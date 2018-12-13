@@ -39,7 +39,7 @@ readloop:
 
 retry:
     mov  ah, 0x02      ; AH = 02 表示要做的是读盘操作
-    mov  al, 1         ; AL 表示要练习读取几个扇区
+    mov  al, 1         ; AL 表示要连续读取几个扇区
     mov  bx, 0
     mov  dl, 0x00      ;驱动器编号，A盘
     int  0x13          ;调用BIOS中断实现磁盘读取功能
