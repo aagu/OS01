@@ -1,90 +1,62 @@
-%include "pm.inc"
+;	deeppinkos
+;-------------------------------------------------------------------------------
+;                                      BIOS内存映射
+;-------------------------------------------------------------------------------
+;	TAB=4			SP=0x7c00		0x8000=拷贝到启动区
+;-------------------------------------------------------------------------------
+;	|中断向量表|		|;代码存储位置|	......	| 512|
+;	|	  |		|	     |	......	|    |
+;-------------------------------------------------------------------------------
+;								0x8200=后边的程序
+;	在某种意义上理解，我们的程序只需要在磁盘的开始512字节就行
+;	然后硬件上自动去读这512，然后执行这段程序
 
-LEDS   equ  0x0ff1
-VMODE  equ  0x0ff2     ;关于颜色数目的信息。颜色的位数
-SCRNX  equ  0x0ff4     ;分辨率X
-SCRNY  equ  0x0ff6     ;分辨率Y
-VRAM   equ  0x0ff8     ;图像缓冲区起始地址
+; 1-> 读取磁盘后边扇区的数据
+; 2-> 在bootsecond.nas中添加LCD支持
+; 3-> 初始化PIC
+; 4-> 打开A20，进入保护模式
+; 5-> 设置CR0的PE和PG
+; 6-> 更新D、E、F、G、S，其中数代表的是第几个GDT
+[bits 32]
+GLOBAL  _start
+GLOBAL	myprintf
+EXTERN  kernel_start
 
-ORG  0xc200
+BOTPAK	EQU		0x00280000
+DSKCAC	EQU		0x00100000
+DSKCAC0	EQU		0x00008000
 
-[SECTION .gdt]
- ;                                  段基址          段界限                属性
-LABEL_GDT:          Descriptor        0,            0,                   0  
-LABEL_DESC_CODE32:  Descriptor        0,      SegCode32Len - 1,       DA_C + DA_32
-LABEL_DESC_VIDEO:   Descriptor     0B8000h,         0ffffh,            DA_DRW
+;BOOT_INFO信息
+CYLS		EQU	0x0ff0
+LEDS		EQU	0x0ff1
+LCDMODE		EQU	0x0ff2  ;
+SCREENX		EQU	0x0ff4  ;	x
+SCREENY		EQU	0x0ff6  ;	y
+LCDRAM		EQU	0x0ff8  ; 图像缓冲区的开始地址
 
-GdtLen     equ    $ - LABEL_GDT
-GdtPtr     dw     GdtLen - 1
-           dd     0
 
-SelectorCode32    equ   LABEL_DESC_CODE32 -  LABEL_GDT
-SelectorVideo     equ   LABEL_DESC_VIDEO  -  LABEL_GDT
+_start:
+        ;INT     0x10
+	MOV     ESP,0x00007000
+        MOV     EBP,ESP
+        ;AND     ESP,0FFFFFFF0H
+        ;MOV     AH,0x0f
+        ;MOV     AL,'V'
+        ;MOV     BYTE [0xb8008],'V'
+        MOV     EAX,kernel_start
+        JMP     EAX
+        ;SUB     EAX,0x8080
+        ;CALL    EAX
 
-[SECTION  .s16]
-[BITS  16]
-LABEL_BEGIN:
-    mov   ax, cs
-    mov   ds, ax
-    mov   es, ax
-    mov   ss, ax
-    mov   sp, 0100h
+;stop:
+;        JMP     stop
+;stack:
+ ;       times   32768 db 0
+;glb_mboot_ptr:
+;	resb	4
 
-    xor   eax, eax
-    mov   ax,  cs
-    shl   eax, 4
-    add   eax, LABEL_SEG_CODE32
-    mov   word [LABEL_DESC_CODE32 + 2], ax
-    shr   eax, 16
-    mov   byte [LABEL_DESC_CODE32 + 4], al
-    mov   byte [LABEL_DESC_CODE32 + 7], ah
+;STACK_TOP equ $-stack-1
 
-    xor   eax, eax
-    mov   ax, ds
-    shl   eax, 4
-    add   eax,  LABEL_GDT
-    mov   dword  [GdtPtr + 2], eax
 
-    lgdt  [GdtPtr]
 
-    cli   ;关中断
 
-    in    al,  92h
-    or    al,  00000010b
-    out   92h, al
-
-    mov   eax, cr0
-    or    eax , 1
-    mov   cr0, eax
-
-    jmp   dword  SelectorCode32: 0
-
-[SECTION .s32]
-[BITS  32]
-LABEL_SEG_CODE32:
-    mov   ax, SelectorVideo
-    mov   gs, ax
-    mov   si, msg
-    mov   ebx, 10
-    mov   ecx, 2
-showChar:
-    mov   edi, (80*5)
-    add   edi, ebx
-    mov   eax, edi
-    mul   ecx
-    mov   edi, eax
-    mov   ah, 0bh
-    mov   al, [si]
-    cmp   al, 0
-    je    fin
-    add   ebx,1
-    add   si, 1
-    mov   [gs:edi], ax
-    jmp   showChar
-fin:
-    hlt
-    jmp  fin
-msg:
-    DB     "Protect Mode", 0
-
-SegCode32Len   equ  $ - LABEL_SEG_CODE32
