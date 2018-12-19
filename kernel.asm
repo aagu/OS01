@@ -1,90 +1,67 @@
-%include "pm.inc"
+ORG  0x08200
+[bits 32]
+;GLOBAL  _start
+;GLOBAL	myprintf
+;EXTERN  kernel_start
 
-LEDS   equ  0x0ff1
-VMODE  equ  0x0ff2     ;关于颜色数目的信息。颜色的位数
-SCRNX  equ  0x0ff4     ;分辨率X
-SCRNY  equ  0x0ff6     ;分辨率Y
-VRAM   equ  0x0ff8     ;图像缓冲区起始地址
+;BOTPAK	EQU		0x00280000
+;DSKCAC	EQU		0x00100000
+;DSKCAC0	EQU		0x00008000
 
-ORG  0xc200
+;BOOT_INFO信息
+CYLS		EQU	0x0ff0
+LEDS		EQU	0x0ff1
+LCDMODE		EQU	0x0ff2  ;
+SCREENX		EQU	0x0ff4  ;	x
+SCREENY		EQU	0x0ff6  ;	y
+LCDRAM		EQU	0x0ff8  ; 图像缓冲区的开始地址
 
-[SECTION .gdt]
- ;                                  段基址          段界限                属性
-LABEL_GDT:          Descriptor        0,            0,                   0  
-LABEL_DESC_CODE32:  Descriptor        0,      SegCode32Len - 1,       DA_C + DA_32
-LABEL_DESC_VIDEO:   Descriptor     0B8000h,         0ffffh,            DA_DRW
+_start:
+        ;mov byte [ds:0B8000h], 'P'   
+        ;mov byte [ds:0B8001h], 1ch
+        ;mov byte [ds:0B8002h], 'r'
+        ;mov byte [ds:0B8003h], 1ch
+        ;mov byte [ds:0B8004h], 'o'
+        ;mov byte [ds:0B8005h], 1ch
+        ;mov byte [ds:0B8006h], 't'
+        ;mov byte [ds:0B8007h], 1ch
+        ;mov byte [ds:0B8008h], 'e'      
+        ;mov byte [ds:0B8009h], 1ch     
+        ;mov byte [ds:0B800ah], 'c'     
+        ;mov byte [ds:0B800bh], 1ch    
+        ;mov byte [ds:0B800ch], 't'     
+        ;mov byte [ds:0B800dh], 1ch     
+        ;mov byte [ds:0B800eh], ' '     
+        ;mov byte [ds:0B800fh], 1ch      
+        ;mov byte [ds:0B8010h], 'm'     
+        ;mov byte [ds:0B8011h], 1ch     
+        ;mov byte [ds:0B8012h], 'o'     
+        ;mov byte [ds:0B8013h], 1ch     
+        ;mov byte [ds:0B8014h], 'd'     
+        ;mov byte [ds:0B8015h], 1ch   
+        ;mov byte [ds:0B8016h], 'e'     
+        ;mov byte [ds:0B8017h], 1ch 
+        ;jmp  stop
+        jmp  clscr
 
-GdtLen     equ    $ - LABEL_GDT
-GdtPtr     dw     GdtLen - 1
-           dd     0
+clscr:
+        xor  eax, eax
+        mov  ecx, 320*200
+        mov  ebx, 0A0000h
+cloop:
+        mov  byte [ds:ebx], 1ah
+        mov  byte [ds:ebx+1], 1ch
+        mov  byte [ds:ebx+2], 1fh
+        mov  byte [ds:ebx+2], 3h
+        add  eax, 4
+        add  ebx, 4
+        cmp  eax, ecx
+        jb  cloop
+        
+stop:
+        hlt
+        jmp     stop
 
-SelectorCode32    equ   LABEL_DESC_CODE32 -  LABEL_GDT
-SelectorVideo     equ   LABEL_DESC_VIDEO  -  LABEL_GDT
 
-[SECTION  .s16]
-[BITS  16]
-LABEL_BEGIN:
-    mov   ax, cs
-    mov   ds, ax
-    mov   es, ax
-    mov   ss, ax
-    mov   sp, 0100h
 
-    xor   eax, eax
-    mov   ax,  cs
-    shl   eax, 4
-    add   eax, LABEL_SEG_CODE32
-    mov   word [LABEL_DESC_CODE32 + 2], ax
-    shr   eax, 16
-    mov   byte [LABEL_DESC_CODE32 + 4], al
-    mov   byte [LABEL_DESC_CODE32 + 7], ah
 
-    xor   eax, eax
-    mov   ax, ds
-    shl   eax, 4
-    add   eax,  LABEL_GDT
-    mov   dword  [GdtPtr + 2], eax
-
-    lgdt  [GdtPtr]
-
-    cli   ;关中断
-
-    in    al,  92h
-    or    al,  00000010b
-    out   92h, al
-
-    mov   eax, cr0
-    or    eax , 1
-    mov   cr0, eax
-
-    jmp   dword  SelectorCode32: 0
-
-[SECTION .s32]
-[BITS  32]
-LABEL_SEG_CODE32:
-    mov   ax, SelectorVideo
-    mov   gs, ax
-    mov   si, msg
-    mov   ebx, 10
-    mov   ecx, 2
-showChar:
-    mov   edi, (80*5)
-    add   edi, ebx
-    mov   eax, edi
-    mul   ecx
-    mov   edi, eax
-    mov   ah, 0bh
-    mov   al, [si]
-    cmp   al, 0
-    je    fin
-    add   ebx,1
-    add   si, 1
-    mov   [gs:edi], ax
-    jmp   showChar
-fin:
-    hlt
-    jmp  fin
-msg:
-    DB     "Protect Mode", 0
-
-SegCode32Len   equ  $ - LABEL_SEG_CODE32

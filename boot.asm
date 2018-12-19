@@ -1,9 +1,10 @@
+[bits 16]
 KERNEL_ADDR  equ  0xc200
 
 ORG  0x7c00
 
 jmp  entry
-db   0x90
+DB   0x90
 DB   "OSKERNEL"
 DW   512
 DB   1
@@ -31,8 +32,8 @@ entry:
     mov  es, ax
 
 readfloppy:
-    mov  ax, 0x0820   ;将数据读到内存0x0820之后，以免覆盖当前内容
-    mov  bx, KERNEL_ADDR
+    ;mov  ax, 1000h   ;将数据读到内存0x0820之后，以免覆盖当前内容
+    mov  bx, 0x8200
     mov  ch, 0        ;CH 用来存储柱面号
     mov  dh, 0        ;DH 用来存储磁头号
     mov  cl, 2        ;CL 用来存储扇区号
@@ -61,11 +62,83 @@ next:
     add  cl, 1
     cmp  cl ,18
 
-    mov  al, 0x101
-    mov  ah,0x00
+goto_PM:
+    mov  al, 0x13
+    mov  ah, 0x00
     int  0x10
 
-    jmp  KERNEL_ADDR
+    mov  al, 0xff
+    out 0x21, al
+    nop
+    out 0xa1, al
+
+    cli
+
+    call  waitkbd_8042
+    mov  al, 0xd1
+    out  0x64, al
+    call  waitkbd_8042
+    mov  al, 0xdf
+    out  0x60, al
+    call  waitkbd_8042
+
+    cli
+    xor  ax, ax
+    mov  ds, ax
+    lgdt  [gdt_desc]
+    in  al, 92h
+    or  al, 0x02
+    out  92h, al
+    mov  eax, cr0
+    or  eax, 1
+    mov  cr0, eax
+    jmp  08h:PM_MODE
+
+[bits 32]
+PM_MODE:
+	mov  ax, 10h             ; Save data segment identifyer
+    mov  ds, ax              ; Move a valid data segment into the data segment register
+    mov  ss, ax              ; Move a valid data segment into the stack segment register
+    mov  es, ax
+    mov  esp, 090000h        ; Move the stack pointer to 090000h
+    ;jmp  fin
+    ;MOV     EAX,0xc200
+    ;JMP     EAX ;
+    jmp  08h:08200h
+;
+;	显示需要的相关字符串
+;
+
+waitkbd_8042:
+	IN	AL,0x64
+	AND	AL,0x02    ;输入缓冲区是否满了？
+	JNZ	waitkbd_8042 ;Yes---跳转
+	RET
+
+gdt:                    ; Address for the GDT
+gdt_null:               ; Null Segment
+        dd 0
+        dd 0
+gdt_code:               ; Code segment, read/execute, nonconforming
+        dw 0FFFFh
+        dw 0
+        db 0
+        db 10011010b
+        db 11001111b
+        db 0
+gdt_data:               ; Data segment, read/write, expand down
+        dw 0FFFFh
+        dw 0
+        db 0
+        db 10010010b
+        db 11001111b
+        db 0
+gdt_end:                ; Used to calculate the size of the GDT
+
+gdt_desc:                       ; The GDT descriptor
+        dw gdt_end - gdt - 1    ; Limit (size)
+        dd gdt                  ; Address of the GDT
+
 
 error:
     mov  si, msg
@@ -88,6 +161,9 @@ msg:
     DB  0x0a, 0x0a
     DB "load error"
     DB  0x0a
+
+    gdt_size         dw 0
+    gdt_base         dd 0x00007e00     ;GDT的物理地址 
 
     ;填充空间，使得扇区末尾为aa55，方能被识别为MBR引导
     times	510-($-$$) DB 0
