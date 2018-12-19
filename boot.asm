@@ -63,9 +63,9 @@ next:
     cmp  cl ,18
 
 goto_PM:
-    ;mov  al, 0x13
-    ;mov  ah, 0x00
-    ;int  0x10
+    mov  al, 0x13
+    mov  ah, 0x00
+    int  0x10
 
     mov  al, 0xff
     out 0x21, al
