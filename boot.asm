@@ -4,7 +4,7 @@ KERNEL_ADDR  equ  0xc200
 ORG  0x7c00
 
 jmp  entry
-db   0x90
+DB   0x90
 DB   "OSKERNEL"
 DW   512
 DB   1
@@ -32,8 +32,8 @@ entry:
     mov  es, ax
 
 readfloppy:
-    mov  ax, 0x0820   ;将数据读到内存0x0820之后，以免覆盖当前内容
-    mov  bx, KERNEL_ADDR
+    ;mov  ax, 1000h   ;将数据读到内存0x0820之后，以免覆盖当前内容
+    mov  bx, 0x8200
     mov  ch, 0        ;CH 用来存储柱面号
     mov  dh, 0        ;DH 用来存储磁头号
     mov  cl, 2        ;CL 用来存储扇区号
@@ -63,9 +63,9 @@ next:
     cmp  cl ,18
 
 goto_PM:
-    mov  al, 0x03
-    mov  ah, 0x00
-    int  0x10
+    ;mov  al, 0x13
+    ;mov  ah, 0x00
+    ;int  0x10
 
     mov  al, 0xff
     out 0x21, al
@@ -82,31 +82,29 @@ goto_PM:
     out  0x60, al
     call  waitkbd_8042
 
-    mov  ah, 0x0e
-    mov  al, 'O'
-    int  0x10
-
     cli
-    lgdt  [GDTR0]
+    xor  ax, ax
+    mov  ds, ax
+    lgdt  [gdt_desc]
     in  al, 92h
     or  al, 0x02
     out  92h, al
     mov  eax, cr0
-    or  al, 1
+    or  eax, 1
     mov  cr0, eax
-    jmp  dword 0x08:PM_MODE
+    jmp  08h:PM_MODE
 
 [bits 32]
 PM_MODE:
-	MOV	EAX,0x00000010
-	MOV	DS,AX
-	MOV	ES,AX
-	MOV	FS,AX
-	MOV	GS,AX
-	MOV	SS,AX
-       
-    MOV     EAX,0x8080
-    JMP     EAx ;dword 0x08:0x8200
+	mov  ax, 10h             ; Save data segment identifyer
+    mov  ds, ax              ; Move a valid data segment into the data segment register
+    mov  ss, ax              ; Move a valid data segment into the stack segment register
+    mov  es, ax
+    mov  esp, 090000h        ; Move the stack pointer to 090000h
+    ;jmp  fin
+    ;MOV     EAX,0xc200
+    ;JMP     EAX ;
+    jmp  08h:08200h
 ;
 ;	显示需要的相关字符串
 ;
@@ -117,27 +115,30 @@ waitkbd_8042:
 	JNZ	waitkbd_8042 ;Yes---跳转
 	RET
 
-;
-;进入保护模式后，不再按照CS*16+IP取指令执行，需要按照向全局描述符
-;	具体可参考《linux内核设计的艺术》
-;
+gdt:                    ; Address for the GDT
+gdt_null:               ; Null Segment
+        dd 0
+        dd 0
+gdt_code:               ; Code segment, read/execute, nonconforming
+        dw 0FFFFh
+        dw 0
+        db 0
+        db 10011010b
+        db 11001111b
+        db 0
+gdt_data:               ; Data segment, read/write, expand down
+        dw 0FFFFh
+        dw 0
+        db 0
+        db 10010010b
+        db 11001111b
+        db 0
+gdt_end:                ; Used to calculate the size of the GDT
 
-GDT0:
-	DW      0x0000,0x0000,0x0000,0x0000
-        ;---代码段基地址 0x0047取00，0x9a28取28，0x0000取全部===0x00280000
-	DW	0xffff,0x0000,0x9a00,0x00cf
-        ;---数据段基地址 0x00cf取00，0x9200取00，0x0000取全部===0x00000000
-	DW	0xffff,0x0000,0x9200,0x00cf
-        DW      0xffff,0x8000,0xf20b,0x000f
-        ;为tss准备的
-	DW      0x0000,0x0000,0x0000,0x0000
-        ;为idt准备的
-	DW      0x0000,0x0000,0x0000,0x0000
-        ;DW      0xffff,0x8000,0xf20b,0x000f
-GDT0_LEN EQU $-GDT0
-GDTR0:
-	DW	GDT0_LEN-1
-	DD	GDT0
+gdt_desc:                       ; The GDT descriptor
+        dw gdt_end - gdt - 1    ; Limit (size)
+        dd gdt                  ; Address of the GDT
+
 
 error:
     mov  si, msg

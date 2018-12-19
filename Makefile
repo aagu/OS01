@@ -19,7 +19,7 @@ ASM_FLAGS = -felf -g -F stabs
 
 IMG:=system.img
 
-$(IMG) : $(BOOT_BIN) $(C_OBJECTS) link
+$(IMG) : $(BOOT_BIN) $(KERNEL_BIN)
 	dd if=/dev/zero of=$(IMG) bs=512 count=2880
 	dd if=$(BOOT_BIN) of=$(IMG) conv=notrunc
 	dd if=$(KERNEL_BIN) of=$(IMG) seek=1 conv=notrunc
@@ -27,8 +27,8 @@ $(IMG) : $(BOOT_BIN) $(C_OBJECTS) link
 $(BOOT_BIN) : $(BOOT)
 	$(ASM) $< -o $@
 
-$(KERNEL_ELF) : $(KERNEL)
-	$(ASM) $(ASM_FLAGS) $< -o $@
+$(KERNEL_BIN) : $(KERNEL)
+	$(ASM) $< -o $@
 
 $(C_OBJECTS) : $(C_SOURCES)
 	$(CC) $(C_FLAGS) $< -o $@
