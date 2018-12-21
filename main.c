@@ -1,4 +1,4 @@
-void io_hlt();
+extern void io_cli_hlt();
 
 void main()
 {
@@ -10,11 +10,5 @@ void main()
         *p = i & 0x0f;  
     }
 
-    for(;;) {
-      io_hlt();
-    }
-}
-
-void io_hlt() {
-  asm volatile("hlt");
+    io_cli_hlt();
 }

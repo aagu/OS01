@@ -1,9 +1,0 @@
-     1                                  ORG  0xc200
-     2                                  
-     3 00000000 B013                        mov  al, 0x13
-     4 00000002 B400                        mov  ah, 0x00
-     5 00000004 CD10                        int  0x10
-     6                                  
-     7                                  fin:
-     8 00000006 F4                          hlt
-     9 00000007 EBFD                        jmp  fin
