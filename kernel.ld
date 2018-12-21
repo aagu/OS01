@@ -27,7 +27,7 @@
 ENTRY(_start)
 SECTIONS
 {
-	. = 0x8200;
+	. = 0x0820;
 
 	.text :
 	{

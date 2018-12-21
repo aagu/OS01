@@ -1,5 +1,5 @@
 [bits 16]
-KERNEL_ADDR  equ  0xc200
+CYLS         equ  10d
 
 ORG  0x7c00
 
@@ -60,6 +60,15 @@ next:
     mov  bx, ax        ;地址后移512byte
     add  cl, 1
     cmp  cl ,18
+    jbe  readloop
+    mov  cl, 1
+    add  dh, 1
+    cmp  dh, 2
+    jb   readloop
+    ;mov  dh, 0
+    ;add  ch, 1
+    ;cmp  ch, CYLS
+    ;jb   readloop
 
 goto_PM:
     mov  al, 0x13
@@ -100,13 +109,7 @@ PM_MODE:
     mov  ss, ax              ; Move a valid data segment into the stack segment register
     mov  es, ax
     mov  esp, 090000h        ; Move the stack pointer to 090000h
-    ;jmp  fin
-    ;MOV     EAX,0xc200
-    ;JMP     EAX ;
     jmp  08h:0820h
-;
-;	显示需要的相关字符串
-;
 
 waitkbd_8042:
 	IN	AL,0x64
@@ -117,27 +120,27 @@ waitkbd_8042:
 ALIGN 16
 gdt:                    ; Address for the GDT
 gdt_null:               ; Null Segment
-        dd 0
-        dd 0
+        DD 0
+        DD 0
 gdt_code:               ; Code segment, read/execute, nonconforming
-        dw 0FFFFh
-        dw 0
-        db 0
-        db 10011010b
-        db 11001111b
-        db 0
+        DW 0FFFFh
+        DW 0
+        DB 0
+        DB 10011010b
+        DB 11001111b
+        DB 0
 gdt_data:               ; Data segment, read/write, expand down
-        dw 0FFFFh
-        dw 0
-        db 0
-        db 10010010b
-        db 11001111b
-        db 0
+        DW 0FFFFh
+        DW 0
+        DB 0
+        DB 10010010b
+        DB 11001111b
+        DB 0
 gdt_end:                ; Used to calculate the size of the GDT
 
 gdt_desc:                       ; The GDT descriptor
-        dw gdt_end - gdt - 1    ; Limit (size)
-        dd gdt                  ; Address of the GDT
+        DW gdt_end - gdt - 1    ; Limit (size)
+        DD gdt                  ; Address of the GDT
 ALIGN 16
 
 error:
@@ -161,9 +164,6 @@ msg:
     DB  0x0a, 0x0a
     DB "load error"
     DB  0x0a
-
-    gdt_size         dw 0
-    gdt_base         dd 0x00007e00     ;GDT的物理地址 
 
     ;填充空间，使得扇区末尾为aa55，方能被识别为MBR引导
     times	510-($-$$) DB 0
