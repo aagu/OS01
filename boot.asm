@@ -32,8 +32,7 @@ entry:
     mov  es, ax
 
 readfloppy:
-    ;mov  ax, 1000h   ;将数据读到内存0x0820之后，以免覆盖当前内容
-    mov  bx, 0x8200
+    mov  bx, 0x0820   ;将数据读到内存0x0820之后，以免覆盖当前内容
     mov  ch, 0        ;CH 用来存储柱面号
     mov  dh, 0        ;DH 用来存储磁头号
     mov  cl, 2        ;CL 用来存储扇区号
@@ -104,7 +103,7 @@ PM_MODE:
     ;jmp  fin
     ;MOV     EAX,0xc200
     ;JMP     EAX ;
-    jmp  08h:08200h
+    jmp  08h:0820h
 ;
 ;	显示需要的相关字符串
 ;
@@ -115,6 +114,7 @@ waitkbd_8042:
 	JNZ	waitkbd_8042 ;Yes---跳转
 	RET
 
+ALIGN 16
 gdt:                    ; Address for the GDT
 gdt_null:               ; Null Segment
         dd 0
@@ -138,7 +138,7 @@ gdt_end:                ; Used to calculate the size of the GDT
 gdt_desc:                       ; The GDT descriptor
         dw gdt_end - gdt - 1    ; Limit (size)
         dd gdt                  ; Address of the GDT
-
+ALIGN 16
 
 error:
     mov  si, msg
