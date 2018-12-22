@@ -3,6 +3,7 @@
 ##################################################
 BOOT:=boot.asm
 BOOT_BIN:=$(subst .asm,.bin,$(BOOT))
+BOOT_LST:=$(subst .asm,.lst,$(BOOT))
 KERNEL:=kernel.asm
 KERNEL_BIN:=$(subst .asm,.bin,$(KERNEL))
 KERNEL_ELF:=$(subst .asm,.elf,$(KERNEL))
@@ -40,6 +41,9 @@ link :
 	$(LD) $(LD_FLAGS) $(KERNEL_OBJECT) $(C_OBJECTS) -o $(KERNEL_ELF)
 	$(OBJCOPY) -O binary -R .note -R .comment -S $(KERNEL_ELF) $(KERNEL_BIN)
 
+$(BOOT_LST) : $(BOOT)
+	$(ASM) $< -l $@
+
 .PHONY:qemu
 qemu:
 	@echo '启动虚拟机...'
@@ -50,4 +54,7 @@ debug:
 	qemu-system-x86_64 -d guest_errors -boot order=a -fda $(IMG)
 .PHONY:clean
 clean :
-	rm -f $(BOOT_BIN) $(KERNEL_BIN) $(KERNEL_ELF) $(KERNEL_OBJECT) $(S_OBJECTS) $(C_OBJECTS)
+	rm -f $(BOOT_BIN) $(KERNEL_BIN) $(KERNEL_ELF) $(KERNEL_OBJECT) $(S_OBJECTS) $(C_OBJECTS) $(IMG) *.txt *.lst
+dis:
+	ndisasm ./boot.bin > ./boot.txt
+	objdump -d -M intel ./kernel.elf > ./kernel.txt
