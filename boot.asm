@@ -83,6 +83,7 @@ goto_PM:
 
     cli
 
+    ;通过键盘控制器打开A20
     call  waitkbd_8042
     mov  al, 0xd1
     out  0x64, al
@@ -95,6 +96,7 @@ goto_PM:
     xor  ax, ax
     mov  ds, ax
     lgdt  [gdt_desc]
+    ;对于较新的机器，也可以通过此方法开启A20
     in  al, 92h
     or  al, 0x02
     out  92h, al
