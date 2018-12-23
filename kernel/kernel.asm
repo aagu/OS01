@@ -69,3 +69,22 @@ io_store_eflags:
         push eax
         popfd
         ret
+
+io_load_gdtr:
+        mov  eax,[esp+4]
+        lgdt  [eax]
+        mov  ax,0x10
+        mov  ds,ax
+        mov  es,ax
+        mov  fs,ax
+        mov  gs,ax
+        mov  ss,ax
+
+        JMP  0x08:.flush
+.flush:
+        ret
+
+io_load_idtr:
+        mov  eax,[esp+4]
+        lidt  [eax]
+        ret
