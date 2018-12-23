@@ -1,10 +1,10 @@
 ##################################################
 #		 Makefile
 ##################################################
-BOOT:=boot.asm
+BOOT:=boot/boot.asm
 BOOT_BIN:=$(subst .asm,.bin,$(BOOT))
 BOOT_LST:=$(subst .asm,.lst,$(BOOT))
-KERNEL:=kernel.asm
+KERNEL:=kernel/kernel.asm
 KERNEL_BIN:=$(subst .asm,.bin,$(KERNEL))
 KERNEL_ELF:=$(subst .asm,.elf,$(KERNEL))
 KERNEL_OBJECT:=$(subst .asm,.o,$(KERNEL))
@@ -56,5 +56,5 @@ debug:
 clean :
 	rm -f $(BOOT_BIN) $(KERNEL_BIN) $(KERNEL_ELF) $(KERNEL_OBJECT) $(S_OBJECTS) $(C_OBJECTS) $(IMG) *.txt *.lst
 dis:
-	ndisasm ./boot.bin > ./boot.txt
-	objdump -d -M intel ./kernel.elf > ./kernel.txt
+	ndisasm ./boot/boot.bin > ./boot/boot.txt
+	objdump -d -M intel ./kernel/kernel.elf > ./kernel/kernel.txt
