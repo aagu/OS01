@@ -1,7 +1,5 @@
-#include "kernel.h"
+#include "discriptor.h"
 #include "video.h"
-#include "mem.h"
-#include "interrupt.h"
 
 unsigned char *vram;/* 声明变量vram、用于BYTE [...]地址 */
 
@@ -13,9 +11,8 @@ void main(void)
 	xsize = 320;
 	ysize = 200;
 
-	init_gdtidt();
-	init_pic();
-	io_sti();
+	init_gdt();
+	init_idt();
 
 	init_palette();/* 设定调色板 */
 	
@@ -28,11 +25,6 @@ void main(void)
 
 	init_mouse_cursor(mcursor, COL8_848484);
 	putblock(vram, xsize, 16, 16, 80, 80, mcursor, 16);
-
-	
-	io_out8(PIC0_IMR, 0xf9); /* 开放PIC1和键盘中断(11111001) */
-	io_out8(PIC1_IMR, 0xef); /* 开放鼠标中断(11101111) */
-	//showString(vram, "KB MOUSE", 8);
 
 	for (;;) {
 		io_hlt();
