@@ -31,33 +31,17 @@ typedef struct pt_regs_t {
 // 定义中断处理函数指针
 typedef void (*interrupt_handler_t)(pt_regs *);
 
-interrupt_handler_t interrupt_handlers[256];
-
 // 注册一个中断处理函数
 // n:中断号
 // h:中断处理函数
-void register_interrupt_handler(unsigned char n,interrupt_handler_t h)
-{
-	interrupt_handlers[n] = h;
-	//h->int_no = n;
-}
+void register_interrupt_handler(unsigned char n, interrupt_handler_t h);
 
-/*
- * 中断服务程序
- * 函数说明：识别到底是发生了说明中断（通过regs->int_no），然后
- *	     执行相应的中断服务程序。
- * interrupt_handlers[n]是一个数组函数，n代表了具体的中断服务程
- * 序，函数参数为regs。
- */
-void isr_handler(pt_regs *regs)
-{
-	if(interrupt_handlers[regs->int_no]){
-		interrupt_handlers[regs->int_no](regs);
-	}
-	else{
-		//showString((unsigned char*)0xa0000, "interr", 6);
-	}
-}
+// 调用中断处理函数
+void isr_handler(pt_regs *regs);
+
+interrupt_handler_t interrupt_handlers[256];
+
+
 
 // 32～255 用户自定义异常
 void isr255();
@@ -101,21 +85,7 @@ void isr31();
 
 
 // IRQ 处理函数
-void irq_handler(pt_regs *regs)
-{
-	// 从32号开始，为用户自定义中断
-	// 单片只能处理八级中断
-	// 因此大于40是由从片处理
-	if(regs->int_no > 40){
-		// 发送重设信号给从片
-		io_out8(0xa0,0x20);
-	}
-	// 发送重设信号给主片
-	io_out8(0x20,0x20);
-	if(interrupt_handlers[regs->int_no]){
-		interrupt_handlers[regs->int_no](regs);
-	}
-}
+void irq_handler(pt_regs *regs);
 
 // 定义IRQ
 #define  IRQ0     32 	// 电脑系统计时器
