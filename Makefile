@@ -16,9 +16,9 @@ CC = gcc
 LD = ld
 OBJCOPY = objcopy
 
-C_FLAGS   = -c -Wall -m32 -ggdb -gstabs+ -nostdinc -fno-builtin -fno-stack-protector -I include
+C_FLAGS   = -c -Wall -m32 -nostdinc -fno-builtin -fno-stack-protector -I include
 LD_FLAGS  = -T kernel.ld -m elf_i386
-ASM_FLAGS = -felf -g -F stabs
+ASM_FLAGS = -felf
 
 IMG:=system.img
 
