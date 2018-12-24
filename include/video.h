@@ -1,7 +1,8 @@
 /*画面显示相关函数*/
 #ifndef VIDEO_H
 #define VIDEO_H
-#include "io.h"
+
+#include "kernel.h"
 
 #define COL8_000000		0
 #define COL8_FF0000		1
@@ -19,6 +20,10 @@
 #define COL8_840084		13
 #define COL8_008484		14
 #define COL8_848484		15
+
+extern char systemFont[16];
+int x = 8;
+int y = 8;
 
 void init_palette(void)
 {
@@ -134,4 +139,13 @@ void showFont8(unsigned char *vram, int xsize, int x, int y, char c, char* font)
 
 }
 
+void showString(unsigned char *vram, char *str, int len) {
+    int i;
+    for (i = 0; i < len; i++) {
+        showFont8(vram, 320, x, y, COL8_FFFFFF, systemFont + str[i]*16);
+        x += 8;
+        if (x >= 312) y += 8;
+    }
+    x += 8;
+}
 #endif //VIDEO_H

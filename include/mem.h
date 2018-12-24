@@ -1,6 +1,18 @@
 #ifndef MEM_H
 #define MEM_H
 
+#include "kernel.h"
+
+#define ADR_IDT			0x0026f800
+#define LIMIT_IDT		0x000007ff
+#define ADR_GDT			0x00270000
+#define LIMIT_GDT		0x0000ffff
+#define ADR_BOTPAK		0x00007e00
+#define LIMIT_BOTPAK	0x0007ffff
+#define AR_DATA32_RW	0x4092
+#define AR_CODE32_ER	0x409a
+#define AR_INTGATE32	0x008e
+
 struct SEGMENT_DESCRIPTOR {
 	short limit_low, base_low;
 	char base_mid, access_right;
@@ -13,9 +25,6 @@ struct GATE_DESCRIPTOR {
 	short offset_high;
 };
 
-void load_gdtr(int limit, int addr);
-void load_idtr(int limit, int addr);
-
 void init_gdtidt(void)
 {
 	struct SEGMENT_DESCRIPTOR *gdt = (struct SEGMENT_DESCRIPTOR *) 0x00270000;
@@ -23,18 +32,23 @@ void init_gdtidt(void)
 	int i;
 
 	/* GDT初始化 */
-	for (i = 0; i < 8192; i++) {
+	for (i = 0; i < LIMIT_GDT / 8; i++) {
 		set_segmdesc(gdt + i, 0, 0, 0);
 	}
-	set_segmdesc(gdt + 1, 0xffffffff, 0x00000000, 0x4092);
-	set_segmdesc(gdt + 2, 0x0007ffff, 0x00280000, 0x409a);
-	load_gdtr(0xffff, 0x00270000);
+	set_segmdesc(gdt + 1, 0xffffffff, 0x00000000, AR_DATA32_RW);
+	set_segmdesc(gdt + 2, LIMIT_BOTPAK, ADR_BOTPAK, AR_CODE32_ER);
+	load_gdtr(LIMIT_GDT, ADR_GDT);
 
 	/* IDT初始化 */
-	for (i = 0; i < 256; i++) {
+	for (i = 0; i < LIMIT_IDT / 8; i++) {
 		set_gatedesc(idt + i, 0, 0, 0);
 	}
-	load_idtr(0x7ff, 0x0026f800);
+	load_idtr(LIMIT_IDT, ADR_IDT);
+
+	/* IDT设置*/
+	set_gatedesc(idt + 0x21, (int) asm_inthandler21, 2 * 8, AR_INTGATE32);
+	set_gatedesc(idt + 0x27, (int) asm_inthandler27, 2 * 8, AR_INTGATE32);
+	set_gatedesc(idt + 0x2c, (int) asm_inthandler2c, 2 * 8, AR_INTGATE32);
 
 	return;
 }

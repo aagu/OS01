@@ -1,8 +1,9 @@
-#include "io.h"
-#include "video.h"
-
 #ifndef INTERUPT_H
 #define INTERUPT_H
+
+#include "kernel.h"
+#include "video.h"
+
 
 #define PIC0_ICW1		0x0020
 #define PIC0_OCW2		0x0020
@@ -45,6 +46,7 @@ void inthandler21(int *esp)
 	boxfill8((unsigned char*)0xa0000, 320, COL8_000000, 0, 0, 32 * 8 - 1, 15);
 	//putfonts8_asc(vram, 320, 0, 0, COL8_FFFFFF, "INT 21 (IRQ-1) : PS/2 keyboard");
 	//showFont8((unsigned char*)0xa0000, 320, 8, 8, COL8_FFFFFF, systemFont+'K'*16);
+	showString((unsigned char*)0xa0000, "KB", 2);
 	for (;;) {
 		io_hlt();
 	}
@@ -55,6 +57,7 @@ void inthandler2c(int *esp)
 {
 	boxfill8((unsigned char*)0xa0000, 320, COL8_000000, 0, 0, 32 * 8 - 1, 15);
 	//showFont8((unsigned char*)0xa0000, 320, 8, 8, COL8_FFFFFF, systemFont+'M'*16);
+	showString((unsigned char*)0xa0000, "MOUSE", 5);
 	for (;;) {
 		io_hlt();
 	}
