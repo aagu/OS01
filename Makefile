@@ -33,7 +33,8 @@ $(BOOT_BIN) : $(BOOT)
 $(KERNEL_OBJECT) : $(KERNEL)
 	$(ASM) $(ASM_FLAGS) $< -o $@
 
-$(C_OBJECTS) : $(C_SOURCES)
+.c.o :
+	@echo $(C_SOURCES)
 	$(CC) $(C_FLAGS) $< -o $@
 
 link :
