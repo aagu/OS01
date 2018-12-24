@@ -3,6 +3,7 @@
  *
  */
 #include <interrupt.h>
+#include <stdio.h>
 
 /*
  * 中断服务程序
@@ -18,7 +19,8 @@ void isr_handler(pt_regs *regs)
 	}
 	else{
 		//printk("unhandle interrupt_handler:%d\n",regs->int_no);
-		showString((unsigned char*)0xa0000, "UHI", 3);
+		//showString((unsigned char*)0xa0000, "UHI", 3);
+		print("unhandled interrupt", 10);
 	}
 }
 

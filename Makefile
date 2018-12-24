@@ -55,7 +55,8 @@ debug:
 	qemu-system-x86_64 -d guest_errors -boot order=a -fda $(IMG)
 .PHONY:clean
 clean :
-	rm -f $(BOOT_BIN) $(KERNEL_BIN) $(KERNEL_ELF) $(KERNEL_OBJECT) $(S_OBJECTS) $(C_OBJECTS) $(IMG) *.txt *.lst
+	rm -f $(BOOT_BIN) $(KERNEL_BIN) $(KERNEL_ELF) $(KERNEL_OBJECT) $(S_OBJECTS) \
+	 $(C_OBJECTS) $(IMG) boot/boot.txt kernel/kernel.txt
 dis:
 	ndisasm ./boot/boot.bin > ./boot/boot.txt
 	objdump -d -M intel ./kernel/kernel.elf > ./kernel/kernel.txt

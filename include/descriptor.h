@@ -32,12 +32,12 @@ typedef struct gdt_struct_t{
 	unsigned char  limit1:4;     //长度限制19--16
 	unsigned char  G_DB_L_AVL:4; //
 	unsigned char  base2         //基地址31--24
-}gdt_struct_t;
+}  __attribute__ ((packed)) gdt_struct_t;
 
 struct gdtr_t{
 	unsigned short length; //这个大小代表了gdt表的大小
 	unsigned int   base    //gdt表的基地址
-}gdtr_t;
+}  __attribute__ ((packed)) gdtr_t;
 
 typedef struct idt_struct_t{
 	unsigned short base0;   //中断函数基地址15--0
@@ -46,12 +46,12 @@ typedef struct idt_struct_t{
 	unsigned char  flags;	//相关标志 P_DVL_'E'
 	unsigned short base1	//中断函数基地址31--16
 
-}idt_struct_t;
+}  __attribute__ ((packed)) idt_struct_t;
 
 struct idtr_t{
 	unsigned short length; //这个大小代表了idt表的大小
 	unsigned int   base   //gdt表的基地址
-}idtr_t;
+}  __attribute__ ((packed)) idtr_t;
 
 gdt_struct_t gdt_list[GDT_LEN];
 struct gdtr_t GDTR;
@@ -104,8 +104,8 @@ void init_gdt()
 	set_gdt(0,0,0,0,0);
 	set_gdt(1,0,0xfffff,0x9a,0x0c); //代码段
 	set_gdt(2,0,0xfffff,0x92,0x0c); //数据段
-	//set_gdt(3,0,0xfffff,0xfa,0x0c); //用户代码段
-	//set_gdt(4,0,0xfffff,0xf2,0x0c); //用户数据段
+	set_gdt(3,0,0xfffff,0xfa,0x0c); //用户代码段
+	set_gdt(4,0,0xfffff,0xf2,0x0c); //用户数据段
 
 	// 加载gdt地址到gdtr寄存器
 	load_gdtr((unsigned int)&GDTR);
@@ -203,7 +203,7 @@ void init_idt()
 	set_idt(45,(unsigned int)irq13, 0x08,0x8E);
 	set_idt(46,(unsigned int)irq14, 0x08,0x8E);
 	set_idt(47,(unsigned int)irq15, 0x08,0x8E);
-
+	
 	// 用于实现系统调用
 	set_idt(255,(unsigned int)isr255,0x08,0x8e);
 	// 加载idt表地址
