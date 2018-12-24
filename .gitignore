@@ -3,4 +3,4 @@
 *.lst
 *.elf
 *.o
-*.img
+system.img
