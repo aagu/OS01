@@ -80,15 +80,6 @@ io_store_eflags:
 load_gdtr:
         mov  ax,[esp+4]
         lgdt  [eax]
-        ;mov  ax,0x10
-        ;mov  ds,ax
-        ;mov  es,ax
-        ;mov  fs,ax
-        ;mov  gs,ax
-        ;mov  ss,ax
-
-        ;JMP  0x08:.flush
-;.flush:
         ret
 
 load_idtr:

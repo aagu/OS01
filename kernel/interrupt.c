@@ -4,6 +4,7 @@
  */
 #include "interrupt.h"
 #include "video.h"
+#include "stdio.h"
 
 /*
  * 中断服务程序
