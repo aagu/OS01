@@ -1,6 +1,5 @@
 #include "stdio.h"
 
-
 /*
  * Simply clears the screen to ' '
  */
@@ -36,4 +35,17 @@ void print(char *msg, unsigned int line)
 		  i++;
 		  *msg++;
 	}
+}
+
+char *itoa(int number)
+{
+	char str[5];
+	int i = 0;
+	while(number > 10)
+	{
+		str[i] = number%10+'0';
+		number = number/10;
+		i++;
+	}
+	return &str;
 }
