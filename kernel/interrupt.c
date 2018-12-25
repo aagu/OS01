@@ -2,8 +2,8 @@
  * 说明：将中断的相关部分分开
  *
  */
-#include <interrupt.h>
-#include <stdio.h>
+#include "interrupt.h"
+#include "video.h"
 
 /*
  * 中断服务程序
@@ -18,9 +18,7 @@ void isr_handler(pt_regs *regs)
 		interrupt_handlers[regs->int_no](regs);
 	}
 	else{
-		//printk("unhandle interrupt_handler:%d\n",regs->int_no);
-		//showString((unsigned char*)0xa0000, "UHI", 3);
-		print("unhandled interrupt", 10);
+		showString((unsigned char*)0xa0000, 320, 8, 8, COL8_FFFFFF, "unhandled interrupt");
 	}
 }
 
