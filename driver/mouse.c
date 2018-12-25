@@ -1,6 +1,5 @@
 #include "mouse.h"
 #include "video.h"
-#include "keyboard.h"
 
 /**
  * 鼠标中断注册
