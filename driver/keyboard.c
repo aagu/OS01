@@ -17,7 +17,6 @@ void init_keyboard()
 	kb_in.count = 0;
 	kb_in.p_head = kb_in.p_tail = kb_in.buf;
 	register_interrupt_handler(IRQ1,keyboard_handler);
-
 }
 
 /*
@@ -45,7 +44,6 @@ void keyboard_handler(pt_regs *regs)
 void keyboard_read()
 {
 	unsigned char scancode;
-	//asm volatile("cli");
     io_cli();
 	if(kb_in.count > 0){
 		scancode = *(kb_in.p_tail);
@@ -57,8 +55,7 @@ void keyboard_read()
 		}
 		kb_in.count = kb_in.count - 2;
 		boxfill8((unsigned char *) 0xa0000, 320, COL8_848484, 8, 24, 321, 40); //clean last char
-        showString((unsigned char *) 0xa0000, 320, 8, 24, COL8_FFFFFF, (unsigned char*)&keymap[scancode*3]);
+        showString((unsigned char *) 0xa0000, 320, 8, 24, COL8_FFFFFF, "key pressed");
 	}
-	//asm volatile("sti");
     io_sti();
 }
