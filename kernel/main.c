@@ -2,21 +2,21 @@
 #include <interrupt.h>
 #include <video.h>
 #include <mouse.h>
+#include <stdio.h>
 
 unsigned char *vram;/* 声明变量vram、用于BYTE [...]地址 */
 static int mx = 0, my = 0;
 static char mcursor[256];
-
-
-static MOUSE_DEC mdec;
 
 void main(void)
 {
 	clear_screen();
 	int xsize, ysize;
 	vram = (unsigned char *) 0xa0000;/* 地址变量赋值 */
-	xsize = 1024;
-	ysize = 768;
+	xsize = 320;
+	ysize = 200;
+
+    MOUSE_DEC mdec;
 
 	init_gdt();
 	init_idt();
@@ -30,16 +30,18 @@ void main(void)
 	boxfill8(vram, xsize, COL8_FFFFFF,  0,         ysize - 19, xsize -  1, ysize - 18);
 	boxfill8(vram, xsize, COL8_C6C6C6,  0,         ysize - 18, xsize -  1, ysize -  1);
 
-	//mx = (xsize - 16) / 2;
-    //my = (ysize - 28 - 16) / 2;  
-	putblock(vram, xsize, 16, 16, 80, 80, mcursor, 16);
+	mx = (xsize - 16) / 2;
+    my = (ysize - 28 - 16) / 2;  
+    init_mouse_cursor(mcursor, COL8_848484);
+	putblock(vram, xsize, 16, 16, mx, my, mcursor, 16);
 	
 	init_mouse();
+    mdec.phase = 0;
 	//asm volatile("int $44");
 	for (;;) {
 		//io_hlt();
 		keyboard_read();
-		//show_mouse_info();
+        show_mouse_info(&mdec, vram);
 	}
 }
 
@@ -60,18 +62,22 @@ void computeMousePosition(MOUSE_DEC* mdec) {
     if (my > 320 - 16) {
        my = 320 - 16;
     }
-
+    print(itoa(mx), 9);
+    print(itoa(my), 10);
 }
 
 void eraseMouse(char* vram) {
-    boxfill8(vram, 320, COL8_008484, mx, my, mx+15, my+15);
+    boxfill8(vram, 320, COL8_848484, mx, my, mx+15, my+15);
+    print("erasing mouse", 0);
 }
 
 void drawMouse(char* vram) {
     putblock(vram, 320, 16, 16, mx, my, mcursor, 16);
+    print("drawing mouse", 0);
 }
 
 int mouse_decode(struct MOUSE_DEC *mdec, unsigned char dat) {
+    print("decoding mouse", 0);
     if (mdec->phase == 0) {
         if (dat == 0xfa) {
            mdec->phase = 1;
@@ -116,14 +122,13 @@ int mouse_decode(struct MOUSE_DEC *mdec, unsigned char dat) {
     return -1;
 }
 
-void show_mouse_info(void) {
-    char*vram = vram;
+void show_mouse_info(struct MOUSE_DEC * mdec, unsigned char *vram) {
     unsigned char data = 0;
 
     data = mouse_read();
-    if (mouse_decode(&mdec, data) != 0) {
-         eraseMouse(vram);
-         computeMousePosition(&mdec);
-         drawMouse(vram);
+    if (mouse_decode(mdec, data) == 1) {
+        eraseMouse(vram);
+        computeMousePosition(&mdec);
+        drawMouse(vram);
     }
 }

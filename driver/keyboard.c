@@ -54,8 +54,8 @@ void keyboard_read()
 			kb_in.p_tail = kb_in.buf;
 		}
 		kb_in.count = kb_in.count - 2;
-		boxfill8((unsigned char *) 0xa0000, 320, COL8_848484, 8, 24, 321, 40); //clean last char
-        showString((unsigned char *) 0xa0000, 320, 8, 24, COL8_FFFFFF, "key pressed");
+		//boxfill8((unsigned char *) 0xa0000, 320, COL8_848484, 8, 24, 321, 40); //clean last char
+        //showFont8((unsigned char *) 0xa0000, 320, 8, 24, COL8_FFFFFF, systemFont+keymap[scancode]);
 	}
     io_sti();
 }

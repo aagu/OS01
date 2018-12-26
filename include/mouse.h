@@ -17,7 +17,7 @@ typedef struct MOUSE_DEC {
 
 void mouse_handler(pt_regs *regs);
 void init_mouse();
-int mouse_read();
+char mouse_read();
 void mouse_wait(int a_type);
 void mouse_write(unsigned char a_write);
 

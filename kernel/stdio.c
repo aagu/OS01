@@ -39,7 +39,7 @@ void print(char *msg, unsigned int line)
 
 char *itoa(int number)
 {
-	char str[5];
+	char str[10];
 	int i = 0;
 	while(number > 10)
 	{
@@ -47,5 +47,7 @@ char *itoa(int number)
 		number = number/10;
 		i++;
 	}
-	return &str;
+	str[i] = number+'0';
+	str[i+1] = '\0';
+	return str;
 }

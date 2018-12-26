@@ -21,10 +21,10 @@ static MOUSE_DEC mdec;
     io_out8(0x60,status_byte);
     //设置默认值
     mouse_write(0xF6);
-    //mouse_read();
+    mouse_read();
     //开始发送数据包
     mouse_write(0xF4);
-    //mouse_read();
+    mouse_read();
     ms_in.count = 0;
     ms_in.p_head = ms_in.p_tail = ms_in.buf;
     register_interrupt_handler(IRQ12, mouse_handler);
@@ -84,13 +84,8 @@ void mouse_write(unsigned char a_write)
     io_out8(0x60,a_write);
 }
 
-int mouse_read()
+char mouse_read()
 {
-<<<<<<< HEAD
-    //从鼠标获取响应
-    mouse_wait(0);
-}
-=======
     unsigned char data;
     io_cli();
 	if(ms_in.count > 0){
@@ -106,4 +101,3 @@ int mouse_read()
     io_sti();
     return data;
 }
->>>>>>> 提高分辨率
