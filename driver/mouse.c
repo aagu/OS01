@@ -1,10 +1,11 @@
 #include "mouse.h"
 #include "video.h"
 
+static MS_INPUT ms_in;
+static MOUSE_DEC mdec;
 /**
  * 鼠标中断注册
  */
- 
  void init_mouse()
 {
     mouse_wait(1);
@@ -24,6 +25,8 @@
     //开始发送数据包
     mouse_write(0xF4);
     //mouse_read();
+    ms_in.count = 0;
+    ms_in.p_head = ms_in.p_tail = ms_in.buf;
     register_interrupt_handler(IRQ12, mouse_handler);
 }
 
@@ -34,8 +37,15 @@ void mouse_handler(pt_regs *regs)
 {
     unsigned char data;
     data = io_in8(0x60);
-    boxfill8((unsigned char *) 0xa0000, 320, COL8_848484, 8, 8, 321, 40); //clean last char
-    showString((unsigned char*) 0xa0000, 320, 8, 8, COL8_FFFFFF, &data);
+    if(ms_in.count < 128) {
+        *(ms_in.p_head) = data;
+        ms_in.p_head++;
+        if(ms_in.p_head == ms_in.buf+128)
+        {
+            ms_in.p_head = ms_in.buf;
+        }
+    }
+    ms_in.count++;
 }
 
 void mouse_wait(int a_type)
@@ -74,8 +84,26 @@ void mouse_write(unsigned char a_write)
     io_out8(0x60,a_write);
 }
 
-void mouse_read()
+int mouse_read()
 {
+<<<<<<< HEAD
     //从鼠标获取响应
     mouse_wait(0);
 }
+=======
+    unsigned char data;
+    io_cli();
+	if(ms_in.count > 0){
+		data = *(ms_in.p_tail);
+		ms_in.p_tail++;
+		ms_in.p_tail++;
+		// 如果读到了最后
+		if(ms_in.p_tail == ms_in.buf + 128){
+			ms_in.p_tail = ms_in.buf;
+		}
+		ms_in.count = ms_in.count - 2;
+	}
+    io_sti();
+    return data;
+}
+>>>>>>> 提高分辨率
