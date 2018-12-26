@@ -4,19 +4,15 @@
 #include <mouse.h>
 #include "printk.h"
 
-unsigned char *vram;/* 声明变量vram、用于BYTE [...]地址 */
 int mouse_decode(struct MOUSE_DEC *mdec, unsigned char dat);
 
 void main(void)
 {
+    struct BOOTINFO *binfo = (struct BOOTINFO*) 0x0ff0;
     int mx = 0, my = 0, i;
     char mcursor[256];
     char s[40];
 	clear_screen();
-	int xsize, ysize;
-	vram = (unsigned char *) 0xa0000;/* 地址变量赋值 */
-	xsize = 320;
-	ysize = 200;
 
     MOUSE_DEC mdec;
 
@@ -26,16 +22,16 @@ void main(void)
 	init_palette();/* 设定调色板 */
 
 	init_keyboard();
-	/* 根据 0xa0000 + x + y * 320 计算坐标 8*/
-	boxfill8(vram, xsize, COL8_848484,  0,         0,          xsize -  1, ysize - 21);
-	boxfill8(vram, xsize, COL8_C6C6C6,  0,         ysize - 20, xsize -  1, ysize - 19);
-	boxfill8(vram, xsize, COL8_FFFFFF,  0,         ysize - 19, xsize -  1, ysize - 18);
-	boxfill8(vram, xsize, COL8_C6C6C6,  0,         ysize - 18, xsize -  1, ysize -  1);
+	
+	boxfill8(binfo->vram, binfo->scrnx, COL8_848484,  0,         0,          binfo->scrnx-  1, binfo->scrny - 21);
+	boxfill8(binfo->vram, binfo->scrnx, COL8_C6C6C6,  0,         binfo->scrny - 20, binfo->scrnx -  1, binfo->scrny - 19);
+	boxfill8(binfo->vram, binfo->scrnx, COL8_FFFFFF,  0,         binfo->scrny - 19, binfo->scrnx -  1, binfo->scrny - 18);
+	boxfill8(binfo->vram, binfo->scrnx, COL8_C6C6C6,  0,         binfo->scrny - 18, binfo->scrnx -  1, binfo->scrny -  1);
 
-	mx = (xsize - 16) / 2;
-    my = (ysize - 28 - 16) / 2;  
+	mx = (binfo->scrnx - 16) / 2;
+    my = (binfo->scrny - 28 - 16) / 2;  
     init_mouse_cursor(mcursor, COL8_848484);
-	putblock(vram, xsize, 16, 16, mx, my, mcursor, 16);
+	putblock(binfo->vram, binfo->scrnx, 16, 16, mx, my, mcursor, 16);
 	
 	init_mouse();
     mdec.phase = 0;
@@ -57,10 +53,10 @@ void main(void)
 			if ((mdec.btn & 0x04) != 0) {
 				s[2] = 'C';
 			}
-			boxfill8(vram, 320, COL8_848484, 32, 16, 32 + 15 * 8 - 1, 31);
-			showString(vram, 320, 32, 16, COL8_FFFFFF, s);
+			boxfill8(binfo->vram, binfo->scrnx, COL8_848484, 32, 16, 32 + 15 * 8 - 1, 31);
+			showString(binfo->vram, binfo->scrnx, 32, 16, COL8_FFFFFF, s);
 			/* 鼠标指针的移动 */
-			boxfill8(vram, 320, COL8_848484, mx, my, mx + 15, my + 15); /* 隐藏鼠标 */
+			boxfill8(binfo->vram, binfo->scrnx, COL8_848484, mx, my, mx + 15, my + 15); /* 隐藏鼠标 */
 			mx += mdec.x;
 			my += mdec.y;
 			if (mx < 0) {
@@ -69,13 +65,13 @@ void main(void)
 			if (my < 0) {
 					my = 0;
 			}
-			if (mx > 320 - 16) {
-						mx = 320 - 16;
+			if (mx > binfo->scrnx - 16) {
+						mx = binfo->scrnx - 16;
 			}
-			if (my > 200 - 16) {
-						my = 200 - 16;
+			if (my > binfo->scrny - 16) {
+						my = binfo->scrny - 16;
 			}
-			putblock(vram, 320, 16, 16, mx, my, mcursor, 16); /* 描画鼠标 */
+			putblock(binfo->vram, binfo->scrnx, 16, 16, mx, my, mcursor, 16); /* 描画鼠标 */
 		}
 	}
 }

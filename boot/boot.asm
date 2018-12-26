@@ -24,6 +24,14 @@ DB   "MYFIRSTOS  "
 DB   "FAT12   "
 times  18  DB 0
 
+VBEMODE	EQU		0x103			;800 x  600 x 8bit 彩色
+
+; BOOT_INFO 相关
+VMODE	EQU		0x0ff2			; 关于颜色的信息
+SCRNX	EQU		0x0ff4			; 分辨率X
+SCRNY	EQU		0x0ff6			; 分辨率Y
+VRAM	EQU		0x0ff8			; 图像缓冲区的起始地址
+
 entry:
     mov  ax, 0
     mov  ss, ax
@@ -70,14 +78,60 @@ next:
     add  ch, 1
     cmp  ch, CYLS
     jb   readloop
+    mov  [0x0ff0],ch	;保存读取的扇区数
 
 goto_PM:
-    ;mov  al, 0x13
-    ;mov  ah, 0x00
-    mov  ax, 0x4f02
-    mov  bx, 0x105
+;确认VBE是否存在
+    mov  ax, 0x9000
+    mov  es, ax
+    mov  di, 0
+    mov  ax, 0x4f00
     int  0x10
+    cmp  ax, 0x004f
+    jne  scrn320
+;检测VBE版本
+    mov  ax, [es:di+4]
+    cmp  ax, 0x0200
+    jb  scrn320
+;取得画面模式信息
+    mov  cx, VBEMODE  ;800 x  600 x 8bit 彩色
+    mov  ax, 0x4f01
+    int  0x10
+    cmp  ax, 0x004f
+    jne  scrn320
+; 画面模式信息的确认
+	cmp  BYTE [es:di+0x19],8		;颜色数必须为8
+	jne  scrn320
+	cmp  BYTE [es:di+0x1b],4		;颜色的指定方法必须为4(4是调色板模式)
+	jne  scrn320
+	mov  ax,[es:di+0x00]				;模式属性bit7不是1就不能加上0x4000
+	and  ax,0x0080
+	jz  scrn320					; 模式属性的bit7是0，所以放弃
 
+;	画面设置
+
+	mov  BX,VBEMODE+0x4000
+	mov  ax,0x4f02
+	int  0x10
+	mov  BYTE [VMODE],8	; 屏幕的模式（参考C语言的引用）
+	mov  ax,[es:di+0x12]
+	mov  [SCRNX],ax
+	mov  ax,[es:di+0x14]
+	mov  [SCRNY],ax
+	mov  eax,[es:di+0x28] ;VRAM的地址
+	mov  [VRAM],eax
+	jmp  keystatus
+
+scrn320:
+	mov  AL,0x13						; VGA图、320x200x8bit彩色
+	mov  AH,0x00
+	int  0x10
+	mov  BYTE [VMODE],8		; 记下画面模式（参考C语言）
+	mov  WORD [SCRNX],320
+	mov  WORD [SCRNY],200
+	mov  DWORD [VRAM],0x000a0000
+
+keystatus:
     mov  al, 0xff
     out 0x21, al
     nop
