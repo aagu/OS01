@@ -4,8 +4,6 @@
 #include <mouse.h>
 #include "printk.h"
 
-int mouse_decode(struct MOUSE_DEC *mdec, unsigned char dat);
-
 void main(void)
 {
     struct BOOTINFO *binfo = (struct BOOTINFO*) 0x0ff0;
@@ -74,45 +72,4 @@ void main(void)
 			putblock(binfo->vram, binfo->scrnx, 16, 16, mx, my, mcursor, 16); /* 描画鼠标 */
 		}
 	}
-}
-
-int mouse_decode(struct MOUSE_DEC *mdec, unsigned char dat){
-	if (mdec->phase == 0) {
-		/* 等待鼠标的0xfa的阶段 */
-		if (dat == 0xfa) {
-			mdec->phase = 1;
-		}        
-		return 0;
-	}
-	if (mdec->phase == 1) {
-		/* 等待鼠标第一字节的阶段 */
-		mdec->buf[0] = dat;
-		mdec->phase = 2;
-		return 0;
-	}
-	if (mdec->phase == 2) {
-		/* 等待鼠标第二字节的阶段 */
-		mdec->buf[1] = dat;
-		mdec->phase = 3;
-		return 0;
-	}
-	if (mdec->phase == 3) {
-		/* 等待鼠标第二字节的阶段 */
-		mdec->buf[2] = dat;
-		mdec->phase = 1;
-		mdec->btn = mdec->buf[0] & 0x07;
-		mdec->x = mdec->buf[1];
-		mdec->y = mdec->buf[2];
-		if ((mdec->buf[0] & 0x10) != 0) {
-			mdec->x |= 0xffffff00;
-		}
-		if ((mdec->buf[0] & 0x20) != 0) {
-			mdec->y |= 0xffffff00;
-		}     
-		/* 鼠标的y方向与画面符号相反 */   
-		mdec->y = - mdec->y; 
-		return 1;
-	}
-	/* 应该不可能到这里来 */
-	return -1; 
 }
