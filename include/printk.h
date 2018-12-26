@@ -1,7 +1,7 @@
-#ifndef __DEBUG_H__
-#define __DEBUG_H__
+#ifndef __PRINTK_H__
+#define __PRINTK_H__
 
-
+/*格式化输出函数， 来自deeppinkOS*/
 /*
  * __builtin***()相关函数是gcc的内置变量和函数
  */
