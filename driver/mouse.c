@@ -3,6 +3,12 @@
 
 static MS_INPUT ms_in;
 static MOUSE_DEC mdec;
+
+int mouse_bytes [3];
+int mouse_cycle = 0;
+int x = 0;
+int y = 0;
+
 /**
  * 鼠标中断注册
  */
@@ -21,10 +27,10 @@ static MOUSE_DEC mdec;
     io_out8(0x60,status_byte);
     //设置默认值
     mouse_write(0xF6);
-    mouse_read();
+    io_in8(0x60);
     //开始发送数据包
     mouse_write(0xF4);
-    mouse_read();
+    io_in8(0x60);
     ms_in.count = 0;
     ms_in.p_head = ms_in.p_tail = ms_in.buf;
     register_interrupt_handler(IRQ12, mouse_handler);
@@ -35,8 +41,7 @@ static MOUSE_DEC mdec;
  */
 void mouse_handler(pt_regs *regs)
 {
-    unsigned char data;
-    data = io_in8(0x60);
+    int data = io_in8(0x60);
     if(ms_in.count < 128) {
         *(ms_in.p_head) = data;
         ms_in.p_head++;
@@ -84,19 +89,18 @@ void mouse_write(unsigned char a_write)
     io_out8(0x60,a_write);
 }
 
-char mouse_read()
+int mouse_read()
 {
-    unsigned char data;
+    char data;
     io_cli();
 	if(ms_in.count > 0){
 		data = *(ms_in.p_tail);
-		ms_in.p_tail++;
-		ms_in.p_tail++;
+        ms_in.p_tail++;
 		// 如果读到了最后
 		if(ms_in.p_tail == ms_in.buf + 128){
 			ms_in.p_tail = ms_in.buf;
 		}
-		ms_in.count = ms_in.count - 2;
+		ms_in.count = ms_in.count - 1;
 	}
     io_sti();
     return data;

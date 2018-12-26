@@ -2,14 +2,16 @@
 #include <interrupt.h>
 #include <video.h>
 #include <mouse.h>
-#include <stdio.h>
+#include "printk.h"
 
 unsigned char *vram;/* 声明变量vram、用于BYTE [...]地址 */
-static int mx = 0, my = 0;
-static char mcursor[256];
+int mouse_decode(struct MOUSE_DEC *mdec, unsigned char dat);
 
 void main(void)
 {
+    int mx = 0, my = 0, i;
+    char mcursor[256];
+    char s[40];
 	clear_screen();
 	int xsize, ysize;
 	vram = (unsigned char *) 0xa0000;/* 地址变量赋值 */
@@ -41,94 +43,80 @@ void main(void)
 	for (;;) {
 		//io_hlt();
 		keyboard_read();
-        show_mouse_info(&mdec, vram);
+        io_cli();
+        i = mouse_read();
+		io_sti();
+		if (mouse_decode(&mdec, i) != 0) {
+			/* 3字节都凑齐了，所以把它们显示出来*/
+			if ((mdec.btn & 0x01) != 0) {
+				s[1] = 'L';
+			}
+			if ((mdec.btn & 0x02) != 0) {
+				s[3] = 'R';
+			}
+			if ((mdec.btn & 0x04) != 0) {
+				s[2] = 'C';
+			}
+			boxfill8(vram, 320, COL8_848484, 32, 16, 32 + 15 * 8 - 1, 31);
+			showString(vram, 320, 32, 16, COL8_FFFFFF, s);
+			/* 鼠标指针的移动 */
+			boxfill8(vram, 320, COL8_848484, mx, my, mx + 15, my + 15); /* 隐藏鼠标 */
+			mx += mdec.x;
+			my += mdec.y;
+			if (mx < 0) {
+						mx = 0;
+			}
+			if (my < 0) {
+					my = 0;
+			}
+			if (mx > 320 - 16) {
+						mx = 320 - 16;
+			}
+			if (my > 200 - 16) {
+						my = 200 - 16;
+			}
+			putblock(vram, 320, 16, 16, mx, my, mcursor, 16); /* 描画鼠标 */
+		}
 	}
 }
 
-void computeMousePosition(MOUSE_DEC* mdec) {
-    mx += mdec->x;
-    my += mdec->y;
-    if (mx < 0) {
-       mx = 0;
-    }
-
-    if (my < 0) {
-       my = 0;
-    }
-
-    if (mx > 320- 16) {
-       mx = 320 - 16;
-    }
-    if (my > 320 - 16) {
-       my = 320 - 16;
-    }
-    print(itoa(mx), 9);
-    print(itoa(my), 10);
-}
-
-void eraseMouse(char* vram) {
-    boxfill8(vram, 320, COL8_848484, mx, my, mx+15, my+15);
-    print("erasing mouse", 0);
-}
-
-void drawMouse(char* vram) {
-    putblock(vram, 320, 16, 16, mx, my, mcursor, 16);
-    print("drawing mouse", 0);
-}
-
-int mouse_decode(struct MOUSE_DEC *mdec, unsigned char dat) {
-    print("decoding mouse", 0);
-    if (mdec->phase == 0) {
-        if (dat == 0xfa) {
-           mdec->phase = 1;
-        }
-
-       return 0;
-    }
-
-    if (mdec->phase == 1) {
-        if ((dat & 0xc8) == 0x08) {
-            mdec->buf[0] = dat;
-            mdec->phase = 2;
-        }
-
-        return 0;
-    }
-
-    if (mdec->phase == 2) {
-        mdec->buf[1] = dat;
-        mdec->phase = 3;
-        return 0;
-    }
-
-    if (mdec->phase == 3) {
-        mdec->buf[2] = dat;
-        mdec->phase = 1;
-        mdec->btn = mdec->buf[0] & 0x07;
-        mdec->x = mdec->buf[1];
-        mdec->y = mdec->buf[2];
-        if ((mdec->buf[0] & 0x10) != 0) {
-           mdec->x |= 0xffffff00;
-        }
-
-        if ((mdec->buf[0] & 0x20) != 0) {
-           mdec->y |= 0xffffff00;
-        }
-
-        mdec->y = -mdec->y;
-        return 1;
-    }
-
-    return -1;
-}
-
-void show_mouse_info(struct MOUSE_DEC * mdec, unsigned char *vram) {
-    unsigned char data = 0;
-
-    data = mouse_read();
-    if (mouse_decode(mdec, data) == 1) {
-        eraseMouse(vram);
-        computeMousePosition(&mdec);
-        drawMouse(vram);
-    }
+int mouse_decode(struct MOUSE_DEC *mdec, unsigned char dat){
+	if (mdec->phase == 0) {
+		/* 等待鼠标的0xfa的阶段 */
+		if (dat == 0xfa) {
+			mdec->phase = 1;
+		}        
+		return 0;
+	}
+	if (mdec->phase == 1) {
+		/* 等待鼠标第一字节的阶段 */
+		mdec->buf[0] = dat;
+		mdec->phase = 2;
+		return 0;
+	}
+	if (mdec->phase == 2) {
+		/* 等待鼠标第二字节的阶段 */
+		mdec->buf[1] = dat;
+		mdec->phase = 3;
+		return 0;
+	}
+	if (mdec->phase == 3) {
+		/* 等待鼠标第二字节的阶段 */
+		mdec->buf[2] = dat;
+		mdec->phase = 1;
+		mdec->btn = mdec->buf[0] & 0x07;
+		mdec->x = mdec->buf[1];
+		mdec->y = mdec->buf[2];
+		if ((mdec->buf[0] & 0x10) != 0) {
+			mdec->x |= 0xffffff00;
+		}
+		if ((mdec->buf[0] & 0x20) != 0) {
+			mdec->y |= 0xffffff00;
+		}     
+		/* 鼠标的y方向与画面符号相反 */   
+		mdec->y = - mdec->y; 
+		return 1;
+	}
+	/* 应该不可能到这里来 */
+	return -1; 
 }

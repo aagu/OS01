@@ -72,10 +72,10 @@ next:
     jb   readloop
 
 goto_PM:
-    mov  al, 0x13
-    mov  ah, 0x00
-    ;mov  ax, 0x4f02
-    ;mov  bx, 0x105
+    ;mov  al, 0x13
+    ;mov  ah, 0x00
+    mov  ax, 0x4f02
+    mov  bx, 0x105
     int  0x10
 
     mov  al, 0xff
