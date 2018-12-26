@@ -6,6 +6,7 @@ GLOBAL io_out8, io_out16, io_out32
 GLOBAL io_load_eflags, io_store_eflags
 GLOBAL load_gdtr, load_idtr
 GLOBAL isr_common_stub, irq_common_stub
+GLOBAL load_cr0, store_cr0
 GLOBAL systemFont
 EXTERN  main
 EXTERN	isr_handler, irq_handler
@@ -86,6 +87,15 @@ load_idtr:
         mov  ax,[esp+4]
         lidt  [eax]
         ret
+
+load_cr0:		; int load_cr0(void);
+		mov		eax, cr0
+		ret
+
+store_cr0:		; void store_cr0(int cr0);
+		mov		eax, [esp+4]
+		mov		cr0, eax
+		ret
 
 ; 定义两个构造中断处理函数的宏(有的中断有错误代码，有的没有)
 ; 用于没有错误代码的中断
