@@ -167,6 +167,8 @@ PM_MODE:
     mov  ds, ax              ; Move a valid data segment into the data segment register
     mov  ss, ax              ; Move a valid data segment into the stack segment register
     mov  es, ax
+    mov  fs, ax
+    mov  gs, ax
     mov  esp, 090000h        ; Move the stack pointer to 090000h
     jmp  08h:7e00h
 
