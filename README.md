@@ -3,3 +3,4 @@
 boot.asm——读取kernel到内存，设置显示模式，进入保护模式<br>
 kernel.asm提供C语言需要的汇编函数调用<br>
 xxx.cC语言完成各项功能
+
