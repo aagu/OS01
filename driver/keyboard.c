@@ -5,7 +5,7 @@
 #include <keyboard.h>
 #include <interrupt.h>
 #include <keymap.h>
-#include <video.h>
+#include "printk.h"
 
 /*
  * 说明：注册键盘中断处理函数
@@ -56,6 +56,7 @@ void keyboard_read()
 		kb_in.count = kb_in.count - 2;
 		//boxfill8((unsigned char *) 0xa0000, 320, COL8_848484, 8, 24, 321, 40); //clean last char
         //showFont8((unsigned char *) 0xa0000, 320, 8, 24, COL8_FFFFFF, systemFont+keymap[scancode]);
+		print("key pressed", 0);
 	}
     io_sti();
 }
