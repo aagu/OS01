@@ -6,7 +6,7 @@ GLOBAL io_out8, io_out16, io_out32
 GLOBAL io_load_eflags, io_store_eflags
 GLOBAL load_gdtr, load_idtr
 GLOBAL isr_common_stub, irq_common_stub
-GLOBAL load_cr0, store_cr0
+GLOBAL load_cr0, store_cr0, memtest_sub
 GLOBAL systemFont
 EXTERN  main
 EXTERN	isr_handler, irq_handler
@@ -96,6 +96,14 @@ store_cr0:		; void store_cr0(int cr0);
 		mov		eax, [esp+4]
 		mov		cr0, eax
 		ret
+
+memtest_sub:	; unsigned int memtest_sub(unsigned int start, unsigned int end)
+		push	edi						; （由于还要使用ebx, esi, edi）
+		push	esi
+		push	ebx
+		mov		esi,0xaa55aa55			; pat0 = 0xaa55aa55;
+		mov		edi,0x55aa55aa			; pat1 = 0x55aa55aa;
+		mov		eax,[esp+12+4]			; i = start;
 
 ; 定义两个构造中断处理函数的宏(有的中断有错误代码，有的没有)
 ; 用于没有错误代码的中断
