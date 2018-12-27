@@ -5,7 +5,7 @@
 
 void keyboard_handler(pt_regs *regs);
 void init_keyboard();
-void keyboard_read();
+int keyboard_read();
 
 /************************************************************************/
 /*                          Macros Declaration                          */

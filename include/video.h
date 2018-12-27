@@ -75,4 +75,6 @@ void showFont8(unsigned char *vram, int xsize, int x, int y, char c, char* font)
 
 void showString(unsigned char* vram, int xsize, int x, int y, char color, unsigned char *s );
 
+void init_screen8(char *vram, int x, int y);
+
 #endif //VIDEO_H

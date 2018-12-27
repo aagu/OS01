@@ -5,7 +5,8 @@
 #include <keyboard.h>
 #include <interrupt.h>
 #include <keymap.h>
-#include "printk.h"
+#include "video.h"
+#include "kernel.h"
 
 /*
  * 说明：注册键盘中断处理函数
@@ -38,10 +39,10 @@ void keyboard_handler(pt_regs *regs)
 	}
 	kb_in.count++;
 	//printk("0x%02X,",scancode);
-
+	interrupt_callback();
 }
 
-void keyboard_read()
+int keyboard_read()
 {
 	unsigned char scancode;
     io_cli();
@@ -54,9 +55,7 @@ void keyboard_read()
 			kb_in.p_tail = kb_in.buf;
 		}
 		kb_in.count = kb_in.count - 2;
-		//boxfill8((unsigned char *) 0xa0000, 320, COL8_848484, 8, 24, 321, 40); //clean last char
-        //showFont8((unsigned char *) 0xa0000, 320, 8, 24, COL8_FFFFFF, systemFont+keymap[scancode]);
-		print("key pressed", 0);
 	}
     io_sti();
+	return scancode;
 }

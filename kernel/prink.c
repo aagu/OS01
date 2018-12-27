@@ -10,8 +10,6 @@
 #include "printk.h"
 #include "string.h"
 
-static int vsprintf(char *buff, const char *format, va_list args);
-
 void printk(const char *format, ...)
 {
 	// 避免频繁创建临时变量，内核的栈很宝贵
@@ -144,7 +142,7 @@ static char *number(char *str, int num, int base, int size, int precision, int t
  * 返回：正常返回字符串长度（除去\0）
  *	 失败返回负数
  */
-static int vsprintf(char *buff, const char *format, va_list args)
+int vsprintf(char *buff, const char *format, va_list args)
 {
 	int len;
 	int i;
