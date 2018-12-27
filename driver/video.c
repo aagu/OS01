@@ -84,3 +84,13 @@ void showString(unsigned char* vram, int xsize, int x, int y, char color, unsign
        x += 8;
     }
 }
+
+void init_screen8(char *vram, int x, int y)
+{
+    boxfill8(vram, x, COL8_848484,  0,         0,         x - 1, y - 21);
+	boxfill8(vram, x, COL8_C6C6C6,  0,         y - 20,    x - 1, y - 19);
+	boxfill8(vram, x, COL8_FFFFFF,  0,         y - 19,    x - 1, y - 18);
+	boxfill8(vram, x, COL8_C6C6C6,  0,         y - 18,    x - 1, y -  1);
+
+	return;
+}
