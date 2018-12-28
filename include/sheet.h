@@ -1,8 +1,6 @@
 #ifndef __SHEET_H__
 #define __SHEET_H__
 
-#include "mm.h"
-
 /*图层处理*/
 #define MAX_SHEETS		256
 #define SHEET_USE  1

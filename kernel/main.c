@@ -40,25 +40,18 @@ void main(void)
     sheet_slide(shtctl, sht_mouse, mx, my);
 	sheet_updown(shtctl, sht_back,  0);
 	sheet_updown(shtctl, sht_mouse, 1);
-	//putblock(binfo->vram, binfo->scrnx, 16, 16, mx, my, mcursor, 16);
-	sheet_refresh(shtctl, sht_back, 0, 0, binfo->scrnx, 48); /* 刷新文字 */
 	
-	//asm volatile("int $44");
 	for (;;) {
-		//io_cli();
 		int scode = keyboard_read();
-		//io_sti();
 		if (scode != -1) {
 			boxfill8(buf_back, binfo->scrnx, COL8_848484, 0, 0, 79, 15); /* 文字 */
 			showFont8(buf_back, binfo->scrnx, 4, 0, COL8_FFFFFF, systemFont + (unsigned char)keymap[scode*3]*16); /* 写文字 */
 			sheet_refresh(shtctl, sht_back, 0, 0, 80, 16); /* 刷新文字 */
 		}
-        //io_cli();
         i = mouse_read();
 		if (i != -1) {
 			if (mouse_decode(&mdec, i) != 0) {
 			/* 3字节都凑齐了，所以把它们显示出来*/
-			//vsprintf(s, "[lcr %4d %4d", mdec.x, mdec.y);
 			if ((mdec.btn & 0x01) != 0) {
 				s[1] = 'L';
 			}
@@ -86,6 +79,5 @@ void main(void)
 			sheet_slide(shtctl, sht_mouse, mx, my); /* 包含sheet_refresh含sheet_refresh */
 			}
 		}
-		//io_sti();
 	}
 }
