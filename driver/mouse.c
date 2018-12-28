@@ -101,9 +101,11 @@ int mouse_read()
 			ms_in.p_tail = ms_in.buf;
 		}
 		ms_in.count = ms_in.count - 1;
+        io_sti();
+        return data;
 	}
     io_sti();
-    return data;
+    return -1;
 }
 
 int mouse_decode(struct MOUSE_DEC *mdec, unsigned char dat){

@@ -2,13 +2,11 @@
 
 #define SHEET_USE		1
 
-//SHTCTL *shtctl_init(MEMMAN *memman, unsigned char *vram, int xsize, int ysize)
 SHTCTL *shtctl_init(unsigned char *vram, int xsize, int ysize)
 {
 	struct SHTCTL *ctl;
 	int i;
-	//ctl = (struct SHTCTL *) memman_alloc_4k(memman, sizeof (struct SHTCTL));
-	ctl = (struct SHTCTL *) 0x400000;
+	ctl = (struct SHTCTL *) 0x800000;
 	if (ctl == 0) {
 		goto err;
 	}

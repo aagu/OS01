@@ -2,10 +2,13 @@
 #define __KEYBOARD_H__
 
 #include "interrupt.h"
+#include "sheet.h"
+#include "kernel.h"
 
 void keyboard_handler(pt_regs *regs);
-void init_keyboard();
-int keyboard_read();
+void init_keyboard(void);
+int keyboard_read(void);
+void wait_keyboard(void);
 
 /************************************************************************/
 /*                          Macros Declaration                          */
