@@ -25,7 +25,7 @@ vgaromimage:file=/usr/share/bochs/VGABIOS-lgpl-latest
 #what disk images will be used 
 #=======================================================================
 
-floppya:1_44=/home/aagu/OS01/system.img, status=inserted
+floppya:1_44=/home/g/桌面/OS01/system.img, status=inserted
 
  
 
