@@ -45,6 +45,7 @@ void main(void)
 	
 	showString((unsigned char *) binfo->vram, binfo->scrnx, 0, 16, COL8_000084, "Welcome to my OS");
 	for (;;) {
+		io_hlt();
 		int scode = keyboard_read();
 		if (scode != -1) {
 			if(cx >= 320){
@@ -61,7 +62,9 @@ void main(void)
 
 			sheet_refresh(shtctl, sht_back, 0, 0, 80, 16); /* 刷新文字 */
 		}
+		
         i = mouse_read();
+		io_sti();
 		if (i != -1) {
 			if (mouse_decode(&mdec, i) != 0) {
 				/* 3字节都凑齐了，所以把它们显示出来*/
@@ -78,16 +81,16 @@ void main(void)
 				mx += mdec.x;
 				my += mdec.y;
 				if (mx < 0) {
-							mx = 0;
+					mx = 0;
 				}
 				if (my < 0) {
-						my = 0;
+					my = 0;
 				}
 				if (mx > binfo->scrnx - 16) {
-							mx = binfo->scrnx - 16;
+					mx = binfo->scrnx - 16;
 				}
 				if (my > binfo->scrny - 16) {
-							my = binfo->scrny - 16;
+					my = binfo->scrny - 16;
 				}
 				sheet_slide(shtctl, sht_mouse, mx, my); /* 包含sheet_refresh含sheet_refresh */
 			}

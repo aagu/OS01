@@ -142,7 +142,13 @@ int mouse_decode(struct MOUSE_DEC *mdec, unsigned char dat){
 			mdec->y |= 0xffffff00;
 		}     
 		/* 鼠标的y方向与画面符号相反 */   
-		mdec->y = - mdec->y; 
+		mdec->y = - mdec->y;
+        if(mdec->x < 0) mdec->x = -2;
+        else if(mdec->x == 0) mdec->x = 0;
+        else mdec->x = 2;
+        if(mdec->y < 0) mdec->y = -2;
+        else if(mdec->y == 0) mdec->y = 0;
+        else mdec->y = 2;
 		return 1;
 	}
 	/* 应该不可能到这里来 */
