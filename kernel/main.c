@@ -6,10 +6,12 @@
 #include "sheet.h"
 #include "keymap.h"
 
+int kx, ky;
+
 void main(void)
 {
     struct BOOTINFO *binfo = (struct BOOTINFO*) 0x0ff0;
-    int mx = 0, my = 0, i;
+    int mx, my, i;
 	char s[40];
 	MOUSE_DEC mdec;
     SHTCTL *shtctl;
@@ -41,43 +43,20 @@ void main(void)
 	sheet_updown(shtctl, sht_back,  0);
 	sheet_updown(shtctl, sht_mouse, 1);
 	
+	setscrnbuf(shtctl, sht_mouse);
+
 	for (;;) {
 		int scode = keyboard_read();
 		if (scode != -1) {
-			boxfill8(buf_back, binfo->scrnx, COL8_848484, 0, 0, 79, 15); /* 文字 */
-			showFont8(buf_back, binfo->scrnx, 4, 0, COL8_FFFFFF, systemFont + (unsigned char)keymap[scode*3]*16); /* 写文字 */
-			sheet_refresh(shtctl, sht_back, 0, 0, 80, 16); /* 刷新文字 */
-		}
-        i = mouse_read();
-		if (i != -1) {
-			if (mouse_decode(&mdec, i) != 0) {
-			/* 3字节都凑齐了，所以把它们显示出来*/
-			if ((mdec.btn & 0x01) != 0) {
-				s[1] = 'L';
+			if (kx >= binfo->scrnx) {
+				kx = 0;
+				ky += 16;
+				if (ky > binfo->scrny) ky = 0;
 			}
-			if ((mdec.btn & 0x02) != 0) {
-				s[3] = 'R';
-			}
-			if ((mdec.btn & 0x04) != 0) {
-				s[2] = 'C';
-			}
-			/* 鼠标指针的移动 */
-			mx += mdec.x;
-			my += mdec.y;
-			if (mx < 0) {
-						mx = 0;
-			}
-			if (my < 0) {
-					my = 0;
-			}
-			if (mx > binfo->scrnx - 16) {
-						mx = binfo->scrnx - 16;
-			}
-			if (my > binfo->scrny - 16) {
-						my = binfo->scrny - 16;
-			}
-			sheet_slide(shtctl, sht_mouse, mx, my); /* 包含sheet_refresh含sheet_refresh */
-			}
+			boxfill8(buf_back, binfo->scrnx, COL8_848484, kx, ky, kx+16, ky+16); /* 文字 */
+			showFont8(buf_back, binfo->scrnx, kx, ky, COL8_FFFFFF, systemFont + (unsigned char)keymap[scode*3]*16); /* 写文字 */
+			sheet_refresh(shtctl, sht_back, kx, ky, kx+16, ky+16); /* 刷新文字 */
+			kx += 16;
 		}
 	}
 }
