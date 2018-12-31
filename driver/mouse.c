@@ -1,13 +1,16 @@
 #include "mouse.h"
 #include "video.h"
+//#include "sheet.h"
 
 static MS_INPUT ms_in;
 static MOUSE_DEC mdec;
 
 int mouse_bytes [3];
 int mouse_cycle = 0;
-int x = 0;
-int y = 0;
+int mouse_x = 0;
+int mouse_y = 0;
+SHTCTL *shtctl;
+SHEET *sht_mouse;
 
 /**
  * 鼠标中断注册
@@ -41,16 +44,38 @@ int y = 0;
  */
 void mouse_handler(pt_regs *regs)
 {
-    int data = io_in8(0x60);
-    if(ms_in.count < 128) {
-        *(ms_in.p_head) = data;
-        ms_in.p_head++;
-        if(ms_in.p_head == ms_in.buf+128)
-        {
-            ms_in.p_head = ms_in.buf;
-        }
+    static int mouse_cycle = 0;
+    static char mouse_byte[3];
+    struct BOOTINFO *binfo = (struct BOOTINFO*) 0x0ff0;
+    switch(mouse_cycle) {
+        case 0:
+            mouse_byte[0] = io_in8(0x60);
+            mouse_cycle++;
+            break;
+        case 1:
+            mouse_byte[1] = io_in8(0x60);
+            mouse_cycle++;
+            break;
+        case 2:
+            mouse_byte[2]= io_in8(0x60);
+            mouse_x = mouse_x + (mouse_byte[1]);
+            mouse_y = mouse_y - (mouse_byte[2]);
+
+            // Adjust mouse position
+            if(mouse_x < 0)
+                mouse_x = 0;
+            if(mouse_y < 0)
+                mouse_y = 0;
+            if(mouse_x > binfo->scrnx - 1)
+                mouse_x = binfo->scrnx - 16;
+            if(mouse_y > binfo->scrny - 1)
+                mouse_y = binfo->scrny - 16;
+
+            sheet_slide(shtctl, sht_mouse, mouse_x, mouse_y); /* 包含sheet_refresh含sheet_refresh */
+
+            mouse_cycle = 0;
+            break;
     }
-    ms_in.count++;
 }
 
 void mouse_wait(int a_type)
@@ -89,62 +114,8 @@ void mouse_write(unsigned char a_write)
     io_out8(0x60,a_write);
 }
 
-int mouse_read()
+void setscrnbuf(SHTCTL *ctl, SHEET *mouse_buf)
 {
-    char data;
-    io_cli();
-	if(ms_in.count > 0){
-		data = *(ms_in.p_tail);
-        ms_in.p_tail++;
-		// 如果读到了最后
-		if(ms_in.p_tail == ms_in.buf + 128){
-			ms_in.p_tail = ms_in.buf;
-		}
-		ms_in.count = ms_in.count - 1;
-        io_sti();
-        return data;
-	}
-    io_sti();
-    return -1;
-}
-
-int mouse_decode(struct MOUSE_DEC *mdec, unsigned char dat){
-	if (mdec->phase == 0) {
-		/* 等待鼠标的0xfa的阶段 */
-		if (dat == 0xfa) {
-			mdec->phase = 1;
-		}        
-		return 0;
-	}
-	if (mdec->phase == 1) {
-		/* 等待鼠标第一字节的阶段 */
-		mdec->buf[0] = dat;
-		mdec->phase = 2;
-		return 0;
-	}
-	if (mdec->phase == 2) {
-		/* 等待鼠标第二字节的阶段 */
-		mdec->buf[1] = dat;
-		mdec->phase = 3;
-		return 0;
-	}
-	if (mdec->phase == 3) {
-		/* 等待鼠标第二字节的阶段 */
-		mdec->buf[2] = dat;
-		mdec->phase = 1;
-		mdec->btn = mdec->buf[0] & 0x07;
-		mdec->x = mdec->buf[1];
-		mdec->y = mdec->buf[2];
-		if ((mdec->buf[0] & 0x10) != 0) {
-			mdec->x |= 0xffffff00;
-		}
-		if ((mdec->buf[0] & 0x20) != 0) {
-			mdec->y |= 0xffffff00;
-		}     
-		/* 鼠标的y方向与画面符号相反 */   
-		mdec->y = - mdec->y; 
-		return 1;
-	}
-	/* 应该不可能到这里来 */
-	return -1; 
+    shtctl = ctl;
+    sht_mouse = mouse_buf;
 }
