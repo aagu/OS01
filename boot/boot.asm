@@ -81,6 +81,7 @@ next:
     mov  [0x0ff0],ch	;保存读取的扇区数
 
 goto_PM:
+    jmp  text_mode
 ;确认VBE是否存在
     mov  ax, 0x9000
     mov  es, ax
@@ -110,7 +111,7 @@ goto_PM:
 
 ;	画面设置
 
-	mov  BX,VBEMODE+0x4000
+	mov  bx,VBEMODE+0x4000
 	mov  ax,0x4f02
 	int  0x10
 	mov  BYTE [VMODE],8	; 屏幕的模式（参考C语言的引用）
@@ -123,13 +124,19 @@ goto_PM:
 	jmp  keystatus
 
 scrn320:
-	mov  AL,0x13						; VGA图、320x200x8bit彩色
-	mov  AH,0x00
+	mov  al,0x13						; VGA图、320x200x8bit彩色
+	mov  ah,0x00
 	int  0x10
 	mov  BYTE [VMODE],8		; 记下画面模式（参考C语言）
 	mov  WORD [SCRNX],320
 	mov  WORD [SCRNY],200
 	mov  DWORD [VRAM],0x000a0000
+    jmp  keystatus
+
+text_mode:
+    mov  al, 0x03
+    mov	 ah, 0x00
+    int  0x10
 
 keystatus:
     mov  al, 0xff

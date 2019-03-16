@@ -8,12 +8,14 @@
 
 int kx, ky;
 
+unsigned int memtest(unsigned int start, unsigned int end);
+unsigned int memtest_sub(unsigned int start, unsigned int end);
+
 void main(void)
 {
     struct BOOTINFO *binfo = (struct BOOTINFO*) 0x0ff0;
     int mx, my, i;
 	char s[40];
-	MOUSE_DEC mdec;
     SHTCTL *shtctl;
 	SHEET *sht_back, *sht_mouse;
 	unsigned char *buf_back, mcursor[256];
@@ -25,7 +27,6 @@ void main(void)
 
 	init_keyboard();
 	init_mouse();
-    mdec.phase = 0;
 	
 	init_palette();/* 设定调色板 */
 
@@ -45,6 +46,10 @@ void main(void)
 	
 	setscrnbuf(shtctl, sht_mouse);
 
+	i = memtest(0x00400000, 0xbfffffff) / (1024 * 1024);
+	vsprintf(s, "%d", i);
+	showString(buf_back, binfo->scrnx, binfo->scrny,
+		8, 8, s);
 	for (;;) {
 		int scode = keyboard_read();
 		if (scode != -1) {
@@ -59,4 +64,42 @@ void main(void)
 			kx += 16;
 		}
 	}
+}
+
+#define EFLAGS_AC_BIT			0x00040000
+#define CR0_CACHE_DISABLE	0x60000000
+
+unsigned int memtest(unsigned int start, unsigned int end) 
+{
+	char flg486 = 0;
+	unsigned int eflg, cr0, i;
+
+	/* 确认CPU是386还是486以上的 */
+	eflg = io_load_eflags();
+	eflg |= EFLAGS_AC_BIT; /* AC-bit = 1 */
+	io_store_eflags(eflg);
+	eflg = io_load_eflags();
+	if ((eflg & EFLAGS_AC_BIT) != 0) {
+		/* 如果是386，即使设定AC=1，AC的值还会自动回到0 */
+		flg486 = 1;
+	}
+
+	eflg &= ~EFLAGS_AC_BIT; /* AC-bit = 0 */
+	io_store_eflags(eflg);
+
+	if (flg486 != 0) {
+		cr0 = load_cr0();
+		cr0 |= CR0_CACHE_DISABLE; /* 禁止缓存 */ 
+		store_cr0(cr0);
+	}
+
+	i = memtest_sub(start, end);
+
+	if (flg486 != 0) {
+		cr0 = load_cr0();
+		cr0 &= ~CR0_CACHE_DISABLE; /* 允许缓存 */
+		store_cr0(cr0);
+	}
+
+	return i;
 }
