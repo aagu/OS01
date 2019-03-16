@@ -2,6 +2,7 @@
 #define MOUSE_H
 
 #include "interrupt.h"
+#include "sheet.h"
 
 typedef struct s_ms {
 	char*	p_head;			/* 指向缓冲区中下一个空闲位置 */
@@ -21,5 +22,6 @@ int mouse_read();
 void mouse_wait(int a_type);
 void mouse_write(unsigned char a_write);
 int mouse_decode(struct MOUSE_DEC *mdec, unsigned char dat);
+void setscrnbuf(SHTCTL *ctl, SHEET *mouse_buf);
 
 #endif
