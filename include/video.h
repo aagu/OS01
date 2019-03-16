@@ -67,7 +67,7 @@ void set_palette(int start, int end, unsigned char *rgb);
 
 void boxfill8(unsigned char *vram, int xsize, unsigned char c, int x0, int y0, int x1, int y1);
 
-void init_mouse_cursor(char* mouse, char bc);
+void init_mouse_cursor(unsigned char* mouse, char bc);
 
 void putblock(unsigned char* vram, int vxsize, int pxsize, int pysize, int px0, int py0, char* buf, int bxsize);
 
@@ -75,6 +75,6 @@ void showFont8(unsigned char *vram, int xsize, int x, int y, char c, char* font)
 
 void showString(unsigned char* vram, int xsize, int x, int y, char color, unsigned char *s );
 
-void init_screen8(char *vram, int x, int y);
+void init_screen8(unsigned char *vram, int x, int y);
 
 #endif //VIDEO_H

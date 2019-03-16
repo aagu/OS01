@@ -35,7 +35,7 @@ void boxfill8(unsigned char *vram, int xsize, unsigned char c, int x0, int y0, i
 	return;
 }
 
-void init_mouse_cursor(char* mouse, char bc) {
+void init_mouse_cursor(unsigned char* mouse, char bc) {
     int x, y;
     for (y = 0; y < 16; y++) {
         for (x = 0; x < 16; x++) {
@@ -85,7 +85,7 @@ void showString(unsigned char* vram, int xsize, int x, int y, char color, unsign
     }
 }
 
-void init_screen8(char *vram, int x, int y)
+void init_screen8(unsigned char *vram, int x, int y)
 {
     boxfill8(vram, x, COL8_848484,  0,         0,         x - 1, y - 21);
 	boxfill8(vram, x, COL8_C6C6C6,  0,         y - 20,    x - 1, y - 19);

@@ -52,10 +52,6 @@ void main(void)
 	
 	setscrnbuf(shtctl, sht_mouse);
 
-	i = memtest(0x00400000, 0xbfffffff) / (1024 * 1024);
-	vsprintf(s, "%d", i);
-	showString(buf_back, binfo->scrnx, binfo->scrny,
-		8, 8, s);
 	for (;;) {
 		int scode = keyboard_read();
 		if (scode != -1) {
