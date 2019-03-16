@@ -5,11 +5,11 @@
 #include "printk.h"
 #include "sheet.h"
 #include "keymap.h"
+#include "memory.h"
+
+#define MEMMAN_ADDR 0x003c0000
 
 int kx, ky;
-
-unsigned int memtest(unsigned int start, unsigned int end);
-unsigned int memtest_sub(unsigned int start, unsigned int end);
 
 void main(void)
 {
@@ -20,6 +20,9 @@ void main(void)
 	SHEET *sht_back, *sht_mouse;
 	unsigned char *buf_back, mcursor[256];
 
+	unsigned int memtotal;
+	struct MEMMAN *memman = (struct MEMMAN *) MEMMAN_ADDR;
+
 	init_gdt();
 	init_idt();
 
@@ -29,11 +32,14 @@ void main(void)
 	init_mouse();
 	
 	init_palette();/* 设定调色板 */
+	memtotal = memtest(0x00400000, 0xbfffffff);
+	memman_init(memman);
+	memman_free(memman, 0x00400000, memtotal - 0x00400000);
 
-	shtctl = shtctl_init(binfo->vram, binfo->scrnx, binfo->scrny);
+	shtctl = shtctl_init(memman, binfo->vram, binfo->scrnx, binfo->scrny);
 	sht_back  = sheet_alloc(shtctl);
 	sht_mouse = sheet_alloc(shtctl);
-	buf_back = (unsigned char *) 0x810000;
+	buf_back = (unsigned char *) memman_alloc_4k(memman, binfo->scrnx * binfo->scrny);
 	sheet_setbuf(sht_back, buf_back, binfo->scrnx, binfo->scrny, -1); /* 没有透明色 */
 	sheet_setbuf(sht_mouse, mcursor, 16, 16, 99); /* 透明色号99 */
 	init_screen8(buf_back, binfo->scrnx, binfo->scrny);
@@ -64,42 +70,4 @@ void main(void)
 			kx += 16;
 		}
 	}
-}
-
-#define EFLAGS_AC_BIT			0x00040000
-#define CR0_CACHE_DISABLE	0x60000000
-
-unsigned int memtest(unsigned int start, unsigned int end) 
-{
-	char flg486 = 0;
-	unsigned int eflg, cr0, i;
-
-	/* 确认CPU是386还是486以上的 */
-	eflg = io_load_eflags();
-	eflg |= EFLAGS_AC_BIT; /* AC-bit = 1 */
-	io_store_eflags(eflg);
-	eflg = io_load_eflags();
-	if ((eflg & EFLAGS_AC_BIT) != 0) {
-		/* 如果是386，即使设定AC=1，AC的值还会自动回到0 */
-		flg486 = 1;
-	}
-
-	eflg &= ~EFLAGS_AC_BIT; /* AC-bit = 0 */
-	io_store_eflags(eflg);
-
-	if (flg486 != 0) {
-		cr0 = load_cr0();
-		cr0 |= CR0_CACHE_DISABLE; /* 禁止缓存 */ 
-		store_cr0(cr0);
-	}
-
-	i = memtest_sub(start, end);
-
-	if (flg486 != 0) {
-		cr0 = load_cr0();
-		cr0 &= ~CR0_CACHE_DISABLE; /* 允许缓存 */
-		store_cr0(cr0);
-	}
-
-	return i;
 }

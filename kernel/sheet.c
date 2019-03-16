@@ -2,11 +2,11 @@
 
 #define SHEET_USE		1
 
-SHTCTL *shtctl_init(unsigned char *vram, int xsize, int ysize)
+SHTCTL *shtctl_init(struct MEMMAN *memman, unsigned char *vram, int xsize, int ysize)
 {
 	struct SHTCTL *ctl;
 	int i;
-	ctl = (struct SHTCTL *) 0x800000;
+	ctl = (struct SHTCTL *) memman_alloc_4k(memman, sizeof (struct SHTCTL));
 	if (ctl == 0) {
 		goto err;
 	}
@@ -44,6 +44,39 @@ void sheet_setbuf(SHEET *sht, unsigned char *buf, int xsize, int ysize, int col_
 	sht->col_inv = col_inv;
 	return;
 }
+
+void sheet_refreshsub(SHTCTL *ctl, int vx0, int vy0, int vx1, int vy1)
+{
+	int h, bx, by, vx, vy, bx0, by0, bx1, by1;
+	unsigned char *buf, c, *vram = ctl->vram;
+	struct SHEET *sht;
+	for (h = 0; h <= ctl->top; h++) {
+		sht = ctl->sheets[h];
+		buf = sht->buf;
+		/* 使用vx0～vy1，对bx0～by1进行倒推 */
+		bx0 = vx0 - sht->vx0;
+		by0 = vy0 - sht->vy0;
+		bx1 = vx1 - sht->vx0;
+		by1 = vy1 - sht->vy0;
+		if (bx0 < 0) { bx0 = 0; } /* 处理刷新范围在图层外侧 */
+		if (by0 < 0) { by0 = 0; }
+		if (bx1 > sht->bxsize) { bx1 = sht->bxsize; } /* 应对不同的重叠方式 */
+		if (by1 > sht->bysize) { by1 = sht->bysize; }
+
+		for (by = by0; by < by1; by++) {
+			vy = sht->vy0 + by;
+			for (bx = bx0; bx < bx1; bx++) {
+				vx = sht->vx0 + bx;
+				c = buf[by * sht->bxsize + bx];
+				if (c != sht->col_inv) {
+					vram[vy * ctl->xsize + vx] = c;
+				}
+			}
+		}
+	}
+	return;
+}
+
 
 void sheet_updown(SHTCTL *ctl, SHEET *sht, int height)
 {
@@ -105,39 +138,6 @@ void sheet_refresh(SHTCTL *ctl, SHEET *sht, int bx0, int by0, int bx1, int by1)
 	}
 	return;
 }
-
-void sheet_refreshsub(SHTCTL *ctl, int vx0, int vy0, int vx1, int vy1)
-{
-	int h, bx, by, vx, vy, bx0, by0, bx1, by1;
-	unsigned char *buf, c, *vram = ctl->vram;
-	struct SHEET *sht;
-	for (h = 0; h <= ctl->top; h++) {
-		sht = ctl->sheets[h];
-		buf = sht->buf;
-		/* 使用vx0～vy1，对bx0～by1进行倒推 */
-		bx0 = vx0 - sht->vx0;
-		by0 = vy0 - sht->vy0;
-		bx1 = vx1 - sht->vx0;
-		by1 = vy1 - sht->vy0;
-		if (bx0 < 0) { bx0 = 0; } /* 处理刷新范围在图层外侧 */
-		if (by0 < 0) { by0 = 0; }
-		if (bx1 > sht->bxsize) { bx1 = sht->bxsize; } /* 应对不同的重叠方式 */
-		if (by1 > sht->bysize) { by1 = sht->bysize; }
-
-		for (by = by0; by < by1; by++) {
-			vy = sht->vy0 + by;
-			for (bx = bx0; bx < bx1; bx++) {
-				vx = sht->vx0 + bx;
-				c = buf[by * sht->bxsize + bx];
-				if (c != sht->col_inv) {
-					vram[vy * ctl->xsize + vx] = c;
-				}
-			}
-		}
-	}
-	return;
-}
-
 
 void sheet_slide(SHTCTL *ctl, SHEET *sht, int vx0, int vy0)
 {

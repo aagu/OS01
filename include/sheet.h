@@ -1,6 +1,8 @@
 #ifndef __SHEET_H__
 #define __SHEET_H__
 
+#include "memory.h"
+
 /*图层处理*/
 #define MAX_SHEETS		256
 #define SHEET_USE  1
@@ -17,8 +19,7 @@ typedef struct SHTCTL {
 	struct SHEET sheets0[MAX_SHEETS];
 } SHTCTL;
 
-//SHTCTL *shtctl_init(MEMMAN *memman, unsigned char *vram, int xsize, int ysize);
-SHTCTL *shtctl_init(unsigned char *vram, int xsize, int ysize);
+SHTCTL *shtctl_init(MEMMAN *memman, unsigned char *vram, int xsize, int ysize);
 SHEET *sheet_alloc(SHTCTL *ctl);
 void sheet_setbuf(SHEET *sht, unsigned char *buf, int xsize, int ysize, int col_inv);
 void sheet_updown(SHTCTL *ctl, SHEET *sht, int height);

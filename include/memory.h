@@ -5,16 +5,16 @@
 #define EFLAGS_AC_BIT			0x00040000
 #define CR0_CACHE_DISABLE	0x60000000
 
-struct FREEINFO
+typedef struct FREEINFO
 {
 	unsigned int addr, size;
-};
+} FREEINFO;
 
-struct MEMMAN
+typedef struct MEMMAN
 {
 	int frees, maxfrees, lostsize, losts;
 	struct FREEINFO free[MEMMAN_FREES];
-};
+} MEMMAN;
 
 unsigned int memtest(unsigned int start, unsigned int end);
 void memman_init(struct MEMMAN *man);
