@@ -44,13 +44,14 @@ void main(void)
 	sheet_setbuf(sht_mouse, mcursor, 16, 16, 99); /* 透明色号99 */
 	init_screen8(buf_back, binfo->scrnx, binfo->scrny);
 	init_mouse_cursor(mcursor, 99);
+	sheet_slide(sht_back, 0, 0);
 	mx = (binfo->scrnx - 16) / 2;
     my = (binfo->scrny - 28 - 16) / 2;  
-    sheet_slide(shtctl, sht_mouse, mx, my);
-	sheet_updown(shtctl, sht_back,  0);
-	sheet_updown(shtctl, sht_mouse, 1);
+    sheet_slide(sht_mouse, mx, my);
+	sheet_updown(sht_back,  0);
+	sheet_updown(sht_mouse, 1);
 	
-	setscrnbuf(shtctl, sht_mouse);
+	setscrnbuf(sht_mouse);
 
 	for (;;) {
 		int scode = keyboard_read();
@@ -62,7 +63,7 @@ void main(void)
 			}
 			boxfill8(buf_back, binfo->scrnx, COL8_848484, kx, ky, kx+16, ky+16); /* 文字 */
 			showFont8(buf_back, binfo->scrnx, kx, ky, COL8_FFFFFF, systemFont + (unsigned char)keymap[scode*3]*16); /* 写文字 */
-			sheet_refresh(shtctl, sht_back, kx, ky, kx+16, ky+16); /* 刷新文字 */
+			sheet_refresh(sht_back, kx, ky, kx+16, ky+16); /* 刷新文字 */
 			kx += 16;
 		}
 	}

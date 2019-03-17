@@ -22,6 +22,6 @@ int mouse_read();
 void mouse_wait(int a_type);
 void mouse_write(unsigned char a_write);
 int mouse_decode(struct MOUSE_DEC *mdec, unsigned char dat);
-void setscrnbuf(SHTCTL *ctl, SHEET *mouse_buf);
+void setscrnbuf(SHEET *mouse_buf);
 
 #endif

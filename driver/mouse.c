@@ -9,7 +9,6 @@ int mouse_bytes [3];
 int mouse_cycle = 0;
 int mouse_x = 0;
 int mouse_y = 0;
-SHTCTL *shtctl;
 SHEET *sht_mouse;
 
 /**
@@ -71,7 +70,7 @@ void mouse_handler(pt_regs *regs)
             if(mouse_y > binfo->scrny - 1)
                 mouse_y = binfo->scrny - 16;
 
-            sheet_slide(shtctl, sht_mouse, mouse_x, mouse_y); /* 包含sheet_refresh含sheet_refresh */
+            sheet_slide(sht_mouse, mouse_x, mouse_y); /* 包含sheet_refresh含sheet_refresh */
 
             mouse_cycle = 0;
             break;
@@ -114,8 +113,7 @@ void mouse_write(unsigned char a_write)
     io_out8(0x60,a_write);
 }
 
-void setscrnbuf(SHTCTL *ctl, SHEET *mouse_buf)
+void setscrnbuf(SHEET *mouse_buf)
 {
-    shtctl = ctl;
     sht_mouse = mouse_buf;
 }
