@@ -1,6 +1,6 @@
 #include "mouse.h"
 #include "video.h"
-//#include "sheet.h"
+#include "sheet.h"
 
 static MS_INPUT ms_in;
 static MOUSE_DEC mdec;

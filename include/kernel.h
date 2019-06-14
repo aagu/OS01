@@ -13,6 +13,11 @@ struct FIFO8 {
 	unsigned char *buf;
 	int p, q, size, free, flags;
 };
+struct TIMERCTL
+{
+	unsigned int count;
+};
+
 void io_hlt(void);
 void io_cli(void);
 void io_sti(void);
@@ -29,4 +34,5 @@ void fifo8_init(struct FIFO8 *fifo, int size, unsigned char *buf);
 int fifo8_put(struct FIFO8 *fifo, unsigned char data);
 int fifo8_get(struct FIFO8 *fifo);
 int fifo8_status(struct FIFO8 *fifo);
+
 #endif //KERNEL_H

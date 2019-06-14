@@ -6,6 +6,9 @@
 #include "sheet.h"
 #include "keymap.h"
 #include "memory.h"
+#include "kernel.h"
+#include "timer.h"
+#include "font.h"
 
 #define MEMMAN_ADDR 0x003c0000
 
@@ -22,17 +25,21 @@ void main(void)
 	SHEET *sht_back, *sht_mouse, *sht_win;
 	unsigned char *buf_back, mcursor[256], *buf_win;
 
-	unsigned int memtotal, count = 0;
+	unsigned int memtotal;
 	struct MEMMAN *memman = (struct MEMMAN *) MEMMAN_ADDR;
+
+	extern struct TIMERCTL timerctl;
 
 	init_gdt();
 	init_idt();
 
 	io_sti();
 
+	init_pit();
+	
 	init_keyboard();
 	init_mouse();
-	
+
 	init_palette();/* 设定调色板 */
 	memtotal = memtest(0x00400000, 0xbfffffff);
 	memman_init(memman);
@@ -61,11 +68,13 @@ void main(void)
 	
 	setscrnbuf(sht_mouse);
 
+	showFont8(buf_back, binfo->scrnx, 8, 8, COL8_FFFFFF, systemFont + 'A' * 16); /* 写文字 */
+	sheet_refresh(sht_back, 8, 8, 24, 24); /* 刷新文字 */
+
 	for (;;) {
-		count++; /* 从这里开始 */
-		vsprintf(s, "%010d", count);
+		vsprintf(s, "%010d", timerctl.count);
 		boxfill8(buf_win, 160, COL8_C6C6C6, 40, 28, 119, 43);
-		showString(buf_win, 160, 40, 28, COL8_000000, s);
+		//showString(buf_win, 160, 40, 28, COL8_000000, s);
 		sheet_refresh(sht_win, 40, 28, 120, 44); /* 到这里结束 */
 		int scode = keyboard_read();
 		if (scode != -1) {
@@ -75,8 +84,8 @@ void main(void)
 				if (ky > binfo->scrny) ky = 0;
 			}
 			boxfill8(buf_back, binfo->scrnx, COL8_848484, kx, ky, kx+16, ky+16); /* 文字 */
-			showFont8(buf_back, binfo->scrnx, kx, ky, COL8_FFFFFF, systemFont + (unsigned char)keymap[scode*3]*16); /* 写文字 */
-			sheet_refresh(sht_back, kx, ky, kx+16, ky+16); /* 刷新文字 */
+			//showFont8(buf_back, binfo->scrnx, kx, ky, COL8_FFFFFF, __font_bitmap__ + (unsigned char)keymap[scode*3]*16 + 0x20); /* 写文字 */
+			//sheet_refresh(sht_back, kx, ky, kx+16, ky+16); /* 刷新文字 */
 			kx += 16;
 		}
 	}
