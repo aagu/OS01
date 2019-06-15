@@ -1,5 +1,6 @@
 #include "stdio.h"
 
+unsigned int cur_line = 0;
 /*
  * Simply clears the screen to ' '
  */
@@ -23,17 +24,24 @@ void clear_screen()
 void print(char *msg, unsigned int line)
 {
 	char *vidmem = (char *)0xB8000;
-    unsigned int i = line*80*2, color = WHITE_TXT;
+    unsigned int i = cur_line*80*2, color = WHITE_TXT;
 
-		
-	
 	while(*msg != 0)
 	{ 		  	
-		  vidmem[i] = *msg;
-		  i++;
-		  vidmem[i] = color;
-		  i++;
-		  *msg++;
+		if (*msg == '\n')
+		{
+			cur_line++;
+			/* 跳过换行符 */
+			i++;
+			i++;
+			*msg++;
+		}
+		cur_line %= 25;
+		vidmem[i] = *msg;
+		i++;
+		vidmem[i] = color;
+		i++;
+		*msg++;
 	}
 }
 

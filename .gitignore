@@ -5,3 +5,4 @@
 *.o
 system.img
 *.ipch
+.vscode/*

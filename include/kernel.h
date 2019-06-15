@@ -16,6 +16,9 @@ struct FIFO8 {
 struct TIMERCTL
 {
 	unsigned int count;
+	unsigned int timeout;
+	struct FIFO8 *fifo;
+	unsigned char data;
 };
 
 void io_hlt(void);

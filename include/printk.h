@@ -10,7 +10,7 @@ typedef __builtin_va_list va_list;
 #define va_arg(ap,type)		(__builtin_va_arg(ap,type))
 #define va_end(ap)
 
-void prink(const char *format,...);
+void printk(const char *format,...);
 int vsprintf(char *buff, const char *format, va_list args);
 
 #endif

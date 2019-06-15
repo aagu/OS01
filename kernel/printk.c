@@ -10,6 +10,8 @@
 #include "printk.h"
 #include "string.h"
 
+//unsigned int line = 0;
+
 void printk(const char *format, ...)
 {
 	// 避免频繁创建临时变量，内核的栈很宝贵
@@ -23,8 +25,11 @@ void printk(const char *format, ...)
 
 	buff[i] = '\0';
 
+	//line %= 25;
+
 	//console_puts(buff,0,white);
 	print(buff, 0);
+	//line++;
 }
 
 // 判断是否是数字 返回 1：代表是数字

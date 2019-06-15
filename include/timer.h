@@ -6,3 +6,4 @@
 
 void init_pit(void);
 void timer_handler(pt_regs *regs);
+void settimer(unsigned int timeout, struct FIFO8 *fifo, unsigned char data);
