@@ -12,8 +12,9 @@ struct TIMER
 };
 struct TIMERCTL
 {
-	unsigned int count;
+	unsigned int count, next, using;
 	struct TIMER timer[MAX_TIMER];
+	struct TIMER *timerU[MAX_TIMER]; /* 使用中的计时器 */
 };
 
 void init_pit(void);
