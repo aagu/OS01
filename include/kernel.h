@@ -13,13 +13,6 @@ struct FIFO8 {
 	unsigned char *buf;
 	int p, q, size, free, flags;
 };
-struct TIMERCTL
-{
-	unsigned int count;
-	unsigned int timeout;
-	struct FIFO8 *fifo;
-	unsigned char data;
-};
 
 void io_hlt(void);
 void io_cli(void);

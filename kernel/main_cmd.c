@@ -12,6 +12,7 @@ void main(void)
     struct BOOTINFO *binfo = (struct BOOTINFO*) 0x0ff0;
 	char s[40];
 
+	struct TIMER *timer;
 	struct FIFO8 timerinfo;
 	unsigned char timerbuf[8];
 
@@ -26,8 +27,10 @@ void main(void)
 	init_pit();
 	init_keyboard();
 
+	timer = timer_alloc();
+	timer_init(timer, &timerinfo, 1);
+	timer_settime(timer, 10000);
 	fifo8_init(&timerinfo, 8, timerbuf);
-	settimer(10000, &timerinfo, 1);
 
 	memtotal = memtest(0x00400000, 0xbfffffff);
 	memman_init(memman);
@@ -39,6 +42,7 @@ void main(void)
 	{
 		if (fifo8_status(&timerinfo) != 0)
 		{
+			timer_free(timer);
 			printk("count done!\n");
 			break;
 		}
