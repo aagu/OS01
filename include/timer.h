@@ -6,15 +6,16 @@
 #define MAX_TIMER 200
 struct TIMER
 {
+	struct TIMER *next;
 	unsigned int timeout, flags;
 	struct FIFO8 *fifo;
 	unsigned char data;
 };
 struct TIMERCTL
 {
-	unsigned int count, next, using;
+	unsigned int count, next;
 	struct TIMER timer[MAX_TIMER];
-	struct TIMER *timerU[MAX_TIMER]; /* 使用中的计时器 */
+	struct TIMER *t0 /* 下一个超时的计时器 */
 };
 
 void init_pit(void);
