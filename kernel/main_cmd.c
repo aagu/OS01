@@ -46,7 +46,7 @@ void main(void)
 			printk("count done!\n");
 			break;
 		}
-		printk("couter %d", timerctl.count);
+		//printk("couter %d", timerctl.count);
 	}
 	
 	io_hlt();
