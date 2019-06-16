@@ -9,7 +9,7 @@
 #include "interrupt.h"
 #include "string.h"
 
-#define GDT_LEN 5
+#define GDT_LEN 256
 #define IDT_LEN 256
 
 #define TYPE_TSS 0x89
@@ -125,9 +125,15 @@ void init_gdt()
 	set_gdt(0,0,0,0,0);
 	set_gdt(1,0,0xfffff,0x9a,0x0c); //代码段
 	set_gdt(2,0,0xfffff,0x92,0x0c); //数据段
-	set_gdt(3,0,0xfffff,0xfa,0x0c); //用户代码段
-	set_gdt(4,0,0xfffff,0xf2,0x0c); //用户数据段
+	set_gdt(3, 0, 0, 0, 0);
+	set_gdt(4,0,0xfffff,0xfa,0x0c); //用户代码段
+	set_gdt(5,0,0xfffff,0xf2,0x0c); //用户数据段
 
+	int i = 0;
+	for (i = 6; i < GDT_LEN; i++)
+	{
+		set_gdt(i, 0, 0, 0, 0);
+	}
 	// 加载gdt地址到gdtr寄存器
 	load_gdtr((unsigned int*)&GDTR);
 

@@ -7,7 +7,7 @@ GLOBAL io_load_eflags, io_store_eflags
 GLOBAL load_gdtr, load_idtr
 GLOBAL isr_common_stub, irq_common_stub
 GLOBAL load_cr0, store_cr0, memtest_sub
-GLOBAL load_tr, taskswitch6
+GLOBAL load_tr, taskswitch7
 GLOBAL systemFont
 EXTERN  main
 EXTERN	isr_handler, irq_handler
@@ -132,11 +132,11 @@ mts_fin:
 	ret
 
 load_tr:
-	LTR     [esp + 4]
+	ltr     [esp + 4]
 	ret
 
-taskswitch6:
-	jmp     6*8:0
+taskswitch7:
+	jmp     7*8:0
 	ret
 
 ; 定义两个构造中断处理函数的宏(有的中断有错误代码，有的没有)

@@ -35,7 +35,7 @@ void main(void)
 
 	timer = timer_alloc();
 	timer_init(timer, &timerinfo, 1);
-	timer_settime(timer, 5000);
+	timer_settime(timer, 500);
 	fifo8_init(&timerinfo, 8, timerbuf);
 
 	memtotal = memtest(0x00400000, 0xbfffffff);
@@ -48,10 +48,10 @@ void main(void)
 	tss_a.iomap = 0x40000000;
 	tss_b.ldtr = 0;
 	tss_b.iomap = 0x40000000;
-	set_tssldt2_gdt(5, &tss_a, TYPE_TSS);
-	set_tssldt2_gdt(6, &tss_b, TYPE_TSS);
+	set_tssldt2_gdt(6, (unsigned int)&tss_a, TYPE_TSS);
+	set_tssldt2_gdt(7, (unsigned int)&tss_b, TYPE_TSS);
 	printk("set gdt\n");
-	load_tr(0 * 8);
+	load_tr(6 * 8);
 	printk("load tr\n");
 	task_b_esp = memman_alloc_4k(memman, 64 * 1024) + 64 * 1024;
 	tss_b.eip = (int) &task_b_main;
@@ -64,22 +64,22 @@ void main(void)
 	tss_b.ebp = 0;
 	tss_b.esi = 0;
 	tss_b.edi = 0;
-	tss_b.es = 1 * 8;
-	tss_b.cs = 2 * 8;
-	tss_b.ss = 1 * 8;
-	tss_b.ds = 1 * 8;
-	tss_b.fs = 1 * 8;
-	tss_b.gs = 1 * 8;
+	tss_b.es = 2 * 8;
+	tss_b.cs = 1 * 8;
+	tss_b.ss = 2 * 8;
+	tss_b.ds = 2 * 8;
+	tss_b.fs = 2 * 8;
+	tss_b.gs = 2 * 8;
 	while (1)
 	{
 		if (fifo8_status(&timerinfo) != 0)
 		{
 			timer_free(timer);
-			//taskswitch6();
 			printk("count done!\n");
+			taskswitch7();
 			break;
 		}
-		//printk("couter %d", timerctl.count);
+		//printk("counter %d ", timerctl.count);
 	}
 	
 	io_hlt();

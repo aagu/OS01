@@ -46,12 +46,12 @@ $(BOOT_LST) : $(BOOT)
 	$(ASM) $< -l $@
 
 .PHONY:qemu
-qemu:
+qemu: $(IMG)
 	@echo '启动虚拟机...'
 	qemu-system-x86_64 -boot order=a -fda $(IMG)
 
 PHONY:debug
-debug:
+debug: $(IMG)
 	qemu-system-x86_64 -S -s -boot order=a -fda $(IMG) &
 	gdb -ex "target remote localhost:1234" -ex "symbol-file $(KERNEL_ELF)"
 .PHONY:clean

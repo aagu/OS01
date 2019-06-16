@@ -27,7 +27,7 @@ int load_cr0(void);
 void store_cr0(int cr0);
 unsigned int memtest_sub(unsigned int start, unsigned int end);
 void load_tr(int tr);
-void taskswitch6(void);
+void taskswitch7(void);
 void fifo8_init(struct FIFO8 *fifo, int size, unsigned char *buf);
 int fifo8_put(struct FIFO8 *fifo, unsigned char data);
 int fifo8_get(struct FIFO8 *fifo);
