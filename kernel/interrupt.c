@@ -4,7 +4,7 @@
  */
 #include "interrupt.h"
 #include "video.h"
-#include "stdio.h"
+#include "printk.h"
 
 /*
  * 中断服务程序
@@ -19,7 +19,9 @@ void isr_handler(pt_regs *regs)
 		interrupt_handlers[regs->int_no](regs);
 	}
 	else{
-		showString((unsigned char*)0xa0000, 320, 8, 8, COL8_FFFFFF, "unhandled interrupt");
+		//showString((unsigned char*)0xa0000, 320, 8, 8, COL8_FFFFFF, "unhandled interrupt");
+		printk("unhandled interrput %d\n", regs->int_no);
+		printk("err_code: %d\n", regs->err_code);
 	}
 }
 

@@ -12,6 +12,9 @@
 #define GDT_LEN 5
 #define IDT_LEN 256
 
+#define TYPE_TSS 0x89
+#define TYPE_LDT 0x82
+
 void init_gdt();
 void init_idt();
 
@@ -87,6 +90,24 @@ static void set_idt(int num,unsigned int base,unsigned short sel,\
 	idt_list[num].sel = sel;
 	idt_list[num].zero = 0;
 	idt_list[num].flags = flags;
+
+}
+
+/*
+ *	填充gdt列表
+ *	num: 在gdt的位置
+ *	base: 填充的段的基地址
+ *	type: 0x89为tss，0x82为ldt
+ */
+static void set_tssldt2_gdt(int num,unsigned int base,char type)
+{
+	gdt_list[num].limit0 = (104 & 0xffff);
+	gdt_list[num].base0 = (base & 0xffff);
+	gdt_list[num].base1 = (base >> 16) & 0xff;
+	gdt_list[num].access = type;
+	gdt_list[num].limit1 = 0;
+	gdt_list[num].G_DB_L_AVL = 0;
+	gdt_list[num].base2 = (base >> 24);
 
 }
 

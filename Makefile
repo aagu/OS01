@@ -16,7 +16,7 @@ CC = gcc
 LD = ld
 OBJCOPY = objcopy
 
-C_FLAGS   = -c -Wall -m32 -nostdinc -fno-builtin -fno-stack-protector -I include
+C_FLAGS   = -c -Wall -m32 -g -nostdinc -fno-builtin -fno-stack-protector -I include
 LD_FLAGS  = -T kernel.ld -m elf_i386
 ASM_FLAGS = -felf
 
@@ -48,11 +48,12 @@ $(BOOT_LST) : $(BOOT)
 .PHONY:qemu
 qemu:
 	@echo '启动虚拟机...'
-	qemu-system-x86_64  -boot order=a -fda $(IMG)
+	qemu-system-x86_64 -boot order=a -fda $(IMG)
 
 PHONY:debug
 debug:
-	qemu-system-x86_64 -d guest_errors -boot order=a -fda $(IMG)
+	qemu-system-x86_64 -S -s -boot order=a -fda $(IMG) &
+	gdb -ex "target remote localhost:1234" -ex "symbol-file $(KERNEL_ELF)"
 .PHONY:clean
 clean :
 	rm -f $(BOOT_BIN) $(KERNEL_BIN) $(KERNEL_ELF) $(KERNEL_OBJECT) $(S_OBJECTS) \
