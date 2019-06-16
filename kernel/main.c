@@ -9,6 +9,7 @@
 #include "memory.h"
 #include "kernel.h"
 #include "timer.h"
+#include "task.h"
 
 #define MEMMAN_ADDR 0x003c0000
 
@@ -16,6 +17,7 @@ int kx, ky;
 
 void make_window(unsigned char *buf, int xsize, int ysize, char *title);
 void putfonts8_asc_sht(struct SHEET *sht, int x, int y, int c, int b, char *s, int l);
+void task_b_main(void);
 
 void main(void)
 {
@@ -25,14 +27,16 @@ void main(void)
     SHTCTL *shtctl;
 	SHEET *sht_back, *sht_mouse, *sht_win;
 	struct TIMER *timer;
+	struct TIMER *task_timer;
 	struct FIFO8 timerinfo;
-	unsigned char timerbuf[8];
+	struct FIFO8 taskinfo;
+	unsigned char timerbuf[8], taskbuf[8];
 	unsigned char *buf_back, mcursor[256], *buf_win;
 
 	unsigned int memtotal;
 	struct MEMMAN *memman = (struct MEMMAN *) MEMMAN_ADDR;
-
-	extern struct TIMERCTL timerctl;
+	int task_b_esp;
+	struct TSS tss_a, tss_b;
 
 	init_gdt();
 	init_idt();
@@ -48,6 +52,11 @@ void main(void)
 	timer_init(timer, &timerinfo, 1);
 	timer_settime(timer, 400);
 	fifo8_init(&timerinfo, 8, timerbuf);
+
+	task_timer = timer_alloc();
+	timer_init(task_timer, &taskinfo, 2);
+	timer_settime(task_timer, 5000);
+	fifo8_init(&taskinfo, 8, taskbuf);
 
 	init_palette();/* 设定调色板 */
 	memtotal = memtest(0x00400000, 0xbfffffff);
@@ -80,6 +89,31 @@ void main(void)
 	
 	setscrnbuf(sht_mouse);
 
+	tss_a.ldtr = 0;
+	tss_a.iomap = 0x40000000;
+	tss_b.ldtr = 0;
+	tss_b.iomap = 0x40000000;
+	set_tssldt2_gdt(6, (unsigned int)&tss_a, TYPE_TSS);
+	set_tssldt2_gdt(7, (unsigned int)&tss_b, TYPE_TSS);
+	load_tr(6 * 8);
+	task_b_esp = memman_alloc_4k(memman, 64 * 1024) + 64 * 1024;
+	tss_b.eip = (int) &task_b_main;
+	tss_b.eflags = 0x00000202; /* IF = 1; */
+	tss_b.eax = 0;
+	tss_b.ecx = 0;
+	tss_b.edx = 0;
+	tss_b.ebx = 0;
+	tss_b.esp = task_b_esp;
+	tss_b.ebp = 0;
+	tss_b.esi = 0;
+	tss_b.edi = 0;
+	tss_b.es = 2 * 8;
+	tss_b.cs = 1 * 8;
+	tss_b.ss = 2 * 8;
+	tss_b.ds = 2 * 8;
+	tss_b.fs = 2 * 8;
+	tss_b.gs = 2 * 8;
+
 	while (1) {
 		int scode = keyboard_read();
 		if (scode != -1) {
@@ -108,6 +142,11 @@ void main(void)
 			timer_settime(timer, 400);
 			fifo8_get(&timerinfo);
 		}
+		if (fifo8_status(&taskinfo) != 0)
+		{
+			taskswitch7();
+		}
+		
 	}
 }
 
@@ -183,4 +222,21 @@ void make_textbox8(struct SHEET *sht, int x0, int y0, int sx, int sy, int c)
 	boxfill8(sht->buf, sht->bxsize, COL8_C6C6C6, x1 + 1, y0 - 2, x1 + 1, y1 + 1);
 	boxfill8(sht->buf, sht->bxsize, c, x0 - 1, y0 - 1, x1 + 0, y1 + 0);
 	return;
+}
+
+void task_b_main(void)
+{
+	struct FIFO8 fifo;
+	struct TIMER *timer;
+	int i, fifobuf[8];
+	fifo8_init(&fifo, 8, fifobuf);
+	timer = timer_alloc();
+	timer_init(timer, &fifo, 1);
+	timer_settime(timer, 5000);
+
+	while (1) {
+		if (fifo8_status(&fifo) != 0) {
+			taskswitch6(); /*返回任务A */
+		}
+	}
 }

@@ -7,8 +7,7 @@ GLOBAL io_load_eflags, io_store_eflags
 GLOBAL load_gdtr, load_idtr
 GLOBAL isr_common_stub, irq_common_stub
 GLOBAL load_cr0, store_cr0, memtest_sub
-GLOBAL load_tr, taskswitch7
-;GLOBAL systemFont
+GLOBAL load_tr, taskswitch6, taskswitch7
 EXTERN  main
 EXTERN	isr_handler, irq_handler
 
@@ -133,6 +132,10 @@ mts_fin:
 
 load_tr:
 	ltr     [esp + 4]
+	ret
+
+taskswitch6:
+	jmp     6*8:0
 	ret
 
 taskswitch7:
