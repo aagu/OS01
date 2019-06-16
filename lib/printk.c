@@ -10,6 +10,7 @@
 #include "printk.h"
 #include "string.h"
 
+/* 文本模式打印函数 */
 void printk(const char *format, ...)
 {
 	// 避免频繁创建临时变量，内核的栈很宝贵
@@ -24,6 +25,17 @@ void printk(const char *format, ...)
 	buff[i] = '\0';
 
 	print(buff, 0, WHITE_TXT);
+}
+
+/* 图形模式字符格式化 */
+int sprintf(char *s, const char *format, ...)
+{
+	va_list arg;
+  	int done;
+  	va_start (arg, format);
+  	done = vsprintf (s, format, arg);
+  	va_end (arg);
+  	return done;
 }
 
 // 判断是否是数字 返回 1：代表是数字

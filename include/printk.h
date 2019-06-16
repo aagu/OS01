@@ -11,6 +11,7 @@ typedef __builtin_va_list va_list;
 #define va_end(ap)
 
 void printk(const char *format,...);
+int sprintf(char *s, const char *format, ...);
 int vsprintf(char *buff, const char *format, va_list args);
 
 #endif

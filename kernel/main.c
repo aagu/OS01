@@ -15,13 +15,13 @@
 int kx, ky;
 
 void make_window(unsigned char *buf, int xsize, int ysize, char *title);
+void putfonts8_asc_sht(struct SHEET *sht, int x, int y, int c, int b, char *s, int l);
 
 void main(void)
 {
     struct BOOTINFO *binfo = (struct BOOTINFO*) 0x0ff0;
-    int mx, my, i;
+    int mx, my, i, cursor_x, cursor_c;
 	char s[40];
-	char t[20];
     SHTCTL *shtctl;
 	SHEET *sht_back, *sht_mouse, *sht_win;
 	struct TIMER *timer;
@@ -46,7 +46,8 @@ void main(void)
 
 	timer = timer_alloc();
 	timer_init(timer, &timerinfo, 1);
-	timer_settime(timer, 500);
+	timer_settime(timer, 400);
+	fifo8_init(&timerinfo, 8, timerbuf);
 
 	init_palette();/* 设定调色板 */
 	memtotal = memtest(0x00400000, 0xbfffffff);
@@ -64,7 +65,10 @@ void main(void)
 	sheet_setbuf(sht_win, buf_win, 160, 52, -1);
 	init_screen8(buf_back, binfo->scrnx, binfo->scrny);
 	init_mouse_cursor(mcursor, 99);
-	make_window(buf_win, 160, 52, "counter");
+	make_window(buf_win, 160, 52, "window");
+	make_textbox8(sht_win, 8, 28, 144, 16, COL8_FFFFFF);
+	cursor_x = 8;
+	cursor_c = COL8_FFFFFF;
 	sheet_slide(sht_back, 0, 0);
 	mx = (binfo->scrnx - 16) / 2;
     my = (binfo->scrny - 28 - 16) / 2;  
@@ -77,32 +81,34 @@ void main(void)
 	setscrnbuf(sht_mouse);
 
 	while (1) {
-		vsprintf(s, "%d", timerctl.count);
-		boxfill8(buf_win, 160, COL8_C6C6C6, 40, 28, 119, 43);
-		showString(buf_win, 160, 40, 28, COL8_000000, s);
-		sheet_refresh(sht_win, 40, 28, 120, 44); /* 到这里结束 */
 		int scode = keyboard_read();
 		if (scode != -1) {
-			if (kx >= binfo->scrnx) {
-				kx = 0;
-				ky += 16;
-				if (ky > binfo->scrny) ky = 0;
+			if (keymap[scode*3] == BACKSPACE && cursor_x > 8) { /* 退格键 */
+				/* 用空格键把光标消去后，后移1次光标 */
+				cursor_x -= 8;
+				putfonts8_asc_sht(sht_win, cursor_x, 28, COL8_000000, COL8_FFFFFF, " ", 1);
+			} else
+			{
+				sprintf(s, "%c", keymap[scode*3]);
+				putfonts8_asc_sht(sht_win, cursor_x, 28, COL8_000000, COL8_FFFFFF, s, 1);
+				cursor_x += 8;
 			}
-			boxfill8(buf_back, binfo->scrnx, COL8_848484, kx, ky, kx+16, ky+16); /* 文字 */
-			showFont8(buf_back, binfo->scrnx, kx, ky, COL8_FFFFFF, systemFont + (unsigned char)keymap[scode*3]*16); /* 写文字 */
-			sheet_refresh(sht_back, kx, ky, kx+16, ky+16); /* 刷新文字 */
-			kx += 16;
 		}
-		//if (fifo8_status(&timerinfo) != 0)
-		//{
-		//	vsprintf(t, "done!", 0);
-		//	boxfill8(buf_back, binfo->scrnx, COL8_848484, 0, 0, 8, 96);
-		//	showString(buf_back, binfo->scrnx, 0, 0, COL8_000000, t);
-		//	sheet_refresh(sht_back, 0, 0, 0, 96);
-		//	break;
-		//}
+		if (fifo8_status(&timerinfo) != 0)
+		{
+			if (cursor_c == COL8_000000)
+			{
+				cursor_c = COL8_FFFFFF;
+			} else
+			{
+				cursor_c = COL8_000000;
+			}
+			boxfill8(sht_win->buf, sht_win->bxsize, cursor_c, cursor_x, 28, cursor_x + 3, 43);
+			sheet_refresh(sht_win, cursor_x, 28, cursor_x + 8, 44);
+			timer_settime(timer, 400);
+			fifo8_get(&timerinfo);
+		}
 	}
-	io_hlt();
 }
 
 void make_window(unsigned char *buf, int xsize, int ysize, char *title)
@@ -154,4 +160,27 @@ void make_window(unsigned char *buf, int xsize, int ysize, char *title)
 		}
 	}
 	return;
-} 
+}
+
+void putfonts8_asc_sht(struct SHEET *sht, int x, int y, int c, int b, char *s, int l)
+{
+	boxfill8(sht->buf, sht->bxsize, b, x, y, x + l * 8 - 1, y + 15);
+	showString(sht->buf, sht->bxsize, x, y, c, s);
+	sheet_refresh(sht, x, y, x + l * 8, y + 16);
+	return;
+}
+
+void make_textbox8(struct SHEET *sht, int x0, int y0, int sx, int sy, int c)
+{
+	int x1 = x0 + sx, y1 = y0 + sy;
+	boxfill8(sht->buf, sht->bxsize, COL8_848484, x0 - 2, y0 - 3, x1 + 1, y0 - 3);
+	boxfill8(sht->buf, sht->bxsize, COL8_848484, x0 - 3, y0 - 3, x0 - 3, y1 + 1);
+	boxfill8(sht->buf, sht->bxsize, COL8_FFFFFF, x0 - 3, y1 + 2, x1 + 1, y1 + 2);
+	boxfill8(sht->buf, sht->bxsize, COL8_FFFFFF, x1 + 2, y0 - 3, x1 + 2, y1 + 2);
+	boxfill8(sht->buf, sht->bxsize, COL8_000000, x0 - 1, y0 - 2, x1 + 0, y0 - 2);
+	boxfill8(sht->buf, sht->bxsize, COL8_000000, x0 - 2, y0 - 2, x0 - 2, y1 + 0);
+	boxfill8(sht->buf, sht->bxsize, COL8_C6C6C6, x0 - 2, y1 + 1, x1 + 0, y1 + 1);
+	boxfill8(sht->buf, sht->bxsize, COL8_C6C6C6, x1 + 1, y0 - 2, x1 + 1, y1 + 1);
+	boxfill8(sht->buf, sht->bxsize, c, x0 - 1, y0 - 1, x1 + 0, y1 + 0);
+	return;
+}
