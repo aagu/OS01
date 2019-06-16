@@ -21,8 +21,6 @@
 #define COL8_008484		14
 #define COL8_848484		15
 
-extern char systemFont[16];
-
 static unsigned char table_rgb[16 * 3] = {
 		0x00, 0x00, 0x00,	/*  0:黑 */
 		0xff, 0x00, 0x00,	/*  1:梁红 */

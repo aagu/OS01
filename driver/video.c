@@ -1,5 +1,6 @@
 #include "video.h"
 #include "kernel.h"
+#include "font.h"
 
 void init_palette(void)
 {

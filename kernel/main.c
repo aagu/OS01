@@ -1,5 +1,6 @@
 #include "descriptor.h"
 #include "interrupt.h"
+#include "font.h"
 #include "video.h"
 #include "mouse.h"
 #include "printk.h"
@@ -20,8 +21,10 @@ void main(void)
     struct BOOTINFO *binfo = (struct BOOTINFO*) 0x0ff0;
     int mx, my, i;
 	char s[40];
+	char t[20];
     SHTCTL *shtctl;
 	SHEET *sht_back, *sht_mouse, *sht_win;
+	struct TIMER *timer;
 	struct FIFO8 timerinfo;
 	unsigned char timerbuf[8];
 	unsigned char *buf_back, mcursor[256], *buf_win;
@@ -41,8 +44,9 @@ void main(void)
 	init_keyboard();
 	init_mouse();
 
-	fifo8_init(&timerinfo, 8, timerbuf);
-	settimer(10, &timerinfo, 1);
+	timer = timer_alloc();
+	timer_init(timer, &timerinfo, 1);
+	timer_settime(timer, 500);
 
 	init_palette();/* 设定调色板 */
 	memtotal = memtest(0x00400000, 0xbfffffff);
@@ -72,8 +76,8 @@ void main(void)
 	
 	setscrnbuf(sht_mouse);
 
-	for (;;) {
-		vsprintf(s, "%010d", timerctl.count);
+	while (1) {
+		vsprintf(s, "%d", timerctl.count);
 		boxfill8(buf_win, 160, COL8_C6C6C6, 40, 28, 119, 43);
 		showString(buf_win, 160, 40, 28, COL8_000000, s);
 		sheet_refresh(sht_win, 40, 28, 120, 44); /* 到这里结束 */
@@ -89,14 +93,16 @@ void main(void)
 			sheet_refresh(sht_back, kx, ky, kx+16, ky+16); /* 刷新文字 */
 			kx += 16;
 		}
-		if (fifo8_status(&timerinfo) != 0)
-		{
-			boxfill8(buf_back, binfo->scrnx, COL8_848484, 32, 32, 40, 96);
-			showFont8(buf_back, binfo->scrnx, 32, 32, COL8_848484, systemFont + (unsigned char) 'd' * 16);
-			sheet_refresh(sht_back, 32, 32, 48, 48);
-		}
-		
+		//if (fifo8_status(&timerinfo) != 0)
+		//{
+		//	vsprintf(t, "done!", 0);
+		//	boxfill8(buf_back, binfo->scrnx, COL8_848484, 0, 0, 8, 96);
+		//	showString(buf_back, binfo->scrnx, 0, 0, COL8_000000, t);
+		//	sheet_refresh(sht_back, 0, 0, 0, 96);
+		//	break;
+		//}
 	}
+	io_hlt();
 }
 
 void make_window(unsigned char *buf, int xsize, int ysize, char *title)
