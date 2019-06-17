@@ -32,7 +32,7 @@ int fifo8_put(struct FIFO8 *fifo, unsigned char data)
 	fifo->free--;
 	if (fifo->task != 0) {
 		if (fifo->task->flags != TASK_RUNNING) { /*如果任务处于休眠状态*/
-			task_run(fifo->task); /*将任务唤醒*/
+			task_run(fifo->task, 0); /*将任务唤醒*/
 		}
 	}
 	return 0;

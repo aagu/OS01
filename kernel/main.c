@@ -95,7 +95,7 @@ void main(void)
 	task_b->tss.fs = 2 * 8;
 	task_b->tss.gs = 2 * 8;
 	*((int *) (task_b->tss.esp + 4)) = (int) sht_count;
-	task_run(task_b);
+	task_run(task_b, 0);
 
 	while (1) {
 		int scode = keyboard_read();
