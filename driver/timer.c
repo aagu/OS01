@@ -1,10 +1,12 @@
 #include "timer.h"
 #include "kernel.h"
+#include "task.h"
 
 #define TIMER_FLAG_ALLOC 1
 #define TIMER_FLAG_USING 2
 
 struct TIMERCTL timerctl;
+extern struct TIMER *mt_timer;
 
 void init_pit(void)
 {
@@ -32,6 +34,7 @@ void timer_handler(pt_regs *regs)
 {
 	io_out8(0x0020, 0x60); /* 把IRQ-00信号接收完了的信息通知给PIC */
     timerctl.count++;
+	char ts = 0;
 	if (timerctl.next > timerctl.count)
 	{
 		return; /* 还不到下一个时刻，所以结束*/
@@ -41,11 +44,21 @@ void timer_handler(pt_regs *regs)
 	while (timer->timeout <= timerctl.count)
 	{
 		timer->flags = TIMER_FLAG_ALLOC;
-		fifo8_put(timer->fifo, timer->data);
+		if (timer == mt_timer)
+		{
+			ts = 1;
+		} else
+		{
+			fifo8_put(timer->fifo, timer->data);
+		}
 		timer = timer->next;
 	}
 	timerctl.t0 = timer;
 	timerctl.next = timerctl.t0->timeout;
+	if (ts != 0)
+	{
+		mt_taskswitch();
+	}
 	return;
 }
 

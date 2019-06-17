@@ -8,4 +8,6 @@ struct TSS
     int ldtr, iomap;
 } __packed;
 
+void mt_init(void);
+void mt_taskswitch(void);
 #endif
