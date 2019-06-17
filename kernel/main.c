@@ -1,4 +1,4 @@
-#include "descriptor.h"
+//#include "descriptor.h"
 #include "interrupt.h"
 #include "font.h"
 #include "video.h"
@@ -33,8 +33,7 @@ void main(void)
 
 	unsigned int memtotal;
 	struct MEMMAN *memman = (struct MEMMAN *) MEMMAN_ADDR;
-	int task_b_esp;
-	struct TSS tss_a, tss_b;
+	struct TASK *task_b;
 
 	init_gdt();
 	init_idt();
@@ -85,34 +84,19 @@ void main(void)
 	
 	setscrnbuf(sht_mouse);
 
-	tss_a.ldtr = 0;
-	tss_a.iomap = 0x40000000;
-	tss_b.ldtr = 0;
-	tss_b.iomap = 0x40000000;
-	set_tssldt2_gdt(6, (unsigned int)&tss_a, TYPE_TSS);
-	set_tssldt2_gdt(7, (unsigned int)&tss_b, TYPE_TSS);
-	load_tr(6 * 8);
-	task_b_esp = memman_alloc_4k(memman, 64 * 1024) + 64 * 1024 - 8;
-	tss_b.eip = (int) &task_b_main;
-	tss_b.eflags = 0x00000202; /* IF = 1; */
-	tss_b.eax = 0;
-	tss_b.ecx = 0;
-	tss_b.edx = 0;
-	tss_b.ebx = 0;
-	tss_b.esp = task_b_esp;
-	tss_b.ebp = 0;
-	tss_b.esi = 0;
-	tss_b.edi = 0;
-	tss_b.es = 2 * 8;
-	tss_b.cs = 1 * 8;
-	tss_b.ss = 2 * 8;
-	tss_b.ds = 2 * 8;
-	tss_b.fs = 2 * 8;
-	tss_b.gs = 2 * 8;
-	*((int *) (task_b_esp + 4)) = (int) sht_count;
+	task_init(memman);
+	task_b = task_alloc();
+	task_b->tss.esp = memman_alloc_4k(memman, 64 * 1024) + 64 * 1024 - 8;
+	task_b->tss.eip = (int) &task_b_main;
+	task_b->tss.es = 2 * 8;
+	task_b->tss.cs = 1 * 8;
+	task_b->tss.ss = 2 * 8;
+	task_b->tss.ds = 2 * 8;
+	task_b->tss.fs = 2 * 8;
+	task_b->tss.gs = 2 * 8;
+	*((int *) (task_b->tss.esp + 4)) = (int) sht_count;
+	task_run(task_b);
 
-	mt_init();
-	
 	while (1) {
 		int scode = keyboard_read();
 		if (scode != -1) {

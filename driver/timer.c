@@ -6,7 +6,7 @@
 #define TIMER_FLAG_USING 2
 
 struct TIMERCTL timerctl;
-extern struct TIMER *mt_timer;
+extern struct TIMER *task_timer;
 
 void init_pit(void)
 {
@@ -44,7 +44,7 @@ void timer_handler(pt_regs *regs)
 	while (timer->timeout <= timerctl.count)
 	{
 		timer->flags = TIMER_FLAG_ALLOC;
-		if (timer == mt_timer)
+		if (timer == task_timer)
 		{
 			ts = 1;
 		} else
@@ -57,7 +57,7 @@ void timer_handler(pt_regs *regs)
 	timerctl.next = timerctl.t0->timeout;
 	if (ts != 0)
 	{
-		mt_taskswitch();
+		task_switch();
 	}
 	return;
 }
