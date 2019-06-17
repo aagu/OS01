@@ -16,7 +16,7 @@ int kx, ky;
 
 void make_window(unsigned char *buf, int xsize, int ysize, char *title);
 void putfonts8_asc_sht(struct SHEET *sht, int x, int y, int c, int b, char *s, int l);
-void task_b_main(struct SHEET *sht_count);
+void task_console(struct SHEET *sht_cons);
 
 void main(void)
 {
@@ -24,15 +24,15 @@ void main(void)
     int mx, my, i, cursor_x, cursor_c;
 	char s[40];
     SHTCTL *shtctl;
-	SHEET *sht_back, *sht_mouse, *sht_win, *sht_count;
+	SHEET *sht_back, *sht_mouse, *sht_win, *sht_cons;
 	struct TIMER *timer;
 	struct FIFO8 timerinfo;
 	unsigned char timerbuf[8], taskbuf[8];
-	unsigned char *buf_back, mcursor[256], *buf_win, *buf_count;
+	unsigned char *buf_back, mcursor[256], *buf_win, *buf_cons;
 
 	unsigned int memtotal;
 	struct MEMMAN *memman = (struct MEMMAN *) MEMMAN_ADDR;
-	struct TASK *task_a, *task_b;
+	struct TASK *task_a, *task_cons;
 
 	init_gdt();
 	init_idt();
@@ -41,7 +41,7 @@ void main(void)
 
 	init_pit();
 	
-	init_keyboard();
+	init_keyboard(task_a);
 	init_mouse();
 
 	task_a = task_init(memman);
@@ -60,18 +60,18 @@ void main(void)
 	sht_back  = sheet_alloc(shtctl);
 	sht_mouse = sheet_alloc(shtctl);
 	sht_win = sheet_alloc(shtctl);
-	sht_count = sheet_alloc(shtctl);
+	sht_cons = sheet_alloc(shtctl);
 	buf_back = (unsigned char *) memman_alloc_4k(memman, binfo->scrnx * binfo->scrny);
 	buf_win = (unsigned char *) memman_alloc_4k(memman, 160*52);
-	buf_count = (unsigned char *) memman_alloc_4k(memman, 160*52);
+	buf_cons = (unsigned char *) memman_alloc_4k(memman, 256*165);
 	sheet_setbuf(sht_back, buf_back, binfo->scrnx, binfo->scrny, -1); /* 没有透明色 */
 	sheet_setbuf(sht_mouse, mcursor, 16, 16, 99); /* 透明色号99 */
 	sheet_setbuf(sht_win, buf_win, 160, 52, -1);
-	sheet_setbuf(sht_count, buf_count, 160, 52, -1);
+	sheet_setbuf(sht_cons, buf_cons, 256, 165, -1);
 	init_screen8(buf_back, binfo->scrnx, binfo->scrny);
 	init_mouse_cursor(mcursor, 99);
 	make_window(buf_win, 160, 52, "window");
-	make_textbox8(sht_win, 8, 28, 144, 16, COL8_FFFFFF);
+	make_textbox(sht_win, 8, 28, 144, 16, COL8_FFFFFF);
 	cursor_x = 8;
 	cursor_c = COL8_FFFFFF;
 	sheet_slide(sht_back, 0, 0);
@@ -85,17 +85,17 @@ void main(void)
 	
 	setscrnbuf(sht_mouse);
 
-	task_b = task_alloc();
-	task_b->tss.esp = memman_alloc_4k(memman, 64 * 1024) + 64 * 1024 - 8;
-	task_b->tss.eip = (int) &task_b_main;
-	task_b->tss.es = 2 * 8;
-	task_b->tss.cs = 1 * 8;
-	task_b->tss.ss = 2 * 8;
-	task_b->tss.ds = 2 * 8;
-	task_b->tss.fs = 2 * 8;
-	task_b->tss.gs = 2 * 8;
-	*((int *) (task_b->tss.esp + 4)) = (int) sht_count;
-	task_run(task_b, 0);
+	task_cons = task_alloc();
+	task_cons->tss.esp = memman_alloc_4k(memman, 64 * 1024) + 64 * 1024 - 8;
+	task_cons->tss.eip = (int) &task_console;
+	task_cons->tss.es = 2 * 8;
+	task_cons->tss.cs = 1 * 8;
+	task_cons->tss.ss = 2 * 8;
+	task_cons->tss.ds = 2 * 8;
+	task_cons->tss.fs = 2 * 8;
+	task_cons->tss.gs = 2 * 8;
+	*((int *) (task_cons->tss.esp + 4)) = (int) sht_cons;
+	task_run(task_cons, 0);
 
 	while (1) {
 		int scode = keyboard_read();
@@ -187,7 +187,7 @@ void putfonts8_asc_sht(struct SHEET *sht, int x, int y, int c, int b, char *s, i
 	return;
 }
 
-void make_textbox8(struct SHEET *sht, int x0, int y0, int sx, int sy, int c)
+void make_textbox(struct SHEET *sht, int x0, int y0, int sx, int sy, int c)
 {
 	int x1 = x0 + sx, y1 = y0 + sy;
 	boxfill8(sht->buf, sht->bxsize, COL8_848484, x0 - 2, y0 - 3, x1 + 1, y0 - 3);
@@ -202,22 +202,23 @@ void make_textbox8(struct SHEET *sht, int x0, int y0, int sx, int sy, int c)
 	return;
 }
 
-void task_b_main(struct SHEET *sht_count)
+void task_console(struct SHEET *sht_cons)
 {
 	struct FIFO8 fifo;
-	struct TIMER *refresh_timer;
-	int i, fifobuf[8];
+	struct TIMER *timer;
+	int i, fifobuf[8], cursor_x = 8, cursor_c = COL8_000000;
 	char s[40];
-	fifo8_init(&fifo, 8, fifobuf, 0);
-	refresh_timer = timer_alloc();
-	timer_init(refresh_timer, &fifo, 4);
-	timer_settime(refresh_timer, 200);
+	fifo8_init(&fifo, 8, fifobuf, task_now());
+	timer = timer_alloc();
+	timer_init(timer, &fifo, 4);
+	timer_settime(timer, 400);
 	int count = 0;
 
-	make_window(sht_count->buf, 160, 52, "counter");
+	make_window(sht_cons->buf, 256, 165, "console");
+	make_textbox(sht_cons, 8, 28, 240, 128, COL8_000000);
 
-	sheet_slide(sht_count, 160, 130);
-	sheet_updown(sht_count, 2);
+	sheet_slide(sht_cons, 160, 130);
+	sheet_updown(sht_cons, 2);
 
 	while (1) {
 		count++;
@@ -225,9 +226,16 @@ void task_b_main(struct SHEET *sht_count)
 			i = fifo8_get(&fifo);
 			if (i == 4)
 			{
-				sprintf(s, "%d", count);
-				putfonts8_asc_sht(sht_count, 8, 28, COL8_000000, COL8_C6C6C6, s, 8);
-				timer_settime(refresh_timer, 200);
+				if (cursor_c == COL8_000000)
+				{
+					cursor_c = COL8_FFFFFF;
+				} else
+				{
+					cursor_c = COL8_000000;
+				}
+				timer_settime(timer, 400);
+				boxfill8(sht_cons->buf, sht_cons->bxsize, cursor_c, cursor_x, 28, cursor_x + 7, 43);
+				sheet_refresh(sht_cons, cursor_x, 28, cursor_x + 8, 44);
 			}
 		}
 	}

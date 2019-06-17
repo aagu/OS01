@@ -121,3 +121,8 @@ void task_sleep(struct TASK *task)
 	}
 	return;
 }
+
+struct TASK *task_now(void)
+{
+	return taskctl->task[taskctl->now];
+}
