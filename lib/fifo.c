@@ -1,9 +1,10 @@
 # include "kernel.h"
+#include "task.h"
 
 #define FLAGS_OVERRUN 0x0001
 
 /* 初始化FIFO缓冲区 */
-void fifo8_init(struct FIFO8 *fifo, int size, unsigned char *buf)
+void fifo8_init(struct FIFO8 *fifo, int size, unsigned char *buf, struct TASK *task)
 {
     fifo->size = size;
     fifo->buf = buf;
@@ -11,6 +12,7 @@ void fifo8_init(struct FIFO8 *fifo, int size, unsigned char *buf)
     fifo->flags = 0;
     fifo->p = 0; /* 下一个数据写入位置 */
     fifo->q = 0; /* 下一个数据读取位置 */
+	fifo->task = task;
     return;
 }
 
@@ -28,6 +30,11 @@ int fifo8_put(struct FIFO8 *fifo, unsigned char data)
 		fifo->p = 0;
 	}
 	fifo->free--;
+	if (fifo->task != 0) {
+		if (fifo->task->flags != TASK_RUNNING) { /*如果任务处于休眠状态*/
+			task_run(fifo->task); /*将任务唤醒*/
+		}
+	}
 	return 0;
 }
 

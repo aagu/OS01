@@ -1,4 +1,3 @@
-//#include "descriptor.h"
 #include "interrupt.h"
 #include "font.h"
 #include "video.h"
@@ -33,7 +32,7 @@ void main(void)
 
 	unsigned int memtotal;
 	struct MEMMAN *memman = (struct MEMMAN *) MEMMAN_ADDR;
-	struct TASK *task_b;
+	struct TASK *task_a, *task_b;
 
 	init_gdt();
 	init_idt();
@@ -45,10 +44,12 @@ void main(void)
 	init_keyboard();
 	init_mouse();
 
+	task_a = task_init(memman);
+
 	timer = timer_alloc();
 	timer_init(timer, &timerinfo, 1);
 	timer_settime(timer, 400);
-	fifo8_init(&timerinfo, 8, timerbuf);
+	fifo8_init(&timerinfo, 8, timerbuf, task_a);
 
 	init_palette();/* 设定调色板 */
 	memtotal = memtest(0x00400000, 0xbfffffff);
@@ -84,7 +85,6 @@ void main(void)
 	
 	setscrnbuf(sht_mouse);
 
-	task_init(memman);
 	task_b = task_alloc();
 	task_b->tss.esp = memman_alloc_4k(memman, 64 * 1024) + 64 * 1024 - 8;
 	task_b->tss.eip = (int) &task_b_main;
@@ -208,7 +208,7 @@ void task_b_main(struct SHEET *sht_count)
 	struct TIMER *refresh_timer;
 	int i, fifobuf[8];
 	char s[40];
-	fifo8_init(&fifo, 8, fifobuf);
+	fifo8_init(&fifo, 8, fifobuf, 0);
 	refresh_timer = timer_alloc();
 	timer_init(refresh_timer, &fifo, 4);
 	timer_settime(refresh_timer, 200);

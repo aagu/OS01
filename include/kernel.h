@@ -12,6 +12,7 @@ struct BOOTINFO { /* 0x0ff0-0x0fff */
 struct FIFO8 {
 	unsigned char *buf;
 	int p, q, size, free, flags;
+	struct TASK *task;
 };
 
 void io_hlt(void);
@@ -28,7 +29,7 @@ void store_cr0(int cr0);
 unsigned int memtest_sub(unsigned int start, unsigned int end);
 void load_tr(int tr);
 void taskswitch(int eip, int cs);
-void fifo8_init(struct FIFO8 *fifo, int size, unsigned char *buf);
+void fifo8_init(struct FIFO8 *fifo, int size, unsigned char *buf, struct TASK *task);
 int fifo8_put(struct FIFO8 *fifo, unsigned char data);
 int fifo8_get(struct FIFO8 *fifo);
 int fifo8_status(struct FIFO8 *fifo);
