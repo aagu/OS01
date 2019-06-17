@@ -4,9 +4,10 @@
 #include "interrupt.h"
 #include "sheet.h"
 #include "kernel.h"
+#include "task.h"
 
 void keyboard_handler(pt_regs *regs);
-void init_keyboard(void);
+void init_keyboard(struct TASK *task);
 int keyboard_read(void);
 void wait_keyboard(void);
 
