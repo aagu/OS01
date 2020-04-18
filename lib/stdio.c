@@ -1,60 +1,22 @@
 #include "stdio.h"
-#include "kernel.h"
+#include "stdlib.h"
+#include "kernel.h" 
 
-static unsigned short *vidmem = (unsigned short *)0xB8000;
+static unsigned short *vidmem = (unsigned short *) 0xB8000;
+int print_char(char c, int col, int row, char attr);
+void set_cursor_offset(int offset);
+int get_offset(int col, int row);
+int get_offset_row(int offset);
+int get_offset_col(int offset);
 
 /*
  * Simply clears the screen to ' '
  */
 void clear_screen()
 {
-	unsigned int i = 0;
-
-	while(i < (80*25*2))
-	{
-    vidmem[i] = ' ';
-    i++;
-	vidmem[i] = 0x07;
-	i++;
-	}
+	memset(vidmem, 0x00, VGA_WIDTH * VGA_HEIGHT * 2);
+	set_cursor(0, 0);
 }
-
-/*
- * Print only supports a-z and 0-9 and other keyboard characters
- */
-//void print(char *msg, unsigned int color)
-//{
-//    //unsigned int i = cur_line*80*2, color = WHITE_TXT;
-//	int pos, pos_x, pos_y;
-//	pos = get_cursor();
-//	pos_x = pos % VGA_WIDTH;
-//	pos_y = pos / VGA_WIDTH;
-//
-//	while(*msg != 0)
-//	{ 		  	
-//		while (*msg == '\n')
-//		{
-//			pos_y++;
-//			/* 跳过换行符 */
-//			pos_x = 0;
-//			*msg++;
-//		}
-//		if (*msg != '\0')
-//		{
-//			vidmem[pos_y * VGA_WIDTH + pos_x] = *msg;
-//			pos_x++;
-//			vidmem[pos_y * VGA_WIDTH + pos_x] = color;
-//			pos_x++;
-//			if (pos_x >= VGA_WIDTH)
-//			{
-//				pos_y++;
-//				pos_x = 0;
-//			}
-//			*msg++;
-//		}
-//	}
-//	set_cursor(pos_x, pos_y);
-//}
 
 /*
  * 显示一串字符
@@ -64,50 +26,20 @@ void clear_screen()
  */
 void print(unsigned char *string, unsigned char color_b, unsigned char color_c)
 {
-	int cursor_x=0,cursor_y=0;
+	int cursor_x=0, cursor_y=0;
 	unsigned char attribute = (color_b << 4)|(15 & color_c);
 	unsigned short cursor_xy=0;
 
 	cursor_xy = get_cursor();
 	cursor_x = cursor_xy % VGA_WIDTH;
 	cursor_y = cursor_xy / VGA_WIDTH;
+
 	while(*string != '\0'){
-		//检查是否有换行符
-		while(*string == '\n')
-		{
-			cursor_y++;   // 纵坐标+1
-			cursor_x = 0; // 光标移到最开始
-			*string++;	      // 不显示换行符
-		}
-
-		// 字符串最后的\0不显示
-		if(*string != '\0')
-		{
-			vidmem[cursor_y*80+cursor_x] = *string | (attribute << 8);
-			cursor_x++;
-			*string++;
-
-			// 到一行显示完，开始从下一行开始显示
-			if(cursor_x + 1 >= VGA_WIDTH)
-				cursor_y++;
-		}
-		set_cursor(cursor_x,cursor_y);
+		cursor_xy = print_char(*string, cursor_x, cursor_y, attribute);
+		cursor_x = get_offset_col(cursor_xy);
+		cursor_y = get_offset_row(cursor_xy);
+		*string++;
 	}
-}
-
-char *itoa(int number)
-{
-	char str[10];
-	int i = 0;
-	while(number > 10)
-	{
-		str[i] = number%10+'0';
-		number = number/10;
-		i++;
-	}
-	str[i] = number+'0';
-	str[i+1] = '\0';
-	return str;
 }
 
 int get_cursor()
@@ -124,8 +56,51 @@ void set_cursor(int x, int y)
 {
 	int pos = y * VGA_WIDTH + x;
  
-	io_out8(0x3D4, 0x0F);
-	io_out8(0x3D5, (short) (pos & 0xFF));
-	io_out8(0x3D4, 0x0E);
-	io_out8(0x3D5, (short) ((pos >> 8) & 0xFF));
+	set_cursor_offset(pos);
 }
+
+void set_cursor_offset(int offset) {
+	io_out8(0x3D4, 0x0F);
+	io_out8(0x3D5, (short) (offset & 0xFF));
+	io_out8(0x3D4, 0x0E);
+	io_out8(0x3D5, (short) ((offset >> 8) & 0xFF));
+}
+
+int print_char(char c, int col /* x */, int row /* y */, char attr) {
+	if (!attr) attr = WHITE_ON_BLACK;
+	if (col >= VGA_WIDTH || row >= VGA_HEIGHT) {
+		vidmem[(VGA_WIDTH)*(VGA_HEIGHT)-2] = 'E';
+		vidmem[(VGA_WIDTH)*(VGA_HEIGHT)-1] = RED_ON_WHITE;
+		return get_offset(col, row);
+	}
+
+	int offset;
+	if (col >= 0 && row >= 0) offset = get_offset(col, row);
+	else offset = get_cursor();
+	
+	if (c == '\n') {
+		// ‘\n’ 不显示
+		row = get_offset_row(offset);
+		offset = get_offset(0, row + 1);
+	} else {
+		vidmem[offset] = c | (attr << 8);
+		offset++;
+	}
+
+	/* 偏移超出屏幕尺寸，滚动画面 */
+	if (offset >= VGA_WIDTH * VGA_HEIGHT) {
+		int i;
+		memcpy(vidmem + VGA_WIDTH, vidmem, VGA_WIDTH * (VGA_HEIGHT - 1) * 2/* 2 byte each cell */);
+		unsigned short* last_line = get_offset(0, VGA_HEIGHT - 1) + vidmem;
+		for (i = 0; i < VGA_WIDTH; i++) last_line[i] = 0;
+
+		offset -= VGA_WIDTH;
+	}
+
+	set_cursor_offset(offset);
+	return offset;
+}
+
+int get_offset(int col, int row) { return (row * VGA_WIDTH + col); }
+int get_offset_row(int offset) { return offset / (VGA_WIDTH); }
+int get_offset_col(int offset) { return (offset - (get_offset_row(offset)*VGA_WIDTH)); }

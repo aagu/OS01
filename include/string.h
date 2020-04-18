@@ -9,22 +9,7 @@
 #ifndef __STRING_H__
 #define __STRING_H__
 
-
-static inline void memcpy(unsigned char *dest, const unsigned char *src, unsigned int len)
-{
-	for (; len != 0; len--){
-		*dest++ = *src++;
-	}
-}
-
-static inline void memset(void *dest, unsigned char value, unsigned int len)
-{
-	unsigned char *dst = (unsigned char *)dest;
-
-	for ( ; len != 0; len--) {
-		*dst++ = value;
-	}
-}
+#include "stdlib.h"
 
 static inline void bzero(void *dest, unsigned int len)
 {
@@ -83,6 +68,21 @@ static inline int strlen(const char *src)
         while (*eos++);
 
 	return (eos - src - 1);
+}
+
+static inline char *itoa(int number)
+{
+	char str[10];
+	int i = 0;
+	while(number > 10)
+	{
+		str[i] = number%10+'0';
+		number = number/10;
+		i++;
+	}
+	str[i] = number+'0';
+	str[i+1] = '\0';
+	return str;
 }
 
 //#define sizeof(char *type) ((type+1)-type)
