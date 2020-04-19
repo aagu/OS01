@@ -3,6 +3,7 @@
 #define VIDEO_H
 
 #include "kernel.h"
+#include "sheet.h"
 
 #define COL8_000000		0
 #define COL8_FF0000		1
@@ -74,5 +75,7 @@ void showFont8(unsigned char *vram, int xsize, int x, int y, char c, char* font)
 void showString(unsigned char* vram, int xsize, int x, int y, char color, unsigned char *s );
 
 void init_screen8(unsigned char *vram, int x, int y);
+
+void putfonts8_asc_sht(struct SHEET *sht, int x, int y, int c, int b, char *s, int l);
 
 #endif //VIDEO_H

@@ -12,8 +12,6 @@
 
 #define MEMMAN_ADDR 0x003c0000
 
-int kx, ky;
-
 void task_console();
 
 void main(void)
@@ -75,13 +73,18 @@ void main(void)
 	task_cons->tss.gs = 2 * 8;
 	task_run(task_cons, 0);
 
+	int key_shift = 0;
+
 	while (1) {
 		int scode = keyboard_read();
 		if (scode != -1) {
-			if (keymap[scode*3] == BACKSPACE && cursor_x > 8) { /* 退格键 */
+			if (keymap[scode*3] == CAPS_LOCK)
+			{
+				key_shift ^= 1;
+			} else if (keymap[scode*3 + key_shift] == BACKSPACE) { /* 退格键 */
 				/* 用空格键把光标消去后，后移1次光标 */
-				cursor_x -= 8;
 				putfonts8_asc_sht(win->sht, cursor_x, 28, COL8_000000, COL8_FFFFFF, " ", 1);
+				if (cursor_x > 8) cursor_x -= 8;
 			} else
 			{
 				sprintf(s, "%c", keymap[scode*3]);
@@ -91,6 +94,8 @@ void main(void)
 		}
 		if (fifo8_status(&timerinfo) != 0)
 		{
+			/* 首先重设背景为白色 */
+			boxfill8(win->win_buf, win->sht->bxsize, COL8_FFFFFF, cursor_x, 28, cursor_x + 8, 43);
 			if (cursor_c == COL8_000000)
 			{
 				cursor_c = COL8_FFFFFF;
@@ -98,7 +103,8 @@ void main(void)
 			{
 				cursor_c = COL8_000000;
 			}
-			boxfill8(win->win_buf, win->sht->bxsize, cursor_c, cursor_x, 28, cursor_x + 3, 43);
+			/* 闪烁光标 */
+			boxfill8(win->win_buf, win->sht->bxsize, cursor_c, cursor_x + 2, 28, cursor_x + 5, 43);
 			sheet_refresh(win->sht, cursor_x, 28, cursor_x + 8, 44);
 			timer_settime(timer, 400);
 			fifo8_get(&timerinfo);

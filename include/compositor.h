@@ -12,7 +12,10 @@ typedef struct WINDOW
 } window;
 
 SHTCTL *shtctl;
+SHEET *sht_mouse;
+SHEET *sht_back;
 MEMMAN *mem;
+struct BOOTINFO *binfo;
 
 static char closebtn[14][16] = {
 		"OOOOOOOOOOOOOOO@",
@@ -31,6 +34,12 @@ static char closebtn[14][16] = {
 		"@@@@@@@@@@@@@@@@"
 	};
 
-SHTCTL *compositor_init(struct MEMMAN  *memman, struct BOOTINFO *bootinfo);
+void compositor_init(struct MEMMAN  *memman, struct BOOTINFO *bootinfo);
 
 window *create_window(int x0, int y0, int xsize, int ysize, char *title);
+
+void create_background();
+
+void create_mouse();
+
+void make_textbox(struct SHEET *sht, int x0, int y0, int sx, int sy, int c);

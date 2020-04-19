@@ -26,6 +26,13 @@ void set_palette(int start, int end, unsigned char *rgb)
 	return;
 }
 
+/**
+ * *vram 显存地址
+ * xsize 屏幕宽度
+ * c 背景色
+ * x0, y0 方块左上角坐标
+ * x1, y1 方块右下角坐标
+*/
 void boxfill8(unsigned char *vram, int xsize, unsigned char c, int x0, int y0, int x1, int y1)
 {
 	int x, y;
@@ -93,5 +100,13 @@ void init_screen8(unsigned char *vram, int x, int y)
 	boxfill8(vram, x, COL8_FFFFFF,  0,         y - 19,    x - 1, y - 18);
 	boxfill8(vram, x, COL8_C6C6C6,  0,         y - 18,    x - 1, y -  1);
 
+	return;
+}
+
+void putfonts8_asc_sht(struct SHEET *sht, int x, int y, int c, int b, char *s, int l)
+{
+	boxfill8(sht->buf, sht->bxsize, b, x, y, x + l * 8 - 1, y + 15);
+	showString(sht->buf, sht->bxsize, x, y, c, s);
+	sheet_refresh(sht, x, y, x + l * 8, y + 16);
 	return;
 }

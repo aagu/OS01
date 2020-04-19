@@ -42,7 +42,7 @@ void main(void)
 	memman_free(memman, 0x00400000, memtotal - 0x00400000);
 
 	int i = 0;
-	while (1) {
+	while (i < 50) {
 		if (fifo8_status(&timerinfo) != 0)
 		{
 			printk("%d times up, the CPU has passed 10000 ticks\n", ++i);
@@ -50,15 +50,8 @@ void main(void)
 			fifo8_get(&timerinfo);
 		}
 		io_hlt();
-
-		if (i == 50)
-		{
-			clear_screen();
-			printk("timer stoped\n");
-			// timer_free(timer);
-			// break;
-		}
 	}
-
+	printk("main loop break out\n");
+	io_cli();
 	io_hlt();
 }
