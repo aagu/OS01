@@ -10,6 +10,8 @@
 #define TASK_EMPTY 0
 #define TASK_CREATED 1
 #define TASK_RUNNING 2
+#define TASK_SUSPEND 4
+#define TASK_FINISHED 8
 
 struct TSS
 {
@@ -40,4 +42,5 @@ void task_run(struct TASK *task, int priority);
 void task_switch(void);
 void task_sleep(struct TASK *task);
 struct TASK *task_now(void);
+void task_free(struct TASK *task);
 #endif

@@ -20,8 +20,7 @@ void isr_handler(pt_regs *regs)
 	}
 	else{
 		//showString((unsigned char*)0xa0000, 320, 8, 8, COL8_FFFFFF, "unhandled interrupt");
-		printk("unhandled interrput %d\n", regs->int_no);
-		printk("err_code: %X\n", regs->err_code);
+		printk("unhandled interrput %d err_code: %X\n", regs->int_no,  regs->err_code);
 	}
 }
 

@@ -86,30 +86,34 @@ void task_switch(void)
     return;
 }
 
+void task_suspend(struct TASK *task) {
+	int i;
+	/*寻找task所在的位置*/
+	for (i = 0; i < taskctl->running; i++) {
+		if (taskctl->task[i] == task) {
+			/*在这里*/
+			break;
+		}
+	}
+	taskctl->running--;
+	if (i < taskctl->now) {
+		taskctl->now--; /*需要移动成员，要相应地处理*/
+	}
+	/*移动成员*/
+	for (; i < taskctl->running; i++) {
+		taskctl->task[i] = taskctl->task[i + 1];
+	}
+	task->flags = TASK_SUSPEND; /*不工作的状态*/
+}
+
 void task_sleep(struct TASK *task)
 {
-	int i;
 	char ts = 0;
 	if (task->flags == TASK_RUNNING) { /*如果指定任务处于唤醒状态*/
 		if (task == taskctl->task[taskctl->now]) {
 			ts = 1; /*让自己休眠的话，稍后需要进行任务切换*/
 		}
-		/*寻找task所在的位置*/
-		for (i = 0; i < taskctl->running; i++) {
-			if (taskctl->task[i] == task) {
-				/*在这里*/
-				break;
-			}
-		}
-		taskctl->running--;
-		if (i < taskctl->now) {
-			taskctl->now--; /*需要移动成员，要相应地处理*/
-		}
-		/*移动成员*/
-		for (; i < taskctl->running; i++) {
-			taskctl->task[i] = taskctl->task[i + 1];
-		}
-		task->flags = 1; /*不工作的状态*/
+		task_suspend(task);
 		if (ts != 0) {
 			/*任务切换*/
 			if (taskctl->now >= taskctl->running) {
@@ -125,4 +129,17 @@ void task_sleep(struct TASK *task)
 struct TASK *task_now(void)
 {
 	return taskctl->task[taskctl->now];
+}
+
+void task_free(struct TASK *task)
+{
+	task_suspend(task);
+	/*任务切换*/
+	if (taskctl->now >= taskctl->running) {
+		/*如果now的值出现异常，则进行修正*/
+		taskctl->now = 0;
+	}
+	taskswitch(0, taskctl->task[taskctl->now]->selector);
+	task->flags = TASK_FINISHED;
+	return;
 }
