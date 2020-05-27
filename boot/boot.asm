@@ -5,7 +5,7 @@ ORG  0x7c00
 
 jmp  entry
 DB   0x90
-DB   "OSKERNEL"
+DB   "OS01BOOT"
 DW   512
 DB   1
 DW   1
@@ -81,7 +81,7 @@ next:
     mov  [0x0ff0],ch	;保存读取的扇区数
 
 goto_PM:
-    ; jmp  text_mode
+    jmp  text_mode
 ;确认VBE是否存在
     mov  ax, 0x9000
     mov  es, ax

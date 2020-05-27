@@ -2,6 +2,23 @@
 #include "video.h"
 #include "printk.h"
 
+const char closebtn[14][16] = {
+	"OOOOOOOOOOOOOOO@",
+	"OQQQQQQQQQQQQQ$@",
+	"OQQQQQQQQQQQQQ$@",
+	"OQQQ@@QQQQ@@QQ$@",
+	"OQQQQ@@QQ@@QQQ$@",
+	"OQQQQQ@@@@QQQQ$@",
+	"OQQQQQQ@@QQQQQ$@",
+	"OQQQQQ@@@@QQQQ$@",
+	"OQQQQ@@QQ@@QQQ$@",
+	"OQQQ@@QQQQ@@QQ$@",
+	"OQQQQQQQQQQQQQ$@",
+	"OQQQQQQQQQQQQQ$@",
+	"O$$$$$$$$$$$$$$@",
+	"@@@@@@@@@@@@@@@@"
+};
+
 void compositor_init(struct BOOTINFO *bootinfo)
 {
 	binfo = bootinfo;

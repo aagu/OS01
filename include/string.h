@@ -24,12 +24,18 @@ static inline void bzero(void *dest, unsigned int len)
  */
 static inline int strcmp(const char *str1, const char *str2)
 {
-    while (*str1 && *str2 && *str1 == *str2) {
-        str1++;
-        str2++;
+    const unsigned char *s1 = (const unsigned char *) str1;
+  	const unsigned char *s2 = (const unsigned char *) str2;
+  	unsigned char c1, c2;
+  	do
+    {
+      	c1 = (unsigned char) *s1++;
+      	c2 = (unsigned char) *s2++;
+      	if (c1 == '\0')
+        	return c1 - c2;
     }
-
-    return *str1 - *str2;
+  	while (c1 == c2);
+  	return c1 - c2;
 }
 
 static inline char *strcpy(char *dest, const char *src)
