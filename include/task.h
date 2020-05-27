@@ -36,7 +36,7 @@ struct TASKCTL
     struct TASK task0[MAX_TASK];
 };
 
-struct TASK *task_init(struct MEMMAN *memman);
+struct TASK *task_init();
 struct TASK *task_alloc(void);
 void task_run(struct TASK *task, int priority);
 void task_switch(void);

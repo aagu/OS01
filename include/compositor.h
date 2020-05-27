@@ -34,7 +34,7 @@ static char closebtn[14][16] = {
 		"@@@@@@@@@@@@@@@@"
 	};
 
-void compositor_init(struct MEMMAN  *memman, struct BOOTINFO *bootinfo);
+void compositor_init(struct BOOTINFO *bootinfo);
 
 window *create_window(int x0, int y0, int xsize, int ysize, char *title);
 

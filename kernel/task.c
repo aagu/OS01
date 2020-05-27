@@ -5,11 +5,11 @@
 struct TASKCTL *taskctl;
 struct TIMER *task_timer;
 
-struct TASK *task_init(struct MEMMAN *memman)
+struct TASK *task_init()
 {
     int i;
 	struct TASK *task;
-	taskctl = (struct TASKCTL *) memman_alloc_4k(memman, sizeof (struct TASKCTL));
+	taskctl = (struct TASKCTL *) memman_alloc_4k(sizeof (struct TASKCTL));
 
 	for (i = 0; i < MAX_TASK; i++) {
 		taskctl->task0[i].flags = TASK_EMPTY;

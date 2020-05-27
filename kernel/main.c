@@ -10,8 +10,6 @@
 #include "task.h"
 #include "compositor.h"
 
-#define MEMMAN_ADDR 0x003c0000
-
 void task_console();
 
 void main(void)
@@ -27,7 +25,6 @@ void main(void)
 	unsigned char *buf_win, *buf_cons;
 
 	unsigned int memtotal;
-	struct MEMMAN *memman = (struct MEMMAN *) MEMMAN_ADDR;
 	struct TASK *task_a, *task_cons;
 
 	init_gdt();
@@ -40,7 +37,7 @@ void main(void)
 	init_keyboard(task_a);
 	init_mouse();
 
-	task_a = task_init(memman);
+	task_a = task_init();
 
 	timer = timer_alloc();
 	timer_init(timer, &timerinfo, 1);
@@ -49,10 +46,10 @@ void main(void)
 
 	init_palette();/* 设定调色板 */
 	memtotal = memtest(0x00400000, 0xbfffffff);
-	memman_init(memman);
-	memman_free(memman, 0x00400000, memtotal - 0x00400000);
+	memman_init();
+	memman_free(0x00400000, memtotal - 0x00400000);
 
-	compositor_init(memman, binfo);
+	compositor_init(binfo);
 	create_background();
 	create_mouse();
 	
@@ -63,7 +60,7 @@ void main(void)
 	cursor_c = COL8_FFFFFF;
 	
 	task_cons = task_alloc();
-	task_cons->tss.esp = memman_alloc_4k(memman, 64 * 1024) + 64 * 1024 - 8;
+	task_cons->tss.esp = memman_alloc_4k(64 * 1024) + 64 * 1024 - 8;
 	task_cons->tss.eip = (int) &task_console;
 	task_cons->tss.es = 2 * 8;
 	task_cons->tss.cs = 1 * 8;

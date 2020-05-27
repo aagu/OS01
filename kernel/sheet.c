@@ -2,17 +2,17 @@
 
 #define SHEET_USE		1
 
-SHTCTL *shtctl_init(struct MEMMAN *memman, unsigned char *vram, int xsize, int ysize)
+SHTCTL *shtctl_init(unsigned char *vram, int xsize, int ysize)
 {
 	struct SHTCTL *ctl;
 	int i;
-	ctl = (struct SHTCTL *) memman_alloc_4k(memman, sizeof (struct SHTCTL));
+	ctl = (struct SHTCTL *) memman_alloc_4k(sizeof (struct SHTCTL));
 	if (ctl == 0) {
 		goto err;
 	}
-	ctl->map = (unsigned char *) memman_alloc_4k(memman, xsize * ysize);
+	ctl->map = (unsigned char *) memman_alloc_4k(xsize * ysize);
 	if (ctl->map == 0) {
-		memman_free_4k(memman, (int) ctl, sizeof (struct SHTCTL));
+		memman_free_4k((int) ctl, sizeof (struct SHTCTL));
 		goto err;
 	}
 	ctl->vram = vram;

@@ -20,7 +20,7 @@ typedef struct SHTCTL {
 	struct SHEET sheets0[MAX_SHEETS];
 } SHTCTL;
 
-SHTCTL *shtctl_init(MEMMAN *memman, unsigned char *vram, int xsize, int ysize);
+SHTCTL *shtctl_init(unsigned char *vram, int xsize, int ysize);
 SHEET *sheet_alloc(SHTCTL *ctl);
 void sheet_setbuf(SHEET *sht, unsigned char *buf, int xsize, int ysize, int col_inv);
 void sheet_updown(SHEET *sht, int height);

@@ -1,6 +1,10 @@
 #include "memory.h"
 #include "kernel.h"
 
+#define MEMMAN_ADDR 0x003c0000
+
+static struct MEMMAN *man = (struct MEMMAN *) MEMMAN_ADDR;
+
 unsigned int memtest(unsigned int start, unsigned int end) 
 {
 	char flg486 = 0;
@@ -36,7 +40,7 @@ unsigned int memtest(unsigned int start, unsigned int end)
 	return i;
 }
 
-void memman_init(struct MEMMAN *man){
+void memman_init(){
 	man->frees = 0;    /* 可用信息数目 */
 	man->maxfrees = 0; /* 用于观察可用状况：frees的最大值 */
 	man->lostsize = 0; /* 释放失败的内存的大小总和 */
@@ -44,7 +48,7 @@ void memman_init(struct MEMMAN *man){
 	return;
 }
 
-unsigned int memman_total(struct MEMMAN *man)
+unsigned int memman_total()
 /* 报告空余内存大小的合计 */
 {
 	unsigned int i, t = 0;
@@ -54,7 +58,7 @@ unsigned int memman_total(struct MEMMAN *man)
 	return t;
 }
 
-unsigned int memman_alloc(struct MEMMAN *man, unsigned int size)
+unsigned int memman_alloc(unsigned int size)
 /* 分配 */
 {
 	unsigned int i, a;
@@ -77,7 +81,7 @@ unsigned int memman_alloc(struct MEMMAN *man, unsigned int size)
 	return 0; /* 没有可用空间 */
 }
 
-int memman_free(struct MEMMAN *man, unsigned int addr, unsigned int size)
+int memman_free(unsigned int addr, unsigned int size)
 /* 释放 */
 {
 	int i, j;
@@ -140,18 +144,18 @@ int memman_free(struct MEMMAN *man, unsigned int addr, unsigned int size)
 	return -1; /* 失败 */
 }
 
-unsigned int memman_alloc_4k(struct MEMMAN *man, unsigned int size)
+unsigned int memman_alloc_4k(unsigned int size)
 {
 	unsigned int a;
 	size = (size + 0xfff) & 0xfffff000;
-	a = memman_alloc(man, size);
+	a = memman_alloc(size);
 	return a;
 }
 
-int memman_free_4k(struct MEMMAN *man, unsigned int addr, unsigned int size)
+int memman_free_4k(unsigned int addr, unsigned int size)
 {
 	int i;
 	size = (size + 0xfff) & 0xfffff000;
-	i = memman_free(man, addr, size);
+	i = memman_free(addr, size);
 	return i;
 }

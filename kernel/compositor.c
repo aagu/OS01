@@ -2,11 +2,10 @@
 #include "video.h"
 #include "printk.h"
 
-void compositor_init(struct MEMMAN  *memman, struct BOOTINFO *bootinfo)
+void compositor_init(struct BOOTINFO *bootinfo)
 {
-    mem = memman;
 	binfo = bootinfo;
-    shtctl = shtctl_init(memman, binfo->vram, binfo->scrnx, binfo->scrny);
+    shtctl = shtctl_init(binfo->vram, binfo->scrnx, binfo->scrny);
     return;
 }
 
@@ -15,7 +14,7 @@ window *create_window(int x0, int y0, int xsize, int ysize, char *title)
     window *win;
     win->name = title;
     win->sht = sheet_alloc(shtctl);
-    win->win_buf = (unsigned char *) memman_alloc_4k(mem, xsize * ysize);
+    win->win_buf = (unsigned char *) memman_alloc_4k(xsize * ysize);
     sheet_setbuf(win->sht, win->win_buf, xsize, ysize, -1);
     win->depth = shtctl->top + 1; //top为鼠标层
 	win->x0 = x0;
@@ -61,7 +60,7 @@ window *create_window(int x0, int y0, int xsize, int ysize, char *title)
 void create_background()
 {
 	sht_back = sheet_alloc(shtctl);
-	unsigned char *buf_back = (unsigned char *) memman_alloc_4k(mem, binfo->scrnx * binfo->scrny);
+	unsigned char *buf_back = (unsigned char *) memman_alloc_4k(binfo->scrnx * binfo->scrny);
 	sheet_setbuf(sht_back, buf_back, binfo->scrnx, binfo->scrny, -1); /* 没有透明色 */
 	init_screen8(buf_back, binfo->scrnx, binfo->scrny);
 	sheet_slide(sht_back, 0, 0);
