@@ -43,4 +43,5 @@ void task_switch(void);
 void task_sleep(struct TASK *task);
 struct TASK *task_now(void);
 void task_free(struct TASK *task);
+struct TASK *task_new(void* func);
 #endif

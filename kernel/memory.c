@@ -40,11 +40,13 @@ unsigned int memtest(unsigned int start, unsigned int end)
 	return i;
 }
 
-void memman_init(){
-	man->frees = 0;    /* 可用信息数目 */
-	man->maxfrees = 0; /* 用于观察可用状况：frees的最大值 */
+void memman_init(unsigned int start, unsigned int size){
+	man->frees = 1;    /* 可用信息数目 */
+	man->maxfrees = MEMMAN_FREES; /* 用于观察可用状况：frees的最大值 */
 	man->lostsize = 0; /* 释放失败的内存的大小总和 */
 	man->losts = 0;    /* 释放失败次数 */
+	man->free[0].addr = start;
+	man->free[0].size = size;
 	return;
 }
 
@@ -61,13 +63,16 @@ unsigned int memman_total()
 unsigned int memman_alloc(unsigned int size)
 /* 分配 */
 {
-	unsigned int i, a;
+	unsigned int i, addr;
+	unsigned int full_size = sizeof(struct MEMBLOCK) + size;
+	struct MEMBLOCK *mem_block;
+
 	for (i = 0; i < man->frees; i++) {
-		if (man->free[i].size >= size) {
+		if (man->free[i].size >= full_size) {
 			/* 找到了足够大的内存 */
-			a = man->free[i].addr;
-			man->free[i].addr += size;
-			man->free[i].size -= size;
+			addr = man->free[i].addr;
+			man->free[i].addr += full_size;
+			man->free[i].size -= full_size;
 			if (man->free[i].size == 0) {
 				/* 如果free[i]变成了0，就减掉一条可用信息 */
 				man->frees--;
@@ -75,15 +80,27 @@ unsigned int memman_alloc(unsigned int size)
 					man->free[i] = man->free[i + 1]; /* 代入结构体 */
 				}
 			}
-			return a;
+			
+			mem_block = (struct MEMBLOCK *) addr;
+			mem_block->magic = MEMBLOCK_MAGIC;
+			mem_block->size = size;
+			return addr + sizeof(struct MEMBLOCK);
 		}
 	}
 	return 0; /* 没有可用空间 */
 }
 
-int memman_free(unsigned int addr, unsigned int size)
+int memman_free(unsigned int addr)
 /* 释放 */
 {
+	addr -= sizeof(struct MEMBLOCK);
+	struct MEMBLOCK * memblock = (struct MEMBLOCK *) addr;
+	if (memblock->magic != MEMBLOCK_MAGIC)
+	{
+		return -1; // 释放失败
+	}
+	
+	unsigned int size = memblock->size + sizeof(struct MEMBLOCK); // 连同控制区内存一并释放
 	int i, j;
 	/* 为便于归纳内存，将free[]按照addr的顺序排列 */
 	/* 所以，先决定应该放在哪里 */
@@ -152,10 +169,8 @@ unsigned int memman_alloc_4k(unsigned int size)
 	return a;
 }
 
-int memman_free_4k(unsigned int addr, unsigned int size)
+int memman_free_4k(unsigned int addr)
 {
-	int i;
-	size = (size + 0xfff) & 0xfffff000;
-	i = memman_free(addr, size);
+	int i = memman_free(addr);
 	return i;
 }

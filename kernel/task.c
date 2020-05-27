@@ -2,6 +2,8 @@
 #include "descriptor.h"
 #include "timer.h"
 
+#define STACK_OFFSET 64 * 1024 - 8
+
 struct TASKCTL *taskctl;
 struct TIMER *task_timer;
 
@@ -139,7 +141,23 @@ void task_free(struct TASK *task)
 		/*如果now的值出现异常，则进行修正*/
 		taskctl->now = 0;
 	}
-	taskswitch(0, taskctl->task[taskctl->now]->selector);
 	task->flags = TASK_FINISHED;
+	memman_free_4k(task->tss.esp - STACK_OFFSET);
+	taskswitch(0, taskctl->task[taskctl->now]->selector);
 	return;
+}
+
+struct TASK *task_new(void* func) {
+	struct TASK *task = task_alloc();
+	if (task == 0) { // 无法分配新任务
+		return 0;
+	}
+	task->tss.esp = memman_alloc_4k(64 * 1024) + STACK_OFFSET;
+	task->tss.eip = (int) func;
+	task->tss.es = 2 * 8;
+	task->tss.cs = 1 * 8;
+	task->tss.ss = 2 * 8;
+	task->tss.ds = 2 * 8;
+	task->tss.fs = 2 * 8;
+	task->tss.gs = 2 * 8;
 }

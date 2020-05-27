@@ -12,7 +12,7 @@ SHTCTL *shtctl_init(unsigned char *vram, int xsize, int ysize)
 	}
 	ctl->map = (unsigned char *) memman_alloc_4k(xsize * ysize);
 	if (ctl->map == 0) {
-		memman_free_4k((int) ctl, sizeof (struct SHTCTL));
+		memman_free_4k((int) ctl);
 		goto err;
 	}
 	ctl->vram = vram;
