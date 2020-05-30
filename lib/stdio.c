@@ -14,7 +14,11 @@ int get_offset_col(int offset);
  */
 void clear_screen()
 {
-	memset(vidmem, 0x00, VGA_WIDTH * VGA_HEIGHT * 2);
+	int i;
+	for (i = 0; i < VGA_WIDTH*VGA_HEIGHT;)
+   	{
+	   vidmem[i++] = WHITE_TXT << 8 | ' ';
+   	}
 	set_cursor(0, 0);
 }
 

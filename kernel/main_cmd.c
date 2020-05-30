@@ -24,6 +24,7 @@ void task_console()
 		count++;
 		if (fifo8_status(&fifo) != 0) {
 			printk("task console: timer up!\n");
+			clear_screen();
 			break;
 		}
 	}
@@ -61,19 +62,18 @@ void main(void)
 	
 	init_keyboard(task_a);
 
-	task_a = task_init(memman);
+	task_a = task_init();
 
 	timer = timer_alloc();
 	timer_init(timer, &timerinfo, 1);
-	timer_settime(timer, 1000);
+	timer_settime(timer, 100);
 	fifo8_init(&timerinfo, 8, timerbuf, task_a);
 
 	memtotal = memtest(0x00400000, 0xbfffffff);
-	memman_init(memman);
-	memman_free(memman, 0x00400000, memtotal - 0x00400000);
+	memman_init(0x00400000, memtotal - 0x00400000);
 
 	task_cons = task_alloc();
-	task_cons->tss.esp = memman_alloc_4k(memman, 64 * 1024) + 64 * 1024 - 8;
+	task_cons->tss.esp = memman_alloc_4k(64 * 1024) + 64 * 1024 - 8;
 	task_cons->tss.eip = (int) &task_console;
 	task_cons->tss.es = 2 * 8;
 	task_cons->tss.cs = 1 * 8;
@@ -87,8 +87,8 @@ void main(void)
 	while (i < 50) {
 		if (fifo8_status(&timerinfo) != 0)
 		{
-			printk("%d times up, the CPU has passed 10000 ticks\n", ++i);
-			timer_settime(timer, 10000);
+			printk("%d times up, the CPU has passed 1000 ticks\n", ++i);
+			timer_settime(timer, 1000);
 			fifo8_get(&timerinfo);
 		}
 		io_hlt();
