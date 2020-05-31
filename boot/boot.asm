@@ -40,8 +40,8 @@ entry:
     mov  es, ax
 
 readfloppy:
-    mov  ax, 0x7e0
-    mov  es, ax   ;将数据读到内存0x07e00之后，以免覆盖当前内容
+    mov  ax, 0x1000
+    mov  es, ax   ;将数据读到内存0x10000之后，以免覆盖当前内容
     mov  ch, 0        ;CH 用来存储柱面号
     mov  dh, 0        ;DH 用来存储磁头号
     mov  cl, 2        ;CL 用来存储扇区号

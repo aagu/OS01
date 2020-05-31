@@ -1,6 +1,9 @@
 /*汇编io调用*/
 #ifndef IO_H
 #define IO_H
+
+#include "types.h"
+
 struct BOOTINFO { /* 0x0ff0-0x0fff */
 	unsigned char cyls; /* 启动区读磁盘读到此为止 */
 	unsigned char leds; /* 启动时键盘的LED的状态 */
@@ -33,5 +36,6 @@ void fifo8_init(struct FIFO8 *fifo, int size, unsigned char *buf, struct TASK *t
 int fifo8_put(struct FIFO8 *fifo, unsigned char data);
 int fifo8_get(struct FIFO8 *fifo);
 int fifo8_status(struct FIFO8 *fifo);
+void copy_page_physical(uint32 src, uint32 dst);
 
 #endif //KERNEL_H

@@ -313,3 +313,38 @@ int vsprintf(char *buff, const char *format, va_list args)
 
 	return (str -buff);
 }
+
+extern void panic(const char *message, const char *file, int32 line)
+{
+    // We encountered a massive problem and have to stop.
+    asm volatile("cli"); // Disable interrupts.
+
+	static const char *format = "PANIC(%s) at %s:%d\n";
+	static char buff[256];
+	int i;
+
+	i = sprintf(buff, format, message, file, line);
+
+	buff[i] = '\0';
+
+	print(buff, 0, RED_TXT);
+    for(;;);
+}
+
+extern void panic_assert(const char *file, int32 line, const char *desc)
+{
+    // An assertion failed, and we have to panic.
+    asm volatile("cli"); // Disable interrupts.
+
+	static const char *format = "ASSERTION-FAILED(%s) at %s:%d\n";
+	static char buff[256];
+	int i;
+
+	i = sprintf(buff, format, desc, file, line);
+
+	buff[i] = '\0';
+
+	print(buff, 0, RED_TXT);
+    // Halt by going into an infinite loop.
+    for(;;);
+}
