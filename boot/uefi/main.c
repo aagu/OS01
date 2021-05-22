@@ -1,18 +1,277 @@
 #include <uefi.h>
 
+struct EFI_GRAPHICS_OUTPUT_INFORMATION
+{
+	unsigned int HorizontalResolution;
+	unsigned int VerticalResolution;
+	unsigned int PixelsPerScanLine;
+
+	unsigned long FrameBufferBase;
+	unsigned long FrameBufferSize;
+};
+
+struct EFI_E820_MEMORY_DESCRIPTOR
+{
+	unsigned long address;
+	unsigned long length;
+	unsigned int  type;
+}__attribute__((packed));
+
+struct EFI_E820_MEMORY_DESCRIPTOR_INFORMATION
+{
+	unsigned int E820_Entry_count;
+	struct EFI_E820_MEMORY_DESCRIPTOR E820_Entry[0];
+};
+
+struct KERNEL_BOOT_PARAMETER_INFORMATION
+{
+	struct EFI_GRAPHICS_OUTPUT_INFORMATION Graphics_Info;
+	struct EFI_E820_MEMORY_DESCRIPTOR_INFORMATION E820_Info;
+    unsigned long RSDP;
+    boolean_t BootFromBIOS;
+};
+
+#define EXPECT_VBE_HEIGHT 900
+#define EXPECT_VBE_WIDTH 1440
+
 int main(int argc, char **argv)
 {
-    DIR *dirptr = NULL;
-    struct dirent *entry;
-    if ((dirptr = opendir(".")) == NULL)
+    efi_status_t status;
+
+    // read kernel into memory
+    FILE *kernFile = NULL;
+    long int kernSize = 0;
+    efi_physical_address_t kernel_address = 0x100000;
+    if((kernFile = fopen("kernel.bin", "r")))
     {
-        printf("open current dir failed!\n");
-        return EFI_ERROR(1);
+        // get file size of kernel.bin
+        fseek(kernFile, 0, SEEK_END);
+        kernSize = ftell(kernFile);
+        fseek(kernFile, 0, SEEK_SET);
+        // printf("Kernel.bin size: %d bytes\n", kernSize);
+
+        // alloc memory start at 0x100000 for kernel, we use AllocatePages from BootService here because wo want the
+        // kernel be load into a fixed address
+        status = gBS->AllocatePages(AllocateAddress,EfiLoaderData,(kernSize + 0x1000 - 1) / 0x1000, &kernel_address);
+        if(EFI_ERROR(status))
+        {
+            printf("unable to alloc memory\n");
+            return status;
+        }
+
+        // read kernel.bin into 0x100000
+        // printf("read kernel to memory address:%018lx\n", kernel_address);
+        fread((char *)kernel_address, kernSize, 1, kernFile);
+        fclose(kernFile);
     }
-    while (entry = readdir(dirptr))
+    else
     {
-        printf("filename %s, filetype %d\n", entry->d_name, entry->d_type);
+        printf("unable to open kernel\n");
+        return 1;
     }
-    closedir(dirptr);
-    return 0;
+
+    // detect video modes
+    efi_guid_t gopGuid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+    efi_gop_t *gop = NULL;
+    efi_gop_mode_info_t *info = NULL;
+    uintn_t isiz = sizeof(efi_gop_mode_info_t), i;
+    status = BS->LocateProtocol(&gopGuid, NULL, (void**)&gop);
+    long currentVBEHeight = 0, currentVBEWidth = 0;
+    int expectVBEMode = 0;
+    if(!EFI_ERROR(status) && gop) {
+        /* iterate on modes and print info */
+        for(i = 0; i < gop->Mode->MaxMode; i++) {
+            status = gop->QueryMode(gop, i, &isiz, &info);
+            if(EFI_ERROR(status) || info->PixelFormat > PixelBitMask) continue;
+            if(info->HorizontalResolution > currentVBEWidth && info->HorizontalResolution <= EXPECT_VBE_WIDTH)
+            {
+                if(info->VerticalResolution > currentVBEHeight && info->VerticalResolution <= EXPECT_VBE_HEIGHT)
+                {
+                    currentVBEHeight = info->VerticalResolution;
+                    currentVBEWidth = info->HorizontalResolution;
+                    expectVBEMode = i;
+                }
+            }
+        }
+        printf("set VBE mode to %d\n", expectVBEMode);
+        status = gop->SetMode(gop, expectVBEMode);
+        if(EFI_ERROR(status)) {
+            printf("unable to set video mode\n");
+            return 0;
+        }
+        /* we got the interface, get current mode */
+        status = gop->QueryMode(gop, gop->Mode ? gop->Mode->Mode : 0, &isiz, &info);
+        if(status == EFI_NOT_STARTED || !gop->Mode) {
+            status = gop->SetMode(gop, 0);
+            ST->ConOut->Reset(ST->ConOut, 0);
+            ST->StdErr->Reset(ST->StdErr, 0);
+        }
+        if(EFI_ERROR(status)) {
+            printf("unable to get current video mode\n");
+            return 0;
+        }
+        printf("current VBE mode:%d,version:%x,horizontal:%d,vertical:%d,framebuffer base:%018lx,framebuffer size:%018lx\n",
+            gop->Mode->Mode,
+            gop->Mode->Information->Version,
+            gop->Mode->Information->HorizontalResolution,
+            gop->Mode->Information->VerticalResolution,
+            gop->Mode->FrameBufferBase,
+            gop->Mode->FrameBufferSize
+        );
+    } else {
+        printf("unable to get graphics output protocol\n");
+        return 1;
+    }
+    
+    struct KERNEL_BOOT_PARAMETER_INFORMATION * kern_boot_para_info;
+    kern_boot_para_info->RSDP = 0x0;
+    kern_boot_para_info->BootFromBIOS = 0; // may support boot from BIOS later :)
+    kern_boot_para_info->Graphics_Info.HorizontalResolution = gop->Mode->Information->HorizontalResolution;
+    kern_boot_para_info->Graphics_Info.VerticalResolution = gop->Mode->Information->VerticalResolution;
+    kern_boot_para_info->Graphics_Info.PixelsPerScanLine = gop->Mode->Information->PixelsPerScanLine;
+    kern_boot_para_info->Graphics_Info.FrameBufferBase = gop->Mode->FrameBufferBase;
+    kern_boot_para_info->Graphics_Info.FrameBufferSize = gop->Mode->FrameBufferSize;
+
+    // get memory map
+    efi_memory_descriptor_t *memory_map = NULL, *mement;
+    uintn_t memory_map_size=0, map_key=0, desc_size=0;
+
+    status = BS->GetMemoryMap(&memory_map_size, NULL, &map_key, &desc_size, NULL);
+    if(status != EFI_BUFFER_TOO_SMALL || !memory_map_size) goto err;
+    /* in worst case malloc allocates two blocks, and each block might split a record into three, that's 4 additional records */
+    memory_map_size += 4 * desc_size;
+    memory_map = (efi_memory_descriptor_t*)malloc(memory_map_size);
+    if(!memory_map) {
+        printf("unable to allocate memory\n");
+        return 1;
+    }
+    status = BS->GetMemoryMap(&memory_map_size, memory_map, &map_key, &desc_size, NULL);
+    if(EFI_ERROR(status)) {
+err:    printf("Unable to get memory map\n");
+        return 1;
+    }
+
+    struct EFI_E820_MEMORY_DESCRIPTOR *E820p = kern_boot_para_info->E820_Info.E820_Entry;
+	struct EFI_E820_MEMORY_DESCRIPTOR *LastE820 = NULL;
+	unsigned long LastEndAddr = 0;
+	int E820Count = 0;
+
+    printf("Address              Size Type\n");
+    for(mement = memory_map; (uint8_t*)mement < (uint8_t*)memory_map + memory_map_size; mement = NextMemoryDescriptor(mement, desc_size)) {
+        int MemType = 0;
+        // printf("%016x %8d %02x %s\n", mement->PhysicalStart, mement->NumberOfPages, mement->Type, types[mement->Type]);
+        switch (mement->Type)
+        {
+        case EfiReservedMemoryType:
+        case EfiMemoryMappedIO:
+        case EfiMemoryMappedIOPortSpace:
+        case EfiPalCode:
+            MemType = 2;    //2:ROM or Reserved
+            break;
+            
+        case EfiUnusableMemory:
+            MemType = 5;    //5:Unusable
+            break;
+
+        case EfiACPIReclaimMemory:
+            MemType = 3;    //3:ACPI Reclaim Memory
+            break;
+
+        case EfiLoaderCode:
+		case EfiLoaderData:
+		case EfiBootServicesCode:
+		case EfiBootServicesData:
+		case EfiRuntimeServicesCode:
+		case EfiRuntimeServicesData:
+		case EfiConventionalMemory:
+			MemType = 1;	//1:RAM
+			break;
+            
+        case EfiACPIMemoryNVS:
+			MemType = 4;	//4:ACPI NVS Memory
+			break;
+
+		default:
+			printf("Invalid UEFI Memory Type:%4d\n",mement->Type);
+			continue;
+
+        }
+        if((LastE820 != NULL) && (LastE820->type == MemType) && (mement->PhysicalStart == LastEndAddr))
+	    {
+	    	LastE820->length += mement->NumberOfPages << 12;
+	    	LastEndAddr += mement->NumberOfPages << 12;
+	    }
+	    else
+	    {
+	    	E820p->address = mement->PhysicalStart;
+	    	E820p->length = mement->NumberOfPages << 12;
+	    	E820p->type = MemType;
+	    	LastEndAddr = mement->PhysicalStart + (mement->NumberOfPages << 12);
+	    	LastE820 = E820p;
+	    	E820p++;
+	    	E820Count++;			
+	    }
+    }
+
+    free(memory_map);
+
+    kern_boot_para_info->E820_Info.E820_Entry_count = E820Count;
+    LastE820 = kern_boot_para_info->E820_Info.E820_Entry;
+    printf("E820 count %d\n", E820Count);
+    int j = 0;
+	for(i = 0; i< E820Count; i++)
+	{
+		struct EFI_E820_MEMORY_DESCRIPTOR* e820i = LastE820 + i;
+		struct EFI_E820_MEMORY_DESCRIPTOR MemMap;
+		for(j = i + 1; j< E820Count; j++)
+		{
+			struct EFI_E820_MEMORY_DESCRIPTOR* e820j = LastE820 + j;
+			if(e820i->address > e820j->address)
+			{
+				MemMap = *e820i;
+				*e820i = *e820j;
+				*e820j = MemMap;
+			}
+		}
+	}
+
+	LastE820 = kern_boot_para_info->E820_Info.E820_Entry;
+	for(i = 0;i < E820Count;i++)
+	{
+		printf("MemoryMap (%10lx<->%10lx) %4d\n",LastE820->address,LastE820->address+LastE820->length,LastE820->type);
+		LastE820++;
+	}
+
+    // find RSDP
+    efi_configuration_table_t* configTable = ST->ConfigurationTable;
+	efi_guid_t Acpi2TableGuid = ACPI_20_TABLE_GUID;
+
+	for (uintn_t index = 0; index < ST->NumberOfTableEntries; index++)
+	{
+		if (CompareGuid(&configTable[index].VendorGuid, &Acpi2TableGuid))
+		{
+            // printf("Acpi2TableGuid found, index %d, address %018lx", index, configTable[index].VendorTable);
+            kern_boot_para_info->RSDP = (unsigned long)configTable[index].VendorTable;
+            break;
+		}
+		configTable++;
+	}
+
+    if(kern_boot_para_info->RSDP == 0)
+        printf("RSDP not found!\n");
+    kern_boot_para_info->BootFromBIOS = 0;
+
+    // exit BootService and jump to kernel
+    if(exit_bs()) {
+        printf("error when exit boot service!\n");
+        return 0;
+    }
+
+    int (*kernel_main)(struct KERNEL_BOOT_PARAMETER_INFORMATION *);
+    kernel_main = (void*)0x100000;
+
+    int ret = kernel_main(kern_boot_para_info);
+    // should never get here
+    printf("kernel function return %d\n", ret);
+    return EFI_SUCCESS;
 }

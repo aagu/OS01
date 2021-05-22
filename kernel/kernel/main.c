@@ -1,4 +1,6 @@
-int kernel_main()
+#include <bootinfo.h>
+
+int kernel_main(struct KERNEL_BOOT_PARAMETER_INFORMATION *bootinfo)
 {
-    return 0;
+    return bootinfo->BootFromBIOS;
 }

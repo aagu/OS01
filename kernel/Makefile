@@ -5,6 +5,8 @@ KERNEL_SOURCES := \
 
 KERNEL_OBJECTS := $(KERNEL_SOURCES:.c=.o)
 
+KERNEL_HEADERS := include
+
 CC := $(HOME)/opt/cross/bin/x86_64-elf-gcc
 LD := $(HOME)/opt/cross/bin/x86_64-elf-gcc
 GAS := $(HOME)/opt/cross/bin/x86_64-elf-as
@@ -17,7 +19,7 @@ CFLAGS += -g
 endif
 
 .c.o:
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -I$(KERNEL_HEADERS) -c $< -o $@
 
 kernel.elf: $(KERNEL_OBJECTS) kernel.ld
 	$(LD) $(LDFLAGS) -o $@ $(KERNEL_OBJECTS) -T kernel.ld -lgcc
