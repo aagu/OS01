@@ -1,63 +1,23 @@
-##################################################
-#		 Makefile
-##################################################
-BOOT:=boot/boot.asm
-BOOT_BIN:=$(subst .asm,.bin,$(BOOT))
-BOOT_LST:=$(subst .asm,.lst,$(BOOT))
-KERNEL:=kernel/kernel.asm
-KERNEL_BIN:=$(subst .asm,.bin,$(KERNEL))
-KERNEL_ELF:=$(subst .asm,.elf,$(KERNEL))
-KERNEL_OBJECT:=$(subst .asm,.o,$(KERNEL))
-C_SOURCES:=$(shell find . -name "*.c")
-C_OBJECTS:=$(patsubst %.c,%.o,$(C_SOURCES))
+all: disk.img
 
-ASM = nasm
-CC = gcc
-LD = ld
-OBJCOPY = objcopy
+boot/uefi/BOOTX64.EFI:
+	make -C boot/uefi
 
-C_FLAGS   = -c -Wall -m32 -g -nostdinc -fno-builtin -fno-stack-protector -I include
-LD_FLAGS  = -T kernel.ld -m elf_i386
-ASM_FLAGS = -felf
+boot/uefi/OVMF.fd:
+	make -C boot/uefi OVMF.fd
 
-IMG:=system.img
+disk.img: boot/uefi/BOOTX64.EFI
+	dd if=/dev/zero of=$@ seek=0 bs=1M count=64
+	mkfs.vfat -F 32 $@
+	mmd -i $@ ::/EFI
+	mmd -i $@ ::/EFI/BOOT
+	mcopy -i $@ $< ::/EFI/BOOT
 
-$(IMG) : $(BOOT_BIN) $(C_OBJECTS) $(KERNEL_OBJECT) link
-	dd if=/dev/zero of=$(IMG) bs=512 count=2880
-	dd if=$(BOOT_BIN) of=$(IMG) conv=notrunc
-	dd if=$(KERNEL_BIN) of=$(IMG) seek=1 conv=notrunc
+.PHONY: run
+run: disk.img boot/uefi/OVMF.fd
+	qemu-system-x86_64 -pflash boot/uefi/OVMF.fd -hda disk.img
 
-$(BOOT_BIN) : $(BOOT)
-	$(ASM) $< -o $@
-
-$(KERNEL_OBJECT) : $(KERNEL)
-	$(ASM) $(ASM_FLAGS) $< -o $@
-
-.c.o :
-	@echo $(C_SOURCES)
-	$(CC) $(C_FLAGS) $< -o $@
-
-link :
-	@echo $(C_SOURCES)
-	$(LD) $(LD_FLAGS) $(KERNEL_OBJECT) $(C_OBJECTS) -o $(KERNEL_ELF)
-	$(OBJCOPY) -O binary -R .note -R .comment -S $(KERNEL_ELF) $(KERNEL_BIN)
-
-$(BOOT_LST) : $(BOOT)
-	$(ASM) $< -l $@
-
-.PHONY:qemu
-qemu: $(IMG)
-	@echo '启动虚拟机...'
-	qemu-system-x86_64 -boot order=a -fda $(IMG)
-
-PHONY:debug
-debug: $(IMG) $(KERNEL_ELF)
-	qemu-system-x86_64 -S -s -boot order=a -fda $(IMG) &
-	gdb -ex "target remote localhost:1234" -ex "symbol-file $(KERNEL_ELF)"
-.PHONY:clean
-clean :
-	rm -f $(BOOT_BIN) $(KERNEL_BIN) $(KERNEL_ELF) $(KERNEL_OBJECT) $(S_OBJECTS) \
-	 $(C_OBJECTS) $(IMG) boot/boot.txt kernel/kernel.txt
-dis:
-	ndisasm ./boot/boot.bin > ./boot/boot.txt
-	objdump -d -M intel ./kernel/kernel.elf > ./kernel/kernel.txt
+.PHONY: clean
+clean:
+	rm -rf disk.img
+	make -C boot/uefi clean
