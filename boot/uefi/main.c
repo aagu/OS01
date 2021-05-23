@@ -34,6 +34,19 @@ struct KERNEL_BOOT_PARAMETER_INFORMATION
 #define EXPECT_VBE_HEIGHT 900
 #define EXPECT_VBE_WIDTH 1440
 
+boolean_t CompareGuid(efi_guid_t * p1, efi_guid_t * p2)
+{
+    if(p1 == NULL || p2 == NULL)
+        return 0;
+    if(p1->Data1 != p2->Data1)
+        return 0;
+    if(p1->Data2 != p2->Data2)
+        return 0;
+    if(p1->Data3 != p2->Data3)
+        return 0;
+    return strncmp((char *)p1->Data4, (char *)p2->Data4, 8) == 0;
+}
+
 int main(int argc, char **argv)
 {
     efi_status_t status;
@@ -123,7 +136,8 @@ int main(int argc, char **argv)
         return 1;
     }
     
-    struct KERNEL_BOOT_PARAMETER_INFORMATION * kern_boot_para_info;
+    struct KERNEL_BOOT_PARAMETER_INFORMATION * kern_boot_para_info = (struct KERNEL_BOOT_PARAMETER_INFORMATION *)
+        malloc(sizeof(struct KERNEL_BOOT_PARAMETER_INFORMATION));
     kern_boot_para_info->RSDP = 0x0;
     kern_boot_para_info->BootFromBIOS = 0; // may support boot from BIOS later :)
     kern_boot_para_info->Graphics_Info.HorizontalResolution = gop->Mode->Information->HorizontalResolution;
@@ -250,7 +264,7 @@ err:    printf("Unable to get memory map\n");
 	{
 		if (CompareGuid(&configTable[index].VendorGuid, &Acpi2TableGuid))
 		{
-            // printf("Acpi2TableGuid found, index %d, address %018lx", index, configTable[index].VendorTable);
+            printf("Acpi2TableGuid found, index %d, address %018lx\n", index, configTable[index].VendorTable);
             kern_boot_para_info->RSDP = (unsigned long)configTable[index].VendorTable;
             break;
 		}
@@ -259,8 +273,6 @@ err:    printf("Unable to get memory map\n");
 
     if(kern_boot_para_info->RSDP == 0)
         printf("RSDP not found!\n");
-    kern_boot_para_info->BootFromBIOS = 0;
-
     // exit BootService and jump to kernel
     if(exit_bs()) {
         printf("error when exit boot service!\n");
@@ -270,8 +282,8 @@ err:    printf("Unable to get memory map\n");
     int (*kernel_main)(struct KERNEL_BOOT_PARAMETER_INFORMATION *);
     kernel_main = (void*)0x100000;
 
-    int ret = kernel_main(kern_boot_para_info);
+    kernel_main(kern_boot_para_info);
     // should never get here
-    printf("kernel function return %d\n", ret);
+    while(1);
     return EFI_SUCCESS;
 }
