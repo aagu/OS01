@@ -3,6 +3,7 @@
 *.lst
 *.elf
 *.o
-system.img
+disk.img
 *.ipch
 .vscode/*
+sysroot/*

@@ -47,6 +47,7 @@ kernel.bin: kernel.elf
 
 clean:
 	rm -f */*.o kernel.bin kernel.elf *.txt
+	rm -f $(ARCHDIR)/*.o
 
 install-headers:
 	mkdir -p $(DESTDIR)$(INCLUDEDIR)

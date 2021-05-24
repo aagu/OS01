@@ -9,6 +9,6 @@ int kernel_main(struct KERNEL_BOOT_PARAMETER_INFORMATION *bootinfo)
     Pos.XResolution = bootinfo->Graphics_Info.HorizontalResolution;
     Pos.YResolution = bootinfo->Graphics_Info.VerticalResolution;
     
-    color_printk(BLACK, RED, "Hello, World!\n");
+    color_printk(RED, BLACK, "Hello, World!\n");
     return 0;
 }

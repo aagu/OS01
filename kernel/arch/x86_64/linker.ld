@@ -1,6 +1,6 @@
 OUTPUT_FORMAT("elf64-x86-64","elf64-x86-64","elf64-x86-64")
 OUTPUT_ARCH(i386:x86-64)
-ENTRY(kernel_main)
+ENTRY(_start)
 SECTIONS
 {
 
@@ -8,6 +8,7 @@ SECTIONS
 	.text :
 	{
 		_text = .;
+		arch/x86_64/head.o(.text)
 		*(.text)
 		_etext = .;
 	}
