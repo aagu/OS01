@@ -39,11 +39,10 @@ int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
 	int i = 0;
 	int count = 0;
 	int line = 0;
-	unsigned long flags = 0;
 	va_list args;
 
 	va_start(args, fmt);
-	i = vsprintf(buf,fmt, args);
+	i = vsprintf(buf, fmt, args);
 	va_end(args);
 
 	for(count = 0;count < i || line;count++)

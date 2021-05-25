@@ -10,5 +10,10 @@ int kernel_main(struct KERNEL_BOOT_PARAMETER_INFORMATION *bootinfo)
     Pos.YResolution = bootinfo->Graphics_Info.VerticalResolution;
     
     color_printk(RED, BLACK, "Hello, World!\n");
+    int i = 1/ 0;
+    while(1)
+    {
+        __asm__ __volatile__("hlt");
+    }
     return 0;
 }
