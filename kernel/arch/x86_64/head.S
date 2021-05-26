@@ -87,9 +87,9 @@ setup_TSS64:
 	addq	%rcx,	%rax
 	addq	$103,	%rax
 	leaq	GDT_Table(%rip),	%rdi
-	movq	%rax,	80(%rdi)	//tss segment offset
+	movq	%rax,	64(%rdi)	//tss segment offset
 	shrq	$32,	%rdx
-	movq	%rdx,	88(%rdi)	//tss+1 segment offset
+	movq	%rdx,	72(%rdi)	//tss+1 segment offset
 
 //=======	call kernel_main
 
