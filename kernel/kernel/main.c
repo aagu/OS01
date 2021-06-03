@@ -1,11 +1,12 @@
 #include <kernel/bootinfo.h>
 #include <string.h>
 #include <kernel/printk.h>
+#include <kernel/memory.h>
 #include <kernel/arch/x86_64/trap.h>
 #include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/x86_64/asm.h>
 
-int kernel_main(struct KERNEL_BOOT_PARAMETER_INFORMATION *bootinfo)
+int kernel_main(struct BOOT_INFO *bootinfo)
 {
     int i;
     Pos.FB_addr = (unsigned int *)bootinfo->Graphics_Info.FrameBufferBase;
@@ -18,8 +19,7 @@ int kernel_main(struct KERNEL_BOOT_PARAMETER_INFORMATION *bootinfo)
     sys_vector_install();
     
     color_printk(RED, BLACK, "Hello, World!\n");
-    i = *(int *)0xffff80000aa00000;
-    i++;
+    pmm_init(bootinfo->E820_Info);
     while(1)
     {
         hlt();

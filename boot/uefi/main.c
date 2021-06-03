@@ -1,6 +1,6 @@
 #include <uefi.h>
 
-struct EFI_GRAPHICS_OUTPUT_INFORMATION
+struct GRAPHICS_INFO
 {
 	unsigned int HorizontalResolution;
 	unsigned int VerticalResolution;
@@ -10,23 +10,23 @@ struct EFI_GRAPHICS_OUTPUT_INFORMATION
 	unsigned long FrameBufferSize;
 };
 
-struct EFI_E820_MEMORY_DESCRIPTOR
+struct E820_ENTRY
 {
 	unsigned long address;
 	unsigned long length;
 	unsigned int  type;
 }__attribute__((packed));
 
-struct EFI_E820_MEMORY_DESCRIPTOR_INFORMATION
+struct MEMORY_INFO
 {
 	unsigned int E820_Entry_count;
-	struct EFI_E820_MEMORY_DESCRIPTOR E820_Entry[0];
+	struct E820_ENTRY *E820_Entry;
 };
 
-struct KERNEL_BOOT_PARAMETER_INFORMATION
+struct BOOT_INFO
 {
-	struct EFI_GRAPHICS_OUTPUT_INFORMATION Graphics_Info;
-	struct EFI_E820_MEMORY_DESCRIPTOR_INFORMATION E820_Info;
+	struct GRAPHICS_INFO Graphics_Info;
+	struct MEMORY_INFO E820_Info;
     unsigned long RSDP;
     boolean_t BootFromBIOS;
 };
@@ -136,8 +136,8 @@ int main(int argc, char **argv)
         return 1;
     }
     
-    struct KERNEL_BOOT_PARAMETER_INFORMATION * kern_boot_para_info = (struct KERNEL_BOOT_PARAMETER_INFORMATION *)
-        malloc(sizeof(struct KERNEL_BOOT_PARAMETER_INFORMATION));
+    struct BOOT_INFO * kern_boot_para_info = (struct BOOT_INFO *)
+        malloc(sizeof(struct BOOT_INFO));
     kern_boot_para_info->RSDP = 0x0;
     kern_boot_para_info->BootFromBIOS = 0; // may support boot from BIOS later :)
     kern_boot_para_info->Graphics_Info.HorizontalResolution = gop->Mode->Information->HorizontalResolution;
@@ -165,8 +165,9 @@ err:    printf("Unable to get memory map\n");
         return 1;
     }
 
-    struct EFI_E820_MEMORY_DESCRIPTOR *E820p = kern_boot_para_info->E820_Info.E820_Entry;
-	struct EFI_E820_MEMORY_DESCRIPTOR *LastE820 = NULL;
+    kern_boot_para_info->E820_Info.E820_Entry = (struct E820_ENTRY*)malloc(sizeof(struct E820_ENTRY) * 32);
+	struct E820_ENTRY *LastE820 = NULL;
+    struct E820_ENTRY *E820p = kern_boot_para_info->E820_Info.E820_Entry;
 	unsigned long LastEndAddr = 0;
 	int E820Count = 0;
 
@@ -235,11 +236,11 @@ err:    printf("Unable to get memory map\n");
     int j = 0;
 	for(i = 0; i< E820Count; i++)
 	{
-		struct EFI_E820_MEMORY_DESCRIPTOR* e820i = LastE820 + i;
-		struct EFI_E820_MEMORY_DESCRIPTOR MemMap;
+		struct E820_ENTRY* e820i = LastE820 + i;
+		struct E820_ENTRY MemMap;
 		for(j = i + 1; j< E820Count; j++)
 		{
-			struct EFI_E820_MEMORY_DESCRIPTOR* e820j = LastE820 + j;
+			struct E820_ENTRY* e820j = LastE820 + j;
 			if(e820i->address > e820j->address)
 			{
 				MemMap = *e820i;
@@ -278,8 +279,7 @@ err:    printf("Unable to get memory map\n");
         printf("error when exit boot service!\n");
         return 0;
     }
-
-    int (*kernel_main)(struct KERNEL_BOOT_PARAMETER_INFORMATION *);
+    int (*kernel_main)(struct BOOT_INFO *);
     kernel_main = (void*)0x100000;
 
     kernel_main(kern_boot_para_info);

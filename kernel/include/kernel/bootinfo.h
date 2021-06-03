@@ -1,7 +1,7 @@
 #ifndef _KERNEL_BOOTINFO_H
 #define _KERNEL_BOOTINFO_H
 
-struct EFI_GRAPHICS_OUTPUT_INFORMATION
+struct GRAPHICS_INFO
 {
 	unsigned int HorizontalResolution;
 	unsigned int VerticalResolution;
@@ -11,23 +11,23 @@ struct EFI_GRAPHICS_OUTPUT_INFORMATION
 	unsigned long FrameBufferSize;
 };
 
-struct EFI_E820_MEMORY_DESCRIPTOR
+struct E820_ENTRY
 {
 	unsigned long address;
 	unsigned long length;
 	unsigned int  type;
 }__attribute__((packed));
 
-struct EFI_E820_MEMORY_DESCRIPTOR_INFORMATION
+struct MEMORY_INFO
 {
 	unsigned int E820_Entry_count;
-	struct EFI_E820_MEMORY_DESCRIPTOR E820_Entry[0];
+	struct E820_ENTRY * E820_Entry;
 };
 
-struct KERNEL_BOOT_PARAMETER_INFORMATION
+struct BOOT_INFO
 {
-	struct EFI_GRAPHICS_OUTPUT_INFORMATION Graphics_Info;
-	struct EFI_E820_MEMORY_DESCRIPTOR_INFORMATION E820_Info;
+	struct GRAPHICS_INFO Graphics_Info;
+	struct MEMORY_INFO E820_Info;
     unsigned long RSDP;
     unsigned char BootFromBIOS;
 };

@@ -8,7 +8,8 @@ DESTDIR=$(SYSROOT)
 
 KERNEL_SOURCES := \
 	kernel/main.c \
-	kernel/printk.c
+	kernel/printk.c \
+	memory/pmm.c
 
 KERNEL_OBJECTS := \
 	$(KERNEL_SOURCES:.c=.o) \
@@ -24,7 +25,6 @@ ASFLAGS :=
 # endif
 LIBS := $(LIBS) -nostdlib -lk -lgcc
 LIBS := $(LIBS) $(KERNEL_ARXH_LIBS)
-
 
 KERNEL_OBJECTS+=kernel/font.o
 
