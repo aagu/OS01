@@ -1,6 +1,8 @@
 #ifndef _KERNEL_PRINTK_H
 #define _KERNEL_PRINTK_H
 
+#include <stdint.h>
+
 #define WHITE 	0x00ffffff		//白
 #define BLACK 	0x00000000		//黑
 #define RED	    0x00ff0000		//红
@@ -13,19 +15,20 @@
 
 typedef struct position
 {
-	int XResolution;
-	int YResolution;
+	int32_t XResolution;
+	int32_t YResolution;
 
-	int XPosition;
-	int YPosition;
+	int32_t XPosition;
+	int32_t YPosition;
 
-	unsigned int * FB_addr;
-	unsigned long FB_length;
+	uint32_t * FB_addr; // memory should be write in 32bits block
+	uint64_t FB_length;
 } position;
 
 extern position Pos;
 
 void putchark(unsigned int FRcolor,unsigned int BKcolor,unsigned char font);
 int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...);
+void frame_buffer_init(uint64_t addr, uint64_t length);
 
 #endif

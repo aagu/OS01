@@ -130,11 +130,12 @@ void do_invalid_TSS(uint64_t rsp, uint64_t error_code)
 		color_printk(RED,BLACK,"Refers to a descriptor in the GDT or the current LDT;\n");
 
 	if((error_code & 0x02) == 0)
+	{
 		if(error_code & 0x04)
 			color_printk(RED,BLACK,"Refers to a segment or gate descriptor in the LDT;\n");
 		else
 			color_printk(RED,BLACK,"Refers to a descriptor in the current GDT;\n");
-
+	}
 	color_printk(RED,BLACK,"Segment Selector Index:%#010x\n",error_code & 0xfff8);
 
 	while(1)
@@ -158,11 +159,12 @@ void do_segment_not_present(uint64_t rsp, uint64_t error_code)
 		color_printk(RED,BLACK,"Refers to a descriptor in the GDT or the current LDT;\n");
 
 	if((error_code & 0x02) == 0)
+	{
 		if(error_code & 0x04)
 			color_printk(RED,BLACK,"Refers to a segment or gate descriptor in the LDT;\n");
 		else
 			color_printk(RED,BLACK,"Refers to a descriptor in the current GDT;\n");
-
+	}
 	color_printk(RED,BLACK,"Segment Selector Index:%#010x\n",error_code & 0xfff8);
 
 	while(1)
@@ -186,11 +188,12 @@ void do_stack_segment_fault(uint64_t rsp, uint64_t error_code)
 		color_printk(RED,BLACK,"Refers to a descriptor in the GDT or the current LDT;\n");
 
 	if((error_code & 0x02) == 0)
+	{
 		if(error_code & 0x04)
 			color_printk(RED,BLACK,"Refers to a segment or gate descriptor in the LDT;\n");
 		else
 			color_printk(RED,BLACK,"Refers to a descriptor in the current GDT;\n");
-
+	}
 	color_printk(RED,BLACK,"Segment Selector Index:%#010x\n",error_code & 0xfff8);
 
 	while(1)
@@ -214,11 +217,12 @@ void do_general_protection(uint64_t rsp, uint64_t error_code)
 		color_printk(RED,BLACK,"Refers to a descriptor in the GDT or the current LDT;\n");
 
 	if((error_code & 0x02) == 0)
+	{
 		if(error_code & 0x04)
 			color_printk(RED,BLACK,"Refers to a segment or gate descriptor in the LDT;\n");
 		else
 			color_printk(RED,BLACK,"Refers to a descriptor in the current GDT;\n");
-
+	}
 	color_printk(RED,BLACK,"Segment Selector Index:%#010x\n",error_code & 0xfff8);
 
 	while(1)

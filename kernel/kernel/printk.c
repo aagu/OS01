@@ -11,8 +11,8 @@ psf2_t *font = (psf2_t*)&_binary_kernel_font_psf_start;
 
 void putchark(unsigned int FRcolor,unsigned int BKcolor,unsigned char c)
 {
-    int i = 0,j = 0;
-	unsigned int * addr = NULL;
+    uint32_t i = 0,j = 0;
+	uint32_t * addr = NULL;
 	int testval = 0;
 	unsigned char *glyph = (unsigned char*)&_binary_kernel_font_psf_start + font->headersize +
             (c>0&&c<font->numglyph?c:0)*font->bytesperglyph;
@@ -85,12 +85,12 @@ Label_tab:
 		}
 
 
-		if(Pos.XPosition >= (Pos.XResolution / font->width))
+		if(Pos.XPosition >= (int32_t)(Pos.XResolution / font->width))
 		{
 			Pos.YPosition++;
 			Pos.XPosition = 0;
 		}
-		if(Pos.YPosition >= (Pos.YResolution / font->height))
+		if(Pos.YPosition >= (int32_t)(Pos.YResolution / font->height))
 		{
 			Pos.YPosition = 0;
 		}
@@ -98,4 +98,9 @@ Label_tab:
 	}
 
 	return i;
+}
+
+void frame_buffer_init(uint64_t addr, uint64_t length)
+{
+	
 }

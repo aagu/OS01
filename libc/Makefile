@@ -4,7 +4,7 @@ ARCHDIR=arch/$(HOSTARCH)
 
 include $(ARCHDIR)/make.config
 
-CFLAGS := $(CFLAGS) -mcmodel=large -ffreestanding -mno-red-zone -Wall -Wextra -D__is_libc -Iinclude -O2
+CFLAGS := $(CFLAGS) -mcmodel=large -ffreestanding -mno-red-zone -Wall -Wextra -D__is_libc -Iinclude
 LDFLAGS := $(LDFLAGS) -mcmodel=large -ffreestanding -O2 -nostdlib
 ASFLAGS :=
 # ifeq ($(DEBUG),1)
