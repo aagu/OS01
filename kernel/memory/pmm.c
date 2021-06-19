@@ -4,6 +4,7 @@
 #include <kernel/pmm.h>
 #include <kernel/printk.h>
 #include <string.h>
+#include <kernel/slab.h>
 
 uint64_t page_init(struct Page * page, uint64_t flags)
 {
@@ -101,7 +102,7 @@ void pmm_init(struct MEMORY_INFO E820_Info)
     TotalMem = PMMngr.e820_entrys[PMMngr.e820_length].address + PMMngr.e820_entrys[PMMngr.e820_length].length;
 
     //bits map construction init
-    PMMngr.bits_map = (uint64_t *)((PMMngr.start_brk + PAGE_4K_SIZE - 1) & PAGE_4K_SIZE);
+    PMMngr.bits_map = (uint64_t *)((PMMngr.start_brk + PAGE_4K_SIZE - 1) & PAGE_4K_MASK);
     PMMngr.bits_size = TotalMem >> PAGE_2M_SHIFT;
     PMMngr.bits_length = (((uint64_t)(TotalMem >> PAGE_2M_SHIFT) + sizeof(long) * 8 - 1) / 8) & ( ~ (sizeof(long) - 1));
     memset(PMMngr.bits_map, 0xff, PMMngr.bits_length);
@@ -195,12 +196,12 @@ void pmm_init(struct MEMORY_INFO E820_Info)
     color_printk(ORANGE,BLACK,"ZONE_DMA_INDEX:%d\tZONE_NORMAL_INDEX:%d\tZONE_UNMAPED_INDEX:%d\n",ZONE_DMA_INDEX,ZONE_NORMAL_INDEX,ZONE_UNMAPPED_INDEX);
 
     PMMngr.end_of_struct = (uint64_t)((uint64_t)PMMngr.zones_struct + PMMngr.zones_length + sizeof(long) * 32) & ( ~ (sizeof(long) - 1)); //leave some blank after PMMngr
-    color_printk(ORANGE,BLACK,"start_code:%#018lx,end_code:%#018lx,end_data:%#018lx,end_brk:%#018lx,end_of_struct:%#018lx\n",PMMngr.start_code,PMMngr.end_code,PMMngr.end_data,PMMngr.start_brk, PMMngr.end_of_struct);
+    color_printk(ORANGE,BLACK,"start_code:%#018lx,end_code:%#018lx,end_data:%#018lx,start_brk:%#018lx,end_of_struct:%#018lx\n",PMMngr.start_code,PMMngr.end_code,PMMngr.end_data,PMMngr.start_brk, PMMngr.end_of_struct);
 
     // page from 0 to PMMngr.end_of_struct are all ready used
     i = PMMngr.end_of_struct >> PAGE_2M_SHIFT;
 
-    for (j = 0; j <= i; j++)
+    for (j = 1; j <= i; j++)
     {
         struct Page * tmp_page = PMMngr.pages_struct + j;
         page_init(tmp_page, PG_PTable_Mapped | PG_Kernel_Init | PG_Kernel);
@@ -209,6 +210,8 @@ void pmm_init(struct MEMORY_INFO E820_Info)
         tmp_page->zone_struct->page_free_count--;
     }
     color_printk(ORANGE,BLACK,"1.PMMngr.bits_map:%#018lx\tzone_struct->page_using_count:%d\tzone_struct->page_free_count:%d\n",*PMMngr.bits_map,PMMngr.zones_struct->page_using_count,PMMngr.zones_struct->page_free_count);
+
+    slab_init();
 }
 
 /*

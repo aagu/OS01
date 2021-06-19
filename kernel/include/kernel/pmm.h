@@ -2,6 +2,7 @@
 #define _KERNEL_PMM_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #define PAGE_1G_SHIFT  30
 #define PAGE_2M_SHIFT  21
@@ -90,5 +91,10 @@ struct Zone
 
     uint64_t total_pages_link;
 };
+
+uint64_t page_init(struct Page * page, uint64_t flags);
+struct Page * alloc_pages(int32_t zone_select, int32_t number, uint64_t page_flags);
+void free_pages(struct Page * page,int32_t number);
+uint64_t page_clean(struct Page * page);
 
 #endif

@@ -1,7 +1,11 @@
 #include <kernel/printk.h>
+#include <kernel/memory.h>
+#include <kernel/vmm.h>
+#include <kernel/pmm.h>
 #include <stdio.h>
 #include <font.h>
 #include <stddef.h>
+#include <string.h>
 
 static char buf[4096]={0};
 
@@ -100,7 +104,13 @@ Label_tab:
 	return i;
 }
 
-void frame_buffer_init(uint64_t addr, uint64_t length)
+void frame_buffer_init()
 {
-	
+	for (uintptr_t i = 0; i < Pos.FB_length; i += PAGE_2M_SIZE)
+	{
+		vmm_map_page(kernel_map, i + (uint64_t)Pos.FB_addr, VIRT_FRAMEBUFFER_OFFSET + i, PAGE_KERNEL_Page | PAGE_PWT | PAGE_PCD);
+	}
+	Pos.FB_addr = (uint32_t *)VIRT_FRAMEBUFFER_OFFSET;
+
+	flush_tlb();
 }

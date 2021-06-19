@@ -24,7 +24,9 @@ string/strlen.o \
 stdio/printf.o \
 stdio/putchar.o \
 stdio/puts.o \
-stdio/vsprintf.o
+stdio/vsprintf.o \
+list/list.o \
+stdlib/abort.o
 
 HOSTEDOBJS=\
 $(ARCH_HOSTEDOBJS) \

@@ -2,9 +2,11 @@
 #include <string.h>
 #include <kernel/printk.h>
 #include <kernel/memory.h>
+#include <kernel/pmm.h>
 #include <kernel/arch/x86_64/trap.h>
 #include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/x86_64/asm.h>
+#include <kernel/panic.h>
 
 extern char _text;
 extern char _etext;
@@ -36,7 +38,10 @@ int kernel_main(struct BOOT_INFO *bootinfo)
 
     vmm_init();
 
+    frame_buffer_init();
+    color_printk(GREEN, BLACK, "frame buffer remap succeed\n");
 
+    // kpanic("[kernel panic] %d\n", 1234);
 
 /*
 	struct Page * page = NULL;

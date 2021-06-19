@@ -9,8 +9,11 @@ DESTDIR=$(SYSROOT)
 KERNEL_SOURCES := \
 	kernel/main.c \
 	kernel/printk.c \
+	kernel/panic.c \
 	memory/pmm.c \
-	memory/vmm.c
+	memory/vmm.c \
+	memory/slab.c \
+	memory/dump.c
 
 KERNEL_OBJECTS := \
 	$(KERNEL_SOURCES:.c=.o) \

@@ -4,47 +4,72 @@
 #include <kernel/printk.h>
 #include <stdint.h>
 
+// kernel map
+uint64_t *kernel_map = NULL;
+
+// get next Level of map
+uint64_t *get_next_level(uint64_t *current_level, size_t entry, uint64_t flags)
+{
+    if (!current_level[entry] & 1)
+    {
+        current_level[entry] = (uint64_t)kcalloc(PAGE_4K_SIZE, 0);
+        current_level[entry] |= flags;
+    }
+    return (uint64_t *) (current_level[entry] & ~(0x1ff));
+}
+
+// map virtual page to physical address
+void vmm_map_page(uint64_t *pagemap, uintptr_t physical_address, uintptr_t virtual_address, uint64_t flags)
+{
+    uint64_t *pml4, *pml3, *pml2;
+    size_t level4, level3, level2;
+
+    level4 = (size_t) (virtual_address >> PAGE_GDT_SHIFT) & 0x1ff;
+    level3 = (size_t) (virtual_address >> PAGE_1G_SHIFT) & 0x1ff;
+    level2 = (size_t) (virtual_address >> PAGE_2M_SHIFT) & 0x1ff;
+
+    pml4 = pagemap;
+    pml3 = get_next_level(pml4, level4, PAGE_KERNEL_GDT);
+    pml2 = get_next_level(pml3, level3, PAGE_KERNEL_Dir);
+    pml2[level2] = (physical_address & PAGE_2M_MASK) | flags;
+}
+
+// unmap virtual page to physical address
+void vmm_unmap_page(uint64_t *pagemap, uintptr_t virtual_address)
+{
+    uint64_t *pml4, *pml3, *pml2;
+    size_t level4, level3, level2;
+
+    level4 = (size_t) (virtual_address >> PAGE_GDT_SHIFT) & 0x1ff;
+    level3 = (size_t) (virtual_address >> PAGE_1G_SHIFT) & 0x1ff;
+    level2 = (size_t) (virtual_address >> PAGE_2M_SHIFT) & 0x1ff;
+
+    pml4 = pagemap;
+    pml3 = get_next_level(pml4, level4, PAGE_KERNEL_GDT);
+    pml2 = get_next_level(pml3, level3, PAGE_KERNEL_Dir);
+
+    pml2[level2] = 0;
+}
+
+static void dump_memory_map()
+{
+    mem_dump(kernel_map, kernel_map+512);
+    // mem_dump(kernel_map+PAGE_4K_SIZE, kernel_map+512+PAGE_4K_SIZE);
+}
+
 void vmm_init()
 {
-    uint64_t * Global_CR3 = get_cr3();
-    color_printk(INDIGO,BLACK,"Global_CR3\t:%#018lx\n",Global_CR3);
-    color_printk(INDIGO,BLACK,"*Global_CR3\t:%#018lx\n",*Global_CR3 & (~0xff));
-	color_printk(PURPLE,BLACK,"**Global_CR3\t:%#018lx\n",*((uint64_t *)(*Global_CR3 & (~0xff))) & (~0xff));
+    kernel_map = (uint64_t *)kcalloc(PAGE_4K_SIZE, 0);
 
-    // int32_t i;
-    // uint64_t * pml4t = (uint64_t *)VM_PML4T;
-    // pml4t[0] = 0x102003;
-    // for (i = 1; i < 256; i++)
-    // {
-    //     set_pml4t(pml4t+i, 0x0);
-    // }
-    // pml4t[256] = 0x102003;
-    // for (i = 257; i < 512; i++)
-    // {
-    //     set_pml4t(pml4t+i, 0x0);
-    // }
-    // uint64_t * pdpt = (uint64_t *)VM_PDPT;
-    // pdpt[0] = 0x103003;
-    // for (i = 1; i < 512; i++)
-    // {
-    //     set_pdpt(pdpt+i, 0x0);
-    // }
-    // uint64_t * pdt = (uint64_t *)VM_PDT;
-    // for (i = 0; i < 10; i++)
-    // {
-    //     set_pdt(pdt+i, mk_pdt((1UL << PAGE_2M_SHIFT) * i,PAGE_KERNEL_Page));
-    // }
-    // for (i = 11; i < 512; i++)
-    // {
-    //     set_pdt(pdt+i, 0x0);
-    // }
-    __asm__ __volatile__(
-        "movq   %0, %%rax   \n\t"
-        "movq   %%rax,  %%cr3   \n\t"
-        :
-        :"d"((uint64_t)VM_PML4T)
-        :"memory"
-    );
-    Global_CR3 = get_cr3();
-    color_printk(INDIGO,BLACK,"Global_CR3\t:%#018lx\n",Phy_To_Virt(Global_CR3));
+    // map 0~32M
+    for (uintptr_t i = 0; i < (PAGE_2M_SIZE << 4); i += PAGE_2M_SIZE)
+    {
+        vmm_map_page(kernel_map, i, i, PAGE_KERNEL_Page);
+    }
+
+    // dump_memory_map();
+    
+    switch_tlb(kernel_map);
+
+    return 0;
 }

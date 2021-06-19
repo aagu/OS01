@@ -13,6 +13,8 @@
 #define INDIGO	0x0000ffff		//靛
 #define PURPLE	0x008000ff		//紫
 
+#define VIRT_FRAMEBUFFER_OFFSET 0xffff8000e0000000
+
 typedef struct position
 {
 	int32_t XResolution;
@@ -29,6 +31,6 @@ extern position Pos;
 
 void putchark(unsigned int FRcolor,unsigned int BKcolor,unsigned char font);
 int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...);
-void frame_buffer_init(uint64_t addr, uint64_t length);
+void frame_buffer_init();
 
 #endif

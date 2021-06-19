@@ -57,4 +57,32 @@ typedef struct {uint64_t pml4e;} pml4e_t;
 #define VM_PDPT  (KERNEL_BASE + 0x2000)
 #define VM_PDT   (KERNEL_BASE + 0x3000)
 
+#define KERNEL_MEM_OFFSET 0xffffffff80000000
+#define PHYS_MEM_OFFSET 0xffff800000000000
+
+extern uint64_t *kernel_map;
+
+#define flush_tlb()				            \
+do								            \
+{								            \
+	unsigned long	tmpreg;					\
+	__asm__ __volatile__ 	(				\
+				"movq	%%cr3,	%0	\n\t"	\
+				"movq	%0,	%%cr3	\n\t"	\
+				:"=r"(tmpreg)			    \
+				:				            \
+				:"memory"			        \
+				);				            \
+}while(0)
+
+#define switch_tlb(tlb)								\
+do													\
+{													\
+	__asm__ __volatile__("mov %0, %%cr3"::"r"(tlb));\
+} while (0);										\
+
+void vmm_map_page(uint64_t *pagemap, uintptr_t physical_address,
+                  uintptr_t virtual_address, uint64_t flags);
+void vmm_unmap_page(uint64_t *pagemap, uintptr_t virtual_address);
+
 #endif
