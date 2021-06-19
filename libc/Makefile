@@ -26,7 +26,10 @@ stdio/putchar.o \
 stdio/puts.o \
 stdio/vsprintf.o \
 list/list.o \
-stdlib/abort.o
+stdlib/abort.o \
+stdlib/calloc.o \
+stdlib/malloc.o \
+stdlib/free.o
 
 HOSTEDOBJS=\
 $(ARCH_HOSTEDOBJS) \

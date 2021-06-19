@@ -34,9 +34,6 @@ void pmm_init(struct MEMORY_INFO E820_Info);
 // void free_pages(struct Page * page,int32_t number);
 // struct Page * alloc_pages(int32_t zone_select, int32_t number, uint64_t page_flags);
 void vmm_init();
-void * kmalloc(size_t size, uint64_t gfp_flags);
-void * kcalloc(size_t size, uint64_t gfp_flags);
-size_t kfree(void * address);
 void mem_dump(const void * start, const void * end);
 
 #endif

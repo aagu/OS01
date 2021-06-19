@@ -3,6 +3,7 @@
 #include <kernel/pmm.h>
 #include <kernel/printk.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 // kernel map
 uint64_t *kernel_map = NULL;
@@ -12,7 +13,7 @@ uint64_t *get_next_level(uint64_t *current_level, size_t entry, uint64_t flags)
 {
     if (!current_level[entry] & 1)
     {
-        current_level[entry] = (uint64_t)kcalloc(PAGE_4K_SIZE, 0);
+        current_level[entry] = (uint64_t)calloc(PAGE_4K_SIZE);
         current_level[entry] |= flags;
     }
     return (uint64_t *) (current_level[entry] & ~(0x1ff));
@@ -59,7 +60,7 @@ static void dump_memory_map()
 
 void vmm_init()
 {
-    kernel_map = (uint64_t *)kcalloc(PAGE_4K_SIZE, 0);
+    kernel_map = (uint64_t *)calloc(PAGE_4K_SIZE);
 
     // map 0~32M
     for (uintptr_t i = 0; i < (PAGE_2M_SIZE << 4); i += PAGE_2M_SIZE)

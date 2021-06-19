@@ -3,12 +3,12 @@
 #include <kernel/slab.h>
 #endif
 
-void* malloc (size_t size)
+void free (void * ptr)
 {
 #if defined(__is_libk)
-	return kmalloc(size);
+	return kfree(ptr);
 #else
 	// TODO: Implement stdio and the write system call.
-    return NULL;
+    return;
 #endif
 }

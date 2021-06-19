@@ -83,7 +83,7 @@ struct Slab * kmalloc_create(uint64_t size)
     case 524288:
     case 1048576:
 
-        slab = (struct SLab *)kmalloc(sizeof(struct Slab), 0);
+        slab = (struct SLab *)kmalloc(sizeof(struct Slab));
 
         slab->free_count = PAGE_2M_SIZE / size;
         slab->using_count = 0;
@@ -91,7 +91,7 @@ struct Slab * kmalloc_create(uint64_t size)
 
         slab->color_length = ((slab->color_count + sizeof(uint64_t) * 8 - 1) >> 6) << 3;
 
-        slab->color_map = (uint64_t *)kmalloc(slab->color_length, 0);
+        slab->color_map = (uint64_t *)kmalloc(slab->color_length);
         memset(slab->color_map, 0xff, slab->color_length);
 
         slab->address = page->phy_address;
@@ -113,7 +113,7 @@ struct Slab * kmalloc_create(uint64_t size)
     return slab;
 }
 
-void * kmalloc(size_t size, uint64_t gfp_flags)
+void * kmalloc(size_t size)
 {
     uint32_t i, j;
     struct Slab * slab = NULL;
@@ -177,14 +177,6 @@ void * kmalloc(size_t size, uint64_t gfp_flags)
 
 	color_printk(BLUE,BLACK,"kmalloc() ERROR: no memory can alloc\n");
 	return NULL;
-}
-
-void * kcalloc(size_t size, uint64_t gfp_flags)
-{
-    void * ptr = kmalloc(size, gfp_flags);
-    if (ptr != NULL)
-        memset(ptr, 0, size);
-    return ptr;
 }
 
 size_t kfree(void * address)
