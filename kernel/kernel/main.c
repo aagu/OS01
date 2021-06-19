@@ -41,7 +41,7 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     frame_buffer_init();
     color_printk(GREEN, BLACK, "frame buffer remap succeed\n");
 
-    // kpanic("[kernel panic] %d\n", 1234);
+    kpanic("%s\n", "something went wrong");
 
 /*
 	struct Page * page = NULL;

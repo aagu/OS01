@@ -3,6 +3,9 @@
 #include <stddef.h>
 #include <string.h>
 #include <stdarg.h>
+#include <stdio.h>
+
+char buf[4096] = {'[','k','e','r','n','e','l',' ','p','a','n','i','c',']',' ',0};
 
 void kpanic(const char * msg,...)
 {
@@ -16,6 +19,7 @@ void kpanic(const char * msg,...)
 
     va_list args;
     va_start(args,msg);
-    color_printk(WHITE, 0x006699ff, msg, args);
+    vsprintf(buf+15, msg, args);
     va_end(args);
+    color_printk(WHITE, 0x006699ff, buf);
 }
