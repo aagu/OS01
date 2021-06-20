@@ -4,11 +4,11 @@
 #include <sys/cdefs.h>
 #include <stddef.h>
 
-struct List
+typedef struct List
 {
     struct List * prev;
     struct List * next;
-};
+} list_t;
 
 inline void list_init(struct List * lst)
 {

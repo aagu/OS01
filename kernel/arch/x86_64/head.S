@@ -1,4 +1,4 @@
-#include "linkage.h"
+#include <kernel/arch/x86_64/linkage.h>
 
 .section .text
 

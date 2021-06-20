@@ -1,4 +1,4 @@
-#include "linkage.h"
+#include <kernel/arch/x86_64/linkage.h>
 
 R15	=	0x00
 R14	=	0x08

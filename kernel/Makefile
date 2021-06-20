@@ -10,6 +10,7 @@ KERNEL_SOURCES := \
 	kernel/main.c \
 	kernel/printk.c \
 	kernel/panic.c \
+	kernel/interrupt.c \
 	memory/pmm.c \
 	memory/vmm.c \
 	memory/slab.c \
@@ -42,6 +43,10 @@ all: kernel.bin
 
 kernel/font.o: kernel/font.psf
 	$(LD) -r -b binary -o $@ $<
+
+# temporary solution to avoid interrupt code asigned to .bss
+kernel/interrupt.o: kernel/interrupt.c
+	$(CC) $(CFLAGS) -I$(KERNEL_HEADERS) -O1 -c $< -o $@
 
 kernel.elf: $(KERNEL_OBJECTS) $(ARCHDIR)/linker.ld
 	$(CC) $(LDFLAGS) -o $@ $(KERNEL_OBJECTS) -T $(ARCHDIR)/linker.ld $(LIBS)

@@ -6,7 +6,7 @@
 #include <kernel/arch/x86_64/trap.h>
 #include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/x86_64/asm.h>
-#include <kernel/panic.h>
+#include <kernel/interrupt.h>
 
 extern char _text;
 extern char _etext;
@@ -41,23 +41,8 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     frame_buffer_init();
     color_printk(GREEN, BLACK, "frame buffer remap succeed\n");
 
-    kpanic("%s\n", "something went wrong");
+    irq_install();
 
-/*
-	struct Page * page = NULL;
-
-	color_printk(RED,BLACK,"PMMngr.bits_map:%#018lx\n",*PMMngr.bits_map);
-	color_printk(RED,BLACK,"PMMngr.bits_map:%#018lx\n",*(PMMngr.bits_map + 1));
-	page = alloc_pages(ZONE_UNMAPPED,64,PG_PTable_Mapped | PG_Kernel);
-	for(i = 0;i <= 64;i++)
-	{
-		color_printk(INDIGO,BLACK,"page%d\tattribute:%#018lx\taddress:%#018lx\t",i,(page + i)->attribute,(page + i)->phy_address);
-		i++;
-		color_printk(INDIGO,BLACK,"page%d\tattribute:%#018lx\taddress:%#018lx\n",i,(page + i)->attribute,(page + i)->phy_address);
-	}
-	color_printk(RED,BLACK,"PMMngr.bits_map:%#018lx\n",*PMMngr.bits_map);
-	color_printk(RED,BLACK,"PMMngr.bits_map:%#018lx\n",*(PMMngr.bits_map + 1));
-*/
     while(1)
     {
         hlt();
