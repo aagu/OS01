@@ -14,6 +14,12 @@ extern char _edata;
 extern char _erodata;
 extern char _end;
 
+int my_divide_error(int i, int j)
+{
+    i = 1/0;
+    return i + j;
+}
+
 int kernel_main(struct BOOT_INFO *bootinfo)
 {
     // int32_t i;
@@ -25,6 +31,7 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     load_TR(8);
     set_tss64(0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00);
     sys_vector_install();
+    irq_install();
     
     color_printk(RED, BLACK, "Hello, World!\n");
 
@@ -41,7 +48,7 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     frame_buffer_init();
     color_printk(GREEN, BLACK, "frame buffer remap succeed\n");
 
-    irq_install();
+    my_divide_error(1, 3);
 
     while(1)
     {

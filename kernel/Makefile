@@ -11,6 +11,7 @@ KERNEL_SOURCES := \
 	kernel/printk.c \
 	kernel/panic.c \
 	kernel/interrupt.c \
+	kernel/trace.c \
 	memory/pmm.c \
 	memory/vmm.c \
 	memory/slab.c \
@@ -51,12 +52,19 @@ kernel/interrupt.o: kernel/interrupt.c
 kernel.elf: $(KERNEL_OBJECTS) $(ARCHDIR)/linker.ld
 	$(CC) $(LDFLAGS) -o $@ $(KERNEL_OBJECTS) -T $(ARCHDIR)/linker.ld $(LIBS)
 
-kernel.bin: kernel.elf
+kernel/kallsyms.o: kernel/kallsyms.c kernel.elf
+	gcc -o kernel/kallsyms $<
+	nm -n kernel.elf | ./kernel/kallsyms > kernel/kallsyms.S
+	$(CC) $(CFLAGS) -c kernel/kallsyms.S -o $@
+
+kernel.bin: kernel.elf kernel/kallsyms.o
+	$(CC) $(LDFLAGS) -o kernel.elf $(KERNEL_OBJECTS) kernel/kallsyms.o -T $(ARCHDIR)/linker.ld $(LIBS)
 	objcopy -I elf64-x86-64 -S -R ".eh_frame" -R ".comment" -O binary kernel.elf kernel.bin
 
 clean:
 	rm -f */*.o kernel.bin kernel.elf *.txt
 	rm -f $(ARCHDIR)/*.o
+	rm -f kernel/kallsyms
 
 install-headers:
 	mkdir -p $(DESTDIR)$(INCLUDEDIR)

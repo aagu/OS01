@@ -2,7 +2,7 @@
 #define _KERNEL_INTERRUPT_H
 
 #include <stdint.h>
-#include <kernel/arch/x86_64/ptrace.h>
+#include <kernel/arch/x86_64/regs.h>
 #include <kernel/arch/x86_64/linkage.h>
 
 typedef struct hw_int_type

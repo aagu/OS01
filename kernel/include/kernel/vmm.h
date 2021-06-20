@@ -3,8 +3,6 @@
 
 #include <stdint.h>
 
-#define KERNEL_BASE 0x100000
-
 //page table attribute
 
 //bit 63 Execution Disable:
@@ -36,26 +34,6 @@
 #define PAGE_USER_GDT    (PAGE_U_S | PAGE_R_W | PAGE_Present)
 #define PAGE_USER_Dir    (PAGE_U_S | PAGE_R_W | PAGE_Present)
 #define	PAGE_USER_Page   (PAGE_PS  | PAGE_U_S | PAGE_R_W | PAGE_Present)
-
-typedef struct {uint64_t pte;} pte_t;
-#define mk_pt(addr,attr)	((unsigned long)(addr) | (unsigned long)(attr))
-#define set_pt(ptptr,ptval)		(*(ptptr) = (ptval))
-
-typedef struct {uint64_t pde;} pde_t;
-#define mk_pdt(addr,attr)	((unsigned long)(addr) | (unsigned long)(attr))
-#define set_pdt(pdtptr,pdtval)		(*(pdtptr) = (pdtval))
-
-typedef struct {uint64_t pdpte;} pdpte_t;
-#define mk_pdpt(addr,attr)	((unsigned long)(addr) | (unsigned long)(attr))
-#define set_pdpt(pdptptr,pdptval)	(*(pdptptr) = (pdptval))
-
-typedef struct {uint64_t pml4e;} pml4e_t;
-#define mk_pml4t(addr,attr) ((unsigned long)(addr) | (unsigned long)(attr))
-#define set_pml4t(pml4tptr,pml4tval) (*(pml4tptr) = (pml4tval))
-
-#define VM_PML4T (KERNEL_BASE + 0x1000)
-#define VM_PDPT  (KERNEL_BASE + 0x2000)
-#define VM_PDT   (KERNEL_BASE + 0x3000)
 
 #define KERNEL_MEM_OFFSET 0xffffffff80000000
 #define PHYS_MEM_OFFSET 0xffff800000000000

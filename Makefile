@@ -40,10 +40,10 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel/kernel.bin
 .PHONY: run clean debug
 
 run: disk.img boot/uefi/OVMF.fd
-	qemu-system-x86_64 -pflash boot/uefi/OVMF.fd -hda disk.img -m 512M
+	qemu-system-x86_64 -pflash boot/uefi/OVMF.fd -hda disk.img -m 2G
 
 debug: disk.img boot/uefi/OVMF.fd
-	qemu-system-x86_64 -S -s -pflash boot/uefi/OVMF.fd -hda disk.img & gdb -ex "target remote localhost:1234" -ex "symbol-file ./kernel/kernel.elf"
+	qemu-system-x86_64 -S -s -pflash boot/uefi/OVMF.fd -hda disk.img -m 2G & gdb -ex "target remote localhost:1234" -ex "symbol-file ./kernel/kernel.elf"
 
 clean:
 	rm -rf disk.img
