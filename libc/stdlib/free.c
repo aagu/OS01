@@ -6,7 +6,7 @@
 void free (void * ptr)
 {
 #if defined(__is_libk)
-	return kfree(ptr);
+	kfree(ptr);
 #else
 	// TODO: Implement stdio and the write system call.
     return;

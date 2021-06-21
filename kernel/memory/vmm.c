@@ -71,6 +71,4 @@ void vmm_init()
     // dump_memory_map();
     
     switch_tlb(kernel_map);
-
-    return 0;
 }

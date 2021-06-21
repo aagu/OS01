@@ -2,7 +2,9 @@
 #include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/x86_64/asm.h>
 #include <kernel/printk.h>
-#include <hw.h>
+#include <stddef.h>
+#include <kernel/softirq.h>
+#include <string.h>
 
 #define SAVE_ALL				\
 	"cld;			\n\t"		\
@@ -108,6 +110,47 @@ void (* interrupt[24])(void)=
 	IRQ0x37_interrupt,
 };
 
+int32_t register_irq(uint64_t nr, void * arg,
+        void (*handler)(uint64_t nr, uint64_t parameter, pt_regs_t * regs),
+		uint64_t parameter,
+        hw_int_controller_t * controller,
+        const char * irq_name)
+{
+	irq_desc_t * p = &irq_table[nr - 32];
+
+	p->controller = controller;
+	strcpy(p->irq_name, irq_name);
+	p->parameter = parameter;
+	p->flags = 0;
+	p->handler = handler;
+
+	if (p->controller != NULL)
+	{
+		p->controller->install(nr, arg);
+		p->controller->enable(nr);
+	}
+
+	return 1;
+}
+
+uint32_t unregister_irq(uint64_t nr)
+{
+	irq_desc_t* p = &irq_table[nr - 32];
+
+	if (p->controller != NULL)
+	{
+		p->controller->disable(nr);
+		p->controller->uninstall(nr);
+	}
+	p->controller = NULL;
+	p->irq_name = NULL;
+	p->parameter = 0;
+	p->flags = 0;
+	p->handler = NULL;
+
+	return 1;
+}
+
 void irq_install()
 {
     for (int i = 32; i < 56; i++)
@@ -115,28 +158,5 @@ void irq_install()
         set_intr_gate(i, 2, interrupt[i - 32]);
     }
 
-    color_printk(YELLOW, BLACK, "8259A init\n");
-
-    //8259A Master
-    outb(0x20, 0x11);
-    outb(0x21, 0x20);
-    outb(0x21, 0x04);
-    outb(0x21, 0x01);
-
-    //8259A Slave
-    outb(0xa0, 0x11);
-    outb(0xa1, 0x28);
-    outb(0xa1, 0x02);
-    outb(0xa1, 0x01);
-
-    outb(0x21, 0x01);
-    outb(0xa1, 0x00);
-
-    sti();
-}
-
-void do_IRQ(uint64_t regs,uint64_t nr)	//regs:rsp,nr
-{
-	color_printk(RED,BLACK,"do_IRQ:%#08x\t",nr);
-	outb(0x20,0x20);
+	softirq_init();
 }

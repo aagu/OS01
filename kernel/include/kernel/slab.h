@@ -36,5 +36,6 @@ extern struct Slab_Cache kmalloc_cache_size[16];
 void * kmalloc(size_t size);
 void * kcalloc(size_t size);
 size_t kfree(void * address);
+size_t slab_init();
 
 #endif

@@ -7,18 +7,13 @@
 #include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/x86_64/asm.h>
 #include <kernel/interrupt.h>
+#include <device/pic.h>
 
 extern char _text;
 extern char _etext;
 extern char _edata;
 extern char _erodata;
 extern char _end;
-
-int my_divide_error(int i, int j)
-{
-    i = 1/0;
-    return i + j;
-}
 
 int kernel_main(struct BOOT_INFO *bootinfo)
 {
@@ -48,7 +43,7 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     frame_buffer_init();
     color_printk(GREEN, BLACK, "frame buffer remap succeed\n");
 
-    my_divide_error(1, 3);
+    pic_init();
 
     while(1)
     {

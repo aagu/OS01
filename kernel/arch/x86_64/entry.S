@@ -55,8 +55,14 @@ RESTORE_ALL:
 ret_from_exception:
 	/*GET_CURRENT(%ebx)	need rewrite*/
 ENTRY(ret_from_intr)
+	movq	$-1,	%rcx
+	testq	softirq_status(%rip),	%rcx
+	jnz	softirq_handler
 	jmp	RESTORE_ALL	/*need rewrite*/
 
+softirq_handler:
+	callq	do_softirq
+	jmp	RESTORE_ALL
 
 ENTRY(divide_error)
 	pushq	$0

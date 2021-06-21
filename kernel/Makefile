@@ -7,15 +7,17 @@ include $(ARCHDIR)/make.config
 DESTDIR=$(SYSROOT)
 
 KERNEL_SOURCES := \
+	intr/irq.c \
+	intr/softirq.c \
 	kernel/main.c \
 	kernel/printk.c \
 	kernel/panic.c \
-	kernel/interrupt.c \
 	kernel/trace.c \
 	memory/pmm.c \
 	memory/vmm.c \
 	memory/slab.c \
-	memory/dump.c
+	memory/dump.c \
+	pic/8259A.c
 
 KERNEL_OBJECTS := \
 	$(KERNEL_SOURCES:.c=.o) \
@@ -46,7 +48,7 @@ kernel/font.o: kernel/font.psf
 	$(LD) -r -b binary -o $@ $<
 
 # temporary solution to avoid interrupt code asigned to .bss
-kernel/interrupt.o: kernel/interrupt.c
+intr/irq.o: intr/irq.c
 	$(CC) $(CFLAGS) -I$(KERNEL_HEADERS) -O1 -c $< -o $@
 
 kernel.elf: $(KERNEL_OBJECTS) $(ARCHDIR)/linker.ld

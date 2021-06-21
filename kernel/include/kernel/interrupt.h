@@ -30,8 +30,9 @@ typedef struct irq_desc
 
 irq_desc_t irq_table[NR_IQRS] = {0};
 
-int32_t register_irq(uint64_t irq, void * arg,
+int32_t register_irq(uint64_t nr, void * arg,
         void (*handler)(uint64_t nr, uint64_t parameter, pt_regs_t * regs),
+        uint64_t parameter,
         hw_int_controller_t * controller,
         const char * irq_name);
 

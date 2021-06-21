@@ -29,7 +29,7 @@ struct Slab * kmalloc_create(uint64_t size)
     uint32_t i;
     struct Slab * slab = NULL;
     struct Page * page = NULL;
-    uint64_t * vaddress = NULL;
+    // uint64_t * vaddress = NULL;
     int64_t structsize = 0;
 
     page = alloc_pages(ZONE_NORMAL,1,0);
@@ -57,7 +57,7 @@ struct Slab * kmalloc_create(uint64_t size)
         slab->free_count = (PAGE_2M_SIZE - (PAGE_2M_SIZE / size / 8) - sizeof(struct Slab)) / size;
         slab->using_count = 0;
         slab->color_count = slab->free_count;
-        slab->address = page->phy_address;
+        slab->address = (void *)page->phy_address;
         slab->page = page;
         list_init(&slab->list);
 
@@ -83,7 +83,7 @@ struct Slab * kmalloc_create(uint64_t size)
     case 524288:
     case 1048576:
 
-        slab = (struct SLab *)kmalloc(sizeof(struct Slab));
+        slab = (struct Slab *)kmalloc(sizeof(struct Slab));
 
         slab->free_count = PAGE_2M_SIZE / size;
         slab->using_count = 0;
@@ -94,7 +94,7 @@ struct Slab * kmalloc_create(uint64_t size)
         slab->color_map = (uint64_t *)kmalloc(slab->color_length);
         memset(slab->color_map, 0xff, slab->color_length);
 
-        slab->address = page->phy_address;
+        slab->address = (void *)page->phy_address;
         slab->page = page;
         list_init(&slab->list);
 
