@@ -8,6 +8,8 @@
 #include <kernel/arch/x86_64/asm.h>
 #include <kernel/interrupt.h>
 #include <device/pic.h>
+#include <driver/rtc.h>
+#include <stdlib.h>
 
 extern char _text;
 extern char _etext;
@@ -44,6 +46,11 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     color_printk(GREEN, BLACK, "frame buffer remap succeed\n");
 
     pic_init();
+
+    datetime_t * dt = (datetime_t *)malloc(sizeof(datetime_t));
+    rtc_read_datetime(dt);
+    color_printk(GREEN, BLACK, "rtc time: %d-%d-%d %02d:%02d:%02d\n", dt->year, dt->month, dt->day, dt->hour, dt->minute, dt->second);
+    free(dt);
 
     while(1)
     {

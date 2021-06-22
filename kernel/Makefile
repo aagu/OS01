@@ -17,7 +17,8 @@ KERNEL_SOURCES := \
 	memory/vmm.c \
 	memory/slab.c \
 	memory/dump.c \
-	pic/8259A.c
+	pic/8259A.c \
+	driver/rtc.c
 
 KERNEL_OBJECTS := \
 	$(KERNEL_SOURCES:.c=.o) \
