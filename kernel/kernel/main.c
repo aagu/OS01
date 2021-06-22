@@ -52,6 +52,11 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     color_printk(GREEN, BLACK, "rtc time: %d-%d-%d %02d:%02d:%02d\n", dt->year, dt->month, dt->day, dt->hour, dt->minute, dt->second);
     free(dt);
 
+    dt = (datetime_t *)malloc(sizeof(datetime_t));
+    rtc_read_datetime(dt);
+    color_printk(GREEN, BLACK, "rtc time: %d-%d-%d %02d:%02d:%02d\n", dt->year, dt->month, dt->day, dt->hour, dt->minute, dt->second);
+    free(dt);
+
     while(1)
     {
         hlt();

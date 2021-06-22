@@ -187,6 +187,7 @@ size_t kfree(void * address)
 
     for (i = 0;i < 16; i++)
     {
+        slab = kmalloc_cache_size[i].cache_pool;
         do
         {
             if (slab->address == page_base_address)
