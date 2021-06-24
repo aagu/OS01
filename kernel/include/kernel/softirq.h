@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define TIMER_IRQ (1<<0)
+#define TIMER_SIRQ (1<<0)
 
 extern uint64_t softirq_status;
 

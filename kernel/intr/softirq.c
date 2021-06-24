@@ -31,7 +31,6 @@ void unregister_softirq(int nr)
 void do_softirq()
 {
 	int i;
-	sti();
 	for(i = 0;i < 64 && softirq_status;i++)
 	{
 		if(softirq_status & (1 << i))
@@ -40,7 +39,6 @@ void do_softirq()
 			softirq_status &= ~(1 << i);
 		}
 	}
-	cli();
 }
 
 void softirq_init()

@@ -1,6 +1,7 @@
 #include <device/pic.h>
 #include <kernel/printk.h>
 #include <hw.h>
+#include <kernel.h>
 #include <kernel/arch/x86_64/asm.h>
 #include <kernel/arch/x86_64/regs.h>
 #include <kernel/interrupt.h>
@@ -11,19 +12,19 @@ void pic_init()
     color_printk(YELLOW, BLACK, "8259A init\n");
 
     //8259A Master
-    outb(0x20, 0x11);
-    outb(0x21, 0x20);
-    outb(0x21, 0x04);
-    outb(0x21, 0x01);
+    outb(MASTER_ICW1, 0x11);
+    outb(MASTER_ICW2, 0x20);
+    outb(MASTER_ICW3, 0x04);
+    outb(MASTER_ICW4, 0x01);
 
     //8259A Slave
-    outb(0xa0, 0x11);
-    outb(0xa1, 0x28);
-    outb(0xa1, 0x02);
-    outb(0xa1, 0x01);
+    outb(SLAVE_ICW1, 0x11);
+    outb(SLAVE_ICW2, 0x28);
+    outb(SLAVE_ICW3, 0x02);
+    outb(SLAVE_ICW4, 0x01);
 
-    outb(0x21, 0xff);
-    outb(0xa1, 0xff);
+    outb(MASTER_OCW1, 0xff);
+    outb(SLAVE_OCW1, 0xff);
 
     sti();
 }
@@ -31,7 +32,6 @@ void pic_init()
 void do_IRQ(pt_regs_t * regs, uint64_t nr)	//regs,nr
 {
     cli();
-	outb(0x20,0x20);
     switch (nr & 0x80)
     {
     case 0x00:
@@ -52,4 +52,53 @@ void do_IRQ(pt_regs_t * regs, uint64_t nr)	//regs,nr
         break;
     }
     sti();
+}
+
+void pic_enable(uint64_t nr)
+{
+    uint16_t port;
+    uint8_t value;
+    if (nr >= 0x28)
+    {
+        nr -= 8;
+        port = SLAVE_OCW1;
+    }
+    else
+        port = MASTER_OCW1;
+
+    value = inb(port) & ~(1 << nr - 0x20);
+    outb(port, value);
+}
+
+void pic_disable(uint64_t nr)
+{
+    uint16_t port;
+    uint8_t value;
+    if (nr >= 0x28)
+    {
+        nr -= 8;
+        port = SLAVE_OCW1;
+    }
+    else
+        port = MASTER_OCW1;
+
+    value = inb(port) | (1 << nr - 0x20);
+    outb(port, value);
+}
+
+uint64_t pic_install(uint64_t nr, void * data)
+{
+    color_printk(BLUE, BLACK, "pic device %d installed\n", nr - 0x20);
+}
+
+void pic_uninstall(uint64_t nr)
+{
+    color_printk(BLUE, BLACK, "pic device %d uninstalled\n", nr - 0x20);
+}
+
+void pic_ack(uint64_t nr)
+{
+    if (nr >= 0x28)
+        outb(SLAVE_OCW3, 0x20);
+    outb(MASTER_OCW3, 0x20);
 }

@@ -8,7 +8,8 @@
 #include <kernel/arch/x86_64/asm.h>
 #include <kernel/interrupt.h>
 #include <device/pic.h>
-#include <driver/rtc.h>
+#include <driver/pit.h>
+#include <device/timer.h>
 #include <stdlib.h>
 
 extern char _text;
@@ -17,9 +18,16 @@ extern char _edata;
 extern char _erodata;
 extern char _end;
 
+timer_t * timer;
+
+void test_timer(void * data)
+{
+    color_printk(GREEN, BLACK, "test_timer");
+    free(timer);
+}
+
 int kernel_main(struct BOOT_INFO *bootinfo)
 {
-    // int32_t i;
     Pos.FB_addr = (uint32_t *)bootinfo->Graphics_Info.FrameBufferBase;
     Pos.FB_length = bootinfo->Graphics_Info.FrameBufferSize;
     Pos.XResolution = bootinfo->Graphics_Info.HorizontalResolution;
@@ -46,16 +54,11 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     color_printk(GREEN, BLACK, "frame buffer remap succeed\n");
 
     pic_init();
+    timer_init();
+    pit_init();
 
-    datetime_t * dt = (datetime_t *)malloc(sizeof(datetime_t));
-    rtc_read_datetime(dt);
-    color_printk(GREEN, BLACK, "rtc time: %d-%d-%d %02d:%02d:%02d\n", dt->year, dt->month, dt->day, dt->hour, dt->minute, dt->second);
-    free(dt);
-
-    dt = (datetime_t *)malloc(sizeof(datetime_t));
-    rtc_read_datetime(dt);
-    color_printk(GREEN, BLACK, "rtc time: %d-%d-%d %02d:%02d:%02d\n", dt->year, dt->month, dt->day, dt->hour, dt->minute, dt->second);
-    free(dt);
+    timer = create_timer(test_timer, NULL, 10);;
+    add_timer(timer);
 
     while(1)
     {
