@@ -6,7 +6,7 @@
 #include <stdlib.h>
 
 // kernel map
-uint64_t *kernel_map = NULL;
+uint64_t *kernel_map = (uint64_t *)Phy_To_Virt(0x101000);
 
 // get next Level of map
 uint64_t *get_next_level(uint64_t *current_level, size_t entry, uint64_t flags)
@@ -60,15 +60,11 @@ static void dump_memory_map()
 
 void vmm_init()
 {
-    kernel_map = (uint64_t *)calloc(PAGE_4K_SIZE);
-
     // map 0~32M
     for (uintptr_t i = 0; i < (PAGE_2M_SIZE << 4); i += PAGE_2M_SIZE)
     {
         vmm_map_page(kernel_map, i, i, PAGE_KERNEL_Page);
     }
-
-    // dump_memory_map();
     
     switch_tlb(kernel_map);
 }

@@ -11,12 +11,9 @@
 #include <driver/pit.h>
 #include <device/timer.h>
 #include <stdlib.h>
-
-extern char _text;
-extern char _etext;
-extern char _edata;
-extern char _erodata;
-extern char _end;
+#include <fs/vfs.h>
+#include <fs/tmpfs.h>
+#include <fs/stat.h>
 
 timer_t * timer;
 
@@ -37,6 +34,8 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     set_tss64(0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00);
     sys_vector_install();
     irq_install();
+
+    frame_buffer_early_init();
     
     color_printk(RED, BLACK, "Hello, World!\n");
 

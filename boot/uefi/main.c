@@ -136,8 +136,14 @@ int main(int argc, char **argv)
         return 1;
     }
     
-    struct BOOT_INFO * kern_boot_para_info = (struct BOOT_INFO *)
-        malloc(sizeof(struct BOOT_INFO));
+    efi_physical_address_t boot_param_address = 0x60000;
+    status = gBS->AllocatePages(AllocateAddress, EfiLoaderData, 2, &boot_param_address);
+    if(EFI_ERROR(status))
+    {
+        printf("unable to alloc memory\n");
+        return status;
+    }
+    struct BOOT_INFO * kern_boot_para_info = (struct BOOT_INFO *)boot_param_address;
     kern_boot_para_info->RSDP = 0x0;
     kern_boot_para_info->BootFromBIOS = 0; // may support boot from BIOS later :)
     kern_boot_para_info->Graphics_Info.HorizontalResolution = gop->Mode->Information->HorizontalResolution;

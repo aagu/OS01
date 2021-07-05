@@ -13,6 +13,11 @@ ENTRY(_start)
 	mov	%ax,	%ss
 	mov	$0x7e00,	%esp
 
+//=======	load	cr3
+
+	movq $0x101000, %rax
+	movq %rax,	%cr3
+
 //=======	load GDTR
 
 	lgdt	GDT_POINTER(%rip)
@@ -30,7 +35,7 @@ ENTRY(_start)
 
 	movq    $0x7e00,	%rsp
 
-//=======	load	cr3
+//======    switch seg to match vma
 
 	movq	switch_seg(%rip),	%rax
 	pushq	$0x08
@@ -171,6 +176,48 @@ Loop:
 
 int_msg:
 	.asciz "Unknown interrupt or fault at RIP\n"
+
+//=======	init page
+.align 8
+
+.org	0x1000
+
+__PML4E:
+
+	.quad	0x102003
+	.fill	255,8,0
+	.quad	0x102003
+	.fill	255,8,0
+
+.org	0x2000
+
+__PDPTE:
+	
+	.quad	0x103003	/* 0x103003 */
+	.fill	511,8,0
+
+.org	0x3000
+
+__PDE:
+
+	.quad	0x000083	
+	.quad	0x200083
+	.quad	0x400083
+	.quad	0x600083
+	.quad	0x800083		/* 0x800083 */
+	.quad	0xa00083
+	.quad	0xc00083
+	.quad	0xe00083
+	.quad	0x1000083
+	.quad	0x1200083
+	.quad	0x1400083
+	.quad	0x1600083
+	.quad	0x1800083
+	.quad	0x1a00083
+	.quad	0x1c00083
+	.quad	0x1e00083
+
+	.fill	496,8,0
 
 //=======	GDT_Table
 
