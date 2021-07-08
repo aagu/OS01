@@ -6,14 +6,14 @@
 #include <stdlib.h>
 
 // kernel map
-uint64_t *kernel_map = (uint64_t *)Phy_To_Virt(0x101000);
+uint64_t *kernel_map;
 
 // get next Level of map
 uint64_t *get_next_level(uint64_t *current_level, size_t entry, uint64_t flags)
 {
     if (!current_level[entry] & 1)
     {
-        current_level[entry] = (uint64_t)calloc(PAGE_4K_SIZE);
+        current_level[entry] = Virt_To_Phy((uint64_t)calloc(PAGE_4K_SIZE));
         current_level[entry] |= flags;
     }
     return (uint64_t *) (current_level[entry] & ~(0x1ff));
@@ -60,11 +60,21 @@ static void dump_memory_map()
 
 void vmm_init()
 {
-    // map 0~32M
-    for (uintptr_t i = 0; i < (PAGE_2M_SIZE << 4); i += PAGE_2M_SIZE)
+    kernel_map = (uint64_t *)Phy_To_Virt(0x101000);
+    uint64_t i, j;
+    for (i = 0; i < PMMngr.zones_size; i++)
     {
-        vmm_map_page(kernel_map, i, i, PAGE_KERNEL_Page);
+        struct Zone * z = PMMngr.zones_struct + i;
+        struct Page * p = z->pages_group;
+
+        if (ZONE_UNMAPPED_INDEX && i == ZONE_UNMAPPED_INDEX)
+            break;
+        
+        for (j = 0; j < z->pages_length; j++, p++)
+        {
+            vmm_map_page(kernel_map, p->phy_address, Phy_To_Virt(p->phy_address), PAGE_KERNEL_Page);
+        }
     }
     
-    switch_tlb(kernel_map);
+    flush_tlb();
 }

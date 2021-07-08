@@ -143,6 +143,7 @@ int main(int argc, char **argv)
         printf("unable to alloc memory\n");
         return status;
     }
+    memset((void *)boot_param_address, 0x1000, 0);
     struct BOOT_INFO * kern_boot_para_info = (struct BOOT_INFO *)boot_param_address;
     kern_boot_para_info->RSDP = 0x0;
     kern_boot_para_info->BootFromBIOS = 0; // may support boot from BIOS later :)
@@ -171,7 +172,6 @@ err:    printf("Unable to get memory map\n");
         return 1;
     }
 
-    kern_boot_para_info->E820_Info.E820_Entry = (struct E820_ENTRY*)malloc(sizeof(struct E820_ENTRY) * 32);
 	struct E820_ENTRY *LastE820 = NULL;
     struct E820_ENTRY *E820p = kern_boot_para_info->E820_Info.E820_Entry;
 	unsigned long LastEndAddr = 0;

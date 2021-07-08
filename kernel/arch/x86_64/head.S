@@ -33,7 +33,7 @@ ENTRY(_start)
 	mov %ax,	%gs
 	mov %ax,	%ss
 
-	movq    $0x7e00,	%rsp
+	movq    $0xffff800000007e00,	%rsp
 
 //======    switch seg to match vma
 

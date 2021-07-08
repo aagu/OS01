@@ -199,7 +199,7 @@ void pmm_init(struct MEMORY_INFO E820_Info)
     color_printk(ORANGE,BLACK,"start_code:%#018lx,end_code:%#018lx,end_data:%#018lx,start_brk:%#018lx,end_of_struct:%#018lx\n",PMMngr.start_code,PMMngr.end_code,PMMngr.end_data,PMMngr.start_brk, PMMngr.end_of_struct);
 
     // page from 0 to PMMngr.end_of_struct are all ready used
-    i = PMMngr.end_of_struct >> PAGE_2M_SHIFT;
+    i = Virt_To_Phy(PMMngr.end_of_struct) >> PAGE_2M_SHIFT;
 
     for (j = 1; j <= i; j++)
     {

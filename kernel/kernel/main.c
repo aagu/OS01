@@ -25,7 +25,7 @@ void test_timer(void * data)
 
 int kernel_main(struct BOOT_INFO *bootinfo)
 {
-    Pos.FB_addr = (uint32_t *)bootinfo->Graphics_Info.FrameBufferBase;
+    Pos.Phy_addr = (uint32_t *)bootinfo->Graphics_Info.FrameBufferBase;
     Pos.FB_length = bootinfo->Graphics_Info.FrameBufferSize;
     Pos.XResolution = bootinfo->Graphics_Info.HorizontalResolution;
     Pos.YResolution = bootinfo->Graphics_Info.VerticalResolution;

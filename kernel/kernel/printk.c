@@ -111,7 +111,7 @@ void frame_buffer_early_init()
 	for (uintptr_t i = 0; i < Pos.FB_length; i += PAGE_2M_SIZE)
 	{
 		size_t level2 = (size_t) ((0xffff800000e00000 + i) >> PAGE_2M_SHIFT) & 0x1ff;
-		pml2[level2] = (((uint64_t)Pos.FB_addr + i) & PAGE_2M_MASK) | (PAGE_KERNEL_Page | PAGE_PWT | PAGE_PCD);
+		pml2[level2] = (((uint64_t)Pos.Phy_addr + i) & PAGE_2M_MASK) | (PAGE_KERNEL_Page | PAGE_PWT | PAGE_PCD);
 	}
 	Pos.FB_addr = (uint32_t *)0xffff800000e00000;
 
@@ -123,7 +123,7 @@ void frame_buffer_init()
 {
 	for (uintptr_t i = 0; i < Pos.FB_length; i += PAGE_2M_SIZE)
 	{
-		vmm_map_page(kernel_map, i + (uint64_t)Pos.FB_addr, VIRT_FRAMEBUFFER_OFFSET + i, PAGE_KERNEL_Page | PAGE_PWT | PAGE_PCD);
+		vmm_map_page(kernel_map, i + (uint64_t)Pos.Phy_addr, VIRT_FRAMEBUFFER_OFFSET + i, PAGE_KERNEL_Page | PAGE_PWT | PAGE_PCD);
 	}
 	Pos.FB_addr = (uint32_t *)VIRT_FRAMEBUFFER_OFFSET;
 

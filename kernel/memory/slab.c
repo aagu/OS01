@@ -247,7 +247,7 @@ size_t kfree(void * address)
 size_t slab_init()
 {
     struct Page * page = NULL;
-    uint64_t * physical = NULL;
+    uint64_t * virtual = NULL;
     uint64_t i, j;
 
     uint64_t tmp_address = PMMngr.end_of_struct;
@@ -274,8 +274,8 @@ size_t slab_init()
         kmalloc_cache_size[i].total_using = 0;
     }
     
-    i = PMMngr.end_of_struct >> PAGE_2M_SHIFT;
-    for (j = PAGE_2M_ALIGN(tmp_address) >> PAGE_2M_SHIFT; j <= i; j++)
+    i = Virt_To_Phy(PMMngr.end_of_struct) >> PAGE_2M_SHIFT;
+    for (j = PAGE_2M_ALIGN(Virt_To_Phy(tmp_address)) >> PAGE_2M_SHIFT; j <= i; j++)
     {
         page = PMMngr.pages_struct + j;
         *(PMMngr.bits_map + ((page->phy_address >> PAGE_2M_SHIFT) >> 6)) |= 1UL << (page->phy_address >> PAGE_2M_SHIFT) % 64;
@@ -288,8 +288,8 @@ size_t slab_init()
 
     for(i = 0;i < 16;i++)
 	{
-		physical = (unsigned long *)((PMMngr.end_of_struct + PAGE_2M_SIZE * i + PAGE_2M_SIZE - 1) & PAGE_2M_MASK);
-		page = Phy_to_2M_Page(physical);
+		virtual = (unsigned long *)((PMMngr.end_of_struct + PAGE_2M_SIZE * i + PAGE_2M_SIZE - 1) & PAGE_2M_MASK);
+		page = Virt_To_2M_Page(virtual);
 
 		*(PMMngr.bits_map + ((page->phy_address >> PAGE_2M_SHIFT) >> 6)) |= 1UL << (page->phy_address >> PAGE_2M_SHIFT) % 64;
 		page->zone_struct->page_using_count++;
@@ -298,7 +298,7 @@ size_t slab_init()
 		page_init(page,PG_PTable_Mapped | PG_Kernel_Init | PG_Kernel);
 
 		kmalloc_cache_size[i].cache_pool->page = page;
-		kmalloc_cache_size[i].cache_pool->address = physical;
+		kmalloc_cache_size[i].cache_pool->address = virtual;
 	}
 
 	color_printk(ORANGE,BLACK,"3.PMMngr.bits_map:%#018lx\tzone_struct->page_using_count:%d\tzone_struct->page_free_count:%d\n",*PMMngr.bits_map,PMMngr.zones_struct->page_using_count,PMMngr.zones_struct->page_free_count);
