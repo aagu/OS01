@@ -1,7 +1,8 @@
-export CC=$(HOME)/opt/cross/bin/x86_64-elf-gcc
-export LD=$(HOME)/opt/cross/bin/x86_64-elf-ld
-export AS=$(HOME)/opt/cross/bin/x86_64-elf-as
-export AR=$(HOME)/opt/cross/bin/x86_64-elf-ar
+base:=$(shell pwd)
+export CC=${base}/toolchain/cross/bin/x86_64-elf-gcc
+export LD=$(base)/toolchain/cross/bin/x86_64-elf-ld
+export AS=$(base)/toolchain/cross/bin/x86_64-elf-as
+export AR=$(base)/toolchain/cross/bin/x86_64-elf-ar
 
 export PREFIX=/usr
 export EXEC_PREFIX=${PREFIX}
@@ -9,7 +10,7 @@ export BOOTDIR=/boot
 export LIBDIR=${EXEC_PREFIX}/lib
 export INCLUDEDIR=${PREFIX}/include
 
-export SYSROOT=$(shell pwd)/sysroot
+export SYSROOT=$(base)/sysroot
 
 export CFLAGS=--sysroot=${SYSROOT} -isystem=${INCLUDEDIR} -g
 
