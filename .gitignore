@@ -3,7 +3,8 @@
 *.lst
 *.elf
 *.o
-disk.img
+*.a
+*.img
 *.ipch
 sysroot/*
 toolchain/*

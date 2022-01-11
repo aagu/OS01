@@ -23,6 +23,7 @@ typedef struct position
 	int32_t XPosition;
 	int32_t YPosition;
 
+	uint32_t * Phy_addr;
 	uint32_t * FB_addr; // memory should be write in 32bits block
 	uint64_t FB_length;
 } position;

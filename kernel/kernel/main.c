@@ -11,9 +11,12 @@
 #include <driver/pit.h>
 #include <device/timer.h>
 #include <stdlib.h>
-#include <fs/vfs.h>
-#include <fs/tmpfs.h>
-#include <fs/stat.h>
+
+extern char _text;
+extern char _etext;
+extern char _edata;
+extern char _erodata;
+extern char _end;
 
 timer_t * timer;
 
