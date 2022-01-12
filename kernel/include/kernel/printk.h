@@ -34,4 +34,6 @@ void putchark(unsigned int FRcolor,unsigned int BKcolor,unsigned char font);
 int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...);
 void frame_buffer_init();
 
+void serial_printk(const char * fmt,...);
+
 #endif

@@ -20,6 +20,7 @@ KERNEL_SOURCES := \
 	pic/8259A.c \
 	driver/rtc.c \
 	driver/pit.c \
+	driver/serial.c \
 	timer/timer.c
 
 KERNEL_OBJECTS := \

@@ -9,6 +9,7 @@
 #include <kernel/interrupt.h>
 #include <device/pic.h>
 #include <driver/pit.h>
+#include <driver/serial.h>
 #include <device/timer.h>
 #include <stdlib.h>
 
@@ -37,6 +38,8 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     set_tss64(0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00);
     sys_vector_install();
     irq_install();
+    init_serial();
+    serial_printk("serial port init succedd\n");
 
     frame_buffer_early_init();
     

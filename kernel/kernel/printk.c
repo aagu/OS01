@@ -2,6 +2,7 @@
 #include <kernel/memory.h>
 #include <kernel/vmm.h>
 #include <kernel/pmm.h>
+#include <driver/serial.h>
 #include <stdio.h>
 #include <font.h>
 #include <stddef.h>
@@ -70,7 +71,7 @@ int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
 				Pos.YPosition--;
 				if(Pos.YPosition < 0)
 					Pos.YPosition = (Pos.YResolution / font->height - 1) * font->height;
-			}	
+			}
 			putchark(FRcolor , BKcolor , ' ');	
 		}
 		else if((unsigned char)*(buf + count) == '\t')
@@ -128,4 +129,21 @@ void frame_buffer_init()
 	Pos.FB_addr = (uint32_t *)VIRT_FRAMEBUFFER_OFFSET;
 
 	flush_tlb();
+}
+
+void serial_printk(const char * fmt,...)
+{
+	int i = 0;
+	int count = 0;
+	int line = 0;
+	va_list args;
+
+	va_start(args, fmt);
+	i = vsprintf(buf, fmt, args);
+	va_end(args);
+
+	for(count = 0;count < i ;count++)
+	{
+		write_serial((unsigned char)*(buf + count));
+	}
 }
