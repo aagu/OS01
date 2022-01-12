@@ -1,0 +1,32 @@
+{
+    "files.associations": {
+        "printk.h": "c",
+        "*.tcc": "c",
+        "unordered_map": "c",
+        "fstream": "c",
+        "istream": "c",
+        "ostream": "c",
+        "streambuf": "c",
+        "functional": "c",
+        "font.h": "c",
+        "memory.h": "c",
+        "string_view": "c",
+        "string.h": "c",
+        "panic.h": "c",
+        "slab.h": "c",
+        "gate.h": "c",
+        "trap.h": "c",
+        "trace.h": "c",
+        "pit.h": "c",
+        "timer.h": "c",
+        "stdbool.h": "c",
+        "strings.h": "c",
+        "pseudofs.h": "c",
+        "stat.h": "c",
+        "posix.h": "c",
+        "vfs.h": "c",
+        "task.h": "c",
+        "vmm.h": "c",
+        "pmm.h": "c"
+    }
+}

@@ -5,7 +5,6 @@
 *.o
 disk.img
 *.ipch
-.vscode/*
 sysroot/*
 toolchain/*
 !toolchain/setup.sh
