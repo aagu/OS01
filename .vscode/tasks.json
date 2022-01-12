@@ -4,21 +4,11 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Build OS",
-            "type": "shell",
-            "linux": {
-                "command": "cd physical && make clean && make"
-            }
-        },
-        {
             "label": "Launch QEMU",
             "type": "shell",
             "isBackground": true,
-            "windows": {
-                "command": "start -FilePath 'qemu-system-x86_64' -ArgumentList '-S -gdb tcp::1234 -boot hda disk.img -m 2048'"
-            },
             "linux": {
-                "command": "qemu-system-x86_64 -L ${workspaceFolder}/boot/uefi -pflash ${workspaceFolder}/boot/uefi/OVMF.fd -S -s -hda ${workspaceFolder}/disk.img -m 2048"
+                "command": "make debug"
             },
             "problemMatcher": {
                 "pattern": {

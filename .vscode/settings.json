@@ -27,6 +27,9 @@
         "vfs.h": "c",
         "task.h": "c",
         "vmm.h": "c",
-        "pmm.h": "c"
+        "pmm.h": "c",
+        "*.def": "c",
+        "*.inc": "c",
+        "internet": "c"
     }
 }
