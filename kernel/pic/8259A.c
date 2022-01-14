@@ -66,7 +66,7 @@ void pic_enable(uint64_t nr)
     else
         port = MASTER_OCW1;
 
-    value = inb(port) & ~(1 << nr - 0x20);
+    value = inb(port) & ~(1 << (nr - 0x20));
     outb(port, value);
 }
 
@@ -82,13 +82,14 @@ void pic_disable(uint64_t nr)
     else
         port = MASTER_OCW1;
 
-    value = inb(port) | (1 << nr - 0x20);
+    value = inb(port) | (1 << (nr - 0x20));
     outb(port, value);
 }
 
-uint64_t pic_install(uint64_t nr, void * data)
+uint64_t pic_install(uint64_t nr, void * data __attribute__((unused)))
 {
     color_printk(BLUE, BLACK, "pic device %d installed\n", nr - 0x20);
+    return 0;
 }
 
 void pic_uninstall(uint64_t nr)

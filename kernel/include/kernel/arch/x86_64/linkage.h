@@ -1,5 +1,5 @@
-#ifndef _KERNEL_LINKAGE_H
-#define _KERNEL_LINKAGE_H
+#ifndef _KERNEL_ARCH_LINKAGE_H
+#define _KERNEL_ARCH_LINKAGE_H
 
 /*
 */

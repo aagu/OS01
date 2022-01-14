@@ -1,6 +1,6 @@
-#ifndef _KERNEL_TRAP_H
+#ifndef _KERNEL_ARCH_TRAP_H
 
-#define _KERNEL_TRAP_H
+#define _KERNEL_ARCH_TRAP_H
 
 void divide_error();
 void debug();

@@ -16,7 +16,7 @@ hw_int_controller_t pit_controller =
     .ack = pic_ack,
 };
 
-void pit_handler(uint64_t nr, uint64_t parameter, pt_regs_t * regs)
+void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attribute__((unused)), pt_regs_t * regs __attribute__((unused)))
 {
     jiffies++;
 
@@ -26,7 +26,7 @@ void pit_handler(uint64_t nr, uint64_t parameter, pt_regs_t * regs)
 
 void pit_init()
 {
-    register_irq(32, NULL, &pit_handler, NULL, &pit_controller, "pit");
+    register_irq(32, NULL, &pit_handler, 0, &pit_controller, "pit");
     set_frequency(100); //100 times per sec
 }
 

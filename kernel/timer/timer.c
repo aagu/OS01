@@ -22,7 +22,7 @@ timer_t * create_timer(void (* func)(void * data), void * data, uint64_t expire_
     return timer;
 }
 
-void do_timer(void * data)
+void do_timer(void * data __attribute__((unused)))
 {
     timer_t * timer = container_of(list_next(&timer_list_head.list), timer_t, list);
     while ((!list_is_empty(&timer_list_head.list)) && (timer->expire_jiffies <= jiffies))

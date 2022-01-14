@@ -135,7 +135,6 @@ void serial_printk(const char * fmt,...)
 {
 	int i = 0;
 	int count = 0;
-	int line = 0;
 	va_list args;
 
 	va_start(args, fmt);

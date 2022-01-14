@@ -1,5 +1,5 @@
-#ifndef _KERNEL_ASM_H
-#define _KERNEL_ASM_H
+#ifndef _KERNEL_ARCH_ASM_H
+#define _KERNEL_ARCH_ASM_H
 
 #define hlt() __asm__ __volatile__("hlt")
 #define sti() 		__asm__ __volatile__ ("sti	\n\t":::"memory")

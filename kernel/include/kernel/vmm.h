@@ -38,7 +38,9 @@
 #define KERNEL_MEM_OFFSET 0xffffffff80000000
 #define PHYS_MEM_OFFSET 0xffff800000000000
 
-extern uint64_t *kernel_map;
+#define mmap uint64_t*
+
+extern mmap kernel_map;
 
 #define flush_tlb()				            \
 do								            \

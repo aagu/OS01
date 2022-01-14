@@ -21,7 +21,7 @@ extern char _end;
 
 timer_t * timer;
 
-void test_timer(void * data)
+void test_timer(void * data __attribute__((unused)))
 {
     color_printk(GREEN, BLACK, "test_timer");
     free(timer);
@@ -40,18 +40,25 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     irq_install();
     init_serial();
     serial_printk("serial port init succedd\n");
+    serial_printk("PMMgr: 0x%p\n", &PMMngr);
 
     frame_buffer_early_init();
     
     color_printk(RED, BLACK, "Hello, World!\n");
 
     PMMngr.start_code = (uint64_t)&_text;
+    serial_printk("_text: 0x%p\n", &_text);
     PMMngr.end_code = (uint64_t)&_etext;
+    serial_printk("_etext: 0x%p\n", &_etext);
     PMMngr.end_data = (uint64_t)&_edata;
+    serial_printk("_edata: 0x%p\n", &_edata);
     PMMngr.end_rodata = (uint64_t)&_erodata;
+    serial_printk("_erodata: 0x%p\n", &_erodata);
     PMMngr.start_brk = (uint64_t)&_end;
+    serial_printk("_end: 0x%p\n", &_end);
 
     pmm_init(bootinfo->E820_Info);
+    serial_printk("PMMgr.end_of_struct: 0x%p\n", PMMngr.end_of_struct);
 
     vmm_init();
 

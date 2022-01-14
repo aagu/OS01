@@ -2,7 +2,7 @@
 #include <kernel/printk.h>
 #include <stdbool.h>
 
-static uint64_t MemChar(uint64_t val)
+static uint64_t mem_char(uint64_t val)
 {
     return (val >= 0x20 && val < 0x80) ? val : '.';
 }
@@ -31,14 +31,14 @@ void mem_dump(const void * start, const void * end)
                 p[0x4], p[0x5], p[0x6], p[0x7],
                 p[0x8], p[0x9], p[0xa], p[0xb],
                 p[0xc], p[0xd], p[0xe], p[0xf],
-                MemChar(p[0x0]), MemChar(p[0x1]),
-                MemChar(p[0x2]), MemChar(p[0x3]),
-                MemChar(p[0x4]), MemChar(p[0x5]),
-                MemChar(p[0x6]), MemChar(p[0x7]),
-                MemChar(p[0x8]), MemChar(p[0x9]),
-                MemChar(p[0xa]), MemChar(p[0xb]),
-                MemChar(p[0xc]), MemChar(p[0xd]),
-                MemChar(p[0xe]), MemChar(p[0xf]));
+                mem_char(p[0x0]), mem_char(p[0x1]),
+                mem_char(p[0x2]), mem_char(p[0x3]),
+                mem_char(p[0x4]), mem_char(p[0x5]),
+                mem_char(p[0x6]), mem_char(p[0x7]),
+                mem_char(p[0x8]), mem_char(p[0x9]),
+                mem_char(p[0xa]), mem_char(p[0xb]),
+                mem_char(p[0xc]), mem_char(p[0xd]),
+                mem_char(p[0xe]), mem_char(p[0xf]));
             zero_ignore_print = false;
         }
         else

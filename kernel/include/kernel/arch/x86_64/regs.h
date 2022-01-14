@@ -1,5 +1,5 @@
-#ifndef _KERNEL_PTRACE_H
-#define _KERNEL_PTRACE_H
+#ifndef _KERNEL_ARCH_REGS_H
+#define _KERNEL_ARCH_REGS_H
 
 #include <stdint.h>
 

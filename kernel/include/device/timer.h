@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <list.h>
 
-extern uint64_t volatile jiffies = 0;
+extern uint64_t volatile jiffies;
 
 typedef struct timer
 {

@@ -6,10 +6,10 @@
 #include <stdlib.h>
 
 // kernel map
-uint64_t *kernel_map;
+mmap kernel_map;
 
 // get next Level of map
-uint64_t *get_next_level(uint64_t *current_level, size_t entry, uint64_t flags)
+mmap get_next_level(uint64_t *current_level, size_t entry, uint64_t flags)
 {
     if (!current_level[entry] & 1)
     {
@@ -77,4 +77,8 @@ void vmm_init()
     }
     
     flush_tlb();
+}
+
+mmap vmm_alloc_map() {
+    return (mmap)calloc(sizeof(mmap));
 }

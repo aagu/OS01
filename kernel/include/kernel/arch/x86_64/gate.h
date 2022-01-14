@@ -1,5 +1,5 @@
-#ifndef _KERNEL_GATE_H
-#define _KERNEL_GATE_H
+#ifndef _KERNEL_ARCH_GATE_H
+#define _KERNEL_ARCH_GATE_H
 
 struct desc_struct 
 {
