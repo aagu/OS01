@@ -3,16 +3,46 @@
 BINUTILS_VERVION=2.37
 GCC_VERSION=11.2.0
 
-DEPS=(wget build-essential bison flex libgmp3-dev libmpc-dev libmpfr-dev texinfo)
+. /etc/os-release
+
+function is_pkg_installed_dpkg(){
+    $(dpkg -s $1 >/dev/null 2>&1)
+    return $?
+}
+
+function install_pkg_dpkg(){
+    sudo apt install -y $@
+}
+
+function is_pkg_installed_pacman(){
+    $(pacman -Qi $1 >/dev/null 2>&1)
+    return $?
+}
+
+function install_pkg_pacman(){
+    sudo pacman -Sy --noconfirm $@
+}
+
+case $ID in
+    archarm)
+        DEPS=(wget base-devel gmp libmpc mpfr)
+        is_pkg_installed() { is_pkg_installed_pacman $@; }
+        install_pkg() { install_pkg_pacman $@; }
+        ;;
+    ubuntu)
+        DEPS=(wget build-essential bison flex libgmp3-dev libmpc-dev libmpfr-dev texinfo)
+        is_pkg_installed() { is_pkg_installed_dpkg $@; }
+        install_pkg() { install_pkg_dpkg $@; }
+        ;;
+    *)
+        echo "Current distro $ID is not supported"
+        exit 1
+        ;;
+esac
 
 export PREFIX="$(pwd)/cross"
 export TARGET=x86_64-elf
 export PATH="$PREFIX/bin:$PATH"
-
-function is_pkg_installed(){
-    $(dpkg -s $1 >/dev/null 2>&1)
-    return $?
-}
 
 function build_binutils(){
     if [[ -f binutils-${BINUTILS_VERVION}.tar.gz ]]; then
@@ -72,7 +102,7 @@ function check_requirement(){
         fi
     done
     if [[ -n "$deps" ]]; then
-        sudo apt install -y ${deps[@]}
+        install_pkg ${deps[@]}
     fi
 }
 
