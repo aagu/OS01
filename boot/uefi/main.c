@@ -31,8 +31,22 @@ struct BOOT_INFO
     boolean_t BootFromBIOS;
 };
 
-#define EXPECT_VBE_HEIGHT 900
-#define EXPECT_VBE_WIDTH 1440
+int EXPECT_VBE_HEIGHT = 900;
+int EXPECT_VBE_WIDTH = 1440;
+
+struct GRAPHICS_INFO* GetResolution(char *wah) {
+    const char delim[2] = "x";
+    char_t *w = strtok(wah, delim);
+    char_t *h = strtok(NULL, delim);
+    struct GRAPHICS_INFO *info = malloc(sizeof(struct GRAPHICS_INFO));
+    if (info == NULL)
+    {
+        return NULL;
+    }
+    info->VerticalResolution = atoi(h);
+    info->HorizontalResolution = atoi(w);
+    return info;
+}
 
 boolean_t CompareGuid(efi_guid_t * p1, efi_guid_t * p2)
 {
@@ -79,9 +93,67 @@ int main(int argc, char **argv)
     }
     else
     {
-        printf("unable to open kernel\n");
+        fprintf(stderr, "unable to open kernel\n");
         return 1;
     }
+    FILE *kconfig = NULL;
+    if((kconfig = fopen("config.txt", "r"))) {
+        fseek(kconfig, 0, SEEK_END);
+        long int size=ftell(kconfig);
+        fseek(kconfig, 0, SEEK_SET);
+        printf("config.txt found, size %d\n", size);
+        char *content = malloc(size + 1);
+        if(!content) {
+            fprintf(stderr, "unable to allocate memory for config.txt content");
+            return 1;
+        }
+        fread(content, size, 1, kconfig);
+        content[size] = 0;
+        fclose(kconfig);
+        const char delim[2] = " ";
+        for (long int i = 0; i <= size;)
+        {
+            long int j = i;
+            for (; j <= size; j++)
+            {
+                if (content[j] == '\n' || content[j] == 0)
+                {
+                    long int line_len = j - i;
+                    if (line_len == 0){ break; }
+                    printf("line length %d\n", line_len);
+                    char *line = malloc(line_len + 1);
+                    memset(line, 0, line_len);
+                    memcpy(line, content+i, line_len);
+                    char *tok = strtok(line, delim);
+                    if (strcmp(tok, "resolution") == 0)
+                    {
+                        tok = strtok(NULL, delim);
+                        struct GRAPHICS_INFO *info = GetResolution(tok);
+                        if (info != NULL)
+                        {
+                            printf("resolution config: height=%d, width=%d\n", info->VerticalResolution, info->HorizontalResolution);
+                            EXPECT_VBE_HEIGHT = info->VerticalResolution;
+                            EXPECT_VBE_WIDTH = info->HorizontalResolution;
+                            free(info);
+                        }
+                    }
+                    else
+                    {
+                        printf("unknown config line: %s\n", line);
+                    }
+                    free(line);
+                    break;
+                }
+            }
+            i = j + 1;
+        }
+        
+        free(content);
+    }
+    else
+    {
+        printf("config.txt not found, using default config\n");
+    }    
 
     // detect video modes
     efi_guid_t gopGuid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
@@ -96,6 +168,7 @@ int main(int argc, char **argv)
         for(i = 0; i < gop->Mode->MaxMode; i++) {
             status = gop->QueryMode(gop, i, &isiz, &info);
             if(EFI_ERROR(status) || info->PixelFormat > PixelBitMask) continue;
+            printf("VBE mode %d found, width=%d, height=%d\n", i, info->HorizontalResolution, info->VerticalResolution);
             if(info->HorizontalResolution > currentVBEWidth && info->HorizontalResolution <= EXPECT_VBE_WIDTH)
             {
                 if(info->VerticalResolution > currentVBEHeight && info->VerticalResolution <= EXPECT_VBE_HEIGHT)
@@ -132,7 +205,7 @@ int main(int argc, char **argv)
             gop->Mode->FrameBufferSize
         );
     } else {
-        printf("unable to get graphics output protocol\n");
+        fprintf(stderr, "unable to get graphics output protocol\n");
         return 1;
     }
     
@@ -140,7 +213,7 @@ int main(int argc, char **argv)
     status = gBS->AllocatePages(AllocateAddress, EfiLoaderData, 2, &boot_param_address);
     if(EFI_ERROR(status))
     {
-        printf("unable to alloc memory\n");
+        fprintf(stderr, "unable to alloc memory\n");
         return status;
     }
     memset((void *)boot_param_address, 0x1000, 0);
@@ -163,12 +236,12 @@ int main(int argc, char **argv)
     memory_map_size += 4 * desc_size;
     memory_map = (efi_memory_descriptor_t*)malloc(memory_map_size);
     if(!memory_map) {
-        printf("unable to allocate memory\n");
+        fprintf(stderr, "unable to allocate memory\n");
         return 1;
     }
     status = BS->GetMemoryMap(&memory_map_size, memory_map, &map_key, &desc_size, NULL);
     if(EFI_ERROR(status)) {
-err:    printf("Unable to get memory map\n");
+err:    fprintf(stderr, "Unable to get memory map\n");
         return 1;
     }
 
@@ -282,7 +355,7 @@ err:    printf("Unable to get memory map\n");
         printf("RSDP not found!\n");
     // exit BootService and jump to kernel
     if(exit_bs()) {
-        printf("error when exit boot service!\n");
+        fprintf(stderr, "error when exit boot service!\n");
         return 0;
     }
     int (*kernel_main)(struct BOOT_INFO *);

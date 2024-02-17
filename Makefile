@@ -39,6 +39,9 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel/kernel.bin
 	mmd -i $@ ::/EFI/BOOT
 	mcopy -i $@ boot/uefi/BOOTX64.EFI ::/EFI/BOOT
 	mcopy -i $@ kernel/kernel.bin ::/
+ifneq (,$(wildcard config/config.txt))
+	mcopy -i $@ config/config.txt ::/
+endif
 
 .PHONY: run clean debug
 
