@@ -16,7 +16,7 @@
             "environment": [],
             "externalConsole": false,
             "MIMode": "gdb",
-            "miDebuggerPath": "/usr/bin/gdb",
+            "miDebuggerPath": "${workspaceFolder}/toolchain/cross/bin/x86_64-elf-gdb",
             "customLaunchSetupCommands": [
                 {
                     "text": "target remote localhost:1234",

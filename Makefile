@@ -1,8 +1,10 @@
 base:=$(shell pwd)
-export CC=${base}/toolchain/cross/bin/x86_64-elf-gcc
-export LD=$(base)/toolchain/cross/bin/x86_64-elf-ld
-export AS=$(base)/toolchain/cross/bin/x86_64-elf-as
-export AR=$(base)/toolchain/cross/bin/x86_64-elf-ar
+export CROSS_BASE=$(base)/toolchain/cross
+export CC=$(CROSS_BASE)/bin/x86_64-elf-gcc
+export LD=$(CROSS_BASE)/bin/x86_64-elf-ld
+export AS=$(CROSS_BASE)/bin/x86_64-elf-as
+export AR=$(CROSS_BASE)/bin/x86_64-elf-ar
+export OBJ_CPY=$(CROSS_BASE)/bin/x86_64-elf-objcopy
 
 export PREFIX=/usr
 export EXEC_PREFIX=${PREFIX}
@@ -48,7 +50,7 @@ debug: disk.img boot/uefi/OVMF.fd
 
 clean:
 	rm -rf disk.img
-	make -C boot/uefi clean
+	make -C boot/uefi distclean
 	make -C kernel clean
 	make -C libc clean
 	rm -rf sysroot

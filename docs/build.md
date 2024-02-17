@@ -5,3 +5,8 @@
 ## 如何获取交叉编译工具
 
 具体构建流程参考[这里](https://wiki.osdev.org/GCC_Cross-Compiler)，需要注意的是，本系统为64位，因此需要编译x86_64-elf工具链，而非i686-elf。此外，强烈建议参照[这个](https://wiki.osdev.org/Libgcc_without_red_zone)说明编译没有red zone的libgcc，否则在中断处理时可能遇到大麻烦。
+
+## Build dependencies
+
+* mkfs.vfat (from dosfstools)
+* mmd (from mtools)

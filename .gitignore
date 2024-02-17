@@ -8,4 +8,5 @@
 *.ipch
 sysroot/*
 toolchain/*
+qemu-8.2.1/*
 !toolchain/setup.sh

@@ -2,6 +2,9 @@
 
 BINUTILS_VERVION=2.37
 GCC_VERSION=11.2.0
+GDB_VERSION=11.2
+
+BASE_DIR="$(dirname "$(readlink -f "$0")")"
 
 . /etc/os-release
 
@@ -40,9 +43,14 @@ case $ID in
         ;;
 esac
 
-export PREFIX="$(pwd)/cross"
+export PREFIX="${BASE_DIR}/cross"
 export TARGET=x86_64-elf
 export PATH="$PREFIX/bin:$PATH"
+
+job_cores=$(($(nproc) / 2))
+if [[ $job_cores -lt 1 ]]; then
+  job_cores=1;
+fi
 
 function build_binutils(){
     if [[ -f binutils-${BINUTILS_VERVION}.tar.gz ]]; then
@@ -53,11 +61,40 @@ function build_binutils(){
     if [[ ! -d binutils-${BINUTILS_VERVION} ]]; then
         tar -xzvf binutils-${BINUTILS_VERVION}.tar.gz
     fi
+    if [[ -d $PREFIX/x86_64-elf/bin ]]; then
+        echo "binutils installed, skip"
+        return 0
+    fi
     mkdir -p build-binutils
     cd build-binutils
-        ../binutils-${BINUTILS_VERVION}/configure --target=$TARGET --prefix="$PREFIX" --with-sysroot --disable-nls --disable-werror
-        make
+        ../binutils-${BINUTILS_VERVION}/configure --target=$TARGET --prefix="$PREFIX" --with-sysroot --disable-nls --disable-werror --enable-targets=x86_64-pep
+        make -j ${job_cores}
         make install
+    cd ..
+}
+
+function build_gdb(){
+    if uname -m | grep -Eq 'i[[:digit:]]86-'; then
+        echo "current architecture matches target, skip build cross gdb"
+        return 0
+    fi
+    if [[ -f gdb-${GDB_VERSION}.tar.gz ]]; then
+        echo "gdb-${GDB_VERSION}.tar.gz already downloaded"
+    else
+        wget https://mirrors.aliyun.com/gnu/gdb/gdb-${GDB_VERSION}.tar.gz
+    fi
+    if [[ ! -d  gdb-${GDB_VERSION} ]]; then
+        tar -zxvf gdb-${GDB_VERSION}.tar.gz
+    fi
+    if [[ -f $PREFIX/bin/${TARGET}-gdb ]]; then
+        echo "gdb installed, skip"
+        return 0
+    fi
+    mkdir -p build-gdb
+    cd build-gdb
+        ../gdb-${GDB_VERSION}/configure --target=$TARGET --prefix="$PREFIX" --disable-werror
+        make all-gdb -j ${job_cores}
+        make install-gdb
     cd ..
 }
 
@@ -70,12 +107,16 @@ function build_gcc(){
     if [[ ! -d  gcc-${GCC_VERSION} ]]; then
         tar -zxvf gcc-${GCC_VERSION}.tar.gz
     fi
+    if [[ -f $PREFIX/bin/${TARGET}-gcc ]]; then
+        echo "gcc installed, skip"
+        return 0
+    fi
     mkdir -p build-gcc
     cd build-gcc
         configure_gcc_redzone $(realpath ../gcc-${GCC_VERSION})
         ../gcc-${GCC_VERSION}/configure --target=$TARGET --prefix="$PREFIX" --disable-nls --enable-languages=c,c++ --without-headers
-        make all-gcc
-        make all-target-libgcc
+        make all-gcc -j ${job_cores}
+        make all-target-libgcc ${job_cores}
         make install-gcc
         make install-target-libgcc
     cd ..
@@ -106,6 +147,9 @@ function check_requirement(){
     fi
 }
 
+cd ${BASE_DIR}
 check_requirement
 build_binutils
+build_gdb
 build_gcc
+cd

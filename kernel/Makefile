@@ -65,7 +65,7 @@ kernel/kallsyms.o: kernel/kallsyms.c kernel.elf
 
 kernel.bin: kernel.elf kernel/kallsyms.o
 	$(CC) $(LDFLAGS) -o kernel.elf $(KERNEL_OBJECTS) kernel/kallsyms.o -T $(ARCHDIR)/linker.ld $(LIBS)
-	objcopy -I elf64-x86-64 -S -R ".eh_frame" -R ".comment" -O binary kernel.elf kernel.bin
+	$(OBJ_CPY) -I elf64-x86-64 -S -R ".eh_frame" -R ".comment" -O binary kernel.elf kernel.bin
 
 clean:
 	rm -f */*.o kernel.bin kernel.elf *.txt
