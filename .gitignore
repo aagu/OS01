@@ -6,7 +6,12 @@
 *.a
 *.img
 *.ipch
+*.S
+*.EFI
 sysroot/*
 toolchain/*
 qemu-8.2.1/*
+boot/uefi/*
+!boot/uefi/main.c
 !toolchain/setup.sh
+kernel/kernel/kallsyms
