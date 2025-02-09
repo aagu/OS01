@@ -7,10 +7,14 @@
                 "${workspaceFolder}/sysroot/usr/include"
             ],
             "defines": [],
-            "compilerPath": "/usr/bin/gcc",
-            "cStandard": "gnu17",
-            "cppStandard": "gnu++14",
-            "intelliSenseMode": "linux-gcc-x64"
+            "compilerPath": "/usr/bin/clang",
+            "cStandard": "gnu11",
+            "cppStandard": "gnu++11",
+            "intelliSenseMode": "linux-gcc-x64",
+            "compilerArgs": [
+                "--sysroot",
+                "${workspaceFolder}/sysroot"
+            ]
         }
     ],
     "version": 4

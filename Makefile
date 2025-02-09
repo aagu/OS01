@@ -1,10 +1,10 @@
 base:=$(shell pwd)
-export CROSS_BASE=$(base)/toolchain/cross
-export CC=$(CROSS_BASE)/bin/x86_64-elf-gcc
-export LD=$(CROSS_BASE)/bin/x86_64-elf-ld
-export AS=$(CROSS_BASE)/bin/x86_64-elf-as
-export AR=$(CROSS_BASE)/bin/x86_64-elf-ar
-export OBJ_CPY=$(CROSS_BASE)/bin/x86_64-elf-objcopy
+export CC=clang -target x86_64-unknown-elf
+export LD=ld.lld -m elf_x86_64
+export AS=as
+export AR=ar
+export OBJ_CPY=objcopy
+export OBJ_DUMP=objdump
 
 export PREFIX=/usr
 export EXEC_PREFIX=${PREFIX}

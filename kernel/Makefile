@@ -7,9 +7,9 @@ include $(ARCHDIR)/make.config
 DESTDIR=$(SYSROOT)
 
 KERNEL_SOURCES := \
+	kernel/main.c \
 	intr/irq.c \
 	intr/softirq.c \
-	kernel/main.c \
 	kernel/printk.c \
 	kernel/panic.c \
 	kernel/trace.c \
@@ -18,10 +18,9 @@ KERNEL_SOURCES := \
 	memory/slab.c \
 	memory/dump.c \
 	pic/8259A.c \
-	driver/rtc.c \
-	driver/pit.c \
-	driver/serial.c \
 	timer/timer.c
+
+KERNEL_SOURCES += $(wildcard driver/*.c)
 
 KERNEL_OBJECTS := \
 	$(KERNEL_SOURCES:.c=.o) \
@@ -29,8 +28,8 @@ KERNEL_OBJECTS := \
 
 KERNEL_HEADERS := include
 
-CFLAGS := $(CFLAGS) -mcmodel=large -ffreestanding -mno-red-zone -Wall -Wextra
-LDFLAGS := $(CFLAGS) -mcmodel=large -ffreestanding -O2 -z muldefs
+CFLAGS := $(CFLAGS) -mcmodel=kernel -ffreestanding -mno-red-zone -Wall -Wextra -mno-80387 -mno-sse -mno-sse2 -mno-3dnow -mno-mmx -fpie
+LDFLAGS := $(CFLAGS) -mcmodel=kernel -ffreestanding -mno-red-zone -Wall -Wextra -mno-80387 -mno-sse -mno-sse2 -mno-3dnow -mno-mmx -fpie -z muldefs -L${SYSROOT}/usr/lib
 ASFLAGS :=
 # ifeq ($(DEBUG),1)
 # CFLAGS += -g
@@ -53,13 +52,13 @@ kernel/font.o: kernel/font.psf
 
 # temporary solution to avoid interrupt code asigned to .bss
 intr/irq.o: intr/irq.c
-	$(CC) $(CFLAGS) -I$(KERNEL_HEADERS) -O1 -c $< -o $@
+	$(CC) $(CFLAGS) -I$(KERNEL_HEADERS) -c $< -o $@
 
 kernel.elf: $(KERNEL_OBJECTS) $(ARCHDIR)/linker.ld
 	$(CC) $(LDFLAGS) -o $@ $(KERNEL_OBJECTS) -T $(ARCHDIR)/linker.ld $(LIBS)
 
 kernel/kallsyms.o: kernel/kallsyms.c kernel.elf
-	gcc -o kernel/kallsyms $<
+	clang -o kernel/kallsyms $<
 	nm -n kernel.elf | ./kernel/kallsyms > kernel/kallsyms.S
 	$(CC) $(CFLAGS) -c kernel/kallsyms.S -o $@
 

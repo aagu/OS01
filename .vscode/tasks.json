@@ -8,7 +8,7 @@
             "type": "shell",
             "isBackground": true,
             "linux": {
-                "command": "make debug"
+                "command": "DEBUG=1 make debug"
             },
             "problemMatcher": {
                 "pattern": {

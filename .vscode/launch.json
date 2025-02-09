@@ -35,6 +35,14 @@
                 }
             ],
             "preLaunchTask": "Launch QEMU"
+        },
+        {
+            "name": "Launch with LLDB",
+            "type": "lldb-dap",
+            "request": "attach",
+            "program": "${workspaceFolder}/kernel/kernel.elf",
+            "attachCommands": ["gdb-remote 1234"],
+            "preLaunchTask": "Launch QEMU"
         }
     ]
 }

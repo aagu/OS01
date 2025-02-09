@@ -30,6 +30,12 @@
         "pmm.h": "c",
         "*.def": "c",
         "*.inc": "c",
-        "internet": "c"
-    }
+        "internet": "c",
+        "executor": "c",
+        "mutex": "c",
+        "shared_mutex": "c",
+        "syncstream": "c",
+        "keyboard.h": "c"
+    },
+    "C_Cpp.errorSquiggles": "disabled"
 }
