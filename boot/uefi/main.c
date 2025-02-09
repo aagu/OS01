@@ -34,6 +34,23 @@ struct BOOT_INFO
 int EXPECT_VBE_HEIGHT = 900;
 int EXPECT_VBE_WIDTH = 1440;
 
+const char *types[] = {
+    "EfiReservedMemoryType",
+    "EfiLoaderCode",
+    "EfiLoaderData",
+    "EfiBootServicesCode",
+    "EfiBootServicesData",
+    "EfiRuntimeServicesCode",
+    "EfiRuntimeServicesData",
+    "EfiConventionalMemory",
+    "EfiUnusableMemory",
+    "EfiACPIReclaimMemory",
+    "EfiACPIMemoryNVS",
+    "EfiMemoryMappedIO",
+    "EfiMemoryMappedIOPortSpace",
+    "EfiPalCode"
+};
+
 struct GRAPHICS_INFO* GetResolution(char *wah) {
     const char delim[2] = "x";
     char_t *w = strtok(wah, delim);
@@ -253,7 +270,9 @@ err:    fprintf(stderr, "Unable to get memory map\n");
     printf("Address              Size Type\n");
     for(mement = memory_map; (uint8_t*)mement < (uint8_t*)memory_map + memory_map_size; mement = NextMemoryDescriptor(mement, desc_size)) {
         int MemType = 0;
-        // printf("%016x %8d %02x %s\n", mement->PhysicalStart, mement->NumberOfPages, mement->Type, types[mement->Type]);
+        #ifdef DEBUG
+        printf("%016x %8d %02x %s\n", mement->PhysicalStart, mement->NumberOfPages, mement->Type, types[mement->Type]);
+        #endif
         switch (mement->Type)
         {
         case EfiReservedMemoryType:

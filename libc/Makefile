@@ -7,9 +7,9 @@ include $(ARCHDIR)/make.config
 CFLAGS := $(CFLAGS) -mcmodel=large -ffreestanding -mno-red-zone -Wall -Wextra -D__is_libc -Iinclude
 LDFLAGS := $(LDFLAGS) -mcmodel=large -ffreestanding -nostdlib
 ASFLAGS :=
-# ifeq ($(DEBUG),1)
-# CFLAGS += -g
-# endif
+ifeq ($(DEBUG),1)
+CFLAGS += -DDEBUG=1
+endif
 LIBK_CFLAGS := $(CFLAGS) -D__is_libk
 
 DESTDIR=$(SYSROOT)

@@ -2,6 +2,9 @@ TARGET = BOOTX64.EFI
 
 USE_GCC=1
 ARCH=x86_64
+ifeq ($(DEBUG),1)
+CFLAGS += -DDEBUG=1
+endif
 export PATH:=$(CROSS_BASE)/bin:$(PATH)
 include uefi/Makefile
 
