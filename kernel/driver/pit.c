@@ -1,6 +1,6 @@
 #include <driver/pit.h>
 #include <device/timer.h>
-#include <hw.h>
+#include <kernel/arch/x86_64/hw.h>
 #include <kernel/interrupt.h>
 #include <stddef.h>
 #include <device/pic.h>

@@ -18,7 +18,7 @@
 
 extern struct Physical_Memory_Manager PMMngr;
 
-uint64_t * __attribute__((always_inline)) get_cr3()
+inline uint64_t * __attribute__((always_inline)) get_cr3()
 {
     uint64_t * tmp;
     __asm__ __volatile__ (

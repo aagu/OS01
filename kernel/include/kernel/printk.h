@@ -2,6 +2,7 @@
 #define _KERNEL_PRINTK_H
 
 #include <stdint.h>
+#include <kernel/arch/x86_64/spinlock.h>
 
 #define WHITE 	0x00ffffff		//白
 #define BLACK 	0x00000000		//黑
@@ -26,6 +27,8 @@ typedef struct position
 	uint32_t * Phy_addr;
 	uint32_t * FB_addr; // memory should be write in 32bits block
 	uint64_t FB_length;
+
+	spinlock_T lock;
 } position;
 
 extern position Pos;

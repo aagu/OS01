@@ -1,6 +1,6 @@
 #include <device/pic.h>
 #include <kernel/printk.h>
-#include <hw.h>
+#include <kernel/arch/x86_64/hw.h>
 #include <kernel.h>
 #include <kernel/arch/x86_64/asm.h>
 #include <kernel/arch/x86_64/regs.h>

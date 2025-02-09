@@ -2,6 +2,7 @@
 #include <kernel/memory.h>
 #include <kernel/vmm.h>
 #include <kernel/pmm.h>
+#include <kernel/slab.h>
 #include <driver/serial.h>
 #include <stdio.h>
 #include <font.h>
@@ -50,6 +51,7 @@ int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
 	i = vsprintf(buf, fmt, args);
 	va_end(args);
 
+	spin_lock(&Pos.lock);
 	for(count = 0;count < i || line;count++)
 	{
 		if(line > 0)
@@ -101,6 +103,7 @@ Label_tab:
 		}
 
 	}
+	spin_unlock(&Pos.lock);
 
 	return i;
 }

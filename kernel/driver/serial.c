@@ -1,5 +1,5 @@
 #include <driver/serial.h>
-#include <hw.h>
+#include <kernel/arch/x86_64/hw.h>
 
 void init_serial() {
     outb(SERIAL_COM1 + 1, 0x00);    // Disable all interrupts

@@ -6,10 +6,12 @@
 #include <kernel/arch/x86_64/trap.h>
 #include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/x86_64/asm.h>
+#include <kernel/arch/x86_64/spinlock.h>
 #include <kernel/interrupt.h>
 #include <device/pic.h>
 #include <driver/pit.h>
 #include <driver/serial.h>
+#include <driver/keyboard.h>
 #include <device/timer.h>
 #include <stdlib.h>
 
@@ -23,7 +25,7 @@ timer_t * timer;
 
 void test_timer(void * data __attribute__((unused)))
 {
-    color_printk(GREEN, BLACK, "test_timer");
+    color_printk(GREEN, BLACK, "test_timer\n");
     free(timer);
 }
 
@@ -34,6 +36,8 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     Pos.XResolution = bootinfo->Graphics_Info.HorizontalResolution;
     Pos.YResolution = bootinfo->Graphics_Info.VerticalResolution;
 
+    spin_init(&Pos.lock);
+
     load_TR(8);
     set_tss64(0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00);
     sys_vector_install();
@@ -41,6 +45,8 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     init_serial();
     serial_printk("serial port init succedd\n");
     serial_printk("PMMgr: 0x%p\n", &PMMngr);
+    unsigned long cr3 = (unsigned long)get_cr3() & (~ 0xffffUL);
+    serial_printk("cr3 address: %#08x\n", cr3);
 
     frame_buffer_early_init();
     
@@ -68,6 +74,7 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     pic_init();
     timer_init();
     pit_init();
+    keyboard_init();
 
     timer = create_timer(test_timer, NULL, 10);;
     add_timer(timer);
