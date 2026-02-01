@@ -27,7 +27,7 @@ struct BOOT_INFO
 {
 	struct GRAPHICS_INFO Graphics_Info;
 	struct MEMORY_INFO E820_Info;
-    unsigned long RSDP;
+    unsigned long long RSDP;
     boolean_t BootFromBIOS;
 };
 
@@ -233,7 +233,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "unable to alloc memory\n");
         return status;
     }
-    memset((void *)boot_param_address, 0x1000, 0);
+    memset((void *)boot_param_address, 0, 0x1000);
     struct BOOT_INFO * kern_boot_para_info = (struct BOOT_INFO *)boot_param_address;
     kern_boot_para_info->RSDP = 0x0;
     kern_boot_para_info->BootFromBIOS = 0; // may support boot from BIOS later :)
@@ -364,7 +364,7 @@ err:    fprintf(stderr, "Unable to get memory map\n");
 		if (CompareGuid(&configTable[index].VendorGuid, &Acpi2TableGuid))
 		{
             printf("Acpi2TableGuid found, index %d, address %018lx\n", index, configTable[index].VendorTable);
-            kern_boot_para_info->RSDP = (unsigned long)configTable[index].VendorTable;
+            kern_boot_para_info->RSDP = (unsigned long long)configTable[index].VendorTable;
             break;
 		}
 		configTable++;

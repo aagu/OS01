@@ -28,7 +28,7 @@ struct BOOT_INFO
 {
 	struct GRAPHICS_INFO Graphics_Info;
 	struct MEMORY_INFO E820_Info;
-    unsigned long RSDP;
+    unsigned long long RSDP;
     unsigned char BootFromBIOS;
 };
 
