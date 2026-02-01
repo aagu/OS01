@@ -1,8 +1,11 @@
 #!/bin/bash
 
+set -e
+
 BINUTILS_VERVION=2.37
 GCC_VERSION=11.2.0
 GDB_VERSION=11.2
+QEMU_VERSION=9.2.0
 
 BASE_DIR="$(dirname "$(readlink -f "$0")")"
 
@@ -27,8 +30,8 @@ function install_pkg_pacman(){
 }
 
 case $ID in
-    archarm)
-        DEPS=(wget base-devel gmp libmpc mpfr)
+    archarm|arch)
+        DEPS=(wget base-devel gmp libmpc mpfr dosfstools mtools)
         is_pkg_installed() { is_pkg_installed_pacman $@; }
         install_pkg() { install_pkg_pacman $@; }
         ;;
@@ -122,11 +125,34 @@ function build_gcc(){
     cd ..
 }
 
+function build_qemu(){
+	 if [[ -f qemu-${QEMU_VERSION}.tar.xz ]]; then
+        echo "qemu-${QEMU_VERSION}.tar.xz already downloaded"
+    else
+        wget https://download.qemu.org/qemu-${QEMU_VERSION}.tar.xz
+    fi
+    if [[ ! -d  qemu-${QEMU_VERSION} ]]; then
+        tar -xvf qemu-${QEMU_VERSION}.tar.xz
+    fi
+    # if [[ -f $PREFIX/bin/${TARGET}-gcc ]]; then
+    #     echo "gcc installed, skip"
+    #     return 0
+    # fi
+    mkdir -p build-qemu
+    cd build-qemu
+        ../qemu-${QEMU_VERSION}/configure --prefix=$PREFIX --target-list='aarch64-softmmu,x86_64-softmmu' \
+          --enable-kvm --enable-tools --enable-pixman --enable-gtk --enable-alsa --enable-linux-aio \
+          --without-default-features
+        make -j ${job_cores}
+        make install
+    cd ..
+}
+
 function configure_gcc_redzone(){
     gcc_dir=$1
-    tee ${gcc_dir}/gcc/config/i386/t-${TARGET}<<EOF 
+    tee ${gcc_dir}/gcc/config/i386/t-${TARGET}<<EOF
 # Add libgcc multilib variant without red-zone requirement
- 
+
 MULTILIB_OPTIONS += mno-red-zone
 MULTILIB_DIRNAMES += no-red-zone
 EOF
@@ -149,7 +175,13 @@ function check_requirement(){
 
 cd ${BASE_DIR}
 check_requirement
-build_binutils
+CPU_ARCH=$(uname -m)
+if [[ "${CPU_ARCH}" == *"aarch64"* ]]; then
+	echo "aarch64 host detected, building cross bin-utils ..."
+	build_binutils
+    echo "aarch64 host detected, building qemu ..."
+    build_qemu
+fi
 build_gdb
 build_gcc
 cd
