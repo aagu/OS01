@@ -12,6 +12,12 @@ SECTIONS
 		*(.text)
 		_etext = .;
 	}
+	.ltext :
+	{
+		_ltext = .;
+		*(.ltext)
+		_eltext = .;
+	}
 
 	. = ALIGN(8);
 

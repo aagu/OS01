@@ -13,6 +13,7 @@ struct symbol_entry
 struct symbol_entry *table;
 int size, count;
 unsigned long _text, _etext;
+unsigned long _ltext, _eltext;
 
 int read_symbol(FILE *filp,struct symbol_entry *sym_entry)
 {
@@ -54,12 +55,16 @@ void read_map(FILE *filp)
 			_text = table[i].address;
 		if(strcmp(table[i].symbol,"_etext") == 0)
 			_etext = table[i].address;
+		if(strcmp(table[i].symbol,"_ltext") == 0)
+			_ltext = table[i].address;
+		if(strcmp(table[i].symbol,"_eltext") == 0)
+			_eltext = table[i].address;
 	}
 }
 
 int symbol_valid(struct symbol_entry *sym_entry)
 {
-	if((sym_entry->address < _text || sym_entry->address > _etext))
+	if((sym_entry->address < _text || sym_entry->address > _etext) && (sym_entry->address < _ltext || sym_entry->address > _eltext))
 		return 0;
 	return 1;
 }
