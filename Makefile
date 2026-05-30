@@ -25,6 +25,7 @@ export LDFLAGS=--sysroot=${SYSROOT}
 
 DISPLAY=gtk
 MEMORY=512M
+QEMU_MONITOR = 127.0.0.1:4444
 
 all: disk.img
 
@@ -54,13 +55,28 @@ ifneq (,$(wildcard config/config.txt))
 	mcopy -i $@ config/config.txt ::/
 endif
 
-.PHONY: run clean debug
+.PHONY: run clean debug screenshot
 
 run: disk.img boot/uefi/OVMF.fd
-	$(QEMU_BIN) -pflash boot/uefi/OVMF.fd -hda disk.img -m $(MEMORY) -display $(DISPLAY) -serial stdio
+	$(QEMU_BIN) -pflash boot/uefi/OVMF.fd -hda disk.img -m $(MEMORY) -display $(DISPLAY) -serial stdio -monitor tcp:$(QEMU_MONITOR),server,nowait
 
 debug: disk.img boot/uefi/OVMF.fd
-	$(QEMU_BIN) -pflash boot/uefi/OVMF.fd -S -s -hda disk.img -m $(MEMORY) -display $(DISPLAY) -serial stdio
+	$(QEMU_BIN) -pflash boot/uefi/OVMF.fd -S -s -hda disk.img -m $(MEMORY) -display $(DISPLAY) -serial stdio -monitor tcp:$(QEMU_MONITOR),server,nowait
+
+# Take a screenshot of the QEMU framebuffer.
+# Requires: QEMU running with -monitor tcp (automatic with make run/debug)
+#           ImageMagick (convert) for PPM→PNG conversion
+# Usage: make screenshot
+# Output: /tmp/os01_screen.png
+screenshot:
+	@exec 3<>/dev/tcp/127.0.0.1/4444 && \
+	 echo "screendump /tmp/os01_screen.ppm" >&3 && exec 3>&- || \
+	 { echo "ERROR: QEMU not running or monitor port not reachable"; false; }
+	@sleep 0.5
+	@magick /tmp/os01_screen.ppm /tmp/os01_screen.png 2>/dev/null || \
+	 convert /tmp/os01_screen.ppm /tmp/os01_screen.png 2>/dev/null || \
+	 { echo "ERROR: ImageMagick not found, install imagemagick"; false; }
+	@echo "Screenshot saved to /tmp/os01_screen.png"
 
 clean:
 	rm -rf disk.img
