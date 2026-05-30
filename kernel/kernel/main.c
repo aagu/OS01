@@ -27,7 +27,6 @@ timer_t * timer;
 void test_timer(void * data __attribute__((unused)))
 {
     color_printk(GREEN, BLACK, "test_timer\n");
-    free(timer);
 }
 
 int kernel_main(struct BOOT_INFO *bootinfo)
@@ -40,7 +39,7 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     spin_init(&Pos.lock);
 
     load_TR(8);
-    set_tss64(0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00);
+    set_tss64(0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7800, 0x7400, 0, 0, 0, 0);
     sys_vector_install();
     irq_install();
     init_serial();

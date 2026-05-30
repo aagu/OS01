@@ -418,7 +418,7 @@ void sys_vector_install()
 	set_system_gate(5,1,bounds);
 	set_trap_gate(6,1,undefined_opcode);
 	set_trap_gate(7,1,dev_not_available);
-	set_trap_gate(8,1,double_fault);
+	set_trap_gate(8,3,double_fault);  // IST 3 = dedicated double fault stack
 	set_trap_gate(9,1,coprocessor_segment_overrun);
 	set_trap_gate(10,1,invalid_TSS);
 	set_trap_gate(11,1,segment_not_present);

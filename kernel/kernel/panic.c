@@ -14,4 +14,7 @@ void kpanic(const char * msg,...)
     vsprintf(buf+15, msg, args);
     va_end(args);
     serial_printk(buf);
+    while (1) {
+        __asm__ __volatile__("cli; hlt");
+    }
 }

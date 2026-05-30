@@ -16,7 +16,7 @@ mmap get_next_level(uint64_t *current_level, size_t entry, uint64_t flags)
         current_level[entry] = Virt_To_Phy((uint64_t)calloc(PAGE_4K_SIZE));
         current_level[entry] |= flags;
     }
-    return (uint64_t *) (current_level[entry] & ~(0x1ff));
+    return (uint64_t *) (current_level[entry] & PAGE_4K_MASK);
 }
 
 // map virtual page to physical address

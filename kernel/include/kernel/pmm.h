@@ -68,9 +68,9 @@ struct Page
     uint64_t age;
 };
 
-uint32_t ZONE_DMA_INDEX = 0;
-uint32_t ZONE_NORMAL_INDEX = 0;   //low 1GB RAM, mapped in pagetable
-uint32_t ZONE_UNMAPPED_INDEX = 0; //above 1GB RAM, unmapped in pagetable
+extern uint32_t ZONE_DMA_INDEX;
+extern uint32_t ZONE_NORMAL_INDEX;   //low 1GB RAM, mapped in pagetable
+extern uint32_t ZONE_UNMAPPED_INDEX; //above 1GB RAM, unmapped in pagetable
 
 #define MAX_NR_ZONES 10 //max zone
 

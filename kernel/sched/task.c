@@ -74,7 +74,7 @@ __asm__(
 
 uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags, uint64_t stack_start, uint64_t stack_size)
 {
-    task_t *tsk = (task_t *)malloc(sizeof(task_t));
+    task_t *tsk = (task_t *)malloc(sizeof(union task_union));
     thread_t *thd = (thread_t *)malloc(sizeof(thread_t));
 
     memset(tsk, 0, sizeof(task_t));
@@ -117,7 +117,7 @@ int kernel_thread(uint64_t (* fn)(uint64_t), uint64_t arg, uint64_t flags)
     regs.es = KERNEL_DS;
     regs.cs = KERNEL_CS;
     regs.ss = KERNEL_DS;
-    regs.rflags = 0; /* IF=0: disable interrupts initially */
+    regs.rflags = (1 << 9); /* IF=1: enable interrupts */
     regs.rip = (uint64_t)kernel_thread_func;
 
     return do_fork(&regs, flags, 0, 0);
