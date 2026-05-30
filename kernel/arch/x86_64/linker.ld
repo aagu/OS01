@@ -35,6 +35,9 @@ SECTIONS
 		_erodata = .;
 	}
 
+	. = ALIGN(32768);
+	.data.init_task : { *(.data.init_task) }
+
 	.bss :
 	{
 		_bss = .;

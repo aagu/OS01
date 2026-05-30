@@ -8,6 +8,7 @@ void backtrace(pt_regs_t* regs)
 	int i = 0;
 
 	color_printk(RED,BLACK,"====================== Kernel Stack Backtrace ======================\n");
+	serial_printk("====================== Kernel Stack Backtrace ======================\n");
 
 	for(i = 0;i<KERNEL_TRACE_DEPTH;i++)
 	{
@@ -33,9 +34,12 @@ int32_t lookup_kallsyms(uint64_t address, int32_t level)
 	{
 		for(level_index = 0;level_index < level;level_index++)
 			color_printk(RED,BLACK,"  ");
+			serial_printk("  ");
 		color_printk(RED,BLACK,"+---> ");
+		serial_printk("+---> ");
 
 		color_printk(RED,BLACK,"address:%#018lx \t(+) %04d function:%s\n",address,address - kallsyms_addresses[index],&string[kallsyms_index[index]]);
+		serial_printk("address:%#018lx \t(+) %04d function:%s\n",address,address - kallsyms_addresses[index],&string[kallsyms_index[index]]);
 		return 0;
 	}
 	else

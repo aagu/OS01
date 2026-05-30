@@ -18,7 +18,8 @@ KERNEL_SOURCES := \
 	memory/slab.c \
 	memory/dump.c \
 	pic/8259A.c \
-	timer/timer.c
+	timer/timer.c \
+	sched/task.c
 
 KERNEL_SOURCES += $(wildcard driver/*.c)
 
@@ -29,7 +30,7 @@ KERNEL_OBJECTS := \
 KERNEL_HEADERS := include
 
 CFLAGS := $(CFLAGS) -mcmodel=kernel -ffreestanding -mno-red-zone -Wall -Wextra -mno-80387 -mno-sse -mno-sse2 -mno-3dnow -mno-mmx -fpie
-LDFLAGS := $(CFLAGS) -mcmodel=kernel -ffreestanding -mno-red-zone -Wall -Wextra -mno-80387 -mno-sse -mno-sse2 -mno-3dnow -mno-mmx -fpie -z muldefs -L${SYSROOT}/usr/lib
+LDFLAGS := $(CFLAGS) -mcmodel=kernel -ffreestanding -mno-red-zone -Wall -Wextra -mno-80387 -mno-sse -mno-sse2 -mno-3dnow -mno-mmx -fpie -static -z muldefs -L${SYSROOT}/usr/lib
 ASFLAGS :=
 ifeq ($(DEBUG),1)
 CFLAGS += -DDEBUG=1

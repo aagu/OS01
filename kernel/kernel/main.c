@@ -8,6 +8,7 @@
 #include <kernel/arch/x86_64/asm.h>
 #include <kernel/arch/x86_64/spinlock.h>
 #include <kernel/interrupt.h>
+#include <kernel/task.h>
 #include <device/pic.h>
 #include <driver/pit.h>
 #include <driver/serial.h>
@@ -79,6 +80,9 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     timer = create_timer(test_timer, NULL, 10);;
     add_timer(timer);
 
+    task_init();
+
+    serial_printk("kernel_main: after task_init, entering idle loop\n");
     while(1)
     {
         hlt();

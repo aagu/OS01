@@ -23,6 +23,9 @@ export SYSROOT=$(base)/sysroot
 export CFLAGS=--sysroot=${SYSROOT} -isystem=${INCLUDEDIR} -g
 export LDFLAGS=--sysroot=${SYSROOT}
 
+DISPLAY=gtk
+MEMORY=512M
+
 all: disk.img
 
 boot/uefi/BOOTX64.EFI: boot/uefi/main.c
@@ -54,10 +57,10 @@ endif
 .PHONY: run clean debug
 
 run: disk.img boot/uefi/OVMF.fd
-	$(QEMU_BIN) -pflash boot/uefi/OVMF.fd -hda disk.img -m 2G -serial stdio
+	$(QEMU_BIN) -pflash boot/uefi/OVMF.fd -hda disk.img -m $(MEMORY) -display $(DISPLAY) -serial stdio
 
 debug: disk.img boot/uefi/OVMF.fd
-	$(QEMU_BIN) -pflash boot/uefi/OVMF.fd -S -s -hda disk.img -m 2G -serial stdio
+	$(QEMU_BIN) -pflash boot/uefi/OVMF.fd -S -s -hda disk.img -m $(MEMORY) -display $(DISPLAY) -serial stdio
 
 clean:
 	rm -rf disk.img

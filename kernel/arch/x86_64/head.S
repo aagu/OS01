@@ -4,7 +4,13 @@
 
 ENTRY(_start)
 
+    // Bootloader may use MS ABI (RCX) or SysV ABI (RDI)
+    // Prefer RCX (clang-built EFI), fallback to RDI (gcc-built EFI)
+    movq    %rcx,   %rax
+    testq   %rax,   %rax
+    jnz     1f
     movq    %rdi,   %rax
+1:
     movq    %rax,   BOOT_INFO(%rip)
 	mov	%ss,	%ax
 	mov	%ax,	%ds
@@ -53,7 +59,7 @@ entry64:
 	movq	%rax,	%es
 	movq	%rax,	%gs
 	movq	%rax,	%ss
-	movq	$0x7e00,	%rsp		/* rsp address */
+	movq	_stack_start(%rip),	%rsp		/* rsp address */
 
 setup_IDT:							
 	leaq	ignore_int(%rip),	%rdx
@@ -176,6 +182,9 @@ Loop:
 
 int_msg:
 	.asciz "Unknown interrupt or fault at RIP\n"
+
+ENTRY(_stack_start)
+	.quad   init_task_union + 32768
 
 //=======	init page
 .align 8

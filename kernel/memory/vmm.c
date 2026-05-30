@@ -11,7 +11,7 @@ mmap kernel_map;
 // get next Level of map
 mmap get_next_level(uint64_t *current_level, size_t entry, uint64_t flags)
 {
-    if (!current_level[entry] & 1)
+    if (!(current_level[entry] & 1))
     {
         current_level[entry] = Virt_To_Phy((uint64_t)calloc(PAGE_4K_SIZE));
         current_level[entry] |= flags;

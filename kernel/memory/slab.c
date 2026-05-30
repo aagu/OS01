@@ -51,13 +51,13 @@ struct Slab * kmalloc_create(uint64_t size)
     case 512:
         structsize = sizeof(struct Slab) + PAGE_2M_SIZE / size / 8;
 
-        slab = (struct Slab *)((uint8_t *)page->phy_address + PAGE_2M_SIZE - structsize);
+        slab = (struct Slab *)Phy_To_Virt((uint8_t *)page->phy_address + PAGE_2M_SIZE - structsize);
         slab->color_map = (uint64_t *)((uint8_t *)slab + sizeof(struct Slab));
 
         slab->free_count = (PAGE_2M_SIZE - (PAGE_2M_SIZE / size / 8) - sizeof(struct Slab)) / size;
         slab->using_count = 0;
         slab->color_count = slab->free_count;
-        slab->address = (void *)page->phy_address;
+        slab->address = (void *)Phy_To_Virt(page->phy_address);
         slab->page = page;
         list_init(&slab->list);
 
@@ -94,7 +94,7 @@ struct Slab * kmalloc_create(uint64_t size)
         slab->color_map = (uint64_t *)kmalloc(slab->color_length);
         memset(slab->color_map, 0xff, slab->color_length);
 
-        slab->address = (void *)page->phy_address;
+        slab->address = (void *)Phy_To_Virt(page->phy_address);
         slab->page = page;
         list_init(&slab->list);
 
@@ -270,10 +270,17 @@ size_t slab_init()
         for (j = 0; j < kmalloc_cache_size[i].cache_pool->color_count; j++)
             *(kmalloc_cache_size[i].cache_pool->color_map + (j >> 6)) ^= 1UL << j % 64;
         
-        kmalloc_cache_size[i].total_free = kmalloc_cache_size[i].cache_pool->color_count;
+        // Only pre-allocate pages for small caches (0-8 = 32..4096 bytes).
+        // Caches 9-15 get pages on first use via kmalloc_create -> alloc_pages.
+        if (i < 8) {
+            kmalloc_cache_size[i].total_free = kmalloc_cache_size[i].cache_pool->color_count;
+        } else {
+            kmalloc_cache_size[i].total_free = 0;
+            kmalloc_cache_size[i].cache_pool->free_count = 0;
+        }
         kmalloc_cache_size[i].total_using = 0;
     }
-    
+
     i = Virt_To_Phy(PMMngr.end_of_struct) >> PAGE_2M_SHIFT;
     for (j = PAGE_2M_ALIGN(Virt_To_Phy(tmp_address)) >> PAGE_2M_SHIFT; j <= i; j++)
     {
@@ -286,9 +293,15 @@ size_t slab_init()
 
     color_printk(ORANGE,BLACK,"2.PMMngr.bits_map:%#018lx\tzone_struct->page_using_count:%d\tzone_struct->page_free_count:%d\n",*PMMngr.bits_map,PMMngr.zones_struct->page_using_count,PMMngr.zones_struct->page_free_count);
 
-    for(i = 0;i < 16;i++)
+	uint64_t slab_page_start = (PMMngr.end_of_struct + PAGE_2M_SIZE - 1) & PAGE_2M_MASK;
+	uint64_t page_offset = 0;
+    // Pre-allocate 2MB pages only for caches 0-7 (32..4096 bytes).
+    // Caches 6-15 allocate pages on first malloc via kmalloc_create.
+    for(i = 0; i < 8; i++)
 	{
-		virtual = (unsigned long *)((PMMngr.end_of_struct + PAGE_2M_SIZE * i + PAGE_2M_SIZE - 1) & PAGE_2M_MASK);
+		uint64_t page_addr = slab_page_start + page_offset;
+		virtual = (unsigned long *)page_addr;
+		page_offset += PAGE_2M_SIZE;
 		page = Virt_To_2M_Page(virtual);
 
 		*(PMMngr.bits_map + ((page->phy_address >> PAGE_2M_SHIFT) >> 6)) |= 1UL << (page->phy_address >> PAGE_2M_SHIFT) % 64;

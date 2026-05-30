@@ -3,7 +3,7 @@
 #include <kernel/memory.h>
 #include <kernel/pmm.h>
 #include <kernel/printk.h>
-#include <string.h>
+#include <kernel/arch/x86_64/string.h>
 #include <kernel/slab.h>
 
 uint64_t page_init(struct Page * page, uint64_t flags)
@@ -80,32 +80,46 @@ void pmm_init(struct MEMORY_INFO E820_Info)
         PMMngr.e820_length = i;
 
 		p++;
+        if (p->type > 4 || p->type < 1)
+            break;
     }
 
     color_printk(ORANGE,BLACK,"OS Can Used Total RAM:%dMB\n",TotalMem>>20);
 
-    TotalMem = 0;
-    for (i = 0; i < PMMngr.e820_length; i++)
-    {
-        uint64_t start, end;
-        if (PMMngr.e820_entrys[i].type != 1)
-            continue;
-        start = PAGE_2M_ALIGN(PMMngr.e820_entrys[i].address);
-        end = ((PMMngr.e820_entrys[i].address + PMMngr.e820_entrys[i].length) >> PAGE_2M_SHIFT) << PAGE_2M_SHIFT;
-        if (end <= start)
-            continue;
-        TotalMem += (end - start) >> PAGE_2M_SHIFT;
-    }
-    color_printk(ORANGE,BLACK,"OS Can Used Total 2M PAGEs:%#018lx=%018ld\n",TotalMem,TotalMem);
+    // TotalMem = 0;
+    // for (i = 0; i <= PMMngr.e820_length; i++)
+    // {
+    //     uint64_t start, end;
+    //     if (PMMngr.e820_entrys[i].type != 1)
+    //         continue;
+    //     start = PAGE_2M_ALIGN(PMMngr.e820_entrys[i].address);
+    //     end = ((PMMngr.e820_entrys[i].address + PMMngr.e820_entrys[i].length) >> PAGE_2M_SHIFT) << PAGE_2M_SHIFT;
+    //     if (end <= start)
+    //         continue;
+    //     TotalMem += (end - start) >> PAGE_2M_SHIFT;
+    // }
+    // color_printk(ORANGE,BLACK,"OS Can Used Total 2M PAGEs:%#018lx=%018ld\n",TotalMem,TotalMem);
 
     //PMMngr.e820_length points to the last `valid` e820_entry
-    TotalMem = PMMngr.e820_entrys[PMMngr.e820_length].address + PMMngr.e820_entrys[PMMngr.e820_length].length;
+    // TotalMem = PMMngr.e820_entrys[PMMngr.e820_length].address + PMMngr.e820_entrys[PMMngr.e820_length].length;
+    // for (i = 0; i < PMMngr.e820_length; i++)
+    // {
+    //     uint64_t end;
+    //     if (PMMngr.e820_entrys[i].type != 1)
+    //         continue;
+    //     end = (PMMngr.e820_entrys[i].address + PMMngr.e820_entrys[i].length);
+    //     // TotalMem is the max address of the last valid e820_entry
+    //     if (end > TotalMem)
+    //         TotalMem = end;
+    // }
 
     //bits map construction init
     PMMngr.bits_map = (uint64_t *)((PMMngr.start_brk + PAGE_4K_SIZE - 1) & PAGE_4K_MASK);
     PMMngr.bits_size = TotalMem >> PAGE_2M_SHIFT;
     PMMngr.bits_length = (((uint64_t)(TotalMem >> PAGE_2M_SHIFT) + sizeof(long) * 8 - 1) / 8) & ( ~ (sizeof(long) - 1));
+    // mem_dump(PMMngr.bits_map, PMMngr.bits_map + sizeof(uint64_t)*64);
     memset(PMMngr.bits_map, 0xff, PMMngr.bits_length);
+    // mem_dump(PMMngr.bits_map, PMMngr.bits_map + sizeof(uint64_t)*64);
 
     //pages construction init
     PMMngr.pages_struct = (struct Page *)(((uint64_t)PMMngr.bits_map + PMMngr.bits_length + PAGE_4K_SIZE - 1) & PAGE_4K_MASK);
@@ -119,7 +133,7 @@ void pmm_init(struct MEMORY_INFO E820_Info)
     PMMngr.zones_length = (5 * sizeof(struct Zone) + sizeof(long) - 1) & ( ~ (sizeof(long) - 1));
     memset(PMMngr.zones_struct, 0x00, PMMngr.zones_length);
 
-    for (i = 0; i < PMMngr.e820_length; i++)
+    for (i = 0; i <= PMMngr.e820_length; i++)
     {
         uint64_t start, end;
         struct Zone * z;
@@ -159,7 +173,6 @@ void pmm_init(struct MEMORY_INFO E820_Info)
             p->attribute = 0;
 
             p->reference_count = 0;
-
             p->age = 0;
             // bits_map array start at 0, so right shift 2^6
             *(PMMngr.bits_map + ((p->phy_address >> PAGE_2M_SHIFT) >> 6)) ^= 1UL << (p->phy_address >> PAGE_2M_SHIFT) % 64;
