@@ -27,7 +27,7 @@ void putchark(unsigned int FRcolor,unsigned int BKcolor,unsigned char c)
 	{
 		addr = Pos.FB_addr + Pos.XResolution * ( Pos.YPosition * font->height + i ) + Pos.XPosition * font->width;
 		testval = 0x100;
-		for(j = 0;j < font->width;j++)		
+		for(j = 0;j < font->width;j++)
 		{
 			testval = testval >> 1;
 			if(*glyph & testval)
@@ -36,7 +36,7 @@ void putchark(unsigned int FRcolor,unsigned int BKcolor,unsigned char c)
 				*addr = BKcolor;
 			addr++;
 		}
-		glyph++;		
+		glyph++;
 	}
 }
 
@@ -74,7 +74,7 @@ int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
 				if(Pos.YPosition < 0)
 					Pos.YPosition = (Pos.YResolution / font->height - 1) * font->height;
 			}
-			putchark(FRcolor , BKcolor , ' ');	
+			putchark(FRcolor , BKcolor , ' ');
 		}
 		else if((unsigned char)*(buf + count) == '\t')
 		{
@@ -82,7 +82,7 @@ int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
 
 Label_tab:
 			line--;
-			putchark(FRcolor , BKcolor , ' ');	
+			putchark(FRcolor , BKcolor , ' ');
 			Pos.XPosition++;
 		}
 		else
@@ -108,29 +108,33 @@ Label_tab:
 	return i;
 }
 
-// we only have 1 pde for now, must ensure vbe frame buffer be mapped inside this pde
+// Early framebuffer map via direct PDE writes, before PMM/VMM are available.
+// Uses VIRT_FRAMEBUFFER_EARLY (within PDPT[0]) for simple setup.
 void frame_buffer_early_init()
 {
 	uint64_t *pml2 = (uint64_t *)0xffff800000103000;
 	for (uintptr_t i = 0; i < Pos.FB_length; i += PAGE_2M_SIZE)
 	{
-		size_t level2 = (size_t) ((0xffff800000e00000 + i) >> PAGE_2M_SHIFT) & 0x1ff;
-		pml2[level2] = (((uint64_t)Pos.Phy_addr + i) & PAGE_2M_MASK) | (PAGE_KERNEL_Page | PAGE_PWT | PAGE_PCD);
+		size_t level2 = (size_t)((VIRT_FRAMEBUFFER_EARLY + i) >> PAGE_2M_SHIFT) & 0x1FF;
+		pml2[level2] = (((uint64_t)Pos.Phy_addr + i) & PAGE_2M_MASK)
+			| (PAGE_KERNEL_Page | PAGE_PWT | PAGE_PCD);
 	}
-	Pos.FB_addr = (uint32_t *)0xffff800000e00000;
-
+	Pos.FB_addr = (uint32_t *)VIRT_FRAMEBUFFER_EARLY;
 	flush_tlb();
 }
 
-// after pmm and vmm properly set up, we can map vbe frame buffer to memory hole now
+// Permanent framebuffer map via vmm_map_page, after PMM/VMM are available.
+// Remaps to VIRT_FRAMEBUFFER_OFFSET in a separate PML4 entry that never
+// overlaps with the physical RAM direct mapping regardless of QEMU -m size.
 void frame_buffer_init()
 {
 	for (uintptr_t i = 0; i < Pos.FB_length; i += PAGE_2M_SIZE)
 	{
-		vmm_map_page(kernel_map, i + (uint64_t)Pos.Phy_addr, VIRT_FRAMEBUFFER_OFFSET + i, PAGE_KERNEL_Page | PAGE_PWT | PAGE_PCD);
+		vmm_map_page(kernel_map, i + (uint64_t)Pos.Phy_addr,
+			VIRT_FRAMEBUFFER_OFFSET + i,
+			PAGE_KERNEL_Page | PAGE_PWT | PAGE_PCD);
 	}
 	Pos.FB_addr = (uint32_t *)VIRT_FRAMEBUFFER_OFFSET;
-
 	flush_tlb();
 }
 

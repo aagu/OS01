@@ -14,7 +14,16 @@
 #define INDIGO	0x0000ffff		//靛
 #define PURPLE	0x008000ff		//紫
 
-#define VIRT_FRAMEBUFFER_OFFSET 0xffff8000e0000000
+// Temporary framebuffer address used before pmm/vmm are available.
+// Within PDPT[0] for simple direct-PDE-write setup in frame_buffer_early_init().
+// Placed at 1008MB (PDE index 504) — above all physical RAM for QEMU -m up to ~1GB.
+#define VIRT_FRAMEBUFFER_EARLY 0xFFFF80003F000000
+
+// Permanent framebuffer address, remapped by frame_buffer_init() after VMM.
+// Uses a separate PML4 entry (PML4[288], 16TB above higher-half base) that
+// will NEVER overlap with the physical RAM direct mapping (PML4[256..287]),
+// regardless of QEMU -m size.
+#define VIRT_FRAMEBUFFER_OFFSET 0xFFFF900000000000
 
 typedef struct position
 {

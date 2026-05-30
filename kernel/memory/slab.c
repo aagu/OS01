@@ -296,7 +296,7 @@ size_t slab_init()
 	uint64_t slab_page_start = (PMMngr.end_of_struct + PAGE_2M_SIZE - 1) & PAGE_2M_MASK;
 	uint64_t page_offset = 0;
     // Pre-allocate 2MB pages only for caches 0-7 (32..4096 bytes).
-    // Caches 6-15 allocate pages on first malloc via kmalloc_create.
+    // Caches 8-15 allocate pages on first malloc via kmalloc_create.
     for(i = 0; i < 8; i++)
 	{
 		uint64_t page_addr = slab_page_start + page_offset;
