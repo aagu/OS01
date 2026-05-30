@@ -63,7 +63,7 @@ void pmm_init(struct MEMORY_INFO E820_Info)
 {
     uint32_t i, j;
     uint64_t TotalMem = 0;
-    struct E820_ENTRY *p = E820_Info.E820_Entry;
+    struct E820_ENTRY *p = (struct E820_ENTRY *)(uintptr_t)E820_Info.E820_Entry;
 
     color_printk(BLUE, BLACK, "Display Physics Address MAP,Type(1:RAM,2:ROM or Reserved,3:ACPI Reclaim Memory,4:ACPI NVS Memory,Others:Undefine)\n");
     for (i = 0; i < E820_Info.E820_Entry_count; i++)

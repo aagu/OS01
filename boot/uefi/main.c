@@ -1,33 +1,39 @@
 #include <uefi.h>
+#include <stdint.h>
+
+// All fields use fixed-size types (uint32_t, uint64_t) to ensure
+// identical struct layout regardless of data model (LP64 vs LLP64).
+// The kernel (SysV LP64) and bootloader (Windows LLP64) disagree on
+// sizeof(unsigned long), so we avoid that type entirely.
 
 struct GRAPHICS_INFO
 {
-	unsigned int HorizontalResolution;
-	unsigned int VerticalResolution;
-	unsigned int PixelsPerScanLine;
+	uint32_t HorizontalResolution;
+	uint32_t VerticalResolution;
+	uint32_t PixelsPerScanLine;
 
-	unsigned long FrameBufferBase;
-	unsigned long FrameBufferSize;
+	uint64_t FrameBufferBase;
+	uint64_t FrameBufferSize;
 };
 
 struct E820_ENTRY
 {
-	unsigned long address;
-	unsigned long length;
-	unsigned int  type;
+	uint64_t address;
+	uint64_t length;
+	uint32_t type;
 }__attribute__((packed));
 
 struct MEMORY_INFO
 {
-	unsigned int E820_Entry_count;
-	struct E820_ENTRY *E820_Entry;
+	uint32_t E820_Entry_count;
+	uint64_t E820_Entry;  // physical address, not a pointer
 };
 
 struct BOOT_INFO
 {
 	struct GRAPHICS_INFO Graphics_Info;
 	struct MEMORY_INFO E820_Info;
-    unsigned long long RSDP;
+    uint64_t RSDP;
     boolean_t BootFromBIOS;
 };
 
@@ -235,6 +241,8 @@ int main(int argc, char **argv)
     }
     memset((void *)boot_param_address, 0, 0x1000);
     struct BOOT_INFO * kern_boot_para_info = (struct BOOT_INFO *)boot_param_address;
+    // E820 array starts right after BOOT_INFO in the same allocation block
+    kern_boot_para_info->E820_Info.E820_Entry = boot_param_address + sizeof(struct BOOT_INFO);
     kern_boot_para_info->RSDP = 0x0;
     kern_boot_para_info->BootFromBIOS = 0; // may support boot from BIOS later :)
     kern_boot_para_info->Graphics_Info.HorizontalResolution = gop->Mode->Information->HorizontalResolution;
@@ -263,15 +271,15 @@ err:    fprintf(stderr, "Unable to get memory map\n");
     }
 
 	struct E820_ENTRY *LastE820 = NULL;
-    struct E820_ENTRY *E820p = kern_boot_para_info->E820_Info.E820_Entry;
-	unsigned long LastEndAddr = 0;
+    struct E820_ENTRY *E820p = (struct E820_ENTRY *)(uintptr_t)kern_boot_para_info->E820_Info.E820_Entry;
+	uint64_t LastEndAddr = 0;
 	int E820Count = 0;
 
     printf("Address              Size Type\n");
     for(mement = memory_map; (uint8_t*)mement < (uint8_t*)memory_map + memory_map_size; mement = NextMemoryDescriptor(mement, desc_size)) {
         int MemType = 0;
         #ifdef DEBUG
-        printf("%016x %8d %02x %s\n", mement->PhysicalStart, mement->NumberOfPages, mement->Type, types[mement->Type]);
+        printf("%016llx %8d %02x %s\n", mement->PhysicalStart, mement->NumberOfPages, mement->Type, types[mement->Type]);
         #endif
         switch (mement->Type)
         {
@@ -329,7 +337,7 @@ err:    fprintf(stderr, "Unable to get memory map\n");
     free(memory_map);
 
     kern_boot_para_info->E820_Info.E820_Entry_count = E820Count;
-    LastE820 = kern_boot_para_info->E820_Info.E820_Entry;
+    LastE820 = (struct E820_ENTRY *)(uintptr_t)kern_boot_para_info->E820_Info.E820_Entry;
     printf("E820 count %d\n", E820Count);
     int j = 0;
 	for(i = 0; i< E820Count; i++)
@@ -348,10 +356,10 @@ err:    fprintf(stderr, "Unable to get memory map\n");
 		}
 	}
 
-	LastE820 = kern_boot_para_info->E820_Info.E820_Entry;
+	LastE820 = (struct E820_ENTRY *)(uintptr_t)kern_boot_para_info->E820_Info.E820_Entry;
 	for(i = 0;i < E820Count;i++)
 	{
-		printf("MemoryMap (%10lx<->%10lx) %4d\n",LastE820->address,LastE820->address+LastE820->length,LastE820->type);
+		printf("MemoryMap (%10llx<->%10llx) %4d\n",LastE820->address,LastE820->address+LastE820->length,LastE820->type);
 		LastE820++;
 	}
 
