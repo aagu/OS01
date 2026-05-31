@@ -3,22 +3,6 @@
 #include <string.h>
 #include <stdlib.h>
 
-// ── Simple string helpers (not in libc) ──────────────────
-static int strcmp(const char *a, const char *b)
-{
-    while (*a && *a == *b) { a++; b++; }
-    return *(unsigned char *)a - *(unsigned char *)b;
-}
-
-static int strncmp(const char *a, const char *b, size_t n)
-{
-    for (size_t i = 0; i < n; i++) {
-        if (a[i] != b[i]) return (unsigned char)a[i] - (unsigned char)b[i];
-        if (a[i] == '\0') return 0;
-    }
-    return 0;
-}
-
 // ── Mount table ───────────────────────────────────────────
 static vfs_mount_t mount_table[VFS_MOUNTPOINT_MAX];
 static int mount_count = 0;

@@ -21,6 +21,8 @@ string/memcpy.o \
 string/memmove.o \
 string/memset.o \
 string/strlen.o \
+string/strcmp.o \
+string/strncmp.o \
 string/strcpy.o \
 string/strdup.o \
 stdio/printf.o \
