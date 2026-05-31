@@ -197,8 +197,8 @@ void pmm_init(struct MEMORY_INFO E820_Info)
 	color_printk(ORANGE,BLACK,"pages_struct:%#018lx,pages_size:%#018lx,pages_length:%#018lx\n",PMMngr.pages_struct,PMMngr.pages_size,PMMngr.pages_length);
 	color_printk(ORANGE,BLACK,"zones_struct:%#018lx,zones_size:%#018lx,zones_length:%#018lx\n",PMMngr.zones_struct,PMMngr.zones_size,PMMngr.zones_length);
 
-    ZONE_DMA_INDEX = 0;	
-	ZONE_NORMAL_INDEX = 0;	
+    ZONE_DMA_INDEX = 0;
+	ZONE_NORMAL_INDEX = PMMngr.zones_size - 1;  // all mapped zones
 	ZONE_UNMAPPED_INDEX = 0;
 
     for (i = 0; i < PMMngr.zones_size; i++)
@@ -206,8 +206,10 @@ void pmm_init(struct MEMORY_INFO E820_Info)
         struct Zone * z = PMMngr.zones_struct + i;
         color_printk(ORANGE,BLACK,"zone_start_address:%#018lx,zone_end_address:%#018lx,zone_length:%#018lx,pages_group:%#018lx,pages_length:%#018lx\n",z->zone_start_address,z->zone_end_address,z->zone_length,z->pages_group,z->pages_length);
 
-        if (z->zone_start_address >= 0x100000000 && !ZONE_UNMAPPED_INDEX)
+        if (z->zone_start_address >= 0x100000000 && !ZONE_UNMAPPED_INDEX) {
             ZONE_UNMAPPED_INDEX = i;
+            ZONE_NORMAL_INDEX = i - 1;  // last zone below 4GB
+        }
     }
 
     color_printk(ORANGE,BLACK,"ZONE_DMA_INDEX:%d\tZONE_NORMAL_INDEX:%d\tZONE_UNMAPED_INDEX:%d\n",ZONE_DMA_INDEX,ZONE_NORMAL_INDEX,ZONE_UNMAPPED_INDEX);

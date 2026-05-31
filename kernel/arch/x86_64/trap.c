@@ -5,6 +5,24 @@
 #include <kernel/printk.h>
 #include <kernel/trace.h>
 #include <kernel/arch/x86_64/asm.h>
+#include <kernel/task.h>
+#include <driver/serial.h>
+
+// Redirect a user-mode fault to do_exit instead of returning to ring 3
+static void kill_current_user_task(pt_regs_t *regs)
+{
+    serial_printk("Killing task %d (user fault at RIP=%p)\n",
+                  current->pid, regs->rip);
+    current->state = TASK_ZOMBIE;
+
+    // Overwrite iretq target: return to ring-0 do_exit instead of user code
+    regs->rip = (uint64_t)do_exit;
+    regs->cs  = KERNEL_CS;
+    regs->ss  = KERNEL_DS;    // ring-0 stack segment
+    regs->ds  = KERNEL_DS;
+    regs->es  = KERNEL_DS;
+    regs->rflags = (1 << 9);
+}
 
 void do_divide_error(pt_regs_t * regs, uint64_t error_code)
 {
@@ -250,6 +268,12 @@ void do_stack_segment_fault(pt_regs_t * regs, uint64_t error_code)
 
 void do_general_protection(pt_regs_t * regs, uint64_t error_code)
 {
+	// User-mode fault → kill the task, don't halt the kernel
+	if (regs->cs & 3) {
+		serial_printk("do_general_protection(13) from user, killing task %d\n", current->pid);
+		kill_current_user_task(regs);
+		return;
+	}
 	color_printk(RED,BLACK,"do_general_protection(13),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	serial_printk("do_general_protection(13),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 
@@ -295,8 +319,15 @@ void do_general_protection(pt_regs_t * regs, uint64_t error_code)
 void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 {
 	uint64_t cr2 = 0;
-
 	__asm__	__volatile__("movq	%%cr2,	%0":"=r"(cr2)::"memory");
+
+	// User-mode fault → kill the task, don't halt the kernel
+	if (regs->cs & 3) {
+		serial_printk("do_page_fault(14) user err=%p rip=%p cr2=%p\n",
+		              error_code, regs->rip, cr2);
+		kill_current_user_task(regs);
+		return;
+	}
 
 	color_printk(RED,BLACK,"do_page_fault(14),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	serial_printk("do_page_fault(14),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
@@ -408,6 +439,12 @@ void do_virtualization_exception(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
+void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused)))
+{
+    serial_printk("hello from user (syscall %d from pid %d)\n",
+                  regs->rax, current->pid);
+}
+
 void sys_vector_install()
 {
     set_trap_gate(0,1,divide_error);
@@ -431,4 +468,7 @@ void sys_vector_install()
 	set_trap_gate(18,1,machine_check);
 	set_trap_gate(19,1,SIMD_exception);
 	set_trap_gate(20,1,virtualization_exception);
+
+	// int 0x80 syscall gate — DPL=3 so user code can call it
+	set_system_gate(0x80, 0, system_call);
 }

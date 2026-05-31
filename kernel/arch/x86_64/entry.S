@@ -265,3 +265,11 @@ ENTRY(virtualization_exception)
 	leaq	do_virtualization_exception(%rip),	%rax
 	xchgq	%rax,	(%rsp)
 	jmp	error_code
+
+// int $0x80 syscall entry (user-callable, DPL=3)
+ENTRY(system_call)
+	pushq	$0
+	pushq	%rax
+	leaq	do_system_call(%rip),	%rax
+	xchgq	%rax,	(%rsp)
+	jmp	error_code

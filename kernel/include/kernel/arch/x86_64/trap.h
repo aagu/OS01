@@ -2,6 +2,9 @@
 
 #define _KERNEL_ARCH_TRAP_H
 
+#include <stdint.h>
+#include <kernel/arch/x86_64/regs.h>
+
 void divide_error();
 void debug();
 void nmi();
@@ -22,6 +25,10 @@ void alignment_check();
 void machine_check();
 void SIMD_exception();
 void virtualization_exception();
+
+// int 0x80 syscall
+void system_call();
+void do_system_call(pt_regs_t *regs, uint64_t error_code);
 
 void sys_vector_install();
 

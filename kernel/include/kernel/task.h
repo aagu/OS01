@@ -10,8 +10,10 @@
 #define KERNEL_CS (0x08)
 #define KERNEL_DS (0x10)
 
-#define USER_CS (0x28)
-#define USER_DS (0x30)
+// RPL=3 (bits 0-1 = 11) required for iretq ring-0→ring-3 transition.
+// GDT indices: USER code=5 (0x28), USER data=6 (0x30)
+#define USER_CS (0x2b)  // 0x28 | 3
+#define USER_DS (0x33)  // 0x30 | 3
 
 #define CLONE_FS (1 << 0)
 #define CLONE_FILES (1 << 1)
@@ -63,6 +65,8 @@ typedef struct thread_struct
 
     uint64_t fs;
     uint64_t gs;
+
+    uint64_t cr3; // page table base (physical address for CR3)
 
     uint64_t cr2;
     uint64_t trap_nr;
@@ -168,7 +172,8 @@ struct tss_struct init_tss[NR_CPUS] = { [0 ... NR_CPUS - 1] = INIT_TSS };
 inline task_t* __attribute__((always_inline)) get_current_task()
 {
     task_t *task = NULL;
-    __asm__ __volatile__("andq %%rsp, %0 \n\t" : "=r"(task) : "0"(~(STACK_SIZE - 1)));
+    // -(int64_t)STACK_SIZE = 0xFFFFFFFFFFFF8000 in 64-bit two's complement
+    __asm__ __volatile__("andq %%rsp, %0 \n\t" : "=r"(task) : "0"(-(int64_t)STACK_SIZE));
     return task;
 }
 
@@ -191,8 +196,9 @@ inline task_t* __attribute__((always_inline)) get_current_task()
             "1: \n\t"                \
             "popq %%rax \n\t"        \
             "popq %%rbp \n\t"        \
-            : "=m"(prev->thread->rsp),"=m"(next->thread->rip) \
-            : "m"(next->thread->rsp), "m"(next->thread->rip)  \
+            : "=m"((prev)->thread->rsp),"=m"((next)->thread->rip) \
+            : "m"((next)->thread->rsp), "m"((next)->thread->rip), \
+              "D"((uint64_t)(prev)), "S"((uint64_t)(next)) \
             : "memory" \
         ); \
     } while (0)
@@ -200,5 +206,8 @@ inline task_t* __attribute__((always_inline)) get_current_task()
 
 uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags, uint64_t stack_start, uint64_t stack_size);
 void task_init();
+void user_task_create(void);
+void schedule(void);
+uint64_t do_exit(uint64_t exit_code);
 
 #endif

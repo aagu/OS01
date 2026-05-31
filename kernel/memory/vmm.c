@@ -30,8 +30,11 @@ void vmm_map_page(uint64_t *pagemap, uintptr_t physical_address, uintptr_t virtu
     level2 = (size_t) (virtual_address >> PAGE_2M_SHIFT) & 0x1ff;
 
     pml4 = pagemap;
-    pml3 = get_next_level(pml4, level4, PAGE_KERNEL_GDT);
-    pml2 = get_next_level(pml3, level3, PAGE_KERNEL_Dir);
+    // Use user-accessible intermediate levels when mapping a user page
+    uint64_t gdt_flags = (flags & PAGE_U_S) ? PAGE_USER_GDT : PAGE_KERNEL_GDT;
+    uint64_t dir_flags = (flags & PAGE_U_S) ? PAGE_USER_Dir : PAGE_KERNEL_Dir;
+    pml3 = get_next_level(pml4, level4, gdt_flags);
+    pml2 = get_next_level(pml3, level3, dir_flags);
     pml2[level2] = (physical_address & PAGE_2M_MASK) | flags;
 }
 
@@ -112,5 +115,5 @@ void vmm_init()
 }
 
 mmap vmm_alloc_map() {
-    return (mmap)calloc(sizeof(mmap));
+    return (mmap)calloc(PAGE_4K_SIZE);
 }

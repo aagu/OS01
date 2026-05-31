@@ -6,6 +6,7 @@
 #include <kernel/printk.h>
 #include <kernel/memory.h>
 #include <kernel/pmm.h>
+#include <kernel/vmm.h>
 
 #include <string.h>
 #include <stdlib.h>
@@ -15,27 +16,66 @@ uint64_t init(uint64_t arg);
 
 void __switch_to(task_t *prev, task_t *next)
 {
-    // Do NOT update TSS.rsp0 — keep dedicated exception stack (0xFFFF800000007C00)
-    // Exception handler must not share stack with running task.
-    init_tss[0].rsp0 = 0xffff800000007c00;
+    // Use per-task kernel stack for ring-3→ring-0 transitions
+    init_tss[0].rsp0 = next->thread->rsp0;
 
     set_tss64(init_tss[0].rsp0, init_tss[0].rsp1, init_tss[0].rsp2,
               init_tss[0].ist1, init_tss[0].ist2, init_tss[0].ist3,
               init_tss[0].ist4, init_tss[0].ist5, init_tss[0].ist6,
               init_tss[0].ist7);
-    
+
     __asm__ __volatile__("movq %%fs, %0 \n\t":"=a"(prev->thread->fs));
     __asm__ __volatile__("movq %%gs, %0 \n\t":"=a"(prev->thread->gs));
 
     __asm__ __volatile__("movq %0, %%fs \n\t"::"a"(next->thread->fs));
     __asm__ __volatile__("movq %0, %%gs \n\t"::"a"(next->thread->gs));
+
+    // Switch page table if the next task has its own address space
+    if (next->thread->cr3 && next->thread->cr3 != prev->thread->cr3) {
+        __asm__ __volatile__("movq %0, %%cr3" :: "r"(next->thread->cr3) : "memory");
+    }
 }
 
+void schedule(void)
+{
+    task_t *next = container_of(current->list.next, task_t, list);
+    int sanity = 64;
+    while (sanity-- && next->state != TASK_RUNNING) {
+        if (next->list.next == &init_task_union.task.list) {
+            next = &init_task_union.task;
+            break;
+        }
+        next = container_of(next->list.next, task_t, list);
+    }
+    if (next->state != TASK_RUNNING)
+        next = &init_task_union.task;  // fallback to idle
+
+    if (next != current)
+        switch_to(current, next);
+}
+
+// ── Known issue: task resource leak ──────────────────────────
+// do_exit() sets state=TASK_ZOMBIE and switches away, but never
+// frees the task's resources:
+//
+//  Leaked per user task:
+//    - task_union       (~64KB, from malloc)
+//    - thread_t         (~72B,  from malloc)
+//    - mm_t             (~80B,  from malloc)
+//    - PML4 page        (4KB,   from vmm_alloc_map/calloc)
+//    - PDPT+PDE pages   (~8KB,  from vmm_map_page/calloc)
+//    - user 2MB page    (2MB,   from alloc_pages + vmm_map_page)
+//
+//  These accumulate until a reaper thread is implemented.
+//  free(current) before schedule() is unsafe because
+//  switch_to(current, next) dereferences current->thread->rsp.
+//
 uint64_t do_exit(uint64_t exit_code)
 {
-    color_printk(RED, BLACK, "exit task running, arg %#018lx\n", exit_code);
-    while (1)
-        ;
+    serial_printk("task %d exiting with code %#018lx\n", current->pid, exit_code);
+    current->state = TASK_ZOMBIE;
+    schedule();
+    return 0;  // never reached — schedule() does switch_to
 }
 
 extern void kernel_thread_func(void);
@@ -72,9 +112,26 @@ __asm__(
     "   callq do_exit \n\t"
 );
 
+// ──────────────────────────────────────────
+//  User code stub — position-independent, copied to user page
+// ──────────────────────────────────────────
+__asm__(
+    ".globl user_code_start\n\t"
+    "user_code_start:\n\t"
+    "movl $1, %eax\n\t"       // syscall number = 1
+    "int $0x80\n\t"            // kernel syscall
+    "1:\n\t"
+    "pause\n\t"  // safe in ring 3 (unlike hlt)
+    "jmp 1b\n\t"
+    ".globl user_code_end\n\t"
+    "user_code_end:\n\t"
+);
+
 uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags, uint64_t stack_start, uint64_t stack_size)
 {
-    task_t *tsk = (task_t *)malloc(sizeof(union task_union));
+    // Allocate with extra space for STACK_SIZE alignment
+    task_t *tsk = (task_t *)malloc(sizeof(union task_union) + STACK_SIZE);
+    tsk = (task_t *)(((uint64_t)tsk + STACK_SIZE - 1) & ~(STACK_SIZE - 1));
     thread_t *thd = (thread_t *)malloc(sizeof(thread_t));
 
     memset(tsk, 0, sizeof(task_t));
@@ -88,6 +145,15 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags, uint64_t stack_start, ui
     tsk->state = TASK_UNINTERRUPTIBLE;
 
     tsk->thread = thd;
+
+    // Inherit parent's page table by default (overridden for user tasks)
+    thd->cr3 = current->thread->cr3;
+
+    // Detect user task from CS Register Permission Level
+    if ((regs->cs & 3) == 3) {
+        tsk->flags &= ~PF_KTHREAD;
+        tsk->addr_limit = 0x00007FFFFFFFFFFF;
+    }
 
     memcpy((void *)((uint64_t)tsk + STACK_SIZE - sizeof(pt_regs_t)), regs, sizeof(pt_regs_t));
 
@@ -128,6 +194,7 @@ void task_init()
     task_t *p = NULL;
 
     init_mm.pml4 = get_cr3();
+    init_thread.cr3 = (uint64_t)init_mm.pml4;  // physical address of kernel PML4
 
     init_mm.start_code = PMMngr.start_code;
     init_mm.end_code = PMMngr.end_code;
@@ -161,8 +228,100 @@ void task_init()
     switch_to(current, p);
 }
 
+// ──────────────────────────────────────────
+//  User task creation
+// ──────────────────────────────────────────
+
+#define USER_CODE_ADDR   0x400000UL
+#define USER_STACK_TOP   (USER_CODE_ADDR + 0x200000UL - 8)  // within 2MB page
+
+// Allocates per-process resources (see do_exit comment for leak status).
+void user_task_create(void)
+{
+    extern char user_code_start[], user_code_end[];
+    size_t code_size = (uint64_t)user_code_end - (uint64_t)user_code_start;
+
+    static uint64_t next_pid = 1;
+
+    // ── Allocate task structures ──
+    // task_union must be STACK_SIZE-aligned for get_current_task() to work
+    task_t *tsk = (task_t *)malloc(sizeof(union task_union) + STACK_SIZE);
+    tsk = (task_t *)(((uint64_t)tsk + STACK_SIZE - 1) & ~(STACK_SIZE - 1));
+    thread_t *thd = (thread_t *)malloc(sizeof(thread_t));
+    memset(tsk, 0, sizeof(task_t));
+    memset(thd, 0, sizeof(thread_t));
+
+    tsk->state = TASK_UNINTERRUPTIBLE;
+    tsk->flags = 0;                        // NOT PF_KTHREAD → user task
+    tsk->addr_limit = 0x00007FFFFFFFFFFF;
+    tsk->pid = next_pid++;
+    tsk->counter = 1;
+    tsk->signal = 0;
+    tsk->priority = 0;
+
+    list_init(&tsk->list);
+    list_add_to_before(&init_task_union.task.list, &tsk->list);
+    tsk->thread = thd;
+
+    // ── Create per-process page table ──
+    mm_t *mm = (mm_t *)malloc(sizeof(mm_t));
+    memset(mm, 0, sizeof(mm_t));
+
+    uint64_t *user_pml4 = (uint64_t *)vmm_alloc_map();  // 4KB zeroed PML4
+
+    // Copy kernel entries (256-511) so kernel is accessible in ring 0
+    uint64_t *kernel_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)init_mm.pml4);
+    memcpy(&user_pml4[256], &kernel_pml4[256], 256 * sizeof(uint64_t));
+
+    // Allocate one 2MB page for user code + stack
+    struct Page *user_page = alloc_pages(ZONE_NORMAL, 1, 0);
+    if (!user_page) {
+        free((void *)mm);
+        free((void *)user_pml4);
+        free((void *)thd);
+        free((void *)tsk);
+        return;
+    }
+    uint64_t page_phys = user_page->phy_address;
+
+    // Map page at USER_CODE_ADDR in user page table with user-accessible flags
+    vmm_map_page(user_pml4, page_phys, USER_CODE_ADDR, PAGE_USER_Page);
+
+    // Copy user code stub
+    memcpy((void *)Phy_To_Virt(page_phys), user_code_start, code_size);
+
+    // Store physical PML4 address (same convention as init_mm)
+    mm->pml4 = (uint64_t *)Virt_To_Phy((uint64_t)user_pml4);
+    tsk->mm = mm;
+    thd->cr3 = (uint64_t)mm->pml4;
+
+    // ── Set up pt_regs for iretq to ring 3 ──
+    pt_regs_t *regs = (pt_regs_t *)((uint64_t)tsk + STACK_SIZE - sizeof(pt_regs_t));
+    memset(regs, 0, sizeof(pt_regs_t));
+    regs->cs      = USER_CS;              // DPL=3 → ring 3 transition
+    regs->ss      = USER_DS;
+    regs->ds      = USER_DS;
+    regs->es      = USER_DS;
+    regs->rsp     = USER_STACK_TOP;
+    regs->rip     = USER_CODE_ADDR;
+    regs->rflags  = (1 << 9);             // IF=1
+
+    // ── Set up thread context ──
+    thd->rsp0 = (uint64_t)tsk + STACK_SIZE;
+    thd->rsp  = (uint64_t)tsk + STACK_SIZE - sizeof(pt_regs_t);
+    thd->fs   = KERNEL_DS;
+    thd->gs   = KERNEL_DS;
+    thd->rip  = (uint64_t)ret_from_intr;  // first entry via RESTORE_ALL → iretq
+
+    tsk->state = TASK_RUNNING;
+
+    serial_printk("user task created: pid=%d rip=%p rsp=%p cr3=%p\n",
+                  tsk->pid, regs->rip, regs->rsp, thd->cr3);
+}
+
 uint64_t init(uint64_t arg)
 {
     serial_printk("init task is running, arg: %#018lx\n", arg);
+    user_task_create();
     return 1;
 }

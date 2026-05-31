@@ -3,6 +3,7 @@
 #include <kernel.h>
 #include <kernel/printk.h>
 #include <stdlib.h>
+#include <kernel/task.h>
 
 uint64_t volatile jiffies;
 timer_t timer_list_head;
@@ -33,6 +34,9 @@ void do_timer(void * data __attribute__((unused)))
     }
     
     color_printk(RED, BLACK, "(Timer:%d)", jiffies);
+    // schedule() not called here — preemption from interrupt context
+    // would use wrong RSP for get_current_task(). TODO: add need_resched
+    // flag and check it in ret_from_intr path.
 }
 
 void timer_init()
