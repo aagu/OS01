@@ -31,6 +31,8 @@
 #define PAGE_KERNEL_GDT  (PAGE_R_W | PAGE_Present)
 #define PAGE_KERNEL_Dir  (PAGE_R_W | PAGE_Present)
 #define	PAGE_KERNEL_Page (PAGE_PS  | PAGE_R_W | PAGE_Present)
+// MMIO (uncacheable): PCD=1, PWT=1 for Strong Uncacheable (UC)
+#define PAGE_KERNEL_MMIO (PAGE_PS | PAGE_R_W | PAGE_PCD | PAGE_PWT | PAGE_Present)
 #define PAGE_USER_GDT    (PAGE_U_S | PAGE_R_W | PAGE_Present)
 #define PAGE_USER_Dir    (PAGE_U_S | PAGE_R_W | PAGE_Present)
 #define	PAGE_USER_Page   (PAGE_PS  | PAGE_U_S | PAGE_R_W | PAGE_Present)

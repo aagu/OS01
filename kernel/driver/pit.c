@@ -4,6 +4,7 @@
 #include <kernel/interrupt.h>
 #include <stddef.h>
 #include <device/pic.h>
+#include <kernel/apic.h>
 #include <kernel.h>
 #include <kernel/softirq.h>
 
@@ -26,7 +27,10 @@ void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attri
 
 void pit_init()
 {
-    register_irq(32, NULL, &pit_handler, 0, &pit_controller, "pit");
+    hw_int_controller_t *ctrl = apic_available()
+        ? get_ioapic_controller()
+        : &pit_controller;
+    register_irq(32, NULL, &pit_handler, 0, ctrl, "pit");
     set_frequency(100); //100 times per sec
 }
 

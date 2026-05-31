@@ -10,6 +10,7 @@
 #include <kernel/interrupt.h>
 #include <kernel/task.h>
 #include <device/pic.h>
+#include <kernel/apic.h>
 #include <driver/pit.h>
 #include <driver/serial.h>
 #include <driver/keyboard.h>
@@ -70,6 +71,8 @@ int kernel_main(struct BOOT_INFO *bootinfo)
 
     frame_buffer_init();
     color_printk(GREEN, BLACK, "frame buffer remap succeed\n");
+
+    apic_init(bootinfo->RSDP);
 
     pic_init();
     timer_init();

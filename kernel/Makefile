@@ -18,6 +18,9 @@ KERNEL_SOURCES := \
 	memory/slab.c \
 	memory/dump.c \
 	pic/8259A.c \
+	apic/lapic.c \
+	apic/ioapic.c \
+	apic/acpi.c \
 	timer/timer.c \
 	sched/task.c
 

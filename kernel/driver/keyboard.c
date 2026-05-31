@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <driver/keyboard.h>
 #include <device/pic.h>
+#include <kernel/apic.h>
 #include <kernel/interrupt.h>
 #include <kernel/printk.h>
 #include <kernel/arch/x86_64/hw.h>
@@ -103,7 +104,6 @@ void keyboard_handler(uint64_t nr, uint64_t parameter __attribute__((unused)),
                       pt_regs_t *regs __attribute__((unused)))
 {
     uint8_t x = inb(0x60);
-    outb(0x20, 0x20);   // EOI to PIC
 
     // Bit 7 set = key release
     uint8_t released = (x & 0x80) != 0;
@@ -147,5 +147,8 @@ void keyboard_handler(uint64_t nr, uint64_t parameter __attribute__((unused)),
 
 void keyboard_init()
 {
-    register_irq(0x21, NULL, &keyboard_handler, 0, &keyboard_controller, "keyboard");
+    hw_int_controller_t *ctrl = apic_available()
+        ? get_ioapic_controller()
+        : &keyboard_controller;
+    register_irq(0x21, NULL, &keyboard_handler, 0, ctrl, "keyboard");
 }
