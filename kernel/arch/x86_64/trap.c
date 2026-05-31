@@ -439,10 +439,26 @@ void do_virtualization_exception(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
+#define USER_CODE_ADDR 0x400000UL
+#define USER_PAGE_SIZE 0x200000UL  // 2MB
+
 void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused)))
 {
-    serial_printk("hello from user (syscall %d from pid %d)\n",
-                  regs->rax, current->pid);
+    switch (regs->rax) {
+    case 1: { // sys_puts(const char *str)
+        const char *str = (const char *)regs->rdi;
+        // Bounds check: string must be in user page
+        if ((uint64_t)str >= USER_CODE_ADDR &&
+            (uint64_t)str < USER_CODE_ADDR + USER_PAGE_SIZE) {
+            color_printk(WHITE, BLACK, "%s", str);
+        }
+        break;
+    }
+    default:
+        serial_printk("syscall: unknown nr=%d from pid=%d\n",
+                      regs->rax, current->pid);
+        break;
+    }
 }
 
 void sys_vector_install()

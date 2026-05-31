@@ -112,17 +112,19 @@ __asm__(
     "   callq do_exit \n\t"
 );
 
-// ──────────────────────────────────────────
-//  User code stub — position-independent, copied to user page
-// ──────────────────────────────────────────
+// ── User code stub (position-independent, copied to user page at 0x400000) ──
 __asm__(
     ".globl user_code_start\n\t"
     "user_code_start:\n\t"
-    "movl $1, %eax\n\t"       // syscall number = 1
-    "int $0x80\n\t"            // kernel syscall
+    "   lea user_string(%rip), %rdi\n\t"  // rdi = string address
+    "   movl $1, %eax\n\t"                 // syscall 1 = sys_puts
+    "   int $0x80\n\t"
     "1:\n\t"
-    "pause\n\t"  // safe in ring 3 (unlike hlt)
-    "jmp 1b\n\t"
+    "   pause\n\t"
+    "   jmp 1b\n\t"
+    ".globl user_string\n\t"
+    "user_string:\n\t"
+    "   .asciz \"Hello from user space!\"\n\t"
     ".globl user_code_end\n\t"
     "user_code_end:\n\t"
 );
