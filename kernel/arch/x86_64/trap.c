@@ -7,6 +7,8 @@
 #include <kernel/arch/x86_64/asm.h>
 #include <kernel/task.h>
 #include <driver/serial.h>
+#include <errno.h>
+#include <uapi/syscall.h>
 
 // Redirect a user-mode fault to do_exit instead of returning to ring 3
 static void kill_current_user_task(pt_regs_t *regs)
@@ -445,18 +447,68 @@ void do_virtualization_exception(pt_regs_t * regs, uint64_t error_code)
 void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused)))
 {
     switch (regs->rax) {
-    case 1: { // sys_puts(const char *str)
+    case SYS_putchar: {
+        // putchar(int c) — write one char to framebuffer
+        char c = (char)regs->rdi;
+        color_printk(WHITE, BLACK, "%c", c);
+        regs->rax = (uint64_t)(unsigned char)c;
+        break;
+    }
+    case SYS_write: {
+        // write(const char *str, size_t len) — write string to framebuffer
         const char *str = (const char *)regs->rdi;
-        // Bounds check: string must be in user page
-        if ((uint64_t)str >= USER_CODE_ADDR &&
-            (uint64_t)str < USER_CODE_ADDR + USER_PAGE_SIZE) {
-            color_printk(WHITE, BLACK, "%s", str);
+        // Bounds check: string must be in user-accessible memory
+        if ((uint64_t)str >= current->addr_limit) {
+            regs->rax = -EFAULT;
+            break;
         }
+        color_printk(WHITE, BLACK, "%s", str);
+        regs->rax = 0;
+        break;
+    }
+    case SYS_exit: {
+        // exit(int code) — terminate current process
+        uint64_t code = regs->rdi;
+        serial_printk("sys_exit: pid=%d code=%d\n", current->pid, code);
+        current->state = TASK_ZOMBIE;
+        schedule();  // switches away, never returns
+        // Unreachable — but if schedule somehow returns, loop
+        for (;;) hlt();
+    }
+    case SYS_brk: {
+        // brk(void *addr) — set program break, return new break
+        uint64_t addr = regs->rdi;
+        mm_t *mm = current->mm;
+        if (mm == NULL || mm->start_brk == 0) {
+            regs->rax = -ENOMEM;
+            break;
+        }
+        if (addr == 0) {
+            // Query current break
+            regs->rax = mm->end_brk;
+            break;
+        }
+        if (addr < mm->start_brk) {
+            regs->rax = -EINVAL;
+            break;
+        }
+        // Safety: keep heap below the stack area within the user page
+        if (addr > (USER_CODE_ADDR + USER_PAGE_SIZE - 0x1000)) {
+            regs->rax = -ENOMEM;
+            break;
+        }
+        mm->end_brk = addr;
+        regs->rax = addr;
+        break;
+    }
+    case SYS_getpid: {
+        regs->rax = current->pid;
         break;
     }
     default:
         serial_printk("syscall: unknown nr=%d from pid=%d\n",
                       regs->rax, current->pid);
+        regs->rax = -EINVAL;
         break;
     }
 }

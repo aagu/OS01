@@ -167,15 +167,24 @@ __asm__(
 __asm__(
     ".globl user_code_start\n\t"
     "user_code_start:\n\t"
-    "   lea user_string(%rip), %rdi\n\t"  // rdi = string address
-    "   movl $1, %eax\n\t"                 // syscall 1 = sys_puts
+    "   lea msg1(%rip), %rdi\n\t"     // rdi = string
+    "   movl $1, %eax\n\t"            // SYS_write = 1
+    "   int $0x80\n\t"
+    "   movl $'!', %edi\n\t"          // rdi = '!'
+    "   movl $0, %eax\n\t"            // SYS_putchar = 0
+    "   int $0x80\n\t"
+    "   movl $10, %edi\n\t"           // rdi = '\n'
+    "   movl $0, %eax\n\t"
+    "   int $0x80\n\t"
+    "   movl $42, %edi\n\t"           // rdi = exit code
+    "   movl $2, %eax\n\t"            // SYS_exit = 2
     "   int $0x80\n\t"
     "1:\n\t"
     "   pause\n\t"
     "   jmp 1b\n\t"
-    ".globl user_string\n\t"
-    "user_string:\n\t"
-    "   .asciz \"Hello from user space!\"\n\t"
+    ".globl msg1\n\t"
+    "msg1:\n\t"
+    "   .asciz \"Hello from user space\"\n\t"
     ".globl user_code_end\n\t"
     "user_code_end:\n\t"
 );
@@ -321,6 +330,10 @@ void user_task_create(void)
     // ── Create per-process page table ──
     mm_t *mm = (mm_t *)malloc(sizeof(mm_t));
     memset(mm, 0, sizeof(mm_t));
+
+    // Initialize heap break — heap starts just after code, within the 2MB page
+    mm->start_brk = USER_CODE_ADDR + 0x1000;
+    mm->end_brk   = mm->start_brk;
 
     uint64_t *user_pml4 = (uint64_t *)vmm_alloc_map();  // 4KB zeroed PML4
 

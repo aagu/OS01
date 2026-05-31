@@ -283,3 +283,13 @@ ENTRY(system_call)
 	leaq	do_system_call(%rip),	%rax
 	xchgq	%rax,	(%rsp)
 	jmp	error_code
+
+// Resume path for the idle task when switched back to.
+// The first switch_to inside task_init() saved RSP after
+// pushq rbp/rax.  We undo those, restore task_init's frame
+// pointer, and then leave+ret to unwind back to kernel_main.
+ENTRY(idle_resume)
+	popq	%rax      // undo first pushq %rax from the initial switch_to
+	popq	%rbp      // restore task_init's frame pointer
+	leave             // mov rsp, rbp; pop rbp — unwinds task_init's frame
+	ret               // return to kernel_main → while(1) hlt()

@@ -8,7 +8,8 @@ void free (void * ptr)
 #if defined(__is_libk)
 	kfree(ptr);
 #else
-	// TODO: Implement stdio and the write system call.
-    return;
+	// Bump allocator — free is a no-op
+	(void)ptr;
+	return;
 #endif
 }

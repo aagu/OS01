@@ -34,6 +34,7 @@ extern char _end;
 extern uint64_t _stack_start;
 
 extern void ret_from_intr(void);
+extern void idle_resume(void);
 
 #define TASK_RUNNING (1 << 0)
 #define TASK_INTERRUPTIBLE (1 << 1)
@@ -118,9 +119,10 @@ union task_union init_task_union __attribute__((__section__(".data.init_task")))
 
 task_t *init_task[NR_CPUS] = {&init_task_union.task,0};
 mm_t init_mm = {0};
-thread_t init_thread = 
+thread_t init_thread =
 {
     .rsp0 = 0xffff800000007c00,  // dedicated exception stack, separate from task stack
+    .rip = (uint64_t)idle_resume,
     .rsp = (uint64_t)(init_task_union.stack + STACK_SIZE),
     .fs = KERNEL_DS,
     .gs = KERNEL_DS,

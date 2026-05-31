@@ -33,7 +33,8 @@ list/list.o \
 stdlib/abort.o \
 stdlib/calloc.o \
 stdlib/malloc.o \
-stdlib/free.o
+stdlib/free.o \
+errno/errno.o
 
 HOSTEDOBJS=\
 $(ARCH_HOSTEDOBJS) \
@@ -44,7 +45,7 @@ $(HOSTEDOBJS) \
 
 LIBK_OBJS=$(FREEOBJS:.o=.libk.o)
 
-BINARIES=libk.a
+BINARIES=libc.a libk.a
 
 .PHONY: all clean install install-headers install-libs
 .SUFFIXES: .o .libk.o .c .S

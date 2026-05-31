@@ -1,9 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/syscall.h>
 #if defined(__is_libk)
 #include <kernel/panic.h>
 #endif
- 
+
 __attribute__((__noreturn__))
 void abort(void) {
 #if defined(__is_libk)
@@ -11,9 +12,7 @@ void abort(void) {
 	// printf("kernel: panic: abort()\n");
 	kpanic("[kernel panic]\n");
 #else
-	// TODO: Abnormally terminate the process as if by SIGABRT.
-	printf("abort()\n");
-#endif
-	while (1) { }
+	syscall(SYS_exit, 1, 0, 0);
 	__builtin_unreachable();
+#endif
 }
