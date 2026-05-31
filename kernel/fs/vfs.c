@@ -136,13 +136,21 @@ vfs_node_t *vfs_lookup(const char *path)
     vfs_mount_t *mp = find_mount(path);
     if (!mp || !mp->root || !mp->root->ops) return NULL;
 
-    // Tokenize path
+    // Tokenize path — skip mount point prefix for sub-mounts
     char path_copy[VFS_NAME_MAX];
     size_t plen = strlen(path);
     if (plen >= VFS_NAME_MAX) return NULL;
     memcpy(path_copy, path, plen + 1);
 
-    char *ptr = path_copy;
+    char *ptr;
+    size_t mp_len = strlen(mp->path);
+    if (mp_len == 1 && mp->path[0] == '/') {
+        ptr = path_copy;  // root mount, no prefix to skip
+    } else {
+        ptr = path_copy + mp_len;
+        while (*ptr == '/') ptr++;  // skip leading slash
+    }
+
     char *comp;
 
     vfs_node_t *current = mp->root;
@@ -213,6 +221,14 @@ int vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
     return node->ops->read(node, offset, size, buffer);
 }
 
+// ── Write ─────────────────────────────────────────────────
+int vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
+{
+    if (!node || !node->ops || !node->ops->write)
+        return -1;
+    return node->ops->write(node, offset, size, buffer);
+}
+
 // ── Read directory ────────────────────────────────────────
 int vfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *entry)
 {
@@ -254,13 +270,18 @@ void vfs_debug_list(const char *path)
     serial_printk("VFS: listing '%s':\n", path);
     vfs_dirent_t entry;
     uint64_t idx = 0;
+    int max_iter = 256;  // safety bound to prevent infinite loops
 
-    while (1) {
+    while (max_iter-- > 0) {
         int ret = vfs_readdir(dir, idx, &entry);
         if (ret != 0) { idx++; continue; }
         if (entry.name[0] == '\0') break;
         if (entry.type == VFS_DIR)
             serial_printk("  [DIR ]  %s\n", entry.name);
+        else if (entry.type == VFS_CHRDEV)
+            serial_printk("  [CHR ]  %s\n", entry.name);
+        else if (entry.type == VFS_BLKDEV)
+            serial_printk("  [BLK ]  %s\n", entry.name);
         else
             serial_printk("  [FILE]  %s (%lu bytes)\n", entry.name, entry.size);
         idx++;

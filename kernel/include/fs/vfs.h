@@ -4,8 +4,10 @@
 #include <stdint.h>
 #include <block/blockdev.h>
 
-#define VFS_FILE 1
-#define VFS_DIR  2
+#define VFS_FILE   1
+#define VFS_DIR    2
+#define VFS_CHRDEV 3   // character device
+#define VFS_BLKDEV 4   // block device
 #define VFS_MOUNTPOINT_MAX 8
 #define VFS_NAME_MAX 256
 
@@ -18,6 +20,8 @@ struct vfs_dirent;
 typedef struct vfs_ops {
     int (*read)(struct vfs_node *node, uint64_t offset,
                 uint64_t size, void *buffer);
+    int (*write)(struct vfs_node *node, uint64_t offset,
+                 uint64_t size, void *buffer);
     int (*readdir)(struct vfs_node *node, uint64_t index,
                    struct vfs_dirent *entry);
 } vfs_ops_t;
@@ -65,6 +69,10 @@ struct vfs_node *vfs_lookup(const char *path);
 // Read from a file
 int vfs_read(struct vfs_node *node, uint64_t offset,
              uint64_t size, void *buffer);
+
+// Write to a file
+int vfs_write(struct vfs_node *node, uint64_t offset,
+              uint64_t size, void *buffer);
 
 // Read directory entries
 int vfs_readdir(struct vfs_node *dir, uint64_t index,

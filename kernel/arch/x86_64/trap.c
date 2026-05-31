@@ -12,6 +12,19 @@
 #include <uapi/syscall.h>
 #include <string.h>
 #include <stdlib.h>
+#include <fs/vfs.h>
+
+// ── Helper: find the current task from TSS.rsp0 ──────────────
+// Safe to call from IST exception stacks where get_current_task()
+// (RSP masking) returns garbage.
+static inline task_t *task_from_tss(void)
+{
+    uint64_t rsp0 = init_tss[0].rsp0;
+    task_t *task = (task_t *)((rsp0 - 1) & ~(STACK_SIZE - 1));
+    if ((uint64_t)task < 0xffff800000000000UL)
+        return NULL;
+    return task;
+}
 
 // Kill the user task that was running when a user-mode fault occurred.
 // We are on the IST exception stack — get_current_task() is broken.
@@ -20,16 +33,15 @@
 // (where get_current_task() will work correctly).
 static void kill_current_user_task(pt_regs_t *regs)
 {
-    uint64_t rsp0 = init_tss[0].rsp0;
-    task_t *task = (task_t *)((rsp0 - 1) & ~(STACK_SIZE - 1));
+    task_t *task = task_from_tss();
 
     if (!task || (task->flags & PF_KTHREAD)) {
-        serial_printk("User fault with no user task (rsp0=%p)\n", rsp0);
+        serial_printk("User fault with no user task\n");
         return;
     }
 
-    serial_printk("Killing task %d (user fault at RIP=%p) rsp0=%p\n",
-                  task->pid, regs->rip, rsp0);
+    serial_printk("Killing task %d (user fault at RIP=%p)\n",
+                  task->pid, regs->rip);
 
     // Mark the task ZOMBIE now, so the reaper can clean it up later.
     // The actual resource cleanup (vmm_free_user_map, kfree) happens
@@ -42,7 +54,7 @@ static void kill_current_user_task(pt_regs_t *regs)
     regs->rip  = (uint64_t)do_exit;
     regs->cs   = KERNEL_CS;
     regs->ss   = KERNEL_DS;
-    regs->rsp  = rsp0;           // task's kernel stack (NOT user RSP!)
+    regs->rsp  = (uint64_t)task + STACK_SIZE;  // task's kernel stack (NOT user RSP!)
     regs->ds   = KERNEL_DS;
     regs->es   = KERNEL_DS;
     regs->rdi  = 0;              // exit code for do_exit
@@ -316,8 +328,11 @@ void do_stack_segment_fault(pt_regs_t * regs, uint64_t error_code)
 void do_general_protection(pt_regs_t * regs, uint64_t error_code)
 {
 	// User-mode fault → kill the task, don't halt the kernel
+	// NOTE: on IST stack — do NOT use current (get_current_task).
 	if (regs->cs & 3) {
-		serial_printk("do_general_protection(13) from user, killing task %d\n", current->pid);
+		task_t *t = task_from_tss();
+		serial_printk("do_general_protection(13) from user, killing task %d\n",
+		              t ? t->pid : -1);
 		kill_current_user_task(regs);
 		return;
 	}
@@ -369,9 +384,12 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 	__asm__	__volatile__("movq	%%cr2,	%0":"=r"(cr2)::"memory");
 
 	// User-mode fault → kill the task, don't halt the kernel
+	// NOTE: on IST stack — do NOT use current (get_current_task).
 	if (regs->cs & 3) {
+		task_t *t = task_from_tss();
 		serial_printk("do_page_fault(14) user err=%p rip=%p cr2=%p pid=%d\n",
-		              error_code, regs->rip, cr2, current->pid);
+		              error_code, regs->rip, cr2,
+		              t ? t->pid : -1);
 		kill_current_user_task(regs);
 		return;
 	}
@@ -569,6 +587,46 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         int64_t ret = sys_exec(path_copy, regs);
         kfree(path_copy);
         regs->rax = ret;
+        break;
+    }
+    case SYS_read: {
+        // read(const char *path, void *buffer, size_t size)
+        const char *path = (const char *)regs->rdi;
+        void *buffer = (void *)regs->rsi;
+        uint64_t size = regs->rdx;
+
+        // Bounds check: both pointers must be in user-accessible memory
+        if ((uint64_t)path >= current->addr_limit ||
+            (uint64_t)buffer >= current->addr_limit) {
+            regs->rax = -EFAULT;
+            break;
+        }
+
+        // Copy path to kernel heap to avoid TOCTOU
+        char *path_copy = strdup(path);
+        if (!path_copy) {
+            regs->rax = -ENOMEM;
+            break;
+        }
+
+        vfs_node_t *node = vfs_lookup(path_copy);
+        if (!node) {
+            kfree(path_copy);
+            regs->rax = -ENOENT;
+            break;
+        }
+
+        // Read into kernel buffer first, then copy to user
+        uint8_t kbuf[256];
+        uint64_t to_read = size > 256 ? 256 : size;
+        int64_t n = vfs_read(node, 0, to_read, kbuf);
+
+        if (n > 0)
+            memcpy(buffer, kbuf, (uint64_t)n);
+
+        vfs_node_put(node);
+        kfree(path_copy);
+        regs->rax = n;
         break;
     }
     default:

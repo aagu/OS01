@@ -34,7 +34,8 @@ stdlib/abort.o \
 stdlib/calloc.o \
 stdlib/malloc.o \
 stdlib/free.o \
-errno/errno.o
+errno/errno.o \
+unistd/read.o
 
 HOSTEDOBJS=\
 $(ARCH_HOSTEDOBJS) \

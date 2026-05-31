@@ -18,6 +18,7 @@
 #include <block/blockdev.h>
 #include <fs/vfs.h>
 #include <fs/fat.h>
+#include <fs/devfs.h>
 #include <device/timer.h>
 #include <stdlib.h>
 
@@ -92,9 +93,27 @@ int kernel_main(struct BOOT_INFO *bootinfo)
         fat32_fs_t *fs = fat32_mount(dev);
         if (fs) {
             vfs_mount("/", dev, &fat_vfs_ops, fs);
-            vfs_debug_list("/");
-            vfs_debug_list("/EFI");
         }
+    }
+
+    // ── Mount devfs at /dev and register device nodes ──
+    devfs_init();
+
+    // Register keyboard on devfs — raw scancode reads
+    devfs_register_chrdev("keyboard", NULL,
+                          keyboard_devfs_read, NULL);
+
+    vfs_debug_list("/dev");
+
+    // Quick verification: /dev/null should be findable and work
+    vfs_node_t *nul = vfs_lookup("/dev/null");
+    if (nul) {
+        serial_printk("devfs: /dev/null found (type=%u)\n", nul->type);
+        char c;
+        int r = vfs_read(nul, 0, 1, &c);
+        int w = vfs_write(nul, 0, 4, "test");
+        serial_printk("devfs: /dev/null read=%d write=%d\n", r, w);
+        vfs_node_put(nul);
     }
 
     // timer = create_timer(test_timer, NULL, 100);;

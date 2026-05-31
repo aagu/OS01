@@ -11,14 +11,14 @@ CFLAGS = --sysroot=$(SYSROOT) \
 LDFLAGS = -T linker.ld -static -nostdlib -no-pie \
           -L$(SYSROOT)/usr/lib -lc
 
-PROGRAMS = hello.elf
+PROGRAMS = init.elf
 
 .PHONY: all clean
 
 all: $(PROGRAMS)
 
-hello.elf: crt0.o hello.o linker.ld
-	$(LD) $(LDFLAGS) -o $@ crt0.o hello.o
+init.elf: crt0.o init.o linker.ld
+	$(LD) $(LDFLAGS) -o $@ crt0.o init.o
 	llvm-objcopy --strip-debug $@
 
 %.o: %.c

@@ -502,9 +502,9 @@ uint64_t init(uint64_t arg)
     serial_printk("init task is running, arg: %#018lx\n", arg);
 
     // Spawn the first user-space process from the filesystem
-    int64_t pid = spawn_user_task("/hello.elf");
+    int64_t pid = spawn_user_task("/init.elf");
     if (pid < 0) {
-        serial_printk("init: failed to spawn /hello.elf (%d)\n", pid);
+        serial_printk("init: failed to spawn /init.elf (%d)\n", pid);
     }
 
     return 1;

@@ -25,6 +25,7 @@ KERNEL_SOURCES := \
 	sched/task.c \
 	block/blockdev.c \
 	fs/vfs.c \
+	fs/devfs.c \
 	fs/fat.c \
 	fs/elf.c
 

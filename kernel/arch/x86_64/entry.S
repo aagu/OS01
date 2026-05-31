@@ -53,7 +53,14 @@ RESTORE_ALL:
 	andq	%rsp,	reg
 
 ret_from_exception:
-	/*GET_CURRENT(%ebx)	need rewrite*/
+	// Exception handlers on IST stacks must NOT go through
+	// ret_from_intr: softirq / schedule() use get_current_task()
+	// (RSP masking) which returns garbage on the IST stack.
+	// User faults are redirected to do_exit via the modified
+	// iretq frame; kernel faults never return.  Any pending
+	// softirqs or resched will be picked up by the very next
+	// interrupt return (which runs on the task kernel stack).
+	jmp	RESTORE_ALL
 ENTRY(ret_from_intr)
 	movq	$-1,	%rcx
 	testq	softirq_status(%rip),	%rcx
