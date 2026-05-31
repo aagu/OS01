@@ -35,22 +35,26 @@ boot/uefi/BOOTX64.EFI: boot/uefi/main.c
 boot/uefi/OVMF.fd:
 	make -C boot/uefi OVMF.fd
 
-.PHONY: lib
+.PHONY: lib user
 lib:
 	make -C kernel install-headers
 	make -C libc install
+
+user:
+	make -C user
 
 .PHONY: kernel/kernel.bin
 kernel/kernel.bin: lib
 	make -C kernel kernel.bin
 
-disk.img: boot/uefi/BOOTX64.EFI lib kernel/kernel.bin
+disk.img: boot/uefi/BOOTX64.EFI lib kernel/kernel.bin user
 	dd if=/dev/zero of=$@ seek=0 bs=1M count=64
 	mkfs.vfat -F 32 $@
 	mmd -i $@ ::/EFI
 	mmd -i $@ ::/EFI/BOOT
 	mcopy -i $@ boot/uefi/BOOTX64.EFI ::/EFI/BOOT
 	mcopy -i $@ kernel/kernel.bin ::/
+	mcopy -i $@ user/hello.elf ::/hello.elf
 ifneq (,$(wildcard config/config.txt))
 	mcopy -i $@ config/config.txt ::/
 endif
@@ -58,10 +62,10 @@ endif
 .PHONY: run clean debug screenshot
 
 run: disk.img boot/uefi/OVMF.fd
-	$(QEMU_BIN) -pflash boot/uefi/OVMF.fd -hda disk.img -m $(MEMORY) -display $(DISPLAY) -serial stdio -monitor tcp:$(QEMU_MONITOR),server,nowait
+	$(QEMU_BIN) -M q35 -pflash boot/uefi/OVMF.fd -hda disk.img -m $(MEMORY) -display $(DISPLAY) -serial stdio -monitor tcp:$(QEMU_MONITOR),server,nowait
 
 debug: disk.img boot/uefi/OVMF.fd
-	$(QEMU_BIN) -pflash boot/uefi/OVMF.fd -S -s -hda disk.img -m $(MEMORY) -display $(DISPLAY) -serial stdio -monitor tcp:$(QEMU_MONITOR),server,nowait
+	$(QEMU_BIN) -M q35 -pflash boot/uefi/OVMF.fd -S -s -hda disk.img -m $(MEMORY) -display $(DISPLAY) -serial stdio -monitor tcp:$(QEMU_MONITOR),server,nowait
 
 # Take a screenshot of the QEMU framebuffer.
 # Requires: QEMU running with -monitor tcp (automatic with make run/debug)
@@ -83,4 +87,5 @@ clean:
 	make -C boot/uefi distclean
 	make -C kernel clean
 	make -C libc clean
+	make -C user clean
 	rm -rf sysroot

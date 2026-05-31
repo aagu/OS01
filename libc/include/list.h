@@ -27,8 +27,8 @@ inline void list_add_to_behind(struct List * entry, struct List * new_entry)
 inline void list_add_to_before(struct List * entry, struct List * new_entry)
 {
     new_entry->next = entry;
+    new_entry->prev = entry->prev;
     entry->prev->next = new_entry;
-    new_entry->next->prev = entry;
     entry->prev = new_entry;
 }
 

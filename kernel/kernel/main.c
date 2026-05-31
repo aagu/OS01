@@ -97,8 +97,8 @@ int kernel_main(struct BOOT_INFO *bootinfo)
         }
     }
 
-    timer = create_timer(test_timer, NULL, 10);;
-    add_timer(timer);
+    // timer = create_timer(test_timer, NULL, 100);;
+    // add_timer(timer);
 
     task_init();
 

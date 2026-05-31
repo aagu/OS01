@@ -289,6 +289,7 @@ ENTRY(system_call)
 // pushq rbp/rax.  We undo those, restore task_init's frame
 // pointer, and then leave+ret to unwind back to kernel_main.
 ENTRY(idle_resume)
+	sti               // re-enable IRQs (disabled by switch_to's cli)
 	popq	%rax      // undo first pushq %rax from the initial switch_to
 	popq	%rbp      // restore task_init's frame pointer
 	leave             // mov rsp, rbp; pop rbp — unwinds task_init's frame

@@ -123,7 +123,7 @@ task_t *init_task[NR_CPUS] = {&init_task_union.task,0};
 mm_t init_mm = {0};
 thread_t init_thread =
 {
-    .rsp0 = 0xffff800000007c00,  // dedicated exception stack, separate from task stack
+    .rsp0 = (uint64_t)(init_task_union.stack + STACK_SIZE),  // idle task kernel stack
     .rip = (uint64_t)idle_resume,
     .rsp = (uint64_t)(init_task_union.stack + STACK_SIZE),
     .fs = KERNEL_DS,
@@ -192,12 +192,14 @@ inline task_t* __attribute__((always_inline)) get_current_task()
         __asm__ __volatile__(                \
             "pushq %%rbp \n\t"       \
             "pushq %%rax \n\t"       \
+            "cli \n\t"               /* disable IRQs during stack switch */ \
             "movq %%rsp, %0 \n\t"    \
             "movq %2, %%rsp \n\t"    \
             "leaq 1f(%%rip), %%rax \n\t" \
             "pushq %3 \n\t"          \
             "jmp __switch_to \n\t"   \
             "1: \n\t"                \
+            "sti \n\t"               /* re-enable IRQs after switch */ \
             "popq %%rax \n\t"        \
             "popq %%rbp \n\t"        \
             : "=m"((prev)->thread->rsp),"=m"((next)->thread->rip) \
@@ -210,9 +212,14 @@ inline task_t* __attribute__((always_inline)) get_current_task()
 
 uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags, uint64_t stack_start, uint64_t stack_size);
 void task_init();
-void user_task_create(void);
+int64_t spawn_user_task(const char *path);
+int64_t sys_exec(const char *path, pt_regs_t *regs);
 void schedule(void);
 uint64_t do_exit(uint64_t exit_code);
+
+/* User stack layout (separate 2MB page from code at 0x400000) */
+#define USER_STACK_BASE 0x600000UL
+#define USER_STACK_TOP  (USER_STACK_BASE + 0x200000UL - 8)
 
 /* Preemption flag — set by timer IRQ, checked in ret_from_intr */
 extern uint64_t need_resched;

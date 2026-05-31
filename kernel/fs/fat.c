@@ -200,6 +200,10 @@ int fat32_read_data(fat32_fs_t *fs, uint32_t first_cluster,
 
             file_offset += to_read;
             if (bytes_remaining == 0) break;
+
+            // Reset file_offset — after the first partial cluster,
+            // subsequent clusters are read from offset 0.
+            file_offset = 0;
         } else {
             // Skip this cluster
             file_offset -= cluster_size;

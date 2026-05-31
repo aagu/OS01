@@ -6,5 +6,6 @@
 #define SYS_exit     2
 #define SYS_brk      3
 #define SYS_getpid   4
+#define SYS_exec     5
 
 #endif

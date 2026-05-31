@@ -8,6 +8,21 @@ static vfs_mount_t mount_table[VFS_MOUNTPOINT_MAX];
 static int mount_count = 0;
 static int vfs_initialized = 0;
 
+// ── Helpers ────────────────────────────────────────────────
+// Case-insensitive string compare — FAT32 stores 8.3 names in
+// uppercase, so we loosen the lookup to accept any case.
+static int vfs_name_cmp(const char *a, const char *b)
+{
+    while (*a && *b) {
+        char ca = *a++;
+        char cb = *b++;
+        if (ca >= 'a' && ca <= 'z') ca -= 32;
+        if (cb >= 'a' && cb <= 'z') cb -= 32;
+        if (ca != cb) return (int)(unsigned char)ca - (int)(unsigned char)cb;
+    }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
 // ── Initialization ────────────────────────────────────────
 void vfs_init(void)
 {
@@ -149,7 +164,7 @@ vfs_node_t *vfs_lookup(const char *path)
             int ret = current->ops->readdir(current, idx, &entry);
             if (ret == 0 && entry.name[0] == '\0') break;  // end of directory
             if (ret == 0) {
-                if (strcmp(entry.name, comp) == 0) {
+                if (vfs_name_cmp(entry.name, comp) == 0) {
                     found = 1;
                     break;
                 }

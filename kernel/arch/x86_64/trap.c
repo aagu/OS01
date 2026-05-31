@@ -6,28 +6,65 @@
 #include <kernel/trace.h>
 #include <kernel/arch/x86_64/asm.h>
 #include <kernel/task.h>
+#include <kernel/slab.h>
 #include <driver/serial.h>
 #include <errno.h>
 #include <uapi/syscall.h>
+#include <string.h>
+#include <stdlib.h>
 
-// Redirect a user-mode fault to do_exit instead of returning to ring 3
+// Kill the user task that was running when a user-mode fault occurred.
+// We are on the IST exception stack — get_current_task() is broken.
+// Use TSS.rsp0 to locate the correct task, then overwrite the iretq
+// frame to redirect execution to do_exit() on the task's kernel stack
+// (where get_current_task() will work correctly).
 static void kill_current_user_task(pt_regs_t *regs)
 {
-    serial_printk("Killing task %d (user fault at RIP=%p)\n",
-                  current->pid, regs->rip);
-    current->state = TASK_ZOMBIE;
+    uint64_t rsp0 = init_tss[0].rsp0;
+    task_t *task = (task_t *)((rsp0 - 1) & ~(STACK_SIZE - 1));
 
-    // Overwrite iretq target: return to ring-0 do_exit instead of user code
-    regs->rip = (uint64_t)do_exit;
-    regs->cs  = KERNEL_CS;
-    regs->ss  = KERNEL_DS;    // ring-0 stack segment
-    regs->ds  = KERNEL_DS;
-    regs->es  = KERNEL_DS;
-    regs->rflags = (1 << 9);
+    if (!task || (task->flags & PF_KTHREAD)) {
+        serial_printk("User fault with no user task (rsp0=%p)\n", rsp0);
+        return;
+    }
+
+    serial_printk("Killing task %d (user fault at RIP=%p) rsp0=%p\n",
+                  task->pid, regs->rip, rsp0);
+
+    // Mark the task ZOMBIE now, so the reaper can clean it up later.
+    // The actual resource cleanup (vmm_free_user_map, kfree) happens
+    // in do_exit() which we redirect to via iretq.
+    task->state = TASK_ZOMBIE;
+
+    // Overwrite the iretq target so the task "returns" to do_exit
+    // running in ring 0 on its own kernel stack — where
+    // get_current_task() works correctly.
+    regs->rip  = (uint64_t)do_exit;
+    regs->cs   = KERNEL_CS;
+    regs->ss   = KERNEL_DS;
+    regs->rsp  = rsp0;           // task's kernel stack (NOT user RSP!)
+    regs->ds   = KERNEL_DS;
+    regs->es   = KERNEL_DS;
+    regs->rdi  = 0;              // exit code for do_exit
+    regs->rflags = (1 << 9);     // IF=1
+}
+
+// Check for user-mode fault and kill the task if so.  Returns 1 if
+// the fault was user-mode (caller should return immediately), 0 if
+// kernel-mode (caller should continue with kernel fault handling).
+static inline int handle_user_fault(pt_regs_t *regs, const char *name)
+{
+    if (regs->cs & 3) {
+        serial_printk("%s from user, killing task\n", name);
+        kill_current_user_task(regs);
+        return 1;
+    }
+    return 0;
 }
 
 void do_divide_error(pt_regs_t * regs, uint64_t error_code)
 {
+        if (handle_user_fault(regs, "do_divide_error")) return;
     color_printk(RED, BLACK, "do_divide_error(0),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	serial_printk("do_divide_error(0),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
@@ -72,6 +109,7 @@ void do_int3(pt_regs_t * regs, uint64_t error_code)
 
 void do_overflow(pt_regs_t * regs, uint64_t error_code)
 {
+    if (handle_user_fault(regs, "do_overflow")) return;
 	color_printk(RED,BLACK,"do_overflow(4),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	serial_printk("do_overflow(4),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
@@ -83,6 +121,7 @@ void do_overflow(pt_regs_t * regs, uint64_t error_code)
 
 void do_bounds(pt_regs_t * regs, uint64_t error_code)
 {
+    if (handle_user_fault(regs, "do_bounds")) return;
 	color_printk(RED,BLACK,"do_bounds(5),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	serial_printk("do_bounds(5),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
@@ -94,6 +133,7 @@ void do_bounds(pt_regs_t * regs, uint64_t error_code)
 
 void do_undefined_opcode(pt_regs_t * regs, uint64_t error_code)
 {
+    if (handle_user_fault(regs, "do_undefined_opcode")) return;
 	color_printk(RED,BLACK,"do_undefined_opcode(6),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	serial_printk("do_undefined_opcode(6),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
@@ -105,6 +145,7 @@ void do_undefined_opcode(pt_regs_t * regs, uint64_t error_code)
 
 void do_dev_not_available(pt_regs_t * regs, uint64_t error_code)
 {
+    if (handle_user_fault(regs, "do_dev_not_available")) return;
 	color_printk(RED,BLACK,"do_dev_not_available(7),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	serial_printk("do_dev_not_available(7),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
@@ -127,6 +168,7 @@ void do_double_fault(pt_regs_t * regs, uint64_t error_code)
 
 void do_coprocessor_segment_overrun(pt_regs_t * regs, uint64_t error_code)
 {
+    if (handle_user_fault(regs, "do_coprocessor_segment_overrun")) return;
 	color_printk(RED,BLACK,"do_coprocessor_segment_overrun(9),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	serial_printk("do_coprocessor_segment_overrun(9),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
@@ -138,6 +180,7 @@ void do_coprocessor_segment_overrun(pt_regs_t * regs, uint64_t error_code)
 
 void do_invalid_TSS(pt_regs_t * regs, uint64_t error_code)
 {
+    if (handle_user_fault(regs, "do_invalid_TSS")) return;
 	color_printk(RED,BLACK,"do_invalid_TSS(10),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	serial_printk("do_invalid_TSS(10),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 
@@ -182,6 +225,7 @@ void do_invalid_TSS(pt_regs_t * regs, uint64_t error_code)
 
 void do_segment_not_present(pt_regs_t * regs, uint64_t error_code)
 {
+    if (handle_user_fault(regs, "do_segment_not_present")) return;
 	color_printk(RED,BLACK,"do_segment_not_present(11),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	serial_printk("do_segment_not_present(11),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 
@@ -226,6 +270,7 @@ void do_segment_not_present(pt_regs_t * regs, uint64_t error_code)
 
 void do_stack_segment_fault(pt_regs_t * regs, uint64_t error_code)
 {
+    if (handle_user_fault(regs, "do_stack_segment_fault")) return;
 	color_printk(RED,BLACK,"do_stack_segment_fault(12),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	serial_printk("do_stack_segment_fault(12),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 
@@ -325,8 +370,8 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 
 	// User-mode fault → kill the task, don't halt the kernel
 	if (regs->cs & 3) {
-		serial_printk("do_page_fault(14) user err=%p rip=%p cr2=%p\n",
-		              error_code, regs->rip, cr2);
+		serial_printk("do_page_fault(14) user err=%p rip=%p cr2=%p pid=%d\n",
+		              error_code, regs->rip, cr2, current->pid);
 		kill_current_user_task(regs);
 		return;
 	}
@@ -388,6 +433,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 
 void do_x87_FPU_error(pt_regs_t * regs, uint64_t error_code)
 {
+    if (handle_user_fault(regs, "do_x87_FPU_error")) return;
 	color_printk(RED,BLACK,"do_x87_FPU_error(16),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	serial_printk("do_x87_FPU_error(16),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
@@ -399,6 +445,7 @@ void do_x87_FPU_error(pt_regs_t * regs, uint64_t error_code)
 
 void do_alignment_check(pt_regs_t * regs, uint64_t error_code)
 {
+    if (handle_user_fault(regs, "do_alignment_check")) return;
 	color_printk(RED,BLACK,"do_alignment_check(17),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	serial_printk("do_alignment_check(17),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
@@ -410,6 +457,7 @@ void do_alignment_check(pt_regs_t * regs, uint64_t error_code)
 
 void do_machine_check(pt_regs_t * regs, uint64_t error_code)
 {
+    if (handle_user_fault(regs, "do_machine_check")) return;
 	color_printk(RED,BLACK,"do_machine_check(18),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	serial_printk("do_machine_check(18),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
@@ -421,6 +469,7 @@ void do_machine_check(pt_regs_t * regs, uint64_t error_code)
 
 void do_SIMD_exception(pt_regs_t * regs, uint64_t error_code)
 {
+    if (handle_user_fault(regs, "do_SIMD_exception")) return;
 	color_printk(RED,BLACK,"do_SIMD_exception(19),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	serial_printk("do_SIMD_exception(19),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
@@ -432,6 +481,7 @@ void do_SIMD_exception(pt_regs_t * regs, uint64_t error_code)
 
 void do_virtualization_exception(pt_regs_t * regs, uint64_t error_code)
 {
+    if (handle_user_fault(regs, "do_virtualization_exception")) return;
 	color_printk(RED,BLACK,"do_virtualization_exception(20),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	serial_printk("do_virtualization_exception(20),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
@@ -499,6 +549,26 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
     }
     case SYS_getpid: {
         regs->rax = current->pid;
+        break;
+    }
+    case SYS_exec: {
+        // exec(const char *path) — replace current process with ELF from file
+        const char *path = (const char *)regs->rdi;
+        if ((uint64_t)path >= current->addr_limit) {
+            regs->rax = -EFAULT;
+            break;
+        }
+
+        // Copy path to kernel heap to avoid TOCTOU with user memory
+        char *path_copy = strdup(path);
+        if (!path_copy) {
+            regs->rax = -ENOMEM;
+            break;
+        }
+
+        int64_t ret = sys_exec(path_copy, regs);
+        kfree(path_copy);
+        regs->rax = ret;
         break;
     }
     default:
