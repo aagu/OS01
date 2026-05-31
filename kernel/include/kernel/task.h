@@ -109,9 +109,9 @@ thread_t init_thread;
     .thread = &init_thread,           \
     .addr_limit = 0xffff800000000000, \
     .pid = 0,                         \
-    .counter = 1,                     \
+    .counter = 0,                     \
     .signal = 0,                      \
-    .priority = 0,                    \
+    .priority = 2,                    /* idle task quantum = 20 ms */ \
 }
 
 union task_union init_task_union __attribute__((__section__(".data.init_task"))) = {INIT_TASK(init_task_union.task)};
@@ -209,5 +209,8 @@ void task_init();
 void user_task_create(void);
 void schedule(void);
 uint64_t do_exit(uint64_t exit_code);
+
+/* Preemption flag — set by timer IRQ, checked in ret_from_intr */
+extern uint64_t need_resched;
 
 #endif

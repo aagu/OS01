@@ -7,6 +7,7 @@
 #include <kernel/apic.h>
 #include <kernel.h>
 #include <kernel/softirq.h>
+#include <kernel/task.h>
 
 hw_int_controller_t pit_controller =
 {
@@ -20,6 +21,10 @@ hw_int_controller_t pit_controller =
 void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attribute__((unused)), pt_regs_t * regs __attribute__((unused)))
 {
     jiffies++;
+
+    // Request rescheduling on every timer tick — schedule() manages
+    // per-task quantum counters and picks the next task.
+    need_resched = 1;
 
     if ((container_of(list_next(&timer_list_head.list), timer_t, list)->expire_jiffies <= jiffies))
         set_softirq_status(TIMER_SIRQ);

@@ -34,9 +34,11 @@ void do_timer(void * data __attribute__((unused)))
     }
     
     color_printk(RED, BLACK, "(Timer:%d)", jiffies);
-    // schedule() not called here — preemption from interrupt context
-    // would use wrong RSP for get_current_task(). TODO: add need_resched
-    // flag and check it in ret_from_intr path.
+    // Preemptive scheduling is driven from pit_handler (hardirq) which
+    // decrements current->counter and sets need_resched.  The flag is
+    // picked up in ret_from_intr (entry.S) which calls schedule() before
+    // RESTORE_ALL → iretq, so a context switch happens on the interrupt
+    // return path — never inline in the timer handler itself.
 }
 
 void timer_init()

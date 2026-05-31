@@ -36,22 +36,73 @@ void __switch_to(task_t *prev, task_t *next)
     }
 }
 
+// ── Preemption flag ──────────────────────────────────────
+// Set by pit_handler (timer IRQ) on every tick,
+// cleared by schedule() after a context switch.
+uint64_t need_resched = 0;
+
+// Global PID counter
+static uint64_t pid_counter = 1;
+
+// Set to 1 once task_init() completes; schedule() returns
+// immediately before this point (timer ticks before tasking
+// are harmless no-ops).
+static int scheduler_initialized = 0;
+
 void schedule(void)
 {
-    task_t *next = container_of(current->list.next, task_t, list);
-    int sanity = 64;
-    while (sanity-- && next->state != TASK_RUNNING) {
-        if (next->list.next == &init_task_union.task.list) {
-            next = &init_task_union.task;
-            break;
-        }
+    task_t *next;
+
+    if (!scheduler_initialized)
+        return;
+
+    // Decrement current task's quantum (one tick per call)
+    if (current->counter > 0)
+        current->counter--;
+
+    // If current still has quantum, keep running
+    if (current->state == TASK_RUNNING && current->counter > 0) {
+        need_resched = 0;
+        return;
+    }
+
+    // Round-robin: scan forward from current for a RUNNING task
+    next = container_of(current->list.next, task_t, list);
+    while (next != &init_task_union.task && next != current) {
+        if (next->state == TASK_RUNNING)
+            goto do_switch;
         next = container_of(next->list.next, task_t, list);
     }
-    if (next->state != TASK_RUNNING)
-        next = &init_task_union.task;  // fallback to idle
 
-    if (next != current)
-        switch_to(current, next);
+    // Wrap past the list head and try the rest
+    if (next == &init_task_union.task) {
+        next = container_of(next->list.next, task_t, list);
+        while (next != &init_task_union.task && next != current) {
+            if (next->state == TASK_RUNNING)
+                goto do_switch;
+            next = container_of(next->list.next, task_t, list);
+        }
+    }
+
+    // No other RUNNING task found — give current a fresh quantum
+    if (current->state == TASK_RUNNING) {
+        current->counter = current->priority > 0 ? current->priority : 1;
+        need_resched = 0;
+        return;
+    }
+
+    // Last resort: idle task
+    if (init_task_union.task.state == TASK_RUNNING) {
+        next = &init_task_union.task;
+        goto do_switch;
+    }
+
+    return;  // nothing to switch to
+
+do_switch:
+    next->counter = next->priority > 0 ? next->priority : 1;
+    need_resched = 0;
+    switch_to(current, next);
 }
 
 // ── Known issue: task resource leak ──────────────────────────
@@ -143,8 +194,9 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags, uint64_t stack_start, ui
 
     list_init(&tsk->list);
     list_add_to_before(&init_task_union.task.list, &tsk->list);
-    tsk->pid++;
+    tsk->pid = pid_counter++;
     tsk->state = TASK_UNINTERRUPTIBLE;
+    tsk->priority = 3;        /* default quantum = 30 ms at 100 Hz */
 
     tsk->thread = thd;
 
@@ -225,6 +277,9 @@ void task_init()
 
     init_task_union.task.state = TASK_RUNNING;
 
+    // Allow schedule() to run now that we have tasks and a valid current
+    scheduler_initialized = 1;
+
     p = container_of(current->list.next, task_t, list);
 
     switch_to(current, p);
@@ -243,8 +298,6 @@ void user_task_create(void)
     extern char user_code_start[], user_code_end[];
     size_t code_size = (uint64_t)user_code_end - (uint64_t)user_code_start;
 
-    static uint64_t next_pid = 1;
-
     // ── Allocate task structures ──
     // task_union must be STACK_SIZE-aligned for get_current_task() to work
     task_t *tsk = (task_t *)malloc(sizeof(union task_union) + STACK_SIZE);
@@ -256,10 +309,10 @@ void user_task_create(void)
     tsk->state = TASK_UNINTERRUPTIBLE;
     tsk->flags = 0;                        // NOT PF_KTHREAD → user task
     tsk->addr_limit = 0x00007FFFFFFFFFFF;
-    tsk->pid = next_pid++;
+    tsk->pid = pid_counter++;
     tsk->counter = 1;
     tsk->signal = 0;
-    tsk->priority = 0;
+    tsk->priority = 5;        /* user tasks get 50 ms quantum */
 
     list_init(&tsk->list);
     list_add_to_before(&init_task_union.task.list, &tsk->list);

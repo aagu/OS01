@@ -22,7 +22,10 @@ KERNEL_SOURCES := \
 	apic/ioapic.c \
 	apic/acpi.c \
 	timer/timer.c \
-	sched/task.c
+	sched/task.c \
+	block/blockdev.c \
+	fs/vfs.c \
+	fs/fat.c
 
 KERNEL_SOURCES += $(wildcard driver/*.c)
 

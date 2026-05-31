@@ -58,10 +58,20 @@ ENTRY(ret_from_intr)
 	movq	$-1,	%rcx
 	testq	softirq_status(%rip),	%rcx
 	jnz	softirq_handler
-	jmp	RESTORE_ALL	/*need rewrite*/
+check_resched:
+	# If need_resched is set, call schedule() before returning to the task
+	cmpq	$0,	need_resched(%rip)
+	jne	do_resched
+	jmp	RESTORE_ALL
 
 softirq_handler:
 	callq	do_softirq
+	jmp	check_resched
+
+do_resched:
+	# Clear the flag and invoke the scheduler
+	movq	$0,	need_resched(%rip)
+	callq	schedule
 	jmp	RESTORE_ALL
 
 ENTRY(divide_error)

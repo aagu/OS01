@@ -14,6 +14,10 @@
 #include <driver/pit.h>
 #include <driver/serial.h>
 #include <driver/keyboard.h>
+#include <driver/ahci.h>
+#include <block/blockdev.h>
+#include <fs/vfs.h>
+#include <fs/fat.h>
 #include <device/timer.h>
 #include <stdlib.h>
 
@@ -78,6 +82,20 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     timer_init();
     pit_init();
     keyboard_init();
+
+    ahci_init();
+
+    // ── Initialize VFS and mount filesystem ──────────
+    vfs_init();
+    if (block_device_count() > 0) {
+        block_device_t *dev = block_device_get(0);
+        fat32_fs_t *fs = fat32_mount(dev);
+        if (fs) {
+            vfs_mount("/", dev, &fat_vfs_ops, fs);
+            vfs_debug_list("/");
+            vfs_debug_list("/EFI");
+        }
+    }
 
     timer = create_timer(test_timer, NULL, 10);;
     add_timer(timer);

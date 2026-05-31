@@ -117,6 +117,21 @@ The UEFI bootloader (`boot/uefi/main.c`, built with posix-uefi via clang `--targ
 
 ### Task/scheduling (`kernel/sched/task.c` + `kernel/include/kernel/task.h`)
 
+**Preemptive round-robin scheduler** — timer-driven, per-task quantum.
+
+#### How preemption works
+1. **PIT hardirq** (`driver/pit.c` — `pit_handler`): fires at 100Hz, increments `jiffies`, sets `need_resched = 1`
+2. **Interrupt return** (`arch/x86_64/entry.S` — `ret_from_intr`): after softirq handling, checks `need_resched`, if set → calls `schedule()`
+3. **`schedule()`**: decrements current task's `counter`. When exhausted, picks the next RUNNING task in round-robin order, gives it a fresh quantum (`counter = priority`), and calls `switch_to()`
+4. This all happens on the **interrupt return path** (before `RESTORE_ALL` → `iretq`), not inline in the timer handler — safe because `get_current_task()` works when RSP is on the task's kernel stack
+
+#### Critical: IRQ gates use IST=0
+IRQ handlers in `irq_install()` (`kernel/intr/irq.c`) use `set_intr_gate(i, 0, ...)` — **no IST stack switch**. This ensures `get_current_task()` (which masks RSP) works from interrupt context:
+- **Ring-0 interrupts**: RSP stays on the task's kernel stack → masking works
+- **Ring-3 interrupts**: CPU switches to TSS.rsp0 (task's kernel stack, set by `__switch_to`) → masking works
+
+Exception handlers (divide_error, double_fault, etc.) retain IST stacks (IST1=0x7C00, IST3=0x7400).
+
 #### Key structures
 ```c
 task_t:    list, state, flags (PF_KTHREAD/PF_PROCESS/PF_THREAD), mm*, thread*, pid, priority
@@ -127,18 +142,24 @@ mm_t:      pml4 pointer + segment boundaries (start_code, end_code, start_brk, e
 Tasks embed a 32KB stack via `union task_union { task_t task; char stack[32768]; }`.
 The union is 32KB-aligned in `.data.init_task` section.
 
+**Default time slices** (at 100Hz = 10ms/tick):
+- Idle task: priority=2 (20ms)
+- Kernel threads (do_fork): priority=3 (30ms)
+- User tasks: priority=5 (50ms)
+
 #### Context switching
 - `get_current_task()`: `RSP & ~(STACK_SIZE - 1)` — masks lower 15 bits to find task base
 - `switch_to(prev, next)`: inline asm saves prev RSP, loads next RSP, pushes next->rip, jumps to `__switch_to`
-- `__switch_to(prev, next)`: updates TSS with **dedicated exception stack** (`0xFFFF800000007C00`, NOT task stack), swaps FS/GS
+- `__switch_to(prev, next)`: updates TSS.rsp0 for ring-3→ring-0 transitions, swaps FS/GS, switches CR3 if needed
 - For kernel threads (PF_KTHREAD): `thd->rip` set to `kernel_thread_func` which pops pt_regs from stack
 - For user processes: `thd->rip` set to `ret_from_intr` (RESTORE_ALL + iretq path)
+- `scheduler_initialized` guard: timer ticks before `task_init()` are no-ops
 
 #### Known pitfalls
 - `~32768` ≠ `~(STACK_SIZE - 1)`. Always use `~(STACK_SIZE - 1)` (or `-STACK_SIZE`) to clear all 15 low bits of RSP.
 - `memcpy(dest, src, size)` — first arg is destination. The pt_regs must be copied TO the new task stack.
-- TSS.rsp0 **must** point to a dedicated exception stack, never to a task's own stack. Otherwise exception handlers overwrite the task's local variables.
-- `__switch_to` should NOT change TSS.rsp0 to the next task's stack; keep it at `0xFFFF800000007C00`.
+- TSS.rsp0 **must** point to the current task's kernel stack (base of task_union + STACK_SIZE), set by `__switch_to`. Not a fixed exception stack.
+- `__switch_to` sets TSS.rsp0 to `next->thread->rsp0`, enabling ring-3 interrupts to land on the correct kernel stack.
 
 ### Kernel initialization sequence (`kernel_main`)
 ```
