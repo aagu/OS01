@@ -468,12 +468,8 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
     }
     case SYS_exit: {
         // exit(int code) — terminate current process
-        uint64_t code = regs->rdi;
-        serial_printk("sys_exit: pid=%d code=%d\n", current->pid, code);
-        current->state = TASK_ZOMBIE;
-        schedule();  // switches away, never returns
-        // Unreachable — but if schedule somehow returns, loop
-        for (;;) hlt();
+        do_exit(regs->rdi);
+        // unreachable — do_exit calls schedule() which never returns
     }
     case SYS_brk: {
         // brk(void *addr) — set program break, return new break

@@ -6,6 +6,7 @@
 #include <kernel/printk.h>
 #include <kernel/memory.h>
 #include <kernel/pmm.h>
+#include <kernel/slab.h>
 #include <kernel/vmm.h>
 
 #include <string.h>
@@ -56,6 +57,21 @@ void schedule(void)
     if (!scheduler_initialized)
         return;
 
+    // ── Reap zombies (skip current — we're on its stack) ──
+    list_t *pos = init_task_union.task.list.next;
+    while (pos != &init_task_union.task.list) {
+        task_t *t = container_of(pos, task_t, list);
+        list_t *safe = pos->next;
+        if (t->state == TASK_ZOMBIE && t != current) {
+            list_del(&t->list);
+            if (t->thread)
+                kfree(t->thread);
+            if (t->stack_alloc_base)
+                kfree(t->stack_alloc_base);
+        }
+        pos = safe;
+    }
+
     // Decrement current task's quantum (one tick per call)
     if (current->counter > 0)
         current->counter--;
@@ -105,25 +121,24 @@ do_switch:
     switch_to(current, next);
 }
 
-// ── Known issue: task resource leak ──────────────────────────
-// do_exit() sets state=TASK_ZOMBIE and switches away, but never
-// frees the task's resources:
-//
-//  Leaked per user task:
-//    - task_union       (~64KB, from malloc)
-//    - thread_t         (~72B,  from malloc)
-//    - mm_t             (~80B,  from malloc)
-//    - PML4 page        (4KB,   from vmm_alloc_map/calloc)
-//    - PDPT+PDE pages   (~8KB,  from vmm_map_page/calloc)
-//    - user 2MB page    (2MB,   from alloc_pages + vmm_map_page)
-//
-//  These accumulate until a reaper thread is implemented.
-//  free(current) before schedule() is unsafe because
-//  switch_to(current, next) dereferences current->thread->rsp.
+// ── Task exit ──────────────────────────────────────────────
+// do_exit() frees user page tables and physical pages, then
+// marks the task ZOMBIE. thread_t and task_union are freed
+// later by the zombie reaper in schedule() (deferred because
+// __switch_to dereferences current->thread, and we're running
+// on the kernel stack inside task_union).
 //
 uint64_t do_exit(uint64_t exit_code)
 {
     serial_printk("task %d exiting with code %#018lx\n", current->pid, exit_code);
+
+    if (!(current->flags & PF_KTHREAD) && current->mm) {
+        // Free user page tables and user physical pages
+        vmm_free_user_map((mmap)Phy_To_Virt((uint64_t)current->mm->pml4));
+        kfree(current->mm);
+        current->mm = NULL;
+    }
+
     current->state = TASK_ZOMBIE;
     schedule();
     return 0;  // never reached — schedule() does switch_to
@@ -192,12 +207,14 @@ __asm__(
 uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags, uint64_t stack_start, uint64_t stack_size)
 {
     // Allocate with extra space for STACK_SIZE alignment
-    task_t *tsk = (task_t *)malloc(sizeof(union task_union) + STACK_SIZE);
-    tsk = (task_t *)(((uint64_t)tsk + STACK_SIZE - 1) & ~(STACK_SIZE - 1));
+    void *raw_alloc = malloc(sizeof(union task_union) + STACK_SIZE);
+    task_t *tsk = (task_t *)(((uint64_t)raw_alloc + STACK_SIZE - 1) & ~(STACK_SIZE - 1));
     thread_t *thd = (thread_t *)malloc(sizeof(thread_t));
 
     memset(tsk, 0, sizeof(task_t));
     memset(thd, 0, sizeof(thread_t));
+
+    tsk->stack_alloc_base = raw_alloc;  // for deferred kfree in reaper
 
     *tsk = *current;
 
@@ -309,11 +326,13 @@ void user_task_create(void)
 
     // ── Allocate task structures ──
     // task_union must be STACK_SIZE-aligned for get_current_task() to work
-    task_t *tsk = (task_t *)malloc(sizeof(union task_union) + STACK_SIZE);
-    tsk = (task_t *)(((uint64_t)tsk + STACK_SIZE - 1) & ~(STACK_SIZE - 1));
+    void *raw_alloc2 = malloc(sizeof(union task_union) + STACK_SIZE);
+    task_t *tsk = (task_t *)(((uint64_t)raw_alloc2 + STACK_SIZE - 1) & ~(STACK_SIZE - 1));
     thread_t *thd = (thread_t *)malloc(sizeof(thread_t));
     memset(tsk, 0, sizeof(task_t));
     memset(thd, 0, sizeof(thread_t));
+
+    tsk->stack_alloc_base = raw_alloc2;
 
     tsk->state = TASK_UNINTERRUPTIBLE;
     tsk->flags = 0;                        // NOT PF_KTHREAD → user task

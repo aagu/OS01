@@ -91,6 +91,8 @@ typedef struct task_struct
     int64_t counter; // time slice counter, used in round-robin scheduling
     int64_t signal; // signal mask, e.g. 0x0000000000000001 means SIGINT
     int64_t priority; // priority, used in priority scheduling
+
+    void *stack_alloc_base; // original malloc ptr (before STACK_SIZE alignment)
 } task_t;
 
 union task_union

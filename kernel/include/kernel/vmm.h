@@ -65,7 +65,8 @@ do													\
 
 void vmm_map_page(uint64_t *pagemap, uintptr_t physical_address,
                   uintptr_t virtual_address, uint64_t flags);
-void vmm_unmap_page(uint64_t *pagemap, uintptr_t virtual_address);
+uintptr_t vmm_unmap_page(uint64_t *pagemap, uintptr_t virtual_address);
 mmap vmm_alloc_map(void);
+void vmm_free_user_map(mmap pagemap);
 
 #endif

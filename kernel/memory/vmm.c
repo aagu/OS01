@@ -1,9 +1,11 @@
 #include <kernel/memory.h>
 #include <kernel/vmm.h>
 #include <kernel/pmm.h>
+#include <kernel/slab.h>
 #include <kernel/printk.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <driver/serial.h>
 
 // kernel map
 mmap kernel_map;
@@ -38,8 +40,8 @@ void vmm_map_page(uint64_t *pagemap, uintptr_t physical_address, uintptr_t virtu
     pml2[level2] = (physical_address & PAGE_2M_MASK) | flags;
 }
 
-// unmap virtual page to physical address
-void vmm_unmap_page(uint64_t *pagemap, uintptr_t virtual_address)
+// unmap virtual page to physical address, return the physical address
+uintptr_t vmm_unmap_page(uint64_t *pagemap, uintptr_t virtual_address)
 {
     uint64_t *pml4, *pml3, *pml2;
     size_t level4, level3, level2;
@@ -49,10 +51,16 @@ void vmm_unmap_page(uint64_t *pagemap, uintptr_t virtual_address)
     level2 = (size_t) (virtual_address >> PAGE_2M_SHIFT) & 0x1ff;
 
     pml4 = pagemap;
-    pml3 = get_next_level(pml4, level4, PAGE_KERNEL_GDT);
-    pml2 = get_next_level(pml3, level3, PAGE_KERNEL_Dir);
+    if (!(pml4[level4] & PAGE_Present))
+        return 0;
+    pml3 = (uint64_t *)Phy_To_Virt(pml4[level4] & PAGE_4K_MASK);
+    if (!(pml3[level3] & PAGE_Present))
+        return 0;
+    pml2 = (uint64_t *)Phy_To_Virt(pml3[level3] & PAGE_4K_MASK);
 
+    uintptr_t phys = pml2[level2] & PAGE_2M_MASK;
     pml2[level2] = 0;
+    return phys;
 }
 
 static void dump_memory_map()
@@ -116,4 +124,50 @@ void vmm_init()
 
 mmap vmm_alloc_map() {
     return (mmap)calloc(PAGE_4K_SIZE);
+}
+
+void vmm_free_user_map(mmap pagemap)
+{
+    if (!pagemap)
+        return;
+
+    // Walk PML4 entries 0–255 (user half). Entries 256–511 are
+    // shared kernel entries and must not be freed.
+    for (int l4 = 0; l4 < 256; l4++) {
+        uint64_t pml4e = pagemap[l4];
+        if (!(pml4e & PAGE_Present))
+            continue;
+
+        uint64_t *pml3 = (uint64_t *)Phy_To_Virt(pml4e & PAGE_4K_MASK);
+
+        // Walk PDPT entries (pointers to PDE pages)
+        for (int l3 = 0; l3 < 512; l3++) {
+            uint64_t pml3e = pml3[l3];
+            if (!(pml3e & PAGE_Present))
+                continue;
+
+            uint64_t *pml2 = (uint64_t *)Phy_To_Virt(pml3e & PAGE_4K_MASK);
+
+            // Walk PDE entries (2MB pages via PAGE_PS)
+            for (int l2 = 0; l2 < 512; l2++) {
+                uint64_t pml2e = pml2[l2];
+                if (!(pml2e & PAGE_Present))
+                    continue;
+
+                // Only 2MB pages (PAGE_PS set) are supported
+                if (pml2e & PAGE_PS) {
+                    uintptr_t phys = pml2e & PAGE_2M_MASK;
+                    struct Page *page = Phy_to_2M_Page(phys);
+                    page_clean(page);
+                    free_pages(page, 1);
+                }
+            }
+
+            kfree(pml2);
+        }
+
+        kfree(pml3);
+    }
+
+    kfree(pagemap);
 }
