@@ -84,6 +84,7 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     pic_init();
     timer_init();
     pit_init();
+    lapic_timer_init();
     keyboard_init();
 
     ahci_init();
@@ -145,6 +146,7 @@ int kernel_main(struct BOOT_INFO *bootinfo)
                 percpu_data[0].tss = &init_tss[0];
                 percpu_install_gs(0);
                 percpu_data[0].online = 1;
+                // GS base set — BSP per-CPU data now accessible
                 serial_printk("percpu: BSP  (cpu=%u, apic_id=%u) online\n",
                               cpu_idx, apic_info.lapics[i].apic_id);
             } else {
@@ -167,6 +169,9 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     // After task_init(), APs set scheduler_ok=1 via
     // their own initialization path.
     smp_boot_aps();
+
+    // Start per-CPU LAPIC timer on BSP after all APs are up.
+    lapic_timer_start(100);
 
     task_init();
 

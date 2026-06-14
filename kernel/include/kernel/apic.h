@@ -195,4 +195,12 @@ hw_int_controller_t * get_ioapic_controller(void);
 // Look up the GSI for a given ISA IRQ (applying ISO overrides)
 uint32_t isa_irq_to_gsi(uint8_t isa_irq);
 
+// ── LAPIC per-CPU timer ────────────────────────
+// Calibrate against PIT (must run once on BSP after PIT is active).
+void lapic_timer_calibrate(void);
+// Start periodic timer at the given frequency on the executing CPU.
+void lapic_timer_start(uint32_t freq_hz);
+// One-shot BSP setup: register IDT gate, calibrate, start at 100 Hz.
+void lapic_timer_init(void);
+
 #endif // _KERNEL_APIC_H

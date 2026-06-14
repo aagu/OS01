@@ -24,6 +24,7 @@ KERNEL_SOURCES := \
 	apic/ioapic.c \
 	apic/acpi.c \
 	apic/ipi.c \
+	apic/lapic_timer.c \
 	timer/timer.c \
 	sched/task.c \
 	sched/smp.c \
