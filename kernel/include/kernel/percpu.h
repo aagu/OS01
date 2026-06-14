@@ -33,6 +33,8 @@ typedef struct percpu {
     // ── IPI / TLB shootdown ──
     uint32_t tlb_wanted;        // atomic flag: TLB invalidate requested
     uint32_t tlb_ack;           // atomic counter: shootdown ACK
+    list_t run_queue;
+    struct task_struct *idle;
 } percpu_t;
 
 // Number of CPUs supported (from kernel/include/kernel/arch/x86_64/cpu.h)

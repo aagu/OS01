@@ -93,7 +93,7 @@ void schedule(void)
     // Round-robin: scan forward from current for a RUNNING task
     next = container_of(current->list.next, task_t, list);
     while (next != &init_task_union.task && next != current) {
-        if (next->state == TASK_RUNNING)
+        if (next->state == TASK_RUNNING && next->cpu == this_cpu()->cpu_id)
             goto do_switch;
         next = container_of(next->list.next, task_t, list);
     }
@@ -102,7 +102,7 @@ void schedule(void)
     if (next == &init_task_union.task) {
         next = container_of(next->list.next, task_t, list);
         while (next != &init_task_union.task && next != current) {
-            if (next->state == TASK_RUNNING)
+            if (next->state == TASK_RUNNING && next->cpu == this_cpu()->cpu_id)
                 goto do_switch;
             next = container_of(next->list.next, task_t, list);
         }
@@ -115,10 +115,13 @@ void schedule(void)
         return;
     }
 
-    // Last resort: idle task
-    if (init_task_union.task.state == TASK_RUNNING) {
-        next = &init_task_union.task;
-        goto do_switch;
+    // Last resort: this CPU's idle task
+    {
+        percpu_t *me = this_cpu();
+        if (me->idle && me->idle->state == TASK_RUNNING) {
+            next = me->idle;
+            goto do_switch;
+        }
     }
 
     return;  // nothing to switch to
@@ -238,6 +241,7 @@ int64_t spawn_user_task(const char *path)
     tsk->counter = 1;
     tsk->signal = 0;
     tsk->priority = 5;                     // 50 ms quantum at 100 Hz
+    tsk->cpu = cpu_id();                    // created on this CPU
 
     list_init(&tsk->list);
     list_add_to_before(&init_task_union.task.list, &tsk->list);
@@ -425,6 +429,7 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
     tsk->pid = atomic_fetch_add((volatile uint64_t *)&pid_counter, 1);
     tsk->state = TASK_UNINTERRUPTIBLE;
     tsk->priority = 3;
+    tsk->cpu = cpu_id();                    // same CPU as parent
     tsk->thread = thd;
 
     thd->cr3 = current->thread->cr3;
@@ -492,6 +497,10 @@ void task_init()
 
     init_tss[0].rsp0 = init_thread.rsp0;
     list_init(&init_task_union.task.list);
+
+    // BSP idle task pointer (for the multicore scheduler).
+    percpu_data[0].idle = &init_task_union.task;
+    init_task_union.task.cpu = 0;
 
     kernel_thread(init, 10, CLONE_FS | CLONE_FILES | CLONE_SIGNAL);
 
