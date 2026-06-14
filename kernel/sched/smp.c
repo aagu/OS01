@@ -1,6 +1,7 @@
 #include <kernel/arch/x86_64/trampoline.h>
 #include <kernel/percpu.h>
 #include <kernel/apic.h>
+#include <kernel/ipi.h>
 #include <kernel/task.h>
 #include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/x86_64/msr.h>
@@ -63,7 +64,6 @@ void ap_entry(void)
     // ── Set up TSS in init_tss[cpu_id] ──────────────────
     cpu->tss = &init_tss[cpu->cpu_id];
     *cpu->tss = init_tss[0];  // copy IST values from BSP template
-    // rsp0 will be set by __switch_to before the first task switch
     cpu->tss->rsp0 = 0xffff800000007c00;
 
     set_tss64(cpu->tss->rsp0, cpu->tss->rsp1, cpu->tss->rsp2,
@@ -71,22 +71,14 @@ void ap_entry(void)
               cpu->tss->ist4, cpu->tss->ist5, cpu->tss->ist6,
               cpu->tss->ist7);
 
-    // TODO Phase 6: Load the per-CPU TSS descriptor via LTR.
-    // For now the BSP's TR (selector 0x40) is still valid for
-    // ring-3 → ring-0 transitions, and __switch_to updates
-    // rsp0 via set_tss64.
-
     // ── Mark online ─────────────────────────────────────
     cpu->online = 1;
 
-    // Enable interrupts and idle — this AP will be woken by
-    // timer interrupts and the scheduler.
     __asm__ __volatile__("sti");
     serial_printk("SMP: AP %u online, entering idle\n", cpu->cpu_id);
 
     while (1) {
         __asm__ __volatile__("hlt");
-        // check for reschedule request
         if (cpu->need_resched && cpu->scheduler_ok)
             schedule();
     }
@@ -96,6 +88,9 @@ void ap_entry(void)
 
 void smp_boot_aps(void)
 {
+    // Register IPI vectors before booting APs.
+    ipi_init();
+
     uint64_t bsp_cr3 = (uint64_t)get_cr3();
 
     // 1. Copy embedded trampoline blob → physical 0x8000
@@ -114,13 +109,12 @@ void smp_boot_aps(void)
         if (i == 0)
             continue;  // skip BSP
         if (!percpu_data[i].apic_id)
-            continue;  // not registered (Phase 1)
+            continue;  // not registered
 
         uint32_t ap_id = percpu_data[i].apic_id;
         serial_printk("SMP: booting AP %u (APIC ID %u)\n", i, ap_id);
 
-        // Allocate a temporary stack for the AP (freed later when
-        // the AP switches to task stacks via the scheduler).
+        // Allocate a temporary stack for the AP
         void *tmp_stack = malloc(STACK_SIZE);
         if (!tmp_stack) {
             serial_printk("SMP: failed to allocate stack for AP %u\n", i);
@@ -128,7 +122,7 @@ void smp_boot_aps(void)
         }
 
         // Fill trampoline data
-        tdata->cr3     = bsp_cr3;              // share BSP's page tables
+        tdata->cr3     = bsp_cr3;
         tdata->gs_base = (uint64_t)&percpu_data[i];
         tdata->stack   = (uint64_t)tmp_stack + STACK_SIZE;
         tdata->entry   = (uint64_t)ap_entry;
@@ -145,7 +139,7 @@ void smp_boot_aps(void)
         lapic_write(LAPIC_ICR_HIGH, icr_high);
         lapic_write(LAPIC_ICR_LOW, ICR_DELIVERY_INIT | ICR_LEVEL_ASSERT);
 
-        // Wait ~10ms for INIT deassert
+        // Wait ~10ms
         for (volatile uint32_t d = 0; d < 100000; d++)
             __asm__ __volatile__("pause");
 
@@ -156,7 +150,7 @@ void smp_boot_aps(void)
         for (volatile uint32_t d = 0; d < 100000; d++)
             __asm__ __volatile__("pause");
 
-        // SIPI #1 — vector = trampoline page number
+        // SIPI #1
         if (lapic_read(LAPIC_ICR_LOW) & ICR_STATUS_PENDING) {
             serial_printk("SMP: ICR still pending before SIPI\n");
         }
