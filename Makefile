@@ -62,10 +62,10 @@ endif
 .PHONY: run clean debug screenshot
 
 run: disk.img boot/uefi/OVMF.fd
-	$(QEMU_BIN) -M q35 -pflash boot/uefi/OVMF.fd -hda disk.img -m $(MEMORY) -display $(DISPLAY) -serial stdio -monitor tcp:$(QEMU_MONITOR),server,nowait
+	$(QEMU_BIN) -M q35 -smp 2 -pflash boot/uefi/OVMF.fd -hda disk.img -m $(MEMORY) -display $(DISPLAY) -serial stdio -monitor tcp:$(QEMU_MONITOR),server,nowait
 
 debug: disk.img boot/uefi/OVMF.fd
-	$(QEMU_BIN) -M q35 -pflash boot/uefi/OVMF.fd -S -s -hda disk.img -m $(MEMORY) -display $(DISPLAY) -serial stdio -monitor tcp:$(QEMU_MONITOR),server,nowait
+	$(QEMU_BIN) -M q35 -smp 2 -pflash boot/uefi/OVMF.fd -S -s -hda disk.img -m $(MEMORY) -display $(DISPLAY) -serial stdio -monitor tcp:$(QEMU_MONITOR),server,nowait
 
 # Take a screenshot of the QEMU framebuffer.
 # Requires: QEMU running with -monitor tcp (automatic with make run/debug)

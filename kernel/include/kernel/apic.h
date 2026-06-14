@@ -124,6 +124,7 @@
 #define MADT_TYPE_IOAPIC      0x01   // I/O APIC
 #define MADT_TYPE_ISO         0x02   // Interrupt Source Override
 #define MADT_TYPE_NMI         0x04   // Local APIC NMI
+#define MADT_TYPE_X2APIC      0x09   // Processor Local x2APIC (ACPI 5.0+)
 
 // ──────────────────────────────────────────────
 //  Data structures
@@ -134,9 +135,9 @@
 #define MAX_ISO_OVERRIDES 16
 
 typedef struct {
-    uint8_t  apic_id;
-    uint8_t  acpi_id;
-    uint32_t flags;        // bit 0 = enabled
+    uint32_t apic_id;          // APIC ID (8-bit for LAPIC, 32-bit for x2APIC)
+    uint32_t acpi_id;          // ACPI processor UID (8-bit or 32-bit depending on type)
+    uint32_t flags;            // bit 0 = enabled
 } lapic_entry_t;
 
 typedef struct {

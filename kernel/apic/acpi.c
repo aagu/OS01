@@ -81,6 +81,16 @@ struct MADT_NMI {
     uint8_t  lint;
 } __attribute__((packed));
 
+// MADT type 9: Processor Local x2APIC (ACPI 5.0+)
+struct MADT_X2APIC {
+    uint8_t  type;
+    uint8_t  length;
+    uint16_t reserved;
+    uint32_t x2apic_id;          // 32-bit APIC ID
+    uint32_t flags;
+    uint32_t acpi_processor_id;  // 32-bit ACPI processor UID
+} __attribute__((packed));
+
 // Wrapper for the MADT (SDT header + MADT-specific fields)
 struct MADT_HEADER {
     struct SDT_HEADER sdt;
@@ -195,6 +205,19 @@ static void parse_madt(struct MADT_HEADER *madt)
             struct MADT_NMI *nmi = (struct MADT_NMI *)ptr;
             serial_printk("APIC:   NMI acpi_processor=%u lint=%u flags=%#x\n",
                           nmi->acpi_processor_id, nmi->lint, nmi->flags);
+            break;
+        }
+
+        case MADT_TYPE_X2APIC: {
+            struct MADT_X2APIC *x2 = (struct MADT_X2APIC *)ptr;
+            if (apic_info.lapic_count < MAX_LAPICS) {
+                apic_info.lapics[apic_info.lapic_count].apic_id  = x2->x2apic_id;
+                apic_info.lapics[apic_info.lapic_count].acpi_id  = x2->acpi_processor_id;
+                apic_info.lapics[apic_info.lapic_count].flags    = x2->flags;
+                serial_printk("APIC:   x2APIC id=%u acpi=%u flags=%#x\n",
+                              x2->x2apic_id, x2->acpi_processor_id, x2->flags);
+                apic_info.lapic_count++;
+            }
             break;
         }
 

@@ -120,17 +120,37 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     // timer = create_timer(test_timer, NULL, 100);;
     // add_timer(timer);
 
-    // ── Initialize per-CPU subsystem for the BSP ──────
-    // Must happen before task_init() — schedule() and
-    // __switch_to expect this_cpu() / cpu->tss to work.
-    percpu_init(0, apic_info.lapic_count > 0
-                   ? apic_info.lapics[0].apic_id
-                   : 0);
-    percpu_data[0].tss = &init_tss[0];
-    percpu_install_gs(0);
-    percpu_data[0].online = 1;
-    serial_printk("percpu: BSP (cpu=0, apic_id=%u) online\n",
-                  percpu_data[0].apic_id);
+    // ── Initialize per-CPU subsystem ─────────────────
+    // Walk the MADT-discovered LAPIC list and set up percpu_data[]
+    // for every enabled processor.  Must happen before task_init() —
+    // schedule() and __switch_to expect this_cpu() / cpu->tss to work.
+    {
+        uint32_t cpu_idx = 0;
+
+        for (uint32_t i = 0; i < apic_info.lapic_count && cpu_idx < NR_CPUS; i++) {
+            if (!(apic_info.lapics[i].flags & 1))
+                continue;  // not enabled
+
+            percpu_init(cpu_idx, apic_info.lapics[i].apic_id);
+
+            if (cpu_idx == 0) {
+                // BSP — install GS base now so the scheduler works
+                percpu_data[0].tss = &init_tss[0];
+                percpu_install_gs(0);
+                percpu_data[0].online = 1;
+                serial_printk("percpu: BSP  (cpu=%u, apic_id=%u) online\n",
+                              cpu_idx, apic_info.lapics[i].apic_id);
+            } else {
+                // AP — will be brought online by smp_boot_aps() (Phase 2)
+                serial_printk("percpu: AP   (cpu=%u, apic_id=%u) registered\n",
+                              cpu_idx, apic_info.lapics[i].apic_id);
+            }
+            cpu_idx++;
+        }
+
+        serial_printk("percpu: %u CPU(s) registered (%u enabled in MADT)\n",
+                      cpu_idx, apic_info.lapic_count);
+    }
 
     task_init();
 
