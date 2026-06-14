@@ -8,6 +8,7 @@
 #endif
 
 percpu_t percpu_data[NR_CPUS];
+uint32_t num_cpus;
 
 void percpu_init(uint32_t cpu, uint32_t apic_id)
 {

@@ -151,6 +151,8 @@ int kernel_main(struct BOOT_INFO *bootinfo)
 
         serial_printk("percpu: %u CPU(s) registered (%u enabled in MADT)\n",
                       cpu_idx, apic_info.lapic_count);
+
+        num_cpus = cpu_idx;
     }
 
     // ── Boot APs ───────────────────────────────────

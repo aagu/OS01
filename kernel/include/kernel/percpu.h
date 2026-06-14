@@ -39,6 +39,11 @@ typedef struct percpu {
 
 extern percpu_t percpu_data[NR_CPUS];
 
+// Number of CPUs actually discovered from MADT (≤ NR_CPUS).
+// Set by main.c after percpu_init loop.  All runtime loops
+// should iterate over num_cpus, not NR_CPUS.
+extern uint32_t num_cpus;
+
 // ── Per-CPU accessors ──────────────────────────────
 
 // Return a pointer to the current CPU's percpu struct.

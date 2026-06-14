@@ -2,6 +2,7 @@
 #define __SPINLOCK_H__
 
 #include "linkage.h"
+#include <stdint.h>
 
 typedef struct
 {
@@ -48,6 +49,40 @@ inline long __attribute__((always_inline)) spin_trylock(spinlock_T * lock)
 				:"memory"
 			);
 	return tmp_value;
+}
+
+// ── Interrupt-safe variants ────────────────────────────
+// Used when a spinlock may be contended between a task
+// and an interrupt handler on the SAME CPU — without
+// disabling IRQs, the handler spins forever trying to
+// acquire a lock already held by the interrupted code.
+
+// Lock and save the current interrupt flag (RFLAGS.IF).
+// Returns the old RFLAGS value — pass to _irqrestore.
+inline uint64_t __attribute__((always_inline)) spin_lock_irqsave(spinlock_T *lock)
+{
+    uint64_t flags;
+    __asm__ __volatile__(
+        "pushfq          \n\t"
+        "popq  %0        \n\t"
+        "cli             \n\t"
+        : "=r"(flags)
+        :
+        : "memory"
+    );
+    spin_lock(lock);
+    return flags;
+}
+
+// Unlock and restore the interrupt flag to the state
+// saved by spin_lock_irqsave.
+inline void __attribute__((always_inline)) spin_unlock_irqrestore(spinlock_T *lock, uint64_t flags)
+{
+    spin_unlock(lock);
+    // Re-enable interrupts ONLY if they were enabled before lock
+    if (flags & (1UL << 9)) {  // RFLAGS.IF = bit 9
+        __asm__ __volatile__("sti" ::: "memory");
+    }
 }
 
 #endif

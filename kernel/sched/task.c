@@ -50,8 +50,9 @@ void __switch_to(task_t *prev, task_t *next)
 // Set by timer IRQ on every tick, cleared by schedule() after
 // a context switch.  entry.S reads it via %gs:8.
 
-// Global PID counter
-static uint64_t pid_counter = 1;
+// Global PID counter — atomic because spawn/fork/exec may
+// race on different CPUs.
+static volatile uint64_t pid_counter = 1;
 
 // Per-CPU scheduler guard — set to 1 by task_init() on each CPU.
 // schedule() returns immediately before this point (ticks before
@@ -233,7 +234,7 @@ int64_t spawn_user_task(const char *path)
     tsk->state = TASK_UNINTERRUPTIBLE;
     tsk->flags = 0;                        // NOT PF_KTHREAD → user task
     tsk->addr_limit = 0x00007FFFFFFFFFFF;
-    tsk->pid = pid_counter++;
+    tsk->pid = atomic_fetch_add((volatile uint64_t *)&pid_counter, 1);
     tsk->counter = 1;
     tsk->signal = 0;
     tsk->priority = 5;                     // 50 ms quantum at 100 Hz
@@ -421,7 +422,7 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
 
     list_init(&tsk->list);
     list_add_to_before(&init_task_union.task.list, &tsk->list);
-    tsk->pid = pid_counter++;
+    tsk->pid = atomic_fetch_add((volatile uint64_t *)&pid_counter, 1);
     tsk->state = TASK_UNINTERRUPTIBLE;
     tsk->priority = 3;
     tsk->thread = thd;

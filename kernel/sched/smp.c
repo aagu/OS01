@@ -110,7 +110,7 @@ void smp_boot_aps(void)
     trampoline_data_t *tdata = (trampoline_data_t *)Phy_To_Virt(TRAMPOLINE_DATA_BASE);
 
     // 3. Boot each AP
-    for (uint32_t i = 0; i < NR_CPUS; i++) {
+    for (uint32_t i = 0; i < num_cpus; i++) {
         if (i == 0)
             continue;  // skip BSP
         if (!percpu_data[i].apic_id)
