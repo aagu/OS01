@@ -35,6 +35,8 @@ typedef struct percpu {
     uint32_t tlb_ack;           // atomic counter: shootdown ACK
     list_t run_queue;
     struct task_struct *idle;
+    uint64_t schedule_count;    // number of times schedule() ran
+    uint64_t tsc_boot;          // TSC value after AP startup (for warp check)
 } percpu_t;
 
 // Number of CPUs supported (from kernel/include/kernel/arch/x86_64/cpu.h)

@@ -43,6 +43,9 @@ static inline void wrmsr(uint32_t msr, uint64_t value)
 
 #define IA32_APIC_BASE  0x1B
 
+// TSC adjustment MSR (available if CPUID 7.0.EBX bit 1)
+#define IA32_TSC_ADJUST 0x3B
+
 // IA32_APIC_BASE bit definitions
 #define APIC_BASE_BSP          (1UL << 8)   // Bootstrap Processor
 #define APIC_BASE_ENABLE       (1UL << 11)  // APIC Global Enable (xAPIC)

@@ -65,6 +65,8 @@ void schedule(void)
     if (!this_cpu()->scheduler_ok)
         return;
 
+    this_cpu()->schedule_count++;
+
     // ── Reap zombies (skip current — we're on its stack) ──
     list_t *pos = init_task_union.task.list.next;
     while (pos != &init_task_union.task.list) {

@@ -89,4 +89,33 @@ static inline uint64_t atomic_xchg(volatile uint64_t *ptr, uint64_t val)
     return val;
 }
 
+// ── Time-Stamp Counter (TSC) ────────────────────────────
+
+// Read the full 64-bit TSC via RDTSC.
+// Returns the current TSC value.  On invariant-TSC CPUs
+// (CPUID 0x80000007 EDX bit 8), the counter ticks at a
+// constant rate irrespective of P-states.
+static inline uint64_t rdtsc(void)
+{
+    uint32_t low, high;
+    __asm__ __volatile__("rdtsc" : "=a"(low), "=d"(high));
+    return ((uint64_t)high << 32) | low;
+}
+
+// Serialising read — executes CPUID first to flush the
+// instruction pipeline, then RDTSC.  Use this when ordering
+// relative to surrounding code matters.
+static inline uint64_t rdtscp_serialized(void)
+{
+    uint32_t low, high;
+    __asm__ __volatile__(
+        "cpuid          \n\t"
+        "rdtsc          \n\t"
+        : "=a"(low), "=d"(high)
+        : "a"(0)
+        : "rbx", "rcx", "memory"
+    );
+    return ((uint64_t)high << 32) | low;
+}
+
 #endif
