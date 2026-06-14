@@ -155,7 +155,7 @@ void irq_install()
 {
     for (int i = 32; i < 56; i++)
     {
-        set_intr_gate(i, 0, interrupt[i - 32]);
+        set_intr_gate_raw(i, 0, interrupt[i - 32]);
     }
 
 	softirq_init();

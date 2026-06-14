@@ -175,7 +175,7 @@ void lapic_timer_init(void)
 {
     // Register the assembly stub (NOT the C function directly —
     // the CPU interrupt gate entry doesn't set up pt_regs).
-    set_intr_gate(LAPIC_TIMER_VECTOR, 0, lapic_timer_stub);
+    set_intr_gate_raw(LAPIC_TIMER_VECTOR, 0, lapic_timer_stub);
 
     // Calibrate using PIT as reference (PIT must already run).
     lapic_timer_calibrate();

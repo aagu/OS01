@@ -4,16 +4,20 @@
 #include <kernel/printk.h>
 #include <kernel/vmm.h>
 #include <kernel/arch/x86_64/gate.h>
-#include <kernel/arch/x86_64/regs.h>
 
-// Assembly stubs (defined below)
-extern void ipi_tlb_stub(void);
-extern void ipi_resched_stub(void);
+// ── File-scope: generate assembly stubs ──────────────────
+// MUST be outside any function so the stub code is not
+// executed as part of normal control flow.
 
-// ── C handlers (non-static — called from asm stubs) ─────
+DEFINE_INTR_STUB(tlb,     0x40);
+DEFINE_INTR_STUB(resched, 0x41);
 
-void ipi_tlb_handler(pt_regs_t *regs __attribute__((unused)),
-                     uint64_t error_code __attribute__((unused)))
+// ── C handlers ───────────────────────────────────────────
+// Called from generic_intr_dispatch via the stubs above.
+
+static void ipi_tlb_handler(uint64_t nr __attribute__((unused)),
+                            uint64_t param __attribute__((unused)),
+                            pt_regs_t *regs __attribute__((unused)))
 {
     percpu_t *cpu = this_cpu();
     if (cpu->tlb_wanted) {
@@ -25,93 +29,20 @@ void ipi_tlb_handler(pt_regs_t *regs __attribute__((unused)),
     lapic_eoi();
 }
 
-void ipi_resched_handler(pt_regs_t *regs __attribute__((unused)),
-                         uint64_t error_code __attribute__((unused)))
+static void ipi_resched_handler(uint64_t nr __attribute__((unused)),
+                                uint64_t param __attribute__((unused)),
+                                pt_regs_t *regs __attribute__((unused)))
 {
     this_cpu()->need_resched = 1;
     lapic_eoi();
 }
 
-// ── Assembly stubs: save regs → call C → ret_from_intr ───
-
-__asm__(
-    ".text\n\t"
-    ".globl ipi_tlb_stub\n\t"
-    "ipi_tlb_stub:\n\t"
-    "cld\n\t"
-    "pushq $0\n\t"        // ERRCODE  (0x90)
-    "pushq $0\n\t"        // FUNC     (0x88)
-    "pushq %rax\n\t"      // RAX      (0x80)
-    "movq %es, %rax\n\t"
-    "pushq %rax\n\t"      // ES       (0x78)
-    "movq %ds, %rax\n\t"
-    "pushq %rax\n\t"      // DS       (0x70)
-    "xorq %rax, %rax\n\t"
-    "pushq %rbp\n\t"      // RBP      (0x68)
-    "pushq %rdi\n\t"      // RDI      (0x60)
-    "pushq %rsi\n\t"      // RSI      (0x58)
-    "pushq %rdx\n\t"      // RDX      (0x50)
-    "pushq %rcx\n\t"      // RCX      (0x48)
-    "pushq %rbx\n\t"      // RBX      (0x40)
-    "pushq %r8\n\t"       // R8       (0x38)
-    "pushq %r9\n\t"       // R9       (0x30)
-    "pushq %r10\n\t"      // R10      (0x28)
-    "pushq %r11\n\t"      // R11      (0x20)
-    "pushq %r12\n\t"      // R12      (0x18)
-    "pushq %r13\n\t"      // R13      (0x10)
-    "pushq %r14\n\t"      // R14      (0x08)
-    "pushq %r15\n\t"      // R15      (0x00)
-    "movq $0x10, %rdi\n\t"
-    "movq %rdi, %ds\n\t"
-    "movq %rdi, %es\n\t"
-    "movq %rsp, %rdi\n\t"
-    "xorq %rsi, %rsi\n\t"
-    "call ipi_tlb_handler\n\t"
-    "jmp ret_from_intr\n\t"
-);
-
-__asm__(
-    ".text\n\t"
-    ".globl ipi_resched_stub\n\t"
-    "ipi_resched_stub:\n\t"
-    "cld\n\t"
-    "pushq $0\n\t"        // ERRCODE  (0x90)
-    "pushq $0\n\t"        // FUNC     (0x88)
-    "pushq %rax\n\t"      // RAX      (0x80)
-    "movq %es, %rax\n\t"
-    "pushq %rax\n\t"      // ES       (0x78)
-    "movq %ds, %rax\n\t"
-    "pushq %rax\n\t"      // DS       (0x70)
-    "xorq %rax, %rax\n\t"
-    "pushq %rbp\n\t"
-    "pushq %rdi\n\t"
-    "pushq %rsi\n\t"
-    "pushq %rdx\n\t"
-    "pushq %rcx\n\t"
-    "pushq %rbx\n\t"
-    "pushq %r8\n\t"
-    "pushq %r9\n\t"
-    "pushq %r10\n\t"
-    "pushq %r11\n\t"
-    "pushq %r12\n\t"
-    "pushq %r13\n\t"
-    "pushq %r14\n\t"
-    "pushq %r15\n\t"
-    "movq $0x10, %rdi\n\t"
-    "movq %rdi, %ds\n\t"
-    "movq %rdi, %es\n\t"
-    "movq %rsp, %rdi\n\t"
-    "xorq %rsi, %rsi\n\t"
-    "call ipi_resched_handler\n\t"
-    "jmp ret_from_intr\n\t"
-);
-
-// ── Register in IDT ───────────────────────────────────────
+// ── Initialisation ───────────────────────────────────────
 
 void ipi_init(void)
 {
-    set_intr_gate(IPI_VECTOR_TLB,     0, ipi_tlb_stub);
-    set_intr_gate(IPI_VECTOR_RESCHED, 0, ipi_resched_stub);
+    REGISTER_INTR_HANDLER(tlb,     0x40, ipi_tlb_handler);
+    REGISTER_INTR_HANDLER(resched, 0x41, ipi_resched_handler);
     serial_printk("IPI: vectors TLB=%#x RESCHED=%#x registered\n",
                   (unsigned)IPI_VECTOR_TLB, (unsigned)IPI_VECTOR_RESCHED);
 }

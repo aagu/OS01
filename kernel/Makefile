@@ -10,6 +10,7 @@ KERNEL_SOURCES := \
 	kernel/main.c \
 	intr/irq.c \
 	intr/softirq.c \
+	intr/dispatch.c \
 	kernel/printk.c \
 	kernel/panic.c \
 	kernel/trace.c \

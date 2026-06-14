@@ -140,7 +140,7 @@ int lapic_init(void)
     lapic_write(LAPIC_EOI, 0);
 
     // 11. Install spurious interrupt stub at the spurious vector
-    set_intr_gate(SPURIOUS_VECTOR, 0, lapic_spurious_stub);
+    set_intr_gate_raw(SPURIOUS_VECTOR, 0, lapic_spurious_stub);
 
     lapic_ready = 1;
     serial_printk("APIC: LAPIC initialized, id=%#x\n", lapic_read(LAPIC_ID));

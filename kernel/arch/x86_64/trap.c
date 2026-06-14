@@ -645,7 +645,7 @@ void sys_vector_install()
 {
     set_trap_gate(0,1,divide_error);
     set_trap_gate(1,1,debug);
-	set_intr_gate(2,1,nmi);
+	set_intr_gate_raw(2, 1, nmi);
 	set_system_gate(3,1,int3);
 	set_system_gate(4,1,overflow);
 	set_system_gate(5,1,bounds);
