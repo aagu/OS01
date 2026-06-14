@@ -10,6 +10,7 @@
 #include <kernel/interrupt.h>
 #include <kernel/task.h>
 #include <kernel/percpu.h>
+#include <kernel/arch/x86_64/trampoline.h>
 #include <device/pic.h>
 #include <kernel/apic.h>
 #include <driver/pit.h>
@@ -151,6 +152,13 @@ int kernel_main(struct BOOT_INFO *bootinfo)
         serial_printk("percpu: %u CPU(s) registered (%u enabled in MADT)\n",
                       cpu_idx, apic_info.lapic_count);
     }
+
+    // ── Boot APs ───────────────────────────────────
+    // Must happen before task_init() — APs enter idle loop
+    // with scheduler_ok=0 and wait for BSP to set up scheduling.
+    // After task_init(), APs set scheduler_ok=1 via
+    // their own initialization path.
+    smp_boot_aps();
 
     task_init();
 

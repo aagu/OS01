@@ -24,6 +24,7 @@ KERNEL_SOURCES := \
 	apic/acpi.c \
 	timer/timer.c \
 	sched/task.c \
+	sched/smp.c \
 	block/blockdev.c \
 	fs/vfs.c \
 	fs/devfs.c \
@@ -48,6 +49,7 @@ LIBS := $(LIBS) -nostdlib -lk -lgcc
 LIBS := $(LIBS) $(KERNEL_ARXH_LIBS)
 
 KERNEL_OBJECTS+=kernel/font.o
+KERNEL_OBJECTS+=arch/x86_64/trampoline_bin.o
 
 all: kernel.bin
 
@@ -59,6 +61,19 @@ all: kernel.bin
 
 kernel/font.o: kernel/font.psf
 	$(LD) -r -b binary -o $@ $<
+
+# ── Trampoline: assemble → link at 0x8000 → binary → embed ──
+arch/x86_64/trampoline.o: arch/x86_64/trampoline.S
+	clang -target x86_64-unknown-none -I$(KERNEL_HEADERS) -c $< -o $@
+
+arch/x86_64/trampoline.elf: arch/x86_64/trampoline.o arch/x86_64/trampoline.ld
+	$(LD) -T arch/x86_64/trampoline.ld arch/x86_64/trampoline.o -o $@
+
+arch/x86_64/trampoline.bin: arch/x86_64/trampoline.elf
+	$(OBJ_CPY) -O binary $< $@
+
+arch/x86_64/trampoline_bin.o: arch/x86_64/trampoline.bin
+	$(LD) -r -b binary $< -o $@
 
 # temporary solution to avoid interrupt code asigned to .bss
 intr/irq.o: intr/irq.c
