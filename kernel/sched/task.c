@@ -516,11 +516,14 @@ uint64_t init(uint64_t arg)
 {
     serial_printk("init task is running, arg: %#018lx\n", arg);
 
-    // Spawn the first user-space process from the filesystem
-    int64_t pid = spawn_user_task("/init.elf");
-    if (pid < 0) {
-        serial_printk("init: failed to spawn /init.elf (%d)\n", pid);
+    // Spawn 2 quick-exit tasks to verify round-robin scheduling.
+    for (int i = 0; i < 2; i++) {
+        int64_t pid = spawn_user_task("/spin.elf");
+        serial_printk("init: spin #%d → pid=%d\n", i, (int)pid);
     }
+    // Also spawn the interactive keyboard reader so the user
+    // can still interact with the system.
+    spawn_user_task("/init.elf");
 
     return 1;
 }
