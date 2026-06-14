@@ -47,20 +47,22 @@ void lapic_eoi(void)
 }
 
 // ──────────────────────────────────────────────
-//  Spurious interrupt handler
-//  The LAPIC may deliver spurious interrupts on the vector programmed
-//  into SVR bits 0-7.  This handler simply returns — no EOI needed for
-//  spurious interrupts.
+//  Spurious interrupt stub
+//  LAPIC may deliver spurious interrupts — no
+//  EOI needed, just return via iretq.  Must be
+//  raw assembly because set_intr_gate puts the
+//  address directly in the IDT: a bare C function
+//  would return via `ret` and leak CS+RFLAGS on
+//  the stack (16 bytes per occurrence).
 // ──────────────────────────────────────────────
 
-static void lapic_spurious_handler(uint64_t nr, uint64_t parameter __attribute__((unused)),
-                                    pt_regs_t *regs __attribute__((unused)))
-{
-    // Spurious interrupts do NOT require EOI.
-    // Just log and ignore.
-    // (quiet — don't flood the console on every spurious IRQ)
-    (void)nr;
-}
+extern void lapic_spurious_stub(void);
+
+__asm__(
+    ".globl lapic_spurious_stub\n\t"
+    "lapic_spurious_stub:\n\t"
+    "iretq\n\t"
+);
 
 // ──────────────────────────────────────────────
 //  Initialization
@@ -137,8 +139,8 @@ int lapic_init(void)
     // 10. EOI any stale pending interrupt
     lapic_write(LAPIC_EOI, 0);
 
-    // 11. Install spurious interrupt handler at the spurious vector
-    set_intr_gate(SPURIOUS_VECTOR, 0, lapic_spurious_handler);
+    // 11. Install spurious interrupt stub at the spurious vector
+    set_intr_gate(SPURIOUS_VECTOR, 0, lapic_spurious_stub);
 
     lapic_ready = 1;
     serial_printk("APIC: LAPIC initialized, id=%#x\n", lapic_read(LAPIC_ID));
