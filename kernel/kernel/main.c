@@ -9,6 +9,7 @@
 #include <kernel/arch/x86_64/spinlock.h>
 #include <kernel/interrupt.h>
 #include <kernel/task.h>
+#include <kernel/percpu.h>
 #include <device/pic.h>
 #include <kernel/apic.h>
 #include <driver/pit.h>
@@ -118,6 +119,18 @@ int kernel_main(struct BOOT_INFO *bootinfo)
 
     // timer = create_timer(test_timer, NULL, 100);;
     // add_timer(timer);
+
+    // ── Initialize per-CPU subsystem for the BSP ──────
+    // Must happen before task_init() — schedule() and
+    // __switch_to expect this_cpu() / cpu->tss to work.
+    percpu_init(0, apic_info.lapic_count > 0
+                   ? apic_info.lapics[0].apic_id
+                   : 0);
+    percpu_data[0].tss = &init_tss[0];
+    percpu_install_gs(0);
+    percpu_data[0].online = 1;
+    serial_printk("percpu: BSP (cpu=0, apic_id=%u) online\n",
+                  percpu_data[0].apic_id);
 
     task_init();
 

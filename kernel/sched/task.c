@@ -1,4 +1,5 @@
 #include <kernel/task.h>
+#include <kernel/percpu.h>
 #include <kernel.h>
 #include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/x86_64/regs.h>
@@ -21,19 +22,22 @@ uint64_t init(uint64_t arg);
 
 void __switch_to(task_t *prev, task_t *next)
 {
-    // Use per-task kernel stack for ring-3→ring-0 transitions
-    init_tss[0].rsp0 = next->thread->rsp0;
+    // Use per-CPU TSS — each CPU has its own TSS descriptor
+    // with rsp0 pointing to the current task's kernel stack.
+    percpu_t *cpu = this_cpu();
+    cpu->tss->rsp0 = next->thread->rsp0;
 
-    set_tss64(init_tss[0].rsp0, init_tss[0].rsp1, init_tss[0].rsp2,
-              init_tss[0].ist1, init_tss[0].ist2, init_tss[0].ist3,
-              init_tss[0].ist4, init_tss[0].ist5, init_tss[0].ist6,
-              init_tss[0].ist7);
+    set_tss64(cpu->tss->rsp0, cpu->tss->rsp1, cpu->tss->rsp2,
+              cpu->tss->ist1, cpu->tss->ist2, cpu->tss->ist3,
+              cpu->tss->ist4, cpu->tss->ist5, cpu->tss->ist6,
+              cpu->tss->ist7);
 
+    // Save/restore FS selector (used by kernel threads).
+    // GS base is per-CPU and set ONCE via MSR — never
+    // touch it here (loading a non-null GS selector would
+    // reload the base from the GDT, clobbering the MSR).
     __asm__ __volatile__("movq %%fs, %0 \n\t":"=a"(prev->thread->fs));
-    __asm__ __volatile__("movq %%gs, %0 \n\t":"=a"(prev->thread->gs));
-
     __asm__ __volatile__("movq %0, %%fs \n\t"::"a"(next->thread->fs));
-    __asm__ __volatile__("movq %0, %%gs \n\t"::"a"(next->thread->gs));
 
     // Switch page table if the next task has its own address space
     if (next->thread->cr3 && next->thread->cr3 != prev->thread->cr3) {
@@ -42,23 +46,22 @@ void __switch_to(task_t *prev, task_t *next)
 }
 
 // ── Preemption flag ──────────────────────────────────────
-// Set by pit_handler (timer IRQ) on every tick,
-// cleared by schedule() after a context switch.
-uint64_t need_resched = 0;
+// Now per-CPU (percpu_t.need_resched, offset 8 from GS base).
+// Set by timer IRQ on every tick, cleared by schedule() after
+// a context switch.  entry.S reads it via %gs:8.
 
 // Global PID counter
 static uint64_t pid_counter = 1;
 
-// Set to 1 once task_init() completes; schedule() returns
-// immediately before this point (timer ticks before tasking
-// are harmless no-ops).
-static int scheduler_initialized = 0;
+// Per-CPU scheduler guard — set to 1 by task_init() on each CPU.
+// schedule() returns immediately before this point (ticks before
+// the scheduler is set up are harmless no-ops).
 
 void schedule(void)
 {
     task_t *next;
 
-    if (!scheduler_initialized)
+    if (!this_cpu()->scheduler_ok)
         return;
 
     // ── Reap zombies (skip current — we're on its stack) ──
@@ -82,7 +85,7 @@ void schedule(void)
 
     // If current still has quantum, keep running
     if (current->state == TASK_RUNNING && current->counter > 0) {
-        need_resched = 0;
+        this_cpu()->need_resched = 0;
         return;
     }
 
@@ -107,7 +110,7 @@ void schedule(void)
     // No other RUNNING task found — give current a fresh quantum
     if (current->state == TASK_RUNNING) {
         current->counter = current->priority > 0 ? current->priority : 1;
-        need_resched = 0;
+        this_cpu()->need_resched = 0;
         return;
     }
 
@@ -121,7 +124,7 @@ void schedule(void)
 
 do_switch:
     next->counter = next->priority > 0 ? next->priority : 1;
-    need_resched = 0;
+    this_cpu()->need_resched = 0;
     switch_to(current, next);
 }
 
@@ -174,7 +177,9 @@ __asm__(
     "   movq %rax, %ds \n\t"
     "   movq %rax, %es \n\t"
     "   movq %rax, %fs \n\t"
-    "   movq %rax, %gs \n\t"
+    // GS is NOT reloaded — its base is per-CPU, set via
+    // IA32_GS_BASE MSR.  Loading a selector would clobber
+    // the per-CPU base with the GDT flat descriptor value.
     "   popq %rax    \n\t" // restore RAX
     "   addq $0x38, %rsp \n\t"
     "   movq %rdx, %rdi \n\t"  // arg
@@ -490,7 +495,7 @@ void task_init()
     kernel_thread(init, 10, CLONE_FS | CLONE_FILES | CLONE_SIGNAL);
 
     init_task_union.task.state = TASK_RUNNING;
-    scheduler_initialized = 1;
+    this_cpu()->scheduler_ok = 1;
 
     p = container_of(current->list.next, task_t, list);
     switch_to(current, p);

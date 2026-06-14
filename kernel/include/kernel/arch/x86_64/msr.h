@@ -30,6 +30,14 @@ static inline void wrmsr(uint32_t msr, uint64_t value)
 }
 
 // ──────────────────────────────────────────────
+//  Segment base MSRs (used for per-CPU data)
+// ──────────────────────────────────────────────
+
+#define IA32_FS_BASE        0xC0000100
+#define IA32_GS_BASE        0xC0000101
+#define IA32_KERNEL_GS_BASE 0xC0000102
+
+// ──────────────────────────────────────────────
 //  Key APIC-related MSR numbers
 // ──────────────────────────────────────────────
 

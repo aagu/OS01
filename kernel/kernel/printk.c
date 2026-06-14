@@ -3,6 +3,7 @@
 #include <kernel/vmm.h>
 #include <kernel/pmm.h>
 #include <kernel/slab.h>
+#include <kernel/arch/x86_64/spinlock.h>
 #include <driver/serial.h>
 #include <stdio.h>
 #include <font.h>
@@ -10,6 +11,10 @@
 #include <string.h>
 
 static char buf[4096]={0};
+
+// Serial output lock — prevents interleaved lines when multiple
+// CPUs call serial_printk concurrently.
+static spinlock_T serial_lock = {1};
 
 position Pos;
 
@@ -145,6 +150,7 @@ void serial_printk(const char * fmt,...)
 	va_list args;
 
 	va_start(args, fmt);
+	spin_lock(&serial_lock);
 	i = vsprintf(buf, fmt, args);
 	va_end(args);
 
@@ -152,4 +158,5 @@ void serial_printk(const char * fmt,...)
 	{
 		write_serial((unsigned char)*(buf + count));
 	}
+	spin_unlock(&serial_lock);
 }

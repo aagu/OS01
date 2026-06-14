@@ -221,7 +221,4 @@ uint64_t do_exit(uint64_t exit_code);
 #define USER_STACK_BASE 0x600000UL
 #define USER_STACK_TOP  (USER_STACK_BASE + 0x200000UL - 8)
 
-/* Preemption flag — set by timer IRQ, checked in ret_from_intr */
-extern uint64_t need_resched;
-
 #endif

@@ -65,9 +65,12 @@ ENTRY(ret_from_intr)
 	movq	$-1,	%rcx
 	testq	softirq_status(%rip),	%rcx
 	jnz	softirq_handler
+#define PERCPU_NEED_RESCHED  8   /* offsetof(percpu_t, need_resched) — keep in sync with percpu.h */
+
 check_resched:
-	# If need_resched is set, call schedule() before returning to the task
-	cmpq	$0,	need_resched(%rip)
+	# need_resched is per-CPU (percpu_t.need_resched at GS:8).
+	# GS base is set to &percpu_data[cpu] via IA32_GS_BASE MSR.
+	cmpq	$0,	%gs:PERCPU_NEED_RESCHED
 	jne	do_resched
 	jmp	RESTORE_ALL
 
@@ -76,8 +79,8 @@ softirq_handler:
 	jmp	check_resched
 
 do_resched:
-	# Clear the flag and invoke the scheduler
-	movq	$0,	need_resched(%rip)
+	# Clear the per-CPU flag and invoke the scheduler
+	movq	$0,	%gs:PERCPU_NEED_RESCHED
 	callq	schedule
 	jmp	RESTORE_ALL
 

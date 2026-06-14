@@ -6,6 +6,7 @@
 #include <kernel/trace.h>
 #include <kernel/arch/x86_64/asm.h>
 #include <kernel/task.h>
+#include <kernel/percpu.h>
 #include <kernel/slab.h>
 #include <driver/serial.h>
 #include <errno.h>
@@ -19,7 +20,10 @@
 // (RSP masking) returns garbage.
 static inline task_t *task_from_tss(void)
 {
-    uint64_t rsp0 = init_tss[0].rsp0;
+    percpu_t *cpu = this_cpu();
+    if (!cpu || !cpu->tss)
+        return NULL;
+    uint64_t rsp0 = cpu->tss->rsp0;
     task_t *task = (task_t *)((rsp0 - 1) & ~(STACK_SIZE - 1));
     if ((uint64_t)task < 0xffff800000000000UL)
         return NULL;
