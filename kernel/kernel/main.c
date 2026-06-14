@@ -128,9 +128,15 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     {
         uint32_t cpu_idx = 0;
 
-        for (uint32_t i = 0; i < apic_info.lapic_count && cpu_idx < NR_CPUS; i++) {
+        for (uint32_t i = 0; i < apic_info.lapic_count; i++) {
             if (!(apic_info.lapics[i].flags & 1))
                 continue;  // not enabled
+
+            if (cpu_idx >= NR_CPUS) {
+                serial_printk("percpu: APIC id=%u DROPPED (NR_CPUS=%u full)\n",
+                              apic_info.lapics[i].apic_id, (unsigned)NR_CPUS);
+                continue;
+            }
 
             percpu_init(cpu_idx, apic_info.lapics[i].apic_id);
 

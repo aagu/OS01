@@ -3,9 +3,22 @@
 
 #include <stdint.h>
 
-// Maximum number of CPUs supported (compile-time array sizing).
-// Must be >= the largest possible MADT LAPIC count (MAX_LAPICS).
-// At runtime, num_cpus (see percpu.h) holds the actual count.
+// Maximum number of CPUs supported at compile time.
+//
+// Determines the size of percpu_data[], init_tss[], init_task[], and the
+// MADT LAPIC/x2APIC entry buffer.  If firmware reports more enabled
+// processors than this limit, the extras are silently ignored.
+//
+// There is no hard x86 limit at 8 — APIC IDs span 8 bits (xAPIC) or 32
+// bits (x2APIC).  This value is a design choice for a hobby kernel:
+// enough to exercise SMP correctness without wasting static memory on
+// arrays that will never be filled under QEMU (default -smp 4).
+//
+// Bump to 16, 64, or 256 as needed.  Memory cost per slot:
+//   percpu_t    ~56 B   (one per CPU)
+//   tss_struct  104 B   (one per CPU)
+//   task_t *      8 B   (init_task[])
+// Total: ~168 B per extra slot — negligible.
 #define NR_CPUS 8
 
 // ── Atomic operations (SMP-safe with `lock` prefix) ────────────

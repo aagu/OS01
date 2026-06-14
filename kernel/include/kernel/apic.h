@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <kernel/interrupt.h>
+#include <kernel/arch/x86_64/cpu.h>
 
 // ──────────────────────────────────────────────
 //  LAPIC Register Offsets (128-bit aligned, 32-bit access)
@@ -130,7 +131,9 @@
 //  Data structures
 // ──────────────────────────────────────────────
 
-#define MAX_LAPICS        8
+// Buffer sizes for MADT parsing.
+// MAX_LAPICS must be >= NR_CPUS so we never miss an enabled CPU.
+#define MAX_LAPICS        NR_CPUS
 #define MAX_IOAPICS       4
 #define MAX_ISO_OVERRIDES 16
 

@@ -168,6 +168,9 @@ static void parse_madt(struct MADT_HEADER *madt)
                 serial_printk("APIC:   LAPIC id=%u acpi=%u flags=%#x\n",
                               lapic->apic_id, lapic->acpi_processor_id, lapic->flags);
                 apic_info.lapic_count++;
+            } else {
+                serial_printk("APIC:   LAPIC id=%u DROPPED (table full, bump NR_CPUS)\n",
+                              lapic->apic_id);
             }
             break;
         }
@@ -217,6 +220,9 @@ static void parse_madt(struct MADT_HEADER *madt)
                 serial_printk("APIC:   x2APIC id=%u acpi=%u flags=%#x\n",
                               x2->x2apic_id, x2->acpi_processor_id, x2->flags);
                 apic_info.lapic_count++;
+            } else {
+                serial_printk("APIC:   x2APIC id=%u DROPPED (table full, bump NR_CPUS)\n",
+                              x2->x2apic_id);
             }
             break;
         }
