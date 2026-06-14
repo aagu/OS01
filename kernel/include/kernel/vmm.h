@@ -69,4 +69,11 @@ uintptr_t vmm_unmap_page(uint64_t *pagemap, uintptr_t virtual_address);
 mmap vmm_alloc_map(void);
 void vmm_free_user_map(mmap pagemap);
 
+// ── TLB shootdown (SMP) ─────────────────────────────
+// When modifying shared kernel page tables (kernel_map), other CPUs
+// may have stale TLB entries.  Call this instead of flush_tlb() to
+// notify all online cores via IPI.  Internally falls through to
+// local flush_tlb() when num_cpus ≤ 1.
+void tlb_shootdown(void);
+
 #endif

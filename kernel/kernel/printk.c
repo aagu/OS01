@@ -140,7 +140,7 @@ void frame_buffer_init()
 			PAGE_KERNEL_Page | PAGE_PWT | PAGE_PCD);
 	}
 	Pos.FB_addr = (uint32_t *)VIRT_FRAMEBUFFER_OFFSET;
-	flush_tlb();
+	tlb_shootdown();
 }
 
 void serial_printk(const char * fmt,...)

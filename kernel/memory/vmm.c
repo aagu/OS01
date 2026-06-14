@@ -1,5 +1,6 @@
 #include <kernel/memory.h>
 #include <kernel/vmm.h>
+#include <kernel/percpu.h>
 #include <kernel/pmm.h>
 #include <kernel/slab.h>
 #include <kernel/printk.h>
@@ -38,6 +39,11 @@ void vmm_map_page(uint64_t *pagemap, uintptr_t physical_address, uintptr_t virtu
     pml3 = get_next_level(pml4, level4, gdt_flags);
     pml2 = get_next_level(pml3, level3, dir_flags);
     pml2[level2] = (physical_address & PAGE_2M_MASK) | flags;
+
+    // If modifying the shared kernel page table after APs are online,
+    // broadcast TLB invalidation so other cores drop stale PDE/TLB entries.
+    if (pagemap == kernel_map && num_cpus > 1)
+        tlb_shootdown();
 }
 
 // unmap virtual page to physical address, return the physical address
@@ -119,7 +125,7 @@ void vmm_init()
         }
     }
     
-    flush_tlb();
+    tlb_shootdown();
 }
 
 mmap vmm_alloc_map() {

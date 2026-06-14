@@ -17,6 +17,7 @@ KERNEL_SOURCES := \
 	memory/vmm.c \
 	memory/slab.c \
 	memory/dump.c \
+	memory/tlb.c \
 	percpu/percpu.c \
 	pic/8259A.c \
 	apic/lapic.c \
