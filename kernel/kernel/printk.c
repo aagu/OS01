@@ -10,7 +10,15 @@
 #include <stddef.h>
 #include <string.h>
 
-static char buf[4096]={0};
+// Separate per-function buffers — color_printk and serial_printk share
+// a single global buffer, which is a race condition: int $0x80 uses a
+// trap gate (IF unchanged), so interrupts can fire between vsprintf()
+// and the loop that reads buf.  When an interrupt handler calls
+// serial_printk(), it overwrites buf and corrupts color_printk's output,
+// potentially writing garbage to the framebuffer and clobbering kernel
+// data structures (manifested as #UD at RIP=0x40).
+static char buf_color[4096];
+static char buf_serial[4096];
 
 // Serial output lock — prevents interleaved lines when multiple
 // CPUs call serial_printk concurrently.
@@ -52,11 +60,12 @@ int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
 	int line = 0;
 	va_list args;
 
+	spin_lock(&Pos.lock);
+
 	va_start(args, fmt);
-	i = vsprintf(buf, fmt, args);
+	i = vsprintf(buf_color, fmt, args);
 	va_end(args);
 
-	spin_lock(&Pos.lock);
 	for(count = 0;count < i || line;count++)
 	{
 		if(line > 0)
@@ -64,12 +73,12 @@ int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
 			count--;
 			goto Label_tab;
 		}
-		if((unsigned char)*(buf + count) == '\n')
+		if((unsigned char)*(buf_color + count) == '\n')
 		{
 			Pos.YPosition++;
 			Pos.XPosition = 0;
 		}
-		else if((unsigned char)*(buf + count) == '\b')
+		else if((unsigned char)*(buf_color + count) == '\b')
 		{
 			Pos.XPosition--;
 			if(Pos.XPosition < 0)
@@ -81,7 +90,7 @@ int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
 			}
 			putchark(FRcolor , BKcolor , ' ');
 		}
-		else if((unsigned char)*(buf + count) == '\t')
+		else if((unsigned char)*(buf_color + count) == '\t')
 		{
 			line = ((Pos.XPosition + 8) & ~(8 - 1)) - Pos.XPosition;
 
@@ -92,7 +101,7 @@ Label_tab:
 		}
 		else
 		{
-			putchark(FRcolor , BKcolor , (unsigned char)*(buf + count));
+			putchark(FRcolor , BKcolor , (unsigned char)*(buf_color + count));
 			Pos.XPosition++;
 		}
 
@@ -151,12 +160,12 @@ void serial_printk(const char * fmt,...)
 
 	va_start(args, fmt);
 	spin_lock(&serial_lock);
-	i = vsprintf(buf, fmt, args);
+	i = vsprintf(buf_serial, fmt, args);
 	va_end(args);
 
 	for(count = 0;count < i ;count++)
 	{
-		write_serial((unsigned char)*(buf + count));
+		write_serial((unsigned char)*(buf_serial + count));
 	}
 	spin_unlock(&serial_lock);
 }

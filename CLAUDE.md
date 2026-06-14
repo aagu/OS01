@@ -42,7 +42,7 @@ Details: [docs/architecture.md](docs/architecture.md), [docs/smp.md](docs/smp.md
 5. **`get_current_task()`**: `RSP & ~(STACK_SIZE-1)`, NOT `RSP & ~STACK_SIZE`.
 6. **`memcpy(dest, src, size)`** — first arg is destination.
 7. **`set_tss64` writes global TSS64_Table** — `-smp 2+` needs per-CPU TSS descriptor.
-8. **spawn with printf is fragile**: `/init.elf` crashes on 3rd+ spawn → [[spawn-ud-crash-syscall-prefault]].
+8. **Printk buffers must be per-function**: `color_printk` and `serial_printk` each need their own `static char buf[...]`. Never share one buffer — `int $0x80` uses a trap gate (IF stays on), so interrupts can fire mid-format and overwrite the buffer. Fixed spawn crash [[spawn-ud-crash-syscall-prefault]].
 
 ## Key files
 
