@@ -65,11 +65,14 @@ int main(void)
     int shift_pressed = 0;
     int capslock = 0;
 
-    printf("Init: /dev/keyboard ready\n");
+    // fd 0 = /dev/keyboard (inherited from init task)
+    // fd 1 = /dev/fb        (inherited)
+    // fd 2 = /dev/serial     (inherited)
+    printf("Init: keyboard echo ready\n");
 
     while (1) {
         uint8_t sc;
-        int64_t n = read("/dev/keyboard", &sc, 1);
+        int64_t n = read(0, &sc, 1);   // fd 0 = stdin (/dev/keyboard)
         if (n <= 0)
             continue;
 

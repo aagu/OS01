@@ -2,6 +2,7 @@
 #include <kernel/percpu.h>
 #include <kernel.h>
 #include <kernel/arch/x86_64/gate.h>
+#include <kernel/arch/x86_64/spinlock.h>
 #include <kernel/arch/x86_64/regs.h>
 #include <kernel/arch/x86_64/linkage.h>
 #include <kernel/printk.h>
@@ -67,19 +68,76 @@ void schedule(void)
 
     this_cpu()->schedule_count++;
 
-    // ── Reap zombies (skip current — we're on its stack) ──
-    list_t *pos = init_task_union.task.list.next;
-    while (pos != &init_task_union.task.list) {
-        task_t *t = container_of(pos, task_t, list);
-        list_t *safe = pos->next;
-        if (t->state == TASK_ZOMBIE && t != current) {
-            list_del(&t->list);
-            if (t->thread)
-                kfree(t->thread);
-            if (t->stack_alloc_base)
-                kfree(t->stack_alloc_base);
+    // ── Reap zombies that nobody will wait for ──
+    // Protected by a global spinlock because both CPUs can
+    // enter schedule() concurrently and would otherwise
+    // double-free the same zombie tasks.
+    {
+        static spinlock_T reap_lock = { .lock = 1L };
+        spin_lock(&reap_lock);
+
+        // Pass 1: collect zombies to reap
+        task_t *reap_list[64];
+        int reap_count = 0;
+
+    {
+        list_t *pos = init_task_union.task.list.next;
+        while (pos != &init_task_union.task.list && reap_count < 64) {
+            task_t *t = container_of(pos, task_t, list);
+            pos = pos->next;
+            if (t->state != TASK_ZOMBIE || t == current)
+                continue;
+
+            int reap = 0;
+            if (t->flags & PF_KTHREAD) {
+                reap = 1;
+            } else if (t->parent == NULL) {
+                reap = 1;
+            } else {
+                // Check if parent is also ZOMBIE without dangling risk:
+                // (a) parent is still on the task list (not yet freed)
+                // (b) parent->state == TASK_ZOMBIE
+                // If parent freed earlier, the iteration above would have
+                // orphaned t by now (t->parent = NULL).  We haven't freed
+                // any parent this round yet, so parent is safe to deref.
+                if (t->parent->state == TASK_ZOMBIE)
+                    reap = 1;
+            }
+
+            if (reap)
+                reap_list[reap_count++] = t;
         }
-        pos = safe;
+    }
+
+    // Pass 2: orphan children of zombies being reaped
+    if (reap_count > 0) {
+        list_t *pos = init_task_union.task.list.next;
+        while (pos != &init_task_union.task.list) {
+            task_t *child = container_of(pos, task_t, list);
+            pos = pos->next;
+            if (!child->parent) continue;
+            for (int i = 0; i < reap_count; i++) {
+                if (child->parent == reap_list[i]) {
+                    child->parent = NULL;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Pass 3: free the zombies
+    for (int i = 0; i < reap_count; i++) {
+        task_t *t = reap_list[i];
+        list_del(&t->list);
+        if (t->thread)
+            kfree(t->thread);
+        if (t->files)
+            files_free(t->files);
+        if (t->stack_alloc_base)
+            kfree(t->stack_alloc_base);
+    }
+
+    spin_unlock(&reap_lock);
     }
 
     // Decrement current task's quantum (one tick per call)
@@ -152,9 +210,105 @@ uint64_t do_exit(uint64_t exit_code)
         current->mm = NULL;
     }
 
+    // Close all file descriptors
+    if (current->files) {
+        files_free(current->files);
+        current->files = NULL;
+    }
+
+    current->exit_code = exit_code;
     current->state = TASK_ZOMBIE;
+
+    // Wake up the parent if it's waiting in waitpid
+    if (current->parent && current->parent->state == TASK_INTERRUPTIBLE)
+        current->parent->state = TASK_RUNNING;
+
+    serial_printk("task %d now ZOMBIE (parent=%d)\n",
+                  current->pid, current->parent ? (int)current->parent->pid : -1);
+
     schedule();
     return 0;  // never reached — schedule() does switch_to
+}
+
+// ── do_waitpid ────────────────────────────────────────────
+// Block until a child with <pid> exits, or return immediately
+// if WNOHANG is set and no child is ready.
+//
+// pid > 0  → wait for specific child
+// pid == -1 → wait for any child
+// Returns child PID on success, -ECHILD if no such child, -EINTR if interrupted.
+int64_t do_waitpid(int64_t pid, int *user_status, int options)
+{
+    // Note: caller has already copied user_status from user space.
+    // We pass NULL if the user didn't provide a status pointer.
+
+    for (;;) {
+        task_t *child = NULL;
+        list_t *pos;
+
+        // Scan for a matching child that is ZOMBIE
+        pos = init_task_union.task.list.next;
+        while (pos != &init_task_union.task.list) {
+            task_t *t = container_of(pos, task_t, list);
+            if (t->parent == current &&
+                t->state == TASK_ZOMBIE &&
+                (pid == -1 || t->pid == pid)) {
+                child = t;
+                break;
+            }
+            pos = pos->next;
+        }
+
+        if (child) {
+            int64_t child_pid = child->pid;
+            int64_t exit_code = child->exit_code;
+
+            // Write exit status to user space
+            if (user_status) {
+                // xv6 convention: exit_code << 8
+                int status = (int)((exit_code & 0xFF) << 8);
+                // Bounds check — user_status must be in user space
+                if ((uint64_t)user_status < current->addr_limit)
+                    *user_status = status;
+            }
+
+            // Reap the zombie
+            list_del(&child->list);
+            if (child->thread)
+                kfree(child->thread);
+            if (child->files)
+                files_free(child->files);
+            if (child->stack_alloc_base)
+                kfree(child->stack_alloc_base);
+
+            serial_printk("waitpid: pid=%d reaped child %d (exit=%d)\n",
+                          (int)current->pid, (int)child_pid, (int)exit_code);
+            return child_pid;
+        }
+
+        // Check if the child even exists (still running)
+        int child_exists = 0;
+        pos = init_task_union.task.list.next;
+        while (pos != &init_task_union.task.list) {
+            task_t *t = container_of(pos, task_t, list);
+            if (t->parent == current && (pid == -1 || t->pid == pid)) {
+                child_exists = 1;
+                break;
+            }
+            pos = pos->next;
+        }
+
+        if (!child_exists)
+            return -ECHILD;
+
+        // WNOHANG: return 0 immediately
+        if (options & WNOHANG)
+            return 0;
+
+        // Sleep until a child exits
+        current->state = TASK_INTERRUPTIBLE;
+        schedule();
+    }
 }
 
 extern void kernel_thread_func(void);
@@ -245,6 +399,13 @@ int64_t spawn_user_task(const char *path)
     tsk->priority = 5;                     // 50 ms quantum at 100 Hz
     tsk->cpu = cpu_id();                    // created on this CPU
 
+    // Inherit fd table from parent (the init task)
+    tsk->parent = current;
+    list_init(&tsk->wait_list);
+    tsk->exit_code = 0;
+    if (current->files)
+        tsk->files = files_dup(current->files);
+
     list_init(&tsk->list);
     list_add_to_before(&init_task_union.task.list, &tsk->list);
     tsk->thread = thd;
@@ -324,8 +485,9 @@ int64_t spawn_user_task(const char *path)
 // restored by RESTORE_ALL → iretq.
 int64_t sys_exec(const char *path, pt_regs_t *regs)
 {
-    // 1. Look up the ELF file
-    vfs_node_t *node = vfs_lookup(path);
+    // 1. Look up the ELF file (support relative paths)
+    const char *cwd = current->files ? current->files->cwd : "/";
+    vfs_node_t *node = vfs_lookup_from(path, cwd);
     if (!node)
         return -ENOENT;
     if (node->type != VFS_FILE) {
@@ -434,15 +596,36 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
     tsk->cpu = cpu_id();                    // same CPU as parent
     tsk->thread = thd;
 
+    // ── Inherit fd table (deep copy — refcount++) ──────────
+    if (current->files)
+        tsk->files = files_dup(current->files);
+
+    // ── Process tree ───────────────────────────────────────
+    tsk->parent = current;
+    list_init(&tsk->wait_list);
+    tsk->exit_code = 0;
+
     thd->cr3 = current->thread->cr3;
 
     if ((regs->cs & 3) == 3) {
         tsk->flags &= ~PF_KTHREAD;
         tsk->addr_limit = 0x00007FFFFFFFFFFF;
+
+        // Child must NOT share the parent's mm — exec would
+        // free the parent's user page tables.  Give the child
+        // a NULL mm; sys_exec will skip the old-user-map free
+        // and allocate a fresh address space.
+        tsk->mm = NULL;
     }
 
     memcpy((void *)((uint64_t)tsk + STACK_SIZE - sizeof(pt_regs_t)),
            regs, sizeof(pt_regs_t));
+
+    // Child process sees fork() return 0
+    {
+        pt_regs_t *child_regs = (pt_regs_t *)((uint64_t)tsk + STACK_SIZE - sizeof(pt_regs_t));
+        child_regs->rax = 0;
+    }
 
     thd->rsp0 = (uint64_t)tsk + STACK_SIZE;
     thd->rsp  = (uint64_t)tsk + STACK_SIZE - sizeof(pt_regs_t);
@@ -451,10 +634,11 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
 
     thd->rip = regs->rip;
     if (!(tsk->flags & PF_KTHREAD))
-        thd->rip = regs->rip = (uint64_t)ret_from_intr;
+        thd->rip = (uint64_t)ret_from_intr;  // child via softirq/preemption check
+    // Parent: do NOT change regs->rip — returns via error_code → RESTORE_ALL
 
     tsk->state = TASK_RUNNING;
-    return 0;
+    return tsk->pid;   // parent sees child PID
 }
 
 int kernel_thread(uint64_t (*fn)(uint64_t), uint64_t arg, uint64_t flags)
@@ -518,14 +702,58 @@ uint64_t init(uint64_t arg)
 {
     serial_printk("init task is running, arg: %#018lx\n", arg);
 
+    // ── Set up fd 0/1/2 for init_task ────────────────────
+    // All descendant processes (spawn_user_task → do_fork)
+    // will inherit these file descriptors.
+    {
+        files_t *files = files_alloc();
+        if (!files) {
+            serial_printk("init: files_alloc failed\n");
+            return 1;
+        }
+        current->files = files;  // attach to *this* task, not idle
+
+        // fd 0: stdin — /dev/keyboard (raw scancodes)
+        vfs_node_t *kbd = vfs_lookup("/dev/keyboard");
+        if (kbd) {
+            file_t *f = file_alloc();
+            f->type = FD_DEV;
+            f->node = kbd;
+            f->flags = O_RDONLY;
+            int fd = fd_alloc(files, f);
+            serial_printk("init: fd%d = /dev/keyboard (scancode reader)\n", fd);
+        }
+
+        // fd 1: stdout — /dev/fb (framebuffer text output)
+        vfs_node_t *fb = vfs_lookup("/dev/fb");
+        if (fb) {
+            file_t *f = file_alloc();
+            f->type = FD_DEV;
+            f->node = fb;
+            f->flags = O_WRONLY;
+            int fd = fd_alloc(files, f);
+            serial_printk("init: fd%d = /dev/fb (framebuffer writer)\n", fd);
+        }
+
+        // fd 2: stderr — /dev/serial (COM1 output)
+        vfs_node_t *ser = vfs_lookup("/dev/serial");
+        if (ser) {
+            file_t *f = file_alloc();
+            f->type = FD_DEV;
+            f->node = ser;
+            f->flags = O_WRONLY;
+            int fd = fd_alloc(files, f);
+            serial_printk("init: fd%d = /dev/serial (error output)\n", fd);
+        }
+    }
+
     // Spawn 2 quick-exit tasks to verify round-robin scheduling.
     for (int i = 0; i < 2; i++) {
         int64_t pid = spawn_user_task("/spin.elf");
         serial_printk("init: spin #%d → pid=%d\n", i, (int)pid);
     }
-    // Also spawn the interactive keyboard reader so the user
-    // can still interact with the system.
-    spawn_user_task("/init.elf");
+    // Spawn the interactive shell (replaces init.elf keyboard echo)
+    spawn_user_task("/sh.elf");
 
     return 1;
 }

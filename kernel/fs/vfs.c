@@ -119,8 +119,9 @@ static vfs_mount_t *find_mount(const char *path)
     return best;
 }
 
-// ── Lookup ────────────────────────────────────────────────
-vfs_node_t *vfs_lookup(const char *path)
+// ── Lookup (core) ─────────────────────────────────────────
+// Resolves an absolute path to a VFS node.
+static vfs_node_t *__vfs_lookup(const char *path)
 {
     if (!vfs_initialized || !path) return NULL;
 
@@ -158,19 +159,16 @@ vfs_node_t *vfs_lookup(const char *path)
 
     while ((comp = next_component(&ptr)) != NULL) {
         if (strlen(comp) == 0) {
-            // skip empty component (trailing slash, etc.)
             continue;
         }
 
-        // Search in current directory using readdir
-        // readdir returns 0 for valid entries, -1 for skip entries (LFN, deleted)
         vfs_dirent_t entry;
         int found = 0;
         uint64_t idx = 0;
 
         while (1) {
             int ret = current->ops->readdir(current, idx, &entry);
-            if (ret == 0 && entry.name[0] == '\0') break;  // end of directory
+            if (ret == 0 && entry.name[0] == '\0') break;
             if (ret == 0) {
                 if (vfs_name_cmp(entry.name, comp) == 0) {
                     found = 1;
@@ -181,12 +179,10 @@ vfs_node_t *vfs_lookup(const char *path)
         }
 
         if (!found) {
-            // Release current before returning NULL
             current->refcount--;
             return NULL;
         }
 
-        // Create a node for the found entry
         vfs_node_t *child = (vfs_node_t *)calloc(sizeof(vfs_node_t));
         if (!child) {
             current->refcount--;
@@ -198,19 +194,54 @@ vfs_node_t *vfs_lookup(const char *path)
         child->type = entry.type;
         child->size = entry.size;
         child->ops = current->ops;
-        child->fs_data = (void *)(uintptr_t)entry.ino;  // cluster number
+        child->fs_data = (void *)(uintptr_t)entry.ino;
         child->refcount = 1;
         size_t nlen = strlen(entry.name);
         if (nlen >= VFS_NAME_MAX) nlen = VFS_NAME_MAX - 1;
         memcpy(child->name, entry.name, nlen);
         child->name[nlen] = '\0';
 
-        // Release previous node, set current to child
         current->refcount--;
         current = child;
     }
 
     return current;
+}
+
+// ── Public lookup: absolute path only ─────────────────────
+vfs_node_t *vfs_lookup(const char *path)
+{
+    return __vfs_lookup(path);
+}
+
+// ── Public lookup: relative path support ──────────────────
+// If path is absolute (starts with '/'), cwd is ignored.
+// Otherwise, path is resolved relative to cwd.
+vfs_node_t *vfs_lookup_from(const char *path, const char *cwd)
+{
+    if (!path) return NULL;
+
+    // Absolute path — use directly
+    if (path[0] == '/')
+        return __vfs_lookup(path);
+
+    // Relative path with no cwd — can't resolve
+    if (!cwd)
+        return NULL;
+
+    // Build absolute path: cwd + "/" + path
+    char abs_path[VFS_NAME_MAX];
+    int cwd_len = (int)strlen(cwd);
+    int path_len = (int)strlen(path);
+    int total = cwd_len + 1 + path_len;  // cwd + "/" + path
+    if (total >= VFS_NAME_MAX)
+        return NULL;
+
+    memcpy(abs_path, cwd, cwd_len);
+    abs_path[cwd_len] = '/';
+    memcpy(abs_path + cwd_len + 1, path, path_len + 1);  // include NUL
+
+    return __vfs_lookup(abs_path);
 }
 
 // ── Read ──────────────────────────────────────────────────

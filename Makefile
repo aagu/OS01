@@ -56,6 +56,7 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel/kernel.bin user
 	mcopy -i $@ kernel/kernel.bin ::/
 	mcopy -i $@ user/init.elf ::/init.elf
 	mcopy -i $@ user/spin.elf ::/spin.elf
+	mcopy -i $@ user/sh.elf ::/sh.elf
 ifneq (,$(wildcard config/config.txt))
 	mcopy -i $@ config/config.txt ::/
 endif

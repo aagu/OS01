@@ -37,6 +37,7 @@
 #define	EPIPE		32	/* Broken pipe */
 #define	EDOM		33	/* Math argument out of domain of func */
 #define	ERANGE		34	/* Math result not representable */
+#define	ENAMETOOLONG	36	/* File name too long */
 
 extern int errno;
 

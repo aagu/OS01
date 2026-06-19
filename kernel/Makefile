@@ -33,7 +33,8 @@ KERNEL_SOURCES := \
 	fs/vfs.c \
 	fs/devfs.c \
 	fs/fat.c \
-	fs/elf.c
+	fs/elf.c \
+	fs/file.c
 
 KERNEL_SOURCES += $(wildcard driver/*.c)
 

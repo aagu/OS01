@@ -501,6 +501,100 @@ int ahci_read_sectors(int port_num, uint64_t lba, uint32_t count, void *buffer)
     return 0;
 }
 
+// ── Public API: write sectors ──────────────────────────────
+// Uses WRITE DMA EXT (0x35) with polling.  Same structure as read but
+// copies data FROM caller INTO DMA buffer BEFORE issuing the command,
+// and uses w=1 (Host-to-Device).
+
+int ahci_write_sectors(int port_num, uint64_t lba, uint32_t count, const void *buffer)
+{
+    if (port_num < 0 || port_num >= AHCI_MAX_PORTS || !ahci_ports[port_num].present) {
+        serial_printk("AHCI: write_sectors: port %d not present\n", port_num);
+        return -1;
+    }
+    if (count == 0) return 0;
+    if (!g_hba) return -1;
+
+    ahci_port_t *ap = &ahci_ports[port_num];
+    HBA_PORT *port = port_regs(g_hba, port_num);
+
+    uint32_t total_bytes = count * 512;
+    uint32_t max_xfer = PAGE_2M_SIZE - DMA_OFF_DATA;
+    if (total_bytes > max_xfer) {
+        serial_printk("AHCI: write_sectors: transfer too large (%u > %u)\n",
+                       total_bytes, max_xfer);
+        return -1;
+    }
+
+    int slot = ahci_find_free_slot(port);
+    if (slot < 0) {
+        serial_printk("AHCI: write_sectors: port %d no free slot\n", port_num);
+        return -1;
+    }
+
+    HBA_CMD_HEADER *cmd_list = (HBA_CMD_HEADER *)((uint8_t *)ap->dma_virt + DMA_OFF_CMD_LIST);
+    HBA_CMD_HEADER *header = &cmd_list[slot];
+
+    HBA_CMD_TBL *cmd_tbl = (HBA_CMD_TBL *)((uint8_t *)ap->dma_virt
+                            + DMA_OFF_CMD_TABLES + slot * 128);
+    memset(cmd_tbl, 0, sizeof(HBA_CMD_TBL));
+
+    uint64_t data_phys = ap->dma_phys + DMA_OFF_DATA;
+    uint8_t *data_virt = (uint8_t *)ap->dma_virt + DMA_OFF_DATA;
+
+    // Copy caller data INTO DMA buffer BEFORE issuing write
+    memcpy(data_virt, buffer, total_bytes);
+
+    // ── Build the Register H2D FIS for WRITE DMA EXT ──
+    cmd_tbl->cfis[0]  = FIS_TYPE_REG_H2D;      // fis_type
+    cmd_tbl->cfis[1]  = 0x80;                   // c=1, pmp=0
+    cmd_tbl->cfis[2]  = ATA_CMD_WRITE_DMA_EXT;  // command 0x35
+    cmd_tbl->cfis[3]  = 0;                      // feature_low
+    cmd_tbl->cfis[4]  = (uint8_t)(lba);
+    cmd_tbl->cfis[5]  = (uint8_t)(lba >> 8);
+    cmd_tbl->cfis[6]  = (uint8_t)(lba >> 16);
+    cmd_tbl->cfis[7]  = 0x40;                   // device (LBA mode)
+    cmd_tbl->cfis[8]  = (uint8_t)(lba >> 24);
+    cmd_tbl->cfis[9]  = (uint8_t)(lba >> 32);
+    cmd_tbl->cfis[10] = (uint8_t)(lba >> 40);
+    cmd_tbl->cfis[11] = 0;                      // feature_high
+    cmd_tbl->cfis[12] = (uint8_t)(count);
+    cmd_tbl->cfis[13] = (uint8_t)(count >> 8);
+
+    // ── Build the PRDT entry ─────────────────────────
+    cmd_tbl->prdt_entry[0].dba  = (uint32_t)(data_phys & 0xFFFFFFFF);
+    cmd_tbl->prdt_entry[0].dbau = (uint32_t)(data_phys >> 32);
+    cmd_tbl->prdt_entry[0].dbc  = total_bytes - 1;
+    cmd_tbl->prdt_entry[0].i    = 0;
+
+    // ── Build the command header ─────────────────────
+    header->cfl    = 5;            // FIS length: 5 DWORDS
+    header->w      = 1;            // H2D (write) — key difference from read
+    header->prdtl  = 1;
+
+    // ── Issue the command ────────────────────────────
+    port->ci = (1U << slot);
+
+    // ── Wait for completion ──────────────────────────
+    uint64_t deadline = jiffies + AHCI_TIMEOUT_JIFFIES;
+    while (port->ci & (1U << slot)) {
+        nop();
+        if (jiffies >= deadline) {
+            serial_printk("AHCI: write_sectors: port %d timeout (ci=%#x, tfd=%#x)\n",
+                           port_num, port->ci, port->tfd);
+            return -1;
+        }
+    }
+
+    if (port->is & AHCI_PORT_IS_TFES) {
+        serial_printk("AHCI: write_sectors: port %d task file error (tfd=%#x)\n",
+                       port_num, port->tfd);
+        return -1;
+    }
+
+    return 0;
+}
+
 // ── Port info accessors ────────────────────────────────────
 
 int ahci_port_present(int port_num)

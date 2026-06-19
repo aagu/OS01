@@ -37,6 +37,18 @@ void test_timer(void * data __attribute__((unused)))
     color_printk(GREEN, BLACK, "test_timer\n");
 }
 
+// ── /dev/fb write handler ──────────────────────────────────
+// Writes characters one-by-one to the framebuffer via color_printk.
+static int fb_dev_write(struct vfs_node *node, uint64_t offset,
+                        uint64_t size, void *buffer)
+{
+    (void)node; (void)offset;
+    if (!buffer || size == 0) return 0;
+    for (uint64_t i = 0; i < size; i++)
+        color_printk(WHITE, BLACK, "%c", ((char *)buffer)[i]);
+    return (int)size;
+}
+
 int kernel_main(struct BOOT_INFO *bootinfo)
 {
     Pos.Phy_addr = (uint32_t *)bootinfo->Graphics_Info.FrameBufferBase;
@@ -105,6 +117,9 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     // Register keyboard on devfs — raw scancode reads
     devfs_register_chrdev("keyboard", NULL,
                           keyboard_devfs_read, NULL);
+
+    // Register /dev/fb — writes characters to the framebuffer
+    devfs_register_chrdev("fb", NULL, NULL, fb_dev_write);
 
     vfs_debug_list("/dev");
 

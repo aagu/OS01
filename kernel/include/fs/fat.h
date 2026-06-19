@@ -115,4 +115,7 @@ int fat32_read_data(fat32_fs_t *fs, uint32_t first_cluster,
 // VFS operations for FAT32
 extern struct vfs_ops fat_vfs_ops;
 
+// Create a new regular file in a directory
+struct vfs_node *fat_create(struct vfs_node *dir, const char *name);
+
 #endif // _FS_FAT_H

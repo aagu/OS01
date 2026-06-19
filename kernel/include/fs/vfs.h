@@ -24,6 +24,9 @@ typedef struct vfs_ops {
                  uint64_t size, void *buffer);
     int (*readdir)(struct vfs_node *node, uint64_t index,
                    struct vfs_dirent *entry);
+    // Create a new regular file in a directory node.  Returns the
+    // new vfs_node, or NULL on error (e.g., already exists).
+    struct vfs_node *(*create)(struct vfs_node *dir, const char *name);
 } vfs_ops_t;
 
 // ── A mounted filesystem instance ─────────────────────────
@@ -63,8 +66,14 @@ void vfs_init(void);
 int vfs_mount(const char *path, block_device_t *dev,
               vfs_ops_t *ops, void *fs_data);
 
-// Resolve a path to a VFS node (call vfs_node_put when done)
+// Resolve a path to a VFS node (call vfs_node_put when done).
+// Absolute path only — no cwd resolution.
 struct vfs_node *vfs_lookup(const char *path);
+
+// Resolve a path, supporting relative paths via cwd.
+// If path starts with '/', cwd is ignored.  If cwd is NULL,
+// only absolute paths are supported (same as vfs_lookup).
+struct vfs_node *vfs_lookup_from(const char *path, const char *cwd);
 
 // Read from a file
 int vfs_read(struct vfs_node *node, uint64_t offset,

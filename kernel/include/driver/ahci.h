@@ -225,6 +225,7 @@ void ahci_init(void);
 
 // Block read/write — returns 0 on success, -1 on error
 int ahci_read_sectors(int port_num, uint64_t lba, uint32_t count, void *buffer);
+int ahci_write_sectors(int port_num, uint64_t lba, uint32_t count, const void *buffer);
 
 // Query port info
 int  ahci_port_present(int port_num);

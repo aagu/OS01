@@ -8,11 +8,17 @@ static block_device_t block_devices[BLOCKDEV_MAX];
 static int block_device_count_val = 0;
 static int block_device_initialized = 0;
 
-// ── Default AHCI read wrapper ────────────────────────────
+// ── Default AHCI read/write wrappers ─────────────────────
 static int default_ahci_read(block_device_t *dev, uint64_t lba,
                               uint32_t count, void *buf)
 {
     return ahci_read_sectors(dev->port_num, lba, count, buf);
+}
+
+static int default_ahci_write(block_device_t *dev, uint64_t lba,
+                               uint32_t count, const void *buf)
+{
+    return ahci_write_sectors(dev->port_num, lba, count, buf);
 }
 
 // ── Initialization ───────────────────────────────────────
@@ -44,6 +50,7 @@ block_device_t *block_device_register(const char *name,
     dev->sector_size = 512;
     dev->present = 1;
     dev->read = default_ahci_read;
+    dev->write = default_ahci_write;
 
     serial_printk("block: registered %s (%lu sectors, %lu MB)\n",
                    dev->name, sector_count,
@@ -64,6 +71,21 @@ int block_device_read(block_device_t *dev, uint64_t lba,
         return -1;
     }
     return dev->read(dev, lba, count, buffer);
+}
+
+// ── Write ─────────────────────────────────────────────────
+int block_device_write(block_device_t *dev, uint64_t lba,
+                       uint32_t count, const void *buffer)
+{
+    if (!dev || !dev->present || !dev->write) {
+        serial_printk("block: write on invalid device\n");
+        return -1;
+    }
+    if (lba + count > dev->sector_count) {
+        serial_printk("block: write past end of device\n");
+        return -1;
+    }
+    return dev->write(dev, lba, count, buffer);
 }
 
 // ── Enumeration ──────────────────────────────────────────

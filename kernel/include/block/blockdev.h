@@ -16,7 +16,7 @@ typedef struct block_device {
 
     // Operations (dispatch to driver)
     int (*read)(struct block_device *dev, uint64_t lba, uint32_t count, void *buf);
-    // int (*write)(...);  // future
+    int (*write)(struct block_device *dev, uint64_t lba, uint32_t count, const void *buf);
 } block_device_t;
 
 // ── Block device API ─────────────────────────────────────
@@ -29,6 +29,10 @@ block_device_t *block_device_register(const char *name,
 // Read sectors from a block device
 int block_device_read(block_device_t *dev, uint64_t lba,
                       uint32_t count, void *buffer);
+
+// Write sectors to a block device
+int block_device_write(block_device_t *dev, uint64_t lba,
+                       uint32_t count, const void *buffer);
 
 // Find a block device by index (for enumeration)
 block_device_t *block_device_get(int index);

@@ -14,6 +14,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <fs/vfs.h>
+#include <kernel/file.h>
 
 // ── Helper: find the current task from TSS.rsp0 ──────────────
 // Safe to call from IST exception stacks where get_current_task()
@@ -527,19 +528,28 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         break;
     }
     case SYS_write: {
-        // write(const char *str, size_t len) — write string to framebuffer
-        const char *str = (const char *)regs->rdi;
-        // Bounds check: string must be in user-accessible memory
-        if ((uint64_t)str >= current->addr_limit) {
+        // write(int fd, const void *buf, size_t len) — fd-based
+        int fd = (int)regs->rdi;
+        const void *buf = (const void *)regs->rsi;
+        uint64_t size = regs->rdx;
+
+        if (fd < 0 || fd >= NOFILE || !current->files ||
+            !current->files->fd[fd]) {
+            regs->rax = -EBADF;
+            break;
+        }
+        if ((uint64_t)buf >= current->addr_limit) {
             regs->rax = -EFAULT;
             break;
         }
-        color_printk(WHITE, BLACK, "%s", str);
-        regs->rax = 0;
+
+        file_t *f = current->files->fd[fd];
+        regs->rax = fd_write(f, buf, size);
         break;
     }
     case SYS_exit: {
         // exit(int code) — terminate current process
+        current->exit_code = regs->rdi;
         do_exit(regs->rdi);
         // unreachable — do_exit calls schedule() which never returns
     }
@@ -594,48 +604,295 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         break;
     }
     case SYS_read: {
-        // read(const char *path, void *buffer, size_t size)
-        const char *path = (const char *)regs->rdi;
-        void *buffer = (void *)regs->rsi;
+        // read(int fd, void *buf, size_t len) — fd-based
+        int fd = (int)regs->rdi;
+        void *buf = (void *)regs->rsi;
         uint64_t size = regs->rdx;
 
-        // Bounds check: both pointers must be in user-accessible memory
-        if ((uint64_t)path >= current->addr_limit ||
-            (uint64_t)buffer >= current->addr_limit) {
+        if (fd < 0 || fd >= NOFILE || !current->files ||
+            !current->files->fd[fd]) {
+            regs->rax = -EBADF;
+            break;
+        }
+        if ((uint64_t)buf >= current->addr_limit) {
             regs->rax = -EFAULT;
             break;
         }
 
-        // Copy path to kernel heap to avoid TOCTOU
+        file_t *f = current->files->fd[fd];
+        regs->rax = fd_read(f, buf, size);
+        break;
+    }
+    case SYS_open: {
+        // open(const char *path, int flags) → fd
+        const char *path = (const char *)regs->rdi;
+        int flags = (int)regs->rsi;
+
+        if ((uint64_t)path >= current->addr_limit) {
+            regs->rax = -EFAULT;
+            break;
+        }
+        if (!current->files) {
+            regs->rax = -ENFILE;
+            break;
+        }
+
         char *path_copy = strdup(path);
         if (!path_copy) {
             regs->rax = -ENOMEM;
             break;
         }
 
-        vfs_node_t *node = vfs_lookup(path_copy);
+        vfs_node_t *node = vfs_lookup_from(path_copy, current->files->cwd);
+        kfree(path_copy);
+
+        // O_CREAT: create file if it doesn't exist
+        if (!node && (flags & O_CREAT)) {
+            // Find parent directory — parse the path to extract parent
+            char parent_path[VFS_NAME_MAX];
+            const char *name = NULL;
+
+            // Copy path and find last '/'
+            char pbuf[VFS_NAME_MAX];
+            size_t plen = strlen(path);
+            if (plen >= VFS_NAME_MAX) { regs->rax = -ENAMETOOLONG; break; }
+            memcpy(pbuf, path, plen + 1);
+
+            char *last_slash = NULL;
+            for (char *s = pbuf; *s; s++)
+                if (*s == '/') last_slash = s;
+
+            if (last_slash && last_slash != pbuf) {
+                // e.g., "/dir/file" — parent is "/dir", name is "file"
+                *last_slash = '\0';
+                name = last_slash + 1;
+                strcpy(parent_path, pbuf);
+            } else if (last_slash == pbuf && plen > 1) {
+                // e.g., "/file" — parent is "/", name is "file"
+                parent_path[0] = '/'; parent_path[1] = '\0';
+                name = pbuf + 1;
+            } else {
+                // No slash — relative path, parent is cwd
+                name = pbuf;
+                // Use cwd as parent path
+                size_t cwd_len = strlen(current->files->cwd);
+                if (cwd_len >= VFS_NAME_MAX) { regs->rax = -ENAMETOOLONG; break; }
+                memcpy(parent_path, current->files->cwd, cwd_len + 1);
+            }
+
+            if (!name || *name == '\0') { regs->rax = -EINVAL; break; }
+
+            vfs_node_t *parent = vfs_lookup_from(parent_path, current->files->cwd);
+            if (!parent) { regs->rax = -ENOENT; break; }
+            if (parent->type != VFS_DIR) { vfs_node_put(parent); regs->rax = -ENOTDIR; break; }
+            if (!parent->ops || !parent->ops->create) {
+                vfs_node_put(parent);
+                regs->rax = -EROFS;
+                break;
+            }
+
+            node = parent->ops->create(parent, name);
+            vfs_node_put(parent);
+            if (!node) { regs->rax = -EEXIST; break; }
+        }
+
         if (!node) {
-            kfree(path_copy);
             regs->rax = -ENOENT;
             break;
         }
 
-        // Read into kernel buffer first, then copy to user
-        uint8_t kbuf[256];
-        uint64_t to_read = size > 256 ? 256 : size;
-        int64_t n = vfs_read(node, 0, to_read, kbuf);
+        // O_TRUNC: truncate regular files to size 0.
+        // The filesystem's write op will reallocate clusters as needed.
+        if ((flags & O_TRUNC) && node->type == VFS_FILE) {
+            node->size = 0;
+            // Clear the first-cluster pointer so fat_write allocates fresh
+            node->fs_data = NULL;
+        }
 
-        if (n > 0)
-            memcpy(buffer, kbuf, (uint64_t)n);
+        file_t *f = file_alloc();
+        if (!f) {
+            vfs_node_put(node);
+            regs->rax = -ENOMEM;
+            break;
+        }
 
-        vfs_node_put(node);
+        f->type = FD_VFS;
+        f->node = node;
+        f->flags = flags;
+        f->offset = 0;
+
+        int newfd = fd_alloc(current->files, f);
+        if (newfd < 0) {
+            file_free(f);
+            regs->rax = -ENFILE;
+            break;
+        }
+        regs->rax = newfd;
+        break;
+    }
+    case SYS_close: {
+        // close(int fd) → 0 / -EBADF
+        int fd = (int)regs->rdi;
+
+        if (fd < 0 || fd >= NOFILE || !current->files || !current->files->fd[fd]) {
+            regs->rax = -EBADF;
+            break;
+        }
+        fd_close(current->files, fd);
+        regs->rax = 0;
+        break;
+    }
+    case SYS_dup: {
+        // dup(int oldfd) → newfd / -errno
+        int oldfd = (int)regs->rdi;
+
+        if (oldfd < 0 || oldfd >= NOFILE || !current->files ||
+            !current->files->fd[oldfd]) {
+            regs->rax = -EBADF;
+            break;
+        }
+
+        // Find lowest free fd
+        int newfd = -1;
+        for (int i = 0; i < NOFILE; i++) {
+            if (current->files->fd[i] == NULL) {
+                newfd = i;
+                break;
+            }
+        }
+        if (newfd < 0) {
+            regs->rax = -ENFILE;
+            break;
+        }
+
+        file_t *f = current->files->fd[oldfd];
+        f->refcount++;
+        current->files->fd[newfd] = f;
+        regs->rax = newfd;
+        break;
+    }
+    case SYS_dup2: {
+        // dup2(int oldfd, int newfd) → newfd / -errno
+        int oldfd = (int)regs->rdi;
+        int newfd = (int)regs->rsi;
+
+        if (oldfd < 0 || oldfd >= NOFILE || newfd < 0 || newfd >= NOFILE ||
+            !current->files || !current->files->fd[oldfd]) {
+            regs->rax = -EBADF;
+            break;
+        }
+
+        if (oldfd == newfd) {
+            regs->rax = newfd;
+            break;
+        }
+
+        // Close newfd first if open
+        if (current->files->fd[newfd])
+            fd_close(current->files, newfd);
+
+        file_t *f = current->files->fd[oldfd];
+        f->refcount++;
+        current->files->fd[newfd] = f;
+        regs->rax = newfd;
+        break;
+    }
+    case SYS_fork: {
+        // fork() → child PID in parent, 0 in child
+        int64_t pid = do_fork(regs, 0, 0, 0);
+        // Parent path: regs->rax = child PID
+        // Child path: do_fork already set child's pt_regs->rax = 0
+        regs->rax = pid;
+        serial_printk("fork: pid=%d returned %d\n", (int)current->pid, (int)pid);
+        break;
+    }
+    case SYS_waitpid: {
+        // waitpid(pid, *status, options) → child PID or error
+        int64_t pid = (int64_t)(int)regs->rdi;
+        int *status = (int *)regs->rsi;
+        int options = (int)regs->rdx;
+
+        // Validate status pointer
+        if (status && (uint64_t)status >= current->addr_limit) {
+            regs->rax = -EFAULT;
+            break;
+        }
+
+        regs->rax = do_waitpid(pid, status, options);
+        break;
+    }
+    case SYS_pipe: {
+        // pipe(int fds[2]) → 0 / -errno
+        int *fds = (int *)regs->rdi;
+        regs->rax = do_pipe(fds);
+        break;
+    }
+    case SYS_chdir: {
+        // chdir(const char *path) → 0 / -errno
+        const char *path = (const char *)regs->rdi;
+        if ((uint64_t)path >= current->addr_limit) {
+            regs->rax = -EFAULT;
+            break;
+        }
+        if (!current->files) {
+            regs->rax = -ENOENT;
+            break;
+        }
+
+        char *path_copy = strdup(path);
+        if (!path_copy) { regs->rax = -ENOMEM; break; }
+
+        vfs_node_t *node = vfs_lookup_from(path_copy, current->files->cwd);
         kfree(path_copy);
-        regs->rax = n;
+        if (!node) { regs->rax = -ENOENT; break; }
+        if (node->type != VFS_DIR) { vfs_node_put(node); regs->rax = -ENOTDIR; break; }
+        vfs_node_put(node);
+
+        // Build the new absolute cwd
+        char new_cwd[256];
+        if (path[0] == '/') {
+            // absolute
+            size_t len = strlen(path);
+            if (len >= 255) { regs->rax = -EINVAL; break; }
+            memcpy(new_cwd, path, len + 1);
+        } else {
+            // relative: cwd + "/" + path
+            int cwd_len = (int)strlen(current->files->cwd);
+            int path_len = (int)strlen(path);
+            if (cwd_len + 1 + path_len >= 256) { regs->rax = -EINVAL; break; }
+            memcpy(new_cwd, current->files->cwd, cwd_len);
+            new_cwd[cwd_len] = '/';
+            memcpy(new_cwd + cwd_len + 1, path, path_len + 1);
+        }
+        // Collapse "//" and trailing "/"
+        // For now, simple store
+        memcpy(current->files->cwd, new_cwd, sizeof(current->files->cwd));
+
+        serial_printk("chdir: pid=%d → '%s'\n", (int)current->pid, current->files->cwd);
+        regs->rax = 0;
+        break;
+    }
+    case SYS_getcwd: {
+        // getcwd(char *buf, size_t size) → buf / NULL(-errno)
+        char *buf = (char *)regs->rdi;
+        uint64_t size = regs->rsi;
+        if ((uint64_t)buf >= current->addr_limit) {
+            regs->rax = -EFAULT;
+            break;
+        }
+        if (!current->files) {
+            regs->rax = -ENOENT;
+            break;
+        }
+        uint64_t len = strlen(current->files->cwd) + 1;
+        if (len > size) { regs->rax = -ERANGE; break; }
+        memcpy((void *)buf, current->files->cwd, len);
+        regs->rax = (int64_t)(uint64_t)buf;  // success: return buf
         break;
     }
     default:
         serial_printk("syscall: unknown nr=%d from pid=%d\n",
-                      regs->rax, current->pid);
+                      (int)regs->rax, (int)current->pid);
         regs->rax = -EINVAL;
         break;
     }

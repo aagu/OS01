@@ -6,6 +6,7 @@
 #include <kernel/arch/x86_64/cpu.h>
 #include <kernel/arch/x86_64/regs.h>
 #include <kernel/arch/x86_64/linkage.h>
+#include <kernel/file.h>
 
 #define KERNEL_CS (0x08)
 #define KERNEL_DS (0x10)
@@ -45,6 +46,9 @@ extern void idle_resume(void);
 #define PF_KTHREAD (1 << 0)
 #define PF_PROCESS (1 << 1)
 #define PF_THREAD (1 << 2)
+
+// waitpid options
+#define WNOHANG 1
 
 typedef struct mm_struct
 {
@@ -94,6 +98,14 @@ typedef struct task_struct
     uint32_t cpu; // CPU affinity — which CPU owns this task (for SMP)
 
     void *stack_alloc_base; // original malloc ptr (before STACK_SIZE alignment)
+
+    // ── File descriptor table ──────────────────────────
+    struct files_struct *files;     // per-process fd table
+
+    // ── Process tree ───────────────────────────────────
+    struct task_struct *parent;     // parent process (for waitpid)
+    int64_t exit_code;              // exit status (harvested by waitpid)
+    list_t wait_list;               // tasks waiting on this process
 } task_t;
 
 union task_union
@@ -194,19 +206,20 @@ inline task_t* __attribute__((always_inline)) get_current_task()
             "pushq %%rbp \n\t"       \
             "pushq %%rax \n\t"       \
             "cli \n\t"               /* disable IRQs during stack switch */ \
-            "movq %%rsp, %0 \n\t"    \
-            "movq %2, %%rsp \n\t"    \
+            "movq %%rsp, %0 \n\t"    /* save prev->rsp */ \
             "leaq 1f(%%rip), %%rax \n\t" \
-            "pushq %3 \n\t"          \
+            "movq %%rax, %1 \n\t"    /* save prev->rip = resume label */ \
+            "movq %2, %%rsp \n\t"    /* load next->rsp */ \
+            "pushq %3 \n\t"          /* push next->rip */ \
             "jmp __switch_to \n\t"   \
             "1: \n\t"                \
             "sti \n\t"               /* re-enable IRQs after switch */ \
             "popq %%rax \n\t"        \
             "popq %%rbp \n\t"        \
-            : "=m"((prev)->thread->rsp),"=m"((next)->thread->rip) \
+            : "=m"((prev)->thread->rsp), "=m"((prev)->thread->rip) \
             : "m"((next)->thread->rsp), "m"((next)->thread->rip), \
               "D"((uint64_t)(prev)), "S"((uint64_t)(next)) \
-            : "memory" \
+            : "memory", "rax" \
         ); \
     } while (0)
 
@@ -217,6 +230,7 @@ int64_t spawn_user_task(const char *path);
 int64_t sys_exec(const char *path, pt_regs_t *regs);
 void schedule(void);
 uint64_t do_exit(uint64_t exit_code);
+int64_t do_waitpid(int64_t pid, int *user_status, int options);
 
 /* User stack layout (separate 2MB page from code at 0x400000) */
 #define USER_STACK_BASE 0x600000UL

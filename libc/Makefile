@@ -35,7 +35,16 @@ stdlib/calloc.o \
 stdlib/malloc.o \
 stdlib/free.o \
 errno/errno.o \
-unistd/read.o
+unistd/read.o \
+unistd/write.o \
+unistd/open.o \
+unistd/close.o \
+unistd/dup.o \
+unistd/dup2.o \
+	unistd/waitpid.o \
+	unistd/pipe.o \
+	unistd/chdir.o \
+	unistd/getcwd.o
 
 HOSTEDOBJS=\
 $(ARCH_HOSTEDOBJS) \
