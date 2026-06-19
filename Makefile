@@ -43,6 +43,10 @@ lib:
 user:
 	make -C user
 
+.PHONY: test
+test:
+	make -C test run
+
 .PHONY: kernel/kernel.bin
 kernel/kernel.bin: lib
 	make -C kernel kernel.bin
@@ -90,4 +94,5 @@ clean:
 	make -C kernel clean
 	make -C libc clean
 	make -C user clean
+	rm -rf test/build
 	rm -rf sysroot
