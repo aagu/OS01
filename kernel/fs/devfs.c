@@ -2,6 +2,7 @@
 #include <fs/vfs.h>
 #include <kernel/printk.h>
 #include <driver/serial.h>
+#include <kernel/tty.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -18,6 +19,14 @@ typedef struct devfs_device {
 
 static devfs_device_t devices[DEVFS_MAX_DEVICES];
 static int device_count = 0;
+
+// The console TTY — set by devfs_set_tty() during init.
+static tty_t *dev_tty = NULL;
+
+void devfs_set_tty(tty_t *tty)
+{
+    dev_tty = tty;
+}
 
 // ── Built-in device handlers ───────────────────────────────
 
@@ -43,27 +52,19 @@ static int zero_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buf
     return (int)size;
 }
 
-// /dev/tty — controlling terminal, passthrough to serial
-static int tty_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
+// /dev/tty — console TTY (canonical mode, echo, keyboard input)
+static int dev_tty_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 {
     (void)node; (void)offset;
-    if (!buffer || size == 0) return 0;
-    uint64_t total = 0;
-    while (total < size) {
-        ((char *)buffer)[total] = read_serial();
-        total++;
-        break;
-    }
-    return (int)total;
+    if (!dev_tty || !buffer || size == 0) return 0;
+    return tty_read(dev_tty, (char *)buffer, (int)size, false);
 }
 
-static int tty_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
+static int dev_tty_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 {
     (void)node; (void)offset;
-    if (!buffer || size == 0) return 0;
-    for (uint64_t i = 0; i < size; i++)
-        write_serial(((char *)buffer)[i]);
-    return (int)size;
+    if (!dev_tty || !buffer || size == 0) return 0;
+    return tty_write(dev_tty, (const char *)buffer, (int)size);
 }
 
 // ── /dev/serial — read/write the COM1 serial port ─────────
@@ -173,7 +174,7 @@ void devfs_init(void)
     devfs_register_chrdev("null",   NULL, null_read,   null_write);
     devfs_register_chrdev("zero",   NULL, zero_read,   null_write);  // zero write = discard
     devfs_register_chrdev("serial", NULL, serial_read, serial_write);
-    devfs_register_chrdev("tty",    NULL, tty_read,    tty_write);
+    devfs_register_chrdev("tty",    NULL, dev_tty_read, dev_tty_write);
 }
 
 // ── Public API ──────────────────────────────────────────────

@@ -106,6 +106,9 @@ typedef struct task_struct
     struct task_struct *parent;     // parent process (for waitpid)
     int64_t exit_code;              // exit status (harvested by waitpid)
     list_t wait_list;               // tasks waiting on this process
+
+    // ── I/O wait queue node ────────────────────────────
+    list_t io_wait_node;
 } task_t;
 
 union task_union

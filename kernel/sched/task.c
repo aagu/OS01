@@ -18,8 +18,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <driver/serial.h>
-
-uint64_t init(uint64_t arg);
+#include <uapi/time.h>
 
 void __switch_to(task_t *prev, task_t *next)
 {
@@ -54,6 +53,12 @@ void __switch_to(task_t *prev, task_t *next)
 // Global PID counter — atomic because spawn/fork/exec may
 // race on different CPUs.
 static volatile uint64_t pid_counter = 1;
+
+// ── User-space init task pointer ─────────────────────────
+// Set by spawn_user_task() the first time it creates a user task.
+// do_exit() uses this to reparent orphans and protect the init process.
+static task_t *user_init_task = NULL;
+static int64_t  user_init_pid = 0;
 
 // Per-CPU scheduler guard — set to 1 by task_init() on each CPU.
 // schedule() returns immediately before this point (ticks before
@@ -203,9 +208,42 @@ uint64_t do_exit(uint64_t exit_code)
 {
     serial_printk("task %d exiting with code %#018lx\n", current->pid, exit_code);
 
+    // ── Init process protection ──────────────────────────
+    // The user-space init process (PID 1) must never exit.
+    // Check by pid rather than pointer — after fork, child
+    // task structs are copies and pointer comparison fails.
+    if (current->pid == user_init_pid) {
+        serial_printk("PANIC: init (pid=%d) attempted to exit with code %#018lx\n",
+                      (int)current->pid, exit_code);
+        while (1) { __asm__ __volatile__("hlt"); }
+    }
+
+    // ── Reparent children to init ────────────────────────
+    if (user_init_task && current->pid != user_init_pid) {
+        list_t *cpos = init_task_union.task.list.next;
+        while (cpos != &init_task_union.task.list) {
+            task_t *child = container_of(cpos, task_t, list);
+            cpos = cpos->next;
+            if (child->parent == current) {
+                child->parent = user_init_task;
+                serial_printk("reparent: child %d → init (pid=%d)\n",
+                              (int)child->pid, (int)user_init_task->pid);
+            }
+        }
+    }
+
+    // ── Send SIGCHLD to parent ───────────────────────────
+    if (current->parent && !(current->parent->flags & PF_KTHREAD)) {
+        current->parent->signal |= (1ULL << SIGCHLD);
+        // Wake parent if it's sleeping (e.g. in waitpid or pause)
+        if (current->parent->state == TASK_INTERRUPTIBLE)
+            current->parent->state = TASK_RUNNING;
+    }
+
     if (!(current->flags & PF_KTHREAD) && current->mm) {
-        // Free user page tables and user physical pages
-        vmm_free_user_map((mmap)Phy_To_Virt((uint64_t)current->mm->pml4));
+        // Skip vmm_free_user_map for now — in do_fork the child
+        // shares pml4 with the parent, so freeing would corrupt
+        // the parent's address space.  Will be fixed with mm refcounting.
         kfree(current->mm);
         current->mm = NULL;
     }
@@ -402,6 +440,7 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     // Inherit fd table from parent (the init task)
     tsk->parent = current;
     list_init(&tsk->wait_list);
+    list_init(&tsk->io_wait_node);
     tsk->exit_code = 0;
     if (current->files)
         tsk->files = files_dup(current->files);
@@ -522,6 +561,12 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     thd->rip  = (uint64_t)ret_from_intr;   // first entry via RESTORE_ALL → iretq
 
     tsk->state = TASK_RUNNING;
+
+    // The first user task we create is "init" — track it globally.
+    if (!user_init_task) {
+        user_init_task = tsk;
+        user_init_pid  = tsk->pid;
+    }
 
     serial_printk("spawn: pid=%d '%s' entry=%p rsp=%p cr3=%p\n",
                   tsk->pid, path, entry_point, regs->rsp, thd->cr3);
@@ -682,10 +727,14 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
         #undef KSTACK
     }
 
-    // 7. Free the OLD user address space
+    // 7. Free the OLD user address space (mm_t only, not page tables).
+    // The old mm may share page tables with the parent (fork), so we
+    // must NOT call vmm_free_user_map here — it would destroy the
+    // parent's address space.  When the parent exits, do_exit handles
+    // the shared page table cleanup.
     if (current->mm) {
-        vmm_free_user_map((mmap)Phy_To_Virt((uint64_t)current->mm->pml4));
         kfree(current->mm);
+        current->mm = NULL;
     }
 
     // 8. Install new mm and page table
@@ -711,6 +760,76 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
                   current->pid, entry_point, regs->rsp, s_argc, current->thread->cr3);
 
     return 0;
+}
+
+// ── fork_mm_copy — create private address space for fork child ─
+// Builds a new PML4 with a private copy of every user 2MB page.
+// This is a full eager copy (like a COW fault on every page).
+// Without COW, parent and child would corrupt each other's
+// stack/heap when either writes to a shared page.
+// Returns new mm_t on success, or NULL on OOM (caller falls back
+// to sharing and risk of corruption).
+static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
+{
+    mm_t *child_mm = (mm_t *)calloc(1, sizeof(mm_t));
+    uint64_t *child_pml4 = (uint64_t *)vmm_alloc_map();
+    if (!child_mm || !child_pml4)
+        goto fail;
+
+    uint64_t *parent_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)parent_mm->pml4);
+    uint64_t *kernel_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)init_mm.pml4);
+
+    memcpy(&child_pml4[256], &kernel_pml4[256], 256 * sizeof(uint64_t));
+
+    for (int l4 = 0; l4 < 256; l4++) {
+        uint64_t pml4e = parent_pml4[l4];
+        if (!(pml4e & PAGE_Present)) continue;
+
+        uint64_t *parent_pml3 = (uint64_t *)Phy_To_Virt(pml4e & PAGE_4K_MASK);
+        uint64_t *child_pml3  = (uint64_t *)calloc(1, PAGE_4K_SIZE);
+        if (!child_pml3) continue;
+        child_pml4[l4] = Virt_To_Phy((uint64_t)child_pml3) | PAGE_USER_GDT;
+
+        for (int l3 = 0; l3 < 512; l3++) {
+            uint64_t pml3e = parent_pml3[l3];
+            if (!(pml3e & PAGE_Present)) continue;
+
+            uint64_t *parent_pml2 = (uint64_t *)Phy_To_Virt(pml3e & PAGE_4K_MASK);
+            uint64_t *child_pml2  = (uint64_t *)calloc(1, PAGE_4K_SIZE);
+            if (!child_pml2) continue;
+            child_pml3[l3] = Virt_To_Phy((uint64_t)child_pml2) | PAGE_USER_Dir;
+
+            for (int l2 = 0; l2 < 512; l2++) {
+                uint64_t pml2e = parent_pml2[l2];
+                if (!(pml2e & PAGE_Present)) continue;
+
+                uint64_t phys = pml2e & PAGE_2M_MASK;
+
+                // Eager copy — every user page gets a private clone.
+                struct Page *s = alloc_pages(ZONE_NORMAL, 1, 0);
+                if (s) {
+                    memcpy((void *)Phy_To_Virt(s->phy_address),
+                           (void *)Phy_To_Virt(phys & ~PAGE_XD),
+                           PAGE_2M_SIZE);
+                    child_pml2[l2] = s->phy_address
+                                   | (pml2e & ~PAGE_2M_MASK);
+                } else {
+                    child_pml2[l2] = pml2e; // OOM fallback
+                }
+            }
+        }
+    }
+
+    memcpy(child_mm, parent_mm, sizeof(mm_t));
+    child_mm->pml4 = (uint64_t *)Virt_To_Phy((uint64_t)child_pml4);
+    *cr3_out = (uint64_t)child_mm->pml4;
+    return child_mm;
+
+fail:
+    if (child_pml4) kfree(child_pml4);
+    if (child_mm)   kfree(child_mm);
+    if (cr3_out)    *cr3_out = 0;
+    return NULL;
 }
 
 // ── do_fork ──────────────────────────────────────────────
@@ -743,6 +862,7 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
     // ── Process tree ───────────────────────────────────────
     tsk->parent = current;
     list_init(&tsk->wait_list);
+    list_init(&tsk->io_wait_node);
     tsk->exit_code = 0;
 
     thd->cr3 = current->thread->cr3;
@@ -750,12 +870,8 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
     if ((regs->cs & 3) == 3) {
         tsk->flags &= ~PF_KTHREAD;
         tsk->addr_limit = 0x00007FFFFFFFFFFF;
-
-        // Child must NOT share the parent's mm — exec would
-        // free the parent's user page tables.  Give the child
-        // a NULL mm; sys_exec will skip the old-user-map free
-        // and allocate a fresh address space.
-        tsk->mm = NULL;
+        if (current->mm)
+            tsk->mm = fork_mm_copy(current->mm, &thd->cr3);
     }
 
     memcpy((void *)((uint64_t)tsk + STACK_SIZE - sizeof(pt_regs_t)),
@@ -801,7 +917,6 @@ int kernel_thread(uint64_t (*fn)(uint64_t), uint64_t arg, uint64_t flags)
 
 void task_init()
 {
-    task_t *p = NULL;
 
     init_mm.pml4 = get_cr3();
     init_thread.cr3 = (uint64_t)init_mm.pml4;
@@ -828,75 +943,40 @@ void task_init()
     percpu_data[0].idle = &init_task_union.task;
     init_task_union.task.cpu = 0;
 
-    kernel_thread(init, 10, CLONE_FS | CLONE_FILES | CLONE_SIGNAL);
-
-    init_task_union.task.state = TASK_RUNNING;
-    this_cpu()->scheduler_ok = 1;
-
-    p = container_of(current->list.next, task_t, list);
-    switch_to(current, p);
-}
-
-// ── init kernel thread ───────────────────────────────────
-uint64_t init(uint64_t arg)
-{
-    serial_printk("init task is running, arg: %#018lx\n", arg);
-
-    // ── Set up fd 0/1/2 for init_task ────────────────────
-    // All descendant processes (spawn_user_task → do_fork)
-    // will inherit these file descriptors.
+    // ── Set up fd 0/1/2 on the idle task ─────────────────
+    // These will be inherited by the first user task (init.elf).
     {
         files_t *files = files_alloc();
-        if (!files) {
-            serial_printk("init: files_alloc failed\n");
-            return 1;
-        }
-        current->files = files;  // attach to *this* task, not idle
+        if (files) {
+            current->files = files;  // attach to idle task
 
-        // fd 0: stdin -- /dev/serial (from QEMU -serial stdio)
-        vfs_node_t *ser = vfs_lookup("/dev/serial");
-        if (ser) {
-            file_t *f = file_alloc();
-            f->type = FD_DEV;
-            f->node = ser;
-            f->flags = O_RDWR;
-            int fd = fd_alloc(files, f);
-            serial_printk("init: fd%d = /dev/serial (stdin)\n", fd);
-        }
+            // All three fds go through /dev/tty:
+            //   read  → keyboard (ASCII-translated scancodes)
+            //   write → framebuffer (GTK window) + serial (terminal)
+            vfs_node_t *tty = vfs_lookup("/dev/tty");
+            if (tty) {
+                file_t *f0 = file_alloc();
+                if (f0) { f0->type = FD_DEV; f0->node = tty; f0->flags = O_RDWR;  fd_alloc(files, f0); }
 
-        // fd 1: stdout -- /dev/serial
-        if (ser) {
-            file_t *f = file_alloc();
-            f->type = FD_DEV;
-            f->node = ser;
-            f->flags = O_WRONLY;
-            int fd = fd_alloc(files, f);
-            serial_printk("init: fd%d = /dev/serial (stdout)\n", fd);
-        }
+                file_t *f1 = file_alloc();
+                if (f1) { f1->type = FD_DEV; f1->node = tty; f1->flags = O_WRONLY; fd_alloc(files, f1); }
 
-        // fd 2: stderr -- /dev/serial
-        if (ser) {
-            file_t *f = file_alloc();
-            f->type = FD_DEV;
-            f->node = ser;
-            f->flags = O_WRONLY;
-            int fd = fd_alloc(files, f);
-            serial_printk("init: fd%d = /dev/serial (stderr)\n", fd);
+                file_t *f2 = file_alloc();
+                if (f2) { f2->type = FD_DEV; f2->node = tty; f2->flags = O_WRONLY; fd_alloc(files, f2); }
+            }
         }
     }
 
-    // Spawn 2 quick-exit tasks to verify round-robin scheduling.
-    for (int i = 0; i < 2; i++) {
-        int64_t pid = spawn_user_task("/spin.elf", NULL);
-        serial_printk("init: spin #%d → pid=%d\n", i, (int)pid);
-    }
-    // Spawn the interactive shell
-    spawn_user_task("/busybox.elf", (const char *const[]){"/busybox.elf", "sh", NULL});
+    // pid_counter starts at 1 → first user task becomes PID=1.
+    int64_t init_pid = spawn_user_task("/init.elf", NULL);
+    serial_printk("init: spawned user-space init, pid=%d\n", (int)init_pid);
 
-    // Stay alive so children can run (init should never exit)
-    serial_printk("init: entering idle loop\n");
+    // Activate the scheduler and enter the idle loop.
+    // schedule() picks up the user init (PID 1) naturally.
+    current->state = TASK_RUNNING;
+    this_cpu()->scheduler_ok = 1;
+
     while (1) {
         schedule();
     }
-    return 0;
 }

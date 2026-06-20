@@ -78,6 +78,10 @@ int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
 			Pos.YPosition++;
 			Pos.XPosition = 0;
 		}
+		else if((unsigned char)*(buf_color + count) == '\r')
+		{
+			Pos.XPosition = 0;
+		}
 		else if((unsigned char)*(buf_color + count) == '\b')
 		{
 			Pos.XPosition--;
@@ -113,7 +117,15 @@ Label_tab:
 		}
 		if(Pos.YPosition >= (int32_t)(Pos.YResolution / font->height))
 		{
-			Pos.YPosition = 0;
+			// Scroll framebuffer up by one character row.
+			// Moves rows 1..N-1 up by one row, then clears the bottom row.
+			int rows = (int)(Pos.YResolution / font->height);
+			uint32_t pitch = Pos.XResolution * sizeof(uint32_t);
+			int row_bytes = (int)(pitch * font->height);
+			uint8_t *fb = (uint8_t *)Pos.FB_addr;
+			memmove(fb, fb + row_bytes, (uintptr_t)row_bytes * (rows - 1));
+			memset(fb + (uintptr_t)row_bytes * (rows - 1), 0, (uintptr_t)row_bytes);
+			Pos.YPosition = rows - 1;
 		}
 
 	}

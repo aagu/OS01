@@ -54,5 +54,7 @@
 #define SYS_umask           37
 #define SYS_kill            38
 #define SYS_signal          39
+#define SYS_sync            40
+#define SYS_reboot          41
 
 #endif

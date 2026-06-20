@@ -100,6 +100,15 @@ thirdpart/busybox-1.36.1/busybox: lib \
 	    -e 's/^# CONFIG_FEATURE_PREFER_APPLETS is not set/CONFIG_FEATURE_PREFER_APPLETS=y/' \
 	    -e 's/^CONFIG_GETFATTR=y/# CONFIG_GETFATTR is not set/' \
 	    -e 's/^CONFIG_FEATURE_IP_LINK_CAN=y/# CONFIG_FEATURE_IP_LINK_CAN is not set/' \
+	    -e 's/^# CONFIG_LS is not set/CONFIG_LS=y/' \
+	    -e 's/^# CONFIG_CAT is not set/CONFIG_CAT=y/' \
+	    -e 's/^# CONFIG_ECHO is not set/CONFIG_ECHO=y/' \
+	    -e 's/^# CONFIG_PWD is not set/CONFIG_PWD=y/' \
+	    -e 's/^# CONFIG_RM is not set/CONFIG_RM=y/' \
+	    -e 's/^# CONFIG_CP is not set/CONFIG_CP=y/' \
+	    -e 's/^# CONFIG_MV is not set/CONFIG_MV=y/' \
+	    -e 's/^# CONFIG_MKDIR is not set/CONFIG_MKDIR=y/' \
+	    -e 's/^# CONFIG_RMDIR is not set/CONFIG_RMDIR=y/' \
 	    .config
 	@# Create stub libraries for busybox link detection (trylink tests -lm -lrt)
 	@mkdir -p $(SYSROOT)/usr/lib

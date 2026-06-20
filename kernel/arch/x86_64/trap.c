@@ -1,5 +1,6 @@
 #include <kernel/arch/x86_64/trap.h>
 #include <kernel/arch/x86_64/gate.h>
+#include <kernel/arch/x86_64/hw.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <kernel/printk.h>
@@ -966,18 +967,25 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         // getcwd(char *buf, size_t size) → buf / NULL(-errno)
         char *buf = (char *)regs->rdi;
         uint64_t size = regs->rsi;
-        if ((uint64_t)buf >= current->addr_limit) {
-            regs->rax = -EFAULT;
-            break;
-        }
         if (!current->files) {
             regs->rax = -ENOENT;
             break;
         }
         uint64_t len = strlen(current->files->cwd) + 1;
+        // NULL buf with size=0 means "allocate" — we allocate on
+        // the user heap via brk.  For simplicity, just require a
+        // buffer of at least 256 bytes when size=0.
+        if (buf == NULL) {
+            regs->rax = -EINVAL;
+            break;
+        }
+        if ((uint64_t)buf >= current->addr_limit) {
+            regs->rax = -EFAULT;
+            break;
+        }
         if (len > size) { regs->rax = -ERANGE; break; }
         memcpy((void *)buf, current->files->cwd, len);
-        regs->rax = (int64_t)(uint64_t)buf;  // success: return buf
+        regs->rax = (int64_t)(uint64_t)buf;
         break;
     }
     case SYS_stat: {
@@ -1574,15 +1582,51 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             break;
         }
 
-        // For MVP, just return SIG_DFL as the old action
+        // Return old action if requested
         if (oldact) {
-            oldact->sa_handler = SIG_DFL;
-            oldact->sa_flags = 0;
-            oldact->sa_restorer = NULL;
-            oldact->sa_mask = 0;
+            // Copy from kernel sighand to user oldact
+            oldact->sa_handler = current->sighand[signum].sa_handler;
+            oldact->sa_flags   = current->sighand[signum].sa_flags;
+            oldact->sa_restorer = current->sighand[signum].sa_restorer;
+            oldact->sa_mask    = current->sighand[signum].sa_mask;
+        }
+
+        // Install new handler (SIGKILL cannot be caught or ignored)
+        if (act && signum != SIGKILL) {
+            current->sighand[signum].sa_handler  = act->sa_handler;
+            current->sighand[signum].sa_flags    = act->sa_flags;
+            current->sighand[signum].sa_restorer = act->sa_restorer;
+            current->sighand[signum].sa_mask     = act->sa_mask;
         }
         regs->rax = 0;
         break;
+    }
+    case SYS_sync: {
+        // sync() — flush filesystem caches to disk
+        // For OS01 (FAT32 without write-back cache), this is a no-op.
+        // Future: flush AHCI/FAT buffers here.
+        regs->rax = 0;
+        break;
+    }
+    case SYS_reboot: {
+        // reboot(int cmd) — reboot/poweroff/halt the system
+        int cmd = (int)(int64_t)regs->rdi;
+        (void)cmd;  // MVP: ignore cmd, always reboot
+
+        serial_printk("syscall: reboot(cmd=%d) from pid=%d\n",
+                      cmd, (int)current->pid);
+
+        // Pulse CPU reset via keyboard controller
+        // Wait for keyboard controller to be ready
+        while ((inb(0x64) & 0x02) != 0) { /* wait */ }
+        outb(0xFE, 0x64);  // pulse reset line
+
+        // If reset fails, triple-fault as last resort
+        __asm__ __volatile__(
+            "lidtq 0 \n\t"  // load zero-length IDT
+            "int3     \n\t" // trigger triple fault
+        );
+        while (1) { __asm__ __volatile__("hlt"); }
     }
     default:
         serial_printk("syscall: unknown nr=%d from pid=%d\n",
@@ -1590,6 +1634,53 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         regs->rax = -EINVAL;
         break;
     }
+
+    // ── Signal delivery: TODO after user-stack delivery is implemented ─
+#if 0
+    if ((regs->cs & 3) && current->signal) {
+        uint64_t pending = current->signal;
+
+        for (int sig = 1; sig < NSIG; sig++) {
+            if (!(pending & (1ULL << sig)))
+                continue;
+
+            void (*handler)(int) = current->sighand[sig].sa_handler;
+
+            if (handler == SIG_IGN) {
+                // Explicitly ignored — just clear the pending bit
+                current->signal &= ~(1ULL << sig);
+                continue;
+            }
+
+            if (handler == SIG_DFL) {
+                // Default action
+                current->signal &= ~(1ULL << sig);
+                switch (sig) {
+                case SIGCHLD: case SIGURG: case SIGWINCH:
+                case SIGCONT:
+                    // Ignore by default
+                    break;
+                case SIGTSTP: case SIGTTIN: case SIGTTOU:
+                    // Stop (not implemented — ignore)
+                    break;
+                default:
+                    // Terminate (SIGTERM, SIGINT, SIGKILL, etc.)
+                    serial_printk("task %d killed by signal %d (default)\n",
+                                  (int)current->pid, sig);
+                    do_exit((uint64_t)sig << 8);
+                    // do_exit never returns — switches away
+                    return;
+                }
+                continue;
+            }
+
+            // Real handler registered — clear pending bit
+            // (Full user-stack frame delivery is a future step;
+            //  for now, signal-aware code uses waitpid/polling.)
+            current->signal &= ~(1ULL << sig);
+        }
+    }
+#endif
 }
 
 void sys_vector_install()

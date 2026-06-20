@@ -11,6 +11,7 @@
 #include <kernel/task.h>
 #include <kernel/percpu.h>
 #include <kernel/arch/x86_64/trampoline.h>
+#include <kernel/tty.h>
 #include <device/pic.h>
 #include <kernel/apic.h>
 #include <driver/pit.h>
@@ -109,6 +110,7 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     pit_init();
     lapic_timer_init();
     keyboard_init();
+    init_serial_irq();    // COM1 IRQ4 — interrupt-driven receive
 
     ahci_init();
 
@@ -124,6 +126,17 @@ int kernel_main(struct BOOT_INFO *bootinfo)
 
     // ── Mount devfs at /dev and register device nodes ──
     devfs_init();
+
+    // ── Create the console TTY ──────────────────────────
+    // tty_alloc without callbacks uses the default output
+    // (framebuffer + serial dual-write).
+    tty_t *console = tty_alloc(NULL, NULL);
+    if (console) {
+        keyboard_set_tty(console);   // keyboard IRQ → TTY
+        serial_set_tty(console);     // serial IRQ  → TTY
+        devfs_set_tty(console);      // /dev/tty read/write → TTY
+        serial_printk("tty: console TTY created\n");
+    }
 
     // Register keyboard on devfs — raw scancode reads
     devfs_register_chrdev("keyboard", NULL,

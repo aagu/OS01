@@ -21,3 +21,8 @@ int tcsetpgrp(int fd, pid_t pgrp) { (void)fd; (void)pgrp; return 0; }
 pid_t tcgetpgrp(int fd) { (void)fd; return 1; }
 int killpg(pid_t pgrp, int sig) { (void)pgrp; (void)sig; return -1; }
 
+// Ownership stubs — not supported, always succeed
+int chown(const char *path, uid_t owner, gid_t group) { (void)path; (void)owner; (void)group; return 0; }
+int fchown(int fd, uid_t owner, gid_t group) { (void)fd; (void)owner; (void)group; return 0; }
+int lchown(const char *path, uid_t owner, gid_t group) { (void)path; (void)owner; (void)group; return 0; }
+

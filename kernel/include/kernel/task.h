@@ -7,6 +7,7 @@
 #include <kernel/arch/x86_64/regs.h>
 #include <kernel/arch/x86_64/linkage.h>
 #include <kernel/file.h>
+#include <uapi/time.h>
 
 #define KERNEL_CS (0x08)
 #define KERNEL_DS (0x10)
@@ -107,6 +108,16 @@ typedef struct task_struct
     struct task_struct *parent;     // parent process (for waitpid)
     int64_t exit_code;              // exit status (harvested by waitpid)
     list_t wait_list;               // tasks waiting on this process
+
+    // ── I/O wait queue node ────────────────────────────
+    // When a task blocks on I/O (tty, pipe, etc.), its
+    // io_wait_node is added to the device's wait queue.
+    // Use list_is_empty(&t->io_wait_node) to check if
+    // the task is NOT currently waiting on any I/O.
+    list_t io_wait_node;
+
+    // ── Signal handling ────────────────────────────────
+    struct sigaction sighand[NSIG]; // registered signal handlers
 } task_t;
 
 union task_union
@@ -239,6 +250,6 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options);
  * overflow past the stack bottom triggers #PF instead of silent
  * corruption of code/data below. */
 #define USER_STACK_BASE 0x800000UL
-#define USER_STACK_TOP  (USER_STACK_BASE + 0x200000UL - 8)
+#define USER_STACK_TOP  (USER_STACK_BASE + 0x200000UL - 16)
 
 #endif

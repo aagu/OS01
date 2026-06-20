@@ -37,6 +37,7 @@ KERNEL_SOURCES := \
 	fs/file.c
 
 KERNEL_SOURCES += $(wildcard driver/*.c)
+KERNEL_SOURCES += $(wildcard tty/*.c)
 
 KERNEL_OBJECTS := \
 	$(KERNEL_SOURCES:.c=.o) \

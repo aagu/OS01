@@ -10,13 +10,13 @@ typedef struct List
     struct List * next;
 } list_t;
 
-inline void list_init(struct List * lst)
+static inline void list_init(struct List * lst)
 {
     lst->prev = lst;
     lst->next = lst;
 }
 
-inline void list_add_to_behind(struct List * entry, struct List * new_entry)
+static inline void list_add_to_behind(struct List * entry, struct List * new_entry)
 {
     new_entry->next = entry->next;
     new_entry->prev = entry;
@@ -24,7 +24,7 @@ inline void list_add_to_behind(struct List * entry, struct List * new_entry)
     entry->next = new_entry;
 }
 
-inline void list_add_to_before(struct List * entry, struct List * new_entry)
+static inline void list_add_to_before(struct List * entry, struct List * new_entry)
 {
     new_entry->next = entry;
     new_entry->prev = entry->prev;
@@ -32,13 +32,22 @@ inline void list_add_to_before(struct List * entry, struct List * new_entry)
     entry->prev = new_entry;
 }
 
-inline void list_del(struct List * entry)
+static inline void list_del(struct List * entry)
 {
     entry->next->prev = entry->prev;
     entry->prev->next = entry->next;
 }
 
-inline long list_is_empty(struct List * entry)
+// Delete entry from its list and re-initialize it (self-pointing).
+// Safe to call on an already-dangling entry — list_del_init is
+// idempotent (the second call is a no-op on a self-pointing node).
+static inline void list_del_init(struct List * entry)
+{
+    list_del(entry);
+    list_init(entry);
+}
+
+static inline long list_is_empty(struct List * entry)
 {
     if (entry == entry->next && entry == entry->prev)
     {
@@ -47,7 +56,7 @@ inline long list_is_empty(struct List * entry)
     return 0;
 }
 
-inline struct List * list_prev(struct List * entry)
+static inline struct List * list_prev(struct List * entry)
 {
     if (entry->prev != NULL)
     {
@@ -56,7 +65,7 @@ inline struct List * list_prev(struct List * entry)
     return NULL;
 }
 
-inline struct List * list_next(struct List * entry)
+static inline struct List * list_next(struct List * entry)
 {
     if (entry->next != NULL)
     {

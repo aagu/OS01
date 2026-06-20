@@ -30,7 +30,9 @@ class TestRunner:
         # Use -serial with the slave
         args = [
             QEMU,
-            "-drive", f"file={self.disk_img},format=raw,if=ide",
+            "-M", "q35",
+            "-pflash", "boot/uefi/OVMF.fd",
+            "-hda", f"{self.disk_img}",
             "-m", "512",
             "-smp", "1",
             "-serial", f"/dev/fd/{slave_fd}",
@@ -113,8 +115,8 @@ def test_boot(tester):
     """Phase 0 test: verify kernel boots and shell runs."""
     tester.start_qemu()
 
-    # Wait for evidence of boot
-    booted = tester.read_until("init task is running", timeout=20)
+    # Wait for evidence of boot — init.elf banner
+    booted = tester.read_until("OS01 Init v1.0", timeout=25)
     if not booted:
         print("FAIL: Kernel did not boot")
         return False

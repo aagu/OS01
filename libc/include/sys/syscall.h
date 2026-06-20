@@ -44,6 +44,8 @@
 #define SYS_umask       37
 #define SYS_kill        38
 #define SYS_signal      39
+#define SYS_sync        40
+#define SYS_reboot      41
 
 // ── Generic syscall helper ─────────────────────────────────
 
@@ -73,6 +75,20 @@ static inline void exit(int code)
 {
     syscall(SYS_exit, (uint64_t)code, 0, 0);
     __builtin_unreachable();
+}
+
+static inline int sync(void)
+{
+    return (int)syscall(SYS_sync, 0, 0, 0);
+}
+
+#define RB_AUTOBOOT   0x01234567
+#define RB_POWER_OFF  0x4321FEDC
+#define RB_HALT_SYSTEM 0xCDEF0123
+
+static inline int reboot(int cmd)
+{
+    return (int)syscall(SYS_reboot, (uint64_t)cmd, 0, 0);
 }
 
 #endif

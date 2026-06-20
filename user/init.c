@@ -1,119 +1,392 @@
+// OS01 Init — PID 1 user-space process
+//
+// Implements a BusyBox-style four-phase boot sequence:
+//   1. SYSINIT (blocking)  — one-time system initialization
+//   2. WAIT    (blocking)  — one-time tasks that must complete
+//   3. ONCE    (fire-and-forget) — one-time tasks, no waiting
+//   4. RESPAWN / ASKFIRST   — supervised long-running services
+//
+// Uses hardcoded fallback actions when /etc/inittab is absent.
+// Child reaping via waitpid(WNOHANG) polling — no signal delivery required.
+
 #include <stdio.h>
 #include <unistd.h>
-#include <stdint.h>
+#include <signal.h>
+#include <string.h>
+#include <stdlib.h>
+#include <sys/syscall.h>
+#include <time.h>
 
-// ── PS/2 scan code set 1 → ASCII mapping (unshifted) ─────
-// 0 = non-printable / handled specially
-#define SCANCODE_MAX 0x53
+// ── Action types ────────────────────────────────────────────
+#define ACT_SYSINIT     1
+#define ACT_WAIT        2
+#define ACT_ONCE        3
+#define ACT_RESPAWN     4
+#define ACT_ASKFIRST    5
+#define ACT_CTRLALTDEL  6
+#define ACT_SHUTDOWN    7
+#define ACT_RESTART     8
 
-static const char ascii_tbl[SCANCODE_MAX + 1] = {
-    [0x01] = 0x1B,    // Escape
-    [0x02] = '1',     [0x03] = '2',     [0x04] = '3',
-    [0x05] = '4',     [0x06] = '5',     [0x07] = '6',
-    [0x08] = '7',     [0x09] = '8',     [0x0A] = '9',
-    [0x0B] = '0',     [0x0C] = '-',     [0x0D] = '=',
-    [0x0E] = '\b',    // Backspace
-    [0x0F] = '\t',    // Tab
-    [0x10] = 'q',     [0x11] = 'w',     [0x12] = 'e',
-    [0x13] = 'r',     [0x14] = 't',     [0x15] = 'y',
-    [0x16] = 'u',     [0x17] = 'i',     [0x18] = 'o',
-    [0x19] = 'p',     [0x1A] = '[',     [0x1B] = ']',
-    [0x1C] = '\n',    // Enter
-    [0x1E] = 'a',     [0x1F] = 's',     [0x20] = 'd',
-    [0x21] = 'f',     [0x22] = 'g',     [0x23] = 'h',
-    [0x24] = 'j',     [0x25] = 'k',     [0x26] = 'l',
-    [0x27] = ';',     [0x28] = '\'',    [0x29] = '`',
-    [0x2B] = '\\',
-    [0x2C] = 'z',     [0x2D] = 'x',     [0x2E] = 'c',
-    [0x2F] = 'v',     [0x30] = 'b',     [0x31] = 'n',
-    [0x32] = 'm',     [0x33] = ',',     [0x34] = '.',
-    [0x35] = '/',
-    [0x39] = ' ',     // Space
+// ── Child process tracking ──────────────────────────────────
+#define MAX_PROCS 16
+
+struct child {
+    int pid;
+    int action;
+    char command[128];
+    int restart_count;
 };
 
-static const char shifted_tbl[SCANCODE_MAX + 1] = {
-    [0x02] = '!',     [0x03] = '@',     [0x04] = '#',
-    [0x05] = '$',     [0x06] = '%',     [0x07] = '^',
-    [0x08] = '&',     [0x09] = '*',     [0x0A] = '(',
-    [0x0B] = ')',     [0x0C] = '_',     [0x0D] = '+',
-    [0x10] = 'Q',     [0x11] = 'W',     [0x12] = 'E',
-    [0x13] = 'R',     [0x14] = 'T',     [0x15] = 'Y',
-    [0x16] = 'U',     [0x17] = 'I',     [0x18] = 'O',
-    [0x19] = 'P',     [0x1A] = '{',     [0x1B] = '}',
-    [0x1E] = 'A',     [0x1F] = 'S',     [0x20] = 'D',
-    [0x21] = 'F',     [0x22] = 'G',     [0x23] = 'H',
-    [0x24] = 'J',     [0x25] = 'K',     [0x26] = 'L',
-    [0x27] = ':',     [0x28] = '"',     [0x29] = '~',
-    [0x2B] = '|',
-    [0x2C] = 'Z',     [0x2D] = 'X',     [0x2E] = 'C',
-    [0x2F] = 'V',     [0x30] = 'B',     [0x31] = 'N',
-    [0x32] = 'M',     [0x33] = '<',     [0x34] = '>',
-    [0x35] = '?',     [0x39] = ' ',
+static struct child children[MAX_PROCS];
+static int child_count = 0;
+
+// ── Inittab action entry ────────────────────────────────────
+#define MAX_ACTIONS 16
+
+struct init_action {
+    int action;
+    char tty[16];
+    char process[128];
 };
 
-// Modifier scancodes
-#define SC_LSHIFT   0x2A
-#define SC_RSHIFT   0x36
-#define SC_CTRL     0x1D
-#define SC_ALT      0x38
-#define SC_CAPSLOCK 0x3A
+static struct init_action actions[MAX_ACTIONS];
+static int action_count = 0;
+static int got_sigchild = 0;
 
-// ── Main ─────────────────────────────────────────────────
+// ── Signal handler (best-effort; even without delivery, ─────
+// ── waitpid WNOHANG polling handles child reaping)        ───
+static void sigchld_handler(int sig __attribute__((unused)))
+{
+    got_sigchild = 1;
+}
 
+// ── Find a tracked child by PID ─────────────────────────────
+static struct child *find_child(int pid)
+{
+    for (int i = 0; i < child_count; i++) {
+        if (children[i].pid == pid)
+            return &children[i];
+    }
+    return NULL;
+}
+
+// ── Remove a tracked child ──────────────────────────────────
+static void remove_child(int pid)
+{
+    for (int i = 0; i < child_count; i++) {
+        if (children[i].pid == pid) {
+            // Compact the array
+            if (i < child_count - 1)
+                children[i] = children[child_count - 1];
+            child_count--;
+            return;
+        }
+    }
+}
+
+// ── Track a new child ───────────────────────────────────────
+static struct child *add_child(int pid, int action, const char *command)
+{
+    if (child_count >= MAX_PROCS)
+        return NULL;
+    struct child *c = &children[child_count++];
+    c->pid = pid;
+    c->action = action;
+    c->restart_count = 0;
+    // Truncate command safely
+    size_t len = strlen(command);
+    if (len >= sizeof(c->command)) len = sizeof(c->command) - 1;
+    memcpy(c->command, command, len);
+    c->command[len] = '\0';
+    return c;
+}
+
+// ── Reap all exited children (non-blocking) ─────────────────
+// Returns number of children reaped.
+static int reap_children(void)
+{
+    int reaped = 0;
+    int status;
+    int64_t pid;
+
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        struct child *c = find_child((int)pid);
+        if (c) {
+            printf("init: pid %d (%s) exited, status=%d, restarts=%d\n",
+                   (int)pid, c->command, status, c->restart_count);
+        } else {
+            printf("init: untracked child pid %d exited, status=%d\n",
+                   (int)pid, status);
+        }
+        remove_child((int)pid);
+        reaped++;
+    }
+    got_sigchild = 0;
+    return reaped;
+}
+
+// ── Fork and exec a process ─────────────────────────────────
+// Returns child PID, or -1 on error.
+static int spawn(const char *command, const char *tty __attribute__((unused)))
+{
+    // Parse command into argv (simple: split on space)
+    char cmd_copy[128];
+    size_t clen = strlen(command);
+    if (clen >= sizeof(cmd_copy)) clen = sizeof(cmd_copy) - 1;
+    memcpy(cmd_copy, command, clen);
+    cmd_copy[clen] = '\0';
+
+    char *argv[16];
+    int argc = 0;
+    char *p = cmd_copy;
+    while (*p && argc < 15) {
+        // Skip spaces
+        while (*p == ' ') p++;
+        if (!*p) break;
+        argv[argc++] = p;
+        // Scan to next space
+        while (*p && *p != ' ') p++;
+        if (*p) {
+            *p = '\0';
+            p++;
+        }
+    }
+    argv[argc] = NULL;
+
+    if (argc == 0)
+        return -1;
+
+    int64_t pid = fork();
+    if (pid < 0) {
+        printf("init: fork failed for '%s'\n", command);
+        return -1;
+    }
+
+    if (pid == 0) {
+        // ── Child ──────────────────────────────────────────
+        // For now, exec directly without signal() call
+        const char *child_argv[] = { "/busybox.elf", "sh", NULL };
+        int64_t ret = exec("/busybox.elf", (char *const *)child_argv, NULL);
+
+        // exec() should not return — if it does, print error and exit
+        printf("init: exec '%s' failed, ret=%d\n", command, (int)ret);
+        exit(1);
+    }
+
+    // ── Parent ────────────────────────────────────────────
+    return (int)pid;
+}
+
+// ── Run actions of a given type ─────────────────────────────
+// For SYSINIT/WAIT: blocks until the spawned process exits.
+// For ONCE: spawns without blocking.
+// For RESPAWN/ASKFIRST: spawns if not already running.
+static void run_actions(int action_mask)
+{
+    for (int i = 0; i < action_count; i++) {
+        struct init_action *a = &actions[i];
+
+        if (!(a->action & action_mask))
+            continue;
+
+        if (a->action == ACT_RESPAWN || a->action == ACT_ASKFIRST) {
+            // Check if already running
+            int running = 0;
+            for (int j = 0; j < child_count; j++) {
+                if (children[j].action == a->action &&
+                    strcmp(children[j].command, a->process) == 0) {
+                    running = 1;
+                    break;
+                }
+            }
+            if (running)
+                continue;
+
+            // ASKFIRST: prompt before first spawn
+            if (a->action == ACT_ASKFIRST) {
+                printf("\ninit: press Enter to start '%s'", a->process);
+                char buf[2];
+                read(0, buf, 1);  // wait for any key
+            }
+
+            int pid = spawn(a->process, a->tty);
+            if (pid > 0) {
+                add_child(pid, a->action, a->process);
+                printf("init: started pid %d: '%s' (respawn)\n",
+                       pid, a->process);
+            }
+            continue;
+        }
+
+        // SYSINIT, WAIT, ONCE
+        int pid = spawn(a->process, a->tty);
+        if (pid <= 0)
+            continue;
+
+        if (a->action == ACT_SYSINIT || a->action == ACT_WAIT) {
+            // Block until this child exits
+            printf("init: waiting for '%s' (pid %d)...\n", a->process, pid);
+            int status;
+            waitpid(pid, &status, 0);
+            printf("init: '%s' done, status=%d\n", a->process, status);
+        }
+        // ONCE: fire-and-forget — the child is not tracked;
+        // it will be reaped as an untracked orphan.
+    }
+}
+
+// ── Shutdown sequence ───────────────────────────────────────
+static void do_shutdown(void)
+{
+    printf("init: shutting down...\n");
+
+    // 1. Run SHUTDOWN actions
+    run_actions(ACT_SHUTDOWN);
+
+    // 2. Send SIGTERM to all tracked children
+    for (int i = 0; i < child_count; i++) {
+        printf("init: sending SIGTERM to pid %d\n", children[i].pid);
+        kill(children[i].pid, SIGTERM);
+    }
+
+    // 3. Reap children (with timeout-like behaviour: reap a few times)
+    for (int attempt = 0; attempt < 10; attempt++) {
+        int reaped = reap_children();
+        if (child_count == 0) break;
+        if (reaped == 0) {
+            // nanosleep not available; just spin-wait a bit
+            for (volatile int z = 0; z < 10000000; z++) { }
+        }
+    }
+
+    // 4. Kill any survivors
+    for (int i = 0; i < child_count; i++) {
+        printf("init: SIGKILL to pid %d\n", children[i].pid);
+        kill(children[i].pid, SIGKILL);
+    }
+
+    // 5. Sync filesystems
+    sync();
+
+    // 6. Reboot
+    printf("init: rebooting...\n");
+    {
+        int pid = fork();
+        if (pid == 0) {
+            // Child: call reboot (avoids init process exit panic)
+            reboot(RB_AUTOBOOT);
+            // If reboot returns, exit
+            exit(0);
+        }
+        // Parent: wait briefly then exit
+        for (volatile int z = 0; z < 50000000; z++) { }
+        exit(0);
+    }
+}
+
+// ── Add a hardcoded fallback action ─────────────────────────
+static void add_action(int action, const char *tty, const char *process)
+{
+    if (action_count >= MAX_ACTIONS)
+        return;
+    struct init_action *a = &actions[action_count++];
+    a->action = action;
+    if (tty) {
+        size_t len = strlen(tty);
+        if (len >= sizeof(a->tty)) len = sizeof(a->tty) - 1;
+        memcpy(a->tty, tty, len);
+        a->tty[len] = '\0';
+    } else {
+        a->tty[0] = '\0';
+    }
+    size_t len = strlen(process);
+    if (len >= sizeof(a->process)) len = sizeof(a->process) - 1;
+    memcpy(a->process, process, len);
+    a->process[len] = '\0';
+}
+
+// ── Parse /etc/inittab ──────────────────────────────────────
+// Format: id:runlevel:action:process
+// Actions: sysinit, wait, once, respawn, askfirst, ctrlaltdel, shutdown, restart
+static void parse_inittab(void)
+{
+    // For OS01 MVP, /etc/inittab doesn't exist on the FAT32 filesystem
+    // because there's no writable persistent storage set up yet.
+    // We always use the hardcoded fallback (see setup_fallback_actions).
+    // This function is a placeholder for future use.
+    (void)0;
+}
+
+// ── Set up hardcoded fallback actions ───────────────────────
+static void setup_fallback_actions(void)
+{
+    printf("init: no /etc/inittab, using built-in defaults\n");
+
+    // SYSINIT: one-time initialization
+    // (could mount filesystems, set hostname, etc.)
+    // For OS01 MVP: /etc/rc doesn't exist, skip
+
+    // RESPAWN: the interactive shell
+    add_action(ACT_RESPAWN, "", "/busybox.elf sh");
+
+    // CTRLALTDEL: when init receives SIGINT, reboot
+    add_action(ACT_CTRLALTDEL, "", "");
+}
+
+// ── Main ────────────────────────────────────────────────────
 int main(void)
 {
-    int shift_pressed = 0;
-    int capslock = 0;
+    printf("\n");
+    printf("+--------------------------------+\n");
+    printf("|  OS01 Init v1.0 (PID 1)        |\n");
+    printf("+--------------------------------+\n");
+    printf("\n");
 
-    // fd 0 = /dev/keyboard (inherited from init task)
-    // fd 1 = /dev/fb        (inherited)
-    // fd 2 = /dev/serial     (inherited)
-    printf("Init: keyboard echo ready\n");
+    // 1. Verify we are PID 1
+    int my_pid = (int)syscall(SYS_getpid, 0, 0, 0);
+    printf("init: running as PID %d\n", my_pid);
 
+    // 2. Set up signal handling
+    // SIGCHLD: reap children
+    signal(SIGCHLD, sigchld_handler);
+    // SIGINT (Ctrl-C): trigger CTRLALTDEL → reboot
+    signal(SIGINT, SIG_IGN);
+    // SIGHUP: reload inittab (stub for now)
+    signal(SIGHUP, SIG_IGN);
+
+    // 3. Ensure stdin/stdout/stderr are open
+    // They should already be inherited from the kernel init thread.
+
+    // 4. Load inittab actions
+    parse_inittab();
+    if (action_count == 0)
+        setup_fallback_actions();
+
+    // 5. SYSINIT phase (blocking)
+    printf("init: phase SYSINIT\n");
+    run_actions(ACT_SYSINIT);
+
+    // 6. WAIT phase (blocking)
+    printf("init: phase WAIT\n");
+    run_actions(ACT_WAIT);
+
+    // 7. ONCE phase (fire-and-forget)
+    printf("init: phase ONCE\n");
+    run_actions(ACT_ONCE);
+
+    // 8. Main supervision loop
+    printf("init: entering supervision loop\n");
     while (1) {
-        uint8_t sc;
-        int64_t n = read(0, &sc, 1);   // fd 0 = stdin (/dev/keyboard)
-        if (n <= 0)
-            continue;
+        // Reap any exited children
+        reap_children();
 
-        uint8_t code  = sc & 0x7F;
-        int released   = (sc >> 7) & 1;
+        // Check if any RESPAWN/ASKFIRST actions need starting
+        run_actions(ACT_RESPAWN | ACT_ASKFIRST);
 
-        // ── Track modifier state ─────────────────────────
-        if (code == SC_CTRL || code == SC_ALT) {
-            // Not used for now, but tracking is trivial
-            continue;
-        }
-        if (code == SC_LSHIFT || code == SC_RSHIFT) {
-            shift_pressed = released ? 0 : 1;
-            continue;
-        }
-        if (code == SC_CAPSLOCK) {
-            if (!released)
-                capslock = !capslock;
-            continue;
-        }
-
-        // Ignore releases of non-modifier keys
-        if (released)
-            continue;
-
-        // ── Look up the character ────────────────────────
-        if (code > SCANCODE_MAX)
-            continue;
-
-        char ch;
-        int use_shift = shift_pressed ^ capslock;
-        ch = use_shift ? shifted_tbl[code] : ascii_tbl[code];
-
-        if (ch == 0)
-            continue;
-
-        // ── Handle special characters ────────────────────
-        if (ch == '\b') {
-            printf("\b \b");        // erase previous character
-        } else {
-            printf("%c", ch);
+        // Sleep briefly to avoid busy-waiting.
+        {
+            struct timespec req = { .tv_sec = 0, .tv_nsec = 100000000 };
+            nanosleep(&req, NULL);
         }
     }
 
