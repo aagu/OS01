@@ -138,7 +138,7 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
             uint64_t *pml3 = (uint64_t *)Phy_To_Virt(pml4e & PAGE_4K_MASK);
             uint64_t pml3e = pml3[l3];
             uint64_t *pml2 = (uint64_t *)Phy_To_Virt(pml3e & PAGE_4K_MASK);
-            phys = pml2[l2] & PAGE_2M_MASK;
+            phys = pml2[l2] & (PAGE_2M_MASK & ~PAGE_XD);
         }
 
         /* Copy segment data from file into the physical page */

@@ -20,6 +20,30 @@
 #define SYS_pipe    13
 #define SYS_chdir   14
 #define SYS_getcwd  15
+#define SYS_stat    16
+#define SYS_fstat   17
+#define SYS_lseek   18
+#define SYS_fcntl   19
+#define SYS_ioctl   20
+#define SYS_getdents64 21
+#define SYS_access  22
+#define SYS_unlink  23
+#define SYS_mkdir   24
+#define SYS_rmdir   25
+#define SYS_rename  26
+#define SYS_truncate 27
+#define SYS_ftruncate 28
+#define SYS_time        29
+#define SYS_gettimeofday 30
+#define SYS_nanosleep   31
+#define SYS_chmod       32
+#define SYS_fchmod      33
+#define SYS_times       34
+#define SYS_uname       35
+#define SYS_getppid     36
+#define SYS_umask       37
+#define SYS_kill        38
+#define SYS_signal      39
 
 // ── Generic syscall helper ─────────────────────────────────
 
@@ -35,9 +59,9 @@ static inline int64_t syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_
 
 // ── Convenience wrappers (inline for hot paths) ────────────
 
-static inline int64_t exec(const char *path)
+static inline int64_t exec(const char *path, char *const argv[], char *const envp[])
 {
-    return syscall(SYS_exec, (uint64_t)path, 0, 0);
+    return syscall(SYS_exec, (uint64_t)path, (uint64_t)argv, (uint64_t)envp);
 }
 
 static inline int64_t fork(void)

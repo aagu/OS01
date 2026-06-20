@@ -64,6 +64,17 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     irq_install();
     init_serial();
     serial_printk("serial port init succedd\n");
+    // Enable NX (No-eXecute) for user-space page table entries
+    uint32_t eax, edx;
+    asm volatile("rdmsr" : "=a"(eax), "=d"(edx) : "c"(0xC0000080));
+    if (!(eax & (1 << 11))) {
+        eax |= (1 << 11);  // NXE bit
+        asm volatile("wrmsr" :: "a"(eax), "d"(edx), "c"(0xC0000080));
+        serial_printk("EFER: NXE enabled\n");
+    } else {
+        serial_printk("EFER: NXE already set\n");
+    }
+
     serial_printk("PMMgr: 0x%p\n", &PMMngr);
     unsigned long cr3 = (unsigned long)get_cr3() & (~ 0xffffUL);
     serial_printk("cr3 address: %#08x\n", cr3);

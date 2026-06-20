@@ -43,7 +43,30 @@ static int zero_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buf
     return (int)size;
 }
 
-// /dev/serial — read/write the COM1 serial port
+// /dev/tty — controlling terminal, passthrough to serial
+static int tty_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
+{
+    (void)node; (void)offset;
+    if (!buffer || size == 0) return 0;
+    uint64_t total = 0;
+    while (total < size) {
+        ((char *)buffer)[total] = read_serial();
+        total++;
+        break;
+    }
+    return (int)total;
+}
+
+static int tty_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
+{
+    (void)node; (void)offset;
+    if (!buffer || size == 0) return 0;
+    for (uint64_t i = 0; i < size; i++)
+        write_serial(((char *)buffer)[i]);
+    return (int)size;
+}
+
+// ── /dev/serial — read/write the COM1 serial port ─────────
 static int serial_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 {
     (void)node; (void)offset;
@@ -150,6 +173,7 @@ void devfs_init(void)
     devfs_register_chrdev("null",   NULL, null_read,   null_write);
     devfs_register_chrdev("zero",   NULL, zero_read,   null_write);  // zero write = discard
     devfs_register_chrdev("serial", NULL, serial_read, serial_write);
+    devfs_register_chrdev("tty",    NULL, tty_read,    tty_write);
 }
 
 // ── Public API ──────────────────────────────────────────────

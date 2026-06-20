@@ -61,6 +61,11 @@ entry64:
 	movq	%rax,	%ss
 	movq	_stack_start(%rip),	%rsp		/* rsp address */
 
+	/* Enable SSE/SSE2 for user-space (x86-64 ABI requires this) */
+	movq	%cr4,	%rax
+	orq	$((1<<9)|(1<<10)),	%rax		/* OSFXSR | OSXMMEXCPT */
+	movq	%rax,	%cr4
+
 setup_IDT:							
 	leaq	ignore_int(%rip),	%rdx
 	movq	$(0x08 << 16),	%rax

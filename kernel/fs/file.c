@@ -9,7 +9,7 @@
 // ── Allocate a file_t ──────────────────────────────────────
 file_t *file_alloc(void)
 {
-    file_t *f = (file_t *)calloc(sizeof(file_t));
+    file_t *f = (file_t *)calloc(1, sizeof(file_t));
     if (!f) return NULL;
     f->refcount = 1;
     return f;
@@ -28,7 +28,7 @@ void file_free(file_t *f)
 // ── Allocate a pipe ─────────────────────────────────────────
 pipe_t *pipe_alloc(void)
 {
-    pipe_t *p = (pipe_t *)calloc(sizeof(pipe_t));
+    pipe_t *p = (pipe_t *)calloc(1, sizeof(pipe_t));
     if (!p) return NULL;
     p->readers = 1;
     p->writers = 1;
@@ -46,7 +46,7 @@ void pipe_free(pipe_t *p)
 // ── Allocate a files_struct ─────────────────────────────────
 files_t *files_alloc(void)
 {
-    files_t *fs = (files_t *)calloc(sizeof(files_t));
+    files_t *fs = (files_t *)calloc(1, sizeof(files_t));
     if (!fs) return NULL;
     // Default cwd is root
     fs->cwd[0] = '/';
@@ -77,7 +77,7 @@ files_t *files_dup(files_t *fs)
 {
     if (!fs) return NULL;
 
-    files_t *new_fs = (files_t *)calloc(sizeof(files_t));
+    files_t *new_fs = (files_t *)calloc(1, sizeof(files_t));
     if (!new_fs) return NULL;
 
     memcpy(new_fs->cwd, fs->cwd, sizeof(fs->cwd));

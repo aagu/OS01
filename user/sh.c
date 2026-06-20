@@ -292,7 +292,7 @@ void runcmd(struct cmd *cmd) {
         int64_t pid = fork();
         if (pid < 0) { printf("fork failed\n"); return; }
         if (pid == 0) {
-            exec(ecmd->argv[0]);
+            exec(ecmd->argv[0], ecmd->argv, NULL);
             printf("exec: %s: failed\n", ecmd->argv[0]);
             exit(1);
         }

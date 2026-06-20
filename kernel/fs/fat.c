@@ -4,6 +4,7 @@
 #include <kernel/printk.h>
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
 
 // ── Read a FAT entry ────────────────────────────────────
 // Returns the next cluster in the chain, or >= FAT32_EOC_MIN if end.
@@ -258,6 +259,40 @@ static uint32_t fat32_read_fat_entry(fat32_fs_t *fs, uint32_t cluster)
         return FAT32_EOC_MIN;
 
     return *(uint32_t *)(sector + entry_off) & FAT32_CLUSTER_MASK;
+}
+
+// ── Free a cluster chain ─────────────────────────────────────
+// Walks the cluster chain starting at `first_cluster` and marks
+// every cluster as free in the FAT.
+static int fat32_free_cluster_chain(fat32_fs_t *fs, uint32_t first_cluster)
+{
+    uint32_t cluster = first_cluster;
+    int safety = 0;
+
+    while (cluster >= 2 && cluster < FAT32_EOC_MIN && safety++ < 0x100000) {
+        uint32_t next = fat32_read_fat_entry(fs, cluster);
+        if (fat32_write_fat_entry(fs, cluster, FAT32_CLUSTER_FREE) != 0)
+            return -1;
+        if (next >= FAT32_EOC_MIN)
+            break;
+        cluster = next;
+    }
+    return 0;
+}
+
+// ── Zero-fill a cluster ──────────────────────────────────────
+// Writes zeroes to every sector in the cluster.
+static int fat32_zero_cluster(fat32_fs_t *fs, uint32_t cluster)
+{
+    uint8_t zero[512];
+    memset(zero, 0, 512);
+
+    uint64_t lba = fat32_cluster_to_sector(fs, cluster);
+    for (uint32_t s = 0; s < fs->sectors_per_cluster; s++) {
+        if (block_device_write(fs->dev, lba + s, 1, zero) != 0)
+            return -1;
+    }
+    return 0;
 }
 
 // ── Find a free cluster ───────────────────────────────────
@@ -686,6 +721,434 @@ static int fat_readdir(struct vfs_node *node, uint64_t index,
     return fat32_read_entry(fs, dir_cluster, index, entry);
 }
 
+// ── Unlink (delete) a regular file ─────────────────────────
+// Marks the directory entry as deleted (0xE5) and frees the cluster chain.
+// Returns 0 on success, -ENOENT if not found, -EISDIR if directory.
+int fat_unlink(vfs_node_t *dir, const char *name)
+{
+    if (!dir || !dir->mount || !name) return -EINVAL;
+    fat32_fs_t *fs = (fat32_fs_t *)dir->mount->fs_data;
+
+    uint32_t dir_cluster;
+    if (dir->fs_data)
+        dir_cluster = (uint32_t)(uintptr_t)dir->fs_data;
+    else
+        dir_cluster = fs->root_cluster;
+
+    // Find the entry
+    uint64_t lba;
+    uint32_t off;
+    int64_t idx = fat32_find_by_name(fs, dir_cluster, name, &lba, &off);
+    if (idx < 0) {
+        serial_printk("FAT: unlink '%s': not found\n", name);
+        return -ENOENT;
+    }
+
+    // Read the entry to get the first cluster
+    FAT32_DIRENT dirent;
+    if (fat32_read_entry_at(fs, lba, off, &dirent) != 0)
+        return -EIO;
+
+    // Refuse to unlink directories via this path (use rmdir)
+    if (dirent.attr & FAT_ATTR_DIRECTORY)
+        return -EISDIR;
+
+    // Free the cluster chain
+    uint32_t first_cl = (uint32_t)dirent.first_cluster_lo
+                      | ((uint32_t)dirent.first_cluster_hi << 16);
+    if (first_cl >= 2 && first_cl < FAT32_EOC_MIN) {
+        fat32_free_cluster_chain(fs, first_cl);
+    }
+
+    // Mark the entry as deleted
+    uint8_t sector[512];
+    if (block_device_read(fs->dev, lba, 1, sector) != 0)
+        return -EIO;
+    sector[off] = 0xE5;
+    if (block_device_write(fs->dev, lba, 1, sector) != 0)
+        return -EIO;
+
+    serial_printk("FAT: unlink '%s' ok\n", name);
+    return 0;
+}
+
+// ── Create a new directory ───────────────────────────────────
+// Allocates a cluster, creates "." and ".." entries, and adds
+// a directory entry to the parent.
+// Returns a new vfs_node or NULL on error.
+struct vfs_node *fat_mkdir(vfs_node_t *dir, const char *name)
+{
+    if (!dir || !dir->mount || !name) return NULL;
+    fat32_fs_t *fs = (fat32_fs_t *)dir->mount->fs_data;
+
+    uint32_t dir_cluster;
+    if (dir->fs_data)
+        dir_cluster = (uint32_t)(uintptr_t)dir->fs_data;
+    else
+        dir_cluster = fs->root_cluster;
+
+    // Check if name already exists
+    if (fat32_find_by_name(fs, dir_cluster, name, NULL, NULL) >= 0) {
+        serial_printk("FAT: mkdir '%s': already exists\n", name);
+        return NULL; // EEXIST
+    }
+
+    // Allocate a new cluster for the directory
+    uint32_t new_cl = fat32_alloc_cluster(fs, 0);
+    if (new_cl == 0) return NULL; // ENOSPC
+
+    // Zero the new cluster
+    if (fat32_zero_cluster(fs, new_cl) != 0) {
+        fat32_write_fat_entry(fs, new_cl, FAT32_CLUSTER_FREE);
+        return NULL;
+    }
+
+    // Build "." entry (points to self)
+    FAT32_DIRENT dot;
+    memset(&dot, 0, sizeof(dot));
+    memset(dot.name, ' ', 11);
+    dot.name[0] = '.';
+    dot.attr = FAT_ATTR_DIRECTORY;
+    dot.first_cluster_lo = (uint16_t)(new_cl & 0xFFFF);
+    dot.first_cluster_hi = (uint16_t)((new_cl >> 16) & 0xFFFF);
+
+    uint64_t new_lba = fat32_cluster_to_sector(fs, new_cl);
+    if (fat32_write_entry_at(fs, new_lba, 0, &dot) != 0) {
+        fat32_free_cluster_chain(fs, new_cl);
+        return NULL;
+    }
+
+    // Build ".." entry (points to parent)
+    FAT32_DIRENT dotdot;
+    memset(&dotdot, 0, sizeof(dotdot));
+    memset(dotdot.name, ' ', 11);
+    dotdot.name[0] = '.'; dotdot.name[1] = '.';
+    dotdot.attr = FAT_ATTR_DIRECTORY;
+    uint32_t parent_cl = dir->fs_data ? (uint32_t)(uintptr_t)dir->fs_data : fs->root_cluster;
+    dotdot.first_cluster_lo = (uint16_t)(parent_cl & 0xFFFF);
+    dotdot.first_cluster_hi = (uint16_t)((parent_cl >> 16) & 0xFFFF);
+
+    if (fat32_write_entry_at(fs, new_lba, 32, &dotdot) != 0) {
+        fat32_free_cluster_chain(fs, new_cl);
+        return NULL;
+    }
+
+    // Create the directory entry in the parent
+    if (fat32_create_entry(fs, dir_cluster, name, FAT_ATTR_DIRECTORY) == 0) {
+        fat32_free_cluster_chain(fs, new_cl);
+        return NULL;
+    }
+
+    // Find the newly created entry to set its first cluster
+    uint64_t ent_lba;
+    uint32_t ent_off;
+    int64_t ent_idx = fat32_find_by_name(fs, dir_cluster, name, &ent_lba, &ent_off);
+    if (ent_idx < 0) {
+        fat32_free_cluster_chain(fs, new_cl);
+        return NULL;
+    }
+
+    FAT32_DIRENT ent;
+    if (fat32_read_entry_at(fs, ent_lba, ent_off, &ent) != 0) {
+        fat32_free_cluster_chain(fs, new_cl);
+        return NULL;
+    }
+
+    ent.first_cluster_lo = (uint16_t)(new_cl & 0xFFFF);
+    ent.first_cluster_hi = (uint16_t)((new_cl >> 16) & 0xFFFF);
+    if (fat32_write_entry_at(fs, ent_lba, ent_off, &ent) != 0) {
+        fat32_free_cluster_chain(fs, new_cl);
+        return NULL;
+    }
+
+    // Allocate a vfs_node
+    vfs_node_t *node = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
+    if (!node) return NULL;
+
+    size_t nlen = strlen(name);
+    if (nlen >= VFS_NAME_MAX) nlen = VFS_NAME_MAX - 1;
+    memcpy(node->name, name, nlen);
+    node->name[nlen] = '\0';
+    node->type = VFS_DIR;
+    node->mount = dir->mount;
+    node->parent = dir;
+    node->ops = dir->ops;
+    node->fs_data = (void *)(uintptr_t)new_cl;
+    node->size = 0;
+    node->refcount = 1;
+
+    serial_printk("FAT: mkdir '%s' cl=%u ok\n", name, new_cl);
+    return node;
+}
+
+// ── Remove an empty directory ────────────────────────────────
+// Verifies the directory contains only "." and "..", then
+// marks it deleted and frees its cluster chain.
+int fat_rmdir(vfs_node_t *dir, const char *name)
+{
+    if (!dir || !dir->mount || !name) return -EINVAL;
+    fat32_fs_t *fs = (fat32_fs_t *)dir->mount->fs_data;
+
+    uint32_t dir_cluster;
+    if (dir->fs_data)
+        dir_cluster = (uint32_t)(uintptr_t)dir->fs_data;
+    else
+        dir_cluster = fs->root_cluster;
+
+    // Find the entry
+    uint64_t ent_lba;
+    uint32_t ent_off;
+    int64_t idx = fat32_find_by_name(fs, dir_cluster, name, &ent_lba, &ent_off);
+    if (idx < 0) {
+        serial_printk("FAT: rmdir '%s': not found\n", name);
+        return -ENOENT;
+    }
+
+    // Read the entry
+    FAT32_DIRENT ent;
+    if (fat32_read_entry_at(fs, ent_lba, ent_off, &ent) != 0)
+        return -EIO;
+
+    if (!(ent.attr & FAT_ATTR_DIRECTORY)) {
+        serial_printk("FAT: rmdir '%s': not a directory\n", name);
+        return -ENOTDIR;
+    }
+
+    uint32_t target_cl = (uint32_t)ent.first_cluster_lo
+                       | ((uint32_t)ent.first_cluster_hi << 16);
+
+    // Verify the directory is empty (only "." and "..")
+    if (target_cl >= 2 && target_cl < FAT32_EOC_MIN) {
+        vfs_dirent_t check_entry;
+        for (uint64_t i = 0; i < 512; i++) {
+            int ret = fat32_read_entry(fs, target_cl, i, &check_entry);
+            if (ret == 0 && check_entry.name[0] == '\0')
+                break; // end of directory
+            if (ret == 0) {
+                // Skip "." and ".."
+                if (strcmp(check_entry.name, ".") != 0 &&
+                    strcmp(check_entry.name, "..") != 0) {
+                    serial_printk("FAT: rmdir '%s': not empty (found '%s')\n",
+                                   name, check_entry.name);
+                    return -ENOTEMPTY;
+                }
+            }
+        }
+    }
+
+    // Mark the entry as deleted
+    uint8_t sector[512];
+    if (block_device_read(fs->dev, ent_lba, 1, sector) != 0)
+        return -EIO;
+    sector[ent_off] = 0xE5;
+    if (block_device_write(fs->dev, ent_lba, 1, sector) != 0)
+        return -EIO;
+
+    // Free the cluster chain
+    if (target_cl >= 2 && target_cl < FAT32_EOC_MIN) {
+        fat32_free_cluster_chain(fs, target_cl);
+    }
+
+    serial_printk("FAT: rmdir '%s' ok\n", name);
+    return 0;
+}
+
+// ── Rename a file or directory ───────────────────────────────
+// Returns 0 on success, -errno on error.
+int fat_rename(vfs_node_t *olddir, const char *oldname,
+               vfs_node_t *newdir, const char *newname)
+{
+    if (!olddir || !newdir || !oldname || !newname) return -EINVAL;
+    if (!olddir->mount || !newdir->mount) return -EINVAL;
+
+    fat32_fs_t *fs = (fat32_fs_t *)olddir->mount->fs_data;
+
+    // Verify both directories are on the same filesystem
+    if (olddir->mount != newdir->mount) return -EXDEV;
+
+    uint32_t src_dir_cl = olddir->fs_data
+        ? (uint32_t)(uintptr_t)olddir->fs_data : fs->root_cluster;
+    uint32_t dst_dir_cl = newdir->fs_data
+        ? (uint32_t)(uintptr_t)newdir->fs_data : fs->root_cluster;
+
+    // Find source entry
+    uint64_t src_lba;
+    uint32_t src_off;
+    int64_t src_idx = fat32_find_by_name(fs, src_dir_cl, oldname, &src_lba, &src_off);
+    if (src_idx < 0) {
+        serial_printk("FAT: rename '%s': source not found\n", oldname);
+        return -ENOENT;
+    }
+
+    // Read source entry
+    FAT32_DIRENT src_ent;
+    if (fat32_read_entry_at(fs, src_lba, src_off, &src_ent) != 0)
+        return -EIO;
+
+    // If target already exists, remove it first
+    int64_t dst_idx = fat32_find_by_name(fs, dst_dir_cl, newname, NULL, NULL);
+    if (dst_idx >= 0) {
+        // Target exists — must be same type
+        if (src_ent.attr & FAT_ATTR_DIRECTORY) {
+            // If it's a directory, it must be empty
+            // We'll call fat_rmdir conceptually, but for simplicity:
+            // Find the target entry and check/remove it
+            uint64_t dst_lba;
+            uint32_t dst_off;
+            fat32_find_by_name(fs, dst_dir_cl, newname, &dst_lba, &dst_off);
+            // Read and verify it's an empty dir
+            FAT32_DIRENT dst_ent;
+            if (fat32_read_entry_at(fs, dst_lba, dst_off, &dst_ent) == 0) {
+                uint32_t dst_cl = (uint32_t)dst_ent.first_cluster_lo
+                                | ((uint32_t)dst_ent.first_cluster_hi << 16);
+                if (dst_cl >= 2 && dst_cl < FAT32_EOC_MIN) {
+                    // Check empty
+                    vfs_dirent_t check_e;
+                    int empty = 1;
+                    for (uint64_t i = 0; i < 512; i++) {
+                        int r = fat32_read_entry(fs, dst_cl, i, &check_e);
+                        if (r == 0 && check_e.name[0] == '\0') break;
+                        if (r == 0 && strcmp(check_e.name, ".") != 0
+                            && strcmp(check_e.name, "..") != 0) {
+                            empty = 0;
+                            break;
+                        }
+                    }
+                    if (!empty) {
+                        serial_printk("FAT: rename: target dir '%s' not empty\n", newname);
+                        return -ENOTEMPTY;
+                    }
+                    fat32_free_cluster_chain(fs, dst_cl);
+                }
+            }
+        } else {
+            // Target is a file — remove its entry and free its clusters
+            uint64_t dst_lba;
+            uint32_t dst_off;
+            fat32_find_by_name(fs, dst_dir_cl, newname, &dst_lba, &dst_off);
+            FAT32_DIRENT dst_ent;
+            if (fat32_read_entry_at(fs, dst_lba, dst_off, &dst_ent) == 0) {
+                uint32_t dst_cl = (uint32_t)dst_ent.first_cluster_lo
+                                | ((uint32_t)dst_ent.first_cluster_hi << 16);
+                if (dst_cl >= 2 && dst_cl < FAT32_EOC_MIN)
+                    fat32_free_cluster_chain(fs, dst_cl);
+            }
+        }
+
+        // Mark target entry as deleted
+        uint8_t sector[512];
+        uint64_t dst_lba2;
+        uint32_t dst_off2;
+        if (fat32_find_by_name(fs, dst_dir_cl, newname, &dst_lba2, &dst_off2) >= 0) {
+            if (block_device_read(fs->dev, dst_lba2, 1, sector) == 0) {
+                sector[dst_off2] = 0xE5;
+                block_device_write(fs->dev, dst_lba2, 1, sector);
+            }
+        }
+    }
+
+    if (src_dir_cl == dst_dir_cl) {
+        // Same directory: just update the name in place
+        uint8_t new_83[11];
+        fat32_make_83_name(newname, new_83);
+        memcpy(src_ent.name, new_83, 11);
+        if (fat32_write_entry_at(fs, src_lba, src_off, &src_ent) != 0)
+            return -EIO;
+    } else {
+        // Cross-directory: copy entry to newdir, mark source as deleted
+        // Update the name in the source entry copy
+        uint8_t new_83[11];
+        fat32_make_83_name(newname, new_83);
+        memcpy(src_ent.name, new_83, 11);
+
+        // Find a free slot in the destination directory
+        int64_t free_idx = fat32_find_free_slot(fs, dst_dir_cl);
+        if (free_idx < 0) return -ENOSPC;
+
+        uint64_t dst_lba;
+        uint32_t dst_off;
+        if (fat32_locate_entry(fs, dst_dir_cl, (uint64_t)free_idx, &dst_lba, &dst_off) != 0)
+            return -EIO;
+
+        // Write the entry to the destination
+        if (fat32_write_entry_at(fs, dst_lba, dst_off, &src_ent) != 0)
+            return -EIO;
+
+        // Mark source entry as deleted
+        uint8_t sector[512];
+        if (block_device_read(fs->dev, src_lba, 1, sector) != 0)
+            return -EIO;
+        sector[src_off] = 0xE5;
+        if (block_device_write(fs->dev, src_lba, 1, sector) != 0)
+            return -EIO;
+    }
+
+    serial_printk("FAT: rename '%s' → '%s' ok\n", oldname, newname);
+    return 0;
+}
+
+// ── Truncate a file to a new size ────────────────────────────
+// If new_size is larger, does nothing (file grows on write).
+// If new_size is smaller, frees clusters beyond the new size
+// and updates the directory entry.
+int fat_truncate(vfs_node_t *node, uint64_t new_size)
+{
+    if (!node || !node->mount) return -EINVAL;
+    fat32_fs_t *fs = (fat32_fs_t *)node->mount->fs_data;
+
+    if (node->type != VFS_FILE) return -EISDIR;
+
+    if (new_size >= node->size) {
+        // Growing (or unchanged): no-op — clusters allocated on write
+        node->size = new_size;
+        fat32_update_entry(fs, node);
+        return 0;
+    }
+
+    uint32_t first_cluster = (uint32_t)(uintptr_t)node->fs_data;
+    if (first_cluster < 2) {
+        // No clusters allocated
+        node->size = new_size;
+        return 0;
+    }
+
+    if (new_size == 0) {
+        // Truncate to zero: free entire chain
+        fat32_free_cluster_chain(fs, first_cluster);
+        node->fs_data = NULL;
+        node->size = 0;
+    } else {
+        // Calculate how many clusters are needed
+        uint32_t cluster_size = fs->sectors_per_cluster * fs->bytes_per_sector;
+        uint64_t clusters_needed = (new_size + cluster_size - 1) / cluster_size;
+
+        // Walk the chain to find the last needed cluster
+        uint32_t cluster = first_cluster;
+        uint32_t prev = 0;
+        uint64_t count = 0;
+
+        while (cluster >= 2 && cluster < FAT32_EOC_MIN && count < clusters_needed) {
+            prev = cluster;
+            cluster = fat32_read_fat_entry(fs, cluster);
+            count++;
+        }
+
+        if (prev != 0 && count == clusters_needed) {
+            // Terminate the chain at `prev` and free the rest
+            uint32_t rest = fat32_read_fat_entry(fs, prev);
+            if (fat32_write_fat_entry(fs, prev, FAT32_EOC_MIN) != 0)
+                return -EIO;
+            if (rest >= 2 && rest < FAT32_EOC_MIN)
+                fat32_free_cluster_chain(fs, rest);
+        }
+    }
+
+    node->size = new_size;
+    fat32_update_entry(fs, node);
+    serial_printk("FAT: truncate to %lu bytes ok\n", (unsigned long)new_size);
+    return 0;
+}
+
 // ── Create a new regular file ─────────────────────────────
 // Returns a vfs_node_t* or NULL on error.
 struct vfs_node *fat_create(vfs_node_t *dir, const char *name)
@@ -704,7 +1167,7 @@ struct vfs_node *fat_create(vfs_node_t *dir, const char *name)
         return NULL;
 
     // Allocate a vfs_node for the caller (no data cluster yet)
-    vfs_node_t *node = (vfs_node_t *)calloc(sizeof(vfs_node_t));
+    vfs_node_t *node = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
     if (!node) return NULL;
 
     size_t nlen = strlen(name);
@@ -723,10 +1186,15 @@ struct vfs_node *fat_create(vfs_node_t *dir, const char *name)
 }
 
 struct vfs_ops fat_vfs_ops = {
-    .read    = fat_read,
-    .write   = fat_write,
-    .readdir = fat_readdir,
-    .create  = fat_create,
+    .read     = fat_read,
+    .write    = fat_write,
+    .readdir  = fat_readdir,
+    .create   = fat_create,
+    .unlink   = fat_unlink,
+    .mkdir    = fat_mkdir,
+    .rmdir    = fat_rmdir,
+    .rename   = fat_rename,
+    .truncate = fat_truncate,
 };
 
 // ── Mount a FAT32 volume ─────────────────────────────────
@@ -767,7 +1235,7 @@ fat32_fs_t *fat32_mount(block_device_t *dev)
     }
 
     // Allocate private data
-    fat32_fs_t *fs = (fat32_fs_t *)calloc(sizeof(fat32_fs_t));
+    fat32_fs_t *fs = (fat32_fs_t *)calloc(1, sizeof(fat32_fs_t));
     if (!fs) return NULL;
 
     memcpy(&fs->bpb, bpb, sizeof(FAT32_BPB));

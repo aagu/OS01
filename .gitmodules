@@ -1,3 +1,6 @@
 [submodule "thirdpart/posix-uefi"]
 	path = thirdpart/posix-uefi
 	url = https://gitlab.com/bztsrc/posix-uefi.git
+[submodule "thirdpart/busybox-1.36.1"]
+	path = thirdpart/busybox-1.36.1
+	url = https://github.com/mirror/busybox

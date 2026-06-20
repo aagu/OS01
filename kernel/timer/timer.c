@@ -18,7 +18,7 @@ void init_timer(timer_t * timer, void (* func)(void * data), void * data, uint64
 
 timer_t * create_timer(void (* func)(void * data), void * data, uint64_t expire_jiffies)
 {
-    timer_t * timer = (timer_t *)calloc(sizeof(timer_t));
+    timer_t * timer = (timer_t *)calloc(1, sizeof(timer_t));
     init_timer(timer, func, data, expire_jiffies);
     return timer;
 }

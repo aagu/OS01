@@ -46,6 +46,7 @@ extern void idle_resume(void);
 #define PF_KTHREAD (1 << 0)
 #define PF_PROCESS (1 << 1)
 #define PF_THREAD (1 << 2)
+#define PF_LINUX_ABI (1 << 3)
 
 // waitpid options
 #define WNOHANG 1
@@ -226,14 +227,18 @@ inline task_t* __attribute__((always_inline)) get_current_task()
 
 uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags, uint64_t stack_start, uint64_t stack_size);
 void task_init();
-int64_t spawn_user_task(const char *path);
-int64_t sys_exec(const char *path, pt_regs_t *regs);
+int64_t spawn_user_task(const char *path, const char *const *argv);
+int64_t sys_exec(const char *path, pt_regs_t *regs,
+                 const char *const *argv, const char *const *envp);
 void schedule(void);
 uint64_t do_exit(uint64_t exit_code);
 int64_t do_waitpid(int64_t pid, int *user_status, int options);
 
-/* User stack layout (separate 2MB page from code at 0x400000) */
-#define USER_STACK_BASE 0x600000UL
+/* User stack layout (separate 2MB page at 0x800000).
+ * The 2MB page at 0x600000 is left unmapped as a stack guard —
+ * overflow past the stack bottom triggers #PF instead of silent
+ * corruption of code/data below. */
+#define USER_STACK_BASE 0x800000UL
 #define USER_STACK_TOP  (USER_STACK_BASE + 0x200000UL - 8)
 
 #endif

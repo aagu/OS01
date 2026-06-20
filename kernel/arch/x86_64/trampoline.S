@@ -57,7 +57,7 @@ trampoline_protected:
     // Enable Long Mode
     movl    $0xC0000080, %ecx
     rdmsr
-    orl     $(1 << 8), %eax                // LME
+    orl     $((1 << 8) | (1 << 11)), %eax  // LME | NXE
     wrmsr
 
     // Enable paging

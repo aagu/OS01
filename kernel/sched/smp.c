@@ -144,7 +144,7 @@ static task_t *create_idle_task(uint32_t cpu_num)
     tsk->cpu      = cpu_num;
     tsk->addr_limit = 0xffff800000000000UL;
 
-    thread_t *thd = (thread_t *)calloc(sizeof(thread_t));
+    thread_t *thd = (thread_t *)calloc(1, sizeof(thread_t));
     if (!thd) { kfree(raw); return NULL; }
     tsk->thread = thd;
     list_init(&tsk->list);

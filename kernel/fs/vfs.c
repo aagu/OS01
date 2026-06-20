@@ -2,6 +2,7 @@
 #include <kernel/printk.h>
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
 
 // ── Mount table ───────────────────────────────────────────
 static vfs_mount_t mount_table[VFS_MOUNTPOINT_MAX];
@@ -50,7 +51,7 @@ int vfs_mount(const char *path, block_device_t *dev,
     mp->root = NULL;
 
     // Allocate a root node — the filesystem fills it via ops
-    mp->root = (vfs_node_t *)calloc(sizeof(vfs_node_t));
+    mp->root = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
     if (!mp->root) {
         serial_printk("VFS: mount: out of memory\n");
         return -1;
@@ -183,7 +184,7 @@ static vfs_node_t *__vfs_lookup(const char *path)
             return NULL;
         }
 
-        vfs_node_t *child = (vfs_node_t *)calloc(sizeof(vfs_node_t));
+        vfs_node_t *child = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
         if (!child) {
             current->refcount--;
             return NULL;
@@ -284,7 +285,91 @@ void vfs_node_put(vfs_node_t *node)
     }
 }
 
-// ── Debug: list directory via serial ──────────────────────
+// ── Stat ───────────────────────────────────────────────────
+// Fills a struct stat from a VFS node.  Used by SYS_stat and SYS_fstat.
+int vfs_stat(vfs_node_t *node, struct stat *buf)
+{
+    if (!node || !buf) return -1;
+
+    memset(buf, 0, sizeof(struct stat));
+
+    // st_ino: use fs_data (cluster number) as inode number
+    buf->st_ino = (uint64_t)(uintptr_t)node->fs_data;
+
+    // st_size: file size in bytes
+    buf->st_size = (int64_t)node->size;
+
+    // st_mode: file type + default permissions
+    switch (node->type) {
+    case VFS_FILE:  buf->st_mode = S_IFREG | 0755; break;
+    case VFS_DIR:   buf->st_mode = S_IFDIR | 0755; break;
+    case VFS_CHRDEV: buf->st_mode = S_IFCHR | 0600; break;
+    case VFS_BLKDEV: buf->st_mode = S_IFBLK | 0600; break;
+    default:        buf->st_mode = 0; break;
+    }
+
+    // Default ownership
+    buf->st_uid = 0;
+    buf->st_gid = 0;
+    buf->st_nlink = 1;
+
+    // Block size and count
+    buf->st_blksize = 512;
+    buf->st_blocks = (node->size + 511) / 512;
+
+    return 0;
+}
+
+// ── getdents64 ─────────────────────────────────────────────
+// Packs directory entries into linux_dirent64 format.
+// *pos tracks the current readdir index across calls.
+// Returns bytes written to buf, 0 at end of directory, -1 on error.
+int vfs_getdents(vfs_node_t *dir, struct linux_dirent64 *buf, unsigned int count,
+                 uint64_t *pos)
+{
+    if (!dir || !buf || !pos || dir->type != VFS_DIR)
+        return -1;
+
+    unsigned int bytes_written = 0;
+    vfs_dirent_t entry;
+
+    while (1) {
+        int ret = vfs_readdir(dir, *pos, &entry);
+        if (ret != 0 || entry.name[0] == '\0') {
+            break;
+        }
+
+        size_t name_len = strlen(entry.name);
+        // Calculate record length: struct + name + null terminator, aligned to 8
+        uint16_t reclen = (uint16_t)(sizeof(struct linux_dirent64) + name_len + 1);
+        reclen = (reclen + 7) & ~7;  // 8-byte align
+
+        if (bytes_written + reclen > count) {
+            break;
+        }
+
+        struct linux_dirent64 *d = (struct linux_dirent64 *)((char *)buf + bytes_written);
+        d->d_ino = (uint64_t)entry.ino;
+        d->d_off = (int64_t)(*pos + 1);
+        d->d_reclen = reclen;
+
+        switch (entry.type) {
+        case VFS_FILE:  d->d_type = DT_REG; break;
+        case VFS_DIR:   d->d_type = DT_DIR; break;
+        case VFS_CHRDEV: d->d_type = DT_CHR; break;
+        case VFS_BLKDEV: d->d_type = DT_BLK; break;
+        default:        d->d_type = DT_UNKNOWN; break;
+        }
+
+        memcpy(d->d_name, entry.name, name_len + 1);
+
+        bytes_written += reclen;
+        (*pos)++;
+    }
+
+    return (int)bytes_written;
+}
+
 void vfs_debug_list(const char *path)
 {
     vfs_node_t *dir = vfs_lookup(path);
@@ -318,4 +403,158 @@ void vfs_debug_list(const char *path)
         idx++;
     }
     vfs_node_put(dir);
+}
+
+// ── Split a path into parent directory path and base name ──
+// Given "/foo/bar/baz", sets parent to "/foo/bar" and returns "baz".
+// Given "/file", sets parent to "/" and returns "file".
+// Given "file" (no slash), uses cwd as parent and returns "file".
+// Returns pointer into a static buffer (parent_path), or NULL on error.
+static const char *vfs_split_parent(const char *path, const char *cwd,
+                                    char parent_path[VFS_NAME_MAX])
+{
+    if (!path || !parent_path) return NULL;
+
+    size_t plen = strlen(path);
+    if (plen >= VFS_NAME_MAX) return NULL;
+
+    // Find the last '/'
+    const char *last_slash = NULL;
+    for (const char *s = path; *s; s++)
+        if (*s == '/') last_slash = s;
+
+    if (last_slash && last_slash != path) {
+        // e.g., "/dir/file" — parent is "/dir", name is "file"
+        size_t parent_len = (size_t)(last_slash - path);
+        memcpy(parent_path, path, parent_len);
+        parent_path[parent_len] = '\0';
+        return last_slash + 1;
+    } else if (last_slash == path && plen > 1) {
+        // e.g., "/file" — parent is "/", name is "file"
+        parent_path[0] = '/';
+        parent_path[1] = '\0';
+        return path + 1;
+    } else {
+        // No slash — relative path, parent is cwd
+        if (!cwd) return NULL;
+        size_t cwd_len = strlen(cwd);
+        if (cwd_len >= VFS_NAME_MAX) return NULL;
+        memcpy(parent_path, cwd, cwd_len + 1);
+        return path;
+    }
+}
+
+// ── Unlink a file ─────────────────────────────────────────────
+int vfs_unlink(const char *path, const char *cwd)
+{
+    if (!path) return -EINVAL;
+
+    char parent_path[VFS_NAME_MAX];
+    const char *name = vfs_split_parent(path, cwd, parent_path);
+    if (!name || *name == '\0') return -EINVAL;
+
+    vfs_node_t *parent = vfs_lookup_from(parent_path, cwd);
+    if (!parent) return -ENOENT;
+    if (parent->type != VFS_DIR) { vfs_node_put(parent); return -ENOTDIR; }
+    if (!parent->ops || !parent->ops->unlink) {
+        vfs_node_put(parent);
+        return -EROFS;
+    }
+
+    int ret = parent->ops->unlink(parent, name);
+    vfs_node_put(parent);
+    return ret;
+}
+
+// ── Create a directory ───────────────────────────────────────
+int vfs_mkdir(const char *path, const char *cwd)
+{
+    if (!path) return -EINVAL;
+
+    char parent_path[VFS_NAME_MAX];
+    const char *name = vfs_split_parent(path, cwd, parent_path);
+    if (!name || *name == '\0') return -EINVAL;
+
+    vfs_node_t *parent = vfs_lookup_from(parent_path, cwd);
+    if (!parent) return -ENOENT;
+    if (parent->type != VFS_DIR) { vfs_node_put(parent); return -ENOTDIR; }
+    if (!parent->ops || !parent->ops->mkdir) {
+        vfs_node_put(parent);
+        return -EROFS;
+    }
+
+    vfs_node_t *newdir = parent->ops->mkdir(parent, name);
+    if (!newdir) { vfs_node_put(parent); return -EEXIST; }
+
+    // The directory was created on disk; we don't need the node ref
+    vfs_node_put(newdir);
+    vfs_node_put(parent);
+    return 0;
+}
+
+// ── Remove an empty directory ─────────────────────────────────
+int vfs_rmdir(const char *path, const char *cwd)
+{
+    if (!path) return -EINVAL;
+
+    char parent_path[VFS_NAME_MAX];
+    const char *name = vfs_split_parent(path, cwd, parent_path);
+    if (!name || *name == '\0') return -EINVAL;
+
+    vfs_node_t *parent = vfs_lookup_from(parent_path, cwd);
+    if (!parent) return -ENOENT;
+    if (parent->type != VFS_DIR) { vfs_node_put(parent); return -ENOTDIR; }
+    if (!parent->ops || !parent->ops->rmdir) {
+        vfs_node_put(parent);
+        return -EROFS;
+    }
+
+    int ret = parent->ops->rmdir(parent, name);
+    vfs_node_put(parent);
+    return ret;
+}
+
+// ── Rename a file/directory ───────────────────────────────────
+int vfs_rename(const char *oldpath, const char *newpath, const char *cwd)
+{
+    if (!oldpath || !newpath) return -EINVAL;
+
+    char old_parent[VFS_NAME_MAX], new_parent[VFS_NAME_MAX];
+    const char *oldname = vfs_split_parent(oldpath, cwd, old_parent);
+    const char *newname = vfs_split_parent(newpath, cwd, new_parent);
+    if (!oldname || *oldname == '\0' || !newname || *newname == '\0')
+        return -EINVAL;
+
+    vfs_node_t *olddir = vfs_lookup_from(old_parent, cwd);
+    if (!olddir) return -ENOENT;
+    if (olddir->type != VFS_DIR) { vfs_node_put(olddir); return -ENOTDIR; }
+
+    vfs_node_t *newdir = vfs_lookup_from(new_parent, cwd);
+    if (!newdir) { vfs_node_put(olddir); return -ENOENT; }
+    if (newdir->type != VFS_DIR) {
+        vfs_node_put(olddir);
+        vfs_node_put(newdir);
+        return -ENOTDIR;
+    }
+
+    if (!olddir->ops || !olddir->ops->rename) {
+        vfs_node_put(olddir);
+        vfs_node_put(newdir);
+        return -EROFS;
+    }
+
+    int ret = olddir->ops->rename(olddir, oldname, newdir, newname);
+    vfs_node_put(olddir);
+    vfs_node_put(newdir);
+    return ret;
+}
+
+// ── Truncate a file ──────────────────────────────────────────
+int vfs_truncate(vfs_node_t *node, uint64_t new_size)
+{
+    if (!node) return -EINVAL;
+    if (node->type != VFS_FILE) return -EISDIR;
+    if (!node->ops || !node->ops->truncate) return -EROFS;
+
+    return node->ops->truncate(node, new_size);
 }

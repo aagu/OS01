@@ -300,7 +300,7 @@ size_t slab_init()
     for(i = 0; i < 8; i++)
 	{
 		uint64_t page_addr = slab_page_start + page_offset;
-		virtual = (unsigned long *)page_addr;
+		virtual = (uint64_t *)page_addr;
 		page_offset += PAGE_2M_SIZE;
 		page = Virt_To_2M_Page(virtual);
 

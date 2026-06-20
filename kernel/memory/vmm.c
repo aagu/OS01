@@ -16,7 +16,7 @@ mmap get_next_level(uint64_t *current_level, size_t entry, uint64_t flags)
 {
     if (!(current_level[entry] & 1))
     {
-        current_level[entry] = Virt_To_Phy((uint64_t)calloc(PAGE_4K_SIZE));
+        current_level[entry] = Virt_To_Phy((uint64_t)calloc(1, PAGE_4K_SIZE));
         current_level[entry] |= flags;
     }
     return (uint64_t *) (current_level[entry] & PAGE_4K_MASK);
@@ -64,7 +64,7 @@ uintptr_t vmm_unmap_page(uint64_t *pagemap, uintptr_t virtual_address)
         return 0;
     pml2 = (uint64_t *)Phy_To_Virt(pml3[level3] & PAGE_4K_MASK);
 
-    uintptr_t phys = pml2[level2] & PAGE_2M_MASK;
+    uintptr_t phys = pml2[level2] & (PAGE_2M_MASK & ~PAGE_XD);
     pml2[level2] = 0;
     return phys;
 }
@@ -129,7 +129,7 @@ void vmm_init()
 }
 
 mmap vmm_alloc_map() {
-    return (mmap)calloc(PAGE_4K_SIZE);
+    return (mmap)calloc(1, PAGE_4K_SIZE);
 }
 
 void vmm_free_user_map(mmap pagemap)
@@ -162,7 +162,7 @@ void vmm_free_user_map(mmap pagemap)
 
                 // Only 2MB pages (PAGE_PS set) are supported
                 if (pml2e & PAGE_PS) {
-                    uintptr_t phys = pml2e & PAGE_2M_MASK;
+                    uintptr_t phys = pml2e & (PAGE_2M_MASK & ~PAGE_XD);
                     struct Page *page = Phy_to_2M_Page(phys);
                     page_clean(page);
                     free_pages(page, 1);

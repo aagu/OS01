@@ -118,4 +118,20 @@ extern struct vfs_ops fat_vfs_ops;
 // Create a new regular file in a directory
 struct vfs_node *fat_create(struct vfs_node *dir, const char *name);
 
+// Delete a file from a directory (unlink)
+int fat_unlink(struct vfs_node *dir, const char *name);
+
+// Create a new directory
+struct vfs_node *fat_mkdir(struct vfs_node *dir, const char *name);
+
+// Remove an empty directory
+int fat_rmdir(struct vfs_node *dir, const char *name);
+
+// Rename a file/directory
+int fat_rename(struct vfs_node *olddir, const char *oldname,
+               struct vfs_node *newdir, const char *newname);
+
+// Truncate a file
+int fat_truncate(struct vfs_node *node, uint64_t new_size);
+
 #endif // _FS_FAT_H

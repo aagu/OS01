@@ -2,7 +2,7 @@
 #include <errno.h>
 #include <sys/syscall.h>
 
-int open(const char *path, int flags)
+int open(const char *path, int flags, ...)
 {
 #if defined(__is_libk)
     (void)path; (void)flags;

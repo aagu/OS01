@@ -353,7 +353,7 @@ __asm__(
 // ── spawn_user_task(path) ──────────────────────────────────
 // Loads an ELF from the filesystem, creates a new user task,
 // and adds it to the scheduler. Returns the new task's PID or -1 on error.
-int64_t spawn_user_task(const char *path)
+int64_t spawn_user_task(const char *path, const char *const *argv)
 {
     // 1. Open the ELF file via VFS
     vfs_node_t *node = vfs_lookup(path);
@@ -377,8 +377,8 @@ int64_t spawn_user_task(const char *path)
     // 3. Allocate task structures (pattern mirrors old user_task_create)
     void *raw_alloc = malloc(sizeof(union task_union) + STACK_SIZE);
     task_t *tsk = (task_t *)(((uint64_t)raw_alloc + STACK_SIZE - 1) & ~(STACK_SIZE - 1));
-    thread_t *thd = (thread_t *)calloc(sizeof(thread_t));
-    mm_t *mm = (mm_t *)calloc(sizeof(mm_t));
+    thread_t *thd = (thread_t *)calloc(1, sizeof(thread_t));
+    mm_t *mm = (mm_t *)calloc(1, sizeof(mm_t));
     if (!raw_alloc || !thd || !mm) {
         if (raw_alloc) kfree(raw_alloc);
         if (thd) kfree(thd);
@@ -424,10 +424,6 @@ int64_t spawn_user_task(const char *path)
     tsk->mm = mm;
     thd->cr3 = (uint64_t)mm->pml4;
 
-    // Heap starts just after code within the 2MB page at 0x400000
-    mm->start_brk = USER_CODE_ADDR + 0x1000;
-    mm->end_brk   = mm->start_brk;
-
     // 5. Load ELF segments into the new address space
     uint64_t entry_point;
     if (elf_load(node, mm, &entry_point) != 0) {
@@ -441,6 +437,10 @@ int64_t spawn_user_task(const char *path)
     }
     vfs_node_put(node);
 
+    // Set heap just after the loaded ELF segments
+    mm->start_brk = PAGE_4K_ALIGN(mm->end_code);
+    mm->end_brk   = mm->start_brk;
+
     // 6. Map the user stack page (separate 2MB page at 0x600000)
     struct Page *stack_page = alloc_pages(ZONE_NORMAL, 1, 0);
     if (!stack_page) {
@@ -449,8 +449,56 @@ int64_t spawn_user_task(const char *path)
         return -1;
     }
     vmm_map_page(user_pml4, stack_page->phy_address,
-                 USER_STACK_BASE, PAGE_USER_Page);
+                 USER_STACK_BASE, PAGE_USER_Page | PAGE_XD);
     mm->start_stack = USER_STACK_BASE;
+
+    // ââ 6.5 Set up argv on user stack âââââââââââââââ
+    int s_argc = 0;
+    uint64_t user_rsp = USER_STACK_TOP;
+    uint64_t user_arg_ptr = 0;
+
+    if (argv != NULL) {
+        while (argv[s_argc] != NULL) s_argc++;
+        char *kstack = (char *)Phy_To_Virt(stack_page->phy_address);
+#define KSTACK(va) (kstack + ((va) - USER_STACK_BASE))
+        uint64_t str_offset[128];
+        for (int i = 0; i < s_argc; i++) {
+            size_t len = strlen(argv[i]) + 1;
+            user_rsp -= len;
+            memcpy(KSTACK(user_rsp), argv[i], len);
+            str_offset[i] = user_rsp;
+        }
+        user_rsp &= ~15ULL;
+
+        // ── Calculate aligned metadata size ───────────────────
+        // Layout from bottom (RSP) up: argc | argv[]+NULL |
+        // envp_NULL | auxv AT_NULL.  Total must be 16-byte
+        // aligned so RSP (pointing to argc) & 0xF == 0.
+        // Without padding, total = 24 + (s_argc+1)*8 bytes.
+        // When s_argc is even, we need 8 extra bytes.
+        int meta_pad = (s_argc & 1) ? 0 : 8;
+
+        // ── auxv: AT_NULL terminator ──────────────────────────
+        user_rsp -= 16;
+        *(uint64_t *)KSTACK(user_rsp) = 0;      // AT_NULL type
+        *(uint64_t *)KSTACK(user_rsp + 8) = 0;  // value
+
+        // ── envp end NULL + optional alignment padding ────────
+        user_rsp -= 8 + meta_pad;
+        *(uint64_t *)KSTACK(user_rsp) = 0;      // NULL (end of envp)
+
+        // ── argv[] array (NULL-terminated) ────────────────────
+        user_rsp -= (s_argc + 1) * 8;
+        user_arg_ptr = user_rsp;
+        for (int i = 0; i < s_argc; i++)
+            *(uint64_t *)KSTACK(user_rsp + i * 8) = str_offset[i];
+        *(uint64_t *)KSTACK(user_rsp + s_argc * 8) = 0;  // NULL terminator
+
+        // ── argc ──────────────────────────────────────────────
+        user_rsp -= 8;
+        *(uint64_t *)KSTACK(user_rsp) = (uint64_t)s_argc;
+#undef KSTACK
+    }
 
     // 7. Set up pt_regs for iretq to ring 3
     pt_regs_t *regs = (pt_regs_t *)((uint64_t)tsk + STACK_SIZE - sizeof(pt_regs_t));
@@ -459,9 +507,12 @@ int64_t spawn_user_task(const char *path)
     regs->ss      = USER_DS;
     regs->ds      = USER_DS;
     regs->es      = USER_DS;
-    regs->rsp     = USER_STACK_TOP;
+    regs->rsp     = (argv != NULL) ? user_rsp : USER_STACK_TOP;
     regs->rip     = entry_point;
     regs->rflags  = (1 << 9);              // IF=1
+    regs->rdi     = (uint64_t)s_argc;
+    regs->rsi     = user_arg_ptr;
+    regs->rdx     = 0;                     // envp = NULL
 
     // 8. Thread context for switch_to / __switch_to
     thd->rsp0 = (uint64_t)tsk + STACK_SIZE;
@@ -478,12 +529,19 @@ int64_t spawn_user_task(const char *path)
     return tsk->pid;
 }
 
-// ── sys_exec(path, regs) ───────────────────────────────────
+// ── sys_exec(path, regs, argv, envp) ────────────────────────
 // Replaces the current process image with a new ELF loaded from
 // the filesystem. Called from do_system_call (SYS_exec).
 // regs is the pt_regs frame on the kernel stack that will be
 // restored by RESTORE_ALL → iretq.
-int64_t sys_exec(const char *path, pt_regs_t *regs)
+//
+// If argv == NULL: old behavior (no args, rsp=USER_STACK_TOP,
+// argc=0, argv=NULL, envp=NULL).
+// If argv != NULL: copies argv/envp strings onto the user stack
+// and sets up the standard ABI stack layout so the child's
+// _start receives argc in %rdi, argv in %rsi, envp in %rdx.
+int64_t sys_exec(const char *path, pt_regs_t *regs,
+                 const char *const *argv, const char *const *envp)
 {
     // 1. Look up the ELF file (support relative paths)
     const char *cwd = current->files ? current->files->cwd : "/";
@@ -511,16 +569,13 @@ int64_t sys_exec(const char *path, pt_regs_t *regs)
     memcpy(&new_pml4[256], &kernel_pml4[256], 256 * sizeof(uint64_t));
 
     // 4. Create new mm_struct
-    mm_t *new_mm = (mm_t *)calloc(sizeof(mm_t));
+    mm_t *new_mm = (mm_t *)calloc(1, sizeof(mm_t));
     if (!new_mm) {
         kfree(new_pml4);
         vfs_node_put(node);
         return -ENOMEM;
     }
     new_mm->pml4 = (uint64_t *)Virt_To_Phy((uint64_t)new_pml4);
-    new_mm->start_brk = USER_CODE_ADDR + 0x1000;
-    new_mm->end_brk   = new_mm->start_brk;
-
     // 5. Load ELF segments into the new address space
     uint64_t entry_point;
     if (elf_load(node, new_mm, &entry_point) != 0) {
@@ -531,6 +586,10 @@ int64_t sys_exec(const char *path, pt_regs_t *regs)
     }
     vfs_node_put(node);
 
+    // Set heap just after the loaded ELF segments
+    new_mm->start_brk = PAGE_4K_ALIGN(new_mm->end_code);
+    new_mm->end_brk   = new_mm->start_brk;
+
     // 6. Map the user stack page
     struct Page *stack_page = alloc_pages(ZONE_NORMAL, 1, 0);
     if (!stack_page) {
@@ -539,13 +598,91 @@ int64_t sys_exec(const char *path, pt_regs_t *regs)
         return -ENOMEM;
     }
     vmm_map_page(new_pml4, stack_page->phy_address,
-                 USER_STACK_BASE, PAGE_USER_Page);
+                 USER_STACK_BASE, PAGE_USER_Page | PAGE_XD);
     new_mm->start_stack = USER_STACK_BASE;
 
-    // 7. Free the OLD user address space (but keep current's mm + PML4
-    //    alive for this function's remaining execution — we switch CR3
-    //    after freeing so all kernel code/data stays mapped via the
-    //    shared high-half kernel entries 256—511).
+    // ── 6.5 Set up argv/envp on user stack ──────────────────
+    int s_argc = 0;
+    int s_envc = 0;
+    uint64_t user_rsp = USER_STACK_TOP;
+    uint64_t user_arg_ptr = 0;   // rsi value
+    uint64_t user_env_ptr = 0;   // rdx value
+
+    if (argv != NULL) {
+        // Count argv
+        while (argv[s_argc] != NULL) s_argc++;
+
+        // Count envp
+        if (envp != NULL) {
+            while (envp[s_envc] != NULL) s_envc++;
+        }
+
+        // Access the stack page through kernel mapping
+        char *kstack = (char *)Phy_To_Virt(stack_page->phy_address);
+        // kstack[0..0x1FFFFF] maps to USER_STACK_BASE..USER_STACK_TOP
+        #define KSTACK(va) (kstack + ((va) - USER_STACK_BASE))
+
+        // ── Copy string data to top of stack ──────────────────
+        // str_offsets[i] records the virtual address of each string on stack
+        uint64_t str_offset[128];  // enough for ~32 argv + envp each
+        int si = 0;
+
+        // Copy argv strings
+        for (int i = 0; i < s_argc; i++) {
+            size_t len = strlen(argv[i]) + 1;
+            user_rsp -= len;
+            memcpy(KSTACK(user_rsp), argv[i], len);
+            str_offset[si++] = user_rsp;
+        }
+
+        // Copy envp strings
+        for (int i = 0; i < s_envc; i++) {
+            size_t len = strlen(envp[i]) + 1;
+            user_rsp -= len;
+            memcpy(KSTACK(user_rsp), envp[i], len);
+            str_offset[si++] = user_rsp;
+        }
+
+        // ── 16-byte align ─────────────────────────────────────
+        user_rsp &= ~15ULL;
+
+        // ── Calculate aligned metadata size ───────────────────
+        // Layout from bottom (RSP) up: argc | argv[]+NULL |
+        // envp[]+NULL | auxv AT_NULL.  Total must be 16-byte
+        // aligned so RSP (pointing to argc) & 0xF == 0.
+        // Without padding, total = 24 + (argc+1)*8 + (envc+1)*8.
+        // When (s_argc + s_envc) is even, we need 8 extra bytes.
+        int meta_pad = ((s_argc + s_envc) & 1) ? 0 : 8;
+
+        // ── auxv: just AT_NULL terminator ─────────────────────
+        user_rsp -= 16;  // {AT_NULL=0, 0}
+        *(uint64_t *)KSTACK(user_rsp) = 0;      // AT_NULL
+        *(uint64_t *)KSTACK(user_rsp + 8) = 0;
+
+        // ── envp[] array (NULL-terminated) + alignment pad ────
+        user_rsp -= (s_envc + 1) * 8 + meta_pad;
+        user_env_ptr = user_rsp;
+        for (int i = 0; i < s_envc; i++) {
+            *(uint64_t *)KSTACK(user_rsp + i * 8) = str_offset[s_argc + i];
+        }
+        *(uint64_t *)KSTACK(user_rsp + s_envc * 8) = 0;  // NULL terminator
+
+        // ── argv[] array (NULL-terminated) ────────────────────
+        user_rsp -= (s_argc + 1) * 8;
+        user_arg_ptr = user_rsp;
+        for (int i = 0; i < s_argc; i++) {
+            *(uint64_t *)KSTACK(user_rsp + i * 8) = str_offset[i];
+        }
+        *(uint64_t *)KSTACK(user_rsp + s_argc * 8) = 0;  // NULL terminator
+
+        // ── argc ──────────────────────────────────────────────
+        user_rsp -= 8;
+        *(uint64_t *)KSTACK(user_rsp) = (uint64_t)s_argc;
+
+        #undef KSTACK
+    }
+
+    // 7. Free the OLD user address space
     if (current->mm) {
         vmm_free_user_map((mmap)Phy_To_Virt((uint64_t)current->mm->pml4));
         kfree(current->mm);
@@ -563,12 +700,15 @@ int64_t sys_exec(const char *path, pt_regs_t *regs)
     regs->ss      = USER_DS;
     regs->ds      = USER_DS;
     regs->es      = USER_DS;
-    regs->rsp     = USER_STACK_TOP;
+    regs->rsp     = (argv != NULL) ? user_rsp : USER_STACK_TOP;
     regs->rip     = entry_point;
     regs->rflags  = (1 << 9);              // IF=1
+    regs->rdi     = (uint64_t)s_argc;      // argc
+    regs->rsi     = user_arg_ptr;          // argv
+    regs->rdx     = user_env_ptr;          // envp
 
-    serial_printk("exec: pid=%d entry=%p rsp=%p cr3=%p\n",
-                  current->pid, entry_point, regs->rsp, current->thread->cr3);
+    serial_printk("exec: pid=%d entry=%p rsp=%p argc=%d cr3=%p\n",
+                  current->pid, entry_point, regs->rsp, s_argc, current->thread->cr3);
 
     return 0;
 }
@@ -713,47 +853,50 @@ uint64_t init(uint64_t arg)
         }
         current->files = files;  // attach to *this* task, not idle
 
-        // fd 0: stdin — /dev/keyboard (raw scancodes)
-        vfs_node_t *kbd = vfs_lookup("/dev/keyboard");
-        if (kbd) {
-            file_t *f = file_alloc();
-            f->type = FD_DEV;
-            f->node = kbd;
-            f->flags = O_RDONLY;
-            int fd = fd_alloc(files, f);
-            serial_printk("init: fd%d = /dev/keyboard (scancode reader)\n", fd);
-        }
-
-        // fd 1: stdout — /dev/fb (framebuffer text output)
-        vfs_node_t *fb = vfs_lookup("/dev/fb");
-        if (fb) {
-            file_t *f = file_alloc();
-            f->type = FD_DEV;
-            f->node = fb;
-            f->flags = O_WRONLY;
-            int fd = fd_alloc(files, f);
-            serial_printk("init: fd%d = /dev/fb (framebuffer writer)\n", fd);
-        }
-
-        // fd 2: stderr — /dev/serial (COM1 output)
+        // fd 0: stdin -- /dev/serial (from QEMU -serial stdio)
         vfs_node_t *ser = vfs_lookup("/dev/serial");
+        if (ser) {
+            file_t *f = file_alloc();
+            f->type = FD_DEV;
+            f->node = ser;
+            f->flags = O_RDWR;
+            int fd = fd_alloc(files, f);
+            serial_printk("init: fd%d = /dev/serial (stdin)\n", fd);
+        }
+
+        // fd 1: stdout -- /dev/serial
         if (ser) {
             file_t *f = file_alloc();
             f->type = FD_DEV;
             f->node = ser;
             f->flags = O_WRONLY;
             int fd = fd_alloc(files, f);
-            serial_printk("init: fd%d = /dev/serial (error output)\n", fd);
+            serial_printk("init: fd%d = /dev/serial (stdout)\n", fd);
+        }
+
+        // fd 2: stderr -- /dev/serial
+        if (ser) {
+            file_t *f = file_alloc();
+            f->type = FD_DEV;
+            f->node = ser;
+            f->flags = O_WRONLY;
+            int fd = fd_alloc(files, f);
+            serial_printk("init: fd%d = /dev/serial (stderr)\n", fd);
         }
     }
 
     // Spawn 2 quick-exit tasks to verify round-robin scheduling.
     for (int i = 0; i < 2; i++) {
-        int64_t pid = spawn_user_task("/spin.elf");
+        int64_t pid = spawn_user_task("/spin.elf", NULL);
         serial_printk("init: spin #%d → pid=%d\n", i, (int)pid);
     }
-    // Spawn the interactive shell (replaces init.elf keyboard echo)
-    spawn_user_task("/sh.elf");
+    // Spawn the interactive shell
+    spawn_user_task("/busybox.elf", (const char *const[]){"/busybox.elf", "sh", NULL});
 
-    return 1;
+    // Stay alive so children can run (init should never exit)
+    serial_printk("init: entering idle loop\n");
+    while (1) {
+        schedule();
+    }
+    return 0;
 }

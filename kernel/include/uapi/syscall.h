@@ -25,4 +25,34 @@
 #define SYS_chdir   14
 #define SYS_getcwd  15
 
+// ── Phase 4: filesystem metadata ─────────────────────────────
+#define SYS_stat         16   // stat(path, buf)
+#define SYS_fstat        17   // fstat(fd, buf)
+#define SYS_lseek        18   // lseek(fd, offset, whence)
+#define SYS_fcntl        19   // fcntl(fd, cmd, arg)
+#define SYS_ioctl        20   // ioctl(fd, request, arg)
+#define SYS_getdents64   21   // getdents64(fd, buf, count)
+#define SYS_access       22   // access(path, mode)
+
+// ── Phase 5: filesystem write operations ─────────────────────
+#define SYS_unlink      23
+#define SYS_mkdir       24
+#define SYS_rmdir       25
+#define SYS_rename      26
+#define SYS_truncate    27
+#define SYS_ftruncate   28
+
+// ── Phase 6: remaining syscalls ──────────────────────────────
+#define SYS_time            29
+#define SYS_gettimeofday    30
+#define SYS_nanosleep       31
+#define SYS_chmod           32
+#define SYS_fchmod          33
+#define SYS_times           34
+#define SYS_uname           35
+#define SYS_getppid         36
+#define SYS_umask           37
+#define SYS_kill            38
+#define SYS_signal          39
+
 #endif

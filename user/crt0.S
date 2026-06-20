@@ -5,6 +5,13 @@ _start:
     # Clear frame pointer for backtrace termination
     xorq %rbp, %rbp
 
+    # ── Save argc, argv, envp BEFORE clobbering registers ──
+    # Kernel passes: rdi=argc, rsi=argv, rdx=envp
+    # Save to callee-saved registers that survive across function calls.
+    movq %rdi, %r12          # r12 = argc
+    movq %rsi, %r13          # r13 = argv
+    movq %rdx, %r14          # r14 = envp
+
     # Zero-initialize BSS
     leaq __bss_start(%rip), %rdi
     leaq __bss_end(%rip), %rcx
@@ -13,9 +20,10 @@ _start:
     xorb %al, %al
     rep stosb
 1:
-    # Call main(argc, argv) — no arguments for now
-    xorl %edi, %edi      # argc = 0
-    xorl %esi, %esi      # argv = NULL
+    # Restore argc, argv, envp and call main
+    movq %r12, %rdi          # argc
+    movq %r13, %rsi          # argv
+    movq %r14, %rdx          # envp
     call main
 
     # exit(return_value)
@@ -25,4 +33,3 @@ _start:
 
     # Should never reach here
     hlt
-

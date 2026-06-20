@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <block/blockdev.h>
+#include <uapi/stat.h>
 
 #define VFS_FILE   1
 #define VFS_DIR    2
@@ -27,6 +28,23 @@ typedef struct vfs_ops {
     // Create a new regular file in a directory node.  Returns the
     // new vfs_node, or NULL on error (e.g., already exists).
     struct vfs_node *(*create)(struct vfs_node *dir, const char *name);
+
+    // Unlink (delete) a file from a directory.  Returns 0 or -errno.
+    int (*unlink)(struct vfs_node *dir, const char *name);
+
+    // Create a new directory.  Returns new vfs_node or NULL on error.
+    struct vfs_node *(*mkdir)(struct vfs_node *dir, const char *name);
+
+    // Remove an empty directory.  Returns 0 or -errno.
+    int (*rmdir)(struct vfs_node *dir, const char *name);
+
+    // Rename a file/directory.  olddir/oldname → newdir/newname.
+    // Returns 0 or -errno.
+    int (*rename)(struct vfs_node *olddir, const char *oldname,
+                  struct vfs_node *newdir, const char *newname);
+
+    // Truncate a file to a new size.  Returns 0 or -errno.
+    int (*truncate)(struct vfs_node *node, uint64_t new_size);
 } vfs_ops_t;
 
 // ── A mounted filesystem instance ─────────────────────────
@@ -93,5 +111,28 @@ void vfs_node_put(struct vfs_node *node);
 
 // Debug: list directory contents via serial
 void vfs_debug_list(const char *path);
+
+// Fill a stat structure from a VFS node
+int vfs_stat(vfs_node_t *node, struct stat *buf);
+
+// Read directory entries into getdents64 format
+// Returns bytes written to buf, or -1 on error
+int vfs_getdents(vfs_node_t *dir, struct linux_dirent64 *buf, unsigned int count,
+                 uint64_t *pos);
+
+// Unlink (delete) a file by path.  Returns 0 or -errno.
+int vfs_unlink(const char *path, const char *cwd);
+
+// Create a new directory by path.  Returns 0 or -errno.
+int vfs_mkdir(const char *path, const char *cwd);
+
+// Remove an empty directory by path.  Returns 0 or -errno.
+int vfs_rmdir(const char *path, const char *cwd);
+
+// Rename oldpath to newpath.  Returns 0 or -errno.
+int vfs_rename(const char *oldpath, const char *newpath, const char *cwd);
+
+// Truncate a file node to a new size.  Returns 0 or -errno.
+int vfs_truncate(vfs_node_t *node, uint64_t new_size);
 
 #endif // _FS_VFS_H
