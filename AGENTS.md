@@ -32,6 +32,7 @@ IPI:     0x40 TLB shootdown, 0x41 resched. Dispatch → ret_from_intr
 - **`Phy_To_Virt()` before deref** — `alloc_pages` returns physical address
 - **`set_tss64`** writes global table — `-smp 2+` needs per-CPU TSS descriptor
 - **printf spawn fragility**: `/spin.elf` (exit-only) 8+ concurrent ok; `/init.elf` (printf+keyboard) crashes on 3rd+ → [[spawn-ud-crash-syscall-prefault]]
+- **Debug output**: never add/remove `serial_printk` debug lines ad-hoc.  Gate all debug prints behind a build-time flag (e.g. `-DOS01_DEBUG_SCHED`, `-DOS01_DEBUG_TTY`) so they stay in the source and can be toggled without code churn.  Add the flag to `kernel/Makefile` CFLAGS when needed, strip it for production builds.  This keeps `git log` clean — no debug-add/debug-remove commit spam.
 
 ## Key files
 
