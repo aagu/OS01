@@ -263,6 +263,13 @@ uint64_t do_exit(uint64_t exit_code)
         current->parent->state = TASK_RUNNING;
         parent_woken = 1;
     }
+    // SIGCHLD (sent above) may have already woken the parent, making
+    // it RUNNING before we reach this check.  Do the direct switch_to
+    // anyway — otherwise schedule()'s round-robin scan may pick the
+    // idle task instead of the parent (task list order issue).
+    if (!parent_woken && current->parent &&
+        current->parent->state == TASK_RUNNING)
+        parent_woken = 1;
 
     serial_printk("task %d now ZOMBIE (parent=%d w=%d ps=%ld)\n",
                   current->pid, current->parent ? (int)current->parent->pid : -1,
