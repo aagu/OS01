@@ -143,7 +143,7 @@ uint32_t unregister_irq(uint64_t nr)
 		p->controller->uninstall(nr);
 	}
 	p->controller = NULL;
-	p->irq_name = NULL;
+	p->irq_name[0] = '\0';
 	p->parameter = 0;
 	p->flags = 0;
 	p->handler = NULL;

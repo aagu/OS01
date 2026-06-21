@@ -97,17 +97,17 @@
 //  ISO (Interrupt Source Override) flags
 // ──────────────────────────────────────────────
 
-#define ISO_POLARITY_MASK     0x3
-#define ISO_POLARITY_HIGH     0x0        // Bus-asserted high (default)
-#define ISO_POLARITY_LOW      0x1
-#define ISO_POLARITY_RESERVED 0x2
-#define ISO_POLARITY_LOW2     0x3
+#define ISO_POLARITY_MASK         0x3
+#define ISO_POLARITY_CONF_BUS     0x0        // Conforms to bus (ISA = active high)
+#define ISO_POLARITY_ACTIVE_HIGH  0x1        // Active high
+#define ISO_POLARITY_RESERVED     0x2
+#define ISO_POLARITY_ACTIVE_LOW   0x3        // Active low
 
-#define ISO_TRIGGER_MASK      0xC
-#define ISO_TRIGGER_BUS       0x0        // Bus-specific (default)
-#define ISO_TRIGGER_EDGE      0x4
-#define ISO_TRIGGER_RESERVED  0x8
-#define ISO_TRIGGER_LEVEL     0xC
+#define ISO_TRIGGER_MASK          0xC
+#define ISO_TRIGGER_CONF_BUS      0x0        // Conforms to bus (ISA = edge)
+#define ISO_TRIGGER_EDGE          0x4
+#define ISO_TRIGGER_RESERVED      0x8
+#define ISO_TRIGGER_LEVEL         0xC
 
 // ──────────────────────────────────────────────
 //  Default values
@@ -147,6 +147,7 @@ typedef struct {
     uint8_t  apic_id;
     uint32_t mmio_base;    // physical address
     uint32_t gsi_base;     // starting GSI number
+    uint32_t max_redir;    // max redirection entries (populated by ioapic_init)
 } ioapic_entry_t;
 
 typedef struct {

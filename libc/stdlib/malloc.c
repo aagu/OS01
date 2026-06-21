@@ -33,13 +33,16 @@ static int heap_initialized = 0;
 // Query or set the program break
 static uint64_t get_brk(void)
 {
-    return (uint64_t)syscall(SYS_brk, 0, 0, 0);
+    int64_t ret = syscall(SYS_brk, 0, 0, 0);
+    if (ret < 0) return 0;
+    return (uint64_t)ret;
 }
 
 static int set_brk(uint64_t addr)
 {
-    uint64_t actual = (uint64_t)syscall(SYS_brk, addr, 0, 0);
-    return (actual >= addr) ? 0 : -1;
+    int64_t actual = syscall(SYS_brk, addr, 0, 0);
+    if (actual < 0) return -1;
+    return ((uint64_t)actual >= addr) ? 0 : -1;
 }
 
 // Initialize the heap

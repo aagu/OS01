@@ -74,9 +74,9 @@ void schedule(void)
     this_cpu()->schedule_count++;
 
     // ── Reap zombies that nobody will wait for ──
-    // Protected by a global spinlock because both CPUs can
-    // enter schedule() concurrently and would otherwise
-    // double-free the same zombie tasks.
+    // Serialized across CPUs to prevent double-free.
+    // PF_REAPED zombies were consumed by do_waitpid — safe to free
+    // here because the ZOMBIE has already passed its final schedule().
     {
         static spinlock_T reap_lock = { .lock = 1L };
         spin_lock(&reap_lock);
@@ -94,17 +94,16 @@ void schedule(void)
                 continue;
 
             int reap = 0;
-            if (t->flags & PF_KTHREAD) {
+            // PF_REAPED: do_waitpid consumed exit status —
+            // safe to free (t != current guarantees the ZOMBIE
+            // finished its final schedule()).
+            if (t->flags & PF_REAPED) {
+                reap = 1;
+            } else if (t->flags & PF_KTHREAD) {
                 reap = 1;
             } else if (t->parent == NULL) {
                 reap = 1;
             } else {
-                // Check if parent is also ZOMBIE without dangling risk:
-                // (a) parent is still on the task list (not yet freed)
-                // (b) parent->state == TASK_ZOMBIE
-                // If parent freed earlier, the iteration above would have
-                // orphaned t by now (t->parent = NULL).  We haven't freed
-                // any parent this round yet, so parent is safe to deref.
                 if (t->parent->state == TASK_ZOMBIE)
                     reap = 1;
             }
@@ -158,7 +157,8 @@ void schedule(void)
     // Round-robin: scan forward from current for a RUNNING task
     next = container_of(current->list.next, task_t, list);
     while (next != &init_task_union.task && next != current) {
-        if (next->state == TASK_RUNNING && next->cpu == this_cpu()->cpu_id)
+        if (next->state == TASK_RUNNING &&
+            next->cpu == (int)this_cpu()->cpu_id)
             goto do_switch;
         next = container_of(next->list.next, task_t, list);
     }
@@ -167,7 +167,8 @@ void schedule(void)
     if (next == &init_task_union.task) {
         next = container_of(next->list.next, task_t, list);
         while (next != &init_task_union.task && next != current) {
-            if (next->state == TASK_RUNNING && next->cpu == this_cpu()->cpu_id)
+            if (next->state == TASK_RUNNING &&
+                next->cpu == (int)this_cpu()->cpu_id)
                 goto do_switch;
             next = container_of(next->list.next, task_t, list);
         }
@@ -235,7 +236,6 @@ uint64_t do_exit(uint64_t exit_code)
     // ── Send SIGCHLD to parent ───────────────────────────
     if (current->parent && !(current->parent->flags & PF_KTHREAD)) {
         current->parent->signal |= (1ULL << SIGCHLD);
-        // Wake parent if it's sleeping (e.g. in waitpid or pause)
         if (current->parent->state == TASK_INTERRUPTIBLE)
             current->parent->state = TASK_RUNNING;
     }
@@ -258,12 +258,23 @@ uint64_t do_exit(uint64_t exit_code)
     current->state = TASK_ZOMBIE;
 
     // Wake up the parent if it's waiting in waitpid
-    if (current->parent && current->parent->state == TASK_INTERRUPTIBLE)
+    int parent_woken = 0;
+    if (current->parent && current->parent->state == TASK_INTERRUPTIBLE) {
         current->parent->state = TASK_RUNNING;
+        parent_woken = 1;
+    }
 
-    serial_printk("task %d now ZOMBIE (parent=%d)\n",
-                  current->pid, current->parent ? (int)current->parent->pid : -1);
+    serial_printk("task %d now ZOMBIE (parent=%d w=%d ps=%ld)\n",
+                  current->pid, current->parent ? (int)current->parent->pid : -1,
+                  parent_woken, current->parent ? (long)current->parent->state : -1);
 
+    // Transfer directly to the woken parent to avoid scheduler
+    // scan races (the parent may not match current CPU affinity).
+    if (parent_woken) {
+        serial_printk("exit: p%d→p%d direct\n", current->pid, current->parent->pid);
+        switch_to(current, current->parent);
+        // unreachable — switch_to never returns
+    }
     schedule();
     return 0;  // never reached — schedule() does switch_to
 }
@@ -277,18 +288,16 @@ uint64_t do_exit(uint64_t exit_code)
 // Returns child PID on success, -ECHILD if no such child, -EINTR if interrupted.
 int64_t do_waitpid(int64_t pid, int *user_status, int options)
 {
-    // Note: caller has already copied user_status from user space.
-    // We pass NULL if the user didn't provide a status pointer.
-
     for (;;) {
         task_t *child = NULL;
         list_t *pos;
 
-        // Scan for a matching child that is ZOMBIE
+        // Pass 1: scan for a matching, unreaped ZOMBIE child
         pos = init_task_union.task.list.next;
         while (pos != &init_task_union.task.list) {
             task_t *t = container_of(pos, task_t, list);
-            if (t->parent == current &&
+            if (!(t->flags & PF_REAPED) &&
+                t->parent == current &&
                 t->state == TASK_ZOMBIE &&
                 (pid == -1 || t->pid == pid)) {
                 child = t;
@@ -301,51 +310,80 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
             int64_t child_pid = child->pid;
             int64_t exit_code = child->exit_code;
 
-            // Write exit status to user space
             if (user_status) {
-                // xv6 convention: exit_code << 8
                 int status = (int)((exit_code & 0xFF) << 8);
-                // Bounds check — user_status must be in user space
                 if ((uint64_t)user_status < current->addr_limit)
                     *user_status = status;
             }
-
-            // Reap the zombie
-            list_del(&child->list);
-            if (child->thread)
-                kfree(child->thread);
-            if (child->files)
-                files_free(child->files);
-            if (child->stack_alloc_base)
-                kfree(child->stack_alloc_base);
+            // Mark reaped — schedule()'s zombie reaper will list_del+kfree.
+            // We MUST NOT touch child->list here: on SMP the child may still
+            // be running schedule() → container_of(current->list.next, …),
+            // and list_del/list_add_to_before would corrupt that.
+            __sync_fetch_and_or(&child->flags, PF_REAPED);
 
             serial_printk("waitpid: pid=%d reaped child %d (exit=%d)\n",
                           (int)current->pid, (int)child_pid, (int)exit_code);
             return child_pid;
         }
 
-        // Check if the child even exists (still running)
+        serial_printk("waitpid: pid=%d search for child pid=%d\n",
+                      current ? (int)current->pid : -1, (int)pid);
+        // Check if the child even exists (unreaped, still running)
         int child_exists = 0;
+        int child_count = 0;
+        serial_printk("waitpid: child-list cur=%d pid=%lld:", current->pid, (long long)pid);
         pos = init_task_union.task.list.next;
         while (pos != &init_task_union.task.list) {
             task_t *t = container_of(pos, task_t, list);
-            if (t->parent == current && (pid == -1 || t->pid == pid)) {
-                child_exists = 1;
+            if (t->parent == current && !(t->flags & PF_REAPED)) {
+                child_count++;
+                serial_printk(" [%d s=%d f=%lx p=%lx]",
+                    t->pid, t->state, t->flags, (unsigned long)t->parent);
+                if (pid == -1 || t->pid == pid)
+                    child_exists = 1;
+            }
+            pos = pos->next;
+        }
+        serial_printk(" count=%d exist=%d\n", child_count, child_exists);
+
+        if (!child_exists) {
+            serial_printk("waitpid: pid=%d returning ECHILD (no child pid=%lld)\n",
+                          current ? (int)current->pid : -1, (long long)pid);
+            return -ECHILD;
+        }
+
+        serial_printk("do_waitpid: chk wnohang pid=%d opt=%d\n", current->pid, options); if (options & WNOHANG)
+            return 0;
+
+        // Sleep until a child exits.
+        // Double-check after setting INTERRUPTIBLE to prevent lost-wakeup.
+        serial_printk("do_waitpid: pid=%d about to sleep options=%d\n", current->pid, options);
+
+        pos = init_task_union.task.list.next;
+        while (pos != &init_task_union.task.list) {
+            task_t *t = container_of(pos, task_t, list);
+            if (!(t->flags & PF_REAPED) &&
+                t->parent == current &&
+                t->state == TASK_ZOMBIE &&
+                (pid == -1 || t->pid == pid)) {
+                child = t;
                 break;
             }
             pos = pos->next;
         }
 
-        if (!child_exists)
-            return -ECHILD;
+        if (child) {
+            current->state = TASK_RUNNING;
+            continue;
+        }
 
-        // WNOHANG: return 0 immediately
-        if (options & WNOHANG)
-            return 0;
-
-        // Sleep until a child exits
+        // Sleep until a child exits or a signal arrives.
+        // do_exit() sets parent->state = TASK_RUNNING when the child
+        // becomes ZOMBIE.
         current->state = TASK_INTERRUPTIBLE;
         schedule();
+        current->state = TASK_RUNNING;
+        serial_printk("wait: p%d woke\n", current->pid);
     }
 }
 
@@ -588,6 +626,7 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
 int64_t sys_exec(const char *path, pt_regs_t *regs,
                  const char *const *argv, const char *const *envp)
 {
+    serial_printk("sys_exec: pid=%d path=%s argv=%p\n", current->pid, path ? path : "(null)", (void*)argv);
     // 1. Look up the ELF file (support relative paths)
     const char *cwd = current->files ? current->files->cwd : "/";
     vfs_node_t *node = vfs_lookup_from(path, cwd);

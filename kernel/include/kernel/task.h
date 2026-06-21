@@ -48,6 +48,7 @@ extern void idle_resume(void);
 #define PF_PROCESS (1 << 1)
 #define PF_THREAD (1 << 2)
 #define PF_LINUX_ABI (1 << 3)
+#define PF_REAPED (1 << 4)   // do_waitpid read this ZOMBIE; schedule() will kfree
 
 // waitpid options
 #define WNOHANG 1

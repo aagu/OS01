@@ -5,10 +5,9 @@
 char * strdup(const char *src)
 {
     size_t len = strlen(src);
-    void *new = malloc(len);
-
+    void *new = malloc(len + 1);
     if (new == NULL)
         return NULL;
-    
-    return (char *) memcpy(new, src, len);
+    memcpy(new, src, len + 1);
+    return (char *)new;
 }

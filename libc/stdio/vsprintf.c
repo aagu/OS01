@@ -20,7 +20,7 @@ static char * number(char * str, char *end, long num, int base, int size, int pr
 	if (type&SMALL) {digits = "0123456789abcdefghijklmnopqrstuvwxyz";}
 	if (type&LEFT) {type &= ~ZEROPAD;}
 	if (base < 2 || base > 36)
-		return 0;
+		return str;
 	c = (type & ZEROPAD) ? '0' : ' ' ;
 	sign = 0;
 	if (type&SIGN && num < 0) {
@@ -83,6 +83,7 @@ static char * number(char * str, char *end, long num, int base, int size, int pr
 
 int vsprintf(char * buf,const char *fmt, va_list args)
 {
+	if (!buf) return -1;
 	char * str,*s,*end;
 	int flags;
 	int field_width;
@@ -177,7 +178,7 @@ int vsprintf(char * buf,const char *fmt, va_list args)
 				
 					s = va_arg(args,char *);
 					if(!s)
-						s = '\0';
+						s = (char *)"";
 					len = strlen(s);
 					if(precision < 0)
 						precision = len;

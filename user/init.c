@@ -164,12 +164,16 @@ static int spawn(const char *command, const char *tty __attribute__((unused)))
 
     if (pid == 0) {
         // ── Child ──────────────────────────────────────────
-        // For now, exec directly without signal() call
-        const char *child_argv[] = { "/busybox.elf", "sh", NULL };
-        int64_t ret = exec("/busybox.elf", (char *const *)child_argv, NULL);
+        // argv[0] is the executable path, argv[1..] are arguments.
+        // This correctly passes the parsed inittab command to exec.
+        if (argv[0] == NULL || argv[0][0] == '\0') {
+            printf("init: empty command\n");
+            exit(1);
+        }
+        int64_t ret = exec(argv[0], (char *const *)argv, NULL);
 
         // exec() should not return — if it does, print error and exit
-        printf("init: exec '%s' failed, ret=%d\n", command, (int)ret);
+        printf("init: exec '%s' failed, ret=%d\n", argv[0], (int)ret);
         exit(1);
     }
 

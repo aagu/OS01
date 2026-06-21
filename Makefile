@@ -109,6 +109,7 @@ thirdpart/busybox-1.36.1/busybox: lib \
 	    -e 's/^# CONFIG_MV is not set/CONFIG_MV=y/' \
 	    -e 's/^# CONFIG_MKDIR is not set/CONFIG_MKDIR=y/' \
 	    -e 's/^# CONFIG_RMDIR is not set/CONFIG_RMDIR=y/' \
+	    -e 's|^CONFIG_BUSYBOX_EXEC_PATH=.*|CONFIG_BUSYBOX_EXEC_PATH="/busybox.elf"|' \
 	    .config
 	@# Create stub libraries for busybox link detection (trylink tests -lm -lrt)
 	@mkdir -p $(SYSROOT)/usr/lib

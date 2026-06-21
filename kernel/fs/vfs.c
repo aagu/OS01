@@ -163,6 +163,22 @@ static vfs_node_t *__vfs_lookup(const char *path)
             continue;
         }
 
+        // "." — stay in current directory
+        if (strcmp(comp, ".") == 0) {
+            continue;
+        }
+
+        // ".." — go to parent, or stay if at root
+        if (strcmp(comp, "..") == 0) {
+            if (current->parent) {
+                vfs_node_t *parent = current->parent;
+                parent->refcount++;
+                current->refcount--;
+                current = parent;
+            }
+            continue;
+        }
+
         vfs_dirent_t entry;
         int found = 0;
         uint64_t idx = 0;

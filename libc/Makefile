@@ -58,6 +58,7 @@ stdlib/free.o \
 stdlib/environ.o \
 stdlib/strtol.o \
 	stdlib/strtoll.o \
+	stdlib/strtod.o \
 stdlib/qsort.o \
 stdlib/atexit.o \
 ctype/ctype.o \

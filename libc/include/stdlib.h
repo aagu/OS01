@@ -66,3 +66,4 @@ void *realloc(void *ptr, size_t size);
 int rand(void);
 char *realpath(const char *path, char *resolved);
 void srand(unsigned int seed);
+double strtod(const char *nptr, char **endptr);

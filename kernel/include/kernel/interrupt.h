@@ -20,7 +20,7 @@ typedef struct irq_desc
 {
     hw_int_controller_t* controller;
 
-    char* irq_name;
+    char irq_name[32];
     uint64_t parameter;
     void (*handler)(uint64_t nr, uint64_t parameter, pt_regs_t * regs);
     uint64_t flags;

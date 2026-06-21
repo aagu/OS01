@@ -95,7 +95,44 @@ char *dirname(char *path) { (void)path; return "/"; }
 char *basename(char *path) { (void)path; return ""; }
 
 /* ── putenv ── */
-int putenv(char *string) { (void)string; return 0; }
+int putenv(char *string)
+{
+    static char **env_table = NULL;
+    static int env_capacity = 0;
+    static int env_count = 0;
+    char *eq;
+    int i;
+
+    if (!string || !(eq = strchr(string, '=')))
+        return -1;
+
+    size_t key_len = (size_t)(eq - string);
+
+    /* 查找已存在的 key → 替换 */
+    for (i = 0; i < env_count; i++) {
+        if (strncmp(env_table[i], string, key_len) == 0
+            && env_table[i][key_len] == '=') {
+            env_table[i] = string;
+            return 0;
+        }
+    }
+
+    /* 新条目：需要 env_count + 2 个槽（新条目 + NULL 结尾） */
+    if (env_count + 2 > env_capacity) {
+        int new_cap = env_capacity ? env_capacity * 2 : 16;
+        char **new_table = realloc(env_table, new_cap * sizeof(char *));
+        if (!new_table)
+            return -1;
+        env_table = new_table;
+        env_capacity = new_cap;
+    }
+
+    env_table[env_count++] = string;
+    env_table[env_count] = NULL;
+    environ = env_table;
+
+    return 0;
+}
 
 /* ── __libc_start_main ── */
 int __libc_start_main(int (*main)(int, char **, char **),
