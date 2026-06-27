@@ -124,10 +124,14 @@ void init_serial_irq(void)
 // ═══════════════════════════════════════════════════════════
 
 // Drain all available bytes from the UART and push to the
-// console TTY.  Safe to call from any context.
+// console TTY.  Called from idle loop; disables IRQs around
+// the read to avoid racing with the serial ISR.
 void serial_poll(void)
 {
     if (!serial_tty) return;
+
+    uint64_t irqf;
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(irqf) :: "memory");
 
     while (inb(SERIAL_COM1 + 5) & 1) {
         char c = inb(SERIAL_COM1);
@@ -145,6 +149,9 @@ void serial_poll(void)
         // Push to console TTY (wakes blocked tty_read)
         tty_push_input(serial_tty, c);
     }
+
+    if (irqf & (1UL << 9))
+        __asm__ __volatile__("sti" ::: "memory");
 }
 
 // ═══════════════════════════════════════════════════════════
