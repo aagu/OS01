@@ -33,12 +33,18 @@ void do_timer(void * data __attribute__((unused)))
         timer = container_of(list_next(&timer_list_head.list), timer_t, list);
     }
     
-    color_printk(RED, BLACK, "(Timer:%d)", jiffies);
+    // Note: 100 Hz color_printk debug is DISABLED by default — the
+    // serial UART TX path (write_serial → poll THRE bit) adds latency
+    // that interferes with interactive shell input on every tick.
+    // Enable via -DOS01_DEBUG_TIMER in kernel/Makefile CFLAGS when needed.
     // Preemptive scheduling is driven from pit_handler (hardirq) which
     // decrements current->counter and sets need_resched.  The flag is
     // picked up in ret_from_intr (entry.S) which calls schedule() before
     // RESTORE_ALL → iretq, so a context switch happens on the interrupt
     // return path — never inline in the timer handler itself.
+    // NOTE: this debug print must stay DISABLED in production — 100 Hz
+    // serial output floods the UART and can interfere with interactive
+    // shell input handling.
 }
 
 void timer_init()

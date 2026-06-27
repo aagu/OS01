@@ -80,7 +80,7 @@ void schedule(void)
     // here because the ZOMBIE has already passed its final schedule().
     {
         static spinlock_T reap_lock = { .lock = 1L };
-        spin_lock(&reap_lock);
+        uint64_t reap_flags = spin_lock_irqsave(&reap_lock);
 
         // Pass 1: collect zombies to reap
         task_t *reap_list[64];
@@ -142,7 +142,7 @@ void schedule(void)
             kfree(t->stack_alloc_base);
     }
 
-    spin_unlock(&reap_lock);
+    spin_unlock_irqrestore(&reap_lock, reap_flags);
     }
 
     // Decrement current task's quantum (one tick per call)
@@ -235,6 +235,10 @@ uint64_t do_exit(uint64_t exit_code)
     }
 
     // ── Send SIGCHLD to parent ───────────────────────────
+    // NOTE: we write-protect parent->state here because we are
+    // about to become ZOMBIE.  After this point, the parent may
+    // run and reap us via do_waitpid → PF_REAPED.  The scheduler's
+    // zombie reaper will later list_del + kfree.
     if (current->parent && !(current->parent->flags & PF_KTHREAD)) {
         current->parent->signal |= (1ULL << SIGCHLD);
         if (current->parent->state == TASK_INTERRUPTIBLE)
@@ -258,29 +262,47 @@ uint64_t do_exit(uint64_t exit_code)
     current->exit_code = exit_code;
     current->state = TASK_ZOMBIE;
 
-    // Wake up the parent if it's waiting in waitpid
+    // ── Direct switch to parent ─────────────────────────────
+    // By the time we reach ZOMBIE the parent is either already
+    // RUNNING (SIGCHLD woke it) or still INTERRUPTIBLE in
+    // do_waitpid.  In either case we want to switch directly to
+    // avoid schedule()'s round-robin scan which may pick the
+    // idle task instead (task list order changes after zombie
+    // reaping inside schedule() can cause this).
+    task_t *parent = current->parent;
     int parent_woken = 0;
-    if (current->parent && current->parent->state == TASK_INTERRUPTIBLE) {
-        current->parent->state = TASK_RUNNING;
-        parent_woken = 1;
+
+    if (parent) {
+        uint64_t ps = parent->state;
+        if (ps == TASK_INTERRUPTIBLE) {
+            parent->state = TASK_RUNNING;
+            parent_woken = 1;
+        } else if (ps == TASK_RUNNING) {
+            // SIGCHLD already woke the parent.
+            parent_woken = 1;
+        } else if (ps == TASK_UNINTERRUPTIBLE) {
+            // Parent is in an unkillable sleep — unlikely for
+            // waitpid but handle gracefully: leave it, the
+            // scheduler's zombie reaper will eventually clean
+            // us up if parent never comes back.
+            serial_printk("exit: p%d parent p%d UNINTERRUPTIBLE (%ld), "
+                          "skipping direct switch\n",
+                          current->pid, parent->pid, ps);
+        }
     }
-    // SIGCHLD (sent above) may have already woken the parent, making
-    // it RUNNING before we reach this check.  Do the direct switch_to
-    // anyway — otherwise schedule()'s round-robin scan may pick the
-    // idle task instead of the parent (task list order issue).
-    if (!parent_woken && current->parent &&
-        current->parent->state == TASK_RUNNING)
-        parent_woken = 1;
 
     serial_printk("task %d now ZOMBIE (parent=%d w=%d ps=%ld)\n",
-                  current->pid, current->parent ? (int)current->parent->pid : -1,
-                  parent_woken, current->parent ? (long)current->parent->state : -1);
+                  current->pid,
+                  parent ? (int)parent->pid : -1,
+                  parent_woken,
+                  parent ? (long)parent->state : -1);
 
     // Transfer directly to the woken parent to avoid scheduler
-    // scan races (the parent may not match current CPU affinity).
+    // scan races.  parent_woken is always 1 for normal exit
+    // (parent in waitpid = INTERRUPTIBLE or RUNNING).
     if (parent_woken) {
-        serial_printk("exit: p%d→p%d direct\n", current->pid, current->parent->pid);
-        switch_to(current, current->parent);
+        serial_printk("exit: p%d→p%d direct\n", current->pid, parent->pid);
+        switch_to(current, parent);
         // unreachable — switch_to never returns
     }
     schedule();
