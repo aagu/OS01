@@ -290,6 +290,37 @@ int keyboard_devfs_read(vfs_node_t *node, uint64_t offset,
 //  Init
 // ═══════════════════════════════════════════════════════════
 
+// Enable keyboard IRQ generation at the PS/2 controller level.
+// The controller's command byte bit 0 (keyboard interrupt enable)
+// may be 0 after UEFI boot — without it, IRQ1 never fires.
+static void keyboard_enable_irq(void)
+{
+    // Write command 0x20 ("read command byte") to port 0x64
+    while (inb(0x64) & 2) __asm__ __volatile__("pause");  // wait for input buffer empty
+    outb(0x64, 0x20);
+    // Read response from port 0x60
+    while (!(inb(0x64) & 1)) __asm__ __volatile__("pause");  // wait for output buffer full
+    uint8_t cmd = inb(0x60);
+
+    serial_printk("kbd: PS/2 command byte was %#x", cmd);
+
+    // Bit 0: keyboard interrupt enable
+    // Bit 2: system flag (tell controller we passed POST)
+    // Bit 3: keyboard enable (0 = enable, 1 = disable)
+    cmd |= 0x01;   // enable IRQ1
+    cmd |= 0x04;   // set system flag
+    cmd &= ~0x08;  // ensure keyboard is enabled
+
+    // Write command 0x60 ("write command byte") to port 0x64
+    while (inb(0x64) & 2) __asm__ __volatile__("pause");
+    outb(0x64, 0x60);
+    // Write the byte to port 0x60
+    while (inb(0x64) & 2) __asm__ __volatile__("pause");
+    outb(0x60, cmd);
+
+    serial_printk(" → %#x\n", cmd);
+}
+
 void keyboard_init(void)
 {
     ring_head = 0;
@@ -301,6 +332,8 @@ void keyboard_init(void)
     kbd_lalt   = false;
     kbd_ralt   = false;
     kbd_caps_lock = false;
+
+    keyboard_enable_irq();
 
     hw_int_controller_t *ctrl = apic_available()
         ? get_ioapic_controller()
