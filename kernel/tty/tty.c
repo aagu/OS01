@@ -175,11 +175,11 @@ static int tty_canon_process(tty_t *tty, char c)
 // ═══════════════════════════════════════════════════════
 //
 //  Blocking protocol (prevents lost wakeup):
-//    1. Drain cooked ring + poll hardware
-//    2. If no data: enqueue on read_wait, set INTERRUPTIBLE
-//    3. Double-check buffer (IRQ may have fired between 1→2)
+//    1. Drain cooked ring
+//    2. Poll hardware once
+//    3. If no data: set INTERRUPTIBLE, enqueue, double-check
 //    4. If still empty: schedule() — sleeps until tty_wake_waiters()
-//    5. On wake: dequeue self (idempotent), loop back to drain
+//    5. On wake: dequeue self, poll hardware once (IRQ fallback), loop
 
 int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
 {
@@ -236,16 +236,16 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
             continue;
 
         // ── Phase 3: blocking sleep on wait queue ──────────
-        // Enqueue first, THEN check buffer.  If an IRQ fires
-        // between enqueue and the state change, tty_wake_waiters()
-        // already set us RUNNING — but we still catch it via the
-        // double-check below and loop back, avoiding the schedule()
-        // call when data is already available.
-        list_add_to_before(&tty->read_wait, &current->io_wait_node);
+        // Set INTERRUPTIBLE FIRST, then enqueue.  If an IRQ fires
+        // between these two steps, the waker won't find us on
+        // read_wait (no-op), but our double-check catches the data.
+        // If the IRQ fires after enqueue, the waker removes us and
+        // sets RUNNING — then either the double-check finds data
+        // or schedule() returns immediately (state==RUNNING).
         current->state = TASK_INTERRUPTIBLE;
+        list_add_to_before(&tty->read_wait, &current->io_wait_node);
 
-        // Double-check: data may have arrived after Phase 2
-        // but before we went INTERRUPTIBLE.
+        // Double-check: IRQ may have fired during the steps above.
         if (!tty_cooked_empty(tty)) {
             list_del_init(&current->io_wait_node);
             current->state = TASK_RUNNING;
@@ -258,9 +258,13 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
 
         // tty_wake_waiters() calls list_del_init on our node,
         // leaving io_wait_node self-pointing.  If we were woken
-        // by something else (signal, etc.), clean up.
+        // by something else, clean up.
         if (!list_is_empty(&current->io_wait_node))
             list_del_init(&current->io_wait_node);
+
+        // Poll hardware once after waking — fallback if IRQs
+        // are not delivering input (e.g. wrong IOAPIC routing).
+        keyboard_poll();
     }
 }
 
