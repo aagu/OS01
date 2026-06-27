@@ -88,8 +88,9 @@ void init_serial(void)
     outb(SERIAL_COM1 + 0, 0x03);    // Set divisor to 3 (lo byte) 38400 baud
     outb(SERIAL_COM1 + 1, 0x00);    //                  (hi byte)
     outb(SERIAL_COM1 + 3, 0x03);    // 8 bits, no parity, one stop bit
-    outb(SERIAL_COM1 + 2, 0xC7);    // Enable FIFO, clear them, with 14-byte threshold
+    outb(SERIAL_COM1 + 2, 0x07);    // Enable FIFO, clear, 1-byte threshold
     outb(SERIAL_COM1 + 4, 0x0B);    // IRQs enabled, RTS/DSR set
+    outb(SERIAL_COM1 + 1, 0x01);    // Enable RX interrupt (Data Available)
 }
 
 void init_serial_irq(void)
@@ -98,7 +99,13 @@ void init_serial_irq(void)
         ? get_ioapic_controller()
         : &serial_controller;
     register_irq(0x24, NULL, &serial_handler, 0, ctrl, "serial");
-    serial_printk("serial: IRQ4 registered\n");
+
+    // Diagnostic: read back UART interrupt config
+    uint8_t ier = inb(SERIAL_COM1 + 1);   // Interrupt Enable Register
+    uint8_t iir = inb(SERIAL_COM1 + 2);   // Interrupt Identification (also FCR)
+    uint8_t mcr = inb(SERIAL_COM1 + 4);   // Modem Control Register
+    serial_printk("serial: IRQ4 registered (IER=%#x IIR=%#x MCR=%#x)\n",
+                  ier, iir, mcr);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -121,7 +128,13 @@ char read_serial(void)
     while (!(inb(SERIAL_COM1 + 5) & 1))
         __asm__ __volatile__("pause");
 
-    return inb(SERIAL_COM1);
+    char c = inb(SERIAL_COM1);
+
+    // I/O delay: give the UART time to update LSR bit 0 (Data Ready)
+    // so the next serial_received() check doesn't see a stale 1.
+    inb(0x80);
+
+    return c;
 }
 
 // Check if serial has received data (non-blocking).
