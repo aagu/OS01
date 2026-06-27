@@ -62,6 +62,12 @@ static void serial_handler(uint64_t nr, uint64_t parameter __attribute__((unused
     while (inb(SERIAL_COM1 + 5) & 1) {
         char c = inb(SERIAL_COM1);
 
+        // I/O delay: allow the UART to update LSR bit 0 (Data Ready)
+        // so the next while-condition read sees the correct state
+        // instead of a stale value that could cause early loop exit
+        // or double-reading the same byte.
+        inb(0x80);
+
         // Push to serial ring buffer (for /dev/serial)
         if (!serial_ring_full()) {
             serial_rx_ring[serial_rx_head] = c;
@@ -120,6 +126,9 @@ void serial_poll(void)
 
     while (inb(SERIAL_COM1 + 5) & 1) {
         char c = inb(SERIAL_COM1);
+
+        // I/O delay: allow UART to update LSR before next check
+        inb(0x80);
 
         // Push to ring buffer (for /dev/serial)
         if (!serial_ring_full()) {
