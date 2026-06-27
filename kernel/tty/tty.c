@@ -230,19 +230,18 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
         if (nonblock)
             return 0;
 
-        // ── Phase 2: poll hardware once before sleeping ────
-        keyboard_poll();
-        serial_poll();
-        if (!tty_cooked_empty(tty))
-            continue;
-
-        // ── Phase 3: blocking sleep on wait queue ──────────
+        // ── Phase 2: blocking sleep on wait queue ──────────
         // Set INTERRUPTIBLE FIRST, then enqueue.  If an IRQ fires
         // between these two steps, the waker won't find us on
         // read_wait (no-op), but our double-check catches the data.
         // If the IRQ fires after enqueue, the waker removes us and
         // sets RUNNING — then either the double-check finds data
         // or schedule() returns immediately (state==RUNNING).
+        //
+        // NOTE: we do NOT poll hardware here — IRQs (serial + keyboard)
+        // are now always-on and level-triggered; the IRQ handler calls
+        // tty_push_input → tty_wake_waiters.  A polling fallback exists
+        // in the BSP idle loop as a last resort if IOAPIC routing fails.
         current->state = TASK_INTERRUPTIBLE;
         list_add_to_before(&tty->read_wait, &current->io_wait_node);
 
@@ -263,10 +262,8 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
         if (!list_is_empty(&current->io_wait_node))
             list_del_init(&current->io_wait_node);
 
-        // Poll hardware once after waking — fallback if IRQs
-        // are not delivering input (e.g. wrong IOAPIC routing).
-        keyboard_poll();
-        serial_poll();
+        // Loop back to Phase 1 — the IRQ handler already pushed
+        // data to the cooked buffer via tty_push_input.
     }
 }
 

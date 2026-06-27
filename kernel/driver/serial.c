@@ -89,14 +89,16 @@ void init_serial(void)
     serial_rx_head = 0;
     serial_rx_tail = 0;
 
-    outb(SERIAL_COM1 + 1, 0x00);    // Disable all interrupts
+    outb(SERIAL_COM1 + 1, 0x00);    // Disable all interrupts (IER)
     outb(SERIAL_COM1 + 3, 0x80);    // Enable DLAB (set baud rate divisor)
     outb(SERIAL_COM1 + 0, 0x03);    // Set divisor to 3 (lo byte) 38400 baud
     outb(SERIAL_COM1 + 1, 0x00);    //                  (hi byte)
     outb(SERIAL_COM1 + 3, 0x03);    // 8 bits, no parity, one stop bit
-    outb(SERIAL_COM1 + 2, 0x07);    // Enable FIFO, clear, 1-byte threshold
+    outb(SERIAL_COM1 + 2, 0xC7);    // Enable FIFO, clear, 14-byte trigger
     outb(SERIAL_COM1 + 4, 0x0B);    // IRQs enabled, RTS/DSR set
-    outb(SERIAL_COM1 + 1, 0x01);    // Enable RX interrupt (Data Available)
+    // IER remains 0x00 here — RX interrupt enabled in init_serial_irq()
+    // after the IOAPIC entry is unmasked, so there is no window where
+    // the UART generates an IRQ that the IOAPIC has not yet routed.
 }
 
 void init_serial_irq(void)
@@ -105,6 +107,9 @@ void init_serial_irq(void)
         ? get_ioapic_controller()
         : &serial_controller;
     register_irq(0x24, NULL, &serial_handler, 0, ctrl, "serial");
+
+    // IOAPIC entry is now unmasked — safe to enable UART RX interrupts.
+    outb(SERIAL_COM1 + 1, 0x01);    // Enable RX interrupt (Data Available)
 
     // Diagnostic: read back UART interrupt config
     uint8_t ier = inb(SERIAL_COM1 + 1);   // Interrupt Enable Register

@@ -1046,8 +1046,14 @@ void task_init()
     this_cpu()->scheduler_ok = 1;
 
     while (1) {
-        keyboard_poll();     // IRQ fallback: poll 8042 for scancodes
-        serial_poll();       // IRQ fallback: poll UART for serial input
+        // IRQ fallback: poll hardware directly as a last resort.
+        // Under normal operation the IRQ handlers (serial + keyboard)
+        // deliver input via tty_push_input → tty_wake_waiters, so
+        // these polls are no-ops.  They exist solely to prevent a
+        // complete hang if IOAPIC routing or UART IRQ generation
+        // ever fails on real hardware.
+        keyboard_poll();
+        serial_poll();
         schedule();
     }
 }
