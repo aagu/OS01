@@ -153,6 +153,17 @@ static void ioapic_enable(uint64_t nr)
     uint32_t bsp_lapic_id = (lapic_read(LAPIC_ID) >> 24) & 0xFF;
     uint32_t high = bsp_lapic_id << 24;
 
+    // ── Force level-triggered for serial (ISA IRQ4) ────────
+    // The 16550 UART keeps its IRQ line asserted as long as data
+    // is in the RX FIFO.  In edge-triggered mode, rapid burst input
+    // causes the IOAPIC to miss the rising edge (the line stays
+    // high from FIFO backlog), dropping interrupts and losing bytes.
+    // Level-triggered mode delivers a new interrupt on each EOI
+    // cycle as long as the line stays asserted, matching the UART's
+    // actual signalling behaviour.
+    if (isa_irq == 4)
+        low_flags |= IOAPIC_RED_TRIG_LEVEL;
+
     // Write the redirection entries
     ioapic_write_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(redir) + 1, high);
     ioapic_write_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(redir), low_flags);
