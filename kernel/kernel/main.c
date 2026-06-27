@@ -132,8 +132,8 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     // (framebuffer + serial dual-write).
     tty_t *console = tty_alloc(NULL, NULL);
     if (console) {
-        keyboard_set_tty(console);   // keyboard IRQ → TTY
         serial_set_tty(console);     // serial IRQ  → TTY
+        keyboard_set_tty(console);   // keyboard IRQ → TTY
         devfs_set_tty(console);      // /dev/tty read/write → TTY
         serial_printk("tty: console TTY created\n");
     }
