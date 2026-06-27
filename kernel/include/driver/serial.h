@@ -24,4 +24,8 @@ bool serial_received(void);
 // Send one character (busy-waits until TX buffer empty)
 void write_serial(char c);
 
+// Poll UART for available data and push to the console TTY.
+// Safe to call from any context — provides IRQ fallback.
+void serial_poll(void);
+
 #endif

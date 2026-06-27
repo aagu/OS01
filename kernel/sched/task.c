@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <driver/serial.h>
+#include <driver/keyboard.h>
 #include <uapi/time.h>
 
 void __switch_to(task_t *prev, task_t *next)
@@ -1023,6 +1024,8 @@ void task_init()
     this_cpu()->scheduler_ok = 1;
 
     while (1) {
+        keyboard_poll();     // IRQ fallback: poll 8042 for scancodes
+        serial_poll();       // IRQ fallback: poll UART for serial input
         schedule();
     }
 }

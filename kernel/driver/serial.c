@@ -109,6 +109,31 @@ void init_serial_irq(void)
 }
 
 // ═══════════════════════════════════════════════════════════
+//  Poll input (IRQ fallback)
+// ═══════════════════════════════════════════════════════════
+
+// Drain all available bytes from the UART and push to the
+// console TTY.  Safe to call from any context.
+void serial_poll(void)
+{
+    if (!serial_tty) return;
+
+    while (inb(SERIAL_COM1 + 5) & 1) {
+        char c = inb(SERIAL_COM1);
+
+        // Push to ring buffer (for /dev/serial)
+        if (!serial_ring_full()) {
+            serial_rx_ring[serial_rx_head] = c;
+            __sync_synchronize();
+            serial_rx_head = (serial_rx_head + 1) % SERIAL_RING_SIZE;
+        }
+
+        // Push to console TTY (wakes blocked tty_read)
+        tty_push_input(serial_tty, c);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
 //  Read / write
 // ═══════════════════════════════════════════════════════════
 
