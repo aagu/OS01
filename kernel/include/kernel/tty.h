@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <list.h>
+#include <kernel/arch/x86_64/spinlock.h>
 
 #define TTY_BUF_SIZE  256
 
@@ -15,8 +16,9 @@
 // ── TTY structure ──────────────────────────────────
 typedef struct tty_struct {
     // ── Input ring buffer ───────────────────────
-    // Producer: IRQ context (keyboard handler)
+    // Producer: IRQ context (keyboard handler), task context (tty_read poll)
     // Consumer: task context (tty_read)
+    spinlock_T  cooked_lock;
     char        cooked[TTY_BUF_SIZE];
     volatile int   head;           // producer index
     volatile int   tail;           // consumer index
