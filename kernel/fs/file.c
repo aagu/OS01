@@ -168,10 +168,10 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
         uint8_t *dst = (uint8_t *)buf;
         uint64_t total = 0;
 
-        while (total == 0) {
+        while (total < size) {
             uint64_t flags = spin_lock_irqsave(&p->lock);
 
-            if (!pipe_empty(p)) {
+            while (total < size && !pipe_empty(p)) {
                 // Read one byte at a time from the ring buffer
                 dst[total++] = p->buf[p->tail];
                 p->tail = (p->tail + 1) % PIPE_SIZE;
@@ -223,7 +223,7 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
         while (total < size) {
             uint64_t flags = spin_lock_irqsave(&p->lock);
 
-            if (!pipe_full(p)) {
+            while (total < size && !pipe_full(p)) {
                 p->buf[p->head] = src[total++];
                 p->head = (p->head + 1) % PIPE_SIZE;
             }
