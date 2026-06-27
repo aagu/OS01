@@ -176,10 +176,9 @@ static int tty_canon_process(tty_t *tty, char c)
 //
 //  Blocking protocol (prevents lost wakeup):
 //    1. Drain cooked ring
-//    2. Poll hardware once
-//    3. If no data: set INTERRUPTIBLE, enqueue, double-check
-//    4. If still empty: schedule() — sleeps until tty_wake_waiters()
-//    5. On wake: dequeue self, poll hardware once (IRQ fallback), loop
+//    2. Set INTERRUPTIBLE, enqueue, double-check
+//    3. If still empty: schedule() — sleeps until tty_wake_waiters()
+//    4. On wake: dequeue self, loop back to Phase 1
 
 int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
 {
@@ -231,17 +230,6 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
             return 0;
 
         // ── Phase 2: blocking sleep on wait queue ──────────
-        // Set INTERRUPTIBLE FIRST, then enqueue.  If an IRQ fires
-        // between these two steps, the waker won't find us on
-        // read_wait (no-op), but our double-check catches the data.
-        // If the IRQ fires after enqueue, the waker removes us and
-        // sets RUNNING — then either the double-check finds data
-        // or schedule() returns immediately (state==RUNNING).
-        //
-        // NOTE: we do NOT poll hardware here — IRQs (serial + keyboard)
-        // are now always-on and level-triggered; the IRQ handler calls
-        // tty_push_input → tty_wake_waiters.  A polling fallback exists
-        // in the BSP idle loop as a last resort if IOAPIC routing fails.
         current->state = TASK_INTERRUPTIBLE;
         list_add_to_before(&tty->read_wait, &current->io_wait_node);
 

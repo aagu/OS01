@@ -74,10 +74,21 @@ void schedule(void)
 
     this_cpu()->schedule_count++;
 
-    // ── Reap zombies that nobody will wait for ──
-    // Serialized across CPUs to prevent double-free.
-    // PF_REAPED zombies were consumed by do_waitpid — safe to free
-    // here because the ZOMBIE has already passed its final schedule().
+    // ── Early return: current still has quantum ────────────
+    // Safe without lock — only touches per-CPU 'current'.
+    if (current->counter > 0)
+        current->counter--;
+
+    if (current->state == TASK_RUNNING && current->counter > 0) {
+        this_cpu()->need_resched = 0;
+        return;
+    }
+
+    // ── Zombie reaping + round-robin scan (serialised) ─────
+    // Both the scan and the zombie reaper traverse the global
+    // task list.  Holding the lock across both prevents an SMP
+    // race where CPU 1 kfree's a zombie while CPU 0 is following
+    // its list.next pointer.
     {
         static spinlock_T reap_lock = { .lock = 1L };
         uint64_t reap_flags = spin_lock_irqsave(&reap_lock);
@@ -95,9 +106,6 @@ void schedule(void)
                 continue;
 
             int reap = 0;
-            // PF_REAPED: do_waitpid consumed exit status —
-            // safe to free (t != current guarantees the ZOMBIE
-            // finished its final schedule()).
             if (t->flags & PF_REAPED) {
                 reap = 1;
             } else if (t->flags & PF_KTHREAD) {
@@ -130,7 +138,13 @@ void schedule(void)
         }
     }
 
-    // Pass 3: free the zombies
+    // Pass 3: unlink and free zombie resources.
+    // NOTE: kfree(t->stack_alloc_base) is DEFERRED — it frees
+    // the task_t itself (embedded in the stack allocation).
+    // Doing so corrupts subsequent allocations from the same
+    // slab cache (the freed memory is re-used before list
+    // consumers have finished with the stale node pointers).
+    // TODO: add a deferred-free work queue for stack_alloc_base.
     for (int i = 0; i < reap_count; i++) {
         task_t *t = reap_list[i];
         list_del(&t->list);
@@ -138,41 +152,20 @@ void schedule(void)
             kfree(t->thread);
         if (t->files)
             files_free(t->files);
-        if (t->stack_alloc_base)
-            kfree(t->stack_alloc_base);
+    }
+
+    // ── Round-robin scan (inside lock) ─────────────────
+    next = container_of(init_task_union.task.list.next, task_t, list);
+    while (next != &init_task_union.task) {
+        if (next->state == TASK_RUNNING &&
+            next->cpu == (int)this_cpu()->cpu_id) {
+            spin_unlock_irqrestore(&reap_lock, reap_flags);
+            goto do_switch;
+        }
+        next = container_of(next->list.next, task_t, list);
     }
 
     spin_unlock_irqrestore(&reap_lock, reap_flags);
-    }
-
-    // Decrement current task's quantum (one tick per call)
-    if (current->counter > 0)
-        current->counter--;
-
-    // If current still has quantum, keep running
-    if (current->state == TASK_RUNNING && current->counter > 0) {
-        this_cpu()->need_resched = 0;
-        return;
-    }
-
-    // Round-robin: scan forward from current for a RUNNING task
-    next = container_of(current->list.next, task_t, list);
-    while (next != &init_task_union.task && next != current) {
-        if (next->state == TASK_RUNNING &&
-            next->cpu == (int)this_cpu()->cpu_id)
-            goto do_switch;
-        next = container_of(next->list.next, task_t, list);
-    }
-
-    // Wrap past the list head and try the rest
-    if (next == &init_task_union.task) {
-        next = container_of(next->list.next, task_t, list);
-        while (next != &init_task_union.task && next != current) {
-            if (next->state == TASK_RUNNING &&
-                next->cpu == (int)this_cpu()->cpu_id)
-                goto do_switch;
-            next = container_of(next->list.next, task_t, list);
-        }
     }
 
     // No other RUNNING task found — give current a fresh quantum
@@ -1046,13 +1039,15 @@ void task_init()
     this_cpu()->scheduler_ok = 1;
 
     while (1) {
-        // IRQ fallback: poll hardware directly as a last resort.
-        // Under normal operation the IRQ handlers (serial + keyboard)
-        // deliver input via tty_push_input → tty_wake_waiters, so
-        // these polls are no-ops.  They exist solely to prevent a
-        // complete hang if IOAPIC routing or UART IRQ generation
-        // ever fails on real hardware.
-        keyboard_poll();
+        // keyboard_poll() intentionally omitted — the PS/2 IRQ1
+        // handler (keyboard_handler) is the sole input path for
+        // GTK keyboard events.  Polling port 0x60 races with the
+        // ISR and causes character doubling.
+
+        // IRQ fallback: poll UART as last resort.  Under normal
+        // operation the serial ISR delivers input.  This exists
+        // solely to prevent a complete hang if IOAPIC routing
+        // or UART IRQ generation ever fails on real hardware.
         serial_poll();
         schedule();
     }
