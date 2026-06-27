@@ -173,6 +173,13 @@ static int tty_canon_process(tty_t *tty, char c)
 // ═══════════════════════════════════════════════════════
 //  tty_read — blocking read with canonical processing
 // ═══════════════════════════════════════════════════════
+//
+//  Blocking protocol (prevents lost wakeup):
+//    1. Drain cooked ring + poll hardware
+//    2. If no data: enqueue on read_wait, set INTERRUPTIBLE
+//    3. Double-check buffer (IRQ may have fired between 1→2)
+//    4. If still empty: schedule() — sleeps until tty_wake_waiters()
+//    5. On wake: dequeue self (idempotent), loop back to drain
 
 int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
 {
@@ -182,6 +189,7 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
     bool canonical = (tty->lflag & TTY_L_ICANON) != 0;
 
     for (;;) {
+        // ── Return pending partial line from previous read ──
         if (canonical && tty->line_ready && tty->read_pos < tty->line_len) {
             int avail = tty->line_len - tty->read_pos;
             int n = (avail < size) ? avail : size;
@@ -195,7 +203,7 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
             return n;
         }
 
-        // Phase 1: process characters from the cooked ring.
+        // ── Phase 1: drain the cooked ring buffer ──────────
         char c;
         while (tty_cooked_pop(tty, &c)) {
             if (canonical) {
@@ -222,16 +230,37 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
         if (nonblock)
             return 0;
 
+        // ── Phase 2: poll hardware once before sleeping ────
         keyboard_poll();
-
         if (!tty_cooked_empty(tty))
             continue;
 
-        for (volatile int spin = 0; spin < 500; spin++)
-            __asm__ __volatile__("pause");
+        // ── Phase 3: blocking sleep on wait queue ──────────
+        // Enqueue first, THEN check buffer.  If an IRQ fires
+        // between enqueue and the state change, tty_wake_waiters()
+        // already set us RUNNING — but we still catch it via the
+        // double-check below and loop back, avoiding the schedule()
+        // call when data is already available.
+        list_add_to_before(&tty->read_wait, &current->io_wait_node);
+        current->state = TASK_INTERRUPTIBLE;
+
+        // Double-check: data may have arrived after Phase 2
+        // but before we went INTERRUPTIBLE.
+        if (!tty_cooked_empty(tty)) {
+            list_del_init(&current->io_wait_node);
+            current->state = TASK_RUNNING;
+            continue;
+        }
+
+        // Truly sleep — woken by tty_wake_waiters() from IRQ
+        // context when new input arrives.
         schedule();
 
-        continue;
+        // tty_wake_waiters() calls list_del_init on our node,
+        // leaving io_wait_node self-pointing.  If we were woken
+        // by something else (signal, etc.), clean up.
+        if (!list_is_empty(&current->io_wait_node))
+            list_del_init(&current->io_wait_node);
     }
 }
 
