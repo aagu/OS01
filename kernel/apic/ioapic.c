@@ -32,6 +32,29 @@ static inline uint32_t ioapic_read_reg(uint32_t ioapic_phys_base, uint8_t reg)
 }
 
 // ──────────────────────────────────────────────
+//  Diagnostics: dump IOAPIC redirection entries
+// ──────────────────────────────────────────────
+
+void ioapic_dump_entries(void)
+{
+    for (uint32_t i = 0; i < apic_info.ioapic_count; i++) {
+        ioapic_entry_t *ioapic = &apic_info.ioapics[i];
+        serial_printk("IOAPIC[%u]: base=%#010x gsi_base=%u max_redir=%u\n",
+                      i, ioapic->mmio_base, ioapic->gsi_base, ioapic->max_redir);
+        for (uint32_t n = 0; n <= ioapic->max_redir; n++) {
+            uint32_t low  = ioapic_read_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(n));
+            uint32_t high = ioapic_read_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(n) + 1);
+            uint64_t entry = ((uint64_t)high << 32) | low;
+            serial_printk("  [%2u] %#018lx", n, entry);
+            if (!(low & IOAPIC_RED_MASK))
+                serial_printk(" (enabled vec=%#x dest=%u)",
+                              low & 0xFF, (high >> 24) & 0xFF);
+            serial_printk("\n");
+        }
+    }
+}
+
+// ──────────────────────────────────────────────
 //  Find the I/O APIC and GSI for a given IRQ vector
 // ──────────────────────────────────────────────
 

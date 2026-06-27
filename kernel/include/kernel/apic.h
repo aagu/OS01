@@ -193,6 +193,9 @@ void lapic_write(uint32_t offset, uint32_t value);
 // Get the I/O APIC hw_int_controller_t for use with register_irq()
 hw_int_controller_t * get_ioapic_controller(void);
 
+// Diagnostics: print all IOAPIC redirection entries
+void ioapic_dump_entries(void);
+
 // Look up the GSI for a given ISA IRQ (applying ISO overrides)
 uint32_t isa_irq_to_gsi(uint8_t isa_irq);
 
