@@ -232,6 +232,7 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
 
         // ── Phase 2: poll hardware once before sleeping ────
         keyboard_poll();
+        serial_poll();
         if (!tty_cooked_empty(tty))
             continue;
 
@@ -265,6 +266,7 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
         // Poll hardware once after waking — fallback if IRQs
         // are not delivering input (e.g. wrong IOAPIC routing).
         keyboard_poll();
+        serial_poll();
     }
 }
 
