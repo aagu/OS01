@@ -248,6 +248,12 @@ void schedule(void);
 uint64_t do_exit(uint64_t exit_code);
 int64_t do_waitpid(int64_t pid, int *user_status, int options);
 
+// ── Kernel thread API ──────────────────────────────────────
+// Create a PF_KTHREAD task that runs fn(arg), then do_exit(0).
+// Returns the new task_t or NULL on failure.
+struct task_struct *create_kthread(uint64_t (*fn)(uint64_t), uint64_t arg,
+                                   const char *name);
+
 /* User stack layout (separate 2MB page at 0x800000).
  * The 2MB page at 0x600000 is left unmapped as a stack guard —
  * overflow past the stack bottom triggers #PF instead of silent

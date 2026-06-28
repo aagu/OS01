@@ -73,6 +73,8 @@ typedef struct { unsigned long lock; } spinlock_T;
 static inline void spin_init(spinlock_T *l) { l->lock = 1; }
 static inline void spin_lock(spinlock_T *l) { (void)l; }
 static inline void spin_unlock(spinlock_T *l) { (void)l; }
+static inline uint64_t spin_lock_irqsave(spinlock_T *l) { (void)l; return 0; }
+static inline void spin_unlock_irqrestore(spinlock_T *l, uint64_t f) { (void)l; (void)f; }
 
 /* I/O port stubs */
 static inline uint8_t inb(uint16_t p) { (void)p; return 0; }

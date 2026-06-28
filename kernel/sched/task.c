@@ -98,7 +98,8 @@ void schedule(void)
     if (current->counter > 0)
         current->counter--;
 
-    if (current->state == TASK_RUNNING && current->counter > 0) {
+    if (current->state == TASK_RUNNING && current->counter > 0 &&
+        current != this_cpu()->idle) {
         this_cpu()->need_resched = 0;
         return;
     }
@@ -186,6 +187,7 @@ void schedule(void)
     while (next != &init_task_union.task) {
         if (next->state == TASK_RUNNING &&
             next->cpu == (int)this_cpu()->cpu_id &&
+            next != this_cpu()->idle &&
             next->counter > best_counter) {
             best_counter = next->counter;
             best = next;

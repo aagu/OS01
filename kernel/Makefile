@@ -11,6 +11,7 @@ KERNEL_SOURCES := \
 	intr/irq.c \
 	intr/softirq.c \
 	intr/dispatch.c \
+	intr/wait.c \
 	kernel/printk.c \
 	kernel/panic.c \
 	kernel/trace.c \
@@ -35,7 +36,8 @@ KERNEL_SOURCES := \
 	fs/procfs.c \
 	fs/fat.c \
 	fs/elf.c \
-	fs/file.c
+	fs/file.c \
+	completion.c \
 
 KERNEL_SOURCES += $(wildcard driver/*.c)
 KERNEL_SOURCES += $(wildcard tty/*.c)

@@ -259,10 +259,14 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
         // context when new input arrives.
         schedule();
 
-        // Fatal signal check: Ctrl-C / kill may have woken us.
-    // Non-fatal signals (SIGCHLD etc.) are ignored — continue
-    // waiting for input.
-    if (signal_pending_fatal()) {
+        // ── Deliver non-fatal signals inline ────────────────
+        // SIGCHLD from do_exit→direct switch_to(parent) is
+        // never delivered by check_signal (the direct switch
+        // bypasses ret_from_intr).  do_signal_delivery(NULL)
+        // clears the bit; signal_pending_fatal() detects kill.
+        do_signal_delivery(NULL);
+
+        if (signal_pending_fatal()) {
             if (!list_is_empty(&current->io_wait_node))
                 list_del_init(&current->io_wait_node);
             return 0;

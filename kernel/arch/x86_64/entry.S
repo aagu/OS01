@@ -87,10 +87,10 @@ do_resched:
 #define TASK_SIGNAL_OFFSET  72   /* offsetof(task_t, signal) — keep in sync with task.h */
 
 check_signal:
-	# Only deliver signals when returning to ring 3.
-	testq	$3,	CS(%rsp)
-	jz	RESTORE_ALL
-	# GET_CURRENT via RSP masking → %rbx
+	# Deliver pending signals regardless of CPL.  When a
+	# process sleeps in kernel mode (tty_read->schedule),
+	# the timer ISR fires in ring 0.  Restricting to
+	# ring 3 prevents SIGCHLD from being cleared.
 	movq	$-32768,	%rbx
 	andq	%rsp,		%rbx
 	# current->signal == 0?  Skip if no pending signals.

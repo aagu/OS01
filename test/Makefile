@@ -40,7 +40,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_fat32_basic.elf \
     $(TEST_BLD)/test_pmm_basic.elf \
     $(TEST_BLD)/test_slab_basic.elf \
-    $(TEST_BLD)/test_elf_validate.elf
+    $(TEST_BLD)/test_elf_validate.elf \
+    $(TEST_BLD)/test_wait_basic.elf
 
 .PHONY: all clean run
 
@@ -148,6 +149,10 @@ $(TEST_BLD)/test_slab_basic.elf: $(TEST_BLD)/test_slab_basic.o $(LIBC_OBJS) $(MO
 
 $(TEST_BLD)/test_elf_validate.elf: $(TEST_BLD)/test_elf_validate.o $(LIBC_OBJS) $(MOCK_OBJS)
 	$(HOST_CC) -o $@ $^
+
+# standalone test (no kernel/libc deps)
+$(TEST_BLD)/test_wait_basic.elf: $(TEST_BLD)/test_wait_basic.o
+	$(HOST_CC) -o $@ $<
 
 clean:
 	rm -rf $(TEST_BLD)
