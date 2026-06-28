@@ -57,4 +57,9 @@
 #define SYS_sync            40
 #define SYS_reboot          41
 
+// ── reboot(2) commands ──────────────────────────────────────
+#define RB_AUTOBOOT    0x01234567
+#define RB_POWER_OFF   0x4321FEDC
+#define RB_HALT_SYSTEM 0xCDEF0123
+
 #endif

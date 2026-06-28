@@ -8,6 +8,7 @@
 #include <kernel/arch/x86_64/asm.h>
 #include <kernel/task.h>
 #include <kernel/percpu.h>
+#include <kernel/apic.h>
 #include <kernel/slab.h>
 #include <driver/serial.h>
 #include <errno.h>
@@ -413,6 +414,8 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 		serial_printk("do_page_fault(14) user err=%p rip=%p cr2=%p pid=%d\n",
 		              error_code, regs->rip, cr2,
 		              t ? t->pid : -1);
+		color_printk(RED, BLACK, "PF: pid=%d rip=%p cr2=%p err=%p\n",
+		             t ? t->pid : -1, regs->rip, cr2, error_code);
 		serial_printk(" PF: RAX=%p RBX=%p RCX=%p RDX=%p\n",
 		              regs->rax, regs->rbx, regs->rcx, regs->rdx);
 		serial_printk(" PF: RSI=%p RDI=%p RBP=%p RSP=%p\n",
@@ -1698,24 +1701,27 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         break;
     }
     case SYS_reboot: {
-        // reboot(int cmd) — reboot/poweroff/halt the system
         int cmd = (int)(int64_t)regs->rdi;
-        (void)cmd;  // MVP: ignore cmd, always reboot
 
         serial_printk("syscall: reboot(cmd=%d) from pid=%d\n",
                       cmd, (int)current->pid);
 
-        // Pulse CPU reset via keyboard controller
-        // Wait for keyboard controller to be ready
-        while ((inb(0x64) & 0x02) != 0) { /* wait */ }
-        outb(0xFE, 0x64);  // pulse reset line
+        // ── ACPI power-off ─────────────────────────────────
+        if (cmd == RB_POWER_OFF && apic_info.pm1a_port) {
+            // SLP_EN (bit 13) toggles sleep.  SLP_TYPa=0 for
+            // S5 on QEMU q35 (the \_S5 object reports {0, 0}).
+            serial_printk("ACPI: powering off via PM1a=%#x\n",
+                          (unsigned)apic_info.pm1a_port);
+            outw(0x2000, apic_info.pm1a_port);
+            // Block — platform powers off asynchronously.
+            while (1) __asm__ __volatile__("hlt");
+        }
 
-        // If reset fails, triple-fault as last resort
-        __asm__ __volatile__(
-            "lidtq 0 \n\t"  // load zero-length IDT
-            "int3     \n\t" // trigger triple fault
-        );
-        while (1) { __asm__ __volatile__("hlt"); }
+        // ── ACPI reboot / halt fallback ────────────────────
+        // Keyboard controller pulse-reset ($0xFE → port $0x64)
+        while ((inb(0x64) & 0x02) != 0) { /* wait */ }
+        outb(0xFE, 0x64);
+        while (1) __asm__ __volatile__("hlt");
     }
     default:
         serial_printk("syscall: unknown nr=%d from pid=%d\n",

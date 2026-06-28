@@ -295,7 +295,7 @@ int acpi_parse(uint64_t rsdp_phys)
     serial_printk("APIC: %s at %p, %u entries\n",
                   use_xsdt ? "XSDT" : "RSDT", sdt, entry_count);
 
-    // Walk entries looking for MADT
+    // Walk entries looking for MADT and FADT
     for (uint32_t i = 0; i < entry_count; i++) {
         uint64_t entry_phys;
 
@@ -319,12 +319,23 @@ int acpi_parse(uint64_t rsdp_phys)
 
         if (memcmp(table->Signature, "APIC", 4) == 0) {
             parse_madt((struct MADT_HEADER *)table);
-            return 1;   // success
+        } else if (memcmp(table->Signature, "FACP", 4) == 0) {
+            // FADT: store PM1a Control port for ACPI shutdown
+            // PM1a_CNT_BLK is at offset 64 in the FADT (v1+)
+            uint32_t pm1a = *(uint32_t *)((uint8_t *)table + 64);
+            if (pm1a) {
+                apic_info.pm1a_port = (uint16_t)(pm1a & 0xFFFF);
+                serial_printk("APIC: FADT PM1a_CNT_BLK=%#x (port=%#x)\n",
+                              pm1a, (unsigned)apic_info.pm1a_port);
+            }
         }
     }
 
-    serial_printk("APIC: MADT not found in ACPI tables\n");
-    return 0;
+    if (apic_info.lapic_count == 0) {
+        serial_printk("APIC: MADT not found — no LAPIC data\n");
+        return 0;
+    }
+    return 1;
 }
 
 // ──────────────────────────────────────────────

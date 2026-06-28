@@ -272,20 +272,13 @@ static void do_shutdown(void)
     // 5. Sync filesystems
     sync();
 
-    // 6. Reboot
-    printf("init: rebooting...\n");
-    {
-        int pid = fork();
-        if (pid == 0) {
-            // Child: call reboot (avoids init process exit panic)
-            reboot(RB_AUTOBOOT);
-            // If reboot returns, exit
-            exit(0);
-        }
-        // Parent: wait briefly then exit
-        for (volatile int z = 0; z < 50000000; z++) { }
-        exit(0);
-    }
+    // 6. Power off (if available) or reboot
+    printf("init: powering off...\n");
+    reboot(RB_POWER_OFF);
+    // If poweroff is not available, fall through to reboot
+    printf("init: poweroff failed, rebooting...\n");
+    reboot(RB_AUTOBOOT);
+    // unreachable
 }
 
 // ── Add a hardcoded fallback action ─────────────────────────

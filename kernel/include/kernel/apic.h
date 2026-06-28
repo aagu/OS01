@@ -165,6 +165,7 @@ typedef struct {
     ioapic_entry_t ioapics[MAX_IOAPICS];
     uint32_t iso_count;
     iso_override_t isos[MAX_ISO_OVERRIDES];
+    uint16_t pm1a_port;           // ACPI PM1a Control port (0 = not found)
 } apic_info_t;
 
 extern apic_info_t apic_info;

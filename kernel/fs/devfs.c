@@ -1,6 +1,7 @@
 #include <fs/devfs.h>
 #include <fs/vfs.h>
 #include <kernel/printk.h>
+#include <kernel/arch/x86_64/cpu.h>
 #include <driver/serial.h>
 #include <kernel/tty.h>
 #include <string.h>
@@ -95,6 +96,26 @@ static int serial_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *
     return (int)size;
 }
 
+// ── /dev/random — pseudorandom data from rdtsc() ──────────
+// Not cryptographically secure.  Mixed with the low bits of
+// TSC on each byte for per-byte variation.
+static int random_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
+{
+    (void)node; (void)offset;
+    if (!buffer || size == 0) return 0;
+    for (uint64_t i = 0; i < size; i++) {
+        uint64_t tsc = rdtsc();
+        ((uint8_t *)buffer)[i] = (uint8_t)(tsc ^ (tsc >> 13) ^ (tsc >> 31));
+    }
+    return (int)size;
+}
+
+static int random_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
+{
+    (void)node; (void)offset; (void)buffer;
+    return (int)size;  // write accepted, data ignored (like Linux)
+}
+
 // ── Dispatch read/write via device index stored in node->fs_data ──
 
 static int devfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
@@ -173,6 +194,7 @@ void devfs_init(void)
     // Register built-in character devices
     devfs_register_chrdev("null",   NULL, null_read,   null_write);
     devfs_register_chrdev("zero",   NULL, zero_read,   null_write);  // zero write = discard
+    devfs_register_chrdev("random", NULL, random_read, random_write);
     devfs_register_chrdev("serial", NULL, serial_read, serial_write);
     devfs_register_chrdev("tty",    NULL, dev_tty_read, dev_tty_write);
 }
