@@ -72,7 +72,7 @@ check_resched:
 	# GS base is set to &percpu_data[cpu] via IA32_GS_BASE MSR.
 	cmpq	$0,	%gs:PERCPU_NEED_RESCHED
 	jne	do_resched
-	jmp	RESTORE_ALL
+	jmp	check_signal
 
 softirq_handler:
 	callq	do_softirq
@@ -82,7 +82,27 @@ do_resched:
 	# Clear the per-CPU flag and invoke the scheduler
 	movq	$0,	%gs:PERCPU_NEED_RESCHED
 	callq	schedule
-	jmp	RESTORE_ALL
+	jmp	check_signal
+
+#define TASK_SIGNAL_OFFSET  72   /* offsetof(task_t, signal) — keep in sync with task.h */
+
+check_signal:
+	# Only deliver signals when returning to ring 3.
+	testq	$3,	CS(%rsp)
+	jz	RESTORE_ALL
+	# GET_CURRENT via RSP masking → %rbx
+	movq	$-32768,	%rbx
+	andq	%rsp,		%rbx
+	# current->signal == 0?  Skip if no pending signals.
+	cmpq	$0,	TASK_SIGNAL_OFFSET(%rbx)
+	je	RESTORE_ALL
+	# Deliver pending signals.  do_signal_delivery may modify the
+	# pt_regs frame (future user-stack handler delivery).  If it
+	# returns, loop to handle the next signal bit — multi-signal
+	# delivery (e.g., SIGINT + SIGTERM in one pass).
+	movq	%rsp,	%rdi
+	call	do_signal_delivery
+	jmp	check_signal
 
 ENTRY(divide_error)
 	pushq	$0

@@ -543,6 +543,83 @@ void do_virtualization_exception(pt_regs_t * regs, uint64_t error_code)
 #define USER_CODE_ADDR 0x400000UL
 #define USER_PAGE_SIZE 0x200000UL  // 2MB
 
+// ── Signal delivery ──────────────────────────────────────────
+// Dispatch pending signals for current.  Called from:
+//   - do_system_call (after every syscall returning to ring 3)
+//   - ret_from_intr  (after every interrupt returning to ring 3)
+//
+// Processes signals in order (1..NSIG-1).  SIG_DFL behaviour:
+//   ignore  → SIGCHLD, SIGURG, SIGWINCH, SIGCONT, SIGTSTP/TTIN/TTOU
+//   kill    → everything else (do_exit, never returns)
+//
+// Registered handlers clear the pending bit but don't yet
+// deliver to user space (future work).
+
+void do_signal_delivery(pt_regs_t *regs)
+{
+    (void)regs;  // unused for now; future user-stack delivery uses it
+
+    uint64_t pending = current->signal;
+    if (!pending)
+        return;
+
+    for (int sig = 1; sig < NSIG; sig++) {
+        if (!(pending & (1ULL << sig)))
+            continue;
+
+        void (*handler)(int) = current->sighand[sig].sa_handler;
+
+        if (handler == SIG_IGN) {
+            current->signal &= ~(1ULL << sig);
+            continue;
+        }
+
+        if (handler == SIG_DFL) {
+            current->signal &= ~(1ULL << sig);
+            switch (sig) {
+            case SIGCHLD: case SIGURG: case SIGWINCH:
+            case SIGCONT:
+                break;   // ignore by default
+            case SIGTSTP: case SIGTTIN: case SIGTTOU:
+                break;   // stop — not implemented
+            default:
+                // Terminate (SIGINT, SIGTERM, SIGKILL, etc.)
+                serial_printk("task %d killed by signal %d (default)\n",
+                              (int)current->pid, sig);
+                do_exit((uint64_t)sig << 8);
+                return;  // unreachable — do_exit switches away
+            }
+            continue;
+        }
+
+        // Real handler registered — clear pending bit.
+        // Full user-stack frame delivery is future work.
+        current->signal &= ~(1ULL << sig);
+    }
+}
+
+int signal_pending_fatal(void)
+{
+    uint64_t pending = current->signal;
+    if (!pending)
+        return false;
+
+    for (int sig = 1; sig < NSIG; sig++) {
+        if (!(pending & (1ULL << sig)))
+            continue;
+        if (current->sighand[sig].sa_handler != SIG_DFL)
+            continue;
+        switch (sig) {
+        case SIGCHLD: case SIGURG: case SIGWINCH:
+        case SIGCONT: case SIGTSTP: case SIGTTIN: case SIGTTOU:
+            continue;
+        default:
+            return true;
+        }
+    }
+    return false;
+}
+
 void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused)))
 {
     // Linux x86_64 ABI translation (for busybox etc.)
@@ -1475,6 +1552,11 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         while (jiffies < target) {
             current->state = TASK_INTERRUPTIBLE;
             schedule();
+            // A signal (e.g. SIGINT via kill) may have woken
+            // us early.  Break out so do_signal_delivery can
+            // process it on syscall return.
+            if (current->signal)
+                break;
         }
         current->state = TASK_RUNNING;
         regs->rax = 0;
@@ -1559,6 +1641,13 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
 
         // Set the pending signal bit
         target->signal |= (1ULL << sig);
+
+        // Wake the target if it's sleeping interruptibly —
+        // otherwise the signal won't take effect until the
+        // target is woken by I/O or a timer tick.
+        if (target->state == TASK_INTERRUPTIBLE)
+            target->state = TASK_RUNNING;
+
         regs->rax = 0;
         break;
     }
@@ -1591,8 +1680,8 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             oldact->sa_mask    = current->sighand[signum].sa_mask;
         }
 
-        // Install new handler (SIGKILL cannot be caught or ignored)
-        if (act && signum != SIGKILL) {
+        // Install new handler (SIGKILL and SIGSTOP cannot be caught or ignored)
+        if (act && signum != SIGKILL && signum != SIGSTOP) {
             current->sighand[signum].sa_handler  = act->sa_handler;
             current->sighand[signum].sa_flags    = act->sa_flags;
             current->sighand[signum].sa_restorer = act->sa_restorer;
@@ -1635,52 +1724,12 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         break;
     }
 
-    // ── Signal delivery: TODO after user-stack delivery is implemented ─
-#if 0
-    if ((regs->cs & 3) && current->signal) {
-        uint64_t pending = current->signal;
-
-        for (int sig = 1; sig < NSIG; sig++) {
-            if (!(pending & (1ULL << sig)))
-                continue;
-
-            void (*handler)(int) = current->sighand[sig].sa_handler;
-
-            if (handler == SIG_IGN) {
-                // Explicitly ignored — just clear the pending bit
-                current->signal &= ~(1ULL << sig);
-                continue;
-            }
-
-            if (handler == SIG_DFL) {
-                // Default action
-                current->signal &= ~(1ULL << sig);
-                switch (sig) {
-                case SIGCHLD: case SIGURG: case SIGWINCH:
-                case SIGCONT:
-                    // Ignore by default
-                    break;
-                case SIGTSTP: case SIGTTIN: case SIGTTOU:
-                    // Stop (not implemented — ignore)
-                    break;
-                default:
-                    // Terminate (SIGTERM, SIGINT, SIGKILL, etc.)
-                    serial_printk("task %d killed by signal %d (default)\n",
-                                  (int)current->pid, sig);
-                    do_exit((uint64_t)sig << 8);
-                    // do_exit never returns — switches away
-                    return;
-                }
-                continue;
-            }
-
-            // Real handler registered — clear pending bit
-            // (Full user-stack frame delivery is a future step;
-            //  for now, signal-aware code uses waitpid/polling.)
-            current->signal &= ~(1ULL << sig);
-        }
-    }
-#endif
+    // ── Signal delivery ──────────────────────────────────────
+    // Runs after every syscall that returns to user mode.
+    // For signals that kill (SIG_DFL + fatal), do_exit() calls
+    // switch_to() and never returns.
+    if (regs->cs & 3)
+        do_signal_delivery(regs);
 }
 
 void sys_vector_install()

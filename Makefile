@@ -94,6 +94,7 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel/kernel.bin user user/busybox.elf
 	mcopy -i $@ kernel/kernel.bin ::/
 	mcopy -i $@ user/init.elf ::/init.elf
 	mcopy -i $@ user/spin.elf ::/spin.elf
+	mcopy -i $@ user/sigtest.elf ::/sigtest.elf
 	mcopy -i $@ user/busybox.elf ::/busybox.elf
 ifneq (,$(wildcard config/config.txt))
 	mcopy -i $@ config/config.txt ::/

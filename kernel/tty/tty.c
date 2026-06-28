@@ -2,6 +2,7 @@
 #include <kernel/task.h>
 #include <kernel/printk.h>
 #include <kernel/percpu.h>
+#include <kernel/arch/x86_64/trap.h>
 #include <driver/serial.h>
 #include <driver/keyboard.h>
 #include <kernel.h>
@@ -149,6 +150,7 @@ static int tty_canon_process(tty_t *tty, char c)
     }
 
     if (c == 0x03 && (tty->lflag & TTY_L_ISIG)) {
+        current->signal |= (1ULL << SIGINT);
         tty->line_len = 0;
         tty->line_ready = false;
         if (tty->lflag & TTY_L_ECHO) {
@@ -233,6 +235,15 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
         if (nonblock)
             return 0;
 
+        // ── Signal check before blocking sleep ───────────────
+    // A fatal signal (e.g. SIGINT from Ctrl-C) may have been
+    // set on current during Phase 1.  Return 0 (EOF) so the
+    // signal delivery path can kill the process.  Non-fatal
+    // signals (SIGCHLD etc.) are ignored here — they will be
+    // handled on the next syscall return.
+    if (signal_pending_fatal())
+            return 0;
+
         // ── Phase 2: blocking sleep on wait queue ──────────
         current->state = TASK_INTERRUPTIBLE;
         list_add_to_before(&tty->read_wait, &current->io_wait_node);
@@ -247,6 +258,15 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
         // Truly sleep — woken by tty_wake_waiters() from IRQ
         // context when new input arrives.
         schedule();
+
+        // Fatal signal check: Ctrl-C / kill may have woken us.
+    // Non-fatal signals (SIGCHLD etc.) are ignored — continue
+    // waiting for input.
+    if (signal_pending_fatal()) {
+            if (!list_is_empty(&current->io_wait_node))
+                list_del_init(&current->io_wait_node);
+            return 0;
+        }
 
         // tty_wake_waiters() calls list_del_init on our node,
         // leaving io_wait_node self-pointing.  If we were woken

@@ -797,6 +797,19 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
         current->mm = NULL;
     }
 
+    // 7.5 POSIX: exec() resets caught signal handlers to SIG_DFL.
+    // SIG_IGN is supposed to survive exec, but shells (ash) set
+    // SIGINT to SIG_IGN to protect themselves from Ctrl-C.  A
+    // forked child inherits SIG_IGN, and with POSIX-correct exec
+    // SIG_IGN survives — leaving the new process immune to Ctrl-C.
+    //
+    // Reset ALL handlers to SIG_DFL unconditionally.  This is what
+    // Linux does for several signals (SIGCHLD is always reset on
+    // exec, even if SIG_IGN), and it's the pragmatic fix for the
+    // shell-child-signal-inheritance problem.
+    for (int sig = 1; sig < NSIG; sig++)
+        current->sighand[sig].sa_handler = SIG_DFL;
+
     // 8. Install new mm and page table
     current->mm = new_mm;
     current->thread->cr3 = (uint64_t)new_mm->pml4;
@@ -906,6 +919,7 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
 
     tsk->stack_alloc_base = raw_alloc;
     *tsk = *current;
+    tsk->signal = 0;   // child must not inherit parent's pending signals
 
     list_init(&tsk->list);
     list_add_to_before(&init_task_union.task.list, &tsk->list);
