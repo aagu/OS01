@@ -100,6 +100,8 @@ typedef struct task_struct
     int64_t priority; // priority, used in priority scheduling
     uint32_t cpu; // CPU affinity — which CPU owns this task (for SMP)
 
+    void *fpu_save; // 512-byte FXSAVE/FXRSTOR area (16-byte aligned)
+
     void *stack_alloc_base; // original malloc ptr (before STACK_SIZE alignment)
 
     // ── File descriptor table ──────────────────────────

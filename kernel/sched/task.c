@@ -42,6 +42,27 @@ void __switch_to(task_t *prev, task_t *next)
     if (next->thread->cr3 && next->thread->cr3 != prev->thread->cr3) {
         __asm__ __volatile__("movq %0, %%cr3" :: "r"(next->thread->cr3) : "memory");
     }
+
+    // Save/restore FPU/SSE state.  The kernel never uses FPU
+    // (-mno-sse -mno-80387), but user programs may.  clts ensures
+    // CR0.TS=0 so fxsave/fxrstor don't #NM.
+    // fpu_save is a raw malloc ptr; align to 16 bytes for FXSAVE.
+    if (prev->fpu_save) {
+        uint64_t area = ((uint64_t)prev->fpu_save + 15) & ~15ULL;
+        __asm__ __volatile__(
+            "clts                \n\t"
+            "fxsave64 (%0)       \n\t"
+            :: "r"(area) : "memory"
+        );
+    }
+    if (next->fpu_save) {
+        uint64_t area = ((uint64_t)next->fpu_save + 15) & ~15ULL;
+        __asm__ __volatile__(
+            "clts                \n\t"
+            "fxrstor64 (%0)      \n\t"
+            :: "r"(area) : "memory"
+        );
+    }
 }
 
 // ── Preemption flag ──────────────────────────────────────
@@ -150,6 +171,8 @@ void schedule(void)
             kfree(t->thread);
         if (t->files)
             files_free(t->files);
+        if (t->fpu_save)
+            kfree(t->fpu_save);
     }
 
     // ── Priority scan (inside lock) ──────────────────────
@@ -459,6 +482,23 @@ __asm__(
 
 #define USER_CODE_ADDR   0x400000UL
 
+// ── FPU helper ──────────────────────────────────────────────
+// Alloc a 512+15 byte buffer for FXSAVE/FXRSTOR.  The returned
+// pointer is the raw malloc block (for kfree).  Users must align
+// it to 16 bytes before passing to fxsave64/fxrstor64.
+// Sets FCW=0x037F (default x87 control word) and MXCSR=0x1F80
+// (default SSE control/status).
+static void *fpu_area_alloc(void)
+{
+    char *raw = (char *)malloc(512 + 16);
+    if (!raw) return NULL;
+    char *aligned = (char *)(((uint64_t)raw + 15) & ~15ULL);
+    memset(aligned, 0, 512);
+    *(uint16_t *)(aligned + 0)  = 0x037F;
+    *(uint16_t *)(aligned + 24) = 0x1F80;
+    return raw;  // raw ptr — caller aligns before FXSAVE/RSTOR
+}
+
 // ── spawn_user_task(path) ──────────────────────────────────
 // Loads an ELF from the filesystem, creates a new user task,
 // and adds it to the scheduler. Returns the new task's PID or -1 on error.
@@ -519,6 +559,9 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     list_init(&tsk->list);
     list_add_to_before(&init_task_union.task.list, &tsk->list);
     tsk->thread = thd;
+
+    // FPU save area — user tasks may use float/SSE
+    tsk->fpu_save = fpu_area_alloc();
 
     // 4. Create per-process page table
     uint64_t *user_pml4 = (uint64_t *)vmm_alloc_map();  // 4KB zeroed PML4
@@ -940,6 +983,12 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
     tsk->priority = 3;
     tsk->cpu = cpu_id();                    // same CPU as parent
     tsk->thread = thd;
+
+    // FPU: child gets a fresh FPU save area.  The parent's FPU
+    // registers are in hardware (not in the fpu_save buffer), so
+    // copying the area would give stale data.  A fresh area is
+    // correct for the common case (child execs immediately).
+    tsk->fpu_save = fpu_area_alloc();
 
     // ── Inherit fd table (deep copy — refcount++) ──────────
     if (current->files)
