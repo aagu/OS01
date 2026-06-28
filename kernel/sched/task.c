@@ -17,8 +17,6 @@
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
-#include <driver/serial.h>
-#include <driver/keyboard.h>
 #include <uapi/time.h>
 
 void __switch_to(task_t *prev, task_t *next)
@@ -1038,17 +1036,19 @@ void task_init()
     current->state = TASK_RUNNING;
     this_cpu()->scheduler_ok = 1;
 
+    // ── Idle loop ────────────────────────────────────────────
+    // hlt pauses the CPU until the next interrupt (timer tick,
+    // keyboard IRQ1, serial IRQ4).  The timer ISR sets
+    // need_resched; ret_from_intr calls schedule() before iretq.
+    // If a task was woken we switch to it; otherwise we loop
+    // back to hlt.
+    //
+    // serial_poll() (IRQ fallback) moved to pit_handler — runs
+    // at 100 Hz on every timer tick, so the serial input path
+    // still has a fallback even if IOAPIC routing fails.
     while (1) {
-        // keyboard_poll() intentionally omitted — the PS/2 IRQ1
-        // handler (keyboard_handler) is the sole input path for
-        // GTK keyboard events.  Polling port 0x60 races with the
-        // ISR and causes character doubling.
-
-        // IRQ fallback: poll UART as last resort.  Under normal
-        // operation the serial ISR delivers input.  This exists
-        // solely to prevent a complete hang if IOAPIC routing
-        // or UART IRQ generation ever fails on real hardware.
-        serial_poll();
-        schedule();
+        __asm__ __volatile__("hlt");
+        if (this_cpu()->need_resched)
+            schedule();
     }
 }

@@ -9,6 +9,7 @@
 #include <kernel/softirq.h>
 #include <kernel/task.h>
 #include <kernel/percpu.h>
+#include <driver/serial.h>
 
 hw_int_controller_t pit_controller =
 {
@@ -26,6 +27,12 @@ void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attri
     // Request rescheduling on every timer tick — schedule() manages
     // per-task quantum counters and picks the next task.
     this_cpu()->need_resched = 1;
+
+    // IRQ fallback: poll UART on every tick.  Under normal
+    // operation the serial ISR delivers input.  This exists
+    // solely to prevent a complete hang if IOAPIC routing
+    // or UART IRQ generation ever fails on real hardware.
+    serial_poll();
 
     if ((container_of(list_next(&timer_list_head.list), timer_t, list)->expire_jiffies <= jiffies))
         set_softirq_status(TIMER_SIRQ);

@@ -10,15 +10,19 @@
 // ═══════════════════════════════════════════════════════════
 //  Ring buffer for received data
 // ═══════════════════════════════════════════════════════════
-// Producer: serial IRQ handler (COM1 IRQ4).
-// Consumer: read_serial() called from kernel tasks.
-// SPSC: head written only by IRQ, tail only by task context.
+// Producers: serial ISR (COM1 IRQ4, on BSP) and serial_poll()
+//            (pit_handler IRQ0, on BSP).  Both run in IRQ
+//            context on the same core — interrupt gates are
+//            serialising (IF=0 on entry), so they're mutually
+//            exclusive.  No per-Vector lock needed.
+// Consumer:  read_serial() called from kernel tasks.
+// SPSC variant: two mutually-exclusive writers, one reader.
 
 #define SERIAL_RING_SIZE 256
 
 static volatile char serial_rx_ring[SERIAL_RING_SIZE];
-static volatile int  serial_rx_head;    // IRQ writes here
-static volatile int  serial_rx_tail;    // read_serial reads here
+static volatile int  serial_rx_head;    // writer: serial ISR + serial_poll (BSP, mutually exclusive)
+static volatile int  serial_rx_tail;    // reader: read_serial (task context)
 
 static inline bool serial_ring_full(void)
 {
@@ -124,8 +128,10 @@ void init_serial_irq(void)
 // ═══════════════════════════════════════════════════════════
 
 // Drain all available bytes from the UART and push to the
-// console TTY.  Called from idle loop; disables IRQs around
-// the read to avoid racing with the serial ISR.
+// console TTY.  Called from pit_handler (IRQ0, BSP, 100 Hz)
+// as a fallback for the serial ISR.  Since this and
+// serial_handler both fire on the BSP under interrupt gates
+// (IF=0), they are mutually exclusive — no lock needed.
 void serial_poll(void)
 {
     if (!serial_tty) return;

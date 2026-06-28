@@ -1,6 +1,7 @@
 #include <kernel/tty.h>
 #include <kernel/task.h>
 #include <kernel/printk.h>
+#include <kernel/percpu.h>
 #include <driver/serial.h>
 #include <driver/keyboard.h>
 #include <kernel.h>
@@ -66,6 +67,9 @@ static void tty_wake_waiters(tty_t *tty)
         task_t *t = container_of(node, task_t, io_wait_node);
         t->state = TASK_RUNNING;
     }
+    // Notify the scheduler that a task was woken — otherwise the
+    // current CPU may sit in hlt (idle) until the next timer tick.
+    this_cpu()->need_resched = 1;
 }
 
 // ═══════════════════════════════════════════════════════
