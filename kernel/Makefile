@@ -32,6 +32,7 @@ KERNEL_SOURCES := \
 	block/blockdev.c \
 	fs/vfs.c \
 	fs/devfs.c \
+	fs/procfs.c \
 	fs/fat.c \
 	fs/elf.c \
 	fs/file.c

@@ -8,6 +8,9 @@
 *.ipch
 *.S
 *.EFI
+.claude/
+.codegraph/
+.hermes/
 sysroot/*
 toolchain/*
 qemu-8.2.1/*
