@@ -152,15 +152,27 @@ void schedule(void)
             files_free(t->files);
     }
 
-    // ── Round-robin scan (inside lock) ─────────────────
+    // ── Priority scan (inside lock) ──────────────────────
+    // Pick the RUNNING task with the highest remaining quantum
+    // on this CPU.  Higher-priority tasks get larger initial
+    // counter values and are selected first; as their counter
+    // decays they naturally yield to others.
+    task_t *best = NULL;
+    int64_t best_counter = -1;
     next = container_of(init_task_union.task.list.next, task_t, list);
     while (next != &init_task_union.task) {
         if (next->state == TASK_RUNNING &&
-            next->cpu == (int)this_cpu()->cpu_id) {
-            spin_unlock_irqrestore(&reap_lock, reap_flags);
-            goto do_switch;
+            next->cpu == (int)this_cpu()->cpu_id &&
+            next->counter > best_counter) {
+            best_counter = next->counter;
+            best = next;
         }
         next = container_of(next->list.next, task_t, list);
+    }
+    if (best) {
+        next = best;
+        spin_unlock_irqrestore(&reap_lock, reap_flags);
+        goto do_switch;
     }
 
     spin_unlock_irqrestore(&reap_lock, reap_flags);
