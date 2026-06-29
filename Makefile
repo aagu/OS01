@@ -27,7 +27,7 @@ all: disk.img
 # ── Bootloader ──────────────────────────────────────────
 
 boot/uefi/BOOTX64.EFI: boot/uefi/main.c
-	make -C boot/uefi CFLAGS="-nostdlibinc -ffreestanding -fshort-wchar -fno-strict-aliasing -fno-stack-protector -fno-stack-check -I. -I./uefi -Dx86_64 -DHAVE_USE_MS_ABI -mno-red-zone -maccumulate-outgoing-args -Wno-builtin-declaration-mismatch -fpic -fPIC" USE_GCC=
+	make -C boot/uefi CFLAGS="-nostdlibinc -ffreestanding -fshort-wchar -fno-strict-aliasing -fno-stack-protector -fno-stack-check -I. -I./uefi -Dx86_64 -DHAVE_USE_MS_ABI -mno-red-zone -Wno-builtin-declaration-mismatch -fpic -fPIC" USE_GCC=
 
 boot/uefi/OVMF.fd:
 	make -C boot/uefi OVMF.fd
