@@ -3,5 +3,5 @@
 	url = https://gitlab.com/bztsrc/posix-uefi.git
 [submodule "thirdpart/busybox-1.36.1"]
 	path = thirdpart/busybox-1.36.1
-	url = git@github.com:aagu/OS01.git
+	url = https://github.com/aagu/OS01.git
 	branch = busybox-1.36.1
