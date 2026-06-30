@@ -45,6 +45,10 @@ lib:
 kernel/kernel.bin: lib
 	make -C kernel kernel.bin
 
+# kernel.bin is built by kernel/Makefile and placed at project root
+kernel.bin: lib
+	make -C kernel kernel.bin
+
 # ── User programs ───────────────────────────────────────
 
 .PHONY: user
@@ -85,13 +89,13 @@ thirdpart/busybox-1.36.1/busybox: lib $(BUSYBOX_SRC)/Makefile $(BUSYBOX_CFG) use
 
 # ── Disk image ──────────────────────────────────────────
 
-disk.img: boot/uefi/BOOTX64.EFI lib kernel/kernel.bin user user/busybox.elf
+disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user user/busybox.elf
 	dd if=/dev/zero of=$@ bs=1M count=64
 	mkfs.vfat -F 32 $@
 	mmd -i $@ ::/EFI
 	mmd -i $@ ::/EFI/BOOT
 	mcopy -i $@ boot/uefi/BOOTX64.EFI ::/EFI/BOOT
-	mcopy -i $@ kernel/kernel.bin ::/
+	mcopy -i $@ kernel.bin ::/
 	mcopy -i $@ user/init.elf ::/init.elf
 	mcopy -i $@ user/spin.elf ::/spin.elf
 	mcopy -i $@ user/sigtest.elf ::/sigtest.elf
@@ -130,7 +134,7 @@ clean:
 	make -C kernel clean
 	make -C libc clean
 	make -C user clean
-	rm -rf test/build sysroot
+	rm -rf test/build sysroot build
 	if [ -f $(BUSYBOX_SRC)/Makefile ]; then \
 	    $(MAKE) -C $(BUSYBOX_SRC) clean 2>/dev/null || true; \
 	    rm -f $(BUSYBOX_SRC)/applets/crt0.S $(BUSYBOX_SRC)/applets/Kbuild.src.bak; \

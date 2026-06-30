@@ -8,7 +8,7 @@ SECTIONS
 	.text :
 	{
 		_text = .;
-		arch/x86_64/head.o(.text)
+		*(.text.head)
 		*(.text)
 		_etext = .;
 	}

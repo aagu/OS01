@@ -1,47 +1,65 @@
-CC = clang -target x86_64-unknown-none
-LD = ld.lld -m elf_x86_64
+# ── Configuration ──────────────────────────────────────────
+BUILD_DIR := ../build/x86_64/user
+OBJ_DIR   := $(BUILD_DIR)/obj
 
-SYSROOT = ../sysroot
-CFLAGS = --sysroot=$(SYSROOT) \
-         -ffreestanding -fno-stack-protector -fno-asynchronous-unwind-tables \
-         -fno-pic -fno-pie -mno-red-zone \
-         -I$(SYSROOT)/usr/include \
-         -Wall -Wextra -O2
+# ── Compiler / Linker ──────────────────────────────────────
+CC       ?= clang -target x86_64-unknown-none
+LD       ?= ld.lld -m elf_x86_64
+OBJ_CPY  ?= llvm-objcopy
 
-LDFLAGS = -T linker.ld -static -nostdlib -no-pie \
-          -L$(SYSROOT)/usr/lib -lc
+SYSROOT  := ../sysroot
+CFLAGS   := --sysroot=$(SYSROOT) \
+            -ffreestanding -fno-stack-protector -fno-asynchronous-unwind-tables \
+            -fno-pic -fno-pie -mno-red-zone \
+            -I$(SYSROOT)/usr/include \
+            -Wall -Wextra -O2
 
-PROGRAMS = init.elf spin.elf sh.elf sigtest.elf poweroff.elf
+LDFLAGS  := -T linker.ld -static -nostdlib -no-pie \
+            -L$(SYSROOT)/usr/lib -lc
 
+# ── Source discovery ───────────────────────────────────────
+# crt0.S is startup code, not a program
+C_SOURCES := $(wildcard *.c)
+ASM_SOURCES := $(wildcard *.S)
+
+# Each .c → .elf (e.g. init.c → init.elf)
+PROGRAMS := $(patsubst %.c,$(BUILD_DIR)/%.elf,$(C_SOURCES))
+
+# ── Targets ────────────────────────────────────────────────
 .PHONY: all clean
 
+# Build all programs, then copy .elf files back to source dir
 all: $(PROGRAMS)
+	cp $(BUILD_DIR)/*.elf .
 
-init.elf: crt0.o init.o linker.ld
-	$(LD) $(LDFLAGS) -o $@ crt0.o init.o
-	llvm-objcopy --strip-debug $@
+# ── Compile rules (into build dir) ─────────────────────────
+$(OBJ_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
-spin.elf: crt0.o spin.o linker.ld
-	$(LD) $(LDFLAGS) -o $@ crt0.o spin.o
-	llvm-objcopy --strip-debug $@
+$(OBJ_DIR)/%.o: %.S
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
-sh.elf: crt0.o sh.o linker.ld
-	$(LD) $(LDFLAGS) -o $@ crt0.o sh.o
-	llvm-objcopy --strip-debug $@
+# ── crt0 startup (compiled once, linked into every program) ─
+CRT0_OBJ := $(OBJ_DIR)/crt0.o
 
-sigtest.elf: crt0.o sigtest.o linker.ld
-	$(LD) $(LDFLAGS) -o $@ crt0.o sigtest.o
-	llvm-objcopy --strip-debug $@
+$(CRT0_OBJ): crt0.S
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
-poweroff.elf: crt0.o poweroff.o linker.ld
-	$(LD) $(LDFLAGS) -o $@ crt0.o poweroff.o
-	llvm-objcopy --strip-debug $@
+# ── Link rules (pattern: each .c → .elf linked with crt0) ─
+# init.c → $(OBJ_DIR)/init.o → $(BUILD_DIR)/init.elf
+$(BUILD_DIR)/%.elf: $(OBJ_DIR)/%.o $(CRT0_OBJ) linker.ld
+	@mkdir -p $(dir $@)
+	$(LD) $(LDFLAGS) -o $@ $(CRT0_OBJ) $<
+	$(OBJ_CPY) --strip-debug $@
 
-%.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
-
-%.o: %.S
-	$(CC) $(CFLAGS) -c $< -o $@
-
+# ── Clean ──────────────────────────────────────────────────
 clean:
-	rm -f *.o *.elf
+	rm -rf $(BUILD_DIR) *.elf
+
+# ── Dependency tracking ────────────────────────────────────
+C_DEPS := $(patsubst %.c,$(OBJ_DIR)/%.d,$(C_SOURCES))
+ASM_DEPS := $(patsubst %.S,$(OBJ_DIR)/%.d,$(ASM_SOURCES))
+-include $(C_DEPS) $(ASM_DEPS)

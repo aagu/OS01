@@ -1,110 +1,154 @@
-HOSTARCH:=$(shell ../target-triplet-to-arch.sh $(shell ../default-host.sh))
+# ── Architecture detection ──────────────────────────────────
+HOSTARCH   := x86_64
+ARCHDIR    := arch/$(HOSTARCH)
+# Build directory: all .o .d .elf .bin go here, separate from source
+BUILD_DIR  := ../build/$(HOSTARCH)/kernel
+DEST_DIR   := ..                  # root of the project (for kernel.bin)
 
-ARCHDIR=arch/$(HOSTARCH)
-
+# ── Load architecture configuration ────────────────────────
 include $(ARCHDIR)/make.config
 
-DESTDIR=$(SYSROOT)
+# ── Compiler / Linker (inherited from root Makefile exports) ─
+CC       ?= clang -target x86_64-unknown-none
+LD       ?= ld.lld -m elf_x86_64
+AR       ?= llvm-ar
+OBJ_CPY  ?= llvm-objcopy
 
-KERNEL_SOURCES := \
-	kernel/main.c \
-	intr/irq.c \
-	intr/softirq.c \
-	intr/dispatch.c \
-	intr/wait.c \
-	kernel/printk.c \
-	kernel/panic.c \
-	kernel/trace.c \
-	memory/pmm.c \
-	memory/vmm.c \
-	memory/slab.c \
-	memory/dump.c \
-	memory/tlb.c \
-	percpu/percpu.c \
-	pic/8259A.c \
-	apic/lapic.c \
-	apic/ioapic.c \
-	apic/acpi.c \
-	apic/ipi.c \
-	apic/lapic_timer.c \
-	timer/timer.c \
-	sched/task.c \
-	sched/smp.c \
-	block/blockdev.c \
-	fs/vfs.c \
-	fs/devfs.c \
-	fs/procfs.c \
-	fs/fat.c \
-	fs/elf.c \
-	fs/file.c \
-	completion.c \
-
-KERNEL_SOURCES += $(wildcard driver/*.c)
-KERNEL_SOURCES += $(wildcard tty/*.c)
-
-KERNEL_OBJECTS := \
-	$(KERNEL_SOURCES:.c=.o) \
-	$(KERNEL_ARCH_OBJECTS)
-
+# Kernel headers path (relative to kernel/ CWD)
 KERNEL_HEADERS := include
 
-CFLAGS := $(CFLAGS) -mcmodel=kernel -ffreestanding -mno-red-zone -Wall -Wextra -mno-80387 -mno-sse -mno-sse2 -mno-3dnow -mno-mmx -fpie
-LDFLAGS := $(CFLAGS) -mcmodel=kernel -ffreestanding -mno-red-zone -Wall -Wextra -mno-80387 -mno-sse -mno-sse2 -mno-3dnow -mno-mmx -fpie -static -z muldefs -L${SYSROOT}/usr/lib
-ASFLAGS :=
+# ── Source discovery via wildcard (no manual lists!) ───────
+# All paths are relative to kernel/ (CWD after make -C kernel)
+KERNEL_C_SOURCES := \
+    $(wildcard kernel/*.c) \
+    $(wildcard memory/*.c) \
+    $(wildcard fs/*.c) \
+    $(wildcard sched/*.c) \
+    $(wildcard driver/*.c) \
+    $(wildcard tty/*.c) \
+    $(wildcard apic/*.c) \
+    $(wildcard intr/*.c) \
+    $(wildcard block/*.c) \
+    $(wildcard timer/*.c) \
+    $(wildcard percpu/*.c) \
+    $(wildcard pic/*.c) \
+    $(wildcard *.c)               # completion.c
+
+# Architecture C sources and asm sources
+ARCH_C_SOURCES  := $(wildcard $(ARCHDIR)/*.c)
+ARCH_ASM_SOURCES := $(wildcard $(ARCHDIR)/*.S)
+# Exclude trampoline.S from normal compilation (special handling below)
+ARCH_ASM_SOURCES := $(filter-out $(ARCHDIR)/trampoline.S, $(ARCH_ASM_SOURCES))
+
+ALL_C_SOURCES   := $(KERNEL_C_SOURCES) $(ARCH_C_SOURCES)
+# kallsyms is a two-pass build artifact, not a regular source
+ALL_C_SOURCES   := $(filter-out kernel/kallsyms.c, $(ALL_C_SOURCES))
+ALL_S_SOURCES   := $(ARCH_ASM_SOURCES)
+
+# ── Object files (under BUILD_DIR) ─────────────────────────
+# Path mapping:  kernel/main.c    → build/x86_64/kernel/main.o
+#                memory/pmm.c     → build/x86_64/memory/pmm.o
+#                arch/x86_64/trap.c → build/x86_64/arch/x86_64/trap.o
+C_OBJECTS       := $(patsubst %.c,$(BUILD_DIR)/%.o,$(ALL_C_SOURCES))
+ASM_OBJECTS     := $(patsubst %.S,$(BUILD_DIR)/%.o,$(ALL_S_SOURCES))
+
+EXTRA_OBJECTS := \
+    $(BUILD_DIR)/kernel/font.o \
+    $(BUILD_DIR)/$(ARCHDIR)/trampoline_bin.o
+
+KERNEL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS) $(EXTRA_OBJECTS)
+
+# ── Flags ──────────────────────────────────────────────────
+ALL_CFLAGS   := $(CFLAGS) $(ARCH_CFLAGS)   -I$(KERNEL_HEADERS)
+ALL_ASMFLAGS := $(ASFLAGS) $(ARCH_ASMFLAGS)
+ALL_LDFLAGS  := $(LDFLAGS) $(ARCH_LDFLAGS) -L$(SYSROOT)/usr/lib
+
+LIBS := -nostdlib -lk -lgcc
+
 ifeq ($(DEBUG),1)
-CFLAGS += -DDEBUG=1
+ALL_CFLAGS += -DDEBUG=1
 endif
-LIBS := $(LIBS) -nostdlib -lk -lgcc
-LIBS := $(LIBS) $(KERNEL_ARXH_LIBS)
 
-KERNEL_OBJECTS+=kernel/font.o
-KERNEL_OBJECTS+=arch/x86_64/trampoline_bin.o
+# ── Targets ────────────────────────────────────────────────
+.PHONY: all clean install-headers
 
-all: kernel.bin
+all: $(BUILD_DIR)/kernel.bin
+	cp $< $(CURDIR)/../kernel.bin
 
-.c.o:
-	$(CC) $(CFLAGS) -I$(KERNEL_HEADERS) -c $< -o $@
+# ── Compilation rules ──────────────────────────────────────
+# .c → .o + .d
+$(BUILD_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
 
-.S.o:
-	$(CC) $(CFLAGS) -c $< -o $@
+# .S → .o + .d
+$(BUILD_DIR)/%.o: %.S
+	@mkdir -p $(dir $@)
+	$(CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
 
-kernel/font.o: kernel/font.psf
+# ── Special objects ────────────────────────────────────────
+# PSF font → .o
+$(BUILD_DIR)/kernel/font.o: kernel/font.psf
+	@mkdir -p $(dir $@)
 	$(LD) -r -b binary -o $@ $<
 
-# ── Trampoline: assemble → link at 0x8000 → binary → embed ──
-arch/x86_64/trampoline.o: arch/x86_64/trampoline.S
-	clang -target x86_64-unknown-none -I$(KERNEL_HEADERS) -c $< -o $@
+# Trampoline: assemble → link at 0x8000 → binary → embed
+$(BUILD_DIR)/$(ARCHDIR)/trampoline.o: $(ARCHDIR)/trampoline.S
+	@mkdir -p $(dir $@)
+	$(CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
 
-arch/x86_64/trampoline.elf: arch/x86_64/trampoline.o arch/x86_64/trampoline.ld
-	$(LD) -T arch/x86_64/trampoline.ld arch/x86_64/trampoline.o -o $@
+$(BUILD_DIR)/$(ARCHDIR)/trampoline.elf: $(BUILD_DIR)/$(ARCHDIR)/trampoline.o $(ARCHDIR)/trampoline.ld
+	$(LD) -T $(ARCHDIR)/trampoline.ld $< -o $@
 
-arch/x86_64/trampoline.bin: arch/x86_64/trampoline.elf
+$(BUILD_DIR)/$(ARCHDIR)/trampoline.bin: $(BUILD_DIR)/$(ARCHDIR)/trampoline.elf
 	$(OBJ_CPY) -O binary $< $@
 
-arch/x86_64/trampoline_bin.o: arch/x86_64/trampoline.bin
-	$(LD) -r -b binary $< -o $@
+$(BUILD_DIR)/$(ARCHDIR)/trampoline_bin.o: $(BUILD_DIR)/$(ARCHDIR)/trampoline.bin
+	cp $< $(ARCHDIR)/trampoline.bin
+	$(LD) -r -b binary $(ARCHDIR)/trampoline.bin -o $@
+	rm -f $(ARCHDIR)/trampoline.bin
 
-# temporary solution to avoid interrupt code asigned to .bss
-intr/irq.o: intr/irq.c
-	$(CC) $(CFLAGS) -I$(KERNEL_HEADERS) -c $< -o $@
+# ── Temporary: irq.o avoids .bss section issue ─────────────
+$(BUILD_DIR)/intr/irq.o: intr/irq.c
+	@mkdir -p $(dir $@)
+	$(CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
 
-kernel.elf: $(KERNEL_OBJECTS) $(ARCHDIR)/linker.ld
-	$(CC) $(LDFLAGS) -o $@ $(KERNEL_OBJECTS) -T $(ARCHDIR)/linker.ld $(LIBS)
+# ── Kallsyms (two-pass link) ───────────────────────────────
+# Stage 1: link without kallsyms, just to get symbol table
+$(BUILD_DIR)/kernel.elf.stage1: $(KERNEL_OBJECTS) $(ARCHDIR)/$(ARCH_LINKER)
+	$(CC) $(ALL_LDFLAGS) -o $@ $(KERNEL_OBJECTS) -T $(ARCHDIR)/$(ARCH_LINKER) $(LIBS)
 
-kernel/kallsyms.o: kernel/kallsyms.c kernel.elf
-	clang -o kernel/kallsyms $<
-	nm -n kernel.elf | ./kernel/kallsyms > kernel/kallsyms.S
-	$(CC) $(CFLAGS) -c kernel/kallsyms.S -o $@
+# Generate kallsyms object from stage1's nm output
+$(BUILD_DIR)/kernel/kallsyms.o: kernel/kallsyms.c $(BUILD_DIR)/kernel.elf.stage1
+	@mkdir -p $(dir $@)
+	clang -o $(BUILD_DIR)/kernel/kallsyms $<
+	nm -n $(BUILD_DIR)/kernel.elf.stage1 | $(BUILD_DIR)/kernel/kallsyms > $(BUILD_DIR)/kernel/kallsyms.S
+	$(CC) $(ALL_CFLAGS) -c $(BUILD_DIR)/kernel/kallsyms.S -o $@
+	rm -f $(BUILD_DIR)/kernel.elf.stage1
 
-kernel.bin: kernel.elf kernel/kallsyms.o
-	$(CC) $(LDFLAGS) -o kernel.elf $(KERNEL_OBJECTS) kernel/kallsyms.o -T $(ARCHDIR)/linker.ld $(LIBS)
-	$(OBJ_CPY) -I elf64-x86-64 -S -R ".eh_frame" -R ".comment" -O binary kernel.elf kernel.bin
+# ── Final link ──────────────────────────────────────────────
+$(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o $(ARCHDIR)/$(ARCH_LINKER)
+	$(CC) $(ALL_LDFLAGS) -o $@ $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o \
+	    -T $(ARCHDIR)/$(ARCH_LINKER) $(LIBS)
 
-clean:
-	rm -f */*.o kernel.bin kernel.elf *.txt
-	rm -f $(ARCHDIR)/*.o
-	rm -f kernel/kallsyms
+$(BUILD_DIR)/kernel.bin: $(BUILD_DIR)/kernel.elf
+	$(OBJ_CPY) -I elf64-x86-64 -S -R ".eh_frame" -R ".comment" \
+	    -O binary $< $@
 
+# Copy kernel.bin to project root via the "all" target above
+.PHONY: kernel.bin
+kernel.bin: all
+	@true
+
+# ── Install headers ────────────────────────────────────────
 install-headers:
-	mkdir -p $(DESTDIR)$(INCLUDEDIR)
-	cp -R --preserve=timestamps include/. $(DESTDIR)$(INCLUDEDIR)/.
+	mkdir -p $(SYSROOT)$(INCLUDEDIR)
+	cp -R --preserve=timestamps include/. $(SYSROOT)$(INCLUDEDIR)/.
+
+# ── Clean ───────────────────────────────────────────────────
+clean:
+	rm -rf $(BUILD_DIR)
+
+# ── Auto-dependency tracking ───────────────────────────────
+ALL_DEPS := $(patsubst %.o,%.d,$(C_OBJECTS))
+-include $(ALL_DEPS)

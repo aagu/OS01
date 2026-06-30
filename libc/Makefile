@@ -1,211 +1,84 @@
-HOSTARCH:=$(shell ../target-triplet-to-arch.sh $(shell ../default-host.sh))
+# ── Architecture ────────────────────────────────────────────
+HOSTARCH  := x86_64
+ARCHDIR   := arch/$(HOSTARCH)
+BUILD_DIR := ../build/$(HOSTARCH)/libc
 
-ARCHDIR=arch/$(HOSTARCH)
+# ── Compiler / Linker (inherited from root Makefile exports) ─
+CC     ?= clang -target x86_64-unknown-none
+LD     ?= ld.lld -m elf_x86_64
+AR     ?= llvm-ar
 
+# ── Load architecture config ────────────────────────────────
 include $(ARCHDIR)/make.config
 
-CFLAGS := $(CFLAGS) -mcmodel=large -ffreestanding -mno-red-zone -Wall -Wextra -D__is_libc -Iinclude -fno-stack-protector
-LDFLAGS := $(LDFLAGS) -mcmodel=large -ffreestanding -nostdlib
-ASFLAGS :=
-ifeq ($(DEBUG),1)
-CFLAGS += -DDEBUG=1
-endif
+# ── Compile flags ──────────────────────────────────────────
+CFLAGS := $(CFLAGS) -ffreestanding -Wall -Wextra -D__is_libc -Iinclude -fno-stack-protector $(ARCH_CFLAGS)
 LIBK_CFLAGS := $(CFLAGS) -D__is_libk
 
-DESTDIR=$(SYSROOT)
+# ── Source discovery (wildcard — no manual lists!) ──────────
+C_SOURCES := \
+    $(wildcard ctype/*.c) \
+    $(wildcard dirent/*.c) \
+    $(wildcard errno/*.c) \
+    $(wildcard list/*.c) \
+    $(wildcard stdio/*.c) \
+    $(wildcard stdlib/*.c) \
+    $(wildcard string/*.c) \
+    $(wildcard time/*.c) \
+    $(wildcard unistd/*.c)
 
-FREEOBJS=\
-$(ARCH_FREEOBJS) \
-string/memcmp.o \
-string/bcmp.o \
-string/memcpy.o \
-string/memmove.o \
-string/memset.o \
-string/strlen.o \
-string/strcmp.o \
-string/strncmp.o \
-string/strcpy.o \
-string/strdup.o \
-string/extras.o \
-	string/strchrnul.o \
-	string/mempcpy.o \
-	string/stpncpy.o \
-	string/stpcpy.o \
-	string/strsignal.o \
-string/strerror.o \
-	string/fnmatch.o \
-stdio/printf.o \
-stdio/putchar.o \
-stdio/puts.o \
-stdio/vsprintf.o \
-stdio/sprintf.o \
-stdio/sscanf.o \
-	time/time.o \
-time/time_r.o \
-stdio/getchar_unlocked.o \
-	stdio/stdio_file.o \
-	stdio/vsnprintf.o \
-stdio/vasprintf.o \
-stdio/getchar_unlocked.o \
-	stdio/stdio_file.o \
-	stdio/vsnprintf.o \
-stdio/vasprintf.o \
-list/list.o \
-stdlib/abort.o \
-stdlib/calloc.o \
-stdlib/malloc.o \
-stdlib/free.o \
-stdlib/environ.o \
-stdlib/strtol.o \
-	stdlib/strtoll.o \
-	stdlib/strtod.o \
-stdlib/qsort.o \
-stdlib/atexit.o \
-ctype/ctype.o \
-errno/errno.o \
-unistd/read.o \
-unistd/write.o \
-unistd/open.o \
-unistd/close.o \
-unistd/dup.o \
-unistd/dup2.o \
-unistd/waitpid.o \
-unistd/pipe.o \
-unistd/chdir.o \
-unistd/getcwd.o \
-unistd/stat.o \
-unistd/fstat.o \
-unistd/lseek.o \
-unistd/fcntl.o \
-unistd/ioctl.o \
-unistd/getdents.o \
-unistd/access.o \
-unistd/execve.o \
-unistd/link.o \
-unistd/symlink.o \
-unistd/readlink.o \
-unistd/unlink.o \
-unistd/mkdir.o \
-unistd/rmdir.o \
-unistd/rename.o \
-unistd/truncate.o \
-unistd/ftruncate.o \
-unistd/dirent.o \
-unistd/time.o \
-unistd/gettimeofday.o \
-unistd/nanosleep.o \
-unistd/chmod.o \
-unistd/fchmod.o \
-unistd/times.o \
-unistd/uname.o \
-unistd/getppid.o \
-unistd/umask.o \
-unistd/kill.o \
-unistd/sigaction.o \
-unistd/signal.o \
-	unistd/raise.o \
-	unistd/geteuid.o \
-	unistd/uid_stubs.o \
-	unistd/sigfillset.o \
-	unistd/sigsuspend.o \
-	unistd/lstat.o \
-	unistd/mknod.o \
-	unistd/chown.o \
-	unistd/utimes.o \
-	unistd/term_stubs.o \
-	unistd/sleep.o \
-	unistd/getopt.o \
-unistd/getgroups.o \
-unistd/sysconf.o \
-stdlib/random.o \
-unistd/busybox_stubs.o \
-stdlib/glob.o \
-unistd/sigprocmask.o \
-stdlib/setjmp.o \
-unistd/isatty.o \
-unistd/getpid.o \
-unistd/exit.o \
-stdio/stdio_extras.o \
-unistd/misc_stubs.o \
-unistd/mkstemp.o \
-unistd/prctl.o \
-unistd/term_stubs.o \
-	unistd/sleep.o \
-	unistd/getopt.o \
-unistd/getgroups.o \
-unistd/sysconf.o \
-stdlib/random.o \
-unistd/busybox_stubs.o \
-stdlib/glob.o \
-unistd/sigprocmask.o \
-stdlib/setjmp.o \
-unistd/isatty.o \
-unistd/getpid.o \
-unistd/exit.o \
-stdio/stdio_extras.o \
-unistd/misc_stubs.o \
-unistd/mkstemp.o \
-unistd/prctl.o \
-unistd/term_stubs.o \
-	unistd/sleep.o \
-	unistd/getopt.o \
-unistd/getgroups.o \
-unistd/sysconf.o \
-stdlib/random.o \
-unistd/busybox_stubs.o \
-stdlib/glob.o \
-unistd/sigprocmask.o \
-stdlib/setjmp.o \
-unistd/isatty.o \
-unistd/getpid.o \
-unistd/exit.o \
-stdio/stdio_extras.o \
-unistd/misc_stubs.o \
-unistd/mkstemp.o \
-unistd/prctl.o \
+# Remove duplicates: free.c conflicts with malloc.c, chown.c with uid_stubs.c
+C_SOURCES := $(filter-out stdlib/free.c unistd/chown.c, $(C_SOURCES))
 
-HOSTEDOBJS=\
-$(ARCH_HOSTEDOBJS) \
+# Object files (inside BUILD_DIR)
+# string/memcmp.c → build/x86_64/libc/string/memcmp.o     (libc)
+#                  → build/x86_64/libc/string/memcmp.libk.o (libk)
+LIBC_OBJS := $(addprefix $(BUILD_DIR)/, $(C_SOURCES:.c=.o))
+LIBK_OBJS := $(addprefix $(BUILD_DIR)/, $(C_SOURCES:.c=.libk.o))
 
-OBJS=\
-$(FREEOBJS) \
-$(HOSTEDOBJS) \
+# Arch-specific objects (if any)
+LIBC_ARCH_OBJS := $(addprefix $(BUILD_DIR)/, $(ARCH_FREEOBJS))
+LIBK_ARCH_OBJS := $(addprefix $(BUILD_DIR)/, $(ARCH_FREEOBJS:.o=.libk.o))
+LIBC_HOSTED_OBJS := $(addprefix $(BUILD_DIR)/, $(ARCH_HOSTEDOBJS))
 
-LIBK_OBJS=$(FREEOBJS:.o=.libk.o)
+LIBC_ALL_OBJS := $(LIBC_OBJS) $(LIBC_ARCH_OBJS) $(LIBC_HOSTED_OBJS)
+LIBK_ALL_OBJS := $(LIBK_OBJS) $(LIBK_ARCH_OBJS)
 
-BINARIES=libc.a libk.a
-
+# ── Targets ────────────────────────────────────────────────
 .PHONY: all clean install install-headers install-libs
-.SUFFIXES: .o .libk.o .c .S
 
-all: $(BINARIES)
+all: libc.a libk.a
 
-libc.a: $(OBJS)
-	$(AR) rcs $@ $(OBJS)
+libc.a: $(LIBC_ALL_OBJS)
+	$(AR) rcs $@ $(LIBC_ALL_OBJS)
 
-libk.a: $(LIBK_OBJS)
-	$(AR) rcs $@ $(LIBK_OBJS)
+libk.a: $(LIBK_ALL_OBJS)
+	$(AR) rcs $@ $(LIBK_ALL_OBJS)
 
-.c.o:
-	$(CC) $(CFLAGS) -c $< -o $@
+# ── Compile rules ──────────────────────────────────────────
+$(BUILD_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
-.c.libk.o:
-	$(CC) $(LIBK_CFLAGS) -c $< -o $@
+$(BUILD_DIR)/%.libk.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(LIBK_CFLAGS) -MMD -MP -c $< -o $@
 
-clean:
-	rm -f $(BINARIES) *.a
-	rm -f $(OBJS) $(LIBK_OBJS) *.o */*.o */*/*.o
-	rm -f $(OBJS:.o=.d) $(LIBK_OBJS:.o=.d) *.d */*.d */*/*.d
-
+# ── Installation (into sysroot) ────────────────────────────
 install: install-headers install-libs
 
 install-headers:
-	mkdir -p $(DESTDIR)$(INCLUDEDIR)
-	cp -R --preserve=timestamps include/. $(DESTDIR)$(INCLUDEDIR)/.
+	mkdir -p $(SYSROOT)$(INCLUDEDIR)
+	cp -R --preserve=timestamps include/. $(SYSROOT)$(INCLUDEDIR)/.
 
-install-libs: $(BINARIES)
-	mkdir -p $(DESTDIR)$(LIBDIR)
-	cp $(BINARIES) $(DESTDIR)$(LIBDIR)
+install-libs: libc.a libk.a
+	mkdir -p $(SYSROOT)$(LIBDIR)
+	cp libc.a libk.a $(SYSROOT)$(LIBDIR)
 
--include $(OBJS:.o=.d)
--include $(LIBK_OBJS:.o=.d)
+# ── Clean ──────────────────────────────────────────────────
+clean:
+	rm -rf $(BUILD_DIR) libc.a libk.a
+
+# ── Dependency tracking ────────────────────────────────────
+ALL_DEPS := $(patsubst %.o,%.d,$(LIBC_ALL_OBJS)) $(patsubst %.o,%.d,$(LIBK_ALL_OBJS))
+-include $(ALL_DEPS)

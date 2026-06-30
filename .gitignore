@@ -18,3 +18,4 @@ boot/uefi/*
 !boot/uefi/main.c
 !toolchain/setup.sh
 kernel/kernel/kallsyms
+build/
