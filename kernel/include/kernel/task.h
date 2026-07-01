@@ -8,6 +8,11 @@
 #include <kernel/arch/x86_64/linkage.h>
 #include <kernel/file.h>
 #include <uapi/time.h>
+#include <stdbool.h>
+
+/* ── Blocker framework ─────────────────────────── */
+#define BLOCKER_NONE      0
+#define BLOCKER_WAITPID   1
 
 #define KERNEL_CS (0x08)
 #define KERNEL_DS (0x10)
@@ -16,6 +21,20 @@
 // GDT indices: USER code=5 (0x28), USER data=6 (0x30)
 #define USER_CS (0x2b)  // 0x28 | 3
 #define USER_DS (0x33)  // 0x30 | 3
+
+struct task_struct;
+typedef bool (*blocker_check_t)(struct task_struct *waiter);
+
+typedef struct blocker {
+    int type;                  // BLOCKER_NONE when not blocked
+    blocker_check_t check;     // callback: returns true when condition met
+    bool signal_can_wake;      // can a pending signal break this block?
+} blocker_t;
+
+typedef struct blocker_data {
+    struct task_struct *waited_child;
+    int64_t waited_pid;
+} blocker_data_t;
 
 #define CLONE_FS (1 << 0)
 #define CLONE_FILES (1 << 1)
@@ -99,6 +118,9 @@ typedef struct task_struct
     int64_t signal; // signal mask, e.g. 0x0000000000000001 means SIGINT
     int64_t priority; // priority, used in priority scheduling
     uint32_t cpu; // CPU affinity — which CPU owns this task (for SMP)
+
+    blocker_t blocker;              // current block state (BLOCKER_NONE = not blocked)
+    blocker_data_t blocker_data;    // per-type blocking data
 
     void *fpu_save; // 512-byte FXSAVE/FXRSTOR area (16-byte aligned)
 

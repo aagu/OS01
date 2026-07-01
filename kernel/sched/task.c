@@ -84,6 +84,128 @@ static int64_t  user_init_pid = 0;
 // schedule() returns immediately before this point (ticks before
 // the scheduler is set up are harmless no-ops).
 
+/*
+ * Wake a blocked task if its condition is met.
+ *
+ * Called by do_exit() (explicit wakeup for fast path) and
+ * by sched_unblock_blocked() (scan-based fallback).
+ * Only wakes if the condition callback returns true.
+ */
+void blocker_wake(task_t *task)
+{
+    // Only wake blocked tasks whose condition is actually met
+    if (task->state != TASK_INTERRUPTIBLE && task->state != TASK_UNINTERRUPTIBLE)
+        return;
+    if (task->blocker.type == BLOCKER_NONE)
+        return;
+    if (task->blocker.check && !task->blocker.check(task))
+        return;
+
+    // Condition met — wake up
+    task->state = TASK_RUNNING;
+    task->blocker.type = BLOCKER_NONE;
+    task->blocker.check = NULL;
+}
+
+/*
+ * Scan all tasks for blocked ones whose conditions are now met.
+ *
+ * Called from schedule() inside the reap_lock critical section,
+ * after zombie reaping and before the priority scan.
+ *
+ * Also handles signal-based wakeup: if a blocker has signal_can_wake=true
+ * and the blocked task has pending signals, wake it with -EINTR return.
+ */
+void sched_unblock_blocked(void)
+{
+    list_t *pos = init_task_union.task.list.next;
+    while (pos != &init_task_union.task.list) {
+        task_t *t = container_of(pos, task_t, list);
+        pos = pos->next;
+
+        if (t->state != TASK_INTERRUPTIBLE)
+            continue;
+        if (t->blocker.type == BLOCKER_NONE)
+            continue;
+
+        // Check condition callback — use blocker_wake which
+        // verifies the condition before setting RUNNING.
+        if (t->blocker.check && t->blocker.check(t)) {
+            blocker_wake(t);
+            continue;
+        }
+
+        // Check signal wakeup (bypass condition check — the
+        // callback returned false, so we're waking for a signal).
+        if (t->blocker.signal_can_wake && t->signal) {
+            t->state = TASK_RUNNING;
+            t->blocker.type = BLOCKER_NONE;
+            t->blocker.check = NULL;
+        }
+    }
+}
+
+/*
+ * Block the current task until condition is met or signal arrives.
+ *
+ * 1. Checks condition first via callback — if already true, returns 0 immediately.
+ *    This closes the SMP race window that the old do_waitpid pattern had.
+ * 2. If condition not met: installs blocker, marks as TASK_INTERRUPTIBLE.
+ * 3. Double-checks condition (one more time — catches edge case between step 1 and 2).
+ * 4. Calls schedule().
+ * 5. On return: clears blocker, returns 0 (condition met) or -EINTR (signal woke us).
+ */
+int blocker_wait(blocker_check_t check, int type, bool signal_can_wake)
+{
+    task_t *self = current;
+    // It doesn't make sense to call blocker_wait in an interrupt handler
+    // or with a NULL check callback.
+    if (!check)
+        return -EINVAL;
+
+    // Step 1: Check condition first — if already met, don't block at all.
+    // This is the critical part that prevents lost-wakeup: even if the
+    // caller already checked, we re-check here atomically before sleeping.
+    if (check(self))
+        return 0;
+
+    // Step 2: Install blocker
+    self->blocker.type = type;
+    self->blocker.check = check;
+    self->blocker.signal_can_wake = signal_can_wake;
+
+    // Step 3: Set interruptible state
+    self->state = TASK_INTERRUPTIBLE;
+
+    // Step 4: Double-check condition (our state change is visible now;
+    // a concurrent do_exit() might have already checked our state and
+    // set us back to RUNNING — if so, don't call schedule())
+    if (check(self)) {
+        self->blocker.type = BLOCKER_NONE;
+        self->blocker.check = NULL;
+        self->state = TASK_RUNNING;
+        return 0;
+    }
+
+    // Step 5: Give up CPU. schedule() will run sched_unblock_blocked()
+    // which finds us and wakes us when the condition is met.
+    // We may also be woken explicitly by blocker_wake() from do_exit().
+    schedule();
+    // Woke up — clear blocker and check why
+    self->blocker.type = BLOCKER_NONE;
+    self->blocker.check = NULL;
+    self->state = TASK_RUNNING;
+
+    // Step 6: Check if woken by signal.
+    // Re-check the condition first: if it's now met (e.g. child
+    // exited AND SIGCHLD was delivered), return 0 — the signal
+    // will be handled on the way back to userspace.
+    if (signal_can_wake && self->signal && !check(self))
+        return -EINTR;
+
+    return 0;
+}
+
 void schedule(void)
 {
     task_t *next;
@@ -175,6 +297,9 @@ void schedule(void)
         if (t->fpu_save)
             kfree(t->fpu_save);
     }
+
+    // ── Wake tasks whose blocking conditions are met ─────
+    sched_unblock_blocked();
 
     // ── Priority scan (inside lock) ──────────────────────
     // Pick the RUNNING task with the highest remaining quantum
@@ -269,8 +394,11 @@ uint64_t do_exit(uint64_t exit_code)
     // zombie reaper will later list_del + kfree.
     if (current->parent && !(current->parent->flags & PF_KTHREAD)) {
         current->parent->signal |= (1ULL << SIGCHLD);
-        if (current->parent->state == TASK_INTERRUPTIBLE)
-            current->parent->state = TASK_RUNNING;
+        // Use blocker_wake which checks condition callback before waking.
+        // This is the explicit fast path; sched_unblock_blocked() in
+        // schedule() is the reliable fallback.
+        if (current->parent->blocker.type != BLOCKER_NONE)
+            blocker_wake(current->parent);
     }
 
     if (!(current->flags & PF_KTHREAD) && current->mm) {
@@ -335,6 +463,34 @@ uint64_t do_exit(uint64_t exit_code)
     }
     schedule();
     return 0;  // never reached — schedule() does switch_to
+}
+
+/*
+ * Blocker condition callback for do_waitpid.
+ * Returns true when a waited-for child has become TASK_ZOMBIE.
+ * Sets waiter->blocker_data.waited_child so the caller can reap it immediately.
+ */
+static bool waitpid_should_unblock(task_t *waiter)
+{
+    int64_t target_pid = waiter->blocker_data.waited_pid;
+    list_t *pos = init_task_union.task.list.next;
+
+    while (pos != &init_task_union.task.list) {
+        task_t *t = container_of(pos, task_t, list);
+        pos = pos->next;
+
+        if (t->parent != waiter)
+            continue;
+        if (t->flags & PF_REAPED)
+            continue;
+        if (target_pid != -1 && t->pid != target_pid)
+            continue;
+        if (t->state == TASK_ZOMBIE) {
+            waiter->blocker_data.waited_child = t;
+            return true;
+        }
+    }
+    return false;
 }
 
 // ── do_waitpid ────────────────────────────────────────────
@@ -410,38 +566,26 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
             return -ECHILD;
         }
 
-        serial_printk("do_waitpid: chk wnohang pid=%d opt=%d\n", current->pid, options); if (options & WNOHANG)
+        if (options & WNOHANG)
             return 0;
 
-        // Sleep until a child exits.
-        // Double-check after setting INTERRUPTIBLE to prevent lost-wakeup.
-        serial_printk("do_waitpid: pid=%d about to sleep options=%d\n", current->pid, options);
+        // Block until a child exits or signal arrives.
+        // blocker_wait() handles the condition check atomically
+        // (checks before sleeping, double-checks after state change,
+        // and is rechecked by sched_unblock_blocked in schedule()).
+        current->blocker_data.waited_pid = pid;
+        current->blocker_data.waited_child = NULL;
 
-        pos = init_task_union.task.list.next;
-        while (pos != &init_task_union.task.list) {
-            task_t *t = container_of(pos, task_t, list);
-            if (!(t->flags & PF_REAPED) &&
-                t->parent == current &&
-                t->state == TASK_ZOMBIE &&
-                (pid == -1 || t->pid == pid)) {
-                child = t;
-                break;
-            }
-            pos = pos->next;
+        int ret = blocker_wait(waitpid_should_unblock, BLOCKER_WAITPID, true);
+        if (ret == -EINTR) {
+            serial_printk("waitpid: pid=%d woken by signal, retrying\n",
+                          current->pid);
+            continue;  // re-check for children before sleeping again
         }
-
-        if (child) {
-            current->state = TASK_RUNNING;
-            continue;
-        }
-
-        // Sleep until a child exits or a signal arrives.
-        // do_exit() sets parent->state = TASK_RUNNING when the child
-        // becomes ZOMBIE.
-        current->state = TASK_INTERRUPTIBLE;
-        schedule();
-        current->state = TASK_RUNNING;
-        serial_printk("wait: p%d woke\n", current->pid);
+        // blocker_wait returned 0 → condition was met
+        // (waited_child was set by the callback)
+        child = current->blocker_data.waited_child;
+        continue;
     }
 }
 
@@ -893,12 +1037,9 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
 }
 
 // ── fork_mm_copy — create private address space for fork child ─
-// Builds a new PML4 with a private copy of every user 2MB page.
-// This is a full eager copy (like a COW fault on every page).
-// Without COW, parent and child would corrupt each other's
-// stack/heap when either writes to a shared page.
-// Returns new mm_t on success, or NULL on OOM (caller falls back
-// to sharing and risk of corruption).
+// Builds a new PML4 with private copies of all user 2MB pages.
+// Uses inline rep movsb instead of memcpy because libk's memcpy
+// has a bug with 2MB copies (CR2=0x8).
 static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
 {
     mm_t *child_mm = (mm_t *)calloc(1, sizeof(mm_t));
@@ -933,18 +1074,34 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                 uint64_t pml2e = parent_pml2[l2];
                 if (!(pml2e & PAGE_Present)) continue;
 
+                // Eager copy: allocate a private 2MB page and copy
+                // using rep movsb.  Inline asm is used instead of
+                // memcpy because the kernel's libk memcpy has a bug
+                // with 2MB copies (CR2=0x8).
+                // Only 2MB huge pages (PAGE_PS) are eagerly copied.
+                // Non-2MB entries (4KB page table pointers, etc.) are
+                // shared -- the child inherits the parent's mapping.
+                if (!(pml2e & PAGE_PS)) {
+                    child_pml2[l2] = pml2e;
+                    continue;
+                }
                 uint64_t phys = pml2e & PAGE_2M_MASK;
-
-                // Eager copy — every user page gets a private clone.
                 struct Page *s = alloc_pages(ZONE_NORMAL, 1, 0);
                 if (s) {
-                    memcpy((void *)Phy_To_Virt(s->phy_address),
-                           (void *)Phy_To_Virt(phys & ~PAGE_XD),
-                           PAGE_2M_SIZE);
+                    uint64_t dst = (uint64_t)Phy_To_Virt(s->phy_address);
+                    uint64_t src = (uint64_t)Phy_To_Virt(phys & ~PAGE_XD);
+                    uint64_t sz  = PAGE_2M_SIZE;
+                    __asm__ __volatile__(
+                        "cld\n\t"
+                        "rep movsb\n\t"
+                        : "+S"(src), "+D"(dst), "+c"(sz)
+                        :
+                        : "memory"
+                    );
                     child_pml2[l2] = s->phy_address
                                    | (pml2e & ~PAGE_2M_MASK);
                 } else {
-                    child_pml2[l2] = pml2e; // OOM fallback
+                    child_pml2[l2] = pml2e; // OOM fallback: share
                 }
             }
         }
@@ -953,6 +1110,7 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
     memcpy(child_mm, parent_mm, sizeof(mm_t));
     child_mm->pml4 = (uint64_t *)Virt_To_Phy((uint64_t)child_pml4);
     *cr3_out = (uint64_t)child_mm->pml4;
+
     return child_mm;
 
 fail:
@@ -971,20 +1129,51 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
     task_t *tsk = (task_t *)(((uint64_t)raw_alloc + STACK_SIZE - 1) & ~(STACK_SIZE - 1));
     thread_t *thd = (thread_t *)malloc(sizeof(thread_t));
 
+    if (!raw_alloc || !thd) {
+        if (raw_alloc) kfree(raw_alloc);
+        if (thd) kfree(thd);
+        return -ENOMEM;
+    }
+
     memset(tsk, 0, sizeof(task_t));
     memset(thd, 0, sizeof(thread_t));
 
+    // ── Selective field initialization (NOT *tsk = *current) ──
+    // The shallow struct copy was the root cause of the CR2=0x8
+    // page fault: it copied stale list nodes (wait_list, io_wait_node),
+    // the parent's stack_alloc_base, and the parent's thread pointer
+    // — all of which must belong to the CHILD, not the parent.
     tsk->stack_alloc_base = raw_alloc;
-    *tsk = *current;
-    tsk->signal = 0;   // child must not inherit parent's pending signals
+
+    // Inherit from parent (safe value-copy fields, not pointers)
+    tsk->flags       = current->flags;
+    tsk->counter     = current->counter;
+    tsk->addr_limit  = current->addr_limit;
+
+    // Inherit signal handlers (shallow copy of sighand array — values, not pointers)
+    for (int sig = 0; sig < NSIG; sig++)
+        tsk->sighand[sig] = current->sighand[sig];
+
+    // ── Fresh fields (must NOT inherit from parent) ────────
+    tsk->signal      = 0;   // child must not inherit parent's pending signals
+    tsk->state       = TASK_UNINTERRUPTIBLE;
+    tsk->priority    = 3;
+    tsk->cpu         = cpu_id();
+    tsk->pid         = atomic_fetch_add((volatile uint64_t *)&pid_counter, 1);
+    tsk->thread      = thd;
+    tsk->parent      = current;
+    tsk->exit_code   = 0;
 
     list_init(&tsk->list);
+    list_init(&tsk->wait_list);
+    list_init(&tsk->io_wait_node);
     list_add_to_before(&init_task_union.task.list, &tsk->list);
-    tsk->pid = atomic_fetch_add((volatile uint64_t *)&pid_counter, 1);
-    tsk->state = TASK_UNINTERRUPTIBLE;
-    tsk->priority = 3;
-    tsk->cpu = cpu_id();                    // same CPU as parent
-    tsk->thread = thd;
+
+    // Blocker starts clean — child inherits no blocker state
+    tsk->blocker.type = BLOCKER_NONE;
+    tsk->blocker.check = NULL;
+    tsk->blocker.signal_can_wake = false;
+    memset(&tsk->blocker_data, 0, sizeof(tsk->blocker_data));
 
     // FPU: child gets a fresh FPU save area.  The parent's FPU
     // registers are in hardware (not in the fpu_save buffer), so
@@ -992,23 +1181,30 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
     // correct for the common case (child execs immediately).
     tsk->fpu_save = fpu_area_alloc();
 
+    // Inherit address space (shared initially, replaced for user tasks)
+    tsk->mm = current->mm;
+
     // ── Inherit fd table (deep copy — refcount++) ──────────
     if (current->files)
         tsk->files = files_dup(current->files);
-
-    // ── Process tree ───────────────────────────────────────
-    tsk->parent = current;
-    list_init(&tsk->wait_list);
-    list_init(&tsk->io_wait_node);
-    tsk->exit_code = 0;
 
     thd->cr3 = current->thread->cr3;
 
     if ((regs->cs & 3) == 3) {
         tsk->flags &= ~PF_KTHREAD;
         tsk->addr_limit = 0x00007FFFFFFFFFFF;
-        if (current->mm)
+        if (current->mm && current->mm->pml4) {
             tsk->mm = fork_mm_copy(current->mm, &thd->cr3);
+            if (!tsk->mm) {
+                serial_printk("fork: pid=%d fork_mm_copy FAILED, falling back to shared mm\n",
+                    (int)current->pid);
+                tsk->mm = current->mm;
+                thd->cr3 = current->thread->cr3;
+            }
+        } else if (current->mm) {
+            serial_printk("fork: pid=%d parent_mm->pml4 is NULL, sharing mm\n",
+                (int)current->pid);
+        }
     }
 
     memcpy((void *)((uint64_t)tsk + STACK_SIZE - sizeof(pt_regs_t)),

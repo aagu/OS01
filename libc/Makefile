@@ -13,7 +13,7 @@ include $(ARCHDIR)/make.config
 
 # ── Compile flags ──────────────────────────────────────────
 CFLAGS := $(CFLAGS) -ffreestanding -Wall -Wextra -D__is_libc -Iinclude -fno-stack-protector $(ARCH_CFLAGS)
-LIBK_CFLAGS := $(CFLAGS) -D__is_libk
+LIBK_CFLAGS := $(CFLAGS) -D__is_libk -mno-red-zone
 
 # ── Source discovery (wildcard — no manual lists!) ──────────
 C_SOURCES := \
