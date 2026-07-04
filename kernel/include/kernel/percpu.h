@@ -36,6 +36,7 @@ typedef struct percpu {
     list_t run_queue;
     struct task_struct *idle;
     uint64_t schedule_count;    // number of times schedule() ran
+    uint64_t watchdog_counter;  // incremented each timer tick, reset by schedule()
     uint64_t tsc_boot;          // TSC value after AP startup (for warp check)
 } percpu_t;
 

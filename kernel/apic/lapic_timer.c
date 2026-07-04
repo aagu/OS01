@@ -118,6 +118,7 @@ void lapic_timer_handler(pt_regs_t *regs __attribute__((unused)),
                          uint64_t error_code __attribute__((unused)))
 {
     this_cpu()->need_resched = 1;
+    this_cpu()->watchdog_counter++;
     lapic_eoi();
 }
 

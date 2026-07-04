@@ -3,6 +3,7 @@
 #include <kernel.h>
 #include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/x86_64/spinlock.h>
+#include <kernel/hang.h>
 #include <kernel/arch/x86_64/regs.h>
 #include <kernel/arch/x86_64/linkage.h>
 #include <kernel/debug.h>
@@ -214,6 +215,18 @@ void schedule(void)
         return;
 
     this_cpu()->schedule_count++;
+
+    // ── Hang detector ──────────────────────────────────
+    // Reset the per-CPU watchdog.  If it was >= HANG_THRESHOLD
+    // we just recovered from a near-hang — dump diagnostic info.
+    if (this_cpu()->watchdog_counter >= HANG_THRESHOLD) {
+        serial_printk("[hang] CPU %u recovered (watchdog=%lu ticks)\n",
+                      (unsigned long)cpu_id(),
+                      (unsigned long)this_cpu()->watchdog_counter);
+        hang_dump_all();
+    }
+    this_cpu()->watchdog_counter = 0;
+
 
     // ── Early return: current still has quantum ────────────
     // Safe without lock — only touches per-CPU 'current'.

@@ -27,6 +27,7 @@ void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attri
     // Request rescheduling on every timer tick — schedule() manages
     // per-task quantum counters and picks the next task.
     this_cpu()->need_resched = 1;
+    this_cpu()->watchdog_counter++;
 
     // IRQ fallback: poll UART on every tick.  Under normal
     // operation the serial ISR delivers input.  This exists

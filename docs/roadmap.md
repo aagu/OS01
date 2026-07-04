@@ -53,7 +53,7 @@
 
 | 优先级 | 任务 | 说明 |
 |--------|------|------|
-| 🔴 P0 | Hang detector | 检测调度停滞 → dump 所有 task 状态、wait_obj、调用栈 |
+| ✅ | Hang detector | 检测调度停滞 (500ms) → dump 所有 task 状态 + 调用栈 |
 | 🟡 P1 | 内核级 strace | `DEBUG_SYSCALLS_STRACE` — 实时打印每次 syscall 的名称和参数 |
 | 🟢 P3 | Debug panel TUI | Tilck 内置交互式 debug 面板 (高级功能，可延后) |
 
