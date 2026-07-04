@@ -1,7 +1,7 @@
 # OS01 优化路线图 v2
 
-> **基准**: `23fcbd9` (built-in selftest framework)
-> **日期**: 2026-07-04
+> **基准**: `1bd7fb0` (hang detector — watchdog per CPU)
+> **日期**: 2026-07-04 (v3)
 > **来源**: 原 v1 路线图 + [6 个开源 OS 项目分析](#附录开源-os-项目分析摘要)
 
 标记: ✅ 已完成 | 🔴 P0 本周 | 🟡 P1 本月 | 🟢 P2 下月 | 🔵 P3 远期
@@ -23,6 +23,7 @@
 | fork_mm_copy fix | ✅ |
 | 模块化 debug 日志 (`debug_<channel>()` 宏) | ✅ |
 | 内置 selftest 框架 (6 个测试 → serial 输出) | ✅ |
+| Hang detector (watchdog per CPU, 500ms threshold) | ✅ |
 | 基础测试框架 (test/ + mock) | ✅ |
 
 ---
@@ -597,24 +598,42 @@ P3 (远期):
 
 ---
 
-## 立即行动计划 (本周)
+## 已完成 (2026-07-04)
 
-基于以上分析，OS01 最紧迫的三件事:
+| 项目 | 工作量 | 状态 |
+|------|--------|------|
+| 模块化 debug 日志 (`debug_<channel>()` 宏) | 1 天 | ✅ |
+| 内置 selftest 框架 (6 tests) | 2 天 | ✅ |
+| Hang detector (watchdog per CPU) | 半天 | ✅ |
 
-1. **模块化 debug 日志** (ArvernOS 模式)
-   - `kernel/kernel/debug.c` 新文件
-   - `ENABLE_*_DEBUG=1` 编译开关 (已有 `-DOS01_DEBUG_*` 约定，统一化)
-   - 1 天工作量，调试效率质变
+## 下一个改进建议
 
-2. **测试框架升级** (Tilck 模式)
-   - host 上 gtest 编译 `memory/pmm.c`, `slab.c`, `vfs.c` → mock 硬件依赖
-   - QEMU Python 自动化测试 — 扩展 `tests/run_test.py` 为多测试用例
-   - 2-3 天工作量
+### 🟡 P1: 内核级 strace (`DEBUG_SYSCALLS_STRACE`)
 
-3. **Hang detector** (Tilck 模式)
-   - 定时器 tick 中递增 `watchdog_counter`
-   - 调度器中清零
-   - 超过阈值 → dump 所有 task + 调用栈
-   - 半天工作量
+**借鉴**: cavOS `syscalls_*.c` 分组 + strace 实时打印
 
-这三项完成后，再进入 COW fork、ext2、EEVDF 等大功能开发。
+**工作量**: 1-2 天
+
+**实现**:
+1. 在 `kernel/arch/x86_64/trap.c` 的 `do_system_call()` 中，在 dispatch 前后加 `debug_syscall()` 打印
+2. 打印格式: `[strace] pid=42 syscall(nr=0x5, arg1=0x400000, arg2=0x0, arg3=0x0) → ret=0`
+3. 仅在 `DEBUG_CHANNELS=syscall` 时激活，生产构建零开销
+4. 后续扩展：按 pid 过滤、按 syscall nr 过滤、跟踪 fork/exec 子进程
+
+**验证**: `make run DEBUG_CHANNELS=syscall` → 每次 syscall 实时打印到 serial
+
+### 🟡 P1: `sigprocmask` + `rt_sigaction` 完整实现
+
+**借鉴**: OS01 已有信号骨架 + Tilck/Aquila 信号实现
+
+**工作量**: 1-2 天
+
+**必要性**: 当前 busybox applet 因 missing `sigprocmask` 而 segfault
+
+### 🟡 P1: ext2 只读驱动
+
+**借鉴**: Aquila `kernel/fs/ext2/` 仅 1,201 行
+
+**工作量**: 3-5 天
+
+**必要性**: FAT32 没有 UNIX 权限/inode/符号链接
