@@ -323,8 +323,12 @@ static void setup_fallback_actions(void)
     // (could mount filesystems, set hostname, etc.)
     // For OS01 MVP: /etc/rc doesn't exist, skip
 
-    // RESPAWN: the interactive shell
+    // RESPAWN: the interactive shell (or systest in test mode)
+#ifdef OS01_SYSTEST
+    add_action(ACT_RESPAWN, "", "/systest.elf");
+#else
     add_action(ACT_RESPAWN, "", "/busybox.elf sh");
+#endif
 
     // CTRLALTDEL: when init receives SIGINT, reboot
     add_action(ACT_CTRLALTDEL, "", "");

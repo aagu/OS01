@@ -131,6 +131,41 @@ def test_boot(tester):
     return True
 
 
+def test_systest(tester):
+    """System test: runs systest.elf in QEMU, parses results."""
+    tester.start_qemu()
+
+    # Wait for test summary line
+    output = tester.read_until("[SYS TEST] RESULT:", timeout=60)
+    if not output:
+        print("FAIL: systest did not complete")
+        return False
+
+    # PTY may split data: keep reading up to 5 seconds after pattern found
+    import select
+    for _ in range(50):
+        r, _, _ = select.select([tester.master], [], [], 0.1)
+        if r:
+            data = os.read(tester.master, 4096)
+            if data:
+                text = data.decode('utf-8', errors='replace')
+                sys.stdout.write(text); sys.stdout.flush()
+                output += text
+
+    # Parse: "[SYS TEST] RESULT: N passed, M failed"
+    m = re.search(r'\[SYS TEST\] RESULT:\s*(\d+)\s*passed,\s*(\d+)\s*failed', output)
+    if not m:
+        print(f"FAIL: could not parse result line. output={output[-200:]!r}")
+        return False
+
+    passed, failed = int(m.group(1)), int(m.group(2))
+    if failed > 0:
+        print(f"FAIL: {failed} tests failed ({passed} passed)")
+        return False
+    print(f"PASS: all {passed} syscall tests passed")
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description="OS01 test runner")
     parser.add_argument("--disk", default=DISK_IMG, help="Disk image to test")
@@ -143,6 +178,8 @@ def main():
     try:
         if args.test_name == "boot" or args.test_name == "phase-0":
             result = test_boot(tester)
+        elif args.test_name == "systest":
+            result = test_systest(tester)
         else:
             print(f"Unknown test: {args.test_name}")
             result = False

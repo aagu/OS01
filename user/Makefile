@@ -14,6 +14,12 @@ CFLAGS   := --sysroot=$(SYSROOT) \
             -I$(SYSROOT)/usr/include \
             -Wall -Wextra -O2
 
+# ── Syscall test mode ──────────────────────────────────────
+# When OS01_SYSTEST=1, init.c spawns /systest.elf instead of /busybox.elf sh
+ifeq ($(OS01_SYSTEST),1)
+override CFLAGS += -DOS01_SYSTEST
+endif
+
 LDFLAGS  := -T linker.ld -static -nostdlib -no-pie \
             -L$(SYSROOT)/usr/lib -lc
 
