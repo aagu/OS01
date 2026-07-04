@@ -19,6 +19,7 @@ typedef int pid_t;
 #include <termios.h>
 #include <stdlib.h>
 #include <fs/vfs.h>
+#include <kernel/debug.h>
 #include <kernel/file.h>
 #include <device/timer.h>
 #include <uapi/time.h>
@@ -675,6 +676,52 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             regs->rax = os;
     }
     switch (regs->rax) {
+    // ── Syscall name table (for strace) ─────────────────────
+    static const char *syscall_names[64] = {
+        [0]  = "putchar",
+        [1]  = "write",
+        [2]  = "exit",
+        [3]  = "brk",
+        [4]  = "getpid",
+        [5]  = "exec",
+        [6]  = "read",
+        [7]  = "open",
+        [8]  = "close",
+        [9]  = "dup",
+        [10] = "dup2",
+        [11] = "fork",
+        [12] = "waitpid",
+        [13] = "signal",
+        [14] = "chdir",
+        [15] = "getcwd",
+        [16] = "stat",
+        [17] = "fstat",
+        [18] = "lseek",
+        [19] = "mkdir",
+        [20] = "ioctl",
+        [21] = "getdents64",
+        [22] = "access",
+        [23] = "unlink",
+        [24] = "mkdir",
+        [25] = "rmdir",
+        [26] = "readlink",
+        [27] = "rename",
+        [31] = "nanosleep",
+        [34] = "times",
+        [35] = "uname",
+        [36] = "getppid",
+        [38] = "kill",
+        [39] = "rt_sigaction",
+        [40] = "sigprocmask",
+        [45] = "poweroff",
+    };
+    const char *sname = (regs->rax < 64 && syscall_names[regs->rax])
+                        ? syscall_names[regs->rax] : "?";
+    debug_syscall("[strace] pid=%d syscall(%s, arg1=%#lx, arg2=%#lx, arg3=%#lx)\n",
+                  (int)current->pid, sname,
+                  (unsigned long)regs->rdi,
+                  (unsigned long)regs->rsi,
+                  (unsigned long)regs->rdx);
     case SYS_putchar: {
         // putchar(int c) — write one char to framebuffer AND serial
         char c = (char)regs->rdi;
