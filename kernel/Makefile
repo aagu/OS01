@@ -32,6 +32,7 @@ KERNEL_C_SOURCES := \
     $(wildcard timer/*.c) \
     $(wildcard percpu/*.c) \
     $(wildcard pic/*.c) \
+    $(wildcard test/*.c) \
     $(wildcard *.c)               # completion.c
 
 # Architecture C sources and asm sources
@@ -76,6 +77,11 @@ ifdef DEBUG_CHANNELS
   space := $(empty) $(empty)
   CHANNELS := $(subst $(comma),$(space),$(DEBUG_CHANNELS))
   ALL_CFLAGS += $(foreach ch,$(CHANNELS),-DOS01_DEBUG_$(ch)=1)
+endif
+
+# ── Built-in selftests (make KERNEL_SELFTEST=1) ────────────────
+ifdef KERNEL_SELFTEST
+ALL_CFLAGS += -DOS01_SELFTEST=1
 endif
 
 # ── Targets ────────────────────────────────────────────────

@@ -1,4 +1,3 @@
-#include <kernel/bootinfo.h>
 #include <string.h>
 #include <kernel/printk.h>
 #include <kernel/memory.h>
@@ -24,6 +23,7 @@
 #include <fs/devfs.h>
 #include <fs/procfs.h>
 #include <device/timer.h>
+#include <kernel/selftest.h>
 #include <stdlib.h>
 
 extern char _text;
@@ -192,6 +192,14 @@ int kernel_main(struct BOOT_INFO *bootinfo)
 
     smp_boot_aps();
     lapic_timer_start(100);              // per-CPU scheduling tick
+
+#ifdef OS01_SELFTEST
+    serial_printk("[selftest] running built-in tests...\n");
+    selftest_run_all();
+    serial_printk("[selftest] done\n");
+#endif
+
+
 
     // ═══ 9. Scheduler + user-space init ═════════════════════
     task_init();                         // spawns /init.elf, enters idle loop
