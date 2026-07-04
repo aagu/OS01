@@ -24,6 +24,7 @@
 | 模块化 debug 日志 (`debug_<channel>()` 宏) | ✅ |
 | 内置 selftest 框架 (6 个测试 → serial 输出) | ✅ |
 | Hang detector (watchdog per CPU, 500ms threshold) | ✅ |
+| 内核级 strace (DEBUG_CHANNELS=syscall) | ✅ |
 | 基础测试框架 (test/ + mock) | ✅ |
 
 ---
@@ -55,7 +56,7 @@
 | 优先级 | 任务 | 说明 |
 |--------|------|------|
 | ✅ | Hang detector | 检测调度停滞 (500ms) → dump 所有 task 状态 + 调用栈 |
-| 🟡 P1 | 内核级 strace | `DEBUG_SYSCALLS_STRACE` — 实时打印每次 syscall 的名称和参数 |
+| ✅ | 内核级 strace | `DEBUG_CHANNELS=syscall` — pid + 参数 + 返回值 |
 | 🟢 P3 | Debug panel TUI | Tilck 内置交互式 debug 面板 (高级功能，可延后) |
 
 ---
