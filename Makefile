@@ -126,6 +126,11 @@ test:
 test-phase-0: disk.img
 	python3 tests/run_test.py phase-0
 
+.PHONY: test-syscall
+test-syscall:
+	$(MAKE) OS01_SYSTEST=1 disk.img
+	python3 tests/run_test.py systest
+
 # ── Clean ───────────────────────────────────────────────
 
 .PHONY: clean
