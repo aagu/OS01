@@ -1,7 +1,7 @@
 # OS01 优化路线图 v2
 
-> **基准**: `1bd7fb0` (hang detector — watchdog per CPU)
-> **日期**: 2026-07-04 (v3)
+> **基准**: `650b010` (sigprocmask syscall — unblock busybox shell)
+> **日期**: 2026-07-04 (v4)
 > **来源**: 原 v1 路线图 + [6 个开源 OS 项目分析](#附录开源-os-项目分析摘要)
 
 标记: ✅ 已完成 | 🔴 P0 本周 | 🟡 P1 本月 | 🟢 P2 下月 | 🔵 P3 远期
@@ -26,6 +26,8 @@
 | Hang detector (watchdog per CPU, 500ms threshold) | ✅ |
 | 内核级 strace (DEBUG_CHANNELS=syscall) | ✅ |
 | 基础测试框架 (test/ + mock) | ✅ |
+| `sigprocmask` syscall (完整实现，含 Linux ABI 映射) | ✅ |
+| 构建系统升级 (`-MMD` 自动依赖 + 分离 build 目录 + wildcard 源码) | ✅ |
 
 ---
 
@@ -38,18 +40,17 @@
 
 | 优先级 | 任务 | 说明 |
 |--------|------|------|
-| ✅ | 单元测试扩展 | 已有 `test/` + selftest 框架覆盖 slab/vfs/procfs/spinlock |
-| 🔴 P0 | 系统测试 (syscall 级) | QEMU 自动运行用户态测试程序，验证 syscall 行为 |
-| 🔴 P0 | CI (GitHub Actions) | `make` + `make run` + 自动化测试脚本，每个 PR 触发 |
+| ✅ | 系统测试 (syscall 级) | systest.elf 68 assertions 覆盖 43 syscall，make test-syscall |
 | 🔴 P0 | Mock 框架完善 | host 上编译测试非 arch 内核代码 (Tilck `mocking.h` 模式) |
+| ✅ | 单元测试扩展 | 已有 `test/` + selftest 框架覆盖 slab/vfs/procfs/spinlock |
 
 ### 1.2 模块化调试日志 [借鉴 ArvernOS]
 
 | 优先级 | 任务 | 说明 |
 |--------|------|------|
-| 🔴 P0 | DEBUG channel 机制 | `ENABLE_SCHED_DEBUG=1`、`ENABLE_FS_DEBUG=1` 按子系统开关 |
+| ✅ | DEBUG channel 机制 | `debug_<channel>()` 宏 + `DEBUG_CHANNELS=` 运行时开关已就绪 |
 | 🔴 P0 | 日志级别 (ERR/WARN/INFO/DEBUG) | 替代无差别的 `printk`，编译时可屏蔽低优先级 |
-| 🔴 P0 | stacktrace 符号解析脚本 | ArvernOS `tools/fix-stacktrace.py` — 自动 addr2line |
+| ✅ | stacktrace 符号解析 | `kernel/kallsyms.c` → `nm` 生成符号表 → `backtrace()` 自动符号名+偏移 |
 
 ### 1.3 内核诊断 [借鉴 Tilck + cavOS]
 
@@ -141,7 +142,7 @@ Aquila 的 ext2 只读驱动仅 221 行，是最佳范本。
 
 | 优先级 | 任务 | 说明 |
 |--------|------|------|
-| 🔴 P0 | `sigprocmask` stub | ~5 行，用 `dummy_ok` 之类返回 0，防止 busybox 卡死 |
+| ✅ | `sigprocmask` 完整实现 | Linux ABI 映射 (nr 14→42)，信号屏蔽字 atomic get/set，已解锁 busybox shell |
 | 🟡 P1 | `mmap`/`mprotect` | COW 前置 + 解锁更多 busybox |
 | 🟡 P1 | `readlink`/`symlink` | ext2 软硬链接的前置条件 |
 | 🟡 P1 | `poll`/`select` | 多路 I/O，解锁 busybox 网络相关 applet |
@@ -184,7 +185,7 @@ ArvernOS 的自研网络栈每层约 1 个文件，清晰可读。
 |--------|------|------|
 | 🔴 P0 | `sigreturn` trampoline | 用户栈帧: return addr → `sigreturn` syscall，恢复被中断上下文 |
 | 🟡 P1 | `rt_sigaction` 完整实现 | SA_SIGINFO、sa_flags 处理 |
-| 🟡 P1 | `sigprocmask` 完整实现 | 不仅仅是 stub，信号屏蔽字 atomic get/set |
+| ✅ | `sigprocmask` 完整实现 | 已完成 — Linux ABI 兼容，信号屏蔽字 atomic get/set |
 | 🟡 P2 | `sigsuspend`/`sigpending` | 原子 sigmask + sleep |
 
 ---
@@ -248,40 +249,36 @@ cavOS 已做到的: `apk add` → bash, vim, gcc, python3, xorg-server, mpv, hto
 
 ```
 P0 (本周):
- 1. 模块化 debug 日志        — 低改造成本，调试效率质变
- 2. sigprocmask stub          — 5 行代码，解锁 busybox
- 3. 内核栈 canary             — 低改造成本，防栈溢出
- 4. Hang detector             — 防死锁/lost-wakeup
- 5. sigreturn trampoline      — 用户态信号 handler 的前置
- 6. COW fork + 4KB 页面       — v1 遗留，性能刚需
+ 1. 内核栈 canary             — 低改造成本，防栈溢出
+ 2. sigreturn trampoline      — 用户态信号 handler 的前置
+ 3. COW fork + 4KB 页面       — v1 遗留，性能刚需
+ 4. 日志级别 (ERR/WARN/INFO/DEBUG) — 调试效率质变
 
 P1 (本月):
- 7. 测试框架升级 + CI         — 质量保障
- 8. 内核级 strace             — syscall 调试利器
- 9. ext2 只读                 — UNIX 文件系统核心
-10. mmap/mprotect             — COW 前置 + 解锁 busybox
-11. rt_sigaction 完整实现
-12. sigprocmask 完整实现
-13. poll/select               — 多路 I/O
-14. /proc/<pid>/fd 和 /maps   — 可观测性
+ 5. 测试框架升级              — 质量保障
+ 6. ext2 只读                 — UNIX 文件系统核心
+ 7. mmap/mprotect             — COW 前置 + 解锁 busybox
+ 8. rt_sigaction 完整实现
+ 9. poll/select               — 多路 I/O
+10. /proc/<pid>/fd 和 /maps   — 可观测性
+11. EEVDF 调度器              — O(n)→O(log n)，公平调度
 
 P2 (下月):
-15. EEVDF 调度器              — O(n)→O(log n)，公平调度
-16. lwIP 网络栈 + E1000       — 第一个网络能力
-17. SMP 负载均衡
-18. ext2 读写
-19. rwlock                    — 读多写少优化
-20. 用户栈 canary
-21. symlink/readlink syscall
-22. 多架构抽象层骨架
+12. lwIP 网络栈 + E1000       — 第一个网络能力
+13. SMP 负载均衡
+14. ext2 读写
+15. rwlock                    — 读多写少优化
+16. 用户栈 canary
+17. symlink/readlink syscall
+18. 多架构抽象层骨架
 
 P3 (远期):
-23. 动态链接器
-24. ASLR
-25. 多架构 (aarch64)
-26. UBSan
-27. GUI 框架
-28. Alpine apk 用户态
+19. 动态链接器
+20. ASLR
+21. 多架构 (aarch64)
+22. UBSan
+23. GUI 框架
+24. Alpine apk 用户态
 ```
 
 ---
@@ -323,7 +320,7 @@ P3 (远期):
 | GUI | ❌ | FB console | Xorg | fbterm | ❌ | Window Server |
 | 多架构 | x86_64 | i686+riscv64 | x86_64 | x86 | x86_64+aarch32/64 | x86+ARMv7+ARM64 |
 | 用户态 | busybox(9) | busybox+vim+tcc | Alpine apk | aqbox+tcc+lua | homemade | C++ GUI apps |
-| Syscall | ~80 | ~100 (Linux兼容) | ~200+ (Linux兼容) | POSIX | homemade | POSIX |
+| Syscall | ~45 (+ Linux ABI) | ~100 (Linux兼容) | ~200+ (Linux兼容) | POSIX | homemade | POSIX |
 
 ## 各项目详细深度分析
 
@@ -582,12 +579,12 @@ P3 (远期):
 
 | 功能 | 最佳参考 | 复杂度 | 对 OS01 影响 | 建议优先级 |
 |------|---------|--------|-------------|-----------|
-| 测试框架升级 | Tilck | 中 | 高 — 质量保障基石 | 🔴 P0 |
-| 模块化 debug 日志 | ArvernOS | 低 | 高 — 调试效率质变 | 🔴 P0 |
-| Hang detector | Tilck | 低 | 高 — 防死锁 | 🔴 P0 |
+| 测试框架升级 | Tilck | 中 | 高 — 质量保障基石 | 🔴 P0 (单元测试 ✅) |
+| 模块化 debug 日志 | ArvernOS | 低 | 高 — 调试效率质变 | 🔴 P0 (channel ✅, 级别/符号待完成) |
+| Hang detector | Tilck | 低 | 高 — 防死锁 | ✅ 已完成 |
 | ext2 只读驱动 | Aquila | 中 | 高 — UNIX 文件系统核心 | 🟡 P1 |
 | EEVDF 调度器 | Tilck | 高 | 高 — 生产级调度 | 🟡 P1 |
-| 内核 strace | cavOS | 低 | 中 — syscall 调试 | 🟡 P1 |
+| 内核 strace | cavOS | 低 | 中 — syscall 调试 | ✅ 已完成 |
 | mmap/mprotect | Aquila | 中 | 高 — COW 前置依赖 | 🟡 P1 |
 | lwIP 网络栈 | cavOS | 高 | 高 — 首个网络能力 | 🟢 P2 |
 | 自研网络栈 (教学) | ArvernOS | 中 | 中 — 理解协议 | 🟢 P2 |
@@ -606,35 +603,46 @@ P3 (远期):
 | 模块化 debug 日志 (`debug_<channel>()` 宏) | 1 天 | ✅ |
 | 内置 selftest 框架 (6 tests) | 2 天 | ✅ |
 | Hang detector (watchdog per CPU) | 半天 | ✅ |
+| 内核级 strace (DEBUG_CHANNELS=syscall) | 1 天 | ✅ |
+| `sigprocmask` 完整实现 (Linux ABI 映射) | 半天 | ✅ |
+| stacktrace 符号解析 (`kallsyms` + `backtrace()`) | 已有 | ✅ |
+| 构建系统升级 (`-MMD` + 分离 build 目录 + wildcard) | 1 天 | ✅ |
 
 ## 下一个改进建议
 
-### 🟡 P1: 内核级 strace (`DEBUG_SYSCALLS_STRACE`)
+### 🔴 P0: 内核栈 canary (`-fstack-protector`)
 
-**借鉴**: cavOS `syscalls_*.c` 分组 + strace 实时打印
+**借鉴**: Linux kernel `__stack_chk_guard` + `__stack_chk_fail`
+
+**工作量**: ~30 分钟
+
+**实现**:
+1. 在 `-static` 链接时提供 `__stack_chk_guard` (随机值) 和 `__stack_chk_fail` (panic)
+2. 添加 `-fstack-protector-strong` 到 kernel CFLAGS
+3. 验证：写一个栈溢出测试 → canary 触发 → panic 而非静默破坏
+
+**收益**: 防止栈缓冲区溢出导致的内核崩溃 — 当前最严重的一类 bug
+
+### 🔴 P0: `sigreturn` trampoline — 用户态信号 handler
+
+**借鉴**: Linux `sigreturn` + OS01 现有信号引擎
 
 **工作量**: 1-2 天
 
 **实现**:
-1. 在 `kernel/arch/x86_64/trap.c` 的 `do_system_call()` 中，在 dispatch 前后加 `debug_syscall()` 打印
-2. 打印格式: `[strace] pid=42 syscall(nr=0x5, arg1=0x400000, arg2=0x0, arg3=0x0) → ret=0`
-3. 仅在 `DEBUG_CHANNELS=syscall` 时激活，生产构建零开销
-4. 后续扩展：按 pid 过滤、按 syscall nr 过滤、跟踪 fork/exec 子进程
+1. `do_signal_delivery()` 不再只清除 pending bit，实际构造用户栈帧
+2. 栈帧布局: `[sigreturn_trampoline_addr] [siginfo] [ucontext] [saved regs]`
+3. 用户态返回到 trampoline → 调用 handler → handler 返回 → `sigreturn` syscall → 恢复上下文
+4. libc 提供 `sigreturn()` 包装
 
-**验证**: `make run DEBUG_CHANNELS=syscall` → 每次 syscall 实时打印到 serial
+**验证**: busybox `trap` 命令、`CTRL-Z` (SIGTSTP) 处理
 
-### 🟡 P1: `sigprocmask` + `rt_sigaction` 完整实现
+**阻塞**: 完成后，用户态信号 handler 全部可用，busybox 信号完整性大幅提升
 
-**借鉴**: OS01 已有信号骨架 + Tilck/Aquila 信号实现
+### 🟡 P1: COW fork + 4KB 页面
 
-**工作量**: 1-2 天
-
-**必要性**: 当前 busybox applet 因 missing `sigprocmask` 而 segfault
-
-### 🟡 P1: ext2 只读驱动
-
-**借鉴**: Aquila `kernel/fs/ext2/` 仅 1,201 行
+**借鉴**: Tilck COW fault handler + Linux `copy_page_range`
 
 **工作量**: 3-5 天
 
-**必要性**: FAT32 没有 UNIX 权限/inode/符号链接
+**重要性**: 当前 `fork_mm_copy` 急切复制 2MB 页，fork 延迟 ~100ms → 目标 ~1ms，是最大的性能瓶颈
