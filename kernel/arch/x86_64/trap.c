@@ -24,6 +24,14 @@ typedef int pid_t;
 #include <device/timer.h>
 #include <uapi/time.h>
 #include <kernel.h>
+// ── Local signal constants (kernel has its own signal.h) ──
+#ifndef SIG_BLOCK
+#define SIG_BLOCK    0
+#define SIG_UNBLOCK  1
+#define SIG_SETMASK  2
+typedef unsigned long sigset_t;
+#endif
+
 
 // ── Helper: find the current task from TSS.rsp0 ──────────────
 // Safe to call from IST exception stacks where get_current_task()
@@ -571,6 +579,11 @@ void do_signal_delivery(pt_regs_t *regs)
         if (!(pending & (1ULL << sig)))
             continue;
 
+        // Skip blocked signals (sigset uses BSD numbering: bit N-1 = signal N)
+        if (sig != SIGKILL && sig != SIGSTOP &&
+            current->blocked & (1ULL << (sig - 1)))
+            continue;
+
         void (*handler)(int) = current->sighand[sig].sa_handler;
 
         if (handler == SIG_IGN) {
@@ -641,7 +654,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             [10] = -1, // mprotect -> unsupported
             [12] = 3,  // brk -> SYS_brk
             [13] = 39, // rt_sigaction -> SYS_signal
-            [14] = -1, // sigprocmask -> unsupported (stub)
+            [14] = 42, // sigprocmask -> SYS_sigprocmask
             [16] = 20, // ioctl -> SYS_ioctl
             [21] = 22, // access -> SYS_access
             [25] = -1, // mremap -> unsupported
@@ -712,7 +725,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         [36] = "getppid",
         [38] = "kill",
         [39] = "rt_sigaction",
-        [40] = "sigprocmask",
+        [42] = "sigprocmask",
         [45] = "poweroff",
     };
     const char *sname = (regs->rax < 64 && syscall_names[regs->rax])
@@ -1736,6 +1749,45 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             current->sighand[signum].sa_flags    = act->sa_flags;
             current->sighand[signum].sa_restorer = act->sa_restorer;
             current->sighand[signum].sa_mask     = act->sa_mask;
+        }
+        regs->rax = 0;
+        break;
+    }
+    case SYS_sigprocmask: {
+        // sigprocmask(int how, const sigset_t *set, sigset_t *oldset)
+        int how = (int)regs->rdi;
+        const sigset_t *set = (const sigset_t *)regs->rsi;
+        sigset_t *oldset = (sigset_t *)regs->rdx;
+
+        // Return current mask if requested
+        if (oldset) {
+            if ((uint64_t)oldset >= current->addr_limit) {
+                regs->rax = -EFAULT;
+                break;
+            }
+            *oldset = (sigset_t)current->blocked;
+        }
+
+        // Update mask if set is provided
+        if (set) {
+            if ((uint64_t)set >= current->addr_limit) {
+                regs->rax = -EFAULT;
+                break;
+            }
+            switch (how) {
+            case SIG_BLOCK:
+                current->blocked |= *set;
+                break;
+            case SIG_UNBLOCK:
+                current->blocked &= ~*set;
+                break;
+            case SIG_SETMASK:
+                current->blocked = (int64_t)*set;
+                break;
+            default:
+                regs->rax = -EINVAL;
+                break;
+            }
         }
         regs->rax = 0;
         break;

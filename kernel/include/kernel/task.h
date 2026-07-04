@@ -116,6 +116,7 @@ typedef struct task_struct
     int64_t pid; // process id
     int64_t counter; // time slice counter, used in round-robin scheduling
     int64_t signal; // signal mask, e.g. 0x0000000000000001 means SIGINT
+    int64_t blocked; // signal mask of blocked signals (bit N = 1 means signal N+1 is blocked)
     int64_t priority; // priority, used in priority scheduling
     uint32_t cpu; // CPU affinity — which CPU owns this task (for SMP)
 
@@ -161,6 +162,7 @@ thread_t init_thread;
     .mm = &init_mm,                   \
     .thread = &init_thread,           \
     .addr_limit = 0xffff800000000000, \
+        .blocked = 0, \                      
     .pid = 0,                         \
     .counter = 0,                     \
     .signal = 0,                      \

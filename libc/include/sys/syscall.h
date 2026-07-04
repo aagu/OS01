@@ -54,6 +54,7 @@ static inline int64_t syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_
     int64_t ret;
     __asm__ volatile ("int $0x80"
         : "=a" (ret)
+#define SYS_sigprocmask 42
         : "a" (nr), "D" (arg1), "S" (arg2), "d" (arg3)
         : "memory");
     return ret;

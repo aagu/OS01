@@ -702,8 +702,10 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     tsk->flags = 0;                        // NOT PF_KTHREAD → user task
     tsk->addr_limit = 0x00007FFFFFFFFFFF;
     tsk->pid = atomic_fetch_add((volatile uint64_t *)&pid_counter, 1);
+    tsk->blocked = 0;                        // child starts with empty blocked mask
     tsk->counter = 1;
     tsk->signal = 0;
+    tsk->blocked = 0;                        // user tasks start with empty blocked mask
     tsk->priority = 5;                     // 50 ms quantum at 100 Hz
     tsk->cpu = cpu_id();                    // created on this CPU
 
@@ -1169,6 +1171,7 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
 
     // ── Fresh fields (must NOT inherit from parent) ────────
     tsk->signal      = 0;   // child must not inherit parent's pending signals
+    tsk->blocked     = current->blocked;  // do_fork inherits parent's blocked mask
     tsk->state       = TASK_UNINTERRUPTIBLE;
     tsk->priority    = 3;
     tsk->cpu         = cpu_id();
