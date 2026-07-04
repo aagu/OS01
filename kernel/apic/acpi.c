@@ -2,7 +2,7 @@
 #include <kernel/memory.h>
 #include <kernel/pmm.h>
 #include <kernel/vmm.h>
-#include <kernel/printk.h>
+#include <kernel/debug.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -148,7 +148,7 @@ static void parse_madt(struct MADT_HEADER *madt)
     uint8_t *ptr = (uint8_t *)madt + sizeof(struct MADT_HEADER);
     uint8_t *end = (uint8_t *)madt + table_length;
 
-    serial_printk("APIC: MADT at %p, length=%u, LAPIC base=%#010lx, flags=%#x\n",
+    debug_irq("APIC: MADT at %p, length=%u, LAPIC base=%#010lx, flags=%#x\n",
                   madt, table_length, apic_info.lapic_base, madt->Flags);
 
     while (ptr < end) {
@@ -165,11 +165,11 @@ static void parse_madt(struct MADT_HEADER *madt)
                 apic_info.lapics[apic_info.lapic_count].apic_id = lapic->apic_id;
                 apic_info.lapics[apic_info.lapic_count].acpi_id = lapic->acpi_processor_id;
                 apic_info.lapics[apic_info.lapic_count].flags   = lapic->flags;
-                serial_printk("APIC:   LAPIC id=%u acpi=%u flags=%#x\n",
+                debug_irq("APIC:   LAPIC id=%u acpi=%u flags=%#x\n",
                               lapic->apic_id, lapic->acpi_processor_id, lapic->flags);
                 apic_info.lapic_count++;
             } else {
-                serial_printk("APIC:   LAPIC id=%u DROPPED (table full, bump NR_CPUS)\n",
+                debug_irq("APIC:   LAPIC id=%u DROPPED (table full, bump NR_CPUS)\n",
                               lapic->apic_id);
             }
             break;
@@ -181,7 +181,7 @@ static void parse_madt(struct MADT_HEADER *madt)
                 apic_info.ioapics[apic_info.ioapic_count].apic_id   = ioapic->ioapic_id;
                 apic_info.ioapics[apic_info.ioapic_count].mmio_base = ioapic->ioapic_address;
                 apic_info.ioapics[apic_info.ioapic_count].gsi_base  = ioapic->global_system_interrupt_base;
-                serial_printk("APIC:   IOAPIC id=%u addr=%#010x gsi_base=%u\n",
+                debug_irq("APIC:   IOAPIC id=%u addr=%#010x gsi_base=%u\n",
                               ioapic->ioapic_id, ioapic->ioapic_address,
                               ioapic->global_system_interrupt_base);
                 apic_info.ioapic_count++;
@@ -196,7 +196,7 @@ static void parse_madt(struct MADT_HEADER *madt)
                 apic_info.isos[apic_info.iso_count].irq_source = iso->irq_source;
                 apic_info.isos[apic_info.iso_count].gsi        = iso->global_system_interrupt;
                 apic_info.isos[apic_info.iso_count].flags      = iso->flags;
-                serial_printk("APIC:   ISO bus=%u irq=%u → GSI=%u flags=%#x\n",
+                debug_irq("APIC:   ISO bus=%u irq=%u → GSI=%u flags=%#x\n",
                               iso->bus_source, iso->irq_source,
                               iso->global_system_interrupt, iso->flags);
                 apic_info.iso_count++;
@@ -206,7 +206,7 @@ static void parse_madt(struct MADT_HEADER *madt)
 
         case MADT_TYPE_NMI: {
             struct MADT_NMI *nmi = (struct MADT_NMI *)ptr;
-            serial_printk("APIC:   NMI acpi_processor=%u lint=%u flags=%#x\n",
+            debug_irq("APIC:   NMI acpi_processor=%u lint=%u flags=%#x\n",
                           nmi->acpi_processor_id, nmi->lint, nmi->flags);
             break;
         }
@@ -217,18 +217,18 @@ static void parse_madt(struct MADT_HEADER *madt)
                 apic_info.lapics[apic_info.lapic_count].apic_id  = x2->x2apic_id;
                 apic_info.lapics[apic_info.lapic_count].acpi_id  = x2->acpi_processor_id;
                 apic_info.lapics[apic_info.lapic_count].flags    = x2->flags;
-                serial_printk("APIC:   x2APIC id=%u acpi=%u flags=%#x\n",
+                debug_irq("APIC:   x2APIC id=%u acpi=%u flags=%#x\n",
                               x2->x2apic_id, x2->acpi_processor_id, x2->flags);
                 apic_info.lapic_count++;
             } else {
-                serial_printk("APIC:   x2APIC id=%u DROPPED (table full, bump NR_CPUS)\n",
+                debug_irq("APIC:   x2APIC id=%u DROPPED (table full, bump NR_CPUS)\n",
                               x2->x2apic_id);
             }
             break;
         }
 
         default:
-            serial_printk("APIC:   Unknown MADT entry type=%u len=%u\n",
+            debug_irq("APIC:   Unknown MADT entry type=%u len=%u\n",
                           entry->type, entry->length);
             break;
         }
@@ -244,7 +244,7 @@ static void parse_madt(struct MADT_HEADER *madt)
 int acpi_parse(uint64_t rsdp_phys)
 {
     if (!rsdp_phys) {
-        serial_printk("APIC: RSDP is NULL — no ACPI tables available\n");
+        debug_irq("APIC: RSDP is NULL — no ACPI tables available\n");
         return 0;
     }
 
@@ -255,17 +255,17 @@ int acpi_parse(uint64_t rsdp_phys)
 
     // Validate signature
     if (memcmp(rsdp->Signature, "RSD PTR ", 8) != 0) {
-        serial_printk("APIC: RSDP signature mismatch\n");
+        debug_irq("APIC: RSDP signature mismatch\n");
         return 0;
     }
 
     // Validate checksum
     if (!sdt_checksum_valid(rsdp, 20)) {
-        serial_printk("APIC: RSDP checksum invalid\n");
+        debug_irq("APIC: RSDP checksum invalid\n");
         return 0;
     }
 
-    serial_printk("APIC: RSDP found, Revision=%u\n", rsdp->Revision);
+    debug_irq("APIC: RSDP found, Revision=%u\n", rsdp->Revision);
 
     // Prefer XSDT (64-bit pointers) when available, otherwise RSDT (32-bit)
     uint64_t sdt_phys;
@@ -284,7 +284,7 @@ int acpi_parse(uint64_t rsdp_phys)
     struct SDT_HEADER *sdt = (struct SDT_HEADER *)Phy_To_Virt(sdt_phys);
 
     if (!sdt_checksum_valid(sdt, sdt->Length)) {
-        serial_printk("APIC: %s checksum invalid\n", use_xsdt ? "XSDT" : "RSDT");
+        debug_irq("APIC: %s checksum invalid\n", use_xsdt ? "XSDT" : "RSDT");
         return 0;
     }
 
@@ -292,7 +292,7 @@ int acpi_parse(uint64_t rsdp_phys)
     uint32_t entry_count = (sdt->Length - sizeof(struct SDT_HEADER))
                            / (use_xsdt ? 8 : 4);
 
-    serial_printk("APIC: %s at %p, %u entries\n",
+    debug_irq("APIC: %s at %p, %u entries\n",
                   use_xsdt ? "XSDT" : "RSDT", sdt, entry_count);
 
     // Walk entries looking for MADT and FADT
@@ -313,7 +313,7 @@ int acpi_parse(uint64_t rsdp_phys)
 
         // Verify checksum before accessing Length
         if (!sdt_checksum_valid(table, table->Length)) {
-            serial_printk("APIC:   table at %p checksum invalid, skipping\n", table);
+            debug_irq("APIC:   table at %p checksum invalid, skipping\n", table);
             continue;
         }
 
@@ -325,14 +325,14 @@ int acpi_parse(uint64_t rsdp_phys)
             uint32_t pm1a = *(uint32_t *)((uint8_t *)table + 64);
             if (pm1a) {
                 apic_info.pm1a_port = (uint16_t)(pm1a & 0xFFFF);
-                serial_printk("APIC: FADT PM1a_CNT_BLK=%#x (port=%#x)\n",
+                debug_irq("APIC: FADT PM1a_CNT_BLK=%#x (port=%#x)\n",
                               pm1a, (unsigned)apic_info.pm1a_port);
             }
         }
     }
 
     if (apic_info.lapic_count == 0) {
-        serial_printk("APIC: MADT not found — no LAPIC data\n");
+        debug_irq("APIC: MADT not found — no LAPIC data\n");
         return 0;
     }
     return 1;

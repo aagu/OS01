@@ -6,7 +6,7 @@
 #include <kernel/arch/x86_64/cpu.h>
 #include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/x86_64/msr.h>
-#include <kernel/printk.h>
+#include <kernel/debug.h>
 #include <kernel/memory.h>
 #include <kernel/vmm.h>
 #include <kernel/pmm.h>
@@ -39,7 +39,7 @@ void ap_entry(void)
 {
     percpu_t *cpu = this_cpu();
 
-    serial_printk("SMP: AP %u (APIC ID %u) reported\n",
+    debug_sched("SMP: AP %u (APIC ID %u) reported\n",
                   cpu->cpu_id, cpu->apic_id);
 
     uint64_t apic_msr = rdmsr(IA32_APIC_BASE);
@@ -114,7 +114,7 @@ void ap_entry(void)
     cpu->tsc_boot = rdtsc();
 
     __asm__ __volatile__("sti");
-    serial_printk("SMP: AP %u online (idle pid=%d), entering idle\n",
+    debug_sched("SMP: AP %u online (idle pid=%d), entering idle\n",
                   cpu->cpu_id, cpu->idle->pid);
 
     cpu->scheduler_ok = 1;
@@ -158,7 +158,7 @@ void smp_boot_aps(void)
 
     uintptr_t tramp_size = (uintptr_t)_binary_arch_x86_64_trampoline_bin_end
                          - (uintptr_t)_binary_arch_x86_64_trampoline_bin_start;
-    serial_printk("SMP: copying trampoline (%u bytes) to %#010lx\n",
+    debug_sched("SMP: copying trampoline (%u bytes) to %#010lx\n",
                   (unsigned)tramp_size, (uint64_t)TRAMPOLINE_BASE);
     memcpy((void *)Phy_To_Virt(TRAMPOLINE_BASE),
            _binary_arch_x86_64_trampoline_bin_start, tramp_size);
@@ -170,13 +170,13 @@ void smp_boot_aps(void)
         if (!percpu_data[i].apic_id) continue;
 
         uint32_t ap_id = percpu_data[i].apic_id;
-        serial_printk("SMP: booting AP %u (APIC ID %u)\n", i, ap_id);
+        debug_sched("SMP: booting AP %u (APIC ID %u)\n", i, ap_id);
 
         // Create the AP's idle task — the AP runs ap_entry() on
         // this task's kernel stack, so get_current_task() = idle.
         task_t *idle = create_idle_task(i);
         if (!idle) {
-            serial_printk("SMP: failed to create idle for AP %u\n", i);
+            debug_sched("SMP: failed to create idle for AP %u\n", i);
             continue;
         }
         percpu_data[i].idle = idle;
@@ -212,7 +212,7 @@ void smp_boot_aps(void)
             __asm__ __volatile__("pause");
         }
         if (percpu_data[i].online) {
-            serial_printk("SMP: AP %u (APIC ID %u) booted successfully\n", i, ap_id);
+            debug_sched("SMP: AP %u (APIC ID %u) booted successfully\n", i, ap_id);
 
             // Quick TSC warp check — compare BSP vs AP readings.
             // Not a full point-to-point measurement (no shared spin-wait),
@@ -223,12 +223,12 @@ void smp_boot_aps(void)
                 int64_t  diff    = (int64_t)(bsp_tsc - ap_tsc);
                 const char *status = (diff > -5000000LL && diff < 5000000LL)
                                      ? "OK" : "WARP";
-                serial_printk("SMP: TSC sync AP%u: BSP=%#018lx AP=%#018lx diff=%+ld %s\n",
+                debug_sched("SMP: TSC sync AP%u: BSP=%#018lx AP=%#018lx diff=%+ld %s\n",
                               i, bsp_tsc, ap_tsc, (long long)diff, status);
             }
             for (volatile uint32_t d = 0; d < 10000; d++) __asm__ __volatile__("pause");
         } else {
-            serial_printk("SMP: AP %u (APIC ID %u) FAILED\n", i, ap_id);
+            debug_sched("SMP: AP %u (APIC ID %u) FAILED\n", i, ap_id);
             list_del(&idle->list);
             kfree(idle->thread);
             kfree(idle->stack_alloc_base);

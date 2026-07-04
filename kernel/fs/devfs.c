@@ -1,6 +1,6 @@
 #include <fs/devfs.h>
 #include <fs/vfs.h>
-#include <kernel/printk.h>
+#include <kernel/debug.h>
 #include <kernel/arch/x86_64/cpu.h>
 #include <driver/serial.h>
 #include <kernel/tty.h>
@@ -185,9 +185,9 @@ void devfs_init(void)
     // Mount devfs at /dev
     int ret = vfs_mount("/dev", NULL, &devfs_ops, NULL);
     if (ret == 0) {
-        serial_printk("devfs: mounted at /dev\n");
+        debug_fs("devfs: mounted at /dev\n");
     } else {
-        serial_printk("devfs: mount FAILED\n");
+        debug_fs("devfs: mount FAILED\n");
         return;
     }
 
@@ -221,6 +221,6 @@ int devfs_register_chrdev(const char *name, void *private_data,
     devices[idx].registered = 1;
     device_count++;
 
-    serial_printk("devfs: registered '%s' (chrdev)\n", name);
+    debug_fs("devfs: registered '%s' (chrdev)\n", name);
     return 0;
 }

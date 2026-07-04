@@ -1,7 +1,7 @@
 #include <fs/fat.h>
 #include <block/blockdev.h>
 #include <fs/vfs.h>
-#include <kernel/printk.h>
+#include <kernel/debug.h>
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -22,7 +22,7 @@ uint32_t fat32_next_cluster(fat32_fs_t *fs, uint32_t current)
     // Read the FAT sector containing this entry
     uint8_t sector[512];
     if (block_device_read(fs->dev, sector_lba, 1, sector) != 0) {
-        serial_printk("FAT: error reading FAT sector %lu\n", sector_lba);
+        debug_fs("FAT: error reading FAT sector %lu\n", sector_lba);
         return FAT32_EOC_MIN;
     }
 
@@ -36,7 +36,7 @@ uint32_t fat32_next_cluster(fat32_fs_t *fs, uint32_t current)
 uint64_t fat32_cluster_to_sector(fat32_fs_t *fs, uint32_t cluster)
 {
     if (cluster < 2) {
-        serial_printk("FAT: invalid cluster %u\n", cluster);
+        debug_fs("FAT: invalid cluster %u\n", cluster);
         return fs->first_data_sector;
     }
     return fs->first_data_sector
@@ -332,7 +332,7 @@ static uint32_t fat32_alloc_cluster(fat32_fs_t *fs, uint32_t prev_cluster)
 {
     uint32_t new_cl = fat32_find_free_cluster(fs);
     if (new_cl == 0) {
-        serial_printk("FAT: no free clusters\n");
+        debug_fs("FAT: no free clusters\n");
         return 0;
     }
 
@@ -629,7 +629,7 @@ static uint32_t fat32_create_entry(fat32_fs_t *fs, uint32_t dir_cluster,
     if (fat32_write_entry_at(fs, lba, off, &dirent) != 0)
         return 0;
 
-    serial_printk("FAT: created '%s' at index %ld\n", name, (long)free_idx);
+    debug_fs("FAT: created '%s' at index %ld\n", name, (long)free_idx);
 
     // Return a non-zero "ino" — for new files we use the entry index
     // as a temporary identifier. The first data cluster will be allocated
@@ -654,7 +654,7 @@ static int fat32_update_entry(fat32_fs_t *fs, vfs_node_t *node)
     uint32_t off;
     int64_t idx = fat32_find_by_name(fs, dir_cluster, node->name, &lba, &off);
     if (idx < 0) {
-        serial_printk("FAT: update_entry: '%s' not found in parent\n", node->name);
+        debug_fs("FAT: update_entry: '%s' not found in parent\n", node->name);
         return -1;
     }
 
@@ -740,7 +740,7 @@ int fat_unlink(vfs_node_t *dir, const char *name)
     uint32_t off;
     int64_t idx = fat32_find_by_name(fs, dir_cluster, name, &lba, &off);
     if (idx < 0) {
-        serial_printk("FAT: unlink '%s': not found\n", name);
+        debug_fs("FAT: unlink '%s': not found\n", name);
         return -ENOENT;
     }
 
@@ -768,7 +768,7 @@ int fat_unlink(vfs_node_t *dir, const char *name)
     if (block_device_write(fs->dev, lba, 1, sector) != 0)
         return -EIO;
 
-    serial_printk("FAT: unlink '%s' ok\n", name);
+    debug_fs("FAT: unlink '%s' ok\n", name);
     return 0;
 }
 
@@ -789,7 +789,7 @@ struct vfs_node *fat_mkdir(vfs_node_t *dir, const char *name)
 
     // Check if name already exists
     if (fat32_find_by_name(fs, dir_cluster, name, NULL, NULL) >= 0) {
-        serial_printk("FAT: mkdir '%s': already exists\n", name);
+        debug_fs("FAT: mkdir '%s': already exists\n", name);
         return NULL; // EEXIST
     }
 
@@ -877,7 +877,7 @@ struct vfs_node *fat_mkdir(vfs_node_t *dir, const char *name)
     node->size = 0;
     node->refcount = 1;
 
-    serial_printk("FAT: mkdir '%s' cl=%u ok\n", name, new_cl);
+    debug_fs("FAT: mkdir '%s' cl=%u ok\n", name, new_cl);
     return node;
 }
 
@@ -900,7 +900,7 @@ int fat_rmdir(vfs_node_t *dir, const char *name)
     uint32_t ent_off;
     int64_t idx = fat32_find_by_name(fs, dir_cluster, name, &ent_lba, &ent_off);
     if (idx < 0) {
-        serial_printk("FAT: rmdir '%s': not found\n", name);
+        debug_fs("FAT: rmdir '%s': not found\n", name);
         return -ENOENT;
     }
 
@@ -910,7 +910,7 @@ int fat_rmdir(vfs_node_t *dir, const char *name)
         return -EIO;
 
     if (!(ent.attr & FAT_ATTR_DIRECTORY)) {
-        serial_printk("FAT: rmdir '%s': not a directory\n", name);
+        debug_fs("FAT: rmdir '%s': not a directory\n", name);
         return -ENOTDIR;
     }
 
@@ -928,7 +928,7 @@ int fat_rmdir(vfs_node_t *dir, const char *name)
                 // Skip "." and ".."
                 if (strcmp(check_entry.name, ".") != 0 &&
                     strcmp(check_entry.name, "..") != 0) {
-                    serial_printk("FAT: rmdir '%s': not empty (found '%s')\n",
+                    debug_fs("FAT: rmdir '%s': not empty (found '%s')\n",
                                    name, check_entry.name);
                     return -ENOTEMPTY;
                 }
@@ -949,7 +949,7 @@ int fat_rmdir(vfs_node_t *dir, const char *name)
         fat32_free_cluster_chain(fs, target_cl);
     }
 
-    serial_printk("FAT: rmdir '%s' ok\n", name);
+    debug_fs("FAT: rmdir '%s' ok\n", name);
     return 0;
 }
 
@@ -976,7 +976,7 @@ int fat_rename(vfs_node_t *olddir, const char *oldname,
     uint32_t src_off;
     int64_t src_idx = fat32_find_by_name(fs, src_dir_cl, oldname, &src_lba, &src_off);
     if (src_idx < 0) {
-        serial_printk("FAT: rename '%s': source not found\n", oldname);
+        debug_fs("FAT: rename '%s': source not found\n", oldname);
         return -ENOENT;
     }
 
@@ -1015,7 +1015,7 @@ int fat_rename(vfs_node_t *olddir, const char *oldname,
                         }
                     }
                     if (!empty) {
-                        serial_printk("FAT: rename: target dir '%s' not empty\n", newname);
+                        debug_fs("FAT: rename: target dir '%s' not empty\n", newname);
                         return -ENOTEMPTY;
                     }
                     fat32_free_cluster_chain(fs, dst_cl);
@@ -1083,7 +1083,7 @@ int fat_rename(vfs_node_t *olddir, const char *oldname,
             return -EIO;
     }
 
-    serial_printk("FAT: rename '%s' → '%s' ok\n", oldname, newname);
+    debug_fs("FAT: rename '%s' → '%s' ok\n", oldname, newname);
     return 0;
 }
 
@@ -1145,7 +1145,7 @@ int fat_truncate(vfs_node_t *node, uint64_t new_size)
 
     node->size = new_size;
     fat32_update_entry(fs, node);
-    serial_printk("FAT: truncate to %lu bytes ok\n", (unsigned long)new_size);
+    debug_fs("FAT: truncate to %lu bytes ok\n", (unsigned long)new_size);
     return 0;
 }
 
@@ -1206,7 +1206,7 @@ fat32_fs_t *fat32_mount(block_device_t *dev)
     // Read sector 0 (BPB)
     uint8_t sector[512];
     if (block_device_read(dev, 0, 1, sector) != 0) {
-        serial_printk("FAT: failed to read boot sector\n");
+        debug_fs("FAT: failed to read boot sector\n");
         return NULL;
     }
 
@@ -1214,7 +1214,7 @@ fat32_fs_t *fat32_mount(block_device_t *dev)
 
     // Validate BPB: check for 0x55 0xAA signature (bytes at offset 510-511)
     if (sector[510] != 0x55 || sector[511] != 0xAA) {
-        serial_printk("FAT: boot sector signature missing (%02x %02x)\n",
+        debug_fs("FAT: boot sector signature missing (%02x %02x)\n",
                        sector[510], sector[511]);
         return NULL;
     }
@@ -1224,13 +1224,13 @@ fat32_fs_t *fat32_mount(block_device_t *dev)
         // Could be FAT12/16 — check total sectors
         uint32_t total = (bpb->total_sectors_16 != 0)
                          ? bpb->total_sectors_16 : bpb->total_sectors_32;
-        serial_printk("FAT: not FAT32 (FAT16=%u, total=%u)\n",
+        debug_fs("FAT: not FAT32 (FAT16=%u, total=%u)\n",
                        bpb->sectors_per_fat_16, total);
         return NULL;
     }
 
     if (bpb->sectors_per_fat_32 == 0) {
-        serial_printk("FAT: invalid FAT32: sectors_per_fat=0\n");
+        debug_fs("FAT: invalid FAT32: sectors_per_fat=0\n");
         return NULL;
     }
 
@@ -1253,14 +1253,14 @@ fat32_fs_t *fat32_mount(block_device_t *dev)
                           + bpb->reserved_sectors
                           + ((uint32_t)bpb->num_fats * bpb->sectors_per_fat_32);
 
-    serial_printk("FAT32: mounted (BpS=%u, SpC=%u, FATs=%u, FATsec=%u, rootClus=%u)\n",
+    debug_fs("FAT32: mounted (BpS=%u, SpC=%u, FATs=%u, FATsec=%u, rootClus=%u)\n",
                    fs->bytes_per_sector, fs->sectors_per_cluster,
                    bpb->num_fats, bpb->sectors_per_fat_32, fs->root_cluster);
-    serial_printk("FAT32: FAT start=%u, data start=%u\n",
+    debug_fs("FAT32: FAT start=%u, data start=%u\n",
                    fs->fat_start_sector, fs->first_data_sector);
 
     // Validate the root cluster
-    serial_printk("FAT32: root directory at cluster %u (LBA %lu)\n",
+    debug_fs("FAT32: root directory at cluster %u (LBA %lu)\n",
                    fs->root_cluster,
                    fat32_cluster_to_sector(fs, fs->root_cluster));
 

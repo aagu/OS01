@@ -4,7 +4,7 @@
 #include <device/pic.h>
 #include <kernel/apic.h>
 #include <kernel/interrupt.h>
-#include <kernel/printk.h>
+#include <kernel/debug.h>
 #include <kernel/tty.h>
 #include <kernel/arch/x86_64/hw.h>
 #include <kernel/arch/x86_64/spinlock.h>
@@ -302,7 +302,7 @@ static void keyboard_enable_irq(void)
     while (!(inb(0x64) & 1)) __asm__ __volatile__("pause");  // wait for output buffer full
     uint8_t cmd = inb(0x60);
 
-    serial_printk("kbd: PS/2 command byte was %#x", cmd);
+    debug_irq("kbd: PS/2 command byte was %#x", cmd);
 
     // Bit 0: keyboard interrupt enable
     // Bit 2: system flag (tell controller we passed POST)
@@ -318,7 +318,7 @@ static void keyboard_enable_irq(void)
     while (inb(0x64) & 2) __asm__ __volatile__("pause");
     outb(0x60, cmd);
 
-    serial_printk(" → %#x\n", cmd);
+    debug_irq(" → %#x\n", cmd);
 }
 
 void keyboard_init(void)

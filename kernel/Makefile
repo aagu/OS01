@@ -69,6 +69,15 @@ ifeq ($(DEBUG),1)
 ALL_CFLAGS += -DDEBUG=1
 endif
 
+# ── Debug channels (comma-separated, e.g. DEBUG_CHANNELS=sched,tty) ──
+ifdef DEBUG_CHANNELS
+  comma := ,
+  empty :=
+  space := $(empty) $(empty)
+  CHANNELS := $(subst $(comma),$(space),$(DEBUG_CHANNELS))
+  ALL_CFLAGS += $(foreach ch,$(CHANNELS),-DOS01_DEBUG_$(ch)=1)
+endif
+
 # ── Targets ────────────────────────────────────────────────
 .PHONY: all clean install-headers
 

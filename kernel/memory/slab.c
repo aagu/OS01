@@ -1,5 +1,6 @@
 #include <kernel/slab.h>
 #include <kernel/memory.h>
+#include <kernel/debug.h>
 #include <kernel/printk.h>
 #include <kernel.h>
 #include <string.h>
@@ -150,7 +151,7 @@ void * kmalloc(size_t size)
         }
         
         kmalloc_cache_size[i].total_free += slab->color_count;
-        color_printk(BLUE,BLACK,"kmalloc()->kmalloc_create()<=size:%#010x\n",kmalloc_cache_size[i].size);
+        debug_mm("kmalloc()->kmalloc_create()<=size:%#010x\n",kmalloc_cache_size[i].size);
 		list_add_to_before(&kmalloc_cache_size[i].cache_pool->list,&slab->list);
 	}
     
@@ -291,7 +292,7 @@ size_t slab_init()
         page_init(page, PG_PTable_Mapped | PG_Kernel_Init | PG_Kernel);
     }
 
-    color_printk(ORANGE,BLACK,"2.PMMngr.bits_map:%#018lx\tzone_struct->page_using_count:%d\tzone_struct->page_free_count:%d\n",*PMMngr.bits_map,PMMngr.zones_struct->page_using_count,PMMngr.zones_struct->page_free_count);
+    debug_mm("2.PMMngr.bits_map:%#018lx\tzone_struct->page_using_count:%d\tzone_struct->page_free_count:%d\n",*PMMngr.bits_map,PMMngr.zones_struct->page_using_count,PMMngr.zones_struct->page_free_count);
 
 	uint64_t slab_page_start = (PMMngr.end_of_struct + PAGE_2M_SIZE - 1) & PAGE_2M_MASK;
 	uint64_t page_offset = 0;
@@ -314,9 +315,9 @@ size_t slab_init()
 		kmalloc_cache_size[i].cache_pool->address = virtual;
 	}
 
-	color_printk(ORANGE,BLACK,"3.PMMngr.bits_map:%#018lx\tzone_struct->page_using_count:%d\tzone_struct->page_free_count:%d\n",*PMMngr.bits_map,PMMngr.zones_struct->page_using_count,PMMngr.zones_struct->page_free_count);
+	debug_mm("3.PMMngr.bits_map:%#018lx\tzone_struct->page_using_count:%d\tzone_struct->page_free_count:%d\n",*PMMngr.bits_map,PMMngr.zones_struct->page_using_count,PMMngr.zones_struct->page_free_count);
 
-	color_printk(ORANGE,BLACK,"start_code:%#018lx,end_code:%#018lx,end_data:%#018lx,end_brk:%#018lx,end_of_struct:%#018lx\n",PMMngr.start_code,PMMngr.end_code,PMMngr.end_data,PMMngr.start_brk, PMMngr.end_of_struct);
+	debug_mm("start_code:%#018lx,end_code:%#018lx,end_data:%#018lx,end_brk:%#018lx,end_of_struct:%#018lx\n",PMMngr.start_code,PMMngr.end_code,PMMngr.end_data,PMMngr.start_brk, PMMngr.end_of_struct);
 
 	return 1;
 }

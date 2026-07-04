@@ -32,7 +32,13 @@ IPI:     0x40 TLB shootdown, 0x41 resched. Dispatch → ret_from_intr
 - **`Phy_To_Virt()` before deref** — `alloc_pages` returns physical address
 - **`set_tss64`** writes global table — `-smp 2+` needs per-CPU TSS descriptor
 - **printf spawn fragility**: `/spin.elf` (exit-only) 8+ concurrent ok; `/init.elf` (printf+keyboard) crashes on 3rd+ → [[spawn-ud-crash-syscall-prefault]]
-- **Debug output**: never add/remove `serial_printk` debug lines ad-hoc.  Gate all debug prints behind a build-time flag (e.g. `-DOS01_DEBUG_SCHED`, `-DOS01_DEBUG_TTY`) so they stay in the source and can be toggled without code churn.  Add the flag to `kernel/Makefile` CFLAGS when needed, strip it for production builds.  This keeps `git log` clean — no debug-add/debug-remove commit spam.
+- **Debug output**: never add/remove `serial_printk` debug lines ad-hoc. Use the `debug_<channel>()` macros from `kernel/include/kernel/debug.h`:
+  ```c
+  debug_sched("cpu %d: switching to pid %d\n", cpu, pid);
+  debug_vfs("VFS: mounted '%s'\n", path);
+  debug_mm("alloc_pages: zone=%d count=%d\n", zone, n);
+  ```
+  Enable via `make kernel.bin DEBUG_CHANNELS=sched,vfs,mm,irq`. Available channels: `sched`, `tty`, `vfs`, `mm`, `irq`, `syscall`, `task`, `ipi`, `block`, `fs`. Production builds (`make kernel.bin` without `DEBUG_CHANNELS`) have zero debug overhead — all macros expand to nothing.
 
 ## Key files
 
@@ -53,6 +59,7 @@ IPI:     0x40 TLB shootdown, 0x41 resched. Dispatch → ret_from_intr
 | `kernel/include/kernel/arch/x86_64/gate.h` | Safe interrupt registration API |
 | `kernel/include/kernel/arch/x86_64/spinlock.h` | Spinlock + irq variants |
 | `kernel/include/kernel/arch/x86_64/cpu.h` | NR_CPUS, atomic ops, rdtsc() |
+| `kernel/include/kernel/debug.h` | `debug_<channel>()` macros, gated by `DEBUG_CHANNELS=` |
 | `user/init.c` / `spin.c` | User-space programs |
 | `Makefile` (root) / `kernel/Makefile` | Build system |
 

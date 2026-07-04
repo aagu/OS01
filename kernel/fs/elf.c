@@ -2,7 +2,7 @@
 #include <kernel/memory.h>
 #include <kernel/vmm.h>
 #include <kernel/pmm.h>
-#include <kernel/printk.h>
+#include <kernel/debug.h>
 #include <stdint.h>
 #include <string.h>
 #include <driver/serial.h>
@@ -35,33 +35,33 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
     /* 1. Read and validate ELF header */
     ret = vfs_read(node, 0, sizeof(ehdr), &ehdr);
     if (ret != (int)sizeof(ehdr)) {
-        serial_printk("elf_load: failed to read ELF header (ret=%d)\n", ret);
+        debug_fs("elf_load: failed to read ELF header (ret=%d)\n", ret);
         return -1;
     }
 
     if (ehdr.e_ident[EI_MAG0] != ELFMAG0 || ehdr.e_ident[EI_MAG1] != ELFMAG1 ||
         ehdr.e_ident[EI_MAG2] != ELFMAG2 || ehdr.e_ident[EI_MAG3] != ELFMAG3) {
-        serial_printk("elf_load: bad ELF magic\n");
+        debug_fs("elf_load: bad ELF magic\n");
         return -1;
     }
     if (ehdr.e_ident[EI_CLASS] != ELFCLASS64) {
-        serial_printk("elf_load: not 64-bit ELF\n");
+        debug_fs("elf_load: not 64-bit ELF\n");
         return -1;
     }
     if (ehdr.e_ident[EI_DATA] != ELFDATA2LSB) {
-        serial_printk("elf_load: not little-endian\n");
+        debug_fs("elf_load: not little-endian\n");
         return -1;
     }
     if (ehdr.e_machine != EM_X86_64) {
-        serial_printk("elf_load: not x86_64 (machine=%#x)\n", ehdr.e_machine);
+        debug_fs("elf_load: not x86_64 (machine=%#x)\n", ehdr.e_machine);
         return -1;
     }
     if (ehdr.e_type != ET_EXEC) {
-        serial_printk("elf_load: not an executable (type=%#x)\n", ehdr.e_type);
+        debug_fs("elf_load: not an executable (type=%#x)\n", ehdr.e_type);
         return -1;
     }
     if (ehdr.e_phentsize != sizeof(elf64_phdr_t)) {
-        serial_printk("elf_load: bad phentsize (%u)\n", ehdr.e_phentsize);
+        debug_fs("elf_load: bad phentsize (%u)\n", ehdr.e_phentsize);
         return -1;
     }
 
@@ -105,7 +105,7 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
             /* Allocate a fresh 2MB physical page */
             struct Page *pg = alloc_pages(ZONE_NORMAL, 1, 0);
             if (!pg) {
-                serial_printk("elf_load: out of memory for segment %u\n", i);
+                debug_fs("elf_load: out of memory for segment %u\n", i);
                 goto cleanup;
             }
             phys = pg->phy_address;
@@ -146,7 +146,7 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
             uint64_t dest = (uint64_t)Phy_To_Virt(phys) + page_off;
             ret = vfs_read(node, phdr.p_offset, phdr.p_filesz, (void *)dest);
             if (ret < 0 || (uint64_t)ret != phdr.p_filesz) {
-                serial_printk("elf_load: read segment %u failed (ret=%d, expected=%lu)\n",
+                debug_fs("elf_load: read segment %u failed (ret=%d, expected=%lu)\n",
                               i, ret, phdr.p_filesz);
                 goto cleanup;
             }
@@ -163,7 +163,7 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
          * zeroed when allocated, and vfs_read only wrote p_filesz bytes. */
     }
 
-    serial_printk("elf_load: entry=%p code=[%p,%p) pages=%d\n",
+    debug_fs("elf_load: entry=%p code=[%p,%p) pages=%d\n",
                   *entry_point, mm->start_code, mm->end_code, mapped_count);
     return 0;
 

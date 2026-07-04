@@ -1,7 +1,7 @@
 #include <kernel/ipi.h>
 #include <kernel/apic.h>
 #include <kernel/percpu.h>
-#include <kernel/printk.h>
+#include <kernel/debug.h>
 #include <kernel/vmm.h>
 #include <kernel/arch/x86_64/gate.h>
 
@@ -43,7 +43,7 @@ void ipi_init(void)
 {
     REGISTER_INTR_HANDLER(tlb,     0x40, ipi_tlb_handler);
     REGISTER_INTR_HANDLER(resched, 0x41, ipi_resched_handler);
-    serial_printk("IPI: vectors TLB=%#x RESCHED=%#x registered\n",
+    debug_ipi("IPI: vectors TLB=%#x RESCHED=%#x registered\n",
                   (unsigned)IPI_VECTOR_TLB, (unsigned)IPI_VECTOR_RESCHED);
 }
 
@@ -54,7 +54,7 @@ void ipi_send(uint32_t dest_apic_id, uint8_t vector)
     uint32_t timeout = 10000;
     while (lapic_read(LAPIC_ICR_LOW) & ICR_STATUS_PENDING) {
         if (--timeout == 0) {
-            serial_printk("IPI: ICR stuck pending\n");
+            debug_ipi("IPI: ICR stuck pending\n");
             break;
         }
         __asm__ __volatile__("pause");

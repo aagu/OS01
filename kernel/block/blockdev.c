@@ -1,6 +1,6 @@
 #include <block/blockdev.h>
 #include <driver/ahci.h>
-#include <kernel/printk.h>
+#include <kernel/debug.h>
 #include <string.h>
 
 // ── Global device table ───────────────────────────────────
@@ -27,7 +27,7 @@ void block_device_init(void)
     memset(block_devices, 0, sizeof(block_devices));
     block_device_count_val = 0;
     block_device_initialized = 1;
-    serial_printk("block: subsystem initialized\n");
+    debug_block("block: subsystem initialized\n");
 }
 
 // ── Registration ─────────────────────────────────────────
@@ -39,7 +39,7 @@ block_device_t *block_device_register(const char *name,
         block_device_init();
 
     if (block_device_count_val >= BLOCKDEV_MAX) {
-        serial_printk("block: max devices reached\n");
+        debug_block("block: max devices reached\n");
         return NULL;
     }
 
@@ -52,7 +52,7 @@ block_device_t *block_device_register(const char *name,
     dev->read = default_ahci_read;
     dev->write = default_ahci_write;
 
-    serial_printk("block: registered %s (%lu sectors, %lu MB)\n",
+    debug_block("block: registered %s (%lu sectors, %lu MB)\n",
                    dev->name, sector_count,
                    sector_count * 512 / 1024 / 1024);
     return dev;
@@ -63,11 +63,11 @@ int block_device_read(block_device_t *dev, uint64_t lba,
                       uint32_t count, void *buffer)
 {
     if (!dev || !dev->present || !dev->read) {
-        serial_printk("block: read on invalid device\n");
+        debug_block("block: read on invalid device\n");
         return -1;
     }
     if (lba + count > dev->sector_count) {
-        serial_printk("block: read past end of device\n");
+        debug_block("block: read past end of device\n");
         return -1;
     }
     return dev->read(dev, lba, count, buffer);
@@ -78,11 +78,11 @@ int block_device_write(block_device_t *dev, uint64_t lba,
                        uint32_t count, const void *buffer)
 {
     if (!dev || !dev->present || !dev->write) {
-        serial_printk("block: write on invalid device\n");
+        debug_block("block: write on invalid device\n");
         return -1;
     }
     if (lba + count > dev->sector_count) {
-        serial_printk("block: write past end of device\n");
+        debug_block("block: write past end of device\n");
         return -1;
     }
     return dev->write(dev, lba, count, buffer);

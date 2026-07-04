@@ -1,6 +1,6 @@
 #include <fs/procfs.h>
 #include <fs/vfs.h>
-#include <kernel/printk.h>
+#include <kernel/debug.h>
 #include <kernel/task.h>
 #include <kernel/percpu.h>
 #include <kernel/pmm.h>
@@ -265,8 +265,8 @@ void procfs_init(void)
 {
     int ret = vfs_mount("/proc", NULL, &procfs_ops, NULL);
     if (ret == 0) {
-        serial_printk("procfs: mounted at /proc\n");
+        debug_fs("procfs: mounted at /proc\n");
     } else {
-        serial_printk("procfs: mount FAILED\n");
+        debug_fs("procfs: mount FAILED\n");
     }
 }

@@ -1,5 +1,5 @@
 #include <kernel/arch/x86_64/gate.h>
-#include <kernel/printk.h>
+#include <kernel/debug.h>
 #include <stddef.h>
 
 // ── Per-vector C handler table ──────────────────────────────
@@ -24,7 +24,7 @@ void generic_intr_dispatch(pt_regs_t *regs, uint64_t vector)
                                    (uint64_t)intr_handler_param[vector],
                                    regs);
     } else {
-        serial_printk("intr: spurious vector %u (no handler)\n",
+        debug_irq("intr: spurious vector %u (no handler)\n",
                       (unsigned)vector);
     }
 }

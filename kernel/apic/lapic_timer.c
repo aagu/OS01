@@ -1,6 +1,6 @@
 #include <kernel/apic.h>
 #include <kernel/percpu.h>
-#include <kernel/printk.h>
+#include <kernel/debug.h>
 #include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/x86_64/regs.h>
 #include <device/timer.h>
@@ -79,7 +79,7 @@ void lapic_timer_calibrate(void)
     // 5. Compute effective frequency
     lapic_timer_hz = (uint64_t)elapsed * 100;
 
-    serial_printk("LAPIC timer: %u ticks/10ms → %lu Hz (div=%u)\n",
+    debug_sched("LAPIC timer: %u ticks/10ms → %lu Hz (div=%u)\n",
                   elapsed, (unsigned long)lapic_timer_hz,
                   (unsigned)lapic_timer_divisor);
 }
@@ -89,7 +89,7 @@ void lapic_timer_calibrate(void)
 void lapic_timer_start(uint32_t freq_hz)
 {
     if (!lapic_timer_hz) {
-        serial_printk("LAPIC timer: not calibrated, skipping start\n");
+        debug_sched("LAPIC timer: not calibrated, skipping start\n");
         return;
     }
 
@@ -106,7 +106,7 @@ void lapic_timer_start(uint32_t freq_hz)
     // Load initial count — the timer starts counting on write.
     lapic_write(LAPIC_TIMER_INIT, init_count);
 
-    serial_printk("LAPIC timer: started at %u Hz (init_count=%u) on CPU %u\n",
+    debug_sched("LAPIC timer: started at %u Hz (init_count=%u) on CPU %u\n",
                   (unsigned)freq_hz, init_count, (unsigned)cpu_id());
 }
 

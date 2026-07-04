@@ -1,7 +1,7 @@
 #include <kernel/interrupt.h>
 #include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/x86_64/asm.h>
-#include <kernel/printk.h>
+#include <kernel/debug.h>
 #include <stddef.h>
 #include <kernel/softirq.h>
 #include <string.h>

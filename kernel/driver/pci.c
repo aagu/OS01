@@ -1,6 +1,6 @@
 #include <driver/pci.h>
 #include <kernel/arch/x86_64/hw.h>
-#include <kernel/printk.h>
+#include <kernel/debug.h>
 #include <stdint.h>
 
 // ── Legacy PCI config space access via 0xCF8 / 0xCFC ─────
@@ -108,11 +108,11 @@ static int scan_bus(uint32_t bus,
 int pci_find_device(uint8_t class_code, uint8_t subclass, uint8_t prog_if,
                     uint8_t *out_bus, uint8_t *out_dev, uint8_t *out_func)
 {
-    serial_printk("PCI: scanning for class=%02x subclass=%02x progIF=%02x\n",
+    debug_block("PCI: scanning for class=%02x subclass=%02x progIF=%02x\n",
                    class_code, subclass, prog_if);
     int ret = scan_bus(0, class_code, subclass, prog_if, out_bus, out_dev, out_func);
     if (ret == 0) {
-        serial_printk("PCI: found at %d:%d.%d\n", *out_bus, *out_dev, *out_func);
+        debug_block("PCI: found at %d:%d.%d\n", *out_bus, *out_dev, *out_func);
     }
     return ret;
 }
@@ -154,7 +154,7 @@ void pci_enable_bus_mastering(uint8_t bus, uint8_t dev, uint8_t func)
     cmd |= PCI_CMD_BUS_MASTER;
     pci_config_write(bus, dev, func, PCI_COMMAND, cmd);
 
-    serial_printk("PCI: enabled bus mastering for %d:%d.%d\n", bus, dev, func);
+    debug_block("PCI: enabled bus mastering for %d:%d.%d\n", bus, dev, func);
 }
 
 void pci_enable_mmio(uint8_t bus, uint8_t dev, uint8_t func)
@@ -163,7 +163,7 @@ void pci_enable_mmio(uint8_t bus, uint8_t dev, uint8_t func)
     cmd |= PCI_CMD_MEM_SPACE;
     pci_config_write(bus, dev, func, PCI_COMMAND, cmd);
 
-    serial_printk("PCI: enabled MMIO for %d:%d.%d\n", bus, dev, func);
+    debug_block("PCI: enabled MMIO for %d:%d.%d\n", bus, dev, func);
 }
 
 // ── Interrupt line ────────────────────────────────────────

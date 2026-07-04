@@ -1,6 +1,6 @@
 #include <driver/ahci.h>
 #include <driver/pci.h>
-#include <kernel/printk.h>
+#include <kernel/debug.h>
 #include <kernel/memory.h>
 #include <kernel/pmm.h>
 #include <kernel/vmm.h>
@@ -87,20 +87,20 @@ void ahci_init(void)
     ret = pci_find_device(PCI_CLASS_MASS_STORAGE, PCI_SUBCLASS_SATA,
                           PCI_PROGIF_AHCI, &bus, &dev, &func);
     if (ret != 0) {
-        serial_printk("AHCI: AHCI-mode SATA not found, trying any SATA...\n");
+        debug_block("AHCI: AHCI-mode SATA not found, trying any SATA...\n");
         ret = pci_find_device(PCI_CLASS_MASS_STORAGE, PCI_SUBCLASS_SATA,
                               0xFF, &bus, &dev, &func);
     }
     if (ret != 0) {
-        serial_printk("AHCI: no SATA controller found\n");
+        debug_block("AHCI: no SATA controller found\n");
         return;
     }
 
-    serial_printk("AHCI: found controller at PCI %d:%d.%d\n", bus, dev, func);
+    debug_block("AHCI: found controller at PCI %d:%d.%d\n", bus, dev, func);
 
     // Read vendor/device ID
     uint32_t vendor_dev = pci_config_read(bus, dev, func, PCI_VENDOR_ID);
-    serial_printk("AHCI: vendor=%#04x device=%#04x\n",
+    debug_block("AHCI: vendor=%#04x device=%#04x\n",
                   vendor_dev & 0xFFFF, vendor_dev >> 16);
 
     // Enable bus mastering and MMIO space
@@ -110,11 +110,11 @@ void ahci_init(void)
     // Read ABAR (BAR5)
     int is_mmio, is_64bit;
     uint64_t abar_phys = pci_read_bar(bus, dev, func, 5, &is_mmio, &is_64bit);
-    serial_printk("AHCI: ABAR = %#018lx (mmio=%d, 64bit=%d)\n",
+    debug_block("AHCI: ABAR = %#018lx (mmio=%d, 64bit=%d)\n",
                   abar_phys, is_mmio, is_64bit);
 
     if (!is_mmio) {
-        serial_printk("AHCI: ABAR is not MMIO, aborting\n");
+        debug_block("AHCI: ABAR is not MMIO, aborting\n");
         return;
     }
 
@@ -129,7 +129,7 @@ void ahci_init(void)
 
     // Read version
     uint32_t vs = hba->vs;
-    serial_printk("AHCI: version %u.%u.%u\n",
+    debug_block("AHCI: version %u.%u.%u\n",
                   (vs >> 16) & 0xF, (vs >> 8) & 0xF, vs & 0xF);
 
     // Read capabilities
@@ -137,21 +137,21 @@ void ahci_init(void)
     uint32_t cap2 = hba->cap2;
     uint32_t n_ports = AHCI_CAP_NP(cap) + 1;
     uint32_t pi = hba->pi;
-    serial_printk("AHCI: %u ports, ports implemented = %#x\n", n_ports, pi);
+    debug_block("AHCI: %u ports, ports implemented = %#x\n", n_ports, pi);
 
     // BIOS/OS handoff if supported
     if (cap2 & AHCI_CAP2_BOH(cap2)) {
-        serial_printk("AHCI: BIOS/OS handoff supported\n");
+        debug_block("AHCI: BIOS/OS handoff supported\n");
         uint32_t bohc = hba->bohc;
         if (bohc & AHCI_BOHC_BOS) {
             // BIOS owns the HBA — request ownership
             hba->bohc = bohc | AHCI_BOHC_OOS;
-            serial_printk("AHCI: requesting OS ownership...\n");
+            debug_block("AHCI: requesting OS ownership...\n");
             // Spin waiting for BIOS to release
             int timeout = 100000;
             while (hba->bohc & AHCI_BOHC_BOS) {
                 if (--timeout == 0) {
-                    serial_printk("AHCI: BIOS handoff timeout\n");
+                    debug_block("AHCI: BIOS handoff timeout\n");
                     break;
                 }
                 nop();
@@ -161,7 +161,7 @@ void ahci_init(void)
 
     // Enable AHCI mode
     hba->ghc |= AHCI_GHC_AE;
-    serial_printk("AHCI: AHCI mode enabled\n");
+    debug_block("AHCI: AHCI mode enabled\n");
 
     // Enable interrupts at HBA level (if we plan to use them)
     // hba->ghc |= AHCI_GHC_IE;
@@ -173,7 +173,7 @@ void ahci_init(void)
         }
     }
 
-    serial_printk("AHCI: initialization complete\n");
+    debug_block("AHCI: initialization complete\n");
 }
 
 // ── Port initialization ───────────────────────────────────
@@ -193,17 +193,17 @@ static void ahci_port_init(HBA_MEM *hba, int port_num)
     uint32_t ipm = ssts & AHCI_PORT_SSTS_IPM_MASK;
 
     if (det != AHCI_PORT_SSTS_DET_PRES || ipm != AHCI_PORT_SSTS_IPM_ACTIVE) {
-        serial_printk("AHCI: port %d: no device (ssts=%#x)\n", port_num, ssts);
+        debug_block("AHCI: port %d: no device (ssts=%#x)\n", port_num, ssts);
         return;
     }
-    serial_printk("AHCI: port %d: device detected (ssts=%#x)\n", port_num, ssts);
+    debug_block("AHCI: port %d: device detected (ssts=%#x)\n", port_num, ssts);
 
     // ── Stop port ─────────────────────────────────────
     port->cmd &= ~(AHCI_PORT_CMD_ST | AHCI_PORT_CMD_FRE);
 
     // Wait for FR and CR to clear
     if (WAIT_WHILE(port->cmd & (AHCI_PORT_CMD_FR | AHCI_PORT_CMD_CR), 10) != 0) {
-        serial_printk("AHCI: port %d: timeout stopping port (cmd=%#x)\n",
+        debug_block("AHCI: port %d: timeout stopping port (cmd=%#x)\n",
                        port_num, port->cmd);
         // Continue anyway — a reset might help
     }
@@ -214,7 +214,7 @@ static void ahci_port_init(HBA_MEM *hba, int port_num)
     // ── Allocate DMA buffer page ──────────────────────
     struct Page *page = alloc_pages(ZONE_NORMAL, 1, 0);
     if (!page) {
-        serial_printk("AHCI: port %d: failed to allocate DMA page\n", port_num);
+        debug_block("AHCI: port %d: failed to allocate DMA page\n", port_num);
         return;
     }
     ap->dma_phys = page->phy_address;
@@ -249,14 +249,14 @@ static void ahci_port_init(HBA_MEM *hba, int port_num)
     port->cmd |= AHCI_PORT_CMD_FRE;
     port->cmd |= AHCI_PORT_CMD_ST;
 
-    serial_printk("AHCI: port %d: started (cmd=%#x, clb=%#x/%#x, fb=%#x/%#x)\n",
+    debug_block("AHCI: port %d: started (cmd=%#x, clb=%#x/%#x, fb=%#x/%#x)\n",
                    port_num, port->cmd,
                    port->clb, port->clbu, port->fb, port->fbu);
 
     // ── Send IDENTIFY DEVICE ─────────────────────────
     ap->present = 1;
     if (ahci_identify(hba, port_num, ap) == 0) {
-        serial_printk("AHCI: port %d: MODEL=%s SERIAL=%s SECTORS=%lu%s\n",
+        debug_block("AHCI: port %d: MODEL=%s SERIAL=%s SECTORS=%lu%s\n",
                        port_num, ap->model, ap->serial,
                        ap->sector_count,
                        ap->lba48 ? " (LBA48)" : "");
@@ -265,7 +265,7 @@ static void ahci_port_init(HBA_MEM *hba, int port_num)
         char name[4] = { 'h', 'd', (char)('a' + port_num), '\0' };
         block_device_register(name, port_num, ap->sector_count);
     } else {
-        serial_printk("AHCI: port %d: IDENTIFY failed\n", port_num);
+        debug_block("AHCI: port %d: IDENTIFY failed\n", port_num);
     }
 }
 
@@ -279,7 +279,7 @@ static int ahci_identify(HBA_MEM *hba, int port_num, ahci_port_t *ap)
     // ── Find a free command slot ─────────────────────
     int slot = ahci_find_free_slot(port);
     if (slot < 0) {
-        serial_printk("AHCI: port %d: no free command slot\n", port_num);
+        debug_block("AHCI: port %d: no free command slot\n", port_num);
         return -1;
     }
 
@@ -325,7 +325,7 @@ static int ahci_identify(HBA_MEM *hba, int port_num, ahci_port_t *ap)
     while (port->ci & (1U << slot)) {
         nop();
         if (jiffies >= deadline) {
-            serial_printk("AHCI: port %d: IDENTIFY timeout (ci=%#x, tfd=%#x, ssts=%#x)\n",
+            debug_block("AHCI: port %d: IDENTIFY timeout (ci=%#x, tfd=%#x, ssts=%#x)\n",
                            port_num, port->ci, port->tfd, port->ssts);
             return -1;
         }
@@ -333,7 +333,7 @@ static int ahci_identify(HBA_MEM *hba, int port_num, ahci_port_t *ap)
 
     // ── Check for errors ─────────────────────────────
     if (port->is & AHCI_PORT_IS_TFES) {
-        serial_printk("AHCI: port %d: IDENTIFY task file error (tfd=%#x)\n",
+        debug_block("AHCI: port %d: IDENTIFY task file error (tfd=%#x)\n",
                        port_num, port->tfd);
         return -1;
     }
@@ -384,7 +384,7 @@ static int ahci_identify(HBA_MEM *hba, int port_num, ahci_port_t *ap)
                          | ((uint64_t)ap->identify[61] << 16);
     }
 
-    serial_printk("AHCI: port %d: IDENTIFY OK (%lu MB)\n",
+    debug_block("AHCI: port %d: IDENTIFY OK (%lu MB)\n",
                    port_num, ap->sector_count * 512 / 1024 / 1024);
     return 0;
 }
@@ -408,7 +408,7 @@ static int ahci_find_free_slot(HBA_PORT *port)
 int ahci_read_sectors(int port_num, uint64_t lba, uint32_t count, void *buffer)
 {
     if (port_num < 0 || port_num >= AHCI_MAX_PORTS || !ahci_ports[port_num].present) {
-        serial_printk("AHCI: read_sectors: port %d not present\n", port_num);
+        debug_block("AHCI: read_sectors: port %d not present\n", port_num);
         return -1;
     }
     if (count == 0) return 0;
@@ -421,7 +421,7 @@ int ahci_read_sectors(int port_num, uint64_t lba, uint32_t count, void *buffer)
     uint32_t total_bytes = count * 512;
     uint32_t max_xfer = PAGE_2M_SIZE - DMA_OFF_DATA;
     if (total_bytes > max_xfer) {
-        serial_printk("AHCI: read_sectors: transfer too large (%u > %u)\n",
+        debug_block("AHCI: read_sectors: transfer too large (%u > %u)\n",
                        total_bytes, max_xfer);
         return -1;
     }
@@ -429,7 +429,7 @@ int ahci_read_sectors(int port_num, uint64_t lba, uint32_t count, void *buffer)
     // Find a free command slot
     int slot = ahci_find_free_slot(port);
     if (slot < 0) {
-        serial_printk("AHCI: read_sectors: port %d no free slot\n", port_num);
+        debug_block("AHCI: read_sectors: port %d no free slot\n", port_num);
         return -1;
     }
 
@@ -483,7 +483,7 @@ int ahci_read_sectors(int port_num, uint64_t lba, uint32_t count, void *buffer)
     while (port->ci & (1U << slot)) {
         nop();
         if (jiffies >= deadline) {
-            serial_printk("AHCI: read_sectors: port %d timeout (ci=%#x, tfd=%#x)\n",
+            debug_block("AHCI: read_sectors: port %d timeout (ci=%#x, tfd=%#x)\n",
                            port_num, port->ci, port->tfd);
             return -1;
         }
@@ -491,7 +491,7 @@ int ahci_read_sectors(int port_num, uint64_t lba, uint32_t count, void *buffer)
 
     // ── Check for errors ─────────────────────────────
     if (port->is & AHCI_PORT_IS_TFES) {
-        serial_printk("AHCI: read_sectors: port %d task file error (tfd=%#x)\n",
+        debug_block("AHCI: read_sectors: port %d task file error (tfd=%#x)\n",
                        port_num, port->tfd);
         return -1;
     }
@@ -509,7 +509,7 @@ int ahci_read_sectors(int port_num, uint64_t lba, uint32_t count, void *buffer)
 int ahci_write_sectors(int port_num, uint64_t lba, uint32_t count, const void *buffer)
 {
     if (port_num < 0 || port_num >= AHCI_MAX_PORTS || !ahci_ports[port_num].present) {
-        serial_printk("AHCI: write_sectors: port %d not present\n", port_num);
+        debug_block("AHCI: write_sectors: port %d not present\n", port_num);
         return -1;
     }
     if (count == 0) return 0;
@@ -521,14 +521,14 @@ int ahci_write_sectors(int port_num, uint64_t lba, uint32_t count, const void *b
     uint32_t total_bytes = count * 512;
     uint32_t max_xfer = PAGE_2M_SIZE - DMA_OFF_DATA;
     if (total_bytes > max_xfer) {
-        serial_printk("AHCI: write_sectors: transfer too large (%u > %u)\n",
+        debug_block("AHCI: write_sectors: transfer too large (%u > %u)\n",
                        total_bytes, max_xfer);
         return -1;
     }
 
     int slot = ahci_find_free_slot(port);
     if (slot < 0) {
-        serial_printk("AHCI: write_sectors: port %d no free slot\n", port_num);
+        debug_block("AHCI: write_sectors: port %d no free slot\n", port_num);
         return -1;
     }
 
@@ -580,14 +580,14 @@ int ahci_write_sectors(int port_num, uint64_t lba, uint32_t count, const void *b
     while (port->ci & (1U << slot)) {
         nop();
         if (jiffies >= deadline) {
-            serial_printk("AHCI: write_sectors: port %d timeout (ci=%#x, tfd=%#x)\n",
+            debug_block("AHCI: write_sectors: port %d timeout (ci=%#x, tfd=%#x)\n",
                            port_num, port->ci, port->tfd);
             return -1;
         }
     }
 
     if (port->is & AHCI_PORT_IS_TFES) {
-        serial_printk("AHCI: write_sectors: port %d task file error (tfd=%#x)\n",
+        debug_block("AHCI: write_sectors: port %d task file error (tfd=%#x)\n",
                        port_num, port->tfd);
         return -1;
     }

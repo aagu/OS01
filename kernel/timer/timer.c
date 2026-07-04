@@ -1,4 +1,5 @@
 #include <device/timer.h>
+#include <kernel/debug.h>
 #include <kernel/softirq.h>
 #include <kernel.h>
 #include <kernel/printk.h>

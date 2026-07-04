@@ -1,6 +1,6 @@
 #include <kernel/file.h>
 #include <fs/vfs.h>
-#include <kernel/printk.h>
+#include <kernel/debug.h>
 #include <kernel/task.h>
 #include <stdlib.h>
 #include <string.h>
@@ -285,7 +285,7 @@ int64_t do_pipe(int *user_fds)
         return -EFAULT;
     memcpy((void *)user_fds, fds, sizeof(fds));
 
-    serial_printk("pipe: pid=%d fds=[%d,%d]\n",
+    debug_fs("pipe: pid=%d fds=[%d,%d]\n",
                   (int)current->pid, rfd, wfd);
     return 0;
 }

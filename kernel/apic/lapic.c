@@ -2,7 +2,7 @@
 #include <kernel/memory.h>
 #include <kernel/pmm.h>
 #include <kernel/vmm.h>
-#include <kernel/printk.h>
+#include <kernel/debug.h>
 #include <kernel/arch/x86_64/msr.h>
 #include <kernel/arch/x86_64/cpuid.h>
 #include <kernel/arch/x86_64/gate.h>
@@ -75,10 +75,10 @@ int lapic_init(void)
     // 1. Verify LAPIC support via CPUID leaf 1, EDX bit 9
     cpuid(1, &eax, &ebx, &ecx, &edx);
     if (!(edx & CPUID_FEAT_EDX_APIC)) {
-        serial_printk("APIC: CPUID reports no APIC support\n");
+        debug_irq("APIC: CPUID reports no APIC support\n");
         return 0;
     }
-    serial_printk("APIC: CPUID APIC feature present\n");
+    debug_irq("APIC: CPUID APIC feature present\n");
 
     // 2. Read IA32_APIC_BASE MSR for the LAPIC base address
     uint64_t apic_base_msr = rdmsr(IA32_APIC_BASE);
@@ -86,7 +86,7 @@ int lapic_init(void)
 
     // If MADT provided a different base, prefer it (should match in practice)
     if (apic_info.lapic_base != 0 && apic_info.lapic_base != msr_base) {
-        serial_printk("APIC: MADT base (%#010lx) differs from MSR (%#010lx), using MADT\n",
+        debug_irq("APIC: MADT base (%#010lx) differs from MSR (%#010lx), using MADT\n",
                       apic_info.lapic_base, msr_base);
     }
     if (apic_info.lapic_base == 0) {
@@ -97,7 +97,7 @@ int lapic_init(void)
         apic_info.lapic_base = DEFAULT_LAPIC_BASE;
     }
 
-    serial_printk("APIC: LAPIC base = %#010lx\n", apic_info.lapic_base);
+    debug_irq("APIC: LAPIC base = %#010lx\n", apic_info.lapic_base);
 
     // 3. Map the LAPIC MMIO region (2MB page, uncacheable)
     uint64_t lapic_page = apic_info.lapic_base & PAGE_2M_MASK;
@@ -107,13 +107,13 @@ int lapic_init(void)
     // 4. Ensure APIC is enabled in the MSR (set bit 11)
     if (!(apic_base_msr & APIC_BASE_ENABLE)) {
         wrmsr(IA32_APIC_BASE, apic_base_msr | APIC_BASE_ENABLE);
-        serial_printk("APIC: enabled via IA32_APIC_BASE MSR\n");
+        debug_irq("APIC: enabled via IA32_APIC_BASE MSR\n");
     }
 
     // 5. Set Spurious Interrupt Vector Register
     //    bit 8 = APIC Software Enable, bits 0-7 = spurious vector (0xFF)
     lapic_write(LAPIC_SVR, APIC_SPURIOUS_VAL);
-    serial_printk("APIC: SVR set to %#x (spurious vector %#x)\n",
+    debug_irq("APIC: SVR set to %#x (spurious vector %#x)\n",
                   APIC_SPURIOUS_VAL, SPURIOUS_VECTOR);
 
     // 6. Set Task Priority Register to 0 (accept all interrupts)
@@ -143,7 +143,7 @@ int lapic_init(void)
     set_intr_gate_raw(SPURIOUS_VECTOR, 0, lapic_spurious_stub);
 
     lapic_ready = 1;
-    serial_printk("APIC: LAPIC initialized, id=%#x\n", lapic_read(LAPIC_ID));
+    debug_irq("APIC: LAPIC initialized, id=%#x\n", lapic_read(LAPIC_ID));
 
     return 1;
 }
@@ -159,17 +159,17 @@ int apic_available(void)
 
 void apic_init(uint64_t rsdp_phys)
 {
-    serial_printk("APIC: initializing (RSDP=%#010lx)\n", rsdp_phys);
+    debug_irq("APIC: initializing (RSDP=%#010lx)\n", rsdp_phys);
 
     // 1. Parse ACPI tables to find LAPIC / IOAPIC info
     if (!acpi_parse(rsdp_phys)) {
-        serial_printk("APIC: ACPI parse failed — using default LAPIC base\n");
+        debug_irq("APIC: ACPI parse failed — using default LAPIC base\n");
         apic_info.lapic_base = DEFAULT_LAPIC_BASE;
     }
 
     // 2. Initialize the Local APIC
     if (!lapic_init()) {
-        serial_printk("APIC: LAPIC init failed — staying on PIC\n");
+        debug_irq("APIC: LAPIC init failed — staying on PIC\n");
         return;
     }
 

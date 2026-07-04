@@ -1,7 +1,7 @@
 #include <kernel/vmm.h>
 #include <kernel/ipi.h>
 #include <kernel/percpu.h>
-#include <kernel/printk.h>
+#include <kernel/debug.h>
 
 // ── TLB shootdown for SMP ──────────────────────────────────
 //
@@ -49,7 +49,7 @@ void tlb_shootdown(void)
             __asm__ __volatile__("pause");
 
         if (timeout == 0) {
-            serial_printk("TLB shootdown: CPU %u did not ACK\n", i);
+            debug_mm("TLB shootdown: CPU %u did not ACK\n", i);
         }
 
         percpu_data[i].tlb_ack = 0;

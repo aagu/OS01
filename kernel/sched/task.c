@@ -5,7 +5,7 @@
 #include <kernel/arch/x86_64/spinlock.h>
 #include <kernel/arch/x86_64/regs.h>
 #include <kernel/arch/x86_64/linkage.h>
-#include <kernel/printk.h>
+#include <kernel/debug.h>
 #include <kernel/memory.h>
 #include <kernel/pmm.h>
 #include <kernel/vmm.h>
@@ -361,14 +361,14 @@ do_switch:
 //
 uint64_t do_exit(uint64_t exit_code)
 {
-    serial_printk("task %d exiting with code %#018lx\n", current->pid, exit_code);
+    debug_task("task %d exiting with code %#018lx\n", current->pid, exit_code);
 
     // ── Init process protection ──────────────────────────
     // The user-space init process (PID 1) must never exit.
     // Check by pid rather than pointer — after fork, child
     // task structs are copies and pointer comparison fails.
     if (current->pid == user_init_pid) {
-        serial_printk("PANIC: init (pid=%d) attempted to exit with code %#018lx\n",
+        debug_task("PANIC: init (pid=%d) attempted to exit with code %#018lx\n",
                       (int)current->pid, exit_code);
         while (1) { __asm__ __volatile__("hlt"); }
     }
@@ -381,7 +381,7 @@ uint64_t do_exit(uint64_t exit_code)
             cpos = cpos->next;
             if (child->parent == current) {
                 child->parent = user_init_task;
-                serial_printk("reparent: child %d → init (pid=%d)\n",
+                debug_task("reparent: child %d → init (pid=%d)\n",
                               (int)child->pid, (int)user_init_task->pid);
             }
         }
@@ -441,13 +441,13 @@ uint64_t do_exit(uint64_t exit_code)
             // waitpid but handle gracefully: leave it, the
             // scheduler's zombie reaper will eventually clean
             // us up if parent never comes back.
-            serial_printk("exit: p%d parent p%d UNINTERRUPTIBLE (%ld), "
+            debug_task("exit: p%d parent p%d UNINTERRUPTIBLE (%ld), "
                           "skipping direct switch\n",
                           current->pid, parent->pid, ps);
         }
     }
 
-    serial_printk("task %d now ZOMBIE (parent=%d w=%d ps=%ld)\n",
+    debug_task("task %d now ZOMBIE (parent=%d w=%d ps=%ld)\n",
                   current->pid,
                   parent ? (int)parent->pid : -1,
                   parent_woken,
@@ -457,7 +457,7 @@ uint64_t do_exit(uint64_t exit_code)
     // scan races.  parent_woken is always 1 for normal exit
     // (parent in waitpid = INTERRUPTIBLE or RUNNING).
     if (parent_woken) {
-        serial_printk("exit: p%d→p%d direct\n", current->pid, parent->pid);
+        debug_task("exit: p%d→p%d direct\n", current->pid, parent->pid);
         switch_to(current, parent);
         // unreachable — switch_to never returns
     }
@@ -535,33 +535,33 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
             // and list_del/list_add_to_before would corrupt that.
             __sync_fetch_and_or(&child->flags, PF_REAPED);
 
-            serial_printk("waitpid: pid=%d reaped child %d (exit=%d)\n",
+            debug_task("waitpid: pid=%d reaped child %d (exit=%d)\n",
                           (int)current->pid, (int)child_pid, (int)exit_code);
             return child_pid;
         }
 
-        serial_printk("waitpid: pid=%d search for child pid=%d\n",
+        debug_task("waitpid: pid=%d search for child pid=%d\n",
                       current ? (int)current->pid : -1, (int)pid);
         // Check if the child even exists (unreaped, still running)
         int child_exists = 0;
         int child_count = 0;
-        serial_printk("waitpid: child-list cur=%d pid=%lld:", current->pid, (long long)pid);
+        debug_task("waitpid: child-list cur=%d pid=%lld:", current->pid, (long long)pid);
         pos = init_task_union.task.list.next;
         while (pos != &init_task_union.task.list) {
             task_t *t = container_of(pos, task_t, list);
             if (t->parent == current && !(t->flags & PF_REAPED)) {
                 child_count++;
-                serial_printk(" [%d s=%d f=%lx p=%lx]",
+                debug_task(" [%d s=%d f=%lx p=%lx]",
                     t->pid, t->state, t->flags, (unsigned long)t->parent);
                 if (pid == -1 || t->pid == pid)
                     child_exists = 1;
             }
             pos = pos->next;
         }
-        serial_printk(" count=%d exist=%d\n", child_count, child_exists);
+        debug_task(" count=%d exist=%d\n", child_count, child_exists);
 
         if (!child_exists) {
-            serial_printk("waitpid: pid=%d returning ECHILD (no child pid=%lld)\n",
+            debug_task("waitpid: pid=%d returning ECHILD (no child pid=%lld)\n",
                           current ? (int)current->pid : -1, (long long)pid);
             return -ECHILD;
         }
@@ -578,7 +578,7 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
 
         int ret = blocker_wait(waitpid_should_unblock, BLOCKER_WAITPID, true);
         if (ret == -EINTR) {
-            serial_printk("waitpid: pid=%d woken by signal, retrying\n",
+            debug_task("waitpid: pid=%d woken by signal, retrying\n",
                           current->pid);
             continue;  // re-check for children before sleeping again
         }
@@ -653,18 +653,18 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     // 1. Open the ELF file via VFS
     vfs_node_t *node = vfs_lookup(path);
     if (!node) {
-        serial_printk("spawn: cannot open '%s'\n", path);
+        debug_task("spawn: cannot open '%s'\n", path);
         return -1;
     }
     if (node->type != VFS_FILE) {
-        serial_printk("spawn: '%s' is not a file\n", path);
+        debug_task("spawn: '%s' is not a file\n", path);
         vfs_node_put(node);
         return -1;
     }
 
     // 2. Quick ELF validation
     if (elf_validate(node) != 0) {
-        serial_printk("spawn: '%s' is not a valid ELF\n", path);
+        debug_task("spawn: '%s' is not a valid ELF\n", path);
         vfs_node_put(node);
         return -1;
     }
@@ -726,7 +726,7 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     // 5. Load ELF segments into the new address space
     uint64_t entry_point;
     if (elf_load(node, mm, &entry_point) != 0) {
-        serial_printk("spawn: ELF load failed for '%s'\n", path);
+        debug_task("spawn: ELF load failed for '%s'\n", path);
         vmm_free_user_map(user_pml4);
         kfree(mm);
         kfree(thd);
@@ -828,7 +828,7 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
         user_init_pid  = tsk->pid;
     }
 
-    serial_printk("spawn: pid=%d '%s' entry=%p rsp=%p cr3=%p\n",
+    debug_task("spawn: pid=%d '%s' entry=%p rsp=%p cr3=%p\n",
                   tsk->pid, path, entry_point, regs->rsp, thd->cr3);
 
     return tsk->pid;
@@ -848,7 +848,7 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
 int64_t sys_exec(const char *path, pt_regs_t *regs,
                  const char *const *argv, const char *const *envp)
 {
-    serial_printk("sys_exec: pid=%d path=%s argv=%p\n", current->pid, path ? path : "(null)", (void*)argv);
+    debug_task("sys_exec: pid=%d path=%s argv=%p\n", current->pid, path ? path : "(null)", (void*)argv);
     // 1. Look up the ELF file (support relative paths)
     const char *cwd = current->files ? current->files->cwd : "/";
     vfs_node_t *node = vfs_lookup_from(path, cwd);
@@ -1030,7 +1030,7 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     regs->rsi     = user_arg_ptr;          // argv
     regs->rdx     = user_env_ptr;          // envp
 
-    serial_printk("exec: pid=%d entry=%p rsp=%p argc=%d cr3=%p\n",
+    debug_task("exec: pid=%d entry=%p rsp=%p argc=%d cr3=%p\n",
                   current->pid, entry_point, regs->rsp, s_argc, current->thread->cr3);
 
     return 0;
@@ -1196,13 +1196,13 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
         if (current->mm && current->mm->pml4) {
             tsk->mm = fork_mm_copy(current->mm, &thd->cr3);
             if (!tsk->mm) {
-                serial_printk("fork: pid=%d fork_mm_copy FAILED, falling back to shared mm\n",
+                debug_task("fork: pid=%d fork_mm_copy FAILED, falling back to shared mm\n",
                     (int)current->pid);
                 tsk->mm = current->mm;
                 thd->cr3 = current->thread->cr3;
             }
         } else if (current->mm) {
-            serial_printk("fork: pid=%d parent_mm->pml4 is NULL, sharing mm\n",
+            debug_task("fork: pid=%d parent_mm->pml4 is NULL, sharing mm\n",
                 (int)current->pid);
         }
     }
@@ -1302,7 +1302,7 @@ void task_init()
 
     // pid_counter starts at 1 → first user task becomes PID=1.
     int64_t init_pid = spawn_user_task("/init.elf", NULL);
-    serial_printk("init: spawned user-space init, pid=%d\n", (int)init_pid);
+    debug_task("init: spawned user-space init, pid=%d\n", (int)init_pid);
 
     // Activate the scheduler and enter the idle loop.
     // schedule() picks up the user init (PID 1) naturally.

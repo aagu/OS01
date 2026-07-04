@@ -1,5 +1,5 @@
 #include <fs/vfs.h>
-#include <kernel/printk.h>
+#include <kernel/debug.h>
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -30,7 +30,7 @@ void vfs_init(void)
     memset(mount_table, 0, sizeof(mount_table));
     mount_count = 0;
     vfs_initialized = 1;
-    serial_printk("VFS: initialized\n");
+    debug_vfs("VFS: initialized\n");
 }
 
 // ── Mount ─────────────────────────────────────────────────
@@ -39,7 +39,7 @@ int vfs_mount(const char *path, block_device_t *dev,
 {
     if (!vfs_initialized) vfs_init();
     if (mount_count >= VFS_MOUNTPOINT_MAX) {
-        serial_printk("VFS: mount table full\n");
+        debug_vfs("VFS: mount table full\n");
         return -1;
     }
 
@@ -53,7 +53,7 @@ int vfs_mount(const char *path, block_device_t *dev,
     // Allocate a root node — the filesystem fills it via ops
     mp->root = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
     if (!mp->root) {
-        serial_printk("VFS: mount: out of memory\n");
+        debug_vfs("VFS: mount: out of memory\n");
         return -1;
     }
 
@@ -68,7 +68,7 @@ int vfs_mount(const char *path, block_device_t *dev,
     strcpy(mp->root->name, "/");
 
     mount_count++;
-    serial_printk("VFS: mounted '%s'\n", path);
+    debug_vfs("VFS: mounted '%s'\n", path);
     return 0;
 }
 
@@ -390,16 +390,16 @@ void vfs_debug_list(const char *path)
 {
     vfs_node_t *dir = vfs_lookup(path);
     if (!dir) {
-        serial_printk("VFS: cannot list '%s' (not found)\n", path);
+        debug_vfs("VFS: cannot list '%s' (not found)\n", path);
         return;
     }
     if (dir->type != VFS_DIR) {
-        serial_printk("VFS: '%s' is not a directory\n", path);
+        debug_vfs("VFS: '%s' is not a directory\n", path);
         vfs_node_put(dir);
         return;
     }
 
-    serial_printk("VFS: listing '%s':\n", path);
+    debug_vfs("VFS: listing '%s':\n", path);
     vfs_dirent_t entry;
     uint64_t idx = 0;
     int max_iter = 256;  // safety bound to prevent infinite loops
@@ -409,13 +409,13 @@ void vfs_debug_list(const char *path)
         if (ret != 0) { idx++; continue; }
         if (entry.name[0] == '\0') break;
         if (entry.type == VFS_DIR)
-            serial_printk("  [DIR ]  %s\n", entry.name);
+            debug_vfs("  [DIR ]  %s\n", entry.name);
         else if (entry.type == VFS_CHRDEV)
-            serial_printk("  [CHR ]  %s\n", entry.name);
+            debug_vfs("  [CHR ]  %s\n", entry.name);
         else if (entry.type == VFS_BLKDEV)
-            serial_printk("  [BLK ]  %s\n", entry.name);
+            debug_vfs("  [BLK ]  %s\n", entry.name);
         else
-            serial_printk("  [FILE]  %s (%lu bytes)\n", entry.name, entry.size);
+            debug_vfs("  [FILE]  %s (%lu bytes)\n", entry.name, entry.size);
         idx++;
     }
     vfs_node_put(dir);

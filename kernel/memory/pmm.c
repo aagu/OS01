@@ -4,6 +4,7 @@
 #include <kernel/pmm.h>
 #include <kernel/printk.h>
 #include <kernel/arch/x86_64/string.h>
+#include <kernel/debug.h>
 #include <kernel/slab.h>
 
 uint64_t page_init(struct Page * page, uint64_t flags)
@@ -69,10 +70,10 @@ void pmm_init(struct MEMORY_INFO E820_Info)
     uint64_t TotalMem = 0;
     struct E820_ENTRY *p = (struct E820_ENTRY *)(uintptr_t)E820_Info.E820_Entry;
 
-    color_printk(BLUE, BLACK, "Display Physics Address MAP,Type(1:RAM,2:ROM or Reserved,3:ACPI Reclaim Memory,4:ACPI NVS Memory,Others:Undefine)\n");
+    debug_mm("Display Physics Address MAP,Type(1:RAM,2:ROM or Reserved,3:ACPI Reclaim Memory,4:ACPI NVS Memory,Others:Undefine)\n");
     for (i = 0; i < E820_Info.E820_Entry_count; i++)
     {
-        color_printk(ORANGE,BLACK,"Address:%#018lx\tLength:%#018lx\tType:%2d\n",p->address,p->length,p->type);
+        debug_mm("Address:%#018lx\tLength:%#018lx\tType:%2d\n",p->address,p->length,p->type);
 		if(p->type == 1)
 		{
 			TotalMem += p->length;
@@ -88,7 +89,7 @@ void pmm_init(struct MEMORY_INFO E820_Info)
             break;
     }
 
-    color_printk(ORANGE,BLACK,"OS Can Used Total RAM:%dMB\n",TotalMem>>20);
+    debug_mm("OS Can Used Total RAM:%dMB\n",TotalMem>>20);
 
     // TotalMem = 0;
     // for (i = 0; i <= PMMngr.e820_length; i++)
@@ -193,9 +194,9 @@ void pmm_init(struct MEMORY_INFO E820_Info)
 
     PMMngr.zones_length = (PMMngr.zones_size * sizeof(struct Zone) + sizeof(long) - 1) & ( ~ (sizeof(long) - 1));
 
-    color_printk(ORANGE,BLACK,"bits_map:%#018lx,bits_size:%#018lx,bits_length:%#018lx\n",PMMngr.bits_map,PMMngr.bits_size,PMMngr.bits_length);
-	color_printk(ORANGE,BLACK,"pages_struct:%#018lx,pages_size:%#018lx,pages_length:%#018lx\n",PMMngr.pages_struct,PMMngr.pages_size,PMMngr.pages_length);
-	color_printk(ORANGE,BLACK,"zones_struct:%#018lx,zones_size:%#018lx,zones_length:%#018lx\n",PMMngr.zones_struct,PMMngr.zones_size,PMMngr.zones_length);
+    debug_mm("bits_map:%#018lx,bits_size:%#018lx,bits_length:%#018lx\n",PMMngr.bits_map,PMMngr.bits_size,PMMngr.bits_length);
+	debug_mm("pages_struct:%#018lx,pages_size:%#018lx,pages_length:%#018lx\n",PMMngr.pages_struct,PMMngr.pages_size,PMMngr.pages_length);
+	debug_mm("zones_struct:%#018lx,zones_size:%#018lx,zones_length:%#018lx\n",PMMngr.zones_struct,PMMngr.zones_size,PMMngr.zones_length);
 
     ZONE_DMA_INDEX = 0;
 	ZONE_NORMAL_INDEX = PMMngr.zones_size - 1;  // all mapped zones
@@ -204,7 +205,7 @@ void pmm_init(struct MEMORY_INFO E820_Info)
     for (i = 0; i < PMMngr.zones_size; i++)
     {
         struct Zone * z = PMMngr.zones_struct + i;
-        color_printk(ORANGE,BLACK,"zone_start_address:%#018lx,zone_end_address:%#018lx,zone_length:%#018lx,pages_group:%#018lx,pages_length:%#018lx\n",z->zone_start_address,z->zone_end_address,z->zone_length,z->pages_group,z->pages_length);
+        debug_mm("zone_start_address:%#018lx,zone_end_address:%#018lx,zone_length:%#018lx,pages_group:%#018lx,pages_length:%#018lx\n",z->zone_start_address,z->zone_end_address,z->zone_length,z->pages_group,z->pages_length);
 
         if (z->zone_start_address >= 0x100000000 && !ZONE_UNMAPPED_INDEX) {
             ZONE_UNMAPPED_INDEX = i;
@@ -212,10 +213,10 @@ void pmm_init(struct MEMORY_INFO E820_Info)
         }
     }
 
-    color_printk(ORANGE,BLACK,"ZONE_DMA_INDEX:%d\tZONE_NORMAL_INDEX:%d\tZONE_UNMAPED_INDEX:%d\n",ZONE_DMA_INDEX,ZONE_NORMAL_INDEX,ZONE_UNMAPPED_INDEX);
+    debug_mm("ZONE_DMA_INDEX:%d\tZONE_NORMAL_INDEX:%d\tZONE_UNMAPED_INDEX:%d\n",ZONE_DMA_INDEX,ZONE_NORMAL_INDEX,ZONE_UNMAPPED_INDEX);
 
     PMMngr.end_of_struct = (uint64_t)((uint64_t)PMMngr.zones_struct + PMMngr.zones_length + sizeof(long) * 32) & ( ~ (sizeof(long) - 1)); //leave some blank after PMMngr
-    color_printk(ORANGE,BLACK,"start_code:%#018lx,end_code:%#018lx,end_data:%#018lx,start_brk:%#018lx,end_of_struct:%#018lx\n",PMMngr.start_code,PMMngr.end_code,PMMngr.end_data,PMMngr.start_brk, PMMngr.end_of_struct);
+    debug_mm("start_code:%#018lx,end_code:%#018lx,end_data:%#018lx,start_brk:%#018lx,end_of_struct:%#018lx\n",PMMngr.start_code,PMMngr.end_code,PMMngr.end_data,PMMngr.start_brk, PMMngr.end_of_struct);
 
     // page from 0 to PMMngr.end_of_struct are all ready used
     i = Virt_To_Phy(PMMngr.end_of_struct) >> PAGE_2M_SHIFT;
@@ -228,7 +229,7 @@ void pmm_init(struct MEMORY_INFO E820_Info)
         tmp_page->zone_struct->page_using_count++;
         tmp_page->zone_struct->page_free_count--;
     }
-    color_printk(ORANGE,BLACK,"1.PMMngr.bits_map:%#018lx\tzone_struct->page_using_count:%d\tzone_struct->page_free_count:%d\n",*PMMngr.bits_map,PMMngr.zones_struct->page_using_count,PMMngr.zones_struct->page_free_count);
+    debug_mm("1.PMMngr.bits_map:%#018lx\tzone_struct->page_using_count:%d\tzone_struct->page_free_count:%d\n",*PMMngr.bits_map,PMMngr.zones_struct->page_using_count,PMMngr.zones_struct->page_free_count);
 
     slab_init();
 }

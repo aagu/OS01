@@ -2,7 +2,7 @@
 #include <kernel/memory.h>
 #include <kernel/pmm.h>
 #include <kernel/vmm.h>
-#include <kernel/printk.h>
+#include <kernel/debug.h>
 #include <kernel/arch/x86_64/asm.h>
 #include <kernel/arch/x86_64/hw.h>
 #include <stdint.h>
@@ -39,17 +39,17 @@ void ioapic_dump_entries(void)
 {
     for (uint32_t i = 0; i < apic_info.ioapic_count; i++) {
         ioapic_entry_t *ioapic = &apic_info.ioapics[i];
-        serial_printk("IOAPIC[%u]: base=%#010x gsi_base=%u max_redir=%u\n",
+        debug_irq("IOAPIC[%u]: base=%#010x gsi_base=%u max_redir=%u\n",
                       i, ioapic->mmio_base, ioapic->gsi_base, ioapic->max_redir);
         for (uint32_t n = 0; n <= ioapic->max_redir; n++) {
             uint32_t low  = ioapic_read_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(n));
             uint32_t high = ioapic_read_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(n) + 1);
             uint64_t entry = ((uint64_t)high << 32) | low;
-            serial_printk("  [%2u] %#018lx", n, entry);
+            debug_irq("  [%2u] %#018lx", n, entry);
             if (!(low & IOAPIC_RED_MASK))
-                serial_printk(" (enabled vec=%#x dest=%u)",
+                debug_irq(" (enabled vec=%#x dest=%u)",
                               low & 0xFF, (high >> 24) & 0xFF);
-            serial_printk("\n");
+            debug_irq("\n");
         }
     }
 }
@@ -82,7 +82,7 @@ static uint64_t ioapic_install(uint64_t nr, void *arg __attribute__((unused)))
     uint32_t isa_irq = (uint32_t)(nr - 0x20);
     uint32_t gsi = isa_irq_to_gsi((uint8_t)isa_irq);
 
-    serial_printk("IOAPIC: install IRQ %u (ISA %u → GSI %u)\n",
+    debug_irq("IOAPIC: install IRQ %u (ISA %u → GSI %u)\n",
                   (unsigned)nr, isa_irq, gsi);
 
     (void)nr;
@@ -102,7 +102,7 @@ static void ioapic_uninstall(uint64_t nr)
         uint32_t low = ioapic_read_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(redir));
         ioapic_write_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(redir), low | IOAPIC_RED_MASK);
 
-        serial_printk("IOAPIC: uninstall IRQ %u (GSI %u)\n", (unsigned)nr, gsi);
+        debug_irq("IOAPIC: uninstall IRQ %u (GSI %u)\n", (unsigned)nr, gsi);
     }
 }
 
@@ -114,7 +114,7 @@ static void ioapic_enable(uint64_t nr)
     int idx = find_ioapic_for_gsi(gsi, &redir);
 
     if (idx < 0) {
-        serial_printk("IOAPIC: no I/O APIC found for GSI %u (IRQ %u)\n",
+        debug_irq("IOAPIC: no I/O APIC found for GSI %u (IRQ %u)\n",
                       gsi, (unsigned)nr);
         return;
     }
@@ -168,7 +168,7 @@ static void ioapic_enable(uint64_t nr)
     ioapic_write_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(redir) + 1, high);
     ioapic_write_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(redir), low_flags);
 
-    serial_printk("IOAPIC: enable IRQ %u (GSI %u, redir %u) → vector %#x, dest=%#x, low=%#x\n",
+    debug_irq("IOAPIC: enable IRQ %u (GSI %u, redir %u) → vector %#x, dest=%#x, low=%#x\n",
                   (unsigned)nr, gsi, redir, (unsigned)vector, bsp_lapic_id, low_flags);
 }
 
@@ -186,7 +186,7 @@ static void ioapic_disable(uint64_t nr)
     uint32_t low = ioapic_read_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(redir));
     ioapic_write_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(redir), low | IOAPIC_RED_MASK);
 
-    serial_printk("IOAPIC: disable IRQ %u (GSI %u)\n", (unsigned)nr, gsi);
+    debug_irq("IOAPIC: disable IRQ %u (GSI %u)\n", (unsigned)nr, gsi);
 }
 
 static void ioapic_ack(uint64_t nr __attribute__((unused)))
@@ -219,7 +219,7 @@ hw_int_controller_t * get_ioapic_controller(void)
 int ioapic_init(void)
 {
     if (apic_info.ioapic_count == 0) {
-        serial_printk("IOAPIC: no I/O APICs found in MADT\n");
+        debug_irq("IOAPIC: no I/O APICs found in MADT\n");
         return 0;
     }
 
@@ -235,7 +235,7 @@ int ioapic_init(void)
         uint32_t ver = ioapic_read_reg(ioapic->mmio_base, IOAPIC_REG_VER);
         ioapic->max_redir = IOAPIC_VER_MAX_REDIR(ver);
 
-        serial_printk("IOAPIC: id=%u base=%#010x version=%#x max_redir=%u\n",
+        debug_irq("IOAPIC: id=%u base=%#010x version=%#x max_redir=%u\n",
                       ioapic->apic_id, ioapic->mmio_base, ver, ioapic->max_redir);
 
         // Mask all redirection entries initially
@@ -244,7 +244,7 @@ int ioapic_init(void)
             ioapic_write_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(n), low | IOAPIC_RED_MASK);
         }
 
-        serial_printk("IOAPIC: %u redirection entries masked\n", ioapic->max_redir + 1);
+        debug_irq("IOAPIC: %u redirection entries masked\n", ioapic->max_redir + 1);
     }
 
     // ── Switch from PIC to APIC mode via IMCR ──────────────
@@ -258,7 +258,7 @@ int ioapic_init(void)
     //  port 0x23 ← 0x01   (IMCR bit → APIC mode)
     outb(0x22, 0x70);
     outb(0x23, 0x01);
-    serial_printk("IOAPIC: IMCR set to APIC mode\n");
+    debug_irq("IOAPIC: IMCR set to APIC mode\n");
 
     return 1;
 }
