@@ -509,7 +509,7 @@ if (!(pml2e & PAGE_PS)) {
 }
 ```
 
-**exec**：`sys_exec` — 调用 `vma_free_all(mm)`（一次遍历完成两步）：释放 VMA 覆盖的 4KB 物理页（匿名）+ PTE 表，然后释放 VMA 节点 + 文件映射的 `vfs_node_put`。与现有 `kfree(current->mm)` 的语义一致（只释放 mm 元数据，不递归释放共享的 pml4/PDPT/PD 表）。
+**exec**：`sys_exec` — 调用 `vma_free_all(mm)`（一次遍历完成两步）：释放 VMA 覆盖的 4KB 物理页（匿名 + 文件映射，两者都通过 `alloc_4k_page` 分配，统一 `free_4k_page` 回收 slot）+ PTE 表，然后释放 VMA 节点 + 文件映射的 `vfs_node_put`。与现有 `kfree(current->mm)` 的语义一致（只释放 mm 元数据，不递归释放共享的 pml4/PDPT/PD 表）。
 
 **exit**：`do_exit` → `vma_free_all(mm)` — 同上。现有 `do_exit` 已跳过 `vmm_free_user_map`（`pml4` 可能共享），mmap 引入后保持该模式：释放 VMA 管理的用户页 + PTE 表，pml4/PDPT/PD 表本身走 zombie 收割的延迟 free 路径。
 

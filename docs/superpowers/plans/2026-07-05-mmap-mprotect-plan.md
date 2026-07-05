@@ -813,11 +813,11 @@ At the top of `libc/unistd/busybox_stubs.c`, add:
 
 - [ ] **Step 5: 更新 libc/Makefile**
 
-Find `$(wildcard unistd/*.c)` and confirm `unistd/mmap.c` is already included. Check with:
+`libc/Makefile` line 28 already has `$(wildcard unistd/*.c)` — `unistd/mmap.c` is auto-discovered. No Makefile change needed. Confirm with:
 ```bash
-grep "unistd/\*\.c" /home/aagu/OS01/libc/Makefile
+grep "wildcard unistd/\*\.c" /home/aagu/OS01/libc/Makefile
 ```
-If wildcard covers `unistd/*.c`, no Makefile change needed.
+Expected: `$(wildcard unistd/*.c) \` present.
 
 - [ ] **Step 6: 编译验证**
 
@@ -853,15 +853,13 @@ static int prot_to_page_flags(int prot, uint64_t *page_prot, uint64_t *vm_flags)
     if (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC))
         return -EINVAL;
 
-    // x86: any PROT_WRITE or PROT_EXEC requires PROT_READ.
-    // Implicitly add PROT_READ so PROT_EXEC alone and PROT_EXEC|PROT_WRITE
-    // both work.  Then reject pure PROT_WRITE (no PROT_READ after implicit).
-    if (prot & (PROT_WRITE | PROT_EXEC))
-        prot |= PROT_READ;
-
-    // x86: still reject pure PROT_WRITE (hardware can't do write-only)
+    // x86: reject pure PROT_WRITE first (hardware can't do write-only)
     if ((prot & PROT_WRITE) && !(prot & PROT_READ))
         return -EINVAL;
+
+    // x86: PROT_EXEC or PROT_EXEC|PROT_WRITE → implicit PROT_READ
+    if (prot & PROT_EXEC)
+        prot |= PROT_READ;
 
     if (prot == PROT_NONE) {
         *page_prot = PAGE_U_S;
@@ -930,48 +928,13 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     length = PAGE_4K_ALIGN(length);
     if (!length) return -EINVAL;
 
-    // Early: addr_limit check before any allocation
-    {
-        uint64_t candidate = addr;
-        if (!(flags & MAP_FIXED)) {
-            uint64_t search = current->mm->mmap_base;
-            vma_t *prev = NULL;
-            list_t *pos = current->mm->vma_list.next;
-            candidate = 0;
-            while (pos != &current->mm->vma_list) {
-                vma_t *v = container_of(pos, vma_t, list);
-                uint64_t gap_start = prev ? prev->vm_end : search;
-                if (gap_start < search) gap_start = search;
-                if (gap_start + length <= v->vm_start) {
-                    candidate = gap_start;
-                    break;
-                }
-                prev = v;
-                pos = pos->next;
-            }
-            if (!candidate)
-                candidate = prev ? prev->vm_end : search;
-            if (candidate < search)
-                candidate = search;
-        }
+    // Helper: first-fit gap search above search_addr
+    uint64_t search = current->mm->mmap_base;
+    vma_t *prev = NULL;
+    list_t *pos = current->mm->vma_list.next;
+    addr = 0;
 
-        if (candidate + length > current->addr_limit)
-            return -ENOMEM;
-        if (candidate >= current->addr_limit)
-            return -ENOMEM;
-    }
-
-    if (flags & MAP_FIXED) {
-        do_munmap(addr, length);
-    } else {
-        // Recompute addr via the same first-fit scan (simpler: use
-        // candidate from above, which the addr_limit block already found)
-        // See addr_limit block above for the actual search loop.
-        // For simplicity, redo the search: same code as above.
-        uint64_t search = current->mm->mmap_base;
-        vma_t *prev = NULL;
-        list_t *pos = current->mm->vma_list.next;
-        addr = 0;
+    if (!(flags & MAP_FIXED)) {
         while (pos != &current->mm->vma_list) {
             vma_t *v = container_of(pos, vma_t, list);
             uint64_t gap_start = prev ? prev->vm_end : search;
@@ -984,9 +947,17 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
             pos = pos->next;
         }
         if (!addr) addr = prev ? prev->vm_end : search;
-        if (addr < search) addr = search; // defensive: never below mmap_base
-        if (addr + length < addr) return -ENOMEM;
+        if (addr < search) addr = search;
+    } else {
+        // MAP_FIXED: unmaps existing VMAs in the range
+        do_munmap(addr, length);
     }
+
+    // Single addr_limit check after addr is computed (before allocations)
+    if (addr + length > current->addr_limit)
+        return -ENOMEM;
+    if (addr >= current->addr_limit)
+        return -ENOMEM;
 
     // ── 3. prot → page flags ───────────────────────────
     uint64_t page_prot, vm_flags_base;
@@ -1417,7 +1388,7 @@ void do_page_fault(pt_regs_t *regs, uint64_t error_code)
                               PAGE_4K_SIZE,
                               (void *)Phy_To_Virt(phys));
             // n < 0 = I/O error (AHCI timeout, etc.) — not -errno format
-            // n == 0 = EOF (file end), handled by zero-fill below
+            // n == 0 = EOF → entire page zero-filled (Linux beyond-EOF semantic)
             // 0 < n < PAGE_4K_SIZE = partial read, zero-fill tail
             if (n < 0) {
                 free_4k_page(phys);
@@ -1471,12 +1442,9 @@ Add at top of `do_page_fault` user-mode path:
 {
     uint64_t rsp;
     __asm__ __volatile__("movq %%rsp, %0" : "=r"(rsp));
-    // IST1 bottom is 7 pages below the top — hardcoded in head.S.
-    // If we're within 4KB of the bottom, warn.
-    extern char ist1_stack_top[];  // defined in head.S
-    if (rsp < (uint64_t)ist1_stack_top - 7 * PAGE_4K_SIZE + PAGE_4K_SIZE)
-        serial_printk("WARN: IST1 stack low — %lx bytes remaining\n",
-                      rsp - (uint64_t)(ist1_stack_top - 7 * PAGE_4K_SIZE));
+    extern char ist1_stack_bottom[];  // defined in head.S (IST1_BASE)
+    if (rsp - (uint64_t)ist1_stack_bottom < 4096)
+        serial_printk("WARN: PF IST1 low — rsp=%lx\n", rsp);
 }
 ```
 (Remove after confirming IST1 has sufficient headroom in normal operation.)
@@ -1827,9 +1795,9 @@ git commit -m "test: verify busybox grep/sed work with mmap"
 
 ---
 
-### Task 5.4: 最终验证 — systest 全绿
+### Task 5.4: 最终验证 — systest 全绿 + SMP stress
 
-- [ ] **Step 1: 完整构建 + 运行**
+- [ ] **Step 1: 完整构建 + 单核运行**
 
 ```bash
 make clean && make && make run
@@ -1847,7 +1815,18 @@ echo hello | sed s/hello/hi/
 
 All must PASS.
 
-- [ ] **Step 3: 提交最终清理**
+- [ ] **Step 3: SMP stress — 并发 mmap/munmap**
+
+```bash
+make run  # default -smp 2
+```
+Run `/test_mmap.elf` 10 times consecutively:
+```bash
+for i in $(seq 1 10); do /test_mmap.elf; done
+```
+Expected: 10/10 PASS, no lock spin, no deadlock in subpage_lock.
+
+- [ ] **Step 4: 提交最终清理**
 
 ```bash
 # Remove any temporary debug printk's
