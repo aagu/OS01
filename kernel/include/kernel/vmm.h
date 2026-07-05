@@ -37,6 +37,22 @@
 #define PAGE_USER_Dir    (PAGE_U_S | PAGE_R_W | PAGE_Present)
 #define	PAGE_USER_Page   (PAGE_PS  | PAGE_U_S | PAGE_R_W | PAGE_Present)
 
+// 4KB page table entry flags (no PAGE_PS — hardware recognizes as 4KB)
+#define PAGE_USER_4K      (PAGE_U_S | PAGE_R_W | PAGE_Present)   // user R/W 4KB
+#define PAGE_USER_4K_RO   (PAGE_U_S | PAGE_Present)              // user read-only 4KB
+#define PAGE_KERNEL_4K    (PAGE_R_W | PAGE_Present)              // kernel 4KB
+#define PAGE_PROTNONE     (1UL << 9)   // software bit: PROT_NONE stash marker
+// bit 9 is x86_64 PTE ignored. mprotect(PROT_NONE) sets this, clears Present
+// but keeps phys.  mprotect(PROT_READ) walks PTEs to restore Present + clear this.
+// do_munmap/vma_free_all check this bit to know phys is valid for free_4k_page.
+
+// 4KB PTE functions
+int      vmm_map_4k_page(uint64_t *pagemap, uint64_t phys,
+                         uint64_t virt, uint64_t flags);
+void     vmm_unmap_4k_page(uint64_t *pagemap, uint64_t virt);
+uint64_t *vmm_pt_walk(uint64_t *pagemap, uint64_t virt,
+                      uint64_t flags, int allocate);
+
 #define KERNEL_MEM_OFFSET 0xffffffff80000000
 #define PHYS_MEM_OFFSET 0xffff800000000000
 
