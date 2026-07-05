@@ -79,6 +79,9 @@ int kill(int64_t pid, int sig);
 typedef void (*sighandler_t)(int);
 sighandler_t signal(int signum, sighandler_t handler);
 
+/* sigreturn trampoline — provided by crt, linked into every user program */
+extern void sigreturn_trampoline(void);
+
 /* Signal set manipulation */
 #define sigemptyset(set) (*(set) = 0)
 #define sigfillset(set)  (*(set) = ~0UL)

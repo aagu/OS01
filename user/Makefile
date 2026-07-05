@@ -21,7 +21,7 @@ override CFLAGS += -DOS01_SYSTEST
 endif
 
 LDFLAGS  := -T linker.ld -static -nostdlib -no-pie \
-            -L$(SYSROOT)/usr/lib -lc
+            -L$(SYSROOT)/usr/lib
 
 # ── Source discovery ───────────────────────────────────────
 # crt0.S is startup code, not a program
@@ -54,11 +54,18 @@ $(CRT0_OBJ): crt0.S
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
+# ── sigreturn trampoline (compiled once, linked into every program) ─
+SIGRETURN_OBJ := $(OBJ_DIR)/sigreturn_trampoline.o
+
+$(SIGRETURN_OBJ): sigreturn_trampoline.S
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
 # ── Link rules (pattern: each .c → .elf linked with crt0) ─
 # init.c → $(OBJ_DIR)/init.o → $(BUILD_DIR)/init.elf
-$(BUILD_DIR)/%.elf: $(OBJ_DIR)/%.o $(CRT0_OBJ) linker.ld
+$(BUILD_DIR)/%.elf: $(OBJ_DIR)/%.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
 	@mkdir -p $(dir $@)
-	$(LD) $(LDFLAGS) -o $@ $(CRT0_OBJ) $<
+	$(LD) $(LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $< -lc
 	$(OBJ_CPY) --strip-debug $@
 
 # ── Clean ──────────────────────────────────────────────────

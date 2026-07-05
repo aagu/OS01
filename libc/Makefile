@@ -12,7 +12,7 @@ AR     ?= llvm-ar
 include $(ARCHDIR)/make.config
 
 # ── Compile flags ──────────────────────────────────────────
-CFLAGS := $(CFLAGS) -ffreestanding -Wall -Wextra -D__is_libc -Iinclude -fno-stack-protector $(ARCH_CFLAGS)
+CFLAGS := $(CFLAGS) -ffreestanding -Wall -Wextra -D__is_libc -Iinclude -fno-stack-protector -fomit-frame-pointer $(ARCH_CFLAGS)
 LIBK_CFLAGS := $(CFLAGS) -D__is_libk -mno-red-zone
 
 # ── Source discovery (wildcard — no manual lists!) ──────────

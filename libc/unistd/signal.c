@@ -12,7 +12,7 @@ sighandler_t signal(int signum, sighandler_t handler)
     struct sigaction act, oldact;
     act.sa_handler = handler;
     act.sa_flags = 0;
-    act.sa_restorer = NULL;
+    act.sa_restorer = sigreturn_trampoline;
     act.sa_mask = 0;
 
     int64_t ret = syscall(SYS_signal,
