@@ -91,15 +91,17 @@ uint64_t mmap_base;  // mmap 下次分配的起始搜索地址
 #define PAGE_USER_4K_RO   (PAGE_U_S | PAGE_Present)              // 用户只读 4KB
 #define PAGE_KERNEL_4K    (PAGE_R_W | PAGE_Present)              // 内核 4KB
 #define PAGE_PROTNONE     (1UL << 9)   // 软件位：PROT_NONE 暂存标记
-// bit 9 是 x86_64 PTE 中 ignored（硬件不解释），用作 mprotect(PROT_NONE) 的
-// "物理页保留"标记。do_page_fault 检测此位 → 恢复 Present，不分配新页。
+// bit 9 是 x86_64 PTE ignored 位。mprotect(PROT_NONE) 在 PTE 上设此位，清 Present
+// 但保留 phys。mprotect(PROT_READ) 遍历 PTE 恢复 Present 并清除此位。do_munmap/
+// vma_free_all 检测此位知道 phys 有效需 free_4k_page。do_page_fault 不做此位处理
+// ——PROT_NONE 期间 VMA 的 vm_flags 已清零，在权限检查阶段就 SIGSEGV 了。
 ```
 
 新增函数（`vmm.c` / `vmm.h`）：
 
-- **`vmm_map_4k_page(pagemap, phys, virt, flags)`** — 调用 `vmm_pt_walk(pagemap, virt, flags, true)` 获取 PTE 条目指针，在 PTE[level1] 处写入 `phys | flags`（不含 `PAGE_PS`）。
-- **`vmm_unmap_4k_page(pagemap, virt)`** — 调用 `vmm_pt_walk(pagemap, virt, 0, false)` 获取 PTE 条目，提取 `phys = pte & PAGE_4K_MASK`，清 PTE，调用 **`free_4k_page(phys)`**（不是 `free_pages`——4KB 子页不在 PMM `bits_map` 中）。若 PTE 表全空则 `kfree` 回收 PTE 表 + 清零 PML2 条目。
-- **`vmm_pt_walk(pagemap, virt, flags, allocate)`** — 遍历 PML4→PML3→PML2，返回 `uint64_t *` 指向 PTE 条目。`flags` 参数用于在中间层设置 U/S 位：若 `flags` 含 `PAGE_U_S`，PML3/PML2 新分配条目使用 `PAGE_USER_GDT`/`PAGE_USER_Dir`；否则用 `PAGE_KERNEL_GDT`/`PAGE_KERNEL_Dir`。若 `allocate=true` 且某层条目不存在则 `calloc` 分配。这是 4KB 映射的正确性关键——中间层缺 U/S 会导致用户态在 PML2 层就触发 protection fault。
+- **`int vmm_map_4k_page(pagemap, phys, virt, flags)`** — 调用 `vmm_pt_walk(pagemap, virt, flags, true)` 获取 PTE 条目指针。若返回 NULL → 返回 `-ENOMEM`（PTE 表分配失败）。成功则在 PTE[level1] 写入 `phys | flags`（不含 `PAGE_PS`），返回 0。调用方（`do_page_fault`）必须检查返回值：失败则 `free_4k_page(phys)` + SIGBUS。
+- **`void vmm_unmap_4k_page(pagemap, virt)`** — 调用 `vmm_pt_walk(pagemap, virt, 0, false)`。若返回 NULL 或 `*pte` 无 `PAGE_Present` → 直接 return（该页从未 fault-in，demand-paging 正常路径）。否则提取 `phys = *pte & PAGE_4K_MASK`，清 PTE，调用 `free_4k_page(phys)`。若 PTE 表全空则 `kfree` 回收 + 清零 PML2 条目。
+- **`uint64_t *vmm_pt_walk(pagemap, virt, flags, allocate)`** — 遍历 PML4→PML3→PML2→PTE。`flags` 含 `PAGE_U_S` 时中间层用 `PAGE_USER_GDT/Dir`，否则 `PAGE_KERNEL_GDT/Dir`。`allocate=true` 且某层不存在时 `calloc` 分配；若 `calloc` 失败 → 返回 `NULL`（OOM）。返回指向 PTE[level1] 条目的指针，供读写。
 
 ### 3. syscall6() 宏 + 参数映射 (`libc/include/sys/syscall.h`)
 
@@ -179,7 +181,8 @@ do_mmap(addr, length, prot, flags, fd, offset):
   1. 参数校验
      - length == 0 → -EINVAL
      - 未知 prot 位 → -EINVAL
-     - PROT_WRITE 无 PROT_READ → -EINVAL（x86 硬件不支持只写页）
+     - PROT_WRITE 无 PROT_READ → -EINVAL（x86 不支持只写）
+     - PROT_EXEC 无 PROT_READ → 隐式加 PROT_READ（x86 不可执行不可读页）
      - offset 非 PAGE_4K_SIZE 对齐 → -EINVAL
      - end = PAGE_4K_ALIGN(addr + length)，若 end 溢出回绕 → -EINVAL
      - MAP_ANONYMOUS 必须有 fd == -1 → -EINVAL
@@ -219,6 +222,7 @@ do_mmap(addr, length, prot, flags, fd, offset):
 do_mprotect(addr, length, prot):
   1. addr 4KB 对齐，length 上界对齐
   2. 遍历 addr..addr+length 覆盖的 VMA
+     范围内有 VMA 之间的空洞 → -ENOMEM（Linux 语义：整个区间都必须已映射）
   3. 对每个 VMA：
      - 更新 vm_page_prot 和 vm_flags（同步 VM_READ/VM_WRITE/VM_EXEC）
        PROT_NONE → vm_flags 清除 VM_READ|VM_WRITE|VM_EXEC
@@ -227,8 +231,7 @@ do_mprotect(addr, length, prot):
      - 对已有物理页：遍历 PTE 条目，更新权限位
        PROT_NONE → 清 PAGE_Present + PAGE_R/W，保留 phys，**设 PAGE_PROTNONE**（bit 9）
        PROT_READ → 从 PROT_NONE 恢复时，清 PAGE_PROTNONE，置 PAGE_Present + PAGE_USER_4K_RO
-     - 用户页表修改：本地 flush_tlb() 即可——单线程任务不会同时在别的 CPU 上跑。
-       tlb_shootdown() 对 user_pml4 页表改动是无谓的全核 IPI 广播，V1 用 flush_tlb()。
+     - 用户页表修改：本地 flush_tlb() 即可
   4. 返回 0
 ```
 
@@ -240,9 +243,11 @@ do_munmap(addr, length):
   2. 对每个 VMA：
      - 调用 vmm_unmap_4k_page() 逐页释放
      - 若 VMA 被部分 unmap → 拆分 VMA
+       拆分后新建 VMA 节点继承 vm_file：需要 vfs_node_get(vm_file)
+       （否则原 VMA 被 vfs_node_put 后新节点的 vm_file 悬空）
      - 若 VMA 完全在范围内 → 从链表移除 + kfree
      - 文件映射：vfs_node_put(vma->vm_file)
-  3. flush_tlb()  // 用户页表修改无需 IPI broadcast
+  3. flush_tlb()
   4. 返回 0
 ```
 
@@ -288,31 +293,19 @@ do_page_fault(regs, error_code):
     user_pml4 = (uint64_t *)Phy_To_Virt(t->mm->pml4)
     uint64_t phys;
 
-    // 检查 PTE 的软件位 bit 9（PAGE_PROTNONE）：
-    // mprotect(PROT_NONE) 清 Present 但保留 phys + 设 bit 9。
-    // do_page_fault 检测到此位 → 恢复 Present 并返回，不分配新页。
-    // 这防止 PROT_NONE → PROT_READ → 首次访问拿到零页（数据丢失）。
-    uint64_t existing_pte = *vmm_pt_walk(user_pml4, cr2, 0, false);
-    if (existing_pte & PAGE_PROTNONE):
-      // PROT_NONE 暂存的页：恢复权限，不分配
-      *vmm_pt_walk(user_pml4, cr2, 0, true) =
-          (existing_pte & ~(PAGE_PROTNONE)) | PAGE_Present | vma->vm_page_prot;
-      return
-
     // 匿名映射首次访问
     if (vma->vm_flags & VM_ANON):
       phys = alloc_4k_page()
       if (!phys): 发送 SIGBUS → goto kill
-      vmm_map_4k_page(user_pml4, phys, PAGE_4K_ALIGN(cr2),
-                       vma->vm_page_prot)
+      int rc = vmm_map_4k_page(user_pml4, phys, PAGE_4K_ALIGN(cr2),
+                                vma->vm_page_prot);
+      if (rc != 0): free_4k_page(phys); 发送 SIGBUS → goto kill
       return
 
     // 文件映射首次访问
-    // AHCI 是 busy-poll（while (port->ci & (1<<slot)) + jiffies 超时），
-    // 整条路径无 schedule()。在 IST 栈上调用 vfs_read 不会因调度崩溃。
-    // IF 保持用户态进来的值（通常 1），busy-wait 期间 IRQ 仍可触发。
-    // 风险：4KB 读的 busy-wait 很短（微秒级），但 IST 栈上长时间自旋
-    // 会阻塞本 CPU 中断处理——作为保守策略，后续 workqueue 可迁出。
+    // AHCI 是 busy-poll（ahci_read_sectors 轮询 port->ci + jiffies 超时），
+    // 整条路径无 schedule()。IST 栈上调 vfs_read 安全。
+    // IF 保持用户态值（通常 1），busy-wait 期间 IRQ 仍可触发。
     if (vma->vm_file):
       phys = alloc_4k_page()
       if (!phys): 发送 SIGBUS
@@ -321,8 +314,9 @@ do_page_fault(regs, error_code):
       int n = vfs_read(vma->vm_file, file_offset,
                         PAGE_4K_SIZE, (void *)Phy_To_Virt(phys))
       if (n < 0): free_4k_page(phys); 发送 SIGBUS
-      vmm_map_4k_page(user_pml4, phys, PAGE_4K_ALIGN(cr2),
-                       vma->vm_page_prot)
+      rc = vmm_map_4k_page(user_pml4, phys, PAGE_4K_ALIGN(cr2),
+                            vma->vm_page_prot);
+      if (rc != 0): free_4k_page(phys); 发送 SIGBUS
       return
 
   // ── COW fault（后续 PR） ─────────────────────
@@ -334,13 +328,15 @@ kill:
 
 **IST 栈上下文**：`do_page_fault` 使用 IST1 栈。`vma_find()`/`vmm_map_4k_page()` 等函数只操作数据结构，不依赖 `current` 宏。`entry.S` 的 `page_fault` 入口不修改 IF（用户态进来通常 IF=1）；`alloc_4k_page()` 内部用 `spin_lock_irqsave` 自行管理中断屏蔽，安全。
 
+**IST1 栈深度警告**：重构后 `do_page_fault` 新增了 `vmm_pt_walk`（→ `calloc` → slab 多级调用）、`alloc_4k_page`（→ `spin_lock`）、文件路径的 `vfs_read`（→ `fat_read` → `ahci_read_sectors` busy-poll）。原 PF handler 仅 `printk` + `backtrace`。实现后需验证 IST1 栈有余量（`head.S` 中 `IST1_SIZE` = 7 页 = 28KB），建议在 do_page_fault 入口读 RSP 与 IST1 栈底比较，差值 < 4KB 时 `serial_printk` 告警（不给优化）。后续可将文件读迁移到 workqueue 上下文以减小 IST 压力。
+
 **AHCI 文件映射可行性**：`ahci_read_sectors`（`kernel/driver/ahci.c:487`）是 busy-poll（轮询 `port->ci` 位 + jiffies 超时），整条 I/O 路径无 `schedule()`。`vfs_read` 在 IST 上下文是安全的——不会因调度崩溃。V1 直接支持 AHCI 文件映射，不设 `-ENODEV` 限制。
 
 ### 8. 4KB 物理页分配 (`kernel/memory/pmm.c`)
 
 **问题**：当前 `alloc_pages(zone, number, flags)` 的 `bits_map` 粒度为 2MB（`PAGE_2M_SHIFT`）。不支持 4KB 单页分配。
 
-**方案**：新增 `alloc_4k_page()` / `free_4k_page()`，使用 2MB pool + 内部 bitmap 管理 512 个 4KB 子页。第一版限制：**仅支持分配，free_4k_page 为骨架**（munmap 暂不回收 4KB 子页到 pool——等 buddy allocator 后统一解决）。
+**方案**：新增 `alloc_4k_page()` / `free_4k_page()`，使用 2MB pool + 内部 bitmap 管理 512 个 4KB 子页。支持分配和回收，同时满足正确性和 busybox 高频 mmap/munmap 的长跑需求。
 
 ```c
 // kernel/memory/pmm.c
@@ -354,8 +350,11 @@ struct subpage_pool {
     int         alloc_count;
 };
 
-static list_t subpage_pools = LIST_INIT(subpage_pools);
+static list_t subpage_pools;             // initialized in pmm_init()
 static spinlock_T subpage_lock = { .lock = 1L };
+
+// In pmm_init() or a subpage_pool_init() called after slab_init():
+//     list_init(&subpage_pools);
 
 // Allocate a single 4KB physical page.  Returns physical address (NOT a
 // struct Page*), or 0 on OOM.  Caller writes the address into a PTE immediately.
@@ -403,7 +402,7 @@ uint64_t alloc_4k_page(void)
     // Mark the rest of the first page as used (potential subpage_pool growth)
     // Actually: subpage_pool is < 4KB, so just mark slot 0
     pool->alloc_count = 1;
-    list_add(&pool->list, &subpage_pools);
+    list_add_to_behind(&subpage_pools, &pool->list);
 
     uint64_t phys = pool->base_phys + PAGE_4K_SIZE;  // slot 1 (skip pool struct)
     // bitmap slot 1
@@ -415,17 +414,50 @@ uint64_t alloc_4k_page(void)
 }
 
 // Free a 4KB page previously allocated by alloc_4k_page().
-// First version: NO-OP skeleton.  Subpage slots are NOT returned to
-// the pool.  munmap'd 4KB pages are leaked until the pool's 2MB page
-// is fully freed (all 512 slots unused) — which requires a buddy
-// allocator upgrade to track.
-//
-// TODO: implement slot reclaim when buddy allocator supports 4KB pages.
+// Locates the owning pool by phys range, clears the bitmap slot,
+// and reclaims the slot for future alloc_4k_page() calls.
+// SMP-safe: subpage_lock is held.
 void free_4k_page(uint64_t phys)
 {
-    (void)phys;
-    // Will implement: locate pool by base_phys range, clear bitmap slot,
-    // if pool->alloc_count reaches 0 → list_del + free_pages 2MB.
+    if (!phys) return;
+
+    uint64_t flags = spin_lock_irqsave(&subpage_lock);
+
+    list_t *pos = subpage_pools.next;
+    while (pos != &subpage_pools) {
+        struct subpage_pool *pool = container_of(pos, struct subpage_pool, list);
+
+        // Does phys fall within this pool?
+        if (phys >= pool->base_phys &&
+            phys < pool->base_phys + PAGE_2M_SIZE) {
+
+            uint64_t offset = phys - pool->base_phys;
+            int slot = (int)(offset / PAGE_4K_SIZE);
+            if (slot < 0 || slot >= SUBPAGE_4K_COUNT) break; // shouldn't happen
+            int word = slot / 64;
+            int bit  = slot % 64;
+
+            if (pool->bitmap[word] & (1ULL << bit)) {
+                pool->bitmap[word] &= ~(1ULL << bit);
+                pool->alloc_count--;
+            }
+            // NOTE: pool's 2MB page is NOT freed when alloc_count
+            // reaches 0.  It stays in the list for future use.
+            // Freeing the 2MB back to PMM requires tracking whether
+            // the 2MB page is still mapped in any page table — a
+            // refcount that depends on the buddy allocator upgrade.
+            // This is fine: the pool page acts as a cache, not a
+            // leak, since slots are now recycled.
+
+            spin_unlock_irqrestore(&subpage_lock, flags);
+            return;
+        }
+        pos = pos->next;
+    }
+
+    // phys not found in any pool — shouldn't happen unless caller
+    // passes a wrong address.
+    spin_unlock_irqrestore(&subpage_lock, flags);
 }
 ```
 
@@ -433,7 +465,8 @@ void free_4k_page(uint64_t phys)
 - 返回 `uint64_t` 而非 `struct Page*` — 调用方只需要物理地址写 PTE，无伪造 `Page` 结构 + 无竞态。
 - `subpage_lock` 是 `spin_lock_irqsave` — `spin_lock_irqsave` 自行保存并清 IF，与调用上下文（`#PF` 入口不修改 IF，用户态进来通常 IF=1）无关。锁操作安全。
 - `subpage_pool` 结构存放在 2MB 页的首个 4KB slot 中（`Phy_To_Virt(pg->phy_address)`），无需额外 `kmalloc`。
-- **已知限制**：`free_4k_page` 第一版不回收 slot。munmap 一个 4KB 映射后物理页不返还 pool（相当于"分配不回收"语义）。这不影响正确性（页表项已清除，用户态无法再访问），只影响内存复用。待 buddy allocator 升级后统一解决。
+- `subpage_pools` 是全局链表，需在 `pmm_init()` → `slab_init()` 之后调用 `list_init(&subpage_pools)` 初始化。
+- **已知限制**：pool 的 2MB 页在 `alloc_count` 归零后不会归还 PMM（无法判断该 2MB 页是否仍被某个页表引用，需 refcount 追踪）。这不影响 busybox 长跑——4KB slot 已回收复用。
 
 ### 9. VMA 生命周期
 
@@ -458,16 +491,14 @@ if (!(pml2e & PAGE_PS)) {
     for (int l1 = 0; l1 < 512; l1++) {
         uint64_t pte = parent_pte[l1];
         if (!(pte & PAGE_Present)) continue;
-        uint64_t phys = pte & PAGE_4K_MASK;
-        struct Page *s = alloc_pages(ZONE_NORMAL, 1, 0);
-        if (s) {
-            uint64_t dst = (uint64_t)Phy_To_Virt(s->phy_address);
-            uint64_t src = (uint64_t)Phy_To_Virt(phys);
-            // 4KB copy — memcpy is safe at this size (existing memcpy bug
-            // only manifests with 2MB copies).  Use memcpy for clarity or
-            // rep movsb for consistency with the 2MB path.
-            memcpy((void *)dst, (void *)src, PAGE_4K_SIZE);
-            child_pte[l1] = s->phy_address | (pte & ~PAGE_4K_MASK);
+        uint64_t parent_phys = pte & PAGE_4K_MASK;
+        // Must use alloc_4k_page() — alloc_pages(1) gives a 2MB page!
+        // 4KB subpages are tracked by the subpage pool, not PMM's bits_map.
+        uint64_t child_phys = alloc_4k_page();
+        if (child_phys) {
+            memcpy((void *)Phy_To_Virt(child_phys),
+                   (void *)Phy_To_Virt(parent_phys), PAGE_4K_SIZE);
+            child_pte[l1] = child_phys | (pte & ~PAGE_4K_MASK);
         } else {
             child_pte[l1] = pte; // OOM: share
         }
@@ -480,17 +511,25 @@ if (!(pml2e & PAGE_PS)) {
 
 **exit**：`do_exit` → `vma_free_all(mm)` — 同上。现有 `do_exit` 已跳过 `vmm_free_user_map`（`pml4` 可能共享），mmap 引入后保持该模式：释放 VMA 管理的用户页 + PTE 表，pml4/PDPT/PD 表本身走 zombie 收割的延迟 free 路径。
 
-### 10. mmap_base 初始化
+**ELF 2MB 页不在 VMA 中**：`sys_exec` 加载的 ELF code/data/stack 使用 `PAGE_PS` 2MB 大页，直接写在 pml4→pml3→pml2 中，不受 `vma_list` 跟踪。`vma_free_all` 只释放 VMA 管理的 4KB 页 + PTE 表，不触碰 2MB ELF 段页。2MB 页的释放继续沿用现有路径（`do_exit` 跳过 `vmm_free_user_map` → zombie 收割时处理）。后续 COW/fork 实现时，若 ELF 段也纳入 VMA 跟踪，这一分离需要重新评估。
 
-`mm_t.mmap_base` 是 mmap 搜索空闲区的起始地址。`calloc` 默认 0 会导致首次 mmap 从 VA 0 开始搜索——VA 0 通常被保留为 NULL 区间。三个创建 `mm_t` 的位置需要显式初始化：
+### 10. mm_t 新字段初始化
+
+`vma_list` 和 `mmap_base` 是 mm_t 的两个新字段。三个创建 `mm_t` 的位置需要初始化：
 
 ```c
-// sys_exec: new_mm->mmap_base = 0x40000000  // 紧贴默认 ELF 加载地址之上
-// spawn_user_task: mm->mmap_base = 0x40000000
-// fork_mm_copy: memcpy 自动继承 parent 的 mmap_base
+// sys_exec (task.c ~893):      new_mm = calloc → list_init(&new_mm->vma_list);
+//                               new_mm->mmap_base = 0x40000000;
+// spawn_user_task (task.c ~689): mm = calloc → list_init(&mm->vma_list);
+//                                 mm->mmap_base = 0x40000000;
+// fork_mm_copy: memcpy(child_mm, parent_mm, sizeof(mm_t)) 会复制 parent
+//               的 vma_list 指针 → 必须覆盖为 list_init(&child_mm->vma_list)
+//               （vma_list 不能共享，fork_vma_copy 会填充 child 自己的 VMA 节点）
 ```
 
-建议值 `0x40000000`（1GB 处）：高于 ELF 默认加载地址（`USER_CODE_ADDR = 0x400000`）和堆区，低于用户栈（`USER_STACK_BASE = 0x00007fffffffffff` 处的 2MB 页）。
+**重要**：`calloc` 出的 `vma_list` 是 NULL/NULL，`list_init` 必须显式调用。`fork_mm_copy` 的 `memcpy` 会把 parent 的 `vma_list` 指针（指向 parent 的 VMA 节点）拷到 child，必须在 `memcpy` 后重新 `list_init` + 再 `fork_vma_copy` 填充 child 版。
+
+`mmap_base` 取值 `0x40000000`（1GB 处）：高于 ELF 加载地址（`USER_CODE_ADDR = 0x400000`）、堆区（brk 上限 ~0x600000）、用户栈（`USER_STACK_BASE = 0x800000` / `USER_STACK_TOP = 0x9FFFF0`），远低于 `addr_limit = 0x00007FFFFFFFFFFF`。该区域足够大（~1.75GB 到 addr_limit），适宜作为 mmap 默认搜索起点。
 
 ## 新增 syscall 编号
 
@@ -533,7 +572,7 @@ Linux ABI 表更新：
 | `kernel/include/kernel/task.h` | 修改 | `mm_t` 新增 `vma_list`、`mmap_base` |
 | `kernel/arch/x86_64/trap.c` | 修改 | `do_page_fault`: cs&3 双路分流（内核 halt，用户 VMA+按需分配）；`do_system_call` 新增 3 case（从 regs->r8/r9/r10 取 mmap 后三参）；Linux ABI [9/10/11] |
 | `kernel/sched/task.c` | 修改 | `fork_mm_copy`: 非 PS 条目 PTE 表 deep copy（4KB eager）；`fork_vma_copy`；`do_exit`→`vma_free_all`；`sys_exec`→`vma_free_all` + `mmap_base=0x40000000`；`spawn_user_task`→`mmap_base` init |
-| `kernel/memory/pmm.c` | 修改 | 新增 `alloc_4k_page()`（返回 `uint64_t`，SMP-safe spinlock + pool list）、`free_4k_page()`（no-op 骨架，V1 不回收 slot）；pool 结构存于 2MB 页首部；`alloc_pages` 的 `PG_PTable_Maped`→可传 0 |
+| `kernel/memory/pmm.c` | 修改 | 新增 `alloc_4k_page()`（返回 `uint64_t`，SMP-safe spinlock + pool list）、`free_4k_page()`（按 phys 反查 pool → bitmap 清位 + slot 回收）；pool 结构存于 2MB 页首部；`pmm_init` 末尾 `list_init(&subpage_pools)` |
 | `kernel/include/kernel/pmm.h` | 修改 | 新增 `uint64_t alloc_4k_page(void)` / `void free_4k_page(uint64_t phys)` |
 | `libc/include/sys/syscall.h` | 修改 | 新增 `SYS_mmap=44`/`SYS_mprotect=45`/`SYS_munmap=46` + `syscall6()` 宏 + mmap 参数映射表 |
 | `libc/include/sys/mman.h` | 新建 | `PROT_NONE/READ/WRITE/EXEC`、`MAP_FAILED/SHARED/PRIVATE/FIXED/ANONYMOUS`、函数声明 |
@@ -546,7 +585,7 @@ Linux ABI 表更新：
 
 1. **systest 保持 70/70** — 现有系统测试全部通过
 2. **匿名映射测试** — 新 systest：`mmap(ANON)` → 写入 → 读取 → `munmap` → 验证数据
-3. **mprotect 测试** — `mmap` → `mprotect(PROT_NONE)` → 访问触发 SIGSEGV；`mprotect(PROT_READ)` → 读取恢复原数据（验证 PAGE_PROTNONE）
+3. **mprotect 测试** — `mmap` → 写入数据 → `mprotect(PROT_NONE)` → 访问触发 SIGSEGV → `mprotect(PROT_READ)`（mprotect 遍历 PTE 同步恢复 Present）→ 读取验证原数据未丢失
 4. **busybox ash 保持正常** — 启动 shell 交互不受影响
 5. **busybox grep** — `echo hello | grep h` 正常工作（文件映射 + 匿名映射）
 6. **fork + mmap** — `fork()` 后在父进程中 mmap 匿名页，父子各自写入不同值，读取验证隔离
