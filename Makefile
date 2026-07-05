@@ -64,7 +64,7 @@ user/busybox.elf: thirdpart/busybox-1.36.1/busybox
 BUSYBOX_SRC  = thirdpart/busybox-1.36.1
 BUSYBOX_CFG  = config/busybox.config
 
-thirdpart/busybox-1.36.1/busybox: lib $(BUSYBOX_SRC)/Makefile $(BUSYBOX_CFG) user/crt0.S
+thirdpart/busybox-1.36.1/busybox: lib $(BUSYBOX_SRC)/Makefile $(BUSYBOX_CFG) user/crt0.S user/sigreturn_trampoline.S
 	@test -f $(BUSYBOX_SRC)/Makefile || { \
 	    echo "ERROR: busybox submodule not initialized"; \
 	    echo "Run: git submodule update --init"; false; }
@@ -76,6 +76,7 @@ thirdpart/busybox-1.36.1/busybox: lib $(BUSYBOX_SRC)/Makefile $(BUSYBOX_CFG) use
 	    echo 'obj-y += crt0.o' >> $(BUSYBOX_SRC)/applets/Kbuild.src; }
 	@grep -q 'sigreturn_trampoline.o' $(BUSYBOX_SRC)/applets/Kbuild.src || { \
 	    echo 'obj-y += sigreturn_trampoline.o' >> $(BUSYBOX_SRC)/applets/Kbuild.src; }
+	$(MAKE) -C $(BUSYBOX_SRC) silentoldconfig CC=clang LD=clang 2>/dev/null || \
 	yes "" | $(MAKE) -C $(BUSYBOX_SRC) oldconfig CC=clang LD=clang
 	@# Fixup config for cross-compilation quirks (oldconfig may flip these)
 	cd $(BUSYBOX_SRC) && sed -i \
