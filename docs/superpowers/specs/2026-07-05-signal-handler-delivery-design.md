@@ -51,10 +51,12 @@ pending signal → do_signal_delivery → push sigframe on user stack
 |------|-----|------|
 | 用户代码段 | `0x400000–0x600000` (2MB, RWX) | `spawn_user_task` |
 | 用户栈 | `0x800000–0xA00000` (2MB, RW+NX) | `spawn_user_task` |
+| USER_CS / USER_DS | `0x2b` / `0x33` | `kernel/include/kernel/task.h:22-23` |
 | 仅 2MB 大页 | 无 4KB 页面支持 | 当前 VMM 限制 |
 | trampoline 必须在可执行区域 | 只能放 `.text` 段 | 栈不可执行 |
 | `sigaction.sa_restorer` 已存在 | `kernel/include/uapi/time.h:84` | SYS_signal 已正确拷贝 |
-| 内核不能直接解引用用户态虚拟地址 | 用户页在独立 `user_pml4` 中 | 需 walk 页表 → `Phy_To_Virt` |
+| busybox 走 Linux ABI | `PF_LINUX_ABI`, `linux_to_os01[]` 翻译 | `trap.c:643-686` |
+| `check_signal` 不检查 CPL | `entry.S:89` 无 `cs & 3` 守卫 | 需在 `do_signal_delivery` 内加 |
 
 ## 4. 新增组件
 
@@ -148,7 +150,37 @@ static uint64_t user_va_to_phys(uint64_t *pml4, uint64_t va) {
 
 触发条件：`handler != SIG_DFL && handler != SIG_IGN`
 
+**CPL 守卫**（P1）：`do_signal_delivery` 在 `entry.S:check_signal` 中被调用时 CPL 可能为 0（内核态中断）。handler 投递只能发生在返回用户态的边界上，否则会把 `iretq` 重定向到 ring 3，丢弃正在进行的内核工作和持有的锁。在函数开头检查 `!(regs->cs & 3)` 时跳过 handler 投递——SIG_DFL/SIG_IGN 正常处理，已注册 handler 的信号保留 pending，等待下一次返回用户态时投递。
+
+**sa_restorer NULL 检查**（P3）：未注册 trampoline 的 handler（raw syscall 调用者传入 `sa_restorer=NULL`）会导致 handler `ret` 后跳转到地址 0 崩溃。在 `do_signal_delivery` 中校验 `sa_restorer == NULL` 时，降级为 SIG_DFL 行为（终止进程）。
+
 ```c
+// ── CPL guard: only deliver to ring-3 frames ──────────
+// Called from check_signal (entry.S:89) which may fire at any CPL.
+// If we're in kernel mode, skip handler delivery — SIG_DFL/SIG_IGN
+// are still safe (they just manipulate task state).  Registered
+// handlers stay pending and will be delivered on the next
+// return-to-userspace.
+if (!(regs->cs & 3)) {
+    // Still process SIG_DFL kills — those don't touch pt_regs
+    // (do_exit switches away, never returns)
+    // Registered handlers: leave pending, retry on next check_signal
+    if (handler != SIG_DFL && handler != SIG_IGN)
+        continue;  // skip this signal, try again later
+    // fall through to SIG_DFL/SIG_IGN handling
+}
+
+// ── sa_restorer NULL guard ───────────────────────────
+// Handler without a valid restorer would ret to address 0.
+// Treat as SIG_DFL (terminate).
+if (!current->sighand[sig].sa_restorer) {
+    serial_printk("task %d: signal %d handler has no restorer, "
+                  "killing\n", (int)current->pid, sig);
+    current->signal &= ~(1ULL << sig);
+    do_exit((uint64_t)sig << 8);
+    return;
+}
+
 // 1. 构造 sigframe（内核栈上）
 struct sigframe frame;
 memset(&frame, 0, sizeof(frame));
@@ -162,19 +194,26 @@ frame.rip=regs->rip; frame.cs=regs->cs;   frame.rflags=regs->rflags;
 frame.rsp=regs->rsp; frame.ss=regs->ss;
 frame.blocked = current->blocked;
 
-// 2. 计算用户栈新 RSP（16 字节对齐，符合 x86_64 ABI）
-size_t total = sizeof(frame) + 8;  // frame (200) + trampoline addr (8) = 208
-uint64_t new_rsp = (regs->rsp - total) & ~15UL;
+// 2. 计算用户栈新 RSP（x86_64 SysV ABI: iretq 等价于 call 之后; RSP≡8 mod 16）
+//    208=200(frame)+8(trampoline), 加 8 调整 → 216=16×13.5 → 对齐后 RSP%16==8
+size_t total = sizeof(frame) + 8;              // 208 = frame (200) + trampoline (8)
+uint64_t new_rsp = ((regs->rsp - total - 8) & ~15UL) + 8;
+// new_rsp % 16 == 8 — handler 可以使用 movaps 对齐取数
 
 // 3. 获取用户栈物理地址 → 内核虚拟地址
 uint64_t *user_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
 uint64_t frame_phys = user_va_to_phys(user_pml4, new_rsp + 8);
-if (!frame_phys) { regs->rax = -EFAULT; break; }  // shouldn't happen
+if (!frame_phys) {
+    // Page table walk failed — leave signal pending, don't modify pt_regs.
+    // The next return-to-userspace will retry (the underlying page should
+    // still be mapped; this is a defensive check).
+    continue;  // skip to next signal, leave current->signal bit set
+}
 void *kstack = (void *)Phy_To_Virt(frame_phys);
 
 // 4. 写 sigframe（new_rsp+8）和 trampoline 返回地址（new_rsp）
 //    布局: [sigframe (200B)] [trampoline addr (8B)]
-//          ^ new_rsp+8         ^ new_rsp
+//          ^ new_rsp+8 (sigframe 起始)  ^ new_rsp (handler 的 RSP，iretq 后直接生效)
 memcpy(kstack, &frame, sizeof(frame));               // sigframe
 uint64_t tramp = (uint64_t)current->sighand[sig].sa_restorer;
 memcpy(kstack - 8, &tramp, 8);                       // trampoline as return addr
@@ -183,17 +222,23 @@ memcpy(kstack - 8, &tramp, 8);                       // trampoline as return add
 regs->rdi = sig;                          // handler arg (x86_64 ABI: arg1=RDI)
 regs->rip = (uint64_t)handler;            // → handler code in .text
 regs->rsp = new_rsp;                      // RSP points to trampoline addr
-regs->cs  = 0x1b;   // USER_CS: ring 3 code
-regs->ss  = 0x23;   // USER_DS: ring 3 data
-regs->ds  = 0x23;
-regs->es  = 0x23;
+regs->cs  = USER_CS;  // 0x2b: ring 3 code (GDT index 5 | RPL 3)
+regs->ss  = USER_DS;  // 0x33: ring 3 data (GDT index 6 | RPL 3)
+regs->ds  = USER_DS;
+regs->es  = USER_DS;
 
 // 6. 阻塞信号防嵌套
+// sa_mask 是 uint64_t 但语义上只用低 NSIG-1 位（与 blocked/sigset_t 一致）。
+// sigreturn 时 current->blocked = kframe->blocked 整体恢复，解除本次阻塞。
 current->blocked |= (1ULL << (sig - 1));              // block current signal
 current->blocked |= current->sighand[sig].sa_mask;    // block sa_mask
 
 current->signal &= ~(1ULL << sig);  // clear pending
 break;  // deliver one signal at a time; remaining signals on next check_signal
+// fall through → return 1 (handled)
+}
+// for loop end: nothing deliverable → return 0
+return 0;
 ```
 
 ### 5.3 SYS_sigreturn (编号 43)
@@ -235,10 +280,30 @@ case SYS_sigreturn: {
 | `libc/include/sys/syscall.h` | 加 `#define SYS_sigreturn 43` |
 | `kernel/arch/x86_64/trap.c` | `syscall_names[43] = "sigreturn"` |
 | `kernel/arch/x86_64/trap.c` | switch 加 `case SYS_sigreturn:` |
+| `kernel/arch/x86_64/trap.c` | Linux ABI 翻译表加 `[15] = 43`（`rt_sigreturn → SYS_sigreturn`） |
+| `kernel/arch/x86_64/trap.c` | `do_signal_delivery` 返回类型 `void → int`，新增 CPL 守卫 + sa_restorer NULL 检查 + sigframe 推送 |
+| `kernel/arch/x86_64/entry.S` | `check_signal` 检查 `do_signal_delivery` 返回值，0 时跳出循环 |
+
+**P2：Linux ABI `rt_sigreturn` 映射。** busybox ash 以 `PF_LINUX_ABI` 运行，使用的 trampoline（内置于 busybox）调用 Linux syscall 15（`rt_sigreturn`）。当前 `linux_to_os01` 表没有 `[15]` 项，会落到 -1 → unsupported 路径，sigreturn 永远不执行。需要在表中增加 `[15] = 43`，将 Linux `rt_sigreturn` 映射到 OS01 `SYS_sigreturn`。注意：busybox 自带 trampoline 是 Linux 风格的（通过 `sigaction.sa_restorer` 指向 busybox 内部的 `sigreturn` stub，调用 `int $0x80` with `%rax=15`），所以 PF_LINUX_ABI 进程通过 ABI 翻译表路由到 `SYS_sigreturn` 后，OS01 内核侧的 sigframe 恢复逻辑同样适用。唯一区别：sigframe 布局必须与 Linux 兼容——而本设计的 `struct sigframe` 恰好匹配 Linux 的 `sigframe` 布局（GPR→iretq frame），两者通用。
 
 ### 5.5 do_signal_delivery 循环行为
 
 当前处理完一个 handler 后 `continue` 循环处理剩余信号。改为 `break`——一次只推送一个 handler。`entry.S:check_signal` 已有 loop 语义（`call do_signal_delivery; jmp check_signal`），每次重新进入会再次调用，逐一处理。这避免了嵌套信号推送时的栈帧重叠。
+
+**CPL 守卫与 entry.S 协作。** `do_signal_delivery` 返回 `int`：**返回 0 当且仅当本轮没有投递任何 handler 且没有杀死进程**——即所有 pending 信号要么被阻塞、要么 CPL=0 跳过。此时 `entry.S:check_signal` 跳出循环，避免 CPL=0 时的无限 loop。非 0 返回表示至少处理了一个信号（投递 handler 或 SIG_DFL kill），`check_signal` 继续循环处理剩余信号。
+
+```asm
+check_signal:
+    cmpq $0, TASK_SIGNAL_OFFSET(%rbx)
+    je   RESTORE_ALL
+    movq %rsp, %rdi
+    call do_signal_delivery          # returns int: 0 = nothing done, !0 = handled ≥1
+    testl %eax, %eax
+    jz   RESTORE_ALL                 # nothing delivered → break loop
+    jmp  check_signal                # try next pending signal
+```
+
+之前 `do_signal_delivery` 返回类型是 `void`，需改为 `int`。实现侧的清理：删除现有 `(void)regs;` 占位行（`trap.c:572`），因为新代码已将 `regs` 用于 sigframe 写入和 pt_regs 修改。
 
 ## 6. Libc 改动清单
 
@@ -271,14 +336,19 @@ case SYS_sigreturn: {
   [sigframe.rdi, rsi, rdx, rcx, rbx  ]     ← sigframe + 0x40–0x60
   [sigframe.r8–r15                    ]     ← sigframe + 0x00–0x38
 
-  [trampoline_addr = sigreturn_trampoline] ← new_rsp (16B aligned, handler 返回地址)
+  [trampoline_addr = sigreturn_trampoline] ← new_rsp (RSP%16==8, handler 返回地址)
 低地址
 ```
 
+handler 入口:  RSP = new_rsp, [RSP] = trampoline 地址, RSP % 16 == 8 ✓ (SysV ABI)
+handler ret:   弹出 trampoline → RIP=trampoline, RSP = new_rsp + 8
+int $0x80:     RSP = new_rsp + 8 = sigframe 起始地址
+
 **关键性质**：
-- `new_rsp = (old_rsp - 208) & ~15UL` — 208 = 200 (frame) + 8 (trampoline)，208 = 16×13，自动对齐
-- sigframe 起始 = `new_rsp + 8`，恰好是 handler `ret` 后的 RSP
-- `SYS_sigreturn` 中直接 `kframe = Phy_To_Virt(user_va_to_phys(pml4, regs->rsp))`，无需计算偏移
+- `new_rsp = ((old_rsp - 208 - 8) & ~15UL) + 8` — 保证 iretq 后 RSP % 16 == 8（等价于"刚执行 call 之后"的栈状态）
+- `sizeof(struct sigframe) = 200 bytes`
+- sigframe 起始 = `new_rsp + 8`，也是 handler `ret` 后的 RSP
+- `SYS_sigreturn` 中 `kframe = Phy_To_Virt(user_va_to_phys(pml4, regs->rsp))`，无需计算偏移
 
 **执行流程的 RSP 变化**：
 
