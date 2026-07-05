@@ -85,4 +85,20 @@ struct sigaction {
     uint64_t   sa_mask;
 };
 
+/* sigframe — saved on user stack by do_signal_delivery,
+ * restored by SYS_sigreturn.  Matches pt_regs_t layout for the
+ * GPR + iretq-frame portion; blocked is extra. */
+struct sigframe {
+    uint64_t r15, r14, r13, r12, r11, r10, r9, r8;  /* 0x00–0x38 */
+    uint64_t rbx, rcx, rdx, rsi, rdi;               /* 0x40–0x60 */
+    uint64_t rbp;                                     /* 0x68 */
+    uint64_t ds, es;                                  /* 0x70, 0x78 */
+    uint64_t rax;                                     /* 0x80 */
+    uint64_t func, errcode;                           /* 0x88, 0x90 (padding) */
+    uint64_t rip, cs, rflags;                        /* 0x98, 0xa0, 0xa8 */
+    uint64_t rsp, ss;                                 /* 0xb0, 0xb8 */
+    uint64_t blocked;                                 /* 0xc0 — saved mask */
+};
+/* sizeof(struct sigframe) == 200 bytes */
+
 #endif
