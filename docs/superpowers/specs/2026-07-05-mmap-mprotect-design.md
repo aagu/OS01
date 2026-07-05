@@ -100,7 +100,7 @@ uint64_t mmap_base;  // mmap 下次分配的起始搜索地址
 新增函数（`vmm.c` / `vmm.h`）：
 
 - **`int vmm_map_4k_page(pagemap, phys, virt, flags)`** — 调用 `vmm_pt_walk(pagemap, virt, flags, true)` 获取 PTE 条目指针。若返回 NULL → 返回 `-ENOMEM`（PTE 表分配失败）。成功则在 PTE[level1] 写入 `phys | flags`（不含 `PAGE_PS`），返回 0。调用方（`do_page_fault`）必须检查返回值：失败则 `free_4k_page(phys)` + SIGBUS。
-- **`void vmm_unmap_4k_page(pagemap, virt)`** — 调用 `vmm_pt_walk(pagemap, virt, 0, false)`。若返回 NULL 或 `*pte` 无 `PAGE_Present` → 直接 return（该页从未 fault-in，demand-paging 正常路径）。否则提取 `phys = *pte & PAGE_4K_MASK`，清 PTE，调用 `free_4k_page(phys)`。若 PTE 表全空则 `kfree` 回收 + 清零 PML2 条目。
+- **`void vmm_unmap_4k_page(pagemap, virt)`** — 调用 `vmm_pt_walk(pagemap, virt, 0, false)`。判定：若返回 NULL → 直接 return（PTE 表不存在）。若 `*pte` 既无 `PAGE_Present` 也无 `PAGE_PROTNONE` → return（真正未映射的页，demand-paging 正常路径）。否则 `phys = *pte & PAGE_4K_MASK`，清 PTE，`free_4k_page(phys)`。**关键**：PROT_NONE 页是 Present=0 + PROTNONE=1 + phys 保留，不加 PROTNONE 检查会当成未映射跳过，phys 泄漏。
 - **`uint64_t *vmm_pt_walk(pagemap, virt, flags, allocate)`** — 遍历 PML4→PML3→PML2→PTE。`flags` 含 `PAGE_U_S` 时中间层用 `PAGE_USER_GDT/Dir`，否则 `PAGE_KERNEL_GDT/Dir`。`allocate=true` 且某层不存在时 `calloc` 分配；若 `calloc` 失败 → 返回 `NULL`（OOM）。返回指向 PTE[level1] 条目的指针，供读写。
 
 ### 3. syscall6() 宏 + 参数映射 (`libc/include/sys/syscall.h`)
@@ -265,10 +265,9 @@ do_page_fault(regs, error_code):
 
   // ── 用户态 PF ─────────────────────────────────
   // NOTE: do_page_fault 在 IST1 栈上，不能使用 current。
-  task_t *t = task_from_tss();
+  task_t *t = task_from_tss();     // 可返回 NULL（cpu/tss/rsp0 无效时）
+  if (!t || !t->mm): goto kill     // NULL guard + 内核线程无用户空间
   cr2 = 故障地址（movq %%cr2, ...）
-
-  if (!t->mm): goto kill   // 内核线程无用户空间
 
   vma = vma_find(t->mm, cr2)
   if (!vma): goto kill
@@ -490,14 +489,17 @@ if (!(pml2e & PAGE_PS)) {
     child_pml2[l2] = Virt_To_Phy((uint64_t)child_pte) | (pml2e & 0xfff);
     for (int l1 = 0; l1 < 512; l1++) {
         uint64_t pte = parent_pte[l1];
-        if (!(pte & PAGE_Present)) continue;
+        // Copy both Present and PROTNONE pages.  PROTNONE pages have
+        // Present=0 but a valid phys address — skip them here and the
+        // child loses the data after parent's mprotect(PROT_READ).
+        if (!(pte & (PAGE_Present | PAGE_PROTNONE))) continue;
+
         uint64_t parent_phys = pte & PAGE_4K_MASK;
-        // Must use alloc_4k_page() — alloc_pages(1) gives a 2MB page!
-        // 4KB subpages are tracked by the subpage pool, not PMM's bits_map.
         uint64_t child_phys = alloc_4k_page();
         if (child_phys) {
             memcpy((void *)Phy_To_Virt(child_phys),
                    (void *)Phy_To_Virt(parent_phys), PAGE_4K_SIZE);
+            // Preserve PROTNONE bit: child gets same Present/PROTNONE state
             child_pte[l1] = child_phys | (pte & ~PAGE_4K_MASK);
         } else {
             child_pte[l1] = pte; // OOM: share
