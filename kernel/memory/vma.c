@@ -107,3 +107,264 @@ vma_t *fork_vma_copy(mm_t *child_mm, mm_t *parent_mm)
     }
     return NULL; // caller doesn't use return value
 }
+
+// ── Helper: convert prot/flags to vm_page_prot flags ──────────
+static int prot_to_page_flags(int prot, uint64_t *page_prot, uint64_t *vm_flags)
+{
+    *vm_flags = 0;
+
+    if (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC))
+        return -EINVAL;
+
+    // x86: reject pure PROT_WRITE first (hardware can't do write-only)
+    if ((prot & PROT_WRITE) && !(prot & PROT_READ))
+        return -EINVAL;
+
+    // x86: PROT_EXEC or PROT_EXEC|PROT_WRITE → implicit PROT_READ
+    if (prot & PROT_EXEC)
+        prot |= PROT_READ;
+
+    if (prot == PROT_NONE) {
+        *page_prot = PAGE_U_S;
+        *vm_flags = 0;
+    } else if (prot == PROT_READ) {
+        *page_prot = PAGE_USER_4K_RO;
+        *vm_flags = VM_READ;
+    } else if (prot == (PROT_READ | PROT_WRITE)) {
+        *page_prot = PAGE_USER_4K;
+        *vm_flags = VM_READ | VM_WRITE;
+    } else if (prot == (PROT_READ | PROT_EXEC) ||
+               prot == (PROT_READ | PROT_WRITE | PROT_EXEC)) {
+        *page_prot = PAGE_USER_4K;  // no NX support yet
+        *vm_flags = VM_READ | VM_EXEC
+                  | ((prot & PROT_WRITE) ? VM_WRITE : 0);
+    } else {
+        return -EINVAL;
+    }
+    return 0;
+}
+
+// ── Helper: convert mmap flags to vm_flags ────────────────────
+static void map_flags_to_vm(int flags, uint64_t *vm_flags)
+{
+    if (flags & MAP_SHARED)  *vm_flags |= VM_SHARED;
+    if (flags & MAP_ANONYMOUS) *vm_flags |= VM_ANON;
+}
+
+// ── do_munmap ─────────────────────────────────────────────────
+// Defined before do_mmap because do_mmap(MAP_FIXED) calls it.
+int64_t do_munmap(uint64_t addr, uint64_t length)
+{
+    addr   = PAGE_4K_ALIGN(addr);
+    length = PAGE_4K_ALIGN(length);
+    if (length == 0)
+        return -EINVAL;
+
+    uint64_t end = addr + length;
+    uint64_t *user_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
+
+    list_t *pos = current->mm->vma_list.next;
+    while (pos != &current->mm->vma_list) {
+        vma_t *v = container_of(pos, vma_t, list);
+        pos = pos->next;
+
+        if (v->vm_end <= addr)   continue;
+        if (v->vm_start >= end)  break;
+
+        uint64_t u_start = (addr > v->vm_start) ? addr : v->vm_start;
+        uint64_t u_end   = (end  < v->vm_end)   ? end  : v->vm_end;
+        for (uint64_t va = u_start; va < u_end; va += PAGE_4K_SIZE)
+            vmm_unmap_4k_page(user_pml4, va);
+
+        uint64_t orig_start = v->vm_start;
+        uint64_t orig_end   = v->vm_end;
+
+        if (u_start <= orig_start && u_end >= orig_end) {
+            vma_remove(current->mm, v);
+            continue;
+        }
+
+        if (u_start > orig_start && u_end < orig_end) {
+            // Split: left + right
+            v->vm_end = u_start;
+
+            vma_t *right = (vma_t *)kmalloc(sizeof(vma_t));
+            if (right) {
+                memcpy(right, v, sizeof(vma_t));
+                list_init(&right->list);
+                right->vm_start = u_end;
+                right->vm_end   = orig_end;
+                if (right->vm_file)
+                    vfs_node_get(right->vm_file);
+                vma_insert(current->mm, right);
+            }
+        } else if (u_start > orig_start) {
+            // Truncate right side
+            v->vm_end = u_start;
+        } else {
+            // Truncate left side
+            v->vm_start = u_end;
+        }
+    }
+
+    flush_tlb();
+    return 0;
+}
+
+// ── do_mmap ───────────────────────────────────────────────────
+int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
+                uint64_t flags, uint64_t fd, uint64_t offset)
+{
+    // ── 1. Argument validation ──────────────────────────
+    if (length == 0)
+        return -EINVAL;
+
+    uint64_t end = PAGE_4K_ALIGN(addr + length);
+    if (end < addr)  // overflow
+        return -EINVAL;
+
+    if (offset & (PAGE_4K_SIZE - 1))
+        return -EINVAL;
+
+    if (flags & MAP_ANONYMOUS) {
+        if ((int64_t)fd != -1)
+            return -EINVAL;
+    } else {
+        file_t *file = NULL;
+        if (fd < NOFILE && current->files)
+            file = current->files->fd[fd];
+        if (!file || !file->node)
+            return -EBADF;
+    }
+
+    if (flags & MAP_FIXED) {
+        if (addr & (PAGE_4K_SIZE - 1))
+            return -EINVAL;
+        if (addr >= current->addr_limit)
+            return -ENOMEM;
+    }
+
+    // ── 2. Address computation ──────────────────────────
+    length = PAGE_4K_ALIGN(length);
+    if (!length) return -EINVAL;
+
+    uint64_t search = current->mm->mmap_base;
+    vma_t *prev = NULL;
+    list_t *pos = current->mm->vma_list.next;
+    addr = 0;
+
+    if (!(flags & MAP_FIXED)) {
+        while (pos != &current->mm->vma_list) {
+            vma_t *v = container_of(pos, vma_t, list);
+            uint64_t gap_start = prev ? prev->vm_end : search;
+            if (gap_start < search) gap_start = search;
+            if (gap_start + length <= v->vm_start) {
+                addr = gap_start;
+                break;
+            }
+            prev = v;
+            pos = pos->next;
+        }
+        if (!addr) addr = prev ? prev->vm_end : search;
+        if (addr < search) addr = search;
+    } else {
+        do_munmap(addr, length);
+    }
+
+    if (addr + length > current->addr_limit)
+        return -ENOMEM;
+    if (addr >= current->addr_limit)
+        return -ENOMEM;
+
+    // ── 3. prot → page flags ───────────────────────────
+    uint64_t page_prot, vm_flags_base;
+    int rc = prot_to_page_flags((int)prot, &page_prot, &vm_flags_base);
+    if (rc) return rc;
+    map_flags_to_vm((int)flags, &vm_flags_base);
+
+    // ── 4. File mapping setup ──────────────────────────
+    vfs_node_t *file_node = NULL;
+    if (!(flags & MAP_ANONYMOUS)) {
+        file_t *file = current->files->fd[fd];
+        file_node = vfs_node_get(file->node);
+    }
+
+    // ── 5. Allocate VMA ────────────────────────────────
+    vma_t *vma = (vma_t *)kmalloc(sizeof(vma_t));
+    if (!vma) {
+        if (file_node) vfs_node_put(file_node);
+        return -ENOMEM;
+    }
+    list_init(&vma->list);
+    vma->vm_start     = addr;
+    vma->vm_end       = addr + length;
+    vma->vm_flags     = vm_flags_base;
+    vma->vm_page_prot = page_prot;
+    vma->vm_pgoff     = offset >> PAGE_4K_SHIFT;
+    vma->vm_file      = file_node;
+
+    vma_insert(current->mm, vma);
+
+    return (int64_t)addr;
+}
+
+// ── do_mprotect ───────────────────────────────────────────────
+int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
+{
+    addr   = PAGE_4K_ALIGN(addr);
+    length = PAGE_4K_ALIGN(length);
+    if (length == 0)
+        return -EINVAL;
+    if (addr + length < addr)  // overflow
+        return -EINVAL;
+
+    uint64_t end = addr + length;
+
+    uint64_t new_page_prot, new_vm_flags;
+    int rc = prot_to_page_flags((int)prot, &new_page_prot, &new_vm_flags);
+    if (rc) return rc;
+
+    uint64_t *user_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
+
+    list_t *pos = current->mm->vma_list.next;
+    while (pos != &current->mm->vma_list) {
+        vma_t *v = container_of(pos, vma_t, list);
+        if (v->vm_end <= addr)   { pos = pos->next; continue; }
+        if (v->vm_start >= end)  break;
+
+        // Hole check
+        if (v->vm_start > addr)
+            return -ENOMEM;
+
+        // Update VMA
+        v->vm_flags     &= ~(VM_READ | VM_WRITE | VM_EXEC);
+        v->vm_flags     |= new_vm_flags;
+        v->vm_page_prot  = new_page_prot;
+
+        // Update existing PTEs
+        uint64_t va_start = (addr > v->vm_start) ? addr : v->vm_start;
+        uint64_t va_end   = (end < v->vm_end) ? end : v->vm_end;
+        for (uint64_t va = va_start; va < va_end; va += PAGE_4K_SIZE) {
+            uint64_t *pte = vmm_pt_walk(user_pml4, va, 0, 0);
+            if (!pte) continue;
+            if (!(*pte & (PAGE_Present | PAGE_PROTNONE))) continue;
+
+            uint64_t phys = *pte & PAGE_4K_MASK;
+            if (prot == PROT_NONE) {
+                *pte = phys | PAGE_U_S | PAGE_PROTNONE;
+            } else {
+                *pte = phys | new_page_prot;
+            }
+        }
+
+        addr = v->vm_end;
+        if (addr >= end) break;
+        pos = pos->next;
+    }
+
+    if (addr < end)
+        return -ENOMEM;
+
+    flush_tlb();
+    return 0;
+}
