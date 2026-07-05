@@ -762,7 +762,6 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             [12] = 3,  // brk -> SYS_brk
             [13] = 39, // rt_sigaction -> SYS_signal
             [14] = 42, // sigprocmask -> SYS_sigprocmask
-            [15] = 43, // rt_sigreturn -> SYS_sigreturn
             [16] = 20, // ioctl -> SYS_ioctl
             [21] = 22, // access -> SYS_access
             [25] = -1, // mremap -> unsupported

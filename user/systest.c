@@ -490,6 +490,7 @@ static void test_signal_handler_sync(void)
 typedef void (*test_fn)(void);
 
 static struct { const char *name; test_fn fn; } tests[] = {
+    {"signal handler sync", test_signal_handler_sync},
     {"putchar",           test_putchar},
     {"write",             test_write},
     {"brk",               test_brk},
@@ -520,7 +521,6 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"kill+deliver",      test_kill_signal_deliver},
     {"sync",              test_sync},
     {"sigprocmask",       test_sigprocmask},
-    {"signal handler sync", test_signal_handler_sync},
     // {"pipe+dup2",         test_pipe_dup2_inherit},
     {"reboot",            test_reboot_skip},
 };

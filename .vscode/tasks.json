@@ -8,11 +8,11 @@
             "type": "shell",
             "isBackground": true,
             "linux": {
-                "command": "DEBUG=1 make debug"
+                "command": "DEBUG=1 make debug DEBUG_CHANNELS=sched,tty,vfs,mm,fs,net,ipc,drivers,init,syscall"
             },
             "problemMatcher": {
                 "pattern": {
-                    "regexp": ""
+                    "regexp": "error|warning",
                 },
                 "background": {
                     "beginsPattern": "disk.img",
