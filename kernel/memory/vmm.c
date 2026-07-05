@@ -177,3 +177,59 @@ void vmm_free_user_map(mmap pagemap)
 
     kfree(pagemap);
 }
+
+// Walk PML4→PML3→PML2→PTE, return pointer to PTE[level1] entry.
+// If allocate=true, allocates missing intermediate tables via calloc.
+// flags carries PAGE_U_S for user-accessible intermediate levels.
+// Returns NULL if allocate fails (OOM) or a required table is missing
+// with allocate=false.
+uint64_t *vmm_pt_walk(uint64_t *pagemap, uint64_t virt,
+                      uint64_t flags, int allocate)
+{
+    size_t l4 = (size_t)(virt >> PAGE_GDT_SHIFT) & 0x1ff;
+    size_t l3 = (size_t)(virt >> PAGE_1G_SHIFT)  & 0x1ff;
+    size_t l2 = (size_t)(virt >> PAGE_2M_SHIFT)  & 0x1ff;
+    size_t l1 = (size_t)(virt >> PAGE_4K_SHIFT)  & 0x1ff;
+
+    // User-half only: entries 0–255.  l4 >= 256 are kernel entries
+    // shared via memcpy(&child_pml4[256], ...) — must never be touched.
+    if (l4 >= 256) return NULL;
+
+    uint64_t *pml4 = pagemap;
+    uint64_t gdt_flags = (flags & PAGE_U_S) ? PAGE_USER_GDT : PAGE_KERNEL_GDT;
+    uint64_t dir_flags = (flags & PAGE_U_S) ? PAGE_USER_Dir : PAGE_KERNEL_Dir;
+
+    // PML4 → PML3
+    if (!(pml4[l4] & PAGE_Present)) {
+        if (!allocate) return NULL;
+        void *t = calloc(1, PAGE_4K_SIZE);
+        if (!t) return NULL;  // OOM check before Virt_To_Phy(0)
+        pml4[l4] = Virt_To_Phy((uint64_t)t) | gdt_flags;
+    }
+    uint64_t *pml3 = (uint64_t *)Phy_To_Virt(pml4[l4] & PAGE_4K_MASK);
+
+    // PML3 → PML2 (PDE table)
+    if (!(pml3[l3] & PAGE_Present)) {
+        if (!allocate) return NULL;
+        void *t = calloc(1, PAGE_4K_SIZE);
+        if (!t) return NULL;
+        pml3[l3] = Virt_To_Phy((uint64_t)t) | dir_flags;
+    }
+    uint64_t *pml2 = (uint64_t *)Phy_To_Virt(pml3[l3] & PAGE_4K_MASK);
+
+    // PML2 → PTE table (4KB leaf).
+    // Guard: if PML2[l2] is a 2MB huge page (PAGE_PS), return NULL.
+    // 4KB operations must not walk into a 2MB PDE as if it were a PTE table.
+    if (pml2[l2] & PAGE_PS)
+        return NULL;
+
+    if (!(pml2[l2] & PAGE_Present)) {
+        if (!allocate) return NULL;
+        void *t = calloc(1, PAGE_4K_SIZE);
+        if (!t) return NULL;
+        pml2[l2] = Virt_To_Phy((uint64_t)t) | dir_flags;
+    }
+    uint64_t *pte_table = (uint64_t *)Phy_To_Virt(pml2[l2] & PAGE_4K_MASK);
+
+    return &pte_table[l1];
+}
