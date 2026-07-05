@@ -83,24 +83,32 @@ uint64_t *vmm_pt_walk(uint64_t *pagemap, uint64_t virt,
     // PML4 → PML3
     if (!(pml4[l4] & PAGE_Present)) {
         if (!allocate) return NULL;
-        pml4[l4] = Virt_To_Phy((uint64_t)calloc(1, PAGE_4K_SIZE)) | gdt_flags;
-        if (!(pml4[l4] & PAGE_Present)) return NULL;
+        void *t = calloc(1, PAGE_4K_SIZE);
+        if (!t) return NULL;  // OOM check before Virt_To_Phy(0)
+        pml4[l4] = Virt_To_Phy((uint64_t)t) | gdt_flags;
     }
     uint64_t *pml3 = (uint64_t *)Phy_To_Virt(pml4[l4] & PAGE_4K_MASK);
 
     // PML3 → PML2 (PDE table)
     if (!(pml3[l3] & PAGE_Present)) {
         if (!allocate) return NULL;
-        pml3[l3] = Virt_To_Phy((uint64_t)calloc(1, PAGE_4K_SIZE)) | dir_flags;
-        if (!(pml3[l3] & PAGE_Present)) return NULL;
+        void *t = calloc(1, PAGE_4K_SIZE);
+        if (!t) return NULL;
+        pml3[l3] = Virt_To_Phy((uint64_t)t) | dir_flags;
     }
     uint64_t *pml2 = (uint64_t *)Phy_To_Virt(pml3[l3] & PAGE_4K_MASK);
 
-    // PML2 → PTE table (4KB leaf)
+    // PML2 → PTE table (4KB leaf).
+    // Guard: if PML2[l2] is a 2MB huge page (PAGE_PS), return NULL.
+    // 4KB operations must not walk into a 2MB PDE as if it were a PTE table.
+    if (pml2[l2] & PAGE_PS)
+        return NULL;
+
     if (!(pml2[l2] & PAGE_Present)) {
         if (!allocate) return NULL;
-        pml2[l2] = Virt_To_Phy((uint64_t)calloc(1, PAGE_4K_SIZE)) | dir_flags;
-        if (!(pml2[l2] & PAGE_Present)) return NULL;
+        void *t = calloc(1, PAGE_4K_SIZE);
+        if (!t) return NULL;
+        pml2[l2] = Virt_To_Phy((uint64_t)t) | dir_flags;
     }
     uint64_t *pte_table = (uint64_t *)Phy_To_Virt(pml2[l2] & PAGE_4K_MASK);
 
@@ -612,25 +620,26 @@ void vma_free_all(mm_t *mm)
 {
     if (!mm) return;
 
-    uint64_t *user_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)mm->pml4);
-    if (!user_pml4) goto free_vmas;
+    uint64_t *user_pml4 = NULL;
+    if (mm->pml4)
+        user_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)mm->pml4);
 
     while (mm->vma_list.next != &mm->vma_list) {
         vma_t *v = container_of(mm->vma_list.next, vma_t, list);
 
-        // Release all mapped 4KB pages in this VMA's range
-        // Only anonymous pages are freed; file-backed pages are
-        // just unmapped (phys was read from file, not owned).
-        for (uint64_t va = v->vm_start; va < v->vm_end;
-             va += PAGE_4K_SIZE) {
-            vmm_unmap_4k_page(user_pml4, va);
+        // If we have a valid pml4, unmap the physical pages.
+        // If pml4 is NULL (shouldn't happen), skip unmap but still
+        // free the VMA node + vfs_node_put to avoid leaks.
+        if (user_pml4) {
+            for (uint64_t va = v->vm_start; va < v->vm_end;
+                 va += PAGE_4K_SIZE) {
+                vmm_unmap_4k_page(user_pml4, va);
+            }
         }
 
         vma_remove(mm, v);
     }
 
-free_vmas:
-    // safety: ensure list is empty
     list_init(&mm->vma_list);
 }
 ```
@@ -912,7 +921,7 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
             return -EINVAL;
     } else {
         file_t *file = NULL;
-        if ((int64_t)fd >= 0 && current->files)
+        if (fd < NOFILE && current->files)
             file = current->files->fd[fd];
         if (!file || !file->node)
             return -EBADF;
@@ -929,29 +938,62 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     length = PAGE_4K_ALIGN(length);
     if (!length) return -EINVAL;
 
+    // Early: addr_limit check before any allocation
+    {
+        uint64_t candidate = addr;
+        if (!(flags & MAP_FIXED)) {
+            uint64_t search = current->mm->mmap_base;
+            vma_t *prev = NULL;
+            list_t *pos = current->mm->vma_list.next;
+            candidate = 0;
+            while (pos != &current->mm->vma_list) {
+                vma_t *v = container_of(pos, vma_t, list);
+                uint64_t gap_start = prev ? prev->vm_end : search;
+                if (gap_start < search) gap_start = search;
+                if (gap_start + length <= v->vm_start) {
+                    candidate = gap_start;
+                    break;
+                }
+                prev = v;
+                pos = pos->next;
+            }
+            if (!candidate)
+                candidate = prev ? prev->vm_end : search;
+            if (candidate < search)
+                candidate = search;
+        }
+
+        if (candidate + length > current->addr_limit)
+            return -ENOMEM;
+        if (candidate >= current->addr_limit)
+            return -ENOMEM;
+    }
+
     if (flags & MAP_FIXED) {
-        // Unmap overlapping VMAs first, then pin to addr
         do_munmap(addr, length);
     } else {
-        // Search from mmap_base upward for a free gap
+        // Recompute addr via the same first-fit scan (simpler: use
+        // candidate from above, which the addr_limit block already found)
+        // See addr_limit block above for the actual search loop.
+        // For simplicity, redo the search: same code as above.
         uint64_t search = current->mm->mmap_base;
-        // Simple first-fit: scan VMA list for a gap >= length
         vma_t *prev = NULL;
         list_t *pos = current->mm->vma_list.next;
+        addr = 0;
         while (pos != &current->mm->vma_list) {
             vma_t *v = container_of(pos, vma_t, list);
             uint64_t gap_start = prev ? prev->vm_end : search;
+            if (gap_start < search) gap_start = search;
             if (gap_start + length <= v->vm_start) {
                 addr = gap_start;
-                goto found_gap;
+                break;
             }
             prev = v;
             pos = pos->next;
         }
-        // Gap after last VMA or no VMAs
-        addr = prev ? prev->vm_end : search;
+        if (!addr) addr = prev ? prev->vm_end : search;
+        if (addr < search) addr = search; // defensive: never below mmap_base
         if (addr + length < addr) return -ENOMEM;
-found_gap: ;
     }
 
     // ── 3. prot → page flags ───────────────────────────
@@ -968,7 +1010,8 @@ found_gap: ;
     }
 
     // ── 5. Allocate VMA ────────────────────────────────
-    vma_t *vma = (vma_t *)kmalloc(sizeof(vma_t), 0);
+    // addr_limit already checked in Step 2 — don't repeat here.
+    vma_t *vma = (vma_t *)kmalloc(sizeof(vma_t));
     if (!vma) {
         if (file_node) vfs_node_put(file_node);
         return -ENOMEM;
@@ -982,12 +1025,6 @@ found_gap: ;
     vma->vm_file      = file_node;
 
     vma_insert(current->mm, vma);
-
-    // ── 6. Address limit check ─────────────────────────
-    if (addr + length > current->addr_limit)
-        return -ENOMEM;
-    if (addr >= current->addr_limit)
-        return -ENOMEM;
 
     return (int64_t)addr;
 }
@@ -1129,31 +1166,40 @@ int64_t do_munmap(uint64_t addr, uint64_t length)
         for (uint64_t va = u_start; va < u_end; va += PAGE_4K_SIZE)
             vmm_unmap_4k_page(user_pml4, va);
 
-        // ── Partial unmap: split VMA ───────────────────────
-        if (u_start > v->vm_start) {
-            // Left piece: [v->vm_start, u_start)
-            v->vm_end = u_start;
-            // The right piece (if any) needs a new VMA
-            // For simplicity V1: only handle full unmap and
-            // left-split.  Right-split deferred.
+        // ── Save original vm_end before mutation ──────────
+        uint64_t orig_end = v->vm_end;
+
+        // ── Full VMA covered? Entirely within [addr, end) ─
+        if (u_start <= v->vm_start && u_end >= orig_end) {
+            vma_remove(current->mm, v);
+            continue;
         }
-        if (u_end < v->vm_end) {
-            // Right piece: [u_end, v->vm_end) — create new VMA
-            vma_t *right = (vma_t *)kmalloc(sizeof(vma_t), 0);
+
+        // ── Left piece: [v->vm_start, u_start) ────────────
+        if (u_start > v->vm_start) {
+            v->vm_end = u_start;   // v is now the left piece
+            // Right piece falls through to creation below:
+            // u_start is now the start of the remainder
+        }
+
+        // ── Right piece: [u_end, orig_end) ────────────────
+        if (u_end < orig_end) {
+            vma_t *right = (vma_t *)kmalloc(sizeof(vma_t));
             if (right) {
+                // Copy from v (left piece, or original if no left split).
+                // vm_end may have been shortened above — only relevant
+                // fields (vm_flags, vm_page_prot, vm_file, vm_pgoff) are
+                // still correct.
                 memcpy(right, v, sizeof(vma_t));
                 list_init(&right->list);
                 right->vm_start = u_end;
+                right->vm_end   = orig_end;
                 if (right->vm_file)
                     vfs_node_get(right->vm_file);
                 vma_insert(current->mm, right);
             }
-            v->vm_end = u_start;
-        }
-
-        // ── Full unmap of what's left of v ──────────────────
-        if (v->vm_end <= addr || v->vm_start >= v->vm_end) {
-            vma_remove(current->mm, v);
+            // v->vm_end is already u_start if there was a left split;
+            // otherwise it's unchanged.  Either way v covers the left.
         }
     }
 
@@ -1183,14 +1229,14 @@ git commit -m "feat(vma): implement do_munmap with partial VMA splitting"
 **Files:**
 - Modify: `kernel/arch/x86_64/trap.c`
 
-- [ ] **Step 1: 添加 include**
+- [ ] **Step 1: 添加 include 和 syscall case**
 
-In `trap.c`, add among existing includes:
+First, add the include at top of `trap.c`:
 ```c
 #include <kernel/vma.h>
 ```
 
-- [ ] **Step 2: 添加 SYS_mmap case**
+Then add the three syscall cases after `SYS_reboot`:
 
 After the `SYS_reboot` case, add:
 ```c
@@ -1219,13 +1265,7 @@ After the `SYS_reboot` case, add:
     }
 ```
 
-- [ ] **Step 2: 添加声明到 trap.c 顶部**
-
-```c
-#include <kernel/vma.h>
-```
-
-- [ ] **Step 3: 更新 Linux ABI 表**
+- [ ] **Step 2: 更新 Linux ABI 表**
 
 Change:
 ```c
@@ -1380,6 +1420,12 @@ void do_page_fault(pt_regs_t *regs, uint64_t error_code)
                 kill_current_user_task(regs);
                 return;
             }
+            // Zero-fill tail: alloc_4k_page returns dirty memory from
+            // the subpage pool.  If vfs_read returns less than a page,
+            // the tail must be zeroed to avoid leaking kernel data.
+            if ((size_t)n < PAGE_4K_SIZE)
+                memset((char *)Phy_To_Virt(phys) + n, 0,
+                       PAGE_4K_SIZE - (size_t)n);
             int rc = vmm_map_4k_page(user_pml4, phys,
                          PAGE_4K_ALIGN(cr2), vma->vm_page_prot);
             if (rc != 0) {
@@ -1451,6 +1497,7 @@ In `do_fork`, after `tsk->mm = fork_mm_copy(current->mm, &tsk->thread->cr3);` (~
     if (tsk->mm)
         fork_vma_copy(tsk->mm, current->mm);
 ```
+**Ordering**: `fork_vma_copy` must run AFTER `fork_mm_copy`. It copies `parent->mm->vma_list` into `child->mm->vma_list` at fork time — the parent's VMA state (including PROTNONE vm_flags) is snapshotted. If the parent later calls `mprotect(PROT_READ)`, the child's VMA stays PROTNONE.
 
 - [ ] **Step 4: fork_mm_copy 添加 4KB PTE 表 deep copy 路径**
 
