@@ -438,7 +438,6 @@ static void test_sigprocmask(void)
     CHECK3((cur & block) == 0, "sigprocmask", "SIGUSR1 unblocked");
 }
 
-// ── Edge: pipe + dup2 child stdout inheritance ─────────────
 static void test_pipe_dup2_inherit(void)
 {
     int fds[2];
@@ -469,6 +468,21 @@ static void test_pipe_dup2_inherit(void)
     CHECKF(r >= 0, "pipe+dup2", "got %ldB", "got %ldB", (long)r);
     if (r == 10 && strcmp(buf, "from_child") == 0)
         PASS("pipe+dup2", "data verified");
+}
+
+/* ── Signal handler sync test ──────────────────────────── */
+static volatile int sigusr1_got = 0;
+static void sigusr1_handler(int sig) { (void)sig; sigusr1_got = 1; }
+
+static void test_signal_handler_sync(void)
+{
+    signal(SIGUSR1, sigusr1_handler);
+    kill(getpid(), SIGUSR1);
+    if (sigusr1_got)
+        PASS("signal handler sync", "handler called by SIGUSR1");
+    else
+        FAIL("signal handler sync", "handler not called");
+    signal(SIGUSR1, SIG_DFL);
 }
 
 // ── Runner ─────────────────────────────────────────────────
@@ -506,6 +520,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"kill+deliver",      test_kill_signal_deliver},
     {"sync",              test_sync},
     {"sigprocmask",       test_sigprocmask},
+    {"signal handler sync", test_signal_handler_sync},
     // {"pipe+dup2",         test_pipe_dup2_inherit},
     {"reboot",            test_reboot_skip},
 };

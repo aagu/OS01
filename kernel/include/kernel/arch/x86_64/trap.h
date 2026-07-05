@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <kernel/arch/x86_64/regs.h>
 
-void do_signal_delivery(pt_regs_t *regs);
+int  do_signal_delivery(pt_regs_t *regs);
 int  signal_pending_fatal(void);   // non-zero if a fatal signal is pending
 
 void divide_error();

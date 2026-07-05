@@ -55,6 +55,7 @@
 #define SYS_kill            38
 #define SYS_signal          39
 #define SYS_sigprocmask 42
+#define SYS_sigreturn  43
 #define SYS_sync            40
 #define SYS_reboot          41
 

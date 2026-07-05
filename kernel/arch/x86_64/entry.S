@@ -86,23 +86,23 @@ do_resched:
 
 #define TASK_SIGNAL_OFFSET  72   /* offsetof(task_t, signal) — keep in sync with task.h */
 
+#define TASK_SIGNAL_OFFSET  72   /* offsetof(task_t, signal) — keep in sync with task.h */
+
 check_signal:
-	# Deliver pending signals regardless of CPL.  When a
-	# process sleeps in kernel mode (tty_read->schedule),
-	# the timer ISR fires in ring 0.  Restricting to
-	# ring 3 prevents SIGCHLD from being cleared.
-	movq	$-32768,	%rbx
-	andq	%rsp,		%rbx
-	# current->signal == 0?  Skip if no pending signals.
-	cmpq	$0,	TASK_SIGNAL_OFFSET(%rbx)
-	je	RESTORE_ALL
-	# Deliver pending signals.  do_signal_delivery may modify the
-	# pt_regs frame (future user-stack handler delivery).  If it
-	# returns, loop to handle the next signal bit — multi-signal
-	# delivery (e.g., SIGINT + SIGTERM in one pass).
-	movq	%rsp,	%rdi
-	call	do_signal_delivery
-	jmp	check_signal
+    # Deliver pending signals — do_signal_delivery returns:
+    #   0 = nothing delivered (all pending blocked or CPL≠3)
+    #   !0 = at least one handler delivered or process killed
+    movq    $-32768,    %rbx
+    andq    %rsp,       %rbx
+    # current->signal == 0?  Skip if no pending signals.
+    cmpq    $0, TASK_SIGNAL_OFFSET(%rbx)
+    je  RESTORE_ALL
+    # Deliver pending signals.
+    movq    %rsp,   %rdi
+    call    do_signal_delivery
+    testl   %eax,   %eax
+    jz  RESTORE_ALL           # nothing delivered → break loop
+    jmp check_signal          # try next pending signal
 
 ENTRY(divide_error)
 	pushq	$0

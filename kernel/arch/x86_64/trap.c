@@ -7,6 +7,9 @@
 #include <kernel/trace.h>
 #include <kernel/arch/x86_64/asm.h>
 #include <kernel/task.h>
+#include <kernel/memory.h>
+#include <kernel/vmm.h>
+#include <kernel/pmm.h>
 #include <kernel/percpu.h>
 #include <kernel/apic.h>
 #include <kernel/slab.h>
@@ -31,6 +34,23 @@ typedef int pid_t;
 #define SIG_SETMASK  2
 typedef unsigned long sigset_t;
 #endif
+
+// ── User address translation ─────────────────────────────────
+// Walk the user page table to resolve a user-space virtual
+// address to its physical address.  Returns 0 on failure.
+// The caller passes Phy_To_Virt(result) to get a kernel pointer.
+static uint64_t user_va_to_phys(uint64_t *pml4, uint64_t va)
+{
+    size_t l4 = (va >> PAGE_GDT_SHIFT) & 0x1ff;
+    size_t l3 = (va >> PAGE_1G_SHIFT) & 0x1ff;
+    size_t l2 = (va >> PAGE_2M_SHIFT) & 0x1ff;
+    if (!(pml4[l4] & PAGE_Present)) return 0;
+    uint64_t *pml3 = (uint64_t *)Phy_To_Virt(pml4[l4] & PAGE_4K_MASK);
+    if (!(pml3[l3] & PAGE_Present)) return 0;
+    uint64_t *pml2 = (uint64_t *)Phy_To_Virt(pml3[l3] & PAGE_4K_MASK);
+    if (!(pml2[l2] & PAGE_Present)) return 0;
+    return (pml2[l2] & PAGE_2M_MASK & ~PAGE_XD) | (va & 0x1FFFFF);
+}
 
 
 // ── Helper: find the current task from TSS.rsp0 ──────────────
@@ -567,13 +587,41 @@ void do_virtualization_exception(pt_regs_t * regs, uint64_t error_code)
 // Registered handlers clear the pending bit but don't yet
 // deliver to user space (future work).
 
-void do_signal_delivery(pt_regs_t *regs)
+int do_signal_delivery(pt_regs_t *regs)
 {
-    (void)regs;  // unused for now; future user-stack delivery uses it
-
     uint64_t pending = current->signal;
     if (!pending)
-        return;
+        return 0;
+
+    // ── NULL regs path (tty.c inline signal clear) ─────────
+    // tty.c:267 calls do_signal_delivery(NULL) when a direct
+    // switch bypassed ret_from_intr.  Only non-fatal signals
+    // can be pending here.  Handle SIG_IGN + non-fatal SIG_DFL;
+    // registered handlers are left pending.
+    if (!regs) {
+        for (int sig = 1; sig < NSIG; sig++) {
+            if (!(pending & (1ULL << sig)))
+                continue;
+            void (*handler)(int) = current->sighand[sig].sa_handler;
+            if (handler == SIG_IGN) {
+                current->signal &= ~(1ULL << sig);
+                continue;
+            }
+            if (handler == SIG_DFL) {
+                switch (sig) {
+                case SIGCHLD: case SIGURG: case SIGWINCH:
+                case SIGCONT: case SIGTSTP: case SIGTTIN: case SIGTTOU:
+                    current->signal &= ~(1ULL << sig);
+                    break;
+                default:
+                    current->signal &= ~(1ULL << sig);
+                    do_exit((uint64_t)sig << 8);
+                    return 1;  // unreachable
+                }
+            }
+        }
+        return 0;
+    }
 
     for (int sig = 1; sig < NSIG; sig++) {
         if (!(pending & (1ULL << sig)))
@@ -600,19 +648,78 @@ void do_signal_delivery(pt_regs_t *regs)
             case SIGTSTP: case SIGTTIN: case SIGTTOU:
                 break;   // stop — not implemented
             default:
-                // Terminate (SIGINT, SIGTERM, SIGKILL, etc.)
                 serial_printk("task %d killed by signal %d (default)\n",
                               (int)current->pid, sig);
                 do_exit((uint64_t)sig << 8);
-                return;  // unreachable — do_exit switches away
+                return 1;  // unreachable — do_exit switches away
             }
             continue;
         }
 
-        // Real handler registered — clear pending bit.
-        // Full user-stack frame delivery is future work.
+        // ── Registered handler ─────────────────────────────
+        uint64_t restorer = (uint64_t)current->sighand[sig].sa_restorer;
+
+        // CPL guard: only deliver to ring-3 frames
+        if (!(regs->cs & 3)) {
+            continue;  // leave pending, retry on next return-to-userspace
+        }
+
+        // sa_restorer NULL guard
+        if (!restorer) {
+            serial_printk("task %d: signal %d handler has no restorer, "
+                          "killing\n", (int)current->pid, sig);
+            current->signal &= ~(1ULL << sig);
+            do_exit((uint64_t)sig << 8);
+            return 1;  // unreachable
+        }
+
+        // 1. Build sigframe on kernel stack
+        struct sigframe frame;
+        memset(&frame, 0, sizeof(frame));
+        frame.r15=regs->r15; frame.r14=regs->r14; frame.r13=regs->r13;
+        frame.r12=regs->r12; frame.r11=regs->r11; frame.r10=regs->r10;
+        frame.r9=regs->r9;   frame.r8=regs->r8;
+        frame.rbx=regs->rbx; frame.rcx=regs->rcx; frame.rdx=regs->rdx;
+        frame.rsi=regs->rsi; frame.rdi=regs->rdi; frame.rbp=regs->rbp;
+        frame.ds=regs->ds;   frame.es=regs->es;   frame.rax=regs->rax;
+        frame.rip=regs->rip; frame.cs=regs->cs;   frame.rflags=regs->rflags;
+        frame.rsp=regs->rsp; frame.ss=regs->ss;
+        frame.blocked = current->blocked;
+
+        // 2. Compute aligned user RSP (SysV ABI: RSP%16==8 after iretq)
+        size_t total = sizeof(frame) + 8;  // 200 + 8 = 208
+        uint64_t new_rsp = ((regs->rsp - total - 8) & ~15UL) + 8;
+
+        // 3. Translate user stack VA → kernel pointer
+        uint64_t *user_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
+        uint64_t frame_phys = user_va_to_phys(user_pml4, new_rsp + 8);
+        if (!frame_phys) {
+            continue;  // leave pending, retry
+        }
+        void *kstack = (void *)Phy_To_Virt(frame_phys);
+
+        // 4. Write sigframe + trampoline return address to user stack
+        memcpy(kstack, &frame, sizeof(frame));           // sigframe at new_rsp+8
+        uint64_t tramp = restorer;
+        memcpy(kstack - 8, &tramp, 8);                   // trampoline at new_rsp
+
+        // 5. Rewrite pt_regs → RESTORE_ALL → iretq → handler
+        regs->rdi = sig;
+        regs->rip = (uint64_t)handler;
+        regs->rsp = new_rsp;
+        regs->cs  = USER_CS;  // 0x2b: ring 3 code (GDT index 5 | RPL 3)
+        regs->ss  = USER_DS;  // 0x33: ring 3 data (GDT index 6 | RPL 3)
+        regs->ds  = USER_DS;
+        regs->es  = USER_DS;
+
+        // 6. Block signal during handler execution
+        current->blocked |= (1ULL << (sig - 1));
+        current->blocked |= current->sighand[sig].sa_mask;
+
         current->signal &= ~(1ULL << sig);
+        return 1;  // handler delivered
     }
+    return 0;  // nothing deliverable
 }
 
 int signal_pending_fatal(void)
@@ -655,6 +762,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             [12] = 3,  // brk -> SYS_brk
             [13] = 39, // rt_sigaction -> SYS_signal
             [14] = 42, // sigprocmask -> SYS_sigprocmask
+            [15] = 43, // rt_sigreturn -> SYS_sigreturn
             [16] = 20, // ioctl -> SYS_ioctl
             [21] = 22, // access -> SYS_access
             [25] = -1, // mremap -> unsupported
@@ -726,6 +834,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         [38] = "kill",
         [39] = "rt_sigaction",
         [42] = "sigprocmask",
+        [43] = "sigreturn",
         [45] = "poweroff",
     };
     const char *sname = (regs->rax < 64 && syscall_names[regs->rax])
@@ -1790,6 +1899,36 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             }
         }
         regs->rax = 0;
+        break;
+    }
+    case SYS_sigreturn: {
+        // regs->rsp == sigframe start in user space (handler ret pop'd
+        // trampoline, then int $0x80 saved this RSP as pt_regs->rsp).
+        uint64_t *user_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
+        uint64_t frame_phys = user_va_to_phys(user_pml4, regs->rsp);
+        if (!frame_phys) { regs->rax = -EFAULT; break; }
+        struct sigframe *kframe = (struct sigframe *)Phy_To_Virt(frame_phys);
+
+        // Restore blocked mask
+        current->blocked = kframe->blocked;
+
+        // Restore all GPRs
+        regs->r15=kframe->r15; regs->r14=kframe->r14; regs->r13=kframe->r13;
+        regs->r12=kframe->r12; regs->r11=kframe->r11; regs->r10=kframe->r10;
+        regs->r9=kframe->r9;   regs->r8=kframe->r8;
+        regs->rbx=kframe->rbx; regs->rcx=kframe->rcx; regs->rdx=kframe->rdx;
+        regs->rsi=kframe->rsi; regs->rdi=kframe->rdi; regs->rbp=kframe->rbp;
+        regs->ds=kframe->ds;   regs->es=kframe->es;    regs->rax=kframe->rax;
+
+        // Restore iretq frame → RESTORE_ALL → iretq to original context
+        regs->rip=kframe->rip; regs->cs=kframe->cs; regs->rflags=kframe->rflags;
+        regs->rsp=kframe->rsp; regs->ss=kframe->ss;
+
+        // Note: do_system_call's tail do_signal_delivery() runs after
+        // this break.  If there are additional pending signals, they
+        // will be delivered on the freshly-restored stack — matching
+        // Linux behavior (sigreturn processes remaining signals before
+        // the final iretq to userspace).
         break;
     }
     case SYS_sync: {

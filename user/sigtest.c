@@ -1,23 +1,31 @@
-// sigtest — signal delivery verification
-//
-// Blocks on stdin.  If SIGINT (Ctrl-C) is delivered correctly,
-// SIG_DFL -> do_exit and we never reach the printf at the end.
-// If we do reach it, signal delivery is broken.
+/* sigtest — standalone signal handler test.  Run directly from shell:
+ *   /sigtest.elf
+ * Registers SIGUSR1 handler, sends to self, exits 0 on success. */
 
+#include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <sys/syscall.h>
 
+static volatile int got = 0;
+static void handler(int sig) { (void)sig; got = 1; }
+
 int main(void)
 {
-    int pid = (int)syscall(SYS_getpid, 0, 0, 0);
-    printf("sigtest: pid=%d blocking on stdin (Ctrl-C to kill)\n", pid);
+    printf("sigtest: pid=%d testing signal handler...\n", (int)getpid());
 
-    char buf[256];
-    int n = (int)syscall(SYS_read, 0, (uint64_t)buf, sizeof(buf));
+    signal(SIGUSR1, handler);
+    printf("sigtest: handler registered at %p\n", (void*)handler);
 
-    // We should never reach here if Ctrl-C delivered SIGINT ->
-    // SIG_DFL -> do_exit.  If we do, signal delivery is broken.
-    printf("sigtest: read returned %d (pid=%d) -- SIGINT NOT delivered!\n", n, pid);
-    return 1;
+    kill(getpid(), SIGUSR1);
+    printf("sigtest: kill returned, got=%d\n", got);
+
+    if (!got) {
+        printf("FAIL: handler not called\n");
+        return 1;
+    }
+
+    printf("PASS: signal handler sync\n");
+    return 0;
 }
