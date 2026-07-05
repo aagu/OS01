@@ -155,6 +155,13 @@ static uint64_t user_va_to_phys(uint64_t *pml4, uint64_t va) {
 **sa_restorer NULL 检查**（P3）：未注册 trampoline 的 handler（raw syscall 调用者传入 `sa_restorer=NULL`）会导致 handler `ret` 后跳转到地址 0 崩溃。在 `do_signal_delivery` 中校验 `sa_restorer == NULL` 时，降级为 SIG_DFL 行为（终止进程）。
 
 ```c
+// ── Preamble (inside the existing for-loop over sig) ─────
+// The code below replaces the "Real handler registered" branch
+// (trap.c:612-614).  handler/sa_restorer are already resolved
+// from current->sighand[sig] at this point.
+void (*handler)(int) = current->sighand[sig].sa_handler;
+uint64_t restorer     = (uint64_t)current->sighand[sig].sa_restorer;
+
 // ── CPL guard: only deliver to ring-3 frames ──────────
 // Called from check_signal (entry.S:89) which may fire at any CPL.
 // If we're in kernel mode, skip handler delivery — SIG_DFL/SIG_IGN
@@ -234,8 +241,7 @@ current->blocked |= (1ULL << (sig - 1));              // block current signal
 current->blocked |= current->sighand[sig].sa_mask;    // block sa_mask
 
 current->signal &= ~(1ULL << sig);  // clear pending
-break;  // deliver one signal at a time; remaining signals on next check_signal
-// fall through → return 1 (handled)
+return 1;  // handler delivered — tell entry.S to retry check_signal
 }
 // for loop end: nothing deliverable → return 0
 return 0;
