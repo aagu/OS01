@@ -23,6 +23,7 @@ typedef int pid_t;
 #include <device/timer.h>
 #include <uapi/time.h>
 #include <kernel.h>
+#include <kernel/vma.h>
 
 // ── Helper: find the current task from TSS.rsp0 ──────────────
 // Safe to call from IST exception stacks where get_current_task()
@@ -636,8 +637,9 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             [5] = 17,  // fstat -> SYS_fstat
             [6] = -1,  // lstat -> unsupported
             [8] = 18,  // lseek -> SYS_lseek
-            [9] = -1,  // mmap -> unsupported
-            [10] = -1, // mprotect -> unsupported
+            [9]  = 44,  // mmap
+            [10] = 45,  // mprotect
+            [11] = 46,  // munmap
             [12] = 3,  // brk -> SYS_brk
             [13] = 39, // rt_sigaction -> SYS_signal
             [14] = -1, // sigprocmask -> unsupported (stub)
@@ -1722,6 +1724,29 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         while ((inb(0x64) & 0x02) != 0) { /* wait */ }
         outb(0xFE, 0x64);
         while (1) __asm__ __volatile__("hlt");
+    }
+    case SYS_mmap: {
+        uint64_t addr   = regs->rdi;
+        uint64_t length = regs->rsi;
+        uint64_t prot   = regs->rdx;
+        uint64_t flags  = regs->r10;
+        uint64_t fd     = regs->r8;
+        uint64_t offset = regs->r9;
+        regs->rax = do_mmap(addr, length, prot, flags, fd, offset);
+        break;
+    }
+    case SYS_mprotect: {
+        uint64_t addr   = regs->rdi;
+        uint64_t length = regs->rsi;
+        uint64_t prot   = regs->rdx;
+        regs->rax = do_mprotect(addr, length, prot);
+        break;
+    }
+    case SYS_munmap: {
+        uint64_t addr   = regs->rdi;
+        uint64_t length = regs->rsi;
+        regs->rax = do_munmap(addr, length);
+        break;
     }
     default:
         serial_printk("syscall: unknown nr=%d from pid=%d\n",
