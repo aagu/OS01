@@ -8,6 +8,7 @@
 #include <kernel/printk.h>
 #include <kernel/memory.h>
 #include <kernel/pmm.h>
+#include <kernel/vma.h>
 #include <kernel/vmm.h>
 #include <kernel/slab.h>
 
@@ -400,6 +401,9 @@ uint64_t do_exit(uint64_t exit_code)
         if (current->parent->blocker.type != BLOCKER_NONE)
             blocker_wake(current->parent);
     }
+
+    // Free VMA-managed pages (anon + file-backed unmaps, not 2MB ELF pages)
+    vma_free_all(current->mm);
 
     if (!(current->flags & PF_KTHREAD) && current->mm) {
         // Skip vmm_free_user_map for now — in do_fork the child
@@ -1001,6 +1005,10 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     // must NOT call vmm_free_user_map here — it would destroy the
     // parent's address space.  When the parent exits, do_exit handles
     // the shared page table cleanup.
+
+    // Free VMA-managed pages before replacing mm
+    vma_free_all(current->mm);
+
     if (current->mm) {
         kfree(current->mm);
         current->mm = NULL;
@@ -1090,7 +1098,37 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                 // Non-2MB entries (4KB page table pointers, etc.) are
                 // shared -- the child inherits the parent's mapping.
                 if (!(pml2e & PAGE_PS)) {
-                    child_pml2[l2] = pml2e;
+                    // 4KB PTE table: deep copy PTE table and all mapped 4KB pages
+                    if (!(pml2e & PAGE_Present)) {
+                        child_pml2[l2] = 0;
+                        continue;
+                    }
+                    uint64_t *parent_pte =
+                        (uint64_t *)Phy_To_Virt(pml2e & PAGE_4K_MASK);
+                    uint64_t *child_pte =
+                        (uint64_t *)calloc(1, PAGE_4K_SIZE);
+                    if (!child_pte) {
+                        child_pml2[l2] = pml2e;  // OOM: share
+                        continue;
+                    }
+                    child_pml2[l2] = Virt_To_Phy((uint64_t)child_pte)
+                                   | (pml2e & 0xfff);
+                    for (int l1 = 0; l1 < 512; l1++) {
+                        uint64_t pte = parent_pte[l1];
+                        if (!(pte & (PAGE_Present | PAGE_PROTNONE)))
+                            continue;
+                        uint64_t parent_phys = pte & PAGE_4K_MASK;
+                        uint64_t child_phys = alloc_4k_page();
+                        if (child_phys) {
+                            memcpy((void *)Phy_To_Virt(child_phys),
+                                   (void *)Phy_To_Virt(parent_phys),
+                                   PAGE_4K_SIZE);
+                            child_pte[l1] = child_phys
+                                          | (pte & ~PAGE_4K_MASK);
+                        } else {
+                            child_pte[l1] = pte;  // OOM: share
+                        }
+                    }
                     continue;
                 }
                 uint64_t phys = pml2e & PAGE_2M_MASK;
@@ -1211,6 +1249,8 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
                 tsk->mm = current->mm;
                 thd->cr3 = current->thread->cr3;
             }
+            if (tsk->mm)
+                fork_vma_copy(tsk->mm, current->mm);
         } else if (current->mm) {
             serial_printk("fork: pid=%d parent_mm->pml4 is NULL, sharing mm\n",
                 (int)current->pid);
