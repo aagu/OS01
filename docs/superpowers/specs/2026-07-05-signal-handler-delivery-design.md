@@ -155,32 +155,28 @@ static uint64_t user_va_to_phys(uint64_t *pml4, uint64_t va) {
 **sa_restorer NULL 检查**（P3）：未注册 trampoline 的 handler（raw syscall 调用者传入 `sa_restorer=NULL`）会导致 handler `ret` 后跳转到地址 0 崩溃。在 `do_signal_delivery` 中校验 `sa_restorer == NULL` 时，降级为 SIG_DFL 行为（终止进程）。
 
 ```c
-// ── Preamble (inside the existing for-loop over sig) ─────
-// The code below replaces the "Real handler registered" branch
-// (trap.c:612-614).  handler/sa_restorer are already resolved
-// from current->sighand[sig] at this point.
-void (*handler)(int) = current->sighand[sig].sa_handler;
-uint64_t restorer     = (uint64_t)current->sighand[sig].sa_restorer;
+// ── Preamble ───────────────────────────────────────────
+// This code replaces the "Real handler registered" branch
+// (trap.c:612-614).  handler is already resolved in the
+// enclosing for-loop (trap.c:587); do NOT redeclare it.
+// Only restorer needs an extra local.
+uint64_t restorer = (uint64_t)current->sighand[sig].sa_restorer;
 
 // ── CPL guard: only deliver to ring-3 frames ──────────
 // Called from check_signal (entry.S:89) which may fire at any CPL.
-// If we're in kernel mode, skip handler delivery — SIG_DFL/SIG_IGN
-// are still safe (they just manipulate task state).  Registered
-// handlers stay pending and will be delivered on the next
-// return-to-userspace.
+// If we're in kernel mode, defer handler delivery — leave pending,
+// retry on next return-to-userspace.  (We are already inside the
+// "registered handler" branch, so SIG_DFL/SIG_IGN cannot reach here.)
 if (!(regs->cs & 3)) {
-    // Still process SIG_DFL kills — those don't touch pt_regs
-    // (do_exit switches away, never returns)
-    // Registered handlers: leave pending, retry on next check_signal
-    if (handler != SIG_DFL && handler != SIG_IGN)
-        continue;  // skip this signal, try again later
-    // fall through to SIG_DFL/SIG_IGN handling
+    continue;  // skip this signal, retry later
 }
 
 // ── sa_restorer NULL guard ───────────────────────────
 // Handler without a valid restorer would ret to address 0.
-// Treat as SIG_DFL (terminate).
-if (!current->sighand[sig].sa_restorer) {
+// Treat as SIG_DFL (terminate).  This only fires for misconfigured
+// user handlers — SIG_DFL-ignore-class signals (SIGCHLD et al.)
+// never enter this branch, so the policy is safe.
+if (!restorer) {
     serial_printk("task %d: signal %d handler has no restorer, "
                   "killing\n", (int)current->pid, sig);
     current->signal &= ~(1ULL << sig);
