@@ -9,10 +9,10 @@ int setjmp(jmp_buf env) {
         "movq %%r13, 3*8(%0)\n"
         "movq %%r14, 4*8(%0)\n"
         "movq %%r15, 5*8(%0)\n"
-        "movq 8(%%rbp), %%rcx\n"
-        "movq %%rcx, 6*8(%0)\n"
-        "leaq 16(%%rbp), %%rcx\n"
-        "movq %%rcx, 7*8(%0)\n"
+        "movq (%%rsp), %%rcx\n"     // return addr: [RSP] (where "call setjmp" put it)
+        "movq %%rcx, 6*8(%0)\n"     // jmp_buf[6] = return address (correct!)
+        "movq %%rsp, %%rcx\n"       // RSP at setjmp entry (before any local changes)
+        "movq %%rcx, 7*8(%0)\n"     // jmp_buf[7] = RSP at entry
         :: "r"(env)
         : "memory", "rcx"
     );

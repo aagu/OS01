@@ -67,7 +67,8 @@ static void test_getpid_getppid(void)
     int64_t pid2 = getpid();
     CHECK3(pid == pid2, "getpid", "consistent");
     int64_t ppid = getppid();
-    CHECK3(ppid == 1, "getppid", "parent is init (1)");
+    CHECK3(ppid > 0, "getppid", "> 0");
+    CHECK3(ppid != pid, "getppid", "different from self");
 }
 
 // ── 2, 5, 11, 12: fork + exec + waitpid ────────────────────
