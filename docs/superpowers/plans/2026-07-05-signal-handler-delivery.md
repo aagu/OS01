@@ -262,14 +262,60 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 ---
 
+### Task 4b: Wire sigreturn_trampoline.S into busybox build (P1)
+
+**Files:**
+- Modify: `Makefile` (root, lines 67-88)
+
+**P1: busybox has an independent build system.** The root `Makefile` copies only `crt0.S` into `$(BUSYBOX_SRC)/applets/` and appends `crt0.o` to `obj-y`. Without shipping `sigreturn_trampoline.S`, busybox.elf will have an undefined `sigreturn_trampoline` symbol → link failure or runtime jump to 0.
+
+- [ ] **Step 1: Copy trampoline.S and add to busybox Kbuild.src**
+
+In the root `Makefile`, after line 71 (`cp user/crt0.S $(BUSYBOX_SRC)/applets/crt0.S`), add:
+
+```makefile
+	cp user/sigreturn_trampoline.S $(BUSYBOX_SRC)/applets/sigreturn_trampoline.S
+```
+
+Then after line 75 (`echo 'obj-y += crt0.o' >> $(BUSYBOX_SRC)/applets/Kbuild.src; }`), add:
+
+```makefile
+	@grep -q 'sigreturn_trampoline.o' $(BUSYBOX_SRC)/applets/Kbuild.src || { \
+	    echo 'obj-y += sigreturn_trampoline.o' >> $(BUSYBOX_SRC)/applets/Kbuild.src; }
+```
+
+- [ ] **Step 2: Rebuild busybox**
+
+```bash
+make -C thirdpart/busybox-1.36.1 clean
+make user/busybox.elf
+```
+
+Expected: busybox links. `nm user/busybox.elf | grep sigreturn` shows the symbol.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add Makefile
+git commit -m "fix: wire sigreturn_trampoline.S into busybox build
+
+Copy trampoline source to busybox applets/ and append to obj-y
+alongside crt0.o.  Without this, busybox.elf link fails on
+undefined sigreturn_trampoline.
+
+Co-Authored-By: Claude <noreply@anthropic.com>"
+```
+
+---
+
 ### Task 5: Add user_va_to_phys helper to trap.c
 
 **Files:**
-- Modify: `kernel/arch/x86_64/trap.c` (near top, after includes)
+- Modify: `kernel/arch/x86_64/trap.c`
 
-- [ ] **Step 1: Add static helper function**
+- [ ] **Step 1: Add user_va_to_phys static helper**
 
-Insert after the `#include` block and before the first function definition. Place it right before `task_from_tss` (around line 36):
+Insert before `task_from_tss` (around line 36), after the `#include` block:
 
 ```c
 // ── User address translation ─────────────────────────────────
@@ -290,25 +336,21 @@ static uint64_t user_va_to_phys(uint64_t *pml4, uint64_t va)
 }
 ```
 
-- [ ] **Step 2: Verify `#include <kernel/memory.h>` and `#include <kernel/vmm.h>` are present**
+Note: `PAGE_GDT_SHIFT`/`PAGE_1G_SHIFT`/`PAGE_2M_SHIFT`/`PAGE_Present`/`PAGE_4K_MASK`/`PAGE_2M_MASK` are all available from `<kernel/memory.h>` and `<kernel/vmm.h>`, which are pulled in via `trap.c`'s existing include chain (`<kernel/task.h>` → `<kernel/memory.h>`).
 
-The existing `trap.c` includes `<kernel/task.h>` which pulls in `<kernel/memory.h>` via its include chain. Verify by building:
+- [ ] **Step 2: Build kernel to verify**
 
 ```bash
 make -j$(nproc)
 ```
 
-Expected: compiles cleanly.
+Expected: clean build.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add kernel/arch/x86_64/trap.c
 git commit -m "feat: add user_va_to_phys() page-table walk helper to trap.c
-
-Walks user PML4→PDPT→PDE to resolve user virtual address to
-physical address. Used by do_signal_delivery and SYS_sigreturn
-to access user-stack sigframes via the kernel higher-half map.
 
 Co-Authored-By: Claude <noreply@anthropic.com>"
 ```
@@ -332,6 +374,36 @@ int do_signal_delivery(pt_regs_t *regs)
     uint64_t pending = current->signal;
     if (!pending)
         return 0;
+
+    // ── NULL regs path (tty.c inline signal clear) ─────────
+    // tty.c:267 calls do_signal_delivery(NULL) when a direct
+    // switch bypassed ret_from_intr.  Only non-fatal signals
+    // can be pending here.  Handle SIG_IGN + non-fatal SIG_DFL;
+    // registered handlers are left pending.
+    if (!regs) {
+        for (int sig = 1; sig < NSIG; sig++) {
+            if (!(pending & (1ULL << sig)))
+                continue;
+            void (*handler)(int) = current->sighand[sig].sa_handler;
+            if (handler == SIG_IGN) {
+                current->signal &= ~(1ULL << sig);
+                continue;
+            }
+            if (handler == SIG_DFL) {
+                switch (sig) {
+                case SIGCHLD: case SIGURG: case SIGWINCH:
+                case SIGCONT: case SIGTSTP: case SIGTTIN: case SIGTTOU:
+                    current->signal &= ~(1ULL << sig);
+                    break;
+                default:
+                    current->signal &= ~(1ULL << sig);
+                    do_exit((uint64_t)sig << 8);
+                    return 1;  // unreachable
+                }
+            }
+        }
+        return 0;
+    }
 
     for (int sig = 1; sig < NSIG; sig++) {
         if (!(pending & (1ULL << sig)))
@@ -464,12 +536,12 @@ Expected: clean build.
 git add kernel/arch/x86_64/trap.c kernel/include/kernel/arch/x86_64/trap.h
 git commit -m "feat: implement user-space signal handler delivery in do_signal_delivery
 
-Replaces the stub 'clear pending bit only' branch with full sigframe
-push: builds 200-byte sigframe on user stack, writes trampoline return
-address, rewrites pt_regs (rip→handler, rsp→new_rsp, cs/ss→USER_CS/DS).
-Blocks current signal + sa_mask during handler execution.
+Replaces the stub branch with full sigframe push: 200-byte sigframe
+on user stack, trampoline return address, pt_regs rewrite
+(rip→handler, rsp→new_rsp, cs/ss→USER_CS/DS). Blocks current signal
++ sa_mask during handler. Includes !regs guard for tty.c NULL call.
 Returns int: 1 when handler delivered, 0 when nothing to deliver.
-Adds CPL guard (skip delivery in kernel mode) and sa_restorer NULL check.
+Adds CPL guard and sa_restorer NULL check.
 
 Co-Authored-By: Claude <noreply@anthropic.com>"
 ```
@@ -528,6 +600,8 @@ Find the right insertion point — after the `case SYS_sigprocmask:` block ends 
         break;
     }
 ```
+
+**Note on tail delivery after sigreturn:** `do_system_call` ends with `if (regs->cs & 3) do_signal_delivery(regs);` (line 1837). After `SYS_sigreturn` restores the iretq frame and `break`s, this tail call runs. If there are additional pending signals, they will be delivered on the freshly-restored stack — this is correct and matches Linux behavior (sigreturn processes remaining pending signals before the final iretq to userspace).
 
 - [ ] **Step 4: Build kernel**
 
@@ -626,8 +700,16 @@ static void sigusr1_handler(int sig) { (void)sig; sigusr1_got = 1; }
 static void test_signal_handler_sync(void)
 {
     /* Register handler, send SIGUSR1 to self.
-     * kill() sets pending; do_signal_delivery on return path
-     * pushes handler. Handler sets flag, sigreturn comes back. */
+     * kill() is a syscall; do_system_call's tail calls
+     * do_signal_delivery on the return path, which pushes
+     * the handler frame.  handler runs, sets flag, sigreturn
+     * restores execution to here.
+     *
+     * Timing assumption: kill() → do_system_call → tail
+     * do_signal_delivery() delivers synchronously before
+     * kill() returns to userspace.  sigusr1_got is volatile
+     * to prevent compiler reordering across the signal
+     * delivery boundary. */
     signal(SIGUSR1, sigusr1_handler);
     kill(getpid(), SIGUSR1);
 
@@ -698,7 +780,6 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <sys/syscall.h>
 
 static volatile int sigint_got = 0;
 static volatile int sigterm_got = 0;
@@ -708,8 +789,7 @@ static void sigterm_handler(int sig) { (void)sig; sigterm_got = 1; }
 
 static void fail(const char *msg) {
     puts(msg);
-    syscall(SYS_exit, 1, 0, 0);
-    __builtin_unreachable();
+    exit(1);
 }
 
 int main(void)
@@ -808,8 +888,9 @@ Run `/sigtest.elf` and do NOT press Ctrl-C. Expected: it prints "NO" and exits w
 1. **Spec coverage:**
    - sigframe struct → Task 1 ✓
    - sigreturn_trampoline → Task 3 ✓
+   - busybox trampoline linkage → Task 4b ✓
    - libc signal/sigaction restorer → Task 4 ✓
-   - user_va_to_phys → Task 5 ✓
+   - user_va_to_phys + `!regs` guard → Task 5 ✓
    - do_signal_delivery sigframe push → Task 6 ✓
    - CPL guard → Task 6 ✓
    - sa_restorer NULL guard → Task 6 ✓
@@ -817,8 +898,9 @@ Run `/sigtest.elf` and do NOT press Ctrl-C. Expected: it prints "NO" and exits w
    - SYS_sigreturn → Task 7 ✓
    - linux_to_os01[15]=43 → Task 7 ✓
    - syscall_names[43] → Task 7 ✓
+   - sigreturn tail-delivery note → Task 7 ✓
    - entry.S check_signal return-value loop → Task 8 ✓
-   - Sync test (SIGUSR1) → Task 9 ✓
+   - Sync test (SIGUSR1) + timing comment → Task 9 ✓
    - Async test (Ctrl-C SIGINT) → Task 10 ✓
    - Build integration → Task 11 ✓
 
