@@ -97,4 +97,8 @@ struct Page * alloc_pages(int32_t zone_select, int32_t number, uint64_t page_fla
 void free_pages(struct Page * page,int32_t number);
 uint64_t page_clean(struct Page * page);
 
+// 4KB subpage allocator — 2MB pool split into 512 4KB slots with bitmap
+uint64_t alloc_4k_page(void);
+void     free_4k_page(uint64_t phys);
+
 #endif
