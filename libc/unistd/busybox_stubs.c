@@ -39,13 +39,6 @@ int setrlimit(int resource, const struct rlimit *rlim) {
     (void)resource; (void)rlim; return 0;
 }
 
-/* ── MMAP ── */
-void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
-    (void)addr; (void)length; (void)prot; (void)flags; (void)fd; (void)offset;
-    errno = ENOSYS; return MAP_FAILED;
-}
-int munmap(void *addr, size_t length) { (void)addr; (void)length; return 0; }
-
 /* ── Time ── */
 size_t strftime(char *s, size_t max, const char *fmt, const struct tm *tm) {
     (void)s; (void)max; (void)fmt; (void)tm;
