@@ -246,17 +246,29 @@ vfs_node_t *vfs_lookup_from(const char *path, const char *cwd)
     if (!cwd)
         return NULL;
 
+    // Strip leading "./" prefix — this keeps mount point matching clean
+    // (./dev → dev, so the absolute path becomes /dev not /./dev)
+    while (path[0] == '.' && path[1] == '/')
+        path += 2;
+
     // Build absolute path: cwd + "/" + path
+    // Avoid double slashes when cwd already ends with '/'
     char abs_path[VFS_NAME_MAX];
     int cwd_len = (int)strlen(cwd);
     int path_len = (int)strlen(path);
-    int total = cwd_len + 1 + path_len;  // cwd + "/" + path
+    int add_sep = (cwd_len > 0 && cwd[cwd_len - 1] != '/') ? 1 : 0;
+    int total = cwd_len + add_sep + path_len;
     if (total >= VFS_NAME_MAX)
         return NULL;
 
-    memcpy(abs_path, cwd, cwd_len);
-    abs_path[cwd_len] = '/';
-    memcpy(abs_path + cwd_len + 1, path, path_len + 1);  // include NUL
+    int off = 0;
+    if (cwd_len > 0) {
+        memcpy(abs_path, cwd, cwd_len);
+        off = cwd_len;
+    }
+    if (add_sep)
+        abs_path[off++] = '/';
+    memcpy(abs_path + off, path, path_len + 1);  // include NUL
 
     return __vfs_lookup(abs_path);
 }
@@ -336,49 +348,126 @@ int vfs_stat(vfs_node_t *node, struct stat *buf)
     return 0;
 }
 
+// ── Sorted getdents entry (internal, for mount-point injection) ──
+// We use vfs_dirent_t (from vfs.h) directly. max 64 entries keeps the
+// stack footprint under 20 KB on a 32 KB kernel stack.
+#define VFS_GETDENTS_SORT_MAX 64
+
+// ── Check if mount_path is a direct child of dir_path ───────
+// Returns 1 if mount_path is exactly one component deeper than dir_path.
+static int vfs_is_child_mount(const char *dir_path, const char *mount_path)
+{
+    if (!dir_path || !mount_path)
+        return 0;
+
+    size_t dlen = strlen(dir_path);
+
+    // Root "/" — resolve to empty; any immediate child is single-component.
+    if (dlen == 1 && dir_path[0] == '/') {
+        if (mount_path[0] != '/' || mount_path[1] == '\0')
+            return 0;
+        // e.g., "/dev" → "dev" (no '/' after position 1)
+        return strchr(mount_path + 1, '/') == NULL;
+    }
+
+    // Non-root: mount_path = dir_path + "/" + one_component
+    if (strncmp(dir_path, mount_path, dlen) != 0)
+        return 0;
+    if (mount_path[dlen] != '/')
+        return 0;
+    return strchr(mount_path + dlen + 1, '/') == NULL;
+}
+
 // ── getdents64 ─────────────────────────────────────────────
-// Packs directory entries into linux_dirent64 format.
-// *pos tracks the current readdir index across calls.
-// Returns bytes written to buf, 0 at end of directory, -1 on error.
+// Collects entries from the underlying filesystem, injects VFS mount
+// points that are direct children of this directory, sorts all entries
+// case-insensitively, then streams them to the user buffer via *pos.
 int vfs_getdents(vfs_node_t *dir, struct linux_dirent64 *buf, unsigned int count,
                  uint64_t *pos)
 {
     if (!dir || !buf || !pos || dir->type != VFS_DIR)
         return -1;
 
+    // ── Phase 1: Collect entries from the underlying filesystem ──
+    vfs_dirent_t entries[VFS_GETDENTS_SORT_MAX];
+    int total = 0;
+    vfs_dirent_t de;
+    uint64_t idx = 0;
+
+    while (total < VFS_GETDENTS_SORT_MAX) {
+        int ret = vfs_readdir(dir, idx++, &de);
+        if (ret != 0) continue;
+        if (de.name[0] == '\0') break;
+
+        size_t nlen = strlen(de.name);
+        if (nlen >= VFS_NAME_MAX) nlen = VFS_NAME_MAX - 1;
+        memcpy(entries[total].name, de.name, nlen);
+        entries[total].name[nlen] = '\0';
+        entries[total].size = de.size;
+        entries[total].type = de.type;
+        entries[total].ino  = de.ino;
+        total++;
+    }
+
+    // ── Phase 2: Inject sub-mount entries ──────────────────────
+    // Only when listing a mount root (e.g., "/" which is FAT32's root).
+    if (dir->mount && dir == dir->mount->root) {
+        for (int i = 0; i < mount_count && total < VFS_GETDENTS_SORT_MAX; i++) {
+            if (&mount_table[i] == dir->mount) continue;  // skip self
+            if (!vfs_is_child_mount(dir->mount->path, mount_table[i].path))
+                continue;
+
+            // Extract basename (skip leading "/")
+            const char *base = mount_table[i].path;
+            if (base[0] == '/') base++;
+            size_t blen = strlen(base);
+            if (blen >= VFS_NAME_MAX) blen = VFS_NAME_MAX - 1;
+            memcpy(entries[total].name, base, blen);
+            entries[total].name[blen] = '\0';
+            entries[total].size = 0;
+            entries[total].type = VFS_DIR;
+            entries[total].ino  = (uint32_t)(0x80000000 | (uint32_t)i);
+            total++;
+        }
+    }
+
+    // ── Phase 3: Sort by name (case-insensitive) ──────────────
+    for (int i = 0; i < total - 1; i++) {
+        for (int j = 0; j < total - 1 - i; j++) {
+            if (vfs_name_cmp(entries[j].name, entries[j + 1].name) > 0) {
+                vfs_dirent_t tmp = entries[j];
+                entries[j]     = entries[j + 1];
+                entries[j + 1] = tmp;
+            }
+        }
+    }
+
+    // ── Phase 4: Output from sorted list starting at *pos ────
     unsigned int bytes_written = 0;
-    vfs_dirent_t entry;
 
-    while (1) {
-        int ret = vfs_readdir(dir, *pos, &entry);
-        if (ret != 0 || entry.name[0] == '\0') {
-            break;
-        }
-
-        size_t name_len = strlen(entry.name);
-        // Calculate record length: struct + name + null terminator, aligned to 8
+    while (*pos < (uint64_t)total) {
+        vfs_dirent_t *e = &entries[*pos];
+        size_t name_len = strlen(e->name);
         uint16_t reclen = (uint16_t)(sizeof(struct linux_dirent64) + name_len + 1);
-        reclen = (reclen + 7) & ~7;  // 8-byte align
+        reclen = (reclen + 7) & ~7;
 
-        if (bytes_written + reclen > count) {
+        if (bytes_written + reclen > count)
             break;
-        }
 
         struct linux_dirent64 *d = (struct linux_dirent64 *)((char *)buf + bytes_written);
-        d->d_ino = (uint64_t)entry.ino;
-        d->d_off = (int64_t)(*pos + 1);
+        d->d_ino   = e->ino;
+        d->d_off   = (int64_t)(*pos + 1);
         d->d_reclen = reclen;
 
-        switch (entry.type) {
-        case VFS_FILE:  d->d_type = DT_REG; break;
-        case VFS_DIR:   d->d_type = DT_DIR; break;
+        switch (e->type) {
+        case VFS_FILE:   d->d_type = DT_REG; break;
+        case VFS_DIR:    d->d_type = DT_DIR; break;
         case VFS_CHRDEV: d->d_type = DT_CHR; break;
         case VFS_BLKDEV: d->d_type = DT_BLK; break;
-        default:        d->d_type = DT_UNKNOWN; break;
+        default:         d->d_type = DT_UNKNOWN; break;
         }
 
-        memcpy(d->d_name, entry.name, name_len + 1);
-
+        memcpy(d->d_name, e->name, name_len + 1);
         bytes_written += reclen;
         (*pos)++;
     }
