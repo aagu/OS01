@@ -81,6 +81,10 @@ typedef struct mm_struct
     uint64_t start_rodata, end_rodata; // start and end address of read-only data segment
     uint64_t start_brk, end_brk; // start and end address of break segment, used in dynamic memory allocation
     uint64_t start_stack; // base address pointer of stack segment
+
+    // ── mmap / VMA support ──────────────────────────────
+    list_t   vma_list;    // sorted by vm_start
+    uint64_t mmap_base;   // start search address for mmap
 } mm_t;
 
 typedef struct thread_struct

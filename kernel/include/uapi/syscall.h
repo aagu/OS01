@@ -59,6 +59,11 @@
 #define SYS_sync            40
 #define SYS_reboot          41
 
+// ── Phase 7: mmap / mprotect / munmap ──────────────────────────
+#define SYS_mmap         44
+#define SYS_mprotect     45
+#define SYS_munmap       46
+
 // ── reboot(2) commands ──────────────────────────────────────
 #define RB_AUTOBOOT    0x01234567
 #define RB_POWER_OFF   0x4321FEDC

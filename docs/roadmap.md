@@ -1,14 +1,14 @@
-# OS01 优化路线图 v2
+# OS01 优化路线图 v3
 
-> **基准**: `650b010` (sigprocmask syscall — unblock busybox shell)
-> **日期**: 2026-07-04 (v4)
-> **来源**: 原 v1 路线图 + [6 个开源 OS 项目分析](#附录开源-os-项目分析摘要)
+> **基准**: `8038274` (setjmp fix + getppid test fix)
+> **日期**: 2026-07-05
+> **来源**: v2 路线图 + 本周信号系统实现进展
 
 标记: ✅ 已完成 | 🔴 P0 本周 | 🟡 P1 本月 | 🟢 P2 下月 | 🔵 P3 远期
 
 ---
 
-## 自 v1 以来的进展 (2026-06-27 → 2026-07-04)
+## 自 v1 以来的进展 (2026-06-27 → 2026-07-05)
 
 | 项目 | 状态 |
 |------|------|
@@ -18,16 +18,22 @@
 | 优先级调度 (max-counter pass) | ✅ |
 | FPU/SSE 状态保存 | ✅ |
 | ACPI shutdown (FADT PM1a_CNT_BLK) | ✅ |
-| procfs (`/proc/meminfo`, `/proc/self/status`) | ✅ |
+| procfs (`/proc/meminfo`, `/proc/self/status`, `/proc/<pid>/status`) | ✅ |
 | blocker framework (通用阻塞/等待框架) | ✅ |
 | fork_mm_copy fix | ✅ |
 | 模块化 debug 日志 (`debug_<channel>()` 宏) | ✅ |
-| 内置 selftest 框架 (6 个测试 → serial 输出) | ✅ |
+| 内置 selftest 框架 (slab, vfs, procfs, spinlock, pm) | ✅ |
 | Hang detector (watchdog per CPU, 500ms threshold) | ✅ |
-| 内核级 strace (DEBUG_CHANNELS=syscall) | ✅ |
-| 基础测试框架 (test/ + mock) | ✅ |
+| 内核级 strace (`DEBUG_CHANNELS=syscall`) | ✅ |
+| systest 系统测试 (70 passed, 0 failed, 33 test funcs, 43 syscalls) | ✅ |
 | `sigprocmask` syscall (完整实现，含 Linux ABI 映射) | ✅ |
 | 构建系统升级 (`-MMD` 自动依赖 + 分离 build 目录 + wildcard 源码) | ✅ |
+| **信号 handler 用户态投递** (sigframe→trampoline→sigreturn 完整闭环) | ✅ |
+| **`sigreturn` trampoline** (`sigreturn_trampoline.S` + busybox 链接) | ✅ |
+| **`rt_sigaction` SA_RESTORER** (libc signal/sigaction 自动设置 restorer) | ✅ |
+| **setjmp `-fomit-frame-pointer` 修复** (`[RSP]` 替代 `[RBP+8]`) | ✅ |
+| **getpid() syscall wrapper 修复** (不再 hardcode return 1) | ✅ |
+| **busybox ash 正常启动** (`#` shell 交互就绪) | ✅ |
 
 ---
 
@@ -40,7 +46,7 @@
 
 | 优先级 | 任务 | 说明 |
 |--------|------|------|
-| ✅ | 系统测试 (syscall 级) | systest.elf 68 assertions 覆盖 43 syscall，make test-syscall |
+| ✅ | 系统测试 (syscall 级) | systest.elf 70 passed, 0 failed, 33 tests 覆盖 43 syscall |
 | 🔴 P0 | Mock 框架完善 | host 上编译测试非 arch 内核代码 (Tilck `mocking.h` 模式) |
 | ✅ | 单元测试扩展 | 已有 `test/` + selftest 框架覆盖 slab/vfs/procfs/spinlock |
 
@@ -179,14 +185,16 @@ ArvernOS 的自研网络栈每层约 1 个文件，清晰可读。
 
 ## Phase 6: 信号系统完善 🟡
 
-> 当前内核态信号引擎正常 (SIGINT/SIGCHLD/SIG_DFL)，但用户态 handler 不工作。
+> ~~当前内核态信号引擎正常 (SIGINT/SIGCHLD/SIG_DFL)，但用户态 handler 不工作。~~
+> **Phase 6 全部完成！** 信号 handler 用户态投递链路完整闭环。
 
 | 优先级 | 任务 | 说明 |
 |--------|------|------|
-| 🔴 P0 | `sigreturn` trampoline | 用户栈帧: return addr → `sigreturn` syscall，恢复被中断上下文 |
-| 🟡 P1 | `rt_sigaction` 完整实现 | SA_SIGINFO、sa_flags 处理 |
+| ✅ | `sigreturn` trampoline | 用户栈帧: return addr → `sigreturn` syscall，恢复被中断上下文 |
+| ✅ | `rt_sigaction` 完整实现 | SA_SIGINFO、sa_flags、SA_RESTORER 自动设置 |
 | ✅ | `sigprocmask` 完整实现 | 已完成 — Linux ABI 兼容，信号屏蔽字 atomic get/set |
-| 🟡 P2 | `sigsuspend`/`sigpending` | 原子 sigmask + sleep |
+| ✅ | 信号 handler 用户态投递 | sigframe push → handler 执行 → trampoline → sigreturn → 恢复 |
+| 🟢 P3 | `sigsuspend`/`sigpending` | 原子 sigmask + sleep（低频需求，延后） |
 
 ---
 
@@ -249,36 +257,34 @@ cavOS 已做到的: `apk add` → bash, vim, gcc, python3, xorg-server, mpv, hto
 
 ```
 P0 (本周):
- 1. 内核栈 canary             — 低改造成本，防栈溢出
- 2. sigreturn trampoline      — 用户态信号 handler 的前置
- 3. COW fork + 4KB 页面       — v1 遗留，性能刚需
+ 1. COW fork + 4KB 页面       — 最大性能瓶颈，fork 100ms→1ms
+ 2. 内核栈 canary             — 低改造成本，防栈溢出
+ 3. mmap/mprotect             — COW 前置 + 解锁 busybox grep/sed
  4. 日志级别 (ERR/WARN/INFO/DEBUG) — 调试效率质变
 
 P1 (本月):
- 5. 测试框架升级              — 质量保障
- 6. ext2 只读                 — UNIX 文件系统核心
- 7. mmap/mprotect             — COW 前置 + 解锁 busybox
- 8. rt_sigaction 完整实现
- 9. poll/select               — 多路 I/O
-10. /proc/<pid>/fd 和 /maps   — 可观测性
-11. EEVDF 调度器              — O(n)→O(log n)，公平调度
+ 5. ext2 只读                 — UNIX 文件系统核心 (Aquila 221 行范本)  
+ 6. COW fault handler         — 完成 COW 闭环
+ 7. EEVDF 调度器              — O(n)→O(log n)，公平调度
+ 8. poll/select               — 多路 I/O，解锁 busybox
+ 9. SMP 负载均衡              — 多核利用
+10. readlink/symlink          — ext2 前置
+11. /proc/<pid>/fd/ + /proc/<pid>/maps
 
 P2 (下月):
 12. lwIP 网络栈 + E1000       — 第一个网络能力
-13. SMP 负载均衡
-14. ext2 读写
-15. rwlock                    — 读多写少优化
-16. 用户栈 canary
-17. symlink/readlink syscall
-18. 多架构抽象层骨架
+13. ext2 读写
+14. rwlock                    — 读多写少优化
+15. 用户栈 canary
+16. 更多 busybox applet (grep/sed/find)
 
 P3 (远期):
-19. 动态链接器
-20. ASLR
-21. 多架构 (aarch64)
-22. UBSan
-23. GUI 框架
-24. Alpine apk 用户态
+17. 动态链接器
+18. ASLR
+19. 多架构 (aarch64)
+20. UBSan
+21. GUI 框架
+22. Alpine apk 用户态
 ```
 
 ---
@@ -292,7 +298,9 @@ P3 (远期):
 | 3 | 文件系统 | FAT32 + ext2 (Aquila 路线) | FAT32 only / ext4 | ext2 简洁 (221行)，UNIX 权限/inode 概念完整 |
 | 4 | 测试 | Tilck 3 层 (unit+self+sys) | 仅手动测试 | 经过验证的模式，gtest host 测试非 arch 代码 |
 | 5 | 用户态 | busybox → 动态链接 → Alpine apk | 全自研用户态 | cavOS 已验证可行，Alpine musl 与 OS01 哲学一致 |
-| 6 | 调试 | 分级日志 + strace + hang detector | printk only | ArvernOS + cavOS + Tilck 三合一，低改造成本 |
+| 6 | 调试 | 分级日志 + strace + hang detector | printk only | ArvernOS + cavOS + Tilck 三合一，已全部落地 |
+| 7 | 信号系统 | sigframe→trampoline→sigreturn 完整闭环 | 仅内核态 SIG_DFL 处理 | 用户态 handler 是 UNIX 信号的核心语义，已完成闭环 |
+| 8 | setjmp | `[RSP]` 相对寻址，不依赖 frame pointer | `[RBP+8]` (broken) | `-fomit-frame-pointer` 是 busybox 上游默认，libc 必须兼容 |
 
 ---
 
@@ -596,19 +604,40 @@ P3 (远期):
 
 ---
 
-## 已完成 (2026-07-04)
+## 已完成 (2026-07-05)
 
 | 项目 | 工作量 | 状态 |
 |------|--------|------|
 | 模块化 debug 日志 (`debug_<channel>()` 宏) | 1 天 | ✅ |
-| 内置 selftest 框架 (6 tests) | 2 天 | ✅ |
+| 内置 selftest 框架 (5 subsystems) | 2 天 | ✅ |
 | Hang detector (watchdog per CPU) | 半天 | ✅ |
-| 内核级 strace (DEBUG_CHANNELS=syscall) | 1 天 | ✅ |
+| 内核级 strace (`DEBUG_CHANNELS=syscall`) | 1 天 | ✅ |
 | `sigprocmask` 完整实现 (Linux ABI 映射) | 半天 | ✅ |
 | stacktrace 符号解析 (`kallsyms` + `backtrace()`) | 已有 | ✅ |
 | 构建系统升级 (`-MMD` + 分离 build 目录 + wildcard) | 1 天 | ✅ |
+| 信号 handler 用户态投递 (sigframe→trampoline→sigreturn) | 2 天 | ✅ |
+| `sigreturn` trampoline (`sigreturn_trampoline.S`) | 半天 | ✅ |
+| `rt_sigaction` SA_RESTORER (libc auto-restorer) | 半天 | ✅ |
+| systest 系统测试 (70 passed, 0 failed) | 1 天 | ✅ |
+| setjmp `-fomit-frame-pointer` 修复 | 1 天 | ✅ |
+| busybox ash `#` shell 正常交互 | — | ✅ |
 
 ## 下一个改进建议
+
+### 🔴 P0: COW fork + 4KB 页面
+
+**重要性**: 当前 `fork_mm_copy` 急切复制 2MB 页，fork+exec 模式中每次 fork 延迟 ~100ms 但 exec 立即丢弃。改用 COW 后共享页表+标记只读，延迟降到 ~1ms — **当前最大单点性能瓶颈**。
+
+**借鉴**: Tilck COW fault handler + Linux `copy_page_range`
+
+**工作量**: 3-5 天
+
+**实现步骤**:
+1. 实现 4KB 页面分配（当前仅 2MB 大页，PDE→PTE 映射）
+2. `fork_mm_copy` 改为：共享 PML4/PDPT/PDE，标记页表只读，`mm_t.refcount++`
+3. `do_page_fault` 检测 Write-Cause + COW 标记 → 分配新 4KB 页 → 复制 → remap R/W
+
+**验证**: `fork(); exec();` 循环计时对比，70/70 systest 保持通过
 
 ### 🔴 P0: 内核栈 canary (`-fstack-protector`)
 
@@ -623,26 +652,28 @@ P3 (远期):
 
 **收益**: 防止栈缓冲区溢出导致的内核崩溃 — 当前最严重的一类 bug
 
-### 🔴 P0: `sigreturn` trampoline — 用户态信号 handler
+### 🟡 P1: mmap/mprotect syscall
 
-**借鉴**: Linux `sigreturn` + OS01 现有信号引擎
+**借鉴**: Linux `mmap` + Aquila VMM
 
 **工作量**: 1-2 天
 
+**重要性**: COW 的前置依赖，同时解锁 busybox grep/sed/find 等核心 applet（它们依赖 mmap 做文件 I/O）
+
 **实现**:
-1. `do_signal_delivery()` 不再只清除 pending bit，实际构造用户栈帧
-2. 栈帧布局: `[sigreturn_trampoline_addr] [siginfo] [ucontext] [saved regs]`
-3. 用户态返回到 trampoline → 调用 handler → handler 返回 → `sigreturn` syscall → 恢复上下文
-4. libc 提供 `sigreturn()` 包装
+1. `SYS_mmap` — 匿名映射 (fd=-1) 和文件映射 (fd>=0)
+2. `SYS_mprotect` — 页权限修改
+3. Linux ABI 映射 (nr 9→mmap, nr 10→mprotect)
 
-**验证**: busybox `trap` 命令、`CTRL-Z` (SIGTSTP) 处理
+### 🟡 P1: 日志级别 (ERR/WARN/INFO/DEBUG)
 
-**阻塞**: 完成后，用户态信号 handler 全部可用，busybox 信号完整性大幅提升
+**借鉴**: ArvernOS 四级日志 + Tilck DEBUG_PANEL
 
-### 🟡 P1: COW fork + 4KB 页面
+**工作量**: ~1 天
 
-**借鉴**: Tilck COW fault handler + Linux `copy_page_range`
+**实现**:
+1. `log_level()` 宏族：`log_err()`, `log_warn()`, `log_info()`, `log_dbg()`
+2. 全局 `LOG_LEVEL` 编译时开关 — 低于此级别的代码被 `if(0)` 消除
+3. 渐进迁移现有 `printk` 调用 → 分级日志
 
-**工作量**: 3-5 天
-
-**重要性**: 当前 `fork_mm_copy` 急切复制 2MB 页，fork 延迟 ~100ms → 目标 ~1ms，是最大的性能瓶颈
+**收益**: 调试效率质变 — 当前所有 `printk` 平等，无法按需开启/关闭

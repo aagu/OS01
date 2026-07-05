@@ -48,6 +48,9 @@
 #define SYS_reboot      41
 #define SYS_sigprocmask 42
 #define SYS_sigreturn  43
+#define SYS_mmap        44
+#define SYS_mprotect    45
+#define SYS_munmap      46
 
 // ── Generic syscall helper ─────────────────────────────────
 
@@ -91,6 +94,24 @@ static inline int sync(void)
 static inline int reboot(int cmd)
 {
     return (int)syscall(SYS_reboot, (uint64_t)cmd, 0, 0);
+}
+
+// ── 6-argument syscall (for mmap) ─────────────────────────
+
+static inline int64_t syscall6(uint64_t nr,
+                                uint64_t arg1, uint64_t arg2, uint64_t arg3,
+                                uint64_t arg4, uint64_t arg5, uint64_t arg6)
+{
+    int64_t ret;
+    register uint64_t r10 __asm__("r10") = arg4;
+    register uint64_t r8  __asm__("r8")  = arg5;
+    register uint64_t r9  __asm__("r9")  = arg6;
+    __asm__ volatile ("int $0x80"
+        : "=a" (ret)
+        : "a" (nr), "D" (arg1), "S" (arg2), "d" (arg3),
+          "r" (r10), "r" (r8), "r" (r9)
+        : "memory");
+    return ret;
 }
 
 #endif

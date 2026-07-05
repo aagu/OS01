@@ -27,6 +27,7 @@ typedef int pid_t;
 #include <device/timer.h>
 #include <uapi/time.h>
 #include <kernel.h>
+#include <kernel/vma.h>
 // ── Local signal constants (kernel has its own signal.h) ──
 #ifndef SIG_BLOCK
 #define SIG_BLOCK    0
@@ -51,7 +52,6 @@ static uint64_t user_va_to_phys(uint64_t *pml4, uint64_t va)
     if (!(pml2[l2] & PAGE_Present)) return 0;
     return (pml2[l2] & PAGE_2M_MASK & ~PAGE_XD) | (va & 0x1FFFFF);
 }
-
 
 // ── Helper: find the current task from TSS.rsp0 ──────────────
 // Safe to call from IST exception stacks where get_current_task()
@@ -436,23 +436,101 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 	uint64_t cr2 = 0;
 	__asm__	__volatile__("movq	%%cr2,	%0":"=r"(cr2)::"memory");
 
-	// User-mode fault → kill the task, don't halt the kernel
-	// NOTE: on IST stack — do NOT use current (get_current_task).
+	// User-mode PF - VMA-based demand paging
+	// NOTE: on IST stack - do NOT use current (get_current_task).
 	if (regs->cs & 3) {
 		task_t *t = task_from_tss();
-		serial_printk("do_page_fault(14) user err=%p rip=%p cr2=%p pid=%d\n",
-		              error_code, regs->rip, cr2,
-		              t ? t->pid : -1);
-		color_printk(RED, BLACK, "PF: pid=%d rip=%p cr2=%p err=%p\n",
-		             t ? t->pid : -1, regs->rip, cr2, error_code);
-		serial_printk(" PF: RAX=%p RBX=%p RCX=%p RDX=%p\n",
-		              regs->rax, regs->rbx, regs->rcx, regs->rdx);
-		serial_printk(" PF: RSI=%p RDI=%p RBP=%p RSP=%p\n",
-		              regs->rsi, regs->rdi, regs->rbp, regs->rsp);
-		serial_printk(" PF: R8=%p R9=%p R10=%p R11=%p\n",
-		              regs->r8, regs->r9, regs->r10, regs->r11);
-		serial_printk(" PF: R12=%p R13=%p R14=%p R15=%p\n",
-		              regs->r12, regs->r13, regs->r14, regs->r15);
+		if (!t || !t->mm) {
+			kill_current_user_task(regs);
+			return;
+		}
+
+		vma_t *vma = vma_find(t->mm, cr2);
+		if (!vma) {
+			serial_printk("PF: pid=%d cr2=%p no vma\n", t->pid, cr2);
+			kill_current_user_task(regs);
+			return;
+		}
+
+		// -- Permission check --
+		// error_code: bit 0=P, bit 1=W/R, bit 4=I/D
+
+		// PROT_NONE VMA -> any access is SIGSEGV
+		if (!(vma->vm_flags & (VM_READ | VM_WRITE | VM_EXEC))) {
+			serial_printk("PF: pid=%d cr2=%p PROTNONE\n", t->pid, cr2);
+			kill_current_user_task(regs);
+			return;
+		}
+
+		// Write protection violation (P=1, W=1)
+		if ((error_code & 0x03) == 0x03 && !(vma->vm_flags & VM_WRITE)) {
+			serial_printk("PF: pid=%d cr2=%p write to RO page\n",
+				      t->pid, cr2);
+			kill_current_user_task(regs);
+			return;
+		}
+
+		// Instruction fetch (I=1)
+		if ((error_code & 0x10) && !(vma->vm_flags & VM_EXEC)) {
+			kill_current_user_task(regs);
+			return;
+		}
+
+		// -- Page not present (P=0) - demand allocation --
+		if (!(error_code & 0x01)) {
+			uint64_t *user_pml4 =
+			    (uint64_t *)Phy_To_Virt((uint64_t)t->mm->pml4);
+
+			if (vma->vm_flags & VM_ANON) {
+				uint64_t phys = alloc_4k_page();
+				if (!phys) {
+					serial_printk("PF: pid=%d OOM\n", t->pid);
+					kill_current_user_task(regs);
+					return;
+				}
+				int rc = vmm_map_4k_page(user_pml4, phys,
+							     PAGE_4K_ALIGN(cr2), vma->vm_page_prot);
+				if (rc != 0) {
+					free_4k_page(phys);
+					kill_current_user_task(regs);
+					return;
+				}
+				return;
+			}
+
+			if (vma->vm_file) {
+				uint64_t phys = alloc_4k_page();
+				if (!phys) {
+					kill_current_user_task(regs);
+					return;
+				}
+				uint64_t file_off =
+				    (cr2 - vma->vm_start)
+				    + (vma->vm_pgoff << PAGE_4K_SHIFT);
+				int n = vfs_read(vma->vm_file, file_off,
+						  PAGE_4K_SIZE,
+						  (void *)Phy_To_Virt(phys));
+				if (n < 0) {
+					free_4k_page(phys);
+					kill_current_user_task(regs);
+					return;
+				}
+				// Zero-fill tail to avoid leaking kernel data
+				if ((size_t)n < PAGE_4K_SIZE)
+				    memset((char *)Phy_To_Virt(phys) + n, 0,
+				           PAGE_4K_SIZE - (size_t)n);
+				int rc = vmm_map_4k_page(user_pml4, phys,
+							     PAGE_4K_ALIGN(cr2), vma->vm_page_prot);
+				if (rc != 0) {
+					free_4k_page(phys);
+					kill_current_user_task(regs);
+					return;
+				}
+				return;
+			}
+		}
+
+		// Unhandled -> SIGSEGV
 		kill_current_user_task(regs);
 		return;
 	}
@@ -757,8 +835,9 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             [5] = 17,  // fstat -> SYS_fstat
             [6] = -1,  // lstat -> unsupported
             [8] = 18,  // lseek -> SYS_lseek
-            [9] = -1,  // mmap -> unsupported
-            [10] = -1, // mprotect -> unsupported
+            [9]  = 44,  // mmap
+            [10] = 45,  // mprotect
+            [11] = 46,  // munmap
             [12] = 3,  // brk -> SYS_brk
             [13] = 39, // rt_sigaction -> SYS_signal
             [14] = 42, // sigprocmask -> SYS_sigprocmask
@@ -1959,6 +2038,29 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         while ((inb(0x64) & 0x02) != 0) { /* wait */ }
         outb(0xFE, 0x64);
         while (1) __asm__ __volatile__("hlt");
+    }
+    case SYS_mmap: {
+        uint64_t addr   = regs->rdi;
+        uint64_t length = regs->rsi;
+        uint64_t prot   = regs->rdx;
+        uint64_t flags  = regs->r10;
+        uint64_t fd     = regs->r8;
+        uint64_t offset = regs->r9;
+        regs->rax = do_mmap(addr, length, prot, flags, fd, offset);
+        break;
+    }
+    case SYS_mprotect: {
+        uint64_t addr   = regs->rdi;
+        uint64_t length = regs->rsi;
+        uint64_t prot   = regs->rdx;
+        regs->rax = do_mprotect(addr, length, prot);
+        break;
+    }
+    case SYS_munmap: {
+        uint64_t addr   = regs->rdi;
+        uint64_t length = regs->rsi;
+        regs->rax = do_munmap(addr, length);
+        break;
     }
     default:
         serial_printk("syscall: unknown nr=%d from pid=%d\n",

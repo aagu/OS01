@@ -6,6 +6,9 @@
 #include <kernel/arch/x86_64/string.h>
 #include <kernel/debug.h>
 #include <kernel/slab.h>
+#include <kernel/arch/x86_64/spinlock.h>
+#include <kernel.h>
+#include <list.h>
 
 uint64_t page_init(struct Page * page, uint64_t flags)
 {
@@ -63,6 +66,21 @@ struct Physical_Memory_Manager PMMngr = {{0},0};
 uint32_t ZONE_DMA_INDEX;
 uint32_t ZONE_NORMAL_INDEX;
 uint32_t ZONE_UNMAPPED_INDEX;
+
+#define SUBPAGE_4K_COUNT (PAGE_2M_SIZE / PAGE_4K_SIZE)  // 512
+
+struct subpage_pool {
+    list_t      list;
+    uint64_t    base_phys;
+    uint64_t    bitmap[SUBPAGE_4K_COUNT / 64];
+    int         alloc_count;
+};
+
+static list_t      subpage_pools;
+static spinlock_T  subpage_lock = { .lock = 1L };
+
+// Initialized explicitly in pmm_init() after slab_init().
+// Do NOT use lazy init — SMP race on first concurrent alloc_4k_page().
 
 void pmm_init(struct MEMORY_INFO E820_Info)
 {
@@ -232,6 +250,7 @@ void pmm_init(struct MEMORY_INFO E820_Info)
     debug_mm("1.PMMngr.bits_map:%#018lx\tzone_struct->page_using_count:%d\tzone_struct->page_free_count:%d\n",*PMMngr.bits_map,PMMngr.zones_struct->page_using_count,PMMngr.zones_struct->page_free_count);
 
     slab_init();
+    list_init(&subpage_pools);
 }
 
 /*
@@ -355,4 +374,90 @@ void free_pages(struct Page * page,int32_t number)
 		page->zone_struct->page_free_count++;
 		page->attribute = 0;
 	}
+}
+
+uint64_t alloc_4k_page(void)
+{
+    // subpage_pools is initialized in pmm_init() — no lazy init needed.
+
+    uint64_t flags = spin_lock_irqsave(&subpage_lock);
+
+    // Search existing pools
+    list_t *pos = subpage_pools.next;
+    while (pos != &subpage_pools) {
+        struct subpage_pool *pool =
+            container_of(pos, struct subpage_pool, list);
+        if (pool->alloc_count < SUBPAGE_4K_COUNT) {
+            for (int i = 0; i < (int)(SUBPAGE_4K_COUNT / 64); i++) {
+                if (pool->bitmap[i] == (uint64_t)-1) continue;
+                int bit = __builtin_ctzll(~pool->bitmap[i]);
+                pool->bitmap[i] |= (1ULL << bit);
+                pool->alloc_count++;
+                uint64_t phys = pool->base_phys
+                              + (uint64_t)(i * 64 + bit) * PAGE_4K_SIZE;
+                spin_unlock_irqrestore(&subpage_lock, flags);
+                return phys;
+            }
+        }
+        pos = pos->next;
+    }
+
+    // No free slot — allocate a new 2MB pool
+    struct Page *pg = alloc_pages(ZONE_NORMAL, 1, 0);
+    if (!pg) {
+        spin_unlock_irqrestore(&subpage_lock, flags);
+        return 0;
+    }
+    struct subpage_pool *pool =
+        (struct subpage_pool *)Phy_To_Virt(pg->phy_address);
+    list_init(&pool->list);
+    pool->base_phys = pg->phy_address;
+    memset(pool->bitmap, 0, sizeof(pool->bitmap));
+    pool->alloc_count = 0;
+
+    // Slot 0: used by subpage_pool struct itself
+    pool->bitmap[0] |= 1;
+    pool->alloc_count = 1;
+    list_add_to_behind(&subpage_pools, &pool->list);
+
+    // Return slot 1 as the first free slot
+    pool->bitmap[0] |= (1ULL << 1);
+    pool->alloc_count++;
+
+    uint64_t phys = pool->base_phys + PAGE_4K_SIZE;
+    spin_unlock_irqrestore(&subpage_lock, flags);
+    return phys;
+}
+
+void free_4k_page(uint64_t phys)
+{
+    if (!phys) return;
+
+    uint64_t flags = spin_lock_irqsave(&subpage_lock);
+
+    list_t *pos = subpage_pools.next;
+    while (pos != &subpage_pools) {
+        struct subpage_pool *pool =
+            container_of(pos, struct subpage_pool, list);
+
+        if (phys >= pool->base_phys &&
+            phys < pool->base_phys + PAGE_2M_SIZE) {
+
+            uint64_t offset = phys - pool->base_phys;
+            int slot = (int)(offset / PAGE_4K_SIZE);
+            if (slot < 0 || slot >= SUBPAGE_4K_COUNT) break;
+            int word = slot / 64;
+            int bit  = slot % 64;
+
+            if (pool->bitmap[word] & (1ULL << bit)) {
+                pool->bitmap[word] &= ~(1ULL << bit);
+                pool->alloc_count--;
+            }
+            spin_unlock_irqrestore(&subpage_lock, flags);
+            return;
+        }
+        pos = pos->next;
+    }
+
+    spin_unlock_irqrestore(&subpage_lock, flags);
 }
