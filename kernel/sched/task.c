@@ -674,6 +674,10 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     task_t *tsk = (task_t *)(((uint64_t)raw_alloc + STACK_SIZE - 1) & ~(STACK_SIZE - 1));
     thread_t *thd = (thread_t *)calloc(1, sizeof(thread_t));
     mm_t *mm = (mm_t *)calloc(1, sizeof(mm_t));
+    if (mm) {
+        list_init(&mm->vma_list);
+        mm->mmap_base = 0x40000000;
+    }
     if (!raw_alloc || !thd || !mm) {
         if (raw_alloc) kfree(raw_alloc);
         if (thd) kfree(thd);
@@ -876,6 +880,10 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
 
     // 4. Create new mm_struct
     mm_t *new_mm = (mm_t *)calloc(1, sizeof(mm_t));
+    if (new_mm) {
+        list_init(&new_mm->vma_list);
+        new_mm->mmap_base = 0x40000000;
+    }
     if (!new_mm) {
         kfree(new_pml4);
         vfs_node_put(node);
@@ -1108,6 +1116,8 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
     }
 
     memcpy(child_mm, parent_mm, sizeof(mm_t));
+    // vma_list must NOT be shared — fork_vma_copy will fill child's own
+    list_init(&child_mm->vma_list);
     child_mm->pml4 = (uint64_t *)Virt_To_Phy((uint64_t)child_pml4);
     *cr3_out = (uint64_t)child_mm->pml4;
 
@@ -1263,6 +1273,9 @@ void task_init()
     init_mm.start_brk = 0;
     init_mm.end_brk = PMMngr.start_brk;
     init_mm.start_stack = _stack_start;
+
+    list_init(&init_mm.vma_list);
+    init_mm.mmap_base = 0;
 
     set_tss64(init_thread.rsp0, init_tss[0].rsp1, init_tss[0].rsp2,
               init_tss[0].ist1, init_tss[0].ist2, init_tss[0].ist3,
