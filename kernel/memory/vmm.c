@@ -4,6 +4,7 @@
 #include <kernel/pmm.h>
 #include <kernel/slab.h>
 #include <kernel/printk.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <driver/serial.h>
@@ -232,4 +233,36 @@ uint64_t *vmm_pt_walk(uint64_t *pagemap, uint64_t virt,
     uint64_t *pte_table = (uint64_t *)Phy_To_Virt(pml2[l2] & PAGE_4K_MASK);
 
     return &pte_table[l1];
+}
+
+// Map a 4KB physical page at virt.  Returns 0 on success, -ENOMEM if
+// PTE table allocation fails.  Caller must free phys on failure.
+int vmm_map_4k_page(uint64_t *pagemap, uint64_t phys,
+                    uint64_t virt, uint64_t flags)
+{
+    uint64_t *pte = vmm_pt_walk(pagemap, virt, flags, 1);
+    if (!pte)
+        return -ENOMEM;
+
+    *pte = (phys & PAGE_4K_MASK) | (flags & ~PAGE_4K_MASK);
+    return 0;
+}
+
+// Unmap a 4KB page at virt.  Frees the physical page via free_4k_page.
+// Safe to call on unmapped/never-faulted pages (no-op).
+// PTE table reclamation is deferred (V1: pages freed, tables remain).
+void vmm_unmap_4k_page(uint64_t *pagemap, uint64_t virt)
+{
+    uint64_t *pte = vmm_pt_walk(pagemap, virt, 0, 0);
+    if (!pte)
+        return;
+
+    // Must check both Present and PROTNONE — PROTNONE pages have
+    // Present=0 but valid phys that must be freed.
+    if (!(*pte & (PAGE_Present | PAGE_PROTNONE)))
+        return;
+
+    uint64_t phys = *pte & PAGE_4K_MASK;
+    *pte = 0;
+    free_4k_page(phys);
 }
