@@ -76,6 +76,10 @@ uint64_t *vmm_pt_walk(uint64_t *pagemap, uint64_t virt,
     size_t l2 = (size_t)(virt >> PAGE_2M_SHIFT)  & 0x1ff;
     size_t l1 = (size_t)(virt >> PAGE_4K_SHIFT)  & 0x1ff;
 
+    // User-half only: entries 0–255.  l4 >= 256 are kernel entries
+    // shared via memcpy(&child_pml4[256], ...) — must never be touched.
+    if (l4 >= 256) return NULL;
+
     uint64_t *pml4 = pagemap;
     uint64_t gdt_flags = (flags & PAGE_U_S) ? PAGE_USER_GDT : PAGE_KERNEL_GDT;
     uint64_t dir_flags = (flags & PAGE_U_S) ? PAGE_USER_Dir : PAGE_KERNEL_Dir;
@@ -159,6 +163,7 @@ int vmm_map_4k_page(uint64_t *pagemap, uint64_t phys,
 ```c
 // Unmap a 4KB page at virt.  Frees the physical page via free_4k_page.
 // Safe to call on unmapped/never-faulted pages (no-op).
+// PTE table reclamation is deferred (V1: pages freed, tables remain).
 void vmm_unmap_4k_page(uint64_t *pagemap, uint64_t virt)
 {
     uint64_t *pte = vmm_pt_walk(pagemap, virt, 0, 0);
@@ -173,29 +178,6 @@ void vmm_unmap_4k_page(uint64_t *pagemap, uint64_t virt)
     uint64_t phys = *pte & PAGE_4K_MASK;
     *pte = 0;
     free_4k_page(phys);
-
-    // Check if the PTE table is now entirely empty
-    uint64_t l2 = (virt >> PAGE_2M_SHIFT) & 0x1ff;
-    uint64_t *pml2 = (uint64_t *)Phy_To_Virt(
-        ((uint64_t *)Phy_To_Virt(
-            ((uint64_t *)Phy_To_Virt(
-                pagemap[(virt >> PAGE_GDT_SHIFT) & 0x1ff] & PAGE_4K_MASK
-            ))[(virt >> PAGE_1G_SHIFT) & 0x1ff] & PAGE_4K_MASK
-        ))[l2] & PAGE_4K_MASK
-    );
-    int all_empty = 1;
-    for (int i = 0; i < 512; i++) {
-        if (pml2[i] & PAGE_Present) { all_empty = 0; break; }
-    }
-    // Also check PROTNONE entries
-    if (all_empty) {
-        for (int i = 0; i < 512; i++) {
-            if (pml2[i] & PAGE_PROTNONE) { all_empty = 0; break; }
-        }
-    }
-    // But the table the PTE lives in is not pml2 itself — we need the PTE table.
-    // For simplicity, V1 skips PTE table reclamation.  TODO: add when virtual
-    // memory pressure tracking is implemented.
 }
 ```
 
@@ -246,15 +228,9 @@ struct subpage_pool {
 
 static list_t      subpage_pools;
 static spinlock_T  subpage_lock = { .lock = 1L };
-static int         subpage_pools_init = 0;
 
-static void subpage_pool_init(void)
-{
-    if (!subpage_pools_init) {
-        list_init(&subpage_pools);
-        subpage_pools_init = 1;
-    }
-}
+// Initialized explicitly in pmm_init() after slab_init().
+// Do NOT use lazy init — SMP race on first concurrent alloc_4k_page().
 ```
 
 - [ ] **Step 3: 实现 alloc_4k_page**
@@ -262,7 +238,7 @@ static void subpage_pool_init(void)
 ```c
 uint64_t alloc_4k_page(void)
 {
-    subpage_pool_init();
+    // subpage_pools is initialized in pmm_init() — no lazy init needed.
 
     uint64_t flags = spin_lock_irqsave(&subpage_lock);
 
@@ -351,14 +327,23 @@ void free_4k_page(uint64_t phys)
 }
 ```
 
-- [ ] **Step 5: 编译验证**
+- [ ] **Step 5: 初始化 subpage_pools**
+
+In `pmm_init()` (kernel/memory/pmm.c:234), after `slab_init();` add:
+```c
+    list_init(&subpage_pools);
+```
+
+This must be explicit — lazy init races on SMP.
+
+- [ ] **Step 6: 编译验证**
 
 ```bash
 make kernel/kernel.bin 2>&1 | tail -10
 ```
 Expected: compiles and links successfully.
 
-- [ ] **Step 6: 快速自测 — 分配/释放循环**
+- [ ] **Step 7: 快速自测 — 分配/释放循环**
 
 Run QEMU:
 ```bash
@@ -377,7 +362,7 @@ serial_printk("realloc: %p (should == p1)\n", p3);
 ```
 Expected: p3 == p1 (slot was recycled).
 
-- [ ] **Step 7: 清理临时测试代码 + Commit**
+- [ ] **Step 8: 清理临时测试代码 + Commit**
 
 ```bash
 git add kernel/include/kernel/pmm.h kernel/memory/pmm.c
@@ -455,6 +440,8 @@ int64_t   do_munmap(uint64_t addr, uint64_t length);
 
 #endif // _KERNEL_VMA_H
 ```
+
+**Note**: `mm_t` is forward-declared in `vma.h` but fully defined in `kernel/task.h`. Any `.c` file using `vma_find`/`vma_insert` (which dereference `mm_t`) must `#include <kernel/task.h>` AFTER `#include <kernel/vma.h>`.
 
 - [ ] **Step 2: 编译验证 — 会失败（mm_t 缺少新字段）**
 
@@ -616,6 +603,9 @@ void vma_remove(mm_t *mm, vma_t *vma)
 ```c
 // Free ALL VMAs and their physical pages.  Called by exec/exit.
 // Does NOT touch 2MB ELF pages (those are tracked outside VMA).
+// Both anonymous and file-backed pages are freed via free_4k_page —
+// in V1, file-backed pages also allocate from the subpage pool,
+// so the slot is returned to the pool for reuse.
 void vma_free_all(mm_t *mm)
 {
     if (!mm) return;
@@ -863,16 +853,18 @@ static int prot_to_page_flags(int prot, uint64_t *page_prot, uint64_t *vm_flags)
     if (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC))
         return -EINVAL;
 
-    // x86: PROT_WRITE without PROT_READ is invalid
+    // x86: any PROT_WRITE or PROT_EXEC requires PROT_READ.
+    // Implicitly add PROT_READ so PROT_EXEC alone and PROT_EXEC|PROT_WRITE
+    // both work.  Then reject pure PROT_WRITE (no PROT_READ after implicit).
+    if (prot & (PROT_WRITE | PROT_EXEC))
+        prot |= PROT_READ;
+
+    // x86: still reject pure PROT_WRITE (hardware can't do write-only)
     if ((prot & PROT_WRITE) && !(prot & PROT_READ))
         return -EINVAL;
 
-    // x86: PROT_EXEC alone → implicit PROT_READ
-    if (prot == PROT_EXEC)
-        prot |= PROT_READ;
-
     if (prot == PROT_NONE) {
-        *page_prot = PAGE_U_S;        // no Present, no R/W
+        *page_prot = PAGE_U_S;
         *vm_flags = 0;
     } else if (prot == PROT_READ) {
         *page_prot = PAGE_USER_4K_RO;
@@ -882,9 +874,9 @@ static int prot_to_page_flags(int prot, uint64_t *page_prot, uint64_t *vm_flags)
         *vm_flags = VM_READ | VM_WRITE;
     } else if (prot == (PROT_READ | PROT_EXEC) ||
                prot == (PROT_READ | PROT_WRITE | PROT_EXEC)) {
-        // no NX support yet — use same flags as R/W
-        *page_prot = PAGE_USER_4K;
-        *vm_flags = VM_READ | (prot & PROT_WRITE ? VM_WRITE : 0) | VM_EXEC;
+        *page_prot = PAGE_USER_4K;  // no NX support yet
+        *vm_flags = VM_READ | VM_EXEC
+                  | ((prot & PROT_WRITE) ? VM_WRITE : 0);
     } else {
         return -EINVAL;
     }
@@ -1166,30 +1158,28 @@ int64_t do_munmap(uint64_t addr, uint64_t length)
         for (uint64_t va = u_start; va < u_end; va += PAGE_4K_SIZE)
             vmm_unmap_4k_page(user_pml4, va);
 
-        // ── Save original vm_end before mutation ──────────
-        uint64_t orig_end = v->vm_end;
+        uint64_t orig_start = v->vm_start;
+        uint64_t orig_end   = v->vm_end;
 
-        // ── Full VMA covered? Entirely within [addr, end) ─
-        if (u_start <= v->vm_start && u_end >= orig_end) {
+        // ── Full VMA entirely within [addr, end) ────────────
+        if (u_start <= orig_start && u_end >= orig_end) {
             vma_remove(current->mm, v);
             continue;
         }
 
-        // ── Left piece: [v->vm_start, u_start) ────────────
-        if (u_start > v->vm_start) {
-            v->vm_end = u_start;   // v is now the left piece
-            // Right piece falls through to creation below:
-            // u_start is now the start of the remainder
-        }
+        // ── Adjust boundaries ──────────────────────────────
+        // v stays in place, boundaries shrink around the hole.
+        // If unmap touches left edge  → v->vm_end = u_start.
+        // If unmap touches right edge → v->vm_start = u_end.
+        // Middle hole → v becomes left piece, create right piece.
 
-        // ── Right piece: [u_end, orig_end) ────────────────
-        if (u_end < orig_end) {
+        if (u_start > orig_start && u_end < orig_end) {
+            // Hole in middle: v → left piece [orig_start, u_start)
+            //                new right: [u_end, orig_end)
+            v->vm_end = u_start;
+
             vma_t *right = (vma_t *)kmalloc(sizeof(vma_t));
             if (right) {
-                // Copy from v (left piece, or original if no left split).
-                // vm_end may have been shortened above — only relevant
-                // fields (vm_flags, vm_page_prot, vm_file, vm_pgoff) are
-                // still correct.
                 memcpy(right, v, sizeof(vma_t));
                 list_init(&right->list);
                 right->vm_start = u_end;
@@ -1198,8 +1188,13 @@ int64_t do_munmap(uint64_t addr, uint64_t length)
                     vfs_node_get(right->vm_file);
                 vma_insert(current->mm, right);
             }
-            // v->vm_end is already u_start if there was a left split;
-            // otherwise it's unchanged.  Either way v covers the left.
+        } else if (u_start > orig_start) {
+            // Trim from end: left piece only
+            v->vm_end = u_start;
+        } else {
+            // Trim from start (u_start <= orig_start, u_end < orig_end):
+            // right piece only — v itself becomes the right piece
+            v->vm_start = u_end;
         }
     }
 
@@ -1321,26 +1316,32 @@ In `trap.c`, find the existing includes and add:
 
 - [ ] **Step 2: 替换 do_page_fault 函数体**
 
-Replace the entire `do_page_fault` function with:
+Replace the entire `do_page_fault` function body. **Important**: the kernel-mode branch (lines 460–512 of current trap.c) must be preserved verbatim — keep the full error-code bit decomposition, GPR dump, `backtrace()`, and `while(1) hlt()`. Only the user-mode branch is replaced.
+
 ```c
 void do_page_fault(pt_regs_t *regs, uint64_t error_code)
 {
     uint64_t cr2 = 0;
     __asm__ __volatile__("movq %%cr2, %0":"=r"(cr2)::"memory");
 
-    // ── Kernel-mode PF: keep original halt path ─────────
+    // ── Kernel-mode PF: KEEP EXISTING CODE UNCHANGED ─────
+    // (lines 460–512 of current trap.c — full error bit dump,
+    //  GPRs, backtrace, halt)
     if (!(regs->cs & 3)) {
-        color_printk(RED,BLACK,"do_page_fault(14),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",
-                     error_code, regs->rsp, regs->rip);
-        serial_printk("do_page_fault(14),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",
-                      error_code, regs->rsp, regs->rip);
-        if (!(error_code & 0x01))
-            serial_printk("Page Not-Present\n");
-        if (error_code & 0x02)
-            serial_printk("Write Cause Fault\n");
-        serial_printk("CR2:%#018lx\n", cr2);
+        // <existing kernel-mode code — DO NOT SIMPLIFY>
+        color_printk(RED,BLACK,"do_page_fault(14),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+        serial_printk("do_page_fault(14),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+        if(!(error_code & 0x01)) { color_printk(RED,BLACK,"Page Not-Present,\t"); serial_printk("Page Not-Present,\t"); }
+        if(error_code & 0x02) { color_printk(RED,BLACK,"Write Cause Fault,\t"); serial_printk("Write Cause Fault,\t"); }
+        else { color_printk(RED,BLACK,"Read Cause Fault,\t"); serial_printk("Read Cause Fault,\t"); }
+        if(error_code & 0x04) { color_printk(RED,BLACK,"Fault in user(3)\t"); serial_printk("Fault in user(3)\t"); }
+        else { color_printk(RED,BLACK,"Fault in supervisor(0,1,2)\t"); serial_printk("Fault in supervisor(0,1,2)\t"); }
+        if(error_code & 0x08) { color_printk(RED,BLACK,",Reserved Bit Cause Fault\t"); serial_printk(",Reserved Bit Cause Fault\t"); }
+        if(error_code & 0x10) { color_printk(RED,BLACK,",Instruction fetch Cause Fault"); serial_printk(",Instruction fetch Cause Fault"); }
+        color_printk(RED,BLACK,"\n"); serial_printk("\n");
+        color_printk(RED,BLACK,"CR2:%#018lx\n",cr2); serial_printk("CR2:%#018lx\n",cr2);
         backtrace(regs);
-        while (1) hlt();
+        while(1) hlt();
     }
 
     // ── User-mode PF ───────────────────────────────────
@@ -1415,6 +1416,9 @@ void do_page_fault(pt_regs_t *regs, uint64_t error_code)
             int n = vfs_read(vma->vm_file, file_off,
                               PAGE_4K_SIZE,
                               (void *)Phy_To_Virt(phys));
+            // n < 0 = I/O error (AHCI timeout, etc.) — not -errno format
+            // n == 0 = EOF (file end), handled by zero-fill below
+            // 0 < n < PAGE_4K_SIZE = partial read, zero-fill tail
             if (n < 0) {
                 free_4k_page(phys);
                 kill_current_user_task(regs);
@@ -1460,6 +1464,23 @@ make run
 ```
 In QEMU, type some commands. Expected: `#` shell prompt works. No PF crashes.
 
+- [ ] **Step 5b (optional): IST1 stack depth verification**
+
+Add at top of `do_page_fault` user-mode path:
+```c
+{
+    uint64_t rsp;
+    __asm__ __volatile__("movq %%rsp, %0" : "=r"(rsp));
+    // IST1 bottom is 7 pages below the top — hardcoded in head.S.
+    // If we're within 4KB of the bottom, warn.
+    extern char ist1_stack_top[];  // defined in head.S
+    if (rsp < (uint64_t)ist1_stack_top - 7 * PAGE_4K_SIZE + PAGE_4K_SIZE)
+        serial_printk("WARN: IST1 stack low — %lx bytes remaining\n",
+                      rsp - (uint64_t)(ist1_stack_top - 7 * PAGE_4K_SIZE));
+}
+```
+(Remove after confirming IST1 has sufficient headroom in normal operation.)
+
 - [ ] **Step 6: Commit**
 
 ```bash
@@ -1497,7 +1518,7 @@ In `do_fork`, after `tsk->mm = fork_mm_copy(current->mm, &tsk->thread->cr3);` (~
     if (tsk->mm)
         fork_vma_copy(tsk->mm, current->mm);
 ```
-**Ordering**: `fork_vma_copy` must run AFTER `fork_mm_copy`. It copies `parent->mm->vma_list` into `child->mm->vma_list` at fork time — the parent's VMA state (including PROTNONE vm_flags) is snapshotted. If the parent later calls `mprotect(PROT_READ)`, the child's VMA stays PROTNONE.
+**Ordering / snapshot semantics**: `fork_vma_copy` snapshots parent VMA state after `fork_mm_copy` has already deep-copied the page tables (including 4KB PTE entries). VMA + PTE represent independent fork-time snapshots — parent and child each own private copies. Parent's subsequent `mprotect`/`munmap` do not affect child.
 
 - [ ] **Step 4: fork_mm_copy 添加 4KB PTE 表 deep copy 路径**
 
