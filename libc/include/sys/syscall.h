@@ -46,6 +46,8 @@
 #define SYS_signal      39
 #define SYS_sync        40
 #define SYS_reboot      41
+#define SYS_sigprocmask 42
+#define SYS_sigreturn  43
 
 // ── Generic syscall helper ─────────────────────────────────
 
@@ -54,7 +56,6 @@ static inline int64_t syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_
     int64_t ret;
     __asm__ volatile ("int $0x80"
         : "=a" (ret)
-#define SYS_sigprocmask 42
         : "a" (nr), "D" (arg1), "S" (arg2), "d" (arg3)
         : "memory");
     return ret;
