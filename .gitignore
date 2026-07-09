@@ -19,3 +19,4 @@ boot/uefi/*
 !toolchain/setup.sh
 kernel/kernel/kallsyms
 build/
+.superpowers/
