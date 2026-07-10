@@ -126,6 +126,9 @@ void page_cow_get(uint64_t phys) {
         int slot = (int)((phys - pool->base_phys) >> PAGE_4K_SHIFT);
         pool->cow_count[slot]++;
     }
+    // else: phys not from alloc_4k_page (should never happen in V1 —
+    // all COW pages come from alloc_4k_page).  debug_mm warning here
+    // helps catch future regressions.
     spin_unlock_irqrestore(&subpage_lock, flags);
 }
 // page_cow_put and page_cow_refs follow the same pattern.
@@ -264,9 +267,13 @@ if ((error_code & 0x03) == 0x03) {
                (void *)Phy_To_Virt(old_phys), PAGE_4K_SIZE);
 
         *pte = new_phys | vma->vm_page_prot;
-        page_cow_put(old_phys);
+        page_cow_put(old_phys);            // drop our COW share of old page
     } else {
-        // Last reference — restore writable in-place, zero copy
+        // Last reference — restore writable in-place, zero copy.
+        // MUST decrement cow_count before rewriting the PTE: the page
+        // is transitioning from COW-shared to private-R/W, and the
+        // stale count would inflate cow_count on the next fork.
+        (void)page_cow_put(old_phys);      // count 1→0, ignore return
         *pte = old_phys | vma->vm_page_prot;
     }
     flush_tlb();
@@ -313,7 +320,15 @@ pre-existing) by `vmm_free_user_map` — no COW impact.
 
 ### 5. `do_mprotect` Adaptation (`vma.c`)
 
-#### 5.1 R/O → R/W transition on a COW page
+The existing `do_mprotect` PTE-update loop (vma.c:347-355) does a simple
+`*pte = phys | new_page_prot` for each in-range PTE.  This assignment is
+replaced with the COW-aware logic below.  The COW check is inserted before
+the existing `PROT_NONE` and `PROT_READ`/`PROT_WRITE` branches, covering:
+- `prot != PROT_NONE` + PTE is COW: the R/O→R/W or R/O→R/O transition (§5.1)
+- `prot == PROT_NONE` + PTE is COW: stash with COW preserved (§5.2)
+- `PROTNONE+COW` → restoring to `PROT_READ`/`PROT_WRITE` (§5.3)
+
+#### 5.1 R/O → R/W (or R/O → R/O) transition on a COW page
 
 ```c
 if (*pte & PAGE_COW) {
@@ -321,10 +336,11 @@ if (*pte & PAGE_COW) {
     if (page_cow_refs(phys) > 1) {
         uint64_t new_phys = alloc_4k_page();
         memcpy(Phy_To_Virt(new_phys), Phy_To_Virt(phys), PAGE_4K_SIZE);
-        page_cow_put(phys);
+        page_cow_put(phys);                  // drop our COW share
         *pte = new_phys | new_page_prot;
     } else {
-        *pte = phys | new_page_prot;   // last reference, promote in-place
+        (void)page_cow_put(phys);            // count 1→0, ignore return
+        *pte = phys | new_page_prot;         // last reference, promote in-place
     }
 }
 ```
@@ -348,7 +364,8 @@ if (*pte & PAGE_PROTNONE) {
     uint64_t phys = *pte & PAGE_4K_MASK;
     if (*pte & PAGE_COW) {
         if (page_cow_refs(phys) == 1) {
-            *pte = phys | new_page_prot;   // last sharer → promote to R/W
+            (void)page_cow_put(phys);          // count 1→0, page stays alive
+            *pte = phys | new_page_prot;       // last sharer → promote to R/W
         } else {
             *pte = phys | PAGE_U_S | PAGE_Present | PAGE_COW;  // still shared
         }
@@ -386,9 +403,11 @@ The `PAGE_COW`-before-`PAGE_R_W` check in §2.2 ensures chain-fork works:
 ```
 P1 fork→P2:  page X (4KB, R/W) → R/O+COW, cow_count=2
 P1 fork→P3:  page X: PAGE_COW checked first → page_cow_get → cow_count=3
-P2 write→X:  refs=3>1 → alloc+copy+put → refs=2
-P3 write→X:  refs=2>1 → alloc+copy+put → refs=1
-P1 write→X:  refs=1 → in-place R/W  ✓
+P2 write→X:  refs=3>1 → alloc+copy+put(old) → refs=2  (P2 has private R/W page)
+P3 write→X:  refs=2>1 → alloc+copy+put(old) → refs=1  (P3 has private R/W page)
+P1 write→X:  refs=1 → put(old) count 1→0, in-place R/W ✓ (P1 has private page)
+// cow_count=0 after all writes — page is private to P1.
+// P1 forks again → page_cow_get×2 → cow_count=2 ✓ (correct, not inflated)
 ```
 
 ### 7. Testing
