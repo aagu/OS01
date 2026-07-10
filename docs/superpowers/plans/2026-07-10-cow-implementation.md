@@ -255,7 +255,9 @@ uint16_t page_cow_refs(uint64_t phys)
 
 - [ ] **Step 4: Declare helpers in pmm.h**
 
-In `kernel/include/kernel/pmm.h`, after the `free_4k_page` declaration (line 102), add:
+`kernel/include/kernel/pmm.h` currently includes only `<stdint.h>` and `<stddef.h>`. `page_cow_put` returns `bool`, so add `#include <stdbool.h>` at the top of the file (after line 2).
+
+Then, after the `free_4k_page` declaration (line 102), add:
 
 ```c
 // COW refcount helpers — acquire subpage_lock internally
@@ -575,9 +577,10 @@ Create `user/test_cow.c`:
 //
 // Tests:
 //  1. cow_basic:        fork, both write, verify isolation
-//  2. cow_fork_of_fork: P1 fork→P2 fork→P3, all write, verify isolation
-//  3. cow_exec:         fork, child execs, parent writes (no crash)
-//  4. cow_exit:         fork, child exits, parent writes (in-place promote)
+//  2. cow_fork_of_fork: P1→P2→P3 chain, all write, verify isolation
+//  3. cow_mprotect:     fork, child PROT_NONE→restore→write, verify isolation
+//  4. cow_exec:         fork, child execs, parent writes (last-ref promote)
+//  5. cow_exit:         fork, child exits, parent writes (in-place promote)
 #include <sys/mman.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -650,12 +653,44 @@ int main(void)
 
         // P1: parent
         int st1; waitpid(p1, &st1, 0);
+        check(st1 == 0, "p2 exit 0");
         check(((int *)p)[0] == 1, "parent isolated from children");
         munmap(p, 4096);
         printf("PASS\n");
     }
 
-    // ── Test 3: cow_exec ──
+    // ── Test 3: cow_mprotect ──
+    {
+        printf("  cow_mprotect: ");
+        void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        check(p != MAP_FAILED, "mmap");
+        ((int *)p)[0] = 0x11;
+
+        int64_t pid = fork();
+        check(pid >= 0, "fork");
+
+        if (pid == 0) {
+            // Child: stash page via PROT_NONE, then restore and write
+            int rc = mprotect(p, 4096, PROT_NONE);
+            check(rc == 0, "mprotect PROT_NONE");
+            // Page is now stashed (PROTNONE+COW) — should not fault
+            rc = mprotect(p, 4096, PROT_READ | PROT_WRITE);
+            check(rc == 0, "mprotect restore");
+            // Now write — COW should allocate a private copy
+            ((int *)p)[0] = 0x22;
+            if (((int *)p)[0] != 0x22) exit(1);
+            exit(0);
+        }
+
+        int st; waitpid(pid, &st, 0);
+        check(st == 0, "child exit 0");
+        check(((int *)p)[0] == 0x11, "parent isolated from mprotect child");
+        munmap(p, 4096);
+        printf("PASS\n");
+    }
+
+    // ── Test 4: cow_exec ──
     {
         printf("  cow_exec: ");
         void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
@@ -683,7 +718,7 @@ int main(void)
         printf("PASS\n");
     }
 
-    // ── Test 4: cow_exit ──
+    // ── Test 5: cow_exit ──
     {
         printf("  cow_exit: ");
         void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
@@ -751,9 +786,10 @@ test_cow: ALL PASS
 
 ```bash
 git add user/test_cow.c Makefile
-git commit -m "test: add COW fork isolation test (4 test cases)
+git commit -m "test: add COW fork isolation test (5 test cases)
 - cow_basic: fork, both write, verify isolation
 - cow_fork_of_fork: P1→P2→P3 chain, all write, verify isolation
+- cow_mprotect: fork, child PROT_NONE→restore→write, verify isolation
 - cow_exec: fork, child execs spin.elf, parent writes (last-ref promote)
 - cow_exit: fork, child exits, parent writes (in-place promote)"
 ```
