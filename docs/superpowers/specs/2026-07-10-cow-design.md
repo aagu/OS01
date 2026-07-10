@@ -87,8 +87,11 @@ struct subpage_pool {
 };
 ```
 
-`sizeof(subpage_pool)` grows by 1024 bytes (512 × uint16_t).  Each pool
-backs a 2MB frame; at one pool this is negligible.
+`sizeof(subpage_pool)` grows by 1024 bytes (512 × uint16_t).  Existing
+struct is ~92 bytes (list_t 16 + base_phys 8 + bitmap 64 + alloc_count 4),
+total with cow_count ≈ **1116 bytes** — still fits in slot 0's 4KB page
+(pmm.c:412 places the pool struct at `Phy_To_Virt(pg->phy_address)`,
+occupying only the first 4KB slot).  No extra slot consumption.
 
 **No changes to `struct Page`** — 2MB frames are never COW-tracked in V1.
 
@@ -112,7 +115,9 @@ bool     page_cow_put(uint64_t phys);
 uint16_t page_cow_refs(uint64_t phys);
 ```
 
-Internal implementation:
+Internal implementation (`find_pool_locked` is extracted from the existing
+pool-search loop in `free_4k_page` at pmm.c:438-459):
+
 ```c
 void page_cow_get(uint64_t phys) {
     uint64_t flags = spin_lock_irqsave(&subpage_lock);
@@ -187,10 +192,23 @@ if (!(pml2e & PAGE_PS)) {
             page_cow_get(pte & PAGE_4K_MASK);
             child_pte[l1] = pte;
         } else if (pte & PAGE_R_W) {
-            // Path A: writable → mark COW on BOTH parent and child
+            // Path A: writable → COW on BOTH parent and child.
+            // VM_SHARED pages skip COW — POSIX requires writes to be visible
+            // to all mappers.  Checking VM_SHARED requires the VMA, which we
+            // don't have in fork_mm_copy's page-table walk.  Instead, check
+            // the PTE itself: MAP_SHARED mappings carry VM_SHARED in the VMA,
+            // but the PTE flags are identical to MAP_PRIVATE.  V1 punts:
+            // OS01 does not currently implement MAP_SHARED writeback to file,
+            // so VM_SHARED writable pages are treated as COW.  If MAP_SHARED
+            // writeback is added later, add a vma_find-and-check here.
+            //
+            // Must call page_cow_get TWICE: parent PTE converted from
+            // uncounted-R/W to counted-COW (+1), child PTE created as
+            // counted-COW (+1).  After this: 2 COW PTEs, cow_count=2.
             parent_pte[l1] &= ~PAGE_R_W;
-            parent_pte[l1] |= PAGE_COW;          // parent in-place R/O+COW
-            page_cow_get(pte & PAGE_4K_MASK);
+            parent_pte[l1] |= PAGE_COW;          // parent: R/W→R/O+COW
+            page_cow_get(pte & PAGE_4K_MASK);    // parent's new COW ref
+            page_cow_get(pte & PAGE_4K_MASK);    // child's new COW ref
             child_pte[l1] = parent_pte[l1];
         } else {
             // Path B: plain read-only → share directly, no tracking
@@ -219,9 +237,12 @@ Only 4KB PTEs are handled.  2MB PDEs never carry `PAGE_COW` and thus never
 enter this branch.
 
 ```c
-// P=1, W=1  (write to a present page → possible COW)
-// Placed AFTER the VM_WRITE permission check (trap.c:465)
-// and BEFORE the P=0 demand-paging path (trap.c:480).
+// P=1, W=1  (write to a present page → possible COW).
+// Placed AFTER the VM_WRITE permission check (trap.c:465) and BEFORE
+// the P=0 demand-paging path (trap.c:480).  The (error_code & 0x03)
+// check is technically redundant at this point — trap.c:465 already
+// killed writes to non-writable VMAs — but is retained as explicit
+// self-documentation of what this branch handles.
 if ((error_code & 0x03) == 0x03) {
 
     task_t *t = task_from_tss();   // IST stack — do NOT use current
@@ -388,6 +409,7 @@ New tests to add to `test/mmap_test.c`:
 | Item | Rationale |
 |------|-----------|
 | 2MB COW (huge-page splitting) | Requires VMA coverage for ELF/stack regions + subpage-pool tracking for split pages. 4KB COW captures the bulk of fork+exec performance benefit. |
+| MAP_SHARED COW skip | OS01 does not currently implement MAP_SHARED writeback to file/ramdisk. V1 treats all VM_SHARED writable pages as COW (reading the VMA from fork_mm_copy's page-table walk would require a vma_find per PTE, which is disproportionate). If MAP_SHARED writeback is added later, add a check here. |
 | cow_sub / per-2MB-frame tracking | Not needed — 2MB pages are never split to 4KB.  All 4KB COW tracking lives in subpage_pool. |
 | Atomic PTE CAS | Lock-based cow_count is sufficient. PTE is only written by the faulting CPU. |
 | Exit-time 2MB ELF page leak | Pre-existing (task.c:422). Not introduced or worsened by COW. |
