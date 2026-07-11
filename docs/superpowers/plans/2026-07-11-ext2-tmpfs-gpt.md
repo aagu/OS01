@@ -74,8 +74,8 @@ New directories:
 
 - [ ] **Step 2: Verify build still succeeds**
 
-Run: `make kernel/kernel.bin 2>&1 | tail -5`
-Expected: `kernel.bin` created successfully.
+Run: `make clean && make kernel/kernel.bin 2>&1 | tail -5`
+Expected: `kernel.bin` created successfully. (struct size change — `make clean` required to avoid stale .o with old sizeof.)
 
 - [ ] **Step 3: Commit**
 
@@ -197,6 +197,8 @@ git commit -m "feat(devfs): add private_data field to devfs_device_t"
 - Modify: `kernel/fs/devfs.c:121-139` (devfs_read/devfs_write)
 - Add: after `devfs_register_chrdev` (~line 226)
 - Modify: `kernel/include/fs/devfs.h:12-13`
+
+**Prerequisite**: Add `#include <kernel/slab.h>` to devfs.c includes (kmalloc/kfree are declared in slab.h, not stdlib.h).
 
 - [ ] **Step 1: Add blkdev branch to devfs_read**
 
@@ -362,8 +364,9 @@ gpt_info_t *gpt_scan(block_device_t *disk);
 #include <fs/devfs.h>
 #include <block/blockdev.h>
 #include <kernel/debug.h>
+#include <kernel/slab.h>     // kmalloc, kfree
 #include <string.h>
-#include <stdlib.h>
+#include <stdlib.h>          // calloc
 
 // ── CRC32 (standard reflected, polynomial 0xEDB88320) ────
 static uint32_t gpt_crc32(const uint8_t *data, size_t len)
@@ -727,8 +730,9 @@ git commit -m "feat(ext2): add on-disk structure definitions and API header"
 // kernel/fs/ext2.c
 #include <fs/ext2.h>
 #include <kernel/debug.h>
+#include <kernel/slab.h>     // kmalloc, kfree
 #include <string.h>
-#include <stdlib.h>
+#include <stdlib.h>          // calloc
 
 // ── Block I/O helper ───────────────────────────────────
 static int ext2_read_block(ext2_fs_t *fs, uint32_t block, void *buf)
@@ -922,6 +926,14 @@ int ext2_init(block_device_t *dev, ext2_fs_t **out_fs)
         kfree(fs); return -1;
     }
 
+    // Reject incompatible features we can't handle
+    // EXT2_FEATURE_INCOMPAT_EXTENTS (0x0040) would cause bmap errors
+    if (sb->s_feature_incompat & 0x0040) {
+        debug_fs("ext2: unsupported feature (extents)\n");
+        kfree(fs); return -1;
+    }
+    // Note: s_feature_incompat & 0x0002 (FILETYPE) is fine — we use file_type
+
     fs->block_size   = 1024u << sb->s_log_block_size;
     if (fs->block_size > 4096) { kfree(fs); return -1; }
     fs->sectors_per_block = fs->block_size / 512;
@@ -1035,10 +1047,10 @@ In `kernel/fs/fat.c`, find `static struct vfs_ops fat_vfs_ops = {` and add `.fla
 
 devfs_ops, procfs_ops, and (future) ext2_vfs_ops, tmpfs_vfs_ops all default `.flags = 0` = case-sensitive — correct.
 
-- [ ] **Step 6: Build**
+- [ ] **Step 6: Build (vfs_ops_t + vfs_dirent_t struct changes)**
 
-Run: `make kernel/kernel.bin 2>&1 | tail -5`
-Expected: Success.
+Run: `make clean && make kernel/kernel.bin 2>&1 | tail -5`
+Expected: Success. (Struct change — clean required.)
 
 - [ ] **Step 7: Commit**
 
@@ -1056,6 +1068,9 @@ Note: The `ino` change is critical for tmpfs (Task 10) — tmpfs stores `(uint64
 **Files:**
 - Modify: `kernel/include/fs/fat.h:99`
 - Modify: `kernel/fs/fat.c` (fat32_mount implementation)
+- Also update: `test/include/fs/fat.h:99` and `sysroot/usr/include/fs/fat.h:99`
+  (These are stale copies — they will be regenerated on `make install-headers`,
+  but for consistency update them now to avoid confusion during development.)
 
 - [ ] **Step 1: Change fat32_mount signature in fat.h**
 
@@ -1077,13 +1092,7 @@ The main.c call site update will happen in Task 12 (integration). The old code `
 - [ ] **Step 4: Build**
 
 Run: `make kernel/kernel.bin 2>&1 | tail -5`
-Expected: Success (old main.c still calls old fat32_mount, which we just renamed the declaration but the implementation is renamed too, so link fails...).
-
-Wait — if we rename the implementation to `fat32_init` but main.c still calls `fat32_mount`, the linker will fail. Options:
-A) Keep old `fat32_mount` as a wrapper that calls `fat32_init` + `vfs_mount`
-B) Just rename the implementation AND update main.c now
-
-Since Task 12 will fully rewrite the storage section anyway, choose **B**: rename implementation, update main.c old call path minimally:
+Since `fat32_mount` no longer exists, we must update main.c now — Task 12 will later fully rewrite the storage section. Choose the minimal update:
 
 In `kernel/kernel/main.c`, replace lines 180-184:
 ```c
@@ -1145,10 +1154,11 @@ void tmpfs_init(void);
 #include <fs/tmpfs.h>
 #include <fs/vfs.h>
 #include <kernel/debug.h>
-#include <kernel/pmm.h>    // alloc_4k_page, free_4k_page
-#include <kernel/vmm.h>    // Phy_To_Virt, Virt_To_Phy
+#include <kernel/pmm.h>      // alloc_4k_page, free_4k_page
+#include <kernel/vmm.h>      // Phy_To_Virt, Virt_To_Phy
+#include <kernel/slab.h>     // kmalloc, kfree
 #include <string.h>
-#include <stdlib.h>
+#include <stdlib.h>          // calloc
 
 #define TMPFS_CHILDREN_INIT_CAP 8
 
@@ -1158,6 +1168,9 @@ typedef struct tmpfs_block_ptr {
     uint64_t                blk_idx;
     void                   *page;   // Phy_To_Virt(alloc_4k_page()) → 4096 bytes
 } tmpfs_block_ptr_t;
+
+// Forward declaration — used in create/mkdir before ops table is defined
+static struct vfs_ops tmpfs_vfs_ops;
 
 // tmpfs inode
 typedef struct tmpfs_node {
@@ -1766,7 +1779,11 @@ static void wr64(uint8_t *b, int off, uint64_t v) {
 static void build_mbr(uint8_t *sector)
 {
     memset(sector, 0, SECTOR_SIZE);
-    sector[446 + 4] = 0xEE;  // GPT Protective
+    sector[446 + 4] = 0xEE;        // GPT Protective type
+    // Protective partition: start=1, size=total_sectors-1 (or max for small disks)
+    wr32(sector, 446 + 8,  1);     // start LBA
+    wr32(sector, 446 + 12, (TOTAL_SECTORS - 1 > 0xFFFFFFFFu)
+                           ? 0xFFFFFFFFu : (uint32_t)(TOTAL_SECTORS - 1));
     sector[510] = 0x55;
     sector[511] = 0xAA;
 }
