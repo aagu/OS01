@@ -26,8 +26,7 @@
                 },
                 "background": {
                     "activeOnStart": true,
-                    "beginsPattern": "^.*BdsDxe:.*starting.*Boot\\d+",
-                    "endsPattern": "^.*tty:\\s+console\\s+TTY\\s+created"
+                    "beginsPattern": "^.*OVMF\\.fd.*probing guessed raw"
                 }
             }
         }
