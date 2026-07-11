@@ -1,8 +1,8 @@
 # OS01 优化路线图 v4
 
-> **基准**: `58f232c` (COW fork 5-test integration)
+> **基准**: `e18e726` (内核栈 canary)
 > **日期**: 2026-07-11
-> **来源**: v3 路线图 + COW fork 实现
+> **来源**: v3 路线图 + COW fork 实现 + 内核栈 canary
 
 标记: ✅ 已完成 | 🔴 P0 本周 | 🟡 P1 本月 | 🟢 P2 下月 | 🔵 P3 远期
 
@@ -20,6 +20,7 @@
 | `PAGE_COW` (PTE bit 10) | COW 共享页标记，bit 9=PAGE_PROTNONE 已用 |
 | 集成测试 `test_cow.elf` | 5 个测试全部 PASS（basic, fork_of_fork, mprotect, exec, exit） |
 | VFS mount point in getdents | `b5cc904` — 挂载点注入 + 字母排序 |
+| 内核栈 canary | `-fstack-protector-strong` + `__stack_chk_guard` (rdtsc 种子) + `__stack_chk_fail` (write_serial 直驱, 无锁) |
 
 ---
 
@@ -143,7 +144,7 @@
 
 | 优先级 | 任务 | 说明 |
 |--------|------|------|
-| 🔴 P0 | 内核栈 canary | 启用 `-fstack-protector` + `__stack_chk_guard` + `__stack_chk_fail` |
+| ✅ | 内核栈 canary | `-fstack-protector-strong` + `__stack_chk_guard` + `__stack_chk_fail` |
 | 🟡 P1 | 用户栈 canary | 用户程序编译时启用 SSP |
 | 🟡 P2 | ASLR 基础 | 随机化用户程序加载基址 |
 | 🟡 P2 | rwlock / seqlock | 读多写少场景 (VFS lookup, /proc read) 优化 |
@@ -194,31 +195,31 @@
 
 ```
 P0 (本周):
- 1. 内核栈 canary             — 低改造成本 (~30min)，防栈溢出
+  - (无 — 已全部完成)
 
 P1 (本月):
- 2. ext2 只读                 — UNIX 文件系统核心 (Aquila 221 行范本)
- 3. EEVDF 调度器              — O(n)→O(log n)，公平调度
- 4. poll/select               — 多路 I/O，解锁 busybox
- 5. SMP 负载均衡              — 多核利用
- 6. readlink/symlink          — ext2 前置
- 7. /proc/<pid>/fd/ + /proc/<pid>/maps
- 8. 日志级别 (ERR/WARN/INFO/DEBUG) — 调试效率质变
- 9. lwIP 网络栈 + E1000       — 第一个网络能力
+ 1. ext2 只读                 — UNIX 文件系统核心 (Aquila 221 行范本)
+ 2. EEVDF 调度器              — O(n)→O(log n)，公平调度
+ 3. poll/select               — 多路 I/O，解锁 busybox
+ 4. SMP 负载均衡              — 多核利用
+ 5. readlink/symlink          — ext2 前置
+ 6. /proc/<pid>/fd/ + /proc/<pid>/maps
+ 7. 日志级别 (ERR/WARN/INFO/DEBUG) — 调试效率质变
+ 8. lwIP 网络栈 + E1000       — 第一个网络能力
 
 P2 (下月):
-10. ext2 读写
-11. rwlock                    — 读多写少优化
-12. 用户栈 canary
-13. 更多 busybox applet (grep/sed/find)
-14. 动态链接器
+ 9. ext2 读写
+10. rwlock                    — 读多写少优化
+11. 用户栈 canary
+12. 更多 busybox applet (grep/sed/find)
+13. 动态链接器
 
 P3 (远期):
-15. ASLR
-16. 多架构 (aarch64)
-17. UBSan
-18. GUI 框架
-19. Alpine apk 用户态
+14. ASLR
+15. 多架构 (aarch64)
+16. UBSan
+17. GUI 框架
+18. Alpine apk 用户态
 ```
 
 ---
@@ -236,6 +237,7 @@ P3 (远期):
 | 7 | 用户态 | busybox → 动态链接 → Alpine apk | cavOS 已验证可行 |
 | 8 | COW PTE 标记 | `PAGE_COW` (bit 10) | bit 9 已被 `PAGE_PROTNONE` 占用 |
 | 9 | COW 并发保护 | `subpage_lock` (已有 spinlock) | 保护 cow_count RMW + alloc/free 位图，无需新增锁 |
+| 10 | 内核栈 canary | 全局 `__stack_chk_guard` (rdtsc 种子) + `-fstack-protector-strong` | clang 在 `-ffreestanding -fpie` 下生成 RIP-relative 全局引用，无需 TLS/FS |
 
 ---
 
@@ -251,7 +253,7 @@ P3 (远期):
 | do_mprotect COW 适配 | — | ✅ |
 | page_cow_get/put/refs | — | ✅ |
 | COW 集成测试 (5 cases) | — | ✅ |
-| 内核栈 canary | 🔴 P0 | 🔴 P0 (未变) |
+| 内核栈 canary | 🔴 P0 | ✅ |
 | ext2 只读 | 🟡 P1 | 🟡 P1 (未变) |
 | EEVDF 调度器 | 🟡 P1 | 🟡 P1 (未变) |
 | 网络栈 | 🟡 P1 | 🟡 P1 (未变) |
@@ -268,17 +270,9 @@ P3 (远期):
 | 4KB 页面 + VMA + mmap/mprotect | 3 天 | 07-08 |
 | **COW fork (4KB-only)** | 2 天 | 07-11 |
 | VFS mount point getdents | 半天 | 07-11 |
+| **内核栈 canary** | 30 分钟 | 07-11 |
 
 ## 下一个改进建议
-
-### 🔴 P0: 内核栈 canary (`-fstack-protector`)
-
-**工作量**: ~30 分钟
-
-**实现**:
-1. 在 `-static` 链接时提供 `__stack_chk_guard` (随机值) 和 `__stack_chk_fail` (panic)
-2. 添加 `-fstack-protector-strong` 到 kernel CFLAGS
-3. 验证：写一个栈溢出测试 → canary 触发 → panic 而非静默破坏
 
 ### 🟡 P1: ext2 只读驱动
 
