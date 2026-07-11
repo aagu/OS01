@@ -1,7 +1,7 @@
 # Ext2 + Tmpfs + GPT 分区文件系统 — 设计规格
 
 **Date:** 2026-07-11
-**Revision:** v2 (code-review feedback applied)
+**Revision:** v3 (second code-review feedback)
 **Scope:** ext2 只读驱动、tmpfs 内存文件系统、GPT 分区表、/dev 块设备、VFS 多挂载点、disk.img 双分区构建
 **Status:** proposed
 
@@ -76,25 +76,46 @@ typedef struct gpt_info {
 
 ```
 gpt_scan(block_device_t *disk):
-  1. 读 LBA 1 (GPT header)
+  1. 读 LBA 1 (GPT header, ≥ 512 bytes)
      验证签名 "EFI PART" (8 bytes)
-     验证 header_size (≥ 92), revision
-     验证 header_crc32 (见 §5 构建工具)
-  2. 读 Partition Entry Array (LBA 2..33, 128 条 × 128B)
-     验证 partition_entries_crc32
-  3. 遍历 entries:
+     验证 revision (= 0x00010000)
+  2. ★ 从 header 读取动态参数（不要硬编码 LBA 2 / 128 / 128!）:
+     uint32_t header_size         = *((uint32_t*)(header + 12))  // 通常 92, ≥ 92
+     uint64_t partition_entry_lba = *((uint64_t*)(header + 72)) // 通常 2
+     uint32_t num_entries         = *((uint32_t*)(header + 80)) // 通常 128
+     uint32_t entry_size          = *((uint32_t*)(header + 84)) // 通常 128, ≥ 128
+     // 表损坏时这些值不可信, 需 sanity check:
+     if (num_entries * entry_size > 1MB) return NULL;  // 上限保护
+  3. 计算 header_crc32 (crc 字段置 0 → 计算 → 与 header[16..19] 比对)
+  4. 读 Partition Entry Array:
+     array_size = num_entries * entry_size
+     array_sectors = (array_size + 511) / 512
+     分配 buf = kmalloc(array_sectors * 512)
+     block_device_read(disk, partition_entry_lba, array_sectors, buf)
+  5. 计算+比对 partition_entries_crc32
+  6. 遍历 entries (每条 entry_size 字节):
      - type_guid == zero → skip (empty entry)
-     - 提取 start_lba, end_lba, name (UTF-16LE → ASCII)
-     - 调用 block_device_create_partition(parent, start_lba, end_lba)
+     - 提取 starting_lba (entry[32..39]), ending_lba (entry[40..47]),
+       name (UTF-16LE → ASCII, entry[56..127])
+     - 调用 block_device_create_partition(parent, starting_lba, ending_lba)
      - 调用 devfs_register_blkdev(name, partition_dev)
-  4. 返回 gpt_info_t
+  7. kfree(buf); 返回 gpt_info_t
 ```
 
 失败处理：若 GPT 签名不匹配或 CRC 校验失败，返回 NULL，调用方 fallback 到旧单分区 FAT32 布局（见 §6）。
 
 ### 1.4 分区块设备（partition wrapper）
 
-分区 block device 不能复用 `block_device_register()`，因为那个函数硬编码 AHCI 的 read/write 并依赖 port_num。分区需要独立注册路径：
+分区 block device **绝对不能复用 `block_device_register()`**。原因：blockdev.c:52-53 无条件执行：
+
+```c
+dev->read = default_ahci_read;   // ← 会覆盖自定义的 partition_read
+dev->write = default_ahci_write; // ← 会覆盖自定义的 partition_write
+```
+
+即使先设 custom hook 再调 `block_device_register()`，也会被冲掉。且 `port_num` 参数对分区无意义。
+
+新增独立注册路径 `block_device_register_raw()`：
 
 ```c
 // partition_ctx_t — 分区 block device 的私有数据
@@ -107,7 +128,7 @@ typedef struct partition_ctx {
 // 分区专用 read/write — 对 LBA 加偏移、检查越界、委托 parent
 static int partition_read(block_device_t *dev, uint64_t lba,
                           uint32_t count, void *buf) {
-    partition_ctx_t *ctx = (partition_ctx_t *)dev->private_data; // 见下文
+    partition_ctx_t *ctx = (partition_ctx_t *)dev->private_data;
     if (lba + count > ctx->length) return -1;
     return ctx->parent->read(ctx->parent, ctx->offset_lba + lba, count, buf);
 }
@@ -118,38 +139,55 @@ static int partition_write(block_device_t *dev, uint64_t lba,
     return ctx->parent->write(ctx->parent, ctx->offset_lba + lba, count, buf);
 }
 
-// block_device_create_partition — 直接写入 block_devices[] 数组
-// 不经过 block_device_register()，避免 AHCI 绑定冲突
-block_device_t *block_device_create_partition(
-    block_device_t *parent, uint64_t offset_lba, uint64_t length)
+// block_device_register_raw — 不绑 AHCI hook 的注册
+// 新增于 blockdev.c, 直接写入 block_devices[]数组。
+// 与 block_device_register() 的区别: 不设置 dev->read/dev->write,
+// 不依赖 port_num — 调用方自行设置这些字段。
+block_device_t *block_device_register_raw(const char *name,
+                                           uint64_t sector_count,
+                                           void *private_data)
 {
-    if (block_device_count() >= BLOCKDEV_MAX) return NULL;  // BLOCKDEV_MAX=8, hda + 2 分区 = 3 槽, 够用
-
-    block_device_t *dev = &block_devices_internal[block_device_count_val++];
-    dev->sector_count = length;
+    if (block_device_count() >= BLOCKDEV_MAX) return NULL;
+    block_device_t *dev = &block_devices[block_device_count()];
+    // block_device_count() returns current count; we increment below.
+    memset(dev, 0, sizeof(block_device_t));
+    strcpy((char *)dev->name, name);
+    dev->sector_count = sector_count;
     dev->sector_size  = 512;
     dev->present      = 1;
     dev->port_num     = 0;  // 分区无 AHCI port
+    dev->private_data = private_data;
+    block_device_count_val++;
+    return dev;
+}
 
+// block_device_create_partition — 组装分区 block device
+// 流程: 分配 ctx → block_device_register_raw() → 手动设 read/write
+block_device_t *block_device_create_partition(
+    block_device_t *parent, uint64_t offset_lba, uint64_t length)
+{
     partition_ctx_t *ctx = kmalloc(sizeof(partition_ctx_t));
     ctx->parent     = parent;
     ctx->offset_lba = offset_lba;
     ctx->length     = length;
-    dev->private_data = ctx;     // block_device_t 新增字段
 
+    char name[16];
+    snprintf(name, sizeof(name), "%s%d", parent->name,
+             block_device_count() + 1);  // "hda1", "hda2" ...
+
+    block_device_t *dev = block_device_register_raw(name, length, ctx);
+    if (!dev) { kfree(ctx); return NULL; }
+
+    // ★ 关键：在 register_raw 之后设置 hook，不会被覆盖
     dev->read  = partition_read;
     dev->write = partition_write;
     return dev;
 }
 ```
 
-需要在 `block_device_t` 中新增 `void *private_data` 字段（struct 中追加到末尾）。
+需要在 `block_device_t` 中新增 `void *private_data` 字段。`block_devices[]` 当前是 blockdev.c 中的 `static`，`block_device_register_raw()` 作为 blockdev.c 中的新公开函数直接访问。
 
-**注意**：`block_devices[]` 当前是 `static` 在 `blockdev.c` 内部。分区创建需要访问该数组，有两种方式：
-- **A)** 新增 `block_device_register_raw()` 函数：接受 read/write/private_data，写入数组但不绑 AHCI — 改动小，封装好
-- **B)** 在 `blockdev.c` 中实现 `block_device_create_partition`，调用内部数组 — 分区逻辑聚在 blockdev 中
-
-推荐 **A**。
+**注册顺序保证**：物理盘 hda 通过 `block_device_register()` 先注册，分区 hda1/hda2 通过 `block_device_register_raw()` 后注册。`block_device_get(0)` 仍是 hda。BLOCKDEV_MAX=8，3 槽够用。**phys first, partitions second — 不要乱序**。
 
 ---
 
@@ -213,15 +251,24 @@ int devfs_register_blkdev(const char *name, block_device_t *dev);
 
 实现：同 `devfs_register_chrdev`，但 `type = VFS_BLKDEV`，`private_data = dev`，`read/write = NULL`（dispatch 走 blkdev 分支）。
 
-### 2.4 注册顺序
+`devfs_readdir` (devfs.c:155) 已有 `entry->type = devices[i].type`，所以 blkdev 节点的 d_type 自动正确 → `DT_BLK`。无需修改 readdir。
 
-`kernel_main()` 中（详见 §6）：
+### 2.4 注册顺序 — ★ 关键：devfs_init 必须最先
+
+`devfs_init()` (devfs.c:182) 做 `memset(devices, 0, sizeof(devices)); device_count = 0;`。**任何 devfs 注册必须在 devfs_init 之后**，否则注册数据会被清零。
+
+正确顺序（详见 §6）：
 ```
-ahci_init()                   → block_device_register("hda", port, sectors)
-devfs_init()                  → /dev 挂载 + devices[] 零初始化 + 字符设备
-// main.c 在 ahci_init 后 devfs_init 后：devfs_register_blkdev("hda", dev)
-gpt_scan(block_device_get(0)) → 调用 devfs_register_blkdev("hda1", ...),
-                                devfs_register_blkdev("hda2", ...)
+ahci_init()                                    → block_device_register("hda", port, sectors)
+                                                  （这只是 block 子系统注册，不碰 devfs）
+devfs_init()                                   → ★ memset(devices, 0, …) + mount /dev + chrdev
+// 以下所有 devfs_register_* 在 devfs_init 之后
+devfs_register_blkdev("hda", block_device_get(0))  → /dev/hda
+gpt_scan(block_device_get(0))                  → 内部:
+    block_device_register_raw("hda1", …)           → block 子系统
+    devfs_register_blkdev("hda1", …)               → /dev/hda1
+    block_device_register_raw("hda2", …)
+    devfs_register_blkdev("hda2", …)               → /dev/hda2
 ```
 
 物理磁盘 `hda` 的 devfs 注册由 `main.c` 在 `ahci_init()` + `devfs_init()` 之后显式调用 `devfs_register_blkdev("hda", block_device_get(0))`。分区 hda1/hda2 的 devfs 注册由 `gpt_scan()` 内部完成。
@@ -558,6 +605,9 @@ typedef struct tmpfs_node {
     uint8_t           type;           // VFS_FILE or VFS_DIR
     uint64_t          size;
 
+    // 目录树：parent 指针供 .. 和 __vfs_lookup 的 node->parent 使用
+    struct tmpfs_node *parent;
+
     // 文件：数据块链表
     tmpfs_block_t    *first_block;
     tmpfs_block_t    *last_block;     // 追加 O(1)
@@ -571,29 +621,44 @@ typedef struct tmpfs_node {
 
 ### 4.3 核心函数
 
+**VFS node ↔ tmpfs_node 绑定**：
+
+tmpfs 把 `tmpfs_node_t *` 存为 `vfs_node_t->fs_data`（不使用 devfs 的索引模式）。所有 ops 从 `(tmpfs_node_t *)node->fs_data` 取回节点。
+
+`__vfs_lookup` 创建子节点时设置 `child->parent`，所以 tmpfs 不负责 VFS 层的 parent 管理。但 tmpfs 内部的 `tmpfs_node_t *parent` 用于读取 `..` 的信息。
+
 ```
 tmpfs_vfs_read(node, offset, size, buffer):
+  tmpfs_node_t *tn = node->fs_data
   blk_idx = offset / 4096
   遍历块链表到 blk_idx → 从块内偏移 memcpy
   跨块时推进到下一个块，直到 size 读完或 size 边界
 
 tmpfs_vfs_write(node, offset, size, buffer):
-  tmpfs_grow_to(node, last_blk = (offset + size - 1) / 4096)
+  tmpfs_node_t *tn = node->fs_data
+  tmpfs_grow_to(tn, last_blk = (offset + size - 1) / 4096)
   同 read 逆操作，从 buffer 写回数据块
 
 tmpfs_vfs_readdir(dir, index, entry):
-  . (index 0) → ino=(uintptr_t)dir, type=DIR
-  .. (index 1) → parent info
-  children[index-2] (index >= 2) → 子节点
+  tmpfs_node_t *d = dir->fs_data
+  . (index 0) → ino=(uintptr_t)d, type=DIR
+  .. (index 1) → 若 d->parent 非 null, 填 ino=(uintptr_t)d->parent, type=DIR
+                 否则填 ino=(uintptr_t)d, type=DIR (在根目录时 .. 就是 .)
+  children[index-2] (index >= 2) → 子节点的 name/type/size, ino=(uintptr_t)子 tmpfs_node
 
 tmpfs_vfs_create(dir, name):
-  分配新 tmpfs_node_t → 追加到 dir->children[] 数组（扩容+memcpy 或重新 kmalloc）
+  tmpfs_node_t *d = dir->fs_data
+  分配新 tmpfs_node_t → 设置 new->parent = d ★
+  d->children 数组扩容 → 追加到 children[child_count++]
+  ★ 扩容必须用 kmalloc+memcpy+kfree, 绝对不能用 realloc
+     (libc realloc 会读 kmalloc 返回内存的伪造 header → 垃圾数据)
 
-tmpfs_vfs_mkdir(dir, name):  同 create, type = VFS_DIR
-tmpfs_vfs_unlink(dir, name):  在 children[] 中查找 → 释放节点+数据块 → 缩容
+tmpfs_vfs_mkdir(dir, name):  同 create, type = VFS_DIR, new->parent = d
+tmpfs_vfs_unlink(dir, name):  在 children[] 中查找 → 释放节点+数据块 → 缩容(移动末尾元素)
 tmpfs_vfs_rmdir(dir, name):   同 unlink, 检查子目录 child_count == 0
 tmpfs_vfs_truncate(node, sz): 释放 new_size 之后的块, 调整 size
-tmpfs_vfs_rename:            从旧父目录 children[] 移除 → 挂到新父目录
+tmpfs_vfs_rename(olddir, oldname, newdir, newname):
+  从旧父目录 children[] 移除 → 挂到新父目录 → 更新 node->parent = newdir
 ```
 
 ### 4.4 初始化
@@ -811,6 +876,7 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 	@cp build/x86_64/user/test_mmap.elf      config/fsroot/bin/test_mmap
 	@cp build/x86_64/user/test_fork_mmap.elf config/fsroot/bin/test_fork_mmap
 	@cp build/x86_64/user/test_cow.elf       config/fsroot/bin/test_cow
+	@cp config/config.txt                    config/fsroot/etc/config.txt
 	$(MAKE) -C tools check-deps
 	$(MAKE) -C tools
 	tools/mkdisk disk.img \
@@ -818,6 +884,8 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 	    --kernel kernel.bin \
 	    --rootfs config/fsroot/
 ```
+
+**config.txt**: 原 Makefile 通过 `mcopy` 写入 FAT32 根目录。新布局 ESP 只放 BOOTX64.EFI + kernel.bin。config.txt 移到 ext2 `/etc/config.txt`。如果当前 init 没读此文件，可暂时丢弃此 `cp` 行。
 
 ---
 
@@ -934,6 +1002,52 @@ int fat32_init(block_device_t *dev, fat32_fs_t **out_fs);
 ```
 不再内部调用 `vfs_mount`，调用方（main.c）在返回后按需挂载到任意路径。
 
+### 7.5 Per-fs 大小写敏感性 — ★ 需要 VFS 改动
+
+**问题**：当前 `vfs_name_cmp`（vfs.c:15）是全局大小写不敏感的（为 FAT32 设计）。ext2 和 tmpfs 是 Unix 文件系统，要求大小写敏感。
+
+`vfs_name_cmp` 被两处调用：
+- `__vfs_lookup` (vfs.c:174): `vfs_name_cmp(entry.name, comp)` — 路径查找的名字匹配
+- `vfs_getdents` (vfs.c:371): `vfs_name_cmp(a->name, b->name)` — 排序用
+
+**方案**：给 `vfs_ops_t` 新增一个 flags 字段：
+
+```c
+typedef struct vfs_ops {
+    uint32_t flags;
+    #define VFS_OPS_CASE_INSENSITIVE  (1 << 0)  // FAT32
+    int (*read)(...);
+    int (*write)(...);
+    int (*readdir)(...);
+    ...
+} vfs_ops_t;
+```
+
+`__vfs_lookup` 和 `vfs_getdents` 中根据 `dir->ops->flags & VFS_OPS_CASE_INSENSITIVE` 选择比较函数：
+
+```c
+// In __vfs_lookup:
+int match = (current->ops->flags & VFS_OPS_CASE_INSENSITIVE)
+    ? (vfs_name_cmp(entry.name, comp) == 0)          // FAT32: case-insensitive
+    : (strcmp(entry.name, comp) == 0);               // ext2/tmpfs: case-sensitive
+```
+
+各 fs 的 ops 定义：
+```c
+static vfs_ops_t fat_vfs_ops  = { .flags = VFS_OPS_CASE_INSENSITIVE, ... };
+static vfs_ops_t ext2_vfs_ops = { .flags = 0, ... };  // case-sensitive
+static vfs_ops_t tmpfs_vfs_ops = { .flags = 0, ... };  // case-sensitive
+// devfs, procfs 同样 flags=0
+```
+
+此改动影响 VFS 核心（vfs.c 的 `__vfs_lookup` 和 `vfs_getdents`），~10 行修改。
+
+### 7.6 `config.txt` 迁移
+
+当前 `config/config.txt` 由 `mcopy -i $@ config/config.txt ::/` 写入 FAT32 根目录，内容为 `init=/init.elf`。新布局下 ESP 只放 BOOTX64.EFI 和 kernel.bin。
+
+**方案**：将 `config.txt` 也写到 ext2 `/etc/config.txt`，或内置到 kernel 中作为默认值。如果 `init` 进程读取此文件，路径改为 `/etc/config.txt`。如当前 init 是 hardcoded 路径 `/bin/init`，可暂时丢弃 `config.txt`，后续需要时再处理。Makefile 中需移除对应的 `mcopy` 行。
+
 ---
 
 ## 8. 文件清单
@@ -950,7 +1064,9 @@ int fat32_init(block_device_t *dev, fat32_fs_t **out_fs);
 | `kernel/include/block/blockdev.h` | 修改 | 新增 `private_data` + `block_device_register_raw()` 声明 |
 | `kernel/fs/devfs.c` | 修改 | `devfs_device_t` 新增 `private_data` + blkdev dispatch (~50 行) |
 | `kernel/include/fs/devfs.h` | 修改 | 新增 `devfs_register_blkdev()` |
-| `kernel/fs/fat.c` | 修改 | `fat32_mount` → `fat32_init`，移除内部 vfs_mount (~5 行) |
+| `kernel/fs/vfs.c` | 修改 | `__vfs_lookup` + `vfs_getdents` 使用 ops->flags 选择大小写比较 (~10 行) |
+| `kernel/include/fs/vfs.h` | 修改 | `vfs_ops_t` 新增 `uint32_t flags` 字段 + `VFS_OPS_CASE_INSENSITIVE` |
+| `kernel/fs/fat.c` | 修改 | `fat32_mount` → `fat32_init`，移除内部 vfs_mount (~5 行)；ops 设 flags |
 | `kernel/include/fs/fat.h` | 修改 | 更新 fat32_init 签名 |
 | `kernel/kernel/main.c` | 修改 | 新挂载顺序 (~20 行增量) |
 | `kernel/Makefile` | 修改 | 新增 .c 文件 |
@@ -958,10 +1074,10 @@ int fat32_init(block_device_t *dev, fat32_fs_t **out_fs);
 | `tools/Makefile` | 新增 | 宿主工具编译 + 依赖检测 |
 | `config/fsroot/bin/` | 新增 | ext2 /bin 内容源 |
 | `config/fsroot/home/` | 新增 | ext2 /home (空目录) |
-| `config/fsroot/etc/` | 新增 | ext2 /etc (空目录) |
+| `config/fsroot/etc/` | 新增 | ext2 /etc (config.txt 等) |
 | `Makefile` (root) | 修改 | disk.img target |
 
-**总计**：~980 行新代码 + ~110 行修改。
+**总计**：~950 行新代码 + ~120 行修改。
 
 ---
 
