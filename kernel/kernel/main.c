@@ -179,6 +179,8 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     // ═══ 6. Storage + filesystem ════════════════════════════
     ahci_init();
 
+    vfs_init();                         // init mount table BEFORE any mount calls
+
     devfs_init();                   // mount /dev + register chrdev
                                     // ★ MUST be before any devfs_register_* call
     devfs_register_chrdev("keyboard", NULL, keyboard_devfs_read, NULL);
@@ -189,8 +191,6 @@ int kernel_main(struct BOOT_INFO *bootinfo)
         block_device_t *dev = block_device_get(i);
         devfs_register_blkdev(dev->name, dev);
     }
-
-    vfs_init();                     // init mount table
 
     // Try GPT partition table scan
     gpt_info_t *gpt = (block_device_count() > 0)
