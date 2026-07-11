@@ -5,6 +5,15 @@
 #include <string.h>
 #include <stdlib.h>          // calloc
 
+// ── Helper: resolve node->fs_data to inode number ────────
+// Root mount node has fs_data=NULL (set by vfs_mount).
+// Subdirectory nodes have fs_data=(void*)(uintptr_t)ino.
+static uint32_t ext2_node_ino(vfs_node_t *node)
+{
+    if (!node->fs_data) return EXT2_ROOT_INO;  // root inode is 2
+    return (uint32_t)(uintptr_t)node->fs_data;
+}
+
 // ── Block I/O helper ───────────────────────────────────
 static int ext2_read_block(ext2_fs_t *fs, uint32_t block, void *buf)
 {
@@ -60,7 +69,7 @@ static int ext2_vfs_read(struct vfs_node *node, uint64_t offset,
                           uint64_t size, void *buffer)
 {
     if (!node || !buffer || size == 0) return 0;
-    uint32_t ino = (uint32_t)(uintptr_t)node->fs_data;
+    uint32_t ino = ext2_node_ino(node);
     ext2_fs_t *fs = (ext2_fs_t *)node->mount->fs_data;
 
     spin_lock(&fs->lock);
@@ -110,7 +119,7 @@ static int ext2_vfs_readdir(struct vfs_node *node, uint64_t index,
     if (!node || !entry) return -1;
     if (node->type != VFS_DIR) return -1;
 
-    uint32_t ino = (uint32_t)(uintptr_t)node->fs_data;
+    uint32_t ino = ext2_node_ino(node);
     ext2_fs_t *fs = (ext2_fs_t *)node->mount->fs_data;
 
     spin_lock(&fs->lock);
