@@ -172,10 +172,17 @@ int main(int argc, char **argv)
     wr32(gpt_hdr, 16, hdr_crc);
 
     fwrite(gpt_hdr, 92, 1, f);
+    // Pad GPT header to fill LBA 1 (header = 92 bytes, sector = 512 bytes)
+    {
+        uint8_t pad[420];
+        memset(pad, 0, sizeof(pad));
+        fwrite(pad, sizeof(pad), 1, f);
+    }
+    // LBA 2: partition entry array
     fwrite(entries, sizeof(entries), 1, f);
 
-    // Pad to PART1_START
-    uint64_t pos = 2 + (sizeof(entries) / SECTOR_SIZE);
+    // Pad to PART1_START (starting from LBA 34 = after 32 sectors of entries)
+    uint64_t pos = 34;
     uint8_t zero[SECTOR_SIZE];
     memset(zero, 0, SECTOR_SIZE);
     while (pos < PART1_START) { fwrite(zero, SECTOR_SIZE, 1, f); pos++; }
