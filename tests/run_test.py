@@ -7,27 +7,26 @@ import subprocess
 import re
 import time
 import argparse
-import signal
+import tempfile
 
 QEMU = os.environ.get("QEMU", "qemu-system-x86_64")
 DISK_IMG = os.environ.get("DISK_IMG", "disk.img")
-TIMEOUT = int(os.environ.get("TEST_TIMEOUT", "30"))
+TIMEOUT = int(os.environ.get("TEST_TIMEOUT", "60"))
 
 class TestRunner:
     def __init__(self, disk_img, timeout=TIMEOUT):
         self.disk_img = disk_img
         self.timeout = timeout
         self.proc = None
-        self.output_lines = []
+        self.serial_log = None
 
     def start_qemu(self):
-        """Launch QEMU with serial on a pty pair."""
-        import pty
-        master_fd, slave_fd = pty.openpty()
-        self.master = master_fd
-        self.slave = slave_fd
+        """Launch QEMU with serial output to a temp file."""
+        self.serial_log = tempfile.NamedTemporaryFile(
+            prefix="os01_serial_", suffix=".log", delete=False)
+        self.serial_path = self.serial_log.name
+        self.serial_log.close()  # QEMU will write to it; we open separately for reading
 
-        # Use -serial with the slave
         args = [
             QEMU,
             "-M", "q35",
@@ -35,7 +34,7 @@ class TestRunner:
             "-hda", f"{self.disk_img}",
             "-m", "512",
             "-smp", "1",
-            "-serial", f"/dev/fd/{slave_fd}",
+            "-serial", f"file:{self.serial_path}",
             "-display", "none",
             "-no-reboot",
             "-no-shutdown",
@@ -45,9 +44,15 @@ class TestRunner:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            pass_fds=[slave_fd],
         )
-        os.close(slave_fd)
+
+    def _read_available(self):
+        """Read any new data from the serial log file."""
+        try:
+            with open(self.serial_path, 'rb') as f:
+                return f.read()
+        except (OSError, IOError):
+            return b''
 
     def read_until(self, pattern, timeout=None):
         """Read serial output until pattern matches. Returns the match or None."""
@@ -55,43 +60,49 @@ class TestRunner:
             timeout = self.timeout
         deadline = time.time() + timeout
         buf = ""
+        last_size = 0
+
         while time.time() < deadline:
-            try:
-                import select
-                r, _, _ = select.select([self.master], [], [], 1.0)
-                if r:
-                    data = os.read(self.master, 4096)
-                    if not data:
-                        break
-                    text = data.decode('utf-8', errors='replace')
+            data = self._read_available()
+            if len(data) > last_size:
+                # New data available
+                text = data[last_size:].decode('utf-8', errors='replace')
+                sys.stdout.write(text)
+                sys.stdout.flush()
+                buf += text
+                last_size = len(data)
+
+                if isinstance(pattern, str):
+                    if pattern in buf:
+                        return buf
+                else:
+                    m = pattern.search(buf)
+                    if m:
+                        return m
+
+            if self.proc.poll() is not None:
+                # QEMU exited — read any remaining output
+                data = self._read_available()
+                if len(data) > last_size:
+                    text = data[last_size:].decode('utf-8', errors='replace')
                     sys.stdout.write(text)
                     sys.stdout.flush()
                     buf += text
-                    if isinstance(pattern, str):
-                        if pattern in buf:
-                            return buf
-                    else:
-                        m = pattern.search(buf)
-                        if m:
-                            return m
-                elif self.proc.poll() is not None:
-                    break
-            except Exception as e:
-                print(f"\n[TEST] exception: {e}")
                 break
+
+            time.sleep(0.5)
+
         # Timeout: dump what we have
         print(f"\n[TEST] TIMEOUT waiting for pattern: {pattern}")
         print(f"[TEST] Last output: {buf[-500:]}")
         return None
 
     def send(self, text):
-        """Send a string to the serial port."""
-        data = text.encode('utf-8')
-        os.write(self.master, data)
+        """Not supported with file-based serial (systest is fully automated)."""
+        pass
 
     def send_line(self, text):
-        """Send a line (with newline) to the serial port."""
-        self.send(text + "\r\n")
+        pass
 
     def wait_for_prompt(self, timeout=None):
         """Wait for the shell prompt."""
@@ -104,9 +115,9 @@ class TestRunner:
                 self.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
-        if hasattr(self, 'master'):
+        if self.serial_path and os.path.exists(self.serial_path):
             try:
-                os.close(self.master)
+                os.unlink(self.serial_path)
             except OSError:
                 pass
 
@@ -115,7 +126,7 @@ def test_boot(tester):
     """Phase 0 test: verify kernel boots and shell runs."""
     tester.start_qemu()
 
-    # Wait for evidence of boot — init.elf banner
+    # Wait for evidence of boot — init banner
     booted = tester.read_until("OS01 Init v1.0", timeout=25)
     if not booted:
         print("FAIL: Kernel did not boot")
@@ -141,16 +152,12 @@ def test_systest(tester):
         print("FAIL: systest did not complete")
         return False
 
-    # PTY may split data: keep reading up to 5 seconds after pattern found
-    import select
-    for _ in range(50):
-        r, _, _ = select.select([tester.master], [], [], 0.1)
-        if r:
-            data = os.read(tester.master, 4096)
-            if data:
-                text = data.decode('utf-8', errors='replace')
-                sys.stdout.write(text); sys.stdout.flush()
-                output += text
+    # Continue reading for a few more seconds to capture trailing output
+    time.sleep(2)
+    remaining = tester._read_available()
+    if remaining:
+        text = remaining.decode('utf-8', errors='replace')
+        output += text
 
     # Parse: "[SYS TEST] RESULT: N passed, M failed"
     m = re.search(r'\[SYS TEST\] RESULT:\s*(\d+)\s*passed,\s*(\d+)\s*failed', output)

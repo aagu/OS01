@@ -158,6 +158,13 @@ static int ext2_vfs_readdir(struct vfs_node *node, uint64_t index,
                     entry->ino  = de->inode;
                     entry->size = 0;
                     entry->type = (de->file_type == 2) ? VFS_DIR : VFS_FILE;
+
+                    // ext2 dirent has no size field — read from inode
+                    if (entry->type == VFS_FILE) {
+                        ext2_inode_t finode;
+                        if (ext2_read_inode(fs, de->inode, &finode) == 0)
+                            entry->size = finode.i_size;
+                    }
                     spin_unlock(&fs->lock);
                     return 0;
                 }

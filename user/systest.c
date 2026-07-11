@@ -78,8 +78,8 @@ static void test_fork_exec_waitpid(void)
     if (pid < 0) { FAIL("fork", "fork failed"); return; }
 
     if (pid == 0) {
-        const char *argv[] = { "/spin.elf", NULL };
-        exec("/spin.elf", (char *const *)argv, NULL);
+        const char *argv[] = { "/bin/spin", NULL };
+        exec("/bin/spin", (char *const *)argv, NULL);
         _exit(99);
     }
 
@@ -88,7 +88,7 @@ static void test_fork_exec_waitpid(void)
     int64_t w = waitpid(pid, &status, 0);
     CHECK3(w == pid, "waitpid", "correct pid");
     CHECK3(WIFEXITED(status) && WEXITSTATUS(status) == 42,
-           "exec", "/spin.elf exit 42");
+           "exec", "/bin/spin exit 42");
 }
 
 // ── 6: read ────────────────────────────────────────────────
@@ -114,8 +114,8 @@ static void test_read(void)
 // ── 7, 8: open, close ──────────────────────────────────────
 static void test_open_close(void)
 {
-    int fd = open("/spin.elf", O_RDONLY);
-    CHECK3(fd >= 0, "open", "/spin.elf");
+    int fd = open("/bin/spin", O_RDONLY);
+    CHECK3(fd >= 0, "open", "/bin/spin");
     if (fd < 0) return;
 
     int ret = close(fd);
@@ -208,7 +208,7 @@ static void test_stat_fstat(void)
 // ── 18: lseek ──────────────────────────────────────────────
 static void test_lseek(void)
 {
-    int fd = open("/spin.elf", O_RDONLY);
+    int fd = open("/bin/spin", O_RDONLY);
     if (fd < 0) { FAIL("lseek", "open failed"); return; }
     CHECK3(lseek(fd, 0, SEEK_SET) == 0, "lseek", "SEEK_SET 0");
     CHECK3(lseek(fd, 0, SEEK_END) > 0, "lseek", "SEEK_END > 0");
@@ -256,15 +256,15 @@ static void test_access(void)
 // ── 23, 24, 25: mkdir, rmdir ───────────────────────────────
 static void test_mkdir_rmdir(void)
 {
-    int ret = mkdir("/t_sys_dir", 0755);
+    int ret = mkdir("/tmp/t_sys_dir", 0755);
     CHECK3(ret == 0, "mkdir", "created");
     struct stat st;
-    ret = stat("/t_sys_dir", &st);
+    ret = stat("/tmp/t_sys_dir", &st);
     if (ret == 0 && S_ISDIR(st.st_mode)) PASS("mkdir", "stat confirms dir");
     else PASS("mkdir", "stat lag (FAT32 ok)");
 
-    CHECK3(rmdir("/t_sys_dir") == 0, "rmdir", "removed");
-    ret = stat("/t_sys_dir", &st);
+    CHECK3(rmdir("/tmp/t_sys_dir") == 0, "rmdir", "removed");
+    ret = stat("/tmp/t_sys_dir", &st);
     if (ret == -1) PASS("rmdir", "gone after rmdir");
     else PASS("rmdir", "still present (FAT32 ok)");
 }
@@ -272,13 +272,13 @@ static void test_mkdir_rmdir(void)
 // ── unlink ─────────────────────────────────────────────────
 static void test_unlink(void)
 {
-    int fd = open("/t_unlink", O_CREAT | O_WRONLY, 0644);
+    int fd = open("/tmp/t_unlink", O_CREAT | O_WRONLY, 0644);
     if (fd < 0) { FAIL("unlink", "O_CREAT failed"); return; }
     close(fd);
 
-    CHECK3(unlink("/t_unlink") == 0, "unlink", "removed");
+    CHECK3(unlink("/tmp/t_unlink") == 0, "unlink", "removed");
     struct stat st;
-    int ret = stat("/t_unlink", &st);
+    int ret = stat("/tmp/t_unlink", &st);
     if (ret == -1) PASS("unlink", "gone after unlink");
     else PASS("unlink", "still present (FAT32 ok)");
 }
@@ -287,25 +287,25 @@ static void test_unlink(void)
 static void test_readlink(void)
 {
     char buf[64];
-    int64_t ret = readlink("/spin.elf", buf, sizeof(buf));
+    int64_t ret = readlink("/bin/spin", buf, sizeof(buf));
     CHECK3(ret < 0 || ret >= 0, "readlink", "stub called");
 }
 
 // ── 27: rename ─────────────────────────────────────────────
 static void test_rename(void)
 {
-    int fd = open("/t_rename", O_CREAT | O_WRONLY, 0644);
+    int fd = open("/tmp/t_rename", O_CREAT | O_WRONLY, 0644);
     if (fd < 0) { FAIL("rename", "O_CREAT failed"); return; }
     write(fd, "hi", 2);
     close(fd);
 
-    CHECK3(rename("/t_rename", "/t_renamed") == 0, "rename", "renamed");
+    CHECK3(rename("/tmp/t_rename", "/tmp/t_renamed") == 0, "rename", "renamed");
     struct stat st;
-    int ret1 = stat("/t_rename", &st);
-    int ret2 = stat("/t_renamed", &st);
+    int ret1 = stat("/tmp/t_rename", &st);
+    int ret2 = stat("/tmp/t_renamed", &st);
     if (ret1 == -1 && ret2 == 0) PASS("rename", "old gone, new exists");
     else PASS("rename", "rename ok (stat lag FAT32 ok)");
-    unlink("/t_renamed");
+    unlink("/tmp/t_renamed");
 }
 
 // ── 28, 29: ftruncate, truncate ────────────────────────────
@@ -344,9 +344,9 @@ static void test_nanosleep(void)
 // ── 32, 33: chmod, fchmod ─────────────────────────────────
 static void test_chmod(void)
 {
-    int ret = chmod("/spin.elf", 0644);
+    int ret = chmod("/bin/spin", 0644);
     CHECK3(ret == 0 || ret < 0, "chmod", "called");
-    int fd = open("/spin.elf", O_RDONLY);
+    int fd = open("/bin/spin", O_RDONLY);
     if (fd >= 0) {
         ret = fchmod(fd, 0644);
         CHECK3(ret == 0 || ret < 0, "fchmod", "called");
