@@ -51,10 +51,36 @@ block_device_t *block_device_register(const char *name,
     dev->present = 1;
     dev->read = default_ahci_read;
     dev->write = default_ahci_write;
+    dev->private_data = NULL;
 
     debug_block("block: registered %s (%lu sectors, %lu MB)\n",
                    dev->name, sector_count,
                    sector_count * 512 / 1024 / 1024);
+    return dev;
+}
+
+// Register a block device without AHCI hook defaults.
+// Caller sets dev->read / dev->write / dev->private_data after this call.
+// Unlike block_device_register(), this does NOT overwrite .read/.write.
+block_device_t *block_device_register_raw(const char *name,
+                                           uint64_t sector_count,
+                                           void *private_data)
+{
+    if (block_device_count_val >= BLOCKDEV_MAX) {
+        debug_block("block: max devices reached (raw)\n");
+        return NULL;
+    }
+    block_device_t *dev = &block_devices[block_device_count_val];
+    memset(dev, 0, sizeof(block_device_t));
+    strcpy((char *)dev->name, name);
+    dev->sector_count = sector_count;
+    dev->sector_size  = 512;
+    dev->present      = 1;
+    dev->port_num     = 0;
+    dev->private_data = private_data;
+    block_device_count_val++;
+    debug_block("block: registered raw %s (%lu sectors)\n",
+                name, sector_count);
     return dev;
 }
 
