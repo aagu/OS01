@@ -95,24 +95,22 @@ thirdpart/busybox-1.36.1/busybox: lib $(BUSYBOX_SRC)/Makefile $(BUSYBOX_CFG) use
 # ── Disk image ──────────────────────────────────────────
 
 disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.elf
-	dd if=/dev/zero of=$@ bs=1M count=64
-	mkfs.vfat -F 32 $@
-	mmd -i $@ ::/EFI
-	mmd -i $@ ::/EFI/BOOT
-	mcopy -i $@ boot/uefi/BOOTX64.EFI ::/EFI/BOOT
-	mcopy -i $@ kernel.bin ::/
-	mcopy -i $@ build/x86_64/user/init.elf ::/init.elf
-	mcopy -i $@ build/x86_64/user/spin.elf ::/spin.elf
-	mcopy -i $@ build/x86_64/user/sigtest.elf ::/sigtest.elf
-	mcopy -i $@ build/x86_64/user/poweroff.elf ::/poweroff.elf
-	mcopy -i $@ build/x86_64/user/systest.elf ::/systest.elf
-	mcopy -i $@ build/x86_64/user/test_mmap.elf ::/test_mmap.elf
-	mcopy -i $@ build/x86_64/user/test_fork_mmap.elf ::/test_fork_mmap.elf
-	mcopy -i $@ build/x86_64/user/test_cow.elf ::/test_cow.elf
-	mcopy -i $@ build/x86_64/user/busybox.elf ::/busybox.elf
-ifneq (,$(wildcard config/config.txt))
-	mcopy -i $@ config/config.txt ::/
-endif
+	@mkdir -p config/fsroot/bin config/fsroot/home config/fsroot/etc
+	@cp build/x86_64/user/init.elf          config/fsroot/bin/init
+	@cp build/x86_64/user/busybox.elf        config/fsroot/bin/busybox
+	@cp build/x86_64/user/spin.elf           config/fsroot/bin/spin
+	@cp build/x86_64/user/sigtest.elf        config/fsroot/bin/sigtest
+	@cp build/x86_64/user/poweroff.elf       config/fsroot/bin/poweroff
+	@cp build/x86_64/user/systest.elf        config/fsroot/bin/systest
+	@cp build/x86_64/user/test_mmap.elf      config/fsroot/bin/test_mmap
+	@cp build/x86_64/user/test_fork_mmap.elf config/fsroot/bin/test_fork_mmap
+	@cp build/x86_64/user/test_cow.elf       config/fsroot/bin/test_cow
+	$(MAKE) -C tools check-deps
+	$(MAKE) -C tools
+	tools/mkdisk disk.img \
+	    --efi boot/uefi/BOOTX64.EFI \
+	    --kernel kernel.bin \
+	    --rootfs config/fsroot/
 
 # ── Run / Debug ─────────────────────────────────────────
 

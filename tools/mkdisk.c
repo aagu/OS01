@@ -250,7 +250,7 @@ int main(int argc, char **argv)
                    memcmp(buf, "EFI PART", 8) == 0 ? "OK" : "FAIL");
 
             fseek(f, PART2_START * 512LL + 1024, SEEK_SET);
-            fread(buf, 1, 2, f);
+            fread(buf, 1, 64, f);
             printf("  ext2 magic: %s\n",
                    (buf[56] == 0x53 && buf[57] == 0xEF) ? "OK" : "FAIL");
 
