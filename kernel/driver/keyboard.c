@@ -6,7 +6,8 @@
 #include <kernel/interrupt.h>
 #include <kernel/debug.h>
 #include <kernel/tty.h>
-#include <kernel/arch/x86_64/hw.h>
+#include <kernel/arch/io.h>
+#include <kernel/arch/cpu.h>
 #include <kernel/arch/x86_64/spinlock.h>
 #include <fs/vfs.h>
 
@@ -193,7 +194,7 @@ static void translate_and_push(uint8_t sc, bool ext)
 void keyboard_handler(uint64_t nr, uint64_t parameter __attribute__((unused)),
                       pt_regs_t *regs __attribute__((unused)))
 {
-    uint8_t sc = inb(0x60);
+    uint8_t sc = arch_inb(0x60);
 
     // Push raw scancode to ring buffer (for /dev/keyboard)
     if (!ring_full()) {
@@ -219,7 +220,7 @@ void keyboard_handler(uint64_t nr, uint64_t parameter __attribute__((unused)),
         static int warned = 0;
         if (!warned) {
             warned = 1;
-            outb(0x3F8, '!');  // single byte — visible in serial output
+            arch_outb(0x3F8, '!');  // single byte — visible in serial output
         }
     }
 }
@@ -246,8 +247,8 @@ void keyboard_poll(void)
 
     static bool poll_e0 = false;
 
-    while (inb(0x64) & 1) {           // 8042 status: output buffer full
-        uint8_t sc = inb(0x60);
+    while (arch_inb(0x64) & 1) {           // 8042 status: output buffer full
+        uint8_t sc = arch_inb(0x60);
 
         // Also push raw scancode to ring buffer
         if (!ring_full()) {
@@ -296,11 +297,11 @@ int keyboard_devfs_read(vfs_node_t *node, uint64_t offset,
 static void keyboard_enable_irq(void)
 {
     // Write command 0x20 ("read command byte") to port 0x64
-    while (inb(0x64) & 2) __asm__ __volatile__("pause");  // wait for input buffer empty
-    outb(0x64, 0x20);
+    while (arch_inb(0x64) & 2) arch_cpu_pause();  // wait for input buffer empty
+    arch_outb(0x64, 0x20);
     // Read response from port 0x60
-    while (!(inb(0x64) & 1)) __asm__ __volatile__("pause");  // wait for output buffer full
-    uint8_t cmd = inb(0x60);
+    while (!(arch_inb(0x64) & 1)) arch_cpu_pause();  // wait for output buffer full
+    uint8_t cmd = arch_inb(0x60);
 
     debug_irq("kbd: PS/2 command byte was %#x", cmd);
 
@@ -312,11 +313,11 @@ static void keyboard_enable_irq(void)
     cmd &= ~0x08;  // ensure keyboard is enabled
 
     // Write command 0x60 ("write command byte") to port 0x64
-    while (inb(0x64) & 2) __asm__ __volatile__("pause");
-    outb(0x64, 0x60);
+    while (arch_inb(0x64) & 2) arch_cpu_pause();
+    arch_outb(0x64, 0x60);
     // Write the byte to port 0x60
-    while (inb(0x64) & 2) __asm__ __volatile__("pause");
-    outb(0x60, cmd);
+    while (arch_inb(0x64) & 2) arch_cpu_pause();
+    arch_outb(0x60, cmd);
 
     debug_irq(" → %#x\n", cmd);
 }

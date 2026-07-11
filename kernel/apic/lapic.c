@@ -6,8 +6,8 @@
 #include <kernel/arch/x86_64/msr.h>
 #include <kernel/arch/x86_64/cpuid.h>
 #include <kernel/arch/x86_64/gate.h>
-#include <kernel/arch/x86_64/asm.h>
-#include <kernel/arch/x86_64/regs.h>
+#include <kernel/arch/irq.h>
+#include <kernel/arch/thread.h>
 #include <stdint.h>
 
 // ──────────────────────────────────────────────

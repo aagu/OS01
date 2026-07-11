@@ -3,8 +3,7 @@
 #include <kernel/pmm.h>
 #include <kernel/vmm.h>
 #include <kernel/debug.h>
-#include <kernel/arch/x86_64/asm.h>
-#include <kernel/arch/x86_64/hw.h>
+#include <kernel/arch/io.h>
 #include <stdint.h>
 #include <string.h>
 

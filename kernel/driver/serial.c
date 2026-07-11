@@ -1,10 +1,12 @@
 #include <driver/serial.h>
-#include <kernel/arch/x86_64/hw.h>
 #include <kernel/interrupt.h>
 #include <kernel/printk.h>
 #include <kernel/tty.h>
 #include <device/pic.h>
 #include <kernel/apic.h>
+#include <kernel/arch/io.h>
+#include <kernel/arch/cpu.h>
+#include <kernel/arch/irq.h>
 #include <stddef.h>
 
 // ═══════════════════════════════════════════════════════════
@@ -63,14 +65,14 @@ static void serial_handler(uint64_t nr, uint64_t parameter __attribute__((unused
 {
     (void)nr;
     // Drain the RX FIFO
-    while (inb(SERIAL_COM1 + 5) & 1) {
-        char c = inb(SERIAL_COM1);
+    while (arch_inb(SERIAL_COM1 + 5) & 1) {
+        char c = arch_inb(SERIAL_COM1);
 
         // I/O delay: allow the UART to update LSR bit 0 (Data Ready)
         // so the next while-condition read sees the correct state
         // instead of a stale value that could cause early loop exit
         // or double-reading the same byte.
-        inb(0x80);
+        arch_inb(0x80);
 
         // Push to serial ring buffer (for /dev/serial)
         if (!serial_ring_full()) {
@@ -93,13 +95,13 @@ void init_serial(void)
     serial_rx_head = 0;
     serial_rx_tail = 0;
 
-    outb(SERIAL_COM1 + 1, 0x00);    // Disable all interrupts (IER)
-    outb(SERIAL_COM1 + 3, 0x80);    // Enable DLAB (set baud rate divisor)
-    outb(SERIAL_COM1 + 0, 0x03);    // Set divisor to 3 (lo byte) 38400 baud
-    outb(SERIAL_COM1 + 1, 0x00);    //                  (hi byte)
-    outb(SERIAL_COM1 + 3, 0x03);    // 8 bits, no parity, one stop bit
-    outb(SERIAL_COM1 + 2, 0xC7);    // Enable FIFO, clear, 14-byte trigger
-    outb(SERIAL_COM1 + 4, 0x0B);    // IRQs enabled, RTS/DSR set
+    arch_outb(SERIAL_COM1 + 1, 0x00);    // Disable all interrupts (IER)
+    arch_outb(SERIAL_COM1 + 3, 0x80);    // Enable DLAB (set baud rate divisor)
+    arch_outb(SERIAL_COM1 + 0, 0x03);    // Set divisor to 3 (lo byte) 38400 baud
+    arch_outb(SERIAL_COM1 + 1, 0x00);    //                  (hi byte)
+    arch_outb(SERIAL_COM1 + 3, 0x03);    // 8 bits, no parity, one stop bit
+    arch_outb(SERIAL_COM1 + 2, 0xC7);    // Enable FIFO, clear, 14-byte trigger
+    arch_outb(SERIAL_COM1 + 4, 0x0B);    // IRQs enabled, RTS/DSR set
     // IER remains 0x00 here — RX interrupt enabled in init_serial_irq()
     // after the IOAPIC entry is unmasked, so there is no window where
     // the UART generates an IRQ that the IOAPIC has not yet routed.
@@ -113,12 +115,12 @@ void init_serial_irq(void)
     register_irq(0x24, NULL, &serial_handler, 0, ctrl, "serial");
 
     // IOAPIC entry is now unmasked — safe to enable UART RX interrupts.
-    outb(SERIAL_COM1 + 1, 0x01);    // Enable RX interrupt (Data Available)
+    arch_outb(SERIAL_COM1 + 1, 0x01);    // Enable RX interrupt (Data Available)
 
     // Diagnostic: read back UART interrupt config
-    uint8_t ier = inb(SERIAL_COM1 + 1);   // Interrupt Enable Register
-    uint8_t iir = inb(SERIAL_COM1 + 2);   // Interrupt Identification (also FCR)
-    uint8_t mcr = inb(SERIAL_COM1 + 4);   // Modem Control Register
+    uint8_t ier = arch_inb(SERIAL_COM1 + 1);   // Interrupt Enable Register
+    uint8_t iir = arch_inb(SERIAL_COM1 + 2);   // Interrupt Identification (also FCR)
+    uint8_t mcr = arch_inb(SERIAL_COM1 + 4);   // Modem Control Register
     serial_printk("serial: IRQ4 registered (IER=%#x IIR=%#x MCR=%#x)\n",
                   ier, iir, mcr);
 }
@@ -136,14 +138,13 @@ void serial_poll(void)
 {
     if (!serial_tty) return;
 
-    uint64_t irqf;
-    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(irqf) :: "memory");
+    arch_irq_state_t irqf = arch_local_irq_save();
 
-    while (inb(SERIAL_COM1 + 5) & 1) {
-        char c = inb(SERIAL_COM1);
+    while (arch_inb(SERIAL_COM1 + 5) & 1) {
+        char c = arch_inb(SERIAL_COM1);
 
         // I/O delay: allow UART to update LSR before next check
-        inb(0x80);
+        arch_inb(0x80);
 
         // Push to ring buffer (for /dev/serial)
         if (!serial_ring_full()) {
@@ -156,8 +157,7 @@ void serial_poll(void)
         tty_push_input(serial_tty, c);
     }
 
-    if (irqf & (1UL << 9))
-        __asm__ __volatile__("sti" ::: "memory");
+    arch_local_irq_restore(irqf);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -177,14 +177,14 @@ char read_serial(void)
     }
 
     // Fallback: poll the hardware directly
-    while (!(inb(SERIAL_COM1 + 5) & 1))
-        __asm__ __volatile__("pause");
+    while (!(arch_inb(SERIAL_COM1 + 5) & 1))
+        arch_cpu_pause();
 
-    char c = inb(SERIAL_COM1);
+    char c = arch_inb(SERIAL_COM1);
 
     // I/O delay: give the UART time to update LSR bit 0 (Data Ready)
     // so the next serial_received() check doesn't see a stale 1.
-    inb(0x80);
+    arch_inb(0x80);
 
     return c;
 }
@@ -194,20 +194,20 @@ bool serial_received(void)
 {
     if (!serial_ring_empty())
         return true;
-    return (inb(SERIAL_COM1 + 5) & 1) != 0;
+    return (arch_inb(SERIAL_COM1 + 5) & 1) != 0;
 }
 
 // ── Sending data ────────────────────────────────────────────
 
 static bool is_transmit_empty(void)
 {
-    return (inb(SERIAL_COM1 + 5) & 0x20) != 0;
+    return (arch_inb(SERIAL_COM1 + 5) & 0x20) != 0;
 }
 
 void write_serial(char c)
 {
     while (!is_transmit_empty())
-        __asm__ __volatile__("pause");
+        arch_cpu_pause();
 
-    outb(SERIAL_COM1, c);
+    arch_outb(SERIAL_COM1, c);
 }
