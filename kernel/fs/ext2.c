@@ -34,8 +34,11 @@ static int ext2_read_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *out)
     uint32_t block_off      = index / inodes_per_blk;
     uint32_t inode_off      = (index % inodes_per_blk) * fs->inode_size;
 
-    // Stack buffer: max inode size 256 bytes
-    uint8_t buf[256];
+    // Inode may cross a sector boundary.  ext2_read_block reads
+    // fs->sectors_per_block * 512 bytes (up to 4096 with 4KB blocks)
+    // regardless of the caller's buffer size — so we need the full
+    // block-sized buffer here, same as every other ext2 function.
+    uint8_t buf[4096];
     if (ext2_read_block(fs, table_start + block_off, buf) != 0)
         return -1;
 
