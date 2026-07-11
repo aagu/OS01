@@ -179,8 +179,8 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     vfs_init();
     if (block_device_count() > 0) {
         block_device_t *dev = block_device_get(0);
-        fat32_fs_t *fs = fat32_mount(dev);
-        if (fs)
+        fat32_fs_t *fs = NULL;
+        if (0 == fat32_init(dev, &fs))
             vfs_mount("/", dev, &fat_vfs_ops, fs);
     }
     devfs_init();                        // /dev: null, zero, serial, tty

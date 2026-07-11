@@ -94,9 +94,9 @@ typedef struct {
 
 // ── FAT32 API ─────────────────────────────────────────────
 
-// Mount a FAT32 filesystem from a block device.
-// Returns the fat32_fs_t pointer (for VFS mount's fs_data), or NULL on error.
-fat32_fs_t *fat32_mount(block_device_t *dev);
+// Initialize a FAT32 filesystem from a block device (no vfs_mount).
+// On success returns 0 and sets *out_fs. On error returns -1.
+int fat32_init(block_device_t *dev, fat32_fs_t **out_fs);
 
 // Get the next cluster in a chain. Returns FAT32_EOC_MIN or higher if end.
 uint32_t fat32_next_cluster(fat32_fs_t *fs, uint32_t current);

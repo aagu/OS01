@@ -1198,17 +1198,18 @@ struct vfs_ops fat_vfs_ops = {
     .truncate = fat_truncate,
 };
 
-// ── Mount a FAT32 volume ─────────────────────────────────
+// ── Initialize a FAT32 volume (no vfs_mount) ───────────────
 
-fat32_fs_t *fat32_mount(block_device_t *dev)
+int fat32_init(block_device_t *dev, fat32_fs_t **out_fs)
 {
-    if (!dev) return NULL;
+    *out_fs = NULL;
+    if (!dev) return -1;
 
     // Read sector 0 (BPB)
     uint8_t sector[512];
     if (block_device_read(dev, 0, 1, sector) != 0) {
         debug_fs("FAT: failed to read boot sector\n");
-        return NULL;
+        return -1;
     }
 
     FAT32_BPB *bpb = (FAT32_BPB *)sector;
@@ -1217,7 +1218,7 @@ fat32_fs_t *fat32_mount(block_device_t *dev)
     if (sector[510] != 0x55 || sector[511] != 0xAA) {
         debug_fs("FAT: boot sector signature missing (%02x %02x)\n",
                        sector[510], sector[511]);
-        return NULL;
+        return -1;
     }
 
     // For FAT32: sectors_per_fat_16 must be 0, and sectors_per_fat_32 > 0
@@ -1227,17 +1228,17 @@ fat32_fs_t *fat32_mount(block_device_t *dev)
                          ? bpb->total_sectors_16 : bpb->total_sectors_32;
         debug_fs("FAT: not FAT32 (FAT16=%u, total=%u)\n",
                        bpb->sectors_per_fat_16, total);
-        return NULL;
+        return -1;
     }
 
     if (bpb->sectors_per_fat_32 == 0) {
         debug_fs("FAT: invalid FAT32: sectors_per_fat=0\n");
-        return NULL;
+        return -1;
     }
 
     // Allocate private data
     fat32_fs_t *fs = (fat32_fs_t *)calloc(1, sizeof(fat32_fs_t));
-    if (!fs) return NULL;
+    if (!fs) return -1;
 
     memcpy(&fs->bpb, bpb, sizeof(FAT32_BPB));
     fs->dev = dev;
@@ -1246,7 +1247,6 @@ fat32_fs_t *fat32_mount(block_device_t *dev)
     fs->root_cluster = bpb->root_cluster;
 
     // Calculate sector offsets (absolute LBAs)
-    // hidden_sectors is the partition offset, 0 for superfloppy (no MBR)
     uint32_t partition_start = 0;  // disk.img is raw FAT32, no partition table
 
     fs->fat_start_sector = partition_start + bpb->reserved_sectors;
@@ -1265,5 +1265,6 @@ fat32_fs_t *fat32_mount(block_device_t *dev)
                    fs->root_cluster,
                    fat32_cluster_to_sector(fs, fs->root_cluster));
 
-    return fs;
+    *out_fs = fs;
+    return 0;
 }
