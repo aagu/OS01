@@ -204,3 +204,16 @@ gpt_info_t *gpt_scan(block_device_t *disk)
     debug_block("gpt: found %d partitions\n", info->count);
     return info;
 }
+
+#ifdef OS01_SELFTEST
+#include <kernel/selftest.h>
+
+SELFTEST(test_gpt_crc32)
+{
+    // CRC32("123456789") = 0xCBF43926 (standard test vector)
+    const char *test = "123456789";
+    uint32_t crc = gpt_crc32((const uint8_t *)test, 9);
+    if (crc != 0xCBF43926) return -1;
+    return 0;
+}
+#endif

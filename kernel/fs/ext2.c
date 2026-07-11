@@ -235,3 +235,26 @@ int ext2_init(block_device_t *dev, ext2_fs_t **out_fs)
     *out_fs = fs;
     return 0;
 }
+
+#ifdef OS01_SELFTEST
+#include <kernel/selftest.h>
+
+SELFTEST(test_ext2_magic)
+{
+    // EXT2_MAGIC must be 0xEF53
+    if (EXT2_MAGIC != 0xEF53) return -1;
+    return 0;
+}
+
+SELFTEST(test_ext2_struct_sizes)
+{
+    // Verify struct sizes match expected on-disk layout
+    // ext2_inode_t = 116 bytes (19 fields × 4B + 3 fields × 2B + 15×4B + 4×4B)
+    if (sizeof(ext2_inode_t) != 116) return -1;
+    // ext2_bgdesc_t = 32 bytes
+    if (sizeof(ext2_bgdesc_t) != 32) return -1;
+    // ext2_dirent_t = 8 bytes + flexible array member
+    if (sizeof(ext2_dirent_t) != 8) return -1;
+    return 0;
+}
+#endif

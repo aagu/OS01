@@ -429,3 +429,17 @@ void tmpfs_init(void)
     vfs_mount("/tmp", NULL, &tmpfs_vfs_ops, root);
     debug_fs("tmpfs: mounted at /tmp\n");
 }
+
+#ifdef OS01_SELFTEST
+#include <kernel/selftest.h>
+
+SELFTEST(test_tmpfs_mounted)
+{
+    // Verify /tmp is mounted after kernel init
+    struct vfs_node *tmp = vfs_lookup("/tmp");
+    if (!tmp) return -1;
+    if (tmp->type != VFS_DIR) { vfs_node_put(tmp); return -1; }
+    vfs_node_put(tmp);
+    return 0;
+}
+#endif
