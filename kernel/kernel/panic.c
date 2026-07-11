@@ -1,5 +1,7 @@
 #include <kernel/panic.h>
 #include <kernel/printk.h>
+#include <kernel/arch/cpu.h>
+#include <kernel/arch/irq.h>
 #include <stddef.h>
 #include <string.h>
 #include <stdarg.h>
@@ -15,6 +17,7 @@ void kpanic(const char * msg,...)
     va_end(args);
     serial_printk(buf);
     while (1) {
-        __asm__ __volatile__("cli; hlt");
+        arch_local_irq_disable();
+        arch_cpu_halt();
     }
 }

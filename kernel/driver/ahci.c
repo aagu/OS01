@@ -4,7 +4,8 @@
 #include <kernel/memory.h>
 #include <kernel/pmm.h>
 #include <kernel/vmm.h>
-#include <kernel/arch/x86_64/asm.h>
+#include <kernel/arch/io.h>
+#include <kernel/arch/cpu.h>
 #include <kernel/interrupt.h>
 #include <kernel/apic.h>
 #include <device/timer.h>
@@ -71,7 +72,7 @@ static inline HBA_PORT *port_regs(HBA_MEM *hba, int n)
         int _ret = 0;                                                         \
         while (expr) {                                                        \
             if (jiffies >= _deadline) { _ret = -1; break; }                   \
-            nop();                                                            \
+            arch_nop();                                                            \
         }                                                                     \
         _ret;                                                                 \
     })
@@ -154,7 +155,7 @@ void ahci_init(void)
                     debug_block("AHCI: BIOS handoff timeout\n");
                     break;
                 }
-                nop();
+                arch_nop();
             }
         }
     }
@@ -323,7 +324,7 @@ static int ahci_identify(HBA_MEM *hba, int port_num, ahci_port_t *ap)
     // ── Wait for completion ──────────────────────────
     uint64_t deadline = jiffies + AHCI_TIMEOUT_JIFFIES;
     while (port->ci & (1U << slot)) {
-        nop();
+        arch_nop();
         if (jiffies >= deadline) {
             debug_block("AHCI: port %d: IDENTIFY timeout (ci=%#x, tfd=%#x, ssts=%#x)\n",
                            port_num, port->ci, port->tfd, port->ssts);
@@ -481,7 +482,7 @@ int ahci_read_sectors(int port_num, uint64_t lba, uint32_t count, void *buffer)
     // ── Wait for completion ──────────────────────────
     uint64_t deadline = jiffies + AHCI_TIMEOUT_JIFFIES;
     while (port->ci & (1U << slot)) {
-        nop();
+        arch_nop();
         if (jiffies >= deadline) {
             debug_block("AHCI: read_sectors: port %d timeout (ci=%#x, tfd=%#x)\n",
                            port_num, port->ci, port->tfd);
@@ -578,7 +579,7 @@ int ahci_write_sectors(int port_num, uint64_t lba, uint32_t count, const void *b
     // ── Wait for completion ──────────────────────────
     uint64_t deadline = jiffies + AHCI_TIMEOUT_JIFFIES;
     while (port->ci & (1U << slot)) {
-        nop();
+        arch_nop();
         if (jiffies >= deadline) {
             debug_block("AHCI: write_sectors: port %d timeout (ci=%#x, tfd=%#x)\n",
                            port_num, port->ci, port->tfd);

@@ -1,14 +1,14 @@
 #include <kernel/percpu.h>
-#include <kernel/arch/x86_64/msr.h>
+#include <kernel/arch/cpu.h>
 #include <string.h>
-
-// GS base MSR (defined in msr.h now, but repeated for clarity)
-#ifndef IA32_GS_BASE
-#define IA32_GS_BASE  0xC0000101
-#endif
 
 percpu_t percpu_data[NR_CPUS];
 uint32_t num_cpus;
+
+void percpu_install_gs(uint32_t cpu)
+{
+    arch_set_percpu_base(&percpu_data[cpu]);
+}
 
 void percpu_init(uint32_t cpu, uint32_t apic_id)
 {
@@ -18,9 +18,4 @@ void percpu_init(uint32_t cpu, uint32_t apic_id)
     // Store self-pointer as the first qword so GS:0 yields &percpu_data[cpu]
     percpu_data[cpu].self = (uint64_t)&percpu_data[cpu];
     list_init(&percpu_data[cpu].run_queue);
-}
-
-void percpu_install_gs(uint32_t cpu)
-{
-    wrmsr(IA32_GS_BASE, (uint64_t)&percpu_data[cpu]);
 }

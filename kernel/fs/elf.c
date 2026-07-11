@@ -3,6 +3,7 @@
 #include <kernel/vmm.h>
 #include <kernel/pmm.h>
 #include <kernel/debug.h>
+#include <kernel/arch/elf.h>
 #include <stdint.h>
 #include <string.h>
 #include <driver/serial.h>
@@ -52,7 +53,7 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
         debug_fs("elf_load: not little-endian\n");
         return -1;
     }
-    if (ehdr.e_machine != EM_X86_64) {
+    if (ehdr.e_machine != ARCH_ELF_MACHINE) {
         debug_fs("elf_load: not x86_64 (machine=%#x)\n", ehdr.e_machine);
         return -1;
     }

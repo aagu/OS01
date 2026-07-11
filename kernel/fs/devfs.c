@@ -2,7 +2,7 @@
 #include <fs/vfs.h>
 #include <block/blockdev.h>
 #include <kernel/debug.h>
-#include <kernel/arch/x86_64/cpu.h>
+#include <kernel/arch/cpu.h>
 #include <kernel/slab.h>
 #include <driver/serial.h>
 #include <kernel/tty.h>
@@ -106,7 +106,7 @@ static int random_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *b
     (void)node; (void)offset;
     if (!buffer || size == 0) return 0;
     for (uint64_t i = 0; i < size; i++) {
-        uint64_t tsc = rdtsc();
+        uint64_t tsc = arch_cycle_counter();
         ((uint8_t *)buffer)[i] = (uint8_t)(tsc ^ (tsc >> 13) ^ (tsc >> 31));
     }
     return (int)size;

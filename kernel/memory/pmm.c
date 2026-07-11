@@ -3,12 +3,12 @@
 #include <kernel/memory.h>
 #include <kernel/pmm.h>
 #include <kernel/printk.h>
-#include <kernel/arch/x86_64/string.h>
 #include <kernel/debug.h>
 #include <kernel/slab.h>
 #include <kernel/arch/x86_64/spinlock.h>
 #include <kernel.h>
 #include <list.h>
+#include <string.h>
 
 uint64_t page_init(struct Page * page, uint64_t flags)
 {

@@ -1,5 +1,5 @@
 #include <driver/pci.h>
-#include <kernel/arch/x86_64/hw.h>
+#include <kernel/arch/io.h>
 #include <kernel/debug.h>
 #include <stdint.h>
 
@@ -27,14 +27,14 @@ static uint32_t pci_make_addr(uint32_t bus, uint32_t dev, uint32_t func, uint32_
 
 uint32_t pci_config_read(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset)
 {
-    outd(PCI_CONFIG_ADDR, pci_make_addr(bus, dev, func, offset));
-    return ind(PCI_CONFIG_DATA);
+    arch_outd(PCI_CONFIG_ADDR, pci_make_addr(bus, dev, func, offset));
+    return arch_ind(PCI_CONFIG_DATA);
 }
 
 void pci_config_write(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset, uint32_t value)
 {
-    outd(PCI_CONFIG_ADDR, pci_make_addr(bus, dev, func, offset));
-    outd(PCI_CONFIG_DATA, value);
+    arch_outd(PCI_CONFIG_ADDR, pci_make_addr(bus, dev, func, offset));
+    arch_outd(PCI_CONFIG_DATA, value);
 }
 
 // ── Device discovery ──────────────────────────────────────
