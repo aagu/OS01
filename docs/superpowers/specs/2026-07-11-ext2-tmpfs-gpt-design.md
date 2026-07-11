@@ -1,42 +1,45 @@
 # Ext2 + Tmpfs + GPT 分区文件系统 — 设计规格
 
 **Date:** 2026-07-11
+**Revision:** v2 (code-review feedback applied)
 **Scope:** ext2 只读驱动、tmpfs 内存文件系统、GPT 分区表、/dev 块设备、VFS 多挂载点、disk.img 双分区构建
 **Status:** proposed
 
 ## 目标
 
 将文件系统从单 FAT32（所有文件在根目录）升级为标准 Unix 布局：
-- `/boot` → FAT32 ESP 分区 (sda1)，供 UEFI 读取 `BOOTX64.EFI` + `kernel.bin`
-- `/` → ext2 分区 (sda2)，绑定 `/bin`, `/home`, `/etc` 等目录
+- `/boot` → FAT32 ESP 分区 (hda1)，供 UEFI 读取 `BOOTX64.EFI` + `kernel.bin`
+- `/` → ext2 分区 (hda2)，绑定 `/bin`, `/home`, `/etc` 等目录
 - `/tmp` → tmpfs 内存文件系统
-- `/dev` → devfs 注册块设备节点 (`/dev/sda`, `/dev/sda1`, `/dev/sda2`)
+- `/dev` → devfs 注册块设备节点 (`/dev/hda`, `/dev/hda1`, `/dev/hda2`)
 
 ## 架构
 
 ```
 disk.img (GPT)
-├── Partition 1 (sda1): FAT32 ESP  →  VFS 挂载 /boot
-└── Partition 2 (sda2): ext2       →  VFS 挂载 /
+├── Partition 1 (hda1): FAT32 ESP  →  VFS 挂载 /boot
+└── Partition 2 (hda2): ext2       →  VFS 挂载 /
 
-tmpfs (纯内存)                     →  VFS 挂载 /tmp
+tmpfs (纯内存)                      →  VFS 挂载 /tmp
 
 启动链:
   UEFI firmware → ESP (FAT32) → BOOTX64.EFI → 从 FAT32 读 kernel.bin
-  → kernel 启动 → AHCI → block_device_t sda
-  → gpt_scan() 解析分区表 → sda1, sda2
-  → vfs_mount("/boot", sda1, &fat_vfs_ops, ...)
-  → vfs_mount("/",    sda2, &ext2_vfs_ops, ...)
+  → kernel 启动 → ahci_init() → block device "hda"
+  → gpt_scan() 解析分区表 → hda1, hda2
+  → vfs_mount("/boot", hda1, &fat_vfs_ops, ...)
+  → vfs_mount("/",    hda2, &ext2_vfs_ops, ...)
   → vfs_mount("/tmp", NULL, &tmpfs_vfs_ops, ...)
   → spawn_user_task("/bin/init")
 ```
+
+**磁盘命名**: AHCI 当前使用 `hda`/`hdb` (ahci.c:265)。保持此命名，物理磁盘 `/dev/hda`，分区 `/dev/hda1`、`/dev/hda2`。若需改为 Linux 风格 `sda`，将 ahci.c 中 `'h'` 改为 `'s'` 即可（一行改动），不影响方案其他部分。
 
 ### 设计原则
 
 - **Bootloader 不碰 ext2**：`BOOTX64.EFI` 只用 FAT32 加载 `kernel.bin`，无需 ext2 代码
 - **`BOOT_INFO` 不变**：内核自己解析 GPT，不依赖 bootloader 传递分区信息
-- **分区是 block device wrapper**：`sda1` 是一个 `block_device_t`，read/write 时对 LBA 加偏移，限制在分区范围内
-- **VFS 多挂载已支持**：`mount_table[8]` + `find_mount` 最长前缀匹配 — 无需改动 VFS 核心
+- **分区是 block device wrapper**：`hda1` 是一个自定义 `block_device_t`，read/write 时对 LBA 加偏移，限制在分区范围内
+- **VFS `find_mount` 已是最长前缀匹配**：vfs.c:101-121 已有 `best_len` 追踪 + 边界检查，`/boot` 和 `/` 两个挂载点无需额外修改。会由回归测试覆盖确认
 
 ---
 
@@ -75,31 +78,78 @@ typedef struct gpt_info {
 gpt_scan(block_device_t *disk):
   1. 读 LBA 1 (GPT header)
      验证签名 "EFI PART" (8 bytes)
-     验证 header_size, revision
-  2. 读 Partition Entry Array (LBA 2, 通常 128 条 × 128B)
+     验证 header_size (≥ 92), revision
+     验证 header_crc32 (见 §5 构建工具)
+  2. 读 Partition Entry Array (LBA 2..33, 128 条 × 128B)
+     验证 partition_entries_crc32
   3. 遍历 entries:
      - type_guid == zero → skip (empty entry)
-     - 提取 start_lba, end_lba, name (UTF-16 → ASCII)
-     - 调用 block_device_create_partition(parent, start, end)
-       创建分区 wrapper
+     - 提取 start_lba, end_lba, name (UTF-16LE → ASCII)
+     - 调用 block_device_create_partition(parent, start_lba, end_lba)
      - 调用 devfs_register_blkdev(name, partition_dev)
-       在 /dev 下注册节点
   4. 返回 gpt_info_t
 ```
 
-### 1.4 分区块设备
+失败处理：若 GPT 签名不匹配或 CRC 校验失败，返回 NULL，调用方 fallback 到旧单分区 FAT32 布局（见 §6）。
 
-分区是 block_device_t 的轻量 wrapper，无需新结构体：
+### 1.4 分区块设备（partition wrapper）
+
+分区 block device 不能复用 `block_device_register()`，因为那个函数硬编码 AHCI 的 read/write 并依赖 port_num。分区需要独立注册路径：
 
 ```c
+// partition_ctx_t — 分区 block device 的私有数据
 typedef struct partition_ctx {
     block_device_t *parent;
     uint64_t        offset_lba;   // 分区起始 LBA
     uint64_t        length;       // 扇区数
 } partition_ctx_t;
+
+// 分区专用 read/write — 对 LBA 加偏移、检查越界、委托 parent
+static int partition_read(block_device_t *dev, uint64_t lba,
+                          uint32_t count, void *buf) {
+    partition_ctx_t *ctx = (partition_ctx_t *)dev->private_data; // 见下文
+    if (lba + count > ctx->length) return -1;
+    return ctx->parent->read(ctx->parent, ctx->offset_lba + lba, count, buf);
+}
+static int partition_write(block_device_t *dev, uint64_t lba,
+                           uint32_t count, const void *buf) {
+    partition_ctx_t *ctx = (partition_ctx_t *)dev->private_data;
+    if (lba + count > ctx->length) return -1;
+    return ctx->parent->write(ctx->parent, ctx->offset_lba + lba, count, buf);
+}
+
+// block_device_create_partition — 直接写入 block_devices[] 数组
+// 不经过 block_device_register()，避免 AHCI 绑定冲突
+block_device_t *block_device_create_partition(
+    block_device_t *parent, uint64_t offset_lba, uint64_t length)
+{
+    if (block_device_count() >= BLOCKDEV_MAX) return NULL;  // BLOCKDEV_MAX=8, hda + 2 分区 = 3 槽, 够用
+
+    block_device_t *dev = &block_devices_internal[block_device_count_val++];
+    dev->sector_count = length;
+    dev->sector_size  = 512;
+    dev->present      = 1;
+    dev->port_num     = 0;  // 分区无 AHCI port
+
+    partition_ctx_t *ctx = kmalloc(sizeof(partition_ctx_t));
+    ctx->parent     = parent;
+    ctx->offset_lba = offset_lba;
+    ctx->length     = length;
+    dev->private_data = ctx;     // block_device_t 新增字段
+
+    dev->read  = partition_read;
+    dev->write = partition_write;
+    return dev;
+}
 ```
 
-`block_device_t` 的 `.read/.write` 函数指针指向分区实现的 read/write，内部对 LBA 加 `offset_lba`，并检查越界，然后委托给 `parent->read/parent->write`。
+需要在 `block_device_t` 中新增 `void *private_data` 字段（struct 中追加到末尾）。
+
+**注意**：`block_devices[]` 当前是 `static` 在 `blockdev.c` 内部。分区创建需要访问该数组，有两种方式：
+- **A)** 新增 `block_device_register_raw()` 函数：接受 read/write/private_data，写入数组但不绑 AHCI — 改动小，封装好
+- **B)** 在 `blockdev.c` 中实现 `block_device_create_partition`，调用内部数组 — 分区逻辑聚在 blockdev 中
+
+推荐 **A**。
 
 ---
 
@@ -109,29 +159,72 @@ typedef struct partition_ctx {
 
 | 文件 | 类型 | 说明 |
 |------|------|------|
-| `kernel/fs/devfs.c` | 修改 | 新增 `devfs_register_blkdev()` (~30 行增量) |
+| `kernel/fs/devfs.c` | 修改 | 新增加载 blkdev dispatch + `devfs_register_blkdev()` (~40 行增量) |
+| `kernel/include/fs/devfs.h` | 修改 | 新增 `devfs_register_blkdev()` 声明 |
 
-### 2.2 接口
+### 2.2 设计 — 避免 fs_data 语义冲突
+
+**现状**: devfs 用 `node->fs_data` 存数组索引（devfs.c:123: `idx = (int)(uintptr_t)node->fs_data`），`devfs_readdir` 设 `entry->ino = i`（devfs.c:157），`__vfs_lookup` 把 `entry->ino` 写回 `child->fs_data`（vfs.c:198）。即 `fs_data` 语义是 **devices[] 整数索引**，不是指针。
+
+**方案**: 保持 `fs_data` 为索引不变。把 `block_device_t *` 存入 `devices[idx].private_data`，在 `devfs_read/devfs_write` 中按 `devices[idx].type` 分支 dispatch：
 
 ```c
-// 注册块设备节点到 /dev/<name>
+// devfs_device_t 新增字段
+typedef struct devfs_device {
+    char     name[DEVFS_NAME_MAX];
+    uint8_t  type;       // VFS_CHRDEV or VFS_BLKDEV
+    int (*read)(vfs_node_t *, uint64_t, uint64_t, void *);
+    int (*write)(vfs_node_t *, uint64_t, uint64_t, void *);
+    void    *private_data;  // chrdev: 自定义; blkdev: block_device_t *
+    int      registered;
+} devfs_device_t;
+
+// devfs_read/dispatch 中新增 blkdev 分支
+static int devfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer) {
+    int idx = (int)(uintptr_t)node->fs_data;
+    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+        return -1;
+
+    if (devices[idx].type == VFS_BLKDEV) {
+        // 扇区级读写：offset 必须按 sector_size 对齐
+        block_device_t *bdev = (block_device_t *)devices[idx].private_data;
+        uint32_t lba   = (uint32_t)(offset / 512);
+        uint32_t count = (uint32_t)((size + 511) / 512);
+        uint8_t *tmp = kmalloc(count * 512);  // 临时缓冲
+        int ret = block_device_read(bdev, lba, count, tmp);
+        if (ret == 0) memcpy(buffer, tmp + (offset % 512), size);
+        kfree(tmp);
+        return (ret == 0) ? (int)size : -1;
+    }
+
+    // chrdev path (existing)
+    if (devices[idx].read)
+        return devices[idx].read(node, offset, size, buffer);
+    return -1;
+}
+// devfs_write 同理
+```
+
+### 2.3 接口
+
+```c
 int devfs_register_blkdev(const char *name, block_device_t *dev);
 ```
 
-与 `devfs_register_chrdev` 镜像，区别：`type = VFS_BLKDEV`，`fs_data` 指向 `block_device_t *`。`devfs_read/devfs_write` 对 `VFS_BLKDEV` 节点直接走 `block_device_read/block_device_write` 进行扇区级读写。
+实现：同 `devfs_register_chrdev`，但 `type = VFS_BLKDEV`，`private_data = dev`，`read/write = NULL`（dispatch 走 blkdev 分支）。
 
-### 2.3 注册顺序
+### 2.4 注册顺序
 
-`kernel_main()` 中：
+`kernel_main()` 中（详见 §6）：
 ```
-block_device_init()       → sda（AHCI port 0 注册为 block device + /dev/sda）
-devfs_init()              → /dev 挂载 + 字符设备注册（null, zero, random, serial, tty）
-                          → devices[] 数组零初始化完成
-gpt_scan(sda)             → 内部调用 devfs_register_blkdev("sda1", ...),
-                            devfs_register_blkdev("sda2", ...)
+ahci_init()                   → block_device_register("hda", port, sectors)
+devfs_init()                  → /dev 挂载 + devices[] 零初始化 + 字符设备
+// main.c 在 ahci_init 后 devfs_init 后：devfs_register_blkdev("hda", dev)
+gpt_scan(block_device_get(0)) → 调用 devfs_register_blkdev("hda1", ...),
+                                devfs_register_blkdev("hda2", ...)
 ```
 
-注意：`block_device_init()` 不仅要注册 `sda` 到 block device 子系统，还要调用 `devfs_register_blkdev("sda", dev)` 将其注册到 `/dev/sda`。这确保了 `gpt_scan()` 调用 `devfs_register_blkdev` 时 `devices[]` 已经是零初始化状态。
+物理磁盘 `hda` 的 devfs 注册由 `main.c` 在 `ahci_init()` + `devfs_init()` 之后显式调用 `devfs_register_blkdev("hda", block_device_get(0))`。分区 hda1/hda2 的 devfs 注册由 `gpt_scan()` 内部完成。
 
 ---
 
@@ -142,20 +235,32 @@ gpt_scan(sda)             → 内部调用 devfs_register_blkdev("sda1", ...),
 | 文件 | 类型 | 说明 |
 |------|------|------|
 | `kernel/fs/ext2.c` | 新增 | ext2 只读驱动 (~350 行) |
-| `kernel/include/fs/ext2.h` | 新增 | on-disk 结构体 + `ext2_mount()` 声明 |
+| `kernel/include/fs/ext2.h` | 新增 | on-disk 结构体 + `ext2_init()` 声明 |
 
 ### 3.2 On-disk 结构
 
 ```c
-// superblock：offset 1024 (sector 2 byte 0), 共 1024 bytes
+// ── constants ─────────────────────────────────────────
+#define EXT2_SB_OFFSET     1024    // superblock byte offset (bytes)
+#define EXT2_SB_SIZE       1024    // superblock 总大小
+#define EXT2_MAGIC         0xEF53
+#define EXT2_INODE_SIZE_OLD 128   // ext2 默认 inode 大小
+#define EXT2_ROOT_INO      2      // 根目录 inode
+
+#define EXT2_S_IFREG       0x8000
+#define EXT2_S_IFDIR       0x4000
+
+// ── superblock (offset 1024, 1024 bytes) ──────────────
+// 只读到 s_algo_bitmap；不映射 trailing padding。
+// 读 1024 bytes 进栈缓冲，memcpy 前 264 bytes 到此 struct。
 typedef struct __attribute__((packed)) {
     uint32_t s_inodes_count;
     uint32_t s_blocks_count;
-    uint32_t s_r_blocks_count;     // reserved blocks
+    uint32_t s_r_blocks_count;
     uint32_t s_free_blocks_count;
     uint32_t s_free_inodes_count;
-    uint32_t s_first_data_block;   // 0 = block_size >= 1024, 1 = block_size == 1024
-    uint32_t s_log_block_size;     // block_size = 1024 << this
+    uint32_t s_first_data_block;
+    uint32_t s_log_block_size;
     uint32_t s_log_frag_size;
     uint32_t s_blocks_per_group;
     uint32_t s_frags_per_group;
@@ -164,7 +269,7 @@ typedef struct __attribute__((packed)) {
     uint32_t s_wtime;
     uint16_t s_mnt_count;
     uint16_t s_max_mnt_count;
-    uint16_t s_magic;              // 0xEF53
+    uint16_t s_magic;
     uint16_t s_state;
     uint16_t s_errors;
     uint16_t s_minor_rev_level;
@@ -174,22 +279,22 @@ typedef struct __attribute__((packed)) {
     uint32_t s_rev_level;
     uint16_t s_def_resuid;
     uint16_t s_def_resgid;
-    // ext2 revision 1 额外字段 (从 offset 84 开始, 只读到 s_rev_level==1 时使用):
-    uint32_t s_first_ino;          // 第一个非保留 inode (通常是 11)
-    uint16_t s_inode_size;         // inode 结构大小 (通常 128)
-    uint16_t s_block_group_nr;     // 此 superblock 副本所在的 block group
-    uint32_t s_feature_compat;     // 兼容特性位图
-    uint32_t s_feature_incompat;   // 不兼容特性位图
-    uint32_t s_feature_ro_compat;  // 只读兼容特性位图
+    // ext2 revision 1 额外字段 (offset 84-263):
+    uint32_t s_first_ino;
+    uint16_t s_inode_size;         // ★ 必须读取, 用于 inode 偏移计算
+    uint16_t s_block_group_nr;
+    uint32_t s_feature_compat;
+    uint32_t s_feature_incompat;
+    uint32_t s_feature_ro_compat;
     uint8_t  s_uuid[16];
     char     s_volume_name[16];
     char     s_last_mounted[64];
     uint32_t s_algo_bitmap;
-    // (后续字段 + padding 到 1024 bytes)
-    uint8_t  _pad[0];              // struct 用 sizeof 验证总大小 = 1024
+    // 后续 preseed block / journal UUID 等字段不使用。
+    // 此 struct 映射 264 bytes; padding 到 1024 bytes 不在 struct 中。
 } ext2_superblock_t;
 
-// Block Group Descriptor (32 bytes)
+// ── Block Group Descriptor (32 bytes) ─────────────────
 typedef struct __attribute__((packed)) {
     uint32_t bg_block_bitmap;
     uint32_t bg_inode_bitmap;
@@ -201,9 +306,12 @@ typedef struct __attribute__((packed)) {
     uint8_t  bg_reserved[12];
 } ext2_bgdesc_t;
 
-// Inode (128 bytes)
+// ── Inode (128 bytes, 或 s_inode_size) ─────────────────
+// 结构体只映射前 128 字节(12 data block ptrs 之后)。
+// 若 s_inode_size > 128, 在 read 时读取完整的 s_inode_size 字节到栈缓冲,
+// 然后 memcpy 前 128 字节到此 struct。
 typedef struct __attribute__((packed)) {
-    uint16_t i_mode;        // S_IFREG=0x8000, S_IFDIR=0x4000, perms
+    uint16_t i_mode;
     uint16_t i_uid;
     uint32_t i_size;
     uint32_t i_atime;
@@ -214,22 +322,24 @@ typedef struct __attribute__((packed)) {
     uint16_t i_links_count;
     uint32_t i_blocks;      // 512B sector count
     uint32_t i_flags;
-    uint32_t i_osd1;        // OS-specific
+    uint32_t i_osd1;
     uint32_t i_block[15];   // [0..11]=direct, [12]=single indirect, [13]=double, [14]=triple
     uint32_t i_generation;
     uint32_t i_file_acl;
     uint32_t i_dir_acl;
-    uint32_t i_faddr;       // fragment address (不使用)
-    // ... osd2 等填充到 128 字节
+    uint32_t i_faddr;
+    // 若 s_inode_size > 128, 这之后还有 osd2 / extra 字段, 不影响读取。
 } ext2_inode_t;
 
-// Directory Entry (变长, rec_len 链表)
+// ── Directory Entry (变长, rec_len 链接) ──────────────
+// name 是 name_len 字节, 标准 ext2 不保证 NUL 结尾！
+// 比较文件名时必须用 name_len, 不能用 strcmp。
 typedef struct __attribute__((packed)) {
     uint32_t inode;
-    uint16_t rec_len;       // 到下一个 entry 的偏移
-    uint8_t  name_len;
+    uint16_t rec_len;       // 到下一个 entry 的偏移 (字节)
+    uint8_t  name_len;      // name 的字节数
     uint8_t  file_type;     // 0=unknown, 1=reg, 2=dir
-    char     name[];        // name_len bytes, 后跟 '\0' (非标准, 但常见)
+    char     name[];        // name_len bytes, 无 NUL 结尾
 } ext2_dirent_t;
 ```
 
@@ -238,72 +348,140 @@ typedef struct __attribute__((packed)) {
 ```c
 typedef struct {
     block_device_t   *dev;
-    uint32_t          block_size;
-    uint32_t          sectors_per_block;
+    uint32_t          block_size;         // 1024, 2048, 4096
+    uint32_t          sectors_per_block;  // block_size / 512
     uint32_t          inodes_per_group;
     uint32_t          blocks_per_group;
     uint32_t          num_block_groups;
-    ext2_bgdesc_t    *bgdesc_table;    // kmalloc 的 bgdesc 数组
-    uint8_t          *block_buf;       // block_size 字节临时缓冲
+    uint32_t          inode_size;         // ★ 从 s_inode_size 读取
+    ext2_bgdesc_t    *bgdesc_table;       // kmalloc 的完整 bgdesc 数组
+    spinlock_t        lock;               // SMP 并发保护 (见 §3.7)
 } ext2_fs_t;
 ```
 
+**注意**：不保留全局 `block_buf`（见 §3.7 SMP 并发分析）。
+
 ### 3.4 核心函数
 
+**ext2_read_block — 栈分配缓冲, 无共享状态**:
+
+```c
+static int ext2_read_block(ext2_fs_t *fs, uint32_t block, void *buf) {
+    uint64_t lba = (uint64_t)block * fs->sectors_per_block;
+    return block_device_read(fs->dev, lba, fs->sectors_per_block, buf);
+}
 ```
-ext2_mount(block_device_t *dev):
-  1. ext2_fs_t *fs = calloc(1, sizeof(ext2_fs_t))
-  2. 读 superblock (sector 2, 1024 bytes)
-  3. 验证 s_magic == 0xEF53
-  4. block_size = 1024 << sb.s_log_block_size
-  5. sectors_per_block = block_size / 512
-  6. blocks_per_group = sb.s_blocks_per_group
-  7. inodes_per_group = sb.s_inodes_per_group
-  8. num_block_groups = (sb.s_blocks_count + blocks_per_group - 1) / blocks_per_group
-  9. 读 bgdesc table (紧接 superblock 的 block)
-  10. fs->block_buf = kmalloc(block_size)
-  11. vfs_mount("/", dev, &ext2_vfs_ops, fs)
+
+**ext2_mount**:
+
 ```
+ext2_init(block_device_t *dev, ext2_fs_t **out_fs):
+  1. *out_fs = NULL
+  2. ext2_fs_t *fs = calloc(1, sizeof(ext2_fs_t))
+  3. spin_init(&fs->lock)
+
+  4. 读 superblock 到栈缓冲:
+     uint8_t sb_buf[1024];
+     block_device_read(dev, 2, 2, sb_buf);  // sector 2+3 = 1024 bytes
+     验证 sb_buf 中 magic == 0xEF53
+
+  5. 计算关键参数:
+     block_size = 1024 << sb.s_log_block_size
+     sectors_per_block = block_size / 512
+     blocks_per_group = sb.s_blocks_per_group
+     inodes_per_group = sb.s_inodes_per_group
+     num_block_groups = (sb.s_blocks_count + blocks_per_group - 1) / blocks_per_group
+     fs->inode_size = (sb.s_inode_size != 0) ? sb.s_inode_size : 128
+        // mke2fs -I 128 → s_inode_size = 128; 默认 256 → 读 256 后只映射前 128B
+
+  6. bgdesc 起始块 (★ 取决于 block_size):
+     - block_size == 1024: SB 在 block 1 (byte 1024), bgdesc 在 block 2
+     - block_size == 2048: SB 在 block 0 (byte 1024), bgdesc 在 block 1
+     - block_size == 4096: SB 在 block 0 (byte 1024), bgdesc 在 block 1
+     公式: sb_block    = (block_size == 1024) ? 1 : 0
+          bgdesc_block = sb_block + 1
+
+  7. 读 bgdesc table:
+     table_size = num_block_groups * 32 (bgdesc = 32 bytes)
+     table_blocks = (table_size + block_size - 1) / block_size
+     fs->bgdesc_table = kmalloc(table_blocks * block_size)
+     循环 for i in 0..table_blocks-1:
+       ext2_read_block(fs, bgdesc_block + i, (uint8_t*)fs->bgdesc_table + i * block_size)
+
+  8. *out_fs = fs; return 0
+```
+
+调用方（main.c）负责调用 `vfs_mount("/", dev, &ext2_vfs_ops, fs)`。与 `fat32_init` 风格一致：驱动返回 fs 指针，调用方挂载。
+
+**ext2_read_inode**:
 
 ```
 ext2_read_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *out):
-  1. group = (ino - 1) / inodes_per_group
-  2. index = (ino - 1) % inodes_per_group
-  3. table_start = bgdesc_table[group].bg_inode_table
-  4. inodes_per_block = block_size / 128  (inode_size = 128)
-  5. block_off = index / inodes_per_block
-  6. inode_off = (index % inodes_per_block) * 128
-  7. ext2_read_block(fs, table_start + block_off, fs->block_buf)
-  8. memcpy(out, fs->block_buf + inode_off, 128)
+  1. group = (ino - 1) / fs->inodes_per_group
+  2. index = (ino - 1) % fs->inodes_per_group
+  3. table_start = fs->bgdesc_table[group].bg_inode_table
+  4. inode_size = fs->inode_size  ★ 使用 fs 中存储的值
+  5. inodes_per_block = fs->block_size / inode_size
+  6. block_off = index / inodes_per_block
+  7. inode_off = (index % inodes_per_block) * inode_size
+  8. // 栈分配或 kmalloc 临时缓冲 (inode 最大 256B, 栈用 256B 数组)
+     uint8_t buf[256];  // 足够覆盖 256B inode
+     ext2_read_block(fs, table_start + block_off, buf);
+  9. memcpy(out, buf + inode_off, sizeof(ext2_inode_t));
+     // 只拷贝 struct 映射的前 128 bytes
 ```
+
+`buf` 是栈变量（最大 256B），不共享 → 无 SMP 竞争。
+
+**ext2_bmap**:
 
 ```
 ext2_bmap(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t logical_block):
   映射 logical block number → physical block number
-  实现 direct blocks [0..11] + single indirect [12]
-  double/triple indirect 返回 0 (暂不实现)
+  Direct blocks [0..11]: inode->i_block[logical_block]
+  Single indirect [12]: 读 single-indirect block → 栈分配 uint32_t 数组 → 返回条目
+  Double/triple indirect: 返回 0 (暂不实现, 见 §3.6)
 ```
+
+**ext2_find_entry — 用 name_len 匹配, 不用 strcmp**:
 
 ```
 ext2_find_entry(ext2_fs_t *fs, ext2_inode_t *dir_inode, const char *name):
-  遍历目录数据块（通过 ext2_bmap 获取 physical block）
-  逐条 ext2_dirent_t 链（rec_len 跳转）
-  匹配 name → 返回 inode number
+  1. 获取 name_len = strlen(name)
+  2. 遍历目录数据块（通过 ext2_bmap 获取 physical block）
+  3. 对每个块:
+     - 栈分配 uint8_t block_data[block_size]  ★ 不共享缓冲
+     - ext2_read_block(fs, phys_block, block_data)
+     - 遍历 ext2_dirent_t 链（rec_len 跳转）
+     - 对每个 entry:
+        * inode == 0 → 跳过(已删除)
+        * dir_entry->name_len != name_len → 跳过
+        * memcmp(dir_entry->name, name, name_len) == 0 → 返回 dir_entry->inode
+  4. 返回 0 (not found)
 ```
+
+**ext2_vfs_read / ext2_vfs_readdir**:
 
 ```
 ext2_vfs_read(vfs_node_t *node, offset, size, buffer):
-  1. 从 node->fs_data 获取 inode number
-  2. ext2_read_inode() 获取 inode
-  3. 通过 ext2_bmap 映射逻辑块 → 物理块
-  4. ext2_read_block → memcpy 到 buffer
+  1. uint32_t ino = (uint32_t)(uintptr_t)node->fs_data
+  2. spin_lock(&fs->lock)  // 保护 block_device I/O 顺序（多核并发）
+  3. ext2_inode_t inode; ext2_read_inode(fs, ino, &inode)
+  4. 通过 ext2_bmap 映射逻辑块 → 物理块
+  5. 栈分配 uint8_t block_buf[block_size]; ext2_read_block(fs, phys_block, block_buf)
+  6. memcpy(buffer, block_buf + intra_block_offset, chunk)
+  7. spin_unlock(&fs->lock)
 
 ext2_vfs_readdir(vfs_node_t *node, index, entry):
-  1. 从 node->fs_data 获取 inode number
-  2. ext2_read_inode() 获取目录 inode
-  3. 遍历 ext2_dirent_t 链到 index 位置
-  4. 填充 vfs_dirent_t (name, type, size, ino)
+  1. uint32_t ino = (uint32_t)(uintptr_t)node->fs_data
+  2. spin_lock(&fs->lock)
+  3. ext2_inode_t dir_inode; ext2_read_inode(fs, ino, &dir_inode)
+  4. 遍历 ext2_dirent_t 链到 index 位置
+  5. 填充 vfs_dirent_t (name, type, size, ino)
+  6. spin_unlock(&fs->lock)
 ```
+
+**node->fs_data 存储 inode number**：ext2 驱动将 `(void *)(uintptr_t)ino` 存入 `fs_data`（与 FAT32 存储 cluster number 的方式一致）。`__vfs_lookup` 生成 child node 时，`ino` 来自 `ext2_vfs_readdir` 的 `entry->ino`。
 
 ### 3.5 VFS Ops 表
 
@@ -312,8 +490,8 @@ static vfs_ops_t ext2_vfs_ops = {
     .read     = ext2_vfs_read,
     .write    = NULL,      // 返回 -1（只读）
     .readdir  = ext2_vfs_readdir,
-    .create   = NULL,      // 返回 NULL（只读）
-    .unlink   = NULL,      // 返回 -errno（只读）
+    .create   = NULL,
+    .unlink   = NULL,
     .mkdir    = NULL,
     .rmdir    = NULL,
     .rename   = NULL,
@@ -321,18 +499,31 @@ static vfs_ops_t ext2_vfs_ops = {
 };
 ```
 
-写操作 NULL 指针由 VFS 层检查：`vfs_write()` 中 `node->ops->write == NULL` 返回 -1。对 ext2 上文件的 write syscall 会返回 -EROFS（只读文件系统），无需在 ext2 内部处理。
+写操作 NULL 指针已由 VFS 层检查：`vfs_write()` 中 `!node->ops->write` → `return -1`。
 
 ### 3.6 未实现
 
-- **Double/Triple 间接块**：只实现 direct (12) + single indirect (1)。12 个 direct 块 + (block_size/4) 个 single-indirect 条目，覆盖 ~4MB + (block_size/4)*block_size 范围，对 `/bin` 下的程序完全足够
-- **Symlink 解析**：ext2 目录支持，VFS 不做 symlink 追踪（后续任务）
-- **权限检查**：不检查 uid/gid/permission bits
-- **Journal replay**：ext2 本身无 journal，不涉及
+- **Double/Triple 间接块**：只实现 direct (12) + single indirect (1)。覆盖 ~(12 + block_size/4) 个块，对 `/bin` 下的程序足够
+- **Symlink 解析**：后续任务
+- **权限检查**：不检查
+- **Journal replay**：ext2 无 journal
 
-### 3.7 参考
+### 3.7 SMP 并发安全
 
-Aquila ext2 驱动（221 行只读核心），本实现扩展至 350 行是因为包含完整的间接块映射和 readdir 处理。
+当前内核默认 `-smp 2`，多核可能同时调用 ext2 VFS ops。风险：
+
+- **block device I/O 非原子**：两个 CPU 同时做 `block_device_read` 共享同一个 AHCI port 的 DMA 缓冲区 → 数据错乱
+- **ext2_fs_t 元数据读取**：`ext2_read_inode` 计算 bgdesc→block 后读出，若并发则无数据竞争（输出在调用方栈上），但 block device 层不一定是线程安全的
+
+**方案**：`ext2_fs_t` 中加一个 `spinlock_t lock`。`ext2_vfs_read` / `ext2_vfs_readdir` 在开始读 block device 之前 `spin_lock(&fs->lock)`，完成后 `spin_unlock`。这序列化了所有 ext2 I/O，性能开销极低（只读场景，临界区只有 block I/O 等待）。
+
+**不在 ext2_fs_t 中保留共享的 `block_buf`**：每个函数在自己的栈上（`uint8_t buf[256]` 或 `uint8_t block_buf[block_size]`）分配临时缓冲。block_size 最大 4096，加上 inode buffer 256B，栈开销 ~4352B — 在内核栈（`STACK_SIZE` 通常 16KB）的安全范围内。
+
+**FAT32 同样有并发风险**，但不在这次修改范围内。若要在 ext2 之前先修 FAT，可将 spinlock 放在 `block_device_t` 层面。
+
+### 3.8 参考
+
+Aquila ext2 驱动（221 行只读核心）。本实现扩展至 ~350 行因包含完整间接块映射、s_inode_size 动态读取、SMP 锁和 name_len 比较。
 
 ---
 
@@ -348,11 +539,15 @@ Aquila ext2 驱动（221 行只读核心），本实现扩展至 350 行是因�
 ### 4.2 数据结构
 
 ```c
-// 数据块：4KB 固定，链表连接
+// 数据块：使用 alloc_pages(0) 获取整页 (4KB)
+// 以 Phy_To_Virt 转换后访问。元数据（next + blk_idx）用 kmalloc。
+// 选择 alloc_pages 而非 kmalloc(>4096) 的原因：slab 分配器对超页大小对象效率低，
+// alloc_pages 返回的 4KB 页与 tmpfs 逻辑块大小天然对齐。
+
 typedef struct tmpfs_block {
-    struct tmpfs_block *next;
+    struct tmpfs_block *next;       // kmalloc(sizeof(tmpfs_block_ptr))
     uint64_t            blk_idx;
-    uint8_t             data[4096];
+    uint8_t            *data;       // alloc_pages(0) → Phy_To_Virt → 4096 bytes
 } tmpfs_block_t;
 
 // 节点：文件或目录
@@ -365,7 +560,7 @@ typedef struct tmpfs_node {
 
     // 文件：数据块链表
     tmpfs_block_t    *first_block;
-    tmpfs_block_t    *last_block;     // 追加优化
+    tmpfs_block_t    *last_block;     // 追加 O(1)
 
     // 目录：子节点动态数组
     struct tmpfs_node **children;
@@ -377,63 +572,41 @@ typedef struct tmpfs_node {
 ### 4.3 核心函数
 
 ```
-tmpfs_find_block(node, blk_idx):
-  遍历 tmpfs_block 链表，定位到 blk_idx 位置
-  若 blk_idx 超过已分配块 → return NULL
-
-tmpfs_grow_to(node, blk_idx):
-  从 last_block 开始，分配新 tmpfs_block_t (kmalloc)
-  追加到链表尾部直到 blk_idx
-  更新 size
-
 tmpfs_vfs_read(node, offset, size, buffer):
   blk_idx = offset / 4096
-  定位 first_block → 遍历到 blk_idx
-  从块内偏移 (offset % 4096) 开始 memcpy
-  跨块时推进到下一个块继续复制
-  直到 size 字节读完或到达 size 边界
+  遍历块链表到 blk_idx → 从块内偏移 memcpy
+  跨块时推进到下一个块，直到 size 读完或 size 边界
 
 tmpfs_vfs_write(node, offset, size, buffer):
-  tmpfs_grow_to(node, (offset + size - 1) / 4096)
-  同 read 的逆操作，从 buffer 写回数据块
+  tmpfs_grow_to(node, last_blk = (offset + size - 1) / 4096)
+  同 read 逆操作，从 buffer 写回数据块
 
 tmpfs_vfs_readdir(dir, index, entry):
   . (index 0) → ino=(uintptr_t)dir, type=DIR
-  .. (index 1) → parent 信息
-  children[index-2] (index >= 2) → 子节点的 name/type/size/ino
+  .. (index 1) → parent info
+  children[index-2] (index >= 2) → 子节点
 
 tmpfs_vfs_create(dir, name):
-  分配新 tmpfs_node_t
-  dir->children 数组扩容（realloc 或 kmalloc 更大数组 + memcpy）
-  追加到 children[child_count++]
+  分配新 tmpfs_node_t → 追加到 dir->children[] 数组（扩容+memcpy 或重新 kmalloc）
 
-tmpfs_vfs_mkdir(dir, name):
-  同 create，但 type = VFS_DIR
-
-tmpfs_vfs_unlink(dir, name):
-  在 children[] 中查找 name → 释放节点 + 数据块
-  数组缩容（把末尾元素移到删除位置，child_count--）
-
-tmpfs_vfs_rmdir(dir, name):
-  同 unlink，但检查子目录为空（child_count == 0）
-
-tmpfs_vfs_truncate(node, new_size):
-  释放 new_size 之后的块
-  调整 size
+tmpfs_vfs_mkdir(dir, name):  同 create, type = VFS_DIR
+tmpfs_vfs_unlink(dir, name):  在 children[] 中查找 → 释放节点+数据块 → 缩容
+tmpfs_vfs_rmdir(dir, name):   同 unlink, 检查子目录 child_count == 0
+tmpfs_vfs_truncate(node, sz): 释放 new_size 之后的块, 调整 size
+tmpfs_vfs_rename:            从旧父目录 children[] 移除 → 挂到新父目录
 ```
 
 ### 4.4 初始化
 
 ```c
 void tmpfs_init(void) {
-    // 创建 tmpfs 根节点 (目录类型)
     tmpfs_node_t *root = calloc(1, sizeof(tmpfs_node_t));
     root->type = VFS_DIR;
+    strcpy(root->name, "/");
     root->children = kmalloc(TMPFS_CHILDREN_INIT_CAP * sizeof(void *));
     root->child_cap = TMPFS_CHILDREN_INIT_CAP;
 
     vfs_mount("/tmp", NULL, &tmpfs_vfs_ops, root);
-    // dev=NULL 表示无后备 block device，VFS 已有此路径
 }
 ```
 
@@ -457,99 +630,174 @@ static vfs_ops_t tmpfs_vfs_ops = {
 
 ## 5. 构建系统
 
-### 5.1 文件
+### 5.1 职责边界
+
+`tools/mkdisk.c` 是一个宿主 C 程序，职责分两层：
+
+- **自己实现的部分**（~200 行 C）：Protective MBR、GPT header、Partition Entry Array（含 CRC32）、磁盘布局计算、校验
+- **调用宿主工具的部分**（`system()` 或 `fork+exec`）：`mkfs.vfat` + `mtools`（FAT32 分区）、`mke2fs` + `debugfs`（ext2 分区）
+
+`tools/Makefile` 明确列出依赖检测，缺工具时输出友好报错：
+
+```makefile
+REQUIRED := mkfs.vfat mcopy mmd mke2fs debugfs
+check-deps:
+	@for cmd in $(REQUIRED); do \
+	    command -v $$cmd >/dev/null 2>&1 || { echo "ERROR: missing $$cmd"; exit 1; }; \
+	done
+```
+
+### 5.2 mkdisk 详细流程
+
+```
+tools/mkdisk disk.img --efi BOOTX64.EFI --kernel kernel.bin --rootfs config/fsroot/
+
+参数:
+  disk.img        输出文件
+  --efi           BOOTX64.EFI 路径
+  --kernel        kernel.bin 路径
+  --rootfs        ext2 内容源目录 (config/fsroot/)
+
+  FAT32_ESP_SIZE = 64 * 1024 * 1024   (64 MB)
+  EXT2_SIZE      = 128 * 1024 * 1024  (128 MB)
+  TOTAL_SIZE     = FAT32_ESP_SIZE + EXT2_SIZE
+  SECTOR_SIZE    = 512
+  ALIGN_LBA      = 2048               (standard GPT partition alignment)
+
+流程:
+  ── Phase 1: 磁盘布局 ──────────────────────────────────
+  1. total_sectors = TOTAL_SIZE / 512
+  2. Create disk.img (ftruncate 或 lseek+write 1 byte)
+  3. Write Protective MBR (LBA 0):
+     一个 DOS 分区条目: bootable=0, type=0xEE,
+     start_lba=1, size_lba=0xFFFFFFFF (clamped)
+  4. Compute partition boundaries:
+     part1_start  = ALIGN_LBA           (2048)
+     part1_sectors = FAT32_ESP_SIZE / 512
+     part1_end    = part1_start + part1_sectors - 1
+     part2_start  = ALIGN_UP(part1_end + 1, ALIGN_LBA)
+     part2_sectors = EXT2_SIZE / 512
+     part2_end    = part2_start + part2_sectors - 1
+
+  ── Phase 2: GPT header + partition entries ─────────────
+  5. Write GPT header (LBA 1):
+     uint8_t hdr[92] 零初始化
+     hdr[0..7]   = "EFI PART"
+     hdr[8..11]  = 0x00010000           (revision 1.0)
+     hdr[12..15] = 92                   (header_size)
+     hdr[24..31] = 1                    (my_lba)
+     hdr[32..39] = total_sectors - 1    (alternate_lba, = backup GPT header LBA)
+     hdr[40..47] = 34                   (first_usable_lba)
+     hdr[48..55] = total_sectors - 34   (last_usable_lba)
+     hdr[72..79] = 2                    (partition_entry_lba)
+     hdr[80..83] = 128                  (num_partition_entries)
+     hdr[84..87] = 128                  (size_of_partition_entry)
+     // hdr[16..19] = header_crc32 — 填 0 后计算 (见 CRC32 节)
+     // hdr[88..91] = reserved (0)
+
+  6. Build Partition Entry Array (LBA 2..33):
+     128 entries × 128 bytes per entry = 16384 bytes (32 sectors)
+     Fill Entry 1 (at offset 0×0):
+       type_guid = C12A7328-F81F-11D2-BA4B-00A0C93EC93B  (EFI System Partition)
+       unique_guid = random (read /dev/urandom 16 bytes)
+       starting_lba = part1_start
+       ending_lba   = part1_end
+       attributes   = 0
+       name: UTF-16LE "ESP" + \0 padding → 72 bytes
+     Fill Entry 2 (at offset 0×80):
+       type_guid = 0FC63DAF-8483-4772-8E79-3D69D8477DE4  (Linux filesystem)
+       unique_guid = random
+       starting_lba = part2_start
+       ending_lba   = part2_end
+       attributes   = 0
+       name: UTF-16LE "rootfs" + \0 padding → 72 bytes
+     Remaining 126 entries: zero-filled
+
+  7. Compute partition_entries_crc32 over the 16384-byte array.
+     Write to GPT header offset 88 (header->partition_entries_crc32).
+
+  8. Compute header_crc32 (header_crc32 field = 0 during computation).
+     Write to GPT header offset 16.
+
+  9. Write GPT header + partition entry array to disk:
+     lseek to LBA 1 → write 92-byte header
+     lseek to LBA 2 → write 16384-byte partition entry array
+
+  ── Phase 3: Fill FAT32 ESP partition ───────────────────
+  10. Build esp.img via system():
+      dd if=/dev/zero of=esp.img bs=1M count=64
+      mkfs.vfat -F 32 esp.img
+      mmd -i esp.img ::/EFI
+      mmd -i esp.img ::/EFI/BOOT
+      mcopy -i esp.img BOOTX64.EFI ::/EFI/BOOT
+      mcopy -i esp.img kernel.bin ::/
+  11. dd if=esp.img of=disk.img bs=512 seek=<part1_start_lba> conv=notrunc
+
+  ── Phase 4: Fill ext2 partition ────────────────────────
+  12. Build rootfs.img via system():
+      dd if=/dev/zero of=rootfs.img bs=1M count=128
+      mke2fs -t ext2 -I 128 -b 4096 rootfs.img
+      debugfs -w rootfs.img:
+        mkdir /bin
+        mkdir /home
+        mkdir /etc
+        # 注意: 不创建 /boot /tmp /dev /proc！
+        # 这些是 mount points, 由 VFS mount 注入提供可见性
+        # (vfs_getdents phase 2 mount-point injection).
+        # __vfs_lookup("/boot") 直接命中 /boot mount, 不需要 ext2 里存在该条目.
+        # 创建它们反而会导致 getdents 重复 (挂载注入 + ext2 真实条目).
+        for f in bin/*; do write $f /bin/$(basename $f); done
+        # 如果有 etc/ 或 home/ 内容, 同样写入
+  13. dd if=rootfs.img of=disk.img bs=512 seek=<part2_start_lba> conv=notrunc
+
+  ── Phase 5: Cleanup ────────────────────────────────────
+  14. rm esp.img rootfs.img
+
+  ── Phase 6: Self-check ─────────────────────────────────
+  15. Read back disk.img GPT header (LBA 1) → verify "EFI PART"
+  16. Read partition entries → CRC32 verify
+  17. Read ESP sector 0 → verify FAT magic bytes (0x55AA at offset 510)
+  18. Read rootfs superblock → verify ext2 magic 0xEF53
+```
+
+### 5.3 CRC32 算法
+
+GPT 使用标准反射 CRC32（与 zlib 一致）：
+
+```
+多项式: 0xEDB88320 (反射 0x04C11DB7)
+初始值: 0xFFFFFFFF
+输出值: XOR 0xFFFFFFFF
+不附加 trailing bytes
+
+// 计算 (同 zlib 的 crc32()):
+uint32_t crc32(const uint8_t *data, size_t len) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int b = 0; b < 8; b++)
+            crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320 : 0);
+    }
+    return crc ^ 0xFFFFFFFF;
+}
+```
+
+两处 CRC 使用：
+1. **header_crc32** (GPT header offset 16)：计算范围 = header 的全部 92 字节，其中 CRC 字段自身置 0
+2. **partition_entries_crc32** (GPT header offset 88)：计算范围 = 全部 partition entry array（128×128=16384 bytes）
+
+kernel 端 `gpt_scan()` 也需要同样的 CRC32 函数用于校验（~30 行复制），放到 `kernel/fs/gpt.c` 内部。
+
+### 5.4 文件
 
 | 文件 | 类型 | 说明 |
 |------|------|------|
-| `tools/mkdisk.c` | 新增 | disk.img 构建工具 (~200 行宿主 C) |
-| `tools/Makefile` | 新增 | 宿主编译规则 |
-| `Makefile` | 修改 | `disk.img` target 改用 `tools/mkdisk` |
-| `config/fsroot/` | 新增 | ext2 内容源目录 |
+| `tools/mkdisk.c` | 新增 | disk 构建工具 (~250 行, 含 CRC + GPT + system() 编排) |
+| `tools/Makefile` | 新增 | 宿主编译 + 依赖检测 |
+| `Makefile` (root) | 修改 | `disk.img` target |
+| `config/fsroot/` | 新增 | ext2 内容源目录（bin/、home/、etc/，不含 boot/tmp/dev/proc） |
 
-### 5.2 mkdisk 流程
-
-```
-tools/mkdisk disk.img \
-    --efi boot/uefi/BOOTX64.EFI \
-    --kernel kernel.bin \
-    --rootfs config/fsroot/
-
-输入:
-  config/fsroot/
-    ├── bin/
-    │   ├── init       → 来自 build/x86_64/user/init.elf
-    │   ├── busybox    → 来自 build/x86_64/user/busybox.elf
-    │   ├── spin       → 来自 build/x86_64/user/spin.elf
-    │   ├── sigtest    → 来自 build/x86_64/user/sigtest.elf
-    │   ├── poweroff   → 来自 build/x86_64/user/poweroff.elf
-    │   ├── systest    → 来自 build/x86_64/user/systest.elf
-    │   ├── test_mmap  → 来自 build/x86_64/user/test_mmap.elf
-    │   ├── test_fork_mmap → 来自 build/x86_64/user/test_fork_mmap.elf
-    │   └── test_cow   → 来自 build/x86_64/user/test_cow.elf
-    ├── home/
-    └── etc/
-
-流程:
-  1. 计算总大小
-     FAT32 = 64MB (给 BOOTX64.EFI + kernel.bin 留有足够空间)
-     ext2  = 128MB (可变, 至少 64MB)
-     total = 64MB + 128MB
-
-  2. 创建 disk.img (fallocate 或 seek write)
-
-  3. 写入 Protective MBR (LBA 0, 只有一个 Type=0xEE entry 的 DOS 分区表)
-
-  4. 写入 GPT header (LBA 1):
-     "EFI PART" signature
-     header_size = 92
-     my_lba = 1
-     first_usable_lba = 34
-     last_usable_lba = total_sectors - 34
-     partition_entry_lba = 2
-     num_partition_entries = 128
-     size_of_partition_entry = 128
-     计算 + 写入 CRC32
-
-  5. 写入 Partition Entry Array (LBA 2..33):
-     Entry 1:
-        type_guid = C12A7328-F81F-11D2-BA4B-00A0C93EC93B (EFI System Partition)
-        name = "ESP"
-        start_lba = 2048
-        end_lba   = 2048 + (64MB / 512) - 1
-     Entry 2:
-        type_guid = 0FC63DAF-8483-4772-8E79-3D69D8477DE4 (Linux filesystem data)
-        name = "rootfs"
-        start_lba = entry1_end + 1
-        end_lba   = entry2_start + (128MB / 512) - 1
-
-  6. 填充 FAT32 ESP 分区:
-     dd if=/dev/zero of=/tmp/esp.img bs=1M count=64
-     mkfs.vfat -F 32 /tmp/esp.img
-     mmd -i /tmp/esp.img ::/EFI
-     mmd -i /tmp/esp.img ::/EFI/BOOT
-     mcopy -i /tmp/esp.img BOOTX64.EFI ::/EFI/BOOT
-     mcopy -i /tmp/esp.img kernel.bin ::/
-     dd if=/tmp/esp.img of=disk.img bs=512 seek=2048 conv=notrunc
-
-  7. 填充 ext2 分区:
-     dd if=/dev/zero of=/tmp/rootfs.img bs=1M count=128
-     mke2fs -t ext2 -I 128 -b 4096 /tmp/rootfs.img
-     使用 debugfs -w /tmp/rootfs.img:
-       mkdir /bin
-       mkdir /home
-       mkdir /etc
-       mkdir /tmp      # mount tmpfs 前的占位目录
-       write init.elf /bin/init
-       write busybox /bin/busybox
-       ... (其他文件)
-     dd if=/tmp/rootfs.img of=disk.img bs=512 seek=<ext2_start> conv=notrunc
-
-  8. 清理临时镜像
-
-依赖: mkfs.vfat (dosfstools), mke2fs (e2fsprogs), mtools, debugfs (e2fsprogs)
-```
-
-### 5.3 Makefile 集成
+### 5.5 Makefile 集成
 
 ```makefile
 disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.elf
@@ -563,6 +811,7 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 	@cp build/x86_64/user/test_mmap.elf      config/fsroot/bin/test_mmap
 	@cp build/x86_64/user/test_fork_mmap.elf config/fsroot/bin/test_fork_mmap
 	@cp build/x86_64/user/test_cow.elf       config/fsroot/bin/test_cow
+	$(MAKE) -C tools check-deps
 	$(MAKE) -C tools
 	tools/mkdisk disk.img \
 	    --efi boot/uefi/BOOTX64.EFI \
@@ -577,55 +826,81 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 `kernel_main()` 中的文件系统初始化调整为：
 
 ```c
-// 1. 块设备
-block_device_init();          // AHCI → sda, 注册 /dev/sda
+// ═══ 1-5. CPU + Memory + APIC + Timers + Device IRQs (不变) ═══
 
-// 2. devfs 挂载 + 字符设备注册（初始化 devices[] 数组）
-devfs_init();                 // /dev: null, zero, random, serial, tty
+// ═══ 6. Storage + filesystem ═══════════════════════════════
+ahci_init();                    // PCI scan → AHCI enable → port init
+                                //   → block_device_register("hda", port, sectors)
+                                //   → block_device_register("hdb", port, sectors) ... (if present)
 
-// 3. 分区发现（此时 devices[] 已可用）
-gpt_scan(block_device_get(0)); // 解析 GPT → /dev/sda1, /dev/sda2
+devfs_init();                   // /dev 挂载 + devices[] 零初始化 + chrdev 注册
+                                // (null, zero, random, serial, tty)
 
-// 4. VFS 文件系统挂载
-vfs_init();                   // 初始化 mount table
-fat32_mount(sda1, "/boot");   // /boot → FAT32 ESP (sda1)
-ext2_mount(sda2);             // / → ext2 (sda2)
-tmpfs_init();                 // /tmp → tmpfs (纯内存)
+// 注册物理磁盘到 /dev
+for (int i = 0; i < block_device_count(); i++)
+    devfs_register_blkdev(block_device_get(i)->name, block_device_get(i));
+// → /dev/hda, /dev/hdb ... (在 devfs readdir 中可见)
 
-// 5. 信息文件系统
-procfs_init();                // /proc
+// 解析 GPT → 分区 block device + devfs 注册
+gpt_info_t *gpt = gpt_scan(block_device_get(0));  // scan hda
+if (!gpt) {
+    // Fallback: 旧单分区 FAT32 布局 (/ 挂载 hda)
+    debug_block("GPT: scan failed, falling back to single-FAT layout\n");
+    vfs_init();
+    fat32_init(block_device_get(0), &fs);
+    if (fs) vfs_mount("/", block_device_get(0), &fat_vfs_ops, fs);
+} else {
+    // 新双分区布局
+    vfs_init();
 
-// 6. 启动用户态
-spawn_user_task("/bin/init");
+    // / → ext2 (hda2 = gpt->partitions[1].dev)
+    ext2_fs_t *ext2_fs;
+    if (0 == ext2_init(gpt->partitions[1].dev, &ext2_fs))
+        vfs_mount("/", gpt->partitions[1].dev, &ext2_vfs_ops, ext2_fs);
+    else
+        serial_printk("EXT2: mount failed — / not available\n");
+
+    // /boot → FAT32 ESP (hda1 = gpt->partitions[0].dev)
+    fat32_fs_t *fat_fs;
+    if (0 == fat32_init(gpt->partitions[0].dev, &fat_fs))
+        vfs_mount("/boot", gpt->partitions[0].dev, &fat_vfs_ops, fat_fs);
+    else
+        serial_printk("FAT32: /boot mount failed\n");
+}
+
+// /tmp → tmpfs (不依赖磁盘分区)
+tmpfs_init();                   // vfs_mount("/tmp", NULL, &tmpfs_vfs_ops, root)
+
+// ═══ then: procfs_init(), TTY, SMP, scheduler, spawn_user_task ═══
 ```
 
-注：
-- `fat32_mount` 当前签名是 `int fat32_mount(block_device_t *dev, fat32_fs_t **out_fs)`，内部硬编码 `vfs_mount("/", dev, ...)`。需改为 `int fat32_mount(block_device_t *dev, const char *mount_path, fat32_fs_t **out_fs)`，将 mount_path 传给 `vfs_mount`。
-- `ext2_mount(block_device_t *dev)` 内部调用 `vfs_mount("/", dev, &ext2_vfs_ops, fs)` 挂载到 `/`。
-- `block_device_get(0)` 返回 sda（第一个注册的 block device）。`gpt_scan` 内部通过 `block_device_t` 的 sector read 读取 GPT 表，并为每个分区创建 `partition_ctx_t` wrapper block device。
+**关键改动**：
+1. `ahci_init()` 在 `devfs_init()` 之前 — 保证 block device 已注册，devfs 的 devices[] 数组可在注册 block device 到 /dev 时使用
+2. `devfs_init()` 在 `gpt_scan()` 之前 — 保证 `devices[]` 数组零初始化，分区注册 blkdev 可用
+3. GPT scan 失败 → fallback 到旧单 FAT32 布局 — 避免内核因找不到分区而静默空转
+4. `fat32_init` 签名变更：`int fat32_init(block_device_t *dev, fat32_fs_t **out_fs)` — 不再内部调用 `vfs_mount`，由调用方决定挂载点。需同步修改 `fat.c` 中的旧 `fat32_mount` 实现和 `fat.h` 声明
+5. 磁盘命名：物理磁盘 "hda"（AHCI 现有命名），分区 "hda1"/"hda2"
 
 ---
 
-## 7. VFS 改动点
+## 7. VFS 已有保证（无需修改）
 
-### 7.1 `find_mount` 改为最长前缀匹配
+### 7.1 `find_mount` — 已实现最长前缀匹配 ✓
 
-当前 `find_mount` 遍历 `mount_table`，对路径做 `strncmp(mp->path, path, mp_len) == 0` 检查，返回第一个匹配的 mount。当同时存在 `/` 和 `/boot` 两个挂载点时，`/` 会先匹配 `/boot/kernel.bin`（因为 `/` 也是其前缀）。
+`kernel/fs/vfs.c:101-121` 的 `find_mount` 当前即为最长前缀实现：
 
-需要改为**最长前缀匹配**：
 ```c
-static vfs_mount_t *find_mount(const char *path) {
+static vfs_mount_t *find_mount(const char *path)
+{
     vfs_mount_t *best = NULL;
     size_t best_len = 0;
     for (int i = 0; i < mount_count; i++) {
-        size_t mp_len = strlen(mount_table[i].path);
-        if (strncmp(mount_table[i].path, path, mp_len) == 0) {
-            // path is "/" or path starts with mount path followed by '/' or NUL
-            if (path[mp_len] == '/' || path[mp_len] == '\0') {
-                if (mp_len > best_len) {
-                    best = &mount_table[i];
-                    best_len = mp_len;
-                }
+        size_t len = strlen(mount_table[i].path);
+        if (strncmp(path, mount_table[i].path, len) == 0) {
+            if (len == 1 && mount_table[i].path[0] == '/') {
+                if (len > best_len) { best_len = len; best = &mount_table[i]; }
+            } else if (path[len] == '\0' || path[len] == '/') {
+                if (len > best_len) { best_len = len; best = &mount_table[i]; }
             }
         }
     }
@@ -635,36 +910,29 @@ static vfs_mount_t *find_mount(const char *path) {
 
 - `/boot/kernel.bin` → 匹配 `/boot`（len=5）和 `/`（len=1），选最长 → `/boot` ✓
 - `/bin/init` → 只匹配 `/` → `/` ✓
-- 对于 `/boot` 挂载下的路径，`__vfs_lookup` 跳过 `/boot` 前缀后正常查找
 
-### 7.2 `/` + `/boot` 两个 mount 的路径解析
+### 7.2 `__vfs_lookup` 跳过 mount 前缀 — 已实现 ✓
 
-`__vfs_lookup` 中 `find_mount` 已改为最长前缀匹配：
+`vfs.c:147-153` 中，当 mount point 非 `/` 时（如 `/boot`），`ptr = path_copy + mp_len` 跳过前缀，然后 `while (*ptr == '/') ptr++` 跳过前导斜杠。剩余路径（如 `kernel.bin`）在 mount root node 的 ops->readdir 中正常查找。
 
-- `/boot/kernel.bin` → `find_mount("/boot/kernel.bin")` → 匹配 `/boot` (len=5) 和 `/` (len=1)，选最长 → 返回 `/boot` mount ✓
-- `/bin/init` → `find_mount("/bin/init")` → 只匹配 `/` → 返回 `/` mount ✓
+### 7.3 getdents 挂载点注入 + 去重
 
-`__vfs_lookup` 中需要确认：当 mount point 是 `/boot` 时，`mp_len > 1`，prefix skip 逻辑正确去掉 `/boot` 前缀后查找剩余路径（即 `/kernel.bin`）。
+`vfs.c:411-432`（Phase 2 mount-point injection）在目录 ≠ mount root 时不触发注入。当前逻辑：`dir->mount && dir == dir->mount->root` 条件保证只有 mount root 节点会注入子挂载。
 
-### 7.3 补充：`block_device_init` 注册物理磁盘到 devfs
+去重问题：方案 §5.2 step 12 明确**不在 ext2 根目录创建 boot/tmp/dev/proc 等挂载点目录**。因此：
+- `/`（ext2 root）包含 bin、home、etc → readdir 返回这些真实目录
+- `/boot`、`/tmp`、`/dev`、`/proc` 只通过 mount injection 出现在 `/` 的 getdents 中
+- ext2 中无同名目录 → 无重复
 
-`block_device_init()` 需要在 AHCI port 发现后调用 `devfs_register_blkdev("sda", dev)`，将物理磁盘也暴露到 `/dev`。后续 `gpt_scan` 创建的 partition wrapper block device 再注册为 `sda1`、`sda2` 等。
+`VFS_GETDENTS_SORT_MAX = 64`：ext2 顶层目录条目（~5-10 个）+ mount 注入（~4 个）<< 64，不触发截断。
 
-分区 block device 创建函数（`block_device_create_partition`）：
+### 7.4 `fat32_init` 签名变更
+
+`fat.h:99` 的声明和 `fat.c` 的实现改为：
 ```c
-// 创建一个分区 block device wrapper
-// parent: 物理磁盘或上层 block device
-// offset_lba: 分区起始扇区
-// length: 分区扇区数
-block_device_t *block_device_create_partition(block_device_t *parent,
-                                               uint64_t offset_lba,
-                                               uint64_t length);
+int fat32_init(block_device_t *dev, fat32_fs_t **out_fs);
 ```
-内部结构见 1.4 节的 `partition_ctx_t`。此函数分配 `block_device_t` + `partition_ctx_t`，设置 `.read/.write` 为分区转发函数，调用 `block_device_register` 注册到全局列表，并返回。分区设备不再次注册到 devfs — 由 `gpt_scan` 中决定哪些分区需要注册到 `/dev`。
-
-### 7.4 getdents 挂载点注入
-
-`/` 下的 getdents 应显示 `boot/`, `bin/`, `home/`, `etc/`, `tmp/`, `dev/`, `proc/`。其中 `boot/`, `tmp/`, `dev/`, `proc/` 是 mount points。当前已有 mount point 注入逻辑（`b5cc904`），需确认在新布局下正确工作。
+不再内部调用 `vfs_mount`，调用方（main.c）在返回后按需挂载到任意路径。
 
 ---
 
@@ -673,22 +941,27 @@ block_device_t *block_device_create_partition(block_device_t *parent,
 | 文件 | 操作 | 说明 |
 |------|------|------|
 | `kernel/fs/ext2.c` | 新增 | ext2 只读驱动 (~350 行) |
-| `kernel/include/fs/ext2.h` | 新增 | ext2 on-disk 结构体定义 |
+| `kernel/include/fs/ext2.h` | 新增 | ext2 on-disk 结构体 + `ext2_init()` |
 | `kernel/fs/tmpfs.c` | 新增 | tmpfs (~200 行) |
-| `kernel/include/fs/tmpfs.h` | 新增 | tmpfs 接口声明 |
-| `kernel/fs/gpt.c` | 新增 | GPT 分区表解析 (~150 行) |
-| `kernel/include/fs/gpt.h` | 新增 | partition_t + gpt_scan 声明 |
-| `kernel/fs/devfs.c` | 修改 | 新增 `devfs_register_blkdev()` (~30 行) |
-| `kernel/fs/vfs.c` | 修改 | `find_mount` 最长前缀匹配确认修复 |
-| `kernel/fs/fat.c` | 修改 | `fat32_mount` 接受 mount_path 参数 |
-| `kernel/kernel/main.c` | 修改 | 新挂载顺序 (~10 行) |
+| `kernel/include/fs/tmpfs.h` | 新增 | `tmpfs_init()` 声明 |
+| `kernel/fs/gpt.c` | 新增 | GPT 扫描 + CRC32 (~180 行) |
+| `kernel/include/fs/gpt.h` | 新增 | partition_t + `gpt_scan()` 声明 |
+| `kernel/block/blockdev.c` | 修改 | 新增 `block_device_register_raw()` + `private_data` 字段 (~30 行) |
+| `kernel/include/block/blockdev.h` | 修改 | 新增 `private_data` + `block_device_register_raw()` 声明 |
+| `kernel/fs/devfs.c` | 修改 | `devfs_device_t` 新增 `private_data` + blkdev dispatch (~50 行) |
+| `kernel/include/fs/devfs.h` | 修改 | 新增 `devfs_register_blkdev()` |
+| `kernel/fs/fat.c` | 修改 | `fat32_mount` → `fat32_init`，移除内部 vfs_mount (~5 行) |
+| `kernel/include/fs/fat.h` | 修改 | 更新 fat32_init 签名 |
+| `kernel/kernel/main.c` | 修改 | 新挂载顺序 (~20 行增量) |
 | `kernel/Makefile` | 修改 | 新增 .c 文件 |
-| `tools/mkdisk.c` | 新增 | disk 构建工具 (~200 行) |
-| `tools/Makefile` | 新增 | 宿主工具编译 |
-| `config/fsroot/` | 新增 | ext2 内容源目录 |
-| `Makefile` (root) | 修改 | disk.img target 改动 |
+| `tools/mkdisk.c` | 新增 | disk 构建工具 (~250 行) |
+| `tools/Makefile` | 新增 | 宿主工具编译 + 依赖检测 |
+| `config/fsroot/bin/` | 新增 | ext2 /bin 内容源 |
+| `config/fsroot/home/` | 新增 | ext2 /home (空目录) |
+| `config/fsroot/etc/` | 新增 | ext2 /etc (空目录) |
+| `Makefile` (root) | 修改 | disk.img target |
 
-**总计**：~950 行新代码 + ~50 行修改。
+**总计**：~980 行新代码 + ~110 行修改。
 
 ---
 
@@ -696,27 +969,37 @@ block_device_t *block_device_create_partition(block_device_t *parent,
 
 ### 9.1 内核自测 (SELFTEST)
 
-- ext2 superblock 验证：magic=0xEF53 → mount 成功
-- ext2 root inode 读取：inode 2 readinode → i_mode has S_IFDIR
-- ext2 readdir root：/ 下有目录条目（. .. bin home etc）
-- ext2 file read：读取 `/bin/init` 的前 4 字节 → ELF magic `\x7fELF`
-- tmpfs create + read + write：挂载后创建文件 → 写入 → 读回验证
-- GPT 解析：扫描 sda → partition count > 0
+- **ext2 superblock 验证**：读 hda2 的 sector 1024/512，验证 magic=0xEF53
+- **ext2 root inode**：inode 2 的 i_mode has S_IFDIR
+- **ext2 s_inode_size 读取**：验证从 superblock 偏移 88 读到的值 = 128 (mke2fs -I 128)
+- **ext2 readdir root**：/ 下有 bin、home、etc（不含 boot/tmp/dev/proc）
+- **ext2 file read**：读取 `/bin/init` 前 4 字节 → ELF magic `\x7fELF`
+- **ext2 dirent name_len 匹配**：用 name_len 比较文件名，验证正确（创建一个带有非 NUL 后缀的测试文件）
+- **tmpfs create+read+write**：挂载后创建文件 → 写入 → 读回
+- **GPT scan**：扫描 hda → partition count = 2, 签名 "EFI PART"
+- **GPT CRC32 校验**：计算 partition entry array CRC → 验证与 header 一致
+- **分区 block device 转发**：通过 hda2 读 sector 0 → 与通过 hda 在 offset_lba 处读出的内容对比一致
+- **分区越界检查**：对 hda2 读超过 length 的 LBA → 返回 -1
 
 ### 9.2 现有测试
 
-`make test` 中 VFS 测试 (`test_vfs_basic.c`) 基于 in-memory fake filesystem，不受 ext2 引入影响，应保持通过。
+`make test` 中 `test_vfs_basic.c`（in-memory fake filesystem）不受影响，保持通过。
 
 ### 9.3 集成验证
 
 ```bash
 make run   # QEMU 启动
-# 期望：
+# 期望输出:
+#   "AHCI: port 0: MODEL=... SECTORS=..."
+#   "block: registered hda (...)"
+#   "devfs: mounted at /dev"
 #   "gpt: found 2 partitions"
-#   "devfs: registered blkdev sda1"
-#   "devfs: registered blkdev sda2"
-#   "VFS: mounted '/boot'"  
+#   "devfs: registered blkdev hda"
+#   "devfs: registered blkdev hda1"
+#   "devfs: registered blkdev hda2"
+#   "EXT2: inode_size=128 block_size=4096 ..."
 #   "VFS: mounted '/'"
+#   "VFS: mounted '/boot'"
 #   "VFS: mounted '/tmp'"
 #   → init.elf 成功启动
 ```
