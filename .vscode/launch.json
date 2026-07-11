@@ -8,7 +8,7 @@
             "name": "Launch with GDB",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build/x86_64/kernel/kernel.elf",
+            "program": "${workspaceFolder}/kernel/kernel.elf",
             "args": [],
             "targetArchitecture": "x86",
             "stopAtEntry": false,
@@ -41,7 +41,12 @@
             "type": "lldb-dap",
             "request": "attach",
             "program": "${workspaceFolder}/build/x86_64/kernel/kernel.elf",
-            "attachCommands": ["gdb-remote 1234"],
+            "targetCreateCommands": [
+                "target create ${workspaceFolder}/build/x86_64/kernel/kernel.elf"
+            ],
+            "attachCommands": [
+                "gdb-remote 1234"
+            ],
             "preLaunchTask": "Launch QEMU"
         }
     ]
