@@ -11,12 +11,23 @@
                 "command": "DEBUG=1 make debug DEBUG_CHANNELS=sched,tty,vfs,mm,fs,net,ipc,drivers,init,syscall"
             },
             "problemMatcher": {
+                "owner": "cpp",
+                "fileLocation": [
+                    "relative",
+                    "${workspaceFolder}"
+                ],
                 "pattern": {
-                    "regexp": "error|warning",
+                    "regexp": "^(.*?):(\\d+):(\\d+):\\s+(warning|error):\\s+(.*)$",
+                    "file": 1,
+                    "line": 2,
+                    "column": 3,
+                    "severity": 4,
+                    "message": 5
                 },
                 "background": {
-                    "beginsPattern": "disk.img",
-                    "endsPattern": "raw"
+                    "activeOnStart": true,
+                    "beginsPattern": "^.*BdsDxe:.*starting.*Boot\\d+",
+                    "endsPattern": "^.*tty:\\s+console\\s+TTY\\s+created"
                 }
             }
         }
