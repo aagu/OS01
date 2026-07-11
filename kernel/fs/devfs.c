@@ -1,7 +1,9 @@
 #include <fs/devfs.h>
 #include <fs/vfs.h>
+#include <block/blockdev.h>
 #include <kernel/debug.h>
 #include <kernel/arch/x86_64/cpu.h>
+#include <kernel/slab.h>
 #include <driver/serial.h>
 #include <kernel/tty.h>
 #include <string.h>
@@ -123,6 +125,24 @@ static int devfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *bu
     int idx = (int)(uintptr_t)node->fs_data;
     if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
         return -1;
+
+    // Block device path: sector-level read via block_device_t
+    if (devices[idx].type == VFS_BLKDEV) {
+        block_device_t *bdev = (block_device_t *)devices[idx].private_data;
+        if (!bdev || !buffer || size == 0) return 0;
+        uint32_t lba   = (uint32_t)(offset / 512);
+        uint32_t count = (uint32_t)((size + 511) / 512);
+        if (count == 0) return 0;
+        uint8_t *tmp = kmalloc(count * 512);
+        if (!tmp) return -1;
+        int ret = block_device_read(bdev, lba, count, tmp);
+        if (ret == 0)
+            memcpy(buffer, tmp + (offset % 512), size);
+        kfree(tmp);
+        return (ret == 0) ? (int)size : -1;
+    }
+
+    // Character device path (existing)
     if (devices[idx].read)
         return devices[idx].read(node, offset, size, buffer);
     return -1;
@@ -133,6 +153,26 @@ static int devfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *b
     int idx = (int)(uintptr_t)node->fs_data;
     if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
         return -1;
+
+    // Block device path: read-modify-write for unaligned edges
+    if (devices[idx].type == VFS_BLKDEV) {
+        block_device_t *bdev = (block_device_t *)devices[idx].private_data;
+        if (!bdev || !buffer || size == 0) return 0;
+        uint32_t lba   = (uint32_t)(offset / 512);
+        uint32_t count = (uint32_t)((size + 511) / 512);
+        if (count == 0) return 0;
+        uint8_t *tmp = kmalloc(count * 512);
+        if (!tmp) return -1;
+        int ret = block_device_read(bdev, lba, count, tmp);
+        if (ret == 0) {
+            memcpy(tmp + (offset % 512), buffer, size);
+            ret = block_device_write(bdev, lba, count, tmp);
+        }
+        kfree(tmp);
+        return (ret == 0) ? (int)size : -1;
+    }
+
+    // Character device path (existing)
     if (devices[idx].write)
         return devices[idx].write(node, offset, size, buffer);
     return -1;
@@ -222,5 +262,27 @@ int devfs_register_chrdev(const char *name, void *private_data,
     device_count++;
 
     debug_fs("devfs: registered '%s' (chrdev)\n", name);
+    return 0;
+}
+
+int devfs_register_blkdev(const char *name, block_device_t *dev)
+{
+    if (device_count >= DEVFS_MAX_DEVICES)
+        return -1;
+
+    int idx = device_count;
+    size_t nlen = strlen(name);
+    if (nlen >= DEVFS_NAME_MAX) nlen = DEVFS_NAME_MAX - 1;
+    memcpy(devices[idx].name, name, nlen);
+    devices[idx].name[nlen] = '\0';
+
+    devices[idx].type = VFS_BLKDEV;
+    devices[idx].read = NULL;           // dispatch handles this
+    devices[idx].write = NULL;
+    devices[idx].private_data = dev;    // block_device_t *
+    devices[idx].registered = 1;
+    device_count++;
+
+    debug_fs("devfs: registered blkdev '%s'\n", name);
     return 0;
 }
