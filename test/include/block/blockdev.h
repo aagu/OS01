@@ -28,6 +28,12 @@ block_device_t *block_device_register(const char *name,
                                        uint32_t port_num,
                                        uint64_t sector_count);
 
+// Register a block device without AHCI defaults.
+// Caller must set .read, .write, and .private_data after this call.
+block_device_t *block_device_register_raw(const char *name,
+                                           uint64_t sector_count,
+                                           void *private_data);
+
 // Read sectors from a block device
 int block_device_read(block_device_t *dev, uint64_t lba,
                       uint32_t count, void *buffer);
