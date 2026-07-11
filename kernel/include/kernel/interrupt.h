@@ -38,10 +38,6 @@ int32_t register_irq(uint64_t nr, void * arg,
 
 uint32_t unregister_irq(uint64_t nr);
 
-extern void (* interrupt[24])(void);
-
-extern void do_IQR(pt_regs_t * regs, uint64_t nr);
-
 void irq_install();
 
 #endif

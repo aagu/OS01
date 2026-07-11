@@ -37,5 +37,7 @@
         "syncstream": "c",
         "keyboard.h": "c"
     },
-    "C_Cpp.errorSquiggles": "disabled"
+    "clangd.fallbackFlags": [
+        "-I ${workspace}/sysroot/usr/include"
+    ]
 }
