@@ -111,12 +111,14 @@ static int test_pipe_basic(void)
 
 // ── External test functions (defined in subsystem .c files) ──
 // Forward-declared here instead of polluting public headers.
-// Each subsystem registers its tests during init (before selftest_run_all).
+// Only available when KERNEL_SELFTEST=1 (guarded by OS01_SELFTEST in each .c file).
 
+#ifdef OS01_SELFTEST
 int ext2_selftest_magic(void);
 int ext2_selftest_struct_sizes(void);
 int gpt_selftest_crc32(void);
 int tmpfs_selftest_mounted(void);
+#endif
 
 // ── Test runner ────────────────────────────────────────────
 int selftest_run_all(void)
@@ -128,10 +130,12 @@ int selftest_run_all(void)
     selftest_register("spinlock_basic",    test_spinlock_basic);
     selftest_register("pipe_basic",        test_pipe_basic);
 
+#ifdef OS01_SELFTEST
     selftest_register("ext2_magic",        ext2_selftest_magic);
     selftest_register("ext2_struct_sizes", ext2_selftest_struct_sizes);
     selftest_register("gpt_crc32",         gpt_selftest_crc32);
     selftest_register("tmpfs_mounted",     tmpfs_selftest_mounted);
+#endif
 
     int passed = 0, failed = 0;
     for (int i = 0; i < test_count; i++) {
