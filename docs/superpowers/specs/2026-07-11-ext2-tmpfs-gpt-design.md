@@ -147,9 +147,8 @@ block_device_t *block_device_register_raw(const char *name,
                                            uint64_t sector_count,
                                            void *private_data)
 {
-    if (block_device_count() >= BLOCKDEV_MAX) return NULL;
-    block_device_t *dev = &block_devices[block_device_count()];
-    // block_device_count() returns current count; we increment below.
+    if (block_device_count_val >= BLOCKDEV_MAX) return NULL;
+    block_device_t *dev = &block_devices[block_device_count_val];
     memset(dev, 0, sizeof(block_device_t));
     strcpy((char *)dev->name, name);
     dev->sector_count = sector_count;
@@ -157,7 +156,7 @@ block_device_t *block_device_register_raw(const char *name,
     dev->present      = 1;
     dev->port_num     = 0;  // 分区无 AHCI port
     dev->private_data = private_data;
-    block_device_count_val++;
+    block_device_count_val++;    // 递增后 block_device_count() 返回新计数
     return dev;
 }
 
@@ -186,6 +185,8 @@ block_device_t *block_device_create_partition(
 ```
 
 需要在 `block_device_t` 中新增 `void *private_data` 字段。`block_devices[]` 当前是 blockdev.c 中的 `static`，`block_device_register_raw()` 作为 blockdev.c 中的新公开函数直接访问。
+
+**ABI 注意**：`block_device_register()` 也需修改 — 在 `dev->write = default_ahci_write;` 后加 `dev->private_data = NULL;`。否则 hda 的 private_data 是未初始化垃圾值（`block_devices[]` 是 BSS/静态数组，不保证 mtime 局部清零）。`block_device_register_raw()` 内部有 `memset(dev, 0, ...)`，已覆盖。
 
 **注册顺序保证**：物理盘 hda 通过 `block_device_register()` 先注册，分区 hda1/hda2 通过 `block_device_register_raw()` 后注册。`block_device_get(0)` 仍是 hda。BLOCKDEV_MAX=8，3 槽够用。**phys first, partitions second — 不要乱序**。
 
@@ -434,6 +435,7 @@ ext2_init(block_device_t *dev, ext2_fs_t **out_fs):
 
   5. 计算关键参数:
      block_size = 1024 << sb.s_log_block_size
+     if (block_size > 4096) { kfree(fs); return -1; }  // 栈缓冲 4096B 不够
      sectors_per_block = block_size / 512
      blocks_per_group = sb.s_blocks_per_group
      inodes_per_group = sb.s_inodes_per_group
@@ -497,7 +499,7 @@ ext2_find_entry(ext2_fs_t *fs, ext2_inode_t *dir_inode, const char *name):
   1. 获取 name_len = strlen(name)
   2. 遍历目录数据块（通过 ext2_bmap 获取 physical block）
   3. 对每个块:
-     - 栈分配 uint8_t block_data[block_size]  ★ 不共享缓冲
+     - 栈分配 uint8_t block_data[4096]  ★ 固定大小, block_size ≤ 4096; 不共享
      - ext2_read_block(fs, phys_block, block_data)
      - 遍历 ext2_dirent_t 链（rec_len 跳转）
      - 对每个 entry:
@@ -515,9 +517,8 @@ ext2_vfs_read(vfs_node_t *node, offset, size, buffer):
   2. spin_lock(&fs->lock)  // 保护 block_device I/O 顺序（多核并发）
   3. ext2_inode_t inode; ext2_read_inode(fs, ino, &inode)
   4. 通过 ext2_bmap 映射逻辑块 → 物理块
-  5. 栈分配 uint8_t block_buf[block_size]; ext2_read_block(fs, phys_block, block_buf)
-  6. memcpy(buffer, block_buf + intra_block_offset, chunk)
-  7. spin_unlock(&fs->lock)
+  5. 栈分配 uint8_t block_buf[4096]; ext2_read_block(fs, phys_block, block_buf)
+     ★ 固定 4096, block_size ≤ 4096; 不够则在 ext2_mount 里拒绝 block_size > 4096
 
 ext2_vfs_readdir(vfs_node_t *node, index, entry):
   1. uint32_t ino = (uint32_t)(uintptr_t)node->fs_data
@@ -562,11 +563,14 @@ static vfs_ops_t ext2_vfs_ops = {
 - **block device I/O 非原子**：两个 CPU 同时做 `block_device_read` 共享同一个 AHCI port 的 DMA 缓冲区 → 数据错乱
 - **ext2_fs_t 元数据读取**：`ext2_read_inode` 计算 bgdesc→block 后读出，若并发则无数据竞争（输出在调用方栈上），但 block device 层不一定是线程安全的
 
-**方案**：`ext2_fs_t` 中加一个 `spinlock_t lock`。`ext2_vfs_read` / `ext2_vfs_readdir` 在开始读 block device 之前 `spin_lock(&fs->lock)`，完成后 `spin_unlock`。这序列化了所有 ext2 I/O，性能开销极低（只读场景，临界区只有 block I/O 等待）。
+**方案**：`ext2_fs_t` 中加一个 `spinlock_t lock`。`ext2_vfs_read` / `ext2_vfs_readdir` 在开始读 block device 之前 `spin_lock(&fs->lock)`，完成后 `spin_unlock`。这序列化了所有 ext2 I/O。
 
-**不在 ext2_fs_t 中保留共享的 `block_buf`**：每个函数在自己的栈上（`uint8_t buf[256]` 或 `uint8_t block_buf[block_size]`）分配临时缓冲。block_size 最大 4096，加上 inode buffer 256B，栈开销 ~4352B — 在内核栈（`STACK_SIZE` 通常 16KB）的安全范围内。
+**不在 ext2_fs_t 中保留共享的 `block_buf`**：每个函数在自己的栈上（`uint8_t buf[256]` 或 `uint8_t block_buf[4096]`）分配固定大小的临时缓冲。block_size 最大 4096，加上 inode buffer 256B，栈开销 ~4352B — 在内核栈（`STACK_SIZE` 通常 16KB）的安全范围内。
 
-**FAT32 同样有并发风险**，但不在这次修改范围内。若要在 ext2 之前先修 FAT，可将 spinlock 放在 `block_device_t` 层面。
+**已知不完整**（标注，不阻塞本次实现）：
+- ext2 lock 只保护 ext2 自身的 I/O 序列化。若两个 CPU 分别读 hda1 (FAT) 和 hda2 (ext2) — 同一物理盘不同分区 — 它们竞争 AHCI port 的共享 DMA 缓冲区，lock 在此不生效。
+- FAT32 / devfs blkdev 读同样裸奔。
+- 正确的修复是将 lock 下沉到 `block_device_t`（或 AHCI port）层面，统一序列化对同一物理 disk 的所有 I/O。这是一个独立任务，等 ext2 + tmpfs 落地后再处理。
 
 ### 3.8 参考
 
@@ -876,7 +880,6 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 	@cp build/x86_64/user/test_mmap.elf      config/fsroot/bin/test_mmap
 	@cp build/x86_64/user/test_fork_mmap.elf config/fsroot/bin/test_fork_mmap
 	@cp build/x86_64/user/test_cow.elf       config/fsroot/bin/test_cow
-	@cp config/config.txt                    config/fsroot/etc/config.txt
 	$(MAKE) -C tools check-deps
 	$(MAKE) -C tools
 	tools/mkdisk disk.img \
@@ -884,8 +887,7 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 	    --kernel kernel.bin \
 	    --rootfs config/fsroot/
 ```
-
-**config.txt**: 原 Makefile 通过 `mcopy` 写入 FAT32 根目录。新布局 ESP 只放 BOOTX64.EFI + kernel.bin。config.txt 移到 ext2 `/etc/config.txt`。如果当前 init 没读此文件，可暂时丢弃此 `cp` 行。
+注：旧的 `mcopy -i $@ config/config.txt ::/` 行移除 — config.txt 当前无代码读取，待 init inittab 实现后重新引入。
 
 ---
 
@@ -1007,10 +1009,10 @@ int fat32_init(block_device_t *dev, fat32_fs_t **out_fs);
 **问题**：当前 `vfs_name_cmp`（vfs.c:15）是全局大小写不敏感的（为 FAT32 设计）。ext2 和 tmpfs 是 Unix 文件系统，要求大小写敏感。
 
 `vfs_name_cmp` 被两处调用：
-- `__vfs_lookup` (vfs.c:174): `vfs_name_cmp(entry.name, comp)` — 路径查找的名字匹配
-- `vfs_getdents` (vfs.c:371): `vfs_name_cmp(a->name, b->name)` — 排序用
+- `__vfs_lookup` (vfs.c:174): `vfs_name_cmp(entry.name, comp)` — 路径查找的名字匹配 ← **需要按 flags 分支**
+- `vfs_getdents` (vfs.c:371): `vfs_name_cmp(a->name, b->name)` — 排序用 ← **保持现状**（排序用大小写敏感/不敏感只影响显示顺序，不影响正确性；统一用 case-insensitive 避免改动扩大化）
 
-**方案**：给 `vfs_ops_t` 新增一个 flags 字段：
+**方案**：给 `vfs_ops_t` 新增一个 flags 字段，只在 `__vfs_lookup` 路径使用：
 
 ```c
 typedef struct vfs_ops {
@@ -1042,11 +1044,11 @@ static vfs_ops_t tmpfs_vfs_ops = { .flags = 0, ... };  // case-sensitive
 
 此改动影响 VFS 核心（vfs.c 的 `__vfs_lookup` 和 `vfs_getdents`），~10 行修改。
 
-### 7.6 `config.txt` 迁移
+### 7.6 `config.txt` 处理 — 本次直接丢弃
 
-当前 `config/config.txt` 由 `mcopy -i $@ config/config.txt ::/` 写入 FAT32 根目录，内容为 `init=/init.elf`。新布局下 ESP 只放 BOOTX64.EFI 和 kernel.bin。
+验证 `user/init.c:308-313`：`parse_inittab()` 是空实现，当前 init 使用 hardcoded fallback（`/systest.elf` / `/busybox.elf sh`）。`config/config.txt` 目前没有任何代码读取。本次不引入 `/etc/config.txt` — 待 init 实现真正的 inittab 解析时再补。
 
-**方案**：将 `config.txt` 也写到 ext2 `/etc/config.txt`，或内置到 kernel 中作为默认值。如果 `init` 进程读取此文件，路径改为 `/etc/config.txt`。如当前 init 是 hardcoded 路径 `/bin/init`，可暂时丢弃 `config.txt`，后续需要时再处理。Makefile 中需移除对应的 `mcopy` 行。
+原 Makefile 中的 `mcopy -i $@ config/config.txt ::/` 行移除。§5.5 的 Makefile 示例无需包含 config.txt 的 cp。
 
 ---
 
