@@ -1112,8 +1112,10 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                 // Only 2MB huge pages (PAGE_PS) are eagerly copied.
                 // Non-2MB entries (4KB page table pointers, etc.) are
                 // shared -- the child inherits the parent's mapping.
+                // 4KB PTE table: share pages via COW.
+                // Check PAGE_COW before PAGE_R_W — a COW page has R/W=0
+                // and must not be misclassified as plain read-only.
                 if (!(pml2e & PAGE_PS)) {
-                    // 4KB PTE table: deep copy PTE table and all mapped 4KB pages
                     if (!(pml2e & PAGE_Present)) {
                         child_pml2[l2] = 0;
                         continue;
@@ -1123,7 +1125,7 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                     uint64_t *child_pte =
                         (uint64_t *)calloc(1, PAGE_4K_SIZE);
                     if (!child_pte) {
-                        child_pml2[l2] = pml2e;  // OOM: share
+                        child_pml2[l2] = pml2e;  // OOM: share PDE
                         continue;
                     }
                     child_pml2[l2] = Virt_To_Phy((uint64_t)child_pte)
@@ -1132,16 +1134,23 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                         uint64_t pte = parent_pte[l1];
                         if (!(pte & (PAGE_Present | PAGE_PROTNONE)))
                             continue;
-                        uint64_t parent_phys = pte & PAGE_4K_MASK;
-                        uint64_t child_phys = alloc_4k_page();
-                        if (child_phys) {
-                            memcpy((void *)Phy_To_Virt(child_phys),
-                                   (void *)Phy_To_Virt(parent_phys),
-                                   PAGE_4K_SIZE);
-                            child_pte[l1] = child_phys
-                                          | (pte & ~PAGE_4K_MASK);
+
+                        if (pte & PAGE_COW) {
+                            // Already COW-shared (fork-of-fork)
+                            page_cow_get(pte & PAGE_4K_MASK);
+                            child_pte[l1] = pte;
+                        } else if (pte & PAGE_R_W) {
+                            // Path A: writable -> COW on BOTH parent and child.
+                            // page_cow_get TWICE: parent PTE (R/W->R/O+COW) +1,
+                            // child PTE (new COW) +1 -> cow_count grows by 2.
+                            parent_pte[l1] &= ~PAGE_R_W;
+                            parent_pte[l1] |= PAGE_COW;
+                            page_cow_get(pte & PAGE_4K_MASK);
+                            page_cow_get(pte & PAGE_4K_MASK);
+                            child_pte[l1] = parent_pte[l1];
                         } else {
-                            child_pte[l1] = pte;  // OOM: share
+                            // Path B: plain read-only -> share directly
+                            child_pte[l1] = pte;
                         }
                     }
                     continue;
@@ -1173,6 +1182,10 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
     list_init(&child_mm->vma_list);
     child_mm->pml4 = (uint64_t *)Virt_To_Phy((uint64_t)child_pml4);
     *cr3_out = (uint64_t)child_mm->pml4;
+
+    // TLB flush: parent's in-memory PTEs were modified (R/W->R/O+COW).
+    // Only the current CPU runs the parent's mm — local flush is sufficient.
+    flush_tlb();
 
     return child_mm;
 

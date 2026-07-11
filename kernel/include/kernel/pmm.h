@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #define PAGE_1G_SHIFT  30
 #define PAGE_2M_SHIFT  21
@@ -100,5 +101,10 @@ uint64_t page_clean(struct Page * page);
 // 4KB subpage allocator — 2MB pool split into 512 4KB slots with bitmap
 uint64_t alloc_4k_page(void);
 void     free_4k_page(uint64_t phys);
+
+// COW refcount helpers — acquire subpage_lock internally
+void     page_cow_get(uint64_t phys);
+bool     page_cow_put(uint64_t phys);   // returns true when count reaches 0
+uint16_t page_cow_refs(uint64_t phys);
 
 #endif

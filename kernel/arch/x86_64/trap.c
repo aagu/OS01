@@ -475,6 +475,32 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 			kill_current_user_task(regs);
 			return;
 		}
+		// -- COW resolution (P=1, W=1, VM_WRITE is set) --
+		if ((error_code & 0x03) == 0x03) {
+			uint64_t *user_pml4 =
+			    (uint64_t *)Phy_To_Virt((uint64_t)t->mm->pml4);
+			uint64_t *pte = vmm_pt_walk(user_pml4, cr2, 0, 0);
+			if (pte && (*pte & PAGE_COW)) {
+				uint64_t old_phys = *pte & PAGE_4K_MASK;
+				if (page_cow_refs(old_phys) > 1) {
+					uint64_t new_phys = alloc_4k_page();
+					if (!new_phys) {
+						kill_current_user_task(regs);
+						return;
+					}
+					memcpy((void *)Phy_To_Virt(new_phys),
+					       (void *)Phy_To_Virt(old_phys),
+					       PAGE_4K_SIZE);
+					*pte = new_phys | vma->vm_page_prot;
+					page_cow_put(old_phys);
+				} else {
+					(void)page_cow_put(old_phys);
+					*pte = old_phys | vma->vm_page_prot;
+				}
+				flush_tlb();
+				return;
+			}
+		}
 
 		// -- Page not present (P=0) - demand allocation --
 		if (!(error_code & 0x01)) {
@@ -2093,7 +2119,10 @@ void sys_vector_install()
 	set_trap_gate(11,1,segment_not_present);
 	set_trap_gate(12,1,stack_segment_fault);
 	set_trap_gate(13,1,general_protection);
-	set_trap_gate(14,1,page_fault);
+	set_trap_gate(14,0,page_fault);   // IST 0: run on task's kernel stack.
+	                                     // COW handler can trigger a reschedule via
+	                                     // ret_from_intr, and schedule()'s get_current_task()
+	                                     // (RSP & ~0x7FFF) breaks on IST stacks.
 	//15 Intel reserved. Do not use.
 	set_trap_gate(16,1,x87_FPU_error);
 	set_trap_gate(17,1,alignment_check);

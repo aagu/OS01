@@ -55,7 +55,8 @@ kernel.bin: lib
 user:
 	make -C user
 
-user/busybox.elf: thirdpart/busybox-1.36.1/busybox
+build/x86_64/user/busybox.elf: thirdpart/busybox-1.36.1/busybox
+	@mkdir -p $(dir $@)
 	cp $< $@
 
 # ── BusyBox ─────────────────────────────────────────────
@@ -93,21 +94,22 @@ thirdpart/busybox-1.36.1/busybox: lib $(BUSYBOX_SRC)/Makefile $(BUSYBOX_CFG) use
 
 # ── Disk image ──────────────────────────────────────────
 
-disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user user/busybox.elf
+disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.elf
 	dd if=/dev/zero of=$@ bs=1M count=64
 	mkfs.vfat -F 32 $@
 	mmd -i $@ ::/EFI
 	mmd -i $@ ::/EFI/BOOT
 	mcopy -i $@ boot/uefi/BOOTX64.EFI ::/EFI/BOOT
 	mcopy -i $@ kernel.bin ::/
-	mcopy -i $@ user/init.elf ::/init.elf
-	mcopy -i $@ user/spin.elf ::/spin.elf
-	mcopy -i $@ user/sigtest.elf ::/sigtest.elf
-	mcopy -i $@ user/poweroff.elf ::/poweroff.elf
-	mcopy -i $@ user/systest.elf ::/systest.elf
-	mcopy -i $@ user/test_mmap.elf ::/test_mmap.elf
-	mcopy -i $@ user/test_fork_mmap.elf ::/test_fork_mmap.elf
-	mcopy -i $@ user/busybox.elf ::/busybox.elf
+	mcopy -i $@ build/x86_64/user/init.elf ::/init.elf
+	mcopy -i $@ build/x86_64/user/spin.elf ::/spin.elf
+	mcopy -i $@ build/x86_64/user/sigtest.elf ::/sigtest.elf
+	mcopy -i $@ build/x86_64/user/poweroff.elf ::/poweroff.elf
+	mcopy -i $@ build/x86_64/user/systest.elf ::/systest.elf
+	mcopy -i $@ build/x86_64/user/test_mmap.elf ::/test_mmap.elf
+	mcopy -i $@ build/x86_64/user/test_fork_mmap.elf ::/test_fork_mmap.elf
+	mcopy -i $@ build/x86_64/user/test_cow.elf ::/test_cow.elf
+	mcopy -i $@ build/x86_64/user/busybox.elf ::/busybox.elf
 ifneq (,$(wildcard config/config.txt))
 	mcopy -i $@ config/config.txt ::/
 endif

@@ -350,10 +350,37 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
             if (!(*pte & (PAGE_Present | PAGE_PROTNONE))) continue;
 
             uint64_t phys = *pte & PAGE_4K_MASK;
+
             if (prot == PROT_NONE) {
-                *pte = phys | PAGE_U_S | PAGE_PROTNONE;
+                // Stash phys for later restore.
+                // Preserve PAGE_COW if set — we keep our COW reference.
+                uint64_t stash = phys | PAGE_U_S | PAGE_PROTNONE;
+                if (*pte & PAGE_COW)
+                    stash |= PAGE_COW;
+                *pte = stash;
             } else {
-                *pte = phys | new_page_prot;
+                // Restoring from PROTNONE or changing existing mapping.
+                // Check COW before blindly applying new_page_prot.
+                if (*pte & PAGE_COW) {
+                    if (page_cow_refs(phys) > 1) {
+                        // Multiple sharers: allocate private copy
+                        uint64_t new_phys = alloc_4k_page();
+                        if (!new_phys) continue; // OOM: skip this page
+                        memcpy((void *)Phy_To_Virt(new_phys),
+                               (void *)Phy_To_Virt(phys), PAGE_4K_SIZE);
+                        page_cow_put(phys);
+                        *pte = new_phys | new_page_prot;
+                    } else {
+                        // Last sharer: promote in-place
+                        (void)page_cow_put(phys);
+                        *pte = phys | new_page_prot;
+                    }
+                } else if (*pte & PAGE_PROTNONE) {
+                    // Non-COW PROTNONE restore
+                    *pte = phys | new_page_prot;
+                } else {
+                    *pte = phys | new_page_prot;
+                }
             }
         }
 

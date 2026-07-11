@@ -46,6 +46,10 @@
 // but keeps phys.  mprotect(PROT_READ) walks PTEs to restore Present + clear this.
 // do_munmap/vma_free_all check this bit to know phys is valid for free_4k_page.
 
+#define PAGE_COW          (1UL << 10)  // software bit: COW-shared, write triggers fault
+// bit 10 is x86_64 PTE ignored.  Fork sets this on writable PTEs, clears PAGE_R_W.
+// COW fault handler checks this bit; if set with P=1,W=1, resolves COW.
+
 // 4KB PTE functions
 int      vmm_map_4k_page(uint64_t *pagemap, uint64_t phys,
                          uint64_t virt, uint64_t flags);

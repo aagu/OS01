@@ -264,6 +264,13 @@ void vmm_unmap_4k_page(uint64_t *pagemap, uint64_t virt)
         return;
 
     uint64_t phys = *pte & PAGE_4K_MASK;
+
+    if (*pte & PAGE_COW) {
+        // COW-shared page: decrement refcount, free only when count hits 0
+        if (page_cow_put(phys))
+            free_4k_page(phys);
+    } else {
+        free_4k_page(phys);
+    }
     *pte = 0;
-    free_4k_page(phys);
 }

@@ -215,9 +215,9 @@ struct tss_struct
     .rsp1 = 0xffff800000007c00, \
     .rsp2 = 0xffff800000007c00, \
     .reserved1 = 0, \
-    .ist1 = 0xffff800000007c00, /* exception stack (1KB from 0x7800) */ \
-    .ist2 = 0xffff800000007800, /* IRQ stack */ \
-    .ist3 = 0xffff800000007400, /* double fault stack */ \
+    .ist1 = 0xffff800000007c00, /* exception stack (4KB from 0x6c00) */ \
+    .ist2 = 0xffff800000006c00, /* IRQ stack (4KB from 0x5c00) */ \
+    .ist3 = 0xffff800000005c00, /* double fault stack (4KB from 0x4c00) */ \
     .ist4 = 0, \
     .ist5 = 0, \
     .ist6 = 0, \

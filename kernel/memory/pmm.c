@@ -74,6 +74,7 @@ struct subpage_pool {
     uint64_t    base_phys;
     uint64_t    bitmap[SUBPAGE_4K_COUNT / 64];
     int         alloc_count;
+    uint16_t    cow_count[SUBPAGE_4K_COUNT];  // COW refcount: how many COW PTEs map each 4KB slot
 };
 
 static list_t      subpage_pools;
@@ -376,6 +377,66 @@ void free_pages(struct Page * page,int32_t number)
 	}
 }
 
+// Find the subpage_pool containing phys, or NULL.  Must be called with
+// subpage_lock held.  Extracted from free_4k_page's pool walk.
+static struct subpage_pool *find_pool_locked(uint64_t phys)
+{
+    list_t *pos = subpage_pools.next;
+    while (pos != &subpage_pools) {
+        struct subpage_pool *pool =
+            container_of(pos, struct subpage_pool, list);
+        if (phys >= pool->base_phys &&
+            phys < pool->base_phys + PAGE_2M_SIZE)
+            return pool;
+        pos = pos->next;
+    }
+    return NULL;
+}
+
+// COW refcount helpers
+// All acquire subpage_lock internally.  Caller must hold no locks.
+
+void page_cow_get(uint64_t phys)
+{
+    uint64_t flags = spin_lock_irqsave(&subpage_lock);
+    struct subpage_pool *pool = find_pool_locked(phys);
+    if (pool) {
+        int slot = (int)((phys - pool->base_phys) >> PAGE_4K_SHIFT);
+        pool->cow_count[slot]++;
+    }
+    spin_unlock_irqrestore(&subpage_lock, flags);
+}
+
+bool page_cow_put(uint64_t phys)
+{
+    bool reached_zero = false;
+    uint64_t flags = spin_lock_irqsave(&subpage_lock);
+    struct subpage_pool *pool = find_pool_locked(phys);
+    if (pool) {
+        int slot = (int)((phys - pool->base_phys) >> PAGE_4K_SHIFT);
+        if (pool->cow_count[slot] > 0) {
+            pool->cow_count[slot]--;
+            if (pool->cow_count[slot] == 0)
+                reached_zero = true;
+        }
+    }
+    spin_unlock_irqrestore(&subpage_lock, flags);
+    return reached_zero;
+}
+
+uint16_t page_cow_refs(uint64_t phys)
+{
+    uint16_t refs = 0;
+    uint64_t flags = spin_lock_irqsave(&subpage_lock);
+    struct subpage_pool *pool = find_pool_locked(phys);
+    if (pool) {
+        int slot = (int)((phys - pool->base_phys) >> PAGE_4K_SHIFT);
+        refs = pool->cow_count[slot];
+    }
+    spin_unlock_irqrestore(&subpage_lock, flags);
+    return refs;
+}
+
 uint64_t alloc_4k_page(void)
 {
     // subpage_pools is initialized in pmm_init() — no lazy init needed.
@@ -393,8 +454,10 @@ uint64_t alloc_4k_page(void)
                 int bit = __builtin_ctzll(~pool->bitmap[i]);
                 pool->bitmap[i] |= (1ULL << bit);
                 pool->alloc_count++;
+                int slot = i * 64 + bit;
+                pool->cow_count[slot] = 0;   // fresh page, no COW references
                 uint64_t phys = pool->base_phys
-                              + (uint64_t)(i * 64 + bit) * PAGE_4K_SIZE;
+                              + (uint64_t)slot * PAGE_4K_SIZE;
                 spin_unlock_irqrestore(&subpage_lock, flags);
                 return phys;
             }
@@ -423,6 +486,7 @@ uint64_t alloc_4k_page(void)
     // Return slot 1 as the first free slot
     pool->bitmap[0] |= (1ULL << 1);
     pool->alloc_count++;
+    pool->cow_count[1] = 0;             // fresh slot 1, no COW references
 
     uint64_t phys = pool->base_phys + PAGE_4K_SIZE;
     spin_unlock_irqrestore(&subpage_lock, flags);
@@ -435,28 +499,18 @@ void free_4k_page(uint64_t phys)
 
     uint64_t flags = spin_lock_irqsave(&subpage_lock);
 
-    list_t *pos = subpage_pools.next;
-    while (pos != &subpage_pools) {
-        struct subpage_pool *pool =
-            container_of(pos, struct subpage_pool, list);
-
-        if (phys >= pool->base_phys &&
-            phys < pool->base_phys + PAGE_2M_SIZE) {
-
-            uint64_t offset = phys - pool->base_phys;
-            int slot = (int)(offset / PAGE_4K_SIZE);
-            if (slot < 0 || slot >= SUBPAGE_4K_COUNT) break;
+    struct subpage_pool *pool = find_pool_locked(phys);
+    if (pool) {
+        uint64_t offset = phys - pool->base_phys;
+        int slot = (int)(offset / PAGE_4K_SIZE);
+        if (slot >= 0 && slot < SUBPAGE_4K_COUNT) {
             int word = slot / 64;
             int bit  = slot % 64;
-
             if (pool->bitmap[word] & (1ULL << bit)) {
                 pool->bitmap[word] &= ~(1ULL << bit);
                 pool->alloc_count--;
             }
-            spin_unlock_irqrestore(&subpage_lock, flags);
-            return;
         }
-        pos = pos->next;
     }
 
     spin_unlock_irqrestore(&subpage_lock, flags);
