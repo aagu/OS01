@@ -3,6 +3,8 @@
 #include <kernel/apic.h>
 #include <kernel/ipi.h>
 #include <kernel/task.h>
+#include <kernel/arch/cpu.h>
+#include <kernel/arch/irq.h>
 #include <kernel/arch/x86_64/cpu.h>
 #include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/x86_64/msr.h>
@@ -113,14 +115,14 @@ void ap_entry(void)
     // Record TSC for cross-core warp comparison
     cpu->tsc_boot = rdtsc();
 
-    __asm__ __volatile__("sti");
+    arch_local_irq_enable();
     debug_sched("SMP: AP %u online (idle pid=%d), entering idle\n",
                   cpu->cpu_id, cpu->idle->pid);
 
     cpu->scheduler_ok = 1;
 
     while (1) {
-        __asm__ __volatile__("hlt");
+        arch_cpu_halt();
         if (cpu->need_resched)
             schedule();
     }
@@ -195,21 +197,21 @@ void smp_boot_aps(void)
         uint32_t icr_high = ap_id << 24;
         lapic_write(LAPIC_ICR_HIGH, icr_high);
         lapic_write(LAPIC_ICR_LOW, ICR_DELIVERY_INIT | ICR_LEVEL_ASSERT);
-        for (volatile uint32_t d = 0; d < 100000; d++) __asm__ __volatile__("pause");
+        for (volatile uint32_t d = 0; d < 100000; d++) arch_cpu_pause();
         lapic_write(LAPIC_ICR_HIGH, icr_high);
         lapic_write(LAPIC_ICR_LOW, ICR_DELIVERY_INIT);
-        for (volatile uint32_t d = 0; d < 100000; d++) __asm__ __volatile__("pause");
+        for (volatile uint32_t d = 0; d < 100000; d++) arch_cpu_pause();
 
         lapic_write(LAPIC_ICR_HIGH, icr_high);
         lapic_write(LAPIC_ICR_LOW, ICR_DELIVERY_STARTUP | ((uint32_t)TRAMPOLINE_BASE >> 12));
-        for (volatile uint32_t d = 0; d < 2000; d++) __asm__ __volatile__("pause");
+        for (volatile uint32_t d = 0; d < 2000; d++) arch_cpu_pause();
 
         lapic_write(LAPIC_ICR_HIGH, icr_high);
         lapic_write(LAPIC_ICR_LOW, ICR_DELIVERY_STARTUP | ((uint32_t)TRAMPOLINE_BASE >> 12));
 
         for (volatile uint32_t t = 0; t < 5000000; t++) {
             if (percpu_data[i].online) break;
-            __asm__ __volatile__("pause");
+            arch_cpu_pause();
         }
         if (percpu_data[i].online) {
             debug_sched("SMP: AP %u (APIC ID %u) booted successfully\n", i, ap_id);
@@ -226,7 +228,7 @@ void smp_boot_aps(void)
                 debug_sched("SMP: TSC sync AP%u: BSP=%#018lx AP=%#018lx diff=%+ld %s\n",
                               i, bsp_tsc, ap_tsc, (long long)diff, status);
             }
-            for (volatile uint32_t d = 0; d < 10000; d++) __asm__ __volatile__("pause");
+            for (volatile uint32_t d = 0; d < 10000; d++) arch_cpu_pause();
         } else {
             debug_sched("SMP: AP %u (APIC ID %u) FAILED\n", i, ap_id);
             list_del(&idle->list);

@@ -6,6 +6,8 @@
 #include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/x86_64/asm.h>
 #include <kernel/arch/x86_64/spinlock.h>
+#include <kernel/arch/cpu.h>
+#include <kernel/arch/irq.h>
 #include <kernel/interrupt.h>
 #include <kernel/task.h>
 #include <kernel/percpu.h>
@@ -47,7 +49,7 @@ __attribute__((noreturn, no_stack_protector, cold))
 void __stack_chk_fail(void)
 {
     // 1. IMMEDIATELY disable interrupts — the stack is corrupted.
-    __asm__ __volatile__("cli");
+    arch_local_irq_disable();
 
     // 2. Output banner via write_serial() — pure port I/O, no
     //    locks, no local buffers.  Do NOT use serial_printk()
@@ -80,7 +82,7 @@ void __stack_chk_fail(void)
 
     // 4. Halt forever.  The hang detector (500ms watchdog) will
     //    dump all task states as bonus diagnostics.
-    __asm__ __volatile__("1: hlt; jmp 1b");
+    while (1) arch_cpu_halt();
     __builtin_unreachable();
 }
 
@@ -136,13 +138,8 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     serial_printk("serial port init succeed\n");
 
     // EFER NXE — enable No-eXecute for user-space page tables
-    uint32_t eax, edx;
-    asm volatile("rdmsr" : "=a"(eax), "=d"(edx) : "c"(0xC0000080));
-    if (!(eax & (1 << 11))) {
-        eax |= (1 << 11);
-        asm volatile("wrmsr" :: "a"(eax), "d"(edx), "c"(0xC0000080));
-        serial_printk("EFER: NXE enabled\n");
-    }
+    arch_cpu_enable_nx();
+    serial_printk("EFER: NXE enabled\n");
 
     // ═══ 2. Memory subsystem ═════════════════════════════════
     PMMngr.start_code  = (uint64_t)&_text;
@@ -298,6 +295,6 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     task_init();                         // spawns /init.elf, enters idle loop
 
     // unreachable
-    while (1) hlt();
+    while (1) arch_cpu_halt();
     return 0;
 }

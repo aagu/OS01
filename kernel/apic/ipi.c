@@ -3,6 +3,8 @@
 #include <kernel/percpu.h>
 #include <kernel/debug.h>
 #include <kernel/vmm.h>
+#include <kernel/arch/irq.h>
+#include <kernel/arch/cpu.h>
 #include <kernel/arch/x86_64/gate.h>
 
 // ── File-scope: generate assembly stubs ──────────────────
@@ -57,7 +59,7 @@ void ipi_send(uint32_t dest_apic_id, uint8_t vector)
             debug_ipi("IPI: ICR stuck pending\n");
             break;
         }
-        __asm__ __volatile__("pause");
+        arch_cpu_pause();
     }
 
     uint32_t high = dest_apic_id << 24;

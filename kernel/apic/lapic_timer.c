@@ -1,8 +1,10 @@
 #include <kernel/apic.h>
 #include <kernel/percpu.h>
 #include <kernel/debug.h>
+#include <kernel/arch/irq.h>
+#include <kernel/arch/thread.h>
+#include <kernel/arch/cpu.h>
 #include <kernel/arch/x86_64/gate.h>
-#include <kernel/arch/x86_64/regs.h>
 #include <device/timer.h>
 
 // Assembly stub created below
@@ -55,7 +57,7 @@ void lapic_timer_calibrate(void)
 
     uint64_t start = jiffies;
     while (jiffies == start)
-        __asm__ __volatile__("pause");
+        arch_cpu_pause();
 
     uint32_t cur_count = lapic_read(LAPIC_TIMER_CUR);
     uint32_t elapsed = 0xFFFFFFFF - cur_count;
@@ -70,7 +72,7 @@ void lapic_timer_calibrate(void)
 
         start = jiffies;
         while (jiffies == start)
-            __asm__ __volatile__("pause");
+            arch_cpu_pause();
 
         cur_count = lapic_read(LAPIC_TIMER_CUR);
         elapsed = 0xFFFFFFFF - cur_count;

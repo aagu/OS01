@@ -5,6 +5,7 @@
 #include <kernel/slab.h>
 #include <kernel/debug.h>
 #include <kernel/printk.h>
+#include <kernel/arch/mmu.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>

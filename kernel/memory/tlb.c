@@ -2,6 +2,8 @@
 #include <kernel/ipi.h>
 #include <kernel/percpu.h>
 #include <kernel/debug.h>
+#include <kernel/arch/cpu.h>
+#include <kernel/arch/mmu.h>
 
 // ── TLB shootdown for SMP ──────────────────────────────────
 //
@@ -46,7 +48,7 @@ void tlb_shootdown(void)
 
         uint32_t timeout = 100000;
         while (percpu_data[i].tlb_ack == 0 && --timeout > 0)
-            __asm__ __volatile__("pause");
+            arch_cpu_pause();
 
         if (timeout == 0) {
             debug_mm("TLB shootdown: CPU %u did not ACK\n", i);
