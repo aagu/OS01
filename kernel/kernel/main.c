@@ -20,6 +20,8 @@
 #include <block/blockdev.h>
 #include <fs/vfs.h>
 #include <fs/fat.h>
+#include <fs/gpt.h>
+#include <fs/ext2.h>
 #include <fs/devfs.h>
 #include <fs/procfs.h>
 #include <fs/tmpfs.h>
@@ -177,20 +179,55 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     // ═══ 6. Storage + filesystem ════════════════════════════
     ahci_init();
 
-    vfs_init();
-    if (block_device_count() > 0) {
-        block_device_t *dev = block_device_get(0);
-        fat32_fs_t *fs = NULL;
-        if (0 == fat32_init(dev, &fs))
-            vfs_mount("/", dev, &fat_vfs_ops, fs);
-    }
-    devfs_init();                        // /dev: null, zero, serial, tty
+    devfs_init();                   // mount /dev + register chrdev
+                                    // ★ MUST be before any devfs_register_* call
     devfs_register_chrdev("keyboard", NULL, keyboard_devfs_read, NULL);
     devfs_register_chrdev("fb", NULL, NULL, fb_dev_write);
 
-    procfs_init();                       // /proc: meminfo, self/status, pid/status
+    // Register physical disks in /dev
+    for (int i = 0; i < block_device_count(); i++) {
+        block_device_t *dev = block_device_get(i);
+        devfs_register_blkdev(dev->name, dev);
+    }
 
-    tmpfs_init();                        // /tmp: memory-backed filesystem
+    vfs_init();                     // init mount table
+
+    // Try GPT partition table scan
+    gpt_info_t *gpt = (block_device_count() > 0)
+                      ? gpt_scan(block_device_get(0)) : NULL;
+
+    if (!gpt) {
+        // Fallback: old single-FAT32 layout
+        if (block_device_count() > 0) {
+            block_device_t *dev = block_device_get(0);
+            fat32_fs_t *fs = NULL;
+            if (0 == fat32_init(dev, &fs))
+                vfs_mount("/", dev, &fat_vfs_ops, fs);
+        }
+    } else {
+        // Dual-partition layout:
+        //   gpt->partitions[0] = hda1 (FAT32 ESP) → /boot
+        //   gpt->partitions[1] = hda2 (ext2)      → /
+        if (gpt->count >= 2) {
+            ext2_fs_t *ext2_fs = NULL;
+            fat32_fs_t *fat_fs = NULL;
+
+            if (0 == ext2_init(gpt->partitions[1].dev, &ext2_fs))
+                vfs_mount("/", gpt->partitions[1].dev, &ext2_vfs_ops, ext2_fs);
+            else
+                serial_printk("EXT2: mount failed — / not available\n");
+
+            if (0 == fat32_init(gpt->partitions[0].dev, &fat_fs))
+                vfs_mount("/boot", gpt->partitions[0].dev, &fat_vfs_ops, fat_fs);
+            else
+                serial_printk("FAT32: /boot mount failed\n");
+        }
+    }
+
+    // /tmp → tmpfs (independent of disk)
+    tmpfs_init();
+
+    procfs_init();                  // /proc
 
     // ═══ 7. Console TTY ═════════════════════════════════════
     // tty_alloc(NULL, NULL) uses default output → fb + serial dual-write.
