@@ -5,25 +5,21 @@
 #include <kernel/pmm.h>
 #include <fs/vfs.h>
 #include <kernel/task.h>
+#include <kernel/arch/x86_64/spinlock.h>
+#include <kernel/file.h>
 #include <string.h>
 #include <stdlib.h>
 
-#define SELFTEST_MAX 32
-static selftest_entry_t test_table[SELFTEST_MAX];
-static int test_count = 0;
+// ── Linker-defined section boundaries ─────────────────────
+// The .selftest_table section is in rodata (linker.ld).
+// Symbols are declared extern and placed inside the body —
+// they're resolved at link time, not compile time.
+extern const selftest_entry_t _selftest_table_start[];
+extern const selftest_entry_t _selftest_table_end[];
 
-void selftest_register(const char *name, selftest_fn fn)
-{
-    if (test_count >= SELFTEST_MAX) {
-        serial_printk("[selftest] ERROR: test table full (%s)\n", name);
-        return;
-    }
-    test_table[test_count].name = name;
-    test_table[test_count].fn   = fn;
-    test_count++;
-}
+// ── Built-in tests ────────────────────────────────────────
 
-static int test_slab_alloc_free(void)
+SELFTEST(test_slab_alloc_free)
 {
     void *p1 = kmalloc(64);
     if (!p1) { serial_printk("[selftest] slab_alloc_free: kmalloc returned NULL\n"); return -1; }
@@ -36,7 +32,7 @@ static int test_slab_alloc_free(void)
     return 0;
 }
 
-static int test_slab_many_sizes(void)
+SELFTEST(test_slab_many_sizes)
 {
     static const int sizes[] = {32, 64, 128, 256, 512, 1024, 2048, 4096};
     void *ptrs[8];
@@ -53,7 +49,7 @@ static int test_slab_many_sizes(void)
     return 0;
 }
 
-static int test_vfs_mount_root(void)
+SELFTEST(test_vfs_mount_root)
 {
     struct vfs_node *root = vfs_lookup("/");
     if (!root) {
@@ -68,7 +64,7 @@ static int test_vfs_mount_root(void)
     return 0;
 }
 
-static int test_procfs_read_meminfo(void)
+SELFTEST(test_procfs_read_meminfo)
 {
     struct vfs_node *mi = vfs_lookup("/proc/meminfo");
     if (!mi) {
@@ -89,8 +85,7 @@ static int test_procfs_read_meminfo(void)
     return 0;
 }
 
-#include <kernel/arch/x86_64/spinlock.h>
-static int test_spinlock_basic(void)
+SELFTEST(test_spinlock_basic)
 {
     spinlock_T lock;
     spin_init(&lock);
@@ -100,26 +95,27 @@ static int test_spinlock_basic(void)
     return 0;
 }
 
-#include <kernel/file.h>
-static int test_pipe_basic(void)
+SELFTEST(test_pipe_basic)
 {
     (void)0;
     return 0;
 }
 
+// ── Test runner ────────────────────────────────────────────
 int selftest_run_all(void)
 {
-    selftest_register("slab_alloc_free",   test_slab_alloc_free);
-    selftest_register("slab_many_sizes",   test_slab_many_sizes);
-    selftest_register("vfs_mount_root",    test_vfs_mount_root);
-    selftest_register("procfs_read_meminfo", test_procfs_read_meminfo);
-    selftest_register("spinlock_basic",    test_spinlock_basic);
-    selftest_register("pipe_basic",        test_pipe_basic);
-
+    // Iterate the .selftest_table section populated by SELFTEST() macros.
+    // Each entry is compiled into the rodata section; the linker script
+    // defines _selftest_table_start / _selftest_table_end boundaries.
+    int count  = (int)(_selftest_table_end - _selftest_table_start);
     int passed = 0, failed = 0;
-    for (int i = 0; i < test_count; i++) {
-        serial_printk("[selftest] %s... ", test_table[i].name);
-        int rc = test_table[i].fn();
+
+    for (int i = 0; i < count; i++) {
+        const char *name = _selftest_table_start[i].name;
+        selftest_fn  fn  = _selftest_table_start[i].fn;
+
+        serial_printk("[selftest] %s... ", name);
+        int rc = fn();
         if (rc == 0) {
             serial_printk("PASS\n");
             passed++;
@@ -128,6 +124,7 @@ int selftest_run_all(void)
             failed++;
         }
     }
+
     serial_printk("[selftest] %d total: %d passed, %d failed\n",
                   passed + failed, passed, failed);
     return failed;
