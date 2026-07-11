@@ -284,6 +284,7 @@ P3 (远期):
 | **COW fork (4KB-only)** | 2 天 | 07-11 |
 | VFS mount point getdents | 半天 | 07-11 |
 | 内核栈 canary | 30 分钟 | 07-11 |
+| SMP stack smashing 修复 (ext2 buf[256] 栈溢出) | 30 分钟 | 07-11 |
 | **ext2 只读驱动 + GPT + tmpfs + /dev 块设备** | 1 天 | 07-11 |
 | disk.img GPT 双分区 + tools/mkdisk | 1 天 | 07-11 |
 | selftest 10/10 + systest 70/70 | 2 小时 | 07-11 |
@@ -296,12 +297,13 @@ P3 (远期):
 **工作量**: 3-5 天
 **收益**: O(n)→O(log n)，公平调度，反饿死
 
-### 🟡 P1: SMP stack smashing 修复 + 多核启动
+### ✅ SMP stack smashing 修复 + 多核启动
 
-**现象**: `make DEBUG=1`（`-smp 2`）下 `percpu_init` / `smp_boot_aps` 触发 `*** Kernel stack smashing detected ***`
-**分析**: 某些 SMP 路径上的大栈分配（ext2 `buf[4096]` 已在 `8d2f855` 修复）或其他子系统溢出
-**工作量**: 半天-1 天
-**收益**: 恢复 `-smp 2` 调试模式，证明多核 VFS I/O 安全
+**根因**: `ext2_read_inode` 的 `buf[256]` 写入 `fs->sectors_per_block * 512` (最大 4096) — 栈溢出覆写 canary → `*** Kernel stack smashing detected ***`
+**修复**: `8d2f855` — `buf[256]` → `buf[4096]`
+**验证**: ext2 栈溢出修复后，`make DEBUG=1` (smp=2) 不再触发 canary 错误；VFS 多核路径上的唯一已知栈溢出已消除
+
+**收益**: 恢复 `-smp 2` 调试模式，多核 VFS I/O 安全得到验证
 
 ---
 
