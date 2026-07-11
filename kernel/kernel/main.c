@@ -22,6 +22,7 @@
 #include <fs/fat.h>
 #include <fs/devfs.h>
 #include <fs/procfs.h>
+#include <fs/tmpfs.h>
 #include <device/timer.h>
 #include <kernel/selftest.h>
 #include <stdlib.h>
@@ -188,6 +189,8 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     devfs_register_chrdev("fb", NULL, NULL, fb_dev_write);
 
     procfs_init();                       // /proc: meminfo, self/status, pid/status
+
+    tmpfs_init();                        // /tmp: memory-backed filesystem
 
     // ═══ 7. Console TTY ═════════════════════════════════════
     // tty_alloc(NULL, NULL) uses default output → fb + serial dual-write.
