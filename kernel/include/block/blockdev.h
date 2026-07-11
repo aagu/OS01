@@ -18,7 +18,7 @@ typedef struct block_device {
     int (*read)(struct block_device *dev, uint64_t lba, uint32_t count, void *buf);
     int (*write)(struct block_device *dev, uint64_t lba, uint32_t count, const void *buf);
 
-    void   *private_data;         // partition_ctx_t* or NULL for raw AHCI
+    void *private_data;         // partition_ctx_t* or NULL for raw AHCI
 } block_device_t;
 
 // ── Block device API ─────────────────────────────────────
