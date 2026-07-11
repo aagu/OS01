@@ -1,4 +1,4 @@
-#include <kernel/arch/x86_64/gate.h>
+#include <kernel/arch/irq.h>
 #include <kernel/debug.h>
 #include <stddef.h>
 
@@ -6,7 +6,7 @@
 // Indexed by interrupt vector number (0-255).
 // REGISTER_INTR_HANDLER fills these tables and sets the IDT gate.
 
-intr_handler_fn intr_handler_table[256];
+arch_intr_handler_fn intr_handler_table[256];
 void *          intr_handler_param[256];
 
 // ── Generic dispatch ────────────────────────────────────────

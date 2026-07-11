@@ -1,6 +1,7 @@
 #include <kernel/arch/x86_64/trap.h>
 #include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/x86_64/hw.h>
+#include <kernel/arch/segment.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <kernel/printk.h>
@@ -94,11 +95,11 @@ static void kill_current_user_task(pt_regs_t *regs)
     // running in ring 0 on its own kernel stack — where
     // get_current_task() works correctly.
     regs->rip  = (uint64_t)do_exit;
-    regs->cs   = KERNEL_CS;
-    regs->ss   = KERNEL_DS;
+    regs->cs   = ARCH_KERNEL_CS;
+    regs->ss   = ARCH_KERNEL_DS;
     regs->rsp  = (uint64_t)task + STACK_SIZE;  // task's kernel stack (NOT user RSP!)
-    regs->ds   = KERNEL_DS;
-    regs->es   = KERNEL_DS;
+    regs->ds   = ARCH_KERNEL_DS;
+    regs->es   = ARCH_KERNEL_DS;
     regs->rdi  = 0;              // exit code for do_exit
     regs->rflags = (1 << 9);     // IF=1
 }
@@ -811,10 +812,10 @@ int do_signal_delivery(pt_regs_t *regs)
         regs->rdi = sig;
         regs->rip = (uint64_t)handler;
         regs->rsp = new_rsp;
-        regs->cs  = USER_CS;  // 0x2b: ring 3 code (GDT index 5 | RPL 3)
-        regs->ss  = USER_DS;  // 0x33: ring 3 data (GDT index 6 | RPL 3)
-        regs->ds  = USER_DS;
-        regs->es  = USER_DS;
+        regs->cs  = ARCH_USER_CS;  // 0x2b: ring 3 code (GDT index 5 | RPL 3)
+        regs->ss  = ARCH_USER_DS;  // 0x33: ring 3 data (GDT index 6 | RPL 3)
+        regs->ds  = ARCH_USER_DS;
+        regs->es  = ARCH_USER_DS;
 
         // 6. Block signal during handler execution
         current->blocked |= (1ULL << (sig - 1));
