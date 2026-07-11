@@ -8,53 +8,53 @@
 extern void ret_from_intr(void);
 extern void do_IRQ(pt_regs_t *regs, uint64_t nr);
 
-#define Build_IRQ(nr)                                                    \
-    extern void IRQ##nr##_interrupt(void);                                \
-    __asm__(                                                             \
-        ".globl " SYMBOL_NAME_STR(IRQ) #nr "_interrupt\n\t"              \
-        SYMBOL_NAME_STR(IRQ) #nr "_interrupt:\n\t"                       \
-        "pushq  $0\n\t"                   /* dummy error code */         \
-        "cld;\n\t"                                                        \
-        "pushq  %rax;\n\t"                                               \
-        "pushq  %rax;\n\t"                                               \
-        "movq   %es,    %rax;\n\t"                                       \
-        "pushq  %rax;\n\t"                                               \
-        "movq   %ds,    %rax;\n\t"                                       \
-        "pushq  %rax;\n\t"                                               \
-        "xorq   %rax,   %rax;\n\t"                                       \
-        "pushq  %rbp;\n\t"                                               \
-        "pushq  %rdi;\n\t"                                               \
-        "pushq  %rsi;\n\t"                                               \
-        "pushq  %rdx;\n\t"                                               \
-        "pushq  %rcx;\n\t"                                               \
-        "pushq  %rbx;\n\t"                                               \
-        "pushq  %r8;\n\t"                                                \
-        "pushq  %r9;\n\t"                                                \
-        "pushq  %r10;\n\t"                                               \
-        "pushq  %r11;\n\t"                                               \
-        "pushq  %r12;\n\t"                                               \
-        "pushq  %r13;\n\t"                                               \
-        "pushq  %r14;\n\t"                                               \
-        "pushq  %r15;\n\t"                                               \
-        "movq   $0x10,  %rdx;\n\t"                                       \
-        "movq   %rdx,   %ds;\n\t"                                        \
-        "movq   %rdx,   %es;\n\t"                                        \
-        "movq   %rsp,   %rdi;\n\t"       /* pt_regs* (arg 1) */          \
-        "movq   $" #nr ", %rsi;\n\t"     /* IRQ number (0-15, arg 2) */     \
-        "leaq   ret_from_intr(%rip), %rax;\n\t"                          \
-        "pushq  %rax;\n\t"               /* return via ret_from_intr */  \
+#define Build_IRQ(nr, vector)                                              \
+    extern void IRQ##nr##_interrupt(void);                                  \
+    __asm__(                                                                \
+        ".globl " SYMBOL_NAME_STR(IRQ) #nr "_interrupt\n\t"                \
+        SYMBOL_NAME_STR(IRQ) #nr "_interrupt:\n\t"                         \
+        "pushq  $0\n\t"                   /* dummy error code */           \
+        "cld;\n\t"                                                          \
+        "pushq  %rax;\n\t"                                                 \
+        "pushq  %rax;\n\t"                                                 \
+        "movq   %es,    %rax;\n\t"                                         \
+        "pushq  %rax;\n\t"                                                 \
+        "movq   %ds,    %rax;\n\t"                                         \
+        "pushq  %rax;\n\t"                                                 \
+        "xorq   %rax,   %rax;\n\t"                                         \
+        "pushq  %rbp;\n\t"                                                 \
+        "pushq  %rdi;\n\t"                                                 \
+        "pushq  %rsi;\n\t"                                                 \
+        "pushq  %rdx;\n\t"                                                 \
+        "pushq  %rcx;\n\t"                                                 \
+        "pushq  %rbx;\n\t"                                                 \
+        "pushq  %r8;\n\t"                                                  \
+        "pushq  %r9;\n\t"                                                  \
+        "pushq  %r10;\n\t"                                                 \
+        "pushq  %r11;\n\t"                                                 \
+        "pushq  %r12;\n\t"                                                 \
+        "pushq  %r13;\n\t"                                                 \
+        "pushq  %r14;\n\t"                                                 \
+        "pushq  %r15;\n\t"                                                 \
+        "movq   $0x10,  %rdx;\n\t"                                         \
+        "movq   %rdx,   %ds;\n\t"                                          \
+        "movq   %rdx,   %es;\n\t"                                          \
+        "movq   %rsp,   %rdi;\n\t"       /* pt_regs* (arg 1) */            \
+        "movq   $" #vector ", %rsi;\n\t" /* IRQ vector (arg 2) */          \
+        "leaq   ret_from_intr(%rip), %rax;\n\t"                            \
+        "pushq  %rax;\n\t"               /* return via ret_from_intr */    \
         "jmp    do_IRQ\n\t"                                              \
-    );                                                                   \
-    static inline void __attribute__((always_inline))                    \
-    _irq_install_##nr(void) {                                            \
-        set_intr_gate_raw(0x20 + (nr), 0,                                \
-                          (void *)(uintptr_t)IRQ##nr##_interrupt);       \
+    );                                                                     \
+    static inline void __attribute__((always_inline))                      \
+    _irq_install_##nr(void) {                                              \
+        set_intr_gate_raw(vector, 0,                                        \
+                          (void *)(uintptr_t)IRQ##nr##_interrupt);         \
     }
 
-Build_IRQ(0);  Build_IRQ(1);  Build_IRQ(2);  Build_IRQ(3);
-Build_IRQ(4);  Build_IRQ(5);  Build_IRQ(6);  Build_IRQ(7);
-Build_IRQ(8);  Build_IRQ(9);  Build_IRQ(10); Build_IRQ(11);
-Build_IRQ(12); Build_IRQ(13); Build_IRQ(14); Build_IRQ(15);
+Build_IRQ(0, 0x20);  Build_IRQ(1, 0x21);  Build_IRQ(2, 0x22);  Build_IRQ(3, 0x23);
+Build_IRQ(4, 0x24);  Build_IRQ(5, 0x25);  Build_IRQ(6, 0x26);  Build_IRQ(7, 0x27);
+Build_IRQ(8, 0x28);  Build_IRQ(9, 0x29);  Build_IRQ(10, 0x2a); Build_IRQ(11, 0x2b);
+Build_IRQ(12, 0x2c); Build_IRQ(13, 0x2d); Build_IRQ(14, 0x2e); Build_IRQ(15, 0x2f);
 
 #undef Build_IRQ
 
