@@ -206,9 +206,9 @@ gpt_info_t *gpt_scan(block_device_t *disk)
 }
 
 #ifdef OS01_SELFTEST
-#include <kernel/selftest.h>
+// Test registered by selftest_run_all() via forward declaration in selftest.c
 
-SELFTEST(test_gpt_crc32)
+int gpt_selftest_crc32(void)
 {
     // CRC32("123456789") = 0xCBF43926 (standard test vector)
     const char *test = "123456789";

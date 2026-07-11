@@ -10,16 +10,24 @@
 #include <string.h>
 #include <stdlib.h>
 
-// ── Linker-defined section boundaries ─────────────────────
-// The .selftest_table section is in rodata (linker.ld).
-// Symbols are declared extern and placed inside the body —
-// they're resolved at link time, not compile time.
-extern const selftest_entry_t _selftest_table_start[];
-extern const selftest_entry_t _selftest_table_end[];
+#define SELFTEST_MAX 32
+static selftest_entry_t test_table[SELFTEST_MAX];
+static int test_count = 0;
+
+void selftest_register(const char *name, selftest_fn fn)
+{
+    if (test_count >= SELFTEST_MAX) {
+        serial_printk("[selftest] ERROR: test table full (%s)\n", name);
+        return;
+    }
+    test_table[test_count].name = name;
+    test_table[test_count].fn   = fn;
+    test_count++;
+}
 
 // ── Built-in tests ────────────────────────────────────────
 
-SELFTEST(test_slab_alloc_free)
+static int test_slab_alloc_free(void)
 {
     void *p1 = kmalloc(64);
     if (!p1) { serial_printk("[selftest] slab_alloc_free: kmalloc returned NULL\n"); return -1; }
@@ -32,7 +40,7 @@ SELFTEST(test_slab_alloc_free)
     return 0;
 }
 
-SELFTEST(test_slab_many_sizes)
+static int test_slab_many_sizes(void)
 {
     static const int sizes[] = {32, 64, 128, 256, 512, 1024, 2048, 4096};
     void *ptrs[8];
@@ -49,7 +57,7 @@ SELFTEST(test_slab_many_sizes)
     return 0;
 }
 
-SELFTEST(test_vfs_mount_root)
+static int test_vfs_mount_root(void)
 {
     struct vfs_node *root = vfs_lookup("/");
     if (!root) {
@@ -64,7 +72,7 @@ SELFTEST(test_vfs_mount_root)
     return 0;
 }
 
-SELFTEST(test_procfs_read_meminfo)
+static int test_procfs_read_meminfo(void)
 {
     struct vfs_node *mi = vfs_lookup("/proc/meminfo");
     if (!mi) {
@@ -85,7 +93,7 @@ SELFTEST(test_procfs_read_meminfo)
     return 0;
 }
 
-SELFTEST(test_spinlock_basic)
+static int test_spinlock_basic(void)
 {
     spinlock_T lock;
     spin_init(&lock);
@@ -95,27 +103,40 @@ SELFTEST(test_spinlock_basic)
     return 0;
 }
 
-SELFTEST(test_pipe_basic)
+static int test_pipe_basic(void)
 {
     (void)0;
     return 0;
 }
 
+// ── External test functions (defined in subsystem .c files) ──
+// Forward-declared here instead of polluting public headers.
+// Each subsystem registers its tests during init (before selftest_run_all).
+
+int ext2_selftest_magic(void);
+int ext2_selftest_struct_sizes(void);
+int gpt_selftest_crc32(void);
+int tmpfs_selftest_mounted(void);
+
 // ── Test runner ────────────────────────────────────────────
 int selftest_run_all(void)
 {
-    // Iterate the .selftest_table section populated by SELFTEST() macros.
-    // Each entry is compiled into the rodata section; the linker script
-    // defines _selftest_table_start / _selftest_table_end boundaries.
-    int count  = (int)(_selftest_table_end - _selftest_table_start);
+    selftest_register("slab_alloc_free",   test_slab_alloc_free);
+    selftest_register("slab_many_sizes",   test_slab_many_sizes);
+    selftest_register("vfs_mount_root",    test_vfs_mount_root);
+    selftest_register("procfs_read_meminfo", test_procfs_read_meminfo);
+    selftest_register("spinlock_basic",    test_spinlock_basic);
+    selftest_register("pipe_basic",        test_pipe_basic);
+
+    selftest_register("ext2_magic",        ext2_selftest_magic);
+    selftest_register("ext2_struct_sizes", ext2_selftest_struct_sizes);
+    selftest_register("gpt_crc32",         gpt_selftest_crc32);
+    selftest_register("tmpfs_mounted",     tmpfs_selftest_mounted);
+
     int passed = 0, failed = 0;
-
-    for (int i = 0; i < count; i++) {
-        const char *name = _selftest_table_start[i].name;
-        selftest_fn  fn  = _selftest_table_start[i].fn;
-
-        serial_printk("[selftest] %s... ", name);
-        int rc = fn();
+    for (int i = 0; i < test_count; i++) {
+        serial_printk("[selftest] %s... ", test_table[i].name);
+        int rc = test_table[i].fn();
         if (rc == 0) {
             serial_printk("PASS\n");
             passed++;
@@ -124,7 +145,6 @@ int selftest_run_all(void)
             failed++;
         }
     }
-
     serial_printk("[selftest] %d total: %d passed, %d failed\n",
                   passed + failed, passed, failed);
     return failed;

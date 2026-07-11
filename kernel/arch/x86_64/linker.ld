@@ -32,9 +32,6 @@ SECTIONS
 	{
 		_rodata = .;
 		*(.rodata)
-		_selftest_table_start = .;
-		*(.selftest_table)
-		_selftest_table_end = .;
 		_erodata = .;
 	}
 

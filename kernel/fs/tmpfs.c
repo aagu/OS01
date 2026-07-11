@@ -431,11 +431,10 @@ void tmpfs_init(void)
 }
 
 #ifdef OS01_SELFTEST
-#include <kernel/selftest.h>
+// Test registered by selftest_run_all() via forward declaration in selftest.c
 
-SELFTEST(test_tmpfs_mounted)
+int tmpfs_selftest_mounted(void)
 {
-    // Verify /tmp is mounted after kernel init
     struct vfs_node *tmp = vfs_lookup("/tmp");
     if (!tmp) return -1;
     if (tmp->type != VFS_DIR) { vfs_node_put(tmp); return -1; }
