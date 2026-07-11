@@ -26,11 +26,60 @@
 #include <kernel/selftest.h>
 #include <stdlib.h>
 
+// ── Stack canary ─────────────────────────────────────────────
+#include <kernel/arch/x86_64/cpu.h>   // rdtsc(), cpu_id()
+
 extern char _text;
 extern char _etext;
 extern char _edata;
 extern char _erodata;
 extern char _end;
+
+// ── Stack canary ─────────────────────────────────────────────
+// Initial value is non-zero (defense-in-depth).  kernel_main()
+// replaces it with rdtsc() as its first statement.
+uint64_t __stack_chk_guard = 0xDEADBEEFCAFEBABE;
+
+__attribute__((noreturn, no_stack_protector, cold))
+void __stack_chk_fail(void)
+{
+    // 1. IMMEDIATELY disable interrupts — the stack is corrupted.
+    __asm__ __volatile__("cli");
+
+    // 2. Output banner via write_serial() — pure port I/O, no
+    //    locks, no local buffers.  Do NOT use serial_printk()
+    //    (deadlock on serial_lock) or color_printk() (local buf).
+    const char *msg = "\n*** Kernel stack smashing detected ***\n";
+    for (const char *p = msg; *p; p++)
+        write_serial(*p);
+
+    // 3. Print PID if the task struct is accessible.
+    //    get_current_task() uses RSP & ~(STACK_SIZE-1) — usually
+    //    still valid even with a corrupted stack.  Guard against
+    //    pointers outside the kernel-mapped range.
+    task_t *t = get_current_task();
+    if (t && (uint64_t)t >= 0xffff800000000000ULL) {
+        const char *pre = "pid=";
+        for (const char *p = pre; *p; p++)
+            write_serial(*p);
+
+        // Simple itoa — no format strings, no division by zero.
+        int64_t pid = t->pid;
+        char buf[21];   // max 20 digits + sign
+        int i = 0;
+        if (pid < 0) { write_serial('-'); pid = -pid; }
+        if (pid == 0) { buf[i++] = '0'; }
+        while (pid > 0) { buf[i++] = '0' + (char)(pid % 10); pid /= 10; }
+        while (i > 0) write_serial(buf[--i]);
+
+        write_serial('\n');
+    }
+
+    // 4. Halt forever.  The hang detector (500ms watchdog) will
+    //    dump all task states as bonus diagnostics.
+    __asm__ __volatile__("1: hlt; jmp 1b");
+    __builtin_unreachable();
+}
 
 // ── /dev/fb write handler ──────────────────────────────────
 // Writes characters one-by-one to the framebuffer via color_printk.
@@ -59,8 +108,12 @@ static int fb_dev_write(struct vfs_node *node, uint64_t offset,
 //    8. Per-CPU + SMP bringup
 //    9. Scheduler + user-space init (/init.elf)
 //
+__attribute__((no_stack_protector))
 int kernel_main(struct BOOT_INFO *bootinfo)
 {
+    // ═══ 0. Stack canary — MUST be the first statement ════════
+    __stack_chk_guard = rdtsc() ^ 0xDEADBEEFCAFEBABE;
+
     // ═══ 1. CPU + interrupt infrastructure ═══════════════════
     Pos.Phy_addr = (uint32_t *)bootinfo->Graphics_Info.FrameBufferBase;
     Pos.FB_length = bootinfo->Graphics_Info.FrameBufferSize;
