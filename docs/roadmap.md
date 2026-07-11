@@ -1,26 +1,30 @@
-# OS01 优化路线图 v4
+# OS01 优化路线图 v5
 
-> **基准**: `e18e726` (内核栈 canary)
+> **基准**: `c03a36a` (test: fix 13 failing syscall tests)
 > **日期**: 2026-07-11
-> **来源**: v3 路线图 + COW fork 实现 + 内核栈 canary
+> **来源**: v4 路线图 + ext2/tmpfs/GPT 文件系统升级
 
 标记: ✅ 已完成 | 🔴 P0 本周 | 🟡 P1 本月 | 🟢 P2 下月 | 🔵 P3 远期
 
 ---
 
-## 自 v3 以来的进展 (2026-07-05 → 2026-07-11)
+## 自 v4 以来的进展 (2026-07-11)
 
 | 项目 | 说明 |
 |------|------|
-| 4KB 页面支持 | `vmm_map_4k_page` + `vmm_unmap_4k_page` + `vmm_pt_walk` + `alloc_4k_page`/`free_4k_page` |
-| VMA 数据结构 | `vma_t` (vm_start/end/flags/prot/file) + `vma_find/insert/remove/free_all` |
-| `mmap`/`mprotect`/`munmap` syscall | 匿名映射 + 文件映射 + demand paging + VMA 管理 |
-| **COW fork (4KB)** | `fork_mm_copy` 4KB PTE 循环改为 COW 共享；`do_page_fault` COW 分支；`vmm_unmap_4k_page` COW 释放；`do_mprotect` COW 适配 |
-| `cow_count[512]` per-subpage-pool | 4KB 粒度引用计数，`subpage_lock` 保护 |
-| `PAGE_COW` (PTE bit 10) | COW 共享页标记，bit 9=PAGE_PROTNONE 已用 |
-| 集成测试 `test_cow.elf` | 5 个测试全部 PASS（basic, fork_of_fork, mprotect, exec, exit） |
-| VFS mount point in getdents | `b5cc904` — 挂载点注入 + 字母排序 |
-| 内核栈 canary | `-fstack-protector-strong` + `__stack_chk_guard` (rdtsc 种子) + `__stack_chk_fail` (write_serial 直驱, 无锁) |
+| **GPT 分区表** | `gpt_scan()` — 解析 GPT header + partition entries + CRC32 校验，创建 partition block device wrapper |
+| **分区块设备** | `block_device_register_raw()` — 不绑 AHCI hook 的注册路径；partition wrapper 对 LBA 加偏移、检查越界 |
+| **/dev 块设备** | `devfs_register_blkdev()` + `devfs_read/devfs_write` blkdev dispatch |
+| **ext2 只读驱动** | ~370 行 `ext2.c`：superblock → bgdesc → inode table → direct + single indirect → VFS read/readdir |
+| **tmpfs** | ~430 行 `tmpfs.c`：4KB 页链表 + 子节点数组，完整 VFS ops (read/write/readdir/create/mkdir/…)，挂载 `/tmp` |
+| **VFS 大小写敏感** | `vfs_ops_t.flags` + `VFS_OPS_CASE_INSENSITIVE` — FAT32 不敏感，ext2/tmpfs/devfs/procfs 敏感 |
+| **`vfs_dirent_t.ino` uint64** | tmpfs 存储内核指针需要 64 位 inode 号 |
+| **disk.img 双分区** | `tools/mkdisk.c` — GPT + FAT32 ESP (64MB) + ext2 root (128MB) + backup GPT |
+| **/boot 挂载** | FAT32 ESP 挂载 `/boot`，ext2 root 挂载 `/` |
+| **fat32_mount → fat32_init** | 驱动只做 init，调用方负责 vfs_mount — ext2 风格一致 |
+| **selftest 恢复** | `selftest_register()` 注册 10 测试，10/10 PASS |
+| **systest 修复** | PTY→file serial runner，ext2 readdir 填 i_size，写操作测试迁移 `/tmp` — **70/70 PASS** |
+| **init 路径迁移** | `/init.elf` → `/bin/init`，`/systest.elf` → `/bin/systest`，`/busybox.elf` → `/bin/busybox` |
 
 ---
 
@@ -68,8 +72,8 @@
 
 | 优先级 | 任务 | 说明 |
 |--------|------|------|
-| ✅ | 系统测试 (syscall 级) | systest.elf 70 passed, 0 failed, 覆盖 43 syscall |
-| ✅ | 单元测试 | `test/` + selftest 框架覆盖 slab/vfs/procfs/spinlock/pmm/fat32 |
+| ✅ | 单元测试 + selftest | `test/` 9 套件 + selftest 10/10 PASS (ext2 structs, tmpfs mount, GPT CRC32, slab, vfs, procfs, spinlock, pipe) |
+| ✅ | 系统测试 (syscall 级) | systest.elf **70/70 PASS**，覆盖 43 syscall |
 | 🟡 P1 | Mock 框架完善 | host 编译测试非 arch 内核代码 (Tilck `mocking.h` 模式) |
 
 ### 2.2 调试日志
@@ -100,15 +104,20 @@
 
 ---
 
-## Phase 4: 文件系统增强 🟡
+## Phase 4: 文件系统
 
-### 4.1 ext2 支持 [借鉴 Aquila]
+### 4.1 文件系统布局 ✅ 已完成
 
 | 优先级 | 任务 | 说明 |
 |--------|------|------|
-| 🟡 P1 | ext2 只读驱动 | superblock、block group descriptor、inode 表、间接块 |
+| ✅ | GPT 分区表扫描 | `gpt_scan()` + CRC32 + partition block device wrapper |
+| ✅ | ext2 只读驱动 | ~370 行：superblock→bgdesc→inode table→direct+single indirect→VFS |
+| ✅ | tmpfs 内存文件系统 | ~430 行：4KB 页链表，完整 VFS ops，`/tmp` 挂载 |
+| ✅ | /dev 块设备 | `devfs_register_blkdev()` — /dev/hda, /dev/hda1, /dev/hda2 |
+| ✅ | disk.img GPT 双分区 | `tools/mkdisk.c` — ESP FAT32 (64MB, `/boot`) + ext2 root (128MB, `/`) |
+| ✅ | VFS per-fs 大小写 | `vfs_ops_t.flags` — FAT32 case-insensitive, ext2/tmpfs case-sensitive |
+| ✅ | `fat32_mount` → `fat32_init` | 驱动只做 init，调用方 vfs_mount |
 | 🟡 P2 | ext2 读写驱动 | inode 分配/释放、block bitmap、目录操作 |
-| 🟡 P2 | VFS vnode refcounting | Aquila 的 `vref()`/`vrele()` 引用计数模式 |
 
 ### 4.2 /proc 完善
 
@@ -198,14 +207,14 @@ P0 (本周):
   - (无 — 已全部完成)
 
 P1 (本月):
- 1. ext2 只读                 — UNIX 文件系统核心 (Aquila 221 行范本)
- 2. EEVDF 调度器              — O(n)→O(log n)，公平调度
- 3. poll/select               — 多路 I/O，解锁 busybox
- 4. SMP 负载均衡              — 多核利用
- 5. readlink/symlink          — ext2 前置
- 6. /proc/<pid>/fd/ + /proc/<pid>/maps
- 7. 日志级别 (ERR/WARN/INFO/DEBUG) — 调试效率质变
- 8. lwIP 网络栈 + E1000       — 第一个网络能力
+ 1. EEVDF 调度器              — O(n)→O(log n)，公平调度
+ 2. poll/select               — 多路 I/O，解锁 busybox
+ 3. SMP 负载均衡              — 多核利用
+ 4. readlink/symlink          — ext2 前置
+ 5. /proc/<pid>/fd/ + /proc/<pid>/maps
+ 6. 日志级别 (ERR/WARN/INFO/DEBUG) — 调试效率质变
+ 7. lwIP 网络栈 + E1000       — 第一个网络能力
+ 8. 用户栈 canary             — 用户态加固
 
 P2 (下月):
  9. ext2 读写
@@ -232,29 +241,33 @@ P3 (远期):
 | 2 | COW 引用计数 | `subpage_pool.cow_count[512]` | 4KB 页来自 alloc_4k_page → 在 pool 中；无需改 struct Page |
 | 3 | 调度器 | EEVDF (Tilck 路线) | Linux 6.6+ 生产级算法 |
 | 4 | 网络栈 | lwIP (cavOS 路线) | 快速获得 TCP/IP，后期可替换自研模块 |
-| 5 | 文件系统 | FAT32 + ext2 (Aquila 路线) | ext2 简洁 (221行)，UNIX 权限/inode 概念完整 |
+| 5 | 文件系统 | FAT32 + ext2 (只读) + tmpfs + devfs + procfs | ext2 只读 370 行，UNIX 权限/inode 完整；tmpfs 430 行，供 /tmp 可写存储 |
 | 6 | 测试 | Tilck 3 层 (unit+self+sys) | 经过验证的模式 |
 | 7 | 用户态 | busybox → 动态链接 → Alpine apk | cavOS 已验证可行 |
 | 8 | COW PTE 标记 | `PAGE_COW` (bit 10) | bit 9 已被 `PAGE_PROTNONE` 占用 |
 | 9 | COW 并发保护 | `subpage_lock` (已有 spinlock) | 保护 cow_count RMW + alloc/free 位图，无需新增锁 |
 | 10 | 内核栈 canary | 全局 `__stack_chk_guard` (rdtsc 种子) + `-fstack-protector-strong` | clang 在 `-ffreestanding -fpie` 下生成 RIP-relative 全局引用，无需 TLS/FS |
+| 11 | 磁盘布局 | GPT 双分区 (FAT32 ESP + ext2 root) | UEFI 标准分区表，`/boot` 和 `/` 分离，内核自解析 GPT |
 
 ---
 
-## v3→v4 变更摘要
+## v4→v5 变更摘要
 
-| 项目 | v3 状态 | v4 状态 |
+| 项目 | v4 状态 | v5 状态 |
 |------|---------|---------|
-| COW fork + 4KB 页面 | 🔴 P0 | ✅ |
-| COW fault handler | 🔴 P0 | ✅ |
-| mmap/mprotect syscall | 🟡 P1 | ✅ |
-| fork_mm_copy COW 共享 | 🔴 P0 | ✅ |
-| vmm_unmap_4k_page COW | — | ✅ |
-| do_mprotect COW 适配 | — | ✅ |
-| page_cow_get/put/refs | — | ✅ |
-| COW 集成测试 (5 cases) | — | ✅ |
-| 内核栈 canary | 🔴 P0 | ✅ |
-| ext2 只读 | 🟡 P1 | 🟡 P1 (未变) |
+| ext2 只读驱动 | 🟡 P1 | ✅ |
+| ext2 读写驱动 | 🟡 P2 | 🟡 P2 (未变) |
+| GPT 分区 + /dev 块设备 | — | ✅ |
+| tmpfs 内存文件系统 | — | ✅ |
+| disk.img GPT 双分区 | — | ✅ |
+| fat32_mount → fat32_init | — | ✅ |
+| VFS per-fs 大小写敏感 | — | ✅ |
+| `vfs_dirent_t.ino` uint64 | — | ✅ |
+| selftest 框架恢复 | — | ✅ (10/10) |
+| systest 修复 (路径+写测试) | — | ✅ (70/70) |
+| init 路径迁移 /init.elf→/bin/init | — | ✅ |
+| `/boot` 挂载点 | — | ✅ |
+| tools/mkdisk 构建工具 | — | ✅ |
 | EEVDF 调度器 | 🟡 P1 | 🟡 P1 (未变) |
 | 网络栈 | 🟡 P1 | 🟡 P1 (未变) |
 
@@ -270,21 +283,25 @@ P3 (远期):
 | 4KB 页面 + VMA + mmap/mprotect | 3 天 | 07-08 |
 | **COW fork (4KB-only)** | 2 天 | 07-11 |
 | VFS mount point getdents | 半天 | 07-11 |
-| **内核栈 canary** | 30 分钟 | 07-11 |
+| 内核栈 canary | 30 分钟 | 07-11 |
+| **ext2 只读驱动 + GPT + tmpfs + /dev 块设备** | 1 天 | 07-11 |
+| disk.img GPT 双分区 + tools/mkdisk | 1 天 | 07-11 |
+| selftest 10/10 + systest 70/70 | 2 小时 | 07-11 |
 
 ## 下一个改进建议
-
-### 🟡 P1: ext2 只读驱动
-
-**借鉴**: Aquila ext2 驱动 (221 行 `ext2.c`)
-**工作量**: 1-2 天
-**收益**: UNIX 文件系统核心能力 (权限、inode、符号链接)
 
 ### 🟡 P1: EEVDF 调度器
 
 **借鉴**: Tilck EEVDF 实现 (`kernel/sched/`)
 **工作量**: 3-5 天
 **收益**: O(n)→O(log n)，公平调度，反饿死
+
+### 🟡 P1: SMP stack smashing 修复 + 多核启动
+
+**现象**: `make DEBUG=1`（`-smp 2`）下 `percpu_init` / `smp_boot_aps` 触发 `*** Kernel stack smashing detected ***`
+**分析**: 某些 SMP 路径上的大栈分配（ext2 `buf[4096]` 已在 `8d2f855` 修复）或其他子系统溢出
+**工作量**: 半天-1 天
+**收益**: 恢复 `-smp 2` 调试模式，证明多核 VFS I/O 安全
 
 ---
 
@@ -306,7 +323,7 @@ P3 (远期):
 | 特性 | OS01 | Tilck | cavOS | Aquila | ArvernOS |
 |------|------|-------|-------|--------|----------|
 | 调度器 | RR+优先级 | EEVDF | 抢占式 | 多线程 | 抢占式 |
-| 文件系统 | FAT32, devfs, procfs | ramfs, devfs, FAT32, sysfs | FAT32, ext2, /proc, /sys, /dev | ext2, tmpfs, devfs, procfs, devpts | — |
+| 文件系统 | ext2, FAT32, devfs, procfs, tmpfs | ramfs, devfs, FAT32, sysfs | FAT32, ext2, /proc, /sys, /dev | ext2, tmpfs, devfs, procfs, devpts | — |
 | 网络 | ❌ | ❌ | lwIP TCP/IP | socket骨架 | 自研 ARP→UDP |
 | COW | ✅ (4KB) | ✅ | ✅ | — | — |
 | mmap | ✅ | ✅ | ✅ | ✅ | — |
