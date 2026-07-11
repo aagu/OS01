@@ -162,6 +162,7 @@ static int ext2_vfs_readdir(struct vfs_node *node, uint64_t index,
 
 // ── VFS operations table ────────────────────────────────
 struct vfs_ops ext2_vfs_ops = {
+    .flags   = 0,  // case-sensitive
     .read    = ext2_vfs_read,
     .write   = NULL,
     .readdir = ext2_vfs_readdir,

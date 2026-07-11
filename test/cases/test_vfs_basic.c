@@ -17,6 +17,8 @@ typedef struct vfs_dirent   vfs_dirent_t;
 typedef struct vfs_mount    vfs_mount_t;
 
 typedef struct vfs_ops {
+    uint32_t flags;
+    #define VFS_OPS_CASE_INSENSITIVE  (1 << 0)
     int (*read)(vfs_node_t *, uint64_t, uint64_t, void *);
     int (*write)(vfs_node_t *, uint64_t, uint64_t, void *);
     int (*readdir)(vfs_node_t *, uint64_t, vfs_dirent_t *);
@@ -27,7 +29,7 @@ struct vfs_dirent {
     char     name[VFS_NAME_MAX];
     uint64_t size;
     uint8_t  type;
-    uint32_t ino;
+    uint64_t ino;
 };
 
 struct vfs_node {

@@ -1186,6 +1186,7 @@ struct vfs_node *fat_create(vfs_node_t *dir, const char *name)
 }
 
 struct vfs_ops fat_vfs_ops = {
+    .flags   = VFS_OPS_CASE_INSENSITIVE,
     .read     = fat_read,
     .write    = fat_write,
     .readdir  = fat_readdir,

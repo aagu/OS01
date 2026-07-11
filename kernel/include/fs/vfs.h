@@ -19,6 +19,8 @@ struct vfs_dirent;
 
 // ── File operations (filesystem driver provides these) ────
 typedef struct vfs_ops {
+    uint32_t flags;
+    #define VFS_OPS_CASE_INSENSITIVE  (1 << 0)
     int (*read)(struct vfs_node *node, uint64_t offset,
                 uint64_t size, void *buffer);
     int (*write)(struct vfs_node *node, uint64_t offset,
@@ -61,7 +63,7 @@ typedef struct vfs_dirent {
     char     name[VFS_NAME_MAX];
     uint64_t size;
     uint8_t  type;          // VFS_FILE or VFS_DIR
-    uint32_t ino;           // filesystem-specific id (cluster number for FAT32)
+    uint64_t ino;           // filesystem-specific id (must hold kernel pointer for tmpfs)
 } vfs_dirent_t;
 
 // ── VFS node (inode) ──────────────────────────────────────

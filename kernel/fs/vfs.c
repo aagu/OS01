@@ -187,7 +187,13 @@ static vfs_node_t *__vfs_lookup(const char *path)
             int ret = current->ops->readdir(current, idx, &entry);
             if (ret == 0 && entry.name[0] == '\0') break;
             if (ret == 0) {
-                if (vfs_name_cmp(entry.name, comp) == 0) {
+                int match;
+                if (current->ops && (current->ops->flags & VFS_OPS_CASE_INSENSITIVE))
+                    match = (vfs_name_cmp(entry.name, comp) == 0);
+                else
+                    match = (strcmp(entry.name, comp) == 0);
+
+                if (match) {
                     found = 1;
                     break;
                 }
@@ -434,7 +440,12 @@ int vfs_getdents(vfs_node_t *dir, struct linux_dirent64 *buf, unsigned int count
     // ── Phase 3: Sort by name (case-insensitive) ──────────────
     for (int i = 0; i < total - 1; i++) {
         for (int j = 0; j < total - 1 - i; j++) {
-            if (vfs_name_cmp(entries[j].name, entries[j + 1].name) > 0) {
+            int cmp;
+            if (dir->ops && (dir->ops->flags & VFS_OPS_CASE_INSENSITIVE))
+                cmp = vfs_name_cmp(entries[j].name, entries[j + 1].name);
+            else
+                cmp = strcmp(entries[j].name, entries[j + 1].name);
+            if (cmp > 0) {
                 vfs_dirent_t tmp = entries[j];
                 entries[j]     = entries[j + 1];
                 entries[j + 1] = tmp;
