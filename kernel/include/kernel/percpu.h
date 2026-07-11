@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <kernel/task.h>
+#include <kernel/arch/percpu.h>
 
 // ──────────────────────────────────────────────
 //  Per-CPU data structure
@@ -26,7 +27,7 @@ typedef struct percpu {
     uint64_t need_resched;      // offset 8: per-CPU reschedule flag
     // ── C-only fields ──
     uint32_t cpu_id;            // logical CPU ID (0 .. NR_CPUS-1)
-    uint32_t apic_id;           // Local APIC ID (from MADT)
+    uint32_t arch_processor_id; // APIC ID (x86) / MPIDR_EL1 (aarch64)
     uint32_t online;            // 1 when CPU is fully initialized
     uint32_t scheduler_ok;      // per-CPU scheduler_initialized guard
     struct tss_struct *tss;     // this CPU's TSS (in GDT slot 7)
@@ -40,11 +41,7 @@ typedef struct percpu {
     uint64_t tsc_boot;          // TSC value after AP startup (for warp check)
 } percpu_t;
 
-// Number of CPUs supported (from kernel/include/kernel/arch/x86_64/cpu.h)
-#ifndef NR_CPUS
-#error "NR_CPUS must be defined (see kernel/include/kernel/arch/x86_64/cpu.h)"
-#endif
-
+// Number of CPUs supported (from arch/cpu.h via task.h)
 extern percpu_t percpu_data[NR_CPUS];
 
 // Number of CPUs actually discovered from MADT (≤ NR_CPUS).
@@ -59,12 +56,7 @@ extern uint32_t num_cpus;
 // be installed via percpu_install_gs().
 static inline percpu_t *this_cpu(void)
 {
-    percpu_t *cpu;
-    __asm__ __volatile__(
-        "movq %%gs:0, %0"
-        : "=r"(cpu)
-    );
-    return cpu;
+    return (percpu_t *)arch_this_cpu_ptr();
 }
 
 // Convenience: logical CPU ID of the executing core.

@@ -14,7 +14,7 @@ void percpu_init(uint32_t cpu, uint32_t apic_id)
 {
     memset(&percpu_data[cpu], 0, sizeof(percpu_t));
     percpu_data[cpu].cpu_id  = cpu;
-    percpu_data[cpu].apic_id = apic_id;
+    percpu_data[cpu].arch_processor_id = apic_id;
     // Store self-pointer as the first qword so GS:0 yields &percpu_data[cpu]
     percpu_data[cpu].self = (uint64_t)&percpu_data[cpu];
     list_init(&percpu_data[cpu].run_queue);

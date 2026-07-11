@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include <kernel/interrupt.h>
-#include <kernel/arch/x86_64/cpu.h>
+#include <kernel/arch/cpu.h>
 
 // ──────────────────────────────────────────────
 //  LAPIC Register Offsets (128-bit aligned, 32-bit access)

@@ -4,8 +4,8 @@
 #ifdef __x86_64__
 #define ARCH_KERNEL_CS  0x08
 #define ARCH_KERNEL_DS  0x10
-#define ARCH_USER_CS    0x23
-#define ARCH_USER_DS    0x2B
+#define ARCH_USER_CS    0x2B
+#define ARCH_USER_DS    0x33
 #else
 #define ARCH_KERNEL_CS  0
 #define ARCH_KERNEL_DS  0

@@ -40,7 +40,7 @@ void ap_entry(void)
     percpu_t *cpu = this_cpu();
 
     debug_sched("SMP: AP %u (APIC ID %u) reported\n",
-                  cpu->cpu_id, cpu->apic_id);
+                  cpu->cpu_id, cpu->arch_processor_id);
 
     uint64_t apic_msr = rdmsr(IA32_APIC_BASE);
     if (!(apic_msr & APIC_BASE_ENABLE)) {
@@ -167,9 +167,9 @@ void smp_boot_aps(void)
 
     for (uint32_t i = 0; i < num_cpus; i++) {
         if (i == 0) continue;
-        if (!percpu_data[i].apic_id) continue;
+        if (!percpu_data[i].arch_processor_id) continue;
 
-        uint32_t ap_id = percpu_data[i].apic_id;
+        uint32_t ap_id = percpu_data[i].arch_processor_id;
         debug_sched("SMP: booting AP %u (APIC ID %u)\n", i, ap_id);
 
         // Create the AP's idle task — the AP runs ap_entry() on

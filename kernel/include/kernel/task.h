@@ -3,9 +3,10 @@
 
 #include <list.h>
 #include <stdint.h>
-#include <kernel/arch/x86_64/cpu.h>
-#include <kernel/arch/x86_64/regs.h>
+#include <kernel/arch/cpu.h>
+#include <kernel/arch/thread.h>
 #include <kernel/arch/x86_64/linkage.h>
+#include <kernel/arch/segment.h>
 #include <kernel/file.h>
 #include <uapi/time.h>
 #include <stdbool.h>
@@ -13,14 +14,6 @@
 /* ── Blocker framework ─────────────────────────── */
 #define BLOCKER_NONE      0
 #define BLOCKER_WAITPID   1
-
-#define KERNEL_CS (0x08)
-#define KERNEL_DS (0x10)
-
-// RPL=3 (bits 0-1 = 11) required for iretq ring-0→ring-3 transition.
-// GDT indices: USER code=5 (0x28), USER data=6 (0x30)
-#define USER_CS (0x2b)  // 0x28 | 3
-#define USER_DS (0x33)  // 0x30 | 3
 
 struct task_struct;
 typedef bool (*blocker_check_t)(struct task_struct *waiter);
@@ -166,7 +159,7 @@ thread_t init_thread;
     .mm = &init_mm,                   \
     .thread = &init_thread,           \
     .addr_limit = 0xffff800000000000, \
-        .blocked = 0, \                      
+                .blocked = 0, \
     .pid = 0,                         \
     .counter = 0,                     \
     .signal = 0,                      \

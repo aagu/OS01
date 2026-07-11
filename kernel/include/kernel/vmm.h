@@ -2,6 +2,7 @@
 #define _KERNEL_VMM_H
 
 #include <stdint.h>
+#include <kernel/arch/mmu.h>
 
 //page table attribute
 
@@ -64,24 +65,9 @@ uint64_t *vmm_pt_walk(uint64_t *pagemap, uint64_t virt,
 
 extern mmap kernel_map;
 
-#define flush_tlb()				            \
-do								            \
-{								            \
-	unsigned long	tmpreg;					\
-	__asm__ __volatile__ 	(				\
-				"movq	%%cr3,	%0	\n\t"	\
-				"movq	%0,	%%cr3	\n\t"	\
-				:"=r"(tmpreg)			    \
-				:				            \
-				:"memory"			        \
-				);				            \
-}while(0)
-
-#define switch_tlb(tlb)								\
-do													\
-{													\
-	__asm__ __volatile__("mov %0, %%cr3"::"r"(tlb));\
-} while (0);										\
+// Backward-compatible aliases for existing callers
+#define flush_tlb()    arch_flush_tlb_all()
+#define switch_tlb(p)  arch_switch_mm((uint64_t *)(p))
 
 void vmm_map_page(uint64_t *pagemap, uintptr_t physical_address,
                   uintptr_t virtual_address, uint64_t flags);

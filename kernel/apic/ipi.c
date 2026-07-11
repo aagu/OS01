@@ -73,6 +73,6 @@ void ipi_broadcast(uint8_t vector, int exclude_self)
             continue;
         if (exclude_self && i == me)
             continue;
-        ipi_send(percpu_data[i].apic_id, vector);
+        ipi_send(percpu_data[i].arch_processor_id, vector);
     }
 }
