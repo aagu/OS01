@@ -325,9 +325,9 @@ static void setup_fallback_actions(void)
 
     // RESPAWN: the interactive shell (or systest in test mode)
 #ifdef OS01_SYSTEST
-    add_action(ACT_RESPAWN, "", "/systest.elf");
+    add_action(ACT_RESPAWN, "", "/bin/systest");
 #else
-    add_action(ACT_RESPAWN, "", "/busybox.elf sh");
+    add_action(ACT_RESPAWN, "", "/bin/busybox sh");
 #endif
 
     // CTRLALTDEL: when init receives SIGINT, reboot
