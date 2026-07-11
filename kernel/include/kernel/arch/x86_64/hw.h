@@ -68,4 +68,14 @@ inline void __attribute__((always_inline)) outd(uint16_t port, uint32_t data)
                         ); 
 }
 
+// ── MMIO accessors ─────────────────────────────────────────
+static inline uint8_t  readb(volatile void *a)  { return *(volatile uint8_t  *)a; }
+static inline uint16_t readw(volatile void *a)  { return *(volatile uint16_t *)a; }
+static inline uint32_t readl(volatile void *a)  { return *(volatile uint32_t *)a; }
+static inline uint64_t readq(volatile void *a)  { return *(volatile uint64_t *)a; }
+static inline void     writeb(volatile void *a, uint8_t  v) { *(volatile uint8_t  *)a = v; }
+static inline void     writew(volatile void *a, uint16_t v) { *(volatile uint16_t *)a = v; }
+static inline void     writel(volatile void *a, uint32_t v) { *(volatile uint32_t *)a = v; }
+static inline void     writeq(volatile void *a, uint64_t v) { *(volatile uint64_t *)a = v; }
+
 #endif

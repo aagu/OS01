@@ -118,4 +118,7 @@ static inline uint64_t rdtscp_serialized(void)
     return ((uint64_t)high << 32) | low;
 }
 
+// Spin-wait hint (defined here so arch/cpu.h can forward it)
+static inline void arch_pause(void) { __asm__ __volatile__("pause"); }
+
 #endif
