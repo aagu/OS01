@@ -25,6 +25,7 @@
 #include <fs/procfs.h>
 #include <fs/tmpfs.h>
 #include <kernel/selftest.h>
+#include <kernel/futex.h>
 #include <stdlib.h>
 #include <kernel/subsys.h>
 #include <kernel/arch/subsys.h>
@@ -282,7 +283,7 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     serial_printk("[selftest] done\n");
 #endif
 
-
+    futex_init();                        // init futex hash buckets
 
     // ═══ 9. Scheduler + user-space init ═════════════════════
     task_init();                         // spawns /init.elf, enters idle loop

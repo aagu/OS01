@@ -30,6 +30,8 @@ typedef int pid_t;
 #include <uapi/time.h>
 #include <kernel.h>
 #include <kernel/vma.h>
+#include <uapi/futex.h>
+#include <kernel/futex.h>
 // ── Local signal constants (kernel has its own signal.h) ──
 #ifndef SIG_BLOCK
 #define SIG_BLOCK    0
@@ -889,6 +891,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         [42] = "sigprocmask",
         [43] = "sigreturn",
         [45] = "poweroff",
+        [47] = "futex",
     };
     const char *sname = (regs->rax < 64 && syscall_names[regs->rax])
                         ? syscall_names[regs->rax] : "?";
@@ -2035,6 +2038,28 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         uint64_t addr   = regs->rdi;
         uint64_t length = regs->rsi;
         regs->rax = do_munmap(addr, length);
+        break;
+    }
+    case SYS_futex: {
+        int *uaddr = (int *)regs->rdi;
+        int op = (int)regs->rsi;
+        int val = (int)regs->rdx;
+
+        if ((uint64_t)uaddr >= current->addr_limit) {
+            regs->rax = -EFAULT;
+            break;
+        }
+
+        switch (op) {
+        case FUTEX_WAIT:
+            regs->rax = do_futex_wait(uaddr, val);
+            break;
+        case FUTEX_WAKE:
+            regs->rax = do_futex_wake(uaddr, val);
+            break;
+        default:
+            regs->rax = -EINVAL;
+        }
         break;
     }
     default:
