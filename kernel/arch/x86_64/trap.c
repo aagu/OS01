@@ -2003,7 +2003,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             // S5 on QEMU q35 (the \_S5 object reports {0, 0}).
             log_info("ACPI: powering off via PM1a=%#x\n",
                      (unsigned)apic_info.pm1a_port);
-            outw(0x2000, apic_info.pm1a_port);
+            outw(apic_info.pm1a_port, 0x2000);
             // Block — platform powers off asynchronously.
             while (1) __asm__ __volatile__("hlt");
         }
