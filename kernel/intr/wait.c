@@ -17,9 +17,9 @@ void wait_queue_sleep(wait_queue_t *wq)
     // schedule() returns).
     uint64_t flags = spin_lock_irqsave(&wq->lock);
     list_add_to_before(&wq->head, &current->io_wait_node);
+    current->state = TASK_INTERRUPTIBLE;  // set before unlock (SMP: prevents lost-wakeup)
     spin_unlock_irqrestore(&wq->lock, flags);
 
-    current->state = TASK_INTERRUPTIBLE;
     schedule();
 
     // Clean up if we were woken by something other than
