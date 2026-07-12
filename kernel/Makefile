@@ -33,6 +33,7 @@ KERNEL_C_SOURCES := \
     $(wildcard percpu/*.c) \
     $(wildcard pic/*.c) \
     $(wildcard test/*.c) \
+    $(wildcard subsys/*.c) \
     $(wildcard *.c)               # completion.c
 
 # Architecture C sources and asm sources
