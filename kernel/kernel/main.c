@@ -13,12 +13,9 @@
 #include <kernel/percpu.h>
 #include <kernel/arch/x86_64/trampoline.h>
 #include <kernel/tty.h>
-#include <device/pic.h>
 #include <kernel/apic.h>
-#include <driver/pit.h>
 #include <driver/serial.h>
 #include <driver/keyboard.h>
-#include <driver/ahci.h>
 #include <block/blockdev.h>
 #include <fs/vfs.h>
 #include <fs/fat.h>
@@ -27,9 +24,9 @@
 #include <fs/devfs.h>
 #include <fs/procfs.h>
 #include <fs/tmpfs.h>
-#include <device/timer.h>
 #include <kernel/selftest.h>
 #include <stdlib.h>
+#include <kernel/subsys.h>
 
 // ── Stack canary ─────────────────────────────────────────────
 #include <kernel/arch/x86_64/cpu.h>   // rdtsc(), cpu_id()
@@ -156,25 +153,14 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     frame_buffer_init();                 // remap FB at VIRT_FRAMEBUFFER_OFFSET
     color_printk(GREEN, BLACK, "frame buffer remap succeed\n");
 
-    // ═══ 3. Interrupt controllers ════════════════════════════
-    // APIC mode: LAPIC for local delivery, IOAPIC for external IRQs.
-    // All IOAPIC redirection entries start masked.
-    apic_init(bootinfo->RSDP);
+    // ═══ RSDP: 传递给 arch 子系统 ═══
+    extern uint64_t arch_boot_rsdp;
+    arch_boot_rsdp = bootinfo->RSDP;
 
-    // Legacy PIC (i8259) — all IRQs masked; used only when !apic_available.
-    pic_init();
-
-    // ═══ 4. Timers ═══════════════════════════════════════════
-    timer_init();                        // softirq timer list
-    pit_init();                          // PIT IRQ0 at 100 Hz
-    lapic_timer_init();                  // calibrate LAPIC timer vs PIT
-
-    // ═══ 5. Device IRQs ═════════════════════════════════════
-    keyboard_init();                     // PS/2: init + register IRQ1
-    init_serial_irq();                   // COM1: register IRQ4 + IER=0x01
-
-    // ═══ 6. Storage + filesystem ════════════════════════════
-    ahci_init();
+    // ═══ 3-6. Subsystem framework ══════════════════════════════════
+    extern void arch_register_subsys(void);
+    arch_register_subsys();
+    subsys_init_all();
 
     vfs_init();                         // init mount table BEFORE any mount calls
 
@@ -281,7 +267,11 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     }
 
     smp_boot_aps();
-    lapic_timer_start(100);              // per-CPU scheduling tick
+
+    // per-CPU 子系统二次 init
+    extern void arch_register_subsys_percpu(void);
+    arch_register_subsys_percpu();
+    subsys_init_percpu();
 
 #ifdef OS01_SELFTEST
     serial_printk("[selftest] running built-in tests...\n");
