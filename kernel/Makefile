@@ -85,6 +85,14 @@ ifdef KERNEL_SELFTEST
 ALL_CFLAGS += -DOS01_SELFTEST=1
 endif
 
+# ── Log output target (serial | fb | both) ────────────────
+# Helper: non-empty → 1, empty → 0
+bool = $(if $1,1,0)
+
+LOG_TARGET ?= serial
+ALL_CFLAGS += -DLOG_TARGET_SERIAL=$(call bool,$(filter serial both,$(LOG_TARGET)))
+ALL_CFLAGS += -DLOG_TARGET_FB=$(call bool,$(filter fb both,$(LOG_TARGET)))
+
 # ── Targets ────────────────────────────────────────────────
 .PHONY: all clean install-headers
 
