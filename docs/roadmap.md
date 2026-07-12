@@ -30,7 +30,7 @@ P0 (本迭代 — 本月):
 
 P1 (本月):
  4. /proc/<pid>/fd/ + maps   — 进程级调试
- 5. 日志级别                  — ERR/WARN/INFO/DEBUG，开发效率质变
+ 5. 日志级别 ✅               — ERR/WARN/INFO/DEBUG，开发效率质变
  6. rwlock/seqlock            — VFS /proc 多核缩放
  7. lwIP 网络栈 + E1000       — 第一个网络能力
  8. 用户栈 canary             — 用户态加固
@@ -120,7 +120,7 @@ P3 (远期):
 
 **收益:** 调试效率提升，busybox `ps`/`top` 的基础数据。
 
-#### 5. 日志级别系统 🟡 P1
+#### 5. 日志级别系统 ✅
 
 **动机:** 当前 `serial_printk`/`color_printk` 无级别概念。开 DEBUG 看流水淹没过筛，关 DEBUG 关键错误丢失。
 
@@ -257,6 +257,7 @@ P3 (远期):
 | 内核栈 canary (SSP) | 30 分钟 | 07-11 |
 | arch 通用头文件迁移 (io/cpu/irq/mmu/atomic/percpu) | 2 天 | 07-12 |
 | 子系统注册框架 | 半天 | 07-12 |
+| 日志级别系统 (log_err/log_warn/log_info/log_debug) | 5 天 | 07-12 |
 
 ---
 

@@ -85,6 +85,11 @@ ifdef KERNEL_SELFTEST
 ALL_CFLAGS += -DOS01_SELFTEST=1
 endif
 
+# ── NDEBUG (compile-time elimination of log_debug) ────────
+ifdef NDEBUG
+ALL_CFLAGS += -DNDEBUG
+endif
+
 # ── Log output target (serial | fb | both) ────────────────
 # Helper: non-empty → 1, empty → 0
 bool = $(if $1,1,0)
