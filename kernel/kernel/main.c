@@ -158,6 +158,11 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     arch_boot_rsdp = bootinfo->RSDP;
 
     // ═══ 3-6. Subsystem framework ══════════════════════════════════
+    // arch_register_subsys() + subsys_init_all() dispatches:
+    //   Phase 3: interrupt controllers (apic, pic)
+    //   Phase 4: timers (timer, pit, lapic-timer)
+    //   Phase 5: device IRQs (keyboard, serial)
+    //   Phase 6: storage (ahci)
     extern void arch_register_subsys(void);
     arch_register_subsys();
     subsys_init_all();
