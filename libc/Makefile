@@ -25,7 +25,8 @@ C_SOURCES := \
     $(wildcard stdlib/*.c) \
     $(wildcard string/*.c) \
     $(wildcard time/*.c) \
-    $(wildcard unistd/*.c)
+    $(wildcard unistd/*.c) \
+    $(wildcard pthread/*.c)
 
 # Remove duplicates: free.c conflicts with malloc.c, chown.c with uid_stubs.c
 C_SOURCES := $(filter-out stdlib/free.c unistd/chown.c, $(C_SOURCES))
