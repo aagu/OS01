@@ -1328,6 +1328,24 @@ int kernel_thread(uint64_t (*fn)(uint64_t), uint64_t arg, uint64_t flags)
     return do_fork(&regs, flags, 0, 0);
 }
 
+struct task_struct *create_kthread(uint64_t (*fn)(uint64_t), uint64_t arg,
+                                   const char *name)
+{
+    (void)name;
+    int64_t pid = kernel_thread(fn, arg, PF_KTHREAD);
+    if (pid < 0)
+        return NULL;
+
+    list_t *pos = init_task_union.task.list.next;
+    while (pos != &init_task_union.task.list) {
+        task_t *t = container_of(pos, task_t, list);
+        if (t->pid == pid)
+            return t;
+        pos = pos->next;
+    }
+    return NULL;
+}
+
 void task_init()
 {
 
@@ -1391,6 +1409,17 @@ void task_init()
     // schedule() picks up the user init (PID 1) naturally.
     current->state = TASK_RUNNING;
     this_cpu()->scheduler_ok = 1;
+
+#ifdef OS01_SELFTEST
+    // ── Kernel mutex selftest ────────────────────────────────
+    // Runs before the idle loop so we can use kernel_thread +
+    // schedule().  Two kernel threads increment a shared counter
+    // under mutex_lock 1000 times each, verifying mutual exclusion.
+    {
+        extern void test_kernel_mutex(void);
+        test_kernel_mutex();
+    }
+#endif
 
     // ── Idle loop ────────────────────────────────────────────
     // hlt pauses the CPU until the next interrupt (timer tick,
