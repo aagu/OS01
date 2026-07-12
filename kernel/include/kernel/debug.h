@@ -1,15 +1,17 @@
 #ifndef _KERNEL_DEBUG_H
 #define _KERNEL_DEBUG_H
 
-#include <kernel/printk.h>
+// Transition: all debug_<channel>() macros now forward to log_debug()
+// while preserving their compile-time per-channel gating (the existing
+// OS01_DEBUG_<ch> flags, set via DEBUG_CHANNELS= in the Makefile).
+// This means:
+//   make DEBUG_CHANNELS=sched        → sched msgs visible at LOG_DEBUG
+//   make NDEBUG=1                    → all debug msgs vanish
+//   log_set_level(LOG_INFO) at boot  → debug msgs filtered at runtime
 
-// ── Channel definitions ────────────────────────────
-// Each OS01_DEBUG_<channel> is either 1 (enabled) or 0 (disabled).
-// Set via -DOS01_DEBUG_<channel> in kernel/Makefile CFLAGS.
-// The Makefile passes lowercase channel names, e.g.:
-//   DEBUG_CHANNELS=sched,tty
-//   → -DOS01_DEBUG_sched=1 -DOS01_DEBUG_tty=1
+#include <kernel/log.h>
 
+// ── Channel definitions (unchanged) ───────────────────────
 #ifndef OS01_DEBUG_sched
 #define OS01_DEBUG_sched 0
 #endif
@@ -41,29 +43,30 @@
 #define OS01_DEBUG_fs 0
 #endif
 
-// ── Debug print macros ─────────────────────────────
-// Usage:  debug_sched("cpu %d switching to pid %d\n", cpu, next->pid);
-// Expands to nothing when channel is disabled — zero runtime cost.
+// ── Debug print macros ────────────────────────────────────
+// The OS01_DEBUG_<ch> gate preserves compile-time channel
+// filtering.  log_debug() adds runtime level filtering and
+// NDEBUG elimination.
 
 #define debug_sched(fmt, ...)                                               \
-    do { if (OS01_DEBUG_sched)  serial_printk("[sched] " fmt, ##__VA_ARGS__); } while(0)
+    do { if (OS01_DEBUG_sched)  log_debug("[sched] " fmt, ##__VA_ARGS__); } while(0)
 #define debug_tty(fmt, ...)                                                 \
-    do { if (OS01_DEBUG_tty)    serial_printk("[tty] " fmt, ##__VA_ARGS__); } while(0)
+    do { if (OS01_DEBUG_tty)    log_debug("[tty] " fmt, ##__VA_ARGS__); } while(0)
 #define debug_vfs(fmt, ...)                                                 \
-    do { if (OS01_DEBUG_vfs)    serial_printk("[vfs] " fmt, ##__VA_ARGS__); } while(0)
+    do { if (OS01_DEBUG_vfs)    log_debug("[vfs] " fmt, ##__VA_ARGS__); } while(0)
 #define debug_mm(fmt, ...)                                                  \
-    do { if (OS01_DEBUG_mm)     serial_printk("[mm] " fmt, ##__VA_ARGS__); } while(0)
+    do { if (OS01_DEBUG_mm)     log_debug("[mm] " fmt, ##__VA_ARGS__); } while(0)
 #define debug_irq(fmt, ...)                                                 \
-    do { if (OS01_DEBUG_irq)    serial_printk("[irq] " fmt, ##__VA_ARGS__); } while(0)
+    do { if (OS01_DEBUG_irq)    log_debug("[irq] " fmt, ##__VA_ARGS__); } while(0)
 #define debug_syscall(fmt, ...)                                             \
-    do { if (OS01_DEBUG_syscall) serial_printk("[syscall] " fmt, ##__VA_ARGS__); } while(0)
+    do { if (OS01_DEBUG_syscall) log_debug("[syscall] " fmt, ##__VA_ARGS__); } while(0)
 #define debug_task(fmt, ...)                                                \
-    do { if (OS01_DEBUG_task)   serial_printk("[task] " fmt, ##__VA_ARGS__); } while(0)
+    do { if (OS01_DEBUG_task)   log_debug("[task] " fmt, ##__VA_ARGS__); } while(0)
 #define debug_ipi(fmt, ...)                                                 \
-    do { if (OS01_DEBUG_ipi)    serial_printk("[ipi] " fmt, ##__VA_ARGS__); } while(0)
+    do { if (OS01_DEBUG_ipi)    log_debug("[ipi] " fmt, ##__VA_ARGS__); } while(0)
 #define debug_block(fmt, ...)                                               \
-    do { if (OS01_DEBUG_block)  serial_printk("[block] " fmt, ##__VA_ARGS__); } while(0)
+    do { if (OS01_DEBUG_block)  log_debug("[block] " fmt, ##__VA_ARGS__); } while(0)
 #define debug_fs(fmt, ...)                                                  \
-    do { if (OS01_DEBUG_fs)     serial_printk("[fs] " fmt, ##__VA_ARGS__); } while(0)
+    do { if (OS01_DEBUG_fs)     log_debug("[fs] " fmt, ##__VA_ARGS__); } while(0)
 
 #endif // _KERNEL_DEBUG_H

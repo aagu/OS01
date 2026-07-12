@@ -7,6 +7,7 @@
 #include <kernel/arch/x86_64/regs.h>
 #include <kernel/arch/x86_64/linkage.h>
 #include <kernel/debug.h>
+#include <kernel/log.h>
 #include <kernel/memory.h>
 #include <kernel/pmm.h>
 #include <kernel/vma.h>
@@ -221,9 +222,9 @@ void schedule(void)
     // Reset the per-CPU watchdog.  If it was >= HANG_THRESHOLD
     // we just recovered from a near-hang — dump diagnostic info.
     if (this_cpu()->watchdog_counter >= HANG_THRESHOLD) {
-        serial_printk("[hang] CPU %u recovered (watchdog=%lu ticks)\n",
-                      (unsigned long)cpu_id(),
-                      (unsigned long)this_cpu()->watchdog_counter);
+        log_info("[hang] CPU %u recovered (watchdog=%lu ticks)\n",
+                 (unsigned long)cpu_id(),
+                 (unsigned long)this_cpu()->watchdog_counter);
         hang_dump_all();
     }
     this_cpu()->watchdog_counter = 0;
