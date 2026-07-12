@@ -1,8 +1,8 @@
 # OS01 优化路线图 v5
 
-> **基准**: `c03a36a` (test: fix 13 failing syscall tests)
-> **日期**: 2026-07-11
-> **来源**: v4 路线图 + ext2/tmpfs/GPT 文件系统升级
+> **基准**: `98435b3` (feat: integrate subsystem registration framework)
+> **日期**: 2026-07-12
+> **来源**: v5 路线图 + 子系统注册框架
 
 标记: ✅ 已完成 | 🔴 P0 本周 | 🟡 P1 本月 | 🟢 P2 下月 | 🔵 P3 远期
 
@@ -25,6 +25,14 @@
 | **selftest 恢复** | `selftest_register()` 注册 10 测试，10/10 PASS |
 | **systest 修复** | PTY→file serial runner，ext2 readdir 填 i_size，写操作测试迁移 `/tmp` — **70/70 PASS** |
 | **init 路径迁移** | `/init.elf` → `/bin/init`，`/systest.elf` → `/bin/systest`，`/busybox.elf` → `/bin/busybox` |
+
+---
+
+## 自 v5 以来的进展 (2026-07-12)
+
+| 项目 | 说明 |
+|------|------|
+| **子系统注册框架** | `register_subsys()` / `subsys_init_all()` — 运行时注册模式，arch 自声明硬件子系统集合。`kernel_main` Phase 3-6 的 8 个硬编码调用替换为框架驱动。per-CPU 二次 init 支持 (`subsys_init_percpu`)。新增 arch 只需写 `subsys.c` + `subsys_percpu.c`，不碰 `main.c`。 |
 
 ---
 
@@ -149,7 +157,19 @@
 
 ---
 
-## Phase 6: 内核加固 🟡
+## Phase 6: 多架构抽象 🟡→🟢
+
+| 优先级 | 任务 | 借鉴 | 说明 |
+|--------|------|------|------|
+| ✅ | 子系统注册框架 | opuntiaOS devman | `register_subsys()` — 每个 arch 自声明硬件子系统，不碰 `kernel_main` |
+| 🟢 P2 | x86_64 → aarch64 | ArvernOS | 多架构移植；子系统框架已就绪，下一步: 分离 PML4/MMU/入口代码 |
+| 🔵 P3 | 真机测试 (USB boot) | Tilck | "不能在真机上测试就别实现" |
+| 🔵 P3 | clang-tidy / coverity | — | 静态分析 CI 集成 |
+| 🔵 P3 | GDB 脚本增强 | Tilck | `tasklist`、`handles`、`vfs` helper |
+
+---
+
+## Phase 7: 内核加固 🟡
 
 | 优先级 | 任务 | 说明 |
 |--------|------|------|
@@ -161,9 +181,9 @@
 
 ---
 
-## Phase 7: 用户态生态 🟡→🔵
+## Phase 8: 用户态生态 🟡→🔵
 
-### 7.1 更多 busybox applet
+### 8.1 更多 busybox applet
 
 | 优先级 | 任务 | 阻塞项 |
 |--------|------|--------|
@@ -172,14 +192,14 @@
 | 🟡 P2 | awk | regex + 浮点数支持 |
 | 🟡 P2 | vi | 完整 TTY termios + signal (SIGWINCH) |
 
-### 7.2 动态链接 [借鉴 cavOS]
+### 8.2 动态链接 [借鉴 cavOS]
 
 | 优先级 | 任务 | 说明 |
 |--------|------|------|
 | 🟡 P2 | ELF64 动态链接器 | 共享 musl libc，减小二进制体积 |
 | 🔵 P3 | Alpine apk 用户态 | cavOS 终极方案 — 直接安装 Alpine Linux musl 二进制包 |
 
-### 7.3 GUI 框架 [借鉴 opuntiaOS + HackOS]
+### 8.3 GUI 框架 [借鉴 opuntiaOS + HackOS]
 
 | 优先级 | 任务 | 说明 |
 |--------|------|------|
@@ -189,14 +209,13 @@
 
 ---
 
-## Phase 8: 多架构 + 构建 🔵
-
-| 优先级 | 任务 | 借鉴 | 说明 |
-|--------|------|------|------|
-| 🟢 P2 | 多架构抽象 (`arch/`) | ArvernOS | x86_64 → aarch64 |
-| 🔵 P3 | 真机测试 (USB boot) | Tilck | "不能在真机上测试就别实现" |
-| 🔵 P3 | clang-tidy / coverity | — | 静态分析 CI 集成 |
-| 🔵 P3 | GDB 脚本增强 | Tilck | `tasklist`、`handles`、`vfs` helper |
+| 优先级 | 任务 | 说明 |
+|--------|------|------|
+| ✅ | 内核栈 canary | `-fstack-protector-strong` + `__stack_chk_guard` + `__stack_chk_fail` |
+| 🟡 P1 | 用户栈 canary | 用户程序编译时启用 SSP |
+| 🟡 P2 | ASLR 基础 | 随机化用户程序加载基址 |
+| 🟡 P2 | rwlock / seqlock | 读多写少场景 (VFS lookup, /proc read) 优化 |
+| 🟢 P3 | UBSan 集成 | ArvernOS 模式：`UBSAN=1` debug build 选项 |
 
 ---
 
@@ -219,16 +238,15 @@ P1 (本月):
 P2 (下月):
  9. ext2 读写
 10. rwlock                    — 读多写少优化
-11. 用户栈 canary
+11. 多架构 (aarch64)         — 子系统框架已就绪，下一步 MMU/入口代码分离
 12. 更多 busybox applet (grep/sed/find)
 13. 动态链接器
 
 P3 (远期):
 14. ASLR
-15. 多架构 (aarch64)
-16. UBSan
-17. GUI 框架
-18. Alpine apk 用户态
+15. UBSan
+16. GUI 框架
+17. Alpine apk 用户态
 ```
 
 ---
@@ -248,6 +266,7 @@ P3 (远期):
 | 9 | COW 并发保护 | `subpage_lock` (已有 spinlock) | 保护 cow_count RMW + alloc/free 位图，无需新增锁 |
 | 10 | 内核栈 canary | 全局 `__stack_chk_guard` (rdtsc 种子) + `-fstack-protector-strong` | clang 在 `-ffreestanding -fpie` 下生成 RIP-relative 全局引用，无需 TLS/FS |
 | 11 | 磁盘布局 | GPT 双分区 (FAT32 ESP + ext2 root) | UEFI 标准分区表，`/boot` 和 `/` 分离，内核自解析 GPT |
+| 12 | 子系统注册模式 | 运行时 `register_subsys()` (与 softirq 同风格) | 不引入 ELF section 依赖；各 arch 写自己的 `subsys.c` + `subsys_percpu.c` |
 
 ---
 
@@ -272,8 +291,18 @@ P3 (远期):
 | 网络栈 | 🟡 P1 | 🟡 P1 (未变) |
 
 ---
+## v5→v6 变更摘要
 
-## 已完成汇总 (截至 2026-07-11)
+| 项目 | v5 状态 | v6 状态 |
+|------|---------|---------|
+| 子系统注册框架 | — | ✅ |
+| 多架构抽象 (arch/) | 🟢 P2 | ✅ (框架) — arch 自声明子系统，不碰 main.c |
+| EEVDF 调度器 | 🟡 P1 | 🟡 P1 (未变) |
+| 网络栈 | 🟡 P1 | 🟡 P1 (未变) |
+
+---
+
+## 已完成汇总 (截至 2026-07-12)
 
 | 项目 | 工作量 | 日期 |
 |------|--------|------|
@@ -283,6 +312,7 @@ P3 (远期):
 | 4KB 页面 + VMA + mmap/mprotect | 3 天 | 07-08 |
 | **COW fork (4KB-only)** | 2 天 | 07-11 |
 | VFS mount point getdents | 半天 | 07-11 |
+| 子系统注册框架 | 半天 | 07-12 |
 | 内核栈 canary | 30 分钟 | 07-11 |
 | SMP stack smashing 修复 (ext2 buf[256] 栈溢出) | 30 分钟 | 07-11 |
 | **ext2 只读驱动 + GPT + tmpfs + /dev 块设备** | 1 天 | 07-11 |
