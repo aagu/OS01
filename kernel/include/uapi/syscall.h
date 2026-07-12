@@ -64,6 +64,9 @@
 #define SYS_mprotect     45
 #define SYS_munmap       46
 
+// ── Phase 8: futex
+#define SYS_futex        47
+
 // ── reboot(2) commands ──────────────────────────────────────
 #define RB_AUTOBOOT    0x01234567
 #define RB_POWER_OFF   0x4321FEDC
