@@ -51,6 +51,7 @@
 #define SYS_mmap        44
 #define SYS_mprotect    45
 #define SYS_munmap      46
+#define SYS_futex      47
 
 // ── Generic syscall helper ─────────────────────────────────
 
