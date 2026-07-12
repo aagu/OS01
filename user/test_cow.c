@@ -4,7 +4,7 @@
 //  1. cow_basic:        fork, both write, verify isolation
 //  2. cow_fork_of_fork: P1->P2->P3 chain, all write, verify isolation
 //  3. cow_mprotect:     fork, child PROT_NONE->restore->write, verify isolation
-//  4. cow_exec:         fork, child execs spin.elf, parent writes (last-ref promote)
+//  4. cow_exec:         fork, child execs /bin/spin, parent writes (last-ref promote)
 //  5. cow_exit:         fork, child exits, parent writes (in-place promote)
 #include <sys/mman.h>
 #include <stdio.h>
@@ -127,10 +127,10 @@ int main(void)
         check(pid >= 0, "fork");
 
         if (pid == 0) {
-            // Child execs spin.elf (a small binary that exits 42).
+            // Child execs /bin/spin (a small binary that exits 42).
             // exec replaces mm -> child's COW refs are released.
-            char *argv[] = {"/spin.elf", NULL};
-            execve("/spin.elf", argv, NULL);
+            char *argv[] = {"/bin/spin", NULL};
+            execve("/bin/spin", argv, NULL);
             exit(99); // exec failed
         }
 
