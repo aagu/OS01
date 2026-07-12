@@ -42,7 +42,7 @@ typedef unsigned long sigset_t;
 // Walk the user page table to resolve a user-space virtual
 // address to its physical address.  Returns 0 on failure.
 // The caller passes Phy_To_Virt(result) to get a kernel pointer.
-static uint64_t user_va_to_phys(uint64_t *pml4, uint64_t va)
+uint64_t user_va_to_phys(uint64_t *pml4, uint64_t va)
 {
     size_t l4 = (va >> PAGE_GDT_SHIFT) & 0x1ff;
     size_t l3 = (va >> PAGE_1G_SHIFT) & 0x1ff;
