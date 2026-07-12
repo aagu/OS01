@@ -22,6 +22,10 @@ export LDFLAGS=--sysroot=${SYSROOT}
 DISPLAY=gtk
 MEMORY=512M
 
+# ── Log output target (serial | fb | both) ───────────────
+LOG_TARGET ?= serial
+NDEBUG     ?=
+
 all: disk.img
 
 # ── Bootloader ──────────────────────────────────────────
