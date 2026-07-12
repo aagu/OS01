@@ -13,6 +13,7 @@
 #define BLUE	0x000000ff		//蓝
 #define INDIGO	0x0000ffff		//靛
 #define PURPLE	0x008000ff		//紫
+#define LIGHT_GRAY	0x00c0c0c0	//浅灰
 
 // Temporary framebuffer address used before pmm/vmm are available.
 // Within PDPT[0] for simple direct-PDE-write setup in frame_buffer_early_init().
