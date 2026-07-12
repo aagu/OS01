@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <kernel/printk.h>
+#include <kernel/log.h>
 #include <kernel/trace.h>
 #include <kernel/arch/x86_64/asm.h>
 #include <kernel/task.h>
@@ -79,12 +80,12 @@ static void kill_current_user_task(pt_regs_t *regs)
     task_t *task = task_from_tss();
 
     if (!task || (task->flags & PF_KTHREAD)) {
-        serial_printk("User fault with no user task\n");
+        log_err("User fault with no user task\n");
         return;
     }
 
-    serial_printk("Killing task %d (user fault at RIP=%p)\n",
-                  task->pid, regs->rip);
+    log_err("Killing task %d (user fault at RIP=%p)\n",
+            task->pid, regs->rip);
 
     // Mark the task ZOMBIE now, so the reaper can clean it up later.
     // The actual resource cleanup (vmm_free_user_map, kfree) happens
@@ -110,7 +111,7 @@ static void kill_current_user_task(pt_regs_t *regs)
 static inline int handle_user_fault(pt_regs_t *regs, const char *name)
 {
     if (regs->cs & 3) {
-        serial_printk("%s from user, killing task\n", name);
+        log_err("%s from user, killing task\n", name);
         kill_current_user_task(regs);
         return 1;
     }
@@ -120,8 +121,7 @@ static inline int handle_user_fault(pt_regs_t *regs, const char *name)
 void do_divide_error(pt_regs_t * regs, uint64_t error_code)
 {
         if (handle_user_fault(regs, "do_divide_error")) return;
-    color_printk(RED, BLACK, "do_divide_error(0),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	serial_printk("do_divide_error(0),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+    log_err("do_divide_error(0),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
     {
@@ -131,8 +131,7 @@ void do_divide_error(pt_regs_t * regs, uint64_t error_code)
 
 void do_debug(pt_regs_t * regs, uint64_t error_code)
 {
-	color_printk(RED,BLACK,"do_debug(1),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	serial_printk("do_debug(1),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+	log_err("do_debug(1),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
     {
@@ -142,8 +141,7 @@ void do_debug(pt_regs_t * regs, uint64_t error_code)
 
 void do_nmi(pt_regs_t * regs, uint64_t error_code)
 {
-	color_printk(RED,BLACK,"do_nmi(2),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	serial_printk("do_nmi(2),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+	log_err("do_nmi(2),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
     {
@@ -153,8 +151,7 @@ void do_nmi(pt_regs_t * regs, uint64_t error_code)
 
 void do_int3(pt_regs_t * regs, uint64_t error_code)
 {
-	color_printk(RED,BLACK,"do_int3(3),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	serial_printk("do_int3(3),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+	log_err("do_int3(3),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
     {
@@ -165,8 +162,7 @@ void do_int3(pt_regs_t * regs, uint64_t error_code)
 void do_overflow(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_overflow")) return;
-	color_printk(RED,BLACK,"do_overflow(4),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	serial_printk("do_overflow(4),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+	log_err("do_overflow(4),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
     {
@@ -177,8 +173,7 @@ void do_overflow(pt_regs_t * regs, uint64_t error_code)
 void do_bounds(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_bounds")) return;
-	color_printk(RED,BLACK,"do_bounds(5),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	serial_printk("do_bounds(5),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+	log_err("do_bounds(5),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
     {
@@ -189,8 +184,7 @@ void do_bounds(pt_regs_t * regs, uint64_t error_code)
 void do_undefined_opcode(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_undefined_opcode")) return;
-	color_printk(RED,BLACK,"do_undefined_opcode(6),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	serial_printk("do_undefined_opcode(6),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+	log_err("do_undefined_opcode(6),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
     {
@@ -201,8 +195,7 @@ void do_undefined_opcode(pt_regs_t * regs, uint64_t error_code)
 void do_dev_not_available(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_dev_not_available")) return;
-	color_printk(RED,BLACK,"do_dev_not_available(7),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	serial_printk("do_dev_not_available(7),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+	log_err("do_dev_not_available(7),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
     {
@@ -212,8 +205,7 @@ void do_dev_not_available(pt_regs_t * regs, uint64_t error_code)
 
 void do_double_fault(pt_regs_t * regs, uint64_t error_code)
 {
-	color_printk(RED,BLACK,"do_double_fault(8),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	serial_printk("do_double_fault(8),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+	log_err("do_double_fault(8),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
     {
@@ -224,8 +216,7 @@ void do_double_fault(pt_regs_t * regs, uint64_t error_code)
 void do_coprocessor_segment_overrun(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_coprocessor_segment_overrun")) return;
-	color_printk(RED,BLACK,"do_coprocessor_segment_overrun(9),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	serial_printk("do_coprocessor_segment_overrun(9),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+	log_err("do_coprocessor_segment_overrun(9),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
     {
@@ -236,41 +227,34 @@ void do_coprocessor_segment_overrun(pt_regs_t * regs, uint64_t error_code)
 void do_invalid_TSS(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_invalid_TSS")) return;
-	color_printk(RED,BLACK,"do_invalid_TSS(10),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	serial_printk("do_invalid_TSS(10),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+	log_err("do_invalid_TSS(10),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 
 	if(error_code & 0x01)
 	{
-		color_printk(RED,BLACK,"The exception occurred during delivery of an event external to the program,such as an interrupt or an earlier exception.\n");
-		serial_printk("The exception occurred during delivery of an event external to the program,such as an interrupt or an earlier exception.\n");
+		log_info("The exception occurred during delivery of an event external to the program,such as an interrupt or an earlier exception.\n");
 	}
 
 	if(error_code & 0x02)
 	{
-		color_printk(RED,BLACK,"Refers to a gate descriptor in the IDT;\n");
-		serial_printk("Refers to a gate descriptor in the IDT;\n");
+		log_info("Refers to a gate descriptor in the IDT;\n");
 	}
 	else
 	{
-		color_printk(RED,BLACK,"Refers to a descriptor in the GDT or the current LDT;\n");
-		serial_printk("Refers to a descriptor in the GDT or the current LDT;\n");
+		log_info("Refers to a descriptor in the GDT or the current LDT;\n");
 	}
 
 	if((error_code & 0x02) == 0)
 	{
 		if(error_code & 0x04)
 		{
-			color_printk(RED,BLACK,"Refers to a segment or gate descriptor in the LDT;\n");
-			serial_printk("Refers to a segment or gate descriptor in the LDT;\n");
+			log_info("Refers to a segment or gate descriptor in the LDT;\n");
 		}
 		else
 		{
-			color_printk(RED,BLACK,"Refers to a descriptor in the current GDT;\n");
-			serial_printk("Refers to a descriptor in the current GDT;\n");
+			log_info("Refers to a descriptor in the current GDT;\n");
 		}
 	}
-	color_printk(RED,BLACK,"Segment Selector Index:%#010x\n",error_code & 0xfff8);
-	serial_printk("Segment Selector Index:%#010x\n",error_code & 0xfff8);
+	log_info("Segment Selector Index:%#010x\n",error_code & 0xfff8);
 	backtrace(regs);
 	while(1)
     {
@@ -281,41 +265,34 @@ void do_invalid_TSS(pt_regs_t * regs, uint64_t error_code)
 void do_segment_not_present(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_segment_not_present")) return;
-	color_printk(RED,BLACK,"do_segment_not_present(11),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	serial_printk("do_segment_not_present(11),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+	log_err("do_segment_not_present(11),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 
 	if(error_code & 0x01)
 	{
-		color_printk(RED,BLACK,"The exception occurred during delivery of an event external to the program,such as an interrupt or an earlier exception.\n");
-		serial_printk("The exception occurred during delivery of an event external to the program,such as an interrupt or an earlier exception.\n");
+		log_info("The exception occurred during delivery of an event external to the program,such as an interrupt or an earlier exception.\n");
 	}
 
 	if(error_code & 0x02)
 	{
-		color_printk(RED,BLACK,"Refers to a gate descriptor in the IDT;\n");
-		serial_printk("Refers to a gate descriptor in the IDT;\n");
+		log_info("Refers to a gate descriptor in the IDT;\n");
 	}
 	else
 	{
-		color_printk(RED,BLACK,"Refers to a descriptor in the GDT or the current LDT;\n");
-		serial_printk("Refers to a descriptor in the GDT or the current LDT;\n");
+		log_info("Refers to a descriptor in the GDT or the current LDT;\n");
 	}
 
 	if((error_code & 0x02) == 0)
 	{
 		if(error_code & 0x04)
 		{
-			color_printk(RED,BLACK,"Refers to a segment or gate descriptor in the LDT;\n");
-			serial_printk("Refers to a segment or gate descriptor in the LDT;\n");
+			log_info("Refers to a segment or gate descriptor in the LDT;\n");
 		}
 		else
 		{
-			color_printk(RED,BLACK,"Refers to a descriptor in the current GDT;\n");
-			serial_printk("Refers to a descriptor in the current GDT;\n");
+			log_info("Refers to a descriptor in the current GDT;\n");
 		}
 	}
-	color_printk(RED,BLACK,"Segment Selector Index:%#010x\n",error_code & 0xfff8);
-	serial_printk("Segment Selector Index:%#010x\n",error_code & 0xfff8);
+	log_info("Segment Selector Index:%#010x\n",error_code & 0xfff8);
 	backtrace(regs);
 	while(1)
     {
@@ -326,41 +303,34 @@ void do_segment_not_present(pt_regs_t * regs, uint64_t error_code)
 void do_stack_segment_fault(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_stack_segment_fault")) return;
-	color_printk(RED,BLACK,"do_stack_segment_fault(12),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	serial_printk("do_stack_segment_fault(12),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+	log_err("do_stack_segment_fault(12),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 
 	if(error_code & 0x01)
 	{
-		color_printk(RED,BLACK,"The exception occurred during delivery of an event external to the program,such as an interrupt or an earlier exception.\n");
-		serial_printk("The exception occurred during delivery of an event external to the program,such as an interrupt or an earlier exception.\n");
+		log_info("The exception occurred during delivery of an event external to the program,such as an interrupt or an earlier exception.\n");
 	}
 
 	if(error_code & 0x02)
 	{
-		color_printk(RED,BLACK,"Refers to a gate descriptor in the IDT;\n");
-		serial_printk("Refers to a gate descriptor in the IDT;\n");
+		log_info("Refers to a gate descriptor in the IDT;\n");
 	}
 	else
 	{
-		color_printk(RED,BLACK,"Refers to a descriptor in the GDT or the current LDT;\n");
-		serial_printk("Refers to a descriptor in the GDT or the current LDT;\n");
+		log_info("Refers to a descriptor in the GDT or the current LDT;\n");
 	}
 
 	if((error_code & 0x02) == 0)
 	{
 		if(error_code & 0x04)
 		{
-			color_printk(RED,BLACK,"Refers to a segment or gate descriptor in the LDT;\n");
-			serial_printk("Refers to a segment or gate descriptor in the LDT;\n");
+			log_info("Refers to a segment or gate descriptor in the LDT;\n");
 		}
 		else
 		{
-			color_printk(RED,BLACK,"Refers to a descriptor in the current GDT;\n");
-			serial_printk("Refers to a descriptor in the current GDT;\n");
+			log_info("Refers to a descriptor in the current GDT;\n");
 		}
 	}
-	color_printk(RED,BLACK,"Segment Selector Index:%#010x\n",error_code & 0xfff8);
-	serial_printk("Segment Selector Index:%#010x\n",error_code & 0xfff8);
+	log_info("Segment Selector Index:%#010x\n",error_code & 0xfff8);
 	backtrace(regs);
 	while(1)
     {
@@ -374,57 +344,50 @@ void do_general_protection(pt_regs_t * regs, uint64_t error_code)
 	// NOTE: on IST stack — do NOT use current (get_current_task).
 	if (regs->cs & 3) {
 		task_t *t = task_from_tss();
-		serial_printk("do_general_protection(13) from user, killing task %d\n",
-		              t ? t->pid : -1);
+		log_err("do_general_protection(13) from user, killing task %d\n",
+		        t ? t->pid : -1);
 		kill_current_user_task(regs);
 		return;
 	}
-	color_printk(RED,BLACK,"do_general_protection(13),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	serial_printk("do_general_protection(13),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-    serial_printk(" GPR: RAX=%#018lx RBX=%#018lx RCX=%#018lx RDX=%#018lx\n",
-                  regs->rax, regs->rbx, regs->rcx, regs->rdx);
-    serial_printk(" GPR: RSI=%#018lx RDI=%#018lx RBP=%#018lx R8=%#018lx\n",
-                  regs->rsi, regs->rdi, regs->rbp, regs->r8);
-    serial_printk(" GPR: R9=%#018lx R10=%#018lx R11=%#018lx R12=%#018lx\n",
-                  regs->r9, regs->r10, regs->r11, regs->r12);
-    serial_printk(" GPR: R13=%#018lx R14=%#018lx R15=%#018lx\n",
-                  regs->r13, regs->r14, regs->r15);
-    serial_printk(" CS=%#04lx SS=%#04lx EFLAGS=%#018lx CR2=%#018lx\n",
-                  regs->cs, regs->ss, regs->rflags, ({ uint64_t v; __asm__ __volatile__("movq %%cr2, %0" : "=r"(v) :: "memory"); v; }));
+	log_err("do_general_protection(13),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+	log_err(" GPR: RAX=%#018lx RBX=%#018lx RCX=%#018lx RDX=%#018lx\n",
+	        regs->rax, regs->rbx, regs->rcx, regs->rdx);
+	log_err(" GPR: RSI=%#018lx RDI=%#018lx RBP=%#018lx R8=%#018lx\n",
+	        regs->rsi, regs->rdi, regs->rbp, regs->r8);
+	log_err(" GPR: R9=%#018lx R10=%#018lx R11=%#018lx R12=%#018lx\n",
+	        regs->r9, regs->r10, regs->r11, regs->r12);
+	log_err(" GPR: R13=%#018lx R14=%#018lx R15=%#018lx\n",
+	        regs->r13, regs->r14, regs->r15);
+	log_err(" CS=%#04lx SS=%#04lx EFLAGS=%#018lx CR2=%#018lx\n",
+	        regs->cs, regs->ss, regs->rflags, ({ uint64_t v; __asm__ __volatile__("movq %%cr2, %0" : "=r"(v) :: "memory"); v; }));
 
 
 	if(error_code & 0x01)
 	{
-		color_printk(RED,BLACK,"The exception occurred during delivery of an event external to the program,such as an interrupt or an earlier exception.\n");
-		serial_printk("The exception occurred during delivery of an event external to the program,such as an interrupt or an earlier exception.\n");
+		log_info("The exception occurred during delivery of an event external to the program,such as an interrupt or an earlier exception.\n");
 	}
 
 	if(error_code & 0x02)
 	{
-		color_printk(RED,BLACK,"Refers to a gate descriptor in the IDT;\n");
-		serial_printk("Refers to a gate descriptor in the IDT;\n");
+		log_info("Refers to a gate descriptor in the IDT;\n");
 	}
 	else
 	{
-		color_printk(RED,BLACK,"Refers to a descriptor in the GDT or the current LDT;\n");
-		serial_printk("Refers to a descriptor in the GDT or the current LDT;\n");
+		log_info("Refers to a descriptor in the GDT or the current LDT;\n");
 	}
 
 	if((error_code & 0x02) == 0)
 	{
 		if(error_code & 0x04)
 		{
-			color_printk(RED,BLACK,"Refers to a segment or gate descriptor in the LDT;\n");
-			serial_printk("Refers to a segment or gate descriptor in the LDT;\n");
+			log_info("Refers to a segment or gate descriptor in the LDT;\n");
 		}
 		else
 		{
-			color_printk(RED,BLACK,"Refers to a descriptor in the current GDT;\n");
-			serial_printk("Refers to a descriptor in the current GDT;\n");
+			log_info("Refers to a descriptor in the current GDT;\n");
 		}
 	}
-	color_printk(RED,BLACK,"Segment Selector Index:%#010x\n",error_code & 0xfff8);
-	serial_printk("Segment Selector Index:%#010x\n",error_code & 0xfff8);
+	log_info("Segment Selector Index:%#010x\n",error_code & 0xfff8);
 	backtrace(regs);
 	while(1)
     {
@@ -448,7 +411,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 
 		vma_t *vma = vma_find(t->mm, cr2);
 		if (!vma) {
-			serial_printk("PF: pid=%d cr2=%p no vma\n", t->pid, cr2);
+			log_debug("PF: pid=%d cr2=%p no vma\n", t->pid, cr2);
 			kill_current_user_task(regs);
 			return;
 		}
@@ -458,15 +421,15 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 
 		// PROT_NONE VMA -> any access is SIGSEGV
 		if (!(vma->vm_flags & (VM_READ | VM_WRITE | VM_EXEC))) {
-			serial_printk("PF: pid=%d cr2=%p PROTNONE\n", t->pid, cr2);
+			log_debug("PF: pid=%d cr2=%p PROTNONE\n", t->pid, cr2);
 			kill_current_user_task(regs);
 			return;
 		}
 
 		// Write protection violation (P=1, W=1)
 		if ((error_code & 0x03) == 0x03 && !(vma->vm_flags & VM_WRITE)) {
-			serial_printk("PF: pid=%d cr2=%p write to RO page\n",
-				      t->pid, cr2);
+			log_debug("PF: pid=%d cr2=%p write to RO page\n",
+			          t->pid, cr2);
 			kill_current_user_task(regs);
 			return;
 		}
@@ -511,7 +474,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 			if (vma->vm_flags & VM_ANON) {
 				uint64_t phys = alloc_4k_page();
 				if (!phys) {
-					serial_printk("PF: pid=%d OOM\n", t->pid);
+					log_debug("PF: pid=%d OOM\n", t->pid);
 					kill_current_user_task(regs);
 					return;
 				}
@@ -562,54 +525,44 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 		return;
 	}
 
-	color_printk(RED,BLACK,"do_page_fault(14),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	serial_printk("do_page_fault(14),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+	log_err("do_page_fault(14),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 
 	if(!(error_code & 0x01))
 	{
-		color_printk(RED,BLACK,"Page Not-Present,\t");
-		serial_printk("Page Not-Present,\t");
+		log_info("Page Not-Present,\t");
 	}
 
 	if(error_code & 0x02)
 	{
-		color_printk(RED,BLACK,"Write Cause Fault,\t");
-		serial_printk("Write Cause Fault,\t");
+		log_info("Write Cause Fault,\t");
 	}
 	else
 	{
-		color_printk(RED,BLACK,"Read Cause Fault,\t");
-		serial_printk("Read Cause Fault,\t");
+		log_info("Read Cause Fault,\t");
 	}
 
 	if(error_code & 0x04)
 	{
-		color_printk(RED,BLACK,"Fault in user(3)\t");
-		serial_printk("Fault in user(3)\t");
+		log_info("Fault in user(3)\t");
 	}
 	else
 	{
-		color_printk(RED,BLACK,"Fault in supervisor(0,1,2)\t");
-		serial_printk("Fault in supervisor(0,1,2)\t");
+		log_info("Fault in supervisor(0,1,2)\t");
 	}
 
 	if(error_code & 0x08)
 	{
-		color_printk(RED,BLACK,",Reserved Bit Cause Fault\t");
-		serial_printk(",Reserved Bit Cause Fault\t");
+		log_info(",Reserved Bit Cause Fault\t");
 	}
 
 	if(error_code & 0x10)
 	{
-		color_printk(RED,BLACK,",Instruction fetch Cause Fault");
-		serial_printk(",Instruction fetch Cause Fault");
+		log_info(",Instruction fetch Cause Fault");
 	}
 
-	color_printk(RED,BLACK,"\n");
-	serial_printk("\n");
+	log_info("\n");
 
-	color_printk(RED,BLACK,"CR2:%#018lx\n",cr2);
-	serial_printk("CR2:%#018lx\n",cr2);
+	log_info("CR2:%#018lx\n",cr2);
 	backtrace(regs);
 	while(1)
     {
@@ -620,8 +573,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 void do_x87_FPU_error(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_x87_FPU_error")) return;
-	color_printk(RED,BLACK,"do_x87_FPU_error(16),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	serial_printk("do_x87_FPU_error(16),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+	log_err("do_x87_FPU_error(16),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
     {
@@ -632,8 +584,7 @@ void do_x87_FPU_error(pt_regs_t * regs, uint64_t error_code)
 void do_alignment_check(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_alignment_check")) return;
-	color_printk(RED,BLACK,"do_alignment_check(17),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	serial_printk("do_alignment_check(17),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+	log_err("do_alignment_check(17),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
     {
@@ -644,8 +595,7 @@ void do_alignment_check(pt_regs_t * regs, uint64_t error_code)
 void do_machine_check(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_machine_check")) return;
-	color_printk(RED,BLACK,"do_machine_check(18),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	serial_printk("do_machine_check(18),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+	log_err("do_machine_check(18),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
     {
@@ -656,8 +606,7 @@ void do_machine_check(pt_regs_t * regs, uint64_t error_code)
 void do_SIMD_exception(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_SIMD_exception")) return;
-	color_printk(RED,BLACK,"do_SIMD_exception(19),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	serial_printk("do_SIMD_exception(19),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+	log_err("do_SIMD_exception(19),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
     {
@@ -668,8 +617,7 @@ void do_SIMD_exception(pt_regs_t * regs, uint64_t error_code)
 void do_virtualization_exception(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_virtualization_exception")) return;
-	color_printk(RED,BLACK,"do_virtualization_exception(20),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	serial_printk("do_virtualization_exception(20),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
+	log_err("do_virtualization_exception(20),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
     {
@@ -753,8 +701,8 @@ int do_signal_delivery(pt_regs_t *regs)
             case SIGTSTP: case SIGTTIN: case SIGTTOU:
                 break;   // stop — not implemented
             default:
-                serial_printk("task %d killed by signal %d (default)\n",
-                              (int)current->pid, sig);
+                log_err("task %d killed by signal %d (default)\n",
+                        (int)current->pid, sig);
                 do_exit((uint64_t)sig << 8);
                 return 1;  // unreachable — do_exit switches away
             }
@@ -771,8 +719,8 @@ int do_signal_delivery(pt_regs_t *regs)
 
         // sa_restorer NULL guard
         if (!restorer) {
-            serial_printk("task %d: signal %d handler has no restorer, "
-                          "killing\n", (int)current->pid, sig);
+            log_err("task %d: signal %d handler has no restorer, "
+                    "killing\n", (int)current->pid, sig);
             current->signal &= ~(1ULL << sig);
             do_exit((uint64_t)sig << 8);
             return 1;  // unreachable
@@ -1248,7 +1196,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         // Parent path: regs->rax = child PID
         // Child path: do_fork already set child's pt_regs->rax = 0
         regs->rax = pid;
-        serial_printk("fork: pid=%d returned %d\n", (int)current->pid, (int)pid);
+        log_info("fork: pid=%d returned %d\n", (int)current->pid, (int)pid);
         break;
     }
     case SYS_waitpid: {
@@ -1313,7 +1261,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         // For now, simple store
         memcpy(current->files->cwd, new_cwd, sizeof(current->files->cwd));
 
-        serial_printk("chdir: pid=%d → '%s'\n", (int)current->pid, current->files->cwd);
+        log_info("chdir: pid=%d → '%s'\n", (int)current->pid, current->files->cwd);
         regs->rax = 0;
         break;
     }
@@ -2046,15 +1994,15 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
     case SYS_reboot: {
         int cmd = (int)(int64_t)regs->rdi;
 
-        serial_printk("syscall: reboot(cmd=%d) from pid=%d\n",
-                      cmd, (int)current->pid);
+        log_info("syscall: reboot(cmd=%d) from pid=%d\n",
+                 cmd, (int)current->pid);
 
         // ── ACPI power-off ─────────────────────────────────
         if (cmd == RB_POWER_OFF && apic_info.pm1a_port) {
             // SLP_EN (bit 13) toggles sleep.  SLP_TYPa=0 for
             // S5 on QEMU q35 (the \_S5 object reports {0, 0}).
-            serial_printk("ACPI: powering off via PM1a=%#x\n",
-                          (unsigned)apic_info.pm1a_port);
+            log_info("ACPI: powering off via PM1a=%#x\n",
+                     (unsigned)apic_info.pm1a_port);
             outw(0x2000, apic_info.pm1a_port);
             // Block — platform powers off asynchronously.
             while (1) __asm__ __volatile__("hlt");
@@ -2090,8 +2038,8 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         break;
     }
     default:
-        serial_printk("syscall: unknown nr=%d from pid=%d\n",
-                      (int)regs->rax, (int)current->pid);
+        log_err("syscall: unknown nr=%d from pid=%d\n",
+                (int)regs->rax, (int)current->pid);
         regs->rax = -EINVAL;
         break;
     }
