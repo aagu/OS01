@@ -354,39 +354,41 @@ kernel_main(kern_boot_para_info);
     }
     ```
 
-## 引导参数结构
+## 引导参数结构及关键 ABI
 
-引导程序传递给内核的引导参数结构如下：
+**⚠️ 关键 ABI 说明**: 引导器使用 clang `--target=x86_64-pc-win32-coff` 编译（LLP64 数据模型：`sizeof(long)=4`），而内核使用 SysV LP64（`sizeof(long)=8`）。为避免结构体布局不匹配，**`BOOT_INFO` 及其子结构中的所有字段必须使用固定大小类型（`uint32_t`、`uint64_t`）**，绝不能使用 `unsigned long`、`unsigned int` 或指针。参见 `kernel/include/kernel/bootinfo.h`。
+
+引导程序传递给内核的引导参数结构如下（使用固定大小类型）：
 
 ```c
 struct BOOT_INFO
 {
     struct GRAPHICS_INFO Graphics_Info;
     struct MEMORY_INFO E820_Info;
-    unsigned long long RSDP;
-    boolean_t BootFromBIOS;
+    uint64_t RSDP;
+    uint32_t BootFromBIOS;
 };
 
 struct GRAPHICS_INFO
 {
-    unsigned int HorizontalResolution;
-    unsigned int VerticalResolution;
-    unsigned int PixelsPerScanLine;
-    unsigned long FrameBufferBase;
-    unsigned long FrameBufferSize;
+    uint32_t HorizontalResolution;
+    uint32_t VerticalResolution;
+    uint32_t PixelsPerScanLine;
+    uint64_t FrameBufferBase;
+    uint64_t FrameBufferSize;
 };
 
 struct MEMORY_INFO
 {
-    unsigned int E820_Entry_count;
-    struct E820_ENTRY *E820_Entry;
+    uint32_t E820_Entry_count;
+    uint64_t E820_Entry;     // 物理地址指针
 };
 
 struct E820_ENTRY
 {
-    unsigned long address;
-    unsigned long length;
-    unsigned int  type;
+    uint64_t address;
+    uint64_t length;
+    uint32_t type;
 };
 ```
 

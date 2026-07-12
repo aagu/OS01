@@ -174,7 +174,20 @@ rp_sidt:
 
 ### 4. 中断堆栈
 
-系统为中断处理设置了专门的堆栈，确保中断处理过程中的堆栈安全。
+系统为中断处理设置了专门的 IST 堆栈，确保中断处理过程中的堆栈安全。
+
+### 5. 子系统注册框架
+
+系统使用 `kernel/subsys/` 中的子系统注册框架按 Phase 初始化硬件：
+
+| Phase | 子系统 |
+|-------|--------|
+| 3 | 中断控制器（APIC, PIC） |
+| 4 | 定时器（PIT, LAPIC timer） |
+| 5 | 设备 IRQ（键盘, 串口 IRQ） |
+| 6 | 存储（AHCI） |
+
+参见 `kernel/arch/x86_64/subsys.c` 和 `kernel/include/kernel/subsys.h`。
 
 ## 硬件访问
 

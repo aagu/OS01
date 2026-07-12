@@ -13,7 +13,7 @@ make debug
 此命令会执行以下操作：
 
 1. 确保磁盘镜像和 OVMF.fd 存在
-2. 启动 QEMU 模拟器，加载 UEFI 固件和磁盘镜像
+2. 启动 QEMU 模拟器（`-M q35 -smp 2`），加载 UEFI 固件和磁盘镜像
 3. 启用 GDB 远程调试服务器（监听端口 1234）
 4. 暂停 CPU 执行，等待 GDB 连接
 
@@ -22,8 +22,10 @@ make debug
 在另一个终端中，使用 GDB 连接到 QEMU 调试服务器：
 
 ```bash
-gdb kernel/kernel.bin
+gdb kernel/kernel.elf
 ```
+
+**注意**：内核编译时包含 `-g` 调试符号。使用 `kernel/kernel.elf`（ELf 格式，含符号表），而非 `kernel/kernel.bin`（纯二进制）。
 
 然后在 GDB 中执行以下命令：
 
@@ -89,7 +91,66 @@ color_printk(RED, BLACK, "Hello, World!\n");
 serial_printk("Debug message: %x\n", value);
 ```
 
-## 5. 调试技巧
+## 5. 日志系统
+
+### 5.1 日志级别
+
+日志级别定义在 `kernel/include/kernel/log.h`：
+
+| 宏 | 值 | 说明 |
+|----|-----|------|
+| `LOG_ERR` | 3 | 错误条件 |
+| `LOG_WARN` | 4 | 警告条件 |
+| `LOG_INFO` | 6 | 信息性消息 |
+| `LOG_DEBUG` | 7 | 调试消息（NDEBUG 编译时消除）|
+
+运行时通过 `log_set_level(level)` 控制，仅显示级别 ≤ 当前级别的消息。
+
+### 5.2 使用方式
+
+```c
+log_err("disk write failed: %d\n", err);
+log_warn("low memory\n");
+log_info("CPU %d online\n", cpu);
+log_debug("sched: switching to pid %d\n", pid);
+```
+
+### 5.3 调试通道（DEBUG_CHANNELS）
+
+按通道选择性启用调试输出：
+
+```bash
+make kernel.bin DEBUG_CHANNELS=sched,vfs,mm
+```
+
+可用通道：`sched`, `tty`, `vfs`, `mm`, `irq`, `syscall`, `task`, `ipi`, `block`, `fs`。
+
+通道宏在 `kernel/include/kernel/debug.h` 中定义：
+
+```c
+debug_sched("cpu %d: switching to pid %d\n", cpu, pid);
+debug_vfs("VFS: mounted '%s'\n", path);
+debug_mm("alloc_pages: zone=%d count=%d\n", zone, n);
+debug_block("AHCI: port %d started\n", port);
+```
+
+### 5.4 NDEBUG — 编译时消除
+
+```bash
+make kernel.bin NDEBUG=1
+```
+
+设置 `NDEBUG=1` 后，所有 `log_debug()` 和 `debug_<channel>()` 调用在预处理阶段展开为空，零运行时开销。
+
+### 5.5 LOG_TARGET — 输出目标
+
+```bash
+make kernel.bin LOG_TARGET=serial    # 仅串口（默认）
+make kernel.bin LOG_TARGET=fb        # 仅帧缓冲
+make kernel.bin LOG_TARGET=both      # 串口 + 帧缓冲
+```
+
+## 6. 调试技巧
 
 ### 5.1 设置断点
 
@@ -138,25 +199,25 @@ next
 continue
 ```
 
-## 6. 常见调试问题和解决方案
+## 7. 常见调试问题和解决方案
 
-### 6.1 GDB 无法连接到 QEMU
+### 7.1 GDB 无法连接到 QEMU
 
 **解决方案**：确保 QEMU 以调试模式启动，并且没有防火墙阻止端口 1234。
 
-### 6.2 断点不生效
+### 7.2 断点不生效
 
 **解决方案**：确保断点设置在正确的函数或地址上，并且代码已经被编译到内核中。
 
-### 6.3 调试信息不完整
+### 7.3 调试信息不完整
 
 **解决方案**：确保内核编译时包含了调试信息，检查 Makefile 中的编译选项是否包含 `-g`。
 
-### 6.4 串口输出乱码
+### 7.4 串口输出乱码
 
 **解决方案**：检查串口设置是否正确，确保波特率设置为 38400。
 
-## 7. 调试工具推荐
+## 8. 调试工具推荐
 
 1. **GDB**：功能强大的命令行调试工具
 2. **VS Code**：图形化调试界面，易于使用

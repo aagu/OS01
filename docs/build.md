@@ -1,11 +1,11 @@
 # 编译过程
 
-本系统需要使用交叉编译工具，[为什么需要交叉编译](https://wiki.osdev.org/Why_do_I_need_a_Cross_Compiler)？简单来讲，就是去除系统自带编译工具的各种“优化”选项，因为我们在编译内核，针对应用程序编译所做的优化，可能适得其反。
+本系统使用原生 Clang 交叉编译（`x86_64-unknown-none` 目标），无需单独的 GCC 交叉编译工具链。可重入（re-entrant）中断处理通过在 CFLAGS 中禁用 red zone 来保证。
 
 ## 必要的依赖项
 
 1. **编译工具链**
-   * Clang/LLVM (用于编译内核)
+   * Clang/LLVM (用于编译内核，`x86_64-unknown-none` 目标)
    * GNU Make
    * ld.lld (链接器)
 
@@ -14,7 +14,7 @@
    * mmd (from mtools)
 
 3. **运行和调试**
-   * QEMU (用于模拟 x86_64 环境)
+   * QEMU (用于模拟 x86_64 环境，`qemu-system-x86_64`)
    * OVMF.fd (UEFI 固件，QEMU 模拟 UEFI 环境所需)
 
 ## 安装依赖项
@@ -40,10 +40,6 @@ sudo pacman -S clang llvm lld make dosfstools mtools qemu-system-x86_64 edk2-ovm
 sudo cp /usr/share/edk2/x64/OVMF.fd boot/uefi/
 ```
 
-## 如何获取交叉编译工具
-
-具体构建流程参考[这里](https://wiki.osdev.org/GCC_Cross-Compiler)，需要注意的是，本系统为64位，因此需要编译x86_64-elf工具链，而非i686-elf。此外，强烈建议参照[这个](https://wiki.osdev.org/Libgcc_without_red_zone)说明编译没有red zone的libgcc，否则在中断处理时可能遇到大麻烦。
-
 ## 编译步骤
 
 ### 1. 克隆项目
@@ -65,9 +61,11 @@ make
 
 1. **编译引导程序**：编译 UEFI 引导程序 BOOTX64.EFI
 2. **安装头文件**：将内核头文件安装到 sysroot
-3. **编译库**：编译 libc 库
-4. **编译内核**：编译内核生成 kernel.bin
-5. **创建磁盘镜像**：创建包含引导程序和内核的 FAT32 磁盘镜像 disk.img
+3. **编译库**：编译 libc 库（libk.a 供内核用，libc.a 供用户程序用）
+4. **编译内核**：编译内核生成 `kernel.bin`（项目根目录），中间目标文件在 `build/x86_64/kernel/`
+5. **编译用户程序**：编译 `init.elf`, `spin.elf`, `sigtest.elf`, `poweroff.elf`, `systest.elf` 等
+6. **编译 BusyBox**：构建 `busybox.elf`（需初始化子模块 `git submodule update --init`）
+7. **创建磁盘镜像**：`tools/mkdisk` 创建 GPT 双分区磁盘镜像 `disk.img`（FAT32 ESP + ext2 根文件系统）
 
 ### 3. 编译单个组件
 
@@ -80,13 +78,41 @@ make boot/uefi/BOOTX64.EFI
 #### 编译内核
 
 ```bash
-make kernel/kernel.bin
+make kernel.bin
 ```
 
 #### 安装头文件和库
 
 ```bash
 make lib
+```
+
+#### 编译用户程序
+
+```bash
+make user
+```
+
+#### 只编译内核（不含磁盘镜像）
+
+```bash
+make kernel/kernel.bin
+```
+
+#### 内置自测试
+
+```bash
+make KERNEL_SELFTEST=1
+```
+
+在 kernel_main 中调用 `selftest_run_all()` 执行内置测试。
+
+#### 运行测试
+
+```bash
+make test             # 运行 test/Makefile 中的测试
+make test-phase-0     # 运行 tests/run_test.py phase-0
+make test-syscall     # 使用 OS01_SYSTEST=1 编译并测试系统调用
 ```
 
 ## 运行系统
@@ -97,7 +123,25 @@ make lib
 make run
 ```
 
-此命令会启动 QEMU 模拟器，加载 UEFI 固件和磁盘镜像，并将串口输出重定向到标准输出。
+此命令会启动 QEMU 模拟器（`-M q35 -smp 2`），加载 UEFI 固件和磁盘镜像，并将串口输出重定向到标准输出。
+
+### BusyBox
+
+项目使用 BusyBox 提供用户空间工具。构建前需要初始化子模块：
+
+```bash
+git submodule update --init
+```
+
+BusyBox 配置位于 `config/busybox.config`，使用 `clang` 编译器构建。
+
+### 磁盘镜像
+
+`tools/mkdisk` 创建 GPT 双分区磁盘镜像：
+- 分区 1：FAT32 ESP — 包含 BOOTX64.EFI 和 kernel.bin，挂载于 `/boot`
+- 分区 2：ext2 根文件系统 — 包含用户程序，挂载于 `/`
+
+Fallback 模式（无 GPT）时使用单一 FAT32 分区。
 
 ## 项目结构
 
@@ -106,23 +150,38 @@ make run
 * `boot/` - 引导程序相关代码
   * `uefi/` - UEFI 引导程序
 * `kernel/` - 内核代码
-  * `arch/` - 架构相关代码
-  * `driver/` - 驱动程序
-  * `include/` - 头文件
-  * `intr/` - 中断处理
-  * `memory/` - 内存管理
-  * `pic/` - PIC 控制器
-  * `timer/` - 定时器
-* `libc/` - 系统库
+  * `kernel/` - 内核主文件（main.c, printk.c, panic.c, log.c 等）
+  * `arch/x86_64/` - x86_64 架构代码（head.S, trap.c, subsys.c）
+  * `apic/` - APIC 子系统（ACPI, LAPIC, IOAPIC, IPI, LAPIC 定时器）
+  * `block/` - 块设备层
+  * `driver/` - 驱动程序（keyboard, serial, pit, rtc, ahci, pci）
+  * `fs/` - 文件系统（VFS, FAT32, ext2, devfs, procfs, tmpfs）
+  * `intr/` - 中断处理（irq.c, softirq.c, dispatch.c）
+  * `memory/` - 内存管理（pmm, vmm, slab, vma, tlb）
+  * `sched/` - 调度器（task.c, smp.c）
+  * `subsys/` - 子系统注册框架
+  * `timer/` - 软件定时器
+  * `tty/` - TTY 子系统
+  * `percpu/` - 每 CPU 数据结构
+  * `pic/` - 8259A PIC 控制器
+* `libc/` - 系统库（libk 供内核，libc 供用户程序）
+* `user/` - 用户空间程序（init, spin, sigtest, poweroff 等）
 * `sysroot/` - 系统根目录
-* `config/` - 配置文件
+* `config/` - 配置文件（busybox.config, fsroot/）
+* `test/` - 测试代码
+* `tests/` - 测试脚本（run_test.py）
+* `tools/` - 构建工具（mkdisk）
 * `docs/` - 文档
+* `thirdpart/` - 第三方依赖（posix-uefi, busybox-1.36.1）
 
 ### 编译产物
 
 * `boot/uefi/BOOTX64.EFI` - UEFI 引导程序
-* `kernel/kernel.bin` - 内核二进制文件
-* `disk.img` - 包含引导程序和内核的磁盘镜像
+* `kernel.bin` - 内核二进制文件（项目根目录）
+* `kernel/kernel.elf` - 内核 ELF（含调试符号，供 GDB 使用）
+* `build/x86_64/kernel/*.o` - 内核中间目标文件
+* `build/x86_64/user/*.elf` - 用户程序 ELF
+* `disk.img` - GPT 双分区磁盘镜像（FAT32 ESP + ext2 根文件系统）
 
 ## 常见问题和解决方案
 

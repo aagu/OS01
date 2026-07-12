@@ -164,6 +164,56 @@ datetime_t new_dt = {2024, 12, 31, 23, 59, 59};
 rtc_write_datetime(&new_dt);
 ```
 
+### AHCI SATA 驱动
+
+位于 `kernel/driver/ahci.c`：
+
+* `ahci_init` - PCI 扫描 SATA 控制器，启用总线主控和 MMIO
+* `ahci_port_init` - 初始化端口（命令列表、FIS、命令表），发送 IDENTIFY
+* `ahci_read_sectors` / `ahci_write_sectors` - 扇区级读写
+
+初始化流程：
+1. PCI 查找类=0x01（大容量存储）、子类=0x06（SATA）、编程接口=0x01（AHCI）
+2. 启用总线主控和 MMIO，读取 ABAR（BAR5）
+3. 映射 MMIO 空间，读版本和功能寄存器
+4. BIOS/OS 所有权交接（BOH）
+5. 初始化每个已实现的端口 → 注册为块设备
+
+### 块设备层
+
+位于 `kernel/block/blockdev.c`：
+
+* `block_device_register` - 注册 AHCI 端口为块设备（hda, hdb, ...）
+* `block_device_register_raw` - 无需 AHCI 包装的注册
+* `block_device_read` / `block_device_write` - 扇区级读写（含边界检查）
+
+### 帧缓冲驱动
+
+帧缓冲在 `kernel/kernel/main.c` 中初始化：
+
+* `frame_buffer_early_init` - 从 bootinfo 读取帧缓冲基址和分辨率
+* `frame_buffer_init` - 将帧缓冲重映射到 `VIRT_FRAMEBUFFER_OFFSET`
+* 在 devfs 中注册为 `/dev/fb`（`devfs_register_chrdev("fb", ...)`）
+
+### TTY 驱动
+
+位于 `kernel/tty/tty.c`，头文件 `kernel/include/kernel/tty.h`：
+
+* `tty_alloc` - 分配 TTY 实例，设置输出/回显回调
+* `tty_push_input` - IRQ 上下文中推送字符（来自 keyboard/serial 处理程序）
+* `tty_read` - 从 TTY 读取（规范模式行缓冲，支持阻塞）
+* `tty_write` - 写入 TTY 输出（dual-write 到 fb + serial）
+
+### 键盘 devfs 读处理
+
+键盘驱动在 `kernel/kernel/main.c` 中注册到 devfs：
+
+```c
+devfs_register_chrdev("keyboard", NULL, keyboard_devfs_read, NULL);
+```
+
+`keyboard_devfs_read` 允许用户空间程序直接从 `/dev/keyboard` 读取键盘扫描码。
+
 ## 中断控制器
 
 系统使用 `hw_int_controller_t` 结构体表示硬件中断控制器，为驱动程序提供统一的中断控制接口：
@@ -180,8 +230,8 @@ typedef struct hw_int_type {
 
 ### 预定义控制器
 
-* `keyboard_controller` - 键盘中断控制器
-* `pit_controller` - PIT 中断控制器
+* `keyboard_controller` - 键盘中断控制器（APIC 可用时使用 IOAPIC）
+* `pit_controller` - PIT 中断控制器（APIC 可用时使用 IOAPIC）
 
 ## 硬件访问
 
@@ -198,15 +248,34 @@ typedef struct hw_int_type {
 
 ## 驱动程序初始化流程
 
-在 `kernel_main` 函数中，驱动程序的初始化顺序如下：
+`kernel_main` 使用子系统框架（subsys）按 Phase 初始化驱动：
 
-1. **串口驱动**：`init_serial()` - 初始化串口，用于调试输出
-2. **物理内存管理**：`pmm_init()` - 初始化物理内存管理
-3. **虚拟内存管理**：`vmm_init()` - 初始化虚拟内存管理
-4. **PIC 控制器**：`pic_init()` - 初始化 PIC 控制器
-5. **定时器**：`timer_init()` - 初始化定时器系统
-6. **PIT 驱动**：`pit_init()` - 初始化 PIT 定时器
-7. **键盘驱动**：`keyboard_init()` - 初始化键盘
+### Phase 1-2（硬编码在 kernel_main 中）
+
+1. **串口硬件**：`init_serial()` - 初始化串口线配置（IER=0，无 IRQ）
+2. **物理内存**：`pmm_init()` - 物理内存管理
+3. **虚拟内存**：`vmm_init()` - 虚拟内存管理
+4. **帧缓冲**：`frame_buffer_init()` - 将帧缓冲重映射到虚拟地址空间
+
+### Phase 3-6（subsys_init_all，在 arch_register_subsys 中定义）
+
+| Phase | 组件 | 函数 | 必需 |
+|-------|------|------|------|
+| 3 | APIC | `apic_init()` | 是 |
+| 3 | PIC | `pic_init()` | 可选（无 APIC 时用）|
+| 4 | 定时器 | `timer_init()` | 是 |
+| 4 | PIT | `pit_init()` | 可选 |
+| 4 | LAPIC 定时器 | `lapic_timer_init()` | 可选 |
+| 5 | 键盘 | `keyboard_init()` | 可选 |
+| 5 | 串口 IRQ | `init_serial_irq()` | 是 |
+| 6 | AHCI | `ahci_init()` | 可选 |
+
+### Phase 7-9（硬编码在 kernel_main 中）
+
+7. **VFS/DevFS**：`vfs_init()` → `devfs_init()` → 注册设备（keyboard, fb, block）
+8. **TTY**：`tty_alloc()` → 将 serial/keyboard IRQ 连接到 TTY
+9. **Per-CPU + SMP**：`percpu_init()` → `smp_boot_aps()` → 每 CPU LAPIC 定时器启动
+10. **调度器 + 用户空间**：`task_init()` → 加载 /init.elf
 
 ## 代码结构
 
@@ -216,6 +285,8 @@ typedef struct hw_int_type {
 * `kernel/driver/serial.c` - 串口驱动
 * `kernel/driver/pit.c` - PIT 定时器驱动
 * `kernel/driver/rtc.c` - RTC 实时时钟驱动
+* `kernel/driver/ahci.c` - AHCI SATA 驱动
+* `kernel/driver/pci.c` - PCI 配置空间访问
 
 ### 驱动程序头文件
 
@@ -223,11 +294,14 @@ typedef struct hw_int_type {
 * `kernel/include/driver/serial.h` - 串口驱动头文件
 * `kernel/include/driver/pit.h` - PIT 定时器驱动头文件
 * `kernel/include/driver/rtc.h` - RTC 实时时钟驱动头文件
+* `kernel/include/driver/ahci.h` - AHCI SATA 驱动头文件
+* `kernel/include/driver/pci.h` - PCI 驱动头文件
 
 ### 设备相关头文件
 
-* `kernel/include/device/pic.h` - PIC 控制器头文件
+* `kernel/include/device/pic.h` - PIC/IOAPIC 控制器头文件
 * `kernel/include/device/timer.h` - 定时器设备头文件
+* `kernel/include/block/blockdev.h` - 块设备层头文件
 
 ## 扩展驱动程序
 
@@ -295,7 +369,7 @@ void example_init()
 
 ## 未来计划
 
-1. **扩展驱动程序**：添加更多硬件驱动，如硬盘、网络等
+1. **扩展驱动程序**：添加更多硬件驱动，如 NVMe、网络等
 2. **驱动程序框架**：完善驱动程序框架，支持热插拔
 3. **设备管理**：实现设备管理系统，统一管理硬件设备
 4. **驱动程序抽象**：提供更高层次的驱动程序抽象，简化驱动开发

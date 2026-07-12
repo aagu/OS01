@@ -8,13 +8,12 @@ OS01 supports up to `NR_CPUS=8` CPUs (compile-time limit in `kernel/include/kern
 Phase 0: per-CPU data (GS base)               kernel/include/kernel/percpu.h
 Phase 1: AP enumeration (MADT LAPIC/x2APIC)    kernel/apic/acpi.c
 Phase 2: AP trampoline + INIT-SIPI-SIPI        kernel/arch/x86_64/trampoline.S, kernel/sched/smp.c
-Phase 3: atomic ops + spin_lock_irqsave        kernel/include/kernel/arch/x86_64/cpu.h, spinlock.h
-Phase 4: IPI infrastructure                    kernel/apic/ipi.c, kernel/include/kernel/ipi.h
-Phase 5: TLB shootdown protocol                kernel/memory/tlb.c
-Phase 6: LAPIC timer per-CPU tick              kernel/apic/lapic_timer.c
+Phase 3: interrupt controllers (APIC, PIC)     kernel/arch/x86_64/subsys.c (subsys phase 3)
+Phase 4: timers (timer, PIT, LAPIC timer)      kernel/arch/x86_64/subsys.c (subsys phase 4)
+Phase 5: device IRQs (keyboard, serial)         kernel/arch/x86_64/subsys.c (subsys phase 5)
+Phase 6: storage (AHCI)                        kernel/arch/x86_64/subsys.c (subsys phase 6)
 Phase 7: CPU affinity + per-CPU idle           kernel/sched/task.c, kernel/sched/smp.c
 Phase 8: TSC sync and warp check               cpu.h rdtsc(), smp.c comparison
-```
 
 ## Per-CPU data
 
@@ -25,16 +24,17 @@ Phase 8: TSC sync and warp check               cpu.h rdtsc(), smp.c comparison
 | 0 | `self` | Self-pointer (GS:0 loads this) |
 | 8 | `need_resched` | Per-CPU reschedule flag (entry.S reads via `%gs:8`) |
 | 16 | `cpu_id` | Logical CPU number (0..NR_CPUS-1) |
-| 20 | `apic_id` | Local APIC ID from MADT |
+| 20 | `arch_processor_id` | APIC ID (x86) / MPIDR_EL1 (aarch64) |
 | 24 | `online` | Set to 1 when CPU is fully initialised |
 | 28 | `scheduler_ok` | Per-CPU guard (schedule() returns before this is set) |
 | 32 | `tss` | Pointer to this CPU's TSS descriptor |
 | 40 | `tlb_wanted` | Atomic flag: TLB invalidation requested |
 | 44 | `tlb_ack` | Atomic counter: shootdown acknowledgement |
-| 48 | `run_queue` | Per-CPU run queue (allocated, not yet used by scheduler) |
+| 48 | `run_queue` | Per-CPU run queue (list_t) |
 | 64 | `idle` | This CPU's idle task pointer |
 | 72 | `schedule_count` | Number of schedule() invocations on this CPU |
-| 80 | `tsc_boot` | TSC value at AP boot time (for warp check) |
+| 80 | `watchdog_counter` | Incremented each timer tick, reset by schedule() |
+| 88 | `tsc_boot` | TSC value at AP boot time (for warp check) |
 
 **Critical**: `self` and `need_resched` offsets are hardcoded in `entry.S`. Do NOT reorder these fields.
 
@@ -53,7 +53,13 @@ Access via:
 
 Enumeration flow in `kernel_main()`:
 ```c
-// Walk MADT LAPIC entries, fill percpu_data[]
+// Phase 3-6: Subsystem framework
+arch_register_subsys();     // registers APIC/PIC/timer/keyboard/AHCI
+subsys_init_all();          // runs phases 3-6
+
+// ... VFS, devfs, filesystem init ...
+
+// Phase 7: Walk MADT LAPIC entries, fill percpu_data[]
 for each enabled LAPIC/x2APIC:
     percpu_init(cpu_idx, apic_id);
     if cpu_idx == 0:
@@ -63,7 +69,12 @@ for each enabled LAPIC/x2APIC:
     else:
         // Registered but offline — smp_boot_aps() will wake them
 num_cpus = cpu_idx;  // runtime count
-```
+
+smp_boot_aps();
+
+// Per-CPU subsystem init (LAPIC timer start, etc.)
+arch_register_subsys_percpu();
+subsys_init_percpu();
 
 ## AP trampoline
 
@@ -152,6 +163,10 @@ SMP locks in use:
 - `Pos.lock` — framebuffer output (color_printk)
 - `serial_lock` — COM1 output (serial_printk), prevents interleaved multi-core lines
 - `tasklist_lock` — global task list (`init_task_union.task.list`), protects spawn/fork/exit against concurrent schedule() iteration
+- `subpage_lock` — COW page pool (pmm.c), protects sub-page allocation/free
+- `futex_hash_lock` — per-bucket lock in futex hash table (futex.c)
+- `tty_lock` — per-TTY cooked_lock (tty.c), protects input ring buffer
+- `pipe_lock` — per-file lock in pipe I/O (file.c)
 
 ## IPI infrastructure
 
@@ -227,7 +242,7 @@ Global task list (`init_task_union.task.list`) with `tasklist_lock`.
 
 `schedule()` picks the next task by round-robining the global list and filtering by `next->cpu == this_cpu()->cpu_id`. The idle fallback uses `this_cpu()->idle` instead of a hardcoded `init_task_union.task`.
 
-Known limitation: `set_tss64()` writes the global `TSS64_Table` — only safe with `-smp 1`. Per-CPU TSS descriptor needed for `-smp 2+`. Two CPUs context-switching simultaneously will clobber each other's `rsp0`, causing #GP at `iretq`.
+TSS is now per-CPU: `init_tss[NR_CPUS]` with each CPU holding `percpu.tss = &init_tss[cpu]`. The GDT TSS descriptor is updated per CPU in `ap_entry()`. This eliminates the old race where two CPUs would clobber each other's `rsp0`.
 
 ## TSC sync
 

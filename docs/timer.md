@@ -57,9 +57,9 @@ typedef struct timer {
 
 位于 `kernel/driver/pit.c` 中，主要组件包括：
 
-* `pit_init` - 初始化 PIT
+* `pit_init` - 初始化 PIT（APIC 可用时使用 IOAPIC，否则使用 PIC）
 * `set_frequency` - 设置 PIT 频率
-* `pit_handler` - PIT 中断处理函数
+* `pit_handler` - PIT 中断处理函数（递增 jiffies、设置 need_resched、触发软中断）
 
 ### 初始化流程
 
@@ -69,11 +69,27 @@ typedef struct timer {
 
 ### 中断处理流程
 
-1. PIT 每 10ms 触发一次中断
+1. PIT 每 10ms 触发一次中断（仅 BSP；AP 使用 LAPIC 定时器做调度）
 2. 调用 `pit_handler` 函数
 3. 递增系统时间计数器 `jiffies`
-4. 检查是否有定时器到期
-5. 如果有定时器到期，设置定时器软中断
+4. 设置 `need_resched` 以便调度器在中断返回时切换任务
+5. 如果有定时器到期，设置 `TIMER_SIRQ` 软中断
+6. `do_timer` 在软中断上下文中遍历链表并执行回调
+
+### LAPIC 定时器（每 CPU 调度时钟）
+
+LAPIC 定时器为每个 CPU 提供独立的调度时钟（100Hz），位于 `kernel/apic/lapic_timer.c`：
+
+* `lapic_timer_init` - 注册 IDT 门并校准（subsys Phase 4）
+* `lapic_timer_calibrate` - 用 PIT 作为参考进行校准
+* `lapic_timer_start` - 启动周期模式（percpu_init + GS 基址设置后调用）
+* `lapic_timer_handler` - 设置 `need_resched` + 发送 EOI（不含 jiffies 递增）
+
+#### 与 PIT 的关系
+
+- **PIT**（仅 BSP）：唯一递增 `jiffies` 的源，触发软中断执行定时器回调，请求调度
+- **LAPIC 定时器**（每 CPU）：仅请求调度，不递增 `jiffies`
+- `jiffies` 是系统全局时间计数器，仅由 PIT 在 BSP 上维护
 
 ## 软件定时器管理
 
@@ -96,6 +112,14 @@ typedef struct timer {
 * `timer_init` - 初始化定时器系统
 
 ### 初始化流程
+
+在 `kernel_main` 的子系统框架中（subsys Phase 4）执行：
+
+1. `timer`（必需）→ `timer_init()` — 初始化 jiffies、链表头、注册软中断
+2. `pit`（可选）→ `pit_init()` — PIT 100Hz，使用 IOAPIC 或 PIC
+3. `lapic-timer`（可选）→ `lapic_timer_init()` — 注册门 + 校准，后续 per-CPU 启动
+
+`register_subsys` 在 `kernel/arch/x86_64/subsys.c` 中定义。`subsys_init_all()` 按 Phase 顺序依次执行。具体流程：
 
 1. 调用 `timer_init` 函数
 2. 初始化系统时间计数器 `jiffies` 为 0
@@ -226,7 +250,7 @@ set_softirq_status(TIMER_SIRQ);
 
 ### 时间单位
 
-- **jiffies**：系统时间计数器，每 10ms 递增一次
+- **jiffies**：系统全局时间计数器，每 10ms 递增一次（仅由 PIT/BSP 维护）
 - **毫秒**：1 毫秒 = 0.1 jiffies
 - **秒**：1 秒 = 100 jiffies
 
@@ -258,13 +282,18 @@ uint64_t jiffies_to_sec(uint64_t jif) {
 
 ### 定时器核心
 
-* `kernel/timer/timer.c` - 定时器系统核心实现
+* `kernel/timer/timer.c` - 定时器系统核心实现（`timer_init`, `add_timer`, `del_timer`, `do_timer`）
 * `kernel/include/device/timer.h` - 定时器相关头文件
 
 ### 硬件定时器
 
-* `kernel/driver/pit.c` - PIT 定时器驱动
+* `kernel/driver/pit.c` - PIT 定时器驱动（`pit_init`, `pit_handler`, `set_frequency`）
 * `kernel/include/driver/pit.h` - PIT 定时器驱动头文件
+* `kernel/apic/lapic_timer.c` - LAPIC 定时器（`lapic_timer_init`, `lapic_timer_start`, `lapic_timer_handler`）
+
+### 子系统注册
+
+* `kernel/arch/x86_64/subsys.c` - 所有定时器组件注册为 Phase 4 入口
 
 ## 性能优化
 
@@ -284,18 +313,18 @@ uint64_t jiffies_to_sec(uint64_t jif) {
 
 ### 提高定时器精度
 
-可以通过以下方式提高定时器精度：
+当前系统已实现的定时方案：
 
-1. **增加 PIT 频率**：提高 PIT 中断频率，减小 `jiffies` 的时间间隔
-2. **使用其他定时器**：如 APIC 定时器或 HPET，提供更高的精度
+1. **PIT**（100Hz）：系统 `jiffies` 时间源，10ms 精度
+2. **LAPIC 定时器**（100Hz）：每 CPU 调度时钟，与 PIT 同频
+3. **进一步优化**：可增加 PIT 频率，或将来引入 HPET
 
-### 添加定时器类型
+### 定时器类型
 
-可以扩展定时器系统，添加以下类型的定时器：
+当前定时器类型（通过回调行为区分）：
 
-1. **一次性定时器**：只执行一次
-2. **周期性定时器**：按固定间隔重复执行
-3. **延迟定时器**：延迟指定时间后执行
+1. **一次性定时器**：回调执行后自动从链表删除，不重新添加
+2. **周期性定时器**：回调函数中重新调用 `create_timer` + `add_timer`
 
 ### 优化定时器管理
 

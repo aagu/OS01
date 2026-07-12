@@ -65,11 +65,21 @@
 
 位于 `kernel/intr/softirq.c` 中，处理软中断。
 
+## 中断安全注册 API（推荐）
+
+当前推荐使用 `kernel/include/kernel/arch/x86_64/gate.h` 中的两步骤模式：
+- `DEFINE_INTR_STUB(name, vector)` — 文件作用域宏，生成汇编跳板
+- `REGISTER_INTR_HANDLER(name, vector, handler_fn)` — 运行时宏，存储 C 处理函数并安装 IDT 门
+- `set_intr_gate_raw()` — 底层 API，**只接受汇编跳板**（不接受裸 C 函数）
+- 通过 `generic_intr_dispatch(pt_regs*, vector)` 分发
+
+异常门（`set_trap_gate`/`set_system_gate`）直接传递 `entry.S` 标签（以 `iretq` 结尾）— 安全可用。
+
 ## 中断注册与管理
 
 ### 注册中断处理函数
 
-使用 `register_irq` 函数注册外部设备中断处理函数：
+使用 `register_irq` 函数注册外部设备中断处理函数（传统 API）：
 
 ```c
 int32_t register_irq(uint64_t nr, void * arg,

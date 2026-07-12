@@ -200,6 +200,22 @@ void vmm_unmap_page(uint64_t *pagemap, uintptr_t virtual_address);
 
 Slab 分配器用于小内存分配，初始化函数为 `slab_init`，位于 `kernel/memory/slab.c` 中。
 
+## COW (Copy-on-Write) Fork
+
+系统支持 4KB 粒度的 COW fork（`PAGE_COW` PTE bit 10）：
+- `subpage_pool`：`alloc_4k_page`/`free_4k_page` 分割 2MB 页面
+- `subpage_pool.cow_count[512]`：每个 4KB 槽位的 COW 引用计数
+- 缺页处理：`do_page_fault` 中 COW 分支解析写时复制
+- `mmap`/`mprotect`/`munmap` 系统调用支持 VMA 追踪
+
+## VMA (Virtual Memory Area)
+
+`kernel/memory/vma.c` 实现 VMA 管理：
+- `mmap` 分配 VMA，`munmap` 释放 VMA
+- `mprotect` 修改 VMA 权限
+- VMA 列表 (`mm_t.vma_list`) 按 `vm_start` 排序
+- `mmap_base` 控制 mmap 搜索起始地址
+
 ## 内存初始化流程
 
 1. **内核启动**：`kernel_main` 函数开始执行
@@ -208,6 +224,7 @@ Slab 分配器用于小内存分配，初始化函数为 `slab_init`，位于 `k
 4. **虚拟内存初始化**：调用 `vmm_init` 初始化虚拟内存管理
 5. **Slab 分配器初始化**：在 `pmm_init` 中调用 `slab_init`
 6. **内存映射**：将物理内存映射到虚拟地址空间
+7. **COW/VMA 支持**：通过 `mmap`/`mprotect`/`munmap` 系统调用提供用户态内存管理
 
 ## 内存区域
 
