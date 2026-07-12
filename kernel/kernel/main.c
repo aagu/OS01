@@ -27,6 +27,7 @@
 #include <kernel/selftest.h>
 #include <stdlib.h>
 #include <kernel/subsys.h>
+#include <kernel/arch/subsys.h>
 
 // ── Stack canary ─────────────────────────────────────────────
 #include <kernel/arch/x86_64/cpu.h>   // rdtsc(), cpu_id()
@@ -154,7 +155,6 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     color_printk(GREEN, BLACK, "frame buffer remap succeed\n");
 
     // ═══ RSDP: 传递给 arch 子系统 ═══
-    extern uint64_t arch_boot_rsdp;
     arch_boot_rsdp = bootinfo->RSDP;
 
     // ═══ 3-6. Subsystem framework ══════════════════════════════════
@@ -163,7 +163,6 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     //   Phase 4: timers (timer, pit, lapic-timer)
     //   Phase 5: device IRQs (keyboard, serial)
     //   Phase 6: storage (ahci)
-    extern void arch_register_subsys(void);
     arch_register_subsys();
     subsys_init_all();
 
@@ -274,7 +273,6 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     smp_boot_aps();
 
     // per-CPU 子系统二次 init
-    extern void arch_register_subsys_percpu(void);
     arch_register_subsys_percpu();
     subsys_init_percpu();
 
