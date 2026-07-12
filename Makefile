@@ -25,6 +25,8 @@ MEMORY=512M
 # ── Log output target (serial | fb | both) ───────────────
 LOG_TARGET ?= serial
 NDEBUG     ?=
+KERNEL_SELFTEST ?=
+export KERNEL_SELFTEST
 
 all: disk.img
 
