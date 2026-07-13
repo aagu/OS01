@@ -1429,6 +1429,16 @@ void task_init()
     }
 #endif
 
+#ifdef OS01_SELFTEST
+    // ── Deferred-free selftest ───────────────────────────────
+    // Must run after scheduler_ok=1 so schedule() works and
+    // the reaper kthread can drain work items.
+    {
+        extern void test_deferred_free(void);
+        test_deferred_free();
+    }
+#endif
+
     // ── Idle loop ────────────────────────────────────────────
     // hlt pauses the CPU until the next interrupt (timer tick,
     // keyboard IRQ1, serial IRQ4).  The timer ISR sets
