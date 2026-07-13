@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <uapi/time.h>
+#include <kernel/deferred_free.h>    // deferred_free() for zombie reaping
 
 void __switch_to(task_t *prev, task_t *next)
 {
@@ -296,21 +297,20 @@ void schedule(void)
     }
 
     // Pass 3: unlink and free zombie resources.
-    // NOTE: kfree(t->stack_alloc_base) is DEFERRED — it frees
-    // the task_t itself (embedded in the stack allocation).
-    // Doing so corrupts subsequent allocations from the same
-    // slab cache (the freed memory is re-used before list
-    // consumers have finished with the stale node pointers).
-    // TODO: add a deferred-free work queue for stack_alloc_base.
+    // thread and fpu_save are separate kmalloc allocations — freed inline.
+    // stack_alloc_base and files are deferred via deferred_free() to avoid
+    // use-after-free (stack embeds task_t+list node; files_free is slow).
     for (int i = 0; i < reap_count; i++) {
         task_t *t = reap_list[i];
         list_del(&t->list);
         if (t->thread)
             kfree(t->thread);
         if (t->files)
-            files_free(t->files);
+            deferred_files_free(t->files);
         if (t->fpu_save)
             kfree(t->fpu_save);
+        if (t->stack_alloc_base)
+            deferred_kfree(t->stack_alloc_base);
     }
 
     // ── Wake tasks whose blocking conditions are met ─────
@@ -1404,6 +1404,14 @@ void task_init()
     // pid_counter starts at 1 → first user task becomes PID=1.
     int64_t init_pid = spawn_user_task("/bin/init", NULL);
     debug_task("init: spawned user-space init, pid=%d\n", (int)init_pid);
+
+    // Spawn the deferred-free reaper kthread BEFORE activating the
+    // scheduler.  This guarantees the reaper exists before any zombie
+    // can be produced (schedule() returns early while scheduler_ok==0).
+    {
+        task_t *df = deferred_free_spawn();
+        if (df) df->cpu = 0;
+    }
 
     // Activate the scheduler and enter the idle loop.
     // schedule() picks up the user init (PID 1) naturally.
