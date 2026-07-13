@@ -14,6 +14,7 @@
 /* ── Blocker framework ─────────────────────────── */
 #define BLOCKER_NONE      0
 #define BLOCKER_WAITPID   1
+#define BLOCKER_DEFERRED_FREE 2
 
 struct task_struct;
 typedef bool (*blocker_check_t)(struct task_struct *waiter);
@@ -28,6 +29,10 @@ typedef struct blocker_data {
     struct task_struct *waited_child;
     int64_t waited_pid;
 } blocker_data_t;
+
+/* ── Blocker API ──────────────────────────────── */
+int  blocker_wait(blocker_check_t check, int type, bool signal_can_wake);
+void blocker_wake(struct task_struct *task);
 
 #define CLONE_FS (1 << 0)
 #define CLONE_FILES (1 << 1)
