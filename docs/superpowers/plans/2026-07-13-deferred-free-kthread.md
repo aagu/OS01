@@ -28,7 +28,9 @@
 - Consumes: nothing
 - Produces: `#define BLOCKER_DEFERRED_FREE 2` — used by `blocker_wait()` calls in Task 2
 
-- [ ] **Step 1: Add the define**
+- [ ] **Step 1: Add the defines and blocker API declarations**
+
+In `kernel/include/kernel/task.h`, after the existing blocker definitions (after line 16):
 
 ```c
 // Line 16 currently reads:
@@ -36,13 +38,19 @@
 //
 // Add after it:
 #define BLOCKER_DEFERRED_FREE 2
+
+// After the blocker typedefs (after line 30), add declarations for
+// the blocker primitives so other files can use them without
+// implicit-function-declaration warnings:
+int  blocker_wait(blocker_check_t check, int type, bool signal_can_wake);
+void blocker_wake(struct task_struct *task);
 ```
 
 - [ ] **Step 2: Verify compilation**
 
 Run:
 ```bash
-cd kernel && make KERNEL_SELFTEST=1 -j$(nproc)
+make KERNEL_SELFTEST=1 -j$(nproc)
 ```
 Expected: Compiles clean (no functional change yet).
 
@@ -50,7 +58,12 @@ Expected: Compiles clean (no functional change yet).
 
 ```bash
 git add kernel/include/kernel/task.h
-git commit -m "feat: add BLOCKER_DEFERRED_FREE blocker type for deferred-free kthread
+git commit -m "feat: add BLOCKER_DEFERRED_FREE and blocker API declarations
+
+Adds BLOCKER_DEFERRED_FREE=2 for the deferred-free kthread.
+Declares blocker_wait() and blocker_wake() in task.h so other
+subsystems can use the blocker framework without implicit-
+function-declaration warnings.
 
 Co-Authored-By: Claude <noreply@anthropic.com>"
 ```
@@ -228,7 +241,7 @@ task_t *deferred_free_spawn(void)
 
 Run:
 ```bash
-cd kernel && make KERNEL_SELFTEST=1 -j$(nproc)
+make KERNEL_SELFTEST=1 -j$(nproc)
 ```
 Expected: Compiles clean. New symbols in kernel.bin (`df_reaper_main`, `deferred_free`, `deferred_free_spawn`).
 
@@ -359,7 +372,7 @@ Replace with:
 
 Run:
 ```bash
-cd kernel && make KERNEL_SELFTEST=1 -j$(nproc)
+make KERNEL_SELFTEST=1 -j$(nproc)
 ```
 Expected: Compiles clean.
 
@@ -380,15 +393,17 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 ---
 
-### Task 4: Add kernel selftest
+### Task 4: Add kernel selftest (post-`task_init()` pattern)
 
 **Files:**
-- Modify: `kernel/test/selftest.c` (register new test)
 - Create: `kernel/test/test_deferred_free.c`
+- Modify: `kernel/sched/task.c:1412-1422` (add call in `task_init()`, after `scheduler_ok = 1` block)
 
 **Interfaces:**
-- Consumes: `deferred_free()`, `kmalloc()`, `kfree()`, `create_kthread()`, `do_exit()` (declared in task.h), `kmalloc_cache_size[]`, `selftest_register()`
-- Produces: `test_deferred_free` — selftest entry point
+- Consumes: `deferred_kfree()` (Task 2); `kmalloc()`, `kfree()`, `kmalloc_cache_size[]`; `create_kthread()`, `do_exit()`; `PMMngr` (via `<kernel/pmm.h>`); `schedule()`
+- Produces: `test_deferred_free()` — called directly from `task_init()`, NOT via `selftest_register()`
+
+**Important:** Selftest registration (`selftest_register()` → `selftest_run_all()`) runs *before* `task_init()` at `kernel/kernel/main.c`. At that point `scheduler_ok == 0` (`schedule()` is a no-op) and the reaper kthread doesn't exist. This test must follow the `test_kernel_mutex` pattern: define the test function in `test/`, call it from `task_init()` after `scheduler_ok = 1`.
 
 - [ ] **Step 1: Create the selftest file**
 
@@ -397,23 +412,19 @@ Create `kernel/test/test_deferred_free.c`:
 ```c
 #if defined(OS01_SELFTEST)
 
-#include <kernel/selftest.h>
 #include <kernel/deferred_free.h>
 #include <kernel/slab.h>
 #include <kernel/printk.h>
 #include <kernel/task.h>
-
-// Forward-declare the wrappers (they're static in deferred_free.c,
-// but we reach them through the public deferred_free() API).
-// We test through the public API only, using kernel threads.
+#include <kernel/pmm.h>
 
 // ── Test 1: Basic deferred kfree ──────────────────────────────
 // Allocate N items, defer-free them, verify the slab total_free
 // returns to baseline after the reaper drains the queue.
 
-SELFTEST(deferred_free_basic)
+static int test_deferred_free_basic(void)
 {
-    // baseline: free count in the 64-byte slab cache
+    // baseline: free count in the 64-byte slab cache (index 1)
     struct Slab_Cache *sc = &kmalloc_cache_size[1]; // size=64
     uint64_t baseline_free = sc->total_free;
 
@@ -422,7 +433,8 @@ SELFTEST(deferred_free_basic)
     for (int i = 0; i < 4; i++) {
         ptrs[i] = kmalloc(64);
         if (!ptrs[i]) {
-            serial_printk("[selftest] deferred_free_basic: kmalloc(64) #%d failed\n", i);
+            serial_printk("[selftest] deferred_free_basic: "
+                          "kmalloc(64) #%d failed\n", i);
             return -1;
         }
     }
@@ -440,38 +452,39 @@ SELFTEST(deferred_free_basic)
     }
 
     if (sc->total_free < baseline_free) {
-        serial_printk("[selftest] deferred_free_basic: total_free=%lu < baseline=%lu after %d spins\n",
-                      (unsigned long)sc->total_free, (unsigned long)baseline_free, spins);
+        serial_printk("[selftest] deferred_free_basic: "
+                      "total_free=%lu < baseline=%lu after %d spins\n",
+                      (unsigned long)sc->total_free,
+                      (unsigned long)baseline_free, spins);
         return -1;
     }
 
     return 0;
 }
 
-// ── Test 2: Kernel thread exit (stack reclamation) ──────────
+// ── Test 2: Kernel thread exit — stack reclamation ───────────
 // A kthread allocates stack via create_kthread → do_exit, then
-// the reaper frees stack_alloc_base.  We verify by checking PMM
-// free page count before and after.
+// the reaper frees stack_alloc_base.  Verify PMM free page count
+// before and after doesn't drop catastrophically.
 
 static uint64_t test_kthread_exiter(uint64_t arg)
 {
     (void)arg;
-    // do_exit triggers do_exit → ZOMBIE → schedule zombie reaper
-    // → deferred_free(stack_alloc_base) → reaper drains
     do_exit(0);
     return 0; // unreachable
 }
 
-SELFTEST(deferred_free_kthread)
+static int test_deferred_free_kthread(void)
 {
-    uint64_t pages_before = 0;
-    extern struct PageManager PMMngr;
-    pages_before = PMMngr.zones_struct->page_free_count;
+    extern struct Physical_Memory_Manager PMMngr;
+    uint64_t pages_before = PMMngr.zones_struct->page_free_count;
 
     for (int i = 0; i < 3; i++) {
-        task_t *kt = create_kthread(test_kthread_exiter, 0, "selftest-exiter");
+        task_t *kt = create_kthread(test_kthread_exiter, 0,
+                                    "selftest-exiter");
         if (!kt) {
-            serial_printk("[selftest] deferred_free_kthread: create_kthread failed\n");
+            serial_printk("[selftest] deferred_free_kthread: "
+                          "create_kthread failed\n");
             return -1;
         }
         // Let the kthread run to completion (it calls do_exit → ZOMBIE)
@@ -485,63 +498,78 @@ SELFTEST(deferred_free_kthread)
             schedule();
     }
 
-    // After all 3 kthreads are reaped, pages should be back at baseline
-    // (the stack_alloc_base allocations are returned to slab/pmm).
+    // After all 3 kthreads are reaped, pages should be near baseline.
     uint64_t pages_after = PMMngr.zones_struct->page_free_count;
-    (void)pages_before;
-    (void)pages_after;
-    // We can't assert strict equality (slab may hold onto pages),
-    // but we can at least verify no catastrophic leak (>4 pages)
     if (pages_after + 4 < pages_before) {
-        serial_printk("[selftest] deferred_free_kthread: pages_before=%lu pages_after=%lu\n",
-                      (unsigned long)pages_before, (unsigned long)pages_after);
+        serial_printk("[selftest] deferred_free_kthread: "
+                      "pages_before=%lu pages_after=%lu (leak > 4 pages)\n",
+                      (unsigned long)pages_before,
+                      (unsigned long)pages_after);
         return -1;
     }
 
     return 0;
 }
 
+// ── Entry point (called from task_init()) ─────────────────────
+
+void test_deferred_free(void)
+{
+    int ok = 0, fail = 0;
+
+    serial_printk("[selftest] deferred_free_basic... ");
+    if (test_deferred_free_basic() == 0) { ok++; serial_printk("PASS\n"); }
+    else { fail++; serial_printk("FAIL\n"); }
+
+    serial_printk("[selftest] deferred_free_kthread... ");
+    if (test_deferred_free_kthread() == 0) { ok++; serial_printk("PASS\n"); }
+    else { fail++; serial_printk("FAIL\n"); }
+
+    serial_printk("[selftest] deferred_free: %d passed, %d failed\n",
+                  ok, fail);
+}
+
 #endif // OS01_SELFTEST
 ```
 
-- [ ] **Step 2: Register the test in selftest.c**
+- [ ] **Step 2: Call test_deferred_free() from task_init()**
 
-In `kernel/test/selftest.c`, after the existing extern declarations (around line 119):
+In `kernel/sched/task.c`, after `scheduler_ok = 1` and the existing `#ifdef OS01_SELFTEST` block (around lines 1411-1422):
 
 ```c
+    current->state = TASK_RUNNING;
+    this_cpu()->scheduler_ok = 1;
+
 #ifdef OS01_SELFTEST
-int ext2_selftest_magic(void);
-int ext2_selftest_struct_sizes(void);
-int gpt_selftest_crc32(void);
-int tmpfs_selftest_mounted(void);
+    // ── Kernel mutex selftest ────────────────────────────────
+    {
+        extern void test_kernel_mutex(void);
+        test_kernel_mutex();
+    }
 #endif
 ```
 
-Add after the `#endif`:
-```c
-
-// Forward-declared from test_deferred_free.c (OS01_SELFTEST-guarded)
-int deferred_free_basic(void);
-int deferred_free_kthread(void);
-```
-
-Then in the `selftest_run_all()` function body, after the existing registrations (around line 131):
+Add AFTER the `#endif` of the existing block, still inside `#ifdef OS01_SELFTEST`:
 
 ```c
-    selftest_register("pipe_basic",        test_pipe_basic);
+#ifdef OS01_SELFTEST
+    // ── Deferred-free selftest ───────────────────────────────
+    // Must run after scheduler_ok=1 so schedule() works and
+    // the reaper kthread can drain work items.
+    {
+        extern void test_deferred_free(void);
+        test_deferred_free();
+    }
+#endif
 ```
 
-Add after:
-```c
-    selftest_register("deferred_free_basic",   deferred_free_basic);
-    selftest_register("deferred_free_kthread", deferred_free_kthread);
-```
+This creates a separate `#ifdef` block so the two selftests are independent but both guarded by the same compile flag.
 
 - [ ] **Step 3: Verify compilation with selftest enabled**
 
 Run:
 ```bash
-cd kernel && make KERNEL_SELFTEST=1 -j$(nproc)
+make KERNEL_SELFTEST=1 -j$(nproc)
 ```
 Expected: Compiles clean.
 
@@ -551,23 +579,28 @@ Run:
 ```bash
 make run
 ```
-Expected: In serial output, see:
+Expected: In serial output, see (after init spawn):
 ```
 [selftest] deferred_free_basic... PASS
 [selftest] deferred_free_kthread... PASS
+[selftest] deferred_free: 2 passed, 0 failed
 ```
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add kernel/test/test_deferred_free.c kernel/test/selftest.c
-git commit -m "test: add deferred-free selftest (basic defer + kthread exit)
+git add kernel/test/test_deferred_free.c kernel/sched/task.c
+git commit -m "test: add deferred-free selftest (post-task_init pattern)
 
-Two tests:
-- deferred_free_basic: alloc N items, defer-free them, verify
-  slab total_free returns to baseline after reaper drains.
-- deferred_free_kthread: spawn 3 kthreads that do_exit(), verify
+Two tests called from task_init() after scheduler_ok=1:
+- deferred_free_basic: alloc, defer-free, verify slab total_free
+  returns to baseline after reaper drains.
+- deferred_free_kthread: spawn kthreads that do_exit(), verify
   PMM free pages don't leak significantly.
+
+Follows test_kernel_mutex pattern — called directly from
+task_init(), not registered via selftest_register(), because
+the scheduler must be active.
 
 Co-Authored-By: Claude <noreply@anthropic.com>"
 ```
