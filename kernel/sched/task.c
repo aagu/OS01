@@ -4,8 +4,6 @@
 #include <kernel/arch/gate.h>
 #include <kernel/arch/spinlock.h>
 #include <kernel/hang.h>
-#include <kernel/arch/x86_64/regs.h>
-#include <kernel/arch/x86_64/linkage.h>
 #include <kernel/debug.h>
 #include <kernel/log.h>
 #include <kernel/memory.h>
@@ -1269,8 +1267,7 @@ struct task_struct *create_kthread(uint64_t (*fn)(uint64_t), uint64_t arg,
 void task_init()
 {
 
-    init_mm.pml4 = get_cr3();
-    init_thread.cr3 = (uint64_t)init_mm.pml4;
+    arch_task_init_platform();
 
     init_mm.start_code = PMMngr.start_code;
     init_mm.end_code = PMMngr.end_code;
@@ -1285,12 +1282,6 @@ void task_init()
     list_init(&init_mm.vma_list);
     init_mm.mmap_base = 0;
 
-    set_tss64(init_thread.rsp0, init_tss[0].rsp1, init_tss[0].rsp2,
-              init_tss[0].ist1, init_tss[0].ist2, init_tss[0].ist3,
-              init_tss[0].ist4, init_tss[0].ist5, init_tss[0].ist6,
-              init_tss[0].ist7);
-
-    init_tss[0].rsp0 = init_thread.rsp0;
     list_init(&init_task_union.task.list);
 
     // BSP idle task pointer (for the multicore scheduler).
