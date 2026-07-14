@@ -5,7 +5,7 @@
 #include <kernel/pmm.h>
 #include <fs/vfs.h>
 #include <kernel/task.h>
-#include <kernel/arch/x86_64/spinlock.h>
+#include <kernel/arch/spinlock.h>
 #include <kernel/file.h>
 #include <string.h>
 #include <stdlib.h>

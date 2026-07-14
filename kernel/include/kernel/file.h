@@ -2,7 +2,7 @@
 #define _KERNEL_FILE_H
 
 #include <stdint.h>
-#include <kernel/arch/x86_64/spinlock.h>
+#include <kernel/arch/spinlock.h>
 
 // ── Constants ──────────────────────────────────────────────
 

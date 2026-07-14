@@ -2,7 +2,7 @@
 #include <kernel/percpu.h>
 #include <kernel.h>
 #include <kernel/arch/x86_64/gate.h>
-#include <kernel/arch/x86_64/spinlock.h>
+#include <kernel/arch/spinlock.h>
 #include <kernel/hang.h>
 #include <kernel/arch/x86_64/regs.h>
 #include <kernel/arch/x86_64/linkage.h>

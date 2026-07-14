@@ -3,7 +3,7 @@
 #include <kernel/task.h>
 #include <kernel/file.h>
 #include <kernel.h>                  // container_of
-#include <kernel/arch/x86_64/spinlock.h>
+#include <kernel/arch/spinlock.h>
 #include <stdbool.h>
 
 // ── Queue state ──────────────────────────────────────────────

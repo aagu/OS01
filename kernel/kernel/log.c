@@ -1,6 +1,6 @@
 #include <kernel/log.h>
 #include <kernel/printk.h>
-#include <kernel/arch/x86_64/spinlock.h>
+#include <kernel/arch/spinlock.h>
 #include <driver/serial.h>
 #include <stdio.h>
 

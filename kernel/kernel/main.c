@@ -5,7 +5,7 @@
 #include <kernel/arch/x86_64/trap.h>
 #include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/x86_64/asm.h>
-#include <kernel/arch/x86_64/spinlock.h>
+#include <kernel/arch/spinlock.h>
 #include <kernel/arch/cpu.h>
 #include <kernel/arch/irq.h>
 #include <kernel/interrupt.h>

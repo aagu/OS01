@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <list.h>
-#include <kernel/arch/x86_64/spinlock.h>
+#include <kernel/arch/spinlock.h>
 
 #define TTY_BUF_SIZE  256
 

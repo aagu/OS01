@@ -3,7 +3,7 @@
 #include <kernel/vmm.h>
 #include <kernel/pmm.h>
 #include <kernel/slab.h>
-#include <kernel/arch/x86_64/spinlock.h>
+#include <kernel/arch/spinlock.h>
 #include <driver/serial.h>
 #include <stdio.h>
 #include <font.h>
