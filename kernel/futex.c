@@ -5,7 +5,7 @@
 #include <kernel/percpu.h>
 #include <kernel/vmm.h>
 #include <kernel/pmm.h>
-#include <kernel/arch/x86_64/cpu.h>
+
 #include <uapi/futex.h>
 #include <list.h>
 #include <errno.h>
