@@ -39,17 +39,17 @@ static inline uintptr_t arch_virt_to_phys(void *pgtbl, uintptr_t va) {
     uint64_t *pml4 = (uint64_t *)pgtbl;
     uint64_t l4 = (va >> 39) & 0x1FF;
     if (!(pml4[l4] & 1)) return 0;
-    uint64_t *pml3 = (uint64_t *)((pml4[l4] & ~(uint64_t)0xFFF) + 0xffff800000000000ULL);
+    uint64_t *pml3 = (uint64_t *)((pml4[l4] & ~(uint64_t)0xFFF) + ARCH_PAGE_OFFSET);
     uint64_t l3 = (va >> 30) & 0x1FF;
     if (!(pml3[l3] & 1)) return 0;
     if (pml3[l3] & 0x80)  // 1GB huge page
         return (pml3[l3] & 0xFFFFFC0000000ULL) | (va & 0x3FFFFFFF);
-    uint64_t *pml2 = (uint64_t *)((pml3[l3] & ~(uint64_t)0xFFF) + 0xffff800000000000ULL);
+    uint64_t *pml2 = (uint64_t *)((pml3[l3] & ~(uint64_t)0xFFF) + ARCH_PAGE_OFFSET);
     uint64_t l2 = (va >> 21) & 0x1FF;
     if (!(pml2[l2] & 1)) return 0;
     if (pml2[l2] & 0x80)  // 2MB huge page
         return (pml2[l2] & 0xFFFFFFFE00000ULL) | (va & 0x1FFFFF);
-    uint64_t *pml1 = (uint64_t *)((pml2[l2] & ~(uint64_t)0xFFF) + 0xffff800000000000ULL);
+    uint64_t *pml1 = (uint64_t *)((pml2[l2] & ~(uint64_t)0xFFF) + ARCH_PAGE_OFFSET);
     uint64_t l1 = (va >> 12) & 0x1FF;
     if (!(pml1[l1] & 1)) return 0;
     return (pml1[l1] & 0xFFFFFFFFFFFFF000ULL) | (va & 0xFFF);
