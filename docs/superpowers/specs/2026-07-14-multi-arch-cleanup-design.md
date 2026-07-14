@@ -266,7 +266,8 @@ test/include/ 镜像（本次同步迁移）:
 - `arch_task_init_platform()` — 在 `arch/thread.h` 中声明，实现在 `arch/x86_64/task_arch.c`，被 `task_init` 调用
 
 **注意**:
-- `mutex.c` / `futex.c` 中的 `atomic_cas`/`atomic_write` 调用，在将 `#include <kernel/arch/x86_64/cpu.h>` 改为 `#include <kernel/arch/atomic.h>` 后，需同步改为 `arch_atomic_cas`/`arch_atomic_write`（来自 `arch/atomic.h`）
+- `mutex.c` 中的 `atomic_cas`/`atomic_write` 调用，在将 `#include <kernel/arch/x86_64/cpu.h>` 改为 `#include <kernel/arch/atomic.h>` 后，需同步改为 `arch_atomic_cas`/`arch_atomic_write`（来自 `arch/atomic.h`）
+- `futex.c` 的 `#include <kernel/arch/x86_64/cpu.h>` 是**无用包含**——futex.c 不调用任何 `atomic_*` 函数，直接删除该 include 即可
 
 ---
 
@@ -312,8 +313,8 @@ test/include/ 镜像（本次同步迁移）:
 | `kernel/include/kernel/tty.h` | 同上 |
 | `kernel/include/kernel/wait.h` | 同上 |
 | `kernel/include/fs/ext2.h` | 同上（v1 遗漏） |
-| `kernel/include/kernel/interrupt.h` | spinlock.h → `arch/spinlock.h`；linkage.h 保持引用不变 |
-| `kernel/include/kernel/task.h` | spinlock.h → `arch/spinlock.h`；linkage.h 保持引用不变 |
+| `kernel/include/kernel/interrupt.h` | linkage.h 保持引用不变（该文件不含 spinlock.h，无需 spinlock 迁移） |
+| `kernel/include/kernel/task.h` | 无需变更 — 已使用 `arch/cpu.h`、`arch/thread.h`、`arch/segment.h` dispatch 头文件；linkage.h 保持引用不变；spinlock 通过 `file.h` 间接获取 |
 | `kernel/include/kernel/arch/x86_64/linkage.h` | 删除 `asmlinkage` 定义 |
 
 #### .c 文件
@@ -328,7 +329,7 @@ test/include/ 镜像（本次同步迁移）:
 | `kernel/sched/deferred_free.c` | 同上（v1 遗漏） |
 | `kernel/test/selftest.c` | 同上 |
 | `kernel/mutex.c` | `arch/x86_64/cpu.h` → `arch/atomic.h`；`atomic_cas` → `arch_atomic_cas`；`atomic_write` → `arch_atomic_write`（v1 遗漏 — 只需 atomic，不需 cpu dispatch） |
-| `kernel/futex.c` | 同上（v1 遗漏） |
+| `kernel/futex.c` | `arch/x86_64/cpu.h` → 删除（无用包含 — futex.c 不调用任何 atomic_* 函数；spinlock 通过 wait.h 间接获取）（v1 遗漏） |
 | `kernel/sched/task.c` | spinlock.h → `arch/spinlock.h`；拆分：`__switch_to` → `arch/x86_64/switch.c`，线程入口 asm → `arch/x86_64/thread_entry.S`，`task_init` 的 x86 init → `arch/x86_64/task_arch.c` |
 
 #### test 镜像
@@ -337,8 +338,8 @@ test/include/ 镜像（本次同步迁移）:
 |------|------|
 | `test/include/kernel/file.h` | `arch/x86_64/spinlock.h` → `arch/spinlock.h` |
 | `test/include/kernel/printk.h` | 同上 |
-| `test/include/kernel/interrupt.h` | `arch/x86_64/spinlock.h` → `arch/spinlock.h`；regs.h → `arch/thread.h`；linkage.h 保持 |
-| `test/include/kernel/task.h` | `arch/x86_64/spinlock.h` → `arch/spinlock.h`；`arch/x86_64/cpu.h` → `arch/cpu.h`；regs.h → `arch/thread.h`；linkage.h 保持 |
+| `test/include/kernel/interrupt.h` | `arch/x86_64/regs.h` → `arch/thread.h`；linkage.h 保持（该文件不含 spinlock.h，无需 spinlock 迁移） |
+| `test/include/kernel/task.h` | `arch/x86_64/cpu.h` → `arch/cpu.h`；`arch/x86_64/regs.h` → `arch/thread.h`；linkage.h 保持（该文件不含 spinlock.h，无需 spinlock 迁移） |
 | `test/include/kernel/trace.h` | `arch/x86_64/regs.h` → `arch/thread.h` |
 
 #### 构建系统
