@@ -561,42 +561,8 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
     }
 }
 
+// kernel_thread_func is defined in arch/x86_64/thread_entry.S.
 extern void kernel_thread_func(void);
-__asm__(
-    "kernel_thread_func:\n\t"
-    "   sti             \n\t"  // re-enable IRQs after first context switch
-    "   popq %r15   \n\t"
-    "   popq %r14   \n\t"
-    "   popq %r13   \n\t"
-    "   popq %r12   \n\t"
-    "   popq %r11   \n\t"
-    "   popq %r10   \n\t"
-    "   popq %r9    \n\t"
-    "   popq %r8    \n\t"
-    "   popq %rbx   \n\t"  // fn pointer
-    "   popq %rcx   \n\t"
-    "   popq %rdx   \n\t"  // arg
-    "   popq %rsi   \n\t"
-    "   popq %rdi   \n\t"
-    "   popq %rbp   \n\t"
-    "   popq %rax   \n\t"  // skip DS slot
-    "   popq %rax   \n\t"  // skip ES slot
-    "   popq %rax   \n\t"  // original RAX
-    "   pushq %rax   \n\t" // save RAX temporarily
-    "   movq $0x10, %rax \n\t"
-    "   movq %rax, %ds \n\t"
-    "   movq %rax, %es \n\t"
-    "   movq %rax, %fs \n\t"
-    // GS is NOT reloaded — its base is per-CPU, set via
-    // IA32_GS_BASE MSR.  Loading a selector would clobber
-    // the per-CPU base with the GDT flat descriptor value.
-    "   popq %rax    \n\t" // restore RAX
-    "   addq $0x38, %rsp \n\t"
-    "   movq %rdx, %rdi \n\t"  // arg
-    "   callq *%rbx \n\t"      // call fn(arg)
-    "   movq %rax, %rdi \n\t"
-    "   callq do_exit \n\t"
-);
 
 #define USER_CODE_ADDR   0x400000UL
 
