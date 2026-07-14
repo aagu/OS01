@@ -1,7 +1,7 @@
 #include <kernel/task.h>
 #include <kernel/percpu.h>
 #include <kernel.h>
-#include <kernel/arch/x86_64/gate.h>
+#include <kernel/arch/gate.h>
 #include <kernel/arch/spinlock.h>
 #include <kernel/hang.h>
 #include <kernel/arch/x86_64/regs.h>
@@ -22,52 +22,6 @@
 #include <errno.h>
 #include <uapi/time.h>
 #include <kernel/deferred_free.h>    // deferred_free() for zombie reaping
-
-void __switch_to(task_t *prev, task_t *next)
-{
-    // Use per-CPU TSS — each CPU has its own TSS descriptor
-    // with rsp0 pointing to the current task's kernel stack.
-    percpu_t *cpu = this_cpu();
-    cpu->tss->rsp0 = next->thread->rsp0;
-
-    set_tss64(cpu->tss->rsp0, cpu->tss->rsp1, cpu->tss->rsp2,
-              cpu->tss->ist1, cpu->tss->ist2, cpu->tss->ist3,
-              cpu->tss->ist4, cpu->tss->ist5, cpu->tss->ist6,
-              cpu->tss->ist7);
-
-    // Save/restore FS selector (used by kernel threads).
-    // GS base is per-CPU and set ONCE via MSR — never
-    // touch it here (loading a non-null GS selector would
-    // reload the base from the GDT, clobbering the MSR).
-    __asm__ __volatile__("movq %%fs, %0 \n\t":"=a"(prev->thread->fs));
-    __asm__ __volatile__("movq %0, %%fs \n\t"::"a"(next->thread->fs));
-
-    // Switch page table if the next task has its own address space
-    if (next->thread->cr3 && next->thread->cr3 != prev->thread->cr3) {
-        __asm__ __volatile__("movq %0, %%cr3" :: "r"(next->thread->cr3) : "memory");
-    }
-
-    // Save/restore FPU/SSE state.  The kernel never uses FPU
-    // (-mno-sse -mno-80387), but user programs may.  clts ensures
-    // CR0.TS=0 so fxsave/fxrstor don't #NM.
-    // fpu_save is a raw malloc ptr; align to 16 bytes for FXSAVE.
-    if (prev->fpu_save) {
-        uint64_t area = ((uint64_t)prev->fpu_save + 15) & ~15ULL;
-        __asm__ __volatile__(
-            "clts                \n\t"
-            "fxsave64 (%0)       \n\t"
-            :: "r"(area) : "memory"
-        );
-    }
-    if (next->fpu_save) {
-        uint64_t area = ((uint64_t)next->fpu_save + 15) & ~15ULL;
-        __asm__ __volatile__(
-            "clts                \n\t"
-            "fxrstor64 (%0)      \n\t"
-            :: "r"(area) : "memory"
-        );
-    }
-}
 
 // ── Preemption flag ──────────────────────────────────────
 // Now per-CPU (percpu_t.need_resched, offset 8 from GS base).
