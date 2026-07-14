@@ -1,9 +1,9 @@
-# ── Architecture detection ──────────────────────────────────
-HOSTARCH   := x86_64
-ARCHDIR    := arch/$(HOSTARCH)
+# ── Architecture selection ──────────────────────────────────
+ARCH        ?= x86_64
+ARCHDIR     := arch/$(ARCH)
 # Build directory: all .o .d .elf .bin go here, separate from source
-BUILD_DIR  := ../build/$(HOSTARCH)/kernel
-DEST_DIR   := ..                  # root of the project (for kernel.bin)
+BUILD_DIR   := ../build/$(ARCH)/kernel
+DEST_DIR    := ..                  # root of the project (for kernel.bin)
 
 # ── Load architecture configuration ────────────────────────
 include $(ARCHDIR)/make.config
@@ -13,6 +13,7 @@ CC       ?= clang -target x86_64-unknown-none
 LD       ?= ld.lld -m elf_x86_64
 AR       ?= llvm-ar
 OBJ_CPY  ?= llvm-objcopy
+OBJFORMAT ?= elf64-x86-64
 
 # Kernel headers path (relative to kernel/ CWD)
 KERNEL_HEADERS := include
@@ -161,7 +162,7 @@ $(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o $(ARCH
 	    -T $(ARCHDIR)/$(ARCH_LINKER) $(LIBS)
 
 $(BUILD_DIR)/kernel.bin: $(BUILD_DIR)/kernel.elf
-	$(OBJ_CPY) -I elf64-x86-64 -S -R ".eh_frame" -R ".comment" \
+	$(OBJ_CPY) -I $(OBJFORMAT) -S -R ".eh_frame" -R ".comment" \
 	    -O binary $< $@
 
 # Copy kernel.bin to project root via the "all" target above
