@@ -5,6 +5,17 @@
 
 #ifdef __x86_64__
 
+// Higher-half base address for direct physical memory mapping.
+// All physical RAM is mapped at this offset (256th PML4 entry).
+#define ARCH_PAGE_OFFSET 0xffff800000000000ULL
+
+// Return the current page table base (CR3 on x86_64, TTBR0_EL1 on aarch64).
+static inline uint64_t *arch_get_page_table(void) {
+    uint64_t cr3;
+    __asm__ __volatile__("movq %%cr3, %0" : "=r"(cr3));
+    return (uint64_t *)cr3;
+}
+
 // Reload CR3 to flush entire TLB
 static inline void arch_flush_tlb_all(void) {
     uint64_t cr3;
