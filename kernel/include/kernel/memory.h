@@ -4,9 +4,10 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <kernel/bootinfo.h>
+#include <kernel/arch/mmu.h>
 // #include <kernel/pmm.h>
 
-#define PAGE_OFFSET ((unsigned long)0xffff800000000000)
+#define PAGE_OFFSET ARCH_PAGE_OFFSET
 
 #define PAGE_GDT_SHIFT 39
 
@@ -18,17 +19,9 @@
 
 extern struct Physical_Memory_Manager PMMngr;
 
-inline uint64_t * __attribute__((always_inline)) get_cr3()
-{
-    uint64_t * tmp;
-    __asm__ __volatile__ (
-        "movq   %%cr3,  %0  \n\t"
-        :"=r"(tmp)
-        :
-        :"memory"
-    );
-    return tmp;
-}
+// Backward-compatible alias — returns current page table base.
+// New code should use arch_get_page_table() directly.
+#define get_cr3() arch_get_page_table()
 
 void pmm_init(struct MEMORY_INFO E820_Info);
 // void free_pages(struct Page * page,int32_t number);
