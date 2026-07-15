@@ -57,7 +57,7 @@
 | 模块 | 文件 | 改动性质 | 预估行数 |
 |------|------|----------|----------|
 | 键盘驱动 | `kernel/driver/keyboard.c` | 扩展转义序列表 | ~30 |
-| 键盘头文件 | `kernel/include/kernel/keyboard.h` | 添加 `keyboard_get_tty()` 声明 | ~5 |
+| 键盘头文件 | `kernel/include/driver/keyboard.h` | 添加 `keyboard_get_tty()` 声明 | ~5 |
 | TTY ioctl | `kernel/tty/tty.c` + `kernel/include/kernel/tty.h` | 新增 `tty_ioctl()` | ~50 |
 | ioctl 路由 | `kernel/arch/x86_64/trap.c` | TCSETS/TCSETSW → tty_ioctl | ~40 |
 | libc stub | `libc/unistd/busybox_stubs.c` | tcsetattr/ioctl syscall 转型 | ~10 |
@@ -100,7 +100,7 @@
 
 `translate_and_push` 需要通过 `kbd_tty` 查询当前 `lflag` 来判断模式。
 
-**初始化顺序**: `main.c` 中 `tty_alloc()` 创建 `dev_tty` 后，在 `keyboard_init()` 之前调用 `keyboard_set_tty(dev_tty)`。`keyboard_get_tty()` 仅返回 `kbd_tty` 指针供 `translate_and_push` 读取 lflag，不修改状态。
+**初始化顺序**: `keyboard_init()` 在 `main.c` Phase 5（`subsys_init_all()`）中注册 IRQ1——此时 `kbd_tty` 仍为 NULL，但 `keyboard_handler` 通过 `if (kbd_tty)` 安全检查不会 crash，只是丢弃按键。`tty_alloc()` 创建 `dev_tty` 后，`main.c` Phase 7 调用 `keyboard_set_tty(dev_tty)` 使键盘输入开始流向 TTY。这个顺序无需改动。
 
 **边界情况**:
 - Shift+方向键不发转义序列（已经由 `{K_UP, K_UP}` 保证 shift 和 base 相同）
@@ -118,10 +118,12 @@
 
 ```c
 int tcsetattr(int fd, int a, const struct termios *tio) {
-    return (int)syscall(SYS_ioctl, (uint64_t)fd, (uint64_t)TCSETS,
-                        (uint64_t)a, (uint64_t)tio);
+    (void)a;  // TCSANOW/TCSADRAIN/TCSAFLUSH — kernel ignores for v1
+    return (int)syscall(SYS_ioctl, (uint64_t)fd, (uint64_t)TCSETS, (uint64_t)tio);
 }
 ```
+
+**关键**: x86_64 syscall ABI 只传 3 个参数（rdi, rsi, rdx）。`tio` 作为第 3 个参数放在 `rdx`，内核 `SYS_ioctl` 以 `regs->rdx` 读取 `arg` 指针。`a`（action，如 TCSANOW=0）不传给内核——内核 v1 实现在 `tty_ioctl` 中不区分 TCSETS/TCSETSW/TCSANOW。
 
 `tcgetattr` 同理改为走 ioctl（当前 trap.c 中 `TCGETS` 的硬编码返回值也会改为调用 `tty_ioctl`，见 §2c）。
 
@@ -146,7 +148,7 @@ case TCSETSW: {
 }
 ```
 
-**`get_dev_tty()` 设计**: 当前 `dev_tty` 是 `main.c` 中的全局变量，通过 devfs 注册暴露。改为将 `dev_tty` 的定义和 `get_dev_tty()` 导出都放在 `kernel/tty/tty.c` 中（`static tty_t *dev_tty` + `tty_t *get_dev_tty(void)` 声明在 `tty.h`）。`main.c` 中 `tty_alloc()` 之后调用 `tty_set_dev_tty(tty)` 注册，devfs 的 `dev_tty_read`/`dev_tty_write` 也改为通过 `get_dev_tty()` 获取指针。这意味着 `dev_tty` 不再作为 `main.c` 的全局变量暴露，所有 TTY 引用集中在 `tty.c`。
+**`get_dev_tty()` 设计**: 当前 `dev_tty` 是 `kernel/fs/devfs.c:27` 中的 `static tty_t *dev_tty = NULL`，通过 `devfs_set_tty()` 由 `main.c` 设置。改为将 `dev_tty` 定义和 `get_dev_tty()` 导出都放在 `kernel/tty/tty.c`（`static tty_t *dev_tty` + `tty_t *get_dev_tty(void)` 声明在 `tty.h`，外加 `tty_set_dev_tty(tty_t *)` 供 main.c 注册）。devfs 中 `dev_tty_read`/`dev_tty_write` 也改为通过 `get_dev_tty()` 获取指针。这使所有 TTY 引用集中在 `tty.c`，不再需要 `devfs_set_tty()` 中间层。
 
 同样 `TCGETS` 从硬编码返回值改为调用 `tty_ioctl` 读取实际 TTY 状态。
 
