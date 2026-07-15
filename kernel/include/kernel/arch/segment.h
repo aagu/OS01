@@ -6,11 +6,15 @@
 #define ARCH_KERNEL_DS  0x10
 #define ARCH_USER_CS    0x2B
 #define ARCH_USER_DS    0x33
+#elif defined(__aarch64__)
+
+// aarch64 has no segmentation — all selectors are 0
+#define ARCH_KERNEL_CS 0
+#define ARCH_KERNEL_DS 0
+#define ARCH_USER_CS   0
+#define ARCH_USER_DS   0
 #else
-#define ARCH_KERNEL_CS  0
-#define ARCH_KERNEL_DS  0
-#define ARCH_USER_CS    0
-#define ARCH_USER_DS    0
+#error "Unknown architecture"
 #endif
 
 // Legacy aliases for existing code that uses bare names
