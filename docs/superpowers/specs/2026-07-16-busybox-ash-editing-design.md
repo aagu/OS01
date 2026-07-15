@@ -100,6 +100,8 @@
 
 `translate_and_push` 需要通过 `kbd_tty` 查询当前 `lflag` 来判断模式。
 
+**初始化顺序**: `main.c` 中 `tty_alloc()` 创建 `dev_tty` 后，在 `keyboard_init()` 之前调用 `keyboard_set_tty(dev_tty)`。`keyboard_get_tty()` 仅返回 `kbd_tty` 指针供 `translate_and_push` 读取 lflag，不修改状态。
+
 **边界情况**:
 - Shift+方向键不发转义序列（已经由 `{K_UP, K_UP}` 保证 shift 和 base 相同）
 - Ctrl+方向键不单独处理（与 Linux 行为一致，Ctrl+方向键生成不同序列，v1 不实现）
@@ -137,8 +139,6 @@ case TCSETSW: {
         regs->rax = -EFAULT;
         break;
     }
-    // 通过 tty.c 导出的 get_dev_tty() 获取控制台 tty
-    extern tty_t *get_dev_tty(void);
     tty_t *tty = get_dev_tty();
     if (!tty) { regs->rax = -ENOTTY; break; }
     regs->rax = tty_ioctl(tty, (int)request, tio);
@@ -146,7 +146,7 @@ case TCSETSW: {
 }
 ```
 
-`get_dev_tty()` 是 `kernel/tty/tty.c` 中新增的导出函数（当前 `dev_tty` 全局变量只在 `main.c` 中可见，需要暴露接口或将其移入 tty.c）。
+**`get_dev_tty()` 设计**: 当前 `dev_tty` 是 `main.c` 中的全局变量，通过 devfs 注册暴露。改为将 `dev_tty` 的定义和 `get_dev_tty()` 导出都放在 `kernel/tty/tty.c` 中（`static tty_t *dev_tty` + `tty_t *get_dev_tty(void)` 声明在 `tty.h`）。`main.c` 中 `tty_alloc()` 之后调用 `tty_set_dev_tty(tty)` 注册，devfs 的 `dev_tty_read`/`dev_tty_write` 也改为通过 `get_dev_tty()` 获取指针。这意味着 `dev_tty` 不再作为 `main.c` 的全局变量暴露，所有 TTY 引用集中在 `tty.c`。
 
 同样 `TCGETS` 从硬编码返回值改为调用 `tty_ioctl` 读取实际 TTY 状态。
 
@@ -222,17 +222,16 @@ Bytes → [Normal] ── ESC ──→ [Escaped]
 
 #### 3e. 光标闪烁
 
-**方案**: PIT 回调 + dirty flag（混合懒渲染）。
+**方案**: PIT 回调直接绘制。
 
 1. `console_init()` 中注册 `console_blink_tick()` 到已有的定时器回调链
-2. 每 50 个 tick（500ms @ 100Hz），`console_blink_tick` 设置一个 volatile flag `console_blink_dirty = true`
-3. 下次 `console_putchar()` 被调用时（无论哪个字符），检查 dirty flag：
-   - 若 `console_cursor_visible && !console_cursor_hidden`：反转当前光标格的视频属性（交换前景色/背景色），调用 `putchar_at` 重绘该格
-   - 清除 dirty flag
-4. `ESC [ ?25l` 隐藏光标 → 先擦除当前闪烁块（恢复原始颜色），再设 `console_cursor_hidden = true`
-5. `ESC [ ?25h` 显示光标 → 设 `console_cursor_hidden = false`，设 dirty flag 触发立即绘制
+2. 每 50 个 tick（500ms @ 100Hz），`console_blink_tick` 检查条件：若 `console_cursor_visible && !console_cursor_hidden`，则在当前光标位置调用 `putchar_at` 反转前景色/背景色（实现闪烁）。同时翻转内部 `blink_on` 状态以便下次 Tick 恢复。
+3. `ESC [ ?25l` 隐藏光标 → 若当前 blink_on，先擦除（恢复原始颜色），再设 `console_cursor_hidden = true`
+4. `ESC [ ?25h` 显示光标 → 设 `console_cursor_hidden = false`，设 `blink_on = false`，下次 Tick 自动开始闪烁
 
-**为什么不用纯 PIT IRQ 回调直接画光标**: `putchar_at` 需要遍历 glyph 位图写入显存像素，而显存映射可能不在中断上下文中被安全访问（某些条件下会触发 page fault）。所以用 dirty flag 将实际渲染推迟到 task context（`tty_write` 路径）。
+**为什么可以直接在 PIT IRQ 回调中画光标**: framebuffer 映射是 2MB 内核恒等映射页（`PAGE_KERNEL_Page | PWT | PCD`），从不 swap、永不 fault。`putchar_at` 自己计算像素地址——不碰 `Pos.lock`、不分配内存、不阻塞。与 `Pos` 结构无关，与 `color_printk` 无竞争（光标格和 printk 的 `Pos.XPosition` 通常在不同位置）。唯一共享资源是 framebuffer 像素，写入一个像素格的 uint32_t 是原子操作（x86 对齐写入），不存在撕裂。
+
+**终端空闲时的闪烁**: 用户不按键时无 `console_putchar` 调用，PIT 仍然每 500ms 触发 `console_blink_tick` → 光标持续闪烁。行为完整。
 
 ### 4. 帧缓冲辅助函数
 
