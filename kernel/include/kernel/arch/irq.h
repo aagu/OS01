@@ -38,7 +38,33 @@ void arch_install_intr_gate(uint8_t vector, void *stub, uint8_t ist);
 void arch_irq_install(void);
 
 #elif defined(__aarch64__)
-#error "aarch64 irq.h not yet implemented"
+
+// DAIF: bit 7=Debug, bit 6=SError, bit 2=IRQ, bit 1=FIQ
+// daifclr clears bits → enables IRQs; daifset sets bits → disables IRQs
+#define DAIF_IRQ_BIT  (1UL << 2)
+
+static inline void arch_local_irq_enable(void)
+{
+    __asm__ __volatile__("msr daifclr, %0" :: "i"(DAIF_IRQ_BIT) : "memory");
+}
+
+static inline void arch_local_irq_disable(void)
+{
+    __asm__ __volatile__("msr daifset, %0" :: "i"(DAIF_IRQ_BIT) : "memory");
+}
+
+static inline arch_irq_state_t arch_local_irq_save(void)
+{
+    uint64_t daif;
+    __asm__ __volatile__("mrs %0, daif" : "=r"(daif));
+    arch_local_irq_disable();
+    return daif;
+}
+
+static inline void arch_local_irq_restore(arch_irq_state_t state)
+{
+    __asm__ __volatile__("msr daif, %0" :: "r"(state) : "memory");
+}
 #else
 #error "Unsupported architecture"
 #endif
