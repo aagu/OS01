@@ -3,8 +3,8 @@
 
 #include <list.h>
 #include <stdint.h>
-#include <kernel/arch/x86_64/cpu.h>
-#include <kernel/arch/x86_64/regs.h>
+#include <kernel/arch/cpu.h>
+#include <kernel/arch/thread.h>
 #include <kernel/arch/x86_64/linkage.h>
 #include <kernel/file.h>
 

@@ -1,7 +1,7 @@
 #ifndef _KERNEL_TRACE_H
 #define _KERNEL_TRACE_H
 
-#include <kernel/arch/x86_64/regs.h>
+#include <kernel/arch/thread.h>
 
 #define KERNEL_TRACE_DEPTH 4
 
