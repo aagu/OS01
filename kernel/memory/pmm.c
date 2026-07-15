@@ -5,7 +5,7 @@
 #include <kernel/printk.h>
 #include <kernel/debug.h>
 #include <kernel/slab.h>
-#include <kernel/arch/x86_64/spinlock.h>
+#include <kernel/arch/spinlock.h>
 #include <kernel.h>
 #include <list.h>
 #include <string.h>

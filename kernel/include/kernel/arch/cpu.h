@@ -37,7 +37,49 @@ static inline void arch_set_percpu_base(void *ptr) {
 }
 
 #elif defined(__aarch64__)
-#error "aarch64 cpu.h not yet implemented"
+
+#include <stdint.h>
+
+#ifndef NR_CPUS
+#define NR_CPUS 8
+#endif
+
+static inline void arch_cpu_halt(void)
+{
+    __asm__ __volatile__("wfi" ::: "memory");
+}
+
+static inline void arch_cpu_pause(void)
+{
+    __asm__ __volatile__("yield" ::: "memory");
+}
+
+static inline void arch_nop(void)
+{
+    __asm__ __volatile__("nop");
+}
+
+static inline uint64_t arch_cycle_counter(void)
+{
+    uint64_t val;
+    __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(val));
+    return val;
+}
+
+// Enable No-eXecute: set SCTLR_EL1.WXN (bit 19)
+static inline void arch_cpu_enable_nx(void)
+{
+    uint64_t sctlr;
+    __asm__ __volatile__("mrs %0, sctlr_el1" : "=r"(sctlr));
+    sctlr |= (1UL << 19);
+    __asm__ __volatile__("msr sctlr_el1, %0" :: "r"(sctlr) : "memory");
+}
+
+// Set per-CPU data base pointer (TPIDR_EL1 on aarch64)
+static inline void arch_set_percpu_base(void *ptr)
+{
+    __asm__ __volatile__("msr tpidr_el1, %0" :: "r"((uint64_t)ptr) : "memory");
+}
 #else
 #error "Unsupported architecture"
 #endif

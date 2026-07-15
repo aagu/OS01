@@ -8,7 +8,7 @@
 #include <kernel/tty.h>
 #include <kernel/arch/io.h>
 #include <kernel/arch/cpu.h>
-#include <kernel/arch/x86_64/spinlock.h>
+#include <kernel/arch/spinlock.h>
 #include <fs/vfs.h>
 
 hw_int_controller_t keyboard_controller =

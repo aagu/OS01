@@ -1,11 +1,9 @@
 #include <kernel/task.h>
 #include <kernel/percpu.h>
 #include <kernel.h>
-#include <kernel/arch/x86_64/gate.h>
-#include <kernel/arch/x86_64/spinlock.h>
+#include <kernel/arch/gate.h>
+#include <kernel/arch/spinlock.h>
 #include <kernel/hang.h>
-#include <kernel/arch/x86_64/regs.h>
-#include <kernel/arch/x86_64/linkage.h>
 #include <kernel/debug.h>
 #include <kernel/log.h>
 #include <kernel/memory.h>
@@ -22,52 +20,6 @@
 #include <errno.h>
 #include <uapi/time.h>
 #include <kernel/deferred_free.h>    // deferred_free() for zombie reaping
-
-void __switch_to(task_t *prev, task_t *next)
-{
-    // Use per-CPU TSS — each CPU has its own TSS descriptor
-    // with rsp0 pointing to the current task's kernel stack.
-    percpu_t *cpu = this_cpu();
-    cpu->tss->rsp0 = next->thread->rsp0;
-
-    set_tss64(cpu->tss->rsp0, cpu->tss->rsp1, cpu->tss->rsp2,
-              cpu->tss->ist1, cpu->tss->ist2, cpu->tss->ist3,
-              cpu->tss->ist4, cpu->tss->ist5, cpu->tss->ist6,
-              cpu->tss->ist7);
-
-    // Save/restore FS selector (used by kernel threads).
-    // GS base is per-CPU and set ONCE via MSR — never
-    // touch it here (loading a non-null GS selector would
-    // reload the base from the GDT, clobbering the MSR).
-    __asm__ __volatile__("movq %%fs, %0 \n\t":"=a"(prev->thread->fs));
-    __asm__ __volatile__("movq %0, %%fs \n\t"::"a"(next->thread->fs));
-
-    // Switch page table if the next task has its own address space
-    if (next->thread->cr3 && next->thread->cr3 != prev->thread->cr3) {
-        __asm__ __volatile__("movq %0, %%cr3" :: "r"(next->thread->cr3) : "memory");
-    }
-
-    // Save/restore FPU/SSE state.  The kernel never uses FPU
-    // (-mno-sse -mno-80387), but user programs may.  clts ensures
-    // CR0.TS=0 so fxsave/fxrstor don't #NM.
-    // fpu_save is a raw malloc ptr; align to 16 bytes for FXSAVE.
-    if (prev->fpu_save) {
-        uint64_t area = ((uint64_t)prev->fpu_save + 15) & ~15ULL;
-        __asm__ __volatile__(
-            "clts                \n\t"
-            "fxsave64 (%0)       \n\t"
-            :: "r"(area) : "memory"
-        );
-    }
-    if (next->fpu_save) {
-        uint64_t area = ((uint64_t)next->fpu_save + 15) & ~15ULL;
-        __asm__ __volatile__(
-            "clts                \n\t"
-            "fxrstor64 (%0)      \n\t"
-            :: "r"(area) : "memory"
-        );
-    }
-}
 
 // ── Preemption flag ──────────────────────────────────────
 // Now per-CPU (percpu_t.need_resched, offset 8 from GS base).
@@ -607,42 +559,8 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
     }
 }
 
+// kernel_thread_func is defined in arch/x86_64/thread_entry.S.
 extern void kernel_thread_func(void);
-__asm__(
-    "kernel_thread_func:\n\t"
-    "   sti             \n\t"  // re-enable IRQs after first context switch
-    "   popq %r15   \n\t"
-    "   popq %r14   \n\t"
-    "   popq %r13   \n\t"
-    "   popq %r12   \n\t"
-    "   popq %r11   \n\t"
-    "   popq %r10   \n\t"
-    "   popq %r9    \n\t"
-    "   popq %r8    \n\t"
-    "   popq %rbx   \n\t"  // fn pointer
-    "   popq %rcx   \n\t"
-    "   popq %rdx   \n\t"  // arg
-    "   popq %rsi   \n\t"
-    "   popq %rdi   \n\t"
-    "   popq %rbp   \n\t"
-    "   popq %rax   \n\t"  // skip DS slot
-    "   popq %rax   \n\t"  // skip ES slot
-    "   popq %rax   \n\t"  // original RAX
-    "   pushq %rax   \n\t" // save RAX temporarily
-    "   movq $0x10, %rax \n\t"
-    "   movq %rax, %ds \n\t"
-    "   movq %rax, %es \n\t"
-    "   movq %rax, %fs \n\t"
-    // GS is NOT reloaded — its base is per-CPU, set via
-    // IA32_GS_BASE MSR.  Loading a selector would clobber
-    // the per-CPU base with the GDT flat descriptor value.
-    "   popq %rax    \n\t" // restore RAX
-    "   addq $0x38, %rsp \n\t"
-    "   movq %rdx, %rdi \n\t"  // arg
-    "   callq *%rbx \n\t"      // call fn(arg)
-    "   movq %rax, %rdi \n\t"
-    "   callq do_exit \n\t"
-);
 
 #define USER_CODE_ADDR   0x400000UL
 
@@ -1349,8 +1267,7 @@ struct task_struct *create_kthread(uint64_t (*fn)(uint64_t), uint64_t arg,
 void task_init()
 {
 
-    init_mm.pml4 = get_cr3();
-    init_thread.cr3 = (uint64_t)init_mm.pml4;
+    arch_task_init_platform();
 
     init_mm.start_code = PMMngr.start_code;
     init_mm.end_code = PMMngr.end_code;
@@ -1365,12 +1282,6 @@ void task_init()
     list_init(&init_mm.vma_list);
     init_mm.mmap_base = 0;
 
-    set_tss64(init_thread.rsp0, init_tss[0].rsp1, init_tss[0].rsp2,
-              init_tss[0].ist1, init_tss[0].ist2, init_tss[0].ist3,
-              init_tss[0].ist4, init_tss[0].ist5, init_tss[0].ist6,
-              init_tss[0].ist7);
-
-    init_tss[0].rsp0 = init_thread.rsp0;
     list_init(&init_task_union.task.list);
 
     // BSP idle task pointer (for the multicore scheduler).

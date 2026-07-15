@@ -3,7 +3,7 @@
 
 #include <list.h>
 #include <kernel/task.h>
-#include <kernel/arch/x86_64/spinlock.h>
+#include <kernel/arch/spinlock.h>
 
 // ── Generic wait queue ───────────────────────────────────────
 // Pattern extracted from tty_read's ad-hoc read_wait list.
