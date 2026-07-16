@@ -10,6 +10,7 @@
 #include <kernel/task.h>
 #include <kernel/percpu.h>
 #include <driver/serial.h>
+#include <kernel/console.h>
 
 hw_int_controller_t pit_controller =
 {
@@ -34,6 +35,9 @@ void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attri
     // solely to prevent a complete hang if IOAPIC routing
     // or UART IRQ generation ever fails on real hardware.
     serial_poll();
+
+    // Drive terminal cursor blink — safe in IRQ context
+    console_blink_tick();
 
     if ((container_of(list_next(&timer_list_head.list), timer_t, list)->expire_jiffies <= jiffies))
         set_softirq_status(TIMER_SIRQ);

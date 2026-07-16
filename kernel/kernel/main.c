@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <kernel/subsys.h>
 #include <kernel/arch/subsys.h>
+#include <kernel/console.h>
 
 // ── Stack canary ─────────────────────────────────────────────
 #include <kernel/arch/x86_64/cpu.h>   // rdtsc(), cpu_id()
@@ -218,14 +219,18 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     procfs_init();                  // /proc
 
     // ═══ 7. Console TTY ═════════════════════════════════════
-    // tty_alloc(NULL, NULL) uses default output → fb + serial dual-write.
-    tty_t *console = tty_alloc(NULL, NULL);
+    // console_putchar as output — routes all user-space writes
+    // through the VT100 CSI terminal emulator.
+    tty_t *console = tty_alloc(console_putchar, NULL);
     if (console) {
         serial_set_tty(console);         // serial IRQ → TTY
         keyboard_set_tty(console);       // keyboard IRQ → TTY
-        tty_set_dev_tty(console);          // /dev/tty read/write → TTY
+        tty_set_dev_tty(console);        // /dev/tty read/write → TTY
         serial_printk("tty: console TTY created\n");
     }
+
+    // Initialize the software terminal (cursor, VT100 state)
+    console_init();
 
     vfs_debug_list("/dev");
 
