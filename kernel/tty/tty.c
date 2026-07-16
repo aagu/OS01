@@ -296,3 +296,18 @@ int tty_write(tty_t *tty, const char *buf, int size)
         tty->output_char(buf[i]);
     return size;
 }
+
+// ── Console TTY singleton ────────────────────────
+// Set by main.c during init, consumed by dev_tty_read/write and trap.c ioctl.
+
+static tty_t *dev_tty = NULL;
+
+void tty_set_dev_tty(tty_t *tty)
+{
+    dev_tty = tty;
+}
+
+tty_t *get_dev_tty(void)
+{
+    return dev_tty;
+}

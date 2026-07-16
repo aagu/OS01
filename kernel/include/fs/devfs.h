@@ -20,7 +20,4 @@ int devfs_register_blkdev(const char *name, struct block_device *dev);
 // Initialize devfs and mount at /dev
 void devfs_init(void);
 
-// Set the console TTY that /dev/tty reads from / writes to.
-void devfs_set_tty(tty_t *tty);
-
 #endif

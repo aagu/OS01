@@ -65,4 +65,8 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock);
 // output_char and echo_char callbacks.
 int tty_write(tty_t *tty, const char *buf, int size);
 
+// Set and get the console TTY singleton — used by devfs, ioctl, and main.c.
+void tty_set_dev_tty(tty_t *tty);
+tty_t *get_dev_tty(void);
+
 #endif

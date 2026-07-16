@@ -23,13 +23,7 @@ typedef struct devfs_device {
 static devfs_device_t devices[DEVFS_MAX_DEVICES];
 static int device_count = 0;
 
-// The console TTY — set by devfs_set_tty() during init.
-static tty_t *dev_tty = NULL;
-
-void devfs_set_tty(tty_t *tty)
-{
-    dev_tty = tty;
-}
+// The console TTY — obtained via get_dev_tty() from tty.c.
 
 // ── Built-in device handlers ───────────────────────────────
 
@@ -59,15 +53,17 @@ static int zero_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buf
 static int dev_tty_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 {
     (void)node; (void)offset;
-    if (!dev_tty || !buffer || size == 0) return 0;
-    return tty_read(dev_tty, (char *)buffer, (int)size, false);
+    tty_t *tty = get_dev_tty();
+    if (!tty || !buffer || size == 0) return 0;
+    return tty_read(tty, (char *)buffer, (int)size, false);
 }
 
 static int dev_tty_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 {
     (void)node; (void)offset;
-    if (!dev_tty || !buffer || size == 0) return 0;
-    return tty_write(dev_tty, (const char *)buffer, (int)size);
+    tty_t *tty = get_dev_tty();
+    if (!tty || !buffer || size == 0) return 0;
+    return tty_write(tty, (const char *)buffer, (int)size);
 }
 
 // ── /dev/serial — read/write the COM1 serial port ─────────

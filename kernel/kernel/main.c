@@ -223,7 +223,7 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     if (console) {
         serial_set_tty(console);         // serial IRQ → TTY
         keyboard_set_tty(console);       // keyboard IRQ → TTY
-        devfs_set_tty(console);          // /dev/tty read/write → TTY
+        tty_set_dev_tty(console);          // /dev/tty read/write → TTY
         serial_printk("tty: console TTY created\n");
     }
 
