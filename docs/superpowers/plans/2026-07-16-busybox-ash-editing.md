@@ -328,24 +328,7 @@ int tty_ioctl(tty_t *tty, int cmd, void *arg)
 }
 ```
 
-注意：需要 `#include <termios.h>` 在 tty.c 顶部（`ICANON`/`ECHO`/`ISIG` 等宏定义在 libc 的 termios.h 中，而 tty.c 的内核宏是 `TTY_L_ICANON` 等）。
-
-实际上内核 tty.c 不直接 include 用户态 termios.h。为了避免命名冲突，在 tty_ioctl 中直接用数值常量：
-
-```c
-// POSIX c_lflag bits (from termios.h, duplicated to avoid userspace include)
-#define K_ICANON  0000002
-#define K_ECHO    0000010
-#define K_ISIG    0000001
-
-// ioctl cmd values must match libc termios.h
-#define K_TCGETS  0x5401
-#define K_TCSETS  0x5402
-#define K_TCSETSW 0x5403
-#define K_TCSETSF 0x5404
-```
-
-然后将函数中的 `ICANON`/`ECHO`/`ISIG` 替换为 `K_ICANON`/`K_ECHO`/`K_ISIG`，将 `TCGETS`/`TCSETS`/`TCSETSW`/`TCSETSF` 替换为 `K_TCGETS` 等。
+**头文件**: 在 `kernel/tty/tty.c` 顶部已有 include 区中新增 `#include <termios.h>`。`ICANON`/`ECHO`/`ISIG` 等宏在 `libc/include/termios.h` 中定义，`trap.c:24` 已经这样用且正常工作。内核 `TTY_L_ICANON` 等宏（`tty.h` 中的 `1<<0` 格式）与 POSIX 的 `ICANON`（`0000002` 格式）数值完全不同，没有命名冲突。
 
 - [ ] **Step 3: 编译验证**
 
@@ -426,9 +409,13 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
         }
 ```
 
-- [ ] **Step 3: 确认 trap.c 顶部包含了必要的头文件**
+- [ ] **Step 3: 添加缺失的 include**
 
-检查 trap.c 中已有 `#include <kernel/tty.h>` 或类似 include。若没有，需要新增。同时需要 `#include <termios.h>` 使 `struct termios` 可见。
+`trap.c` 当前不包含 `<kernel/tty.h>`——但 `get_dev_tty()` 和 `tty_t` 类型都需要它。在 `trap.c` 顶部 include 区（`#include <termios.h>` 附近）新增：
+
+```c
+#include <kernel/tty.h>
+```
 
 - [ ] **Step 4: 编译验证**
 
@@ -953,9 +940,11 @@ static void push_vt100_seq(tty_t *tty, char seq)
 }
 ```
 
-然后将 `translate_and_push` 中 "Look up ASCII" 部分（150-163 行）的返回值处理逻辑改为：
+然后修改 `translate_and_push` 的变量类型和逻辑顺序：
 
-在 line 163 `if (c == 0) return;` 之后、Ctrl modifier 处理之前（line 165 之前），插入以下代码来处理特殊键码：
+**关键修改 1**：将 `char c = 0;`（line 153）改为 `int c = 0;`。否则 `K_UP = 0x100` 赋值给 `char` 被截断为 `0`，后面 `if (c == 0) return;` 会把特殊键码直接丢弃。
+
+**关键修改 2**：在 `if (c == 0) return;`（line 163）之后、Ctrl modifier 处理之前（line 165 之前），插入以下代码：
 
 ```c
     // ── Expand VT100 escape sequences for navigation keys ──
@@ -976,7 +965,7 @@ static void push_vt100_seq(tty_t *tty, char seq)
     }
 ```
 
-注意：使用 `kbd_tty->lflag & TTY_L_ICANON` 或直接用数值 `0x01`（tty.h 中 `TTY_L_ICANON = 1<<0`）。
+**为什么不放在 Ctrl modifier 之后**：`c >= 0x100` 的高位不匹配任何 Ctrl 映射规则，但 `kbd_ctrl()` 分支里有 `if (c == 0) return;`（line 184），若 `K_UP` 先经过了奇怪的 Ctrl 转换可能变成其他值。放在 Ctrl 之前保证直接命中退出。
 
 - [ ] **Step 4: 新增 keyboard_get_tty() 并导出**
 
@@ -1229,21 +1218,23 @@ git log --oneline -10
 ## 依赖关系
 
 ```
-Task 1 (putchar_at)
+Task 1 (putchar_at)     ← 完全独立，可首个执行
   ↓
-Task 2 (dev_tty refactor) ──→ Task 3 (tty_ioctl) ──→ Task 4 (trap ioctl)
-                                                          ↓
-                           Task 6 (console.c) ←──────────┘
-                              ↓
-Task 5 (libc stub) ──────────┘
-                              ↓
-                         Task 7 (keyboard kbd_key)
-                              ↓
-                         Task 8 (main.c wire-up)
-                              ↓
-                         Task 9 (busybox config)
-                              ↓
-                         Task 10 (build + test)
+Task 2 (dev_tty refactor)  ← 改 tty.c + tty.h
+  ↓                          ┐
+Task 3 (tty_ioctl)          │ 顺序执行：共享 tty.c/tty.h
+  ↓                          ┘
+Task 4 (trap ioctl)    ← 依赖 Task 2(get_dev_tty) + Task 3(tty_ioctl)
+  ↓
+Task 5 (libc stub)     ← 独立，可与 Task 3-4 并行
+  ↓
+Task 6 (console.c)     ← 依赖 Task 1(putchar_at)
+  ↓
+Task 7 (keyboard kbd_key) ← 独立，读 kbd_tty->lflag（已有代码保证非 NULL 时有意义）
+  ↓
+Task 8 (main.c wire-up)   ← 依赖 Tasks 2,3,6,7
+  ↓
+Task 9 (busybox config)   ← 独立（纯 .config edit）
+  ↓
+Task 10 (build + test)    ← 依赖所有
 ```
-
-Tasks 1-5 相互独立，可并行。Task 6 依赖 Tasks 1 和 3。Task 7 独立。Task 8 依赖 Tasks 2, 3, 6, 7。Task 9 独立（纯 config）。
