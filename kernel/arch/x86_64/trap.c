@@ -22,6 +22,7 @@
 #include <string.h>
 typedef int pid_t;
 #include <termios.h>
+#include <kernel/tty.h>
 #include <stdlib.h>
 #include <fs/vfs.h>
 #include <kernel/debug.h>
@@ -1483,44 +1484,29 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             break;
         }
         case TCGETS: {
-            // tcgetattr — return default termios (canonical + echo)
             struct termios *tio = (struct termios *)arg;
             if ((uint64_t)tio >= current->addr_limit) {
                 regs->rax = -EFAULT;
                 break;
             }
-            tio->c_iflag = ICRNL | IXON | BRKINT;
-            tio->c_oflag = OPOST | ONLCR;
-            tio->c_cflag = CS8 | CREAD | CLOCAL;
-            tio->c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL;
-            tio->c_line = 0;
-            tio->c_cc[VINTR]    = 0x03;
-            tio->c_cc[VQUIT]    = 0x1c;
-            tio->c_cc[VERASE]   = 0x7f;
-            tio->c_cc[VKILL]    = 0x15;
-            tio->c_cc[VEOF]     = 0x04;
-            tio->c_cc[VTIME]    = 0;
-            tio->c_cc[VMIN]     = 1;
-            tio->c_cc[VSTART]   = 0x11;
-            tio->c_cc[VSTOP]    = 0x13;
-            tio->c_cc[VSUSP]    = 0x1a;
-            tio->c_cc[VEOL]     = 0;
-            tio->c_cc[VREPRINT] = 0x12;
-            tio->c_cc[VDISCARD] = 0x0f;
-            tio->c_cc[VWERASE]  = 0x17;
-            tio->c_cc[VLNEXT]   = 0x16;
-            tio->c_cc[VEOL2]    = 0;
-            tio->__c_ispeed = 38400;
-            tio->__c_ospeed = 38400;
-            regs->rax = 0;
+            tty_t *tty = get_dev_tty();
+            if (!tty) { regs->rax = -ENOTTY; break; }
+            regs->rax = tty_ioctl(tty, (int)request, tio);
             break;
         }
         case TCSETS:
         case TCSETSW:
-        case TCSETSF:
-            // tcsetattr — no-op
-            regs->rax = 0;
+        case TCSETSF: {
+            struct termios *tio = (struct termios *)arg;
+            if ((uint64_t)tio >= current->addr_limit) {
+                regs->rax = -EFAULT;
+                break;
+            }
+            tty_t *tty = get_dev_tty();
+            if (!tty) { regs->rax = -ENOTTY; break; }
+            regs->rax = tty_ioctl(tty, (int)request, tio);
             break;
+        }
         case TIOCGPGRP: {
             regs->rax = (int64_t)current->pid;
             break;
