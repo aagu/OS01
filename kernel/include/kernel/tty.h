@@ -5,6 +5,8 @@
 #include <stdbool.h>
 #include <list.h>
 #include <kernel/arch/spinlock.h>
+typedef int pid_t;  /* for termios.h userspace declarations */
+#include <termios.h>
 
 #define TTY_BUF_SIZE  256
 
@@ -68,5 +70,9 @@ int tty_write(tty_t *tty, const char *buf, int size);
 // Set and get the console TTY singleton — used by devfs, ioctl, and main.c.
 void tty_set_dev_tty(tty_t *tty);
 tty_t *get_dev_tty(void);
+
+// TTY ioctl — handles TCGETS/TCSETS/TCSETSW for line discipline control.
+// Returns 0 on success or -errno on failure.
+int tty_ioctl(tty_t *tty, int cmd, void *arg);
 
 #endif

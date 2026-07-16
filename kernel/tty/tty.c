@@ -10,6 +10,8 @@
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
+#include <termios.h>
+#include <uapi/stat.h>
 
 // ═══════════════════════════════════════════════════════
 //  Internal helpers
@@ -295,6 +297,69 @@ int tty_write(tty_t *tty, const char *buf, int size)
     for (int i = 0; i < size; i++)
         tty->output_char(buf[i]);
     return size;
+}
+
+// ── ioctl — line discipline control ─────────────
+// Maps between kernel lflag bits and POSIX termios flags.
+// Only ICANON and ECHO are live; ISIG is mandatory.
+
+int tty_ioctl(tty_t *tty, int cmd, void *arg)
+{
+    if (!tty || !arg)
+        return -EINVAL;
+
+    struct termios *tio = (struct termios *)arg;
+
+    switch (cmd) {
+    case TCGETS: {
+        // Read current line discipline into termios
+        tio->c_iflag = ICRNL | IXON | BRKINT;
+        tio->c_oflag = OPOST | ONLCR;
+        tio->c_cflag = CS8 | CREAD | CLOCAL;
+        tio->c_lflag = ISIG;  // ISIG is always on
+        if (tty->lflag & TTY_L_ICANON) tio->c_lflag |= ICANON;
+        if (tty->lflag & TTY_L_ECHO)   tio->c_lflag |= ECHO;
+        tio->c_lflag |= ECHOE | ECHOK | ECHOCTL;
+        tio->c_line = 0;
+        tio->c_cc[VINTR]    = 0x03;
+        tio->c_cc[VQUIT]    = 0x1c;
+        tio->c_cc[VERASE]   = 0x7f;
+        tio->c_cc[VKILL]    = 0x15;
+        tio->c_cc[VEOF]     = 0x04;
+        tio->c_cc[VTIME]    = 0;
+        tio->c_cc[VMIN]     = 1;
+        tio->c_cc[VSTART]   = 0x11;
+        tio->c_cc[VSTOP]    = 0x13;
+        tio->c_cc[VSUSP]    = 0x1a;
+        tio->c_cc[VEOL]     = 0;
+        tio->c_cc[VREPRINT] = 0x12;
+        tio->c_cc[VDISCARD] = 0x0f;
+        tio->c_cc[VWERASE]  = 0x17;
+        tio->c_cc[VLNEXT]   = 0x16;
+        tio->c_cc[VEOL2]    = 0;
+        tio->__c_ispeed = 38400;
+        tio->__c_ospeed = 38400;
+        return 0;
+    }
+
+    case TCSETS:
+    case TCSETSW:
+    case TCSETSF: {
+        // Write: apply ICANON and ECHO; ISIG is force-enabled
+        tty->lflag = TTY_L_ISIG;
+        if (tio->c_lflag & ICANON) tty->lflag |= TTY_L_ICANON;
+        if (tio->c_lflag & ECHO)   tty->lflag |= TTY_L_ECHO;
+
+        // Reset canonical line buffer when mode changes
+        tty->line_len = 0;
+        tty->read_pos = 0;
+        tty->line_ready = false;
+        return 0;
+    }
+
+    default:
+        return -ENOTTY;
+    }
 }
 
 // ── Console TTY singleton ────────────────────────
