@@ -44,6 +44,12 @@ typedef struct position
 extern position Pos;
 
 void putchark(unsigned int FRcolor,unsigned int BKcolor,unsigned char font);
+// Write a character to a specific character-cell position on the
+// framebuffer.  (col, row) are in character cells; pixel address
+// is computed from font->width/height and Pos.FB_addr.
+// Does NOT touch Pos.XPosition/YPosition or Pos.lock.
+void putchar_at(int col, int row, unsigned int FRcolor, unsigned int BKcolor,
+                unsigned char c);
 int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...);
 void frame_buffer_init();
 void frame_buffer_early_init();

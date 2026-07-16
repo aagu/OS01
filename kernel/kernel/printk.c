@@ -53,6 +53,41 @@ void putchark(unsigned int FRcolor,unsigned int BKcolor,unsigned char c)
 	}
 }
 
+void putchar_at(int col, int row, unsigned int FRcolor, unsigned int BKcolor,
+                unsigned char c)
+{
+    int i = 0, j = 0;
+    uint32_t *addr = NULL;
+    int testval = 0;
+    unsigned char *glyph = (unsigned char*)&_binary_kernel_font_psf_start
+        + font->headersize
+        + (c > 0 && c < font->numglyph ? c : 0) * font->bytesperglyph;
+
+    int pixel_row_start = row * (int)font->height;
+    int pixel_col_start = col * (int)font->width;
+    int max_rows = (int)(Pos.YResolution / font->height);
+    int max_cols = (int)(Pos.XResolution / font->width);
+
+    // Clamp to framebuffer bounds
+    if (row < 0 || row >= max_rows) return;
+    if (col < 0 || col >= max_cols) return;
+
+    for (i = 0; i < (int)font->height; i++) {
+        addr = Pos.FB_addr + Pos.XResolution * (pixel_row_start + i)
+               + pixel_col_start;
+        testval = 0x100;
+        for (j = 0; j < (int)font->width; j++) {
+            testval = testval >> 1;
+            if (*glyph & testval)
+                *addr = FRcolor;
+            else
+                *addr = BKcolor;
+            addr++;
+        }
+        glyph++;
+    }
+}
+
 int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
 {
 	int i = 0;
