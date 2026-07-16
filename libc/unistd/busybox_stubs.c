@@ -12,6 +12,7 @@
 #include <time.h>
 #include <stdint.h>
 #include <termios.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 
 extern char **environ;
@@ -63,7 +64,10 @@ struct group *getgrgid(gid_t gid) { (void)gid; return NULL; }
 
 /* ── Termios stubs needed by ash ── */
 int tcgetattr(int fd, struct termios *tio) { (void)fd; (void)tio; return 0; }
-int tcsetattr(int fd, int a, const struct termios *tio) { (void)fd; (void)a; (void)tio; return 0; }
+int tcsetattr(int fd, int a, const struct termios *tio) {
+    (void)a;
+    return (int)syscall(SYS_ioctl, (uint64_t)fd, (uint64_t)TCSETS, (uint64_t)tio);
+}
 int tcflow(int fd, int action) { (void)fd; (void)action; return 0; }
 int tcflush(int fd, int q) { (void)fd; (void)q; return 0; }
 speed_t cfgetispeed(const struct termios *tio) { (void)tio; return B9600; }
