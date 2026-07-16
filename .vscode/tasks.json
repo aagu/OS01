@@ -8,7 +8,7 @@
             "type": "shell",
             "isBackground": true,
             "linux": {
-                "command": "DEBUG=1 make debug DEBUG_CHANNELS=sched,tty,vfs,mm,fs,net,ipc,drivers,init,syscall"
+                "command": "DEBUG=1 make debug DEBUG_CHANNELS=sched,tty,vfs,mm,fs,net,ipc,drivers,init,syscall OS01_SELFTEST=1"
             },
             "problemMatcher": {
                 "owner": "cpp",

@@ -14,7 +14,7 @@
 - New header in `kernel/include/kernel/`
 - Add `BLOCKER_DEFERRED_FREE = 2` to `kernel/include/kernel/task.h`
 - Modify `schedule()` Pass 3 + `task_init()` in `kernel/sched/task.c`
-- Selftest uses existing `#ifdef OS01_SELFTEST` + `selftest_register()` pattern
+- Selftest uses `test_kernel_mutex` pattern: `#ifdef OS01_SELFTEST` block in `task_init()` after `scheduler_ok = 1`, called directly (not via `selftest_register()` — the scheduler must be active)
 - Build and test with `make KERNEL_SELFTEST=1`
 
 ---
