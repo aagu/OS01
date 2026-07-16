@@ -23,6 +23,7 @@ int clearerr(void *f) { (void)f; }
 int fileno_unlocked(FILE *f) { (void)f; return 0; }
 void *fopen(const char *path, const char *mode) { (void)path; (void)mode; return NULL; }
 int fclose(void *f) { (void)f; return 0; }
+char *fgets_unlocked(char *s, int n, void *f) { (void)s; (void)n; (void)f; return NULL; }
 
 /* ── Poll ── */
 int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
