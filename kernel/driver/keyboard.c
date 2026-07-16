@@ -62,9 +62,19 @@ static bool kbd_caps_lock;
 static inline bool kbd_shift(void) { return kbd_lshift || kbd_rshift; }
 static inline bool kbd_ctrl(void)  { return kbd_lctrl  || kbd_rctrl;  }
 
+// Special key codes (> 0xFF, to avoid collision with ASCII).
+// These are expanded to multi-byte VT100 escape sequences in
+// translate_and_push when the TTY is in raw mode.
+#define K_UP    0x100
+#define K_DOWN  0x101
+#define K_LEFT  0x102
+#define K_RIGHT 0x103
+#define K_HOME  0x104
+#define K_END   0x105
+
 struct kbd_key {
-    char base;
-    char shift;
+    int base;
+    int shift;
 };
 
 static const struct kbd_key scancode_tbl[128] = {
@@ -99,12 +109,18 @@ static const struct kbd_key scancode_tbl[128] = {
 };
 
 static const struct kbd_key ext_scancode_tbl[128] = {
-    [0x1C] = { '\n', '\n' },     [0x35] = { '/', '/' },
-    [0x47] = { 0, 0 },           [0x48] = { 0, 0 },
-    [0x49] = { 0, 0 },           [0x4B] = { 0, 0 },
-    [0x4D] = { 0, 0 },           [0x4F] = { 0, 0 },
-    [0x50] = { 0, 0 },           [0x51] = { 0, 0 },
-    [0x52] = { 0, 0 },           [0x53] = { '\x7f', '\x7f' },
+    [0x1C] = { '\n', '\n' },         // KP Enter
+    [0x35] = { '/',  '/'  },         // KP /
+    [0x47] = { K_HOME,  K_HOME  },   // E0 47 = Home
+    [0x48] = { K_UP,    K_UP    },   // E0 48 = UP
+    [0x49] = { K_UP,    K_UP    },   // E0 49 = Page Up (as UP for v1)
+    [0x4B] = { K_LEFT,  K_LEFT  },   // E0 4B = LEFT
+    [0x4D] = { K_RIGHT, K_RIGHT },   // E0 4D = RIGHT
+    [0x4F] = { K_END,   K_END   },   // E0 4F = End
+    [0x50] = { K_DOWN,  K_DOWN  },   // E0 50 = DOWN
+    [0x51] = { K_DOWN,  K_DOWN  },   // E0 51 = Page Down (as DOWN for v1)
+    [0x52] = { K_HOME,  K_HOME  },   // E0 52 = Insert (as Home for v1)
+    [0x53] = { '\x7f', '\x7f' },     // E0 53 = Delete
 };
 
 // ═══════════════════════════════════════════════════════════
@@ -113,6 +129,15 @@ static const struct kbd_key ext_scancode_tbl[128] = {
 
 // The TTY that receives translated characters.
 static tty_t *kbd_tty = NULL;
+
+// Push a VT100 CSI escape sequence to the TTY.
+// seq is the final character: 'A'=UP, 'B'=DOWN, 'C'=RIGHT, 'D'=LEFT
+static void push_vt100_seq(tty_t *tty, char seq)
+{
+    tty_push_input(tty, '\x1b');   // ESC
+    tty_push_input(tty, '[');      // [
+    tty_push_input(tty, seq);      // final
+}
 
 // Translate one scancode byte and push ASCII to the TTY.
 // `ext` is true when the byte was preceded by an E0 prefix.
@@ -150,7 +175,7 @@ static void translate_and_push(uint8_t sc, bool ext)
     // ── Look up ASCII ─────────────────────────
     const struct kbd_key *k = ext ? &ext_scancode_tbl[code]
                                   : &scancode_tbl[code];
-    char c = 0;
+    int c = 0;
     if (k->base != 0 || k->shift != 0) {
         bool caps = kbd_caps_lock;
         bool base_is_letter = (k->base >= 'a' && k->base <= 'z') ||
@@ -161,6 +186,23 @@ static void translate_and_push(uint8_t sc, bool ext)
             c = kbd_shift() ? k->shift : k->base;
     }
     if (c == 0) return;
+
+    // ── Expand VT100 escape sequences for navigation keys ──
+    if (c >= 0x100) {
+        // Only emit escape sequences in raw mode; discard in canonical.
+        if (!(kbd_tty->lflag & TTY_L_ICANON)) {
+            switch (c) {
+            case K_UP:    push_vt100_seq(kbd_tty, 'A'); break;
+            case K_DOWN:  push_vt100_seq(kbd_tty, 'B'); break;
+            case K_LEFT:  push_vt100_seq(kbd_tty, 'D'); break;
+            case K_RIGHT: push_vt100_seq(kbd_tty, 'C'); break;
+            case K_HOME:  push_vt100_seq(kbd_tty, 'H'); break;
+            case K_END:   push_vt100_seq(kbd_tty, 'F'); break;
+            default: break;
+            }
+        }
+        return;
+    }
 
     // ── Ctrl modifier ─────────────────────────
     if (kbd_ctrl()) {
@@ -233,6 +275,11 @@ void keyboard_handler(uint64_t nr, uint64_t parameter __attribute__((unused)),
 void keyboard_set_tty(tty_t *tty)
 {
     kbd_tty = tty;
+}
+
+tty_t *keyboard_get_tty(void)
+{
+    return kbd_tty;
 }
 
 // Poll the 8042 keyboard controller for available scancodes.

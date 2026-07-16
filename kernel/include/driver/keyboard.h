@@ -23,4 +23,7 @@ int keyboard_read_scancodes(uint8_t *buffer, int size);
 int keyboard_devfs_read(vfs_node_t *node, uint64_t offset,
                         uint64_t size, void *buffer);
 
+// Get the TTY that receives translated input (for reading lflag, etc.).
+tty_t *keyboard_get_tty(void);
+
 #endif
