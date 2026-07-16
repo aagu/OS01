@@ -237,7 +237,7 @@ void console_putchar(char c)
     case CSI_QMARK:
         if (c >= '0' && c <= '9') {
             cs_param = cs_param * 10 + (c - '0');
-            cs = CSI_PARAM;  // continue parsing param after ?
+            // Stay in CSI_QMARK — do NOT transition to CSI_PARAM
         } else {
             // Terminal character with ? prefix (private mode)
             switch (c) {
