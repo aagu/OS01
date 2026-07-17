@@ -357,6 +357,14 @@ int tty_ioctl(tty_t *tty, int cmd, void *arg)
         return 0;
     }
 
+    case 0x541B: { // FIONREAD — bytes available to read
+        int *n = (int *)arg;
+        int head = tty->head;
+        int tail = tty->tail;
+        *n = (head >= tail) ? (head - tail) : (TTY_BUF_SIZE - (tail - head));
+        return 0;
+    }
+
     default:
         return -ENOTTY;
     }

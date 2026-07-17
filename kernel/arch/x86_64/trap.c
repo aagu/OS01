@@ -1494,6 +1494,17 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             regs->rax = tty_ioctl(tty, (int)request, tio);
             break;
         }
+        case 0x541B: { // FIONREAD — bytes available to read
+            int *n = (int *)arg;
+            if ((uint64_t)n >= current->addr_limit) {
+                regs->rax = -EFAULT;
+                break;
+            }
+            tty_t *tty = get_dev_tty();
+            if (!tty) { regs->rax = -ENOTTY; break; }
+            regs->rax = tty_ioctl(tty, (int)request, n);
+            break;
+        }
         case TCSETS:
         case TCSETSW:
         case TCSETSF: {

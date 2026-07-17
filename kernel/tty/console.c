@@ -276,7 +276,7 @@ void console_blink_tick(void)
     if (!term_cursor_visible) return;
 
     term_blink_counter++;
-    if (term_blink_counter >= 50) {  // 500ms @ 100Hz
+    if (term_blink_counter >= 80) {  // 800ms @ 100Hz
         term_blink_counter = 0;
         term_blink_on = !term_blink_on;
         console_draw_blink(term_blink_on);
@@ -289,8 +289,11 @@ void console_blink_tick(void)
 
 void console_init(void)
 {
-    // Start terminal cursor at the current kernel printk position row
-    term_cursor_row = Pos.YPosition;
+    // Start terminal cursor one row below the last kernel printk output.
+    // Called at the very end of kernel_main(), so Pos.YPosition is stable.
+    term_cursor_row = Pos.YPosition + 1;
+    int max_rows = (int)(Pos.YResolution / font->height);
+    if (term_cursor_row >= max_rows) term_cursor_row = max_rows - 1;
     term_cursor_col = 0;
     term_cursor_visible = true;
     term_blink_on = false;

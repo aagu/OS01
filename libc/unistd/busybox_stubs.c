@@ -27,8 +27,25 @@ char *fgets_unlocked(char *s, int n, void *f) { (void)s; (void)n; (void)f; retur
 
 /* ── Poll ── */
 int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
-    (void)fds; (void)nfds; (void)timeout;
-    errno = ENOSYS; return -1;
+    int nready = 0;
+    for (nfds_t i = 0; i < nfds; i++) {
+        fds[i].revents = 0;
+        // For stdin (fd 0), check if TTY has buffered data via FIONREAD.
+        // Blocking poll with timeout is not supported in v1, but this is
+        // sufficient for escape-sequence detection: keyboard ISR pushes
+        // all 3 bytes of an arrow key atomically, so they're already in
+        // the TTY buffer by the time userspace reads the first byte.
+        if (fds[i].fd == 0 && (fds[i].events & POLLIN)) {
+            int n = 0;
+            if (syscall(SYS_ioctl, 0, (uint64_t)0x541B, (uint64_t)&n) == 0
+                && n > 0) {
+                fds[i].revents |= POLLIN;
+                nready++;
+            }
+        }
+    }
+    (void)timeout;
+    return nready;
 }
 
 /* ── Rlimit ── */

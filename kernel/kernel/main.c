@@ -229,9 +229,6 @@ int kernel_main(struct BOOT_INFO *bootinfo)
         serial_printk("tty: console TTY created\n");
     }
 
-    // Initialize the software terminal (cursor, VT100 state)
-    console_init();
-
     vfs_debug_list("/dev");
 
     // Quick smoke test: /dev/null
@@ -289,6 +286,10 @@ int kernel_main(struct BOOT_INFO *bootinfo)
 #endif
 
     futex_init();                        // init futex hash buckets
+
+    // Initialize the software terminal cursor — called at the very end
+    // of kernel init so Pos.YPosition won't change after this point.
+    console_init();
 
     // ═══ 9. Scheduler + user-space init ═════════════════════
     task_init();                         // spawns /init.elf, enters idle loop
