@@ -26,7 +26,7 @@ System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`
 | 17 | `SYS_fstat` | rdi=fd, rsi=buf | FD status |
 | 18 | `SYS_lseek` | rdi=fd, rsi=offset, rdx=whence | Seek |
 | 19 | `SYS_fcntl` | rdi=fd, rsi=cmd, rdx=arg | FD control |
-| 20 | `SYS_ioctl` | rdi=fd, rsi=request, rdx=arg | Device control |
+| 20 | `SYS_ioctl` | rdi=fd, rsi=request, rdx=arg | Device control (TIOCGWINSZ, TCGETS/TCSETS, FIONREAD, TIOCGPGRP/SPGRP, TIOCNOTTY) |
 | 21 | `SYS_getdents64` | rdi=fd, rsi=buf, rdx=count | Directory entries |
 | 22 | `SYS_access` | rdi=path, rsi=mode | Check access |
 | 23 | `SYS_unlink` | rdi=path | Remove file |

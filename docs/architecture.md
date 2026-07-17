@@ -119,6 +119,6 @@ Four levels: `LOG_ERR`, `LOG_WARN`, `LOG_INFO`, `LOG_DEBUG`. Compile-time `LOG_T
 4. PMM init + VMM init + FB remap
 5. `arch_register_subsys()` + `subsys_init_all()` → APIC/PIC/timer/PIT/LAPIC-timer/keyboard/AHCI
 6. VFS init + devfs init + GPT partition scan + filesystem mounts (ext2 `/`, FAT32 `/boot`, tmpfs, procfs)
-7. Console TTY (serial + keyboard IRQ → TTY, devfs `/dev/tty`)
+7. Console TTY (serial + keyboard IRQ → TTY, devfs `/dev/tty`) + console_init (VT100 CSI terminal, cursor)
 8. Per-CPU init + SMP boot + `arch_register_subsys_percpu()` + `subsys_init_percpu()`
 9. Selftest + futex_init + task_init (spawns `/init.elf` → idle loop)

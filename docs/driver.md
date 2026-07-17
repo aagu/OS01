@@ -17,31 +17,21 @@
 
 #### 功能
 
-* 处理键盘中断
-* 读取键盘扫描码
-* 打印键盘按下信息
+* 处理键盘中断（PS/2 Scancode Set 1）
+* 扫描码 → ASCII 转换（Shift/Ctrl/CapsLock 修饰键）
+* **VT100 转义序列映射**：方向键（↑↓←→）、Home、End 在 raw mode 下发 ESC [ A/B/C/D 序列
+* 通过 `keyboard_set_tty()` 推送字符到 TTY；raw mode 判断由 `kbd_tty->lflag & TTY_L_ICANON` 控制
+* `/dev/keyboard` 可读取原始扫描码
 
 #### 实现
 
 位于 `kernel/driver/keyboard.c` 中，主要组件包括：
 
-* `keyboard_controller` - 键盘中断控制器
-* `keyboard_handler` - 键盘中断处理函数
-* `keyboard_init` - 键盘初始化函数
-
-#### 初始化流程
-
-1. 调用 `keyboard_init` 函数
-2. 注册键盘中断（IRQ1）
-3. 设置中断处理函数 `keyboard_handler`
-
-#### 中断处理流程
-
-1. 键盘按下时触发中断
-2. 调用 `keyboard_handler` 函数
-3. 读取键盘扫描码（端口 0x60）
-4. 发送 EOI 信号（端口 0x20）
-5. 打印键盘扫描码
+* `scancode_tbl[128]` — 基础扫描码→ASCII 映射表
+* `ext_scancode_tbl[128]` — 扩展扫描码（E0 前缀）→ASCII 映射表，特殊键码 >0xFF（K_UP=0x100, K_DOWN=0x101, K_LEFT=0x102, K_RIGHT=0x103, K_HOME=0x104, K_END=0x105）
+* `translate_and_push` — 扫描码转 ASCII 并推入 TTY；raw mode 展开 VT100 序列，canonical mode 丢弃
+* `keyboard_handler` — IRQ1 中断处理
+* `keyboard_poll` — task context 轮询（DevFS read 路径）
 
 ### 串口驱动
 
@@ -197,12 +187,31 @@ rtc_write_datetime(&new_dt);
 
 ### TTY 驱动
 
-位于 `kernel/tty/tty.c`，头文件 `kernel/include/kernel/tty.h`：
+位于 `kernel/tty/tty.c` + `kernel/tty/console.c`，头文件 `kernel/include/kernel/tty.h` + `kernel/include/kernel/console.h`：
 
-* `tty_alloc` - 分配 TTY 实例，设置输出/回显回调
-* `tty_push_input` - IRQ 上下文中推送字符（来自 keyboard/serial 处理程序）
-* `tty_read` - 从 TTY 读取（规范模式行缓冲，支持阻塞）
-* `tty_write` - 写入 TTY 输出（dual-write 到 fb + serial）
+* `tty_alloc` — 分配 TTY 实例，设置输出/回显回调
+* `tty_push_input` — IRQ 上下文中推送字符（来自 keyboard/serial 处理程序）
+* `tty_read` — 读取 TTY（规范模式行缓冲或 raw mode 逐字节；阻塞支持）
+* `tty_write` — 写入 TTY 输出（路由到 output_char 回调，默认为 `tty_def_output → color_printk + serial`）
+* `tty_ioctl` — 处理 TCGETS/TCSETS/TCSETSW/TCSETSF（ICANON/ECHO 映射，ISIG 强制启用）和 FIONREAD（可读字节数）
+* `get_dev_tty` / `tty_set_dev_tty` — dev_tty 单例管理（从 devfs.c 迁移至 tty.c 统一管理）
+
+#### 软件终端 (console.c)
+
+新增 VT100 CSI 终端模拟器，位于 TTY write 路径和 framebuffer 之间：
+
+* `console_putchar(char c)` — TTY 输出回调，CSI 状态机解析 VT100 序列并渲染字符
+* `console_init()` — 初始化终端光标位置和状态（在 `kernel_main` 末尾调用）
+* `console_blink_tick()` — PIT 100Hz 回调驱动光标下划线闪烁（800ms 周期，IRQ 上下文安全）
+
+**支持的 CSI 序列 (v1):**
+| 序列 | 语义 |
+|------|------|
+| `ESC [ D` / `ESC [ n D` | 光标左移 |
+| `ESC [ C` / `ESC [ n C` | 光标右移 |
+| `ESC [ K` | 清到行尾 |
+| `ESC [ ?25h` / `ESC [ ?25l` | 显示/隐藏光标 |
+| `ESC [ n ; m` | SGR 参数分隔（静默忽略） |
 
 ### 键盘 devfs 读处理
 

@@ -116,14 +116,15 @@
 * `subsys.c` - 子系统注册框架（register_subsys, subsys_init_all）
 
 #### tty 子目录
-* `tty.c` - TTY 子系统（tty_alloc, tty_read, tty_write, tty_push_input）
+* `tty.c` — TTY 子系统（tty_alloc, tty_read, tty_write, tty_push_input, tty_ioctl, get_dev_tty）
+* `console.c` — VT100 CSI 终端模拟器（console_putchar, console_init, console_blink_tick）
 
 ### include 目录
 包含系统头文件，按功能分类组织：
 
 * `device/` - 设备相关头文件（pic.h, timer.h）
 * `driver/` - 驱动相关头文件（keyboard.h, serial.h, pit.h, rtc.h, ahci.h, pci.h）
-* `kernel/` - 内核核心头文件（main.h, task.h, sched.h, debug.h, log.h, softirq.h, interrupt.h, subsys.h, tty.h, apic.h, percpu.h）
+* `kernel/` - 内核核心头文件（main.h, task.h, sched.h, debug.h, log.h, softirq.h, interrupt.h, subsys.h, tty.h, console.h, apic.h, percpu.h, printk.h）
 * `block/` - 块设备头文件（blockdev.h）
 * `kernel/arch/x86_64/` - x86_64 架构特定头文件（cpu.h, gate.h, hw.h, spinlock.h）
 * `list.h` - 通用链表实现
