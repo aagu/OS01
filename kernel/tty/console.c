@@ -3,6 +3,7 @@
 #include <font.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 
 // font is a global in kernel/kernel/printk.c
 extern psf2_t *font;
@@ -49,6 +50,19 @@ static void console_clear_to_eol(void)
     }
 }
 
+// Scroll the entire framebuffer up by one character row.
+// Moves rows 1..N-1 up, clears the bottom row.
+static void console_scroll(void)
+{
+    int rows = (int)(Pos.YResolution / font->height);
+    uint32_t pitch = Pos.XResolution * sizeof(uint32_t);
+    int row_bytes = (int)(pitch * font->height);
+    uint8_t *fb = (uint8_t *)Pos.FB_addr;
+    memmove(fb, fb + row_bytes, (uintptr_t)row_bytes * (rows - 1));
+    memset(fb + (uintptr_t)row_bytes * (rows - 1), 0, (uintptr_t)row_bytes);
+    term_cursor_row = rows - 1;
+}
+
 // Draw or erase the blink cursor block at current position.
 // blink_on=true -> reverse video; blink_on=false -> draw space.
 static void console_draw_blink(bool on)
@@ -81,10 +95,8 @@ static void console_advance(void)
     if (term_cursor_col >= max_cols) {
         term_cursor_col = 0;
         term_cursor_row++;
-        if (term_cursor_row >= max_rows) {
-            // Scroll: TODO for now just clamp
-            term_cursor_row = max_rows - 1;
-        }
+        if (term_cursor_row >= max_rows)
+            console_scroll();
     }
 }
 
@@ -109,15 +121,12 @@ static void console_cursor_right(int n)
 static void console_put_normal(char c)
 {
     if (c == '\n') {
-        // Erase blink before moving cursor
         if (term_blink_on) console_draw_blink(false);
         term_cursor_col = 0;
         term_cursor_row++;
         int max_rows = (int)(Pos.YResolution / font->height);
-        if (term_cursor_row >= max_rows) {
-            // TODO: scroll - for v1 just clamp
-            term_cursor_row = max_rows - 1;
-        }
+        if (term_cursor_row >= max_rows)
+            console_scroll();
         return;
     }
 
@@ -143,8 +152,8 @@ static void console_put_normal(char c)
         return;
     }
 
-    // Printable characters (space and above) and anything else
-    if (c >= ' ' || c < 0) {
+    // Printable characters (space and above) — skip ASCII controls
+    if ((unsigned char)c >= ' ') {
         if (term_blink_on) console_draw_blink(false);
         putchar_at(term_cursor_col, term_cursor_row, term_fg, term_bg, c);
         console_advance();
@@ -184,6 +193,10 @@ void console_putchar(char c)
         if (c == '?') {
             cs = CSI_QMARK;
             cs_qmark = true;
+        } else if (c == ';') {
+            // Semicolon after empty param (e.g. ESC [ ; n D)
+            // Stay in CSI state, reset param accumulator.
+            cs_param = 0;
         } else if (c >= '0' && c <= '9') {
             cs = CSI_PARAM;
             cs_param = c - '0';
@@ -212,6 +225,10 @@ void console_putchar(char c)
     case CSI_PARAM:
         if (c >= '0' && c <= '9') {
             cs_param = cs_param * 10 + (c - '0');
+        } else if (c == ';') {
+            // Semicolon separates params (e.g. ESC [ 1 ; 3 2 m)
+            // Reset accumulator, stay in CSI_PARAM for next param.
+            cs_param = 0;
         } else {
             // Terminal character with parameter
             switch (c) {
