@@ -40,25 +40,43 @@ char *fgets_unlocked(char *s, int n, void *f) {
 
 /* ── Poll ── */
 int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
-    int nready = 0;
-    for (nfds_t i = 0; i < nfds; i++) {
-        fds[i].revents = 0;
-        // For stdin (fd 0), check if TTY has buffered data via FIONREAD.
-        // Blocking poll with timeout is not supported in v1, but this is
-        // sufficient for escape-sequence detection: keyboard ISR pushes
-        // all 3 bytes of an arrow key atomically, so they're already in
-        // the TTY buffer by the time userspace reads the first byte.
-        if (fds[i].fd == 0 && (fds[i].events & POLLIN)) {
+    (void)nfds;
+    fds[0].revents = 0;
+    if (fds[0].fd != 0 || !(fds[0].events & POLLIN))
+        return 0;
+
+    // timeout < 0 (blocking): return 1 unconditionally — read_key
+    // proceeds to read() which blocks inside the kernel TTY layer.
+    // This is correct: poll(-1) means "wait forever", not "busy-wait".
+    if (timeout < 0) {
+        fds[0].revents |= POLLIN;
+        return 1;
+    }
+
+    // timeout > 0: spin-wait up to timeout ms.  Busybox uses
+    // safe_poll(&pfd, 1, 50) after reading ESC to check for more
+    // bytes in multi-byte escape sequences.  Keyboard ISR pushes all
+    // 3 bytes atomically, so this path rarely spins.
+    if (timeout > 0) {
+        for (volatile int t = 0; t < timeout * 10000; t++) {
             int n = 0;
             if (syscall(SYS_ioctl, 0, (uint64_t)0x541B, (uint64_t)&n) == 0
                 && n > 0) {
-                fds[i].revents |= POLLIN;
-                nready++;
+                fds[0].revents |= POLLIN;
+                return 1;
             }
         }
+        return 0;
     }
-    (void)timeout;
-    return nready;
+
+    // timeout == 0: non-blocking FIONREAD check
+    int n = 0;
+    if (syscall(SYS_ioctl, 0, (uint64_t)0x541B, (uint64_t)&n) == 0
+        && n > 0) {
+        fds[0].revents |= POLLIN;
+        return 1;
+    }
+    return 0;
 }
 
 /* ── Rlimit ── */
