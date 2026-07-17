@@ -1,7 +1,7 @@
-# OS01 优化路线图 v7
+# OS01 优化路线图 v8
 
-> **基准**: `f453e86` (multi-arch cleanup complete — 20 commits, 36 files)
-> **日期**: 2026-07-15
+> **基准**: `7258cac` (busybox ash editing + cursor blink complete — 38 commits, 49 files)
+> **日期**: 2026-07-17
 
 标记: ✅ 已完成 | 🔴 P0 本迭代 | 🟡 P1 本月 | 🟢 P2 下月 | 🔵 P3 远期
 
@@ -16,7 +16,7 @@
 | **Phase 3: 信号 + 调度** | do_signal_delivery、Ctrl-C→SIGINT、systest 70/70、优先级 O(n) 调度器 | ✅ |
 | **Phase 4: 文件系统** | ext2 只读、FAT32 R/W、tmpfs、devfs、procfs、GPT 双分区 | ✅ |
 | **Phase 5: 设备驱动** | 8259A PIC、APIC/IOAPIC/LAPIC、PIT/LAPIC timer、PS/2 键盘、16550 串口、AHCI SATA | ✅ |
-| **Phase 6: 用户态** | busybox ash shell + 9 applet、init、libc (printf/malloc/string/syscall wrapper) | ✅ |
+| **Phase 6: 用户态** | busybox ash shell（方向键行编辑+光标闪烁+raw mode TTY）、9 applet、init、libc (printf/malloc/string/syscall wrapper)、VT100 CSI 终端模拟器 | ✅ |
 
 ---
 
@@ -25,7 +25,7 @@
 ```
 P0 (本迭代 — 本月):
  1. EEVDF 调度器              — O(n)→O(log n)，公平调度，反饿死
- 2. poll/select               — 多路 I/O，解锁 busybox 网络 applet
+ 2. poll/select               — 多路 I/O，解锁 busybox 网络 applet（v1 实现 FIONREAD + poll stub 已就绪，需升级为 wait queue）
  3. ext2 读写                 — 完成文件系统故事，/ 可写
 
 P1 (本月):
@@ -275,6 +275,8 @@ P3 (远期):
 | 子系统注册框架 | 半天 | 07-12 |
 | 日志级别系统 (log_err/log_warn/log_info/log_debug) | 5 天 | 07-12 |
 | **多架构清理收尾** (8 dispatch + 7 aarch64 桩 + task.c 拆分 + 15 spinlock 迁移) | 1 天 | 07-15 |
+| **busybox ash 方向键+行编辑** (putchar_at + VT100 CSI 终端 + keyboard VT100 映射 + tty_ioctl TCGETS/TCSETS + FIONREAD poll) | 2 天 | 07-17 |
+| arch/x86_64 头文件引用清理 (gate.h/asm.h/cpu.h) | 1 小时 | 07-17 |
 
 ---
 
@@ -295,3 +297,6 @@ P3 (远期):
 | 11 | 磁盘布局 | GPT 双分区 (FAT32 ESP + ext2 root) | UEFI 标准分区表，`/boot` 和 `/` 分离，内核自解析 GPT |
 | 12 | 子系统注册模式 | 运行时 `register_subsys()` (与 softirq 同风格) | 不引入 ELF section 依赖；各 arch 写自己的 `subsys.c` |
 | 13 | 多架构 dispatch | `arch/*.h` 用 `#ifdef __x86_64__`/`#elif __aarch64__` dispatch 头文件 | 最小变更：ISP 在 include 层解决，不改 spinlock_T 等已有接口；`interrupt.h`/`task.h` 等通用头通过 dispatch 路由到正确架构 |
+| 14 | VT100 CSI 终端模拟器 | console_putchar() state machine：`kernel/tty/console.c` (~330 行)，隔离 framebuffer 底层 | "framebuffer 只画像素，终端管理在 tty 层之上"；光标闪烁由 PIT 100Hz 回调驱动下划线反显 |
+| 15 | TTY ioctl (TCGETS/TCSETS) | tty_ioctl() 映射 TTY_L_ICANON/ECHO ↔ POSIX termios c_lflag，ISIG 强制启用 | 让 tcsetattr 真正工作，ash 可切 raw mode；dev_tty 从 devfs.c 迁移到 tty.c 统一管理 |
+| 16 | 键盘 VT100 转义序列 | ext_scancode_tbl 改为 int，K_UP/DOWN/LEFT/RIGHT (0x100-0x105)，raw mode 下发 ESC [ A/B/C/D 序列 | canonical 模式静默丢弃；Ctrl+方向键 v1 不处理 |
