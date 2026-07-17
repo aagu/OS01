@@ -350,10 +350,18 @@ int tty_ioctl(tty_t *tty, int cmd, void *arg)
         if (tio->c_lflag & ICANON) tty->lflag |= TTY_L_ICANON;
         if (tio->c_lflag & ECHO)   tty->lflag |= TTY_L_ECHO;
 
-        // Reset canonical line buffer when mode changes
+        // Reset canonical line buffer
         tty->line_len = 0;
         tty->read_pos = 0;
         tty->line_ready = false;
+
+        // Flush the cooked ring buffer — discards any pending
+        // input accumulated before the mode switch (e.g. serial
+        // noise during kernel init).
+        uint64_t flags = spin_lock_irqsave(&tty->cooked_lock);
+        tty->head = 0;
+        tty->tail = 0;
+        spin_unlock_irqrestore(&tty->cooked_lock, flags);
         return 0;
     }
 
