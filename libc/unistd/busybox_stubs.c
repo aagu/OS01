@@ -23,7 +23,20 @@ int clearerr(void *f) { (void)f; }
 int fileno_unlocked(FILE *f) { (void)f; return 0; }
 void *fopen(const char *path, const char *mode) { (void)path; (void)mode; return NULL; }
 int fclose(void *f) { (void)f; return 0; }
-char *fgets_unlocked(char *s, int n, void *f) { (void)s; (void)n; (void)f; return NULL; }
+char *fgets_unlocked(char *s, int n, void *f) {
+    if (!s || n <= 1) return NULL;
+    (void)f;
+    int i = 0;
+    while (i < n - 1) {
+        int64_t ret = syscall(SYS_read, 0, (uint64_t)&s[i], 1);
+        if (ret <= 0) break;
+        i++;
+        if (s[i - 1] == '\n') break;
+    }
+    if (i == 0) return NULL;
+    s[i] = '\0';
+    return s;
+}
 
 /* ── Poll ── */
 int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
