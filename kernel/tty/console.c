@@ -64,8 +64,7 @@ static void console_scroll(void)
 }
 
 // Draw or erase the blink cursor at current position.
-// Uses a top-line cursor (top pixel row of the cell) to avoid
-// destroying the character under the cursor.
+// Uses an underline (bottom pixel row of the cell) for visibility.
 static void console_draw_blink(bool on)
 {
     if (!term_cursor_visible || !term_initialized)
@@ -77,16 +76,16 @@ static void console_draw_blink(bool on)
     if (term_cursor_row < 0 || term_cursor_row >= max_rows) return;
     if (term_cursor_col < 0 || term_cursor_col >= max_cols) return;
 
-    int pixel_row = term_cursor_row * (int)font->height;
+    int pixel_row = term_cursor_row * (int)font->height + (int)font->height - 1;
     int pixel_col_start = term_cursor_col * (int)font->width;
     uint32_t *addr = Pos.FB_addr + Pos.XResolution * pixel_row + pixel_col_start;
 
     if (on) {
         for (unsigned int j = 0; j < font->width; j++)
-            *addr++ = term_fg;     // white line = cursor visible
+            *addr++ = term_fg;     // white underline = cursor visible
     } else {
         for (unsigned int j = 0; j < font->width; j++)
-            *addr++ = term_bg;     // black line = cursor hidden
+            *addr++ = term_bg;     // black underline = cursor hidden
     }
 }
 
