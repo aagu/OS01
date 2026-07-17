@@ -144,8 +144,8 @@ static void console_put_normal(char c)
     if (c == '\b' || c == 0x7F) {
         if (term_blink_on) console_draw_blink(false);
         if (term_cursor_col > 0) term_cursor_col--;
-        // Erase the character at the new position
-        putchar_at(term_cursor_col, term_cursor_row, term_fg, term_bg, ' ');
+        // Don't erase — in raw mode ash manages its own display.
+        // Erasing would destroy prompt characters.
         return;
     }
 
