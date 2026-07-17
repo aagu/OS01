@@ -63,8 +63,9 @@ static void console_scroll(void)
     term_cursor_row = rows - 1;
 }
 
-// Draw or erase the blink cursor block at current position.
-// blink_on=true -> reverse video; blink_on=false -> draw space.
+// Draw or erase the blink cursor at current position.
+// Uses an underline (bottom pixel row of the cell) to avoid
+// destroying the character at the cursor position.
 static void console_draw_blink(bool on)
 {
     if (!term_cursor_visible || !term_initialized)
@@ -76,12 +77,16 @@ static void console_draw_blink(bool on)
     if (term_cursor_row < 0 || term_cursor_row >= max_rows) return;
     if (term_cursor_col < 0 || term_cursor_col >= max_cols) return;
 
+    int pixel_row = term_cursor_row * (int)font->height + (int)font->height - 1;
+    int pixel_col_start = term_cursor_col * (int)font->width;
+    uint32_t *addr = Pos.FB_addr + Pos.XResolution * pixel_row + pixel_col_start;
+
     if (on) {
-        // Reverse video: swap fg/bg, write a space block
-        putchar_at(term_cursor_col, term_cursor_row, term_bg, term_fg, ' ');
+        for (unsigned int j = 0; j < font->width; j++)
+            *addr++ = term_fg;
     } else {
-        // Restore: draw a space with normal colors
-        putchar_at(term_cursor_col, term_cursor_row, term_fg, term_bg, ' ');
+        for (unsigned int j = 0; j < font->width; j++)
+            *addr++ = term_bg;
     }
 }
 
