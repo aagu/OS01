@@ -223,6 +223,9 @@ int ext2_init(block_device_t *dev, ext2_fs_t **out_fs)
         kfree(fs); return -1;
     }
 
+    // Cache superblock for writeback
+    memcpy(&fs->sb_raw, sb_buf, sizeof(ext2_superblock_t));
+
     fs->block_size   = 1024u << sb->s_log_block_size;
     if (fs->block_size > 4096) { kfree(fs); return -1; }
     fs->sectors_per_block = fs->block_size / 512;
@@ -238,6 +241,8 @@ int ext2_init(block_device_t *dev, ext2_fs_t **out_fs)
 
     uint32_t table_size   = fs->num_block_groups * sizeof(ext2_bgdesc_t);
     uint32_t table_blocks = (table_size + fs->block_size - 1) / fs->block_size;
+    fs->bgdesc_block = bgdesc_block;
+    fs->bgdesc_table_blocks = table_blocks;
     fs->bgdesc_table = kmalloc(table_blocks * fs->block_size);
     if (!fs->bgdesc_table) { kfree(fs); return -1; }
 
