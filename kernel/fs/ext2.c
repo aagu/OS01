@@ -731,6 +731,63 @@ static struct vfs_node *ext2_vfs_create(struct vfs_node *dir, const char *name)
     return node;
 }
 
+// ── VFS unlink (delete file) ────────────────────────────
+static int ext2_vfs_unlink(struct vfs_node *dir, const char *name)
+{
+    if (!dir || !dir->mount || !name) return -EINVAL;
+    ext2_fs_t *fs = (ext2_fs_t *)dir->mount->fs_data;
+
+    spin_lock(&fs->lock);
+
+    uint32_t dir_ino = ext2_node_ino(dir);
+    uint32_t target_ino, block, off;
+    uint8_t file_type;
+
+    int ret = ext2_find_dirent(fs, dir_ino, name,
+                               &target_ino, &file_type, &block, &off);
+    if (ret != 0) { spin_unlock(&fs->lock); return ret; }
+
+    // Remove dirent first (write ordering: dirent → inode → bitmap → sb → data)
+    dirent_del(fs, dir_ino, name);
+
+    ext2_inode_t inode;
+    if (ext2_read_inode(fs, target_ino, &inode) != 0) {
+        spin_unlock(&fs->lock); return -EIO;
+    }
+
+    inode.i_links_count--;
+    if (inode.i_links_count == 0) {
+        // Free all data blocks (direct + single indirect)
+        for (int i = 0; i < 12; i++) {
+            if (inode.i_block[i] != 0) {
+                free_block(fs, inode.i_block[i]);
+                inode.i_block[i] = 0;
+            }
+        }
+        if (inode.i_block[12] != 0) {
+            uint32_t ptrs_per_block = fs->block_size / sizeof(uint32_t);
+            uint32_t indirect[1024];
+            ext2_read_block(fs, inode.i_block[12], indirect);
+            for (uint32_t i = 0; i < ptrs_per_block; i++) {
+                if (indirect[i] != 0) {
+                    free_block(fs, indirect[i]);
+                }
+            }
+            free_block(fs, inode.i_block[12]);
+            inode.i_block[12] = 0;
+        }
+        inode.i_blocks = 0;
+        inode.i_size = 0;
+        ext2_write_inode(fs, target_ino, &inode);
+        free_inode(fs, target_ino);
+    } else {
+        ext2_write_inode(fs, target_ino, &inode);
+    }
+
+    spin_unlock(&fs->lock);
+    return 0;
+}
+
 // ── VFS readdir implementation ──────────────────────────
 static int ext2_vfs_readdir(struct vfs_node *node, uint64_t index,
                              struct vfs_dirent *entry)
@@ -802,7 +859,7 @@ struct vfs_ops ext2_vfs_ops = {
     .write   = ext2_vfs_write,
     .readdir = ext2_vfs_readdir,
     .create  = ext2_vfs_create,
-    .unlink  = NULL,
+    .unlink  = ext2_vfs_unlink,
     .mkdir   = NULL,
     .rmdir   = NULL,
     .rename  = NULL,
