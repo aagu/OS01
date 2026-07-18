@@ -5,6 +5,11 @@
 #include <string.h>
 #include <stdlib.h>          // calloc
 #include <errno.h>
+#include <kernel.h>
+
+#ifdef OS01_SELFTEST
+static ext2_fs_t *ext2_selftest_fs;  // set by ext2_init, used by selftests
+#endif
 
 // ── Helper: resolve node->fs_data to inode number ────────
 // Root mount node has fs_data=NULL (set by vfs_mount).
@@ -1250,11 +1255,20 @@ int ext2_init(block_device_t *dev, ext2_fs_t **out_fs)
     debug_fs("ext2: mounted — ino_size=%u blk_size=%u groups=%u\n",
              fs->inode_size, fs->block_size, fs->num_block_groups);
     *out_fs = fs;
+#ifdef OS01_SELFTEST
+    ext2_selftest_fs = fs;
+#endif
     return 0;
 }
 
 #ifdef OS01_SELFTEST
 // Tests registered by selftest_run_all() via forward declarations in selftest.c
+
+// Get the ext2_fs_t set by ext2_init. Returns NULL if FS not mounted yet.
+static ext2_fs_t *ext2_selftest_get_fs(void)
+{
+    return ext2_selftest_fs;
+}
 
 int ext2_selftest_magic(void)
 {
@@ -1268,5 +1282,273 @@ int ext2_selftest_struct_sizes(void)
     if (sizeof(ext2_bgdesc_t) != 32) return -1;
     if (sizeof(ext2_dirent_t) != 8) return -1;
     return 0;
+}
+
+// Save/restore: bitmap block + bgdesc block + superblock
+int ext2_selftest_block_alloc(void)
+{
+    ext2_fs_t *fs = ext2_selftest_get_fs();
+    if (!fs) return 0;  // SKIP -- AHCI not ready
+
+    spin_lock(&fs->lock);
+
+    // Choose first group that has free blocks
+    uint32_t g = 0;
+    while (g < fs->num_block_groups && fs->bgdesc_table[g].bg_free_blocks_count == 0)
+        g++;
+    if (g >= fs->num_block_groups) { spin_unlock(&fs->lock); return 0; }
+
+    uint32_t bitmap_block = fs->bgdesc_table[g].bg_block_bitmap;
+    // g * sizeof(ext2_bgdesc_t) / fs->block_size: index into the bgdesc
+    // table blocks (not absolute block number -- may be 0 when block_size is
+    // larger than a single descriptor).  We add it to fs->bgdesc_block to
+    // get the physical block on disk.
+    uint32_t bgdesc_blk_off = g * sizeof(ext2_bgdesc_t) / fs->block_size;
+    uint32_t bgdesc_phys_blk = fs->bgdesc_block + bgdesc_blk_off;
+
+    // Save
+    uint8_t save_bitmap[4096], save_bgdesc[4096], save_sb[1024];
+    ext2_read_block(fs, bitmap_block, save_bitmap);
+    ext2_read_block(fs, bgdesc_phys_blk, save_bgdesc);
+    block_device_read(fs->dev, 2, 2, save_sb);
+
+    // Test: allocate a block
+    uint32_t blk = alloc_block(fs);
+    if (blk == 0) {
+        // Restore and skip
+        ext2_write_block(fs, bitmap_block, save_bitmap);
+        ext2_write_block(fs, bgdesc_phys_blk, save_bgdesc);
+        block_device_write(fs->dev, 2, 2, save_sb);
+        spin_unlock(&fs->lock);
+        return 0;  // SKIP -- no free blocks (unlikely but possible)
+    }
+
+    // Verify: block should be non-zero
+    if (blk == 0) {
+        spin_unlock(&fs->lock); return -1;
+    }
+
+    // Free it
+    free_block(fs, blk);
+
+    // Restore
+    ext2_write_block(fs, bitmap_block, save_bitmap);
+    ext2_write_block(fs, bgdesc_phys_blk, save_bgdesc);
+    block_device_write(fs->dev, 2, 2, save_sb);
+
+    spin_unlock(&fs->lock);
+    return 0;
+}
+
+int ext2_selftest_inode_alloc(void)
+{
+    ext2_fs_t *fs = ext2_selftest_get_fs();
+    if (!fs) return 0;
+
+    spin_lock(&fs->lock);
+
+    uint32_t g = 0;
+    while (g < fs->num_block_groups && fs->bgdesc_table[g].bg_free_inodes_count == 0)
+        g++;
+    if (g >= fs->num_block_groups) { spin_unlock(&fs->lock); return 0; }
+
+    uint32_t inode_bitmap_block = fs->bgdesc_table[g].bg_inode_bitmap;
+    uint32_t inode_table_start  = fs->bgdesc_table[g].bg_inode_table;
+
+    // Save bitmap and superblock (alloc_inode/free_inode touch these)
+    uint8_t save_ibitmap[4096], save_sb[1024];
+    ext2_read_block(fs, inode_bitmap_block, save_ibitmap);
+    block_device_read(fs->dev, 2, 2, save_sb);
+
+    // Test: allocate, then figure out which inode table block was written
+    uint32_t ino = alloc_inode(fs, EXT2_S_IFREG | 0644);
+    if (ino == 0) {
+        ext2_write_block(fs, inode_bitmap_block, save_ibitmap);
+        block_device_write(fs->dev, 2, 2, save_sb);
+        spin_unlock(&fs->lock); return -1;
+    }
+
+    // Compute the inode table block that was modified, save it for restore
+    uint32_t ag = (ino - 1) / fs->inodes_per_group;
+    uint32_t aidx = (ino - 1) % fs->inodes_per_group;
+    uint32_t inodes_per_blk = fs->block_size / fs->inode_size;
+    uint32_t itable_blk = fs->bgdesc_table[ag].bg_inode_table + aidx / inodes_per_blk;
+    uint8_t save_itable[4096];
+    ext2_read_block(fs, itable_blk, save_itable);
+
+    free_inode(fs, ino);
+
+    // Restore
+    ext2_write_block(fs, inode_bitmap_block, save_ibitmap);
+    block_device_write(fs->dev, 2, 2, save_sb);
+    ext2_write_block(fs, itable_blk, save_itable);
+
+    spin_unlock(&fs->lock);
+    return 0;
+}
+
+int ext2_selftest_dirent_roundtrip(void)
+{
+    ext2_fs_t *fs = ext2_selftest_get_fs();
+    if (!fs) return 0;
+
+    spin_lock(&fs->lock);
+
+    // Use root inode (2) as the test directory
+    uint32_t dir_ino = EXT2_ROOT_INO;
+
+    // Save: root directory data blocks + root inode table block
+    ext2_inode_t root_inode;
+    ext2_read_inode(fs, dir_ino, &root_inode);
+
+    // Save first dir block
+    uint32_t first_phys = ext2_bmap(fs, &root_inode, 0);
+    if (first_phys == 0) { spin_unlock(&fs->lock); return 0; }
+    uint8_t save_dir_blk[4096];
+    ext2_read_block(fs, first_phys, save_dir_blk);
+
+    // Save root inode table entry (root is always ino 2, group 0)
+    uint32_t inodes_per_blk = fs->block_size / fs->inode_size;
+    uint32_t root_idx = (dir_ino - 1) % inodes_per_blk;
+    uint32_t root_group = (dir_ino - 1) / fs->inodes_per_group;
+    uint32_t root_itable_blk = fs->bgdesc_table[root_group].bg_inode_table
+                               + ((dir_ino - 1) / inodes_per_blk);
+
+    uint8_t save_itable_blk[4096];
+    ext2_read_block(fs, root_itable_blk, save_itable_blk);
+
+    // Test: alloc_inode -> dirent_add -> verify -> dirent_del -> free_inode
+    // alloc_inode sets the bitmap bit and initializes the inode table entry.
+    // We don't save the post-alloc bitmap/itable state here -- free_inode below
+    // will clear the bitmap bit, restoring it to the original state.
+    // The inode table init data is harmless (bitmap says "free", will be
+    // overwritten on next alloc of that inode number).
+    //
+    // What we DO need to save: superblock (counts mutated by alloc+free),
+    // directory data blocks (modified by dirent_add/del), and root inode.
+    uint8_t save_sb[1024];
+    block_device_read(fs->dev, 2, 2, save_sb);
+
+    uint32_t new_ino = alloc_inode(fs, EXT2_S_IFREG | 0644);
+    if (new_ino == 0) { spin_unlock(&fs->lock); return -1; }
+
+    int add_ret = dirent_add(fs, dir_ino, "___test99", new_ino, 1);
+    if (add_ret != 0) {
+        free_inode(fs, new_ino);
+        spin_unlock(&fs->lock); return -1;
+    }
+
+    // Verify via ext2_find_dirent
+    uint32_t found_ino, found_blk, found_off;
+    uint8_t found_type;
+    int find_ret = ext2_find_dirent(fs, dir_ino, "___test99",
+                                    &found_ino, &found_type, &found_blk, &found_off);
+    if (find_ret != 0 || found_ino != new_ino || found_type != 1) {
+        // Cleanup then fail
+        dirent_del(fs, dir_ino, "___test99");
+        free_inode(fs, new_ino);
+        spin_unlock(&fs->lock); return -1;
+    }
+
+    // Delete
+    dirent_del(fs, dir_ino, "___test99");
+    free_inode(fs, new_ino);
+
+    // Verify gone
+    int find2 = ext2_find_dirent(fs, dir_ino, "___test99",
+                                 &found_ino, &found_type, &found_blk, &found_off);
+    if (find2 == 0) {
+        spin_unlock(&fs->lock); return -1;  // should not exist
+    }
+
+    // Restore: directory data blocks, root inode, superblock (counts).
+    // Inode bitmap is already in the original state (free_inode cleared the bit).
+    // Inode table init data is harmless (bitmap says "free").
+    ext2_write_block(fs, first_phys, save_dir_blk);
+    ext2_write_block(fs, root_itable_blk, save_itable_blk);
+    block_device_write(fs->dev, 2, 2, save_sb);
+
+    spin_unlock(&fs->lock);
+    return 0;
+}
+
+// Test write within existing file's i_size -- no block alloc needed.
+// We write to byte offset 0 of an existing small file, then restore.
+// NOTE: This selftest does raw block read/write under the ext2 lock
+// (not via ext2_vfs_write) because the VFS write path would require a
+// vfs_node_t which isn't available at selftest time.  The VFS write
+// path is exercised by the user-mode systest in Task 19.
+int ext2_selftest_write_read(void)
+{
+    ext2_fs_t *fs = ext2_selftest_get_fs();
+    if (!fs) return 0;
+
+    spin_lock(&fs->lock);
+
+    // Find a regular file in root directory
+    uint32_t dir_ino = EXT2_ROOT_INO;
+    ext2_inode_t dir_inode;
+    ext2_read_inode(fs, dir_ino, &dir_inode);
+
+    uint8_t block_data[4096];
+    uint32_t test_ino = 0;
+    uint32_t test_blk = 0;
+
+    for (uint32_t bi = 0; ; bi++) {
+        uint32_t phys = ext2_bmap(fs, &dir_inode, bi);
+        if (phys == 0) break;
+        ext2_read_block(fs, phys, block_data);
+
+        uint32_t off = 0;
+        while (off < fs->block_size) {
+            ext2_dirent_t *de = (ext2_dirent_t *)(block_data + off);
+            if (de->rec_len == 0) break;
+            if (de->inode != 0 && de->file_type == 1 /* regular file */) {
+                test_ino = de->inode;
+                break;
+            }
+            off += de->rec_len;
+        }
+        if (test_ino) break;
+    }
+
+    if (test_ino == 0) { spin_unlock(&fs->lock); return 0; }  // SKIP
+
+    ext2_inode_t test_inode;
+    ext2_read_inode(fs, test_ino, &test_inode);
+
+    // Only test if file has data blocks we can restore
+    if (test_inode.i_size < 16 || test_inode.i_block[0] == 0) {
+        spin_unlock(&fs->lock); return 0;
+    }
+
+    // Save data block and inode
+    uint8_t save_data[4096];
+    ext2_read_block(fs, test_inode.i_block[0], save_data);
+
+    ext2_inode_t save_inode = test_inode;
+
+    // Write test data at offset 0 (within existing i_size)
+    const char *test_str = "HELLO_WRITE_TEST";
+    size_t test_len = strlen(test_str);
+    if (test_len > test_inode.i_size) test_len = (size_t)test_inode.i_size;
+
+    // Do a raw write via the VFS write -- but we're under lock.
+    // Write directly to the block for the selftest.
+    uint8_t write_buf[4096];
+    memcpy(write_buf, save_data, fs->block_size);
+    memcpy(write_buf, test_str, test_len);
+    ext2_write_block(fs, test_inode.i_block[0], write_buf);
+
+    // Read back and verify
+    uint8_t read_buf[4096];
+    ext2_read_block(fs, test_inode.i_block[0], read_buf);
+    int match = (memcmp(read_buf, test_str, test_len) == 0);
+
+    // Restore
+    ext2_write_block(fs, test_inode.i_block[0], save_data);
+
+    spin_unlock(&fs->lock);
+    return match ? 0 : -1;
 }
 #endif

@@ -116,6 +116,10 @@ static int test_pipe_basic(void)
 #ifdef OS01_SELFTEST
 int ext2_selftest_magic(void);
 int ext2_selftest_struct_sizes(void);
+int ext2_selftest_block_alloc(void);
+int ext2_selftest_inode_alloc(void);
+int ext2_selftest_dirent_roundtrip(void);
+int ext2_selftest_write_read(void);
 int gpt_selftest_crc32(void);
 int tmpfs_selftest_mounted(void);
 #endif
@@ -133,6 +137,10 @@ int selftest_run_all(void)
 #ifdef OS01_SELFTEST
     selftest_register("ext2_magic",        ext2_selftest_magic);
     selftest_register("ext2_struct_sizes", ext2_selftest_struct_sizes);
+    selftest_register("ext2_block_alloc",      ext2_selftest_block_alloc);
+    selftest_register("ext2_inode_alloc",      ext2_selftest_inode_alloc);
+    selftest_register("ext2_dirent_roundtrip", ext2_selftest_dirent_roundtrip);
+    selftest_register("ext2_write_read",       ext2_selftest_write_read);
     selftest_register("gpt_crc32",         gpt_selftest_crc32);
     selftest_register("tmpfs_mounted",     tmpfs_selftest_mounted);
 #endif
