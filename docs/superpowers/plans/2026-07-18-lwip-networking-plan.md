@@ -364,10 +364,16 @@ void sys_mbox_free(sys_mbox_t mbox)
 //  Thread — create_kthread wrapper
 // ═══════════════════════════════════════════════════════════════
 
+struct lwip_thread_ctx {
+    lwip_thread_fn fn;
+    void          *arg;
+};
+
 static uint64_t lwip_thread_entry(uint64_t arg)
 {
-    void (*fn)(void *) = (void (*)(void *))arg;
-    fn(NULL);
+    struct lwip_thread_ctx *ctx = (struct lwip_thread_ctx *)(uintptr_t)arg;
+    ctx->fn(ctx->arg);
+    kfree(ctx);      // ctx was kmalloc'd in sys_thread_new
     return 0;
 }
 
@@ -382,26 +388,15 @@ sys_thread_t sys_thread_new(const char *name,
     char *name_copy = strdup(name);
     if (!name_copy) return NULL;
 
-    uint64_t wrapper_arg = (uint64_t)thread;
-    // lwIP's lwip_thread_fn is void (*)(void *), but our
-    // create_kthread expects uint64_t (*)(uint64_t).  We
-    // use a trampoline above that casts.
-    // Actually, lwip_thread_fn takes two args (void *arg).
-    // We pass `arg` through a static variable — ugly but
-    // this is called once for tcpip_thread.  For multiple
-    // threads we'd need a struct wrapper.
-
-    // Better: embed arg in wrapper
-    struct { lwip_thread_fn fn; void *a; } *ctx =
-        kmalloc(sizeof(struct { lwip_thread_fn fn; void *a; }), 0);
+    // Bundle fn+arg into heap-allocated context so lwip_thread_entry
+    // can call fn(arg) without UB-prone function pointer casts.
+    struct lwip_thread_ctx *ctx = kmalloc(sizeof(*ctx), 0);
     if (!ctx) { kfree(name_copy); return NULL; }
-    ctx->fn = thread;
-    ctx->a = arg;
+    ctx->fn   = thread;
+    ctx->arg  = arg;
 
-    task_t *t = create_kthread(
-        (uint64_t (*)(uint64_t))(uint64_t)ctx->fn,
-        (uint64_t)ctx->a,
-        name_copy);
+    task_t *t = create_kthread(lwip_thread_entry,
+                               (uint64_t)(uintptr_t)ctx, name_copy);
     if (!t) {
         kfree(name_copy);
         kfree(ctx);
@@ -614,7 +609,7 @@ git commit -m "feat(e1000): add register definitions header"
 - Create: `kernel/driver/e1000.c`
 
 **Interfaces:**
-- Consumes: `e1000.h`, `driver/pci.h`, `kernel/vmm.h` (vmm_map_page, kernel_map, PAGE_KERNEL_MMIO), `kernel/pmm.h` (PAGE_2M_MASK, alloc_pages), `kernel/memory.h` (Phy_To_Virt), `kernel/interrupt.h` (register_irq), `kernel/arch/x86_64/gate.h` (DEFINE_INTR_STUB/REGISTER_INTR_HANDLER), `stdlib.h` (kmalloc, memset)
+- Consumes: `e1000.h`, `driver/pci.h`, `kernel/vmm.h` (vmm_map_page, kernel_map, PAGE_KERNEL_MMIO), `kernel/pmm.h` (PAGE_2M_MASK, alloc_pages), `kernel/memory.h` (Phy_To_Virt), `kernel/interrupt.h` (register_irq), `kernel/apic.h` (get_ioapic_controller), `stdlib.h` (kmalloc, memset)
 - Produces: `void e1000_init(uint64_t bar_phys, uint8_t irq)` — called by Stage A subsys. Internally: `e1000_xmit()` (netif->linkoutput), `e1000_input()` (netif->input), IRQ handler.
 
 - [ ] **Step 1: Create `kernel/driver/e1000.c`**
@@ -627,15 +622,14 @@ git commit -m "feat(e1000): add register definitions header"
 #include <kernel/pmm.h>       // PAGE_2M_MASK, alloc_pages
 #include <kernel/memory.h>    // Phy_To_Virt
 #include <kernel/interrupt.h> // register_irq
-#include <kernel/arch/x86_64/gate.h> // DEFINE_INTR_STUB, REGISTER_INTR_HANDLER
-#include <kernel/debug.h>
-#include <kernel/arch/io.h>   // arch_mmio_write/read
-#include <kernel/arch/cpu.h>  // arch_local_irq_disable/enable
+#include <kernel/apic.h>      // get_ioapic_controller
+#include <kernel/log.h>       // log_info
 #include <stdlib.h>
 #include <string.h>
 #include "lwip/netif.h"
 #include "lwip/pbuf.h"
 #include "lwip/tcpip.h"
+#include "lwip/etharp.h"   // ethernet_input
 
 // ── Per-device state ───────────────────────────────────────────
 static struct {
@@ -643,7 +637,7 @@ static struct {
     volatile uint8_t  *mmio;           // kernel-virtual MMIO base
     uint8_t            mac[6];
     uint8_t            irq;
-    struct netif       netif;
+    struct netif      *netif_ptr;      // set by e1000_netif_init during netif_add
 
     // Descriptor rings (in RAM — Phy_To_Virt works)
     e1000_rx_desc_t   *rx_descs;
@@ -651,9 +645,14 @@ static struct {
     uint64_t            rx_phys;
     uint64_t            tx_phys;
 
-    // Packet buffers referenced by descriptors (allocated separately)
-    uint8_t           *rx_bufs[E1000_NUM_RX_DESC];
-    uint8_t           *tx_bufs[E1000_NUM_TX_DESC];
+    // Packet buffers — must be allocated from physical pages, NOT kmalloc.
+    // kmalloc returns slab memory which is NOT identity-mapped, so
+    // Virt_To_Phy() computes a garbage physical address → DMA corruption.
+    // Use alloc_4k_page() which returns a physical address usable for DMA.
+    uint64_t           rx_buf_phys[E1000_NUM_RX_DESC];
+    uint64_t           tx_buf_phys[E1000_NUM_TX_DESC];
+    uint8_t           *rx_bufs[E1000_NUM_RX_DESC];    // Phy_To_Virt(rx_buf_phys[i])
+    uint8_t           *tx_bufs[E1000_NUM_TX_DESC];    // Phy_To_Virt(tx_buf_phys[i])
 
     uint32_t            tx_head;       // next descriptor to send
     uint32_t            tx_tail;       // next free slot (post-completion)
@@ -683,9 +682,12 @@ static uint16_t e1000_eeprom_read(uint8_t addr)
 }
 
 // ── Interrupt handler ──────────────────────────────────────────
-DEFINE_INTR_STUB(e1000_intr_stub, 0x20 + 11);  // vector: 0x20 + IRQ11 (typical)
+// Uses register_irq() — the same pattern as keyboard, serial, PIT.
+// The kernel has 16 pre-installed stubs (arch/x86_64/irq.c) for
+// vectors 0x20–0x2f that dispatch through do_IRQ → irq_table[].
+// No DEFINE_INTR_STUB/REGISTER_INTR_HANDLER needed.
 
-static void e1000_intr_handler(uint64_t nr, uint64_t param, pt_regs_t *regs)
+static void e1000_handler(uint64_t nr, uint64_t param, pt_regs_t *regs)
 {
     (void)nr; (void)param; (void)regs;
     uint32_t icr = e1000_read(E1000_REG_ICR);
@@ -699,7 +701,7 @@ static void e1000_intr_handler(uint64_t nr, uint64_t param, pt_regs_t *regs)
                 struct pbuf *p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
                 if (p) {
                     memcpy(p->payload, e1000.rx_bufs[e1000.rx_tail], len);
-                    if (tcpip_inpkt(p, &e1000.netif, NULL) != ERR_OK)
+                    if (tcpip_inpkt(p, e1000.netif_ptr, ethernet_input) != ERR_OK)
                         pbuf_free(p);
                 } else {
                     e1000.rx_bufs[e1000.rx_tail][0] = 0xDB; // "dropped" marker
@@ -794,20 +796,23 @@ int e1000_init(uint64_t bar_phys, uint8_t irq)
     memset(e1000.rx_descs, 0, sizeof(e1000_rx_desc_t) * E1000_NUM_RX_DESC);
     memset(e1000.tx_descs, 0, sizeof(e1000_tx_desc_t) * E1000_NUM_TX_DESC);
 
-    // 5. Allocate packet buffers for each RX/TX descriptor
+    // 5. Allocate DMA buffers for RX/TX descriptors using physical pages.
+    //    alloc_4k_page() returns a physical address — Phy_To_Virt gives the
+    //    kernel-virtual address for CPU access.  The physical address goes
+    //    directly into the descriptor (no Virt_To_Phy needed).
     for (int i = 0; i < E1000_NUM_RX_DESC; i++) {
-        e1000.rx_bufs[i] = (uint8_t *)kmalloc(2048, 0);
-        if (e1000.rx_bufs[i]) {
-            // We need the physical address.  kmalloc returns a virtual
-            // address from the slab allocator; Virt_To_Phy works.
-            e1000.rx_descs[i].addr = Virt_To_Phy(e1000.rx_bufs[i]);
-        }
+        uint64_t buf_phys = alloc_4k_page();
+        if (!buf_phys) return -1;
+        e1000.rx_buf_phys[i] = buf_phys;
+        e1000.rx_bufs[i] = (uint8_t *)Phy_To_Virt(buf_phys);
+        e1000.rx_descs[i].addr = buf_phys;  // physical address for DMA
     }
     for (int i = 0; i < E1000_NUM_TX_DESC; i++) {
-        e1000.tx_bufs[i] = (uint8_t *)kmalloc(2048, 0);
-        if (e1000.tx_bufs[i]) {
-            e1000.tx_descs[i].addr = Virt_To_Phy(e1000.tx_bufs[i]);
-        }
+        uint64_t buf_phys = alloc_4k_page();
+        if (!buf_phys) return -1;
+        e1000.tx_buf_phys[i] = buf_phys;
+        e1000.tx_bufs[i] = (uint8_t *)Phy_To_Virt(buf_phys);
+        e1000.tx_descs[i].addr = buf_phys;  // physical address for DMA
     }
 
     // 6. Configure RX
@@ -834,15 +839,20 @@ int e1000_init(uint64_t bar_phys, uint8_t irq)
         | (0x10 << E1000_TCTL_CT_SHIFT)
         | (E1000_TCTL_COLD_FULLDUPLEX << E1000_TCTL_COLD_SHIFT));
 
-    // 8. Enable interrupts
+    // 8. Enable e1000 interrupt sources
     e1000_write(E1000_REG_IMS,
         E1000_ICR_RXT0 | E1000_ICR_RXDMT0 | E1000_ICR_TXDW | E1000_ICR_LSC);
 
-    REGISTER_INTR_HANDLER(e1000_intr_stub, 0x20 + irq, e1000_intr_handler);
+    // 9. Register interrupt handler (same pattern as keyboard/serial/PIT)
+    // The kernel pre-installs 16 stubs for vectors 0x20..0x2f that
+    // dispatch through do_IRQ → irq_table[].  register_irq fills
+    // irq_table[irq] with the handler and configures the IOAPIC.
+    register_irq(0x20 + irq, NULL, &e1000_handler, 0,
+                 get_ioapic_controller(), "e1000");
 
     e1000.initialized = 1;
 
-    debug_block("e1000: MAC %02x:%02x:%02x:%02x:%02x:%02x IRQ=%u\n",
+    log_info("e1000: MAC %02x:%02x:%02x:%02x:%02x:%02x IRQ=%u\n",
                 e1000.mac[0], e1000.mac[1], e1000.mac[2],
                 e1000.mac[3], e1000.mac[4], e1000.mac[5], irq);
     return 0;
@@ -917,13 +927,15 @@ static int net_hw_init(void)
 
     int is_mmio, is_64bit;
     e1000_bar = pci_read_bar(bus, dev, func, 0, &is_mmio, &is_64bit);
+    // Note: is_64bit is ignored — e1000 BAR0 is always MMIO on QEMU.
+    // pci_read_bar() already handles the 64-bit read internally.
     pci_enable_bus_mastering(bus, dev, func);
     pci_enable_mmio(bus, dev, func);
     e1000_irq = pci_read_interrupt_line(bus, dev, func);
 
     if (e1000_init(e1000_bar, e1000_irq) != 0) {
         debug_block("net: e1000 init failed\n");
-        return -1;
+        return -EIO;
     }
 
     net_hw_ok = 1;
@@ -938,62 +950,61 @@ void net_lwip_init(void)
 
     lwip_init();
 
+    // Start the tcpip_thread FIRST — lwIP's core processing thread.
+    // DHCP responses arrive via tcpip_inpkt → tcpip_mbox → tcpip_thread.
+    // If tcpip_init() runs after dhcp_start(), the mbox doesn't exist yet
+    // and DHCP responses are silently dropped → timeout → no IP.
+    tcpip_init(NULL, NULL);
+
     // Bring up the single netif
+    // e1000_netif_init is an init callback exported from e1000.c.
+    // It sets MAC, MTU, flags, and linkoutput — all mandatory for
+    // lwIP's etharp_output to work.
     struct netif *nif = &os01_netif;
-    if (!netif_add(nif, NULL, NULL, NULL, NULL, NULL, NULL)) {
-        debug_block("net: netif_add failed\n");
+    if (!netif_add(nif, NULL, NULL, NULL, NULL, e1000_netif_init, tcpip_input)) {
+        log_info("net: netif_add failed\n");
         return;
     }
-    // netif->state will hold e1000 state pointer (NULL for now, driver is static)
-    // netif->output = etharp_output is set by netif_add
-    // netif->linkoutput must be set — but lwIP's default netif_add doesn't set it.
-    // We set it manually OR use netif API that accepts linkoutput.
-    // Actually, netif_add takes only init/input callbacks. linkoutput must be set
-    // separately. For e1000 we use the global e1000_xmit, which we embed in e1000.c.
-    // netif->linkoutput = e1000_linkoutput;  // exported from e1000.c
 
     netif_set_default(nif);
     netif_set_up(nif);
 
-    // Start DHCP
+    // Start DHCP — tcpip_thread is already running, can process responses
     dhcp_start(nif);
 
-    // Start the tcpip_thread — lwIP's core processing thread
-    tcpip_init(NULL, NULL);
-
-    debug_block("net: lwIP stack initialized, DHCP started\n");
+    log_info("net: lwIP stack initialized, DHCP started\n");
 }
 ```
 
-Note: `e1000_linkoutput` needs to be an exported symbol from `e1000.c`. The `e1000_xmit` function matches `netif_linkoutput_fn` signature (`err_t (*)(struct netif *, struct pbuf *)`). Export it:
+`e1000_netif_init` is added to `kernel/driver/e1000.c`:
 
 ```c
-// In e1000.c, add at the end:
-netif_linkoutput_fn e1000_linkoutput = e1000_xmit;
+// ── netif init callback — called by netif_add to configure the interface ──
+// Sets hwaddr, hwaddr_len, mtu, flags, linkoutput.
+// The e1000 state is global (single NIC), so no void *arg needed.
+
+err_t e1000_netif_init(struct netif *netif)
+{
+    e1000.netif_ptr = netif;  // store for IRQ handler's tcpip_inpkt()
+    netif->input = ethernet_input;  // input function for received packets
+    netif->hwaddr_len = 6;
+    memcpy(netif->hwaddr, e1000.mac, 6);
+    netif->mtu = 1500;
+    netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_ETHERNET;
+    netif->linkoutput = e1000_xmit;
+    netif->output = etharp_output;  // standard Ethernet ARP output
+    return ERR_OK;
+}
 ```
 
-And declare in `e1000.h`:
-```c
-extern netif_linkoutput_fn e1000_linkoutput;
-```
-
-Actually, since `netif_linkoutput_fn` is an lwIP type, we need to include lwIP headers in `e1000.h`, or just declare in `net.c` with extern.
-
-Simpler approach: In `net_lwip_init()`, after `netif_add`:
-```c
-extern err_t e1000_xmit(struct netif *, struct pbuf *);
-nif->linkoutput = e1000_xmit;
-```
-
-- [ ] **Step 2: Update `e1000.h` to declare `e1000_init` and `e1000_xmit`**
-
-In `kernel/driver/e1000.h`, add at end:
+And declared in `kernel/driver/e1000.h`:
 ```c
 // ── Driver API ─────────────────────────────────────────────────
 #include "lwip/netif.h"  // for struct netif, struct pbuf, err_t
 
 int   e1000_init(uint64_t bar_phys, uint8_t irq);
 err_t e1000_xmit(struct netif *netif, struct pbuf *p);
+err_t e1000_netif_init(struct netif *netif);
 ```
 
 - [ ] **Step 3: Register net_hw_init as a Phase 6 subsys**
@@ -1086,6 +1097,12 @@ LWIP_SOURCES  := $(LWIP_CORE) $(LWIP_CORE4) $(LWIP_NETIF) $(LWIP_API)
 LWIP_OBJECTS  := $(patsubst $(LWIP_SRC_DIR)/%.c,$(BUILD_DIR)/lwip/%.o,$(LWIP_SOURCES))
 
 KERNEL_OBJECTS += $(LWIP_OBJECTS)
+
+# IMPORTANT: add kernel/net/*.c to the existing KERNEL_C_SOURCES list
+# In the existing KERNEL_C_SOURCES definition (~line 27), add:
+#     $(wildcard net/*.c) \
+KERNEL_C_SOURCES += $(wildcard net/*.c)
+
 ALL_CFLAGS     += -I$(LWIP_SRC_DIR)/include -I../kernel/net
 ALL_LDFLAGS    +=
 ```
@@ -1481,7 +1498,7 @@ int64_t do_connect(int fd, uint32_t ip, uint16_t port)
     if (!s) return -EBADF;
 
     ip_addr_t addr;
-    ip_addr_set_ip4_u32(&addr, ip);
+    ip4_addr_set_u32(&addr, ip);
     err_t err = netconn_connect((struct netconn *)s->conn, &addr, port);
     if (err == ERR_OK) {
         s->state = SOCK_CONNECTED;
@@ -1502,8 +1519,8 @@ int64_t do_sendto(int fd, const void *buf, uint64_t len, int flags,
     if (s->type == 1) {
         // TCP: use netconn_write (ignore ip/port — connection already established)
         err_t err = netconn_write((struct netconn *)s->conn, buf,
-                                  (u16_t)len, NETCONN_COPY);
-        return (err == ERR_OK) ? (int64_t)len : -1;
+                                  (u16_t)len, 0x01);  // NETCONN_COPY
+        return (err == ERR_OK) ? (int64_t)len : -EIO;
     } else {
         // UDP: create netbuf with destination
         struct netbuf *nb = netbuf_new();
@@ -1513,7 +1530,7 @@ int64_t do_sendto(int fd, const void *buf, uint64_t len, int flags,
         memcpy(payload, buf, len);
 
         ip_addr_t addr;
-        ip_addr_set_ip4_u32(&addr, ip);
+        ip4_addr_set_u32(&addr, ip);
         netconn_sendto((struct netconn *)s->conn, nb, &addr, port);
         netbuf_delete(nb);
         return (int64_t)len;
@@ -1533,7 +1550,7 @@ int64_t do_recvfrom(int fd, void *buf, uint64_t len, int flags,
     if (err != ERR_OK) {
         if (err == ERR_CLSD) return 0;
         if (err == ERR_TIMEOUT) return -ETIMEDOUT;
-        return -1;
+        return -EIO;
     }
 
     void *data;
@@ -1545,7 +1562,7 @@ int64_t do_recvfrom(int fd, void *buf, uint64_t len, int flags,
     // Fill in source address if requested
     if (out_ip) {
         ip_addr_t *addr = netbuf_fromaddr(nb);
-        *out_ip = ip_addr_get_ip4_u32(addr);
+        *out_ip = ip4_addr_get_u32(addr);
     }
     if (out_port) {
         *out_port = netbuf_fromport(nb);
@@ -1567,7 +1584,7 @@ int64_t do_bind(int fd, uint32_t ip, uint16_t port)
     if (!s) return -EBADF;
 
     ip_addr_t addr;
-    ip_addr_set_ip4_u32(&addr, ip);
+    ip4_addr_set_u32(&addr, ip);
     err_t err = netconn_bind((struct netconn *)s->conn, &addr, port);
     if (err == ERR_OK) {
         s->bound = 1;
@@ -1590,7 +1607,7 @@ int64_t do_listen(int fd, int backlog)
         s->state = SOCK_LISTENING;
         return 0;
     }
-    return -1;
+    return -EIO;
 }
 
 // ── SYS_accept — accept incoming connection ──────────────────
@@ -1603,7 +1620,7 @@ int64_t do_accept(int fd, uint32_t *out_ip, uint16_t *out_port)
 
     struct netconn *new_conn;
     err_t err = netconn_accept((struct netconn *)listen_sock->conn, &new_conn);
-    if (err != ERR_OK) return -1;
+    if (err != ERR_OK) return -EIO;
 
     // Fill source address
     if (out_ip) {
@@ -1662,9 +1679,43 @@ int64_t do_getsockopt(int fd, int level, int optname,
 }
 ```
 
+- [ ] **Step 1b: Create shared sockaddr_in header**
+
+Create `kernel/include/uapi/sockaddr.h` so both kernel (trap.c) and userspace
+(libc netinet/in.h) share the same layout:
+
+```c
+// kernel/include/uapi/sockaddr.h — shared sockaddr_in layout (kernel + userspace)
+#ifndef _UAPI_SOCKADDR_H
+#define _UAPI_SOCKADDR_H
+
+#include <stdint.h>
+
+// AF_INET must match libc/include/sys/socket.h
+#define AF_INET     2
+
+struct sockaddr_in {
+    uint16_t sin_family;   // AF_INET
+    uint16_t sin_port;     // network byte order
+    uint32_t sin_addr;     // 4-byte IPv4 address (network byte order)
+    uint8_t  sin_zero[8];  // padding to sizeof(struct sockaddr)
+} __attribute__((packed));
+
+#endif
+```
+
+- [ ] **Step 1c: Add sockaddr.h include at top of trap.c**
+
+In `kernel/arch/x86_64/trap.c`, add with the other kernel includes (NOT inside
+the switch statement — that is invalid C):
+
+```c
+#include <uapi/sockaddr.h>   // struct sockaddr_in (shared with userspace)
+```
+
 - [ ] **Step 2: Replace stubs in trap.c with real dispatch**
 
-In `kernel/arch/x86_64/trap.c`, replace the `case SYS_socket ... case SYS_getsockopt:` block:
+In `kernel/arch/x86_64/trap.c`, replace the `case SYS_socket ... case SYS_getsockopt:` block (which uses `struct sockaddr_in` from the header added above):
 
 ```c
 case SYS_socket: {
@@ -1673,12 +1724,12 @@ case SYS_socket: {
 }
 case SYS_connect: {
     // rsi = pointer to sockaddr_in (ip:port)
-    struct sockaddr_in { uint16_t family; uint16_t port; uint32_t ip; } __attribute__((packed)) addr;
+    struct sockaddr_in addr;
     if ((uint64_t)regs->rsi >= current->addr_limit) { regs->rax = -EFAULT; break; }
     memcpy(&addr, (void *)regs->rsi, sizeof(addr));
     regs->rax = do_connect((int)regs->rdi,
-                           __builtin_bswap32(addr.ip),  // network → host
-                           __builtin_bswap16(addr.port));
+                           addr.sin_addr,   // lwIP expects network byte order
+                           addr.sin_port);  // network byte order
     break;
 }
 case SYS_sendto: {
@@ -1687,9 +1738,9 @@ case SYS_sendto: {
     // args: rdi=fd, rsi=buf, rdx=len, r10=flags, r8=addr, r9=addrlen
     uint64_t addr_ptr = regs->r8;
     if (addr_ptr && addr_ptr < current->addr_limit) {
-        struct sockaddr_in { uint16_t f; uint16_t p; uint32_t i; } __attribute__((packed)) a;
+        struct sockaddr_in a;
         memcpy(&a, (void *)addr_ptr, sizeof(a));
-        ip = __builtin_bswap32(a.i); port = __builtin_bswap16(a.p);
+        ip = a.sin_addr; port = a.sin_port;  // lwIP expects network byte order
     }
     regs->rax = do_sendto((int)regs->rdi, (void *)regs->rsi,
                           len, (int)regs->r10, ip, port);
@@ -1701,11 +1752,11 @@ case SYS_recvfrom: {
     break;
 }
 case SYS_bind: {
-    struct sockaddr_in { uint16_t f; uint16_t p; uint32_t i; } __attribute__((packed)) a;
+    struct sockaddr_in a;
     if ((uint64_t)regs->rsi >= current->addr_limit) { regs->rax = -EFAULT; break; }
     memcpy(&a, (void *)regs->rsi, sizeof(a));
     regs->rax = do_bind((int)regs->rdi,
-                        __builtin_bswap32(a.i), __builtin_bswap16(a.p));
+                        a.sin_addr, a.sin_port);  // lwIP expects network byte order
     break;
 }
 case SYS_listen: {
@@ -1765,7 +1816,7 @@ int64_t do_getsockopt(int fd, int level, int optname,
 - [ ] **Step 4: Commit**
 
 ```bash
-git add kernel/net/socket.c kernel/include/net/socket.h kernel/arch/x86_64/trap.c
+git add kernel/net/socket.c kernel/include/net/socket.h kernel/include/uapi/sockaddr.h kernel/arch/x86_64/trap.c
 git commit -m "feat(socket): implement 9 socket syscall implementations
 do_socket: netconn_new → socket_t → file_t → fd_alloc.
 do_connect: netconn_connect (blocks via netconn semaphore).
@@ -1787,7 +1838,7 @@ In `kernel/fs/file.c`, in `fd_read()`, after the `FD_PIPE` case, add:
 ```c
 case FD_SOCKET: {
     socket_t *s = f->sock;
-    if (!s) return -1;
+    if (!s) return -EIO;
 
     struct netbuf *nb;
     // Forward-declare: defined in lwIP
@@ -1808,7 +1859,7 @@ case FD_SOCKET: {
         return (int64_t)copy;
     }
     if (err == ERR_CLSD) return 0;  // EOF
-    return -1;
+    return -EIO;
 }
 ```
 
@@ -1819,18 +1870,19 @@ In `kernel/fs/file.c`, in `fd_write()`, after the `FD_PIPE` case, add:
 ```c
 case FD_SOCKET: {
     socket_t *s = f->sock;
-    if (!s) return -1;
+    if (!s) return -EIO;
 
     extern err_t netconn_write(struct netconn *, const void *, u16_t, u8_t);
-    #define NETCONN_COPY 0
-
+    // NETCONN_COPY = 0x01 in lwIP (NOT 0!).  NETCONN_NOCOPY = 0x00.
+    // Using 0 by mistake means NOCOPY — lwIP dereferences the pointer
+    // later from tcpip_thread context → use-after-free and data corruption.
     err_t err = netconn_write((struct netconn *)s->conn, buf,
-                              (u16_t)size, NETCONN_COPY);
+                              (u16_t)size, 0x01);  // NETCONN_COPY
     if (err == ERR_OK) {
         f->offset += size;
         return (int64_t)size;
     }
-    return -1;
+    return -EIO;
 }
 ```
 
@@ -1894,25 +1946,49 @@ Note: Full poll accuracy requires a lwIP recv callback that wakes `s->poll_list`
 
 - [ ] **Step 2: Implement do_select() in poll.c**
 
+- [ ] **Step 2a: Add fd_set_kern to kernel/include/kernel/poll.h**
+
+In `kernel/include/kernel/poll.h`, after the `struct pollfd` definition, add:
+
+```c
+// ── fd_set for select(2) — shared by poll.c (do_select) and trap.c (dispatch) ──
+typedef struct {
+    uint64_t bits[16];  // 1024 fds
+} fd_set_kern;
+
+#define FD_SET_KERN(fd, set)  ((set)->bits[(fd)/64] |= (1ULL << ((fd) % 64)))
+#define FD_ISSET_KERN(fd, set) ((set)->bits[(fd)/64] & (1ULL << ((fd) % 64)))
+#define FD_ZERO_KERN(set)      memset((set)->bits, 0, sizeof((set)->bits))
+```
+
+- [ ] **Step 2b: Implement do_select() in poll.c**
+
 Add to `kernel/fs/poll.c`, after `do_poll()`:
 
 ```c
-// ── do_select — select(2) wrapper around do_poll ──────────────
-
-// fd_set must match userspace definition
-typedef struct {
-    uint64_t bits[16];  // 1024 bits
-} fd_set_kern;
-
-#define FD_SET_KERN(fd, set) ((set)->bits[(fd)/64] |= (1ULL << ((fd) % 64)))
-#define FD_ZERO_KERN(set)    memset((set)->bits, 0, sizeof((set)->bits))
+// ── do_select — select(2) implementation ─────────────────────
+//
+// Does NOT go through do_poll() because do_poll checks
+// (uint64_t)user_fds >= current->addr_limit and would reject
+// kernel-stack struct pollfd arrays.  do_select is always called
+// from the syscall path (trap.c), so we build a kernel-stack
+// pollfd array and run the poll loop inline.
+//
+// fd_set_kern is defined in kernel/include/kernel/poll.h so both
+// poll.c and trap.c can see it.
 
 int64_t do_select(int nfds, fd_set_kern *readfds, fd_set_kern *writefds,
                   fd_set_kern *exceptfds, int timeout_ms)
 {
-    (void)exceptfds;  // not supported
+    (void)exceptfds;
 
-    struct pollfd pfds[POLL_MAX_FDS];
+    if (nfds <= 0 || nfds > POLL_MAX_FDS)
+        return -EINVAL;
+
+    // ── Build pollfd array from fd_sets ─────────────────────
+    int pfds_fd[POLL_MAX_FDS];
+    short pfds_events[POLL_MAX_FDS];
+    short pfds_revents[POLL_MAX_FDS];
     int n = 0;
 
     for (int fd = 0; fd < nfds && n < POLL_MAX_FDS; fd++) {
@@ -1922,27 +1998,87 @@ int64_t do_select(int nfds, fd_set_kern *readfds, fd_set_kern *writefds,
         if (writefds && (writefds->bits[fd / 64] & (1ULL << (fd % 64))))
             events |= POLLOUT;
         if (events) {
-            pfds[n].fd     = fd;
-            pfds[n].events = events;
-            pfds[n].revents = 0;
+            pfds_fd[n]     = fd;
+            pfds_events[n] = events;
+            pfds_revents[n] = 0;
             n++;
         }
     }
 
-    int64_t ret = do_poll(pfds, (uint64_t)n, timeout_ms);
-    if (ret <= 0) return ret;
+    // ── Signal check ────────────────────────────────────────
+    if (current->signal & ~current->blocked)
+        return -EINTR;
 
+    // ── Timeout setup ───────────────────────────────────────
+    uint64_t deadline = 0;
+    if (timeout_ms > 0) {
+        int ticks = (timeout_ms + 9) / 10;
+        if (ticks < 1) ticks = 1;
+        deadline = jiffies + (uint64_t)ticks;
+    }
+
+    // ── Poll loop ───────────────────────────────────────────
+    poll_table_t pt;
+    poll_table_setup(&pt);
+
+    int ready_count;
+    for (;;) {
+        poll_table_init(&pt);
+        ready_count = 0;
+
+        for (int i = 0; i < n; i++) {
+            file_t *f = current->files->fd[pfds_fd[i]];
+            if (!f) {
+                pfds_revents[i] = POLLNVAL;
+                ready_count++;
+                continue;
+            }
+
+            uint32_t revents = fd_poll(f, &pt);
+            if ((revents & pfds_events[i]) || (revents & (POLLHUP | POLLERR))) {
+                pfds_revents[i] = (revents & pfds_events[i])
+                                | (revents & (POLLHUP | POLLERR | POLLNVAL));
+                ready_count++;
+            }
+        }
+
+        if (ready_count > 0) {
+            poll_table_cleanup(&pt);
+            break;
+        }
+
+        if (timeout_ms == 0) {
+            poll_table_cleanup(&pt);
+            break;
+        }
+
+        if (current->signal & ~current->blocked) {
+            poll_table_cleanup(&pt);
+            return -EINTR;
+        }
+
+        wait_queue_sleep(&pt.wq);
+        poll_table_cleanup(&pt);
+
+        if (timeout_ms > 0 && jiffies >= deadline)
+            return 0;
+
+        if (current->signal & ~current->blocked)
+            return -EINTR;
+    }
+
+    // ── Convert revents back to fd_sets ─────────────────────
     if (readfds)  FD_ZERO_KERN(readfds);
     if (writefds) FD_ZERO_KERN(writefds);
 
     int count = 0;
     for (int i = 0; i < n; i++) {
-        if (pfds[i].revents & (POLLIN | POLLHUP | POLLERR)) {
-            if (readfds) FD_SET_KERN(pfds[i].fd, readfds);
+        if (pfds_revents[i] & (POLLIN | POLLHUP | POLLERR)) {
+            if (readfds) FD_SET_KERN(pfds_fd[i], readfds);
             count++;
         }
-        if (pfds[i].revents & (POLLOUT | POLLHUP | POLLERR)) {
-            if (writefds) FD_SET_KERN(pfds[i].fd, writefds);
+        if (pfds_revents[i] & (POLLOUT | POLLHUP | POLLERR)) {
+            if (writefds) FD_SET_KERN(pfds_fd[i], writefds);
             count++;
         }
     }
@@ -2272,24 +2408,111 @@ int64_t recv(int fd, void *buf, uint64_t len, int flags) {
 }
 ```
 
-Create `libc/unistd/sendto.c`:
+Create `libc/unistd/recvfrom.c`:
 ```c
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <errno.h>
-#include <sys/syscall.h>
 
-int64_t sendto(int fd, const void *buf, uint64_t len, int flags,
-               const sockaddr *addr, socklen_t addrlen) {
-    (void)addrlen;
-    int64_t ret = syscall(SYS_sendto, fd, (uint64_t)buf, len,
-                          (uint64_t)(int64_t)flags, (uint64_t)addr, addrlen);
+int64_t recvfrom(int fd, void *buf, uint64_t len, int flags,
+                 sockaddr *addr, socklen_t *addrlen)
+{
+    // 6 args via syscall6 (same pattern as sendto/mmap)
+    int64_t ret = syscall6(SYS_recvfrom, fd, (uint64_t)buf, len,
+                           (uint64_t)(int64_t)flags, (uint64_t)addr, (uint64_t)addrlen);
     if (ret < 0) { errno = (int)(-ret); return -1; }
     return ret;
 }
 ```
 
-Note: `sendto` needs 6 args. Extend `syscall` in `syscall.h` to support 6-arg syscalls or add a dedicated wrapper.
+Create `libc/unistd/bind.c`:
+```c
+#include <sys/socket.h>
+#include <sys/syscall.h>
+#include <errno.h>
+
+int bind(int fd, const sockaddr *addr, socklen_t addrlen) {
+    (void)addrlen;
+    int64_t ret = syscall(SYS_bind, fd, (uint64_t)addr, addrlen);
+    if (ret < 0) { errno = (int)(-ret); return -1; }
+    return (int)ret;
+}
+```
+
+Create `libc/unistd/listen.c`:
+```c
+#include <sys/socket.h>
+#include <sys/syscall.h>
+#include <errno.h>
+
+int listen(int fd, int backlog) {
+    int64_t ret = syscall(SYS_listen, fd, backlog, 0);
+    if (ret < 0) { errno = (int)(-ret); return -1; }
+    return (int)ret;
+}
+```
+
+Create `libc/unistd/accept.c`:
+```c
+#include <sys/socket.h>
+#include <sys/syscall.h>
+#include <errno.h>
+
+int accept(int fd, sockaddr *addr, socklen_t *addrlen) {
+    int64_t ret = syscall(SYS_accept, fd, (uint64_t)addr, (uint64_t)addrlen);
+    if (ret < 0) { errno = (int)(-ret); return -1; }
+    return (int)ret;
+}
+```
+
+Create `libc/unistd/setsockopt.c`:
+```c
+#include <sys/socket.h>
+#include <sys/syscall.h>
+#include <errno.h>
+
+int setsockopt(int fd, int level, int optname,
+               const void *optval, socklen_t optlen) {
+    int64_t ret = syscall(SYS_setsockopt, fd, level, optname,
+                          (uint64_t)optval, optlen);
+    if (ret < 0) { errno = (int)(-ret); return -1; }
+    return (int)ret;
+}
+```
+
+Create `libc/unistd/getsockopt.c`:
+```c
+#include <sys/socket.h>
+#include <sys/syscall.h>
+#include <errno.h>
+
+int getsockopt(int fd, int level, int optname,
+               void *optval, socklen_t *optlen) {
+    int64_t ret = syscall(SYS_getsockopt, fd, level, optname,
+                          (uint64_t)optval, (uint64_t)optlen);
+    if (ret < 0) { errno = (int)(-ret); return -1; }
+    return (int)ret;
+}
+```
+
+Create `libc/unistd/sendto.c`:
+```c
+#include <sys/socket.h>
+#include <sys/syscall.h>
+#include <errno.h>
+
+int64_t sendto(int fd, const void *buf, uint64_t len, int flags,
+               const sockaddr *addr, socklen_t addrlen)
+{
+    // sendto needs 6 args — use syscall6 (same pattern as mmap).
+    // syscall() only takes 3 args and would truncate flags/addr/addrlen.
+    (void)addrlen;
+    int64_t ret = syscall6(SYS_sendto, fd, (uint64_t)buf, len,
+                           (uint64_t)(int64_t)flags, (uint64_t)addr, addrlen);
+    if (ret < 0) { errno = (int)(-ret); return -1; }
+    return ret;
+}
+```
 
 - [ ] **Step 7: Implement getaddrinfo in `libc/network/getaddrinfo.c`**
 
@@ -2460,16 +2683,45 @@ char *inet_ntoa(struct in_addr in)
 }
 ```
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 8: Update libc Makefile to compile network/*.c**
+
+In `libc/Makefile`, in the `C_SOURCES` definition (~line 29), add:
+
+```makefile
+C_SOURCES := \
+    $(wildcard ctype/*.c) \
+    $(wildcard dirent/*.c) \
+    $(wildcard errno/*.c) \
+    $(wildcard list/*.c) \
+    $(wildcard network/*.c) \      # ← NEW: getaddrinfo, inet, entropy
+    $(wildcard stdio/*.c) \
+    $(wildcard stdlib/*.c) \
+    $(wildcard string/*.c) \
+    $(wildcard time/*.c) \
+    $(wildcard unistd/*.c) \
+    $(wildcard pthread/*.c)
+```
+
+Without this, `libc/network/getaddrinfo.c`, `inet.c`, and `entropy.c` are never compiled and wget fails at link time.
+
+Build verification:
+```bash
+make clean
+make lib
+ls build/x86_64/libc/network/  # should contain getaddrinfo.o, inet.o
+```
+
+- [ ] **Step 9: Commit**
 
 ```bash
-git add libc/include/sys/socket.h libc/include/netinet/in.h libc/include/arpa/inet.h libc/include/netdb.h libc/include/sys/syscall.h libc/unistd/socket.c libc/unistd/connect.c libc/unistd/send.c libc/unistd/recv.c libc/unistd/sendto.c libc/network/getaddrinfo.c libc/network/inet.c
-git commit -m "feat(libc): add BSD socket headers and syscall wrappers
+git add libc/include/sys/socket.h libc/include/netinet/in.h libc/include/arpa/inet.h libc/include/netdb.h libc/include/sys/syscall.h libc/unistd/socket.c libc/unistd/connect.c libc/unistd/send.c libc/unistd/recv.c libc/unistd/sendto.c libc/network/getaddrinfo.c libc/network/inet.c libc/Makefile
+git commit -m "feat(libc): add BSD socket headers, wrappers, network/ build
 Headers: sys/socket.h, netinet/in.h, arpa/inet.h, netdb.h.
 Wrappers: socket, connect, send, recv, sendto.
 getaddrinfo: minimal DNS A-record resolver via UDP socket
 (queries QEMU user-mode NAT DNS at 10.0.2.3).
-inet_aton/ntoa for dotted-quad conversion."
+inet_aton/ntoa for dotted-quad conversion.
+libc/Makefile: add $(wildcard network/*.c) to C_SOURCES."
 ```
 
 ---
@@ -2781,50 +3033,32 @@ git tag phase-3-mbedtls-done
 
 ## Implementation Notes
 
-### 6-argument syscall wrappers
-
-The existing `syscall()` in `libc/include/sys/syscall.h` takes only 4 arguments (nr, arg1-3). `sendto`, `recvfrom`, and `mmap` need 6. The libc already has `syscall6()` for mmap. Use the same pattern for `sendto`/`recvfrom` wrappers:
-
-```c
-// In libc/unistd/sendto.c:
-static inline int64_t syscall6(uint64_t nr, uint64_t a1, uint64_t a2,
-                                uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6)
-{
-    int64_t ret;
-    register uint64_t r10 __asm__("r10") = a4;
-    register uint64_t r8  __asm__("r8")  = a5;
-    register uint64_t r9  __asm__("r9")  = a6;
-    __asm__ volatile ("int $0x80"
-        : "=a" (ret)
-        : "a" (nr), "D" (a1), "S" (a2), "d" (a3),
-          "r" (r10), "r" (r8), "r" (r9)
-        : "memory");
-    return ret;
-}
-```
-
-### netif linkoutput wiring
-
-In `net_lwip_init()`, after `netif_add()`, `nif->linkoutput` must be set:
-
-```c
-extern err_t e1000_xmit(struct netif *, struct pbuf *);
-nif->linkoutput = e1000_xmit;
-```
-
 ### libc Makefile update
 
-New `.c` files under `libc/unistd/` and `libc/network/` must be compiled.
-The libc `Makefile` wildcards should auto-detect new files in these directories.
-Verify with `make lib` after adding the new source files.
+`$(wildcard network/*.c)` has been added to C_SOURCES in Task 2.7 Step 8.
+Verify:
+```bash
+ls build/x86_64/libc/network/getaddrinfo.o build/x86_64/libc/network/inet.o \
+   build/x86_64/libc/network/entropy.o
+```
+
+### kernel Makefile update
+
+`$(wildcard net/*.c)` must be added to KERNEL_C_SOURCES in `kernel/Makefile`
+(Task 1.8 Step 1). Without it, `kernel/net/net.c`, `sys_arch.c`, `socket.c`
+are never compiled: `KERNEL_C_SOURCES += $(wildcard net/*.c)`.
 
 ### lwIP header include paths
 
 The kernel Makefile adds `-I../kernel/net` (for `lwipopts.h`) and
-`-I../thirdpart/lwip/src/include` (for lwIP headers). Ensure that
-`lwipopts.h` is found BEFORE lwIP's own `opt.h` — the `-I` order matters.
-Put `-I../kernel/net` FIRST so `#include "lwip/opt.h"` finds our
-`lwipopts.h` via the include path resolution.
+`-I../thirdpart/lwip/src/include` (for lwIP headers).
+
+**⚠️ ORDER IS CRITICAL:** `-I../kernel/net` MUST appear BEFORE
+`-I../thirdpart/lwip/src/include`. lwIP's `lwip/opt.h` does
+`#include "lwipopts.h"`. The compiler searches include paths from
+left to right; with the wrong order it finds a stale/missing
+`lwipopts.h` and lwIP uses its defaults (NO_SYS=1, no DHCP, etc.),
+silently breaking everything. **Never reorder these flags.**
 
 ### recvfrom address output
 
@@ -2834,12 +3068,13 @@ pointer) in trap.c and passing it through. This is a Phase 2 follow-up if wget
 needs recvfrom source address (it shouldn't for HTTP — only DNS UDP needs it,
 and we use a dedicated getaddrinfo implementation instead).
 
-### struct sockaddr_in alignment
+### struct sockaddr_in consistency
 
-Inside trap.c dispatch, we define `struct sockaddr_in` inline. The actual
-definition in `libc/include/netinet/in.h` must match byte-for-byte (family=u16,
-port=u16, addr=u32, zero[8]). Keep these in sync or centralize in
-`kernel/include/uapi/` shared between kernel and libc.
+`struct sockaddr_in` is defined once in `kernel/include/uapi/sockaddr.h`
+(Task 2.4 Step 1b) with the exact packed layout `{ u16 sin_family; u16 sin_port;
+u32 sin_addr; u8 sin_zero[8] }`. Both `kernel/arch/x86_64/trap.c` (syscall
+dispatch) and `libc/include/netinet/in.h` use this same definition, avoiding
+the previous 3 inline duplicates.
 
 ### Known kernel net/socket.c vs lwIP header dependencies
 
