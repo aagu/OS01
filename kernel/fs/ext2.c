@@ -21,21 +21,21 @@ static uint32_t ext2_node_ino(vfs_node_t *node)
 }
 
 // ── Block I/O helper ───────────────────────────────────
-static int ext2_read_block(ext2_fs_t *fs, uint32_t block, void *buf)
+static __attribute__((noinline)) int ext2_read_block(ext2_fs_t *fs, uint32_t block, void *buf)
 {
     uint64_t lba = (uint64_t)block * fs->sectors_per_block;
     return block_device_read(fs->dev, lba, fs->sectors_per_block, buf);
 }
 
 // ── Block I/O helper (write) ───────────────────────────
-static int ext2_write_block(ext2_fs_t *fs, uint32_t block, const void *buf)
+static __attribute__((noinline)) int ext2_write_block(ext2_fs_t *fs, uint32_t block, const void *buf)
 {
     uint64_t lba = (uint64_t)block * fs->sectors_per_block;
     return block_device_write(fs->dev, lba, fs->sectors_per_block, buf);
 }
 
 // ── Read an inode from disk ─────────────────────────────
-static int ext2_read_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *out)
+static __attribute__((noinline)) int ext2_read_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *out)
 {
     if (ino == 0) return -1;
     uint32_t group = (ino - 1) / fs->inodes_per_group;
@@ -60,7 +60,7 @@ static int ext2_read_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *out)
 }
 
 // ── Write an inode to disk ─────────────────────────────
-static int ext2_write_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *inode)
+static __attribute__((noinline)) int ext2_write_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *inode)
 {
     if (ino == 0) return -1;
     uint32_t group = (ino - 1) / fs->inodes_per_group;
@@ -82,7 +82,7 @@ static int ext2_write_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *inode)
 }
 
 // ── Write superblock and bgdesc table to disk ──────────
-static int ext2_write_superblock(ext2_fs_t *fs)
+static __attribute__((noinline)) int ext2_write_superblock(ext2_fs_t *fs)
 {
     // ext2_superblock_t is ~204 bytes packed, but the on-disk
     // superblock occupies 1024 bytes.  Serialize into a zero-filled
@@ -106,7 +106,7 @@ static int ext2_write_superblock(ext2_fs_t *fs)
 // Scans block bitmaps across groups, updates sb_raw + bgdesc,
 // writes superblock+bgdesc to disk, zeroes the new block.
 // Returns block number or 0 on failure.
-static uint32_t alloc_block(ext2_fs_t *fs)
+static __attribute__((noinline)) uint32_t alloc_block(ext2_fs_t *fs)
 {
     for (uint32_t g = 0; g < fs->num_block_groups; g++) {
         if (fs->bgdesc_table[g].bg_free_blocks_count == 0)
@@ -149,7 +149,7 @@ static uint32_t alloc_block(ext2_fs_t *fs)
 }
 
 // ── Free a data block ──────────────────────────────────
-static void free_block(ext2_fs_t *fs, uint32_t block)
+static __attribute__((noinline)) void free_block(ext2_fs_t *fs, uint32_t block)
 {
     if (block == 0) return;
 
@@ -176,7 +176,7 @@ static void free_block(ext2_fs_t *fs, uint32_t block)
 
 // ── Allocate and initialize an inode ────────────────────
 // Returns inode number or 0 on failure.
-static uint32_t alloc_inode(ext2_fs_t *fs, uint16_t mode)
+static __attribute__((noinline)) uint32_t alloc_inode(ext2_fs_t *fs, uint16_t mode)
 {
     for (uint32_t g = 0; g < fs->num_block_groups; g++) {
         if (fs->bgdesc_table[g].bg_free_inodes_count == 0)
@@ -225,7 +225,7 @@ static uint32_t alloc_inode(ext2_fs_t *fs, uint16_t mode)
 }
 
 // ── Free an inode ──────────────────────────────────────
-static void free_inode(ext2_fs_t *fs, uint32_t ino)
+static __attribute__((noinline)) void free_inode(ext2_fs_t *fs, uint32_t ino)
 {
     if (ino == 0) return;
 
@@ -250,7 +250,7 @@ static void free_inode(ext2_fs_t *fs, uint32_t ino)
 }
 
 // ── Map logical block → physical (direct + single indirect) ─
-static uint32_t ext2_bmap(ext2_fs_t *fs, ext2_inode_t *inode,
+static __attribute__((noinline)) uint32_t ext2_bmap(ext2_fs_t *fs, ext2_inode_t *inode,
                           uint32_t logical_block)
 {
     if (logical_block < 12)
@@ -273,7 +273,7 @@ static uint32_t ext2_bmap(ext2_fs_t *fs, ext2_inode_t *inode,
 // ── Map logical block → physical (allocating variant) ──
 // Like ext2_bmap but allocates blocks as needed.  Only modifies
 // the in-memory inode; caller must call ext2_write_inode to persist.
-static uint32_t ext2_bmap_alloc(ext2_fs_t *fs, ext2_inode_t *inode,
+static __attribute__((noinline)) uint32_t ext2_bmap_alloc(ext2_fs_t *fs, ext2_inode_t *inode,
                                 uint32_t logical_block)
 {
     // Direct blocks (0–11)
@@ -315,7 +315,7 @@ static uint32_t ext2_bmap_alloc(ext2_fs_t *fs, ext2_inode_t *inode,
 }
 
 // ── Find a directory entry by name ──────────────────────
-static int ext2_find_dirent(ext2_fs_t *fs, uint32_t dir_ino, const char *name,
+static __attribute__((noinline)) int ext2_find_dirent(ext2_fs_t *fs, uint32_t dir_ino, const char *name,
                             uint32_t *out_ino, uint8_t *out_file_type,
                             uint32_t *out_block, uint32_t *out_off)
 {
@@ -356,7 +356,7 @@ static int ext2_find_dirent(ext2_fs_t *fs, uint32_t dir_ino, const char *name,
 // ── Add a directory entry ───────────────────────────────
 #define ALIGN4(x) (((x) + 3) & ~3u)
 
-static int dirent_add(ext2_fs_t *fs, uint32_t dir_ino, const char *name,
+static __attribute__((noinline)) int dirent_add(ext2_fs_t *fs, uint32_t dir_ino, const char *name,
                       uint32_t new_ino, uint8_t file_type)
 {
     size_t name_len = strlen(name);
@@ -456,7 +456,7 @@ static int dirent_add(ext2_fs_t *fs, uint32_t dir_ino, const char *name,
 }
 
 // ── Remove a directory entry ────────────────────────────
-static int dirent_del(ext2_fs_t *fs, uint32_t dir_ino, const char *name)
+static __attribute__((noinline)) int dirent_del(ext2_fs_t *fs, uint32_t dir_ino, const char *name)
 {
     uint32_t target_ino, block, off;
     uint8_t file_type;
@@ -494,7 +494,7 @@ static int dirent_del(ext2_fs_t *fs, uint32_t dir_ino, const char *name)
 }
 
 // ── VFS read implementation ─────────────────────────────
-static int ext2_vfs_read(struct vfs_node *node, uint64_t offset,
+static __attribute__((noinline)) int ext2_vfs_read(struct vfs_node *node, uint64_t offset,
                           uint64_t size, void *buffer)
 {
     if (!node || !buffer || size == 0) return 0;
@@ -542,7 +542,7 @@ static int ext2_vfs_read(struct vfs_node *node, uint64_t offset,
 }
 
 // ── VFS write implementation ────────────────────────────
-static int ext2_vfs_write(struct vfs_node *node, uint64_t offset,
+static __attribute__((noinline)) int ext2_vfs_write(struct vfs_node *node, uint64_t offset,
                            uint64_t size, void *buffer)
 {
     if (!node || !buffer || size == 0) return 0;
@@ -607,6 +607,8 @@ static int ext2_vfs_write(struct vfs_node *node, uint64_t offset,
     // Update i_size if write extended the file
     if (offset + size > inode.i_size)
         inode.i_size = offset + size;
+    if ((uint64_t)inode.i_size > node->size)
+        node->size = inode.i_size;
     inode.i_mtime = 0;
     ext2_write_inode(fs, ino, &inode);
 
@@ -615,7 +617,7 @@ static int ext2_vfs_write(struct vfs_node *node, uint64_t offset,
 }
 
 // ── VFS truncate implementation ─────────────────────────
-static int ext2_vfs_truncate(struct vfs_node *node, uint64_t new_size)
+static __attribute__((noinline)) int ext2_vfs_truncate(struct vfs_node *node, uint64_t new_size)
 {
     if (!node) return -EINVAL;
     if (node->type != VFS_FILE) return -EISDIR;
@@ -685,12 +687,15 @@ static int ext2_vfs_truncate(struct vfs_node *node, uint64_t new_size)
     inode.i_mtime = 0;
     ext2_write_inode(fs, ino, &inode);
 
+    // Sync the VFS node's cached size — fstat() reads node->size
+    node->size = new_size;
+
     spin_unlock(&fs->lock);
     return 0;
 }
 
 // ── VFS create (regular file) ──────────────────────────
-static struct vfs_node *ext2_vfs_create(struct vfs_node *dir, const char *name)
+static __attribute__((noinline)) struct vfs_node *ext2_vfs_create(struct vfs_node *dir, const char *name)
 {
     if (!dir || !dir->mount || !name) return NULL;
     ext2_fs_t *fs = (ext2_fs_t *)dir->mount->fs_data;
@@ -739,7 +744,7 @@ static struct vfs_node *ext2_vfs_create(struct vfs_node *dir, const char *name)
 }
 
 // ── VFS unlink (delete file) ────────────────────────────
-static int ext2_vfs_unlink(struct vfs_node *dir, const char *name)
+static __attribute__((noinline)) int ext2_vfs_unlink(struct vfs_node *dir, const char *name)
 {
     if (!dir || !dir->mount || !name) return -EINVAL;
     ext2_fs_t *fs = (ext2_fs_t *)dir->mount->fs_data;
@@ -798,7 +803,7 @@ static int ext2_vfs_unlink(struct vfs_node *dir, const char *name)
 }
 
 // ── VFS mkdir ──────────────────────────────────────────
-static struct vfs_node *ext2_vfs_mkdir(struct vfs_node *dir, const char *name)
+static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node *dir, const char *name)
 {
     if (!dir || !dir->mount || !name) return NULL;
     ext2_fs_t *fs = (ext2_fs_t *)dir->mount->fs_data;
@@ -898,7 +903,7 @@ static struct vfs_node *ext2_vfs_mkdir(struct vfs_node *dir, const char *name)
 }
 
 // ── VFS rmdir ──────────────────────────────────────────
-static int ext2_vfs_rmdir(struct vfs_node *dir, const char *name)
+static __attribute__((noinline)) int ext2_vfs_rmdir(struct vfs_node *dir, const char *name)
 {
     if (!dir || !dir->mount || !name) return -EINVAL;
     ext2_fs_t *fs = (ext2_fs_t *)dir->mount->fs_data;
@@ -981,7 +986,7 @@ static int ext2_vfs_rmdir(struct vfs_node *dir, const char *name)
 }
 
 // ── VFS readdir implementation ──────────────────────────
-static int ext2_vfs_readdir(struct vfs_node *node, uint64_t index,
+static __attribute__((noinline)) int ext2_vfs_readdir(struct vfs_node *node, uint64_t index,
                              struct vfs_dirent *entry)
 {
     if (!node || !entry) return -1;
@@ -1045,7 +1050,7 @@ static int ext2_vfs_readdir(struct vfs_node *node, uint64_t index,
 }
 
 // ── VFS rename ──────────────────────────────────────────
-static int ext2_vfs_rename(struct vfs_node *olddir, const char *oldname,
+static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, const char *oldname,
                             struct vfs_node *newdir, const char *newname)
 {
     if (!olddir || !olddir->mount || !oldname || !newdir || !newdir->mount || !newname)
@@ -1143,9 +1148,19 @@ static int ext2_vfs_rename(struct vfs_node *olddir, const char *oldname,
         }
     }
 
-    // Perform the move
-    dirent_add(fs, new_ino_dir, newname, target_ino, file_type);
-    dirent_del(fs, old_ino, oldname);
+    // Perform the move — del old name first, then add new name.
+    int del_ret = dirent_del(fs, old_ino, oldname);
+    if (del_ret != 0) {
+        log_err("ext2_rename: dirent_del(%s) failed ret=%d\n", oldname, del_ret);
+        spin_unlock(&fs->lock);
+        return del_ret;
+    }
+    int add_ret = dirent_add(fs, new_ino_dir, newname, target_ino, file_type);
+    if (add_ret != 0) {
+        log_err("ext2_rename: dirent_add(%s) failed ret=%d\n", newname, add_ret);
+        spin_unlock(&fs->lock);
+        return add_ret;
+    }
 
     // Update ctime
     ext2_inode_t target_inode;
@@ -1332,18 +1347,18 @@ int ext2_selftest_block_alloc(void)
         ext2_write_block(fs, bgdesc_phys_blk, save_bgdesc);
         block_device_write(fs->dev, 2, 2, save_sb);
         spin_unlock(&fs->lock);
-        return 0;  // SKIP -- no free blocks (unlikely but possible)
+        return 0;  // SKIP
     }
 
-    // Verify: block should be non-zero
-    if (blk == 0) {
-        spin_unlock(&fs->lock); return -1;
-    }
+    // Save the block content BEFORE free_block (alloc_block zeroes it)
+    uint8_t save_blk[4096];
+    ext2_read_block(fs, blk, save_blk);
 
     // Free it
     free_block(fs, blk);
 
-    // Restore
+    // Restore bitmap + bgdesc + superblock + block content
+    ext2_write_block(fs, blk, save_blk);
     ext2_write_block(fs, bitmap_block, save_bitmap);
     ext2_write_block(fs, bgdesc_phys_blk, save_bgdesc);
     block_device_write(fs->dev, 2, 2, save_sb);

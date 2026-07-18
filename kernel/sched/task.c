@@ -35,7 +35,7 @@ static inline list_t *task_list_next(list_t *pos)
 {
     list_t *next = pos->next;
     if ((uintptr_t)next < 0x1000) {
-        log_err("[sched] task list corrupted at %p (next=%p), breaking\n",
+        log_err("[sched] list corruption at %p (next=%p) — breaking\n",
                 (void *)pos, (void *)next);
         return NULL;
     }
@@ -289,6 +289,8 @@ void schedule(void)
     for (int i = 0; i < reap_count; i++) {
         task_t *t = reap_list[i];
         list_del(&t->list);
+        t->list.next = NULL;
+        t->list.prev = NULL;
         if (t->thread)
             kfree(t->thread);
         if (t->files)
