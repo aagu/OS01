@@ -107,6 +107,9 @@ typedef struct {
     uint32_t          inode_size;
     ext2_bgdesc_t    *bgdesc_table;
     spinlock_T        lock;        // ★ spinlock_T (capital T), see spinlock.h:10
+    ext2_superblock_t sb_raw;              // cached superblock for writeback
+    uint32_t          bgdesc_block;         // bgdesc table start block number
+    uint32_t          bgdesc_table_blocks;  // number of blocks in bgdesc table
 } ext2_fs_t;
 
 // ── API ────────────────────────────────────────────────
