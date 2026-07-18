@@ -536,6 +536,79 @@ static int ext2_vfs_read(struct vfs_node *node, uint64_t offset,
     return (int)size;
 }
 
+// ── VFS write implementation ────────────────────────────
+static int ext2_vfs_write(struct vfs_node *node, uint64_t offset,
+                           uint64_t size, void *buffer)
+{
+    if (!node || !buffer || size == 0) return 0;
+    uint32_t ino = ext2_node_ino(node);
+    ext2_fs_t *fs = (ext2_fs_t *)node->mount->fs_data;
+
+    spin_lock(&fs->lock);
+
+    ext2_inode_t inode;
+    if (ext2_read_inode(fs, ino, &inode) != 0) {
+        spin_unlock(&fs->lock); return -EIO;
+    }
+
+    // Reject extent-based inodes
+    if (inode.i_flags & 0x00080000) {
+        spin_unlock(&fs->lock); return -EOPNOTSUPP;
+    }
+
+    // Ensure blocks are allocated for the write range
+    uint32_t first_blk = (uint32_t)(offset / fs->block_size);
+    uint32_t last_blk  = (uint32_t)((offset + size - 1) / fs->block_size);
+
+    for (uint32_t lb = first_blk; lb <= last_blk; lb++) {
+        if (ext2_bmap_alloc(fs, &inode, lb) == 0) {
+            spin_unlock(&fs->lock); return -ENOSPC;
+        }
+    }
+
+    // Persist inode changes from bmap_alloc
+    ext2_write_inode(fs, ino, &inode);
+
+    // RMW per block
+    const uint8_t *src = (const uint8_t *)buffer;
+    uint64_t remaining = size;
+    uint64_t file_off  = offset;
+
+    while (remaining > 0) {
+        uint32_t logical_block = (uint32_t)(file_off / fs->block_size);
+        uint32_t block_off     = (uint32_t)(file_off % fs->block_size);
+
+        uint32_t phys = ext2_bmap(fs, &inode, logical_block);
+        if (phys == 0) { spin_unlock(&fs->lock); return -EIO; }
+
+        uint8_t block_buf[4096];
+        if (ext2_read_block(fs, phys, block_buf) != 0) {
+            spin_unlock(&fs->lock); return -EIO;
+        }
+
+        uint32_t chunk = fs->block_size - block_off;
+        if (chunk > remaining) chunk = (uint32_t)remaining;
+
+        memcpy(block_buf + block_off, src, chunk);
+        if (ext2_write_block(fs, phys, block_buf) != 0) {
+            spin_unlock(&fs->lock); return -EIO;
+        }
+
+        src        += chunk;
+        file_off   += chunk;
+        remaining  -= chunk;
+    }
+
+    // Update i_size if write extended the file
+    if (offset + size > inode.i_size)
+        inode.i_size = offset + size;
+    inode.i_mtime = 0;
+    ext2_write_inode(fs, ino, &inode);
+
+    spin_unlock(&fs->lock);
+    return (int)size;
+}
+
 // ── VFS readdir implementation ──────────────────────────
 static int ext2_vfs_readdir(struct vfs_node *node, uint64_t index,
                              struct vfs_dirent *entry)
@@ -604,7 +677,7 @@ static int ext2_vfs_readdir(struct vfs_node *node, uint64_t index,
 struct vfs_ops ext2_vfs_ops = {
     .flags   = 0,  // case-sensitive
     .read    = ext2_vfs_read,
-    .write   = NULL,
+    .write   = ext2_vfs_write,
     .readdir = ext2_vfs_readdir,
     .create  = NULL,
     .unlink  = NULL,
