@@ -572,6 +572,89 @@ static void test_signal_handler_sync(void)
     signal(SIGUSR1, SIG_DFL);
 }
 
+// ── ext2 write tests (require ext2 write support) ──────
+static void test_ext2_write(void)
+{
+    const char *fname = "/opt/test/ext2_test_file";
+    const char *dname = "/opt/test/ext2_test_dir";
+
+    // 1. Create + write + read + unlink
+    int fd = open(fname, O_CREAT | O_RDWR, 0644);
+    CHECKF(fd >= 0, "ext2_create", "fd=%d", "fd=%d", fd);
+    if (fd < 0) return;
+
+    const char *msg = "ext2 write test data";
+    size_t len = strlen(msg);
+    int64_t w = write(fd, msg, len);
+    CHECKF(w == (int64_t)len, "ext2_write", "wrote %zd", "wrote %zd", (ssize_t)w);
+
+    int64_t seek = lseek(fd, 0, SEEK_SET);
+    CHECK3(seek == 0, "ext2_lseek", "SEEK_SET 0");
+
+    char buf[64] = {0};
+    int64_t r = read(fd, buf, sizeof(buf));
+    CHECKF(r == (int64_t)len, "ext2_read", "read %zd", "read %zd", (ssize_t)r);
+    CHECK3(memcmp(buf, msg, len) == 0, "ext2_read", "data matches");
+    close(fd);
+
+    int ret = unlink(fname);
+    CHECK3(ret == 0, "ext2_unlink", "removed");
+    fd = open(fname, O_RDONLY);
+    CHECK3(fd < 0, "ext2_unlink", "ENOENT after unlink");
+    if (fd >= 0) close(fd);
+
+    // 2. mkdir + rmdir
+    ret = mkdir(dname, 0755);
+    CHECK3(ret == 0, "ext2_mkdir", "created");
+
+    struct stat st;
+    ret = stat(dname, &st);
+    CHECK3(ret == 0, "ext2_mkdir", "stat works");
+
+    ret = rmdir(dname);
+    CHECK3(ret == 0, "ext2_rmdir", "removed");
+
+    // 3. rename (same directory)
+    fd = open(fname, O_CREAT | O_RDWR, 0644);
+    write(fd, "rename_me", 9);
+    close(fd);
+
+    const char *renamed = "/opt/test/ext2_renamed";
+    ret = rename(fname, renamed);
+    CHECK3(ret == 0, "ext2_rename", "same-dir rename");
+
+    struct stat st2;
+    ret = stat(fname, &st2);
+    CHECK3(ret == -1, "ext2_rename", "old name gone");
+
+    ret = stat(renamed, &st2);
+    CHECK3(ret == 0, "ext2_rename", "new name exists");
+    unlink(renamed);
+
+    // 4. truncate (extend + shrink)
+    fd = open(fname, O_CREAT | O_RDWR, 0644);
+    CHECK3(fd >= 0, "ext2_truncate", "create for trunc");
+
+    ret = ftruncate(fd, 8192);
+    CHECK3(ret == 0, "ext2_truncate", "extend to 8K");
+
+    int64_t w2 = lseek(fd, 4096, SEEK_SET);
+    CHECKF(w2 == 4096, "ext2_truncate", "seek 4K %ld", "seek 4K %ld", (long)w2);
+    w2 = write(fd, "AT_4K", 5);
+    CHECK3(w2 == 5, "ext2_truncate", "write at 4K offset");
+
+    ret = ftruncate(fd, 100);
+    CHECK3(ret == 0, "ext2_truncate", "shrink to 100");
+
+    struct stat st3;
+    fstat(fd, &st3);
+    CHECKF(st3.st_size == 100, "ext2_truncate", "size=%lld", "size=%lld",
+           (long long)st3.st_size);
+
+    close(fd);
+    unlink(fname);
+}
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
@@ -609,6 +692,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"kill+deliver",      test_kill_signal_deliver},
     {"sync",              test_sync},
     {"sigprocmask",       test_sigprocmask},
+    {"ext2_write",        test_ext2_write},
     // {"pipe+dup2",         test_pipe_dup2_inherit},
     {"reboot",            test_reboot_skip},
 };

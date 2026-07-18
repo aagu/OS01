@@ -206,6 +206,8 @@ int main(int argc, char **argv)
     run_cmd("debugfs -w /tmp/_mkdisk_rootfs.img -R \"mkdir /bin\" 2>/dev/null");
     run_cmd("debugfs -w /tmp/_mkdisk_rootfs.img -R \"mkdir /home\" 2>/dev/null");
     run_cmd("debugfs -w /tmp/_mkdisk_rootfs.img -R \"mkdir /etc\" 2>/dev/null");
+    run_cmd("debugfs -w /tmp/_mkdisk_rootfs.img -R \"mkdir /opt\" 2>/dev/null");
+    run_cmd("debugfs -w /tmp/_mkdisk_rootfs.img -R \"mkdir /opt/test\" 2>/dev/null");
 
     // Copy fsroot/bin/* to /bin/ using a shell loop
     {
