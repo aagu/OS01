@@ -203,7 +203,9 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
     case FD_DEV: {
         if (!f->node || !f->node->ops || !f->node->ops->read)
             return -1;
-        if (!(f->flags == O_RDONLY || f->flags == O_RDWR))
+        // Check access mode (low 2 bits) — ignore O_CREAT etc.
+        int acc = f->flags & 3;
+        if (!(acc == O_RDONLY || acc == O_RDWR))
             return -1;
         int64_t n = vfs_read(f->node, f->offset, size, buf);
         if (n > 0)
@@ -265,7 +267,9 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
     case FD_DEV: {
         if (!f->node || !f->node->ops || !f->node->ops->write)
             return -1;
-        if (!(f->flags == O_WRONLY || f->flags == O_RDWR))
+        // Check access mode (low 2 bits) — ignore O_CREAT etc.
+        int acc = f->flags & 3;
+        if (!(acc == O_WRONLY || acc == O_RDWR))
             return -1;
         int64_t n = vfs_write(f->node, f->offset, size, (void *)buf);
         if (n > 0)
