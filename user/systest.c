@@ -7,6 +7,7 @@
 #include <signal.h>
 #include <string.h>
 #include <stdlib.h>
+#include <poll.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -471,6 +472,91 @@ static void test_pipe_dup2_inherit(void)
         PASS("pipe+dup2", "data verified");
 }
 
+/* ── poll syscall test ────────────────────────────────── */
+static void test_poll(void)
+{
+    // Test 1: poll on pipe — readability
+    int fds[2];
+    if (pipe(fds) < 0) { FAIL("poll", "pipe failed"); return; }
+
+    struct pollfd pfd;
+    pfd.fd = fds[0];
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+
+    // Pipe should NOT be readable yet (nothing written)
+    int ret = poll(&pfd, 1, 0);  // timeout=0 → non-blocking
+    CHECK3(ret == 0, "poll", "empty pipe timeout=0 yields 0");
+
+    // Write data to pipe
+    write(fds[1], "x", 1);
+
+    // Now pipe should be readable
+    ret = poll(&pfd, 1, 0);
+    CHECK3(ret == 1 && (pfd.revents & POLLIN), "poll", "pipe with data readable");
+
+    // Consume the byte
+    char c;
+    read(fds[0], &c, 1);
+
+    // Pipe empty again
+    pfd.revents = 0;
+    ret = poll(&pfd, 1, 0);
+    CHECK3(ret == 0, "poll", "pipe empty again");
+
+    close(fds[0]);
+    close(fds[1]);
+
+    // Test 2: poll with multiple fds
+    int p1[2], p2[2];
+    if (pipe(p1) < 0 || pipe(p2) < 0) { PASS("poll", "skipped (multi-pipe alloc failed)"); return; }
+
+    struct pollfd pfds[2];
+    pfds[0].fd = p1[0]; pfds[0].events = POLLIN; pfds[0].revents = 0;
+    pfds[1].fd = p2[0]; pfds[1].events = POLLIN; pfds[1].revents = 0;
+
+    // Neither pipe has data
+    ret = poll(pfds, 2, 0);
+    CHECK3(ret == 0, "poll", "two empty pipes timeout=0");
+
+    // Write to second pipe only
+    write(p2[1], "y", 1);
+
+    ret = poll(pfds, 2, 0);
+    CHECK3(pfds[0].revents == 0, "poll", "multi: pipe0 not ready");
+    CHECK3(pfds[1].revents & POLLIN, "poll", "multi: pipe1 ready");
+
+    // Cleanup
+    read(p2[0], &c, 1);
+    close(p1[0]); close(p1[1]);
+    close(p2[0]); close(p2[1]);
+
+    // Test 3: POLLHUP when writer closes
+    int hfds[2];
+    if (pipe(hfds) == 0) {
+        write(hfds[1], "data", 4);
+        close(hfds[1]);  // close writer
+
+        struct pollfd hpfd;
+        hpfd.fd = hfds[0]; hpfd.events = POLLIN; hpfd.revents = 0;
+
+        ret = poll(&hpfd, 1, 0);
+        // Should be readable (POLLIN) — data still in buffer
+        CHECK3(ret == 1 && (hpfd.revents & POLLIN), "poll", "pipe data+closed writer → POLLIN");
+
+        // Drain data
+        char buf[8];
+        read(hfds[0], buf, 4);
+
+        // Now pipe is empty and writer is closed → POLLHUP
+        hpfd.revents = 0;
+        ret = poll(&hpfd, 1, 0);
+        CHECK3(ret == 1 && (hpfd.revents & POLLHUP), "poll", "pipe empty+closed writer → POLLHUP");
+
+        close(hfds[0]);
+    }
+}
+
 /* ── Signal handler sync test ──────────────────────────── */
 static volatile int sigusr1_got = 0;
 static void sigusr1_handler(int sig) { (void)sig; sigusr1_got = 1; }
@@ -492,6 +578,7 @@ typedef void (*test_fn)(void);
 
 static struct { const char *name; test_fn fn; } tests[] = {
     {"signal handler sync", test_signal_handler_sync},
+    {"poll",               test_poll},
     {"putchar",           test_putchar},
     {"write",             test_write},
     {"brk",               test_brk},
