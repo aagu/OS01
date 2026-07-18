@@ -33,6 +33,10 @@ pipe_t *pipe_alloc(void)
     p->readers = 1;
     p->writers = 1;
     spin_init(&p->lock);
+    wait_queue_init(&p->read_wait);
+    wait_queue_init(&p->write_wait);
+    list_init(&p->read_poll);
+    list_init(&p->write_poll);
     return p;
 }
 
