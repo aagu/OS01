@@ -609,6 +609,79 @@ static int ext2_vfs_write(struct vfs_node *node, uint64_t offset,
     return (int)size;
 }
 
+// ── VFS truncate implementation ─────────────────────────
+static int ext2_vfs_truncate(struct vfs_node *node, uint64_t new_size)
+{
+    if (!node) return -EINVAL;
+    if (node->type != VFS_FILE) return -EISDIR;
+    uint32_t ino = ext2_node_ino(node);
+    ext2_fs_t *fs = (ext2_fs_t *)node->mount->fs_data;
+
+    spin_lock(&fs->lock);
+
+    ext2_inode_t inode;
+    if (ext2_read_inode(fs, ino, &inode) != 0) {
+        spin_unlock(&fs->lock); return -EIO;
+    }
+
+    if (inode.i_flags & 0x00080000) {
+        spin_unlock(&fs->lock); return -EOPNOTSUPP;
+    }
+
+    uint32_t old_blocks = (inode.i_size + fs->block_size - 1) / fs->block_size;
+    uint32_t new_blocks = (uint32_t)((new_size + fs->block_size - 1) / fs->block_size);
+
+    if (new_size > inode.i_size) {
+        // Extend: allocate new blocks
+        for (uint32_t lb = old_blocks; lb < new_blocks; lb++) {
+            if (ext2_bmap_alloc(fs, &inode, lb) == 0) {
+                spin_unlock(&fs->lock); return -ENOSPC;
+            }
+        }
+    } else if (new_size < inode.i_size) {
+        // Shrink: free excess blocks
+        for (uint32_t lb = new_blocks; lb < old_blocks; lb++) {
+            uint32_t phys = ext2_bmap(fs, &inode, lb);
+            if (phys == 0) continue;
+
+            free_block(fs, phys);
+
+            // Clear the block pointer
+            if (lb < 12) {
+                inode.i_block[lb] = 0;
+            } else {
+                uint32_t ptrs_per_block = fs->block_size / sizeof(uint32_t);
+                uint32_t idx = lb - 12;
+                if (inode.i_block[12] != 0) {
+                    uint32_t indirect[1024];
+                    ext2_read_block(fs, inode.i_block[12], indirect);
+                    indirect[idx] = 0;
+                    ext2_write_block(fs, inode.i_block[12], indirect);
+
+                    // Check if indirect block is now empty
+                    int empty = 1;
+                    for (uint32_t k = 0; k < ptrs_per_block; k++) {
+                        if (indirect[k] != 0) { empty = 0; break; }
+                    }
+                    if (empty) {
+                        free_block(fs, inode.i_block[12]);
+                        inode.i_block[12] = 0;
+                        inode.i_blocks -= fs->block_size / 512;
+                    }
+                }
+            }
+            inode.i_blocks -= fs->block_size / 512;
+        }
+    }
+
+    inode.i_size = new_size;
+    inode.i_mtime = 0;
+    ext2_write_inode(fs, ino, &inode);
+
+    spin_unlock(&fs->lock);
+    return 0;
+}
+
 // ── VFS readdir implementation ──────────────────────────
 static int ext2_vfs_readdir(struct vfs_node *node, uint64_t index,
                              struct vfs_dirent *entry)
@@ -684,7 +757,7 @@ struct vfs_ops ext2_vfs_ops = {
     .mkdir   = NULL,
     .rmdir   = NULL,
     .rename  = NULL,
-    .truncate = NULL,
+    .truncate = ext2_vfs_truncate,
 };
 
 // ── ext2_init (mount) ───────────────────────────────────
