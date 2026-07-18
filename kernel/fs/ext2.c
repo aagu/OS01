@@ -264,6 +264,50 @@ static uint32_t ext2_bmap(ext2_fs_t *fs, ext2_inode_t *inode,
     return 0;  // double/triple indirect not implemented
 }
 
+// ── Map logical block → physical (allocating variant) ──
+// Like ext2_bmap but allocates blocks as needed.  Only modifies
+// the in-memory inode; caller must call ext2_write_inode to persist.
+static uint32_t ext2_bmap_alloc(ext2_fs_t *fs, ext2_inode_t *inode,
+                                uint32_t logical_block)
+{
+    // Direct blocks (0–11)
+    if (logical_block < 12) {
+        if (inode->i_block[logical_block] != 0)
+            return inode->i_block[logical_block];
+        uint32_t phys = alloc_block(fs);
+        if (phys == 0) return 0;
+        inode->i_block[logical_block] = phys;
+        inode->i_blocks += fs->block_size / 512;
+        return phys;
+    }
+
+    // Single indirect (block 12)
+    uint32_t ptrs_per_block = fs->block_size / sizeof(uint32_t);
+    if (logical_block < 12 + ptrs_per_block) {
+        if (inode->i_block[12] == 0) {
+            uint32_t indirect_blk = alloc_block(fs);
+            if (indirect_blk == 0) return 0;
+            inode->i_block[12] = indirect_blk;
+            inode->i_blocks += fs->block_size / 512;
+        }
+
+        uint32_t indirect[1024];
+        if (ext2_read_block(fs, inode->i_block[12], indirect) != 0)
+            return 0;
+
+        uint32_t idx = logical_block - 12;
+        if (indirect[idx] == 0) {
+            indirect[idx] = alloc_block(fs);
+            if (indirect[idx] == 0) return 0;
+            inode->i_blocks += fs->block_size / 512;
+            ext2_write_block(fs, inode->i_block[12], indirect);
+        }
+        return indirect[idx];
+    }
+
+    return 0;  // double/triple indirect not supported
+}
+
 // ── VFS read implementation ─────────────────────────────
 static int ext2_vfs_read(struct vfs_node *node, uint64_t offset,
                           uint64_t size, void *buffer)
