@@ -62,4 +62,7 @@ uint8_t pci_read_interrupt_line(uint8_t bus, uint8_t dev, uint8_t func);
 #define PCI_SUBCLASS_SATA        0x06
 #define PCI_PROGIF_AHCI          0x01
 
+#define PCI_CLASS_NETWORK          0x02
+#define PCI_SUBCLASS_ETHERNET      0x00
+
 #endif // _DRIVER_PCI_H
