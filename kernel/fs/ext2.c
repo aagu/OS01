@@ -348,6 +348,146 @@ static int ext2_find_dirent(ext2_fs_t *fs, uint32_t dir_ino, const char *name,
     return -ENOENT;
 }
 
+// ── Add a directory entry ───────────────────────────────
+#define ALIGN4(x) (((x) + 3) & ~3u)
+
+static int dirent_add(ext2_fs_t *fs, uint32_t dir_ino, const char *name,
+                      uint32_t new_ino, uint8_t file_type)
+{
+    size_t name_len = strlen(name);
+    uint32_t new_len = ALIGN4(sizeof(ext2_dirent_t) + name_len);
+
+    ext2_inode_t dir_inode;
+    if (ext2_read_inode(fs, dir_ino, &dir_inode) != 0)
+        return -EIO;
+
+    uint32_t logical_block = 0;
+    uint8_t block_data[4096];
+
+    for (;; logical_block++) {
+        uint32_t phys = ext2_bmap(fs, &dir_inode, logical_block);
+        if (phys == 0) {
+            uint32_t new_blk = alloc_block(fs);
+            if (new_blk == 0) return -ENOSPC;
+            if (logical_block < 12) {
+                dir_inode.i_block[logical_block] = new_blk;
+            } else {
+                // Directory > 12 blocks (48 KB with 4 KB blocks):
+                // single indirect not implemented for directories.
+                // Real-world directories with > ~1000 entries would hit this.
+                // Documented in spec §10: double/triple indirect unsupported.
+                return -ENOSPC;
+            }
+            dir_inode.i_blocks += fs->block_size / 512;
+            dir_inode.i_size += fs->block_size;
+
+            memset(block_data, 0, fs->block_size);
+            ext2_dirent_t *de = (ext2_dirent_t *)block_data;
+            de->inode    = new_ino;
+            de->rec_len  = fs->block_size;
+            de->name_len = (uint8_t)name_len;
+            de->file_type = file_type;
+            memcpy(de->name, name, name_len);
+
+            ext2_write_block(fs, new_blk, block_data);
+            dir_inode.i_mtime = 0;
+            ext2_write_inode(fs, dir_ino, &dir_inode);
+            return 0;
+        }
+
+        if (ext2_read_block(fs, phys, block_data) != 0)
+            return -EIO;
+
+        uint32_t off = 0;
+        while (off < fs->block_size) {
+            ext2_dirent_t *de = (ext2_dirent_t *)(block_data + off);
+            if (de->rec_len == 0) break;
+
+            uint32_t occupied = ALIGN4(sizeof(ext2_dirent_t) + de->name_len);
+            if (de->inode == 0) {
+                // Deleted entry — check if rec_len covers enough space
+                if (de->rec_len >= new_len) {
+                    if (de->rec_len - new_len >= (uint32_t)(sizeof(ext2_dirent_t) + 4)) {
+                        // Split: truncate this entry to new_len, create
+                        // a remainder deleted placeholder after it
+                        ext2_dirent_t *rem = (ext2_dirent_t *)(block_data + off + new_len);
+                        rem->inode = 0;
+                        rem->rec_len = de->rec_len - new_len;
+                        rem->name_len = 0;
+                        rem->file_type = 0;
+                        de->rec_len = new_len;
+                    }
+                    // else: no split — keep original rec_len so the next
+                    // entry remains reachable via the original rec_len chain.
+                    de->inode     = new_ino;
+                    de->name_len  = (uint8_t)name_len;
+                    de->file_type = file_type;
+                    memcpy(de->name, name, name_len);
+
+                    ext2_write_block(fs, phys, block_data);
+                    dir_inode.i_mtime = 0;
+                    ext2_write_inode(fs, dir_ino, &dir_inode);
+                    return 0;
+                }
+            } else if (de->rec_len - occupied >= new_len) {
+                uint32_t old_rec_len = de->rec_len;
+                de->rec_len = occupied;
+
+                ext2_dirent_t *new_de = (ext2_dirent_t *)(block_data + off + occupied);
+                new_de->inode     = new_ino;
+                new_de->rec_len   = old_rec_len - occupied;
+                new_de->name_len  = (uint8_t)name_len;
+                new_de->file_type = file_type;
+                memcpy(new_de->name, name, name_len);
+
+                ext2_write_block(fs, phys, block_data);
+                dir_inode.i_mtime = 0;
+                ext2_write_inode(fs, dir_ino, &dir_inode);
+                return 0;
+            }
+            off += de->rec_len;
+        }
+    }
+}
+
+// ── Remove a directory entry ────────────────────────────
+static int dirent_del(ext2_fs_t *fs, uint32_t dir_ino, const char *name)
+{
+    uint32_t target_ino, block, off;
+    uint8_t file_type;
+    int ret = ext2_find_dirent(fs, dir_ino, name,
+                               &target_ino, &file_type, &block, &off);
+    if (ret != 0) return ret;
+
+    uint8_t block_data[4096];
+    if (ext2_read_block(fs, block, block_data) != 0)
+        return -EIO;
+
+    ext2_dirent_t *de = (ext2_dirent_t *)(block_data + off);
+    de->inode = 0;
+
+    // Merge rec_len into previous entry
+    ext2_dirent_t *prev = NULL;
+    for (uint32_t cur = 0; cur < off; ) {
+        ext2_dirent_t *cur_de = (ext2_dirent_t *)(block_data + cur);
+        if (cur_de->rec_len == 0) break;
+        prev = cur_de;
+        cur += cur_de->rec_len;
+    }
+    if (prev && prev != de) {
+        prev->rec_len += de->rec_len;
+    }
+
+    ext2_write_block(fs, block, block_data);
+
+    ext2_inode_t dir_inode;
+    if (ext2_read_inode(fs, dir_ino, &dir_inode) == 0) {
+        dir_inode.i_mtime = 0;
+        ext2_write_inode(fs, dir_ino, &dir_inode);
+    }
+    return 0;
+}
+
 // ── VFS read implementation ─────────────────────────────
 static int ext2_vfs_read(struct vfs_node *node, uint64_t offset,
                           uint64_t size, void *buffer)
