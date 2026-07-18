@@ -17,6 +17,7 @@
 #include <kernel/percpu.h>
 #include <device/timer.h>    // jiffies
 #include <stddef.h>
+#include <errno.h>
 
 // Forward: devfs_poll lives in devfs.c (devices[] is static there)
 struct vfs_node;
@@ -154,4 +155,123 @@ uint32_t fd_poll(file_t *f, poll_table_t *pt)
     default:
         return POLLNVAL;
     }
+}
+
+// ── do_poll — poll syscall implementation ────────────────
+//
+// Linux ABI: int poll(struct pollfd *fds, nfds_t nfds, int timeout)
+//   timeout: -1 = infinite, 0 = non-blocking, >0 = milliseconds
+// Returns: count of ready fds, 0 = timeout, <0 = -errno
+//
+// Signal semantics: any unblocked signal (not just fatal) interrupts
+// poll with -EINTR, per POSIX.
+
+// ── Global poll state (single-CPU safe; will need per-CPU for SMP) ──
+wait_queue_t *current_poll_wq = NULL;
+uint64_t poll_deadline_jiffies = 0;
+
+int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val)
+{
+    // ── Validate user pointer ──────────────────────────────
+    if ((uint64_t)user_fds >= current->addr_limit)
+        return -EFAULT;
+    if (nfds == 0)
+        return 0;
+    if (nfds > POLL_MAX_FDS)
+        return -EINVAL;
+
+    // ── Copy pollfd from user space ────────────────────────
+    struct pollfd kfds[POLL_MAX_FDS];
+    for (uint32_t i = 0; i < nfds; i++) {
+        kfds[i].fd      = user_fds[i].fd;
+        kfds[i].events  = user_fds[i].events;
+        kfds[i].revents = 0;
+    }
+
+    // ── Signal check: any unblocked pending signal → EINTR ─
+    if (current->signal & ~current->blocked)
+        return -EINTR;
+
+    // ── Setup poll table (one-time wq init) ────────────────
+    poll_table_t pt;
+    poll_table_setup(&pt);
+
+    // ── Timeout setup ──────────────────────────────────────
+    uint64_t deadline = 0;
+    if (timeout_val > 0) {
+        // Convert ms to PIT ticks (100 Hz → 10 ms/tick)
+        int ticks = (timeout_val + 9) / 10;
+        if (ticks < 1) ticks = 1;
+        poll_deadline_jiffies = jiffies + (uint64_t)ticks;
+        deadline = poll_deadline_jiffies;
+        current_poll_wq = &pt.wq;
+    }
+
+    int ready_count = 0;
+
+    for (;;) {
+        poll_table_init(&pt);  // reset nent=0, triggered=false
+
+        // ── Scan all fds ──────────────────────────────────
+        for (uint32_t i = 0; i < nfds; i++) {
+            if (kfds[i].fd < 0) continue;
+
+            file_t *f = current->files->fd[kfds[i].fd];
+            if (!f) {
+                kfds[i].revents = POLLNVAL;
+                ready_count++;
+                continue;
+            }
+
+            uint32_t revents = fd_poll(f, &pt);
+            if (revents & kfds[i].events) {
+                kfds[i].revents = revents & kfds[i].events;
+                ready_count++;
+                pt.triggered = true;
+            }
+        }
+
+        // ── Ready? Return ─────────────────────────────────
+        if (ready_count > 0) {
+            poll_table_cleanup(&pt);
+            if (timeout_val > 0) current_poll_wq = NULL;  // prevent dangling ptr
+            break;
+        }
+
+        // ── Non-blocking? ─────────────────────────────────
+        if (timeout_val == 0) {
+            poll_table_cleanup(&pt);
+            break;
+        }
+
+        // ── Pre-sleep signal check ────────────────────────
+        if (current->signal & ~current->blocked) {
+            poll_table_cleanup(&pt);
+            if (timeout_val > 0) current_poll_wq = NULL;
+            return -EINTR;
+        }
+
+        // ── Block on pt.wq ────────────────────────────────
+        wait_queue_sleep(&pt.wq);
+
+        // Woken up — remove entries from fd poll lists
+        if (timeout_val > 0) current_poll_wq = NULL;
+        poll_table_cleanup(&pt);
+
+        // ── Timeout check ─────────────────────────────────
+        if (timeout_val > 0 && jiffies >= deadline)
+            return 0;
+
+        // ── Post-sleep signal check ───────────────────────
+        if (current->signal & ~current->blocked)
+            return -EINTR;
+
+        ready_count = 0;
+    }
+
+    // ── Copy revents back to user space ────────────────────
+    for (uint32_t i = 0; i < nfds; i++)
+        user_fds[i].revents = kfds[i].revents;
+
+    return ready_count;
 }
