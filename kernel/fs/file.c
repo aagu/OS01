@@ -265,26 +265,36 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
         const uint8_t *src = (const uint8_t *)buf;
         uint64_t total = 0;
 
-        while (total < size) {
+        for (;;) {
             uint64_t flags = spin_lock_irqsave(&p->lock);
 
             while (total < size && !pipe_full(p)) {
                 p->buf[p->head] = src[total++];
                 p->head = (p->head + 1) % PIPE_SIZE;
             }
+
+            if (total > 0) {
+                // Wrote some data — wake blocked readers, return
+                pipe_wake_readers(p);
+                spin_unlock_irqrestore(&p->lock, flags);
+                return (int64_t)total;
+            }
+
+            // Pipe is full (total == 0)
+            // Check if any reader still exists
+            if (p->readers == 0) {
+                spin_unlock_irqrestore(&p->lock, flags);
+                return -EPIPE;
+            }
+
             spin_unlock_irqrestore(&p->lock, flags);
 
-            if (total == size) break;
+            // Block on pipe's write_wait (not busy-loop schedule)
+            wait_queue_sleep(&p->write_wait);
 
-            // Pipe full — check if any reader still exists
-            if (p->readers == 0)
-                return -EPIPE;
-
-            // Yield CPU so the reader can consume data
-            schedule();
+            if (signal_pending_fatal())
+                return -EINTR;
         }
-
-        return (int64_t)total;
     }
     default:
         return -1;
