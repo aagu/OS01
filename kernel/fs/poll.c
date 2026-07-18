@@ -18,6 +18,10 @@
 #include <device/timer.h>    // jiffies
 #include <stddef.h>
 
+// Forward: devfs_poll lives in devfs.c (devices[] is static there)
+struct vfs_node;
+uint32_t devfs_poll(struct vfs_node *node, poll_table_t *pt);
+
 // ── poll_table_init — reset for new scan round ─────────────
 // Does NOT re-init wq or entry nodes (one-time setup).
 
@@ -68,4 +72,86 @@ void poll_table_cleanup(poll_table_t *pt)
         }
     }
     pt->nent = 0;
+}
+
+// ── fd_poll — check readiness of a single fd ──────────────
+// Returns a mask of poll event flags.  If the fd is NOT ready
+// and pt is non-NULL, calls poll_wait() to register on the fd's
+// private poll list for later cascade-wake.
+//
+// FD types:
+//   FD_VFS  — plain files: always ready
+//   FD_DEV  — delegate to devfs_poll() (e.g. /dev/tty)
+//   FD_PIPE — check ring buffer; if empty/full, poll_wait
+
+static inline int pipe_empty(pipe_t *p) { return p->head == p->tail; }
+static inline int pipe_full(pipe_t *p)  { return ((p->head + 1) % PIPE_SIZE) == p->tail; }
+
+uint32_t fd_poll(file_t *f, poll_table_t *pt)
+{
+    if (!f) return POLLNVAL;
+
+    switch (f->type) {
+
+    case FD_VFS:
+        // Plain files are always ready for read and write
+        if (f->flags == O_RDONLY || f->flags == O_RDWR)
+            return POLLIN | POLLRDNORM;
+        if (f->flags == O_WRONLY || f->flags == O_RDWR)
+            return POLLOUT | POLLWRNORM;
+        return 0;
+
+    case FD_DEV:
+        // /dev devices — delegate to devfs_poll()
+        if (!f->node) return POLLNVAL;
+        return devfs_poll(f->node, pt);
+
+    case FD_PIPE: {
+        pipe_t *p = f->pipe;
+        if (!p) return POLLERR;
+
+        uint32_t mask = 0;
+        uint64_t flags = spin_lock_irqsave(&p->lock);
+
+        if (f->flags == O_RDONLY) {
+            if (!pipe_empty(p))
+                mask |= POLLIN;
+            else if (p->writers == 0)
+                mask |= POLLHUP;
+            else if (pt && !pt->triggered)
+                poll_wait(pt, &p->read_poll, &p->lock);
+        }
+
+        if (f->flags == O_WRONLY) {
+            if (!pipe_full(p))
+                mask |= POLLOUT;
+            else if (p->readers == 0)
+                mask |= POLLERR;
+            else if (pt && !pt->triggered)
+                poll_wait(pt, &p->write_poll, &p->lock);
+        }
+
+        if (f->flags == O_RDWR) {
+            if (!pipe_empty(p))
+                mask |= POLLIN;
+            else if (p->writers == 0)
+                mask |= POLLHUP;
+            else if (pt && !pt->triggered)
+                poll_wait(pt, &p->read_poll, &p->lock);
+
+            if (!pipe_full(p))
+                mask |= POLLOUT;
+            else if (p->readers == 0)
+                mask |= POLLERR;
+            else if (pt && !pt->triggered)
+                poll_wait(pt, &p->write_poll, &p->lock);
+        }
+
+        spin_unlock_irqrestore(&p->lock, flags);
+        return mask;
+    }
+
+    default:
+        return POLLNVAL;
+    }
 }
