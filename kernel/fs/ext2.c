@@ -1033,6 +1033,145 @@ static int ext2_vfs_readdir(struct vfs_node *node, uint64_t index,
     return 0;
 }
 
+// ── VFS rename ──────────────────────────────────────────
+static int ext2_vfs_rename(struct vfs_node *olddir, const char *oldname,
+                            struct vfs_node *newdir, const char *newname)
+{
+    if (!olddir || !olddir->mount || !oldname || !newdir || !newdir->mount || !newname)
+        return -EINVAL;
+    ext2_fs_t *fs = (ext2_fs_t *)olddir->mount->fs_data;
+
+    spin_lock(&fs->lock);
+
+    uint32_t old_ino = ext2_node_ino(olddir);
+    uint32_t new_ino_dir = ext2_node_ino(newdir);
+    uint32_t target_ino, block, off;
+    uint8_t file_type;
+
+    int ret = ext2_find_dirent(fs, old_ino, oldname,
+                               &target_ino, &file_type, &block, &off);
+    if (ret != 0) { spin_unlock(&fs->lock); return ret; }
+
+    // Check if target exists in newdir
+    uint32_t exist_ino, exist_block, exist_off;
+    uint8_t exist_type;
+    int exists = ext2_find_dirent(fs, new_ino_dir, newname,
+                                  &exist_ino, &exist_type,
+                                  &exist_block, &exist_off);
+
+    if (exists == 0) {
+        // POSIX: cannot overwrite non-empty directory
+        if (exist_type == 2 /* EXT2_FT_DIR */) {
+            ext2_inode_t exist_inode;
+            ext2_read_inode(fs, exist_ino, &exist_inode);
+            // Check if non-empty (same pattern as rmdir)
+            uint8_t bd[4096];
+            for (uint32_t bi = 0; ; bi++) {
+                uint32_t p = ext2_bmap(fs, &exist_inode, bi);
+                if (p == 0) break;
+                ext2_read_block(fs, p, bd);
+                uint32_t o2 = 0;
+                while (o2 < fs->block_size) {
+                    ext2_dirent_t *de = (ext2_dirent_t *)(bd + o2);
+                    if (de->rec_len == 0) break;
+                    if (de->inode != 0 && de->inode != exist_ino && de->inode != new_ino_dir) {
+                        spin_unlock(&fs->lock); return -ENOTEMPTY;
+                    }
+                    o2 += de->rec_len;
+                }
+            }
+            // Empty directory — remove it first
+            // Free all data blocks before freeing the inode (same as rmdir §5.6)
+            ext2_inode_t exist_inode2;
+            ext2_read_inode(fs, exist_ino, &exist_inode2);
+            for (int i = 0; i < 12; i++) {
+                if (exist_inode2.i_block[i]) free_block(fs, exist_inode2.i_block[i]);
+            }
+            if (exist_inode2.i_block[12]) {
+                uint32_t indirect[1024];
+                uint32_t pps = fs->block_size / sizeof(uint32_t);
+                ext2_read_block(fs, exist_inode2.i_block[12], indirect);
+                for (uint32_t k = 0; k < pps; k++)
+                    if (indirect[k]) free_block(fs, indirect[k]);
+                free_block(fs, exist_inode2.i_block[12]);
+            }
+            dirent_del(fs, new_ino_dir, newname);
+            free_inode(fs, exist_ino);
+        } else {
+            // Overwrite file — unlink it first
+            // Write ordering (spec §6.1): dirent → inode → bitmap → sb → data
+            dirent_del(fs, new_ino_dir, newname);
+
+            ext2_inode_t exist_inode;
+            ext2_read_inode(fs, exist_ino, &exist_inode);
+            exist_inode.i_links_count--;
+            if (exist_inode.i_links_count == 0) {
+                ext2_write_inode(fs, exist_ino, &exist_inode);
+                free_inode(fs, exist_ino);
+                // Now free data blocks (after inode is gone from bitmap)
+                for (int i = 0; i < 12; i++) {
+                    if (exist_inode.i_block[i]) free_block(fs, exist_inode.i_block[i]);
+                }
+                if (exist_inode.i_block[12]) {
+                    uint32_t indirect[1024];
+                    uint32_t pps = fs->block_size / sizeof(uint32_t);
+                    ext2_read_block(fs, exist_inode.i_block[12], indirect);
+                    for (uint32_t k = 0; k < pps; k++)
+                        if (indirect[k]) free_block(fs, indirect[k]);
+                    free_block(fs, exist_inode.i_block[12]);
+                }
+            } else {
+                ext2_write_inode(fs, exist_ino, &exist_inode);
+            }
+        }
+    }
+
+    // Perform the move
+    dirent_add(fs, new_ino_dir, newname, target_ino, file_type);
+    dirent_del(fs, old_ino, oldname);
+
+    // Update ctime
+    ext2_inode_t target_inode;
+    if (ext2_read_inode(fs, target_ino, &target_inode) == 0) {
+        target_inode.i_ctime = 0;
+        ext2_write_inode(fs, target_ino, &target_inode);
+    }
+
+    // Cross-directory directory move: adjust ".." and link counts
+    if (file_type == 2 /* EXT2_FT_DIR */ && old_ino != new_ino_dir) {
+        // Update ".." in moved directory
+        ext2_inode_t moved_inode;
+        ext2_read_inode(fs, target_ino, &moved_inode);
+        uint32_t first_block = moved_inode.i_block[0];
+        uint8_t dir_data[4096];
+        ext2_read_block(fs, first_block, dir_data);
+
+        ext2_dirent_t *dotdot = (ext2_dirent_t *)(dir_data + 12);
+        dotdot->inode = new_ino_dir;
+        ext2_write_block(fs, first_block, dir_data);
+
+        // Adjust link counts
+        ext2_inode_t old_inode, new_inode;
+        ext2_read_inode(fs, old_ino, &old_inode);
+        old_inode.i_links_count--;
+        ext2_write_inode(fs, old_ino, &old_inode);
+
+        ext2_read_inode(fs, new_ino_dir, &new_inode);
+        new_inode.i_links_count++;
+        ext2_write_inode(fs, new_ino_dir, &new_inode);
+
+        // Adjust used_dirs_count per group
+        uint32_t old_group = (old_ino - 1) / fs->inodes_per_group;
+        uint32_t new_group = (new_ino_dir - 1) / fs->inodes_per_group;
+        fs->bgdesc_table[old_group].bg_used_dirs_count--;
+        fs->bgdesc_table[new_group].bg_used_dirs_count++;
+        ext2_write_superblock(fs);
+    }
+
+    spin_unlock(&fs->lock);
+    return 0;
+}
+
 // ── VFS operations table ────────────────────────────────
 struct vfs_ops ext2_vfs_ops = {
     .flags   = 0,  // case-sensitive
@@ -1043,7 +1182,7 @@ struct vfs_ops ext2_vfs_ops = {
     .unlink  = ext2_vfs_unlink,
     .mkdir   = ext2_vfs_mkdir,
     .rmdir   = ext2_vfs_rmdir,
-    .rename  = NULL,
+    .rename  = ext2_vfs_rename,
     .truncate = ext2_vfs_truncate,
 };
 
