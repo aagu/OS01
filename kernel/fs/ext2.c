@@ -53,6 +53,28 @@ static int ext2_read_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *out)
     return 0;
 }
 
+// ── Write an inode to disk ─────────────────────────────
+static int ext2_write_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *inode)
+{
+    if (ino == 0) return -1;
+    uint32_t group = (ino - 1) / fs->inodes_per_group;
+    uint32_t index = (ino - 1) % fs->inodes_per_group;
+    if (group >= fs->num_block_groups) return -1;
+
+    uint32_t table_start    = fs->bgdesc_table[group].bg_inode_table;
+    uint32_t inodes_per_blk = fs->block_size / fs->inode_size;
+    uint32_t block_off      = index / inodes_per_blk;
+    uint32_t inode_off      = (index % inodes_per_blk) * fs->inode_size;
+
+    // Read full block, modify inode slot, write back
+    uint8_t buf[4096];
+    if (ext2_read_block(fs, table_start + block_off, buf) != 0)
+        return -1;
+
+    memcpy(buf + inode_off, inode, sizeof(ext2_inode_t));
+    return ext2_write_block(fs, table_start + block_off, buf);
+}
+
 // ── Map logical block → physical (direct + single indirect) ─
 static uint32_t ext2_bmap(ext2_fs_t *fs, ext2_inode_t *inode,
                           uint32_t logical_block)
