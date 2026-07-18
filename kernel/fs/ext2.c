@@ -788,6 +788,187 @@ static int ext2_vfs_unlink(struct vfs_node *dir, const char *name)
     return 0;
 }
 
+// ── VFS mkdir ──────────────────────────────────────────
+static struct vfs_node *ext2_vfs_mkdir(struct vfs_node *dir, const char *name)
+{
+    if (!dir || !dir->mount || !name) return NULL;
+    ext2_fs_t *fs = (ext2_fs_t *)dir->mount->fs_data;
+
+    spin_lock(&fs->lock);
+
+    uint32_t dir_ino = ext2_node_ino(dir);
+
+    uint32_t dummy_ino, dummy_block, dummy_off;
+    uint8_t dummy_type;
+    if (ext2_find_dirent(fs, dir_ino, name, &dummy_ino, &dummy_type,
+                         &dummy_block, &dummy_off) == 0) {
+        spin_unlock(&fs->lock); return NULL;
+    }
+
+    uint32_t new_ino = alloc_inode(fs, EXT2_S_IFDIR | 0755);
+    if (new_ino == 0) { spin_unlock(&fs->lock); return NULL; }
+
+    // Allocate data block for "." and ".."
+    uint32_t dir_blk = alloc_block(fs);
+    if (dir_blk == 0) {
+        free_inode(fs, new_ino);
+        spin_unlock(&fs->lock); return NULL;
+    }
+
+    // Read inode to update i_block
+    ext2_inode_t new_inode;
+    if (ext2_read_inode(fs, new_ino, &new_inode) != 0) {
+        free_block(fs, dir_blk); free_inode(fs, new_ino);
+        spin_unlock(&fs->lock); return NULL;
+    }
+    new_inode.i_block[0] = dir_blk;
+    new_inode.i_blocks = fs->block_size / 512;
+    new_inode.i_size = fs->block_size;
+    new_inode.i_links_count = 2;
+    ext2_write_inode(fs, new_ino, &new_inode);
+
+    // Initialize directory block with "." and ".."
+    uint8_t block_data[4096];
+    memset(block_data, 0, fs->block_size);
+
+    ext2_dirent_t *dot = (ext2_dirent_t *)block_data;
+    dot->inode    = new_ino;
+    dot->rec_len  = 12;
+    dot->name_len = 1;
+    dot->file_type = 2;  // EXT2_FT_DIR
+    memcpy(dot->name, ".", 1);
+
+    ext2_dirent_t *dotdot = (ext2_dirent_t *)(block_data + 12);
+    dotdot->inode    = dir_ino;
+    dotdot->rec_len  = fs->block_size - 12;
+    dotdot->name_len = 2;
+    dotdot->file_type = 2;
+    memcpy(dotdot->name, "..", 2);
+
+    ext2_write_block(fs, dir_blk, block_data);
+
+    // Update parent directory
+    uint32_t parent_group = (dir_ino - 1) / fs->inodes_per_group;
+    fs->bgdesc_table[parent_group].bg_used_dirs_count++;
+    ext2_inode_t dir_inode;
+    ext2_read_inode(fs, dir_ino, &dir_inode);
+    dir_inode.i_links_count++;
+    ext2_write_inode(fs, dir_ino, &dir_inode);
+
+    ext2_write_superblock(fs);
+
+    if (dirent_add(fs, dir_ino, name, new_ino, 2 /* EXT2_FT_DIR */) != 0) {
+        // Rollback: free dir block, free inode, decrement parent links
+        free_block(fs, dir_blk);
+        free_inode(fs, new_ino);
+        dir_inode.i_links_count--;
+        fs->bgdesc_table[parent_group].bg_used_dirs_count--;
+        ext2_write_inode(fs, dir_ino, &dir_inode);
+        ext2_write_superblock(fs);
+        spin_unlock(&fs->lock); return NULL;
+    }
+
+    spin_unlock(&fs->lock);
+
+    // Build vfs_node_t
+    vfs_node_t *node = calloc(1, sizeof(vfs_node_t));
+    if (!node) return NULL;
+
+    size_t nlen = strlen(name);
+    if (nlen >= VFS_NAME_MAX) nlen = VFS_NAME_MAX - 1;
+    memcpy(node->name, name, nlen);
+    node->name[nlen] = '\0';
+    node->type = VFS_DIR;
+    node->mount = dir->mount;
+    node->ops = dir->ops;
+    node->fs_data = (void *)(uintptr_t)new_ino;
+    node->size = fs->block_size;
+    node->refcount = 1;
+
+    return node;
+}
+
+// ── VFS rmdir ──────────────────────────────────────────
+static int ext2_vfs_rmdir(struct vfs_node *dir, const char *name)
+{
+    if (!dir || !dir->mount || !name) return -EINVAL;
+    ext2_fs_t *fs = (ext2_fs_t *)dir->mount->fs_data;
+
+    spin_lock(&fs->lock);
+
+    uint32_t dir_ino = ext2_node_ino(dir);
+    uint32_t target_ino, block, off;
+    uint8_t file_type;
+
+    int ret = ext2_find_dirent(fs, dir_ino, name,
+                               &target_ino, &file_type, &block, &off);
+    if (ret != 0) { spin_unlock(&fs->lock); return ret; }
+
+    if (file_type != 2 /* EXT2_FT_DIR */) {
+        spin_unlock(&fs->lock); return -ENOTDIR;
+    }
+
+    ext2_inode_t target_inode;
+    if (ext2_read_inode(fs, target_ino, &target_inode) != 0) {
+        spin_unlock(&fs->lock); return -EIO;
+    }
+
+    // Check directory is empty (only "." and ".." entries with valid inode)
+    uint8_t block_data[4096];
+    for (uint32_t blk_idx = 0; ; blk_idx++) {
+        uint32_t phys = ext2_bmap(fs, &target_inode, blk_idx);
+        if (phys == 0) break;
+        if (ext2_read_block(fs, phys, block_data) != 0) break;
+
+        uint32_t off2 = 0;
+        while (off2 < fs->block_size) {
+            ext2_dirent_t *de = (ext2_dirent_t *)(block_data + off2);
+            if (de->rec_len == 0) break;
+
+            if (de->inode != 0 &&
+                de->inode != target_ino &&
+                de->inode != dir_ino) {
+                spin_unlock(&fs->lock); return -ENOTEMPTY;
+            }
+            off2 += de->rec_len;
+        }
+    }
+
+    // Remove dirent from parent
+    dirent_del(fs, dir_ino, name);
+
+    // Decrement parent links_count
+    ext2_inode_t dir_inode;
+    ext2_read_inode(fs, dir_ino, &dir_inode);
+    dir_inode.i_links_count--;
+    ext2_write_inode(fs, dir_ino, &dir_inode);
+
+    // Update parent group used_dirs_count
+    uint32_t parent_group = (dir_ino - 1) / fs->inodes_per_group;
+    fs->bgdesc_table[parent_group].bg_used_dirs_count--;
+    ext2_write_superblock(fs);
+
+    // Free all data blocks of target directory
+    for (int i = 0; i < 12; i++) {
+        if (target_inode.i_block[i] != 0) {
+            free_block(fs, target_inode.i_block[i]);
+        }
+    }
+    if (target_inode.i_block[12] != 0) {
+        uint32_t ptrs_per_block = fs->block_size / sizeof(uint32_t);
+        uint32_t indirect[1024];
+        ext2_read_block(fs, target_inode.i_block[12], indirect);
+        for (uint32_t i = 0; i < ptrs_per_block; i++) {
+            if (indirect[i] != 0) free_block(fs, indirect[i]);
+        }
+        free_block(fs, target_inode.i_block[12]);
+    }
+    free_inode(fs, target_ino);
+
+    spin_unlock(&fs->lock);
+    return 0;
+}
+
 // ── VFS readdir implementation ──────────────────────────
 static int ext2_vfs_readdir(struct vfs_node *node, uint64_t index,
                              struct vfs_dirent *entry)
@@ -860,8 +1041,8 @@ struct vfs_ops ext2_vfs_ops = {
     .readdir = ext2_vfs_readdir,
     .create  = ext2_vfs_create,
     .unlink  = ext2_vfs_unlink,
-    .mkdir   = NULL,
-    .rmdir   = NULL,
+    .mkdir   = ext2_vfs_mkdir,
+    .rmdir   = ext2_vfs_rmdir,
     .rename  = NULL,
     .truncate = ext2_vfs_truncate,
 };
