@@ -52,6 +52,9 @@
 #define SYS_mprotect    45
 #define SYS_munmap      46
 #define SYS_futex      47
+#define SYS_poll       48
+#define SYS_ppoll      49   // v1: stub (returns -ENOSYS)
+#define SYS_select     50   // v1: adaptor on top of do_poll
 
 // ── Generic syscall helper ─────────────────────────────────
 

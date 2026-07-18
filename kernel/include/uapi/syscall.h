@@ -67,6 +67,11 @@
 // ── Phase 8: futex
 #define SYS_futex        47
 
+// ── Phase 9: poll / select
+#define SYS_poll         48
+#define SYS_ppoll        49
+#define SYS_select       50
+
 // ── reboot(2) commands ──────────────────────────────────────
 #define RB_AUTOBOOT    0x01234567
 #define RB_POWER_OFF   0x4321FEDC

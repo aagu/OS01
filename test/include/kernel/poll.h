@@ -84,4 +84,7 @@ void poll_table_cleanup(poll_table_t *pt);
 struct file;
 uint32_t fd_poll(struct file *f, struct poll_table *pt);
 
+// do_poll — poll(2) syscall implementation.
+int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout);
+
 #endif // _KERNEL_POLL_H

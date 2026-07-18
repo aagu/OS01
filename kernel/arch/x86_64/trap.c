@@ -27,6 +27,7 @@ typedef int pid_t;
 #include <fs/vfs.h>
 #include <kernel/debug.h>
 #include <kernel/file.h>
+#include <kernel/poll.h>     // struct pollfd, do_poll()
 #include <device/timer.h>
 #include <uapi/time.h>
 #include <kernel.h>
@@ -893,6 +894,9 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         [43] = "sigreturn",
         [45] = "poweroff",
         [47] = "futex",
+        [48] = "poll",
+        [49] = "ppoll",
+        [50] = "select",
     };
     const char *sname = (regs->rax < 64 && syscall_names[regs->rax])
                         ? syscall_names[regs->rax] : "?";
@@ -2057,6 +2061,21 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         default:
             regs->rax = -EINVAL;
         }
+        break;
+    }
+    case SYS_poll: {
+        int64_t nfds64 = (int64_t)regs->rsi;
+        regs->rax = do_poll((struct pollfd *)regs->rdi,
+                            (uint64_t)nfds64,
+                            (int)regs->rdx);
+        break;
+    }
+    case SYS_ppoll: {
+        regs->rax = -ENOSYS;
+        break;
+    }
+    case SYS_select: {
+        regs->rax = -ENOSYS;
         break;
     }
     default:
