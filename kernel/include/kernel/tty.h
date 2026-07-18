@@ -6,6 +6,8 @@
 #include <list.h>
 #include <kernel/arch/spinlock.h>
 typedef int pid_t;  /* for termios.h userspace declarations */
+
+struct poll_table;  /* forward declaration — full definition in kernel/poll.h */
 #include <termios.h>
 
 #define TTY_BUF_SIZE  256
@@ -79,5 +81,9 @@ tty_t *get_dev_tty(void);
 // TTY ioctl — handles TCGETS/TCSETS/TCSETSW for line discipline control.
 // Returns 0 on success or -errno on failure.
 int tty_ioctl(tty_t *tty, int cmd, void *arg);
+
+// TTY poll — check if input is available.  Returns POLLIN/POLLOUT mask.
+// If not ready, registers a poll_wait_entry on read_poll.
+uint32_t tty_poll(tty_t *tty, struct poll_table *pt);
 
 #endif

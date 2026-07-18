@@ -5,6 +5,7 @@
 #include <driver/serial.h>
 #include <driver/keyboard.h>
 #include <kernel.h>
+#include <kernel/poll.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
@@ -62,12 +63,22 @@ static bool tty_cooked_pop(tty_t *tty, char *c)
 
 static void tty_wake_waiters(tty_t *tty)
 {
+    // 1. Wake direct blocking reader tasks (tty_read path)
     while (!list_is_empty(&tty->read_wait)) {
         list_t *node = tty->read_wait.next;
         list_del_init(node);
         task_t *t = container_of(node, task_t, io_wait_node);
         t->state = TASK_RUNNING;
     }
+
+    // 2. Cascade-wake all poll waiters (fd_poll path)
+    while (!list_is_empty(&tty->read_poll)) {
+        list_t *node = tty->read_poll.next;
+        list_del_init(node);
+        poll_wait_entry_t *e = container_of(node, poll_wait_entry_t, node);
+        wait_queue_wake_all(e->poll_wq);
+    }
+
     // Notify the scheduler that a task was woken — otherwise the
     // current CPU may sit in hlt (idle) until the next timer tick.
     this_cpu()->need_resched = 1;
@@ -296,6 +307,31 @@ int tty_write(tty_t *tty, const char *buf, int size)
     for (int i = 0; i < size; i++)
         tty->output_char(buf[i]);
     return size;
+}
+
+// ── tty_poll — check TTY readiness ───────────────────────
+// TTY is always writable.  Readable if cooked ring buffer
+// has data.  If not ready and pt is provided, register a
+// poll_wait_entry on tty->read_poll for cascade wake when
+// tty_push_input() → tty_wake_waiters() fires.
+
+uint32_t tty_poll(tty_t *tty, poll_table_t *pt)
+{
+    uint32_t mask = 0;
+
+    // TTY output is always ready
+    mask |= POLLOUT | POLLWRNORM;
+
+    // Check cooked ring buffer
+    uint64_t flags = spin_lock_irqsave(&tty->cooked_lock);
+    if (tty->head != tty->tail) {
+        mask |= POLLIN | POLLRDNORM;
+    } else if (pt && !pt->triggered) {
+        poll_wait(pt, &tty->read_poll, &tty->cooked_lock);
+    }
+    spin_unlock_irqrestore(&tty->cooked_lock, flags);
+
+    return mask;
 }
 
 // ── ioctl — line discipline control ─────────────
