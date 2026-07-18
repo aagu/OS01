@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <kernel/poll.h>
 
 // ── Allocate a file_t ──────────────────────────────────────
 file_t *file_alloc(void)
@@ -144,6 +145,36 @@ static inline int pipe_empty(pipe_t *p)
 static inline int pipe_full(pipe_t *p)
 {
     return ((p->head + 1) % PIPE_SIZE) == p->tail;
+}
+
+// ── Pipe wake helpers ──────────────────────────────────────
+// Caller must hold p->lock.  Wake one direct waiter + all poll
+// entries.  Direct waiters use wait_queue_t (task_t.io_wait_node).
+// Poll entries use a plain list_t (poll_wait_entry_t.node).
+// Each poll entry cascades to wait_queue_wake_all(entry->poll_wq).
+
+static void pipe_wake_readers(pipe_t *p)
+{
+    wait_queue_wake_one(&p->read_wait);
+
+    while (!list_is_empty(&p->read_poll)) {
+        list_t *node = p->read_poll.next;
+        list_del_init(node);
+        poll_wait_entry_t *e = container_of(node, poll_wait_entry_t, node);
+        wait_queue_wake_all(e->poll_wq);
+    }
+}
+
+static void pipe_wake_writers(pipe_t *p)
+{
+    wait_queue_wake_one(&p->write_wait);
+
+    while (!list_is_empty(&p->write_poll)) {
+        list_t *node = p->write_poll.next;
+        list_del_init(node);
+        poll_wait_entry_t *e = container_of(node, poll_wait_entry_t, node);
+        wait_queue_wake_all(e->poll_wq);
+    }
 }
 
 // ── Read through a file descriptor ──────────────────────────
