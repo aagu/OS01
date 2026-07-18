@@ -96,6 +96,78 @@ static int ext2_write_superblock(ext2_fs_t *fs)
     return 0;
 }
 
+// ── Allocate a data block ──────────────────────────────
+// Scans block bitmaps across groups, updates sb_raw + bgdesc,
+// writes superblock+bgdesc to disk, zeroes the new block.
+// Returns block number or 0 on failure.
+static uint32_t alloc_block(ext2_fs_t *fs)
+{
+    for (uint32_t g = 0; g < fs->num_block_groups; g++) {
+        if (fs->bgdesc_table[g].bg_free_blocks_count == 0)
+            continue;
+
+        uint32_t bitmap_block = fs->bgdesc_table[g].bg_block_bitmap;
+        uint8_t buf[4096];
+        if (ext2_read_block(fs, bitmap_block, buf) != 0)
+            continue;
+
+        uint32_t blocks_in_group = fs->blocks_per_group;
+        uint32_t bit_count = blocks_in_group;
+        if (bit_count > fs->block_size * 8)
+            bit_count = fs->block_size * 8;
+
+        for (uint32_t byte_idx = 0; byte_idx < bit_count / 8; byte_idx++) {
+            if (buf[byte_idx] == 0xFF) continue;
+            for (int bit = 0; bit < 8; bit++) {
+                if (!(buf[byte_idx] & (1u << bit))) {
+                    buf[byte_idx] |= (1u << bit);
+                    // Block numbers are 0-based: group * blocks_per_group + bit_position
+                    uint32_t block = g * blocks_in_group + byte_idx * 8 + bit;
+
+                    ext2_write_block(fs, bitmap_block, buf);
+
+                    fs->bgdesc_table[g].bg_free_blocks_count--;
+                    fs->sb_raw.s_free_blocks_count--;
+                    ext2_write_superblock(fs);
+
+                    uint8_t zero[4096];
+                    memset(zero, 0, fs->block_size);
+                    ext2_write_block(fs, block, zero);
+
+                    return block;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+// ── Free a data block ──────────────────────────────────
+static void free_block(ext2_fs_t *fs, uint32_t block)
+{
+    if (block == 0) return;
+
+    // Block numbers are 0-based: group = block / blocks_per_group
+    uint32_t group = block / fs->blocks_per_group;
+    if (group >= fs->num_block_groups) return;
+
+    uint32_t index = block % fs->blocks_per_group;
+    uint32_t byte_idx = index / 8;
+    uint32_t bit      = index % 8;
+
+    uint32_t bitmap_block = fs->bgdesc_table[group].bg_block_bitmap;
+    uint8_t buf[4096];
+    if (ext2_read_block(fs, bitmap_block, buf) != 0)
+        return;
+
+    buf[byte_idx] &= ~(1u << bit);
+    ext2_write_block(fs, bitmap_block, buf);
+
+    fs->bgdesc_table[group].bg_free_blocks_count++;
+    fs->sb_raw.s_free_blocks_count++;
+    ext2_write_superblock(fs);
+}
+
 // ── Map logical block → physical (direct + single indirect) ─
 static uint32_t ext2_bmap(ext2_fs_t *fs, ext2_inode_t *inode,
                           uint32_t logical_block)
