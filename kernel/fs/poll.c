@@ -115,37 +115,45 @@ uint32_t fd_poll(file_t *f, poll_table_t *pt)
         uint64_t flags = spin_lock_irqsave(&p->lock);
 
         if (f->flags == O_RDONLY) {
-            if (!pipe_empty(p))
+            if (!pipe_empty(p)) {
                 mask |= POLLIN;
-            else if (p->writers == 0)
-                mask |= POLLHUP;
-            else if (pt && !pt->triggered)
+                if (p->writers == 0)
+                    mask |= POLLHUP;
+            } else if (p->writers == 0) {
+                mask |= POLLIN | POLLHUP;  // EOF: read() returns 0 immediately
+            } else if (pt && !pt->triggered) {
                 poll_wait(pt, &p->read_poll, &p->lock);
+            }
         }
 
         if (f->flags == O_WRONLY) {
-            if (!pipe_full(p))
+            if (!pipe_full(p)) {
                 mask |= POLLOUT;
-            else if (p->readers == 0)
-                mask |= POLLERR;
-            else if (pt && !pt->triggered)
+            } else if (p->readers == 0) {
+                mask |= POLLOUT | POLLERR;  // EPIPE: write() errors immediately
+            } else if (pt && !pt->triggered) {
                 poll_wait(pt, &p->write_poll, &p->lock);
+            }
         }
 
         if (f->flags == O_RDWR) {
-            if (!pipe_empty(p))
+            if (!pipe_empty(p)) {
                 mask |= POLLIN;
-            else if (p->writers == 0)
-                mask |= POLLHUP;
-            else if (pt && !pt->triggered)
+                if (p->writers == 0)
+                    mask |= POLLHUP;
+            } else if (p->writers == 0) {
+                mask |= POLLIN | POLLHUP;
+            } else if (pt && !pt->triggered) {
                 poll_wait(pt, &p->read_poll, &p->lock);
+            }
 
-            if (!pipe_full(p))
+            if (!pipe_full(p)) {
                 mask |= POLLOUT;
-            else if (p->readers == 0)
-                mask |= POLLERR;
-            else if (pt && !pt->triggered)
+            } else if (p->readers == 0) {
+                mask |= POLLOUT | POLLERR;
+            } else if (pt && !pt->triggered) {
                 poll_wait(pt, &p->write_poll, &p->lock);
+            }
         }
 
         spin_unlock_irqrestore(&p->lock, flags);
@@ -224,8 +232,12 @@ int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val)
             }
 
             uint32_t revents = fd_poll(f, &pt);
-            if (revents & kfds[i].events) {
-                kfds[i].revents = revents & kfds[i].events;
+            // fd is ready if it matches requested events OR has error/HUP
+            if ((revents & kfds[i].events) || (revents & (POLLHUP | POLLERR))) {
+                // Mask to requested events, but always include POLLHUP/POLLERR
+                // even if not requested (POSIX: output-only error flags).
+                kfds[i].revents = (revents & kfds[i].events)
+                                | (revents & (POLLHUP | POLLERR | POLLNVAL));
                 ready_count++;
                 pt.triggered = true;
             }
