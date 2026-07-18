@@ -659,7 +659,9 @@ static int ext2_vfs_truncate(struct vfs_node *node, uint64_t new_size)
                 uint32_t idx = lb - 12;
                 if (inode.i_block[12] != 0) {
                     uint32_t indirect[1024];
-                    ext2_read_block(fs, inode.i_block[12], indirect);
+                    if (ext2_read_block(fs, inode.i_block[12], indirect) != 0) {
+                        spin_unlock(&fs->lock); return -EIO;
+                    }
                     indirect[idx] = 0;
                     ext2_write_block(fs, inode.i_block[12], indirect);
 
@@ -772,7 +774,9 @@ static int ext2_vfs_unlink(struct vfs_node *dir, const char *name)
         if (inode.i_block[12] != 0) {
             uint32_t ptrs_per_block = fs->block_size / sizeof(uint32_t);
             uint32_t indirect[1024];
-            ext2_read_block(fs, inode.i_block[12], indirect);
+            if (ext2_read_block(fs, inode.i_block[12], indirect) != 0) {
+                spin_unlock(&fs->lock); return -EIO;
+            }
             for (uint32_t i = 0; i < ptrs_per_block; i++) {
                 if (indirect[i] != 0) {
                     free_block(fs, indirect[i]);
@@ -962,7 +966,9 @@ static int ext2_vfs_rmdir(struct vfs_node *dir, const char *name)
     if (target_inode.i_block[12] != 0) {
         uint32_t ptrs_per_block = fs->block_size / sizeof(uint32_t);
         uint32_t indirect[1024];
-        ext2_read_block(fs, target_inode.i_block[12], indirect);
+        if (ext2_read_block(fs, target_inode.i_block[12], indirect) != 0) {
+            spin_unlock(&fs->lock); return -EIO;
+        }
         for (uint32_t i = 0; i < ptrs_per_block; i++) {
             if (indirect[i] != 0) free_block(fs, indirect[i]);
         }
@@ -1086,7 +1092,10 @@ static int ext2_vfs_rename(struct vfs_node *olddir, const char *oldname,
                 }
             }
             // Empty directory — remove it first
-            // Free all data blocks before freeing the inode (same as rmdir §5.6)
+            // Write ordering (spec §6.1): dirent → bitmap → sb → data
+            dirent_del(fs, new_ino_dir, newname);
+
+            // Free all data blocks before freeing the inode
             ext2_inode_t exist_inode2;
             ext2_read_inode(fs, exist_ino, &exist_inode2);
             for (int i = 0; i < 12; i++) {
@@ -1095,12 +1104,13 @@ static int ext2_vfs_rename(struct vfs_node *olddir, const char *oldname,
             if (exist_inode2.i_block[12]) {
                 uint32_t indirect[1024];
                 uint32_t pps = fs->block_size / sizeof(uint32_t);
-                ext2_read_block(fs, exist_inode2.i_block[12], indirect);
+                if (ext2_read_block(fs, exist_inode2.i_block[12], indirect) != 0) {
+                    spin_unlock(&fs->lock); return -EIO;
+                }
                 for (uint32_t k = 0; k < pps; k++)
                     if (indirect[k]) free_block(fs, indirect[k]);
                 free_block(fs, exist_inode2.i_block[12]);
             }
-            dirent_del(fs, new_ino_dir, newname);
             free_inode(fs, exist_ino);
         } else {
             // Overwrite file — unlink it first
@@ -1120,7 +1130,9 @@ static int ext2_vfs_rename(struct vfs_node *olddir, const char *oldname,
                 if (exist_inode.i_block[12]) {
                     uint32_t indirect[1024];
                     uint32_t pps = fs->block_size / sizeof(uint32_t);
-                    ext2_read_block(fs, exist_inode.i_block[12], indirect);
+                    if (ext2_read_block(fs, exist_inode.i_block[12], indirect) != 0) {
+                        spin_unlock(&fs->lock); return -EIO;
+                    }
                     for (uint32_t k = 0; k < pps; k++)
                         if (indirect[k]) free_block(fs, indirect[k]);
                     free_block(fs, exist_inode.i_block[12]);
