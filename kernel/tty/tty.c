@@ -99,6 +99,7 @@ tty_t *tty_alloc(void (*output_char)(char), void (*echo_char)(char))
     tty->lflag = TTY_L_ICANON | TTY_L_ECHO | TTY_L_ISIG;
     tty->pgrp = 0;
     list_init(&tty->read_wait);
+    list_init(&tty->read_poll);
     spin_init(&tty->cooked_lock);
 
     tty->output_char = output_char ? output_char : tty_def_output;

@@ -38,6 +38,11 @@ typedef struct tty_struct {
     // Tasks blocked in tty_read() wait here.
     list_t      read_wait;
 
+    // ── Poll wait list ──────────────────────────
+    // Poll entries (poll_wait_entry_t.node) wait here.
+    // Also protected by cooked_lock.
+    list_t      read_poll;
+
     // ── Output callbacks ────────────────────────
     void (*output_char)(char c);   // primary output
     void (*echo_char)(char c);     // echo output (usually same as output_char)
