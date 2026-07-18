@@ -26,6 +26,22 @@
 // Set by timer IRQ on every tick, cleared by schedule() after
 // a context switch.  entry.S reads it via %gs:8.
 
+// ── Safe task-list iteration ─────────────────────────────
+// The global task list is written (list_add_to_before) without
+// synchronisation against readers (sched_unblock_blocked etc.).
+// On SMP a reader may see a partially-updated ->next, including
+// NULL.  Advance with the guard below to survive the window.
+static inline list_t *task_list_next(list_t *pos)
+{
+    list_t *next = pos->next;
+    if ((uintptr_t)next < 0x1000) {
+        log_err("[sched] task list corrupted at %p (next=%p), breaking\n",
+                (void *)pos, (void *)next);
+        return NULL;
+    }
+    return next;
+}
+
 // Global PID counter — atomic because spawn/fork/exec may
 // race on different CPUs.
 static volatile uint64_t pid_counter = 1;
@@ -76,8 +92,13 @@ void sched_unblock_blocked(void)
 {
     list_t *pos = init_task_union.task.list.next;
     while (pos != &init_task_union.task.list) {
+        if ((uintptr_t)pos < 0x1000) {
+            log_err("[sched] unblock scan: corrupted list pointer %p, breaking\n",
+                    (void *)pos);
+            break;
+        }
         task_t *t = container_of(pos, task_t, list);
-        pos = pos->next;
+        pos = task_list_next(pos);
 
         if (t->state != TASK_INTERRUPTIBLE)
             continue;
@@ -210,8 +231,16 @@ void schedule(void)
     {
         list_t *pos = init_task_union.task.list.next;
         while (pos != &init_task_union.task.list && reap_count < 64) {
+            // Defensive: a NULL or low pointer in the list means
+            // the list was corrupted (e.g. use-after-free).  Break
+            // instead of page-faulting.
+            if ((uintptr_t)pos < 0x1000) {
+                log_err("[sched] zombie scan: corrupted list pointer %p, breaking\n",
+                        (void *)pos);
+                break;
+            }
             task_t *t = container_of(pos, task_t, list);
-            pos = pos->next;
+            pos = task_list_next(pos);
             if (t->state != TASK_ZOMBIE || t == current)
                 continue;
 
@@ -236,8 +265,13 @@ void schedule(void)
     if (reap_count > 0) {
         list_t *pos = init_task_union.task.list.next;
         while (pos != &init_task_union.task.list) {
+            if ((uintptr_t)pos < 0x1000) {
+                log_err("[sched] orphan scan: corrupted list pointer %p, breaking\n",
+                        (void *)pos);
+                break;
+            }
             task_t *child = container_of(pos, task_t, list);
-            pos = pos->next;
+            pos = task_list_next(pos);
             if (!child->parent) continue;
             for (int i = 0; i < reap_count; i++) {
                 if (child->parent == reap_list[i]) {
@@ -284,7 +318,9 @@ void schedule(void)
             best_counter = next->counter;
             best = next;
         }
-        next = container_of(next->list.next, task_t, list);
+        list_t *nxt = task_list_next(&next->list);
+        if (!nxt) break;
+        next = container_of(nxt, task_t, list);
     }
     if (best) {
         next = best;
@@ -447,7 +483,7 @@ static bool waitpid_should_unblock(task_t *waiter)
 
     while (pos != &init_task_union.task.list) {
         task_t *t = container_of(pos, task_t, list);
-        pos = pos->next;
+        pos = task_list_next(pos);
 
         if (t->parent != waiter)
             continue;
@@ -487,7 +523,7 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
                 child = t;
                 break;
             }
-            pos = pos->next;
+            pos = task_list_next(pos);
         }
 
         if (child) {
@@ -526,7 +562,7 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
                 if (pid == -1 || t->pid == pid)
                     child_exists = 1;
             }
-            pos = pos->next;
+            pos = task_list_next(pos);
         }
         debug_task(" count=%d exist=%d\n", child_count, child_exists);
 
@@ -1259,7 +1295,7 @@ struct task_struct *create_kthread(uint64_t (*fn)(uint64_t), uint64_t arg,
         task_t *t = container_of(pos, task_t, list);
         if (t->pid == pid)
             return t;
-        pos = pos->next;
+        pos = task_list_next(pos);
     }
     return NULL;
 }
