@@ -6,14 +6,22 @@
 //   - Threads    (sys_thread_new)
 //   - Protection (sys_arch_protect, sys_arch_unprotect)
 //   - Time       (sys_now)
+//
+// lwIP 2.2.0 API: functions take sys_sem_t*/sys_mbox_t* (pointer to handle).
+// We allocate structs via kmalloc and store pointers in *sem/*mbox.
 
-#include "lwip/sys.h"
+#include "lwip/sys.h"       // SYS_ARCH_TIMEOUT, SYS_MBOX_EMPTY, err_t
 #include <kernel/arch/spinlock.h>
 #include <kernel/wait.h>
 #include <kernel/task.h>
-#include <kernel/slab.h>       // kmalloc, kfree
-#include <device/timer.h>
-#include <string.h>            // strdup
+#include <kernel/slab.h>      // kmalloc, kfree
+#include <device/timer.h>     // jiffies
+#include <string.h>           // strdup
+#include <errno.h>            // for errno extern
+
+// Kernel-side errno — the kernel doesn't have per-thread errno but
+// libk functions pulled in by our code reference it.
+int errno;
 
 // ═══════════════════════════════════════════════════════════════
 //  Semaphores — spinlock + counter + wait_queue
@@ -25,31 +33,32 @@ typedef struct {
     wait_queue_t  wq;
 } os_sem_t;
 
-sys_sem_t sys_sem_new(u8_t count)
+err_t sys_sem_new(sys_sem_t *sem, u8_t count)
 {
-    os_sem_t *sem = (os_sem_t *)kmalloc(sizeof(os_sem_t));
-    if (!sem) return NULL;
-    sem->count = (int)count;
-    spin_init(&sem->lock);
-    wait_queue_init(&sem->wq);
-    return (sys_sem_t)sem;
+    os_sem_t *s = (os_sem_t *)kmalloc(sizeof(os_sem_t));
+    if (!s) return ERR_MEM;
+    s->count = (int)count;
+    spin_init(&s->lock);
+    wait_queue_init(&s->wq);
+    *sem = (sys_sem_t)s;
+    return ERR_OK;
 }
 
-void sys_sem_signal(sys_sem_t sem)
+void sys_sem_signal(sys_sem_t *sem)
 {
-    os_sem_t *s = (os_sem_t *)sem;
-    if (!s) return;
+    if (!sem || !*sem) return;
+    os_sem_t *s = (os_sem_t *)*sem;
     uint64_t flags = spin_lock_irqsave(&s->lock);
     s->count++;
     spin_unlock_irqrestore(&s->lock, flags);
     wait_queue_wake_one(&s->wq);
 }
 
-u32_t sys_arch_sem_wait(sys_sem_t sem, u32_t timeout_ms)
+u32_t sys_arch_sem_wait(sys_sem_t *sem, u32_t timeout)
 {
-    os_sem_t *s = (os_sem_t *)sem;
-    if (!s) return SYS_ARCH_TIMEOUT;
-    (void)timeout_ms;  // infinite only for now
+    if (!sem || !*sem) return SYS_ARCH_TIMEOUT;
+    os_sem_t *s = (os_sem_t *)*sem;
+    (void)timeout;  // infinite only
 
     for (;;) {
         uint64_t flags = spin_lock_irqsave(&s->lock);
@@ -63,7 +72,7 @@ u32_t sys_arch_sem_wait(sys_sem_t sem, u32_t timeout_ms)
     }
 }
 
-void sys_sem_free(sys_sem_t sem)
+void sys_sem_free(sys_sem_t *sem)
 {
     // lwIP semaphores are created once at init and never freed.
     // We allocate them with kmalloc but free is a no-op — they
@@ -79,35 +88,34 @@ void sys_sem_free(sys_sem_t sem)
 
 typedef struct {
     void         *queue[MBOX_SIZE];
-    int           head;       // producer writes here
-    int           tail;       // consumer reads here
+    int           head;
+    int           tail;
     int           count;
     spinlock_T    lock;
-    wait_queue_t  wq;         // readers wait here
+    wait_queue_t  wq;
 } os_mbox_t;
 
-sys_mbox_t sys_mbox_new(int size)
+err_t sys_mbox_new(sys_mbox_t *mbox, int size)
 {
     (void)size;
     os_mbox_t *mb = (os_mbox_t *)kmalloc(sizeof(os_mbox_t));
-    if (!mb) return NULL;
+    if (!mb) return ERR_MEM;
     mb->head = 0;
     mb->tail = 0;
     mb->count = 0;
     spin_init(&mb->lock);
     wait_queue_init(&mb->wq);
-    return (sys_mbox_t)mb;
+    *mbox = (sys_mbox_t)mb;
+    return ERR_OK;
 }
 
-void sys_mbox_post(sys_mbox_t mbox, void *msg)
+void sys_mbox_post(sys_mbox_t *mbox, void *msg)
 {
-    os_mbox_t *mb = (os_mbox_t *)mbox;
-    if (!mb) return;
+    if (!mbox || !*mbox) return;
+    os_mbox_t *mb = (os_mbox_t *)*mbox;
 
     uint64_t flags = spin_lock_irqsave(&mb->lock);
     if (mb->count >= MBOX_SIZE) {
-        // Drop on overflow — should not happen with properly
-        // sized mailboxes.  Log and bail.
         spin_unlock_irqrestore(&mb->lock, flags);
         return;
     }
@@ -119,11 +127,11 @@ void sys_mbox_post(sys_mbox_t mbox, void *msg)
     wait_queue_wake_one(&mb->wq);
 }
 
-u32_t sys_arch_mbox_fetch(sys_mbox_t mbox, void **msg, u32_t timeout_ms)
+u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
 {
-    os_mbox_t *mb = (os_mbox_t *)mbox;
-    if (!mb) return SYS_ARCH_TIMEOUT;
-    (void)timeout_ms;  // infinite only
+    if (!mbox || !*mbox) return SYS_ARCH_TIMEOUT;
+    os_mbox_t *mb = (os_mbox_t *)*mbox;
+    (void)timeout;
 
     for (;;) {
         uint64_t flags = spin_lock_irqsave(&mb->lock);
@@ -139,10 +147,10 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t mbox, void **msg, u32_t timeout_ms)
     }
 }
 
-u32_t sys_arch_mbox_tryfetch(sys_mbox_t mbox, void **msg)
+u32_t sys_arch_mbox_tryfetch(sys_mbox_t *mbox, void **msg)
 {
-    os_mbox_t *mb = (os_mbox_t *)mbox;
-    if (!mb) return SYS_MBOX_EMPTY;
+    if (!mbox || !*mbox) return SYS_MBOX_EMPTY;
+    os_mbox_t *mb = (os_mbox_t *)*mbox;
 
     uint64_t flags = spin_lock_irqsave(&mb->lock);
     if (mb->count > 0) {
@@ -156,9 +164,53 @@ u32_t sys_arch_mbox_tryfetch(sys_mbox_t mbox, void **msg)
     return SYS_MBOX_EMPTY;
 }
 
-void sys_mbox_free(sys_mbox_t mbox)
+void sys_mbox_free(sys_mbox_t *mbox)
 {
-    (void)mbox;  // live forever, same rationale as semaphores
+    (void)mbox;
+}
+
+// ── mbox trypost (lwIP calls these directly, not via macros) ──
+
+err_t sys_mbox_trypost(sys_mbox_t *mbox, void *msg)
+{
+    if (!mbox || !*mbox) return ERR_MEM;
+    os_mbox_t *mb = (os_mbox_t *)*mbox;
+
+    uint64_t flags = spin_lock_irqsave(&mb->lock);
+    if (mb->count >= MBOX_SIZE) {
+        spin_unlock_irqrestore(&mb->lock, flags);
+        return ERR_MEM;
+    }
+    mb->queue[mb->head] = msg;
+    mb->head = (mb->head + 1) % MBOX_SIZE;
+    mb->count++;
+    spin_unlock_irqrestore(&mb->lock, flags);
+
+    wait_queue_wake_one(&mb->wq);
+    return ERR_OK;
+}
+
+err_t sys_mbox_trypost_fromisr(sys_mbox_t *mbox, void *msg)
+{
+    // Same as trypost — our spin_lock_irqsave is ISR-safe.
+    return sys_mbox_trypost(mbox, msg);
+}
+
+// ── Mutex (lwIP calls these as real functions when LWIP_TCPIP_CORE_LOCKING) ──
+
+err_t sys_mutex_new(sys_mutex_t *mutex)
+{
+    return sys_sem_new(mutex, 1);
+}
+
+void sys_mutex_lock(sys_mutex_t *mutex)
+{
+    sys_arch_sem_wait(mutex, 0);
+}
+
+void sys_mutex_unlock(sys_mutex_t *mutex)
+{
+    sys_sem_signal(mutex);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -174,7 +226,7 @@ static uint64_t lwip_thread_entry(uint64_t arg)
 {
     struct lwip_thread_ctx *ctx = (struct lwip_thread_ctx *)(uintptr_t)arg;
     ctx->fn(ctx->arg);
-    kfree(ctx);      // ctx was kmalloc'd in sys_thread_new
+    kfree(ctx);
     return 0;
 }
 
@@ -185,14 +237,11 @@ sys_thread_t sys_thread_new(const char *name,
     (void)stacksize;
     (void)prio;
 
-    // lwIP may pass a stack-local name string; strdup it.
     char *name_copy = strdup(name);
-    if (!name_copy) return NULL;
+    if (!name_copy) return 0;
 
-    // Bundle fn+arg into heap-allocated context so lwip_thread_entry
-    // can call fn(arg) without UB-prone function pointer casts.
     struct lwip_thread_ctx *ctx = kmalloc(sizeof(*ctx));
-    if (!ctx) { kfree(name_copy); return NULL; }
+    if (!ctx) { kfree(name_copy); return 0; }
     ctx->fn   = thread;
     ctx->arg  = arg;
 
@@ -201,9 +250,9 @@ sys_thread_t sys_thread_new(const char *name,
     if (!t) {
         kfree(name_copy);
         kfree(ctx);
-        return NULL;
+        return 0;
     }
-    return (sys_thread_t)t;
+    (void)name_copy; return (sys_thread_t)(uintptr_t)t;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -217,10 +266,6 @@ static uint64_t     protect_flags = 0;
 sys_prot_t sys_arch_protect(void)
 {
     if (protect_nest == 0) {
-        // IRQ-save is required: a 100 Hz PIT timer tick during a
-        // lwIP critical section may set need_resched; ret_from_intr
-        // could then switch to another kernel thread that also enters
-        // lwIP, deadlocking on lwip_global_lock.
         protect_flags = spin_lock_irqsave(&lwip_global_lock);
     }
     protect_nest++;
@@ -241,6 +286,21 @@ void sys_arch_unprotect(sys_prot_t pval)
 
 u32_t sys_now(void)
 {
-    // jiffies increments at 100 Hz (PIT), so 1 jiffy = 10 ms
     return (u32_t)(jiffies * 10);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Misc
+// ═══════════════════════════════════════════════════════════════
+
+void sys_init(void)
+{
+    // lwIP calls this once at startup. No action needed.
+}
+
+void sys_msleep(u32_t ms)
+{
+    // We don't support ms-level sleep yet. lwIP uses this sparingly.
+    // For now, busy-wait is the fallback (called only in init paths).
+    (void)ms;
 }

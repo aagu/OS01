@@ -7,3 +7,6 @@
 [submodule "thirdpart/lwip"]
 	path = thirdpart/lwip
 	url = https://git.savannah.nongnu.org/git/lwip.git
+[submodule "thirdpart/mbedtls"]
+	path = thirdpart/mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls.git

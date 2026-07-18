@@ -1,7 +1,34 @@
-// kernel/include/net/socket.h — socket types (expanded in Phase 2)
+// kernel/include/net/socket.h — socket API declarations
 #ifndef _NET_SOCKET_H
 #define _NET_SOCKET_H
 
-// Placeholder — socket_t and socket API will be added in Phase 2
+#include <kernel/file.h>
+#include <stdint.h>
 
-#endif // _NET_SOCKET_H
+// socket_t is defined in kernel/file.h
+
+// Socket state constants (shared with poll.c)
+#define SOCK_UNCONNECTED  0
+#define SOCK_CONNECTED    1
+#define SOCK_LISTENING    2
+#define SOCK_CLOSED       3
+
+socket_t *socket_alloc(int domain, int type, int protocol);
+void      socket_free(socket_t *s);
+socket_t *socket_get(int fd);
+
+int64_t do_socket(int domain, int type, int protocol);
+int64_t do_connect(int fd, uint32_t ip, uint16_t port);
+int64_t do_sendto(int fd, const void *buf, uint64_t len, int flags,
+                  uint32_t ip, uint16_t port);
+int64_t do_recvfrom(int fd, void *buf, uint64_t len, int flags,
+                    uint32_t *out_ip, uint16_t *out_port);
+int64_t do_bind(int fd, uint32_t ip, uint16_t port);
+int64_t do_listen(int fd, int backlog);
+int64_t do_accept(int fd, uint32_t *out_ip, uint16_t *out_port);
+int64_t do_setsockopt(int fd, int level, int optname,
+                      const void *optval, uint64_t optlen);
+int64_t do_getsockopt(int fd, int level, int optname,
+                      void *optval, uint64_t *optlen);
+
+#endif

@@ -10,8 +10,8 @@
 #include <string.h>
 #include "lwip/netif.h"
 #include "lwip/pbuf.h"
-#include "lwip/tcpip.h"
-#include "lwip/etharp.h"   // ethernet_input
+#include "lwip/tcpip.h"   // tcpip_inpkt, tcpip_input
+#include "lwip/etharp.h"  // etharp_output
 
 // ── Per-device state ───────────────────────────────────────────
 static struct {
@@ -83,7 +83,7 @@ static void e1000_handler(uint64_t nr, uint64_t param, pt_regs_t *regs)
                 struct pbuf *p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
                 if (p) {
                     memcpy(p->payload, e1000.rx_bufs[e1000.rx_tail], len);
-                    if (tcpip_inpkt(p, e1000.netif_ptr, ethernet_input) != ERR_OK)
+                    if (tcpip_inpkt(p, e1000.netif_ptr, tcpip_input) != ERR_OK)
                         pbuf_free(p);
                 } else {
                     e1000.rx_bufs[e1000.rx_tail][0] = 0xDB; // "dropped" marker
@@ -145,7 +145,7 @@ err_t e1000_xmit(struct netif *netif, struct pbuf *p)
 err_t e1000_netif_init(struct netif *netif)
 {
     e1000.netif_ptr = netif;  // store for IRQ handler's tcpip_inpkt()
-    netif->input = ethernet_input;  // input function for received packets
+    // netif->input is already set by netif_add(..., tcpip_input)
     netif->hwaddr_len = 6;
     memcpy(netif->hwaddr, e1000.mac, 6);
     netif->mtu = 1500;

@@ -37,6 +37,8 @@ typedef int pid_t;
 #include <kernel/vma.h>
 #include <uapi/futex.h>
 #include <kernel/futex.h>
+#include <uapi/sockaddr.h>  // struct sockaddr_in (shared with userspace)
+#include <net/socket.h>     // do_socket, do_connect, etc.
 // ── Local signal constants (kernel has its own signal.h) ──
 #ifndef SIG_BLOCK
 #define SIG_BLOCK    0
@@ -999,6 +1001,19 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             [201] = 34,// times -> SYS_times
             [217] = 21,// getdents64 -> SYS_getdents64
             [231] = 2, // exit_group -> SYS_exit
+
+		// Socket syscalls (Phase 10 networking)
+		[41] = 52,	// socket	→ SYS_socket
+		[42] = 54,	// connect	→ SYS_connect
+		[43] = 56,	// accept	→ SYS_accept
+		[44] = 57,	// sendto	→ SYS_sendto
+		[45] = 58,	// recvfrom	→ SYS_recvfrom
+		[49] = 53,	// bind	→ SYS_bind
+		[50] = 55,	// listen	→ SYS_listen
+		[51] = 61,	// getsockname	→ SYS_getsockname
+		[54] = 59,	// setsockopt	→ SYS_setsockopt
+		[55] = 60,	// getsockopt	→ SYS_getsockopt
+		[164] = 63,	// getifaddr	→ SYS_getifaddr
         };
         int8_t os = linux_to_os01[regs->rax];
         if (os >= 0)
@@ -1049,6 +1064,18 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         [49] = "ppoll",
         [50] = "select",
         [51] = "pselect6",
+        [52] = "socket",
+        [53] = "bind",
+        [54] = "connect",
+        [55] = "listen",
+        [56] = "accept",
+        [57] = "sendto",
+        [58] = "recvfrom",
+        [59] = "setsockopt",
+        [60] = "getsockopt",
+        [61] = "getsockname",
+        [62] = "getpeername",
+        [63] = "getifaddr",
     };
     const char *sname = (regs->rax < 64 && syscall_names[regs->rax])
                         ? syscall_names[regs->rax] : "?";
@@ -2190,6 +2217,69 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
                                 (void *)regs->rsi, (void *)regs->rdx,
                                 (void *)regs->r10, (void *)regs->r8,
                                 (const void *)regs->r9);
+        break;
+    }
+    case SYS_socket: {
+        regs->rax = do_socket((int)regs->rdi, (int)regs->rsi, (int)regs->rdx);
+        break;
+    }
+    case SYS_connect: {
+        struct sockaddr_in addr;
+        if ((uint64_t)regs->rsi >= current->addr_limit) { regs->rax = -EFAULT; break; }
+        memcpy(&addr, (void *)regs->rsi, sizeof(addr));
+        regs->rax = do_connect((int)regs->rdi, addr.sin_addr, addr.sin_port);
+        break;
+    }
+    case SYS_sendto: {
+        uint64_t len = regs->rdx;
+        uint32_t ip = 0; uint16_t port = 0;
+        uint64_t addr_ptr = regs->r8;
+        if (addr_ptr && addr_ptr < current->addr_limit) {
+            struct sockaddr_in a;
+            memcpy(&a, (void *)addr_ptr, sizeof(a));
+            ip = a.sin_addr; port = a.sin_port;
+        }
+        regs->rax = do_sendto((int)regs->rdi, (void *)regs->rsi,
+                              len, (int)regs->r10, ip, port);
+        break;
+    }
+    case SYS_recvfrom: {
+        regs->rax = do_recvfrom((int)regs->rdi, (void *)regs->rsi,
+                                regs->rdx, (int)regs->r10, NULL, NULL);
+        break;
+    }
+    case SYS_bind: {
+        struct sockaddr_in a;
+        if ((uint64_t)regs->rsi >= current->addr_limit) { regs->rax = -EFAULT; break; }
+        memcpy(&a, (void *)regs->rsi, sizeof(a));
+        regs->rax = do_bind((int)regs->rdi, a.sin_addr, a.sin_port);
+        break;
+    }
+    case SYS_listen: {
+        regs->rax = do_listen((int)regs->rdi, (int)regs->rsi);
+        break;
+    }
+    case SYS_accept: {
+        regs->rax = do_accept((int)regs->rdi, NULL, NULL);
+        break;
+    }
+    case SYS_setsockopt: {
+        regs->rax = do_setsockopt((int)regs->rdi, (int)regs->rsi,
+                                  (int)regs->rdx, (void *)regs->r10, regs->r8);
+        break;
+    }
+    case SYS_getsockopt: {
+        regs->rax = do_getsockopt((int)regs->rdi, (int)regs->rsi,
+                                  (int)regs->rdx, (void *)regs->r10, (uint64_t *)regs->r8);
+        break;
+    }
+    case SYS_getsockname: {
+        regs->rax = do_getsockname((int)regs->rdi,
+                                   (void *)regs->rsi, (uint64_t *)regs->rdx);
+        break;
+    }
+    case SYS_getifaddr: {
+        regs->rax = do_getifaddr();
         break;
     }
     default:

@@ -25,6 +25,12 @@
 #define TCP_MSS                 1460
 #define TCP_SND_BUF             (8 * TCP_MSS)
 #define TCP_WND                 (8 * TCP_MSS)
-#define LWIP_NETIF_HOSTNAME     "os01"
+// LWIP_NETIF_HOSTNAME: 0 = disable hostname field (avoids DNS code path
+// that tries to access netif->hostname)
+#define LWIP_NETIF_HOSTNAME     0
+
+// Prevent lwIP from including OS userspace headers (<unistd.h> etc.)
+// that would conflict with kernel headers (struct timeval, etc.)
+#define LWIP_NO_UNISTD_H        1
 
 #endif // LWIP_OPTS_H

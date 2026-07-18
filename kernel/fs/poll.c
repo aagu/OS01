@@ -18,6 +18,8 @@
 #include <kernel/percpu.h>
 #include <kernel/pty.h>
 #include <device/timer.h>    // jiffies
+#include <net/socket.h>     // SOCK_CONNECTED, SOCK_LISTENING
+#include <string.h>          // memset
 #include <stddef.h>
 #include <errno.h>
 
@@ -249,6 +251,18 @@ uint32_t fd_poll(file_t *f, poll_table_t *pt)
             spin_unlock_irqrestore(&pty->slave_to_master->lock, fl);
         }
         return mask;
+    }
+    case FD_SOCKET: {
+        socket_t *s = f->sock;
+        if (!s) return POLLNVAL;
+        uint32_t revents = 0;
+        uint64_t flags = spin_lock_irqsave(&s->lock);
+        if (s->state == SOCK_CONNECTED) revents |= POLLOUT;
+        if (s->state == SOCK_LISTENING) revents |= POLLIN;
+        if (revents == 0 && pt && !pt->triggered)
+            poll_wait(pt, &s->poll_list, &s->lock);
+        spin_unlock_irqrestore(&s->lock, flags);
+        return revents;
     }
 
     default:
