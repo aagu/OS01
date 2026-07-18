@@ -2,7 +2,6 @@
 #define _KERNEL_WAIT_H
 
 #include <list.h>
-#include <kernel/task.h>
 #include <kernel/arch/spinlock.h>
 
 // ── Generic wait queue ───────────────────────────────────────

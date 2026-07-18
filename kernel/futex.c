@@ -1,6 +1,7 @@
 #include <kernel/futex.h>
 #include <kernel.h>           // container_of
-#include <kernel/wait.h>      // wait_queue_t, task_t, current
+#include <kernel/task.h>      // task_t, current
+#include <kernel/wait.h>      // wait_queue_t
 #include <kernel/memory.h>    // Phy_To_Virt
 #include <kernel/percpu.h>
 #include <kernel/vmm.h>

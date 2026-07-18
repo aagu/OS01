@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 #include <kernel/arch/spinlock.h>
+#include <list.h>
+#include <kernel/wait.h>
 
 // ── Constants ──────────────────────────────────────────────
 
@@ -39,6 +41,10 @@ typedef struct pipe {
     int       readers;        // active reader count
     int       writers;        // active writer count
     spinlock_T lock;
+    wait_queue_t  read_wait;    // task 直接阻塞 (fd_read) — 挂 task_t.io_wait_node
+    wait_queue_t  write_wait;   // task 直接阻塞 (fd_write)
+    list_t        read_poll;    // poll entry — 挂 poll_wait_entry_t.node
+    list_t        write_poll;   // poll entry
 } pipe_t;
 
 // ── Open file ──────────────────────────────────────────────
