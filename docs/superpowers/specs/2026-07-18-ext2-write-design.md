@@ -1,7 +1,7 @@
 # ext2 文件系统写入 — 设计方案
 
 > **日期**: 2026-07-18
-> **修订**: 2026-07-18 — 16 条评审意见全量修复
+> **修订**: 2026-07-18 — 16 条 (v2) + 5 条 (v3) 评审意见全量修复
 > **范围**: ext2 全部 7 个 VFS 写入操作 + 底层分配/管理原语
 > **方案**: 共享原语 + VFS op 组合（方案 2）
 > **依赖**: 现有 ext2 只读路径、block_device_write、FAT32 写路径参考
@@ -139,6 +139,8 @@ return 0;  // double/triple indirect 不支持
 
 `ext2_bmap` 的分配变体。保证 `logical_block` 有对应的物理块，不存在则分配。是 `ext2_vfs_write` 和 `ext2_vfs_truncate`（扩展路径）的核心依赖。
 
+**注意**: 本函数只修改内存中的 `inode` 结构体（`i_block[]`、`i_blocks`、以及可能的 indirect block 磁盘数据）。调用方通过 `ext2_write_inode` 负责将修改后的 inode 持久化到磁盘。
+
 ### 3.3 ext2_write_inode
 
 ```
@@ -214,15 +216,17 @@ int ext2_write_superblock(ext2_fs_t *fs)
 
 ```
 int ext2_find_dirent(ext2_fs_t *fs, uint32_t dir_ino, const char *name,
-                     ext2_dirent_t *out_de, uint32_t *out_block,
-                     uint32_t *out_off)
+                     uint32_t *out_ino, uint8_t *out_file_type,
+                     uint32_t *out_block, uint32_t *out_off)
 
 // 遍历目录 inode 的 dirent 链表，匹配 name
-// 成功: 填充 *out_de, *out_block(物理块号), *out_off(块内偏移), 返回 0
+// 成功: 填充 *out_ino, *out_file_type, *out_block(物理块号), *out_off(块内偏移), 返回 0
 // 未找到: 返回 -ENOENT
 ```
 
 `unlink`、`rmdir`、`rename` 共享的查找辅助函数。避免三处各自遍历 dirent 链表。
+
+**生命周期说明**: 本函数内部使用栈上的 `ext2_dirent_t` 缓冲区，遍历时通过 `ext2_read_block` 逐块读取。返回值 `out_ino`/`out_file_type`/`out_block`/`out_off` 是标量值，不持有指针依赖，调用方无需关心内部缓冲区生命周期。不可返回指向内部 `de.name[]` 的指针。
 
 ### 3.8 dirent_add / dirent_del
 
@@ -252,8 +256,9 @@ int ext2_find_dirent(ext2_fs_t *fs, uint32_t dir_ino, const char *name,
 
 **dirent_del(fs, dir_ino, name)**:
 ```
-ext2_find_dirent 找到目标(获取 de, block, off)
-→ 将目标 inode 清零: de->inode = 0（此举让 readdir 的 de->inode != 0 检查自然跳过此条目）
+ext2_find_dirent 找到目标(获取 out_ino, out_file_type, block, off)
+→ 将目标 inode 清零: 直接写回 block data → *(uint32_t*)(block_data + off) = 0
+  （此举让 readdir 的 de->inode != 0 检查自然跳过此条目）
 → 将前一条 dirent 的 rec_len += 本条 de.rec_len（合并回前一条）
 → ext2_write_block 回写目录块
 → ext2_write_inode(dir)
@@ -346,8 +351,7 @@ Create(dir, name, mode=0644):
 
 ```
 Unlink(dir, name):
-  → ext2_find_dirent(fs, dir_ino, name, &de, &block, &off)
-  → target_ino = de.inode
+  → ext2_find_dirent(fs, dir_ino, name, &target_ino, &file_type, &block, &off)
   → dirent_del(dir_ino, name)
   → 读目标 inode → i_links_count--
   → if i_links_count == 0:
@@ -382,8 +386,7 @@ Mkdir(dir, name, mode=0755):
 
 ```
 Rmdir(dir, name):
-  → ext2_find_dirent(fs, dir_ino, name, &de, &block, &off)
-  → target_ino = de.inode
+  → ext2_find_dirent(fs, dir_ino, name, &target_ino, &file_type, &block, &off)
   → 读目标 inode
   → 检查目标目录是否为空: 遍历 dirent 链表
       有效条目 = de.inode != 0（已删除 dirent 跳过）
@@ -394,7 +397,11 @@ Rmdir(dir, name):
   → 父目录 i_links_count--（因为子目录的 ".." 随之消失）
   → ext2_write_inode(dir)
   → 父 group bg_used_dirs_count-- → ext2_write_superblock
-  → free_block(目录的数据块)
+  → 释放目录全部数据块:
+      遍历 i_block[0..11] → free_block 每个非零块
+      if i_block[12] != 0:
+        读 indirect block → free_block 每个非零条目
+        → free_block indirect block 本身
   → free_inode(target_ino)
 ```
 
@@ -406,6 +413,10 @@ Rmdir(dir, name):
 Rename(olddir, oldname, newdir, newname):
   → ext2_find_dirent(olddir, oldname) → 获取 target_ino, file_type
   → 读旧目录 inode
+
+// 注: 当前不支持硬链接 (§10)，因此 oldname 和 newname 指向同一 inode 的情况
+// 不会出现。若后续引入 link()，需在此时添加 if (target_ino == existing_ino) return 0
+// 的空操作检测（POSIX 要求同 inode rename 是空操作）。
 
   → 预处理目标:
     在新目录中 ext2_find_dirent(newdir, newname)
@@ -471,7 +482,9 @@ mkdir:      data block("." / "..") → inode → bitmap → superblock+bgdesc �
 | `ext2_selftest_block_alloc` | 目标 bitmap block + 目标 group 的 bgdesc block + superblock (2 sectors) | alloc → 验证非零 → free → 验证 free 后 alloc 得不同块 | 逐个写回 bitmap → bgdesc → superblock |
 | `ext2_selftest_inode_alloc` | inode bitmap block + bgdesc block + superblock + inode table block（将被写入的那个） | alloc → 验证 ino>0 → free | 逐个写回 |
 | `ext2_selftest_dirent_roundtrip` | 父目录的数据 block(s) + 父 inode table block + inode bitmap block + bgdesc block + superblock + 新 inode 所在 inode table block（dirent_add 需要先 alloc_inode） | alloc_inode → dirent_add → readdir 验证 → dirent_del → free_inode → 验证消失 | 逐个写回 |
-| `ext2_selftest_write_read` | 目标文件的数据 block(s) + 目标 inode table block（不碰 bitmap/superblock，write 不分配新块） | write → read 回读验证 | 逐个写回数据 + inode |
+| `ext2_selftest_write_read` | 目标文件的数据 block(s) + 目标 inode table block | write → read 回读验证 | 逐个写回数据 + inode |
+
+**`ext2_selftest_write_read` 前提条件**: 测试假设写入范围在文件的当前 i_size 之内，不触发 `ext2_bmap_alloc`（不分配新块）。如果文件已有大小不足以容纳测试写入，则测试应当 `SKIP` 或选择一个更大的已有文件。此约束确保 save/restore 范围不含 bitmap/superblock。
 
 **`ext2_selftest_dirent_roundtrip` 依赖说明**: 必须走完整的 `alloc_inode → dirent_add` 路径，因为目录项需要一个有效的 inode 编号。因此保存范围包含 inode bitmap 和 inode table block，结束前 `free_inode` 回收。
 
