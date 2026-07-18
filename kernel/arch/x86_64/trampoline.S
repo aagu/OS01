@@ -13,6 +13,8 @@
 //  32-bit range — so 16/32-bit code can use absolute addressing.
 // ──────────────────────────────────────────────────────────
 
+#include <kernel/arch/x86_64/regs.h>
+
 .code16
 .globl trampoline_code_start
 trampoline_code_start:
@@ -30,7 +32,7 @@ trampoline_code_start:
 
     // Enter protected mode
     movl    %cr0, %eax
-    orl     $1, %eax
+    orl     $CR0_PE, %eax
     movl    %eax, %cr0
 
     ljmpl   $0x08, $trampoline_protected
@@ -46,7 +48,7 @@ trampoline_protected:
 
     // Enable PAE
     movl    %cr4, %eax
-    orl     $(1 << 5), %eax
+    orl     $CR4_PAE, %eax
     movl    %eax, %cr4
 
     // Load PML4 from trampoline data
@@ -55,14 +57,14 @@ trampoline_protected:
     movl    %eax, %cr3
 
     // Enable Long Mode
-    movl    $0xC0000080, %ecx
+    movl    $IA32_EFER, %ecx
     rdmsr
-    orl     $((1 << 8) | (1 << 11)), %eax  // LME | NXE
+    orl     $(EFER_LME|EFER_NXE), %eax  // LME | NXE
     wrmsr
 
     // Enable paging
     movl    %cr0, %eax
-    orl     $(1 << 31), %eax
+    orl     $CR0_PG, %eax
     movl    %eax, %cr0
 
     ljmpl   $0x18, $trampoline_long
@@ -76,7 +78,7 @@ trampoline_long:
 
     // Load per-CPU GS base via MSR
     movq    trampoline_data + 8(%rip), %rax // tdata->gs_base
-    movl    $0xC0000101, %ecx               // IA32_GS_BASE
+    movl    $IA32_GS_BASE, %ecx               // IA32_GS_BASE
     wrmsr
 
     // Load kernel stack

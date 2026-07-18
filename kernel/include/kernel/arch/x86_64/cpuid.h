@@ -2,6 +2,7 @@
 #define _KERNEL_ARCH_CPUID_H
 
 #include <stdint.h>
+#include <kernel/arch/x86_64/regs.h>   // CPUID feature bit definitions
 
 // ──────────────────────────────────────────────
 //  CPUID instruction wrapper
@@ -28,15 +29,5 @@ static inline void cpuid_count(uint32_t leaf, uint32_t subleaf,
         : "a"(leaf), "c"(subleaf)
     );
 }
-
-// ──────────────────────────────────────────────
-//  CPU feature bit definitions (CPU leaf 1)
-// ──────────────────────────────────────────────
-
-// EDX bits
-#define CPUID_FEAT_EDX_APIC    (1 << 9)   // APIC supported on chip
-
-// ECX bits
-#define CPUID_FEAT_ECX_X2APIC  (1 << 21)  // x2APIC supported
 
 #endif // _KERNEL_ARCH_CPUID_H

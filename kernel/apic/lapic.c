@@ -3,9 +3,9 @@
 #include <kernel/pmm.h>
 #include <kernel/vmm.h>
 #include <kernel/debug.h>
-#include <kernel/arch/x86_64/msr.h>
-#include <kernel/arch/x86_64/cpuid.h>
-#include <kernel/arch/x86_64/gate.h>
+#include <kernel/arch/msr.h>
+#include <kernel/arch/cpuid.h>
+#include <kernel/arch/gate.h>
 #include <kernel/arch/irq.h>
 #include <kernel/arch/thread.h>
 #include <stdint.h>

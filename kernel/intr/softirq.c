@@ -1,5 +1,4 @@
 #include <kernel/softirq.h>
-#include <kernel/arch/x86_64/asm.h>
 #include <stddef.h>
 #include <string.h>
 

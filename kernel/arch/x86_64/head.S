@@ -1,4 +1,5 @@
 #include <kernel/arch/x86_64/linkage.h>
+#include <kernel/arch/x86_64/regs.h>
 
 .section .text.head, "ax"
 
@@ -21,8 +22,8 @@ ENTRY(_start)
 
 //=======	load	cr3
 
-	movq $0x101000, %rax
-	movq %rax,	%cr3
+	movq	$0x101000, %rax
+	movq	%rax,	%cr3
 
 //=======	load GDTR
 
@@ -32,7 +33,7 @@ ENTRY(_start)
 
 	lidt	IDT_POINTER(%rip)
 
-	mov $0x10,	%ax
+	mov $X86_KERNEL_DS,	%ax
 	mov %ax,	%ds
 	mov %ax,	%es
 	mov %ax,	%fs
@@ -44,7 +45,7 @@ ENTRY(_start)
 //======    switch seg to match vma
 
 	movq	switch_seg(%rip),	%rax
-	pushq	$0x08
+	pushq	$X86_KERNEL_CS
 	pushq	%rax
 	lretq
 
@@ -54,7 +55,7 @@ switch_seg:
 	.quad	entry64
 
 entry64:
-	movq	$0x10,	%rax
+	movq	$X86_KERNEL_DS,	%rax
 	movq	%rax,	%ds
 	movq	%rax,	%es
 	movq	%rax,	%gs
@@ -63,12 +64,12 @@ entry64:
 
 	/* Enable SSE/SSE2 for user-space (x86-64 ABI requires this) */
 	movq	%cr4,	%rax
-	orq	$((1<<9)|(1<<10)),	%rax		/* OSFXSR | OSXMMEXCPT */
+	orq	$(CR4_OSFXSR|CR4_OSXMMEXCPT),	%rax		/* OSFXSR | OSXMMEXCPT */
 	movq	%rax,	%cr4
 
-setup_IDT:							
+setup_IDT:
 	leaq	ignore_int(%rip),	%rdx
-	movq	$(0x08 << 16),	%rax
+	movq	$(X86_KERNEL_CS << 16),	%rax
 	movw	%dx,	%ax
 	movq	$(0x8e00 << 32),	%rcx		
 	addq	%rcx,	%rax
@@ -112,7 +113,7 @@ setup_TSS64:
 	movq    BOOT_INFO(%rip),    %rax
     movq    %rax,   %rdi
 	movq    go_to_kernel(%rip),     %rax
-    pushq   $0x08
+    pushq   $X86_KERNEL_CS
     pushq   %rax
     lretq
 
@@ -145,7 +146,7 @@ ignore_int:
 	movq	%ds,	%rax
 	pushq	%rax
 
-	movq	$0x10,	%rax
+	movq	$X86_KERNEL_DS,	%rax
 	movq	%rax,	%ds
 	movq	%rax,	%es
 

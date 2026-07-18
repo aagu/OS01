@@ -30,11 +30,4 @@ typedef struct {
 extern char _binary_arch_x86_64_trampoline_bin_start[];
 extern char _binary_arch_x86_64_trampoline_bin_end[];
 
-// ── SMP boot API ──────────────────────────────────────────
-
-// Bring up all APs discovered from MADT (Phase 1 enumeration).
-// Copies the trampoline to 0x8000, then sends INIT-SIPI-SIPI
-// to each online-capable AP in percpu_data[].
-void smp_boot_aps(void);
-
 #endif

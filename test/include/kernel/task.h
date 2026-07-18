@@ -5,7 +5,6 @@
 #include <stdint.h>
 #include <kernel/arch/cpu.h>
 #include <kernel/arch/thread.h>
-#include <kernel/arch/x86_64/linkage.h>
 #include <kernel/file.h>
 
 #define KERNEL_CS (0x08)

@@ -3,6 +3,11 @@
 
 #ifdef __x86_64__
 #include <kernel/arch/x86_64/gate.h>
+
+// Install per-architecture IDT entries (syscall, exceptions, IRQs).
+// Defined in arch/<arch>/trap.c.
+void sys_vector_install(void);
+
 #elif defined(__aarch64__)
 // aarch64 has no TSS — all TSS operations are no-ops
 #define set_tss64(rsp0, rsp1, rsp2, ist1, ist2, ist3, ist4, ist5, ist6, ist7) \
@@ -10,6 +15,9 @@
          (void)(ist1); (void)(ist2); (void)(ist3); \
          (void)(ist4); (void)(ist5); (void)(ist6); \
          (void)(ist7); } while (0)
+
+// aarch64: install exception vectors to VBAR_EL1
+void sys_vector_install(void);
 #else
 #error "Unsupported architecture"
 #endif

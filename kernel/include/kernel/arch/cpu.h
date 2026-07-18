@@ -6,6 +6,7 @@
 #ifdef __x86_64__
 #include <kernel/arch/x86_64/asm.h>
 #include <kernel/arch/x86_64/cpu.h>    // for rdtsc(), NR_CPUS
+#include <kernel/arch/x86_64/regs.h>   // IA32_EFER, EFER_NXE, IA32_GS_BASE
 
 static inline void     arch_cpu_halt(void)      { hlt(); }
 static inline void     arch_cpu_pause(void)     { __asm__ __volatile__("pause"); }
@@ -22,10 +23,10 @@ static inline uint64_t arch_cycle_counter(void) { return rdtsc(); }
 // Enable No-eXecute: set EFER.NXE (bit 11)
 static inline void arch_cpu_enable_nx(void) {
     uint32_t eax, edx;
-    __asm__ __volatile__("rdmsr" : "=a"(eax), "=d"(edx) : "c"(0xC0000080));
-    if (!(eax & (1 << 11))) {
-        eax |= (1 << 11);
-        __asm__ __volatile__("wrmsr" : : "a"(eax), "d"(edx), "c"(0xC0000080));
+    __asm__ __volatile__("rdmsr" : "=a"(eax), "=d"(edx) : "c"(IA32_EFER));
+    if (!(eax & EFER_NXE)) {
+        eax |= EFER_NXE;
+        __asm__ __volatile__("wrmsr" : : "a"(eax), "d"(edx), "c"(IA32_EFER));
     }
 }
 
@@ -33,7 +34,7 @@ static inline void arch_cpu_enable_nx(void) {
 static inline void arch_set_percpu_base(void *ptr) {
     uint32_t lo = (uint32_t)(uintptr_t)ptr;
     uint32_t hi = (uint32_t)((uintptr_t)ptr >> 32);
-    __asm__ __volatile__("wrmsr" : : "a"(lo), "d"(hi), "c"(0xC0000101) : "memory");
+    __asm__ __volatile__("wrmsr" : : "a"(lo), "d"(hi), "c"(IA32_GS_BASE) : "memory");
 }
 
 #elif defined(__aarch64__)
@@ -80,6 +81,7 @@ static inline void arch_set_percpu_base(void *ptr)
 {
     __asm__ __volatile__("msr tpidr_el1, %0" :: "r"((uint64_t)ptr) : "memory");
 }
+
 #else
 #error "Unsupported architecture"
 #endif

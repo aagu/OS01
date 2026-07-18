@@ -4,7 +4,7 @@
 #include <kernel/arch/irq.h>
 #include <kernel/arch/thread.h>
 #include <kernel/arch/cpu.h>
-#include <kernel/arch/x86_64/gate.h>
+#include <kernel/arch/gate.h>
 #include <device/timer.h>
 
 // Assembly stub created below

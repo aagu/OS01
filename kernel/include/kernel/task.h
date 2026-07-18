@@ -5,7 +5,6 @@
 #include <stdint.h>
 #include <kernel/arch/cpu.h>
 #include <kernel/arch/thread.h>
-#include <kernel/arch/x86_64/linkage.h>
 #include <kernel/arch/segment.h>
 #include <kernel/file.h>
 #include <uapi/time.h>

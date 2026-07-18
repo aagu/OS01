@@ -2,11 +2,9 @@
 #include <kernel/task.h>
 #include <kernel/printk.h>
 #include <kernel/percpu.h>
-#include <kernel/arch/x86_64/trap.h>
 #include <driver/serial.h>
 #include <driver/keyboard.h>
 #include <kernel.h>
-#include <kernel/arch/x86_64/hw.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>

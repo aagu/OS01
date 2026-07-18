@@ -7,6 +7,11 @@
 // Architecture-specific task init (TSS, CR3 setup).
 // Called once by task_init() during boot.
 void arch_task_init_platform(void);
+
+// Signal delivery — arch-specific because it manipulates the
+// user-mode register frame on the kernel stack before iretq.
+int  do_signal_delivery(pt_regs_t *regs);
+int  signal_pending_fatal(void);   // non-zero if a fatal signal is pending
 #elif defined(__aarch64__)
 
 // aarch64 exception frame as pushed by the exception vector handler.
@@ -25,6 +30,10 @@ typedef struct pt_regs
 // arch_task_init_platform placeholder — aarch64 doesn't need TSS setup.
 // Declared in this header's x86_64 block. For aarch64 it's a no-op.
 static inline void arch_task_init_platform(void) {}
+
+// Signal delivery stubs — aarch64 not yet implemented.
+static inline int do_signal_delivery(pt_regs_t *regs) { (void)regs; return 0; }
+static inline int signal_pending_fatal(void) { return 0; }
 #else
 #error "Unsupported architecture"
 #endif

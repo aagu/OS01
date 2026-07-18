@@ -2,7 +2,6 @@
 #include <kernel/printk.h>
 #include <kernel/memory.h>
 #include <kernel/pmm.h>
-#include <kernel/arch/x86_64/trap.h>
 #include <kernel/arch/gate.h>
 #include <kernel/arch/spinlock.h>
 #include <kernel/arch/cpu.h>
@@ -10,7 +9,7 @@
 #include <kernel/interrupt.h>
 #include <kernel/task.h>
 #include <kernel/percpu.h>
-#include <kernel/arch/x86_64/trampoline.h>
+#include <kernel/smp.h>
 #include <kernel/tty.h>
 #include <kernel/apic.h>
 #include <driver/serial.h>

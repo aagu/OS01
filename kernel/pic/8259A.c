@@ -1,9 +1,9 @@
 #include <device/pic.h>
 #include <kernel/printk.h>
-#include <kernel/arch/x86_64/hw.h>
+#include <kernel/arch/io.h>
 #include <kernel.h>
-#include <kernel/arch/x86_64/asm.h>
-#include <kernel/arch/x86_64/regs.h>
+#include <kernel/arch/irq.h>
+#include <kernel/arch/thread.h>
 #include <kernel/interrupt.h>
 #include <stddef.h>
 
@@ -26,12 +26,12 @@ void pic_init()
     outb(MASTER_OCW1, 0xff);
     outb(SLAVE_OCW1, 0xff);
 
-    sti();
+    arch_local_irq_enable();
 }
 
 void do_IRQ(pt_regs_t * regs, uint64_t nr)	//regs,nr
 {
-    cli();
+    arch_local_irq_disable();
     switch (nr & 0x80)
     {
     case 0x00:
@@ -51,7 +51,7 @@ void do_IRQ(pt_regs_t * regs, uint64_t nr)	//regs,nr
         color_printk(RED,BLACK,"regs:%#018lx\t<RIP:%#018lx\tRSP:%#018lx>\n",regs,regs->rip,regs->rsp);
         break;
     }
-    sti();
+    arch_local_irq_enable();
 }
 
 void pic_enable(uint64_t nr)

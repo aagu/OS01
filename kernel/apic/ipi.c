@@ -5,7 +5,7 @@
 #include <kernel/vmm.h>
 #include <kernel/arch/irq.h>
 #include <kernel/arch/cpu.h>
-#include <kernel/arch/x86_64/gate.h>
+#include <kernel/arch/gate.h>
 
 // ── File-scope: generate assembly stubs ──────────────────
 // MUST be outside any function so the stub code is not

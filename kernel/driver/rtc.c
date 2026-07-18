@@ -1,5 +1,5 @@
 #include <driver/rtc.h>
-#include <kernel/arch/x86_64/hw.h>
+#include <kernel/arch/io.h>
 
 bool is_updating_rtc()
 {

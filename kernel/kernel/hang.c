@@ -4,7 +4,6 @@
 #include <kernel/task.h>
 #include <kernel.h>
 #include <device/timer.h>
-#include <kernel/arch/x86_64/regs.h>
 
 // ── Dump all tasks ─────────────────────────────────────────
 void hang_dump_all(void)

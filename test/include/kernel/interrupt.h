@@ -3,7 +3,6 @@
 
 #include <stdint.h>
 #include <kernel/arch/thread.h>
-#include <kernel/arch/x86_64/linkage.h>
 
 typedef struct hw_int_type
 {

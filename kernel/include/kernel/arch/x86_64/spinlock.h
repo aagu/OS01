@@ -3,6 +3,7 @@
 
 #include "linkage.h"
 #include <stdint.h>
+#include <kernel/arch/x86_64/regs.h>   // RFLAGS_IF
 
 typedef struct
 {
@@ -80,7 +81,7 @@ inline void __attribute__((always_inline)) spin_unlock_irqrestore(spinlock_T *lo
 {
     spin_unlock(lock);
     // Re-enable interrupts ONLY if they were enabled before lock
-    if (flags & (1UL << 9)) {  // RFLAGS.IF = bit 9
+    if (flags & RFLAGS_IF) {
         __asm__ __volatile__("sti" ::: "memory");
     }
 }
