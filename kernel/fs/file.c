@@ -203,7 +203,7 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
         uint8_t *dst = (uint8_t *)buf;
         uint64_t total = 0;
 
-        while (total < size) {
+        for (;;) {
             uint64_t flags = spin_lock_irqsave(&p->lock);
 
             while (total < size && !pipe_empty(p)) {
@@ -211,19 +211,29 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
                 dst[total++] = p->buf[p->tail];
                 p->tail = (p->tail + 1) % PIPE_SIZE;
             }
-            spin_unlock_irqrestore(&p->lock, flags);
 
-            if (total > 0) break;
+            if (total > 0) {
+                // Data consumed — wake any blocked writers
+                pipe_wake_writers(p);
+                spin_unlock_irqrestore(&p->lock, flags);
+                return (int64_t)total;
+            }
 
             // Pipe empty — check if any writer still exists
-            if (p->writers == 0)
+            if (p->writers == 0) {
+                spin_unlock_irqrestore(&p->lock, flags);
                 return 0;  // EOF
+            }
 
-            // Yield CPU so the writer can produce data
-            schedule();
+            spin_unlock_irqrestore(&p->lock, flags);
+
+            // Block on pipe's read_wait (not busy-loop schedule)
+            wait_queue_sleep(&p->read_wait);
+
+            // Check for fatal signals after wake
+            if (signal_pending_fatal())
+                return -EINTR;
         }
-
-        return (int64_t)total;
     }
     default:
         return -1;
