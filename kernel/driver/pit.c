@@ -8,6 +8,7 @@
 #include <kernel.h>
 #include <kernel/softirq.h>
 #include <kernel/task.h>
+#include <kernel/wait.h>
 #include <kernel/percpu.h>
 #include <driver/serial.h>
 #include <kernel/console.h>
@@ -24,6 +25,15 @@ hw_int_controller_t pit_controller =
 void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attribute__((unused)), pt_regs_t * regs __attribute__((unused)))
 {
     jiffies++;
+
+    // Poll timeout check: if a poll syscall is active and its
+    // deadline has passed, wake the polling task.
+    extern wait_queue_t *current_poll_wq;
+    extern uint64_t poll_deadline_jiffies;
+    if (current_poll_wq && jiffies >= poll_deadline_jiffies) {
+        wait_queue_wake_all(current_poll_wq);
+        current_poll_wq = NULL;
+    }
 
     // Request rescheduling on every timer tick — schedule() manages
     // per-task quantum counters and picks the next task.
