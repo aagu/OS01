@@ -75,6 +75,27 @@ static int ext2_write_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *inode)
     return ext2_write_block(fs, table_start + block_off, buf);
 }
 
+// ── Write superblock and bgdesc table to disk ──────────
+static int ext2_write_superblock(ext2_fs_t *fs)
+{
+    // ext2_superblock_t is ~204 bytes packed, but the on-disk
+    // superblock occupies 1024 bytes.  Serialize into a zero-filled
+    // 1024-byte buffer to avoid writing stack/junk beyond the struct.
+    uint8_t sb_buf[1024];
+    memset(sb_buf, 0, 1024);
+    memcpy(sb_buf, &fs->sb_raw, sizeof(ext2_superblock_t));
+    if (block_device_write(fs->dev, 2, 2, sb_buf) != 0)
+        return -1;
+
+    // Write all block group descriptors
+    for (uint32_t i = 0; i < fs->bgdesc_table_blocks; i++) {
+        if (ext2_write_block(fs, fs->bgdesc_block + i,
+            (uint8_t *)fs->bgdesc_table + i * fs->block_size) != 0)
+            return -1;
+    }
+    return 0;
+}
+
 // ── Map logical block → physical (direct + single indirect) ─
 static uint32_t ext2_bmap(ext2_fs_t *fs, ext2_inode_t *inode,
                           uint32_t logical_block)
