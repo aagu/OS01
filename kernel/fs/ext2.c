@@ -4,6 +4,7 @@
 #include <kernel/slab.h>     // kmalloc, kfree
 #include <string.h>
 #include <stdlib.h>          // calloc
+#include <errno.h>
 
 // ── Helper: resolve node->fs_data to inode number ────────
 // Root mount node has fs_data=NULL (set by vfs_mount).
@@ -306,6 +307,45 @@ static uint32_t ext2_bmap_alloc(ext2_fs_t *fs, ext2_inode_t *inode,
     }
 
     return 0;  // double/triple indirect not supported
+}
+
+// ── Find a directory entry by name ──────────────────────
+static int ext2_find_dirent(ext2_fs_t *fs, uint32_t dir_ino, const char *name,
+                            uint32_t *out_ino, uint8_t *out_file_type,
+                            uint32_t *out_block, uint32_t *out_off)
+{
+    ext2_inode_t dir_inode;
+    if (ext2_read_inode(fs, dir_ino, &dir_inode) != 0)
+        return -EIO;
+    if (!(dir_inode.i_mode & EXT2_S_IFDIR))
+        return -ENOTDIR;
+
+    size_t name_len = strlen(name);
+    uint8_t block_data[4096];
+
+    for (uint32_t blk_idx = 0; ; blk_idx++) {
+        uint32_t phys = ext2_bmap(fs, &dir_inode, blk_idx);
+        if (phys == 0) break;
+        if (ext2_read_block(fs, phys, block_data) != 0) break;
+
+        uint32_t off = 0;
+        while (off < fs->block_size) {
+            ext2_dirent_t *de = (ext2_dirent_t *)(block_data + off);
+            if (de->rec_len == 0) break;
+
+            if (de->inode != 0 &&
+                de->name_len == name_len &&
+                memcmp(de->name, name, name_len) == 0) {
+                *out_ino       = de->inode;
+                *out_file_type = de->file_type;
+                *out_block     = phys;
+                *out_off       = off;
+                return 0;
+            }
+            off += de->rec_len;
+        }
+    }
+    return -ENOENT;
 }
 
 // ── VFS read implementation ─────────────────────────────
