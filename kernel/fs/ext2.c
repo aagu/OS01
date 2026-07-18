@@ -21,6 +21,13 @@ static int ext2_read_block(ext2_fs_t *fs, uint32_t block, void *buf)
     return block_device_read(fs->dev, lba, fs->sectors_per_block, buf);
 }
 
+// ── Block I/O helper (write) ───────────────────────────
+static int ext2_write_block(ext2_fs_t *fs, uint32_t block, const void *buf)
+{
+    uint64_t lba = (uint64_t)block * fs->sectors_per_block;
+    return block_device_write(fs->dev, lba, fs->sectors_per_block, buf);
+}
+
 // ── Read an inode from disk ─────────────────────────────
 static int ext2_read_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *out)
 {
