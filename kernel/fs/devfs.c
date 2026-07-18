@@ -6,6 +6,7 @@
 #include <kernel/slab.h>
 #include <driver/serial.h>
 #include <kernel/tty.h>
+#include <kernel/poll.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -16,6 +17,9 @@ typedef struct devfs_device {
     uint8_t type;       // VFS_CHRDEV or VFS_BLKDEV
     int (*read)(vfs_node_t *, uint64_t, uint64_t, void *);
     int (*write)(vfs_node_t *, uint64_t, uint64_t, void *);
+    // Poll: check device readiness.  pt is poll_table for non-ready registration.
+    // NULL means device is always ready (default for most devices).
+    uint32_t (*poll)(void *priv, struct poll_table *pt);
     void *private_data;
     int registered;
 } devfs_device_t;
@@ -64,6 +68,16 @@ static int dev_tty_write(vfs_node_t *node, uint64_t offset, uint64_t size, void 
     tty_t *tty = get_dev_tty();
     if (!tty || !buffer || size == 0) return 0;
     return tty_write(tty, (const char *)buffer, (int)size);
+}
+
+// ── /dev/tty poll — delegates to tty_poll via global TTY singleton
+static uint32_t dev_tty_poll(void *priv, struct poll_table *pt)
+{
+    (void)priv;
+    tty_t *tty = get_dev_tty();
+    if (!tty)
+        return POLLERR;
+    return tty_poll(tty, pt);
 }
 
 // ── /dev/serial — read/write the COM1 serial port ─────────
@@ -174,6 +188,24 @@ static int devfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *b
     return -1;
 }
 
+// ── devfs_poll — dispatch poll for fd_poll(FD_DEV) ─────────
+// node->fs_data holds the device index.  Resolve it and call
+// the device's poll callback, or return always-ready if none.
+uint32_t devfs_poll(vfs_node_t *node, poll_table_t *pt)
+{
+    int idx = (int)(uintptr_t)node->fs_data;
+    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+        return POLLNVAL;
+
+    devfs_device_t *dev = &devices[idx];
+
+    if (dev->poll)
+        return dev->poll(dev->private_data, pt);
+
+    // No poll callback: default to always ready
+    return POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM;
+}
+
 // ── readdir: enumerate registered devices ───────────────────
 
 static int devfs_readdir(vfs_node_t *node, uint64_t index, vfs_dirent_t *entry)
@@ -228,18 +260,19 @@ void devfs_init(void)
     }
 
     // Register built-in character devices
-    devfs_register_chrdev("null",   NULL, null_read,   null_write);
-    devfs_register_chrdev("zero",   NULL, zero_read,   null_write);  // zero write = discard
-    devfs_register_chrdev("random", NULL, random_read, random_write);
-    devfs_register_chrdev("serial", NULL, serial_read, serial_write);
-    devfs_register_chrdev("tty",    NULL, dev_tty_read, dev_tty_write);
+    devfs_register_chrdev("null",   NULL, null_read,   null_write,   NULL);
+    devfs_register_chrdev("zero",   NULL, zero_read,   null_write,   NULL);
+    devfs_register_chrdev("random", NULL, random_read, random_write, NULL);
+    devfs_register_chrdev("serial", NULL, serial_read, serial_write, NULL);
+    devfs_register_chrdev("tty",    NULL, dev_tty_read, dev_tty_write, dev_tty_poll);
 }
 
 // ── Public API ──────────────────────────────────────────────
 
 int devfs_register_chrdev(const char *name, void *private_data,
     int (*read)(vfs_node_t *, uint64_t, uint64_t, void *),
-    int (*write)(vfs_node_t *, uint64_t, uint64_t, void *))
+    int (*write)(vfs_node_t *, uint64_t, uint64_t, void *),
+    uint32_t (*poll)(void *priv, struct poll_table *pt))
 {
     if (device_count >= DEVFS_MAX_DEVICES)
         return -1;
@@ -253,6 +286,7 @@ int devfs_register_chrdev(const char *name, void *private_data,
     devices[idx].type = VFS_CHRDEV;
     devices[idx].read = read;
     devices[idx].write = write;
+    devices[idx].poll = poll;
     devices[idx].private_data = private_data;
     devices[idx].registered = 1;
     device_count++;
