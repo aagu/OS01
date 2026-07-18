@@ -122,11 +122,23 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 
 run: disk.img boot/uefi/OVMF.fd
 	$(QEMU_BIN) -M q35 -smp 2 -pflash boot/uefi/OVMF.fd \
-	  -hda disk.img -m $(MEMORY) -display $(DISPLAY) -serial stdio
+	  -drive file=disk.img,format=raw,if=none,id=disk \
+	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
+	  -m $(MEMORY) -display $(DISPLAY) -serial stdio
+
+run-kvm: disk.img boot/uefi/OVMF.fd
+	$(QEMU_BIN) -M q35 -smp 2 -pflash boot/uefi/OVMF.fd \
+	  -accel kvm \
+	  -drive file=disk.img,format=raw,if=none,id=disk \
+	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
+	  -m $(MEMORY) -display $(DISPLAY) -serial stdio
 
 debug: disk.img boot/uefi/OVMF.fd
 	$(QEMU_BIN) -M q35 -smp 2 -pflash boot/uefi/OVMF.fd \
-	  -S -s -hda disk.img -m $(MEMORY) -display $(DISPLAY) -serial stdio
+	  -S -s \
+	  -drive file=disk.img,format=raw,if=none,id=disk \
+	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
+	  -m $(MEMORY) -display $(DISPLAY) -serial stdio
 
 # ── Test ────────────────────────────────────────────────
 
