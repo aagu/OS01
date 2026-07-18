@@ -682,6 +682,55 @@ static int ext2_vfs_truncate(struct vfs_node *node, uint64_t new_size)
     return 0;
 }
 
+// ── VFS create (regular file) ──────────────────────────
+static struct vfs_node *ext2_vfs_create(struct vfs_node *dir, const char *name)
+{
+    if (!dir || !dir->mount || !name) return NULL;
+    ext2_fs_t *fs = (ext2_fs_t *)dir->mount->fs_data;
+
+    spin_lock(&fs->lock);
+
+    uint32_t dir_ino = ext2_node_ino(dir);
+
+    // Check for duplicate
+    uint32_t dummy_ino, dummy_block, dummy_off;
+    uint8_t dummy_type;
+    if (ext2_find_dirent(fs, dir_ino, name, &dummy_ino, &dummy_type,
+                         &dummy_block, &dummy_off) == 0) {
+        spin_unlock(&fs->lock);
+        return NULL;  // already exists
+    }
+
+    uint32_t new_ino = alloc_inode(fs, EXT2_S_IFREG | 0644);
+    if (new_ino == 0) {
+        spin_unlock(&fs->lock); return NULL;
+    }
+
+    if (dirent_add(fs, dir_ino, name, new_ino, 1 /* EXT2_FT_REG_FILE */) != 0) {
+        free_inode(fs, new_ino);
+        spin_unlock(&fs->lock); return NULL;
+    }
+
+    spin_unlock(&fs->lock);
+
+    // Build vfs_node_t
+    vfs_node_t *node = calloc(1, sizeof(vfs_node_t));
+    if (!node) return NULL;
+
+    size_t nlen = strlen(name);
+    if (nlen >= VFS_NAME_MAX) nlen = VFS_NAME_MAX - 1;
+    memcpy(node->name, name, nlen);
+    node->name[nlen] = '\0';
+    node->type = VFS_FILE;
+    node->mount = dir->mount;
+    node->ops = dir->ops;
+    node->fs_data = (void *)(uintptr_t)new_ino;
+    node->size = 0;
+    node->refcount = 1;
+
+    return node;
+}
+
 // ── VFS readdir implementation ──────────────────────────
 static int ext2_vfs_readdir(struct vfs_node *node, uint64_t index,
                              struct vfs_dirent *entry)
@@ -752,7 +801,7 @@ struct vfs_ops ext2_vfs_ops = {
     .read    = ext2_vfs_read,
     .write   = ext2_vfs_write,
     .readdir = ext2_vfs_readdir,
-    .create  = NULL,
+    .create  = ext2_vfs_create,
     .unlink  = NULL,
     .mkdir   = NULL,
     .rmdir   = NULL,
