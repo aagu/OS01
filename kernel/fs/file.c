@@ -2,6 +2,7 @@
 #include <fs/vfs.h>
 #include <kernel/debug.h>
 #include <kernel/task.h>
+#include <kernel.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -109,6 +110,10 @@ int fd_alloc(files_t *fs, file_t *f)
     return -1;  // table full
 }
 
+// ── Forward declarations for pipe wake helpers ──────────────
+static void pipe_wake_readers(pipe_t *p);
+static void pipe_wake_writers(pipe_t *p);
+
 // ── Close a single fd ───────────────────────────────────────
 void fd_close(files_t *fs, int fd)
 {
@@ -119,12 +124,21 @@ void fd_close(files_t *fs, int fd)
 
     fs->fd[fd] = NULL;
 
-    // For pipes: decrement reader/writer counts
+    // For pipes: decrement reader/writer counts and wake poll waiters
     if (f->type == FD_PIPE && f->pipe) {
-        if (f->flags == O_RDONLY)
+        uint64_t flags = spin_lock_irqsave(&f->pipe->lock);
+
+        if (f->flags == O_RDONLY) {
             f->pipe->readers--;
-        else
+            if (f->pipe->readers == 0)
+                pipe_wake_writers(f->pipe);
+        } else {
             f->pipe->writers--;
+            if (f->pipe->writers == 0)
+                pipe_wake_readers(f->pipe);
+        }
+
+        spin_unlock_irqrestore(&f->pipe->lock, flags);
     }
 
     f->refcount--;
