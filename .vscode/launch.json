@@ -48,6 +48,19 @@
                 "gdb-remote 1234"
             ],
             "preLaunchTask": "Launch QEMU"
+        },
+        {
+            "name": "debug systest with LLDB",
+            "type": "lldb-dap",
+            "request": "attach",
+            "program": "${workspaceFolder}/build/x86_64/user/systest.elf",
+            "targetCreateCommands": [
+                "target create ${workspaceFolder}/build/x86_64/user/systest.elf"
+            ],
+            "attachCommands": [
+                "gdb-remote 1234"
+            ],
+            "preLaunchTask": "Launch QEMU"
         }
     ]
 }

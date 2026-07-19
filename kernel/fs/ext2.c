@@ -784,8 +784,7 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_create(struct vfs_nod
 
     size_t nlen = strlen(name);
     if (nlen >= VFS_NAME_MAX) nlen = VFS_NAME_MAX - 1;
-    memcpy(node->name, name, nlen);
-    node->name[nlen] = '\0';
+    node->name = strndup(name, nlen);
     node->type = VFS_FILE;
     node->mount = dir->mount;
     node->ops = dir->ops;
@@ -948,8 +947,7 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node
 
     size_t nlen = strlen(name);
     if (nlen >= VFS_NAME_MAX) nlen = VFS_NAME_MAX - 1;
-    memcpy(node->name, name, nlen);
-    node->name[nlen] = '\0';
+    node->name = strndup(name, nlen);
     node->type = VFS_DIR;
     node->mount = dir->mount;
     node->ops = dir->ops;

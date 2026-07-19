@@ -2,6 +2,7 @@
 #include <fs/vfs.h>
 #include <kernel/debug.h>
 #include <kernel/task.h>
+#include <kernel/slab.h>
 #include <kernel.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,6 +33,8 @@ pipe_t *pipe_alloc(void)
 {
     pipe_t *p = (pipe_t *)calloc(1, sizeof(pipe_t));
     if (!p) return NULL;
+    p->buf = (char *)kmalloc(PIPE_SIZE);
+    if (!p->buf) { free(p); return NULL; }
     p->readers = 1;
     p->writers = 1;
     spin_init(&p->lock);
@@ -46,6 +49,7 @@ pipe_t *pipe_alloc(void)
 void pipe_free(pipe_t *p)
 {
     if (!p) return;
+    kfree(p->buf);
     free(p);
 }
 
@@ -55,8 +59,8 @@ files_t *files_alloc(void)
     files_t *fs = (files_t *)calloc(1, sizeof(files_t));
     if (!fs) return NULL;
     // Default cwd is root
-    fs->cwd[0] = '/';
-    fs->cwd[1] = '\0';
+    fs->cwd = strdup("/");
+    if (!fs->cwd) { free(fs); return NULL; }
     return fs;
 }
 
@@ -73,6 +77,7 @@ void files_free(files_t *fs)
             fs->fd[i] = NULL;
         }
     }
+    kfree(fs->cwd);
     free(fs);
 }
 
@@ -86,7 +91,8 @@ files_t *files_dup(files_t *fs)
     files_t *new_fs = (files_t *)calloc(1, sizeof(files_t));
     if (!new_fs) return NULL;
 
-    memcpy(new_fs->cwd, fs->cwd, sizeof(fs->cwd));
+    new_fs->cwd = strdup(fs->cwd);
+    if (!new_fs->cwd) { free(new_fs); return NULL; }
 
     for (int i = 0; i < NOFILE; i++) {
         if (fs->fd[i]) {

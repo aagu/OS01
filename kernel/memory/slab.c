@@ -182,6 +182,8 @@ void * kmalloc(size_t size)
 
 size_t kfree(void * address)
 {
+    if (!address) return 0;
+
     uint32_t i, index;
     struct Slab * slab = NULL;
     void * page_base_address = (void *)((uint64_t)address & PAGE_2M_MASK);
@@ -189,13 +191,17 @@ size_t kfree(void * address)
     for (i = 0;i < 16; i++)
     {
         slab = kmalloc_cache_size[i].cache_pool;
+        if (!slab) continue;
         do
         {
             if (slab->address == page_base_address)
             {
                 index = (address - slab->address) / kmalloc_cache_size[i].size;
 
-                *(slab->color_map + (index >> 6)) ^= 1UL << index % 64;
+                // XOR toggles the bit back to 0 (free).
+                // NOTE: this is NOT idempotent — double-free would re-mark
+                // the block as allocated, corrupting the allocator.
+                *(slab->color_map + (index >> 6)) ^= 1UL << (index % 64);
 
                 slab->free_count++;
                 slab->using_count--;

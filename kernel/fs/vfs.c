@@ -6,7 +6,7 @@
 #include <errno.h>
 
 // ── Mount table ───────────────────────────────────────────
-static vfs_mount_t mount_table[VFS_MOUNTPOINT_MAX];
+static vfs_mount_t *mount_list = NULL;
 static int mount_count = 0;
 static int vfs_initialized = 0;
 
@@ -28,7 +28,7 @@ static int vfs_name_cmp(const char *a, const char *b)
 // ── Initialization ────────────────────────────────────────
 void vfs_init(void)
 {
-    memset(mount_table, 0, sizeof(mount_table));
+    mount_list = NULL;
     mount_count = 0;
     vfs_initialized = 1;
     debug_vfs("VFS: initialized\n");
@@ -39,12 +39,13 @@ int vfs_mount(const char *path, block_device_t *dev,
               vfs_ops_t *ops, void *fs_data)
 {
     if (!vfs_initialized) vfs_init();
-    if (mount_count >= VFS_MOUNTPOINT_MAX) {
-        debug_vfs("VFS: mount table full\n");
+
+    vfs_mount_t *mp = (vfs_mount_t *)calloc(1, sizeof(vfs_mount_t));
+    if (!mp) {
+        debug_vfs("VFS: mount: out of memory\n");
         return -1;
     }
 
-    vfs_mount_t *mp = &mount_table[mount_count];
     mp->dev = dev;
     mp->path = path;
     mp->ops = ops;
@@ -54,7 +55,8 @@ int vfs_mount(const char *path, block_device_t *dev,
     // Allocate a root node — the filesystem fills it via ops
     mp->root = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
     if (!mp->root) {
-        debug_vfs("VFS: mount: out of memory\n");
+        debug_vfs("VFS: mount: root node alloc failed\n");
+        kfree(mp);
         return -1;
     }
 
@@ -66,8 +68,16 @@ int vfs_mount(const char *path, block_device_t *dev,
     // Subdirectory nodes will hold the cluster number here.
     mp->root->fs_data = NULL;
     mp->root->refcount = 1;
-    strcpy(mp->root->name, "/");
+    mp->root->name = strdup("/");
+    if (!mp->root->name) {
+        kfree(mp->root);
+        kfree(mp);
+        return -1;
+    }
 
+    // Prepend to mount list
+    mp->next = mount_list;
+    mount_list = mp;
     mount_count++;
     debug_vfs("VFS: mounted '%s'\n", path);
     return 0;
@@ -106,15 +116,15 @@ static vfs_mount_t *find_mount(const char *path)
     vfs_mount_t *best = NULL;
     size_t best_len = 0;
 
-    for (int i = 0; i < mount_count; i++) {
-        size_t len = strlen(mount_table[i].path);
-        if (strncmp(path, mount_table[i].path, len) == 0) {
+    for (vfs_mount_t *mp = mount_list; mp; mp = mp->next) {
+        size_t len = strlen(mp->path);
+        if (strncmp(path, mp->path, len) == 0) {
             // Root mount ("/") matches any path.
             // Non-root mounts must end at a component boundary.
-            if (len == 1 && mount_table[i].path[0] == '/') {
-                if (len > best_len) { best_len = len; best = &mount_table[i]; }
+            if (len == 1 && mp->path[0] == '/') {
+                if (len > best_len) { best_len = len; best = mp; }
             } else if (path[len] == '\0' || path[len] == '/') {
-                if (len > best_len) { best_len = len; best = &mount_table[i]; }
+                if (len > best_len) { best_len = len; best = mp; }
             }
         }
     }
@@ -181,6 +191,8 @@ static vfs_node_t *__vfs_lookup(const char *path)
         }
 
         vfs_dirent_t entry;
+        char _entry_name[VFS_NAME_MAX];
+        entry.name = _entry_name;
         int found = 0;
         uint64_t idx = 0;
 
@@ -220,10 +232,7 @@ static vfs_node_t *__vfs_lookup(const char *path)
         child->ops = current->ops;
         child->fs_data = (void *)(uintptr_t)entry.ino;
         child->refcount = 1;
-        size_t nlen = strlen(entry.name);
-        if (nlen >= VFS_NAME_MAX) nlen = VFS_NAME_MAX - 1;
-        memcpy(child->name, entry.name, nlen);
-        child->name[nlen] = '\0';
+        child->name = strndup(entry.name, VFS_NAME_MAX - 1);
 
         current->refcount--;
         current = child;
@@ -315,7 +324,7 @@ void vfs_node_put(vfs_node_t *node)
 {
     if (!node) return;
     if (--node->refcount == 0) {
-        // For now, free the node
+        if (node->name) kfree(node->name);
         free(node);
     }
 }
@@ -397,9 +406,18 @@ int vfs_getdents(vfs_node_t *dir, struct linux_dirent64 *buf, unsigned int count
 
     // ── Phase 1: Collect entries from the underlying filesystem ──
     vfs_dirent_t *entries = kmalloc(sizeof(vfs_dirent_t) * VFS_GETDENTS_SORT_MAX);
-    if (!entries) return -ENOMEM;
+    char *entry_names = kmalloc(VFS_NAME_MAX * VFS_GETDENTS_SORT_MAX);
+    if (!entries || !entry_names) {
+        if (entries) kfree(entries);
+        if (entry_names) kfree(entry_names);
+        return -ENOMEM;
+    }
+    for (int i = 0; i < VFS_GETDENTS_SORT_MAX; i++)
+        entries[i].name = entry_names + i * VFS_NAME_MAX;
+
     int total = 0;
-    vfs_dirent_t de;
+    char _de_name[VFS_NAME_MAX];
+    vfs_dirent_t de = { .name = _de_name };
     uint64_t idx = 0;
 
     while (total < VFS_GETDENTS_SORT_MAX) {
@@ -420,13 +438,13 @@ int vfs_getdents(vfs_node_t *dir, struct linux_dirent64 *buf, unsigned int count
     // ── Phase 2: Inject sub-mount entries ──────────────────────
     // Only when listing a mount root (e.g., "/" which is FAT32's root).
     if (dir->mount && dir == dir->mount->root) {
-        for (int i = 0; i < mount_count && total < VFS_GETDENTS_SORT_MAX; i++) {
-            if (&mount_table[i] == dir->mount) continue;  // skip self
-            if (!vfs_is_child_mount(dir->mount->path, mount_table[i].path))
+        for (vfs_mount_t *mp = mount_list; mp && total < VFS_GETDENTS_SORT_MAX; mp = mp->next) {
+            if (mp == dir->mount) continue;  // skip self
+            if (!vfs_is_child_mount(dir->mount->path, mp->path))
                 continue;
 
             // Extract basename (skip leading "/")
-            const char *base = mount_table[i].path;
+            const char *base = mp->path;
             if (base[0] == '/') base++;
             size_t blen = strlen(base);
             if (blen >= VFS_NAME_MAX) blen = VFS_NAME_MAX - 1;
@@ -434,7 +452,7 @@ int vfs_getdents(vfs_node_t *dir, struct linux_dirent64 *buf, unsigned int count
             entries[total].name[blen] = '\0';
             entries[total].size = 0;
             entries[total].type = VFS_DIR;
-            entries[total].ino  = (uint32_t)(0x80000000 | (uint32_t)i);
+            entries[total].ino  = (uint32_t)(0x80000000 | total);
             total++;
         }
     }
@@ -485,6 +503,7 @@ int vfs_getdents(vfs_node_t *dir, struct linux_dirent64 *buf, unsigned int count
         (*pos)++;
     }
 
+    kfree(entry_names);
     kfree(entries);
     return (int)bytes_written;
 }
@@ -503,7 +522,8 @@ void vfs_debug_list(const char *path)
     }
 
     debug_vfs("VFS: listing '%s':\n", path);
-    vfs_dirent_t entry;
+    char _entry_name[VFS_NAME_MAX];
+    vfs_dirent_t entry = { .name = _entry_name };
     uint64_t idx = 0;
     int max_iter = 256;  // safety bound to prevent infinite loops
 

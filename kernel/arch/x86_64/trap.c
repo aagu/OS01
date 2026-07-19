@@ -1279,9 +1279,11 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         }
         // Collapse "//" and trailing "/"
         // For now, simple store
-        memcpy(current->files->cwd, new_cwd, sizeof(current->files->cwd));
+        kfree(current->files->cwd);
+        current->files->cwd = strdup(new_cwd);
+        if (!current->files->cwd) { regs->rax = -ENOMEM; break; }
 
-        log_info("chdir: pid=%d → '%s'\n", (int)current->pid, current->files->cwd);
+        log_info("chdir: pid=%d -> '%s'\n", (int)current->pid, current->files->cwd);
         regs->rax = 0;
         break;
     }

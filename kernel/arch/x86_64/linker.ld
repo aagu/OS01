@@ -24,7 +24,7 @@ SECTIONS
 	.data :
 	{
 		_data = .;
-		*(.data)		
+		*(.data)
 		_edata = .;
 	}
 

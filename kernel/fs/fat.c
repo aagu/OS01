@@ -867,8 +867,7 @@ struct vfs_node *fat_mkdir(vfs_node_t *dir, const char *name)
 
     size_t nlen = strlen(name);
     if (nlen >= VFS_NAME_MAX) nlen = VFS_NAME_MAX - 1;
-    memcpy(node->name, name, nlen);
-    node->name[nlen] = '\0';
+    node->name = strndup(name, nlen);
     node->type = VFS_DIR;
     node->mount = dir->mount;
     node->parent = dir;
@@ -1172,8 +1171,7 @@ struct vfs_node *fat_create(vfs_node_t *dir, const char *name)
 
     size_t nlen = strlen(name);
     if (nlen >= VFS_NAME_MAX) nlen = VFS_NAME_MAX - 1;
-    memcpy(node->name, name, nlen);
-    node->name[nlen] = '\0';
+    node->name = strndup(name, nlen);
     node->type = VFS_FILE;
     node->mount = dir->mount;
     node->parent = dir;

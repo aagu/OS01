@@ -9,7 +9,6 @@
 #define VFS_DIR    2
 #define VFS_CHRDEV 3   // character device
 #define VFS_BLKDEV 4   // block device
-#define VFS_MOUNTPOINT_MAX 8
 #define VFS_NAME_MAX 256
 
 // ── Forward declarations ──────────────────────────────────
@@ -56,23 +55,26 @@ typedef struct vfs_mount {
     struct vfs_node   *root;          // root node of this filesystem
     struct vfs_ops    *ops;
     void              *fs_data;       // filesystem-private data
+    struct vfs_mount  *next;          // linked list (mount order)
 } vfs_mount_t;
 
 // ── Directory entry returned by readdir ───────────────────
+// Caller must set entry->name to a buffer of at least VFS_NAME_MAX bytes
+// before calling ops->readdir.
 typedef struct vfs_dirent {
-    char     name[VFS_NAME_MAX];
+    char     *name;          // caller-provided buffer (VFS_NAME_MAX bytes)
     uint64_t size;
-    uint8_t  type;          // VFS_FILE or VFS_DIR
-    uint64_t ino;           // filesystem-specific id (must hold kernel pointer for tmpfs)
+    uint8_t  type;           // VFS_FILE or VFS_DIR
+    uint64_t ino;            // filesystem-specific id (must hold kernel pointer for tmpfs)
 } vfs_dirent_t;
 
 // ── VFS node (inode) ──────────────────────────────────────
 typedef struct vfs_node {
-    char              name[VFS_NAME_MAX];
+    char              *name;  // heap-allocated via strdup/strndup; kfree'd on node free
     uint64_t          size;
-    uint8_t           type;           // VFS_FILE or VFS_DIR
+    uint8_t           type;   // VFS_FILE or VFS_DIR
     struct vfs_mount *mount;
-    void             *fs_data;        // filesystem-private (e.g., first cluster)
+    void             *fs_data;
     struct vfs_node  *parent;
     struct vfs_ops   *ops;
     uint32_t          refcount;

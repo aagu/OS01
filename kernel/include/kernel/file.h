@@ -35,7 +35,7 @@ enum file_type {
 // ── Pipe ───────────────────────────────────────────────────
 
 typedef struct pipe {
-    char      buf[PIPE_SIZE];
+    char      *buf;           // heap-allocated ring buffer (PIPE_SIZE bytes)
     int       head;           // producer writes here (ring buffer)
     int       tail;           // consumer reads here
     int       readers;        // active reader count
@@ -64,7 +64,7 @@ typedef struct file {
 
 typedef struct files_struct {
     file_t *fd[NOFILE];
-    char    cwd[256];          // current working directory
+    char   *cwd;              // heap-allocated current working directory
 } files_t;
 
 // ── API ────────────────────────────────────────────────────

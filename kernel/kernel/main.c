@@ -40,45 +40,58 @@ extern char _end;
 // ── Stack canary ─────────────────────────────────────────────
 // Initial value is non-zero (defense-in-depth).  kernel_main()
 // replaces it with rdtsc() as its first statement.
+// ── Safe raw hex output (for __stack_chk_fail — only write_serial) ──
+static void write_hex(uint64_t val)
+{
+    char b[17];
+    int i;
+    for (i = 15; i >= 0; i--) {
+        int d = (int)(val & 0xf);
+        b[i] = (d < 10) ? ('0' + d) : ('a' + d - 10);
+        val >>= 4;
+    }
+    b[16] = '\0';
+    for (i = 0; i < 16; i++) write_serial(b[i]);
+}
+
 uint64_t __stack_chk_guard = 0xDEADBEEFCAFEBABE;
 
+// ── Stack smashing handler (safety net, rarely called) ────
 __attribute__((noreturn, no_stack_protector, cold))
 void __stack_chk_fail(void)
 {
-    // 1. IMMEDIATELY disable interrupts — the stack is corrupted.
     arch_local_irq_disable();
-
-    // 2. Output banner via write_serial() — pure port I/O, no
-    //    locks, no local buffers.  Do NOT use serial_printk()
-    //    (deadlock on serial_lock) or color_printk() (local buf).
-    const char *msg = "\n*** Kernel stack smashing detected ***\n";
-    for (const char *p = msg; *p; p++)
-        write_serial(*p);
-
-    // 3. Print PID if the task struct is accessible.
-    //    get_current_task() uses RSP & ~(STACK_SIZE-1) — usually
-    //    still valid even with a corrupted stack.  Guard against
-    //    pointers outside the kernel-mapped range.
-    task_t *t = get_current_task();
-    if (t && (uint64_t)t >= 0xffff800000000000ULL) {
-        const char *pre = "pid=";
-        for (const char *p = pre; *p; p++)
-            write_serial(*p);
-
-        // Simple itoa — no format strings, no division by zero.
-        int64_t pid = t->pid;
-        char buf[21];   // max 20 digits + sign
-        int i = 0;
-        if (pid < 0) { write_serial('-'); pid = -pid; }
-        if (pid == 0) { buf[i++] = '0'; }
-        while (pid > 0) { buf[i++] = '0' + (char)(pid % 10); pid /= 10; }
-        while (i > 0) write_serial(buf[--i]);
-
+    {
+        const char *p = "\n*** Kernel stack smashing detected ***\n";
+        for (; *p; p++) write_serial(*p);
+    }
+    // Raw stack walk via RBP chain
+    write_serial('>'), write_serial('>'), write_serial('>'), write_serial(' ');
+    {
+        uint64_t rbp_val;
+        __asm__ __volatile__("movq %%rbp, %0" : "=r"(rbp_val));
+        for (int fi = 0; fi < 10; fi++) {
+            if (rbp_val < 0xffff800000000000ULL || rbp_val > 0xfffffffffffff000ULL)
+                break;
+            uint64_t ret_addr = *(volatile uint64_t *)(rbp_val + 8);
+            write_hex(ret_addr); write_serial(' ');
+            if (fi == 4) { write_serial('\n'); }
+            rbp_val = *(volatile uint64_t *)rbp_val;
+        }
         write_serial('\n');
     }
-
-    // 4. Halt forever.  The hang detector (500ms watchdog) will
-    //    dump all task states as bonus diagnostics.
+    task_t *t = get_current_task();
+    if (t && (uint64_t)t >= 0xffff800000000000ULL) {
+        const char *a = "pid=";
+        for (; *a; a++) write_serial(*a);
+        int64_t pid = t->pid;
+        char b[21]; int i = 0;
+        if (pid < 0) { write_serial('-'); pid = -pid; }
+        if (pid == 0) { b[i++] = '0'; }
+        while (pid > 0) { b[i++] = '0' + (char)(pid % 10); pid /= 10; }
+        while (i > 0) write_serial(b[--i]);
+        write_serial('\n');
+    }
     while (1) arch_cpu_halt();
     __builtin_unreachable();
 }
