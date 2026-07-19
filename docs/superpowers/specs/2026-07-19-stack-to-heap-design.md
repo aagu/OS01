@@ -121,7 +121,7 @@ kfree(buf);
 | `ext2_read_inode` | `uint8_t buf[4096]` | `kmalloc(4096)` | `-ENOMEM` |
 | `ext2_write_inode` | `uint8_t buf[4096]` | `kmalloc(4096)` | `-ENOMEM` |
 | `ext2_write_superblock` | `uint8_t sb_buf[1024]` | `kmalloc(1024)` | `-ENOMEM` |
-| `ext2_init` | `uint8_t sb_buf[1024]` | `kmalloc(1024)` | `NULL` |
+| `ext2_init` | `uint8_t sb_buf[1024]` | `kmalloc(1024)` | `-ENOMEM` |
 | `alloc_block` | `uint8_t buf[4096]` | `kmalloc(4096)` | `0` |
 | `alloc_block` | `uint8_t zero[4096]` | 复用上面的 `buf`（先 `memset(…,0,4096)`） | — |
 | `free_block` | `uint8_t buf[4096]` | `kmalloc(4096)` | `return` (void) |
@@ -139,7 +139,7 @@ kfree(buf);
 | `ext2_vfs_rename` | `uint8_t dir_data[4096]` | `kmalloc(4096)`（独立分配，不复用） | `-ENOMEM` |
 | `ext2_vfs_rmdir` | `uint8_t bd[4096]` | `kmalloc(4096)` | `-ENOMEM` |
 | `ext2_vfs_rmdir` | `uint32_t indirect[1024]` | `kmalloc(4096)` | `-ENOMEM` |
-| `ext2_vfs_rename` 收缩 | `uint32_t indirect[1024]` | `kmalloc(4096)` | `-ENOMEM` |
+| `ext2_vfs_rename` | `uint32_t indirect[1024]` | `kmalloc(4096)`（两处互斥分支，可同一分配） | `-ENOMEM` |
 | `ext2_vfs_mkdir` | `uint8_t block_data[4096]` | `kmalloc(4096)` | `-ENOMEM` |
 | `ext2_vfs_readdir` | `uint8_t block_data[4096]` | `kmalloc(4096)` | `-ENOMEM` |
 | `ext2_vfs_unlink` | `uint8_t block_data[4096]` | `kmalloc(4096)` | `-ENOMEM` |
@@ -246,11 +246,10 @@ endif
 - `panic.c` 的 `buf[4096]`（已是全局 `.bss` 变量）
 - `printk.c` 的 `buf_color[4096]` / `buf_serial[4096]`（已是 `static` 全局变量）
 - `procfs.c` 的 `char local[512]`（512 B，栈安全）
-- `ext2_init` 的 `uint8_t sb_buf[1024]`（1 KB，仅挂载时调用一次，路径极浅）
 
 ### 潜在的未来改动
 
-- `GET_CROSS` 宏（`task.h:241`）：`"andq $-32768, %rbx"` 硬编码了 32KB 掩码。若未来调整 STACK_SIZE 需同步修改。建议加 `static_assert(sizeof(union task_union) == STACK_SIZE)` 在编译期保护。
+- `GET_CURRENT` 宏（`task.h:239`）：`"andq $-32768, %rbx"` 硬编码了 32KB 掩码。若未来调整 STACK_SIZE 需同步修改。建议加 `static_assert(sizeof(union task_union) == STACK_SIZE)` 在编译期保护。
 
 ---
 
