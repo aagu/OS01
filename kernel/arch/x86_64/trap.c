@@ -803,6 +803,18 @@ int signal_pending_fatal(void)
 
 void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused)))
 {
+#ifndef NDEBUG
+    // Stack overflow guard: warn when RSP is within 2KB of stack bottom.
+    // Keep this for at least one release cycle to catch regressions.
+    task_t *cur = get_current_task();
+    if (cur) {
+        uint64_t stack_bottom = ((uint64_t)cur) & ~(STACK_SIZE - 1);
+        if ((uint64_t)__builtin_frame_address(0) - stack_bottom < 2048)
+            log_err("WARNING: RSP within 2KB of stack bottom! pid=%d\n",
+                    (int)cur->pid);
+    }
+#endif
+
     // Linux x86_64 ABI translation (for busybox etc.)
     if ((current->flags & PF_LINUX_ABI) && regs->rax < 256) {
         static const int8_t linux_to_os01[256] = {
