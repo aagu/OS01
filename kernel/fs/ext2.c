@@ -985,25 +985,29 @@ static __attribute__((noinline)) int ext2_vfs_rmdir(struct vfs_node *dir, const 
     }
 
     // Check directory is empty (only "." and ".." entries with valid inode)
-    uint8_t block_data[4096];
+    uint8_t *bd = kmalloc(4096);
+    if (!bd) { spin_unlock(&fs->lock); return -ENOMEM; }
     for (uint32_t blk_idx = 0; ; blk_idx++) {
         uint32_t phys = ext2_bmap(fs, &target_inode, blk_idx);
         if (phys == 0) break;
-        if (ext2_read_block(fs, phys, block_data) != 0) break;
+        if (ext2_read_block(fs, phys, bd) != 0) break;
 
         uint32_t off2 = 0;
         while (off2 < fs->block_size) {
-            ext2_dirent_t *de = (ext2_dirent_t *)(block_data + off2);
+            ext2_dirent_t *de = (ext2_dirent_t *)(bd + off2);
             if (de->rec_len == 0) break;
 
             if (de->inode != 0 &&
                 de->inode != target_ino &&
                 de->inode != dir_ino) {
+                kfree(bd);
                 spin_unlock(&fs->lock); return -ENOTEMPTY;
             }
             off2 += de->rec_len;
         }
     }
+
+    kfree(bd);
 
     // Remove dirent from parent
     dirent_del(fs, dir_ino, name);
@@ -1027,14 +1031,16 @@ static __attribute__((noinline)) int ext2_vfs_rmdir(struct vfs_node *dir, const 
     }
     if (target_inode.i_block[12] != 0) {
         uint32_t ptrs_per_block = fs->block_size / sizeof(uint32_t);
-        uint32_t indirect[1024];
+        uint32_t *indirect = kmalloc(4096);
+        if (!indirect) { spin_unlock(&fs->lock); return -ENOMEM; }
         if (ext2_read_block(fs, target_inode.i_block[12], indirect) != 0) {
-            spin_unlock(&fs->lock); return -EIO;
+            kfree(indirect); spin_unlock(&fs->lock); return -EIO;
         }
         for (uint32_t i = 0; i < ptrs_per_block; i++) {
             if (indirect[i] != 0) free_block(fs, indirect[i]);
         }
         free_block(fs, target_inode.i_block[12]);
+        kfree(indirect);
     }
     free_inode(fs, target_ino);
 
@@ -1141,7 +1147,8 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
             ext2_inode_t exist_inode;
             ext2_read_inode(fs, exist_ino, &exist_inode);
             // Check if non-empty (same pattern as rmdir)
-            uint8_t bd[4096];
+            uint8_t *bd = kmalloc(4096);
+            if (!bd) { spin_unlock(&fs->lock); return -ENOMEM; }
             for (uint32_t bi = 0; ; bi++) {
                 uint32_t p = ext2_bmap(fs, &exist_inode, bi);
                 if (p == 0) break;
@@ -1151,11 +1158,12 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
                     ext2_dirent_t *de = (ext2_dirent_t *)(bd + o2);
                     if (de->rec_len == 0) break;
                     if (de->inode != 0 && de->inode != exist_ino && de->inode != new_ino_dir) {
-                        spin_unlock(&fs->lock); return -ENOTEMPTY;
+                        kfree(bd); spin_unlock(&fs->lock); return -ENOTEMPTY;
                     }
                     o2 += de->rec_len;
                 }
             }
+            kfree(bd);
             // Empty directory — remove it first
             // Write ordering (spec §6.1): dirent → bitmap → sb → data
             dirent_del(fs, new_ino_dir, newname);
@@ -1167,14 +1175,16 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
                 if (exist_inode2.i_block[i]) free_block(fs, exist_inode2.i_block[i]);
             }
             if (exist_inode2.i_block[12]) {
-                uint32_t indirect[1024];
+                uint32_t *indirect = kmalloc(4096);
+                if (!indirect) { spin_unlock(&fs->lock); return -ENOMEM; }
                 uint32_t pps = fs->block_size / sizeof(uint32_t);
                 if (ext2_read_block(fs, exist_inode2.i_block[12], indirect) != 0) {
-                    spin_unlock(&fs->lock); return -EIO;
+                    kfree(indirect); spin_unlock(&fs->lock); return -EIO;
                 }
                 for (uint32_t k = 0; k < pps; k++)
                     if (indirect[k]) free_block(fs, indirect[k]);
                 free_block(fs, exist_inode2.i_block[12]);
+                kfree(indirect);
             }
             free_inode(fs, exist_ino);
         } else {
@@ -1193,14 +1203,16 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
                     if (exist_inode.i_block[i]) free_block(fs, exist_inode.i_block[i]);
                 }
                 if (exist_inode.i_block[12]) {
-                    uint32_t indirect[1024];
+                    uint32_t *indirect = kmalloc(4096);
+                    if (!indirect) { spin_unlock(&fs->lock); return -ENOMEM; }
                     uint32_t pps = fs->block_size / sizeof(uint32_t);
                     if (ext2_read_block(fs, exist_inode.i_block[12], indirect) != 0) {
-                        spin_unlock(&fs->lock); return -EIO;
+                        kfree(indirect); spin_unlock(&fs->lock); return -EIO;
                     }
                     for (uint32_t k = 0; k < pps; k++)
                         if (indirect[k]) free_block(fs, indirect[k]);
                     free_block(fs, exist_inode.i_block[12]);
+                    kfree(indirect);
                 }
             } else {
                 ext2_write_inode(fs, exist_ino, &exist_inode);
@@ -1235,12 +1247,14 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
         ext2_inode_t moved_inode;
         ext2_read_inode(fs, target_ino, &moved_inode);
         uint32_t first_block = moved_inode.i_block[0];
-        uint8_t dir_data[4096];
+        uint8_t *dir_data = kmalloc(4096);
+        if (!dir_data) { spin_unlock(&fs->lock); return -ENOMEM; }
         ext2_read_block(fs, first_block, dir_data);
 
         ext2_dirent_t *dotdot = (ext2_dirent_t *)(dir_data + 12);
         dotdot->inode = new_ino_dir;
         ext2_write_block(fs, first_block, dir_data);
+        kfree(dir_data);
 
         // Adjust link counts
         ext2_inode_t old_inode, new_inode;
