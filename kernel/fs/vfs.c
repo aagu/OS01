@@ -1,5 +1,6 @@
 #include <fs/vfs.h>
 #include <kernel/debug.h>
+#include <kernel/slab.h>
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -395,7 +396,8 @@ int vfs_getdents(vfs_node_t *dir, struct linux_dirent64 *buf, unsigned int count
         return -1;
 
     // ── Phase 1: Collect entries from the underlying filesystem ──
-    vfs_dirent_t entries[VFS_GETDENTS_SORT_MAX];
+    vfs_dirent_t *entries = kmalloc(sizeof(vfs_dirent_t) * VFS_GETDENTS_SORT_MAX);
+    if (!entries) return -ENOMEM;
     int total = 0;
     vfs_dirent_t de;
     uint64_t idx = 0;
@@ -483,6 +485,7 @@ int vfs_getdents(vfs_node_t *dir, struct linux_dirent64 *buf, unsigned int count
         (*pos)++;
     }
 
+    kfree(entries);
     return (int)bytes_written;
 }
 

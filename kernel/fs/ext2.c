@@ -897,7 +897,8 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node
     ext2_write_inode(fs, new_ino, &new_inode);
 
     // Initialize directory block with "." and ".."
-    uint8_t block_data[4096];
+    uint8_t *block_data = kmalloc(4096);
+    if (!block_data) { spin_unlock(&fs->lock); return NULL; }
     memset(block_data, 0, fs->block_size);
 
     ext2_dirent_t *dot = (ext2_dirent_t *)block_data;
@@ -915,6 +916,7 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node
     memcpy(dotdot->name, "..", 2);
 
     ext2_write_block(fs, dir_blk, block_data);
+    kfree(block_data);
 
     // Update parent directory
     uint32_t parent_group = (dir_ino - 1) / fs->inodes_per_group;
@@ -1060,7 +1062,8 @@ static __attribute__((noinline)) int ext2_vfs_readdir(struct vfs_node *node, uin
         spin_unlock(&fs->lock); return -1;
     }
 
-    uint8_t block_data[4096];
+    uint8_t *block_data = kmalloc(4096);
+    if (!block_data) { spin_unlock(&fs->lock); return -ENOMEM; }
     uint64_t entry_idx = 0;
 
     for (uint32_t blk_idx = 0; ; blk_idx++) {
@@ -1090,6 +1093,7 @@ static __attribute__((noinline)) int ext2_vfs_readdir(struct vfs_node *node, uin
                         if (ext2_read_inode(fs, de->inode, &finode) == 0)
                             entry->size = finode.i_size;
                     }
+                    kfree(block_data);
                     spin_unlock(&fs->lock);
                     return 0;
                 }
@@ -1099,6 +1103,7 @@ static __attribute__((noinline)) int ext2_vfs_readdir(struct vfs_node *node, uin
         }
     }
 
+    kfree(block_data);
     entry->name[0] = '\0';
     spin_unlock(&fs->lock);
     return 0;
