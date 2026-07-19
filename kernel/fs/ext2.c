@@ -360,12 +360,14 @@ static __attribute__((noinline)) int ext2_find_dirent(ext2_fs_t *fs, uint32_t di
         return -ENOTDIR;
 
     size_t name_len = strlen(name);
-    uint8_t block_data[4096];
+    uint8_t *block_data = kmalloc(4096);
+    if (!block_data) return -ENOMEM;
+    int rc = -ENOENT;
 
     for (uint32_t blk_idx = 0; ; blk_idx++) {
         uint32_t phys = ext2_bmap(fs, &dir_inode, blk_idx);
-        if (phys == 0) break;
-        if (ext2_read_block(fs, phys, block_data) != 0) break;
+        if (phys == 0) goto out;
+        if (ext2_read_block(fs, phys, block_data) != 0) goto out;
 
         uint32_t off = 0;
         while (off < fs->block_size) {
@@ -379,12 +381,16 @@ static __attribute__((noinline)) int ext2_find_dirent(ext2_fs_t *fs, uint32_t di
                 *out_file_type = de->file_type;
                 *out_block     = phys;
                 *out_off       = off;
-                return 0;
+                rc = 0;
+                goto out;
             }
             off += de->rec_len;
         }
     }
-    return -ENOENT;
+
+out:
+    kfree(block_data);
+    return rc;
 }
 
 // ── Add a directory entry ───────────────────────────────
@@ -401,13 +407,14 @@ static __attribute__((noinline)) int dirent_add(ext2_fs_t *fs, uint32_t dir_ino,
         return -EIO;
 
     uint32_t logical_block = 0;
-    uint8_t block_data[4096];
+    uint8_t *block_data = kmalloc(4096);
+    if (!block_data) return -ENOMEM;
 
     for (;; logical_block++) {
         uint32_t phys = ext2_bmap(fs, &dir_inode, logical_block);
         if (phys == 0) {
             uint32_t new_blk = alloc_block(fs);
-            if (new_blk == 0) return -ENOSPC;
+            if (new_blk == 0) { kfree(block_data); return -ENOSPC; }
             if (logical_block < 12) {
                 dir_inode.i_block[logical_block] = new_blk;
             } else {
@@ -415,7 +422,7 @@ static __attribute__((noinline)) int dirent_add(ext2_fs_t *fs, uint32_t dir_ino,
                 // single indirect not implemented for directories.
                 // Real-world directories with > ~1000 entries would hit this.
                 // Documented in spec §10: double/triple indirect unsupported.
-                return -ENOSPC;
+                { kfree(block_data); return -ENOSPC; }
             }
             dir_inode.i_blocks += fs->block_size / 512;
             dir_inode.i_size += fs->block_size;
@@ -431,11 +438,11 @@ static __attribute__((noinline)) int dirent_add(ext2_fs_t *fs, uint32_t dir_ino,
             ext2_write_block(fs, new_blk, block_data);
             dir_inode.i_mtime = 0;
             ext2_write_inode(fs, dir_ino, &dir_inode);
-            return 0;
+            { kfree(block_data); return 0; }
         }
 
         if (ext2_read_block(fs, phys, block_data) != 0)
-            return -EIO;
+            { kfree(block_data); return -EIO; }
 
         uint32_t off = 0;
         while (off < fs->block_size) {
@@ -466,7 +473,7 @@ static __attribute__((noinline)) int dirent_add(ext2_fs_t *fs, uint32_t dir_ino,
                     ext2_write_block(fs, phys, block_data);
                     dir_inode.i_mtime = 0;
                     ext2_write_inode(fs, dir_ino, &dir_inode);
-                    return 0;
+                    { kfree(block_data); return 0; }
                 }
             } else if (de->rec_len - occupied >= new_len) {
                 uint32_t old_rec_len = de->rec_len;
@@ -482,7 +489,7 @@ static __attribute__((noinline)) int dirent_add(ext2_fs_t *fs, uint32_t dir_ino,
                 ext2_write_block(fs, phys, block_data);
                 dir_inode.i_mtime = 0;
                 ext2_write_inode(fs, dir_ino, &dir_inode);
-                return 0;
+                { kfree(block_data); return 0; }
             }
             off += de->rec_len;
         }
@@ -498,9 +505,10 @@ static __attribute__((noinline)) int dirent_del(ext2_fs_t *fs, uint32_t dir_ino,
                                &target_ino, &file_type, &block, &off);
     if (ret != 0) return ret;
 
-    uint8_t block_data[4096];
+    uint8_t *block_data = kmalloc(4096);
+    if (!block_data) return -ENOMEM;
     if (ext2_read_block(fs, block, block_data) != 0)
-        return -EIO;
+        { kfree(block_data); return -EIO; }
 
     ext2_dirent_t *de = (ext2_dirent_t *)(block_data + off);
     de->inode = 0;
@@ -524,7 +532,7 @@ static __attribute__((noinline)) int dirent_del(ext2_fs_t *fs, uint32_t dir_ino,
         dir_inode.i_mtime = 0;
         ext2_write_inode(fs, dir_ino, &dir_inode);
     }
-    return 0;
+    { kfree(block_data); return 0; }
 }
 
 // ── VFS read implementation ─────────────────────────────
