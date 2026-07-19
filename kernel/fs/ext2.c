@@ -558,16 +558,18 @@ static __attribute__((noinline)) int ext2_vfs_read(struct vfs_node *node, uint64
     uint64_t remaining = size;
     uint64_t file_off = offset;
 
+    uint8_t *block_buf = kmalloc(4096);
+    if (!block_buf) { spin_unlock(&fs->lock); return -ENOMEM; }
+
     while (remaining > 0) {
         uint32_t logical_block = (uint32_t)(file_off / fs->block_size);
         uint32_t block_off     = (uint32_t)(file_off % fs->block_size);
 
         uint32_t phys = ext2_bmap(fs, &inode, logical_block);
-        if (phys == 0) { spin_unlock(&fs->lock); return -1; }
+        if (phys == 0) { kfree(block_buf); spin_unlock(&fs->lock); return -1; }
 
-        uint8_t block_buf[4096];  // fixed size, block_size ≤ 4096
         if (ext2_read_block(fs, phys, block_buf) != 0) {
-            spin_unlock(&fs->lock); return -1;
+            kfree(block_buf); spin_unlock(&fs->lock); return -1;
         }
 
         uint32_t chunk = (uint32_t)(fs->block_size - block_off);
@@ -579,6 +581,7 @@ static __attribute__((noinline)) int ext2_vfs_read(struct vfs_node *node, uint64
         remaining -= chunk;
     }
 
+    kfree(block_buf);
     spin_unlock(&fs->lock);
     return (int)size;
 }
@@ -621,16 +624,18 @@ static __attribute__((noinline)) int ext2_vfs_write(struct vfs_node *node, uint6
     uint64_t remaining = size;
     uint64_t file_off  = offset;
 
+    uint8_t *block_buf = kmalloc(4096);
+    if (!block_buf) { spin_unlock(&fs->lock); return -ENOMEM; }
+
     while (remaining > 0) {
         uint32_t logical_block = (uint32_t)(file_off / fs->block_size);
         uint32_t block_off     = (uint32_t)(file_off % fs->block_size);
 
         uint32_t phys = ext2_bmap(fs, &inode, logical_block);
-        if (phys == 0) { spin_unlock(&fs->lock); return -EIO; }
+        if (phys == 0) { kfree(block_buf); spin_unlock(&fs->lock); return -EIO; }
 
-        uint8_t block_buf[4096];
         if (ext2_read_block(fs, phys, block_buf) != 0) {
-            spin_unlock(&fs->lock); return -EIO;
+            kfree(block_buf); spin_unlock(&fs->lock); return -EIO;
         }
 
         uint32_t chunk = fs->block_size - block_off;
@@ -638,13 +643,15 @@ static __attribute__((noinline)) int ext2_vfs_write(struct vfs_node *node, uint6
 
         memcpy(block_buf + block_off, src, chunk);
         if (ext2_write_block(fs, phys, block_buf) != 0) {
-            spin_unlock(&fs->lock); return -EIO;
+            kfree(block_buf); spin_unlock(&fs->lock); return -EIO;
         }
 
         src        += chunk;
         file_off   += chunk;
         remaining  -= chunk;
     }
+
+    kfree(block_buf);
 
     // Update i_size if write extended the file
     if (offset + size > inode.i_size)
@@ -702,8 +709,10 @@ static __attribute__((noinline)) int ext2_vfs_truncate(struct vfs_node *node, ui
                 uint32_t ptrs_per_block = fs->block_size / sizeof(uint32_t);
                 uint32_t idx = lb - 12;
                 if (inode.i_block[12] != 0) {
-                    uint32_t indirect[1024];
+                    uint32_t *indirect = kmalloc(4096);
+                    if (!indirect) { spin_unlock(&fs->lock); return -ENOMEM; }
                     if (ext2_read_block(fs, inode.i_block[12], indirect) != 0) {
+                        kfree(indirect);
                         spin_unlock(&fs->lock); return -EIO;
                     }
                     indirect[idx] = 0;
@@ -719,6 +728,7 @@ static __attribute__((noinline)) int ext2_vfs_truncate(struct vfs_node *node, ui
                         inode.i_block[12] = 0;
                         inode.i_blocks -= fs->block_size / 512;
                     }
+                    kfree(indirect);
                 }
             }
             inode.i_blocks -= fs->block_size / 512;
@@ -820,8 +830,10 @@ static __attribute__((noinline)) int ext2_vfs_unlink(struct vfs_node *dir, const
         }
         if (inode.i_block[12] != 0) {
             uint32_t ptrs_per_block = fs->block_size / sizeof(uint32_t);
-            uint32_t indirect[1024];
+            uint32_t *indirect = kmalloc(4096);
+            if (!indirect) { spin_unlock(&fs->lock); return -ENOMEM; }
             if (ext2_read_block(fs, inode.i_block[12], indirect) != 0) {
+                kfree(indirect);
                 spin_unlock(&fs->lock); return -EIO;
             }
             for (uint32_t i = 0; i < ptrs_per_block; i++) {
@@ -829,6 +841,7 @@ static __attribute__((noinline)) int ext2_vfs_unlink(struct vfs_node *dir, const
                     free_block(fs, indirect[i]);
                 }
             }
+            kfree(indirect);
             free_block(fs, inode.i_block[12]);
             inode.i_block[12] = 0;
         }
