@@ -1,8 +1,12 @@
 # 内核栈空间改造方案
 
 > **日期**: 2026-07-19
+> **修订**: 2026-07-19 — 代码审查 14 条全量修复
 > **范围**: 内核栈上大块内存迁移到堆，STACK_SIZE 从 64KB 降至 32KB，引入 -O2 优化
 > **动机**: 虽然 64KB 栈可运行，但浪费内存。目标在保持稳定性的前提下降低栈需求。
+
+> ⚠️ **警告**: 当前代码 `STACK_SIZE` 已改为 32KB（`task.h:40`），但堆迁移尚未实现！
+> rename 路径峰值 ~34 KB > 32 KB。实施前必须先完成堆迁移，再缩栈。
 
 ---
 
@@ -85,7 +89,7 @@ do_system_call                        3,224 B
 
 **策略**: 每个函数按需 `kmalloc`，用完 `kfree`。不用共享缓冲池，保证未来去掉 spin_lock 后天然并发安全。
 
-**模式**:
+**通用模式**:
 
 ```c
 // 原代码
@@ -93,40 +97,62 @@ uint8_t buf[4096];
 
 // 改为
 uint8_t *buf = kmalloc(4096);
-if (!buf) return -ENOMEM;
+if (!buf) return <failure-sentinel>;
 // ... 使用 buf ...
 kfree(buf);
 ```
 
+#### 返回值兼容要求
+
+⚠️ 各函数返回类型不同，`kmalloc` 失败时的 sentinel 值必须匹配原有语义：
+
+| 返回类型 | 失败 sentinel | 适用函数 |
+|----------|-------------|----------|
+| `int` / `struct vfs_node *` | `-ENOMEM` / `NULL` | `ext2_read/write_inode`, `ext2_vfs_*`, `dirent_*` |
+| `uint32_t`（block/ino 编号，0=失败） | `0` | `alloc_block`, `alloc_inode`, `ext2_bmap`, `ext2_bmap_alloc` |
+| `void` | `return`（静默失败） | `free_block`, `free_inode` |
+
+**关键细节**: `alloc_block`、`alloc_inode`、`ext2_bmap`、`ext2_bmap_alloc` 返回 `uint32_t`，其调用者已将 `0` 视为 "not found / out of space"，返回 `0` 与 `-ENOMEM` 语义一致。`free_block` / `free_inode` 返回 `void`，kmalloc 失败时静默 `return`（与现有 I/O 错误处理一致——这些函数内部已经对 I/O 错误不做错误传播）。
+
 **改造清单**（按源文件位置排序）:
 
-| 函数 | 移除的栈分配 | 新分配 |
-|------|-------------|--------|
-| `ext2_read_inode` | `uint8_t buf[4096]` | `kmalloc(4096)` |
-| `ext2_write_inode` | `uint8_t buf[4096]` | `kmalloc(4096)` |
-| `ext2_write_superblock` | `uint8_t sb_buf[1024]` | `kmalloc(1024)` |
-| `alloc_block` | `uint8_t buf[4096]` | `kmalloc(4096)` |
-| `free_block` | `uint8_t buf[4096]` | `kmalloc(4096)` |
-| `alloc_inode` | `uint8_t buf[4096]` | `kmalloc(4096)` |
-| `free_inode` | `uint8_t buf[4096]` | `kmalloc(4096)` |
-| `ext2_bmap` | `uint32_t indirect[1024]` | `kmalloc(4096)` |
-| `ext2_bmap_alloc` | `uint32_t indirect[1024]` | `kmalloc(4096)` |
-| `ext2_find_dirent` | `uint8_t block_data[4096]` | `kmalloc(4096)` |
-| `dirent_add` | `uint8_t block_data[4096]` | `kmalloc(4096)` |
-| `dirent_del` | `uint8_t block_data[4096]` | `kmalloc(4096)` |
-| `ext2_vfs_read` | `uint8_t block_buf[4096]` | `kmalloc(4096)` |
-| `ext2_vfs_write` | `uint8_t block_buf[4096]` | `kmalloc(4096)` |
-| `ext2_vfs_truncate` | `uint32_t indirect[1024]` | `kmalloc(4096)` |
-| `ext2_vfs_rename` | `uint8_t bd[4096]` | `kmalloc(4096)` |
-| `ext2_vfs_rename` | `uint8_t dir_data[4096]` | 复用同一 kmalloc（串行） |
-| `ext2_vfs_rmdir` | `uint8_t bd[4096]` | `kmalloc(4096)` |
-| `ext2_vfs_rmdir` 收缩 | `uint32_t indirect[1024]` | `kmalloc(4096)` |
-| `ext2_vfs_rename` 收缩 | `uint32_t indirect[1024]` | `kmalloc(4096)` |
-| `ext2_vfs_mkdir` | `uint8_t block_data[4096]` | `kmalloc(4096)` |
-| `ext2_vfs_readdir` | `uint8_t block_data[4096]` | `kmalloc(4096)` |
-| `ext2_vfs_unlink` | `uint8_t block_data[4096]` | `kmalloc(4096)` |
+| 函数 | 移除的栈分配 | 新增堆分配 | 失败 sentinel |
+|------|-------------|----------|:---:|
+| `ext2_read_inode` | `uint8_t buf[4096]` | `kmalloc(4096)` | `-ENOMEM` |
+| `ext2_write_inode` | `uint8_t buf[4096]` | `kmalloc(4096)` | `-ENOMEM` |
+| `ext2_write_superblock` | `uint8_t sb_buf[1024]` | `kmalloc(1024)` | `-ENOMEM` |
+| `ext2_init` | `uint8_t sb_buf[1024]` | `kmalloc(1024)` | `NULL` |
+| `alloc_block` | `uint8_t buf[4096]` | `kmalloc(4096)` | `0` |
+| `alloc_block` | `uint8_t zero[4096]` | 复用上面的 `buf`（先 `memset(…,0,4096)`） | — |
+| `free_block` | `uint8_t buf[4096]` | `kmalloc(4096)` | `return` (void) |
+| `alloc_inode` | `uint8_t buf[4096]` | `kmalloc(4096)` | `0` |
+| `free_inode` | `uint8_t buf[4096]` | `kmalloc(4096)` | `return` (void) |
+| `ext2_bmap` | `uint32_t indirect[1024]` | `kmalloc(4096)` | `0` |
+| `ext2_bmap_alloc` | `uint32_t indirect[1024]` | `kmalloc(4096)` | `0` |
+| `ext2_find_dirent` | `uint8_t block_data[4096]` | `kmalloc(4096)` | `-ENOMEM` |
+| `dirent_add` | `uint8_t block_data[4096]` | `kmalloc(4096)` | `-ENOMEM` |
+| `dirent_del` | `uint8_t block_data[4096]` | `kmalloc(4096)` | `-ENOMEM` |
+| `ext2_vfs_read` | `uint8_t block_buf[4096]` | `kmalloc(4096)` | `-ENOMEM` |
+| `ext2_vfs_write` | `uint8_t block_buf[4096]` | `kmalloc(4096)` | `-ENOMEM` |
+| `ext2_vfs_truncate` | `uint32_t indirect[1024]` | `kmalloc(4096)` | `-ENOMEM` |
+| `ext2_vfs_rename` | `uint8_t bd[4096]` | `kmalloc(4096)` | `-ENOMEM` |
+| `ext2_vfs_rename` | `uint8_t dir_data[4096]` | `kmalloc(4096)`（独立分配，不复用） | `-ENOMEM` |
+| `ext2_vfs_rmdir` | `uint8_t bd[4096]` | `kmalloc(4096)` | `-ENOMEM` |
+| `ext2_vfs_rmdir` | `uint32_t indirect[1024]` | `kmalloc(4096)` | `-ENOMEM` |
+| `ext2_vfs_rename` 收缩 | `uint32_t indirect[1024]` | `kmalloc(4096)` | `-ENOMEM` |
+| `ext2_vfs_mkdir` | `uint8_t block_data[4096]` | `kmalloc(4096)` | `-ENOMEM` |
+| `ext2_vfs_readdir` | `uint8_t block_data[4096]` | `kmalloc(4096)` | `-ENOMEM` |
+| `ext2_vfs_unlink` | `uint8_t block_data[4096]` | `kmalloc(4096)` | `-ENOMEM` |
 
-**错误处理**: 所有函数返回类型为 `int` / `uint32_t` / `struct vfs_node *`（可为 NULL），加 `if (!buf) return -ENOMEM;` 即可。调用者（VFS → syscall）已有错误传播路径。
+> **注**: 4 KB slab（cache[7]）已预分配 512 槽，rename / rmdir 路径的多个 4KB 分配不会触发额外的 2MB 页分配。`ext2_write_superblock`、`ext2_init` 和 selftest 中 `save_sb` 用的 1024B 分配走 cache[5]（未预分配），首次使用触发一次 2MB `alloc_pages`，之后复用。
+
+#### `alloc_block` 零填充优化
+
+`alloc_block` 原有两个独立栈数组：
+- `uint8_t buf[4096]` — 读 bitmap block
+- `uint8_t zero[4096]` — 全零数据块，写入新分配的 block
+
+改造后只需要一次 `kmalloc(4096)`：先用 `memset(ptr, 0, 4096)` 全零 → 写入 block → 再复用同一块内存读 bitmap block（两步操作串行，无冲突）。
 
 ### 3.2 vfs: vfs_getdents entries → kmalloc
 
@@ -159,18 +185,20 @@ kfree(entries);
 | `ext2_selftest_dirent_roundtrip` | `save_dir_blk[4096]` + `save_itable_blk[4096]` + `save_sb[1024]` | 各 `kmalloc` |
 | `ext2_selftest_write_read` | `block_data[4096]` + `save_data[4096]` + `write_buf[4096]` + `read_buf[4096]` | 各 `kmalloc` |
 
-### 3.4 实现 kcalloc
+### 3.4 实现 `kzalloc`
 
-`kernel/include/kernel/slab.h` 中声明了 `kcalloc` 但未实现。补充实现：
+`kernel/include/kernel/slab.h` 中声明了单参 `kcalloc`（非标准 `calloc(nmemb, size)` 签名），但未实现。重命名为 `kzalloc` 并实现：
 
 ```c
 // kernel/memory/slab.c
-void *kcalloc(size_t size) {
+void *kzalloc(size_t size) {
     void *ptr = kmalloc(size);
     if (ptr) memset(ptr, 0, size);
     return ptr;
 }
 ```
+
+同时更新 `kernel/include/kernel/slab.h` 中的声明。无需搜索调用者——该函数以前未实现，无调用者。
 
 ### 3.5 构建系统：NDEBUG → -O2
 
@@ -184,6 +212,10 @@ else
   CFLAGS += -O2
 endif
 ```
+
+#### 3.5.1 `noinline` 与 `-O2` 共存
+
+所有 ext2 函数标记了 `__attribute__((noinline))`。在 `-O2` + `NDEBUG` 下，`noinline` 阻止了编译器内联，但 `-O2` 仍能将帧内的寄存器溢出、临时变量和栈槽共享。实测效果（见 §1.2）：无论 -O0 还是 -O2，4KB 缓冲改成 heap 之后帧大小差异不大（~200B vs ~150B）。保留 `noinline` 不变——它在 `-O0`（Debug）下提供清晰的栈回溯，在 `-O2`（Release）下的影响可忽略。
 
 ### 3.6 STACK_SIZE: 64 KB → 32 KB
 
@@ -214,13 +246,37 @@ endif
 - `panic.c` 的 `buf[4096]`（已是全局 `.bss` 变量）
 - `printk.c` 的 `buf_color[4096]` / `buf_serial[4096]`（已是 `static` 全局变量）
 - `procfs.c` 的 `char local[512]`（512 B，栈安全）
+- `ext2_init` 的 `uint8_t sb_buf[1024]`（1 KB，仅挂载时调用一次，路径极浅）
+
+### 潜在的未来改动
+
+- `GET_CROSS` 宏（`task.h:241`）：`"andq $-32768, %rbx"` 硬编码了 32KB 掩码。若未来调整 STACK_SIZE 需同步修改。建议加 `static_assert(sizeof(union task_union) == STACK_SIZE)` 在编译期保护。
 
 ---
 
 ## 6. 验证计划
 
+### 6.1 顺序要求
+
+⚠️ **堆迁移必须在缩栈之前完成。** 实施顺序：
+1. 堆迁移（ext2 + vfs_getdents + selftest）
+2. `-O2` + NDEBUG 联动
+3. `STACK_SIZE` 缩至 32 KB（如仍为 64 KB）
+
+当前 `task.h:40` 已改为 32 KB，若实施前运行 rename 路径会 `#PF`。要么先还原为 64 KB 再开始实施，要么按上述顺序实施（第一步就跑堆迁移）。
+
+### 6.2 测试项
+
 1. **编译**: `make clean && make`（Release）和 `make NDEBUG=`（Debug）均通过
 2. **启动**: `make run` 正常启动到 shell
-3. **systest**: `make test-syscall` 全量 pass
-4. **selftest**: `KERNEL_SELFTEST=1 make run` 测试全部通过
-5. **栈溢出**: 在 `do_system_call` 入口加 RSP 检查（开发阶段断言），确认不会接近 32 KB 边界
+3. **systest**: `make test-syscall` 全量 pass（覆盖 open/read/write/rename/unlink/mkdir/rmdir/getdents）
+4. **selftest**: `KERNEL_SELFTEST=1 NDEBUG=1 make run` 测试全部通过
+5. **栈溢出守卫**: 在 `do_system_call` 入口添加 Debug 模式 RSP 检查（保留至少一个 release 周期）：
+   ```c
+   #ifndef NDEBUG
+   // STACK_SIZE - 2KB 余量
+   uint64_t *stack_bottom = ((uint64_t)(current) & ~(STACK_SIZE - 1));
+   if ((uint64_t)__builtin_frame_address(0) - (uint64_t)stack_bottom < 2048)
+       log_err("WARNING: RSP within 2KB of stack bottom!\n");
+   #endif
+   ```
