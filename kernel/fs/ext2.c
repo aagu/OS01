@@ -1393,6 +1393,8 @@ int ext2_selftest_block_alloc(void)
     ext2_fs_t *fs = ext2_selftest_get_fs();
     if (!fs) return 0;  // SKIP -- AHCI not ready
 
+    uint8_t *save_bitmap = NULL, *save_bgdesc = NULL, *save_sb = NULL, *save_blk = NULL;
+
     spin_lock(&fs->lock);
 
     // Choose first group that has free blocks
@@ -1410,7 +1412,10 @@ int ext2_selftest_block_alloc(void)
     uint32_t bgdesc_phys_blk = fs->bgdesc_block + bgdesc_blk_off;
 
     // Save
-    uint8_t save_bitmap[4096], save_bgdesc[4096], save_sb[1024];
+    save_bitmap = kmalloc(4096);
+    save_bgdesc = kmalloc(4096);
+    save_sb = kmalloc(1024);
+    if (!save_bitmap || !save_bgdesc || !save_sb) goto cleanup;
     ext2_read_block(fs, bitmap_block, save_bitmap);
     ext2_read_block(fs, bgdesc_phys_blk, save_bgdesc);
     block_device_read(fs->dev, 2, 2, save_sb);
@@ -1422,12 +1427,12 @@ int ext2_selftest_block_alloc(void)
         ext2_write_block(fs, bitmap_block, save_bitmap);
         ext2_write_block(fs, bgdesc_phys_blk, save_bgdesc);
         block_device_write(fs->dev, 2, 2, save_sb);
-        spin_unlock(&fs->lock);
-        return 0;  // SKIP
+        goto cleanup;
     }
 
     // Save the block content BEFORE free_block (alloc_block zeroes it)
-    uint8_t save_blk[4096];
+    save_blk = kmalloc(4096);
+    if (!save_blk) { free_block(fs, blk); goto cleanup; }
     ext2_read_block(fs, blk, save_blk);
 
     // Free it
@@ -1439,6 +1444,11 @@ int ext2_selftest_block_alloc(void)
     ext2_write_block(fs, bgdesc_phys_blk, save_bgdesc);
     block_device_write(fs->dev, 2, 2, save_sb);
 
+cleanup:
+    if (save_blk) kfree(save_blk);
+    if (save_sb) kfree(save_sb);
+    if (save_bgdesc) kfree(save_bgdesc);
+    if (save_bitmap) kfree(save_bitmap);
     spin_unlock(&fs->lock);
     return 0;
 }
@@ -1447,6 +1457,9 @@ int ext2_selftest_inode_alloc(void)
 {
     ext2_fs_t *fs = ext2_selftest_get_fs();
     if (!fs) return 0;
+
+    uint8_t *save_ibitmap = NULL, *save_sb = NULL, *save_itable = NULL;
+    int ret = 0;
 
     spin_lock(&fs->lock);
 
@@ -1459,7 +1472,9 @@ int ext2_selftest_inode_alloc(void)
     uint32_t inode_table_start  = fs->bgdesc_table[g].bg_inode_table;
 
     // Save bitmap and superblock (alloc_inode/free_inode touch these)
-    uint8_t save_ibitmap[4096], save_sb[1024];
+    save_ibitmap = kmalloc(4096);
+    save_sb = kmalloc(1024);
+    if (!save_ibitmap || !save_sb) { ret = -1; goto cleanup; }
     ext2_read_block(fs, inode_bitmap_block, save_ibitmap);
     block_device_read(fs->dev, 2, 2, save_sb);
 
@@ -1468,7 +1483,8 @@ int ext2_selftest_inode_alloc(void)
     if (ino == 0) {
         ext2_write_block(fs, inode_bitmap_block, save_ibitmap);
         block_device_write(fs->dev, 2, 2, save_sb);
-        spin_unlock(&fs->lock); return -1;
+        ret = -1;
+        goto cleanup;
     }
 
     // Compute the inode table block that was modified, save it for restore
@@ -1476,7 +1492,8 @@ int ext2_selftest_inode_alloc(void)
     uint32_t aidx = (ino - 1) % fs->inodes_per_group;
     uint32_t inodes_per_blk = fs->block_size / fs->inode_size;
     uint32_t itable_blk = fs->bgdesc_table[ag].bg_inode_table + aidx / inodes_per_blk;
-    uint8_t save_itable[4096];
+    save_itable = kmalloc(4096);
+    if (!save_itable) { free_inode(fs, ino); ret = -1; goto cleanup; }
     ext2_read_block(fs, itable_blk, save_itable);
 
     free_inode(fs, ino);
@@ -1486,14 +1503,21 @@ int ext2_selftest_inode_alloc(void)
     block_device_write(fs->dev, 2, 2, save_sb);
     ext2_write_block(fs, itable_blk, save_itable);
 
+cleanup:
+    if (save_itable) kfree(save_itable);
+    if (save_sb) kfree(save_sb);
+    if (save_ibitmap) kfree(save_ibitmap);
     spin_unlock(&fs->lock);
-    return 0;
+    return ret;
 }
 
 int ext2_selftest_dirent_roundtrip(void)
 {
     ext2_fs_t *fs = ext2_selftest_get_fs();
     if (!fs) return 0;
+
+    uint8_t *save_dir_blk = NULL, *save_itable_blk = NULL, *save_sb = NULL;
+    int ret = 0;
 
     spin_lock(&fs->lock);
 
@@ -1507,7 +1531,8 @@ int ext2_selftest_dirent_roundtrip(void)
     // Save first dir block
     uint32_t first_phys = ext2_bmap(fs, &root_inode, 0);
     if (first_phys == 0) { spin_unlock(&fs->lock); return 0; }
-    uint8_t save_dir_blk[4096];
+    save_dir_blk = kmalloc(4096);
+    if (!save_dir_blk) goto cleanup;
     ext2_read_block(fs, first_phys, save_dir_blk);
 
     // Save root inode table entry (root is always ino 2, group 0)
@@ -1517,7 +1542,8 @@ int ext2_selftest_dirent_roundtrip(void)
     uint32_t root_itable_blk = fs->bgdesc_table[root_group].bg_inode_table
                                + ((dir_ino - 1) / inodes_per_blk);
 
-    uint8_t save_itable_blk[4096];
+    save_itable_blk = kmalloc(4096);
+    if (!save_itable_blk) goto cleanup;
     ext2_read_block(fs, root_itable_blk, save_itable_blk);
 
     // Test: alloc_inode -> dirent_add -> verify -> dirent_del -> free_inode
@@ -1529,16 +1555,18 @@ int ext2_selftest_dirent_roundtrip(void)
     //
     // What we DO need to save: superblock (counts mutated by alloc+free),
     // directory data blocks (modified by dirent_add/del), and root inode.
-    uint8_t save_sb[1024];
+    save_sb = kmalloc(1024);
+    if (!save_sb) goto cleanup;
     block_device_read(fs->dev, 2, 2, save_sb);
 
     uint32_t new_ino = alloc_inode(fs, EXT2_S_IFREG | 0644);
-    if (new_ino == 0) { spin_unlock(&fs->lock); return -1; }
+    if (new_ino == 0) { ret = -1; goto cleanup; }
 
     int add_ret = dirent_add(fs, dir_ino, "___test99", new_ino, 1);
     if (add_ret != 0) {
         free_inode(fs, new_ino);
-        spin_unlock(&fs->lock); return -1;
+        ret = -1;
+        goto cleanup;
     }
 
     // Verify via ext2_find_dirent
@@ -1550,7 +1578,8 @@ int ext2_selftest_dirent_roundtrip(void)
         // Cleanup then fail
         dirent_del(fs, dir_ino, "___test99");
         free_inode(fs, new_ino);
-        spin_unlock(&fs->lock); return -1;
+        ret = -1;
+        goto cleanup;
     }
 
     // Delete
@@ -1561,7 +1590,8 @@ int ext2_selftest_dirent_roundtrip(void)
     int find2 = ext2_find_dirent(fs, dir_ino, "___test99",
                                  &found_ino, &found_type, &found_blk, &found_off);
     if (find2 == 0) {
-        spin_unlock(&fs->lock); return -1;  // should not exist
+        ret = -1;  // should not exist
+        goto cleanup;
     }
 
     // Restore: directory data blocks, root inode, superblock (counts).
@@ -1571,8 +1601,12 @@ int ext2_selftest_dirent_roundtrip(void)
     ext2_write_block(fs, root_itable_blk, save_itable_blk);
     block_device_write(fs->dev, 2, 2, save_sb);
 
+cleanup:
+    if (save_sb) kfree(save_sb);
+    if (save_itable_blk) kfree(save_itable_blk);
+    if (save_dir_blk) kfree(save_dir_blk);
     spin_unlock(&fs->lock);
-    return 0;
+    return ret;
 }
 
 // Test write within existing file's i_size -- no block alloc needed.
@@ -1586,6 +1620,9 @@ int ext2_selftest_write_read(void)
     ext2_fs_t *fs = ext2_selftest_get_fs();
     if (!fs) return 0;
 
+    uint8_t *block_data = NULL, *save_data = NULL, *write_buf = NULL, *read_buf = NULL;
+    int ret = 0;
+
     spin_lock(&fs->lock);
 
     // Find a regular file in root directory
@@ -1593,9 +1630,11 @@ int ext2_selftest_write_read(void)
     ext2_inode_t dir_inode;
     ext2_read_inode(fs, dir_ino, &dir_inode);
 
-    uint8_t block_data[4096];
     uint32_t test_ino = 0;
     uint32_t test_blk = 0;
+
+    block_data = kmalloc(4096);
+    if (!block_data) goto cleanup;
 
     for (uint32_t bi = 0; ; bi++) {
         uint32_t phys = ext2_bmap(fs, &dir_inode, bi);
@@ -1615,21 +1654,21 @@ int ext2_selftest_write_read(void)
         if (test_ino) break;
     }
 
-    if (test_ino == 0) { spin_unlock(&fs->lock); return 0; }  // SKIP
+    if (test_ino == 0) goto cleanup;  // SKIP
 
     ext2_inode_t test_inode;
     ext2_read_inode(fs, test_ino, &test_inode);
 
     // Only test if file has data blocks we can restore
-    if (test_inode.i_size < 16 || test_inode.i_block[0] == 0) {
-        spin_unlock(&fs->lock); return 0;
-    }
+    if (test_inode.i_size < 16 || test_inode.i_block[0] == 0)
+        goto cleanup;  // SKIP
 
     // Save data block and inode
-    uint8_t save_data[4096];
+    save_data = kmalloc(4096);
+    write_buf = kmalloc(4096);
+    read_buf = kmalloc(4096);
+    if (!save_data || !write_buf || !read_buf) goto cleanup;
     ext2_read_block(fs, test_inode.i_block[0], save_data);
-
-    ext2_inode_t save_inode = test_inode;
 
     // Write test data at offset 0 (within existing i_size)
     const char *test_str = "HELLO_WRITE_TEST";
@@ -1638,20 +1677,25 @@ int ext2_selftest_write_read(void)
 
     // Do a raw write via the VFS write -- but we're under lock.
     // Write directly to the block for the selftest.
-    uint8_t write_buf[4096];
     memcpy(write_buf, save_data, fs->block_size);
     memcpy(write_buf, test_str, test_len);
     ext2_write_block(fs, test_inode.i_block[0], write_buf);
 
     // Read back and verify
-    uint8_t read_buf[4096];
     ext2_read_block(fs, test_inode.i_block[0], read_buf);
     int match = (memcmp(read_buf, test_str, test_len) == 0);
 
     // Restore
     ext2_write_block(fs, test_inode.i_block[0], save_data);
 
+    ret = match ? 0 : -1;
+
+cleanup:
+    if (read_buf) kfree(read_buf);
+    if (write_buf) kfree(write_buf);
+    if (save_data) kfree(save_data);
+    if (block_data) kfree(block_data);
     spin_unlock(&fs->lock);
-    return match ? 0 : -1;
+    return ret;
 }
 #endif
