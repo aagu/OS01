@@ -37,7 +37,7 @@ void blocker_wake(struct task_struct *task);
 #define CLONE_FILES (1 << 1)
 #define CLONE_SIGNAL (1 << 2)
 
-#define STACK_SIZE (64 * 1024) // 64KB — ext2 4KB block buffers need ~24KB peak
+#define STACK_SIZE (32 * 1024) // 32KB — heap migration + -O2 makes this safe
 
 extern char _text;
 extern char _etext;
