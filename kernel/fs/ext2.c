@@ -47,16 +47,17 @@ static __attribute__((noinline)) int ext2_read_inode(ext2_fs_t *fs, uint32_t ino
     uint32_t block_off      = index / inodes_per_blk;
     uint32_t inode_off      = (index % inodes_per_blk) * fs->inode_size;
 
-    // Inode may cross a sector boundary.  ext2_read_block reads
-    // fs->sectors_per_block * 512 bytes (up to 4096 with 4KB blocks)
-    // regardless of the caller's buffer size — so we need the full
-    // block-sized buffer here, same as every other ext2 function.
-    uint8_t buf[4096];
-    if (ext2_read_block(fs, table_start + block_off, buf) != 0)
-        return -1;
+    uint8_t *buf = kmalloc(4096);
+    if (!buf) return -ENOMEM;
 
+    int rc = -1;
+    if (ext2_read_block(fs, table_start + block_off, buf) != 0)
+        goto out;
     memcpy(out, buf + inode_off, sizeof(ext2_inode_t));
-    return 0;
+    rc = 0;
+out:
+    kfree(buf);
+    return rc;
 }
 
 // ── Write an inode to disk ─────────────────────────────
@@ -73,25 +74,31 @@ static __attribute__((noinline)) int ext2_write_inode(ext2_fs_t *fs, uint32_t in
     uint32_t inode_off      = (index % inodes_per_blk) * fs->inode_size;
 
     // Read full block, modify inode slot, write back
-    uint8_t buf[4096];
-    if (ext2_read_block(fs, table_start + block_off, buf) != 0)
-        return -1;
+    uint8_t *buf = kmalloc(4096);
+    if (!buf) return -ENOMEM;
 
+    if (ext2_read_block(fs, table_start + block_off, buf) != 0) {
+        kfree(buf);
+        return -1;
+    }
     memcpy(buf + inode_off, inode, sizeof(ext2_inode_t));
-    return ext2_write_block(fs, table_start + block_off, buf);
+    int rc = ext2_write_block(fs, table_start + block_off, buf);
+    kfree(buf);
+    return rc;
 }
 
 // ── Write superblock and bgdesc table to disk ──────────
 static __attribute__((noinline)) int ext2_write_superblock(ext2_fs_t *fs)
 {
-    // ext2_superblock_t is ~204 bytes packed, but the on-disk
-    // superblock occupies 1024 bytes.  Serialize into a zero-filled
-    // 1024-byte buffer to avoid writing stack/junk beyond the struct.
-    uint8_t sb_buf[1024];
+    uint8_t *sb_buf = kmalloc(1024);
+    if (!sb_buf) return -ENOMEM;
     memset(sb_buf, 0, 1024);
     memcpy(sb_buf, &fs->sb_raw, sizeof(ext2_superblock_t));
-    if (block_device_write(fs->dev, 2, 2, sb_buf) != 0)
+    if (block_device_write(fs->dev, 2, 2, sb_buf) != 0) {
+        kfree(sb_buf);
         return -1;
+    }
+    kfree(sb_buf);  // sb_buf no longer needed — bgdesc loop uses fs->bgdesc_table
 
     // Write all block group descriptors
     for (uint32_t i = 0; i < fs->bgdesc_table_blocks; i++) {
@@ -1230,35 +1237,37 @@ int ext2_init(block_device_t *dev, ext2_fs_t **out_fs)
     spin_init(&fs->lock);
 
     // Read superblock (byte 1024 = sector 2)
-    uint8_t sb_buf[1024];
+    uint8_t *sb_buf = kmalloc(1024);
+    if (!sb_buf) { kfree(fs); return -ENOMEM; }
     if (block_device_read(dev, 2, 2, sb_buf) != 0) {
-        kfree(fs); return -1;
+        kfree(sb_buf); kfree(fs); return -1;
     }
 
     ext2_superblock_t *sb = (ext2_superblock_t *)sb_buf;
     if (sb->s_magic != EXT2_MAGIC) {
         debug_fs("ext2: bad magic %#x\n", sb->s_magic);
-        kfree(fs); return -1;
+        kfree(sb_buf); kfree(fs); return -1;
     }
 
     // Reject incompatible features we can't handle
     // EXT2_FEATURE_INCOMPAT_EXTENTS (0x0040) would cause bmap errors
     if (sb->s_feature_incompat & 0x0040) {
         debug_fs("ext2: unsupported feature (extents)\n");
-        kfree(fs); return -1;
+        kfree(sb_buf); kfree(fs); return -1;
     }
 
     // Cache superblock for writeback
     memcpy(&fs->sb_raw, sb_buf, sizeof(ext2_superblock_t));
+    kfree(sb_buf);  // sb_buf no longer needed — data cached in fs->sb_raw
 
-    fs->block_size   = 1024u << sb->s_log_block_size;
+    fs->block_size   = 1024u << fs->sb_raw.s_log_block_size;
     if (fs->block_size > 4096) { kfree(fs); return -1; }
     fs->sectors_per_block = fs->block_size / 512;
-    fs->blocks_per_group  = sb->s_blocks_per_group;
-    fs->inodes_per_group  = sb->s_inodes_per_group;
-    fs->num_block_groups  = (sb->s_blocks_count + fs->blocks_per_group - 1)
+    fs->blocks_per_group  = fs->sb_raw.s_blocks_per_group;
+    fs->inodes_per_group  = fs->sb_raw.s_inodes_per_group;
+    fs->num_block_groups  = (fs->sb_raw.s_blocks_count + fs->blocks_per_group - 1)
                             / fs->blocks_per_group;
-    fs->inode_size = (sb->s_inode_size != 0) ? sb->s_inode_size : 128;
+    fs->inode_size = (fs->sb_raw.s_inode_size != 0) ? fs->sb_raw.s_inode_size : 128;
 
     // bgdesc table starts at block after superblock
     uint32_t sb_block     = (fs->block_size == 1024) ? 1u : 0u;
