@@ -140,7 +140,7 @@ kfree(buf);
 | `ext2_vfs_rmdir` | `uint8_t bd[4096]` | `kmalloc(4096)` | `-ENOMEM` |
 | `ext2_vfs_rmdir` | `uint32_t indirect[1024]` | `kmalloc(4096)` | `-ENOMEM` |
 | `ext2_vfs_rename` | `uint32_t indirect[1024]` | `kmalloc(4096)`（两处互斥分支，可同一分配） | `-ENOMEM` |
-| `ext2_vfs_mkdir` | `uint8_t block_data[4096]` | `kmalloc(4096)` | `-ENOMEM` |
+| `ext2_vfs_mkdir` | `uint8_t block_data[4096]` | `kmalloc(4096)` | `NULL`（返回 `struct vfs_node *`） |
 | `ext2_vfs_readdir` | `uint8_t block_data[4096]` | `kmalloc(4096)` | `-ENOMEM` |
 | `ext2_vfs_unlink` | `uint8_t block_data[4096]` | `kmalloc(4096)` | `-ENOMEM` |
 

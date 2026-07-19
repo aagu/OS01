@@ -444,28 +444,54 @@ alloc_inode, free_inode: uint8_t buf[4096] → kmalloc(4096)"
 **Interfaces:**
 - 三者均返回 `int`，失败 sentinel = `-ENOMEM`
 
-- [ ] **Step 1: ext2_find_dirent — `block_data[4096]` → kmalloc**
+- [ ] **Step 1: ext2_find_dirent — `block_data[4096]` → kmalloc + goto out**
+
+该函数有 4 个 return 点（-EIO, -ENOTDIR, 0, -ENOENT），分散在循环内外。用 `goto out` 统一释放：
 
 ```c
-// kernel/fs/ext2.c:329 — 替换
-// Before:
-    uint8_t block_data[4096];
-    // for loop reads blocks into block_data...
+// kernel/fs/ext2.c:321-354 — 完整改造
+    ext2_inode_t dir_inode;
+    if (ext2_read_inode(fs, dir_ino, &dir_inode) != 0)
+        return -EIO;
+    if (!(dir_inode.i_mode & EXT2_S_IFDIR))
+        return -ENOTDIR;             // ① no allocation yet — safe to return directly
 
-// After:
+    size_t name_len = strlen(name);
     uint8_t *block_data = kmalloc(4096);
     if (!block_data) return -ENOMEM;
     int rc = -ENOENT;
 
     for (uint32_t blk_idx = 0; ; blk_idx++) {
-        // ... same loop logic, replace return with goto out ...
-        // if found: rc = 0; goto out;
+        uint32_t phys = ext2_bmap(fs, &dir_inode, blk_idx);
+        if (phys == 0) goto out;     // ② break → goto out
+        if (ext2_read_block(fs, phys, block_data) != 0)
+            goto out;                // ③ I/O error — goto out
+
+        uint32_t off = 0;
+        while (off < fs->block_size) {
+            ext2_dirent_t *de = (ext2_dirent_t *)(block_data + off);
+            if (de->rec_len == 0) break;
+
+            if (de->inode != 0 &&
+                de->name_len == name_len &&
+                memcmp(de->name, name, name_len) == 0) {
+                *out_ino       = de->inode;
+                *out_file_type = de->file_type;
+                *out_block     = phys;
+                *out_off       = off;
+                rc = 0;
+                goto out;            // ④ success — goto out
+            }
+            off += de->rec_len;
+        }
     }
 
 out:
     kfree(block_data);
     return rc;
 ```
+
+注意：第 ① 个 return（`-EIO`, `-ENOTDIR`）在 kmalloc 之前，无需 goto。
 
 - [ ] **Step 2: dirent_add — `block_data[4096]` → kmalloc**
 
