@@ -245,6 +245,12 @@ size_t kfree(void * address)
     return 0;
 }
 
+void *kzalloc(size_t size) {
+    void *ptr = kmalloc(size);
+    if (ptr) memset(ptr, 0, size);
+    return ptr;
+}
+
 size_t slab_init()
 {
     struct Page * page = NULL;
