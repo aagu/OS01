@@ -89,6 +89,9 @@ endif
 # ── NDEBUG (compile-time elimination of log_debug) ────────
 ifdef NDEBUG
 ALL_CFLAGS += -DNDEBUG
+ALL_CFLAGS += -O2     # Release: shrink stack frames significantly
+else
+ALL_CFLAGS += -O0     # Debug: easy GDB single-stepping
 endif
 
 # ── Log output target (serial | fb | both) ────────────────
