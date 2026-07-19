@@ -5,8 +5,8 @@
 // while preserving their compile-time per-channel gating (the existing
 // OS01_DEBUG_<ch> flags, set via DEBUG_CHANNELS= in the Makefile).
 // This means:
-//   make DEBUG_CHANNELS=sched        → sched msgs visible at LOG_DEBUG
-//   make NDEBUG=1                    → all debug msgs vanish
+//   make DEBUG=1                   → all debug msgs compiled in (default: off)
+//   make DEBUG_CHANNELS=sched      → sched msgs visible at LOG_DEBUG
 //   log_set_level(LOG_INFO) at boot  → debug msgs filtered at runtime
 
 #include <kernel/log.h>

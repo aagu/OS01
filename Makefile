@@ -24,7 +24,7 @@ MEMORY=512M
 
 # ── Log output target (serial | fb | both) ───────────────
 LOG_TARGET ?= serial
-NDEBUG     ?=
+DEBUG      ?=
 KERNEL_SELFTEST ?=
 export KERNEL_SELFTEST
 

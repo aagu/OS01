@@ -68,11 +68,16 @@ ALL_LDFLAGS  := $(LDFLAGS) $(ARCH_LDFLAGS) -L$(SYSROOT)/usr/lib
 
 LIBS := -nostdlib -lk -lgcc
 
-ifeq ($(DEBUG),1)
+# ── DEBUG / NDEBUG (align with busybox convention) ────────
+# Release (default): compile out log_debug() via -DNDEBUG, -O2.
+#   make DEBUG=1  → debug: keep log_debug(), -O0 for GDB.
+ifneq ($(DEBUG),1)
+ALL_CFLAGS += -DNDEBUG
+ALL_CFLAGS += -O2     # Release: shrink stack frames significantly
+else
 ALL_CFLAGS += -DDEBUG=1
+ALL_CFLAGS += -O0     # Debug: easy GDB single-stepping
 endif
-
-# ── Debug channels (comma-separated, e.g. DEBUG_CHANNELS=sched,tty) ──
 ifdef DEBUG_CHANNELS
   comma := ,
   empty :=
@@ -84,14 +89,6 @@ endif
 # ── Built-in selftests (make KERNEL_SELFTEST=1) ────────────────
 ifdef KERNEL_SELFTEST
 ALL_CFLAGS += -DOS01_SELFTEST=1
-endif
-
-# ── NDEBUG (compile-time elimination of log_debug) ────────
-ifdef NDEBUG
-ALL_CFLAGS += -DNDEBUG
-ALL_CFLAGS += -O2     # Release: shrink stack frames significantly
-else
-ALL_CFLAGS += -O0     # Debug: easy GDB single-stepping
 endif
 
 # ── Log output target (serial | fb | both) ────────────────

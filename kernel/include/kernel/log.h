@@ -6,7 +6,7 @@
 #define LOG_ERR    3   // Error conditions
 #define LOG_WARN   4   // Warning conditions
 #define LOG_INFO   6   // Informational
-#define LOG_DEBUG  7   // Debug — eliminated in NDEBUG builds
+#define LOG_DEBUG  7   // Debug — eliminated via -DNDEBUG in release builds
 
 // ── Core log macro ────────────────────────────────────────
 // Only evaluates the level check (integer compare) at runtime.
