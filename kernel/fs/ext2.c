@@ -268,10 +268,13 @@ static __attribute__((noinline)) uint32_t ext2_bmap(ext2_fs_t *fs, ext2_inode_t 
         uint32_t indirect_blk = inode->i_block[12];
         if (indirect_blk == 0) return 0;
 
-        uint32_t indirect[1024];  // up to 4096/4 = 1024 entries
-        if (ext2_read_block(fs, indirect_blk, indirect) != 0)
-            return 0;
-        return indirect[logical_block - 12];
+        uint32_t *indirect = kmalloc(4096);
+        if (!indirect) return 0;  // uint32_t: 0 = failure
+        uint32_t result = 0;
+        if (ext2_read_block(fs, indirect_blk, indirect) == 0)
+            result = indirect[logical_block - 12];
+        kfree(indirect);
+        return result;
     }
 
     return 0;  // double/triple indirect not implemented
@@ -304,18 +307,24 @@ static __attribute__((noinline)) uint32_t ext2_bmap_alloc(ext2_fs_t *fs, ext2_in
             inode->i_blocks += fs->block_size / 512;
         }
 
-        uint32_t indirect[1024];
-        if (ext2_read_block(fs, inode->i_block[12], indirect) != 0)
+        uint32_t *indirect = kmalloc(4096);
+        if (!indirect) return 0;
+
+        if (ext2_read_block(fs, inode->i_block[12], indirect) != 0) {
+            kfree(indirect);
             return 0;
+        }
 
         uint32_t idx = logical_block - 12;
         if (indirect[idx] == 0) {
             indirect[idx] = alloc_block(fs);
-            if (indirect[idx] == 0) return 0;
+            if (indirect[idx] == 0) { kfree(indirect); return 0; }
             inode->i_blocks += fs->block_size / 512;
             ext2_write_block(fs, inode->i_block[12], indirect);
         }
-        return indirect[idx];
+        uint32_t result = indirect[idx];
+        kfree(indirect);
+        return result;
     }
 
     return 0;  // double/triple indirect not supported
