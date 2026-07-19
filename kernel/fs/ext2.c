@@ -422,6 +422,7 @@ static __attribute__((noinline)) int dirent_add(ext2_fs_t *fs, uint32_t dir_ino,
                 // single indirect not implemented for directories.
                 // Real-world directories with > ~1000 entries would hit this.
                 // Documented in spec §10: double/triple indirect unsupported.
+                free_block(fs, new_blk);
                 { kfree(block_data); return -ENOSPC; }
             }
             dir_inode.i_blocks += fs->block_size / 512;
