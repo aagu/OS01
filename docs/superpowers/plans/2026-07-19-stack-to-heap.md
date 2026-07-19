@@ -167,7 +167,7 @@ out:
 - [ ] **Step 3: ext2_write_superblock — `sb_buf[1024]` → kmalloc**
 
 ```c
-// kernel/fs/ext2.c:90-99 — 替换
+// kernel/fs/ext2.c:90-103 — 替换
 // Before:
     uint8_t sb_buf[1024];
     memset(sb_buf, 0, 1024);
@@ -185,7 +185,7 @@ out:
         kfree(sb_buf);
         return -1;
     }
-    kfree(sb_buf);
+    kfree(sb_buf);  // sb_buf no longer needed — bgdesc loop uses fs->bgdesc_table
 
     for (uint32_t i = 0; i < fs->bgdesc_table_blocks; i++) {
         if (ext2_write_block(fs, fs->bgdesc_block + i,
@@ -195,7 +195,9 @@ out:
     return 0;
 ```
 
-- [ ] **Step 4: ext2_init — `sb_buf[1024]` → kmalloc**
+kfree(sb_buf) 放在 bgdesc 循环之前是安全的——sb_buf 仅用于 superblock 写回，bgdesc 使用 `fs->bgdesc_table`（独立内存）。 ✅
+
+- [ ] **Step 4: ext2_init — `sb_buf[1024]` → kmalloc，在最后使用点立即释放**
 
 ```c
 // kernel/fs/ext2.c:1233-1236 — 替换
@@ -213,7 +215,7 @@ out:
     }
 ```
 
-然后 `sb_buf` 引用保持不变直到不再需要。在函数返回前加 `kfree(sb_buf)`。找到函数中所有的 `return` 点（包括 `return -1` 和最后 `return 0`），在每个 `return` 前加 `kfree(sb_buf)`。
+然后 `sb_buf` 引用保持不变，直到 `memcpy(&fs->sb_raw, sb_buf, sizeof(ext2_superblock_t))`（约 line 1252）。**在该行之后立即加 `kfree(sb_buf)`**——sb_buf 之后不再使用。后续的所有 return 点（bgdesc 分配失败等）无需再关心 `sb_buf`。
 
 - [ ] **Step 5: 编译 & Commit**
 
@@ -516,44 +518,78 @@ ext2_find_dirent, dirent_add, dirent_del: uint8_t block_data[4096] → kmalloc(4
 **Interfaces:**
 - 四者均返回 `int`，失败 sentinel = `-ENOMEM`
 
-- [ ] **Step 1: ext2_vfs_read — `block_buf[4096]` → kmalloc（循环内）**
+- [ ] **Step 1: ext2_vfs_read — `block_buf[4096]` → kmalloc（循环外一次分配，复用到循环结束）**
 
 ```c
-// kernel/fs/ext2.c:526-529 — 替换
-// Before (in while loop):
+// kernel/fs/ext2.c:519-535 — Before (scan for logical_block in while loop):
+    // ... existing ...
+
+// Replace the block_buf declaration AND the while loop body:
+// Before:
+    while (remaining > 0) {
+        // ...
         uint8_t block_buf[4096];  // fixed size, block_size ≤ 4096
         if (ext2_read_block(fs, phys, block_buf) != 0) {
             spin_unlock(&fs->lock); return -1;
         }
+        // ... use block_buf ...
+    }
 
 // After:
-        uint8_t *block_buf = kmalloc(4096);
-        if (!block_buf) {
-            spin_unlock(&fs->lock);
-            return -ENOMEM;
-        }
+    uint8_t *block_buf = kmalloc(4096);
+    if (!block_buf) {
+        spin_unlock(&fs->lock);
+        return -ENOMEM;
+    }
+
+    while (remaining > 0) {
+        // ... same loop logic ...
         if (ext2_read_block(fs, phys, block_buf) != 0) {
             kfree(block_buf);
             spin_unlock(&fs->lock);
             return -1;
         }
+        // ... use block_buf ...
+    }
+
+    kfree(block_buf);
+    spin_unlock(&fs->lock);
+    return (int)size;
 ```
 
-然后在 `memcpy(out, block_buf + block_off, chunk)` 之后、循环继续前加 `kfree(block_buf)`。
+循环一次分配、多次迭代复用，避免 N 次 kmalloc/kfree。循环内 `return -1` 需改为 `{ kfree(block_buf); spin_unlock(&fs->lock); return -1; }`。
 
-- [ ] **Step 2: ext2_vfs_write — `block_buf[4096]` → kmalloc（循环内）**
+- [ ] **Step 2: ext2_vfs_write — `block_buf[4096]` → kmalloc（循环外一次分配）**
+
+与 read 同样模式：`block_buf` 在 `while` 之前分配一次，循环结束后释放。hot path 上避免重复 kmalloc/kfree。
 
 ```c
-// kernel/fs/ext2.c:589-597 — 同样模式
+// kernel/fs/ext2.c:577-614 — 在 while 之前分配，循环结束后释放
 // Before:
+    while (remaining > 0) {
+        // ...
         uint8_t block_buf[4096];
+        if (ext2_read_block(fs, phys, block_buf) != 0) { ... }
+        // ... RMW: read → modify → write ...
+    }
 
 // After:
-        uint8_t *block_buf = kmalloc(4096);
-        if (!block_buf) { spin_unlock(&fs->lock); return -ENOMEM; }
+    uint8_t *block_buf = kmalloc(4096);
+    if (!block_buf) { spin_unlock(&fs->lock); return -ENOMEM; }
+
+    while (remaining > 0) {
+        // ... same logic, block_buf overwritten each iteration ...
+        if (ext2_read_block(fs, phys, block_buf) != 0) { ... }
+        memcpy(block_buf + block_off, src, chunk);
+        // ...
+    }
+
+    kfree(block_buf);
+    spin_unlock(&fs->lock);
+    return (int)size;
 ```
 
-读块、修改、写回后 `kfree(block_buf)`。
+循环内 `return` 点加 `kfree(block_buf)`。
 
 - [ ] **Step 3: ext2_vfs_truncate — `indirect[1024]` → kmalloc（循环内）**
 
@@ -768,33 +804,34 @@ dir_blk/itable_blk/data/write_buf/read_buf → kmalloc + goto cleanup."
 ### Task 11: 构建系统 — NDEBUG 时启用 -O2
 
 **Files:**
-- Modify: `kernel/Makefile` (在 CFLAGS 定义处追加)
+- Modify: `kernel/Makefile` (在现存的 `ifdef NDEBUG` 块附近追加)
 
 **Interfaces:**
-- Debug (`NDEBUG=` 或未定义): `-O0`（不变）
+- Debug (`NDEBUG` 未定义): `-O0`（不变）
 - Release (`NDEBUG=1`): `-O2`
 
-- [ ] **Step 1: 在 kernel/Makefile 中添加条件编译**
+**上下文**: `kernel/Makefile:90` 已有 `ifdef NDEBUG` 块（追加 `-DNDEBUG`）。本 task 在该块内追加优化标志，与既有风格一致。
+
+- [ ] **Step 1: 在 kernel/Makefile 现有 `ifdef NDEBUG` 块内追加**
 
 ```makefile
-# kernel/Makefile — 在 CFLAGS 定义后追加 (~line 20 附近)
-ifeq ($(NDEBUG),)
-  # Debug: keep -O0 for easy GDB single-stepping
-  KERNEL_CFLAGS += -O0
+# kernel/Makefile ~line 90 — 在现有 ifdef NDEBUG 块内追加
+ifdef NDEBUG
+ALL_CFLAGS += -DNDEBUG
+ALL_CFLAGS += -O2     # Release: shrink stack frames significantly
 else
-  # Release: -O2 shrinks stack frames (do_system_call: 3224 B → 568 B)
-  KERNEL_CFLAGS += -O2
+ALL_CFLAGS += -O0     # Debug: easy GDB single-stepping
 endif
 ```
 
-然后将 `KERNEL_CFLAGS` 合并到实际的编译命令中（查找 Makefile 中 `$(CC)` 调用的位置，确认 CFLAGS 变量名）。
+变量是 `ALL_CFLAGS`（见 line 65 定义），不是 `KERNEL_CFLAGS`。条件使用 `ifdef NDEBUG`（与既有 line 90 一致），不用 `ifeq ($(NDEBUG),)`。
 
 - [ ] **Step 2: 验证两种模式编译**
 
 ```bash
 # Release
 make -C kernel clean && make -C kernel kernel.bin NDEBUG=1 2>&1 | tail -5
-# Expected: 编译成功
+# Expected: 编译成功（-O2 生效，warning-free）
 
 # Debug
 make -C kernel clean && make -C kernel kernel.bin 2>&1 | tail -5
@@ -805,7 +842,7 @@ make -C kernel clean && make -C kernel kernel.bin 2>&1 | tail -5
 
 ```bash
 git add kernel/Makefile
-git commit -m "build: enable -O2 when NDEBUG=1, keep -O0 for Debug
+git commit -m "build: enable -O2 when NDEBUG, -O0 otherwise
 
 -O2 reduces do_system_call frame from 3224B to 568B and shrinks all
 ext2 function frames significantly. Critical for 32KB stack safety."
