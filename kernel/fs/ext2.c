@@ -120,9 +120,12 @@ static __attribute__((noinline)) uint32_t alloc_block(ext2_fs_t *fs)
             continue;
 
         uint32_t bitmap_block = fs->bgdesc_table[g].bg_block_bitmap;
-        uint8_t buf[4096];
-        if (ext2_read_block(fs, bitmap_block, buf) != 0)
+        uint8_t *buf = kmalloc(4096);
+        if (!buf) return 0;
+        if (ext2_read_block(fs, bitmap_block, buf) != 0) {
+            kfree(buf);
             continue;
+        }
 
         uint32_t blocks_in_group = fs->blocks_per_group;
         uint32_t bit_count = blocks_in_group;
@@ -143,14 +146,16 @@ static __attribute__((noinline)) uint32_t alloc_block(ext2_fs_t *fs)
                     fs->sb_raw.s_free_blocks_count--;
                     ext2_write_superblock(fs);
 
-                    uint8_t zero[4096];
-                    memset(zero, 0, fs->block_size);
-                    ext2_write_block(fs, block, zero);
+                    // Reuse buf for zero-fill (write to disk frees buf for reuse)
+                    memset(buf, 0, fs->block_size);
+                    ext2_write_block(fs, block, buf);
+                    kfree(buf);
 
                     return block;
                 }
             }
         }
+        kfree(buf);
     }
     return 0;
 }
@@ -169,12 +174,16 @@ static __attribute__((noinline)) void free_block(ext2_fs_t *fs, uint32_t block)
     uint32_t bit      = index % 8;
 
     uint32_t bitmap_block = fs->bgdesc_table[group].bg_block_bitmap;
-    uint8_t buf[4096];
-    if (ext2_read_block(fs, bitmap_block, buf) != 0)
+    uint8_t *buf = kmalloc(4096);
+    if (!buf) return;
+    if (ext2_read_block(fs, bitmap_block, buf) != 0) {
+        kfree(buf);
         return;
+    }
 
     buf[byte_idx] &= ~(1u << bit);
     ext2_write_block(fs, bitmap_block, buf);
+    kfree(buf);
 
     fs->bgdesc_table[group].bg_free_blocks_count++;
     fs->sb_raw.s_free_blocks_count++;
@@ -190,9 +199,12 @@ static __attribute__((noinline)) uint32_t alloc_inode(ext2_fs_t *fs, uint16_t mo
             continue;
 
         uint32_t bitmap_block = fs->bgdesc_table[g].bg_inode_bitmap;
-        uint8_t buf[4096];
-        if (ext2_read_block(fs, bitmap_block, buf) != 0)
+        uint8_t *buf = kmalloc(4096);
+        if (!buf) return 0;
+        if (ext2_read_block(fs, bitmap_block, buf) != 0) {
+            kfree(buf);
             continue;
+        }
 
         uint32_t inodes_in_group = fs->inodes_per_group;
         uint32_t bit_count = inodes_in_group;
@@ -207,6 +219,7 @@ static __attribute__((noinline)) uint32_t alloc_inode(ext2_fs_t *fs, uint16_t mo
                     uint32_t ino = g * inodes_in_group + byte_idx * 8 + bit + 1;
 
                     ext2_write_block(fs, bitmap_block, buf);
+                    kfree(buf);
 
                     fs->bgdesc_table[g].bg_free_inodes_count--;
                     fs->sb_raw.s_free_inodes_count--;
@@ -227,6 +240,7 @@ static __attribute__((noinline)) uint32_t alloc_inode(ext2_fs_t *fs, uint16_t mo
                 }
             }
         }
+        kfree(buf);
     }
     return 0;
 }
@@ -244,12 +258,16 @@ static __attribute__((noinline)) void free_inode(ext2_fs_t *fs, uint32_t ino)
     uint32_t bit      = index % 8;
 
     uint32_t bitmap_block = fs->bgdesc_table[group].bg_inode_bitmap;
-    uint8_t buf[4096];
-    if (ext2_read_block(fs, bitmap_block, buf) != 0)
+    uint8_t *buf = kmalloc(4096);
+    if (!buf) return;
+    if (ext2_read_block(fs, bitmap_block, buf) != 0) {
+        kfree(buf);
         return;
+    }
 
     buf[byte_idx] &= ~(1u << bit);
     ext2_write_block(fs, bitmap_block, buf);
+    kfree(buf);
 
     fs->bgdesc_table[group].bg_free_inodes_count++;
     fs->sb_raw.s_free_inodes_count++;
