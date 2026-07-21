@@ -167,6 +167,35 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 	@cp build/x86_64/user/terminal.elf       config/fsroot/bin/terminal
 	@cp build/x86_64/user/smp_stress.elf     config/fsroot/bin/smp_stress
 	@cp $(INITTAB_FILE) config/fsroot/etc/inittab
+	@cp build/x86_64/user/socktest.elf      config/fsroot/bin/socktest
+	@ln -sf busybox config/fsroot/bin/wget
+	@ln -sf busybox config/fsroot/bin/login
+	@ln -sf busybox config/fsroot/bin/sh
+	@ln -sf busybox config/fsroot/bin/[
+	@ln -sf busybox config/fsroot/bin/[[
+	@ln -sf busybox config/fsroot/bin/cat
+	@ln -sf busybox config/fsroot/bin/cp
+	@ln -sf busybox config/fsroot/bin/mv
+	@ln -sf busybox config/fsroot/bin/rm
+	@ln -sf busybox config/fsroot/bin/mkdir
+	@ln -sf busybox config/fsroot/bin/rmdir
+	@ln -sf busybox config/fsroot/bin/echo
+	@ln -sf busybox config/fsroot/bin/printf
+	@ln -sf busybox config/fsroot/bin/ps
+	@ln -sf busybox config/fsroot/bin/kill
+	@ln -sf busybox config/fsroot/bin/mount
+	@ln -sf busybox config/fsroot/bin/grep
+	@ln -sf busybox config/fsroot/bin/sed
+	@ln -sf busybox config/fsroot/bin/awk
+	@ln -sf busybox config/fsroot/bin/find
+	@ln -sf busybox config/fsroot/bin/xargs
+	@ln -sf busybox config/fsroot/bin/tar
+	@ln -sf busybox config/fsroot/bin/gzip
+	@ln -sf busybox config/fsroot/bin/gunzip
+	@ln -sf busybox config/fsroot/bin/ping
+	@ln -sf busybox config/fsroot/bin/ifconfig
+	@ln -sf busybox config/fsroot/bin/clear
+	@ln -sf busybox config/fsroot/bin/dmesg
 	$(MAKE) -C tools check-deps
 	$(MAKE) -C tools
 	tools/mkdisk disk.img \

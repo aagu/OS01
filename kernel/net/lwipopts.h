@@ -33,4 +33,14 @@
 // that would conflict with kernel headers (struct timeval, etc.)
 #define LWIP_NO_UNISTD_H        1
 
+// ── Debug output ──────────────────────────────────────────
+// LWIP_PLATFORM_DIAG maps to log_info (see arch/cc.h), so these
+// are always visible regardless of NDEBUG.
+// Note: numeric value 0x80 = LWIP_DBG_ON (lwip/debug.h isn't
+// included yet at lwipopts.h parse time, so the macro isn't available).
+#define DHCP_DEBUG                      (LWIP_DBG_ON | LWIP_DBG_TRACE | LWIP_DBG_STATE)
+#define LWIP_NETIF_DEBUG    0x80
+#define LWIP_ETHARP_DEBUG   0x80
+#define LWIP_ARP_DEBUG      0x80
+
 #endif // LWIP_OPTS_H

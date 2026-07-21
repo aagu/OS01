@@ -8,6 +8,7 @@
 
 uint32_t pci_config_read(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset);
 void     pci_config_write(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset, uint32_t value);
+void     pci_config_writeb(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset, uint8_t value);
 
 // ── Device discovery ───────────────────────────────────────
 // Returns 0 on success, -1 if not found.
@@ -25,8 +26,12 @@ uint64_t pci_read_bar(uint8_t bus, uint8_t dev, uint8_t func,
 void pci_enable_bus_mastering(uint8_t bus, uint8_t dev, uint8_t func);
 void pci_enable_mmio(uint8_t bus, uint8_t dev, uint8_t func);
 
-// ── Interrupt line ─────────────────────────────────────────
+// ── Interrupt routing / MSI ────────────────────────────────
 uint8_t pci_read_interrupt_line(uint8_t bus, uint8_t dev, uint8_t func);
+uint8_t pci_get_gsi(uint8_t bus, uint8_t dev, uint8_t func);
+void   pci_disable_msi(uint8_t bus, uint8_t dev, uint8_t func);
+// Enable MSI at the given vector.  Returns 0 on success, -1 if not MSI-capable.
+int    pci_enable_msi(uint8_t bus, uint8_t dev, uint8_t func, uint8_t vector);
 
 // ── Standard PCI header offsets ────────────────────────────
 #define PCI_VENDOR_ID       0x00
@@ -56,6 +61,16 @@ uint8_t pci_read_interrupt_line(uint8_t bus, uint8_t dev, uint8_t func);
 // ── Header types ───────────────────────────────────────────
 #define PCI_HEADER_DEVICE    0
 #define PCI_HEADER_BRIDGE    1
+
+// ── MSI capability structure ───────────────────────────────
+#define PCI_CAP_ID_MSI       0x05
+#define PCI_MSI_ADDR_BASE    0xFEE00000   // target LAPIC (physical, dest=0)
+#define PCI_MSI_FLAGS_OFF    2            // Message Control u16 offset in cap
+#define PCI_MSI_FLAGS_64BIT  (1 << 7)     // 64-bit addressing capable
+#define PCI_MSI_ADDR_LO_OFF  4            // Message Address low u32 offset
+#define PCI_MSI_ADDR_HI_OFF  8            // Message Address high u32 (64-bit)
+#define PCI_MSI_DATA_32_OFF  8            // Message Data u16 offset (32-bit)
+#define PCI_MSI_DATA_64_OFF  12           // Message Data u16 offset (64-bit)
 
 // ── Class codes ────────────────────────────────────────────
 #define PCI_CLASS_MASS_STORAGE   0x01

@@ -1871,7 +1871,10 @@ void task_init()
     list_init(&init_mm.vma_list);
     init_mm.mmap_base = 0;
 
-    list_init(&init_task_union.task.list);
+    // init_task_union.task.list is pre-initialized as self-referencing
+    // in INIT_TASK, so any tasks added before task_init() (e.g. tcpip_thread
+    // from net_lwip_init(), AP idle tasks from smp_boot_aps()) remain on the
+    // scheduler's list.  Do NOT call list_init() here — it would orphan them.
 
     // BSP idle task pointer (for the multicore scheduler).
     percpu_data[0].idle = &init_task_union.task;
@@ -1901,7 +1904,10 @@ void task_init()
         }
     }
 
-    // pid_counter starts at 1 → first user task becomes PID=1.
+    // pid_counter starts at 1.  With lwIP networking, tcpip_thread (PID 1)
+    // is created before task_init(), so user init becomes PID 2.
+    // user_init_task pointer is set on the first spawn_user_task call,
+    // so reparenting works regardless of init's PID.
     int64_t init_pid = spawn_user_task("/bin/init", NULL);
     debug_task("init: spawned user-space init, pid=%d\n", (int)init_pid);
 

@@ -193,6 +193,7 @@ thread_t init_thread;
 {                                     \
     .state = TASK_UNINTERRUPTIBLE,    \
     .flags = PF_KTHREAD,              \
+    .list = {&(task).list, &(task).list}, \
     .mm = &init_mm,                   \
     .thread = &init_thread,           \
     .addr_limit = 0xffff800000000000, \

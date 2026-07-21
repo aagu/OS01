@@ -163,6 +163,16 @@ static void ioapic_enable(uint64_t nr)
     if (isa_irq == 4)
         low_flags |= IOAPIC_RED_TRIG_LEVEL;
 
+    // ── Edge-triggered for PCI GSIs (Q35 workaround) ────
+    // PCI INTx is nominally level-sensitive, but on QEMU Q35
+    // the IOAPIC pin for GSIs >= 16 never fires in level-triggered
+    // mode (RIRR stays 0).  Edge-triggered works on the PIT
+    // (IOAPIC pin 2) and keyboard (pin 1).  Try edge-triggered
+    // for PCI devices — the INTx# deassertion after the handler
+    // clears the condition via ICS re-read will provide a clean
+    // rising edge for the next interrupt.
+    // (No force-level for gsi >= 16 — keep edge unless ISO says otherwise)
+
     // Write the redirection entries
     ioapic_write_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(redir) + 1, high);
     ioapic_write_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(redir), low_flags);

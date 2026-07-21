@@ -6,9 +6,11 @@
 
 // ── Register offsets (16-byte aligned for 64-bit MMIO) ────────
 #define E1000_REG_CTRL     0x0000   // Device Control
+#define E1000_REG_CTRL_EXT 0x0018   // Extended Device Control
 #define E1000_REG_STATUS   0x0008   // Device Status
 #define E1000_REG_EERD     0x0014   // EEPROM Read
-#define E1000_REG_ICR      0x00C0   // Interrupt Cause Read
+#define E1000_REG_ICR      0x00C0   // Interrupt Cause Read (R/W1C)
+#define E1000_REG_ICS      0x00C8   // Interrupt Cause Set (WO)
 #define E1000_REG_IMS      0x00D0   // Interrupt Mask Set
 #define E1000_REG_IMC      0x00D8   // Interrupt Mask Clear
 #define E1000_REG_RCTL     0x0100   // Receive Control
@@ -19,12 +21,16 @@
 #define E1000_REG_RDH      0x2810   // RX Descriptor Head
 #define E1000_REG_RDT      0x2818   // RX Descriptor Tail
 #define E1000_REG_RDTR     0x2820   // RX Delay Timer
+#define E1000_REG_RADV     0x282C   // RX Absolute Delay Timer
 #define E1000_REG_TDBAL    0x3800   // TX Descriptor Base Low
 #define E1000_REG_TDBAH    0x3804   // TX Descriptor Base High
 #define E1000_REG_TDLEN    0x3808   // TX Descriptor Length
 #define E1000_REG_TDH      0x3810   // TX Descriptor Head
 #define E1000_REG_TDT      0x3818   // TX Descriptor Tail
 #define E1000_REG_RA_BASE  0x5400   // Receive Address (MAC) Filter
+
+// ── CTRL_EXT bits ─────────────────────────────────────────────
+#define E1000_CTRL_EXT_INT_MODE (1 << 30)   // 0 = INTx, 1 = MSI
 
 // ── CTRL bits ─────────────────────────────────────────────────
 #define E1000_CTRL_FD       (1 << 0)
@@ -123,7 +129,8 @@ typedef struct {
 // ── Driver API ─────────────────────────────────────────────────
 #include "lwip/netif.h"  // for struct netif, struct pbuf, err_t
 
-int   e1000_init(uint64_t bar_phys, uint8_t irq);
+int   e1000_init(uint64_t bar_phys, uint8_t irq, int use_msi);
+int   e1000_link_up(void);
 err_t e1000_xmit(struct netif *netif, struct pbuf *p);
 err_t e1000_netif_init(struct netif *netif);
 

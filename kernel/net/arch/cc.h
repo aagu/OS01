@@ -39,7 +39,7 @@ typedef int32_t   s32_t;
 typedef uintptr_t mem_ptr_t;
 
 // ── Diagnostic / debug output ──────────────────────────────────
-#define LWIP_PLATFORM_DIAG(x) do { log_debug x; } while (0)
+#define LWIP_PLATFORM_DIAG(x) do { log_info x; } while (0)
 #define LWIP_PLATFORM_ASSERT(x) do { \
     log_err("lwIP assert: %s at %s:%d\n", x, __FILE__, __LINE__); \
 } while (0)

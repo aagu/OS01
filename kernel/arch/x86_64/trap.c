@@ -2268,6 +2268,15 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
                                   (int)regs->rdx, (void *)regs->r10, regs->r8);
         break;
     }
+    case SYS_getsockname: {
+        regs->rax = do_getsockname((int)regs->rdi,
+                                   (void *)regs->rsi, (uint64_t *)regs->rdx);
+        break;
+    }
+    case SYS_getifaddr: {
+        regs->rax = do_getifaddr();
+        break;
+    }
     case SYS_getsockopt: {
         regs->rax = do_getsockopt((int)regs->rdi, (int)regs->rsi,
                                   (int)regs->rdx, (void *)regs->r10, (uint64_t *)regs->r8);

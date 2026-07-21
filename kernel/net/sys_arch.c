@@ -23,6 +23,22 @@
 // libk functions pulled in by our code reference it.
 int errno;
 
+// ── Timeout support for mbox_fetch ──────────────────────────────
+
+typedef struct {
+    sys_mbox_t *mbox;
+    volatile int fired;
+    volatile int cancelled;
+} mbox_timeout_ctx_t;
+
+static void mbox_timeout_callback(void *data)
+{
+    mbox_timeout_ctx_t *ctx = (mbox_timeout_ctx_t *)data;
+    if (ctx->cancelled) return;
+    ctx->fired = 1;
+    sys_mbox_trypost_fromisr(ctx->mbox, NULL);
+}
+
 // ═══════════════════════════════════════════════════════════════
 //  Semaphores — spinlock + counter + wait_queue
 // ═══════════════════════════════════════════════════════════════
@@ -58,7 +74,11 @@ u32_t sys_arch_sem_wait(sys_sem_t *sem, u32_t timeout)
 {
     if (!sem || !*sem) return SYS_ARCH_TIMEOUT;
     os_sem_t *s = (os_sem_t *)*sem;
-    (void)timeout;  // infinite only
+
+    u32_t deadline = 0;
+    if (timeout && timeout != (u32_t)-1) {
+        deadline = (u32_t)(jiffies * 10) + timeout;
+    }
 
     for (;;) {
         uint64_t flags = spin_lock_irqsave(&s->lock);
@@ -68,6 +88,14 @@ u32_t sys_arch_sem_wait(sys_sem_t *sem, u32_t timeout)
             return 0;
         }
         spin_unlock_irqrestore(&s->lock, flags);
+
+        // Check timeout (busy-poll at 10ms granularity)
+        if (timeout > 0 && timeout != (u32_t)-1) {
+            u32_t now = (u32_t)(jiffies * 10);
+            if (now >= deadline)
+                return SYS_ARCH_TIMEOUT;
+        }
+
         wait_queue_sleep(&s->wq);
     }
 }
@@ -131,15 +159,38 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
 {
     if (!mbox || !*mbox) return SYS_ARCH_TIMEOUT;
     os_mbox_t *mb = (os_mbox_t *)*mbox;
-    (void)timeout;
+
+    // Set up timeout timer (fires once, posts NULL sentinel)
+    mbox_timeout_ctx_t tctx = {0};
+    timer_t *timer = NULL;
+    if (timeout > 0) {
+        tctx.mbox = mbox;
+        // Convert ms to jiffies: sys_now() = jiffies * 10, so 1 jiffy = 10ms
+        timer = create_timer(mbox_timeout_callback, &tctx,
+                             jiffies + (timeout + 9) / 10);
+        if (timer) add_timer(timer);
+    }
 
     for (;;) {
         uint64_t flags = spin_lock_irqsave(&mb->lock);
         if (mb->count > 0) {
-            *msg = mb->queue[mb->tail];
+            void *m = mb->queue[mb->tail];
             mb->tail = (mb->tail + 1) % MBOX_SIZE;
             mb->count--;
             spin_unlock_irqrestore(&mb->lock, flags);
+
+            // Cancel timer if active
+            if (timer) {
+                tctx.cancelled = 1;
+                del_timer(timer);
+                // If the timer fired and this was the sentinel,
+                // we might need to eat the NULL.  But it's too late
+                // to distinguish — check fired flag.
+                if (tctx.fired && m == NULL)
+                    return SYS_ARCH_TIMEOUT;
+            }
+
+            *msg = m;
             return 0;
         }
         spin_unlock_irqrestore(&mb->lock, flags);
@@ -212,6 +263,7 @@ void sys_mutex_unlock(sys_mutex_t *mutex)
 {
     sys_sem_signal(mutex);
 }
+
 
 // ═══════════════════════════════════════════════════════════════
 //  Thread — create_kthread wrapper

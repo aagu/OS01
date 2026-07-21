@@ -37,6 +37,12 @@ void pci_config_write(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset
     arch_outd(PCI_CONFIG_DATA, value);
 }
 
+void pci_config_writeb(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset, uint8_t value)
+{
+    arch_outd(PCI_CONFIG_ADDR, pci_make_addr(bus, dev, func, offset));
+    arch_outb(value, PCI_CONFIG_DATA + (offset & 3));
+}
+
 // ── Device discovery ──────────────────────────────────────
 
 // Check if a function exists (vendor != 0xFFFF)
@@ -166,10 +172,116 @@ void pci_enable_mmio(uint8_t bus, uint8_t dev, uint8_t func)
     debug_block("PCI: enabled MMIO for %d:%d.%d\n", bus, dev, func);
 }
 
-// ── Interrupt line ────────────────────────────────────────
+// ── MSI disable ────────────────────────────────────────────
+// Walk the PCI capabilities list and clear the MSI Enable bit.
+// Required for devices that default to MSI on Q35 — without this,
+// INTx is never asserted and the IOAPIC never fires.
+void pci_disable_msi(uint8_t bus, uint8_t dev, uint8_t func)
+{
+    uint32_t cap_reg = pci_config_read(bus, dev, func, 0x34);
+    uint8_t cap_ptr = (uint8_t)(cap_reg & 0xFF);
+
+    while (cap_ptr != 0) {
+        uint8_t base = cap_ptr & 0xFC;
+        uint8_t off  = cap_ptr & 3;
+
+        uint32_t dword = pci_config_read(bus, dev, func, base);
+        uint8_t cap_id = (uint8_t)((dword >> (off * 8)) & 0xFF);
+
+        if (cap_id == 0x05) {  // MSI capability
+            uint8_t mc_off = off + 2;   // Message Control at cap_ptr+2
+            uint16_t msg_ctrl = (uint16_t)((dword >> (mc_off * 8)) & 0xFFFF);
+            if (msg_ctrl & 1) {
+                msg_ctrl &= ~1;
+                uint32_t mask = 0xFFFF << (mc_off * 8);
+                dword = (dword & ~mask) | ((uint32_t)msg_ctrl << (mc_off * 8));
+                pci_config_write(bus, dev, func, base, dword);
+                log_info("PCI: disabled MSI for %d:%d.%d\n", bus, dev, func);
+            }
+            return;
+        }
+        cap_ptr = (uint8_t)((dword >> ((off + 1) * 8)) & 0xFF);
+    }
+}
+
+// ── MSI enable ─────────────────────────────────────────────
+// Walk the PCI capabilities list, find the MSI capability, and
+// configure it to deliver edge-triggered fixed-mode interrupts
+// at the given vector to LAPIC ID 0 (BSP).
+// Returns 0 on success, -1 if no MSI capability found.
+int pci_enable_msi(uint8_t bus, uint8_t dev, uint8_t func, uint8_t vector)
+{
+    uint32_t cap_reg = pci_config_read(bus, dev, func, 0x34);
+    uint8_t cap_ptr = (uint8_t)(cap_reg & 0xFF);
+
+    log_info("PCI: %d:%d.%d caps_ptr=%#x\n", bus, dev, func, cap_ptr);
+    if (cap_ptr == 0) {
+        log_info("PCI: %d:%d.%d has no capabilities\n", bus, dev, func);
+    }
+    while (cap_ptr != 0) {
+        // cap_ptr is always dword-aligned in practice — read full dword
+        uint32_t dword = pci_config_read(bus, dev, func, cap_ptr);
+        uint8_t cap_id = (uint8_t)(dword & 0xFF);
+        log_info("PCI: %d:%d.%d cap_id=%#x\n", bus, dev, func, cap_id);
+        if (cap_id == PCI_CAP_ID_MSI) {
+            uint16_t msg_ctrl = (uint16_t)(dword >> 16);
+            int is_64 = (msg_ctrl & PCI_MSI_FLAGS_64BIT) ? 1 : 0;
+
+            // Write Message Address (4 bytes at cap_ptr + 4)
+            pci_config_write(bus, dev, func, cap_ptr + 4, PCI_MSI_ADDR_BASE);
+
+            if (is_64)
+                pci_config_write(bus, dev, func, cap_ptr + 8, 0);
+
+            // Write Message Data (u16 at cap_ptr + 8 for 32-bit, +12 for 64-bit)
+            uint8_t data_off = is_64 ? 12 : 8;
+            uint32_t data_dword = pci_config_read(bus, dev, func, cap_ptr + data_off);
+            data_dword = (data_dword & 0xFFFF0000) | vector;
+            pci_config_write(bus, dev, func, cap_ptr + data_off, data_dword);
+
+            // Enable MSI: set bit 0 of Message Control (bit 16 of dword)
+            pci_config_write(bus, dev, func, cap_ptr, dword | (1 << 16));
+
+            log_info("PCI: MSI enabled for %d:%d.%d vector=0x%x (%d-bit)\n",
+                     bus, dev, func, vector, is_64 ? 64 : 32);
+            return 0;
+        }
+        cap_ptr = (uint8_t)(dword >> 8);
+    }
+    return -1;
+}
+// Returns the GSI (Global System Interrupt) for a PCI device.
+//
+// On Q35/ICH9, PCI INTx is routed through PIRQ[A-D] to GSIs 16-19:
+//   PIRQ = (slot + pin - 1) & 3,  GSI = 16 + PIRQ
+//
+// The PCI "interrupt line" register (offset 0x3C) contains a legacy ISA IRQ
+// value (0-15) for PIC compatibility, NOT the actual GSI.  Using it with the
+// IOAPIC programs the wrong redirection entry → interrupt never delivered.
 
 uint8_t pci_read_interrupt_line(uint8_t bus, uint8_t dev, uint8_t func)
 {
     uint32_t reg = pci_config_read(bus, dev, func, PCI_INTERRUPT_LINE);
     return (uint8_t)(reg & 0xFF);
+}
+
+uint8_t pci_get_gsi(uint8_t bus, uint8_t dev, uint8_t func)
+{
+    uint32_t reg = pci_config_read(bus, dev, func, PCI_INTERRUPT_LINE);
+    uint8_t int_line = (uint8_t)(reg & 0xFF);
+    uint8_t int_pin  = (uint8_t)((reg >> 8) & 0xFF);
+
+    if (int_pin == 0)
+        return int_line;  // MSI or no interrupt
+
+    // Compute GSI using Q35/ICH9 routing:
+    //   PIRQ[A-D] → GSI[16-19],  PIRQ = (slot + pin - 1) & 3
+    uint8_t gsi = 16 + ((dev + int_pin - 1) & 3);
+
+    // If firmware already set interrupt line to a value >= 16, trust it
+    // (OVMF on some configs writes the GSI directly).
+    if (int_line >= 16)
+        return int_line;
+
+    return gsi;
 }

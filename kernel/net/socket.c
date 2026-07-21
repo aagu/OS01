@@ -1,6 +1,9 @@
 // kernel/net/socket.c — BSD socket implementation backed by lwIP netconn
 #include <net/socket.h>
+#include <uapi/sockaddr.h>
+#include <net/net.h>
 #include <kernel/file.h>
+#include "lwip/netif.h"
 #include <kernel/task.h>
 #include <kernel/slab.h>   // kmalloc, kfree
 #include <kernel/poll.h>
@@ -253,6 +256,41 @@ int64_t do_accept(int fd, uint32_t *out_ip, uint16_t *out_port)
     return new_fd;
 }
 
+
+// ── SYS_getsockname ──
+
+int64_t do_getsockname(int fd, void *addr_ptr, uint64_t *addrlen_ptr)
+{
+    socket_t *s = socket_get(fd);
+    if (!s) return -EBADF;
+
+    ip_addr_t lwip_addr;
+    u16_t port;
+    err_t err = netconn_getaddr((struct netconn *)s->conn, &lwip_addr, &port, 1);
+    if (err != ERR_OK)
+        return -EADDRNOTAVAIL;
+
+    uint64_t usr_addrlen = *addrlen_ptr;
+    if (usr_addrlen < sizeof(struct sockaddr_in))
+        return -EINVAL;
+extern struct netif os01_netif;
+
+    // If socket not bound, fall back to netif DHCP address
+    uint32_t ip = ip4_addr_get_u32(&lwip_addr);
+    if (ip == 0) {
+        ip = ip4_addr_get_u32(&os01_netif.ip_addr);
+    }
+
+    struct sockaddr_in sin;
+    memset(&sin, 0, sizeof(sin));
+    sin.sin_family = AF_INET;
+    sin.sin_port = port;
+    sin.sin_addr = ip;
+    memcpy(addr_ptr, &sin, sizeof(sin));
+    *addrlen_ptr = sizeof(sin);
+    return 0;
+}
+
 // ── SYS_setsockopt / SYS_getsockopt — minimal stubs ────────────
 
 int64_t do_setsockopt(int fd, int level, int optname,
@@ -272,4 +310,12 @@ int64_t do_getsockopt(int fd, int level, int optname,
     if (!s) return -EBADF;
     (void)level; (void)optname; (void)optval; (void)optlen;
     return 0;
+}
+
+// ── SYS_getifaddr — return netif IPv4 address ────────────────
+extern struct netif os01_netif;
+
+int64_t do_getifaddr(void)
+{
+    return (int64_t)ip4_addr_get_u32(&os01_netif.ip_addr);
 }

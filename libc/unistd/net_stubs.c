@@ -28,9 +28,13 @@ uint16_t ntohs(uint16_t n) { return __builtin_bswap16(n); }
 uint32_t htonl(uint32_t n) { return __builtin_bswap32(n); }
 uint32_t ntohl(uint32_t n) { return __builtin_bswap32(n); }
 
+#include <sys/syscall.h>
+
 int getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
-    (void)sockfd; (void)addr; (void)addrlen;
-    return -1;
+    (void)addrlen;
+    int64_t ret = syscall(SYS_getsockname, sockfd, (uint64_t)addr, (uint64_t)addrlen);
+    if (ret < 0) { errno = (int)(-ret); return -1; }
+    return (int)ret;
 }
 
 int getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {

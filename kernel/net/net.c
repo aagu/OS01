@@ -24,7 +24,7 @@ static uint8_t e1000_irq = 0;
 static uint64_t e1000_bar = 0;
 
 // The single OS01 network interface
-static struct netif os01_netif;
+struct netif os01_netif;
 
 // ── Stage A: Hardware init (Phase 6 subsys, no scheduler) ────
 
@@ -46,7 +46,7 @@ int net_hw_init(void)
     pci_enable_mmio(bus, dev, func);
     e1000_irq = pci_read_interrupt_line(bus, dev, func);
 
-    if (e1000_init(e1000_bar, e1000_irq) != 0) {
+    if (e1000_init(e1000_bar, e1000_irq, 0) != 0) {
         debug_block("net: e1000 init failed\n");
         return -EIO;
     }
@@ -86,6 +86,17 @@ void net_lwip_init(void)
     netif_set_up(nif);
 
     // Start DHCP — tcpip_thread is already running, can process responses
+    // Static IP for QEMU user-mode: 10.0.2.15/24 gw 10.0.2.2
+    {
+        ip4_addr_t ip, mask, gw;
+        IP4_ADDR(&ip,  10, 0, 2, 15);
+        IP4_ADDR(&mask, 255, 255, 255, 0);
+        IP4_ADDR(&gw,  10, 0, 2, 2);
+        netif_set_addr(&os01_netif, &ip, &mask, &gw);
+        netif_set_link_up(&os01_netif);
+        log_info("net: static IP 10.0.2.15/24\n");
+    }
+    // Also try DHCP
     dhcp_start(nif);
 
     log_info("net: lwIP stack initialized, DHCP started\n");
