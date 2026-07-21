@@ -8,4 +8,4 @@ int net_hw_init(void);
 // Stage B: Post-SMP, pre-task_init — lwIP stack init + tcpip_thread creation
 void net_lwip_init(void);
 
-#endif // _NET_NET_H
+#endif // _NET_NET_Hvoid net_poll_rx(void);

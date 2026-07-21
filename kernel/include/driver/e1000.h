@@ -27,7 +27,6 @@
 #define E1000_REG_TDLEN    0x3808   // TX Descriptor Length
 #define E1000_REG_TDH      0x3810   // TX Descriptor Head
 #define E1000_REG_TDT      0x3818   // TX Descriptor Tail
-#define E1000_REG_RA_BASE  0x5400   // Receive Address (MAC) Filter
 
 // ── CTRL_EXT bits ─────────────────────────────────────────────
 #define E1000_CTRL_EXT_INT_MODE (1 << 30)   // 0 = INTx, 1 = MSI
@@ -37,12 +36,6 @@
 #define E1000_CTRL_ASDE     (1 << 5)
 #define E1000_CTRL_SLU      (1 << 6)
 #define E1000_CTRL_ILOS     (1 << 7)
-#define E1000_CTRL_SPEED_10  0
-#define E1000_CTRL_SPEED_100 (1 << 8)
-#define E1000_CTRL_SPEED_1000 (2 << 8)
-#define E1000_CTRL_SPEED_MASK (3 << 8)
-#define E1000_CTRL_FRCSPD   (1 << 11)
-#define E1000_CTRL_FRCDPLX  (1 << 12)
 #define E1000_CTRL_RST      (1 << 26)
 
 // ── STATUS bits ────────────────────────────────────────────────
@@ -133,5 +126,7 @@ int   e1000_init(uint64_t bar_phys, uint8_t irq, int use_msi);
 int   e1000_link_up(void);
 err_t e1000_xmit(struct netif *netif, struct pbuf *p);
 err_t e1000_netif_init(struct netif *netif);
+
+void e1000_poll_rx(void);
 
 #endif // _DRIVER_E1000_H

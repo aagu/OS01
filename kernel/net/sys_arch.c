@@ -194,6 +194,8 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
             return 0;
         }
         spin_unlock_irqrestore(&mb->lock, flags);
+        extern void net_poll_rx(void);
+        net_poll_rx();
         wait_queue_sleep(&mb->wq);
     }
 }
