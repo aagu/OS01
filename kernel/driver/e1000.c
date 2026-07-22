@@ -272,7 +272,7 @@ int e1000_init(uint64_t bar_phys, uint8_t irq, int use_msi)
     e1000_write(E1000_REG_RDT, E1000_NUM_RX_DESC - 1);
     e1000.rx_tail = 0;
     e1000_write(E1000_REG_RCTL,
-        E1000_RCTL_EN | E1000_RCTL_SBP | E1000_RCTL_BAM
+        E1000_RCTL_EN | E1000_RCTL_SBP | E1000_RCTL_UPE | E1000_RCTL_MPE | E1000_RCTL_BAM
         | E1000_RCTL_BSIZE_2048 | E1000_RCTL_SECRC);
 
     // 7. Configure TX
