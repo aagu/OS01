@@ -40,7 +40,7 @@
 | `poll_table_setup` kmalloc 失败无路径 | 返回 `int`（0/-ENOMEM），调用方检查 |
 | Makefile 变更不需要（wildcard 自动发现） | 从清单中移除 |
 | `do_poll_core` 信号契约不明确 | 添加明确的 3 个检查时间点 |
-| pselect6 结构体重复定义 | 提取到共享 `uapi/pselect.h` |
+| pselect6 结构体重复定义 | 两边各自定义（内核在 `kernel/select.h`，libc 在 `select.c` 内联）；libc 无法引用 kernel include 路径下的头文件 |
 
 ### v1 → v2
 
@@ -276,25 +276,28 @@ static inline int kern_fd_isset(int fd, kernel_fd_set *set) {
 
 **布局一致性**：libc `fd_set.long __fds_bits[16]` 与内核 `kernel_fd_set.uint64_t __bits[16]` 均为 16×8=128 字节，在 x86_64 LP64 下位序一致。`memcpy` 逐字节拷贝不依赖字段名。非可移植到 ILP32（`sizeof(long)=4`），但本项目仅支持 x86_64。
 
-### pselect6 打包结构体（共享头文件）
+### pselect6 打包结构体（各自定义）
 
+libc 无法 `#include` kernel include 路径下的头文件（libc Makefile 的 `-I.` 仅指向 `libc/include/`）。`pselect6_sigmask` 结构体在两端各自定义，保证 ABI 布局一致即可。
+
+**内核端**（在 `kernel/include/kernel/select.h`）：
 ```c
-// kernel/include/uapi/pselect.h — 内核和 libc 共享
-
-#ifndef _UAPI_PSELECT_H
-#define _UAPI_PSELECT_H
-
-#include <stddef.h>   // size_t
-
 struct pselect6_sigmask {
     const void *ss;       // const sigset_t *（void* 避免依赖 signal.h）
     size_t      ss_len;   // 必须 == sizeof(sigset_t) (8 字节)
 };
-
-#endif
 ```
 
-LP64 下 layout：指针 8 字节 + size_t 8 字节 = 16 字节，无 padding。AArch64 同样 LP64。
+**libc 端**（在 `libc/unistd/select.c` 内联定义，该文件唯一使用者）：
+```c
+// libc/unistd/select.c
+struct pselect6_sigmask {     // 与内核端布局一致
+    const sigset_t *ss;       // libc 可用 sigset_t（来自 <signal.h>）
+    size_t          ss_len;
+};
+```
+
+LP64 下两端布局相同：指针 8 字节 + size_t 8 字节 = 16 字节，无 padding。AArch64 同理。
 
 ### libc fd_set（已存在）
 
@@ -445,7 +448,11 @@ POLLHUP 出现在 readfds（EOF-readable），POLLERR 出现在所有三个集�
 
 ```c
 // libc/unistd/select.c
-#include <uapi/pselect.h>
+
+struct pselect6_sigmask {          // 内联定义，与内核 select.h 中布局一致
+    const sigset_t *ss;
+    size_t          ss_len;
+};
 
 int pselect(int nfds, fd_set *r, fd_set *w, fd_set *e,
             const struct timespec *ts, const sigset_t *sigmask)
@@ -466,7 +473,7 @@ int pselect(int nfds, fd_set *r, fd_set *w, fd_set *e,
 
 ```c
 // kernel/fs/select.c — do_pselect6()
-#include <uapi/pselect.h>
+// struct pselect6_sigmask 定义在 kernel/include/kernel/select.h
 
 sigset_t sigmask_kern, *sigmask_ptr = NULL;
 
@@ -614,8 +621,7 @@ int pselect(int nfds, fd_set *readfds, fd_set *writefds,
 | **修改** | `kernel/include/kernel/poll.h` | +12/−8 | poll_table_t 动态 entries + max_entries；`poll_table_setup` 返回 int；`poll_wait` 使用 `max_entries` |
 | **修改** | `kernel/fs/poll.c` | +60/−25 | 提取 do_poll_core()；poll_table_setup/destroy；nfds==0→timeout；memcpy(NULL)守卫；首次信号检查归属 |
 | **新增** | `kernel/fs/select.c` | ~170 | do_select、do_pselect6、fd_set↔pollfd 转换 |
-| **新增** | `kernel/include/kernel/select.h` | ~40 | kernel_fd_set + sigset_t typedef、原型（void*）、FD_SETSIZE |
-| **新增** | `kernel/include/uapi/pselect.h` | ~12 | struct pselect6_sigmask（共享） |
+| **新增** | `kernel/include/kernel/select.h` | ~45 | kernel_fd_set + sigset_t + struct pselect6_sigmask、原型（void*）、FD_SETSIZE |
 | **新增** | `libc/include/sys/select.h` | ~60 | FD 宏、select()/pselect() 声明 |
 | **新增** | `libc/unistd/select.c` | ~40 | libc wrappers + pselect 打包 |
 | **修改** | `kernel/include/uapi/syscall.h` | +1 | SYS_pselect6 |
@@ -627,11 +633,10 @@ int pselect(int nfds, fd_set *readfds, fd_set *writefds,
 ### select.c 依赖头文件
 
 ```c
-#include <kernel/select.h>    // kernel_fd_set, sigset_t, FD_SETSIZE, 原型
+#include <kernel/select.h>    // kernel_fd_set, sigset_t, FD_SETSIZE, struct pselect6_sigmask, 原型
 #include <kernel/poll.h>      // poll_table_t, do_poll_core, poll_table_setup/destroy
 #include <kernel/task.h>      // current, current->signal, current->blocked, addr_limit
 #include <uapi/time.h>        // struct timeval, struct timespec
-#include <uapi/pselect.h>     // struct pselect6_sigmask
 #include <errno.h>            // EINTR, EINVAL, EFAULT, ENOMEM, ENOSYS
 #include <string.h>           // memcpy, memset
 #include <kernel/slab.h>      // kmalloc, kfree
