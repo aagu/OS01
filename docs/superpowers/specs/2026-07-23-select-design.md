@@ -235,6 +235,13 @@ int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val) {
 ```c
 // kernel/include/kernel/select.h
 
+#include <stdint.h>
+
+#define FD_SETSIZE 1024
+
+// signal mask type (unsigned long, matches libc/include/signal.h:47)
+typedef unsigned long sigset_t;
+
 typedef struct {
     uint64_t __bits[16];   // 1024 bits = FD_SETSIZE
 } kernel_fd_set;
@@ -323,17 +330,17 @@ kernel_fd_set *kr_ptr = NULL, *kw_ptr = NULL, *ke_ptr = NULL;
 
 if (readfds) {
     if ((uint64_t)readfds >= current->addr_limit) return -EFAULT;
-    memcpy(&kr, readfds, sizeof(fd_set));     // 128 字节（跨页安全，见假设）
+    memcpy(&kr, readfds, sizeof(kernel_fd_set));     // 128 字节（跨页安全，见假设）
     kr_ptr = &kr;
 }
 if (writefds) {
     if ((uint64_t)writefds >= current->addr_limit) return -EFAULT;
-    memcpy(&kw, writefds, sizeof(fd_set));
+    memcpy(&kw, writefds, sizeof(kernel_fd_set));
     kw_ptr = &kw;
 }
 if (exceptfds) {
     if ((uint64_t)exceptfds >= current->addr_limit) return -EFAULT;
-    memcpy(&ke, exceptfds, sizeof(fd_set));
+    memcpy(&ke, exceptfds, sizeof(kernel_fd_set));
     ke_ptr = &ke;
 }
 
@@ -353,11 +360,11 @@ if (timeout_tv) {
 // (4) 返回：将 kernel_fd_set 写回用户 fd_set
 // addr_limit 在 syscall 期间不变，无需重复校验
 if (readfds)
-    memcpy(readfds, kr_ptr, sizeof(fd_set));
+    memcpy(readfds, kr_ptr, sizeof(kernel_fd_set));
 if (writefds)
-    memcpy(writefds, kw_ptr, sizeof(fd_set));
+    memcpy(writefds, kw_ptr, sizeof(kernel_fd_set));
 if (exceptfds)
-    memcpy(exceptfds, ke_ptr, sizeof(fd_set));
+    memcpy(exceptfds, ke_ptr, sizeof(kernel_fd_set));
 ```
 
 ---
@@ -500,20 +507,22 @@ sig mask 由 `do_pselect6()` 在调用 `do_select()` 前后保存/交换/恢复�
 ```
 do_pselect6(...sigmask_packed):
     解包 sigmask_packed
-    首次信号检查 → EINTR? return
+    首次信号检查 → EINTR? return          // 步骤 A（用 OLD blocked mask）
 
     if sigmask:
         old_blocked = current->blocked
         current->blocked = sigmask_kern   // 交换完成
 
-    ret = do_select(nfds, r, w, e, ts)    // 内部所有信号检查用新的 blocked mask
-                                          // (do_select 内的首次信号检查已在 pselect6 中完成，
-                                          //  后续由 do_poll_core 的循环检查处理)
+    ret = do_select(nfds, r, w, e, ts)    // do_select 入口也做信号检查（步骤 B，用 NEW mask）
+                                          // (此后由 do_poll_core 循环检查处理)
 
     if sigmask:
         current->blocked = old_blocked    // 始终恢复，即使出错
     return ret
 ```
+
+**步骤 A 的逻辑**：步骤 A 在 mask 交换前用旧 mask 检查信号，如果返回 EINTR，mask 未被修改（正确：pselect 尚未"开始"）。但步骤 A 存在冗余——步骤 B（`do_select` 入口检查）会捕获所有情况（无论信号在 swap 前或后到达）。步骤 A 不改变正确性，只是较保守。实现时两个检查都可保留，删除步骤 A 也不影响行为。
+
 
 ### 已知限制：无限超时下的信号唤醒
 
@@ -605,15 +614,37 @@ int pselect(int nfds, fd_set *readfds, fd_set *writefds,
 | **修改** | `kernel/include/kernel/poll.h` | +12/−8 | poll_table_t 动态 entries + max_entries；`poll_table_setup` 返回 int；`poll_wait` 使用 `max_entries` |
 | **修改** | `kernel/fs/poll.c` | +60/−25 | 提取 do_poll_core()；poll_table_setup/destroy；nfds==0→timeout；memcpy(NULL)守卫；首次信号检查归属 |
 | **新增** | `kernel/fs/select.c` | ~170 | do_select、do_pselect6、fd_set↔pollfd 转换 |
-| **新增** | `kernel/include/kernel/select.h` | ~35 | kernel_fd_set 类型、原型（void*） |
+| **新增** | `kernel/include/kernel/select.h` | ~40 | kernel_fd_set + sigset_t typedef、原型（void*）、FD_SETSIZE |
 | **新增** | `kernel/include/uapi/pselect.h` | ~12 | struct pselect6_sigmask（共享） |
 | **新增** | `libc/include/sys/select.h` | ~60 | FD 宏、select()/pselect() 声明 |
 | **新增** | `libc/unistd/select.c` | ~40 | libc wrappers + pselect 打包 |
 | **修改** | `kernel/include/uapi/syscall.h` | +1 | SYS_pselect6 |
 | **修改** | `kernel/arch/x86_64/trap.c` | +15 | dispatch + syscall_names[50,51] |
-| **修改** | `user/systest.c` | +120 | 9 个测试用例 |
+| **修改** | `user/systest.c` | +130 | 10 个测试用例 |
 
 **总计：~530 行**
+
+### select.c 依赖头文件
+
+```c
+#include <kernel/select.h>    // kernel_fd_set, sigset_t, FD_SETSIZE, 原型
+#include <kernel/poll.h>      // poll_table_t, do_poll_core, poll_table_setup/destroy
+#include <kernel/task.h>      // current, current->signal, current->blocked, addr_limit
+#include <uapi/time.h>        // struct timeval, struct timespec
+#include <uapi/pselect.h>     // struct pselect6_sigmask
+#include <errno.h>            // EINTR, EINVAL, EFAULT, ENOMEM, ENOSYS
+#include <string.h>           // memcpy, memset
+#include <kernel/slab.h>      // kmalloc, kfree
+```
+
+### do_poll 与 do_select 的 nfds==0 行为差异
+
+| 调用 | `nfds==0, timeout==NULL` | 原因 |
+|------|-------------------------|------|
+| `do_poll` | 立即返回 0 | 历史行为（poll with 0 fds 是空操作） |
+| `do_select` | 返回 `-ENOSYS` | POSIX select(0,...,NULL) 要求信号可中断睡眠，当前无法实现 |
+
+这种差异是故意的：`do_poll` 保持向后兼容，`do_select` 对新语义诚实。
 
 ### 堆压力
 
@@ -636,5 +667,6 @@ int pselect(int nfds, fd_set *readfds, fd_set *writefds,
 | 7 | `test_select_sleep` | `select(0, NULL, NULL, NULL, &{0,50000})` → 休眠 50ms | |
 | 8 | `test_select_invalid_fd` | fd 不在表中 → 返回 1，无 fd_set 位 | |
 | 9 | `test_pselect_null_sigmask` | sigmask=NULL → 退化为 select | |
+| 10 | `test_pselect_bad_ss_len` | pselect6 with ss_len=999 → 返回 -1, errno=EINVAL | |
 
-**注**：`test_pselect_sigmask`（SIGINT 中断测试）依赖于无限超时下的信号唤醒（已知限制）。待 blocker 框架集成后作为后续测试添加。当前先实现 9 个确可工作的测试。
+**注**：`test_pselect_sigmask`（SIGINT 中断测试）依赖于无限超时下的信号唤醒（已知限制）。待 blocker 框架集成后作为后续测试添加。当前先实现 10 个确可工作的测试。
