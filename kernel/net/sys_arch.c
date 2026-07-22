@@ -196,6 +196,10 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
         spin_unlock_irqrestore(&mb->lock, flags);
         extern void net_poll_rx(void);
         net_poll_rx();
+        // Double-check: poll may have posted to this same mailbox
+        { uint64_t _f2 = spin_lock_irqsave(&mb->lock);
+          if (mb->count > 0) { spin_unlock_irqrestore(&mb->lock, _f2); continue; }
+          spin_unlock_irqrestore(&mb->lock, _f2); }
         wait_queue_sleep(&mb->wq);
     }
 }

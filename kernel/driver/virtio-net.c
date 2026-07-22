@@ -61,12 +61,16 @@ static int virtq_init_legacy(virtq_t *vq, uint16_t qsize) {
 
     uint64_t phys = pages->phy_address;
     uint8_t *base = (uint8_t*)Phy_To_Virt(phys);
-    memset(base, 0, 8192);
+    // Zero at least enough for desc + avail + used (used aligned to next 4K)
+    uint16_t desc_sz = qsize * 16;
+    uint16_t used_off = (desc_sz + 4 + qsize * 2 + 4095) & ~4095;  // page_align after avail
+    memset(base, 0, used_off + 4 + qsize * 8);
 
     vq->desc  = (virtq_desc_t*)base;
-    vq->avail = (virtq_avail_t*)(base + qsize * 16);
-    vq->used  = (virtq_used_t*)(base + 4096);
+    vq->avail = (virtq_avail_t*)(base + desc_sz);
+    vq->used  = (virtq_used_t*)(base + used_off);
     vq->last_used_idx = 0;
+    log_info("virtio: vring qsize=%u desc_sz=%u used_off=%u\n", qsize, desc_sz, used_off);
     return 0;
 }
 
@@ -183,7 +187,8 @@ int virtio_net_init(uint64_t bar_phys, uint8_t bus, uint8_t dev, uint8_t func, u
     uint32_t host_feat = vio_in32(io_base + VIRTIO_LEGACY_HOST_FEATURES);
     log_info("virtio: host features=0x%x\n", host_feat);
 
-    uint32_t guest_feat = host_feat & 0x7fffffff;
+    // ToroKernel-style: disable everything except MAC and STATUS
+    uint32_t guest_feat = host_feat & (VIRTIO_NET_F_MAC | VIRTIO_NET_F_STATUS);
     if (!(host_feat & VIRTIO_NET_F_MAC)) {
         log_info("virtio: MAC feature not available!\n");
         return -1;
@@ -198,18 +203,27 @@ int virtio_net_init(uint64_t bar_phys, uint8_t bus, uint8_t dev, uint8_t func, u
     }
 
     // Setup RX queue (0)
-    if (virtq_init_legacy(&vnet.rx_vq, VQ_SIZE)) return -1;
     vio_out16(io_base + VIRTIO_LEGACY_QUEUE_SELECT, VIRTIO_NET_RX_QUEUE);
-    vio_out16(io_base + VIRTIO_LEGACY_QUEUE_SIZE, VQ_SIZE);
+    uint16_t qsize = vio_in16(io_base + VIRTIO_LEGACY_QUEUE_SIZE);
+    if (qsize < VQ_SIZE) qsize = VQ_SIZE;
+    if (virtq_init_legacy(&vnet.rx_vq, qsize)) return -1;
+    vio_out16(io_base + VIRTIO_LEGACY_QUEUE_SIZE, qsize);
     uint64_t rx_page = ((uint64_t)vnet.rx_vq.desc - PAGE_OFFSET) >> 12;
+    log_info("virtio: RX phys=%lx pfn=%u\n", (unsigned long)(rx_page << 12), (unsigned)rx_page);
     vio_out32(io_base + VIRTIO_LEGACY_QUEUE_PFN, (uint32_t)rx_page);
+    
+    log_info("virtio: RX queue size=%u\n", qsize);
 
     // Setup TX queue (1)
-    if (virtq_init_legacy(&vnet.tx_vq, VQ_SIZE)) return -1;
     vio_out16(io_base + VIRTIO_LEGACY_QUEUE_SELECT, VIRTIO_NET_TX_QUEUE);
-    vio_out16(io_base + VIRTIO_LEGACY_QUEUE_SIZE, VQ_SIZE);
+    qsize = vio_in16(io_base + VIRTIO_LEGACY_QUEUE_SIZE);
+    if (qsize < VQ_SIZE) qsize = VQ_SIZE;
+    if (virtq_init_legacy(&vnet.tx_vq, qsize)) return -1;
+    vio_out16(io_base + VIRTIO_LEGACY_QUEUE_SIZE, qsize);
     uint64_t tx_page = ((uint64_t)vnet.tx_vq.desc - PAGE_OFFSET) >> 12;
+    log_info("virtio: TX phys=%lx pfn=%u\n", (unsigned long)(tx_page << 12), (unsigned)tx_page);
     vio_out32(io_base + VIRTIO_LEGACY_QUEUE_PFN, (uint32_t)tx_page);
+    log_info("virtio: TX queue size=%u\n", qsize);
 
     // DRIVER_OK
     virtio_set_status(VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
@@ -218,52 +232,15 @@ int virtio_net_init(uint64_t bar_phys, uint8_t bus, uint8_t dev, uint8_t func, u
     for (int i = 0; i < 6; i++)
         vnet.mac[i] = vio_in8(io_base + 0x14 + i);
 
-    if (virtio_fill_rx()) { log_info("virtio: RX fill failed\n"); return -1; }
-
-    // --- Try MSI-X first ---
-    int MSI_ENABLED = 0;
-    {
-        uint32_t cap_reg = pci_config_read(bus, dev, func, 0x34);
-        uint8_t cp = (uint8_t)(cap_reg & 0xFF);
-        while (cp) {
-            uint32_t dword = pci_config_read(bus, dev, func, cp);
-            if ((uint8_t)(dword & 0xFF) == 0x11) {  // MSI-X cap
-                uint32_t tr = pci_config_read(bus, dev, func, cp + 4);
-                uint8_t bir = (uint8_t)(tr & 0x7);
-                uint32_t tbl_off = tr & ~0x7U;
-                int m, b64;
-                uint64_t bar = pci_read_bar(bus, dev, func, bir, &m, &b64);
-                if (m) {
-                    uint64_t tbl_phys = bar + tbl_off;
-                    // Map the 2MB page containing the MSI-X table
-                    vmm_map_page(kernel_map, tbl_phys & ~0x1FFFFFULL,
-                        (uintptr_t)((tbl_phys & ~0x1FFFFFULL) + PAGE_OFFSET),
-                        0x87);
-                    volatile uint32_t *entry = (volatile uint32_t *)(tbl_phys + PAGE_OFFSET);
-                    uint32_t bsp_id = (lapic_read(0x020) >> 24) & 0xFF;
-                    entry[0] = 0xFEE00000 | (bsp_id << 12);
-                    entry[1] = 0;
-                    entry[2] = 0x30;  // vector
-                    entry[3] = 0;     // unmask
-                    // Set MSI-X Enable bit (bit 15 of Message Control)
-                    pci_config_write(bus, dev, func, cp + 2,
-                        (pci_config_read(bus, dev, func, cp + 2) & 0xFFFF0000) | 0x8000);
-                    MSI_ENABLED = 1;
-                }
-                break;
-            }
-            cp = (uint8_t)(pci_config_read(bus, dev, func, cp) >> 8);
-        }
-    }
-
-    uint8_t irq_gsi = MSI_ENABLED ? 16 : gsi;
-    register_irq(irq_gsi, NULL, &virtio_net_handler, 0,
+    // Register IRQ handler (INTx via IOAPIC, same pattern as torokernel)
+    register_irq(gsi, NULL, &virtio_net_handler, 0,
                  IRQF_TRIGGER_LEVEL, "virtio-net");
-    log_info("virtio-net: MAC %02x:%02x:%02x:%02x:%02x:%02x GSI=%u%s\n",
+    log_info("virtio-net: MAC %02x:%02x:%02x:%02x:%02x:%02x GSI=%u (INTx)\n",
              vnet.mac[0],vnet.mac[1],vnet.mac[2],vnet.mac[3],vnet.mac[4],vnet.mac[5],
-             irq_gsi, MSI_ENABLED ? " (MSI-X)" : " (INTx)");
+             gsi);
     return 0;
 }
+
 
 err_t virtio_netif_init(struct netif *netif) {
     vnet.netif_ptr = netif;

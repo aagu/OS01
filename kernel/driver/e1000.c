@@ -68,6 +68,45 @@ static int e1000_eeprom_read(uint8_t addr, uint16_t *out)
     return -1;
 }
 
+// ── Poll RX + buffered processing ──────────────────────────────
+// e1000_poll_rx: called from IRQ context (PIT handler) — copies packet
+//   to a static buffer.  e1000_process_rx: called from tcpip_thread
+//   context (via net_poll_rx) — delivers to lwIP via etharp_input.
+
+static uint8_t *e1000_rx_buf = NULL;
+static uint16_t e1000_rx_len = 0;
+
+void e1000_poll_rx(void) {
+    if (!e1000.initialized) return;
+    if (e1000_rx_buf != NULL) return;  // previous not yet processed
+    if (e1000.rx_descs[e1000.rx_tail].status & E1000_RXD_STAT_DD) {
+        uint16_t len = e1000.rx_descs[e1000.rx_tail].length;
+        if (len > 0 && len < 1600) {
+            uint8_t *buf = (uint8_t *)kmalloc(len);
+            if (buf) {
+                memcpy(buf, e1000.rx_bufs[e1000.rx_tail], len);
+                e1000_rx_buf = buf;
+                e1000_rx_len = len;
+            }
+        }
+        e1000.rx_descs[e1000.rx_tail].status = 0;
+        e1000.rx_tail = (e1000.rx_tail + 1) % E1000_NUM_RX_DESC;
+        e1000_write(E1000_REG_RDT, e1000.rx_tail);
+    }
+}
+
+void e1000_process_rx(void) {
+    if (!e1000.initialized || !e1000_rx_buf) return;
+    struct pbuf *p = pbuf_alloc(PBUF_RAW, e1000_rx_len, PBUF_POOL);
+    if (p) {
+        memcpy(p->payload, e1000_rx_buf, e1000_rx_len);
+        e1000.netif_ptr->input(p, e1000.netif_ptr);
+    }
+    kfree(e1000_rx_buf);
+    e1000_rx_buf = NULL;
+    e1000_rx_len = 0;
+}
+
 // ── Interrupt handler ──────────────────────────────────────────
 // Uses register_irq() — the same pattern as keyboard, serial, PIT.
 // The kernel has 16 pre-installed stubs (arch/x86_64/irq.c) for
@@ -147,10 +186,12 @@ err_t e1000_xmit(struct netif *netif, struct pbuf *p)
 // Sets hwaddr, hwaddr_len, mtu, flags, linkoutput.
 // The e1000 state is global (single NIC), so no void *arg needed.
 
+static err_t e1000_netif_input(struct pbuf *p, struct netif *n) { etharp_input(p, n); return ERR_OK; }
+
 err_t e1000_netif_init(struct netif *netif)
 {
     e1000.netif_ptr = netif;  // store for IRQ handler's tcpip_inpkt()
-    netif->input = tcpip_input;  // input function for received packets
+    netif->input = e1000_netif_input;  // inline etharp processing
     netif->hwaddr_len = 6;
     memcpy(netif->hwaddr, e1000.mac, 6);
     netif->mtu = 1500;
