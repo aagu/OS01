@@ -306,6 +306,8 @@ sys_thread_t sys_thread_new(const char *name,
         kfree(ctx);
         return 0;
     }
+    t->state = TASK_RUNNING;
+    t->counter = t->priority;
     (void)name_copy; return (sys_thread_t)(uintptr_t)t;
 }
 

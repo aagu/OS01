@@ -122,7 +122,7 @@ typedef struct {
 // ── Driver API ─────────────────────────────────────────────────
 #include "lwip/netif.h"  // for struct netif, struct pbuf, err_t
 
-int   e1000_init(uint64_t bar_phys, uint8_t irq, int use_msi);
+int   e1000_init(uint64_t bar_phys, uint8_t gsi, int use_msi);
 int   e1000_link_up(void);
 err_t e1000_xmit(struct netif *netif, struct pbuf *p);
 err_t e1000_netif_init(struct netif *netif);

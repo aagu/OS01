@@ -138,12 +138,13 @@ struct virtio_net_dev {
     uint32_t notify_off_mult;    // queue_notify_off multiplier
 
     uint8_t  mac[6];
-    uint8_t  irq;
+    uint8_t  gsi;
     uint32_t irq_vector;
 
     virtq_t  rx_vq;
     virtq_t  tx_vq;
 
+    uint8_t pci_bus, pci_dev, pci_func;
     struct netif *netif_ptr;     // set during netif_add
 
     // Buffer info
@@ -151,7 +152,7 @@ struct virtio_net_dev {
 };
 
 // ── Public API ──────────────────────────────────────────────────
-int   virtio_net_init(uint64_t bar_phys, uint8_t bus, uint8_t dev, uint8_t func);
+int   virtio_net_init(uint64_t bar_phys, uint8_t bus, uint8_t dev, uint8_t func, uint8_t gsi);
 err_t virtio_netif_init(struct netif *netif);
 void  virtio_net_poll_rx(void);
 

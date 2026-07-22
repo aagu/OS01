@@ -2,6 +2,7 @@
 // Uses LEGACY transport via BAR0 IO ports.
 // QEMU: -device virtio-net-pci,netdev=net0
 
+#include <lwip/etharp.h>
 #include <driver/virtio-net.h>
 #include <driver/pci.h>
 #include <kernel/debug.h>
@@ -9,10 +10,12 @@
 #include <kernel/pmm.h>
 #include <kernel/interrupt.h>
 #include <kernel/apic.h>
+#include <kernel/vmm.h>
 #include <string.h>
 
 #define VQ_SIZE         64
 #define RX_BUF_SIZE     2048
+#define VIRTIO_NET_HDR_SIZE 10
 
 // Legacy virtio register offsets (from BAR0 IO base)
 #define VIRTIO_LEGACY_HOST_FEATURES   0x00
@@ -25,7 +28,11 @@
 #define VIRTIO_LEGACY_ISR_STATUS      0x13
 
 static struct virtio_net_dev vnet;
-static uint16_t io_base;  // BAR0 IO port base
+static uint16_t io_base;
+
+// TX descriptor ring tracking
+static uint16_t tx_desc_head = 0;
+static uint16_t tx_desc_tail = 0;
 
 // IO port helpers
 static inline uint32_t vio_in32(uint16_t port) { uint32_t v; __asm__("inl %1, %0":"=a"(v):"Nd"(port)); return v; }
@@ -47,11 +54,8 @@ static uint8_t virtio_get_isr(void) {
     return vio_in8(io_base + VIRTIO_LEGACY_ISR_STATUS);
 }
 
-// Legacy virtqueue: descriptors + avail in one page, used in next page
-// Page layout: [desc 0..63] [avail ring] [padding to 4K] [used ring in next page]
 static int virtq_init_legacy(virtq_t *vq, uint16_t qsize) {
     vq->size = qsize;
-    // Allocate 2 contiguous pages (used ring must follow desc ring)
     struct Page *pages = alloc_pages(ZONE_NORMAL, 2, 0);
     if (!pages) return -1;
 
@@ -75,17 +79,23 @@ static void virtq_notify(virtq_t *vq, uint16_t qi) {
 static err_t virtio_xmit(struct netif *netif, struct pbuf *p) {
     (void)netif;
     virtq_t *vq = &vnet.tx_vq;
-    uint16_t total = sizeof(virtio_net_hdr_t) + p->tot_len;
 
+    uint16_t next_head = (tx_desc_head + 1) % VQ_SIZE;
+    if (next_head == tx_desc_tail) {
+        log_info("virtio: TX ring full\n");
+        return ERR_MEM;
+    }
+
+    uint16_t total = VIRTIO_NET_HDR_SIZE + p->tot_len;
     uint64_t buf_phys = alloc_4k_page();
     if (!buf_phys) return ERR_MEM;
     uint8_t *buf = (uint8_t*)Phy_To_Virt(buf_phys);
 
     virtio_net_hdr_t *hdr = (virtio_net_hdr_t*)buf;
-    memset(hdr, 0, sizeof(*hdr));
-    pbuf_copy_partial(p, buf + sizeof(*hdr), p->tot_len, 0);
+    memset(hdr, 0, VIRTIO_NET_HDR_SIZE);
+    pbuf_copy_partial(p, buf + VIRTIO_NET_HDR_SIZE, p->tot_len, 0);
 
-    uint16_t di = 0;
+    uint16_t di = tx_desc_head;
     vq->desc[di].addr  = buf_phys;
     vq->desc[di].len   = total;
     vq->desc[di].flags = 0;
@@ -94,39 +104,44 @@ static err_t virtio_xmit(struct netif *netif, struct pbuf *p) {
     vq->avail->ring[vq->avail->idx % vq->size] = di;
     __asm__ volatile("mfence":::"memory");
     vq->avail->idx++;
+    tx_desc_head = next_head;
+
+    log_info("virtio: TX len=%d desc=%u\n", total, di);
     virtq_notify(vq, VIRTIO_NET_TX_QUEUE);
-
-    while (vq->used->idx == vq->last_used_idx)
-        __asm__ volatile("pause");
-    vq->last_used_idx = vq->used->idx;
-
     virtio_net_poll_rx();
     return ERR_OK;
 }
 
-// RX poll
+// RX poll + TX completion
 void virtio_net_poll_rx(void) {
-    virtq_t *vq = &vnet.rx_vq;
-    while (vq->last_used_idx != vq->used->idx) {
-        virtq_used_elem_t *ue = &vq->used->ring[vq->last_used_idx % vq->size];
-        uint32_t di = ue->id, len = ue->len;
-        uint8_t *buf = (uint8_t*)Phy_To_Virt(vq->desc[di].addr);
-        uint32_t data_len = len - sizeof(virtio_net_hdr_t);
-        if (data_len > 0 && data_len < 1600 && vnet.netif_ptr) {
-            struct pbuf *pb = pbuf_alloc(PBUF_RAW, data_len, PBUF_POOL);
-            if (pb) {
-                pbuf_take(pb, buf + sizeof(virtio_net_hdr_t), data_len);
-                vnet.netif_ptr->input(pb, vnet.netif_ptr);
+    {
+        virtq_t *vq = &vnet.rx_vq;
+        while (vq->last_used_idx != vq->used->idx) {
+            virtq_used_elem_t *ue = &vq->used->ring[vq->last_used_idx % vq->size];
+            uint32_t di = ue->id, len = ue->len;
+            uint8_t *buf = (uint8_t*)Phy_To_Virt(vq->desc[di].addr);
+            uint32_t data_len = len - VIRTIO_NET_HDR_SIZE;
+            if (data_len > 0 && data_len < 1600 && vnet.netif_ptr) {
+                struct pbuf *pb = pbuf_alloc(PBUF_RAW, data_len, PBUF_POOL);
+                if (pb) {
+                    pbuf_take(pb, buf + VIRTIO_NET_HDR_SIZE, data_len);
+                    vnet.netif_ptr->input(pb, vnet.netif_ptr);
+                }
             }
+            vq->desc[di].len = RX_BUF_SIZE;
+            vq->desc[di].flags = VIRTQ_DESC_F_WRITE;
+            uint16_t ai = vq->avail->idx;
+            vq->avail->ring[ai % vq->size] = di;
+            __asm__ volatile("mfence":::"memory");
+            vq->avail->idx = ai + 1;
+            vq->last_used_idx++;
         }
-        // Re-submit
-        vq->desc[di].len = RX_BUF_SIZE;
-        vq->desc[di].flags = VIRTQ_DESC_F_WRITE;
-        uint16_t ai = vq->avail->idx;
-        vq->avail->ring[ai % vq->size] = di;
-        __asm__ volatile("mfence":::"memory");
-        vq->avail->idx = ai + 1;
-        vq->last_used_idx++;
+    }
+    {
+        virtq_t *vq = &vnet.tx_vq;
+        while (tx_desc_tail != vq->used->idx) {
+            tx_desc_tail = (tx_desc_tail + 1) % VQ_SIZE;
+        }
     }
 }
 
@@ -151,26 +166,24 @@ static int virtio_fill_rx(void) {
     for (int i = 0; i < VQ_SIZE; i++)
         vq->avail->ring[i] = i;
     vq->avail->idx = VQ_SIZE;
+    virtq_notify(vq, VIRTIO_NET_RX_QUEUE);
     return 0;
 }
 
-int virtio_net_init(uint64_t bar_phys, uint8_t bus, uint8_t dev, uint8_t func) {
-    // BAR0 is I/O port. bar_phys contains the base port in low 32 bits.
+int virtio_net_init(uint64_t bar_phys, uint8_t bus, uint8_t dev, uint8_t func, uint8_t gsi) {
     io_base = (uint16_t)(bar_phys & 0xFFFF);
+    vnet.pci_bus = bus; vnet.pci_dev = dev; vnet.pci_func = func;
+    vnet.gsi = gsi;
     log_info("virtio: IO port base=0x%x\n", io_base);
 
-    // Reset
     virtio_reset();
-
-    // ACKNOWLEDGE
     virtio_set_status(VIRTIO_STATUS_ACKNOWLEDGE);
     virtio_set_status(VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
 
-    // Feature negotiation (only 32-bit for legacy)
     uint32_t host_feat = vio_in32(io_base + VIRTIO_LEGACY_HOST_FEATURES);
     log_info("virtio: host features=0x%x\n", host_feat);
 
-    uint32_t guest_feat = (host_feat & VIRTIO_NET_F_MAC) | VIRTIO_NET_F_STATUS;
+    uint32_t guest_feat = host_feat & 0x7fffffff;
     if (!(host_feat & VIRTIO_NET_F_MAC)) {
         log_info("virtio: MAC feature not available!\n");
         return -1;
@@ -202,21 +215,53 @@ int virtio_net_init(uint64_t bar_phys, uint8_t bus, uint8_t dev, uint8_t func) {
     virtio_set_status(VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
                       VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK);
 
-    // Read MAC from device config (available via BAR0 after DRIVER_OK)
-    // For legacy, device config is at BAR0 + 0x14 (after legacy registers)
     for (int i = 0; i < 6; i++)
         vnet.mac[i] = vio_in8(io_base + 0x14 + i);
 
-    // Fill RX
     if (virtio_fill_rx()) { log_info("virtio: RX fill failed\n"); return -1; }
 
-    // IRQ
-    vnet.irq = pci_read_interrupt_line(bus, dev, func);
-    register_irq(0x20 + vnet.irq, NULL, &virtio_net_handler, 0,
-                 get_ioapic_controller(), "virtio-net");
+    // --- Try MSI-X first ---
+    int MSI_ENABLED = 0;
+    {
+        uint32_t cap_reg = pci_config_read(bus, dev, func, 0x34);
+        uint8_t cp = (uint8_t)(cap_reg & 0xFF);
+        while (cp) {
+            uint32_t dword = pci_config_read(bus, dev, func, cp);
+            if ((uint8_t)(dword & 0xFF) == 0x11) {  // MSI-X cap
+                uint32_t tr = pci_config_read(bus, dev, func, cp + 4);
+                uint8_t bir = (uint8_t)(tr & 0x7);
+                uint32_t tbl_off = tr & ~0x7U;
+                int m, b64;
+                uint64_t bar = pci_read_bar(bus, dev, func, bir, &m, &b64);
+                if (m) {
+                    uint64_t tbl_phys = bar + tbl_off;
+                    // Map the 2MB page containing the MSI-X table
+                    vmm_map_page(kernel_map, tbl_phys & ~0x1FFFFFULL,
+                        (uintptr_t)((tbl_phys & ~0x1FFFFFULL) + PAGE_OFFSET),
+                        0x87);
+                    volatile uint32_t *entry = (volatile uint32_t *)(tbl_phys + PAGE_OFFSET);
+                    uint32_t bsp_id = (lapic_read(0x020) >> 24) & 0xFF;
+                    entry[0] = 0xFEE00000 | (bsp_id << 12);
+                    entry[1] = 0;
+                    entry[2] = 0x30;  // vector
+                    entry[3] = 0;     // unmask
+                    // Set MSI-X Enable bit (bit 15 of Message Control)
+                    pci_config_write(bus, dev, func, cp + 2,
+                        (pci_config_read(bus, dev, func, cp + 2) & 0xFFFF0000) | 0x8000);
+                    MSI_ENABLED = 1;
+                }
+                break;
+            }
+            cp = (uint8_t)(pci_config_read(bus, dev, func, cp) >> 8);
+        }
+    }
 
-    log_info("virtio-net: MAC %02x:%02x:%02x:%02x:%02x:%02x IRQ=%d\n",
-             vnet.mac[0],vnet.mac[1],vnet.mac[2],vnet.mac[3],vnet.mac[4],vnet.mac[5],vnet.irq);
+    uint8_t irq_gsi = MSI_ENABLED ? 16 : gsi;
+    register_irq(irq_gsi, NULL, &virtio_net_handler, 0,
+                 IRQF_TRIGGER_LEVEL, "virtio-net");
+    log_info("virtio-net: MAC %02x:%02x:%02x:%02x:%02x:%02x GSI=%u%s\n",
+             vnet.mac[0],vnet.mac[1],vnet.mac[2],vnet.mac[3],vnet.mac[4],vnet.mac[5],
+             irq_gsi, MSI_ENABLED ? " (MSI-X)" : " (INTx)");
     return 0;
 }
 
@@ -225,7 +270,8 @@ err_t virtio_netif_init(struct netif *netif) {
     netif->hwaddr_len = 6;
     memcpy(netif->hwaddr, vnet.mac, 6);
     netif->mtu = 1500;
-    netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_LINK_UP;
+    netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_ETHERNET | NETIF_FLAG_LINK_UP;
     netif->linkoutput = virtio_xmit;
+    netif->output = etharp_output;
     return ERR_OK;
 }

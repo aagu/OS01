@@ -6,7 +6,8 @@
 #include <kernel/memory.h>    // Phy_To_Virt
 #include <kernel/interrupt.h> // register_irq
 #include <kernel/apic.h>      // lapic_eoi, get_ioapic_controller
-#include <kernel/log.h>       // log_info
+#include <kernel/log.h>
+#include <kernel/slab.h>       // log_info
 #include <string.h>
 #include "lwip/netif.h"
 #include "lwip/pbuf.h"
@@ -254,8 +255,8 @@ int e1000_init(uint64_t bar_phys, uint8_t irq, int use_msi)
     // The kernel pre-installs 16 stubs for vectors 0x20..0x2f that
     // dispatch through do_IRQ → irq_table[].  register_irq fills
     // irq_table[irq] with the handler and configures the IOAPIC.
-    register_irq(0x20 + irq, NULL, &e1000_handler, 0,
-                 get_ioapic_controller(), "e1000");
+    register_irq(irq, NULL, &e1000_handler, 0,
+                 IRQF_TRIGGER_LEVEL, "e1000");
 
     e1000.initialized = 1;
 

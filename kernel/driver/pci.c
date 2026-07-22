@@ -242,11 +242,78 @@ int pci_enable_msi(uint8_t bus, uint8_t dev, uint8_t func, uint8_t vector)
             // Enable MSI: set bit 0 of Message Control (bit 16 of dword)
             pci_config_write(bus, dev, func, cap_ptr, dword | (1 << 16));
 
-            log_info("PCI: MSI enabled for %d:%d.%d vector=0x%x (%d-bit)\n",
+                log_info("PCI: MSI enabled for %d:%d.%d vector=0x%x (%d-bit)\n",
                      bus, dev, func, vector, is_64 ? 64 : 32);
             return 0;
         }
         cap_ptr = (uint8_t)(dword >> 8);
+    }
+    return -1;
+}
+
+// ── MSI-X enable ──────────────────────────────────────────────
+// Finds the MSI-X capability, configures entry 0 with the given
+// vector, and enables MSI-X.  Bypasses IOAPIC entirely.
+// Returns 0 on success, -1 if no MSI-X capability found.
+int pci_enable_msix(uint8_t bus, uint8_t dev, uint8_t func, uint8_t vector)
+{
+    uint32_t cap_reg = pci_config_read(bus, dev, func, 0x34);
+    uint8_t cap_ptr = (uint8_t)(cap_reg & 0xFF);
+
+    if (cap_ptr == 0) {
+        log_info("PCI: %d:%d.%d no caps\n", bus, dev, func);
+    }
+
+    while (cap_ptr != 0) {
+        uint32_t dword = pci_config_read(bus, dev, func, cap_ptr);
+        uint8_t cap_id = (uint8_t)(dword & 0xFF);
+
+        if (cap_id == 0x11) {  // MSI-X capability
+            uint16_t msg_ctrl = (uint16_t)(dword >> 16);
+            uint32_t table_size = (msg_ctrl & 0x7FF) + 1;
+
+            // Read Table BIR and offset
+            uint32_t table_reg = pci_config_read(bus, dev, func, cap_ptr + 4);
+            uint8_t bir = (uint8_t)(table_reg & 0x7);
+            uint32_t tbl_off = table_reg & ~0x7U;
+
+            // Get BAR base address (must be MMIO)
+            int is_mmio, is_64bit;
+            uint64_t bar_phys = pci_read_bar(bus, dev, func, bir, &is_mmio, &is_64bit);
+            if (!is_mmio) {
+                log_info("PCI: %d:%d.%d MSI-X table BAR is not MMIO\n", bus, dev, func);
+                return -1;
+            }
+
+            // BSP LAPIC ID for MSI-X destination
+            extern uint32_t lapic_read(uint32_t offset);
+            uint32_t bsp_lapic_id = (lapic_read(0x020) >> 24) & 0xFF;
+
+            // Map the MSI-X table for CPU access
+            uint64_t table_phys = bar_phys + tbl_off;
+            uint64_t page_base = table_phys & 0xFFFFFFFFFFE00000ULL; // 2MB align
+
+            
+            // Use the identity-mapped page table - table is within the first 32MB
+            // which is already identity-mapped by the kernel, so no explicit map needed.
+
+            volatile uint32_t *entry = (volatile uint32_t *)(table_phys + 0xFFFF800000000000ULL);
+
+            // Configure entry 0 (we use the first vector)
+            entry[0] = 0xFEE00000 | (bsp_lapic_id << 12);  // Message Address
+            entry[1] = 0;                                    // Upper Address = 0
+            entry[2] = (uint32_t)vector;                     // Message Data
+            entry[3] = 0;                                    // Unmask
+
+            // Enable MSI-X: set bit 15 of Message Control
+            pci_config_write(bus, dev, func, cap_ptr + 2,
+                             (pci_config_read(bus, dev, func, cap_ptr + 2) & 0xFFFF0000) | 0x8000);
+
+            log_info("PCI: MSI-X enabled for %d:%d.%d vector=0x%x (table_size=%u bir=%u tbl_off=%#x)\n",
+                     bus, dev, func, vector, (unsigned)table_size, bir, tbl_off);
+            return 0;
+        }
+        cap_ptr = (uint8_t)(pci_config_read(bus, dev, func, cap_ptr) >> 8);
     }
     return -1;
 }

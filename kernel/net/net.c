@@ -24,8 +24,10 @@
 // ── Static state ───────────────────────────────────────────────
 int   net_hw_ok = 0;
 int   is_virtio = 0;       // 1 = virtio-net, 0 = e1000
-static uint8_t  nic_irq = 0;
+static uint8_t  nic_gsi = 0;
 static uint64_t nic_bar = 0;
+// Forward declaration
+extern void e1000_process_rx(void);
 static uint8_t  nic_bus = 0;      // for virtio init
 static uint8_t  nic_dev = 0;
 static uint8_t  nic_func = 0;
@@ -54,7 +56,7 @@ int net_hw_init(void)
     nic_bar = pci_read_bar(bus, dev, func, 0, &is_mmio, &is_64bit);
     pci_enable_bus_mastering(bus, dev, func);
     pci_enable_mmio(bus, dev, func);
-    nic_irq = pci_read_interrupt_line(bus, dev, func);
+    nic_gsi = pci_get_gsi(bus, dev, func);
     nic_bus = bus;
     nic_dev = dev;
     nic_func = func;
@@ -64,14 +66,14 @@ int net_hw_init(void)
         is_virtio = 1;
         log_info("net: VirtIO-net NIC found (vendor=0x%x device=0x%x)\n",
                  vendor, device);
-        if (virtio_net_init(nic_bar, bus, dev, func) != 0) {
+        if (virtio_net_init(nic_bar, bus, dev, func, nic_gsi) != 0) {
             debug_block("net: virtio-net init failed\n");
             return -EIO;
         }
     } else {
         // Assume e1000 (0x8086:0x100E or similar)
         is_virtio = 0;
-        if (e1000_init(nic_bar, nic_irq, 0) != 0) {
+        if (e1000_init(nic_bar, nic_gsi, 0) != 0) {
             debug_block("net: e1000 init failed\n");
             return -EIO;
         }
@@ -87,6 +89,10 @@ void net_poll_rx(void)
     if (!net_hw_ok) return;
     if (is_virtio)
         virtio_net_poll_rx();
+    else {
+        e1000_poll_rx();         // IRQ context: just buffer the packet
+        e1000_process_rx();      // tcpip_thread context: process buffered packet
+    }
 }
 
 // ── Stage B: lwIP stack init (post-SMP, pre-task_init) ────────

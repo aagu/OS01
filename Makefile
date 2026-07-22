@@ -168,6 +168,7 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 	@cp build/x86_64/user/smp_stress.elf     config/fsroot/bin/smp_stress
 	@cp $(INITTAB_FILE) config/fsroot/etc/inittab
 	@cp build/x86_64/user/socktest.elf      config/fsroot/bin/socktest
+	@cp build/x86_64/user/ipaddr.elf        config/fsroot/bin/ipaddr
 	@ln -sf busybox config/fsroot/bin/wget
 	@ln -sf busybox config/fsroot/bin/login
 	@ln -sf busybox config/fsroot/bin/sh
@@ -219,6 +220,14 @@ run-kvm: disk.img boot/uefi/OVMF.fd
 	  -drive file=disk.img,format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio -no-reboot
+
+# ── VirtIO-net test ──────────────────────────────────────
+run-virtio: disk.img boot/uefi/OVMF.fd
+	$(QEMU_BIN) -M q35 -smp 2 -pflash boot/uefi/OVMF.fd \
+	  -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
+	  -drive file=disk.img,format=raw,if=none,id=disk \
+	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
+	  -m $(MEMORY) -display $(DISPLAY) -serial stdio
 
 debug: disk.img boot/uefi/OVMF.fd
 	$(QEMU_BIN) -M q35 -smp 2 -pflash boot/uefi/OVMF.fd \

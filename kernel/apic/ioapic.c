@@ -120,11 +120,12 @@ static void ioapic_enable(uint64_t nr)
 
     ioapic_entry_t *ioapic = &apic_info.ioapics[idx];
 
-    // Determine polarity and trigger from ISO overrides
-    uint32_t low_flags = 0;
-    uint8_t iso_pol = ISO_POLARITY_CONF_BUS;
-    uint8_t iso_trig = ISO_TRIGGER_CONF_BUS;
+    // ── Determine trigger mode ────────────────────────────────
+    // Priority: ISO override > device flags > GSI-range defaults
+    uint8_t iso_trig = ISO_TRIGGER_CONF_BUS;  // "not specified"
+    uint8_t iso_pol  = ISO_POLARITY_CONF_BUS;
 
+    // 1. Check ISO overrides (for ISA IRQ → GSI mappings)
     for (uint32_t i = 0; i < apic_info.iso_count; i++) {
         if (apic_info.isos[i].irq_source == isa_irq) {
             iso_pol  = apic_info.isos[i].flags & ISO_POLARITY_MASK;
@@ -133,52 +134,60 @@ static void ioapic_enable(uint64_t nr)
         }
     }
 
-    // Polarity — only override when ISO explicitly says active-low.
-    if (iso_pol == ISO_POLARITY_ACTIVE_LOW)
-        low_flags |= IOAPIC_RED_POL_LOW;
-
-    // Trigger mode — only override when ISO explicitly says level-triggered.
+    // 2. Determine trigger: ISO first, then device flags, then defaults
+    uint32_t use_level = 0;
     if (iso_trig == ISO_TRIGGER_LEVEL)
+        use_level = 1;
+    else if (iso_trig == ISO_TRIGGER_EDGE)
+        use_level = 0;
+    else {
+        // ISO says "conforms to bus" or not present — check device flags
+        irq_desc_t *desc = &irq_table[nr - 32];
+        if (desc->flags & IRQF_TRIGGER_LEVEL)
+            use_level = 1;
+        else if (desc->flags & IRQF_TRIGGER_EDGE)
+            use_level = 0;
+        else
+            // No hint from device either — use GSI-range defaults
+            use_level = (irq_trigger_for_gsi(gsi) == ISO_TRIGGER_LEVEL);
+    }
+
+    // 3. Determine polarity: ISO first, then GSI-range defaults
+    uint32_t active_low = 0;
+    if (iso_pol == ISO_POLARITY_ACTIVE_LOW)
+        active_low = 1;
+    else if (iso_pol == ISO_POLARITY_ACTIVE_HIGH)
+        active_low = 0;
+    else
+        // ISA: active-high, PCI (GSI ≥ 16): active-low (INTx#)
+        active_low = (gsi >= 16);
+
+    // ── Build redirection entry ──────────────────────────────
+    uint32_t low_flags = 0;
+
+    if (active_low)
+        low_flags |= IOAPIC_RED_POL_LOW;
+    if (use_level)
         low_flags |= IOAPIC_RED_TRIG_LEVEL;
 
     // Vector number = IRQ vector (0x20 + isa_irq), physical destination mode
     uint32_t vector = (uint32_t)nr;
-    low_flags |= vector;   // bits 0-7: interrupt vector
-    low_flags |= IOAPIC_RED_DEL_FIXED;    // fixed delivery mode (value 0)
+    low_flags |= vector;
+    low_flags |= IOAPIC_RED_DEL_FIXED;
 
     // Destination: route to BSP (physical destination mode).
-    // Read the actual LAPIC ID from hardware — APIC ID 0 is not
-    // guaranteed, especially on x2APIC or non-standard topologies.
     uint32_t bsp_lapic_id = (lapic_read(LAPIC_ID) >> 24) & 0xFF;
     uint32_t high = bsp_lapic_id << 24;
-
-    // ── Force level-triggered for serial (ISA IRQ4) ────────
-    // The 16550 UART keeps its IRQ line asserted as long as data
-    // is in the RX FIFO.  In edge-triggered mode, rapid burst input
-    // causes the IOAPIC to miss the rising edge (the line stays
-    // high from FIFO backlog), dropping interrupts and losing bytes.
-    // Level-triggered mode delivers a new interrupt on each EOI
-    // cycle as long as the line stays asserted, matching the UART's
-    // actual signalling behaviour.
-    if (isa_irq == 4)
-        low_flags |= IOAPIC_RED_TRIG_LEVEL;
-
-    // ── Edge-triggered for PCI GSIs (Q35 workaround) ────
-    // PCI INTx is nominally level-sensitive, but on QEMU Q35
-    // the IOAPIC pin for GSIs >= 16 never fires in level-triggered
-    // mode (RIRR stays 0).  Edge-triggered works on the PIT
-    // (IOAPIC pin 2) and keyboard (pin 1).  Try edge-triggered
-    // for PCI devices — the INTx# deassertion after the handler
-    // clears the condition via ICS re-read will provide a clean
-    // rising edge for the next interrupt.
-    // (No force-level for gsi >= 16 — keep edge unless ISO says otherwise)
 
     // Write the redirection entries
     ioapic_write_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(redir) + 1, high);
     ioapic_write_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(redir), low_flags);
 
-    debug_irq("IOAPIC: enable IRQ %u (GSI %u, redir %u) → vector %#x, dest=%#x, low=%#x\n",
-                  (unsigned)nr, gsi, redir, (unsigned)vector, bsp_lapic_id, low_flags);
+    debug_irq("IOAPIC: enable IRQ %u (GSI %u, redir %u) → vector %#x trig=%s pol=%s dest=%#x low=%#x\n",
+                  (unsigned)nr, gsi, redir, (unsigned)vector,
+                  use_level ? "level" : "edge",
+                  active_low ? "lo" : "hi",
+                  bsp_lapic_id, low_flags);
 }
 
 static void ioapic_disable(uint64_t nr)

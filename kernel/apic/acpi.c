@@ -105,6 +105,9 @@ struct MADT_HEADER {
 
 apic_info_t apic_info;
 
+// MADT Flags stored during parsing (for trigger mode decisions)
+static uint32_t madt_flags = 0;
+
 // ──────────────────────────────────────────────
 //  Helpers
 // ──────────────────────────────────────────────
@@ -144,6 +147,7 @@ static void ensure_mapped(uint64_t phys_addr)
 static void parse_madt(struct MADT_HEADER *madt)
 {
     apic_info.lapic_base = madt->LocalApicAddress;
+    madt_flags = madt->Flags;  // cache for apic_madt_flags()
     uint32_t table_length = madt->sdt.Length;
     uint8_t *ptr = (uint8_t *)madt + sizeof(struct MADT_HEADER);
     uint8_t *end = (uint8_t *)madt + table_length;
@@ -351,4 +355,44 @@ uint32_t isa_irq_to_gsi(uint8_t isa_irq)
     }
     // Default: ISA IRQ N → GSI N
     return isa_irq;
+}
+
+// ──────────────────────────────────────────────
+//  MADT Flags accessor
+// ──────────────────────────────────────────────
+
+uint32_t apic_madt_flags(void)
+{
+    return madt_flags;
+}
+
+// ──────────────────────────────────────────────
+//  Trigger mode recommendation for a GSI
+// ──────────────────────────────────────────────
+
+uint8_t irq_trigger_for_gsi(uint32_t gsi)
+{
+    // 1. Check ISO overrides first (highest priority)
+    for (uint32_t i = 0; i < apic_info.iso_count; i++) {
+        if (apic_info.isos[i].gsi == gsi) {
+            uint8_t trig = apic_info.isos[i].flags & ISO_TRIGGER_MASK;
+            if (trig == ISO_TRIGGER_EDGE || trig == ISO_TRIGGER_LEVEL)
+                return trig;
+            // ISO_TRIGGER_CONF_BUS → fall through to defaults
+            break;
+        }
+    }
+
+    // 2. GSI-range defaults
+    if (gsi < 16) {
+        // ISA IRQs: edge-triggered (ISA bus convention).
+        // Exception: serial IRQ4 — the UART asserts its line until
+        // the RX FIFO is drained, requiring level-triggered mode.
+        if (gsi == 4)
+            return ISO_TRIGGER_LEVEL;
+        return ISO_TRIGGER_EDGE;
+    }
+
+    // PCI INTx (GSI 16+): level-triggered active-low per PCI spec §6.2.4
+    return ISO_TRIGGER_LEVEL;
 }

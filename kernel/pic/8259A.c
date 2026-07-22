@@ -103,3 +103,19 @@ void pic_ack(uint64_t nr)
         outb(SLAVE_OCW3, 0x20);
     outb(MASTER_OCW3, 0x20);
 }
+
+// ── Global PIC controller instance ──────────────────────────
+// Shared fallback for ISA IRQs when IOAPIC is unavailable.
+
+static hw_int_controller_t pic_controller = {
+    .enable    = pic_enable,
+    .disable   = pic_disable,
+    .install   = pic_install,
+    .uninstall = pic_uninstall,
+    .ack       = pic_ack,
+};
+
+hw_int_controller_t *get_pic_controller(void)
+{
+    return &pic_controller;
+}

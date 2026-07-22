@@ -1,7 +1,6 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <driver/keyboard.h>
-#include <device/pic.h>
 #include <kernel/apic.h>
 #include <kernel/interrupt.h>
 #include <kernel/debug.h>
@@ -10,15 +9,6 @@
 #include <kernel/arch/cpu.h>
 #include <kernel/arch/spinlock.h>
 #include <fs/vfs.h>
-
-hw_int_controller_t keyboard_controller =
-{
-    .enable = pic_enable,
-    .disable = pic_disable,
-    .install = pic_install,
-    .uninstall = pic_uninstall,
-    .ack = pic_ack,
-};
 
 // ═══════════════════════════════════════════════════════════
 //  Raw scancode ring buffer — used only by /dev/keyboard
@@ -380,8 +370,5 @@ void keyboard_init(void)
 
     keyboard_enable_irq();
 
-    hw_int_controller_t *ctrl = apic_available()
-        ? get_ioapic_controller()
-        : &keyboard_controller;
-    register_irq(0x21, NULL, &keyboard_handler, 0, ctrl, "keyboard");
+    register_irq(1, NULL, &keyboard_handler, 0, IRQF_TRIGGER_EDGE, "keyboard");
 }
