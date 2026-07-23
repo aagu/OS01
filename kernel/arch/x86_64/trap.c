@@ -28,6 +28,7 @@ typedef int pid_t;
 #include <kernel/debug.h>
 #include <kernel/file.h>
 #include <kernel/poll.h>     // struct pollfd, do_poll()
+#include <kernel/select.h>   // sigset_t, do_select(), do_pselect6()
 #include <device/timer.h>
 #include <uapi/time.h>
 #include <kernel.h>
@@ -39,7 +40,6 @@ typedef int pid_t;
 #define SIG_BLOCK    0
 #define SIG_UNBLOCK  1
 #define SIG_SETMASK  2
-typedef unsigned long sigset_t;
 #endif
 
 // ── User address translation ─────────────────────────────────
@@ -909,6 +909,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         [48] = "poll",
         [49] = "ppoll",
         [50] = "select",
+        [51] = "pselect6",
     };
     const char *sname = (regs->rax < 64 && syscall_names[regs->rax])
                         ? syscall_names[regs->rax] : "?";
@@ -2089,7 +2090,16 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         break;
     }
     case SYS_select: {
-        regs->rax = -ENOSYS;
+        regs->rax = do_select((int)regs->rdi,
+                              (void *)regs->rsi, (void *)regs->rdx,
+                              (void *)regs->r10, (void *)regs->r8);
+        break;
+    }
+    case SYS_pselect6: {
+        regs->rax = do_pselect6((int)regs->rdi,
+                                (void *)regs->rsi, (void *)regs->rdx,
+                                (void *)regs->r10, (void *)regs->r8,
+                                (const void *)regs->r9);
         break;
     }
     default:

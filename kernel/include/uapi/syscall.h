@@ -71,6 +71,7 @@
 #define SYS_poll         48
 #define SYS_ppoll        49
 #define SYS_select       50
+#define SYS_pselect6     51
 
 // ── reboot(2) commands ──────────────────────────────────────
 #define RB_AUTOBOOT    0x01234567
