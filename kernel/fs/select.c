@@ -285,6 +285,7 @@ int64_t do_pselect6(int nfds, void *readfds, void *writefds,
     uint64_t old_blocked = 0;
     bool     mask_swapped = false;
     int64_t  ret = 0;
+    kernel_fd_set kr = {0}, kw = {0}, ke = {0};
 
     if (sigmask_ptr) {
         old_blocked = current->blocked;
@@ -323,10 +324,7 @@ int64_t do_pselect6(int nfds, void *readfds, void *writefds,
                    + (kts.tv_nsec + 999999) / 1000000);
 
 after_timeout:
-    ;   // empty statement to avoid "label followed by declaration" warning
-
     // ── Copy fd_sets from user space (NULL → skip) ──────────
-    kernel_fd_set kr = {0}, kw = {0}, ke = {0};
 
     if (readfds) {
         if ((uint64_t)readfds + sizeof(kernel_fd_set) > current->addr_limit) {
