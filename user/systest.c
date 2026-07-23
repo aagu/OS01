@@ -11,6 +11,7 @@
 #include <sys/syscall.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/select.h>
 #include <sys/times.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
@@ -655,6 +656,252 @@ static void test_ext2_write(void)
     unlink(fname);
 }
 
+// ── select/pselect tests ──────────────────────────────
+
+static int64_t time_ms(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (int64_t)tv.tv_sec * 1000 + (int64_t)tv.tv_usec / 1000;
+}
+
+static void test_select_basic(void)
+{
+    int fds[2];
+    if (pipe(fds) < 0) { FAIL("select_basic", "pipe failed"); return; }
+
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(fds[0], &rfds);
+
+    // Empty pipe → timeout 0 returns 0
+    struct timeval tv = {0, 0};
+    int ret = select(fds[0] + 1, &rfds, NULL, NULL, &tv);
+    CHECK3(ret == 0, "select_basic", "empty pipe timeout=0 returns 0");
+    CHECK3(!FD_ISSET(fds[0], &rfds), "select_basic", "fd not set after timeout");
+
+    // Write data → readable
+    write(fds[1], "x", 1);
+    FD_ZERO(&rfds);
+    FD_SET(fds[0], &rfds);
+    tv.tv_sec = 0; tv.tv_usec = 0;
+    ret = select(fds[0] + 1, &rfds, NULL, NULL, &tv);
+    CHECK3(ret == 1 && FD_ISSET(fds[0], &rfds), "select_basic", "pipe with data readable");
+
+    // Read data → empty again
+    char c;
+    read(fds[0], &c, 1);
+    FD_ZERO(&rfds);
+    FD_SET(fds[0], &rfds);
+    tv.tv_sec = 0; tv.tv_usec = 0;
+    ret = select(fds[0] + 1, &rfds, NULL, NULL, &tv);
+    CHECK3(ret == 0 && !FD_ISSET(fds[0], &rfds), "select_basic", "empty after read");
+
+    close(fds[0]); close(fds[1]);
+}
+
+static void test_select_write(void)
+{
+    int fds[2];
+    if (pipe(fds) < 0) { FAIL("select_write", "pipe failed"); return; }
+
+    // Empty pipe → writable
+    fd_set wfds;
+    FD_ZERO(&wfds);
+    FD_SET(fds[1], &wfds);
+    struct timeval tv = {0, 0};
+    int ret = select(fds[1] + 1, NULL, &wfds, NULL, &tv);
+    CHECK3(ret == 1 && FD_ISSET(fds[1], &wfds), "select_write", "empty pipe writable");
+
+    // Fill pipe until full (non-blocking)
+    int flags = fcntl(fds[1], F_GETFL, 0);
+    fcntl(fds[1], F_SETFL, flags | O_NONBLOCK);
+    char buf[4096];
+    memset(buf, 'x', sizeof(buf));
+    while (write(fds[1], buf, sizeof(buf)) > 0) {}
+    fcntl(fds[1], F_SETFL, flags);
+
+    // Full pipe → not writable
+    FD_ZERO(&wfds);
+    FD_SET(fds[1], &wfds);
+    tv.tv_sec = 0; tv.tv_usec = 0;
+    ret = select(fds[1] + 1, NULL, &wfds, NULL, &tv);
+    CHECK3(ret == 0 && !FD_ISSET(fds[1], &wfds), "select_write", "full pipe not writable");
+
+    close(fds[0]); close(fds[1]);
+}
+
+static void test_select_timeout(void)
+{
+    int64_t t1 = time_ms();
+    struct timeval tv = {0, 50000}; // 50ms
+    int ret = select(0, NULL, NULL, NULL, &tv);
+    int64_t elapsed = time_ms() - t1;
+    CHECK3(ret == 0, "select_timeout", "returns 0");
+    CHECKF(elapsed >= 30 && elapsed <= 70, "select_timeout",
+           "~50ms", "got %ldms", (long)elapsed);
+}
+
+static void test_select_null_timeout(void)
+{
+    int fds[2];
+    if (pipe(fds) < 0) { FAIL("select_null_timeout", "pipe failed"); return; }
+
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("select_null_timeout", "fork failed"); close(fds[0]); close(fds[1]); return; }
+
+    if (pid == 0) {
+        close(fds[0]);
+        struct timespec ts = {0, 30000000};
+        nanosleep(&ts, NULL);
+        write(fds[1], "x", 1);
+        close(fds[1]);
+        _exit(0);
+    }
+
+    close(fds[1]);
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(fds[0], &rfds);
+    int ret = select(fds[0] + 1, &rfds, NULL, NULL, NULL);
+
+    int status;
+    waitpid(pid, &status, 0);
+    close(fds[0]);
+
+    CHECK3(ret == 1 && FD_ISSET(fds[0], &rfds), "select_null_timeout",
+           "blocking select returned 1");
+}
+
+static void test_select_multifd(void)
+{
+    int p1[2], p2[2], p3[2];
+    if (pipe(p1) < 0 || pipe(p2) < 0 || pipe(p3) < 0) {
+        FAIL("select_multifd", "pipe alloc failed"); return;
+    }
+
+    write(p3[1], "data", 4);
+
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(p1[0], &rfds);
+    FD_SET(p2[0], &rfds);
+    FD_SET(p3[0], &rfds);
+
+    int maxfd = p1[0];
+    if (p2[0] > maxfd) maxfd = p2[0];
+    if (p3[0] > maxfd) maxfd = p3[0];
+    maxfd++;
+
+    struct timeval tv = {0, 0};
+    int ret = select(maxfd, &rfds, NULL, NULL, &tv);
+
+    CHECK3(ret == 1, "select_multifd", "only 1 ready");
+    CHECK3(!FD_ISSET(p1[0], &rfds), "select_multifd", "pipe1 not set");
+    CHECK3(!FD_ISSET(p2[0], &rfds), "select_multifd", "pipe2 not set");
+    CHECK3(FD_ISSET(p3[0], &rfds), "select_multifd", "pipe3 set");
+
+    char c;
+    read(p3[0], &c, 4);
+    close(p1[0]); close(p1[1]);
+    close(p2[0]); close(p2[1]);
+    close(p3[0]); close(p3[1]);
+}
+
+static void test_select_zero_timeout(void)
+{
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    struct timeval tv = {0, 0};
+    int ret = select(0, &rfds, NULL, NULL, &tv);
+    CHECK3(ret == 0, "select_zero_timeout", "returns 0");
+}
+
+static void test_select_sleep(void)
+{
+    int64_t t1 = time_ms();
+    struct timeval tv = {0, 50000};
+    int ret = select(0, NULL, NULL, NULL, &tv);
+    int64_t elapsed = time_ms() - t1;
+    CHECK3(ret == 0, "select_sleep", "returns 0");
+    CHECKF(elapsed >= 30 && elapsed <= 70, "select_sleep",
+           "~50ms", "got %ldms", (long)elapsed);
+}
+
+static void test_pselect_sleep(void)
+{
+    int64_t t1 = time_ms();
+    struct timespec ts = {0, 50000000};
+    int ret = pselect(0, NULL, NULL, NULL, &ts, NULL);
+    int64_t elapsed = time_ms() - t1;
+    CHECK3(ret == 0, "pselect_sleep", "returns 0");
+    CHECKF(elapsed >= 30 && elapsed <= 70, "pselect_sleep",
+           "~50ms", "got %ldms", (long)elapsed);
+}
+
+static void test_select_invalid_fd(void)
+{
+    int tmp_fds[2];
+    if (pipe(tmp_fds) < 0) { FAIL("select_invalid_fd", "pipe failed"); return; }
+    int bad_fd = tmp_fds[0];
+    close(tmp_fds[0]); close(tmp_fds[1]);
+
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(bad_fd, &rfds);
+
+    struct timeval tv = {0, 0};
+    int ret = select(bad_fd + 1, &rfds, NULL, NULL, &tv);
+
+    if (ret > 0)
+        CHECK3(!FD_ISSET(bad_fd, &rfds), "select_invalid_fd", "bad fd not set (ret>0)");
+    else if (ret == -1 && errno == EBADF)
+        PASS("select_invalid_fd", "returns -1/EBADF");
+    else
+        FAIL("select_invalid_fd", "unexpected ret=%d errno=%d", ret, errno);
+}
+
+static void test_pselect_null_sigmask(void)
+{
+    int fds[2];
+    if (pipe(fds) < 0) { FAIL("pselect_null_sigmask", "pipe failed"); return; }
+
+    write(fds[1], "x", 1);
+
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(fds[0], &rfds);
+
+    struct timespec ts = {0, 0};
+    int ret = pselect(fds[0] + 1, &rfds, NULL, NULL, &ts, NULL);
+
+    CHECK3(ret == 1 && FD_ISSET(fds[0], &rfds), "pselect_null_sigmask",
+           "returns 1 with data");
+
+    close(fds[0]); close(fds[1]);
+}
+
+static void test_pselect_bad_ss_len(void)
+{
+    sigset_t dummy;
+    struct {
+        const sigset_t *ss;
+        size_t          ss_len;
+    } bad = { &dummy, 999 };
+
+    errno = 0;
+    int64_t ret = syscall6(SYS_pselect6,
+                           (uint64_t)0,
+                           (uint64_t)0,
+                           (uint64_t)0,
+                           (uint64_t)0,
+                           (uint64_t)0,
+                           (uint64_t)&bad);
+
+    CHECK3(ret == -1 && errno == EINVAL, "pselect_bad_ss_len",
+           "returns -1 EINVAL");
+}
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
@@ -695,6 +942,17 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"ext2_write",        test_ext2_write},
     // {"pipe+dup2",         test_pipe_dup2_inherit},
     {"reboot",            test_reboot_skip},
+    {"select_basic",        test_select_basic},
+    {"select_write",        test_select_write},
+    {"select_timeout",      test_select_timeout},
+    {"select_null_timeout", test_select_null_timeout},
+    {"select_multifd",      test_select_multifd},
+    {"select_zero_timeout", test_select_zero_timeout},
+    {"select_sleep",        test_select_sleep},
+    {"pselect_sleep",       test_pselect_sleep},
+    {"select_invalid_fd",   test_select_invalid_fd},
+    {"pselect_null_sigmask", test_pselect_null_sigmask},
+    {"pselect_bad_ss_len",  test_pselect_bad_ss_len},
 };
 
 int main(void)
