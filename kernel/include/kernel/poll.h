@@ -95,4 +95,10 @@ uint32_t fd_poll(struct file *f, struct poll_table *pt);
 // do_poll — poll(2) syscall implementation.
 int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout);
 
+// do_poll_core — core polling loop (no user memory access).
+// Caller provides kfds and pt (already setup via poll_table_setup).
+// Caller is responsible for poll_table_destroy (not called inside).
+// Returns: ready count (>=0), -EINTR, -ENOMEM.
+int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, poll_table_t *pt);
+
 #endif // _KERNEL_POLL_H

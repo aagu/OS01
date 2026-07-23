@@ -195,48 +195,28 @@ uint32_t fd_poll(file_t *f, poll_table_t *pt)
 wait_queue_t *current_poll_wq = NULL;
 uint64_t poll_deadline_jiffies = 0;
 
-int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val)
+// ── do_poll_core — core polling loop (no user memory access) ──
+// Caller provides kfds and pt (already setup via poll_table_setup).
+// Caller is responsible for poll_table_destroy.
+// Returns: ready count (>=0), or -EINTR.
+
+int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, poll_table_t *pt)
 {
-    // ── Validate user pointer ──────────────────────────────
-    if ((uint64_t)user_fds >= current->addr_limit)
-        return -EFAULT;
-    if (nfds == 0)
-        return 0;
-    if (nfds > POLL_MAX_FDS)
-        return -EINVAL;
-
-    // ── Copy pollfd from user space ────────────────────────
-    struct pollfd kfds[POLL_MAX_FDS];
-    for (uint32_t i = 0; i < nfds; i++) {
-        kfds[i].fd      = user_fds[i].fd;
-        kfds[i].events  = user_fds[i].events;
-        kfds[i].revents = 0;
-    }
-
-    // ── Signal check: any unblocked pending signal → EINTR ─
-    if (current->signal & ~current->blocked)
-        return -EINTR;
-
-    // ── Setup poll table (dynamic entries allocation) ─────────
-    poll_table_t pt;
-    if (poll_table_setup(&pt, nfds) < 0)
-        return -ENOMEM;
-
     // ── Timeout setup ──────────────────────────────────────
     uint64_t deadline = 0;
     if (timeout_val > 0) {
         // Convert ms to PIT ticks (100 Hz → 10 ms/tick)
-        int ticks = (timeout_val + 9) / 10;
+        int64_t ticks = (timeout_val + 9) / 10;
         if (ticks < 1) ticks = 1;
         poll_deadline_jiffies = jiffies + (uint64_t)ticks;
         deadline = poll_deadline_jiffies;
-        current_poll_wq = &pt.wq;
+        current_poll_wq = &pt->wq;
     }
 
     int ready_count = 0;
 
     for (;;) {
-        poll_table_init(&pt);  // reset nent=0, triggered=false
+        poll_table_init(pt);  // reset nent=0, triggered=false
 
         // ── Scan all fds ──────────────────────────────────
         for (uint32_t i = 0; i < nfds; i++) {
@@ -249,7 +229,7 @@ int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val)
                 continue;
             }
 
-            uint32_t revents = fd_poll(f, &pt);
+            uint32_t revents = fd_poll(f, pt);
             // fd is ready if it matches requested events OR has error/HUP
             if ((revents & kfds[i].events) || (revents & (POLLHUP | POLLERR))) {
                 // Mask to requested events, but always include POLLHUP/POLLERR
@@ -257,57 +237,101 @@ int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val)
                 kfds[i].revents = (revents & kfds[i].events)
                                 | (revents & (POLLHUP | POLLERR | POLLNVAL));
                 ready_count++;
-                pt.triggered = true;
+                pt->triggered = true;
             }
         }
 
         // ── Ready? Return ─────────────────────────────────
         if (ready_count > 0) {
-            poll_table_cleanup(&pt);
-            if (timeout_val > 0) current_poll_wq = NULL;  // prevent dangling ptr
+            poll_table_cleanup(pt);
+            if (timeout_val > 0) current_poll_wq = NULL;
             break;
         }
 
         // ── Non-blocking? ─────────────────────────────────
         if (timeout_val == 0) {
-            poll_table_cleanup(&pt);
+            poll_table_cleanup(pt);
             break;
         }
 
         // ── Pre-sleep signal check ────────────────────────
         if (current->signal & ~current->blocked) {
-            poll_table_cleanup(&pt);
+            poll_table_cleanup(pt);
             if (timeout_val > 0) current_poll_wq = NULL;
-            poll_table_destroy(&pt);
             return -EINTR;
         }
 
         // ── Block on pt.wq ────────────────────────────────
-        wait_queue_sleep(&pt.wq);
+        wait_queue_sleep(&pt->wq);
 
         // Woken up — remove entries from fd poll lists
         if (timeout_val > 0) current_poll_wq = NULL;
-        poll_table_cleanup(&pt);
+        poll_table_cleanup(pt);
 
         // ── Timeout check ─────────────────────────────────
         if (timeout_val > 0 && jiffies >= deadline) {
-            poll_table_destroy(&pt);
             return 0;
         }
 
         // ── Post-sleep signal check ───────────────────────
         if (current->signal & ~current->blocked) {
-            poll_table_destroy(&pt);
             return -EINTR;
         }
 
         ready_count = 0;
     }
 
-    // ── Copy revents back to user space ────────────────────
-    for (uint32_t i = 0; i < nfds; i++)
-        user_fds[i].revents = kfds[i].revents;
-
-    poll_table_destroy(&pt);
     return ready_count;
+}
+
+// ── do_poll — poll syscall implementation (thin wrapper) ──
+//
+// Linux ABI: int poll(struct pollfd *fds, nfds_t nfds, int timeout)
+//   timeout: -1 = infinite, 0 = non-blocking, >0 = milliseconds
+// Returns: count of ready fds, 0 = timeout, <0 = -errno
+//
+// Signal semantics: any unblocked signal (not just fatal) interrupts
+// poll with -EINTR, per POSIX.
+
+int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val)
+{
+    // ── Validate user pointer ──────────────────────────────
+    if ((uint64_t)user_fds >= current->addr_limit)
+        return -EFAULT;
+    if (nfds > POLL_MAX_FDS)
+        return -EINVAL;
+
+    // nfds==0 with timeout<=0 returns immediately.
+    // nfds==0 with timeout>0 goes through do_poll_core to sleep.
+    if (nfds == 0 && timeout_val <= 0)
+        return 0;
+
+    // ── Copy pollfd from user space ────────────────────────
+    struct pollfd kfds[POLL_MAX_FDS];
+    if (nfds > 0) {
+        for (uint32_t i = 0; i < nfds; i++) {
+            kfds[i].fd      = user_fds[i].fd;
+            kfds[i].events  = user_fds[i].events;
+            kfds[i].revents = 0;
+        }
+    }
+
+    // ── Signal check: any unblocked pending signal → EINTR ─
+    if (current->signal & ~current->blocked)
+        return -EINTR;
+
+    // ── Setup poll table (dynamic entries allocation) ─────────
+    poll_table_t pt;
+    if (poll_table_setup(&pt, (nfds == 0) ? 1 : POLL_MAX_FDS) != 0)
+        return -ENOMEM;
+
+    int64_t ret = do_poll_core(kfds, nfds, timeout_val, &pt);
+
+    // ── Single-point cleanup ────────────────────────────────
+    if (ret >= 0 && nfds > 0) {
+        for (uint32_t i = 0; i < nfds; i++)
+            user_fds[i].revents = kfds[i].revents;
+    }
+    poll_table_destroy(&pt);
+    return ret;
 }
