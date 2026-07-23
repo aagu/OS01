@@ -23,6 +23,7 @@
 - `addr_limit` 校验使用 base+length 模式（非仅 base）：`ptr + size > addr_limit → -EFAULT`
 - nfds 参数在信号检查之前验证
 - **重构后务必 `make clean`**：`poll_table_t` struct 布局改变，头文件无依赖跟踪
+- SMP 注释：`current_poll_wq` 和 `poll_deadline_jiffies` 全局变量在 SMP 下有竞态（已有限制，非本次引入）。实施时在 do_poll_core 附近标注
 
 ---
 
@@ -128,7 +129,7 @@ int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val) {
 - `typedef unsigned long sigset_t` — 从 `trap.c:42` 移入此头文件
 - `struct pselect6_sigmask { const void *ss; size_t ss_len; }` — pselect6 打包结构体
 - `FD_SETSIZE` (1024)
-- `int64_t do_select_common(int nfds, kernel_fd_set *kr, kernel_fd_set *kw, kernel_fd_set *ke, int64_t ms)` — do_select/do_pselect6 的共享核心（见 Task 4 Critical #2 修复）
+- `int64_t do_select_common(int nfds, kernel_fd_set *kr, kernel_fd_set *kw, kernel_fd_set *ke, struct pollfd *pfds, poll_table_t *pt, int64_t ms, void *ur, void *uw, void *ue)` — **仅在 select.c 中 static**，头文件中不声明（避免参数重复+签名不一致）
 - `do_select()`、`do_pselect6()` 原型（用户指针用 `void *`）
 - `kern_fd_*` 内联位操作函数 + 边界检查
 
@@ -139,7 +140,8 @@ int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val) {
   4. `typedef struct { uint64_t __bits[16]; } kernel_fd_set;`
   5. `#define FD_SETSIZE 1024`
   6. `kern_fd_zero`、`kern_fd_set`、`kern_fd_clr`、`kern_fd_isset` 内联函数（含 `(uint32_t)fd < FD_SETSIZE` 边界检查）
-  7. `do_select_common`、`do_select`、`do_pselect6` 原型
+  7. `do_select`、`do_pselect6` 原型（用户指针用 `void *`）。
+     （注意：`do_select_common` 不在此处——它是 select.c 中的 `static`，不暴露给其他翻译单元。）
 
 ---
 
@@ -199,6 +201,7 @@ static int64_t do_select_common(int nfds,
      memset(kr, 0, sizeof(kernel_fd_set));
      memset(kw, 0, sizeof(kernel_fd_set));
      memset(ke, 0, sizeof(kernel_fd_set));
+     // kr/kw/ke 始终为栈变量（非 NULL），写回由 ur/uw/ue 控制（可 NULL）
      int64_t count = 0;
      for (uint32_t i = 0; i < nfds; i++) {
          int fd = pfds[i].fd;
@@ -206,12 +209,11 @@ static int64_t do_select_common(int nfds,
          uint32_t r = pfds[i].revents;
          if (r == 0) continue;
          bool ready = false;
-         // POLLERR 出现在所有三个集合，POLLHUP 在 readfds
-         if (kr && (r & (POLLIN | POLLRDNORM | POLLHUP | POLLERR)))
+         if (r & (POLLIN | POLLRDNORM | POLLHUP | POLLERR))
              { kern_fd_set(fd, kr); ready = true; }
-         if (kw && (r & (POLLOUT | POLLWRNORM | POLLERR)))
+         if (r & (POLLOUT | POLLWRNORM | POLLERR))
              { kern_fd_set(fd, kw); ready = true; }
-         if (ke && (r & (POLLPRI | POLLERR)))
+         if (r & (POLLPRI | POLLERR))
              { kern_fd_set(fd, ke); ready = true; }
          if (ready) count++;
      }
@@ -219,26 +221,36 @@ static int64_t do_select_common(int nfds,
   4. **成功时（ret >= 0）**将 kr/kw/ke memcpy 写回用户空间（non-NULL 指针写回）；失败时跳过（fd_set 不改动）
   5. out：`kfree(pfds)`、`poll_table_destroy(pt)`、return ret 或 count
 
-- [ ] **Step 3: 实现 `do_pselect6()`**
-  1. nfds 验证（同 do_select Step 1.1）
+- [ ] **Step 3: 实现 `do_pselect6()`** —— ⚠️ sigmask 交换后**所有**错误路径必须恢复 blocked
+  1. **nfds 验证**（在 sigmask swap **之前**，避免 restore 缺失）：
+     - `nfds < 0 || nfds > FD_SETSIZE` → `-EINVAL`
+     - nfds==0 路径：timeout==NULL → `-ENOSYS`；timeout=={0,0} → 0；timeout>0 → 跳过（稍后处理）
   2. 解包 sigmask_packed（如非 NULL）：`addr_limit` 校验 → memcpy `struct pselect6_sigmask` → 验证 `ss_len == sizeof(sigset_t)` → 非 NULL 则 `addr_limit` 校验 + memcpy `sigmask` 到 `sigmask_kern`
-  3. sigmask swap：`old_blocked = current->blocked; if sigmask_ptr: current->blocked = *sigmask_ptr`
-  4. 首次信号检查（使用新 blocked mask）
-  5. `addr_limit` 校验 + `memcpy`：用户 `timespec` → `struct timespec kts`。验证：`tv_sec > INT32_MAX/1000` → `-EINVAL`，`tv_nsec >= 1000000000` → `-EINVAL`
-  6. 转换 `timespec → ms`：`int64_t ms = (int64_t)(tv_sec * 1000 + (tv_nsec + 999999) / 1000000);`
-  7. fd_set memcpy → kernel_fd_set
-  8. `kmalloc` pollfd 数组并填充（同 do_select Step 1.6）
-  9. `poll_table_setup(&pt, (nfds==0) ? 1 : nfds)`；**失败则 `kfree(pfds)` 并返回 `-ENOMEM`**
-  10. `ret = do_select_common(...)`
-  11. 恢复 sigmask：`if sigmask_ptr: current->blocked = old_blocked`
-  12. return ret
+  3. **sigmask swap + goto out 模式**（所有后续错误路径必须 goto out）：
+     ```c
+     uint64_t old_blocked = 0;
+     bool mask_swapped = false;
+     if (sigmask_ptr) {
+         old_blocked = current->blocked;
+         current->blocked = *sigmask_ptr;
+         mask_swapped = true;
+     }
+     ```
+  4. 首次信号检查（使用新 blocked mask）→ `-EINTR` → **goto out**
+  5. `addr_limit` 校验 + `memcpy`：用户 `timespec` → `struct timespec kts`。验证失败 → **goto out**
+  6. 转换 `timespec → ms`
+  7. fd_set memcpy → kernel_fd_set。`addr_limit` 失败 → **goto out**
+  8. `kmalloc` pollfd 数组 + 填充。`kmalloc` 失败 → **goto out**
+  9. `poll_table_setup`。失败 → `kfree(pfds)`，**goto out**
+  10. `ret = do_select_common(nfds, &kr, &kw, &ke, pfds, &pt, ms, readfds, writefds, exceptfds)`
+  11. **out:** `if (mask_swapped) current->blocked = old_blocked; return ret;`
 
-- [ ] **Step 4: nfds==0 特殊路径**
+- [ ] **Step 4: nfds==0 特殊路径（`do_select` 专用；`do_pselect6` 在 Step 3.1 处理）**
   1. nfds==0 且 timeout 是 `{0,0}` → 立即返回 0
   2. nfds==0 且 timeout 是 NULL → 返回 `-ENOSYS`（无法用信号唤醒）
-  3. nfds==0 且 timeout > 0 → `poll_table_setup(&pt, 1)` → `do_poll_core(NULL, 0, ms, &pt)`（休眠到超时，返回 0；`poll_table_destroy` 在 do_poll_core 定义后由 do_select_common 处理）
+  3. nfds==0 且 timeout > 0 → `poll_table_setup(&pt, 1)` → `do_poll_core(NULL, 0, ms, &pt)`（休眠到超时，返回 0；清理由 do_select_common 处理）
 
-**验证顺序（Medium #9）**：nfds 验证 → 首次信号检查 → addr_limit → 其余（无效参数应在信号检测前拒绝）。
+**验证顺序**：nfds 验证 → 首次信号检查 → addr_limit → 其余（无效参数应在信号检测前拒绝）。
 
 ---
 
