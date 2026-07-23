@@ -238,8 +238,7 @@ int64_t do_pselect6(int nfds, void *readfds, void *writefds,
     if (nfds < 0 || nfds > FD_SETSIZE)
         return -EINVAL;
 
-    // ── nfds==0 path (before sigmask swap) ───────────────────
-    // Separate early return avoids needing mask_swapped tracking.
+    // ── nfds==0 path (sigmask swap still needed for atomicity) ──
     if (nfds == 0) {
         if (!timeout_ts)
             return -ENOSYS;
@@ -257,7 +256,38 @@ int64_t do_pselect6(int nfds, void *readfds, void *writefds,
 
         int64_t ms = (int64_t)(kts.tv_sec * 1000
                                + (kts.tv_nsec + 999999) / 1000000);
-        return do_select_nofds(ms);
+
+        // Unpack + swap signal mask for nfds==0 path
+        struct pselect6_sigmask sm;
+        sigset_t sigmask_kern_n0 = 0;
+        sigset_t *sigmask_ptr_n0 = NULL;
+        if (sigmask_packed) {
+            if ((uint64_t)sigmask_packed + sizeof(sm) > current->addr_limit)
+                return -EFAULT;
+            memcpy(&sm, sigmask_packed, sizeof(sm));
+            if (sm.ss_len != sizeof(sigset_t))
+                return -EINVAL;
+            if (sm.ss) {
+                if ((uint64_t)sm.ss + sizeof(sigset_t) > current->addr_limit)
+                    return -EFAULT;
+                memcpy(&sigmask_kern_n0, sm.ss, sizeof(sigset_t));
+                sigmask_ptr_n0 = &sigmask_kern_n0;
+            }
+        }
+
+        uint64_t old_blocked_n0 = 0;
+        bool mask_swapped_n0 = false;
+        if (sigmask_ptr_n0) {
+            old_blocked_n0 = current->blocked;
+            current->blocked = *sigmask_ptr_n0;
+            mask_swapped_n0 = true;
+        }
+
+        int64_t ret = do_select_nofds(ms);
+
+        if (mask_swapped_n0)
+            current->blocked = old_blocked_n0;
+        return ret;
     }
 
     // ── Unpack sigmask_packed ────────────────────────────────
