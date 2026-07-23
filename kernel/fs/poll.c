@@ -13,6 +13,7 @@
 #include <kernel/poll.h>
 #include <kernel/file.h>
 #include <kernel/task.h>
+#include <kernel/slab.h>
 #include <fs/vfs.h>
 #include <kernel/percpu.h>
 #include <device/timer.h>    // jiffies
@@ -32,13 +33,29 @@ void poll_table_init(poll_table_t *pt)
     pt->triggered = false;
 }
 
-// ── poll_table_setup — one-time init of wq + entry nodes ──
+// ── poll_table_setup — allocate entries + init wq + entry nodes ──
+// Returns 0 on success, -ENOMEM on allocation failure.
 
-void poll_table_setup(poll_table_t *pt)
+int poll_table_setup(poll_table_t *pt, int max_entries)
 {
     wait_queue_init(&pt->wq);
-    for (int i = 0; i < POLL_MAX_FDS; i++)
+    pt->max_entries = max_entries;
+    pt->entries = kmalloc(max_entries * sizeof(poll_wait_entry_t));
+    if (!pt->entries)
+        return -ENOMEM;
+    for (int i = 0; i < max_entries; i++)
         list_init(&pt->entries[i].node);
+    return 0;
+}
+
+// ── poll_table_destroy — free entries allocated by poll_table_setup ──
+
+void poll_table_destroy(poll_table_t *pt)
+{
+    if (pt->entries) {
+        kfree(pt->entries);
+        pt->entries = NULL;
+    }
 }
 
 // ── poll_wait — register on an fd's poll list ─────────────
@@ -47,7 +64,7 @@ void poll_table_setup(poll_table_t *pt)
 
 void poll_wait(poll_table_t *pt, list_t *poll_list, spinlock_T *fd_lock)
 {
-    if (pt->nent >= POLL_MAX_FDS || pt->triggered)
+    if (pt->nent >= pt->max_entries || pt->triggered)
         return;
 
     poll_wait_entry_t *e = &pt->entries[pt->nent++];
@@ -200,9 +217,10 @@ int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val)
     if (current->signal & ~current->blocked)
         return -EINTR;
 
-    // ── Setup poll table (one-time wq init) ────────────────
+    // ── Setup poll table (dynamic entries allocation) ─────────
     poll_table_t pt;
-    poll_table_setup(&pt);
+    if (poll_table_setup(&pt, nfds) < 0)
+        return -ENOMEM;
 
     // ── Timeout setup ──────────────────────────────────────
     uint64_t deadline = 0;
@@ -260,6 +278,7 @@ int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val)
         if (current->signal & ~current->blocked) {
             poll_table_cleanup(&pt);
             if (timeout_val > 0) current_poll_wq = NULL;
+            poll_table_destroy(&pt);
             return -EINTR;
         }
 
@@ -271,12 +290,16 @@ int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val)
         poll_table_cleanup(&pt);
 
         // ── Timeout check ─────────────────────────────────
-        if (timeout_val > 0 && jiffies >= deadline)
+        if (timeout_val > 0 && jiffies >= deadline) {
+            poll_table_destroy(&pt);
             return 0;
+        }
 
         // ── Post-sleep signal check ───────────────────────
-        if (current->signal & ~current->blocked)
+        if (current->signal & ~current->blocked) {
+            poll_table_destroy(&pt);
             return -EINTR;
+        }
 
         ready_count = 0;
     }
@@ -285,5 +308,6 @@ int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val)
     for (uint32_t i = 0; i < nfds; i++)
         user_fds[i].revents = kfds[i].revents;
 
+    poll_table_destroy(&pt);
     return ready_count;
 }

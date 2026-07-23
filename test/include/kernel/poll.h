@@ -52,12 +52,15 @@ typedef struct poll_wait_entry {
 } poll_wait_entry_t;
 
 // ── Poll table ─────────────────────────────────────────
-// Per-syscall stack object.  The polling task sleeps on pt.wq;
-// when any fd becomes ready it cascade-wakes pt.wq.
+// Per-syscall object, one per concurrent poll/select call.
+// The polling task sleeps on pt.wq; when any fd becomes ready
+// it cascade-wakes pt.wq.  Entries are heap-allocated via
+// poll_table_setup and freed via poll_table_destroy.
 
 typedef struct poll_table {
     wait_queue_t        wq;                      // main wait queue
-    poll_wait_entry_t   entries[POLL_MAX_FDS];   // static array
+    poll_wait_entry_t   *entries;                // dynamically allocated array
+    int                 max_entries;             // capacity of entries array
     int                 nent;                    // active entry count
     bool                triggered;               // short-circuit: fd ready
 } poll_table_t;
@@ -68,12 +71,17 @@ typedef struct poll_table {
 // Does NOT re-init wq — call poll_table_setup once, then init per round.
 void poll_table_init(poll_table_t *pt);
 
-// One-time setup: init wq + all entry nodes.
-void poll_table_setup(poll_table_t *pt);
+// One-time setup: allocate entries + init wq + all entry nodes.
+// Returns 0 on success, -ENOMEM on kmalloc failure.
+int poll_table_setup(poll_table_t *pt, int max_entries);
+
+// Free entries allocated by poll_table_setup.
+void poll_table_destroy(poll_table_t *pt);
 
 // Register current fd as not-ready.  The entry is hung on poll_list
 // (protected by fd_lock).  When the fd becomes ready, its wake path
 // walks poll_list and calls wait_queue_wake_all(e->poll_wq).
+// Entries are indexed into pt->entries; capacity is pt->max_entries.
 void poll_wait(poll_table_t *pt, list_t *poll_list, spinlock_T *fd_lock);
 
 // Remove all entries from their fd poll lists.  Uses entry.fd_lock
