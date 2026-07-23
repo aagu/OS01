@@ -14,6 +14,22 @@
 
 ## 评审变更摘要
 
+### 计划评审修复（v5 规约对照实现计划）
+
+| # | 严重度 | 问题 | 解决方案（在计划中反映） |
+|---|--------|------|--------------------------|
+| 🔴 1 | 严重 | timeout 溢出：`tv_sec*1000` 在 24.8 天时溢出 int32 | `do_poll_core` timeout 参数改为 `int64_t`；timeval 验证改为 `tv_sec > INT32_MAX/1000` |
+| 🔴 2 | 严重 | do_select/do_pselect6 间 70% 代码重复 | 提取 `do_select_common()` 共享函数；各自只负责 timeout 解析 + sigmask swap |
+| 🔴 3 | 严重 | sigset_t 重定义冲突（trap.c:42 vs select.h） | select.h 提供 `sigset_t`；删除 trap.c 局部 typedef；trap.c 包含 select.h |
+| 🔴 4 | 严重 | 反向映射未包含 POLLERR/POLLHUP | 添加显式 `POLLERR\|POLLHUP` 在 readfds/writefds 映射条件中 |
+| 🟡 6 | 中等 | addr_limit 仅校验基址，未校验 buffer 尾部 | 改用 base+length 模式：`ptr + size > addr_limit → -EFAULT` |
+| 🟡 7 | 中等 | nfds 超过进程 max_fds 时越界读 | fd_set→pollfd 转换中添加 `fd < current->files->max_fds` 保护 |
+| 🟡 8 | 中等 | memcpy 后 revents 未清零 | 显式 for loop 清零所有 revents |
+| 🟡 9 | 中等 | 信号检查优先性未文档化 | 明确顺序：nfds 验证 → 信号检查 → addr_limit → 其余 |
+| 🟡 10 | 中等 | do_poll 重构后 error path 遗漏 poll_table_destroy | 改用集中清理模式（goto out 或单点 destroy at wrapper level） |
+| 🟢 11 | 次要 | select.h 需要 `#include <stddef.h>`（size_t） | 已添加 |
+| 🟢 17 | 次要 | 重构后必须 make clean | 计划 Task 9 显式标注 |
+
 ### v3 → v4
 
 | # | 问题 | 解决方案 |
