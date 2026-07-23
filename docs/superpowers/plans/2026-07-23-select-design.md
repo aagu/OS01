@@ -24,6 +24,7 @@
 - nfds 参数在信号检查之前验证
 - **重构后务必 `make clean`**：`poll_table_t` struct 布局改变，头文件无依赖跟踪
 - SMP 注释：`current_poll_wq` 和 `poll_deadline_jiffies` 全局变量在 SMP 下有竞态（已有限制，非本次引入）。实施时在 do_poll_core 附近标注
+- `kfree(NULL)` 安全：OS01 的 slab `kfree` 已有 NULL 守卫（参见 commit 62199b9），所有 `kfree(pfds)` 路径在 pfds 有效时才调用——无需守卫
 
 ---
 
@@ -177,12 +178,20 @@ static int64_t do_select_common(int nfds,
 
 - [ ] **Step 2: 实现 `do_select()`**
   1. **nfds 验证优先**（`< 0 → -EINVAL`，`> FD_SETSIZE → -EINVAL`）
-  2. **nfds==0 路径**（在首次信号检查之前——因无 fd 也无 poll_table 分配）：
-     - timeout `{0,0}` → return 0
-     - timeout NULL → return `-ENOSYS`
-     - timeout>0 → `ms = timeval_to_ms(ktv)` → `return do_select_nofds(ms)`
+  2. **nfds==0 路径**（在首次信号检查之前——因无 fd 也无 poll_table 分配；需前移 timeval 的 copy+验证，与 do_pselect6 Step 4.1 对称）：
+     ```c
+     if (!timeout_tv) return -ENOSYS;
+     struct timeval ktv;
+     if ((uint64_t)timeout_tv + sizeof(ktv) > current->addr_limit) return -EFAULT;
+     memcpy(&ktv, timeout_tv, sizeof(ktv));
+     if (ktv.tv_sec > INT32_MAX/1000) return -EINVAL;
+     if (ktv.tv_usec >= 1000000) return -EINVAL;
+     if (ktv.tv_sec == 0 && ktv.tv_usec == 0) return 0;
+     int64_t ms = (int64_t)(ktv.tv_sec * 1000 + (ktv.tv_usec + 999) / 1000);
+     return do_select_nofds(ms);
+     ```
   3. 首次信号检查（`poll_table_setup` 前）
-  4. `addr_limit` 校验（**base+length 模式**：`(uint64_t)ptr + sizeof(kernel_fd_set) > addr_limit → -EFAULT`）+ `memcpy`：3×`fd_set` → `kernel_fd_set kr/kw/ke`。**NULL 参数跳过**（不校验 addr_limit，kr/kw/ke 保持栈变量默认值）
+  4. `addr_limit` 校验（**base+length 模式**）+ `memcpy`：3×`fd_set` → `kernel_fd_set kr/kw/ke`。**NULL 参数跳过**（不校验 addr_limit）。**kr/kw/ke 声明时零初始化**：`kernel_fd_set kr = {0}, kw = {0}, ke = {0};` — 跳过 NULL 时可确保残留随机位不泄漏到 pollfd events 中
   5. `addr_limit` 校验 + `memcpy`：用户 `timeval` → `struct timeval ktv`。验证：`tv_sec > INT32_MAX/1000` → `-EINVAL`，`tv_usec >= 1000000` → `-EINVAL`。**NULL → ms = -1**
   6. 非 NULL timeout 转换：`int64_t ms = (int64_t)(tv_sec * 1000 + (tv_usec + 999) / 1000);`
   7. `kmalloc(nfds * sizeof(struct pollfd))` + fd_set → pollfd 转换：
@@ -195,7 +204,8 @@ static int64_t do_select_common(int nfds,
   10. return ret
 
 - [ ] **Step 3: 实现 `do_select_common()`（共享核心——仅 select.c 中 static）**
-  1. `ret = do_poll_core(pfds, nfds, ms, pt)`
+  1. `int64_t count = 0;` — **在函数顶部声明**（out label 跨作用域引用；不在反向映射块内声明）
+  2. `int64_t ret = do_poll_core(pfds, nfds, ms, pt);`
   2. 如果 `ret < 0` → 转到 out（仅释放内存，**不**覆盖用户 fd_set）
   3. 反向映射：对每个 pollfd[0..nfds-1]（每 fd 计一次，非每集合计一次）：
      ```c
@@ -356,9 +366,10 @@ static int64_t do_select_common(int nfds,
   | 5 | `test_select_multifd()` | 3 pipes，只写 1 个 → select 返回 1，**仅该 fd 置位**；验证非就绪 fd 位已清除（`!FD_ISSET(unready_fd)`） |
   | 6 | `test_select_zero_timeout()` | `{0,0}` 非阻塞轮询 → 立即返回 0 |
   | 7 | `test_select_sleep()` | `select(0, NULL, NULL, NULL, &(struct timeval){0,50000})` → 返回 0，耗时 ~50ms |
-  | 8 | `test_select_invalid_fd()` | nfds=1 的已关闭 fd → POLLNVAL 计入计数，无 fd_set 置位 |
-  | 9 | `test_pselect_null_sigmask()` | pselect with sigmask=NULL → 与 select 行为相同 |
-  | 10 | `test_pselect_bad_ss_len()` | pselect with ss_len=999 → errno=EINVAL |
+  | 8 | `test_pselect_sleep()` | `pselect(0, NULL, NULL, NULL, &(struct timespec){0,50000000}, NULL)` → 返回 0（nfds==0+pselect 路径） |
+  | 9 | `test_select_invalid_fd()` | nfds=1 的已关闭 fd → POLLNVAL 计入计数，无 fd_set 置位 |
+  | 10 | `test_pselect_null_sigmask()` | pselect with sigmask=NULL → 与 select 行为相同 |
+  | 11 | `test_pselect_bad_ss_len()` | pselect with ss_len=999 → errno=EINVAL |
 
 - [ ] **Step 3: 注册测试 + 更新测试数**
   1. 扩展 `g_test_table[]` 增加 10 个条目
@@ -374,4 +385,4 @@ static int64_t do_select_common(int nfds,
 - [ ] **Step 1: `make clean && make`** — ⚠️ **必须 `make clean`**（`poll_table_t` struct 布局改变，`.o` 文件中的 sizeof/offset 会错误）
 - [ ] **Step 2: `make run`** — 启动 QEMU，验证 shell 启动正常
 - [ ] **Step 3: 运行 `systest`** — 验证所有现有 test_select 用例 + poll 用例（88/88）全部通过
-- [ ] **Step 4: 修复任何失败的测试**，迭代至 10/10 select + 8/8 poll + 70 原有 = 88/88 pass
+- [ ] **Step 4: 修复任何失败的测试**，迭代至 11/11 select + 8/8 poll + 原有测试全部 pass
