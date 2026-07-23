@@ -173,21 +173,30 @@ static int64_t do_select_common(int nfds,
   4. `addr_limit` 校验 + `memcpy`：用户 `timeval` → `struct timeval ktv`。验证：`tv_sec > INT32_MAX/1000` → `-EINVAL`（~24.8 天，防止 ms 溢出 int32），`tv_usec >= 1000000` → `-EINVAL`。NULL → timeout=-1
   5. 转换 `timeval → ms`：`int64_t ms = (int64_t)(tv_sec * 1000 + (tv_usec + 999) / 1000);`
   6. `kmalloc(nfds * sizeof(struct pollfd))` + fd_set → pollfd 转换：
-     - 对每个 fd 0..nfds-1，设 `pollfds[i].fd = i`、`pollfds[i].events = 0`、`pollfds[i].revents = 0`
-     - **fd 边界保护**（Medium #7）：`if ((uint32_t)fd < current->files->max_fds)` 仅在 fd 有效时才检查 `kern_fd_isset`
-     - `kern_fd_isset(fd, kr) → events |= POLLIN | POLLRDNORM`
-     - `kern_fd_isset(fd, kw) → events |= POLLOUT | POLLWRNORM`
-     - `kern_fd_isset(fd, ke) → events |= POLLPRI`
-  7. `poll_table_setup(&pt, (nfds==0) ? 1 : nfds)`，检查返回码
+     - 对每个 fd 0..nfds-1：
+       ```c
+       pollfds[i].fd = i;
+       pollfds[i].events = 0;
+       pollfds[i].revents = 0;
+       // fd 越界保护（Critical #1）：fd >= max_fds → 设 fd=-1，do_poll_core 跳过
+       if ((uint32_t)i >= current->files->max_fds) {
+           pollfds[i].fd = -1;
+           continue;
+       }
+       if (kr && kern_fd_isset(i, kr))  pollfds[i].events |= POLLIN  | POLLRDNORM;
+       if (kw && kern_fd_isset(i, kw))  pollfds[i].events |= POLLOUT | POLLWRNORM;
+       if (ke && kern_fd_isset(i, ke))  pollfds[i].events |= POLLPRI;
+       ```
+  7. `poll_table_setup(&pt, (nfds==0) ? 1 : nfds)`**；失败则 `kfree(pfds)` 并返回 `-ENOMEM`
   8. `ret = do_select_common(nfds, &kr, &kw, &ke, pfds, &pt, ms, readfds, writefds, exceptfds)` —— 包含 do_poll_core + 反向映射 + 写回 + 清理
   9. 返回 ret
 
 - [ ] **Step 2: 实现 `do_select_common()`（共享核心）**
   1. `ret = do_poll_core(pfds, nfds, ms, pt)`
   2. 如果 `ret < 0` → 转到 out（仅释放内存，**不**覆盖用户 fd_set）
-  3. 反向映射：对每个 pollfd[0..nfds-1]：
+  3. 反向映射：对每个 pollfd[0..nfds-1]（每 fd 计一次，非每集合计一次）：
      ```c
-     memset(kr, 0, sizeof(kernel_fd_set));   // 清零后重建
+     memset(kr, 0, sizeof(kernel_fd_set));
      memset(kw, 0, sizeof(kernel_fd_set));
      memset(ke, 0, sizeof(kernel_fd_set));
      int64_t count = 0;
@@ -196,16 +205,15 @@ static int64_t do_select_common(int nfds,
          if (fd < 0) continue;
          uint32_t r = pfds[i].revents;
          if (r == 0) continue;
-         // POLLERR 出现在所有三个集合，POLLHUP 在 readfds（Critical #4）
-         if (kr && (r & (POLLIN | POLLRDNORM | POLLHUP | POLLERR))) {
-             kern_fd_set(fd, kr); count++;
-         }
-         if (kw && (r & (POLLOUT | POLLWRNORM | POLLERR))) {
-             kern_fd_set(fd, kw); count++;
-         }
-         if (ke && (r & (POLLPRI | POLLERR))) {
-             kern_fd_set(fd, ke); count++;
-         }
+         bool ready = false;
+         // POLLERR 出现在所有三个集合，POLLHUP 在 readfds
+         if (kr && (r & (POLLIN | POLLRDNORM | POLLHUP | POLLERR)))
+             { kern_fd_set(fd, kr); ready = true; }
+         if (kw && (r & (POLLOUT | POLLWRNORM | POLLERR)))
+             { kern_fd_set(fd, kw); ready = true; }
+         if (ke && (r & (POLLPRI | POLLERR)))
+             { kern_fd_set(fd, ke); ready = true; }
+         if (ready) count++;
      }
      ```
   4. **成功时（ret >= 0）**将 kr/kw/ke memcpy 写回用户空间（non-NULL 指针写回）；失败时跳过（fd_set 不改动）
@@ -220,7 +228,7 @@ static int64_t do_select_common(int nfds,
   6. 转换 `timespec → ms`：`int64_t ms = (int64_t)(tv_sec * 1000 + (tv_nsec + 999999) / 1000000);`
   7. fd_set memcpy → kernel_fd_set
   8. `kmalloc` pollfd 数组并填充（同 do_select Step 1.6）
-  9. `poll_table_setup`
+  9. `poll_table_setup(&pt, (nfds==0) ? 1 : nfds)`；**失败则 `kfree(pfds)` 并返回 `-ENOMEM`**
   10. `ret = do_select_common(...)`
   11. 恢复 sigmask：`if sigmask_ptr: current->blocked = old_blocked`
   12. return ret
@@ -319,11 +327,11 @@ static int64_t do_select_common(int nfds,
 
   | # | 函数 | 测试 |
   |---|------|------|
-  | 1 | `test_select_basic()` | pipe 写 → select 报告可读；读空 → 超时 0 返回 0 |
+  | 1 | `test_select_basic()` | pipe 写 → select 报告可读；读空 → 超时 0 返回 0；验证非就绪 fd 位已清除 |
   | 2 | `test_select_write()` | 空 pipe → writable；填满 → 超时 0 返回 0 |
-  | 3 | `test_select_timeout()` | 50ms 超时无 fd → 返回 0，耗时 ~50ms ±10ms |
+  | 3 | `test_select_timeout()` | 50ms 超时无 fd → 返回 0，耗时 ~50ms ±20ms |
   | 4 | `test_select_null_timeout()` | NULL timeout → fork 子进程，子进程 sleep 后写入，父进程 select 返回 1 |
-  | 5 | `test_select_multifd()` | 3 pipes，只写 1 个 → select 返回 1，仅该 fd 置位 |
+  | 5 | `test_select_multifd()` | 3 pipes，只写 1 个 → select 返回 1，**仅该 fd 置位**；验证非就绪 fd 位已清除（`!FD_ISSET(unready_fd)`） |
   | 6 | `test_select_zero_timeout()` | `{0,0}` 非阻塞轮询 → 立即返回 0 |
   | 7 | `test_select_sleep()` | `select(0, NULL, NULL, NULL, &(struct timeval){0,50000})` → 返回 0，耗时 ~50ms |
   | 8 | `test_select_invalid_fd()` | nfds=1 的已关闭 fd → POLLNVAL 计入计数，无 fd_set 置位 |
