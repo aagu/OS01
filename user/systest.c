@@ -898,8 +898,8 @@ static void test_pselect_bad_ss_len(void)
                            (uint64_t)0,
                            (uint64_t)&bad);
 
-    CHECK3(ret == -1 && errno == EINVAL, "pselect_bad_ss_len",
-           "returns -1 EINVAL");
+    CHECK3(ret == -EINVAL, "pselect_bad_ss_len",
+           "returns -EINVAL");
 }
 
 // ── Runner ─────────────────────────────────────────────────
