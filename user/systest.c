@@ -20,6 +20,22 @@
 #include <errno.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <rbtree.h>
+
+// Test node: embed rbtree_node_t in a small test struct
+typedef struct test_rb_node {
+    rbtree_node_t node;
+    int key;
+} test_rb_node_t;
+
+static int test_cmp(rbtree_node_t *a, rbtree_node_t *b)
+{
+    test_rb_node_t *ta = (test_rb_node_t *)a;
+    test_rb_node_t *tb = (test_rb_node_t *)b;
+    if (ta->key < tb->key) return -1;
+    if (ta->key > tb->key) return 1;
+    return 0;
+}
 
 static int fail_count = 0;
 static int pass_count = 0;
@@ -916,6 +932,101 @@ static void test_pselect_bad_ss_len(void)
            "returns -EINVAL");
 }
 
+// ── rbtree unit tests ────────────────────────────────────
+static int test_rbtree_insert_order(void)
+{
+    rbtree_root_t root;
+    rbtree_init(&root);
+
+    test_rb_node_t n[5];
+    int keys[] = {30, 10, 50, 20, 40};
+    for (int i = 0; i < 5; i++) {
+        n[i].key = keys[i];
+        rbtree_insert(&root, &n[i].node, test_cmp);
+    }
+
+    int prev = -1;
+    for (rbtree_node_t *cur = rbtree_first(&root); cur; cur = rbtree_next(cur)) {
+        test_rb_node_t *tn = (test_rb_node_t *)cur;
+        if (tn->key <= prev) return 1;
+        prev = tn->key;
+    }
+    return 0;
+}
+
+static int test_rbtree_erase_middle(void)
+{
+    rbtree_root_t root;
+    rbtree_init(&root);
+
+    test_rb_node_t n[3];
+    n[0].key = 10; n[1].key = 20; n[2].key = 30;
+    rbtree_insert(&root, &n[0].node, test_cmp);
+    rbtree_insert(&root, &n[1].node, test_cmp);
+    rbtree_insert(&root, &n[2].node, test_cmp);
+
+    rbtree_erase(&root, &n[1].node);
+
+    rbtree_node_t *first = rbtree_first(&root);
+    if (((test_rb_node_t *)first)->key != 10) return 1;
+    rbtree_node_t *second = rbtree_next(first);
+    if (!second || ((test_rb_node_t *)second)->key != 30) return 1;
+    if (rbtree_next(second) != NULL) return 1;
+    return 0;
+}
+
+static int test_rbtree_stress_100(void)
+{
+    rbtree_root_t root;
+    rbtree_init(&root);
+
+    test_rb_node_t nodes[100];
+    for (int i = 0; i < 100; i++) {
+        nodes[i].key = (i * 73 + 17) % 1000;
+        rbtree_insert(&root, &nodes[i].node, test_cmp);
+    }
+
+    int prev = -1, count = 0;
+    for (rbtree_node_t *cur = rbtree_first(&root); cur; cur = rbtree_next(cur)) {
+        test_rb_node_t *tn = (test_rb_node_t *)cur;
+        if (tn->key < prev) return 1;
+        prev = tn->key;
+        count++;
+    }
+    if (count != 100) return 1;
+
+    for (int i = 0; i < 100; i++) {
+        int idx = (i * 47 + 23) % 100;
+        rbtree_erase(&root, &nodes[idx].node);
+    }
+    if (!rbtree_empty(&root)) return 1;
+    return 0;
+}
+
+static int test_eevdf_fork_child_scheduled(void)
+{
+    int pid = fork();
+    if (pid < 0) return 1;
+    if (pid == 0) {
+        _exit(0);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+    return (status == 0) ? 0 : 1;
+}
+
+static void test_wrap_rbtree_insert_order(void)
+{ CHECK3(test_rbtree_insert_order() == 0, "rbtree_insert_order", "inorder traversal sorted"); }
+
+static void test_wrap_rbtree_erase_middle(void)
+{ CHECK3(test_rbtree_erase_middle() == 0, "rbtree_erase_middle", "remaining nodes correct after erase"); }
+
+static void test_wrap_rbtree_stress_100(void)
+{ CHECK3(test_rbtree_stress_100() == 0, "rbtree_stress_100", "100 insert/erase stress ok"); }
+
+static void test_wrap_eevdf_fork_child_scheduled(void)
+{ CHECK3(test_eevdf_fork_child_scheduled() == 0, "eevdf_fork_child", "fork child scheduled and exit(0)"); }
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
@@ -967,6 +1078,10 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"select_invalid_fd",   test_select_invalid_fd},
     {"pselect_null_sigmask", test_pselect_null_sigmask},
     {"pselect_bad_ss_len",  test_pselect_bad_ss_len},
+    {"rbtree_insert_order", test_wrap_rbtree_insert_order},
+    {"rbtree_erase_middle", test_wrap_rbtree_erase_middle},
+    {"rbtree_stress_100",   test_wrap_rbtree_stress_100},
+    {"eevdf_fork_child",    test_wrap_eevdf_fork_child_scheduled},
 };
 
 int main(void)
