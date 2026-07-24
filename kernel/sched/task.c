@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <uapi/time.h>
 #include <kernel/deferred_free.h>    // deferred_free() for zombie reaping
+#include <kernel/assert.h>
 
 // ── Preemption flag ──────────────────────────────────────
 // Now per-CPU (percpu_t.need_resched, offset 8 from GS base).
@@ -40,6 +41,84 @@ static inline list_t *task_list_next(list_t *pos)
         return NULL;
     }
     return next;
+}
+
+/* ── EEVDF scheduler constants ─────────────────────── */
+#define EEVDF_MIN_SLICE  10   // time slice = 10 ticks = 100ms
+#define EEVDF_LATENCY    40   // eligibility window = 40 ticks = 400ms
+
+/* ── update_curr: advance vruntime by 1 tick ──────── */
+static void update_curr(task_t *task)
+{
+    if (!task || task == this_cpu()->idle)
+        return;
+    task->vruntime += 1;
+    if (task->vruntime >= task->deadline)
+        this_cpu()->need_resched = 1;
+}
+
+/* ── rbtree comparator: order by deadline ─────────── */
+static int cmp_deadline(rbtree_node_t *a, rbtree_node_t *b)
+{
+    task_t *ta = container_of(a, task_t, rb_node);
+    task_t *tb = container_of(b, task_t, rb_node);
+    if (ta->deadline < tb->deadline) return -1;
+    if (ta->deadline > tb->deadline) return 1;
+    if (ta->pid < tb->pid) return -1;
+    if (ta->pid > tb->pid) return 1;
+    return (uintptr_t)a < (uintptr_t)b ? -1 : 1;
+}
+
+/* ── enqueue / dequeue ─────────────────────────────── */
+static void enqueue_task(task_t *task, percpu_t *rq)
+{
+    task->deadline = task->vruntime + EEVDF_MIN_SLICE;
+    task->on_rq = true;
+    rbtree_node_t *conflict = rbtree_insert(&rq->run_queue, &task->rb_node, cmp_deadline);
+    ASSERT(conflict == NULL);
+}
+
+static void dequeue_task(task_t *task, percpu_t *rq)
+{
+    rbtree_erase(&rq->run_queue, &task->rb_node);
+    task->on_rq = false;
+}
+
+/* ── pick_eevdf: select next task O(log n) ─────────── */
+static task_t *pick_eevdf(percpu_t *rq)
+{
+    if (rbtree_empty(&rq->run_queue))
+        return rq->idle;
+    rbtree_node_t *node = rbtree_first(&rq->run_queue);
+    task_t *t = container_of(node, task_t, rb_node);
+    if (t->vruntime > rq->min_vruntime + EEVDF_LATENCY)
+        rq->min_vruntime = t->vruntime;
+    return t;
+}
+
+/* ── task_wake: mark RUNNING + enqueue (exported) ─── */
+void task_wake(task_t *t)
+{
+    percpu_t *rq = &percpu_data[t->cpu];
+    t->state = TASK_RUNNING;
+    if (t->on_rq)
+        return;
+    /*
+     * Read min_vruntime without rq_lock — may see a stale (lower) value.
+     * This gives the woken task a slightly larger vruntime boost, making it
+     * MORE likely to be scheduled (anti-starvation).  Harmless race.
+     */
+    uint64_t wake_vruntime = rq->min_vruntime > EEVDF_LATENCY
+        ? rq->min_vruntime - EEVDF_LATENCY : 0;
+    if (t->vruntime < wake_vruntime)
+        t->vruntime = wake_vruntime;
+    {
+        uint64_t flags = spin_lock_irqsave(&rq->rq_lock);
+        enqueue_task(t, rq);
+        spin_unlock_irqrestore(&rq->rq_lock, flags);
+    }
+    if ((int)t->cpu != (int)cpu_id())
+        rq->need_resched = 1;
 }
 
 // Global PID counter — atomic because spawn/fork/exec may
@@ -74,7 +153,7 @@ void blocker_wake(task_t *task)
         return;
 
     // Condition met — wake up
-    task->state = TASK_RUNNING;
+    task_wake(task);
     task->blocker.type = BLOCKER_NONE;
     task->blocker.check = NULL;
 }
@@ -115,7 +194,7 @@ void sched_unblock_blocked(void)
         // Check signal wakeup (bypass condition check — the
         // callback returned false, so we're waking for a signal).
         if (t->blocker.signal_can_wake && t->signal) {
-            t->state = TASK_RUNNING;
+            task_wake(t);
             t->blocker.type = BLOCKER_NONE;
             t->blocker.check = NULL;
         }
@@ -185,175 +264,118 @@ int blocker_wait(blocker_check_t check, int type, bool signal_can_wake)
 
 void schedule(void)
 {
-    task_t *next;
-
-    if (!this_cpu()->scheduler_ok)
+    percpu_t *rq = this_cpu();
+    if (!rq->scheduler_ok)
         return;
 
-    this_cpu()->schedule_count++;
+    rq->schedule_count++;
 
     // ── Hang detector ──────────────────────────────────
-    // Reset the per-CPU watchdog.  If it was >= HANG_THRESHOLD
-    // we just recovered from a near-hang — dump diagnostic info.
-    if (this_cpu()->watchdog_counter >= HANG_THRESHOLD) {
+    if (rq->watchdog_counter >= HANG_THRESHOLD) {
         log_info("[hang] CPU %u recovered (watchdog=%lu ticks)\n",
-                 (unsigned long)cpu_id(),
-                 (unsigned long)this_cpu()->watchdog_counter);
+                 (unsigned)cpu_id(), (unsigned long)rq->watchdog_counter);
         hang_dump_all();
     }
-    this_cpu()->watchdog_counter = 0;
+    rq->watchdog_counter = 0;
 
+    // ── 1. Update current task's vruntime ──────────────────
+    update_curr(current);
 
-    // ── Early return: current still has quantum ────────────
-    // Safe without lock — only touches per-CPU 'current'.
-    if (current->counter > 0)
-        current->counter--;
-
-    if (current->state == TASK_RUNNING && current->counter > 0 &&
-        current != this_cpu()->idle) {
-        this_cpu()->need_resched = 0;
-        return;
+    // ── 2. Dequeue + conditional re-enqueue current ─────────
+    {
+        uint64_t rq_flags = spin_lock_irqsave(&rq->rq_lock);
+        if (current->on_rq)
+            dequeue_task(current, rq);
+        if (current->state == TASK_RUNNING && current != rq->idle)
+            enqueue_task(current, rq);
+        spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
     }
 
-    // ── Zombie reaping + round-robin scan (serialised) ─────
-    // Both the scan and the zombie reaper traverse the global
-    // task list.  Holding the lock across both prevents an SMP
-    // race where CPU 1 kfree's a zombie while CPU 0 is following
-    // its list.next pointer.
+    // ── 3. Zombie reaper (global list, with on_rq guard) ──
     {
         static spinlock_T reap_lock = { .lock = 1L };
         uint64_t reap_flags = spin_lock_irqsave(&reap_lock);
 
-        // Pass 1: collect zombies to reap
         task_t *reap_list[64];
         int reap_count = 0;
 
-    {
-        list_t *pos = init_task_union.task.list.next;
-        while (pos != &init_task_union.task.list && reap_count < 64) {
-            // Defensive: a NULL or low pointer in the list means
-            // the list was corrupted (e.g. use-after-free).  Break
-            // instead of page-faulting.
-            if ((uintptr_t)pos < 0x1000) {
-                log_err("[sched] zombie scan: corrupted list pointer %p, breaking\n",
-                        (void *)pos);
-                break;
-            }
-            task_t *t = container_of(pos, task_t, list);
-            pos = task_list_next(pos);
-            if (t->state != TASK_ZOMBIE || t == current)
-                continue;
-
-            int reap = 0;
-            if (t->flags & PF_REAPED) {
-                reap = 1;
-            } else if (t->flags & PF_KTHREAD) {
-                reap = 1;
-            } else if (t->parent == NULL) {
-                reap = 1;
-            } else {
-                if (t->parent->state == TASK_ZOMBIE)
-                    reap = 1;
-            }
-
-            if (reap)
-                reap_list[reap_count++] = t;
-        }
-    }
-
-    // Pass 2: orphan children of zombies being reaped
-    if (reap_count > 0) {
-        list_t *pos = init_task_union.task.list.next;
-        while (pos != &init_task_union.task.list) {
-            if ((uintptr_t)pos < 0x1000) {
-                log_err("[sched] orphan scan: corrupted list pointer %p, breaking\n",
-                        (void *)pos);
-                break;
-            }
-            task_t *child = container_of(pos, task_t, list);
-            pos = task_list_next(pos);
-            if (!child->parent) continue;
-            for (int i = 0; i < reap_count; i++) {
-                if (child->parent == reap_list[i]) {
-                    child->parent = NULL;
+        {
+            list_t *pos = init_task_union.task.list.next;
+            while (pos != &init_task_union.task.list && reap_count < 64) {
+                if ((uintptr_t)pos < 0x1000) {
+                    log_err("[sched] zombie scan: corrupted list pointer %p\n", (void *)pos);
                     break;
+                }
+                task_t *t = container_of(pos, task_t, list);
+                pos = task_list_next(pos);
+                if (t->state != TASK_ZOMBIE || t == current) continue;
+                if (t->on_rq) continue;  // not yet dequeued — skip
+
+                int reap = 0;
+                if (t->flags & PF_REAPED) reap = 1;
+                else if (t->flags & PF_KTHREAD) reap = 1;
+                else if (t->parent == NULL) reap = 1;
+                else if (t->parent->state == TASK_ZOMBIE) reap = 1;
+
+                if (reap) reap_list[reap_count++] = t;
+            }
+        }
+
+        if (reap_count > 0) {
+            list_t *pos = init_task_union.task.list.next;
+            while (pos != &init_task_union.task.list) {
+                if ((uintptr_t)pos < 0x1000) break;
+                task_t *child = container_of(pos, task_t, list);
+                pos = task_list_next(pos);
+                if (!child->parent) continue;
+                for (int i = 0; i < reap_count; i++) {
+                    if (child->parent == reap_list[i]) {
+                        child->parent = NULL;
+                        break;
+                    }
                 }
             }
         }
-    }
 
-    // Pass 3: unlink and free zombie resources.
-    // thread and fpu_save are separate kmalloc allocations — freed inline.
-    // stack_alloc_base and files are deferred via deferred_free() to avoid
-    // use-after-free (stack embeds task_t+list node; files_free is slow).
-    for (int i = 0; i < reap_count; i++) {
-        task_t *t = reap_list[i];
-        list_del(&t->list);
-        t->list.next = NULL;
-        t->list.prev = NULL;
-        if (t->thread)
-            kfree(t->thread);
-        if (t->files)
-            deferred_files_free(t->files);
-        if (t->fpu_save)
-            kfree(t->fpu_save);
-        if (t->stack_alloc_base)
-            deferred_kfree(t->stack_alloc_base);
-    }
-
-    // ── Wake tasks whose blocking conditions are met ─────
-    sched_unblock_blocked();
-
-    // ── Priority scan (inside lock) ──────────────────────
-    // Pick the RUNNING task with the highest remaining quantum
-    // on this CPU.  Higher-priority tasks get larger initial
-    // counter values and are selected first; as their counter
-    // decays they naturally yield to others.
-    task_t *best = NULL;
-    int64_t best_counter = -1;
-    next = container_of(init_task_union.task.list.next, task_t, list);
-    while (next != &init_task_union.task) {
-        if (next->state == TASK_RUNNING &&
-            next->cpu == (int)this_cpu()->cpu_id &&
-            next != this_cpu()->idle &&
-            next->counter > best_counter) {
-            best_counter = next->counter;
-            best = next;
+        for (int i = 0; i < reap_count; i++) {
+            task_t *t = reap_list[i];
+            list_del(&t->list);
+            t->list.next = NULL;
+            t->list.prev = NULL;
+            if (t->thread) kfree(t->thread);
+            if (t->files) deferred_files_free(t->files);
+            if (t->fpu_save) kfree(t->fpu_save);
+            if (t->stack_alloc_base) deferred_kfree(t->stack_alloc_base);
         }
-        list_t *nxt = task_list_next(&next->list);
-        if (!nxt) break;
-        next = container_of(nxt, task_t, list);
-    }
-    if (best) {
-        next = best;
+
+        sched_unblock_blocked();
         spin_unlock_irqrestore(&reap_lock, reap_flags);
-        goto do_switch;
     }
 
-    spin_unlock_irqrestore(&reap_lock, reap_flags);
-    }
-
-    // No other RUNNING task found — give current a fresh quantum
-    if (current->state == TASK_RUNNING) {
-        current->counter = current->priority > 0 ? current->priority : 1;
-        this_cpu()->need_resched = 0;
-        return;
-    }
-
-    // Last resort: this CPU's idle task
+    // ── 4. Pick next task (rbtree O(log n)) ─────────────────
+    task_t *next;
     {
-        percpu_t *me = this_cpu();
-        if (me->idle && me->idle->state == TASK_RUNNING) {
-            next = me->idle;
-            goto do_switch;
-        }
+        uint64_t rq_flags = spin_lock_irqsave(&rq->rq_lock);
+        next = pick_eevdf(rq);
+        if (next && next != rq->idle)
+            dequeue_task(next, rq);
+        spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
     }
 
-    return;  // nothing to switch to
+    // ── 5. Fallback to idle ─────────────────────────────────
+    if (!next || next->state != TASK_RUNNING) {
+        if (next)
+            log_err("sched: orphan task %d (state=%ld), falling back to idle\n",
+                    (int)next->pid, (long)next->state);
+        next = rq->idle;
+        if (!next) return;
+    }
 
-do_switch:
-    next->counter = next->priority > 0 ? next->priority : 1;
-    this_cpu()->need_resched = 0;
+    // ── 6. Update min_vruntime ──────────────────────────────
+    if (next != rq->idle && next->vruntime > rq->min_vruntime)
+        rq->min_vruntime = next->vruntime;
+
+    rq->need_resched = 0;
     switch_to(current, next);
 }
 
