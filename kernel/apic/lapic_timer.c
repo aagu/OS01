@@ -119,7 +119,10 @@ void lapic_timer_start(uint32_t freq_hz)
 void lapic_timer_handler(pt_regs_t *regs __attribute__((unused)),
                          uint64_t error_code __attribute__((unused)))
 {
-    this_cpu()->need_resched = 1;
+    // BSP already receives scheduling ticks from PIT (IRQ0).
+    // Only set need_resched on APs, avoiding double-entry on BSP.
+    if (cpu_id() != 0)
+        this_cpu()->need_resched = 1;
     this_cpu()->watchdog_counter++;
     lapic_eoi();
 }

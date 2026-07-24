@@ -68,7 +68,7 @@ static void tty_wake_waiters(tty_t *tty)
         list_t *node = tty->read_wait.next;
         list_del_init(node);
         task_t *t = container_of(node, task_t, io_wait_node);
-        t->state = TASK_RUNNING;
+        task_wake(t);
     }
 
     // 2. Cascade-wake all poll waiters (fd_poll path)

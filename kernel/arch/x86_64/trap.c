@@ -1890,7 +1890,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         // otherwise the signal won't take effect until the
         // target is woken by I/O or a timer tick.
         if (target->state == TASK_INTERRUPTIBLE)
-            target->state = TASK_RUNNING;
+            task_wake(target);
 
         regs->rax = 0;
         break;

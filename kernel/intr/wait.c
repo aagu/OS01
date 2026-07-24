@@ -37,7 +37,7 @@ void wait_queue_wake_one(wait_queue_t *wq)
         list_t *node = wq->head.next;
         list_del_init(node);
         task_t *t = container_of(node, task_t, io_wait_node);
-        t->state = TASK_RUNNING;
+        task_wake(t);
     }
     spin_unlock_irqrestore(&wq->lock, flags);
 }
@@ -49,7 +49,7 @@ void wait_queue_wake_all(wait_queue_t *wq)
         list_t *node = wq->head.next;
         list_del_init(node);
         task_t *t = container_of(node, task_t, io_wait_node);
-        t->state = TASK_RUNNING;
+        task_wake(t);
     }
     spin_unlock_irqrestore(&wq->lock, flags);
 }

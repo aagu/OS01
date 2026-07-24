@@ -104,7 +104,7 @@ int do_futex_wake(int *uaddr, int val)
         list_t *node = bucket->wq.head.next;
         list_del_init(node);
         task_t *t = container_of(node, task_t, io_wait_node);
-        t->state = TASK_RUNNING;
+        task_wake(t);
         woken++;
     }
 
