@@ -21,6 +21,7 @@ C_SOURCES := \
     $(wildcard dirent/*.c) \
     $(wildcard errno/*.c) \
     $(wildcard list/*.c) \
+    $(wildcard rbtree/*.c) \
     $(wildcard stdio/*.c) \
     $(wildcard stdlib/*.c) \
     $(wildcard string/*.c) \
