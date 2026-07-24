@@ -461,7 +461,7 @@ uint64_t do_exit(uint64_t exit_code)
     if (parent) {
         uint64_t ps = parent->state;
         if (ps == TASK_INTERRUPTIBLE) {
-            parent->state = TASK_RUNNING;
+            // EEVDF: don't set RUNNING here — task_wake handles it at end of do_exit
             parent_woken = 1;
         } else if (ps == TASK_RUNNING) {
             // SIGCHLD already woke the parent.
@@ -487,12 +487,11 @@ uint64_t do_exit(uint64_t exit_code)
     // scan races.  parent_woken is always 1 for normal exit
     // (parent in waitpid = INTERRUPTIBLE or RUNNING).
     if (parent_woken) {
-        debug_task("exit: p%d→p%d direct\n", current->pid, parent->pid);
-        switch_to(current, parent);
-        // unreachable — switch_to never returns
+        task_wake(parent);
     }
+    current->state = TASK_ZOMBIE;
     schedule();
-    return 0;  // never reached — schedule() does switch_to
+    return 0;  // unreachable
 }
 
 /*
@@ -823,6 +822,7 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     thd->rip  = (uint64_t)ret_from_intr;   // first entry via RESTORE_ALL → iretq
 
     tsk->state = TASK_RUNNING;
+    enqueue_task(tsk, &percpu_data[tsk->cpu]);
 
     // The first user task we create is "init" — track it globally.
     if (!user_init_task) {
@@ -1202,8 +1202,13 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
 
     // Inherit from parent (safe value-copy fields, not pointers)
     tsk->flags       = current->flags;
-    tsk->counter     = current->counter;
     tsk->addr_limit  = current->addr_limit;
+
+    // EEVDF: fair starting vruntime
+    {
+        uint64_t fair_start = percpu_data[cpu_id()].min_vruntime;
+        tsk->vruntime = current->vruntime < fair_start ? current->vruntime : fair_start;
+    }
 
     // Inherit signal handlers (shallow copy of sighand array — values, not pointers)
     for (int sig = 0; sig < NSIG; sig++)
@@ -1285,6 +1290,8 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
     // Parent: do NOT change regs->rip — returns via error_code → RESTORE_ALL
 
     tsk->state = TASK_RUNNING;
+    enqueue_task(tsk, &percpu_data[tsk->cpu]);
+    enqueue_task(tsk, &percpu_data[tsk->cpu]);
     return tsk->pid;   // parent sees child PID
 }
 
