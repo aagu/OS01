@@ -2,6 +2,7 @@
 #define _KERNEL_PERCPU_H
 
 #include <stdint.h>
+#include <kernel/arch/spinlock.h>
 #include <kernel/task.h>
 #include <kernel/arch/percpu.h>
 
@@ -34,9 +35,11 @@ typedef struct percpu {
     // ── IPI / TLB shootdown ──
     uint32_t tlb_wanted;        // atomic flag: TLB invalidate requested
     uint32_t tlb_ack;           // atomic counter: shootdown ACK
-    list_t run_queue;
+    rbtree_root_t run_queue;
     struct task_struct *idle;
     uint64_t schedule_count;    // number of times schedule() ran
+    uint64_t min_vruntime;      // per-CPU tracking of minimum vruntime
+    spinlock_T rq_lock;          // protects rbtree operations
     uint64_t watchdog_counter;  // incremented each timer tick, reset by schedule()
     uint64_t tsc_boot;          // TSC value after AP startup (for warp check)
 } percpu_t;

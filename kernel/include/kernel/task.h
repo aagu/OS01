@@ -8,6 +8,7 @@
 #include <kernel/arch/segment.h>
 #include <kernel/file.h>
 #include <uapi/time.h>
+#include <rbtree.h>
 #include <stdbool.h>
 
 /* ── Blocker framework ─────────────────────────── */
@@ -119,6 +120,11 @@ typedef struct task_struct
     int64_t signal; // signal mask, e.g. 0x0000000000000001 means SIGINT
     int64_t blocked; // signal mask of blocked signals (bit N = 1 means signal N+1 is blocked)
     int64_t priority; // priority, used in priority scheduling
+    // ── EEVDF scheduling fields ────────────────────────
+    rbtree_node_t rb_node;    // node on per-CPU runqueue rbtree
+    uint64_t      vruntime;   // accumulated virtual runtime (ticks)
+    uint64_t      deadline;   // vruntime + slice, rbtree sort key
+    bool          on_rq;      // true when on a CPU's runqueue
     uint32_t cpu; // CPU affinity — which CPU owns this task (for SMP)
 
     blocker_t blocker;              // current block state (BLOCKER_NONE = not blocked)
@@ -285,5 +291,8 @@ struct task_struct *create_kthread(uint64_t (*fn)(uint64_t), uint64_t arg,
  * corruption of code/data below. */
 #define USER_STACK_BASE 0x800000UL
 #define USER_STACK_TOP  (USER_STACK_BASE + 0x200000UL - 16)
+
+/* ── EEVDF scheduler ─────────────────────────── */
+void task_wake(struct task_struct *t);
 
 #endif
