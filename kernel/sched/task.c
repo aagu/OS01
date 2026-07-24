@@ -1291,7 +1291,6 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
 
     tsk->state = TASK_RUNNING;
     enqueue_task(tsk, &percpu_data[tsk->cpu]);
-    enqueue_task(tsk, &percpu_data[tsk->cpu]);
     return tsk->pid;   // parent sees child PID
 }
 
