@@ -1,7 +1,7 @@
-# OS01 优化路线图 v9
+# OS01 优化路线图 v10
 
-> **基准**: `1aaf2ee` (poll/select 完成 — 18 commits, 19 files, +875/−114)
-> **日期**: 2026-07-18
+> **基准**: `068fbba` (select/pselect 完成 — 118/118 pass)
+> **日期**: 2026-07-24
 
 标记: ✅ 已完成 | 🔴 P0 本迭代 | 🟡 P1 本月 | 🟢 P2 下月 | 🔵 P3 远期
 
@@ -13,11 +13,11 @@
 |-------|------|------|
 | **Phase 1: COW + 内存** | Copy-On-Write Fork, mmap/mprotect/munmap, demand paging | ✅ |
 | **Phase 2: 内核基础设施** | arch 抽象层、子系统注册框架、多架构清理（aarch64 桩到位）、SMP (percpu+GS-base)、canary、hang detector、debug channels、kallsyms、FPU 保存 | ✅ |
-| **Phase 3: 信号 + 调度** | do_signal_delivery、Ctrl-C→SIGINT、systest 78/78、优先级 O(n) 调度器 | ✅ |
-| **Phase 4: 文件系统** | ext2 只读、FAT32 R/W、tmpfs、devfs、procfs、GPT 双分区 | ✅ |
+| **Phase 3: 信号 + 调度** | do_signal_delivery、Ctrl-C→SIGINT、systest 118/118、优先级 O(n) 调度器 | ✅ |
+| **Phase 4: 文件系统** | ext2 R/W、FAT32 R/W、tmpfs、devfs、procfs、GPT 双分区 | ✅ |
 | **Phase 5: 设备驱动** | 8259A PIC、APIC/IOAPIC/LAPIC、PIT/LAPIC timer、PS/2 键盘、16550 串口、AHCI SATA | ✅ |
 | **Phase 6: 用户态** | busybox ash shell（方向键行编辑+光标闪烁+raw mode TTY）、9 applet、init、libc (printf/malloc/string/syscall wrapper)、VT100 CSI 终端模拟器 | ✅ |
-| **Phase 7: poll/select** | poll_table + 双队列级联唤醒、pipe wait queue 重构、TTY poll、devfs poll 转发、PIT 超时、systest 78/78 | ✅ |
+| **Phase 7: poll/select** | poll_table + 双队列级联唤醒、select/pselect 系统调用（SYS_select=50 + SYS_pselect6=51）、do_poll_core 共享轮询循环、pselect6 sigmask 原子 swap、systest 118/118 | ✅ |
 
 ---
 
@@ -26,32 +26,30 @@
 ```
 P0 (本迭代 — 本月):
  1. EEVDF 调度器              — O(n)→O(log n)，公平调度，反饿死
- 2. ext2 读写                 — 完成文件系统故事，/ 可写
+ 2. lwIP 网络栈 + E1000       — 第一个网络能力 (socket poll 回调已就绪)
 
 P1 (本月):
- 3. lwIP 网络栈 + E1000       — 第一个网络能力 (socket poll 回调已就绪)
- 4. 多架构 aarch64 ✅ 清理     — 8 dispatch 头文件 + 7 aarch64 桩 + task.c 拆分（20 commits）
- 5. /proc/<pid>/fd/ + maps   — 进程级调试
- 6. 日志级别 ✅               — ERR/WARN/INFO/DEBUG，开发效率质变
- 7. rwlock/seqlock            — VFS /proc 多核缩放
- 8. 用户栈 canary             — 用户态加固
+ 3. 多架构 aarch64 ✅ 清理     — 8 dispatch 头文件 + 7 aarch64 桩 + task.c 拆分（20 commits）
+ 4. /proc/<pid>/fd/ + maps   — 进程级调试
+ 5. 日志级别 ✅               — ERR/WARN/INFO/DEBUG，开发效率质变
+ 6. rwlock/seqlock            — VFS /proc 多核缩放
+ 7. 用户栈 canary             — 用户态加固
 
 P2 (下月):
- 9. 更多 busybox applet      — grep/sed/find (依赖 poll/select ✅ + regex)
-10. select() 系统调用          — fd_set → pollfd 适配层 (do_poll 已就绪)
-11. aarch64 启动              — head.S + GIC + Generic Timer（清理已就绪）
-12. readlink/symlink          — ext2 写驱动的前置条件
-13. 动态链接器                — 共享 libc，减小二进制体积
+ 8. 更多 busybox applet      — grep/sed/find (依赖 poll/select ✅ + regex)
+ 9. aarch64 启动              — head.S + GIC + Generic Timer（清理已就绪）
+10. readlink/symlink          — ext2 写驱动的前置条件
+11. 动态链接器                — 共享 libc，减小二进制体积
 
 P3 (远期):
-14. ASLR                      — 用户态安全
-15. SMP 负载均衡              — push-pull / work stealing
-16. UBSan + KASan            — 运行时 bug 检测
-17. 真机启动 (USB)            — "不能在真机上测试就别实现"
-18. 网络进阶 (AF_UNIX, socketpair)
-19. GUI 框架 (参考 opuntiaOS + HackOS)
-20. Alpine apk 用户态        — cavOS 路线，直接安装 musl 二进制包
-21. NVMe 驱动                — 替代 AHCI
+12. ASLR                      — 用户态安全
+13. SMP 负载均衡              — push-pull / work stealing
+14. UBSan + KASan            — 运行时 bug 检测
+15. 真机启动 (USB)            — "不能在真机上测试就别实现"
+16. 网络进阶 (AF_UNIX, socketpair)
+17. GUI 框架 (参考 opuntiaOS + HackOS)
+18. Alpine apk 用户态        — cavOS 路线，直接安装 musl 二进制包
+19. NVMe 驱动                — 替代 AHCI
 ```
 
 **依赖链:**
@@ -60,7 +58,7 @@ P3 (远期):
        │
        └─────→ lwIP 网络栈 (socket poll 回调 ✅)
        
-  ext2 只读 ──→ ext2 读写 ──→ readlink/symlink
+  ext2 R/W ✅ ──→ readlink/symlink
        
   rwlock ──→ VFS 多核缩放 (VFS lookup, /proc read)
 ```
@@ -71,7 +69,7 @@ P3 (远期):
 
 ### P0: 本迭代 (预计 2-3 周)
 
-#### 1. EEVDF 公平调度器 [借鉴 Tilck] 🟡 P1
+#### 1. EEVDF 公平调度器 [借鉴 Tilck]
 
 **动机:** 当前 `schedule()` 扫描全局链表 O(n)，`max-counter + priority` 策略无公平性保证。EEVDF 是 Linux 6.6+ 的生产级算法。
 
@@ -82,24 +80,7 @@ P3 (远期):
 | eligibility + deadline 选择 | 1 天 | `vruntime ≤ avg_vruntime` 且 deadline 最早 |
 | **收益:** | | 反饿死 + 响应时间可预测 + 高负载下不减速 |
 
-#### 2. ext2 读写驱动 🟡 P2
-
-**动机:** 当前 ext2 只读，`/` 挂了但不可写。要完成文件系统故事，需要 inode/block 分配。
-
-| 任务 | 工作量 | 借鉴 |
-|------|--------|------|
-| block bitmap 分配/释放 | 半天 | Aquila (221 行) |
-| inode bitmap 分配 | 半天 | Aquila |
-| 目录操作 (mkdir/rmdir) | 1 天 | link/unlink/rename |
-| ext2_write/truncate | 1 天 | VFS write path |
-
-**收益:** `/` 可写，系统调用具备持久化能力。
-
----
-
-### P1: 本月
-
-#### 3. lwIP 网络栈 + E1000 驱动 🟡 P1
+#### 2. lwIP 网络栈 + E1000 驱动 [借鉴 cavOS]
 
 **动机:** 最大的"缺失功能"。网络解锁 telnet/ssh/http/nslookup 等无限可能性。poll/select 就绪为 socket poll 提供了直接的支持。
 
@@ -112,7 +93,13 @@ P3 (远期):
 
 **收益:** 网络栈是从"玩具 OS"到"可用 OS"的最大一步。
 
-#### 4. 多架构 aarch64 🟡 P1
+**状态:** `lwIP-dev` 分支已有 10+ commit（e1000 + virtio-net + lwIP 2.2.1 + socket 层 + DHCP + MSI-X），待合并。
+
+---
+
+### P1: 本月
+
+#### 3. 多架构 aarch64
 
 **状态:** 基础清理完成。ARCH 参数化 + 8 个 dispatch 头文件 + task.c 拆分 + 7 个 aarch64 桩到位。
 
@@ -125,7 +112,7 @@ P3 (远期):
 | 时钟/定时器 | opuntiaOS | Generic Timer |
 | MMU 初始化 | ArvernOS | TTBR0_EL1 设置 |
 
-#### 5. /proc 完善 🟡 P1
+#### 4. /proc 完善
 
 | 任务 | 工作量 | 说明 |
 |------|--------|------|
@@ -133,14 +120,14 @@ P3 (远期):
 | `/proc/<pid>/maps` | 半天 | 查看 VMA 布局 |
 | `/proc/<pid>/status` 扩展 | 半天 | signal mask、ppid、utime/stime |
 
-#### 6. rwlock / seqlock 🟡 P2
+#### 5. rwlock / seqlock
 
 | 任务 | 工作量 | 说明 |
 |------|--------|------|
 | rwlock 实现 | 半天 | 读共享/写独占 |
 | VFS lookup 路径加锁 | 半天 | `/proc` 多核缩放 |
 
-#### 7. 用户栈 canary 🟡 P1
+#### 6. 用户栈 canary
 
 | 任务 | 工作量 | 说明 |
 |------|--------|------|
@@ -151,7 +138,7 @@ P3 (远期):
 
 ### P2: 下月
 
-#### 8. 更多 busybox applet 🟢 P2
+#### 7. 更多 busybox applet
 
 > poll/select ✅ → 阻塞条件已满足。
 
@@ -162,18 +149,11 @@ P3 (远期):
 | awk | regex + FPU | regex + 浮点数解析 |
 | vi | TTY termios + SIGWINCH | 完整终端控制 |
 
-#### 9. select() 系统调用 🟢 P2
+#### 8. aarch64 启动
 
-| 任务 | 工作量 | 说明 |
-|------|--------|------|
-| do_select() 适配层 | 1 小时 | `fd_set → pollfd[] → do_poll() → revents → fd_set` |
-| `sys_select.h` + libc | 半小时 | SYS_select(23) 已有编号，替换 -ENOSYS stub |
+见 P1 #3 的剩余工作。
 
-#### 10. aarch64 启动 🟢 P2
-
-见 P1 #4 的剩余工作。
-
-#### 11. readlink/symlink 🟢 P2
+#### 9. readlink/symlink
 
 | 任务 | 说明 |
 |------|------|
@@ -181,7 +161,7 @@ P3 (远期):
 | VFS 软连接支持 | 跨文件系统路径解析 |
 | ext2 symlink inode | 快速符号链接 (in-inode) |
 
-#### 12. 动态链接器 🟢 P2
+#### 10. 动态链接器
 
 | 任务 | 借鉴 | 说明 |
 |------|------|------|
@@ -194,89 +174,80 @@ P3 (远期):
 
 | # | 任务 | 借鉴 | 说明 |
 |---|------|------|------|
-| 13 | ASLR | — | 随机化加载基址 |
-| 14 | SMP 负载均衡 | Tilck EEVDF | push-pull / work stealing |
-| 15 | UBSan + KASan | ArvernOS | 内核地址消毒 |
-| 16 | 真机 USB 启动 | Tilck | "不能在真机上测试就别实现" |
-| 17 | AF_UNIX sockets | cavOS | 本地 IPC |
-| 18 | GUI 框架 | opuntiaOS + HackOS | Window Server + Compositor |
-| 19 | Alpine apk 用户态 | cavOS | musl 二进制包 |
-| 20 | NVMe 驱动 | — | 替代 AHCI |
+| 11 | ASLR | — | 随机化加载基址 |
+| 12 | SMP 负载均衡 | Tilck EEVDF | push-pull / work stealing |
+| 13 | UBSan + KASan | ArvernOS | 内核地址消毒 |
+| 14 | 真机 USB 启动 | Tilck | "不能在真机上测试就别实现" |
+| 15 | AF_UNIX sockets | cavOS | 本地 IPC |
+| 16 | GUI 框架 | opuntiaOS + HackOS | Window Server + Compositor |
+| 17 | Alpine apk 用户态 | cavOS | musl 二进制包 |
+| 18 | NVMe 驱动 | — | 替代 AHCI |
 
 ---
 
-## poll/select 实施总结
+## select/pselect 实施总结
 
 ### 架构
 
 ```
-               libc poll(fds,n,to)
-                      │ SYS_poll (48)
-              ┌───────▼────────┐
-              │   do_poll()    │  poll_table_t (栈)
-              │  poll_table    │  .wq + .entries[16]
-              └──┬───┬───┬─────┘
-                 │   │   │
-      ┌──────────┘   │   └──────────┐
-      ▼              ▼              ▼
-  ┌────────┐   ┌────────┐   ┌──────────┐
-  │ pipe_t │   │ tty_t  │   │ devfs    │
-  │.r_wait │   │.r_wait │   │.poll()   │
-  │.r_poll │   │.r_poll │   │→tty_poll │
-  │.w_wait │   │cooked  │   └──────────┘
-  │.w_poll │   │_lock   │
-  └────────┘   └────────┘
+              libc
+              ┌──────────────────────────────┐
+              │ select(nfds, r, w, e, tv)     │
+              │ pselect(nfds, r, w, e, ts, m) │
+              └──────────────────────────────┘
+                       │ SYS_select=50 / SYS_pselect6=51
+                       ▼
+              kernel/fs/select.c
+              ┌─────────────────────────────────────────┐
+              │ do_select(nfds, r, w, e, tv)            │
+              │   → fd_set → pollfd[nfds]               │
+              │   → do_poll_core(pollfd, nfds, ms, &pt) │
+              │   → revents → fd_set                    │
+              │                                         │
+              │ do_pselect6(nfds, r, w, e, ts, packed)  │
+              │   → 解包 sigmask + swap + restore        │
+              │   → 同上                                 │
+              └─────────────────────────────────────────┘
+                       │
+                       ▼
+              kernel/fs/poll.c
+              ┌─────────────────────────────────────────┐
+              │          do_poll_core() (共享)           │
+              │ do_poll() = copy + do_poll_core + copy  │
+              └─────────────────────────────────────────┘
 ```
 
-- **双队列**: `*_wait` (wait_queue_t, 直接阻塞 task) + `*_poll` (list_t, poll entry)
-- **级联唤醒**: fd 就绪 → walk `*_poll` → `wake_all(e->poll_wq)` → 重扫所有 fd → 返回 revents
-- **POSIX 合规**: POLLHUP/POLLERR 即使未请求也填入 revents；任意未阻塞信号中断返回 EINTR
+- **poll_table_t 动态化**: `entries[16]` → `*entries + max_entries`，支持 select 的 1024 fd
+- **do_poll_core 共享**: poll 和 select/pselect 共享轮询循环，接收内核侧 pollfd[]，不碰用户内存
+- **do_select_common 去重**: select/pselect 共享 fd_set↔pollfd 转换 + 反向映射 + 写回逻辑
+- **pselect6 sigmask 原子性**: goto-out 模式，所有错误路径恢复 blocked
+- **fd_set 128 字节**: `kernel_fd_set { uint64_t __bits[16] }` 匹配 libc `long __fds_bits[16]`
 
 ### 文件变更
 
-| 类别 | 文件 | 行数 |
-|------|------|------|
-| **新增** | `kernel/include/kernel/poll.h` | 82 |
-| **新增** | `kernel/fs/poll.c` | 319 |
-| **新增** | `libc/unistd/poll.c` | 16 |
-| **修改** | `kernel/include/kernel/file.h` — pipe_t 4 新字段 | +8 |
-| **修改** | `kernel/fs/file.c` — pipe wait queue + wake 路径 | +137/−50 |
-| **修改** | `kernel/include/kernel/tty.h` — read_poll + tty_poll 原型 | +8 |
-| **修改** | `kernel/tty/tty.c` — 双队列 wake + tty_poll() | +51 |
-| **修改** | `kernel/fs/devfs.c` — poll 回调 + devfs_poll() | +67 |
-| **修改** | `kernel/include/fs/devfs.h` — API + devfs_poll 声明 | +12 |
-| **修改** | `kernel/arch/x86_64/trap.c` — syscall dispatch + names | +22 |
-| **修改** | `kernel/include/uapi/syscall.h` — SYS_poll/ppoll/select | +5 |
-| **修改** | `kernel/driver/pit.c` — poll 超时回调 | +10 |
-| **修改** | `kernel/kernel/main.c` — devfs poll 参数 | +2 |
-| **修改** | `libc/include/poll.h` — event flags 对齐内核 | +15 |
-| **修改** | `libc/include/sys/syscall.h` — syscall 编号 | +3 |
-| **修改** | `libc/unistd/busybox_stubs.c` — 删除假 poll | −39 |
-| **修改** | `user/systest.c` — 8 poll 测试用例 | +86 |
-| **修复** | `kernel/include/kernel/wait.h` — 消除循环 include | −1 |
-| **修复** | `kernel/futex.c` — 显式 include task.h | +1 |
-| **修复** | `Makefile` — run/run-kvm/debug 统一 AHCI | +14/−2 |
+| 类别 | 文件 | 行数 | 说明 |
+|------|------|------|------|
+| **修改** | `kernel/include/kernel/poll.h` | +24/−8 | poll_table_t 动态化 + do_poll_core 声明 |
+| **修改** | `kernel/fs/poll.c` | +60/−25 | 提取 do_poll_core() + 包装器重构 |
+| **新增** | `kernel/include/kernel/select.h` | 73 | kernel_fd_set、sigset_t、pselect6_sigmask、原型 |
+| **新增** | `kernel/fs/select.c` | 423 | do_select、do_pselect6、do_select_common、do_select_nofds |
+| **修改** | `kernel/arch/x86_64/trap.c` | +15 | SYS_select + SYS_pselect6 dispatch + 移除 sigset_t |
+| **修改** | `kernel/include/uapi/syscall.h` | +1 | SYS_pselect6=51 |
+| **新增** | `test/include/kernel/select.h` | 73 | 镜像 |
+| **修改** | `test/include/kernel/poll.h` | 镜像 | 同步动态化 |
+| **新增** | `libc/include/sys/select.h` | 59 | FD_ZERO/SET/CLR/ISSET + select/pselect 声明 |
+| **新增** | `libc/unistd/select.c` | 52 | libc wrapper + pselect6 打包 |
+| **修改** | `libc/include/sys/syscall.h` | +1 | SYS_pselect6 |
+| **修改** | `user/systest.c` | +258 | 10 测试组 (20 个断言) |
+| **修改** | `tests/run_test.py` | +3 | QEMU AHCI 驱动参数 |
 
-**总计: 18 commits, 19 files, +875 / −114**
+**总计: 11 commits, 14 files, +1042 / −33**
 
-### systest 结果: 78/78 passed (poll 8/8)
+### systest 结果: 118/118 passed (poll 8/8 + select 20/20)
 
 ---
 
-## 开源 OS 项目借鉴 — 下一步行动
-
-| 项目 | 已经用到的 | 还可以拿来的 |
-|------|----------|-------------|
-| **Tilck** | EEVDF 调度思路、3 层测试、hang detector | EEVDF 代码结构、load balancing、GDB helper |
-| **cavOS** | lwIP 网络栈参考、动态链接、Alpine apk 路线 | socket syscall 层、E1000 驱动、动态链接器加载流程 |
-| **Aquila** | — | **ext2 R/W 核心 (~221 行)**: inode/block alloc+free |
-| **ArvernOS** | 多架构抽象思路、aarch64 dispatch 桩模式 | 分层日志系统、UBSan、aarch64 head.S/GIC/Generic Timer |
-| **opuntiaOS** | devman 子系统注册框架 | GICv2 驱动、Generic Timer、Window Server GUI |
-| **HackOS** | — | 可缩放字体渲染器、VESA 图形模式 |
-
----
-
-## 已完成汇总 (截至 2026-07-18)
+## 已完成汇总 (截至 2026-07-24)
 
 | 项目 | 工作量 | 日期 |
 |------|--------|------|
@@ -300,8 +271,24 @@ P3 (远期):
 | **多架构清理收尾** (8 dispatch + 7 aarch64 桩) | 1 天 | 07-15 |
 | **busybox ash 方向键+行编辑** (VT100 CSI + terminal + FIONREAD) | 2 天 | 07-17 |
 | arch/x86_64 头文件引用清理 | 1 小时 | 07-17 |
-| **poll/select syscall** (poll_table + 双队列 wake + pipe/tty/devfs + PIT timeout + systest 78/78) | 2 天 | 07-18 |
+| **poll syscall** (poll_table + 双队列 wake + pipe/tty/devfs + PIT timeout) | 2 天 | 07-18 |
 | Makefile QEMU targets 统一 AHCI (run/run-kvm/debug) | 10 分钟 | 07-18 |
+| **ext2 读写** (alloc_block/inode、create/mkdir/rmdir/unlink/rename/truncate、selftest) | 2 天 | 07-19 |
+| refactor: 固定数组→堆分配 (VFS name/cwd + mount_table + pipe buf + ext2 buf) | 1 天 | 07-19 |
+| **select/pselect syscall** (poll_table 动态化 + do_poll_core 提取 + 适配层 + pselect6 sigmask 原子性 + systest 118/118) | 2 天 | 07-24 |
+
+---
+
+## 开源 OS 项目借鉴 — 下一步行动
+
+| 项目 | 已经用到的 | 还可以拿来的 |
+|------|----------|-------------|
+| **Tilck** | EEVDF 调度思路、3 层测试、hang detector | EEVDF 代码结构、load balancing、GDB helper |
+| **cavOS** | lwIP 网络栈参考、动态链接、Alpine apk 路线 | socket syscall 层、E1000 驱动、动态链接器加载流程 |
+| **Aquila** | **ext2 R/W 核心 (~221 行)**: inode/block alloc+free | — |
+| **ArvernOS** | 多架构抽象思路、aarch64 dispatch 桩模式 | 分层日志系统、UBSan、aarch64 head.S/GIC/Generic Timer |
+| **opuntiaOS** | devman 子系统注册框架 | GICv2 驱动、Generic Timer、Window Server GUI |
+| **HackOS** | — | 可缩放字体渲染器、VESA 图形模式 |
 
 ---
 
@@ -313,15 +300,15 @@ P3 (远期):
 | 2 | COW 引用计数 | `subpage_pool.cow_count[512]` | 无需改 struct Page |
 | 3 | 调度器 | EEVDF (Tilck 路线) | Linux 6.6+ 生产级算法 |
 | 4 | 网络栈 | lwIP (cavOS 路线) | 快速获得 TCP/IP，socket poll 回调已就绪 |
-| 5 | 文件系统 | FAT32 + ext2 (只读) + tmpfs + devfs + procfs | ext2 只读 370 行，UNIX 权限完整 |
-| 6 | 测试 | Tilck 3 层 (unit+self+sys) | 78/78 systest pass |
+| 5 | 文件系统 | FAT32 + ext2 R/W + tmpfs + devfs + procfs | ext2 读写完整，UNIX 权限完整 |
+| 6 | 测试 | Tilck 3 层 (unit+self+sys) | 118/118 systest pass |
 | 7 | 用户态 | busybox → 动态链接 → Alpine apk | cavOS 已验证可行 |
 | 8 | COW PTE 标记 | `PAGE_COW` (bit 10) | bit 9 已被 `PAGE_PROTNONE` 占用 |
 | 9 | COW 并发保护 | `subpage_lock` (已有 spinlock) | 无需新增锁 |
-| 10 | 内核栈 canary | 全局 `__stack_chk_guard` (rdtsc 种子) + `-fstack-protector-strong` | clang 生成 RIP-relative 全局引用，无需 TLS/FS |
+| 10 | 内核栈 canary | 全局 `__stack_chk_guard` (rdtsc 种子) | clang 生成 RIP-relative 全局引用，无需 TLS/FS |
 | 11 | 磁盘布局 | GPT 双分区 (FAT32 ESP + ext2 root) | UEFI 标准，内核自解析 GPT |
 | 12 | 子系统注册模式 | 运行时 `register_subsys()` | 不引入 ELF section 依赖 |
-| 13 | 多架构 dispatch | `arch/*.h` 用 `#ifdef __x86_64__`/`#elif __aarch64__` | ISP 在 include 层解决 |
+| 13 | 多架构 dispatch | `arch/*.h` 用 `#ifdef __x86_64__` / `#elif __aarch64__` | ISP 在 include 层解决 |
 | 14 | VT100 CSI 终端模拟器 | `console_putchar()` state machine (~330 行) | framebuffer 与终端分离 |
 | 15 | TTY ioctl (TCGETS/TCSETS) | tty_ioctl() 映射 ICANON/ECHO ↔ termios | ash 可切 raw mode |
 | 16 | 键盘 VT100 转义序列 | K_UP/DOWN/LEFT/RIGHT → ESC [ A/B/C/D | canonical 模式静默丢弃 |
@@ -329,3 +316,6 @@ P3 (远期):
 | 18 | pipe 阻塞语义 | wait_queue_t 替代 busy-loop schedule() | 双队列：read_wait/write_wait (task) + read_poll/write_poll (poll entry) |
 | 19 | poll 超时 | jiffies + PIT 100Hz callback → wake_all(poll_wq) | 级联唤醒路径无冗余扫描 |
 | 20 | QEMU 设备模型 | `-drive` + `ahci/ide-hd` 替代 `-hda` | 与 GPT 分区表 + AHCI 驱动一致 |
+| 21 | select/pselect 适配层 | `do_poll_core` 共享 + `do_select_common` 去重 | poll 和 select 共享轮询循环；select/pselect 共享 fd_set↔pollfd 转换 |
+| 22 | poll_table 动态化 | `entries[]` → `*entries + max_entries` | select 支持 1024 fd，poll 保持 16 fd 不变 |
+| 23 | pselect6 sigmask 原子性 | goto-out 模式 + `mask_swapped` 标志 | 所有错误路径恢复 blocked；nfds==0 路径也做 atomic swap |
