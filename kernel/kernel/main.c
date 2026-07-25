@@ -137,7 +137,8 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     spin_init(&Pos.lock);
 
     load_TR(8);
-    set_tss64(0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7800, 0x7400,
+    set_tss64(TSS64_Table,
+              0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7800, 0x7400,
               0, 0, 0, 0);
 
     sys_vector_install();      // syscall + exception IDT entries
@@ -268,6 +269,7 @@ int kernel_main(struct BOOT_INFO *bootinfo)
 
             if (cpu_idx == 0) {
                 percpu_data[0].tss = &init_tss[0];
+                percpu_data[0].tss_hw = TSS64_Table;   // BSP uses legacy global TSS
                 percpu_install_gs(0);
                 percpu_data[0].online = 1;
                 serial_printk("percpu: BSP  (cpu=%u, apic_id=%u) online\n",

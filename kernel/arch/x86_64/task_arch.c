@@ -10,7 +10,9 @@ void arch_task_init_platform(void)
     init_thread.cr3 = (uint64_t)init_mm.pml4;
 
     // Program BSP TSS with kernel stack pointers and IST entries.
-    set_tss64(init_thread.rsp0, init_tss[0].rsp1, init_tss[0].rsp2,
+    // BSP uses the legacy global TSS64_Table as its hardware TSS.
+    set_tss64(TSS64_Table,
+              init_thread.rsp0, init_tss[0].rsp1, init_tss[0].rsp2,
               init_tss[0].ist1, init_tss[0].ist2, init_tss[0].ist3,
               init_tss[0].ist4, init_tss[0].ist5, init_tss[0].ist6,
               init_tss[0].ist7);

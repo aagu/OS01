@@ -87,14 +87,8 @@ void ap_entry(void)
         :: "r"((uint16_t)KERNEL_DS) : "memory", "rax"
     );
 
-    // TSS — copy IST values from BSP template
+    // TSS — per-CPU, installed by smp_boot_aps via set_tss_descriptor.
     cpu->tss = &init_tss[cpu->cpu_id];
-    *cpu->tss = init_tss[0];
-    cpu->tss->rsp0 = 0xffff800000007c00;
-    set_tss64(cpu->tss->rsp0, cpu->tss->rsp1, cpu->tss->rsp2,
-              cpu->tss->ist1, cpu->tss->ist2, cpu->tss->ist3,
-              cpu->tss->ist4, cpu->tss->ist5, cpu->tss->ist6,
-              cpu->tss->ist7);
 
     // Initialise the idle task's thread (allocated by smp_boot_aps).
     // current = idle task (get_current_task via RSP masking).
@@ -104,6 +98,24 @@ void ap_entry(void)
     cpu->idle->thread->fs   = KERNEL_DS;
     cpu->idle->thread->gs   = KERNEL_DS;
     cpu->idle->thread->cr3  = (uint64_t)init_mm.pml4;
+
+    // Seed the per-CPU TSS with idle-task ring-0 stack + IST values
+    // copied from the BSP template.
+    cpu->tss->rsp0 = cpu->idle->thread->rsp0;
+    cpu->tss->rsp1 = init_tss[0].rsp1;
+    cpu->tss->rsp2 = init_tss[0].rsp2;
+    set_tss64(cpu->tss_hw,
+              cpu->tss->rsp0, cpu->tss->rsp1, cpu->tss->rsp2,
+              init_tss[0].ist1, init_tss[0].ist2, init_tss[0].ist3,
+              init_tss[0].ist4, init_tss[0].ist5, init_tss[0].ist6,
+              init_tss[0].ist7);
+
+    // Load the per-CPU Task Register.  Each CPU has its own TSS
+    // descriptor in the shared GDT at slot 8+2*cpu_id (installed by
+    // smp_boot_aps).  Without this, the CPU would use the BSP's TSS
+    // and corrupt the BSP's ring-0 stack pointer on every context
+    // switch.
+    load_TR(8 + cpu->cpu_id * 2);
 
     // Start per-CPU scheduling tick
     lapic_timer_start(100);
@@ -183,6 +195,13 @@ void smp_boot_aps(void)
         percpu_data[i].idle = idle;
         // Add to the global task list so schedule() can find it.
         list_add_to_before(&init_task_union.task.list, &idle->list);
+
+        // ── Per-CPU TSS descriptor in the shared GDT ──────────
+        // CPU i uses GDT entries [8+2i, 9+2i] → selector (8+2i)<<3.
+        // Without per-CPU TSS areas each core's context-switch path
+        // would overwrite every other core's ring-0 stack pointer.
+        set_tss_descriptor(8 + i * 2, &init_tss[i]);
+        percpu_data[i].tss_hw = &init_tss[i];   // AP uses its own TSS
 
         tdata->cr3     = bsp_cr3;
         tdata->gs_base = (uint64_t)&percpu_data[i];

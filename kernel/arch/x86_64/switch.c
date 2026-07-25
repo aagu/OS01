@@ -19,7 +19,8 @@ void __switch_to(task_t *prev, task_t *next)
     percpu_t *cpu = this_cpu();
     cpu->tss->rsp0 = next->thread->rsp0;
 
-    set_tss64(cpu->tss->rsp0, cpu->tss->rsp1, cpu->tss->rsp2,
+    set_tss64(cpu->tss_hw,
+              cpu->tss->rsp0, cpu->tss->rsp1, cpu->tss->rsp2,
               cpu->tss->ist1, cpu->tss->ist2, cpu->tss->ist3,
               cpu->tss->ist4, cpu->tss->ist5, cpu->tss->ist6,
               cpu->tss->ist7);

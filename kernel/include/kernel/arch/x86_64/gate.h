@@ -214,20 +214,32 @@ static inline void _intr_table_set(uint8_t vector, intr_handler_fn handler,
 /*
 */
 
-inline void __attribute__((always_inline)) set_tss64(unsigned long rsp0,unsigned long rsp1,unsigned long rsp2,unsigned long ist1,unsigned long ist2,unsigned long ist3,
-unsigned long ist4,unsigned long ist5,unsigned long ist6,unsigned long ist7)
-{
-	*(unsigned long *)(TSS64_Table+1) = rsp0;
-	*(unsigned long *)(TSS64_Table+3) = rsp1;
-	*(unsigned long *)(TSS64_Table+5) = rsp2;
+/*
+ * set_tss64 — update a per-CPU TSS in memory.
+ *
+ * Callers pass the TSS base address (TSS64_Table for BSP,
+ * &init_tss[cpu_id] for APs).  This avoids a dependency on
+ * percpu.h inside this header (always_inline expands at the
+ * call site where percpu.h is available).
+ */
 
-	*(unsigned long *)(TSS64_Table+9) = ist1;
-	*(unsigned long *)(TSS64_Table+11) = ist2;
-	*(unsigned long *)(TSS64_Table+13) = ist3;
-	*(unsigned long *)(TSS64_Table+15) = ist4;
-	*(unsigned long *)(TSS64_Table+17) = ist5;
-	*(unsigned long *)(TSS64_Table+19) = ist6;
-	*(unsigned long *)(TSS64_Table+21) = ist7;
+inline void __attribute__((always_inline)) set_tss64(void *tss_base,
+    unsigned long rsp0,unsigned long rsp1,unsigned long rsp2,
+    unsigned long ist1,unsigned long ist2,unsigned long ist3,
+    unsigned long ist4,unsigned long ist5,unsigned long ist6,unsigned long ist7)
+{
+    unsigned int *tss = (unsigned int *)tss_base;
+    *(unsigned long *)(tss+1) = rsp0;
+    *(unsigned long *)(tss+3) = rsp1;
+    *(unsigned long *)(tss+5) = rsp2;
+
+    *(unsigned long *)(tss+9) = ist1;
+    *(unsigned long *)(tss+11) = ist2;
+    *(unsigned long *)(tss+13) = ist3;
+    *(unsigned long *)(tss+15) = ist4;
+    *(unsigned long *)(tss+17) = ist5;
+    *(unsigned long *)(tss+19) = ist6;
+    *(unsigned long *)(tss+21) = ist7;
 }
 
 #endif

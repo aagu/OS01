@@ -32,6 +32,8 @@ typedef struct percpu {
     uint32_t online;            // 1 when CPU is fully initialized
     uint32_t scheduler_ok;      // per-CPU scheduler_initialized guard
     struct tss_struct *tss;     // this CPU's TSS (in GDT slot 7)
+    void *tss_hw;               // hardware TSS base (TSS64_Table for BSP,
+                                // init_tss[cpu_id] for APs)
     // ── IPI / TLB shootdown ──
     uint32_t tlb_wanted;        // atomic flag: TLB invalidate requested
     uint32_t tlb_ack;           // atomic counter: shootdown ACK
