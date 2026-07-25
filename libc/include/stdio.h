@@ -49,9 +49,9 @@ int fflush(void *f);
 int vasprintf(char **strp, const char *fmt, va_list ap);
 int fileno_unlocked(FILE *f);
 
-#define stdin  ((void*)0)
-#define stdout ((void*)1)
-#define stderr ((void*)2)
+#define stdin  ((FILE*)1)
+#define stdout ((FILE*)2)
+#define stderr ((FILE*)3)
 
 #define getc_unlocked(f) getchar()
 #define putc_unlocked(c,f) putchar(c)
