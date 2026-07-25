@@ -227,6 +227,7 @@ static vfs_node_t *__vfs_lookup(const char *path)
 
         child->mount = mp;
         child->parent = current;
+        current->refcount++;  // child holds a ref through parent pointer
         child->type = entry.type;
         child->size = entry.size;
         child->ops = current->ops;
@@ -324,8 +325,10 @@ void vfs_node_put(vfs_node_t *node)
 {
     if (!node) return;
     if (--node->refcount == 0) {
+        vfs_node_t *parent = node->parent;
         if (node->name) kfree(node->name);
         free(node);
+        vfs_node_put(parent);  // release parent ref after child is gone
     }
 }
 

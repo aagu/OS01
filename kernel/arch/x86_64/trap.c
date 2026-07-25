@@ -1115,12 +1115,14 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             break;
         }
 
-        // O_TRUNC: truncate regular files to size 0.
-        // The filesystem's write op will reallocate clusters as needed.
+        // O_TRUNC: truncate regular files to size 0 via filesystem op
         if ((flags & O_TRUNC) && node->type == VFS_FILE) {
-            node->size = 0;
-            // Clear the first-cluster pointer so fat_write allocates fresh
-            node->fs_data = NULL;
+            if (node->ops && node->ops->truncate)
+                node->ops->truncate(node, 0);
+            else {
+                // Fallback: reset size only (fs_data is FS-specific)
+                node->size = 0;
+            }
         }
 
         file_t *f = file_alloc();

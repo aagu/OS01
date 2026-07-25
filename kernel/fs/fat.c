@@ -875,6 +875,7 @@ struct vfs_node *fat_mkdir(vfs_node_t *dir, const char *name)
     node->fs_data = (void *)(uintptr_t)new_cl;
     node->size = 0;
     node->refcount = 1;
+    dir->refcount++;  // child holds reference to parent
 
     debug_fs("FAT: mkdir '%s' cl=%u ok\n", name, new_cl);
     return node;
@@ -1175,6 +1176,7 @@ struct vfs_node *fat_create(vfs_node_t *dir, const char *name)
     node->type = VFS_FILE;
     node->mount = dir->mount;
     node->parent = dir;
+    dir->refcount++;  // child holds reference to parent
     node->ops = dir->ops;
     node->fs_data = NULL;  // no cluster yet — allocated on first write
     node->size = 0;
