@@ -302,17 +302,6 @@ void schedule(void)
         uint64_t rq_flags = spin_lock_irqsave(&rq->rq_lock);
         if (current->on_rq)
             dequeue_task(current, rq);
-
-        // Preemption guard: if current hasn't exhausted its time
-        // slice, keep it on the CPU.  This prevents mid-syscall
-        // preemption that the old counter-based scheduler avoided.
-        if (current->state == TASK_RUNNING && current != rq->idle &&
-            current->vruntime < current->deadline) {
-            spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
-            rq->need_resched = 0;
-            return;
-        }
-
         if (current->state == TASK_RUNNING && current != rq->idle)
             enqueue_task(current, rq);
         spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
@@ -396,6 +385,14 @@ void schedule(void)
                     (int)next->pid, (long)next->state);
         next = rq->idle;
         if (!next) return;
+    }
+
+    // ── 6. Preemption guard: if the best candidate is still
+    //        current and it hasn't exhausted its time slice,
+    //        skip the context switch.
+    if (next == current && current->vruntime < current->deadline) {
+        rq->need_resched = 0;
+        return;
     }
 
     // ── 6. Update min_vruntime ──────────────────────────────
