@@ -88,7 +88,7 @@ thirdpart/busybox-1.36.1/busybox: lib $(BUSYBOX_SRC)/Makefile $(BUSYBOX_CFG) use
 	@# Fixup config for cross-compilation quirks (oldconfig may flip these)
 	cd $(BUSYBOX_SRC) && sed -i \
 	    -e 's/^# CONFIG_STATIC is not set/CONFIG_STATIC=y/' \
-	    -e 's|^CONFIG_BUSYBOX_EXEC_PATH=.*|CONFIG_BUSYBOX_EXEC_PATH="/busybox.elf"|' \
+	    -e 's|^CONFIG_BUSYBOX_EXEC_PATH=.*|CONFIG_BUSYBOX_EXEC_PATH="/bin/busybox"|' \
 	    .config
 	@mkdir -p $(SYSROOT)/usr/lib
 	@touch /tmp/stub.c && clang -c -x c /tmp/stub.c -o /tmp/stub.o 2>/dev/null
