@@ -46,6 +46,7 @@ struct Slab * kmalloc_create(uint64_t size)
     if (page == NULL)
     {
         color_printk(RED,BLACK,"kmalloc_create()->alloc_pages()=>page == NULL\n");
+		kmalloc_creating = false;
 		return NULL;
     }
     
@@ -115,7 +116,7 @@ struct Slab * kmalloc_create(uint64_t size)
     default:
         color_printk(RED,BLACK,"kmalloc_create() ERROR: wrong size:%08d\n",size);
 		free_pages(page,1);
-
+        kmalloc_creating = false;
         return NULL;
     }
 

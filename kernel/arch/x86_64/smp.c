@@ -179,8 +179,7 @@ void smp_boot_aps(void)
     trampoline_data_t *tdata = (trampoline_data_t *)Phy_To_Virt(TRAMPOLINE_DATA_BASE);
 
     for (uint32_t i = 0; i < num_cpus; i++) {
-        if (i == 0) continue;
-        if (!percpu_data[i].online) continue;
+        if (i == 0) continue;  // skip BSP (already running)
 
         uint32_t ap_id = percpu_data[i].arch_processor_id;
         debug_sched("SMP: booting AP %u (APIC ID %u)\n", i, ap_id);
