@@ -1901,6 +1901,11 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
 
         // Install new handler (SIGKILL and SIGSTOP cannot be caught or ignored)
         if (act && signum != SIGKILL && signum != SIGSTOP) {
+            if ((uint64_t)act->sa_restorer >= current->addr_limit ||
+                (uint64_t)act->sa_handler >= current->addr_limit) {
+                regs->rax = -EINVAL;
+                break;
+            }
             current->sighand[signum].sa_handler  = act->sa_handler;
             current->sighand[signum].sa_flags    = act->sa_flags;
             current->sighand[signum].sa_restorer = act->sa_restorer;
@@ -1955,6 +1960,9 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         uint64_t frame_phys = user_va_to_phys(user_pml4, regs->rsp);
         if (!frame_phys) { regs->rax = -EFAULT; break; }
         struct sigframe *kframe = (struct sigframe *)Phy_To_Virt(frame_phys);
+
+        // Validate sigframe: iretq CS must be ring-3
+        if ((kframe->cs & 3) != 3) { regs->rax = -EINVAL; break; }
 
         // Restore blocked mask
         current->blocked = kframe->blocked;

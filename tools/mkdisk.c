@@ -115,7 +115,7 @@ static void build_partition_entry(uint8_t *entry, const uint8_t *type_guid,
     write_gpt_name(entry, name);
 }
 
-static int run_cmd(const char *fmt, ...)
+static void run_cmd(const char *fmt, ...)
 {
     char buf[4096];
     va_list ap;
@@ -125,9 +125,9 @@ static int run_cmd(const char *fmt, ...)
     printf("  [cmd] %s\n", buf);
     int ret = system(buf);
     if (ret != 0) {
-        fprintf(stderr, "  [cmd] WARNING: returned %d\n", ret);
+        fprintf(stderr, "  [cmd] FAILED: returned %d\n", ret);
+        exit(1);
     }
-    return ret;
 }
 
 int main(int argc, char **argv)
@@ -188,26 +188,31 @@ int main(int argc, char **argv)
     while (pos < PART1_START) { fwrite(zero, SECTOR_SIZE, 1, f); pos++; }
     fclose(f);
 
+    // Temp file paths with PID for concurrent build safety
+    char esp_tmp[64], rootfs_tmp[64];
+    snprintf(esp_tmp, sizeof(esp_tmp), "/tmp/_mkdisk_esp.%d.img", getpid());
+    snprintf(rootfs_tmp, sizeof(rootfs_tmp), "/tmp/_mkdisk_rootfs.%d.img", getpid());
+
     // ── Phase 2: Build + inject ESP (FAT32) ──────────────
     printf("Building ESP partition...\n");
-    run_cmd("dd if=/dev/zero of=/tmp/_mkdisk_esp.img bs=1M count=%d 2>/dev/null", FAT32_SIZE_MB);
-    run_cmd("mkfs.vfat -F 32 /tmp/_mkdisk_esp.img 2>/dev/null");
-    run_cmd("mmd -i /tmp/_mkdisk_esp.img ::/EFI 2>/dev/null");
-    run_cmd("mmd -i /tmp/_mkdisk_esp.img ::/EFI/BOOT 2>/dev/null");
-    run_cmd("mcopy -i /tmp/_mkdisk_esp.img %s ::/EFI/BOOT 2>/dev/null", efi_path);
-    run_cmd("mcopy -i /tmp/_mkdisk_esp.img %s ::/ 2>/dev/null", kernel_path);
-    run_cmd("dd if=/tmp/_mkdisk_esp.img of=disk.img bs=512 seek=%lu conv=notrunc 2>/dev/null",
-            (unsigned long)PART1_START);
+    run_cmd("dd if=/dev/zero of=%s bs=1M count=%d 2>/dev/null", esp_tmp, FAT32_SIZE_MB);
+    run_cmd("mkfs.vfat -F 32 %s 2>/dev/null", esp_tmp);
+    run_cmd("mmd -i %s ::/EFI 2>/dev/null", esp_tmp);
+    run_cmd("mmd -i %s ::/EFI/BOOT 2>/dev/null", esp_tmp);
+    run_cmd("mcopy -i %s %s ::/EFI/BOOT 2>/dev/null", esp_tmp, efi_path);
+    run_cmd("mcopy -i %s %s ::/ 2>/dev/null", esp_tmp, kernel_path);
+    run_cmd("dd if=%s of=disk.img bs=512 seek=%lu conv=notrunc 2>/dev/null",
+            esp_tmp, (unsigned long)PART1_START);
 
     // ── Phase 3: Build + inject ext2 root ────────────────
     printf("Building ext2 root filesystem...\n");
-    run_cmd("dd if=/dev/zero of=/tmp/_mkdisk_rootfs.img bs=1M count=%d 2>/dev/null", EXT2_SIZE_MB);
-    run_cmd("mke2fs -t ext2 -I 128 -b 4096 /tmp/_mkdisk_rootfs.img 2>/dev/null");
-    run_cmd("debugfs -w /tmp/_mkdisk_rootfs.img -R \"mkdir /bin\" 2>/dev/null");
-    run_cmd("debugfs -w /tmp/_mkdisk_rootfs.img -R \"mkdir /home\" 2>/dev/null");
-    run_cmd("debugfs -w /tmp/_mkdisk_rootfs.img -R \"mkdir /etc\" 2>/dev/null");
-    run_cmd("debugfs -w /tmp/_mkdisk_rootfs.img -R \"mkdir /opt\" 2>/dev/null");
-    run_cmd("debugfs -w /tmp/_mkdisk_rootfs.img -R \"mkdir /opt/test\" 2>/dev/null");
+    run_cmd("dd if=/dev/zero of=%s bs=1M count=%d 2>/dev/null", rootfs_tmp, EXT2_SIZE_MB);
+    run_cmd("mke2fs -t ext2 -I 128 -b 4096 %s 2>/dev/null", rootfs_tmp);
+    run_cmd("debugfs -w %s -R \"mkdir /bin\" 2>/dev/null", rootfs_tmp);
+    run_cmd("debugfs -w %s -R \"mkdir /home\" 2>/dev/null", rootfs_tmp);
+    run_cmd("debugfs -w %s -R \"mkdir /etc\" 2>/dev/null", rootfs_tmp);
+    run_cmd("debugfs -w %s -R \"mkdir /opt\" 2>/dev/null", rootfs_tmp);
+    run_cmd("debugfs -w %s -R \"mkdir /opt/test\" 2>/dev/null", rootfs_tmp);
 
     // Copy fsroot/bin/* to /bin/ using a shell loop
     {
@@ -215,13 +220,13 @@ int main(int argc, char **argv)
         snprintf(glob_cmd, sizeof(glob_cmd),
                  "for f in %s/bin/*; do "
                  "  base=$(basename \"$f\"); "
-                 "  debugfs -w /tmp/_mkdisk_rootfs.img -R \"write $f /bin/$base\" 2>/dev/null; "
-                 "done", rootfs_dir);
+                 "  debugfs -w %s -R \"write $f /bin/$base\" 2>/dev/null; "
+                 "done", rootfs_dir, rootfs_tmp);
         system(glob_cmd);
     }
 
-    run_cmd("dd if=/tmp/_mkdisk_rootfs.img of=disk.img bs=512 seek=%lu conv=notrunc 2>/dev/null",
-            (unsigned long)PART2_START);
+    run_cmd("dd if=%s of=disk.img bs=512 seek=%lu conv=notrunc 2>/dev/null",
+            rootfs_tmp, (unsigned long)PART2_START);
 
     // ── Phase 4: Write backup GPT at end of disk ─────────
     {

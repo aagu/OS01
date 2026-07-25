@@ -1040,17 +1040,18 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
         #undef KSTACK
     }
 
-    // 7. Free the OLD user address space (mm_t only, not page tables).
-    // The old mm may share page tables with the parent (fork), so we
-    // must NOT call vmm_free_user_map here — it would destroy the
-    // parent's address space.  When the parent exits, do_exit handles
-    // the shared page table cleanup.
-
-    // Free VMA-managed pages before replacing mm
-    vma_free_all(current->mm);
-
+    // 7. Free the OLD user address space (both VMA pages and page tables).
+    // fork_mm_copy creates fully independent page table hierarchies
+    // (vmm_alloc_map + calloc per level), so vmm_free_user_map on the
+    // child's PML4 is safe — it won't corrupt the parent's address space.
     if (current->mm) {
-        kfree(current->mm);
+        mm_t *old_mm = current->mm;
+        uint64_t *old_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)old_mm->pml4);
+
+        vma_free_all(old_mm);            // free VMA-tracked 4KB pages + VMA nodes
+        vmm_free_user_map(old_pml4);     // free page tables + remaining 2MB pages
+
+        kfree(old_mm);
         current->mm = NULL;
     }
 

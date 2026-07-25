@@ -161,30 +161,7 @@ ignore_int:
 
 Loop:
 	hlt
-	jmp	Loop	
-
-	popq	%rax
-	movq	%rax,	%ds
-	popq	%rax
-	movq	%rax,	%es
-
-	popq	%r15
-	popq	%r14
-	popq	%r13
-	popq	%r12
-	popq	%r11
-	popq	%r10
-	popq	%r9
-	popq	%r8
-
-	popq	%rsi
-	popq	%rdi
-	popq	%rbp
-	popq	%rdx
-	popq	%rcx
-	popq	%rbx
-	popq	%rax
-	iretq
+	jmp	Loop
 
 int_msg:
 	.asciz "Unknown interrupt or fault at RIP\n"
@@ -250,7 +227,7 @@ GDT_Table:
 	.quad	0x0000f20000000000			/*6	USER	Data	64-bit	Segment	30*/
 	.quad	0x00cf9a000000ffff			/*7	KERNEL	Code	32-bit	Segment	38*/
 	.quad	0x00cf92000000ffff			/*8	KERNEL	Data	32-bit	Segment	40*/
-	.fill	100,8,0					/*10 ~ 11 TSS (jmp one segment <9>) in long-mode 128-bit 50*/
+	.fill	100,8,0					/* TSS descriptors: slots 8-9 overwritten by setup_TSS64; remaining slots for per-CPU TSS at SMP boot */
 GDT_END:
 
 GDT_POINTER:

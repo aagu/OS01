@@ -33,7 +33,7 @@ static bool df_queue_has_work(task_t *self)
 void deferred_free(deferred_fn_t fn, void *ptr)
 {
     deferred_work_t *w = kmalloc(sizeof(*w));
-    if (!w) return;  // OOM: leak the ptr rather than panic
+    if (!w) { fn(ptr); return; }  // OOM: free synchronously rather than leak
     list_init(&w->node);
     w->fn  = fn;
     w->ptr = ptr;
