@@ -10,7 +10,12 @@ ARCH=x86_64
 ifeq ($(DEBUG),1)
 CFLAGS += -DDEBUG=1
 endif
-include uefi/Makefile
+uefi_mk := uefi/Makefile
+ifneq ($(wildcard $(uefi_mk)),)
+include $(uefi_mk)
+else
+$(error "posix-uefi submodule not initialized. Run 'git submodule update --init'")
+endif
 
 .PHONY: all clean clean-all
 

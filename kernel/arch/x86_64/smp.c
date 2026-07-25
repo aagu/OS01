@@ -180,7 +180,7 @@ void smp_boot_aps(void)
 
     for (uint32_t i = 0; i < num_cpus; i++) {
         if (i == 0) continue;
-        if (!percpu_data[i].arch_processor_id) continue;
+        if (!percpu_data[i].online) continue;
 
         uint32_t ap_id = percpu_data[i].arch_processor_id;
         debug_sched("SMP: booting AP %u (APIC ID %u)\n", i, ap_id);

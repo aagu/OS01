@@ -25,8 +25,16 @@ struct Slab_Cache kmalloc_cache_size[16] =
     {1048576, 0, 0, NULL, NULL, NULL, NULL},    //1MB
 };
 
+static bool kmalloc_creating = false;
+
 struct Slab * kmalloc_create(uint64_t size)
 {
+    if (kmalloc_creating) {
+        color_printk(RED, BLACK, "kmalloc_create: recursive call, size=%lu\n", size);
+        return NULL;
+    }
+    kmalloc_creating = true;
+
     uint32_t i;
     struct Slab * slab = NULL;
     struct Page * page = NULL;
@@ -111,6 +119,7 @@ struct Slab * kmalloc_create(uint64_t size)
         return NULL;
     }
 
+    kmalloc_creating = false;
     return slab;
 }
 
@@ -198,10 +207,13 @@ size_t kfree(void * address)
             {
                 index = (address - slab->address) / kmalloc_cache_size[i].size;
 
-                // XOR toggles the bit back to 0 (free).
-                // NOTE: this is NOT idempotent — double-free would re-mark
-                // the block as allocated, corrupting the allocator.
-                *(slab->color_map + (index >> 6)) ^= 1UL << (index % 64);
+                uint64_t *word = slab->color_map + (index >> 6);
+                uint64_t bit = 1UL << (index % 64);
+                if (!(*word & bit)) {
+                    color_printk(RED, BLACK, "kfree: double free %p\n", address);
+                    return 1;
+                }
+                *word &= ~bit;
 
                 slab->free_count++;
                 slab->using_count--;
