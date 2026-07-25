@@ -9,6 +9,10 @@
 #include <errno.h>
 #include <kernel/poll.h>
 
+// ── Forward declarations ─────────────────────────────────────
+static void pipe_wake_readers(pipe_t *p);
+static void pipe_wake_writers(pipe_t *p);
+
 // ── Allocate a file_t ──────────────────────────────────────
 file_t *file_alloc(void)
 {
@@ -22,9 +26,37 @@ file_t *file_alloc(void)
 void file_free(file_t *f)
 {
     if (!f) return;
+
+    // Pipe cleanup: when the last reference to a pipe-end
+    // file descriptor goes away, decrement reader/writer count
+    // and wake the other end if needed.  Defer the wake calls
+    // to after p->lock is released — avoids lock-order inversion
+    // with fd_read/fd_write's wq->lock → p->lock path.
+    if (f->type == FD_PIPE && f->pipe) {
+        pipe_t *p = f->pipe;
+        int need_wake_r = 0, need_wake_w = 0;
+
+        {
+            uint64_t flags = spin_lock_irqsave(&p->lock);
+            if (f->flags == O_RDONLY) {
+                p->readers--;
+                if (p->readers == 0) need_wake_w = 1;
+            } else {
+                p->writers--;
+                if (p->writers == 0) need_wake_r = 1;
+            }
+            int last = (p->readers == 0 && p->writers == 0);
+            spin_unlock_irqrestore(&p->lock, flags);
+
+            f->pipe = NULL;  // break link to avoid UAF from the other end
+            if (need_wake_r) pipe_wake_readers(p);
+            if (need_wake_w) pipe_wake_writers(p);
+            if (last)         pipe_free(p);
+        }
+    }
+
     if (f->node)
         vfs_node_put(f->node);
-    // pipe is freed separately via pipe_free
     free(f);
 }
 
@@ -116,10 +148,6 @@ int fd_alloc(files_t *fs, file_t *f)
     return -1;  // table full
 }
 
-// ── Forward declarations for pipe wake helpers ──────────────
-static void pipe_wake_readers(pipe_t *p);
-static void pipe_wake_writers(pipe_t *p);
-
 // ── Close a single fd ───────────────────────────────────────
 void fd_close(files_t *fs, int fd)
 {
@@ -130,29 +158,9 @@ void fd_close(files_t *fs, int fd)
 
     fs->fd[fd] = NULL;
 
-    // For pipes: decrement reader/writer counts and wake poll waiters
-    if (f->type == FD_PIPE && f->pipe) {
-        uint64_t flags = spin_lock_irqsave(&f->pipe->lock);
-
-        if (f->flags == O_RDONLY) {
-            f->pipe->readers--;
-            if (f->pipe->readers == 0)
-                pipe_wake_writers(f->pipe);
-        } else {
-            f->pipe->writers--;
-            if (f->pipe->writers == 0)
-                pipe_wake_readers(f->pipe);
-        }
-
-        spin_unlock_irqrestore(&f->pipe->lock, flags);
-    }
-
     f->refcount--;
-    if (f->refcount == 0) {
-        if (f->type == FD_PIPE && f->pipe)
-            pipe_free(f->pipe);
+    if (f->refcount == 0)
         file_free(f);
-    }
 }
 
 // ── Pipe helpers ──────────────────────────────────────────
@@ -249,10 +257,52 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
 
             spin_unlock_irqrestore(&p->lock, flags);
 
-            // Block on pipe's read_wait (not busy-loop schedule)
-            wait_queue_sleep(&p->read_wait);
+            // Register on pipe's wait queue, then double-check
+            // under p->lock to close the lost-wakeup race:
+            //  1. check writers=1 → 2. unlock → 3. writer exits, wake
+            //     (queue empty) → 4. add to queue → sleep forever.
+            // Double-check after queue registration catches step 3.
+            {
+                wait_queue_t *wq = &p->read_wait;
+                int do_eof = 0;
 
-            // Check for fatal signals after wake
+                uint64_t wq_flags = spin_lock_irqsave(&wq->lock);
+                list_add_to_before(&wq->head, &current->io_wait_node);
+
+                {
+                    uint64_t p2_flags = spin_lock_irqsave(&p->lock);
+                    if (p->writers == 0 && pipe_empty(p)) {
+                        // No more data will ever arrive → EOF
+                        list_del_init(&current->io_wait_node);
+                        do_eof = 1;
+                    } else if (p->writers == 0 && !pipe_empty(p)) {
+                        // Last writer gone but data still in buffer —
+                        // don't sleep, go back and read it
+                        list_del_init(&current->io_wait_node);
+                    }
+                    spin_unlock_irqrestore(&p->lock, p2_flags);
+                }
+
+                if (do_eof) {
+                    spin_unlock_irqrestore(&wq->lock, wq_flags);
+                    return 0;
+                }
+
+                current->state = TASK_INTERRUPTIBLE;
+                int was_queued = !list_is_empty(&current->io_wait_node);
+                spin_unlock_irqrestore(&wq->lock, wq_flags);
+
+                if (!was_queued) {
+                    // Dequeued by double-check (buffer has data) — skip sleep
+                    current->state = TASK_RUNNING;
+                } else {
+                    schedule();
+                    if (!list_is_empty(&current->io_wait_node))
+                        list_del_init(&current->io_wait_node);
+                    current->state = TASK_RUNNING;
+                }
+            }
+
             if (signal_pending_fatal())
                 return -EINTR;
         }
@@ -313,8 +363,47 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
 
             spin_unlock_irqrestore(&p->lock, flags);
 
-            // Block on pipe's write_wait (not busy-loop schedule)
-            wait_queue_sleep(&p->write_wait);
+            // Double-check after queue registration to
+            // close the lost-wakeup race (same pattern as fd_read).
+            {
+                wait_queue_t *wq = &p->write_wait;
+                int do_epipe = 0;
+
+                uint64_t wq_flags = spin_lock_irqsave(&wq->lock);
+                list_add_to_before(&wq->head, &current->io_wait_node);
+
+                {
+                    uint64_t p2_flags = spin_lock_irqsave(&p->lock);
+                    if (p->readers == 0) {
+                        list_del_init(&current->io_wait_node);
+                        do_epipe = 1;
+                    } else if (!pipe_full(p)) {
+                        // Reader consumed data between the outer
+                        // pipe_full check and queue registration —
+                        // don't sleep, loop back and write
+                        list_del_init(&current->io_wait_node);
+                    }
+                    spin_unlock_irqrestore(&p->lock, p2_flags);
+                }
+
+                if (do_epipe) {
+                    spin_unlock_irqrestore(&wq->lock, wq_flags);
+                    return -EPIPE;
+                }
+
+                current->state = TASK_INTERRUPTIBLE;
+                int was_queued = !list_is_empty(&current->io_wait_node);
+                spin_unlock_irqrestore(&wq->lock, wq_flags);
+
+                if (!was_queued) {
+                    current->state = TASK_RUNNING;
+                } else {
+                    schedule();
+                    if (!list_is_empty(&current->io_wait_node))
+                        list_del_init(&current->io_wait_node);
+                    current->state = TASK_RUNNING;
+                }
+            }
 
             if (signal_pending_fatal())
                 return -EINTR;
