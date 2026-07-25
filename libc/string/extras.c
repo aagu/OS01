@@ -46,6 +46,35 @@ char *strstr(const char *haystack, const char *needle)
     return NULL;
 }
 
+char *strsep(char **stringp, const char *delim)
+{
+    char *begin;
+
+    if (!stringp || !*stringp)
+        return NULL;
+
+    begin = *stringp;
+
+    /* Skip leading delimiters (original BSD strsep skips them) */
+    begin += strspn(begin, delim);
+
+    if (*begin == '\0') {
+        *stringp = begin;
+        return NULL;
+    }
+
+    /* Find first delimiter */
+    char *end = begin + strcspn(begin, delim);
+    if (*end != '\0') {
+        *end = '\0';
+        *stringp = end + 1;
+    } else {
+        *stringp = end;
+    }
+
+    return begin;
+}
+
 char *strtok(char *str, const char *delim)
 {
     static char *save_ptr = NULL;
