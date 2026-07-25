@@ -163,12 +163,26 @@ void vmm_free_user_map(mmap pagemap)
                 if (!(pml2e & PAGE_Present))
                     continue;
 
-                // Only 2MB pages (PAGE_PS set) are supported
                 if (pml2e & PAGE_PS) {
                     uintptr_t phys = pml2e & (PAGE_2M_MASK & ~PAGE_XD);
                     struct Page *page = Phy_to_2M_Page(phys);
                     page_clean(page);
                     free_pages(page, 1);
+                } else {
+                    uint64_t *pt = (uint64_t *)Phy_To_Virt(pml2e & PAGE_4K_MASK);
+                    for (int l1 = 0; l1 < 512; l1++) {
+                        uint64_t pte = pt[l1];
+                        if (!(pte & (PAGE_Present | PAGE_PROTNONE)))
+                            continue;
+                        uintptr_t phys = pte & PAGE_4K_MASK;
+                        if (pte & PAGE_COW) {
+                            if (page_cow_put(phys))
+                                free_4k_page(phys);
+                        } else {
+                            free_4k_page(phys);
+                        }
+                    }
+                    kfree(pt);
                 }
             }
 
