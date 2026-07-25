@@ -152,7 +152,7 @@ test-phase-0: disk.img
 
 .PHONY: test-syscall
 test-syscall:
-	$(MAKE) OS01_SYSTEST=1 disk.img
+	$(MAKE) OS01_SYSTEST=1 disk.img boot/uefi/OVMF.fd
 	python3 tests/run_test.py systest
 
 # ── Clean ───────────────────────────────────────────────

@@ -64,19 +64,28 @@ static bool tty_cooked_pop(tty_t *tty, char *c)
 static void tty_wake_waiters(tty_t *tty)
 {
     // 1. Wake direct blocking reader tasks (tty_read path)
-    while (!list_is_empty(&tty->read_wait)) {
-        list_t *node = tty->read_wait.next;
-        list_del_init(node);
-        task_t *t = container_of(node, task_t, io_wait_node);
-        task_wake(t);
+    {
+        uint64_t flags = spin_lock_irqsave(&tty->read_wait_lock);
+        while (!list_is_empty(&tty->read_wait)) {
+            list_t *node = tty->read_wait.next;
+            list_del_init(node);
+            task_t *t = container_of(node, task_t, io_wait_node);
+            task_wake(t);
+        }
+        spin_unlock_irqrestore(&tty->read_wait_lock, flags);
     }
 
     // 2. Cascade-wake all poll waiters (fd_poll path)
-    while (!list_is_empty(&tty->read_poll)) {
-        list_t *node = tty->read_poll.next;
-        list_del_init(node);
-        poll_wait_entry_t *e = container_of(node, poll_wait_entry_t, node);
-        wait_queue_wake_all(e->poll_wq);
+    // read_poll is protected by cooked_lock (see poll_wait in tty_poll).
+    {
+        uint64_t flags = spin_lock_irqsave(&tty->cooked_lock);
+        while (!list_is_empty(&tty->read_poll)) {
+            list_t *node = tty->read_poll.next;
+            list_del_init(node);
+            poll_wait_entry_t *e = container_of(node, poll_wait_entry_t, node);
+            wait_queue_wake_all(e->poll_wq);
+        }
+        spin_unlock_irqrestore(&tty->cooked_lock, flags);
     }
 
     // Notify the scheduler that a task was woken — otherwise the
@@ -111,6 +120,7 @@ tty_t *tty_alloc(void (*output_char)(char), void (*echo_char)(char))
     tty->pgrp = 0;
     list_init(&tty->read_wait);
     list_init(&tty->read_poll);
+    spin_init(&tty->read_wait_lock);
     spin_init(&tty->cooked_lock);
 
     tty->output_char = output_char ? output_char : tty_def_output;
@@ -257,14 +267,20 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
             return 0;
 
         // ── Phase 2: blocking sleep on wait queue ──────────
-        current->state = TASK_INTERRUPTIBLE;
-        list_add_to_before(&tty->read_wait, &current->io_wait_node);
+        {
+            uint64_t wq_flags = spin_lock_irqsave(&tty->read_wait_lock);
+            current->state = TASK_INTERRUPTIBLE;
+            list_add_to_before(&tty->read_wait, &current->io_wait_node);
 
-        // Double-check: IRQ may have fired during the steps above.
-        if (!tty_cooked_empty(tty)) {
-            list_del_init(&current->io_wait_node);
-            current->state = TASK_RUNNING;
-            continue;
+            // Double-check: IRQ may have fired on another CPU
+            // (tty_push_input from keyboard/serial handler).
+            if (!tty_cooked_empty(tty)) {
+                list_del_init(&current->io_wait_node);
+                current->state = TASK_RUNNING;
+                spin_unlock_irqrestore(&tty->read_wait_lock, wq_flags);
+                continue;
+            }
+            spin_unlock_irqrestore(&tty->read_wait_lock, wq_flags);
         }
 
         // Truly sleep — woken by tty_wake_waiters() from IRQ
@@ -279,16 +295,22 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
         do_signal_delivery(NULL);
 
         if (signal_pending_fatal()) {
+            uint64_t wq_flags = spin_lock_irqsave(&tty->read_wait_lock);
             if (!list_is_empty(&current->io_wait_node))
                 list_del_init(&current->io_wait_node);
+            spin_unlock_irqrestore(&tty->read_wait_lock, wq_flags);
             return 0;
         }
 
-        // tty_wake_waiters() calls list_del_init on our node,
-        // leaving io_wait_node self-pointing.  If we were woken
-        // by something else, clean up.
-        if (!list_is_empty(&current->io_wait_node))
-            list_del_init(&current->io_wait_node);
+        // tty_wake_waiters() calls list_del_init on our node
+        // under read_wait_lock, leaving io_wait_node self-pointing.
+        // If we were woken by something else, clean up.
+        {
+            uint64_t wq_flags = spin_lock_irqsave(&tty->read_wait_lock);
+            if (!list_is_empty(&current->io_wait_node))
+                list_del_init(&current->io_wait_node);
+            spin_unlock_irqrestore(&tty->read_wait_lock, wq_flags);
+        }
 
         // Loop back to Phase 1 — the IRQ handler already pushed
         // data to the cooked buffer via tty_push_input.

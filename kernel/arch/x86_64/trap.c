@@ -1866,35 +1866,8 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             break;
         }
 
-        // Find the target task in the global task list
-        task_t *target = NULL;
-        {
-            list_t *pos = init_task_union.task.list.next;
-            while (pos != &init_task_union.task.list) {
-                task_t *t = container_of(pos, task_t, list);
-                pos = pos->next;
-                if (t->pid == pid) {
-                    target = t;
-                    break;
-                }
-            }
-        }
-
-        if (!target) {
-            regs->rax = -ESRCH;
-            break;
-        }
-
-        // Set the pending signal bit
-        target->signal |= (1ULL << sig);
-
-        // Wake the target if it's sleeping interruptibly —
-        // otherwise the signal won't take effect until the
-        // target is woken by I/O or a timer tick.
-        if (target->state == TASK_INTERRUPTIBLE)
-            task_wake(target);
-
-        regs->rax = 0;
+        int ret = task_send_signal(pid, sig);
+        regs->rax = ret;
         break;
     }
     case SYS_signal: {

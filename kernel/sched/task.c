@@ -27,6 +27,13 @@
 // Set by timer IRQ on every tick, cleared by schedule() after
 // a context switch.  entry.S reads it via %gs:8.
 
+// ── Global task list lock (SMP) ──────────────────────────
+// Protects all traversals and modifications to
+// init_task_union.task.list.  schedule() paths use
+// spin_trylock_irqsave — if the lock is contended they
+// skip one cycle (no deadlock possible).
+static spinlock_T task_list_lock = { .lock = 1L };
+
 // ── Safe task-list iteration ─────────────────────────────
 // The global task list is written (list_add_to_before) without
 // synchronisation against readers (sched_unblock_blocked etc.).
@@ -184,7 +191,7 @@ void blocker_wake(task_t *task)
  * and the blocked task has pending signals, wake it with -EINTR return.
  */
 void sched_unblock_blocked(void)
-{
+{  // Caller MUST hold task_list_lock (only called from schedule()).
     list_t *pos = init_task_union.task.list.next;
     while (pos != &init_task_union.task.list) {
         if ((uintptr_t)pos < 0x1000) {
@@ -309,8 +316,7 @@ void schedule(void)
 
     // ── 3. Zombie reaper (global list, with on_rq guard) ──
     {
-        static spinlock_T reap_lock = { .lock = 1L };
-        uint64_t reap_flags = spin_lock_irqsave(&reap_lock);
+        uint64_t reap_flags = spin_lock_irqsave(&task_list_lock);
 
         task_t *reap_list[64];
         int reap_count = 0;
@@ -365,7 +371,7 @@ void schedule(void)
         }
 
         sched_unblock_blocked();
-        spin_unlock_irqrestore(&reap_lock, reap_flags);
+        spin_unlock_irqrestore(&task_list_lock, reap_flags);
     }
 
     // ── 4. Pick next task (rbtree O(log n)) ─────────────────
@@ -426,6 +432,7 @@ uint64_t do_exit(uint64_t exit_code)
 
     // ── Reparent children to init ────────────────────────
     if (user_init_task && current->pid != user_init_pid) {
+        uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
         list_t *cpos = init_task_union.task.list.next;
         while (cpos != &init_task_union.task.list) {
             task_t *child = container_of(cpos, task_t, list);
@@ -436,6 +443,7 @@ uint64_t do_exit(uint64_t exit_code)
                               (int)child->pid, (int)user_init_task->pid);
             }
         }
+        spin_unlock_irqrestore(&task_list_lock, tl_flags);
     }
 
     // ── Send SIGCHLD to parent ───────────────────────────
@@ -444,7 +452,7 @@ uint64_t do_exit(uint64_t exit_code)
     // run and reap us via do_waitpid → PF_REAPED.  The scheduler's
     // zombie reaper will later list_del + kfree.
     if (current->parent && !(current->parent->flags & PF_KTHREAD)) {
-        current->parent->signal |= (1ULL << SIGCHLD);
+        __sync_fetch_and_or(&current->parent->signal, (1ULL << SIGCHLD));
         // Use blocker_wake which checks condition callback before waking.
         // This is the explicit fast path; sched_unblock_blocked() in
         // schedule() is the reliable fallback.
@@ -456,9 +464,11 @@ uint64_t do_exit(uint64_t exit_code)
     vma_free_all(current->mm);
 
     if (!(current->flags & PF_KTHREAD) && current->mm) {
-        // Skip vmm_free_user_map for now — in do_fork the child
-        // shares pml4 with the parent, so freeing would corrupt
-        // the parent's address space.  Will be fixed with mm refcounting.
+        uint64_t *pml4_virt = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
+        bool mm_is_shared = (current->parent != NULL &&
+                             current->parent->mm == current->mm);
+        if (!mm_is_shared && current->mm->pml4)
+            vmm_free_user_map(pml4_virt);
         kfree(current->mm);
         current->mm = NULL;
     }
@@ -560,17 +570,21 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
         list_t *pos;
 
         // Pass 1: scan for a matching, unreaped ZOMBIE child
-        pos = init_task_union.task.list.next;
-        while (pos != &init_task_union.task.list) {
-            task_t *t = container_of(pos, task_t, list);
-            if (!(t->flags & PF_REAPED) &&
-                t->parent == current &&
-                t->state == TASK_ZOMBIE &&
-                (pid == -1 || t->pid == pid)) {
-                child = t;
-                break;
+        {
+            uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
+            pos = init_task_union.task.list.next;
+            while (pos != &init_task_union.task.list) {
+                task_t *t = container_of(pos, task_t, list);
+                if (!(t->flags & PF_REAPED) &&
+                    t->parent == current &&
+                    t->state == TASK_ZOMBIE &&
+                    (pid == -1 || t->pid == pid)) {
+                    child = t;
+                    break;
+                }
+                pos = task_list_next(pos);
             }
-            pos = task_list_next(pos);
+            spin_unlock_irqrestore(&task_list_lock, tl_flags);
         }
 
         if (child) {
@@ -599,17 +613,21 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
         int child_exists = 0;
         int child_count = 0;
         debug_task("waitpid: child-list cur=%d pid=%lld:", current->pid, (long long)pid);
-        pos = init_task_union.task.list.next;
-        while (pos != &init_task_union.task.list) {
-            task_t *t = container_of(pos, task_t, list);
-            if (t->parent == current && !(t->flags & PF_REAPED)) {
-                child_count++;
-                debug_task(" [%d s=%d f=%lx p=%lx]",
-                    t->pid, t->state, t->flags, (unsigned long)t->parent);
-                if (pid == -1 || t->pid == pid)
-                    child_exists = 1;
+        {
+            uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
+            pos = init_task_union.task.list.next;
+            while (pos != &init_task_union.task.list) {
+                task_t *t = container_of(pos, task_t, list);
+                if (t->parent == current && !(t->flags & PF_REAPED)) {
+                    child_count++;
+                    debug_task(" [%d s=%d f=%lx p=%lx]",
+                        t->pid, t->state, t->flags, (unsigned long)t->parent);
+                    if (pid == -1 || t->pid == pid)
+                        child_exists = 1;
+                }
+                pos = task_list_next(pos);
             }
-            pos = task_list_next(pos);
+            spin_unlock_irqrestore(&task_list_lock, tl_flags);
         }
         debug_task(" count=%d exist=%d\n", child_count, child_exists);
 
@@ -728,7 +746,11 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
         tsk->files = files_dup(current->files);
 
     list_init(&tsk->list);
-    list_add_to_before(&init_task_union.task.list, &tsk->list);
+    {
+        uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
+        list_add_to_before(&init_task_union.task.list, &tsk->list);
+        spin_unlock_irqrestore(&task_list_lock, tl_flags);
+    }
     tsk->thread = thd;
 
     // FPU save area — user tasks may use float/SSE
@@ -1193,7 +1215,29 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
     return child_mm;
 
 fail:
-    if (child_pml4) kfree(child_pml4);
+    if (child_pml4) {
+        for (int l4 = 0; l4 < 256; l4++) {
+            uint64_t pml4e = child_pml4[l4];
+            if (!(pml4e & PAGE_Present)) continue;
+            uint64_t *pml3 = (uint64_t *)Phy_To_Virt(pml4e & PAGE_4K_MASK);
+            for (int l3 = 0; l3 < 512; l3++) {
+                uint64_t pml3e = pml3[l3];
+                if (!(pml3e & PAGE_Present)) continue;
+                uint64_t *pml2 = (uint64_t *)Phy_To_Virt(pml3e & PAGE_4K_MASK);
+                for (int l2 = 0; l2 < 512; l2++) {
+                    uint64_t pml2e = pml2[l2];
+                    if (!(pml2e & PAGE_Present)) continue;
+                    if (!(pml2e & PAGE_PS)) {
+                        uint64_t *pte = (uint64_t *)Phy_To_Virt(pml2e & PAGE_4K_MASK);
+                        kfree(pte);
+                    }
+                }
+                kfree(pml2);
+            }
+            kfree(pml3);
+        }
+        kfree(child_pml4);
+    }
     if (child_mm)   kfree(child_mm);
     if (cr3_out)    *cr3_out = 0;
     return NULL;
@@ -1252,7 +1296,11 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
     list_init(&tsk->list);
     list_init(&tsk->wait_list);
     list_init(&tsk->io_wait_node);
-    list_add_to_before(&init_task_union.task.list, &tsk->list);
+    {
+        uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
+        list_add_to_before(&init_task_union.task.list, &tsk->list);
+        spin_unlock_irqrestore(&task_list_lock, tl_flags);
+    }
 
     // Blocker starts clean — child inherits no blocker state
     tsk->blocker.type = BLOCKER_NONE;
@@ -1352,6 +1400,39 @@ struct task_struct *create_kthread(uint64_t (*fn)(uint64_t), uint64_t arg,
         pos = task_list_next(pos);
     }
     return NULL;
+}
+
+// ── task_send_signal ────────────────────────────────────────
+// SMP-safe signal delivery: find task by pid under
+// task_list_lock, check PF_KTHREAD / init protection,
+// set signal bit, wake if interruptible.
+int task_send_signal(int pid, int sig)
+{
+    int ret = 0;
+    uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
+    list_t *pos = init_task_union.task.list.next;
+    task_t *target = NULL;
+    while (pos != &init_task_union.task.list) {
+        task_t *t = container_of(pos, task_t, list);
+        pos = task_list_next(pos);
+        if (t->pid == pid) {
+            target = t;
+            break;
+        }
+    }
+    if (!target) {
+        ret = -ESRCH;
+    } else if (target->flags & PF_KTHREAD) {
+        ret = -EPERM;
+    } else if (target->pid == 1) {
+        ret = -EPERM;
+    } else {
+        target->signal |= (1ULL << sig);
+        if (target->state == TASK_INTERRUPTIBLE)
+            task_wake(target);
+    }
+    spin_unlock_irqrestore(&task_list_lock, tl_flags);
+    return ret;
 }
 
 void task_init()

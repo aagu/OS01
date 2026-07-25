@@ -38,6 +38,8 @@ typedef struct tty_struct {
 
     // ── Read wait queue ─────────────────────────
     // Tasks blocked in tty_read() wait here.
+    // Protected by read_wait_lock (IRQ-safe).
+    spinlock_T  read_wait_lock;
     list_t      read_wait;
 
     // ── Poll wait list ──────────────────────────

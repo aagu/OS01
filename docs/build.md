@@ -113,6 +113,8 @@ make KERNEL_SELFTEST=1
 make test             # 运行 test/Makefile 中的测试
 make test-phase-0     # 运行 tests/run_test.py phase-0
 make test-syscall     # 使用 OS01_SYSTEST=1 编译并测试系统调用
+
+> **⚠️ 注意事项**: `make test-syscall` 会自动设置 `OS01_SYSTEST=1`。如果**手动**构建 `kernel.bin` 或 `disk.img`（例如 `make run`），需要显式传入 `OS01_SYSTEST=1`，否则 init 不会启动 systest 而是启动 busybox shell。例：`make OS01_SYSTEST=1 run` / `make OS01_SYSTEST=1 disk.img`。
 ```
 
 ## 运行系统

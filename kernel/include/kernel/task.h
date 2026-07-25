@@ -295,4 +295,11 @@ struct task_struct *create_kthread(uint64_t (*fn)(uint64_t), uint64_t arg,
 /* ── EEVDF scheduler ─────────────────────────── */
 void task_wake(struct task_struct *t);
 
+// ── SMP-safe signal delivery ──────────────────────
+// Finds task by pid and delivers signal under
+// task_list_lock.  Returns 0 on success, -ESRCH if
+// the task doesn't exist, -EPERM if the target is
+// a kernel thread or init.
+int task_send_signal(int pid, int sig);
+
 #endif

@@ -12,7 +12,7 @@ CFLAGS += -DDEBUG=1
 endif
 include uefi/Makefile
 
-.PHONY: all clean
+.PHONY: all clean clean-all
 
 all: $(TARGET)
 
@@ -23,5 +23,6 @@ OVMF.fd:
 # submodule builds in-place)
 clean:
 	rm -f *.o *.EFI *.efi *.bin
-	rm -f OVMF.fd
 	rm -rf build/
+clean-all: clean
+	rm -f OVMF.fd
