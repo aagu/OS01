@@ -25,7 +25,7 @@
 
 ```
 P0 (本迭代 — 本月):
- 1. EEVDF 调度器              — O(n)→O(log n)，公平调度，反饿死
+ 1. EEVDF 调度器 ✅            — O(n)→O(log n)，公平调度，反饿死 (2026-07-25)
  2. lwIP 网络栈 + E1000       — 第一个网络能力 (socket poll 回调已就绪)
 
 P1 (本月):
@@ -276,6 +276,7 @@ P3 (远期):
 | **ext2 读写** (alloc_block/inode、create/mkdir/rmdir/unlink/rename/truncate、selftest) | 2 天 | 07-19 |
 | refactor: 固定数组→堆分配 (VFS name/cwd + mount_table + pipe buf + ext2 buf) | 1 天 | 07-19 |
 | **select/pselect syscall** (poll_table 动态化 + do_poll_core 提取 + 适配层 + pselect6 sigmask 原子性 + systest 118/118) | 2 天 | 07-24 |
+| **EEVDF 调度器** (rbtree 可运行队列 + vruntime/deadline + pick_eevdf O(log n) + per-CPU TSS SMP 修复) | 2 天 | 07-25 |
 
 ---
 
