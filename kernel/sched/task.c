@@ -72,6 +72,13 @@ static int cmp_deadline(rbtree_node_t *a, rbtree_node_t *b)
 /* ── enqueue / dequeue ─────────────────────────────── */
 static void enqueue_task(task_t *task, percpu_t *rq)
 {
+    /*
+     * Idle tasks must never appear on a runqueue.  They are
+     * always RUNNING and selected only as a last resort when
+     * pick_eevdf() finds the rbtree empty.
+     */
+    ASSERT(task != rq->idle);
+
     task->deadline = task->vruntime + EEVDF_MIN_SLICE;
     task->on_rq = true;
     rbtree_node_t *conflict = rbtree_insert(&rq->run_queue, &task->rb_node, cmp_deadline);
@@ -99,6 +106,15 @@ static task_t *pick_eevdf(percpu_t *rq)
 /* ── task_wake: mark RUNNING + enqueue (exported) ─── */
 void task_wake(task_t *t)
 {
+    /*
+     * Never enqueue the idle task — it is always RUNNING on its
+     * CPU and must never appear on a runqueue.  If we enqueued it,
+     * pick_eevdf() could select it and switch_to() would corrupt
+     * the idle loop's kernel stack.
+     */
+    if (t == percpu_data[t->cpu].idle)
+        return;
+
     percpu_t *rq = &percpu_data[t->cpu];
     t->state = TASK_RUNNING;
     if (t->on_rq)
