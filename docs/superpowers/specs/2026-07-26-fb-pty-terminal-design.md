@@ -198,10 +198,21 @@ case FD_PTY_MASTER:
 case FD_PTY_MASTER: {
     pty_t *pty = f->pty;
     uint32_t mask = 0;
-    if (pty->slave_to_master && !pipe_empty(pty->slave_to_master))
+    // POLLIN: ash 写了数据 → slave_to_master pipe 有内容
+    if (pty->slave_to_master && !pipe_empty(pty->slave_to_master)) {
         mask |= POLLIN | POLLRDNORM;
-    if (pty->master_to_slave && !pipe_full(pty->master_to_slave))
+    } else if (pt && !pt->triggered) {
+        // 无数据时注册到 pipe 的 read_poll wait queue
+        poll_wait(pt, &pty->slave_to_master->read_wait,
+                  &pty->slave_to_master->lock);
+    }
+    // POLLOUT: master_to_slave pipe 有空间
+    if (pty->master_to_slave && !pipe_full(pty->master_to_slave)) {
         mask |= POLLOUT | POLLWRNORM;
+    } else if (pt && !pt->triggered) {
+        poll_wait(pt, &pty->master_to_slave->write_wait,
+                  &pty->master_to_slave->lock);
+    }
     return mask;
 }
 
@@ -323,6 +334,12 @@ master 和 slave iput 各减 1，归零时释放）。
 
 这种做法避免了引用计数协调的复杂度——PTY 索引是静态数组，不需要动态分配。
 
+**file_free 对 FD_PTY_MASTER 的处理**：`file_free` 的清理逻辑按 `f->type` 分派：
+- `FD_PTY_MASTER`: `f->pty` 是静态 PTY slot 指针，**不 kfree**。仅减少两个 pipe
+  的引用计数（关闭写端）→ pipe writer 归零 → slave 端 `read()` 返回 EOF。
+- `f->node` 为 NULL（PTY master 不用 devfs node），`file_free` 跳过 vfs_node_put。
+- 清理后 `f->pty = NULL`，PTY slot 保持 `allocated = true` 直到下一轮复用。
+
 **pty->pgrp 生命周期**：
 - `ptmx_open` → `pty->pgrp = 0`（初始无前台进程组）
 - ash 调用 `tcsetpgrp(slave, pgrp)` → `pty->pgrp = pgrp`
@@ -438,6 +455,7 @@ int is_device_mmap = 0;
 // ── 第 4 步: 检查并处理设备/文件映射 ──
 if (!(flags & MAP_ANONYMOUS)) {
     file_t *file = current->files->fd[fd];
+    if (!file || !file->node) return -EBADF;  // FD_PTY_MASTER/FD_PIPE 无 node
     file_node = vfs_node_get(file->node);
 
     // 设备节点有 mmap handler → 走设备路径
@@ -681,6 +699,25 @@ void console_force_enable(void)    // panic 路径调用
 }
 ```
 
+**触发机制**：terminal.elf 在用户态通过 `ioctl(fb_fd, FBIOSURRENDER, NULL)` 触发。
+`fb_ioctl` 处理 `FBIOSURRENDER` 命令，调用 `console_surrender_fb()`。这样在
+`mmap` 之后、主循环开始之前，console 将 fb 移交给 terminal.elf。
+
+```c
+// kernel/driver/fb.c
+#define FBIOSURRENDER  0x00004601  // "give up framebuffer"
+
+int fb_ioctl(vfs_node_t *node, int cmd, void *arg) {
+    if (cmd == FBIOSURRENDER) {
+        console_surrender_fb();
+        return 0;
+    }
+    return -ENOTTY;
+}
+```
+
+terminal.elf 时序中在 `mmap` 之后、`open("/dev/ptmx")` 之前调用此 ioctl。
+
 **行为约定**：
 - terminal.elf 启动前 → `term_initialized = true`，`printk`/`log_err`/`log_debug` 输出到 fb
 - terminal.elf 启动后 → `console_surrender_fb()`，`term_initialized = false`
@@ -784,20 +821,19 @@ terminal.elf 的启动顺序是关键——读键盘的 `/dev/tty` fd 必须在�
 ```
 terminal.elf:
   1. open("/dev/tty")        → ctty_type==CTTY_NONE → 回退到物理 TTY (键盘/串口)
-  2. open("/dev/ptmx")       → master fd，创建 pty[0]
-  3. open("/dev/pts0")      → slave fd, current->ctty_type=CTTY_PTY, current->ctty = &ptys[0]
-  4. fork()                  → ash 继承 ctty_type=CTTY_PTY, ctty=ptys[0]
-  5. close(slave)            // terminal 不需要 slave fd（只用 master）
-  6. current->ctty_type = CTTY_NONE;  // terminal.elf 清空自己的 ctty
+  2. open("/dev/fb")         → fb_fd, read metadata, mmap framebuffer
+  3. ioctl(fb_fd, FBIOSURRENDER) → console_surrender_fb() — 内核交出 fb
+  4. open("/dev/ptmx")       → master fd，创建 pty[0]
+  5. open("/dev/pts0")       → slave fd, current->ctty_type=CTTY_PTY, current->ctty = &ptys[0]
+  6. fork()                  → ash 继承 ctty_type=CTTY_PTY, ctty=ptys[0]
+  7. close(slave)            // terminal 不需要 slave fd（只用 master）
+  8. current->ctty_type = CTTY_NONE;  // terminal.elf 清空自己的 ctty
 
   // terminal.elf 的 tty_fd 仍指向物理 TTY（在步骤 1 已解析完毕）
   // ash 的 /dev/tty → ctty_type==CTTY_PTY → PTY slave
 
 ash (fork 后):
   open("/dev/tty")           → ctty_type==CTTY_PTY → 遍历 device 表匹配 ptys[0] → slave fd
-  tcgetpgrp/tcsetpgrp        → 操作 PTY slave（兼容）
-```
-  open("/dev/tty")           → ctty==&ptys[0] → PTY slave fd
   tcgetpgrp/tcsetpgrp        → 操作 PTY slave（兼容）
 ```
 
@@ -838,6 +874,10 @@ read(fb_fd, &info, sizeof(info));
 // mmap framebuffer
 uint32_t *fb = mmap(NULL, info.height * info.stride,
                     PROT_WRITE, MAP_SHARED, fb_fd, 0);
+
+// 通知内核交出 fb（console → terminal.elf）
+#define FBIOSURRENDER  0x00004601
+ioctl(fb_fd, FBIOSURRENDER, NULL);
 
 // 使 PTY slave 成为控制终端
 int slave = open("/dev/pts0", O_RDWR);    // current->ctty = slave
