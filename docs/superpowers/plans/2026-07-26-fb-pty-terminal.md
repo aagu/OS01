@@ -20,9 +20,65 @@
 - 每步 commit 独立可编译可运行
 - `vfs_node_alloc()` 不存在——使用 `calloc(1, sizeof(vfs_node_t))`
 
+## VM_IO 关键防护（影响 Task 4, 7）
+
+以下 3 处必须在 Task 4 (/dev/fb) 完成时同步修复，否则 fork/exit/pf 路径会在
+framebuffer MMIO 页上出错：
+
+### A. fork_mm_copy — VM_IO 页面不 COW
+
+`kernel/sched/task.c` 的 `fork_mm_copy` 对所有可写 Present PTE 做 COW。
+framebuffer 物理地址不在 `subpage_pool` 中 → `page_cow_get` 是 no-op →
+`page_cow_refs` 在 #PF 时返回 0 → 原地提升。**当前此行为偶然正确**，
+但若 framebuffer 物理地址在 E820 RAM 区域内，`free_4k_page` 会把 MMIO 页
+还给分配器 → 双重分配 + 显示损坏。
+
+**修复**：在 `fork_mm_copy` 遍历 PTE 时，检查 VMA 的 `VM_IO` 标志，跳过 COW：
+
+```c
+// kernel/sched/task.c — fork_mm_copy, 在 page_cow_get 调用前:
+if (vma->vm_flags & VM_IO) continue;  // MMIO pages: skip COW, share directly
+```
+
+### B. do_page_fault vm_file 路径 — VM_IO 页面不惰性填页
+
+`kernel/arch/x86_64/trap.c:495-524` 的 `vma->vm_file` 路径在缺页时分配 RAM 页 +
+`vfs_read(vma->vm_file, ...)` 填入。若 fb_mmap 的 PTE 未预先填充（或 fork 后
+PTE 被清除），缺页处理会从 `/dev/fb` 读取 `fb_info` 结构体数据写入 RAM 页，
+屏幕被二进制数据覆盖。
+
+**修复 A（推荐）**：`fb_mmap` 预填充所有 PTE 后设 `vma->vm_file = NULL`，
+  缺页处理器跳过 vm_file 路径。
+
+**修复 B（额外防护）**：`do_page_fault` 在 vm_file 路径前检查 `VM_IO`：
+```c
+if (vma->vm_file && !(vma->vm_flags & VM_IO)) { ... }
+```
+
+两者都做——fb_mmap 清 vm_file（避免 pf 误判）+ pf 路径加 VM_IO 防护（深度防御）。
+
+### C. vma_free_all — VM_IO 页面不释放
+
+`kernel/memory/vma.c` 的 `vma_free_all` → `vmm_unmap_4k_page` → `free_4k_page`
+对不在 subpage_pool 中的物理地址是 no-op（非 RAM 地址不匹配任何池）。
+但若 framebuffer 在 E820 RAM 内 → 释放 MMIO 页到分配器 → 双重分配。
+
+**修复**：`vma_free_all` 遍历 VMA 时跳过 `VM_IO` 页面：
+```c
+if (v->vm_flags & VM_IO) { vma_remove(mm, v); continue; }
+```
+
+### D. fb_mmap 统一修复
+
+`fb_mmap` 中预填充所有 PTE 后：
+```c
+vfs_node_put(vma->vm_file);
+vma->vm_file = NULL;  // 防止 do_page_fault 走 vfs_read 路径
+```
+
 ---
 
-## Task 重排（v2）
+## Task 重排（v3）
 
 ```
 Task 1:  devfs_ops struct 重构 + 5 设备迁移 + sys_open 集成
@@ -146,9 +202,15 @@ if (!node) { regs->rax = -ENOENT; break; }
 
 file_t *f = NULL;
 int rc = devfs_open_node(node, path, flags, &f);
-vfs_node_put(node);
+vfs_node_put(node);  // node 来自 lookup，现在引用已移交或释放
 if (rc < 0) { regs->rax = rc; break; }
 if (!f) { regs->rax = -ENOMEM; break; }
+```
+
+`devfs_open_node` 内部：若走 open 回调返回自定义 file_t，则该 file_t 不绑定 vfs_node
+（如 FD_PTY_MASTER）。若回调返回 -ENOSYS，则分配 FD_DEV + vfs_node_get(node)。
+无论哪种，调用方统一 `vfs_node_put(node)` 正确——一个引用来自 lookup，另一个
+（若需）来自 file_t 内部。
 
 int fd = fd_alloc(current->files, f);
 if (fd < 0) { file_free(f); regs->rax = -EMFILE; break; }
@@ -453,15 +515,53 @@ struct fb_info {
 - [ ] **Step 4: fb.c — fb_read, fb_mmap, fb_ioctl**
 
 ```c
-// fb_read: offset=0 返回 fb_info，否则 EOF
-// fb_write: 返回 size（discard）
-// fb_mmap: 校验 SHARED + 不越界 → 设置 VM_IO → eager PTE fill → flush_tlb
-// fb_ioctl: FBIOSURRENDER → console_surrender_fb()
+// fb_read: offset=0 返回 fb_info, offset>0 返回 0 (EOF)
+// fb_write: 返回 size (discard) + 检查 fb_surrendered 标志
+//   static bool fb_surrendered = false;
+//   若 fb_surrendered → 只输出到 serial (write_serial)，不写 fb
+static int fb_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
+{
+    (void)node; (void)offset;
+    if (fb_surrendered) {
+        for (uint64_t i = 0; i < size; i++)
+            write_serial(((char *)buffer)[i]);
+    }
+    return (int)size;
+}
+
+// fb_mmap:
+//   校验 SHARED + 不越界 → 设置 VM_IO → eager PTE fill → flush_tlb
+//   → vfs_node_put(vma->vm_file); vma->vm_file = NULL;  // 防 pf vm_file 路径
+// fb_ioctl:
+//   FBIOSURRENDER → console_surrender_fb() + fb_surrendered = true
 ```
 
-其中 `fb_mmap` 末尾 `flush_tlb()` 必不可少。
+`fb_mmap` 末尾 `flush_tlb()` 必不可少。`vma->vm_file = NULL` 防止
+do_page_fault 的 vm_file 路径误判——fb_mmap 已将 PTE 全部预填入，
+后续缺页只可能来自 fork 清除的 PTE。VM_IO 防护（见 Global Constraints）
+在 fork_mm_copy 中跳过 VM_IO 页面 → PTE 不会被清除 → 不会触发缺页。
 
-- [ ] **Step 5: main.c 注册 /dev/fb**
+- [ ] **Step 5: fork_mm_copy + do_page_fault + vma_free_all VM_IO 防护**
+
+在 `kernel/sched/task.c` 的 `fork_mm_copy` 中，COW 循环里：
+```c
+// 在遍历 PTE 时，获取 vma 后检查:
+if (vma->vm_flags & VM_IO) continue;  // skip MMIO pages
+```
+
+在 `kernel/arch/x86_64/trap.c` 的 `do_page_fault`，vm_file 路径前：
+```c
+if (vma->vm_file && !(vma->vm_flags & VM_IO)) {
+    // 现有惰性填页逻辑 (alloc_4k_page + vfs_read + vmm_map_4k_page)
+}
+```
+
+在 `kernel/memory/vma.c` 的 `vma_free_all`，循环开头：
+```c
+if (v->vm_flags & VM_IO) { vma_remove(mm, v); continue; }
+```
+
+- [ ] **Step 6: main.c 注册 /dev/fb**
 
 `devfs_register_chrdev("fb", NULL, &fb_ops);`
 
@@ -579,6 +679,15 @@ int pty_slave_ioctl(pty_t *pty, int cmd, void *arg)
     case TIOCSWINSZ: pty->ws_row = ((struct winsize *)arg)->ws_row; pty->ws_col = ((struct winsize *)arg)->ws_col; return 0;
     case TIOCGPGRP: *(pid_t *)arg = pty->pgrp; return 0;
     case TIOCSPGRP: pty->pgrp = *(pid_t *)arg; return 0;
+    // FIONREAD — busybox ash needs this for get_more_input()
+    case FIONREAD: {
+        if (!pty->master_to_slave) return -ENODEV;
+        uint64_t fl = spin_lock_irqsave(&pty->master_to_slave->lock);
+        int avail = (pty->master_to_slave->head - pty->master_to_slave->tail + PIPE_SIZE) % PIPE_SIZE;
+        spin_unlock_irqrestore(&pty->master_to_slave->lock, fl);
+        *(int *)arg = avail;
+        return 0;
+    }
     default: return -ENOTTY;
     }
 }
@@ -763,7 +872,7 @@ typedef struct {
     uint32_t magic, version, headersize, flags, numglyph, bytesperglyph, height, width;
 } psf2_t;
 
-extern char _binary_kernel_font_psf_start[];
+extern char _binary_user_terminal_font_psf_start[];
 
 static uint32_t *fb;
 static struct fb_info fb_info;
@@ -861,7 +970,7 @@ int main(void)
     if ((int64_t)fb < 0) { write(2, "terminal: mmap fb\n", 18); return 1; }
     ioctl(fb_fd, FBIOSURRENDER, NULL);
 
-    font = (psf2_t *)_binary_kernel_font_psf_start;
+    font = (psf2_t *)_binary_user_terminal_font_psf_start;
     term_cols = fb_info.width / font->width;
     term_rows = fb_info.height / font->height;
 
@@ -905,12 +1014,18 @@ int main(void)
 - [ ] **Step 2: 更新 user/Makefile**
 
 ```makefile
-user/font.psf.o: kernel/font.psf
-	$(OBJCOPY) -B i386 -I binary -O elf64-x86-64 kernel/font.psf user/font.psf.o
+# Copy font -- avoid symbol collision with kernel_psf_start
+user/terminal_font.psf: kernel/font.psf
+	cp kernel/font.psf user/terminal_font.psf
 
-user/terminal.elf: user/terminal.o user/font.psf.o
+user/terminal_font.psf.o: user/terminal_font.psf
+	$(OBJCOPY) -B i386 -I binary -O elf64-x86-64 user/terminal_font.psf user/terminal_font.psf.o
+
+user/terminal.elf: user/terminal.o user/terminal_font.psf.o
 	$(LD) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 ```
+
+符号名：`extern char _binary_user_terminal_font_psf_start[];`（objcopy 自动生成）。
 
 - [ ] **Step 3: 编译验证 + Commit**
 
