@@ -277,6 +277,7 @@ block device（`devfs_register_blkdev`）签名不变，无需迁移。
 
 **Files:**
 - Modify: `kernel/fs/file.c`
+- Modify: `kernel/fs/poll.c`
 - Modify: `kernel/include/kernel/file.h`
 
 **Interfaces:**
@@ -351,7 +352,7 @@ case FD_PTY_MASTER: {
         if (pty->slave_to_master->head != pty->slave_to_master->tail)
             mask |= POLLIN | POLLRDNORM;
         else if (pt && !pt->triggered)
-            poll_wait(pt, &pty->slave_to_master->read_wait, &pty->slave_to_master->lock);
+            poll_wait(pt, &pty->slave_to_master->read_poll, &pty->slave_to_master->lock);
         spin_unlock_irqrestore(&pty->slave_to_master->lock, fl);
     }
     if (pty->master_to_slave) {
@@ -359,7 +360,7 @@ case FD_PTY_MASTER: {
         if (!pipe_full(pty->master_to_slave))
             mask |= POLLOUT | POLLWRNORM;
         else if (pt && !pt->triggered)
-            poll_wait(pt, &pty->master_to_slave->write_wait, &pty->master_to_slave->lock);
+            poll_wait(pt, &pty->master_to_slave->write_poll, &pty->master_to_slave->lock);
         spin_unlock_irqrestore(&pty->master_to_slave->lock, fl);
     }
     return mask;
@@ -373,7 +374,7 @@ case FD_PTY_SLAVE: {
         if (pty->master_to_slave->head != pty->master_to_slave->tail)
             mask |= POLLIN | POLLRDNORM;
         else if (pt && !pt->triggered)
-            poll_wait(pt, &pty->master_to_slave->read_wait, &pty->master_to_slave->lock);
+            poll_wait(pt, &pty->master_to_slave->read_poll, &pty->master_to_slave->lock);
         spin_unlock_irqrestore(&pty->master_to_slave->lock, fl);
     }
     if (pty->slave_to_master) {
@@ -381,7 +382,7 @@ case FD_PTY_SLAVE: {
         if (!pipe_full(pty->slave_to_master))
             mask |= POLLOUT | POLLWRNORM;
         else if (pt && !pt->triggered)
-            poll_wait(pt, &pty->slave_to_master->write_wait, &pty->slave_to_master->lock);
+            poll_wait(pt, &pty->slave_to_master->write_poll, &pty->slave_to_master->lock);
         spin_unlock_irqrestore(&pty->slave_to_master->lock, fl);
     }
     return mask;
@@ -969,14 +970,23 @@ void pty_init(void) {
 }
 ```
 
-- [ ] **Step 9: 添加 FIONREAD 定义到 sysroot ioctl.h**
+- [ ] **Step 9: 添加 ioctl 常量到内核 + 用户空间头文件**
 
-在 `sysroot/usr/include/sys/ioctl.h` 末尾添加：
+`TIOCSWINSZ` 和 `FIONREAD` 在内核代码（`pty_slave_ioctl`、`tty_phys_ioctl`）中使用，
+需同时在两处定义：
+
+**内核头文件** `kernel/include/uapi/stat.h` 的 ioctl 段末尾：
+```c
+#define TIOCSWINSZ  0x5414
+#define FIONREAD    0x541B
+```
+
+**sysroot 头文件** `sysroot/usr/include/sys/ioctl.h` 末尾：
 ```c
 #define FIONREAD   0x541B
 ```
 
-busybox ash 的 `get_more_input()` 需要此 ioctl 来检查可用字符数。
+busybox ash 的 `get_more_input()` 需要 FIONREAD 来检查可用字符数。
 
 - [ ] **Step 10: 编译验证**
 
