@@ -171,6 +171,11 @@ static int devfs_mmap(vfs_node_t *node, vma_t *vma)
 // kernel/fs/devfs.c
 int devfs_open_node(vfs_node_t *node, const char *path, int flags, file_t **out)
 {
+    // Guard: only process devfs device nodes. Non-device nodes return -ENOSYS
+    // so SYS_open falls through to the default FD_VFS path.
+    if (node->type != VFS_CHRDEV && node->type != VFS_BLKDEV)
+        return -ENOSYS;
+
     int idx = (int)(uintptr_t)node->fs_data;
     if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
         return -ENODEV;
@@ -202,9 +207,18 @@ if (!node) { regs->rax = -ENOENT; break; }
 
 file_t *f = NULL;
 int rc = devfs_open_node(node, path, flags, &f);
-vfs_node_put(node);  // node 来自 lookup，现在引用已移交或释放
-if (rc < 0) { regs->rax = rc; break; }
-if (!f) { regs->rax = -ENOMEM; break; }
+if (rc == -ENOSYS) {
+    // Not a devfs device node → fall through to default FD_VFS
+    f = file_alloc();
+    if (!f) { vfs_node_put(node); regs->rax = -ENOMEM; break; }
+    f->type = (node->type == VFS_DIR) ? VFS_DIR : FD_VFS;
+    f->node = node;  // takes ownership of lookup ref
+    f->flags = flags;
+} else {
+    vfs_node_put(node);  // devfs path owns its own ref
+    if (rc < 0) { regs->rax = rc; break; }
+    if (!f) { regs->rax = -ENOMEM; break; }
+}
 ```
 
 `devfs_open_node` 内部：若走 open 回调返回自定义 file_t，则该 file_t 不绑定 vfs_node
@@ -356,6 +370,8 @@ case FD_PTY_SLAVE: {
 ```c
 if ((f->type == FD_PTY_MASTER || f->type == FD_PTY_SLAVE) && f->pty) {
     pty_t *pty = f->pty;
+    // Hold pty_lock to prevent concurrent pty_alloc reusing this slot (SMP)
+    uint64_t pty_flags = spin_lock_irqsave(&pty_lock);
     int need_r_a = 0, need_r_b = 0;
 
     if (f->type == FD_PTY_MASTER) {
@@ -404,6 +420,7 @@ if ((f->type == FD_PTY_MASTER || f->type == FD_PTY_SLAVE) && f->pty) {
         pty->allocated = false;  // slot reusable
     }
 
+    spin_unlock_irqrestore(&pty_lock, pty_flags);
     f->pty = NULL;
 }
 ```
@@ -654,6 +671,35 @@ if (v->vm_flags & VM_IO) { vma_remove(mm, v); continue; }
 - `tty_read`: 删除 canonical 处理，直接 ring → buf 拷贝 + sleep/wake
 - 删除 `tty_canon_process()`, `tty_cooked_pop()`
 - `keyboard.c`: 方向键无条件发 VT100 序列
+- **添加 `tty_phys_ioctl`**: 物理 TTY 的 ioctl 回调（SYS_ioctl 重构后，TIOCGWINSZ/TIOCGPGRP 等 ioctl 需通过 devfs_ops.ioctl 分发）：
+
+```c
+// kernel/tty/tty.c — 添加到 tty_phys_ops.ioctl
+static int tty_phys_ioctl(vfs_node_t *node, int cmd, void *arg)
+{
+    (void)node;
+    switch (cmd) {
+    case TCGETS: {
+        struct termios t;
+        memset(&t, 0, sizeof(t));
+        t.c_lflag = ICANON | ECHO | ISIG; t.c_iflag = ICRNL; t.c_oflag = OPOST | ONLCR;
+        memcpy(arg, &t, sizeof(t)); return 0;
+    }
+    case TCSETS: case TCSETSW: return 0;  // store only, no-op
+    case TIOCGWINSZ: ((struct winsize *)arg)->ws_row = 25; ((struct winsize *)arg)->ws_col = 80; return 0;
+    case TIOCGPGRP: *(pid_t *)arg = 0; return 0;
+    case TIOCSPGRP: return 0;
+    case FIONREAD: {
+        tty_t *tty = get_dev_tty();
+        *(int *)arg = tty ? (tty->head - tty->tail + TTY_BUF_SIZE) % TTY_BUF_SIZE : 0;
+        return 0;
+    }
+    default: return -ENOTTY;
+    }
+}
+```
+
+更新 `tty_phys_ops.ioctl = tty_phys_ioctl`。这确保物理 TTY fd 上的 ioctl 在 fd_ioctl 重构后不丢失。
 
 ---
 
@@ -899,7 +945,16 @@ void pty_init(void) {
 }
 ```
 
-- [ ] **Step 9: 编译验证**
+- [ ] **Step 9: 添加 FIONREAD 定义到 sysroot ioctl.h**
+
+在 `sysroot/usr/include/sys/ioctl.h` 末尾添加：
+```c
+#define FIONREAD   0x541B
+```
+
+busybox ash 的 `get_more_input()` 需要此 ioctl 来检查可用字符数。
+
+- [ ] **Step 10: 编译验证**
 
 确认 `snprintf` 可用。若不可用，替换为手动构造 `"pts0"` 等字符串：
 ```c
@@ -909,7 +964,7 @@ void pty_init(void) {
 slave_name[3] = '0' + pty->index; slave_name[4] = '\0';
 ```
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 11: Commit**
 
 ---
 
@@ -1088,7 +1143,7 @@ int main(void)
             break;
         }
         if (fds[0].revents & POLLIN) { int n = read(tty_fd, buf, sizeof(buf)); if (n > 0) handle_input(buf, n, pty_fd, ash_pid); }
-        if (fds[1].revents & POLLIN) { int n = read(pty_fd, buf, sizeof(buf)); if (n > 0) handle_output(buf, n); else if (n == 0) break; }
+        if (fds[1].revents & POLLIN) { int n = read(pty_fd, buf, sizeof(buf)); if (n > 0) handle_output(buf, n); else break; /* n==0 EOF, n<0 error */ }
     }
 
     // Wait for ash to exit (reap zombie)
