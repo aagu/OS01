@@ -12,7 +12,7 @@
 
 ### 目标
 
-1. 实现 Unix98 风格 PTY（`/dev/ptmx` + `/dev/pts/N`），复用现有 pipe
+1. 实现 Unix98 风格 PTY（`/dev/ptmx` + `/dev/pts0`...），复用现有 pipe。devfs 是扁平目录，PTY slave 使用 `/dev/pts0`、`/dev/pts1` 命名（不支持子目录 `/dev/pts/N`）
 2. `/dev/fb` 新增 mmap（`VM_IO` 映射）+ read（元数据）
 3. tty.c 退化为 raw ring buffer + 阻塞读写（删除 canonical/line discipline）
 4. console.c 退化为应急 panic 输出（删除 VT100 CSI 状态机、光标闪烁）
@@ -82,7 +82,7 @@
 | `/dev/tty` | 有 (canonical mode + console 渲染) | 有 (current->ctty 魔数设备) |
 | `/dev/fb` | **无** | **新增** (mmap + read metadata) |
 | `/dev/ptmx` | **无** | **新增** (Unix98 PTY master 克隆设备) |
-| `/dev/pts/0..N` | **无** | **新增** (动态注册 slave) |
+| `/dev/pts0..N` | **无** | **新增** (动态注册 slave，扁平命名) |
 | `/dev/keyboard` | 有 | 不变 |
 
 ### 启动流程
@@ -92,8 +92,8 @@ init
  ├─ fork → terminal.elf   (负责 fb 渲染 + 键盘/串口输入分发)
  │    ├─ open /dev/tty → 物理 TTY fd (ctty==NULL → 回退键盘/串口)
  │    ├─ open /dev/fb, read metadata, mmap
- │    ├─ open /dev/ptmx → master fd (/dev/pts/0 自动创建)
- │    ├─ open /dev/pts/0 → slave fd（使 slave 成为当前 session ctty）
+ │    ├─ open /dev/ptmx → master fd (/dev/pts0 自动创建)
+ │    ├─ open /dev/pts0 → slave fd（使 slave 成为当前 session ctty）
  │    ├─ fork → ash
  │    │    └─ dup2(slave, 0/1/2) → close(slave) → exec("/bin/ash")
  │    │         ash 的 current->ctty 已继承自 fork = slave
@@ -114,8 +114,8 @@ init
 
 #### 设备注册
 
-- `/dev/ptmx` — 字符设备。`open()` 时创建一对新的 PTY，返回 master fd。
-- `/dev/pts/<N>` — 字符设备。由 `ptmx_open` 动态注册到 devfs。`open()` 返回 slave fd。
+- `/dev/ptmx` — 字符设备。`open()` 时创建一对新的 PTY，返回 master fd。slave 自动注册为 `/dev/pts0`、`/dev/pts1`...（扁平命名，devfs 不支持子目录）。
+- `/dev/pts<N>` — 字符设备。由 `ptmx_open` 动态注册到 devfs。`open()` 返回 slave fd。
 - 最大同时 PTY 数量：`PTY_MAX = 8`。
 
 #### 数据结构
@@ -160,7 +160,7 @@ Slave fd 操作：
 - `ioctl(slave, TCGETS)` → 返回 `pty->term`
 - `ioctl(slave, TCSETS/TCSETSW)` → 存储到 `pty->term`（不改变实际行为）
 - `ioctl(slave, TIOCGWINSZ)` → 返回 `pty->ws_row/ws_col`
-- `ioctl(slave, TIOCSWINSZ)` → 设置后发 SIGWINCH 到 pty->pgrp
+- `ioctl(slave, TIOCSWINSZ)` → 设置后发 SIGWINCH 到 `pty->pgrp`（**V1 defer**: `task_send_signal` 仅支持单 PID，无 `kill_pgrp` 函数。窗口大小变化暂时存储但不产生信号，terminal.elf 通过 VT100 转义序列控制显示尺寸）
 - `ioctl(slave, TIOCGPGRP)` → 返回 `pty->pgrp`
 - `ioctl(slave, TIOCSPGRP)` → 设置 `pty->pgrp`
 
@@ -199,13 +199,19 @@ master 和 slave iput 各减 1，归零时释放）。
 
 这种做法避免了引用计数协调的复杂度——PTY 索引是静态数组，不需要动态分配。
 
+**pty->pgrp 生命周期**：
+- `ptmx_open` → `pty->pgrp = 0`（初始无前台进程组）
+- ash 调用 `tcsetpgrp(slave, pgrp)` → `pty->pgrp = pgrp`
+- slave fd 关闭 → `pty->pgrp = 0`（重置，避免指向已退出进程组）
+- 下一个 `ptmx_open` 复用 slot 时重新初始化为 0
+
 #### 涉及文件
 
 | 文件 | 改动 | 行数 |
 |---|---|---|
 | `kernel/driver/pty.c` | 新建：PTY alloc/free、master/slave 读写、ioctl | ~250 |
 | `kernel/include/kernel/pty.h` | 新建：pty_t + PTY_MAX + API 声明 | ~30 |
-| `kernel/fs/devfs.c` | ptmx open 时注册 /dev/pts/N | ~20 |
+| `kernel/fs/devfs.c` | ptmx open 时注册 /dev/ptsN | ~20 |
 | `kernel/kernel/main.c` | 调用 pty_init() | ~2 |
 
 ---
@@ -250,6 +256,7 @@ int fb_mmap(vfs_node_t *node, vma_t *vma)
         uint64_t pa = Pos.Phy_addr + (va - vma->vm_start);
         vmm_map_4k_page(user_pml4, va, pa, vma->vm_page_prot);
     }
+    flush_tlb();  // Eager 填入 PTE 后必须刷新 TLB
     return 0;
 }
 ```
@@ -650,7 +657,7 @@ terminal.elf 的启动顺序是关键——读键盘的 `/dev/tty` fd 必须在�
 terminal.elf:
   1. open("/dev/tty")        → ctty_type==CTTY_NONE → 回退到物理 TTY (键盘/串口)
   2. open("/dev/ptmx")       → master fd，创建 pty[0]
-  3. open("/dev/pts/0")      → slave fd, current->ctty_type=CTTY_PTY, current->ctty = &ptys[0]
+  3. open("/dev/pts0")      → slave fd, current->ctty_type=CTTY_PTY, current->ctty = &ptys[0]
   4. fork()                  → ash 继承 ctty_type=CTTY_PTY, ctty=ptys[0]
   5. close(slave)            // terminal 不需要 slave fd（只用 master）
   
@@ -693,7 +700,7 @@ ash (fork 后):
 int tty_fd  = open("/dev/tty", O_RDONLY);   // ctty==NULL → 回退物理 TTY
 int fb_fd   = open("/dev/fb", O_RDWR);
 int pty_fd  = open("/dev/ptmx", O_RDWR);    // 返回 master
-// /dev/pts/0 被自动创建
+// /dev/pts0 被自动创建
 
 // 读取 fb 元数据
 struct fb_info info;
@@ -704,7 +711,7 @@ uint32_t *fb = mmap(NULL, info.height * info.stride,
                     PROT_WRITE, MAP_SHARED, fb_fd, 0);
 
 // 使 PTY slave 成为控制终端
-int slave = open("/dev/pts/0", O_RDWR);    // current->ctty = slave
+int slave = open("/dev/pts0", O_RDWR);    // current->ctty = slave
 
 // Fork ash
 int ash_pid = fork();
@@ -780,6 +787,14 @@ terminal.elf 将键盘输入逐字节透传给 PTY master，不做任何行编�
 **V1 限制**：仅 ash（cooked 模式程序）已验证。raw mode 程序（vi、less）的
 透传路径已实现但尚未测试——因为 PTY 缺少 `TIOCPKT` 通知，terminal.elf
 需轮询 termios，存在最多一个 poll 周期的延迟。
+
+**已知交互: terminal.elf echo + ash readline**：PTY slave 初始 `!ECHO`，
+ash 不自行 echo。terminal.elf 在 cooked 模式下 echo 每个字符到 fb。
+ash 收到整行后执行命令。基本命令（`ls`、`echo hello`）正常。
+但 ash 的 readline（退格、^U、^W、tab 补全）依赖逐字节交互——
+terminal.elf 的行编辑已缓冲整行后才发送，readline 可能对已完成的
+行进行第二次处理。此交互在 V1 可接受但不完美，后续优化方向是
+terminal.elf 进入真正的逐字节透传模式对接 readline。
 
 #### VT100 状态机（handle_output）
 
@@ -906,11 +921,14 @@ ash 的读输入路径 `preadfd()` 不变——fd 0 已 dup2 到 PTY slave，`re
 
 | 项目 | 说明 |
 |---|---|
-| `ptsname`/`grantpt`/`unlockpt` | libc stub 缺失；terminal.elf 硬编码 `/dev/pts/0`。后续支持多 PTY 时需实现 |
+| `ptsname`/`grantpt`/`unlockpt` | libc stub 缺失；terminal.elf 硬编码 `/dev/pts0`。后续支持多 PTY 时需实现 |
 | `TIOCPKT` 包模式 | PTY master 在 slave termios/winsize 变化时无通知。terminal.elf 改用 poll 轮询 TCGETS，最多一个 poll 周期延迟 |
 | `TIOCSCTTY` | 允许进程主动设置控制终端（某些 daemon 化路径需要）。V1 没有调用者 |
+| `kill_pgrp` / SIGWINCH | `task_send_signal` 仅支持单 PID，无进程组广播。TIOCSWINSZ 存储 winsize 但不发信号。terminal.elf 通过 VT100 序列控制显示尺寸 |
 | `/dev/tty` strcmp 路径 | 硬编码字符串是设计瑕疵。后续改为 VFS_REDIRECT 节点类型 + devfs 特殊节点 |
+| devfs 子目录 `/dev/pts/N` | 当前用 `/dev/pts0` 扁平命名。后续需 devfs_mkdir + 多级 lookup → `/dev/pts/0` |
 | 键盘扩展键 (PGUP/PGDN/INSERT) | `ext_scancode_tbl` 中 0x49(PGUP)、0x51(PGDN)、0x52(INSERT) 当前映射为 UP/DOWN/HOME，后续可独立处理 |
+| terminal.elf echo + readline | 目前 terminal.elf 缓冲整行再发送。后续改为逐字节透传适配 ash readline 的退格/补全/^U 等 |
 | fb mmap 2MB huge page | V1 使用 4KB 页映射 fb，正确但 TLB 效率低。后续改为 2MB 页减少 TLB 压力 |
 | fb stride padding | V1 stride = width * 4。部分 UEFI GOP 有行末 padding，需要 `Pos.pixels_per_line` 字段 |
 | raw mode 程序测试 | V1 仅测试 cooked mode（ash）；vi/less 等 raw mode 程序的透传路径已实现但未验证 |
