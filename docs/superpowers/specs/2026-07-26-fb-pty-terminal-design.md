@@ -139,12 +139,10 @@ typedef struct pty_struct {
 
     // 前台进程组
     pid_t       pgrp;
-
-    // 等待队列（slave 端 blocking read）
-    list_t      read_wait;
-    spinlock_T   read_wait_lock;
 } pty_t;
 ```
+
+读写和 poll 完全委托给底层 pipe——`pty_t` 不需要自己的等待队列。
 
 #### 数据流
 
@@ -171,6 +169,35 @@ Slave fd 操作：
 PTY slave **初始化为 raw mode**（`!ICANON, !ECHO, ISIG=0`）。terminal.elf 完全负责终端语义（行编辑、echo、信号生成）。这符合 Linux 终端模拟器的做法——PTY slave 始终 raw，模拟器在上面实现 cooked 行为。
 
 Slave 存储 `tcsetattr` 写入的值供 `tcgetattr` 查询，但 ly 不执行——实际行为始终 raw（无内核端行编辑、无 echo、无信号生成）。
+
+#### pipe 生命周期与 PTY 释放
+
+PTY 内部的两个 pipe 由 VFS pipe 的引用计数管理，PTY 层不持有额外引用。
+
+**释放时序**：
+
+```
+terminal.elf exit → close(master fd) → iput(master node) → 递减 inode 引用
+ash exit          → close(slave fd)  → iput(slave node)  → 递减 inode 引用
+
+当 master + slave 的 inode 引用都归零：
+  → pty_free(pty)
+    1. 遍历所有 task: ctty == pty → ctty_type = CTTY_NONE, ctty = NULL
+    2. 关闭 master_to_slave 和 slave_to_master pipe 的写端
+       → pipe 引用计数归零 → pipe_free 释放缓冲区
+    3. devfs_unregister("/dev/pts/<n>")
+    4. pty->allocated = false
+```
+
+**关键**: `pty_free` 在 iput 回调中触发（当 master 和 slave 的最后一个引用被释放时）。
+但 master 和 slave 节点各自清理时都可能触发——需要引用计数（`refcount` 从 2 开始，
+master 和 slave iput 各减 1，归零时释放）。
+
+简化 V1 实现：PTY 不主动释放。所有 8 个 PTY slot 在内核生命周期内存在。
+`pty->allocated` 仅在 `ptmx_open` 时设为 true。terminal.elf 退出后 slot 可被
+下一个 `ptmx_open` 复用。pipe 在两端 fd 关闭后由 VFS fd 层自动 `iput → pipe_free`。
+
+这种做法避免了引用计数协调的复杂度——PTY 索引是静态数组，不需要动态分配。
 
 #### 涉及文件
 
@@ -241,11 +268,6 @@ struct fb_info {
 
 `fb_read(node, offset, size, buf)`：`offset=0` 返回 `sizeof(fb_info)` 字节，`offset>0` 返回 0（EOF）。
 
-> **注意**: V1 的 stride = `width * 4`。部分 UEFI GOP 模式在行末有 padding，
-> stride > `width * 4`。遇到此类硬件时 `Pos` 需新增 `pixels_per_line` 字段。
-
-`fb_read(node, offset, size, buf)`：`offset=0` 返回 `sizeof(fb_info)` 字节，`offset>0` 返回 0（EOF）。
-
 #### #PF handler
 
 无需特殊处理——PTE 已在 mmap 时填入，不会因惰性映射触发 #PF。越界访问正常 SIGSEGV。
@@ -270,31 +292,66 @@ int devfs_register_chrdev(const char *name, void *private_data,
 #### do_mmap 的设备 mmap 分派
 
 当前 `do_mmap` 创建 VMA、存储 `vm_file`，但**从未调用文件/设备的 mmap handler**。
-需要新增分派路径：
+需要新增分派路径。重构 `do_mmap` 的步骤 3-5：
 
 ```c
-// kernel/memory/vma.c — do_mmap 的第 4 步之后插入
+// kernel/memory/vma.c — do_mmap 重构后的步骤 3-5
 
-// 4.5 如果是设备映射（文件节点有 mmap handler），调用它
-if (!(flags & MAP_ANONYMOUS) && file_node && file_node->ops->mmap) {
-    vma_t *vma = (vma_t *)kmalloc(sizeof(vma_t));
-    // ... 分配 VMA，设置 vm_file = file_node, vm_flags |= VM_IO
-    int rc = file_node->ops->mmap(file_node, vma);
-    if (rc < 0) {
-        kfree(vma);
-        vfs_node_put(file_node);
-        return rc;
+// 3. prot → page/flags (不变)
+// 4. 判断映射类型并处理（新增）
+// 5. 分配 VMA + 插入（统一）
+
+vfs_node_t *file_node = NULL;
+int is_device_mmap = 0;
+
+// ── 第 4 步: 检查并处理设备/文件映射 ──
+if (!(flags & MAP_ANONYMOUS)) {
+    file_t *file = current->files->fd[fd];
+    file_node = vfs_node_get(file->node);
+
+    // 设备节点有 mmap handler → 走设备路径
+    if (file_node && file_node->ops->mmap) {
+        is_device_mmap = 1;
+        
+        // 设备映射必须 SHARED（VM_IO 不可写时复制）
+        if (!(flags & MAP_SHARED))
+            return -EINVAL;
+        
+        // 先分配 VMA（统一在第 5 步）
+        // 但 mmap handler 需要先运行来填入 PTE
+        // → 重排：设备路径提前分配 VMA 并调用 handler
+        vma_t *vma = (vma_t *)kmalloc(sizeof(vma_t));
+        if (!vma) { vfs_node_put(file_node); return -ENOMEM; }
+        list_init(&vma->list);
+        vma->vm_start     = addr;
+        vma->vm_end       = addr + length;
+        vma->vm_flags     = vm_flags_base | VM_IO;
+        vma->vm_page_prot = page_prot;
+        vma->vm_pgoff     = offset >> PAGE_4K_SHIFT;
+        vma->vm_file      = file_node;
+
+        int rc = file_node->ops->mmap(file_node, vma);
+        if (rc < 0) {
+            kfree(vma);
+            vfs_node_put(file_node);
+            return rc;
+        }
+        // mmap handler 已填入 PTE（如 fb_mmap）
+        vma_insert(current->mm, vma);
+        return (int64_t)vma->vm_start;
     }
-    // mmap handler 已填入 PTE（如 fb_mmap）
-    vma_insert(current->mm, vma);
-    return (int64_t)vma->vm_start;
+    // 普通文件映射走现有逻辑（vfs_read 惰性填页）
 }
 
-// 非设备的 MAP_ANON 或普通文件映射走现有逻辑（5. Allocate VMA...）
+// ── 第 5 步: 非设备路径 — 分配 VMA (现有逻辑) ──
+vma_t *vma = (vma_t *)kmalloc(sizeof(vma_t));
+if (!vma) { ... }
+// ... 现有 VMA 初始化 + vma_insert
 ```
 
-**简化实现**：不创建通用 VFS mmap 层。`do_mmap` 中 VM_IO 路径直接检查 `file_node->ops->mmap`
-是否为非 NULL，是则调用。
+设备路径在第 4 步提前分配 VMA 并调用 `node->ops->mmap`（由 handler 填入 PTE），
+然后直接 return。非设备路径（ANON、普通文件）保持现有的步 5 逻辑不变。
+两个路径各自独立，不重复不交叉。
 
 #### VFS 扩展
 
@@ -493,6 +550,14 @@ void console_force_enable(void)    // panic 路径调用
 }
 ```
 
+**行为约定**：
+- terminal.elf 启动前 → `term_initialized = true`，`printk`/`log_err`/`log_debug` 输出到 fb
+- terminal.elf 启动后 → `console_surrender_fb()`，`term_initialized = false`
+- 之后所有内核 log（`log_debug`、`log_err`、`log_info`）仅 serial 输出
+- fb 由 terminal.elf 独占写入
+- `console_force_enable()` 仅在 panic 路径调用——绕过 terminal.elf，直写 fb 显示崩溃信息
+- `LOG_TARGET=both` 配置下，终端启动后等价于 `LOG_TARGET=serial`；需在文档中记录
+
 #### 涉及文件
 
 | 文件 | 改动 |
@@ -507,31 +572,46 @@ void console_force_enable(void)    // panic 路径调用
 
 #### 实现
 
-- `task_struct` 新增 `void *ctty` 字段，指向 `pty_t`（PTY slave）或 `tty_t`（物理 TTY）
-- `fork()` 时子进程继承父进程的 `ctty`
-- `/dev/tty` 注册为魔数字符设备——`open` 时查 `current->ctty`：
-  - 非 NULL → 返回对应设备的 fd
-  - NULL → 返回物理 TTY（`kbd_tty`）的 fd（回退机制）
-- session leader 首次打开 PTY slave 时：`current->ctty = pty`
-- PTY 释放时：遍历所有 task，`ctty == this → ctty = NULL`
+```c
+// kernel/include/kernel/sched.h
+enum ctty_type { CTTY_NONE = 0, CTTY_PHYS, CTTY_PTY };
+
+struct task_struct {
+    // ...
+    enum ctty_type  ctty_type;   // CTTY_NONE / CTTY_PHYS / CTTY_PTY
+    void           *ctty;        // 指向 tty_t（CTTY_PHYS）或 pty_t（CTTY_PTY）
+};
+```
+
+- `fork()` 时子进程继承父进程的 `ctty_type` 和 `ctty`
+- `/dev/tty` open 时根据 `ctty_type` 分派：
+  - `CTTY_PTY` → 遍历 device 表找 PTY slave（`private_data == ctty`）
+  - `CTTY_PHYS` → 直接查找物理 TTY 的 devfs 节点（特殊路径，见下方）
+  - `CTTY_NONE` → 回退物理 TTY
+- session leader 首次打开 PTY slave 时：`current->ctty_type = CTTY_PTY; current->ctty = pty`
+- PTY 释放时：遍历所有 task，`ctty == this → ctty_type = CTTY_NONE, ctty = NULL`
 - `/dev/tty` fd 在 open 时解析 ctty，之后无论 ctty 如何变化，fd 指向的设备不变
 
 #### /dev/tty open handler 实现草图
 
 ```c
-// kernel/fs/devfs.c — /dev/tty 魔数 open
+// kernel/fs/devfs.c
 static vfs_node_t *tty_dev_open(const char *name)
 {
     if (strcmp(name, "/dev/tty") != 0) return NULL;
 
-    void *ctty = current->ctty;
-    if (!ctty)
-        ctty = kbd_tty;  // 回退到物理 TTY
+    void *target = NULL;
 
-    // 查找已注册的 devfs 节点（物理 TTY 或 PTY slave 的 vfs_node）
-    // 通过遍历 device 表，匹配 private_data == ctty：
+    if (current->ctty_type == CTTY_PTY) {
+        target = current->ctty;  // 指向 pty_t
+    } else {
+        // CTTY_NONE 或 CTTY_PHYS → 物理 TTY
+        target = kbd_tty;
+    }
+
+    // 遍历 device 表匹配 private_data
     for (int i = 0; i < device_count; i++) {
-        if (devices[i].private_data == ctty && devices[i].type == VFS_CHRDEV) {
+        if (devices[i].private_data == target && devices[i].type == VFS_CHRDEV) {
             vfs_node_t *node = vfs_node_alloc();
             node->type = VFS_CHRDEV;
             node->fs_data = (void *)(uintptr_t)i;
@@ -539,14 +619,28 @@ static vfs_node_t *tty_dev_open(const char *name)
             return node;
         }
     }
-    return NULL;  // -ENXIO
+    return NULL;  // → vfs_open 返回 -ENXIO
 }
 ```
 
-注意：`/dev/tty` 不能走常规的 `vfs_lookup + vfs_open` 路径，因为 `/dev/tty`
-不存在于 devfs 的 directory 中。需要在 `vfs_open` 中识别此路径并调用 `tty_dev_open`。
-v1 方案：`do_syscall(SYS_open, "/dev/tty", ...)` 的路径里，`vfs_open` 检查
-`strcmp(path, "/dev/tty") == 0`，走特殊路径返回对应设备的 `vfs_node`。
+**前置依赖**: 物理 TTY 注册时须传 `kbd_tty` 为 `private_data`（当前传 `NULL`）：
+
+```c
+// kernel/kernel/main.c 或 devfs_init
+devfs_register_chrdev("tty", kbd_tty, &tty_devfs_ops);
+```
+
+**物理 TTY 的额外路径**：`/dev/tty` 成为魔数设备后，物理 TTY 仍需一个固定路径名
+供 terminal.elf 打开。保留现有 `/dev/tty` 命名的同时，物理 TTY 注册为 `/dev/tty0`
+作为别名（或直接用 `/dev/tty` + CTTY_NONE 回退）。terminal.elf 启动时
+`ctty_type == CTTY_NONE`，打开 `/dev/tty` 即获得物理 TTY fd。
+
+`/dev/tty` 不通过常规 `vfs_lookup + vfs_open` 路径——`vfs_open` 在路径为
+`"/dev/tty"` 时调用 `tty_dev_open`，不走常规 devfs directory 查找。
+
+> **已知设计瑕疵**: `strcmp(path, "/dev/tty")` 硬编码路径字符串。后续可改为
+> 在 devfs 目录中注册一个 `VFS_REDIRECT` 节点类型——`open` 时检查节点类型
+> 标志走特殊分派逻辑。V1 保留 strcmp。
 
 #### 时序与行为
 
@@ -554,16 +648,19 @@ terminal.elf 的启动顺序是关键——读键盘的 `/dev/tty` fd 必须在�
 
 ```
 terminal.elf:
-  1. open("/dev/tty")        → ctty==NULL → 回退到物理 TTY fd (键盘/串口)
+  1. open("/dev/tty")        → ctty_type==CTTY_NONE → 回退到物理 TTY (键盘/串口)
   2. open("/dev/ptmx")       → master fd，创建 pty[0]
-  3. open("/dev/pts/0")      → slave fd，current->ctty = &ptys[0]
-  4. fork()                  → ash 继承 ctty = pty[0]
+  3. open("/dev/pts/0")      → slave fd, current->ctty_type=CTTY_PTY, current->ctty = &ptys[0]
+  4. fork()                  → ash 继承 ctty_type=CTTY_PTY, ctty=ptys[0]
   5. close(slave)            // terminal 不需要 slave fd（只用 master）
   
   // terminal.elf 的 tty_fd 仍指向物理 TTY（在步骤 1 已解析完毕）
-  // ash 的 /dev/tty → ctty!=NULL → PTY slave
+  // ash 的 /dev/tty → ctty_type==CTTY_PTY → PTY slave
 
 ash (fork 后):
+  open("/dev/tty")           → ctty_type==CTTY_PTY → 遍历 device 表匹配 ptys[0] → slave fd
+  tcgetpgrp/tcsetpgrp        → 操作 PTY slave（兼容）
+```
   open("/dev/tty")           → ctty==&ptys[0] → PTY slave fd
   tcgetpgrp/tcsetpgrp        → 操作 PTY slave（兼容）
 ```
@@ -771,8 +868,8 @@ ash 的读输入路径 `preadfd()` 不变——fd 0 已 dup2 到 PTY slave，`re
   kernel/tty/tty.c            | -250  (删除 canonical + 简化 read)
   kernel/include/kernel/tty.h |  -20  (精简字段)
   kernel/include/kernel/console.h | +8 (更新声明)
-  kernel/include/kernel/sched.h | +2 (ctty 指针)
-  kernel/sched/task.c         |   +2  (fork 继承 ctty)
+  kernel/include/kernel/sched.h | +5 (ctty_type + ctty 字段, fork 继承)
+  kernel/sched/task.c         |   +4  (fork 继承 ctty_type + ctty)
   kernel/driver/keyboard.c    |   +2  (方向键不再检查 ICANON)
   kernel/kernel/main.c        |  ~10  (注册 fb + PTY init)
   ─────────────────────────────────
@@ -811,7 +908,10 @@ ash 的读输入路径 `preadfd()` 不变——fd 0 已 dup2 到 PTY slave，`re
 |---|---|
 | `ptsname`/`grantpt`/`unlockpt` | libc stub 缺失；terminal.elf 硬编码 `/dev/pts/0`。后续支持多 PTY 时需实现 |
 | `TIOCPKT` 包模式 | PTY master 在 slave termios/winsize 变化时无通知。terminal.elf 改用 poll 轮询 TCGETS，最多一个 poll 周期延迟 |
+| `TIOCSCTTY` | 允许进程主动设置控制终端（某些 daemon 化路径需要）。V1 没有调用者 |
+| `/dev/tty` strcmp 路径 | 硬编码字符串是设计瑕疵。后续改为 VFS_REDIRECT 节点类型 + devfs 特殊节点 |
 | 键盘扩展键 (PGUP/PGDN/INSERT) | `ext_scancode_tbl` 中 0x49(PGUP)、0x51(PGDN)、0x52(INSERT) 当前映射为 UP/DOWN/HOME，后续可独立处理 |
 | fb mmap 2MB huge page | V1 使用 4KB 页映射 fb，正确但 TLB 效率低。后续改为 2MB 页减少 TLB 压力 |
 | fb stride padding | V1 stride = width * 4。部分 UEFI GOP 有行末 padding，需要 `Pos.pixels_per_line` 字段 |
 | raw mode 程序测试 | V1 仅测试 cooked mode（ash）；vi/less 等 raw mode 程序的透传路径已实现但未验证 |
+| devfs_register_chrdev 迁移 | `devfs_init` 中 5 个现有设备（null/zero/random/serial/tty）需迁移到 ops struct |
