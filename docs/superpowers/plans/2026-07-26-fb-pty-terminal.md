@@ -238,9 +238,14 @@ regs->rax = fd;
 int (*mmap)(struct vfs_node *, struct vma *);
 ```
 
-- [ ] **Step 8: 迁移 5 个现有设备到 ops struct**
+- [ ] **Step 8: 迁移现有设备到 ops struct**
 
-为 null/zero/random/serial/tty 各创建 static ops struct，在 `devfs_init()` 中用新签名注册。
+**devfs_init 中的 5 个设备**: null/zero/random/serial/tty 各创建 static ops struct，
+在 `devfs_init()` 中用新签名注册。
+
+**main.c 中的 keyboard + fb**: keyboard 保持旧签名直到 Task 7（pty_init 前）迁移；
+fb 由 Task 4 创建 fb.c 时用新签名注册，main.c 中的旧 fb 注册行删除。
+block device（`devfs_register_blkdev`）签名不变，无需迁移。
 
 - [ ] **Step 9: vfs_node_alloc 不存在 → 用 calloc**
 
@@ -1182,7 +1187,7 @@ user/terminal.elf: user/terminal.o user/terminal_font.psf.o
 
 **Files:**
 - Verify: `thirdpart/busybox-1.36.1/.config` (FEATURE_EDITING)
-- Modify: init 启动逻辑
+- Modify: `kernel/sched/task.c` (init 启动路径)
 
 - [ ] **Step 1: 确认 busybox FEATURE_EDITING=y**
 
@@ -1191,11 +1196,18 @@ grep CONFIG_FEATURE_EDITING thirdpart/busybox-1.36.1/.config
 # 应为 CONFIG_FEATURE_EDITING=y，如果不是则手动设置
 ```
 
-- [ ] **Step 2: init 启动 terminal.elf 而非 ash**
+- [ ] **Step 2: task_init 启动 terminal.elf**
 
-如果 init 在 `kernel/kernel/main.c`：将 `exec("/bin/ash", ...)` 改为 `exec("/terminal.elf", ...)`。
+当前 `kernel/sched/task.c:1488` 中：
+```c
+int64_t init_pid = spawn_user_task("/bin/init", NULL);
+```
+改为：
+```c
+int64_t init_pid = spawn_user_task("/terminal.elf", NULL);
+```
 
-如果是用户态 `/bin/init`：改为启动 `/terminal.elf`。
+**不是** main.c 中的 exec 调用——init 通过 `spawn_user_task` 在 `task_init` 末尾启动。
 
 - [ ] **Step 3: 集成测试**
 
