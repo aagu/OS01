@@ -351,29 +351,59 @@ case FD_PTY_SLAVE: {
 }
 ```
 
-- [ ] **Step 7: file_free 处理 FD_PTY_MASTER + FD_PTY_SLAVE**
+- [ ] **Step 7: file_free 处理 FD_PTY_MASTER + FD_PTY_SLAVE (含 pipe_free)**
 
 ```c
 if ((f->type == FD_PTY_MASTER || f->type == FD_PTY_SLAVE) && f->pty) {
     pty_t *pty = f->pty;
-    // Close master→slave write end
-    if (pty->master_to_slave) {
-        uint64_t fl = spin_lock_irqsave(&pty->master_to_slave->lock);
-        pty->master_to_slave->writers--;
-        int need_r = (pty->master_to_slave->writers == 0);
-        spin_unlock_irqrestore(&pty->master_to_slave->lock, fl);
-        if (need_r) pipe_wake_readers(pty->master_to_slave);
-    }
-    // Close slave→master write end
-    if (pty->slave_to_master) {
-        uint64_t fl = spin_lock_irqsave(&pty->slave_to_master->lock);
-        pty->slave_to_master->writers--;
-        int need_r = (pty->slave_to_master->writers == 0);
-        spin_unlock_irqrestore(&pty->slave_to_master->lock, fl);
-        if (need_r) pipe_wake_readers(pty->slave_to_master);
-    }
-    if (f->type == FD_PTY_SLAVE)
+    int need_r_a = 0, need_r_b = 0;
+
+    if (f->type == FD_PTY_MASTER) {
+        // master reads slave_to_master, writes master_to_slave
+        if (pty->slave_to_master) {
+            uint64_t fl = spin_lock_irqsave(&pty->slave_to_master->lock);
+            pty->slave_to_master->readers--;           // master stopped reading
+            need_r_b = (pty->slave_to_master->readers == 0);
+            spin_unlock_irqrestore(&pty->slave_to_master->lock, fl);
+        }
+        if (pty->master_to_slave) {
+            uint64_t fl = spin_lock_irqsave(&pty->master_to_slave->lock);
+            pty->master_to_slave->writers--;            // master stopped writing
+            need_r_a = (pty->master_to_slave->writers == 0);
+            spin_unlock_irqrestore(&pty->master_to_slave->lock, fl);
+        }
+    } else { // FD_PTY_SLAVE
+        // slave reads master_to_slave, writes slave_to_master
+        if (pty->master_to_slave) {
+            uint64_t fl = spin_lock_irqsave(&pty->master_to_slave->lock);
+            pty->master_to_slave->readers--;            // slave stopped reading
+            need_r_a = (pty->master_to_slave->readers == 0);
+            spin_unlock_irqrestore(&pty->master_to_slave->lock, fl);
+        }
+        if (pty->slave_to_master) {
+            uint64_t fl = spin_lock_irqsave(&pty->slave_to_master->lock);
+            pty->slave_to_master->writers--;            // slave stopped writing
+            need_r_b = (pty->slave_to_master->writers == 0);
+            spin_unlock_irqrestore(&pty->slave_to_master->lock, fl);
+        }
         pty->pgrp = 0;  // reset on slave close
+    }
+
+    // Wake blocked readers if all writers are gone
+    if (need_r_a) pipe_wake_readers(pty->master_to_slave);
+    if (need_r_b) pipe_wake_readers(pty->slave_to_master);
+
+    // Check if both pipes are fully closed → free them + reclaim slot
+    int m2s_done = (!pty->master_to_slave->readers && !pty->master_to_slave->writers);
+    int s2m_done = (!pty->slave_to_master->readers && !pty->slave_to_master->writers);
+    if (m2s_done && s2m_done) {
+        pipe_free(pty->master_to_slave);
+        pipe_free(pty->slave_to_master);
+        pty->master_to_slave = NULL;
+        pty->slave_to_master = NULL;
+        pty->allocated = false;  // slot reusable
+    }
+
     f->pty = NULL;
 }
 ```
@@ -495,7 +525,52 @@ case SYS_ioctl: {
 
 - [ ] **Step 2: do_mmap 设备分派 (vma.c)**
 
-在步 4 中：非 ANON →检查 `file->node` 非 NULL → `vfs_node_get` → 若 `node->ops->mmap` 存在则走设备路径（提前分配 VMA + 调用 handler + vma_insert + return），否则继续步 5 的普通路径。
+在 `do_mmap` 的步 3（prot→flags）之后、步 5（VMA 分配）之前，替换现有的步 4：
+
+```c
+    // ── 4. Check for device/file mmap ──
+    vfs_node_t *file_node = NULL;
+    if (!(flags & MAP_ANONYMOUS)) {
+        file_t *file = current->files->fd[fd];
+        if (!file || !file->node) { regs setup if needed; return -EBADF; }
+        file_node = vfs_node_get(file->node);
+
+        // Device node with mmap handler → device path
+        if (file_node && file_node->ops && file_node->ops->mmap) {
+            if (!(flags & MAP_SHARED))
+                return -EINVAL;  // device map must be SHARED
+
+            // Pre-allocate VMA for the device handler to fill PTEs
+            vma_t *vma = (vma_t *)kmalloc(sizeof(vma_t));
+            if (!vma) { vfs_node_put(file_node); return -ENOMEM; }
+            list_init(&vma->list);
+            vma->vm_start     = addr;
+            vma->vm_end       = addr + length;
+            vma->vm_flags     = vm_flags_base | VM_IO;
+            vma->vm_page_prot = page_prot;
+            vma->vm_pgoff     = offset >> PAGE_4K_SHIFT;
+            vma->vm_file      = file_node;  // handler may clear this
+
+            int rc = file_node->ops->mmap(file_node, vma);
+            if (rc < 0) {
+                // Handler failed — vma not inserted, clean up
+                vfs_node_put(file_node);
+                kfree(vma);
+                return rc;
+            }
+            // Handler fills PTEs (e.g. fb_mmap eager-fills + flush_tlb +
+            //   vfs_node_put(vma->vm_file); vma->vm_file = NULL)
+            vma_insert(current->mm, vma);
+            return (int64_t)vma->vm_start;
+        }
+        // Normal file mapping → fall through to step 5
+    }
+
+    // ── 5. Non-device: allocate VMA (existing logic unchanged) ──
+    vma_t *vma = (vma_t *)kmalloc(sizeof(vma_t));
+    if (!vma) { if (file_node) vfs_node_put(file_node); return -ENOMEM; }
+    // ... existing VMA init + vma_insert
+```
 
 - [ ] **Step 3: fb.h**
 
@@ -656,6 +731,9 @@ pty_t *pty_alloc(void)
             pty->term.c_lflag = 0;  // raw mode
             pty->term.c_iflag = ICRNL;
             pty->term.c_oflag = OPOST | ONLCR;
+            // c_cflag / c_line / c_ispeed / c_ospeed already zero from memset
+            pty->term.c_cc[VMIN] = 1;
+            pty->term.c_cc[VTIME] = 0;
             pty->ws_row = 25; pty->ws_col = 80; pty->pgrp = 0;
             spin_unlock_irqrestore(&pty_lock, fl);
             return pty;
@@ -679,6 +757,8 @@ int pty_slave_ioctl(pty_t *pty, int cmd, void *arg)
     case TIOCSWINSZ: pty->ws_row = ((struct winsize *)arg)->ws_row; pty->ws_col = ((struct winsize *)arg)->ws_col; return 0;
     case TIOCGPGRP: *(pid_t *)arg = pty->pgrp; return 0;
     case TIOCSPGRP: pty->pgrp = *(pid_t *)arg; return 0;
+    case TIOCSCTTY:  // stub: set ctty (no-op, ctty set by ptsN_open)
+        return 0;
     // FIONREAD — busybox ash needs this for get_more_input()
     case FIONREAD: {
         if (!pty->master_to_slave) return -ENODEV;
@@ -859,6 +939,7 @@ slave_name[3] = '0' + pty->index; slave_name[4] = '\0';
 #include <string.h>
 #include <signal.h>
 #include <sys/syscall.h>
+#include <errno.h>
 #include <poll.h>         // ← NOT <sys/poll.h>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -868,9 +949,11 @@ slave_name[3] = '0' + pty->index; slave_name[4] = '\0';
 struct fb_info { uint32_t width, height, stride, bpp, format; } __attribute__((packed));
 #define FBIOSURRENDER  0x00004601
 
+// Must match kernel font.h: 8 uint32 fields + glyphs byte + packed
 typedef struct {
     uint32_t magic, version, headersize, flags, numglyph, bytesperglyph, height, width;
-} psf2_t;
+    uint8_t glyphs;  // make sizeof = 33 (same as kernel font.h)
+} __attribute__((packed)) psf2_t;
 
 extern char _binary_user_terminal_font_psf_start[];
 
@@ -966,7 +1049,8 @@ int main(void)
     int fb_fd = open("/dev/fb", O_RDWR);
     if (fb_fd < 0) { write(2, "terminal: /dev/fb\n", 18); return 1; }
     read(fb_fd, &fb_info, sizeof(fb_info));
-    fb = mmap(NULL, fb_info.height * fb_info.stride, PROT_WRITE, MAP_SHARED, fb_fd, 0);
+    fb = mmap(NULL, fb_info.height * fb_info.stride,
+              PROT_READ | PROT_WRITE, MAP_SHARED, fb_fd, 0);
     if ((int64_t)fb < 0) { write(2, "terminal: mmap fb\n", 18); return 1; }
     ioctl(fb_fd, FBIOSURRENDER, NULL);
 
@@ -996,16 +1080,24 @@ int main(void)
     // 6. Main loop
     struct pollfd fds[2] = {{.fd = tty_fd, .events = POLLIN}, {.fd = pty_fd, .events = POLLIN}};
     char buf[256];
+    int exit_code = 0;
     while (1) {
-        if (poll(fds, 2, -1) < 0) break;
+        int ret = poll(fds, 2, -1);
+        if (ret < 0) {
+            if (errno == EINTR) continue;  // signal arrived, retry
+            break;
+        }
         if (fds[0].revents & POLLIN) { int n = read(tty_fd, buf, sizeof(buf)); if (n > 0) handle_input(buf, n, pty_fd, ash_pid); }
         if (fds[1].revents & POLLIN) { int n = read(pty_fd, buf, sizeof(buf)); if (n > 0) handle_output(buf, n); else if (n == 0) break; }
     }
 
+    // Wait for ash to exit (reap zombie)
+    waitpid(ash_pid, &exit_code, 0);
+
     // Cleanup
     munmap(fb, fb_info.height * fb_info.stride);
     close(pty_fd); close(tty_fd); close(fb_fd);
-    return 0;
+    return exit_code;
 }
 ```
 
