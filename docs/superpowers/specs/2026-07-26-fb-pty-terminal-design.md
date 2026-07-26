@@ -183,28 +183,60 @@ static int ptmx_open(const char *name, file_t **out_file)
 }
 ```
 
-**fd_read / fd_write / fd_poll 分派**：新增 `FD_PTY_MASTER` case——委托给底层 pipe：
+**fd_read / fd_write / fd_poll / fd_ioctl 分派**：新增 `FD_PTY_MASTER` case：
 
 ```c
-// fd_read 新增:
+// ── fd_read 新增 ──
+case FD_PTY_MASTER:
+    return pipe_read(f->pty->slave_to_master, buf, size);
+
+// ── fd_write 新增 ──
+case FD_PTY_MASTER:
+    return pipe_write(f->pty->master_to_slave, buf, size);
+
+// ── fd_poll 新增 ──
 case FD_PTY_MASTER: {
-    // master read = 读 slave → master pipe（ash 的输出）
     pty_t *pty = f->pty;
-    if (!pty || !pty->slave_to_master) return -1;
-    // 直接借用 FD_PIPE 逻辑但 pipe 来自 pty
-    // V1 简化：创建临时 file_t 或抽取共享函数
-    ...
+    uint32_t mask = 0;
+    if (pty->slave_to_master && !pipe_empty(pty->slave_to_master))
+        mask |= POLLIN | POLLRDNORM;
+    if (pty->master_to_slave && !pipe_full(pty->master_to_slave))
+        mask |= POLLOUT | POLLWRNORM;
+    return mask;
+}
+
+// ── fd_ioctl 新增 ──
+case FD_PTY_MASTER: {
+    pty_t *pty = f->pty;
+    if (cmd == TCGETS) {
+        if (!arg) return -EINVAL;
+        memcpy(arg, &pty->term, sizeof(struct termios));
+        return 0;
+    }
+    return -ENOTTY;
 }
 ```
 
-**V1 简化实现**：PTY master 的 `fd_read`/`fd_write` 复用 `FD_PIPE` 的代码。
-在 `FD_PTY_MASTER` case 中直接操作 pipe 字段（PTY 的两个 pipe 本质就是 pipe_t）。
-实际实现可以提取 `pipe_read(pipe_t *p, void *buf, uint64_t size)` 和
-`pipe_write(pipe_t *p, const void *buf, uint64_t size)` 两个内部函数，
-然后 `FD_PIPE` 和 `FD_PTY_MASTER` case 都调用它们。
+实现：从现有 `FD_PIPE` case 中提取 `pipe_read(pipe_t *p, ...)` 和
+`pipe_write(pipe_t *p, ...)` 内部函数，`FD_PIPE` 和 `FD_PTY_MASTER` 都调用它们。
 
-PTY slave 走现有 devfs 路径（`FD_DEV` → `devfs_read` → `pty_slave_read`），
-`private_data = &ptys[idx]`。
+**sys_open 集成路径**：`devfs_ops.open` 回调需要 `sys_open`/`vfs_open` 流程支持：
+
+```c
+// sys_open 修改后
+sys_open(path):
+  1. vfs_lookup(path) → node
+  2. if node->ops->open:                        // ← 新增
+       rc = node->ops->open(path, &file)        // 返回自定义 file_t
+       if rc == 0: return fd_install(file)      // 跳过默认路径
+       if rc != -ENOSYS: return rc              // 真实错误
+  3. // 回退到默认 FD_DEV（现有逻辑）
+     file_alloc(), type=FD_DEV, node=node, fd_install
+```
+
+`/dev/tty` 和 `/dev/ptmx` 的魔数行为可以统一到各自的 `devfs_ops.open` 中，
+不再需要 `vfs_open` 中的 `strcmp` 特殊路径。V1 可渐进迁移——
+`/dev/ptmx` 用 open 回调，`/dev/tty` 的 strcmp 独立后续移除。
 
 #### 数据结构
 
@@ -925,7 +957,8 @@ void render_char(uint32_t *fb, struct fb_info *info,
                  uint32_t fg, uint32_t bg, char c);
 
 // 滚动：memmove fb 行 1..N-1 到 0..N-2，清最末行
-void fb_scroll(uint32_t *fb, struct fb_info *info);
+// font->height 用于计算每行像素高度 = font->height * info->stride 字节
+void fb_scroll(uint32_t *fb, struct fb_info *info, psf2_t *font);
 ```
 
 PSF2 字体内嵌到 terminal.elf（`objcopy -B i386 -I binary -O elf64-x86-64`）。
@@ -961,6 +994,12 @@ ash 的读输入路径 `preadfd()` 不变——fd 0 已 dup2 到 PTY slave，`re
 
 目前 ash 的 `_PATH_TTY` 宏（`/dev/tty`）需要确保编译进 busybox 时是这个路径。检查现有 busybox 配置，如已是 `/dev/tty` 则无需改动。
 
+**V1 依赖**: busybox 需要启用 `CONFIG_FEATURE_EDITING`（`FEATURE_EDITING`）。
+PTY slave 初始 `!ICANON, !ECHO`——ash 如果没有内置 readline 支持（仅用 `fgets()`），
+会导致无 echo 且 read 可能只读到部分字节。启用 `FEATURE_EDITING` 后 ash 逐字节读
++ 本地 echo + 行编辑，与 raw PTY slave 正确配合。当前 busybox 可能已编译此选项，
+但需在集成前验证。
+
 ---
 
 ## 总计
@@ -970,9 +1009,9 @@ ash 的读输入路径 `preadfd()` 不变——fd 0 已 dup2 到 PTY slave，`re
   kernel/driver/pty.c         | ~300  (新建：PTY alloc/free + master/slave I/O + ptmx_open + devfs 注册)
   kernel/driver/fb.c          |  ~60  (新建：fb mmap + read)
   kernel/include/kernel/pty.h |  ~30  (新建：pty_t + 宏)
-  kernel/fs/file.c            |  ~30  (FD_PTY_MASTER case in fd_read/fd_write/fd_poll)
+  kernel/fs/file.c            |  ~50  (FD_PTY_MASTER case in fd_read/fd_write/fd_poll/fd_ioctl + pipe_read/pipe_write 提取)
   kernel/include/kernel/file.h|   +5  (FD_PTY_MASTER + file->pty)
-  kernel/fs/devfs.c           |  ~70  (mmap 分派 + ops struct + ptmx/pts + /dev/tty 魔数 + devfs open 回调)
+  kernel/fs/devfs.c           |  ~80  (mmap 分派 + ops struct + devfs_open 回调 + ptmx/pts + /dev/tty 魔数)
   kernel/include/fs/devfs.h   |  ~15  (devfs_ops struct + open 回调)
   kernel/include/fs/vfs.h     |   +2  (vfs_ops.mmap)
   kernel/fs/vfs.c             |   +1  (默认 mmap = NULL)
@@ -1002,7 +1041,7 @@ ash 的读输入路径 `preadfd()` 不变——fd 0 已 dup2 到 PTY slave，`re
 
 ## 实现顺序
 
-1. **devfs_ops struct 重构** — 包括 VFS vfs_ops.mmap + devfs_ops.open 回调
+1. **devfs_ops struct 重构** — VFS vfs_ops.mmap + devfs_ops.open 回调 + 现有 5 个设备（null/zero/random/serial/tty）同步迁移到 ops struct
 2. **FD_PTY_MASTER** — file_t 加 pty 指针、fd_read/fd_write/fd_poll 分派
 3. **VM_IO + do_mmap 设备分派** — + /dev/fb mmap
 4. **tty.c 退化** — 键盘输入路径简化
@@ -1031,4 +1070,3 @@ ash 的读输入路径 `preadfd()` 不变——fd 0 已 dup2 到 PTY slave，`re
 | fb mmap 2MB huge page | V1 使用 4KB 页映射 fb，正确但 TLB 效率低。后续改为 2MB 页减少 TLB 压力 |
 | fb stride padding | V1 stride = width * 4。部分 UEFI GOP 有行末 padding，需要 `Pos.pixels_per_line` 字段 |
 | raw mode 程序测试 | V1 仅测试 cooked mode（ash）；vi/less 等 raw mode 程序的透传路径已实现但未验证 |
-| devfs_register_chrdev 迁移 | `devfs_init` 中 5 个现有设备（null/zero/random/serial/tty）需迁移到 ops struct |
