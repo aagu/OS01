@@ -33,12 +33,30 @@ framebuffer 物理地址不在 `subpage_pool` 中 → `page_cow_get` 是 no-op �
 但若 framebuffer 物理地址在 E820 RAM 区域内，`free_4k_page` 会把 MMIO 页
 还给分配器 → 双重分配 + 显示损坏。
 
-**修复**：在 `fork_mm_copy` 遍历 PTE 时，检查 VMA 的 `VM_IO` 标志，跳过 COW：
+**修复**：`fork_mm_copy` 不直接遍历 VMA——它遍历页表层级（PML4→PDPT→PD→PT）。
+在 4KB PTE 循环中通过 `vma_find` 查询 VMA，跳过 VM_IO 页面：
 
 ```c
-// kernel/sched/task.c — fork_mm_copy, 在 page_cow_get 调用前:
-if (vma->vm_flags & VM_IO) continue;  // MMIO pages: skip COW, share directly
+// kernel/sched/task.c — fork_mm_copy, 4KB PTE 循环中 (约 line 1159):
+for (int l1 = 0; l1 < 512; l1++) {
+    uint64_t pte = parent_pte[l1];
+    if (!(pte & (PAGE_Present | PAGE_PROTNONE))) continue;
+
+    // Compute VA from page table indices
+    uint64_t vaddr = ((uint64_t)l4 << 39) | ((uint64_t)l3 << 30)
+                   | ((uint64_t)l2 << 21) | ((uint64_t)l1 << 12);
+    vma_t *vma = vma_find(parent_mm, vaddr);
+    if (vma && (vma->vm_flags & VM_IO)) {
+        child_pte[l1] = pte;  // share MMIO PTE directly, no COW
+        continue;
+    }
+
+    // existing COW logic (page_cow_get, etc.) ...
+}
 ```
+
+2MB huge page 路径同理：eager copy 前查 vma_find，VM_IO 则直接
+`child_pml2[l2] = pml2e`（共享 PDE 不做拷贝）。
 
 ### B. do_page_fault vm_file 路径 — VM_IO 页面不惰性填页
 
@@ -901,12 +919,13 @@ child->ctty      = current->ctty;
 
 - [ ] **Step 7: /dev/tty 魔数 open handler (devfs.c)**
 
-物理 TTY 注册改为 `private_data = kbd_tty`（不是 NULL）。
+物理 TTY 注册改为 `private_data = keyboard_get_tty()`（不是 NULL）。`keyboard_get_tty()`
+在 `keyboard.c:281` 已公开声明，`kbd_tty` 是 static 不能用 extern。
 
 ```c
-extern tty_t *kbd_tty;
-devfs_register_chrdev("tty", kbd_tty, &tty_magic_ops);   // /dev/tty magic
-devfs_register_chrdev("tty0", kbd_tty, &tty_phys_ops);   // physical alias
+#include <driver/keyboard.h>
+devfs_register_chrdev("tty", keyboard_get_tty(), &tty_magic_ops);   // /dev/tty magic
+devfs_register_chrdev("tty0", keyboard_get_tty(), &tty_phys_ops);   // physical alias
 ```
 
 `tty_magic_ops.open`:
@@ -917,7 +936,7 @@ static int tty_magic_open(const char *name, file_t **out_file)
 
     void *target = NULL;
     if (current->ctty_type == CTTY_PTY) target = current->ctty;
-    else target = kbd_tty;
+    else target = keyboard_get_tty();
 
     for (int i = 0; i < device_count; i++) {
         if (devices[i].private_data == target && devices[i].type == VFS_CHRDEV
@@ -1148,7 +1167,7 @@ int main(void)
             break;
         }
         if (fds[0].revents & POLLIN) { int n = read(tty_fd, buf, sizeof(buf)); if (n > 0) handle_input(buf, n, pty_fd, ash_pid); }
-        if (fds[1].revents & POLLIN) { int n = read(pty_fd, buf, sizeof(buf)); if (n > 0) handle_output(buf, n); else break; /* n==0 EOF, n<0 error */ }
+        if (fds[1].revents & POLLIN) { int n = read(pty_fd, buf, sizeof(buf)); if (n > 0) handle_output(buf, n); else if (n == 0) break; else if (errno == EINTR) continue; else break; }
     }
 
     // Wait for ash to exit (reap zombie)
