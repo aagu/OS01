@@ -152,7 +152,8 @@ Master fd 操作：
 - `read(master)` → 从 `slave_to_master` pipe 读（ash 的输出）
 - `write(master)` → 写到 `master_to_slave` pipe（ash 的输入）
 - `poll(master)` → POLLIN = slave 端有数据可读，POLLOUT = pipe 有空间
-- `ioctl` → `-ENOTTY`（master 不是 TTY）
+- `ioctl(master, TCGETS)` → 读取 slave 的 termios（让 terminal.elf 感知 termios 变化）
+- 其他 ioctl → `-ENOTTY`
 
 Slave fd 操作：
 - `read(slave)` → 从 `master_to_slave` pipe 读（terminal.elf 的输入）
@@ -167,11 +168,9 @@ Slave fd 操作：
 
 #### termios 初始化
 
-PTY slave 预设为合理的"标准终端"值：
-- `c_lflag`: ICANON | ECHO | ECHOE | ECHOK | ISIG
-- `c_iflag`: ICRNL | IXON
-- `c_oflag`: OPOST | ONLCR
-- `c_cflag`: B38400 | CS8 | CREAD
+PTY slave **初始化为 raw mode**（`!ICANON, !ECHO, ISIG=0`）。terminal.elf 完全负责终端语义（行编辑、echo、信号生成）。这符合 Linux 终端模拟器的做法——PTY slave 始终 raw，模拟器在上面实现 cooked 行为。
+
+Slave 存储 `tcsetattr` 写入的值供 `tcgetattr` 查询，但 ly 不执行——实际行为始终 raw（无内核端行编辑、无 echo、无信号生成）。
 
 #### 涉及文件
 
@@ -208,7 +207,9 @@ mmap 时一次性填入所有 PTE——因为 fb 物理地址已知且连续，�
 int fb_mmap(vfs_node_t *node, vma_t *vma)
 {
     uint64_t length = vma->vm_end - vma->vm_start;
-    uint64_t fb_size = Pos.XResolution * Pos.YResolution * 4;
+    // 使用实际 GOP 返回的像素间距（可能含 padding），而非 width*4 的推算值
+    uint64_t pitch = Pos.XResolution * sizeof(uint32_t);  // 当前 UEFI GOP 无 padding
+    uint64_t fb_size = pitch * Pos.YResolution;
 
     if (vma->vm_pgoff != 0)               return -EINVAL;
     if (length > fb_size)                  return -EINVAL;
@@ -232,11 +233,16 @@ int fb_mmap(vfs_node_t *node, vma_t *vma)
 struct fb_info {
     uint32_t width;          // 像素
     uint32_t height;
-    uint32_t stride;         // 每行字节数 (= width * 4)
+    uint32_t stride;         // 每行字节数 (= Pos.XResolution * 4)
     uint32_t bpp;            // 32
     uint32_t format;         // 0 = XRGB8888
 } __attribute__((packed));
 ```
+
+`fb_read(node, offset, size, buf)`：`offset=0` 返回 `sizeof(fb_info)` 字节，`offset>0` 返回 0（EOF）。
+
+> **注意**: V1 的 stride = `width * 4`。部分 UEFI GOP 模式在行末有 padding，
+> stride > `width * 4`。遇到此类硬件时 `Pos` 需新增 `pixels_per_line` 字段。
 
 `fb_read(node, offset, size, buf)`：`offset=0` 返回 `sizeof(fb_info)` 字节，`offset>0` 返回 0（EOF）。
 
@@ -261,6 +267,51 @@ int devfs_register_chrdev(const char *name, void *private_data,
                           const struct devfs_ops *ops);
 ```
 
+#### do_mmap 的设备 mmap 分派
+
+当前 `do_mmap` 创建 VMA、存储 `vm_file`，但**从未调用文件/设备的 mmap handler**。
+需要新增分派路径：
+
+```c
+// kernel/memory/vma.c — do_mmap 的第 4 步之后插入
+
+// 4.5 如果是设备映射（文件节点有 mmap handler），调用它
+if (!(flags & MAP_ANONYMOUS) && file_node && file_node->ops->mmap) {
+    vma_t *vma = (vma_t *)kmalloc(sizeof(vma_t));
+    // ... 分配 VMA，设置 vm_file = file_node, vm_flags |= VM_IO
+    int rc = file_node->ops->mmap(file_node, vma);
+    if (rc < 0) {
+        kfree(vma);
+        vfs_node_put(file_node);
+        return rc;
+    }
+    // mmap handler 已填入 PTE（如 fb_mmap）
+    vma_insert(current->mm, vma);
+    return (int64_t)vma->vm_start;
+}
+
+// 非设备的 MAP_ANON 或普通文件映射走现有逻辑（5. Allocate VMA...）
+```
+
+**简化实现**：不创建通用 VFS mmap 层。`do_mmap` 中 VM_IO 路径直接检查 `file_node->ops->mmap`
+是否为非 NULL，是则调用。
+
+#### VFS 扩展
+
+`vfs_ops` struct 新增 `mmap` 回调：
+
+```c
+struct vfs_ops {
+    int (*read)(...);
+    int (*write)(...);
+    int (*readdir)(...);
+    int (*mmap)(vfs_node_t *, vma_t *);   // 新增，可为 NULL
+};
+```
+
+`vfs_node_t` 的 `ops` 字段已指向文件系统的 `vfs_ops`（如 devfs_ops）。
+设备 mmap handler 通过 `node->ops->mmap` 被调用。
+
 #### 涉及文件
 
 | 文件 | 改动 | 行数 |
@@ -269,7 +320,9 @@ int devfs_register_chrdev(const char *name, void *private_data,
 | `kernel/fs/devfs.c` | devfs_mmap 分派 + ops struct 重构 | ~30 |
 | `kernel/include/fs/devfs.h` | devfs_ops struct | ~15 |
 | `kernel/include/kernel/vma.h` | VM_IO 定义 | +2 |
-| `kernel/memory/vma.c` | VM_IO | MAP_PRIVATE 校验 | ~5 |
+| `kernel/memory/vma.c` | do_mmap 设备分派 + VM_IO 校验 | ~20 |
+| `kernel/include/fs/vfs.h` | vfs_ops 加 mmap | +2 |
+| `kernel/fs/vfs.c` | 默认 mmap = NULL（无实现） | +1 |
 | `kernel/kernel/main.c` | 注册 /dev/fb | ~3 |
 
 ---
@@ -454,14 +507,46 @@ void console_force_enable(void)    // panic 路径调用
 
 #### 实现
 
-- `task_struct`（或 `sched.h` 的 task 结构体）新增 `void *ctty` 字段，指向 `pty_t`
+- `task_struct` 新增 `void *ctty` 字段，指向 `pty_t`（PTY slave）或 `tty_t`（物理 TTY）
 - `fork()` 时子进程继承父进程的 `ctty`
 - `/dev/tty` 注册为魔数字符设备——`open` 时查 `current->ctty`：
-  - 非 NULL → 返回对应 PTY slave 的 fd
+  - 非 NULL → 返回对应设备的 fd
   - NULL → 返回物理 TTY（`kbd_tty`）的 fd（回退机制）
 - session leader 首次打开 PTY slave 时：`current->ctty = pty`
 - PTY 释放时：遍历所有 task，`ctty == this → ctty = NULL`
 - `/dev/tty` fd 在 open 时解析 ctty，之后无论 ctty 如何变化，fd 指向的设备不变
+
+#### /dev/tty open handler 实现草图
+
+```c
+// kernel/fs/devfs.c — /dev/tty 魔数 open
+static vfs_node_t *tty_dev_open(const char *name)
+{
+    if (strcmp(name, "/dev/tty") != 0) return NULL;
+
+    void *ctty = current->ctty;
+    if (!ctty)
+        ctty = kbd_tty;  // 回退到物理 TTY
+
+    // 查找已注册的 devfs 节点（物理 TTY 或 PTY slave 的 vfs_node）
+    // 通过遍历 device 表，匹配 private_data == ctty：
+    for (int i = 0; i < device_count; i++) {
+        if (devices[i].private_data == ctty && devices[i].type == VFS_CHRDEV) {
+            vfs_node_t *node = vfs_node_alloc();
+            node->type = VFS_CHRDEV;
+            node->fs_data = (void *)(uintptr_t)i;
+            node->ops = &devfs_ops;
+            return node;
+        }
+    }
+    return NULL;  // -ENXIO
+}
+```
+
+注意：`/dev/tty` 不能走常规的 `vfs_lookup + vfs_open` 路径，因为 `/dev/tty`
+不存在于 devfs 的 directory 中。需要在 `vfs_open` 中识别此路径并调用 `tty_dev_open`。
+v1 方案：`do_syscall(SYS_open, "/dev/tty", ...)` 的路径里，`vfs_open` 检查
+`strcmp(path, "/dev/tty") == 0`，走特殊路径返回对应设备的 `vfs_node`。
 
 #### 时序与行为
 
@@ -555,30 +640,49 @@ while (1) {
 }
 ```
 
-#### 输入处理（handle_input）
+#### 输入处理（handle_input）— 双模式
+
+terminal.elf 通过 `ioctl(pty_master, TCGETS)` 持续检查 slave 的 termios 状态，
+在 cooked 和 raw 两种模式间切换：
+
+**Cooked 模式**（`c_lflag & ICANON`，终端初始状态）：
+terminal.elf 本地做行编辑 + echo + ^C 处理。方向键按 VT100 透传。
+
+**Raw 模式**（`!ICANON`，被 vi/less/readline 等程序设置）：
+terminal.elf 将键盘输入逐字节透传给 PTY master，不做任何行编辑、echo 或信号生成。
+
+模式切换时机：每次 poll 返回后，在消费数据前检查 termios。
 
 ```
-对于每个字符 c：
+对于每个字符 c（cooked 模式）：
   if c == '\r' || c == '\n':
       line_buf[line_len++] = '\n'
       write(pty_fd, line_buf, line_len)
       line_len = 0
-      if echo: render_char('\r\n') → 光标移到下一行行首
+      if echo: render_string("\r\n")
   else if c == '\x7f' || c == '\b':
       if line_len > 0:
           line_len--
-          if echo: render_backspace() → fb 上覆盖空格
+          if echo: render_backspace()
   else if c == '\x03':                   // ^C
-      kill(ash_pid, SIGINT)
+      if termios.c_lflag & ISIG:
+          kill(ash_pid, SIGINT)
   else if c == '\x04' && line_len == 0: // ^D → EOF
-      传送 EOF 到 PTY master（close master write 端或发零长度）
+      传送 EOF 到 PTY master
   else if c == '\x1b':                  // ESC 开始 → 方向键
-      读后续 2 字节构造 VT100 序列
-      透传给 PTY master（raw 模式，ash 的 readline 自己处理）
+      读后续 2 字节，透传完整 VT100 序列给 PTY master
   else if c >= ' ':
       line_buf[line_len++] = c
       if echo: render_char(c)
+
+对于 raw 模式：
+  所有字节（包括方向键）逐字节透传给 PTY master
+  不做任何行缓冲、echo、^C 处理
 ```
+
+**V1 限制**：仅 ash（cooked 模式程序）已验证。raw mode 程序（vi、less）的
+透传路径已实现但尚未测试——因为 PTY 缺少 `TIOCPKT` 通知，terminal.elf
+需轮询 termios，存在最多一个 poll 周期的延迟。
 
 #### VT100 状态机（handle_output）
 
@@ -657,10 +761,12 @@ ash 的读输入路径 `preadfd()` 不变——fd 0 已 dup2 到 PTY slave，`re
   kernel/driver/pty.c         | ~250  (新建：PTY alloc/free + master/slave I/O)
   kernel/driver/fb.c          |  ~60  (新建：fb mmap + read)
   kernel/include/kernel/pty.h |  ~30  (新建：pty_t + 宏)
-  kernel/fs/devfs.c           |  ~50  (mmap 分派 + ops struct + ptmx/pts + /dev/tty 魔数)
+  kernel/fs/devfs.c           |  ~70  (mmap 分派 + ops struct + ptmx/pts + /dev/tty 魔数)
   kernel/include/fs/devfs.h   |  ~15  (devfs_ops struct)
+  kernel/include/fs/vfs.h     |   +2  (vfs_ops.mmap)
+  kernel/fs/vfs.c             |   +1  (默认 mmap = NULL)
   kernel/include/kernel/vma.h |   +2  (VM_IO)
-  kernel/memory/vma.c         |   +5  (VM_IO | MAP_PRIVATE 拒绝)
+  kernel/memory/vma.c         |  ~20  (do_mmap 设备分派 + VM_IO 校验)
   kernel/tty/console.c        | -120  (删除 CSI 状态机 + 光标)
   kernel/tty/tty.c            | -250  (删除 canonical + 简化 read)
   kernel/include/kernel/tty.h |  -20  (精简字段)
@@ -670,7 +776,7 @@ ash 的读输入路径 `preadfd()` 不变——fd 0 已 dup2 到 PTY slave，`re
   kernel/driver/keyboard.c    |   +2  (方向键不再检查 ICANON)
   kernel/kernel/main.c        |  ~10  (注册 fb + PTY init)
   ─────────────────────────────────
-  内核净增                     | ~300 行 (+430 新增, -390 删除)
+  内核净增                     | ~360 行 (+540 新增, -390 删除)
 
 用户态改动:
   user/terminal.c             | ~400  (新建)
@@ -678,18 +784,34 @@ ash 的读输入路径 `preadfd()` 不变——fd 0 已 dup2 到 PTY slave，`re
   ─────────────────────────────────
   用户态净增                   | ~400 行
 
-总计净增                       | ~700 行
+总计净增                       | ~760 行
 ```
 
 ---
 
 ## 实现顺序
 
-1. **devfs_ops struct 重构** — 所有后续模块的基础接口
-2. **VM_IO + /dev/fb mmap** — terminal.elf 的渲染基础
-3. **tty.c 退化** — 键盘输入路径简化
-4. **console.c 退化** — 移除 VT100 解析
-5. **PTY 实现** — 包括 current->ctty、/dev/tty 魔数
-6. **terminal.elf** — 用户态终端
-7. **busybox ash 对接 + init 编排** — 集成测试
-8. **测试 + 文档**
+1. **devfs_ops struct 重构** — 包括 VFS vfs_ops.mmap 扩展
+2. **do_mmap 设备 mmap 分派** — VM_IO + 调用 node->ops->mmap
+3. **VM_IO + /dev/fb mmap** — terminal.elf 的渲染基础
+4. **tty.c 退化** — 键盘输入路径简化
+5. **console.c 退化** — 移除 VT100 解析
+6. **PTY 实现** — 包括 current->ctty、/dev/tty 魔数 open、master TCGETS
+7. **terminal.elf** — 用户态终端（含 termios 感知双模式）
+8. **busybox ash 对接 + init 编排** — 集成测试
+9. **测试 + 文档**
+
+---
+
+## Deferred Items
+
+以下功能评审中确认暂缓，V1 不实现：
+
+| 项目 | 说明 |
+|---|---|
+| `ptsname`/`grantpt`/`unlockpt` | libc stub 缺失；terminal.elf 硬编码 `/dev/pts/0`。后续支持多 PTY 时需实现 |
+| `TIOCPKT` 包模式 | PTY master 在 slave termios/winsize 变化时无通知。terminal.elf 改用 poll 轮询 TCGETS，最多一个 poll 周期延迟 |
+| 键盘扩展键 (PGUP/PGDN/INSERT) | `ext_scancode_tbl` 中 0x49(PGUP)、0x51(PGDN)、0x52(INSERT) 当前映射为 UP/DOWN/HOME，后续可独立处理 |
+| fb mmap 2MB huge page | V1 使用 4KB 页映射 fb，正确但 TLB 效率低。后续改为 2MB 页减少 TLB 压力 |
+| fb stride padding | V1 stride = width * 4。部分 UEFI GOP 有行末 padding，需要 `Pos.pixels_per_line` 字段 |
+| raw mode 程序测试 | V1 仅测试 cooked mode（ash）；vi/less 等 raw mode 程序的透传路径已实现但未验证 |
