@@ -112,11 +112,99 @@ init
 
 ### 1. PTY (Unix98 风格)
 
-#### 设备注册
+#### `/dev/ptmx` — Clone 设备的分派机制
 
-- `/dev/ptmx` — 字符设备。`open()` 时创建一对新的 PTY，返回 master fd。slave 自动注册为 `/dev/pts0`、`/dev/pts1`...（扁平命名，devfs 不支持子目录）。
-- `/dev/pts<N>` — 字符设备。由 `ptmx_open` 动态注册到 devfs。`open()` 返回 slave fd。
-- 最大同时 PTY 数量：`PTY_MAX = 8`。
+**关键设计问题**：`/dev/ptmx` 是 clone 设备——每次 `open()` 创建独立的 PTY 对。
+devfs 的单节点→单 `private_data` 模型无法支持多实例。
+
+**解决方案**：PTY master 不通过 devfs 分派。改用 `FD_PTY_MASTER` 文件类型 +
+`file_t` 中的 `pty` 指针，与 `FD_PIPE` 模式一致。
+
+```c
+// kernel/include/kernel/file.h
+
+enum file_type {
+    FD_NONE = 0,
+    FD_VFS,          // regular file via VFS
+    FD_PIPE,         // pipe
+    FD_DEV,          // device (uses vfs_node)
+    FD_PTY_MASTER,   // ← 新增：PTY master fd
+};
+
+typedef struct file {
+    enum file_type type;
+    uint32_t       refcount;
+    int            flags;
+    uint64_t       offset;
+    // FD_VFS / FD_DEV
+    struct vfs_node *node;
+    // FD_PIPE
+    pipe_t         *pipe;
+    // FD_PTY_MASTER
+    pty_t          *pty;               // ← 新增
+} file_t;
+```
+
+**devfs open 回调**：`devfs_ops` 新增 `open` 回调。当设备需要在 `open` 时创建
+自定义 `file_t`（而非默认 `FD_DEV` 节点），handler 返回 `file_t *`。
+
+```c
+struct devfs_ops {
+    int (*open)(const char *name, file_t **out_file);  // ← 新增。返回 0 使用 out_file，
+                                                        // 返回 -ENOSYS 走默认 FD_DEV
+    int (*read)(vfs_node_t *, uint64_t, uint64_t, void *);
+    int (*write)(vfs_node_t *, uint64_t, uint64_t, void *);
+    uint32_t (*poll)(void *priv, struct poll_table *pt);
+    int (*mmap)(vfs_node_t *, vma_t *);
+    int (*ioctl)(vfs_node_t *, int cmd, void *arg);
+};
+```
+
+**ptmx_open 流程**：
+
+```c
+static int ptmx_open(const char *name, file_t **out_file)
+{
+    pty_t *pty = pty_alloc();          // 找空闲 slot，创建两个 pipe
+    if (!pty) return -ENOMEM;
+
+    // 动态注册 slave 到 devfs
+    char slave_name[16];
+    snprintf(slave_name, sizeof(slave_name), "pts%d", pty->index);
+    devfs_register_chrdev(slave_name, pty, &pty_slave_ops);
+
+    // 创建 master file_t
+    file_t *f = file_alloc();
+    f->type  = FD_PTY_MASTER;
+    f->pty   = pty;
+    f->flags = O_RDWR;
+    *out_file = f;
+    return 0;
+}
+```
+
+**fd_read / fd_write / fd_poll 分派**：新增 `FD_PTY_MASTER` case——委托给底层 pipe：
+
+```c
+// fd_read 新增:
+case FD_PTY_MASTER: {
+    // master read = 读 slave → master pipe（ash 的输出）
+    pty_t *pty = f->pty;
+    if (!pty || !pty->slave_to_master) return -1;
+    // 直接借用 FD_PIPE 逻辑但 pipe 来自 pty
+    // V1 简化：创建临时 file_t 或抽取共享函数
+    ...
+}
+```
+
+**V1 简化实现**：PTY master 的 `fd_read`/`fd_write` 复用 `FD_PIPE` 的代码。
+在 `FD_PTY_MASTER` case 中直接操作 pipe 字段（PTY 的两个 pipe 本质就是 pipe_t）。
+实际实现可以提取 `pipe_read(pipe_t *p, void *buf, uint64_t size)` 和
+`pipe_write(pipe_t *p, const void *buf, uint64_t size)` 两个内部函数，
+然后 `FD_PIPE` 和 `FD_PTY_MASTER` case 都调用它们。
+
+PTY slave 走现有 devfs 路径（`FD_DEV` → `devfs_read` → `pty_slave_read`），
+`private_data = &ptys[idx]`。
 
 #### 数据结构
 
@@ -169,6 +257,10 @@ Slave fd 操作：
 PTY slave **初始化为 raw mode**（`!ICANON, !ECHO, ISIG=0`）。terminal.elf 完全负责终端语义（行编辑、echo、信号生成）。这符合 Linux 终端模拟器的做法——PTY slave 始终 raw，模拟器在上面实现 cooked 行为。
 
 Slave 存储 `tcsetattr` 写入的值供 `tcgetattr` 查询，但 ly 不执行——实际行为始终 raw（无内核端行编辑、无 echo、无信号生成）。
+
+`struct termios` 定义在 `libc/include/termios.h`，由 `kernel/include/kernel/tty.h`
+通过 `#include <termios.h>` 引用。PTY 的 `pty->term` 使用同一份定义，
+内核与用户空间的布局一致——`tty_ioctl` 已在此假设下运行，PTY 沿用即可。
 
 #### pipe 生命周期与 PTY 释放
 
@@ -563,6 +655,10 @@ void console_force_enable(void)    // panic 路径调用
 - 之后所有内核 log（`log_debug`、`log_err`、`log_info`）仅 serial 输出
 - fb 由 terminal.elf 独占写入
 - `console_force_enable()` 仅在 panic 路径调用——绕过 terminal.elf，直写 fb 显示崩溃信息
+- **Panic fb 竞态**：panic 时 terminal.elf 可能仍在运行并同时写 fb。两者通过
+  不同虚拟地址（kernel direct map vs. user mmap）写入同一物理 framebuffer，
+  内容可能互相覆盖。panic 是终局路径，此竞态可接受——自旋失败和崩溃信息可见性
+  是合理的权衡。
 - `LOG_TARGET=both` 配置下，终端启动后等价于 `LOG_TARGET=serial`；需在文档中记录
 
 #### 涉及文件
@@ -660,7 +756,8 @@ terminal.elf:
   3. open("/dev/pts0")      → slave fd, current->ctty_type=CTTY_PTY, current->ctty = &ptys[0]
   4. fork()                  → ash 继承 ctty_type=CTTY_PTY, ctty=ptys[0]
   5. close(slave)            // terminal 不需要 slave fd（只用 master）
-  
+  6. current->ctty_type = CTTY_NONE;  // terminal.elf 清空自己的 ctty
+
   // terminal.elf 的 tty_fd 仍指向物理 TTY（在步骤 1 已解析完毕）
   // ash 的 /dev/tty → ctty_type==CTTY_PTY → PTY slave
 
@@ -870,11 +967,13 @@ ash 的读输入路径 `preadfd()` 不变——fd 0 已 dup2 到 PTY slave，`re
 
 ```
 内核改动:
-  kernel/driver/pty.c         | ~250  (新建：PTY alloc/free + master/slave I/O)
+  kernel/driver/pty.c         | ~300  (新建：PTY alloc/free + master/slave I/O + ptmx_open + devfs 注册)
   kernel/driver/fb.c          |  ~60  (新建：fb mmap + read)
   kernel/include/kernel/pty.h |  ~30  (新建：pty_t + 宏)
-  kernel/fs/devfs.c           |  ~70  (mmap 分派 + ops struct + ptmx/pts + /dev/tty 魔数)
-  kernel/include/fs/devfs.h   |  ~15  (devfs_ops struct)
+  kernel/fs/file.c            |  ~30  (FD_PTY_MASTER case in fd_read/fd_write/fd_poll)
+  kernel/include/kernel/file.h|   +5  (FD_PTY_MASTER + file->pty)
+  kernel/fs/devfs.c           |  ~70  (mmap 分派 + ops struct + ptmx/pts + /dev/tty 魔数 + devfs open 回调)
+  kernel/include/fs/devfs.h   |  ~15  (devfs_ops struct + open 回调)
   kernel/include/fs/vfs.h     |   +2  (vfs_ops.mmap)
   kernel/fs/vfs.c             |   +1  (默认 mmap = NULL)
   kernel/include/kernel/vma.h |   +2  (VM_IO)
@@ -888,7 +987,7 @@ ash 的读输入路径 `preadfd()` 不变——fd 0 已 dup2 到 PTY slave，`re
   kernel/driver/keyboard.c    |   +2  (方向键不再检查 ICANON)
   kernel/kernel/main.c        |  ~10  (注册 fb + PTY init)
   ─────────────────────────────────
-  内核净增                     | ~360 行 (+540 新增, -390 删除)
+  内核净增                     | ~400 行 (+610 新增, -390 删除)
 
 用户态改动:
   user/terminal.c             | ~400  (新建)
@@ -903,12 +1002,12 @@ ash 的读输入路径 `preadfd()` 不变——fd 0 已 dup2 到 PTY slave，`re
 
 ## 实现顺序
 
-1. **devfs_ops struct 重构** — 包括 VFS vfs_ops.mmap 扩展
-2. **do_mmap 设备 mmap 分派** — VM_IO + 调用 node->ops->mmap
-3. **VM_IO + /dev/fb mmap** — terminal.elf 的渲染基础
+1. **devfs_ops struct 重构** — 包括 VFS vfs_ops.mmap + devfs_ops.open 回调
+2. **FD_PTY_MASTER** — file_t 加 pty 指针、fd_read/fd_write/fd_poll 分派
+3. **VM_IO + do_mmap 设备分派** — + /dev/fb mmap
 4. **tty.c 退化** — 键盘输入路径简化
 5. **console.c 退化** — 移除 VT100 解析
-6. **PTY 实现** — 包括 current->ctty、/dev/tty 魔数 open、master TCGETS
+6. **PTY 实现** — pty_alloc、master/slave I/O、current->ctty、/dev/tty 魔数 open、master TCGETS、ptmx_open → FD_PTY_MASTER
 7. **terminal.elf** — 用户态终端（含 termios 感知双模式）
 8. **busybox ash 对接 + init 编排** — 集成测试
 9. **测试 + 文档**
