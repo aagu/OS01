@@ -15,6 +15,7 @@
 struct vfs_node;
 struct vfs_mount;
 struct vfs_dirent;
+struct vma;
 
 // ── File operations (filesystem driver provides these) ────
 typedef struct vfs_ops {
@@ -46,6 +47,19 @@ typedef struct vfs_ops {
 
     // Truncate a file to a new size.  Returns 0 or -errno.
     int (*truncate)(struct vfs_node *node, uint64_t new_size);
+
+    // Memory-map a device's memory region into user space.
+    // The mmap macro from kernel/vmm.h (mmap = uint64_t*) conflicts with
+    // this field name, so we save/restore the macro around it.
+#ifdef mmap
+#undef mmap
+#define VFS_MMAP_RESTORE
+#endif
+    int (*mmap)(struct vfs_node *, struct vma *);
+#ifdef VFS_MMAP_RESTORE
+#define mmap uint64_t*
+#undef VFS_MMAP_RESTORE
+#endif
 } vfs_ops_t;
 
 // ── A mounted filesystem instance ─────────────────────────

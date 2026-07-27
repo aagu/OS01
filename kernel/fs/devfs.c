@@ -7,6 +7,8 @@
 #include <driver/serial.h>
 #include <kernel/tty.h>
 #include <kernel/poll.h>
+#include <kernel/file.h>
+#include <errno.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -15,11 +17,7 @@
 typedef struct devfs_device {
     char name[DEVFS_NAME_MAX];
     uint8_t type;       // VFS_CHRDEV or VFS_BLKDEV
-    int (*read)(vfs_node_t *, uint64_t, uint64_t, void *);
-    int (*write)(vfs_node_t *, uint64_t, uint64_t, void *);
-    // Poll: check device readiness.  pt is poll_table for non-ready registration.
-    // NULL means device is always ready (default for most devices).
-    uint32_t (*poll)(void *priv, struct poll_table *pt);
+    const struct devfs_ops *ops;  // replaced individual read/write/poll pointers
     void *private_data;
     int registered;
 } devfs_device_t;
@@ -153,8 +151,8 @@ static int devfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *bu
     }
 
     // Character device path (existing)
-    if (devices[idx].read)
-        return devices[idx].read(node, offset, size, buffer);
+    if (devices[idx].ops && devices[idx].ops->read)
+        return devices[idx].ops->read(node, offset, size, buffer);
     return -1;
 }
 
@@ -183,9 +181,20 @@ static int devfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *b
     }
 
     // Character device path (existing)
-    if (devices[idx].write)
-        return devices[idx].write(node, offset, size, buffer);
+    if (devices[idx].ops && devices[idx].ops->write)
+        return devices[idx].ops->write(node, offset, size, buffer);
     return -1;
+}
+
+// ── devfs_mmap — dispatch mmap for device-backed mmap ────────
+static int devfs_mmap(vfs_node_t *node, struct vma *vma)
+{
+    int idx = (int)(uintptr_t)node->fs_data;
+    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+        return -EINVAL;
+    if (devices[idx].ops && devices[idx].ops->mmap)
+        return devices[idx].ops->mmap(node, vma);
+    return -ENODEV;
 }
 
 // ── devfs_poll — dispatch poll for fd_poll(FD_DEV) ─────────
@@ -199,8 +208,8 @@ uint32_t devfs_poll(vfs_node_t *node, poll_table_t *pt)
 
     devfs_device_t *dev = &devices[idx];
 
-    if (dev->poll)
-        return dev->poll(dev->private_data, pt);
+    if (dev->ops && dev->ops->poll)
+        return dev->ops->poll(dev->private_data, pt);
 
     // No poll callback: default to always ready
     return POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM;
@@ -241,9 +250,70 @@ static struct vfs_ops devfs_ops = {
     .read    = devfs_read,
     .write   = devfs_write,
     .readdir = devfs_readdir,
+    .mmap    = devfs_mmap,
 };
 
+// ── devfs_open_node — sys_open integration ──────────────────
+// Called from SYS_open after vfs_lookup.  If the node is a devfs
+// device node with an open callback, returns a custom file_t.
+// Otherwise returns -ENOSYS so SYS_open falls through to FD_VFS.
+int devfs_open_node(vfs_node_t *node, const char *path, int flags, file_t **out)
+{
+    if (!out) return -EINVAL;
+
+    // Guard: only process devfs device nodes.
+    if (node->type != VFS_CHRDEV && node->type != VFS_BLKDEV)
+        return -ENOSYS;
+
+    int idx = (int)(uintptr_t)node->fs_data;
+    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+        return -ENODEV;
+
+    if (devices[idx].ops && devices[idx].ops->open) {
+        int rc = devices[idx].ops->open(path, out);
+        if (rc == 0 && *out) {
+            (*out)->flags = flags;
+            return 0;
+        }
+        if (rc != -ENOSYS) return rc;
+    }
+
+    // Default: FD_DEV
+    *out = file_alloc();
+    if (!*out) return -ENOMEM;
+    (*out)->type = FD_DEV;
+    (*out)->node = vfs_node_get(node);
+    (*out)->flags = flags;
+    return 0;
+}
+
 // ── Initialise devfs and register built-in devices ──────────
+
+static const struct devfs_ops null_ops = {
+    .read  = null_read,
+    .write = null_write,
+};
+
+static const struct devfs_ops zero_ops = {
+    .read  = zero_read,
+    .write = null_write,
+};
+
+static const struct devfs_ops random_ops = {
+    .read  = random_read,
+    .write = random_write,
+};
+
+static const struct devfs_ops serial_ops = {
+    .read  = serial_read,
+    .write = serial_write,
+};
+
+static const struct devfs_ops tty_ops = {
+    .read  = dev_tty_read,
+    .write = dev_tty_write,
+    .poll  = dev_tty_poll,
+};
 
 void devfs_init(void)
 {
@@ -260,19 +330,17 @@ void devfs_init(void)
     }
 
     // Register built-in character devices
-    devfs_register_chrdev("null",   NULL, null_read,   null_write,   NULL);
-    devfs_register_chrdev("zero",   NULL, zero_read,   null_write,   NULL);
-    devfs_register_chrdev("random", NULL, random_read, random_write, NULL);
-    devfs_register_chrdev("serial", NULL, serial_read, serial_write, NULL);
-    devfs_register_chrdev("tty",    NULL, dev_tty_read, dev_tty_write, dev_tty_poll);
+    devfs_register_chrdev("null",   NULL, &null_ops);
+    devfs_register_chrdev("zero",   NULL, &zero_ops);
+    devfs_register_chrdev("random", NULL, &random_ops);
+    devfs_register_chrdev("serial", NULL, &serial_ops);
+    devfs_register_chrdev("tty",    NULL, &tty_ops);
 }
 
 // ── Public API ──────────────────────────────────────────────
 
 int devfs_register_chrdev(const char *name, void *private_data,
-    int (*read)(vfs_node_t *, uint64_t, uint64_t, void *),
-    int (*write)(vfs_node_t *, uint64_t, uint64_t, void *),
-    uint32_t (*poll)(void *priv, struct poll_table *pt))
+                          const struct devfs_ops *ops)
 {
     if (device_count >= DEVFS_MAX_DEVICES)
         return -1;
@@ -284,9 +352,7 @@ int devfs_register_chrdev(const char *name, void *private_data,
     devices[idx].name[nlen] = '\0';
 
     devices[idx].type = VFS_CHRDEV;
-    devices[idx].read = read;
-    devices[idx].write = write;
-    devices[idx].poll = poll;
+    devices[idx].ops = ops;
     devices[idx].private_data = private_data;
     devices[idx].registered = 1;
     device_count++;
@@ -307,8 +373,7 @@ int devfs_register_blkdev(const char *name, block_device_t *dev)
     devices[idx].name[nlen] = '\0';
 
     devices[idx].type = VFS_BLKDEV;
-    devices[idx].read = NULL;           // dispatch handles this
-    devices[idx].write = NULL;
+    devices[idx].ops = NULL;            // block device dispatch is separate
     devices[idx].private_data = dev;    // block_device_t *
     devices[idx].registered = 1;
     device_count++;

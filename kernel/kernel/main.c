@@ -183,8 +183,15 @@ int kernel_main(struct BOOT_INFO *bootinfo)
 
     devfs_init();                   // mount /dev + register chrdev
                                     // ★ MUST be before any devfs_register_* call
-    devfs_register_chrdev("keyboard", NULL, keyboard_devfs_read, NULL, NULL);
-    devfs_register_chrdev("fb", NULL, NULL, fb_dev_write, NULL);
+
+    static const struct devfs_ops keyboard_ops = {
+        .read = keyboard_devfs_read,
+    };
+    static const struct devfs_ops fb_ops = {
+        .write = fb_dev_write,
+    };
+    devfs_register_chrdev("keyboard", NULL, &keyboard_ops);
+    devfs_register_chrdev("fb", NULL, &fb_ops);
 
     // Register physical disks in /dev
     for (int i = 0; i < block_device_count(); i++) {

@@ -25,6 +25,7 @@ typedef int pid_t;
 #include <kernel/tty.h>
 #include <stdlib.h>
 #include <fs/vfs.h>
+#include <fs/devfs.h>
 #include <kernel/debug.h>
 #include <kernel/file.h>
 #include <kernel/poll.h>     // struct pollfd, do_poll()
@@ -1125,17 +1126,20 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             }
         }
 
-        file_t *f = file_alloc();
-        if (!f) {
-            vfs_node_put(node);
-            regs->rax = -ENOMEM;
-            break;
+        file_t *f = NULL;
+        int rc = devfs_open_node(node, path, flags, &f);
+        if (rc == -ENOSYS) {
+            // Not a devfs device node → fall through to default FD_VFS
+            f = file_alloc();
+            if (!f) { vfs_node_put(node); regs->rax = -ENOMEM; break; }
+            f->type = (node->type == VFS_DIR) ? VFS_DIR : FD_VFS;
+            f->node = node;  // takes ownership of lookup ref
+            f->flags = flags;
+        } else {
+            vfs_node_put(node);  // devfs path owns its own ref
+            if (rc < 0) { regs->rax = rc; break; }
+            if (!f) { regs->rax = -ENOMEM; break; }
         }
-
-        f->type = FD_VFS;
-        f->node = node;
-        f->flags = flags;
-        f->offset = 0;
 
         int newfd = fd_alloc(current->files, f);
         if (newfd < 0) {
