@@ -8,10 +8,14 @@
 #include <string.h>
 #include <errno.h>
 #include <kernel/poll.h>
+#include <kernel/pty.h>
 
 // ── Forward declarations ─────────────────────────────────────
-static void pipe_wake_readers(pipe_t *p);
-static void pipe_wake_writers(pipe_t *p);
+void pipe_wake_readers(pipe_t *p);
+void pipe_wake_writers(pipe_t *p);
+
+// ── PTY allocation lock ─────────────────────────────────────
+spinlock_T pty_lock = { 1 };
 
 // ── Allocate a file_t ──────────────────────────────────────
 file_t *file_alloc(void)
@@ -53,6 +57,65 @@ void file_free(file_t *f)
             if (need_wake_w) pipe_wake_writers(p);
             if (last)         pipe_free(p);
         }
+    }
+
+    // ── PTY cleanup ──────────────────────────────────────────────
+    if ((f->type == FD_PTY_MASTER || f->type == FD_PTY_SLAVE) && f->pty) {
+        pty_t *pty = f->pty;
+        // Hold pty_lock to prevent concurrent pty_alloc reusing this slot (SMP)
+        uint64_t pty_flags = spin_lock_irqsave(&pty_lock);
+        int need_rd_a = 0, need_wr_a = 0, need_rd_b = 0, need_wr_b = 0;
+
+        if (f->type == FD_PTY_MASTER) {
+            // master reads slave_to_master, writes master_to_slave
+            if (pty->slave_to_master) {
+                uint64_t fl = spin_lock_irqsave(&pty->slave_to_master->lock);
+                pty->slave_to_master->readers--;           // master stopped reading
+                need_wr_b = (pty->slave_to_master->readers == 0);
+                spin_unlock_irqrestore(&pty->slave_to_master->lock, fl);
+            }
+            if (pty->master_to_slave) {
+                uint64_t fl = spin_lock_irqsave(&pty->master_to_slave->lock);
+                pty->master_to_slave->writers--;            // master stopped writing
+                need_rd_a = (pty->master_to_slave->writers == 0);
+                spin_unlock_irqrestore(&pty->master_to_slave->lock, fl);
+            }
+        } else { // FD_PTY_SLAVE
+            // slave reads master_to_slave, writes slave_to_master
+            if (pty->master_to_slave) {
+                uint64_t fl = spin_lock_irqsave(&pty->master_to_slave->lock);
+                pty->master_to_slave->readers--;            // slave stopped reading
+                need_wr_a = (pty->master_to_slave->readers == 0);
+                spin_unlock_irqrestore(&pty->master_to_slave->lock, fl);
+            }
+            if (pty->slave_to_master) {
+                uint64_t fl = spin_lock_irqsave(&pty->slave_to_master->lock);
+                pty->slave_to_master->writers--;            // slave stopped writing
+                need_rd_b = (pty->slave_to_master->writers == 0);
+                spin_unlock_irqrestore(&pty->slave_to_master->lock, fl);
+            }
+            pty->pgrp = 0;  // reset on slave close
+        }
+
+        // Wake blocked sides
+        if (need_rd_a) pipe_wake_readers(pty->master_to_slave);
+        if (need_wr_a) pipe_wake_writers(pty->master_to_slave);
+        if (need_rd_b) pipe_wake_readers(pty->slave_to_master);
+        if (need_wr_b) pipe_wake_writers(pty->slave_to_master);
+
+        // Check if both pipes are fully closed -> free them + reclaim slot
+        int m2s_done = (!pty->master_to_slave->readers && !pty->master_to_slave->writers);
+        int s2m_done = (!pty->slave_to_master->readers && !pty->slave_to_master->writers);
+        if (m2s_done && s2m_done) {
+            pipe_free(pty->master_to_slave);
+            pipe_free(pty->slave_to_master);
+            pty->master_to_slave = NULL;
+            pty->slave_to_master = NULL;
+            pty->allocated = false;  // slot reusable
+        }
+
+        spin_unlock_irqrestore(&pty_lock, pty_flags);
+        f->pty = NULL;
     }
 
     if (f->node)
@@ -181,10 +244,9 @@ static inline int pipe_full(pipe_t *p)
 // Poll entries use a plain list_t (poll_wait_entry_t.node).
 // Each poll entry cascades to wait_queue_wake_all(entry->poll_wq).
 
-static void pipe_wake_readers(pipe_t *p)
+void pipe_wake_readers(pipe_t *p)
 {
     wait_queue_wake_one(&p->read_wait);
-
     while (!list_is_empty(&p->read_poll)) {
         list_t *node = p->read_poll.next;
         list_del_init(node);
@@ -193,7 +255,7 @@ static void pipe_wake_readers(pipe_t *p)
     }
 }
 
-static void pipe_wake_writers(pipe_t *p)
+void pipe_wake_writers(pipe_t *p)
 {
     wait_queue_wake_one(&p->write_wait);
 
@@ -202,6 +264,89 @@ static void pipe_wake_writers(pipe_t *p)
         list_del_init(node);
         poll_wait_entry_t *e = container_of(node, poll_wait_entry_t, node);
         wait_queue_wake_all(e->poll_wq);
+    }
+}
+
+// ── Pipe read internal (blocking, exported for PTY) ─────────
+int64_t pipe_read_internal(pipe_t *p, void *buf, uint64_t size)
+{
+    if (!p) return -1;
+
+    uint8_t *dst = (uint8_t *)buf;
+    uint64_t total = 0;
+
+    for (;;) {
+        uint64_t flags = spin_lock_irqsave(&p->lock);
+
+        while (total < size && !pipe_empty(p)) {
+            // Read one byte at a time from the ring buffer
+            dst[total++] = p->buf[p->tail];
+            p->tail = (p->tail + 1) % PIPE_SIZE;
+        }
+
+        if (total > 0) {
+            // Data consumed — wake any blocked writers
+            pipe_wake_writers(p);
+            spin_unlock_irqrestore(&p->lock, flags);
+            return (int64_t)total;
+        }
+
+        // Pipe empty — check if any writer still exists
+        if (p->writers == 0) {
+            spin_unlock_irqrestore(&p->lock, flags);
+            return 0;  // EOF
+        }
+
+        spin_unlock_irqrestore(&p->lock, flags);
+
+        // Register on pipe's wait queue, then double-check
+        // under p->lock to close the lost-wakeup race:
+        //  1. check writers=1 → 2. unlock → 3. writer exits, wake
+        //     (queue empty) → 4. add to queue → sleep forever.
+        // Double-check after queue registration catches step 3.
+        {
+            wait_queue_t *wq = &p->read_wait;
+            int do_eof = 0;
+
+            uint64_t wq_flags = spin_lock_irqsave(&wq->lock);
+            list_add_to_before(&wq->head, &current->io_wait_node);
+
+            {
+                uint64_t p2_flags = spin_lock_irqsave(&p->lock);
+                if (p->writers == 0 && pipe_empty(p)) {
+                    // No more data will ever arrive → EOF
+                    list_del_init(&current->io_wait_node);
+                    do_eof = 1;
+                } else if (p->writers == 0 && !pipe_empty(p)) {
+                    // Last writer gone but data still in buffer —
+                    // don't sleep, go back and read it
+                    list_del_init(&current->io_wait_node);
+                }
+                spin_unlock_irqrestore(&p->lock, p2_flags);
+            }
+
+            if (do_eof) {
+                spin_unlock_irqrestore(&wq->lock, wq_flags);
+                return 0;
+            }
+
+            current->state = TASK_INTERRUPTIBLE;
+            int was_queued = !list_is_empty(&current->io_wait_node);
+            spin_unlock_irqrestore(&wq->lock, wq_flags);
+
+            if (!was_queued) {
+                // Dequeued by double-check (buffer has data) — skip sleep
+                current->state = TASK_RUNNING;
+            } else {
+                schedule();
+                if (!list_is_empty(&current->io_wait_node))
+                    list_del_init(&current->io_wait_node);
+                current->state = TASK_RUNNING;
+            }
+        }
+
+        if (signal_pending_fatal())
+            return -EINTR;
     }
 }
 
@@ -226,89 +371,95 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
             f->offset += (uint64_t)n;
         return n;
     }
-    case FD_PIPE: {
-        pipe_t *p = f->pipe;
-        if (!p) return -1;
-
-        uint8_t *dst = (uint8_t *)buf;
-        uint64_t total = 0;
-
-        for (;;) {
-            uint64_t flags = spin_lock_irqsave(&p->lock);
-
-            while (total < size && !pipe_empty(p)) {
-                // Read one byte at a time from the ring buffer
-                dst[total++] = p->buf[p->tail];
-                p->tail = (p->tail + 1) % PIPE_SIZE;
-            }
-
-            if (total > 0) {
-                // Data consumed — wake any blocked writers
-                pipe_wake_writers(p);
-                spin_unlock_irqrestore(&p->lock, flags);
-                return (int64_t)total;
-            }
-
-            // Pipe empty — check if any writer still exists
-            if (p->writers == 0) {
-                spin_unlock_irqrestore(&p->lock, flags);
-                return 0;  // EOF
-            }
-
-            spin_unlock_irqrestore(&p->lock, flags);
-
-            // Register on pipe's wait queue, then double-check
-            // under p->lock to close the lost-wakeup race:
-            //  1. check writers=1 → 2. unlock → 3. writer exits, wake
-            //     (queue empty) → 4. add to queue → sleep forever.
-            // Double-check after queue registration catches step 3.
-            {
-                wait_queue_t *wq = &p->read_wait;
-                int do_eof = 0;
-
-                uint64_t wq_flags = spin_lock_irqsave(&wq->lock);
-                list_add_to_before(&wq->head, &current->io_wait_node);
-
-                {
-                    uint64_t p2_flags = spin_lock_irqsave(&p->lock);
-                    if (p->writers == 0 && pipe_empty(p)) {
-                        // No more data will ever arrive → EOF
-                        list_del_init(&current->io_wait_node);
-                        do_eof = 1;
-                    } else if (p->writers == 0 && !pipe_empty(p)) {
-                        // Last writer gone but data still in buffer —
-                        // don't sleep, go back and read it
-                        list_del_init(&current->io_wait_node);
-                    }
-                    spin_unlock_irqrestore(&p->lock, p2_flags);
-                }
-
-                if (do_eof) {
-                    spin_unlock_irqrestore(&wq->lock, wq_flags);
-                    return 0;
-                }
-
-                current->state = TASK_INTERRUPTIBLE;
-                int was_queued = !list_is_empty(&current->io_wait_node);
-                spin_unlock_irqrestore(&wq->lock, wq_flags);
-
-                if (!was_queued) {
-                    // Dequeued by double-check (buffer has data) — skip sleep
-                    current->state = TASK_RUNNING;
-                } else {
-                    schedule();
-                    if (!list_is_empty(&current->io_wait_node))
-                        list_del_init(&current->io_wait_node);
-                    current->state = TASK_RUNNING;
-                }
-            }
-
-            if (signal_pending_fatal())
-                return -EINTR;
-        }
-    }
+    case FD_PIPE:
+        return pipe_read_internal(f->pipe, buf, size);
+    case FD_PTY_MASTER:
+        if (!f->pty || !f->pty->slave_to_master) return -1;
+        return pipe_read_internal(f->pty->slave_to_master, buf, size);
+    case FD_PTY_SLAVE:
+        if (!f->pty || !f->pty->master_to_slave) return -1;
+        return pipe_read_internal(f->pty->master_to_slave, buf, size);
     default:
         return -1;
+    }
+}
+
+// ── Pipe write internal (blocking, exported for PTY) ────────
+int64_t pipe_write_internal(pipe_t *p, const void *buf, uint64_t size)
+{
+    if (!p) return -1;
+
+    const uint8_t *src = (const uint8_t *)buf;
+    uint64_t total = 0;
+
+    for (;;) {
+        uint64_t flags = spin_lock_irqsave(&p->lock);
+
+        while (total < size && !pipe_full(p)) {
+            p->buf[p->head] = src[total++];
+            p->head = (p->head + 1) % PIPE_SIZE;
+        }
+
+        if (total > 0) {
+            // Wrote some data — wake blocked readers, return
+            pipe_wake_readers(p);
+            spin_unlock_irqrestore(&p->lock, flags);
+            return (int64_t)total;
+        }
+
+        // Pipe is full (total == 0)
+        // Check if any reader still exists
+        if (p->readers == 0) {
+            spin_unlock_irqrestore(&p->lock, flags);
+            return -EPIPE;
+        }
+
+        spin_unlock_irqrestore(&p->lock, flags);
+
+        // Double-check after queue registration to
+        // close the lost-wakeup race (same pattern as fd_read).
+        {
+            wait_queue_t *wq = &p->write_wait;
+            int do_epipe = 0;
+
+            uint64_t wq_flags = spin_lock_irqsave(&wq->lock);
+            list_add_to_before(&wq->head, &current->io_wait_node);
+
+            {
+                uint64_t p2_flags = spin_lock_irqsave(&p->lock);
+                if (p->readers == 0) {
+                    list_del_init(&current->io_wait_node);
+                    do_epipe = 1;
+                } else if (!pipe_full(p)) {
+                    // Reader consumed data between the outer
+                    // pipe_full check and queue registration —
+                    // don't sleep, loop back and write
+                    list_del_init(&current->io_wait_node);
+                }
+                spin_unlock_irqrestore(&p->lock, p2_flags);
+            }
+
+            if (do_epipe) {
+                spin_unlock_irqrestore(&wq->lock, wq_flags);
+                return -EPIPE;
+            }
+
+            current->state = TASK_INTERRUPTIBLE;
+            int was_queued = !list_is_empty(&current->io_wait_node);
+            spin_unlock_irqrestore(&wq->lock, wq_flags);
+
+            if (!was_queued) {
+                current->state = TASK_RUNNING;
+            } else {
+                schedule();
+                if (!list_is_empty(&current->io_wait_node))
+                    list_del_init(&current->io_wait_node);
+                current->state = TASK_RUNNING;
+            }
+        }
+
+        if (signal_pending_fatal())
+            return -EINTR;
     }
 }
 
@@ -332,83 +483,14 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
             f->offset += (uint64_t)n;
         return n;
     }
-    case FD_PIPE: {
-        pipe_t *p = f->pipe;
-        if (!p) return -1;
-
-        const uint8_t *src = (const uint8_t *)buf;
-        uint64_t total = 0;
-
-        for (;;) {
-            uint64_t flags = spin_lock_irqsave(&p->lock);
-
-            while (total < size && !pipe_full(p)) {
-                p->buf[p->head] = src[total++];
-                p->head = (p->head + 1) % PIPE_SIZE;
-            }
-
-            if (total > 0) {
-                // Wrote some data — wake blocked readers, return
-                pipe_wake_readers(p);
-                spin_unlock_irqrestore(&p->lock, flags);
-                return (int64_t)total;
-            }
-
-            // Pipe is full (total == 0)
-            // Check if any reader still exists
-            if (p->readers == 0) {
-                spin_unlock_irqrestore(&p->lock, flags);
-                return -EPIPE;
-            }
-
-            spin_unlock_irqrestore(&p->lock, flags);
-
-            // Double-check after queue registration to
-            // close the lost-wakeup race (same pattern as fd_read).
-            {
-                wait_queue_t *wq = &p->write_wait;
-                int do_epipe = 0;
-
-                uint64_t wq_flags = spin_lock_irqsave(&wq->lock);
-                list_add_to_before(&wq->head, &current->io_wait_node);
-
-                {
-                    uint64_t p2_flags = spin_lock_irqsave(&p->lock);
-                    if (p->readers == 0) {
-                        list_del_init(&current->io_wait_node);
-                        do_epipe = 1;
-                    } else if (!pipe_full(p)) {
-                        // Reader consumed data between the outer
-                        // pipe_full check and queue registration —
-                        // don't sleep, loop back and write
-                        list_del_init(&current->io_wait_node);
-                    }
-                    spin_unlock_irqrestore(&p->lock, p2_flags);
-                }
-
-                if (do_epipe) {
-                    spin_unlock_irqrestore(&wq->lock, wq_flags);
-                    return -EPIPE;
-                }
-
-                current->state = TASK_INTERRUPTIBLE;
-                int was_queued = !list_is_empty(&current->io_wait_node);
-                spin_unlock_irqrestore(&wq->lock, wq_flags);
-
-                if (!was_queued) {
-                    current->state = TASK_RUNNING;
-                } else {
-                    schedule();
-                    if (!list_is_empty(&current->io_wait_node))
-                        list_del_init(&current->io_wait_node);
-                    current->state = TASK_RUNNING;
-                }
-            }
-
-            if (signal_pending_fatal())
-                return -EINTR;
-        }
-    }
+    case FD_PIPE:
+        return pipe_write_internal(f->pipe, buf, size);
+    case FD_PTY_MASTER:
+        if (!f->pty || !f->pty->master_to_slave) return -1;
+        return pipe_write_internal(f->pty->master_to_slave, buf, size);
+    case FD_PTY_SLAVE:
+        if (!f->pty || !f->pty->slave_to_master) return -1;
+        return pipe_write_internal(f->pty->slave_to_master, buf, size);
     default:
         return -1;
     }

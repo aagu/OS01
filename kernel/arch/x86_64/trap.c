@@ -1132,7 +1132,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             // Not a devfs device node → fall through to default FD_VFS
             f = file_alloc();
             if (!f) { vfs_node_put(node); regs->rax = -ENOMEM; break; }
-            f->type = (node->type == VFS_DIR) ? VFS_DIR : FD_VFS;
+            f->type = FD_VFS;
             f->node = node;  // takes ownership of lookup ref
             f->flags = flags;
         } else {

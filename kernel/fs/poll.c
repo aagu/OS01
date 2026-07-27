@@ -16,6 +16,7 @@
 #include <kernel/slab.h>
 #include <fs/vfs.h>
 #include <kernel/percpu.h>
+#include <kernel/pty.h>
 #include <device/timer.h>    // jiffies
 #include <stddef.h>
 #include <errno.h>
@@ -174,6 +175,76 @@ uint32_t fd_poll(file_t *f, poll_table_t *pt)
         }
 
         spin_unlock_irqrestore(&p->lock, flags);
+        return mask;
+    }
+
+    case FD_PTY_MASTER: {
+        pty_t *pty = f->pty;
+        if (!pty) return POLLERR;
+        uint32_t mask = 0;
+        if (pty->slave_to_master) {
+            uint64_t fl = spin_lock_irqsave(&pty->slave_to_master->lock);
+            pipe_t *p = pty->slave_to_master;
+            if (!pipe_empty(p)) {
+                mask |= POLLIN | POLLRDNORM;
+                if (p->writers == 0)
+                    mask |= POLLHUP;
+            } else if (p->writers == 0) {
+                mask |= POLLIN | POLLHUP;
+            } else if (pt && !pt->triggered) {
+                poll_wait(pt, &p->read_poll, &p->lock);
+            }
+            spin_unlock_irqrestore(&pty->slave_to_master->lock, fl);
+        }
+        if (pty->master_to_slave) {
+            uint64_t fl = spin_lock_irqsave(&pty->master_to_slave->lock);
+            pipe_t *p = pty->master_to_slave;
+            if (!pipe_full(p)) {
+                mask |= POLLOUT | POLLWRNORM;
+                if (p->readers == 0)
+                    mask |= POLLERR;
+            } else if (p->readers == 0) {
+                mask |= POLLOUT | POLLERR;
+            } else if (pt && !pt->triggered) {
+                poll_wait(pt, &p->write_poll, &p->lock);
+            }
+            spin_unlock_irqrestore(&pty->master_to_slave->lock, fl);
+        }
+        return mask;
+    }
+    case FD_PTY_SLAVE: {
+        // symmetric: slave reads master_to_slave, writes slave_to_master
+        pty_t *pty = f->pty;
+        if (!pty) return POLLERR;
+        uint32_t mask = 0;
+        if (pty->master_to_slave) {
+            uint64_t fl = spin_lock_irqsave(&pty->master_to_slave->lock);
+            pipe_t *p = pty->master_to_slave;
+            if (!pipe_empty(p)) {
+                mask |= POLLIN | POLLRDNORM;
+                if (p->writers == 0)
+                    mask |= POLLHUP;
+            } else if (p->writers == 0) {
+                mask |= POLLIN | POLLHUP;
+            } else if (pt && !pt->triggered) {
+                poll_wait(pt, &p->read_poll, &p->lock);
+            }
+            spin_unlock_irqrestore(&pty->master_to_slave->lock, fl);
+        }
+        if (pty->slave_to_master) {
+            uint64_t fl = spin_lock_irqsave(&pty->slave_to_master->lock);
+            pipe_t *p = pty->slave_to_master;
+            if (!pipe_full(p)) {
+                mask |= POLLOUT | POLLWRNORM;
+                if (p->readers == 0)
+                    mask |= POLLERR;
+            } else if (p->readers == 0) {
+                mask |= POLLOUT | POLLERR;
+            } else if (pt && !pt->triggered) {
+                poll_wait(pt, &p->write_poll, &p->lock);
+            }
+            spin_unlock_irqrestore(&pty->slave_to_master->lock, fl);
+        }
         return mask;
     }
 

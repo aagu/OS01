@@ -22,6 +22,8 @@
 // ── Forward declarations ───────────────────────────────────
 
 struct vfs_node;
+struct pty_struct;
+typedef struct pty_struct pty_t;
 
 // ── File types ─────────────────────────────────────────────
 
@@ -30,6 +32,8 @@ enum file_type {
     FD_VFS,          // regular file via VFS
     FD_PIPE,         // pipe
     FD_DEV,          // device (uses vfs_node, same ops as FD_VFS)
+    FD_PTY_MASTER,   // PTY master
+    FD_PTY_SLAVE,    // PTY slave (blocking I/O via pipe directly)
 };
 
 // ── Pipe ───────────────────────────────────────────────────
@@ -58,6 +62,8 @@ typedef struct file {
     struct vfs_node *node;
     // FD_PIPE
     pipe_t         *pipe;
+    // FD_PTY_MASTER / FD_PTY_SLAVE
+    pty_t          *pty;
 } file_t;
 
 // ── Per-process file descriptor table ──────────────────────
@@ -94,5 +100,11 @@ int64_t      fd_write(file_t *f, const void *buf, uint64_t size);
 
 // Create a pipe — fills fds[0] (read end), fds[1] (write end)
 int64_t       do_pipe(int *user_fds);
+
+// ── Pipe API (exported for PTY) ──
+int64_t pipe_read_internal(pipe_t *p, void *buf, uint64_t size);
+int64_t pipe_write_internal(pipe_t *p, const void *buf, uint64_t size);
+void    pipe_wake_readers(pipe_t *p);
+void    pipe_wake_writers(pipe_t *p);
 
 #endif // _KERNEL_FILE_H
