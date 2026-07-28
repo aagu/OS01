@@ -9,7 +9,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <unistd.h>
-#include <stdlib.h>
+#include <stdlib.h>     // environ
 #include <string.h>
 #include <signal.h>
 #include <errno.h>
@@ -208,21 +208,32 @@ static void handle_input(char *buf, int n, int pty_fd, int ash_pid)
 //  Main
 // ═══════════════════════════════════════════════════════════
 
+#define ASH_PATH "/bin/busybox"
+
 int main(void)
 {
+    char *ash_argv[] = { "ash", NULL };
+
     // 1. Open physical TTY BEFORE ctty is set (CTTY_NONE → phys TTY)
     int tty_fd = open("/dev/tty", O_RDONLY);
     if (tty_fd < 0) { write(2, "terminal: /dev/tty\n", 19); return 1; }
 
-    // 2. Open framebuffer
+    // 2. Open framebuffer — may not exist (DISPLAY=none)
     int fb_fd = open("/dev/fb", O_RDWR);
-    if (fb_fd < 0) { write(2, "terminal: /dev/fb\n", 18); return 1; }
+    if (fb_fd < 0) {
+        write(2, "terminal: no fb, fallback to ash\n", 34);
+        exec(ASH_PATH, ash_argv, NULL);
+        return 1;
+    }
 
     read(fb_fd, &fb_info, sizeof(fb_info));
     fb = mmap(NULL, fb_info.height * fb_info.stride,
               PROT_READ | PROT_WRITE, MAP_SHARED, fb_fd, 0);
-    if ((int64_t)(intptr_t)fb < 0) {
-        write(2, "terminal: mmap fb failed\n", 25); return 1;
+    if (fb_info.width == 0 || fb_info.height == 0 ||
+        (int64_t)(intptr_t)fb < 0) {
+        write(2, "terminal: fb unusable, fallback to ash\n", 40);
+        exec(ASH_PATH, ash_argv, NULL);
+        return 1;
     }
 
     ioctl(fb_fd, FBIOSURRENDER, NULL);
@@ -246,8 +257,7 @@ int main(void)
     if (ash_pid == 0) {
         dup2(slave, 0); dup2(slave, 1); dup2(slave, 2);
         close(slave); close(pty_fd); close(tty_fd); close(fb_fd);
-        char *argv[] = { "/bin/ash", NULL };
-        exec("/bin/ash", argv, NULL);
+        exec(ASH_PATH, ash_argv, NULL);
         exit(1);
     }
     close(slave);
