@@ -156,10 +156,12 @@ static void output_char(char c)
     if (term_row >= term_rows) fb_scroll();
 }
 
-static void handle_output(char *buf, int n)
+static void handle_output(char *buf, int n, int serial_fd)
 {
-    for (int i = 0; i < n; i++)
+    for (int i = 0; i < n; i++) {
         output_char(buf[i]);
+        if (serial_fd >= 0) write(serial_fd, &buf[i], 1);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -281,10 +283,15 @@ int main(void)
     if (ash_pid == 0) {
         dup2(slave, 0); dup2(slave, 1); dup2(slave, 2);
         close(slave); close(pty_fd); close(tty_fd); close(fb_fd);
-        exec(ASH_PATH, ash_argv, NULL);
+        exec(ASH_PATH, ash_argv, environ);
+        // exec failed — write to stderr (fd 2 = slave) then exit
         exit(1);
     }
     close(slave);
+    dbg("terminal: entering main loop\n");
+
+    // 6. Main loop — also open /dev/serial for headless output echo
+    int serial_fd = open("/dev/serial", O_WRONLY);
 
     // 6. Main loop
     struct pollfd fds[2] = {{.fd = tty_fd, .events = POLLIN}, {.fd = pty_fd, .events = POLLIN}};
@@ -299,11 +306,14 @@ int main(void)
         }
         if (fds[0].revents & POLLIN) {
             int n = read(tty_fd, buf, sizeof(buf));
-            if (n > 0) handle_input(buf, n, pty_fd, ash_pid);
+            if (n > 0) {
+                handle_input(buf, n, pty_fd, ash_pid);
+                if (serial_fd >= 0) write(serial_fd, buf, n);
+            }
         }
         if (fds[1].revents & POLLIN) {
             int n = read(pty_fd, buf, sizeof(buf));
-            if (n > 0) handle_output(buf, n);
+            if (n > 0) handle_output(buf, n, serial_fd);
             else if (n == 0) break;
             else if (errno == EINTR) continue;
             else break;
