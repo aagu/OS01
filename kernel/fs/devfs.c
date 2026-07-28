@@ -215,6 +215,17 @@ uint32_t devfs_poll(vfs_node_t *node, poll_table_t *pt)
     return POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM;
 }
 
+// ── devfs_ioctl_node — dispatch ioctl to a devfs device ─────
+int devfs_ioctl_node(vfs_node_t *node, int cmd, void *arg)
+{
+    int idx = (int)(uintptr_t)node->fs_data;
+    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+        return -ENODEV;
+    if (devices[idx].ops && devices[idx].ops->ioctl)
+        return devices[idx].ops->ioctl(node, cmd, arg);
+    return -ENOTTY;
+}
+
 // ── readdir: enumerate registered devices ───────────────────
 
 static int devfs_readdir(vfs_node_t *node, uint64_t index, vfs_dirent_t *entry)

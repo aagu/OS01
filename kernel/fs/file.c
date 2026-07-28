@@ -9,6 +9,8 @@
 #include <errno.h>
 #include <kernel/poll.h>
 #include <kernel/pty.h>
+#include <fs/devfs.h>
+#include <uapi/stat.h>
 
 // ── Forward declarations ─────────────────────────────────────
 void pipe_wake_readers(pipe_t *p);
@@ -493,6 +495,45 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
         return pipe_write_internal(f->pty->slave_to_master, buf, size);
     default:
         return -1;
+    }
+}
+
+// ── Weak stub for pty_slave_ioctl (real impl in pty.c, Task 7) ─
+__attribute__((weak)) int pty_slave_ioctl(pty_t *pty, int cmd, void *arg)
+{
+    (void)pty; (void)cmd; (void)arg;
+    return -ENOTTY;
+}
+
+// ── ioctl through a file descriptor ───────────────────────
+int64_t fd_ioctl(file_t *f, int cmd, void *arg)
+{
+    if (!f) return -EBADF;
+
+    switch (f->type) {
+    case FD_VFS:
+    case FD_DEV: {
+        if (!f->node) return -ENOTTY;
+        return devfs_ioctl_node(f->node, cmd, arg);
+    }
+    case FD_PTY_MASTER: {
+        pty_t *pty = f->pty;
+        if (!pty) return -ENOTTY;
+        if (cmd == TCGETS) {
+            if (!arg) return -EINVAL;
+            memcpy(arg, &pty->term, sizeof(struct termios));
+            return 0;
+        }
+        return -ENOTTY;
+    }
+    case FD_PTY_SLAVE: {
+        pty_t *pty = f->pty;
+        if (!pty) return -ENOTTY;
+        return pty_slave_ioctl(pty, cmd, arg);
+    }
+    case FD_PIPE:
+    default:
+        return -ENOTTY;
     }
 }
 
