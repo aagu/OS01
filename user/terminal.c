@@ -152,10 +152,12 @@ static void output_char(char c)
     if (term_row >= term_rows) fb_scroll();
 }
 
-static void handle_output(char *buf, int n)
+static void handle_output(char *buf, int n, int serial_fd)
 {
-    for (int i = 0; i < n; i++)
+    for (int i = 0; i < n; i++) {
         output_char(buf[i]);
+        if (serial_fd >= 0) write(serial_fd, &buf[i], 1);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -253,8 +255,7 @@ int main(void)
         if (fds[1].revents & POLLIN) {
             int n = read(pty_fd, buf, sizeof(buf));
             if (n > 0) {
-                handle_output(buf, n);
-                if (serial_fd >= 0) write(serial_fd, buf, n);  // mirror to serial
+                handle_output(buf, n, serial_fd);
             } else if (n == 0) break;
             else if (errno == EINTR) continue; else break;
         }
