@@ -46,10 +46,6 @@ static int term_cols, term_rows;
 static uint32_t fg = 0xFFFFFFFF, bg = 0x00000000;
 static bool cursor_visible = true;
 
-// ── Input line buffer ───────────────────────────────────────
-static char line_buf[256];
-static int  line_len;
-
 // ── VT100 output parser state ───────────────────────────────
 enum { S_NORMAL, S_ESC, S_CSI_PARAM };
 static int csi_state = S_NORMAL;
@@ -168,39 +164,15 @@ static void handle_output(char *buf, int n)
 
 static void handle_input(char *buf, int n, int pty_fd, int ash_pid)
 {
-    struct termios term;
-    bool is_cooked = (ioctl(pty_fd, TCGETS, &term) == 0) && (term.c_lflag & ICANON);
-
+    // Raw passthrough: ash (FEATURE_EDITING=y) handles all line editing, echo, ^C.
+    // We just forward keyboard bytes to the PTY master and let ash do the rest.
     for (int i = 0; i < n; i++) {
         char c = buf[i];
-
-        if (!is_cooked) {
-            write(pty_fd, &c, 1);
-            continue;
+        if (c == '\x03') {
+            // ^C → send SIGINT directly (ash handles it even in raw mode)
+            kill(ash_pid, SIGINT);
         }
-
-        // Cooked mode with line editing
-        if (c == '\r' || c == '\n') {
-            line_buf[line_len++] = '\n';
-            write(pty_fd, line_buf, line_len);
-            line_len = 0;
-            output_char('\r'); output_char('\n');
-        } else if (c == '\x7f' || c == '\b') {
-            if (line_len > 0) {
-                line_len--;
-                if (term_col > 0) term_col--;
-                put_glyph(term_col, term_row, fg, bg, ' ');
-            }
-        } else if (c == '\x03') {
-            if (term.c_lflag & ISIG)
-                kill(ash_pid, SIGINT);
-        } else if (c >= ' ') {
-            if (line_len < (int)sizeof(line_buf) - 1) {
-                line_buf[line_len++] = c;
-                output_char(c);
-            }
-        }
-        // \x04 (Ctrl-D) on empty line: ignored in V1 (ash exits on EOF)
+        write(pty_fd, &c, 1);
     }
 }
 
@@ -230,20 +202,15 @@ int main(void)
     int tty_fd = open("/dev/tty", O_RDONLY);
     if (tty_fd < 0) { exec(ASH_PATH, ash_argv, environ); return 1; }
 
-    // 2. Try framebuffer — only do PTY+fb path if it's usable
+    // 2. Try framebuffer
     int fb_fd = open("/dev/fb", O_RDWR);
-    int has_fb = 0;
-    if (fb_fd >= 0) {
-        read(fb_fd, &fb_info, sizeof(fb_info));
-        if (fb_info.width > 0) {
-            fb = mmap(NULL, fb_info.height * fb_info.stride,
-                      PROT_READ | PROT_WRITE, MAP_SHARED, fb_fd, 0);
-            has_fb = (fb_info.width > 0 && (int64_t)(intptr_t)fb >= 0);
-        }
-    }
+    if (fb_fd < 0) { dup2(tty_fd, 0); close(tty_fd); exec(ASH_PATH, ash_argv, environ); return 1; }
 
-    if (!has_fb) {
-        // Headless: run ash directly on TTY (serial+keyboard)
+    read(fb_fd, &fb_info, sizeof(fb_info));
+    fb = mmap(NULL, fb_info.height * fb_info.stride,
+              PROT_READ | PROT_WRITE, MAP_SHARED, fb_fd, 0);
+    if (fb_info.width == 0 || (int64_t)(intptr_t)fb < 0) {
+        // No fb — run ash directly on TTY
         if (fb_fd >= 0) close(fb_fd);
         dup2(tty_fd, 0); close(tty_fd);
         exec(ASH_PATH, ash_argv, environ);
@@ -255,13 +222,16 @@ int main(void)
     term_cols = fb_info.width / font->width;
     term_rows = fb_info.height / font->height;
 
-    // 3. PTY master + slave
+    // 3. Open serial for headless echo
+    int serial_fd = open("/dev/serial", O_WRONLY);
+
+    // 4. PTY
     int pty_fd = open("/dev/ptmx", O_RDWR);
     if (pty_fd < 0) { close(tty_fd); close(fb_fd); exec(ASH_PATH, ash_argv, environ); return 1; }
     int slave = open("/dev/pts0", O_RDWR);
     if (slave < 0) { close(pty_fd); close(tty_fd); close(fb_fd); exec(ASH_PATH, ash_argv, environ); return 1; }
 
-    // 4. Fork ash
+    // 5. Fork ash
     int ash_pid = fork();
     if (ash_pid == 0) {
         dup2(slave, 0); dup2(slave, 1); dup2(slave, 2);
@@ -271,7 +241,7 @@ int main(void)
     }
     close(slave);
 
-    // 5. Main loop
+    // 6. Main loop — mirror fb output to serial for headless
     struct pollfd fds[2] = {{.fd = tty_fd, .events = POLLIN}, {.fd = pty_fd, .events = POLLIN}};
     char buf[256];
     while (1) {
@@ -282,8 +252,10 @@ int main(void)
         }
         if (fds[1].revents & POLLIN) {
             int n = read(pty_fd, buf, sizeof(buf));
-            if (n > 0) handle_output(buf, n);
-            else if (n == 0) break;
+            if (n > 0) {
+                handle_output(buf, n);
+                if (serial_fd >= 0) write(serial_fd, buf, n);  // mirror to serial
+            } else if (n == 0) break;
             else if (errno == EINTR) continue; else break;
         }
     }
