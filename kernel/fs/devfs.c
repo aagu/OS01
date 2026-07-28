@@ -10,6 +10,7 @@
 #include <kernel/task.h>
 #include <kernel/poll.h>
 #include <kernel/file.h>
+#include <kernel/pty.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
@@ -335,15 +336,27 @@ static int tty_magic_open(const char *name, file_t **out_file)
     if (strcmp(name, "/dev/tty") != 0) return -ENOSYS;
 
     void *target = NULL;
-    if (current->ctty_type == CTTY_PTY)
-        target = current->ctty;
-    else
-        target = keyboard_get_tty();
+    if (current->ctty_type == CTTY_PTY) {
+        // PTY slave: create FD_PTY_SLAVE file directly (I/O goes through
+        // pipe_read_internal/pipe_write_internal, not devfs callbacks)
+        pty_t *pty = (pty_t *)current->ctty;
+        if (!pty || !pty->allocated) return -ENXIO;
+        file_t *f = file_alloc();
+        if (!f) return -ENOMEM;
+        f->type = FD_PTY_SLAVE;
+        f->pty = pty;
+        f->flags = O_RDWR;
+        *out_file = f;
+        return 0;
+    }
+
+    // Physical TTY: fall through to device table lookup
+    target = keyboard_get_tty();
 
     for (int i = 0; i < device_count; i++) {
         if (devices[i].private_data == target && devices[i].type == VFS_CHRDEV
             && devices[i].registered) {
-            vfs_node_t *node = calloc(1, sizeof(vfs_node_t));  // NOT vfs_node_alloc()
+            vfs_node_t *node = calloc(1, sizeof(vfs_node_t));
             if (!node) return -ENOMEM;
             node->type = VFS_CHRDEV;
             node->fs_data = (void *)(uintptr_t)i;

@@ -12,7 +12,7 @@ struct file;
 struct vma;
 
 #define DEVFS_NAME_MAX    32
-#define DEVFS_MAX_DEVICES 16
+#define DEVFS_MAX_DEVICES 32
 
 // ── Device operations table ─────────────────────────────────
 // open:  returns a custom file_t.  Return -ENOSYS to fall back

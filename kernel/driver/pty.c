@@ -133,7 +133,16 @@ static int ptmx_open(const char *name, file_t **out_file)
     slave_name[0] = 'p'; slave_name[1] = 't'; slave_name[2] = 's';
     slave_name[3] = '0' + pty->index;
     slave_name[4] = '\0';
-    devfs_register_chrdev(slave_name, pty, &pty_slave_ops);
+    int rc = devfs_register_chrdev(slave_name, pty, &pty_slave_ops);
+    if (rc < 0) {
+        // Rollback: free pipes and release slot
+        if (pty->master_to_slave) pipe_free(pty->master_to_slave);
+        if (pty->slave_to_master) pipe_free(pty->slave_to_master);
+        pty->master_to_slave = NULL;
+        pty->slave_to_master = NULL;
+        pty->allocated = false;
+        return rc;
+    }
 
     file_t *f = file_alloc();
     if (!f) return -ENOMEM;
