@@ -1511,7 +1511,7 @@ void task_init()
     }
 
     // pid_counter starts at 1 → first user task becomes PID=1.
-    int64_t init_pid = spawn_user_task("/bin/init", NULL);
+    int64_t init_pid = spawn_user_task("/terminal.elf", NULL);
     debug_task("init: spawned user-space init, pid=%d\n", (int)init_pid);
 
     // Spawn the deferred-free reaper kthread BEFORE activating the
