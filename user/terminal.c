@@ -208,35 +208,51 @@ static void handle_input(char *buf, int n, int pty_fd, int ash_pid)
 //  Main
 // ═══════════════════════════════════════════════════════════
 
+#include <sys/syscall.h>  // SYS_putchar for early debug
+
 #define ASH_PATH "/bin/busybox"
+
+// Early debug: write a string to serial via kernel putchar syscall
+static void dbg(const char *s) {
+    while (*s) syscall(SYS_putchar, (uint64_t)*s++, 0, 0);
+}
 
 int main(void)
 {
     char *ash_argv[] = { "ash", NULL };
 
-    // 1. Open physical TTY BEFORE ctty is set (CTTY_NONE → phys TTY)
+    dbg("\n[terminal] starting...\n");
+
+    // 1. Open physical TTY BEFORE ctty is set (CTTY_NONE -> phys TTY)
     int tty_fd = open("/dev/tty", O_RDONLY);
-    if (tty_fd < 0) { write(2, "terminal: /dev/tty\n", 19); return 1; }
+    if (tty_fd < 0) {
+        dbg("[terminal] /dev/tty open failed\n");
+        exec(ASH_PATH, ash_argv, NULL);
+        return 1;
+    }
+    dbg("[terminal] /dev/tty ok\n");
 
     // 2. Open framebuffer — may not exist (DISPLAY=none)
     int fb_fd = open("/dev/fb", O_RDWR);
     if (fb_fd < 0) {
-        write(2, "terminal: no fb, fallback to ash\n", 34);
+        dbg("[terminal] no /dev/fb, fallback ash\n");
         exec(ASH_PATH, ash_argv, NULL);
         return 1;
     }
+    dbg("[terminal] /dev/fb ok\n");
 
     read(fb_fd, &fb_info, sizeof(fb_info));
     fb = mmap(NULL, fb_info.height * fb_info.stride,
               PROT_READ | PROT_WRITE, MAP_SHARED, fb_fd, 0);
     if (fb_info.width == 0 || fb_info.height == 0 ||
         (int64_t)(intptr_t)fb < 0) {
-        write(2, "terminal: fb unusable, fallback to ash\n", 40);
+        dbg("[terminal] fb unusable, fallback ash\n");
         exec(ASH_PATH, ash_argv, NULL);
         return 1;
     }
 
     ioctl(fb_fd, FBIOSURRENDER, NULL);
+    dbg("[terminal] fb mapped, surrendered\n");
 
     // Setup PSF2 font
     font = (psf2_t *)_binary_terminal_font_psf_start;
@@ -246,11 +262,19 @@ int main(void)
 
     // 3. Open PTY master
     int pty_fd = open("/dev/ptmx", O_RDWR);
-    if (pty_fd < 0) { write(2, "terminal: /dev/ptmx\n", 19); return 1; }
+    if (pty_fd < 0) {
+        dbg("[terminal] /dev/ptmx failed\n");
+        exec(ASH_PATH, ash_argv, NULL); return 1;
+    }
+    dbg("[terminal] /dev/ptmx ok\n");
 
     // 4. Open slave → sets ctty=PTY for this session + fork children
     int slave = open("/dev/pts0", O_RDWR);
-    if (slave < 0) { write(2, "terminal: /dev/pts0\n", 19); return 1; }
+    if (slave < 0) {
+        dbg("[terminal] /dev/pts0 failed\n");
+        exec(ASH_PATH, ash_argv, NULL); return 1;
+    }
+    dbg("[terminal] ptmx+pts0 ok, fork ash\n");
 
     // 5. Fork ash (child inherits ctty=PTY)
     int ash_pid = fork();
