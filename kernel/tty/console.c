@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <driver/serial.h>
 
 // font is a global in kernel/kernel/printk.c
 extern psf2_t *font;
@@ -20,6 +21,12 @@ static int  term_blink_counter = 0;       // ticks since last toggle
 static unsigned int term_fg = WHITE;
 static unsigned int term_bg = BLACK;
 static bool term_initialized = false;
+
+// ── Framebuffer surrender flag ─────────────────────────────
+// Set to false by console_surrender_fb() when userspace takes
+// over the framebuffer.  After surrender, console_putchar
+// writes only to the serial port.
+static bool console_fb_active = true;
 
 // ═══════════════════════════════════════════════════════
 //  VT100 CSI state machine
@@ -173,6 +180,12 @@ void console_putchar(char c)
 {
     if (!term_initialized) return;
 
+    // If framebuffer surrendered, divert to serial only
+    if (!console_fb_active) {
+        write_serial(c);
+        return;
+    }
+
     switch (cs) {
     case CSI_NORMAL:
         if (c == '\x1b') {
@@ -325,4 +338,13 @@ void console_init(void)
     cs = CSI_NORMAL;
     cs_param = 0;
     cs_qmark = false;
+}
+
+// ── Surrender framebuffer to userspace ──────────────────────
+// Called from /dev/fb FBIOSURRENDER ioctl when terminal.elf
+// takes over the framebuffer.  After this, console_putchar
+// writes to serial only.
+void console_surrender_fb(void)
+{
+    console_fb_active = false;
 }

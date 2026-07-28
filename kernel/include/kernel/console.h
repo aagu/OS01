@@ -16,4 +16,9 @@ void console_putchar(char c);
 // Safe to call from IRQ context.
 void console_blink_tick(void);
 
+// Surrender the framebuffer to userspace.
+// After this call, console_putchar diverts output to serial only.
+// Called by /dev/fb FBIOSURRENDER ioctl.
+void console_surrender_fb(void);
+
 #endif

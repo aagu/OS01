@@ -58,4 +58,8 @@ uint32_t devfs_poll(struct vfs_node *node, struct poll_table *pt);
 int devfs_open_node(struct vfs_node *node, const char *path, int flags,
                     struct file **out);
 
+// Dispatch ioctl to a devfs device node — resolves node->fs_data index
+// to device, calls device's ops->ioctl if present.
+int devfs_ioctl_node(struct vfs_node *node, int cmd, void *arg);
+
 #endif

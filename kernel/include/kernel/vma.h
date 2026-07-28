@@ -18,6 +18,7 @@ typedef struct mm_struct mm_t;
 #define VM_MAYSHARE  0x10
 #define VM_ANON      0x20   // anonymous mapping (no backing file)
 #define VM_GROWSDOWN 0x40   // reserved, not implemented
+#define VM_IO        0x80   // MMIO region (no COW, no file-backed demand paging)
 
 // ── PROT_* constants (kernel-accessible copy of libc mman.h) ─
 #define PROT_NONE  0x0

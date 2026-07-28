@@ -98,6 +98,9 @@ void         fd_close(files_t *fs, int fd);
 int64_t      fd_read(file_t *f, void *buf, uint64_t size);
 int64_t      fd_write(file_t *f, const void *buf, uint64_t size);
 
+// ioctl through fd — dispatches by file type
+int64_t      fd_ioctl(file_t *f, int cmd, void *arg);
+
 // Create a pipe — fills fds[0] (read end), fds[1] (write end)
 int64_t       do_pipe(int *user_fds);
 

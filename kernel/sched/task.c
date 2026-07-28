@@ -1161,6 +1161,17 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                         if (!(pte & (PAGE_Present | PAGE_PROTNONE)))
                             continue;
 
+                        // Compute VA from page table indices
+                        uint64_t vaddr = ((uint64_t)l4 << 39)
+                                       | ((uint64_t)l3 << 30)
+                                       | ((uint64_t)l2 << 21)
+                                       | ((uint64_t)l1 << 12);
+                        vma_t *vma = vma_find(parent_mm, vaddr);
+                        if (vma && (vma->vm_flags & VM_IO)) {
+                            child_pte[l1] = pte;  // share MMIO PTE, no COW
+                            continue;
+                        }
+
                         if (pte & PAGE_COW) {
                             // Already COW-shared (fork-of-fork)
                             page_cow_get(pte & PAGE_4K_MASK);
@@ -1182,6 +1193,17 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                     continue;
                 }
                 uint64_t phys = pml2e & PAGE_2M_MASK;
+                // VM_IO guard: skip MMIO huge pages, share directly
+                {
+                    uint64_t vaddr_2m = ((uint64_t)l4 << 39)
+                                       | ((uint64_t)l3 << 30)
+                                       | ((uint64_t)l2 << 21);
+                    vma_t *vm = vma_find(parent_mm, vaddr_2m);
+                    if (vm && (vm->vm_flags & VM_IO)) {
+                        child_pml2[l2] = pml2e;
+                        continue;
+                    }
+                }
                 struct Page *s = alloc_pages(ZONE_NORMAL, 1, 0);
                 if (s) {
                     uint64_t dst = (uint64_t)Phy_To_Virt(s->phy_address);

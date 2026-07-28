@@ -493,7 +493,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 				return;
 			}
 
-			if (vma->vm_file) {
+			if (vma->vm_file && !(vma->vm_flags & VM_IO)) {
 				uint64_t phys = alloc_4k_page();
 				if (!phys) {
 					kill_current_user_task(regs);
@@ -1479,88 +1479,28 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         }
         break;
     }
-    case SYS_ioctl: {
-        // ioctl(int fd, unsigned long request, uint64_t arg) → 0 / -errno
-        int fd = (int)regs->rdi;
-        uint64_t request = regs->rsi;
-        uint64_t arg = regs->rdx;
+			case SYS_ioctl: {
+			    // ioctl(int fd, unsigned long request, void *arg) -> 0 / -errno
+			    int fd = (int)regs->rdi;
+			    int request = (int)regs->rsi;
+			    void *arg = (void *)regs->rdx;
 
-        if (fd < 0 || fd >= NOFILE || !current->files ||
-            !current->files->fd[fd]) {
-            regs->rax = -EBADF;
-            break;
-        }
+			    if (fd < 0 || fd >= NOFILE || !current->files ||
+			        !current->files->fd[fd]) {
+			        regs->rax = -EBADF;
+			        break;
+			    }
+			    file_t *f = current->files->fd[fd];
 
-        file_t *f = current->files->fd[fd];
+			    // User pointer validation
+			    if ((uint64_t)arg >= current->addr_limit) {
+			        regs->rax = -EFAULT;
+			        break;
+			    }
 
-        switch (request) {
-        case TIOCGWINSZ: {
-            // Return terminal window size
-            struct winsize *ws = (struct winsize *)arg;
-            if ((uint64_t)ws >= current->addr_limit) {
-                regs->rax = -EFAULT;
-                break;
-            }
-            ws->ws_row = 24;
-            ws->ws_col = 80;
-            ws->ws_xpixel = 0;
-            ws->ws_ypixel = 0;
-            regs->rax = 0;
-            break;
-        }
-        case TCGETS: {
-            struct termios *tio = (struct termios *)arg;
-            if ((uint64_t)tio >= current->addr_limit) {
-                regs->rax = -EFAULT;
-                break;
-            }
-            tty_t *tty = get_dev_tty();
-            if (!tty) { regs->rax = -ENOTTY; break; }
-            regs->rax = tty_ioctl(tty, (int)request, tio);
-            break;
-        }
-        case 0x541B: { // FIONREAD — bytes available to read
-            int *n = (int *)arg;
-            if ((uint64_t)n >= current->addr_limit) {
-                regs->rax = -EFAULT;
-                break;
-            }
-            tty_t *tty = get_dev_tty();
-            if (!tty) { regs->rax = -ENOTTY; break; }
-            regs->rax = tty_ioctl(tty, (int)request, n);
-            break;
-        }
-        case TCSETS:
-        case TCSETSW:
-        case TCSETSF: {
-            struct termios *tio = (struct termios *)arg;
-            if ((uint64_t)tio >= current->addr_limit) {
-                regs->rax = -EFAULT;
-                break;
-            }
-            tty_t *tty = get_dev_tty();
-            if (!tty) { regs->rax = -ENOTTY; break; }
-            regs->rax = tty_ioctl(tty, (int)request, tio);
-            break;
-        }
-        case TIOCGPGRP: {
-            regs->rax = (int64_t)current->pid;
-            break;
-        }
-        case TIOCSPGRP: {
-            regs->rax = 0;
-            break;
-        }
-        case TIOCNOTTY: {
-            regs->rax = 0;
-            break;
-        }
-        default:
-            regs->rax = -ENOTTY;
-            break;
-        }
-        break;
-    }
+			    regs->rax = fd_ioctl(f, request, arg);
+			    break;
+			}
     case SYS_getdents64: {
         // getdents64(int fd, struct linux_dirent64 *buf, unsigned int count)
         // → bytes read / -errno

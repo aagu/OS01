@@ -28,6 +28,7 @@
 #include <kernel/subsys.h>
 #include <kernel/arch/subsys.h>
 #include <kernel/console.h>
+#include <kernel/fb.h>
 
 // ── Stack canary ─────────────────────────────────────────────
 
@@ -94,18 +95,6 @@ void __stack_chk_fail(void)
     }
     while (1) arch_cpu_halt();
     __builtin_unreachable();
-}
-
-// ── /dev/fb write handler ──────────────────────────────────
-// Writes characters one-by-one to the framebuffer via color_printk.
-static int fb_dev_write(struct vfs_node *node, uint64_t offset,
-                        uint64_t size, void *buffer)
-{
-    (void)node; (void)offset;
-    if (!buffer || size == 0) return 0;
-    for (uint64_t i = 0; i < size; i++)
-        color_printk(WHITE, BLACK, "%c", ((char *)buffer)[i]);
-    return (int)size;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -187,9 +176,7 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     static const struct devfs_ops keyboard_ops = {
         .read = keyboard_devfs_read,
     };
-    static const struct devfs_ops fb_ops = {
-        .write = fb_dev_write,
-    };
+    extern const struct devfs_ops fb_ops;
     devfs_register_chrdev("keyboard", NULL, &keyboard_ops);
     devfs_register_chrdev("fb", NULL, &fb_ops);
 

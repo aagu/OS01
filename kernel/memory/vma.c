@@ -70,6 +70,11 @@ void vma_free_all(mm_t *mm)
     while (mm->vma_list.next != &mm->vma_list) {
         vma_t *v = container_of(mm->vma_list.next, vma_t, list);
 
+        if (v->vm_flags & VM_IO) {
+            vma_remove(mm, v);
+            continue;
+        }
+
         // If we have a valid pml4, unmap the physical pages.
         // If pml4 is NULL (shouldn't happen), skip unmap but still
         // free the VMA node + vfs_node_put to avoid leaks.
@@ -282,11 +287,53 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     if (rc) return rc;
     map_flags_to_vm((int)flags, &vm_flags_base);
 
-    // ── 4. File mapping setup ──────────────────────────
+    // ── 4. Check for device/file mmap ──────────────────
     vfs_node_t *file_node = NULL;
     if (!(flags & MAP_ANONYMOUS)) {
         file_t *file = current->files->fd[fd];
+        if (!file || !file->node) {
+            if ((int64_t)fd != -1) return -EBADF;
+            return -EINVAL;
+        }
         file_node = vfs_node_get(file->node);
+
+        // Device node with mmap handler → device path.
+        // The mmap macro (uint64_t*) conflicts with ops->mmap field name.
+        // Save the callback pointer before undefining, then restore macro.
+        #undef mmap
+        int (*_dev_mmap)(struct vfs_node *, struct vma *) =
+            (file_node && file_node->ops) ? file_node->ops->mmap : NULL;
+        #define mmap uint64_t*
+
+        if (_dev_mmap) {
+            if (!(flags & MAP_SHARED))
+                { vfs_node_put(file_node); return -EINVAL; }
+
+            // Pre-allocate VMA for the device handler to fill PTEs
+            vma_t *vma = (vma_t *)kmalloc(sizeof(vma_t));
+            if (!vma) { vfs_node_put(file_node); return -ENOMEM; }
+            list_init(&vma->list);
+            vma->vm_start     = addr;
+            vma->vm_end       = addr + length;
+            vma->vm_flags     = vm_flags_base | VM_IO;
+            vma->vm_page_prot = page_prot;
+            vma->vm_pgoff     = offset >> PAGE_4K_SHIFT;
+            vma->vm_file      = file_node;  // handler may clear this
+
+            int mmap_rc = _dev_mmap(file_node, (struct vma *)vma);
+
+            if (mmap_rc < 0) {
+                // Handler failed — vma not inserted, clean up
+                vfs_node_put(file_node);
+                kfree(vma);
+                return mmap_rc;
+            }
+            // Handler filled PTEs (e.g. fb_mmap eager-fills + flush_tlb +
+            //   vfs_node_put(vma->vm_file); vma->vm_file = NULL)
+            vma_insert(current->mm, vma);
+            return (int64_t)vma->vm_start;
+        }
+        // Normal file mapping → fall through to step 5
     }
 
     // ── 5. Allocate VMA ────────────────────────────────
