@@ -29,6 +29,7 @@
 #include <kernel/arch/subsys.h>
 #include <kernel/console.h>
 #include <kernel/fb.h>
+#include <kernel/pty.h>
 
 // ── Stack canary ─────────────────────────────────────────────
 
@@ -173,6 +174,8 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     devfs_init();                   // mount /dev + register chrdev
                                     // ★ MUST be before any devfs_register_* call
 
+    pty_init();                     // init PTY table + register /dev/ptmx
+
     static const struct devfs_ops keyboard_ops = {
         .read = keyboard_devfs_read,
     };
@@ -233,6 +236,12 @@ int kernel_main(struct BOOT_INFO *bootinfo)
         tty_set_dev_tty(console);        // /dev/tty read/write → TTY
         serial_printk("tty: console TTY created\n");
     }
+
+    // Register /dev/tty (magic → controlling terminal) and /dev/tty0
+    // (direct physical console) AFTER keyboard_set_tty so that
+    // keyboard_get_tty() returns the correct pointer for private_data.
+    devfs_register_chrdev("tty",  keyboard_get_tty(), &tty_magic_ops);
+    devfs_register_chrdev("tty0", keyboard_get_tty(), &tty_phys_ops);
 
     vfs_debug_list("/dev");
 

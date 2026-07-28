@@ -5,7 +5,9 @@
 #include <kernel/arch/cpu.h>
 #include <kernel/slab.h>
 #include <driver/serial.h>
+#include <driver/keyboard.h>
 #include <kernel/tty.h>
+#include <kernel/task.h>
 #include <kernel/poll.h>
 #include <kernel/file.h>
 #include <errno.h>
@@ -320,10 +322,49 @@ static const struct devfs_ops serial_ops = {
     .write = serial_write,
 };
 
-static const struct devfs_ops tty_ops = {
+const struct devfs_ops tty_phys_ops = {
     .read  = dev_tty_read,
     .write = dev_tty_write,
     .poll  = dev_tty_poll,
+    .ioctl = tty_phys_ioctl,
+};
+
+// ── /dev/tty magic: opens the controlling terminal ────────────
+static int tty_magic_open(const char *name, file_t **out_file)
+{
+    if (strcmp(name, "/dev/tty") != 0) return -ENOSYS;
+
+    void *target = NULL;
+    if (current->ctty_type == CTTY_PTY)
+        target = current->ctty;
+    else
+        target = keyboard_get_tty();
+
+    for (int i = 0; i < device_count; i++) {
+        if (devices[i].private_data == target && devices[i].type == VFS_CHRDEV
+            && devices[i].registered) {
+            vfs_node_t *node = calloc(1, sizeof(vfs_node_t));  // NOT vfs_node_alloc()
+            if (!node) return -ENOMEM;
+            node->type = VFS_CHRDEV;
+            node->fs_data = (void *)(uintptr_t)i;
+            node->ops = &devfs_ops;
+            node->refcount = 1;
+            *out_file = file_alloc();
+            if (!*out_file) { free(node); return -ENOMEM; }
+            (*out_file)->type = FD_DEV;
+            (*out_file)->node = node;
+            return 0;
+        }
+    }
+    return -ENXIO;
+}
+
+const struct devfs_ops tty_magic_ops = {
+    .open  = tty_magic_open,
+    .read  = dev_tty_read,
+    .write = dev_tty_write,
+    .poll  = dev_tty_poll,
+    .ioctl = tty_phys_ioctl,
 };
 
 void devfs_init(void)
@@ -345,7 +386,9 @@ void devfs_init(void)
     devfs_register_chrdev("zero",   NULL, &zero_ops);
     devfs_register_chrdev("random", NULL, &random_ops);
     devfs_register_chrdev("serial", NULL, &serial_ops);
-    devfs_register_chrdev("tty",    NULL, &tty_ops);
+    // NOTE: /dev/tty and /dev/tty0 are registered in main.c
+    // after keyboard_set_tty() so keyboard_get_tty() returns
+    // the correct pointer.
 }
 
 // ── Public API ──────────────────────────────────────────────
@@ -391,4 +434,13 @@ int devfs_register_blkdev(const char *name, block_device_t *dev)
 
     debug_fs("devfs: registered blkdev '%s'\n", name);
     return 0;
+}
+
+// ── devfs_get_private — retrieve private_data from a devfs node ──
+void *devfs_get_private(struct vfs_node *node)
+{
+    int idx = (int)(uintptr_t)node->fs_data;
+    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+        return NULL;
+    return devices[idx].private_data;
 }

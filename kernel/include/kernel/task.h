@@ -151,6 +151,10 @@ typedef struct task_struct
 
     // ── Signal handling ────────────────────────────────
     struct sigaction sighand[NSIG]; // registered signal handlers
+
+    // ── Controlling terminal ─────────────────────────────
+    enum ctty_type { CTTY_NONE = 0, CTTY_PHYS, CTTY_PTY } ctty_type;
+    void *ctty;  // → tty_t (CTTY_PHYS) or pty_t (CTTY_PTY)
 } task_t;
 
 union task_union
@@ -174,6 +178,8 @@ thread_t init_thread;
     .counter = 0,                     \
     .signal = 0,                      \
     .priority = 2,                    /* idle task quantum = 20 ms */ \
+    .ctty_type = CTTY_NONE,           \
+    .ctty = NULL,                     \
 }
 
 union task_union init_task_union __attribute__((__section__(".data.init_task"))) = {INIT_TASK(init_task_union.task)};

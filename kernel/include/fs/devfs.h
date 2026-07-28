@@ -47,6 +47,11 @@ int devfs_register_blkdev(const char *name, struct block_device *dev);
 // Initialize devfs and mount at /dev
 void devfs_init(void);
 
+// TTY device ops tables — defined in devfs.c, registered in main.c
+// after keyboard_set_tty() so keyboard_get_tty() returns the correct pointer.
+extern const struct devfs_ops tty_magic_ops;
+extern const struct devfs_ops tty_phys_ops;
+
 // Poll a devfs device node — resolves node->fs_data index to device,
 // calls device's poll callback or returns always-ready if none.
 uint32_t devfs_poll(struct vfs_node *node, struct poll_table *pt);
@@ -61,5 +66,8 @@ int devfs_open_node(struct vfs_node *node, const char *path, int flags,
 // Dispatch ioctl to a devfs device node — resolves node->fs_data index
 // to device, calls device's ops->ioctl if present.
 int devfs_ioctl_node(struct vfs_node *node, int cmd, void *arg);
+
+// Retrieve private_data from a devfs node (e.g. pty_t* for PTY slave nodes).
+void *devfs_get_private(struct vfs_node *node);
 
 #endif

@@ -1316,6 +1316,10 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
     tsk->parent      = current;
     tsk->exit_code   = 0;
 
+    // Inherit controlling terminal from parent
+    tsk->ctty_type = current->ctty_type;
+    tsk->ctty      = current->ctty;
+
     list_init(&tsk->list);
     list_init(&tsk->wait_list);
     list_init(&tsk->io_wait_node);
