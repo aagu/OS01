@@ -156,12 +156,10 @@ static void output_char(char c)
     if (term_row >= term_rows) fb_scroll();
 }
 
-static void handle_output(char *buf, int n, int serial_fd)
+static void handle_output(char *buf, int n)
 {
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < n; i++)
         output_char(buf[i]);
-        if (serial_fd >= 0) write(serial_fd, &buf[i], 1);
-    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -210,6 +208,11 @@ static void handle_input(char *buf, int n, int pty_fd, int ash_pid)
 //  Main
 // ═══════════════════════════════════════════════════════════
 
+#include <poll.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <termios.h>
 #include <sys/syscall.h>  // SYS_putchar for early debug
 
 #define ASH_PATH "/bin/busybox"
@@ -223,108 +226,70 @@ int main(void)
 {
     char *ash_argv[] = { "ash", NULL };
 
-    dbg("\n[terminal] starting...\n");
-
-    // 1. Open physical TTY BEFORE ctty is set (CTTY_NONE -> phys TTY)
+    // 1. Open /dev/tty
     int tty_fd = open("/dev/tty", O_RDONLY);
-    if (tty_fd < 0) {
-        dbg("[terminal] /dev/tty open failed\n");
-        exec(ASH_PATH, ash_argv, NULL);
-        return 1;
-    }
-    dbg("[terminal] /dev/tty ok\n");
+    if (tty_fd < 0) { exec(ASH_PATH, ash_argv, environ); return 1; }
 
-    // 2. Open framebuffer — may not exist (DISPLAY=none)
+    // 2. Try framebuffer — only do PTY+fb path if it's usable
     int fb_fd = open("/dev/fb", O_RDWR);
-    if (fb_fd < 0) {
-        dbg("[terminal] no /dev/fb, fallback ash\n");
-        exec(ASH_PATH, ash_argv, NULL);
-        return 1;
+    int has_fb = 0;
+    if (fb_fd >= 0) {
+        read(fb_fd, &fb_info, sizeof(fb_info));
+        if (fb_info.width > 0) {
+            fb = mmap(NULL, fb_info.height * fb_info.stride,
+                      PROT_READ | PROT_WRITE, MAP_SHARED, fb_fd, 0);
+            has_fb = (fb_info.width > 0 && (int64_t)(intptr_t)fb >= 0);
+        }
     }
-    dbg("[terminal] /dev/fb ok\n");
 
-    read(fb_fd, &fb_info, sizeof(fb_info));
-    fb = mmap(NULL, fb_info.height * fb_info.stride,
-              PROT_READ | PROT_WRITE, MAP_SHARED, fb_fd, 0);
-    if (fb_info.width == 0 || fb_info.height == 0 ||
-        (int64_t)(intptr_t)fb < 0) {
-        dbg("[terminal] fb unusable, fallback ash\n");
-        exec(ASH_PATH, ash_argv, NULL);
+    if (!has_fb) {
+        // Headless: run ash directly on TTY (serial+keyboard)
+        if (fb_fd >= 0) close(fb_fd);
+        dup2(tty_fd, 0); close(tty_fd);
+        exec(ASH_PATH, ash_argv, environ);
         return 1;
     }
 
     ioctl(fb_fd, FBIOSURRENDER, NULL);
-    dbg("[terminal] fb mapped, surrendered\n");
-
-    // Setup PSF2 font
     font = (psf2_t *)_binary_terminal_font_psf_start;
     term_cols = fb_info.width / font->width;
     term_rows = fb_info.height / font->height;
-    term_col = 0; term_row = 0;
 
-    // 3. Open PTY master
+    // 3. PTY master + slave
     int pty_fd = open("/dev/ptmx", O_RDWR);
-    if (pty_fd < 0) {
-        dbg("[terminal] /dev/ptmx failed\n");
-        exec(ASH_PATH, ash_argv, NULL); return 1;
-    }
-    dbg("[terminal] /dev/ptmx ok\n");
-
-    // 4. Open slave → sets ctty=PTY for this session + fork children
+    if (pty_fd < 0) { close(tty_fd); close(fb_fd); exec(ASH_PATH, ash_argv, environ); return 1; }
     int slave = open("/dev/pts0", O_RDWR);
-    if (slave < 0) {
-        dbg("[terminal] /dev/pts0 failed\n");
-        exec(ASH_PATH, ash_argv, NULL); return 1;
-    }
-    dbg("[terminal] ptmx+pts0 ok, fork ash\n");
+    if (slave < 0) { close(pty_fd); close(tty_fd); close(fb_fd); exec(ASH_PATH, ash_argv, environ); return 1; }
 
-    // 5. Fork ash (child inherits ctty=PTY)
+    // 4. Fork ash
     int ash_pid = fork();
     if (ash_pid == 0) {
         dup2(slave, 0); dup2(slave, 1); dup2(slave, 2);
         close(slave); close(pty_fd); close(tty_fd); close(fb_fd);
         exec(ASH_PATH, ash_argv, environ);
-        // exec failed — write to stderr (fd 2 = slave) then exit
         exit(1);
     }
     close(slave);
-    dbg("terminal: entering main loop\n");
 
-    // 6. Main loop — also open /dev/serial for headless output echo
-    int serial_fd = open("/dev/serial", O_WRONLY);
-
-    // 6. Main loop
+    // 5. Main loop
     struct pollfd fds[2] = {{.fd = tty_fd, .events = POLLIN}, {.fd = pty_fd, .events = POLLIN}};
     char buf[256];
-    int exit_code = 0;
-
     while (1) {
-        int ret = poll(fds, 2, -1);
-        if (ret < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
+        if (poll(fds, 2, -1) < 0) { if (errno == EINTR) continue; break; }
         if (fds[0].revents & POLLIN) {
             int n = read(tty_fd, buf, sizeof(buf));
-            if (n > 0) {
-                handle_input(buf, n, pty_fd, ash_pid);
-                if (serial_fd >= 0) write(serial_fd, buf, n);
-            }
+            if (n > 0) handle_input(buf, n, pty_fd, ash_pid);
         }
         if (fds[1].revents & POLLIN) {
             int n = read(pty_fd, buf, sizeof(buf));
-            if (n > 0) handle_output(buf, n, serial_fd);
+            if (n > 0) handle_output(buf, n);
             else if (n == 0) break;
-            else if (errno == EINTR) continue;
-            else break;
+            else if (errno == EINTR) continue; else break;
         }
     }
 
-    // Wait for ash to exit (reap zombie)
-    waitpid(ash_pid, &exit_code, 0);
-
-    // Cleanup
+    waitpid(ash_pid, NULL, 0);
     munmap(fb, fb_info.height * fb_info.stride);
     close(pty_fd); close(tty_fd); close(fb_fd);
-    return exit_code;
+    return 0;
 }
