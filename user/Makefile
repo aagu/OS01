@@ -68,6 +68,20 @@ $(BUILD_DIR)/%.elf: $(OBJ_DIR)/%.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
 	$(LD) $(LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $< -lc
 	$(OBJ_CPY) --strip-debug $@
 
+# ══════════════════════════════════════════════════════════════
+#  terminal.elf — needs embedded font (override pattern rule)
+# ══════════════════════════════════════════════════════════════
+TERMINAL_FONT_OBJ := $(OBJ_DIR)/terminal_font.o
+
+$(BUILD_DIR)/terminal.elf: $(OBJ_DIR)/terminal.o $(CRT0_OBJ) $(SIGRETURN_OBJ) $(TERMINAL_FONT_OBJ) linker.ld
+	@mkdir -p $(dir $@)
+	$(LD) $(LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/terminal.o $(TERMINAL_FONT_OBJ) -lc
+	$(OBJ_CPY) --strip-debug $@
+
+$(TERMINAL_FONT_OBJ): terminal_font.psf
+	@mkdir -p $(dir $@)
+	$(OBJ_CPY) -B i386 -I binary -O elf64-x86-64 terminal_font.psf $@
+
 # ── Clean ──────────────────────────────────────────────────
 clean:
 	rm -rf $(BUILD_DIR) *.elf
