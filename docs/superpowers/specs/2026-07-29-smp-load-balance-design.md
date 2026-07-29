@@ -70,6 +70,28 @@ These must be resolved before or alongside this design:
    sched_notify_remote(tsk);  // after unlock so IPI arrives after enqueue
    ```
 
+4. **`softirq_status` must use atomic operations.**
+   `kernel/softirq/softirq.c:8-11` uses non-atomic `|=` and in
+   `do_softirq` non-atomic `&=` on the global `softirq_status`
+   variable.  Once APs run `ret_from_intr` (after any interrupt — IPI,
+   timer, etc.), multiple CPUs may concurrently set or clear different
+   softirq bits, causing lost updates.  **Fix:** use
+   `__sync_fetch_and_or` / `__sync_fetch_and_and` or `lock orq`/`lock
+   andq` inline asm.
+
+5. **Global timer list (`timer_list_head`) must be spinlock-protected.**
+   `do_timer()` (`kernel/timer/timer.c:27-49`), `add_timer()` (line
+   58-68), and `del_timer()` (line 70-73) traverse and mutate the
+   global `timer_list_head` without any lock.  When two CPUs both enter
+   `do_softirq` → `do_timer` (triggered by `softirq_status`), the
+   concurrent `list_del`/`list_add_to_behind` operations corrupt the
+   linked list.  The PIT handler's lockless read of
+   `timer_list_head.list.next` (`pit.c:49`) also races with
+   `do_timer`'s writes.  **Fix:** add a global `spinlock_T` protecting
+   `timer_list_head` and all `add_timer`/`del_timer`/`do_timer`
+   accesses.  The PIT handler should hold the lock during its peek, or
+   switch to a lockless flag set by `add_timer`.
+
    (The `rq_lock` is a single lock on the remote CPU — no deadlock
    risk with `sched_balance`'s double-lock, because `do_fork` is never
    inside `schedule()`.)
@@ -623,7 +645,10 @@ its vruntime was already behind.
 | File | Change |
 |---|---|
 | `kernel/memory/slab.c` (prereq) | +global spinlock around `kmalloc`/`kfree` |
-| `kernel/sched/task.c` (prereq) | COW fix: replace `flush_tlb()` with `tlb_shootdown()` in `fork_mm_copy()` |
+| `kernel/softirq/softirq.c` (prereq) | atomic `softirq_status` operations (lock orq/andq) |
+| `kernel/timer/timer.c` (prereq) | +spinlock protecting `timer_list_head` |
+| `kernel/driver/pit.c` (prereq) | timer list peek under lock (or lockless flag) |
+| `kernel/sched/task.c` (prereq) | COW: `flush_tlb()` → `tlb_shootdown()` in `fork_mm_copy()` |
 | `kernel/include/kernel/percpu.h` | +`uint32_t nr_running` |
 | `kernel/sched/task.c` | +`sched_pick_cpu()`, +`sched_balance()`, +`sched_notify_remote()`, update `enqueue_task`/`dequeue_task`, update `do_fork()` (CPU selection + fair_start + rq_lock + IPI), update `spawn_user_task()` (CPU selection + rq_lock + IPI), remove `df->cpu=0` override |
 | `libc/include/rbtree.h` | +`rbtree_last`, +`rbtree_prev` declarations |
