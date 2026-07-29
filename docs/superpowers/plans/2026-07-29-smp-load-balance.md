@@ -4,7 +4,7 @@
 
 **Goal:** Enable AP cores to pick up and run tasks, with automatic load balancing using EEVDF's `nr_running` metric and per-schedule pull/steal.
 
-**Architecture:** Three new static functions in `kernel/sched/task.c` — `sched_pick_cpu()` (least-loaded CPU selection at task creation), `sched_notify_remote()` (IPI + need_resched for remote wakeup), `sched_balance()` (tail-steal from busiest CPU with oscillation guard). Two new rbtree functions (`rbtree_last`, `rbtree_prev`) in `libc/rbtree/`. One new field `nr_running` in `percpu_t`. Five prerequisites address existing SMP-unsafe code paths.
+**Architecture:** Four new static functions in `kernel/sched/task.c` — `sched_pick_cpu()` (least-loaded CPU selection at task creation), `sched_notify_remote()` (IPI + need_resched for remote wakeup), `sched_balance()` (tail-steal from busiest CPU with oscillation guard), and a retry-enabled `task_wake()` (lock-hold re-check of `t->cpu`/`t->on_rq` against concurrent migration). Two new rbtree functions (`rbtree_last`, `rbtree_prev`) in `libc/rbtree/`. One new field `nr_running` in `percpu_t`. Five prerequisites address existing SMP-unsafe code paths plus the `task_wake` race.
 
 **Tech Stack:** C (kernel), x86_64 asm (no changes needed), QEMU with `-smp 2+` for testing.
 
@@ -21,6 +21,112 @@
 ---
 
 ## Prerequisites (Phase 1)
+
+### Task 0: Fix task_wake retry-on-migrate race
+
+**Files:**
+- Modify: `kernel/sched/task.c:114-145`
+
+**Interfaces:**
+- Produces: `task_wake()` with lock-hold retry for `t->cpu`/`t->on_rq` migration
+
+**Why now:** `sched_balance` modifies `t->cpu` while holding two `rq_lock`s.
+`task_wake` reads `t->cpu` *before* acquiring `rq_lock`, creating a window
+where the task is enqueued on the wrong CPU's rbtree.  This is a
+prerequisite for T8 (`sched_balance`).
+
+- [ ] **Step 1: Rewrite task_wake with retry pattern**
+
+Replace the existing `task_wake` (line 114-145) with:
+
+```c
+/* ── task_wake: mark RUNNING + enqueue (exported) ─── */
+void task_wake(task_t *t)
+{
+    /*
+     * Never enqueue the idle task — it is always RUNNING on its
+     * CPU and must never appear on a runqueue.
+     */
+    if (t == percpu_data[t->cpu].idle)
+        return;
+
+    t->state = TASK_RUNNING;
+
+retry:
+    /*
+     * Read t->cpu locklessly — sched_balance may change it concurrently.
+     * We re-check both t->cpu and t->on_rq under the acquired rq_lock
+     * to close the race window.
+     */
+    percpu_t *rq = &percpu_data[*(volatile uint32_t *)&t->cpu];
+    uint64_t flags = spin_lock_irqsave(&rq->rq_lock);
+
+    /* Re-check on_rq under lock — sched_balance may have enqueued it */
+    if (t->on_rq) {
+        spin_unlock_irqrestore(&rq->rq_lock, flags);
+        return;
+    }
+
+    /* Re-check t->cpu under lock — sched_balance may have migrated it */
+    if ((uintptr_t)rq != (uintptr_t)&percpu_data[*(volatile uint32_t *)&t->cpu]) {
+        spin_unlock_irqrestore(&rq->rq_lock, flags);
+        goto retry;
+    }
+
+    /* Wakeup boost: prevent starvation by raising vruntime floor */
+    uint64_t wake_vruntime = rq->min_vruntime > EEVDF_LATENCY
+        ? rq->min_vruntime - EEVDF_LATENCY : 0;
+    if (t->vruntime < wake_vruntime)
+        t->vruntime = wake_vruntime;
+
+    enqueue_task(t, rq);
+    t->cpu = rq->cpu_id;  // keep t->cpu in sync with actual rq
+
+    spin_unlock_irqrestore(&rq->rq_lock, flags);
+
+    if ((int)t->cpu != (int)cpu_id())
+        rq->need_resched = 1;
+}
+```
+
+**Key changes:**
+1. `retry` loop: if `t->cpu` changed between lockless read and lock
+   acquire, release lock and retry with the new CPU.
+2. `on_rq` check under lock: if `sched_balance` enqueued the task
+   between our lockless read and lock acquire, we return immediately —
+   the task is already scheduled.
+3. `t->cpu = rq->cpu_id` after enqueue: keeps `t->cpu` consistent with
+   the actual runqueue.  Without this, a subsequent `task_wake` call
+   could enqueue to the wrong CPU.
+4. Volatile reads of `t->cpu` via `*(volatile uint32_t *)&t->cpu`.
+
+- [ ] **Step 2: Build**
+
+```bash
+cd /home/aagu/OS01 && make clean && make -j$(nproc)
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add kernel/sched/task.c
+git commit -m "fix(sched): close task_wake migration race with retry loop
+
+sched_balance modifies t->cpu while holding two rq_locks.
+task_wake read t->cpu before acquiring rq_lock, creating
+a window where the task could be enqueued to the wrong CPU.
+
+Fix: retry pattern — re-read t->cpu and on_rq under lock,
+retry if cpu changed between read and lock acquire.
+Also set t->cpu = rq->cpu_id after enqueue to maintain
+the cpu↔runqueue invariant.
+
+Prerequisite for sched_balance (T8).
+
+Co-Authored-By: Claude <noreply@anthropic.com>"
+```
+
+---
 
 ### Task 1: Slab allocator SMP safety
 
@@ -922,7 +1028,7 @@ static void sched_balance(percpu_t *rq)
         uint32_t nr = *(volatile uint32_t *)&percpu_data[i].nr_running;
         if (nr == 0)
             continue;
-        uint64_t vr = percpu_data[i].min_vruntime;
+        uint64_t vr = *(volatile uint64_t *)&percpu_data[i].min_vruntime;
         if (nr > max_nr || (nr == max_nr && vr > max_vr)) {
             max_nr = nr;
             max_vr = vr;
@@ -1299,6 +1405,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 ## Task Dependency Graph
 
 ```
+T0 (task_wake retry) ─── prerequisite for T8
 T1 (slab lock) ────┐
 T2 (softirq+timer) ┤─── Prerequisites (parallel)
 T3 (COW tlb) ──────┘
@@ -1309,7 +1416,7 @@ T5 (systest rbtree) ───── test immediately
 T6 (nr_running) ───────── data structure
         │
 T7 (pick_cpu+notify) ──── core helpers
-T8 (sched_balance) ────── depends on T6, T7
+T8 (sched_balance) ────── depends on T0, T6, T7
         │
 T9  (do_fork integ) ───── depends on T7, T8
 T10 (spawn integ) ─────── depends on T7, T8
@@ -1319,6 +1426,6 @@ T11 (schedule integ) ──── depends on T8
 T12 (multi-core test) ─── verify everything
 ```
 
-Tasks in each phase may run in parallel within the phase.
-Prerequisites (T1-T3) are independent of each other.
+T0 must complete before T8.
+T1-T3 are independent of each other.
 T9-T10 are independent of each other.
