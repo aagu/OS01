@@ -30,17 +30,49 @@ count.  No separate `load_avg` or weight tracking.
 - Idle-core power management (C-states, etc.).
 - Gang scheduling or co-scheduling.
 
-### Prerequisite
+### Prerequisites
 
-- **`fork_mm_copy` must use `tlb_shootdown()` instead of local `flush_tlb()`.**
-  Currently `fork_mm_copy()` (`task.c:1236`) performs `flush_tlb()` on the
-  local CPU only.  With load balancing, the parent process may be running
-  on a different CPU after fork, and that CPU's TLB still caches writable
-  mappings to COW pages — causing silent data corruption if both parent
-  and child write before the TLB is evicted.  This is an *existing* bug
-  that load balancing makes more likely to trigger.  The fix (replacing
-  `flush_tlb()` with `tlb_shootdown()`) should be implemented before or
-  alongside this design.
+These must be resolved before or alongside this design:
+
+1. **Slab allocator SMP safety (`kmalloc`/`kfree`).**
+   `kernel/memory/slab.c` has no locking — global cache pools, slab
+   bitmaps, and free/using counters are accessed without any
+   synchronisation.  Today only the BSP allocates/frees (APs spin in
+   idle), so there is no concurrency.  Once APs run user tasks, every
+   `fork`/`exec`/`exit`/`open`/`read`/`close` path calls `kmalloc`
+   or `kfree`, and concurrent slab operations will corrupt the global
+   cache state.  **Fix:** add a global spinlock around `kmalloc` and
+   `kfree`, or implement per-CPU slab caches.  The spinlock approach is
+   simplest and sufficient for OS01's scale.
+
+2. **`fork_mm_copy` must use `tlb_shootdown()` instead of local `flush_tlb()`.**
+   Currently `fork_mm_copy()` (`task.c:1236`) performs `flush_tlb()` on
+   the local CPU only.  With load balancing, the parent process may be
+   running on a different CPU after fork, and that CPU's TLB still
+   caches writable mappings to COW pages — causing silent data
+   corruption.  This is an *existing* bug that load balancing makes
+   more likely to trigger.
+
+3. **`do_fork` and `spawn_user_task` must hold the target CPU's `rq_lock`
+   during `enqueue_task`.**  These functions currently call
+   `enqueue_task(tsk, &percpu_data[tsk->cpu])` without locking.  When
+   `tsk->cpu` is the local CPU this is safe (no other CPU touches the
+   local runqueue).  With `sched_pick_cpu()` choosing a remote CPU, the
+   caller modifies the remote CPU's rbtree while that CPU's `schedule()`
+   may be concurrently manipulating the same tree via `dequeue_task` /
+   `enqueue_task` — rbtree corruption.  The fix follows the existing
+   `task_wake()` pattern:
+
+   ```c
+   uint64_t flags = spin_lock_irqsave(&percpu_data[tsk->cpu].rq_lock);
+   enqueue_task(tsk, &percpu_data[tsk->cpu]);
+   spin_unlock_irqrestore(&percpu_data[tsk->cpu].rq_lock, flags);
+   sched_notify_remote(tsk);  // after unlock so IPI arrives after enqueue
+   ```
+
+   (The `rq_lock` is a single lock on the remote CPU — no deadlock
+   risk with `sched_balance`'s double-lock, because `do_fork` is never
+   inside `schedule()`.)
 
 ---
 
@@ -53,14 +85,18 @@ fork / spawn / kthread
   │     │
   │     └── tsk->cpu = chosen
   │
-  ├── do_fork: set vruntime (fair_start from tsk->cpu's min_vruntime)
+  ├── do_fork only: vruntime = min(current->vruntime,
+  │                  percpu_data[tsk->cpu].min_vruntime)
   │
+  ├── lock target: spin_lock_irqsave(&percpu_data[tsk->cpu].rq_lock)
   ├── enqueue_task(tsk, &percpu_data[tsk->cpu])
+  ├── unlock:     spin_unlock_irqrestore(...)
   │
   └── if tsk->cpu != cpu_id():
-        ──→ ipi_send(tsk->cpu, IPI_VECTOR_RESCHED)    ◀── NEW
-        │
-        ▼
+        ──→ sched_notify_remote(tsk)
+              (need_resched=1 + ipi_send RESCHED)
+              │
+              ▼
   CPU N: schedule() runs on next timer tick (or IPI wakeup)
         │
         ├── update_curr / dequeue / zombie reap (unchanged)
@@ -264,9 +300,11 @@ after zombie reaping, before `pick_eevdf()`.
 | Location | Current | Change |
 |---|---|---|
 | `spawn_user_task()` — CPU selection | `tsk->cpu = cpu_id()` | → `tsk->cpu = sched_pick_cpu()` |
+| `spawn_user_task()` — enqueue | `enqueue_task(tsk, ...)` (no lock) | → wrap with `spin_lock_irqsave`/`spin_unlock_irqrestore` on target `rq_lock` |
 | `spawn_user_task()` — after enqueue | (nothing) | → `sched_notify_remote(tsk)` |
-| `do_fork()` — CPU selection | `tsk->cpu = 0` or copied from parent | → `tsk->cpu = sched_pick_cpu()` |
-| `do_fork()` — fair_start | `percpu_data[cpu_id()].min_vruntime` | → `percpu_data[tsk->cpu].min_vruntime` |
+| `do_fork()` — CPU selection | `tsk->cpu = 0` or `cpu_id()` | → `tsk->cpu = sched_pick_cpu()` |
+| `do_fork()` — fair_start | `percpu_data[cpu_id()].min_vruntime` | → `percpu_data[tsk->cpu].min_vruntime` (after picking CPU) |
+| `do_fork()` — enqueue | `enqueue_task(tsk, ...)` (no lock) | → wrap with `spin_lock_irqsave`/`spin_unlock_irqrestore` on target `rq_lock` |
 | `do_fork()` — after enqueue | (nothing) | → `sched_notify_remote(tsk)` |
 | `deferred_free_spawn()` | `df->cpu = 0` | → **remove line** (do_fork already uses sched_pick_cpu) |
 | `schedule()` step 3.5 | (absent) | → `sched_balance(rq)` |
@@ -584,9 +622,10 @@ its vruntime was already behind.
 
 | File | Change |
 |---|---|
-| `kernel/include/kernel/percpu.h` | +`uint32_t nr_running` |
-| `kernel/sched/task.c` | +`sched_pick_cpu()`, +`sched_balance()`, +`sched_notify_remote()`, update `enqueue_task`/`dequeue_task`, update `do_fork()` (CPU selection + fair_start + IPI), remove `df->cpu=0` override |
+| `kernel/memory/slab.c` (prereq) | +global spinlock around `kmalloc`/`kfree` |
 | `kernel/sched/task.c` (prereq) | COW fix: replace `flush_tlb()` with `tlb_shootdown()` in `fork_mm_copy()` |
+| `kernel/include/kernel/percpu.h` | +`uint32_t nr_running` |
+| `kernel/sched/task.c` | +`sched_pick_cpu()`, +`sched_balance()`, +`sched_notify_remote()`, update `enqueue_task`/`dequeue_task`, update `do_fork()` (CPU selection + fair_start + rq_lock + IPI), update `spawn_user_task()` (CPU selection + rq_lock + IPI), remove `df->cpu=0` override |
 | `libc/include/rbtree.h` | +`rbtree_last`, +`rbtree_prev` declarations |
 | `libc/rbtree/rbtree.c` | +`rbtree_last()`, +`rbtree_prev()` implementations |
 | `test/include/kernel/task.h` | sync `nr_running` field |
