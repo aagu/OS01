@@ -128,6 +128,95 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 ---
 
+### Task 1a: PMM alloc_pages/free_pages SMP protection
+
+**Files:**
+- Modify: `kernel/memory/pmm.c`
+
+**Interfaces:**
+- Produces: thread-safe `alloc_pages()` / `free_pages()` via global `spinlock_T pmm_lock`
+
+**Why:** PMM bitmaps (`PMMngr.bits_map`) and `page_using_count`/`page_free_count`
+counters use non-atomic RMW operations.  `spawn_user_task`, `fork_mm_copy`,
+`do_exit`, and `sys_exec` all call `alloc_pages`/`free_pages` without any
+synchronisation.  With SMP, two CPUs simultaneously modifying the same
+bitmap word will corrupt the free-page tracking.
+
+- [ ] **Step 1: Add pmm_lock and include**
+
+```c
+// kernel/memory/pmm.c — add after #include lines (near file top)
+#include <kernel/arch/spinlock.h>
+
+static spinlock_T pmm_lock = { .lock = 1L };
+```
+
+- [ ] **Step 2: Wrap alloc_pages**
+
+In `alloc_pages()` (around line 262), add lock/unlock.  Find the function
+signature and add the lock immediately after variable declarations:
+
+```c
+struct Page * alloc_pages(int32_t zone_select, int32_t number, uint64_t page_flags)
+{
+    uint64_t flags = spin_lock_irqsave(&pmm_lock);
+    // ... existing function body (all code paths) ...
+    // Before EVERY return statement, add:
+    //     spin_unlock_irqrestore(&pmm_lock, flags);
+}
+```
+
+The function has multiple return points — wrap each with unlock before return:
+- `return NULL` paths → `spin_unlock_irqrestore(&pmm_lock, flags); return NULL;`
+- Success path → `spin_unlock_irqrestore(&pmm_lock, flags); return page;`
+
+- [ ] **Step 3: Wrap free_pages**
+
+```c
+void free_pages(struct Page * page, int32_t number)
+{
+    uint64_t flags = spin_lock_irqsave(&pmm_lock);
+    // ... existing function body ...
+    spin_unlock_irqrestore(&pmm_lock, flags);
+}
+```
+
+- [ ] **Step 4: Lock ordering verification**
+
+The new lock hierarchy is:
+```
+slab_lock → pmm_lock   (kmalloc_create → alloc_pages, kfree → free_pages)
+subpage_lock → pmm_lock (alloc_4k_page → alloc_pages)
+```
+
+No code acquires `pmm_lock` then `subpage_lock` — no AB-BA deadlock.
+`vmm_free_user_map` calls `page_cow_put` (subpage_lock) then `free_pages`
+(pmm_lock) sequentially, not nested. ✓
+
+- [ ] **Step 5: Build**
+
+```bash
+cd /home/aagu/OS01 && make clean && make -j$(nproc)
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add kernel/memory/pmm.c
+git commit -m "fix(pmm): add SMP spinlock for alloc_pages/free_pages
+
+Global pmm_lock serialises bitmap operations and page counters.
+Lock hierarchy: slab_lock → pmm_lock, subpage_lock → pmm_lock.
+Protects spawn_user_task, fork_mm_copy, do_exit, sys_exec
+from concurrent PMM corruption.
+
+Prerequisite for SMP load balancing.
+
+Co-Authored-By: Claude <noreply@anthropic.com>"
+```
+
+---
+
 ### Task 1: Slab allocator SMP safety
 
 **Files:**
@@ -364,7 +453,35 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 - Modify: `kernel/driver/pit.c:1-68`
 
 **Interfaces:**
-- Produces: atomic `softirq_status` operations, spinlock-protected `timer_list_head`
+- Produces: atomic `softirq_status` operations, spinlock-protected `timer_list_head`, AP timer IRQ triggers `TIMER_SIRQ`
+
+- [ ] **Step 0: Make LAPIC timer trigger TIMER_SIRQ on APs**
+
+In `kernel/apic/lapic_timer.c`, first add the include:
+
+```c
+// kernel/apic/lapic_timer.c — add near other #include lines
+#include <kernel/softirq.h>
+```
+
+Then modify `lapic_timer_handler` (around line 119-128):
+
+```c
+void lapic_timer_handler(uint64_t nr, uint64_t param, pt_regs_t *regs)
+{
+    if (cpu_id() != 0) {
+        this_cpu()->need_resched = 1;
+        set_softirq_status(TIMER_SIRQ);  // ← NEW: APs process timer softirqs
+    }
+    /* watchdog_counter incremented for ALL CPUs */
+    this_cpu()->watchdog_counter++;
+    lapic_eoi();
+}
+```
+
+**Why:** Without this, only the BSP processes timer callbacks via `do_softirq`.
+With two CPUs both handling `TIMER_SIRQ`, `do_softirq` → `do_timer` may run
+concurrently on both — but `timer_lock` (added in step 3) serialises access.
 
 - [ ] **Step 1: Make softirq_status atomic**
 
@@ -544,8 +661,8 @@ Expected: boots to shell, timer softirqs work, no corruption.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add kernel/intr/softirq.c kernel/timer/timer.c kernel/include/device/timer.h
-git commit -m "fix: atomic softirq_status + spinlock-protected timer list
+git add kernel/intr/softirq.c kernel/timer/timer.c kernel/include/device/timer.h kernel/apic/lapic_timer.c
+git commit -m "fix: atomic softirq_status + spinlock-protected timer list + AP TIMER_SIRQ
 
 softirq_status: lock orq/andq for concurrent set/clear from
 multiple CPUs in ret_from_intr paths.
@@ -1405,10 +1522,11 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 ## Task Dependency Graph
 
 ```
-T0 (task_wake retry) ─── prerequisite for T8
-T1 (slab lock) ────┐
-T2 (softirq+timer) ┤─── Prerequisites (parallel)
-T3 (COW tlb) ──────┘
+T0  (task_wake retry) ── prerequisite for T8
+T1a (PMM lock) ───────┐
+T1  (slab lock) ──────┤
+T2  (softirq+timer) ──┼── Prerequisites (parallel, internal order)
+T3  (COW tlb) ────────┘
         │
 T4 (rbtree_last/prev) ─── rbtree extensions
 T5 (systest rbtree) ───── test immediately
@@ -1427,5 +1545,5 @@ T12 (multi-core test) ─── verify everything
 ```
 
 T0 must complete before T8.
-T1-T3 are independent of each other.
+T1a-T3 are independent of each other (modify different subsystems).
 T9-T10 are independent of each other.
