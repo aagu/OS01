@@ -114,7 +114,13 @@ typedef struct percpu {
   schedule round — always consistent with the rbtree.
 - Read lockless by `sched_balance()` and `sched_pick_cpu()` — a transient
   stale value is harmless (at worst we skip one balance round or take
-  ±1 task).
+  ±1 task).  On x86-64 TSO, plain `mov` loads have acquire semantics;
+  however, without a compiler barrier the optimiser may hoist or merge
+  reads across loop iterations.  All lockless `nr_running` reads should
+  use a `READ_ONCE()`-style volatile access:
+  ```c
+  uint32_t nr = *(volatile uint32_t *)&percpu_data[i].nr_running;
+  ```
 
 `task_t` needs no new fields — `cpu`, `on_rq`, and `rb_node` already
 support per-CPU runqueues.
@@ -507,6 +513,15 @@ its vruntime was already behind.
   double-lock serializes them — only one succeeds.  For a first
   implementation this is acceptable; future optimization could add an
   exponential backoff in the idle loop.
+- **Init may start on an AP:** `spawn_user_task("/bin/init")` now uses
+  `sched_pick_cpu()`.  If the AP's runqueue is empty, init lands on the
+  AP.  This is safe — `user_init_task` pointer (task.c:874-876) is set
+  regardless of chosen CPU, and BSP's remaining `task_init()` work
+  (mutex test, deferred free spawn) doesn't depend on init running
+  first.
+- **BSP PIT vs AP LAPIC timer:** BSP is driven by PIT at 100 Hz, APs by
+  per-core LAPIC timer at 100 Hz.  Both trigger `schedule()` at the same
+  frequency — `sched_balance` firing rate is uniform across CPUs.
 
 ---
 
