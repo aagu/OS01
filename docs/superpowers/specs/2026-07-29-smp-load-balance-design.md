@@ -57,12 +57,10 @@ fork / spawn / kthread
         │     │
         │     ├── find busiest online CPU (max nr_running,
         │     │     tiebreak: max min_vruntime)
-        │     ├── gate: (rq empty) OR (src.nr_running > rq.nr_running)
-        │     ├── count = src.nr_running / 2
+        │     ├── gate: (rq empty) OR (src.nr_running > rq.nr_running + 1)
+        │     ├── count = max(1, (src.nr_running - rq.nr_running) / 2)
         │     ├── double-lock rq_locks (addr-ordered, single IRQ save)
-        │     ├── walk rbtree_last → rbtree_prev, collect count tasks
-        │     ├── normalize vruntime: max(t->vruntime, rq->min_vruntime)
-        │     ├── insert into local rbtree
+        │     ├── dequeue_task from src, normalize vruntime, enqueue_task to local
         │     └── if src empty: src.min_vruntime = 0
         │
         ├── pick_eevdf(rq)            (unchanged)
@@ -226,27 +224,19 @@ after zombie reaping, before `pick_eevdf()`.
 
  5. Walk src rbtree from rbtree_last() backwards via rbtree_prev(),
     collecting up to `count` tasks.  For each:
-      - rbtree_erase from src
-      - t->on_rq = false
+      - dequeue_task(t, src_rq)       // rbtree_erase + on_rq=false + src.nr_running--
+      - if src rbtree now empty: src.min_vruntime = 0
       - t->cpu = rq->cpu_id
-      - src.nr_running--
+      - normalize vruntime (see rationale § "Wakeup boost interaction"):
+          t->vruntime = max(t->vruntime, rq->min_vruntime)
+      - enqueue_task(t, rq)           // deadline set + on_rq=true + rbtree_insert + rq->nr_running++
 
- 6. Insert each collected task into local rbtree.
-    Before inserting, normalize vruntime to the target CPU's timeline
-    (see rationale § "Wakeup boost interaction"):
-      - t->vruntime = max(t->vruntime, rq->min_vruntime)
-      - t->deadline = t->vruntime + EEVDF_MIN_SLICE
-      - t->on_rq = true
-      - rbtree_insert
-      - rq->nr_running++
+    Using enqueue_task / dequeue_task rather than manual rbtree
+    manipulation avoids duplicating the nr_running accounting logic
+    and guarantees consistency with the existing code paths.
 
- 7. If src runqueue is now empty:
+ 6. If no tasks were taken and src runqueue is now empty:
       src.min_vruntime = 0
-    (Fresh start — next tasks enqueued here won't inherit a stale
-     baseline.  Do NOT decrease min_vruntime when non-empty — see
-     rationale § "min_vruntime monotonicity".)
-
- 8. Unlock both, restore IRQs.
 ```
 
 ---
@@ -260,32 +250,54 @@ after zombie reaping, before `pick_eevdf()`.
 | `do_fork()` — CPU selection | `tsk->cpu = 0` or copied from parent | → `tsk->cpu = sched_pick_cpu()` |
 | `do_fork()` — fair_start | `percpu_data[cpu_id()].min_vruntime` | → `percpu_data[tsk->cpu].min_vruntime` |
 | `do_fork()` — after enqueue | (nothing) | → `sched_notify_remote(tsk)` |
+| `deferred_free_spawn()` | `df->cpu = 0` | → **remove line** (do_fork already uses sched_pick_cpu) |
 | `schedule()` step 3.5 | (absent) | → `sched_balance(rq)` |
 | `enqueue_task()` | — | → `rq->nr_running++` |
 | `dequeue_task()` | — | → `rq->nr_running--` |
 
-### `do_fork()` fair_start: use target CPU's min_vruntime
+### `do_fork()`: correct ordering
 
-Currently `do_fork()` (task.c:1299-1301):
+Currently `do_fork()` (task.c:1299-1313):
 
 ```c
 uint64_t fair_start = percpu_data[cpu_id()].min_vruntime;
 tsk->vruntime = current->vruntime < fair_start ? current->vruntime : fair_start;
+// ... other init ...
+tsk->cpu = cpu_id();
 ```
 
-This uses the **current** CPU's `min_vruntime`.  After this change,
-`tsk->cpu` is already set by `sched_pick_cpu()`, so use the target:
+After this change, pick the CPU **first**, then derive `fair_start` from
+the **target** CPU:
 
 ```c
-uint64_t fair_start = percpu_data[tsk->cpu].min_vruntime;
+uint32_t target_cpu = sched_pick_cpu();
+uint64_t fair_start = percpu_data[target_cpu].min_vruntime;
 tsk->vruntime = current->vruntime < fair_start ? current->vruntime : fair_start;
+// ... other init ...
+tsk->cpu = target_cpu;
 ```
 
-Without this, a child placed on a freshly-unloaded CPU (whose
-`min_vruntime` was just reset to 0 by `sched_balance` step 7) would
-inherit the parent CPU's higher vruntime and be placed unfairly far
-right in the target rbtree.  With the target CPU's `min_vruntime`,
-the child gets correct initial placement.
+Without this ordering, a child placed on a freshly-unloaded CPU (whose
+`min_vruntime` was just reset to 0 by `sched_balance`) would inherit
+the parent CPU's higher vruntime and be placed unfairly far right in the
+target rbtree.  With the target CPU's `min_vruntime`, the child gets
+correct initial placement.
+
+### `deferred_free_spawn()`: remove `df->cpu = 0` override
+
+### `deferred_free_spawn()`: remove `df->cpu = 0` override
+
+`task.c:1518-1520` creates the deferred-free reaper kthread, then
+overrides the CPU:
+
+```c
+task_t *df = kernel_thread(df_reaper_main, ...);
+df->cpu = 0;   // ← MUST REMOVE — overrides sched_pick_cpu()
+```
+
+`kernel_thread()` already calls `do_fork()` which now uses
+`sched_pick_cpu()`.  The `df->cpu = 0` override would pin the reaper
+to the BSP, defeating load balancing.  Simply delete the line.
 
 ### `task_wake()` — no changes needed, reasoning
 
@@ -470,6 +482,13 @@ its vruntime was already behind.
   of the rbtree and remain on the source CPU.  The design gets this
   behavior *for free* from the EEVDF deadline ordering — no explicit
   task classification needed.
+- **Reschedule IPI may be silently dropped:** `ipi_send()` (ipi.c:54-68)
+  polls ICR with a 10,000-iteration timeout, and if the previous IPI
+  hasn't completed, the send is silently skipped.  For reschedule IPI,
+  the consequence is mild: the target CPU discovers new tasks on its
+  next LAPIC timer tick (≤10 ms) via `need_resched`.  The
+  `sched_notify_remote` path sets `need_resched` as a belt-and-suspenders
+  fallback precisely for this case.
 - **Idle CPUs hammering the busiest lock:** all idle APs enter
   `sched_balance` at 100 Hz (LAPIC timer).  With multiple idle cores,
   all attempt to steal from the same busy CPU simultaneously.  The
@@ -494,7 +513,18 @@ its vruntime was already behind.
    weight) via `enqueue_task`/`dequeue_task` hooks — the call sites
    are already in place.
 
-3. **Test mock gap:** `test/include/kernel/percpu.h` diverges from the
+3. **Pull-only model:** all balancing is driven by idle or less-loaded
+   CPUs pulling from busier ones.  A busy CPU never proactively pushes
+   tasks.  If *all* CPUs are busy but unbalanced, convergence is slower
+   (each CPU only rebalances on its own `schedule()`).  For OS01 this
+   is acceptable; a future push path could use `ipi_send` to actively
+   wake idle CPUs for immediate steal.
+
+4. **No tickless/idle awareness:** every CPU wakes at 100 Hz regardless
+   of load.  On real hardware this increases power consumption.  OS01
+   targets QEMU where this is negligible.
+
+5. **Test mock gap:** `test/include/kernel/percpu.h` diverges from the
    real `percpu_t` (uses `list_t run_queue` instead of `rbtree_root_t`,
    lacks `min_vruntime`/`rq_lock`/`watchdog_counter`).  Unit testing
    `sched_pick_cpu` and `sched_balance` gate logic requires updating
