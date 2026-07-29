@@ -5,6 +5,9 @@
 #include <kernel.h>
 #include <string.h>
 
+#include <kernel/arch/spinlock.h>
+#include <kernel/percpu.h>
+
 struct Slab_Cache kmalloc_cache_size[16] = 
 {
     {32     , 0, 0, NULL, NULL, NULL, NULL},
@@ -26,6 +29,30 @@ struct Slab_Cache kmalloc_cache_size[16] =
 };
 
 static bool kmalloc_creating = false;
+
+static spinlock_T slab_lock = { .lock = 1L };
+static uint32_t slab_lock_depth[NR_CPUS];
+
+static inline uint64_t slab_lock_acquire(void) {
+    uint64_t flags;
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    // Early boot: GS not installed yet, single-CPU, skip locking.
+    if (percpu_data[0].online) {
+        uint32_t cpu = cpu_id();
+        if (slab_lock_depth[cpu]++ == 0)
+            spin_lock(&slab_lock);
+    }
+    return flags;
+}
+static inline void slab_lock_release(uint64_t flags) {
+    if (percpu_data[0].online) {
+        uint32_t cpu = cpu_id();
+        if (--slab_lock_depth[cpu] == 0)
+            spin_unlock(&slab_lock);
+    }
+    if (flags & (1UL << 9))   // RFLAGS_IF
+        __asm__ __volatile__("sti" ::: "memory");
+}
 
 struct Slab * kmalloc_create(uint64_t size)
 {
@@ -128,9 +155,11 @@ void * kmalloc(size_t size)
 {
     uint32_t i, j;
     struct Slab * slab = NULL;
+    uint64_t _slab_flags = slab_lock_acquire();
     if (size > 1048576)
     {
         color_printk(RED,BLACK,"kmalloc() ERROR: kmalloc size too long:%08d\n",size);
+		slab_lock_release(_slab_flags);
 		return NULL;
     }
     for (i = 0; i < 16; i++)
@@ -157,6 +186,7 @@ void * kmalloc(size_t size)
         if (slab == NULL)
         {
             color_printk(RED, BLACK, "kmalloc()->kmalloc_create()=>slab == NULL\n");
+            slab_lock_release(_slab_flags);
             return NULL;
         }
         
@@ -182,11 +212,13 @@ void * kmalloc(size_t size)
             kmalloc_cache_size[i].total_free--;
             kmalloc_cache_size[i].total_using++;
 
+            slab_lock_release(_slab_flags);
             return (void *)((char *)slab->address + kmalloc_cache_size[i].size * j);
         }
     }
 
 	color_printk(BLUE,BLACK,"kmalloc() ERROR: no memory can alloc\n");
+	slab_lock_release(_slab_flags);
 	return NULL;
 }
 
@@ -196,6 +228,7 @@ size_t kfree(void * address)
 
     uint32_t i, index;
     struct Slab * slab = NULL;
+    uint64_t _slab_flags = slab_lock_acquire();
     void * page_base_address = (void *)((uint64_t)address & PAGE_2M_MASK);
 
     for (i = 0;i < 16; i++)
@@ -212,6 +245,7 @@ size_t kfree(void * address)
                 uint64_t bit = 1UL << (index % 64);
                 if (!(*word & bit)) {
                     color_printk(RED, BLACK, "kfree: double free %p\n", address);
+                    slab_lock_release(_slab_flags);
                     return 1;
                 }
                 *word &= ~bit;
@@ -251,6 +285,7 @@ size_t kfree(void * address)
                     }
                 }
                 
+                slab_lock_release(_slab_flags);
                 return 1;
             }
             else
@@ -261,6 +296,7 @@ size_t kfree(void * address)
 
     color_printk(RED, BLACK, "kfree() ERROR: can not free memory %p\n", address);
 
+    slab_lock_release(_slab_flags);
     return 0;
 }
 
