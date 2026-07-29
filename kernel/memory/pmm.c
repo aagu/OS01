@@ -79,6 +79,7 @@ struct subpage_pool {
 
 static list_t      subpage_pools;
 static spinlock_T  subpage_lock = { .lock = 1L };
+static spinlock_T  pmm_lock     = { .lock = 1L };
 
 // Initialized explicitly in pmm_init() after slab_init().
 // Do NOT use lazy init — SMP race on first concurrent alloc_4k_page().
@@ -271,7 +272,8 @@ struct Page * alloc_pages(int32_t zone_select, int32_t number, uint64_t page_fla
     int32_t zone_end = 0;
     uint64_t attribute = 0;
     uint64_t page = 0;
-    
+    uint64_t flags = spin_lock_irqsave(&pmm_lock);
+
     switch (zone_select)
     {
     case ZONE_DMA:
@@ -291,6 +293,7 @@ struct Page * alloc_pages(int32_t zone_select, int32_t number, uint64_t page_fla
         break;
     default:
         color_printk(RED, BLACK, "alloc_pages() ERROR: zone_select index is invalid\n");
+        spin_unlock_irqrestore(&pmm_lock, flags);
         return NULL;
         break;
     }
@@ -341,9 +344,11 @@ struct Page * alloc_pages(int32_t zone_select, int32_t number, uint64_t page_fla
     }
     
     color_printk(RED, BLACK, "alloc_pages() ERROR: no page can alloc\n");
+    spin_unlock_irqrestore(&pmm_lock, flags);
     return NULL;
 
 find_free_pages:
+    spin_unlock_irqrestore(&pmm_lock, flags);
     return (struct Page *)(PMMngr.pages_struct + page);
 }
 
@@ -353,19 +358,22 @@ find_free_pages:
 */
 
 void free_pages(struct Page * page,int32_t number)
-{	
+{
 	int i = 0;
-	
+	uint64_t flags = spin_lock_irqsave(&pmm_lock);
+
 	if(page == NULL)
 	{
 		color_printk(RED,BLACK,"free_pages() ERROR: page is invalid\n");
+		spin_unlock_irqrestore(&pmm_lock, flags);
 		return ;
-	}	
+	}
 
 	if(number >= 64 || number <= 0)
 	{
 		color_printk(RED,BLACK,"free_pages() ERROR: number is invalid\n");
-		return ;	
+		spin_unlock_irqrestore(&pmm_lock, flags);
+		return ;
 	}
 	
 	for(i = 0;i<number;i++,page++)
@@ -375,6 +383,7 @@ void free_pages(struct Page * page,int32_t number)
 		page->zone_struct->page_free_count++;
 		page->attribute = 0;
 	}
+	spin_unlock_irqrestore(&pmm_lock, flags);
 }
 
 // Find the subpage_pool containing phys, or NULL.  Must be called with
