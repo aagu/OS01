@@ -5,9 +5,11 @@
 #include <kernel/printk.h>
 #include <stdlib.h>
 #include <kernel/task.h>
+#include <kernel/arch/spinlock.h>
 
 uint64_t volatile jiffies;
 timer_t timer_list_head;
+static spinlock_T timer_lock = { .lock = 1L };
 
 void init_timer(timer_t * timer, void (* func)(void * data), void * data, uint64_t expire_jiffies)
 {
@@ -26,14 +28,20 @@ timer_t * create_timer(void (* func)(void * data), void * data, uint64_t expire_
 
 void do_timer(void * data __attribute__((unused)))
 {
+    uint64_t flags = spin_lock_irqsave(&timer_lock);
     timer_t * timer = container_of(list_next(&timer_list_head.list), timer_t, list);
     while ((!list_is_empty(&timer_list_head.list)) && (timer->expire_jiffies <= jiffies))
     {
-        del_timer(timer);
-        timer->func(timer->data);
+        list_del(&timer->list);                     // direct list_del, not del_timer()
+        spin_unlock_irqrestore(&timer_lock, flags); // release before callback
+
+        timer->func(timer->data);                   // callback runs unlocked
+
+        flags = spin_lock_irqsave(&timer_lock);      // re-acquire
         timer = container_of(list_next(&timer_list_head.list), timer_t, list);
     }
-    
+    spin_unlock_irqrestore(&timer_lock, flags);
+
     // Note: 100 Hz color_printk debug is DISABLED by default — the
     // serial UART TX path (write_serial → poll THRE bit) adds latency
     // that interferes with interactive shell input on every tick.
@@ -57,6 +65,7 @@ void timer_init()
 
 void add_timer(timer_t * timer)
 {
+    uint64_t flags = spin_lock_irqsave(&timer_lock);
     timer_t * tmp = container_of(list_next(&timer_list_head.list), timer_t, list);
 
     if (!list_is_empty(&timer_list_head.list))
@@ -65,9 +74,19 @@ void add_timer(timer_t * timer)
             tmp = container_of(list_next(&tmp->list), timer_t, list);
     }
     list_add_to_behind(&tmp->list, &timer->list);
+    spin_unlock_irqrestore(&timer_lock, flags);
 }
 
 void del_timer(timer_t * timer)
 {
+    uint64_t flags = spin_lock_irqsave(&timer_lock);
     list_del(&timer->list);
+    spin_unlock_irqrestore(&timer_lock, flags);
+}
+
+int timer_has_expired(uint64_t now)
+{
+    if (list_is_empty(&timer_list_head.list)) return 0;
+    timer_t *first = container_of(list_next(&timer_list_head.list), timer_t, list);
+    return first->expire_jiffies <= now;
 }

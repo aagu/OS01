@@ -3,11 +3,13 @@
 #include <string.h>
 
 uint64_t softirq_status;
+
 softirq_t softirq_vector[64] = {0};
 
 void set_softirq_status(uint64_t status)
 {
-    softirq_status |= status;
+    __asm__ __volatile__("lock orq %0, softirq_status(%%rip)"
+                         :: "r"(status) : "memory");
 }
 
 uint64_t get_softirq_status()
@@ -30,12 +32,13 @@ void unregister_softirq(int nr)
 void do_softirq()
 {
 	int i;
-	for(i = 0;i < 64 && softirq_status;i++)
+	for(i = 0; i < 64 && softirq_status; i++)
 	{
 		if(softirq_status & (1 << i))
 		{
 			softirq_vector[i].action(softirq_vector[i].data);
-			softirq_status &= ~(1 << i);
+			__asm__ __volatile__("lock andq %0, softirq_status(%%rip)"
+			                     :: "r"(~(1ULL << i)) : "memory");
 		}
 	}
 }

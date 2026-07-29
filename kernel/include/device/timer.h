@@ -20,5 +20,6 @@ timer_t * create_timer(void (* func)(void * data), void * data, uint64_t expire_
 void timer_init();
 void add_timer(timer_t * timer);
 void del_timer(timer_t * timer);
+int timer_has_expired(uint64_t now);
 
 #endif

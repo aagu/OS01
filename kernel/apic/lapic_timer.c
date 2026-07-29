@@ -6,6 +6,7 @@
 #include <kernel/arch/cpu.h>
 #include <kernel/arch/gate.h>
 #include <device/timer.h>
+#include <kernel/softirq.h>
 
 // Assembly stub created below
 extern void lapic_timer_stub(void);
@@ -121,8 +122,10 @@ void lapic_timer_handler(pt_regs_t *regs __attribute__((unused)),
 {
     // BSP already receives scheduling ticks from PIT (IRQ0).
     // Only set need_resched on APs, avoiding double-entry on BSP.
-    if (cpu_id() != 0)
+    if (cpu_id() != 0) {
         this_cpu()->need_resched = 1;
+        set_softirq_status(TIMER_SIRQ);  // APs process timer softirqs
+    }
     this_cpu()->watchdog_counter++;
     lapic_eoi();
 }
