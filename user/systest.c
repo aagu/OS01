@@ -1003,6 +1003,67 @@ static int test_rbtree_stress_100(void)
     return 0;
 }
 
+static int test_rbtree_last(void)
+{
+    rbtree_root_t root;
+    rbtree_init(&root);
+
+    test_rb_node_t n[3];
+    n[0].key = 10; n[1].key = 20; n[2].key = 30;
+    for (int i = 0; i < 3; i++)
+        rbtree_insert(&root, &n[i].node, test_cmp);
+
+    rbtree_node_t *last = rbtree_last(&root);
+    if (!last || ((test_rb_node_t *)last)->key != 30) return 1;
+    return 0;
+}
+
+static int test_rbtree_prev_traversal(void)
+{
+    rbtree_root_t root;
+    rbtree_init(&root);
+
+    test_rb_node_t n[5];
+    int keys[] = {30, 10, 50, 20, 40};
+    for (int i = 0; i < 5; i++) {
+        n[i].key = keys[i];
+        rbtree_insert(&root, &n[i].node, test_cmp);
+    }
+
+    // Reverse traversal: should visit 50, 40, 30, 20, 10
+    int expected[] = {50, 40, 30, 20, 10};
+    int idx = 0;
+    for (rbtree_node_t *cur = rbtree_last(&root); cur; cur = rbtree_prev(cur)) {
+        test_rb_node_t *tn = (test_rb_node_t *)cur;
+        if (idx >= 5 || tn->key != expected[idx]) return 1;
+        idx++;
+    }
+    if (idx != 5) return 1;
+    return 0;
+}
+
+static int test_rbtree_prev_null(void)
+{
+    rbtree_root_t root;
+    rbtree_init(&root);
+
+    test_rb_node_t n[2];
+    n[0].key = 10; n[1].key = 20;
+    rbtree_insert(&root, &n[0].node, test_cmp);
+    rbtree_insert(&root, &n[1].node, test_cmp);
+
+    // prev of first should be NULL
+    rbtree_node_t *first = rbtree_first(&root);
+    if (rbtree_prev(first) != NULL) return 1;
+
+    // last of empty tree should be NULL
+    rbtree_root_t empty;
+    rbtree_init(&empty);
+    if (rbtree_last(&empty) != NULL) return 1;
+
+    return 0;
+}
+
 static int test_eevdf_fork_child_scheduled(void)
 {
     int pid = fork();
@@ -1023,6 +1084,15 @@ static void test_wrap_rbtree_erase_middle(void)
 
 static void test_wrap_rbtree_stress_100(void)
 { CHECK3(test_rbtree_stress_100() == 0, "rbtree_stress_100", "100 insert/erase stress ok"); }
+
+static void test_wrap_rbtree_last(void)
+{ CHECK3(test_rbtree_last() == 0, "rbtree_last", "rightmost is max key"); }
+
+static void test_wrap_rbtree_prev_traversal(void)
+{ CHECK3(test_rbtree_prev_traversal() == 0, "rbtree_prev", "reverse inorder traversal"); }
+
+static void test_wrap_rbtree_prev_null(void)
+{ CHECK3(test_rbtree_prev_null() == 0, "rbtree_prev_null", "prev of first is NULL, last of empty is NULL"); }
 
 static void test_wrap_eevdf_fork_child_scheduled(void)
 { CHECK3(test_eevdf_fork_child_scheduled() == 0, "eevdf_fork_child", "fork child scheduled and exit(0)"); }
@@ -1081,6 +1151,9 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"rbtree_insert_order", test_wrap_rbtree_insert_order},
     {"rbtree_erase_middle", test_wrap_rbtree_erase_middle},
     {"rbtree_stress_100",   test_wrap_rbtree_stress_100},
+    {"rbtree_last",         test_wrap_rbtree_last},
+    {"rbtree_prev_traversal", test_wrap_rbtree_prev_traversal},
+    {"rbtree_prev_null",    test_wrap_rbtree_prev_null},
     {"eevdf_fork_child",    test_wrap_eevdf_fork_child_scheduled},
 };
 
