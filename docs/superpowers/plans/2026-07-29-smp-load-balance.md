@@ -189,23 +189,27 @@ size_t kfree(void * address)
 
 **Critical:** `kfree()` has recursive calls at lines 246 and 249 (frees slab metadata
 via `kfree(slab->color_map)` and `kfree(slab)`).  With a non-recursive spinlock,
-these will deadlock.  **Fix:** use `spin_lock` (not `spin_lock_irqsave`) and a
-recursive-safe pattern — or switch to `spin_lock` + per-CPU recursion counter:
+these will deadlock.  **Fix:** use a per-CPU recursion counter:
 
 ```c
-// kernel/memory/slab.c — at file scope
-static uint32_t slab_lock_depth;  // per-CPU recursion depth (IRQs disabled = no preemption)
+// kernel/memory/slab.c — at file scope (replaces the global slab_lock_depth)
+// Per-CPU recursion depth: each CPU tracks its own nesting level.
+// IRQs are disabled during kmalloc/kfree, so the current CPU can't
+// be preempted — per-CPU indexing via cpu_id() is safe without atomics.
+static uint32_t slab_lock_depth[NR_CPUS];
 
-// Replace spin_lock_irqsave/spin_unlock_irqrestore with:
+// Replace spin_lock_irqsave/spin_unlock_irqrestore with these helpers:
 static inline uint64_t slab_lock_acquire(void) {
     uint64_t flags;
     __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
-    if (slab_lock_depth++ == 0)
+    uint32_t cpu = cpu_id();
+    if (slab_lock_depth[cpu]++ == 0)
         spin_lock(&slab_lock);
     return flags;
 }
 static inline void slab_lock_release(uint64_t flags) {
-    if (--slab_lock_depth == 0)
+    uint32_t cpu = cpu_id();
+    if (--slab_lock_depth[cpu] == 0)
         spin_unlock(&slab_lock);
     if (flags & (1UL << 9))  // RFLAGS_IF
         __asm__ __volatile__("sti" ::: "memory");
@@ -214,6 +218,9 @@ static inline void slab_lock_release(uint64_t flags) {
 
 Use `slab_lock_acquire()` / `slab_lock_release(flags)` in place of
 `spin_lock_irqsave` / `spin_unlock_irqrestore` for both `kmalloc` and `kfree`.
+The per-CPU depth counter is safe because IRQs are disabled during the
+locked section — the current CPU won't be preempted, so no other code on
+this CPU can touch `slab_lock_depth[me]`.
 
 - [ ] **Step 4: Build and boot test**
 
@@ -755,10 +762,10 @@ In `test/include/kernel/percpu.h`, add `uint32_t nr_running;` to the test `percp
     uint32_t nr_running;   // ← NEW
 ```
 
-- [ ] **Step 5: Build**
+- [ ] **Step 5: Build (must use make clean — struct layout changed)**
 
 ```bash
-cd /home/aagu/OS01 && make -j$(nproc)
+cd /home/aagu/OS01 && make clean && make -j$(nproc)
 ```
 
 - [ ] **Step 6: Commit**
@@ -832,6 +839,11 @@ static uint32_t sched_pick_cpu(void)
 /* ── sched_notify_remote: wake remote CPU after enqueue ──
  * Sets need_resched and sends reschedule IPI so the remote
  * CPU discovers the task immediately, not up to 10 ms later.
+ *
+ * If ipi_send() times out (10K ICR poll), the IPI is silently
+ * dropped.  need_resched=1 is the fallback: the remote CPU
+ * picks it up on the next LAPIC timer tick (≤10 ms).
+ *
  * Called from do_fork() and spawn_user_task() after enqueue.
  */
 static void sched_notify_remote(task_t *tsk)
@@ -1210,7 +1222,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 ### Task 12: Multi-core boot and systest
 
-- [ ] **Step 1: Full build**
+- [ ] **Step 1: Full build (must use make clean — multiple struct changes)**
 
 ```bash
 cd /home/aagu/OS01 && make clean && make -j$(nproc)
@@ -1236,22 +1248,35 @@ At the shell:
 
 Expected: 70/70 (or current total) tests pass, including the 4 new rbtree tests.
 
-- [ ] **Step 4: Check schedule_count on both CPUs**
+**CAVEAT:** Some systests may implicitly assume single-CPU semantics (e.g.,
+`schedule_count` exact values, timing assumptions about `jiffies` which
+only increments on BSP).  If any test fails under `-smp 2`, inspect the
+failure — it may need tweaking for multi-CPU, or may reveal a real
+scheduling bug.  Existing rbtree and syscall tests should be unaffected.
+
+- [ ] **Step 4: Verify load distribution**
 
 At the shell, run a command that forces fork:
 ```
 ls /
 ```
 
-Check debug output for `schedule_count` or add a quick debug print:
+Add a temporary debug print in `schedule()` to verify distribution:
 ```c
-// In schedule(), after schedule_count increment:
-if (rq->schedule_count % 1000 == 0)
+// In schedule(), after sched_balance(rq):
+if (rq->schedule_count % 500 == 0)
     debug_sched("CPU%u: schedule_count=%lu nr_running=%u\n",
                 rq->cpu_id, rq->schedule_count, rq->nr_running);
 ```
 
-Both CPUs should show growing `schedule_count`.
+Both CPUs should show growing `schedule_count`.  For 2 CPUs with 3+ tasks,
+`nr_running` should stabilise near (N/2) ± 1 on each CPU (not oscillating
+every tick).
+
+Also verify that `sched_balance` debug output shows occasional migrations
+from the debug_sched line at the end of `sched_balance`.
+
+Remove these debug prints before committing (they're 100 Hz noise in production).
 
 - [ ] **Step 5: Commit any debug tweaks**
 
