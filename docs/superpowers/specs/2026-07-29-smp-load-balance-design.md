@@ -196,14 +196,15 @@ after zombie reaping, before `pick_eevdf()`.
       - return if none found
     Complexity: O(num_cpus).  Acceptable for NR_CPUS ≤ 8.
 
- 2. Gate:
+ 2. Gate (see rationale § "Oscillation prevention"):
       a) If local nr_running == 0 → proceed (idle steal).
-      b) Else if src.nr_running <= local.nr_running → return.
-         (no real imbalance — pull would overshoot)
+      b) Else if src.nr_running <= local.nr_running + 1 → return.
+         (require ≥ 2 task gap to prevent permanent 2:1↔1:2 ping-pong)
       c) Else proceed.
 
- 3. count = src.nr_running / 2
-    (integer division; gate (b) ensures this is always ≥ 1)
+ 3. count = max(1, (src.nr_running - local.nr_running) / 2)
+    Migrate half the difference, not half of src's total.  This
+    converges toward balance in O(log N) rounds instead of overshooting.
 
  4. Double-lock both rq_locks, ordered by address to avoid deadlock.
     Use a single IRQ save/restore around the entire critical section
@@ -254,6 +255,8 @@ after zombie reaping, before `pick_eevdf()`.
 
 | Location | Current | Change |
 |---|---|---|
+| `spawn_user_task()` — CPU selection | `tsk->cpu = cpu_id()` | → `tsk->cpu = sched_pick_cpu()` |
+| `spawn_user_task()` — after enqueue | (nothing) | → `sched_notify_remote(tsk)` |
 | `do_fork()` — CPU selection | `tsk->cpu = 0` or copied from parent | → `tsk->cpu = sched_pick_cpu()` |
 | `do_fork()` — fair_start | `percpu_data[cpu_id()].min_vruntime` | → `percpu_data[tsk->cpu].min_vruntime` |
 | `do_fork()` — after enqueue | (nothing) | → `sched_notify_remote(tsk)` |
@@ -339,6 +342,41 @@ Using `nr_running` correctly identifies CPU 0 as the busiest CPU.
 same task count, prefer the one with higher `min_vruntime` — its tasks
 have run more and deserve relief sooner).
 
+### Oscillation prevention
+
+A naive `nr_running / 2` steal with gate `src.nr_running > local.nr_running`
+produces permanent oscillation on small imbalances:
+
+```
+2 CPUs, 3 tasks total: (2:1) → steal 1 → (1:2) → steal back → (2:1) → …
+```
+
+Every 10 ms the tasks migrate, causing unnecessary cache misses and IPI
+traffic.  The system is already *optimally* balanced at (2:1) for 3 tasks
+on 2 CPUs — there's no genuine imbalance to fix.
+
+**Two changes prevent this:**
+
+1. **Gate requires ≥ 2 task gap:** `src.nr_running > local.nr_running + 1`.
+   At (2:1), `2 > 1 + 1` is false — no steal.  Only (3:1), (4:1), etc.
+   trigger.  Idle steal still works: at (1:0), `1 > 0 + 1` is false, but
+   local `nr_running == 0` passes gate (a).
+
+2. **Steal half the difference, not half of src:** count =
+   `max(1, (src.nr_running - local.nr_running) / 2)`.  Examples:
+   | Before | Diff | Count | After | Result |
+   |--------|------|-------|-------|--------|
+   | 100:98 | 2    | 1     | 99:99 | ✓ perfect balance |
+   | 8:5    | 3    | 1     | 7:6   | ✓ close (vs 4:9 with src/2) |
+   | 2:0    | 2    | 1     | 1:1   | ✓ idle steal works |
+   | 5:1    | 4    | 2     | 3:3   | ✓ converges in one round |
+
+   Old formula (`src.nr_running / 2`) on 100:98 would steal 50 tasks,
+   overshooting to 50:148 — worse than the original imbalance.
+
+Together these converge to balance in O(log Δ) rounds with minimal
+overshoot.
+
 ### `min_vruntime` monotonicity
 
 After removing tail (high-vruntime) tasks, `rbtree_first` returns a
@@ -406,9 +444,10 @@ its vruntime was already behind.
   `sched_balance()` corrects.
 - **`min_vruntime` tiebreak reads:** lockless, may see stale value.
   At worst the tiebreaker is wrong for one round.
-- **Overshoot on small queues:** `src.nr_running = 2, local.nr_running = 1`,
-  count = 1.  Stealing the only task overshoots to (1:2).  The next
-  round on the other CPU's `schedule()` will steal back.  Self-correcting.
+- **Small-queue convergence:** with `count = max(1, diff/2)`, systems
+  converge monotonically toward balance.  The (2:1) → (1:2) oscillation
+  is prevented by the `+ 1` gate (see rationale § "Oscillation
+  prevention").
 - **AP online window (`smp.c:123-133`):** `cpu->online = 1` is set
   before `scheduler_ok = 1`.  `sched_pick_cpu` may select an AP with
   `nr_running = 0` during this window — this is correct behavior
@@ -419,6 +458,18 @@ its vruntime was already behind.
 - **Migration while task is in `task_wake` path:** `task_wake` holds
   `rq_lock` during enqueue.  `sched_balance` also acquires `rq_lock`
   (of source).  Ordered correctly — no race.
+- **sched_balance can steal `current`:** `schedule()` step 2 re-enqueues
+  the calling task if it's still RUNNING.  `sched_balance` (step 3.5)
+  may then steal it to another CPU.  This is **safe**: `pick_eevdf`
+  simply won't find it in the local rbtree and selects a different task.
+  The stolen `current` resumes on the target CPU when it's picked there.
+- **Tail stealing naturally migrates CPU-bound tasks:** tasks with high
+  vruntime (large deadline) are the ones that ran continuously without
+  sleeping.  These are typically CPU-bound.  Interactive tasks (low
+  vruntime from frequent sleep/wakeup-boost cycles) stay near the front
+  of the rbtree and remain on the source CPU.  The design gets this
+  behavior *for free* from the EEVDF deadline ordering — no explicit
+  task classification needed.
 - **Idle CPUs hammering the busiest lock:** all idle APs enter
   `sched_balance` at 100 Hz (LAPIC timer).  With multiple idle cores,
   all attempt to steal from the same busy CPU simultaneously.  The
@@ -434,7 +485,16 @@ its vruntime was already behind.
    iterate all online CPUs.  Acceptable for NR_CPUS ≤ 8.  A future
    optimization could maintain a global `max_nr_running_cpu` hint.
 
-2. **Test mock gap:** `test/include/kernel/percpu.h` diverges from the
+2. **`nr_running` does not distinguish task types:** 2 CPU-bound tasks
+   and 2 idle-sleeping tasks both report `nr_running = 2`, but have
+   completely different actual CPU demand.  Similarly, interactive
+   tasks that sleep frequently cause `nr_running` to fluctuate.  For
+   OS01's current workloads (syscall tests, busybox shell), this is
+   adequate.  A future upgrade could add per-task load tracking (PELT
+   weight) via `enqueue_task`/`dequeue_task` hooks — the call sites
+   are already in place.
+
+3. **Test mock gap:** `test/include/kernel/percpu.h` diverges from the
    real `percpu_t` (uses `list_t run_queue` instead of `rbtree_root_t`,
    lacks `min_vruntime`/`rq_lock`/`watchdog_counter`).  Unit testing
    `sched_pick_cpu` and `sched_balance` gate logic requires updating
@@ -451,10 +511,15 @@ its vruntime was already behind.
    `num_cpus > 1`.  (Requires QEMU `-smp 2` or higher.)
 3. **systest: load distribution** — spawn `num_cpus` busy-loop
    processes, verify `schedule_count` grows on all cores.
-4. **Unit test `sched_pick_cpu()`** — requires test mock update (see
-   known limitation #2).  Defer to a follow-up if mock sync is too
+4. **systest: oscillation resistance** — spawn 3 busy-loop processes
+   on 2 CPUs.  Verify they stabilize at (2:1) or (1:2) distribution
+   and don't ping-pong every tick.
+5. **Manual: remote reschedule latency** — boot with `OS01_DEBUG_SCHED`,
+   `fork()`, verify remote CPU's `schedule()` runs within 1-2 ticks
+   of IPI instead of full 10 ms.
+6. **Unit test `sched_pick_cpu()`** — requires test mock update (see
+   known limitation #3).  Defer to a follow-up if mock sync is too
    extensive.
-5. **Unit test `sched_balance` gate** — same mock constraint as above.
 
 ---
 
