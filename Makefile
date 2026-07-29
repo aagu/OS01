@@ -107,6 +107,8 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 	@cp build/x86_64/user/spin.elf           config/fsroot/bin/spin
 	@cp build/x86_64/user/sigtest.elf        config/fsroot/bin/sigtest
 	@cp build/x86_64/user/poweroff.elf       config/fsroot/bin/poweroff
+	@cp build/x86_64/user/halt.elf           config/fsroot/bin/halt
+	@cp build/x86_64/user/reboot.elf         config/fsroot/bin/reboot
 	@cp build/x86_64/user/systest.elf        config/fsroot/bin/systest
 	@cp build/x86_64/user/test_mmap.elf      config/fsroot/bin/test_mmap
 	@cp build/x86_64/user/test_fork_mmap.elf config/fsroot/bin/test_fork_mmap

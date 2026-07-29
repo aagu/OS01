@@ -1451,8 +1451,6 @@ int task_send_signal(int pid, int sig)
         ret = -ESRCH;
     } else if (target->flags & PF_KTHREAD) {
         ret = -EPERM;
-    } else if (target->pid == 1) {
-        ret = -EPERM;
     } else {
         target->signal |= (1ULL << sig);
         if (target->state == TASK_INTERRUPTIBLE)

@@ -52,12 +52,24 @@ struct init_action {
 static struct init_action actions[MAX_ACTIONS];
 static int action_count = 0;
 static int got_sigchild = 0;
+static volatile int shutdown_signal = 0;  // set by signal handler, checked in main loop
 
 // ── Signal handler (best-effort; even without delivery, ─────
 // ── waitpid WNOHANG polling handles child reaping)        ───
 static void sigchld_handler(int sig __attribute__((unused)))
 {
     got_sigchild = 1;
+}
+
+// ── Shutdown signal handler ──────────────────────────────────
+// BusyBox halt/poweroff/reboot (without -f) send these signals
+// to PID 1 instead of calling the reboot syscall directly:
+//   halt     → SIGUSR1
+//   poweroff → SIGUSR2
+//   reboot   → SIGTERM
+static void shutdown_handler(int sig)
+{
+    shutdown_signal = sig;
 }
 
 // ── Find a tracked child by PID ─────────────────────────────
@@ -240,9 +252,10 @@ static void run_actions(int action_mask)
 }
 
 // ── Shutdown sequence ───────────────────────────────────────
-static void do_shutdown(void)
+// cmd: RB_POWER_OFF for poweroff/halt, RB_AUTOBOOT for reboot
+static void do_shutdown(int cmd)
 {
-    printf("init: shutting down...\n");
+    printf("init: shutting down... (cmd=%#x)\n", cmd);
 
     // 1. Run SHUTDOWN actions
     run_actions(ACT_SHUTDOWN);
@@ -272,11 +285,11 @@ static void do_shutdown(void)
     // 5. Sync filesystems
     sync();
 
-    // 6. Power off (if available) or reboot
-    printf("init: powering off...\n");
-    reboot(RB_POWER_OFF);
-    // If poweroff is not available, fall through to reboot
-    printf("init: poweroff failed, rebooting...\n");
+    // 6. Execute the requested action
+    printf("init: calling reboot(%#x)...\n", cmd);
+    reboot(cmd);
+    // If the requested action fails, fall through to reboot
+    printf("init: reboot(%#x) failed, falling back to reboot...\n", cmd);
     reboot(RB_AUTOBOOT);
     // unreachable
 }
@@ -354,6 +367,11 @@ int main(void)
     signal(SIGINT, SIG_IGN);
     // SIGHUP: reload inittab (stub for now)
     signal(SIGHUP, SIG_IGN);
+    // Shutdown signals: BusyBox halt/poweroff/reboot send these to PID 1
+    // SIGUSR1 → halt, SIGUSR2 → poweroff, SIGTERM → reboot
+    signal(SIGUSR1, shutdown_handler);
+    signal(SIGUSR2, shutdown_handler);
+    signal(SIGTERM, shutdown_handler);
 
     // 3. Ensure stdin/stdout/stderr are open
     // They should already be inherited from the kernel init thread.
@@ -378,6 +396,17 @@ int main(void)
     // 8. Main supervision loop
     printf("init: entering supervision loop\n");
     while (1) {
+        // Check for shutdown signals (set by shutdown_handler)
+        if (shutdown_signal) {
+            int cmd = RB_POWER_OFF;  // default: power off
+            if (shutdown_signal == SIGTERM)
+                cmd = RB_AUTOBOOT;   // reboot → restart
+            // SIGUSR1 (halt) and SIGUSR2 (poweroff) both → power off
+            printf("init: received signal %d, shutting down...\n", shutdown_signal);
+            do_shutdown(cmd);
+            // do_shutdown does not return
+        }
+
         // Reap any exited children
         reap_children();
 

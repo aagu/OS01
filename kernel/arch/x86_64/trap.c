@@ -672,6 +672,11 @@ int do_signal_delivery(pt_regs_t *regs)
                     current->signal &= ~(1ULL << sig);
                     break;
                 default:
+                    // PID 1 is special: ignore fatal signals
+                    if (current->pid == 1) {
+                        current->signal &= ~(1ULL << sig);
+                        break;
+                    }
                     current->signal &= ~(1ULL << sig);
                     do_exit((uint64_t)sig << 8);
                     return 1;  // unreachable
@@ -706,6 +711,12 @@ int do_signal_delivery(pt_regs_t *regs)
             case SIGTSTP: case SIGTTIN: case SIGTTOU:
                 break;   // stop — not implemented
             default:
+                // PID 1 is special: ignore signals that would
+                // otherwise kill, matching Linux behaviour.
+                // Init must explicitly register handlers for
+                // signals it wants to receive (SIGUSR1, SIGUSR2, SIGTERM).
+                if (current->pid == 1)
+                    break;   // ignore for init
                 log_err("task %d killed by signal %d (default)\n",
                         (int)current->pid, sig);
                 do_exit((uint64_t)sig << 8);
