@@ -90,12 +90,14 @@ static void enqueue_task(task_t *task, percpu_t *rq)
     task->on_rq = true;
     rbtree_node_t *conflict = rbtree_insert(&rq->run_queue, &task->rb_node, cmp_deadline);
     ASSERT(conflict == NULL);
+    rq->nr_running++;
 }
 
 static void dequeue_task(task_t *task, percpu_t *rq)
 {
     rbtree_erase(&rq->run_queue, &task->rb_node);
     task->on_rq = false;
+    rq->nr_running--;
 }
 
 /* ── pick_eevdf: select next task O(log n) ─────────── */

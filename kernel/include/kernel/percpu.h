@@ -42,6 +42,7 @@ typedef struct percpu {
     uint64_t schedule_count;    // number of times schedule() ran
     uint64_t min_vruntime;      // per-CPU tracking of minimum vruntime
     spinlock_T rq_lock;          // protects rbtree operations
+    uint32_t nr_running;         // count of tasks on runqueue (excl. idle)
     uint64_t watchdog_counter;  // incremented each timer tick, reset by schedule()
     uint64_t tsc_boot;          // TSC value after AP startup (for warp check)
 } percpu_t;
