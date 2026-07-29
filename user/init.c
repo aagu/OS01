@@ -327,7 +327,7 @@ static void setup_fallback_actions(void)
 #ifdef OS01_SYSTEST
     add_action(ACT_RESPAWN, "", "/bin/systest");
 #else
-    add_action(ACT_RESPAWN, "", "/bin/busybox sh");
+    add_action(ACT_RESPAWN, "", "/bin/terminal");
 #endif
 
     // CTRLALTDEL: when init receives SIGINT, reboot
