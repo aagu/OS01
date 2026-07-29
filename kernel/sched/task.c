@@ -1,5 +1,6 @@
 #include <kernel/task.h>
 #include <kernel/percpu.h>
+#include <kernel/ipi.h>
 #include <kernel.h>
 #include <kernel/arch/gate.h>
 #include <kernel/arch/spinlock.h>
@@ -53,6 +54,51 @@ static inline list_t *task_list_next(list_t *pos)
 /* ── EEVDF scheduler constants ─────────────────────── */
 #define EEVDF_MIN_SLICE  10   // time slice = 10 ticks = 100ms
 #define EEVDF_LATENCY    40   // eligibility window = 40 ticks = 400ms
+
+/* ── Forward declarations for load balancing ─────────── */
+static void sched_balance(percpu_t *rq);
+
+/* ── sched_pick_cpu: choose CPU with fewest nr_running ────
+ * Called from do_fork() and spawn_user_task() to place
+ * new tasks on the least-loaded CPU.
+ * Complexity: O(num_cpus).  Acceptable for NR_CPUS ≤ 8.
+ */
+static uint32_t sched_pick_cpu(void)
+{
+    uint32_t me = cpu_id();
+    uint32_t best = me;
+    uint32_t min_nr = *(volatile uint32_t *)&percpu_data[me].nr_running;
+
+    for (uint32_t i = 0; i < num_cpus; i++) {
+        if (!percpu_data[i].online) continue;
+        uint32_t nr = *(volatile uint32_t *)&percpu_data[i].nr_running;
+        if (nr < min_nr) {
+            min_nr = nr;
+            best = i;
+        }
+    }
+    return best;
+}
+
+/* ── sched_notify_remote: wake remote CPU after enqueue ──
+ * Sets need_resched and sends reschedule IPI so the remote
+ * CPU discovers the task immediately, not up to 10 ms later.
+ *
+ * If ipi_send() times out (10K ICR poll), the IPI is silently
+ * dropped.  need_resched=1 is the fallback: the remote CPU
+ * picks it up on the next LAPIC timer tick (≤10 ms).
+ *
+ * Called from do_fork() and spawn_user_task() after enqueue.
+ */
+static void sched_notify_remote(task_t *tsk)
+{
+    if ((int)tsk->cpu == (int)cpu_id())
+        return;
+    percpu_t *dst = &percpu_data[tsk->cpu];
+    dst->need_resched = 1;
+    __sync_synchronize();
+    ipi_send(dst->arch_processor_id, IPI_VECTOR_RESCHED);
+}
 
 /* ── update_curr: advance vruntime by 1 tick ──────── */
 static void update_curr(task_t *task)
