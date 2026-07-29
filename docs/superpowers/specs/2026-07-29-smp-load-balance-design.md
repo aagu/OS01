@@ -2,6 +2,7 @@
 
 **Date:** 2026-07-29
 **Status:** Draft
+**Review:** [review](file:///tmp/opencode/smp-load-balance-review.md)
 
 ## Overview
 
@@ -11,15 +12,14 @@ enqueued on the BSP's runqueue.  This design adds:
 
 1. **At-creation CPU selection** — pick the least-loaded CPU for new tasks.
 2. **Per-schedule() pull** — every `schedule()` compares its local
-   `min_vruntime` against the busiest CPU; if the gap exceeds
-   `EEVDF_LATENCY`, steal half of the busiest queue.
-3. **Idle-steal fallback** — when the local runqueue is empty (even if the
-   vruntime gap is small), unconditionally take half from the busiest
-   queue.
+   `nr_running` against the busiest CPU; if there's a meaningful
+   imbalance, steal half of the busiest queue's tail.
+3. **Idle-steal fallback** — when the local runqueue is empty,
+   unconditionally take half from the busiest queue.
 
-The mechanism uses the existing **per-CPU rbtree** (EEVDF) and
-`min_vruntime` as the sole load metric — no separate `load_avg` or
-weight tracking.
+The mechanism uses **`nr_running` as the primary load metric** with
+`min_vruntime` as a tiebreaker when multiple CPUs have the same task
+count.  No separate `load_avg` or weight tracking.
 
 ### Non-goals
 
@@ -47,23 +47,26 @@ fork / spawn / kthread
         │
         ├── sched_balance(rq)          ◀── NEW
         │     │
-        │     ├── find busiest online CPU (max min_vruntime)
-        │     ├── gate: (rq empty) OR (gap > EEVDF_LATENCY)
-        │     ├── double-lock rq_locks (addr-ordered)
-        │     ├── walk rbtree_last → rbtree_prev, take nr_running/2 tasks
-        │     ├── update cpu field, insert into local rbtree
-        │     └── re-check busiest CPU's min_vruntime
+        │     ├── find busiest online CPU (max nr_running,
+        │     │     tiebreak: max min_vruntime)
+        │     ├── gate: (rq empty) OR (src.nr_running > rq.nr_running)
+        │     ├── count = src.nr_running / 2
+        │     ├── double-lock rq_locks (addr-ordered, single IRQ save)
+        │     ├── walk rbtree_last → rbtree_prev, collect count tasks
+        │     ├── normalize vruntime: max(t->vruntime, rq->min_vruntime)
+        │     ├── insert into local rbtree
+        │     └── if src empty: src.min_vruntime = 0
         │
         ├── pick_eevdf(rq)            (unchanged)
         ├── idle fallback             (unchanged)
         └── switch_to                 (unchanged)
 ```
 
-**Key invariant:** a task's `vruntime` is **never modified** during
-migration.  The EEVDF natural ordering will schedule migrated tasks
-fairly — they get to run sooner on the idle CPU (which has a lower
-`min_vruntime`), while the source CPU's `min_vruntime` drops because
-its most-deadline tasks (the tail) were removed.
+**Why take from the tail (largest deadline):**
+These tasks just finished their time slice and won't be scheduled again
+soon on the source CPU.  Migrating them to an idle CPU naturally
+balances the system without ping-pong — the source CPU keeps its
+"about to run" tasks (small deadline) with hot caches.
 
 ---
 
@@ -80,10 +83,14 @@ typedef struct percpu {
 ```
 
 - Incremented in `enqueue_task()`, decremented in `dequeue_task()`.
-- Read lockless by `sched_balance()` — a transient stale value is harmless
-  (at worst we skip one balance round or take ±1 task).
+- **`pick_eevdf()` also calls `dequeue_task()`** (`schedule()` step 4,
+  `task.c:382-383`).  This means `nr_running` is recomputed every
+  schedule round — always consistent with the rbtree.
+- Read lockless by `sched_balance()` and `sched_pick_cpu()` — a transient
+  stale value is harmless (at worst we skip one balance round or take
+  ±1 task).
 
-No new fields needed in `task_t` — `cpu`, `on_rq`, and `rb_node` already
+`task_t` needs no new fields — `cpu`, `on_rq`, and `rb_node` already
 support per-CPU runqueues.
 
 ### rbtree — two new functions
@@ -130,41 +137,63 @@ after zombie reaping, before `pick_eevdf()`.
 **Pseudocode:**
 
 ```
-1. Find busiest online CPU (max min_vruntime, nr_running > 0).
-   Skip self.  Return if none found.
+ 1. Find busiest online CPU:
+      - max nr_running (primary metric)
+      - tiebreak: max min_vruntime
+      - skip self, skip CPUs with nr_running == 0
+      - return if none found
 
-2. Gate:
-   a) If local nr_running == 0  →  steal unconditionally.
-   b) Else if (max_vr - rq->min_vruntime) < EEVDF_LATENCY  →  return.
+ 2. Gate:
+      a) If local nr_running == 0 → proceed (idle steal).
+      b) Else if src.nr_running <= local.nr_running → return.
+         (no real imbalance — pull would overshoot)
+      c) Else proceed.
 
-3. count = max(1, src.nr_running / 2)
+ 3. count = src.nr_running / 2
+    (integer division; with (b) this is always ≥ 1)
 
-4. Double-lock both rq_locks (ordered by address to avoid deadlock).
+ 4. Double-lock both rq_locks, ordered by address to avoid deadlock.
+    Use a single IRQ save/restore around the entire critical section
+    (spin_lock_irqsave/lock pair nesting is not safe — re-enabling
+    interrupts partway through schedule() would be incorrect):
 
-5. Walk src rbtree from rbtree_last() backwards via rbtree_prev(),
-   collecting up to `count` tasks.  For each:
-     - rbtree_erase from src
-     - t->on_rq = false
-     - t->cpu = rq->cpu_id
-     - src.nr_running--
+      uint64_t flags = arch_local_irq_save();
+      spinlock_T *lo = (uintptr_t)&src->rq_lock < (uintptr_t)&rq->rq_lock
+                       ? &src->rq_lock : &rq->rq_lock;
+      spinlock_T *hi = (lo == &src->rq_lock) ? &rq->rq_lock : &src->rq_lock;
+      spin_lock(lo);
+      spin_lock(hi);
 
-6. Insert each collected task into local rbtree:
-     - t->deadline = t->vruntime + EEVDF_MIN_SLICE
-     - t->on_rq = true
-     - rbtree_insert
-     - rq->nr_running++
+      // ... critical section ...
 
-7. If src runqueue still non-empty, update src.min_vruntime from
-   rbtree_first.
+      spin_unlock(hi);
+      spin_unlock(lo);
+      arch_local_irq_restore(flags);
 
-8. Unlock both.
+ 5. Walk src rbtree from rbtree_last() backwards via rbtree_prev(),
+    collecting up to `count` tasks.  For each:
+      - rbtree_erase from src
+      - t->on_rq = false
+      - t->cpu = rq->cpu_id
+      - src.nr_running--
+
+ 6. Insert each collected task into local rbtree.
+    Before inserting, normalize vruntime to the target CPU's timeline
+    (see rationale § "Wakeup boost interaction"):
+      - t->vruntime = max(t->vruntime, rq->min_vruntime)
+      - t->deadline = t->vruntime + EEVDF_MIN_SLICE
+      - t->on_rq = true
+      - rbtree_insert
+      - rq->nr_running++
+
+ 7. If src runqueue is now empty:
+      src.min_vruntime = 0
+    (Fresh start — next tasks enqueued here won't inherit a stale
+     baseline.  Do NOT decrease min_vruntime when non-empty — see
+     rationale § "min_vruntime monotonicity".)
+
+ 8. Unlock both, restore IRQs.
 ```
-
-**Why take from the tail (largest deadline):**
-These tasks just finished their time slice and won't be scheduled again
-soon on the source CPU.  Migrating them to an idle CPU naturally
-balances the system without ping-pong — the source CPU keeps its
-"about to run" tasks (small deadline) with hot caches.
 
 ---
 
@@ -174,13 +203,86 @@ balances the system without ping-pong — the source CPU keeps its
 |---|---|---|
 | `spawn_user_task()` | `tsk->cpu = 0` | → `sched_pick_cpu()` |
 | `kernel_thread()` | `tsk->cpu = 0` | → `sched_pick_cpu()` |
-| `do_fork()` child | inherits parent? | → `sched_pick_cpu()` |
+| `do_fork()` child | copied from parent? | → `sched_pick_cpu()` |
 | `schedule()` step 3.5 | (absent) | → `sched_balance(rq)` |
 | `enqueue_task()` | — | → `rq->nr_running++` |
 | `dequeue_task()` | — | → `rq->nr_running--` |
 
-`task_wake()` **needs no changes** — it already uses `t->cpu` to
-determine the target runqueue.
+`task_wake()` **needs no changes** — it already enqueues to `t->cpu`'s
+runqueue.  If a task was migrated by `sched_balance`, `t->cpu` already
+points to the new CPU, and the wakeup boost is computed from the correct
+(target) runqueue's `min_vruntime`.
+
+---
+
+## Design rationale
+
+### Why `nr_running` and not `min_vruntime` as the primary load metric
+
+`min_vruntime` has restricted monotonic semantics in this codebase: it
+is only ever increased by `pick_eevdf()` and `schedule()`.  It
+correlates with cumulative work but **not** with current load.
+
+Counterexample:
+
+| CPU | Tasks | min_vruntime | nr_running |
+|-----|-------|-------------|------------|
+| 0   | 10 interactive tasks (frequent sleep → wakeup boost keeps vruntime low) | 100 | 10 |
+| 1   | 1 CPU-bound task (vruntime +1/tick, no sleep) | 500 | 1 |
+
+A `min_vruntime` gap check sees CPU 1 as "busiest" and steals its
+single task.  After stealing, CPU 1 goes idle and CPU 0 has 11 tasks —
+the opposite of correct behavior.
+
+Using `nr_running` correctly identifies CPU 0 as the busiest CPU.
+`min_vruntime` is retained only as a tiebreaker (when two CPUs have the
+same task count, prefer the one with higher `min_vruntime` — its tasks
+have run more and deserve relief sooner).
+
+### `min_vruntime` monotonicity
+
+After removing tail (high-vruntime) tasks, `rbtree_first` returns a
+task with a **lower** vruntime than before.  If we updated
+`src.min_vruntime` from `rbtree_first`, we'd decrease it, breaking the
+EEVDF invariant that `min_vruntime` only increases.
+
+Consequence: `task_wake()`'s wakeup boost ceiling depends on
+`min_vruntime` (`task.c:134-137`).  A lower `min_vruntime` means a
+lower boost ceiling, degrading wakeup latency on the source CPU for
+interactive tasks.
+
+**Therefore:** do not update `src.min_vruntime` after migration.  The
+existing code in `pick_eevdf()` and `schedule()` will advance it
+naturally on the next scheduling round.  The only exception is when the
+runqueue becomes empty — set to 0 to signal "fresh start."
+
+### Wakeup boost interaction
+
+`task_wake()` boosts vruntime based on the woken task's home CPU's
+`min_vruntime` (`task.c:134-137`):
+
+```c
+uint64_t wake_vruntime = rq->min_vruntime > EEVDF_LATENCY
+    ? rq->min_vruntime - EEVDF_LATENCY : 0;
+if (t->vruntime < wake_vruntime)
+    t->vruntime = wake_vruntime;
+```
+
+If a task woke on an overloaded CPU (high `min_vruntime`), its
+vruntime was boosted upward.  After migration to a less-loaded CPU
+(lower `min_vruntime`), this boosted vruntime would place it far right
+in the target rbtree — it appears to have "already run a lot" and
+would be unfairly starved for up to `EEVDF_LATENCY` ticks.
+
+**Mitigation:** on migration, normalize vruntime:
+
+```c
+t->vruntime = max(t->vruntime, rq->min_vruntime);
+```
+
+This is a cap, not a boost — the task gets at worst "fair" placement
+(aligned with the target CPU's timeline) and at best a head-start if
+its vruntime was already behind.
 
 ---
 
@@ -189,15 +291,28 @@ determine the target runqueue.
 - **Only one online CPU:** step 1 finds no source, returns immediately.
 - **Source queue drained between lockless read and lock acquire:**
   `rbtree_last()` returns NULL, `taken == 0`, no side effects.
-- **`nr_running == 1` on source:** `count = 1/2 = 0` → bumped to 1,
-  stealing the only task.  Source CPU goes idle — correct.
 - **`nr_running` transiently stale:** lockless read may be ±1 off.
-  Worst case: pull one fewer/more task than ideal.  Balances next round.
-- **min_vruntime reads:** lockless, may see stale value.  At worst the
-  gap check is slightly too strict/lenient for one round.
+  Worst case: pull one fewer/more task than ideal.  Next
+  `sched_balance()` corrects.
+- **`min_vruntime` tiebreak reads:** lockless, may see stale value.
+  At worst the tiebreaker is wrong for one round.
+- **Overshoot on small queues:** `src.nr_running = 2, local.nr_running = 1`,
+  count = 1.  Stealing the only task overshoots to (1:2).  The next
+  round on the other CPU's `schedule()` will steal back.  Self-correcting.
+- **AP online window (`smp.c:123-133`):** `cpu->online = 1` is set
+  before `scheduler_ok = 1`.  `sched_pick_cpu` may select an AP with
+  `nr_running = 0` during this window — this is correct behavior
+  (least-loaded CPU wins).  `task_wake` holds `rq_lock` so the enqueue
+  is safe.
 - **Migration while task is in `task_wake` path:** `task_wake` holds
   `rq_lock` during enqueue.  `sched_balance` also acquires `rq_lock`
   (of source).  Ordered correctly — no race.
+- **Idle CPUs hammering the busiest lock:** all idle APs enter
+  `sched_balance` at 100 Hz (LAPIC timer).  With multiple idle cores,
+  all attempt to steal from the same busy CPU simultaneously.  The
+  double-lock serializes them — only one succeeds.  For a first
+  implementation this is acceptable; future optimization could add an
+  exponential backoff in the idle loop.
 
 ---
 
@@ -206,14 +321,15 @@ determine the target runqueue.
 1. **Unit test `sched_pick_cpu()`** — mock percpu_data, verify
    least-loaded CPU chosen.
 2. **Unit test `sched_balance` gate** — verify steal triggers on
-   empty queue and on gap > LANTENCY, but not on small gap.
+   empty local queue, triggers on `src.nr_running > local.nr_running`,
+   and skips when `src.nr_running <= local.nr_running`.
 3. **Integration: `systest` on multi-core** — existing 70 tests must
    pass with `num_cpus > 1`.
-4. **Smoke test: shell on AP** — verify user processes can run on
-   non-BSP cores via `taskset`-like manual pinning (future).
-5. **Load distribution smoke test** — spawn `num_cpus` busy-loop
+4. **Load distribution smoke test** — spawn `num_cpus` busy-loop
    processes, verify via debug log that each lands on a different CPU
    and `schedule_count` grows on all cores.
+5. **`rbtree_last` / `rbtree_prev` correctness** — extend existing
+   rbtree unit tests in systest to cover the new functions.
 
 ---
 
