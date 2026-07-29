@@ -46,4 +46,10 @@ rbtree_node_t *rbtree_first(rbtree_root_t *root);
 /* Return the inorder successor, or NULL if node is the rightmost. */
 rbtree_node_t *rbtree_next(rbtree_node_t *node);
 
+/* Return the rightmost (maximum) node, or NULL if tree is empty. */
+rbtree_node_t *rbtree_last(rbtree_root_t *root);
+
+/* Return the inorder predecessor, or NULL if node is the leftmost. */
+rbtree_node_t *rbtree_prev(rbtree_node_t *node);
+
 #endif /* _RBTREE_H */

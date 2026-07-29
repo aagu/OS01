@@ -168,6 +168,35 @@ rbtree_node_t *rbtree_next(rbtree_node_t *node)
     return p;
 }
 
+/* ── Tree maximum ──────────────────────────────────────── */
+
+rbtree_node_t *rbtree_last(rbtree_root_t *root)
+{
+    rbtree_node_t *n = root->rb_node;
+    if (!n) return NULL;
+    while (n->right)
+        n = n->right;
+    return n;
+}
+
+/* ── Inorder predecessor ───────────────────────────────── */
+
+rbtree_node_t *rbtree_prev(rbtree_node_t *node)
+{
+    if (node->left) {
+        node = node->left;
+        while (node->right)
+            node = node->right;
+        return node;
+    }
+    rbtree_node_t *p = node->parent;
+    while (p && node == p->left) {
+        node = p;
+        p = p->parent;
+    }
+    return p;
+}
+
 /* ── Erase ────────────────────────────────────────────── */
 
 static void rbtree_erase_fixup(rbtree_node_t *node, rbtree_node_t *parent,
