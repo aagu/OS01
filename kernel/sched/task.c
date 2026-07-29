@@ -1245,9 +1245,10 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
     child_mm->pml4 = (uint64_t *)Virt_To_Phy((uint64_t)child_pml4);
     *cr3_out = (uint64_t)child_mm->pml4;
 
-    // TLB flush: parent's in-memory PTEs were modified (R/W->R/O+COW).
-    // Only the current CPU runs the parent's mm — local flush is sufficient.
-    flush_tlb();
+    // TLB shootdown: parent's in-memory PTEs were modified (R/W → R/O+COW).
+    // With SMP load balancing the parent may run on any CPU — must
+    // invalidate ALL cores' TLBs, not just the local one.
+    tlb_shootdown();
 
     return child_mm;
 
