@@ -35,10 +35,10 @@ void console_putchar(char c)
 {
     if (!term_initialized) return;
 
-    if (!console_fb_active) {
-        write_serial(c);
+    write_serial(c);   // mirror to serial unconditionally
+
+    if (!console_fb_active)
         return;
-    }
 
     switch (c) {
     case '\n':

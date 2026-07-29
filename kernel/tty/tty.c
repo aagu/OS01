@@ -206,7 +206,6 @@ int tty_write(tty_t *tty, const char *buf, int size)
 
     for (int i = 0; i < size; i++) {
         tty->output_char(buf[i]);
-        write_serial(buf[i]);   // echo to serial for test/debug output
     }
     return size;
 }
