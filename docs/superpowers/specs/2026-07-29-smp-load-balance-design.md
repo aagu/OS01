@@ -30,6 +30,18 @@ count.  No separate `load_avg` or weight tracking.
 - Idle-core power management (C-states, etc.).
 - Gang scheduling or co-scheduling.
 
+### Prerequisite
+
+- **`fork_mm_copy` must use `tlb_shootdown()` instead of local `flush_tlb()`.**
+  Currently `fork_mm_copy()` (`task.c:1236`) performs `flush_tlb()` on the
+  local CPU only.  With load balancing, the parent process may be running
+  on a different CPU after fork, and that CPU's TLB still caches writable
+  mappings to COW pages — causing silent data corruption if both parent
+  and child write before the TLB is evicted.  This is an *existing* bug
+  that load balancing makes more likely to trigger.  The fix (replacing
+  `flush_tlb()` with `tlb_shootdown()`) should be implemented before or
+  alongside this design.
+
 ---
 
 ## Architecture
@@ -558,7 +570,8 @@ its vruntime was already behind.
 | File | Change |
 |---|---|
 | `kernel/include/kernel/percpu.h` | +`uint32_t nr_running` |
-| `kernel/sched/task.c` | +`sched_pick_cpu()`, +`sched_balance()`, +`sched_notify_remote()`, update `enqueue_task`/`dequeue_task`, update `do_fork()` (CPU selection + fair_start + IPI) |
+| `kernel/sched/task.c` | +`sched_pick_cpu()`, +`sched_balance()`, +`sched_notify_remote()`, update `enqueue_task`/`dequeue_task`, update `do_fork()` (CPU selection + fair_start + IPI), remove `df->cpu=0` override |
+| `kernel/sched/task.c` (prereq) | COW fix: replace `flush_tlb()` with `tlb_shootdown()` in `fork_mm_copy()` |
 | `libc/include/rbtree.h` | +`rbtree_last`, +`rbtree_prev` declarations |
 | `libc/rbtree/rbtree.c` | +`rbtree_last()`, +`rbtree_prev()` implementations |
 | `test/include/kernel/task.h` | sync `nr_running` field |
