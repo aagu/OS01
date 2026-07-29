@@ -115,31 +115,45 @@ void task_wake(task_t *t)
 {
     /*
      * Never enqueue the idle task — it is always RUNNING on its
-     * CPU and must never appear on a runqueue.  If we enqueued it,
-     * pick_eevdf() could select it and switch_to() would corrupt
-     * the idle loop's kernel stack.
+     * CPU and must never appear on a runqueue.
      */
     if (t == percpu_data[t->cpu].idle)
         return;
 
-    percpu_t *rq = &percpu_data[t->cpu];
     t->state = TASK_RUNNING;
-    if (t->on_rq)
-        return;
+
+retry:
     /*
-     * Read min_vruntime without rq_lock — may see a stale (lower) value.
-     * This gives the woken task a slightly larger vruntime boost, making it
-     * MORE likely to be scheduled (anti-starvation).  Harmless race.
+     * Read t->cpu locklessly — sched_balance may change it concurrently.
+     * We re-check both t->cpu and t->on_rq under the acquired rq_lock
+     * to close the race window.
      */
+    percpu_t *rq = &percpu_data[*(volatile uint32_t *)&t->cpu];
+    uint64_t flags = spin_lock_irqsave(&rq->rq_lock);
+
+    /* Re-check on_rq under lock — sched_balance may have enqueued it */
+    if (t->on_rq) {
+        spin_unlock_irqrestore(&rq->rq_lock, flags);
+        return;
+    }
+
+    /* Re-check t->cpu under lock — sched_balance may have migrated it */
+    if ((uintptr_t)rq != (uintptr_t)&percpu_data[*(volatile uint32_t *)&t->cpu]) {
+        spin_unlock_irqrestore(&rq->rq_lock, flags);
+        goto retry;
+    }
+
+    /* Wakeup boost: prevent starvation by raising vruntime floor */
     uint64_t wake_vruntime = rq->min_vruntime > EEVDF_LATENCY
         ? rq->min_vruntime - EEVDF_LATENCY : 0;
     if (t->vruntime < wake_vruntime)
         t->vruntime = wake_vruntime;
-    {
-        uint64_t flags = spin_lock_irqsave(&rq->rq_lock);
-        enqueue_task(t, rq);
-        spin_unlock_irqrestore(&rq->rq_lock, flags);
-    }
+
+    enqueue_task(t, rq);
+    t->cpu = rq->cpu_id;  // keep t->cpu in sync with actual rq
+
+    spin_unlock_irqrestore(&rq->rq_lock, flags);
+
     if ((int)t->cpu != (int)cpu_id())
         rq->need_resched = 1;
 }
