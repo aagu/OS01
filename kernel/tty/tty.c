@@ -16,44 +16,29 @@
 //  Internal helpers
 // ═══════════════════════════════════════════════════════
 
-static inline bool tty_cooked_empty(tty_t *tty)
+static inline bool tty_ring_empty(tty_t *tty)
 {
     return tty->head == tty->tail;
 }
 
-static inline bool tty_cooked_full(tty_t *tty)
+static inline bool tty_ring_full(tty_t *tty)
 {
     int next = (tty->head + 1) % TTY_BUF_SIZE;
     return next == tty->tail;
 }
 
-static bool tty_cooked_push(tty_t *tty, char c)
+static bool tty_ring_push(tty_t *tty, char c)
 {
-    uint64_t flags = spin_lock_irqsave(&tty->cooked_lock);
+    uint64_t flags = spin_lock_irqsave(&tty->ring_lock);
 
     bool ok = false;
-    if (!tty_cooked_full(tty)) {
-        tty->cooked[tty->head] = c;
+    if (!tty_ring_full(tty)) {
+        tty->ring[tty->head] = c;
         tty->head = (tty->head + 1) % TTY_BUF_SIZE;
         ok = true;
     }
 
-    spin_unlock_irqrestore(&tty->cooked_lock, flags);
-    return ok;
-}
-
-static bool tty_cooked_pop(tty_t *tty, char *c)
-{
-    uint64_t flags = spin_lock_irqsave(&tty->cooked_lock);
-
-    bool ok = false;
-    if (!tty_cooked_empty(tty)) {
-        *c = tty->cooked[tty->tail];
-        tty->tail = (tty->tail + 1) % TTY_BUF_SIZE;
-        ok = true;
-    }
-
-    spin_unlock_irqrestore(&tty->cooked_lock, flags);
+    spin_unlock_irqrestore(&tty->ring_lock, flags);
     return ok;
 }
 
@@ -76,16 +61,16 @@ static void tty_wake_waiters(tty_t *tty)
     }
 
     // 2. Cascade-wake all poll waiters (fd_poll path)
-    // read_poll is protected by cooked_lock (see poll_wait in tty_poll).
+    // read_poll is protected by ring_lock (see poll_wait in tty_poll).
     {
-        uint64_t flags = spin_lock_irqsave(&tty->cooked_lock);
+        uint64_t flags = spin_lock_irqsave(&tty->ring_lock);
         while (!list_is_empty(&tty->read_poll)) {
             list_t *node = tty->read_poll.next;
             list_del_init(node);
             poll_wait_entry_t *e = container_of(node, poll_wait_entry_t, node);
             wait_queue_wake_all(e->poll_wq);
         }
-        spin_unlock_irqrestore(&tty->cooked_lock, flags);
+        spin_unlock_irqrestore(&tty->ring_lock, flags);
     }
 
     // Notify the scheduler that a task was woken — otherwise the
@@ -114,14 +99,10 @@ tty_t *tty_alloc(void (*output_char)(char), void (*echo_char)(char))
 
     tty->head = 0;
     tty->tail = 0;
-    tty->line_len = 0;
-    tty->read_pos = 0;
-    tty->lflag = TTY_L_ICANON | TTY_L_ECHO | TTY_L_ISIG;
-    tty->pgrp = 0;
     list_init(&tty->read_wait);
     list_init(&tty->read_poll);
     spin_init(&tty->read_wait_lock);
-    spin_init(&tty->cooked_lock);
+    spin_init(&tty->ring_lock);
 
     tty->output_char = output_char ? output_char : tty_def_output;
     tty->echo_char   = echo_char   ? echo_char   : tty->output_char;
@@ -137,73 +118,17 @@ void tty_push_input(tty_t *tty, char c)
 {
     if (!tty)
         return;
-    if (!tty_cooked_push(tty, c))
+    if (!tty_ring_push(tty, c))
         return;
     tty_wake_waiters(tty);
 }
 
 // ═══════════════════════════════════════════════════════
-//  Canonical mode processing
-// ═══════════════════════════════════════════════════════
-
-static int tty_canon_process(tty_t *tty, char c)
-{
-    if (c == '\n' || c == '\r') {
-        tty->line[tty->line_len++] = '\n';
-        tty->line[tty->line_len] = '\0';
-        tty->line_ready = true;
-        if (tty->lflag & TTY_L_ECHO) {
-            tty->echo_char('\r');
-            tty->echo_char('\n');
-        }
-        return tty->line_len;
-    }
-
-    if (c == '\b' || c == 0x7F) {
-        if (tty->line_len > 0) {
-            tty->line_len--;
-            if (tty->lflag & TTY_L_ECHO) {
-                tty->echo_char('\b');
-                tty->echo_char(' ');
-                tty->echo_char('\b');
-            }
-        }
-        return -1;
-    }
-
-    if (c == 0x03 && (tty->lflag & TTY_L_ISIG)) {
-        current->signal |= (1ULL << SIGINT);
-        tty->line_len = 0;
-        tty->line_ready = false;
-        if (tty->lflag & TTY_L_ECHO) {
-            tty->echo_char('^');
-            tty->echo_char('C');
-            tty->echo_char('\r');
-            tty->echo_char('\n');
-        }
-        return -1;
-    }
-
-    if (c == 0x04 && tty->line_len == 0)
-        return 0;
-
-    if (c >= ' ') {
-        if (tty->line_len < TTY_BUF_SIZE - 1) {
-            tty->line[tty->line_len++] = c;
-            if (tty->lflag & TTY_L_ECHO)
-                tty->echo_char(c);
-        }
-    }
-
-    return -1;
-}
-
-// ═══════════════════════════════════════════════════════
-//  tty_read — blocking read with canonical processing
+//  tty_read — blocking read from raw ring buffer
 // ═══════════════════════════════════════════════════════
 //
 //  Blocking protocol (prevents lost wakeup):
-//    1. Drain cooked ring
+//    1. Drain ring buffer directly
 //    2. Set INTERRUPTIBLE, enqueue, double-check
 //    3. If still empty: schedule() — sleeps until tty_wake_waiters()
 //    4. On wake: dequeue self, loop back to Phase 1
@@ -213,57 +138,24 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
     if (!tty || !buf || size <= 0)
         return 0;
 
-    bool canonical = (tty->lflag & TTY_L_ICANON) != 0;
-
     for (;;) {
-        // ── Return pending partial line from previous read ──
-        if (canonical && tty->line_ready && tty->read_pos < tty->line_len) {
-            int avail = tty->line_len - tty->read_pos;
-            int n = (avail < size) ? avail : size;
-            memcpy(buf, tty->line + tty->read_pos, n);
-            tty->read_pos += n;
-            if (tty->read_pos >= tty->line_len) {
-                tty->line_len = 0;
-                tty->read_pos = 0;
-                tty->line_ready = false;
-            }
-            return n;
+        // ── Phase 1: drain the ring buffer directly ──────────
+        uint64_t flags = spin_lock_irqsave(&tty->ring_lock);
+        int n = 0;
+        while (n < size && tty->head != tty->tail) {
+            buf[n++] = tty->ring[tty->tail];
+            tty->tail = (tty->tail + 1) % TTY_BUF_SIZE;
         }
+        spin_unlock_irqrestore(&tty->ring_lock, flags);
 
-        // ── Phase 1: drain the cooked ring buffer ──────────
-        char c;
-        while (tty_cooked_pop(tty, &c)) {
-            if (canonical) {
-                int ret = tty_canon_process(tty, c);
-                if (ret >= 0) {
-                    tty->read_pos = 0;
-                    int n = (ret < size) ? ret : size;
-                    memcpy(buf, tty->line, n);
-                    tty->read_pos = n;
-                    if (n >= ret) {
-                        tty->line_len = 0;
-                        tty->read_pos = 0;
-                        tty->line_ready = false;
-                    }
-                    return n;
-                }
-                continue;
-            } else {
-                buf[0] = c;
-                return 1;
-            }
-        }
+        if (n > 0)
+            return n;
 
         if (nonblock)
             return 0;
 
         // ── Signal check before blocking sleep ───────────────
-    // A fatal signal (e.g. SIGINT from Ctrl-C) may have been
-    // set on current during Phase 1.  Return 0 (EOF) so the
-    // signal delivery path can kill the process.  Non-fatal
-    // signals (SIGCHLD etc.) are ignored here — they will be
-    // handled on the next syscall return.
-    if (signal_pending_fatal())
+        if (signal_pending_fatal())
             return 0;
 
         // ── Phase 2: blocking sleep on wait queue ──────────
@@ -273,8 +165,7 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
             list_add_to_before(&tty->read_wait, &current->io_wait_node);
 
             // Double-check: IRQ may have fired on another CPU
-            // (tty_push_input from keyboard/serial handler).
-            if (!tty_cooked_empty(tty)) {
+            if (tty->head != tty->tail) {
                 list_del_init(&current->io_wait_node);
                 current->state = TASK_RUNNING;
                 spin_unlock_irqrestore(&tty->read_wait_lock, wq_flags);
@@ -283,15 +174,8 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
             spin_unlock_irqrestore(&tty->read_wait_lock, wq_flags);
         }
 
-        // Truly sleep — woken by tty_wake_waiters() from IRQ
-        // context when new input arrives.
         schedule();
 
-        // ── Deliver non-fatal signals inline ────────────────
-        // SIGCHLD from do_exit→direct switch_to(parent) is
-        // never delivered by check_signal (the direct switch
-        // bypasses ret_from_intr).  do_signal_delivery(NULL)
-        // clears the bit; signal_pending_fatal() detects kill.
         do_signal_delivery(NULL);
 
         if (signal_pending_fatal()) {
@@ -302,18 +186,12 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
             return 0;
         }
 
-        // tty_wake_waiters() calls list_del_init on our node
-        // under read_wait_lock, leaving io_wait_node self-pointing.
-        // If we were woken by something else, clean up.
         {
             uint64_t wq_flags = spin_lock_irqsave(&tty->read_wait_lock);
             if (!list_is_empty(&current->io_wait_node))
                 list_del_init(&current->io_wait_node);
             spin_unlock_irqrestore(&tty->read_wait_lock, wq_flags);
         }
-
-        // Loop back to Phase 1 — the IRQ handler already pushed
-        // data to the cooked buffer via tty_push_input.
     }
 }
 
@@ -334,7 +212,7 @@ int tty_write(tty_t *tty, const char *buf, int size)
 }
 
 // ── tty_poll — check TTY readiness ───────────────────────
-// TTY is always writable.  Readable if cooked ring buffer
+// TTY is always writable.  Readable if ring buffer
 // has data.  If not ready and pt is provided, register a
 // poll_wait_entry on tty->read_poll for cascade wake when
 // tty_push_input() → tty_wake_waiters() fires.
@@ -346,99 +224,52 @@ uint32_t tty_poll(tty_t *tty, poll_table_t *pt)
     // TTY output is always ready
     mask |= POLLOUT | POLLWRNORM;
 
-    // Check cooked ring buffer
-    uint64_t flags = spin_lock_irqsave(&tty->cooked_lock);
+    // Check ring buffer
+    uint64_t flags = spin_lock_irqsave(&tty->ring_lock);
     if (tty->head != tty->tail) {
         mask |= POLLIN | POLLRDNORM;
     } else if (pt && !pt->triggered) {
-        poll_wait(pt, &tty->read_poll, &tty->cooked_lock);
+        poll_wait(pt, &tty->read_poll, &tty->ring_lock);
     }
-    spin_unlock_irqrestore(&tty->cooked_lock, flags);
+    spin_unlock_irqrestore(&tty->ring_lock, flags);
 
     return mask;
 }
 
-// ── ioctl — line discipline control ─────────────
-// Maps between kernel lflag bits and POSIX termios flags.
-// Only ICANON and ECHO are live; ISIG is mandatory.
+// ── tty_phys_ioctl — physical TTY ioctl callback for devfs_ops.ioctl ──
+// Handles TCGETS/TCSETS/TIOCGWINSZ/TIOCGPGRP/FIONREAD.
 
-int tty_ioctl(tty_t *tty, int cmd, void *arg)
+int tty_phys_ioctl(struct vfs_node *node, int cmd, void *arg)
 {
-    if (!tty || !arg)
-        return -EINVAL;
-
-    struct termios *tio = (struct termios *)arg;
-
+    (void)node;
     switch (cmd) {
     case TCGETS: {
-        // Read current line discipline into termios
-        tio->c_iflag = ICRNL | IXON | BRKINT;
-        tio->c_oflag = OPOST | ONLCR;
-        tio->c_cflag = CS8 | CREAD | CLOCAL;
-        tio->c_lflag = ISIG;  // ISIG is always on
-        if (tty->lflag & TTY_L_ICANON) tio->c_lflag |= ICANON;
-        if (tty->lflag & TTY_L_ECHO)   tio->c_lflag |= ECHO;
-        tio->c_lflag |= ECHOE | ECHOK | ECHOCTL;
-        tio->c_line = 0;
-        tio->c_cc[VINTR]    = 0x03;
-        tio->c_cc[VQUIT]    = 0x1c;
-        tio->c_cc[VERASE]   = 0x7f;
-        tio->c_cc[VKILL]    = 0x15;
-        tio->c_cc[VEOF]     = 0x04;
-        tio->c_cc[VTIME]    = 0;
-        tio->c_cc[VMIN]     = 1;
-        tio->c_cc[VSTART]   = 0x11;
-        tio->c_cc[VSTOP]    = 0x13;
-        tio->c_cc[VSUSP]    = 0x1a;
-        tio->c_cc[VEOL]     = 0;
-        tio->c_cc[VREPRINT] = 0x12;
-        tio->c_cc[VDISCARD] = 0x0f;
-        tio->c_cc[VWERASE]  = 0x17;
-        tio->c_cc[VLNEXT]   = 0x16;
-        tio->c_cc[VEOL2]    = 0;
-        tio->__c_ispeed = 38400;
-        tio->__c_ospeed = 38400;
+        struct termios t;
+        memset(&t, 0, sizeof(t));
+        t.c_lflag = ICANON | ECHO | ISIG;
+        t.c_iflag = ICRNL;
+        t.c_oflag = OPOST | ONLCR;
+        memcpy(arg, &t, sizeof(t));
         return 0;
     }
-
-    case TCSETS:
-    case TCSETSW:
-    case TCSETSF: {
-        // Write: apply ICANON and ECHO; ISIG is force-enabled
-        tty->lflag = TTY_L_ISIG;
-        if (tio->c_lflag & ICANON) tty->lflag |= TTY_L_ICANON;
-        if (tio->c_lflag & ECHO)   tty->lflag |= TTY_L_ECHO;
-
-        // Reset canonical line buffer
-        tty->line_len = 0;
-        tty->read_pos = 0;
-        tty->line_ready = false;
-
-        // Flush the cooked ring buffer — discards any pending
-        // input accumulated before the mode switch (e.g. serial
-        // noise during kernel init).
-        uint64_t flags = spin_lock_irqsave(&tty->cooked_lock);
-        tty->head = 0;
-        tty->tail = 0;
-        spin_unlock_irqrestore(&tty->cooked_lock, flags);
+    case TCSETS: case TCSETSW: return 0;  // store only, no-op
+    case TIOCGWINSZ:
+        ((struct winsize *)arg)->ws_row = 25;
+        ((struct winsize *)arg)->ws_col = 80;
+        return 0;
+    case TIOCGPGRP: *(pid_t *)arg = 0; return 0;
+    case TIOCSPGRP: return 0;
+    case FIONREAD: {
+        tty_t *tty = get_dev_tty();
+        *(int *)arg = tty ? (tty->head - tty->tail + TTY_BUF_SIZE) % TTY_BUF_SIZE : 0;
         return 0;
     }
-
-    case 0x541B: { // FIONREAD — bytes available to read
-        int *n = (int *)arg;
-        int head = tty->head;
-        int tail = tty->tail;
-        *n = (head >= tail) ? (head - tail) : (TTY_BUF_SIZE - (tail - head));
-        return 0;
-    }
-
-    default:
-        return -ENOTTY;
+    default: return -ENOTTY;
     }
 }
 
 // ── Console TTY singleton ────────────────────────
-// Set by main.c during init, consumed by dev_tty_read/write and trap.c ioctl.
+// Set by main.c during init, consumed by dev_tty_read/write.
 
 static tty_t *dev_tty = NULL;
 

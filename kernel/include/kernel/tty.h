@@ -8,33 +8,20 @@
 typedef int pid_t;  /* for termios.h userspace declarations */
 
 struct poll_table;  /* forward declaration — full definition in kernel/poll.h */
+struct vfs_node;    /* forward declaration — full definition in fs/vfs.h */
 #include <termios.h>
 
 #define TTY_BUF_SIZE  256
-
-// ── Line discipline flags ──────────────────────────
-#define TTY_L_ICANON  (1 << 0)   // canonical mode (line buffering)
-#define TTY_L_ECHO    (1 << 1)   // echo input characters
-#define TTY_L_ISIG    (1 << 2)   // generate signals (^C → SIGINT)
 
 // ── TTY structure ──────────────────────────────────
 typedef struct tty_struct {
     // ── Input ring buffer ───────────────────────
     // Producer: IRQ context (keyboard handler), task context (tty_read poll)
     // Consumer: task context (tty_read)
-    spinlock_T  cooked_lock;
-    char        cooked[TTY_BUF_SIZE];
+    spinlock_T  ring_lock;
+    char        ring[TTY_BUF_SIZE];
     volatile int   head;           // producer index
     volatile int   tail;           // consumer index
-
-    // ── Canonical line buffer ───────────────────
-    char        line[TTY_BUF_SIZE];
-    int         line_len;          // bytes in the completed line
-    int         read_pos;          // bytes already consumed by tty_read
-    bool        line_ready;        // true when line is \n-terminated
-
-    // ── Line discipline ─────────────────────────
-    uint8_t     lflag;             // TTY_L_ICANON | TTY_L_ECHO | TTY_L_ISIG
 
     // ── Read wait queue ─────────────────────────
     // Tasks blocked in tty_read() wait here.
@@ -44,15 +31,12 @@ typedef struct tty_struct {
 
     // ── Poll wait list ──────────────────────────
     // Poll entries (poll_wait_entry_t.node) wait here.
-    // Also protected by cooked_lock.
+    // Also protected by ring_lock.
     list_t      read_poll;
 
     // ── Output callbacks ────────────────────────
     void (*output_char)(char c);   // primary output
     void (*echo_char)(char c);     // echo output (usually same as output_char)
-
-    // ── Foreground process group ────────────────
-    int64_t     pgrp;              // PID that receives ^C-generated SIGINT
 } tty_t;
 
 // ── API ────────────────────────────────────────────
@@ -66,10 +50,8 @@ tty_t *tty_alloc(void (*output_char)(char), void (*echo_char)(char));
 // Wakes any task blocked in tty_read().
 void tty_push_input(tty_t *tty, char c);
 
-// Read up to `size` bytes from the TTY.  In canonical mode,
-// blocks until a complete line is available (terminated by \n).
-// Returns number of bytes copied, 0 for EOF, or -EINTR if
-// interrupted by a signal.
+// Read up to `size` bytes from the TTY.  Blocks until data is available.
+// Returns number of bytes copied, or -EINTR if interrupted by a signal.
 int tty_read(tty_t *tty, char *buf, int size, bool nonblock);
 
 // Write `size` bytes to the TTY output.  Goes to both
@@ -80,9 +62,9 @@ int tty_write(tty_t *tty, const char *buf, int size);
 void tty_set_dev_tty(tty_t *tty);
 tty_t *get_dev_tty(void);
 
-// TTY ioctl — handles TCGETS/TCSETS/TCSETSW for line discipline control.
-// Returns 0 on success or -errno on failure.
-int tty_ioctl(tty_t *tty, int cmd, void *arg);
+// TTY ioctl — physical TTY ioctl callback for devfs_ops.ioctl.
+// Handles TCGETS/TCSETS/TIOCGWINSZ/TIOCGPGRP/FIONREAD.
+int tty_phys_ioctl(struct vfs_node *node, int cmd, void *arg);
 
 // TTY poll — check if input is available.  Returns POLLIN/POLLOUT mask.
 // If not ready, registers a poll_wait_entry on read_poll.

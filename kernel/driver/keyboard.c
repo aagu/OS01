@@ -189,17 +189,14 @@ static void translate_and_push(uint8_t sc, bool ext)
 
     // ── Expand VT100 escape sequences for navigation keys ──
     if (c >= 0x100) {
-        // Only emit escape sequences in raw mode; discard in canonical.
-        if (!(kbd_tty->lflag & TTY_L_ICANON)) {
-            switch (c) {
-            case K_UP:    push_vt100_seq(kbd_tty, 'A'); break;
-            case K_DOWN:  push_vt100_seq(kbd_tty, 'B'); break;
-            case K_LEFT:  push_vt100_seq(kbd_tty, 'D'); break;
-            case K_RIGHT: push_vt100_seq(kbd_tty, 'C'); break;
-            case K_HOME:  push_vt100_seq(kbd_tty, 'H'); break;
-            case K_END:   push_vt100_seq(kbd_tty, 'F'); break;
-            default: break;
-            }
+        switch (c) {
+        case K_UP:    push_vt100_seq(kbd_tty, 'A'); break;
+        case K_DOWN:  push_vt100_seq(kbd_tty, 'B'); break;
+        case K_LEFT:  push_vt100_seq(kbd_tty, 'D'); break;
+        case K_RIGHT: push_vt100_seq(kbd_tty, 'C'); break;
+        case K_HOME:  push_vt100_seq(kbd_tty, 'H'); break;
+        case K_END:   push_vt100_seq(kbd_tty, 'F'); break;
+        default: break;
         }
         return;
     }
