@@ -542,6 +542,9 @@ void schedule(void)
         spin_unlock_irqrestore(&task_list_lock, reap_flags);
     }
 
+    // ── 3.5 Load balancing ───────────────────────────────
+    sched_balance(rq);
+
     // ── 4. Pick next task (rbtree O(log n)) ─────────────────
     task_t *next;
     {
@@ -903,7 +906,7 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     tsk->signal = 0;
     tsk->blocked = 0;                        // user tasks start with empty blocked mask
     tsk->priority = 5;                     // 50 ms quantum at 100 Hz
-    tsk->cpu = cpu_id();                    // created on this CPU
+    tsk->cpu = sched_pick_cpu();          // place on least-loaded CPU
 
     // Inherit fd table from parent (the init task)
     tsk->parent = current;
@@ -1692,7 +1695,6 @@ void task_init()
     // can be produced (schedule() returns early while scheduler_ok==0).
     {
         task_t *df = deferred_free_spawn();
-        if (df) df->cpu = 0;
     }
 
     // Activate the scheduler and enter the idle loop.
