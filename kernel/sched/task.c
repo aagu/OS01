@@ -58,6 +58,7 @@ static inline list_t *task_list_next(list_t *pos)
 
 /* ── Forward declarations for load balancing ─────────── */
 static void sched_balance(percpu_t *rq);
+__attribute__((noreturn)) static void idle_task_resume(void);
 
 /* ── sched_pick_cpu: choose CPU with fewest nr_running ────
  * Called from do_fork() and spawn_user_task() to place
@@ -566,8 +567,9 @@ void schedule(void)
 
     // ── 6. Preemption guard: if the best candidate is still
     //        current and it hasn't exhausted its time slice,
-    //        skip the context switch.
-    if (next == current && current->vruntime < current->deadline) {
+    //        skip the context switch.  Always skip idle→idle.
+    if (next == current &&
+        (next == rq->idle || current->vruntime < current->deadline)) {
         rq->need_resched = 0;
         return;
     }
@@ -577,7 +579,30 @@ void schedule(void)
         rq->min_vruntime = next->vruntime;
 
     rq->need_resched = 0;
+
+    // Idle task thread->rip is 0 until its first switch_to.
+    // Fix it unconditionally — when schedule() runs from the idle
+    // loop with an empty rbtree, next==current==idle and the
+    // preemption guard may not skip us (idle vruntime==deadline==0).
+    if (next == rq->idle && next->thread->rip == 0)
+        next->thread->rip = (uint64_t)idle_task_resume;
+
     switch_to(current, next);
+}
+
+// ── Idle task entry ─────────────────────────────────────────
+// Called when switch_to first resumes an idle task that was
+// never previously switched away from (thread->rip == 0).
+// The idle task is always RUNNING but never on a runqueue —
+// schedule() falls back to it when the rbtree is empty.
+__attribute__((noreturn)) static void idle_task_resume(void)
+{
+    percpu_t *cpu = this_cpu();
+    while (1) {
+        arch_cpu_halt();
+        if (cpu->need_resched)
+            schedule();
+    }
 }
 
 // ── Task exit ──────────────────────────────────────────────
