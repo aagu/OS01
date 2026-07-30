@@ -4,6 +4,7 @@
 #include <kernel.h>
 #include <kernel/arch/gate.h>
 #include <kernel/arch/spinlock.h>
+#include <kernel/arch/irq.h>
 #include <kernel/hang.h>
 #include <kernel/debug.h>
 #include <kernel/log.h>
@@ -345,6 +346,111 @@ int blocker_wait(blocker_check_t check, int type, bool signal_can_wake)
         return -EINTR;
 
     return 0;
+}
+
+/* ── sched_balance: pull or steal tasks from busiest CPU ──
+ *
+ * Called from schedule() after zombie reaping, before pick_eevdf().
+ *
+ * Algorithm:
+ *   1. Find busiest CPU (max nr_running, tiebreak max min_vruntime)
+ *   2. Gate: proceed if local is idle OR gap >= 2 tasks
+ *   3. Steal count = max(1, (src - local) / 2) from rbtree tail
+ *   4. Double-lock rq_locks (address-ordered), single IRQ save
+ *   5. For each task: dequeue from src, normalize vruntime, enqueue to local
+ *   6. If src now empty: src.min_vruntime = 0
+ *
+ * Takes from the tail (largest deadline) — tasks that just used
+ * their slice and won't be scheduled again soon.  Preserves source
+ * CPU's hot-cache "about to run" tasks.
+ */
+static void sched_balance(percpu_t *rq)
+{
+    /* 1. Find busiest online CPU */
+    int src_idx = -1;
+    uint32_t max_nr = 0;
+    uint64_t max_vr = 0;
+
+    for (uint32_t i = 0; i < num_cpus; i++) {
+        if (i == rq->cpu_id || !percpu_data[i].online)
+            continue;
+        uint32_t nr = *(volatile uint32_t *)&percpu_data[i].nr_running;
+        if (nr == 0)
+            continue;
+        uint64_t vr = *(volatile uint64_t *)&percpu_data[i].min_vruntime;
+        if (nr > max_nr || (nr == max_nr && vr > max_vr)) {
+            max_nr = nr;
+            max_vr = vr;
+            src_idx = (int)i;
+        }
+    }
+    if (src_idx < 0)
+        return;
+
+    /* 2. Gate */
+    if (rq->nr_running > 0) {
+        /* Non-idle: require >= 2 task gap to prevent oscillation */
+        if (max_nr <= rq->nr_running + 1)
+            return;
+    }
+    /* rq->nr_running == 0: idle steal — unconditional */
+
+    /* 3. Determine steal count */
+    int count = (int)(max_nr - rq->nr_running) / 2;
+    if (count < 1) count = 1;
+
+    percpu_t *src_rq = &percpu_data[src_idx];
+
+    /* 4. Double-lock, address-ordered, single IRQ save */
+    spinlock_T *lo, *hi;
+    if ((uintptr_t)&src_rq->rq_lock < (uintptr_t)&rq->rq_lock) {
+        lo = &src_rq->rq_lock; hi = &rq->rq_lock;
+    } else {
+        lo = &rq->rq_lock; hi = &src_rq->rq_lock;
+    }
+
+    uint64_t flags = arch_local_irq_save();
+    spin_lock(lo);
+    if (lo != hi) spin_lock(hi);
+
+    /* 5. Steal from tail */
+    rbtree_node_t *node = rbtree_last(&src_rq->run_queue);
+    int taken = 0;
+
+    while (node && taken < count) {
+        task_t *t = container_of(node, task_t, rb_node);
+
+        /* Advance BEFORE erase (rbtree_erase invalidates node's
+         * parent/left/right pointers used by rbtree_prev) */
+        rbtree_node_t *prev = rbtree_prev(node);
+
+        if (t != src_rq->idle) {
+            dequeue_task(t, src_rq);   // rbtree_erase + on_rq=false + nr_running--
+            t->cpu = rq->cpu_id;
+
+            /* Normalize vruntime to target CPU's timeline */
+            if (t->vruntime < rq->min_vruntime)
+                t->vruntime = rq->min_vruntime;
+
+            enqueue_task(t, rq);       // deadline set + on_rq=true + rbtree_insert + nr_running++
+            taken++;
+        }
+        node = prev;
+    }
+
+    /* 6. Reset min_vruntime if source is now empty */
+    if (src_rq->nr_running == 0)
+        src_rq->min_vruntime = 0;
+
+    spin_unlock(hi);
+    if (lo != hi) spin_unlock(lo);
+    arch_local_irq_restore(flags);
+
+    if (taken > 0) {
+        debug_sched("balance: CPU%u <- %d tasks from CPU%d (src_nr=%u local_nr=%u)\n",
+                    rq->cpu_id, taken, src_idx,
+                    (unsigned)src_rq->nr_running, (unsigned)rq->nr_running);
+    }
 }
 
 void schedule(void)
