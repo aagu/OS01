@@ -426,15 +426,18 @@ static void sched_balance(percpu_t *rq)
         rbtree_node_t *prev = rbtree_prev(node);
 
         if (t != src_rq->idle) {
-            dequeue_task(t, src_rq);   // rbtree_erase + on_rq=false + nr_running--
-            t->cpu = rq->cpu_id;
+            /* Never migrate the user-space init process (pid==1). */
+            if (t->pid != user_init_pid) {
+                dequeue_task(t, src_rq);
+                t->cpu = rq->cpu_id;
 
-            /* Normalize vruntime to target CPU's timeline */
-            if (t->vruntime < rq->min_vruntime)
-                t->vruntime = rq->min_vruntime;
+                /* Normalize vruntime to target CPU's timeline */
+                if (t->vruntime < rq->min_vruntime)
+                    t->vruntime = rq->min_vruntime;
 
-            enqueue_task(t, rq);       // deadline set + on_rq=true + rbtree_insert + nr_running++
-            taken++;
+                enqueue_task(t, rq);
+                taken++;
+            }
         }
         node = prev;
     }

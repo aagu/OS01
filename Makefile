@@ -128,14 +128,14 @@ run: disk.img boot/uefi/OVMF.fd
 	$(QEMU_BIN) -M q35 -smp 2 -pflash boot/uefi/OVMF.fd \
 	  -drive file=disk.img,format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
-	  -m $(MEMORY) -display $(DISPLAY) -serial stdio
+	  -m $(MEMORY) -display $(DISPLAY) -serial stdio -no-reboot
 
 run-kvm: disk.img boot/uefi/OVMF.fd
 	$(QEMU_BIN) -M q35 -smp 2 -pflash boot/uefi/OVMF.fd \
 	  -accel kvm \
 	  -drive file=disk.img,format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
-	  -m $(MEMORY) -display $(DISPLAY) -serial stdio
+	  -m $(MEMORY) -display $(DISPLAY) -serial stdio -no-reboot
 
 debug: disk.img boot/uefi/OVMF.fd
 	$(QEMU_BIN) -M q35 -smp 2 -pflash boot/uefi/OVMF.fd \
