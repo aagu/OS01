@@ -1039,7 +1039,12 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     thd->rip  = (uint64_t)ret_from_intr;   // first entry via RESTORE_ALL → iretq
 
     tsk->state = TASK_RUNNING;
-    enqueue_task(tsk, &percpu_data[tsk->cpu]);
+    {
+        uint64_t flags = spin_lock_irqsave(&percpu_data[tsk->cpu].rq_lock);
+        enqueue_task(tsk, &percpu_data[tsk->cpu]);
+        spin_unlock_irqrestore(&percpu_data[tsk->cpu].rq_lock, flags);
+    }
+    sched_notify_remote(tsk);
 
     // The first user task we create is "init" — track it globally.
     if (!user_init_task) {
