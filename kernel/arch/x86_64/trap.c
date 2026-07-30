@@ -94,20 +94,34 @@ static void kill_current_user_task(pt_regs_t *regs)
 
     // Mark the task ZOMBIE now, so the reaper can clean it up later.
     // The actual resource cleanup (vmm_free_user_map, kfree) happens
-    // in do_exit() which we redirect to via iretq.
+    // in do_exit() which we call directly.
     task->state = TASK_ZOMBIE;
 
-    // Overwrite the iretq target so the task "returns" to do_exit
-    // running in ring 0 on its own kernel stack — where
-    // get_current_task() works correctly.
-    regs->rip  = (uint64_t)do_exit;
-    regs->cs   = ARCH_KERNEL_CS;
-    regs->ss   = ARCH_KERNEL_DS;
-    regs->rsp  = (uint64_t)task + STACK_SIZE;  // task's kernel stack (NOT user RSP!)
-    regs->ds   = ARCH_KERNEL_DS;
-    regs->es   = ARCH_KERNEL_DS;
-    regs->rdi  = 0;              // exit code for do_exit
-    regs->rflags = (1 << 9);     // IF=1
+    // Switch to the task's own kernel stack and call do_exit.
+    // We CANNOT use iretq for a ring-0 return here.  When iretq
+    // keeps the same privilege level (ring 0 → ring 0) it does
+    // NOT pop RSP/SS from the frame, so we would remain on the
+    // IST exception stack.  get_current_task() (RSP masking)
+    // would return garbage, causing memory corruption or a crash.
+    //
+    // Instead, switch RSP to the task's kernel stack directly and
+    // call do_exit.  RSP is set to (task + STACK_SIZE - 8) so that
+    // get_current_task() returns the correct task struct (RSP
+    // masking rounds down to the STACK_SIZE-aligned base).
+    // The -8 also mimics the stack state after a normal function
+    // call (return address below the top) so do_exit's prologue
+    // and sub-functions work correctly.  Since do_exit() calls
+    // schedule() (which context-switches away and never returns),
+    // the compiler is told this path is unreachable.
+    __asm__ __volatile__(
+        "movq %[stack_top], %%rsp\n\t"
+        "xorl %%edi, %%edi\n\t"         // rdi = 0 (exit code)
+        "call do_exit\n\t"
+        :
+        : [stack_top] "r"((uint64_t)task + STACK_SIZE - 8)
+        : "edi", "memory"
+    );
+    __builtin_unreachable();
 }
 
 // Check for user-mode fault and kill the task if so.  Returns 1 if

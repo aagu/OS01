@@ -46,9 +46,9 @@ trampoline_protected:
     movw    %ax, %gs
     movw    %ax, %ss
 
-    // Enable PAE
+    // Enable PAE and SSE (OSFXSR + OSXMMEXCPT)
     movl    %cr4, %eax
-    orl     $CR4_PAE, %eax
+    orl     $(CR4_PAE|CR4_OSFXSR|CR4_OSXMMEXCPT), %eax
     movl    %eax, %cr4
 
     // Load PML4 from trampoline data
@@ -78,6 +78,8 @@ trampoline_long:
 
     // Load per-CPU GS base via MSR
     movq    trampoline_data + 8(%rip), %rax // tdata->gs_base
+    movq    %rax, %rdx                      // split into EDX:EAX for wrmsr
+    shrq    $32, %rdx                      // EDX = high 32 bits
     movl    $IA32_GS_BASE, %ecx               // IA32_GS_BASE
     wrmsr
 
