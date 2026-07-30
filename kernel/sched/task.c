@@ -1464,9 +1464,10 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
     tsk->flags       = current->flags;
     tsk->addr_limit  = current->addr_limit;
 
-    // EEVDF: fair starting vruntime
+    // EEVDF: fair starting vruntime — pick target CPU first, then use its min_vruntime
+    uint32_t target_cpu = sched_pick_cpu();
     {
-        uint64_t fair_start = percpu_data[cpu_id()].min_vruntime;
+        uint64_t fair_start = percpu_data[target_cpu].min_vruntime;
         tsk->vruntime = current->vruntime < fair_start ? current->vruntime : fair_start;
     }
 
@@ -1479,7 +1480,7 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
     tsk->blocked     = current->blocked;  // do_fork inherits parent's blocked mask
     tsk->state       = TASK_UNINTERRUPTIBLE;
     tsk->priority    = 3;
-    tsk->cpu         = cpu_id();
+    tsk->cpu         = target_cpu;
     tsk->pid         = atomic_fetch_add((volatile uint64_t *)&pid_counter, 1);
     tsk->thread      = thd;
     tsk->parent      = current;
@@ -1558,7 +1559,12 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
     // Parent: do NOT change regs->rip — returns via error_code → RESTORE_ALL
 
     tsk->state = TASK_RUNNING;
-    enqueue_task(tsk, &percpu_data[tsk->cpu]);
+    {
+        uint64_t flags = spin_lock_irqsave(&percpu_data[tsk->cpu].rq_lock);
+        enqueue_task(tsk, &percpu_data[tsk->cpu]);
+        spin_unlock_irqrestore(&percpu_data[tsk->cpu].rq_lock, flags);
+    }
+    sched_notify_remote(tsk);
     return tsk->pid;   // parent sees child PID
 }
 
