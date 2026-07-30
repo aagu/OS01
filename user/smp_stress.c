@@ -84,14 +84,32 @@ static void worker(int id, int duration_sec)
 /* ── Entry ────────────────────────────────────────────────── */
 int main(int argc, char **argv)
 {
-    int nproc   = (argc > 1) ? atoi(argv[1]) : 4;
-    int dur_sec = (argc > 2) ? atoi(argv[2]) : 10;
+    int nproc   = 4;
+    int dur_sec = 10;
+
+    /* Minimal argument parser: -n <procs>  -d <seconds>  -h  positional */
+    for (int i = 1; i < argc; i++) {
+        if (argv[i][0] == '-') {
+            if (argv[i][1] == 'n' && argv[i][2] == '\0' && i + 1 < argc)
+                nproc   = atoi(argv[++i]);
+            else if (argv[i][1] == 'd' && argv[i][2] == '\0' && i + 1 < argc)
+                dur_sec = atoi(argv[++i]);
+            else if (argv[i][1] == 'h' && argv[i][2] == '\0') {
+                printf("usage: smp_stress [-n procs] [-d sec] [procs] [sec]\n");
+                return 0;
+            }
+            /* ignore unknown flags */
+        } else {
+            /* positional fallback */
+            if (i == 1) nproc   = atoi(argv[i]);
+            if (i == 2) dur_sec = atoi(argv[i]);
+        }
+    }
 
     if (nproc < 1)  nproc = 1;
     if (dur_sec < 1) dur_sec = 1;
 
-    printf("smp_stress: %d procs, %d sec each\n", nproc, dur_sec);
-    printf("           (run with -smp N to see load balancing)\n\n");
+    printf("smp_stress: %d procs, %d sec each (-h for help)\n", nproc, dur_sec);
 
     pid_t *children = (pid_t *)calloc((size_t)nproc, sizeof(pid_t));
     if (!children) { perror("calloc"); return 1; }
@@ -103,8 +121,9 @@ int main(int argc, char **argv)
             return 1;
         }
         if (p == 0) {
-            /* Child */
-            free(children);
+            /* Child: don't free(children) — it was allocated before
+             * fork and the COW pages belong to both processes.
+             * Just work, then _exit. */
             worker(i, dur_sec);
             /* unreachable */
         }
