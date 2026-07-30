@@ -114,6 +114,7 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 	@cp build/x86_64/user/test_fork_mmap.elf config/fsroot/bin/test_fork_mmap
 	@cp build/x86_64/user/test_cow.elf       config/fsroot/bin/test_cow
 	@cp build/x86_64/user/terminal.elf       config/fsroot/bin/terminal
+	@cp build/x86_64/user/smp_stress.elf     config/fsroot/bin/smp_stress
 	$(MAKE) -C tools check-deps
 	$(MAKE) -C tools
 	tools/mkdisk disk.img \
