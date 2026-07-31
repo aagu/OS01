@@ -18,14 +18,15 @@
 #include <time.h>
 
 // ── Action types ────────────────────────────────────────────
-#define ACT_SYSINIT     1
-#define ACT_WAIT        2
-#define ACT_ONCE        3
-#define ACT_RESPAWN     4
-#define ACT_ASKFIRST    5
-#define ACT_CTRLALTDEL  6
-#define ACT_SHUTDOWN    7
-#define ACT_RESTART     8
+// MUST be powers of 2: run_actions() uses bitmask matching.
+#define ACT_SYSINIT     0x01
+#define ACT_WAIT        0x02
+#define ACT_ONCE        0x04
+#define ACT_RESPAWN     0x08
+#define ACT_ASKFIRST    0x10
+#define ACT_CTRLALTDEL  0x20
+#define ACT_SHUTDOWN    0x40
+#define ACT_RESTART     0x80
 
 // ── Child process tracking ──────────────────────────────────
 #define MAX_PROCS 16
@@ -363,7 +364,7 @@ int main(void)
     // 2. Set up signal handling
     // SIGCHLD: reap children
     signal(SIGCHLD, sigchld_handler);
-    // SIGINT (Ctrl-C): trigger CTRLALTDEL → reboot
+    // SIGINT (Ctrl-C): ignore (no tty job control on PID 1)
     signal(SIGINT, SIG_IGN);
     // SIGHUP: reload inittab (stub for now)
     signal(SIGHUP, SIG_IGN);
