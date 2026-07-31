@@ -28,6 +28,12 @@ DEBUG      ?=
 KERNEL_SELFTEST ?=
 export KERNEL_SELFTEST
 
+# ── Inittab ────────────────────────────────────────────────
+INITTAB_FILE ?= config/inittab
+ifeq ($(OS01_SYSTEST),1)
+INITTAB_FILE := config/inittab.systest
+endif
+
 all: disk.img
 
 # ── Bootloader ──────────────────────────────────────────
@@ -115,6 +121,7 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 	@cp build/x86_64/user/test_cow.elf       config/fsroot/bin/test_cow
 	@cp build/x86_64/user/terminal.elf       config/fsroot/bin/terminal
 	@cp build/x86_64/user/smp_stress.elf     config/fsroot/bin/smp_stress
+	@cp $(INITTAB_FILE) config/fsroot/etc/inittab
 	$(MAKE) -C tools check-deps
 	$(MAKE) -C tools
 	tools/mkdisk disk.img \
@@ -156,8 +163,15 @@ test-phase-0: disk.img
 
 .PHONY: test-syscall
 test-syscall:
+	rm -f disk.img
 	$(MAKE) OS01_SYSTEST=1 disk.img boot/uefi/OVMF.fd
 	python3 tests/run_test.py systest
+
+.PHONY: test-inittab
+test-inittab:
+	rm -f disk.img
+	$(MAKE) INITTAB_FILE=config/inittab.test disk.img boot/uefi/OVMF.fd
+	python3 tests/run_test.py inittab-phase
 
 # ── Clean ───────────────────────────────────────────────
 

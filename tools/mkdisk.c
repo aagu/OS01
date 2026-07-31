@@ -225,6 +225,18 @@ int main(int argc, char **argv)
         system(glob_cmd);
     }
 
+    // Copy fsroot/etc/* to /etc/
+    {
+        char glob_cmd[1024];
+        snprintf(glob_cmd, sizeof(glob_cmd),
+                 "for f in %s/etc/*; do "
+                 "  test -f \"$f\" || continue; "
+                 "  base=$(basename \"$f\"); "
+                 "  debugfs -w %s -R \"write $f /etc/$base\" 2>/dev/null; "
+                 "done", rootfs_dir, rootfs_tmp);
+        system(glob_cmd);
+    }
+
     run_cmd("dd if=%s of=disk.img bs=512 seek=%lu conv=notrunc 2>/dev/null",
             rootfs_tmp, (unsigned long)PART2_START);
 
