@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <sys/syscall.h>
 #include <time.h>
+#include <fcntl.h>
 
 // ── Action types ────────────────────────────────────────────
 // MUST be powers of 2: run_actions() uses bitmask matching.
@@ -331,16 +332,141 @@ static void add_action(int action, const char *tty, const char *process)
     a->process[len] = '\0';
 }
 
+// ── Map action name to ACT_* bitmask ────────────────────────
+static int parse_action(const char *name)
+{
+    static const struct { const char *name; int action; } map[] = {
+        {"sysinit",   ACT_SYSINIT},
+        {"wait",      ACT_WAIT},
+        {"once",      ACT_ONCE},
+        {"respawn",   ACT_RESPAWN},
+        {"askfirst",  ACT_ASKFIRST},
+        {"ctrlaltdel",ACT_CTRLALTDEL},
+        {"shutdown",  ACT_SHUTDOWN},
+        {"restart",   ACT_RESTART},
+    };
+    for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
+        if (strcmp(name, map[i].name) == 0)
+            return map[i].action;
+    }
+    return -1;
+}
+
 // ── Parse /etc/inittab ──────────────────────────────────────
-// Format: id:runlevel:action:process
+// Format: id:action:process
 // Actions: sysinit, wait, once, respawn, askfirst, ctrlaltdel, shutdown, restart
 static void parse_inittab(void)
 {
-    // For OS01 MVP, /etc/inittab doesn't exist on the FAT32 filesystem
-    // because there's no writable persistent storage set up yet.
-    // We always use the hardcoded fallback (see setup_fallback_actions).
-    // This function is a placeholder for future use.
-    (void)0;
+    int fd = open("/etc/inittab", O_RDONLY);
+    if (fd < 0) {
+        printf("init: /etc/inittab not found, using defaults\n");
+        return;
+    }
+
+    // Inittab is a small build-time file (<1KB); single read() is sufficient.
+    char buf[4096];
+    int64_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return;
+    buf[n] = '\0';
+
+    char *p = buf;
+    char *end = buf + n;
+    int lineno = 0;
+
+    while (p < end) {
+        char *line_start = p;
+        lineno++;
+
+        // Find end of line
+        char *nl = p;
+        while (nl < end && *nl != '\n')
+            nl++;
+        char *line_end = nl; // points to '\n' or end
+
+        // Trim trailing '\r' (CRLF)
+        if (line_end > line_start && line_end[-1] == '\r')
+            line_end--;
+
+        // Null-terminate this line in-place for string ops
+        char saved = *line_end;
+        *line_end = '\0';
+
+        // Skip leading whitespace
+        char *s = line_start;
+        while (*s == ' ' || *s == '\t')
+            s++;
+
+        // Skip blank lines and comments
+        if (*s != '\0' && *s != '#') {
+            // Split on ':', counting colons to detect excess fields
+            char *fields[3] = {NULL, NULL, NULL};
+            char *fp = s;
+            int colons = 0;
+            for (int i = 0; i < 3; i++) {
+                fields[i] = fp;
+                while (*fp && *fp != ':')
+                    fp++;
+                if (*fp == ':') {
+                    *fp = '\0';
+                    fp++;
+                    colons++;
+                } else {
+                    break;
+                }
+            }
+            // colons >= 3 means a 4th field boundary was seen
+            int has_extra = (colons >= 3);
+
+            if (!fields[0] || !fields[1] || !fields[2]) {
+                printf("init: /etc/inittab:%d: missing fields"
+                       " (need id:action:process)\n",
+                       lineno);
+            } else if (has_extra) {
+                printf("init: /etc/inittab:%d: too many fields"
+                       " (expected 3 colon-separated fields)\n",
+                       lineno);
+            } else {
+                // Trim whitespace from each field
+                for (int i = 0; i < 3; i++) {
+                    char *fs = fields[i];
+                    while (*fs == ' ' || *fs == '\t')
+                        fs++;
+                    fields[i] = fs;
+                    char *fe = fs + strlen(fs);
+                    while (fe > fs
+                           && (fe[-1] == ' ' || fe[-1] == '\t')) {
+                        fe--;
+                        *fe = '\0';
+                    }
+                }
+
+                if (fields[2][0] == '\0') {
+                    printf("init: /etc/inittab:%d: empty process\n",
+                           lineno);
+                } else if (fields[1][0] == '\0') {
+                    printf("init: /etc/inittab:%d: empty action\n",
+                           lineno);
+                } else {
+                    int action = parse_action(fields[1]);
+                    if (action < 0) {
+                        printf("init: /etc/inittab:%d:"
+                               " unknown action '%s'\n",
+                               lineno, fields[1]);
+                    } else {
+                        add_action(action, fields[0], fields[2]);
+                    }
+                }
+            }
+        }
+
+        // Restore and advance
+        *line_end = saved;
+        p = nl;
+        if (p < end)
+            p++; // skip '\n'
+    }
 }
 
 // ── Set up hardcoded fallback actions ───────────────────────
