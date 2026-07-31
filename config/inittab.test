@@ -1,0 +1,7 @@
+# Multi-phase dispatch verification
+mark_sysinit:sysinit:/bin/busybox echo SYSINIT_DONE
+mark_wait:wait:/bin/busybox echo WAIT_DONE
+mark_once:once:/bin/busybox echo ONCE_DONE
+bad:unknown_action:/bin/x
+too_many:respawn:/bin/terminal:extra
+tty1:respawn:/bin/terminal

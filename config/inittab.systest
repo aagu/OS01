@@ -1,0 +1,3 @@
+# OS01 /etc/inittab (systest mode)
+tty1:respawn:/bin/systest
+tty2:askfirst:/bin/terminal
