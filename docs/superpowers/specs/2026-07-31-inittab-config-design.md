@@ -323,14 +323,18 @@ tty1:respawn:/bin/systest
 tty2:askfirst:/bin/terminal
 ```
 
-**`config/inittab.test`** — exercises all working phase actions:
+**`config/inittab.test`** — exercises all working phase actions + error handling:
 ```
 # Multi-phase dispatch verification
 mark_sysinit:sysinit:/bin/busybox echo SYSINIT_DONE
 mark_wait:wait:/bin/busybox echo WAIT_DONE
 mark_once:once:/bin/busybox echo ONCE_DONE
+bad:unknown_action:/bin/x
+too_many:respawn:/bin/terminal:extra
 tty1:respawn:/bin/terminal
 ```
+
+The two malformed lines exercise parse error paths: `unknown_action` triggers the `parse_action` warning path, and the 4-field line triggers the `has_extra` warning path. Both are benign (rejected, not added to `actions[]`).
 
 `/bin/busybox echo` is used instead of `/bin/terminal -c` because:
 - `terminal` does not accept `argc`/`argv` (`int main(void)` at `user/terminal.c:199`); it always launches an interactive ash session that never exits
@@ -424,7 +428,7 @@ In all warning cases, `action_count` may be partial — valid lines parsed befor
 | `config/inittab.systest` | **New** — systest template |
 | `config/inittab.test` | **New** — multi-phase test template (`/bin/busybox echo`) |
 | `Makefile` | Add `INITTAB_FILE` variable + `cp` in `disk.img` recipe + `test-inittab` target |
-| `tests/run_test.py` | **New** test case `inittab-phase`: assert serial order `SYSINIT_DONE` → `WAIT_DONE` → `ONCE_DONE` → `# ` prompt |
+| `tests/run_test.py` | **New** test case `inittab-phase` (see §7 for assertion mechanism) |
 
 ---
 
@@ -432,7 +436,13 @@ In all warning cases, `action_count` may be partial — valid lines parsed befor
 
 - **Normal mode:** boot → `# ` prompt on tty1, tty2 waits for keypress. Respawn ordering (tty1 before tty2 in template → actions array) ensures the shell prompt appears before the askfirst `read(0)` blocks.
 - **`OS01_SYSTEST=1` — `make test`:** boot → systest on tty1, all systest cases pass
-- **`make test-inittab`:** boot with `config/inittab.test` → serial output matches `SYSINIT_DONE` → `WAIT_DONE` → `ONCE_DONE` → `# `. Verifies: (a) bitmask dispatch isolates each phase correctly; (b) SYSINIT and WAIT block; (c) ONCE fires-and-forgets without blocking the supervision loop; (d) respawn starts terminal after all phases
+- **`make test-inittab`:** boot with `config/inittab.test`. The test assertion:
+  1. `read_until("ONCE_DONE")` — waits for the last phase marker (and implicitly all earlier ones since SYSINIT and WAIT block before ONCE).
+  2. On the returned full buffer, assert via regex: `re.search(r'SYSINIT_DONE.*WAIT_DONE.*ONCE_DONE', buf, re.DOTALL)`. This verifies phase dispatch order in a single pass — `read_until` re-reads the log from the start each call, so sequential `read_until("A")` → `read_until("B")` only checks existence, not order. The regex on the final buffer proves the sequence.
+  3. `read_until("# ")` — confirms terminal started after all phases. (The `# ` arrival timing relative to `ONCE_DONE` is NOT asserted: ONCE is fire-and-forget, and `# ` may appear before `ONCE_DONE` in the log due to terminal startup latency. That's correct behaviour — it proves ONCE doesn't block — but the race direction is unpredictable.)
+  4. Assert `"unknown action 'unknown_action'"` appears in the buffer (parser error path).
+  5. Assert `"too many fields"` appears in the buffer (has_extra path).
+
+  This verifies: (a) bitmask dispatch isolates each phase correctly; (b) SYSINIT and WAIT are blocking (the order is guaranteed by `run_actions` calling `waitpid`); (c) ONCE does not block the supervision loop (proven by code structure, not timing — `run_actions(ACT_ONCE)` contains no `waitpid` call); (d) malformed lines are rejected with warnings; (e) respawn starts terminal after all phases.
 - **Inittab absent:** boot → fallback `/bin/terminal` (no regression)
-- **Malformed inittab lines:** warnings printed to serial, valid lines processed
 - **post-build verification:** `debugfs disk.img -R "ls -l /etc"` shows `/etc/inittab`
