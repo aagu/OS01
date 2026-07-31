@@ -1,7 +1,7 @@
 # Inittab Configuration Support
 
 **Date:** 2026-07-31  
-**Status:** Design Approved (v3)
+**Status:** Design Approved (v4)
 
 ## Overview
 
@@ -53,7 +53,7 @@ tty2:askfirst:/bin/terminal
 
 **Action table:**
 
-| inittab token | ACT_* constant (new bitmask) | Semantics | Caveat |
+| inittab token | ACT_* constant (bitmask) | Semantics | Caveat |
 |---|---|---|---|
 | `sysinit` | `0x01` | Boot phase, blocking | |
 | `wait` | `0x02` | One-time, blocking | |
@@ -92,6 +92,8 @@ tty2:askfirst:/bin/terminal
 ```
 
 The equality checks in `run_actions()` (`a->action == ACT_RESPAWN`, etc.) and child tracking (`children[j].action == a->action`) are unaffected — they compare exact values, and actions are still mutually exclusive.
+
+**Stale comment cleanup:** The old comment "CTRLALTDEL: when init receives SIGINT, reboot" at line 346 and "SIGINT (Ctrl-C): trigger CTRLALTDEL → reboot" at line 367 are misleading now that ctrlaltdel is acknowledged as not-wired. Update both.
 
 #### 2b. `parse_inittab()` in `user/init.c`
 
@@ -164,24 +166,25 @@ static void parse_inittab(void)
 
         // Skip blank lines and comments
         if (*s != '\0' && *s != '#') {
-            // Split on ':'
+            // Split on ':', counting colons to detect excess fields
+            // (including trailing empty ones like "a:b:c:")
             char *fields[3] = {NULL, NULL, NULL};
             char *fp = s;
+            int colons = 0;
             for (int i = 0; i < 3; i++) {
                 fields[i] = fp;
-                // Scan to next ':' or end-of-string
                 while (*fp && *fp != ':') fp++;
                 if (*fp == ':') {
                     *fp = '\0';
                     fp++;
+                    colons++;
                 } else {
-                    // No more colons — remaining fields stay NULL
                     break;
                 }
             }
-
-            // Detect extra fields: if there's any non-null text after 3rd colon
-            int has_extra = (*fp != '\0');
+            // colons >= 3 means we saw a 4th field boundary
+            // (even if the 4th field is empty, e.g. "a:b:c:")
+            int has_extra = (colons >= 3);
 
             if (!fields[0] || !fields[1] || !fields[2]) {
                 printf("init: /etc/inittab:%d: missing fields"
@@ -194,7 +197,7 @@ static void parse_inittab(void)
                 for (int i = 0; i < 3; i++) {
                     char *fs = fields[i];
                     while (*fs == ' ' || *fs == '\t') fs++;
-                    fields[i] = fs;  // trimmed start
+                    fields[i] = fs;
                     char *fe = fs + strlen(fs);
                     while (fe > fs && (fe[-1] == ' ' || fe[-1] == '\t')) {
                         fe--;
@@ -227,16 +230,29 @@ static void parse_inittab(void)
 }
 ```
 
+**Field-count detection summary:**
+
+| Input | colons | fields[2] | Result |
+|---|---|---|---|
+| `a:b:c` | 2 | non-NULL | OK |
+| `a:b` | 1 | NULL | "missing fields" |
+| `a:b:` | 2 | "" (non-NULL) | "empty process" |
+| `a:b:c:` | 3 | non-NULL | "too many fields" |
+| `a:b:c:d` | 3 | non-NULL | "too many fields" |
+| `a:b:c:d:e` | 3 | non-NULL | "too many fields" |
+
+The `colons >= 3` test catches all excess-field cases including the trailing-empty-colon case that `*fp != '\0'` missed in v3.
+
 #### 2c. `add_action()` hardening
 
-Add warnings for truncation (both `tty` and `process`) and overflow:
+Add warnings for truncation (both `tty` and `process`) and overflow. All `size_t` values cast to `(unsigned long)` with `%lu` — OS01 libc `vsprintf` has no `z` modifier:
 
 ```c
 static void add_action(int action, const char *tty, const char *process)
 {
     if (action_count >= MAX_ACTIONS) {
-        printf("init: too many inittab entries (max %u),"
-               " ignoring '%s'\n", (unsigned)MAX_ACTIONS, process);
+        printf("init: too many inittab entries (max %lu),"
+               " ignoring '%s'\n", (unsigned long)MAX_ACTIONS, process);
         return;
     }
     struct init_action *a = &actions[action_count++];
@@ -246,7 +262,8 @@ static void add_action(int action, const char *tty, const char *process)
         size_t len = strlen(tty);
         if (len >= sizeof(a->tty)) {
             printf("init: tty/id truncated (needs %lu, max %lu): '%s'\n",
-                   (unsigned long)len, (unsigned long)(sizeof(a->tty) - 1), tty);
+                   (unsigned long)len,
+                   (unsigned long)(sizeof(a->tty) - 1), tty);
             len = sizeof(a->tty) - 1;
         }
         memcpy(a->tty, tty, len);
@@ -258,15 +275,14 @@ static void add_action(int action, const char *tty, const char *process)
     size_t len = strlen(process);
     if (len >= sizeof(a->process)) {
         printf("init: process truncated (needs %lu, max %lu): '%s'\n",
-               (unsigned long)len, (unsigned long)(sizeof(a->process) - 1), process);
+               (unsigned long)len,
+               (unsigned long)(sizeof(a->process) - 1), process);
         len = sizeof(a->process) - 1;
     }
     memcpy(a->process, process, len);
     a->process[len] = '\0';
 }
 ```
-
-**Format specifier note:** OS01 libc `vsprintf` supports `%d`, `%u`, `%ld`, `%lu`, `%x`, `%p`, `%s`, `%c` and qualifiers `h`/`l`/`L`/`Z` — no `z` modifier. All `size_t` values are cast to `(unsigned long)` with `%lu`.
 
 #### 2d. `setup_fallback_actions()` changes
 
@@ -288,8 +304,9 @@ static void setup_fallback_actions(void)
 
 ### 3. Build System Integration
 
-#### `config/inittab` (new, version-controlled)
+#### Template files (new, version-controlled)
 
+**`config/inittab`** — default:
 ```
 # OS01 /etc/inittab
 # Format: id:action:process
@@ -299,43 +316,54 @@ tty1:respawn:/bin/terminal
 tty2:askfirst:/bin/terminal
 ```
 
-#### `config/inittab.systest` (new, version-controlled)
-
+**`config/inittab.systest`** — used when `OS01_SYSTEST=1`:
 ```
 # OS01 /etc/inittab (systest mode)
 tty1:respawn:/bin/systest
 tty2:askfirst:/bin/terminal
 ```
 
-Two separate templates (instead of `sed`) avoid: ambiguity (global `s|/bin/terminal|/bin/systest|g` hits both lines), and accidental double-replacement if more lines are added later.
-
-#### `config/inittab.test` (new, version-controlled)
-
-Test-mode inittab that exercises all working phase actions — used by a build target for verification:
-
+**`config/inittab.test`** — exercises all working phase actions:
 ```
-mark_sysinit:sysinit:/bin/terminal -c "echo SYSINIT_DONE"
-mark_wait:wait:/bin/terminal -c "echo WAIT_DONE"
-mark_once:once:/bin/terminal -c "echo ONCE_DONE"
+# Multi-phase dispatch verification
+mark_sysinit:sysinit:/bin/busybox echo SYSINIT_DONE
+mark_wait:wait:/bin/busybox echo WAIT_DONE
+mark_once:once:/bin/busybox echo ONCE_DONE
 tty1:respawn:/bin/terminal
 ```
 
-The test verifies that sysinit, wait, once, and respawn each fire in the correct phase. (The `terminal -c` pattern relies on terminal's command-line parsing; if terminal does not support `-c`, use `/bin/busybox echo` instead.)
+`/bin/busybox echo` is used instead of `/bin/terminal -c` because:
+- `terminal` does not accept `argc`/`argv` (`int main(void)` at `user/terminal.c:199`); it always launches an interactive ash session that never exits
+- BusyBox's echo applet is enabled (`CONFIG_ECHO=y` in `busybox.config:253`); `spawn()` splits argv as `/bin/busybox, echo, SYSINIT_DONE` and BusyBox dispatches to echo by `argv[1]`
+- echo writes to fd 1 (inherited from init → serial port), so all three phase markers are visible on the serial console
 
 #### Makefile changes
+
+Use a variable so the test target can override the template:
+
+```makefile
+INITTAB_FILE ?= config/inittab
+ifeq ($(OS01_SYSTEST),1)
+INITTAB_FILE := config/inittab.systest
+endif
+```
 
 In the `disk.img` target, **after** the `@mkdir -p config/fsroot/.../etc` line (currently line 104) and **before** the `mkdisk` invocation (line 120):
 
 ```makefile
-# Copy inittab template
-ifeq ($(OS01_SYSTEST),1)
-	@cp config/inittab.systest config/fsroot/etc/inittab
-else
-	@cp config/inittab config/fsroot/etc/inittab
-endif
+	@cp $(INITTAB_FILE) config/fsroot/etc/inittab
 ```
 
 Insertion point is critical: `config/fsroot/etc/` must already exist (created by the `mkdir -p` on line 104).
+
+New test target:
+
+```makefile
+.PHONY: test-inittab
+test-inittab:
+	$(MAKE) INITTAB_FILE=config/inittab.test disk.img boot/uefi/OVMF.fd
+	python3 tests/run_test.py inittab-phase
+```
 
 #### `tools/mkdisk.c` changes
 
@@ -365,15 +393,15 @@ The `test -f` guard skips the pattern when there are no files (loop body never e
 |---|---|
 | `/etc/inittab` does not exist | `open` returns -1 → `parse_inittab()` returns → `action_count==0` → fallback |
 | Inittab is empty (all comments/blank) | `action_count` stays 0 → fallback |
-| Single line has bad field count (!= 3) | Warning with line number, line skipped, parsing continues |
+| Field count != 3 (too few or too many colons) | Warning with line number, line skipped |
 | Unknown action name | Warning with line number + name, line skipped |
 | Empty process or action after trim | Warning with line number, line skipped |
-| `>` MAX_ACTIONS entries | Warning, excess entries dropped |
-| tty/id `>` 16 chars or process `>` 128 chars | Warning, truncated (now symmetric: both `tty` and `process` warn) |
+| > MAX_ACTIONS entries | Warning, excess entries dropped |
+| tty/id > 16 chars or process > 128 chars | Warning, truncated |
 
 In all warning cases, `action_count` may be partial — valid lines parsed before the error are already registered and will execute normally.
 
-**File size assumption:** Inittab is baked into the image at build time and is expected to be under 4 KB. A single `read()` call is used; the file is not expected to require partial reads. No explicit per-line length limit beyond the buffer size.
+**File size assumption:** Inittab is baked into the image at build time and is expected to be under 4 KB. A single `read()` call is used; the file is not expected to require partial reads.
 
 ---
 
@@ -390,22 +418,21 @@ In all warning cases, `action_count` may be partial — valid lines parsed befor
 
 | File | Change |
 |---|---|
-| `user/init.c` | **(a)** ACT_* constants → bitmasks; **(b)** implement `parse_inittab()` + `parse_action()`; **(c)** harden `add_action()`; **(d)** remove `#ifdef OS01_SYSTEST`; **(e)** `#include <fcntl.h>` |
+| `user/init.c` | **(a)** ACT_* constants → bitmasks (`0x01..0x80`); **(b)** implement `parse_inittab()` + `parse_action()` with `colons` counter; **(c)** harden `add_action()` (both `tty` and `process` with `%lu`); **(d)** remove `#ifdef OS01_SYSTEST` + dead CTRLALTDEL fallback; **(e)** `#include <fcntl.h>`; **(f)** fix stale SIGINT/CTRLALTDEL comments |
 | `tools/mkdisk.c` | Add loop to copy `config/fsroot/etc/*` → ext2 `/etc/` |
 | `config/inittab` | **New** — default template |
 | `config/inittab.systest` | **New** — systest template |
-| `config/inittab.test` | **New** — multi-phase test template |
-| `Makefile` | Copy appropriate inittab template into `config/fsroot/etc/` (after mkdir, before mkdisk) |
-
-**No libc changes.** `busybox_stubs.c` is untouched. No stdio implementation is added.
+| `config/inittab.test` | **New** — multi-phase test template (`/bin/busybox echo`) |
+| `Makefile` | Add `INITTAB_FILE` variable + `cp` in `disk.img` recipe + `test-inittab` target |
+| `tests/run_test.py` | **New** test case `inittab-phase`: assert serial order `SYSINIT_DONE` → `WAIT_DONE` → `ONCE_DONE` → `# ` prompt |
 
 ---
 
 ### 7. Testing
 
-- **Normal mode:** boot → terminal on tty1, tty2 waits for keypress
+- **Normal mode:** boot → `# ` prompt on tty1, tty2 waits for keypress. Respawn ordering (tty1 before tty2 in template → actions array) ensures the shell prompt appears before the askfirst `read(0)` blocks.
 - **`OS01_SYSTEST=1` — `make test`:** boot → systest on tty1, all systest cases pass
+- **`make test-inittab`:** boot with `config/inittab.test` → serial output matches `SYSINIT_DONE` → `WAIT_DONE` → `ONCE_DONE` → `# `. Verifies: (a) bitmask dispatch isolates each phase correctly; (b) SYSINIT and WAIT block; (c) ONCE fires-and-forgets without blocking the supervision loop; (d) respawn starts terminal after all phases
 - **Inittab absent:** boot → fallback `/bin/terminal` (no regression)
-- **Multi-phase test (`config/inittab.test`):** boot → SYSINIT runs (blocking, sees "SYSINIT_DONE"), WAIT runs (blocking, sees "WAIT_DONE"), ONCE runs (fire-and-forget), then terminal spawns. Verifies all phase dispatch masks work correctly with the new bitmask constants
 - **Malformed inittab lines:** warnings printed to serial, valid lines processed
-- **post-build verification:** `debugfs disk.img -R "ls -l /etc"` should show `/etc/inittab`
+- **post-build verification:** `debugfs disk.img -R "ls -l /etc"` shows `/etc/inittab`
