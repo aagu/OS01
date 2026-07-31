@@ -588,16 +588,40 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 	    --rootfs config/fsroot/
 ```
 
-- [ ] **Step 2: Add `test-inittab` target in Makefile**
+- [ ] **Step 2: Fix `test-syscall` and add `test-inittab` target in Makefile**
 
-After the `test-syscall` target (around line 161), add:
+`disk.img`'s prerequisites don't change when `INITTAB_FILE` or `OS01_SYSTEST` switches modes (no `#ifdef` left in init.c after Task 4), so GNU Make considers the target up-to-date and skips rebuild. Explicitly delete `disk.img` before the recursive make to force it.
+
+Edit `test-syscall` (Makefile lines 157-160), replacing:
+
+```makefile
+.PHONY: test-syscall
+test-syscall:
+	$(MAKE) OS01_SYSTEST=1 disk.img boot/uefi/OVMF.fd
+	python3 tests/run_test.py systest
+```
+
+With:
+
+```makefile
+.PHONY: test-syscall
+test-syscall:
+	rm -f disk.img
+	$(MAKE) OS01_SYSTEST=1 disk.img boot/uefi/OVMF.fd
+	python3 tests/run_test.py systest
+```
+
+After `test-syscall`, add:
 
 ```makefile
 .PHONY: test-inittab
 test-inittab:
+	rm -f disk.img
 	$(MAKE) INITTAB_FILE=config/inittab.test disk.img boot/uefi/OVMF.fd
 	python3 tests/run_test.py inittab-phase
 ```
+
+The `rm -f disk.img` is cheap — all prerequisites are up-to-date, so only the `disk.img` recipe reruns (`cp` + `mkdisk`).
 
 - [ ] **Step 3: Add `etc/` copy loop in `tools/mkdisk.c`**
 
@@ -621,15 +645,23 @@ After the existing `for f in %s/bin/*` block (line 226, after the `system(glob_c
 
 Run: `make clean && cd tools && make && cd .. && make`
 
-Then verify:
+The ext2 root is partition 2 of a GPT disk. `debugfs` has no offset option and fails with "Bad magic number in super-block" on the full `disk.img`. Extract the partition first:
+
 ```bash
-debugfs disk.img -R "ls -l /etc"
+dd if=disk.img of=/tmp/ext2.img bs=512 skip=133120 count=262144
+debugfs /tmp/ext2.img -R "ls -l /etc"
 ```
+
 Expected: shows `/etc/inittab` with a non-zero size.
+
+The partition offsets (`skip=133120`, `count=262144`) come from `tools/mkdisk.c`:
+`PART2_START` (LBA of ext2 partition) and `PART2_SECTORS` (128 MB / 512 bytes = 262144).
+These are stable as long as `FAT32_SIZE_MB=64` and `ALIGN_LBA=2048` don't change.
+All subsequent plan steps that use `debugfs` follow the same dd→operate→dd-back pattern.
 
 Also check the file content:
 ```bash
-debugfs disk.img -R "cat /etc/inittab"
+debugfs /tmp/ext2.img -R "cat /etc/inittab"
 ```
 
 - [ ] **Step 5: Verify normal boot works**
@@ -770,12 +802,17 @@ All three must pass.
 
 ```bash
 make clean && make                              # full normal build (inittab present)
-debugfs -w disk.img -R "rm /etc/inittab"        # surgically remove inittab
+
+# debugfs can't operate on the GPT disk directly — extract ext2 partition first
+dd if=disk.img of=/tmp/ext2.img bs=512 skip=133120 count=262144
+debugfs -w /tmp/ext2.img -R "rm /etc/inittab"   # surgically remove inittab
+dd if=/tmp/ext2.img of=disk.img bs=512 seek=133120 count=262144 conv=notrunc
+
 python3 tests/run_test.py phase-0               # verify fallback
 ```
 
 Expected: PASS — boot reaches `# ` prompt via hardcoded `/bin/terminal` fallback.
-Serial output should contain `init: /etc/inittab not found, using defaults`.
+Serial output should contain `init: /etc/inittab not found, using defaults`. No QEMU crash or mount failure (the ext2 filesystem itself is intact — we only removed one inode).
 
 This also validates that the mkdisk `etc/` copy loop works correctly (inittab was on the image before we removed it), and that `parse_inittab()` gracefully handles the absent-file case.
 
@@ -783,7 +820,8 @@ This also validates that the mkdisk `etc/` copy loop works correctly (inittab wa
 
 ```bash
 make clean && make
-debugfs disk.img -R "ls -l /etc"
+dd if=disk.img of=/tmp/ext2.img bs=512 skip=133120 count=262144
+debugfs /tmp/ext2.img -R "ls -l /etc"
 ```
 
 Expected: `/etc/inittab` listed with non-zero size.
