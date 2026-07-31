@@ -1,7 +1,7 @@
-# OS01 优化路线图 v10
+# OS01 优化路线图 v11
 
-> **基准**: `068fbba` (select/pselect 完成 — 118/118 pass)
-> **日期**: 2026-07-24
+> **基准**: `b5151eb` (SMP 负载均衡完成 — 124/125 pass)
+> **日期**: 2026-07-31
 
 标记: ✅ 已完成 | 🔴 P0 本迭代 | 🟡 P1 本月 | 🟢 P2 下月 | 🔵 P3 远期
 
@@ -12,7 +12,7 @@
 | Phase | 说明 | 状态 |
 |-------|------|------|
 | **Phase 1: COW + 内存** | Copy-On-Write Fork, mmap/mprotect/munmap, demand paging | ✅ |
-| **Phase 2: 内核基础设施** | arch 抽象层、子系统注册框架、多架构清理（aarch64 桩到位）、SMP (percpu+GS-base)、canary、hang detector、debug channels、kallsyms、FPU 保存 | ✅ |
+| **Phase 2: 内核基础设施** | arch 抽象层、子系统注册框架、多架构清理（aarch64 桩到位）、SMP（percpu+GS-base+AP boot+负载均衡）、canary、hang detector、debug channels、kallsyms、FPU 保存、slab/PMM/softirq/timer SMP 加固 | ✅ |
 | **Phase 3: 信号 + 调度** | do_signal_delivery、Ctrl-C→SIGINT、systest 118/118、优先级 O(n) 调度器 | ✅ |
 | **Phase 4: 文件系统** | ext2 R/W、FAT32 R/W、tmpfs、devfs、procfs、GPT 双分区 | ✅ |
 | **Phase 5: 设备驱动** | 8259A PIC、APIC/IOAPIC/LAPIC、PIT/LAPIC timer、PS/2 键盘、16550 串口、AHCI SATA | ✅ |
@@ -26,7 +26,8 @@
 ```
 P0 (本迭代 — 本月):
  1. EEVDF 调度器 ✅            — O(n)→O(log n)，公平调度，反饿死 (2026-07-25)
- 2. lwIP 网络栈 + E1000       — 第一个网络能力 (socket poll 回调已就绪)
+ 2. SMP 负载均衡 ✅            — idle-steal + per-schedule pull + 振荡防护 (2026-07-29)
+ 3. lwIP 网络栈 + E1000       — 第一个网络能力 (socket poll 回调已就绪)
 
 P1 (本月):
  3. 多架构 aarch64 ✅ 清理     — 8 dispatch 头文件 + 7 aarch64 桩 + task.c 拆分（20 commits）
@@ -175,7 +176,7 @@ P3 (远期):
 | # | 任务 | 借鉴 | 说明 |
 |---|------|------|------|
 | 11 | ASLR | — | 随机化加载基址 |
-| 12 | SMP 负载均衡 | Tilck EEVDF | push-pull / work stealing |
+| 12 | SMP 负载均衡 | — | ✅ 2026-07-29（idle-steal + per-schedule pull） |
 | 13 | UBSan + KASan | ArvernOS | 内核地址消毒 |
 | 14 | 真机 USB 启动 | Tilck | "不能在真机上测试就别实现" |
 | 15 | AF_UNIX sockets | cavOS | 本地 IPC |
@@ -247,6 +248,78 @@ P3 (远期):
 
 ---
 
+## SMP 负载均衡实施总结
+
+### 架构
+
+```
+fork / spawn / kthread
+  │
+  ├── sched_pick_cpu() ──→ 选择 nr_running 最小的 CPU
+  ├── spin_lock_irqsave(&percpu_data[tsk->cpu].rq_lock)
+  ├── enqueue_task(tsk, ...)
+  ├── spin_unlock_irqrestore(...)
+  └── sched_notify_remote(tsk)   // IPI + need_resched
+
+CPU N: schedule()
+  │
+  ├── update_curr / dequeue / zombie reap  (不变)
+  ├── sched_balance(rq)                    ← NEW
+  │     ├── 找到最忙 CPU（max nr_running, tiebreak min_vruntime）
+  │     ├── 门控: idle 无条件 或 src.nr > local.nr + 1
+  │     ├── count = max(1, (src - local) / 2)
+  │     ├── 双锁 rq_locks（地址排序，单次 IRQ save）
+  │     ├── rbtree 尾部窃取（最大 deadline → 最近不会运行）
+  │     └── vruntime 规范化到目标 CPU 时间线
+  ├── pick_eevdf(rq)                       (不变)
+  └── switch_to                             (不变)
+```
+
+- **负载指标**: `nr_running` 为主，`min_vruntime` 为 tiebreaker
+- **窃取方向**: rbtree 尾部（最大 deadline）— 这些任务刚用完时间片，源 CPU 近期不会调度
+- **振荡防护**: 门控 `src > local + 1` ≥ 2 任务差距才迁移；count = `(diff)/2` 收敛而非过冲
+- **Vruntime 规范化**: `t->vruntime = max(t->vruntime, rq->min_vruntime)` — 上限，非下限
+- **Init 保护**: `sched_balance` 跳过 `pid == user_init_pid` 的任务，确保关机路径完整
+
+### SMP 前置条件（6 项加固）
+
+| 提交 | 说明 |
+|------|------|
+| `90da765` | PMM alloc_pages/free_pages 全局 spinlock |
+| `052f3e6` | Slab kmalloc/kfree 递归 per-CPU spinlock |
+| `7b1b52e` | softirq_status 原子操作 + timer_list_lock + AP TIMER_SIRQ |
+| `29d129c` | fork_mm_copy flush_tlb() → tlb_shootdown() |
+| `40ccd3d` | task_wake 重试模式（t->cpu/on_rq 迁移竞态） |
+| `b3465ff` | AP 启动 3 个修复（wrmsr EDX:EAX、CR4 SSE、IST 栈重定向） |
+
+### AP 启动 Bug 修复（验证中发现）
+
+| Bug | 症状 | 修复 |
+|-----|------|------|
+| wrmsr EDX:EAX 分割 | AP #PF at ret_from_intr (GS base 错误) | trampoline.S 添加 `movq %rax,%rdx; shrq $32,%rdx` |
+| CR4_OSFXSR\|OSXMMEXCPT 缺失 | AP 用户任务 #UD on movups/movaps (SSE) | trampoline.S `orl $(CR4_PAE\|CR4_OSFXSR\|CR4_OSXMMEXCPT)` |
+| kill_current_user_task IST 栈重定向 | #PF at RIP=0 after task kill | iretq → direct RSP switch + call do_exit |
+
+### 文件变更
+
+| 类别 | 文件 | 说明 |
+|------|------|------|
+| **修改** | `kernel/sched/task.c` | sched_pick_cpu、sched_notify_remote、sched_balance、task_wake 重试、do_fork/spawn/schedule 集成、idle_task_resume、nr_running |
+| **修改** | `kernel/include/kernel/percpu.h` | +`uint32_t nr_running` |
+| **修改** | `kernel/memory/slab.c` | per-CPU 递归 slab_lock |
+| **修改** | `kernel/memory/pmm.c` | pmm_lock for alloc_pages/free_pages |
+| **修改** | `kernel/intr/softirq.c` | lock orq/andq atomic softirq_status |
+| **修改** | `kernel/timer/timer.c` | timer_lock + do_timer 解锁回调模式 |
+| **修改** | `kernel/apic/lapic_timer.c` | AP TIMER_SIRQ + softirq.h include |
+| **修改** | `kernel/arch/x86_64/trampoline.S` | wrmsr EDX:EAX + CR4 SSE bits |
+| **修改** | `kernel/arch/x86_64/trap.c` | kill_current_user_task RSP switch |
+| **新增** | `libc/rbtree/rbtree.c` | rbtree_last、rbtree_prev |
+| **新增** | `user/smp_stress.c` | CPU-bound 多进程负载均衡验证 |
+
+**总计: 15+ commits, 12 files, 124/125 systest pass (-smp 2)**
+
+---
+
 ## 已完成汇总 (截至 2026-07-24)
 
 | 项目 | 工作量 | 日期 |
@@ -277,6 +350,7 @@ P3 (远期):
 | refactor: 固定数组→堆分配 (VFS name/cwd + mount_table + pipe buf + ext2 buf) | 1 天 | 07-19 |
 | **select/pselect syscall** (poll_table 动态化 + do_poll_core 提取 + 适配层 + pselect6 sigmask 原子性 + systest 118/118) | 2 天 | 07-24 |
 | **EEVDF 调度器** (rbtree 可运行队列 + vruntime/deadline + pick_eevdf O(log n) + per-CPU TSS SMP 修复) | 2 天 | 07-25 |
+| **SMP 负载均衡** (idle-steal + per-schedule pull + sched_pick_cpu + nr_running 指标 + 振荡防护 + 6 项 SMP 前置条件加固 + init 迁移保护 + idle→idle #PF 修复 + smp_stress 验证) | 2 天 | 07-29 |
 
 ---
 
@@ -320,3 +394,7 @@ P3 (远期):
 | 21 | select/pselect 适配层 | `do_poll_core` 共享 + `do_select_common` 去重 | poll 和 select 共享轮询循环；select/pselect 共享 fd_set↔pollfd 转换 |
 | 22 | poll_table 动态化 | `entries[]` → `*entries + max_entries` | select 支持 1024 fd，poll 保持 16 fd 不变 |
 | 23 | pselect6 sigmask 原子性 | goto-out 模式 + `mask_swapped` 标志 | 所有错误路径恢复 blocked；nfds==0 路径也做 atomic swap |
+| 24 | SMP 负载均衡指标 | `nr_running` 为主 + `min_vruntime` tiebreaker | 避免 min_vruntime 单调递增语义导致的虚假"最忙"判断（1 CPU-bound vs 10 interactive） |
+| 25 | SMP 窃取方向 | rbtree 尾部（最大 deadline） | CPU-bound 任务高 vruntime→自然迁移到空闲核；交互式任务留在源核 |
+| 26 | SMP 振荡防护 | 门控 `src > local + 1` + count = `(diff)/2` | O(log N) 收敛，无 2:1↔1:2 ping-pong |
+| 27 | SMP 前置条件 | 6 项全局无锁代码加固 | slab/PMM/softirq/timer/fork_mm_copy/task_wake — AP 运行用户程序前必须 SMP 安全 |
