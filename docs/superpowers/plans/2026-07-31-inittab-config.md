@@ -23,7 +23,6 @@
 
 **Files:**
 - Modify: `user/init.c:20-28` (ACT_* defines)
-- Modify: `user/init.c:346-347` (SIGINT/CTRLALTDEL comment)
 - Modify: `user/init.c:367` (SIGINT comment in main)
 
 **Interfaces:**
@@ -58,21 +57,7 @@ With:
 #define ACT_RESTART     0x80
 ```
 
-- [ ] **Step 2: Fix stale comment at line 346**
-
-The old CTRLALTDEL comment says "when init receives SIGINT, reboot". Replace line 346:
-
-```c
-    // CTRLALTDEL: when init receives SIGINT, reboot
-```
-
-With:
-
-```c
-    // RESPAWN: the interactive shell
-```
-
-- [ ] **Step 3: Fix stale comment at line 367**
+- [ ] **Step 2: Fix stale comment at line 367**
 
 Replace:
 
@@ -88,17 +73,17 @@ With:
     signal(SIGINT, SIG_IGN);
 ```
 
-- [ ] **Step 4: Build and smoke-test**
+- [ ] **Step 3: Build and smoke-test**
 
 Run: `make clean && make`
 Expected: builds without error. (`parse_inittab()` is still a no-op; `run_actions()` bitmask math still works because no action has bit overlap.)
 
-- [ ] **Step 5: Run phase-0 boot test**
+- [ ] **Step 4: Run phase-0 boot test**
 
 Run: `make test-phase-0`
 Expected: PASS — boot reaches `# ` shell prompt.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add user/init.c
@@ -109,7 +94,7 @@ Sequential integers 1..8 overlap as bitmasks — ACT_SYSINIT=1
 matches ONCE(3), ASKFIRST(5), SHUTDOWN(7). Fix before inittab
 parsing goes live.
 
-Also fix stale CTRLALTDEL/SIGINT comments: ctrlaltdel is not wired."
+Also fix stale SIGINT comment at line 367."
 ```
 
 ---
@@ -203,7 +188,7 @@ git commit -m "refactor(init): harden add_action() with truncation/overflow warn
 
 Both tty and process fields now warn on truncation (symmetric).
 Overflow past MAX_ACTIONS now warns instead of silently dropping.
-All size_t values cast to (unsigned long) with %%lu (libc has no z modifier)."
+All size_t values cast to (unsigned long) with %lu (libc has no z modifier)."
 ```
 
 ---
@@ -422,7 +407,8 @@ setup_fallback_actions()."
 
 **Interfaces:**
 - Consumes: `add_action()` from Task 2, `ACT_RESPAWN` from Task 1
-- Produces: fallback with single `/bin/terminal` respawn entry, no `#ifdef OS01_SYSTEST`, no CTRLALTDEL
+- Produces: fallback with single `/bin/terminal` respawn entry, no `#ifdef OS01_SYSTEST`, no CTRLALTDEL.
+  The stale "CTRLALTDEL: when init receives SIGINT, reboot" comment at line 346 (now removed along with the dead code it described) is cleaned up here rather than in Task 1, since the whole block is being replaced.
 
 - [ ] **Step 1: Replace `setup_fallback_actions()`**
 
@@ -778,23 +764,20 @@ make test-inittab         # config/inittab.test: phase dispatch + errors
 
 All three must pass.
 
-- [ ] **Step 2: Verify "inittab absent" still works**
+- [ ] **Step 2: Verify "inittab absent" fallback path**
+
+`make clean` deletes kernel.bin and BOOTX64.EFI alongside userspace, so a hand-crafted partial build would fail at `tools/mkdisk --kernel kernel.bin`. Instead, do a full build then surgically remove inittab from the image:
 
 ```bash
-# Remove generated inittab, rebuild without cp step (simulate old disk image)
-make clean
-make user
-# Manually build without copying inittab:
-mkdir -p config/fsroot/bin config/fsroot/home config/fsroot/etc
-cp build/x86_64/user/init.elf config/fsroot/bin/init
-cp build/x86_64/user/terminal.elf config/fsroot/bin/terminal
-# ... (all other bin/ files)
-cd tools && make && cd ..
-tools/mkdisk disk.img --efi boot/uefi/BOOTX64.EFI --kernel kernel.bin --rootfs config/fsroot/
-python3 tests/run_test.py phase-0
+make clean && make                              # full normal build (inittab present)
+debugfs -w disk.img -R "rm /etc/inittab"        # surgically remove inittab
+python3 tests/run_test.py phase-0               # verify fallback
 ```
 
-Expected: PASS — boot falls back to hardcoded `/bin/terminal`.
+Expected: PASS — boot reaches `# ` prompt via hardcoded `/bin/terminal` fallback.
+Serial output should contain `init: /etc/inittab not found, using defaults`.
+
+This also validates that the mkdisk `etc/` copy loop works correctly (inittab was on the image before we removed it), and that `parse_inittab()` gracefully handles the absent-file case.
 
 - [ ] **Step 3: Verify `debugfs ls /etc` shows inittab**
 
@@ -811,3 +794,19 @@ Expected: `/etc/inittab` listed with non-zero size.
 git status
 # Should show clean working tree
 ```
+
+---
+
+### Known untested paths
+
+These code paths are exercised by real hardware / interactive use but are not covered by automated QEMU tests:
+
+| Path | Why untestable |
+|---|---|
+| `ACT_ASKFIRST` (tty2 in default template) | `read(0)` blocks until a keypress; `TestRunner.send`/`send_line` are no-ops (`run_test.py:103-105`); QEMU `-display none` has no interactive input |
+| `do_shutdown` / `ACT_SHUTDOWN` | `shutdown` action is not waited for (races `sync()`+`reboot()`) — documented caveat in the spec |
+| `ACT_RESTART` | `SIGHUP` is `SIG_IGN`, not wired |
+| `ACT_CTRLALTDEL` | `SIGINT` is `SIG_IGN`, no dispatch path |
+| Inittab with `\r\n` (CRLF) line endings | Templates are Unix-line-ending files committed to git; CRLF is handled by the parser but never exercised |
+
+The first item is the most notable: `askfirst` is in the default and systest templates. It is manually testable in `make run` (interactive QEMU with GTK display) — press Enter when prompted. Automated coverage would require adding `send` support to `TestRunner` (e.g., `-serial pipe:` or `-chardev socket`), which is out of scope for this feature.
