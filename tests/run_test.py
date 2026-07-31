@@ -175,6 +175,43 @@ def test_systest(tester):
     return True
 
 
+def test_inittab_phase(tester):
+    """Verify inittab phase dispatch order and error handling."""
+    tester.start_qemu()
+
+    # Wait for the last phase marker. Since SYSINIT and WAIT block
+    # before ONCE runs, all three markers must be present by this point.
+    buf = tester.read_until("ONCE_DONE", timeout=30)
+    if not buf:
+        print("FAIL: phase markers not found")
+        return False
+
+    # Assert order: SYSINIT_DONE before WAIT_DONE before ONCE_DONE.
+    # read_until() re-reads the log from the start each call, so
+    # sequential calls only check existence. Single-regex on the
+    # returned buffer proves the sequence.
+    if not re.search(r'SYSINIT_DONE.*WAIT_DONE.*ONCE_DONE', buf, re.DOTALL):
+        print("FAIL: phase dispatch out of order")
+        return False
+
+    # Wait for terminal shell prompt
+    prompt = tester.read_until("# ", timeout=15)
+    if not prompt:
+        print("FAIL: terminal not started")
+        return False
+
+    # Assert malformed-line warnings are present in the buffer
+    if "unknown action 'unknown_action'" not in buf:
+        print("FAIL: missing 'unknown action' warning")
+        return False
+    if "too many fields" not in buf:
+        print("FAIL: missing 'too many fields' warning")
+        return False
+
+    print("PASS: phase dispatch order verified, error paths exercised")
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description="OS01 test runner")
     parser.add_argument("--disk", default=DISK_IMG, help="Disk image to test")
@@ -189,6 +226,8 @@ def main():
             result = test_boot(tester)
         elif args.test_name == "systest":
             result = test_systest(tester)
+        elif args.test_name == "inittab-phase":
+            result = test_inittab_phase(tester)
         else:
             print(f"Unknown test: {args.test_name}")
             result = False
