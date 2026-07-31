@@ -1,7 +1,7 @@
 # Inittab Configuration Support
 
 **Date:** 2026-07-31  
-**Status:** Design Approved (v2 — revised after review)
+**Status:** Design Approved (v3)
 
 ## Overview
 
@@ -10,9 +10,11 @@ Implement `/etc/inittab` configuration file support for OS01 init (PID 1). Curre
 ## Motivation
 
 - End users can customize what services start at boot without recompiling init
-- Removes `#ifdef OS01_SYSTEST` from init.c — test vs normal mode is a config file difference at build time (the Makefile copies the right template)
+- Removes `#ifdef OS01_SYSTEST` from init.c — test vs normal mode is a config template selection at build time (the Makefile copies the right file)
 - Provides the standard Unix boot configuration interface
 - Inittab is baked into the disk image at build time; no persistent writable FS needed
+
+---
 
 ## Design
 
@@ -20,52 +22,86 @@ Implement `/etc/inittab` configuration file support for OS01 init (PID 1). Curre
 
 Three-field format: `id:action:process`
 
+Default template (`config/inittab`):
 ```
 # OS01 /etc/inittab
 # Format: id:action:process
-# Actions: sysinit, wait, once, respawn, askfirst, ctrlaltdel, shutdown, restart
+# Actions: sysinit, wait, once, respawn, askfirst
 
 tty1:respawn:/bin/terminal
 tty2:askfirst:/bin/terminal
 ```
 
-The `id` field is parsed but unused in OS01 (compatibility placeholder). No runlevel field — the second field IS the action name.
+Systest template (`config/inittab.systest`):
+```
+tty1:respawn:/bin/systest
+tty2:askfirst:/bin/terminal
+```
 
-**Note on ctrlaltdel:** The `ACT_CTRLALTDEL` action type exists but is not wired in the current main loop (`SIGINT` is `SIG_IGN`; `run_actions` never dispatches `ACT_CTRLALTDEL`). This is left as future work — adding it to the template would be misleading.
-
-**Note on /etc/rc:** No `/bin/sh` exists in the image (terminal uses `/bin/busybox` as its shell). The sysinit line from the initial draft is removed. When an `/etc/rc` script and a shell become available, users can add `rc:sysinit:/bin/busybox sh /etc/rc`.
+**Field semantics:**
+- `id` — parsed but unused in OS01 (compatibility placeholder; stored in the `tty` slot)
+- `action` — one of the tokens below
+- `process` — absolute path + arguments, space-separated (same as current `add_action()` convention)
 
 **Parsing rules:**
-- Blank lines and `#`-prefixed lines are skipped (comments). Lines with only whitespace are blank.
+- Blank lines and `#`-prefixed lines are skipped (comments). Lines with only whitespace are blank
 - Fields separated by `:` — exactly 3 colon-delimited fields required (empty fields ARE counted; `::` is a field)
 - Leading/trailing whitespace is trimmed from each field **after** colon-splitting
 - Trailing `\r` (CRLF files) is stripped before newline handling
 - Unknown action names → warning, line skipped
 - Format errors (field count != 3, empty process after trim, empty action after trim) → warning, line skipped
-- Lines exceeding 255 characters are truncated with a warning
 
-**Action mapping:**
+**Action table:**
 
-| inittab token | ACT_* constant | Semantics |
-|---|---|---|
-| `sysinit` | `ACT_SYSINIT` | Boot phase, blocking |
-| `wait` | `ACT_WAIT` | One-time, blocking |
-| `once` | `ACT_ONCE` | One-time, fire-and-forget |
-| `respawn` | `ACT_RESPAWN` | Restart on exit, supervised |
-| `askfirst` | `ACT_ASKFIRST` | Prompt then spawn, restart on exit |
-| `ctrlaltdel` | `ACT_CTRLALTDEL` | Triggered on Ctrl-Alt-Del (future; not wired yet) |
-| `shutdown` | `ACT_SHUTDOWN` | Run during shutdown sequence |
-| `restart` | `ACT_RESTART` | Run when init restarts |
+| inittab token | ACT_* constant (new bitmask) | Semantics | Caveat |
+|---|---|---|---|
+| `sysinit` | `0x01` | Boot phase, blocking | |
+| `wait` | `0x02` | One-time, blocking | |
+| `once` | `0x04` | One-time, fire-and-forget | |
+| `respawn` | `0x08` | Restart on exit, supervised | |
+| `askfirst` | `0x10` | Prompt then spawn, restart on exit | |
+| `ctrlaltdel` | `0x20` | Ctrl-Alt-Del trigger | Not wired: `SIGINT` is `SIG_IGN`, no dispatch path |
+| `shutdown` | `0x40` | Run during shutdown sequence | Not waited for: child races `sync()`+`reboot()` |
+| `restart` | `0x80` | Run when init restarts | Not implemented: `SIGHUP` is `SIG_IGN` |
+
+`ctrlaltdel`, `shutdown`, and `restart` exist for configuration compatibility but have no functional effect in the current OS01 init. The template header comment only lists the working actions to avoid misleading users.
+
+**Note on `/etc/rc`:** No `/bin/sh` exists in the image (`terminal` uses `/bin/busybox` as its shell). There is no rc line in the default templates. When a shell becomes available, users can add e.g. `rc:sysinit:/bin/busybox sh /etc/rc`.
+
+---
 
 ### 2. Implementation
 
-#### 2a. `parse_inittab()` in `user/init.c`
+#### 2a. Pre-requisite fix: ACT_* must be bitmasks
 
-**No libc stdio changes.** The inittab parser uses raw syscall I/O (`open`/`read`/`close`) — the same approach already used throughout OS01 userspace. This avoids activating the half-implemented stdio functions in `libc/stdio/stdio_file.c` (`fflush`/`vfprintf`/`fprintf`/`fputc`/`fputs` all hardcoded to fd 1) and the sentinel `FILE*` values (`stdin=(FILE*)1`, `stdout=(FILE*)2`, `stderr=(FILE*)3` defined in `libc/include/stdio.h:52-54`). Busybox's `fgets_unlocked` requirement (`libbb.h` redefines `fgets`→`fgets_unlocked`) is also avoided entirely.
+`run_actions()` (line 200-205) uses `a->action & action_mask` for dispatch. The current ACT_* values are sequential integers (1..8), which overlap as bit masks — `ACT_SYSINIT=1` spuriously matches `ACT_ONCE=3`, `ACT_ASKFIRST=5`, and `ACT_SHUTDOWN=7`. This must be fixed before any inittab parsing goes live.
+
+**Change in `user/init.c` lines 20-28:**
+
+```c
+// ── Action types ────────────────────────────────────────────
+// MUST be powers of 2: run_actions() uses bitmask matching.
+#define ACT_SYSINIT     0x01
+#define ACT_WAIT        0x02
+#define ACT_ONCE        0x04
+#define ACT_RESPAWN     0x08
+#define ACT_ASKFIRST    0x10
+#define ACT_CTRLALTDEL  0x20
+#define ACT_SHUTDOWN    0x40
+#define ACT_RESTART     0x80
+```
+
+The equality checks in `run_actions()` (`a->action == ACT_RESPAWN`, etc.) and child tracking (`children[j].action == a->action`) are unaffected — they compare exact values, and actions are still mutually exclusive.
+
+#### 2b. `parse_inittab()` in `user/init.c`
+
+**No libc stdio changes.** The inittab parser uses raw syscall I/O (`open`/`read`/`close`). This avoids activating the half-implemented stdio functions in `libc/stdio/stdio_file.c` (`fflush`/`vfprintf`/`fprintf`/`fputc`/`fputs` all hardcoded to fd 1) and the sentinel `FILE*` values (`stdin=(FILE*)1`, `stdout=(FILE*)2`, `stderr=(FILE*)3` in `libc/include/stdio.h`). Busybox's `fgets_unlocked` requirement (`libbb.h` redefines `fgets` → `fgets_unlocked`) is also avoided entirely.
+
+**New include:** `#include <fcntl.h>` for `O_RDONLY`.
 
 Replace the current empty stub (line 321-328):
 
-```
+```c
 static int parse_action(const char *name)
 {
     static const struct { const char *name; int action; } map[] = {
@@ -93,7 +129,8 @@ static void parse_inittab(void)
         return;
     }
 
-    // Read entire file (inittab is small, typically < 1KB)
+    // Inittab is a small build-time file (<1KB); single read() is sufficient.
+    // No line-length limit beyond the buffer size (4KB).
     char buf[4096];
     int64_t n = read(fd, buf, sizeof(buf) - 1);
     close(fd);
@@ -105,7 +142,6 @@ static void parse_inittab(void)
     int lineno = 0;
 
     while (p < end) {
-        // Find start of line (skip leading whitespace on this line)
         char *line_start = p;
         lineno++;
 
@@ -118,7 +154,7 @@ static void parse_inittab(void)
         if (line_end > line_start && line_end[-1] == '\r')
             line_end--;
 
-        // Null-terminate this line in-place
+        // Null-terminate this line in-place for string ops
         char saved = *line_end;
         *line_end = '\0';
 
@@ -133,7 +169,7 @@ static void parse_inittab(void)
             char *fp = s;
             for (int i = 0; i < 3; i++) {
                 fields[i] = fp;
-                // Find next ':' or end
+                // Scan to next ':' or end-of-string
                 while (*fp && *fp != ':') fp++;
                 if (*fp == ':') {
                     *fp = '\0';
@@ -144,17 +180,15 @@ static void parse_inittab(void)
                 }
             }
 
-            // Check for extra colons (4th+ field)
-            int has_extra = 0;
-            while (*fp) {
-                if (*fp == ':') { has_extra = 1; break; }
-                fp++;
-            }
+            // Detect extra fields: if there's any non-null text after 3rd colon
+            int has_extra = (*fp != '\0');
 
             if (!fields[0] || !fields[1] || !fields[2]) {
-                printf("init: /etc/inittab:%d: missing fields (need id:action:process)\n", lineno);
+                printf("init: /etc/inittab:%d: missing fields"
+                       " (need id:action:process)\n", lineno);
             } else if (has_extra) {
-                printf("init: /etc/inittab:%d: too many fields (expected 3 colon-separated fields)\n", lineno);
+                printf("init: /etc/inittab:%d: too many fields"
+                       " (expected 3 colon-separated fields)\n", lineno);
             } else {
                 // Trim whitespace from each field
                 for (int i = 0; i < 3; i++) {
@@ -175,7 +209,8 @@ static void parse_inittab(void)
                 } else {
                     int action = parse_action(fields[1]);
                     if (action < 0) {
-                        printf("init: /etc/inittab:%d: unknown action '%s'\n",
+                        printf("init: /etc/inittab:%d:"
+                               " unknown action '%s'\n",
                                lineno, fields[1]);
                     } else {
                         add_action(action, fields[0], fields[2]);
@@ -192,74 +227,119 @@ static void parse_inittab(void)
 }
 ```
 
-**`add_action()` hardening:** Add warnings when:
-- `action_count >= MAX_ACTIONS` (line silently dropped — now warns)
-- `process` string is truncated to `sizeof(a->process)`
+#### 2c. `add_action()` hardening
 
-```
+Add warnings for truncation (both `tty` and `process`) and overflow:
+
+```c
 static void add_action(int action, const char *tty, const char *process)
 {
     if (action_count >= MAX_ACTIONS) {
-        printf("init: too many inittab entries (max %d), ignoring '%s'\n",
-               MAX_ACTIONS, process);
+        printf("init: too many inittab entries (max %u),"
+               " ignoring '%s'\n", (unsigned)MAX_ACTIONS, process);
         return;
     }
     struct init_action *a = &actions[action_count++];
     a->action = action;
-    // ... tty copy unchanged ...
+
+    if (tty) {
+        size_t len = strlen(tty);
+        if (len >= sizeof(a->tty)) {
+            printf("init: tty/id truncated (needs %lu, max %lu): '%s'\n",
+                   (unsigned long)len, (unsigned long)(sizeof(a->tty) - 1), tty);
+            len = sizeof(a->tty) - 1;
+        }
+        memcpy(a->tty, tty, len);
+        a->tty[len] = '\0';
+    } else {
+        a->tty[0] = '\0';
+    }
+
     size_t len = strlen(process);
-    size_t max = sizeof(a->process);
-    if (len >= max) {
-        printf("init: process truncated (needs %zu, max %zu): '%s'\n", len, max - 1, process);
-        len = max - 1;
+    if (len >= sizeof(a->process)) {
+        printf("init: process truncated (needs %lu, max %lu): '%s'\n",
+               (unsigned long)len, (unsigned long)(sizeof(a->process) - 1), process);
+        len = sizeof(a->process) - 1;
     }
     memcpy(a->process, process, len);
     a->process[len] = '\0';
 }
 ```
 
-**`setup_fallback_actions()`** — kept unchanged. The fallback always uses `/bin/terminal` (or `/bin/systest` when the old `#ifdef` was there; see OS01_SYSTEST handling below).
+**Format specifier note:** OS01 libc `vsprintf` supports `%d`, `%u`, `%ld`, `%lu`, `%x`, `%p`, `%s`, `%c` and qualifiers `h`/`l`/`L`/`Z` — no `z` modifier. All `size_t` values are cast to `(unsigned long)` with `%lu`.
 
-**`#ifdef OS01_SYSTEST`** — removed. The same init binary serves both modes.
+#### 2d. `setup_fallback_actions()` changes
 
-**`setup_fallback_actions()`** — fallback is always `/bin/terminal`. If `OS01_SYSTEST=1` is set but the inittab is lost, the system boots to terminal instead of systest. This is a conscious trade-off: the fallback is a recovery path, and the default inittab template (copied by Makefile) is the normal mechanism.
+- Remove `#ifdef OS01_SYSTEST` — fallback always uses `/bin/terminal`
+- Remove the dead `CTRLALTDEL` fallback entry (not wired, misleading)
+- Keep the function so inittab-absent boots work
+
+```c
+static void setup_fallback_actions(void)
+{
+    printf("init: no /etc/inittab, using built-in defaults\n");
+    add_action(ACT_RESPAWN, "", "/bin/terminal");
+}
+```
+
+**OS01_SYSTEST regression note:** Under the old `#ifdef`, `make OS01_SYSTEST=1` produced a binary that booted to systest even without an inittab. With the `#ifdef` removed, `OS01_SYSTEST=1` with a missing inittab boots to terminal instead. This is acceptable because: (a) the Makefile always copies the correct template when building `disk.img`, so inittab is always present in normal workflows; (b) the fallback is a recovery path, and terminal is the correct recovery default.
+
+---
 
 ### 3. Build System Integration
 
 #### `config/inittab` (new, version-controlled)
 
-Default template:
-
 ```
+# OS01 /etc/inittab
+# Format: id:action:process
+# Actions: sysinit, wait, once, respawn, askfirst
+
 tty1:respawn:/bin/terminal
 tty2:askfirst:/bin/terminal
 ```
 
 #### `config/inittab.systest` (new, version-controlled)
 
-Test-mode template — `OS01_SYSTEST=1` uses this directly instead of sed:
-
 ```
+# OS01 /etc/inittab (systest mode)
 tty1:respawn:/bin/systest
 tty2:askfirst:/bin/terminal
 ```
 
-Two separate templates avoid the sed substitution ambiguity (sed `s|/bin/terminal|/bin/systest|g` would replace both tty1 and tty2). A single systest instance is the correct behavior.
+Two separate templates (instead of `sed`) avoid: ambiguity (global `s|/bin/terminal|/bin/systest|g` hits both lines), and accidental double-replacement if more lines are added later.
+
+#### `config/inittab.test` (new, version-controlled)
+
+Test-mode inittab that exercises all working phase actions — used by a build target for verification:
+
+```
+mark_sysinit:sysinit:/bin/terminal -c "echo SYSINIT_DONE"
+mark_wait:wait:/bin/terminal -c "echo WAIT_DONE"
+mark_once:once:/bin/terminal -c "echo ONCE_DONE"
+tty1:respawn:/bin/terminal
+```
+
+The test verifies that sysinit, wait, once, and respawn each fire in the correct phase. (The `terminal -c` pattern relies on terminal's command-line parsing; if terminal does not support `-c`, use `/bin/busybox echo` instead.)
 
 #### Makefile changes
 
+In the `disk.img` target, **after** the `@mkdir -p config/fsroot/.../etc` line (currently line 104) and **before** the `mkdisk` invocation (line 120):
+
 ```makefile
-# Copy inittab to rootfs
+# Copy inittab template
 ifeq ($(OS01_SYSTEST),1)
-	cp config/inittab.systest config/fsroot/etc/inittab
+	@cp config/inittab.systest config/fsroot/etc/inittab
 else
-	cp config/inittab config/fsroot/etc/inittab
+	@cp config/inittab config/fsroot/etc/inittab
 endif
 ```
 
+Insertion point is critical: `config/fsroot/etc/` must already exist (created by the `mkdir -p` on line 104).
+
 #### `tools/mkdisk.c` changes
 
-After the existing `for f in %s/bin/*` loop (line 217-226), add an equivalent loop for `etc/`:
+After the existing `for f in %s/bin/*` loop (lines 217-226), add an equivalent loop for `etc/`:
 
 ```c
 // Copy fsroot/etc/* to /etc/
@@ -275,11 +355,9 @@ After the existing `for f in %s/bin/*` loop (line 217-226), add an equivalent lo
 }
 ```
 
-The `test -f` guard skips the pattern when there are no files (the loop body never executes), which is silently fine.
+The `test -f` guard skips the pattern when there are no files (loop body never executes), which is silently fine.
 
-#### `config/fsroot/` in `.gitignore`
-
-The generated `config/fsroot/etc/inittab` is already covered: `config/fsroot/` is in `.gitignore` / cleaned by `make clean`.
+---
 
 ### 4. Error Handling
 
@@ -287,38 +365,47 @@ The generated `config/fsroot/etc/inittab` is already covered: `config/fsroot/` i
 |---|---|
 | `/etc/inittab` does not exist | `open` returns -1 → `parse_inittab()` returns → `action_count==0` → fallback |
 | Inittab is empty (all comments/blank) | `action_count` stays 0 → fallback |
-| Single line has bad field count | Warning with line number, line skipped, remaining lines parsed |
+| Single line has bad field count (!= 3) | Warning with line number, line skipped, parsing continues |
 | Unknown action name | Warning with line number + name, line skipped |
 | Empty process or action after trim | Warning with line number, line skipped |
-| Line exceeds 255 chars | Truncated; the in-place parsing only handles lines fitting in the read buffer (4096 bytes total file size is ample) |
-| > MAX_ACTIONS entries | Warning, excess lines silently skipped (after first MAX_ACTIONS) |
-| Process > 128 chars | Warning, truncated |
+| `>` MAX_ACTIONS entries | Warning, excess entries dropped |
+| tty/id `>` 16 chars or process `>` 128 chars | Warning, truncated (now symmetric: both `tty` and `process` warn) |
 
-In all error/warning cases, `action_count` may be partial — valid lines parsed before the error are already registered and will execute normally.
+In all warning cases, `action_count` may be partial — valid lines parsed before the error are already registered and will execute normally.
+
+**File size assumption:** Inittab is baked into the image at build time and is expected to be under 4 KB. A single `read()` call is used; the file is not expected to require partial reads. No explicit per-line length limit beyond the buffer size.
+
+---
 
 ### 5. Backward Compatibility
 
-- `setup_fallback_actions()` is preserved
-- When `/etc/inittab` is absent (older disk images, manual builds without the updated Makefile), init behaves identically to today's non-SYSTEST mode (terminal)
-- For `OS01_SYSTEST=1`: the Makefile copies the systest template → inittab is present → systest runs; if inittab is absent for any reason, the fallback runs terminal (not systest — this is a conscious regression from the old `#ifdef` behavior, acceptable because the Makefile guarantees the inittab)
+- `setup_fallback_actions()` is preserved (simplified to `/bin/terminal` only, no `#ifdef`)
+- When `/etc/inittab` is absent (older disk images, manual builds without the updated Makefile), init falls back to `/bin/terminal` — same as today's non-SYSTEST mode
+- All existing `action` types, `run_actions()` phases, and the main supervision loop are unchanged (except the ACT_* values)
+- `OS01_SYSTEST=1` depends on the Makefile copying the systest template; if the inittab is absent for any reason, the fallback is terminal (not systest)
+
+---
 
 ### 6. Files Changed
 
 | File | Change |
 |---|---|
-| `user/init.c` | Implement `parse_inittab()` + `parse_action()`; harden `add_action()`; remove `#ifdef OS01_SYSTEST` |
+| `user/init.c` | **(a)** ACT_* constants → bitmasks; **(b)** implement `parse_inittab()` + `parse_action()`; **(c)** harden `add_action()`; **(d)** remove `#ifdef OS01_SYSTEST`; **(e)** `#include <fcntl.h>` |
 | `tools/mkdisk.c` | Add loop to copy `config/fsroot/etc/*` → ext2 `/etc/` |
-| `config/inittab` | **New** — default template (respawn+askfirst terminal) |
-| `config/inittab.systest` | **New** — systest template (respawn systest + askfirst terminal) |
-| `Makefile` | Copy appropriate inittab template into `config/fsroot/etc/` |
+| `config/inittab` | **New** — default template |
+| `config/inittab.systest` | **New** — systest template |
+| `config/inittab.test` | **New** — multi-phase test template |
+| `Makefile` | Copy appropriate inittab template into `config/fsroot/etc/` (after mkdir, before mkdisk) |
 
 **No libc changes.** `busybox_stubs.c` is untouched. No stdio implementation is added.
 
+---
+
 ### 7. Testing
 
-- **Normal mode:** boot → terminal on tty1, tty2 waits for keypress → terminal
-- **`OS01_SYSTEST=1`:** boot → systest on tty1, tty2 waits for keypress → terminal. `make test` passes.
-- **Inittab absent (disk image built without updated Makefile):** fallback → `/bin/terminal` on respawn
-- **Inittab absent + old `#ifdef OS01_SYSTEST` binary:** N/A — `#ifdef` is removed
-- **Malformed inittab lines:** warnings printed to serial, valid lines processed, partial config used
-- **Manual verification** that `/etc/inittab` is on the image: add `debugfs disk.img -R "ls /etc"` check or inspect boot serial output for `init: /etc/inittab not found` absence
+- **Normal mode:** boot → terminal on tty1, tty2 waits for keypress
+- **`OS01_SYSTEST=1` — `make test`:** boot → systest on tty1, all systest cases pass
+- **Inittab absent:** boot → fallback `/bin/terminal` (no regression)
+- **Multi-phase test (`config/inittab.test`):** boot → SYSINIT runs (blocking, sees "SYSINIT_DONE"), WAIT runs (blocking, sees "WAIT_DONE"), ONCE runs (fire-and-forget), then terminal spawns. Verifies all phase dispatch masks work correctly with the new bitmask constants
+- **Malformed inittab lines:** warnings printed to serial, valid lines processed
+- **post-build verification:** `debugfs disk.img -R "ls -l /etc"` should show `/etc/inittab`
