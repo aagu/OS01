@@ -295,23 +295,38 @@ static void do_shutdown(int cmd)
     // unreachable
 }
 
-// ── Add a hardcoded fallback action ─────────────────────────
+// ── Add an action (from inittab or fallback) ────────────────
 static void add_action(int action, const char *tty, const char *process)
 {
-    if (action_count >= MAX_ACTIONS)
+    if (action_count >= MAX_ACTIONS) {
+        printf("init: too many inittab entries (max %lu),"
+               " ignoring '%s'\n", (unsigned long)MAX_ACTIONS, process);
         return;
+    }
     struct init_action *a = &actions[action_count++];
     a->action = action;
+
     if (tty) {
         size_t len = strlen(tty);
-        if (len >= sizeof(a->tty)) len = sizeof(a->tty) - 1;
+        if (len >= sizeof(a->tty)) {
+            printf("init: tty/id truncated (needs %lu, max %lu): '%s'\n",
+                   (unsigned long)len,
+                   (unsigned long)(sizeof(a->tty) - 1), tty);
+            len = sizeof(a->tty) - 1;
+        }
         memcpy(a->tty, tty, len);
         a->tty[len] = '\0';
     } else {
         a->tty[0] = '\0';
     }
+
     size_t len = strlen(process);
-    if (len >= sizeof(a->process)) len = sizeof(a->process) - 1;
+    if (len >= sizeof(a->process)) {
+        printf("init: process truncated (needs %lu, max %lu): '%s'\n",
+               (unsigned long)len,
+               (unsigned long)(sizeof(a->process) - 1), process);
+        len = sizeof(a->process) - 1;
+    }
     memcpy(a->process, process, len);
     a->process[len] = '\0';
 }
