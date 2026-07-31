@@ -470,23 +470,11 @@ static void parse_inittab(void)
 }
 
 // ── Set up hardcoded fallback actions ───────────────────────
+// Called when /etc/inittab is absent or empty.
 static void setup_fallback_actions(void)
 {
     printf("init: no /etc/inittab, using built-in defaults\n");
-
-    // SYSINIT: one-time initialization
-    // (could mount filesystems, set hostname, etc.)
-    // For OS01 MVP: /etc/rc doesn't exist, skip
-
-    // RESPAWN: the interactive shell (or systest in test mode)
-#ifdef OS01_SYSTEST
-    add_action(ACT_RESPAWN, "", "/bin/systest");
-#else
     add_action(ACT_RESPAWN, "", "/bin/terminal");
-#endif
-
-    // CTRLALTDEL: when init receives SIGINT, reboot
-    add_action(ACT_CTRLALTDEL, "", "");
 }
 
 // ── Main ────────────────────────────────────────────────────
