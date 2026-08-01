@@ -23,13 +23,13 @@
 
 | # | 问题 | 详情 |
 |---|------|------|
-| 1 | `tcflush` 重复定义 | `busybox_stubs.c:82` 和 `term_stubs.c:2` 各定义一次，签名不同 |
+| 1 | `tcflush` 重复定义 | `busybox_stubs.c:83` 和 `term_stubs.c:2` 各定义一次，签名不同 |
 | 2 | `sigfillset.c` 死代码 | `signal.h:87` 有宏 `#define sigfillset(set) (*(set) = ~0UL)`；`.c` 文件从不被调用 |
 | 3 | 多文件缺少 errno 设置 | getsockname / getpeername / killpg 裸 `return -1`，不设 errno |
 | 4 | `struct passwd/group` 本地冗余定义 | busybox_stubs.c 内重复定义，而 `pwd.h`/`grp.h` 已有正确定义 |
 | 5 | `htons` 等放错归属 | 属于 `<arpa/inet.h>` / POSIX `<netinet/in.h>`，不是 `<netdb.h>` |
 | 6 | `dirname`/`basename` 放错归属 | 属于 `<libgen.h>`，不是 `<string.h>` |
-| 7 | `netdb.h` 守卫外有重复垃圾 | `#endif` 后整段重复两次（lines 48-69） |
+| 7 | `netdb.h` 守卫外有重复垃圾 | `#endif` 后整段重复两次（lines 48-68） |
 | 8 | `tcgetattr`/`tcsetattr` 返回 raw syscall | 返回负 errno 不符合 POSIX，应按 kill.c 惯例转换 |
 
 ## 设计原则
@@ -113,8 +113,8 @@ libc/csu/        libc/signal/    libc/arpa/      libc/libgen/
 ```c
 #include <netdb.h>
 #include <string.h>
-#include <errno.h>
 ```
+（不需要 `<errno.h>`：netdb 函数返回 EAI 码或 NULL，不设 errno）
 
 | 符号 | 行为 | 来源 |
 |------|------|------|
@@ -132,8 +132,8 @@ libc/csu/        libc/signal/    libc/arpa/      libc/libgen/
 
 ```c
 #include <arpa/inet.h>
-#include <stdint.h>
 ```
+（`arpa/inet.h` 已 include `<netinet/in.h>` → `<sys/socket.h>` → `<sys/types.h>`，`uint16_t`/`uint32_t` 可达，不需要额外 include）
 
 | 函数 | 行为 | 来源 |
 |------|------|------|
@@ -142,7 +142,7 @@ libc/csu/        libc/signal/    libc/arpa/      libc/libgen/
 | `htonl` | `return n`（identity） | net_stubs.c |
 | `ntohl` | `return n`（identity） | net_stubs.c |
 
-**同步头文件**：补齐 `arpa/inet.h` 和 `netinet/in.h` 的声明，从 `netdb.h` 中移除不属于它的 `htons`/`ntohs`/`htonl`/`ntohl` 声明（它们属于 `<arpa/inet.h>` 和 POSIX `<netinet/in.h>`）。
+**同步头文件**：补齐 `netinet/in.h` 的字节序函数声明（POSIX 标准位置）。`arpa/inet.h` 已 include `<netinet/in.h>`，自动继承，无需重复声明。从 `netdb.h` 中移除不属于它的 `htons`/`ntohs`/`htonl`/`ntohl` 声明。
 
 ---
 
@@ -197,7 +197,7 @@ libc/csu/        libc/signal/    libc/arpa/      libc/libgen/
 
 | 函数 | 行为 | 来源 |
 |------|------|------|
-| `getrlimit` | 实际逻辑：`rlim->rlim_cur = rlim->rlim_max = 65536; return 0` | busybox_stubs.c |
+| `getrlimit` | 实际逻辑：`if (rlim) { rlim->rlim_cur = rlim->rlim_max = 65536; } return 0` | busybox_stubs.c |
 | `setrlimit` | `return 0` | busybox_stubs.c |
 
 ---
@@ -224,7 +224,7 @@ libc/csu/        libc/signal/    libc/arpa/      libc/libgen/
 #include <sys/types.h>    /* gid_t */
 
 int setgroups(size_t s, const gid_t *l) { (void)s; (void)l; return 0; }
-int initgroups(const char *u, int g) { (void)u; (void)g; return 0; }
+int initgroups(const char *u, gid_t group) { (void)u; (void)group; return 0; }
 ```
 
 | 函数 | 行为 | 来源 |
@@ -241,7 +241,7 @@ int initgroups(const char *u, int g) { (void)u; (void)g; return 0; }
 int setgroups(size_t size, const gid_t *list);
 int initgroups(const char *user, gid_t group);
 ```
-（当前 `initgroups` 声明在 `unistd.h:107`，`setgroups` 无声明。）
+同时修正 `unistd.h:107` 的 `initgroups` 声明：`int group` → `gid_t group`（否则与 `grp.h` 新声明冲突——grp.c 自身会 conflicting-types，busybox 两个头都 include 也会冲突）。
 
 ---
 
@@ -382,7 +382,7 @@ signal/ 最终共 **7** 个文件：6 个迁入 + 1 个新建（killpg.c）。
 
 注意：当前 `settimeofday` 声明在 `unistd.h:145` 而非 `<sys/time.h>`。声明不迁移，仅实现迁移。
 
-#### `arpa/inet.h` — 补齐声明
+#### `netinet/in.h` — 补齐声明
 
 ```c
 uint16_t htons(uint16_t n);
@@ -390,14 +390,11 @@ uint16_t ntohs(uint16_t n);
 uint32_t htonl(uint32_t n);
 uint32_t ntohl(uint32_t n);
 ```
-
-#### `netinet/in.h` — 补齐声明
-
-同样补齐 4 个字节序函数声明（POSIX 标准位置，busybox 网络代码常用）。
+（`arpa/inet.h` 已 include `<netinet/in.h>`，自动继承，无需重复声明。）
 
 #### `netdb.h` — 清理
 
-- 删除守卫 `#endif` 后的整段重复内容（lines 48-69）
+- 删除守卫 `#endif` 后的整段重复内容（lines 48-68：含两段重复，第一段末尾有游离 `#endif`）
 - 删除原本的 `htons`/`ntohs`/`htonl`/`ntohl` 声明（它们属于 `<arpa/inet.h>` 和 `<netinet/in.h>`）
 
 #### `grp.h` — 补齐声明
@@ -407,7 +404,7 @@ int setgroups(size_t size, const gid_t *list);
 int initgroups(const char *user, gid_t group);
 ```
 
-（`setgroups` 当前无任何声明；`initgroups` 当前在 `unistd.h:107`，后续可清理。）
+（`setgroups` 当前无任何声明；`initgroups` 当前在 `unistd.h:107`，本次同步修正为 `gid_t`。）
 
 ---
 
@@ -472,7 +469,6 @@ C_SOURCES := $(filter-out stdlib/free.c, $(C_SOURCES))
 
 - `stdlib/free.c` 与 `malloc.c` 的冲突排除（保留现有 filter-out）
 - `settimeofday` 声明从 `unistd.h` 迁移到 `<sys/time.h>`（声明迁移，不属本次范围）
-- `initgroups` 声明从 `unistd.h` 迁移到 `<grp.h>`（不属本次范围；本次仅补齐 `grp.h` 中缺失的声明）
 - 非 stub 函数的实现改进（如 `fgets_unlocked` 的实际逻辑）
 
 ---
@@ -501,8 +497,8 @@ libc/
   time/time.c           (+2 函数: strftime, settimeofday)
 
 头文件修改:
-  arpa/inet.h           (+4 字节序声明)
-  netinet/in.h          (+4 字节序声明)
-  netdb.h               (-4 字节序声明移出, -守卫外重复块)
+  netinet/in.h          (+4 字节序声明; arpa/inet.h 继承)
+  netdb.h               (-4 字节序声明移出, -守卫外重复块 lines 48-68)
   grp.h                 (+2 声明: setgroups, initgroups)
+  unistd.h              (initgroups 签名修正: int → gid_t)
 ```
