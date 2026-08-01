@@ -3,4 +3,3 @@
 # Actions: sysinit, wait, once, respawn, askfirst
 
 tty1:respawn:/bin/terminal
-tty2:askfirst:/bin/terminal
