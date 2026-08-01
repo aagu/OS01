@@ -60,3 +60,45 @@ int clearenv(void)
     environ = NULL;
     return 0;
 }
+
+/* ── putenv / unsetenv ── */
+
+int unsetenv(const char *name) { (void)name; return 0; }
+
+int putenv(char *string)
+{
+    static char **env_table = NULL;
+    static int env_capacity = 0;
+    static int env_count = 0;
+    char *eq;
+
+    if (!string || !(eq = strchr(string, '=')))
+        return -1;
+
+    size_t key_len = (size_t)(eq - string);
+
+    /* Find existing key → replace */
+    for (int i = 0; i < env_count; i++) {
+        if (strncmp(env_table[i], string, key_len) == 0
+            && env_table[i][key_len] == '=') {
+            env_table[i] = string;
+            return 0;
+        }
+    }
+
+    /* New entry: need env_count + 2 slots (new entry + NULL terminator) */
+    if (env_count + 2 > env_capacity) {
+        int new_cap = env_capacity ? env_capacity * 2 : 16;
+        char **new_table = realloc(env_table, new_cap * sizeof(char *));
+        if (!new_table)
+            return -1;
+        env_table = new_table;
+        env_capacity = new_cap;
+    }
+
+    env_table[env_count++] = string;
+    env_table[env_count] = NULL;
+    environ = env_table;
+
+    return 0;
+}
