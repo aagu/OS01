@@ -5,34 +5,43 @@
 
 ## 目标
 
-消除 `libc/unistd/` 下 5 个 `*_stubs.c` 文件，将其中约 100 个函数按 GNU libc 风格（按标准 header 归属分目录，每组 stub 一个 `.c` 文件）重新组织。
+消除 `libc/unistd/` 下 5 个 `*_stubs.c` 文件，将其中约 100 个函数按标准 header 归属分目录重新组织。顺带修复发现的 bug、统一 stub 语义、清理死代码。
 
 ## 当前状态
 
 `libc/unistd/` 下存在 5 个混合 stub 文件：
 
-| 文件 | 行数 | 内容 |
-|------|------|------|
-| `busybox_stubs.c` | 232 | stdio、rlimit、termios、socket、sched、xattr、putenv、`__libc_start_main` 等 |
-| `uid_stubs.c` | 29 | uid/gid、vfork、setsid、进程组、chown、killpg |
-| `net_stubs.c` | 54 | netdb 函数、字节序转换、socket 地址函数 |
-| `misc_stubs.c` | 8 | fchdir、chroot、ttyname_r、settimeofday |
-| `term_stubs.c` | 4 | tcflush（与 busybox_stubs.c 重复）、alarm |
+| 文件 | 行数 | 函数/符号数 |
+|------|------|------------|
+| `busybox_stubs.c` | 232 | 46 |
+| `uid_stubs.c` | 29 | 20 |
+| `net_stubs.c` | 54 | 14 |
+| `misc_stubs.c` | 8 | 4 |
+| `term_stubs.c` | 4 | 2 |
 
-### 已发现 bug
+### 已发现 bug（本次一并修复）
 
-- `tcflush` 在 `busybox_stubs.c:82` 和 `term_stubs.c:2` 重复定义，返回值和签名不同（`return 0` vs `return -1; int` vs `void`）
+| # | 问题 | 详情 |
+|---|------|------|
+| 1 | `tcflush` 重复定义 | `busybox_stubs.c:82` 和 `term_stubs.c:2` 各定义一次，签名不同 |
+| 2 | `sigfillset.c` 死代码 | `signal.h:87` 有宏 `#define sigfillset(set) (*(set) = ~0UL)`；`.c` 文件从不被调用 |
+| 3 | 多文件缺少 errno 设置 | getsockname/getpeername/killpg 裸 `return -1`，不设 errno |
+| 4 | `struct passwd/group` 本地冗余定义 | busybox_stubs.c 内重复定义，而 `pwd.h`/`grp.h` 已有正确定义 |
+| 5 | `htons` 等放错归属 | 属于 `<arpa/inet.h>` / POSIX `<netinet/in.h>`，不是 `<netdb.h>` |
+| 6 | `dirname`/`basename` 放错归属 | 属于 `<libgen.h>`，不是 `<string.h>` |
+
+## 设计原则
+
+1. **按标准 header 归属分目录** — 函数声明在哪个 header，实现就放在对应目录
+2. **unistd 域：一函数一文件** — 延续 unistd/ 现有惯例
+3. **其他域：一组一个文件** — xattr 12 个函数合并一个文件（纯样板，分开无价值）；termios/socket/sched 同理
+4. **统一 stub 语义** — 失败：`errno = ENOSYS; return -1`（或 `NULL`）；成功 no-op：`return 0`
+5. **每个 `.c` 文件 include 对应 header** — 让编译器检查声明/定义一致性
+6. **Makefile 用 wildcard 自动发现** — 不手工枚举文件
 
 ## 设计方案
 
-### 原则
-
-1. 按标准 header 归属分目录（GNU libc 风格）
-2. 每个功能域一组 stub 一个 `.c` 文件
-3. 每个 syscall wrapper 或独立概念的 stub 单独成一个文件
-4. Makefile 使用 wildcard 自动发现，无需手工枚举
-
-### 删除 5 个文件
+### 删除 6 个文件
 
 ```
 libc/unistd/busybox_stubs.c
@@ -40,161 +49,348 @@ libc/unistd/uid_stubs.c
 libc/unistd/misc_stubs.c
 libc/unistd/term_stubs.c
 libc/unistd/net_stubs.c
+libc/unistd/sigfillset.c   ← 死代码，不迁移，直接删除
 ```
 
-### 新建 11 个目录
+### 新建 12 个目录
 
 ```
 libc/termios/    libc/socket/    libc/netdb/    libc/sched/
 libc/xattr/      libc/resource/  libc/pwd/       libc/grp/
-libc/csu/        libc/signal/
+libc/csu/        libc/signal/    libc/arpa/      libc/libgen/
 ```
 
-### 新建文件
+### 新建文件清单
 
-#### termios/ (10 个函数)
+每个条目列出：路径、include 列表、来源、函数列表及行为。
 
-**`termios/termios.c`** — 来源：busybox_stubs.c
-- `tcgetattr` — 实际 ioctl 包装（非纯 stub，调用 `syscall(SYS_ioctl, ..., TCGETS, ...)`）
-- `tcsetattr` — 实际 ioctl 包装（同上，过 TCGETS）
-- `tcflow` — stub: `return 0`
-- `tcflush` — stub: `return 0`（统一用 busybox 版本，消除重复）
-- `cfgetispeed` — stub: `return B9600`
-- `cfgetospeed` — stub: `return B9600`
-- `cfsetispeed` — stub: `return 0`
-- `cfsetospeed` — stub: `return 0`
+---
 
-#### socket/ (6 个函数)
+#### `termios/termios.c`
 
-**`socket/socket.c`** — 来源：busybox_stubs.c
-- `socket`, `bind`, `listen`, `sendto` — stub: `errno = ENOSYS; return -1`
-- `getsockname`, `getpeername` — 来源：net_stubs.c，stub: `return -1`
-
-#### netdb/ (12 个符号)
-
-**`netdb/netdb.c`** — 来源：net_stubs.c
-- `int h_errno = 0` — 全局变量
-- `hstrerror` — stub: `return "Unknown host"`
-- `getaddrinfo`, `freeaddrinfo`, `getservbyname`, `gethostbyname`, `getnameinfo` — stub
-- `htons`, `ntohs`, `htonl`, `ntohl` — 直通（identity）
-
-注意：net_stubs.c 中的 `getsockname`, `getpeername` 移至 `socket/socket.c`（属于 `<sys/socket.h>`）。
-
-#### sched/ (7 个函数)
-
-**`sched/sched.c`** — 来源：busybox_stubs.c
-- `sched_getaffinity`, `sched_setaffinity`, `sched_get_priority_max`, `sched_get_priority_min`, `sched_setscheduler`, `sched_getscheduler` — stub
-- `sched_yield` — stub: `return 0`
-
-#### xattr/ (12 个函数)
-
-**`xattr/xattr.c`** — 来源：busybox_stubs.c
-- `getxattr`, `lgetxattr`, `fgetxattr`, `listxattr`, `llistxattr`, `flistxattr`, `setxattr`, `lsetxattr`, `fsetxattr`, `removexattr`, `lremovexattr`, `fremovexattr` — 全部 `errno = ENOSYS; return -1`
-
-#### resource/ (2 个函数)
-
-**`resource/resource.c`** — 来源：busybox_stubs.c
-- `getrlimit` — 实际逻辑：`rlim->rlim_cur = rlim->rlim_max = 65536; return 0`
-- `setrlimit` — stub: `return 0`
-
-#### pwd/ (2 个函数)
-
-**`pwd/pwd.c`** — 来源：busybox_stubs.c
-- `getpwnam` — stub: `return NULL`
-- `getpwuid` — stub: `return NULL`
-
-注意：需本地定义 `struct passwd`（当前在 busybox_stubs.c 中本地定义）。
-
-#### grp/ (4 个函数)
-
-**`grp/grp.c`** — 来源：busybox_stubs.c + uid_stubs.c
-- `getgrnam`, `getgrgid` — stub: `return NULL`
-- `setgroups`, `initgroups` — stub: `return 0`
-
-注意：需本地定义 `struct group`（当前在 busybox_stubs.c 中本地定义）。
-
-#### csu/ (1 个函数)
-
-**`csu/csu.c`** — 来源：busybox_stubs.c
-- `__libc_start_main` — 非 stub，实际 CRT 启动逻辑：调用 `main(argc, argv, environ)`
-
-#### signal/ (从 unistd/ 迁移 6 个 + 新建 1 个)
-
-从 `unistd/` 迁移至 `signal/`：
-```
-unistd/raise.c        → signal/raise.c
-unistd/sigaction.c    → signal/sigaction.c
-unistd/sigfillset.c   → signal/sigfillset.c
-unistd/signal.c       → signal/signal.c
-unistd/sigprocmask.c  → signal/sigprocmask.c
-unistd/sigsuspend.c   → signal/sigsuspend.c
+```c
+#include <termios.h>
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>    /* STDIN_FILENO, syscall() 的 int64_t 等 */
 ```
 
-新建：
-**`signal/killpg.c`** — 来源：uid_stubs.c，stub: `return -1`
+| 函数 | 行为 | 来源 |
+|------|------|------|
+| `tcgetattr` | 实际 ioctl 包装：`syscall(SYS_ioctl, fd, TCGETS, tio)` | busybox_stubs.c |
+| `tcsetattr` | 实际 ioctl 包装：`syscall(SYS_ioctl, fd, TCSETS, tio)` | busybox_stubs.c |
+| `tcflow` | stub: `return 0` | busybox_stubs.c |
+| `tcflush` | stub: `return 0` | busybox_stubs.c（消除重复，采用已验证版本） |
+| `cfgetispeed` | stub: `return B9600` | busybox_stubs.c |
+| `cfgetospeed` | stub: `return B9600` | busybox_stubs.c |
+| `cfsetispeed` | stub: `return 0` | busybox_stubs.c |
+| `cfsetospeed` | stub: `return 0` | busybox_stubs.c |
 
-### unistd/ 中新建的独立文件（共 16 个）
+---
 
-从 uid_stubs.c/misc_stubs.c/term_stubs.c 拆分出，每个函数一个文件：
+#### `socket/socket.c`
 
-**uid/gid 系列（8 个）**：
-```
-unistd/getuid.c       — return 0
-unistd/getgid.c       — return 0
-unistd/getegid.c      — return 0
-unistd/setgid.c       — return 0
-unistd/setuid.c       — return 0
-unistd/setegid.c      — return 0
-unistd/seteuid.c      — return 0
-unistd/geteuid.c      — return 0（已有，无需操作）
-```
-
-**session/pgrp 系列（7 个）**：
-```
-unistd/vfork.c        — errno = ENOSYS; return -1
-unistd/setsid.c       — errno = ENOSYS; return -1
-unistd/getsid.c       — return 0
-unistd/getpgrp.c      — return 1
-unistd/setpgid.c      — return 0
-unistd/tcsetpgrp.c    — return 0
-unistd/tcgetpgrp.c    — return 1
+```c
+#include <sys/socket.h>
+#include <errno.h>
 ```
 
-**chown 系列（2 个新建，1 个启用）**：
-```
-unistd/fchown.c       — 新建：return 0
-unistd/lchown.c       — 新建：return 0
-unistd/chown.c         — 已存在（当前被 Makefile filter-out），启用
+| 函数 | 行为 | 来源 |
+|------|------|------|
+| `socket` | `errno = ENOSYS; return -1` | busybox_stubs.c |
+| `bind` | `errno = ENOSYS; return -1` | busybox_stubs.c |
+| `listen` | `errno = ENOSYS; return -1` | busybox_stubs.c |
+| `sendto` | `errno = ENOSYS; return -1` | busybox_stubs.c |
+| `getsockname` | `errno = ENOSYS; return -1` | net_stubs.c（行为变化：旧版无 errno） |
+| `getpeername` | `errno = ENOSYS; return -1` | net_stubs.c（行为变化：旧版无 errno） |
+
+---
+
+#### `netdb/netdb.c`
+
+```c
+#include <netdb.h>
+#include <string.h>
+#include <errno.h>
 ```
 
-**其他（4 个）** — 来源：misc_stubs.c + term_stubs.c：
+| 符号 | 行为 | 来源 |
+|------|------|------|
+| `int h_errno = 0` | 全局变量 | net_stubs.c |
+| `hstrerror` | `return "Unknown host"` | net_stubs.c |
+| `getaddrinfo` | `return -1` | net_stubs.c |
+| `freeaddrinfo` | no-op | net_stubs.c |
+| `getservbyname` | `return NULL` | net_stubs.c |
+| `gethostbyname` | `return NULL` | net_stubs.c |
+| `getnameinfo` | `return -1` | net_stubs.c |
+
+---
+
+#### `arpa/inet.c`
+
+```c
+#include <arpa/inet.h>
+#include <stdint.h>
 ```
-unistd/fchdir.c       — errno = ENOSYS; return -1
-unistd/chroot.c       — errno = ENOSYS; return -1
-unistd/ttyname_r.c    — errno = ENOSYS; return -1
-unistd/alarm.c        — return 0
+
+| 函数 | 行为 | 来源 |
+|------|------|------|
+| `htons` | `return n`（identity） | net_stubs.c |
+| `ntohs` | `return n`（identity） | net_stubs.c |
+| `htonl` | `return n`（identity） | net_stubs.c |
+| `ntohl` | `return n`（identity） | net_stubs.c |
+
+同时补全 `arpa/inet.h` 中缺少的声明：
+```c
+uint16_t htons(uint16_t n);
+uint16_t ntohs(uint16_t n);
+uint32_t htonl(uint32_t n);
+uint32_t ntohl(uint32_t n);
 ```
+
+---
+
+#### `libgen/libgen.c`
+
+```c
+#include <libgen.h>
+```
+
+| 函数 | 行为 | 来源 |
+|------|------|------|
+| `dirname` | `return "/"` | busybox_stubs.c |
+| `basename` | `return ""` | busybox_stubs.c |
+
+---
+
+#### `sched/sched.c`
+
+```c
+#include <sched.h>
+#include <errno.h>
+#include <unistd.h>    /* pid_t */
+```
+
+| 函数 | 行为 | 来源 |
+|------|------|------|
+| `sched_getaffinity` | `errno = ENOSYS; return -1` | busybox_stubs.c |
+| `sched_setaffinity` | `errno = ENOSYS; return -1` | busybox_stubs.c |
+| `sched_get_priority_max` | `return 0` | busybox_stubs.c |
+| `sched_get_priority_min` | `return 0` | busybox_stubs.c |
+| `sched_setscheduler` | `return 0` | busybox_stubs.c |
+| `sched_getscheduler` | `return SCHED_NORMAL` | busybox_stubs.c |
+| `sched_yield` | `return 0` | busybox_stubs.c |
+
+---
+
+#### `xattr/xattr.c`
+
+```c
+#include <sys/xattr.h>
+#include <errno.h>
+```
+
+12 个函数，统一 `errno = ENOSYS; return -1`（`getxattr`/`lgetxattr`/`fgetxattr`/`listxattr`/`llistxattr`/`flistxattr`/`setxattr`/`lsetxattr`/`fsetxattr`/`removexattr`/`lremovexattr`/`fremovexattr`）。来源：busybox_stubs.c。
+
+---
+
+#### `resource/resource.c`
+
+```c
+#include <sys/resource.h>
+```
+
+| 函数 | 行为 | 来源 |
+|------|------|------|
+| `getrlimit` | 实际逻辑：`rlim->rlim_cur = rlim->rlim_max = 65536; return 0` | busybox_stubs.c |
+| `setrlimit` | `return 0` | busybox_stubs.c |
+
+---
+
+#### `pwd/pwd.c`
+
+```c
+#include <pwd.h>
+#include <errno.h>
+```
+
+| 函数 | 行为 | 来源 |
+|------|------|------|
+| `getpwnam` | `errno = ENOSYS; return NULL` | busybox_stubs.c |
+| `getpwuid` | `errno = ENOSYS; return NULL` | busybox_stubs.c |
+
+使用 `pwd.h` 中的 `struct passwd` 定义，**不**本地定义。
+
+---
+
+#### `grp/grp.c`
+
+```c
+#include <grp.h>
+#include <errno.h>
+#include <sys/types.h>
+
+int setgroups(size_t s, const gid_t *l) { (void)s; (void)l; return 0; }
+int initgroups(const char *u, int g) { (void)u; (void)g; return 0; }
+```
+
+| 函数 | 行为 | 来源 |
+|------|------|------|
+| `getgrnam` | `errno = ENOSYS; return NULL` | busybox_stubs.c |
+| `getgrgid` | `errno = ENOSYS; return NULL` | busybox_stubs.c |
+| `setgroups` | `return 0` | uid_stubs.c |
+| `initgroups` | `return 0` | uid_stubs.c |
+
+使用 `grp.h` 中的 `struct group` 定义，**不**本地定义。
+
+注意：`setgroups` / `initgroups` 本应声明在 `<grp.h>` 中，但当前在 `unistd.h:106-107` 中声明。重构不改变声明位置（后续可处理）。
+
+---
+
+#### `csu/csu.c`
+
+```c
+#include <unistd.h>    /* environ (extern) */
+```
+
+| 函数 | 行为 | 来源 |
+|------|------|------|
+| `__libc_start_main` | 实际 CRT 启动：调用 `main(argc, argv, environ)` | busybox_stubs.c |
+
+非 stub。命名贴合 glibc 惯例（`csu/` = C StartUp）。
+
+---
+
+#### signal/ 目录（从 unistd/ 迁移 7 个文件 + 新建 1 个）
+
+从 `unistd/` 迁移的文件（内容不变，仅路径变化）：
+```
+unistd/kill.c          → signal/kill.c         (include <signal.h>)
+unistd/raise.c          → signal/raise.c         (include <signal.h> + <unistd.h>)
+unistd/sigaction.c      → signal/sigaction.c     (include <signal.h>)
+unistd/signal.c         → signal/signal.c        (include <signal.h>)
+unistd/sigprocmask.c    → signal/sigprocmask.c   (include <signal.h>)
+unistd/sigsuspend.c     → signal/sigsuspend.c    (include <signal.h>)
+```
+
+**注意**：`raise.c` 当前同时 include `<signal.h>` 和 `<unistd.h>`（为了 `syscall(SYS_getpid,...)`）。迁入 signal/ 后 include 不变——`unistd.h` 仍需要（提供 `syscall` 宏）。
+
+新建文件：
+
+**`signal/killpg.c`**
+
+```c
+#include <signal.h>
+#include <errno.h>
+```
+
+`killpg` — stub: `errno = ENOSYS; return -1`（行为变化：旧版无 errno）
+
+**`sigfillset.c` 不迁移**——`signal.h:87` 的宏 `#define sigfillset(set) (*(set) = ~0UL)` 使 `.c` 函数不可达。`sigfillset.c` 签名 `int sigfillset(void *s)` 也与 POSIX 不一致。直接删除。
+
+signal/ 最终共 8 个文件：7 个迁入 + 1 个新建（killpg.c）。
+
+---
+
+### unistd/ 中新建的独立文件
+
+从 uid_stubs.c/misc_stubs.c/term_stubs.c 拆分，每文件一个函数，延续 unistd/ 惯例。
+
+每个文件 include `<unistd.h>`（提供类型和声明）+ 按需 `<errno.h>`。
+
+#### uid/gid（7 个新建；`geteuid.c` 已存在无需操作）
+
+| 文件 | 行为 | 来源 |
+|------|------|------|
+| `getuid.c` | `return 0` | uid_stubs.c |
+| `getgid.c` | `return 0` | uid_stubs.c |
+| `getegid.c` | `return 0` | uid_stubs.c |
+| `setgid.c` | `return 0` | uid_stubs.c |
+| `setuid.c` | `return 0` | uid_stubs.c |
+| `setegid.c` | `return 0` | uid_stubs.c |
+| `seteuid.c` | `return 0` | uid_stubs.c |
+
+#### session/pgrp（7 个）
+
+| 文件 | 行为 | 来源 |
+|------|------|------|
+| `vfork.c` | `errno = ENOSYS; return -1` | uid_stubs.c |
+| `setsid.c` | `errno = ENOSYS; return -1` | uid_stubs.c |
+| `getsid.c` | `return 0` | uid_stubs.c |
+| `getpgrp.c` | `return 1` | uid_stubs.c |
+| `setpgid.c` | `return 0` | uid_stubs.c |
+| `tcsetpgrp.c` | `return 0` | uid_stubs.c |
+| `tcgetpgrp.c` | `return 1` | uid_stubs.c |
+
+#### chown 系列（1 个新建，1 个启用；不新建 fchown.c）
+
+| 文件 | 行为 | 来源 |
+|------|------|------|
+| `chown.c` | 启用（已存在）。含 `chown` + `fchown`，均为 `errno = ENOSYS; return -1` | 取消 filter-out |
+| `lchown.c` | 新建：`errno = ENOSYS; return -1` | 旧 uid_stubs 为 `return 0`，本次统一为 ENOSYS |
+
+`chown.c` 同时定义了 `chown` 和 `fchown`（已在 repo 中）。**不新建 `fchown.c`**，避免重复定义。
+
+#### 其他（4 个）
+
+| 文件 | 行为 | 来源 |
+|------|------|------|
+| `fchdir.c` | `errno = ENOSYS; return -1` | misc_stubs.c |
+| `chroot.c` | `errno = ENOSYS; return -1` | misc_stubs.c |
+| `ttyname_r.c` | `errno = ENOSYS; return -1` | misc_stubs.c |
+| `alarm.c` | `return 0` | term_stubs.c |
+
+---
 
 ### 修改已有文件
 
-**`stdio/stdio_extras.c`** — 追加 7 个 stdio stub（来源：busybox_stubs.c）
-- `ferror_unlocked`, `clearerr`, `fileno_unlocked`, `fopen`, `fclose`, `fdopen`, `fgets_unlocked`
+#### `stdio/stdio_extras.c` — 追加 7 个函数
 
-**`stdlib/environ.c`** — 追加 2 个环境变量函数（来源：busybox_stubs.c）
-- `putenv` — 有实际逻辑（env_table 管理）
-- `unsetenv` — stub: `return 0`
+来源：busybox_stubs.c。
 
-**`string/extras.c`** — 追加 2 个路径函数（来源：busybox_stubs.c）
-- `dirname` — stub: `return "/"`
-- `basename` — stub: `return ""`
+追加 include：`<unistd.h>`（提供 `syscall` 宏供 `fgets_unlocked` 使用）。
 
-**`time/time.c`** — 追加 2 个时间函数
-- `strftime` — 来源：busybox_stubs.c，stub: `return 0`
-- `settimeofday` — 来源：misc_stubs.c，stub: `errno = ENOSYS; return -1`
+| 函数 | 行为 |
+|------|------|
+| `ferror_unlocked` | `return 0` |
+| `clearerr` | no-op |
+| `fileno_unlocked` | `return 0` |
+| `fopen` | `return NULL` |
+| `fclose` | `return 0` |
+| `fdopen` | `return NULL` |
+| `fgets_unlocked` | 实际实现（从 fd 0 逐字节读，带 `syscall`） |
+
+#### `stdlib/environ.c` — 追加 2 个函数
+
+来源：busybox_stubs.c。
+
+追加 include：`<string.h>`（`strchr`, `strncmp`）。
+
+| 函数 | 行为 |
+|------|------|
+| `putenv` | 有实际逻辑（env_table 管理，含 `realloc`） |
+| `unsetenv` | `return 0` |
+
+#### `string/extras.c` — 不追加
+
+`dirname`/`basename` 归属 `<libgen.h>`，放入新建的 `libgen/libgen.c`。
+
+#### `time/time.c` — 追加 2 个函数
+
+追加 include：`<sys/time.h>`（`settimeofday`）。
+
+| 函数 | 行为 | 来源 |
+|------|------|------|
+| `strftime` | `return 0` | busybox_stubs.c |
+| `settimeofday` | `errno = ENOSYS; return -1` | misc_stubs.c |
+
+注意：当前 `settimeofday` 声明在 `unistd.h:145` 而非 `<sys/time.h>`（尽管 `<sys/time.h>` 是 POSIX 标准位置）。声明不迁移，仅实现迁移。
+
+---
 
 ### Makefile 变更
 
-新增 11 行 wildcard：
+新增 12 行 wildcard：
 ```makefile
     $(wildcard termios/*.c) \
     $(wildcard socket/*.c) \
@@ -206,70 +402,78 @@ unistd/alarm.c        — return 0
     $(wildcard grp/*.c) \
     $(wildcard csu/*.c) \
     $(wildcard signal/*.c) \
+    $(wildcard arpa/*.c) \
+    $(wildcard libgen/*.c) \
 ```
 
-删除 filter-out 行：
+删除 filter-out 行中 `unistd/chown.c` 部分：
 ```makefile
-# 删除
+# 旧
 C_SOURCES := $(filter-out stdlib/free.c unistd/chown.c, $(C_SOURCES))
-# 改为
+# 新
 C_SOURCES := $(filter-out stdlib/free.c, $(C_SOURCES))
 ```
 
-原因：`chown.c` 冲突的来源是 `uid_stubs.c` 中定义了 `chown`——该文件被删除后冲突自然消除。`free.c` 与 `malloc.c` 的冲突保留处理。
+同时删除死 wildcard `$(wildcard dirent/*.c)`（`libc/dirent/` 目录不存在）。
 
-### 修复重复定义
+---
 
-`tcflush` 同时存在于 `busybox_stubs.c:82` 和 `term_stubs.c:2`：
-- `busybox_stubs.c`: `int tcflush(int fd, int q) { (void)fd; (void)q; return 0; }`
-- `term_stubs.c`: `int tcflush(int fd, int q) { (void)fd; (void)q; return -1; }`
+## 行为变化清单（显式列举）
 
-采用 busybox 版本（`return 0`），放入 `termios/termios.c`。删除 `term_stubs.c` 后冲突消除。
+所有行为变化已由设计确认。以下为完整清单：
+
+| 函数 | 旧行为 | 新行为 | 影响评估 |
+|------|--------|--------|----------|
+| `chown` | `return 0`（uid_stubs.c，恒成功） | `errno=ENOSYS; return -1`（chown.c） | busybox `chown` / `cp -p` 从成功变为报错 |
+| `fchown` | `return 0`（uid_stubs.c，恒成功） | `errno=ENOSYS; return -1`（chown.c） | 同上 |
+| `lchown` | `return 0`（uid_stubs.c，恒成功） | `errno=ENOSYS; return -1`（新建） | 统一语义 |
+| `tcflush` | `return -1`（term_stubs.c 版本，但实际被 busybox_stubs 的 `return 0` 版本覆盖） | `return 0`（termios.c 统一版本） | 消除重复，选 busybox 已验证版本 |
+| `getsockname` | `return -1`（无 errno） | `errno=ENOSYS; return -1` | 统一 stub 语义 |
+| `getpeername` | `return -1`（无 errno） | `errno=ENOSYS; return -1` | 统一 stub 语义 |
+| `killpg` | `return -1`（无 errno） | `errno=ENOSYS; return -1` | 统一 stub 语义 |
+| `sigfillset` | `.c` 文件（死代码，不可达） | 删除（宏生效） | 无影响 |
+
+以上已批准。
+
+---
+
+## 验证方案
+
+1. **重复符号检查**：`nm libc.a | sort | uniq -d` — 确认零重复
+2. **归档构建**：`make -C libc clean && make -C libc` — 确认 `.a` 生成无警告
+3. **完整链接**：`make clean && make` 走 root Makefile 的 `busybox.elf` 流程 — 确认无 undefined symbol
+
+---
 
 ## 排除在外的内容
 
-- `libc/unistd/chown.c` 当前被 Makefile filter-out 排除，`uid_stubs.c` 删除后取消排除，启用该文件
-- `libc/stdlib/free.c` 继续被 filter-out（与 `malloc.c` 冲突）
+- `stdlib/free.c` 与 `malloc.c` 的冲突排除（保留现有 filter-out）
+- `settimeofday` 声明从 `unistd.h` 迁移到 `<sys/time.h>`（声明迁移，不属本次范围）
+- `setgroups` / `initgroups` 声明从 `unistd.h` 迁移到 `<grp.h>`（同上）
+- 非 stub 函数的实现改进（如 `fgets_unlocked` 的实际逻辑）
 
-## 文件结构对比
+---
 
-### 重构前
+## 重构后文件结构
+
 ```
 libc/
-  unistd/
-    busybox_stubs.c   (232行, ~46 函数, 7+ 域)
-    uid_stubs.c       (29行, ~16 函数)
-    net_stubs.c       (54行, ~14 符号)
-    misc_stubs.c      (8行, 4 函数)
-    term_stubs.c      (4行, 2 函数, 含重复)
-  ... (其他 60+ unistd 文件)
+  arpa/inet.c           (~12行)
+  termios/termios.c     (~25行)
+  socket/socket.c       (~20行)
+  netdb/netdb.c         (~45行)
+  sched/sched.c         (~25行)
+  xattr/xattr.c         (~45行)
+  resource/resource.c   (~15行)
+  pwd/pwd.c             (~10行)
+  grp/grp.c             (~15行)
+  csu/csu.c             (~10行)
+  libgen/libgen.c       (~10行)
+  signal/               (7 文件: killpg + 6 个自 unistd/ 迁入)
+  unistd/               (原有 ~60 文件，-5 *_stubs.c, -1 sigfillset.c,
+                         -6 迁出信号文件, +19 新建独立 stub,
+                         chown.c 启用)
+  stdio/stdio_extras.c  (+7 函数)
+  stdlib/environ.c      (+2 函数: putenv, unsetenv)
+  time/time.c           (+2 函数: strftime, settimeofday)
 ```
-
-### 重构后
-```
-libc/
-  termios/termios.c   (~25行)
-  socket/socket.c     (~20行)
-  netdb/netdb.c       (~50行)
-  sched/sched.c       (~25行)
-  xattr/xattr.c       (~45行)
-  resource/resource.c (~15行)
-  pwd/pwd.c           (~10行)
-  grp/grp.c           (~15行)
-  csu/csu.c           (~10行)
-  signal/             (7 文件: killpg + 从 unistd 迁入的 6 个)
-  unistd/             (60+ 原有文件 + 16 新建独立 stub 文件,
-                       -5 *_stubs.c, -6 signal 文件,
-                       chown.c 启用)
-  stdio/stdio_extras.c (+7 函数)
-  stdlib/environ.c    (+2 函数)
-  string/extras.c     (+2 函数)
-  time/time.c         (+2 函数)
-```
-
-## 风险
-
-- 低风险：纯文件移动和拆分，函数实现不改变
-- `__libc_start_main` 中的 `struct passwd` / `struct group` 本地定义需随函数移动到新文件
-- Makefile wildcard 自动发现新目录，无需手动维护文件列表
-- 构建验证：`make -C libc` 成功后链接 busybox 确认无未定义符号
