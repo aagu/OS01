@@ -109,7 +109,7 @@
 * `gpt.c` - GPT 分区表解析
 
 #### sched 子目录
-* `task.c` - 任务/线程管理 + 调度器（round-robin, 全局列表 + CPU 亲和性）
+* `task.c` - 任务/线程管理 + EEVDF 调度器（O(log n) rbtree 可运行队列 + vruntime/deadline + SMP 负载均衡）
 * `smp.c` - SMP AP 引导（INIT-SIPI-SIPI）
 
 #### subsys 子目录
@@ -140,13 +140,16 @@
 
 ### user 目录
 用户空间程序：
-* `init.c` - init 进程（系统初始化 + shell）
-* `spin.c` - 纯循环（测试退出）
+* `init.c` - PID 1 init 进程（解析 /etc/inittab → 4 阶段引导：SYSINIT→WAIT→ONCE→RESPAWN/ASKFIRST，fallback 硬编码默认）
+* `spin.c` - 纯循环（测试退出码 42）
 * `sigtest.c` - 信号测试
-* `poweroff.c` - 关机程序
-* `systest.c` - 系统调用测试
+* `poweroff.c` - 关机程序（发送信号至 PID 1）
+* `halt.c` - 停机程序
+* `reboot.c` - 重启程序
+* `systest.c` - 系统调用测试（125/125）
 * `test_mmap.c`, `test_fork_mmap.c`, `test_cow.c` - 内存映射测试
-* `sh.c` - 简单 shell
+* `smp_stress.c` - SMP 多核负载均衡压力测试
+* `terminal.c` - 交互终端（PTY + framebuffer + busybox ash）
 
 ### tools 目录
 * `mkdisk.c` - GPT 双分区磁盘镜像创建工具（FAT32 ESP + ext2 rootfs）

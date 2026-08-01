@@ -1,7 +1,7 @@
-# OS01 优化路线图 v11
+# OS01 优化路线图 v12
 
-> **基准**: `b5151eb` (SMP 负载均衡完成 — 124/125 pass)
-> **日期**: 2026-07-31
+> **基准**: `930187e` (inittab 配置支持完成 — 125/125 pass)
+> **日期**: 2026-08-01
 
 标记: ✅ 已完成 | 🔴 P0 本迭代 | 🟡 P1 本月 | 🟢 P2 下月 | 🔵 P3 远期
 
@@ -16,7 +16,7 @@
 | **Phase 3: 信号 + 调度** | do_signal_delivery、Ctrl-C→SIGINT、systest 118/118、优先级 O(n) 调度器 | ✅ |
 | **Phase 4: 文件系统** | ext2 R/W、FAT32 R/W、tmpfs、devfs、procfs、GPT 双分区 | ✅ |
 | **Phase 5: 设备驱动** | 8259A PIC、APIC/IOAPIC/LAPIC、PIT/LAPIC timer、PS/2 键盘、16550 串口、AHCI SATA | ✅ |
-| **Phase 6: 用户态** | busybox ash shell（方向键行编辑+光标闪烁+raw mode TTY）、9 applet、init、libc (printf/malloc/string/syscall wrapper)、VT100 CSI 终端模拟器 | ✅ |
+| **Phase 6: 用户态** | busybox ash shell（方向键行编辑+光标闪烁+raw mode TTY）、9 applet、init（/etc/inittab 配置解析、4 阶段引导：SYSINIT→WAIT→ONCE→RESPAWN/ASKFIRST、fallback 硬编码默认）、libc (printf/malloc/string/syscall wrapper)、VT100 CSI 终端模拟器 | ✅ |
 | **Phase 7: poll/select** | poll_table + 双队列级联唤醒、select/pselect 系统调用（SYS_select=50 + SYS_pselect6=51）、do_poll_core 共享轮询循环、pselect6 sigmask 原子 swap、systest 118/118 | ✅ |
 
 ---
@@ -351,6 +351,7 @@ CPU N: schedule()
 | **select/pselect syscall** (poll_table 动态化 + do_poll_core 提取 + 适配层 + pselect6 sigmask 原子性 + systest 118/118) | 2 天 | 07-24 |
 | **EEVDF 调度器** (rbtree 可运行队列 + vruntime/deadline + pick_eevdf O(log n) + per-CPU TSS SMP 修复) | 2 天 | 07-25 |
 | **SMP 负载均衡** (idle-steal + per-schedule pull + sched_pick_cpu + nr_running 指标 + 振荡防护 + 6 项 SMP 前置条件加固 + init 迁移保护 + idle→idle #PF 修复 + smp_stress 验证) | 2 天 | 07-29 |
+| **inittab 配置支持** (ACT_* 位掩码修复 + parse_inittab() open/read 解析器 + 3 套模板 + Makefile/build 集成 + test-inittab 相位派发验证) | 1 天 | 08-01 |
 
 ---
 
@@ -398,3 +399,5 @@ CPU N: schedule()
 | 25 | SMP 窃取方向 | rbtree 尾部（最大 deadline） | CPU-bound 任务高 vruntime→自然迁移到空闲核；交互式任务留在源核 |
 | 26 | SMP 振荡防护 | 门控 `src > local + 1` + count = `(diff)/2` | O(log N) 收敛，无 2:1↔1:2 ping-pong |
 | 27 | SMP 前置条件 | 6 项全局无锁代码加固 | slab/PMM/softirq/timer/fork_mm_copy/task_wake — AP 运行用户程序前必须 SMP 安全 |
+| 28 | inittab 格式 | `id:action:process`（3 字段，冒号分界，open+read 直接解析） | 去掉 runlevel；ACT_* 位掩码 0x01..0x80 与 run_actions() dispatch 兼容 |
+| 29 | OS01_SYSTEST 切换 | Makefile cp 模板（config/inittab.systest），非编译期 #ifdef | 同一 init 二进制同时支持测试/正常模式 |

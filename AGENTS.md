@@ -15,7 +15,7 @@ make kernel.bin            # Build kernel only
 **Build flags** (set on `make` command line):
 - `DEBUG_CHANNELS=sched,vfs,mm` — enable debug per-subsystem
 - `KERNEL_SELFTEST=1` — built-in kernel self-tests at boot
-- `OS01_SYSTEST=1` — systest as init (for `make test-syscall`)
+- `OS01_SYSTEST=1` — systest as init (Makefile copies config/inittab.systest template)
 - `LOG_TARGET=both` — log output to serial + framebuffer
 - `NDEBUG=1` — compile-time elimination of log_debug
 
@@ -29,8 +29,8 @@ Boot:    UEFI → BOOTX64.EFI → kernel.bin @ phys 0x100000
 Kernel:  head.S → GDT/IDT/TSS → lretq → 0xffff800000100000 → kernel_main
 Memory:  PML4→PDPT→PDE (2MB huge) + PT (4KB). Higher-half: Phy_To_Virt(x)=x+0xffff800000000000
 SMP:     percpu(GS base) → MADT enum → trampoline 0x8000 → INIT-SIPI-SIPI → APs
-Sched:   global list + CPU affinity + priority. LAPIC timer tick (APs). Round-robin.
-Init:    head.S → kernel_main → subsys framework (phases 3-6) → VFS/FS → TTY → percpu → SMP → task_init → idle
+Sched:   EEVDF O(log n) — rbtree 可运行队列 + vruntime/deadline + pick_eevdf + SMP 负载均衡
+Init:    head.S → kernel_main → subsys → VFS/FS → TTY → percpu → SMP → task_init → /init.elf (→ parse_inittab)
 ```
 
 ## Critical gotchas (will crash silently if wrong)
@@ -65,6 +65,8 @@ Init:    head.S → kernel_main → subsys framework (phases 3-6) → VFS/FS →
 | `kernel/futex.c` | Futex hash table (SYS_futex=47) |
 | `kernel/include/kernel/bootinfo.h` | **Fixed-size types critical for ABI** |
 | `kernel/include/uapi/syscall.h` | Syscall numbers (0..47) |
+| `user/init.c` | PID 1 init: inittab parsing, 4-phase boot (SYSINIT/WAIT/ONCE/RESPAWN), child supervision |
+| `config/inittab` | Default inittab template (id:action:process); `config/inittab.systest` for test mode |
 
 ## Documentation
 

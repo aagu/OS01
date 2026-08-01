@@ -121,4 +121,4 @@ Four levels: `LOG_ERR`, `LOG_WARN`, `LOG_INFO`, `LOG_DEBUG`. Compile-time `LOG_T
 6. VFS init + devfs init + GPT partition scan + filesystem mounts (ext2 `/`, FAT32 `/boot`, tmpfs, procfs)
 7. Console TTY (serial + keyboard IRQ → TTY, devfs `/dev/tty`) + console_init (VT100 CSI terminal, cursor)
 8. Per-CPU init + SMP boot + `arch_register_subsys_percpu()` + `subsys_init_percpu()`
-9. Selftest + futex_init + task_init (spawns `/init.elf` → idle loop)
+9. Selftest + futex_init + task_init (spawns `/bin/init` as PID 1 → parses `/etc/inittab` → 4-phase boot → supervision loop → idle loop)
