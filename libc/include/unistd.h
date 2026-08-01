@@ -104,7 +104,7 @@ int getuid(void);
 int getgid(void);
 int geteuid(void);
 int getgroups(int size, unsigned int *list);
-int initgroups(const char *user, int group);
+int initgroups(const char *user, gid_t group);
 void endgrent(void);
 int tcflush(int fd, int q);
 #define TCIFLUSH 0

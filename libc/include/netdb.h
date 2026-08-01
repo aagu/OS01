@@ -37,32 +37,8 @@ void freeaddrinfo(struct addrinfo *res);
 struct servent *getservbyname(const char *name, const char *proto);
 struct hostent *gethostbyname(const char *name);
 
-uint16_t htons(uint16_t n);
-uint16_t ntohs(uint16_t n);
-uint32_t htonl(uint32_t n);
-uint32_t ntohl(uint32_t n);
-
 #ifdef __cplusplus
 }
 #endif
-extern int h_errno;
-#define NI_NUMERICHOST 1
-#define NI_NUMERICSERV 2
-#define NI_NAMEREQD    8
 
-int getnameinfo(const struct sockaddr *sa, socklen_t salen,
-                char *host, socklen_t hostlen,
-                char *serv, socklen_t servlen, int flags);
-
-const char *hstrerror(int err);
-#endif
-extern int h_errno;
-#define NI_NUMERICHOST 1
-#define NI_NUMERICSERV 2
-#define NI_NAMEREQD    8
-
-int getnameinfo(const struct sockaddr *sa, socklen_t salen,
-                char *host, socklen_t hostlen,
-                char *serv, socklen_t servlen, int flags);
-
-const char *hstrerror(int err);
+#endif /* _NETDB_H */

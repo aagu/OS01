@@ -17,6 +17,12 @@ extern "C" {
 #define IPPROTO_UDP     17
 #define IPPROTO_RAW     255
 
+/* Byte-order functions (POSIX) */
+uint16_t htons(uint16_t n);
+uint16_t ntohs(uint16_t n);
+uint32_t htonl(uint32_t n);
+uint32_t ntohl(uint32_t n);
+
 /* IPv6 socket address */
 struct sockaddr_in6 {
     unsigned short  sin6_family;
