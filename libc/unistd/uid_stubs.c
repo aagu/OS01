@@ -10,7 +10,7 @@ int setuid(uid_t u) { (void)u; return 0; }
 int setegid(gid_t g) { (void)g; return 0; }
 int seteuid(uid_t u) { (void)u; return 0; }
 int setgroups(size_t s, const gid_t *l) { (void)s; (void)l; return 0; }
-int initgroups(const char *u, int g) { (void)u; (void)g; return 0; }
+int initgroups(const char *u, gid_t g) { (void)u; (void)g; return 0; }
 int vfork(void) { errno = ENOSYS; return -1; }
 int setsid(void) { errno = ENOSYS; return -1; }
 pid_t getsid(pid_t pid) { (void)pid; return 0; }
