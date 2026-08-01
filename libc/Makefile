@@ -4,21 +4,23 @@ ARCHDIR   := arch/$(HOSTARCH)
 BUILD_DIR := ../build/$(HOSTARCH)/libc
 
 # ── Compiler / Linker (inherited from root Makefile exports) ─
-CC     ?= clang -target x86_64-unknown-none
-LD     ?= ld.lld -m elf_x86_64
-AR     ?= llvm-ar
+# Note: use := not ?= — make's built-in default `CC = cc` has origin "default",
+# so `?=` would NOT override it, causing standalone `make -C libc` to build
+# with the host compiler instead of the cross clang.
+CC     := clang -target x86_64-unknown-none
+LD     := ld.lld -m elf_x86_64
+AR     := llvm-ar
 
 # ── Load architecture config ────────────────────────────────
 include $(ARCHDIR)/make.config
 
 # ── Compile flags ──────────────────────────────────────────
 CFLAGS := $(CFLAGS) -ffreestanding -Wall -Wextra -D__is_libc -Iinclude -fno-stack-protector -fomit-frame-pointer $(ARCH_CFLAGS)
-LIBK_CFLAGS := $(CFLAGS) -D__is_libk -mno-red-zone
+LIBK_CFLAGS := $(CFLAGS) -D__is_libk -mno-red-zone -I../kernel/include
 
 # ── Source discovery (wildcard — no manual lists!) ──────────
 C_SOURCES := \
     $(wildcard ctype/*.c) \
-    $(wildcard dirent/*.c) \
     $(wildcard errno/*.c) \
     $(wildcard list/*.c) \
     $(wildcard rbtree/*.c) \
@@ -27,10 +29,22 @@ C_SOURCES := \
     $(wildcard string/*.c) \
     $(wildcard time/*.c) \
     $(wildcard unistd/*.c) \
+    $(wildcard termios/*.c) \
+    $(wildcard socket/*.c) \
+    $(wildcard netdb/*.c) \
+    $(wildcard sched/*.c) \
+    $(wildcard xattr/*.c) \
+    $(wildcard resource/*.c) \
+    $(wildcard pwd/*.c) \
+    $(wildcard grp/*.c) \
+    $(wildcard csu/*.c) \
+    $(wildcard signal/*.c) \
+    $(wildcard arpa/*.c) \
+    $(wildcard libgen/*.c) \
     $(wildcard pthread/*.c)
 
-# Remove duplicates: free.c conflicts with malloc.c, chown.c with uid_stubs.c
-C_SOURCES := $(filter-out stdlib/free.c unistd/chown.c, $(C_SOURCES))
+# Remove duplicates: free.c conflicts with malloc.c (chown.c conflict gone — uid_stubs.c deleted)
+C_SOURCES := $(filter-out stdlib/free.c, $(C_SOURCES))
 
 # Object files (inside BUILD_DIR)
 # string/memcmp.c → build/x86_64/libc/string/memcmp.o     (libc)
