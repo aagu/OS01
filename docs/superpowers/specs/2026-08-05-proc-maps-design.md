@@ -1,7 +1,7 @@
 # /proc/<pid>/maps — 进程内存映射查看
 
 > **日期**: 2026-08-05
-> **状态**: design-revising (v3 — address second-round P0/P1/P2/P3 review defects)
+> **状态**: design-revising (v4 — fix example/output/permission/path-end inconsistencies)
 
 ## 动机
 
@@ -15,23 +15,30 @@
 
 | 区域 | 实现方式 | 位置 |
 |------|---------|------|
-| ELF 加载区 | `elf_load()` → `vmm_map_page` 2MB 大页，不调 vma_insert | `elf.c:31` |
+| ELF 加载区 | `elf_load()` → `vmm_map_page` 2MB 大页，不调 vma_insert | `elf.c:127` |
 | 栈 | `task.c:997` 直接映射 `USER_STACK_BASE..USER_STACK_TOP` 2MB | `task.c` |
 | 堆 | `SYS_brk` 只改 `mm->end_brk`，libc malloc 只用 brk | `trap.c:981` |
 
 `vma_free_all` 注释明说 "Does NOT touch 2MB ELF pages (those are tracked outside VMA)" (`vma.c:58`)。
 
-**更深层约束：elf_load 只填充 `start_code`/`end_code`** (`elf.c:156-161`)。`start_data`/`end_data`/`start_rodata`/`end_rodata` 仅在使用 `INIT_TASK` 宏的 init_mm 中被赋值 (`task.c:1679-1684`)，对任何用户进程这四个字段恒为 0。因此 gen_maps 只能输出**单条** ELF 区域，不是四条。
+**更深层约束：elf_load 只填充 `start_code`/`end_code`** (`elf.c:157-161`)。`start_data`/`end_data`/`start_rodata`/`end_rodata` 仅 init_mm 被赋值 (`task.c:1679-1684`)，对任何用户进程这四个字段恒为 0。因此 gen_maps 只能输出**单条** ELF 区域。
 
-此外 **ELF 映射权限是恒 RWX**：elf_load 对 2MB 大页注释 "always RWX for user space (2MB pages can't enforce per-4KB permissions)" (`elf.c:125-126`)。maps 应如实印 `rwxp`，而不是虚构的 `r-xp`/`rw-p`。
+**0x600000 是栈守护页，不映射**：`USER_STACK_BASE=0x800000` (`task.h:298`)，task.c:989-996 映射的 2MB 在 0x800000(`vmm_map_page(user_pml4, ..., USER_STACK_BASE, ...)`)。0x600000 的 2MB 故意不映射——"left unmapped as a stack guard — overflow past the stack bottom triggers #PF"。`mm->start_stack = USER_STACK_BASE`。
+
+**页面权限：**
+
+| 区域 | PTE flags | 实际权限 |
+|------|-----------|---------|
+| ELF 加载区 | `PAGE_USER_Page` (不含 XD) | `rwx` |
+| Stack | `PAGE_USER_Page \| PAGE_XD` | `rw-` |
+| Heap | 在 ELF 的 2MB 页内，无独立映射 | 同 ELF:`rwx` |
 
 ## 目标
 
 - `cat /proc/<pid>/maps` 输出本系统真实可达到的内存布局
 - `cat /proc/self/maps` 同上（"self" 魔法目录已有）
 - 每一行：地址范围 + 权限 + 偏移 + 设备:inode + 路径
-- 权限如实反映 2MB 页面限制（`rwxp`）
-- 不新增 `ino`/`dev` 到 `vfs_node_t`（复用 `fs_data`，见 §VFS 扩展）
+- 权限如实反映 PTE flags（见上方表格）
 
 ## 输出格式
 
@@ -39,35 +46,34 @@
 <vm_start>-<vm_end> <r/w/x><p/s> <offset> <dev:inode> <path>
 ```
 
-本系统可达的示例（实际输出）:
-```
-000000400000-000000600000 rwxp 00000000 00:00 0
-000000600000-000000800000 rwxp 00000000 00:00 0        [stack]
-000000800000-000000802000 rw-p 00000000 00:00 0        [heap]
-```
+（本系统不跟踪 exec 路径，ELF 区域 path 列为空。）
 
-- 地址: `%012lx-%012lx`（12 位十六进制，64 位安全；用户地址 < 0x800000000000 `USER_ADDR_LIMIT`）
+- 地址: `%012lx-%012lx`（12 位十六进制，64 位安全；用户地址 < 0x800000000000）
 - 地址对齐: start round down、end round up 到 PAGE_SIZE (4KB)
-- 权限: `r`/`-` `w`/`-` `x`/`-` `p`/`s`。合成段恒为 `rwxp`（见 §ELF 区域的权限）
+- 权限: `r`/`-` `w`/`-` `x`/`-` `p`/`s`。各区域按 PTE 写死（见 §合成条目权限）
 - offset: VMA 用 `vm_pgoff << 12`；合成段恒为 `00000000`（mm_t 未记录 p_offset）
-- dev:inode: 合成段 `00:00 0`；VMA 有 vm_file 则 `00:<fs_data> <fs_data>`；无 vm_file 则 `00:00 0`
-- path: 合成段空（不跟踪 exec 路径）或 `[stack]`/`[heap]`；VMA 若有 vm_file 调用 `vfs_resolve_path()`
-
-### ELF 区域的权限
-
-elf_load 用 2MB 大页映射，PTE 实际是 `rwx`。印 `rwxp` 如实反映硬件页表——调试工具输出真实权限比虚构 `r-xp` 更有用。权限细分（code 只读、data 可写不可执行）需等到 4KB 页面支持，届时可改为从 ELF p_flags 推导并更新 `elf_load` 按段设置 PTE。本轮注明限制即可。
+- dev:inode: 合成段 `00:00 0`；VMA 有 vm_file → `00:<fs_data> <fs_data>`；无 vm_file (anon) → `00:00 0`
+- path: 合成段 `[stack]`/`[heap]` 或空（ELF 区）；VMA 有 vm_file → `vfs_resolve_path()`
 
 ## gen_maps() 合成逻辑
 
-`gen_maps(task_t *t, char *buf, int bufsz)` 输出三类条目，按地址升序 merge（免去收集+排序的固定数组问题）。
+`gen_maps(task_t *t, char *buf, int bufsz)` 输出四类条目，按地址升序 merge 到输出缓冲。
 
-### 条目标记
+合成条目地址递增（ELF < brk < stack 在常见 binary 尺寸下成立；注释注明排序假设），vma_list 已按 vm_start 升序。两路归并免去收集+排序的额外缓冲。
 
-gen_maps 不收集到固定数组。改为：遍历 `vma_list` 时，与合成条目按地址做 merge。两类条目源码地址有序（合成条目地址递增、vma_list 递增），两路归并即可。
+### 合成条目权限（按 PTE 写死，不泛化规则）
 
-### (1) 合成 ELF 加载区
+| 条目 | 权限 | 依据 |
+|------|------|------|
+| ELF 加载区 | `rwxp` | `PAGE_USER_Page`，无 `PAGE_XD`（elf.c:127） |
+| Stack | `rw-p` | `PAGE_USER_Page \| PAGE_XD`（task.c:997） |
+| Heap | `rwxp` | 在 ELF 的 2MB 页内，无独立映射——实际权限同 ELF |
 
-仅当 `start_code < end_code`（用户进程才有的条件）:
+> **未来：** 4KB 页面支持后，elf_load 可按 ELF p_flags 逐段设置 PTE（code 只读 +XD、data RW+XD、rodata 只读）。届时 maps 权限从 VMA `vm_page_prot` 读取即可。
+
+### (A) 合成 ELF 加载区
+
+仅当 `start_code < end_code`（用户进程才有）：
 
 ```
 start_code-end_code rwxp 00000000 00:00 0
@@ -75,59 +81,50 @@ start_code-end_code rwxp 00000000 00:00 0
 
 - 不设 data/rodata 子段（mm_t 字段未被 elf_load 填充）
 - offset=0（mm_t 未记录 p_offset）
-- 权限 rwxp（2MB 页面限制；elf.c:125-126）
+- 内核线程由顶部 `mm == &init_mm` 早退，不走到这里
 
-### (2) 合成 [stack]
+### (B) 合成 [stack]
 
-仅当 `start_stack != 0`:
-
-```
-<start_stack_page_base>-<start_stack_page_top> rwxp 00000000 00:00 0  [stack]
-```
-
-- start_stack 是 `elf_load` 设置的栈顶附近值（`task.c:997` 用 `start_stack - 8` 作为初始 RSP）
-- 页基址 = `start_stack & ~(0x200000 - 1)`
-- 页顶 = 基址 + 0x200000（`USER_STACK_TOP` 定义为 `USER_STACK_BASE + 0x200000`）
-
-### (3) 合成 [heap]
-
-仅当 `start_brk < end_brk`:
+仅当 `start_stack != 0`：
 
 ```
-start_brk-end_brk rw-p 00000000 00:00 0  [heap]
+<stack_base>-<stack_top> rw-p 00000000 00:00 0  [stack]
 ```
 
-- `SYS_brk` 只改 `end_brk`；初始 `start_brk == end_brk` 时不输出
-- 堆权限用 `rw-p`（标准堆不具备 exec；但 2MB 页面下实际是 rwxp，等 4KB 细粒度时修正）
+- `stack_base = start_stack & ~(PAGE_4K_MASK)` → `0x800000`（`USER_STACK_BASE`）
+- `stack_top = stack_base + 0x200000`（2MB 页）
+- `0x600000` 的 2MB 是栈守护页（未映射），**不输出**
 
-### (4) vma_list 条目
+### (C) 合成 [heap]
 
-对 `t->mm->vma_list` 中每个 VMA:
+仅当 `start_brk < end_brk`：
+
 ```
-vma->vm_start-vma->vm_end <r/w/x><p/s> <vm_pgoff<<12> <00:00 or 00:fs_data> <path or empty>
+start_brk-end_brk rwxp 00000000 00:00 0  [heap]
 ```
 
-- 权限: 从 `vm_flags` (VM_READ/WRITE/EXEC/SHARED) 推导
+- `SYS_brk` 只改 `end_brk`；初始 `start_brk == end_brk`（= `PAGE_4K_ALIGN(end_code)`）→ 不输出
+- 权限 `rwxp`（在 ELF 的 2MB 页内，硬件权限同 ELF 区；等 4KB 页面粒度后可按 VMA 精确设置）
+
+### (D) vma_list 条目
+
+对 `t->mm->vma_list` 中每个 VMA：
+```
+vma->vm_start-vma->vm_end <r/w/x><p/s> <vm_pgoff<<12> <dev:inode> <path>
+```
+
+- 权限: 从 `vm_flags` (VM_READ/WRITE/EXEC/SHARED) 推导，形如 `rw-p`/`r--p`/`rwx-`
 - offset: `vm_pgoff << 12`
-- dev:inode: 若 `vm_file` 非 NULL → `00:0%x 0x%x`（dev=00, ino=`vm_file->fs_data`）；若 VM_ANON → `00:00 0`
+- dev:inode: `vm_file` 非 NULL → `00:0%x 0x%x`（`vm_file->fs_data`）；VM_ANON → `00:00 0`
 - path: `vm_file` 非 NULL → `vfs_resolve_path()` 结果；否则空
 
 **tmpfs 的 fs_data 是内核指针** (`tmpfs.c:222` 用节点地址作 ino)。直接印进用户输出泄漏内核地址。本轮沿用 `vfs_stat` 的现有行为（vfs.c:344 同样把 fs_data 当 st_ino 返回给用户态），待后续统一修复。
 
+### 排序
+
+合并假设：合成条目地址递增（ELF < brk < stack）对常见 ≤4MB 的静态二进制成立。加注释注明此假设；若未来 ELF >4MB 使 brk 越过 0x800000 则需调整。vma_list 已按 vm_start 升序保证有序。
+
 ## VFS 扩展
-
-### 不新增 ino/dev 字段
-
-**`vfs_node_t` 不加 `ino`/`dev`。** ino 概念已编码在 `fs_data`：
-
-| FS | ino 来源 |
-|----|---------|
-| ext2 | `ext2_node_ino()` 从 `fs_data` 取 inode 号 |
-| FAT32 | `entry->ino = cluster`（`fat.c`） |
-| tmpfs | `entry->ino = node` 指针（`tmpfs.c`） |
-| procfs/devfs | `fs_data`（PROCFS_ENCODE 等） |
-
-`vfs_stat` (`vfs.c:344`) 已用 `fs_data` 作为 `st_ino`。单独加字段制造两个不一致的真相源。
 
 ### `vfs_resolve_path()` 新增
 
@@ -135,10 +132,23 @@ vma->vm_start-vma->vm_end <r/w/x><p/s> <vm_pgoff<<12> <00:00 or 00:fs_data> <pat
 int vfs_resolve_path(vfs_node_t *node, char *path, size_t pathsz);
 ```
 
-- 沿 `parent` 链回溯到挂载根，构造 `/mount/a/b/file`
-- 返回路径长度（不含 NUL），bufsz 不足返回实际所需长度
-- 调用方检测返回值 >= pathsz 时，末尾补 `...`
-- parent 为 NULL 时返回 -1，调用方印 `?`
+- 沿 `parent` 链回溯到**挂载根**（`node->parent == NULL` → 到达挂载根，此乃成功终止条件，不是错误）
+- 构造 `/mount/a/b/file`，返回路径长度（不含 NUL）
+- bufsz 不足返回实际所需长度
+
+**终止条件**：`parent == NULL` 表示回溯到挂载根，终止。首次回溯时记录根节点为 `node`（此时 `node` 仍是叶子），以后每步 `node = node->parent`。此路径是：
+```
+leaf → parent → ... → mount_root (parent==NULL)
+```
+需从后向前构造 `/name(N-1)/.../name(1)/name(0)`。
+
+**错误条件**（返回 -1）：`node` 为 NULL、`node->mount` 为 NULL、或 `node->name` 为 NULL。
+
+**调用方处理溢出**：`vfs_resolve_path` 返回 >= pathsz 时，缓冲已满。maps 行需在调用前预留 4 字节给 `...\0`（路径列在行末，snprintf 到路径前 buffer 剩余 ≥ pathsz+4，截断时补 `...`）。
+
+### 不新增 ino/dev 字段
+
+`vfs_node_t` 不加 `ino`/`dev`。ino 概念已编码在 `fs_data`。单独加字段制造两个不一致的真相源。留待 `stat`/`fstat` syscall 统一引入。
 
 ## procfs 改动
 
@@ -150,7 +160,7 @@ int vfs_resolve_path(vfs_node_t *node, char *path, size_t pathsz);
 
 ### `procfs_read` 栈缓冲扩容
 
-`procfs.c:129` 的 `char local[512]` → `char local[4096]`。gen_maps 需要 4KB 最小缓冲（~6 行 × ~80 字节 + 路径），STACK_SIZE=32KB 放得下。
+`procfs.c:129` 的 `char local[512]` → `char local[4096]`。gen_maps 需要 4KB 最小缓冲（~6 行 × 80 字节 + 路径），STACK_SIZE=32KB 放得下。
 
 ### `procfs_readdir` 增加条目
 
@@ -181,7 +191,7 @@ case PROCFS_TYPE_MAPS: {
 `find_task_by_pid` 注释自称 "caller holds spinlock"，但 `procfs_read` 不持任何锁。两处 TOCTOU 窗口：
 
 1. **vma_list 遍历**: 另一 CPU 可并发 `vma_remove`/`free`，遍历到已释放 VMA→悬垂指针→内核崩溃
-2. **mm 释放**: `t->mm == NULL` 检查不原子；另一 CPU 在 `find_task_` 通过后、`mm` 解引用前执行 `do_exit`→释放 mm，同样崩溃
+2. **mm 释放**: `t->mm == NULL` 检查不原子；另一 CPU 在 `find_task_by_pid` 返回后、`mm` 解引用前执行 `do_exit`→释放 mm，同样崩溃
 
 `mm_t` 无锁字段，加锁 scope 外；`status` (`gen_status`) 已有同款风险，短期不修。
 
@@ -194,14 +204,14 @@ case PROCFS_TYPE_MAPS: {
 
 | 场景 | 行为 |
 |------|------|
-| 内核线程 | t->mm == &init_mm → 返回 0 |
-| Zombie 进程 | t->mm == NULL → 返回 0 |
-| start_code == end_code | 无 ELF 行（内核线程，非用户进程） |
+| 内核线程（mm == &init_mm） | 返回 0 |
+| Zombie 进程（mm == NULL） | 返回 0 |
+| start_code == end_code | 无 ELF 行（但在 `mm != &init_mm` 前提下一般不存在） |
 | start_brk == end_brk | 无 [heap] 行 |
 | start_stack == 0 | 无 [stack] 行 |
 | vma_list 为空 + 无合成段 | 返回 0（空输出） |
-| 路径缓冲溢出 | vfs_resolve_path 返回 >= pathsz → 补 `...` |
-| vm_file→parent 为 NULL | vfs_resolve_path 返回 -1 → 印 `?` |
+| 路径缓冲溢出 | vfs_resolve_path 返回所需长度 → 调用方补 `...`（预留 4 字节） |
+| node/mount/name 为 NULL | vfs_resolve_path 返回 -1 → 印 `?` |
 | 并发 vma_remove / mm 释放 | 已知风险，不做防护（见 §并发安全） |
 | tmpfs fs_data 泄漏 | 已知，沿用现有 vfs_stat 行为，待统一修复 |
 
@@ -212,8 +222,9 @@ case PROCFS_TYPE_MAPS: {
 1. `fd = open("/proc/self/maps")` — 成功打开
 2. `read(fd, buf, sizeof(buf))` — 成功（n > 0）
 3. 字段数检查：至少一行匹配 `^[0-9a-f]{8,12}-[0-9a-f]{8,12} [r-][w-][x-][ps]` 模式
-4. 检查存在 `[stack]` 标签（用户进程必须有栈）
+4. 检查存在 `[stack]` 标签
 5. 检查至少 2 行（ELF 加载区 + stack，如果 brk 已扩展则有 heap）
+6. 检查 stack 行的地址范围不包含 `0x600000`（守护页，不应出现）
 
 ## 文件变更预估
 
@@ -223,17 +234,17 @@ case PROCFS_TYPE_MAPS: {
 | `kernel/include/fs/procfs.h` | PROCFS_TYPE_MAPS 常量 | +1 |
 | `kernel/fs/vfs.c` | vfs_resolve_path() 实现 | ~30 |
 | `kernel/include/fs/vfs.h` | vfs_resolve_path() 声明 | +2 |
-| `user/systest.c` | test_proc_maps() | ~30 |
+| `user/systest.c` | test_proc_maps() | ~35 |
 
-**总计: ~173 行，5 个文件。**
+**总计: ~178 行，5 个文件。**
 
 ## 不在范围内
 
 - `/proc/<pid>/fd/` — 推迟到 `readlink`/`symlink` 就绪后
 - `/proc/<pid>/smaps` — 细粒度内存统计，远期
-- `task_t->exe_path` — 不在本轮 scope；即使不做，ELF 加载区印空路径也符合本系统现状（无动态链接、ET_EXEC 唯一可执行）
+- `task_t->exe_path` — 不在本轮 scope
 - `stat`/`fstat` — 不在本轮 scope
 - VFS `ino`/`dev` 字段 — 复用 `fs_data`，不增字段
 - `mm_t` 锁/并发安全 — 依赖 rwlock（路线图 P1 任务 B）
-- ELF 4KB 权限细分 — 依赖 4KB 页面支持 + `elf_load` 按 p_flags 设置 PTE
+- ELF 4KB 权限细分 — 依赖 4KB 页面支持 + elf_load 按 p_flags 设 PTE
 - tmpfs ino 内核地址泄漏 — 复用 `vfs_stat` 现有行为，待统一修复
