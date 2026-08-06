@@ -68,6 +68,10 @@ Add after `vfs_truncate` (at end of file, after line 702):
 //
 // Returns path length (excl NUL).  Returns >= pathsz if truncated.
 // Returns -1 on error (node, mount, or name is NULL).
+//
+// CONTRACT: path is always NUL-terminated on return, even when
+// truncated.  Caller should call with pathsz = real_bufsize - 4
+// to reserve room for "...\0" appended after truncation.
 int vfs_resolve_path(vfs_node_t *node, char *path, size_t pathsz)
 {
     if (!node || !node->mount || !node->name)
@@ -93,28 +97,43 @@ int vfs_resolve_path(vfs_node_t *node, char *path, size_t pathsz)
 
     size_t written = 0;
     const char *mpath = node->mount->path;
+
+    // Helper: safely write a character — NUL-terminates on overflow
+    #define PUT(c) do {                                \
+        if (written < pathsz) path[written] = (c);     \
+        written++;                                      \
+    } while (0)
+    #define PUTS(s, len) do {                           \
+        for (size_t _k = 0; _k < (len); _k++)          \
+            PUT((s)[_k]);                               \
+    } while (0)
+    #define TERM() do {                                 \
+        if (pathsz > 0)                                \
+            path[(written < pathsz) ? written           \
+                                    : pathsz - 1] = '\0'; \
+    } while (0)
+
     if (mpath) {
         size_t mlen = strlen(mpath);
-        if (written + mlen >= pathsz) return (int)(written + mlen);
-        memcpy(path + written, mpath, mlen);
-        written += mlen;
+        // Strip trailing '/' from mount path (root mount has "/")
+        // so we don't produce "//bin/init.elf".
+        if (mlen > 0 && mpath[mlen - 1] == '/')
+            mlen--;
+        PUTS(mpath, mlen);
     }
 
     // Emit names from mount root's child down to leaf
     // (skip index depth-1 which is mount root "/")
     for (int i = depth - 2; i >= 0; i--) {
-        if (written + 1 >= pathsz) return (int)(written + 1);
-        path[written++] = '/';
+        PUT('/');
         size_t nlen = strlen(names[i]);
-        if (written + nlen >= pathsz) return (int)(written + nlen);
-        memcpy(path + written, names[i], nlen);
-        written += nlen;
+        PUTS(names[i], nlen);
     }
 
-    if (written < pathsz)
-        path[written] = '\0';
-    else if (pathsz > 0)
-        path[pathsz - 1] = '\0';
+    TERM();
+    #undef PUT
+    #undef PUTS
+    #undef TERM
 
     return (int)written;
 }
@@ -126,7 +145,7 @@ int vfs_resolve_path(vfs_node_t *node, char *path, size_t pathsz)
 make -j$(nproc) 2>&1 | tail -5
 ```
 
-Expected: build succeeds. An unused-function warning for `vfs_resolve_path` is acceptable — callers come in Task 3.
+Expected: build succeeds. An unused-function warning for `vfs_resolve_path` is expected at this stage (no callers yet); Task 3 adds the caller and resolves it.
 
 - [ ] **Step 4: Commit**
 
@@ -135,9 +154,7 @@ git add kernel/fs/vfs.c kernel/include/fs/vfs.h
 git commit -m "feat(vfs): add vfs_resolve_path() — reverse node-to-path resolution
 
 Walks node->parent chain to mount root, skipping root's '/' name,
-prepending mount->path. Returns absolute path like /bin/init.elf.
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
+prepending mount->path. Returns absolute path like /bin/init.elf."
 ```
 
 ---
@@ -170,9 +187,7 @@ Expected: build succeeds.
 
 ```bash
 git add kernel/include/fs/procfs.h
-git commit -m "feat(procfs): add PROCFS_TYPE_MAPS=5 constant
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
+git commit -m "feat(procfs): add PROCFS_TYPE_MAPS=5 constant"
 ```
 
 ---
@@ -231,8 +246,10 @@ static int gen_maps(task_t *t, char *buf, int bufsz)
     mm_t *mm = t->mm;
     int off = 0;
 
-    // Buffer for vfs_resolve_path (VFS_NAME_MAX=256 is enough)
+    // Buffer for vfs_resolve_path — call with pathsz - 4 to
+    // reserve room for possible "...\0" truncation marker.
     char path_buf[280];
+    #define PATH_RESOLVE_BUF (sizeof(path_buf) - 4)
 
     // ── Helper: emit one maps line ─────────────────────────
     #define EMIT(s, e, pstr, off_val, dev_str, ino_val, path_str) do {  \
@@ -299,10 +316,14 @@ static int gen_maps(task_t *t, char *buf, int bufsz)
                 EMIT(s, e, "rwxp", 0, "00", 0, "");
                 break;
             }
-            case 1:  // heap
+            case 1:  // heap — round to PAGE_4K
                 brk_done = 1;
-                EMIT(mm->start_brk, mm->end_brk,
-                     "rwxp", 0, "00", 0, "[heap]");
+                {
+                    uint64_t hs = mm->start_brk & ~(PAGE_4K_MASK);
+                    uint64_t he = (mm->end_brk + PAGE_4K_SIZE - 1)
+                                  & ~(PAGE_4K_MASK);
+                    EMIT(hs, he, "rwxp", 0, "00", 0, "[heap]");
+                }
                 break;
             case 2: {  // stack
                 stack_done = 1;
@@ -329,13 +350,17 @@ static int gen_maps(task_t *t, char *buf, int bufsz)
             if (next_vma->vm_file) {
                 ino_val = (unsigned)(uintptr_t)next_vma->vm_file->fs_data;
                 int pn = vfs_resolve_path(next_vma->vm_file, path_buf,
-                                          sizeof(path_buf));
+                                          PATH_RESOLVE_BUF);
                 if (pn >= 0) {
-                    // Reserve last 4 bytes for possible "...\0"
-                    if ((size_t)pn >= sizeof(path_buf) - 4) {
-                        size_t r = sizeof(path_buf) - 4;
-                        memcpy(path_buf + r, "...", 3);
-                        path_buf[r + 3] = '\0';
+                    // vfs_resolve_path always NUL-terminates.
+                    // If truncated (pn >= PATH_RESOLVE_BUF), find the
+                    // actual NUL position and append "..." there.
+                    if ((size_t)pn >= PATH_RESOLVE_BUF) {
+                        size_t r = strlen(path_buf);
+                        if (r + 3 < sizeof(path_buf)) {
+                            memcpy(path_buf + r, "...", 3);
+                            path_buf[r + 3] = '\0';
+                        }
                     }
                     path_str = path_buf;
                 } else {
@@ -418,7 +443,7 @@ In `procfs_read`, in the `switch (type)` block, after the `PROCFS_TYPE_MEMINFO` 
 make -j$(nproc) 2>&1 | tail -10
 ```
 
-Expected: build succeeds with no warnings.
+Expected: build succeeds with no warnings (the unused-function warning from Task 1 is now resolved — gen_maps calls vfs_resolve_path).
 
 - [ ] **Step 6: Commit**
 
@@ -429,9 +454,7 @@ git commit -m "feat(procfs): add /proc/<pid>/maps — memory layout reporting
 gen_maps() synthesises ELF, stack, and heap rows from mm_t fields
 (which are NOT in vma_list), then two-way-merges with vma_list.
 Output is 7-column Linux-compatible format. local buffer enlarged
-512->4096.
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
+512->4096."
 ```
 
 ---
@@ -560,9 +583,7 @@ git add user/systest.c
 git commit -m "test: add test_proc_maps() for /proc/self/maps
 
 Verifies open/read, format pattern, [stack] label, correct stack
-range [800000,a00000), and absence of 0x600000 guard page.
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
+range [800000,a00000), and absence of 0x600000 guard page."
 ```
 
 ---
@@ -572,8 +593,10 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 **Spec coverage check:**
 | Spec requirement | Covered by |
 |-----------------|------------|
-| vfs_resolve_path with mount root name skip | Task 1 Step 2 (skips `names[depth-1]`) |
+| vfs_resolve_path NUL-termination guarantee (incl early returns) | Task 1 Step 2 (PUT/TERM macros) |
+| vfs_resolve_path mount->path trailing-slash fix | Task 1 Step 2 (strips '/' from mount->path tail to avoid "//") |
 | gen_maps 4-section merge (ELF/stack/heap/vma_list) | Task 3 Step 2 (two-way merge loop) |
+| All addresses rounded to PAGE_4K | Task 3 Step 2 (ELF=code block, heap=round both, stack=round base) |
 | 7-column Linux format | Task 3 Step 2 (EMIT macro) |
 | PROCFS_TYPE_MAPS = 5 | Task 2 Step 1 |
 | local[4096] enlargement | Task 3 Step 1 |
@@ -583,7 +606,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 | No ino/dev fields in vfs_node_t | Confirmed — no vfs_node_t changes anywhere |
 | Two-way merge (sorted sources) | Task 3 Step 2 (next_synth vs next_vma_start comparison) |
 | No merge of adjacent rows | Task 3 Step 2 (each row emitted independently) |
-| Path truncation with `...` | Task 3 Step 2 (4-byte reserve in path_buf) |
+| Path truncation with `...` | Task 3 Step 2 (strlen-based positioning after vfs_resolve_path, PATH_RESOLVE_BUF = sizeof-4) |
 | Concurrency risk acceptance | Task 3 Step 2 (gen_maps top comment) |
 | Test: open/read/pattern/[stack]/range/guard-page | Task 4 Step 1 |
 
