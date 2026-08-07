@@ -165,7 +165,7 @@ static int gen_maps(task_t *t, char *buf, int bufsz)
             }
         }
         if (!stack_done && mm->start_stack != 0) {
-            uint64_t sb = mm->start_stack & ~(PAGE_4K_MASK);
+            uint64_t sb = mm->start_stack & PAGE_4K_MASK;
             if (sb < next_synth) {
                 next_synth = sb;
                 which = 2;
@@ -189,24 +189,24 @@ static int gen_maps(task_t *t, char *buf, int bufsz)
             switch (which) {
             case 0: {  // ELF code — round to PAGE_4K
                 code_done = 1;
-                uint64_t s = mm->start_code & ~(PAGE_4K_MASK);
+                uint64_t s = mm->start_code & PAGE_4K_MASK;
                 uint64_t e = (mm->end_code + PAGE_4K_SIZE - 1)
-                             & ~(PAGE_4K_MASK);
+                             & PAGE_4K_MASK;
                 EMIT(s, e, "rwxp", 0, "00", 0, "");
                 break;
             }
             case 1:  // heap — round to PAGE_4K
                 brk_done = 1;
                 {
-                    uint64_t hs = mm->start_brk & ~(PAGE_4K_MASK);
+                    uint64_t hs = mm->start_brk & PAGE_4K_MASK;
                     uint64_t he = (mm->end_brk + PAGE_4K_SIZE - 1)
-                                  & ~(PAGE_4K_MASK);
+                                  & PAGE_4K_MASK;
                     EMIT(hs, he, "rwxp", 0, "00", 0, "[heap]");
                 }
                 break;
             case 2: {  // stack
                 stack_done = 1;
-                uint64_t sb = mm->start_stack & ~(PAGE_4K_MASK);
+                uint64_t sb = mm->start_stack & PAGE_4K_MASK;
                 uint64_t st = sb + 0x200000;  // 2MB stack page
                 EMIT(sb, st, "rw-p", 0, "00", 0, "[stack]");
                 break;
