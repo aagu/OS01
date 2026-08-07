@@ -700,3 +700,87 @@ int vfs_truncate(vfs_node_t *node, uint64_t new_size)
 
     return node->ops->truncate(node, new_size);
 }
+
+// ── Resolve full path from a VFS node ─────────────────────────
+//
+// Walks parent chain up to mount root, collecting names in a
+// stack array, then emits mount->path + names top-down + leaf.
+// Mount root's own name ("/") is skipped to avoid doubling.
+//
+// Returns path length (excl NUL).  Returns >= pathsz if truncated.
+// Returns -1 on error (node, mount, or name is NULL).
+//
+// CONTRACT: path is always NUL-terminated on return, even when
+// truncated.  Caller should call with pathsz = real_bufsize - 4
+// to reserve room for "...\0" appended after truncation.
+int vfs_resolve_path(vfs_node_t *node, char *path, size_t pathsz)
+{
+    if (!node || !node->mount || !node->name)
+        return -1;
+
+    // Collect names bottom-up (max 32 depth — far more than any
+    // real path in this system; returning -1 is safer than silent
+    // corruption if the limit is ever exceeded)
+    const char *names[32];
+    int depth = 0;
+    vfs_node_t *cur = node;
+
+    while (cur) {
+        if (depth >= 32)
+            return -1;  // path too deep
+        names[depth++] = cur->name;
+        if (!cur->parent)
+            break;  // reached mount root
+        cur = cur->parent;
+    }
+    // names[0] = leaf, names[depth-1] = mount root ("/")
+
+    // The mount root (names[depth-1]) is "/" — skip it.
+    // Build: mount->path + "/" + names[depth-2] + "/" + ... + names[0]
+
+    size_t written = 0;
+    const char *mpath = node->mount->path;
+
+    // Helper: safely write a character — NUL-terminates on overflow
+    #define PUT(c) do {                                \
+        if (written < pathsz) path[written] = (c);     \
+        written++;                                      \
+    } while (0)
+    #define PUTS(s, len) do {                           \
+        for (size_t _k = 0; _k < (len); _k++)          \
+            PUT((s)[_k]);                               \
+    } while (0)
+    #define TERM() do {                                 \
+        /* At exact-fit (written==pathsz), the last byte  \
+           is overwritten with NUL — 1 char lost.         \
+           Inherent: pathsz bytes can't store pathsz      \
+           chars + NUL. */                                \
+        if (pathsz > 0)                                \
+            path[(written < pathsz) ? written           \
+                                    : pathsz - 1] = '\0'; \
+    } while (0)
+
+    if (mpath) {
+        size_t mlen = strlen(mpath);
+        // Strip trailing '/' from mount path (root mount has "/")
+        // so we don't produce "//bin/init.elf".
+        if (mlen > 0 && mpath[mlen - 1] == '/')
+            mlen--;
+        PUTS(mpath, mlen);
+    }
+
+    // Emit names from mount root's child down to leaf
+    // (skip index depth-1 which is mount root "/")
+    for (int i = depth - 2; i >= 0; i--) {
+        PUT('/');
+        size_t nlen = strlen(names[i]);
+        PUTS(names[i], nlen);
+    }
+
+    TERM();
+    #undef PUT
+    #undef PUTS
+    #undef TERM
+
+    return (int)written;
+}

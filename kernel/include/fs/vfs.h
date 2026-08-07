@@ -94,6 +94,8 @@ typedef struct vfs_node {
     uint32_t          refcount;
 } vfs_node_t;
 
+#include <stddef.h>   // size_t
+
 // ── VFS API ───────────────────────────────────────────────
 
 void vfs_init(void);
@@ -132,6 +134,11 @@ void vfs_debug_list(const char *path);
 
 // Fill a stat structure from a VFS node
 int vfs_stat(vfs_node_t *node, struct stat *buf);
+
+// Resolve a VFS node's full path by walking parent chain to mount root.
+// Returns path length (excluding NUL), or -1 on error (NULL node/mount/name).
+// Returns >= pathsz if truncated.
+int vfs_resolve_path(vfs_node_t *node, char *path, size_t pathsz);
 
 // Read directory entries into getdents64 format
 // Returns bytes written to buf, or -1 on error
