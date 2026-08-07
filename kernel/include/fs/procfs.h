@@ -16,6 +16,7 @@
 #define PROCFS_TYPE_PID_DIR   2   // /proc/<pid>/
 #define PROCFS_TYPE_STATUS    3   // .../status
 #define PROCFS_TYPE_MEMINFO   4   // /proc/meminfo
+#define PROCFS_TYPE_MAPS      5   // /proc/<pid>/maps
 
 #define PROCFS_PID_SELF       0xFFFFFF   // sentinel: resolve to current->pid in read()
 
