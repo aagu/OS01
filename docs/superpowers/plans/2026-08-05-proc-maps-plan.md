@@ -28,7 +28,7 @@
 | File | Action | Responsibility |
 |------|--------|---------------|
 | `kernel/fs/vfs.c` | Modify | Add `vfs_resolve_path()` at end of file |
-| `kernel/include/fs/vfs.h` | Modify | Add `vfs_resolve_path()` declaration |
+| `kernel/include/fs/vfs.h` | Modify | Add `#include <stddef.h>` + `vfs_resolve_path()` declaration |
 | `kernel/include/fs/procfs.h` | Modify | Add `PROCFS_TYPE_MAPS = 5` |
 | `kernel/fs/procfs.c` | Modify | Enlarge `local[512]`→`[4096]`, add `gen_maps()`, register MAPS in readdir+read |
 | `user/systest.c` | Modify | Add `test_proc_maps()` |
@@ -39,10 +39,18 @@
 
 **Files:**
 - Modify: `kernel/fs/vfs.c` (append after `vfs_truncate`)
-- Modify: `kernel/include/fs/vfs.h` (add declaration after `vfs_stat`)
+- Modify: `kernel/include/fs/vfs.h` (add `#include <stddef.h>` + declaration after `vfs_stat`)
 
 **Interfaces:**
 - Produces: `int vfs_resolve_path(vfs_node_t *node, char *path, size_t pathsz)` — fills `path` with resolved absolute path, returns length (excl NUL) or -1 on error. Returns >= pathsz if truncated.
+
+- [ ] **Step 0: Add `#include <stddef.h>` to vfs.h**
+
+vfs.h uses `size_t` in the new declaration but its include chain (`<stdint.h>` → `<block/blockdev.h>` → `<uapi/stat.h>`) doesn't carry it. vfs.h has always avoided `size_t` for this reason (all existing signatures use `uint64_t`). Add before the VFS API section (before line 97):
+
+```c
+#include <stddef.h>   // size_t
+```
 
 - [ ] **Step 1: Add declaration to vfs.h**
 
@@ -77,14 +85,16 @@ int vfs_resolve_path(vfs_node_t *node, char *path, size_t pathsz)
     if (!node || !node->mount || !node->name)
         return -1;
 
-    // Collect names bottom-up (max 32 depth — far more than needed)
+    // Collect names bottom-up (max 32 depth — far more than any
+    // real path in this system; returning -1 is safer than silent
+    // corruption if the limit is ever exceeded)
     const char *names[32];
     int depth = 0;
     vfs_node_t *cur = node;
 
     while (cur) {
         if (depth >= 32)
-            break;
+            return -1;  // path too deep
         names[depth++] = cur->name;
         if (!cur->parent)
             break;  // reached mount root
@@ -108,6 +118,10 @@ int vfs_resolve_path(vfs_node_t *node, char *path, size_t pathsz)
             PUT((s)[_k]);                               \
     } while (0)
     #define TERM() do {                                 \
+        /* At exact-fit (written==pathsz), the last byte  \
+           is overwritten with NUL — 1 char lost.         \
+           Inherent: pathsz bytes can't store pathsz      \
+           chars + NUL. */                                \
         if (pathsz > 0)                                \
             path[(written < pathsz) ? written           \
                                     : pathsz - 1] = '\0'; \
@@ -201,7 +215,7 @@ git commit -m "feat(procfs): add PROCFS_TYPE_MAPS=5 constant"
 - Consumes: `vfs_resolve_path()` (Task 1), `PROCFS_TYPE_MAPS` (Task 2), `find_task_by_pid()`, `PROCFS_ENCODE`, `PROCFS_TYPE_PID_DIR`, `PROCFS_TYPE_SELF_DIR`, `PROCFS_PID_SELF`, `list_t` / `container_of` / `mm_t` / `vma_t` / `PAGE_4K_MASK` / `PAGE_4K_SIZE` (all existing)
 - Produces: `gen_maps()` static function, MAPS case in `procfs_read`, maps entry in `procfs_readdir`, enlarged `local[]` buffer
 
-- [ ] **Step 1: Enlarge the procfs_read local buffer**
+- [ ] **Step 1: Enlarge local buffer + fix offset-slice safety**
 
 In `procfs_read` (currently line 129), change:
 
@@ -214,6 +228,29 @@ to:
 ```c
     char  local[4096];
 ```
+
+Also fix the generic offset-slice safety: the read offset path at lines 150-153 does
+`memcpy(buffer, local + offset, n)` where n = min(len-offset, size).  When gen_maps
+returns a would-be length > 4096 (long paths, many VMAs), `local + offset` can exceed
+`local + sizeof(local)`.  Bound it:
+
+Replace:
+```c
+    uint64_t remain = (uint64_t)len - offset;
+    uint64_t n = remain < size ? remain : size;
+    memcpy(buffer, local + offset, n);
+```
+
+With:
+```c
+    uint64_t remain = (uint64_t)len - offset;
+    uint64_t n = remain < size ? remain : size;
+    if (n > (uint64_t)sizeof(local) - offset)
+        n = (uint64_t)sizeof(local) - offset;
+    memcpy(buffer, local + offset, n);
+```
+
+This guards status/meminfo/maps equally against oversized would-be lengths.
 
 - [ ] **Step 2: Add gen_maps() function**
 
@@ -355,7 +392,12 @@ static int gen_maps(task_t *t, char *buf, int bufsz)
                     // vfs_resolve_path always NUL-terminates.
                     // If truncated (pn >= PATH_RESOLVE_BUF), find the
                     // actual NUL position and append "..." there.
-                    if ((size_t)pn >= PATH_RESOLVE_BUF) {
+                    // NOTE: at the exact-fit boundary (pn == PATH_RESOLVE_BUF),
+                    // the last byte is NUL rather than a path character
+                    // (TERM overwrites path[pathsz-1] with '\0'), so 1
+                    // character is lost.  This is inherent: a pathsz-byte
+                    // buffer cannot hold a pathsz-length string + NUL.
+                    if ((size_t)pn > PATH_RESOLVE_BUF) {
                         size_t r = strlen(path_buf);
                         if (r + 3 < sizeof(path_buf)) {
                             memcpy(path_buf + r, "...", 3);
@@ -593,10 +635,13 @@ range [800000,a00000), and absence of 0x600000 guard page."
 **Spec coverage check:**
 | Spec requirement | Covered by |
 |-----------------|------------|
+| `#include <stddef.h>` for size_t in vfs.h | Task 1 Step 0 |
 | vfs_resolve_path NUL-termination guarantee (incl early returns) | Task 1 Step 2 (PUT/TERM macros) |
-| vfs_resolve_path mount->path trailing-slash fix | Task 1 Step 2 (strips '/' from mount->path tail to avoid "//") |
+| vfs_resolve_path depth limit (return -1 not silent corruption) | Task 1 Step 2 (depth>=32 → return -1) |
+| vfs_resolve_path mount->path trailing-slash fix | Task 1 Step 2 (strips '/' from mount->path tail) |
 | gen_maps 4-section merge (ELF/stack/heap/vma_list) | Task 3 Step 2 (two-way merge loop) |
 | All addresses rounded to PAGE_4K | Task 3 Step 2 (ELF=code block, heap=round both, stack=round base) |
+| procfs_read offset-slice bounds check | Task 3 Step 1 (min(n, sizeof(local)-offset)) |
 | 7-column Linux format | Task 3 Step 2 (EMIT macro) |
 | PROCFS_TYPE_MAPS = 5 | Task 2 Step 1 |
 | local[4096] enlargement | Task 3 Step 1 |
