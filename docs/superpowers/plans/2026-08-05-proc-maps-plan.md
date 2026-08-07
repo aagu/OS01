@@ -243,10 +243,15 @@ Replace:
 
 With:
 ```c
+    // Guard: offset past buffer is EOF (pre-empts unsigned underflow
+    // in sizeof(local) - offset when len exceeds buffer size).
+    if (offset >= (uint64_t)sizeof(local))
+        return 0;
     uint64_t remain = (uint64_t)len - offset;
     uint64_t n = remain < size ? remain : size;
-    if (n > (uint64_t)sizeof(local) - offset)
-        n = (uint64_t)sizeof(local) - offset;
+    uint64_t avail = (uint64_t)sizeof(local) - offset;
+    if (n > avail)
+        n = avail;
     memcpy(buffer, local + offset, n);
 ```
 
@@ -397,7 +402,8 @@ static int gen_maps(task_t *t, char *buf, int bufsz)
                     // (TERM overwrites path[pathsz-1] with '\0'), so 1
                     // character is lost.  This is inherent: a pathsz-byte
                     // buffer cannot hold a pathsz-length string + NUL.
-                    if ((size_t)pn > PATH_RESOLVE_BUF) {
+                    // We still flag with "..." since content was lost.
+                    if ((size_t)pn >= PATH_RESOLVE_BUF) {
                         size_t r = strlen(path_buf);
                         if (r + 3 < sizeof(path_buf)) {
                             memcpy(path_buf + r, "...", 3);
