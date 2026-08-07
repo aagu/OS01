@@ -1097,6 +1097,84 @@ static void test_wrap_rbtree_prev_null(void)
 static void test_wrap_eevdf_fork_child_scheduled(void)
 { CHECK3(test_eevdf_fork_child_scheduled() == 0, "eevdf_fork_child", "fork child scheduled and exit(0)"); }
 
+// ── Test /proc/self/maps ─────────────────────────────────────
+static void test_proc_maps(void)
+{
+    char buf[4096];
+    int fd = open("/proc/self/maps", O_RDONLY);
+    if (fd < 0) {
+        FAIL("%s: open /proc/self/maps returned %d", "proc_maps open", fd);
+        return;
+    }
+
+    int n = (int)read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) {
+        FAIL("%s: read returned %d", "proc_maps read", n);
+        return;
+    }
+    buf[n] = '\0';
+
+    int lines = 0;
+    int has_stack = 0;
+    int stack_at_right_addr = 0;
+    int fail_guard = 0;
+    unsigned long start = 0, end = 0;
+    char *p = buf;
+    while (*p) {
+        char *line = p;
+        char *nl = strchr(p, '\n');
+        if (nl) { *nl = '\0'; p = nl + 1; }
+        else    { p = line + strlen(line); }
+
+        if (*line == '\0') continue;
+
+        char perm[5];
+        // Parse first 6 columns (skip inode): addr-end perms off dev ino.
+        // NOTE: OS01 libc sscanf has no %lx/%4s (length/width) support, so
+        // parse hex into 32-bit temps (all user map addresses are < 4GB).
+        unsigned int s32, e32;
+        int fields = sscanf(line, "%x-%x %s %*x %*s %*x",
+                            &s32, &e32, perm);
+        start = s32;
+        end = e32;
+        if (fields >= 3 && perm[0] != '\0')
+            lines++;
+
+        if (strstr(line, "[stack]")) {
+            has_stack = 1;
+            // Positive: stack at [0x800000, 0xa00000)
+            if (start == 0x800000UL && end == 0xa00000UL)
+                stack_at_right_addr = 1;
+            // Negative: must NOT include guard page 0x600000
+            if (start <= 0x600000UL && 0x600000UL < end) {
+                FAIL("%s: %s", "proc_maps guard",
+                     "stack line includes 0x600000 guard page");
+                fail_guard = 1;
+            }
+        }
+    }
+
+    if (fail_guard) return;
+
+    if (lines < 2) {
+        FAIL("%s: %d lines (need >=2)", "proc_maps lines", lines);
+        return;
+    }
+
+    if (!has_stack) {
+        FAIL("%s: %s", "proc_maps stack", "no [stack] label found");
+        return;
+    }
+
+    if (!stack_at_right_addr) {
+        FAIL("%s: %s", "proc_maps stack_addr", "[stack] not at [800000,a00000)");
+        return;
+    }
+
+    PASS("test_proc_maps (%d lines)", lines);
+}
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
@@ -1155,6 +1233,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"rbtree_prev_traversal", test_wrap_rbtree_prev_traversal},
     {"rbtree_prev_null",    test_wrap_rbtree_prev_null},
     {"eevdf_fork_child",    test_wrap_eevdf_fork_child_scheduled},
+    {"proc_maps",           test_proc_maps},
 };
 
 int main(void)
