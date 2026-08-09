@@ -237,6 +237,16 @@ int main(int argc, char **argv)
         system(glob_cmd);
     }
 
+    // Explicitly copy /etc/inittab (shell glob above may fail silently)
+    {
+        char inittab_src[256], inittab_cmd[512];
+        snprintf(inittab_src, sizeof(inittab_src), "%s/etc/inittab", rootfs_dir);
+        snprintf(inittab_cmd, sizeof(inittab_cmd),
+                 "debugfs -w %s -R \"write %s /etc/inittab\"",
+                 rootfs_tmp, inittab_src);
+        run_cmd("%s", inittab_cmd);
+    }
+
     run_cmd("dd if=%s of=disk.img bs=512 seek=%lu conv=notrunc 2>/dev/null",
             rootfs_tmp, (unsigned long)PART2_START);
 
