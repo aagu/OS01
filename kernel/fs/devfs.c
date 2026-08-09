@@ -154,7 +154,7 @@ static int devfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *bu
     }
 
     // Character device path (existing)
-    if (devices[idx].ops && devices[idx].ops->read)
+    if (devices[idx].ops && (uint64_t)devices[idx].ops >= 0xffff800000000000ULL && devices[idx].ops->read)
         return devices[idx].ops->read(node, offset, size, buffer);
     return -1;
 }
@@ -184,7 +184,7 @@ static int devfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *b
     }
 
     // Character device path (existing)
-    if (devices[idx].ops && devices[idx].ops->write)
+    if (devices[idx].ops && (uint64_t)devices[idx].ops >= 0xffff800000000000ULL && devices[idx].ops->write)
         return devices[idx].ops->write(node, offset, size, buffer);
     return -1;
 }
@@ -195,7 +195,7 @@ static int devfs_mmap(vfs_node_t *node, struct vma *vma)
     int idx = (int)(uintptr_t)node->fs_data;
     if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
         return -EINVAL;
-    if (devices[idx].ops && devices[idx].ops->mmap)
+    if (devices[idx].ops && (uint64_t)devices[idx].ops >= 0xffff800000000000ULL && devices[idx].ops->mmap)
         return devices[idx].ops->mmap(node, vma);
     return -ENODEV;
 }
@@ -211,7 +211,7 @@ uint32_t devfs_poll(vfs_node_t *node, poll_table_t *pt)
 
     devfs_device_t *dev = &devices[idx];
 
-    if (dev->ops && dev->ops->poll)
+    if (dev->ops && (uint64_t)dev->ops >= 0xffff800000000000ULL && dev->ops->poll)
         return dev->ops->poll(dev->private_data, pt);
 
     // No poll callback: default to always ready
@@ -224,7 +224,7 @@ int devfs_ioctl_node(vfs_node_t *node, int cmd, void *arg)
     int idx = (int)(uintptr_t)node->fs_data;
     if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
         return -ENODEV;
-    if (devices[idx].ops && devices[idx].ops->ioctl)
+    if (devices[idx].ops && (uint64_t)devices[idx].ops >= 0xffff800000000000ULL && devices[idx].ops->ioctl)
         return devices[idx].ops->ioctl(node, cmd, arg);
     return -ENOTTY;
 }
@@ -283,7 +283,7 @@ int devfs_open_node(vfs_node_t *node, const char *path, int flags, file_t **out)
     if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
         return -ENODEV;
 
-    if (devices[idx].ops && devices[idx].ops->open) {
+    if (devices[idx].ops && (uint64_t)devices[idx].ops >= 0xffff800000000000ULL && devices[idx].ops->open) {
         int rc = devices[idx].ops->open(path, out);
         if (rc == 0 && *out) {
             (*out)->flags = flags;

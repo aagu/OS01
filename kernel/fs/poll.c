@@ -54,6 +54,9 @@ int poll_table_setup(poll_table_t *pt, int max_entries)
 void poll_table_destroy(poll_table_t *pt)
 {
     if (pt->entries) {
+        // Always clean up fd list entries before freeing to prevent
+        // use-after-free from concurrent fd wake paths.
+        poll_table_cleanup(pt);
         kfree(pt->entries);
         pt->entries = NULL;
     }

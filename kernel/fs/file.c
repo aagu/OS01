@@ -120,8 +120,13 @@ void file_free(file_t *f)
         f->pty = NULL;
     }
 
-    if (f->node)
+    if (f->node) {
         vfs_node_put(f->node);
+        f->node = NULL;
+    }
+    // Poison to catch use-after-free
+    f->pipe = NULL;
+    f->pty  = NULL;
     free(f);
 }
 
@@ -147,6 +152,7 @@ void pipe_free(pipe_t *p)
 {
     if (!p) return;
     kfree(p->buf);
+    p->buf = NULL;
     free(p);
 }
 
@@ -168,8 +174,7 @@ void files_free(files_t *fs)
     for (int i = 0; i < NOFILE; i++) {
         if (fs->fd[i]) {
             file_t *f = fs->fd[i];
-            f->refcount--;
-            if (f->refcount == 0)
+            if (__sync_sub_and_fetch(&f->refcount, 1) == 0)
                 file_free(f);
             fs->fd[i] = NULL;
         }
@@ -193,7 +198,7 @@ files_t *files_dup(files_t *fs)
 
     for (int i = 0; i < NOFILE; i++) {
         if (fs->fd[i]) {
-            fs->fd[i]->refcount++;
+            __sync_add_and_fetch(&fs->fd[i]->refcount, 1);
             new_fs->fd[i] = fs->fd[i];
         }
     }
@@ -223,8 +228,7 @@ void fd_close(files_t *fs, int fd)
 
     fs->fd[fd] = NULL;
 
-    f->refcount--;
-    if (f->refcount == 0)
+    if (__sync_sub_and_fetch(&f->refcount, 1) == 0)
         file_free(f);
 }
 
@@ -362,7 +366,9 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
     switch (f->type) {
     case FD_VFS:
     case FD_DEV: {
-        if (!f->node || !f->node->ops || !f->node->ops->read)
+        if (!f->node || !f->node->ops ||
+            (uint64_t)f->node->ops < 0xffff800000000000ULL ||
+            !f->node->ops->read)
             return -1;
         // Check access mode (low 2 bits) — ignore O_CREAT etc.
         int acc = f->flags & 3;
@@ -474,7 +480,9 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
     switch (f->type) {
     case FD_VFS:
     case FD_DEV: {
-        if (!f->node || !f->node->ops || !f->node->ops->write)
+        if (!f->node || !f->node->ops ||
+            (uint64_t)f->node->ops < 0xffff800000000000ULL ||
+            !f->node->ops->write)
             return -1;
         // Check access mode (low 2 bits) — ignore O_CREAT etc.
         int acc = f->flags & 3;

@@ -419,6 +419,39 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 	uint64_t cr2 = 0;
 	__asm__	__volatile__("movq	%%cr2,	%0":"=r"(cr2)::"memory");
 
+	// Detect kernel-mode PF (IST 0 = task stack)
+	if (!(regs->cs & 3)) {
+		task_t *t = task_from_tss();
+		serial_printk("PF-KRN: err=%lx rip=%lx rsp=%lx rbp=%lx cr2=%lx "
+			"pid=%d cpu=%d\n",
+			error_code, regs->rip, regs->rsp, regs->rbp, cr2,
+			t?t->pid:-1, cpu_id());
+		serial_printk("PF-KRN: r8=%lx r9=%lx r10=%lx r11=%lx\n",
+			regs->r8, regs->r9, regs->r10, regs->r11);
+		serial_printk("PF-KRN: r12=%lx r13=%lx r14=%lx r15=%lx\n",
+			regs->r12, regs->r13, regs->r14, regs->r15);
+		serial_printk("PF-KRN: rax=%lx rbx=%lx rcx=%lx rdx=%lx\n",
+			regs->rax, regs->rbx, regs->rcx, regs->rdx);
+		serial_printk("PF-KRN: rdi=%lx rsi=%lx cs=%lx ss=%lx\n",
+			regs->rdi, regs->rsi, regs->cs, regs->ss);
+		if (t) {
+			serial_printk("PF-KRN: task sig=%lx blk=%lx st=%d fl=%lx\n",
+				t->signal, t->blocked, t->state, t->flags);
+			serial_printk("PF-KRN: thd rsp=%lx rsp0=%lx rip=%lx\n",
+				t->thread->rsp, t->thread->rsp0, t->thread->rip);
+			// Dump 8 bytes at saved RSP to see what schedule() saved
+			uint64_t saved_rsp = t->thread->rsp;
+			if (saved_rsp >= 0xffff800000000000ULL)
+				serial_printk("PF-KRN: *thd_rsp=%lx %lx\n",
+					*(uint64_t *)saved_rsp,
+					*((uint64_t *)saved_rsp + 1));
+		}
+		// Check stack boundaries
+		uint64_t sb = regs->rsp & ~(STACK_SIZE - 1);
+		serial_printk("PF-KRN: stack %lu/%lu used\n",
+			((sb + STACK_SIZE) - regs->rsp), (uint64_t)STACK_SIZE);
+	}
+
 	// User-mode PF - VMA-based demand paging
 	// NOTE: on IST stack - do NOT use current (get_current_task).
 	if (regs->cs & 3) {
@@ -542,14 +575,6 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 		// Unhandled -> SIGSEGV
 		kill_current_user_task(regs);
 		return;
-	}
-
-	{
-	    uint64_t _sb = regs->rsp & ~(STACK_SIZE - 1);
-	    serial_printk("PF-KERN: stack %lu/%lu used  pid=%d cpu=%d\n",
-	                  ((_sb + STACK_SIZE) - regs->rsp), (uint64_t)STACK_SIZE,
-	                  task_from_tss() ? task_from_tss()->pid : -1,
-	                  task_from_tss() ? task_from_tss()->cpu : -1);
 	}
 	log_err("do_page_fault(14),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 
@@ -1136,9 +1161,14 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             vfs_node_t *parent = vfs_lookup_from(parent_path, current->files->cwd);
             if (!parent) { regs->rax = -ENOENT; break; }
             if (parent->type != VFS_DIR) { vfs_node_put(parent); regs->rax = -ENOTDIR; break; }
-            if (!parent->ops || !parent->ops->create) {
+            if (!parent->ops || (uint64_t)parent->ops < 0xffff800000000000ULL || !parent->ops->create) {
                 vfs_node_put(parent);
                 regs->rax = -EROFS;
+                break;
+            }
+            if ((uint64_t)parent->ops->create < 0xffff800000000000ULL) {
+                vfs_node_put(parent);
+                regs->rax = -1;
                 break;
             }
 
@@ -1154,7 +1184,8 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
 
         // O_TRUNC: truncate regular files to size 0 via filesystem op
         if ((flags & O_TRUNC) && node->type == VFS_FILE) {
-            if (node->ops && node->ops->truncate)
+            if (node->ops && (uint64_t)node->ops >= 0xffff800000000000ULL && node->ops->truncate &&
+                (uint64_t)node->ops->truncate >= 0xffff800000000000ULL)
                 node->ops->truncate(node, 0);
             else {
                 // Fallback: reset size only (fs_data is FS-specific)
@@ -1222,7 +1253,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         }
 
         file_t *f = current->files->fd[oldfd];
-        f->refcount++;
+        __sync_add_and_fetch(&f->refcount, 1);
         current->files->fd[newfd] = f;
         regs->rax = newfd;
         break;
@@ -1248,7 +1279,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             fd_close(current->files, newfd);
 
         file_t *f = current->files->fd[oldfd];
-        f->refcount++;
+        __sync_add_and_fetch(&f->refcount, 1);
         current->files->fd[newfd] = f;
         regs->rax = newfd;
         break;
@@ -1482,7 +1513,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
                 }
             }
             if (newfd < 0) { regs->rax = -ENFILE; break; }
-            f->refcount++;
+            __sync_add_and_fetch(&f->refcount, 1);
             current->files->fd[newfd] = f;
             regs->rax = newfd;
             break;
@@ -1499,7 +1530,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
                 }
             }
             if (newfd < 0) { regs->rax = -ENFILE; break; }
-            f->refcount++;
+            __sync_add_and_fetch(&f->refcount, 1);
             current->files->fd[newfd] = f;
             regs->rax = newfd;
             break;
@@ -1607,7 +1638,8 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             // Check if filesystem is writable (not devfs)
             if (node->type == VFS_CHRDEV || node->type == VFS_BLKDEV) {
                 // Devices: check if write op exists
-                if (!node->ops || !node->ops->write)
+                if (!node->ops || (uint64_t)node->ops < 0xffff800000000000ULL ||
+                    !node->ops->write)
                     ok = 0;
             }
         }

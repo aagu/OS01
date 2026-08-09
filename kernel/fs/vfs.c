@@ -141,7 +141,7 @@ static vfs_node_t *__vfs_lookup(const char *path)
     if (strcmp(path, "/") == 0) {
         vfs_mount_t *mp = find_mount("/");
         if (!mp || !mp->root) return NULL;
-        mp->root->refcount++;
+        __sync_add_and_fetch(&mp->root->refcount, 1);
         return mp->root;
     }
 
@@ -167,7 +167,7 @@ static vfs_node_t *__vfs_lookup(const char *path)
     char *comp;
 
     vfs_node_t *current = mp->root;
-    current->refcount++;
+    __sync_add_and_fetch(&current->refcount, 1);
 
     while ((comp = next_component(&ptr)) != NULL) {
         if (strlen(comp) == 0) {
@@ -183,8 +183,8 @@ static vfs_node_t *__vfs_lookup(const char *path)
         if (strcmp(comp, "..") == 0) {
             if (current->parent) {
                 vfs_node_t *parent = current->parent;
-                parent->refcount++;
-                current->refcount--;
+                __sync_add_and_fetch(&parent->refcount, 1);
+                __sync_sub_and_fetch(&current->refcount, 1);
                 current = parent;
             }
             continue;
@@ -195,13 +195,16 @@ static vfs_node_t *__vfs_lookup(const char *path)
         entry.name = _entry_name;
         int found = 0;
         uint64_t idx = 0;
+        int max_iter = 256;  // safety bound for corrupted ops
 
-        while (1) {
-            int ret = current->ops->readdir(current, idx, &entry);
+        while (max_iter-- > 0) {
+            int ret = vfs_readdir(current, idx, &entry);
             if (ret == 0 && entry.name[0] == '\0') break;
             if (ret == 0) {
                 int match;
-                if (current->ops && (current->ops->flags & VFS_OPS_CASE_INSENSITIVE))
+                if (current->ops &&
+                    (uint64_t)current->ops >= 0xffff800000000000ULL &&
+                    (current->ops->flags & VFS_OPS_CASE_INSENSITIVE))
                     match = (vfs_name_cmp(entry.name, comp) == 0);
                 else
                     match = (strcmp(entry.name, comp) == 0);
@@ -215,19 +218,19 @@ static vfs_node_t *__vfs_lookup(const char *path)
         }
 
         if (!found) {
-            current->refcount--;
+            __sync_sub_and_fetch(&current->refcount, 1);
             return NULL;
         }
 
         vfs_node_t *child = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
         if (!child) {
-            current->refcount--;
+            __sync_sub_and_fetch(&current->refcount, 1);
             return NULL;
         }
 
         child->mount = mp;
         child->parent = current;
-        current->refcount++;  // child holds a ref through parent pointer
+        __sync_add_and_fetch(&current->refcount, 1);  // child holds a ref through parent pointer
         child->type = entry.type;
         child->size = entry.size;
         child->ops = current->ops;
@@ -235,7 +238,7 @@ static vfs_node_t *__vfs_lookup(const char *path)
         child->refcount = 1;
         child->name = strndup(entry.name, VFS_NAME_MAX - 1);
 
-        current->refcount--;
+        __sync_sub_and_fetch(&current->refcount, 1);
         current = child;
     }
 
@@ -293,7 +296,11 @@ vfs_node_t *vfs_lookup_from(const char *path, const char *cwd)
 // ── Read ──────────────────────────────────────────────────
 int vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 {
-    if (!node || !node->ops || !node->ops->read)
+    if (!node || !node->ops || (uint64_t)node->ops < 0xffff800000000000ULL)
+        return -1;
+    if (!node->ops->read)
+        return -1;
+    if ((uint64_t)node->ops->read < 0xffff800000000000ULL)
         return -1;
     return node->ops->read(node, offset, size, buffer);
 }
@@ -301,7 +308,9 @@ int vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 // ── Write ─────────────────────────────────────────────────
 int vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 {
-    if (!node || !node->ops || !node->ops->write)
+    if (!node || !node->ops || (uint64_t)node->ops < 0xffff800000000000ULL)
+        return -1;
+    if (!node->ops->write)
         return -1;
     if ((uint64_t)node->ops->write < 0xffff800000000000ULL)
         return -1;
@@ -311,7 +320,9 @@ int vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 // ── Read directory ────────────────────────────────────────
 int vfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *entry)
 {
-    if (!dir || !dir->ops || !dir->ops->readdir)
+    if (!dir || !dir->ops || (uint64_t)dir->ops < 0xffff800000000000ULL)
+        return -1;
+    if (!dir->ops->readdir)
         return -1;
     if ((uint64_t)dir->ops->readdir < 0xffff800000000000ULL)
         return -1;
@@ -321,16 +332,24 @@ int vfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *entry)
 // ── Reference counting ────────────────────────────────────
 vfs_node_t *vfs_node_get(vfs_node_t *node)
 {
-    if (node) node->refcount++;
+    if (node) __sync_add_and_fetch(&node->refcount, 1);
     return node;
 }
 
 void vfs_node_put(vfs_node_t *node)
 {
     if (!node) return;
-    if (--node->refcount == 0) {
+    if (__sync_sub_and_fetch(&node->refcount, 1) == 0) {
         vfs_node_t *parent = node->parent;
+        // Poison to catch use-after-free: any stale reference
+        // will hit a null-pointer check (unlike kernel-address
+        // guards which the optimizer may elide).
+        node->ops    = NULL;
+        node->parent = NULL;
+        node->mount  = NULL;
+        node->fs_data = NULL;
         if (node->name) kfree(node->name);
+        node->name = NULL;
         free(node);
         vfs_node_put(parent);  // release parent ref after child is gone
     }
@@ -468,7 +487,8 @@ int vfs_getdents(vfs_node_t *dir, struct linux_dirent64 *buf, unsigned int count
     for (int i = 0; i < total - 1; i++) {
         for (int j = 0; j < total - 1 - i; j++) {
             int cmp;
-            if (dir->ops && (dir->ops->flags & VFS_OPS_CASE_INSENSITIVE))
+            if (dir->ops && (uint64_t)dir->ops >= 0xffff800000000000ULL &&
+                (dir->ops->flags & VFS_OPS_CASE_INSENSITIVE))
                 cmp = vfs_name_cmp(entries[j].name, entries[j + 1].name);
             else
                 cmp = strcmp(entries[j].name, entries[j + 1].name);
@@ -602,9 +622,13 @@ int vfs_unlink(const char *path, const char *cwd)
     vfs_node_t *parent = vfs_lookup_from(parent_path, cwd);
     if (!parent) return -ENOENT;
     if (parent->type != VFS_DIR) { vfs_node_put(parent); return -ENOTDIR; }
-    if (!parent->ops || !parent->ops->unlink) {
+    if (!parent->ops || (uint64_t)parent->ops < 0xffff800000000000ULL || !parent->ops->unlink) {
         vfs_node_put(parent);
         return -EROFS;
+    }
+    if ((uint64_t)parent->ops->unlink < 0xffff800000000000ULL) {
+        vfs_node_put(parent);
+        return -1;
     }
 
     int ret = parent->ops->unlink(parent, name);
@@ -624,9 +648,13 @@ int vfs_mkdir(const char *path, const char *cwd)
     vfs_node_t *parent = vfs_lookup_from(parent_path, cwd);
     if (!parent) return -ENOENT;
     if (parent->type != VFS_DIR) { vfs_node_put(parent); return -ENOTDIR; }
-    if (!parent->ops || !parent->ops->mkdir) {
+    if (!parent->ops || (uint64_t)parent->ops < 0xffff800000000000ULL || !parent->ops->mkdir) {
         vfs_node_put(parent);
         return -EROFS;
+    }
+    if ((uint64_t)parent->ops->mkdir < 0xffff800000000000ULL) {
+        vfs_node_put(parent);
+        return -1;
     }
 
     vfs_node_t *newdir = parent->ops->mkdir(parent, name);
@@ -650,9 +678,13 @@ int vfs_rmdir(const char *path, const char *cwd)
     vfs_node_t *parent = vfs_lookup_from(parent_path, cwd);
     if (!parent) return -ENOENT;
     if (parent->type != VFS_DIR) { vfs_node_put(parent); return -ENOTDIR; }
-    if (!parent->ops || !parent->ops->rmdir) {
+    if (!parent->ops || (uint64_t)parent->ops < 0xffff800000000000ULL || !parent->ops->rmdir) {
         vfs_node_put(parent);
         return -EROFS;
+    }
+    if ((uint64_t)parent->ops->rmdir < 0xffff800000000000ULL) {
+        vfs_node_put(parent);
+        return -1;
     }
 
     int ret = parent->ops->rmdir(parent, name);
@@ -683,10 +715,15 @@ int vfs_rename(const char *oldpath, const char *newpath, const char *cwd)
         return -ENOTDIR;
     }
 
-    if (!olddir->ops || !olddir->ops->rename) {
+    if (!olddir->ops || (uint64_t)olddir->ops < 0xffff800000000000ULL || !olddir->ops->rename) {
         vfs_node_put(olddir);
         vfs_node_put(newdir);
         return -EROFS;
+    }
+    if ((uint64_t)olddir->ops->rename < 0xffff800000000000ULL) {
+        vfs_node_put(olddir);
+        vfs_node_put(newdir);
+        return -1;
     }
 
     int ret = olddir->ops->rename(olddir, oldname, newdir, newname);
@@ -700,7 +737,9 @@ int vfs_truncate(vfs_node_t *node, uint64_t new_size)
 {
     if (!node) return -EINVAL;
     if (node->type != VFS_FILE) return -EISDIR;
-    if (!node->ops || !node->ops->truncate) return -EROFS;
+    if (!node->ops || (uint64_t)node->ops < 0xffff800000000000ULL || !node->ops->truncate) return -EROFS;
+    if ((uint64_t)node->ops->truncate < 0xffff800000000000ULL)
+        return -1;
 
     return node->ops->truncate(node, new_size);
 }

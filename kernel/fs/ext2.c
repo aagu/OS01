@@ -789,7 +789,7 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_create(struct vfs_nod
     node->mount = dir->mount;
     node->ops = dir->ops;
     node->parent = dir;
-    dir->refcount++;  // child holds reference to parent
+    __sync_add_and_fetch(&dir->refcount, 1);  // child holds reference to parent
     node->fs_data = (void *)(uintptr_t)new_ino;
     node->size = 0;
     node->refcount = 1;
@@ -954,7 +954,7 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node
     node->mount = dir->mount;
     node->ops = dir->ops;
     node->parent = dir;
-    dir->refcount++;  // child holds reference to parent
+    __sync_add_and_fetch(&dir->refcount, 1);  // child holds reference to parent
     node->fs_data = (void *)(uintptr_t)new_ino;
     node->size = fs->block_size;
     node->refcount = 1;

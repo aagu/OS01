@@ -281,13 +281,13 @@ static struct vfs_node *tmpfs_vfs_create(struct vfs_node *dir,
     vn->ops     = &tmpfs_vfs_ops;
     vn->mount   = dir->mount;
     vn->parent  = dir;
-    dir->refcount++;
+    __sync_add_and_fetch(&dir->refcount, 1);
     vn->refcount = 1;
     // vn->name must be set last — strdup may fail
     vn->name = strdup(name);
     if (!vn->name) {
         vn->refcount = 0;
-        dir->refcount--;
+        __sync_sub_and_fetch(&dir->refcount, 1);
         d->children[--d->child_count] = NULL;
         kfree(new_node);
         free(vn);
@@ -328,12 +328,12 @@ static struct vfs_node *tmpfs_vfs_mkdir(struct vfs_node *dir,
     vn->ops     = &tmpfs_vfs_ops;
     vn->mount   = dir->mount;
     vn->parent  = dir;
-    dir->refcount++;
+    __sync_add_and_fetch(&dir->refcount, 1);
     vn->refcount = 1;
     vn->name = strdup(name);
     if (!vn->name) {
         vn->refcount = 0;
-        dir->refcount--;
+        __sync_sub_and_fetch(&dir->refcount, 1);
         d->children[--d->child_count] = NULL;
         kfree(new_node);
         free(vn);
