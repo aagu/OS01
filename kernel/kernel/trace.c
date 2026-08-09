@@ -12,8 +12,17 @@ void backtrace(pt_regs_t* regs)
 
 	for(i = 0;i<KERNEL_TRACE_DEPTH;i++)
 	{
-		if(lookup_kallsyms(ret_address,i))
-			break;
+		if(lookup_kallsyms(ret_address,i)) {
+			int li;
+			for(li = 0; li < i; li++) {
+				color_printk(RED,BLACK,"  ");
+				serial_printk("  ");
+			}
+			color_printk(RED,BLACK,"+---> ");
+			serial_printk("+---> ");
+			color_printk(RED,BLACK,"address:%#018lx \t(no symbol)\n",ret_address);
+			serial_printk("address:%#018lx \t(no symbol)\n",ret_address);
+		}
 		if((unsigned long)rbp < (unsigned long)regs->rsp)
 			break;
 
@@ -32,9 +41,10 @@ int32_t lookup_kallsyms(uint64_t address, int32_t level)
 			break;
 	if(index < kallsyms_syms_num)
 	{
-		for(level_index = 0;level_index < level;level_index++)
+		for(level_index = 0;level_index < level;level_index++) {
 			color_printk(RED,BLACK,"  ");
 			serial_printk("  ");
+		}
 		color_printk(RED,BLACK,"+---> ");
 		serial_printk("+---> ");
 

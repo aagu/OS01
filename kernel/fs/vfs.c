@@ -303,6 +303,8 @@ int vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 {
     if (!node || !node->ops || !node->ops->write)
         return -1;
+    if ((uint64_t)node->ops->write < 0xffff800000000000ULL)
+        return -1;
     return node->ops->write(node, offset, size, buffer);
 }
 
@@ -310,6 +312,8 @@ int vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 int vfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *entry)
 {
     if (!dir || !dir->ops || !dir->ops->readdir)
+        return -1;
+    if ((uint64_t)dir->ops->readdir < 0xffff800000000000ULL)
         return -1;
     return dir->ops->readdir(dir, index, entry);
 }

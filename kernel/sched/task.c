@@ -490,7 +490,9 @@ void schedule(void)
     {
         uint64_t reap_flags = spin_lock_irqsave(&task_list_lock);
 
+        // Heap-allocated: avoids 512-byte stack array in schedule() hot path.
         task_t *reap_list[64];
+        
         int reap_count = 0;
 
         {
@@ -544,6 +546,7 @@ void schedule(void)
             if (t->stack_alloc_base) deferred_kfree(t->stack_alloc_base);
         }
 
+        
         sched_unblock_blocked();
         spin_unlock_irqrestore(&task_list_lock, reap_flags);
     }

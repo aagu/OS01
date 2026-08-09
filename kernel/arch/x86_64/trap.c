@@ -544,6 +544,13 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 		return;
 	}
 
+	{
+	    uint64_t _sb = regs->rsp & ~(STACK_SIZE - 1);
+	    serial_printk("PF-KERN: stack %lu/%lu used  pid=%d cpu=%d\n",
+	                  ((_sb + STACK_SIZE) - regs->rsp), (uint64_t)STACK_SIZE,
+	                  task_from_tss() ? task_from_tss()->pid : -1,
+	                  task_from_tss() ? task_from_tss()->cpu : -1);
+	}
 	log_err("do_page_fault(14),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 
 	if(!(error_code & 0x01))
