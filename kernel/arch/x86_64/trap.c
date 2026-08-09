@@ -955,7 +955,11 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         // putchar(int c) — write one char to framebuffer AND serial
         char c = (char)regs->rdi;
         color_printk(WHITE, BLACK, "%c", c);
-        write_serial(c);  // also echo to serial for interactive shell
+        {
+            uint64_t sf = spin_lock_irqsave(&serial_lock);
+            write_serial(c);  // also echo to serial for interactive shell
+            spin_unlock_irqrestore(&serial_lock, sf);
+        }
         regs->rax = (uint64_t)(unsigned char)c;
         break;
     }
@@ -1396,7 +1400,18 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         }
 
         file_t *f = current->files->fd[fd];
-        if (!f->node) { regs->rax = -ENOENT; break; }
+
+        // PTY and pipe fds have no vfs_node — fill a synthetic stat
+        if (!f->node) {
+            memset(buf, 0, sizeof(struct stat));
+            if (f->type == FD_PTY_MASTER || f->type == FD_PTY_SLAVE)
+                buf->st_mode = S_IFCHR | 0600;
+            else if (f->type == FD_PIPE)
+                buf->st_mode = S_IFIFO | 0600;
+            else { regs->rax = -ENOENT; break; }
+            regs->rax = 0;
+            break;
+        }
 
         if (vfs_stat(f->node, buf) != 0) {
             regs->rax = -EIO;

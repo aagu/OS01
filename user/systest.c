@@ -1246,34 +1246,9 @@ int main(void)
         tests[i].fn();
     }
 
-    // Print result with raw putchar (printf buffers don't flush before exit)
-    // Format: "\n[SYS TEST] RESULT: N passed, M failed\n"
-    const char *prefix = "\n[SYS TEST] RESULT: ";
-    for (const char *p = prefix; *p; p++)
-        syscall(SYS_putchar, (uint64_t)(unsigned char)*p, 0, 0);
-
-    // Simple itoa for pass_count
-    char num[16]; int nd, v;
-    nd = 0; v = pass_count;
-    if (v == 0) num[nd++] = '0';
-    else { while (v > 0) { num[nd++] = '0' + (v % 10); v /= 10; } }
-    while (nd > 0) syscall(SYS_putchar, (uint64_t)(unsigned char)num[--nd], 0, 0);
-
-    const char *mid = " passed, ";
-    for (const char *p = mid; *p; p++)
-        syscall(SYS_putchar, (uint64_t)(unsigned char)*p, 0, 0);
-
-    nd = 0; v = fail_count;
-    if (v == 0) num[nd++] = '0';
-    else { while (v > 0) { num[nd++] = '0' + (v % 10); v /= 10; } }
-    while (nd > 0) syscall(SYS_putchar, (uint64_t)(unsigned char)num[--nd], 0, 0);
-
-    const char *suffix = " failed\n";
-    for (const char *p = suffix; *p; p++)
-        syscall(SYS_putchar, (uint64_t)(unsigned char)*p, 0, 0);
-
-    // Allow serial UART to flush before exit
-    for (volatile int i = 0; i < 10000000; i++) { __asm__(""); }
+    // Print summary — use write(1,…) so output serialises through the
+    // PTY instead of racing past buffered test output via raw SYS_putchar.
+    printf("\n[SYS TEST] RESULT: %d passed, %d failed\n", pass_count, fail_count);
 
     return fail_count > 255 ? 255 : (int)fail_count;
 }

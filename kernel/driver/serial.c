@@ -199,6 +199,14 @@ bool serial_received(void)
 
 // ── Sending data ────────────────────────────────────────────
 
+// Serial output lock — protects COM1 from interleaved writes
+// when multiple code paths (tty_write, SYS_putchar, serial_printk,
+// panic/stack_chk_fail) try to write concurrently.
+// Used with plain spin_lock (not irqsave) because no interrupt
+// handler calls write_serial or any function that acquires this
+// lock while a task may already hold it.
+spinlock_T serial_lock = {1};
+
 static bool is_transmit_empty(void)
 {
     return (arch_inb(SERIAL_COM1 + 5) & 0x20) != 0;

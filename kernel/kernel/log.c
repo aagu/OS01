@@ -5,14 +5,12 @@
 #include <stdio.h>
 
 // ── Lock ──────────────────────────────────────────────────
-// spin_lock_irqsave protects both the vsnprintf into the static
-// buffer AND the output loop.  This means local IRQs are disabled
-// during the entire UART write (up to ~26ms for 100 chars at
-// 38400 baud).  This is acceptable for a debug OS: timer ticks
-// are lost on the local CPU but the deadline is short and the
-// alternative (spin_lock without irqsave) deadlocks if an
-// int $0x80 syscall handler calls log() while task context
-// holds log_lock.
+// log_lock: protects the static log_buf from concurrent vsnprintf,
+// and serial_lock: prevents interleaved serial output with
+// tty_write / SYS_putchar / serial_printk.
+// Both use irqsave to avoid same-CPU deadlock when a lock is
+// held by task context and an interrupt handler tries to
+// acquire it.
 static spinlock_T log_lock = {1};
 
 // ── Global level ──────────────────────────────────────────
@@ -76,7 +74,11 @@ void _log_write(int level, const char *fmt, ...)
         len = (int)sizeof(log_buf) - 1;
 
 #if LOG_TARGET_SERIAL
-    write_serial_buf(log_buf, len);
+    {
+        uint64_t sf = spin_lock_irqsave(&serial_lock);
+        write_serial_buf(log_buf, len);
+        spin_unlock_irqrestore(&serial_lock, sf);
+    }
 #endif
 #if LOG_TARGET_FB
     color_printk(level_to_color(level), BLACK, "%s", log_buf);

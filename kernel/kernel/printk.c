@@ -20,10 +20,6 @@
 static char buf_color[4096];
 static char buf_serial[4096];
 
-// Serial output lock — prevents interleaved lines when multiple
-// CPUs call serial_printk concurrently.
-static spinlock_T serial_lock = {1};
-
 position Pos;
 
 psf2_t *font = (psf2_t*)&_binary_kernel_font_psf_start;
@@ -206,7 +202,7 @@ void serial_printk(const char * fmt,...)
 	va_list args;
 
 	va_start(args, fmt);
-	spin_lock(&serial_lock);
+	uint64_t sf = spin_lock_irqsave(&serial_lock);
 	i = vsprintf(buf_serial, fmt, args);
 	va_end(args);
 
@@ -214,5 +210,5 @@ void serial_printk(const char * fmt,...)
 	{
 		write_serial((unsigned char)*(buf_serial + count));
 	}
-	spin_unlock(&serial_lock);
+	spin_unlock_irqrestore(&serial_lock, sf);
 }

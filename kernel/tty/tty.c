@@ -204,9 +204,11 @@ int tty_write(tty_t *tty, const char *buf, int size)
     if (!tty || !buf || size <= 0)
         return 0;
 
+    uint64_t sf = spin_lock_irqsave(&serial_lock);
     for (int i = 0; i < size; i++) {
         tty->output_char(buf[i]);
     }
+    spin_unlock_irqrestore(&serial_lock, sf);
     return size;
 }
 

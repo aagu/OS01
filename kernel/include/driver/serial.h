@@ -3,8 +3,14 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <kernel/tty.h>
+#include <kernel/arch/spinlock.h>
 
 #define SERIAL_COM1 0x3f8
+
+// Serial output lock — prevents interleaved characters when
+// multiple code paths (tty_write, sys_putchar, serial_printk)
+// write to the same COM1 port concurrently.
+extern spinlock_T serial_lock;
 
 // UART init (called early, before interrupt system is up)
 void init_serial(void);

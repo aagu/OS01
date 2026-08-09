@@ -146,7 +146,7 @@ error_code:
 
 	callq 	*%rdx
 
-	jmp	ret_from_exception	
+	jmp	ret_from_intr
 
 ENTRY(debug)
 	pushq	$0
