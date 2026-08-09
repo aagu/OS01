@@ -504,6 +504,8 @@ void schedule(void)
                 pos = task_list_next(pos);
                 if (t->state != TASK_ZOMBIE || t == current) continue;
                 if (t->on_rq) continue;  // not yet dequeued — skip
+                // SMP: only reap tasks on this CPU — the other CPU will reap its own tasks.
+                if (t->cpu != (int)this_cpu()->cpu_id) continue;
 
                 int reap = 0;
                 if (t->flags & PF_REAPED) reap = 1;
@@ -536,9 +538,9 @@ void schedule(void)
             list_del(&t->list);
             t->list.next = NULL;
             t->list.prev = NULL;
-            if (t->thread) kfree(t->thread);
+            if (t->thread) {deferred_kfree(t->thread); t->thread = NULL;}
             if (t->files) deferred_files_free(t->files);
-            if (t->fpu_save) kfree(t->fpu_save);
+            if (t->fpu_save) {deferred_kfree(t->fpu_save); t->fpu_save = NULL;}
             if (t->stack_alloc_base) deferred_kfree(t->stack_alloc_base);
         }
 
