@@ -38,10 +38,10 @@
 static spinlock_T task_list_lock = { .lock = 1L };
 
 // ── Safe task-list iteration ─────────────────────────────
-// The global task list is written (list_add_to_before) without
-// synchronisation against readers (sched_unblock_blocked etc.).
-// On SMP a reader may see a partially-updated ->next, including
-// NULL.  Advance with the guard below to survive the window.
+// Writers hold task_list_lock (see task_list_add() called from
+// smp_boot_aps, do_fork, spawn_user_task), so concurrent readers
+// in schedule() see consistent pointers.  The NULL guard below
+// survives any remaining edge cases (e.g. memory corruption).
 static inline list_t *task_list_next(list_t *pos)
 {
     list_t *next = pos->next;
@@ -51,6 +51,17 @@ static inline list_t *task_list_next(list_t *pos)
         return NULL;
     }
     return next;
+}
+
+// ── Thread-safe task-list insertion ─────────────────────
+// Called from smp_boot_aps() to add AP idle tasks while
+// already-booted APs may be scanning the list in schedule().
+void task_list_add(task_t *tsk)
+{
+    list_init(&tsk->list);
+    uint64_t flags = spin_lock_irqsave(&task_list_lock);
+    list_add_to_before(&init_task_union.task.list, &tsk->list);
+    spin_unlock_irqrestore(&task_list_lock, flags);
 }
 
 /* ── EEVDF scheduler constants ─────────────────────── */

@@ -327,6 +327,13 @@ struct task_struct *create_kthread(uint64_t (*fn)(uint64_t), uint64_t arg,
 /* ── EEVDF scheduler ─────────────────────────── */
 void task_wake(struct task_struct *t);
 
+// ── Safe task-list insertion (SMP-aware) ───────────
+// Must be used by any code outside task.c that adds
+// tasks to the global list (e.g. smp_boot_aps).
+// Holds task_list_lock so concurrent schedule()
+// scanners on other CPUs see a consistent list.
+void task_list_add(struct task_struct *tsk);
+
 // ── SMP-safe signal delivery ──────────────────────
 // Finds task by pid and delivers signal under
 // task_list_lock.  Returns 0 on success, -ESRCH if

@@ -196,7 +196,10 @@ void smp_boot_aps(void)
         }
         percpu_data[i].idle = idle;
         // Add to the global task list so schedule() can find it.
-        list_add_to_before(&init_task_union.task.list, &idle->list);
+        // Must use task_list_add() which holds task_list_lock:
+        // previously-booted APs may already be running schedule()
+        // and scanning this list concurrently.
+        task_list_add(idle);
 
         // ── Per-CPU TSS descriptor in the shared GDT ──────────
         // CPU i uses GDT entries [8+2i, 9+2i] → selector (8+2i)<<3.
