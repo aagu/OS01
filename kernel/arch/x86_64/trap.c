@@ -1,4 +1,5 @@
 #include <kernel/arch/x86_64/trap.h>
+#include <kernel/arch/irq.h>
 #include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/x86_64/hw.h>
 #include <kernel/arch/segment.h>
@@ -426,6 +427,38 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 			"pid=%d cpu=%d\n",
 			error_code, regs->rip, regs->rsp, regs->rbp, cr2,
 			t?t->pid:-1, cpu_id());
+
+		// TASKLIST dump below covers every live task (pid/state/
+		// on_rq/on_cpu/cpu/stack) — the UAF victim is identifiable
+		// even when the crashing task_t is already reclaimed.
+
+		// TASKLIST FIRST: full task inventory before touching t (which
+		// may itself be a freed/garbage pointer).  Prints every live
+		// task's pid/state/stack so the UAF victim is identifiable even
+		// when the crashing task_t is already reclaimed.
+		{
+			uint64_t head = (uint64_t)&init_task_union.task.list;
+			uint64_t pos = *(uint64_t *)head;  // list.next
+			int n = 0;
+			serial_printk("PF-KRN: tasklist head=%lx\n", head);
+			// Circular list: stop when we return to head.  Do NOT use
+			// address ordering (head is lower than heap nodes).
+			while (pos != head && n < 32) {
+				if (pos < 0xffff800000000000ULL ||
+				    pos > 0xffff800020000000ULL) {
+					serial_printk("PF-KRN:   tasklist corrupt pos=%lx\n", pos);
+					break;
+				}
+				task_t *tl = container_of((list_t *)pos, task_t, list);
+				uint64_t stk = (uint64_t)tl->stack_alloc_base;
+				serial_printk("PF-KRN:   task pid=%ld st=%d fl=%lx cpu=%u on_rq=%u on_cpu=%u thd=%p stk=%lx\n",
+					(long)tl->pid, (int)tl->state, (unsigned long)tl->flags,
+					(unsigned)tl->cpu, (unsigned)tl->on_rq, (unsigned)tl->on_cpu,
+					(void *)tl->thread, stk);
+				pos = *(uint64_t *)pos;  // next
+				n++;
+			}
+		}
 		serial_printk("PF-KRN: r8=%lx r9=%lx r10=%lx r11=%lx\n",
 			regs->r8, regs->r9, regs->r10, regs->r11);
 		serial_printk("PF-KRN: r12=%lx r13=%lx r14=%lx r15=%lx\n",
@@ -445,11 +478,59 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 				serial_printk("PF-KRN: *thd_rsp=%lx %lx\n",
 					*(uint64_t *)saved_rsp,
 					*((uint64_t *)saved_rsp + 1));
+			// Dump 16 qwords around the saved rsp to reconstruct the
+			// return chain that led to the bad RIP.
+			if (saved_rsp >= 0xffff800000000000ULL) {
+				uint64_t *p = (uint64_t *)(saved_rsp & ~0x7ULL);
+				serial_printk("PF-KRN: thd_rsp-8..+120:\n");
+				for (int i = -1; i < 15; i++) {
+					uint64_t addr = (uint64_t)p + i * 8;
+					if (addr < 0xffff800000000000ULL ||
+					    addr > 0xffff800020000000ULL)
+						break;
+					serial_printk("PF-KRN:   [%+d] %p: %lx\n",
+						(i * 8), (void *)addr,
+						*(uint64_t *)addr);
+				}
+			}
+			// Also dump 8 qwords at the crash rsp.
+			{
+				uint64_t cr = regs->rsp;
+				if (cr >= 0xffff800000000000ULL &&
+				    cr <= 0xffff800020000000ULL) {
+					serial_printk("PF-KRN: crsp dump:\n");
+					for (int i = 0; i < 8; i++) {
+						uint64_t addr = cr + i * 8;
+						if (addr > 0xffff800020000000ULL) break;
+						serial_printk("PF-KRN:   crsp[%d] %p: %lx\n",
+							i, (void *)addr, *(uint64_t *)addr);
+					}
+				}
+			}
 		}
 		// Check stack boundaries
 		uint64_t sb = regs->rsp & ~(STACK_SIZE - 1);
 		serial_printk("PF-KRN: stack %lu/%lu used\n",
 			((sb + STACK_SIZE) - regs->rsp), (uint64_t)STACK_SIZE);
+
+		// Raw rbp-chain backtrace: return addresses + frame pointers.
+		// Walk up to 12 frames; stop on unmapped/loop pointers.
+		{
+			uint64_t fp = regs->rbp;
+			serial_printk("PF-KRN: bt rbp=%lx rip=%lx\n", fp, regs->rip);
+			for (int i = 0; i < 12; i++) {
+				if (fp < 0xffff800000000000ULL ||
+				    fp > 0xffff800020000000ULL)
+					break;
+				uint64_t *fr = (uint64_t *)fp;
+				uint64_t ret = fr[1];
+				uint64_t next_fp = fr[0];
+				serial_printk("PF-KRN:   #%d fp=%lx ret=%lx\n",
+					i, fp, ret);
+				if (next_fp <= fp) break;  // loop or forward
+				fp = next_fp;
+			}
+		}
 	}
 
 	// User-mode PF - VMA-based demand paging
@@ -1821,6 +1902,9 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         while (jiffies < target) {
             current->state = TASK_INTERRUPTIBLE;
             schedule();
+            // schedule() returns with IRQs disabled; this loop needs
+            // the tick to advance jiffies.
+            arch_local_irq_enable();
             // A signal (e.g. SIGINT via kill) may have woken
             // us early.  Break out so do_signal_delivery can
             // process it on syscall return.

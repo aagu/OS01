@@ -23,6 +23,7 @@
 #include <uapi/time.h>
 #include <kernel/deferred_free.h>    // deferred_free() for zombie reaping
 #include <kernel/assert.h>
+#include <kernel/printk.h>   // serial_printk
 
 // ── Preemption flag ──────────────────────────────────────
 // Now per-CPU (percpu_t.need_resched, offset 8 from GS base).
@@ -135,7 +136,9 @@ static void enqueue_task(task_t *task, percpu_t *rq)
     ASSERT(task != rq->idle);
 
     task->deadline = task->vruntime + EEVDF_MIN_SLICE;
-    task->on_rq = true;
+    // [FIX-atomic] RELEASE: paired with task_wake's ACQUIRE load
+    // (on_rq) so a concurrent wakeup never sees a stale false.
+    __atomic_store_n(&task->on_rq, 1, __ATOMIC_RELEASE);
     rbtree_node_t *conflict = rbtree_insert(&rq->run_queue, &task->rb_node, cmp_deadline);
     ASSERT(conflict == NULL);
     rq->nr_running++;
@@ -144,7 +147,8 @@ static void enqueue_task(task_t *task, percpu_t *rq)
 static void dequeue_task(task_t *task, percpu_t *rq)
 {
     rbtree_erase(&rq->run_queue, &task->rb_node);
-    task->on_rq = false;
+    // [FIX-atomic] RELEASE store (see enqueue_task).
+    __atomic_store_n(&task->on_rq, 0, __ATOMIC_RELEASE);
     rq->nr_running--;
 }
 
@@ -181,8 +185,21 @@ retry:
     percpu_t *rq = &percpu_data[*(volatile uint32_t *)&t->cpu];
     uint64_t flags = spin_lock_irqsave(&rq->rq_lock);
 
-    /* Re-check on_rq under lock — sched_balance may have enqueued it */
-    if (t->on_rq) {
+    /* Re-check on_rq under lock — sched_balance may have enqueued it.
+     * ACQUIRE loads: the picker's RELEASE stores of on_rq/on_cpu are
+     * guaranteed visible even when we locked a stale rq (t->cpu may
+     * have been read before the picker synced it) — without this the
+     * wakeup re-enqueues a task that is already committed to another
+     * CPU (double-book -> both CPUs run it -> stack clobber). */
+    if (__atomic_load_n(&t->on_rq, __ATOMIC_ACQUIRE)) {
+        spin_unlock_irqrestore(&rq->rq_lock, flags);
+        return;
+    }
+
+    /* [FIX-doublebook] Re-check on_cpu: a task that is RUNNING on a
+     * CPU (or committed to run by schedule()'s pick, on_cpu=1 set
+     * under the rq_lock) must never be woken/re-enqueued. */
+    if (__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
         spin_unlock_irqrestore(&rq->rq_lock, flags);
         return;
     }
@@ -334,6 +351,7 @@ int blocker_wait(blocker_check_t check, int type, bool signal_can_wake)
     // which finds us and wakes us when the condition is met.
     // We may also be woken explicitly by blocker_wake() from do_exit().
     schedule();
+    arch_local_irq_enable();
     // Woke up — clear blocker and check why
     self->blocker.type = BLOCKER_NONE;
     self->blocker.check = NULL;
@@ -426,8 +444,15 @@ static void sched_balance(percpu_t *rq)
         rbtree_node_t *prev = rbtree_prev(node);
 
         if (t != src_rq->idle) {
-            /* Never migrate the user-space init process (pid==1). */
-            if (t->pid != user_init_pid) {
+            /* Never migrate the user-space init process (pid==1),
+             * and NEVER migrate a task that is on a CPU (running or
+             * committed by pick).  schedule() re-enqueues current
+             * (on_rq=true) while it still runs (on_cpu=1) for
+             * vruntime reordering; without the on_cpu check another
+             * CPU's balancer steals it and BOTH CPUs operate on the
+             * same task (double-book -> stack clobber, RIP=2/1). */
+            if (t->pid != user_init_pid &&
+                !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
                 dequeue_task(t, src_rq);
                 t->cpu = rq->cpu_id;
 
@@ -462,6 +487,33 @@ void schedule(void)
     percpu_t *rq = this_cpu();
     if (!rq->scheduler_ok)
         return;
+
+    // [FIX] Nested-schedule guard (Linux preempt_count idea):
+    // the resume path re-opens IRQs before the epilogue returns, so
+    // a tick in that window calls do_resched -> schedule() on top of
+    // this invocation.  Nested schedule() re-picks/re-switches and
+    // corrupts the outer switch frames (RIP=2, rax=0x202 crash).
+    // With the flag set, the nested call returns immediately: the
+    // outer call has already chosen next and will finish switching.
+    if (current->in_schedule)
+        return;
+    current->in_schedule = 1;
+    // On-CPU: our kernel stack is in use.  Reaper must not free us
+    // even after do_exit sets ZOMBIE (final schedule is still
+    // running on this stack).
+    __atomic_store_n(&current->on_cpu, 1, __ATOMIC_RELEASE);
+
+    // [FIX] IRQs must stay OFF for the whole schedule() body.
+    // Otherwise the AP tick's do_resched path re-enters schedule()
+    // on top of this invocation (nested schedule), corrupting
+    // run-queue state and interrupt frames — the SMP-only
+    // intermittent #PF seen with systest.
+    // Saved in current->thread->sched_flags, NOT a per-CPU global:
+    // the global gets overwritten by the next task calling
+    // schedule() on this CPU, so on resume this task would restore
+    // another task's flags.  Per-task storage survives any number
+    // of intervening schedules by other tasks.
+    current->thread->sched_flags = arch_local_irq_save();
 
     rq->schedule_count++;
 
@@ -537,13 +589,37 @@ void schedule(void)
 
         for (int i = 0; i < reap_count; i++) {
             task_t *t = reap_list[i];
+            // [FIX] re-verify under the target CPU's rq_lock: the
+            // lockless scan may have seen stale state/on_rq/cpu.
+            // A task being (re-)enqueued or migrated concurrently
+            // must never be reaped (its stack is still in use).
+            {
+                int tcpu = (int)*(volatile uint32_t *)&t->cpu;
+                if (tcpu < 0 || tcpu >= (int)num_cpus) {
+                    log_err("sched: reap skip task %d bad cpu=%d\n",
+                            (int)t->pid, tcpu);
+                    continue;
+                }
+                percpu_t *trq = &percpu_data[tcpu];
+                uint64_t rq_flags = spin_lock_irqsave(&trq->rq_lock);
+                if (t->state != TASK_ZOMBIE || t->on_rq || t->on_cpu ||
+                    (int)t->cpu != (int)trq->cpu_id) {
+                    // state changed / got enqueued / migrated — skip
+                    spin_unlock_irqrestore(&trq->rq_lock, rq_flags);
+                    continue;
+                }
+                spin_unlock_irqrestore(&trq->rq_lock, rq_flags);
+            }
             list_del(&t->list);
             t->list.next = NULL;
             t->list.prev = NULL;
             if (t->thread) {deferred_kfree(t->thread); t->thread = NULL;}
-            if (t->files) deferred_files_free(t->files);
+            if (t->files) {deferred_files_free(t->files); t->files = NULL;}
             if (t->fpu_save) {deferred_kfree(t->fpu_save); t->fpu_save = NULL;}
-            if (t->stack_alloc_base) deferred_kfree(t->stack_alloc_base);
+            if (t->stack_alloc_base) {
+                deferred_kfree(t->stack_alloc_base);
+                t->stack_alloc_base = NULL;  // [FIX] no double-free
+            }
         }
 
         
@@ -559,8 +635,29 @@ void schedule(void)
     {
         uint64_t rq_flags = spin_lock_irqsave(&rq->rq_lock);
         next = pick_eevdf(rq);
-        if (next && next != rq->idle)
+        if (next && next != rq->idle) {
             dequeue_task(next, rq);
+            // [FIX-doublebook] next is COMMITTED to this CPU: from
+            // now until switch_to + resume it is off-rq but about to
+            // run.  Without on_cpu=1 here, another CPU's task_wake /
+            // blocker_wake / sched_unblock_blocked sees on_rq==false
+            // in the window and re-enqueues next onto ITS runqueue —
+            // both CPUs then run the same task (stack clobber,
+            // garbage rbp, RIP=user-data crash).  on_cpu=1 closes
+            // the window: task_wake skips on_cpu tasks.
+            // RELEASE: paired with task_wake's ACQUIRE on_cpu load.
+            __atomic_store_n(&next->on_cpu, 1, __ATOMIC_RELEASE);
+            // [FIX-cpu-sync] keep t->cpu == the runqueue it sits on.
+            // schedule() never updated next->cpu at pick time, so a
+            // task could run on CPU0 with a stale t->cpu=1.  task_wake
+            // locks percpu_data[t->cpu] (CPU1's rq) which does NOT
+            // serialize against this CPU0 pick (CPU0's rq) — wakeup in
+            // the pick->switch_to window re-enqueues next onto CPU1
+            // and both CPUs run it.  Syncing cpu under the same lock
+            // makes task_wake's lock == this lock -> on_rq/on_cpu
+            // re-checks actually serialize.
+            next->cpu = rq->cpu_id;
+        }
         spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
     }
 
@@ -570,7 +667,11 @@ void schedule(void)
             log_err("sched: orphan task %d (state=%ld), falling back to idle\n",
                     (int)next->pid, (long)next->state);
         next = rq->idle;
-        if (!next) return;
+        if (!next) {
+            arch_local_irq_restore(current->thread->sched_flags);
+            current->in_schedule = 0;
+            return;
+        }
     }
 
     // ── 6. Preemption guard: if the best candidate is still
@@ -579,6 +680,8 @@ void schedule(void)
     if (next == current &&
         (next == rq->idle || current->vruntime < current->deadline)) {
         rq->need_resched = 0;
+        arch_local_irq_restore(current->thread->sched_flags);
+        current->in_schedule = 0;
         return;
     }
 
@@ -595,7 +698,46 @@ void schedule(void)
     if (next == rq->idle && next->thread->rip == 0)
         next->thread->rip = (uint64_t)idle_task_resume;
 
+    // [DIAG-5] before saving prev state, verify current->thread is a
+    // sane kernel-heap pointer: switch_to's asm stores
+    // (movq %rsp, prev->thread->rsp / rip) would write through a
+    // garbage thread pointer and corrupt memory BEFORE any crash.
+    if ((uint64_t)current->thread < 0xffff800000000000ULL ||
+        (uint64_t)current->thread >= 0xffff800020000000ULL) {
+        serial_printk("SCHED-PREV-BAD: pid=%ld thread=%p cpu=%d "
+                      "state=%ld on_rq=%d on_cpu=%d\n",
+                      current->pid, (void *)current->thread, cpu_id(),
+                      (long)current->state, (int)current->on_rq,
+                      (int)current->on_cpu);
+        for (;;) arch_cpu_halt();
+    }
+    // [DIAG-5b] hardened: our SAVED thread->rsp must lie inside our
+    // OWN task_union stack.  If it points elsewhere (e.g. a freed
+    // 64-byte thread_t slab object), the thread struct was already
+    // corrupted — and switch_to's store (movq %rsp,
+    // prev->thread->rsp) would write through garbage.  Catch it
+    // before the corruption spreads.
+    if (current->thread->rsp < (uint64_t)current ||
+        current->thread->rsp > (uint64_t)current + STACK_SIZE) {
+        serial_printk("SCHED-PREV-BAD2: pid=%ld saved_rsp=%lx cpu=%d "
+                      "state=%ld cur=%p rsp0=%lx rip=%lx\n",
+                      current->pid, current->thread->rsp, cpu_id(),
+                      (long)current->state, (void *)current,
+                      current->thread->rsp0, current->thread->rip);
+        for (;;) arch_cpu_halt();
+    }
     switch_to(current, next);
+    // Resumed here when this task is switched back: we are running
+    // again — stack in use, so on_cpu = 1.
+    __atomic_store_n(&current->on_cpu, 1, __ATOMIC_RELEASE);
+    // IRQs stay DISABLED (cli from switch_to).  Do NOT popfq here:
+    // re-opening IRQs before the epilogue ret creates a tick window
+    // where do_resched runs a nested schedule() over the live resume
+    // frame -> RIP=2 (rbx==rbp, rsp-saved-0xf0 crash signature).
+    // Callers restore IRQ state: iret/sysret to userspace, or an
+    // explicit arch_local_irq_enable() in kernel-side loops.
+    // Leave schedule() — allow a real (non-nested) call next time.
+    current->in_schedule = 0;
 }
 
 // ── Idle task entry ─────────────────────────────────────────
@@ -606,10 +748,25 @@ void schedule(void)
 __attribute__((noreturn)) static void idle_task_resume(void)
 {
     percpu_t *cpu = this_cpu();
+
+    // First switch-IN does NOT resume through schedule()'s resume
+    // label (thread->rip was 0, so we start here directly).  The
+    // in_schedule guard set by that schedule() call is still 1 —
+    // clear it, or every future schedule() on this CPU bails out as
+    // "nested" and no other task ever runs (terminal hang).
+    current->in_schedule = 0;
+    // switch_to left IRQs disabled (cli).  hlt() needs IF=1 to be
+    // woken by the tick — same as ap_entry() does for APs.
+    arch_local_irq_enable();
+
     while (1) {
         arch_cpu_halt();
-        if (cpu->need_resched)
+        if (cpu->need_resched) {
             schedule();
+            // schedule() returns with IRQs disabled; hlt() needs
+            // IF=1 to be woken by the tick.
+            arch_local_irq_enable();
+        }
     }
 }
 
@@ -683,8 +840,17 @@ uint64_t do_exit(uint64_t exit_code)
         current->files = NULL;
     }
 
+    // On-CPU: our kernel stack is in use until __switch_to clears
+    // on_cpu.  The reaper must not free us after we set ZOMBIE below
+    // (final schedule() still runs on this stack).
+    __atomic_store_n(&current->on_cpu, 1, __ATOMIC_RELEASE);
+
     current->exit_code = exit_code;
-    current->state = TASK_ZOMBIE;
+    // NOTE: we stay TASK_RUNNING through the cleanup below and only
+    // become TASK_ZOMBIE immediately before the final schedule().
+    // Setting ZOMBIE earlier lets the zombie reaper on another CPU
+    // reap (free) this task's kernel stack while do_exit is still
+    // running on it — the SMP-only intermittent #PF.
 
     // ── Direct switch to parent ─────────────────────────────
     // By the time we reach ZOMBIE the parent is either already
@@ -727,7 +893,7 @@ uint64_t do_exit(uint64_t exit_code)
     if (parent_woken) {
         task_wake(parent);
     }
-    current->state = TASK_ZOMBIE;
+    current->state = TASK_ZOMBIE;   // now reaped-able: do_exit is done
     schedule();
     return 0;  // unreachable
 }
@@ -1773,7 +1939,9 @@ void task_init()
     // still has a fallback even if IOAPIC routing fails.
     while (1) {
         __asm__ __volatile__("hlt");
-        if (this_cpu()->need_resched)
+        if (this_cpu()->need_resched) {
             schedule();
+            arch_local_irq_enable();
+        }
     }
 }

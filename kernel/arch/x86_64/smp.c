@@ -134,8 +134,11 @@ void ap_entry(void)
 
     while (1) {
         arch_cpu_halt();
-        if (cpu->need_resched)
+        if (cpu->need_resched) {
             schedule();
+            // schedule() returns with IRQs disabled; hlt() needs IF=1.
+            arch_local_irq_enable();
+        }
     }
 }
 

@@ -100,6 +100,15 @@ typedef struct thread_struct
     uint64_t cr2;
     uint64_t trap_nr;
     uint64_t error_code;
+
+    // IRQ state saved by schedule() when this task entered it.
+    // Per-TASK (not per-CPU): a per-CPU global gets overwritten by
+    // the next task that calls schedule() on the same CPU, so the
+    // resumed task would restore another task's flags (e.g. IRQ
+    // opened in ret_from_intr -> nested tick frame -> #PF with
+    // RFLAGS-as-RIP).  Saved in thread so each task restores its
+    // own state when switched back in.
+    uint64_t sched_flags;
 } thread_t;
 
 typedef struct task_struct
@@ -148,6 +157,20 @@ typedef struct task_struct
     // Use list_is_empty(&t->io_wait_node) to check if
     // the task is NOT currently waiting on any I/O.
     list_t io_wait_node;
+
+    // ── Nested-schedule guard (Linux preempt_count idea) ──
+    // PER-TASK: set by schedule() while this task is inside it,
+    // cleared on the switch_to resume path (or the very first
+    // switch-in entry).  Blocks a tick's do_resched from re-entering
+    // schedule() on top of an in-flight one.
+    uint32_t in_schedule;
+
+    // ── on_cpu (Linux on_cpu semantics) ──────────────────
+    // 1 = this task is currently ON a CPU (running or being
+    // switched): its kernel stack is in use.  0 = off-CPU; only
+    // then may the zombie reaper free it.  do_exit sets 1 at entry
+    // and only becomes reapable after __switch_to clears it.
+    uint32_t on_cpu;
 
     // ── Signal handling ────────────────────────────────
     struct sigaction sighand[NSIG]; // registered signal handlers
@@ -263,15 +286,18 @@ inline task_t* __attribute__((always_inline)) get_current_task()
             "movq %%rax, %1 \n\t"    /* save prev->rip = resume label */ \
             "movq %2, %%rsp \n\t"    /* load next->rsp */ \
             "pushq %3 \n\t"          /* push next->rip */ \
+            "movq %4, %%rdi \n\t"    /* 1st arg: prev (SysV) */ \
+            "movq %5, %%rsi \n\t"    /* 2nd arg: next (SysV) */ \
             "jmp __switch_to \n\t"   \
             "1: \n\t"                \
-            "sti \n\t"               /* re-enable IRQs after switch */ \
+            /* IRQ state restored by schedule() after switch */ \
             "popq %%rax \n\t"        \
             "popq %%rbp \n\t"        \
             : "=m"((prev)->thread->rsp), "=m"((prev)->thread->rip) \
             : "m"((next)->thread->rsp), "m"((next)->thread->rip), \
-              "D"((uint64_t)(prev)), "S"((uint64_t)(next)) \
-            : "memory", "rax" \
+              "r"((uint64_t)(prev)), "r"((uint64_t)(next)) \
+            : "memory", "rax", "rcx", "rdx", "rdi", "rsi", \
+              "r8", "r9", "r10", "r11", "cc" \
         ); \
     } while (0)
 
