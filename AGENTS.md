@@ -75,6 +75,7 @@ Init:    head.S → kernel_main → subsys → VFS/FS → TTY → percpu → SMP
 | [docs/architecture.md](docs/architecture.md) | Boot chain, memory layout, interrupt system, init sequence |
 | [docs/smp.md](docs/smp.md) | 8-phase SMP bringup, per-CPU, IPI, TLB shootdown |
 | [docs/scheduler.md](docs/scheduler.md) | Task system, context switch, spawn/fork/exec/exit, blocker framework |
+| [docs/scheduler-complexity.md](docs/scheduler-complexity.md) | Scheduler complexity assessment, feature-impact risk map, refactor triggers |
 | [docs/syscall.md](docs/syscall.md) | Syscall table (48 syscalls), dispatch, invocation |
 | [docs/filesystem.md](docs/filesystem.md) | VFS, FAT32, ext2, devfs, procfs, tmpfs, GPT, block device |
 | [docs/cow-mmap.md](docs/cow-mmap.md) | COW fork, VMA, mmap/mprotect/munmap, 4KB page pool |
