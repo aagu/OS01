@@ -1,7 +1,7 @@
-# OS01 优化路线图 v12
+# OS01 优化路线图 v13
 
-> **基准**: `930187e` (inittab 配置支持完成 — 125/125 pass)
-> **日期**: 2026-08-01
+> **基准**: `9d051fa` (scheduler complexity assessment)
+> **日期**: 2026-08-11
 
 标记: ✅ 已完成 | 🔴 P0 本迭代 | 🟡 P1 本月 | 🟢 P2 下月 | 🔵 P3 远期
 
@@ -17,7 +17,7 @@
 | **Phase 4: 文件系统** | ext2 R/W、FAT32 R/W、tmpfs、devfs、procfs、GPT 双分区 | ✅ |
 | **Phase 5: 设备驱动** | 8259A PIC、APIC/IOAPIC/LAPIC、PIT/LAPIC timer、PS/2 键盘、16550 串口、AHCI SATA | ✅ |
 | **Phase 6: 用户态** | busybox ash shell（方向键行编辑+光标闪烁+raw mode TTY）、9 applet、init（/etc/inittab 配置解析、4 阶段引导：SYSINIT→WAIT→ONCE→RESPAWN/ASKFIRST、fallback 硬编码默认）、libc (printf/malloc/string/syscall wrapper)、VT100 CSI 终端模拟器 | ✅ |
-| **Phase 7: poll/select** | poll_table + 双队列级联唤醒、select/pselect 系统调用（SYS_select=50 + SYS_pselect6=51）、do_poll_core 共享轮询循环、pselect6 sigmask 原子 swap、systest 118/118 | ✅ |
+| **Phase 7: poll/select** | poll_table + 双队列级联唤醒、select/pselect 系统调用（SYS_select=50 + SYS_pselect6=51）、do_poll_core 共享轮询循环、pselect6 sigmask 原子 swap、systest 126/126 | ✅ |
 
 ---
 
@@ -31,7 +31,7 @@ P0 (本迭代 — 本月):
 
 P1 (本月):
  3. 多架构 aarch64 ✅ 清理     — 8 dispatch 头文件 + 7 aarch64 桩 + task.c 拆分（20 commits）
- 4. /proc/<pid>/fd/ + maps   — 进程级调试
+ 4. /proc/<pid>/fd/ + maps ✅  — /proc/<pid>/maps 已实现；fd/ 待完成
  5. 日志级别 ✅               — ERR/WARN/INFO/DEBUG，开发效率质变
  6. rwlock/seqlock            — VFS /proc 多核缩放
  7. 用户栈 canary             — 用户态加固
@@ -44,13 +44,12 @@ P2 (下月):
 
 P3 (远期):
 12. ASLR                      — 用户态安全
-13. SMP 负载均衡              — push-pull / work stealing
-14. UBSan + KASan            — 运行时 bug 检测
-15. 真机启动 (USB)            — "不能在真机上测试就别实现"
-16. 网络进阶 (AF_UNIX, socketpair)
-17. GUI 框架 (参考 opuntiaOS + HackOS)
-18. Alpine apk 用户态        — cavOS 路线，直接安装 musl 二进制包
-19. NVMe 驱动                — 替代 AHCI
+13. UBSan + KASan            — 运行时 bug 检测
+14. 真机启动 (USB)            — "不能在真机上测试就别实现"
+15. 网络进阶 (AF_UNIX, socketpair)
+16. GUI 框架 (参考 opuntiaOS + HackOS)
+17. Alpine apk 用户态        — cavOS 路线，直接安装 musl 二进制包
+18. NVMe 驱动                — 替代 AHCI
 ```
 
 **依赖链:**
@@ -244,7 +243,7 @@ P3 (远期):
 
 **总计: 11 commits, 14 files, +1042 / −33**
 
-### systest 结果: 118/118 passed (poll 8/8 + select 20/20)
+### systest 结果: 126/126 passed (poll 8/8 + select 20/20)
 
 ---
 
@@ -316,7 +315,7 @@ CPU N: schedule()
 | **新增** | `libc/rbtree/rbtree.c` | rbtree_last、rbtree_prev |
 | **新增** | `user/smp_stress.c` | CPU-bound 多进程负载均衡验证 |
 
-**总计: 15+ commits, 12 files, 124/125 systest pass (-smp 2)**
+**总计: 15+ commits, 12 files, 126/126 systest pass (-smp 2)**
 
 ---
 
@@ -377,7 +376,7 @@ CPU N: schedule()
 | 3 | 调度器 | EEVDF (Tilck 路线) | Linux 6.6+ 生产级算法 |
 | 4 | 网络栈 | lwIP (cavOS 路线) | 快速获得 TCP/IP，socket poll 回调已就绪 |
 | 5 | 文件系统 | FAT32 + ext2 R/W + tmpfs + devfs + procfs | ext2 读写完整，UNIX 权限完整 |
-| 6 | 测试 | Tilck 3 层 (unit+self+sys) | 118/118 systest pass |
+| 6 | 测试 | Tilck 3 层 (unit+self+sys) | 126/126 systest pass |
 | 7 | 用户态 | busybox → 动态链接 → Alpine apk | cavOS 已验证可行 |
 | 8 | COW PTE 标记 | `PAGE_COW` (bit 10) | bit 9 已被 `PAGE_PROTNONE` 占用 |
 | 9 | COW 并发保护 | `subpage_lock` (已有 spinlock) | 无需新增锁 |

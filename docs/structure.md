@@ -20,7 +20,7 @@
 
 * `kernel/` — 内核主文件（main.c, printk.c, panic.c, log.c, trace.c, kallsyms.c）
 * `intr/` — 中断处理相关（irq.c, softirq.c, dispatch.c, wait.c）
-* `arch/x86_64/` — 处理器体系架构相关（head.S, trap.c, entry.S, subsys.c, subsys_percpu.c）
+* `arch/x86_64/` — 处理器体系架构相关（head.S, trap.c, entry.S, smp.c, subsys.c, subsys_percpu.c）
 * `driver/` — 硬件驱动（keyboard, serial, pit, rtc, ahci, pci）
 * `include/` — 头文件，会和 lib 一起安装到 sysroot 中
 * `memory/` — 内存管理相关（pmm.c, vmm.c, slab.c, vma.c, tlb.c, dump.c）
@@ -28,8 +28,8 @@
 * `timer/` — 软件定时器核心（timer.c）
 * `apic/` — APIC 子系统（acpi.c, lapic.c, ioapic.c, ipi.c, lapic_timer.c）
 * `block/` — 块设备层（blockdev.c）
-* `fs/` — 文件系统（vfs.c, fat.c, ext2.c, devfs.c, procfs.c, tmpfs.c, elf.c, file.c, gpt.c）
-* `sched/` — 调度器（task.c, smp.c）
+* `fs/` — 文件系统（vfs.c, fat.c, ext2.c, devfs.c, procfs.c, tmpfs.c, elf.c, file.c, gpt.c, poll.c, select.c）
+* `sched/` — 调度器 (task.c, deferred_free.c)
 * `subsys/` — 子系统注册框架（subsys.c）
 * `tty/` — 终端/TTY 子系统（tty.c）
 * `percpu/` — 每 CPU 数据结构（percpu.c）
@@ -60,8 +60,9 @@
 #### arch/x86_64 子目录
 * `head.S` - 内核入口，页表，GDT，IDT，TSS
 * `entry.S` - 异常/中断/系统调用入口/退出
-* `trap.c` - 异常处理 + do_system_call
+* `trap.c` - 异常处理 + do_system_call + do_signal_delivery
 * `trampoline.S` - AP 启动（16→32→64 位）
+* `smp.c` - SMP AP 引导（ap_entry, smp_boot_aps, INIT-SIPI-SIPI）
 * `subsys.c` - 子系统注册（BSP 一次性 init）
 * `subsys_percpu.c` - 每 CPU 子系统 init
 
@@ -102,15 +103,17 @@
 * `fat.c` - FAT32 文件系统驱动
 * `ext2.c` - ext2 文件系统驱动
 * `devfs.c` - 设备文件系统
-* `procfs.c` - 进程文件系统
+* `procfs.c` - 进程文件系统（/proc/<pid>/maps, /proc/<pid>/status, /proc/meminfo）
 * `tmpfs.c` - 临时文件系统
 * `elf.c` - ELF 加载器
 * `file.c` - 文件描述符操作
 * `gpt.c` - GPT 分区表解析
+* `poll.c` - poll/ppoll 系统调用核心（do_poll_core）
+* `select.c` - select/pselect6 系统调用（do_select_common 适配层）
 
 #### sched 子目录
-* `task.c` - 任务/线程管理 + EEVDF 调度器（O(log n) rbtree 可运行队列 + vruntime/deadline + SMP 负载均衡）
-* `smp.c` - SMP AP 引导（INIT-SIPI-SIPI）
+* `task.c` - 任务/线程管理 + EEVDF 调度器（O(log n) rbtree 可运行队列 + vruntime/deadline + SMP 负载均衡 + COW fork）
+* `deferred_free.c` - 异步 deferred-free kthread（跨 CPU 任务回收）
 
 #### subsys 子目录
 * `subsys.c` - 子系统注册框架（register_subsys, subsys_init_all）
@@ -146,7 +149,7 @@
 * `poweroff.c` - 关机程序（发送信号至 PID 1）
 * `halt.c` - 停机程序
 * `reboot.c` - 重启程序
-* `systest.c` - 系统调用测试（125/125）
+* `systest.c` - 系统调用测试（126/126）
 * `test_mmap.c`, `test_fork_mmap.c`, `test_cow.c` - 内存映射测试
 * `smp_stress.c` - SMP 多核负载均衡压力测试
 * `terminal.c` - 交互终端（PTY + framebuffer + busybox ash）

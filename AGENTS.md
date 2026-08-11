@@ -29,7 +29,7 @@ Boot:    UEFI → BOOTX64.EFI → kernel.bin @ phys 0x100000
 Kernel:  head.S → GDT/IDT/TSS → lretq → 0xffff800000100000 → kernel_main
 Memory:  PML4→PDPT→PDE (2MB huge) + PT (4KB). Higher-half: Phy_To_Virt(x)=x+0xffff800000000000
 SMP:     percpu(GS base) → MADT enum → trampoline 0x8000 → INIT-SIPI-SIPI → APs
-Sched:   EEVDF O(log n) — rbtree 可运行队列 + vruntime/deadline + pick_eevdf + SMP 负载均衡
+Sched:   EEVDF O(log n) — per-CPU rbtree 可运行队列 + vruntime/deadline + pick_eevdf + sched_balance SMP 负载均衡
 Init:    head.S → kernel_main → subsys → VFS/FS → TTY → percpu → SMP → task_init → /init.elf (→ parse_inittab)
 ```
 
@@ -56,15 +56,16 @@ Init:    head.S → kernel_main → subsys → VFS/FS → TTY → percpu → SMP
 | `kernel/arch/x86_64/entry.S` | Exception/intr/syscall entry/exit, ret_from_intr |
 | `kernel/arch/x86_64/trap.c` | Exception handlers + do_system_call + do_signal_delivery |
 | `kernel/arch/x86_64/trampoline.S` | AP startup (16→32→64 bit) |
+| `kernel/arch/x86_64/smp.c` | smp_boot_aps() + ap_entry() — INIT-SIPI-SIPI + AP idle loop |
 | `kernel/memory/` | pmm.c, slab.c, vmm.c, vma.c, tlb.c — full memory stack |
 | `kernel/apic/` | acpi.c, lapic.c, lapic_timer.c, ioapic.c, ipi.c |
-| `kernel/sched/` | task.c (COW fork, schedule, spawn), smp.c (ap_entry, smp_boot_aps), signal.c |
-| `kernel/fs/` | vfs.c, fat.c, ext2.c, devfs.c, procfs.c, tmpfs.c, elf.c, file.c |
+| `kernel/sched/` | task.c (EEVDF scheduler, COW fork, schedule, spawn, sched_balance), deferred_free.c (async reaper kthread) |
+| `kernel/fs/` | vfs.c, fat.c, ext2.c, devfs.c, procfs.c, tmpfs.c, elf.c, file.c, poll.c, select.c |
 | `kernel/tty/tty.c` | Console TTY (cooked readline, Ctrl-C→SIGINT) |
 | `kernel/subsys/subsys.c` | Subsystem registration framework |
 | `kernel/futex.c` | Futex hash table (SYS_futex=47) |
 | `kernel/include/kernel/bootinfo.h` | **Fixed-size types critical for ABI** |
-| `kernel/include/uapi/syscall.h` | Syscall numbers (0..47) |
+| `kernel/include/uapi/syscall.h` | Syscall numbers (0..51) |
 | `user/init.c` | PID 1 init: inittab parsing, 4-phase boot (SYSINIT/WAIT/ONCE/RESPAWN), child supervision |
 | `config/inittab` | Default inittab template (id:action:process); `config/inittab.systest` for test mode |
 
@@ -73,10 +74,10 @@ Init:    head.S → kernel_main → subsys → VFS/FS → TTY → percpu → SMP
 | Doc | What it covers |
 |-----|----------------|
 | [docs/architecture.md](docs/architecture.md) | Boot chain, memory layout, interrupt system, init sequence |
-| [docs/smp.md](docs/smp.md) | 8-phase SMP bringup, per-CPU, IPI, TLB shootdown |
-| [docs/scheduler.md](docs/scheduler.md) | Task system, context switch, spawn/fork/exec/exit, blocker framework |
+| [docs/smp.md](docs/smp.md) | 8-phase SMP bringup, per-CPU, IPI, TLB shootdown, load balancing, EEVDF rbtree runqueues |
+| [docs/scheduler.md](docs/scheduler.md) | Task system, EEVDF scheduler, context switch, spawn/fork/exec/exit, blocker framework |
 | [docs/scheduler-complexity.md](docs/scheduler-complexity.md) | Scheduler complexity assessment, feature-impact risk map, refactor triggers |
-| [docs/syscall.md](docs/syscall.md) | Syscall table (48 syscalls), dispatch, invocation |
+| [docs/syscall.md](docs/syscall.md) | Syscall table (52 syscalls), dispatch, invocation |
 | [docs/filesystem.md](docs/filesystem.md) | VFS, FAT32, ext2, devfs, procfs, tmpfs, GPT, block device |
 | [docs/cow-mmap.md](docs/cow-mmap.md) | COW fork, VMA, mmap/mprotect/munmap, 4KB page pool |
 | [docs/signal.md](docs/signal.md) | Signal delivery, handler, sigreturn, Ctrl-C→SIGINT |

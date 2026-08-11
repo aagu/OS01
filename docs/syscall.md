@@ -1,6 +1,6 @@
 # Syscall interface
 
-System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`. Up to 6 arguments via the `syscall6()` wrapper. Return value in `rax`.
+System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`. Up to 6 arguments via the `syscall6()` wrapper. Return value in `rax`. 52 syscalls total (0..51).
 
 ## Syscall table
 
@@ -54,6 +54,10 @@ System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`
 | 45 | `SYS_mprotect` | rdi=addr, rsi=len, rdx=prot | Change protection |
 | 46 | `SYS_munmap` | rdi=addr, rsi=len | Unmap memory |
 | 47 | `SYS_futex` | rdi=uaddr, rsi=futex_op, rdx=val, r10=timeout | Fast userspace mutex |
+| 48 | `SYS_poll` | rdi=fds, rsi=nfds, rdx=timeout | Poll file descriptors |
+| 49 | `SYS_ppoll` | rdi=fds, rsi=nfds, rdx=tsp, r10=sigmask | Poll with signal mask |
+| 50 | `SYS_select` | rdi=nfds, rsi=readfds, rdx=writefds, r10=exceptfds, r8=timeout | Synchronous I/O multiplexing |
+| 51 | `SYS_pselect6` | rdi=nfds, rsi=readfds, rdx=writefds, r10=exceptfds, r8=tsp, r9=sigmask | Select with signal mask |
 
 ## Definitions
 

@@ -1,18 +1,20 @@
 # SMP — Symmetric Multi-Processing
 
-OS01 supports up to `NR_CPUS=8` CPUs (compile-time limit in `kernel/include/kernel/arch/x86_64/cpu.h`). The runtime count `num_cpus` is discovered from the MADT. Default QEMU invocation is `-smp 2` (see root `Makefile`).
+OS01 supports up to `NR_CPUS=8` CPUs (compile-time limit in `kernel/include/kernel/task.h`). The runtime count `num_cpus` is discovered from the MADT. Default QEMU invocation is `-smp 2` (see root `Makefile`).
+
+**Scheduling**: EEVDF O(log n) per-CPU rbtree runqueues + `sched_balance()` work stealing. See [docs/scheduler.md](scheduler.md) and [docs/scheduler-complexity.md](scheduler-complexity.md).
 
 ## Architecture overview
 
 ```
 Phase 0: per-CPU data (GS base)               kernel/include/kernel/percpu.h
 Phase 1: AP enumeration (MADT LAPIC/x2APIC)    kernel/apic/acpi.c
-Phase 2: AP trampoline + INIT-SIPI-SIPI        kernel/arch/x86_64/trampoline.S, kernel/sched/smp.c
+Phase 2: AP trampoline + INIT-SIPI-SIPI        kernel/arch/x86_64/trampoline.S, kernel/arch/x86_64/smp.c
 Phase 3: interrupt controllers (APIC, PIC)     kernel/arch/x86_64/subsys.c (subsys phase 3)
 Phase 4: timers (timer, PIT, LAPIC timer)      kernel/arch/x86_64/subsys.c (subsys phase 4)
 Phase 5: device IRQs (keyboard, serial)         kernel/arch/x86_64/subsys.c (subsys phase 5)
 Phase 6: storage (AHCI)                        kernel/arch/x86_64/subsys.c (subsys phase 6)
-Phase 7: CPU affinity + per-CPU idle           kernel/sched/task.c, kernel/sched/smp.c
+Phase 7: CPU affinity + per-CPU idle           kernel/sched/task.c, kernel/arch/x86_64/smp.c
 Phase 8: TSC sync and warp check               cpu.h rdtsc(), smp.c comparison
 
 ## Per-CPU data
@@ -30,11 +32,14 @@ Phase 8: TSC sync and warp check               cpu.h rdtsc(), smp.c comparison
 | 32 | `tss` | Pointer to this CPU's TSS descriptor |
 | 40 | `tlb_wanted` | Atomic flag: TLB invalidation requested |
 | 44 | `tlb_ack` | Atomic counter: shootdown acknowledgement |
-| 48 | `run_queue` | Per-CPU run queue (list_t) |
-| 64 | `idle` | This CPU's idle task pointer |
-| 72 | `schedule_count` | Number of schedule() invocations on this CPU |
-| 80 | `watchdog_counter` | Incremented each timer tick, reset by schedule() |
-| 88 | `tsc_boot` | TSC value at AP boot time (for warp check) |
+| 48 | `run_queue` | Per-CPU rbtree runqueue (rbtree_root_t, sorted by EEVDF deadline) |
+| 64 | `rq_lock` | Per-CPU spinlock protecting rbtree operations |
+| 72 | `nr_running` | Count of tasks on runqueue (excludes idle; used for load balancing) |
+| 76 | `min_vruntime` | EEVDF eligibility floor for this CPU |
+| 88 | `idle` | This CPU's idle task pointer |
+| 96 | `schedule_count` | Number of schedule() invocations on this CPU |
+| 104 | `watchdog_counter` | Incremented each timer tick, reset by schedule() |
+| 112 | `tsc_boot` | TSC value at AP boot time (for warp check) |
 
 **Critical**: `self` and `need_resched` offsets are hardcoded in `entry.S`. Do NOT reorder these fields.
 
@@ -162,7 +167,8 @@ Without these, any interrupt delivery would raise #GP because the IDT gate refer
 SMP locks in use:
 - `Pos.lock` — framebuffer output (color_printk)
 - `serial_lock` — COM1 output (serial_printk), prevents interleaved multi-core lines
-- `tasklist_lock` — global task list (`init_task_union.task.list`), protects spawn/fork/exit against concurrent schedule() iteration
+- `rq_lock` (per-CPU) — per-CPU runqueue rbtree, protects enqueue/dequeue/pick/sched_balance
+- `tasklist_lock` — global task list (for waitpid/zombie scanning only)
 - `subpage_lock` — COW page pool (pmm.c), protects sub-page allocation/free
 - `futex_hash_lock` — per-bucket lock in futex hash table (futex.c)
 - `tty_lock` — per-TTY cooked_lock (tty.c), protects input ring buffer
@@ -230,19 +236,35 @@ Per-CPU handler (`lapic_timer_handler`):
 
 BSP keeps PIT (IRQ0) as tick source; APs use LAPIC timer (`ap_entry()` calls `lapic_timer_start(100)`). BSP also starts LAPIC timer after `smp_boot_aps()`.
 
-## CPU affinity scheduler
+## EEVDF scheduler with SMP load balancing
 
-Global task list (`init_task_union.task.list`) with `tasklist_lock`.
+**Per-CPU rbtree runqueues** (`percpu_t.run_queue`, sorted by EEVDF deadline) replace the old global task list. Each CPU has its own `rq_lock` spinlock protecting rbtree insert/erase/first operations.
 
-`task_t.cpu` — set at creation time:
-- `spawn_user_task()`: `tsk->cpu = cpu_id()`
-- `do_fork()`: `tsk->cpu = cpu_id()` (same as parent)
+### CPU selection at creation time
+
+`sched_pick_cpu()` — picks the CPU with the lowest `nr_running` at task creation time:
+- `spawn_user_task()`: calls `sched_pick_cpu()` → enqueues under target CPU's `rq_lock`
+- `do_fork()`: enqueues on current CPU
 - BSP idle: `init_task_union.task.cpu = 0`
 - AP idle: `create_idle_task(cpu_num)` sets `tsk->cpu = cpu_num`
 
-`schedule()` picks the next task by round-robining the global list and filtering by `next->cpu == this_cpu()->cpu_id`. The idle fallback uses `this_cpu()->idle` instead of a hardcoded `init_task_union.task`.
+`sched_notify_remote()` sends an IPI reschedule to the target CPU if a task was placed on a CPU other than the current one.
 
-TSS is now per-CPU: `init_tss[NR_CPUS]` with each CPU holding `percpu.tss = &init_tss[cpu]`. The GDT TSS descriptor is updated per CPU in `ap_entry()`. This eliminates the old race where two CPUs would clobber each other's `rsp0`.
+### Work stealing (sched_balance)
+
+Called by `schedule()` **before** `pick_eevdf()` on the local CPU:
+
+1. Find busiest CPU (max `nr_running`, tiebreak on max `min_vruntime`)
+2. Gate: only pull if `src.nr_running > local.nr_running + 1` (oscillation guard)
+3. Steal count = `max(1, (src - local) / 2)` — convergence, not overcorrection
+4. Steal from **rbtree tail** (largest deadline = least likely to run soon)
+5. Double-lock both `rq_lock`s (address-ordered, single IRQ save)
+6. Normalize stolen tasks' `vruntime` to target CPU's `min_vruntime`
+7. Enqueue on local runqueue
+
+### Per-CPU TSS
+
+`init_tss[NR_CPUS]` with each CPU holding `percpu.tss = &init_tss[cpu]`. The GDT TSS descriptor is updated per CPU in `ap_entry()`. This eliminates the old race where two CPUs would clobber each other's `rsp0`.
 
 ## TSC sync
 
@@ -250,7 +272,7 @@ TSS is now per-CPU: `init_tss[NR_CPUS]` with each CPU holding `percpu.tss = &ini
 - `rdtsc()` — reads full 64-bit TSC
 - `rdtscp_serialized()` — CPUID serialisation + RDTSC
 
-`kernel/sched/smp.c`:
+`kernel/arch/x86_64/smp.c`:
 - AP samples `tsc_boot = rdtsc()` in `ap_entry()` after marking online
 - BSP compares: `bsp_tsc = rdtsc()`, `diff = bsp_tsc - ap_tsc`
 - Flags `WARP` if `|diff| > 5,000,000` (~2ms at 2.4GHz)

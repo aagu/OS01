@@ -36,11 +36,12 @@ GDT layout:
 ## Memory layout
 
 - **Higher Half Kernel**: virtual base `0xffff800000000000`, physical load at `0x100000`
-- **Page tables**: 3-level paging (PML4 → PDPT → PDE), **2MB huge pages** (no PT level)
+- **Page tables**: 3/4-level paging (PML4 → PDPT → PDE → PT), **2MB huge pages** and **4KB pages**
 - **Initial 32MB identity-mapped**: PDE[0..15], critical for AP trampoline at physical 0x8000
 - **Phy_To_Virt(x)** = `x + 0xffff800000000000`
 - Linker script: `.text` at `0xffff800000100000`, then `.ltext`, `.data`, `.rodata`, `.data.init_task` (32KB-aligned), `.bss`
 - **User space**: code at `0x400000` (2MB page), stack at `0x800000` (2MB page, top at `0x9FFFF8`), guard at `0x600000`
+- **4KB pages**: `subpage_pool` in `pmm.c` subdivides 2MB pages into 512 × 4KB slots for COW and `mmap`
 - **Framebuffer virtual**: `0xFFFF800000E00000`
 
 ## Physical memory manager (`kernel/memory/pmm.c`)
@@ -83,7 +84,7 @@ Checks softirq_status, then per-CPU `need_resched` via `%gs:8`. Calls `do_softir
 `register_irq` with dispatch through `do_IRQ` + `Build_IRQ` assembly stubs. Vector range `0x20`–`0x37`, IST=0.
 
 ### System call (`kernel/arch/x86_64/trap.c` + entry.S)
-`int $0x80` (DPL=3) → `system_call` → `do_system_call`. Dispatch on `regs->rax` (nr) with args `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9` (up to 6 args). 48 syscalls (0=SYS_putchar..47=SYS_futex).
+`int $0x80` (DPL=3) → `system_call` → `do_system_call`. Dispatch on `regs->rax` (nr) with args `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9` (up to 6 args). 52 syscalls (0=SYS_putchar..51=SYS_pselect6).
 
 ### Softirqs (`kernel/intr/softirq.c`)
 Deferred processing; `TIMER_SIRQ` set by timer hardirq.
@@ -122,3 +123,4 @@ Four levels: `LOG_ERR`, `LOG_WARN`, `LOG_INFO`, `LOG_DEBUG`. Compile-time `LOG_T
 7. Console TTY (serial + keyboard IRQ → TTY, devfs `/dev/tty`) + console_init (VT100 CSI terminal, cursor)
 8. Per-CPU init + SMP boot + `arch_register_subsys_percpu()` + `subsys_init_percpu()`
 9. Selftest + futex_init + task_init (spawns `/bin/init` as PID 1 → parses `/etc/inittab` → 4-phase boot → supervision loop → idle loop)
+10. EEVDF scheduler active: per-CPU rbtree runqueues + `sched_balance()` work stealing + vruntime/deadline fair scheduling

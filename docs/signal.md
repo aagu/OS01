@@ -120,10 +120,10 @@ This sets SIGINT pending on the foreground task. On the next return-to-userspace
 | `kernel/include/kernel/task.h` | `task_t` signal/blocked fields, `sighand[]` array |
 | `kernel/arch/x86_64/trap.c` | `do_signal_delivery`, `kill_current_user_task`, syscall dispatch |
 | `libc/include/signal.h` | Userspace signal API, `sigset_t` macros |
-| `libc/unistd/signal.c` | `signal()` — BSD-style wrapper |
-| `libc/unistd/sigaction.c` | `sigaction()` wrapper, sets `sa_restorer` |
-| `libc/unistd/kill.c` | `kill()` — sends signal |
-| `libc/unistd/sigprocmask.c` | `sigprocmask()` wrapper |
-| `libc/unistd/raise.c` | `raise()` — kill(self, sig) |
+| `libc/signal/signal.c` | `signal()` — BSD-style wrapper |
+| `libc/signal/sigaction.c` | `sigaction()` wrapper, sets `sa_restorer` |
+| `libc/signal/kill.c` | `kill()` — sends signal |
+| `libc/signal/sigprocmask.c` | `sigprocmask()` wrapper |
+| `libc/signal/raise.c` | `raise()` — kill(self, sig) |
 | `user/sigreturn_trampoline.S` | sigreturn trampoline |
 | `user/sigtest.c` | Signal handler self-test |
