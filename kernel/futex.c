@@ -1,4 +1,5 @@
 #include <kernel/futex.h>
+#include <kernel/arch/irq.h>
 #include <kernel.h>           // container_of
 #include <kernel/task.h>      // task_t, current
 #include <kernel/wait.h>      // wait_queue_t
@@ -75,6 +76,7 @@ int do_futex_wait(int *uaddr, int val)
     spin_unlock_irqrestore(&bucket->lock, flags);
 
     schedule();
+    arch_local_irq_enable();
 
     // 5. Cleanup on return
     if (!list_is_empty(&self->io_wait_node)) {

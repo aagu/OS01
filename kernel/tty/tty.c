@@ -1,4 +1,5 @@
 #include <kernel/tty.h>
+#include <kernel/arch/irq.h>
 #include <kernel/task.h>
 #include <kernel/printk.h>
 #include <kernel/percpu.h>
@@ -175,6 +176,7 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
         }
 
         schedule();
+        arch_local_irq_enable();
 
         do_signal_delivery(NULL);
 

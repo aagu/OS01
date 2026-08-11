@@ -2,6 +2,7 @@
 #include <fs/vfs.h>
 #include <kernel/debug.h>
 #include <kernel/task.h>
+#include <kernel/arch/irq.h>
 #include <kernel/slab.h>
 #include <kernel.h>
 #include <stdlib.h>
@@ -345,6 +346,7 @@ int64_t pipe_read_internal(pipe_t *p, void *buf, uint64_t size)
                 current->state = TASK_RUNNING;
             } else {
                 schedule();
+                arch_local_irq_enable();
                 if (!list_is_empty(&current->io_wait_node))
                     list_del_init(&current->io_wait_node);
                 current->state = TASK_RUNNING;
@@ -460,6 +462,7 @@ int64_t pipe_write_internal(pipe_t *p, const void *buf, uint64_t size)
                 current->state = TASK_RUNNING;
             } else {
                 schedule();
+                arch_local_irq_enable();
                 if (!list_is_empty(&current->io_wait_node))
                     list_del_init(&current->io_wait_node);
                 current->state = TASK_RUNNING;

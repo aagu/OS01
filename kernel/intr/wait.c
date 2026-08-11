@@ -1,4 +1,5 @@
 #include <kernel/wait.h>
+#include <kernel/arch/irq.h>
 #include <kernel.h>
 #include <kernel/percpu.h>
 
@@ -21,6 +22,7 @@ void wait_queue_sleep(wait_queue_t *wq)
     spin_unlock_irqrestore(&wq->lock, flags);
 
     schedule();
+    arch_local_irq_enable();
 
     // Clean up if we were woken by something other than
     // wait_queue_wake_one (signal, etc.).  The normal path
