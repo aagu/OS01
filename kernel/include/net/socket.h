@@ -5,6 +5,11 @@
 #include <kernel/file.h>
 #include <stdint.h>
 
+// Kernel-side byte swap helper (network order -> host order).
+// lwIP sockaddr_in.sin_port arrives in network byte order; convert
+// to host order before passing to netconn_connect etc.
+static inline uint16_t os01_ntohs(uint16_t n) { return __builtin_bswap16(n); }
+
 // socket_t is defined in kernel/file.h
 
 // Socket state constants (shared with poll.c)
