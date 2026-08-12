@@ -5,6 +5,17 @@
 #define NO_SYS                  0   // OS mode
 #define MEM_LIBC_MALLOC         1   // use OS01 kmalloc() instead of internal heap
 #define LWIP_NETCONN            1   // netconn API (needed for socket layer)
+
+// Core locking OFF: netconn API functions run inside the tcpip_thread
+// via message passing (tcpip_api_call posts a TCPIP_MSG_API_CALL and
+// waits on a semaphore).  With LWIP_TCPIP_CORE_LOCKING=1 the API call
+// executes in the CALLER's context while taking the core lock — but
+// tcpip_thread holds that lock while processing timers/messages, so a
+// caller blocked on LOCK_TCPIP_CORE() can never post its message:
+// classic deadlock (socktest's connect() hangs forever).  Message
+// passing is also what our sys_arch mbox implementation expects.
+#define LWIP_TCPIP_CORE_LOCKING     0
+#define LWIP_TCPIP_CORE_LOCKING_INPUT 0
 #define LWIP_SOCKET             0   // don't use lwIP's own socket layer
 #define LWIP_IPV4               1
 #define LWIP_IPV6               0
@@ -34,13 +45,14 @@
 #define LWIP_NO_UNISTD_H        1
 
 // ── Debug output ──────────────────────────────────────────
+#define LWIP_DEBUG 1
 // LWIP_PLATFORM_DIAG maps to log_info (see arch/cc.h), so these
 // are always visible regardless of NDEBUG.
 // Note: numeric value 0x80 = LWIP_DBG_ON (lwip/debug.h isn't
 // included yet at lwipopts.h parse time, so the macro isn't available).
 #define DHCP_DEBUG                      (LWIP_DBG_ON | LWIP_DBG_TRACE | LWIP_DBG_STATE)
 #define LWIP_NETIF_DEBUG    0x80
-#define LWIP_ETHARP_DEBUG   0x80
+#define LWIP_ETHARP_DEBUG   (0x80 | 0x08 | 0x10)  // ON | TRACE | STATE
 #define LWIP_ARP_DEBUG      0x80
 
 #endif // LWIP_OPTS_H

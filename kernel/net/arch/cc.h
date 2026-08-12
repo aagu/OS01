@@ -51,6 +51,21 @@ typedef uintptr_t mem_ptr_t;
 // lwIP's ssize_t = int.
 #define LWIP_NO_STDINT_H   1
 #define LWIP_NO_INTTYPES_H 1
+
+// ── (sn)printf format macros ──────────────────────────────────
+// LWIP_NO_INTTYPES_H=1 above tells lwIP not to pull in <inttypes.h>,
+// so arch.h's auto-definition of X8_F/U16_F/S16_F/... never runs.
+// Define them here (matching OS01's <inttypes.h> values).
+#define X8_F   "02" "x"
+#define U16_F  "u"
+#define S16_F  "d"
+#define X16_F  "x"
+#define U32_F  "u"
+#define S32_F  "d"
+#define X32_F  "x"
+#define U64_F  "llu"
+#define S64_F  "lld"
+#define X64_F  "llx"
 // Define SSIZE_MAX so lwIP arch.h takes the #ifdef SSIZE_MAX path
 // (no-ops when LWIP_NO_UNISTD_H=1) instead of typedef'ing ssize_t.
 #define SSIZE_MAX 0x7FFFFFFFFFFFFFFFULL

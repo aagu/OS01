@@ -12,6 +12,7 @@
 
 #include "lwip/sys.h"       // SYS_ARCH_TIMEOUT, SYS_MBOX_EMPTY, err_t
 #include <kernel/arch/spinlock.h>
+#include <kernel/arch/irq.h>
 #include <kernel/wait.h>
 #include <kernel/task.h>
 #include <kernel/slab.h>      // kmalloc, kfree
@@ -24,20 +25,6 @@
 int errno;
 
 // ── Timeout support for mbox_fetch ──────────────────────────────
-
-typedef struct {
-    sys_mbox_t *mbox;
-    volatile int fired;
-    volatile int cancelled;
-} mbox_timeout_ctx_t;
-
-static void mbox_timeout_callback(void *data)
-{
-    mbox_timeout_ctx_t *ctx = (mbox_timeout_ctx_t *)data;
-    if (ctx->cancelled) return;
-    ctx->fired = 1;
-    sys_mbox_trypost_fromisr(ctx->mbox, NULL);
-}
 
 // ═══════════════════════════════════════════════════════════════
 //  Semaphores — spinlock + counter + wait_queue
@@ -96,7 +83,25 @@ u32_t sys_arch_sem_wait(sys_sem_t *sem, u32_t timeout)
                 return SYS_ARCH_TIMEOUT;
         }
 
-        wait_queue_sleep(&s->wq);
+        // Lost-wakeup-safe sleep (same rationale as mbox_fetch):
+        // enqueue while holding s->lock so sys_sem_signal's count++
+        // serializes with our enqueue and its wake_one always sees us.
+        {
+            uint64_t _f = spin_lock_irqsave(&s->lock);
+            if (s->count > 0) { spin_unlock_irqrestore(&s->lock, _f); continue; }
+            uint64_t _wf = spin_lock_irqsave(&s->wq.lock);
+            list_add_to_before(&s->wq.head, &current->io_wait_node);
+            current->state = TASK_INTERRUPTIBLE;
+            spin_unlock_irqrestore(&s->wq.lock, _wf);
+            spin_unlock_irqrestore(&s->lock, _f);
+
+            schedule();
+            arch_local_irq_enable();
+
+            if (!list_is_empty(&current->io_wait_node))
+                list_del_init(&current->io_wait_node);
+            current->state = TASK_RUNNING;
+        }
     }
 }
 
@@ -155,21 +160,53 @@ void sys_mbox_post(sys_mbox_t *mbox, void *msg)
     wait_queue_wake_one(&mb->wq);
 }
 
+// ── Periodic wakeup for mbox_fetch ────────────────────────────
+// lwIP's tcpip_thread must periodically wake to process buffered
+// RX packets (e1000_process_rx / virtio RX run only in its context).
+// A periodic timer posts a sentinel; sys_arch_mbox_fetch consumes it
+// internally and re-enters the wait loop.  The sentinel MUST NOT be
+// NULL — tcpip_thread asserts on NULL ("invalid message").
+#define MBOX_IDLE_WAKEUP_JIFFIES  5   // 50ms (1 jiffy = 10ms)
+#define MBOX_SENTINEL             ((void *)0x1)
+
+typedef struct {
+    os_mbox_t *mb;
+    volatile int cancelled;
+} mbox_idle_ctx_t;
+
+static void mbox_idle_callback(void *data)
+{
+    mbox_idle_ctx_t *ctx = (mbox_idle_ctx_t *)data;
+    if (ctx->cancelled) return;
+    // Wake the fetcher directly — do NOT post a message.  Posting a
+    // sentinel message floods the mbox (one per 50ms), crowding out
+    // real lwIP messages (TCPIP_MSG_INPKT etc.) — the mailbox fills
+    // with 0x1 sentinels and packets get dropped.  Waking the wait
+    // queue just makes mbox_fetch re-run net_poll_rx() and re-check.
+    wait_queue_wake_one(&ctx->mb->wq);
+}
+
 u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
 {
     if (!mbox || !*mbox) return SYS_ARCH_TIMEOUT;
     os_mbox_t *mb = (os_mbox_t *)*mbox;
 
-    // Set up timeout timer (fires once, posts NULL sentinel)
-    mbox_timeout_ctx_t tctx = {0};
-    timer_t *timer = NULL;
-    if (timeout > 0) {
-        tctx.mbox = mbox;
-        // Convert ms to jiffies: sys_now() = jiffies * 10, so 1 jiffy = 10ms
-        timer = create_timer(mbox_timeout_callback, &tctx,
-                             jiffies + (timeout + 9) / 10);
-        if (timer) add_timer(timer);
+    // Periodic wakeup timer — wakes the fetcher at a fixed interval
+    // so buffered RX packets get processed even while waiting for a
+    // message.  Timer-driven (not busy-wait): the PIT handler only
+    // BUFFERS packets (IRQ context cannot call lwIP).
+    mbox_idle_ctx_t ictx = {0};
+    timer_t *idle_timer = NULL;
+    ictx.mb = mb;
+    idle_timer = create_timer(mbox_idle_callback, &ictx,
+                              jiffies + MBOX_IDLE_WAKEUP_JIFFIES);
+    if (idle_timer) {
+        add_timer(idle_timer);
     }
+
+    u32_t deadline_jiffies = 0;
+    if (timeout > 0)
+        deadline_jiffies = jiffies + (timeout + 9) / 10;
 
     for (;;) {
         uint64_t flags = spin_lock_irqsave(&mb->lock);
@@ -179,28 +216,52 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
             mb->count--;
             spin_unlock_irqrestore(&mb->lock, flags);
 
-            // Cancel timer if active
-            if (timer) {
-                tctx.cancelled = 1;
-                del_timer(timer);
-                // If the timer fired and this was the sentinel,
-                // we might need to eat the NULL.  But it's too late
-                // to distinguish — check fired flag.
-                if (tctx.fired && m == NULL)
-                    return SYS_ARCH_TIMEOUT;
-            }
+            ictx.cancelled = 1;
+            del_timer(idle_timer);
 
             *msg = m;
             return 0;
         }
         spin_unlock_irqrestore(&mb->lock, flags);
+
         extern void net_poll_rx(void);
         net_poll_rx();
         // Double-check: poll may have posted to this same mailbox
         { uint64_t _f2 = spin_lock_irqsave(&mb->lock);
           if (mb->count > 0) { spin_unlock_irqrestore(&mb->lock, _f2); continue; }
           spin_unlock_irqrestore(&mb->lock, _f2); }
-        wait_queue_sleep(&mb->wq);
+
+        if (timeout > 0 && jiffies >= deadline_jiffies) {
+            ictx.cancelled = 1;
+            del_timer(idle_timer);
+            return SYS_ARCH_TIMEOUT;
+        }
+
+        // Lost-wakeup-safe sleep: enqueue onto the wait queue while
+        // holding mb->lock.  sys_mbox_post does count++ under the same
+        // lock and then calls wait_queue_wake_one(&mb->wq); because
+        // our enqueue is serialized with count++, any wake that
+        // happens after our count check is guaranteed to see us on
+        // the queue.  The old wait_queue_sleep(&mb->wq) left a window:
+        // post's count++ → wake_one could run between our count check
+        // and our enqueue, and the wake was lost (tcpip_thread slept
+        // forever with a message sitting in the mbox).
+        {
+            uint64_t _f = spin_lock_irqsave(&mb->lock);
+            if (mb->count > 0) { spin_unlock_irqrestore(&mb->lock, _f); continue; }
+            uint64_t _wf = spin_lock_irqsave(&mb->wq.lock);
+            list_add_to_before(&mb->wq.head, &current->io_wait_node);
+            current->state = TASK_INTERRUPTIBLE;
+            spin_unlock_irqrestore(&mb->wq.lock, _wf);
+            spin_unlock_irqrestore(&mb->lock, _f);
+
+            schedule();
+            arch_local_irq_enable();
+
+            if (!list_is_empty(&current->io_wait_node))
+                list_del_init(&current->io_wait_node);
+            current->state = TASK_RUNNING;
+        }
     }
 }
 
