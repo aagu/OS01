@@ -1,7 +1,7 @@
 # OS01 优化路线图 v13
 
 > **基准**: `9d051fa` (scheduler complexity assessment)
-> **日期**: 2026-08-11
+> **日期**: 2026-08-12
 
 标记: ✅ 已完成 | 🔴 P0 本迭代 | 🟡 P1 本月 | 🟢 P2 下月 | 🔵 P3 远期
 
@@ -400,3 +400,4 @@ CPU N: schedule()
 | 27 | SMP 前置条件 | 6 项全局无锁代码加固 | slab/PMM/softirq/timer/fork_mm_copy/task_wake — AP 运行用户程序前必须 SMP 安全 |
 | 28 | inittab 格式 | `id:action:process`（3 字段，冒号分界，open+read 直接解析） | 去掉 runlevel；ACT_* 位掩码 0x01..0x80 与 run_actions() dispatch 兼容 |
 | 29 | OS01_SYSTEST 切换 | Makefile cp 模板（config/inittab.systest），非编译期 #ifdef | 同一 init 二进制同时支持测试/正常模式 |
+| 30 | 任务回收机制（**候选，暂缓**） | wait 驱动回收：do_waitpid 直接收割（`on_cpu==0` 检查 + list_del + kfree(thread/fpu/stack)），删 schedule() 内 zombie reaper 扫描 + deferred_free（df-kthread） | 贴 Linux 语义（release_task 在 wait4 路径同步回收，调度器零参与）；当前 reaper 是"调度器驱动 + 异步"组合，是 double-book 竞态（f58d1a1）的温床；孤儿由 do_exit reparent→init + init reap_children 兜底。触发条件：频繁改任务退出/父子语义或加 exit_group 时实施。详见 docs/scheduler-complexity.md §3 🔴 |
