@@ -14,7 +14,7 @@
 #include <kernel/debug.h>
 
 // Poll NIC RX (defined in net/net.c)
-extern void net_poll_rx(void);
+extern void net_poll_rx_irq(void);
 
 void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attribute__((unused)), pt_regs_t * regs __attribute__((unused)))
 {
@@ -28,6 +28,9 @@ void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attri
         wait_queue_wake_all(current_poll_wq);
         current_poll_wq = NULL;
     }
+
+    // Poll NIC RX (IRQ-safe: buffers only, lwIP processes later)
+    net_poll_rx_irq();
 
     // Request rescheduling on every timer tick — schedule() manages
     // per-task quantum counters and picks the next task.

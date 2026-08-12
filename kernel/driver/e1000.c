@@ -11,6 +11,7 @@
 #include <string.h>
 #include "lwip/netif.h"
 #include "lwip/pbuf.h"
+#include "netif/ethernet.h"   // ethernet_input (strips ETH header, routes ARP/IP)
 #include "lwip/tcpip.h"
 #include "lwip/etharp.h"   // ethernet_input
 
@@ -70,41 +71,77 @@ static int e1000_eeprom_read(uint8_t addr, uint16_t *out)
 
 // ── Poll RX + buffered processing ──────────────────────────────
 // e1000_poll_rx: called from IRQ context (PIT handler) — copies packet
-//   to a static buffer.  e1000_process_rx: called from tcpip_thread
-//   context (via net_poll_rx) — delivers to lwIP via etharp_input.
+//   into a software ring queue.  e1000_process_rx: called from
+//   tcpip_thread context (via net_poll_rx) — drains the queue and
+//   delivers to lwIP via etharp_input.
+//
+// Single-slot buffering was a drop-loss bug: if a second packet
+// arrived while the first was still buffered (not yet processed by
+// tcpip_thread), e1000_poll_rx returned early, RDT stalled, QEMU
+// saw a full ring and dropped the packet (ARP replies lost → DHCP
+// stuck, TCP connect never completes).  A ring queue keeps the
+// hardware ring drained continuously.
 
-static uint8_t *e1000_rx_buf = NULL;
-static uint16_t e1000_rx_len = 0;
+#define E1000_RXQ_DEPTH  16
+
+typedef struct {
+    uint8_t  *buf[E1000_RXQ_DEPTH];
+    uint16_t  len[E1000_RXQ_DEPTH];
+    int       head;   // next slot to fill (IRQ context)
+    int       tail;   // next slot to drain (tcpip_thread context)
+} e1000_rxq_t;
+
+static e1000_rxq_t e1000_rxq;
 
 void e1000_poll_rx(void) {
     if (!e1000.initialized) return;
-    if (e1000_rx_buf != NULL) return;  // previous not yet processed
-    if (e1000.rx_descs[e1000.rx_tail].status & E1000_RXD_STAT_DD) {
+    // Drain as many completed descriptors as fit in the queue.
+    while (e1000.rx_descs[e1000.rx_tail].status & E1000_RXD_STAT_DD) {
         uint16_t len = e1000.rx_descs[e1000.rx_tail].length;
         if (len > 0 && len < 1600) {
+            int next = (e1000_rxq.head + 1) % E1000_RXQ_DEPTH;
+            if (next == e1000_rxq.tail) {
+                // Queue full — drop this packet, keep HW ring moving.
+                e1000.rx_descs[e1000.rx_tail].status = 0;
+                e1000.rx_tail = (e1000.rx_tail + 1) % E1000_NUM_RX_DESC;
+                e1000_write(E1000_REG_RDT, e1000.rx_tail);
+                continue;
+            }
             uint8_t *buf = (uint8_t *)kmalloc(len);
             if (buf) {
                 memcpy(buf, e1000.rx_bufs[e1000.rx_tail], len);
-                e1000_rx_buf = buf;
-                e1000_rx_len = len;
+                e1000_rxq.buf[e1000_rxq.head] = buf;
+                e1000_rxq.len[e1000_rxq.head] = len;
+                e1000_rxq.head = next;
             }
         }
         e1000.rx_descs[e1000.rx_tail].status = 0;
         e1000.rx_tail = (e1000.rx_tail + 1) % E1000_NUM_RX_DESC;
-        e1000_write(E1000_REG_RDT, e1000.rx_tail);
+        // RDT semantics (Intel 8254x): RDT is the LAST usable
+        // descriptor index.  Writing RDT=rx_tail makes the hardware
+        // believe only one slot is free — once it fills that slot,
+        // RDH==RDT and QEMU considers the ring FULL and drops every
+        // subsequent packet.  Always point RDT at the ring tail so
+        // the hardware can keep writing (RDH advances on its own).
+        e1000_write(E1000_REG_RDT, E1000_NUM_RX_DESC - 1);
     }
 }
 
 void e1000_process_rx(void) {
-    if (!e1000.initialized || !e1000_rx_buf) return;
-    struct pbuf *p = pbuf_alloc(PBUF_RAW, e1000_rx_len, PBUF_POOL);
-    if (p) {
-        memcpy(p->payload, e1000_rx_buf, e1000_rx_len);
-        e1000.netif_ptr->input(p, e1000.netif_ptr);
+    if (!e1000.initialized) return;
+    while (e1000_rxq.tail != e1000_rxq.head) {
+        uint8_t *buf = e1000_rxq.buf[e1000_rxq.tail];
+        uint16_t len = e1000_rxq.len[e1000_rxq.tail];
+        e1000_rxq.buf[e1000_rxq.tail] = NULL;
+        e1000_rxq.tail = (e1000_rxq.tail + 1) % E1000_RXQ_DEPTH;
+
+        struct pbuf *p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
+        if (p) {
+            memcpy(p->payload, buf, len);
+            e1000.netif_ptr->input(p, e1000.netif_ptr);
+        }
+        kfree(buf);
     }
-    kfree(e1000_rx_buf);
-    e1000_rx_buf = NULL;
-    e1000_rx_len = 0;
 }
 
 // ── Interrupt handler ──────────────────────────────────────────
@@ -186,7 +223,14 @@ err_t e1000_xmit(struct netif *netif, struct pbuf *p)
 // Sets hwaddr, hwaddr_len, mtu, flags, linkoutput.
 // The e1000 state is global (single NIC), so no void *arg needed.
 
-static err_t e1000_netif_input(struct pbuf *p, struct netif *n) { etharp_input(p, n); return ERR_OK; }
+static err_t e1000_netif_input(struct pbuf *p, struct netif *n) {
+    // MUST go through ethernet_input: it strips the 14-byte Ethernet
+    // header and routes the frame to etharp_input (ARP) or ip_input
+    // (IP).  Calling etharp_input directly passed the raw Ethernet
+    // frame — ARP header fields were read from the wrong offset, the
+    // hwtype/proto sanity check failed and every packet was dropped.
+    return ethernet_input(p, n);
+}
 
 err_t e1000_netif_init(struct netif *netif)
 {
@@ -262,6 +306,27 @@ int e1000_init(uint64_t bar_phys, uint8_t irq, int use_msi)
         e1000.tx_buf_phys[i] = buf_phys;
         e1000.tx_bufs[i] = (uint8_t *)Phy_To_Virt(buf_phys);
         e1000.tx_descs[i].addr = buf_phys;  // physical address for DMA
+    }
+
+    // 5b. Trigger PHY auto-negotiation via MDIC — REQUIRED for QEMU RX.
+    // QEMU's e1000 only sets STATUS.LU (link up) after the PHY
+    // auto-neg timer fires (~500ms virtual time).  The timer only
+    // starts if the guest writes BMCR via MDIC.  Without this,
+    // STATUS.LU stays 0, e1000x_rx_ready() returns false and RX is
+    // permanently disabled (TX works, OFFER/SYN-ACK never arrive).
+    {
+        // BMCR: ANRESTART(9) | AUTOEN(12) | FD(8) | SPEED1000(6)
+        uint32_t bmcr = (1u << 9) | (1u << 12) | (1u << 8) | (1u << 6);
+        // MDIC: data=bmcr | op=WRITE(01) | PHY addr=0 | reg=0 (BMCR)
+        e1000_write(0x0020, bmcr | (1u << 21) | (0u << 16) | (0u << 26));
+        for (int m = 0; m < 1000; m++) {
+            if (e1000_read(0x0020) & (1u << 28))
+                break;
+            for (volatile int d = 0; d < 1000; d++)
+                __asm__ volatile("pause");
+        }
+        log_info("e1000: PHY auto-neg triggered via MDIC (STATUS=0x%x)\n",
+                 e1000_read(E1000_REG_STATUS));
     }
 
     // 6. Configure RX
