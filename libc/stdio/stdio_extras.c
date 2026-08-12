@@ -17,14 +17,6 @@ int ferror_unlocked(void *f) { (void)f; return 0; }
 int clearerr(void *f)        { (void)f; return 0; }
 int fileno_unlocked(FILE *f) { (void)f; return 0; }
 
-void *fopen(const char *path, const char *mode)
-    { (void)path; (void)mode; return NULL; }
-
-int fclose(void *f) { (void)f; return 0; }
-
-void *fdopen(int fd, const char *mode)
-    { (void)fd; (void)mode; return NULL; }
-
 char *fgets_unlocked(char *s, int n, void *f)
 {
     if (!s || n <= 1) return NULL;
