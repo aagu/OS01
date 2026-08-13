@@ -61,6 +61,7 @@ typedef struct socket {
     int          protocol;     // IPPROTO_TCP (6) or IPPROTO_UDP (17)
     int          state;        // UNCONNECTED/CONNECTED/LISTENING/CLOSED
     int          bound;        // 1 if bind() was called
+    volatile int rx_pending;   // data available (netconn callback RCVPLUS)
     spinlock_T   lock;
     list_t       poll_list;    // poll_wait_entry_t chain
 } socket_t;

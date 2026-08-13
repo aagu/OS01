@@ -168,6 +168,7 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 	@cp build/x86_64/user/smp_stress.elf     config/fsroot/bin/smp_stress
 	@cp $(INITTAB_FILE) config/fsroot/etc/inittab
 	@cp build/x86_64/user/socktest.elf      config/fsroot/bin/socktest
+	@cp build/x86_64/user/udptest.elf       config/fsroot/bin/udptest
 	@cp build/x86_64/user/ipaddr.elf        config/fsroot/bin/ipaddr
 	@ln -sf busybox config/fsroot/bin/wget
 	@ln -sf busybox config/fsroot/bin/login

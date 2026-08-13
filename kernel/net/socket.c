@@ -7,6 +7,8 @@
 #include <kernel/task.h>
 #include <kernel/slab.h>   // kmalloc, kfree
 #include <kernel/poll.h>
+#include <kernel/wait.h>   // wait_queue_wake_all
+#include <kernel.h>        // container_of
 #include <string.h>
 #include <errno.h>
 #include "lwip/api.h"       // netconn, netbuf, NETCONN_TCP/UDP
@@ -18,6 +20,36 @@
 #define SOCK_CONNECTED    1
 #define SOCK_LISTENING    2
 #define SOCK_CLOSED       3
+
+// ── netconn event callback ─────────────────────────────────────
+// lwIP invokes this when a netconn event occurs (data arrived,
+// send space freed, error).  We use RCVPLUS to set rx_pending and
+// wake poll waiters so poll(POLLIN) on a CONNECTED socket works.
+static void socket_netconn_cb(struct netconn *conn, enum netconn_evt evt, u16_t len)
+{
+    (void)conn; (void)len;
+    if (evt != NETCONN_EVT_RCVPLUS && evt != NETCONN_EVT_ERROR)
+        return;
+
+    // Find the socket owning this conn via callback_arg (set in
+    // socket_alloc with netconn_set_callback_arg).
+    socket_t *s = (socket_t *)netconn_get_callback_arg(conn);
+    if (!s) return;
+
+    uint64_t flags = spin_lock_irqsave(&s->lock);
+    // RCVPLUS: data arrived.  ERROR: readable so read() surfaces
+    // the pending error / EOF.  Either way the socket is readable.
+    s->rx_pending = 1;
+    spin_unlock_irqrestore(&s->lock, flags);
+
+    // Wake all poll waiters (same pattern as pipe_wake_readers).
+    while (!list_is_empty(&s->poll_list)) {
+        list_t *node = s->poll_list.next;
+        list_del_init(node);
+        poll_wait_entry_t *e = container_of(node, poll_wait_entry_t, node);
+        wait_queue_wake_all(e->poll_wq);
+    }
+}
 
 // ── Socket allocation ──────────────────────────────────────────
 
@@ -31,7 +63,7 @@ socket_t *socket_alloc(int domain, int type, int protocol)
     }
 
     struct netconn *conn = netconn_new_with_proto_and_callback(nc_type,
-        (u8_t)protocol, NULL);
+        (u8_t)protocol, socket_netconn_cb);
     if (!conn) return NULL;
 
     socket_t *s = (socket_t *)kmalloc(sizeof(socket_t));
@@ -43,6 +75,8 @@ socket_t *socket_alloc(int domain, int type, int protocol)
     s->protocol = protocol;
     s->state    = SOCK_UNCONNECTED;
     s->bound    = 0;
+    s->rx_pending = 0;
+    netconn_set_callback_arg(conn, s);
     spin_init(&s->lock);
     list_init(&s->poll_list);
 
@@ -133,8 +167,13 @@ int64_t do_sendto(int fd, const void *buf, uint64_t len, int flags,
 
         ip_addr_t addr;
         ip4_addr_set_u32(&addr, ip);
-        netconn_sendto((struct netconn *)s->conn, nb, &addr, port);
+        err_t err = netconn_sendto((struct netconn *)s->conn, nb, &addr, port);
         netbuf_delete(nb);
+        if (err != ERR_OK) {
+            // ERR_RTE: no route / netif down.  ERR_MEM: pbuf/mbox full.
+            // Surface the failure instead of pretending success.
+            return (err == ERR_MEM) ? -ENOMEM : -ENETUNREACH;
+        }
         return (int64_t)len;
     }
 }
@@ -151,9 +190,22 @@ int64_t do_recvfrom(int fd, void *buf, uint64_t len, int flags,
     struct netbuf *nb;
     err_t err = netconn_recv((struct netconn *)s->conn, &nb);
     if (err != ERR_OK) {
-        if (err == ERR_CLSD) return 0;
+        if (err == ERR_CLSD) {
+            // Peer closed: readable-but-EOF.  Keep rx_pending set so
+            // poll(POLLIN) returns and read() surfaces 0 (EOF).
+            return 0;
+        }
         if (err == ERR_TIMEOUT) return -ETIMEDOUT;
         return -EIO;
+    }
+
+    // Consumed the pending data — clear the flag.  More data may
+    // arrive (callback will re-set it), and netconn may have more
+    // queued; poll will re-check on next call.
+    {
+        uint64_t _f = spin_lock_irqsave(&s->lock);
+        s->rx_pending = 0;
+        spin_unlock_irqrestore(&s->lock, _f);
     }
 
     void *data;
@@ -238,6 +290,7 @@ int64_t do_accept(int fd, uint32_t *out_ip, uint16_t *out_port)
     new_sock->protocol = listen_sock->protocol;
     new_sock->state    = SOCK_CONNECTED;
     new_sock->bound    = 0;
+    new_sock->rx_pending = 0;
     spin_init(&new_sock->lock);
     list_init(&new_sock->poll_list);
 

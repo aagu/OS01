@@ -257,7 +257,14 @@ uint32_t fd_poll(file_t *f, poll_table_t *pt)
         if (!s) return POLLNVAL;
         uint32_t revents = 0;
         uint64_t flags = spin_lock_irqsave(&s->lock);
-        if (s->state == SOCK_CONNECTED) revents |= POLLOUT;
+        if (s->state == SOCK_CONNECTED) {
+            revents |= POLLOUT;
+            // Data available (netconn RCVPLUS callback set rx_pending)
+            // or peer closed (rx_pending stays set after ERR_CLSD):
+            // readable either way.
+            if (s->rx_pending)
+                revents |= POLLIN | POLLRDNORM;
+        }
         if (s->state == SOCK_LISTENING) revents |= POLLIN;
         if (revents == 0 && pt && !pt->triggered)
             poll_wait(pt, &s->poll_list, &s->lock);
