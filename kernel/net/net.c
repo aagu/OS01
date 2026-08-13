@@ -73,7 +73,11 @@ int net_hw_init(void)
     } else {
         // Assume e1000 (0x8086:0x100E or similar)
         is_virtio = 0;
-        if (e1000_init(nic_bar, nic_gsi, 0) != 0) {
+        // Try MSI-X first (vector 0x30) — Q35+TCG IOAPIC INTx never
+        // fires, so MSI-X is the only working interrupt path.
+        // e1000_init() falls back to INTx GSI if use_msi is 0.
+        int msi_ok = (pci_enable_msix(nic_bus, nic_dev, nic_func, 0x30) == 0);
+        if (e1000_init(nic_bar, nic_gsi, msi_ok ? 1 : 0) != 0) {
             debug_block("net: e1000 init failed\n");
             return -EIO;
         }

@@ -158,22 +158,15 @@ static void e1000_handler(uint64_t nr, uint64_t param, pt_regs_t *regs)
 
     // ── RX: descriptor done ─────────────────────────────────
     if (icr & (E1000_ICR_RXT0 | E1000_ICR_RXDMT0)) {
-        while (e1000.rx_descs[e1000.rx_tail].status & E1000_RXD_STAT_DD) {
-            uint16_t len = e1000.rx_descs[e1000.rx_tail].length;
-            if (len > 0) {
-                struct pbuf *p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
-                if (p) {
-                    memcpy(p->payload, e1000.rx_bufs[e1000.rx_tail], len);
-                    if (tcpip_inpkt(p, e1000.netif_ptr, tcpip_input) != ERR_OK)
-                        pbuf_free(p);
-                } else {
-                    e1000.rx_bufs[e1000.rx_tail][0] = 0xDB; // "dropped" marker
-                }
-            }
-            e1000.rx_descs[e1000.rx_tail].status = 0;
-            e1000.rx_tail = (e1000.rx_tail + 1) % E1000_NUM_RX_DESC;
-            e1000_write(E1000_REG_RDT, e1000.rx_tail);
-        }
+        // Buffer only (IRQ-safe).  lwIP processing happens in
+        // tcpip_thread context — e1000_process_rx() runs from
+        // net_poll_rx() inside sys_arch_mbox_fetch.  Wake the
+        // fetcher so buffered packets are drained promptly.
+        // NEVER call tcpip_input/tcpip_inpkt from IRQ context
+        // (lwIP asserts: "tcpip_thread: invalid message").
+        e1000_poll_rx();
+        extern void sys_mbox_wake(void);
+        sys_mbox_wake();
     }
 
     // ── TX: descriptor done ─────────────────────────────────
@@ -266,15 +259,30 @@ int e1000_init(uint64_t bar_phys, uint8_t irq, int use_msi)
             break;
     }
 
-    // 3. Read MAC from EEPROM
+    // 3. Read MAC — try EEPROM first, fall back to RAL/RAH registers.
+    //    QEMU e1000e (82574L) has NO working EEPROM: the EERD read
+    //    times out, but the hardware auto-loads the MAC into RAL0/RAH0
+    //    after reset (same behavior as Linux e1000e driver fallback).
+    int eep_ok = 1;
     for (int i = 0; i < 3; i++) {
         uint16_t eep_word;
         if (e1000_eeprom_read((uint8_t)i, &eep_word) != 0) {
-            log_info("e1000: EEPROM read timeout at word %d\n", i);
-            return -1;
+            eep_ok = 0;
+            break;
         }
         e1000.mac[i * 2]     = (uint8_t)(eep_word & 0xFF);
         e1000.mac[i * 2 + 1] = (uint8_t)(eep_word >> 8);
+    }
+    if (!eep_ok) {
+        uint32_t ral = e1000_read(E1000_REG_RAL0);
+        uint32_t rah = e1000_read(E1000_REG_RAH0);
+        e1000.mac[0] = (uint8_t)(ral & 0xFF);
+        e1000.mac[1] = (uint8_t)((ral >> 8) & 0xFF);
+        e1000.mac[2] = (uint8_t)((ral >> 16) & 0xFF);
+        e1000.mac[3] = (uint8_t)((ral >> 24) & 0xFF);
+        e1000.mac[4] = (uint8_t)(rah & 0xFF);
+        e1000.mac[5] = (uint8_t)((rah >> 8) & 0xFF);
+        log_info("e1000: MAC read from RAL0/RAH0 (EEPROM unavailable)\n");
     }
 
     // 4. Allocate descriptor rings (physically contiguous, 16-byte aligned)
@@ -357,17 +365,22 @@ int e1000_init(uint64_t bar_phys, uint8_t irq, int use_msi)
     e1000_write(E1000_REG_IMS,
         E1000_ICR_RXT0 | E1000_ICR_RXDMT0 | E1000_ICR_TXDW | E1000_ICR_LSC);
 
-    // 9. Register interrupt handler (same pattern as keyboard/serial/PIT)
-    // The kernel pre-installs 16 stubs for vectors 0x20..0x2f that
-    // dispatch through do_IRQ → irq_table[].  register_irq fills
-    // irq_table[irq] with the handler and configures the IOAPIC.
-    register_irq(irq, NULL, &e1000_handler, 0,
+    // 9. Register interrupt handler.
+    // MSI-X path (use_msi != 0): caller already ran pci_enable_msix()
+    // with vector 0x30.  Register on GSI 16 (vector 0x30) as the
+    // dispatch slot — MSI-X interrupts arrive directly on the LAPIC,
+    // bypassing the IOAPIC (which never fires on Q35+TCG).
+    // INTx fallback (use_msi == 0): register on the GSI from
+    // PCI_INTERRUPT_LINE, routed through the IOAPIC.
+    uint8_t reg_gsi = use_msi ? 16 : irq;
+    register_irq(reg_gsi, NULL, &e1000_handler, 0,
                  IRQF_TRIGGER_LEVEL, "e1000");
 
     e1000.initialized = 1;
 
-    log_info("e1000: MAC %02x:%02x:%02x:%02x:%02x:%02x IRQ=%u\n",
+    log_info("e1000: MAC %02x:%02x:%02x:%02x:%02x:%02x IRQ=%u%s\n",
                 e1000.mac[0], e1000.mac[1], e1000.mac[2],
-                e1000.mac[3], e1000.mac[4], e1000.mac[5], irq);
+                e1000.mac[3], e1000.mac[4], e1000.mac[5],
+                reg_gsi, use_msi ? " (MSI-X v0x30)" : "");
     return 0;
 }

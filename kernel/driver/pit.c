@@ -30,7 +30,10 @@ void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attri
     }
 
     // Poll NIC RX (IRQ-safe: buffers only, lwIP processes later)
-    net_poll_rx_irq();
+    // TEMP-DISABLED for interrupt-driven verification: e1000 MSI-X
+    // handler (vector 0x30) now buffers RX directly.  Re-enable only
+    // as a fallback if interrupt path proves unreliable.
+    // net_poll_rx_irq();
 
     // Request rescheduling on every timer tick — schedule() manages
     // per-task quantum counters and picks the next task.

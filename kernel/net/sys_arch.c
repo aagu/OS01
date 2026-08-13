@@ -128,6 +128,21 @@ typedef struct {
     wait_queue_t  wq;
 } os_mbox_t;
 
+// ── Interrupt-driven RX wake ─────────────────────────────────
+// tcpip_thread blocks in sys_arch_mbox_fetch on the lwIP mbox.
+// The NIC IRQ handler (e1000) buffers a packet, then calls
+// sys_mbox_wake() to wake the fetcher.  The fetcher re-runs
+// net_poll_rx() and drains the two-stage buffer — no message
+// needs to be posted (a sentinel would flood the mbox).
+static os_mbox_t *g_fetch_mbox = NULL;
+
+void sys_mbox_wake(void)
+{
+    os_mbox_t *mb = g_fetch_mbox;
+    if (!mb) return;
+    wait_queue_wake_one(&mb->wq);
+}
+
 err_t sys_mbox_new(sys_mbox_t *mbox, int size)
 {
     (void)size;
@@ -208,6 +223,8 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
     if (timeout > 0)
         deadline_jiffies = jiffies + (timeout + 9) / 10;
 
+    g_fetch_mbox = mb;
+
     for (;;) {
         uint64_t flags = spin_lock_irqsave(&mb->lock);
         if (mb->count > 0) {
@@ -218,6 +235,7 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
 
             ictx.cancelled = 1;
             del_timer(idle_timer);
+            g_fetch_mbox = NULL;
 
             *msg = m;
             return 0;
@@ -234,6 +252,7 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
         if (timeout > 0 && jiffies >= deadline_jiffies) {
             ictx.cancelled = 1;
             del_timer(idle_timer);
+            g_fetch_mbox = NULL;
             return SYS_ARCH_TIMEOUT;
         }
 

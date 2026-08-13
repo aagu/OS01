@@ -9,6 +9,8 @@
 #define E1000_REG_CTRL_EXT 0x0018   // Extended Device Control
 #define E1000_REG_STATUS   0x0008   // Device Status
 #define E1000_REG_EERD     0x0014   // EEPROM Read
+#define E1000_REG_RAL0     0x5400   // RX Address Low 0 (MAC[3:0] — auto-loaded on 82574L)
+#define E1000_REG_RAH0     0x5404   // RX Address High 0 (MAC[5:4] + AV bit)
 #define E1000_REG_ICR      0x00C0   // Interrupt Cause Read (R/W1C)
 #define E1000_REG_ICS      0x00C8   // Interrupt Cause Set (WO)
 #define E1000_REG_IMS      0x00D0   // Interrupt Mask Set

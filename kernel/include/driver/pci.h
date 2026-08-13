@@ -32,6 +32,9 @@ uint8_t pci_get_gsi(uint8_t bus, uint8_t dev, uint8_t func);
 void   pci_disable_msi(uint8_t bus, uint8_t dev, uint8_t func);
 // Enable MSI at the given vector.  Returns 0 on success, -1 if not MSI-capable.
 int    pci_enable_msi(uint8_t bus, uint8_t dev, uint8_t func, uint8_t vector);
+// Enable MSI-X entry 0 at the given vector (bypasses IOAPIC).
+// Returns 0 on success, -1 if not MSI-X-capable.
+int    pci_enable_msix(uint8_t bus, uint8_t dev, uint8_t func, uint8_t vector);
 
 // ── Standard PCI header offsets ────────────────────────────
 #define PCI_VENDOR_ID       0x00
