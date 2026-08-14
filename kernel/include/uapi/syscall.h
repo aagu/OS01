@@ -86,6 +86,7 @@
 #define SYS_getsockname   61
 #define SYS_getpeername   62
 #define SYS_getifaddr     63
+#define SYS_shutdown      64
 
 // ── reboot(2) commands ──────────────────────────────────────
 #define RB_AUTOBOOT    0x01234567

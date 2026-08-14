@@ -70,6 +70,7 @@
 #define SYS_getsockname   61
 #define SYS_getpeername   62
 #define SYS_getifaddr     63
+#define SYS_shutdown      64
 
 // ── Generic syscall helper ─────────────────────────────────
 

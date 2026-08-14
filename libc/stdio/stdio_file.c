@@ -6,12 +6,10 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/syscall.h>
 
-/* Minimal FILE struct for fopen/fdopen/fread/fwrite */
-typedef struct {
-    int fd;
-    int mode;  /* 0=read, 1=write */
-} mini_file_t;
+/* Minimal FILE struct lives in stdio.h (shared with stdio_extras.c) */
+/* typedef struct { int fd; int mode; } mini_file_t; -- see stdio.h */
 
 void *fopen(const char *path, const char *mode)
 {
@@ -69,10 +67,12 @@ size_t fwrite(const void *p, size_t s, size_t n, void *f)
 
 int fflush(void *f) { (void)f; return 0; }
 int vfprintf(void *f, const char *fmt, __builtin_va_list ap) {
-	(void)f;
 	static char buf[4096];
 	int len = vsprintf(buf, fmt, ap);
-	if (len > 0) write(1, buf, len);
+	if (len > 0) {
+		int fd = fileno_unlocked((FILE *)f);
+		syscall(SYS_write, fd, (uint64_t)buf, (uint64_t)len);
+	}
 	return len;
 }
 int fprintf(void *f, const char *fmt, ...) {
@@ -83,5 +83,18 @@ int fprintf(void *f, const char *fmt, ...) {
 	return ret;
 }
 int putchar_unlocked(int c) { return putchar(c); }
-int fputc(int c, void *f) { (void)f; return putchar(c); }
-int fputs(const char *s, void *f) { (void)f; while(*s) putchar(*s++); return 0; }
+int fputc(int c, void *f)
+{
+    int fd = fileno_unlocked((FILE *)f);
+    unsigned char ch = (unsigned char)c;
+    syscall(SYS_write, fd, (uint64_t)&ch, 1);
+    return c;
+}
+int fputs(const char *s, void *f)
+{
+    int fd = fileno_unlocked((FILE *)f);
+    size_t len = 0;
+    while (s[len]) len++;
+    syscall(SYS_write, fd, (uint64_t)s, (uint64_t)len);
+    return 0;
+}
