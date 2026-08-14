@@ -43,6 +43,24 @@ void pci_config_writeb(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offse
     arch_outb(value, PCI_CONFIG_DATA + (offset & 3));
 }
 
+// 16-bit config access.  PCI capability structures are byte-addressed
+// (e.g. MSI-X Message Control sits at cap_ptr + 2), so a 32-bit access
+// through pci_make_addr (which forces dword alignment via offset & 0xFC)
+// would read/write the wrong dword and the MSI-X enable bit would never
+// be set — QEMU then treats the device as non-MSI-X and never raises an
+// interrupt.  Use the data-port byte lanes for true 16-bit accesses.
+uint16_t pci_config_readw(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset)
+{
+    arch_outd(PCI_CONFIG_ADDR, pci_make_addr(bus, dev, func, offset));
+    return arch_inw(PCI_CONFIG_DATA + (offset & 2));
+}
+
+void pci_config_writew(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset, uint16_t value)
+{
+    arch_outd(PCI_CONFIG_ADDR, pci_make_addr(bus, dev, func, offset));
+    arch_outw(value, PCI_CONFIG_DATA + (offset & 2));
+}
+
 // ── Device discovery ──────────────────────────────────────
 
 // Check if a function exists (vendor != 0xFFFF)
@@ -269,6 +287,14 @@ int pci_enable_msix(uint8_t bus, uint8_t dev, uint8_t func, uint8_t vector)
         uint8_t cap_id = (uint8_t)(dword & 0xFF);
 
         if (cap_id == 0x11) {  // MSI-X capability
+            // Message Control is the high u16 of the dword at cap_ptr
+            // (cap_ptr is dword-aligned in practice, e.g. 0xa0).  Its
+            // bit 15 (MSI-X Enable) is bit 31 of that dword.  Enable
+            // it with a 32-bit write — 16-bit config-port writes
+            // (outw to 0xCFE) are dropped by QEMU's PCI host data port
+            // on TCG, so the enable bit was silently lost and the
+            // device stayed in non-MSI-X mode (no interrupts ever
+            // raised).
             uint16_t msg_ctrl = (uint16_t)(dword >> 16);
             uint32_t table_size = (msg_ctrl & 0x7FF) + 1;
 
@@ -305,12 +331,13 @@ int pci_enable_msix(uint8_t bus, uint8_t dev, uint8_t func, uint8_t vector)
             entry[2] = (uint32_t)vector;                     // Message Data
             entry[3] = 0;                                    // Unmask
 
-            // Enable MSI-X: set bit 15 of Message Control
-            pci_config_write(bus, dev, func, cap_ptr + 2,
-                             (pci_config_read(bus, dev, func, cap_ptr + 2) & 0xFFFF0000) | 0x8000);
+            // Enable MSI-X: set dword bit 31 (= msg_ctrl bit 15)
+            pci_config_write(bus, dev, func, cap_ptr, dword | 0x80000000);
+            uint32_t verify = pci_config_read(bus, dev, func, cap_ptr);
 
-            log_info("PCI: MSI-X enabled for %d:%d.%d vector=0x%x (table_size=%u bir=%u tbl_off=%#x)\n",
-                     bus, dev, func, vector, (unsigned)table_size, bir, tbl_off);
+            log_info("PCI: MSI-X enabled for %d:%d.%d vector=0x%x (table_size=%u bir=%u tbl_off=%#x ctrl=%#x cap=%#x verify=%#x)\n",
+                     bus, dev, func, vector, (unsigned)table_size, bir, tbl_off,
+                     (unsigned)(msg_ctrl | 0x8000), cap_ptr, (unsigned)verify);
             return 0;
         }
         cap_ptr = (uint8_t)(pci_config_read(bus, dev, func, cap_ptr) >> 8);

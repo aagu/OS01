@@ -166,7 +166,7 @@ static void e1000_handler(uint64_t nr, uint64_t param, pt_regs_t *regs)
     if (!icr) return;
 
     // ── RX: descriptor done ─────────────────────────────────
-    if (icr & (E1000_ICR_RXT0 | E1000_ICR_RXDMT0)) {
+    if (icr & (E1000_ICR_RXQ0 | E1000_ICR_RXT0 | E1000_ICR_RXDMT0)) {
         // Buffer only (IRQ-safe).  lwIP processing happens in
         // tcpip_thread context — e1000_process_rx() runs from
         // net_poll_rx() inside sys_arch_mbox_fetch.  Wake the
@@ -370,9 +370,22 @@ int e1000_init(uint64_t bar_phys, uint8_t irq, int use_msi)
         | (0x10 << E1000_TCTL_CT_SHIFT)
         | (E1000_TCTL_COLD_FULLDUPLEX << E1000_TCTL_COLD_SHIFT));
 
-    // 8. Enable e1000 interrupt sources
-    e1000_write(E1000_REG_IMS,
-        E1000_ICR_RXT0 | E1000_ICR_RXDMT0 | E1000_ICR_TXDW | E1000_ICR_LSC);
+    // 8. Enable e1000 interrupt sources.
+    // 82574L MSI-X mode: QEMU raises RXQ0/TXQ0 (not the 82540
+    // RXT0/TXDW bits) when MSI-X is enabled.  Route every cause to
+    // vector 0 (entry 0, configured by pci_enable_msix) via IVAR:
+    // each 4-bit field = bit 3 VALID + bits 2:0 vector.
+    if (use_msi) {
+        e1000_write(E1000_REG_IVAR,
+                    (0x8 | 0) | ((0x8 | 0) << 4) | ((0x8 | 0) << 8) |
+                    ((0x8 | 0) << 12) | ((0x8 | 0) << 16));  // RXQ0,RXQ1,TXQ0,TXQ1,OTHER → vec 0
+        e1000_write(E1000_REG_IMS,
+            E1000_ICR_RXQ0 | E1000_ICR_TXQ0 | E1000_ICR_OTHER |
+            E1000_ICR_LSC | E1000_ICR_RXDMT0);
+    } else {
+        e1000_write(E1000_REG_IMS,
+            E1000_ICR_RXT0 | E1000_ICR_RXDMT0 | E1000_ICR_TXDW | E1000_ICR_LSC);
+    }
 
     // 9. Register interrupt handler.
     // MSI-X path (use_msi != 0): caller already ran pci_enable_msix()

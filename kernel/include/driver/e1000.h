@@ -15,6 +15,7 @@
 #define E1000_REG_ICS      0x00C8   // Interrupt Cause Set (WO)
 #define E1000_REG_IMS      0x00D0   // Interrupt Mask Set
 #define E1000_REG_IMC      0x00D8   // Interrupt Mask Clear
+#define E1000_REG_IVAR     0x00E4   // Interrupt Vector Allocation (82574 MSI-X)
 #define E1000_REG_RCTL     0x0100   // Receive Control
 #define E1000_REG_TCTL     0x0400   // Transmit Control
 #define E1000_REG_RDBAL    0x2800   // RX Descriptor Base Low
@@ -88,6 +89,11 @@
 #define E1000_ICR_RXDMT0    (1 << 4)
 #define E1000_ICR_RXO       (1 << 6)
 #define E1000_ICR_RXT0      (1 << 7)
+// 82574L (e1000e) MSI-X per-queue causes.  QEMU's e1000e raises
+// RXQ0 (not RXT0) for received packets when MSI-X is enabled.
+#define E1000_ICR_RXQ0      (1 << 20)
+#define E1000_ICR_TXQ0      (1 << 22)
+#define E1000_ICR_OTHER     (1 << 24)
 
 // ── RX descriptor ──────────────────────────────────────────────
 #define E1000_NUM_RX_DESC   32

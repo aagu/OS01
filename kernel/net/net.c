@@ -99,20 +99,6 @@ void net_poll_rx(void)
     }
 }
 
-// ── IRQ-safe RX poll (PIT handler) ─────────────────────────
-// Only buffers packets into the two-stage buffer.  lwIP processing
-// (e1000_process_rx / virtio RX deliver) happens in tcpip_thread
-// context via net_poll_rx() — NEVER call lwIP from IRQ context
-// (tcpip_input from IRQ asserts: "tcpip_thread: invalid message").
-void net_poll_rx_irq(void)
-{
-    if (!net_hw_ok) return;
-    if (is_virtio)
-        virtio_net_poll_rx();    // virtio RX path is IRQ-safe (buffers + netif->input later)
-    else
-        e1000_poll_rx();         // IRQ context: just buffer the packet
-}
-
 // ── Stage B: lwIP stack init (post-SMP, pre-task_init) ────────
 
 void net_lwip_init(void)

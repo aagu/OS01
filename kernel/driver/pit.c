@@ -13,9 +13,6 @@
 #include <kernel/console.h>
 #include <kernel/debug.h>
 
-// Poll NIC RX (defined in net/net.c)
-extern void net_poll_rx_irq(void);
-
 void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attribute__((unused)), pt_regs_t * regs __attribute__((unused)))
 {
     jiffies++;
@@ -29,12 +26,10 @@ void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attri
         current_poll_wq = NULL;
     }
 
-    // Poll NIC RX (IRQ-safe: buffers only, lwIP processes later).
-    // The e1000 MSI-X interrupt path is not wired up (no IRQ ever
-    // fires), so this PIT-tick polling is the sole RX path: it drains
-    // the hardware ring into the kernel rxq, which tcpip_thread
-    // consumes via net_poll_rx() on each mbox idle wakeup.
-    net_poll_rx_irq();
+    // RX is now interrupt-driven: the e1000 MSI-X handler buffers
+    // packets and wakes tcpip_thread (see e1000_handler).  No PIT-tick
+    // polling needed — the mbox idle timer remains as a wake-up
+    // fallback inside sys_arch_mbox_fetch.
 
     // Request rescheduling on every timer tick — schedule() manages
     // per-task quantum counters and picks the next task.

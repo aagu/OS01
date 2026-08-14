@@ -9,6 +9,8 @@
 uint32_t pci_config_read(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset);
 void     pci_config_write(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset, uint32_t value);
 void     pci_config_writeb(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset, uint8_t value);
+uint16_t pci_config_readw(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset);
+void     pci_config_writew(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset, uint16_t value);
 
 // ── Device discovery ───────────────────────────────────────
 // Returns 0 on success, -1 if not found.
