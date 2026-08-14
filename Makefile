@@ -21,6 +21,7 @@ export LDFLAGS=--sysroot=${SYSROOT}
 
 DISPLAY=gtk
 MEMORY=512M
+SMP ?= 2
 
 # ── Log output target (serial | fb | both) ───────────────
 LOG_TARGET ?= serial
@@ -132,20 +133,20 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 # ── Run / Debug ─────────────────────────────────────────
 
 run: disk.img boot/uefi/OVMF.fd
-	$(QEMU_BIN) -M q35 -smp 2 -pflash boot/uefi/OVMF.fd \
+	$(QEMU_BIN) -M q35 -smp $(SMP) -pflash boot/uefi/OVMF.fd \
 	  -drive file=disk.img,format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio -no-reboot
 
 run-kvm: disk.img boot/uefi/OVMF.fd
-	$(QEMU_BIN) -M q35 -smp 2 -pflash boot/uefi/OVMF.fd \
+	$(QEMU_BIN) -M q35 -smp $(SMP) -pflash boot/uefi/OVMF.fd \
 	  -accel kvm \
 	  -drive file=disk.img,format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio -no-reboot
 
 debug: disk.img boot/uefi/OVMF.fd
-	$(QEMU_BIN) -M q35 -smp 2 -pflash boot/uefi/OVMF.fd \
+	$(QEMU_BIN) -M q35 -smp $(SMP) -pflash boot/uefi/OVMF.fd \
 	  -S -s \
 	  -drive file=disk.img,format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
