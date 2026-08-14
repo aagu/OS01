@@ -29,11 +29,12 @@ void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attri
         current_poll_wq = NULL;
     }
 
-    // Poll NIC RX (IRQ-safe: buffers only, lwIP processes later)
-    // TEMP-DISABLED for interrupt-driven verification: e1000 MSI-X
-    // handler (vector 0x30) now buffers RX directly.  Re-enable only
-    // as a fallback if interrupt path proves unreliable.
-    // net_poll_rx_irq();
+    // Poll NIC RX (IRQ-safe: buffers only, lwIP processes later).
+    // The e1000 MSI-X interrupt path is not wired up (no IRQ ever
+    // fires), so this PIT-tick polling is the sole RX path: it drains
+    // the hardware ring into the kernel rxq, which tcpip_thread
+    // consumes via net_poll_rx() on each mbox idle wakeup.
+    net_poll_rx_irq();
 
     // Request rescheduling on every timer tick — schedule() manages
     // per-task quantum counters and picks the next task.

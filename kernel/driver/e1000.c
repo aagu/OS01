@@ -82,7 +82,7 @@ static int e1000_eeprom_read(uint8_t addr, uint16_t *out)
 // stuck, TCP connect never completes).  A ring queue keeps the
 // hardware ring drained continuously.
 
-#define E1000_RXQ_DEPTH  16
+#define E1000_RXQ_DEPTH  64
 
 typedef struct {
     uint8_t  *buf[E1000_RXQ_DEPTH];
@@ -104,7 +104,6 @@ void e1000_poll_rx(void) {
                 // Queue full — drop this packet, keep HW ring moving.
                 e1000.rx_descs[e1000.rx_tail].status = 0;
                 e1000.rx_tail = (e1000.rx_tail + 1) % E1000_NUM_RX_DESC;
-                e1000_write(E1000_REG_RDT, e1000.rx_tail);
                 continue;
             }
             uint8_t *buf = (uint8_t *)kmalloc(len);
@@ -117,14 +116,24 @@ void e1000_poll_rx(void) {
         }
         e1000.rx_descs[e1000.rx_tail].status = 0;
         e1000.rx_tail = (e1000.rx_tail + 1) % E1000_NUM_RX_DESC;
-        // RDT semantics (Intel 8254x): RDT is the LAST usable
-        // descriptor index.  Writing RDT=rx_tail makes the hardware
-        // believe only one slot is free — once it fills that slot,
-        // RDH==RDT and QEMU considers the ring FULL and drops every
-        // subsequent packet.  Always point RDT at the ring tail so
-        // the hardware can keep writing (RDH advances on its own).
-        e1000_write(E1000_REG_RDT, E1000_NUM_RX_DESC - 1);
     }
+    // Clear any pending RX interrupts.  QEMU's e1000e sets interrupt
+    // bits in ICR when packets arrive and may defer writing further
+    // descriptors until the interrupt is acknowledged (ICR read).  Our
+    // MSI-X path is not wired up (no IRQ ever fires), so without this
+    // read QEMU goes quiet after the first burst of ~10 packets and
+    // the HTTP body is never delivered.
+    e1000_read(E1000_REG_ICR);
+    // RDT is the LAST descriptor the software has prepared.  QEMU's
+    // e1000e only re-arms reception when the RDT VALUE CHANGES and it
+    // stops when RDH >= RDT.  A constant RDT means no re-arm: the NIC
+    // goes quiet after its first burst (~10 pkts) and the HTTP body is
+    // never delivered.  Worse, if we only write RDT while draining, a
+    // stopped NIC (no DD descriptors) never gets re-armed — deadlock.
+    // Toggle 30→31 on EVERY call (even with nothing to drain) so the
+    // value always changes and RDT stays > RDH: QEMU keeps delivering.
+    e1000_write(E1000_REG_RDT, 30);
+    e1000_write(E1000_REG_RDT, 31);
 }
 
 void e1000_process_rx(void) {
