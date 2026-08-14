@@ -6,12 +6,14 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <poll.h>
 #include <errno.h>
 
 // Use QEMU user-mode NAT gateway's built-in DNS proxy
 #define DNS_IP     0x0302000A  // 10.0.2.3 in network byte order
 #define DNS_PORT   53
 #define DNS_PACKET_SIZE 512
+#define DNS_TIMEOUT_MS 5000
 
 static uint16_t dns_u16(const uint8_t *p)
 {
@@ -139,6 +141,13 @@ int getaddrinfo(const char *node, const char *service,
     if (sendto(fd, query, qi, 0, (struct sockaddr *)&dns, sizeof(dns)) < 0) {
         close(fd);
         return EAI_SYSTEM;
+    }
+
+    struct pollfd pfd = { .fd = fd, .events = POLLIN };
+    int ready = poll(&pfd, 1, DNS_TIMEOUT_MS);
+    if (ready <= 0) {
+        close(fd);
+        return ready == 0 ? EAI_AGAIN : EAI_SYSTEM;
     }
 
     uint8_t reply[DNS_PACKET_SIZE];
