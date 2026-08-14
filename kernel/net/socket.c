@@ -28,7 +28,8 @@
 static void socket_netconn_cb(struct netconn *conn, enum netconn_evt evt, u16_t len)
 {
     (void)conn; (void)len;
-    if (evt != NETCONN_EVT_RCVPLUS && evt != NETCONN_EVT_ERROR)
+    if (evt != NETCONN_EVT_RCVPLUS && evt != NETCONN_EVT_RCVMINUS &&
+        evt != NETCONN_EVT_ERROR)
         return;
 
     // Find the socket owning this conn via callback_arg (set in
@@ -37,10 +38,12 @@ static void socket_netconn_cb(struct netconn *conn, enum netconn_evt evt, u16_t 
     if (!s) return;
 
     uint64_t flags = spin_lock_irqsave(&s->lock);
-    // RCVPLUS: data arrived.  ERROR: readable so read() surfaces
-    // the pending error / EOF.  Either way the socket is readable.
-    s->rx_pending = 1;
-    spin_unlock_irqrestore(&s->lock, flags);
+    if (evt == NETCONN_EVT_RCVPLUS)
+        s->rx_pending++;
+    else if (evt == NETCONN_EVT_RCVMINUS && s->rx_pending > 0)
+        s->rx_pending--;
+    else if (evt == NETCONN_EVT_ERROR)
+        s->rx_pending = 1;
 
     // Wake all poll waiters (same pattern as pipe_wake_readers).
     while (!list_is_empty(&s->poll_list)) {
@@ -49,6 +52,7 @@ static void socket_netconn_cb(struct netconn *conn, enum netconn_evt evt, u16_t 
         poll_wait_entry_t *e = container_of(node, poll_wait_entry_t, node);
         wait_queue_wake_all(e->poll_wq);
     }
+    spin_unlock_irqrestore(&s->lock, flags);
 }
 
 // ── Socket allocation ──────────────────────────────────────────
@@ -203,15 +207,6 @@ int64_t do_recvfrom(int fd, void *buf, uint64_t len, int flags,
         return -EIO;
     }
 
-    // Consumed the pending data — clear the flag.  More data may
-    // arrive (callback will re-set it), and netconn may have more
-    // queued; poll will re-check on next call.
-    {
-        uint64_t _f = spin_lock_irqsave(&s->lock);
-        s->rx_pending = 0;
-        spin_unlock_irqrestore(&s->lock, _f);
-    }
-
     void *data;
     u16_t data_len;
     netbuf_data(nb, &data, &data_len);
@@ -295,8 +290,11 @@ int64_t do_accept(int fd, uint32_t *out_ip, uint16_t *out_port)
     new_sock->state    = SOCK_CONNECTED;
     new_sock->bound    = 0;
     new_sock->rx_pending = 0;
+    new_sock->rx_nb = NULL;
+    new_sock->rx_off = 0;
     spin_init(&new_sock->lock);
     list_init(&new_sock->poll_list);
+    netconn_set_callback_arg(new_conn, new_sock);
 
     file_t *new_f = file_alloc();
     if (!new_f) { socket_free(new_sock); return -ENOMEM; }
@@ -306,7 +304,6 @@ int64_t do_accept(int fd, uint32_t *out_ip, uint16_t *out_port)
 
     int new_fd = fd_alloc(current->files, new_f);
     if (new_fd < 0) {
-        new_f->sock = NULL;
         file_free(new_f);
         return -ENFILE;
     }
@@ -316,7 +313,7 @@ int64_t do_accept(int fd, uint32_t *out_ip, uint16_t *out_port)
 
 // ── SYS_getsockname ──
 
-int64_t do_getsockname(int fd, void *addr_ptr, uint64_t *addrlen_ptr)
+int64_t do_getsockname(int fd, void *addr_ptr, uint32_t *addrlen_ptr)
 {
     socket_t *s = socket_get(fd);
     if (!s) return -EBADF;
@@ -327,7 +324,7 @@ int64_t do_getsockname(int fd, void *addr_ptr, uint64_t *addrlen_ptr)
     if (err != ERR_OK)
         return -EADDRNOTAVAIL;
 
-    uint64_t usr_addrlen = *addrlen_ptr;
+    uint32_t usr_addrlen = *addrlen_ptr;
     if (usr_addrlen < sizeof(struct sockaddr_in))
         return -EINVAL;
 extern struct netif os01_netif;
@@ -361,7 +358,7 @@ int64_t do_setsockopt(int fd, int level, int optname,
 }
 
 int64_t do_getsockopt(int fd, int level, int optname,
-                      void *optval, uint64_t *optlen)
+                      void *optval, uint32_t *optlen)
 {
     socket_t *s = socket_get(fd);
     if (!s) return -EBADF;

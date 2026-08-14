@@ -265,7 +265,8 @@ uint32_t fd_poll(file_t *f, poll_table_t *pt)
             if (s->rx_pending)
                 revents |= POLLIN | POLLRDNORM;
         }
-        if (s->state == SOCK_LISTENING) revents |= POLLIN;
+        if (s->state == SOCK_LISTENING && s->rx_pending)
+            revents |= POLLIN;
         if (revents == 0 && pt && !pt->triggered)
             poll_wait(pt, &s->poll_list, &s->lock);
         spin_unlock_irqrestore(&s->lock, flags);

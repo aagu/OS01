@@ -17,11 +17,14 @@ void init_timer(timer_t * timer, void (* func)(void * data), void * data, uint64
     timer->func = func;
     timer->data = data;
     timer->expire_jiffies = jiffies + expire_jiffies;
+    timer->active = 0;
 }
 
 timer_t * create_timer(void (* func)(void * data), void * data, uint64_t expire_jiffies)
 {
     timer_t * timer = (timer_t *)calloc(1, sizeof(timer_t));
+    if (!timer)
+        return NULL;
     init_timer(timer, func, data, expire_jiffies);
     return timer;
 }
@@ -34,11 +37,13 @@ void do_timer(void * data __attribute__((unused)))
     {
         list_del(&timer->list);                     // direct list_del, not del_timer()
         timer->active = 0;
+        timer->running = 1;
         spin_unlock_irqrestore(&timer_lock, flags); // release before callback
 
         timer->func(timer->data);                   // callback runs unlocked
 
         flags = spin_lock_irqsave(&timer_lock);      // re-acquire
+        timer->running = 0;
         timer = container_of(list_next(&timer_list_head.list), timer_t, list);
     }
     spin_unlock_irqrestore(&timer_lock, flags);
@@ -103,6 +108,22 @@ void del_timer(timer_t * timer)
         timer->active = 0;
     }
     spin_unlock_irqrestore(&timer_lock, flags);
+}
+
+void destroy_timer(timer_t *timer)
+{
+    if (!timer) return;
+
+    del_timer(timer);
+    for (;;) {
+        uint64_t flags = spin_lock_irqsave(&timer_lock);
+        int running = timer->running;
+        spin_unlock_irqrestore(&timer_lock, flags);
+        if (!running)
+            break;
+        __asm__ volatile("pause");
+    }
+    free(timer);
 }
 
 int timer_has_expired(uint64_t now)

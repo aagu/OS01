@@ -942,6 +942,12 @@ int signal_pending_fatal(void)
     return false;
 }
 
+static inline bool syscall_user_range_ok(uint64_t addr, uint64_t len)
+{
+    return addr != 0 && addr < current->addr_limit &&
+           len <= current->addr_limit - addr;
+}
+
 void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused)))
 {
 #ifndef NDEBUG
@@ -2226,7 +2232,10 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
     }
     case SYS_connect: {
         struct sockaddr_in addr;
-        if ((uint64_t)regs->rsi >= current->addr_limit) { regs->rax = -EFAULT; break; }
+        if (regs->rdx < sizeof(addr) ||
+            !syscall_user_range_ok(regs->rsi, sizeof(addr))) {
+            regs->rax = -EFAULT; break;
+        }
         memcpy(&addr, (void *)regs->rsi, sizeof(addr));
         // sin_port is network byte order; lwIP netconn_connect wants host order.
         regs->rax = do_connect((int)regs->rdi, addr.sin_addr, os01_ntohs(addr.sin_port));
@@ -2236,7 +2245,14 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         uint64_t len = regs->rdx;
         uint32_t ip = 0; uint16_t port = 0;
         uint64_t addr_ptr = regs->r8;
-        if (addr_ptr && addr_ptr < current->addr_limit) {
+        if (len && !syscall_user_range_ok(regs->rsi, len)) {
+            regs->rax = -EFAULT; break;
+        }
+        if (addr_ptr) {
+            if (regs->r9 < sizeof(struct sockaddr_in) ||
+                !syscall_user_range_ok(addr_ptr, sizeof(struct sockaddr_in))) {
+                regs->rax = -EFAULT; break;
+            }
             struct sockaddr_in a;
             memcpy(&a, (void *)addr_ptr, sizeof(a));
             ip = a.sin_addr; port = a.sin_port;
@@ -2246,13 +2262,19 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         break;
     }
     case SYS_recvfrom: {
+        if (regs->rdx && !syscall_user_range_ok(regs->rsi, regs->rdx)) {
+            regs->rax = -EFAULT; break;
+        }
         regs->rax = do_recvfrom((int)regs->rdi, (void *)regs->rsi,
                                 regs->rdx, (int)regs->r10, NULL, NULL);
         break;
     }
     case SYS_bind: {
         struct sockaddr_in a;
-        if ((uint64_t)regs->rsi >= current->addr_limit) { regs->rax = -EFAULT; break; }
+        if (regs->rdx < sizeof(a) ||
+            !syscall_user_range_ok(regs->rsi, sizeof(a))) {
+            regs->rax = -EFAULT; break;
+        }
         memcpy(&a, (void *)regs->rsi, sizeof(a));
         regs->rax = do_bind((int)regs->rdi, a.sin_addr, os01_ntohs(a.sin_port));
         break;
@@ -2266,13 +2288,20 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         break;
     }
     case SYS_setsockopt: {
+        if (regs->r8 && !syscall_user_range_ok(regs->r10, regs->r8)) {
+            regs->rax = -EFAULT; break;
+        }
         regs->rax = do_setsockopt((int)regs->rdi, (int)regs->rsi,
                                   (int)regs->rdx, (void *)regs->r10, regs->r8);
         break;
     }
     case SYS_getsockname: {
+        if (!syscall_user_range_ok(regs->rdx, sizeof(uint32_t)) ||
+            !syscall_user_range_ok(regs->rsi, sizeof(struct sockaddr_in))) {
+            regs->rax = -EFAULT; break;
+        }
         regs->rax = do_getsockname((int)regs->rdi,
-                                   (void *)regs->rsi, (uint64_t *)regs->rdx);
+                                   (void *)regs->rsi, (uint32_t *)regs->rdx);
         break;
     }
     case SYS_getifaddr: {
@@ -2280,8 +2309,11 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         break;
     }
     case SYS_getsockopt: {
+        if (!syscall_user_range_ok(regs->r8, sizeof(uint32_t))) {
+            regs->rax = -EFAULT; break;
+        }
         regs->rax = do_getsockopt((int)regs->rdi, (int)regs->rsi,
-                                  (int)regs->rdx, (void *)regs->r10, (uint64_t *)regs->r8);
+                                  (int)regs->rdx, (void *)regs->r10, (uint32_t *)regs->r8);
         break;
     }
     case SYS_shutdown: {

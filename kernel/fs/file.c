@@ -412,9 +412,11 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
                 if (copy > 0) memcpy(buf, (uint8_t *)data + s->rx_off, copy);
                 s->rx_off += (int)copy;
                 if (s->rx_off >= data_len) {
-                    netbuf_delete(nb);
-                    s->rx_nb = NULL;
                     s->rx_off = 0;
+                    if (netbuf_next(nb) < 0) {
+                        netbuf_delete(nb);
+                        s->rx_nb = NULL;
+                    }
                 }
                 if (copy > 0) return (int64_t)copy;
                 return -EAGAIN;
@@ -431,7 +433,12 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
                     s->rx_nb = nb;
                     s->rx_off = (int)copy;
                 } else {
-                    netbuf_delete(nb);
+                    if (netbuf_next(nb) >= 0) {
+                        s->rx_nb = nb;
+                        s->rx_off = 0;
+                    } else {
+                        netbuf_delete(nb);
+                    }
                 }
                 if (copy > 0) return (int64_t)copy;
                 return -EAGAIN;

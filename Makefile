@@ -209,7 +209,7 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 
 run: disk.img boot/uefi/OVMF.fd
 	$(QEMU_BIN) -M q35 -smp 2 -pflash boot/uefi/OVMF.fd \
-	  -netdev user,id=net0 -device e1000,netdev=net0 \
+	  -netdev user,id=net0 -device e1000e,netdev=net0 \
 	  -drive file=disk.img,format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio -no-reboot
@@ -217,7 +217,7 @@ run: disk.img boot/uefi/OVMF.fd
 run-kvm: disk.img boot/uefi/OVMF.fd
 	$(QEMU_BIN) -M q35 -smp 2 -pflash boot/uefi/OVMF.fd \
 	  -accel kvm \
-	  -netdev user,id=net0 -device e1000,netdev=net0 \
+	  -netdev user,id=net0 -device e1000e,netdev=net0 \
 	  -drive file=disk.img,format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio -no-reboot
@@ -233,7 +233,7 @@ run-virtio: disk.img boot/uefi/OVMF.fd
 debug: disk.img boot/uefi/OVMF.fd
 	$(QEMU_BIN) -M q35 -smp 2 -pflash boot/uefi/OVMF.fd \
 	  -S -s \
-	  -netdev user,id=net0 -device e1000,netdev=net0 \
+	  -netdev user,id=net0 -device e1000e,netdev=net0 \
 	  -drive file=disk.img,format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio

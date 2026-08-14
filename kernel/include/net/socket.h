@@ -33,9 +33,9 @@ int64_t do_listen(int fd, int backlog);
 int64_t do_accept(int fd, uint32_t *out_ip, uint16_t *out_port);
 int64_t do_setsockopt(int fd, int level, int optname,
                       const void *optval, uint64_t optlen);
-int64_t do_getsockname(int fd, void *addr, uint64_t *addrlen);
+int64_t do_getsockname(int fd, void *addr, uint32_t *addrlen);
 int64_t do_getsockopt(int fd, int level, int optname,
-                      void *optval, uint64_t *optlen);
+                      void *optval, uint32_t *optlen);
 int64_t do_shutdown(int fd, int how);
 
 #endif

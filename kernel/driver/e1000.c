@@ -5,6 +5,7 @@
 #include <kernel/pmm.h>       // PAGE_2M_MASK, alloc_pages, alloc_4k_page
 #include <kernel/memory.h>    // Phy_To_Virt
 #include <kernel/interrupt.h> // register_irq
+#include <kernel/arch/x86_64/spinlock.h>
 #include <kernel/apic.h>      // lapic_eoi, get_ioapic_controller
 #include <kernel/log.h>
 #include <kernel/slab.h>       // log_info
@@ -40,6 +41,7 @@ static struct {
 
     uint32_t            tx_head;       // next descriptor to send
     uint32_t            tx_tail;       // next free slot (post-completion)
+    spinlock_T          tx_lock;
     uint32_t            rx_tail;       // next descriptor to check
 
     int                 initialized;
@@ -146,8 +148,9 @@ void e1000_process_rx(void) {
 
         struct pbuf *p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
         if (p) {
-            memcpy(p->payload, buf, len);
-            e1000.netif_ptr->input(p, e1000.netif_ptr);
+            if (pbuf_take(p, buf, len) != ERR_OK ||
+                e1000.netif_ptr->input(p, e1000.netif_ptr) != ERR_OK)
+                pbuf_free(p);
         }
         kfree(buf);
     }
@@ -179,7 +182,8 @@ static void e1000_handler(uint64_t nr, uint64_t param, pt_regs_t *regs)
     }
 
     // ── TX: descriptor done ─────────────────────────────────
-    if (icr & E1000_ICR_TXDW) {
+    if (icr & (E1000_ICR_TXQ0 | E1000_ICR_TXDW)) {
+        uint64_t flags = spin_lock_irqsave(&e1000.tx_lock);
         // Walk from tx_tail to tx_head, freeing completed descriptors
         while (e1000.tx_tail != e1000.tx_head) {
             if (!(e1000.tx_descs[e1000.tx_tail].status & E1000_TXD_STAT_DD))
@@ -187,6 +191,7 @@ static void e1000_handler(uint64_t nr, uint64_t param, pt_regs_t *regs)
             e1000.tx_descs[e1000.tx_tail].status = 0;
             e1000.tx_tail = (e1000.tx_tail + 1) % E1000_NUM_TX_DESC;
         }
+        spin_unlock_irqrestore(&e1000.tx_lock, flags);
     }
 }
 
@@ -195,9 +200,21 @@ err_t e1000_xmit(struct netif *netif, struct pbuf *p)
 {
     (void)netif;
 
+    uint64_t flags = spin_lock_irqsave(&e1000.tx_lock);
+
+    // Completion interrupts are only a latency optimization.  Reap DD
+    // descriptors here too so a lost/coalesced TX interrupt cannot leave
+    // the small software ring permanently full.
+    while (e1000.tx_tail != e1000.tx_head &&
+           (e1000.tx_descs[e1000.tx_tail].status & E1000_TXD_STAT_DD)) {
+        e1000.tx_descs[e1000.tx_tail].status = 0;
+        e1000.tx_tail = (e1000.tx_tail + 1) % E1000_NUM_TX_DESC;
+    }
+
     uint32_t next = (e1000.tx_head + 1) % E1000_NUM_TX_DESC;
     if (next == e1000.tx_tail) {
         // Ring full — lwIP will retry
+        spin_unlock_irqrestore(&e1000.tx_lock, flags);
         return ERR_MEM;
     }
 
@@ -218,6 +235,7 @@ err_t e1000_xmit(struct netif *netif, struct pbuf *p)
     e1000.tx_head = next;
     e1000_write(E1000_REG_TDT, e1000.tx_head);
 
+    spin_unlock_irqrestore(&e1000.tx_lock, flags);
     return ERR_OK;
 }
 
@@ -365,6 +383,7 @@ int e1000_init(uint64_t bar_phys, uint8_t irq, int use_msi)
     e1000_write(E1000_REG_TDT, 0);
     e1000.tx_head = 0;
     e1000.tx_tail = 0;
+    spin_init(&e1000.tx_lock);
     e1000_write(E1000_REG_TCTL,
         E1000_TCTL_EN | E1000_TCTL_PSP
         | (0x10 << E1000_TCTL_CT_SHIFT)

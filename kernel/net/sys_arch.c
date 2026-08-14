@@ -15,6 +15,7 @@
 #include <kernel/arch/irq.h>
 #include <kernel/wait.h>
 #include <kernel/task.h>
+#include <kernel/percpu.h>
 #include <kernel/slab.h>      // kmalloc, kfree
 #include <device/timer.h>     // jiffies
 #include <string.h>           // strdup
@@ -126,6 +127,7 @@ typedef struct {
     int           count;
     spinlock_T    lock;
     wait_queue_t  wq;
+    wait_queue_t  not_full_wq;
     volatile int  idle_wakeup;   // lost-wakeup guard for the idle timer
 } os_mbox_t;
 
@@ -135,11 +137,16 @@ typedef struct {
 // sys_mbox_wake() to wake the fetcher.  The fetcher re-runs
 // net_poll_rx() and drains the two-stage buffer — no message
 // needs to be posted (a sentinel would flood the mbox).
-static os_mbox_t *g_fetch_mbox = NULL;
+/* tcpip_init() creates the core mailbox before it starts tcpip_thread.
+ * Keep that mailbox permanently registered: application/netconn waits also
+ * call sys_arch_mbox_fetch(), so a "currently fetching mailbox" global is
+ * inherently racy and can make the NIC IRQ wake an unrelated socket waiter.
+ */
+static os_mbox_t *g_tcpip_mbox = NULL;
 
 void sys_mbox_wake(void)
 {
-    os_mbox_t *mb = g_fetch_mbox;
+    os_mbox_t *mb = g_tcpip_mbox;
     if (!mb) return;
     wait_queue_wake_one(&mb->wq);
 }
@@ -152,8 +159,12 @@ err_t sys_mbox_new(sys_mbox_t *mbox, int size)
     mb->head = 0;
     mb->tail = 0;
     mb->count = 0;
+    mb->idle_wakeup = 0;
     spin_init(&mb->lock);
     wait_queue_init(&mb->wq);
+    wait_queue_init(&mb->not_full_wq);
+    if (!g_tcpip_mbox)
+        g_tcpip_mbox = mb;
     *mbox = (sys_mbox_t)mb;
     return ERR_OK;
 }
@@ -163,15 +174,32 @@ void sys_mbox_post(sys_mbox_t *mbox, void *msg)
     if (!mbox || !*mbox) return;
     os_mbox_t *mb = (os_mbox_t *)*mbox;
 
-    uint64_t flags = spin_lock_irqsave(&mb->lock);
-    if (mb->count >= MBOX_SIZE) {
+    for (;;) {
+        uint64_t flags = spin_lock_irqsave(&mb->lock);
+        if (mb->count < MBOX_SIZE) {
+            mb->queue[mb->head] = msg;
+            mb->head = (mb->head + 1) % MBOX_SIZE;
+            mb->count++;
+            spin_unlock_irqrestore(&mb->lock, flags);
+            break;
+        }
+
+        uint64_t wf = spin_lock_irqsave(&mb->not_full_wq.lock);
+        if (mb->count >= MBOX_SIZE) {
+            list_add_to_before(&mb->not_full_wq.head, &current->io_wait_node);
+            current->state = TASK_INTERRUPTIBLE;
+        }
+        spin_unlock_irqrestore(&mb->not_full_wq.lock, wf);
         spin_unlock_irqrestore(&mb->lock, flags);
-        return;
+
+        if (!list_is_empty(&current->io_wait_node)) {
+            schedule();
+            arch_local_irq_enable();
+            if (!list_is_empty(&current->io_wait_node))
+                list_del_init(&current->io_wait_node);
+            current->state = TASK_RUNNING;
+        }
     }
-    mb->queue[mb->head] = msg;
-    mb->head = (mb->head + 1) % MBOX_SIZE;
-    mb->count++;
-    spin_unlock_irqrestore(&mb->lock, flags);
 
     wait_queue_wake_one(&mb->wq);
 }
@@ -244,8 +272,6 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
     if (timeout > 0)
         deadline_jiffies = jiffies + (timeout + 9) / 10;
 
-    g_fetch_mbox = mb;
-
     for (;;) {
         // The idle timer only fires ONCE (do_timer removes it).  Rebuild
         // it at the top of every loop iteration so a second sleep in
@@ -253,12 +279,12 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
         // this, tcpip_thread slept forever after the first wake (its RX
         // polling stopped, the RX queue filled, the NIC stopped
         // receiving, and wget hung waiting for the HTTP body).
-        if (!idle_timer || !idle_timer->active) {
-            idle_timer = create_timer(mbox_idle_callback, mb,
-                                      MBOX_IDLE_WAKEUP_JIFFIES);
-            if (idle_timer) {
-                add_timer(idle_timer);
-            }
+        if (idle_timer && !idle_timer->active) {
+            while (idle_timer->running)
+                __asm__ volatile("pause");
+            init_timer(idle_timer, mbox_idle_callback, mb,
+                       MBOX_IDLE_WAKEUP_JIFFIES);
+            add_timer(idle_timer);
         }
         uint64_t flags = spin_lock_irqsave(&mb->lock);
         if (mb->count > 0) {
@@ -266,25 +292,25 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
             mb->tail = (mb->tail + 1) % MBOX_SIZE;
             mb->count--;
             spin_unlock_irqrestore(&mb->lock, flags);
+            wait_queue_wake_one(&mb->not_full_wq);
 
-            del_timer(idle_timer);
-            g_fetch_mbox = NULL;
-
+            destroy_timer(idle_timer);
             *msg = m;
             return 0;
         }
         spin_unlock_irqrestore(&mb->lock, flags);
 
-        extern void net_poll_rx(void);
-        net_poll_rx();
+        if (mb == g_tcpip_mbox) {
+            extern void net_poll_rx(void);
+            net_poll_rx();
+        }
         // Double-check: poll may have posted to this same mailbox
         { uint64_t _f2 = spin_lock_irqsave(&mb->lock);
           if (mb->count > 0) { spin_unlock_irqrestore(&mb->lock, _f2); continue; }
           spin_unlock_irqrestore(&mb->lock, _f2); }
 
         if (timeout > 0 && jiffies >= deadline_jiffies) {
-            del_timer(idle_timer);
-            g_fetch_mbox = NULL;
+            destroy_timer(idle_timer);
             return SYS_ARCH_TIMEOUT;
         }
 
@@ -330,6 +356,7 @@ u32_t sys_arch_mbox_tryfetch(sys_mbox_t *mbox, void **msg)
         mb->tail = (mb->tail + 1) % MBOX_SIZE;
         mb->count--;
         spin_unlock_irqrestore(&mb->lock, flags);
+        wait_queue_wake_one(&mb->not_full_wq);
         return 0;
     }
     spin_unlock_irqrestore(&mb->lock, flags);
@@ -435,24 +462,26 @@ sys_thread_t sys_thread_new(const char *name,
 // ═══════════════════════════════════════════════════════════════
 
 static spinlock_T  lwip_global_lock = { .lock = 1 };
-static volatile int protect_nest = 0;
-static uint64_t     protect_flags = 0;
+static volatile int protect_nest[NR_CPUS];
+static uint64_t     protect_flags[NR_CPUS];
 
 sys_prot_t sys_arch_protect(void)
 {
-    if (protect_nest == 0) {
-        protect_flags = spin_lock_irqsave(&lwip_global_lock);
+    unsigned int cpu = (unsigned int)cpu_id();
+    if (protect_nest[cpu] == 0) {
+        protect_flags[cpu] = spin_lock_irqsave(&lwip_global_lock);
     }
-    protect_nest++;
-    return protect_flags;
+    protect_nest[cpu]++;
+    return protect_flags[cpu];
 }
 
 void sys_arch_unprotect(sys_prot_t pval)
 {
     (void)pval;
-    if (protect_nest <= 0) return;
-    if (--protect_nest == 0)
-        spin_unlock_irqrestore(&lwip_global_lock, protect_flags);
+    unsigned int cpu = (unsigned int)cpu_id();
+    if (protect_nest[cpu] <= 0) return;
+    if (--protect_nest[cpu] == 0)
+        spin_unlock_irqrestore(&lwip_global_lock, protect_flags[cpu]);
 }
 
 // ═══════════════════════════════════════════════════════════════
