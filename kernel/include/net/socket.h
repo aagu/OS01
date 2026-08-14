@@ -13,6 +13,10 @@ static inline uint16_t os01_htons(uint16_t n) { return __builtin_bswap16(n); }
 
 // socket_t is defined in kernel/file.h
 
+// Socket type values (shared with the userspace socket ABI).
+#define SOCK_STREAM  1  // TCP
+#define SOCK_DGRAM   2  // UDP
+
 // Socket state constants (shared with poll.c)
 #define SOCK_UNCONNECTED  0
 #define SOCK_CONNECTED    1

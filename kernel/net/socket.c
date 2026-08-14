@@ -61,8 +61,8 @@ socket_t *socket_alloc(int domain, int type, int protocol)
 {
     enum netconn_type nc_type;
     switch (type) {
-    case 1: nc_type = NETCONN_TCP; break;   // SOCK_STREAM
-    case 2: nc_type = NETCONN_UDP; break;   // SOCK_DGRAM
+    case SOCK_STREAM: nc_type = NETCONN_TCP; break;
+    case SOCK_DGRAM:  nc_type = NETCONN_UDP; break;
     default: return NULL;
     }
 
@@ -160,7 +160,7 @@ int64_t do_sendto(int fd, const void *buf, uint64_t len, int flags,
     socket_t *s = socket_get(fd);
     if (!s) return -EBADF;
 
-    if (s->type == 1) {
+    if (s->type == SOCK_STREAM) {
         // TCP: use netconn_write (ip/port ignored — already connected)
         (void)flags; (void)ip; (void)port;
         if (signal_pending_fatal()) return -EINTR;

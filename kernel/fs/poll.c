@@ -265,7 +265,7 @@ uint32_t fd_poll(file_t *f, poll_table_t *pt)
         // listeners use it for queued connections.
         if (s->rx_pending &&
             (s->state == SOCK_CONNECTED || s->state == SOCK_LISTENING ||
-             (s->state == SOCK_UNCONNECTED && s->type == 2 /* SOCK_DGRAM */)))
+             (s->state == SOCK_UNCONNECTED && s->type == SOCK_DGRAM)))
             revents |= POLLIN | POLLRDNORM;
         if (revents == 0 && pt && !pt->triggered)
             poll_wait(pt, &s->poll_list, &s->lock);
