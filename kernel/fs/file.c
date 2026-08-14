@@ -401,6 +401,7 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
     case FD_SOCKET: {
         socket_t *s = f->sock;
         if (!s || !s->conn) return -1;
+        if (signal_pending_fatal()) return -EINTR;
         // Drain a partially-consumed netbuf first (a 1-byte fgets
         // read must not lose the rest of the 370-byte response).
         if (s->rx_nb) {
@@ -443,6 +444,7 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
                 if (copy > 0) return (int64_t)copy;
                 return -EAGAIN;
             }
+            if (signal_pending_fatal()) return -EINTR;
             if (err == ERR_CLSD) return 0;
             if (err == ERR_WOULDBLOCK) return -EAGAIN;
             return -EIO;
@@ -566,7 +568,7 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
         socket_t *s = f->sock;
         if (!s || !s->conn) return -EIO;
         err_t err = netconn_write((struct netconn *)s->conn, buf,
-                                  (u16_t)size, 0x01);  // NETCONN_COPY
+                                  (size_t)size, NETCONN_COPY);
         if (err == ERR_OK) { f->offset += size; return (int64_t)size; }
         return -EIO;
     }

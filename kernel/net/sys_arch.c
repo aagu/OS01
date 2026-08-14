@@ -273,6 +273,10 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
         deadline_jiffies = jiffies + (timeout + 9) / 10;
 
     for (;;) {
+        if (signal_pending_fatal()) {
+            destroy_timer(idle_timer);
+            return SYS_ARCH_TIMEOUT;
+        }
         // The idle timer only fires ONCE (do_timer removes it).  Rebuild
         // it at the top of every loop iteration so a second sleep in
         // this same mbox_fetch call is still woken 50ms later.  Without
@@ -454,7 +458,8 @@ sys_thread_t sys_thread_new(const char *name,
     }
     t->state = TASK_RUNNING;
     t->counter = t->priority;
-    (void)name_copy; return (sys_thread_t)(uintptr_t)t;
+    kfree(name_copy);
+    return (sys_thread_t)(uintptr_t)t;
 }
 
 // ═══════════════════════════════════════════════════════════════

@@ -9,6 +9,7 @@
 // lwIP sockaddr_in.sin_port arrives in network byte order; convert
 // to host order before passing to netconn_connect etc.
 static inline uint16_t os01_ntohs(uint16_t n) { return __builtin_bswap16(n); }
+static inline uint16_t os01_htons(uint16_t n) { return __builtin_bswap16(n); }
 
 // socket_t is defined in kernel/file.h
 

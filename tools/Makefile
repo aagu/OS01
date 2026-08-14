@@ -2,8 +2,12 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -std=c11
 
+.PHONY: all mkdisk check-deps clean
+
 all: mkdisk
 
+# mkdisk is a tracked host binary. Always rebuild it so checkout/archive
+# timestamps cannot make an older binary appear newer than mkdisk.c.
 mkdisk: mkdisk.c
 	$(CC) $(CFLAGS) -o $@ $<
 

@@ -35,6 +35,7 @@ struct addrinfo {
 #define EAI_NONAME  -2
 #define EAI_AGAIN   -3
 #define EAI_FAIL    -4
+#define EAI_SERVICE -8
 #define EAI_MEMORY  -10
 #define EAI_SYSTEM  -11
 

@@ -2262,11 +2262,39 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         break;
     }
     case SYS_recvfrom: {
+        uint64_t addr_ptr = regs->r8;
+        uint64_t addrlen_ptr = regs->r9;
         if (regs->rdx && !syscall_user_range_ok(regs->rsi, regs->rdx)) {
             regs->rax = -EFAULT; break;
         }
-        regs->rax = do_recvfrom((int)regs->rdi, (void *)regs->rsi,
-                                regs->rdx, (int)regs->r10, NULL, NULL);
+        uint32_t ip = 0;
+        uint16_t port = 0;
+        uint32_t addrlen = 0;
+        if (addr_ptr) {
+            if (!syscall_user_range_ok(addrlen_ptr, sizeof(addrlen))) {
+                regs->rax = -EFAULT; break;
+            }
+            memcpy(&addrlen, (void *)addrlen_ptr, sizeof(addrlen));
+            if (addrlen < sizeof(struct sockaddr_in) ||
+                !syscall_user_range_ok(addr_ptr, sizeof(struct sockaddr_in))) {
+                regs->rax = -EINVAL; break;
+            }
+        }
+        int64_t ret = do_recvfrom((int)regs->rdi, (void *)regs->rsi,
+                                  regs->rdx, (int)regs->r10,
+                                  addr_ptr ? &ip : NULL,
+                                  addr_ptr ? &port : NULL);
+        if (ret >= 0 && addr_ptr) {
+            struct sockaddr_in src;
+            memset(&src, 0, sizeof(src));
+            src.sin_family = AF_INET;
+            src.sin_port = os01_htons(port);
+            src.sin_addr = ip;
+            memcpy((void *)addr_ptr, &src, sizeof(src));
+            addrlen = sizeof(src);
+            memcpy((void *)addrlen_ptr, &addrlen, sizeof(addrlen));
+        }
+        regs->rax = ret;
         break;
     }
     case SYS_bind: {

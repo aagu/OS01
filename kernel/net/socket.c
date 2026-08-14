@@ -126,6 +126,7 @@ int64_t do_socket(int domain, int type, int protocol)
     if (fd < 0) {
         f->sock = NULL;
         file_free(f);
+        socket_free(s);
         return -ENFILE;
     }
     return fd;
@@ -161,11 +162,12 @@ int64_t do_sendto(int fd, const void *buf, uint64_t len, int flags,
         // TCP: use netconn_write (ip/port ignored — already connected)
         (void)flags; (void)ip; (void)port;
         err_t err = netconn_write((struct netconn *)s->conn, buf,
-                                  (u16_t)len, 0x01);  // NETCONN_COPY
+                                  (size_t)len, NETCONN_COPY);
         return (err == ERR_OK) ? (int64_t)len : -EIO;
     } else {
         // UDP: create netbuf with destination
         (void)flags;
+        if (len > UINT16_MAX) return -EMSGSIZE;
         struct netbuf *nb = netbuf_new();
         if (!nb) return -ENOMEM;
         void *payload = netbuf_alloc(nb, (u16_t)len);
@@ -196,8 +198,11 @@ int64_t do_recvfrom(int fd, void *buf, uint64_t len, int flags,
     (void)flags;
 
     struct netbuf *nb;
+    if (signal_pending_fatal()) return -EINTR;
+
     err_t err = netconn_recv((struct netconn *)s->conn, &nb);
     if (err != ERR_OK) {
+        if (signal_pending_fatal()) return -EINTR;
         if (err == ERR_CLSD) {
             // Peer closed: readable-but-EOF.  Keep rx_pending set so
             // poll(POLLIN) returns and read() surfaces 0 (EOF).
@@ -210,7 +215,7 @@ int64_t do_recvfrom(int fd, void *buf, uint64_t len, int flags,
     void *data;
     u16_t data_len;
     netbuf_data(nb, &data, &data_len);
-    u16_t copy = (data_len < (u16_t)len) ? data_len : (u16_t)len;
+    size_t copy = (data_len < len) ? data_len : (size_t)len;
     memcpy(buf, data, copy);
 
     // Fill in source address if requested
@@ -224,10 +229,7 @@ int64_t do_recvfrom(int fd, void *buf, uint64_t len, int flags,
 
     netbuf_delete(nb);
 
-    if (signal_pending_fatal())
-        return -EINTR;
-
-    return copy;
+    return (int64_t)copy;
 }
 
 // ── SYS_bind — bind to local address ─────────────────────────
@@ -338,7 +340,7 @@ extern struct netif os01_netif;
     struct sockaddr_in sin;
     memset(&sin, 0, sizeof(sin));
     sin.sin_family = AF_INET;
-    sin.sin_port = port;
+    sin.sin_port = os01_htons(port);
     sin.sin_addr = ip;
     memcpy(addr_ptr, &sin, sizeof(sin));
     *addrlen_ptr = sizeof(sin);
