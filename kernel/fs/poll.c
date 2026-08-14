@@ -259,14 +259,14 @@ uint32_t fd_poll(file_t *f, poll_table_t *pt)
         uint64_t flags = spin_lock_irqsave(&s->lock);
         if (s->state == SOCK_CONNECTED) {
             revents |= POLLOUT;
-            // Data available (netconn RCVPLUS callback set rx_pending)
-            // or peer closed (rx_pending stays set after ERR_CLSD):
-            // readable either way.
-            if (s->rx_pending)
-                revents |= POLLIN | POLLRDNORM;
         }
-        if (s->state == SOCK_LISTENING && s->rx_pending)
-            revents |= POLLIN;
+        // netconn reports queued datagrams on unconnected UDP sockets too.
+        // Connected sockets may also use rx_pending to report peer closure;
+        // listeners use it for queued connections.
+        if (s->rx_pending &&
+            (s->state == SOCK_CONNECTED || s->state == SOCK_LISTENING ||
+             (s->state == SOCK_UNCONNECTED && s->type == 2 /* SOCK_DGRAM */)))
+            revents |= POLLIN | POLLRDNORM;
         if (revents == 0 && pt && !pt->triggered)
             poll_wait(pt, &s->poll_list, &s->lock);
         spin_unlock_irqrestore(&s->lock, flags);
