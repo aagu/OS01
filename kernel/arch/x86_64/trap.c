@@ -1013,6 +1013,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
 		[51] = 61,	// getsockname	→ SYS_getsockname
 		[54] = 59,	// setsockopt	→ SYS_setsockopt
 		[55] = 60,	// getsockopt	→ SYS_getsockopt
+		[48] = 64,	// shutdown	→ SYS_shutdown
 		[164] = 63,	// getifaddr	→ SYS_getifaddr
         };
         int8_t os = linux_to_os01[regs->rax];
@@ -2241,7 +2242,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             ip = a.sin_addr; port = a.sin_port;
         }
         regs->rax = do_sendto((int)regs->rdi, (void *)regs->rsi,
-                              len, (int)regs->r10, ip, port);
+                              len, (int)regs->r10, ip, os01_ntohs(port));
         break;
     }
     case SYS_recvfrom: {
@@ -2253,7 +2254,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         struct sockaddr_in a;
         if ((uint64_t)regs->rsi >= current->addr_limit) { regs->rax = -EFAULT; break; }
         memcpy(&a, (void *)regs->rsi, sizeof(a));
-        regs->rax = do_bind((int)regs->rdi, a.sin_addr, a.sin_port);
+        regs->rax = do_bind((int)regs->rdi, a.sin_addr, os01_ntohs(a.sin_port));
         break;
     }
     case SYS_listen: {
@@ -2281,6 +2282,10 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
     case SYS_getsockopt: {
         regs->rax = do_getsockopt((int)regs->rdi, (int)regs->rsi,
                                   (int)regs->rdx, (void *)regs->r10, (uint64_t *)regs->r8);
+        break;
+    }
+    case SYS_shutdown: {
+        regs->rax = do_shutdown((int)regs->rdi, (int)regs->rsi);
         break;
     }
     default:

@@ -401,21 +401,45 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
     case FD_SOCKET: {
         socket_t *s = f->sock;
         if (!s || !s->conn) return -1;
-        struct netbuf *nb;
-        err_t err = netconn_recv((struct netconn *)s->conn, &nb);
-        if (err == ERR_OK) {
-            void *data; u16_t data_len;
-            netbuf_data(nb, &data, &data_len);
-            size_t copy = (data_len < size) ? data_len : size;
-            memcpy(buf, data, copy);
-            netbuf_delete(nb);
-            if (signal_pending_fatal())
-                return -EINTR;
-            return (int64_t)copy;
+        // Drain a partially-consumed netbuf first (a 1-byte fgets
+        // read must not lose the rest of the 370-byte response).
+        if (s->rx_nb) {
+                struct netbuf *nb = (struct netbuf *)s->rx_nb;
+                void *data; u16_t data_len;
+                netbuf_data(nb, &data, &data_len);
+                u16_t avail = (data_len > (u16_t)s->rx_off) ? (u16_t)(data_len - s->rx_off) : 0;
+                size_t copy = (avail < size) ? avail : size;
+                if (copy > 0) memcpy(buf, (uint8_t *)data + s->rx_off, copy);
+                s->rx_off += (int)copy;
+                if (s->rx_off >= data_len) {
+                    netbuf_delete(nb);
+                    s->rx_nb = NULL;
+                    s->rx_off = 0;
+                }
+                if (copy > 0) return (int64_t)copy;
+                return -EAGAIN;
+            }
+            struct netbuf *nb;
+            err_t err = netconn_recv((struct netconn *)s->conn, &nb);
+            if (err == ERR_OK) {
+                void *data; u16_t data_len;
+                netbuf_data(nb, &data, &data_len);
+                size_t copy = (data_len < size) ? data_len : size;
+                if (copy > 0) memcpy(buf, data, copy);
+                if (copy < data_len) {
+                    // Keep the rest for the next read.
+                    s->rx_nb = nb;
+                    s->rx_off = (int)copy;
+                } else {
+                    netbuf_delete(nb);
+                }
+                if (copy > 0) return (int64_t)copy;
+                return -EAGAIN;
+            }
+            if (err == ERR_CLSD) return 0;
+            if (err == ERR_WOULDBLOCK) return -EAGAIN;
+            return -EIO;
         }
-        if (err == ERR_CLSD) return 0;
-        return -EIO;
-    }
     default:
         return -1;
     }

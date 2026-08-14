@@ -76,6 +76,8 @@ socket_t *socket_alloc(int domain, int type, int protocol)
     s->state    = SOCK_UNCONNECTED;
     s->bound    = 0;
     s->rx_pending = 0;
+    s->rx_nb = NULL;
+    s->rx_off = 0;
     netconn_set_callback_arg(conn, s);
     spin_init(&s->lock);
     list_init(&s->poll_list);
@@ -86,6 +88,7 @@ socket_t *socket_alloc(int domain, int type, int protocol)
 void socket_free(socket_t *s)
 {
     if (!s) return;
+    if (s->rx_nb) netbuf_delete((struct netbuf *)s->rx_nb);
     if (s->conn) netconn_delete((struct netconn *)s->conn);
     kfree(s);
 }
@@ -168,6 +171,7 @@ int64_t do_sendto(int fd, const void *buf, uint64_t len, int flags,
         ip_addr_t addr;
         ip4_addr_set_u32(&addr, ip);
         err_t err = netconn_sendto((struct netconn *)s->conn, nb, &addr, port);
+        log_info("sock: sendto err=%d port=%u dst=%u\n", (int)err, port, ip);
         netbuf_delete(nb);
         if (err != ERR_OK) {
             // ERR_RTE: no route / netif down.  ERR_MEM: pbuf/mbox full.
@@ -363,6 +367,24 @@ int64_t do_getsockopt(int fd, int level, int optname,
     if (!s) return -EBADF;
     (void)level; (void)optname; (void)optval; (void)optlen;
     return 0;
+}
+
+// ── SYS_shutdown — half-close the connection ─────────────────
+// how: 0 = SHUT_RD, 1 = SHUT_WR, 2 = SHUT_RDWR.  busybox wget calls
+// shutdown(fd, SHUT_WR) after sending the request so the server sees
+// EOF on its read side and responds.  lwIP's netconn_shutdown sends
+// a FIN for shut_tx on TCP.
+
+int64_t do_shutdown(int fd, int how)
+{
+    socket_t *s = socket_get(fd);
+    if (!s) return -EBADF;
+    if (!s->conn) return -ENOTCONN;
+    u8_t shut_rx = (how == 0 || how == 2) ? 1 : 0;
+    u8_t shut_tx = (how == 1 || how == 2) ? 1 : 0;
+    err_t err = netconn_shutdown((struct netconn *)s->conn, shut_rx, shut_tx);
+    if (err == ERR_OK) return 0;
+    return -EIO;
 }
 
 // ── SYS_getifaddr — return netif IPv4 address ────────────────

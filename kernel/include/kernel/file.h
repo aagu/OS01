@@ -64,6 +64,13 @@ typedef struct socket {
     volatile int rx_pending;   // data available (netconn callback RCVPLUS)
     spinlock_T   lock;
     list_t       poll_list;    // poll_wait_entry_t chain
+    // Partial-read state: when read() consumes less than the full
+    // netbuf, the remainder is cached here for the next read.  lwIP
+    // netbufs are one-shot (netbuf_delete frees everything), so a
+    // 1-byte fgets read would otherwise destroy the whole 370-byte
+    // HTTP response.
+    void        *rx_nb;        // lwIP struct netbuf * (partially consumed)
+    int          rx_off;       // bytes already consumed from rx_nb
 } socket_t;
 
 // ── Open file ──────────────────────────────────────────────

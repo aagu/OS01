@@ -36,6 +36,7 @@ int64_t do_setsockopt(int fd, int level, int optname,
 int64_t do_getsockname(int fd, void *addr, uint64_t *addrlen);
 int64_t do_getsockopt(int fd, int level, int optname,
                       void *optval, uint64_t *optlen);
+int64_t do_shutdown(int fd, int how);
 
 #endif
 int64_t do_getifaddr(void);
