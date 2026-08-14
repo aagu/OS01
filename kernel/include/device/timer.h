@@ -12,6 +12,7 @@ typedef struct timer
     uint64_t expire_jiffies;
     void (* func)(void * data);
     void * data;
+    int active;          // 1 while linked in the timer list
 } timer_t;
 
 extern timer_t timer_list_head;

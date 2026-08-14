@@ -33,6 +33,7 @@ void do_timer(void * data __attribute__((unused)))
     while ((!list_is_empty(&timer_list_head.list)) && (timer->expire_jiffies <= jiffies))
     {
         list_del(&timer->list);                     // direct list_del, not del_timer()
+        timer->active = 0;
         spin_unlock_irqrestore(&timer_lock, flags); // release before callback
 
         timer->func(timer->data);                   // callback runs unlocked
@@ -66,21 +67,41 @@ void timer_init()
 void add_timer(timer_t * timer)
 {
     uint64_t flags = spin_lock_irqsave(&timer_lock);
-    timer_t * tmp = container_of(list_next(&timer_list_head.list), timer_t, list);
+    timer_t * head = &timer_list_head;
+    timer_t * tmp;
 
-    if (!list_is_empty(&timer_list_head.list))
-    {
-        while (tmp->expire_jiffies < timer->expire_jiffies)
-            tmp = container_of(list_next(&tmp->list), timer_t, list);
+    if (list_is_empty(&head->list)) {
+        list_add_to_behind(&head->list, &timer->list);
+        timer->active = 1;
+        spin_unlock_irqrestore(&timer_lock, flags);
+        return;
     }
+
+    // Find insertion point: first node with expire >= timer->expire.
+    // Guard with tmp != head to stop at the tail — the old code let
+    // the walk wrap around the head node (expire_jiffies of the head
+    // is 0 < any real expire), which either loops forever or inserts
+    // behind a stale node so do_timer never reaches the new timer.
+    tmp = container_of(list_next(&head->list), timer_t, list);
+    while (tmp != head && tmp->expire_jiffies < timer->expire_jiffies)
+        tmp = container_of(list_next(&tmp->list), timer_t, list);
     list_add_to_behind(&tmp->list, &timer->list);
+    timer->active = 1;
     spin_unlock_irqrestore(&timer_lock, flags);
 }
 
 void del_timer(timer_t * timer)
 {
     uint64_t flags = spin_lock_irqsave(&timer_lock);
-    list_del(&timer->list);
+    // Guard against double-removal: do_timer() removes the entry via
+    // list_del() before invoking the callback, so a later del_timer()
+    // on an already-fired timer would corrupt the list.  list_is_empty
+    // on a list_del'd node is UB, so track liveness with a flag on the
+    // node instead (see timer_t.active).
+    if (timer->active) {
+        list_del(&timer->list);
+        timer->active = 0;
+    }
     spin_unlock_irqrestore(&timer_lock, flags);
 }
 

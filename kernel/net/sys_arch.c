@@ -126,6 +126,7 @@ typedef struct {
     int           count;
     spinlock_T    lock;
     wait_queue_t  wq;
+    volatile int  idle_wakeup;   // lost-wakeup guard for the idle timer
 } os_mbox_t;
 
 // ── Interrupt-driven RX wake ─────────────────────────────────
@@ -188,17 +189,33 @@ typedef struct {
     os_mbox_t *mb;
     volatile int cancelled;
 } mbox_idle_ctx_t;
+/* mbox_idle_ctx_t no longer used: the idle-timer callback now takes
+   the mailbox pointer directly (see mbox_idle_callback).  Kept only
+   as documentation of the old stack-ctx design. */
 
 static void mbox_idle_callback(void *data)
 {
-    mbox_idle_ctx_t *ctx = (mbox_idle_ctx_t *)data;
-    if (ctx->cancelled) return;
-    // Wake the fetcher directly — do NOT post a message.  Posting a
-    // sentinel message floods the mbox (one per 50ms), crowding out
-    // real lwIP messages (TCPIP_MSG_INPKT etc.) — the mailbox fills
-    // with 0x1 sentinels and packets get dropped.  Waking the wait
-    // queue just makes mbox_fetch re-run net_poll_rx() and re-check.
-    wait_queue_wake_one(&ctx->mb->wq);
+    // data is the mailbox pointer itself — NOT a stack-allocated ctx.
+    // The old code passed &ictx (a stack local in mbox_fetch); when the
+    // timer fired right as mbox_fetch returned (message arrived), the
+    // callback dereferenced a dangling stack pointer (use-after-free),
+    // woke the WRONG wait queue, and tcpip_thread slept forever — RX
+    // buffers accumulated in rxq, RDH caught up to RDT and the NIC
+    // stopped receiving.  Waking the mailbox's queue is harmless even
+    // if the fetcher already left (wq empty -> no-op).
+    os_mbox_t *mb = (os_mbox_t *)data;
+    // Lost-wakeup-safe wake: set the flag BEFORE waking so a fetcher
+    // that is between its count-check and its wait-queue enqueue
+    // cannot miss this tick.  It checks idle_wakeup under mb->lock
+    // before sleeping and, if set, clears it and loops instead of
+    // blocking.  (A bare wait_queue_wake_one has a race: if the timer
+    // fires just before the fetcher enqueues, the wake is lost and
+    // tcpip_thread sleeps forever — RX buffers pile up in rxq, RDH
+    // catches up to RDT and the NIC stops receiving.)
+    uint64_t _f = spin_lock_irqsave(&mb->lock);
+    mb->idle_wakeup = 1;
+    spin_unlock_irqrestore(&mb->lock, _f);
+    wait_queue_wake_one(&mb->wq);
 }
 
 u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
@@ -210,11 +227,15 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
     // so buffered RX packets get processed even while waiting for a
     // message.  Timer-driven (not busy-wait): the PIT handler only
     // BUFFERS packets (IRQ context cannot call lwIP).
-    mbox_idle_ctx_t ictx = {0};
     timer_t *idle_timer = NULL;
-    ictx.mb = mb;
-    idle_timer = create_timer(mbox_idle_callback, &ictx,
-                              jiffies + MBOX_IDLE_WAKEUP_JIFFIES);
+    // create_timer()/init_timer() treat the argument as a RELATIVE
+    // jiffies offset (expire = jiffies + arg). Passing an absolute
+    // `jiffies + N` double-added jiffies (expire = 2*jiffies + N) so
+    // the timer never expired and tcpip_thread slept forever waiting
+    // for RX that never got polled. Pass the bare offset.  data is the
+    // mailbox pointer itself (stable, global) — see mbox_idle_callback.
+    idle_timer = create_timer(mbox_idle_callback, mb,
+                              MBOX_IDLE_WAKEUP_JIFFIES);
     if (idle_timer) {
         add_timer(idle_timer);
     }
@@ -226,6 +247,19 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
     g_fetch_mbox = mb;
 
     for (;;) {
+        // The idle timer only fires ONCE (do_timer removes it).  Rebuild
+        // it at the top of every loop iteration so a second sleep in
+        // this same mbox_fetch call is still woken 50ms later.  Without
+        // this, tcpip_thread slept forever after the first wake (its RX
+        // polling stopped, the RX queue filled, the NIC stopped
+        // receiving, and wget hung waiting for the HTTP body).
+        if (!idle_timer || !idle_timer->active) {
+            idle_timer = create_timer(mbox_idle_callback, mb,
+                                      MBOX_IDLE_WAKEUP_JIFFIES);
+            if (idle_timer) {
+                add_timer(idle_timer);
+            }
+        }
         uint64_t flags = spin_lock_irqsave(&mb->lock);
         if (mb->count > 0) {
             void *m = mb->queue[mb->tail];
@@ -233,7 +267,6 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
             mb->count--;
             spin_unlock_irqrestore(&mb->lock, flags);
 
-            ictx.cancelled = 1;
             del_timer(idle_timer);
             g_fetch_mbox = NULL;
 
@@ -250,7 +283,6 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
           spin_unlock_irqrestore(&mb->lock, _f2); }
 
         if (timeout > 0 && jiffies >= deadline_jiffies) {
-            ictx.cancelled = 1;
             del_timer(idle_timer);
             g_fetch_mbox = NULL;
             return SYS_ARCH_TIMEOUT;
@@ -264,10 +296,13 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
         // the queue.  The old wait_queue_sleep(&mb->wq) left a window:
         // post's count++ → wake_one could run between our count check
         // and our enqueue, and the wake was lost (tcpip_thread slept
-        // forever with a message sitting in the mbox).
+        // forever with a message sitting in the mbox).  The idle-timer
+        // wake uses the same lock, but ALSO sets mb->idle_wakeup (see
+        // mbox_idle_callback) — check it here to close the timer race.
         {
             uint64_t _f = spin_lock_irqsave(&mb->lock);
             if (mb->count > 0) { spin_unlock_irqrestore(&mb->lock, _f); continue; }
+            if (mb->idle_wakeup) { mb->idle_wakeup = 0; spin_unlock_irqrestore(&mb->lock, _f); continue; }
             uint64_t _wf = spin_lock_irqsave(&mb->wq.lock);
             list_add_to_before(&mb->wq.head, &current->io_wait_node);
             current->state = TASK_INTERRUPTIBLE;
