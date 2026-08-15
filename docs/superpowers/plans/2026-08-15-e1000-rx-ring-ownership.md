@@ -106,17 +106,29 @@ Run each iteration as a separate QEMU process, saving its complete output:
 ```bash
 mkdir -p /tmp/os01-e1000-mutation
 for i in $(seq 1 20); do
-    python3 tests/run_test.py network >"/tmp/os01-e1000-mutation/run-$i.log" 2>&1
+    TEST_TIMEOUT=180 python3 tests/run_test.py network >"/tmp/os01-e1000-mutation/run-$i.log" 2>&1
     test $? -ne 0 || exit 1
-    rg '\[NET TEST\] RESULT: [0-9]+ passed, [1-9][0-9]* failed' "/tmp/os01-e1000-mutation/run-$i.log" || exit 1
+    log="/tmp/os01-e1000-mutation/run-$i.log"
+    if rg -q '\[NET TEST\] RESULT: [0-9]+ passed, [1-9][0-9]* failed' "$log"; then
+        continue
+    fi
+    rg -q '\[NET TEST\] starting' "$log" || exit 1
+    rg -q '\[TEST\] TIMEOUT waiting for pattern: \[NET TEST\] RESULT:' "$log" || exit 1
 done
 ```
 
-Expected: the shell exits 0; all 20 logs contain an aggregate result with at least one failure. `DHCP: PASS` is expected because the guest initially has a static IP; UDP, DNS, TCP, or wget must expose the RX starvation.
+Expected: the shell exits 0. Every one of the 20 logs either contains an
+aggregate result with at least one failure, or contains both the network-test
+start marker and the runner timeout while waiting for its aggregate result.
+Current `nettest` requires the exact DHCP lease `10.0.2.20`, so DHCP may fail
+after the two available descriptors are exhausted. Build failure, QEMU boot
+failure, and host-port bind failure are not valid mutation evidence.
 
 If iteration 2 or later fails before QEMU starts with `Address already in use`,
 stop and fix the harness's host-port cleanup separately, then restart all 20
-iterations from 1. A bind failure is not descriptor-starvation evidence.
+iterations from 1. A bind failure is not descriptor-starvation evidence. A
+timeout before `[NET TEST] starting` is likewise invalid and requires a full
+restart.
 
 - [ ] **Step 5: Restore only the mutation and verify the restoration**
 
@@ -367,4 +379,7 @@ Expected: no blocking findings. If review changes code, repeat Tasks 3 Steps 1â€
 
 - [ ] **Step 6: Record verification evidence**
 
-In the final handoff, report the implementation commit, the 20/20 mutation result, the 20/20 green result, `make test`, syscall E2E, and any accepted environmental prerequisite. Do not claim success from cached or pre-change output.
+In the final handoff, report the implementation commit, the 20/20 mutation
+result split into aggregate failures and valid post-start timeouts, the 20/20
+green result, `make test`, syscall E2E, and any accepted environmental
+prerequisite. Do not claim success from cached or pre-change output.
