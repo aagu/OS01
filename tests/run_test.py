@@ -46,7 +46,8 @@ class TestRunner:
             "-no-shutdown",
         ]
         if network:
-            args += ["-netdev", "user,id=net0", "-device", "e1000e,netdev=net0"]
+            args += ["-netdev", "user,id=net0,dhcpstart=10.0.2.20",
+                     "-device", "e1000e,netdev=net0"]
         self.proc = subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
@@ -220,8 +221,10 @@ def test_inittab_phase(tester):
 
 class _EchoTCPHandler(socketserver.BaseRequestHandler):
     def handle(self):
-        data = self.request.recv(4096)
-        if data:
+        while True:
+            data = self.request.recv(4096)
+            if not data:
+                return
             self.request.sendall(data)
 
 
@@ -302,7 +305,7 @@ def test_network(tester):
     try:
         services.start()
         tester.start_qemu(network=True)
-        output = tester.read_until("[NET TEST] RESULT:", timeout=75)
+        output = tester.read_until("[NET TEST] RESULT:", timeout=tester.timeout)
         if not output:
             print("FAIL: network test did not complete")
             return False

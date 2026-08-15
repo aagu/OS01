@@ -28,11 +28,15 @@ static void result(const char *name, int ok)
 
 static int wait_for_dhcp(void)
 {
-    const struct timespec delay = { .tv_sec = 0, .tv_nsec = 250000000 };
+    struct in_addr expected;
+    if (!inet_aton("10.0.2.20", &expected))
+        return 0;
     for (int i = 0; i < 40; i++) {
-        if (syscall(SYS_getifaddr, 0, 0, 0) > 0)
+        uint32_t current = (uint32_t)syscall(SYS_getifaddr, 0, 0, 0);
+        if (current == expected.s_addr)
             return 1;
-        nanosleep(&delay, NULL);
+        if (poll(NULL, 0, 250) < 0)
+            return 0;
     }
     return 0;
 }
@@ -94,21 +98,38 @@ static int test_tcp(void)
 {
     static const char message[] = "os01-tcp";
     char reply[32];
+    size_t sent = 0;
+    size_t received = 0;
+    int ok = 0;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return 0;
     struct sockaddr_in peer = {0};
     peer.sin_family = AF_INET;
     peer.sin_port = htons(TCP_PORT);
     if (!inet_aton(HOST_IP, &peer.sin_addr) ||
-        connect(fd, (struct sockaddr *)&peer, sizeof(peer)) < 0 ||
-        write(fd, message, sizeof(message)) != (int)sizeof(message) ||
-        !wait_readable(fd)) {
-        close(fd);
-        return 0;
+        connect(fd, (struct sockaddr *)&peer, sizeof(peer)) < 0)
+        goto out;
+
+    while (sent < sizeof(message)) {
+        int n = (int)write(fd, message + sent, sizeof(message) - sent);
+        if (n <= 0 || (size_t)n > sizeof(message) - sent)
+            goto out;
+        sent += (size_t)n;
     }
-    int n = read(fd, reply, sizeof(reply));
+
+    while (received < sizeof(message)) {
+        if (!wait_readable(fd))
+            goto out;
+        int n = (int)read(fd, reply + received, sizeof(message) - received);
+        if (n <= 0 || (size_t)n > sizeof(message) - received)
+            goto out;
+        received += (size_t)n;
+    }
+
+    ok = !memcmp(reply, message, sizeof(message));
+out:
     close(fd);
-    return n == (int)sizeof(message) && !memcmp(reply, message, sizeof(message));
+    return ok;
 }
 
 static int test_wget(void)
