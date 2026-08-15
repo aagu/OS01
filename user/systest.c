@@ -1232,8 +1232,14 @@ static void test_proc_fd(void)
     // 6. Non-current PID: child holds fds, parent reads /proc/<child>/fd/0
     int cpid = fork();
     if (cpid == 0) {
-        struct timespec ts = { .tv_sec = 2, .tv_nsec = 0 };
-        nanosleep(&ts, NULL);   // hold fds open while parent inspects
+        // CPU-bound busy wait keeps the child alive long enough for the
+        // parent to read /proc/<pid>/fd/0.  Do NOT use nanosleep(): its
+        // jiffies spin may hang in a fork child (timer/jiffies not advanced
+        // there) — same reason test_select_null_timeout is disabled.
+        volatile unsigned long spin = 0;
+        for (volatile unsigned long i = 0; i < 50000000UL; i++)
+            spin += i;
+        (void)spin;
         _exit(0);
     } else if (cpid > 0) {
         snprintf(path, sizeof(path), "/proc/%d/fd/0", cpid);
