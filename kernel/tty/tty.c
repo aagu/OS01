@@ -220,7 +220,7 @@ int tty_write(tty_t *tty, const char *buf, int size)
 // poll_wait_entry on tty->read_poll for cascade wake when
 // tty_push_input() → tty_wake_waiters() fires.
 
-uint32_t tty_poll(tty_t *tty, poll_table_t *pt)
+uint32_t tty_poll(tty_t *tty, uint32_t requested, poll_table_t *pt)
 {
     uint32_t mask = 0;
 
@@ -231,7 +231,7 @@ uint32_t tty_poll(tty_t *tty, poll_table_t *pt)
     uint64_t flags = spin_lock_irqsave(&tty->ring_lock);
     if (tty->head != tty->tail) {
         mask |= POLLIN | POLLRDNORM;
-    } else if (pt && !pt->triggered) {
+    } else if (poll_requested_read(requested) && pt && !pt->triggered) {
         poll_wait(pt, &tty->read_poll, &tty->ring_lock);
     }
     spin_unlock_irqrestore(&tty->ring_lock, flags);

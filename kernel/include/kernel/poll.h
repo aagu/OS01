@@ -24,6 +24,16 @@
 #define POLLWRNORM  0x100
 #define POLLWRBAND  0x200
 
+static inline bool poll_requested_read(uint32_t requested)
+{
+    return (requested & (POLLIN | POLLRDNORM | POLLPRI | POLLRDBAND)) != 0;
+}
+
+static inline bool poll_requested_write(uint32_t requested)
+{
+    return (requested & (POLLOUT | POLLWRNORM | POLLWRBAND)) != 0;
+}
+
 // ── Poll fd (Linux ABI — must match libc/include/poll.h) ──
 // Defined here so kernel code (poll.c, trap.c) can use it
 // without including a userspace header.
@@ -90,7 +100,8 @@ void poll_table_cleanup(poll_table_t *pt);
 
 // Forward-declared in kernel/fs/file.h; implementation in kernel/fs/poll.c.
 struct file;
-uint32_t fd_poll(struct file *f, struct poll_table *pt);
+uint32_t fd_poll(struct file *f, uint32_t requested,
+                 struct poll_table *pt);
 
 // do_poll — poll(2) syscall implementation.
 int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout);

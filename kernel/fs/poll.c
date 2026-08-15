@@ -25,7 +25,8 @@
 
 // Forward: devfs_poll lives in devfs.c (devices[] is static there)
 struct vfs_node;
-uint32_t devfs_poll(struct vfs_node *node, poll_table_t *pt);
+uint32_t devfs_poll(struct vfs_node *node, uint32_t requested,
+                    poll_table_t *pt);
 
 // ── poll_table_init — reset for new scan round ─────────────
 // Does NOT re-init wq or entry nodes (one-time setup).
@@ -111,24 +112,31 @@ void poll_table_cleanup(poll_table_t *pt)
 static inline int pipe_empty(pipe_t *p) { return p->head == p->tail; }
 static inline int pipe_full(pipe_t *p)  { return ((p->head + 1) % PIPE_SIZE) == p->tail; }
 
-uint32_t fd_poll(file_t *f, poll_table_t *pt)
+uint32_t fd_poll(file_t *f, uint32_t requested, poll_table_t *pt)
 {
     if (!f) return POLLNVAL;
 
+    bool can_read = f->flags == O_RDONLY || f->flags == O_RDWR;
+    bool can_write = f->flags == O_WRONLY || f->flags == O_RDWR;
+    bool want_read = can_read && poll_requested_read(requested);
+    bool want_write = can_write && poll_requested_write(requested);
+
     switch (f->type) {
 
-    case FD_VFS:
+    case FD_VFS: {
         // Plain files are always ready for read and write
-        if (f->flags == O_RDONLY || f->flags == O_RDWR)
-            return POLLIN | POLLRDNORM;
-        if (f->flags == O_WRONLY || f->flags == O_RDWR)
-            return POLLOUT | POLLWRNORM;
-        return 0;
+        uint32_t mask = 0;
+        if (can_read)
+            mask |= POLLIN | POLLRDNORM;
+        if (can_write)
+            mask |= POLLOUT | POLLWRNORM;
+        return mask;
+    }
 
     case FD_DEV:
         // /dev devices — delegate to devfs_poll()
         if (!f->node) return POLLNVAL;
-        return devfs_poll(f->node, pt);
+        return devfs_poll(f->node, requested, pt);
 
     case FD_PIPE: {
         pipe_t *p = f->pipe;
@@ -144,7 +152,7 @@ uint32_t fd_poll(file_t *f, poll_table_t *pt)
                     mask |= POLLHUP;
             } else if (p->writers == 0) {
                 mask |= POLLIN | POLLHUP;  // EOF: read() returns 0 immediately
-            } else if (pt && !pt->triggered) {
+            } else if (want_read && pt && !pt->triggered) {
                 poll_wait(pt, &p->read_poll, &p->lock);
             }
         }
@@ -154,7 +162,7 @@ uint32_t fd_poll(file_t *f, poll_table_t *pt)
                 mask |= POLLOUT;
             } else if (p->readers == 0) {
                 mask |= POLLOUT | POLLERR;  // EPIPE: write() errors immediately
-            } else if (pt && !pt->triggered) {
+            } else if (want_write && pt && !pt->triggered) {
                 poll_wait(pt, &p->write_poll, &p->lock);
             }
         }
@@ -166,7 +174,7 @@ uint32_t fd_poll(file_t *f, poll_table_t *pt)
                     mask |= POLLHUP;
             } else if (p->writers == 0) {
                 mask |= POLLIN | POLLHUP;
-            } else if (pt && !pt->triggered) {
+            } else if (want_read && pt && !pt->triggered) {
                 poll_wait(pt, &p->read_poll, &p->lock);
             }
 
@@ -174,7 +182,7 @@ uint32_t fd_poll(file_t *f, poll_table_t *pt)
                 mask |= POLLOUT;
             } else if (p->readers == 0) {
                 mask |= POLLOUT | POLLERR;
-            } else if (pt && !pt->triggered) {
+            } else if (want_write && pt && !pt->triggered) {
                 poll_wait(pt, &p->write_poll, &p->lock);
             }
         }
@@ -196,7 +204,7 @@ uint32_t fd_poll(file_t *f, poll_table_t *pt)
                     mask |= POLLHUP;
             } else if (p->writers == 0) {
                 mask |= POLLIN | POLLHUP;
-            } else if (pt && !pt->triggered) {
+            } else if (want_read && pt && !pt->triggered) {
                 poll_wait(pt, &p->read_poll, &p->lock);
             }
             spin_unlock_irqrestore(&pty->slave_to_master->lock, fl);
@@ -210,7 +218,7 @@ uint32_t fd_poll(file_t *f, poll_table_t *pt)
                     mask |= POLLERR;
             } else if (p->readers == 0) {
                 mask |= POLLOUT | POLLERR;
-            } else if (pt && !pt->triggered) {
+            } else if (want_write && pt && !pt->triggered) {
                 poll_wait(pt, &p->write_poll, &p->lock);
             }
             spin_unlock_irqrestore(&pty->master_to_slave->lock, fl);
@@ -231,7 +239,7 @@ uint32_t fd_poll(file_t *f, poll_table_t *pt)
                     mask |= POLLHUP;
             } else if (p->writers == 0) {
                 mask |= POLLIN | POLLHUP;
-            } else if (pt && !pt->triggered) {
+            } else if (want_read && pt && !pt->triggered) {
                 poll_wait(pt, &p->read_poll, &p->lock);
             }
             spin_unlock_irqrestore(&pty->master_to_slave->lock, fl);
@@ -245,7 +253,7 @@ uint32_t fd_poll(file_t *f, poll_table_t *pt)
                     mask |= POLLERR;
             } else if (p->readers == 0) {
                 mask |= POLLOUT | POLLERR;
-            } else if (pt && !pt->triggered) {
+            } else if (want_write && pt && !pt->triggered) {
                 poll_wait(pt, &p->write_poll, &p->lock);
             }
             spin_unlock_irqrestore(&pty->slave_to_master->lock, fl);
@@ -267,7 +275,10 @@ uint32_t fd_poll(file_t *f, poll_table_t *pt)
             (s->state == SOCK_CONNECTED || s->state == SOCK_LISTENING ||
              (s->state == SOCK_UNCONNECTED && s->type == SOCK_DGRAM)))
             revents |= POLLIN | POLLRDNORM;
-        if (revents == 0 && pt && !pt->triggered)
+        uint32_t read_class = POLLIN | POLLRDNORM | POLLPRI | POLLRDBAND;
+        bool socket_want_read = poll_requested_read(requested);
+        bool read_ready = (revents & requested & read_class) != 0;
+        if (socket_want_read && !read_ready && pt && !pt->triggered)
             poll_wait(pt, &s->poll_list, &s->lock);
         spin_unlock_irqrestore(&s->lock, flags);
         return revents;
@@ -290,6 +301,32 @@ uint32_t fd_poll(file_t *f, poll_table_t *pt)
 // ── Global poll state (single-CPU safe; will need per-CPU for SMP) ──
 wait_queue_t *current_poll_wq = NULL;
 uint64_t poll_deadline_jiffies = 0;
+
+static int poll_scan(struct pollfd *kfds, uint64_t nfds, poll_table_t *pt)
+{
+    int ready_count = 0;
+
+    for (uint32_t i = 0; i < nfds; i++) {
+        kfds[i].revents = 0;
+        if (kfds[i].fd < 0)
+            continue;
+
+        uint32_t requested = (uint32_t)kfds[i].events;
+        file_t *f = current->files->fd[kfds[i].fd];
+        uint32_t revents = f ? fd_poll(f, requested, pt) : POLLNVAL;
+        uint32_t filtered = (revents & requested)
+                          | (revents & (POLLHUP | POLLERR | POLLNVAL));
+
+        if (filtered) {
+            kfds[i].revents = (short)filtered;
+            ready_count++;
+            if (pt)
+                pt->triggered = true;
+        }
+    }
+
+    return ready_count;
+}
 
 // ── do_poll_core — core polling loop (no user memory access) ──
 // Caller provides kfds and pt (already setup via poll_table_setup).
@@ -315,27 +352,7 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
         poll_table_init(pt);  // reset nent=0, triggered=false
 
         // ── Scan all fds ──────────────────────────────────
-        for (uint32_t i = 0; i < nfds; i++) {
-            if (kfds[i].fd < 0) continue;
-
-            file_t *f = current->files->fd[kfds[i].fd];
-            if (!f) {
-                kfds[i].revents = POLLNVAL;
-                ready_count++;
-                continue;
-            }
-
-            uint32_t revents = fd_poll(f, pt);
-            // fd is ready if it matches requested events OR has error/HUP
-            if ((revents & kfds[i].events) || (revents & (POLLHUP | POLLERR))) {
-                // Mask to requested events, but always include POLLHUP/POLLERR
-                // even if not requested (POSIX: output-only error flags).
-                kfds[i].revents = (revents & kfds[i].events)
-                                | (revents & (POLLHUP | POLLERR | POLLNVAL));
-                ready_count++;
-                pt->triggered = true;
-            }
-        }
+        ready_count = poll_scan(kfds, nfds, pt);
 
         // ── Ready? Return ─────────────────────────────────
         if (ready_count > 0) {
@@ -366,7 +383,7 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
 
         // ── Timeout check ─────────────────────────────────
         if (timeout_val > 0 && jiffies >= deadline) {
-            return 0;
+            return poll_scan(kfds, nfds, NULL);
         }
 
         // ── Post-sleep signal check ───────────────────────
@@ -374,7 +391,6 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
             return -EINTR;
         }
 
-        ready_count = 0;
     }
 
     return ready_count;

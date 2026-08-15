@@ -41,7 +41,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_pmm_basic.elf \
     $(TEST_BLD)/test_slab_basic.elf \
     $(TEST_BLD)/test_elf_validate.elf \
-    $(TEST_BLD)/test_wait_basic.elf
+    $(TEST_BLD)/test_wait_basic.elf \
+    $(TEST_BLD)/test_poll_requested.elf
 
 .PHONY: all clean run
 
@@ -125,6 +126,11 @@ $(TEST_BLD)/%.o: $(TEST_CASES)/%.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
+# Focused poll policy test includes the production poll header directly.
+$(TEST_BLD)/test_poll_requested.o: $(TEST_CASES)/test_poll_requested.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -D__SPINLOCK_H__ $(KERNEL_INC) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
 # Link rules
 $(TEST_BLD)/test_libc_string.elf: $(TEST_BLD)/test_libc_string.o $(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^
@@ -152,6 +158,13 @@ $(TEST_BLD)/test_elf_validate.elf: $(TEST_BLD)/test_elf_validate.o $(LIBC_OBJS) 
 
 # standalone test (no kernel/libc deps)
 $(TEST_BLD)/test_wait_basic.elf: $(TEST_BLD)/test_wait_basic.o
+	$(HOST_CC) -o $@ $<
+
+$(TEST_BLD)/test_poll_requested.elf: $(TEST_BLD)/test_poll_requested.o
+	$(HOST_CC) -o $@ $<
+
+# Keep the focused command usable from the repository root/task plan.
+build/test_poll_requested.elf: $(TEST_BLD)/test_poll_requested.o
 	$(HOST_CC) -o $@ $<
 
 clean:
