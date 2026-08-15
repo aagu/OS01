@@ -8,6 +8,9 @@ import re
 import time
 import argparse
 import tempfile
+import http.server
+import socketserver
+import threading
 
 QEMU = os.environ.get("QEMU", "qemu-system-x86_64")
 DISK_IMG = os.environ.get("DISK_IMG", "disk.img")
@@ -19,8 +22,9 @@ class TestRunner:
         self.timeout = timeout
         self.proc = None
         self.serial_log = None
+        self.serial_path = None
 
-    def start_qemu(self):
+    def start_qemu(self, network=False):
         """Launch QEMU with serial output to a temp file."""
         self.serial_log = tempfile.NamedTemporaryFile(
             prefix="os01_serial_", suffix=".log", delete=False)
@@ -41,6 +45,8 @@ class TestRunner:
             "-no-reboot",
             "-no-shutdown",
         ]
+        if network:
+            args += ["-netdev", "user,id=net0", "-device", "e1000e,netdev=net0"]
         self.proc = subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
@@ -212,6 +218,111 @@ def test_inittab_phase(tester):
     return True
 
 
+class _EchoTCPHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        data = self.request.recv(4096)
+        if data:
+            self.request.sendall(data)
+
+
+class _PayloadHTTPHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        payload = b"OS01 network test\n"
+        if self.path != "/payload":
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format, *args):
+        pass
+
+
+class _ReusableTCPServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+
+
+class NetworkServices:
+    """Deterministic host endpoints reachable from QEMU as 10.0.2.2."""
+    def __init__(self):
+        self.stop_event = threading.Event()
+        self.servers = []
+        self.threads = []
+        self.udp_socket = None
+
+    def start(self):
+        endpoints = [
+            (10002, _EchoTCPHandler),
+            (18080, _PayloadHTTPHandler),
+        ]
+        for port, handler in endpoints:
+            server = _ReusableTCPServer(("127.0.0.1", port), handler)
+            self.servers.append(server)
+            server.daemon_threads = True
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.threads.append(thread)
+
+        import socket
+        self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.udp_socket.bind(("127.0.0.1", 10001))
+        self.udp_socket.settimeout(0.25)
+
+        def udp_echo():
+            while not self.stop_event.is_set():
+                try:
+                    data, peer = self.udp_socket.recvfrom(4096)
+                    self.udp_socket.sendto(data, peer)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+
+        thread = threading.Thread(target=udp_echo, daemon=True)
+        thread.start()
+        self.threads.append(thread)
+
+    def close(self):
+        self.stop_event.set()
+        if self.udp_socket:
+            self.udp_socket.close()
+        for server in self.servers:
+            server.shutdown()
+            server.server_close()
+        for thread in self.threads:
+            thread.join(timeout=2)
+
+
+def test_network(tester):
+    """Exercise DHCP, UDP, DNS, TCP, and wget through QEMU user networking."""
+    services = NetworkServices()
+    try:
+        services.start()
+        tester.start_qemu(network=True)
+        output = tester.read_until("[NET TEST] RESULT:", timeout=75)
+        if not output:
+            print("FAIL: network test did not complete")
+            return False
+
+        time.sleep(1)
+        output = tester._read_available().decode('utf-8', errors='replace')
+        match = re.search(r'\[NET TEST\] RESULT:\s*(\d+)\s*passed,\s*(\d+)\s*failed', output)
+        if not match:
+            print("FAIL: could not parse network result")
+            return False
+        passed, failed = int(match.group(1)), int(match.group(2))
+        if passed != 5 or failed:
+            print(f"FAIL: network regression: {passed} passed, {failed} failed")
+            return False
+        print("PASS: DHCP, UDP, DNS, TCP, and wget")
+        return True
+    finally:
+        services.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="OS01 test runner")
     parser.add_argument("--disk", default=DISK_IMG, help="Disk image to test")
@@ -228,6 +339,8 @@ def main():
             result = test_systest(tester)
         elif args.test_name == "inittab-phase":
             result = test_inittab_phase(tester)
+        elif args.test_name == "network":
+            result = test_network(tester)
         else:
             print(f"Unknown test: {args.test_name}")
             result = False
