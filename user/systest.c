@@ -1175,6 +1175,85 @@ static void test_proc_maps(void)
     PASS("test_proc_maps (%d lines)", lines);
 }
 
+// ── Test /proc/self/fd ─────────────────────────────────────
+static void test_proc_fd(void)
+{
+    char buf[512], path[64];
+    int n, fd, fdfd, r;
+
+    // 1. FD_VFS: open /proc/meminfo, read /proc/self/fd/<fd> → resolved path
+    fd = open("/proc/meminfo", O_RDONLY);
+    if (fd < 0) { FAIL("proc_fd", "open /proc/meminfo failed"); return; }
+    snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+    fdfd = open(path, O_RDONLY);
+    if (fdfd < 0) { FAIL("proc_fd", "open /proc/self/fd/N failed"); close(fd); return; }
+    n = (int)read(fdfd, buf, sizeof(buf) - 1);
+    close(fdfd);
+    if (n <= 0) { FAIL("proc_fd", "read fd link empty"); close(fd); return; }
+    buf[n] = '\0';
+    CHECK3(strcmp(buf, "/proc/meminfo\n") == 0, "proc_fd", "FD_VFS resolves path");
+
+    // 2. FD_PIPE: pipe, read read-end target
+    int fds[2];
+    if (pipe(fds) < 0) { FAIL("proc_fd", "pipe failed"); close(fd); return; }
+    snprintf(path, sizeof(path), "/proc/self/fd/%d", fds[0]);
+    fdfd = open(path, O_RDONLY);
+    if (fdfd < 0) { FAIL("proc_fd", "open pipe fd failed"); close(fd); close(fds[0]); close(fds[1]); return; }
+    n = (int)read(fdfd, buf, sizeof(buf) - 1);
+    close(fdfd);
+    if (n <= 0) { FAIL("proc_fd", "read pipe link empty"); close(fd); close(fds[0]); close(fds[1]); return; }
+    buf[n] = '\0';
+    CHECK3(strncmp(buf, "pipe:[?]\n", 9) == 0, "proc_fd", "FD_PIPE format");
+
+    // 3. Directory enumeration: see 0, 1, 2
+    DIR *dir = opendir("/proc/self/fd");
+    if (!dir) { FAIL("proc_fd", "opendir /proc/self/fd failed"); close(fd); close(fds[0]); close(fds[1]); return; }
+    int has0 = 0, has1 = 0, has2 = 0;
+    struct dirent *de;
+    while ((de = readdir(dir)) != NULL) {
+        if (strcmp(de->d_name, "0") == 0) has0 = 1;
+        if (strcmp(de->d_name, "1") == 0) has1 = 1;
+        if (strcmp(de->d_name, "2") == 0) has2 = 1;
+    }
+    closedir(dir);
+    CHECK3(has0 && has1 && has2, "proc_fd", "enum 0/1/2");
+
+    // 4. Close then open fails (ENOENT)
+    int saved = fds[1];
+    close(saved);
+    snprintf(path, sizeof(path), "/proc/self/fd/%d", saved);
+    r = open(path, O_RDONLY);
+    CHECK3(r < 0, "proc_fd", "closed fd open fails");
+
+    // 5. Out-of-range fd fails
+    r = open("/proc/self/fd/9999", O_RDONLY);
+    CHECK3(r < 0, "proc_fd", "out-of-range fd fails");
+
+    // 6. Non-current PID: child holds fds, parent reads /proc/<child>/fd/0
+    int cpid = fork();
+    if (cpid == 0) {
+        struct timespec ts = { .tv_sec = 2, .tv_nsec = 0 };
+        nanosleep(&ts, NULL);   // hold fds open while parent inspects
+        _exit(0);
+    } else if (cpid > 0) {
+        snprintf(path, sizeof(path), "/proc/%d/fd/0", cpid);
+        fdfd = open(path, O_RDONLY);
+        if (fdfd >= 0) {
+            n = (int)read(fdfd, buf, sizeof(buf) - 1);
+            close(fdfd);
+            CHECK3(n > 0, "proc_fd", "non-current pid fd readable");
+        } else {
+            FAIL("proc_fd", "open /proc/<pid>/fd/0 failed");
+        }
+        waitpid(cpid, NULL, 0);
+    } else {
+        FAIL("proc_fd", "fork failed");
+    }
+
+    close(fd);
+    close(fds[0]);
+}
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
@@ -1234,6 +1313,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"rbtree_prev_null",    test_wrap_rbtree_prev_null},
     {"eevdf_fork_child",    test_wrap_eevdf_fork_child_scheduled},
     {"proc_maps",           test_proc_maps},
+    {"proc_fd",             test_proc_fd},
 };
 
 int main(void)
