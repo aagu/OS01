@@ -96,17 +96,18 @@ typedef struct files_struct {
 } files_t;
 ```
 
-| 函数 | 语义 |
-|------|------|
-| `files_pin(fs)` | `refcount++`（`__sync_add_and_fetch`，原子） |
-| `files_unpin(fs)` | `refcount--`（`__sync_sub_and_fetch`）；归零则 `deferred_files_free(fs)` |
-| `files_get_file(fs, fd)` | `fs->lock` 内取槽位，非空则 `file_get(f)`，返回稳定 `file_t*` |
-| `files_put_file(f)` | `file_put(f)`（`file_t` refcount--，归零则 `file_free`） |
-| `file_get(f)` / `file_put(f)` | `file_t` refcount 的**唯一**封装，所有增减都走它 |
-| `fd_dup(fs, oldfd, minfd)` | 集中 dup 语义：锁内找 `>= minfd` 空槽、`file_get`、写槽位；锁外无需释放 |
-| `fd_dup2(fs, oldfd, newfd)` | 集中 dup2 语义：锁内 `file_get(old)`、detach 旧 `newfd` 目标、写槽位；锁外 `files_put_file(旧目标)` |
+| 函数 | 语义 | 调用约束（锁） |
+|------|------|----------------|
+| `files_pin(fs)` | `refcount++`（`__sync_add_and_fetch`，原子） | 可持 `task_list_lock`（仅原子操作） |
+| `files_unpin(fs)` | `refcount--`（`__sync_sub_and_fetch`）；归零则 `deferred_files_free(fs)` | **禁止持 `task_list_lock`/`fs->lock`/rq lock**：归零路径在 deferred 队列 OOM 时同步 `files_free`（`deferred_free.c:36`）→ `file_free → pipe/pty/socket 清理 + wake` |
+| `files_get_file(fs, fd)` | `fs->lock` 内取槽位，非空则 `file_get(f)`，返回稳定 `file_t*` | 可持 `fs->lock`（`file_get` 仅原子，不释放对象） |
+| `files_put_file(f)` | `file_put(f)`（refcount--，归零则 `file_free`） | **禁止持 `fs->lock`**（归零进 `file_free` → pipe/pty/socket 锁 + wake） |
+| `file_get(f)` | `file_t` refcount++（原子，唯一封装） | 任意锁内安全（不释放对象、不拿其他锁） |
+| `file_put(f)` | `file_t` refcount--（原子，唯一封装）；归零则 `file_free(f)` | **禁止持 `fs->lock`**：归零进 pipe/pty/socket 清理 + wake |
+| `fd_dup(fs, oldfd, minfd)` | 集中 dup 语义：`fs->lock` 内找 `>= minfd` 空槽、`file_get`、写槽位 | 内部持 `fs->lock`；锁内只 `file_get`（原子），锁外无归零动作 |
+| `fd_dup2(fs, oldfd, newfd)` | 集中 dup2 语义：`fs->lock` 内 `file_get(old)`、detach 旧目标、写槽位；**锁外** `files_put_file(旧目标)` | detach 的旧目标必须移出临界区后再 `file_put` |
 
-**决策：`files_unpin` 归零时统一走 `deferred_files_free`（deferred）。** 理由：schedule 收割器在 schedule() 内，同步 `files_free` 会触发 `file_free → pipe wake → task_wake` 重入调度器；deferred 路径规避之。代价是 `do_exit` 的 fd 关闭时序轻微推迟（见 §已知语义变化）。
+**决策：`files_unpin` 归零时统一走 `deferred_files_free`（deferred）。** 理由：schedule 收割器在 schedule() 内，同步 `files_free` 会触发 `file_free → pipe wake → task_wake` 重入调度器；deferred 路径规避之。代价是 `do_exit` 的 fd 关闭时序轻微推迟（见 §已知语义变化）。**但 deferred 的 OOM 回退会同步 `files_free`（`deferred_free.c:36`），故 `files_unpin` 的锁约束必须按上表执行，不能宣称锁内安全。**
 
 ### 槽位访问规则
 
@@ -114,13 +115,39 @@ typedef struct files_struct {
 
 **file_t refcount 统一封装**：`files_dup`、`dup`、`close`、`do_pipe` 等现有路径直接 `__sync_add/sub_and_fetch(&f->refcount, 1)` 的，全部改为 `file_get(f)`/`file_put(f)`，杜绝绕过协议。
 
-**files_dup 持源锁**：`/proc` 引入外部并发读取者后，「源表仅 current 使用」的假设不再成立（另一 CPU 可能正在 `files_get_file` 读同一 `current->files`）。`files_dup` 复制 `fd[]` 时持源 `fs->lock`（仅临界区，不跨 `file_get` 的 ref-bump——refcount 原子，锁只保证读到一致的槽位集合）。
+**files_dup 持源锁**：`/proc` 引入外部并发读取者后，「源表仅 current 使用」的假设不再成立（另一 CPU 可能正在 `files_get_file` 读同一 `current->files`）。`files_dup` 复制 `fd[]` 时，**槽位指针取出后必须在同一 `src->lock` 临界区内完成 `file_get`**（`file_get` 仅原子计数，不释放对象、不拿其他锁，锁内安全），再写入 `dst->fd[fd]`：
+
+```c
+lock(src->lock);
+for (fd = 0; fd < NOFILE; fd++) {
+    file_t *f = src->fd[fd];
+    if (f) {
+        file_get(f);      // 必须仍在 src->lock 内 → 稳定引用
+        dst->fd[fd] = f;
+    }
+}
+unlock(src->lock);
+```
+
+> 更正：v3 原句「不跨 `file_get` 的 ref-bump」措辞矛盾——它暗示「先读指针、解锁、再 ref-bump」，违反「槽位指针从锁中取出后必须在同一临界区内 ref-bump 才成为稳定引用」的核心规则。正确语义是：**ref-bump 在 `src->lock` 内完成**；锁内不能做的是可能归零的 `file_put`，而非 `file_get`。
 
 ### 锁顺序
 
-- `task_list_lock`：只在 `task_files_pin_by_pid` 内 find + pin；`do_exit`/收割器置空 `t->files`。**不跨** `files_get_file`/`vfs_resolve_path`/`files_put_file`。
-- `fs->lock`：只在槽位 detach/bump/scan 的临界区，**不跨** `file_free`（其内部拿 pipe/pty 锁）。
-- `files_unpin` 归零触发 `deferred_files_free`（拿 `df_lock`）；deferred 路径已在收割器 `task_list_lock` 下调用过（现状），锁内/外均安全。
+```
+（锁内仅原子操作）
+  task_list_lock  →  find_task + files_pin(t->files)   [仅 files_pin 原子]
+  fs->lock        →  槽位 detach / file_get(原子) / 槽位扫描
+
+（释放上述锁之后才可）
+  files_unpin(fs)  →  deferred_files_free → df_lock；或 OOM 同步 files_free
+  file_put(f)      →  file_free → pipe/pty/socket locks + wake
+```
+
+- `task_list_lock`：只在 `task_files_pin_by_pid` 内 find + pin；`do_exit`/收割器仅 `fs = t->files; t->files = NULL`（收集指针），**不跨** `files_get_file`/`vfs_resolve_path`/`files_put_file`/`files_unpin`。
+- `do_exit`/收割器：**锁内只收集要 unpin 的 `files_t*`，释放 `task_list_lock` 后再逐个 `files_unpin()`**。
+- `fd_close`/`fd_dup2`：detach 出的旧 `file_t*` 移出 `fs->lock` 临界区后，再 `file_put()`。
+- `fs->lock`：只在槽位 detach/bump/scan 的临界区，**不跨** `file_put`/`file_free`（其内部拿 pipe/pty 锁）。
+- `files_unpin` 归零触发 `deferred_files_free`（拿 `df_lock`）；df_reaper 执行回调前已释放 `df_lock`（`deferred_free.c:76`）。**`files_unpin` 必须在此链路的锁之外调用**（见上表），因其 OOM 回退会同步 `files_free`。
 
 ### 竞态结局
 
@@ -292,7 +319,7 @@ cat /proc/self/fd/3
 | `kernel/include/kernel/file.h` | `files_t` +`lock`+`refcount`；+`files_pin/unpin/get_file/put_file`、`file_get/put`、`fd_dup/dup2` 声明 | 结构体变更 |
 | `kernel/fs/file.c` | `files_alloc/dup` 初始化 lock/refcount；`fd_alloc/fd_close` 走锁；实现全部新 API；`do_pipe` 等改 `file_get/put` | 引用协议 |
 | `kernel/include/kernel/task.h` | +`task_files_pin_by_pid` 声明 | |
-| `kernel/sched/task.c` | `task_files_pin_by_pid` 实现；`do_exit`/收割器改 `files_unpin` + 锁内置空 `t->files` | 表生命周期 |
+| `kernel/sched/task.c` | `task_files_pin_by_pid` 实现；`do_exit`/收割器改为 `task_list_lock` 内 `fs = t->files; t->files = NULL`，**锁外** `files_unpin(fs)` | 表生命周期 |
 | `kernel/arch/x86_64/trap.c` | `SYS_dup`/`SYS_dup2`/`SYS_fcntl(F_DUPFD/F_DUPFD_CLOEXEC)` 改调 `fd_dup`/`fd_dup2` | 槽位写入者收敛 |
 | `kernel/include/fs/procfs.h` | `PROCFS_TYPE_FD_DIR`/`FD_ENTRY` 常量 | +2 |
 | `kernel/fs/procfs.c` | +`file.h`/`pty.h` include；`parse_fd`/`gen_fd_target`；read/readdir 分支 | ~+110 |
