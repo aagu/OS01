@@ -289,7 +289,45 @@ uint32_t fd_poll(file_t *f, poll_table_t *pt)
 
 // ── Global poll state (single-CPU safe; will need per-CPU for SMP) ──
 wait_queue_t *current_poll_wq = NULL;
-uint64_t poll_deadline_jiffies = 0;
+// ── Poll timeout registry ──────────────────────────────
+// Replaces the old global single-slot (current_poll_wq +
+// poll_deadline_jiffies) which had two bugs:
+//   1. Lost-wakeup race: the PIT fired its wake ONCE and cleared the
+//      slot; if that happened between deadline setup and
+//      wait_queue_sleep, the wake was lost and the poller slept forever.
+//   2. Concurrent pollers (e.g. tetris + lwIP) clobbered each other's
+//      slot, so one poller's timeout never fired.
+// The registry keeps one node per in-flight poll; the PIT scan wakes
+// every node whose deadline passed, so a wake "lost" before sleep is
+// retried on the next tick, and concurrent pollers don't interfere.
+
+// Non-static: pit.c PIT handler references them (extern).
+poll_timeout_node_t *poll_timeout_head = NULL;
+spinlock_T poll_timeout_lock = { 1 };
+
+static void poll_tmo_register(poll_table_t *pt, uint64_t deadline)
+{
+    spin_lock(&poll_timeout_lock);
+    pt->tmo.next = poll_timeout_head;
+    pt->tmo.wq   = &pt->wq;
+    pt->tmo.deadline = deadline;
+    poll_timeout_head = &pt->tmo;
+    spin_unlock(&poll_timeout_lock);
+}
+
+static void poll_tmo_unregister(poll_table_t *pt)
+{
+    spin_lock(&poll_timeout_lock);
+    poll_timeout_node_t **pp = &poll_timeout_head;
+    while (*pp) {
+        if (*pp == &pt->tmo) {
+            *pp = (*pp)->next;
+            break;
+        }
+        pp = &(*pp)->next;
+    }
+    spin_unlock(&poll_timeout_lock);
+}
 
 // ── do_poll_core — core polling loop (no user memory access) ──
 // Caller provides kfds and pt (already setup via poll_table_setup).
@@ -299,14 +337,17 @@ uint64_t poll_deadline_jiffies = 0;
 int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, poll_table_t *pt)
 {
     // ── Timeout setup ──────────────────────────────────────
+    // Register a PIT registry node.  It stays registered until this
+    // poll RETURNS (not until first wake) so the deadline keeps
+    // firing every tick — no lost-wakeup window.
     uint64_t deadline = 0;
-    if (timeout_val > 0) {
+    bool timed = (timeout_val > 0);
+    if (timed) {
         // Convert ms to PIT ticks (100 Hz → 10 ms/tick)
         int64_t ticks = (timeout_val + 9) / 10;
         if (ticks < 1) ticks = 1;
-        poll_deadline_jiffies = jiffies + (uint64_t)ticks;
-        deadline = poll_deadline_jiffies;
-        current_poll_wq = &pt->wq;
+        deadline = jiffies + (uint64_t)ticks;
+        poll_tmo_register(pt, deadline);
     }
 
     int ready_count = 0;
@@ -340,7 +381,7 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
         // ── Ready? Return ─────────────────────────────────
         if (ready_count > 0) {
             poll_table_cleanup(pt);
-            if (timeout_val > 0) current_poll_wq = NULL;
+            if (timed) poll_tmo_unregister(pt);
             break;
         }
 
@@ -353,24 +394,35 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
         // ── Pre-sleep signal check ────────────────────────
         if (current->signal & ~current->blocked) {
             poll_table_cleanup(pt);
-            if (timeout_val > 0) current_poll_wq = NULL;
+            if (timed) poll_tmo_unregister(pt);
             return -EINTR;
         }
 
         // ── Block on pt.wq ────────────────────────────────
+        // The PIT registry keeps waking this wq every tick past the
+        // deadline, so no lost-wakeup window exists here.  The
+        // pre-sleep deadline check below is a cheap extra guard.
+        if (timed && jiffies >= deadline) {
+            poll_table_cleanup(pt);
+            if (timed) poll_tmo_unregister(pt);
+            return 0;
+        }
         wait_queue_sleep(&pt->wq);
 
-        // Woken up — remove entries from fd poll lists
-        if (timeout_val > 0) current_poll_wq = NULL;
+        // Woken up — remove entries from fd poll lists.
+        // The timeout node STAYS registered (only removed on return)
+        // so the PIT keeps waking us on subsequent ticks.
         poll_table_cleanup(pt);
 
         // ── Timeout check ─────────────────────────────────
-        if (timeout_val > 0 && jiffies >= deadline) {
+        if (timed && jiffies >= deadline) {
+            poll_tmo_unregister(pt);
             return 0;
         }
 
         // ── Post-sleep signal check ───────────────────────
         if (current->signal & ~current->blocked) {
+            if (timed) poll_tmo_unregister(pt);
             return -EINTR;
         }
 

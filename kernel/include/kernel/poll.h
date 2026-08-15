@@ -57,12 +57,25 @@ typedef struct poll_wait_entry {
 // it cascade-wakes pt.wq.  Entries are heap-allocated via
 // poll_table_setup and freed via poll_table_destroy.
 
+// ── Poll timeout registry node ─────────────────────────
+// One node per in-flight poll with a positive timeout.  The PIT tick
+// scans the registry list and wakes every node whose deadline passed.
+// Per-poll nodes (NOT a global single slot) so concurrent pollers
+// never clobber each other's timeout wakeup.
+
+typedef struct poll_timeout_node {
+    struct poll_timeout_node *next;
+    wait_queue_t             *wq;       // target: pt.wq
+    uint64_t                  deadline; // jiffies deadline
+} poll_timeout_node_t;
+
 typedef struct poll_table {
     wait_queue_t        wq;                      // main wait queue
     poll_wait_entry_t   *entries;                // dynamically allocated array
     int                 max_entries;             // capacity of entries array
     int                 nent;                    // active entry count
     bool                triggered;               // short-circuit: fd ready
+    poll_timeout_node_t tmo;                     // PIT timeout registry node
 } poll_table_t;
 
 // ── API ────────────────────────────────────────────────

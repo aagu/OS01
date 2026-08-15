@@ -2,6 +2,7 @@
 #include <device/timer.h>
 #include <kernel/arch/io.h>
 #include <kernel/interrupt.h>
+#include <kernel/poll.h>  // poll_timeout_node_t (PIT registry scan)
 #include <stddef.h>
 #include <kernel/apic.h>
 #include <kernel.h>
@@ -17,13 +18,18 @@ void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attri
 {
     jiffies++;
 
-    // Poll timeout check: if a poll syscall is active and its
-    // deadline has passed, wake the polling task.
-    extern wait_queue_t *current_poll_wq;
-    extern uint64_t poll_deadline_jiffies;
-    if (current_poll_wq && jiffies >= poll_deadline_jiffies) {
-        wait_queue_wake_all(current_poll_wq);
-        current_poll_wq = NULL;
+    // Poll timeout check: wake every registered poll whose
+    // deadline has passed.  Registry nodes live per-poll (kernel/fs/
+    // poll.c) — concurrent pollers don't clobber each other, and a
+    // wake that lands before the poller sleeps is retried next tick.
+    extern poll_timeout_node_t *poll_timeout_head;
+    extern spinlock_T poll_timeout_lock;
+    if (poll_timeout_head) {
+        spin_lock(&poll_timeout_lock);
+        for (poll_timeout_node_t *n = poll_timeout_head; n; n = n->next)
+            if (jiffies >= n->deadline)
+                wait_queue_wake_all(n->wq);
+        spin_unlock(&poll_timeout_lock);
     }
 
     // RX is now interrupt-driven: the e1000 MSI-X handler buffers
