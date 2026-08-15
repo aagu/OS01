@@ -26,7 +26,7 @@
 
 ```
 P0 (本迭代):
- 1. 网络回归测试              — TCP/UDP/DNS/DHCP/wget 纳入自动化 QEMU 测试
+ 1. 网络回归测试 ✅           — TCP/UDP/DNS/DHCP/wget 纳入自动化 QEMU 测试
  2. /proc/<pid>/fd/           — 补齐进程文件描述符可观测性
  3. 任务退出/回收收敛         — wait 驱动回收，移除调度器与 reaper 双重职责
 

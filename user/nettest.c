@@ -114,6 +114,8 @@ static int test_tcp(void)
 static int test_wget(void)
 {
     const char *output = "/home/nettest.out";
+    static const char payload[] = "OS01 network test\n";
+    const size_t payload_len = sizeof(payload) - 1;
     unlink(output);
     int64_t pid = fork();
     if (pid < 0) return 0;
@@ -132,7 +134,7 @@ static int test_wget(void)
     int n = fd >= 0 ? (int)read(fd, data, sizeof(data)) : -1;
     if (fd >= 0) close(fd);
     unlink(output);
-    return n == 18 && !memcmp(data, "OS01 network test\n", 18);
+    return n == (int)payload_len && !memcmp(data, payload, payload_len);
 }
 
 int main(void)
