@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <list.h>
 #include <kernel/arch/spinlock.h>
+#include <kernel/canon.h>
 typedef int pid_t;  /* for termios.h userspace declarations */
 
 struct poll_table;  /* forward declaration — full definition in kernel/poll.h */
@@ -22,6 +23,15 @@ typedef struct tty_struct {
     char        ring[TTY_BUF_SIZE];
     volatile int   head;           // producer index
     volatile int   tail;           // consumer index
+
+    // ── Canonical line discipline (ICANON mode) ──
+    // Pure-logic buffer (kernel/canon.h); host-testable.
+    canon_buf_t canon;
+
+    // ── termios (honest storage) ─────────────────
+    // TCSETS/TCSETSW store here; TCGETS reports it back.
+    // Default is raw (c_lflag == 0) — matches the actual ring behavior.
+    struct termios term;
 
     // ── Read wait queue ─────────────────────────
     // Tasks blocked in tty_read() wait here.

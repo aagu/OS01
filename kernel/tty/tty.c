@@ -100,6 +100,13 @@ tty_t *tty_alloc(void (*output_char)(char), void (*echo_char)(char))
 
     tty->head = 0;
     tty->tail = 0;
+    tty->canon.len = 0;
+    memset(&tty->term, 0, sizeof(struct termios));
+    tty->term.c_iflag = ICRNL;
+    tty->term.c_oflag = OPOST | ONLCR;
+    tty->term.c_lflag = 0;               // raw default — honest
+    tty->term.c_cc[VMIN] = 1;
+    tty->term.c_cc[VTIME] = 0;
     list_init(&tty->read_wait);
     list_init(&tty->read_poll);
     spin_init(&tty->read_wait_lock);
@@ -119,6 +126,14 @@ void tty_push_input(tty_t *tty, char c)
 {
     if (!tty)
         return;
+
+    // Echo in canonical+echo mode (input-time echo, typewriter style)
+    if ((tty->term.c_lflag & ICANON) && (tty->term.c_lflag & ECHO)) {
+        if (c == '\n' && (tty->term.c_oflag & ONLCR))
+            tty->echo_char('\r');
+        tty->echo_char(c);
+    }
+
     if (!tty_ring_push(tty, c))
         return;
     tty_wake_waiters(tty);
@@ -143,9 +158,17 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
         // ── Phase 1: drain the ring buffer directly ──────────
         uint64_t flags = spin_lock_irqsave(&tty->ring_lock);
         int n = 0;
-        while (n < size && tty->head != tty->tail) {
-            buf[n++] = tty->ring[tty->tail];
-            tty->tail = (tty->tail + 1) % TTY_BUF_SIZE;
+        bool canonical = (tty->term.c_lflag & ICANON) != 0;
+
+        if (canonical) {
+            canon_accumulate(&tty->canon, tty->ring, &tty->head, &tty->tail,
+                             TTY_BUF_SIZE);
+            n = canon_read(&tty->canon, buf, size);
+        } else {
+            while (n < size && tty->head != tty->tail) {
+                buf[n++] = tty->ring[tty->tail];
+                tty->tail = (tty->tail + 1) % TTY_BUF_SIZE;
+            }
         }
         spin_unlock_irqrestore(&tty->ring_lock, flags);
 
@@ -247,15 +270,18 @@ int tty_phys_ioctl(struct vfs_node *node, int cmd, void *arg)
     (void)node;
     switch (cmd) {
     case TCGETS: {
-        struct termios t;
-        memset(&t, 0, sizeof(t));
-        t.c_lflag = ICANON | ECHO | ISIG;
-        t.c_iflag = ICRNL;
-        t.c_oflag = OPOST | ONLCR;
-        memcpy(arg, &t, sizeof(t));
+        tty_t *tty = get_dev_tty();
+        if (!tty) return -ENODEV;
+        memcpy(arg, &tty->term, sizeof(struct termios));
         return 0;
     }
-    case TCSETS: case TCSETSW: return 0;  // store only, no-op
+    case TCSETS:
+    case TCSETSW: {
+        tty_t *tty = get_dev_tty();
+        if (!tty) return -ENODEV;
+        memcpy(&tty->term, arg, sizeof(struct termios));
+        return 0;
+    }
     case TIOCGWINSZ:
         ((struct winsize *)arg)->ws_row = 25;
         ((struct winsize *)arg)->ws_col = 80;

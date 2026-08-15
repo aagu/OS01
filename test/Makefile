@@ -41,7 +41,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_pmm_basic.elf \
     $(TEST_BLD)/test_slab_basic.elf \
     $(TEST_BLD)/test_elf_validate.elf \
-    $(TEST_BLD)/test_wait_basic.elf
+    $(TEST_BLD)/test_wait_basic.elf \
+    $(TEST_BLD)/test_canon.elf
 
 .PHONY: all clean run
 
@@ -153,6 +154,18 @@ $(TEST_BLD)/test_elf_validate.elf: $(TEST_BLD)/test_elf_validate.o $(LIBC_OBJS) 
 # standalone test (no kernel/libc deps)
 $(TEST_BLD)/test_wait_basic.elf: $(TEST_BLD)/test_wait_basic.o
 	$(HOST_CC) -o $@ $<
+
+# Canon line discipline test — compiles REAL kernel/tty/canon.c (pure logic)
+$(TEST_BLD)/canon.o: $(TESTS_DIR)/kernel/tty/canon.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/kernel/include -c $< -o $@
+
+$(TEST_BLD)/test_canon.o: $(TEST_CASES)/test_canon.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/kernel/include -c $< -o $@
+
+$(TEST_BLD)/test_canon.elf: $(TEST_BLD)/test_canon.o $(TEST_BLD)/canon.o
+	$(HOST_CC) -o $@ $^
 
 clean:
 	rm -rf $(TEST_BLD)

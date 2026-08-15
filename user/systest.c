@@ -18,6 +18,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <termios.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <rbtree.h>
@@ -1272,6 +1273,43 @@ static void test_proc_fd(void)
     close(fds[0]);
 }
 
+// ── termios honesty test ───────────────────────────────────
+static void test_termios(void)
+{
+    int fd = open("/dev/tty", O_RDONLY);
+    if (fd < 0) { FAIL("termios", "open /dev/tty failed"); return; }
+
+    struct termios t;
+    int ret;
+
+    // Test 1: TCGETS default — honest raw mode (c_lflag == 0)
+    memset(&t, 0xAA, sizeof(t));
+    ret = ioctl(fd, TCGETS, &t);
+    CHECK3(ret == 0, "termios", "TCGETS returns 0");
+    CHECK3((t.c_lflag & (ICANON | ECHO | ISIG)) == 0, "termios", "default c_lflag is raw");
+
+    // Test 2: TCSETS then TCGETS — settings must persist
+    memset(&t, 0, sizeof(t));
+    t.c_lflag = ICANON | ECHO;
+    t.c_iflag = ICRNL;
+    t.c_oflag = OPOST | ONLCR;
+    ret = ioctl(fd, TCSETS, &t);
+    CHECK3(ret == 0, "termios", "TCSETS returns 0");
+
+    struct termios t2;
+    memset(&t2, 0xAA, sizeof(t2));
+    ret = ioctl(fd, TCGETS, &t2);
+    CHECK3(ret == 0, "termios", "TCGETS after TCSETS returns 0");
+    CHECK3(t2.c_lflag == t.c_lflag, "termios", "TCSETS persisted (c_lflag round-trip)");
+    CHECK3(t2.c_iflag == t.c_iflag, "termios", "TCSETS persisted (c_iflag round-trip)");
+
+    // Test 3: restore raw — don't pollute later readers
+    memset(&t, 0, sizeof(t));
+    ioctl(fd, TCSETS, &t);
+
+    close(fd);
+}
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
@@ -1332,6 +1370,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"eevdf_fork_child",    test_wrap_eevdf_fork_child_scheduled},
     {"proc_maps",           test_proc_maps},
     {"proc_fd",             test_proc_fd},
+    {"termios",             test_termios},
 };
 
 int main(void)
