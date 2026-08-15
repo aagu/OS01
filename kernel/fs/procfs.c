@@ -7,6 +7,8 @@
 #include <kernel/pmm.h>
 #include <kernel/memory.h>
 #include <kernel.h>
+#include <kernel/file.h>   // file_t / files_t full definition
+#include <kernel/pty.h>    // pty_struct full definition (file.h only fwd-declares)
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -33,6 +35,51 @@ static task_t *find_task_by_pid(int pid)
         pos = pos->next;
     }
     return NULL;
+}
+
+// ── Strict decimal fd parse ────────────────────────────────
+// Rejects negative, leading garbage, trailing chars, and overflow.
+// NOT atoi(): we own the name (from readdir) but parse defensively.
+static int parse_fd(const char *s)
+{
+    if (!s || *s < '0' || *s > '9') return -1;
+    int v = 0;
+    for (; *s; s++) {
+        if (*s < '0' || *s > '9') return -1;
+        v = v * 10 + (*s - '0');
+        if (v >= NOFILE) return -1;
+    }
+    return v;
+}
+
+// ── Render an fd's target as a text line ──────────────────
+// f must be a stable reference (from files_get_file).
+// Returns bytes written (excluding NUL).
+static int gen_fd_target(file_t *f, char *buf, int bufsz)
+{
+    if (!f || !buf || bufsz <= 0) return 0;
+
+    switch (f->type) {
+    case FD_VFS:
+    case FD_DEV: {
+        if (!f->node) return snprintf(buf, bufsz, "?\n");
+        char path_buf[280];
+        int n = vfs_resolve_path(f->node, path_buf, sizeof(path_buf) - 4);
+        return snprintf(buf, bufsz, "%s\n", n < 0 ? "?" : path_buf);
+    }
+    case FD_PIPE:
+        return snprintf(buf, bufsz, "pipe:[?]\n");
+    case FD_PTY_MASTER:
+        return snprintf(buf, bufsz, "/dev/ptmx\n");
+    case FD_PTY_SLAVE: {
+        int idx = f->pty ? f->pty->index : -1;
+        return snprintf(buf, bufsz, "/dev/pts%d\n", idx);
+    }
+    case FD_SOCKET:
+        return snprintf(buf, bufsz, "socket:[?]\n");
+    default:
+        return 0;
+    }
 }
 
 // ── procfs_stat: fill stat buffer for a procfs node ──────────
@@ -288,7 +335,7 @@ static int procfs_read(vfs_node_t *node, uint64_t offset,
     // Auto-detect PID from current if a plain PID_DIR node is read
     // (shouldn't happen — PID_DIRs are directories, not files)
     if (type == PROCFS_TYPE_PID_DIR || type == PROCFS_TYPE_ROOT ||
-        type == PROCFS_TYPE_SELF_DIR)
+        type == PROCFS_TYPE_SELF_DIR || type == PROCFS_TYPE_FD_DIR)
         return 0;
 
     // ── Generate content ──────────────────────────────────
@@ -309,6 +356,22 @@ static int procfs_read(vfs_node_t *node, uint64_t offset,
         task_t *t = find_task_by_pid((int)pid);
         if (!t) return 0;
         len = gen_maps(t, local, sizeof(local));
+        break;
+    }
+    case PROCFS_TYPE_FD_ENTRY: {
+        uint32_t p = pid;
+        if (p == PROCFS_PID_SELF) { if (!current) return 0; p = (uint32_t)current->pid; }
+        int fd = parse_fd(node->name);
+        if (fd < 0) return 0;
+
+        files_t *fs = task_files_pin_by_pid((int)p);
+        if (!fs) return 0;
+        file_t *f = files_get_file(fs, fd);
+        files_unpin(fs);                 // drop table ref early
+        if (!f) return 0;
+
+        len = gen_fd_target(f, local, sizeof(local));
+        files_put_file(f);
         break;
     }
     default:
@@ -414,6 +477,13 @@ static int procfs_readdir(vfs_node_t *node, uint64_t index,
             entry->ino  = (uint32_t)(uintptr_t)PROCFS_ENCODE(
                 PROCFS_TYPE_MAPS, PROCFS_PID_SELF);
             return 0;
+        case 2:
+            strcpy(entry->name, "fd");
+            entry->type = VFS_DIR;
+            entry->size = 0;
+            entry->ino  = (uint32_t)(uintptr_t)PROCFS_ENCODE(
+                PROCFS_TYPE_FD_DIR, PROCFS_PID_SELF);
+            return 0;
         default:
             entry->name[0] = '\0';
             return 0;
@@ -437,8 +507,50 @@ static int procfs_readdir(vfs_node_t *node, uint64_t index,
                 PROCFS_TYPE_MAPS, pid);
             return 0;
         }
+        if (index == 2) {
+            strcpy(entry->name, "fd");
+            entry->type = VFS_DIR;
+            entry->size = 0;
+            entry->ino  = (uint32_t)(uintptr_t)PROCFS_ENCODE(
+                PROCFS_TYPE_FD_DIR, pid);
+            return 0;
+        }
         entry->name[0] = '\0';
         return 0;
+
+    // ── /proc/<pid>/fd/ ──────────────────────────────────
+    case PROCFS_TYPE_FD_DIR: {
+        uint32_t p = pid;
+        if (p == PROCFS_PID_SELF) { if (!current) return -1; p = (uint32_t)current->pid; }
+
+        files_t *fs = task_files_pin_by_pid((int)p);   // pin under task_list_lock
+        if (!fs) return -1;
+
+        uint64_t k = index;
+        int found = -1;
+        {
+            uint64_t fl = spin_lock_irqsave(&fs->lock); // single scan, held
+            for (int fd = 0; fd < NOFILE; fd++) {
+                if (!fs->fd[fd]) continue;
+                if (k == 0) { found = fd; break; }
+                k--;
+            }
+            spin_unlock_irqrestore(&fs->lock, fl);
+        }
+
+        if (found >= 0) {
+            snprintf(entry->name, VFS_NAME_MAX, "%d", found);
+            entry->type = VFS_FILE;
+            entry->size = 4096;
+            entry->ino  = (uint32_t)(uintptr_t)PROCFS_ENCODE(
+                PROCFS_TYPE_FD_ENTRY, pid);
+        } else {
+            entry->name[0] = '\0';
+        }
+
+        files_unpin(fs);   // outside any lock
+        return 0;
+    }
 
     default:
         entry->name[0] = '\0';
