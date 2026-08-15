@@ -58,8 +58,10 @@ run: $(TEST_BINS)
 	    name=$$(basename $$t .elf); \
 	    echo ""; \
 	    echo "======== $$name ========"; \
-	    $$t 2>&1 | grep -E "===|Total|Failed|>>>|ALL" --color=never; \
+	    output=$$($$t 2>&1); \
 	    rc=$$?; \
+	    printf '%s\n' "$$output" | \
+	        grep -E "===|Total|Failed|>>>|ALL" --color=never || true; \
 	    total=$$((total + 1)); \
 	    if [ "$${rc}" -ne 0 ] && [ "$${rc}" -ne 1 ]; then \
 	        echo "  >>> $$name CRASHED (rc=$$rc) <<<"; \

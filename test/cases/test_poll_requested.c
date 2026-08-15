@@ -82,6 +82,13 @@ TEST_LIST_END
 
 int main(void)
 {
-    RUN_ALL_TESTS();
-    return __test_stats.failed > 0 ? 1 : 0;
+    printf("=== Test Runner ===\n");
+    for (int i = 0; i < __test_table_size; i++) {
+        printf("\n--- %s ---\n", __test_table[i].name);
+        __test_table[i].fn();
+    }
+
+    int failed = __test_stats.failed;
+    TEST_RESULTS();
+    return failed > 0 ? 1 : 0;
 }
