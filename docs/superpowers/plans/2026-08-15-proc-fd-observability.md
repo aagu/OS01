@@ -842,9 +842,25 @@ git commit -m "test(systest): add proc_fd coverage for /proc/<pid>/fd"
 **Files:**
 - Create: `kernel/test/test_fd_refcount.c`（双 kthread 竞态测试）
 - Modify: `kernel/sched/task.c`（在 `task_init()` 的 `OS01_SELFTEST` 块加调用）
+- Modify: `kernel/include/kernel/task.h`（声明 `kernel_thread`，供测试跨 .c 使用）
 
 **Interfaces:**
-- Consumes: `files_alloc`/`files_unpin`/`files_get_file`/`files_put_file`/`fd_alloc`/`fd_close`/`file_alloc`/`file_put`（Task 1）；`create_kthread`/`schedule`（已有）。
+- Consumes: `files_alloc`/`files_unpin`/`files_get_file`/`files_put_file`/`fd_alloc`/`fd_close`/`file_alloc`/`file_put`（Task 1）；`kernel_thread`/`schedule`（已有）。
+- Produces: `int kernel_thread(uint64_t (*fn)(uint64_t), uint64_t arg, uint64_t flags);`（Task 6 依赖）。
+
+> **为什么用 `kernel_thread` 而非 `create_kthread`**：`create_kthread`（task.c:1806）先 `kernel_thread()`（worker 已 enqueue），再**无锁扫描** task list 返回 `task_t*`；在 SMP 调度器已运行的环境里，该扫描与收割器并发，扫描失败返回 NULL 时 worker 可能已存在。测试若据 NULL 判断「无 worker」而不 pin，worker 会释放不拥有的引用 → refcount 下溢 / UAF。`kernel_thread` 直接返回 `do_fork` 的 PID（`<0` = 确实未创建，`>=0` = 已创建），且测试不需要 `task_t*`（R2 用 PID 传给 reader，CPU 覆盖由 worker 自记）。
+
+- [ ] **Step 0: `task.h` 声明 `kernel_thread`（放在 `create_kthread` 声明之前，约第 316 行）**
+
+```c
+// ── Kernel thread API ──────────────────────────────────────
+// Create a PF_KTHREAD task that runs fn(arg), then do_exit(0).
+// Returns the new pid (>= 0), or a negative errno on failure.
+// Unlike create_kthread(), this does NOT do a second lockless
+// task-list scan to recover a task_t* — the returned pid is the
+// authoritative "did it get created" signal, safe under SMP.
+int kernel_thread(uint64_t (*fn)(uint64_t), uint64_t arg, uint64_t flags);
+```
 
 - [ ] **Step 1: 新建 `kernel/test/test_fd_refcount.c`**
 
@@ -852,7 +868,7 @@ git commit -m "test(systest): add proc_fd coverage for /proc/<pid>/fd"
 // kernel/test/test_fd_refcount.c
 // ── fd reference-protocol SMP race tests ──────────────────
 // Two scenarios, run from task_init() AFTER deferred_free_spawn()
-// (files_unpin can defer-free) and scheduler_ok=1 (create_kthread +
+// (files_unpin can defer-free) and scheduler_ok=1 (kernel_thread +
 // schedule() work).
 //
 // Synchronisation uses __atomic acquire/release flags, NOT volatile:
@@ -962,12 +978,13 @@ static void run_get_detach_race(void)
     r3_reader_cpu_mask = 0; r3_writer_cpu_mask = 0;
     r3_writer_err = 0; r3_saw_present = 0; r3_saw_absent = 0;
 
-    // Pin a worker ref ONLY when its kthread is successfully created.
+    // Pin a worker ref ONLY when kernel_thread() returns a pid >= 0
+    // (authoritative: pid < 0 means the task was NOT created).
     int reader_ok = 0, writer_ok = 0;
-    task_t *r = create_kthread(race_reader, 0, "fd-race-reader");
-    if (r) { files_pin(race_fs); reader_ok = 1; }
-    task_t *w = create_kthread(race_writer, 0, "fd-race-writer");
-    if (w) { files_pin(race_fs); writer_ok = 1; }
+    int rpid = kernel_thread(race_reader, 0, PF_KTHREAD);
+    if (rpid >= 0) { files_pin(race_fs); reader_ok = 1; }
+    int wpid = kernel_thread(race_writer, 0, PF_KTHREAD);
+    if (wpid >= 0) { files_pin(race_fs); writer_ok = 1; }
 
     if (!reader_ok || !writer_ok) {
         // Release any created worker with abort set so it exits (not spin
@@ -1013,7 +1030,7 @@ static void run_get_detach_race(void)
 }
 
 // ── Scenario 2: pin-vs-detach (R2) ────────────────────────
-// holder inherits its files_t via create_kthread (do_fork files_dup's init's
+// holder inherits its files_t via kernel_thread (do_fork files_dup's init's
 // table); we never create or override a table, so there is no leaked ref.
 // Orchestration forces the detach to happen INSIDE the reader's active
 // window: reader pins successfully (present), signals reader_started; holder
@@ -1067,12 +1084,11 @@ static void run_pin_detach_race(void)
     r2_reader_cpu_mask = 0; r2_holder_cpu = -1;
     r2_saw_present = 0; r2_saw_absent = 0;
 
-    task_t *holder = create_kthread(race_holder, 0, "fd-pin-holder");
-    if (!holder) { serial_printk("FAIL (holder create)\n"); return; }
-    int holder_pid = (int)holder->pid;  // copy value while holder is alive
+    int holder_pid = kernel_thread(race_holder, 0, PF_KTHREAD);
+    if (holder_pid < 0) { serial_printk("FAIL (holder create)\n"); return; }
 
-    task_t *reader = create_kthread(pin_reader, holder_pid, "fd-pin-reader");
-    if (!reader) {
+    int reader_pid = kernel_thread(pin_reader, (uint64_t)holder_pid, PF_KTHREAD);
+    if (reader_pid < 0) {
         // Let holder proceed to exit (its inherited table frees on do_exit).
         // We never touch holder task_t* again.
         __atomic_store_n(&r2_reader_started, 1, __ATOMIC_RELEASE);
@@ -1088,8 +1104,14 @@ static void run_pin_detach_race(void)
     }
 
     int holder_entered = __atomic_load_n(&r2_holder_entered, __ATOMIC_ACQUIRE);
-    int cross_cpu = (r2_holder_cpu >= 0) &&
-                    (r2_reader_cpu_mask & (1U << r2_holder_cpu)) == 0;
+    int cross_cpu = 0;
+    if (holder_entered) {
+        // Read r2_holder_cpu only after acquiring holder_entered (release/
+        // acquire pairing gives the happens-before for the holder's write).
+        int holder_cpu = r2_holder_cpu;
+        cross_cpu = (holder_cpu >= 0) &&
+                    (r2_reader_cpu_mask & (1U << holder_cpu)) == 0;
+    }
 
     if (!(r2_saw_present && r2_saw_absent))
         serial_printk("FAIL (no detach observed present=%d absent=%d)\n",
@@ -1122,7 +1144,7 @@ void test_fd_refcount(void)
 #ifdef OS01_SELFTEST
     // ── fd reference-protocol race test ─────────────────────
     // After deferred_free_spawn() (files_unpin defers) and scheduler_ok
-    // (create_kthread + schedule() work).
+    // (kernel_thread + schedule() work).
     {
         extern void test_fd_refcount(void);
         test_fd_refcount();
@@ -1152,15 +1174,16 @@ R2 的 PASS 还要求 `saw_present && saw_absent && holder_entered` —— 证�
 - [ ] **Step 4: Commit**
 
 ```bash
-git add kernel/test/test_fd_refcount.c kernel/sched/task.c
+git add kernel/test/test_fd_refcount.c kernel/sched/task.c kernel/include/kernel/task.h
 git commit -m "test(selftest): add SMP fd reference-protocol race tests
 
 get-vs-detach (R3): files_get_file/put vs fd_close/fd_alloc on one slot.
 pin-vs-detach (R2): task_files_pin_by_pid vs a kthread do_exit() detaching
 its inherited table; PASS requires cross-CPU and observed detach (present &&
-absent) inside the reader's window.  __atomic acquire/release + abort/start
-protocol so a partial create never leaves a spinning worker.  Both run after
-deferred_free_spawn + scheduler_ok."
+absent) inside the reader's window.  Workers created via kernel_thread (pid,
+not a lockless task_t* scan) so a failed create can't orphan a live worker.
+__atomic acquire/release + abort/start.  Both run after deferred_free_spawn
++ scheduler_ok.  Declares kernel_thread in task.h."
 ```
 
 ---
@@ -1213,6 +1236,8 @@ git commit -m "docs: mark /proc/<pid>/fd observability complete"
 - **abort/start 协议**：R3 创建失败时 set `r3_abort` + release `r3_start`，已创建 worker 检查 abort 后退出（不永久自旋），harness 等其 done 再 `files_unpin` 自己。超时路径仍有意泄漏（worker 有限循环会自退，其 ref 保活表）。
 - **R3 观察证明**：reader 记录 `r3_saw_present`（取得非 NULL `file_t` 引用，即执行了槽位读取 + ref-bump 临界区）与 `r3_saw_absent`（观察到 writer detach 后的空槽）；PASS 要求 `!writer_err && saw_present && saw_absent && cross-CPU`。writer 每 16 次迭代 `schedule()` 一次加宽非 NULL 窗口，提高交叠概率而非依赖自然撞中。
 - **R2 观察证明**：编排 `reader → (pin 成功) → reader_started → holder → holder_entered → do_exit`，reader 循环直到 `saw_present && saw_absent`；PASS 要求 `saw_present && saw_absent && holder_entered && cross-CPU`，杜绝「reader 跑完 holder 才 detach」的假 PASS。holder 完成 detach 的确认来自 reader 观察到 `task_files_pin_by_pid(pid)==NULL`，而非轮询可被收割的 task_t*。
+- **worker 创建语义**：Task 6 用 `kernel_thread()`（返回 `do_fork` 的 PID，`<0` = 确实未创建）而非 `create_kthread()`（先创建再加无锁 task-list 扫描，扫描失败返回 NULL 但 worker 可能已存在）。测试据 PID 决定是否 pin，R2 直接用返回的 holder PID 传给 reader，全程不持有可被收割的 `task_t*`。`kernel_thread` 在 `task.h` 新增声明（Task 6 Step 0）。
+- **R2 防御性同步**：`cross_cpu` 只在 `holder_entered` acquire 确认后计算（release/acquire 配对保证 `r2_holder_cpu` 的 happens-before），`holder_entered==0` 时不读未同步的普通变量。
 
 
 
