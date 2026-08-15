@@ -66,6 +66,13 @@ EOF, `POLLHUP`, `POLLERR`, and reader/writer-count semantics. An unrelated
 ready direction must not prevent registration for a requested unavailable
 direction.
 
+Readiness and registration use different inputs. Readiness computation remains
+keyed by the descriptor's legal open directions (`f->flags`: `O_RDONLY`,
+`O_WRONLY`, or `O_RDWR`) and the endpoint's capabilities. Registration uses
+`requested & legal_directions` and occurs only when that requested legal
+direction is unavailable. Requested bits must never make an `O_RDONLY`
+descriptor report writable or an `O_WRONLY` descriptor report readable.
+
 ### VFS and Devices
 
 Plain VFS files remain immediately ready according to their open mode. Device
@@ -74,7 +81,10 @@ but the requested mask is propagated explicitly through
 `devfs_poll(node, requested, table)` and the `devfs_ops.poll` callback. The TTY
 callback computes the same full readiness mask as today and registers its read
 wait list only when a read-class event was requested and input is unavailable.
-Default always-ready devices keep their current readiness mask.
+TTY's current input-empty registration is already correct; this signature
+change is a consistency refinement, not a repair of a TTY lost wake. Default
+always-ready devices keep their current readiness mask and do not acquire new
+registration behavior.
 
 ## Poll and Select Flow
 
@@ -91,7 +101,11 @@ Before returning zero because a finite deadline has been reached,
 `do_poll_core()` performs one final readiness scan with registration disabled.
 If requested readiness is present, it returns that readiness instead of zero.
 This closes the deadline-boundary race as defense in depth; it does not replace
-correct wait registration.
+correct wait registration. The concrete mechanism is
+`fd_poll(file, requested, NULL)`: a null poll table computes readiness but
+cannot add an entry. The final scan runs after existing entries are cleaned and
+does not restore `current_poll_wq`, change the PIT deadline contract, or reuse
+the previously active poll table for registration.
 
 Every scan cleans its prior poll-table entries before reinitializing or
 returning. Temporary entries created for a descriptor whose other requested
@@ -109,9 +123,18 @@ Extend the controlled host TCP echo endpoint with a test-only delay of exactly
 - the first guest aggregate result passes without relying on PID 1 respawn.
 
 Add focused coverage for `POLLIN`, `POLLOUT`, both directions together, and
-the equivalent `select()` read/write sets. Tests must distinguish a genuine
-guest result from build, boot, bind, and host-service failures. No retry or
-result-parser relaxation is permitted.
+the equivalent `select()` read/write sets. The required test carriers are:
+
+- `test/` host tests (`make test`): pipe, PTY, and devfs directional
+  readiness/registration; entry cleanup; EOF, error, and hangup propagation.
+- `user/systest.c` guest syscall E2E: pipe `POLLIN`, `POLLOUT`, and combined
+  requests plus equivalent `select()` read/write fd sets.
+- QEMU network harness and its guest network test: real connected-socket
+  `POLLIN`, `POLLOUT`, combined requests, and `select()` equivalence, including
+  the exact 250 ms delayed reply.
+
+Tests must distinguish a genuine guest result from build, boot, bind, and
+host-service failures. No retry or result-parser relaxation is permitted.
 
 ## Verification
 
@@ -138,3 +161,9 @@ fixed host ports.
 The existing global/single-CPU assumptions around `current_poll_wq` and poll
 deadlines are separate SMP scalability work. They are documented but not
 refactored by this fix.
+
+Socket readiness does not currently produce `POLLPRI` or `POLLRDBAND`.
+Read-class classification may use those requested bits to decide whether a
+receive waiter is relevant, but it must not synthesize either readiness bit.
+Consequently socket `select()` exception sets remain unsupported existing
+behavior and are outside this fix.
