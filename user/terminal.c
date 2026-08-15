@@ -18,6 +18,7 @@
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <termios.h>
+#include "terminal_core.h"
 
 // ── fb_info (must match kernel definition) ──────────────────
 struct fb_info {
@@ -41,16 +42,9 @@ extern char _binary_terminal_font_psf_start[];
 static uint32_t *fb;
 static struct fb_info fb_info;
 static psf2_t *font;
-static int term_col, term_row;
 static int term_cols, term_rows;
 static uint32_t fg = 0xFFFFFFFF, bg = 0x00000000;
-static bool cursor_visible = true;
-
-// ── VT100 output parser state ───────────────────────────────
-enum { S_NORMAL, S_ESC, S_CSI_PARAM };
-static int csi_state = S_NORMAL;
-static int csi_param = 0;
-static bool csi_qmark = false;
+static term_core_t core;   // VT100 screen model + parser (terminal_core.c)
 
 // ═══════════════════════════════════════════════════════════
 //  Renderer
@@ -76,14 +70,16 @@ static void put_glyph(int col, int row, uint32_t fgc, uint32_t bgc, char c)
     }
 }
 
-static void fb_scroll(void)
+static void flush_screen(void)
 {
-    uint8_t *fb_bytes = (uint8_t *)fb;
-    uint32_t row_bytes = font->height * fb_info.stride;
-    uint32_t total = row_bytes * term_rows;
-    memmove(fb_bytes, fb_bytes + row_bytes, total - row_bytes);
-    memset(fb_bytes + total - row_bytes, 0, row_bytes);
-    term_row = term_rows - 1;
+    term_cell_t (*screen)[TERM_COLS] = term_core_screen(&core);
+    for (int r = 0; r < core.rows; r++)
+        for (int c = 0; c < core.cols; c++)
+            if (term_core_is_dirty(&core, r, c)) {
+                uint8_t g = screen[r][c].glyph;
+                put_glyph(c, r, fg, bg, g ? (char)g : ' ');
+                term_core_clear_dirty(&core, r, c);
+            }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -92,64 +88,8 @@ static void fb_scroll(void)
 
 static void output_char(char c)
 {
-    if (csi_state == S_NORMAL && c == '\x1b') {
-        csi_state = S_ESC;
-        return;
-    }
-    if (csi_state == S_ESC) {
-        if (c == '[') { csi_state = S_CSI_PARAM; csi_param = 0; csi_qmark = false; return; }
-        csi_state = S_NORMAL;
-        return;
-    }
-    if (csi_state == S_CSI_PARAM) {
-        if (c == '?') { csi_qmark = true; return; }
-        if (c >= '0' && c <= '9') { csi_param = csi_param * 10 + (c - '0'); return; }
-        // Terminal character
-        switch (c) {
-        case 'A': term_row -= (csi_param ? csi_param : 1); if (term_row < 0) term_row = 0; break;
-        case 'B': term_row += (csi_param ? csi_param : 1); if (term_row >= term_rows) term_row = term_rows - 1; break;
-        case 'C': term_col += (csi_param ? csi_param : 1); if (term_col >= term_cols) term_col = term_cols - 1; break;
-        case 'D': term_col -= (csi_param ? csi_param : 1); if (term_col < 0) term_col = 0; break;
-        case 'K':
-            if (csi_param == 0)
-                for (int x = term_col; x < term_cols; x++) put_glyph(x, term_row, fg, bg, ' ');
-            else if (csi_param == 1)
-                for (int x = 0; x <= term_col; x++) put_glyph(x, term_row, fg, bg, ' ');
-            else
-                for (int x = 0; x < term_cols; x++) put_glyph(x, term_row, fg, bg, ' ');
-            break;
-        case 'J':
-            if (csi_param == 2) {
-                for (int r = 0; r < term_rows; r++)
-                    for (int x = 0; x < term_cols; x++)
-                        put_glyph(x, r, fg, bg, ' ');
-                term_row = 0; term_col = 0;
-            }
-            break;
-        case 'H': term_row = 0; term_col = 0; break;
-        case 'h': if (csi_qmark && csi_param == 25) cursor_visible = true; break;
-        case 'l': if (csi_qmark && csi_param == 25) cursor_visible = false; break;
-        }
-        csi_state = S_NORMAL;
-        return;
-    }
-
-    // Normal character
-    switch (c) {
-    case '\n': term_col = 0; term_row++; break;
-    case '\r': term_col = 0; break;
-    case '\b': case 0x7F: if (term_col > 0) term_col--; break;
-    case '\t': term_col = (term_col + 8) & ~7; break;
-    default:
-        if ((unsigned char)c >= ' ') {
-            put_glyph(term_col, term_row, fg, bg, c);
-            term_col++;
-        }
-        break;
-    }
-
-    if (term_col >= term_cols) { term_col = 0; term_row++; }
-    if (term_row >= term_rows) fb_scroll();
+    if (term_core_input(&core, c))
+        flush_screen();
 }
 
 static void handle_output(char *buf, int n, int serial_fd)
@@ -223,6 +163,7 @@ int main(void)
     font = (psf2_t *)_binary_terminal_font_psf_start;
     term_cols = fb_info.width / font->width;
     term_rows = fb_info.height / font->height;
+    term_core_init(&core, term_rows, term_cols);
 
     // 3. Open serial for headless echo
     int serial_fd = open("/dev/serial", O_WRONLY);

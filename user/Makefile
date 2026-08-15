@@ -25,7 +25,8 @@ LDFLAGS  := -T linker.ld -static -nostdlib -no-pie \
 
 # ── Source discovery ───────────────────────────────────────
 # crt0.S is startup code, not a program
-C_SOURCES := $(wildcard *.c)
+# terminal_core.c is a library for terminal.elf, not a standalone program
+C_SOURCES := $(filter-out terminal_core.c,$(wildcard *.c))
 ASM_SOURCES := $(wildcard *.S)
 
 # Each .c → .elf (e.g. init.c → init.elf)
@@ -73,9 +74,9 @@ $(BUILD_DIR)/%.elf: $(OBJ_DIR)/%.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
 # ══════════════════════════════════════════════════════════════
 TERMINAL_FONT_OBJ := $(OBJ_DIR)/terminal_font.o
 
-$(BUILD_DIR)/terminal.elf: $(OBJ_DIR)/terminal.o $(CRT0_OBJ) $(SIGRETURN_OBJ) $(TERMINAL_FONT_OBJ) linker.ld
+$(BUILD_DIR)/terminal.elf: $(OBJ_DIR)/terminal.o $(OBJ_DIR)/terminal_core.o $(CRT0_OBJ) $(SIGRETURN_OBJ) $(TERMINAL_FONT_OBJ) linker.ld
 	@mkdir -p $(dir $@)
-	$(LD) $(LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/terminal.o $(TERMINAL_FONT_OBJ) -lc
+	$(LD) $(LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/terminal.o $(OBJ_DIR)/terminal_core.o $(TERMINAL_FONT_OBJ) -lc
 	$(OBJ_CPY) --strip-debug $@
 
 $(TERMINAL_FONT_OBJ): terminal_font.psf

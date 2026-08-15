@@ -42,7 +42,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_slab_basic.elf \
     $(TEST_BLD)/test_elf_validate.elf \
     $(TEST_BLD)/test_wait_basic.elf \
-    $(TEST_BLD)/test_canon.elf
+    $(TEST_BLD)/test_canon.elf \
+    $(TEST_BLD)/test_terminal_core.elf
 
 .PHONY: all clean run
 
@@ -165,6 +166,18 @@ $(TEST_BLD)/test_canon.o: $(TEST_CASES)/test_canon.c
 	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/kernel/include -c $< -o $@
 
 $(TEST_BLD)/test_canon.elf: $(TEST_BLD)/test_canon.o $(TEST_BLD)/canon.o
+	$(HOST_CC) -o $@ $^
+
+# Terminal core test — compiles REAL user/terminal_core.c (pure logic)
+$(TEST_BLD)/terminal_core.o: $(TESTS_DIR)/user/terminal_core.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user -c $< -o $@
+
+$(TEST_BLD)/test_terminal_core.o: $(TEST_CASES)/test_terminal_core.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user -c $< -o $@
+
+$(TEST_BLD)/test_terminal_core.elf: $(TEST_BLD)/test_terminal_core.o $(TEST_BLD)/terminal_core.o
 	$(HOST_CC) -o $@ $^
 
 clean:
