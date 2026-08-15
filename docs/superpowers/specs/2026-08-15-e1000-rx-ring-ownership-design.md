@@ -23,7 +23,9 @@ The tcpip thread will be the sole hardware RX-ring owner.
 - `net_poll_rx()` will call `e1000_poll_rx()` and then `e1000_process_rx()` in
   tcpip-thread context. No other caller may invoke `e1000_poll_rx()`.
 - The existing software RX queue remains between descriptor copying and lwIP
-  delivery, but both fill and drain occur in tcpip-thread context.
+  delivery, but both fill and drain occur in tcpip-thread context. It is kept
+  to minimize the change surface; collapsing this now-redundant bounce queue
+  into direct `pbuf` delivery is separate follow-up work.
 
 This removes IRQ/task reentrancy and keeps allocation and packet copying out of
 the interrupt handler.
@@ -51,6 +53,10 @@ descriptor after the fixed-tail workaround is removed.
 
 Initialization remains `RDH=0`, `RDT=E1000_NUM_RX_DESC-1`, and software index
 zero. The fixed `30→31` writes and their workaround comments are removed.
+The stale `e1000_poll_rx()` comment claiming that the MSI-X path is not wired
+and no IRQ ever fires is also removed with the poll-side ICR read. The handler
+comment must instead document that its ICR read acknowledges the interrupt and
+clears QEMU's RX latch; no wording may imply that polling still owns this duty.
 
 ## Wakeup Contract
 
@@ -88,9 +94,12 @@ by the E1000 change.
 
 - Use a named deterministic descriptor-return mutation: initialize `RDT=1`
   and suppress all per-consumption `RDT=i` writes, limiting hardware to the
-  first two descriptors. Across 20 fresh QEMU iterations, every first network
-  result must fail. This proves the regression observes a stalled RX ring; a
-  single timing-dependent failure is not sufficient mutation evidence.
+  first two descriptors. Across 20 fresh QEMU iterations, every aggregate
+  network `RESULT` must report at least one failure. The DHCP subtest is
+  expected to pass because the guest starts with a static address; failure must
+  appear in a later RX-dependent UDP, DNS, TCP, or wget subtest. This proves the
+  regression observes a stalled RX ring; a single timing-dependent failure is
+  not sufficient mutation evidence.
 - Run at least 20 QEMU network iterations without per-packet serial logging;
   every first result must report five passed and zero failed.
 - Run the host test suite with `make test`.
