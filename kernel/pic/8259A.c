@@ -12,19 +12,19 @@ void pic_init()
     color_printk(YELLOW, BLACK, "8259A init\n");
 
     //8259A Master
-    outb(MASTER_ICW1, 0x11);
-    outb(MASTER_ICW2, 0x20);
-    outb(MASTER_ICW3, 0x04);
-    outb(MASTER_ICW4, 0x01);
+    arch_outb(MASTER_ICW1, 0x11);
+    arch_outb(MASTER_ICW2, 0x20);
+    arch_outb(MASTER_ICW3, 0x04);
+    arch_outb(MASTER_ICW4, 0x01);
 
     //8259A Slave
-    outb(SLAVE_ICW1, 0x11);
-    outb(SLAVE_ICW2, 0x28);
-    outb(SLAVE_ICW3, 0x02);
-    outb(SLAVE_ICW4, 0x01);
+    arch_outb(SLAVE_ICW1, 0x11);
+    arch_outb(SLAVE_ICW2, 0x28);
+    arch_outb(SLAVE_ICW3, 0x02);
+    arch_outb(SLAVE_ICW4, 0x01);
 
-    outb(MASTER_OCW1, 0xff);
-    outb(SLAVE_OCW1, 0xff);
+    arch_outb(MASTER_OCW1, 0xff);
+    arch_outb(SLAVE_OCW1, 0xff);
 
     arch_local_irq_enable();
 }
@@ -66,8 +66,8 @@ void pic_enable(uint64_t nr)
     else
         port = MASTER_OCW1;
 
-    value = inb(port) & ~(1 << (nr - 0x20));
-    outb(port, value);
+    value = arch_inb(port) & ~(1 << (nr - 0x20));
+    arch_outb(port, value);
 }
 
 void pic_disable(uint64_t nr)
@@ -82,8 +82,8 @@ void pic_disable(uint64_t nr)
     else
         port = MASTER_OCW1;
 
-    value = inb(port) | (1 << (nr - 0x20));
-    outb(port, value);
+    value = arch_inb(port) | (1 << (nr - 0x20));
+    arch_outb(port, value);
 }
 
 uint64_t pic_install(uint64_t nr, void * data __attribute__((unused)))
@@ -100,8 +100,8 @@ void pic_uninstall(uint64_t nr)
 void pic_ack(uint64_t nr)
 {
     if (nr >= 0x28)
-        outb(SLAVE_OCW3, 0x20);
-    outb(MASTER_OCW3, 0x20);
+        arch_outb(SLAVE_OCW3, 0x20);
+    arch_outb(MASTER_OCW3, 0x20);
 }
 
 // ── Global PIC controller instance ──────────────────────────

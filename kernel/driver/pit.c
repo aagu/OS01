@@ -55,7 +55,7 @@ void pit_init()
 void set_frequency(uint16_t hz)
 {
     uint16_t divisor = CLOCK_FREQUENCY / hz;
-    outb(PIT_COMMAND, PIT_ICW);
-    outb(PIT_DATA, divisor & 0xff);
-    outb(PIT_DATA, (divisor >> 8) & 0xff);
+    arch_outb(PIT_COMMAND, PIT_ICW);
+    arch_outb(PIT_DATA, divisor & 0xff);
+    arch_outb(PIT_DATA, (divisor >> 8) & 0xff);
 }

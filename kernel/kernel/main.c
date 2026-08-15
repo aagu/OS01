@@ -42,7 +42,7 @@ extern char _end;
 
 // ── Stack canary ─────────────────────────────────────────────
 // Initial value is non-zero (defense-in-depth).  kernel_main()
-// replaces it with rdtsc() as its first statement.
+// replaces it with arch_cycle_counter() as its first statement.
 // ── Safe raw hex output (for __stack_chk_fail — only write_serial) ──
 static void write_hex(uint64_t val)
 {
@@ -118,7 +118,7 @@ __attribute__((no_stack_protector))
 int kernel_main(struct BOOT_INFO *bootinfo)
 {
     // ═══ 0. Stack canary — MUST be the first statement ════════
-    __stack_chk_guard = rdtsc() ^ 0xDEADBEEFCAFEBABE;
+    __stack_chk_guard = arch_cycle_counter() ^ 0xDEADBEEFCAFEBABE;
 
     // ═══ 1. CPU + interrupt infrastructure ═══════════════════
     Pos.Phy_addr = (uint32_t *)bootinfo->Graphics_Info.FrameBufferBase;
@@ -127,10 +127,7 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     Pos.YResolution = bootinfo->Graphics_Info.VerticalResolution;
     spin_init(&Pos.lock);
 
-    load_TR(8);
-    set_tss64(TSS64_Table,
-              0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7800, 0x7400,
-              0, 0, 0, 0);
+    arch_task_init_early();
 
     sys_vector_install();      // syscall + exception IDT entries
     irq_install();             // IRQ 0x20–0x37 IDT entries
@@ -273,7 +270,7 @@ int kernel_main(struct BOOT_INFO *bootinfo)
 
             if (cpu_idx == 0) {
                 percpu_data[0].tss = &init_tss[0];
-                percpu_data[0].tss_hw = TSS64_Table;   // BSP uses legacy global TSS
+                percpu_data[0].tss_hw = arch_task_boot_state();
                 percpu_install_gs(0);
                 percpu_data[0].online = 1;
                 serial_printk("percpu: BSP  (cpu=%u, apic_id=%u) online\n",

@@ -89,7 +89,7 @@ do_resched:
 #define TASK_SIGNAL_OFFSET  72   /* offsetof(task_t, signal) — keep in sync with task.h */
 
 check_signal:
-    # Deliver pending signals — do_signal_delivery returns:
+    # Deliver pending signals — arch_do_signal_delivery returns:
     #   0 = nothing delivered (all pending blocked or CPL≠3)
     #   !0 = at least one handler delivered or process killed
     movq    $-32768,    %rbx
@@ -99,7 +99,7 @@ check_signal:
     je  RESTORE_ALL
     # Deliver pending signals.
     movq    %rsp,   %rdi
-    call    do_signal_delivery
+    call    arch_do_signal_delivery
     testl   %eax,   %eax
     jz  RESTORE_ALL           # nothing delivered → break loop
     jmp check_signal          # try next pending signal

@@ -5,7 +5,7 @@
 #include <kernel/task.h>
 #include <kernel/arch/cpu.h>
 #include <kernel/arch/irq.h>
-#include <kernel/arch/gate.h>
+#include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/msr.h>
 #include <kernel/debug.h>
 #include <kernel/memory.h>

@@ -5,13 +5,16 @@
 #include <kernel/arch/x86_64/regs.h>   // provides pt_regs_t
 
 // Architecture-specific task init (TSS, CR3 setup).
+// The early hook runs before interrupt vectors and memory/task setup.
+void arch_task_init_early(void);
+void *arch_task_boot_state(void);
 // Called once by task_init() during boot.
 void arch_task_init_platform(void);
 
 // Signal delivery — arch-specific because it manipulates the
 // user-mode register frame on the kernel stack before iretq.
-int  do_signal_delivery(pt_regs_t *regs);
-int  signal_pending_fatal(void);   // non-zero if a fatal signal is pending
+int  arch_do_signal_delivery(pt_regs_t *regs);
+int  arch_signal_pending_fatal(void);   // non-zero if a fatal signal is pending
 #elif defined(__aarch64__)
 
 // aarch64 exception frame as pushed by the exception vector handler.
@@ -29,11 +32,13 @@ typedef struct pt_regs
 
 // arch_task_init_platform placeholder — aarch64 doesn't need TSS setup.
 // Declared in this header's x86_64 block. For aarch64 it's a no-op.
+static inline void arch_task_init_early(void) {}
+static inline void *arch_task_boot_state(void) { return (void *)0; }
 static inline void arch_task_init_platform(void) {}
 
 // Signal delivery stubs — aarch64 not yet implemented.
-static inline int do_signal_delivery(pt_regs_t *regs) { (void)regs; return 0; }
-static inline int signal_pending_fatal(void) { return 0; }
+static inline int arch_do_signal_delivery(pt_regs_t *regs) { (void)regs; return 0; }
+static inline int arch_signal_pending_fatal(void) { return 0; }
 #else
 #error "Unsupported architecture"
 #endif

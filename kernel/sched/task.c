@@ -2,7 +2,6 @@
 #include <kernel/percpu.h>
 #include <kernel/ipi.h>
 #include <kernel.h>
-#include <kernel/arch/gate.h>
 #include <kernel/arch/spinlock.h>
 #include <kernel/arch/irq.h>
 #include <kernel/hang.h>

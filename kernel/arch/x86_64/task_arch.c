@@ -1,7 +1,20 @@
 #include <kernel/task.h>
 #include <kernel/arch/mmu.h>
-#include <kernel/arch/gate.h>
+#include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/thread.h>
+
+void arch_task_init_early(void)
+{
+    load_TR(8);
+    set_tss64(TSS64_Table,
+              0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7800, 0x7400,
+              0, 0, 0, 0);
+}
+
+void *arch_task_boot_state(void)
+{
+    return TSS64_Table;
+}
 
 void arch_task_init_platform(void)
 {

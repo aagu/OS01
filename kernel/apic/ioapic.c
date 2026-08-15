@@ -274,8 +274,8 @@ int ioapic_init(void)
     //
     //  port 0x22 ← 0x70   (select IMCR register)
     //  port 0x23 ← 0x01   (IMCR bit → APIC mode)
-    outb(0x22, 0x70);
-    outb(0x23, 0x01);
+    arch_outb(0x22, 0x70);
+    arch_outb(0x23, 0x01);
     debug_irq("IOAPIC: IMCR set to APIC mode\n");
 
     return 1;

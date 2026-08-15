@@ -774,14 +774,14 @@ void do_virtualization_exception(pt_regs_t * regs, uint64_t error_code)
 // Registered handlers clear the pending bit but don't yet
 // deliver to user space (future work).
 
-int do_signal_delivery(pt_regs_t *regs)
+int arch_do_signal_delivery(pt_regs_t *regs)
 {
     uint64_t pending = current->signal;
     if (!pending)
         return 0;
 
     // ── NULL regs path (tty.c inline signal clear) ─────────
-    // tty.c:267 calls do_signal_delivery(NULL) when a direct
+    // tty.c calls arch_do_signal_delivery(NULL) when a direct
     // switch bypassed ret_from_intr.  Only non-fatal signals
     // can be pending here.  Handle SIG_IGN + non-fatal SIG_DFL;
     // registered handlers are left pending.
@@ -920,7 +920,7 @@ int do_signal_delivery(pt_regs_t *regs)
     return 0;  // nothing deliverable
 }
 
-int signal_pending_fatal(void)
+int arch_signal_pending_fatal(void)
 {
     uint64_t pending = current->signal;
     if (!pending)
@@ -2120,7 +2120,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         regs->rip=kframe->rip; regs->cs=kframe->cs; regs->rflags=kframe->rflags;
         regs->rsp=kframe->rsp; regs->ss=kframe->ss;
 
-        // Note: do_system_call's tail do_signal_delivery() runs after
+        // Note: do_system_call's tail arch_do_signal_delivery() runs after
         // this break.  If there are additional pending signals, they
         // will be delivered on the freshly-restored stack — matching
         // Linux behavior (sigreturn processes remaining signals before
@@ -2360,7 +2360,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
     // For signals that kill (SIG_DFL + fatal), do_exit() calls
     // switch_to() and never returns.
     if (regs->cs & 3)
-        do_signal_delivery(regs);
+        arch_do_signal_delivery(regs);
 }
 
 void sys_vector_install()

@@ -273,7 +273,7 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
         deadline_jiffies = jiffies + (timeout + 9) / 10;
 
     for (;;) {
-        if (signal_pending_fatal()) {
+        if (arch_signal_pending_fatal()) {
             destroy_timer(idle_timer);
             return SYS_ARCH_TIMEOUT;
         }

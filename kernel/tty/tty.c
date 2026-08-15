@@ -156,7 +156,7 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
             return 0;
 
         // ── Signal check before blocking sleep ───────────────
-        if (signal_pending_fatal())
+        if (arch_signal_pending_fatal())
             return 0;
 
         // ── Phase 2: blocking sleep on wait queue ──────────
@@ -178,9 +178,9 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
         schedule();
         arch_local_irq_enable();
 
-        do_signal_delivery(NULL);
+        arch_do_signal_delivery(NULL);
 
-        if (signal_pending_fatal()) {
+        if (arch_signal_pending_fatal()) {
             uint64_t wq_flags = spin_lock_irqsave(&tty->read_wait_lock);
             if (!list_is_empty(&current->io_wait_node))
                 list_del_init(&current->io_wait_node);

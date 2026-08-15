@@ -362,7 +362,7 @@ int64_t pipe_read_internal(pipe_t *p, void *buf, uint64_t size)
             }
         }
 
-        if (signal_pending_fatal())
+        if (arch_signal_pending_fatal())
             return -EINTR;
     }
 }
@@ -401,7 +401,7 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
     case FD_SOCKET: {
         socket_t *s = f->sock;
         if (!s || !s->conn) return -1;
-        if (signal_pending_fatal()) return -EINTR;
+        if (arch_signal_pending_fatal()) return -EINTR;
         // Drain a partially-consumed netbuf first (a 1-byte fgets
         // read must not lose the rest of the 370-byte response).
         if (s->rx_nb) {
@@ -444,7 +444,7 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
                 if (copy > 0) return (int64_t)copy;
                 return -EAGAIN;
             }
-            if (signal_pending_fatal()) return -EINTR;
+            if (arch_signal_pending_fatal()) return -EINTR;
             if (err == ERR_CLSD) return 0;
             if (err == ERR_WOULDBLOCK) return -EAGAIN;
             return -EIO;
@@ -529,7 +529,7 @@ int64_t pipe_write_internal(pipe_t *p, const void *buf, uint64_t size)
             }
         }
 
-        if (signal_pending_fatal())
+        if (arch_signal_pending_fatal())
             return -EINTR;
     }
 }

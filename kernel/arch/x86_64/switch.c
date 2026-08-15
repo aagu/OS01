@@ -1,7 +1,7 @@
 #include <kernel/task.h>
 #include <kernel/percpu.h>
 #include <kernel/arch/spinlock.h>
-#include <kernel/arch/gate.h>
+#include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/cpu.h>
 #include <kernel/printk.h>
 

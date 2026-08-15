@@ -85,7 +85,7 @@ struct sigaction {
     uint64_t   sa_mask;
 };
 
-/* sigframe — saved on user stack by do_signal_delivery,
+/* sigframe — saved on user stack by arch_do_signal_delivery,
  * restored by SYS_sigreturn.  Matches pt_regs_t layout for the
  * GPR + iretq-frame portion; blocked is extra. */
 struct sigframe {

@@ -28,15 +28,18 @@ KERNEL_C_SOURCES := \
     $(wildcard sched/*.c) \
     $(wildcard driver/*.c) \
     $(wildcard tty/*.c) \
-    $(wildcard apic/*.c) \
     $(wildcard intr/*.c) \
     $(wildcard block/*.c) \
     $(wildcard timer/*.c) \
     $(wildcard percpu/*.c) \
-    $(wildcard pic/*.c) \
     $(wildcard test/*.c) \
     $(wildcard subsys/*.c) \
     $(wildcard *.c)               # completion.c
+
+# Platform devices are selected by arch/<arch>/make.config.  Keep x86-only
+# APIC/PIC/PIT/RTC code out of architecture-neutral source discovery.
+KERNEL_C_SOURCES := $(filter-out driver/pit.c driver/rtc.c,$(KERNEL_C_SOURCES))
+KERNEL_C_SOURCES += $(ARCH_PLATFORM_C_SOURCES)
 
 # Architecture C sources and asm sources
 ARCH_C_SOURCES  := $(wildcard $(ARCHDIR)/*.c)

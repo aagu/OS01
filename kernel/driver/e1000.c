@@ -5,7 +5,7 @@
 #include <kernel/pmm.h>       // PAGE_2M_MASK, alloc_pages, alloc_4k_page
 #include <kernel/memory.h>    // Phy_To_Virt
 #include <kernel/interrupt.h> // register_irq
-#include <kernel/arch/x86_64/spinlock.h>
+#include <kernel/arch/spinlock.h>
 #include <kernel/apic.h>      // lapic_eoi, get_ioapic_controller
 #include <kernel/log.h>
 #include <kernel/slab.h>       // log_info

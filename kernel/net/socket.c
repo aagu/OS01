@@ -141,9 +141,9 @@ int64_t do_connect(int fd, uint32_t ip, uint16_t port)
 
     ip_addr_t addr;
     ip4_addr_set_u32(&addr, ip);
-    if (signal_pending_fatal()) return -EINTR;
+    if (arch_signal_pending_fatal()) return -EINTR;
     err_t err = netconn_connect((struct netconn *)s->conn, &addr, port);
-    if (signal_pending_fatal()) return -EINTR;
+    if (arch_signal_pending_fatal()) return -EINTR;
     if (err == ERR_OK) {
         s->state = SOCK_CONNECTED;
         return 0;
@@ -163,10 +163,10 @@ int64_t do_sendto(int fd, const void *buf, uint64_t len, int flags,
     if (s->type == SOCK_STREAM) {
         // TCP: use netconn_write (ip/port ignored — already connected)
         (void)flags; (void)ip; (void)port;
-        if (signal_pending_fatal()) return -EINTR;
+        if (arch_signal_pending_fatal()) return -EINTR;
         err_t err = netconn_write((struct netconn *)s->conn, buf,
                                   (size_t)len, NETCONN_COPY);
-        if (signal_pending_fatal()) return -EINTR;
+        if (arch_signal_pending_fatal()) return -EINTR;
         return (err == ERR_OK) ? (int64_t)len : -EIO;
     } else {
         // UDP: create netbuf with destination
@@ -202,11 +202,11 @@ int64_t do_recvfrom(int fd, void *buf, uint64_t len, int flags,
     (void)flags;
 
     struct netbuf *nb;
-    if (signal_pending_fatal()) return -EINTR;
+    if (arch_signal_pending_fatal()) return -EINTR;
 
     err_t err = netconn_recv((struct netconn *)s->conn, &nb);
     if (err != ERR_OK) {
-        if (signal_pending_fatal()) return -EINTR;
+        if (arch_signal_pending_fatal()) return -EINTR;
         if (err == ERR_CLSD) {
             // Peer closed: readable-but-EOF.  Keep rx_pending set so
             // poll(POLLIN) returns and read() surfaces 0 (EOF).

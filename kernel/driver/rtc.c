@@ -3,21 +3,21 @@
 
 bool is_updating_rtc()
 {
-    outb(CMOS_ADDR, 0x0a);
-    uint32_t status = inb(CMOS_DATA);
+    arch_outb(CMOS_ADDR, 0x0a);
+    uint32_t status = arch_inb(CMOS_DATA);
     return (status & 0x80);
 }
 
 uint8_t get_rtc_register(uint8_t nr)
 {
-    outb(CMOS_ADDR, 0x80 | nr);
-    return inb(CMOS_DATA);
+    arch_outb(CMOS_ADDR, 0x80 | nr);
+    return arch_inb(CMOS_DATA);
 }
 
 void set_rtc_register(uint8_t nr, uint8_t val)
 {
-    outb(CMOS_ADDR, 0x80 | nr);
-    outb(CMOS_DATA,val);
+    arch_outb(CMOS_ADDR, 0x80 | nr);
+    arch_outb(CMOS_DATA,val);
 }
 
 void rtc_read_datetime(datetime_t * dt)
