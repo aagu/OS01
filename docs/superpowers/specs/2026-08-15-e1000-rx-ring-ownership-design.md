@@ -16,7 +16,10 @@ The tcpip thread will be the sole hardware RX-ring owner.
 
 - `e1000_handler()` will acknowledge interrupt causes and request a persistent
   tcpip mailbox wake. It will not inspect, copy, clear, or advance RX
-  descriptors.
+  descriptors. The handler's ICR read remains mandatory: besides acknowledging
+  the interrupt, it clears the QEMU e1000e RX latch so the device may write
+  subsequent descriptors. The equivalent ICR read is removed from
+  `e1000_poll_rx()` only after this responsibility is retained in the handler.
 - `net_poll_rx()` will call `e1000_poll_rx()` and then `e1000_process_rx()` in
   tcpip-thread context. No other caller may invoke `e1000_poll_rx()`.
 - The existing software RX queue remains between descriptor copying and lwIP
@@ -34,10 +37,17 @@ For each descriptor at software index `i` with `DD` set:
    allocation fails, length is invalid, or the queue is full.
 3. Clear the descriptor status only after the CPU has finished reading its DMA
    buffer.
-4. Execute an explicit compiler/DMA ordering barrier so the cleared descriptor
-   is visible before MMIO advertises it to hardware.
+4. Call `arch_wmb()` (the x86 implementation is `sfence` plus a compiler memory
+   clobber) so the cleared descriptor is visible before MMIO advertises it to
+   hardware. A compiler-only barrier is not sufficient.
 5. Write `RDT=i`, returning exactly that descriptor to the device.
 6. Advance the software index to `(i + 1) % E1000_NUM_RX_DESC`.
+
+Steps 3–6 apply to every consumed DD descriptor without exception. A packet
+that is dropped because of invalid length, allocation failure, or a full
+software queue must still clear DD, execute `arch_wmb()`, and write `RDT=i`.
+Merely advancing the software index on a drop would permanently withhold that
+descriptor after the fixed-tail workaround is removed.
 
 Initialization remains `RDH=0`, `RDT=E1000_NUM_RX_DESC-1`, and software index
 zero. The fixed `30→31` writes and their workaround comments are removed.
@@ -46,11 +56,19 @@ zero. The fixed `30→31` writes and their workaround comments are removed.
 
 An RX interrupt can occur after tcpip-thread RX polling but before that thread
 joins the mailbox wait queue. To close this window, `sys_mbox_wake()` must set
-the mailbox's existing `idle_wakeup` flag while holding `mb->lock`, then wake
-the queue. The fetch side must observe and clear this flag under the same lock
-before sleeping. This persistent wake is required together with single ring
-ownership; it was previously insufficient while descriptor bookkeeping was
-still ambiguous.
+the mailbox's existing `idle_wakeup` flag using
+`spin_lock_irqsave(&mb->lock)` / `spin_unlock_irqrestore()`, then—after the
+unlock—call `wait_queue_wake_one(&mb->wq)`. This exact
+set-under-lock → unlock → wake ordering mirrors `mbox_idle_callback()` and is
+safe when called from `e1000_handler()` in IRQ context. The fetch side must
+observe and clear the flag under the same lock before sleeping. This persistent
+wake is required together with single ring ownership; it was previously
+insufficient while descriptor bookkeeping was still ambiguous.
+
+The comment at `kernel/net/net.c`'s `e1000_poll_rx()` call must explicitly say
+that it runs in tcpip-thread context and is the sole hardware-ring consumer.
+This comment is part of the ownership contract and replaces the misleading
+existing `IRQ context` wording.
 
 ## Diagnostics and Scope
 
@@ -62,11 +80,17 @@ parser relaxation is prohibited.
 
 The existing `localhost` DNS prerequisite and fixed host-port limitation remain
 unchanged. The pre-existing `nanosleep()` wake defect is outside this fix.
+VirtIO-net currently has a similar IRQ/task dual-consumer shape; it is explicitly
+out of scope and must be tracked as follow-up work rather than treated as fixed
+by the E1000 change.
 
 ## Verification
 
-- A deliberately broken descriptor-return mutation must make the QEMU network
-  regression fail, proving the test observes RX loss.
+- Use a named deterministic descriptor-return mutation: initialize `RDT=1`
+  and suppress all per-consumption `RDT=i` writes, limiting hardware to the
+  first two descriptors. Across 20 fresh QEMU iterations, every first network
+  result must fail. This proves the regression observes a stalled RX ring; a
+  single timing-dependent failure is not sufficient mutation evidence.
 - Run at least 20 QEMU network iterations without per-packet serial logging;
   every first result must report five passed and zero failed.
 - Run the host test suite with `make test`.
