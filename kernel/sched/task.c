@@ -1978,6 +1978,16 @@ void task_init()
     }
 #endif
 
+#ifdef OS01_SELFTEST
+    // ── fd reference-protocol race test ─────────────────────
+    // After deferred_free_spawn() (files_unpin defers) and scheduler_ok
+    // (kernel_thread + schedule() work).
+    {
+        extern void test_fd_refcount(void);
+        test_fd_refcount();
+    }
+#endif
+
     // ── Idle loop ────────────────────────────────────────────
     // hlt pauses the CPU until the next interrupt (timer tick,
     // keyboard IRQ1, serial IRQ4).  The timer ISR sets

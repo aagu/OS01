@@ -318,6 +318,13 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options);
 struct task_struct *create_kthread(uint64_t (*fn)(uint64_t), uint64_t arg,
                                    const char *name);
 
+// Create a PF_KTHREAD task that runs fn(arg), then do_exit(0).
+// Returns the new pid (>= 0), or a negative errno on failure.
+// Unlike create_kthread(), this does NOT do a second lockless
+// task-list scan to recover a task_t* — the returned pid is the
+// authoritative "did it get created" signal, safe under SMP.
+int kernel_thread(uint64_t (*fn)(uint64_t), uint64_t arg, uint64_t flags);
+
 /* User stack layout (separate 2MB page at 0x800000).
  * The 2MB page at 0x600000 is left unmapped as a stack guard —
  * overflow past the stack bottom triggers #PF instead of silent
