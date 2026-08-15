@@ -32,6 +32,11 @@ extern "C" {
 #define SO_BROADCAST   6
 #define SO_KEEPALIVE   9
 
+/* shutdown() how */
+#define SHUT_RD    0
+#define SHUT_WR    1
+#define SHUT_RDWR  2
+
 typedef unsigned int socklen_t;
 typedef unsigned short sa_family_t;
 
@@ -61,12 +66,15 @@ int  listen(int sockfd, int backlog);
 int  accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
 int  connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
 ssize_t recv(int sockfd, void *buf, size_t len, int flags);
+ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags, struct sockaddr *src, socklen_t *addrlen);
 int  setsockopt(int sockfd, int level, int optname, const void *optval, socklen_t optlen);
 int  getsockopt(int sockfd, int level, int optname, void *optval, socklen_t *optlen);
 ssize_t send(int sockfd, const void *buf, size_t len, int flags);
 ssize_t sendto(int sockfd, const void *buf, size_t len, int flags, const struct sockaddr *dest, socklen_t addrlen);
 int  getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
 int  getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+int  socketpair(int domain, int type, int protocol, int sv[2]);
+int  shutdown(int sockfd, int how);
 
 #ifdef __cplusplus
 }

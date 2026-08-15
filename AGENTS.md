@@ -9,6 +9,7 @@ make run                   # Build + run
 make debug                 # Build + QEMU paused, GDB :1234
 make clean                 # MANDATORY after struct changes (no header deps!)
 make test                  # Run all tests
+make OS01_SYSTEST=1 test-syscall  # QEMU syscall E2E; top-level flag is mandatory
 make kernel.bin            # Build kernel only
 ```
 
@@ -37,6 +38,7 @@ Init:    head.S → kernel_main → subsys → VFS/FS → TTY → percpu → SMP
 
 - **BOOT_INFO ABI**: bootloader is LLP64 (`sizeof(long)=4`), kernel LP64 (`sizeof(long)=8`). All fields must use `uint32_t`/`uint64_t` — never `unsigned long`.
 - **`make clean` mandatory** after any struct change (no header deps in Makefile — stale `.o` = silent `sizeof()` mismatch).
+- **Syscall E2E invocation**: always run `make OS01_SYSTEST=1 test-syscall`; do not omit the top-level `OS01_SYSTEST=1` even though the target invokes a recursive make.
 - **`set_intr_gate_raw` only accepts assembly stubs**. Bare C `ret` leaks CS+RFLAGS. Use `DEFINE_INTR_STUB` + `REGISTER_INTR_HANDLER`.
 - **GS base** set ONCE via `wrmsr(IA32_GS_BASE)`. Never reload GS selector — clobbers per-CPU data.
 - **`get_current_task()`**: `RSP & ~(STACK_SIZE-1)`, NOT `RSP & ~STACK_SIZE`.

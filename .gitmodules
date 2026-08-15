@@ -4,3 +4,9 @@
 [submodule "thirdpart/busybox-1.36.1"]
 	path = thirdpart/busybox-1.36.1
 	url = https://github.com/mirror/busybox
+[submodule "thirdpart/lwip"]
+	path = thirdpart/lwip
+	url = https://git.savannah.nongnu.org/git/lwip.git
+[submodule "thirdpart/mbedtls"]
+	path = thirdpart/mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls.git

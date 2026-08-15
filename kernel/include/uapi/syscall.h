@@ -73,6 +73,21 @@
 #define SYS_select       50
 #define SYS_pselect6     51
 
+// ── Phase 10: socket networking ────────────────────────────────
+#define SYS_socket        52
+#define SYS_bind          53
+#define SYS_connect       54
+#define SYS_listen        55
+#define SYS_accept        56
+#define SYS_sendto        57
+#define SYS_recvfrom      58
+#define SYS_setsockopt    59
+#define SYS_getsockopt    60
+#define SYS_getsockname   61
+#define SYS_getpeername   62
+#define SYS_getifaddr     63
+#define SYS_shutdown      64
+
 // ── reboot(2) commands ──────────────────────────────────────
 #define RB_AUTOBOOT    0x01234567
 #define RB_POWER_OFF   0x4321FEDC

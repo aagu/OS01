@@ -127,6 +127,9 @@
 #define MADT_TYPE_NMI         0x04   // Local APIC NMI
 #define MADT_TYPE_X2APIC      0x09   // Processor Local x2APIC (ACPI 5.0+)
 
+// MADT Flags (from MADT_HEADER.Flags)
+#define MADT_FLAG_PIC_PRESENT  (1 << 0)  // PC-AT dual 8259 PICs installed
+
 // ──────────────────────────────────────────────
 //  Data structures
 // ──────────────────────────────────────────────
@@ -191,7 +194,7 @@ void lapic_eoi(void);
 uint32_t lapic_read(uint32_t offset);
 void lapic_write(uint32_t offset, uint32_t value);
 
-// Get the I/O APIC hw_int_controller_t for use with register_irq()
+// Get the I/O APIC hw_int_controller_t (used internally by register_irq)
 hw_int_controller_t * get_ioapic_controller(void);
 
 // Diagnostics: print all IOAPIC redirection entries
@@ -199,6 +202,14 @@ void ioapic_dump_entries(void);
 
 // Look up the GSI for a given ISA IRQ (applying ISO overrides)
 uint32_t isa_irq_to_gsi(uint8_t isa_irq);
+
+// Return the MADT Flags field (e.g. MADT_FLAG_PIC_PRESENT)
+uint32_t apic_madt_flags(void);
+
+// Determine the recommended trigger mode for a GSI.
+// Consults ISO overrides and GSI-range defaults.
+// Returns ISO_TRIGGER_EDGE or ISO_TRIGGER_LEVEL.
+uint8_t irq_trigger_for_gsi(uint32_t gsi);
 
 // ── LAPIC per-CPU timer ────────────────────────
 // Calibrate against PIT (must run once on BSP after PIT is active).

@@ -8,6 +8,7 @@
 #include <driver/keyboard.h>
 #include <driver/serial.h>
 #include <driver/ahci.h>
+#include <net/net.h>
 
 // ── RSDP 地址（由 kernel_main 在调用 arch_register_subsys 前设置） ──
 uint64_t arch_boot_rsdp = 0;
@@ -62,6 +63,11 @@ static int _ahci_init_wrapper(void)
     return 0;
 }
 
+static int _net_hw_init_wrapper(void)
+{
+    return net_hw_init();
+}
+
 // ── Arch 注册入口 ─────────────────────────────────────────
 
 void arch_register_subsys(void)
@@ -79,6 +85,7 @@ void arch_register_subsys(void)
     register_subsys("keyboard", _keyboard_init_wrapper,    SUBSYS_PHASE_5, SUBSYS_FLAG_OPTIONAL);
     register_subsys("serial",   _init_serial_irq_wrapper,  SUBSYS_PHASE_5, 0);
 
-    // Phase 6: 存储
+    // Phase 6: 存储 + 网络
     register_subsys("ahci", _ahci_init_wrapper,            SUBSYS_PHASE_6, SUBSYS_FLAG_OPTIONAL);
+    register_subsys("net-hw", _net_hw_init_wrapper,        SUBSYS_PHASE_6, SUBSYS_FLAG_OPTIONAL);
 }

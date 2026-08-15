@@ -3,7 +3,6 @@
 #include <kernel/arch/io.h>
 #include <kernel/interrupt.h>
 #include <stddef.h>
-#include <device/pic.h>
 #include <kernel/apic.h>
 #include <kernel.h>
 #include <kernel/softirq.h>
@@ -12,15 +11,7 @@
 #include <kernel/percpu.h>
 #include <driver/serial.h>
 #include <kernel/console.h>
-
-hw_int_controller_t pit_controller =
-{
-    .enable = pic_enable,
-    .disable = pic_disable,
-    .install = pic_install,
-    .uninstall = pic_uninstall,
-    .ack = pic_ack,
-};
+#include <kernel/debug.h>
 
 void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attribute__((unused)), pt_regs_t * regs __attribute__((unused)))
 {
@@ -34,6 +25,11 @@ void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attri
         wait_queue_wake_all(current_poll_wq);
         current_poll_wq = NULL;
     }
+
+    // RX is now interrupt-driven: the e1000 MSI-X handler buffers
+    // packets and wakes tcpip_thread (see e1000_handler).  No PIT-tick
+    // polling needed — the mbox idle timer remains as a wake-up
+    // fallback inside sys_arch_mbox_fetch.
 
     // Request rescheduling on every timer tick — schedule() manages
     // per-task quantum counters and picks the next task.
@@ -52,10 +48,7 @@ void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attri
 
 void pit_init()
 {
-    hw_int_controller_t *ctrl = apic_available()
-        ? get_ioapic_controller()
-        : &pit_controller;
-    register_irq(32, NULL, &pit_handler, 0, ctrl, "pit");
+    register_irq(0, NULL, &pit_handler, 0, IRQF_TRIGGER_EDGE, "pit");
     set_frequency(100); //100 times per sec
 }
 

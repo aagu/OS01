@@ -30,6 +30,7 @@
 #include <kernel/console.h>
 #include <kernel/fb.h>
 #include <kernel/pty.h>
+#include <net/net.h>
 
 // ── Stack canary ─────────────────────────────────────────────
 
@@ -299,6 +300,13 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     selftest_run_all();
     serial_printk("[selftest] done\n");
 #endif
+
+    // ═══ Network stack init (post-SMP, pre-scheduler) ═══
+    // lwIP creates kernel threads (tcpip_thread) — must happen
+    // after SMP is up and before the scheduler starts.  The task
+    // list is no longer reset by task_init() (INIT_TASK pre-initializes
+    // .list as self-referencing), so tcpip_thread stays schedulable.
+    net_lwip_init();
 
     futex_init();                        // init futex hash buckets
 

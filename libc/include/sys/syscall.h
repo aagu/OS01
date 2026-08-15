@@ -57,6 +57,21 @@
 #define SYS_select     50   // v1: adaptor on top of do_poll
 #define SYS_pselect6   51   // v1: adaptor on top of do_poll
 
+// ── Socket networking (Phase 10) ───────────────────────────
+#define SYS_socket        52
+#define SYS_bind          53
+#define SYS_connect       54
+#define SYS_listen        55
+#define SYS_accept        56
+#define SYS_sendto        57
+#define SYS_recvfrom      58
+#define SYS_setsockopt    59
+#define SYS_getsockopt    60
+#define SYS_getsockname   61
+#define SYS_getpeername   62
+#define SYS_getifaddr     63
+#define SYS_shutdown      64
+
 // ── Generic syscall helper ─────────────────────────────────
 
 static inline int64_t syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3)

@@ -45,7 +45,6 @@ int fseeko(void *f, long off, int whence);
 size_t fread(void *ptr, size_t size, size_t nmemb, void *f);
 int fflush(void *f);
 
-#endif
 int vasprintf(char **strp, const char *fmt, va_list ap);
 int fileno_unlocked(FILE *f);
 
@@ -53,8 +52,14 @@ int fileno_unlocked(FILE *f);
 #define stdout ((FILE*)2)
 #define stderr ((FILE*)3)
 
-#define getc_unlocked(f) getchar()
-#define putc_unlocked(c,f) putchar(c)
+/* Minimal FILE struct shared by fopen/fdopen/fread/fwrite/fgets/getc */
+typedef struct {
+    int fd;
+    int mode;  /* 0=read, 1=write */
+} mini_file_t;
+
+int getc_unlocked(void *f);
+int putc_unlocked(int c, void *f);
 #define fputs_unlocked(s,f) fputs(s,f)
 
 int fputs(const char *s, void *f);
@@ -74,3 +79,5 @@ int vsnprintf(char *b, unsigned long s, const char *fmt, __builtin_va_list ap);
 int putchar_unlocked(int c);
 int fputc(int c, void *f);
 size_t fwrite(const void *p, size_t s, size_t n, void *f);
+
+#endif /* _STDIO_H */

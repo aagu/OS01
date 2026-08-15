@@ -2,7 +2,6 @@
 #include <kernel/interrupt.h>
 #include <kernel/printk.h>
 #include <kernel/tty.h>
-#include <device/pic.h>
 #include <kernel/apic.h>
 #include <kernel/arch/io.h>
 #include <kernel/arch/cpu.h>
@@ -38,19 +37,10 @@ static inline bool serial_ring_empty(void)
 }
 
 // ═══════════════════════════════════════════════════════════
-//  Serial IRQ handler (COM1 IRQ4, vector 0x24)
+//  Serial IRQ handler (COM1 IRQ4, GSI 4, vector 0x24)
 // ═══════════════════════════════════════════════════════════
 // Drains all available bytes from the UART RX FIFO and
 // pushes them to the ring buffer.
-
-static hw_int_controller_t serial_controller =
-{
-    .enable   = pic_enable,
-    .disable  = pic_disable,
-    .install  = pic_install,
-    .uninstall = pic_uninstall,
-    .ack      = pic_ack,
-};
 
 // Console TTY — serial handler pushes received bytes here.
 static tty_t *serial_tty = NULL;
@@ -109,10 +99,7 @@ void init_serial(void)
 
 void init_serial_irq(void)
 {
-    hw_int_controller_t *ctrl = apic_available()
-        ? get_ioapic_controller()
-        : &serial_controller;
-    register_irq(0x24, NULL, &serial_handler, 0, ctrl, "serial");
+    register_irq(4, NULL, &serial_handler, 0, IRQF_TRIGGER_LEVEL, "serial");
 
     // IOAPIC entry is now unmasked — safe to enable UART RX interrupts.
     arch_outb(SERIAL_COM1 + 1, 0x01);    // Enable RX interrupt (Data Available)

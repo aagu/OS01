@@ -20,6 +20,9 @@ void pipe_wake_writers(pipe_t *p);
 // ── PTY allocation lock ─────────────────────────────────────
 spinlock_T pty_lock = { 1 };
 
+#include "lwip/err.h"     // err_t, ERR_OK, ERR_CLSD
+#include "lwip/api.h"     // netconn_recv, netconn_write, netconn_delete, netbuf
+
 // ── Allocate a file_t ──────────────────────────────────────
 file_t *file_alloc(void)
 {
@@ -125,9 +128,15 @@ void file_free(file_t *f)
         vfs_node_put(f->node);
         f->node = NULL;
     }
+    if (f->type == FD_SOCKET && f->sock) {
+        if (f->sock->conn)
+            netconn_delete((struct netconn *)f->sock->conn);
+        free(f->sock);
+    }
     // Poison to catch use-after-free
     f->pipe = NULL;
     f->pty  = NULL;
+    f->sock = NULL;
     free(f);
 }
 
@@ -389,6 +398,57 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
     case FD_PTY_SLAVE:
         if (!f->pty || !f->pty->master_to_slave) return -1;
         return pipe_read_internal(f->pty->master_to_slave, buf, size);
+    case FD_SOCKET: {
+        socket_t *s = f->sock;
+        if (!s || !s->conn) return -1;
+        if (signal_pending_fatal()) return -EINTR;
+        // Drain a partially-consumed netbuf first (a 1-byte fgets
+        // read must not lose the rest of the 370-byte response).
+        if (s->rx_nb) {
+                struct netbuf *nb = (struct netbuf *)s->rx_nb;
+                void *data; u16_t data_len;
+                netbuf_data(nb, &data, &data_len);
+                u16_t avail = (data_len > (u16_t)s->rx_off) ? (u16_t)(data_len - s->rx_off) : 0;
+                size_t copy = (avail < size) ? avail : size;
+                if (copy > 0) memcpy(buf, (uint8_t *)data + s->rx_off, copy);
+                s->rx_off += (int)copy;
+                if (s->rx_off >= data_len) {
+                    s->rx_off = 0;
+                    if (netbuf_next(nb) < 0) {
+                        netbuf_delete(nb);
+                        s->rx_nb = NULL;
+                    }
+                }
+                if (copy > 0) return (int64_t)copy;
+                return -EAGAIN;
+            }
+            struct netbuf *nb;
+            err_t err = netconn_recv((struct netconn *)s->conn, &nb);
+            if (err == ERR_OK) {
+                void *data; u16_t data_len;
+                netbuf_data(nb, &data, &data_len);
+                size_t copy = (data_len < size) ? data_len : size;
+                if (copy > 0) memcpy(buf, data, copy);
+                if (copy < data_len) {
+                    // Keep the rest for the next read.
+                    s->rx_nb = nb;
+                    s->rx_off = (int)copy;
+                } else {
+                    if (netbuf_next(nb) >= 0) {
+                        s->rx_nb = nb;
+                        s->rx_off = 0;
+                    } else {
+                        netbuf_delete(nb);
+                    }
+                }
+                if (copy > 0) return (int64_t)copy;
+                return -EAGAIN;
+            }
+            if (signal_pending_fatal()) return -EINTR;
+            if (err == ERR_CLSD) return 0;
+            if (err == ERR_WOULDBLOCK) return -EAGAIN;
+            return -EIO;
+        }
     default:
         return -1;
     }
@@ -504,6 +564,14 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
     case FD_PTY_SLAVE:
         if (!f->pty || !f->pty->slave_to_master) return -1;
         return pipe_write_internal(f->pty->slave_to_master, buf, size);
+    case FD_SOCKET: {
+        socket_t *s = f->sock;
+        if (!s || !s->conn) return -EIO;
+        err_t err = netconn_write((struct netconn *)s->conn, buf,
+                                  (size_t)size, NETCONN_COPY);
+        if (err == ERR_OK) { f->offset += size; return (int64_t)size; }
+        return -EIO;
+    }
     default:
         return -1;
     }

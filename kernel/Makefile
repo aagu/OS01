@@ -22,6 +22,7 @@ KERNEL_HEADERS := include
 # All paths are relative to kernel/ (CWD after make -C kernel)
 KERNEL_C_SOURCES := \
     $(wildcard kernel/*.c) \
+    $(wildcard net/*.c) \
     $(wildcard memory/*.c) \
     $(wildcard fs/*.c) \
     $(wildcard sched/*.c) \
@@ -78,6 +79,25 @@ else
 ALL_CFLAGS += -DDEBUG=1
 ALL_CFLAGS += -O0     # Debug: easy GDB single-stepping
 endif
+
+# ── lwIP networking stack ────────────────────────────────────
+LWIP_SRC_DIR  := ../thirdpart/lwip/src
+LWIP_CORE     := $(wildcard $(LWIP_SRC_DIR)/core/*.c)
+LWIP_CORE4    := $(wildcard $(LWIP_SRC_DIR)/core/ipv4/*.c)
+LWIP_NETIF    := $(wildcard $(LWIP_SRC_DIR)/netif/*.c)
+LWIP_API      := $(wildcard $(LWIP_SRC_DIR)/api/*.c)
+
+# Exclude PPP/SLIP/SLIPIF/ethernetif.c (we provide our own netif)
+LWIP_NETIF    := $(filter-out %/ppp.c %/slipif.c %/ethernetif.c, $(LWIP_NETIF))
+
+LWIP_SOURCES  := $(LWIP_CORE) $(LWIP_CORE4) $(LWIP_NETIF) $(LWIP_API)
+# Map lwIP sources to build dir: thirdpart/lwip/src/core/tcp.c → build/.../lwip/core/tcp.o
+LWIP_OBJECTS  := $(patsubst $(LWIP_SRC_DIR)/%.c,$(BUILD_DIR)/lwip/%.o,$(LWIP_SOURCES))
+
+KERNEL_OBJECTS += $(LWIP_OBJECTS)
+
+ALL_CFLAGS     += -I$(LWIP_SRC_DIR)/include -I../kernel/net
+ALL_LDFLAGS    +=
 ifdef DEBUG_CHANNELS
   comma := ,
   empty :=
@@ -113,6 +133,12 @@ $(BUILD_DIR)/%.o: %.c
 
 # .S → .o + .d
 $(BUILD_DIR)/%.o: %.S
+	@mkdir -p $(dir $@)
+	$(CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
+
+# ── lwIP compilation ──────────────────────────────────────────
+# lwIP sources live outside kernel/ under thirdpart/lwip/src
+$(BUILD_DIR)/lwip/%.o: $(LWIP_SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
 

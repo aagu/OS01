@@ -78,6 +78,51 @@ build/x86_64/user/busybox.elf: thirdpart/busybox-1.36.1/busybox
 BUSYBOX_SRC  = thirdpart/busybox-1.36.1
 BUSYBOX_CFG  = config/busybox.config
 
+# ── mbedTLS ─────────────────────────────────────────────────
+MBEDTLS_SRC = thirdpart/mbedtls
+MBEDTLS_LIB = $(SYSROOT)/usr/lib/libmbedtls.a
+
+$(MBEDTLS_LIB): lib config/mbedtls_config.h libc/network/entropy.c
+	@test -d $(MBEDTLS_SRC)/library || { \
+	    echo "ERROR: mbedtls submodule not initialized"; \
+	    echo "Run: git submodule update --init"; false; }
+	@cp config/mbedtls_config.h $(MBEDTLS_SRC)/include/mbedtls/os01_mbedtls_config.h
+	@mkdir -p $(SYSROOT)/usr/lib $(SYSROOT)/usr/include
+	@rm -rf /tmp/mbedtls_build && mkdir -p /tmp/mbedtls_build
+	@echo "  [mbedtls] compiling 108 library files..."
+	@ok=0; fail=0; \
+	for src in $(MBEDTLS_SRC)/library/*.c; do \
+	    name=$$(basename $$src .c); \
+	    if clang -target x86_64-unknown-none \
+	        --sysroot=$(SYSROOT) -isystem=$(INCLUDEDIR) \
+	        -g -ffreestanding -fno-stack-protector \
+	        -I$(MBEDTLS_SRC)/include -I$(MBEDTLS_SRC)/library \
+	        -DMBEDTLS_USER_CONFIG_FILE='<mbedtls/os01_mbedtls_config.h>' \
+	        -c $$src -o /tmp/mbedtls_build/$$name.o 2>/dev/null; then \
+	        ok=$$((ok+1)); \
+	    else \
+	        fail=$$((fail+1)); \
+	        [ $$fail -le 3 ] && echo "  [mbedtls] FAIL: $$name" && \
+	          clang -target x86_64-unknown-none \
+	            --sysroot=$(SYSROOT) -isystem=$(INCLUDEDIR) \
+	            -g -ffreestanding -fno-stack-protector \
+	            -I$(MBEDTLS_SRC)/include -I$(MBEDTLS_SRC)/library \
+	            -DMBEDTLS_USER_CONFIG_FILE='<mbedtls/os01_mbedtls_config.h>' \
+	            -c $$src -o /tmp/mbedtls_build/$$name.o 2>&1 | grep "error:" | head -1; \
+	    fi; \
+	done; \
+	clang -target x86_64-unknown-none \
+	    --sysroot=$(SYSROOT) -isystem=$(INCLUDEDIR) \
+	    -g -ffreestanding -fno-stack-protector \
+	    -I$(MBEDTLS_SRC)/include -I$(MBEDTLS_SRC)/library \
+	    -DMBEDTLS_USER_CONFIG_FILE='<mbedtls/os01_mbedtls_config.h>' \
+	    -c libc/network/entropy.c -o /tmp/mbedtls_build/os01_entropy.o 2>/dev/null && ok=$$((ok+1)); \
+	echo "  [mbedtls] $$ok compiled"
+	@llvm-ar rcs $(MBEDTLS_LIB) /tmp/mbedtls_build/*.o
+	@cp -R $(MBEDTLS_SRC)/include/mbedtls $(SYSROOT)/usr/include/
+	@rm -rf /tmp/mbedtls_build
+	@echo "  [mbedtls] libmbedtls.a installed"
+
 thirdpart/busybox-1.36.1/busybox: lib $(BUSYBOX_SRC)/Makefile $(BUSYBOX_CFG) user/crt0.S user/sigreturn_trampoline.S
 	@test -f $(BUSYBOX_SRC)/Makefile || { \
 	    echo "ERROR: busybox submodule not initialized"; \
@@ -123,6 +168,37 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 	@cp build/x86_64/user/terminal.elf       config/fsroot/bin/terminal
 	@cp build/x86_64/user/smp_stress.elf     config/fsroot/bin/smp_stress
 	@cp $(INITTAB_FILE) config/fsroot/etc/inittab
+	@cp build/x86_64/user/socktest.elf      config/fsroot/bin/socktest
+	@cp build/x86_64/user/udptest.elf       config/fsroot/bin/udptest
+	@cp build/x86_64/user/ipaddr.elf        config/fsroot/bin/ipaddr
+	@ln -sf busybox config/fsroot/bin/wget
+	@ln -sf busybox config/fsroot/bin/login
+	@ln -sf busybox config/fsroot/bin/sh
+	@ln -sf busybox config/fsroot/bin/[
+	@ln -sf busybox config/fsroot/bin/[[
+	@ln -sf busybox config/fsroot/bin/cat
+	@ln -sf busybox config/fsroot/bin/cp
+	@ln -sf busybox config/fsroot/bin/mv
+	@ln -sf busybox config/fsroot/bin/rm
+	@ln -sf busybox config/fsroot/bin/mkdir
+	@ln -sf busybox config/fsroot/bin/rmdir
+	@ln -sf busybox config/fsroot/bin/echo
+	@ln -sf busybox config/fsroot/bin/printf
+	@ln -sf busybox config/fsroot/bin/ps
+	@ln -sf busybox config/fsroot/bin/kill
+	@ln -sf busybox config/fsroot/bin/mount
+	@ln -sf busybox config/fsroot/bin/grep
+	@ln -sf busybox config/fsroot/bin/sed
+	@ln -sf busybox config/fsroot/bin/awk
+	@ln -sf busybox config/fsroot/bin/find
+	@ln -sf busybox config/fsroot/bin/xargs
+	@ln -sf busybox config/fsroot/bin/tar
+	@ln -sf busybox config/fsroot/bin/gzip
+	@ln -sf busybox config/fsroot/bin/gunzip
+	@ln -sf busybox config/fsroot/bin/ping
+	@ln -sf busybox config/fsroot/bin/ifconfig
+	@ln -sf busybox config/fsroot/bin/clear
+	@ln -sf busybox config/fsroot/bin/dmesg
 	$(MAKE) -C tools check-deps
 	$(MAKE) -C tools
 	tools/mkdisk disk.img \
@@ -134,6 +210,7 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 
 run: disk.img boot/uefi/OVMF.fd
 	$(QEMU_BIN) -M q35 -smp $(SMP) -pflash boot/uefi/OVMF.fd \
+	  -netdev user,id=net0 -device e1000e,netdev=net0 \
 	  -drive file=disk.img,format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio -no-reboot
@@ -141,13 +218,23 @@ run: disk.img boot/uefi/OVMF.fd
 run-kvm: disk.img boot/uefi/OVMF.fd
 	$(QEMU_BIN) -M q35 -smp $(SMP) -pflash boot/uefi/OVMF.fd \
 	  -accel kvm \
+	  -netdev user,id=net0 -device e1000e,netdev=net0 \
 	  -drive file=disk.img,format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio -no-reboot
 
+# ── VirtIO-net test ──────────────────────────────────────
+run-virtio: disk.img boot/uefi/OVMF.fd
+	$(QEMU_BIN) -M q35 -smp $(SMP) -pflash boot/uefi/OVMF.fd \
+	  -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
+	  -drive file=disk.img,format=raw,if=none,id=disk \
+	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
+	  -m $(MEMORY) -display $(DISPLAY) -serial stdio
+
 debug: disk.img boot/uefi/OVMF.fd
 	$(QEMU_BIN) -M q35 -smp $(SMP) -pflash boot/uefi/OVMF.fd \
 	  -S -s \
+	  -netdev user,id=net0 -device e1000e,netdev=net0 \
 	  -drive file=disk.img,format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio

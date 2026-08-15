@@ -34,6 +34,7 @@ enum file_type {
     FD_DEV,          // device (uses vfs_node, same ops as FD_VFS)
     FD_PTY_MASTER,   // PTY master
     FD_PTY_SLAVE,    // PTY slave (blocking I/O via pipe directly)
+    FD_SOCKET,       // network socket (lwIP netconn)
 };
 
 // ── Pipe ───────────────────────────────────────────────────
@@ -51,6 +52,27 @@ typedef struct pipe {
     list_t        write_poll;   // poll entry
 } pipe_t;
 
+// ── Socket ────────────────────────────────────────────────────
+
+typedef struct socket {
+    void        *conn;         // lwIP struct netconn *
+    int          domain;       // AF_INET (2)
+    int          type;         // SOCK_STREAM (1) or SOCK_DGRAM (2)
+    int          protocol;     // IPPROTO_TCP (6) or IPPROTO_UDP (17)
+    int          state;        // UNCONNECTED/CONNECTED/LISTENING/CLOSED
+    int          bound;        // 1 if bind() was called
+    volatile int rx_pending;   // data available (netconn callback RCVPLUS)
+    spinlock_T   lock;
+    list_t       poll_list;    // poll_wait_entry_t chain
+    // Partial-read state: when read() consumes less than the full
+    // netbuf, the remainder is cached here for the next read.  lwIP
+    // netbufs are one-shot (netbuf_delete frees everything), so a
+    // 1-byte fgets read would otherwise destroy the whole 370-byte
+    // HTTP response.
+    void        *rx_nb;        // lwIP struct netbuf * (partially consumed)
+    int          rx_off;       // bytes already consumed from rx_nb
+} socket_t;
+
 // ── Open file ──────────────────────────────────────────────
 
 typedef struct file {
@@ -64,6 +86,8 @@ typedef struct file {
     pipe_t         *pipe;
     // FD_PTY_MASTER / FD_PTY_SLAVE
     pty_t          *pty;
+    // FD_SOCKET
+    socket_t       *sock;
 } file_t;
 
 // ── Per-process file descriptor table ──────────────────────

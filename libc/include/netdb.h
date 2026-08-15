@@ -32,10 +32,24 @@ struct addrinfo {
 #define AI_PASSIVE    1
 #define AI_NUMERICHOST 4
 
+#define EAI_NONAME  -2
+#define EAI_AGAIN   -3
+#define EAI_FAIL    -4
+#define EAI_SERVICE -8
+#define EAI_MEMORY  -10
+#define EAI_SYSTEM  -11
+
 int getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res);
 void freeaddrinfo(struct addrinfo *res);
 struct servent *getservbyname(const char *name, const char *proto);
 struct hostent *gethostbyname(const char *name);
+
+uint16_t htons(uint16_t n);
+uint16_t ntohs(uint16_t n);
+uint32_t htonl(uint32_t n);
+uint32_t ntohl(uint32_t n);
+
+const char *gai_strerror(int ecode);
 
 #ifdef __cplusplus
 }
