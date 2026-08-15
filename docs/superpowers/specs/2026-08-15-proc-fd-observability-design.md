@@ -96,18 +96,22 @@ typedef struct files_struct {
 } files_t;
 ```
 
-| 函数 | 语义 | 调用约束（锁） |
-|------|------|----------------|
-| `files_pin(fs)` | `refcount++`（`__sync_add_and_fetch`，原子） | 可持 `task_list_lock`（仅原子操作） |
+| 函数 | 语义 | 调用约束（锁）与生命周期前置条件 |
+|------|------|----------------------------------|
+| `files_pin(fs)` | `refcount++`（`__sync_add_and_fetch`，原子） | 前置条件：调用者已持有一个 `files_t` 引用，或持保护该指针来源的 `task_list_lock`。**不得对未受保护的裸指针 pin**。可持 `task_list_lock`（仅原子操作） |
 | `files_unpin(fs)` | `refcount--`（`__sync_sub_and_fetch`）；归零则 `deferred_files_free(fs)` | **禁止持 `task_list_lock`/`fs->lock`/rq lock**：归零路径在 deferred 队列 OOM 时同步 `files_free`（`deferred_free.c:36`）→ `file_free → pipe/pty/socket 清理 + wake` |
-| `files_get_file(fs, fd)` | `fs->lock` 内取槽位，非空则 `file_get(f)`，返回稳定 `file_t*` | 可持 `fs->lock`（`file_get` 仅原子，不释放对象） |
-| `files_put_file(f)` | `file_put(f)`（refcount--，归零则 `file_free`） | **禁止持 `fs->lock`**（归零进 `file_free` → pipe/pty/socket 锁 + wake） |
-| `file_get(f)` | `file_t` refcount++（原子，唯一封装） | 任意锁内安全（不释放对象、不拿其他锁） |
-| `file_put(f)` | `file_t` refcount--（原子，唯一封装）；归零则 `file_free(f)` | **禁止持 `fs->lock`**：归零进 pipe/pty/socket 清理 + wake |
-| `fd_dup(fs, oldfd, minfd)` | 集中 dup 语义：`fs->lock` 内找 `>= minfd` 空槽、`file_get`、写槽位 | 内部持 `fs->lock`；锁内只 `file_get`（原子），锁外无归零动作 |
-| `fd_dup2(fs, oldfd, newfd)` | 集中 dup2 语义：`fs->lock` 内 `file_get(old)`、detach 旧目标、写槽位；**锁外** `files_put_file(旧目标)` | detach 的旧目标必须移出临界区后再 `file_put` |
+| `files_get_file(fs, fd)` | 内部自行获取 `fs->lock`，锁内取槽位、非空则 `file_get(f)`，返回稳定 `file_t*` | **禁止调用者持 `fs->lock`**（`spinlock_T` 不可重入，内部自行加锁会自旋死锁）。调用者须持有效的 `files_t` 引用（如 `task_files_pin_by_pid` 返回的） |
+| `files_put_file(f)` | `file_put(f)`（refcount--，归零则 `file_free`） | **禁止持 `fs->lock`/`task_list_lock`/rq lock**（归零进 `file_free` → pipe/pty/socket 锁 + wake → `task_wake` 触碰调度状态） |
+| `file_get(f)` | `file_t` refcount++（原子，唯一封装） | 前置条件：调用者已持有一个 `file_t` 引用，或持保护该槽位的 `fs->lock`。**不得对锁外取得的裸槽位指针 get**。任意锁内安全（不释放对象、不拿其他锁） |
+| `file_put(f)` | `file_t` refcount--（原子，唯一封装）；归零则 `file_free(f)` | **禁止持 `fs->lock`/`task_list_lock`/rq lock**：归零进 pipe/pty/socket 清理 + wake → `task_wake` |
+| `fd_dup(fs, oldfd, minfd)` | 集中 dup 语义：内部自行获取 `fs->lock`，锁内找 `>= minfd` 空槽、`file_get`、写槽位 | **调用者不得持 `fs->lock`**（内部自行加锁）；须持有效 `files_t` 引用。锁内只 `file_get`（原子），无归零动作 |
+| `fd_dup2(fs, oldfd, newfd)` | 集中 dup2 语义：内部自行获取 `fs->lock`，锁内 `file_get(old)`、detach 旧目标、写槽位；**锁外** `files_put_file(旧目标)` | **调用者不得持 `fs->lock`**（内部自行加锁）；须持有效 `files_t` 引用。detach 的旧目标移出临界区后再 `file_put` |
+
+> **前置条件总则**：原子自增（`files_pin`/`file_get`）只能保护**已经存活**的对象，不能让悬空指针复活。调用者必须在「已持有引用」或「持有保护指针来源的锁」二选一的前提下调用。这正是 `task_files_pin_by_pid`（task_list_lock 内取 `t->files` 并 pin）和 `files_get_file`（fs->lock 内取槽位并 file_get）存在的原因——它们把「取得稳定引用」的临界区封装在 API 内，调用者无需也不应自行加锁。
 
 **决策：`files_unpin` 归零时统一走 `deferred_files_free`（deferred）。** 理由：schedule 收割器在 schedule() 内，同步 `files_free` 会触发 `file_free → pipe wake → task_wake` 重入调度器；deferred 路径规避之。代价是 `do_exit` 的 fd 关闭时序轻微推迟（见 §已知语义变化）。**但 deferred 的 OOM 回退会同步 `files_free`（`deferred_free.c:36`），故 `files_unpin` 的锁约束必须按上表执行，不能宣称锁内安全。**
+
+> 若未来需要锁内版本，可拆 `files_get_file_locked()`（要求调用者已持 `fs->lock`）+ `files_get_file()`（对外 API，自行加锁）。本方案不需要前者，故不引入。
 
 ### 槽位访问规则
 
