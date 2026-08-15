@@ -861,18 +861,12 @@ git commit -m "test(systest): add proc_fd coverage for /proc/<pid>/fd"
 // and schedule()s), so it spins on flags via schedule(); workers are
 // kthreads and use the same spin, keeping one uniform protocol.
 //
-//   1. get-vs-detach (R3): reader files_get_file/put vs writer
-//      fd_close/fd_alloc on slot 0.
-//   2. pin-vs-detach (R2): reader task_files_pin_by_pid vs a kthread that
-//      do_exit()s, detaching its inherited table.
-//
-// Ownership model: harness holds the initial files_t ref; each worker
-// files_pin()s its own ref at setup and files_unpin()s it BEFORE signaling
-// done.  Harness unpins its own ref only after both workers signal done, so
-// the table is never freed while a worker may still touch it.  On timeout
-// the harness deliberately leaks (a timed-out worker may still run) rather
-// than turn a timeout into a UAF.  A use-after-free otherwise manifests as
-// a crash (#PF), not a graceful FAIL.
+// Ownership: harness holds the initial files_t ref; each SUCCESSFULLY
+// created worker files_pin()s its own ref and unpins BEFORE signaling done.
+// An abort flag + start flag let a partially-created worker set exit cleanly
+// instead of spinning forever.  A scenario PASSes only when it provably ran
+// cross-CPU and (for R2) provably observed a detach inside the reader's
+// active window.  A use-after-free otherwise manifests as a crash (#PF).
 
 #if defined(OS01_SELFTEST)
 
@@ -904,22 +898,26 @@ static int wait_flag_timeout(const int *flag)
 // ── Scenario 1: get-vs-detach (R3) ────────────────────────
 static files_t *race_fs;
 static int      r3_start;
+static int      r3_abort;
 static int      r3_reader_done;
 static int      r3_writer_done;
-static int      reader_cpu = -1;
-static int      writer_cpu = -1;
-static int      writer_err;
+static int      r3_reader_cpu = -1;
+static int      r3_writer_cpu = -1;
+static int      r3_writer_err;
 
 static uint64_t race_reader(uint64_t arg)
 {
     (void)arg;
     wait_flag(&r3_start);
-    reader_cpu = (int)cpu_id();
+    if (__atomic_load_n(&r3_abort, __ATOMIC_ACQUIRE))
+        goto out;                       // partial-create: exit without racing
+    r3_reader_cpu = (int)cpu_id();
     for (int i = 0; i < FD_RACE_ITERS; i++) {
         file_t *g = files_get_file(race_fs, 0);
-        if (g) files_put_file(g);   // slot may be empty (writer detached it)
+        if (g) files_put_file(g);       // slot may be empty (writer detached)
     }
-    files_unpin(race_fs);           // drop reader's own ref BEFORE signaling
+out:
+    files_unpin(race_fs);               // drop reader's own ref BEFORE signaling
     __atomic_store_n(&r3_reader_done, 1, __ATOMIC_RELEASE);
     return 0;
 }
@@ -928,35 +926,45 @@ static uint64_t race_writer(uint64_t arg)
 {
     (void)arg;
     wait_flag(&r3_start);
-    writer_cpu = (int)cpu_id();
+    if (__atomic_load_n(&r3_abort, __ATOMIC_ACQUIRE))
+        goto out;
+    r3_writer_cpu = (int)cpu_id();
     for (int i = 0; i < FD_RACE_ITERS; i++) {
         file_t *f = file_alloc();
-        if (!f) { writer_err++; continue; }
+        if (!f) { r3_writer_err++; continue; }
         int fd = fd_alloc(race_fs, f);
-        if (fd < 0) { file_put(f); writer_err++; continue; }
+        if (fd < 0) { file_put(f); r3_writer_err++; continue; }
         fd_close(race_fs, fd);
     }
-    files_unpin(race_fs);           // drop writer's own ref BEFORE signaling
+out:
+    files_unpin(race_fs);
     __atomic_store_n(&r3_writer_done, 1, __ATOMIC_RELEASE);
     return 0;
 }
 
 static void run_get_detach_race(void)
 {
-    race_fs = files_alloc();        // harness ref: refcount == 1
+    race_fs = files_alloc();            // harness ref: refcount == 1
     if (!race_fs) { serial_printk("FAIL (files_alloc)\n"); return; }
-    files_pin(race_fs);             // reader ref
-    files_pin(race_fs);             // writer ref   (refcount == 3)
 
-    r3_start = 0; r3_reader_done = 0; r3_writer_done = 0;
-    reader_cpu = -1; writer_cpu = -1; writer_err = 0;
+    r3_start = 0; r3_abort = 0; r3_reader_done = 0; r3_writer_done = 0;
+    r3_reader_cpu = -1; r3_writer_cpu = -1; r3_writer_err = 0;
 
+    // Pin a worker ref ONLY when its kthread is successfully created.
+    int reader_ok = 0, writer_ok = 0;
     task_t *r = create_kthread(race_reader, 0, "fd-race-reader");
+    if (r) { files_pin(race_fs); reader_ok = 1; }
     task_t *w = create_kthread(race_writer, 0, "fd-race-writer");
-    if (!r || !w) {
-        // Cannot unwind safely (a created worker may still run).  Report
-        // failure and deliberately leak race_fs — create_kthread fails only
-        // on OOM, where leaking a test table is acceptable.
+    if (w) { files_pin(race_fs); writer_ok = 1; }
+
+    if (!reader_ok || !writer_ok) {
+        // Release any created worker with abort set so it exits (not spin
+        // forever on r3_start); wait for it to drop its ref, then drop ours.
+        __atomic_store_n(&r3_abort, 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&r3_start, 1, __ATOMIC_RELEASE);
+        if (reader_ok) wait_flag_timeout(&r3_reader_done);
+        if (writer_ok) wait_flag_timeout(&r3_writer_done);
+        files_unpin(race_fs);
         serial_printk("FAIL (kthread create)\n");
         return;
     }
@@ -967,43 +975,66 @@ static void run_get_detach_race(void)
     int wd = wait_flag_timeout(&r3_writer_done);
 
     if (!rd || !wd) {
+        // Timeout: a worker may still be running (finite loop → will exit on
+        // its own and drop its ref).  Deliberately LEAK the harness ref rather
+        // than free a table a live worker may touch.
         serial_printk("FAIL (timeout reader=%d writer=%d)\n", rd, wd);
-        return;   // DELIBERATE LEAK: a timed-out worker may still be running
+        return;
     }
 
-    if (writer_err)
-        serial_printk("FAIL (writer_err=%d)\n", writer_err);
-    else if (reader_cpu != writer_cpu)
-        serial_printk("PASS (cross-CPU %d/%d)\n", reader_cpu, writer_cpu);
+    if (r3_writer_err)
+        serial_printk("FAIL (writer_err=%d)\n", r3_writer_err);
+    else if (r3_reader_cpu != r3_writer_cpu)
+        serial_printk("PASS (cross-CPU %d/%d)\n", r3_reader_cpu, r3_writer_cpu);
     else
-        serial_printk("PASS (same-CPU %d — no cross-CPU window)\n", reader_cpu);
+        serial_printk("FAIL (same-CPU %d, no SMP coverage)\n", r3_reader_cpu);
 
-    files_unpin(race_fs);           // harness ref → refcount 0 → deferred free
+    files_unpin(race_fs);               // harness ref → refcount 0 → deferred free
 }
 
 // ── Scenario 2: pin-vs-detach (R2) ────────────────────────
-// holder inherits its files_t via create_kthread (do_fork files_dup's
-// init's table).  We do NOT create or override a table, so there is no
-// leaked reference.  reader pins only by pid — it never touches holder's
-// task_t or table directly.
-static int r2_start;
+// holder inherits its files_t via create_kthread (do_fork files_dup's init's
+// table); we never create or override a table, so there is no leaked ref.
+// Orchestration forces the detach to happen INSIDE the reader's active
+// window: reader pins successfully (present), signals reader_started; holder
+// waits for that, records its CPU, signals holder_entered, then do_exit().
+// reader keeps looping until it sees a NULL pin (absent).  PASS requires
+// present && absent && holder_entered && cross-CPU.
+static int r2_reader_go;       // harness → reader: start
+static int r2_reader_started;  // reader → holder: "I pinned at least once"
+static int r2_holder_entered;  // holder → harness: "about to do_exit"
 static int r2_reader_done;
+static int r2_reader_cpu = -1;
+static int r2_holder_cpu = -1;
+static int r2_saw_present;
+static int r2_saw_absent;
 
 static uint64_t race_holder(uint64_t arg)
 {
     (void)arg;
-    wait_flag(&r2_start);
-    do_exit(0);   // detaches inherited files under task_list_lock, unpins outside
+    wait_flag(&r2_reader_started);      // wait until reader has pinned once
+    r2_holder_cpu = (int)cpu_id();
+    __atomic_store_n(&r2_holder_entered, 1, __ATOMIC_RELEASE);
+    do_exit(0);   // detaches inherited files under task_list_lock; no return
     return 0;
 }
 
 static uint64_t pin_reader(uint64_t arg)
 {
     int pid = (int)arg;
-    wait_flag(&r2_start);
-    for (int i = 0; i < FD_RACE_ITERS; i++) {
+    wait_flag(&r2_reader_go);
+    r2_reader_cpu = (int)cpu_id();
+    for (int i = 0; i < FD_RACE_ITERS && !(r2_saw_present && r2_saw_absent); i++) {
         files_t *fs = task_files_pin_by_pid(pid);
-        if (fs) files_unpin(fs);    // NULL when holder already detached
+        if (fs) {
+            r2_saw_present = 1;
+            files_unpin(fs);
+            // Signal holder on the FIRST successful pin (may fire repeatedly;
+            // holder's wait_flag absorbs it harmlessly).
+            __atomic_store_n(&r2_reader_started, 1, __ATOMIC_RELEASE);
+        } else {
+            r2_saw_absent = 1;          // holder detached while we were active
+        }
     }
     __atomic_store_n(&r2_reader_done, 1, __ATOMIC_RELEASE);
     return 0;
@@ -1011,27 +1042,42 @@ static uint64_t pin_reader(uint64_t arg)
 
 static void run_pin_detach_race(void)
 {
-    r2_start = 0; r2_reader_done = 0;
+    r2_reader_go = 0; r2_reader_started = 0; r2_holder_entered = 0;
+    r2_reader_done = 0;
+    r2_reader_cpu = -1; r2_holder_cpu = -1;
+    r2_saw_present = 0; r2_saw_absent = 0;
 
     task_t *holder = create_kthread(race_holder, 0, "fd-pin-holder");
     if (!holder) { serial_printk("FAIL (holder create)\n"); return; }
-    int holder_pid = (int)holder->pid;   // copy value while holder is alive
+    int holder_pid = (int)holder->pid;  // copy value while holder is alive
 
     task_t *reader = create_kthread(pin_reader, holder_pid, "fd-pin-reader");
     if (!reader) {
-        // Let the already-created holder run and exit (it frees its own
-        // table).  We never touch holder after this.
-        __atomic_store_n(&r2_start, 1, __ATOMIC_RELEASE);
+        // Let holder proceed to exit (its inherited table frees on do_exit).
+        // We never touch holder task_t* again.
+        __atomic_store_n(&r2_reader_started, 1, __ATOMIC_RELEASE);
         serial_printk("FAIL (reader create)\n");
         return;
     }
 
-    __atomic_store_n(&r2_start, 1, __ATOMIC_RELEASE);   // release both workers
+    __atomic_store_n(&r2_reader_go, 1, __ATOMIC_RELEASE);   // release reader
 
-    if (!wait_flag_timeout(&r2_reader_done))
+    if (!wait_flag_timeout(&r2_reader_done)) {
         serial_printk("FAIL (timeout)\n");
+        return;
+    }
+
+    int holder_entered = __atomic_load_n(&r2_holder_entered, __ATOMIC_ACQUIRE);
+
+    if (!(r2_saw_present && r2_saw_absent))
+        serial_printk("FAIL (no detach observed present=%d absent=%d)\n",
+                      r2_saw_present, r2_saw_absent);
+    else if (!holder_entered)
+        serial_printk("FAIL (holder never entered)\n");
+    else if (r2_reader_cpu != r2_holder_cpu)
+        serial_printk("PASS (cross-CPU %d/%d)\n", r2_reader_cpu, r2_holder_cpu);
     else
-        serial_printk("PASS\n");
+        serial_printk("FAIL (same-CPU %d, no SMP coverage)\n", r2_reader_cpu);
 }
 
 void test_fd_refcount(void)
@@ -1067,13 +1113,15 @@ make clean
 make KERNEL_SELFTEST=1 run          # 默认 SMP=2；可 make SMP=4 KERNEL_SELFTEST=1 run 加重跨 CPU 窗口
 ```
 
-Expected: boot 串口输出两条 PASS（无崩溃）。get-vs-detach 会报告 `cross-CPU <a>/<b>` 或 `same-CPU <a> — no cross-CPU window`（后者逻辑仍正确，仅覆盖度较低，属正常 NOTE 而非 FAIL）：
+Expected: boot 串口输出两条 PASS（无崩溃），且都必须是 **cross-CPU**。same-CPU 判 FAIL（coverage 未达成，需重跑；`sched_pick_cpu` 选最少负载 CPU，两个 kthread 先后创建、第二个创建时第一个已 enqueue 使 `nr_running` 更新，故通常分到不同 CPU）：
 ```
 [selftest] fd_refcount get-vs-detach... PASS (cross-CPU 0/1)
-[selftest] fd_refcount pin-vs-detach... PASS
+[selftest] fd_refcount pin-vs-detach... PASS (cross-CPU 0/1)
 ```
 
-漏 `fs->lock` 时，get-vs-detach 的 `files_get_file` 会在 writer `fd_close` 释放 `file_t` 后对已 free 的 `f->refcount` 原子自增 → #PF 崩溃；漏 `task_list_lock` 内 detach 时，pin-vs-detach 的 `task_files_pin_by_pid` 会 pin 已释放的表 → 崩溃。测试自身不制造 UAF：超时路径有意泄漏而非 `files_unpin`，worker 先 `files_unpin` 自己再 signal done。
+R2 的 PASS 还要求 `saw_present && saw_absent && holder_entered` —— 证明 detach 确实发生在 reader 活跃区间内，而非 reader 跑完 holder 才退出。
+
+漏 `fs->lock` 时，get-vs-detach 的 `files_get_file` 会在 writer `fd_close` 释放 `file_t` 后对已 free 的 `f->refcount` 原子自增 → #PF 崩溃；漏 `task_list_lock` 内 detach 时，pin-vs-detach 的 `task_files_pin_by_pid` 会 pin 已释放的表 → 崩溃。测试自身不制造 UAF：创建失败路径用 abort+start 释放已创建 worker（不再永久自旋），worker 先 `files_unpin` 自己再 signal done；超时路径有意泄漏。
 
 - [ ] **Step 4: Commit**
 
@@ -1083,9 +1131,10 @@ git commit -m "test(selftest): add SMP fd reference-protocol race tests
 
 get-vs-detach (R3): files_get_file/put vs fd_close/fd_alloc on one slot.
 pin-vs-detach (R2): task_files_pin_by_pid vs a kthread do_exit() detaching
-its inherited table.  __atomic acquire/release sync (no volatile); workers
-own a files_t pin and unpin before signaling done; timeout leaks instead of
-freeing a live table.  Both run after deferred_free_spawn + scheduler_ok."
+its inherited table; PASS requires cross-CPU and observed detach (present &&
+absent) inside the reader's window.  __atomic acquire/release + abort/start
+protocol so a partial create never leaves a spinning worker.  Both run after
+deferred_free_spawn + scheduler_ok."
 ```
 
 ---
@@ -1133,8 +1182,11 @@ git commit -m "docs: mark /proc/<pid>/fd observability complete"
 - **锁纪律**：所有 `files_unpin`/`file_put`/`files_put_file` 调用点均在锁外——Task 3 Step 3 的 do_exit **锁内 detach + 锁外 unpin**（两阶段，与 `task_files_pin_by_pid` 经 `task_list_lock` 串行化）、Task 3 Step 4 收割器的锁外 unpin 循环、Task 4 的 `files_unpin(fs)` 在 `task_files_pin_by_pid` 返回后、Task 6 的 `files_unpin` 在测试尾部（无锁上下文）。
 - **启动顺序**：Task 6 的 selftest 明确放在 `task_init()` 内 `deferred_free_spawn()` + `scheduler_ok=1` 之后，不注册进早期 `selftest_run_all()`（`df_queue` 未初始化会导致 `files_unpin` 归零时向未初始化链表插入节点）。
 - **NULL 语义**：`file_get/put`/`files_pin/unpin` 均以 NULL 为 no-op，Task 6 reader 的 `if (g) files_put_file(g)` 与 Task 1 实现判空一致，消除 `file_put(NULL)` 崩溃路径。
-- **SMP 同步**：Task 6 用 `__atomic_store_n/__atomic_load_n`（acquire/release）替代 volatile；harness 是 idle task、不能 `wait_queue_sleep`，故用 `schedule()` spin 检查标志。worker 记录 `cpu_id()` 并报告 cross-CPU 或 same-CPU NOTE（不误报 FAIL）。
-- **测试生命周期**：所有权模型 = harness 初始 ref + 每 worker 各 `files_pin` 一个 ref，worker 先 `files_unpin` 自己再 `__atomic_store_n` signal done；harness 等两个 done 后才 `files_unpin` 自己。超时与 create_kthread 失败路径**有意泄漏**而非释放（避免把 timeout 转成 UAF）。pin-vs-detach 用 holder 继承的表，不创建/覆盖表，无泄漏；不轮询可被收割的 task_t*，只等 reader 的 done 标志。
+- **SMP 同步**：Task 6 用 `__atomic_store_n/__atomic_load_n`（acquire/release）替代 volatile；harness 是 idle task、不能 `wait_queue_sleep`，故用 `schedule()` spin 检查标志。worker 记录 `cpu_id()`；**same-CPU 判 FAIL（coverage 未达成）**，不误报 PASS。
+- **测试生命周期**：所有权模型 = harness 初始 ref + 每**成功创建**的 worker 各 `files_pin` 一个 ref，worker 先 `files_unpin` 自己再 `__atomic_store_n` signal done；harness 等两个 done 后才 `files_unpin` 自己。
+- **abort/start 协议**：R3 创建失败时 set `r3_abort` + release `r3_start`，已创建 worker 检查 abort 后退出（不永久自旋），harness 等其 done 再 `files_unpin` 自己。超时路径仍有意泄漏（worker 有限循环会自退，其 ref 保活表）。
+- **R2 观察证明**：编排 `reader → (pin 成功) → reader_started → holder → holder_entered → do_exit`，reader 循环直到 `saw_present && saw_absent`；PASS 要求 `saw_present && saw_absent && holder_entered && cross-CPU`，杜绝「reader 跑完 holder 才 detach」的假 PASS。holder 完成 detach 的确认来自 reader 观察到 `task_files_pin_by_pid(pid)==NULL`，而非轮询可被收割的 task_t*。
+
 
 
 
