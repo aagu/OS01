@@ -901,9 +901,11 @@ static int      r3_start;
 static int      r3_abort;
 static int      r3_reader_done;
 static int      r3_writer_done;
-static int      r3_reader_cpu = -1;
-static int      r3_writer_cpu = -1;
+static int      r3_reader_cpu_mask;   // bitmask of CPUs the reader ran on
+static int      r3_writer_cpu_mask;   // bitmask of CPUs the writer ran on
 static int      r3_writer_err;
+static int      r3_saw_present;       // reader got a non-NULL file ref
+static int      r3_saw_absent;        // reader saw slot empty (writer detached)
 
 static uint64_t race_reader(uint64_t arg)
 {
@@ -911,10 +913,15 @@ static uint64_t race_reader(uint64_t arg)
     wait_flag(&r3_start);
     if (__atomic_load_n(&r3_abort, __ATOMIC_ACQUIRE))
         goto out;                       // partial-create: exit without racing
-    r3_reader_cpu = (int)cpu_id();
     for (int i = 0; i < FD_RACE_ITERS; i++) {
+        __atomic_fetch_or(&r3_reader_cpu_mask, 1U << cpu_id(), __ATOMIC_RELAXED);
         file_t *g = files_get_file(race_fs, 0);
-        if (g) files_put_file(g);       // slot may be empty (writer detached)
+        if (g) {
+            r3_saw_present = 1;         // we DID grab a live file ref
+            files_put_file(g);
+        } else {
+            r3_saw_absent = 1;          // slot empty (writer detached it)
+        }
     }
 out:
     files_unpin(race_fs);               // drop reader's own ref BEFORE signaling
@@ -928,12 +935,16 @@ static uint64_t race_writer(uint64_t arg)
     wait_flag(&r3_start);
     if (__atomic_load_n(&r3_abort, __ATOMIC_ACQUIRE))
         goto out;
-    r3_writer_cpu = (int)cpu_id();
     for (int i = 0; i < FD_RACE_ITERS; i++) {
+        __atomic_fetch_or(&r3_writer_cpu_mask, 1U << cpu_id(), __ATOMIC_RELAXED);
         file_t *f = file_alloc();
         if (!f) { r3_writer_err++; continue; }
         int fd = fd_alloc(race_fs, f);
         if (fd < 0) { file_put(f); r3_writer_err++; continue; }
+        // Widen the window where the slot is non-NULL so the reader can
+        // actually grab a live ref (not just see NULL after we detach).
+        if ((i & 15) == 0)
+            schedule();
         fd_close(race_fs, fd);
     }
 out:
@@ -948,7 +959,8 @@ static void run_get_detach_race(void)
     if (!race_fs) { serial_printk("FAIL (files_alloc)\n"); return; }
 
     r3_start = 0; r3_abort = 0; r3_reader_done = 0; r3_writer_done = 0;
-    r3_reader_cpu = -1; r3_writer_cpu = -1; r3_writer_err = 0;
+    r3_reader_cpu_mask = 0; r3_writer_cpu_mask = 0;
+    r3_writer_err = 0; r3_saw_present = 0; r3_saw_absent = 0;
 
     // Pin a worker ref ONLY when its kthread is successfully created.
     int reader_ok = 0, writer_ok = 0;
@@ -982,12 +994,20 @@ static void run_get_detach_race(void)
         return;
     }
 
+    int cross_cpu = (r3_reader_cpu_mask & r3_writer_cpu_mask) == 0
+                    && r3_reader_cpu_mask != 0 && r3_writer_cpu_mask != 0;
+
     if (r3_writer_err)
         serial_printk("FAIL (writer_err=%d)\n", r3_writer_err);
-    else if (r3_reader_cpu != r3_writer_cpu)
-        serial_printk("PASS (cross-CPU %d/%d)\n", r3_reader_cpu, r3_writer_cpu);
+    else if (!(r3_saw_present && r3_saw_absent))
+        serial_printk("FAIL (no slot interaction present=%d absent=%d)\n",
+                      r3_saw_present, r3_saw_absent);
+    else if (!cross_cpu)
+        serial_printk("FAIL (no cross-CPU overlap reader=%x writer=%x)\n",
+                      r3_reader_cpu_mask, r3_writer_cpu_mask);
     else
-        serial_printk("FAIL (same-CPU %d, no SMP coverage)\n", r3_reader_cpu);
+        serial_printk("PASS (cross-CPU reader=%x writer=%x)\n",
+                      r3_reader_cpu_mask, r3_writer_cpu_mask);
 
     files_unpin(race_fs);               // harness ref → refcount 0 → deferred free
 }
@@ -1004,8 +1024,8 @@ static int r2_reader_go;       // harness → reader: start
 static int r2_reader_started;  // reader → holder: "I pinned at least once"
 static int r2_holder_entered;  // holder → harness: "about to do_exit"
 static int r2_reader_done;
-static int r2_reader_cpu = -1;
-static int r2_holder_cpu = -1;
+static int r2_reader_cpu_mask; // bitmask of CPUs the reader ran on
+static int r2_holder_cpu = -1; // holder runs do_exit() exactly once → single CPU
 static int r2_saw_present;
 static int r2_saw_absent;
 
@@ -1023,8 +1043,8 @@ static uint64_t pin_reader(uint64_t arg)
 {
     int pid = (int)arg;
     wait_flag(&r2_reader_go);
-    r2_reader_cpu = (int)cpu_id();
     for (int i = 0; i < FD_RACE_ITERS && !(r2_saw_present && r2_saw_absent); i++) {
+        __atomic_fetch_or(&r2_reader_cpu_mask, 1U << cpu_id(), __ATOMIC_RELAXED);
         files_t *fs = task_files_pin_by_pid(pid);
         if (fs) {
             r2_saw_present = 1;
@@ -1044,7 +1064,7 @@ static void run_pin_detach_race(void)
 {
     r2_reader_go = 0; r2_reader_started = 0; r2_holder_entered = 0;
     r2_reader_done = 0;
-    r2_reader_cpu = -1; r2_holder_cpu = -1;
+    r2_reader_cpu_mask = 0; r2_holder_cpu = -1;
     r2_saw_present = 0; r2_saw_absent = 0;
 
     task_t *holder = create_kthread(race_holder, 0, "fd-pin-holder");
@@ -1068,16 +1088,20 @@ static void run_pin_detach_race(void)
     }
 
     int holder_entered = __atomic_load_n(&r2_holder_entered, __ATOMIC_ACQUIRE);
+    int cross_cpu = (r2_holder_cpu >= 0) &&
+                    (r2_reader_cpu_mask & (1U << r2_holder_cpu)) == 0;
 
     if (!(r2_saw_present && r2_saw_absent))
         serial_printk("FAIL (no detach observed present=%d absent=%d)\n",
                       r2_saw_present, r2_saw_absent);
     else if (!holder_entered)
         serial_printk("FAIL (holder never entered)\n");
-    else if (r2_reader_cpu != r2_holder_cpu)
-        serial_printk("PASS (cross-CPU %d/%d)\n", r2_reader_cpu, r2_holder_cpu);
+    else if (!cross_cpu)
+        serial_printk("FAIL (no cross-CPU reader=%x holder=%d)\n",
+                      r2_reader_cpu_mask, r2_holder_cpu);
     else
-        serial_printk("FAIL (same-CPU %d, no SMP coverage)\n", r2_reader_cpu);
+        serial_printk("PASS (cross-CPU reader=%x holder=%d)\n",
+                      r2_reader_cpu_mask, r2_holder_cpu);
 }
 
 void test_fd_refcount(void)
@@ -1113,11 +1137,13 @@ make clean
 make KERNEL_SELFTEST=1 run          # 默认 SMP=2；可 make SMP=4 KERNEL_SELFTEST=1 run 加重跨 CPU 窗口
 ```
 
-Expected: boot 串口输出两条 PASS（无崩溃），且都必须是 **cross-CPU**。same-CPU 判 FAIL（coverage 未达成，需重跑；`sched_pick_cpu` 选最少负载 CPU，两个 kthread 先后创建、第二个创建时第一个已 enqueue 使 `nr_running` 更新，故通常分到不同 CPU）：
+Expected: boot 串口输出两条 PASS（无崩溃），且都必须是 **cross-CPU**。same-CPU / no-interaction 判 FAIL（coverage 未达成，需重跑；`sched_pick_cpu` 选最少负载 CPU，两个 kthread 先后创建、第二个创建时第一个已 enqueue 使 `nr_running` 更新，故通常分到不同 CPU）：
 ```
-[selftest] fd_refcount get-vs-detach... PASS (cross-CPU 0/1)
-[selftest] fd_refcount pin-vs-detach... PASS (cross-CPU 0/1)
+[selftest] fd_refcount get-vs-detach... PASS (cross-CPU reader=1 writer=2)
+[selftest] fd_refcount pin-vs-detach... PASS (cross-CPU reader=1 holder=2)
 ```
+
+R3 的 PASS 要求 `saw_present && saw_absent` —— 证明 reader 确实取得过非 NULL 的 `file_t` 引用（执行了槽位读取 + ref-bump 的临界区），并观察到 writer detach 后的空槽。writer 每 16 次迭代 `schedule()` 一次，加宽非 NULL 窗口以提高交叠概率，不依赖 10000 次自然撞中。
 
 R2 的 PASS 还要求 `saw_present && saw_absent && holder_entered` —— 证明 detach 确实发生在 reader 活跃区间内，而非 reader 跑完 holder 才退出。
 
@@ -1182,9 +1208,10 @@ git commit -m "docs: mark /proc/<pid>/fd observability complete"
 - **锁纪律**：所有 `files_unpin`/`file_put`/`files_put_file` 调用点均在锁外——Task 3 Step 3 的 do_exit **锁内 detach + 锁外 unpin**（两阶段，与 `task_files_pin_by_pid` 经 `task_list_lock` 串行化）、Task 3 Step 4 收割器的锁外 unpin 循环、Task 4 的 `files_unpin(fs)` 在 `task_files_pin_by_pid` 返回后、Task 6 的 `files_unpin` 在测试尾部（无锁上下文）。
 - **启动顺序**：Task 6 的 selftest 明确放在 `task_init()` 内 `deferred_free_spawn()` + `scheduler_ok=1` 之后，不注册进早期 `selftest_run_all()`（`df_queue` 未初始化会导致 `files_unpin` 归零时向未初始化链表插入节点）。
 - **NULL 语义**：`file_get/put`/`files_pin/unpin` 均以 NULL 为 no-op，Task 6 reader 的 `if (g) files_put_file(g)` 与 Task 1 实现判空一致，消除 `file_put(NULL)` 崩溃路径。
-- **SMP 同步**：Task 6 用 `__atomic_store_n/__atomic_load_n`（acquire/release）替代 volatile；harness 是 idle task、不能 `wait_queue_sleep`，故用 `schedule()` spin 检查标志。worker 记录 `cpu_id()`；**same-CPU 判 FAIL（coverage 未达成）**，不误报 PASS。
+- **SMP 同步**：Task 6 用 `__atomic_store_n/__atomic_load_n`（acquire/release）替代 volatile；harness 是 idle task、不能 `wait_queue_sleep`，故用 `schedule()` spin 检查标志。worker 用 `__atomic_fetch_or(&cpu_mask, 1U << cpu_id())` 记录执行过的 CPU 集合（覆盖 `sched_balance` 迁移），**cross-CPU 判 FAIL（coverage 未达成）**，不误报 PASS。
 - **测试生命周期**：所有权模型 = harness 初始 ref + 每**成功创建**的 worker 各 `files_pin` 一个 ref，worker 先 `files_unpin` 自己再 `__atomic_store_n` signal done；harness 等两个 done 后才 `files_unpin` 自己。
 - **abort/start 协议**：R3 创建失败时 set `r3_abort` + release `r3_start`，已创建 worker 检查 abort 后退出（不永久自旋），harness 等其 done 再 `files_unpin` 自己。超时路径仍有意泄漏（worker 有限循环会自退，其 ref 保活表）。
+- **R3 观察证明**：reader 记录 `r3_saw_present`（取得非 NULL `file_t` 引用，即执行了槽位读取 + ref-bump 临界区）与 `r3_saw_absent`（观察到 writer detach 后的空槽）；PASS 要求 `!writer_err && saw_present && saw_absent && cross-CPU`。writer 每 16 次迭代 `schedule()` 一次加宽非 NULL 窗口，提高交叠概率而非依赖自然撞中。
 - **R2 观察证明**：编排 `reader → (pin 成功) → reader_started → holder → holder_entered → do_exit`，reader 循环直到 `saw_present && saw_absent`；PASS 要求 `saw_present && saw_absent && holder_entered && cross-CPU`，杜绝「reader 跑完 holder 才 detach」的假 PASS。holder 完成 detach 的确认来自 reader 观察到 `task_files_pin_by_pid(pid)==NULL`，而非轮询可被收割的 task_t*。
 
 
