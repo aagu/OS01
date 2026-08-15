@@ -6,6 +6,7 @@
 #include <kernel/memory.h>    // Phy_To_Virt
 #include <kernel/interrupt.h> // register_irq
 #include <kernel/arch/spinlock.h>
+#include <kernel/arch/barrier.h>
 #include <kernel/apic.h>      // lapic_eoi, get_ioapic_controller
 #include <kernel/log.h>
 #include <kernel/slab.h>       // log_info
@@ -72,70 +73,47 @@ static int e1000_eeprom_read(uint8_t addr, uint16_t *out)
 }
 
 // ── Poll RX + buffered processing ──────────────────────────────
-// e1000_poll_rx: called from IRQ context (PIT handler) — copies packet
-//   into a software ring queue.  e1000_process_rx: called from
-//   tcpip_thread context (via net_poll_rx) — drains the queue and
-//   delivers to lwIP via etharp_input.
-//
-// Single-slot buffering was a drop-loss bug: if a second packet
-// arrived while the first was still buffered (not yet processed by
-// tcpip_thread), e1000_poll_rx returned early, RDT stalled, QEMU
-// saw a full ring and dropped the packet (ARP replies lost → DHCP
-// stuck, TCP connect never completes).  A ring queue keeps the
-// hardware ring drained continuously.
+// e1000_poll_rx and e1000_process_rx both run in tcpip-thread context
+// via net_poll_rx.  The software queue is retained only to minimize
+// this change: polling copies packets into it, then processing drains
+// it and delivers them to lwIP.
 
 #define E1000_RXQ_DEPTH  64
 
 typedef struct {
     uint8_t  *buf[E1000_RXQ_DEPTH];
     uint16_t  len[E1000_RXQ_DEPTH];
-    int       head;   // next slot to fill (IRQ context)
-    int       tail;   // next slot to drain (tcpip_thread context)
+    int       head;   // next slot to fill (tcpip-thread context)
+    int       tail;   // next slot to drain (tcpip-thread context)
 } e1000_rxq_t;
 
 static e1000_rxq_t e1000_rxq;
 
 void e1000_poll_rx(void) {
     if (!e1000.initialized) return;
-    // Drain as many completed descriptors as fit in the queue.
+    // Drain all completed descriptors, dropping packets the queue cannot accept.
     while (e1000.rx_descs[e1000.rx_tail].status & E1000_RXD_STAT_DD) {
-        uint16_t len = e1000.rx_descs[e1000.rx_tail].length;
+        uint32_t i = e1000.rx_tail;
+        uint16_t len = e1000.rx_descs[i].length;
+
         if (len > 0 && len < 1600) {
             int next = (e1000_rxq.head + 1) % E1000_RXQ_DEPTH;
-            if (next == e1000_rxq.tail) {
-                // Queue full — drop this packet, keep HW ring moving.
-                e1000.rx_descs[e1000.rx_tail].status = 0;
-                e1000.rx_tail = (e1000.rx_tail + 1) % E1000_NUM_RX_DESC;
-                continue;
-            }
-            uint8_t *buf = (uint8_t *)kmalloc(len);
-            if (buf) {
-                memcpy(buf, e1000.rx_bufs[e1000.rx_tail], len);
-                e1000_rxq.buf[e1000_rxq.head] = buf;
-                e1000_rxq.len[e1000_rxq.head] = len;
-                e1000_rxq.head = next;
+            if (next != e1000_rxq.tail) {
+                uint8_t *buf = (uint8_t *)kmalloc(len);
+                if (buf) {
+                    memcpy(buf, e1000.rx_bufs[i], len);
+                    e1000_rxq.buf[e1000_rxq.head] = buf;
+                    e1000_rxq.len[e1000_rxq.head] = len;
+                    e1000_rxq.head = next;
+                }
             }
         }
-        e1000.rx_descs[e1000.rx_tail].status = 0;
-        e1000.rx_tail = (e1000.rx_tail + 1) % E1000_NUM_RX_DESC;
+
+        e1000.rx_descs[i].status = 0;
+        arch_wmb();
+        e1000_write(E1000_REG_RDT, i);
+        e1000.rx_tail = (i + 1) % E1000_NUM_RX_DESC;
     }
-    // Clear any pending RX interrupts.  QEMU's e1000e sets interrupt
-    // bits in ICR when packets arrive and may defer writing further
-    // descriptors until the interrupt is acknowledged (ICR read).  Our
-    // MSI-X path is not wired up (no IRQ ever fires), so without this
-    // read QEMU goes quiet after the first burst of ~10 packets and
-    // the HTTP body is never delivered.
-    e1000_read(E1000_REG_ICR);
-    // RDT is the LAST descriptor the software has prepared.  QEMU's
-    // e1000e only re-arms reception when the RDT VALUE CHANGES and it
-    // stops when RDH >= RDT.  A constant RDT means no re-arm: the NIC
-    // goes quiet after its first burst (~10 pkts) and the HTTP body is
-    // never delivered.  Worse, if we only write RDT while draining, a
-    // stopped NIC (no DD descriptors) never gets re-armed — deadlock.
-    // Toggle 30→31 on EVERY call (even with nothing to drain) so the
-    // value always changes and RDT stays > RDH: QEMU keeps delivering.
-    e1000_write(E1000_REG_RDT, 30);
-    e1000_write(E1000_REG_RDT, 31);
 }
 
 void e1000_process_rx(void) {
@@ -170,13 +148,8 @@ static void e1000_handler(uint64_t nr, uint64_t param, pt_regs_t *regs)
 
     // ── RX: descriptor done ─────────────────────────────────
     if (icr & (E1000_ICR_RXQ0 | E1000_ICR_RXT0 | E1000_ICR_RXDMT0)) {
-        // Buffer only (IRQ-safe).  lwIP processing happens in
-        // tcpip_thread context — e1000_process_rx() runs from
-        // net_poll_rx() inside sys_arch_mbox_fetch.  Wake the
-        // fetcher so buffered packets are drained promptly.
-        // NEVER call tcpip_input/tcpip_inpkt from IRQ context
-        // (lwIP asserts: "tcpip_thread: invalid message").
-        e1000_poll_rx();
+        // Reading ICR above acknowledges the interrupt and clears QEMU's RX
+        // latch. The tcpip thread is the sole descriptor-ring consumer.
         extern void sys_mbox_wake(void);
         sys_mbox_wake();
     }
@@ -254,7 +227,7 @@ static err_t e1000_netif_input(struct pbuf *p, struct netif *n) {
 
 err_t e1000_netif_init(struct netif *netif)
 {
-    e1000.netif_ptr = netif;  // store for IRQ handler's tcpip_inpkt()
+    e1000.netif_ptr = netif;  // store for e1000_process_rx() delivery
     netif->input = e1000_netif_input;  // inline etharp processing
     netif->hwaddr_len = 6;
     memcpy(netif->hwaddr, e1000.mac, 6);
