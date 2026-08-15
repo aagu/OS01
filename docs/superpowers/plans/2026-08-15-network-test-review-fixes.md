@@ -25,7 +25,6 @@
 
 **Files:**
 - Modify: `Makefile`
-- Modify: `docs/roadmap.md`
 - Modify: `tests/run_test.py`
 - Create: `config/inittab.nettest`
 - Create: `user/nettest.c`
@@ -44,11 +43,13 @@ make test-network
 ```
 
 Expected: exit 0 with `[NET TEST] RESULT: 5 passed, 0 failed`.
+This baseline still queries `example.com`, so it requires working external DNS;
+a DNS failure here should be recorded as the known dependency Task 1 removes.
 
 - [ ] **Step 2: Commit the harness as the buildable base**
 
 ```bash
-git add Makefile docs/roadmap.md tests/run_test.py config/inittab.nettest user/nettest.c
+git add Makefile tests/run_test.py config/inittab.nettest user/nettest.c
 git commit -m "test: add automated QEMU network regression"
 ```
 
@@ -92,6 +93,14 @@ if (rc == 0 && answer && answer->ai_family == AF_INET && answer->ai_addr) {
     printf(" address=%u.%u.%u.%u", octet[0], octet[1], octet[2], octet[3]);
 }
 printf("\n");
+struct in_addr deliberately_wrong;
+int wrong_address_match =
+    inet_aton("127.0.0.2", &deliberately_wrong) && rc == 0 && answer &&
+    answer->ai_family == AF_INET && answer->ai_addr &&
+    ((const struct sockaddr_in *)answer->ai_addr)->sin_addr.s_addr ==
+        deliberately_wrong.s_addr;
+if (answer) freeaddrinfo(answer);
+return wrong_address_match;
 ```
 
 Rebuild and run:
@@ -162,6 +171,7 @@ git commit -m "test: make QEMU DNS regression local"
 
 **Files:**
 - Modify: `user/nettest.c:105-123`
+- Modify: `docs/roadmap.md:29`
 - Verify: `tests/run_test.py:230-243` already derives host length with `len(payload)`
 
 **Interfaces:**
@@ -192,7 +202,8 @@ Expected: QEMU reports `[NET TEST] wget: FAIL`. Restore the numeric value before
 
 - [ ] **Step 3: Replace the guest magic number**
 
-In `test_wget()`, define the expected payload once and derive the non-NUL byte count:
+Inside the block scope of `test_wget()`, define the expected payload once and
+derive the non-NUL byte count:
 
 ```c
 static const char payload[] = "OS01 network test\n";
@@ -207,6 +218,9 @@ return n == (int)payload_len && !memcmp(data, payload, payload_len);
 
 - [ ] **Step 4: Run complete verification**
 
+After the full test passes, retain the existing `docs/roadmap.md` change that
+marks the deterministic network regression complete.
+
 Run:
 
 ```bash
@@ -219,6 +233,6 @@ Expected: `make test-network` exits 0 with all five network cases passing; `git 
 - [ ] **Step 5: Commit the payload refactor**
 
 ```bash
-git add user/nettest.c
-git commit -m "test: derive wget payload length"
+git add user/nettest.c docs/roadmap.md
+git commit -m "test: finalize deterministic QEMU network regression"
 ```
