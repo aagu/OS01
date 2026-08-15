@@ -1,0 +1,2 @@
+# OS01 /etc/inittab (network regression mode)
+tty1:respawn:/bin/nettest

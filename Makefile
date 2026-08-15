@@ -34,6 +34,9 @@ INITTAB_FILE ?= config/inittab
 ifeq ($(OS01_SYSTEST),1)
 INITTAB_FILE := config/inittab.systest
 endif
+ifeq ($(OS01_NETTEST),1)
+INITTAB_FILE := config/inittab.nettest
+endif
 
 all: disk.img
 
@@ -171,6 +174,7 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 	@cp build/x86_64/user/socktest.elf      config/fsroot/bin/socktest
 	@cp build/x86_64/user/udptest.elf       config/fsroot/bin/udptest
 	@cp build/x86_64/user/ipaddr.elf        config/fsroot/bin/ipaddr
+	@cp build/x86_64/user/nettest.elf       config/fsroot/bin/nettest
 	@ln -sf busybox config/fsroot/bin/wget
 	@ln -sf busybox config/fsroot/bin/login
 	@ln -sf busybox config/fsroot/bin/sh
@@ -260,6 +264,12 @@ test-inittab:
 	rm -f disk.img
 	$(MAKE) INITTAB_FILE=config/inittab.test disk.img boot/uefi/OVMF.fd
 	python3 tests/run_test.py inittab-phase
+
+.PHONY: test-network
+test-network:
+	rm -f disk.img
+	$(MAKE) OS01_NETTEST=1 disk.img boot/uefi/OVMF.fd
+	python3 tests/run_test.py network
 
 # ── Clean ───────────────────────────────────────────────
 
