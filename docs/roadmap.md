@@ -1,64 +1,63 @@
-# OS01 优化路线图 v13
+# OS01 优化路线图 v14
 
-> **基准**: `9d051fa` (scheduler complexity assessment)
-> **日期**: 2026-08-12
+> **基准**: `840f3a5` (architecture boundary cleanup)
+> **日期**: 2026-08-15
 
-标记: ✅ 已完成 | 🔴 P0 本迭代 | 🟡 P1 本月 | 🟢 P2 下月 | 🔵 P3 远期
+标记: ✅ 已完成 | 🔴 P0 本迭代 | 🟡 P1 近期 | 🟢 P2 中期 | 🔵 P3 远期
 
 ---
 
-## 当前状态总览 (7 个 Phase 全部就绪)
+## 当前状态总览 (8 个 Phase 全部就绪)
 
 | Phase | 说明 | 状态 |
 |-------|------|------|
 | **Phase 1: COW + 内存** | Copy-On-Write Fork, mmap/mprotect/munmap, demand paging | ✅ |
-| **Phase 2: 内核基础设施** | arch 抽象层、子系统注册框架、多架构清理（aarch64 桩到位）、SMP（percpu+GS-base+AP boot+负载均衡）、canary、hang detector、debug channels、kallsyms、FPU 保存、slab/PMM/softirq/timer SMP 加固 | ✅ |
-| **Phase 3: 信号 + 调度** | do_signal_delivery、Ctrl-C→SIGINT、systest 118/118、优先级 O(n) 调度器 | ✅ |
+| **Phase 2: 内核基础设施** | arch 抽象层、子系统注册框架、x86 平台源隔离、aarch64 dispatch 桩、SMP（percpu+GS-base+AP boot+负载均衡）、canary、hang detector、debug channels、kallsyms、FPU 保存、slab/PMM/softirq/timer SMP 加固 | ✅ |
+| **Phase 3: 信号 + 调度** | arch 信号帧投递、Ctrl-C→SIGINT、per-CPU EEVDF rbtree 可运行队列、SMP 负载均衡 | ✅ |
 | **Phase 4: 文件系统** | ext2 R/W、FAT32 R/W、tmpfs、devfs、procfs、GPT 双分区 | ✅ |
 | **Phase 5: 设备驱动** | 8259A PIC、APIC/IOAPIC/LAPIC、PIT/LAPIC timer、PS/2 键盘、16550 串口、AHCI SATA | ✅ |
 | **Phase 6: 用户态** | busybox ash shell（方向键行编辑+光标闪烁+raw mode TTY）、9 applet、init（/etc/inittab 配置解析、4 阶段引导：SYSINIT→WAIT→ONCE→RESPAWN/ASKFIRST、fallback 硬编码默认）、libc (printf/malloc/string/syscall wrapper)、VT100 CSI 终端模拟器 | ✅ |
 | **Phase 7: poll/select** | poll_table + 双队列级联唤醒、select/pselect 系统调用（SYS_select=50 + SYS_pselect6=51）、do_poll_core 共享轮询循环、pselect6 sigmask 原子 swap、systest 126/126 | ✅ |
+| **Phase 8: 网络** | lwIP 2.2.1、E1000 + virtio-net、PCI/MSI-X、DHCP/DNS、TCP/UDP socket syscall（52–64）、poll/select 集成、BusyBox HTTP wget | ✅ |
 
 ---
 
 ## 待实施优先级
 
 ```
-P0 (本迭代 — 本月):
- 1. EEVDF 调度器 ✅            — O(n)→O(log n)，公平调度，反饿死 (2026-07-25)
- 2. SMP 负载均衡 ✅            — idle-steal + per-schedule pull + 振荡防护 (2026-07-29)
- 3. lwIP 网络栈 + E1000       — 第一个网络能力 (socket poll 回调已就绪)
+P0 (本迭代):
+ 1. 网络回归测试              — TCP/UDP/DNS/DHCP/wget 纳入自动化 QEMU 测试
+ 2. /proc/<pid>/fd/           — 补齐进程文件描述符可观测性
+ 3. 任务退出/回收收敛         — wait 驱动回收，移除调度器与 reaper 双重职责
 
-P1 (本月):
- 3. 多架构 aarch64 ✅ 清理     — 8 dispatch 头文件 + 7 aarch64 桩 + task.c 拆分（20 commits）
- 4. /proc/<pid>/fd/ + maps ✅  — /proc/<pid>/maps 已实现；fd/ 待完成
- 5. 日志级别 ✅               — ERR/WARN/INFO/DEBUG，开发效率质变
- 6. rwlock/seqlock            — VFS /proc 多核缩放
- 7. 用户栈 canary             — 用户态加固
+P1 (近期):
+ 4. rwlock/seqlock            — VFS 与 /proc 多核缩放
+ 5. 用户栈 canary             — libc SSP + ELF AT_RANDOM
+ 6. symlink/readlink          — 完整 VFS 软链接语义和 ext2 symlink
+ 7. 更多 BusyBox applet       — grep/sed/find，先补 regex/fnmatch
 
-P2 (下月):
- 8. 更多 busybox applet      — grep/sed/find (依赖 poll/select ✅ + regex)
- 9. aarch64 启动              — head.S + GIC + Generic Timer（清理已就绪）
-10. readlink/symlink          — ext2 写驱动的前置条件
-11. 动态链接器                — 共享 libc，减小二进制体积
+P2 (中期):
+ 8. aarch64 启动              — head.S + MMU + GIC + Generic Timer
+ 9. 动态链接器                — PT_INTERP + ld.so + 共享 libc
+10. HTTPS/TLS                 — 集成现有 mbedTLS 子模块，BusyBox wget HTTPS
+11. AF_UNIX/socketpair        — 本地 socket IPC
 
 P3 (远期):
 12. ASLR                      — 用户态安全
-13. UBSan + KASan            — 运行时 bug 检测
-14. 真机启动 (USB)            — "不能在真机上测试就别实现"
-15. 网络进阶 (AF_UNIX, socketpair)
-16. GUI 框架 (参考 opuntiaOS + HackOS)
-17. Alpine apk 用户态        — cavOS 路线，直接安装 musl 二进制包
-18. NVMe 驱动                — 替代 AHCI
+13. UBSan + KASan             — 运行时 bug 检测
+14. 真机启动 (USB)            — 建立硬件验证路径
+15. GUI 框架                  — Window Server + compositor
+16. Alpine apk 用户态         — musl 二进制包兼容路线
+17. NVMe 驱动                 — 替代 AHCI
 ```
 
 **依赖链:**
 ```
-  poll/select ✅ ──→ 更多 busybox applet ──→ 动态链接器
+  poll/select ✅ ──→ lwIP/socket ✅ ──→ 网络回归测试 ──→ HTTPS/TLS
        │
-       └─────→ lwIP 网络栈 (socket poll 回调 ✅)
+       └─────→ 更多 BusyBox applet ──→ 动态链接器
        
-  ext2 R/W ✅ ──→ readlink/symlink
+  ext2 R/W ✅ ──→ symlink/readlink
        
   rwlock ──→ VFS 多核缩放 (VFS lookup, /proc read)
 ```
@@ -67,46 +66,47 @@ P3 (远期):
 
 ## Phase 解析
 
-### P0: 本迭代 (预计 2-3 周)
+### 已完成的 P0 基座
 
 #### 1. EEVDF 公平调度器 [借鉴 Tilck]
 
-**动机:** 当前 `schedule()` 扫描全局链表 O(n)，`max-counter + priority` 策略无公平性保证。EEVDF 是 Linux 6.6+ 的生产级算法。
+**状态:** 已完成。调度器使用 per-CPU rbtree 可运行队列，按 eligibility 和 virtual deadline 选择任务，并配套 SMP 负载均衡。
 
 | 任务 | 工作量 | 说明 |
 |------|--------|------|
-| AVL/rbtree 可运行队列 | 1-2 天 | 替代 O(n) 链表扫描 |
-| vruntime 累积 + min_vruntime | 1 天 | 子刻度精度 |
-| eligibility + deadline 选择 | 1 天 | `vruntime ≤ avg_vruntime` 且 deadline 最早 |
+| rbtree 可运行队列 | ✅ | 替代 O(n) 链表扫描 |
+| vruntime 累积 + min_vruntime | ✅ | per-CPU 时间线 |
+| eligibility + deadline 选择 | ✅ | `pick_eevdf()` O(log n) |
 | **收益:** | | 反饿死 + 响应时间可预测 + 高负载下不减速 |
 
 #### 2. lwIP 网络栈 + E1000 驱动 [借鉴 cavOS]
 
-**动机:** 最大的"缺失功能"。网络解锁 telnet/ssh/http/nslookup 等无限可能性。poll/select 就绪为 socket poll 提供了直接的支持。
+**状态:** 已于 `7416f40` 合并到主线。具备 lwIP 2.2.1、E1000/virtio-net、DHCP/DNS、TCP/UDP socket、poll/select 网络就绪通知和 HTTP wget。
 
 | 任务 | 工作量 | 借鉴 |
 |------|--------|------|
-| lwIP 移植到内核 | 1 天 | cavOS 的开箱即用方案 |
-| E1000 PCI NIC 驱动 | 2 天 | QEMU `e1000` 虚拟网卡 |
-| socket syscall 层 | 1-2 天 | `UserSocket` + `lwip_send`/`lwip_recv` |
-| poll/select 网络集成 | 半天 | socket poll 回调 — `fd_poll(FD_SOCKET)` 直接复用 |
+| lwIP 移植到内核 | ✅ | tcpip_thread + OS01 sys_arch |
+| E1000/virtio-net 驱动 | ✅ | PCI、MSI-X、IRQ RX 缓冲 |
+| socket syscall 层 | ✅ | TCP/UDP、DNS、shutdown、部分读缓存 |
+| poll/select 网络集成 | ✅ | `FD_SOCKET` readiness 回调 |
+| HTTPS/TLS | ⏳ | mbedTLS 已引入，尚未集成到 BusyBox wget |
 
 **收益:** 网络栈是从"玩具 OS"到"可用 OS"的最大一步。
 
-**状态:** `lwIP-dev` 分支已有 10+ commit（e1000 + virtio-net + lwIP 2.2.1 + socket 层 + DHCP + MSI-X），待合并。
+下一步重点不是继续堆 socket API，而是把 DNS、TCP、UDP、DHCP 和 wget 的成功路径纳入稳定的 QEMU 自动化回归。
 
 ---
 
-### P1: 本月
+### P1: 近期
 
 #### 3. 多架构 aarch64
 
-**状态:** 基础清理完成。ARCH 参数化 + 8 个 dispatch 头文件 + task.c 拆分 + 7 个 aarch64 桩到位。
+**状态:** 基础清理完成。ARCH 参数化、dispatch 头文件、task arch hook、aarch64 原子量/spinlock 桩和 x86 平台源构建隔离均已到位；aarch64 尚不能启动。
 
 | 任务 | 借鉴 | 说明 |
 |------|------|------|
-| `arch/aarch64/spinlock.h` 实现 | — | ldxr/stlxr 独占循环 |
-| `arch/aarch64/linkage.h` | — | ENTRY 汇编宏 |
+| `arch/aarch64/spinlock.h` 实现 | ✅ | ldxr/stlxr 独占循环 |
+| `arch/aarch64/linkage.h` | — | 随启动汇编补 ENTRY 宏 |
 | `kernel/arch/aarch64/head.S` | ArvernOS | 启动入口 |
 | 中断控制器 (GIC) | opuntiaOS | GICv2/v3 驱动 |
 | 时钟/定时器 | opuntiaOS | Generic Timer |
@@ -117,7 +117,7 @@ P3 (远期):
 | 任务 | 工作量 | 说明 |
 |------|--------|------|
 | `/proc/<pid>/fd/` | 半天 | 查看打开的文件描述符 |
-| `/proc/<pid>/maps` | 半天 | 查看 VMA 布局 |
+| `/proc/<pid>/maps` | ✅ | 已实现并有 systest 覆盖 |
 | `/proc/<pid>/status` 扩展 | 半天 | signal mask、ppid、utime/stime |
 
 #### 5. rwlock / seqlock
@@ -136,7 +136,7 @@ P3 (远期):
 
 ---
 
-### P2: 下月
+### P2: 中期
 
 #### 7. 更多 busybox applet
 
@@ -157,7 +157,7 @@ P3 (远期):
 
 | 任务 | 说明 |
 |------|------|
-| `SYS_readlink` | Linux ABI 89 |
+| readlink syscall/兼容层 | 当前仅有兼容 stub，补齐真实 VFS 语义 |
 | VFS 软连接支持 | 跨文件系统路径解析 |
 | ext2 symlink inode | 快速符号链接 (in-inode) |
 
@@ -174,14 +174,12 @@ P3 (远期):
 
 | # | 任务 | 借鉴 | 说明 |
 |---|------|------|------|
-| 11 | ASLR | — | 随机化加载基址 |
-| 12 | SMP 负载均衡 | — | ✅ 2026-07-29（idle-steal + per-schedule pull） |
+| 12 | ASLR | — | 随机化加载基址 |
 | 13 | UBSan + KASan | ArvernOS | 内核地址消毒 |
-| 14 | 真机 USB 启动 | Tilck | "不能在真机上测试就别实现" |
-| 15 | AF_UNIX sockets | cavOS | 本地 IPC |
-| 16 | GUI 框架 | opuntiaOS + HackOS | Window Server + Compositor |
-| 17 | Alpine apk 用户态 | cavOS | musl 二进制包 |
-| 18 | NVMe 驱动 | — | 替代 AHCI |
+| 14 | 真机 USB 启动 | Tilck | 建立真实硬件验证路径 |
+| 15 | GUI 框架 | opuntiaOS + HackOS | Window Server + Compositor |
+| 16 | Alpine apk 用户态 | cavOS | musl 二进制包 |
+| 17 | NVMe 驱动 | — | 替代 AHCI |
 
 ---
 
@@ -319,7 +317,7 @@ CPU N: schedule()
 
 ---
 
-## 已完成汇总 (截至 2026-07-24)
+## 已完成汇总 (截至 2026-08-15)
 
 | 项目 | 工作量 | 日期 |
 |------|--------|------|
@@ -347,10 +345,13 @@ CPU N: schedule()
 | Makefile QEMU targets 统一 AHCI (run/run-kvm/debug) | 10 分钟 | 07-18 |
 | **ext2 读写** (alloc_block/inode、create/mkdir/rmdir/unlink/rename/truncate、selftest) | 2 天 | 07-19 |
 | refactor: 固定数组→堆分配 (VFS name/cwd + mount_table + pipe buf + ext2 buf) | 1 天 | 07-19 |
-| **select/pselect syscall** (poll_table 动态化 + do_poll_core 提取 + 适配层 + pselect6 sigmask 原子性 + systest 118/118) | 2 天 | 07-24 |
+| **select/pselect syscall** (poll_table 动态化 + do_poll_core 提取 + 适配层 + pselect6 sigmask 原子性；当时 systest 118/118，当前 126/126) | 2 天 | 07-24 |
 | **EEVDF 调度器** (rbtree 可运行队列 + vruntime/deadline + pick_eevdf O(log n) + per-CPU TSS SMP 修复) | 2 天 | 07-25 |
 | **SMP 负载均衡** (idle-steal + per-schedule pull + sched_pick_cpu + nr_running 指标 + 振荡防护 + 6 项 SMP 前置条件加固 + init 迁移保护 + idle→idle #PF 修复 + smp_stress 验证) | 2 天 | 07-29 |
 | **inittab 配置支持** (ACT_* 位掩码修复 + parse_inittab() open/read 解析器 + 3 套模板 + Makefile/build 集成 + test-inittab 相位派发验证) | 1 天 | 08-01 |
+| **lwIP 网络栈合并** (E1000/virtio-net + PCI/MSI-X + DHCP/DNS + TCP/UDP socket + poll/select + HTTP wget) | 多迭代 | 08-15 |
+| **网络正确性加固** (DNS 超时、端口字节序、部分读缓存、shutdown、UDP readiness、响应 hang) | 3 天 | 08-12~08-15 |
+| **arch 边界收紧** (x86 平台源选择、early task-state hook、公共 gate ABI、arch signal API、端口 I/O wrapper) | 1 天 | 08-15 |
 
 ---
 
@@ -359,7 +360,7 @@ CPU N: schedule()
 | 项目 | 已经用到的 | 还可以拿来的 |
 |------|----------|-------------|
 | **Tilck** | EEVDF 调度思路、3 层测试、hang detector | EEVDF 代码结构、load balancing、GDB helper |
-| **cavOS** | lwIP 网络栈参考、动态链接、Alpine apk 路线 | socket syscall 层、E1000 驱动、动态链接器加载流程 |
+| **cavOS** | lwIP、socket syscall、E1000、动态链接与 Alpine apk 路线参考 | 动态链接器加载流程、用户态包兼容 |
 | **Aquila** | **ext2 R/W 核心 (~221 行)**: inode/block alloc+free | — |
 | **ArvernOS** | 多架构抽象思路、aarch64 dispatch 桩模式 | 分层日志系统、UBSan、aarch64 head.S/GIC/Generic Timer |
 | **opuntiaOS** | devman 子系统注册框架 | GICv2 驱动、Generic Timer、Window Server GUI |
@@ -374,13 +375,13 @@ CPU N: schedule()
 | 1 | COW 粒度 | 4KB-only V1（2MB 推迟） | 2MB split 子页风险过高；4KB COW 已捕获 fork+exec 主要收益 |
 | 2 | COW 引用计数 | `subpage_pool.cow_count[512]` | 无需改 struct Page |
 | 3 | 调度器 | EEVDF (Tilck 路线) | Linux 6.6+ 生产级算法 |
-| 4 | 网络栈 | lwIP (cavOS 路线) | 快速获得 TCP/IP，socket poll 回调已就绪 |
+| 4 | 网络栈 | 内核态 lwIP 2.2.1 + 自有 socket syscall 层 | TCP/UDP/DHCP/DNS 与 poll/select 已贯通；下一步补自动化网络回归和 TLS |
 | 5 | 文件系统 | FAT32 + ext2 R/W + tmpfs + devfs + procfs | ext2 读写完整，UNIX 权限完整 |
 | 6 | 测试 | Tilck 3 层 (unit+self+sys) | 126/126 systest pass |
 | 7 | 用户态 | busybox → 动态链接 → Alpine apk | cavOS 已验证可行 |
 | 8 | COW PTE 标记 | `PAGE_COW` (bit 10) | bit 9 已被 `PAGE_PROTNONE` 占用 |
 | 9 | COW 并发保护 | `subpage_lock` (已有 spinlock) | 无需新增锁 |
-| 10 | 内核栈 canary | 全局 `__stack_chk_guard` (rdtsc 种子) | clang 生成 RIP-relative 全局引用，无需 TLS/FS |
+| 10 | 内核栈 canary | 全局 `__stack_chk_guard` (`arch_cycle_counter()` 种子) | clang 生成 RIP-relative全局引用，无需 TLS/FS |
 | 11 | 磁盘布局 | GPT 双分区 (FAT32 ESP + ext2 root) | UEFI 标准，内核自解析 GPT |
 | 12 | 子系统注册模式 | 运行时 `register_subsys()` | 不引入 ELF section 依赖 |
 | 13 | 多架构 dispatch | `arch/*.h` 用 `#ifdef __x86_64__` / `#elif __aarch64__` | ISP 在 include 层解决 |
