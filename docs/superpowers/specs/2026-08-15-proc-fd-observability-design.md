@@ -1,7 +1,7 @@
 # /proc/<pid>/fd/ — 进程文件描述符只读可观测
 
 > **日期**: 2026-08-15
-> **状态**: design (v2 — 修订并发 UAF、内核地址泄漏、PTY include)
+> **状态**: design (v3 — 修复并发 API 边界：task 锁封装、readdir 协议、dup/fcntl 覆盖)
 > **姊妹篇**: [2026-08-05-proc-maps-design.md](2026-08-05-proc-maps-design.md)
 
 ## 动机
@@ -27,7 +27,7 @@ $ cat /proc/self/fd/3
 - `cat /proc/<pid>/fd/N` 输出该 fd 指向目标的文本描述
 - `/proc/self/fd` 对称支持（复用 `PROCFS_PID_SELF` 哨兵）
 - 只读、无 write 重定向、无真 symlink
-- **并发安全：不引入 use-after-free**（本迭代的硬约束，见 §并发安全）
+- **并发安全：不引入 use-after-free**（本迭代的硬约束）
 - **不向用户态泄漏内核地址**
 
 ## 关键设计决策
@@ -44,7 +44,7 @@ $ cat /proc/self/fd/3
 
 ### 3. pipe/socket 不暴露内核地址
 
-Linux 用 `pipe:[12345]`/`socket:[12345]`。OS01 无稳定 inode 概念，若用 `pipe_t *`/`socket_t *` 地址当伪 inode，会把内核堆地址直接暴露给用户态——即便当前无 KASLR，也会固化一个不必要的信息泄露 ABI。故用占位符 `pipe:[?]` / `socket:[?]`，只区分对象类型、不暴露身份。稳定单调 ID 计数器列为 P1 增强（不在本迭代）。
+Linux 用 `pipe:[12345]`/`socket:[12345]`。OS01 无稳定 inode 概念，若用 `pipe_t *`/`socket_t *` 地址当伪 inode，会把内核堆地址直接暴露给用户态。故用占位符 `pipe:[?]` / `socket:[?]`，只区分对象类型、不暴露身份。稳定单调 ID 计数器列为 P1 增强。
 
 ### 4. FD_ENTRY 而非 FD_LINK
 
@@ -60,19 +60,91 @@ Linux 用 `pipe:[12345]`/`socket:[12345]`。OS01 无稳定 inode 概念，若用
 
 `FD_DIR` 的 `fs_data = ENCODE(FD_DIR, pid)`；`FD_ENTRY` 同编码，**fd 号走 `node->name`**。
 
+## 并发安全（本迭代核心）
+
+### 问题定性
+
+现有 fd 数据路径**没有 fd 表锁**，且 `task_list_lock`（`task.c:37`）是 **static**，procfs 无法直接访问：
+
+- **R3（file_t UAF，阻断）**：读取器 `f = fd[fd]` 后、解引用前，另一 CPU 的 `fd_close`（`file.c:232`）无锁 detach + `refcount--` 归零即 `file_free`（释放 `file_t` 及其 `node`/`pipe`/`sock`）。
+- **R2（files_t 表 UAF）**：读取器取得 `t->files` 后，`do_exit`（`task.c:848` 同步 `files_free`）或 schedule 收割器（`task.c:627` `deferred_files_free` 异步）可释放整个表。
+- **R1（task_t UAF）**：`find_task_by_pid` 返回裸指针，收割器可 `list_del`+释放 task。
+
+**关键事实（决定边界）**：`do_fork` 完全忽略 `clone_flags`（`task.c:1656` 标 unused），`files_t` per-task 独占，**无 CLONE_FILES 线程共享**。故 syscall 内部对 `current->files->fd[]` 的读是 `current` 独占的（同一 task 不会同时在两 CPU 上跑，`on_cpu` 保证），无外部 detach 者。唯一新增的外部并发者是 /proc 读取器。
+
+### API 边界：procfs 不直接碰锁
+
+`task_list_lock` 是 task.c 的 static，procfs 无法访问。故在 task.c 导出边界函数：
+
+```c
+// kernel/sched/task.c 实现，task.h 声明
+files_t *task_files_pin_by_pid(int pid);
+```
+
+**语义**：`task_list_lock` 内 `find_task_by_pid(pid)` → 若 `t && t->files` 则 `files_pin(t->files)` 并返回之，否则返回 NULL；解锁后返回。procfs 拿到的是**已 pin 的 files_t**，之后不再解引用 task_t。
+
+### 引用协议（file.c 实现并导出）
+
+`files_t` 加两字段（`file.h`）：
+
+```c
+typedef struct files_struct {
+    spinlock_T   lock;       // 护 fd[] 槽位
+    int          refcount;   // 表生命周期（原子增减）
+    file_t      *fd[NOFILE];
+    char        *cwd;
+} files_t;
+```
+
+| 函数 | 语义 |
+|------|------|
+| `files_pin(fs)` | `refcount++`（`__sync_add_and_fetch`，原子） |
+| `files_unpin(fs)` | `refcount--`（`__sync_sub_and_fetch`）；归零则 `deferred_files_free(fs)` |
+| `files_get_file(fs, fd)` | `fs->lock` 内取槽位，非空则 `file_get(f)`，返回稳定 `file_t*` |
+| `files_put_file(f)` | `file_put(f)`（`file_t` refcount--，归零则 `file_free`） |
+| `file_get(f)` / `file_put(f)` | `file_t` refcount 的**唯一**封装，所有增减都走它 |
+| `fd_dup(fs, oldfd, minfd)` | 集中 dup 语义：锁内找 `>= minfd` 空槽、`file_get`、写槽位；锁外无需释放 |
+| `fd_dup2(fs, oldfd, newfd)` | 集中 dup2 语义：锁内 `file_get(old)`、detach 旧 `newfd` 目标、写槽位；锁外 `files_put_file(旧目标)` |
+
+**决策：`files_unpin` 归零时统一走 `deferred_files_free`（deferred）。** 理由：schedule 收割器在 schedule() 内，同步 `files_free` 会触发 `file_free → pipe wake → task_wake` 重入调度器；deferred 路径规避之。代价是 `do_exit` 的 fd 关闭时序轻微推迟（见 §已知语义变化）。
+
+### 槽位访问规则
+
+**所有槽位写入者**（`fd_alloc`、`fd_close`、`fd_dup`、`fd_dup2`）持 `fs->lock`；**所有外部读取者**（`files_get_file`、procfs readdir）持 `fs->lock`。唯一免锁的是 `files_free`（refcount 0 时 teardown，无并发读取者）。
+
+**file_t refcount 统一封装**：`files_dup`、`dup`、`close`、`do_pipe` 等现有路径直接 `__sync_add/sub_and_fetch(&f->refcount, 1)` 的，全部改为 `file_get(f)`/`file_put(f)`，杜绝绕过协议。
+
+**files_dup 持源锁**：`/proc` 引入外部并发读取者后，「源表仅 current 使用」的假设不再成立（另一 CPU 可能正在 `files_get_file` 读同一 `current->files`）。`files_dup` 复制 `fd[]` 时持源 `fs->lock`（仅临界区，不跨 `file_get` 的 ref-bump——refcount 原子，锁只保证读到一致的槽位集合）。
+
+### 锁顺序
+
+- `task_list_lock`：只在 `task_files_pin_by_pid` 内 find + pin；`do_exit`/收割器置空 `t->files`。**不跨** `files_get_file`/`vfs_resolve_path`/`files_put_file`。
+- `fs->lock`：只在槽位 detach/bump/scan 的临界区，**不跨** `file_free`（其内部拿 pipe/pty 锁）。
+- `files_unpin` 归零触发 `deferred_files_free`（拿 `df_lock`）；deferred 路径已在收割器 `task_list_lock` 下调用过（现状），锁内/外均安全。
+
+### 竞态结局
+
+| 竞态 | 结局 |
+|------|------|
+| R3 file_t UAF | **消除**：`files_get_file` 在 `fs->lock` 内 `file_get`，与 `fd_close` detach 同步；`file_free` 只在 refcount 0 |
+| R2 files_t 表 UAF | **消除**：`files_pin`/`unpin` 保证读取期表存活 |
+| R1 task_t UAF | **消除**：`task_files_pin_by_pid` 在 `task_list_lock` 内 pin，解锁后不再碰 task_t；task_t 释放与否不影响已 pin 的 files_t |
+
+> 与 v2 的差异：v2 将 R1 描述为「继承 maps/status 的既有风险」，但 `task_files_pin_by_pid` 使 fd 路径在解锁后完全脱离 task_t，故 R1 实际消除，而非继承。
+
 ## 组件
 
 ### `gen_fd_target(file_t *f, char *buf, int bufsz)`
 
-唯一新增的核心渲染函数。按 `file_t.type` 分发输出目标路径，返回写入字节数（不含 NUL）。**入参是已持有稳定引用的 `file_t *`**（由调用方 `files_get_file` 取得，见 §并发安全）：
+唯一新增的核心渲染函数。入参是 `files_get_file` 返回的**已持有稳定引用**的 `file_t*`：
 
 | `file_t.type` | 输出 | 说明 |
 |---------------|------|------|
-| `FD_VFS` / `FD_DEV` | `<绝对路径>\n` | `vfs_resolve_path(f->node)`（`vfs.c:759`，已在 gen_maps 使用）；失败 `"?\n"` |
-| `FD_PIPE` | `pipe:[?]\n` | 不暴露 `f->pipe` 地址 |
+| `FD_VFS` / `FD_DEV` | `<绝对路径>\n` | `vfs_resolve_path(f->node)`；失败 `"?\n"` |
+| `FD_PIPE` | `pipe:[?]\n` | 不暴露地址 |
 | `FD_PTY_MASTER` | `/dev/ptmx\n` | |
 | `FD_PTY_SLAVE` | `/dev/pts<index>\n` | `f->pty->index` |
-| `FD_SOCKET` | `socket:[?]\n` | 不暴露 `f->sock` 地址 |
+| `FD_SOCKET` | `socket:[?]\n` | 不暴露地址 |
 | 其他 | 返回 0 | |
 
 ### `parse_fd(const char *s)`
@@ -82,50 +154,61 @@ Linux 用 `pipe:[12345]`/`socket:[12345]`。OS01 无稳定 inode 概念，若用
 ```c
 static int parse_fd(const char *s)
 {
-    if (!s || *s < '0' || *s > '9') return -1;   // 空 / 负号 / 前导垃圾
+    if (!s || *s < '0' || *s > '9') return -1;
     int v = 0;
     for (; *s; s++) {
-        if (*s < '0' || *s > '9') return -1;     // 尾随字符
+        if (*s < '0' || *s > '9') return -1;
         v = v * 10 + (*s - '0');
-        if (v >= NOFILE) return -1;              // 越界
+        if (v >= NOFILE) return -1;
     }
     return v;
 }
 ```
 
-### `procfs_readdir` 扩展
+### `procfs_readdir` 扩展（完整 pin/lock 流程）
 
-1. `PROCFS_TYPE_SELF_DIR` 与 `PROCFS_TYPE_PID_DIR` 各加一个 index=2 条目（`"fd"`，`VFS_DIR`，`ino = ENCODE(FD_DIR, pid/SELF)`）。
-2. 新增 `PROCFS_TYPE_FD_DIR` case——先 resolve self 哨兵，再遍历 fd 表，按 index 输出第 k 个非空槽位：
+1. `SELF_DIR`/`PID_DIR` 各加 index=2 条目 `"fd"`（`VFS_DIR`，`ino = ENCODE(FD_DIR, pid/SELF)`）。
+2. 新增 `PROCFS_TYPE_FD_DIR` case，**按引用协议完整走**：
 
 ```c
 case PROCFS_TYPE_FD_DIR: {
     uint32_t p = pid;
     if (p == PROCFS_PID_SELF) { if (!current) return -1; p = (uint32_t)current->pid; }
-    task_t *t = find_task_by_pid((int)p);
-    if (!t || !t->files) return -1;
+
+    files_t *fs = task_files_pin_by_pid((int)p);   // task_list_lock 内 find + pin
+    if (!fs) return -1;
+
     uint64_t k = index;
-    for (int fd = 0; fd < NOFILE; fd++) {
-        if (!t->files->fd[fd]) continue;
-        if (k == 0) {
-            snprintf(entry->name, VFS_NAME_MAX, "%d", fd);
-            entry->type = VFS_FILE;
-            entry->size = 4096;
-            entry->ino = (uint32_t)(uintptr_t)PROCFS_ENCODE(PROCFS_TYPE_FD_ENTRY, pid);
-            return 0;
+    int found = -1;
+    {
+        uint64_t fl = spin_lock_irqsave(&fs->lock); // 单次扫描内持锁
+        for (int fd = 0; fd < NOFILE; fd++) {
+            if (!fs->fd[fd]) continue;
+            if (k == 0) { found = fd; break; }
+            k--;
         }
-        k--;
+        spin_unlock_irqrestore(&fs->lock, fl);
     }
-    entry->name[0] = '\0';
+
+    if (found >= 0) {
+        snprintf(entry->name, VFS_NAME_MAX, "%d", found);
+        entry->type = VFS_FILE;
+        entry->size = 4096;
+        entry->ino  = (uint32_t)(uintptr_t)PROCFS_ENCODE(PROCFS_TYPE_FD_ENTRY, pid);
+    } else {
+        entry->name[0] = '\0';
+    }
+
+    files_unpin(fs);                                 // 锁外 unpin
     return 0;
 }
 ```
 
-> 注：`readdir` 阶段的 `t->files` 访问与 §并发安全 的读取器协议一致，见下。
+> 注意：**不在多次 `readdir(index)` 调用之间保留锁**。动态目录允许条目变化/重复（fd 在两次调用间 close/reuse 会导致条目漂移），但单次扫描在 `fs->lock` 内，安全。
 
 ### `procfs_read` 扩展
 
-1. 目录守卫加 `PROCFS_TYPE_FD_DIR`（当前只挡 `PID_DIR`/`ROOT`/`SELF_DIR`，`procfs.c:290`）。
+1. 目录守卫加 `PROCFS_TYPE_FD_DIR`。
 2. 新增 `PROCFS_TYPE_FD_ENTRY` case：
 
 ```c
@@ -134,145 +217,99 @@ case PROCFS_TYPE_FD_ENTRY: {
     if (p == PROCFS_PID_SELF) { if (!current) return 0; p = (uint32_t)current->pid; }
     int fd = parse_fd(node->name);
     if (fd < 0) return 0;
-    file_t *f = files_get_file_for_pid((int)p, fd);   // 稳定引用，见 §并发安全
+
+    files_t *fs = task_files_pin_by_pid((int)p);
+    if (!fs) return 0;
+    file_t *f = files_get_file(fs, fd);   // fs->lock 内 file_get
+    files_unpin(fs);                      // 表引用不再需要，尽早释放
     if (!f) return 0;
+
     len = gen_fd_target(f, local, sizeof(local));
-    files_put_file(f);
+    files_put_file(f);                    // file_put
     break;
 }
 ```
 
 ### `#include` 集合
 
-`procfs.c` 需新增两个 include：
-
 ```c
 #include <kernel/file.h>   // file_t / files_t 完整定义
-#include <kernel/pty.h>    // pty_struct 完整定义（file.h 只前置声明，访问 f->pty->index 需要）
+#include <kernel/pty.h>    // pty_struct 完整定义（file.h 只前置声明）
 ```
-
-`file.h:25` 只 `struct pty_struct;` 前置声明，不完整类型无法访问成员；必须引入 `pty.h`（其 `pid_t` 已在 tty.h/pty.h 以 `typedef int` 存在，无冲突）。
-
-## 并发安全（本迭代核心，评审修订）
-
-### 问题定性
-
-现有 fd 数据路径**没有 fd 表锁**：`fd_close`（`file.c:232`）无锁地 `fd[fd]=NULL` 后 `refcount--` 归零即 `file_free`（释放 `file_t` 及其 `node`/`pipe`/`sock`）。`t->files` 指针本身有两个释放点——`do_exit`（`task.c:848` 同步 `files_free`）与 schedule 收割器（`task.c:627` `deferred_files_free` 异步）。因此：
-
-- **R3（file_t UAF，阻断）**：读取器 `f = fd[fd]` 后、解引用 `f->type/node/pipe` 前，另一 CPU 的 `fd_close` 可释放 `f`。**这是活进程正常 `close()` 触发的新竞态**，比 maps 的 teardown 竞态更严重。
-- **R2（files_t 表 UAF）**：读取器取得 `t->files` 后，`do_exit`/收割器可释放整个表。
-- **R1（task_t UAF）**：`find_task_by_pid` 返回裸指针，收割器可 `list_del`+释放 task。此为 maps/status **已有**的 teardown 竞态。
-
-### 设计：`files_t` 引用计数 + 表锁
-
-R3 与 R2 耦合（锁长在表里，表被释放则锁失效），必须一起修。给 `files_t` 增加两字段：
-
-```c
-// file.h
-typedef struct files_struct {
-    spinlock_T   lock;       // 护 fd[] 槽位的 detach vs 读取器 ref-bump
-    int          refcount;   // 表生命周期（/proc 读取器 pin）
-    file_t      *fd[NOFILE];
-    char        *cwd;
-} files_t;
-```
-
-新增引用协议 API（`file.c`/`file.h`）：
-
-| 函数 | 语义 |
-|------|------|
-| `files_pin(fs)` | `refcount++`（在 `task_list_lock` 内调用） |
-| `files_unpin(fs)` | `refcount--`；归零则 `deferred_files_free(fs)`（**统一 deferred，不同步 free**） |
-| `files_get_file(fs, fd)` | `fs->lock` 内取槽位，非空则 `file->refcount++`，返回稳定 `file_t*` |
-| `files_put_file(f)` | `file->refcount--`；归零则 `file_free(f)` |
-
-**决策：`files_unpin` 归零时统一走 `deferred_files_free`（deferred），不做同步 `files_free`。** 理由：`deferred_files_free` 已在 schedule 收割器内 `task_list_lock` 下调用（`task.c:627` 现状），deferred 路径不会在 schedule() 内重入调度器；同步 `files_free` 会触发 `file_free → pipe wake → task_wake` 的重入风险。代价是 `do_exit` 的 fd 关闭时序轻微推迟（见 §已知语义变化）。
-
-### 规则
-
-**槽位访问统一走 `fs->lock`**：`fd_close`（detach 后释放引用）、`fd_alloc`（写入）、`files_get_file`（读取+ref-bump）都持锁。唯一免锁的是 `files_free`（refcount 0 时 teardown，无并发读取器）与 `files_dup`（源表是 `current` 自己的，仅 `file_t` refcount 原子自增，无释放）。
-
-**表生命周期统一走 pin/unpin**：
-
-- 读取器（procfs）：`task_list_lock` 内 `find_task_by_pid` → `t->files` 非空则 `files_pin`，解锁；渲染；`files_unpin`。
-- `do_exit`（`task.c:848`）：改为 `task_list_lock` 内 `fs = current->files; current->files = NULL`，解锁后 `files_unpin(fs)`。
-- schedule 收割器（`task.c:627`）：改为 `task_list_lock` 内 `fs = t->files; t->files = NULL`（保留 `list_del`），解锁后 `files_unpin(fs)`（取代直接 `deferred_files_free`）。
-
-### 锁顺序
-
-- `task_list_lock` **只在**定位 task + pin 表 + 置空 `t->files` 时持有，**不跨** `files_get_file`/`vfs_resolve_path`/`files_put_file`（避免全局锁持有期做可能拿其他锁的工作）。
-- `fs->lock` 只在槽位 detach/bump 的临界区持有，**不跨** `file_free`（`file_free` 内部拿 pipe/pty 锁）。
-- `files_unpin` 归零时触发 `deferred_files_free`（拿 `df_lock`）。deferred 路径已在 schedule 收割器内 `task_list_lock` 下调用过（`task.c:627` 现状），故 `files_unpin` 在 `task_list_lock` 内/外均安全；`do_exit` 选择在锁外调用仅因它持锁只为置空指针。
-
-### 竞态结局
-
-| 竞态 | 结局 |
-|------|------|
-| R3 file_t UAF | **消除**：`files_get_file` 在 `fs->lock` 内 ref-bump，与 `fd_close` 的 detach 同步；`file_free` 只在 refcount 0 触发 |
-| R2 files_t 表 UAF | **消除**：`files_pin`/`unpin` 保证读取期间表不被释放 |
-| R1 task_t UAF | **继承**（maps/status 已接受的 teardown 竞态）：`find_task_by_pid` 仍锁无关，task 释放窗口与 `gen_maps` 同型，待 rwlock（路线图 P1 #4）统一收紧 |
 
 ## 数据流
 
 ```
 ls /proc/self/fd
   → getdents64 → vfs_getdents → procfs_readdir(FD_DIR, SELF)
-      → resolve SELF → 遍历 fd[] → 输出 "0"/"1"/"2"...
+      → task_files_pin_by_pid → fs->lock 内扫描 → 输出 "0"/"1"/"2" → files_unpin
 
 cat /proc/self/fd/3
   → open: vfs_lookup 匹配 "3" → node->name="3", fs_data=FD_ENTRY+SELF
-  → read: procfs_read(FD_ENTRY) → resolve SELF → parse_fd("3")=3
-      → files_get_file(3) → gen_fd_target(f) → "/proc/meminfo\n" → files_put_file
+  → read: procfs_read(FD_ENTRY) → parse_fd("3")=3
+      → task_files_pin_by_pid → files_get_file(3) → gen_fd_target(f)
+      → "/proc/meminfo\n" → files_put_file
 ```
 
 ## 错误处理 & 边界情况
 
 | 场景 | 行为 |
 |------|------|
-| 目标 task 不存在 | 返回 0（空读） |
+| 目标 task 不存在 | `task_files_pin_by_pid` 返回 NULL → 空读 / -1 |
 | fd 越界 / 空槽（open 后已 close） | `files_get_file` 返回 NULL → 空读 |
 | `parse_fd` 失败（非数字/负/溢出） | 返回 0 |
 | `vfs_resolve_path` 失败 | 印 `"?"` |
 | 目录节点被 read | 返回 0（目录守卫） |
 | self 哨兵 + 无 current | 返回 0 / -1 |
-| 关闭/越界的 fd 在 open 阶段 | readdir 不枚举 → `vfs_lookup` 失败 → `open` 返回 `ENOENT` |
-| fd 复用（close 后 re-open 同号） | 每次 `read` 重新查询槽位 → 展示复用后的新对象（非 open 时对象），文档化差异 |
+| 关闭/越界的 fd 在 open 阶段 | readdir 不枚举 → `vfs_lookup` 失败 → `open` 返回 ENOENT |
+| fd 复用（close 后 re-open 同号） | 每次 read 重新查询槽位 → 展示复用后新对象，文档化差异 |
 
 ## 测试
 
-`systest.c` 新增 `test_proc_fd()`：
+### systest（`test_proc_fd()`）
 
-1. **FD_VFS 反解**：`fd = open("/proc/meminfo")` → 读 `/proc/self/fd/<fd>` 内容 == `"/proc/meminfo\n"`。
+1. **FD_VFS 反解**：`fd = open("/proc/meminfo")` → 读 `/proc/self/fd/<fd>` == `"/proc/meminfo\n"`。
 2. **FD_PIPE**：`pipe(fds)` → 读 `/proc/self/fd/<fds[0]>` == `"pipe:[?]\n"`。
 3. **目录枚举**：`opendir("/proc/self/fd")` + `readdir`，能看到 `"0"`/`"1"`/`"2"`。
-4. **关闭后 open 失败**：`close(fd)` → `open("/proc/self/fd/<fd>")` 返回 `< 0`（ENOENT）。
+4. **关闭后 open 失败**：`close(fd)` → `open("/proc/self/fd/<fd>")` 返回 `< 0`。
 5. **越界 fd 失败**：`open("/proc/self/fd/9999")` 返回 `< 0`。
-6. **非当前 PID**：读 `/proc/<其他 pid>/fd/0`（fork 子进程持有 fd，父进程观察），验证内容非空。
-7. **socket 格式**（若网络可用）：socket → `socket:[?]\n`。
+6. **非当前 PID**：fork 子进程持有 fd，父进程读 `/proc/<child>/fd/0` 非空。
+7. **socket 格式**（若网络可用）：`socket:[?]\n`。
 
-并发压力测试（close/readdir/read 竞态）不在 systest 自动化内——非确定性时序不适合回归套件；由 §并发安全 的引用协议保证，必要时用 `smp_stress` 类手工验证。
+### SMP 引用协议验证（本迭代必做）
+
+并发引用协议是本修改的核心，仅靠功能断言不够。加**内核 selftest**（`KERNEL_SELFTEST=1` 下运行，`kernel/test/`）：
+
+- 单 reader 线程循环 `files_get_file`/`files_put_file`，另单 writer 循环 `fd_close`+`fd_alloc` 同一槽位，迭代 N 次无 UAF（依赖 slab poison / `file_free` 的 `f->pipe=NULL` 毒化 + 崩溃即失败）。
+- `files_pin`/`unpin` 与 `do_exit` 竞态：reader 持 pin 时退出路径不释放表（refcount 不归零）。
+
+> 非确定性时序不适合放 systest 回归；用内核 selftest（可重复、确定性迭代）覆盖。若实现阶段发现 selftest 框架不便注入，退化为 `user/smp_fd_stress.c` 专用压力测试（`-smp 2` 手工跑）。
 
 ## 文件变更预估
 
 | 文件 | 改动 | 说明 |
 |------|------|------|
-| `kernel/include/kernel/file.h` | `files_t` +`lock`+`refcount`；+`files_pin/unpin/get_file/put_file` 声明 | 结构体变更 |
-| `kernel/fs/file.c` | `files_alloc/dup` 初始化 lock/refcount；`fd_alloc/fd_close` 走 `fs->lock`；实现 pin/unpin/get_file/put_file | 引用协议 |
-| `kernel/sched/task.c` | `do_exit` 与收割器改走 `files_unpin` + `t->files=NULL`（task_list_lock 内） | 表生命周期 |
+| `kernel/include/kernel/file.h` | `files_t` +`lock`+`refcount`；+`files_pin/unpin/get_file/put_file`、`file_get/put`、`fd_dup/dup2` 声明 | 结构体变更 |
+| `kernel/fs/file.c` | `files_alloc/dup` 初始化 lock/refcount；`fd_alloc/fd_close` 走锁；实现全部新 API；`do_pipe` 等改 `file_get/put` | 引用协议 |
+| `kernel/include/kernel/task.h` | +`task_files_pin_by_pid` 声明 | |
+| `kernel/sched/task.c` | `task_files_pin_by_pid` 实现；`do_exit`/收割器改 `files_unpin` + 锁内置空 `t->files` | 表生命周期 |
+| `kernel/arch/x86_64/trap.c` | `SYS_dup`/`SYS_dup2`/`SYS_fcntl(F_DUPFD/F_DUPFD_CLOEXEC)` 改调 `fd_dup`/`fd_dup2` | 槽位写入者收敛 |
 | `kernel/include/fs/procfs.h` | `PROCFS_TYPE_FD_DIR`/`FD_ENTRY` 常量 | +2 |
-| `kernel/fs/procfs.c` | +`file.h`/`pty.h` include；`parse_fd`/`gen_fd_target`；read/readdir 分支 | ~+100 |
+| `kernel/fs/procfs.c` | +`file.h`/`pty.h` include；`parse_fd`/`gen_fd_target`；read/readdir 分支 | ~+110 |
+| `kernel/test/`（selftest） | fd 引用协议并发 selftest | ~+60 |
 | `user/systest.c` | `test_proc_fd()` + 注册 | ~+60 |
 
-**总计: ~+200 行，6 个文件。无 syscall / uapi 变更；有 `files_t` 结构体变更（需 `make clean`）。**
+**总计: ~+300 行，9 个文件。无 syscall / uapi 变更；有 `files_t` 结构体变更（需 `make clean`）。**
 
 ## 不在范围内
 
-- `/proc/<pid>/fd/N` 的 **write 重定向**（`echo x > fd/N` 触发 dup2 语义）— 超出「可观测」
+- `/proc/<pid>/fd/N` 的 **write 重定向**（dup2 语义）— 超出「可观测」
 - **真 symlink** 语义（`ls -l` 显示 `N -> /path`）— 依赖 `symlink`/`readlink`（路线图 P1 #6）
 - `fdinfo` — 记录 P1
 - pipe/socket 稳定单调 inode ID — 记录 P1
-- R1（task_t teardown 竞态）统一加固 — 依赖 rwlock（路线图 P1 #4）
+- syscall 读取者（read/write/lseek/fstat/ioctl）的锁加固 — 无 CLONE_FILES，current 独占，无此竞态；未来引入线程时一并加固（记录）
+- R1 task_t teardown 的 rwlock 统一加固 — 本 fd 路径已消除，其余路径待路线图 P1 #4
 
 ## 已知语义变化（评审需知悉）
 
-`do_exit` 的 fd 表释放从「同步 `files_free`」改为「`files_unpin` → refcount 0 → `deferred_files_free` 异步」。正常退出（无 /proc 读取器）时 refcount 1→0，释放延迟到 df-reaper kthread 的下一次调度——对 pipe 写端 EOF / socket close 的时序有轻微推迟，量级为一个 blocker 唤醒周期，可接受。这是统一 deferred 决策（见 §并发安全）的既定代价，非开放选项。
+`do_exit` 的 fd 表释放从「同步 `files_free`」改为「`files_unpin` → refcount 0 → `deferred_files_free` 异步」。正常退出（无 /proc 读取器）时 refcount 1→0，释放延迟到 df-reaper kthread 下一次调度——pipe 写端 EOF / socket close 时序轻微推迟，量级为一个 blocker 唤醒周期，可接受。这是统一 deferred 决策的既定代价。
