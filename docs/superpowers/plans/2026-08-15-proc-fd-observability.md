@@ -59,6 +59,7 @@ typedef struct files_struct {
 ```c
 // ── Reference protocol (concurrency-safe fd table access) ──
 // Table lifecycle: pin/unpin.  file lifecycle: get/put.
+// All take NULL as a no-op (defensive; failure paths are safe to call).
 // files_unpin / file_put / files_put_file MUST NOT be called while
 // holding task_list_lock, fs->lock, or an rq lock — their drop-to-zero
 // path may synchronously files_free/file_free (deferred OOM fallback).
@@ -84,16 +85,20 @@ int     fd_dup2(files_t *fs, int oldfd, int newfd);  // locks fs->lock internall
 
 ```c
 // ── file_t reference counting ──────────────────────────────
+// NULL is a no-op for both (defensive: keeps failure paths and the
+// procfs reader's "slot may be empty" guard from crashing).
 // file_get is safe under any lock (pure atomic, never frees).
 // file_put MUST NOT be called under fs->lock: a drop-to-zero enters
 // file_free → pipe/pty/socket cleanup + wake.
 void file_get(file_t *f)
 {
+    if (!f) return;
     __sync_add_and_fetch(&f->refcount, 1);
 }
 
 void file_put(file_t *f)
 {
+    if (!f) return;
     if (__sync_sub_and_fetch(&f->refcount, 1) == 0)
         file_free(f);
 }
@@ -202,8 +207,10 @@ void fd_close(files_t *fs, int fd)
 
 ```c
 // ── files_t reference protocol ─────────────────────────────
+// NULL is a no-op (defensive; mirrors file_get/file_put).
 void files_pin(files_t *fs)
 {
+    if (!fs) return;
     __sync_add_and_fetch(&fs->refcount, 1);
 }
 
@@ -211,6 +218,7 @@ void files_pin(files_t *fs)
 // → deferred_files_free, whose OOM fallback synchronously files_free()s.
 void files_unpin(files_t *fs)
 {
+    if (!fs) return;
     if (__sync_sub_and_fetch(&fs->refcount, 1) == 0)
         deferred_files_free(fs);
 }
@@ -442,15 +450,21 @@ files_t *task_files_pin_by_pid(int pid)
         current->files = NULL;
     }
 ```
-替换为：
+替换为（**两阶段：task_list_lock 内 detach，锁外 unpin**——与 `task_files_pin_by_pid` 通过同一把锁串行化，否则 CPU0 读到旧 `t->files` 后 CPU1 无锁置空并释放，CPU0 再 pin 已释放的表）：
+
 ```c
-    // Drop our fd-table reference (deferred free on refcount==0).
-    // No lock held here, so files_unpin is safe.
-    if (current->files) {
-        files_t *fs = current->files;
+    // Detach our fd-table under task_list_lock (serializes against
+    // task_files_pin_by_pid), then drop the reference outside the lock
+    // (files_unpin may synchronously files_free on deferred OOM).
+    files_t *fs = NULL;
+    {
+        uint64_t fl = spin_lock_irqsave(&task_list_lock);
+        fs = current->files;
         current->files = NULL;
-        files_unpin(fs);
+        spin_unlock_irqrestore(&task_list_lock, fl);
     }
+    if (fs)
+        files_unpin(fs);
 ```
 
 - [ ] **Step 4: schedule 收割器收敛（第 626-627 行）**
@@ -821,79 +835,195 @@ git commit -m "test(systest): add proc_fd coverage for /proc/<pid>/fd"
 
 ---
 
-### Task 6: 内核 selftest（引用协议不变量）
+### Task 6: 内核 selftest（SMP 引用协议竞态）
+
+> **依赖顺序**：本任务独立于 Task 4（procfs）与 Task 5（systest），可在 Task 3 完成后立即执行，尽早验证协议。启动顺序要求（`kernel_main → selftest_run_all() → task_init() → deferred_free_spawn() → scheduler_ok=1`）决定了它**不能**注册进早期 `selftest_run_all()`——那时 `df_queue` 未初始化，`files_unpin` 归零会向未初始化链表插入节点。
 
 **Files:**
-- Modify: `kernel/test/selftest.c`（`test_fd_refcount_basic` + 注册）
+- Create: `kernel/test/test_fd_refcount.c`（双 kthread 竞态测试）
+- Modify: `kernel/sched/task.c`（在 `task_init()` 的 `OS01_SELFTEST` 块加调用）
 
 **Interfaces:**
-- Consumes: `files_alloc`/`files_pin`/`files_unpin`/`files_get_file`/`files_put_file`/`fd_alloc`/`fd_close`/`fd_dup`/`fd_dup2`/`file_alloc`/`file_put`（Task 1、2）。
+- Consumes: `files_alloc`/`files_unpin`/`files_get_file`/`files_put_file`/`fd_alloc`/`fd_close`/`file_alloc`/`file_put`（Task 1）；`create_kthread`/`schedule`（已有）。
 
-- [ ] **Step 1: 加 `test_fd_refcount_basic`（放在 `test_pipe_basic` 之后，约第 110 行）**
+- [ ] **Step 1: 新建 `kernel/test/test_fd_refcount.c`**
 
 ```c
-// ── fd reference-protocol invariants ──────────────────────
-// Single-threaded protocol exercise (SMP stress is not feasible in the
-// pre-idle selftest window; correctness rests on lock ordering, which
-// these invariants verify for the drop-to-zero/dup2-detach paths).
-static int test_fd_refcount_basic(void)
+// kernel/test/test_fd_refcount.c
+// ── fd reference-protocol SMP race tests ──────────────────
+// Two scenarios, both run from task_init() AFTER deferred_free_spawn()
+// (files_unpin can defer-free) and scheduler_ok=1 (create_kthread +
+// schedule() work):
+//   1. get-vs-detach: reader files_get_file/put vs writer fd_close/fd_alloc
+//      on slot 0 — verifies R3 (file_t UAF) elimination.
+//   2. pin-vs-detach: reader task_files_pin_by_pid vs a kthread that
+//      do_exit()s — verifies R2 (files_t table UAF) elimination.
+// A use-after-free manifests as a crash (#PF), not a graceful FAIL —
+// "both threads complete, no crash" is the pass condition.
+
+#if defined(OS01_SELFTEST)
+
+#include <kernel/printk.h>
+#include <kernel/task.h>
+#include <kernel/file.h>
+
+#define FD_RACE_ITERS  10000
+
+// ── Scenario 1: get-vs-detach (R3) ────────────────────────
+static files_t      *race_fs;
+static volatile int  reader_done;
+static volatile int  writer_done;
+static volatile int  writer_err;
+
+static uint64_t race_reader(uint64_t arg)
 {
-    files_t *fs = files_alloc();
-    if (!fs) return -1;
-    if (fs->refcount != 1) { files_unpin(fs); return -1; }
-
-    // pin/unpin round-trip keeps table alive
-    files_pin(fs);
-    if (fs->refcount != 2) { files_unpin(fs); files_unpin(fs); return -1; }
-    files_unpin(fs);
-    if (fs->refcount != 1) { files_unpin(fs); return -1; }
-
-    // get/put: put a file in a slot, get it back with a stable ref
-    file_t *f = file_alloc();          // refcount==1
-    if (!f) { files_unpin(fs); return -1; }
-    int fd = fd_alloc(fs, f);          // table holds the initial ref
-    if (fd < 0) { file_put(f); files_unpin(fs); return -1; }
-
-    file_t *g = files_get_file(fs, fd);
-    if (g != f) { files_put_file(g); fd_close(fs, fd); files_unpin(fs); return -1; }
-    files_put_file(g);                 // back to refcount 1
-
-    // dup: fd and fd2 both reference f
-    int fd2 = fd_dup(fs, fd, 0);
-    if (fd2 != fd + 1) { fd_close(fs, fd); files_unpin(fs); return -1; }
-
-    // dup2 onto existing target detaches old ref without UAF
-    if (fd_dup2(fs, fd, fd2) != fd2) { fd_close(fs, fd); fd_close(fs, fd2); files_unpin(fs); return -1; }
-
-    // close both → drop-to-zero → file_free (no crash = pass)
-    fd_close(fs, fd);
-    fd_close(fs, fd2);
-    files_unpin(fs);                   // deferred free; reaper drains later
+    (void)arg;
+    for (int i = 0; i < FD_RACE_ITERS; i++) {
+        file_t *g = files_get_file(race_fs, 0);
+        if (g) files_put_file(g);   // NULL guard: slot may be empty
+    }
+    reader_done = 1;
     return 0;
 }
+
+static uint64_t race_writer(uint64_t arg)
+{
+    (void)arg;
+    for (int i = 0; i < FD_RACE_ITERS; i++) {
+        file_t *f = file_alloc();
+        if (!f) { writer_err++; continue; }
+        int fd = fd_alloc(race_fs, f);
+        if (fd < 0) { file_put(f); writer_err++; continue; }
+        fd_close(race_fs, fd);
+    }
+    writer_done = 1;
+    return 0;
+}
+
+static int run_get_detach_race(void)
+{
+    race_fs = files_alloc();
+    if (!race_fs) return -1;
+    reader_done = 0; writer_done = 0; writer_err = 0;
+
+    task_t *r = create_kthread(race_reader, 0, "fd-race-reader");
+    task_t *w = create_kthread(race_writer, 0, "fd-race-writer");
+    if (!r || !w) { files_unpin(race_fs); return -1; }
+
+    int spins = 0;
+    while ((!reader_done || !writer_done) && spins < 10000000) {
+        schedule(); spins++;
+    }
+    int rc = (!reader_done || !writer_done || writer_err) ? -1 : 0;
+    files_unpin(race_fs);
+    return rc;
+}
+
+// ── Scenario 2: pin-vs-detach (R2) ────────────────────────
+static files_t      *holder_fs;
+static volatile int  holder_go;          // release holder only after files set
+static volatile int  pin_reader_done;
+
+static uint64_t race_holder(uint64_t arg)
+{
+    (void)arg;
+    while (!holder_go) schedule();   // wait until harness sets holder->files
+    do_exit(0);   // detaches current->files under task_list_lock, unpins outside
+    return 0;
+}
+
+static uint64_t pin_reader(uint64_t arg)
+{
+    int pid = (int)arg;
+    for (int i = 0; i < FD_RACE_ITERS; i++) {
+        files_t *fs = task_files_pin_by_pid(pid);
+        if (fs) files_unpin(fs);
+    }
+    pin_reader_done = 1;
+    return 0;
+}
+
+static int run_pin_detach_race(void)
+{
+    holder_fs = files_alloc();
+    if (!holder_fs) return -1;
+    holder_go = 0;
+
+    // Create holder; set its files BEFORE releasing it (no schedule yet,
+    // and holder_go gates the kthread body).  x86_64 store-store ordering
+    // + volatile holder_go ensure the holder sees files set when it wakes.
+    task_t *holder = create_kthread(race_holder, 0, "fd-pin-holder");
+    if (!holder) { files_unpin(holder_fs); return -1; }
+    holder->files = holder_fs;      // holder now owns refcount==1
+    holder_go = 1;                  // release holder → do_exit detaches it
+
+    pin_reader_done = 0;
+    task_t *r = create_kthread(pin_reader, holder->pid, "fd-pin-reader");
+    if (!r) {
+        int spins = 0;
+        while (holder->state != TASK_ZOMBIE && spins < 100000) { schedule(); spins++; }
+        files_unpin(holder_fs);
+        return -1;
+    }
+
+    int spins = 0;
+    while (!pin_reader_done && spins < 10000000) { schedule(); spins++; }
+
+    return pin_reader_done ? 0 : -1;
+}
+
+void test_fd_refcount(void)
+{
+    serial_printk("[selftest] fd_refcount get-vs-detach... ");
+    if (run_get_detach_race() == 0) serial_printk("PASS\n");
+    else serial_printk("FAIL\n");
+
+    serial_printk("[selftest] fd_refcount pin-vs-detach... ");
+    if (run_pin_detach_race() == 0) serial_printk("PASS\n");
+    else serial_printk("FAIL\n");
+}
+
+#endif // OS01_SELFTEST
 ```
 
-- [ ] **Step 2: 注册进 `selftest_run_all`（第 135 行 `pipe_basic` 之后）**
+- [ ] **Step 2: `task.c` 的 `OS01_SELFTEST` 块加调用（`test_deferred_free()` 块之后，约第 1944 行）**
 
 ```c
-    selftest_register("pipe_basic",        test_pipe_basic);
-    selftest_register("fd_refcount_basic", test_fd_refcount_basic);
+#ifdef OS01_SELFTEST
+    // ── fd reference-protocol race test ─────────────────────
+    // After deferred_free_spawn() (files_unpin defers) and scheduler_ok
+    // (create_kthread + schedule() work).
+    {
+        extern void test_fd_refcount(void);
+        test_fd_refcount();
+    }
+#endif
 ```
 
-- [ ] **Step 3: 运行验证**
+- [ ] **Step 3: 运行验证（至少 -smp 2，真实并行）**
 
 ```bash
 make clean
-make KERNEL_SELFTEST=1 run
+make KERNEL_SELFTEST=1 run          # 默认 SMP=2；可 make SMP=4 KERNEL_SELFTEST=1 run 加重并行
 ```
 
-Expected: boot 串口输出 `[selftest] fd_refcount_basic... PASS`，且无 `FAIL`。若 `files_alloc` 在 selftest 阶段不可用（`calloc` 未就绪），把测试移到 `task.c` 的 `OS01_SELFTEST` 块（`scheduler_ok` 之后）改用 `extern void test_fd_refcount(void)` 模式（参照 `test_deferred_free`），并在 Step 2 相应改注册位置。
+Expected: boot 串口输出两条 PASS：
+```
+[selftest] fd_refcount get-vs-detach... PASS
+[selftest] fd_refcount pin-vs-detach... PASS
+```
+且内核不崩溃（UAF 会 #PF）。漏 `fs->lock` 时，get-vs-detach 的 `files_get_file` 会在 writer `fd_close` 释放 `file_t` 后对已 free 的 `f->refcount` 原子自增 → 崩溃；漏 `task_list_lock` 内 detach 时，pin-vs-detach 的 `task_files_pin_by_pid` 会 pin 已释放的表 → 崩溃。
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add kernel/test/selftest.c
-git commit -m "test(selftest): add fd reference-protocol invariants"
+git add kernel/test/test_fd_refcount.c kernel/sched/task.c
+git commit -m "test(selftest): add SMP fd reference-protocol race tests
+
+get-vs-detach (R3): files_get_file/put vs fd_close/fd_alloc on one slot.
+pin-vs-detach (R2): task_files_pin_by_pid vs a kthread do_exit() detaching
+its table.  Both run after deferred_free_spawn + scheduler_ok and detect a
+missing lock in the detach/ref-bump critical section as a crash."
 ```
 
 ---
@@ -919,7 +1049,7 @@ git commit -m "test(selftest): add fd reference-protocol invariants"
 ```bash
 make clean
 make OS01_SYSTEST=1 test-syscall      # systest 全绿
-make KERNEL_SELFTEST=1 run            # selftest fd_refcount_basic PASS
+make KERNEL_SELFTEST=1 run            # selftest fd_refcount PASS (SMP race)
 ```
 
 Expected: systest 全 PASS；selftest 无 FAIL。
@@ -936,6 +1066,10 @@ git commit -m "docs: mark /proc/<pid>/fd observability complete"
 
 ## Self-Review 记录
 
-- **Spec 覆盖**：引用协议（Task 1）、dup/fcntl 收敛（Task 2）、task_files_pin_by_pid + 退出路径（Task 3）、procfs 节点（Task 4）、systest（Task 5）、selftest（Task 6）、roadmap（Task 7）——spec 各节均有对应任务。
-- **类型一致性**：`files_pin/unpin/get_file/put_file`、`file_get/put`、`fd_dup/dup2`、`task_files_pin_by_pid` 在 Task 1/3 定义、Task 4 消费，签名一致。
-- **锁纪律**：所有 `files_unpin`/`file_put`/`files_put_file` 调用点均在锁外（Task 3 Step 4 的锁外 unpin 循环、Task 4 的 `files_unpin(fs)` 在 `task_files_pin_by_pid` 返回后）。
+- **Spec 覆盖**：引用协议（Task 1）、dup/fcntl 收敛（Task 2）、task_files_pin_by_pid + 退出路径（Task 3）、procfs 节点（Task 4）、systest（Task 5）、SMP 竞态 selftest（Task 6，两个场景：get-vs-detach=R3 + pin-vs-detach=R2）、roadmap（Task 7）——spec 各节均有对应任务。
+- **类型一致性**：`files_pin/unpin/get_file/put_file`、`file_get/put`、`fd_dup/dup2`、`task_files_pin_by_pid` 在 Task 1/3 定义、Task 4/6 消费，签名一致。
+- **锁纪律**：所有 `files_unpin`/`file_put`/`files_put_file` 调用点均在锁外——Task 3 Step 3 的 do_exit **锁内 detach + 锁外 unpin**（两阶段，与 `task_files_pin_by_pid` 经 `task_list_lock` 串行化）、Task 3 Step 4 收割器的锁外 unpin 循环、Task 4 的 `files_unpin(fs)` 在 `task_files_pin_by_pid` 返回后、Task 6 的 `files_unpin` 在测试尾部（无锁上下文）。
+- **启动顺序**：Task 6 的 selftest 明确放在 `task_init()` 内 `deferred_free_spawn()` + `scheduler_ok=1` 之后，不注册进早期 `selftest_run_all()`（`df_queue` 未初始化会导致 `files_unpin` 归零时向未初始化链表插入节点）。
+- **NULL 语义**：`file_get/put`/`files_pin/unpin` 均以 NULL 为 no-op，Task 6 reader 的 `if (g) files_put_file(g)` 与 Task 1 实现判空一致，消除 `file_put(NULL)` 崩溃路径。
+
+
