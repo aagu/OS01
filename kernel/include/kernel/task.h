@@ -342,4 +342,10 @@ void task_list_add(struct task_struct *tsk);
 // a kernel thread or init.
 int task_send_signal(int pid, int sig);
 
+// ── SMP-safe fd-table pinning ─────────────────────────
+// Finds task by pid under task_list_lock, pins its files_t, returns
+// it (or NULL).  Caller owns a reference and must files_unpin() it.
+// Caller does NOT touch task_t after return.
+files_t *task_files_pin_by_pid(int pid);
+
 #endif

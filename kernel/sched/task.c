@@ -554,7 +554,9 @@ void schedule(void)
 
         // Heap-allocated: avoids 512-byte stack array in schedule() hot path.
         task_t *reap_list[64];
-        
+        files_t *files_to_free[64];
+        int      files_free_count = 0;
+
         int reap_count = 0;
 
         {
@@ -624,7 +626,7 @@ void schedule(void)
             t->list.next = NULL;
             t->list.prev = NULL;
             if (t->thread) {deferred_kfree(t->thread); t->thread = NULL;}
-            if (t->files) {deferred_files_free(t->files); t->files = NULL;}
+            if (t->files) { files_to_free[files_free_count++] = t->files; t->files = NULL; }
             if (t->fpu_save) {deferred_kfree(t->fpu_save); t->fpu_save = NULL;}
             if (t->stack_alloc_base) {
                 deferred_kfree(t->stack_alloc_base);
@@ -632,9 +634,12 @@ void schedule(void)
             }
         }
 
-        
+
         sched_unblock_blocked();
         spin_unlock_irqrestore(&task_list_lock, reap_flags);
+
+        for (int i = 0; i < files_free_count; i++)
+            files_unpin(files_to_free[i]);   // outside task_list_lock
     }
 
     // ── 3.5 Load balancing ───────────────────────────────
@@ -844,11 +849,18 @@ uint64_t do_exit(uint64_t exit_code)
         current->mm = NULL;
     }
 
-    // Close all file descriptors
-    if (current->files) {
-        files_free(current->files);
+    // Detach our fd-table under task_list_lock (serializes against
+    // task_files_pin_by_pid), then drop the reference outside the lock
+    // (files_unpin may synchronously files_free on deferred OOM).
+    files_t *fs = NULL;
+    {
+        uint64_t fl = spin_lock_irqsave(&task_list_lock);
+        fs = current->files;
         current->files = NULL;
+        spin_unlock_irqrestore(&task_list_lock, fl);
     }
+    if (fs)
+        files_unpin(fs);
 
     // On-CPU: our kernel stack is in use until __switch_to clears
     // on_cpu.  The reaper must not free us after we set ZOMBIE below
@@ -1850,6 +1862,29 @@ int task_send_signal(int pid, int sig)
     }
     spin_unlock_irqrestore(&task_list_lock, tl_flags);
     return ret;
+}
+
+// ── task_files_pin_by_pid ─────────────────────────────────
+// Locate a task by pid under task_list_lock and pin its fd table so a
+// /proc reader can inspect it without racing do_exit / the reaper.
+files_t *task_files_pin_by_pid(int pid)
+{
+    files_t *fs = NULL;
+    uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
+    list_t *pos = init_task_union.task.list.next;
+    while (pos != &init_task_union.task.list) {
+        task_t *t = container_of(pos, task_t, list);
+        pos = task_list_next(pos);
+        if (t->pid == pid) {
+            if (t->files) {
+                fs = t->files;
+                files_pin(fs);   // atomic, safe under task_list_lock
+            }
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&task_list_lock, tl_flags);
+    return fs;
 }
 
 void task_init()
