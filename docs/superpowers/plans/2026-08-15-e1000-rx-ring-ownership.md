@@ -10,6 +10,12 @@
 
 ## Global Constraints
 
+- Precondition: the committed base must already contain the network harness:
+  `Makefile`'s `OS01_NETTEST`/`test-network`, `tests/run_test.py`'s `network`
+  branch, `config/inittab.nettest`, and `user/nettest.c`. If any is absent from
+  `HEAD` or exists only as a dirty/untracked file, land that prerequisite work
+  before executing this plan; do not create an E1000 commit that depends on an
+  uncommitted test target.
 - Preserve the handler's ICR read: it acknowledges the IRQ and clears QEMU's RX latch.
 - Every consumed DD descriptor, including every drop path, must execute clear DD → `arch_wmb()` → `RDT=i` → advance index.
 - `e1000_poll_rx()` has exactly one caller: `net_poll_rx()` in tcpip-thread context.
@@ -47,9 +53,17 @@ Run:
 ```bash
 git status --short
 git diff -- kernel/driver/e1000.c kernel/net/sys_arch.c kernel/net/net.c
+git show HEAD:Makefile | rg 'OS01_NETTEST|test-network'
+git show HEAD:tests/run_test.py | rg 'def test_network|args.test_name == "network"'
+git show HEAD:config/inittab.nettest
+git show HEAD:user/nettest.c | rg '\[NET TEST\] RESULT'
 ```
 
-Expected: the three implementation files have no pre-existing changes. Stop and report the overlap if any is modified; do not overwrite it.
+Expected: the three implementation files have no pre-existing changes, and
+all four harness checks succeed from committed `HEAD`. Stop and report an
+overlap if an implementation file is modified. If a harness check fails, land
+the harness prerequisite before continuing; do not rely on a working-tree-only
+test target.
 
 - [ ] **Step 2: Apply the named descriptor-starvation mutation**
 
@@ -99,6 +113,10 @@ done
 ```
 
 Expected: the shell exits 0; all 20 logs contain an aggregate result with at least one failure. `DHCP: PASS` is expected because the guest initially has a static IP; UDP, DNS, TCP, or wget must expose the RX starvation.
+
+If iteration 2 or later fails before QEMU starts with `Address already in use`,
+stop and fix the harness's host-port cleanup separately, then restart all 20
+iterations from 1. A bind failure is not descriptor-starvation evidence.
 
 - [ ] **Step 5: Restore only the mutation and verify the restoration**
 
@@ -249,7 +267,9 @@ rg -n 'E1000_REG_RDT|E1000_REG_ICR|arch_wmb|idle_wakeup' kernel/driver/e1000.c k
 
 Expected:
 
-- `e1000_poll_rx()` has one definition and one call in `kernel/net/net.c`.
+- `e1000_poll_rx()` has one declaration in `kernel/include/driver/e1000.h`,
+  one definition in `kernel/driver/e1000.c`, and one call in
+  `kernel/net/net.c`.
 - The poller contains `arch_wmb()` immediately before `RDT=i` and no ICR read.
 - The handler contains the ICR read and no descriptor poll call.
 - No `RDT=30/31` workaround remains.
@@ -292,6 +312,10 @@ done
 ```
 
 Expected: all 20 fresh QEMU runs exit 0 and contain exactly `5 passed, 0 failed`; no per-packet diagnostic logging is present.
+
+If iteration 2 or later fails before QEMU starts with `Address already in use`,
+stop and fix the harness's host-port cleanup separately, then restart the full
+20-run sequence. Do not count a bind failure as an E1000 regression.
 
 - [ ] **Step 2: Run the full host test suite**
 
