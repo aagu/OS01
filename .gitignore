@@ -22,4 +22,5 @@ kernel/kernel/kallsyms
 build/
 config/fsroot/
 .superpowers/
+.worktrees/
 tools/mkdisk
