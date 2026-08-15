@@ -26,7 +26,8 @@ LDFLAGS  := -T linker.ld -static -nostdlib -no-pie \
 # ── Source discovery ───────────────────────────────────────
 # crt0.S is startup code, not a program
 # terminal_core.c is a library for terminal.elf, not a standalone program
-C_SOURCES := $(filter-out terminal_core.c,$(wildcard *.c))
+# tetris_logic.c / terminal_core.c are libraries, not standalone programs
+C_SOURCES := $(filter-out terminal_core.c tetris_logic.c,$(wildcard *.c))
 ASM_SOURCES := $(wildcard *.S)
 
 # Each .c → .elf (e.g. init.c → init.elf)
@@ -82,6 +83,14 @@ $(BUILD_DIR)/terminal.elf: $(OBJ_DIR)/terminal.o $(OBJ_DIR)/terminal_core.o $(CR
 $(TERMINAL_FONT_OBJ): terminal_font.psf
 	@mkdir -p $(dir $@)
 	$(OBJ_CPY) -B i386 -I binary -O elf64-x86-64 terminal_font.psf $@
+
+# ══════════════════════════════════════════════════════════════
+#  tetris.elf — needs tetris_logic.o (override pattern rule)
+# ══════════════════════════════════════════════════════════════
+$(BUILD_DIR)/tetris.elf: $(OBJ_DIR)/tetris.o $(OBJ_DIR)/tetris_logic.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
+	@mkdir -p $(dir $@)
+	$(LD) $(LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/tetris.o $(OBJ_DIR)/tetris_logic.o -lc
+	$(OBJ_CPY) --strip-debug $@
 
 # ── Clean ──────────────────────────────────────────────────
 clean:

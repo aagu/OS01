@@ -43,7 +43,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_elf_validate.elf \
     $(TEST_BLD)/test_wait_basic.elf \
     $(TEST_BLD)/test_canon.elf \
-    $(TEST_BLD)/test_terminal_core.elf
+    $(TEST_BLD)/test_terminal_core.elf \
+    $(TEST_BLD)/test_tetris_logic.elf
 
 .PHONY: all clean run
 
@@ -178,6 +179,18 @@ $(TEST_BLD)/test_terminal_core.o: $(TEST_CASES)/test_terminal_core.c
 	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user -c $< -o $@
 
 $(TEST_BLD)/test_terminal_core.elf: $(TEST_BLD)/test_terminal_core.o $(TEST_BLD)/terminal_core.o
+	$(HOST_CC) -o $@ $^
+
+# Tetris logic test — compiles REAL user/tetris_logic.c (pure C)
+$(TEST_BLD)/tetris_logic.o: $(TESTS_DIR)/user/tetris_logic.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user -c $< -o $@
+
+$(TEST_BLD)/test_tetris_logic.o: $(TEST_CASES)/test_tetris_logic.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user -c $< -o $@
+
+$(TEST_BLD)/test_tetris_logic.elf: $(TEST_BLD)/test_tetris_logic.o $(TEST_BLD)/tetris_logic.o
 	$(HOST_CC) -o $@ $^
 
 clean:
