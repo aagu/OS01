@@ -225,6 +225,9 @@ class _EchoTCPHandler(socketserver.BaseRequestHandler):
             data = self.request.recv(4096)
             if not data:
                 return
+            delay_ms = self.server.echo_delay_ms
+            if delay_ms:
+                time.sleep(delay_ms / 1000.0)
             self.request.sendall(data)
 
 
@@ -254,6 +257,9 @@ class NetworkServices:
         self.servers = []
         self.threads = []
         self.udp_socket = None
+        self.tcp_echo_delay_ms = int(os.environ.get("OS01_TCP_ECHO_DELAY_MS", "0"))
+        if self.tcp_echo_delay_ms < 0:
+            raise ValueError("OS01_TCP_ECHO_DELAY_MS must be non-negative")
 
     def start(self):
         endpoints = [
@@ -262,6 +268,10 @@ class NetworkServices:
         ]
         for port, handler in endpoints:
             server = _ReusableTCPServer(("127.0.0.1", port), handler)
+            if port == 10002:
+                server.echo_delay_ms = self.tcp_echo_delay_ms
+            else:
+                server.echo_delay_ms = 0
             self.servers.append(server)
             server.daemon_threads = True
             thread = threading.Thread(target=server.serve_forever, daemon=True)
