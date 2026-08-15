@@ -9,6 +9,9 @@
 #include <kernel/arch/cpu.h>
 #include <kernel/arch/spinlock.h>
 #include <fs/vfs.h>
+#include <kernel/poll.h>
+#include <kernel/percpu.h>
+#include <kernel.h>
 
 // ═══════════════════════════════════════════════════════════
 //  Raw scancode ring buffer — used only by /dev/keyboard
@@ -20,6 +23,12 @@
 static volatile uint8_t scancode_ring[RING_SIZE];
 static volatile int      ring_head;
 static volatile int      ring_tail;
+
+// ── Poll wait list — poll(2) waiters cascaded from IRQ context ──
+static list_t kbd_poll;
+static spinlock_T kbd_poll_lock;
+
+static void keyboard_wake_pollers(void);
 
 static inline int ring_full(void)
 {
@@ -231,6 +240,7 @@ void keyboard_handler(uint64_t nr, uint64_t parameter __attribute__((unused)),
         __sync_synchronize();
         ring_head = (ring_head + 1) % RING_SIZE;
     }
+    keyboard_wake_pollers();
 
     // Translate and push to TTY
     if (kbd_tty) {
@@ -290,6 +300,7 @@ void keyboard_poll(void)
             __sync_synchronize();
             ring_head = (ring_head + 1) % RING_SIZE;
         }
+        keyboard_wake_pollers();
 
         if (sc == 0xE0) {
             poll_e0 = true;
@@ -309,6 +320,37 @@ int keyboard_read_scancodes(uint8_t *buffer, int size)
         ring_tail = (ring_tail + 1) % RING_SIZE;
     }
     return count;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  Poll support — /dev/keyboard readiness
+// ═══════════════════════════════════════════════════════════
+
+static void keyboard_wake_pollers(void)
+{
+    uint64_t flags = spin_lock_irqsave(&kbd_poll_lock);
+    while (!list_is_empty(&kbd_poll)) {
+        list_t *node = kbd_poll.next;
+        list_del_init(node);
+        poll_wait_entry_t *e = container_of(node, poll_wait_entry_t, node);
+        wait_queue_wake_all(e->poll_wq);
+    }
+    spin_unlock_irqrestore(&kbd_poll_lock, flags);
+
+    this_cpu()->need_resched = 1;
+}
+
+uint32_t keyboard_poll_dev(void *priv, poll_table_t *pt)
+{
+    (void)priv;
+    uint32_t mask = 0;
+
+    if (!ring_empty()) {
+        mask |= POLLIN | POLLRDNORM;
+    } else if (pt && !pt->triggered) {
+        poll_wait(pt, &kbd_poll, &kbd_poll_lock);
+    }
+    return mask;
 }
 
 // DevFS read handler for /dev/keyboard — raw scancodes
@@ -360,6 +402,8 @@ void keyboard_init(void)
 {
     ring_head = 0;
     ring_tail = 0;
+    list_init(&kbd_poll);
+    spin_init(&kbd_poll_lock);
     kbd_lshift = false;
     kbd_rshift = false;
     kbd_lctrl  = false;

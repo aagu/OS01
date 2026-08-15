@@ -176,6 +176,7 @@ int kernel_main(struct BOOT_INFO *bootinfo)
 
     static const struct devfs_ops keyboard_ops = {
         .read = keyboard_devfs_read,
+        .poll = keyboard_poll_dev,
     };
     extern const struct devfs_ops fb_ops;
     devfs_register_chrdev("keyboard", NULL, &keyboard_ops);

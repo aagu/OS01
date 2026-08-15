@@ -572,6 +572,18 @@ static void test_poll(void)
 
         close(hfds[0]);
     }
+
+    // Test 4: poll on /dev/keyboard — empty ring must time out (not always-ready)
+    int kbd = open("/dev/keyboard", O_RDONLY);
+    if (kbd >= 0) {
+        struct pollfd kpfd;
+        kpfd.fd = kbd; kpfd.events = POLLIN; kpfd.revents = 0;
+        ret = poll(&kpfd, 1, 100);  // 100ms — no key pressed in QEMU
+        CHECK3(ret == 0, "poll", "keyboard empty ring -> poll timeout yields 0");
+        close(kbd);
+    } else {
+        PASS("poll", "keyboard poll skipped (no /dev/keyboard)");
+    }
 }
 
 /* ── Signal handler sync test ──────────────────────────── */

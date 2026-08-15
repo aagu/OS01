@@ -23,6 +23,11 @@ int keyboard_read_scancodes(uint8_t *buffer, int size);
 int keyboard_devfs_read(vfs_node_t *node, uint64_t offset,
                         uint64_t size, void *buffer);
 
+// DevFS poll handler for /dev/keyboard — POLLIN when the scancode
+// ring is non-empty, otherwise registers on the scancode wait list
+// (cascade-woken from IRQ context when a scancode arrives).
+uint32_t keyboard_poll_dev(void *priv, struct poll_table *pt);
+
 // Get the TTY that receives translated input (for reading lflag, etc.).
 tty_t *keyboard_get_tty(void);
 
