@@ -10,8 +10,12 @@ coverage or adding external infrastructure.
 The DNS case will resolve `localhost` instead of `example.com`. The guest still
 sends a DNS packet to QEMU's DNS proxy at `10.0.2.3:53`, so the test continues
 to cover UDP transport, DNS request/response handling, and `getaddrinfo()` result
-parsing. The host resolver can answer `localhost` locally, so the test does not
-depend on Internet connectivity or an upstream DNS server. The assertion will
+parsing. The test does not require Internet connectivity, but it does require
+the host resolver used by slirp to answer `localhost` as `127.0.0.1` (as
+systemd-resolved and dnsmasq normally do). Hosts that forward `localhost` to an
+upstream resolver may return NXDOMAIN; the test must print the `getaddrinfo()`
+return code and any returned IPv4 address so that this environment failure is
+distinguishable from an address-validation failure. The assertion will
 require a successful IPv4 result whose `sin_addr.s_addr` is exactly the IPv4
 loopback address `127.0.0.1`; checking `ai_addrlen` alone is not sufficient.
 
@@ -26,6 +30,10 @@ prevents future payload edits from producing an off-by-one review or regression.
 
 The standalone `user/socktest.c` remains unchanged because it is a manual
 diagnostic and is not part of `make test-network`.
+
+The network-test harness changes in `Makefile`, `tests/run_test.py`,
+`config/inittab.nettest`, and `user/nettest.c` must be committed as a working
+baseline before the review fixes are split into follow-up commits.
 
 ## Verification
 
