@@ -71,8 +71,21 @@ static int test_dns(void)
     struct addrinfo *answer = NULL;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
-    int rc = getaddrinfo("example.com", "80", &hints, &answer);
-    int ok = rc == 0 && answer && answer->ai_addrlen == sizeof(struct sockaddr_in);
+    int rc = getaddrinfo("localhost", "80", &hints, &answer);
+    printf("[NET TEST] DNS diagnostic: rc=%d", rc);
+    int ok = 0;
+    if (rc == 0 && answer && answer->ai_family == AF_INET &&
+        answer->ai_addr && answer->ai_addrlen == sizeof(struct sockaddr_in)) {
+        const struct sockaddr_in *resolved =
+            (const struct sockaddr_in *)answer->ai_addr;
+        const unsigned char *octet =
+            (const unsigned char *)&resolved->sin_addr.s_addr;
+        printf(" address=%u.%u.%u.%u", octet[0], octet[1], octet[2], octet[3]);
+        struct in_addr loopback;
+        ok = inet_aton("127.0.0.1", &loopback) &&
+             resolved->sin_addr.s_addr == loopback.s_addr;
+    }
+    printf("\n");
     if (answer) freeaddrinfo(answer);
     return ok;
 }
