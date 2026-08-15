@@ -12,6 +12,7 @@
 #include <kernel/pty.h>
 #include <fs/devfs.h>
 #include <uapi/stat.h>
+#include <kernel/deferred_free.h>
 
 // ── Forward declarations ─────────────────────────────────────
 void pipe_wake_readers(pipe_t *p);
@@ -140,6 +141,25 @@ void file_free(file_t *f)
     free(f);
 }
 
+// ── file_t reference counting ──────────────────────────────
+// NULL is a no-op for both (defensive: keeps failure paths and the
+// procfs reader's "slot may be empty" guard from crashing).
+// file_get is safe under any lock (pure atomic, never frees).
+// file_put MUST NOT be called under fs->lock: a drop-to-zero enters
+// file_free → pipe/pty/socket cleanup + wake.
+void file_get(file_t *f)
+{
+    if (!f) return;
+    __sync_add_and_fetch(&f->refcount, 1);
+}
+
+void file_put(file_t *f)
+{
+    if (!f) return;
+    if (__sync_sub_and_fetch(&f->refcount, 1) == 0)
+        file_free(f);
+}
+
 // ── Allocate a pipe ─────────────────────────────────────────
 pipe_t *pipe_alloc(void)
 {
@@ -171,6 +191,8 @@ files_t *files_alloc(void)
 {
     files_t *fs = (files_t *)calloc(1, sizeof(files_t));
     if (!fs) return NULL;
+    spin_init(&fs->lock);
+    fs->refcount = 1;            // caller holds the initial reference
     // Default cwd is root
     fs->cwd = strdup("/");
     if (!fs->cwd) { free(fs); return NULL; }
@@ -181,11 +203,10 @@ files_t *files_alloc(void)
 void files_free(files_t *fs)
 {
     if (!fs) return;
+    // refcount==0 here: no concurrent readers, no lock needed.
     for (int i = 0; i < NOFILE; i++) {
         if (fs->fd[i]) {
-            file_t *f = fs->fd[i];
-            if (__sync_sub_and_fetch(&f->refcount, 1) == 0)
-                file_free(f);
+            file_put(fs->fd[i]);
             fs->fd[i] = NULL;
         }
     }
@@ -202,16 +223,22 @@ files_t *files_dup(files_t *fs)
 
     files_t *new_fs = (files_t *)calloc(1, sizeof(files_t));
     if (!new_fs) return NULL;
+    spin_init(&new_fs->lock);
+    new_fs->refcount = 1;
 
     new_fs->cwd = strdup(fs->cwd);
     if (!new_fs->cwd) { free(new_fs); return NULL; }
 
+    // /proc readers may be concurrently files_get_file()'ing the source
+    // table, so hold src->lock; file_get() is atomic and safe in-lock.
+    uint64_t fl = spin_lock_irqsave(&fs->lock);
     for (int i = 0; i < NOFILE; i++) {
         if (fs->fd[i]) {
-            __sync_add_and_fetch(&fs->fd[i]->refcount, 1);
+            file_get(fs->fd[i]);
             new_fs->fd[i] = fs->fd[i];
         }
     }
+    spin_unlock_irqrestore(&fs->lock, fl);
     return new_fs;
 }
 
@@ -219,13 +246,17 @@ files_t *files_dup(files_t *fs)
 int fd_alloc(files_t *fs, file_t *f)
 {
     if (!fs || !f) return -1;
+    uint64_t fl = spin_lock_irqsave(&fs->lock);
+    int ret = -1;
     for (int i = 0; i < NOFILE; i++) {
         if (fs->fd[i] == NULL) {
             fs->fd[i] = f;
-            return i;
+            ret = i;
+            break;
         }
     }
-    return -1;  // table full
+    spin_unlock_irqrestore(&fs->lock, fl);
+    return ret;
 }
 
 // ── Close a single fd ───────────────────────────────────────
@@ -233,13 +264,94 @@ void fd_close(files_t *fs, int fd)
 {
     if (!fs || fd < 0 || fd >= NOFILE) return;
 
-    file_t *f = fs->fd[fd];
-    if (!f) return;
-
+    file_t *f;
+    uint64_t fl = spin_lock_irqsave(&fs->lock);
+    f = fs->fd[fd];
     fs->fd[fd] = NULL;
+    spin_unlock_irqrestore(&fs->lock, fl);
 
-    if (__sync_sub_and_fetch(&f->refcount, 1) == 0)
-        file_free(f);
+    if (f) file_put(f);   // outside lock: drop-to-zero → file_free
+}
+
+// ── files_t reference protocol ─────────────────────────────
+// NULL is a no-op (defensive; mirrors file_get/file_put).
+void files_pin(files_t *fs)
+{
+    if (!fs) return;
+    __sync_add_and_fetch(&fs->refcount, 1);
+}
+
+// MUST NOT be called under task_list_lock/fs->lock/rq lock: drop-to-zero
+// → deferred_files_free, whose OOM fallback synchronously files_free()s.
+void files_unpin(files_t *fs)
+{
+    if (!fs) return;
+    if (__sync_sub_and_fetch(&fs->refcount, 1) == 0)
+        deferred_files_free(fs);
+}
+
+// Locks fs->lock internally.  Caller must NOT already hold fs->lock
+// (spinlock is non-reentrant).  Caller must hold a live files_t ref.
+file_t *files_get_file(files_t *fs, int fd)
+{
+    if (!fs || fd < 0 || fd >= NOFILE) return NULL;
+    uint64_t fl = spin_lock_irqsave(&fs->lock);
+    file_t *f = fs->fd[fd];
+    if (f) file_get(f);   // ref-bump inside the critical section
+    spin_unlock_irqrestore(&fs->lock, fl);
+    return f;
+}
+
+void files_put_file(file_t *f)
+{
+    file_put(f);
+}
+
+// ── Centralized dup (slot writers must hold fs->lock) ──────
+int fd_dup(files_t *fs, int oldfd, int minfd)
+{
+    if (!fs || oldfd < 0 || oldfd >= NOFILE || minfd < 0)
+        return -EBADF;
+
+    uint64_t fl = spin_lock_irqsave(&fs->lock);
+    file_t *f = fs->fd[oldfd];
+    if (!f) { spin_unlock_irqrestore(&fs->lock, fl); return -EBADF; }
+
+    int newfd = -1;
+    for (int i = minfd; i < NOFILE; i++) {
+        if (fs->fd[i] == NULL) { newfd = i; break; }
+    }
+    if (newfd < 0) { spin_unlock_irqrestore(&fs->lock, fl); return -ENFILE; }
+
+    file_get(f);
+    fs->fd[newfd] = f;
+    spin_unlock_irqrestore(&fs->lock, fl);
+    return newfd;
+}
+
+int fd_dup2(files_t *fs, int oldfd, int newfd)
+{
+    if (!fs || oldfd < 0 || oldfd >= NOFILE || newfd < 0 || newfd >= NOFILE)
+        return -EBADF;
+
+    if (oldfd == newfd) {
+        uint64_t fl = spin_lock_irqsave(&fs->lock);
+        int ok = fs->fd[oldfd] != NULL;
+        spin_unlock_irqrestore(&fs->lock, fl);
+        return ok ? newfd : -EBADF;
+    }
+
+    file_t *old_target = NULL;
+    uint64_t fl = spin_lock_irqsave(&fs->lock);
+    file_t *f = fs->fd[oldfd];
+    if (!f) { spin_unlock_irqrestore(&fs->lock, fl); return -EBADF; }
+    file_get(f);
+    old_target = fs->fd[newfd];
+    fs->fd[newfd] = f;
+    spin_unlock_irqrestore(&fs->lock, fl);
+
+    if (old_target) files_put_file(old_target);   // outside lock
+    return newfd;
 }
 
 // ── Pipe helpers ──────────────────────────────────────────

@@ -93,8 +93,10 @@ typedef struct file {
 // ── Per-process file descriptor table ──────────────────────
 
 typedef struct files_struct {
-    file_t *fd[NOFILE];
-    char   *cwd;              // heap-allocated current working directory
+    spinlock_T   lock;       // 护 fd[] 槽位
+    int          refcount;   // 表生命周期（__sync 原子增减）
+    file_t      *fd[NOFILE];
+    char        *cwd;        // heap-allocated current working directory
 } files_t;
 
 // ── API ────────────────────────────────────────────────────
@@ -117,6 +119,21 @@ int          fd_alloc(files_t *fs, file_t *f);
 
 // Close one fd (release reference)
 void         fd_close(files_t *fs, int fd);
+
+// ── Reference protocol (concurrency-safe fd table access) ──
+// Table lifecycle: pin/unpin.  file lifecycle: get/put.
+// All take NULL as a no-op (defensive; failure paths are safe to call).
+// files_unpin / file_put / files_put_file MUST NOT be called while
+// holding task_list_lock, fs->lock, or an rq lock — their drop-to-zero
+// path may synchronously files_free/file_free (deferred OOM fallback).
+void    files_pin(files_t *fs);
+void    files_unpin(files_t *fs);
+file_t *files_get_file(files_t *fs, int fd);   // locks fs->lock internally
+void    files_put_file(file_t *f);
+void    file_get(file_t *f);                   // safe under any lock
+void    file_put(file_t *f);
+int     fd_dup(files_t *fs, int oldfd, int minfd);   // locks fs->lock internally
+int     fd_dup2(files_t *fs, int oldfd, int newfd);  // locks fs->lock internally
 
 // Read / write through fd (may sleep for pipes)
 int64_t      fd_read(file_t *f, void *buf, uint64_t size);
