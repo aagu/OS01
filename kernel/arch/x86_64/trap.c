@@ -1347,56 +1347,14 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
     case SYS_dup: {
         // dup(int oldfd) → newfd / -errno
         int oldfd = (int)regs->rdi;
-
-        if (oldfd < 0 || oldfd >= NOFILE || !current->files ||
-            !current->files->fd[oldfd]) {
-            regs->rax = -EBADF;
-            break;
-        }
-
-        // Find lowest free fd
-        int newfd = -1;
-        for (int i = 0; i < NOFILE; i++) {
-            if (current->files->fd[i] == NULL) {
-                newfd = i;
-                break;
-            }
-        }
-        if (newfd < 0) {
-            regs->rax = -ENFILE;
-            break;
-        }
-
-        file_t *f = current->files->fd[oldfd];
-        __sync_add_and_fetch(&f->refcount, 1);
-        current->files->fd[newfd] = f;
-        regs->rax = newfd;
+        regs->rax = fd_dup(current->files, oldfd, 0);
         break;
     }
     case SYS_dup2: {
         // dup2(int oldfd, int newfd) → newfd / -errno
         int oldfd = (int)regs->rdi;
         int newfd = (int)regs->rsi;
-
-        if (oldfd < 0 || oldfd >= NOFILE || newfd < 0 || newfd >= NOFILE ||
-            !current->files || !current->files->fd[oldfd]) {
-            regs->rax = -EBADF;
-            break;
-        }
-
-        if (oldfd == newfd) {
-            regs->rax = newfd;
-            break;
-        }
-
-        // Close newfd first if open
-        if (current->files->fd[newfd])
-            fd_close(current->files, newfd);
-
-        file_t *f = current->files->fd[oldfd];
-        __sync_add_and_fetch(&f->refcount, 1);
-        current->files->fd[newfd] = f;
-        regs->rax = newfd;
+        regs->rax = fd_dup2(current->files, oldfd, newfd);
         break;
     }
     case SYS_fork: {
@@ -1620,34 +1578,14 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             // dup to >= arg
             int start = (int)arg;
             if (start < 0) start = 0;
-            int newfd = -1;
-            for (int i = start; i < NOFILE; i++) {
-                if (current->files->fd[i] == NULL) {
-                    newfd = i;
-                    break;
-                }
-            }
-            if (newfd < 0) { regs->rax = -ENFILE; break; }
-            __sync_add_and_fetch(&f->refcount, 1);
-            current->files->fd[newfd] = f;
-            regs->rax = newfd;
+            regs->rax = fd_dup(current->files, fd, start);
             break;
         }
         case F_DUPFD_CLOEXEC: {
             // Same as F_DUPFD for now (close-on-exec not implemented)
             int start = (int)arg;
             if (start < 0) start = 0;
-            int newfd = -1;
-            for (int i = start; i < NOFILE; i++) {
-                if (current->files->fd[i] == NULL) {
-                    newfd = i;
-                    break;
-                }
-            }
-            if (newfd < 0) { regs->rax = -ENFILE; break; }
-            __sync_add_and_fetch(&f->refcount, 1);
-            current->files->fd[newfd] = f;
-            regs->rax = newfd;
+            regs->rax = fd_dup(current->files, fd, start);
             break;
         }
         case F_GETFD:
