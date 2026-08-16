@@ -14,6 +14,10 @@ struct timespec {
     uint64_t tv_nsec;   /* nanoseconds */
 };
 
+/* clock_gettime(2) clock ids — must match userspace ABI exactly */
+#define CLOCK_REALTIME  0
+#define CLOCK_MONOTONIC 1
+
 struct timezone {
     int tz_minuteswest;
     int tz_dsttime;

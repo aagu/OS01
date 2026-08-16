@@ -413,18 +413,82 @@ static void test_gettimeofday(void)
     CHECK3(tv.tv_usec < 1000000ULL, "gettimeofday", "tv_usec < 1e6");
 }
 
+// ── 30b: clock_gettime (monotonic) ─────────────────────────
+static int64_t mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + (int64_t)ts.tv_nsec / 1000000;
+}
+
+static void test_clock_gettime(void)
+{
+    struct timespec a, b;
+    int ra = clock_gettime(CLOCK_MONOTONIC, &a);
+    for (volatile int i = 0; i < 50000; i++) {}
+    int rb = clock_gettime(CLOCK_MONOTONIC, &b);
+    CHECK3(ra == 0 && rb == 0, "clock_gettime", "returns 0");
+    CHECKF(b.tv_sec > a.tv_sec || (b.tv_sec == a.tv_sec && b.tv_nsec >= a.tv_nsec),
+           "clock_gettime", "monotonic", "a=%lu.%09lu b=%lu.%09lu",
+           (unsigned long)a.tv_sec, (unsigned long)a.tv_nsec,
+           (unsigned long)b.tv_sec, (unsigned long)b.tv_nsec);
+}
+
 // ── 31: nanosleep ──────────────────────────────────────────
 static void test_nanosleep(void)
 {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    if (tv.tv_sec == 0 && tv.tv_usec == 0) {
-        PASS("nanosleep", "skipped (clock not init)");
-        return;
-    }
-    const struct timespec ts = { .tv_sec = 0, .tv_nsec = 10000000 };
+    // Block ALL signals so a pending signal can't fake-wake us: this
+    // tests the REAL sleep duration.  Pre-fix, nanosleep had no wakeup
+    // source — with signals blocked it hung forever (systest timeout).
+    sigset_t all = ~0UL, old;
+    sigprocmask(SIG_BLOCK, &all, &old);
+
+    const struct timespec ts = { .tv_sec = 0, .tv_nsec = 100000000 };
+    int64_t t1 = mono_ms();
     int ret = nanosleep(&ts, NULL);
-    CHECK3(ret >= 0 || ret < 0, "nanosleep", "called");
+    int64_t elapsed = mono_ms() - t1;
+
+    sigprocmask(SIG_SETMASK, &old, NULL);
+
+    CHECK3(ret == 0, "nanosleep", "returns 0");
+    CHECKF(elapsed >= 80 && elapsed < 2000, "nanosleep",
+           "~100ms", "got %ldms", (long)elapsed);
+}
+
+// ── 31b: nanosleep interrupted by signal ───────────────────
+static volatile int eintr_got = 0;
+static void on_eintr(int sig __attribute__((unused))) { eintr_got = 1; }
+
+static void test_nanosleep_eintr(void)
+{
+    signal(SIGUSR1, on_eintr);
+    eintr_got = 0;
+
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("nanosleep_eintr", "fork failed"); return; }
+
+    if (pid == 0) {
+        // child: brief sleep, then signal the parent
+        struct timespec wait = { .tv_sec = 0, .tv_nsec = 30000000 };
+        nanosleep(&wait, NULL);
+        kill(getppid(), SIGUSR1);
+        _exit(0);
+    }
+
+    errno = 0;
+    int64_t t1 = mono_ms();
+    struct timespec longreq = { .tv_sec = 5, .tv_nsec = 0 };
+    int ret = nanosleep(&longreq, NULL);
+    int64_t elapsed = mono_ms() - t1;
+
+    int status;
+    waitpid(pid, &status, 0);
+
+    CHECK3(ret == -1 && errno == EINTR, "nanosleep_eintr", "returns -EINTR");
+    CHECKF(elapsed < 1000, "nanosleep_eintr", "interrupted <1s", "got %ldms", (long)elapsed);
+    CHECK3(eintr_got == 1, "nanosleep_eintr", "handler ran");
+
+    signal(SIGUSR1, SIG_DFL);
 }
 
 // ── 32, 33: chmod, fchmod ─────────────────────────────────
@@ -1493,7 +1557,9 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"rename",            test_rename},
     {"ftruncate/truncate",test_truncate},
     {"gettimeofday",      test_gettimeofday},
+    {"clock_gettime",     test_clock_gettime},
     {"nanosleep",         test_nanosleep},
+    {"nanosleep_eintr",   test_nanosleep_eintr},
     {"chmod/fchmod",      test_chmod},
     {"times",             test_times},
     {"uname",             test_uname},

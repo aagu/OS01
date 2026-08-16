@@ -71,6 +71,7 @@
 #define SYS_getpeername   62
 #define SYS_getifaddr     63
 #define SYS_shutdown      64
+#define SYS_clock_gettime 65
 
 // ── Generic syscall helper ─────────────────────────────────
 

@@ -306,7 +306,10 @@ void sched_unblock_blocked(void)
 
         // Check signal wakeup (bypass condition check — the
         // callback returned false, so we're waking for a signal).
-        if (t->blocker.signal_can_wake && t->signal) {
+        // Mask-aware: a blocked signal must NOT wake an interruptible
+        // sleeper (POSIX).  do_waitpid still wakes via the condition
+        // path above (child ZOMBIE), so this change doesn't affect it.
+        if (t->blocker.signal_can_wake && (t->signal & ~t->blocked)) {
             task_wake(t);
             t->blocker.type = BLOCKER_NONE;
             t->blocker.check = NULL;
@@ -370,7 +373,8 @@ int blocker_wait(blocker_check_t check, int type, bool signal_can_wake)
     // Re-check the condition first: if it's now met (e.g. child
     // exited AND SIGCHLD was delivered), return 0 — the signal
     // will be handled on the way back to userspace.
-    if (signal_can_wake && self->signal && !check(self))
+    // Mask-aware: only an UNBLOCKED pending signal interrupts (POSIX).
+    if (signal_can_wake && (self->signal & ~self->blocked) && !check(self))
         return -EINTR;
 
     return 0;

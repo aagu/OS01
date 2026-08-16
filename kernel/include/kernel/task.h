@@ -14,6 +14,7 @@
 /* ── Blocker framework ─────────────────────────── */
 #define BLOCKER_NONE      0
 #define BLOCKER_WAITPID   1
+#define BLOCKER_NANOSLEEP 2
 
 struct task_struct;
 typedef bool (*blocker_check_t)(struct task_struct *waiter);
@@ -140,6 +141,12 @@ typedef struct task_struct
 
     blocker_t blocker;              // current block state (BLOCKER_NONE = not blocked)
     blocker_data_t blocker_data;    // per-type blocking data
+
+    // ── Sleep deadline (jiffies) ────────────────────────
+    // When a task blocks in nanosleep (BLOCKER_NANOSLEEP), its
+    // nanosleep_should_unblock callback checks jiffies >= wakeup_jiffies.
+    // Generic: reusable by any future time-based block (timer_wait, etc.).
+    uint64_t wakeup_jiffies;
 
     void *fpu_save; // 512-byte FXSAVE/FXRSTOR area (16-byte aligned)
 

@@ -27,6 +27,11 @@ int gettimeofday(struct timeval *tv, struct timezone *tz);
 int nanosleep(const struct timespec *req, struct timespec *rem);
 int utimes(const char *filename, const struct timeval times[2]);
 
+/* clock_gettime(2) — clock ids */
+#define CLOCK_REALTIME  0
+#define CLOCK_MONOTONIC 1
+int clock_gettime(int clk_id, struct timespec *tp);
+
 #ifdef __cplusplus
 }
 #endif
