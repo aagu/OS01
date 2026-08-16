@@ -110,6 +110,73 @@ static void test_fork_exec_waitpid(void)
            "exec", "/bin/spin exit 42");
 }
 
+// ── orphan reparent: child dies while its own child is alive ──
+// The grandchild becomes an orphan, reparented to init (PID 1) by the
+// child's do_exit; init's supervision loop (waitpid(-1, WNOHANG)) reaps
+// it. Verify: (1) the direct child is reaped normally, and (2) the
+// orphaned grandchild is actually reaped by init — it must disappear from
+// /proc (a leaked ZOMBIE would still be on the task list and listed under
+// /proc/<pid>).
+static void test_orphan_reparent(void)
+{
+    int fds[2];
+    if (pipe(fds) < 0) { FAIL("orphan_reparent", "pipe failed"); return; }
+
+    int64_t c = fork();
+    if (c < 0) { close(fds[0]); close(fds[1]); FAIL("orphan_reparent", "fork failed"); return; }
+    if (c == 0) {
+        // child: fork grandchild, report its pid up the pipe, exit.
+        close(fds[0]);
+        int64_t g = fork();
+        if (g == 0) { close(fds[1]); _exit(0); }       // grandchild: orphaned
+        if (g < 0)  { close(fds[1]); _exit(1); }       // grandchild fork failed
+        char buf[32];
+        int n = snprintf(buf, sizeof(buf), "%d", (int)g);
+        write(fds[1], buf, (size_t)n + 1);
+        close(fds[1]);
+        _exit(0);
+    }
+    close(fds[1]);
+
+    // Read grandchild pid, then reap the direct child.
+    char gbuf[32] = {0};
+    read(fds[0], gbuf, sizeof(gbuf) - 1);
+    close(fds[0]);
+    int gpid = 0;
+    sscanf(gbuf, "%d", &gpid);
+
+    int status = 0;
+    int64_t w = waitpid(c, &status, 0);
+    CHECK3(w == c && WIFEXITED(status), "orphan_reparent", "child reaped");
+
+    // Poll for init's supervision loop to reap the orphan, then probe
+    // /proc/<gpid>: open resolves via procfs_readdir enumeration, so it
+    // returns <0 once the task is off the task list (reaped). A leaked
+    // ZOMBIE would still resolve (fd >= 0) and read 0 bytes (mm already
+    // freed). Poll rather than a single fixed sleep: init's reap_children
+    // cadence is ~100ms and races tty respawn / scheduler jitter, so a
+    // one-shot probe could catch the grandchild still-ZOMBIE and false-fail.
+    //
+    // Sleep via poll(NULL, 0, 20): nanosleep() is NOT usable here — it
+    // spins on jiffies which stall in a fork child (see test_proc_fd's
+    // comment), hanging the suite. poll()'s per-poll timeout registry
+    // (kernel/fs/poll.c) is reliable and doesn't clobber init's own
+    // concurrent poll() sleep in its supervision loop.
+    char path[32];
+    snprintf(path, sizeof(path), "/proc/%d/maps", gpid);
+
+    int probe = -1;
+    int tries = 0;
+    for (; tries < 50; tries++) {
+        probe = open(path, O_RDONLY);
+        if (probe < 0) break;          // reaped — gone from the task list
+        close(probe);
+        poll(NULL, 0, 20);             // 20ms sleep; init reaps between probes
+    }
+    if (probe >= 0) close(probe);
+    CHECK3(gpid > 0 && probe < 0, "orphan_reparent", "grandchild reaped by init");
+}
+
 // ── 6: read ────────────────────────────────────────────────
 static void test_read(void)
 {
@@ -1408,6 +1475,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"brk",               test_brk},
     {"getpid/getppid",    test_getpid_getppid},
     {"fork+exec+waitpid", test_fork_exec_waitpid},
+    {"orphan_reparent",   test_orphan_reparent},
     {"read",              test_read},
     {"open/close",        test_open_close},
     {"dup/dup2",          test_dup_dup2},

@@ -30,7 +30,7 @@ P0 (本迭代):
  1. nanosleep 修复 🔴           — 见下 "nanosleep 修复路线图"（睡眠无唤醒源；tetris game-over 卡死 + busybox sleep 假醒实证）
  2. 网络回归测试 ✅           — TCP/UDP/DNS/DHCP/wget 纳入自动化 QEMU 测试
  3. /proc/<pid>/fd/           ✅ — 只读 fd 目录 + fd→目标路径合成文件；files_t 引用协议（pin/unpin/get/put）消除 UAF
- 4. 任务退出/回收收敛         — wait 驱动回收，移除调度器与 reaper 双重职责（方案已实现于 worktree-wait-driven-reaping，待合并入 master）
+ 4. 任务退出/回收收敛         ✅ — wait 驱动回收（do_waitpid 直接收割）+ kthread __switch_to 自收割，删除 reaper 与 deferred_free
 
 P1 (近期):
  4. rwlock/seqlock            — VFS 与 /proc 多核缩放

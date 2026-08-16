@@ -181,6 +181,24 @@ static int test_wget(void)
     return n == (int)payload_len && !memcmp(data, payload, payload_len);
 }
 
+// A task holding an open socket exits WITHOUT closing it: its do_exit →
+// files_unpin → file_free → netconn_delete must complete (blocking on a
+// tcpip_thread round-trip) without hanging or crashing.
+static int test_socket_exit(void)
+{
+    int64_t pid = fork();
+    if (pid < 0) return 0;
+    if (pid == 0) {
+        int fd = socket(AF_INET, SOCK_DGRAM, 0);  // open, deliberately not closed
+        if (fd < 0) _exit(127);   // socket must succeed to exercise the path
+        _exit(0);   // do_exit frees the open socket → netconn_delete
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid)
+        return 0;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 int main(void)
 {
     printf("[NET TEST] starting\n");
@@ -189,6 +207,7 @@ int main(void)
     result("DNS", test_dns());
     result("TCP", test_tcp());
     result("wget", test_wget());
+    result("socket_exit", test_socket_exit());
     printf("[NET TEST] RESULT: %d passed, %d failed\n", passed, failed);
     return failed ? 1 : 0;
 }

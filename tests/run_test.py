@@ -327,10 +327,10 @@ def test_network(tester):
             print("FAIL: could not parse network result")
             return False
         passed, failed = int(match.group(1)), int(match.group(2))
-        if passed != 5 or failed:
+        if passed != 6 or failed:
             print(f"FAIL: network regression: {passed} passed, {failed} failed")
             return False
-        print("PASS: DHCP, UDP, DNS, TCP, and wget")
+        print("PASS: DHCP, UDP, DNS, TCP, wget, and socket_exit")
         return True
     finally:
         services.close()
