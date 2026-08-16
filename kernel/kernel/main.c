@@ -150,7 +150,6 @@ int kernel_main(struct BOOT_INFO *bootinfo)
 
     frame_buffer_early_init();
     boot_logo_show();                 // OS01 boot logo
-    color_printk(RED, BLACK, "Hello, World!\n");
 
     pmm_init(bootinfo->E820_Info);      // physical page allocator
     vmm_init();                          // virtual memory (page tables)
