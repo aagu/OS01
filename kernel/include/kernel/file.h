@@ -125,7 +125,7 @@ void         fd_close(files_t *fs, int fd);
 // All take NULL as a no-op (defensive; failure paths are safe to call).
 // files_unpin / file_put / files_put_file MUST NOT be called while
 // holding task_list_lock, fs->lock, or an rq lock — their drop-to-zero
-// path may synchronously files_free/file_free (deferred OOM fallback).
+// path may synchronously files_free/file_free.
 void    files_pin(files_t *fs);
 void    files_unpin(files_t *fs);
 file_t *files_get_file(files_t *fs, int fd);   // locks fs->lock internally

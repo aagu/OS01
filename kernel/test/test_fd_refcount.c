@@ -1,8 +1,8 @@
 // kernel/test/test_fd_refcount.c
 // ── fd reference-protocol SMP race tests ──────────────────
-// Two scenarios, run from task_init() AFTER deferred_free_spawn()
-// (files_unpin can defer-free) and scheduler_ok=1 (kernel_thread +
-// schedule() work).
+// Two scenarios, run from task_init() AFTER scheduler_ok=1
+// (kernel_thread + schedule() work).  files_unpin is now a
+// synchronous drop-to-zero → files_free.
 //
 // Synchronisation uses __atomic acquire/release flags, NOT volatile:
 // volatile gives no cross-CPU happens-before.  The harness runs as the
@@ -159,7 +159,7 @@ static void run_get_detach_race(void)
         serial_printk("PASS (cross-CPU reader=%x writer=%x)\n",
                       r3_reader_cpu_mask, r3_writer_cpu_mask);
 
-    files_unpin(race_fs);               // harness ref → refcount 0 → deferred free
+    files_unpin(race_fs);               // harness ref → refcount 0 → synchronous files_free
 }
 
 // ── Scenario 2: pin-vs-detach (R2) ────────────────────────

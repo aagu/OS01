@@ -14,7 +14,6 @@
 /* ── Blocker framework ─────────────────────────── */
 #define BLOCKER_NONE      0
 #define BLOCKER_WAITPID   1
-#define BLOCKER_DEFERRED_FREE 2
 
 struct task_struct;
 typedef bool (*blocker_check_t)(struct task_struct *waiter);
@@ -65,7 +64,6 @@ extern void idle_resume(void);
 #define PF_PROCESS (1 << 1)
 #define PF_THREAD (1 << 2)
 #define PF_LINUX_ABI (1 << 3)
-#define PF_REAPED (1 << 4)   // do_waitpid read this ZOMBIE; schedule() will kfree
 #define PF_SELF_REAP (1 << 5)   // kthread exited; __switch_to epilogue frees it
 
 // waitpid options
@@ -169,7 +167,8 @@ typedef struct task_struct
     // ── on_cpu (Linux on_cpu semantics) ──────────────────
     // 1 = this task is currently ON a CPU (running or being
     // switched): its kernel stack is in use.  0 = off-CPU; only
-    // then may the zombie reaper free it.  do_exit sets 1 at entry
+    // then may a waiter free it (do_waitpid reap, or __switch_to's
+    // PF_SELF_REAP epilogue for kthreads).  do_exit sets 1 at entry
     // and only becomes reapable after __switch_to clears it.
     uint32_t on_cpu;
 

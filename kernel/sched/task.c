@@ -20,7 +20,6 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <uapi/time.h>
-#include <kernel/deferred_free.h>    // deferred_free() for zombie reaping
 #include <kernel/assert.h>
 #include <kernel/printk.h>   // serial_printk
 
@@ -275,8 +274,8 @@ void blocker_wake(task_t *task)
 /*
  * Scan all tasks for blocked ones whose conditions are now met.
  *
- * Called from schedule() inside the reap_lock critical section,
- * after zombie reaping and before the priority scan.
+ * Called from schedule() under task_list_lock — the blocker-wakeup
+ * backstop.  (The old zombie reaper is gone; this is NOT a reaper.)
  *
  * Also handles signal-based wakeup: if a blocker has signal_can_wake=true
  * and the blocked task has pending signals, wake it with -EINTR return.
@@ -508,7 +507,7 @@ void schedule(void)
     if (current->in_schedule)
         return;
     current->in_schedule = 1;
-    // On-CPU: our kernel stack is in use.  Reaper must not free us
+    // On-CPU: our kernel stack is in use.  A waiter must not free us
     // even after do_exit sets ZOMBIE (final schedule is still
     // running on this stack).
     __atomic_store_n(&current->on_cpu, 1, __ATOMIC_RELEASE);
@@ -548,98 +547,13 @@ void schedule(void)
         spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
     }
 
-    // ── 3. Zombie reaper (global list, with on_rq guard) ──
+    // ── 3. Wake blocked tasks whose condition is now met ──
+    // (was inside the old zombie-reaper critical section; now
+    // standalone — this is the blocker-wakeup backstop, NOT a reaper.)
     {
-        uint64_t reap_flags = spin_lock_irqsave(&task_list_lock);
-
-        // Heap-allocated: avoids 512-byte stack array in schedule() hot path.
-        task_t *reap_list[64];
-        files_t *files_to_free[64];
-        int      files_free_count = 0;
-
-        int reap_count = 0;
-
-        {
-            list_t *pos = init_task_union.task.list.next;
-            while (pos != &init_task_union.task.list && reap_count < 64) {
-                if ((uintptr_t)pos < 0x1000) {
-                    log_err("[sched] zombie scan: corrupted list pointer %p\n", (void *)pos);
-                    break;
-                }
-                task_t *t = container_of(pos, task_t, list);
-                pos = task_list_next(pos);
-                if (t->state != TASK_ZOMBIE || t == current) continue;
-                if (t->on_rq) continue;  // not yet dequeued — skip
-                // SMP: only reap tasks on this CPU — the other CPU will reap its own tasks.
-                if (t->cpu != (int)this_cpu()->cpu_id) continue;
-
-                int reap = 0;
-                if (t->flags & PF_REAPED) reap = 1;
-                else if (t->flags & PF_KTHREAD) reap = 1;
-                else if (t->parent == NULL) reap = 1;
-                else if (t->parent->state == TASK_ZOMBIE) reap = 1;
-
-                if (reap) reap_list[reap_count++] = t;
-            }
-        }
-
-        if (reap_count > 0) {
-            list_t *pos = init_task_union.task.list.next;
-            while (pos != &init_task_union.task.list) {
-                if ((uintptr_t)pos < 0x1000) break;
-                task_t *child = container_of(pos, task_t, list);
-                pos = task_list_next(pos);
-                if (!child->parent) continue;
-                for (int i = 0; i < reap_count; i++) {
-                    if (child->parent == reap_list[i]) {
-                        child->parent = NULL;
-                        break;
-                    }
-                }
-            }
-        }
-
-        for (int i = 0; i < reap_count; i++) {
-            task_t *t = reap_list[i];
-            // [FIX] re-verify under the target CPU's rq_lock: the
-            // lockless scan may have seen stale state/on_rq/cpu.
-            // A task being (re-)enqueued or migrated concurrently
-            // must never be reaped (its stack is still in use).
-            {
-                int tcpu = (int)*(volatile uint32_t *)&t->cpu;
-                if (tcpu < 0 || tcpu >= (int)num_cpus) {
-                    log_err("sched: reap skip task %d bad cpu=%d\n",
-                            (int)t->pid, tcpu);
-                    continue;
-                }
-                percpu_t *trq = &percpu_data[tcpu];
-                uint64_t rq_flags = spin_lock_irqsave(&trq->rq_lock);
-                if (t->state != TASK_ZOMBIE || t->on_rq || t->on_cpu ||
-                    (int)t->cpu != (int)trq->cpu_id) {
-                    // state changed / got enqueued / migrated — skip
-                    spin_unlock_irqrestore(&trq->rq_lock, rq_flags);
-                    continue;
-                }
-                spin_unlock_irqrestore(&trq->rq_lock, rq_flags);
-            }
-            list_del(&t->list);
-            t->list.next = NULL;
-            t->list.prev = NULL;
-            if (t->thread) {deferred_kfree(t->thread); t->thread = NULL;}
-            if (t->files) { files_to_free[files_free_count++] = t->files; t->files = NULL; }
-            if (t->fpu_save) {deferred_kfree(t->fpu_save); t->fpu_save = NULL;}
-            if (t->stack_alloc_base) {
-                deferred_kfree(t->stack_alloc_base);
-                t->stack_alloc_base = NULL;  // [FIX] no double-free
-            }
-        }
-
-
+        uint64_t ub_flags = spin_lock_irqsave(&task_list_lock);
         sched_unblock_blocked();
-        spin_unlock_irqrestore(&task_list_lock, reap_flags);
-
-        for (int i = 0; i < files_free_count; i++)
-            files_unpin(files_to_free[i]);   // outside task_list_lock
+        spin_unlock_irqrestore(&task_list_lock, ub_flags);
     }
 
     // ── 3.5 Load balancing ───────────────────────────────
@@ -787,10 +701,11 @@ __attribute__((noreturn)) static void idle_task_resume(void)
 
 // ── Task exit ──────────────────────────────────────────────
 // do_exit() frees user page tables and physical pages, then
-// marks the task ZOMBIE. thread_t and task_union are freed
-// later by the zombie reaper in schedule() (deferred because
-// __switch_to dereferences current->thread, and we're running
-// on the kernel stack inside task_union).
+// marks the task ZOMBIE. thread_t and task_union are freed by
+// the waiter (do_waitpid) or, for kthreads, by __switch_to's
+// PF_SELF_REAP epilogue (deferred because __switch_to dereferences
+// current->thread, and we're running on the kernel stack inside
+// task_union).
 //
 uint64_t do_exit(uint64_t exit_code)
 {
@@ -846,8 +761,8 @@ uint64_t do_exit(uint64_t exit_code)
     // ── Send SIGCHLD to parent ───────────────────────────
     // NOTE: we write-protect parent->state here because we are
     // about to become ZOMBIE.  After this point, the parent may
-    // run and reap us via do_waitpid → PF_REAPED.  The scheduler's
-    // zombie reaper will later list_del + kfree.
+    // run and reap us via do_waitpid (wait-driven).  A kthread's
+    // ZOMBIE is freed by __switch_to's PF_SELF_REAP epilogue.
     if (current->parent && !(current->parent->flags & PF_KTHREAD)) {
         __sync_fetch_and_or(&current->parent->signal, (1ULL << SIGCHLD));
         // Use blocker_wake which checks condition callback before waking.
@@ -872,7 +787,7 @@ uint64_t do_exit(uint64_t exit_code)
 
     // Detach our fd-table under task_list_lock (serializes against
     // task_files_pin_by_pid), then drop the reference outside the lock
-    // (files_unpin may synchronously files_free on deferred OOM).
+    // (files_unpin drop-to-zero now calls files_free synchronously).
     files_t *fs = NULL;
     {
         uint64_t fl = spin_lock_irqsave(&task_list_lock);
@@ -884,7 +799,7 @@ uint64_t do_exit(uint64_t exit_code)
         files_unpin(fs);
 
     // On-CPU: our kernel stack is in use until __switch_to clears
-    // on_cpu.  The reaper must not free us after we set ZOMBIE below
+    // on_cpu.  A waiter must not free us after we set ZOMBIE below
     // (final schedule() still runs on this stack).
     __atomic_store_n(&current->on_cpu, 1, __ATOMIC_RELEASE);
 
@@ -927,9 +842,9 @@ uint64_t do_exit(uint64_t exit_code)
 
     // NOTE: we stay TASK_RUNNING through the cleanup below and only
     // become TASK_ZOMBIE immediately before the final schedule().
-    // Setting ZOMBIE earlier lets the zombie reaper on another CPU
-    // reap (free) this task's kernel stack while do_exit is still
-    // running on it — the SMP-only intermittent #PF.
+    // Setting ZOMBIE earlier lets a waiter reap (free) this task's
+    // kernel stack while do_exit is still running on it — the
+    // SMP-only intermittent #PF.
 
     // ── Direct switch to parent ─────────────────────────────
     // By the time we reach ZOMBIE the parent is either already
@@ -951,9 +866,8 @@ uint64_t do_exit(uint64_t exit_code)
             parent_woken = 1;
         } else if (ps == TASK_UNINTERRUPTIBLE) {
             // Parent is in an unkillable sleep — unlikely for
-            // waitpid but handle gracefully: leave it, the
-            // scheduler's zombie reaper will eventually clean
-            // us up if parent never comes back.
+            // waitpid but handle gracefully: leave it; when the
+            // parent finally wakes, do_waitpid reaps us.
             debug_task("exit: p%d parent p%d UNINTERRUPTIBLE (%ld), "
                           "skipping direct switch\n",
                           current->pid, parent->pid, ps);
@@ -1921,7 +1835,7 @@ int task_send_signal(int pid, int sig)
 
 // ── task_files_pin_by_pid ─────────────────────────────────
 // Locate a task by pid under task_list_lock and pin its fd table so a
-// /proc reader can inspect it without racing do_exit / the reaper.
+// /proc reader can inspect it without racing do_exit.
 files_t *task_files_pin_by_pid(int pid)
 {
     files_t *fs = NULL;
@@ -2000,13 +1914,6 @@ void task_init()
     int64_t init_pid = spawn_user_task("/bin/init", NULL);
     debug_task("init: spawned user-space init, pid=%d\n", (int)init_pid);
 
-    // Spawn the deferred-free reaper kthread BEFORE activating the
-    // scheduler.  This guarantees the reaper exists before any zombie
-    // can be produced (schedule() returns early while scheduler_ok==0).
-    {
-        task_t *df = deferred_free_spawn();
-    }
-
     // Activate the scheduler and enter the idle loop.
     // schedule() picks up the user init (PID 1) naturally.
     current->state = TASK_RUNNING;
@@ -2034,8 +1941,8 @@ void task_init()
 
 #ifdef OS01_SELFTEST
     // ── fd reference-protocol race test ─────────────────────
-    // After deferred_free_spawn() (files_unpin defers) and scheduler_ok
-    // (kernel_thread + schedule() work).
+    // After scheduler_ok=1 (kernel_thread + schedule() work).
+    // files_unpin is now a synchronous drop-to-zero → files_free.
     {
         extern void test_fd_refcount(void);
         test_fd_refcount();

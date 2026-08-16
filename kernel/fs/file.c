@@ -12,7 +12,6 @@
 #include <kernel/pty.h>
 #include <fs/devfs.h>
 #include <uapi/stat.h>
-#include <kernel/deferred_free.h>
 
 // ── Forward declarations ─────────────────────────────────────
 void pipe_wake_readers(pipe_t *p);
@@ -282,12 +281,13 @@ void files_pin(files_t *fs)
 }
 
 // MUST NOT be called under task_list_lock/fs->lock/rq lock: drop-to-zero
-// → deferred_files_free, whose OOM fallback synchronously files_free()s.
+// → synchronous files_free, which may block (netconn_delete → lwIP) and
+// take file/pipe/pty locks.
 void files_unpin(files_t *fs)
 {
     if (!fs) return;
     if (__sync_sub_and_fetch(&fs->refcount, 1) == 0)
-        deferred_files_free(fs);
+        files_free(fs);
 }
 
 // Locks fs->lock internally.  Caller must NOT already hold fs->lock

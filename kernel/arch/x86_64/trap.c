@@ -95,9 +95,9 @@ static void kill_current_user_task(pt_regs_t *regs)
     log_err("Killing task %d (user fault at RIP=%p)\n",
             task->pid, regs->rip);
 
-    // Mark the task ZOMBIE now, so the reaper can clean it up later.
-    // The actual resource cleanup (vmm_free_user_map, kfree) happens
-    // in do_exit() which we call directly.
+    // Mark the task ZOMBIE now, so a waiter (do_waitpid) can reap it
+    // later. The actual resource cleanup (vmm_free_user_map, kfree)
+    // happens in do_exit() which we call directly.
     task->state = TASK_ZOMBIE;
 
     // Switch to the task's own kernel stack and call do_exit.
