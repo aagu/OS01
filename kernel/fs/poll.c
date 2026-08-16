@@ -37,16 +37,29 @@ void poll_table_init(poll_table_t *pt)
     pt->triggered = false;
 }
 
-// ── poll_table_setup — allocate entries + init wq + entry nodes ──
-// Returns 0 on success, -ENOMEM on allocation failure.
+// ── poll_table_setup — validate/allocate entries + init wq + nodes ──
+// Returns 0, -EINVAL for an invalid/capacity-exceeding size, or -ENOMEM.
 
 int poll_table_setup(poll_table_t *pt, int max_entries)
 {
+    if (!pt)
+        return -EINVAL;
+
+    pt->entries = NULL;
+    pt->max_entries = 0;
+    pt->nent = 0;
+    pt->triggered = false;
+
+    /* Every descriptor can register independent read and write queues. */
+    if (max_entries <= 0 || max_entries > POLL_MAX_WAIT_ENTRIES ||
+        (size_t)max_entries > SIZE_MAX / sizeof(poll_wait_entry_t))
+        return -EINVAL;
+
     wait_queue_init(&pt->wq);
-    pt->max_entries = max_entries;
-    pt->entries = kmalloc(max_entries * sizeof(poll_wait_entry_t));
+    pt->entries = kmalloc((size_t)max_entries * sizeof(poll_wait_entry_t));
     if (!pt->entries)
         return -ENOMEM;
+    pt->max_entries = max_entries;
     for (int i = 0; i < max_entries; i++)
         list_init(&pt->entries[i].node);
     return 0;
@@ -71,7 +84,8 @@ void poll_table_destroy(poll_table_t *pt)
 
 void poll_wait(poll_table_t *pt, list_t *poll_list, spinlock_T *fd_lock)
 {
-    if (pt->nent >= pt->max_entries || pt->triggered)
+    if (!pt || !pt->entries || !poll_list || !fd_lock ||
+        pt->nent < 0 || pt->nent >= pt->max_entries || pt->triggered)
         return;
 
     poll_wait_entry_t *e = &pt->entries[pt->nent++];
@@ -116,8 +130,9 @@ uint32_t fd_poll(file_t *f, uint32_t requested, poll_table_t *pt)
 {
     if (!f) return POLLNVAL;
 
-    bool can_read = f->flags == O_RDONLY || f->flags == O_RDWR;
-    bool can_write = f->flags == O_WRONLY || f->flags == O_RDWR;
+    int acc = f->flags & 3;
+    bool can_read = acc == O_RDONLY || acc == O_RDWR;
+    bool can_write = acc == O_WRONLY || acc == O_RDWR;
     bool want_read = can_read && poll_requested_read(requested);
     bool want_write = can_write && poll_requested_write(requested);
 
@@ -145,7 +160,7 @@ uint32_t fd_poll(file_t *f, uint32_t requested, poll_table_t *pt)
         uint32_t mask = 0;
         uint64_t flags = spin_lock_irqsave(&p->lock);
 
-        if (f->flags == O_RDONLY) {
+        if (can_read && !can_write) {
             if (!pipe_empty(p)) {
                 mask |= POLLIN;
                 if (p->writers == 0)
@@ -157,7 +172,7 @@ uint32_t fd_poll(file_t *f, uint32_t requested, poll_table_t *pt)
             }
         }
 
-        if (f->flags == O_WRONLY) {
+        if (can_write && !can_read) {
             if (!pipe_full(p)) {
                 mask |= POLLOUT;
             } else if (p->readers == 0) {
@@ -167,7 +182,7 @@ uint32_t fd_poll(file_t *f, uint32_t requested, poll_table_t *pt)
             }
         }
 
-        if (f->flags == O_RDWR) {
+        if (can_read && can_write) {
             if (!pipe_empty(p)) {
                 mask |= POLLIN;
                 if (p->writers == 0)
@@ -312,7 +327,9 @@ static int poll_scan(struct pollfd *kfds, uint64_t nfds, poll_table_t *pt)
             continue;
 
         uint32_t requested = (uint32_t)kfds[i].events;
-        file_t *f = current->files->fd[kfds[i].fd];
+        file_t *f = NULL;
+        if ((uint32_t)kfds[i].fd < NOFILE && current->files)
+            f = current->files->fd[kfds[i].fd];
         uint32_t revents = f ? fd_poll(f, requested, pt) : POLLNVAL;
         uint32_t filtered = (revents & requested)
                           | (revents & (POLLHUP | POLLERR | POLLNVAL));
@@ -434,7 +451,10 @@ int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val)
 
     // ── Setup poll table (dynamic entries allocation) ─────────
     poll_table_t pt;
-    if (poll_table_setup(&pt, (nfds == 0) ? 1 : POLL_MAX_FDS) != 0)
+    int max_entries = (nfds == 0)
+        ? 1
+        : (int)(nfds * POLL_WAIT_SLOTS_PER_FD);
+    if (poll_table_setup(&pt, max_entries) != 0)
         return -ENOMEM;
 
     int64_t ret = do_poll_core(kfds, nfds, timeout_val, &pt);

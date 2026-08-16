@@ -10,6 +10,8 @@
 // ── Max fds per poll call ──────────────────────────────
 
 #define POLL_MAX_FDS  16
+#define POLL_WAIT_SLOTS_PER_FD  2
+#define POLL_MAX_WAIT_ENTRIES   (POLL_MAX_FDS * POLL_WAIT_SLOTS_PER_FD)
 
 // ── Poll event flags (Linux ABI) ──────────────────────
 
@@ -81,8 +83,8 @@ typedef struct poll_table {
 // Does NOT re-init wq — call poll_table_setup once, then init per round.
 void poll_table_init(poll_table_t *pt);
 
-// One-time setup: allocate entries + init wq + all entry nodes.
-// Returns 0 on success, -ENOMEM on kmalloc failure.
+// One-time setup: validate/allocate entries + init wq + all entry nodes.
+// Returns 0, -EINVAL for an invalid/capacity-exceeding size, or -ENOMEM.
 int poll_table_setup(poll_table_t *pt, int max_entries);
 
 // Free entries allocated by poll_table_setup.

@@ -206,7 +206,9 @@ int64_t do_select(int nfds, void *readfds, void *writefds,
 
     // ── Setup poll table ─────────────────────────────────────
     poll_table_t pt;
-    if (poll_table_setup(&pt, nfds) != 0) {
+    int pollable_fds = nfds < NOFILE ? nfds : NOFILE;
+    int max_entries = pollable_fds * POLL_WAIT_SLOTS_PER_FD;
+    if (poll_table_setup(&pt, max_entries) != 0) {
         kfree(pfds);
         return -ENOMEM;
     }
@@ -406,7 +408,9 @@ after_timeout:
 
     // ── Setup poll table ─────────────────────────────────────
     poll_table_t pt;
-    if (poll_table_setup(&pt, nfds) != 0) {
+    int pollable_fds = nfds < NOFILE ? nfds : NOFILE;
+    int max_entries = pollable_fds * POLL_WAIT_SLOTS_PER_FD;
+    if (poll_table_setup(&pt, max_entries) != 0) {
         kfree(pfds);
         ret = -ENOMEM;
         goto out;
