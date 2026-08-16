@@ -25,6 +25,9 @@ typedef struct blocker {
 } blocker_t;
 
 typedef struct blocker_data {
+    // Deprecated: do_waitpid no longer reads/writes this (it re-scans the
+    // task list to reap).  Kept to avoid changing task_t layout — do not
+    // rely on it.  Remove it only alongside a full task_t layout review.
     struct task_struct *waited_child;
     int64_t waited_pid;
 } blocker_data_t;

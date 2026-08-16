@@ -893,8 +893,9 @@ uint64_t do_exit(uint64_t exit_code)
 
 /*
  * Blocker condition callback for do_waitpid.
- * Returns true when a waited-for child has become TASK_ZOMBIE.
- * Sets waiter->blocker_data.waited_child so the caller can reap it immediately.
+ * Returns true when a waited-for child has become TASK_ZOMBIE and fully
+ * left the CPU (on_cpu == 0), i.e. is immediately reapable.  The caller
+ * (do_waitpid) re-scans the task list to actually reap it.
  */
 static bool waitpid_should_unblock(task_t *waiter)
 {
@@ -902,6 +903,10 @@ static bool waitpid_should_unblock(task_t *waiter)
     list_t *pos = init_task_union.task.list.next;
 
     while (pos != &init_task_union.task.list) {
+        if ((uintptr_t)pos < 0x1000) {
+            log_err("[sched] task-list corruption at %p, breaking\n", (void *)pos);
+            break;
+        }
         task_t *t = container_of(pos, task_t, list);
         pos = task_list_next(pos);
 
@@ -940,6 +945,10 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
             uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
             list_t *pos = init_task_union.task.list.next;
             while (pos != &init_task_union.task.list) {
+                if ((uintptr_t)pos < 0x1000) {
+                    log_err("[sched] task-list corruption at %p, breaking\n", (void *)pos);
+                    break;
+                }
                 task_t *t = container_of(pos, task_t, list);
                 pos = task_list_next(pos);
 
@@ -995,6 +1004,10 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
             uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
             list_t *pos = init_task_union.task.list.next;
             while (pos != &init_task_union.task.list) {
+                if ((uintptr_t)pos < 0x1000) {
+                    log_err("[sched] task-list corruption at %p, breaking\n", (void *)pos);
+                    break;
+                }
                 task_t *t = container_of(pos, task_t, list);
                 pos = task_list_next(pos);
                 if (t->parent == current && (pid == -1 || t->pid == pid)) {
