@@ -164,6 +164,10 @@ int main(void)
     term_cols = fb_info.width / font->width;
     term_rows = fb_info.height / font->height;
     term_core_init(&core, term_rows, term_cols);
+    // Paint a blank screen immediately: init may respawn us after the
+    // previous terminal (or a game) left stale framebuffer content.
+    term_core_mark_all_dirty(&core);
+    flush_screen();
 
     // 3. Open serial for headless echo
     int serial_fd = open("/dev/serial", O_WRONLY);
@@ -197,7 +201,14 @@ int main(void)
             int n = read(pty_fd, buf, sizeof(buf));
             if (n > 0) {
                 handle_output(buf, n, serial_fd);
-            } else if (n == 0) break;
+            } else if (n == 0) {
+                // Shell died (e.g. `exec tetris` exited): clear the fb so
+                // init's respawn starts from a clean screen, not our
+                // stale game/terminal content.
+                output_char('\x1b'); output_char('[');
+                output_char('2'); output_char('J');
+                break;
+            }
             else if (errno == EINTR) continue; else break;
         }
     }

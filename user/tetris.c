@@ -224,7 +224,12 @@ lock_piece:
                         draw_cell(c, full_rows[i], 0xFFFFFF);
                 struct pollfd pf = { .fd = kbd, .events = POLLIN };
                 poll(&pf, 1, fast ? 50 : 200);
-                memset(prev_view, 0, sizeof(prev_view)); // full redraw
+                // Force redraw of the cleared rows: prev_view must DIFFER
+                // from the cleared board cells (0), or render()'s diff
+                // skips them and the white flash stays on screen forever.
+                for (int i = 0; i < nfull; i++)
+                    for (int c = 0; c < TETRIS_W; c++)
+                        prev_view[full_rows[i]][c] = 0xFF;
             }
             if (tetris_spawn(&board, &piece, tetris_rand(&rng) % 7) != 0)
                 game_over = true;
