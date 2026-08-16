@@ -16,6 +16,11 @@ HOST_CFLAGS := -g -O0 -Wall -Wextra -Wno-unused-parameter \
                -Wno-macro-redefined -Wno-dangling-else \
                -Wno-non-literal-null-conversion -Wno-incompatible-library-redeclaration
 
+POLL_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
+    -Wno-unused-function -D__SPINLOCK_H__ \
+    -include $(TEST_MOCK)/poll_test_runtime.h \
+    -I$(TEST_MOCK)/include $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+
 LIBC_SRC := $(TESTS_DIR)/libc
 
 LIBC_OBJS := \
@@ -44,7 +49,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_wait_basic.elf \
     $(TEST_BLD)/test_canon.elf \
     $(TEST_BLD)/test_terminal_core.elf \
-    $(TEST_BLD)/test_tetris_logic.elf
+    $(TEST_BLD)/test_tetris_logic.elf \
+    $(TEST_BLD)/test_poll_requested.elf
 
 .PHONY: all clean run
 
@@ -60,8 +66,10 @@ run: $(TEST_BINS)
 	    name=$$(basename $$t .elf); \
 	    echo ""; \
 	    echo "======== $$name ========"; \
-	    $$t 2>&1 | grep -E "===|Total|Failed|>>>|ALL" --color=never; \
+	    output=$$($$t 2>&1); \
 	    rc=$$?; \
+	    printf '%s\n' "$$output" | \
+	        grep -E "===|Total|Failed|>>>|ALL" --color=never || true; \
 	    total=$$((total + 1)); \
 	    if [ "$${rc}" -ne 0 ] && [ "$${rc}" -ne 1 ]; then \
 	        echo "  >>> $$name CRASHED (rc=$$rc) <<<"; \
@@ -128,6 +136,31 @@ $(TEST_BLD)/%.o: $(TEST_CASES)/%.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
+# Focused poll test compiles and links the real production paths.
+$(TEST_BLD)/test_poll_requested.o: $(TEST_CASES)/test_poll_requested.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/poll_production.o: $(TESTS_DIR)/kernel/fs/poll.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/select_production.o: $(TESTS_DIR)/kernel/fs/select.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/file_poll_production.o: $(TESTS_DIR)/kernel/fs/file.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/tty_poll_production.o: $(TESTS_DIR)/kernel/tty/tty.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/devfs_poll_production.o: $(TESTS_DIR)/kernel/fs/devfs.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
+
 # Link rules
 $(TEST_BLD)/test_libc_string.elf: $(TEST_BLD)/test_libc_string.o $(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^
@@ -192,6 +225,20 @@ $(TEST_BLD)/test_tetris_logic.o: $(TEST_CASES)/test_tetris_logic.c
 
 $(TEST_BLD)/test_tetris_logic.elf: $(TEST_BLD)/test_tetris_logic.o $(TEST_BLD)/tetris_logic.o
 	$(HOST_CC) -o $@ $^
+
+POLL_PRODUCTION_OBJS := \
+    $(TEST_BLD)/poll_production.o \
+    $(TEST_BLD)/select_production.o \
+    $(TEST_BLD)/file_poll_production.o \
+    $(TEST_BLD)/tty_poll_production.o \
+    $(TEST_BLD)/devfs_poll_production.o
+
+$(TEST_BLD)/test_poll_requested.elf: $(TEST_BLD)/test_poll_requested.o $(POLL_PRODUCTION_OBJS)
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+# Keep the focused command usable from the repository root/task plan.
+build/test_poll_requested.elf: $(TEST_BLD)/test_poll_requested.o $(POLL_PRODUCTION_OBJS)
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 clean:
 	rm -rf $(TEST_BLD)

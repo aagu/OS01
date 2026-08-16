@@ -340,14 +340,14 @@ static void keyboard_wake_pollers(void)
     this_cpu()->need_resched = 1;
 }
 
-uint32_t keyboard_poll_dev(void *priv, poll_table_t *pt)
+uint32_t keyboard_poll_dev(void *priv, uint32_t requested, poll_table_t *pt)
 {
     (void)priv;
     uint32_t mask = 0;
 
     if (!ring_empty()) {
         mask |= POLLIN | POLLRDNORM;
-    } else if (pt && !pt->triggered) {
+    } else if (poll_requested_read(requested) && pt && !pt->triggered) {
         poll_wait(pt, &kbd_poll, &kbd_poll_lock);
     }
     return mask;

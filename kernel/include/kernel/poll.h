@@ -10,6 +10,8 @@
 // ── Max fds per poll call ──────────────────────────────
 
 #define POLL_MAX_FDS  16
+#define POLL_WAIT_SLOTS_PER_FD  2
+#define POLL_MAX_WAIT_ENTRIES   (POLL_MAX_FDS * POLL_WAIT_SLOTS_PER_FD)
 
 // ── Poll event flags (Linux ABI) ──────────────────────
 
@@ -23,6 +25,16 @@
 #define POLLRDBAND  0x080
 #define POLLWRNORM  0x100
 #define POLLWRBAND  0x200
+
+static inline bool poll_requested_read(uint32_t requested)
+{
+    return (requested & (POLLIN | POLLRDNORM | POLLPRI | POLLRDBAND)) != 0;
+}
+
+static inline bool poll_requested_write(uint32_t requested)
+{
+    return (requested & (POLLOUT | POLLWRNORM | POLLWRBAND)) != 0;
+}
 
 // ── Poll fd (Linux ABI — must match libc/include/poll.h) ──
 // Defined here so kernel code (poll.c, trap.c) can use it
@@ -84,8 +96,8 @@ typedef struct poll_table {
 // Does NOT re-init wq — call poll_table_setup once, then init per round.
 void poll_table_init(poll_table_t *pt);
 
-// One-time setup: allocate entries + init wq + all entry nodes.
-// Returns 0 on success, -ENOMEM on kmalloc failure.
+// One-time setup: validate/allocate entries + init wq + all entry nodes.
+// Returns 0, -EINVAL for an invalid/capacity-exceeding size, or -ENOMEM.
 int poll_table_setup(poll_table_t *pt, int max_entries);
 
 // Free entries allocated by poll_table_setup.
@@ -103,7 +115,8 @@ void poll_table_cleanup(poll_table_t *pt);
 
 // Forward-declared in kernel/fs/file.h; implementation in kernel/fs/poll.c.
 struct file;
-uint32_t fd_poll(struct file *f, struct poll_table *pt);
+uint32_t fd_poll(struct file *f, uint32_t requested,
+                 struct poll_table *pt);
 
 // do_poll — poll(2) syscall implementation.
 int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout);

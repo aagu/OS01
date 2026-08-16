@@ -22,6 +22,14 @@
 #define LWIP_TCP                1
 #define LWIP_UDP                1
 #define LWIP_DHCP               1
+// Disable RFC5227 address conflict detection during DHCP.  It is enabled by
+// default (LWIP_DHCP_DOES_ACD_CHECK == LWIP_DHCP) and, with our NIC's
+// MAC-derived probe delays, takes ~10.6s of PROBE/ANNOUNCE traffic before
+// dhcp_bind() sets the lease.  That races the guest's 10s DHCP wait in
+// nettest and intermittently loses the bind.  QEMU user-mode NAT serves a
+// single guest on 10.0.2.20 (dhcpstart=10.0.2.20), so no conflict can occur;
+// bind immediately after ACK instead.
+#define LWIP_DHCP_DOES_ACD_CHECK 0
 #define LWIP_DNS                1
 #define LWIP_ARP                1
 #define LWIP_ICMP               1

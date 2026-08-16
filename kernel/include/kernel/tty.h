@@ -78,6 +78,6 @@ int tty_phys_ioctl(struct vfs_node *node, int cmd, void *arg);
 
 // TTY poll — check if input is available.  Returns POLLIN/POLLOUT mask.
 // If not ready, registers a poll_wait_entry on read_poll.
-uint32_t tty_poll(tty_t *tty, struct poll_table *pt);
+uint32_t tty_poll(tty_t *tty, uint32_t requested, struct poll_table *pt);
 
 #endif

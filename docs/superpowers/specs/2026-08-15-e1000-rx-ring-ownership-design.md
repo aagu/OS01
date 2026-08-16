@@ -94,12 +94,14 @@ by the E1000 change.
 
 - Use a named deterministic descriptor-return mutation: initialize `RDT=1`
   and suppress all per-consumption `RDT=i` writes, limiting hardware to the
-  first two descriptors. Across 20 fresh QEMU iterations, every aggregate
-  network `RESULT` must report at least one failure. The DHCP subtest is
-  expected to pass because the guest starts with a static address; failure must
-  appear in a later RX-dependent UDP, DNS, TCP, or wget subtest. This proves the
-  regression observes a stalled RX ring; a single timing-dependent failure is
-  not sufficient mutation evidence.
+  first two descriptors. Across 20 fresh QEMU iterations, every iteration must
+  either produce an aggregate network `RESULT` with at least one failure, or
+  reach the runner timeout after the serial log proves that `[NET TEST]` began
+  and then stalled in an RX-dependent operation. Build failure, QEMU boot
+  failure, and host-port bind failure are invalid evidence and require the
+  sequence to restart from iteration 1. This proves the regression observes a
+  stalled RX ring; a single timing-dependent failure is not sufficient
+  mutation evidence.
 - Run at least 20 QEMU network iterations without per-packet serial logging;
   every first result must report five passed and zero failed.
 - Run the host test suite with `make test`.

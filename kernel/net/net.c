@@ -94,8 +94,8 @@ void net_poll_rx(void)
     if (is_virtio)
         virtio_net_poll_rx();
     else {
-        e1000_poll_rx();         // IRQ context: just buffer the packet
-        e1000_process_rx();      // tcpip_thread context: process buffered packet
+        e1000_poll_rx();    // tcpip thread: sole E1000 hardware-ring consumer
+        e1000_process_rx(); // tcpip thread: deliver the buffered packets to lwIP
     }
 }
 

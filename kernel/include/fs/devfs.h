@@ -23,7 +23,8 @@ struct devfs_ops {
     int (*open)(const char *name, struct file **out_file);
     int (*read)(struct vfs_node *, uint64_t, uint64_t, void *);
     int (*write)(struct vfs_node *, uint64_t, uint64_t, void *);
-    uint32_t (*poll)(void *priv, struct poll_table *pt);
+    uint32_t (*poll)(void *priv, uint32_t requested,
+                     struct poll_table *pt);
     // Guard against mmap macro from kernel/vmm.h (mmap = uint64_t*)
 #ifdef mmap
 #undef mmap
@@ -54,7 +55,8 @@ extern const struct devfs_ops tty_phys_ops;
 
 // Poll a devfs device node — resolves node->fs_data index to device,
 // calls device's poll callback or returns always-ready if none.
-uint32_t devfs_poll(struct vfs_node *node, struct poll_table *pt);
+uint32_t devfs_poll(struct vfs_node *node, uint32_t requested,
+                    struct poll_table *pt);
 
 // sys_open integration: check the devfs device's open callback,
 // returning a custom file_t or NULL to fall through to FD_DEV.

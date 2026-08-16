@@ -133,10 +133,10 @@ typedef struct {
 
 // ── Interrupt-driven RX wake ─────────────────────────────────
 // tcpip_thread blocks in sys_arch_mbox_fetch on the lwIP mbox.
-// The NIC IRQ handler (e1000) buffers a packet, then calls
-// sys_mbox_wake() to wake the fetcher.  The fetcher re-runs
-// net_poll_rx() and drains the two-stage buffer — no message
-// needs to be posted (a sentinel would flood the mbox).
+// The NIC IRQ handler only acknowledges RX and requests a persistent
+// sys_mbox_wake().  The tcpip thread re-runs net_poll_rx() and drains
+// the two-stage buffer — no message needs to be posted (a sentinel
+// would flood the mbox).
 /* tcpip_init() creates the core mailbox before it starts tcpip_thread.
  * Keep that mailbox permanently registered: application/netconn waits also
  * call sys_arch_mbox_fetch(), so a "currently fetching mailbox" global is
@@ -148,6 +148,9 @@ void sys_mbox_wake(void)
 {
     os_mbox_t *mb = g_tcpip_mbox;
     if (!mb) return;
+    uint64_t flags = spin_lock_irqsave(&mb->lock);
+    mb->idle_wakeup = 1;
+    spin_unlock_irqrestore(&mb->lock, flags);
     wait_queue_wake_one(&mb->wq);
 }
 
@@ -251,10 +254,9 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
     if (!mbox || !*mbox) return SYS_ARCH_TIMEOUT;
     os_mbox_t *mb = (os_mbox_t *)*mbox;
 
-    // Periodic wakeup timer — wakes the fetcher at a fixed interval
-    // so buffered RX packets get processed even while waiting for a
-    // message.  Timer-driven (not busy-wait): the PIT handler only
-    // BUFFERS packets (IRQ context cannot call lwIP).
+    // Periodic wakeup timer — requests a persistent wake at a fixed interval
+    // so the tcpip thread polls and processes RX even while waiting for a
+    // message. Timer-driven wakeups never call lwIP from IRQ context.
     timer_t *idle_timer = NULL;
     // create_timer()/init_timer() treat the argument as a RELATIVE
     // jiffies offset (expire = jiffies + arg). Passing an absolute

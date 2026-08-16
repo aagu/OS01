@@ -1,5 +1,6 @@
 // nettest.c — deterministic QEMU network regression test.
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <netinet/in.h>
@@ -45,7 +46,7 @@ static int wait_readable(int fd)
 {
     struct pollfd pfd = { .fd = fd, .events = POLLIN };
     int ready = poll(&pfd, 1, 5000);
-    return ready > 0 && (pfd.revents & (POLLIN | POLLHUP));
+    return ready == 1 && (pfd.revents & POLLIN);
 }
 
 static int test_udp(void)
@@ -110,12 +111,34 @@ static int test_tcp(void)
         connect(fd, (struct sockaddr *)&peer, sizeof(peer)) < 0)
         goto out;
 
+    struct pollfd out_ready = { .fd = fd, .events = POLLOUT, .revents = 0 };
+    if (poll(&out_ready, 1, 0) != 1 || !(out_ready.revents & POLLOUT))
+        goto out;
+
+    struct pollfd both = {
+        .fd = fd,
+        .events = POLLIN | POLLOUT,
+        .revents = 0,
+    };
+    if (poll(&both, 1, 0) != 1 || !(both.revents & POLLOUT))
+        goto out;
+
     while (sent < sizeof(message)) {
         int n = (int)write(fd, message + sent, sizeof(message) - sent);
         if (n <= 0 || (size_t)n > sizeof(message) - sent)
             goto out;
         sent += (size_t)n;
     }
+
+    fd_set rfds, wfds;
+    FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
+    FD_SET(fd, &rfds);
+    FD_SET(fd, &wfds);
+    struct timeval tv = {0, 0};
+    if (select(fd + 1, &rfds, &wfds, NULL, &tv) != 1 ||
+        !FD_ISSET(fd, &wfds))
+        goto out;
 
     while (received < sizeof(message)) {
         if (!wait_readable(fd))

@@ -72,13 +72,14 @@ static int dev_tty_write(vfs_node_t *node, uint64_t offset, uint64_t size, void 
 }
 
 // ── /dev/tty poll — delegates to tty_poll via global TTY singleton
-static uint32_t dev_tty_poll(void *priv, struct poll_table *pt)
+static uint32_t dev_tty_poll(void *priv, uint32_t requested,
+                             struct poll_table *pt)
 {
     (void)priv;
     tty_t *tty = get_dev_tty();
     if (!tty)
         return POLLERR;
-    return tty_poll(tty, pt);
+    return tty_poll(tty, requested, pt);
 }
 
 // ── /dev/serial — read/write the COM1 serial port ─────────
@@ -203,7 +204,7 @@ static int devfs_mmap(vfs_node_t *node, struct vma *vma)
 // ── devfs_poll — dispatch poll for fd_poll(FD_DEV) ─────────
 // node->fs_data holds the device index.  Resolve it and call
 // the device's poll callback, or return always-ready if none.
-uint32_t devfs_poll(vfs_node_t *node, poll_table_t *pt)
+uint32_t devfs_poll(vfs_node_t *node, uint32_t requested, poll_table_t *pt)
 {
     int idx = (int)(uintptr_t)node->fs_data;
     if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
@@ -212,7 +213,7 @@ uint32_t devfs_poll(vfs_node_t *node, poll_table_t *pt)
     devfs_device_t *dev = &devices[idx];
 
     if (dev->ops && (uint64_t)dev->ops >= 0xffff800000000000ULL && dev->ops->poll)
-        return dev->ops->poll(dev->private_data, pt);
+        return dev->ops->poll(dev->private_data, requested, pt);
 
     // No poll callback: default to always ready
     return POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM;

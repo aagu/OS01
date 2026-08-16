@@ -497,21 +497,41 @@ static void test_poll(void)
     int fds[2];
     if (pipe(fds) < 0) { FAIL("poll", "pipe failed"); return; }
 
-    struct pollfd pfd;
-    pfd.fd = fds[0];
-    pfd.events = POLLIN;
-    pfd.revents = 0;
+    struct pollfd pfd = { .fd = fds[0], .events = POLLIN, .revents = 0 };
 
     // Pipe should NOT be readable yet (nothing written)
     int ret = poll(&pfd, 1, 0);  // timeout=0 → non-blocking
-    CHECK3(ret == 0, "poll", "empty pipe timeout=0 yields 0");
+    CHECK3(ret == 0 && pfd.revents == 0, "poll", "read end POLLIN empty yields 0");
+
+    // The write end is writable, but never readable.
+    struct pollfd out = { .fd = fds[1], .events = POLLOUT, .revents = 0 };
+    ret = poll(&out, 1, 0);
+    CHECK3(ret == 1 && out.revents == POLLOUT, "poll", "write end POLLOUT ready");
+
+    // Combined requests still report only readiness legal for each end.
+    struct pollfd directions[2] = {
+        { .fd = fds[0], .events = POLLIN | POLLOUT, .revents = 0 },
+        { .fd = fds[1], .events = POLLIN | POLLOUT, .revents = 0 },
+    };
+    ret = poll(directions, 2, 0);
+    CHECK3(ret == 1 && directions[0].revents == 0 &&
+           directions[1].revents == POLLOUT,
+           "poll", "empty pipe combined requests report write end only");
 
     // Write data to pipe
     write(fds[1], "x", 1);
 
     // Now pipe should be readable
+    pfd.revents = 0;
     ret = poll(&pfd, 1, 0);
-    CHECK3(ret == 1 && (pfd.revents & POLLIN), "poll", "pipe with data readable");
+    CHECK3(ret == 1 && pfd.revents == POLLIN, "poll", "read end POLLIN after write");
+
+    directions[0].revents = 0;
+    directions[1].revents = 0;
+    ret = poll(directions, 2, 0);
+    CHECK3(ret == 2 && directions[0].revents == POLLIN &&
+           directions[1].revents == POLLOUT,
+           "poll", "data pipe combined requests report legal directions");
 
     // Consume the byte
     char c;
@@ -525,7 +545,62 @@ static void test_poll(void)
     close(fds[0]);
     close(fds[1]);
 
-    // Test 2: poll with multiple fds
+    // Test 2: blocking POLLIN wakes only after a child writes.
+    int wakefds[2], ackfds[2];
+    if (pipe(wakefds) < 0) {
+        FAIL("poll", "wake pipe failed");
+        return;
+    }
+    if (pipe(ackfds) < 0) {
+        FAIL("poll", "ack pipe failed");
+        close(wakefds[0]);
+        close(wakefds[1]);
+        return;
+    }
+    int64_t pid = fork();
+    if (pid < 0) {
+        FAIL("poll", "wake fork failed");
+        close(wakefds[0]);
+        close(wakefds[1]);
+        close(ackfds[0]);
+        close(ackfds[1]);
+        return;
+    }
+    if (pid == 0) {
+        close(wakefds[0]);
+        close(ackfds[1]);
+        if (poll(NULL, 0, 100) != 0) {
+            close(wakefds[1]);
+            close(ackfds[0]);
+            _exit(1);
+        }
+        int64_t written = write(wakefds[1], "w", 1);
+        char ack = 0;
+        int64_t acknowledged = read(ackfds[0], &ack, 1);
+        close(wakefds[1]);
+        close(ackfds[0]);
+        _exit(written == 1 && acknowledged == 1 && ack == 'a' ? 0 : 1);
+    }
+
+    close(wakefds[1]);
+    close(ackfds[0]);
+    struct pollfd wake = { .fd = wakefds[0], .events = POLLIN, .revents = 0 };
+    ret = poll(&wake, 1, 2000);
+    char wake_byte = 0;
+    int64_t wake_read = ret == 1 && (wake.revents & POLLIN)
+                      ? read(wakefds[0], &wake_byte, 1) : -1;
+    int64_t acknowledged = write(ackfds[1], "a", 1);
+    close(ackfds[1]);
+    int wake_status = 0;
+    int64_t waited = waitpid(pid, &wake_status, 0);
+    CHECK3(ret == 1 && (wake.revents & POLLIN) && wake_read == 1 &&
+           wake_byte == 'w' && acknowledged == 1 && waited == pid &&
+           WIFEXITED(wake_status) &&
+           WEXITSTATUS(wake_status) == 0,
+           "poll", "blocking POLLIN wakes and reads child byte");
+    close(wakefds[0]);
+
+    // Test 3: poll with multiple fds
     int p1[2], p2[2];
     if (pipe(p1) < 0 || pipe(p2) < 0) { PASS("poll", "skipped (multi-pipe alloc failed)"); return; }
 
@@ -549,7 +624,7 @@ static void test_poll(void)
     close(p1[0]); close(p1[1]);
     close(p2[0]); close(p2[1]);
 
-    // Test 3: POLLHUP when writer closes
+    // Test 4: POLLHUP when writer closes
     int hfds[2];
     if (pipe(hfds) == 0) {
         write(hfds[1], "data", 4);
@@ -699,32 +774,43 @@ static void test_select_basic(void)
     int fds[2];
     if (pipe(fds) < 0) { FAIL("select_basic", "pipe failed"); return; }
 
-    fd_set rfds;
+    fd_set rfds, wfds;
     FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
     FD_SET(fds[0], &rfds);
+    FD_SET(fds[1], &wfds);
 
-    // Empty pipe → timeout 0 returns 0
+    // Empty pipe: read end is not readable, write end is writable.
     struct timeval tv = {0, 0};
-    int ret = select(fds[0] + 1, &rfds, NULL, NULL, &tv);
-    CHECK3(ret == 0, "select_basic", "empty pipe timeout=0 returns 0");
-    CHECK3(!FD_ISSET(fds[0], &rfds), "select_basic", "fd not set after timeout");
+    int ret = select(fds[1] + 1, &rfds, &wfds, NULL, &tv);
+    CHECK3(ret == 1 && !FD_ISSET(fds[0], &rfds) &&
+           FD_ISSET(fds[1], &wfds),
+           "select_basic", "empty pipe reports write end only");
 
-    // Write data → readable
+    // With data queued, both legal directions are ready.
     write(fds[1], "x", 1);
     FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
     FD_SET(fds[0], &rfds);
+    FD_SET(fds[1], &wfds);
     tv.tv_sec = 0; tv.tv_usec = 0;
-    ret = select(fds[0] + 1, &rfds, NULL, NULL, &tv);
-    CHECK3(ret == 1 && FD_ISSET(fds[0], &rfds), "select_basic", "pipe with data readable");
+    ret = select(fds[1] + 1, &rfds, &wfds, NULL, &tv);
+    CHECK3(ret == 2 && FD_ISSET(fds[0], &rfds) &&
+           FD_ISSET(fds[1], &wfds),
+           "select_basic", "data pipe reports read and write ends");
 
-    // Read data → empty again
+    // Read data: only the write end remains ready.
     char c;
     read(fds[0], &c, 1);
     FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
     FD_SET(fds[0], &rfds);
+    FD_SET(fds[1], &wfds);
     tv.tv_sec = 0; tv.tv_usec = 0;
-    ret = select(fds[0] + 1, &rfds, NULL, NULL, &tv);
-    CHECK3(ret == 0 && !FD_ISSET(fds[0], &rfds), "select_basic", "empty after read");
+    ret = select(fds[1] + 1, &rfds, &wfds, NULL, &tv);
+    CHECK3(ret == 1 && !FD_ISSET(fds[0], &rfds) &&
+           FD_ISSET(fds[1], &wfds),
+           "select_basic", "empty after read reports write end only");
 
     close(fds[0]); close(fds[1]);
 }
