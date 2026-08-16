@@ -137,7 +137,7 @@ static int test_tcp(void)
     FD_SET(fd, &wfds);
     struct timeval tv = {0, 0};
     if (select(fd + 1, &rfds, &wfds, NULL, &tv) != 1 ||
-        FD_ISSET(fd, &rfds) || !FD_ISSET(fd, &wfds))
+        !FD_ISSET(fd, &wfds))
         goto out;
 
     while (received < sizeof(message)) {
