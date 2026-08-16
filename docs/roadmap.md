@@ -27,9 +27,10 @@
 ```
 P0 (本迭代):
  0. 俄罗斯方块游戏 🔴           — 见下 "Tetris 游戏实施路线图"（内核 2 commit + terminal 双缓冲 + 用户态游戏）
- 1. 网络回归测试 ✅           — TCP/UDP/DNS/DHCP/wget 纳入自动化 QEMU 测试
- 2. /proc/<pid>/fd/           ✅ — 只读 fd 目录 + fd→目标路径合成文件；files_t 引用协议（pin/unpin/get/put）消除 UAF
- 3. 任务退出/回收收敛         — wait 驱动回收，移除调度器与 reaper 双重职责
+ 1. nanosleep 修复 🔴           — 见下 "nanosleep 修复路线图"（睡眠无唤醒源；tetris game-over 卡死 + busybox sleep 假醒实证）
+ 2. 网络回归测试 ✅           — TCP/UDP/DNS/DHCP/wget 纳入自动化 QEMU 测试
+ 3. /proc/<pid>/fd/           ✅ — 只读 fd 目录 + fd→目标路径合成文件；files_t 引用协议（pin/unpin/get/put）消除 UAF
+ 4. 任务退出/回收收敛         — wait 驱动回收，移除调度器与 reaper 双重职责
 
 P1 (近期):
  4. rwlock/seqlock            — VFS 与 /proc 多核缩放
@@ -137,6 +138,50 @@ Step 5 (集成验证) ──→ 所有 Step 完成后
 
 - tty ISIG/pgrp 真实现（Step 2 留的 TODO）→ 内核层 Ctrl-C 信号
 - serial 后端 `tetris -serial`（增量 ANSI，QEMU -nographic 直玩）
+
+---
+
+## nanosleep 修复路线图 🔴 P0
+
+### 背景（tetris 开发中实证发现）
+
+`SYS_nanosleep`（kernel/arch/x86_64/trap.c:1862）睡眠实现无唤醒源：
+
+```c
+uint64_t target = jiffies + ticks;
+while (jiffies < target) {
+    current->state = TASK_INTERRUPTIBLE;   // 标记睡眠
+    schedule();                              // dequeue 后不重新入队
+    ...
+}
+```
+
+schedule()（kernel/sched/task.c:541-547）对 INTERRUPTIBLE 任务 dequeue 后**不重新入队**；
+nanosleep **没有注册任何唤醒机制**（无 wait queue、无 timer 回调、无 wake 路径），
+PIT tick 不唤醒普通睡眠任务 → 无 signal 任务**永久睡死**。
+
+QEMU 实证：
+- tetris game-over 后 `nanosleep(1s)` 永久卡死（无 `\e[?1049l`、init 不 respawn）
+- busybox `sleep 1` **0.05s 瞬间返回**（pending signal 假醒，根本没睡）
+- 与 poll bug 同源（1ef8e1f 已修）：睡眠/超时机制缺唤醒注册；nanosleep 比 poll 更严重（连 wq 都没有）
+
+### 修复方案
+
+| 方案 | 改动 | 代价 |
+|------|------|------|
+| A 最小可用 | nanosleep 循环**不置 INTERRUPTIBLE**（保持 RUNNING）→ schedule 轮询，每 tick 调度回来检查 jiffies | 10ms 粒度空转；信号打断靠循环检查 |
+| B 事件驱动（推荐） | task 加 `wakeup_jiffies` 字段 + PIT tick 扫描唤醒到期的 INTERRUPTIBLE 任务（复用 poll timeout registry 思路，~30 行） | 干净、真睡眠；需处理多核并发唤醒 |
+
+### 分步实现（TDD 门禁）
+
+1. **Step 1 复现测试**（RED）：systest 加 nanosleep case——`nanosleep(100ms)` 断言实际睡眠时长 ≥80ms。当前实现：无 signal 时睡死（systest 超时失败）；有 signal 时假醒（时长断言失败）
+2. **Step 2 GREEN**：方案 B 优先（wakeup_jiffies + PIT 扫描）；方案 A 作 fallback
+3. **Step 3 回归**：systest 全量 + host 全绿 + QEMU 实证——`sleep 1` 真睡 ~1s（非 0.05s）；tetris game-over 后正常退出恢复终端
+4. **Step 4 commit**：`fix(sched): nanosleep with real wakeup`（独立 commit）
+
+### 连带问题（待查，不阻塞）
+
+- **signal 假醒**：busybox `sleep 1` 0.05s 返回——pending signal 来源待确认（疑似 fork 复制父进程 pending SIGCHLD / exec 未清 signal）。修复后 sleep 应真睡 1 秒，假醒自然消除
 
 ---
 
@@ -484,3 +529,4 @@ CPU N: schedule()
 | 34 | terminal.elf 双缓冲 | offscreen 主缓冲 + alt 缓冲 | 退出后内容 100% 一致、恢复零重绘 |
 | 35 | 游戏启动 | 手工 `exec /bin/tetris` | 不进 inittab |
 | 36 | serial 渲染后端 | ❌ 不并入 | 38400 baud 增量重绘可行但投入产出比低；收敛范围 |
+| 37 | nanosleep 修复 | B 事件驱动（wakeup_jiffies + PIT 扫描）优先；A 最小可用 fallback | 睡眠无唤醒源（tetris 卡死实证）；连带排查 signal 假醒（sleep 1 不睡） |
