@@ -4,6 +4,7 @@
 #include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/cpu.h>
 #include <kernel/printk.h>
+#include <kernel/slab.h>   // kfree — for PF_SELF_REAP epilogue
 
 /**
  * __switch_to — architecture-specific context switch
@@ -91,9 +92,22 @@ void __switch_to(task_t *prev, task_t *next)
         );
     }
 
-    // prev has now fully left the CPU: its kernel stack is no
-    // longer in use.  Clear on_cpu so the zombie reaper may free it
-    // (a task that set TASK_ZOMBIE and ran its final schedule()).
-    // RELEASE store: paired with task_wake/reaper ACQUIRE loads.
+    // prev has now fully left the CPU: its kernel stack is no longer in
+    // use.  Clear on_cpu so do_waitpid / task_wake may reap it (a task
+    // that set TASK_ZOMBIE and ran its final schedule()).  RELEASE store
+    // paired with ACQUIRE loads.
     __atomic_store_n(&prev->on_cpu, 0, __ATOMIC_RELEASE);
+
+    // kthread self-reap: a PF_SELF_REAP task removed itself from the
+    // global list and set ZOMBIE atomically in do_exit.  It has no
+    // waitpid consumer, so reclaim its slab objects here.  We run on
+    // NEXT's stack (switch_to already switched rsp), so freeing prev's
+    // stack is safe.  This MUST stay the last code that touches prev:
+    // kfree(prev->stack_alloc_base) frees the task_union containing prev
+    // itself — do not dereference prev past this point.
+    if (prev->flags & PF_SELF_REAP) {
+        if (prev->thread)           kfree(prev->thread);
+        if (prev->fpu_save)         kfree(prev->fpu_save);
+        if (prev->stack_alloc_base) kfree(prev->stack_alloc_base);
+    }
 }
