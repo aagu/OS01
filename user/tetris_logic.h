@@ -22,6 +22,17 @@ typedef struct {
 // 4x4 bitmap for a shape/rotation (values 0/1).
 const uint8_t (*tetris_shape(uint8_t shape, uint8_t rot))[4];
 
+// xorshift32 PRNG — deterministic per seed, host-testable.
+// Feed a per-game seed (e.g. time ^ pid); advance via the returned state.
+uint32_t tetris_rand(uint32_t *state);
+
+// Which board rows would become FULL if `p` were locked now?
+// Writes row indices (0=top) into `rows` (max entries `max`) and
+// returns the count.  Used for the clear-line flash animation BEFORE
+// the actual lock clears them.
+int tetris_preview_full_rows(const tetris_board_t *b, const tetris_piece_t *p,
+                             int *rows, int max);
+
 // Does the piece overlap board cells / walls / floor?
 int tetris_fits(const tetris_board_t *b, const tetris_piece_t *p);
 

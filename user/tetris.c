@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include "tetris_logic.h"
 
 // ── fb_info (must match kernel definition) ──────────────────
@@ -167,8 +168,11 @@ int main(int argc, char **argv)
     memset(prev_view, 0, sizeof(prev_view));
 
     int lines = 0, score = 0;
-    int tick_ms = fast ? 50 : 500;
+    int tick_ms = fast ? 50 : 800;   // classic-start gravity (0.8s/row)
     bool game_over = false;
+    // RNG seed: time ^ pid — different every launch
+    uint32_t rng = (uint32_t)time(NULL) ^ (uint32_t)getpid();
+    if (rng == 0) rng = 0x9e3779b9;
 
     clear_screen();
     memset(prev_view, 0, sizeof(prev_view));
@@ -202,15 +206,27 @@ int main(int argc, char **argv)
         // gravity
         if (tetris_move(&board, &piece, 0, 1) != 0) {
 lock_piece:
+            // Which rows complete with this lock? (flash them before clearing)
+            int full_rows[TETRIS_H], nfull;
+            nfull = tetris_preview_full_rows(&board, &piece, full_rows, TETRIS_H);
             int cleared = tetris_lock(&board, &piece);
             if (cleared > 0) {
                 lines += cleared;
                 score += cleared * 100;
-                tick_ms = 500 - (lines / 10) * 50;
-                if (tick_ms < 100) tick_ms = 100;
+                if (!fast) {
+                    tick_ms = 800 - (lines / 10) * 40;
+                    if (tick_ms < 150) tick_ms = 150;
+                }
+                // Flash completed rows white, pause briefly, then redraw
+                // (poll timeout as delay — nanosleep is broken in this kernel).
+                for (int i = 0; i < nfull; i++)
+                    for (int c = 0; c < TETRIS_W; c++)
+                        draw_cell(c, full_rows[i], 0xFFFFFF);
+                struct pollfd pf = { .fd = kbd, .events = POLLIN };
+                poll(&pf, 1, fast ? 50 : 200);
                 memset(prev_view, 0, sizeof(prev_view)); // full redraw
             }
-            if (tetris_spawn(&board, &piece, lines % 7) != 0)
+            if (tetris_spawn(&board, &piece, tetris_rand(&rng) % 7) != 0)
                 game_over = true;
         }
 

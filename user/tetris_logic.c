@@ -49,6 +49,41 @@ const uint8_t (*tetris_shape(uint8_t shape, uint8_t rot))[4]
     return shapes[shape][rot];
 }
 
+uint32_t tetris_rand(uint32_t *state)
+{
+    uint32_t x = *state;
+    if (x == 0) x = 0x9e3779b9;   // never stuck at 0
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    return x;
+}
+
+int tetris_preview_full_rows(const tetris_board_t *b, const tetris_piece_t *p,
+                             int *rows, int max)
+{
+    tetris_board_t tmp = *b;
+    const uint8_t (*s)[4] = tetris_shape(p->shape, p->rot);
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 4; c++)
+            if (s[r][c]) {
+                int bx = p->x + c;
+                int by = p->y + r;
+                if (by >= 0 && by < TETRIS_H && bx >= 0 && bx < TETRIS_W)
+                    tmp.cells[by][bx] = p->shape + 1;
+            }
+    int n = 0;
+    for (int r = 0; r < TETRIS_H && n < max; r++) {
+        int full = 1;
+        for (int c = 0; c < TETRIS_W; c++)
+            if (!tmp.cells[r][c]) { full = 0; break; }
+        if (full)
+            rows[n++] = r;
+    }
+    return n;
+}
+
 int tetris_fits(const tetris_board_t *b, const tetris_piece_t *p)
 {
     const uint8_t (*s)[4] = tetris_shape(p->shape, p->rot);

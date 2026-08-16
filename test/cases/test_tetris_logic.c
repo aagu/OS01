@@ -131,6 +131,66 @@ TEST_FUNC(test_game_over_on_spawn) {
     assert_eq(-1, tetris_spawn(&board, &piece, 2));
 }
 
+TEST_FUNC(test_rand_deterministic) {
+    uint32_t s1 = 42, s2 = 42;
+    for (int i = 0; i < 10; i++) {
+        uint32_t a = tetris_rand(&s1);
+        uint32_t b = tetris_rand(&s2);
+        assert_eq((long)a, (long)b);     /* same seed → same sequence */
+    }
+    assert_true(s1 != 0);
+    assert_true(s1 != 42);               /* state advanced */
+}
+
+TEST_FUNC(test_rand_covers_all_shapes) {
+    uint32_t s = 1;
+    int seen[7] = {0};
+    for (int i = 0; i < 200; i++)
+        seen[tetris_rand(&s) % 7] = 1;
+    for (int i = 0; i < 7; i++)
+        assert_eq(1, seen[i]);           /* distribution covers 0..6 */
+}
+
+TEST_FUNC(test_rand_differs_per_seed) {
+    uint32_t s1 = 1, s2 = 2;
+    int same = 1;
+    for (int i = 0; i < 8; i++)
+        if (tetris_rand(&s1) != tetris_rand(&s2)) { same = 0; break; }
+    assert_eq(0, same);                  /* different seeds → different seq */
+}
+
+TEST_FUNC(test_preview_no_full_rows) {
+    reset_board();
+    tetris_spawn(&board, &piece, 2);     /* T at top, empty board */
+    int rows[TETRIS_H];
+    assert_eq(0, tetris_preview_full_rows(&board, &piece, rows, TETRIS_H));
+}
+
+TEST_FUNC(test_preview_completed_row) {
+    reset_board();
+    for (int c = 0; c < TETRIS_W; c++)
+        board.cells[19][c] = 1;
+    board.cells[19][1] = 0;              /* hole at col 1 */
+    tetris_piece_t o = { .x = 0, .y = 17, .shape = 1, .rot = 0 }; /* O 2x2 */
+    int rows[TETRIS_H];
+    assert_eq(1, tetris_preview_full_rows(&board, &o, rows, TETRIS_H));
+    assert_eq(19, rows[0]);              /* row 19 completes */
+}
+
+TEST_FUNC(test_preview_multi_rows) {
+    reset_board();
+    for (int r = 17; r <= 19; r++)
+        for (int c = 0; c < TETRIS_W; c++)
+            board.cells[r][c] = 1;
+    board.cells[18][1] = 0;              /* hole in row 18 only */
+    tetris_piece_t o = { .x = 0, .y = 16, .shape = 1, .rot = 0 }; /* O: rows 17,18 */
+    int rows[TETRIS_H];
+    assert_eq(3, tetris_preview_full_rows(&board, &o, rows, TETRIS_H));
+    assert_eq(17, rows[0]);
+    assert_eq(18, rows[1]);              /* 18 completes via O; 19 was already full */
+    assert_eq(19, rows[2]);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_spawn_ok),
     TEST_ENTRY(test_wall_left_blocked),
@@ -142,6 +202,12 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_clear_four_rows),
     TEST_ENTRY(test_occupied_blocked),
     TEST_ENTRY(test_game_over_on_spawn),
+    TEST_ENTRY(test_rand_deterministic),
+    TEST_ENTRY(test_rand_covers_all_shapes),
+    TEST_ENTRY(test_rand_differs_per_seed),
+    TEST_ENTRY(test_preview_no_full_rows),
+    TEST_ENTRY(test_preview_completed_row),
+    TEST_ENTRY(test_preview_multi_rows),
 TEST_LIST_END
 
 int main() {
