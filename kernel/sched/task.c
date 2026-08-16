@@ -822,6 +822,27 @@ uint64_t do_exit(uint64_t exit_code)
         spin_unlock_irqrestore(&task_list_lock, tl_flags);
     }
 
+    // Defensive self-reparent: a USER task whose own parent is a kthread
+    // or NULL (shouldn't happen in normal flow, but closes the
+    // "parent==NULL zombie leak" the old reaper's parent==NULL branch
+    // used to handle) becomes init's child so init can reap it.
+    //
+    // The current->parent read + write is done under task_list_lock, like
+    // the child-reparent block above: waitpid_should_unblock and
+    // sched_unblock_blocked read t->parent from unlocked contexts, so a
+    // lockless write here is a data race with those scans on another CPU.
+    // (Note: after reparenting to init, the SIGCHLD block below will
+    // deliver to init instead of being skipped — harmless; init ignores it.)
+    if (user_init_task && !(current->flags & PF_KTHREAD)) {
+        uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
+        task_t *p = current->parent;
+        if (p == NULL || (p->flags & PF_KTHREAD)) {
+            current->parent = user_init_task;
+            debug_task("reparent: self %d → init (orphan)\n", (int)current->pid);
+        }
+        spin_unlock_irqrestore(&task_list_lock, tl_flags);
+    }
+
     // ── Send SIGCHLD to parent ───────────────────────────
     // NOTE: we write-protect parent->state here because we are
     // about to become ZOMBIE.  After this point, the parent may
@@ -972,13 +993,15 @@ static bool waitpid_should_unblock(task_t *waiter)
 
         if (t->parent != waiter)
             continue;
-        if (t->flags & PF_REAPED)
-            continue;
         if (target_pid != -1 && t->pid != target_pid)
             continue;
-        if (t->state == TASK_ZOMBIE) {
-            waiter->blocker_data.waited_child = t;
-            return true;
+        // Reapable only once the child fully left the CPU. A ZOMBIE
+        // child still on_cpu==1 is mid-final-schedule — skip it and
+        // keep scanning (do NOT return false: another child may be
+        // ready).
+        if (t->state == TASK_ZOMBIE &&
+            __atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE) == 0) {
+            return true;   // reapable — do_waitpid re-scans to reap it
         }
     }
     return false;
@@ -994,96 +1017,92 @@ static bool waitpid_should_unblock(task_t *waiter)
 int64_t do_waitpid(int64_t pid, int *user_status, int options)
 {
     for (;;) {
-        task_t *child = NULL;
-        list_t *pos;
+        task_t   *child      = NULL;
+        int64_t   child_pid  = -1;
+        int64_t   exit_code  = 0;
 
-        // Pass 1: scan for a matching, unreaped ZOMBIE child
+        // Pass 1: find a reapable ZOMBIE child (on_cpu==0) and detach it.
         {
             uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
-            pos = init_task_union.task.list.next;
+            list_t *pos = init_task_union.task.list.next;
             while (pos != &init_task_union.task.list) {
                 task_t *t = container_of(pos, task_t, list);
-                if (!(t->flags & PF_REAPED) &&
-                    t->parent == current &&
-                    t->state == TASK_ZOMBIE &&
-                    (pid == -1 || t->pid == pid)) {
-                    child = t;
-                    break;
-                }
                 pos = task_list_next(pos);
+
+                if (t->parent != current)
+                    continue;
+                if (t->state != TASK_ZOMBIE)
+                    continue;
+                if (pid != -1 && t->pid != pid)
+                    continue;
+                // Gate on on_cpu==0: __switch_to's RELEASE store
+                // guarantees the child's stack/thread/exit_code are no
+                // longer in use. A ZOMBIE child still on_cpu==1 is not
+                // reapable yet — treat it as "exists, keep waiting".
+                if (__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE) != 0)
+                    continue;
+
+                // Capture pid/exit_code BEFORE detaching and freeing
+                // (kfree(stack_alloc_base) frees the task_union holding
+                // the task_t, so t->pid is invalid after step 2 below).
+                child      = t;
+                child_pid  = t->pid;
+                exit_code  = t->exit_code;
+                list_del(&t->list);
+                t->list.next = NULL;
+                t->list.prev = NULL;
+                break;
             }
             spin_unlock_irqrestore(&task_list_lock, tl_flags);
         }
 
         if (child) {
-            int64_t child_pid = child->pid;
-            int64_t exit_code = child->exit_code;
-
             if (user_status) {
                 int status = (int)((exit_code & 0xFF) << 8);
                 if ((uint64_t)user_status < current->addr_limit)
                     *user_status = status;
             }
-            // Mark reaped — schedule()'s zombie reaper will list_del+kfree.
-            // We MUST NOT touch child->list here: on SMP the child may still
-            // be running schedule() → container_of(current->list.next, …),
-            // and list_del/list_add_to_before would corrupt that.
-            __sync_fetch_and_or(&child->flags, PF_REAPED);
+
+            // Synchronous reclamation (no more schedule() reaper).
+            // Order: free the two standalone slabs first, then the
+            // task_union (which contains the task_t itself).
+            if (child->thread)           kfree(child->thread);
+            if (child->fpu_save)         kfree(child->fpu_save);
+            if (child->stack_alloc_base) kfree(child->stack_alloc_base);
 
             debug_task("waitpid: pid=%d reaped child %d (exit=%d)\n",
                           (int)current->pid, (int)child_pid, (int)exit_code);
             return child_pid;
         }
 
-        debug_task("waitpid: pid=%d search for child pid=%d\n",
-                      current ? (int)current->pid : -1, (int)pid);
-        // Check if the child even exists (unreaped, still running)
+        // No reapable child — check existence for -ECHILD / WNOHANG.
         int child_exists = 0;
-        int child_count = 0;
-        debug_task("waitpid: child-list cur=%d pid=%lld:", current->pid, (long long)pid);
         {
             uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
-            pos = init_task_union.task.list.next;
+            list_t *pos = init_task_union.task.list.next;
             while (pos != &init_task_union.task.list) {
                 task_t *t = container_of(pos, task_t, list);
-                if (t->parent == current && !(t->flags & PF_REAPED)) {
-                    child_count++;
-                    debug_task(" [%d s=%d f=%lx p=%lx]",
-                        t->pid, t->state, t->flags, (unsigned long)t->parent);
-                    if (pid == -1 || t->pid == pid)
-                        child_exists = 1;
-                }
                 pos = task_list_next(pos);
+                if (t->parent == current && (pid == -1 || t->pid == pid)) {
+                    child_exists = 1;
+                    break;
+                }
             }
             spin_unlock_irqrestore(&task_list_lock, tl_flags);
         }
-        debug_task(" count=%d exist=%d\n", child_count, child_exists);
 
-        if (!child_exists) {
-            debug_task("waitpid: pid=%d returning ECHILD (no child pid=%lld)\n",
-                          current ? (int)current->pid : -1, (long long)pid);
+        if (!child_exists)
             return -ECHILD;
-        }
 
         if (options & WNOHANG)
             return 0;
 
-        // Block until a child exits or signal arrives.
-        // blocker_wait() handles the condition check atomically
-        // (checks before sleeping, double-checks after state change,
-        // and is rechecked by sched_unblock_blocked in schedule()).
         current->blocker_data.waited_pid = pid;
-        current->blocker_data.waited_child = NULL;
 
         int ret = blocker_wait(waitpid_should_unblock, BLOCKER_WAITPID, true);
-        if (ret == -EINTR) {
-            debug_task("waitpid: pid=%d woken by signal, retrying\n",
-                          current->pid);
-            continue;  // re-check for children before sleeping again
-        }
-        // blocker_wait returned 0 → condition was met
-        // (waited_child was set by the callback)
-        child = current->blocker_data.waited_child;
+        if (ret == -EINTR)
+            continue;   // re-check for children before sleeping again
+        // blocker_wait returned 0 → condition met; loop and reap in Pass 1.
         continue;
     }
 }
