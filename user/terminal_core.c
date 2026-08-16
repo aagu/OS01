@@ -5,17 +5,35 @@
 //   CSI A/B/C/D (cursor), K (clear line), J (clear screen), H (home),
 //   ?25h/?25l (cursor visibility) + \n \r \b \t and printable glyphs.
 // NEW: \e[?1049h / \e[?1049l alternate-screen protocol (dual buffer).
+//
+// Screen buffers are dynamically allocated in term_core_init() to match the
+// real framebuffer dimensions; all access is via flat index (row * cols + col).
 
 #include "terminal_core.h"
 #include <string.h>
+#include <stdlib.h>
 
 enum { CS_NORMAL = 0, CS_ESC = 1, CS_CSI = 2 };
 
-static void blank_cell(term_core_t *t, term_cell_t (*buf)[TERM_COLS], int r, int c)
+// Flat index into a [rows * cols] buffer.
+static inline int cell_idx(const term_core_t *t, int r, int c)
 {
-    if (buf[r][c].glyph != 0) {
-        buf[r][c].glyph = 0;
-        t->dirty[r][c] = true;
+    return r * t->cols + c;
+}
+
+// True if the core's buffers were allocated and are usable.
+static inline bool has_buffers(const term_core_t *t)
+{
+    return t->main_buf && t->alt_buf && t->dirty;
+}
+
+static void blank_cell(term_core_t *t, term_cell_t *buf, int r, int c)
+{
+    if (!has_buffers(t)) return;
+    int i = cell_idx(t, r, c);
+    if (buf[i].glyph != 0) {
+        buf[i].glyph = 0;
+        t->dirty[i] = true;
     }
 }
 
@@ -23,56 +41,78 @@ static void set_glyph(term_core_t *t, int col, int row, uint8_t g)
 {
     if (col < 0 || col >= t->cols || row < 0 || row >= t->rows)
         return;
-    term_cell_t (*buf)[TERM_COLS] = t->alt_active ? t->alt_buf : t->main_buf;
-    if (buf[row][col].glyph != g) {
-        buf[row][col].glyph = g;
-        t->dirty[row][col] = true;
+    if (!has_buffers(t)) return;
+    term_cell_t *buf = t->alt_active ? t->alt_buf : t->main_buf;
+    int i = cell_idx(t, row, col);
+    if (buf[i].glyph != g) {
+        buf[i].glyph = g;
+        t->dirty[i] = true;
     }
 }
 
 static void scroll_active(term_core_t *t)
 {
-    term_cell_t (*buf)[TERM_COLS] = t->alt_active ? t->alt_buf : t->main_buf;
-    memmove(buf[0], buf[1], (t->rows - 1) * sizeof(term_cell_t) * TERM_COLS);
-    for (int c = 0; c < TERM_COLS; c++)
-        buf[t->rows - 1][c].glyph = 0;
-    // whole screen is now different — mark dirty
-    for (int r = 0; r < t->rows; r++)
-        for (int c = 0; c < TERM_COLS; c++)
-            t->dirty[r][c] = true;
+    term_cell_t *buf = t->alt_active ? t->alt_buf : t->main_buf;
+    if (has_buffers(t)) {
+        size_t row_elems = (size_t)t->cols;
+        // Move rows 1..rows-1 up by one row, then clear the new bottom row.
+        memmove(buf, buf + row_elems,
+                (size_t)(t->rows - 1) * row_elems * sizeof(term_cell_t));
+        for (int c = 0; c < t->cols; c++)
+            buf[cell_idx(t, t->rows - 1, c)].glyph = 0;
+        // Whole screen is now different — mark dirty.
+        for (int i = 0; i < t->rows * t->cols; i++)
+            t->dirty[i] = true;
+    }
     t->row = t->rows - 1;
 }
 
 void term_core_init(term_core_t *t, int rows, int cols)
 {
+    term_core_free(t);   // idempotent: release any buffers from a prior init
     memset(t, 0, sizeof(*t));
-    if (rows > TERM_ROWS) rows = TERM_ROWS;
-    if (cols > TERM_COLS) cols = TERM_COLS;
     t->rows = rows;
     t->cols = cols;
     t->cursor_visible = true;
+
+    size_t n = (size_t)rows * (size_t)cols;
+    t->main_buf = malloc(n * sizeof(term_cell_t));
+    t->alt_buf  = malloc(n * sizeof(term_cell_t));
+    t->dirty    = malloc(n * sizeof(bool));
+    if (t->main_buf) memset(t->main_buf, 0, n * sizeof(term_cell_t));
+    if (t->alt_buf)  memset(t->alt_buf,  0, n * sizeof(term_cell_t));
+    if (t->dirty)    memset(t->dirty,    0, n * sizeof(bool));
 }
 
-term_cell_t (*term_core_screen(term_core_t *t))[TERM_COLS]
+void term_core_free(term_core_t *t)
+{
+    free(t->main_buf); t->main_buf = NULL;
+    free(t->alt_buf);  t->alt_buf  = NULL;
+    free(t->dirty);    t->dirty    = NULL;
+}
+
+term_cell_t *term_core_screen(term_core_t *t)
 {
     return t->alt_active ? t->alt_buf : t->main_buf;
 }
 
 bool term_core_is_dirty(term_core_t *t, int row, int col)
 {
-    return t->dirty[row][col];
+    if (!has_buffers(t)) return false;
+    return t->dirty[cell_idx(t, row, col)];
 }
 
 void term_core_clear_dirty(term_core_t *t, int row, int col)
 {
-    t->dirty[row][col] = false;
+    if (!has_buffers(t)) return;
+    t->dirty[cell_idx(t, row, col)] = false;
 }
 
 void term_core_mark_all_dirty(term_core_t *t)
 {
-    for (int r = 0; r < TERM_ROWS; r++)
-        for (int c = 0; c < TERM_COLS; c++)
-            t->dirty[r][c] = true;
+    if (!has_buffers(t)) return;
+    for (int i = 0; i < t->rows * t->cols; i++)
+        t->dirty[i] = true;
 }
 
 static void clear_line(term_core_t *t, int from, int to)
@@ -83,7 +123,7 @@ static void clear_line(term_core_t *t, int from, int to)
 
 static void clear_screen(term_core_t *t)
 {
-    term_cell_t (*buf)[TERM_COLS] = term_core_screen(t);
+    term_cell_t *buf = term_core_screen(t);
     for (int r = 0; r < t->rows; r++)
         for (int c = 0; c < t->cols; c++)
             blank_cell(t, buf, r, c);

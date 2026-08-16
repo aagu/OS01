@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>   // struct winsize (TIOCSWINSZ target)
 #include <termios.h>
 #include "terminal_core.h"
 
@@ -72,11 +73,12 @@ static void put_glyph(int col, int row, uint32_t fgc, uint32_t bgc, char c)
 
 static void flush_screen(void)
 {
-    term_cell_t (*screen)[TERM_COLS] = term_core_screen(&core);
+    term_cell_t *screen = term_core_screen(&core);
+    if (!screen) return;
     for (int r = 0; r < core.rows; r++)
         for (int c = 0; c < core.cols; c++)
             if (term_core_is_dirty(&core, r, c)) {
-                uint8_t g = screen[r][c].glyph;
+                uint8_t g = screen[r * core.cols + c].glyph;
                 put_glyph(c, r, fg, bg, g ? (char)g : ' ');
                 term_core_clear_dirty(&core, r, c);
             }
@@ -178,6 +180,18 @@ int main(void)
     int slave = open("/dev/pts0", O_RDWR);
     if (slave < 0) { close(pty_fd); close(tty_fd); close(fb_fd); exec(ASH_PATH, ash_argv, environ); return 1; }
 
+    // Tell the PTY (and thus ash) the real terminal size, so line editing
+    // and line-wrapping use the full framebuffer width instead of the 80x25
+    // default baked into pty_alloc().  Without this, ash wraps output at 80
+    // columns and the right side of the screen is never used.
+    struct winsize ws = {
+        .ws_row    = (unsigned short)term_rows,
+        .ws_col    = (unsigned short)term_cols,
+        .ws_xpixel = (unsigned short)fb_info.width,
+        .ws_ypixel = (unsigned short)fb_info.height,
+    };
+    ioctl(slave, TIOCSWINSZ, &ws);
+
     // 5. Fork ash
     int ash_pid = fork();
     if (ash_pid == 0) {
@@ -214,6 +228,7 @@ int main(void)
     }
 
     waitpid(ash_pid, NULL, 0);
+    term_core_free(&core);
     munmap(fb, fb_info.height * fb_info.stride);
     close(pty_fd); close(tty_fd); close(fb_fd);
     return 0;
