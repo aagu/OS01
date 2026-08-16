@@ -28,6 +28,7 @@
 #include <kernel/subsys.h>
 #include <kernel/arch/subsys.h>
 #include <kernel/console.h>
+#include <kernel/logo.h>
 #include <kernel/fb.h>
 #include <kernel/pty.h>
 #include <net/net.h>
@@ -148,6 +149,7 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     PMMngr.start_brk   = (uint64_t)&_end;
 
     frame_buffer_early_init();
+    boot_logo_show();                 // OS01 boot logo
     color_printk(RED, BLACK, "Hello, World!\n");
 
     pmm_init(bootinfo->E820_Info);      // physical page allocator
