@@ -1,7 +1,7 @@
-# OS01 优化路线图 v15
+# OS01 优化路线图 v17
 
-> **基准**: `840f3a5` (architecture boundary cleanup)
-> **日期**: 2026-08-15
+> **基准**: `b7753ae` (merge fix/e1000-rx-ring-ownership)
+> **日期**: 2026-08-16
 
 标记: ✅ 已完成 | 🔴 P0 本迭代 | 🟡 P1 近期 | 🟢 P2 中期 | 🔵 P3 远期
 
@@ -17,8 +17,8 @@
 | **Phase 4: 文件系统** | ext2 R/W、FAT32 R/W、tmpfs、devfs、procfs、GPT 双分区 | ✅ |
 | **Phase 5: 设备驱动** | 8259A PIC、APIC/IOAPIC/LAPIC、PIT/LAPIC timer、PS/2 键盘、16550 串口、AHCI SATA | ✅ |
 | **Phase 6: 用户态** | busybox ash shell（方向键行编辑+光标闪烁+raw mode TTY）、9 applet、init（/etc/inittab 配置解析、4 阶段引导：SYSINIT→WAIT→ONCE→RESPAWN/ASKFIRST、fallback 硬编码默认）、libc (printf/malloc/string/syscall wrapper)、VT100 CSI 终端模拟器 | ✅ |
-| **Phase 7: poll/select** | poll_table + 双队列级联唤醒、select/pselect 系统调用（SYS_select=50 + SYS_pselect6=51）、do_poll_core 共享轮询循环、pselect6 sigmask 原子 swap、systest 126/126 | ✅ |
-| **Phase 8: 网络** | lwIP 2.2.1、E1000 + virtio-net、PCI/MSI-X、DHCP/DNS、TCP/UDP socket syscall（52–64）、poll/select 集成、BusyBox HTTP wget | ✅ |
+| **Phase 7: poll/select** | poll_table + 双队列级联唤醒、select/pselect 系统调用（SYS_select=50 + SYS_pselect6=51）、do_poll_core 共享轮询循环、pselect6 sigmask 原子 swap、requested-event-aware 注册（按请求方向唤醒，修复复合 flags + PTY 双注册容量）、per-poll timeout registry（修复 lost-wakeup + 并发 clobber）、systest 142/142 | ✅ |
+| **Phase 8: 网络** | lwIP 2.2.1、E1000 + virtio-net、PCI/MSI-X、DHCP/DNS、TCP/UDP socket syscall（52–64）、poll/select 集成、BusyBox HTTP wget、E1000 RX ring 所有权串行化、DHCP ACD 关闭（确定性绑定）、自动化网络回归 harness（make test-network） | ✅ |
 
 ---
 
@@ -26,11 +26,11 @@
 
 ```
 P0 (本迭代):
- 0. 俄罗斯方块游戏 🔴           — 见下 "Tetris 游戏实施路线图"（内核 2 commit + terminal 双缓冲 + 用户态游戏）
+ 0. 俄罗斯方块游戏 ✅           — 已实施（framebuffer 像素渲染 + /dev/keyboard 扫描码 + alt-screen 终端恢复）
  1. nanosleep 修复 🔴           — 见下 "nanosleep 修复路线图"（睡眠无唤醒源；tetris game-over 卡死 + busybox sleep 假醒实证）
  2. 网络回归测试 ✅           — TCP/UDP/DNS/DHCP/wget 纳入自动化 QEMU 测试
  3. /proc/<pid>/fd/           ✅ — 只读 fd 目录 + fd→目标路径合成文件；files_t 引用协议（pin/unpin/get/put）消除 UAF
- 4. 任务退出/回收收敛         — wait 驱动回收，移除调度器与 reaper 双重职责
+ 4. 任务退出/回收收敛         — wait 驱动回收，移除调度器与 reaper 双重职责（方案已实现于 worktree-wait-driven-reaping，待合并入 master）
 
 P1 (近期):
  4. rwlock/seqlock            — VFS 与 /proc 多核缩放
@@ -66,9 +66,9 @@ P3 (远期):
 
 ---
 
-## Tetris 游戏实施路线图 🔴 P0
+## Tetris 游戏实施路线图 ✅ P0（已完成）
 
-> 状态：**规划完成，待实施**（2026-08-15）。所有内核改造点已逐一核实（keyboard ring/IRQ、devfs poll 分派、tty 四阶段阻塞协议、termios 现状、PTY termios 对比、fb mmap/FBIOSURRENDER 语义、terminal.c VT100 解析器、扫描码表）。
+> 状态：**已完成**（2026-08-16）。提交 `79f1179`（framebuffer + alt-screen 协议）、`d8e5c05`（UX：慢速重力 + 种子 RNG + 消行闪烁）、`ae0cc04`（消行白残留修复）。QEMU 手工 `exec /bin/tetris` 可玩，退出终端内容恢复。
 
 ### 目标
 
@@ -473,6 +473,16 @@ CPU N: schedule()
 | **lwIP 网络栈合并** (E1000/virtio-net + PCI/MSI-X + DHCP/DNS + TCP/UDP socket + poll/select + HTTP wget) | 多迭代 | 08-15 |
 | **网络正确性加固** (DNS 超时、端口字节序、部分读缓存、shutdown、UDP readiness、响应 hang) | 3 天 | 08-12~08-15 |
 | **arch 边界收紧** (x86 平台源选择、early task-state hook、公共 gate ABI、arch signal API、端口 I/O wrapper) | 1 天 | 08-15 |
+| **/proc/<pid>/fd/ 观测性** (files_t 引用协议 pin/unpin + dup/dup2/fcntl 路由重构 + exit 路径 pin) | 1 天 | 08-15 |
+| **per-poll timeout registry** (poll_timeout_head 链表 + PIT 扫描，修复 lost-wakeup + 并发 clobber) | 半天 | 08-15 |
+| **keyboard poll 支持** (/dev/keyboard 扫描码 wait queue + keyboard_poll_dev) | 半天 | 08-15 |
+| **tty termios 诚实化** (TCSETS 真存储 + raw 默认 + ICANON/ECHO) | 半天 | 08-15 |
+| **terminal alt-screen 双缓冲** (?1049h/l) | 半天 | 08-15 |
+| **俄罗斯方块游戏** (framebuffer 像素渲染 + 扫描码输入 + alt-screen 恢复 + UX) | 1 天 | 08-16 |
+| **E1000 RX ring 所有权串行化** (tcpip 线程独占硬件 ring 消费，IRQ 仅 ack + wake) | 半天 | 08-16 |
+| **requested-event-aware poll/select** (按请求方向注册/唤醒，修复复合 flags + PTY 双注册容量 + 时序敏感 select 断言) | 1 天 | 08-16 |
+| **DHCP ACD 关闭** (LWIP_DHCP_DOES_ACD_CHECK=0，消除 ~10.6s ACD 竞态导致的偶发不绑定) | 1 小时 | 08-16 |
+| **网络回归 harness** (make test-network + OS01_TCP_ECHO_DELAY_MS delayed-reply + 20/20 no-delay + 10/10 delay250 cohort) | 1 天 | 08-16 |
 
 ---
 
@@ -530,3 +540,6 @@ CPU N: schedule()
 | 35 | 游戏启动 | 手工 `exec /bin/tetris` | 不进 inittab |
 | 36 | serial 渲染后端 | ❌ 不并入 | 38400 baud 增量重绘可行但投入产出比低；收敛范围 |
 | 37 | nanosleep 修复 | B 事件驱动（wakeup_jiffies + PIT 扫描）优先；A 最小可用 fallback | 睡眠无唤醒源（tetris 卡死实证）；连带排查 signal 假醒（sleep 1 不睡） |
+| 38 | poll 注册方向语义 | requested & legal & unavailable 才注册（poll_requested_read/write 分类器）；readiness 只由 open mode 决定，绝不因 requested bits 创造就绪 | 修复复合 flags（O_RDWR 管道误报方向）、PTY 双注册容量（每 fd 2 槽）、socket POLLOUT 吞 POLLIN 注册 |
+| 39 | poll 超时最终扫描 | 超时路径 cleanup 后 `poll_scan(kfds, nfds, NULL)` 只读扫描 | 超时返回前不恢复 current_poll_wq，避免最后一拍唤醒被丢 |
+| 40 | DHCP ACD | `LWIP_DHCP_DOES_ACD_CHECK=0` | QEMU user-mode NAT 单 guest 无地址冲突可能；ACD ~10.6s PROBE/ANNOUNCE 竞态 nettest 10s 等待，偶发不绑定 |
