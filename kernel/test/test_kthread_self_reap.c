@@ -3,6 +3,7 @@
 #include <kernel/task.h>
 #include <kernel/slab.h>      // kmalloc_cache_size[] — assert object-level reclaim
 #include <device/timer.h>     // jiffies — time-bounded wait (cross-CPU safe)
+#include <kernel/arch/irq.h>  // arch_local_irq_enable — schedule() returns with IRQs off
 #include <kernel/printk.h>
 
 // kthread that exits immediately. Its thread/fpu_save/stack must be
@@ -58,8 +59,10 @@ static int test_kthread_self_reap_once(void)
     // is atomic and this is a benign progress check, not a correctness
     // dependency (the final comparison is also just a leak detector).
     uint64_t start = jiffies;
-    while (sc->total_using > using_before && jiffies - start < 100)
+    while (sc->total_using > using_before && jiffies - start < 100) {
         schedule();
+        arch_local_irq_enable();   // schedule() returns with IRQs off — re-enable so jiffies advances
+    }
 
     if (sc->total_using > using_before) {
         serial_printk("[selftest] kthread_self_reap: "
