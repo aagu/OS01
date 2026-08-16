@@ -17,6 +17,7 @@
 #include <sys/syscall.h>
 #include <time.h>
 #include <fcntl.h>
+#include <poll.h>
 
 // ── Action types ────────────────────────────────────────────
 // MUST be powers of 2: run_actions() uses bitmask matching.
@@ -543,11 +544,14 @@ int main(void)
         // Check if any RESPAWN/ASKFIRST actions need starting
         run_actions(ACT_RESPAWN | ACT_ASKFIRST);
 
-        // Sleep briefly to avoid busy-waiting.
-        {
-            struct timespec req = { .tv_sec = 0, .tv_nsec = 100000000 };
-            nanosleep(&req, NULL);
-        }
+        // Sleep briefly to avoid busy-waiting.  Use poll()'s timeout, NOT
+        // nanosleep(): nanosleep spins on jiffies which can stall in a fork
+        // child (init is forked by the kernel init thread), freezing this
+        // loop and leaving orphaned grandchildren unreaped (a ZOMBIE leak
+        // that test_orphan_reparent in systest catches).  poll()'s timeout
+        // is PIT-driven (pit_handler wakes the poll wait queue) and is
+        // reliable here.
+        poll(NULL, 0, 100);
     }
 
     return 0;
