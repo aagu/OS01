@@ -1,32 +1,33 @@
 #include <kernel/logo.h>
 #include <kernel/printk.h>
 
-// ── OS01 boot logo (7 rows x 38 cols ASCII art) ──────────────
+// ── OS01 boot logo (7 rows x 31 cols ASCII art) ──────────────
 // O S 0 1, drawn with putchar_at at character-cell granularity.
-// Colors: O=RED, S=YELLOW, 0=GREEN, 1=INDIGO (cyan-ish).
-// Tagline + dividers use WHITE / LIGHT_GRAY.
+// Each letter is a 7x7 block; shapes VERIFIED by rendering (see
+// docs/boot-logo-design.md / design script): O=RED, S=YELLOW,
+// 0=GREEN, 1=INDIGO. Tagline + dividers use WHITE / LIGHT_GRAY.
 
 #define LOGO_ROWS 7
-#define LOGO_COLS 38
+#define LOGO_COLS 31
 
 static const char *logo_lines[LOGO_ROWS] = {
-    "    #####   ########   ######   #    #",
-    "   #     #  #       #  #     #  #    #",
-    "   #        #       #  #     #  #    #",
-    "   #  ####  ########   ######   #    #",
-    "   #     #  #     #    #     #  #    #",
-    "   #     #  #       #  #     #  #    #",
-    "    #####   #       #   ######  ######",
+    " #####   ######  #####     #   ",
+    "#     # #     # #     #   ##   ",
+    "#     # #       #   ###    #   ",
+    "#     #  #####  #  #  #    #   ",
+    "#     #       # ###   #    #   ",
+    "#     # #     # #     #    #   ",
+    " #####   ######  #####   ##### ",
 };
 
-// Letter column boundaries within a 38-char row:
-//   O: 0-6   S: 8-15   0: 17-23   1: 25-30
+// Letter column boundaries within a 31-char row (7 cols each + 1 gap):
+//   O: 0-6   S: 8-14   0: 16-22   1: 24-30
 static unsigned int logo_color_for_col(int col)
 {
     if (col < 7)        return RED;
-    if (col < 16)       return YELLOW;
-    if (col < 24)       return GREEN;
-    return INDIGO;                      // col 24..37 -> '1' region + padding
+    if (col < 15)       return YELLOW;
+    if (col < 23)       return GREEN;
+    return INDIGO;                      // col 23..30 -> '1' region + padding
 }
 
 void boot_logo_show(void)
