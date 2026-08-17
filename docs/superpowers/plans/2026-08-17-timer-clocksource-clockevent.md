@@ -226,6 +226,9 @@ void tick_handler(void)
     jiffies++;
 
     // poll 超时扫描（纳秒比较）—— 从 pit_handler 迁来。
+    // ⚠️ 时序假设：boot 期 poll_timeout_head 恒 NULL（poll 只在用户态进程里调，
+    // 用户态进程 task_init() 之后才有），此短路保证 GS base 装之前（phase 4 到
+    // main.c:276）不调 clocksource_read_ns()（它读 this_cpu()->tsc_offset）。
     if (poll_timeout_head) {
         spin_lock(&poll_timeout_lock);
         uint64_t now_ns = clocksource_read_ns();
@@ -334,6 +337,16 @@ void irq_unmask(uint32_t gsi)
         p->controller->enable(0x20 + gsi);
 }
 ```
+
+> **对称性已验证（Hermes 评审问题 2，已读源码确认，无需实现者再查）**：
+> - `ioapic_disable`（ioapic.c:193-208）= 置 IOREDTBL mask 位（`low | IOAPIC_RED_MASK`），
+>   **保留** vector/trigger/polarity/dest 字段，是 mask-only。
+> - `ioapic_enable`（ioapic.c:108-191）= **重建** redirection entry（重新算 trigger/
+>   polarity 并写 high+low），写的 low_flags **不含 mask 位** → 清除 mask、恢复路由。
+> - 两者对称：disable 置 mask 保留路由，enable 清 mask 重建路由。PIT（IRQ0）flags=
+>   IRQF_TRIGGER_EDGE，enable 重建时经 `irq_table[nr-32].flags` 正确还原 edge 触发。
+> - PIC 路径同样 mask-only（8259A.c `pic_disable/enable` 用 OCW1 掩码位，天然对称）。
+> 结论：`irq_mask` 用 `controller->disable` 安全，回退 PIT 时 `irq_unmask` 能正确恢复 IRQ0。
 
 - [ ] **Step 8: 编译验证（无行为变化）**
 
@@ -452,16 +465,15 @@ int rtc_pie_calibrate(uint64_t *tsc_hz_out, uint64_t *lapic_hz_out)
     uint8_t a = get_rtc_register(0x0A);
     set_rtc_register(0x0A, (a & 0xF0) | 0x06);
 
-    // 4. 主循环：双条件（tick 数未达 && TSC 流逝 < 500ms）。
+    // 4. 主循环：双条件（tick 数未达 && TSC 流逝 < 宽松上限）。
+    //    RTC PIE 校准时 freq 未知（cpuid 15h=0 才会进这里），无法把「500ms」精确
+    //    换算成 cycle 数。用 2^32 cycle 作宽松兜底：@8.6GHz ≈ 500ms、@3GHz ≈
+    //    1.43s、@1GHz ≈ 4.3s。正常路径 250ms 内 tick 达标，不依赖此值精度；
+    //    它只防 IRQ8 完全失效时的无限自旋（挂 boot）。
     rtc_pie_count = 0;
     uint64_t tsc_start = arch_cycle_counter();
-    uint64_t budget = 500000000ULL;      // 500ms，用 freq 换算在下面精确化
-    // 用当前已知 freq 精确化 budget：无 freq 时用粗 fallback（约 1.5e9 cycle@3GHz）。
-    // 这里用一次 arch_cycle_counter 差值配合调用方已知 freq；若无则按 3GHz 估算。
-    (void)budget;                         // 见下方循环用 arch_cycle_counter 差值
     while (rtc_pie_count < RTC_PIE_TICKS) {
-        // 500ms 硬超时：按 3GHz 粗估 cycle 上限（实际由调用方 freq 校准误差兜底）。
-        if (arch_cycle_counter() - tsc_start > 1500000000ULL) {   // ~500ms @3GHz
+        if (arch_cycle_counter() - tsc_start > 0x100000000ULL) {  // 2^32 cycle 兜底
             break;
         }
         arch_cpu_pause();
@@ -484,6 +496,10 @@ int rtc_pie_calibrate(uint64_t *tsc_hz_out, uint64_t *lapic_hz_out)
     // off-by-one 修正：tsc0 在沿#1、tsc1 在沿#N，实际跨 N-1 个周期。
     uint64_t n = RTC_PIE_TICKS - 1;
     *tsc_hz_out   = tsc_elapsed * 1024 / n;
+    // ⚠️ lapic_hz_out = 递减率（divisor ÷2 已折算），**不 ×2**：elapsed_lapic 是
+    // ÷2 后递减量，除以窗口秒数 n/1024 即递减率；lapic_timer_start 的
+    // init_count=hz/freq 直接基于递减率。×2 会得真实频率 → init_count 被 divisor
+    // 再 ÷2 → 50Hz。与 Task 3 Step 1 的 `elapsed * 100`（不 ×2）语义一致。
     *lapic_hz_out = elapsed_lapic * 1024 / n;
     return 0;
 }
@@ -631,7 +647,8 @@ void lapic_timer_calibrate(void)
         return;
     }
 
-    lapic_timer_divisor = 0;   // ÷2
+    lapic_timer_divisor = 0;   // ÷2（SDM 000b；⚠️ 原代码 lapic_timer.c:53 注释
+                               // "divide by 1" 是错的，实现时一并改正为 ÷2）
     lapic_write(LAPIC_TIMER_DIV, lapic_timer_divisor);
     lapic_write(LAPIC_TIMER_INIT, 0xFFFFFFFF);
 
@@ -642,8 +659,11 @@ void lapic_timer_calibrate(void)
     uint32_t cur = lapic_read(LAPIC_TIMER_CUR);
     uint64_t elapsed = 0xFFFFFFFFULL - cur;
 
-    // ÷2 折算：elapsed 是半频计数，真实频率 = elapsed*2*100 = elapsed*200。
-    lapic_timer_hz = elapsed * 200;
+    // lapic_timer_hz 语义 = 递减率（÷2 已折算），不是真实频率。
+    // elapsed 是 ÷2 后 10ms 递减量，除以 10ms 得递减率 → elapsed * 100（不 ×2）。
+    // 若误写 *200 得真实频率，lapic_timer_start 的 init_count=hz/freq 会被 divisor
+    // 再 ÷2 → 50Hz（Hermes 评审「漏 ×2」的误报方向，正确是保持 ×100）。
+    lapic_timer_hz = elapsed * 100;
 
     debug_sched("LAPIC timer: %u ticks/10ms → %lu Hz (div=%u, TSC)\n",
                 (unsigned)elapsed, (unsigned long)lapic_timer_hz,
@@ -722,6 +742,15 @@ void pit_handler(uint64_t nr __attribute__((unused)),
 ```
 
 在 `pit.c` 顶部加 `#include <kernel/clockevent.h>`。删除原 `pit_handler` 里的 jiffies++、poll 扫描、need_resched、watchdog、softirq 代码（全部并入 `tick_handler`）。
+
+> **GS 时序假设（Hermes 评审问题 3，需在 tick_handler 注释里写明）**：`tick_handler()`
+> 的 poll 扫描调 `clocksource_read_ns()`（读 `this_cpu()->tsc_offset`），而
+> `tick_handler` 在 phase 4（PIT 启动）到 `main.c:276`（GS 装）之间每 tick 都跑。
+> 安全前提是 `poll_timeout_head` 在 boot 期恒 NULL（poll 只在用户态进程里调，用户态
+> 进程 `task_init()` 之后才有），`if (poll_timeout_head)` 短路使 `clocksource_read_ns()`
+> 不被调用。**实现 tick.c 时必须在 poll 扫描里保留 `if (poll_timeout_head)` 短路，
+> 并加注释「boot 期 poll 空 → 不读 GS」**。若未来允许 boot 期注册 poll，须先解决
+> GS 早期安装。
 
 - [ ] **Step 5: （irq_mask/irq_unmask 已在 Task 1 Step 7b 定义，无需重复）**
 
@@ -849,6 +878,12 @@ git commit -m "feat(tick): BSP 切 LAPIC 周期 tick，先掩 PIT 再接管 + �
 ---
 
 ## Task 4: CLOCK_MONOTONIC/REALTIME + nanosleep + poll 迁纳秒
+
+> **承重墙前置（Hermes 建议）**：必须**先**在 Task 3 Step 11 用 QEMU trace 确认
+> LAPIC 100Hz 接管成功（门①），再动本任务。这是整个重构的承重墙——先有一版
+> 「tick 正确 + 时间仍走 jiffies」的可运行系统，再叠纳秒迁移，失败定位面小。
+> KVM（非 TCG）下握手采样的 store 延迟可能 >100ns，若 Task 3 测 `tsc_offset`
+> 异常大，实现注释提示加 `lfence`（spec §8.3 已标可选）。
 
 **Files:**
 - Modify: `kernel/include/kernel/task.h`（`wakeup_jiffies`→`wakeup_ns`）
@@ -1065,6 +1100,21 @@ git commit -m "test(time): 内核 jiffies 频率 self-test + 验证门证据 + �
 ---
 
 ## Self-Review 记录
+
+**Hermes 外部评审修订（v7，本次）**：
+- 问题 1「lapic_hz_out 漏 ×2」→ **误报，方向反了**。`lapic_timer_hz` 语义 = 递减率
+  （÷2 已折算），不是真实频率。真正的 bug 是 plan Task 3 Step 1 写了 `elapsed * 200`
+  （多 ×2），已改回 `elapsed * 100`。RTC 路径 `elapsed * 1024 / n` 本就正确（不 ×2），
+  加注释说明语义。spec §5.1 新增「lapic_timer_hz 语义」段。
+- 问题 2「irq_mask 对称性」→ 已读 ioapic.c 源码确认对称（disable 置 mask 保留路由，
+  enable 重建清 mask），在 plan Task 1 Step 7b 加验证结论，无需实现者再查。
+- 问题 3「GS 时序」→ spec §7.4 补 tick_handler poll 扫描路径；plan Task 1 Step 5
+  tick_handler 代码 + Task 3 Step 4 各加「boot 期 poll 空 → 不读 GS」注释。
+- 问题 4「500ms 超时硬编码 3GHz」→ plan Task 2 Step 2 改 2^32 cycle 宽松兜底
+  （@8.6GHz≈500ms、@3GHz≈1.43s），注释说明不依赖精度、只防无限自旋。
+- 问题 5「divisor 注释矛盾」→ plan Task 3 Step 1 注明原 lapic_timer.c "divide by 1"
+  是错的，实现时统一 ÷2。
+- 承重墙建议 → plan Task 4 开头加「先过 Task 3 门①再动」前置 + KVM lfence 提示。
 
 **1. Spec coverage**（spec §2-§11 → 任务映射）:
 - §3 架构分层 / §4 接口 → Task 1（clocksource.h/clockevent.h/time.c/tick.c）

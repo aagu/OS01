@@ -11,6 +11,7 @@
   - v4：并入三轮 review（register/unregister 参数约定写反、irq_mask 的 gsi→vector 转换、PIE 采样点+divisor、watchdog 双计、EINTR rem 下溢保护、握手有界等待、fallback AP 无 tick、门④.14 放宽、AP 复用 BSP 校准状态）
   - v5：并入四轮 review（AP 握手超时后无条件采样 bug、0.4%/0.8% 矛盾 + off-by-one 修复、超时 300→500ms、LVT_TIMER 掩蔽、IRQ8 读 0x0C 清标志、arch_tick_start 返回 bool、SYNC_SPIN_LIMIT 双侧同宏、lfence 可选、CPUID15h 有效=RTC 不需要注记、门②⑥ 忙等基准）
   - v6：并入五轮 review（300/500ms 三处统一、校准优先级死代码修正 + §8.1 正交表述如实化、DIV=0 是 ÷2 非 ÷1、register_irq(8) 带 IRQF_TRIGGER_LEVEL）
+  - v7：并入 Hermes 外部评审（明确 lapic_timer_hz 语义=递减率不 ×2、irq_mask ioapic 对称性验证结论、tick_handler poll 扫描的 GS 时序假设、500ms 超时改 2^32 宽松兜底、divisor 注释统一 ÷2）
 
 ---
 
@@ -236,8 +237,25 @@ static int rtc_pie_calibrate(uint64_t *tsc_hz_out, uint64_t *lapic_hz_out)
     //    写 unregister_irq(8) → irq_table[-24] 野内存写（irq.c:58-62 清任意地址）。
     // 7. *tsc_hz_out   = (tsc1 - tsc0) * 1024 / (N - 1)   // 修 off-by-one，见下
     //    *lapic_hz_out = elapsed_lapic * 1024 / (N - 1)
+    //    ⚠️ lapic_hz_out 语义 = 递减率（divisor ÷2 已折算），不是真实总线频率。
+    //    因此**不 ×2**：elapsed_lapic 是 ÷2 后的递减量，除以窗口秒数 (N-1)/1024
+    //    即得递减率。lapic_timer_start 的 init_count = hz/freq 直接基于递减率。
+    //    详见下方「lapic_timer_hz 语义」段。
 }
 ```
+
+**lapic_timer_hz 语义（关键，两条校准路径与启动必须一致）**：`lapic_timer_hz` 存的
+是**递减率**（= 总线频率 ÷ divisor，divisor ÷2 已折算），**不是真实 LAPIC 总线
+频率**。这是现有 `lapic_timer.c` 的自洽语义：`lapic_timer_hz = elapsed * 100`
+（elapsed 是 ÷2 后 10ms 递减量 → 递减率），随后 `lapic_timer_start` 的
+`init_count = lapic_timer_hz / freq_hz` 直接基于递减率。**因此两条校准路径都不
+×2**：
+- TSC 窗口（10ms）：`lapic_hz = elapsed * 100`
+- RTC PIE（n/1024s）：`lapic_hz = elapsed * 1024 / (n-1)`
+
+若误 ×2 得到「真实频率」，`init_count = 真实频率/freq` 会被 divisor 再 ÷2，最终
+LAPIC 跑 ~50Hz（验证门①直接失败）。这是 Hermes 评审「漏 ×2」的误报方向——
+正确做法是**不 ×2**，并在此明确语义防再犯。
 
 **采样窗口规格与精度（off-by-one 已修，数字统一）**：PIE 1024Hz，N=256 tick ≈
 250ms。**主导误差是 off-by-one**：tsc0 在沿 #1、tsc1 在沿 #N → 实际跨越 (N-1)
@@ -282,6 +300,7 @@ lapic_timer_calibrate():
         lapic_hz = g_lapic_premeasured_hz;       // 优先：RTC PIE 联合结果（250ms 更稳）
     else if (tsc_hz != 0)
         lapic_hz = measure_against_tsc(tsc_hz);  // 回落：TSC 窗口（~10ms）
+        // = elapsed * 100（elapsed 是 ÷2 后 10ms 递减量 → 递减率，不 ×2）
     else
         lapic_hz = 0;                            // 退 PIT
 ```
@@ -435,6 +454,15 @@ phase 4-6 期间 `pit_handler` 已在 `percpu_install_gs(0)`（`main.c:276`）�
 既有窗口值得**顺手记录**（spec 内记录即可），或加一条 boot 期 GS 早期安装（在
 `arch_register_subsys` 前把 GS base 指向 `&percpu_data[0]`）。列为可选改进，不
 阻断本次。
+
+**tick_handler 的 poll 扫描路径同样受此窗口影响（本次改造后新增的 GS 读取点）**：
+`tick_handler()` 内 poll 扫描调 `clocksource_read_ns()`（读 `this_cpu()->tsc_offset`），
+而 `tick_handler` 在 phase 4（PIT 启动）到 `main.c:276`（GS 装）之间每 tick 都跑。
+**安全前提是 `poll_timeout_head` 在 boot 期恒为 NULL**（poll 只在用户态进程里调，
+用户态进程在 `task_init()` 之后才有），`tick_handler` 里的 `if (poll_timeout_head)`
+短路使 `clocksource_read_ns()` 不被调用。实现时必须在 `tick_handler` 的 poll 扫描
+里保留这个短路，并在注释里写明「boot 期 poll 空 → 不读 GS」这一时序假设；若未来
+允许 boot 期注册 poll，须先解决 GS 早期安装。
 
 **BSP 的 LAPIC handler 改动**：现在 `lapic_timer_handler` 里 `if (cpu_id() != 0)`
 只给 AP 用；改成 BSP 走 `tick_handler()`（驱动 jiffies），AP 只做
