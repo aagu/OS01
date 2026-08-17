@@ -10,6 +10,7 @@
   - v3：并入次轮 review（正交性=联合校准、tsc_offset 握手采样、unregister 索引坑、PIE 超时、mult/shift 算术、BSP 二次启动、irq_mask API、nanosleep 迁移补全）
   - v4：并入三轮 review（register/unregister 参数约定写反、irq_mask 的 gsi→vector 转换、PIE 采样点+divisor、watchdog 双计、EINTR rem 下溢保护、握手有界等待、fallback AP 无 tick、门④.14 放宽、AP 复用 BSP 校准状态）
   - v5：并入四轮 review（AP 握手超时后无条件采样 bug、0.4%/0.8% 矛盾 + off-by-one 修复、超时 300→500ms、LVT_TIMER 掩蔽、IRQ8 读 0x0C 清标志、arch_tick_start 返回 bool、SYNC_SPIN_LIMIT 双侧同宏、lfence 可选、CPUID15h 有效=RTC 不需要注记、门②⑥ 忙等基准）
+  - v6：并入五轮 review（300/500ms 三处统一、校准优先级死代码修正 + §8.1 正交表述如实化、DIV=0 是 ÷2 非 ÷1、register_irq(8) 带 IRQF_TRIGGER_LEVEL）
 
 ---
 
@@ -207,15 +208,19 @@ static int rtc_pie_calibrate(uint64_t *tsc_hz_out, uint64_t *lapic_hz_out)
     //    必须与现有 lapic_timer.c:48 校准第一行一致。否则 countdown 到零时以
     //    vector 0x38 触发中断，而 0x38 的 IDT gate 要等 lapic_timer_init 才注册
     //    （IDT 只盖 0x20-0x37 + 异常）→ GP# → 三连 fault。
-    //    然后写 LAPIC_TIMER_DIV = 0（divide-by-1）—— 必须显式写，否则
-    //    elapsed_lapic 用的是上次遗留的 divisor，lapic_hz 算错，且与
-    //    lapic_timer_start 复用 divisor 的前提不一致（lapic_timer.c:101 的
-    //    init_count 依赖 divisor 确定）。再装载 0xFFFFFFFF 启动 countdown
-    //    （无需 IDT gate，已掩）。
-    // 2. 临时 register_irq(8, ...) —— 第一参数是 gsi（interrupt.h:50），不是 vector。
-    //    ⚠️ 传 vector 0x28 会 ≥ MAX_GSI(24) → irq.c:13 return 0 静默不注册。
-    //    必须检查返回值：失败直接 return -1（走超时/兜底），别假设必然成功。
-    //    然后使能 PIE（1024Hz，周期 ~976.5625µs）。
+    //    然后写 LAPIC_TIMER_DIV = 0（divide-by-2，按 Intel SDM 000b=÷2）——
+    //    必须显式写，否则 elapsed_lapic 用的是上次遗留的 divisor，lapic_hz
+    //    算错，且与 lapic_timer_start 复用 divisor 的前提不一致
+    //    （lapic_timer.c:101 的 init_count 依赖 divisor 确定）。再装载
+    //    0xFFFFFFFF 启动 countdown（无需 IDT gate，已掩）。
+    //    ⚠️ divisor 值语义：DIV=0 是 ÷2（不是 ÷1，÷1 是 DIV=7/0b111）。
+    //    校准/启动只要 divisor 一致即可，此处沿用 lapic_timer.c:53 的 DIV=0。
+    // 2. 临时 register_irq(8, NULL, rtc_pie_handler, 0, IRQF_TRIGGER_LEVEL, "rtc-pie")
+    //    —— 第一参数是 gsi（interrupt.h:50），不是 vector。RTC IRQ8 是 level 触发，
+    //    显式传 IRQF_TRIGGER_LEVEL 避免 ioapic_enable 按 GSI 默认值猜触发模式
+    //    （ioapic.c:138-153）。⚠️ 传 vector 0x28 会 ≥ MAX_GSI(24) → irq.c:13
+    //    return 0 静默不注册。必须检查返回值：失败直接 return -1（走超时/兜底），
+    //    别假设必然成功。然后使能 PIE（1024Hz，周期 ~976.5625µs）。
     // 3. IRQ8 handler 内：
     //    a. 每次进 handler 先读 RTC reg 0x0C 清中断标志，否则真实硬件上第一个
     //       中断后 PIE 停摆 → 校准等不到 N tick → 假超时：
@@ -259,7 +264,7 @@ MAX_GSI(24) → `irq.c:13` return 0 静默不注册（校准等不到 IRQ8 → �
 PIE 停摆），500ms 后放弃，`tsc_hz=0` → 落 jiffies 兜底，**绝不无限自旋挂
 boot**。
 
-**校准职责划分（复用联合结果）**：
+**校准职责划分（优先复用联合结果）**：
 
 ```c
 clocksource_init():
@@ -273,16 +278,22 @@ clocksource_init():
     }
 
 lapic_timer_calibrate():
-    if (tsc_hz != 0)
-        lapic_hz = measure_against_tsc(tsc_hz)   // 首选：快 ~10ms，覆盖暂存值
-    else if (g_lapic_premeasured_hz != 0)
-        lapic_hz = g_lapic_premeasured_hz;       // 复用 RTC PIE 联合结果
+    if (g_lapic_premeasured_hz != 0)
+        lapic_hz = g_lapic_premeasured_hz;       // 优先：RTC PIE 联合结果（250ms 更稳）
+    else if (tsc_hz != 0)
+        lapic_hz = measure_against_tsc(tsc_hz);  // 回落：TSC 窗口（~10ms）
     else
         lapic_hz = 0;                            // 退 PIT
 ```
 
-这样 LAPIC 在 TSC_HZ 未知时复用 RTC PIE 联合结果，**真正正交**：clocksource 与
-clockevent 各自独立可测，启动延迟只一次 PIE 窗口。
+**优先级顺序说明（消除 v5 的死代码）**：`g_lapic_premeasured_hz` 只在
+`rtc_pie_calibrate` 成功时被赋值，而成功必然 `tsc_hz != 0`——所以把
+`measure_against_tsc` 放第一支会让 `g_lapic_premeasured_hz` 的 else-if 成为
+**死路径**，联合测量的 LAPIC 结果从未被用，与「TSC 未知时复用」的叙事矛盾。
+**正确顺序是优先复用联合结果**：它来自 250ms 的 RTC PIE 窗口，比 10ms 的 TSC
+窗口更稳（更长的采样时间平滑抖动）；只有 RTC PIE 没跑（CPUID 15h 直接给了
+tsc_hz，`g_lapic_premeasured_hz==0`）时才回落 TSC 窗口。两路径都可用时，
+LAPIC 校准的**精度**不再依赖 TSC 校准链路，只依赖 RTC PIE。
 
 ### 5.2 mult/shift 换算公式（实现者需要的公式）
 
@@ -442,16 +453,21 @@ TSC 频率（clocksource）:
 tick 源（clockevent）:
   PIT 先跑（boot 期，phase 4→6 驱动 jiffies）
   tick_start() 启动 LAPIC：
-    tsc_hz 已知 ──→ LAPIC 用 TSC 窗口校准 → 成功 → 掩 PIT，LAPIC 主 tick
-    tsc_hz 未知 ──→ LAPIC 复用 RTC PIE 联合结果（§5.1 的 g_lapic_premeasured_hz）
-                    → 成功 → 掩 PIT；失败 → PIT 保持运行
+    有 g_lapic_premeasured_hz ──→ 优先复用 RTC PIE 联合结果（§5.1 顺序）
+                                   → 成功 → 掩 PIT；失败 → PIT 保持运行
+    无联合结果但 tsc_hz 已知 ───→ LAPIC 用 TSC 窗口校准 → 同上
+    两者皆无 ───────────────────→ lapic_hz=0 → PIT 保持运行
 ```
 
-**正交性成立的关键**：LAPIC 校准**不硬依赖 TSC_HZ**——它要么用 TSC 窗口（TSC_HZ
-已知时），要么复用 RTC PIE 联合校准的结果（TSC_HZ 只能靠 RTC PIE 时）。两个
-计数器都能从同一个 RTC PIE 窗口独立测出频率。因此「TSC 频率拿不到」≠「LAPIC
-起不来」——只要 RTC PIE 可用，两者都能校准；RTC PIE 也挂时，两者一起退（
-TSC→jiffies，LAPIC→PIT），这才是真正的最坏情况，且 = 现状。
+**正交性表述（v5 修正，如实）**：LAPIC 校准的**精度**不再依赖 TSC 校准链路——
+它优先复用 RTC PIE 联合结果（250ms 更稳），只在 RTC PIE 没跑时才回落 TSC 窗口。
+但要注意**可及性**：LAPIC 校准能否成功，实际仍绑定 RTC PIE 或 TSC 窗口二者至少
+其一可用（`g_lapic_premeasured_hz` 来自 RTC PIE，`tsc_hz` 来自 CPUID 或 RTC
+PIE）。因此严格说「tick 源与时间基**完全独立**回退」不成立——它俩共享 RTC PIE
+这一个校准底座。真正的独立是「**精度**独立」：TSC 校准失败不会拖累 LAPIC 精度
+（LAPIC 有自己独立的 RTC PIE 结果）。「TSC 拿不到」≠「LAPIC 起不来」仍成立，
+但成立的原因是两者都能从 RTC PIE 独立取结果，而非各自有独立校准源。此表述与
+§5.1 的优先级顺序一致，避免「正交复用」叙事与死代码逻辑冲突。
 
 **注记（消除读者困惑）**：矩阵里没有「CPUID 15h 有效但 RTC PIE 挂」这个组合——
 因为 CPUID 15h 有效时**根本不走 RTC PIE**（`clocksource_init` 直接采用 CPUID
@@ -471,7 +487,7 @@ TSC→jiffies，LAPIC→PIT），这才是真正的最坏情况，且 = 现状�
    deadline 比较用环绕安全式 `(int64_t)(now_ns - deadline_ns) >= 0`。
 5. mult/shift 精度：换算舍入误差 < 1ppm（§5.2）；启动校准误差 ~0.2%（§5.3）。
 6. RTC CMOS 访问：屏蔽 NMI（0x70 bit7）、检测 `is_updating_rtc()`（已有）再读。
-7. RTC PIE 校准超时：§5.1 的 TSC 硬超时 ~300ms，绝不自旋挂 boot。
+7. RTC PIE 校准超时：§5.1 的 TSC 硬超时 ~500ms，绝不自旋挂 boot。
 8. **fallback 模式的 AP 无 tick（预期降级，需注明）**：当 LAPIC 未校准成功
    （`lapic_timer_hz==0`）时，AP 的 `lapic_timer_start` no-op → **AP 没有任何
    调度 tick**（PIT 只投递 BSP）。此时 AP 上任务永不因 tick 抢占，只能靠
@@ -588,7 +604,7 @@ progress claims」规则。
 
 11. 人为 `lapic_timer_hz=0` → 回退 PIT 仍正常运行（tick 走 PIT，时间走 TSC）
 12. 人为禁用 RTC 校准 → 时间基退 jiffies×10ms，系统可跑
-13. 人为禁用 RTC PIE 且 CPUID 15h=0 → RTC PIE 校准超时 ~300ms 后落 jiffies 兜底，
+13. 人为禁用 RTC PIE 且 CPUID 15h=0 → RTC PIE 校准超时 ~500ms 后落 jiffies 兜底，
     **boot 不挂起**（验证 §5.1 超时兜底）
 14. 跨核 TSC 握手采样：code review + 断言 `tsc_offset` 量级（**放宽**：MTTCG 宿主
     线程抢占会偶发延迟 AP 的 rdtsc，`tsc_offset` 可能超标；只断言「非零且符号
