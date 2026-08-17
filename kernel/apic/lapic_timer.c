@@ -7,6 +7,9 @@
 #include <kernel/arch/x86_64/gate.h>
 #include <device/timer.h>
 #include <kernel/softirq.h>
+#include <kernel/clockevent.h>   // tick_handler()
+#include <kernel/clocksource.h>  // clocksource_freq_hz()
+#include <stdbool.h>
 
 // Assembly stub created below
 extern void lapic_timer_stub(void);
@@ -20,8 +23,8 @@ extern void lapic_timer_stub(void);
 //   timer that can be placed in periodic mode.
 //
 //   This file:
-//     1. Calibrates the LAPIC timer against the PIT
-//        (one-shot, measure ticks per 10ms).
+//     1. Calibrates the LAPIC timer (RTC PIE joint result or TSC
+//        window; measures decrement rate per 10ms).
 //     2. Starts the timer in periodic mode at 100 Hz
 //        for whichever CPU calls lapic_timer_start().
 //     3. Provides a per-CPU tick handler that mirrors
@@ -46,69 +49,78 @@ void lapic_timer_set_premeasured(uint64_t hz)
 }
 
 // ── Calibration ───────────────────────────────────
-// Uses the PIT (already running at 100 Hz) as a
-// reference to measure how many LAPIC timer ticks
-// elapse in one jiffy (10 ms).
+// §5.1：优先复用 RTC PIE 联合结果（更稳）；否则 TSC 窗口（~10ms）。
 
 void lapic_timer_calibrate(void)
 {
-    // 1. Mask and stop the timer
     lapic_write(LAPIC_LVT_TIMER, LVT_MASK);
 
-    // 2. Use divisor 0 (divide-by-1) for best precision.
-    //    If the raw count overflows 32 bits at 100 Hz start,
-    //    we fall back to divide-by-16.
-    lapic_timer_divisor = 0;   // divide by 1
-    lapic_write(LAPIC_TIMER_DIV, lapic_timer_divisor);
+    uint64_t tsc_hz = clocksource_freq_hz();
 
-    // 3. Load maximum count and wait one PIT tick
-    lapic_write(LAPIC_TIMER_INIT, 0xFFFFFFFF);
-
-    uint64_t start = jiffies;
-    while (jiffies == start)
-        arch_cpu_pause();
-
-    uint32_t cur_count = lapic_read(LAPIC_TIMER_CUR);
-    uint32_t elapsed = 0xFFFFFFFF - cur_count;
-
-    // 4. If elapsed is suspiciously near zero, the timer
-    //    overflowed 32 bits in 10 ms — retry with divide-by-16.
-    if (elapsed < 1000) {
-        lapic_timer_divisor = 3;   // divide by 16
-        lapic_write(LAPIC_TIMER_DIV, lapic_timer_divisor);
-
-        lapic_write(LAPIC_TIMER_INIT, 0xFFFFFFFF);
-
-        start = jiffies;
-        while (jiffies == start)
-            arch_cpu_pause();
-
-        cur_count = lapic_read(LAPIC_TIMER_CUR);
-        elapsed = 0xFFFFFFFF - cur_count;
-    }
-
-    // 5. Compute effective frequency
-    lapic_timer_hz = (uint64_t)elapsed * 100;
-
-    debug_sched("LAPIC timer: %u ticks/10ms → %lu Hz (div=%u)\n",
-                  elapsed, (unsigned long)lapic_timer_hz,
-                  (unsigned)lapic_timer_divisor);
-}
-
-// ── Start periodic timer ──────────────────────────
-
-void lapic_timer_start(uint32_t freq_hz)
-{
-    if (!lapic_timer_hz) {
-        debug_sched("LAPIC timer: not calibrated, skipping start\n");
+    // 1. 优先复用 RTC PIE 联合结果（250ms 更稳）。
+    if (lapic_premeasured_hz != 0) {
+        lapic_timer_hz = lapic_premeasured_hz;
+        lapic_timer_divisor = 0;   // 联合校准用 ÷2（DIV=0）
+        debug_sched("LAPIC timer: %lu Hz (from RTC PIE)\n",
+                    (unsigned long)lapic_timer_hz);
         return;
     }
 
-    // Compute initial count for the target frequency.
-    // The divisor was already written during calibration.
+    // 2. 回落 TSC 窗口（~10ms）。
+    if (tsc_hz == 0) {
+        lapic_timer_hz = 0;   // 无法校准 → 退 PIT
+        debug_sched("LAPIC timer: no TSC freq, fallback PIT\n");
+        return;
+    }
+
+    // divisor=0（÷2）。SDM 000b；⚠️ 原代码注释 "divide by 1" 是错的，
+    // 实现时一并改正为 ÷2。
+    lapic_timer_divisor = 0;   // ÷2
+    lapic_write(LAPIC_TIMER_DIV, lapic_timer_divisor);
+    lapic_write(LAPIC_TIMER_INIT, 0xFFFFFFFF);
+
+    uint64_t tsc0 = rdtscp_serialized();
+    while (rdtscp_serialized() - tsc0 < tsc_hz / 100)   // 10ms TSC 窗口
+        arch_cpu_pause();
+
+    uint32_t cur = lapic_read(LAPIC_TIMER_CUR);
+    uint64_t elapsed = 0xFFFFFFFFULL - cur;
+
+    // lapic_timer_hz 语义 = 递减率（÷2 已折算），不是真实频率。
+    // elapsed 是 ÷2 后 10ms 递减量，除以 10ms 得递减率 → elapsed * 100（不 ×2）。
+    // 若误写 *200 得真实频率，lapic_timer_start 的 init_count=hz/freq 会被 divisor
+    // 再 ÷2 → 50Hz（正确是保持 ×100）。
+    lapic_timer_hz = elapsed * 100;
+
+    debug_sched("LAPIC timer: %u ticks/10ms → %lu Hz (div=%u, TSC)\n",
+                (unsigned)elapsed, (unsigned long)lapic_timer_hz,
+                (unsigned)lapic_timer_divisor);
+}
+
+// ── Start periodic timer ──────────────────────────
+// Returns true if the timer was started, false if not calibrated
+// (caller falls back to the PIT).  DIV is a per-LAPIC hardware register:
+// the calibration-time value is re-written here for the current CPU
+// (each AP's LAPIC resets to count_shift=0/÷1, so omitting it would run
+// the AP at ÷1 with a ÷2-folded lapic_timer_hz → 2× frequency).
+
+bool lapic_timer_start(uint32_t freq_hz)
+{
+    if (!lapic_timer_hz) {
+        debug_sched("LAPIC timer: not calibrated, skipping start\n");
+        return false;
+    }
+
     uint32_t init_count = (uint32_t)(lapic_timer_hz / freq_hz);
     if (init_count == 0)
         init_count = 1;
+
+    // 写 divisor 到当前 CPU 的 LAPIC 硬件寄存器（DIV 是 per-LAPIC 的，不是
+    // 全局变量）。值仍是校准产物（不变），但必须每 CPU 各写一次：AP 的 LAPIC
+    // 复位后 count_shift=0(÷1)，若不写则 AP 复用 ÷2 折算的 lapic_timer_hz
+    // 却用 ÷1 硬件 → AP 频率 ×2。见 spec §7.2。
+    // 必须先写 DIV 再写 INIT（先定 divisor，再装 count，保证 count 按正确 divisor 递减）。
+    lapic_write(LAPIC_TIMER_DIV, lapic_timer_divisor);
 
     // LVT Timer: vector in bits 0–7, periodic mode in bit 17.
     // Delivery mode fixed (0), unmasked (bit 16 = 0).
@@ -119,6 +131,7 @@ void lapic_timer_start(uint32_t freq_hz)
 
     debug_sched("LAPIC timer: started at %u Hz (init_count=%u) on CPU %u\n",
                   (unsigned)freq_hz, init_count, (unsigned)cpu_id());
+    return true;
 }
 
 // ── Per-CPU tick handler (called from assembly stub) ──────
@@ -128,13 +141,15 @@ void lapic_timer_start(uint32_t freq_hz)
 void lapic_timer_handler(pt_regs_t *regs __attribute__((unused)),
                          uint64_t error_code __attribute__((unused)))
 {
-    // BSP already receives scheduling ticks from PIT (IRQ0).
-    // Only set need_resched on APs, avoiding double-entry on BSP.
-    if (cpu_id() != 0) {
+    if (cpu_id() == 0) {
+        // BSP 驱动 jiffies + poll 扫描（tick_handler 内含 watchdog++/softirq）。
+        tick_handler();
+    } else {
+        // AP 只做 need_resched + watchdog（BSP 的 tick_handler 已覆盖全局 jiffies）。
         this_cpu()->need_resched = 1;
-        set_softirq_status(TIMER_SIRQ);  // APs process timer softirqs
+        this_cpu()->watchdog_counter++;
+        set_softirq_status(TIMER_SIRQ);
     }
-    this_cpu()->watchdog_counter++;
     lapic_eoi();
 }
 
@@ -194,7 +209,7 @@ void lapic_timer_init(void)
     // the CPU interrupt gate entry doesn't set up pt_regs).
     set_intr_gate_raw(LAPIC_TIMER_VECTOR, 0, lapic_timer_stub);
 
-    // Calibrate using PIT as reference (PIT must already run).
+    // 校准（RTC PIE 联合结果优先，否则 TSC 窗口）。
     lapic_timer_calibrate();
 
     // Start is deferred to caller — GS base must be set first.

@@ -33,7 +33,8 @@ int rtc_pie_calibrate(uint64_t *tsc_hz_out, uint64_t *lapic_hz_out)
 {
     // 1. 掩 LAPIC timer，避免 countdown 到零触发未注册的 vector 0x38（GP# 三重故障）。
     lapic_write(LAPIC_LVT_TIMER, LVT_MASK);
-    //    divisor=0（÷2，SDM 000b）。必须显式写。
+    //    divisor=0（÷2，SDM 000b；lapic_timer.c 原文 "divide by 1" 注释是错的）。
+    //    必须显式写。
     lapic_write(LAPIC_TIMER_DIV, 0);
     lapic_write(LAPIC_TIMER_INIT, 0xFFFFFFFF);
 

@@ -16,7 +16,10 @@
 #include <stdlib.h>
 
 // Forward declaration from lapic_timer.c
-extern void lapic_timer_start(uint32_t freq_hz);
+extern bool lapic_timer_start(uint32_t freq_hz);
+
+// 两侧握手自旋的统一上限（BSP 等 AP、AP 等 BSP 用同一宏）。
+#define SYNC_SPIN_LIMIT 1000000u
 
 static void ap_init_lapic(void)
 {
@@ -120,11 +123,16 @@ void ap_entry(void)
     // Start per-CPU scheduling tick
     lapic_timer_start(100);
 
-    cpu->online = 1;
     __sync_synchronize();
-
-    // Record TSC for cross-core warp comparison
-    cpu->tsc_boot = rdtsc();
+    cpu->online = 1;                     // 1. 先活（BSP 等待循环退出条件）
+    uint32_t w = 0;
+    while (w++ < SYNC_SPIN_LIMIT && !cpu->tsc_sync_go)  // 2. 有界等 BSP
+        arch_cpu_pause();
+    if (cpu->tsc_sync_go) {              // 3. 只有观测到 go 才采样；超时跳过（sampled 留 0）
+        cpu->tsc_boot = rdtsc();
+        __sync_synchronize();
+        cpu->tsc_sampled = 1;            // 4. 回写完成
+    }
 
     arch_local_irq_enable();
     debug_sched("SMP: AP %u online (idle pid=%d), entering idle\n",
@@ -239,17 +247,19 @@ void smp_boot_aps(void)
         if (percpu_data[i].online) {
             debug_sched("SMP: AP %u (APIC ID %u) booted successfully\n", i, ap_id);
 
-            // Quick TSC warp check — compare BSP vs AP readings.
-            // Not a full point-to-point measurement (no shared spin-wait),
-            // but enough to detect gross skew.
-            {
-                uint64_t bsp_tsc = rdtsc();
-                uint64_t ap_tsc  = percpu_data[i].tsc_boot;
-                int64_t  diff    = (int64_t)(bsp_tsc - ap_tsc);
-                const char *status = (diff > -5000000LL && diff < 5000000LL)
-                                     ? "OK" : "WARP";
-                debug_sched("SMP: TSC sync AP%u: BSP=%#018lx AP=%#018lx diff=%+ld %s\n",
-                              i, bsp_tsc, ap_tsc, (long long)diff, status);
+            // TSC 握手采样：BSP 发起、等 AP 回写，算跨核偏移。
+            percpu_data[i].tsc_sync_go = 1;
+            uint64_t bsp_tsc = rdtsc();
+            for (uint32_t w = 0; w < SYNC_SPIN_LIMIT && !percpu_data[i].tsc_sampled; w++)
+                arch_cpu_pause();
+            if (!percpu_data[i].tsc_sampled) {
+                debug_sched("SMP: TSC sync AP%u timeout, offset unset\n", i);
+                percpu_data[i].tsc_offset = 0;
+            } else {
+                uint64_t ap_tsc = percpu_data[i].tsc_boot;
+                percpu_data[i].tsc_offset = (int64_t)(bsp_tsc - ap_tsc);
+                debug_sched("SMP: TSC sync AP%u: offset=%+ld\n", i,
+                            (long)percpu_data[i].tsc_offset);
             }
             for (volatile uint32_t d = 0; d < 10000; d++) arch_cpu_pause();
         } else {

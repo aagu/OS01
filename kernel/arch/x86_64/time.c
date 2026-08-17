@@ -24,6 +24,5 @@ uint64_t arch_cycle_freq(void)
 // 启动 x86 tick 源：LAPIC 周期模式。返回是否启动成功。
 bool arch_tick_start(void)
 {
-    // lapic_timer_start 在 Task 3 改签名返回 bool；本任务先按 void 处理。
-    return true;  // Task 3 替换为 lapic_timer_start(100) 的 bool 结果
+    return lapic_timer_start(100);
 }

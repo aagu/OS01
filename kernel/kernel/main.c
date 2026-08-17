@@ -31,6 +31,7 @@
 #include <kernel/logo.h>
 #include <kernel/fb.h>
 #include <kernel/pty.h>
+#include <kernel/clockevent.h>
 #include <net/net.h>
 
 // ── Stack canary ─────────────────────────────────────────────
@@ -287,6 +288,10 @@ int kernel_main(struct BOOT_INFO *bootinfo)
                       cpu_idx, apic_info.lapic_count);
         num_cpus = cpu_idx;
     }
+
+    // 显式启动 tick 源：GS base 已装（main.c percpu_install_gs(0)），
+    // this_cpu() 可用。tick_start 先掩 PIT 再启 LAPIC，失败回退 PIT。
+    tick_start();
 
     smp_boot_aps();
 
