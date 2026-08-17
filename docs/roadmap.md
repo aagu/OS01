@@ -27,10 +27,13 @@
 ```
 P0 (本迭代):
  0. 俄罗斯方块游戏 ✅           — 已实施（framebuffer 像素渲染 + /dev/keyboard 扫描码 + alt-screen 终端恢复）
- 1. nanosleep 修复 🔴           — 见下 "nanosleep 修复路线图"（睡眠无唤醒源；tetris game-over 卡死 + busybox sleep 假醒实证）
+ 1. nanosleep 修复 ✅           — 唤醒走 blocker（wakeup_jiffies + BLOCKER_NANOSLEEP）+ 掩码感知信号唤醒 + -EINTR/rem；CLOCK_MONOTONIC（commit 2faccbc）
  2. 网络回归测试 ✅           — TCP/UDP/DNS/DHCP/wget 纳入自动化 QEMU 测试
  3. /proc/<pid>/fd/           ✅ — 只读 fd 目录 + fd→目标路径合成文件；files_t 引用协议（pin/unpin/get/put）消除 UAF
  4. 任务退出/回收收敛         ✅ — wait 驱动回收（do_waitpid 直接收割）+ kthread __switch_to 自收割，删除 reaper 与 deferred_free
+
+⚠️ 已知问题（另立 issue 跟踪，非 nanosleep 合并阻塞项）:
+ 5. PIT 200Hz（jiffies 2x）   — QEMU TCG artifact：IOAPIC edge 投递无上升沿检测，PIT mode-3 每 10ms 触发两次 level=1 → guest 收到 200Hz。影响 select/poll 超时、EEVDF 时间片、lwIP 超时、CLOCK_MONOTONIC、busybox sleep 时长（sleep N→N/2）。根因与修复计划见 docs/pit-200hz-handoff.md（推荐切 LAPIC timer + TSC 校准，方案 A/B/C/D）。
 
 P1 (近期):
  4. rwlock/seqlock            — VFS 与 /proc 多核缩放
@@ -141,7 +144,10 @@ Step 5 (集成验证) ──→ 所有 Step 完成后
 
 ---
 
-## nanosleep 修复路线图 🔴 P0
+## nanosleep 修复路线图 ✅ P0（已完成）
+
+> 状态：**已完成**（2026-08-17）。commit `2faccbc` — 唤醒走 blocker（`wakeup_jiffies` + `BLOCKER_NANOSLEEP`）+ 掩码感知信号唤醒 + `-EINTR`/rem + `CLOCK_MONOTONIC`。systest 150/150。
+> 连带发现的 PIT 200Hz（jiffies 2x）为 QEMU TCG artifact，**另立 issue 跟踪**（见「待实施优先级」第 5 项 + `docs/pit-200hz-handoff.md`），不阻塞本修复。
 
 ### 背景（tetris 开发中实证发现）
 
