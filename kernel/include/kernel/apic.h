@@ -219,4 +219,7 @@ void lapic_timer_start(uint32_t freq_hz);
 // One-shot BSP setup: register IDT gate, calibrate, start at 100 Hz.
 void lapic_timer_init(void);
 
+// 预置 RTC PIE 联合校准测得的 LAPIC 频率，供 lapic_timer_calibrate 优先复用。
+void lapic_timer_set_premeasured(uint64_t hz);
+
 #endif // _KERNEL_APIC_H

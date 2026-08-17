@@ -37,6 +37,14 @@ static uint64_t lapic_timer_hz = 0;
 // Divisor value programmed during calibration (kept across start).
 static uint32_t lapic_timer_divisor = 0;
 
+// RTC PIE 联合校准测得的 LAPIC 频率，供 lapic_timer_calibrate 优先复用。
+static uint64_t lapic_premeasured_hz = 0;
+
+void lapic_timer_set_premeasured(uint64_t hz)
+{
+    lapic_premeasured_hz = hz;
+}
+
 // ── Calibration ───────────────────────────────────
 // Uses the PIT (already running at 100 Hz) as a
 // reference to measure how many LAPIC timer ticks

@@ -30,4 +30,9 @@ void rtc_read_datetime(datetime_t * dt);
 
 void rtc_write_datetime(datetime_t * dt);
 
+// RTC PIE 联合校准：一次 PIE 窗口（1024Hz × N=256 tick ≈250ms）同时测 TSC 和
+// LAPIC 两个计数器频率。返回 0 成功 / -1 失败（超时或 IRQ8 不到）。
+// tsc_hz_out / lapic_hz_out 仅在成功时被写。
+int rtc_pie_calibrate(uint64_t *tsc_hz_out, uint64_t *lapic_hz_out);
+
 #endif

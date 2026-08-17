@@ -9,11 +9,18 @@
 #include <driver/serial.h>
 #include <driver/ahci.h>
 #include <net/net.h>
+#include <kernel/clocksource.h>
 
 // ── RSDP 地址（由 kernel_main 在调用 arch_register_subsys 前设置） ──
 uint64_t arch_boot_rsdp = 0;
 
 // ── 包装函数（void → int (*)(void)） ──────────────────────
+
+static int _clocksource_init_wrapper(void)
+{
+    clocksource_init();
+    return 0;
+}
 
 static int _apic_init_wrapper(void)
 {
@@ -78,6 +85,7 @@ void arch_register_subsys(void)
 
     // Phase 4: 定时器
     register_subsys("timer",      _timer_init_wrapper,      SUBSYS_PHASE_4, 0);
+    register_subsys("clocksource", _clocksource_init_wrapper, SUBSYS_PHASE_4, 0);
     register_subsys("pit",        _pit_init_wrapper,        SUBSYS_PHASE_4, SUBSYS_FLAG_OPTIONAL);
     register_subsys("lapic-timer", _lapic_timer_init_wrapper, SUBSYS_PHASE_4, SUBSYS_FLAG_OPTIONAL);
 
