@@ -45,6 +45,7 @@ typedef struct percpu {
     uint32_t nr_running;         // count of tasks on runqueue (excl. idle)
     uint64_t watchdog_counter;  // incremented each timer tick, reset by schedule()
     uint64_t tsc_boot;          // TSC value after AP startup (for warp check)
+    int64_t  tsc_offset;        // bsp_tsc - ap_tsc (BSP=0); populated by handshake in Task 3
 } percpu_t;
 
 // Number of CPUs supported (from arch/cpu.h via task.h)

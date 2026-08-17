@@ -53,6 +53,11 @@ int32_t register_irq(uint32_t gsi, void * arg,
 
 uint32_t unregister_irq(uint64_t nr);
 
+// 只掩蔽/解掩蔽，不触碰 irq_desc 的 handler（作 fallback 保留用）。
+// 参数是 gsi；内部转 vector(0x20+gsi) 再调 controller->disable/enable。
+void irq_mask(uint32_t gsi);
+void irq_unmask(uint32_t gsi);
+
 void irq_install();
 
 #endif

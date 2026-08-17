@@ -2,6 +2,7 @@
 #define _ARCH_CPU_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #ifdef __x86_64__
 #include <kernel/arch/x86_64/asm.h>
@@ -12,6 +13,13 @@ static inline void     arch_cpu_halt(void)      { hlt(); }
 static inline void     arch_cpu_pause(void)     { __asm__ __volatile__("pause"); }
 static inline void     arch_nop(void)           { __asm__ __volatile__("nop"); }
 static inline uint64_t arch_cycle_counter(void) { return rdtsc(); }
+
+// TSC 频率（Hz）。实现见 kernel/arch/x86_64/time.c（CPUID 15h → RTC PIE → 0）。
+uint64_t arch_cycle_freq(void);
+
+// 启动 arch tick 源（x86: LAPIC 周期模式）。实现见 kernel/arch/x86_64/time.c。
+// 返回是否启动成功；失败由 clockevent 层回退 PIT。
+bool arch_tick_start(void);
 
 // NR_CPUS — architecture-specific max CPU count.
 // Defined here (as well as in arch/x86_64/cpu.h for backward compat)
@@ -64,6 +72,13 @@ static inline uint64_t arch_cycle_counter(void)
 {
     uint64_t val;
     __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(val));
+    return val;
+}
+
+static inline uint64_t arch_cycle_freq(void)
+{
+    uint64_t val;
+    __asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(val));
     return val;
 }
 

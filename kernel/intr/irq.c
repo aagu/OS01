@@ -69,3 +69,17 @@ void irq_install()
     arch_irq_install();
     softirq_init();
 }
+
+void irq_mask(uint32_t gsi)
+{
+    irq_desc_t *p = &irq_table[gsi];
+    if (p->controller)
+        p->controller->disable(0x20 + gsi);
+}
+
+void irq_unmask(uint32_t gsi)
+{
+    irq_desc_t *p = &irq_table[gsi];
+    if (p->controller)
+        p->controller->enable(0x20 + gsi);
+}

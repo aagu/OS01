@@ -1,0 +1,22 @@
+#include <stdint.h>
+#include <stdbool.h>
+#include <kernel/arch/x86_64/cpuid.h>   // cpuid()
+#include <kernel/apic.h>                 // lapic_timer_start
+
+// 三级回落：CPUID 15h → RTC PIE（Task 2 接入）→ 0。
+// 本任务只做 CPUID 15h；RTC PIE 由 Task 2 补全。
+uint64_t arch_cycle_freq(void)
+{
+    uint32_t eax, ebx, ecx, edx;
+    cpuid(0x15, &eax, &ebx, &ecx, &edx);
+    if (ecx != 0)
+        return (uint64_t)ecx * ebx / eax;   // core crystal Hz * ratio
+    return 0;                                // Task 2 接 RTC PIE 回落
+}
+
+// 启动 x86 tick 源：LAPIC 周期模式。返回是否启动成功。
+bool arch_tick_start(void)
+{
+    // lapic_timer_start 在 Task 3 改签名返回 bool；本任务先按 void 处理。
+    return true;  // Task 3 替换为 lapic_timer_start(100) 的 bool 结果
+}
