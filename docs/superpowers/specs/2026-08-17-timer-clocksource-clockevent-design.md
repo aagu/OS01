@@ -8,6 +8,7 @@
   - v1：初版
   - v2：并入首轮 review（boot 窗口 tick、IRQ8 时序、sys_now 语义、mult/shift、CLOCK_REALTIME、跨核 TSC、handler 契约、内核 self-test）
   - v3：并入次轮 review（正交性=联合校准、tsc_offset 握手采样、unregister 索引坑、PIE 超时、mult/shift 算术、BSP 二次启动、irq_mask API、nanosleep 迁移补全）
+  - v4：并入三轮 review（register/unregister 参数约定写反、irq_mask 的 gsi→vector 转换、PIE 采样点+divisor、watchdog 双计、EINTR rem 下溢保护、握手有界等待、fallback AP 无 tick、门④.14 放宽、AP 复用 BSP 校准状态）
 
 ---
 
@@ -154,13 +155,22 @@ clocksource/clockevent 核心一行不改。
 
 ```c
 // kernel/include/kernel/interrupt.h
-void irq_mask(uint32_t gsi);     // 只 disable（controller->disable），保留 handler
-void irq_unmask(uint32_t gsi);   // 只 enable（controller->enable），handler 仍在
+void irq_mask(uint32_t gsi);     // 只 disable，保留 handler（内部 gsi→vector 转换）
+void irq_unmask(uint32_t gsi);   // 只 enable，handler 仍在
 ```
 
 实现走 `controller->disable/enable`（`pic_disable/enable` 或 IOAPIC mask/unmask），
 **不触碰 `irq_desc` 的 handler 字段**。PIT 的接管掩蔽/回退使能用它，而非
 `unregister_irq`。
+
+**⚠️ 索引转换（同一类坑在本 API 内重演，必须写明）**：controller 层的
+`enable/disable` 全部按 **vector** 索引——`ioapic_disable` 用 `nr - 0x20`
+（`ioapic.c:195`）、`pic_disable` 用 `1 << (nr-0x20)`（`8259A.c:85`）。而
+`irq_mask`/`irq_unmask` 对外收 **gsi**。实现必须内部转换
+`controller->disable(0x20 + gsi)`，否则 `irq_mask(0)` 透传 gsi=0 → `0-0x20`
+下溢 → `pic_disable` 掩错 bit / `ioapic_disable` 的 `find_ioapic_for_gsi` 不匹配
+直接 return，**PIT 从未被掩蔽** → LAPIC 接管后两者都调 `tick_handler()` →
+`jiffies` 双计（正是 §7.2 要防的）。
 
 ## 5. TSC 频率校准（x86，真实硬件的关键）
 
@@ -184,30 +194,43 @@ void irq_unmask(uint32_t gsi);   // 只 enable（controller->enable），handler
 // 返回 0 成功 / -1 失败（超时或 IRQ8 不到）。带 TSC 硬超时，绝不无限自旋。
 static int rtc_pie_calibrate(uint64_t *tsc_hz_out, uint64_t *lapic_hz_out)
 {
-    // 1. LAPIC 装载 0xFFFFFFFF 并启动（countdown 开始跑，无需 IDT gate）
-    // 2. 临时 register_irq(0x20 + 8, ...)   ← 注意 gsi=8，注销见下
-    //    使能 PIE（1024Hz，周期 ~976.5625µs）
-    // 3. 记录 tsc0；等 N=256 个 PIE tick，同时用 TSC 硬超时 ~300ms 兜底
-    //    （300ms 内没来够 N tick → 放弃，返回 -1）
-    // 4. 记录 tsc1；读 LAPIC CUR，算 elapsed_lapic = 0xFFFFFFFF - cur
-    // 5. 禁 PIE；unregister_irq(0x20 + 8)
-    //    ⚠️ 必须传 vector 0x28 而非 gsi 8 —— unregister_irq 用 nr-32 索引
-    //       irq_table（irq.c:52），传 8 会下溢成 irq_table[-24] 野内存写。
-    // 6. *tsc_hz_out   = (tsc1 - tsc0)   * 1024 / N
-    //    *lapic_hz_out = elapsed_lapic   * 1024 / N
+    // 1. 写 LAPIC_TIMER_DIV = 0（divide-by-1）—— 必须显式写，否则 elapsed_lapic
+    //    用的是上次遗留的 divisor，lapic_hz 算错，且与 lapic_timer_start 复用
+    //    divisor 的前提不一致（lapic_timer.c:101 的 init_count 依赖 divisor 确定）。
+    //    然后装载 0xFFFFFFFF 启动 countdown（无需 IDT gate）。
+    // 2. 临时 register_irq(8, ...) —— 第一参数是 gsi（interrupt.h:50），不是 vector。
+    //    ⚠️ 传 vector 0x28 会 ≥ MAX_GSI(24) → irq.c:13 return 0 静默不注册。
+    //    必须检查返回值：失败直接 return -1（走超时/兜底），别假设必然成功。
+    //    然后使能 PIE（1024Hz，周期 ~976.5625µs）。
+    // 3. IRQ8 handler 内：捕获 tsc0（第一次 PIE 沿）、计数，到第 N=256 个沿时捕获
+    //    tsc1。采样必须在 handler 内 PIE 沿上做——主循环采样会加中断延迟抖动，
+    //    窗口两端各 ±1 tick → 粒度误差 ≈ 2/N ≈ 0.8%。
+    //    主循环同时用 TSC 硬超时 ~300ms 兜底（300ms 内没来够 N tick → 放弃 -1）。
+    // 4. 读 LAPIC CUR，算 elapsed_lapic = 0xFFFFFFFF - cur。
+    // 5. 禁 PIE；unregister_irq(0x28) —— unregister 传 vector（irq.c:52 用 nr-32）。
+    //    ⚠️ register/unregister 参数约定相反：register 传 gsi，unregister 传 vector。
+    //    写 unregister_irq(8) → irq_table[-24] 野内存写（irq.c:58-62 清任意地址）。
+    // 6. *tsc_hz_out   = (tsc1 - tsc0) * 1024 / N
+    //    *lapic_hz_out = elapsed_lapic * 1024 / N
 }
 ```
 
-**采样窗口规格与精度**：PIE 1024Hz，N=256 tick ≈ 250ms。粒度误差 = 1/N ≈ 0.4%
-（4000ppm），满足验证门 ±1%（10000ppm）要求。N 越大越准但启动越慢；250ms 是
-精度/延迟的合理折中。（HANDOFF 的 TSCCAL 0.006%=60ppm 是离线精细测量，不是
-启动校准目标——启动校准 0.4% 已够。）
+**采样窗口规格与精度**：PIE 1024Hz，N=256 tick ≈ 250ms。粒度误差前提是
+**tsc0/tsc1 在 IRQ8 handler 内、PIE 沿上采样**（§5.1 伪码已注明）——窗口两端各
+±1 tick → 误差 ≈ 2/N ≈ 0.8%（8000ppm），仍在验证门 ±1%（10000ppm）内。若在
+主循环采样还要加中断延迟抖动。N 越大越准但启动越慢；250ms 是精度/延迟的合理
+折中。（HANDOFF 的 TSCCAL 0.006%=60ppm 是离线精细测量，不是启动校准目标——
+启动校准 0.8% 已够。）
 
-**IRQ8 索引不一致的历史坑（必须写进实现注释）**：`register_irq` 用 `gsi` 索引
-`irq_table[gsi]`（`irq.c:34`），`unregister_irq` 用 `nr-32` 索引
-`irq_table[nr-32]`（`irq.c:52`）。注册 gsi=8（vector 0x28）后，注销必须
-`unregister_irq(0x28)`，即 `0x20 + 8`。写 `unregister_irq(8)` → `irq_table[-24]`
-→ 野内存写（`irq.c:58-62` 清任意地址）。
+**IRQ8 索引不一致的历史坑（必须写进实现注释）**：`register_irq` 的第一参数是
+**gsi**，内部才 `vector = 0x20 + gsi`（`irq.c:32`），索引 `irq_table[gsi]`
+（`irq.c:34`）；`unregister_irq` 的第一参数是 **vector**，内部用 `nr-32` 索引
+`irq_table[nr-32]`（`irq.c:52`）。**两个 API 参数约定相反**：注册 gsi=8 后，注销
+必须 `unregister_irq(0x28)`（vector）。写 `register_irq(0x28)` → gsi=40 ≥
+MAX_GSI(24) → `irq.c:13` return 0 静默不注册（校准等不到 IRQ8 → 超时落兜底）；
+写 `unregister_irq(8)` → `irq_table[-24]` 野内存写（`irq.c:58-62` 清任意地址）。
+两条都要写对，且实现时在调用点各加一行「register 传 gsi / unregister 传 vector」
+注释。
 
 **超时兜底**：等 N tick 的循环同时用 TSC 硬超时（~300ms）。若 IRQ8 因任何原因
 不到（IOAPIC 路由失败、QEMU 变体），300ms 后放弃，`tsc_hz=0` → 落 jiffies 兜底，
@@ -279,7 +302,7 @@ mult = (10^9 << shift) / freq_hz
 | `task.h` `wakeup_jiffies` | 存 jiffies | 改名 `wakeup_ns`，存纳秒 |
 | `trap.c` `nanosleep_should_unblock` | `jiffies >= wakeup_jiffies` | `clocksource_read_ns() >= wakeup_ns` |
 | `trap.c` `SYS_nanosleep` do/while 条件 | `while (r==0 && jiffies < target)`（trap.c:1918） | `while (r==0 && clocksource_read_ns() < target_ns)` |
-| `trap.c` `SYS_nanosleep` EINTR rem | `remain = target - jiffies`（trap.c:1924-1929） | `remain_ns = target_ns - clocksource_read_ns()` |
+| `trap.c` `SYS_nanosleep` EINTR rem | `remain = (jiffies < target) ? (target-jiffies) : 0`（trap.c:1924-1929） | `remain_ns = (now_ns < target_ns) ? (target_ns - now_ns) : 0`（**必须保留下溢保护**） |
 | `poll.c` `do_poll_core` | `deadline = jiffies + (ms+9)/10` | `deadline = now_ns + ms*1e6` |
 | `poll.h` `poll_timeout_node_t.deadline` | jiffies | 纳秒（字段类型 uint64_t 不变） |
 | `select.c` `do_select`/`do_pselect6` | 走 `do_poll_core`（select.c:32,54） | **随 poll 一起迁**，无需单独改 |
@@ -353,6 +376,13 @@ phase 6:  ahci ...                              ← 不变，仍由 PIT 驱动 j
 initial_count），不崩，但 `lapic_timer_start` 的 bool 返回值适配必须**同时改
 `subsys_percpu.c`**（不只 `smp.c`），且实现要确认重写 initial_count 无副作用。
 
+**AP 复用 BSP 校准状态（预检，无冲突但需确认）**：`lapic_timer_hz` /
+`lapic_timer_divisor` 是**静态全局**（`lapic_timer.c:35-38`）。BSP 在
+`lapic_timer_calibrate`（phase 4）算好它们，`tick_start` 用它们启动 BSP；AP 在
+`smp_boot_aps`（`tick_start` 之后）复用同一静态值，无冲突。**唯一要求**：实现
+在 `lapic_timer_start` 里**不得重置 divisor**（divisor 只在校准阶段写一次，启动
+阶段只写 INIT），否则 AP 启动时会把 BSP 校准好的 divisor 改掉。
+
 ### 7.3 IF 前置条件（写明）
 
 phase 4 执行 `clocksource_init` 的 RTC PIE 校准时，中断必须已开启。事实链：
@@ -414,6 +444,12 @@ TSC→jiffies，LAPIC→PIT），这才是真正的最坏情况，且 = 现状�
 5. mult/shift 精度：换算舍入误差 < 1ppm（§5.2）；启动校准误差 ~0.4%（§5.3）。
 6. RTC CMOS 访问：屏蔽 NMI（0x70 bit7）、检测 `is_updating_rtc()`（已有）再读。
 7. RTC PIE 校准超时：§5.1 的 TSC 硬超时 ~300ms，绝不自旋挂 boot。
+8. **fallback 模式的 AP 无 tick（预期降级，需注明）**：当 LAPIC 未校准成功
+   （`lapic_timer_hz==0`）时，AP 的 `lapic_timer_start` no-op → **AP 没有任何
+   调度 tick**（PIT 只投递 BSP）。此时 AP 上任务永不因 tick 抢占，只能靠
+   IPI reschedule 或自愿让出。这是可接受的降级——tick 频率错误（200Hz）比
+   AP 无抢占更严重，优先保证 BSP 时间正确。文档明确记录为预期行为，不视为
+   bug。
 
 ### 8.3 跨核 TSC 时间线（握手采样粗偏移修正）
 
@@ -440,7 +476,7 @@ TSC→jiffies，LAPIC→PIT），这才是真正的最坏情况，且 = 现状�
 lapic_timer_start(100);
 __sync_synchronize();
 cpu->online = 1;                     // 1. 先活（BSP 等待循环退出条件）
-while (!cpu->tsc_sync_go)            // 2. 等 BSP 发起采样
+for (uint32_t w = 0; w < SYNC_SPIN_LIMIT && !cpu->tsc_sync_go; w++)  // 2. 有界等 BSP
     arch_cpu_pause();
 cpu->tsc_boot = rdtsc();             // 3. AP 读 TSC（与 BSP 几乎同时）
 __sync_synchronize();
@@ -449,11 +485,20 @@ cpu->tsc_sampled = 1;                // 4. 回写完成
 // BSP smp_boot_aps（等 online 后，替换原 warp 检测块）：
 percpu_data[i].tsc_sync_go = 1;      // 发起
 bsp_tsc = rdtsc();                   // BSP 读 TSC（与 AP 间隔仅一次内存写传播延迟 ~100ns）
-while (!percpu_data[i].tsc_sampled)  // 等 AP 完成
+for (uint32_t w = 0; w < SYNC_SPIN_LIMIT && !percpu_data[i].tsc_sampled; w++)  // 有界等 AP
     arch_cpu_pause();
-ap_tsc = percpu_data[i].tsc_boot;
-percpu_data[i].tsc_offset = (int64_t)(bsp_tsc - ap_tsc);
+if (!percpu_data[i].tsc_sampled) {   // 超时：AP 异常/被抢占，放弃修正（offset 留 0）
+    debug_sched("SMP: TSC sync AP%u timeout, offset unset\n", i);
+} else {
+    ap_tsc = percpu_data[i].tsc_boot;
+    percpu_data[i].tsc_offset = (int64_t)(bsp_tsc - ap_tsc);
+}
 ```
+
+**有界等待**：`tsc_sync_go` / `tsc_sampled` 两个自旋都必须有界（与 `smp.c:235`
+的 online 等待同风格，`SYNC_SPIN_LIMIT` 取一个远大于正常传播时间、又远小于
+「挂死」的值，如 ~1e6 次 pause）。MTTCG 下宿主线程抢占或 AP 异常时，超时放弃
+修正（`tsc_offset` 留 0），**绝不无限自旋挂 boot**。
 
 `clocksource_read_ns()` 用 `arch_cycle_counter() + (uint64_t)this_cpu()->tsc_offset`
 作逻辑 cycle。**`this_cpu()` 在运行时安全**：BSP 在 `main.c:276` 装 GS，AP 在
@@ -498,8 +543,9 @@ progress claims」规则。
 12. 人为禁用 RTC 校准 → 时间基退 jiffies×10ms，系统可跑
 13. 人为禁用 RTC PIE 且 CPUID 15h=0 → RTC PIE 校准超时 ~300ms 后落 jiffies 兜底，
     **boot 不挂起**（验证 §5.1 超时兜底）
-14. 跨核 TSC 握手采样：code review + 断言 `tsc_offset` 量级 < 百万 cycle（
-    QEMU 不支持真实偏移，靠单测 `tsc_offset` 计算逻辑）
+14. 跨核 TSC 握手采样：code review + 断言 `tsc_offset` 量级（**放宽**：MTTCG 宿主
+    线程抢占会偶发延迟 AP 的 rdtsc，`tsc_offset` 可能超标；只断言「非零且符号
+    合理」或仅记录值，不设 < 百万 cycle 硬阈值，避免偶发误报）
 
 ## 10. 文件改动清单
 
@@ -517,7 +563,7 @@ progress claims」规则。
 
 | 文件 | 改动 |
 |---|---|
-| `kernel/apic/lapic_timer.c` | 校准改 §5.1（TSC 窗口 / RTC PIE 复用）；handler BSP→tick_handler / AP→need_resched；start 返回 bool；**删 divisor-16 retry 死代码**（TSC 窗口法下 10ms 内 32 位溢出需 LAPIC>429THz，原 lapic_timer.c:68-80 不再可达） |
+| `kernel/apic/lapic_timer.c` | 校准改 §5.1（TSC 窗口 / RTC PIE 复用）；handler BSP→tick_handler / AP→need_resched，**BSP 分支不再单独 `watchdog_counter++`**（避免与 `tick_handler()` 内的 watchdog++ 双计，现 lapic_timer.c:129 是无条件 ++）；start 返回 bool；**删 divisor-16 retry 死代码**（TSC 窗口法下 10ms 内 32 位溢出需 LAPIC>429THz，原 lapic_timer.c:68-80 不再可达） |
 | `kernel/driver/pit.c` | handler 改调 tick_handler()；serial_poll 留在本层 |
 | `kernel/driver/rtc.c` + `rtc.h` | 新增 RTC PIE 联合校准（§5.1：IRQ8 临时注册 + PIE + 超时 + TSC/LAPIC 采样） |
 | `kernel/arch/x86_64/subsys.c` | 初始化顺序重排：加 clocksource；保留 pit 启动；lapic-timer 改校准 |
