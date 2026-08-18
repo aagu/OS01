@@ -32,7 +32,7 @@
 | 项 | 内容 | 理由 |
 |----|------|------|
 | 文档同步 | `docs/syscall.md` 51→66、`docs/timer.md` 新架构、`pit-200hz-handoff.md` 状态 ✅（已提交 ba56d34） | 技术债清零 |
-| applet 验证清单 | `config/busybox.config` 51 个 applet 逐个 QEMU 跑通并记录（标出缺 syscall 跑不了的） | 摸清家底 |
+| applet 验证清单 | 52/52 编译进 busybox；28 个完整工作，15 个受 libc 缺口影响，3 个未编译，4 处 user-fault 崩溃。详见 `docs/applet-verification.md` ✅（已提交，2026-08-18） | 摸清家底 ✅ |
 
 ### 🔒 P1 安全加固
 
@@ -104,6 +104,7 @@
 | HTTPS/TLS | mbedTLS 集成 BusyBox wget（原 P2#10） | mbedTLS ✅ | |
 | AF_UNIX/socketpair | 本地 socket IPC（原 P2#11） | socket ✅ | |
 | 更多 applet | grep/sed/find，先补 libc regex/fnmatch（原 P1#7） | libc | |
+| **libc 完整性** | printf 补 `%f/%ld/%lu`、strtod、getopt、stdio 行读取；验收基线 `docs/applet-verification.md`（28/52 完整工作） | 独立 | |
 | Alpine apk/musl | musl 二进制包兼容路线（原 P3#16） | 动态链接器 | cavOS |
 
 ### 依赖链总览
