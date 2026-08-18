@@ -123,6 +123,7 @@ int ext2_selftest_write_read(void);
 int gpt_selftest_crc32(void);
 int tmpfs_selftest_mounted(void);
 int test_timer_tsc_freq(void);
+int test_timer_jiffies_hz(void);
 #endif
 
 // ── Test runner ────────────────────────────────────────────
@@ -145,6 +146,7 @@ int selftest_run_all(void)
     selftest_register("gpt_crc32",         gpt_selftest_crc32);
     selftest_register("tmpfs_mounted",     tmpfs_selftest_mounted);
     selftest_register("timer_tsc_freq",    test_timer_tsc_freq);
+    selftest_register("timer_jiffies_hz",  test_timer_jiffies_hz);
 #endif
 
     int passed = 0, failed = 0;

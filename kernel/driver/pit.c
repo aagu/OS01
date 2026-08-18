@@ -2,14 +2,9 @@
 #include <device/timer.h>
 #include <kernel/arch/io.h>
 #include <kernel/interrupt.h>
-#include <kernel/poll.h>  // poll_timeout_node_t (PIT registry scan)
 #include <stddef.h>
 #include <kernel/apic.h>
 #include <kernel.h>
-#include <kernel/softirq.h>
-#include <kernel/task.h>
-#include <kernel/wait.h>
-#include <kernel/percpu.h>
 #include <kernel/clockevent.h>  // tick_handler()
 #include <driver/serial.h>
 #include <kernel/console.h>

@@ -70,7 +70,7 @@ typedef struct poll_wait_entry {
 // poll_table_setup and freed via poll_table_destroy.
 
 // ── Poll timeout registry node ─────────────────────────
-// One node per in-flight poll with a positive timeout.  The PIT tick
+// One node per in-flight poll with a positive timeout.  The LAPIC tick
 // scans the registry list and wakes every node whose deadline passed.
 // Per-poll nodes (NOT a global single slot) so concurrent pollers
 // never clobber each other's timeout wakeup.
@@ -87,7 +87,7 @@ typedef struct poll_table {
     int                 max_entries;             // capacity of entries array
     int                 nent;                    // active entry count
     bool                triggered;               // short-circuit: fd ready
-    poll_timeout_node_t tmo;                     // PIT timeout registry node
+    poll_timeout_node_t tmo;                     // LAPIC tick timeout registry node
 } poll_table_t;
 
 // ── API ────────────────────────────────────────────────

@@ -10,8 +10,9 @@ void tick_init(void);
 // 接管，失败则回退 PIT。
 void tick_start(void);
 
-// 统一 tick 语义（arch IRQ handler 调用，无参）：jiffies++ → poll 纳秒扫描 →
-// need_resched → watchdog → TIMER_SIRQ。EOI 由各 arch handler 负责。
+// 统一 tick 语义（arch IRQ handler 调用，无参）：jiffies++ → poll 扫描
+// （deadline 纳秒比较）→ need_resched → watchdog → TIMER_SIRQ。EOI 由各
+// arch handler 负责。
 void tick_handler(void);
 
 #endif

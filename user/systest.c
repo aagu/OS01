@@ -425,7 +425,8 @@ static void test_clock_gettime(void)
 {
     struct timespec a, b;
     int ra = clock_gettime(CLOCK_MONOTONIC, &a);
-    for (volatile int i = 0; i < 50000; i++) {}
+    // 短忙等（固定空转，用户态无 TSC，靠 tick 前进），确保时间前进。
+    for (volatile int i = 0; i < 2000000; i++) {}
     int rb = clock_gettime(CLOCK_MONOTONIC, &b);
     CHECK3(ra == 0 && rb == 0, "clock_gettime", "returns 0");
     CHECKF(b.tv_sec > a.tv_sec || (b.tv_sec == a.tv_sec && b.tv_nsec >= a.tv_nsec),

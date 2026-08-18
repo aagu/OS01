@@ -17,7 +17,6 @@
 #include <fs/vfs.h>
 #include <kernel/percpu.h>
 #include <kernel/pty.h>
-#include <device/timer.h>    // jiffies
 #include <kernel/clocksource.h>   // clocksource_read_ns()
 #include <net/socket.h>     // SOCK_CONNECTED, SOCK_LISTENING
 #include <string.h>          // memset
@@ -329,7 +328,7 @@ wait_queue_t *current_poll_wq = NULL;
 // before sleep is retried on the next tick, and concurrent pollers
 // don't interfere.  Deadlines are in ns (clocksource_read_ns timeline).
 
-// Non-static: pit.c PIT handler references them (extern).
+// Non-static: tick.c tick_handler references them (extern).
 poll_timeout_node_t *poll_timeout_head = NULL;
 spinlock_T poll_timeout_lock = { 1 };
 
