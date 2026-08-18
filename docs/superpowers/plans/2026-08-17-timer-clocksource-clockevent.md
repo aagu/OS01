@@ -689,6 +689,12 @@ bool lapic_timer_start(uint32_t freq_hz)
     if (init_count == 0)
         init_count = 1;
 
+    // 写 divisor 到当前 CPU 的 LAPIC 硬件寄存器（DIV 是 per-LAPIC 的，不是
+    // 全局变量）。值仍是校准产物，但必须每 CPU 各写一次：AP 的 LAPIC 复位后
+    // count_shift=0(÷1)，若不写则 AP 复用 ÷2 折算的 lapic_timer_hz 却用 ÷1
+    // 硬件 → AP 频率 ×2 = 200Hz（spec §7.2，Ruling 4）。先定 divisor 再装 count。
+    lapic_write(LAPIC_TIMER_DIV, lapic_timer_divisor);
+
     lapic_write(LAPIC_LVT_TIMER, LAPIC_TIMER_VECTOR | (1 << 17));
     lapic_write(LAPIC_TIMER_INIT, init_count);
 

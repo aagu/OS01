@@ -12,6 +12,7 @@
   - v5：并入四轮 review（AP 握手超时后无条件采样 bug、0.4%/0.8% 矛盾 + off-by-one 修复、超时 300→500ms、LVT_TIMER 掩蔽、IRQ8 读 0x0C 清标志、arch_tick_start 返回 bool、SYNC_SPIN_LIMIT 双侧同宏、lfence 可选、CPUID15h 有效=RTC 不需要注记、门②⑥ 忙等基准）
   - v6：并入五轮 review（300/500ms 三处统一、校准优先级死代码修正 + §8.1 正交表述如实化、DIV=0 是 ÷2 非 ÷1、register_irq(8) 带 IRQF_TRIGGER_LEVEL）
   - v7：并入 Hermes 外部评审（明确 lapic_timer_hz 语义=递减率不 ×2、irq_mask ioapic 对称性验证结论、tick_handler poll 扫描的 GS 时序假设、500ms 超时改 2^32 宽松兜底、divisor 注释统一 ÷2）
+  - v8：并入实现期门①实测（QEMU 双核 298Hz 定位：`lapic_timer_start` 必须写 per-LAPIC `LAPIC_TIMER_DIV`，因 AP 复位 ÷1 而静态值 ÷2 折算 → 漏写导致 AP 200Hz）
 
 ---
 
@@ -429,12 +430,17 @@ phase 6:  ahci ...                              ← 不变，仍由 PIT 驱动 j
 initial_count），不崩，但 `lapic_timer_start` 的 bool 返回值适配必须**同时改
 `subsys_percpu.c`**（不只 `smp.c`），且实现要确认重写 initial_count 无副作用。
 
-**AP 复用 BSP 校准状态（预检，无冲突但需确认）**：`lapic_timer_hz` /
-`lapic_timer_divisor` 是**静态全局**（`lapic_timer.c:35-38`）。BSP 在
-`lapic_timer_calibrate`（phase 4）算好它们，`tick_start` 用它们启动 BSP；AP 在
-`smp_boot_aps`（`tick_start` 之后）复用同一静态值，无冲突。**唯一要求**：实现
-在 `lapic_timer_start` 里**不得重置 divisor**（divisor 只在校准阶段写一次，启动
-阶段只写 INIT），否则 AP 启动时会把 BSP 校准好的 divisor 改掉。
+**AP 复用 BSP 校准状态（关键：divisor 是 per-LAPIC 硬件，不是全局变量）**：
+`lapic_timer_hz` / `lapic_timer_divisor` 是**静态全局**（`lapic_timer.c:35-38`），
+BSP 在 `lapic_timer_calibrate`（phase 4）算好它们。但 **`LAPIC_TIMER_DIV` 是
+per-LAPIC 的硬件寄存器**：BSP 校准写了 BSP 的 `LAPIC_TIMER_DIV`，AP 的 LAPIC
+复位后 `count_shift=0`（÷1，见 QEMU `apic_common.c` reset）。因此
+**`lapic_timer_start()` 必须写 `lapic_write(LAPIC_TIMER_DIV, lapic_timer_divisor)`**
+——把校准好的 divisor **值**应用到当前 CPU 的 LAPIC 硬件寄存器（不是重新校准
+divisor 值，值始终是校准产物、不变量）。若省略，AP 复用 BSP 的 ÷2 折算
+`lapic_timer_hz` 却用 ÷1 硬件 → AP 频率 ×2 = 200Hz，双核 100+200=300Hz（QEMU
+实测 298Hz 吻合，门①失败）。此约束与「不在 start 里重新校准 divisor」不矛盾：
+值不变，只是必须**每 CPU 各写一次**自己的硬件寄存器。
 
 ### 7.3 IF 前置条件（写明）
 
