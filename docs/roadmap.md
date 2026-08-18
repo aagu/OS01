@@ -31,8 +31,7 @@
 
 | 项 | 内容 | 理由 |
 |----|------|------|
-| 文档同步 | `docs/syscall.md` 51→66（漏 socket 52–64 + clock_gettime 65）、`docs/timer.md` 重构后新架构 | 技术债，趁记忆新鲜 |
-| CI 集成 | GitHub Actions + QEMU（`make systest` / `make test-network`） | 已上 GitHub，回归自动化 |
+| 文档同步 | `docs/syscall.md` 51→66、`docs/timer.md` 新架构、`pit-200hz-handoff.md` 状态 ✅（已提交 ba56d34） | 技术债清零 |
 | applet 验证清单 | `config/busybox.config` 51 个 applet 逐个 QEMU 跑通并记录（标出缺 syscall 跑不了的） | 摸清家底 |
 
 ### 🔒 P1 安全加固
