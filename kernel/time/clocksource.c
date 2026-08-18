@@ -13,13 +13,16 @@ static void compute_mult_shift(uint64_t freq_hz, uint32_t *mult, uint32_t *shift
     uint64_t m = 0;
     // s 上限 64：>1GHz CPU 需要 shift>31（spec §5.2，如 2.994GHz → 33）；
     // mult 必须 < 2^32，由下方 `m >= (1ULL<<32)` break 保证。
+    // 注意：`1e9 << s` 在 s>=35 时溢出 uint64_t（1e9<<35 ≈ 3.4e19 > 2^64），
+    // 而 ≥4.3GHz 的 TSC 恰好需要 shift>=35；故中间值用 __uint128_t，
+    // 使 1e9<<63（<2^93）也在 2^128 内，高频下循环不再提前 wrap。
     for (; s < 64; s++) {
-        m = (1000000000ULL << s) / freq_hz;
+        m = (uint64_t)(((__uint128_t)1000000000ULL << s) / freq_hz);
         if (m >= (1ULL << 32))
             break;
     }
     s -= 1;                       // 退回最后一个不溢出的 shift
-    m = (1000000000ULL << s) / freq_hz;
+    m = (uint64_t)(((__uint128_t)1000000000ULL << s) / freq_hz);
     if (m == 0) m = 1;            // 极低 freq 保护
     *shift = s;
     *mult  = (uint32_t)m;
