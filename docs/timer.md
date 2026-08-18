@@ -1,35 +1,131 @@
-# 定时器系统
+# 定时器系统（Timer 重构后）
 
-本系统实现了完整的定时器系统，包括硬件定时器（PIT）和软件定时器管理。
+> 本文档描述 timer 重构（2026-08-17~18，clocksource+clockevent 双层抽象）之后的定时器架构。
+> 重构解决了 QEMU TCG 下 PIT 200Hz 伪影（jiffies 2x），并把精粒度时间与 tick 解耦。
+> 设计文档：`docs/superpowers/specs/2026-08-17-timer-clocksource-clockevent-design.md`（v8）。
 
-## 定时器系统架构
+## 架构总览
 
-定时器系统采用分层设计：
+```
+┌─────────────────────────────────────────────────────┐
+│ 精粒度消费者: clock_gettime / nanosleep / poll/select │ ← 纳秒时间戳
+├─────────────────────────────────────────────────────┤
+│ clocksource 层 (kernel/time/clocksource.c, arch无关) │ ← 单调纳秒
+│   clocksource_read_ns() = (cycle+offset)*mult>>shift │
+├─────────────────────────────────────────────────────┤
+│ clockevent 层 (kernel/time/tick.c, arch无关)         │ ← tick 语义
+│   tick_handler(): jiffies++ / poll超时纳秒扫描 /      │
+│                   need_resched / watchdog / TIMER_SIRQ
+├─────────────────────────────────────────────────────┤
+│ arch hook (kernel/include/kernel/arch/*.h)           │
+│   arch_cycle_counter() [已有]  arch_cycle_freq() [新增]
+│   arch_tick_start() [新增]  ← x86: LAPIC; aarch64: CNTP(预留)
+└─────────────────────────────────────────────────────┘
+粗粒度消费者: EEVDF、watchdog、kernel timer 轮、lwIP 粗超时、AHCI → jiffies
+（10ms/tick，不变）
+```
 
-1. **硬件定时器层**：使用可编程间隔定时器（PIT）提供时间基准
-2. **时间计数层**：维护系统时间计数器 `jiffies`
-3. **定时器管理层**：管理软件定时器的创建、添加、删除和执行
-4. **软中断处理层**：使用软中断处理到期的定时器
+**核心原则**：精粒度时间（用户可感知）挂在 clocksource 纳秒上；粗粒度超时继续用
+jiffies（tick 粒度）。tick 源修好后 jiffies 恢复真 10ms，两类消费者都正确。
+
+## jiffies 语义（精确定义）
+
+`jiffies` 仍隐含 **10ms/tick** 的时间语义，精度就是 tick 粒度。它继续服务于：
+
+- 调度器（EEVDF vruntime/deadline 以 tick 计）—— tick 语义，不是时间
+- watchdog（`watchdog_counter`）、kernel timer 轮（`kernel/timer/timer.c`）
+- lwIP 粗超时（`sys_arch.c`，粒度 100ms+ 足够）
+- AHCI 初始化 busy-wait 超时（`WAIT_WHILE`）
+- `LWIP_RAND()` 种子、`hang.c` 调试时间戳
+
+**迁到 clocksource 纳秒的只有精粒度路径**：`clock_gettime`（MONOTONIC 与
+REALTIME）、`nanosleep`、`poll`、`select` 的 deadline。这些路径用户可感知精度。
 
 ## 核心组件
 
-### 系统时间计数器
+### 1. clocksource 层 — 单调纳秒（kernel/time/clocksource.c）
 
 ```c
-uint64_t volatile jiffies;
+void        clocksource_init(void);       // arch_cycle_freq() 校准 + mult/shift
+static inline uint64_t clocksource_read_ns(void);  // (cycle+offset)*mult>>shift
+uint64_t    clocksource_cycles(void);     // 原始 cycle（调试/校准用）
+uint64_t    clocksource_freq_hz(void);
 ```
 
-`jiffies` 是系统时间计数器，每 10ms 递增一次（由 PIT 中断触发）。
+- `clocksource_init()`：调 `arch_cycle_freq()`（x86: TSC 频率，CPUID15h + RTC PIE
+  联合校准）。freq 为 0 时 `clocksource_active=false`（回退路径）。
+- `compute_mult_shift(freq, &mult, &shift)`：找最大 shift 使
+  `mult = (1e9 << shift)/freq` 落在 `[1, 2^32)`，尽量接近 2^31 最大化精度。
+  - s 上限 64：>1GHz CPU 需要 shift>31（如 2.994GHz → 33）
+  - **中间值必须 `__uint128_t`**：`1e9 << s` 在 s≥35 时溢出 uint64_t，
+    而 ≥4.3GHz 的 TSC 恰好需要 shift≥35（commit 496a210 实证修复）
+  - freq 在 1MHz~10GHz 时循环很快（s≈22..34）
+- `clocksource_read_ns()`：静态 inline（热路径，syscall / tick_handler /
+  sched_unblock 都调），读 `arch_cycle_counter() + this_cpu()->tsc_offset` 换算。
 
-### 定时器链表
+### 2. clockevent 层 — tick 语义（kernel/time/tick.c）
 
 ```c
-timer_t timer_list_head;
+void tick_start(void);     // 显式启动（percpu+GS 就绪后调用）：掩 PIT → LAPIC 接管或回退
+void tick_handler(void);   // 统一 tick 语义（arch IRQ handler 调用，无参）
+uint64_t tick_get_jiffies(void);
 ```
 
-`timer_list_head` 是定时器链表的头节点，所有活跃的定时器都链接到这个链表中。
+> 注意：**没有独立的 tick_init()**——PIT 在 phase 4 由 `pit_init()` 照常启动，
+> `tick_handler()` 由 PIT/LAPIC 的 arch IRQ handler 直接调用；`tick_start()` 在
+> `kernel/kernel/main.c:294`（percpu+GS 就绪后）显式调用。
 
-### 定时器结构体
+**tick_start() 的源选择**：
+
+```
+1. irq_mask(0)                     // 先掩 PIT IRQ0，防交接窗口双计 jiffies
+2. if (arch_tick_start())          // LAPIC 周期模式接管（每 CPU）
+       PIT 保持掩蔽                // LAPIC 成功 = QEMU 免疫 200Hz 伪影
+   else
+       irq_unmask(0)               // 回退 PIT（LAPIC 未校准/失败）
+```
+
+**tick_handler() 职责**（从旧 pit_handler 迁来 + 扩展）：
+
+1. `jiffies++`
+2. **poll 超时扫描**（纳秒比较）：遍历 `poll_timeout_head` 注册表，
+   `clocksource_read_ns() >= n->deadline` → `wait_queue_wake_all(n->wq)`
+   （poll.c 注册 deadline 用 `clocksource_read_ns() + timeout*1e6`，同一时间轴）
+   - ⚠️ 取锁必须 `spin_lock_irqsave`：poll.c 持锁时被本 tick 抢占会自旋死锁
+   - ⚠️ boot 期 `poll_timeout_head` 恒 NULL（poll 只在用户态进程里调）——
+     此短路保证 GS base 装之前不调 `clocksource_read_ns()`（读 this_cpu()->tsc_offset）
+3. `this_cpu()->need_resched = 1` + `watchdog_counter++`
+4. timer wheel 到期（`expire_jiffies <= jiffies`）→ `set_softirq_status(TIMER_SIRQ)`
+
+### 3. arch hook
+
+| hook | x86_64 | aarch64（预留） |
+|------|--------|----------------|
+| `arch_cycle_counter()` | RDTSC | `cntvct_el0`（待实现） |
+| `arch_cycle_freq()` | CPUID15h + RTC PIE 联合校准 | 读 CNTFRQ（待实现） |
+| `arch_tick_start()` | LAPIC 周期模式（每 CPU 写 per-LAPIC DIV） | CNTP（待实现） |
+
+### 4. LAPIC 定时器（tick 源，kernel/apic/lapic_timer.c）
+
+- `lapic_timer_init()`：注册 IDT 门 + 校准（subsys Phase 4）
+- `lapic_timer_calibrate()`：**RTC PIE 联合结果优先**（250ms 窗口更稳），
+  否则 TSC 窗口（~10ms）
+- `lapic_timer_start()`：每 CPU 周期模式启动
+  - ⚠️ **必须写 per-LAPIC `LAPIC_TIMER_DIV`**：AP 复位后 DIV=÷1，静态值 ÷2
+    折算会导致 AP 200Hz（QEMU 双核 298Hz 实证，spec v8 门①）
+- `lapic_timer_handler()`：调 `tick_handler()` + 发送 EOI
+
+### 5. PIT（fallback + boot 窗口，kernel/driver/pit.c）
+
+- `pit_init()`：PIT 100Hz（IOAPIC 或 PIC），**boot 早期先跑**保证 tick 可用
+- `pit_handler()` → 调 `tick_handler()`
+- `tick_start()` 后：LAPIC 成功 → PIT 掩蔽；失败 → PIT 继续
+- PIT 200Hz 伪影背景：QEMU TCG 的 IOAPIC edge 投递无上升沿检测，PIT mode-3
+  每 10ms 双触发 → guest 收 200Hz。**这不是 OS bug**（guest 侧 1:1 处理），
+  真实硬件 PIT 是真 100Hz。LAPIC LVT 本地投递天然免疫。证据链见
+  `docs/pit-200hz-analysis.md`。
+
+### 6. 软件定时器管理（timer wheel，kernel/timer/timer.c，未变）
 
 ```c
 typedef struct timer {
@@ -40,332 +136,67 @@ typedef struct timer {
 } timer_t;
 ```
 
-- `list` - 链表节点，用于链接定时器
-- `func` - 定时器到期时执行的回调函数
-- `data` - 传递给回调函数的数据
-- `expire_jiffies` - 定时器到期的时间（`jiffies` 值）
+- `init_timer` / `create_timer` / `add_timer` / `del_timer` / `do_timer`
+- 链表按 `expire_jiffies` 排序；tick_handler 检查头部到期则触发 `TIMER_SIRQ`
+- 软中断 `do_timer` 遍历到期回调（硬中断处理时间短，回调简短原则不变）
 
-## 硬件定时器（PIT）
-
-### 功能
-
-* 提供系统时间基准
-* 触发定时器中断
-* 递增系统时间计数器 `jiffies`
-
-### 实现
-
-位于 `kernel/driver/pit.c` 中，主要组件包括：
-
-* `pit_init` - 初始化 PIT（APIC 可用时使用 IOAPIC，否则使用 PIC）
-* `set_frequency` - 设置 PIT 频率
-* `pit_handler` - PIT 中断处理函数（递增 jiffies、设置 need_resched、触发软中断）
-
-### 初始化流程
-
-1. 调用 `pit_init` 函数
-2. 注册 PIT 中断（IRQ0）
-3. 设置 PIT 频率为 100Hz（每秒 100 次中断）
-
-### 中断处理流程
-
-1. PIT 每 10ms 触发一次中断（仅 BSP；AP 使用 LAPIC 定时器做调度）
-2. 调用 `pit_handler` 函数
-3. 递增系统时间计数器 `jiffies`
-4. 设置 `need_resched` 以便调度器在中断返回时切换任务
-5. 如果有定时器到期，设置 `TIMER_SIRQ` 软中断
-6. `do_timer` 在软中断上下文中遍历链表并执行回调
-
-### LAPIC 定时器（每 CPU 调度时钟）
-
-LAPIC 定时器为每个 CPU 提供独立的调度时钟（100Hz），位于 `kernel/apic/lapic_timer.c`：
-
-* `lapic_timer_init` - 注册 IDT 门并校准（subsys Phase 4）
-* `lapic_timer_calibrate` - 用 PIT 作为参考进行校准
-* `lapic_timer_start` - 启动周期模式（percpu_init + GS 基址设置后调用）
-* `lapic_timer_handler` - 设置 `need_resched` + 发送 EOI（不含 jiffies 递增）
-
-#### 与 PIT 的关系
-
-- **PIT**（仅 BSP）：唯一递增 `jiffies` 的源，触发软中断执行定时器回调，请求调度
-- **LAPIC 定时器**（每 CPU）：仅请求调度，不递增 `jiffies`
-- `jiffies` 是系统全局时间计数器，仅由 PIT 在 BSP 上维护
-
-## 软件定时器管理
-
-### 功能
-
-* 创建和初始化定时器
-* 添加定时器到链表
-* 从链表中删除定时器
-* 处理到期的定时器
-
-### 实现
-
-位于 `kernel/timer/timer.c` 中，主要函数包括：
-
-* `init_timer` - 初始化定时器
-* `create_timer` - 创建定时器
-* `add_timer` - 添加定时器到链表
-* `del_timer` - 从链表中删除定时器
-* `do_timer` - 处理到期的定时器
-* `timer_init` - 初始化定时器系统
-
-### 初始化流程
-
-在 `kernel_main` 的子系统框架中（subsys Phase 4）执行：
-
-1. `timer`（必需）→ `timer_init()` — 初始化 jiffies、链表头、注册软中断
-2. `pit`（可选）→ `pit_init()` — PIT 100Hz，使用 IOAPIC 或 PIC
-3. `lapic-timer`（可选）→ `lapic_timer_init()` — 注册门 + 校准，后续 per-CPU 启动
-
-`register_subsys` 在 `kernel/arch/x86_64/subsys.c` 中定义。`subsys_init_all()` 按 Phase 顺序依次执行。具体流程：
-
-1. 调用 `timer_init` 函数
-2. 初始化系统时间计数器 `jiffies` 为 0
-3. 初始化定时器链表头
-4. 注册定时器软中断处理函数 `do_timer`
-
-### 定时器管理流程
-
-#### 创建定时器
+## 时间转换
 
 ```c
-timer_t *timer = create_timer(callback_function, callback_data, expire_time);
+// jiffies ↔ 毫秒（tick = 10ms）
+uint64_t ms_to_jiffies(uint64_t ms)   { return ms / 10; }
+uint64_t sec_to_jiffies(uint64_t sec) { return sec * 100; }
+uint64_t jiffies_to_ms(uint64_t jif)  { return jif * 10; }
+uint64_t jiffies_to_sec(uint64_t jif) { return jif / 100; }
 ```
 
-#### 添加定时器
+精粒度纳秒（clocksource）直接 `ns / 1e9 = sec`，`ns % 1e9 = nsec`。
 
-```c
-add_timer(timer);
+## 子系统注册（kernel/arch/x86_64/subsys.c）
+
+```
+Phase 4:
+  1. timer（必需）→ timer_init()      — jiffies、链表头、软中断注册
+  2. pit（可选）→ pit_init()          — PIT 100Hz，boot 窗口 tick（handler 直接调 tick_handler）
+  3. lapic-timer（可选）→ lapic_timer_init() — 门 + 校准
+  4. clocksource（必需）→ clocksource_init() — TSC 频率 + mult/shift
+main.c（percpu_init + GS 基址设置后）:
+  → tick_start()                    — 掩 PIT → arch_tick_start()（LAPIC）或回退 PIT
 ```
 
-#### 处理到期的定时器
-
-1. PIT 中断触发，递增 `jiffies`
-2. 检查定时器链表，判断是否有定时器到期
-3. 如果有定时器到期，设置定时器软中断
-4. 软中断处理函数 `do_timer` 执行以下操作：
-   - 遍历定时器链表
-   - 找到所有到期的定时器
-   - 从链表中删除到期的定时器
-   - 执行定时器的回调函数
-   - 继续检查下一个定时器
-
-## 定时器使用示例
-
-### 基本用法
+## 定时器使用示例（timer wheel）
 
 ```c
-// 定义定时器回调函数
-void timer_callback(void *data) {
-    color_printk(GREEN, BLACK, "Timer expired! Data: %p\n", data);
-    // 执行定时任务
-}
+void callback(void *data) { color_printk(GREEN, BLACK, "Timer expired! %p\n", data); }
 
-// 创建并添加定时器
-void setup_timer() {
-    // 创建一个 5 秒后到期的定时器
-    timer_t *timer = create_timer(timer_callback, NULL, 50); // 50 * 10ms = 500ms
-    add_timer(timer);
-}
-```
-
-### 一次性定时器
-
-```c
-void one_shot_timer(void *data) {
-    color_printk(GREEN, BLACK, "One-shot timer executed!\n");
-    // 定时器执行完成后会自动删除
-}
-
-void create_one_shot_timer() {
-    timer_t *timer = create_timer(one_shot_timer, NULL, 100); // 1 秒后执行
-    add_timer(timer);
-}
-```
-
-### 周期性定时器
-
-```c
-void periodic_timer(void *data) {
-    color_printk(GREEN, BLACK, "Periodic timer executed!\n");
-    
-    // 重新创建并添加定时器，实现周期性执行
-    timer_t *timer = create_timer(periodic_timer, NULL, 50); // 500ms 后再次执行
-    add_timer(timer);
-}
-
-void create_periodic_timer() {
-    timer_t *timer = create_timer(periodic_timer, NULL, 50); // 500ms 后首次执行
-    add_timer(timer);
-}
-```
-
-## 定时器链表管理
-
-### 链表结构
-
-定时器链表是一个按到期时间排序的双向链表：
-
-- 链表头：`timer_list_head`
-- 链表节点：每个 `timer_t` 结构体中的 `list` 字段
-- 排序方式：按 `expire_jiffies` 值从小到大排序
-
-### 添加定时器流程
-
-1. 遍历定时器链表
-2. 找到第一个到期时间大于当前定时器的节点
-3. 将当前定时器插入到该节点之前
-4. 保持链表的排序顺序
-
-### 删除定时器流程
-
-1. 从链表中删除定时器节点
-2. 保持链表的完整性
-
-## 软中断处理
-
-定时器系统使用软中断来处理到期的定时器，这样可以：
-
-1. 减少硬中断处理时间
-2. 提高系统响应速度
-3. 允许在处理定时器时执行更复杂的操作
-
-### 软中断注册
-
-```c
-register_softirq(0, &do_timer, NULL);
-```
-
-### 软中断触发
-
-当有定时器到期时，在 PIT 中断处理函数中设置软中断状态：
-
-```c
-set_softirq_status(TIMER_SIRQ);
-```
-
-## 时间管理
-
-### 时间单位
-
-- **jiffies**：系统全局时间计数器，每 10ms 递增一次（仅由 PIT/BSP 维护）
-- **毫秒**：1 毫秒 = 0.1 jiffies
-- **秒**：1 秒 = 100 jiffies
-
-### 时间转换
-
-```c
-// 将毫秒转换为 jiffies
-uint64_t ms_to_jiffies(uint64_t ms) {
-    return ms / 10;
-}
-
-// 将秒转换为 jiffies
-uint64_t sec_to_jiffies(uint64_t sec) {
-    return sec * 100;
-}
-
-// 将 jiffies 转换为毫秒
-uint64_t jiffies_to_ms(uint64_t jif) {
-    return jif * 10;
-}
-
-// 将 jiffies 转换为秒
-uint64_t jiffies_to_sec(uint64_t jif) {
-    return jif / 100;
-}
+timer_t *t = create_timer(callback, NULL, 50); // 50 * 10ms = 500ms
+add_timer(t);                                  // 到期自动删除（一次性）
 ```
 
 ## 代码结构
 
-### 定时器核心
+| 文件 | 职责 |
+|------|------|
+| `kernel/time/clocksource.c` + `include/kernel/clocksource.h` | 单调纳秒层（mult/shift 换算） |
+| `kernel/time/tick.c` + `include/kernel/clockevent.h` | tick 语义层（jiffies/poll 扫描/源选择） |
+| `kernel/apic/lapic_timer.c` | LAPIC tick 源（校准 + 周期模式 + per-LAPIC DIV） |
+| `kernel/driver/pit.c` | PIT（boot 窗口 + fallback） |
+| `kernel/timer/timer.c` + `include/device/timer.h` | 软件定时器轮（timer wheel） |
+| `kernel/arch/x86_64/`（arch hook） | TSC/RTC 校准、LAPIC 启动 |
 
-* `kernel/timer/timer.c` - 定时器系统核心实现（`timer_init`, `add_timer`, `del_timer`, `do_timer`）
-* `kernel/include/device/timer.h` - 定时器相关头文件
+## 精度说明
 
-### 硬件定时器
-
-* `kernel/driver/pit.c` - PIT 定时器驱动（`pit_init`, `pit_handler`, `set_frequency`）
-* `kernel/include/driver/pit.h` - PIT 定时器驱动头文件
-* `kernel/apic/lapic_timer.c` - LAPIC 定时器（`lapic_timer_init`, `lapic_timer_start`, `lapic_timer_handler`）
-
-### 子系统注册
-
-* `kernel/arch/x86_64/subsys.c` - 所有定时器组件注册为 Phase 4 入口
-
-## 性能优化
-
-1. **链表排序**：定时器链表按到期时间排序，减少查找时间
-2. **软中断处理**：使用软中断处理定时器，减少硬中断处理时间
-3. **批量处理**：一次处理所有到期的定时器，提高效率
-4. **内存管理**：使用 `calloc` 和 `free` 管理定时器内存
-
-## 注意事项
-
-1. **定时器回调函数应尽量简短**：回调函数执行时间过长会影响其他定时器的执行
-2. **避免在回调函数中创建大量定时器**：可能导致链表过长，影响性能
-3. **及时删除不需要的定时器**：避免内存泄漏和不必要的处理
-4. **注意定时器的精度**：定时器的精度为 10ms，不适合需要高精度的场景
-
-## 扩展定时器系统
-
-### 提高定时器精度
-
-当前系统已实现的定时方案：
-
-1. **PIT**（100Hz）：系统 `jiffies` 时间源，10ms 精度
-2. **LAPIC 定时器**（100Hz）：每 CPU 调度时钟，与 PIT 同频
-3. **进一步优化**：可增加 PIT 频率，或将来引入 HPET
-
-### 定时器类型
-
-当前定时器类型（通过回调行为区分）：
-
-1. **一次性定时器**：回调执行后自动从链表删除，不重新添加
-2. **周期性定时器**：回调函数中重新调用 `create_timer` + `add_timer`
-
-### 优化定时器管理
-
-可以通过以下方式优化定时器管理：
-
-1. **使用更高效的数据结构**：如时间轮（Time Wheel）或平衡二叉树，提高定时器管理效率
-2. **批量处理定时器**：减少链表操作次数
-3. **定时器合并**：合并接近的定时器，减少中断处理次数
+- tick 精度 10ms（LAPIC 周期模式 100Hz，与旧 PIT 一致）
+- clocksource 纳秒精度受 TSC 频率与 mult/shift 影响（~1ns 分辨率，亚微秒实际）
+- nanosleep/poll/select 的 deadline 用纳秒比较，唤醒仍由 tick 驱动
+  （每个 tick 扫描一次到期项）——唤醒延迟 ≤ 1 tick（10ms）
 
 ## 故障排除
 
-### 定时器不执行
-
-可能的原因：
-
-1. **定时器未添加到链表**：确保调用了 `add_timer` 函数
-2. **定时器到期时间设置错误**：确保 `expire_jiffies` 设置正确
-3. **软中断未触发**：检查 PIT 中断是否正常触发
-4. **回调函数有问题**：检查回调函数是否有错误
-
-### 定时器执行多次
-
-可能的原因：
-
-1. **定时器被多次添加**：确保每个定时器只调用一次 `add_timer`
-2. **回调函数中重新添加了定时器**：检查回调函数是否意外重新添加了定时器
-
-### 系统时间不准
-
-可能的原因：
-
-1. **PIT 频率设置错误**：检查 `set_frequency` 函数的参数
-2. **中断处理延迟**：系统负载过高，导致中断处理延迟
-
-## 总结
-
-系统的定时器系统实现了以下功能：
-
-1. **硬件定时器管理**：使用 PIT 提供系统时间基准
-2. **软件定时器管理**：创建、添加、删除和执行定时器
-3. **时间管理**：维护系统时间计数器 `jiffies`
-4. **软中断处理**：使用软中断处理到期的定时器
-
-定时器系统为操作系统提供了时间管理能力，支持各种定时任务的执行，是操作系统的重要组成部分。
+| 症状 | 排查 |
+|------|------|
+| tick 速率 2×（200Hz） | QEMU TCG PIT 伪影：确认 `tick_start()` 后 LAPIC 接管成功（`arch_tick_start()` 返回 true），PIT 保持掩蔽 |
+| AP tick 速率异常（~200Hz） | `lapic_timer_start` 漏写 per-LAPIC `LAPIC_TIMER_DIV`（AP 复位 ÷1） |
+| `clocksource_read_ns()` 崩溃 | GS base 装之前调用（boot 期）——tick_handler 有 `poll_timeout_head` 短路保护，新调用点需同样注意 |
+| 定时器不执行 | timer 未 add / `expire_jiffies` 错误 / TIMER_SIRQ 未触发 |
+| 定时器执行多次 | 回调中重复 add_timer |

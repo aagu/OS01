@@ -1,6 +1,6 @@
 # Syscall interface
 
-System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`. Up to 6 arguments via the `syscall6()` wrapper. Return value in `rax`. 52 syscalls total (0..51).
+System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`. Up to 6 arguments via the `syscall6()` wrapper. Return value in `rax`. 66 syscalls total (0..65).
 
 ## Syscall table
 
@@ -58,6 +58,20 @@ System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`
 | 49 | `SYS_ppoll` | rdi=fds, rsi=nfds, rdx=tsp, r10=sigmask | Poll with signal mask |
 | 50 | `SYS_select` | rdi=nfds, rsi=readfds, rdx=writefds, r10=exceptfds, r8=timeout | Synchronous I/O multiplexing |
 | 51 | `SYS_pselect6` | rdi=nfds, rsi=readfds, rdx=writefds, r10=exceptfds, r8=tsp, r9=sigmask | Select with signal mask |
+| 52 | `SYS_socket` | rdi=domain, rsi=type, rdx=protocol | Create socket（AF_INET; SOCK_STREAM/SOCK_DGRAM） |
+| 53 | `SYS_bind` | rdi=fd, rsi=sockaddr, rdx=addrlen | Bind socket to address（addrlen ≥ sizeof(sockaddr_in)） |
+| 54 | `SYS_connect` | rdi=fd, rsi=sockaddr, rdx=addrlen | Connect socket（sin_port 网络序→主机序） |
+| 55 | `SYS_listen` | rdi=fd, rsi=backlog | Listen for connections |
+| 56 | `SYS_accept` | rdi=fd | Accept connection（**简化版：不返回客户端地址**，内核传 NULL） |
+| 57 | `SYS_sendto` | rdi=fd, rsi=buf, rdx=len, r10=flags, r8=addr, r9=addrlen | Send UDP data（addr 可空=已连接套接字） |
+| 58 | `SYS_recvfrom` | rdi=fd, rsi=buf, rdx=len, r10=flags, r8=addr, r9=addrlen | Receive UDP data（回填源地址 + addrlen） |
+| 59 | `SYS_setsockopt` | rdi=fd, rsi=level, rdx=optname, r10=optval, r8=optlen | Set socket option |
+| 60 | `SYS_getsockopt` | rdi=fd, rsi=level, rdx=optname, r10=optval, r8=optlen(ptr) | Get socket option |
+| 61 | `SYS_getsockname` | rdi=fd, rsi=sockaddr, rdx=addrlen(ptr) | Get bound address |
+| 62 | `SYS_getpeername` | — | ⚠️ **已定义（NR=62）但未实现**：trap.c 无 dispatch case，kernel/net 无 do_getpeername |
+| 63 | `SYS_getifaddr` | — | **OS01 自定义扩展**：无参数，返回本机接口地址（lwIP netif IP） |
+| 64 | `SYS_shutdown` | rdi=fd, rsi=how | Shutdown socket |
+| 65 | `SYS_clock_gettime` | rdi=clk_id, rsi=timespec | 纳秒时间；仅支持 CLOCK_REALTIME/MONOTONIC，**两者同值**（无 RTC 墙钟，gettimeofday 返回 0） |
 
 ## Definitions
 
@@ -95,6 +109,8 @@ Higher-level libc functions (`read()`, `exec()`, etc.) call these wrappers.
 - Sets `regs->rax` as return value
 - For `SYS_read` and `SYS_exec`: copies user-provided path strings to kernel heap (`strdup`) before VFS operations to prevent TOCTOU races
 - Return via `ret_from_exception` → `RESTORE_ALL` → `iretq`
+
+> ⚠️ **已定义未实现**：`SYS_getpeername`（62）在 syscall 名映射表存在但无 dispatch case（`do_getpeername` 不存在）。调用会落入默认分支返回 `-ENOSYS`。其余 65 个均有实现。
 
 ## Known bug
 

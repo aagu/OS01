@@ -1,5 +1,11 @@
 # PIT 200Hz — Root Cause, Evidence, and Stable Timer Plan (HANDOFF)
 
+> ✅ **已解决（2026-08-18）**：timer 重构完成（clocksource+clockevent 双层抽象），
+> tick 源切 LAPIC 周期模式（LVT 本地投递免疫 QEMU IOAPIC edge 伪影），PIT 掩蔽 +
+> 未校准回退。jiffies 恢复真 10ms。实现见 `docs/timer.md`，设计见
+> `docs/superpowers/specs/2026-08-17-timer-clocksource-clockevent-design.md`。
+> 本文件保留作根因证据链参考。
+
 Status: HANDOFF 2026-08-17 from Hermes/agent to Claude Code on homeserver.
 Read this whole file before touching timer code. Supersedes
 `PIT-200HZ-ANALYSIS.md` and `PIT-200HZ-DECISION.md` where they conflict
