@@ -14,11 +14,6 @@
 extern poll_timeout_node_t *poll_timeout_head;
 extern spinlock_T poll_timeout_lock;
 
-void tick_init(void)
-{
-    // 静态注册阶段无 tick 源切换；PIT 由 pit_init 照常启动。
-}
-
 void tick_handler(void)
 {
     jiffies++;
@@ -30,11 +25,13 @@ void tick_handler(void)
     // 用户态进程 task_init() 之后才有），此短路保证 GS base 装之前（phase 4 到
     // main.c:276）不调 clocksource_read_ns()（它读 this_cpu()->tsc_offset）。
     if (poll_timeout_head) {
-        spin_lock(&poll_timeout_lock);
+        // IRQ 上下文取锁必须 irqsave：若 poll.c 持有同一把锁时被本 tick 抢占，
+        // 普通 spin_lock 会自旋死锁（单 CPU 挂死）。irqsave 清 IF，unlock 恢复。
+        uint64_t flags = spin_lock_irqsave(&poll_timeout_lock);
         for (poll_timeout_node_t *n = poll_timeout_head; n; n = n->next)
             if (clocksource_read_ns() >= n->deadline)
                 wait_queue_wake_all(n->wq);
-        spin_unlock(&poll_timeout_lock);
+        spin_unlock_irqrestore(&poll_timeout_lock, flags);
     }
 
     this_cpu()->need_resched = 1;

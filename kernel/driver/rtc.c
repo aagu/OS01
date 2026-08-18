@@ -14,6 +14,9 @@
 static volatile uint32_t rtc_pie_count;
 static volatile uint64_t rtc_pie_tsc0;
 static volatile uint64_t rtc_pie_tsc1;
+// LAPIC 腿在 handler 内沿 #1/#N 采样，与 TSC 严格同一窗口。
+static volatile uint32_t rtc_pie_lapic0;
+static volatile uint32_t rtc_pie_lapic1;
 
 static void rtc_pie_handler(uint64_t nr, uint64_t parameter, pt_regs_t *regs)
 {
@@ -22,11 +25,17 @@ static void rtc_pie_handler(uint64_t nr, uint64_t parameter, pt_regs_t *regs)
     arch_outb(CMOS_ADDR, 0x80 | 0x0C);
     arch_inb(CMOS_DATA);
 
-    if (rtc_pie_count == 0)
+    // 沿 #1 采 tsc0+lapic0、沿 #N 采 tsc1+lapic1：LAPIC 与 TSC 共享同一
+    // N-1 个 PIE 周期窗口，消除主循环外测量的 ~0.2-0.4% 系统性偏大。
+    if (rtc_pie_count == 0) {
         rtc_pie_tsc0 = arch_cycle_counter();
+        rtc_pie_lapic0 = lapic_read(LAPIC_TIMER_CUR);
+    }
     rtc_pie_count++;
-    if (rtc_pie_count >= RTC_PIE_TICKS)
+    if (rtc_pie_count >= RTC_PIE_TICKS) {
         rtc_pie_tsc1 = arch_cycle_counter();
+        rtc_pie_lapic1 = lapic_read(LAPIC_TIMER_CUR);
+    }
 }
 
 int rtc_pie_calibrate(uint64_t *tsc_hz_out, uint64_t *lapic_hz_out)
@@ -72,16 +81,16 @@ int rtc_pie_calibrate(uint64_t *tsc_hz_out, uint64_t *lapic_hz_out)
     set_rtc_register(0x0B, b & ~0x40);
     unregister_irq(RTC_PIE_IRQ_VEC);     // ⚠️ 传 vector 0x28（非 gsi 8）
 
-    // 6. 读 LAPIC 剩余计数。
-    uint32_t cur = lapic_read(LAPIC_TIMER_CUR);
-    uint64_t elapsed_lapic = 0xFFFFFFFFULL - cur;
+    // 6. LAPIC 腿：elapsed = 沿#1计数 - 沿#N计数（递减，lapic0 > lapic1）。
+    //    handler 内采样 → 与 TSC 同一 N-1 窗口，不再从 INIT 装载处算起。
+    uint64_t elapsed_lapic = (uint64_t)rtc_pie_lapic0 - (uint64_t)rtc_pie_lapic1;
 
     // 7. 检查是否采到足够 tick。
     if (rtc_pie_count < RTC_PIE_TICKS)
         return -1;                        // 超时/中断不到
 
     uint64_t tsc_elapsed = rtc_pie_tsc1 - rtc_pie_tsc0;
-    // off-by-one 修正：tsc0 在沿#1、tsc1 在沿#N，实际跨 N-1 个周期。
+    // off-by-one 修正：tsc0/lapic0 在沿#1、tsc1/lapic1 在沿#N，两条腿均跨 N-1 个周期。
     uint64_t n = RTC_PIE_TICKS - 1;
     *tsc_hz_out   = tsc_elapsed * 1024 / n;
     // ⚠️ lapic_hz_out = 递减率（divisor ÷2 已折算），**不 ×2**：elapsed_lapic 是

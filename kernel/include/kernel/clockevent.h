@@ -3,8 +3,7 @@
 
 #include <stdint.h>
 
-// 静态注册阶段：不启动任何 tick 源（PIT 在 phase 4 由 pit_init 照常启动）。
-void tick_init(void);
+// 静态注册阶段无显式 tick 源启动：PIT 在 phase 4 由 pit_init 照常启动。
 
 // 显式启动（percpu+GS 就绪后调用）：先掩 PIT，arch_tick_start() 成功则 LAPIC
 // 接管，失败则回退 PIT。

@@ -11,7 +11,9 @@ static void compute_mult_shift(uint64_t freq_hz, uint32_t *mult, uint32_t *shift
 {
     uint32_t s = 1;
     uint64_t m = 0;
-    for (; s < 32; s++) {
+    // s 上限 64：>1GHz CPU 需要 shift>31（spec §5.2，如 2.994GHz → 33）；
+    // mult 必须 < 2^32，由下方 `m >= (1ULL<<32)` break 保证。
+    for (; s < 64; s++) {
         m = (1000000000ULL << s) / freq_hz;
         if (m >= (1ULL << 32))
             break;

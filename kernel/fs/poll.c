@@ -334,17 +334,19 @@ spinlock_T poll_timeout_lock = { 1 };
 
 static void poll_tmo_register(poll_table_t *pt, uint64_t deadline)
 {
-    spin_lock(&poll_timeout_lock);
+    // irqsave：tick_handler 在中断上下文取同一把锁，任务上下文必须禁 IRQ，
+    // 否则 BSP tick 落在本临界区内会自旋死锁。
+    uint64_t flags = spin_lock_irqsave(&poll_timeout_lock);
     pt->tmo.next = poll_timeout_head;
     pt->tmo.wq   = &pt->wq;
     pt->tmo.deadline = deadline;
     poll_timeout_head = &pt->tmo;
-    spin_unlock(&poll_timeout_lock);
+    spin_unlock_irqrestore(&poll_timeout_lock, flags);
 }
 
 static void poll_tmo_unregister(poll_table_t *pt)
 {
-    spin_lock(&poll_timeout_lock);
+    uint64_t flags = spin_lock_irqsave(&poll_timeout_lock);
     poll_timeout_node_t **pp = &poll_timeout_head;
     while (*pp) {
         if (*pp == &pt->tmo) {
@@ -353,7 +355,7 @@ static void poll_tmo_unregister(poll_table_t *pt)
         }
         pp = &(*pp)->next;
     }
-    spin_unlock(&poll_timeout_lock);
+    spin_unlock_irqrestore(&poll_timeout_lock, flags);
 }
 
 static int poll_scan(struct pollfd *kfds, uint64_t nfds, poll_table_t *pt)

@@ -9,7 +9,7 @@ uint64_t arch_cycle_freq(void)
 {
     uint32_t eax, ebx, ecx, edx;
     cpuid(0x15, &eax, &ebx, &ecx, &edx);
-    if (ecx != 0)
+    if (ecx != 0 && eax != 0)   // eax==0 防 boot 期 #DE（畸形/虚拟 CPU）
         return (uint64_t)ecx * ebx / eax;   // core crystal Hz * ratio
 
     // RTC PIE 联合校准：同时测 TSC + LAPIC，LAPIC 结果暂存复用。
