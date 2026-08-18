@@ -18,6 +18,7 @@
 #include <kernel/percpu.h>
 #include <kernel/pty.h>
 #include <device/timer.h>    // jiffies
+#include <kernel/clocksource.h>   // clocksource_read_ns()
 #include <net/socket.h>     // SOCK_CONNECTED, SOCK_LISTENING
 #include <string.h>          // memset
 #include <stddef.h>
@@ -323,9 +324,10 @@ wait_queue_t *current_poll_wq = NULL;
 //      wait_queue_sleep, the wake was lost and the poller slept forever.
 //   2. Concurrent pollers (e.g. tetris + lwIP) clobbered each other's
 //      slot, so one poller's timeout never fired.
-// The registry keeps one node per in-flight poll; the PIT scan wakes
-// every node whose deadline passed, so a wake "lost" before sleep is
-// retried on the next tick, and concurrent pollers don't interfere.
+// The registry keeps one node per in-flight poll; the tick scan (tick.c
+// tick_handler) wakes every node whose deadline passed, so a wake "lost"
+// before sleep is retried on the next tick, and concurrent pollers
+// don't interfere.  Deadlines are in ns (clocksource_read_ns timeline).
 
 // Non-static: pit.c PIT handler references them (extern).
 poll_timeout_node_t *poll_timeout_head = NULL;
@@ -391,16 +393,14 @@ static int poll_scan(struct pollfd *kfds, uint64_t nfds, poll_table_t *pt)
 int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, poll_table_t *pt)
 {
     // ── Timeout setup ──────────────────────────────────────
-    // Register a PIT registry node.  It stays registered until this
+    // Register a tick-timeout registry node.  It stays registered until this
     // poll RETURNS (not until first wake) so the deadline keeps
     // firing every tick — no lost-wakeup window.
     uint64_t deadline = 0;
     bool timed = (timeout_val > 0);
     if (timed) {
-        // Convert ms to PIT ticks (100 Hz → 10 ms/tick)
-        int64_t ticks = (timeout_val + 9) / 10;
-        if (ticks < 1) ticks = 1;
-        deadline = jiffies + (uint64_t)ticks;
+        // Convert ms to ns on the clocksource_read_ns() timeline.
+        deadline = clocksource_read_ns() + (uint64_t)timeout_val * 1000000ULL;
         poll_tmo_register(pt, deadline);
     }
 
@@ -433,10 +433,10 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
         }
 
         // ── Block on pt.wq ────────────────────────────────
-        // The PIT registry keeps waking this wq every tick past the
+        // The LAPIC tick registry keeps waking this wq every tick past the
         // deadline, so no lost-wakeup window exists here.  The
         // pre-sleep deadline check below is a cheap extra guard.
-        if (timed && jiffies >= deadline) {
+        if (timed && clocksource_read_ns() >= deadline) {
             poll_table_cleanup(pt);
             if (timed) poll_tmo_unregister(pt);
             return 0;
@@ -449,7 +449,7 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
         poll_table_cleanup(pt);
 
         // ── Timeout check ─────────────────────────────────
-        if (timed && jiffies >= deadline) {
+        if (timed && clocksource_read_ns() >= deadline) {
             poll_tmo_unregister(pt);
             return poll_scan(kfds, nfds, NULL);
         }

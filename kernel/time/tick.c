@@ -1,5 +1,6 @@
 #include <kernel/clockevent.h>
 #include <device/timer.h>
+#include <kernel/clocksource.h>   // clocksource_read_ns()
 #include <kernel/softirq.h>       // set_softirq_status, TIMER_SIRQ
 #include <kernel/percpu.h>        // this_cpu()
 #include <kernel/arch/cpu.h>      // arch_tick_start()
@@ -22,17 +23,16 @@ void tick_handler(void)
 {
     jiffies++;
 
-    // poll 超时扫描（jiffies 比较）—— 从 pit_handler 迁来。
-    // 单位与 poll.c 现状一致：poll.c 用 `jiffies + ticks` 注册 deadline（poll.c:403）。
+    // poll 超时扫描（纳秒比较）—— 从 pit_handler 迁来。
+    // 与 poll.c 单位一致：poll.c 用 `clocksource_read_ns() + timeout*1e6` 注册
+    // ns deadline（poll.c:do_poll_core），此扫描用同一时间轴比较。
     // ⚠️ 时序假设：boot 期 poll_timeout_head 恒 NULL（poll 只在用户态进程里调，
     // 用户态进程 task_init() 之后才有），此短路保证 GS base 装之前（phase 4 到
     // main.c:276）不调 clocksource_read_ns()（它读 this_cpu()->tsc_offset）。
-    // ⚠️ Task 4 一起迁纳秒：poll.c 的 deadline 注册 + 本扫描比较都改用
-    // clocksource_read_ns() 后，此短路在 GS base 已装后仍成立（见 spec）。
     if (poll_timeout_head) {
         spin_lock(&poll_timeout_lock);
         for (poll_timeout_node_t *n = poll_timeout_head; n; n = n->next)
-            if (jiffies >= n->deadline)
+            if (clocksource_read_ns() >= n->deadline)
                 wait_queue_wake_all(n->wq);
         spin_unlock(&poll_timeout_lock);
     }

@@ -32,6 +32,7 @@ typedef int pid_t;
 #include <kernel/poll.h>     // struct pollfd, do_poll()
 #include <kernel/select.h>   // sigset_t, do_select(), do_pselect6()
 #include <device/timer.h>
+#include <kernel/clocksource.h>  // clocksource_read_ns()
 #include <uapi/time.h>
 #include <kernel.h>
 #include <kernel/vma.h>
@@ -950,12 +951,12 @@ static inline bool syscall_user_range_ok(uint64_t addr, uint64_t len)
 
 // ── nanosleep blocker condition ────────────────────────────
 // Condition callback for blocker_wait(): true once the sleep deadline
-// (current->wakeup_jiffies) has been reached.  sched_unblock_blocked()
+// (current->wakeup_ns) has been reached.  sched_unblock_blocked()
 // runs this from every schedule() (i.e. every tick) and wakes the
 // sleeping task when it returns true.
 static bool nanosleep_should_unblock(struct task_struct *waiter)
 {
-    return jiffies >= waiter->wakeup_jiffies;
+    return clocksource_read_ns() >= waiter->wakeup_ns;
 }
 
 void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused)))
@@ -1876,8 +1877,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         // clock_gettime(clockid_t clk_id, struct timespec *tp)
         // OS01 has no real RTC wall clock yet (gettimeofday returns 0),
         // so both CLOCK_REALTIME and CLOCK_MONOTONIC report the same
-        // monotonic jiffies-based time: 1 jiffy = 10 ms.  This gives a
-        // usable monotonic clock for in-guest timing (nanosleep/select).
+        // monotonic clocksource time (clocksource_read_ns, ns).
         uint64_t clk_id = regs->rdi;
         struct timespec *tp = (struct timespec *)regs->rsi;
         if (clk_id != CLOCK_REALTIME && clk_id != CLOCK_MONOTONIC) {
@@ -1888,9 +1888,9 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             regs->rax = -EFAULT;
             break;
         }
-        uint64_t ms = jiffies * 10;
-        tp->tv_sec  = ms / 1000;
-        tp->tv_nsec = (ms % 1000) * 1000000ULL;
+        uint64_t ns = clocksource_read_ns();
+        tp->tv_sec  = ns / 1000000000ULL;
+        tp->tv_nsec = ns % 1000000000ULL;
         regs->rax = 0;
         break;
     }
@@ -1902,30 +1902,27 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         if (req && (uint64_t)req < current->addr_limit) {
             ns = req->tv_sec * 1000000000ULL + req->tv_nsec;
         }
-        // Convert nanoseconds to jiffies (1 jiffy = 10ms = 10,000,000 ns)
-        uint64_t ticks = (ns + 9999999) / 10000000;
-        if (ticks == 0 && ns > 0) ticks = 1;
 
-        uint64_t target = jiffies + ticks;
-        current->wakeup_jiffies = target;
+        uint64_t target_ns = clocksource_read_ns() + ns;
+        current->wakeup_ns = target_ns;
 
         // Real sleep via the blocker framework: sched_unblock_blocked()
         // (run from every schedule(), i.e. every tick) wakes us once
-        // jiffies reaches target.  The loop absorbs spurious wakes.
+        // clocksource reaches target_ns.  The loop absorbs spurious wakes.
         int r;
         do {
             r = blocker_wait(nanosleep_should_unblock, BLOCKER_NANOSLEEP, true);
-        } while (r == 0 && jiffies < target);
-        current->wakeup_jiffies = 0;
+        } while (r == 0 && clocksource_read_ns() < target_ns);
+        current->wakeup_ns = 0;
 
         if (r == -EINTR) {
             // Interrupted by a signal before the deadline: report the
-            // remaining time (best-effort; jiffies already advanced).
-            uint64_t remain = (jiffies < target) ? (target - jiffies) : 0;
+            // remaining time (guarded against unsigned underflow).
+            uint64_t now_ns = clocksource_read_ns();
+            uint64_t remain_ns = (now_ns < target_ns) ? (target_ns - now_ns) : 0;
             if (rem && (uint64_t)rem < current->addr_limit) {
-                uint64_t rem_ns = remain * 10000000ULL;
-                rem->tv_sec  = rem_ns / 1000000000ULL;
-                rem->tv_nsec = rem_ns % 1000000000ULL;
+                rem->tv_sec  = remain_ns / 1000000000ULL;
+                rem->tv_nsec = remain_ns % 1000000000ULL;
             }
             regs->rax = -EINTR;
         } else {

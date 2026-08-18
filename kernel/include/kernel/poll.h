@@ -78,7 +78,7 @@ typedef struct poll_wait_entry {
 typedef struct poll_timeout_node {
     struct poll_timeout_node *next;
     wait_queue_t             *wq;       // target: pt.wq
-    uint64_t                  deadline; // jiffies deadline
+    uint64_t                  deadline; // 纳秒 deadline（clocksource_read_ns 时间轴）
 } poll_timeout_node_t;
 
 typedef struct poll_table {

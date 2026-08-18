@@ -142,11 +142,11 @@ typedef struct task_struct
     blocker_t blocker;              // current block state (BLOCKER_NONE = not blocked)
     blocker_data_t blocker_data;    // per-type blocking data
 
-    // ── Sleep deadline (jiffies) ────────────────────────
+    // ── Sleep deadline (nanoseconds) ────────────────────
     // When a task blocks in nanosleep (BLOCKER_NANOSLEEP), its
-    // nanosleep_should_unblock callback checks jiffies >= wakeup_jiffies.
+    // nanosleep_should_unblock callback checks clocksource_read_ns() >= wakeup_ns.
     // Generic: reusable by any future time-based block (timer_wait, etc.).
-    uint64_t wakeup_jiffies;
+    uint64_t wakeup_ns;
 
     void *fpu_save; // 512-byte FXSAVE/FXRSTOR area (16-byte aligned)
 
