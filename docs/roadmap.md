@@ -1,9 +1,9 @@
-# OS01 优化路线图 v18
+# OS01 优化路线图 v19
 
-> **基准**: `496a210` (timer 重构完成：clocksource+clockevent + LAPIC tick 接管)
+> **基准**: `16a78c3` (docs(roadmap): v18 — timer 重构完成)
 > **日期**: 2026-08-18
 
-标记: ✅ 已完成 | 🔴 P0 本迭代 | 🟡 P1 近期 | 🟢 P2 中期 | 🔵 P3 远期
+标记: ✅ 已完成 | 🔒 P1 安全加固 | 🏗 P2 aarch64 适配 | 🖥 P3 GUI | 🔧 P4 硬件适配 | 📐 P5 ABI 扩展/兼容性
 
 ---
 
@@ -23,48 +23,99 @@
 
 ---
 
-## 待实施优先级
+## 待实施路线图（v19 按 5 优先级）
+
+> 优先级框架（用户确认，2026-08-18）：**P0 工程基础** → **P1 安全加固** → **P2 aarch64 适配** → **P3 GUI** → **P4 硬件适配** → **P5 ABI 扩展/兼容性**
+
+### P0 工程基础（主线前铺垫）
+
+| 项 | 内容 | 理由 |
+|----|------|------|
+| 文档同步 | `docs/syscall.md` 51→66（漏 socket 52–64 + clock_gettime 65）、`docs/timer.md` 重构后新架构 | 技术债，趁记忆新鲜 |
+| CI 集成 | GitHub Actions + QEMU（`make systest` / `make test-network`） | 已上 GitHub，回归自动化 |
+| applet 验证清单 | `config/busybox.config` 51 个 applet 逐个 QEMU 跑通并记录（标出缺 syscall 跑不了的） | 摸清家底 |
+
+### 🔒 P1 安全加固
+
+依赖链：`getrandom → AT_RANDOM → 用户栈 canary / ASLR`；UBSan/KASan 编译期独立。
+
+| 项 | 内容 | 依赖 | 借鉴 |
+|----|------|------|------|
+| getrandom syscall | 内核安全随机数（熵池：TSC + RTC + 周期熵累积），LWIP_RAND/种子改用 | 独立 | Linux getrandom(2) |
+| 用户栈 canary | libc `-fstack-protector-strong` + ELF 加载器 AT_RANDOM auxv 传种子（原 P1#5） | getrandom | |
+| ASLR | mmap 基址随机化 + ET_DYN/PIE 加载随机化（原 P3#12） | getrandom | |
+| UBSan + KASan | 内核编译期 instrument（原 P3#13） | 独立 | ArvernOS |
+| syscall 边界审计 | copy_from_user 全路径核查 + TOCTOU（现仅 read/exec 防） | 独立 | |
+| 堆加固 | malloc double-free/溢出检测 | 独立 | |
+| NX 页 | 栈/堆不可执行 + mmap PROT_EXEC 审计 | 独立 | |
+
+### 🏗 P2 aarch64 适配
+
+前置：**rwlock/seqlock**（多核并发正确性，VFS/`/proc` 多核缩放，SMP 基础）。
+
+已有基座：arch 抽象层 ✅、dispatch 桩 ✅、平台源隔离 ✅、aarch64 spinlock（ldxr/stlxr）✅、clocksource/clockevent 接口 hook ✅
+
+| 项 | 内容 | 依赖 | 借鉴 |
+|----|------|------|------|
+| rwlock/seqlock | VFS lookup + `/proc` read 多核缩放（原 P1#4 提为前置） | 独立 | |
+| head.S + MMU | 启动入口 + TTBR0_EL1/页表 | 独立 | ArvernOS |
+| GICv2 驱动 | 中断控制器 | head.S | opuntiaOS |
+| Generic Timer | cntvct_el0 读数 + CNTP 周期定时器（clockevent hook 已预留） | head.S | opuntiaOS |
+| 交叉编译链 | aarch64-linux-gnu-gcc + QEMU virt 平台 | 独立 | |
+| SMP 验证 | percpu/GS 抽象已就绪，AP 启动 ARM 侧 | GIC | |
+| 用户态 syscall ABI | `svc #0` 入口 + 参数传递 | 启动 | |
+
+### 🖥 P3 GUI
+
+已有基座：fb ✅、fb mmap ✅、terminal 双缓冲 + alt-screen ✅、键盘扫描码 ✅
+
+| 项 | 内容 | 依赖 | 借鉴 |
+|----|------|------|------|
+| PS/2 鼠标驱动 | `/dev/mouse`，扩展 keyboard.c 的 PS/2 协议处理 | 独立 | |
+| 2D 图形 API | fb 之上画线/矩形/位图 blit | 独立 | |
+| 可缩放字体渲染器 | 矢量/位图缩放 | 2D API | HackOS |
+| Window Server + compositor | 多窗口管理 + 合成（原 P3#15） | 字体/2D/鼠标 | opuntiaOS + HackOS |
+
+### 🔧 P4 硬件适配
+
+| 项 | 内容 | 依赖 | 借鉴 |
+|----|------|------|------|
+| USB 驱动栈 | HID/存储/网络 | 独立 | |
+| 真机启动 (USB) | 建立硬件验证路径（原 P3#14） | USB 存储 | Tilck |
+| NVMe 驱动 | 替代 AHCI（原 P3#17） | 独立 | |
+| HPET clocksource | 真实硬件跨平台时间源（timer spec 方案 B） | 独立 | |
+| ACPI | 电源管理/关机 | 独立 | |
+
+### 📐 P5 ABI 扩展/兼容性
+
+依赖链：`ELF loader ✅ → 动态链接器 → 共享 libc → Alpine apk/musl`；`futex ✅ → clone → pthread`；`socket ✅ → AF_UNIX`；`mbedTLS ✅ → HTTPS`。
+
+| 项 | 内容 | 依赖 | 借鉴 |
+|----|------|------|------|
+| 动态链接器 | PT_INTERP + ld.so + 共享 libc（原 P2#9） | ELF ✅ | cavOS |
+| rt_sigaction | 现代信号语义（SA_RESTART/si_value/实时信号），替换老 SYS_signal | 信号重构 | |
+| clone/pthread | 线程模型 + pthread_create | futex ✅ | |
+| readv/writev | scatter-gather I/O | 独立 | |
+| openat/dup3/pipe2 | 现代 syscall 变体 | 独立 | |
+| FIFO 命名管道 | S_IFIFO 语义 + mkfifo | 独立 | |
+| alarm/setitimer | POSIX 定时器（busybox timeout 需要） | 独立 | |
+| 作业控制 | setpgid/setsid/tcgetpgrp 真实现 + tty ISIG + SIGWINCH | tty termios ✅ | |
+| /proc 完善 | status（signal mask/ppid/utime/stime）+ cmdline + stat | 独立 | |
+| symlink/readlink | VFS 软链接 + ext2 symlink（in-inode 快链接）（原 P1#6） | 独立 | |
+| HTTPS/TLS | mbedTLS 集成 BusyBox wget（原 P2#10） | mbedTLS ✅ | |
+| AF_UNIX/socketpair | 本地 socket IPC（原 P2#11） | socket ✅ | |
+| 更多 applet | grep/sed/find，先补 libc regex/fnmatch（原 P1#7） | libc | |
+| Alpine apk/musl | musl 二进制包兼容路线（原 P3#16） | 动态链接器 | cavOS |
+
+### 依赖链总览
 
 ```
-P0 (本迭代):
- 0. 俄罗斯方块游戏 ✅           — 已实施（framebuffer 像素渲染 + /dev/keyboard 扫描码 + alt-screen 终端恢复）
- 1. nanosleep 修复 ✅           — 唤醒走 blocker（wakeup_jiffies + BLOCKER_NANOSLEEP）+ 掩码感知信号唤醒 + -EINTR/rem；CLOCK_MONOTONIC（commit 2faccbc）
- 2. 网络回归测试 ✅           — TCP/UDP/DNS/DHCP/wget 纳入自动化 QEMU 测试
- 3. /proc/<pid>/fd/           ✅ — 只读 fd 目录 + fd→目标路径合成文件；files_t 引用协议（pin/unpin/get/put）消除 UAF
- 4. 任务退出/回收收敛         ✅ — wait 驱动回收（do_waitpid 直接收割）+ kthread __switch_to 自收割，删除 reaper 与 deferred_free
-
-✅ 已解决: PIT 200Hz（jiffies 2x）   — QEMU TCG artifact（IOAPIC edge 投递无上升沿检测，PIT mode-3 每 10ms 双触发）。已由 timer 重构根治（08-18）：tick 源切 LAPIC 周期模式（LVT 本地投递天然免疫该伪影），PIT 掩蔽 + 未校准回退；jiffies 恢复真 10ms，select/poll 超时、EEVDF 时间片、lwIP 超时、CLOCK_MONOTONIC、busybox sleep 全部恢复正确速率。证据链归档 docs/pit-200hz-analysis.md。
-
-P1 (近期):
- 4. rwlock/seqlock            — VFS 与 /proc 多核缩放
- 5. 用户栈 canary             — libc SSP + ELF AT_RANDOM
- 6. symlink/readlink          — 完整 VFS 软链接语义和 ext2 symlink
- 7. 更多 BusyBox applet       — grep/sed/find，先补 regex/fnmatch
-
-P2 (中期):
- 8. aarch64 启动              — head.S + MMU + GIC + Generic Timer（clocksource/clockevent 接口已预留）
- 9. 动态链接器                — PT_INTERP + ld.so + 共享 libc
-10. HTTPS/TLS                 — 集成现有 mbedTLS 子模块，BusyBox wget HTTPS
-11. AF_UNIX/socketpair        — 本地 socket IPC
-
-P3 (远期):
-12. ASLR                      — 用户态安全
-13. UBSan + KASan             — 运行时 bug 检测
-14. 真机启动 (USB)            — 建立硬件验证路径
-15. GUI 框架                  — Window Server + compositor
-16. Alpine apk 用户态         — musl 二进制包兼容路线
-17. NVMe 驱动                 — 替代 AHCI
-```
-
-**依赖链:**
-```
-  poll/select ✅ ──→ lwIP/socket ✅ ──→ 网络回归测试 ──→ HTTPS/TLS
-       │
-       └─────→ 更多 BusyBox applet ──→ 动态链接器
-       
-  ext2 R/W ✅ ──→ symlink/readlink
-       
-  rwlock ──→ VFS 多核缩放 (VFS lookup, /proc read)
+P1: getrandom → AT_RANDOM → canary / ASLR
+P2: rwlock → aarch64 SMP；timer hook ✅ → CNTP
+P3: fb ✅ → 2D API → 字体 → Window Server；PS/2 鼠标并行
+P4: USB 栈 → 真机启动；NVMe / HPET / ACPI 独立
+P5: ELF ✅ → ld.so → 共享 libc → apk/musl；futex ✅ → clone → pthread
+    socket ✅ → AF_UNIX；mbedTLS ✅ → HTTPS
 ```
 
 ---
@@ -223,6 +274,8 @@ QEMU 实证：
 下一步重点不是继续堆 socket API，而是把 DNS、TCP、UDP、DHCP 和 wget 的成功路径纳入稳定的 QEMU 自动化回归。
 
 ---
+
+> 📌 **历史计划（v18 及之前结构）**：以下 P1/P2/P3 为旧优先级结构，已由 **v19 的 5 优先级框架**（P0 工程基础 → P1 安全加固 → P2 aarch64 → P3 GUI → P4 硬件 → P5 ABI）取代。内容保留作参考，实施项已映射进新结构。
 
 ### P1: 近期
 
