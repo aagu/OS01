@@ -1,13 +1,13 @@
-# OS01 优化路线图 v17
+# OS01 优化路线图 v18
 
-> **基准**: `b7753ae` (merge fix/e1000-rx-ring-ownership)
-> **日期**: 2026-08-16
+> **基准**: `496a210` (timer 重构完成：clocksource+clockevent + LAPIC tick 接管)
+> **日期**: 2026-08-18
 
 标记: ✅ 已完成 | 🔴 P0 本迭代 | 🟡 P1 近期 | 🟢 P2 中期 | 🔵 P3 远期
 
 ---
 
-## 当前状态总览 (8 个 Phase 全部就绪)
+## 当前状态总览 (9 个 Phase 全部就绪)
 
 | Phase | 说明 | 状态 |
 |-------|------|------|
@@ -19,6 +19,7 @@
 | **Phase 6: 用户态** | busybox ash shell（方向键行编辑+光标闪烁+raw mode TTY）、9 applet、init（/etc/inittab 配置解析、4 阶段引导：SYSINIT→WAIT→ONCE→RESPAWN/ASKFIRST、fallback 硬编码默认）、libc (printf/malloc/string/syscall wrapper)、VT100 CSI 终端模拟器 | ✅ |
 | **Phase 7: poll/select** | poll_table + 双队列级联唤醒、select/pselect 系统调用（SYS_select=50 + SYS_pselect6=51）、do_poll_core 共享轮询循环、pselect6 sigmask 原子 swap、requested-event-aware 注册（按请求方向唤醒，修复复合 flags + PTY 双注册容量）、per-poll timeout registry（修复 lost-wakeup + 并发 clobber）、systest 142/142 | ✅ |
 | **Phase 8: 网络** | lwIP 2.2.1、E1000 + virtio-net、PCI/MSI-X、DHCP/DNS、TCP/UDP socket syscall（52–64）、poll/select 集成、BusyBox HTTP wget、E1000 RX ring 所有权串行化、DHCP ACD 关闭（确定性绑定）、自动化网络回归 harness（make test-network） | ✅ |
+| **Phase 9: 时间系统** | clocksource + clockevent 双层抽象（kernel/time/）、TSC 频率校准（CPUID15h + RTC PIE 联合）、LAPIC 周期 tick 接管（掩 PIT + fallback）、CLOCK_MONOTONIC/REALTIME + nanosleep + poll/select 迁纳秒、内核 jiffies 频率 self-test、systest 150/150 | ✅ |
 
 ---
 
@@ -32,8 +33,7 @@ P0 (本迭代):
  3. /proc/<pid>/fd/           ✅ — 只读 fd 目录 + fd→目标路径合成文件；files_t 引用协议（pin/unpin/get/put）消除 UAF
  4. 任务退出/回收收敛         ✅ — wait 驱动回收（do_waitpid 直接收割）+ kthread __switch_to 自收割，删除 reaper 与 deferred_free
 
-⚠️ 已知问题（另立 issue 跟踪，非 nanosleep 合并阻塞项）:
- 5. PIT 200Hz（jiffies 2x）   — QEMU TCG artifact：IOAPIC edge 投递无上升沿检测，PIT mode-3 每 10ms 触发两次 level=1 → guest 收到 200Hz。影响 select/poll 超时、EEVDF 时间片、lwIP 超时、CLOCK_MONOTONIC、busybox sleep 时长（sleep N→N/2）。根因与修复计划见 docs/pit-200hz-handoff.md（推荐切 LAPIC timer + TSC 校准，方案 A/B/C/D）。
+✅ 已解决: PIT 200Hz（jiffies 2x）   — QEMU TCG artifact（IOAPIC edge 投递无上升沿检测，PIT mode-3 每 10ms 双触发）。已由 timer 重构根治（08-18）：tick 源切 LAPIC 周期模式（LVT 本地投递天然免疫该伪影），PIT 掩蔽 + 未校准回退；jiffies 恢复真 10ms，select/poll 超时、EEVDF 时间片、lwIP 超时、CLOCK_MONOTONIC、busybox sleep 全部恢复正确速率。证据链归档 docs/pit-200hz-analysis.md。
 
 P1 (近期):
  4. rwlock/seqlock            — VFS 与 /proc 多核缩放
@@ -42,7 +42,7 @@ P1 (近期):
  7. 更多 BusyBox applet       — grep/sed/find，先补 regex/fnmatch
 
 P2 (中期):
- 8. aarch64 启动              — head.S + MMU + GIC + Generic Timer
+ 8. aarch64 启动              — head.S + MMU + GIC + Generic Timer（clocksource/clockevent 接口已预留）
  9. 动态链接器                — PT_INTERP + ld.so + 共享 libc
 10. HTTPS/TLS                 — 集成现有 mbedTLS 子模块，BusyBox wget HTTPS
 11. AF_UNIX/socketpair        — 本地 socket IPC
@@ -147,7 +147,7 @@ Step 5 (集成验证) ──→ 所有 Step 完成后
 ## nanosleep 修复路线图 ✅ P0（已完成）
 
 > 状态：**已完成**（2026-08-17）。commit `2faccbc` — 唤醒走 blocker（`wakeup_jiffies` + `BLOCKER_NANOSLEEP`）+ 掩码感知信号唤醒 + `-EINTR`/rem + `CLOCK_MONOTONIC`。systest 150/150。
-> 连带发现的 PIT 200Hz（jiffies 2x）为 QEMU TCG artifact，**另立 issue 跟踪**（见「待实施优先级」第 5 项 + `docs/pit-200hz-handoff.md`），不阻塞本修复。
+> 连带发现的 PIT 200Hz（jiffies 2x）为 QEMU TCG artifact——✅ **已由 timer 重构根治**（08-18，LAPIC tick 接管，见「Timer 重构实施总结」），不再阻塞任何后续工作。证据链归档 `docs/pit-200hz-analysis.md`。
 
 ### 背景（tetris 开发中实证发现）
 
@@ -444,7 +444,65 @@ CPU N: schedule()
 
 ---
 
-## 已完成汇总 (截至 2026-08-15)
+## Timer 重构实施总结（clocksource + clockevent）
+
+> 目标：根治 QEMU TCG 下 PIT 200Hz 伪影（jiffies 2x），把精粒度时间与 tick 解耦，为 aarch64 预留时钟接口。前置：`docs/pit-200hz-handoff.md`（根因定位）。spec/plan 见 `docs/superpowers/specs/2026-08-17-timer-clocksource-clockevent-design.md`（v8 修订）。
+
+### 架构
+
+```
+┌─────────────────────────────────────────────────────┐
+│ 精粒度消费者: clock_gettime / nanosleep / poll/select │ ← 纳秒时间戳
+├─────────────────────────────────────────────────────┤
+│ clocksource 层 (kernel/time/clocksource.c, arch无关) │ ← 单调纳秒
+│   clocksource_read_ns() = (cycle+offset)*mult>>shift │
+├─────────────────────────────────────────────────────┤
+│ clockevent 层 (kernel/time/tick.c, arch无关)         │ ← tick 语义
+│   tick_handler(): jiffies++ / poll超时纳秒扫描/need_resched
+├─────────────────────────────────────────────────────┤
+│ arch hook (kernel/include/kernel/arch/*.h)           │
+│   arch_cycle_counter() [已有]  arch_cycle_freq() [新增]
+│   arch_tick_start() [新增]  ← x86: LAPIC; aarch64: CNTP(预留)
+└─────────────────────────────────────────────────────┘
+粗粒度消费者: EEVDF、watchdog、kernel timer 轮、lwIP 粗超时、AHCI → jiffies（10ms/tick 不变）
+```
+
+### 关键决策
+
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| tick 源 | LAPIC 周期模式接管，PIT 掩蔽 + 未校准回退 | LVT 本地投递免疫 QEMU IOAPIC edge 伪影；PIT 先跑保证 boot 窗口有 tick |
+| TSC 频率校准 | CPUID15h + RTC PIE 联合校准（RTC PIE 结果优先复用） | 250ms PIE 窗口比 TSC 窗口更稳；AP 复用 BSP 校准状态 |
+| mult/shift | `__uint128_t` 中间值 + shift 上限放宽 | 高频 TSC（≥4.3GHz）需 shift≥35，64 位中间值会溢出（commit 496a210） |
+| 时间语义 | 精粒度路径迁纳秒；调度器/watchdog/lwIP 粗超时保持 jiffies | 亚 tick 分辨率只对用户可感知路径有价值；避免重写已验证的 deadline 算术 |
+| jiffies | 仍隐含 10ms/tick，修好 tick 源后自动恢复正确速率 | EEVDF 是 tick 粒度语义，不迁纳秒 |
+| aarch64 | clocksource/clockevent 接口 hook 预留（cntvct_el0 + CNTP），不写 ARM 代码 | YAGNI，避免未验证代码 |
+
+### 实现期发现
+
+- **per-LAPIC DIV 必须写**：QEMU 双核实测 298Hz 定位——AP 复位后 DIV 为 ÷1，静态值 ÷2 折算导致 AP 200Hz。`lapic_timer_start` 必须在每个 CPU 写 `LAPIC_TIMER_DIV`（spec v8 门① 实证）。
+
+### Commit 列表
+
+| Commit | 内容 |
+|--------|------|
+| `dc25e97`~`41b3541` | spec/plan 迭代 v1→v8 + Hermes 外部评审归档（9 个 docs commit） |
+| `de052f2` | clocksource + clockevent 双层抽象（TSC/cntvct_el0，接口层） |
+| `4cc5779` | TSC 频率校准（CPUID15h + RTC PIE 联合校准，含超时） |
+| `67f99e2` | BSP 切 LAPIC 周期 tick，先掩 PIT 再接管 + 握手采样 |
+| `86f4ceb` | CLOCK_MONOTONIC/REALTIME + nanosleep + poll 迁纳秒 |
+| `7a06a6e` | 内核 jiffies 频率 self-test + 验证门证据 + 回归 |
+| `14db988` | 最终评审修复 — RTC PIE 窗口对齐/mult-shift 上界/aarch64 stub/CPUID 守卫/删死代码/IRQ-safe 锁 |
+| `496a210` | compute_mult_shift 高频 TSC 溢出 — __uint128_t 中间值 |
+
+### 验证
+
+- systest **150/150**（含 jiffies 频率 self-test：QEMU 实测 tick 速率与期望值匹配）
+- 回归：select/poll 超时、EEVDF 时间片、lwIP 超时、busybox `sleep 1` ≈ 1s（恢复真 10ms/tick）
+
+---
+
+## 已完成汇总 (截至 2026-08-18)
 
 | 项目 | 工作量 | 日期 |
 |------|--------|------|
@@ -489,6 +547,7 @@ CPU N: schedule()
 | **requested-event-aware poll/select** (按请求方向注册/唤醒，修复复合 flags + PTY 双注册容量 + 时序敏感 select 断言) | 1 天 | 08-16 |
 | **DHCP ACD 关闭** (LWIP_DHCP_DOES_ACD_CHECK=0，消除 ~10.6s ACD 竞态导致的偶发不绑定) | 1 小时 | 08-16 |
 | **网络回归 harness** (make test-network + OS01_TCP_ECHO_DELAY_MS delayed-reply + 20/20 no-delay + 10/10 delay250 cohort) | 1 天 | 08-16 |
+| **timer 重构** (clocksource+clockevent 双层抽象 + TSC/RTC-PIE 联合校准 + LAPIC tick 接管掩 PIT + CLOCK_MONOTONIC/REALTIME/nanosleep/poll 迁纳秒 + jiffies self-test，systest 150/150，根治 PIT 200Hz) | 2 天 | 08-17~18 |
 
 ---
 
@@ -500,7 +559,7 @@ CPU N: schedule()
 | **cavOS** | lwIP、socket syscall、E1000、动态链接与 Alpine apk 路线参考 | 动态链接器加载流程、用户态包兼容 |
 | **Aquila** | **ext2 R/W 核心 (~221 行)**: inode/block alloc+free | — |
 | **ArvernOS** | 多架构抽象思路、aarch64 dispatch 桩模式 | 分层日志系统、UBSan、aarch64 head.S/GIC/Generic Timer |
-| **opuntiaOS** | devman 子系统注册框架 | GICv2 驱动、Generic Timer、Window Server GUI |
+| **opuntiaOS** | devman 子系统注册框架 | GICv2 驱动、Generic Timer（clocksource/clockevent 接口已预留）、Window Server GUI |
 | **HackOS** | — | 可缩放字体渲染器、VESA 图形模式 |
 
 ---
@@ -549,3 +608,9 @@ CPU N: schedule()
 | 38 | poll 注册方向语义 | requested & legal & unavailable 才注册（poll_requested_read/write 分类器）；readiness 只由 open mode 决定，绝不因 requested bits 创造就绪 | 修复复合 flags（O_RDWR 管道误报方向）、PTY 双注册容量（每 fd 2 槽）、socket POLLOUT 吞 POLLIN 注册 |
 | 39 | poll 超时最终扫描 | 超时路径 cleanup 后 `poll_scan(kfds, nfds, NULL)` 只读扫描 | 超时返回前不恢复 current_poll_wq，避免最后一拍唤醒被丢 |
 | 40 | DHCP ACD | `LWIP_DHCP_DOES_ACD_CHECK=0` | QEMU user-mode NAT 单 guest 无地址冲突可能；ACD ~10.6s PROBE/ANNOUNCE 竞态 nettest 10s 等待，偶发不绑定 |
+| 41 | tick 源 | LAPIC 周期模式接管，PIT 掩蔽 + 未校准回退 | QEMU TCG IOAPIC edge 无沿检测 → PIT 200Hz 伪影；LAPIC LVT 本地投递免疫，PIT 先跑保证 boot 窗口 |
+| 42 | 精粒度时间 | clocksource 纳秒（TSC, mult/shift）与 tick 解耦 | clock_gettime/nanosleep/poll/select 需亚 tick 分辨率；粗超时（EEVDF/watchdog/lwIP/AHCI）保持 jiffies |
+| 43 | TSC 频率校准 | CPUID15h + RTC PIE 联合校准（PIE 结果优先复用，AP 复用 BSP 状态） | 250ms PIE 窗口比 TSC 窗口更稳；跨核只做握手采样粗偏移修正 |
+| 44 | mult/shift 计算 | `__uint128_t` 中间值 + shift 上限放宽（>1GHz 需 shift>31） | 高频 TSC（≥4.3GHz）需 shift≥35，64 位中间值溢出（496a210 实证） |
+| 45 | per-LAPIC DIV | `lapic_timer_start` 每 CPU 写 `LAPIC_TIMER_DIV` | AP 复位后 DIV=÷1，静态值 ÷2 折算 → AP 200Hz（QEMU 双核 298Hz 实证） |
+| 46 | aarch64 时钟 | clocksource/clockevent 接口 hook 预留（cntvct_el0 + CNTP），不写 ARM 代码 | YAGNI，避免未验证代码；随 aarch64 启动实施 |
