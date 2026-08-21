@@ -492,10 +492,32 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
 // /dev/urandom) skips the check/lock entirely — its buffer is a trusted
 // kernel buffer.
 //
-// Known limitation: vmm_pt_walk returns NULL for a 2MB huge-page PDE
-// (PAGE_PS), so a buffer in a 2MB user mapping would false-positive
-// -EFAULT.  Current userland is entirely 4KB pages; revisit if 2MB user
-// mappings appear.
+// Walk is huge-page aware: the user stack is a single 2MB page (PAGE_PS),
+// so buffers on the stack must validate the PDE itself rather than a 4KB PTE.
+static uint64_t *user_leaf_pte(uint64_t *pml4, uint64_t va)
+{
+    size_t l4 = (size_t)(va >> 39) & 0x1ff;
+    size_t l3 = (size_t)(va >> 30) & 0x1ff;
+    size_t l2 = (size_t)(va >> 21) & 0x1ff;
+    size_t l1 = (size_t)(va >> 12) & 0x1ff;
+
+    if (l4 >= 256) return NULL;                       // kernel half — out of scope
+
+    if (!(pml4[l4] & PAGE_Present)) return NULL;
+    uint64_t *pml3 = (uint64_t *)Phy_To_Virt(pml4[l4] & PAGE_4K_MASK);
+
+    if (!(pml3[l3] & PAGE_Present)) return NULL;
+    uint64_t *pml2 = (uint64_t *)Phy_To_Virt(pml3[l3] & PAGE_4K_MASK);
+
+    if (!(pml2[l2] & PAGE_Present)) return NULL;
+
+    if (pml2[l2] & PAGE_PS)                            // 2MB huge page: PDE is the leaf
+        return &pml2[l2];
+
+    uint64_t *pte_table = (uint64_t *)Phy_To_Virt(pml2[l2] & PAGE_4K_MASK);
+    return &pte_table[l1];
+}
+
 int user_write_range_begin(uint64_t addr, size_t len)
 {
     if (current->mm == NULL)
@@ -508,14 +530,20 @@ int user_write_range_begin(uint64_t addr, size_t len)
     spin_lock(&current->mm->lock);
 
     uint64_t *user_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
-    for (uint64_t va = addr & PAGE_4K_MASK; va < addr + len; va += PAGE_4K_SIZE) {
-        uint64_t *pte = vmm_pt_walk(user_pml4, va, 0, 0);
+    uint64_t end = addr + len;
+    for (uint64_t va = addr & PAGE_4K_MASK; va < end; ) {
+        uint64_t *leaf = user_leaf_pte(user_pml4, va);
         // Require present + writable.  A COW page (P=1, W=0, PAGE_COW set)
         // fails here — a documented deviation from Linux's COW-fault-on-write.
-        if (!pte || !(*pte & (PAGE_Present | PAGE_R_W))) {
+        if (!leaf || !(*leaf & (PAGE_Present | PAGE_R_W))) {
             spin_unlock(&current->mm->lock);
             return -EFAULT;
         }
+        // Huge page: the single PDE covers 2 MB — validate it once, skip to
+        // the next 2 MB boundary.  Otherwise advance one 4 KB page.
+        va = (*leaf & PAGE_PS)
+             ? (va & PAGE_2M_MASK) + PAGE_2M_SIZE
+             : va + PAGE_4K_SIZE;
     }
     return 0;   // lock held
 }
