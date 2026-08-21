@@ -2,6 +2,7 @@
 #define _KERNEL_VMM_H
 
 #include <stdint.h>
+#include <stddef.h>
 #include <kernel/arch/mmu.h>
 
 //page table attribute
@@ -57,6 +58,14 @@ int      vmm_map_4k_page(uint64_t *pagemap, uint64_t phys,
 void     vmm_unmap_4k_page(uint64_t *pagemap, uint64_t virt);
 uint64_t *vmm_pt_walk(uint64_t *pagemap, uint64_t virt,
                       uint64_t flags, int allocate);
+
+// Validate-and-lock a user write range before the kernel writes into it
+// (getrandom / devfs random read).  Returns 0 with current->mm->lock HELD
+// on success — caller MUST call user_write_range_end().  Returns -EFAULT
+// (lock NOT held) on any bad address or non-writable page.  Kernel buffers
+// (current->mm == NULL) are trusted and pass through without lock/check.
+int  user_write_range_begin(uint64_t addr, size_t len);
+void user_write_range_end(void);
 
 #define KERNEL_MEM_OFFSET 0xffffffff80000000
 #define PHYS_MEM_OFFSET 0xffff800000000000

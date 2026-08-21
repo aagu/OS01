@@ -1088,11 +1088,7 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     void *raw_alloc = malloc(sizeof(union task_union) + STACK_SIZE);
     task_t *tsk = (task_t *)(((uint64_t)raw_alloc + STACK_SIZE - 1) & ~(STACK_SIZE - 1));
     thread_t *thd = (thread_t *)calloc(1, sizeof(thread_t));
-    mm_t *mm = (mm_t *)calloc(1, sizeof(mm_t));
-    if (mm) {
-        list_init(&mm->vma_list);
-        mm->mmap_base = 0x40000000;
-    }
+    mm_t *mm = mm_alloc();
     if (!raw_alloc || !thd || !mm) {
         if (raw_alloc) kfree(raw_alloc);
         if (thd) kfree(thd);
@@ -1306,11 +1302,7 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     memcpy(&new_pml4[256], &kernel_pml4[256], 256 * sizeof(uint64_t));
 
     // 4. Create new mm_struct
-    mm_t *new_mm = (mm_t *)calloc(1, sizeof(mm_t));
-    if (new_mm) {
-        list_init(&new_mm->vma_list);
-        new_mm->mmap_base = 0x40000000;
-    }
+    mm_t *new_mm = mm_alloc();
     if (!new_mm) {
         kfree(new_pml4);
         vfs_node_put(node);
@@ -1482,7 +1474,7 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
 // has a bug with 2MB copies (CR2=0x8).
 static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
 {
-    mm_t *child_mm = (mm_t *)calloc(1, sizeof(mm_t));
+    mm_t *child_mm = mm_alloc();
     uint64_t *child_pml4 = (uint64_t *)vmm_alloc_map();
     if (!child_mm || !child_pml4)
         goto fail;
@@ -1611,6 +1603,7 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
     memcpy(child_mm, parent_mm, sizeof(mm_t));
     // vma_list must NOT be shared — fork_vma_copy will fill child's own
     list_init(&child_mm->vma_list);
+    spin_init(&child_mm->lock);   // memcpy copied parent's lock value — reset
     child_mm->pml4 = (uint64_t *)Virt_To_Phy((uint64_t)child_pml4);
     *cr3_out = (uint64_t)child_mm->pml4;
 

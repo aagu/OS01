@@ -10,6 +10,7 @@
 #include <uapi/time.h>
 #include <rbtree.h>
 #include <stdbool.h>
+#include <kernel/arch/spinlock.h>
 
 /* ── Blocker framework ─────────────────────────── */
 #define BLOCKER_NONE      0
@@ -86,6 +87,7 @@ typedef struct mm_struct
     // ── mmap / VMA support ──────────────────────────────
     list_t   vma_list;    // sorted by vm_start
     uint64_t mmap_base;   // start search address for mmap
+    spinlock_T lock;      // guards munmap/MAP_FIXED/mprotect vs getrandom write
 } mm_t;
 
 typedef struct thread_struct
@@ -219,7 +221,10 @@ thread_t init_thread;
 union task_union init_task_union __attribute__((__section__(".data.init_task"))) = {INIT_TASK(init_task_union.task)};
 
 task_t *init_task[NR_CPUS] = {&init_task_union.task,0};
-mm_t init_mm = {0};
+// .lock = { .lock = 1L }: mm_t.lock is a spinlock_T whose own field is
+// `lock`.  1 = unlocked; leaving it 0 would deadlock the first task that
+// takes it (INIT_TASK points .mm at this struct).
+mm_t init_mm = { .lock = { .lock = 1L } };
 thread_t init_thread =
 {
     .rsp0 = (uint64_t)(init_task_union.stack + STACK_SIZE),  // idle task kernel stack

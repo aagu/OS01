@@ -6,7 +6,9 @@
 #include <kernel/file.h>
 #include <kernel/pmm.h>
 #include <kernel/memory.h>
+#include <kernel/arch/spinlock.h>   // mm->lock: guards munmap/MAP_FIXED/mprotect
 #include <string.h>
+#include <stdlib.h>                 // calloc (used by mm_alloc)
 #include <errno.h>
 
 // Find the VMA containing addr, or NULL
@@ -113,6 +115,19 @@ vma_t *fork_vma_copy(mm_t *child_mm, mm_t *parent_mm)
     return NULL; // caller doesn't use return value
 }
 
+// mm_alloc — allocate + initialize an mm_t.  Centralizes the "lock = 1L"
+// invariant so no call site can forget it (lock == 0 is the LOCKED state
+// and would deadlock the first taker).
+mm_t *mm_alloc(void)
+{
+    mm_t *mm = (mm_t *)calloc(1, sizeof(mm_t));
+    if (!mm) return NULL;
+    list_init(&mm->vma_list);
+    mm->mmap_base = 0x40000000;
+    spin_init(&mm->lock);
+    return mm;
+}
+
 // ── Helper: convert prot/flags to vm_page_prot flags ──────────
 static int prot_to_page_flags(int prot, uint64_t *page_prot, uint64_t *vm_flags)
 {
@@ -157,8 +172,9 @@ static void map_flags_to_vm(int flags, uint64_t *vm_flags)
 }
 
 // ── do_munmap ─────────────────────────────────────────────────
+// do_munmap_locked — unmaps WITHOUT taking mm->lock (caller holds it).
 // Defined before do_mmap because do_mmap(MAP_FIXED) calls it.
-int64_t do_munmap(uint64_t addr, uint64_t length)
+static int64_t do_munmap_locked(uint64_t addr, uint64_t length)
 {
     addr   = PAGE_4K_ALIGN(addr);
     length = PAGE_4K_ALIGN(length);
@@ -214,6 +230,15 @@ int64_t do_munmap(uint64_t addr, uint64_t length)
 
     flush_tlb();
     return 0;
+}
+
+// do_munmap — public entry: take mm->lock, then unmap.
+int64_t do_munmap(uint64_t addr, uint64_t length)
+{
+    spin_lock(&current->mm->lock);
+    int64_t rc = do_munmap_locked(addr, length);
+    spin_unlock(&current->mm->lock);
+    return rc;
 }
 
 // ── do_mmap ───────────────────────────────────────────────────
@@ -273,7 +298,9 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
         if (!addr) addr = prev ? prev->vm_end : search;
         if (addr < search) addr = search;
     } else {
-        do_munmap(addr, length);
+        spin_lock(&current->mm->lock);
+        do_munmap_locked(addr, length);
+        spin_unlock(&current->mm->lock);
     }
 
     if (addr + length > current->addr_limit)
@@ -375,6 +402,8 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
     int rc = prot_to_page_flags((int)prot, &new_page_prot, &new_vm_flags);
     if (rc) return rc;
 
+    spin_lock(&current->mm->lock);
+
     uint64_t *user_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
 
     list_t *pos = current->mm->vma_list.next;
@@ -384,8 +413,10 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
         if (v->vm_start >= end)  break;
 
         // Hole check
-        if (v->vm_start > addr)
+        if (v->vm_start > addr) {
+            spin_unlock(&current->mm->lock);
             return -ENOMEM;
+        }
 
         // Update VMA
         v->vm_flags     &= ~(VM_READ | VM_WRITE | VM_EXEC);
@@ -440,9 +471,57 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
         pos = pos->next;
     }
 
+    spin_unlock(&current->mm->lock);
+
     if (addr < end)
         return -ENOMEM;
 
     flush_tlb();
     return 0;
+}
+
+// ── user_write_range_begin/end — validate + lock a kernel→user write ──
+// Closes the TOCTOU between "check the pages are mapped+writable" and
+// "write them": the caller holds current->mm->lock for the whole fill, and
+// munmap/MAP_FIXED/mprotect take the same lock, so no concurrent call can
+// tear down or narrow a page mid-write (which would fault into the
+// do_page_fault hlt hang — there is no kernel-side demand paging).
+//
+// On success returns 0 with mm->lock HELD; on any failure returns -EFAULT
+// and the lock is NOT held.  current->mm == NULL (kthread reading
+// /dev/urandom) skips the check/lock entirely — its buffer is a trusted
+// kernel buffer.
+//
+// Known limitation: vmm_pt_walk returns NULL for a 2MB huge-page PDE
+// (PAGE_PS), so a buffer in a 2MB user mapping would false-positive
+// -EFAULT.  Current userland is entirely 4KB pages; revisit if 2MB user
+// mappings appear.
+int user_write_range_begin(uint64_t addr, size_t len)
+{
+    if (current->mm == NULL)
+        return 0;
+
+    if (addr == 0 || addr >= current->addr_limit ||
+        len > current->addr_limit - addr)
+        return -EFAULT;
+
+    spin_lock(&current->mm->lock);
+
+    uint64_t *user_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
+    for (uint64_t va = addr & PAGE_4K_MASK; va < addr + len; va += PAGE_4K_SIZE) {
+        uint64_t *pte = vmm_pt_walk(user_pml4, va, 0, 0);
+        // Require present + writable.  A COW page (P=1, W=0, PAGE_COW set)
+        // fails here — a documented deviation from Linux's COW-fault-on-write.
+        if (!pte || !(*pte & (PAGE_Present | PAGE_R_W))) {
+            spin_unlock(&current->mm->lock);
+            return -EFAULT;
+        }
+    }
+    return 0;   // lock held
+}
+
+void user_write_range_end(void)
+{
+    if (current->mm != NULL)
+        spin_unlock(&current->mm->lock);
 }

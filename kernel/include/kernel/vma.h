@@ -49,6 +49,7 @@ int       vma_insert(mm_t *mm, vma_t *vma);
 void      vma_remove(mm_t *mm, vma_t *vma);
 void      vma_free_all(mm_t *mm);
 vma_t    *fork_vma_copy(mm_t *child_mm, mm_t *parent_mm);
+mm_t     *mm_alloc(void);   // allocate + init an mm_t (lock = unlocked)
 
 // ── Syscall implementations (called from trap.c) ───────────
 int64_t   do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
