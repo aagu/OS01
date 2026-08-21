@@ -7,6 +7,7 @@
   - v1：初版
   - v2：并入首轮 review — ①用户 buffer 逐页 PTE 校验（内核态 PF 无 demand-paging，裸写未映射页会 hlt 挂死）；②RDRAND 从"每调用 rekey"改为初始化充分播种 + 周期 reseed（每 1 MiB）；③ChaCha20 32-bit counter 回绕处理（高 32 位进 nonce）；④len 上限 33554431 + 分块放锁；⑤SMP 全局锁标注为已知限制；⑥内核经 sysroot 看到 libc 头文件的构建链路已验证；⑦aarch64 fallback 改用 arch_cycle_counter()；⑧文件清单补 docs/syscall.md；⑨测试补并发/大 len/monobit；⑩非目标注明 AT_RANDOM 未来消费者；⑪明确 rdi/rsi/rdx 寄存器约定
   - v3：并入二轮 review — ①TOCTOU 闭合：新增 mm->lock，"校验→写"全程持锁，do_munmap/do_mmap(MAP_FIXED) 同锁（已验证 brk 不 unmap、页表 unmap 源仅这两处+进程拆毁）；②/dev/random+/dev/urandom 的 read 用同一 helper 对称保护；③COW 页 -EFAULT 的影响面注明；④reseed 的 RDRAND 失败语义=跳过本次；⑤nonce 字拆分端序写明 little-endian；⑥test#3 改用 mmap+munmap 确定性构造未映射 VA；⑦同 mm 并发竞态在当前用户态不可构造（无 CLONE_VM），race-injection 测试不可表达，如实写明
+  - v4：并入三轮 review — ①H1 init_mm={0} 使 lock=0(已锁态)，init 首次 munmap 即全局死锁：所有 mm 分配点统一走新 mm_alloc() 构造器，init_mm 定义显式 `.lock = 1L`；②H2 do_mmap(MAP_FIXED) 内部调 do_munmap 的递归锁死锁：拆出 do_munmap_locked()；③H3 do_mprotect 就地收窄 PTE 权限不在锁集 → TOCTOU 未闭合：纳入锁集，锁集明确为 {do_munmap, do_mmap(MAP_FIXED), do_mprotect}；④M1 task.c 三处 calloc(mm_t) 零值 lock 隐患：统一 mm_alloc() 杜绝散落
 
 ---
 
@@ -114,19 +115,24 @@ void get_random_bytes(void *buf, size_t len); // 任意上下文可用（IRQ-saf
 
 `do_page_fault()` 对**所有**缺页（含内核态 syscall 中写用户内存触发的 PF）统一走 dump + `hlt()` 死循环，**没有 demand-paging**。只查 `addr_limit` 范围不够；只做事前逐页 PTE 校验也不够——校验与写入不是原子区间，同一 mm 的另一任务可在其间 munmap（TOCTOU），仍会把内核挂死。因此本设计引入 **mm 级锁**闭合窗口：
 
-- `mm_t` 新增 `spinlock_T lock`（初始化约定 `.lock = 1L` = 未锁，同 `task_list_lock`；mm 创建路径 `fork_mm_copy` / 新建 mm 处显式初始化。静态 `init_mm = {0}` 不受影响——getrandom 只碰用户 mm）。
+- `mm_t` 新增 `spinlock_T lock`（初始化约定 `.lock = 1L` = 未锁，同 `task_list_lock`）。**初始化是本设计的致命细节**——`lock = 0` 是已锁态，任何漏初始化的 mm 在首次取锁时即永久自旋：
+  - 新增统一构造器 `mm_alloc()`（zero + list_init + mmap_base + `.lock = 1L`），替换 `task.c` 三处散落 `calloc(1, sizeof(mm_t))`（task.c:1091 / 1309 / 1485），杜绝漏初始化。
+  - `init_mm = {0}`（task.h:222）必须改为 `= { .lock = 1L }`——`INIT_TASK` 把 `.mm = &init_mm`，锁集路径对 `current->mm` 无条件取锁，`init_mm.lock == 0` 会让首个用到它的任务死锁全局。
+- **锁集（点名，覆盖所有"移除或收窄"用户 PTE/VM 的 syscall 路径）**：`{do_munmap, do_mmap(MAP_FIXED), do_mprotect}`。三者是唯一入口（已核实仅 trap.c syscall 分发调用；do_mprotect 不内部调 do_munmap；brk 不动页表）。
+  - **递归拆分**：`do_mmap(MAP_FIXED)` 内部调 `do_munmap`（vma.c:276），同锁递归会死锁。拆分为 `do_munmap_locked()`（不取锁，供内部调用）+ `do_munmap()`（取锁 + `do_munmap_locked()`）；`do_mmap` 取一次锁，MAP_FIXED 段调 `do_munmap_locked()`。
+  - `do_mprotect` 就地改写 PTE 权限位（可收窄到 PROT_READ/PROT_NONE），同锁覆盖——否则"校验为 RW → 并发 mprotect(PROT_READ) → 裸写命中只读页 → hlt"的竞态仍在。
 - 新 helper（实现在 `kernel/memory/vma.c`，声明进 `kernel/include/kernel/vmm.h`）：
   ```c
-  // 持 current->mm->lock（irqsave），然后：syscall_user_range_ok 范围检查 +
-  // 逐页 vmm_pt_walk(Phy_To_Virt(current->mm->pml4), va, 0, 0) 要求 PTE 存在
-  // 且 PAGE_R_W 置位。全部通过返回 0（锁保持持有）；任一失败释放锁返回 -EFAULT。
+  // 持 current->mm->lock（普通 spin_lock，见下），然后：范围检查（addr != 0、
+  // addr < addr_limit、len 不越界）+ 逐页 vmm_pt_walk(Phy_To_Virt(current->mm->pml4),
+  // va, 0, 0) 要求 PTE 存在且 PAGE_R_W 置位。全部通过返回 0（锁保持持有）；
+  // 任一失败释放锁返回 -EFAULT。
   int  user_write_range_begin(uint64_t addr, size_t len);
   void user_write_range_end(void);   // 释放 current->mm->lock
   ```
-  内核调用者边界：`current->mm == NULL`（kthread 经 devfs 读 /dev/urandom）时跳过校验与加锁直接返回 0（内核 buffer 受信任），`end()` 对应成 no-op。
-- **unmap 源同锁**（已核实用户页表的 unmap 源只有两处 syscall 路径）：`do_munmap()` 与 `do_mmap()` 的 MAP_FIXED 重叠解除段，均持 `current->mm->lock`。brk 已验证不 unmap（只移动 `end_brk` 指针），无需参与。
+  内核调用者边界：`current->mm == NULL`（kthread 经 devfs 读 /dev/urandom）时跳过校验与加锁直接返回 0（内核 buffer 受信任——kthread 若拿用户 VA 当 buffer 仍可能 PF，属边缘情形，实无此用法），`end()` 对应成 no-op。
 - 锁内安全性：持锁期间只写"已确认 P+W 的页"，不会触发 PF，不会在中断/异常路径重入该锁，无死锁面。**mm->lock 用普通 spin_lock（非 irqsave）**：它只在 syscall 上下文被取，IRQ/PF handler 均不触碰；这样大填充期间本 CPU 中断保持可用（timer tick 不丢）。持锁调度是安全的（竞争者自旋有界）。池锁与 mm->lock 的嵌套顺序固定为 mm->lock(外) → 池锁(内)，全项目唯一此一处嵌套，无环。大 len 填充全程持 mm->lock（上界 32 MiB cap；典型消费者 ≤ 256B），写进代码注释。
-- **已知限制（如实声明，非 airtight 的剩余面）**：`vma_free_all()`（exit/exec 的整 mm 拆毁）**不**参与本锁——共享 mm 的用户任务仅存在于 fork OOM fallback（`fork_mm_copy` 失败时 `tsk->mm = current->mm`），且该路径有既有更严重问题（exit 时无条件 `kfree(current->mm)` 会 UAF 共享方）。本 spec 不触碰它；全局 `copy_to_user()`/GUP（含拆毁路径）属另一个 roadmap 项。在此限制之外，munmap/MAP_FIXED 竞态对本 syscall 是**闭合**的，不再是 best-effort。
+- **已知限制（如实声明，非 airtight 的剩余面）**：`vma_free_all()`（exit/exec 的整 mm 拆毁）**不**参与本锁——共享 mm 的用户任务仅存在于 fork OOM fallback（`fork_mm_copy` 失败时 `tsk->mm = current->mm`），且该路径有既有更严重问题（exit 时无条件 `kfree(current->mm)` 会 UAF 共享方）。本 spec 不触碰它；全局 `copy_to_user()`/GUP（含拆毁路径）属另一个 roadmap 项。**闭合范围的准确表述**：mm->lock 对"teardown（munmap/MAP_FIXED）+ 权限收窄（mprotect）"类并发操作闭合；页表填充类并发（demand-fault/COW 在另一 CPU 上分配/改写 PTE）不经此锁——它不会动已校验页的映射与权限，依赖的是既有原子 PTE 写在 SMP 下成立（与现有 fork/COW 同一假设）。
 - **COW 影响面**：要求 `PAGE_R_W` 意味着 MAP_PRIVATE 文件映射（COW，P=1/W=0）的 buffer 得到 `-EFAULT`，而 Linux 会先 COW-fault 再写入成功。实际消费者（mbedtls 等）的输出 buffer 都是堆/匿名可写页，不受影响；标注为已知偏差，测试不得用 COW 区做 buffer。
 
 ### 5.2 为什么 devfs 路径也要同一 helper
@@ -153,7 +159,7 @@ void get_random_bytes(void *buf, size_t len); // 任意上下文可用（IRQ-saf
 4. `len=0` → 返回 0。
 5. 大 len：`getrandom(buf, 1 MiB, 0)` 返回 1 MiB 且不挂死（覆盖分块放锁路径；缓冲区用匿名 mmap，确保可写已映射）。
 6. `/dev/urandom`：open + read 16B 成功，两次 read 内容不同；对其做第 3 条的 munmap VA 测试 → read 返回 <0（devfs 对称保护生效）。
-7. 并发：fork 出子进程，父子各循环 1000 次 `getrandom(32B)` 不挂死（SMP 下压全局池锁与分块放锁），且父子首 32B 不同（无跨进程输出重复）。**同 mm 并发 munmap 竞态（§5.1 的 TOCTOU）在当前用户态不可构造**——无 CLONE_VM/pthread（clone 映射到 fork），共享 mm 仅存在于 fork OOM fallback——race-injection 测试不可表达，如实说明；mm->lock 的正确性由现有 mmap/munmap 回归（test_mmap/test_fork_mmap/test_cow 全绿）+ review 保证。
+7. 并发：fork 出子进程，父子各循环 1000 次 `getrandom(32B)` 不挂死（SMP 下压全局池锁与分块放锁），且父子首 32B 不同（无跨进程输出重复）。**同 mm 并发 munmap 竞态（§5.1 的 TOCTOU）在当前用户态不可构造**——无 CLONE_VM/pthread（clone 映射到 fork），共享 mm 仅存在于 fork OOM fallback——race-injection 测试不可表达，如实说明；mm->lock 的正确性由现有 mmap/munmap/mprotect 回归（systest 的 mmap/mprotect 用例 + test_mmap/test_fork_mmap/test_cow 全绿——重点确认锁集改造未破坏 MAP_FIXED 重叠、mprotect 拆分、init 进程 mmap/munmap 正常路径）+ review 保证。
 8. 统计健全性（宽松界防 flaky）：取 32 KiB，1 的位数占比落在 [0.45, 0.55]（monobit 弱检验）。
 9. Linux ABI 路径：`syscall(318, ...)` 翻译仅在 PF_LINUX_ABI 进程生效——systest 是 native 进程，此项不在 systest 断言，由 busybox 实际使用覆盖（实现期可用一个 PF_LINUX_ABI 小程序手工验证一次）。
 
@@ -171,9 +177,9 @@ void get_random_bytes(void *buf, size_t len); // 任意上下文可用（IRQ-saf
 | `kernel/include/kernel/arch/random.h` (+`x86_64/random.h`) | 新增 ~50 行 |
 | `kernel/include/kernel/arch/x86_64/regs.h` | +2 行特性位 |
 | `kernel/include/uapi/syscall.h` / `libc/include/sys/syscall.h` | 各 +1 行 |
-| `kernel/include/kernel/task.h` | mm_t 加 `spinlock_T lock` 字段 |
-| `kernel/memory/vma.c` + `kernel/include/kernel/vmm.h` | `user_write_range_begin/end` helper ~50 行；do_munmap / do_mmap(MAP_FIXED) 持 mm->lock |
-| `kernel/sched/task.c` | fork_mm_copy / mm 创建处初始化 mm->lock（`.lock = 1L`） |
+| `kernel/include/kernel/task.h` | mm_t 加 `spinlock_T lock` 字段；`init_mm = {0}` → `{ .lock = 1L }` |
+| `kernel/memory/vma.c` + `kernel/include/kernel/vmm.h` | `user_write_range_begin/end` helper ~50 行；`do_munmap` 拆 `do_munmap_locked()`；锁集 {do_munmap, do_mmap(MAP_FIXED), do_mprotect} 持 mm->lock；新增 `mm_alloc()` 构造器 |
+| `kernel/sched/task.c` | 三处 `calloc(mm_t)`（1091/1309/1485）→ `mm_alloc()` |
 | `kernel/arch/x86_64/trap.c` | 扩表 + case ~25 行 |
 | `kernel/kernel/main.c` | +1 行 random_init() |
 | `kernel/fs/devfs.c` | random_read 换实现（begin/end 夹住）+ 注册 urandom |
@@ -181,7 +187,7 @@ void get_random_bytes(void *buf, size_t len); // 任意上下文可用（IRQ-saf
 | `user/systest.c` | test_getrandom ~110 行 |
 | `docs/syscall.md` | syscall 清单 66→67，补 getrandom 条目 |
 
-合计新增约 380 行，改动 17 个文件。
+合计新增约 420 行，改动 17 个文件。
 
 ## 10. 非目标（YAGNI）
 
