@@ -22,6 +22,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <rbtree.h>
+#include <sys/random.h>
+#include <sys/mman.h>
 
 // Test node: embed rbtree_node_t in a small test struct
 typedef struct test_rb_node {
@@ -1528,6 +1530,153 @@ static void test_termios(void)
     close(fd);
 }
 
+// ── 66: getrandom(2) + /dev/urandom ─────────────────────────
+static void test_getrandom(void)
+{
+    uint8_t a[32], b[32];
+    memset(a, 0, 32);
+    memset(b, 0, 32);
+
+    // 1. Basic: returns 32, non-zero, two calls differ.
+    errno = 0;
+    ssize_t ra = getrandom(a, 32, 0);
+    CHECK3(ra == 32, "getrandom", "basic returns 32");
+    int nz = 0;
+    for (int i = 0; i < 32; i++) if (a[i]) nz++;
+    CHECK3(nz > 0, "getrandom", "non-zero output");
+    ssize_t rb = getrandom(b, 32, 0);
+    CHECK3(rb == 32, "getrandom", "second call returns 32");
+    CHECK3(memcmp(a, b, 32) != 0, "getrandom", "two calls differ");
+
+    // 2. Flags: both GRND flags (and their OR) accepted; unknown → EINVAL.
+    CHECK3(getrandom(a, 32, GRND_NONBLOCK) == 32, "getrandom", "GRND_NONBLOCK ok");
+    CHECK3(getrandom(a, 32, GRND_RANDOM) == 32, "getrandom", "GRND_RANDOM ok");
+    CHECK3(getrandom(a, 32, GRND_NONBLOCK | GRND_RANDOM) == 32, "getrandom", "both flags ok");
+    errno = 0;
+    ssize_t rbad = getrandom(a, 32, 0x100);
+    CHECK3(rbad == -1 && errno == EINVAL, "getrandom", "bad flag EINVAL");
+
+    // 3. Bad pointer: out-of-range → EFAULT.
+    errno = 0;
+    ssize_t r0 = getrandom((void *)0xFFFF800000000000ULL, 32, 0);
+    CHECK3(r0 == -1 && errno == EFAULT, "getrandom", "out-of-range EFAULT");
+
+    // 3b. Deterministic unmapped page: mmap one page, munmap it, use that VA.
+    //     Must be in-range and unmapped → exercises the per-page PTE check.
+    //     NOT a COW/MAP_PRIVATE file map (that's a documented -EFAULT deviation).
+    void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p != MAP_FAILED) {
+        munmap(p, 4096);
+        errno = 0;
+        ssize_t r1 = getrandom(p, 4096, 0);
+        CHECK3(r1 == -1 && errno == EFAULT, "getrandom", "unmapped VA EFAULT");
+    } else {
+        FAIL("getrandom: mmap for EFAULT test");
+    }
+
+    // 4. len=0 → 0 (buf may be NULL).
+    errno = 0;
+    CHECK3(getrandom(NULL, 0, 0) == 0, "getrandom", "len=0 returns 0");
+
+    // 5. Large len (1 MiB) must not hang (exercises chunked lock release).
+    //     Touch the buffer first: anon pages are demand-mapped on first
+    //     access; user_write_range_begin requires PTEs to already exist.
+    {
+        size_t big = 1024 * 1024;
+        void *buf = mmap(NULL, big, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        CHECK3(buf != MAP_FAILED, "getrandom", "1MiB mmap");
+        if (buf != MAP_FAILED) {
+            memset(buf, 0, big);   // fault in all pages
+            errno = 0;
+            ssize_t r = getrandom(buf, big, 0);
+            CHECKF(r == (ssize_t)big, "getrandom", "1MiB = %ldB",
+                   "1MiB = %ldB", (long)r);
+            munmap(buf, big);
+        }
+    }
+
+    // 6. /dev/urandom: read 16B, two reads differ; unmapped VA → read < 0.
+    {
+        int fd = open("/dev/urandom", O_RDONLY);
+        CHECK3(fd >= 0, "getrandom", "/dev/urandom open");
+        if (fd >= 0) {
+            uint8_t ua[16], ub[16];
+            ssize_t n1 = read(fd, ua, 16);
+            ssize_t n2 = read(fd, ub, 16);
+            CHECK3(n1 == 16 && n2 == 16, "getrandom", "/dev/urandom read 16");
+            CHECK3(memcmp(ua, ub, 16) != 0, "getrandom", "/dev/urandom two reads differ");
+            close(fd);
+        }
+        void *q = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (q != MAP_FAILED) {
+            munmap(q, 4096);
+            int f2 = open("/dev/urandom", O_RDONLY);
+            if (f2 >= 0) {
+                errno = 0;
+                ssize_t r = read(f2, q, 4096);
+                CHECK3(r < 0, "getrandom", "/dev/urandom unmapped VA <0");
+                close(f2);
+            }
+        }
+    }
+
+    // 7. Concurrency: fork, child loops 1000×getrandom(32B), parent draws
+    //    its own sample; both must not hang and must differ (no cross-process
+    //    keystream repeat).  Note: same-mm munmap race is NOT expressible in
+    //    current userland (clone→fork, no CLONE_VM); mm->lock correctness is
+    //    covered by the mmap/mprotect/fork-mmap/COW suites.
+    {
+        int pipefd[2];
+        if (pipe(pipefd) == 0) {
+            int pid = fork();
+            if (pid == 0) {
+                close(pipefd[0]);
+                uint8_t c[32];
+                for (int i = 0; i < 1000; i++) getrandom(c, 32, 0);
+                getrandom(c, 32, 0);   // fresh sample for comparison
+                write(pipefd[1], c, 32);
+                close(pipefd[1]);
+                _exit(0);
+            }
+            close(pipefd[1]);
+            uint8_t pa[32], ca[32];
+            getrandom(pa, 32, 0);
+            ssize_t got = read(pipefd[0], ca, 32);
+            close(pipefd[0]);
+            int st;
+            waitpid(pid, &st, 0);
+            CHECK3(WIFEXITED(st) && WEXITSTATUS(st) == 0, "getrandom", "fork child 1000 iters");
+            CHECK3(got == 32, "getrandom", "pipe received child sample");
+            CHECK3(memcmp(pa, ca, 32) != 0, "getrandom", "parent/child first differ");
+        }
+    }
+
+    // 8. Monobit smoke test (32 KiB, no statistical power — catches only
+    //    constant/all-zero/strongly-periodic disasters, not weak RNGs).
+    //    Integer math only: OS01's printf has no %f and no %z modifier.
+    {
+        size_t big = 32768;
+        uint8_t *buf = (uint8_t *)malloc(big);
+        CHECK3(buf != NULL, "getrandom", "32KiB malloc");
+        if (buf) {
+            getrandom(buf, big, 0);
+            long ones = 0;
+            for (size_t i = 0; i < big; i++) {
+                uint8_t v = buf[i];
+                for (int k = 0; k < 8; k++) ones += (v >> k) & 1;
+            }
+            long total = (long)big * 8;
+            long pct = (ones * 100) / total;   // integer % of 1-bits
+            CHECKF(pct > 45 && pct < 55, "getrandom",
+                   "monobit 1-bit%% in (45,55)", "monobit 1-bit%% = %ld", pct);
+            free(buf);
+        }
+    }
+}
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
@@ -1592,6 +1741,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"proc_maps",           test_proc_maps},
     {"proc_fd",             test_proc_fd},
     {"termios",             test_termios},
+    {"getrandom",           test_getrandom},
 };
 
 int main(void)
