@@ -145,5 +145,9 @@ typedef struct pt_regs
 
 // ECX bits
 #define CPUID_FEAT_ECX_X2APIC  (1 << 21)   // x2APIC supported
+#define CPUID_FEAT_ECX_RDRAND  (1 << 30)   // RDRAND instruction (leaf 1 ECX)
+
+// EBX bits (leaf 7, subleaf 0)
+#define CPUID_FEAT_EBX_RDSEED  (1 << 18)   // RDSEED instruction (leaf 7 EBX)
 
 #endif /* _KERNEL_ARCH_REGS_H */

@@ -33,6 +33,7 @@
 #include <kernel/pty.h>
 #include <kernel/clockevent.h>
 #include <net/net.h>
+#include <kernel/random.h>
 
 // ── Stack canary ─────────────────────────────────────────────
 
@@ -168,6 +169,8 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     //   Phase 6: storage (ahci)
     arch_register_subsys();
     subsys_init_all();
+
+    random_init();                      // seed the CSPRNG pool (BSP, once)
 
     vfs_init();                         // init mount table BEFORE any mount calls
 
