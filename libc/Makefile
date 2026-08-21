@@ -42,7 +42,8 @@ C_SOURCES := \
     $(wildcard signal/*.c) \
     $(wildcard arpa/*.c) \
     $(wildcard libgen/*.c) \
-    $(wildcard pthread/*.c)
+    $(wildcard pthread/*.c) \
+    $(wildcard random/*.c)
 
 # Remove duplicates: free.c conflicts with malloc.c (chown.c conflict gone — uid_stubs.c deleted)
 C_SOURCES := $(filter-out stdlib/free.c, $(C_SOURCES))
