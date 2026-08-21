@@ -82,7 +82,7 @@ void get_random_bytes(void *buf, size_t len); // 任意上下文可用（IRQ-saf
 
 - `random_init()`：种子 = RDSEED×4（不可用则 RDRAND×4）⊕ arch_cycle_counter() 多次采样 ⊕ jiffies，写入 ChaCha20 key（32B）。
 - **周期 reseed**：每累计输出 **1 MiB** 用 RDRAND×4（或 RDSEED×4）与 key 异或混入一次。**禁止每次调用都抽 RDRAND**：RDRAND 吞吐有限（~100 MB/s 量级）且可能失败需重试，每调用 rekey 会把 CSPRNG 退化成硬件依赖、在高并发下成为瓶颈，且不带来额外安全性。RDRAND 只用于初始化播种与周期补熵。**reseed 失败语义**：RDRAND/RDSEED 重试上限用尽仍失败时，**跳过本次 reseed，key 保持不变**——严禁把未初始化或全零 buffer 异或进 key（那会确定性地改写/削弱 key）。
-- **counter 回绕**：池维护 64-bit block 索引 `blk`；调 `chacha20_block` 时 `counter = (uint32_t)blk`，`blk >> 32` 写入 nonce 的第一个 32-bit 字（**RFC 8439 为 little-endian 字序**：12B nonce = 3 个 LE u32，`blk>>32` 即 nonce 字节 [0..3] 的 LE 解释），其余 nonce 字为 0。`chacha20.h` 注释写明 LE 约定。keystream 空间 2^96 block，回绕在事实上不可达，不存在 (counter,nonce) 复用。`chacha20.h` 的 API 形态不变。
+- **counter 回绕**：池维护 64-bit block 索引 `blk`；调 `chacha20_block` 时 `counter = (uint32_t)blk`，`blk >> 32` 写入 nonce 的第一个 32-bit 字（**RFC 8439 为 little-endian 字序**：12B nonce = 3 个 LE u32，`blk>>32` 即 nonce 字节 [0..3] 的 LE 解释），其余 nonce 字为 0。`chacha20.h` 注释写明 LE 约定。keystream 空间 2^64 block（2^70 字节），回绕在事实上不可达，不存在 (counter,nonce) 复用。`chacha20.h` 的 API 形态不变。
 - 无任何硬件熵（老 CPU / aarch64 stub）：退化为 arch_cycle_counter() 高频混合种子（两架构均有此函数；aarch64 无 rdtsc，不得使用 rdtsc 命名/调用）。弱熵但不劣于现状，属已知限制，写进代码注释。
 
 ### 4.4 并发与 SMP

@@ -507,6 +507,7 @@ static uint64_t *user_leaf_pte(uint64_t *pml4, uint64_t va)
     uint64_t *pml3 = (uint64_t *)Phy_To_Virt(pml4[l4] & PAGE_4K_MASK);
 
     if (!(pml3[l3] & PAGE_Present)) return NULL;
+    if (pml3[l3] & PAGE_PS) return NULL;   // 1GB huge page: unsupported here (same gap as vmm_pt_walk)
     uint64_t *pml2 = (uint64_t *)Phy_To_Virt(pml3[l3] & PAGE_4K_MASK);
 
     if (!(pml2[l2] & PAGE_Present)) return NULL;

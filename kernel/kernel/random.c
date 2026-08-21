@@ -91,7 +91,8 @@ void get_random_bytes(void *buf, size_t len)
             // byte order (RFC 8439): low 32 bits are the counter, high 32
             // bits are nonce word 0.  When the low 32 bits wrap, the carry
             // moves into the high bits, so no (counter, nonce) pair ever
-            // repeats — the keystream space is 2^96 blocks.
+            // repeats — the reachable keystream space is 2^64 blocks (2^70
+            // bytes) — unreachable in practice.
             uint32_t counter = (uint32_t)pool_blk;
             nonce[0] = (uint8_t)(pool_blk >> 32);
             nonce[1] = (uint8_t)(pool_blk >> 40);

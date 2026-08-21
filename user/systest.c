@@ -1662,7 +1662,10 @@ static void test_getrandom(void)
         uint8_t *buf = (uint8_t *)malloc(big);
         CHECK3(buf != NULL, "getrandom", "32KiB malloc");
         if (buf) {
-            getrandom(buf, big, 0);
+            memset(buf, 0, big);   // fault in all heap pages (no demand paging)
+            ssize_t r = getrandom(buf, big, 0);
+            CHECKF(r == (ssize_t)big, "getrandom", "32KiB returns %ldB",
+                   "32KiB got %ldB", (long)r);
             long ones = 0;
             for (size_t i = 0; i < big; i++) {
                 uint8_t v = buf[i];

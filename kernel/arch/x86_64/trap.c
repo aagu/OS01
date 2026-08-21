@@ -1038,7 +1038,11 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
 		[318] = 66,	// getrandom	→ SYS_getrandom
         };
         int8_t os = linux_to_os01[regs->rax];
-        if (os >= 0)
+        // `> 0` not `>= 0`: no Linux syscall in the table maps to OS01
+        // putchar (0), so os == 0 always means "zero-filled unmapped entry"
+        // and must fall through untranslated -> switch default -> -ENOSYS;
+        // os == -1 is the explicit unsupported sentinel (also falls through).
+        if (os > 0)
             regs->rax = os;
     }
     switch (regs->rax) {
