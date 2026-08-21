@@ -88,6 +88,7 @@
 #define SYS_getifaddr     63
 #define SYS_shutdown      64
 #define SYS_clock_gettime 65
+#define SYS_getrandom     66
 
 // ── reboot(2) commands ──────────────────────────────────────
 #define RB_AUTOBOOT    0x01234567

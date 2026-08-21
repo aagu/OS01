@@ -72,6 +72,7 @@
 #define SYS_getifaddr     63
 #define SYS_shutdown      64
 #define SYS_clock_gettime 65
+#define SYS_getrandom     66
 
 // ── Generic syscall helper ─────────────────────────────────
 

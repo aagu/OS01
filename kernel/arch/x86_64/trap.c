@@ -36,6 +36,8 @@ typedef int pid_t;
 #include <uapi/time.h>
 #include <kernel.h>
 #include <kernel/vma.h>
+#include <sys/random.h>   // GRND_NONBLOCK, GRND_RANDOM (for SYS_getrandom)
+#include <kernel/random.h>  // get_random_bytes(), RANDOM_MAX_LEN
 #include <uapi/futex.h>
 #include <kernel/futex.h>
 #include <uapi/sockaddr.h>  // struct sockaddr_in (shared with userspace)
@@ -974,8 +976,8 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
 #endif
 
     // Linux x86_64 ABI translation (for busybox etc.)
-    if ((current->flags & PF_LINUX_ABI) && regs->rax < 256) {
-        static const int8_t linux_to_os01[256] = {
+    if ((current->flags & PF_LINUX_ABI) && regs->rax < 320) {
+        static const int8_t linux_to_os01[320] = {
             [0] = 6,   // read -> SYS_read
             [1] = 1,   // write -> SYS_write (same)
             [2] = 7,   // open -> SYS_open
@@ -1033,6 +1035,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
 		[48] = 64,	// shutdown	→ SYS_shutdown
 		[164] = 63,	// getifaddr	→ SYS_getifaddr
 		[228] = 65,	// clock_gettime	→ SYS_clock_gettime
+		[318] = 66,	// getrandom	→ SYS_getrandom
         };
         int8_t os = linux_to_os01[regs->rax];
         if (os >= 0)
@@ -1040,7 +1043,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
     }
     switch (regs->rax) {
     // ── Syscall name table (for strace) ─────────────────────
-    static const char *syscall_names[66] = {
+    static const char *syscall_names[67] = {
         [0]  = "putchar",
         [1]  = "write",
         [2]  = "exit",
@@ -1097,8 +1100,9 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         [63] = "getifaddr",
         [64] = "shutdown",
         [65] = "clock_gettime",
+        [66] = "getrandom",
     };
-    const char *sname = (regs->rax < 66 && syscall_names[regs->rax])
+    const char *sname = (regs->rax < 67 && syscall_names[regs->rax])
                         ? syscall_names[regs->rax] : "?";
     debug_syscall("[strace] pid=%d syscall(%s, arg1=%#lx, arg2=%#lx, arg3=%#lx)\n",
                   (int)current->pid, sname,
@@ -1892,6 +1896,25 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         tp->tv_sec  = ns / 1000000000ULL;
         tp->tv_nsec = ns % 1000000000ULL;
         regs->rax = 0;
+        break;
+    }
+    case SYS_getrandom: {
+        // getrandom(void *buf, size_t len, unsigned int flags)
+        uint64_t addr  = regs->rdi;
+        uint64_t len   = regs->rsi;
+        uint64_t flags = regs->rdx;
+
+        if (len == 0) { regs->rax = 0; break; }              // buf may be NULL
+        if (flags & ~(GRND_NONBLOCK | GRND_RANDOM)) {        // pool never blocks
+            regs->rax = -EINVAL; break;
+        }
+        if (len > RANDOM_MAX_LEN) len = RANDOM_MAX_LEN;      // truncate, not error
+
+        int rc = user_write_range_begin(addr, len);          // mm->lock + per-page PTE
+        if (rc < 0) { regs->rax = rc; break; }               // -EFAULT (lock released)
+        get_random_bytes((void *)addr, len);                 // chunked pool fill; mm->lock held
+        user_write_range_end();
+        regs->rax = len;                                     // actual bytes filled
         break;
     }
     case SYS_nanosleep: {
