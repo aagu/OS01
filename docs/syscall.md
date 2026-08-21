@@ -1,6 +1,6 @@
 # Syscall interface
 
-System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`. Up to 6 arguments via the `syscall6()` wrapper. Return value in `rax`. 66 syscalls total (0..65).
+System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`. Up to 6 arguments via the `syscall6()` wrapper. Return value in `rax`. 67 syscalls total (0..66).
 
 ## Syscall table
 
@@ -72,6 +72,7 @@ System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`
 | 63 | `SYS_getifaddr` | — | **OS01 自定义扩展**：无参数，返回本机接口地址（lwIP netif IP） |
 | 64 | `SYS_shutdown` | rdi=fd, rsi=how | Shutdown socket |
 | 65 | `SYS_clock_gettime` | rdi=clk_id, rsi=timespec | 纳秒时间；仅支持 CLOCK_REALTIME/MONOTONIC，**两者同值**（无 RTC 墙钟，gettimeofday 返回 0） |
+| 66 | `SYS_getrandom` | rdi=buf, rsi=len, rdx=flags | 内核 ChaCha20 池；GRND_NONBLOCK/GRND_RANDOM 为语义 NOP；len>33554431 截断；未映射/只读 buffer → -EFAULT |
 
 ## Definitions
 
@@ -108,9 +109,10 @@ Higher-level libc functions (`read()`, `exec()`, etc.) call these wrappers.
 - Arguments from `regs->rdi`, `regs->rsi`, `regs->rdx`, `regs->r10`, `regs->r8`, `regs->r9`
 - Sets `regs->rax` as return value
 - For `SYS_read` and `SYS_exec`: copies user-provided path strings to kernel heap (`strdup`) before VFS operations to prevent TOCTOU races
+- For `PF_LINUX_ABI` processes (busybox etc.): translates Linux x86_64 syscall numbers to OS01 via `linux_to_os01[320]` (expanded from `[256]`) before dispatch; Linux `getrandom` (318) → `SYS_getrandom` (66)
 - Return via `ret_from_exception` → `RESTORE_ALL` → `iretq`
 
-> ⚠️ **已定义未实现**：`SYS_getpeername`（62）在 syscall 名映射表存在但无 dispatch case（`do_getpeername` 不存在）。调用会落入默认分支返回 `-ENOSYS`。其余 65 个均有实现。
+> ⚠️ **已定义未实现**：`SYS_getpeername`（62）在 syscall 名映射表存在但无 dispatch case（`do_getpeername` 不存在）。调用会落入默认分支返回 `-ENOSYS`。其余 66 个均有实现。
 
 ## Known bug
 
