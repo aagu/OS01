@@ -6,6 +6,7 @@
 - 修订记录：
   - v1：初版
   - v2：并入首轮 review — ①用户 buffer 逐页 PTE 校验（内核态 PF 无 demand-paging，裸写未映射页会 hlt 挂死）；②RDRAND 从"每调用 rekey"改为初始化充分播种 + 周期 reseed（每 1 MiB）；③ChaCha20 32-bit counter 回绕处理（高 32 位进 nonce）；④len 上限 33554431 + 分块放锁；⑤SMP 全局锁标注为已知限制；⑥内核经 sysroot 看到 libc 头文件的构建链路已验证；⑦aarch64 fallback 改用 arch_cycle_counter()；⑧文件清单补 docs/syscall.md；⑨测试补并发/大 len/monobit；⑩非目标注明 AT_RANDOM 未来消费者；⑪明确 rdi/rsi/rdx 寄存器约定
+  - v3：并入二轮 review — ①TOCTOU 闭合：新增 mm->lock，"校验→写"全程持锁，do_munmap/do_mmap(MAP_FIXED) 同锁（已验证 brk 不 unmap、页表 unmap 源仅这两处+进程拆毁）；②/dev/random+/dev/urandom 的 read 用同一 helper 对称保护；③COW 页 -EFAULT 的影响面注明；④reseed 的 RDRAND 失败语义=跳过本次；⑤nonce 字拆分端序写明 little-endian；⑥test#3 改用 mmap+munmap 确定性构造未映射 VA；⑦同 mm 并发竞态在当前用户态不可构造（无 CLONE_VM），race-injection 测试不可表达，如实写明
 
 ---
 
@@ -76,8 +77,8 @@ void get_random_bytes(void *buf, size_t len); // 任意上下文可用（IRQ-saf
 ### 4.3 种子与 reseed
 
 - `random_init()`：种子 = RDSEED×4（不可用则 RDRAND×4）⊕ arch_cycle_counter() 多次采样 ⊕ jiffies，写入 ChaCha20 key（32B）。
-- **周期 reseed**：每累计输出 **1 MiB** 用 RDRAND×4（或 RDSEED×4）与 key 异或混入一次。**禁止每次调用都抽 RDRAND**：RDRAND 吞吐有限（~100 MB/s 量级）且可能失败需重试，每调用 rekey 会把 CSPRNG 退化成硬件依赖、在高并发下成为瓶颈，且不带来额外安全性。RDRAND 只用于初始化播种与周期补熵。
-- **counter 回绕**：池维护 64-bit block 索引 `blk`；调 `chacha20_block` 时 `counter = (uint32_t)blk`，nonce 第一个字 = `(uint32_t)(blk >> 32)`，其余 nonce 字为 0。keystream 空间 2^96 block，回绕在事实上不可达，不存在 (counter,nonce) 复用导致的 keystream 重用。`chacha20.h` 的 API 形态不变（RFC 8439 布局）。
+- **周期 reseed**：每累计输出 **1 MiB** 用 RDRAND×4（或 RDSEED×4）与 key 异或混入一次。**禁止每次调用都抽 RDRAND**：RDRAND 吞吐有限（~100 MB/s 量级）且可能失败需重试，每调用 rekey 会把 CSPRNG 退化成硬件依赖、在高并发下成为瓶颈，且不带来额外安全性。RDRAND 只用于初始化播种与周期补熵。**reseed 失败语义**：RDRAND/RDSEED 重试上限用尽仍失败时，**跳过本次 reseed，key 保持不变**——严禁把未初始化或全零 buffer 异或进 key（那会确定性地改写/削弱 key）。
+- **counter 回绕**：池维护 64-bit block 索引 `blk`；调 `chacha20_block` 时 `counter = (uint32_t)blk`，`blk >> 32` 写入 nonce 的第一个 32-bit 字（**RFC 8439 为 little-endian 字序**：12B nonce = 3 个 LE u32，`blk>>32` 即 nonce 字节 [0..3] 的 LE 解释），其余 nonce 字为 0。`chacha20.h` 注释写明 LE 约定。keystream 空间 2^96 block，回绕在事实上不可达，不存在 (counter,nonce) 复用。`chacha20.h` 的 API 形态不变。
 - 无任何硬件熵（老 CPU / aarch64 stub）：退化为 arch_cycle_counter() 高频混合种子（两架构均有此函数；aarch64 无 rdtsc，不得使用 rdtsc 命名/调用）。弱熵但不劣于现状，属已知限制，写进代码注释。
 
 ### 4.4 并发与 SMP
@@ -100,21 +101,43 @@ void get_random_bytes(void *buf, size_t len); // 任意上下文可用（IRQ-saf
     - `len == 0` → 返回 0（buf 可为 NULL，Linux 语义；先于一切指针校验）。
     - `len > 33554431` → 按 Linux urandom 源行为截断为 33554431（填充并返回该值），不报错。
     - flags 校验：仅接受 `0 | GRND_NONBLOCK(1) | GRND_RANDOM(2)` 的任意组合（池不阻塞，两 flag 均为语义 NOP），其他位 → `-EINVAL`。
-    - **用户 buffer 两级校验（关键，见 §5.1）**：
-      1. `syscall_user_range_ok(addr, len)` 范围检查 → `-EFAULT`；
-      2. **逐页 PTE 校验**：对 `[addr, addr+len)` 覆盖的每个 4 KiB 页，`vmm_pt_walk((uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4), va, 0, 0)`（模式同 trap.c COW 处理处），要求 PTE 存在且 `PAGE_R_W` 置位。未映射页或写保护页（含 COW 页：P=1 但 W=0）→ `-EFAULT`。
-    - 校验通过后调 `get_random_bytes(buf, len)`（内部分块放锁），返回实际填充字节数。
+    - **用户 buffer 校验与写入（关键，见 §5.1）**：用 §5.1 的 `user_write_range_begin()` / `user_write_range_end()` 夹住整个"校验→写"窗口：
+      ```c
+      int rc = user_write_range_begin((uint64_t)buf, len);  // mm->lock + 范围 + 逐页 PTE
+      if (rc < 0) { regs->rax = rc; break; }                // -EFAULT（锁已释放）
+      get_random_bytes(buf, len);                           // 内部分块放池锁，mm->lock 全程持有
+      user_write_range_end();
+      regs->rax = len;
+      ```
 
-### 5.1 为什么必须逐页 PTE 校验
+### 5.1 用户 buffer 安全：mm->lock + 逐页校验（闭合 TOCTOU）
 
-`do_page_fault()` 对**所有**缺页（含内核态 syscall 中写用户内存触发的 PF）统一走 dump + `hlt()` 死循环，**没有 demand-paging**。`syscall_user_range_ok()` 只查 `addr_limit` 范围，不查页面是否已映射；用户传入 mmap 后未触碰的页或空洞地址时，裸写会让整个内核挂死。getrandom 是"写"用户内存，比"读"用户内存的 syscall 更易命中未映射页，因此本设计主动逐页校验。注意这是**继承性缺陷**（read(2) 等现有 syscall 同样裸写、同样有风险），本 spec 只保证 getrandom 自身安全；全局 `copy_to_user()` 属另一个 roadmap 项，不在此引入。对 COW 页返回 -EFAULT 而不做内核态 COW 解析，同属继承限制。
+`do_page_fault()` 对**所有**缺页（含内核态 syscall 中写用户内存触发的 PF）统一走 dump + `hlt()` 死循环，**没有 demand-paging**。只查 `addr_limit` 范围不够；只做事前逐页 PTE 校验也不够——校验与写入不是原子区间，同一 mm 的另一任务可在其间 munmap（TOCTOU），仍会把内核挂死。因此本设计引入 **mm 级锁**闭合窗口：
+
+- `mm_t` 新增 `spinlock_T lock`（初始化约定 `.lock = 1L` = 未锁，同 `task_list_lock`；mm 创建路径 `fork_mm_copy` / 新建 mm 处显式初始化。静态 `init_mm = {0}` 不受影响——getrandom 只碰用户 mm）。
+- 新 helper（实现在 `kernel/memory/vma.c`，声明进 `kernel/include/kernel/vmm.h`）：
+  ```c
+  // 持 current->mm->lock（irqsave），然后：syscall_user_range_ok 范围检查 +
+  // 逐页 vmm_pt_walk(Phy_To_Virt(current->mm->pml4), va, 0, 0) 要求 PTE 存在
+  // 且 PAGE_R_W 置位。全部通过返回 0（锁保持持有）；任一失败释放锁返回 -EFAULT。
+  int  user_write_range_begin(uint64_t addr, size_t len);
+  void user_write_range_end(void);   // 释放 current->mm->lock
+  ```
+  内核调用者边界：`current->mm == NULL`（kthread 经 devfs 读 /dev/urandom）时跳过校验与加锁直接返回 0（内核 buffer 受信任），`end()` 对应成 no-op。
+- **unmap 源同锁**（已核实用户页表的 unmap 源只有两处 syscall 路径）：`do_munmap()` 与 `do_mmap()` 的 MAP_FIXED 重叠解除段，均持 `current->mm->lock`。brk 已验证不 unmap（只移动 `end_brk` 指针），无需参与。
+- 锁内安全性：持锁期间只写"已确认 P+W 的页"，不会触发 PF，不会在中断/异常路径重入该锁，无死锁面。**mm->lock 用普通 spin_lock（非 irqsave）**：它只在 syscall 上下文被取，IRQ/PF handler 均不触碰；这样大填充期间本 CPU 中断保持可用（timer tick 不丢）。持锁调度是安全的（竞争者自旋有界）。池锁与 mm->lock 的嵌套顺序固定为 mm->lock(外) → 池锁(内)，全项目唯一此一处嵌套，无环。大 len 填充全程持 mm->lock（上界 32 MiB cap；典型消费者 ≤ 256B），写进代码注释。
+- **已知限制（如实声明，非 airtight 的剩余面）**：`vma_free_all()`（exit/exec 的整 mm 拆毁）**不**参与本锁——共享 mm 的用户任务仅存在于 fork OOM fallback（`fork_mm_copy` 失败时 `tsk->mm = current->mm`），且该路径有既有更严重问题（exit 时无条件 `kfree(current->mm)` 会 UAF 共享方）。本 spec 不触碰它；全局 `copy_to_user()`/GUP（含拆毁路径）属另一个 roadmap 项。在此限制之外，munmap/MAP_FIXED 竞态对本 syscall 是**闭合**的，不再是 best-effort。
+- **COW 影响面**：要求 `PAGE_R_W` 意味着 MAP_PRIVATE 文件映射（COW，P=1/W=0）的 buffer 得到 `-EFAULT`，而 Linux 会先 COW-fault 再写入成功。实际消费者（mbedtls 等）的输出 buffer 都是堆/匿名可写页，不受影响；标注为已知偏差，测试不得用 COW 区做 buffer。
+
+### 5.2 为什么 devfs 路径也要同一 helper
+
+§1 的核心动机之一是 mbedtls 的 `/dev/urandom` fallback 路径——若只保护 getrandom(2) 而让 `random_read` 裸写，恰恰漏掉了驱动本设计的消费者，两条路径安全性不对称。因此 `random_read` 用同一对 `user_write_range_begin/end` 夹住"校验→`get_random_bytes`"（devfs read 的 `current` 即读者进程，mm 可用；helper 成本极低）。这是本设计与"其他设备一致"原则的**有意偏离**，理由即 §5.1：其他设备的裸写是继承性缺陷，新增代码不继续扩散它。
 
 ## 6. devfs（`kernel/fs/devfs.c`）
 
-- `random_read` 删除 rdtsc 逐字节异或，改为 `get_random_bytes(buffer, size)`。
+- `random_read` 删除 rdtsc 逐字节异或，改为：`user_write_range_begin()` → `get_random_bytes()` → `user_write_range_end()`（与 getrandom(2) 对称保护，理由见 §5.2）。
 - 同一 `random_ops` 追加注册 `"urandom"` 节点（Linux 语义上 urandom 不阻塞，与本池行为一致；不区分 random/urandom 质量，与"同源"决策一致）。
 - `random_write` 保持现状（接受并忽略）。
-- 注：/dev/urandom 的 read 走通用 read(2) 路径，用户 buffer 校验继承该路径现状（含 §5.1 所述继承性风险），本 spec 不为 devfs 单独加校验，保持与其他设备一致。
 
 ## 7. libc 用户态接口
 
@@ -126,11 +149,11 @@ void get_random_bytes(void *buf, size_t len); // 任意上下文可用（IRQ-saf
 
 1. 基本：`getrandom(buf, 32, 0)` 返回 32；buf 非全零；两次调用内容不同。
 2. flags：`GRND_NONBLOCK`、`GRND_RANDOM`、两者或均接受；`flags=0x100` → `-EINVAL`。
-3. 错误指针：越界 buf（addr_limit 之外）→ `-EFAULT`；**addr_limit 之内但保证未映射的地址**（如紧邻 brk 顶上一页，实现期选定一个确定未映射的 VA）→ `-EFAULT`（覆盖 §5.1 逐页校验路径，防回归）。
+3. 错误指针：越界 buf（addr_limit 之外）→ `-EFAULT`；**确定性未映射页**：`mmap` 一页 → 立即 `munmap` → 用返回的 VA 做 buf（必在 addr_limit 内且必未映射）→ `-EFAULT`（覆盖 §5.1 逐页校验路径，防回归）。**不得用 COW/MAP_PRIVATE 区做 buffer**（会得到 -EFAULT，是 §5.1 注明的已知偏差，不是本测试目标）。
 4. `len=0` → 返回 0。
-5. 大 len：`getrandom(buf, 1 MiB, 0)` 返回 1 MiB 且不挂死（覆盖分块放锁路径；缓冲区用 mmap 或静态大数组，确保可写已映射）。
-6. `/dev/urandom`：open + read 16B 成功，两次 read 内容不同。
-7. 并发：fork 出子进程，父子各循环 1000 次 `getrandom(32B)` 不挂死（SMP 下跑在不同 CPU 上压全局锁与分块放锁），且父子首 32B 不同（无跨进程输出重复）。
+5. 大 len：`getrandom(buf, 1 MiB, 0)` 返回 1 MiB 且不挂死（覆盖分块放锁路径；缓冲区用匿名 mmap，确保可写已映射）。
+6. `/dev/urandom`：open + read 16B 成功，两次 read 内容不同；对其做第 3 条的 munmap VA 测试 → read 返回 <0（devfs 对称保护生效）。
+7. 并发：fork 出子进程，父子各循环 1000 次 `getrandom(32B)` 不挂死（SMP 下压全局池锁与分块放锁），且父子首 32B 不同（无跨进程输出重复）。**同 mm 并发 munmap 竞态（§5.1 的 TOCTOU）在当前用户态不可构造**——无 CLONE_VM/pthread（clone 映射到 fork），共享 mm 仅存在于 fork OOM fallback——race-injection 测试不可表达，如实说明；mm->lock 的正确性由现有 mmap/munmap 回归（test_mmap/test_fork_mmap/test_cow 全绿）+ review 保证。
 8. 统计健全性（宽松界防 flaky）：取 32 KiB，1 的位数占比落在 [0.45, 0.55]（monobit 弱检验）。
 9. Linux ABI 路径：`syscall(318, ...)` 翻译仅在 PF_LINUX_ABI 进程生效——systest 是 native 进程，此项不在 systest 断言，由 busybox 实际使用覆盖（实现期可用一个 PF_LINUX_ABI 小程序手工验证一次）。
 
@@ -148,14 +171,17 @@ void get_random_bytes(void *buf, size_t len); // 任意上下文可用（IRQ-saf
 | `kernel/include/kernel/arch/random.h` (+`x86_64/random.h`) | 新增 ~50 行 |
 | `kernel/include/kernel/arch/x86_64/regs.h` | +2 行特性位 |
 | `kernel/include/uapi/syscall.h` / `libc/include/sys/syscall.h` | 各 +1 行 |
-| `kernel/arch/x86_64/trap.c` | 扩表 + case ~30 行 |
+| `kernel/include/kernel/task.h` | mm_t 加 `spinlock_T lock` 字段 |
+| `kernel/memory/vma.c` + `kernel/include/kernel/vmm.h` | `user_write_range_begin/end` helper ~50 行；do_munmap / do_mmap(MAP_FIXED) 持 mm->lock |
+| `kernel/sched/task.c` | fork_mm_copy / mm 创建处初始化 mm->lock（`.lock = 1L`） |
+| `kernel/arch/x86_64/trap.c` | 扩表 + case ~25 行 |
 | `kernel/kernel/main.c` | +1 行 random_init() |
-| `kernel/fs/devfs.c` | random_read 换实现 + 注册 urandom |
+| `kernel/fs/devfs.c` | random_read 换实现（begin/end 夹住）+ 注册 urandom |
 | `libc/include/sys/random.h` / `libc/unistd/getrandom.c` | 新增 ~25 行 |
-| `user/systest.c` | test_getrandom ~100 行 |
+| `user/systest.c` | test_getrandom ~110 行 |
 | `docs/syscall.md` | syscall 清单 66→67，补 getrandom 条目 |
 
-合计新增约 330 行，改动 14 个文件。
+合计新增约 380 行，改动 17 个文件。
 
 ## 10. 非目标（YAGNI）
 
