@@ -2,6 +2,12 @@
 #include <fs/vfs.h>
 #include <block/blockdev.h>
 #include <kernel/debug.h>
+#include <kernel/random.h>
+#include <kernel/vmm.h>
+// kernel/vmm.h defines a legacy `mmap` type macro (uint64_t*) that collides
+// with devfs_ops.mmap / ops->mmap below — undef it here.  devfs.c never uses
+// `mmap` as a type.  (Same pattern as vma.c and fb.c.)
+#undef mmap
 #include <kernel/arch/cpu.h>
 #include <kernel/slab.h>
 #include <driver/serial.h>
@@ -110,17 +116,22 @@ static int serial_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *
     return (int)size;
 }
 
-// ── /dev/random — pseudorandom data from rdtsc() ──────────
-// Not cryptographically secure.  Mixed with the low bits of
-// TSC on each byte for per-byte variation.
+// ── /dev/random + /dev/urandom — kernel CSPRNG pool ────────
+// Same source as getrandom(2); uses the same user_write_range_begin/end
+// helper so the devfs read path has the same kernel-write safety as the
+// syscall (a deliberate deviation from the other devices' raw writes —
+// see spec §5.2).  Cap mirrors the syscall so one huge read can't hold
+// mm->lock while serializing that mm's munmap/mprotect.
 static int random_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 {
     (void)node; (void)offset;
     if (!buffer || size == 0) return 0;
-    for (uint64_t i = 0; i < size; i++) {
-        uint64_t tsc = arch_cycle_counter();
-        ((uint8_t *)buffer)[i] = (uint8_t)(tsc ^ (tsc >> 13) ^ (tsc >> 31));
-    }
+    if (size > RANDOM_MAX_LEN) size = RANDOM_MAX_LEN;
+
+    int rc = user_write_range_begin((uint64_t)buffer, (size_t)size);
+    if (rc < 0) return rc;                 // -EFAULT (lock released)
+    get_random_bytes(buffer, (size_t)size);
+    user_write_range_end();
     return (int)size;
 }
 
@@ -399,6 +410,7 @@ void devfs_init(void)
     devfs_register_chrdev("null",   NULL, &null_ops);
     devfs_register_chrdev("zero",   NULL, &zero_ops);
     devfs_register_chrdev("random", NULL, &random_ops);
+    devfs_register_chrdev("urandom", NULL, &random_ops);
     devfs_register_chrdev("serial", NULL, &serial_ops);
     // NOTE: /dev/tty and /dev/tty0 are registered in main.c
     // after keyboard_set_tty() so keyboard_get_tty() returns
