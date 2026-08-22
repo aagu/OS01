@@ -1113,6 +1113,11 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
 
     // Inherit fd table from parent (the init task)
     tsk->parent = current;
+
+    // v2: inherit caller's pgrp/session (init task sets pgrp=1 in task_init)
+    tsk->pgrp = current->pgrp;
+    tsk->session = current->session;
+
     list_init(&tsk->wait_list);
     list_init(&tsk->io_wait_node);
     tsk->exit_code = 0;
@@ -1698,6 +1703,11 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
     tsk->ctty_type = current->ctty_type;
     tsk->ctty      = current->ctty;
 
+    // v2: inherit parent's pgrp/session (not pgrp leader: trap.c SYS_fork case
+    // is just a thin wrapper around do_fork(); the real child struct is built here)
+    tsk->pgrp = current->pgrp;
+    tsk->session = current->session;
+
     list_init(&tsk->list);
     list_init(&tsk->wait_list);
     list_init(&tsk->io_wait_node);
@@ -1843,6 +1853,31 @@ int task_send_signal(int pid, int sig)
     return ret;
 }
 
+// ── signal_pgrp ───────────────────────────────────────────
+// Sends sig to all tasks with pgrp==target, skipping PF_KTHREAD.
+// Holds task_list_lock.  Returns 0 on match, -ESRCH if no match,
+// 0 if target==0 (silent no-op).
+int signal_pgrp(pid_t target, int sig)
+{
+    if (target == 0) return 0;  // silent no-op
+    if (sig < 1 || sig >= NSIG) return -EINVAL;
+    int matched = 0;
+    uint64_t flags = spin_lock_irqsave(&task_list_lock);
+    list_t *pos = init_task_union.task.list.next;
+    while (pos != &init_task_union.task.list) {
+        task_t *t = container_of(pos, task_t, list);
+        pos = task_list_next(pos);
+        if (t->pgrp == target && !(t->flags & PF_KTHREAD)) {
+            t->signal |= (1ULL << sig);
+            if (t->state == TASK_INTERRUPTIBLE)
+                task_wake(t);
+            matched++;
+        }
+    }
+    spin_unlock_irqrestore(&task_list_lock, flags);
+    return matched > 0 ? 0 : -ESRCH;
+}
+
 // ── task_files_pin_by_pid ─────────────────────────────────
 // Locate a task by pid under task_list_lock and pin its fd table so a
 // /proc reader can inspect it without racing do_exit.
@@ -1921,6 +1956,8 @@ void task_init()
     // is created before task_init(), so user init becomes PID 2.
     // user_init_task pointer is set on the first spawn_user_task call,
     // so reparenting works regardless of init's PID.
+    init_task_union.task.pgrp = 1;
+    init_task_union.task.session = 1;
     int64_t init_pid = spawn_user_task("/bin/init", NULL);
     debug_task("init: spawned user-space init, pid=%d\n", (int)init_pid);
 
