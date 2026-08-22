@@ -33,6 +33,9 @@ LIBC_OBJS := \
     $(TEST_BLD)/libc_strcpy.o \
     $(TEST_BLD)/libc_strdup.o \
     $(TEST_BLD)/libc_vsprintf.o \
+    $(TEST_BLD)/libc_vsnprintf.o \
+    $(TEST_BLD)/libc_sprintf.o \
+    $(TEST_BLD)/libc_getopt.o \
     $(TEST_BLD)/libc_list.o
 
 MOCK_OBJS := $(TEST_BLD)/mock_kernel.o
@@ -41,6 +44,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_libc_string.elf \
     $(TEST_BLD)/test_libc_list.elf \
     $(TEST_BLD)/test_libc_vsprintf.elf \
+    $(TEST_BLD)/test_libc_getopt.elf \
     $(TEST_BLD)/test_vfs_basic.elf \
     $(TEST_BLD)/test_fat32_basic.elf \
     $(TEST_BLD)/test_pmm_basic.elf \
@@ -122,6 +126,18 @@ $(TEST_BLD)/libc_vsprintf.o: $(LIBC_SRC)/stdio/vsprintf.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
+$(TEST_BLD)/libc_vsnprintf.o: $(LIBC_SRC)/stdio/vsnprintf.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/libc_sprintf.o: $(LIBC_SRC)/stdio/sprintf.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/libc_getopt.o: $(LIBC_SRC)/unistd/getopt.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
 $(TEST_BLD)/libc_list.o: $(LIBC_SRC)/list/list.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -fgnu89-inline -c $< -o $@
@@ -135,6 +151,12 @@ $(TEST_BLD)/mock_kernel.o: $(TEST_MOCK)/mock_kernel.c
 $(TEST_BLD)/%.o: $(TEST_CASES)/%.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+# getopt test links against libc_getopt.o whose globals (optarg/optind/...) are
+# also declared (as tentative defs) by <getopt.h>; build with -fcommon so they merge.
+$(TEST_BLD)/test_libc_getopt.o: $(TEST_CASES)/test_libc_getopt.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -fcommon $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
 # Focused poll test compiles and links the real production paths.
 $(TEST_BLD)/test_poll_requested.o: $(TEST_CASES)/test_poll_requested.c
@@ -169,6 +191,9 @@ $(TEST_BLD)/test_libc_list.elf: $(TEST_BLD)/test_libc_list.o $(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/test_libc_vsprintf.elf: $(TEST_BLD)/test_libc_vsprintf.o $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+$(TEST_BLD)/test_libc_getopt.elf: $(TEST_BLD)/test_libc_getopt.o $(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/test_vfs_basic.elf: $(TEST_BLD)/test_vfs_basic.o $(LIBC_OBJS) $(MOCK_OBJS)
