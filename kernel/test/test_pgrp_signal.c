@@ -2,13 +2,13 @@
 
 #include <kernel/task.h>
 #include <kernel/printk.h>
-#include <kernel/selftest.h>
-#include <kernel/sched.h>
+#include <kernel/arch/irq.h>
+#include <errno.h>
 
 static volatile int pgrp_thread_ready = 0;
 static volatile int pgrp_thread_pid = 0;
 
-static int pgrp_thread_fn(void *arg) {
+static uint64_t pgrp_thread_fn(uint64_t arg) {
     (void)arg;
     pgrp_thread_pid = current->pid;
     for (;;) {
@@ -21,16 +21,22 @@ static int pgrp_thread_fn(void *arg) {
     return 0;
 }
 
-static int test_pgrp_signal(void)
+// NOTE: non-static void (called from task_init via extern). NOT registered via
+// the SELFTEST() macro — its .selftest_table section is never consumed by
+// selftest_run_all(), which only runs explicitly-registered tests. Matches
+// test_kthread_self_reap / test_fd_refcount / test_tty_vintr.
+void test_pgrp_signal(void)
 {
     serial_printk("[selftest] test_pgrp_signal: start\n");
     pgrp_thread_ready = 0;
     pgrp_thread_pid = 0;
 
-    task_t *t = (task_t *)kernel_thread(pgrp_thread_fn, NULL, "pgrp_test");
+    // create_kthread() returns the task_t* (kernel_thread() only returns the
+    // pid; casting that int to a pointer would #PF on first deref).
+    task_t *t = create_kthread(pgrp_thread_fn, 0, "pgrp_test");
     if (!t) {
-        serial_printk("[selftest] test_pgrp_signal: FAIL: kernel_thread returned NULL\n");
-        return -1;
+        serial_printk("[selftest] test_pgrp_signal: FAIL: create_kthread returned NULL\n");
+        return;
     }
 
     // Wait for thread to register pid and reach INTERRUPTIBLE
@@ -42,7 +48,7 @@ static int test_pgrp_signal(void)
     }
     if (!pgrp_thread_ready || t->state != TASK_INTERRUPTIBLE) {
         serial_printk("[selftest] test_pgrp_signal: FAIL: thread did not become ready\n");
-        return -1;
+        return;
     }
 
     // v3 D1 fix: kernel_thread sets PF_KTHREAD; signal_pgrp skips it per
@@ -60,43 +66,39 @@ static int test_pgrp_signal(void)
     // Assertion 1: signal_pgrp(0, ...) is silent no-op (returns 0)
     if (signal_pgrp(0, SIGUSR1) != 0) {
         serial_printk("[selftest] test_pgrp_signal: FAIL: signal_pgrp(0,..) != 0\n");
-        return -1;
+        return;
     }
 
     // Assertion 2: signal_pgrp with no matching pgrp returns -ESRCH
     if (signal_pgrp(99999, SIGUSR1) != -ESRCH) {
         serial_printk("[selftest] test_pgrp_signal: FAIL: signal_pgrp(99999,..) != -ESRCH\n");
-        return -1;
+        return;
     }
 
     // Assertion 3: signal_pgrp(self.pid, SIGUSR1) hits the target
     if (signal_pgrp(t->pid, SIGUSR1) != 0) {
         serial_printk("[selftest] test_pgrp_signal: FAIL: signal_pgrp(target,..) != 0\n");
-        return -1;
+        return;
     }
 
     // Assertion 4: SIGUSR1 bit set on target's signal field
     if ((t->signal & (1ULL << SIGUSR1)) == 0 || prev_signal != 0) {
         serial_printk("[selftest] test_pgrp_signal: FAIL: SIGUSR1 bit not set (prev=%d cur=%llx)\n",
                       prev_signal, (unsigned long long)t->signal);
-        return -1;
+        return;
     }
 
     // Assertion 5: target was TASK_INTERRUPTIBLE → moved to TASK_RUNNING
     if (prev_state != TASK_INTERRUPTIBLE || t->state != TASK_RUNNING) {
         serial_printk("[selftest] test_pgrp_signal: FAIL: state not moved (prev=%lld cur=%lld)\n",
                       (long long)prev_state, (long long)t->state);
-        return -1;
+        return;
     }
 
     // Cleanup: SIGKILL so thread exits deterministically
     t->signal |= (1ULL << SIGKILL);
 
     serial_printk("[selftest] test_pgrp_signal: PASS\n");
-    return 0;
 }
-
-// v4 fix E4: register via SELFTEST macro (NOT a tests[] array or TEST_NAME)
-SELFTEST(pgrp_signal);
 
 #endif // OS01_SELFTEST

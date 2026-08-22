@@ -1996,6 +1996,15 @@ void task_init()
     }
 #endif
 
+#ifdef OS01_SELFTEST
+    // ── pgrp signal selftest ─────────────────────────────────
+    // After scheduler_ok=1 (kernel_thread + schedule() work).
+    {
+        extern void test_pgrp_signal(void);
+        test_pgrp_signal();
+    }
+#endif
+
     // ── Idle loop ────────────────────────────────────────────
     // hlt pauses the CPU until the next interrupt (timer tick,
     // keyboard IRQ1, serial IRQ4).  The timer ISR sets

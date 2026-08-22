@@ -3,6 +3,7 @@
 
 #include <list.h>
 #include <stdint.h>
+#include <sys/types.h>      // pid_t (task_struct.pgrp/session, signal_pgrp)
 #include <kernel/arch/cpu.h>
 #include <kernel/arch/thread.h>
 #include <kernel/arch/segment.h>
