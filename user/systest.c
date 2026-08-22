@@ -1793,6 +1793,31 @@ static void test_devfs_open_default_fg_pgrp(void) {
            "devfs_open_fg", "tcgetpgrp after open returns self pgrp");
 }
 
+// ── 71: setpgid auto fg_pgrp update (§3.4) ─────────
+static void test_setpgid_auto_fg_pgrp(void) {
+    int pfd = open("/dev/tty", O_RDWR);
+    if (pfd < 0) { FAIL("setpgid_auto_fg", "no /dev/tty"); return; }
+    // 父先设一个非零 fg_pgrp 让 child open 不触发 §4.1.1 兜底
+    setpgid(0, getpid());
+    tcsetpgrp(pfd, getpid());
+
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("setpgid_auto_fg", "fork"); return; }
+    if (pid == 0) {
+        int cfd = open("/dev/tty", O_RDWR);
+        if (cfd < 0) { _exit(2); }
+        // v5: dup2 把 tty 放到 fd0，§3.4 才能触发（消除继承依赖）
+        if (dup2(cfd, 0) < 0) { _exit(5); }
+        if (setpgid(0, 0) != 0) _exit(3);
+        pid_t p = tcgetpgrp(0);
+        _exit(p == getpid() ? 0 : 4);
+    }
+    int status; waitpid(pid, &status, 0);
+    CHECK3(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+           "setpgid_auto_fg", "tcgetpgrp after setpgid(0,0)==child.pid");
+    close(pfd);
+}
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
@@ -1862,6 +1887,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"devfs_open_fg",       test_devfs_open_default_fg_pgrp},
     {"setpgid_getpgid",   test_setpgid_getpgid},
     {"setsid",            test_setsid},
+    {"setpgid_auto_fg", test_setpgid_auto_fg_pgrp},
     {"getrandom",           test_getrandom},
 };
 

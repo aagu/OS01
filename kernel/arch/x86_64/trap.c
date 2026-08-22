@@ -1970,6 +1970,19 @@ case SYS_setpgid: {
         regs->rax = -EPERM; break;
     }
     target->pgrp = pgid;
+    // ── v3 自动 fg_pgrp 更新──────────────────
+    // 任一成功 setpgid（含 join 现有 pgrp）且 fd 0 指向控制台 TTY 时
+    // （file_t->tty == get_dev_tty()，由 §4.1.1 在 open 路径置位），
+    // 把 dev_tty.fg_pgrp 同步到新 pgid——替代 POSIX 要求的"shell 调 tcsetpgrp"
+    tty_t *dev_tty = get_dev_tty();
+    if (dev_tty && current->files && current->files->fd[0]) {
+        file_t *f0 = current->files->fd[0];
+        if (f0->tty == dev_tty) {
+            uint64_t ftf = spin_lock_irqsave(&dev_tty->fg_pgrp_lock);
+            dev_tty->fg_pgrp = pgid;
+            spin_unlock_irqrestore(&dev_tty->fg_pgrp_lock, ftf);
+        }
+    }
     spin_unlock_irqrestore(&task_list_lock, f);
     regs->rax = 0;
     break;
