@@ -1,0 +1,20 @@
+# OS01 is a freestanding x86_64 kernel. Keep clangd's fallback command aligned
+# with the flags exported by the top-level Makefile. clangd resolves relative
+# flags from each source file's directory, so these workspace paths are absolute.
+CompileFlags:
+  CompilationDatabase: None
+  Add:
+    - --target=x86_64-unknown-none
+    - --sysroot=/home/aagu/OS01/sysroot
+    - -ffreestanding
+    - -isystem
+    - /home/aagu/OS01/sysroot/usr/include
+
+---
+If:
+  PathMatch: kernel/.*
+CompileFlags:
+  Add:
+    - -I/home/aagu/OS01/kernel/include
+    - -I/home/aagu/OS01/thirdpart/lwip/src/include
+    - -I/home/aagu/OS01/kernel/net

@@ -1,19 +1,25 @@
 {
     "configurations": [
         {
-            "name": "Linux",
+            "name": "OS01 x86_64",
             "includePath": [
-                "${workspaceFolder}/**",
-                "${workspaceFolder}/sysroot/usr/include"
+                "${workspaceFolder}/kernel/include",
+                "${workspaceFolder}/sysroot/usr/include",
+                "${workspaceFolder}/thirdpart/lwip/src/include",
+                "${workspaceFolder}/kernel/net"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/clang",
             "cStandard": "gnu11",
             "cppStandard": "gnu++11",
-            "intelliSenseMode": "linux-gcc-x64",
+            "intelliSenseMode": "linux-clang-x64",
             "compilerArgs": [
+                "--target=x86_64-unknown-none",
                 "--sysroot",
-                "${workspaceFolder}/sysroot"
+                "${workspaceFolder}/sysroot",
+                "-ffreestanding",
+                "-isystem",
+                "${workspaceFolder}/sysroot/usr/include"
             ]
         }
     ],
