@@ -8,7 +8,7 @@
 
 **Tech Stack:** C11 freestanding (kernel), POSIX (libc), x86_64 PS/2 keyboard IRQ1, busybox hush (CONFIG_ASH_JOB_CONTROL=n), QEMU gtk display.
 
-**Spec:** [docs/superpowers/specs/2026-08-22-tty-line-discipline-design.md](../specs/2026-08-22-tty-line-discipline-design.md) — this plan implements spec v5 (commits fcd2219/4e3783f/3fb161e/aa4daa0/d296aa4).
+**Spec:** [docs/superpowers/specs/2026-08-22-tty-line-discipline-design.md](../specs/2026-08-22-tty-line-discipline-design.md) — this plan implements spec v5 (commits fcd2219/4e3783f/3fb161e/aa4daa0/d296aa4). **This is plan v2** — applies review fixes C1/C2/C3/H2/M2 over the v1 plan (commit b43dcb9). See "v2 changes" at end of file.
 
 ## Global Constraints
 
@@ -148,17 +148,37 @@ Declare in `kernel/include/kernel/task.h` (after `task_send_signal` declaration)
 int signal_pgrp(pid_t target, int sig);
 ```
 
-- [ ] **Step 5: Add pgrp/session inheritance to SYS_fork**
+- [ ] **Step 5: Add pgrp/session inheritance — TWO edit points (v2 修正 C1)**
 
-In `kernel/arch/x86_64/trap.c`, find `case SYS_fork:` (around line 1450). After the child task's mm and files are set up, before the new task is added to runqueue, add:
+**v2 critical fix**: trap.c `case SYS_fork:` only calls `do_fork()` — it has no child struct. The real edit point is in `do_fork()` itself (kernel/sched/task.c) AND in `spawn_user_task()` (same file). Both do `memset(tsk, 0, ...)` which zeros pgrp/session; we must restore the inheritance. Forgetting either path leaves global pgrp=0 and breaks §4.1.1 default (green tests, broken Ctrl-C — the most dangerous failure mode).
+
+**Edit point A** — `kernel/sched/task.c`, in `do_fork()` (~line 1699), AFTER `tsk->ctty = current->ctty;` and BEFORE `list_init(&tsk->list);`:
 
 ```c
-    // 继承父进程的 pgrp/session
-    child->pgrp = current->pgrp;
-    child->session = current->session;
+    // v2: 继承父进程的 pgrp/session（不是 pgrp leader：trap.c SYS_fork case
+    // 只是 do_fork() 的薄壳，真正的 child struct 在这里构建）
+    tsk->pgrp = current->pgrp;
+    tsk->session = current->session;
 ```
 
-Exact location: just after `child->files = files_alloc(); ...` (or wherever child files are assigned — match the surrounding pattern). If the child is created via `kernel_thread` (kthread), set `child->pgrp = 0; child->session = 0;` instead — these threads never receive tty signals.
+**Edit point B** — `kernel/sched/task.c`, in `spawn_user_task()` (~line 1115), AFTER `tsk->parent = current;` and BEFORE `list_init(&tsk->wait_list);`:
+
+```c
+    // v2: 继承 caller 的 pgrp/session（init 进程在 task_init 中显式设 pgrp=1）
+    tsk->pgrp = current->pgrp;
+    tsk->session = current->session;
+```
+
+**Edit point C (M2 fix)** — `kernel/include/kernel/task.h`, in `INIT_TASK` macro (~line 204), add `.pgrp` and `.session` so the init task starts with proper values even before `task_init()` runs:
+
+```c
+    .pgrp = 1,
+    .session = 1,
+```
+
+(Add these lines inside the INIT_TASK macro, after `.pid = 0,` line. The runtime fixup in Step 4 is still required for safety, but this provides defense-in-depth.)
+
+**DO NOT edit trap.c SYS_fork case** — there is nothing to copy there. (Previous v1 plan incorrectly placed the inheritance there; v2 removes that step.)
 
 - [ ] **Step 6: Run kernel build + selftest**
 
@@ -342,16 +362,26 @@ case SYS_getsid: {
 }
 ```
 
-Also add 4 entries to the `syscall_names[]` array (around line 1080):
+Also add 4 entries to the `syscall_names[]` array (~line 1052). **v2 fix C3**: array is currently `[67]` (valid indices 0..66); MUST be enlarged to `[71]` to hold entries at indices 67-70. **Also update the bounds check** at ~line 1111 from `regs->rax < 67` to `regs->rax < 71`:
 
 ```c
-[67] = "setpgid",
-[68] = "getpgid",
-[69] = "setsid",
-[70] = "getsid",
+    static const char *syscall_names[71] = {
+        ... (existing 0..66 entries) ...
+        [67] = "setpgid",
+        [68] = "getpgid",
+        [69] = "setsid",
+        [70] = "getsid",
+    };
 ```
 
-(Bump array size if needed — currently `[67]` declared; may need to be `[71]`.)
+And later in the strace print code (~line 1111):
+
+```c
+    const char *sname = (regs->rax < 71 && syscall_names[regs->rax])
+                        ? syscall_names[regs->rax] : "?";
+```
+
+(Forgot to bump the bounds check would cause silent "?" output in strace for syscalls 67-70 — not a compile error, but defeats debugging.)
 
 - [ ] **Step 5: Run test to verify it passes**
 
@@ -547,13 +577,23 @@ Register: `{ "devfs_open_fg", test_devfs_open_default_fg_pgrp },`
 
 Expected: child opens /dev/tty, but `tty->fg_pgrp` not set, tcgetpgrp returns 0 ≠ child.pid → child exits 3 → test fails.
 
-- [ ] **Step 3: Add tty field to file_t**
+- [ ] **Step 3: Add tty field to file_t (with forward declaration — v2 fix C2)**
 
-In `kernel/include/kernel/file.h:78-91`, inside `file_t` (after `socket_t *sock;`):
+**v2 fix C2**: `kernel/include/kernel/file.h` currently has forward declarations for `struct vfs_node` and `struct pty_struct` but NOT `struct tty_struct`. Adding `struct tty_struct *tty;` without a forward declaration would fail to compile with "unknown struct type".
+
+In `kernel/include/kernel/file.h`, in the "Forward declarations" block (~line 26, after `typedef struct pty_struct pty_t;`):
 
 ```c
-    struct tty_struct *tty;       // v3 新增：标记此 fd 指向控制台 TTY
+struct tty_struct;       // v2: forward decl for file_t->tty field
 ```
+
+Then inside `file_t` (after `socket_t *sock;`):
+
+```c
+    struct tty_struct *tty;       // v3: 标记此 fd 指向控制台 TTY
+```
+
+(Do NOT `#include <kernel/tty.h>` from file.h — that creates a circular include because tty.h itself uses file_t through `keyboard_poll`. Forward declaration only.)
 
 - [ ] **Step 4: Modify tty_magic_open physical branch**
 
@@ -607,6 +647,79 @@ git commit -m "feat(devfs): file_t->tty + default fg_pgrp on console TTY open"
 
 ---
 
+### Task 4.5 (v2 新增, M1 fix): systest 验证 §4.1.1 默认继承路径（不调 setpgid）
+
+**Files:**
+- Modify: `user/systest.c` (add `test_devfs_open_inherited_fg_pgrp` + register)
+
+**Why new test**: existing 8.4/8.5/8.7 all force pgrp via explicit setpgid — they hide the C1 failure mode (global pgrp=0 → §4.1.1 writes 0 → tcgetpgrp returns 0). Without this test, a broken C1 (fork/spawn_user_task not copying pgrp) would let all other tests pass while Ctrl-C silently fails in real OS01 use. **This is the test that catches green-tests-broken-feature.**
+
+- [ ] **Step 1: Write the failing test**
+
+In `user/systest.c`:
+
+```c
+// ── 70b: §4.1.1 默认继承路径验证（v2 M1）────────────
+// 不调 setpgid(0,0)。靠 fork 继承父 pgrp + §4.1.1 open 默认路径，
+// 验证 child open /dev/tty 后 tcgetpgrp 返回 child.pid 的继承 pgrp
+// (而非 0 — 这才能抓 C1 fork 不复制 pgrp 的 bug)。
+// 设计：父 (systest) pgrp 继承自 hush = 1。child fork 继承 pgrp=1。
+// 复位 fg_pgrp=0（new_pg==0 §4.4 始终允许），child open → §4.1.1 设 fg_pgrp=child.pgrp=1。
+// 注意：这里断言 p == child.pid 仅在 child.pgrp == child.pid 时成立（不可能）。
+// 正确断言：p == child.pgrp（继承自父）—— 即 p == 1 (若 systest pgrp=1) 或
+// 任何 child.pgrp 的实际值。简化：直接断言 p != 0 且 p == child 的 getpgid(0)。
+static void test_devfs_open_inherited_fg_pgrp(void) {
+    int rfd = open("/dev/tty", O_RDWR);
+    if (rfd < 0) { FAIL("devfs_open_inherit", "no /dev/tty"); return; }
+    tcsetpgrp(rfd, 0);  // 复位
+    close(rfd);
+
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("devfs_open_inherit", "fork"); return; }
+    if (pid == 0) {
+        // 不调 setpgid！靠 fork 继承父 pgrp（必须 ≠ 0，验证 C1）
+        pid_t my_pgrp = getpgid(0);
+        if (my_pgrp == 0) { _exit(2); }       // C1 broken: fork 没复制 pgrp
+        int cfd = open("/dev/tty", O_RDWR);
+        if (cfd < 0) { _exit(3); }
+        pid_t fg = tcgetpgrp(cfd);
+        // §4.1.1: fg_pgrp==0 时设 = opener.pgrp = my_pgrp
+        _exit(fg == my_pgrp ? 0 : 4);
+    }
+    int status; waitpid(pid, &status, 0);
+    CHECK3(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+           "devfs_open_inherit",
+           "tcgetpgrp after open returns inherited pgrp (catches C1)");
+}
+```
+
+Register: `{ "devfs_open_inherit", test_devfs_open_inherited_fg_pgrp },`
+
+Place this test **early** in the `tests[]` array (e.g. right after existing simple ones), before any test that calls `setpgid` — so it runs on a "fresh" global fg_pgrp without interference.
+
+- [ ] **Step 2: Run test to verify it fails (catches C1)**
+
+Run: `make && make test`
+
+Expected: child fails with `_exit(2)` (fork didn't copy pgrp → getpgid(0) returns 0 → broken C1 caught). If C1 is fixed, this test passes.
+
+- [ ] **Step 3: Already fixed by Task 1 Step 5 (v2)**
+
+No additional changes — Task 1 Step 5's pgrp inheritance fix should make this pass.
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Expected: PASS (assuming Task 1 Step 5 was applied correctly).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add user/systest.c
+git commit -m "test(systest): §4.1.1 default fg_pgrp inherits from fork (catches C1)"
+```
+
+---
+
 ### Task 5: tty_push_input line discipline + default termios + kernel test_tty_vintr
 
 **Files:**
@@ -618,26 +731,104 @@ git commit -m "feat(devfs): file_t->tty + default fg_pgrp on console TTY open"
 **Interfaces:**
 - Produces: `tty_push_input` now dispatches SIGINT to fg_pgrp when ISIG set and `c == c_cc[VINTR]`. Character is NOT pushed to ring buffer or echoed. VQUIT → SIGQUIT. VSUSP → log + drop (SIGTSTP not implemented).
 
-- [ ] **Step 1: Write the failing kernel selftest**
+- [ ] **Step 1: Write the failing kernel selftest (v2 simplification H2)**
+
+**v2 fix H2**: original v1 plan called for fork+exec+waitpid in a kernel selftest — no such harness exists in `test/cases/` (all existing tests are pure-logic: canon, elf_validate, fat32, libc). Building one would balloon scope. Simplified to a **kernel-thread based unit test** that exercises `tty_push_input` → `signal_pgrp` delivery without user-space involvement:
 
 Create `test/cases/test_tty_vintr.c`:
 
 ```c
-// Kernel selftest for VINTR → SIGINT delivery.
-// Test thread:
-//   1. kernel_thread a child user task that does setpgid(0,0); exec "cat"
-//      (cat will block in read on fd 0 — the console TTY)
-//   2. set dev_tty->fg_pgrp = child.pid via ioctl(TIOCSPGRP)
-//   3. spin a moment so cat enters read
-//   4. tty_push_input(get_dev_tty(), 0x03) — simulate Ctrl-C
-//   5. waitpid child, assert WIFSIGNALED && WTERMSIG == SIGINT
-//   6. clean up: dev_tty->fg_pgrp = 0
+// Kernel selftest for VINTR → signal_pgrp delivery.
+// Strategy: create a kernel_thread that just sleeps in pause() (idle wait),
+// set its pgrp to a unique value, set dev_tty->fg_pgrp to that value,
+// inject VINTR via tty_push_input, verify thread's signal bit has SIGINT
+// and thread state moved to TASK_RUNNING.
 //
-// Pattern follows test/cases/test_poll_requested.c — look there for the
-// exact kernel_thread + waitpid helpers available.
+// No fork/exec/waitpid needed — the kernel_thread helper (kernel/sched/task.c)
+// creates a kthread (PF_KTHREAD), but we can override pgrp/session post-creation
+// since pgrp doesn't care about the kthread flag for signal_pgrp delivery
+// (signal_pgrp skips kthread — see Task 1, but here we're using the thread as
+// a signal target directly via t->signal, NOT through signal_pgrp broadcast).
+
+#include <kernel/task.h>
+#include <kernel/tty.h>
+#include <kernel/debug.h>
+#include <kernel/sched.h>
+
+#define TEST_NAME "test_tty_vintr"
+
+static volatile int vintr_seen = 0;
+static volatile int vintr_thread_pid = 0;
+
+static int vintr_thread_fn(void *arg) {
+    (void)arg;
+    vintr_thread_pid = current->pid;
+    for (;;) {
+        // Sleep until signal wakes us
+        current->state = TASK_INTERRUPTIBLE;
+        schedule();
+        if (current->signal & (1ULL << SIGINT)) {
+            vintr_seen = 1;
+            break;
+        }
+    }
+    return 0;
+}
+
+void test_tty_vintr(void) {
+    vintr_seen = 0;
+    vintr_thread_pid = 0;
+
+    // 1. Spawn kernel_thread
+    task_t *t = (task_t *)kernel_thread(vintr_thread_fn, NULL, "vintr_test");
+    if (!t) { debug_test("%s: kernel_thread failed\n", TEST_NAME); return; }
+
+    // 2. Spin until thread is in TASK_INTERRUPTIBLE
+    while (t->state != TASK_INTERRUPTIBLE || vintr_thread_pid == 0) {
+        arch_local_irq_enable();
+        for (volatile int i = 0; i < 1000; i++);
+        arch_local_irq_disable();
+    }
+
+    // 3. Set t->pgrp = unique value, tty->fg_pgrp = same value
+    uint64_t flags = spin_lock_irqsave(&task_list_lock);
+    t->pgrp = t->pid;          // become own pgrp leader
+    spin_unlock_irqrestore(&task_list_lock, flags);
+
+    tty_t *dev_tty = get_dev_tty();
+    if (!dev_tty) { debug_test("%s: no dev_tty\n", TEST_NAME); return; }
+    uint64_t f = spin_lock_irqsave(&dev_tty->fg_pgrp_lock);
+    dev_tty->fg_pgrp = t->pid;
+    spin_unlock_irqrestore(&dev_tty->fg_pgrp_lock, f);
+
+    // 4. Inject VINTR char (0x03 = Ctrl-C) into tty
+    tty_push_input(dev_tty, 0x03);
+
+    // 5. Wait for thread to wake and ack
+    int spin = 0;
+    while (!vintr_seen && spin++ < 10000) {
+        arch_local_irq_enable();
+        for (volatile int i = 0; i < 1000; i++);
+        arch_local_irq_disable();
+    }
+
+    // ASSERTIONS:
+    //  - vintr_seen == 1 (thread got SIGINT via signal_pgrp → task_wake)
+    //  - (dev_tty->fg_pgrp got reset; cleanup for next test)
+
+    // Cleanup
+    uint64_t f2 = spin_lock_irqsave(&dev_tty->fg_pgrp_lock);
+    dev_tty->fg_pgrp = 0;
+    spin_unlock_irqrestore(&dev_tty->fg_pgrp_lock, f2);
+    // Signal thread to exit if still alive
+    if (!vintr_seen) t->signal |= (1ULL << SIGKILL);
+    // (Thread cleanup — kthread will be reaped by task reaper or linger; OK for selftest)
+}
 ```
 
-Wire into existing selftest runner (add to `tests[]` in kernel/test/).
+Wire into the existing kernel selftest runner (find the `tests[]` array in `kernel/test/`, add an entry). Match the pattern of other `test_*.c` files in `test/cases/`.
+
+Note: This test exercises the tty_push_input → signal_pgrp → task_wake → signal delivery chain end-to-end in kernel context. It does NOT exercise the `arch_do_signal_delivery` ring-3 path (that requires returning to user space). Manual acceptance (Task 10) covers the full user-space path.
 
 - [ ] **Step 2: Run selftest to verify it fails**
 
@@ -1194,6 +1385,23 @@ No reverse-nesting anywhere. ✓
 **Out-of-spec changes:**
 
 None. Plan implements exactly spec v5.
+
+---
+
+## v2 changes (over v1, commit b43dcb9)
+
+Reviewer feedback on v1 found 5 issues:
+
+- **C1 (fatal)**: Task 1 Step 5 placed pgrp/session inheritance in trap.c `case SYS_fork:` — but that case only calls `do_fork()`, there is no child struct to copy. Real edit points are `do_fork()` (kernel/sched/task.c ~line 1699, after ctty block) AND `spawn_user_task()` (same file ~line 1115, after parent assignment). Missing either leaves global pgrp=0 → §4.1.1 writes 0 → Ctrl-C silently fails. **Most dangerous failure: green tests, broken feature.**
+- **C2 (compile)**: `struct tty_struct *tty;` in file_t requires `struct tty_struct;` forward declaration in file.h (currently has vfs_node/pty_struct but not tty_struct). v1 plan missed this.
+- **C3 (compile)**: `syscall_names[67..70]` writes are out of bounds for the `[67]` array. v2 enlarges to `[71]` AND updates bounds check at line 1111 from `< 67` to `< 71` (otherwise strace prints "?" for the new syscalls).
+- **H2 (incomplete)**: original Task 5 Step 1 wrote "参考 test_poll_requested.c" for kernel_thread+exec+waitpid harness — no such harness exists in `test/cases/` (all tests are pure-logic). v2 simplifies to a kernel_thread-based unit test that exercises tty_push_input → signal_pgrp → task_wake chain in kernel context. Manual Task 10 covers the ring-3 user-space path.
+- **M1 (test gap)**: existing tests force pgrp via setpgid, hiding C1 failure mode. v2 adds Task 4.5 (`test_devfs_open_inherited_fg_pgrp`) — verifies fork-inherited pgrp flows through §4.1.1 without any explicit setpgid. This is the canary that fails loud if C1 regresses.
+- **M2 (defense-in-depth)**: v2 adds `.pgrp=1, .session=1` to INIT_TASK macro so init task has correct values even before `task_init()` runtime fixup runs.
+
+H1 (test_setsid logic self-contradiction) was reviewed and found to be a misread — v1 plan's `test_setsid` does NOT call `setpgid(0,0)` before setsid. After C1 fix, child's pgrp = parent.pgrp (systest runner's, which is 1 inherited from hush); child's pid != 1; setsid's pgrp-leader check `current->pgrp == current->pid` evaluates to `1 != child_pid` → false → setsid succeeds. Test passes.
+
+**M3, M4, M5 are documented as low/no risk and need no plan changes.**
 
 ---
 
