@@ -1,6 +1,6 @@
-# libc 兼容性修复设计（printf 浮点 + getopt）— 修订版 v4
+# libc 兼容性修复设计（printf 浮点 + getopt）— 修订版 v5
 
-- 日期：2026-08-22（v4 修订）
+- 日期：2026-08-22（v5 修订）
 - 验收基线：`docs/applet-verification.md`（BusyBox Applet 验证报告 2026-08-18）
 - 范围：仅修复代码中**已确证**的两个 libc 缺陷——`printf` 格式化器（无符号路径缺失 + 浮点缺失 + 大小保护缺失）与 `getopt`（逻辑错误 + 公开头多重定义）。
 - 方针：最小范围、最低风险；不引入外部依赖（除非浮点部分明确选择成熟 dtoa）。
@@ -40,6 +40,11 @@
 - **P0（uint64_t 不足）**：引入**定容 bigint**（80×`uint32_t`≈2560 bit，覆盖任意有限 `double` 十进制展开至 ~770 位），并明确支持上界：所有有限 `double`；`precision` 上限 `FLOATCONV_MAX_PREC`（如 100），超出钳制到上限（文档化、不崩溃）。
 - **P1（`DBL_MANT_DIG` 错误）**：修正为 **53**（52 fraction + 1 隐含位）；`float.h` 加编译期 `#error` 断言 binary64（`DBL_MANT_DIG==53 && DBL_MAX_EXP==1024 && sizeof(double)==8`），并配单测。
 - **P1（舍入规则）**：明确默认 **round-to-nearest, ties-to-even**（不实现 `fenv`）；验收串固定 `0.5→"0"`、`2.5→"2"`、`-0.5→"-0"`、`3.5→"4"` 等。
+
+### 0.5 补充修订（v5，本轮）
+- **P0（`#if sizeof` 非法）**：预处理器无法解析 `sizeof`；拆为：`#if DBL_MANT_DIG != 53 || DBL_MAX_EXP != 1024` → `#error`，`sizeof(double)==8` 改 C 级 `_Static_assert`。并补**位模式测试**（`(uint64_t)1.0 == 0x3FF0000000000000`、`0.5 == 0x3FE0000000000000`）校验真实 binary64 编码，避免“自证宏”假阳性。
+- **P1（缺 `DBL_MAX`/`DBL_MIN`）**：`float.h` 补充 `DBL_MAX`（≈1.7976931348623157e308）、`DBL_MIN`（最小正规数，≈2.2250738585072014e-308），使 §5.3 的 `DBL_MAX`/`DBL_MIN` 用例可编译。
+- **P1（不可靠的中点用例）**：`%.1f(2.05)→"2.0"` 因 `2.05` 非精确二进制中点而不可靠；改为精确中点 `2.25→"2.2"`、`2.75→"2.8"`。
 
 ## 1. 背景与上下文（修正后的根因归类）
 
@@ -112,7 +117,8 @@
 - **`%a/%A`（十六进制浮点）：本期显式不支持**——原样输出 `%a`/`%A`。
 - 算法（呼应 P2，已冻结具体方案，v4 定稿）：**不采用朴素 `frac*=10`**，亦**不移植 musl `fmt_fp`**（其 `long double`/`math.h` 依赖过重）。改为 **自包含 `double`-only 浮点格式化器**，零 `math.h`/`long double` 依赖：
   - **依赖面（满足 P0）**：
-    - 新增 `libc/include/float.h`：定义 `FLT_RADIX=2`、`DBL_MANT_DIG=53`（**修正：53 = 52 显式 fraction 位 + 1 隐含整数位；此前写 52 错误**）、`DBL_MAX_EXP=1024`、`DBL_MIN_EXP=-1021`。并加**编译期断言** `#if DBL_MANT_DIG!=53 || DBL_MAX_EXP!=1024 || sizeof(double)!=8` → `#error "requires IEEE-754 binary64"`，并配单测校验 binary64 前提。
+    - 新增 `libc/include/float.h`：定义 `FLT_RADIX=2`、`DBL_MANT_DIG=53`（**修正：53 = 52 显式 fraction 位 + 1 隐含整数位**）、`DBL_MAX_EXP=1024`、`DBL_MIN_EXP=-1021`，并补充 `DBL_MAX`（≈1.7976931348623157e308，位模式 `0x7FEFFFFFFFFFFFFF`）、`DBL_MIN`（**最小正规数**，≈2.2250738585072014e-308，位模式 `0x0010000000000000`）——§5.3 的 `DBL_MAX`/`DBL_MIN` 用例依赖这两个宏方可编译。
+    - **编译期断言（拆分，满足 P0）**：预处理器层 `#if DBL_MANT_DIG != 53 || DBL_MAX_EXP != 1024` → `#error "need binary64 macros"`；`sizeof(double)` 是 C 表达式，**不能用于 `#if`**，改用 C 级 `_Static_assert(sizeof(double) == 8, "requires IEEE-754 binary64");`（或 typedef 数组断言兼容旧标准）。注意：手工定义宏后再 `#if` 检查仅为自证，故另加**位模式测试**校验真实编码：`union{double;uint64_t}` 断言 `(uint64_t)1.0 == 0x3FF0000000000000`、`(uint64_t)0.5 == 0x3FE0000000000000`，确认实现确为 binary64 而非仅宏正确。
     - 新增 `libc/include/math.h`（最小子集）：`signbit(x)`、`isfinite(x)` 为**位级宏**（`union{double;uint64_t}` 取符号/指数域），无 libm 调用、无 helper 符号。
     - **不引入 `frexpl`/`scalbnl` 或任何 `long double` 运算**；仅用 `double` 的 64 位位模式 + 整数/大整数运算。
   - **大整数支撑（满足 P0：纯 `uint64_t` 不足）**：`%f` 大指数（`DBL_MAX`≈1e308）、`%g`/高精度 `%.100f`、以及 10 的幂缩放中间值都超出 64 位，故**引入定容大整数（bigint）**——定长字数组（如 80×`uint32_t`≈2560 bit，足以容纳任意有限 `double` 的完整十进制展开至 ~770 位），提供 `init/adc/sub/mul_small/divmod_small/mul_pow10`。**明确支持上界**：
@@ -121,7 +127,7 @@
     - 全程栈上定容缓冲（如 768 字节 scratch），无动态分配。
   - **舍入规则（满足 P1）**：默认且仅保证 **round-to-nearest, ties-to-even**（不实现 `fenv`/`FLT_ROUNDS`，文档声明仅默认舍入模式）。验收串明确：
     - `%.0f`：`0.5`→`"0"`、`1.5`→`"2"`、`2.5`→`"2"`、`-0.5`→`"-0"`、`3.5`→`"4"`。
-    - 任意精度 `%.1f`：`2.5`→`"2.5"`、`2.05`→`"2.0"`（中间位偶数判定）。
+    - 任意精度 `%.1f`：`2.25`→`"2.2"`、`2.75`→`"2.8"`（精确二进制中点，ties-to-even）。
   - **实现位置与链接（满足 P0 跨 TU 调用）**：拆为两个文件：
     - `libc/stdio/floatconv.c`：提供**非 `static`** 的内部函数，如 `size_t floatconv_render(char *scratch, size_t scap, double d, int w, int p, int fl, int conv)`，生成“数字串+小数点+指数+符号”原始序列（不含宽度/填充），返回长度。
     - `libc/stdio/floatconv.h`：**私有内部头**（置于 `libc/stdio/`，**不安装到公开 `include/`**），声明该函数 + `FLOATCONV_MAX_PREC` 等宏；`vsprintf.c` 包含它以调用渲染器。
@@ -182,8 +188,8 @@
 - **浮点 `%L` 三形态（v3 修正）**：`%Lf`/`%Le`/`%Lg` 均原样输出字面量（`%Lf`→`%Lf`）、不消费实参，三种形态分别验证。
 - **真实回归（BusyBox）**：`du`（`%llu`）与 `sum`（`%u %llu`）的输出格式须与预期一致（见 §3.3）。
 - **浮点**：`%.0f` 整数化；`%f/%e/%g` 正/负/零/inf/nan；`0.5`/`2.5` 四舍五入；`1e20` 大值；`%g`↔`%f` 切换。
-- **浮点舍入（v4.x 新增，ties-to-even）**：`%.0f` 的 `0.5→"0"`、`1.5→"2"`、`2.5→"2"`、`-0.5→"-0"`、`3.5→"4"`；`%.1f` 的 `2.5→"2.5"`、`2.05→"2.0"`（中间位偶数判定）。断言默认舍入模式为 round-to-nearest-even。
-- **binary64 前提（v4.x 新增）**：编译期 `static_assert`/`#error`（`DBL_MANT_DIG==53 && DBL_MAX_EXP==1024 && sizeof(double)==8`）通过；单测校验 `DBL_MANT_DIG==53`。
+- **浮点舍入（v4.x 新增，ties-to-even；v5 修正用例）**：`%.0f` 的 `0.5→"0"`、`1.5→"2"`、`2.5→"2"`、`-0.5→"-0"`、`3.5→"4"`（这些是有效的 ties-to-even 覆盖）；`%.1f` 改用**精确二进制中点**（非 `2.05` 这种不可靠的非精确中点）：`2.25→"2.2"`（2.25=9/4 精确，.25 位于偶数侧 2）、`2.75→"2.8"`（2.75=11/4 精确，.75 进位到偶数 8）。断言默认舍入模式为 round-to-nearest-even。
+- **binary64 前提（v4.x 新增，v5 修正）**：预处理器 `#if DBL_MANT_DIG!=53 || DBL_MAX_EXP!=1024` → `#error`；C 级 `_Static_assert(sizeof(double)==8, "requires IEEE-754 binary64")`（`sizeof` 不用于 `#if`）；位模式单测校验真实编码：`(uint64_t)1.0==0x3FF0000000000000`、`(uint64_t)0.5==0x3FE0000000000000`。宏定义本身不构成充分证明。
 
 - **浮点边界（v4.x 新增，bigint）**：`DBL_MAX`/`DBL_MIN` 的 `%f`/`%e` 经定容 bigint 正确展开；`%.100f` 等超 `FLOATCONV_MAX_PREC` 请求被钳制到上限且不崩溃、不越界（文档化行为）。
 - **浮点 flags（v4 新增，覆盖 §3.4 承诺语义）**：`%#.0f`（强制小数点，如 `1`→`1.`）、`%+08.2f`（`+` 号 + 零填充 + 宽度，如 `3.14`→`+0003.14`）、`%-10.2e`（左对齐 + 宽度，如 `1.5e+00` 后补空格至 10 列）、`%#.5g`（`#` 保留尾随零/小数点后至少一位，如 `1.0`→`1.0000`）。这些用例用于捕获 musl 风格 flag 位映射错误或重复填充。
