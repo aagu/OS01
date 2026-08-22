@@ -1717,6 +1717,28 @@ static void test_setsid(void) {
            "setsid", "child: setsid() returns own pid; getpgid==pid");
 }
 
+// ── 69: TIOCSPGRP/TIOCGPGRP roundtrip ──────────────
+static void test_tiocspgrp_roundtrip(void) {
+    int fd = open("/dev/tty", O_RDWR);
+    if (fd < 0) { FAIL("tiocspgrp", "no /dev/tty"); return; }
+    // 复位 fg_pgrp=0（new_pg==0 §4.4 始终允许），避免被前置用例污染
+    tcsetpgrp(fd, 0);
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("tiocspgrp", "fork"); return; }
+    if (pid == 0) {
+        setpgid(0, 0);
+        _exit(0);
+    }
+    setpgid(pid, pid);
+    // v4 放宽：parent 可设 fg_pgrp = child.pid（child 在同 session）
+    int rc = tcsetpgrp(fd, pid);
+    if (rc < 0) { FAIL("tiocspgrp", "tcsetpgrp returns <0"); close(fd); return; }
+    int status; waitpid(pid, &status, 0);
+    pid_t p = tcgetpgrp(fd);
+    CHECK3(p == pid, "tiocspgrp", "tcgetpgrp returns set child pid");
+    close(fd);
+}
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
@@ -1781,6 +1803,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"proc_maps",           test_proc_maps},
     {"proc_fd",             test_proc_fd},
     {"termios",             test_termios},
+    {"tiocspgrp",           test_tiocspgrp_roundtrip},
     {"setpgid_getpgid",   test_setpgid_getpgid},
     {"setsid",            test_setsid},
     {"getrandom",           test_getrandom},

@@ -111,6 +111,8 @@ tty_t *tty_alloc(void (*output_char)(char), void (*echo_char)(char))
     list_init(&tty->read_poll);
     spin_init(&tty->read_wait_lock);
     spin_init(&tty->ring_lock);
+    tty->fg_pgrp = 0;
+    spin_init(&tty->fg_pgrp_lock);
 
     tty->output_char = output_char ? output_char : tty_def_output;
     tty->echo_char   = echo_char   ? echo_char   : tty->output_char;
@@ -286,8 +288,49 @@ int tty_phys_ioctl(struct vfs_node *node, int cmd, void *arg)
         ((struct winsize *)arg)->ws_row = 25;
         ((struct winsize *)arg)->ws_col = 80;
         return 0;
-    case TIOCGPGRP: *(pid_t *)arg = 0; return 0;
-    case TIOCSPGRP: return 0;
+    case TIOCGPGRP: {
+        tty_t *tty = get_dev_tty();
+        if (!tty) return -ENODEV;
+        pid_t *p = (pid_t *)arg;
+        // v2: 区间检查 p..p+sizeof(pid_t)
+        if ((uint64_t)p >= current->addr_limit ||
+            (uint64_t)p + sizeof(pid_t) > current->addr_limit)
+            return -EFAULT;
+        uint64_t f = spin_lock_irqsave(&tty->fg_pgrp_lock);
+        *p = tty->fg_pgrp;
+        spin_unlock_irqrestore(&tty->fg_pgrp_lock, f);
+        return 0;
+    }
+    case TIOCSPGRP: {
+        tty_t *tty = get_dev_tty();
+        if (!tty) return -ENODEV;
+        pid_t *p = (pid_t *)arg;
+        if ((uint64_t)p >= current->addr_limit ||
+            (uint64_t)p + sizeof(pid_t) > current->addr_limit)
+            return -EFAULT;
+        pid_t new_pg;
+        memcpy(&new_pg, p, sizeof(pid_t));
+        if (new_pg < 0) return -EINVAL;
+        // v4 放宽：new_pg == 0 OR new_pg exists in caller's session
+        if (new_pg != 0 && new_pg != current->pgrp) {
+            uint64_t f2 = spin_lock_irqsave(&task_list_lock);
+            bool found = false;
+            list_t *pos3 = init_task_union.task.list.next;
+            while (pos3 != &init_task_union.task.list) {
+                task_t *t3 = container_of(pos3, task_t, list);
+                pos3 = task_list_next(pos3);
+                if (t3->pgrp == new_pg && t3->session == current->session) {
+                    found = true; break;
+                }
+            }
+            spin_unlock_irqrestore(&task_list_lock, f2);
+            if (!found) return -EPERM;
+        }
+        uint64_t f = spin_lock_irqsave(&tty->fg_pgrp_lock);
+        tty->fg_pgrp = new_pg;
+        spin_unlock_irqrestore(&tty->fg_pgrp_lock, f);
+        return 0;
+    }
     case FIONREAD: {
         tty_t *tty = get_dev_tty();
         *(int *)arg = tty ? (tty->head - tty->tail + TTY_BUF_SIZE) % TTY_BUF_SIZE : 0;

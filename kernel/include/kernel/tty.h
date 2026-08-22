@@ -47,6 +47,12 @@ typedef struct tty_struct {
     // ── Output callbacks ────────────────────────
     void (*output_char)(char c);   // primary output
     void (*echo_char)(char c);     // echo output (usually same as output_char)
+
+    // ── Foreground process group (foreground pgrp) ──
+    // Set by TIOCSPGRP ioctl; defaults to 0 (no foreground pgrp).
+    // Protected by fg_pgrp_lock (IRQ-safe).
+    pid_t       fg_pgrp;         // 前台进程组 ID（§4.1.1 / TIOCSPGRP / §3.4 写入）
+    spinlock_T  fg_pgrp_lock;    // 保护 fg_pgrp，IRQ-safe
 } tty_t;
 
 // ── API ────────────────────────────────────────────
