@@ -30,7 +30,7 @@ From spec: vruntime unit = ticks (100Hz, 10ms per tick); `EEVDF_MIN_SLICE = 10 t
 | `kernel/futex.c` | **Modify** | `do_futex_wake`: `state=RUNNING` → `task_wake(t)` |
 | `kernel/tty/tty.c` | **Modify** | `tty_wake_waiters`: `state=RUNNING` → `task_wake(t)` |
 | `kernel/arch/x86_64/trap.c` | **Modify** | `SYS_kill`: keep `if (INTERRUPTIBLE)` guard, call `task_wake(target)` |
-| `kernel/apic/lapic_timer.c` | **Modify** | BSP guard: `if (cpu_id() != 0) need_resched=1` |
+| `kernel/intr/apic/lapic_timer.c` | **Modify** | BSP guard: `if (cpu_id() != 0) need_resched=1` |
 | `user/systest.c` | **Modify** | Add rbtree + EEVDF fairness test cases |
 
 ---
@@ -938,7 +938,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 - Modify: `kernel/futex.c`
 - Modify: `kernel/tty/tty.c`
 - Modify: `kernel/arch/x86_64/trap.c`
-- Modify: `kernel/apic/lapic_timer.c`
+- Modify: `kernel/intr/apic/lapic_timer.c`
 
 - [ ] **Step 1: `wait_queue_wake_one()` — replace `state=RUNNING` with `task_wake`**
 
@@ -999,7 +999,7 @@ with:
 
 - [ ] **Step 6: `lapic_timer_handler()` — BSP guard**
 
-In `kernel/apic/lapic_timer.c`, around line 122, change:
+In `kernel/intr/apic/lapic_timer.c`, around line 122, change:
 ```c
     this_cpu()->need_resched = 1;
 ```
@@ -1024,7 +1024,7 @@ Expected: normal boot. Keyboard input works. TTY output echoes. Ctrl-C → SIGIN
 - [ ] **Step 9: Commit**
 
 ```bash
-git add kernel/intr/wait.c kernel/futex.c kernel/tty/tty.c kernel/arch/x86_64/trap.c kernel/apic/lapic_timer.c
+git add kernel/intr/wait.c kernel/futex.c kernel/tty/tty.c kernel/arch/x86_64/trap.c kernel/intr/apic/lapic_timer.c
 git commit -m "feat(sched): audit wake-up paths to use task_wake()
 
 wait_queue_wake_one/all, do_futex_wake, tty_wake_waiters,

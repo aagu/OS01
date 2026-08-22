@@ -510,7 +510,7 @@ KERNEL_C_SOURCES := \
     $(wildcard block/*.c) \
     $(wildcard timer/*.c) \
     $(wildcard percpu/*.c) \
-    $(wildcard pic/*.c) \
+    $(wildcard intr/pic/*.c) \
     $(wildcard test/*.c) \
     $(wildcard subsys/*.c) \
     $(wildcard *.c)               # completion.c

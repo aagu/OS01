@@ -8,7 +8,7 @@ OS01 supports up to `NR_CPUS=8` CPUs (compile-time limit in `kernel/include/kern
 
 ```
 Phase 0: per-CPU data (GS base)               kernel/include/kernel/percpu.h
-Phase 1: AP enumeration (MADT LAPIC/x2APIC)    kernel/apic/acpi.c
+Phase 1: AP enumeration (MADT LAPIC/x2APIC)    kernel/intr/apic/acpi.c
 Phase 2: AP trampoline + INIT-SIPI-SIPI        kernel/arch/x86_64/trampoline.S, kernel/arch/x86_64/smp.c
 Phase 3: interrupt controllers (APIC, PIC)     kernel/arch/x86_64/subsys.c (subsys phase 3)
 Phase 4: timers (timer, PIT, LAPIC timer)      kernel/arch/x86_64/subsys.c (subsys phase 4)
@@ -50,7 +50,7 @@ Access via:
 
 ## AP enumeration
 
-`kernel/apic/acpi.c` — MADT parser in `parse_madt()`:
+`kernel/intr/apic/acpi.c` — MADT parser in `parse_madt()`:
 - Type 0 (LAPIC): 8-bit APIC ID, 8-bit ACPI processor ID, 32-bit flags (bit 0 = enabled)
 - Type 9 (x2APIC): 32-bit APIC ID, 32-bit ACPI processor UID (ACPI 5.0+)
 - `MAX_LAPICS` is defined as `NR_CPUS` — single knob in `cpu.h` for the supported CPU count
@@ -180,7 +180,7 @@ Vectors (see `kernel/include/kernel/ipi.h`):
 - `IPI_VECTOR_TLB = 0x40` — TLB shootdown
 - `IPI_VECTOR_RESCHED = 0x41` — reschedule request
 
-Sending (`kernel/apic/ipi.c`):
+Sending (`kernel/intr/apic/ipi.c`):
 - `ipi_send(dest_apic_id, vector)`: writes ICR high dword (destination), then low dword (triggers send). Polls Delivery Status (bit 12) before send with timeout.
 - `ipi_broadcast(vector, exclude_self)`: iterates `num_cpus` calling `ipi_send()` for each online CPU.
 
@@ -215,7 +215,7 @@ Injection points:
 
 ## LAPIC timer
 
-`kernel/apic/lapic_timer.c`:
+`kernel/intr/apic/lapic_timer.c`:
 
 Calibration (`lapic_timer_calibrate()`):
 1. Mask timer, set divisor to divide-by-1 (or ÷16 if counter overflow)

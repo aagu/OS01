@@ -491,7 +491,7 @@ void schedule(void) {
 
 **`kernel/driver/pit.c:pit_handler()`** — 无需修改（维持现有 `need_resched=1`）。
 
-**`kernel/apic/lapic_timer.c:lapic_timer_handler()`** — 1 行修改：
+**`kernel/intr/apic/lapic_timer.c:lapic_timer_handler()`** — 1 行修改：
 ```c
 // BSP 已经有 PIT 提供调度 tick，LAPIC timer 不重复设 need_resched。
 // AP 只有 LAPIC timer，必须设 need_resched。
@@ -641,7 +641,7 @@ task_wake(init_tsk);  // 入队到 CPU 0 的 runqueue
 | `kernel/futex.c` | **修改** | +1/-1 | do_futex_wake → task_wake |
 | `kernel/tty/tty.c` | **修改** | +1/-1 | tty_wake_waiters → task_wake |
 | `kernel/arch/x86_64/trap.c` | **修改** | +1/-1 | SYS_kill → task_wake（保持 INTERRUPTIBLE 检查） |
-| `kernel/apic/lapic_timer.c` | **修改** | +2 | BSP 不设 need_resched（§6.1） |
+| `kernel/intr/apic/lapic_timer.c` | **修改** | +2 | BSP 不设 need_resched（§6.1） |
 | `kernel/include/kernel/assert.h` | **新增** | ~8 | 内核 ASSERT 宏 |
 | `kernel/sched/task.c` (do_fork) | 归入上方 | — | vruntime 公平起点 + enqueue_task + 删除 counter 继承 |
 | `kernel/sched/task.c` (spawn_user_task) | 归入上方 | — | 返回 task_t* + task_wake |

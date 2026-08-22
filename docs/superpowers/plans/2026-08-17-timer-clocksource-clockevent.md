@@ -44,7 +44,7 @@
 | `kernel/include/kernel/arch/cpu.h` | 加 `arch_cycle_freq()`（x86 extern / aarch64 inline） |
 | `kernel/arch/x86_64/time.c`（新增，x86 平台源） | `arch_cycle_freq()` x86 实现 + `arch_tick_start()` |
 | `kernel/driver/rtc.c` + `kernel/include/driver/rtc.h` | `rtc_pie_calibrate()` 联合校准 |
-| `kernel/apic/lapic_timer.c` | 校准改 §5.1、handler BSP/AP 分支、`lapic_timer_start` 返回 bool、删 divisor-16 retry |
+| `kernel/intr/apic/lapic_timer.c` | 校准改 §5.1、handler BSP/AP 分支、`lapic_timer_start` 返回 bool、删 divisor-16 retry |
 | `kernel/driver/pit.c` | `pit_handler` 改调 `tick_handler()`，`serial_poll` 留本层 |
 | `kernel/intr/irq.c` + `kernel/include/kernel/interrupt.h` | `irq_mask()`/`irq_unmask()` |
 | `kernel/arch/x86_64/smp.c` | 握手采样（`tsc_offset`）、`lapic_timer_start` 适配 bool |
@@ -373,7 +373,7 @@ git commit -m "feat(time): clocksource + clockevent 双层抽象（TSC/cntvct_el
 
 **Files:**
 - Modify: `kernel/driver/rtc.c`, `kernel/include/driver/rtc.h`, `kernel/arch/x86_64/time.c`
-- Modify: `kernel/apic/lapic_timer.c`（加 `lapic_timer_set_premeasured`）
+- Modify: `kernel/intr/apic/lapic_timer.c`（加 `lapic_timer_set_premeasured`）
 
 **Interfaces:**
 - Consumes: `arch_cycle_freq()`（Task 1）、`lapic_read/lapic_write`（`apic.h`）、`register_irq/unregister_irq`（`interrupt.h`）、`get_rtc_register/set_rtc_register`（`rtc.h`）、`cpuid()`（`cpuid.h`）
@@ -598,7 +598,7 @@ Expected: serial 输出 `[selftest] timer_tsc_freq: 2993154817 Hz`（或相近�
 - [ ] **Step 8: Commit**
 
 ```bash
-git add kernel/driver/rtc.c kernel/include/driver/rtc.h kernel/arch/x86_64/time.c kernel/apic/lapic_timer.c kernel/include/kernel/apic.h kernel/test/test_timer.c kernel/test/selftest.c kernel/arch/x86_64/subsys.c
+git add kernel/driver/rtc.c kernel/include/driver/rtc.h kernel/arch/x86_64/time.c kernel/intr/apic/lapic_timer.c kernel/include/kernel/apic.h kernel/test/test_timer.c kernel/test/selftest.c kernel/arch/x86_64/subsys.c
 git commit -m "feat(time): TSC 频率校准（CPUID15h + RTC PIE 联合校准，含超时）"
 ```
 
@@ -607,7 +607,7 @@ git commit -m "feat(time): TSC 频率校准（CPUID15h + RTC PIE 联合校准，
 ## Task 3: BSP 切 LAPIC 周期 tick（先掩 PIT 再接管）+ 握手采样
 
 **Files:**
-- Modify: `kernel/apic/lapic_timer.c`（校准改 §5.1、handler 分支、`lapic_timer_start` 返回 bool、删 divisor-16 retry）
+- Modify: `kernel/intr/apic/lapic_timer.c`（校准改 §5.1、handler 分支、`lapic_timer_start` 返回 bool、删 divisor-16 retry）
 - Modify: `kernel/driver/pit.c`（`pit_handler` 改调 `tick_handler()`）
 - Modify: `kernel/intr/irq.c` + `kernel/include/kernel/interrupt.h`（`irq_mask/irq_unmask`）
 - Modify: `kernel/arch/x86_64/smp.c`（握手采样）、`kernel/include/kernel/percpu.h`（字段）
@@ -622,7 +622,7 @@ git commit -m "feat(time): TSC 频率校准（CPUID15h + RTC PIE 联合校准，
 
 - [ ] **Step 1: 重写 lapic_timer_calibrate（TSC 窗口 / RTC PIE 复用，删 divisor-16 retry）**
 
-替换 `kernel/apic/lapic_timer.c` 的 `lapic_timer_calibrate()`（约 line 45-88）:
+替换 `kernel/intr/apic/lapic_timer.c` 的 `lapic_timer_calibrate()`（约 line 45-88）:
 
 ```c
 void lapic_timer_calibrate(void)
@@ -877,7 +877,7 @@ Expected（spec §9 门①）: LAPIC LVT TIMER ~100Hz（非 200/629）；`busybo
 - [ ] **Step 13: Commit**
 
 ```bash
-git add kernel/apic/lapic_timer.c kernel/include/kernel/apic.h kernel/driver/pit.c kernel/intr/irq.c kernel/include/kernel/interrupt.h kernel/arch/x86_64/smp.c kernel/include/kernel/percpu.h kernel/arch/x86_64/subsys_percpu.c kernel/kernel/main.c kernel/arch/x86_64/time.c
+git add kernel/intr/apic/lapic_timer.c kernel/include/kernel/apic.h kernel/driver/pit.c kernel/intr/irq.c kernel/include/kernel/interrupt.h kernel/arch/x86_64/smp.c kernel/include/kernel/percpu.h kernel/arch/x86_64/subsys_percpu.c kernel/kernel/main.c kernel/arch/x86_64/time.c
 git commit -m "feat(tick): BSP 切 LAPIC 周期 tick，先掩 PIT 再接管 + 握手采样"
 ```
 

@@ -303,7 +303,7 @@ static inline uint64_t arch_cycle_counter(void) { return rdtsc(); }
 | `driver/ahci.c` | `<arch/x86_64/asm.h>` (仅 `nop()`，在 `WAIT_WHILE` 宏中), `pause` | `<arch/io.h>`, `<arch/cpu.h>`; `arch_nop()`, `arch_cpu_pause()`. **注意**: `WAIT_WHILE` 宏中的 `nop()` 映射到 `arch_io.h` 的 `arch_nop()` |
 | `driver/pci.c` | `ind`/`outd` | `<arch/io.h>` |
 | `driver/pit.c` | `<arch/x86_64/hw.h>`, `asm.h` | 保留直接 include — PIT 是纯 x86 驱动，不在通用路径中执行。标记为 `// x86 specific driver` |
-| `pic/8259A.c` | `<arch/x86_64/hw.h>`, `asm.h` | 保留直接 include — 8259A PIC 是纯 x86 驱动 |
+| `intr/pic/8259A.c` | `<arch/x86_64/hw.h>`, `asm.h` | 保留直接 include — 8259A PIC 是纯 x86 驱动 |
 | `apic/lapic.c` | `<arch/x86_64/msr.h>`, `regs.h`, `cpuid.h`, `gate.h`, `asm.h` | `<arch/cpu.h>`, `<arch/irq.h>` |
 | `apic/ioapic.c` | `<arch/x86_64/asm.h>`, `hw.h` | `<arch/io.h>` |
 | `apic/ipi.c` | `<arch/x86_64/gate.h>` | `<arch/irq.h>` |
@@ -372,7 +372,7 @@ export LD = ld.lld -m elf_$(ARCH)
 | `cpuid.h` | x86 CPUID 指令；aarch64 对应寄存器不同 |
 | `msr.h` | MSR 架构特有；通用代码封装为语义函数（如 `arch_cpu_enable_nx()`） |
 | `spinlock.h` | 自旋锁本质上架构特定（x86: `lock xchg`；aarch64: `ldaxr`/`stlxr`） |
-| `apic/` + `pic/` 目录 | 中断控制器架构特定 — aarch64 使用 GIC-400 |
+| `apic/` + `intr/pic/` 目录 | 中断控制器架构特定 — aarch64 使用 GIC-400 |
 | `kallsyms` 栈回溯 | 回溯算法通用，但 DWARF2 解析架构相关 |
 | **`get_current_task()` 宏** (RSP 掩码) | `RSP & ~(STACK_SIZE-1)` 是 x86 内核栈布局假设。aarch64 可能用 SP_EL1 或专用寄存器 |
 | **`switch_to` 宏** + `__switch_to()` | `cli/sti`、`pushq callee-saved`、`jmp` 是 x86 调用约定。aarch64 用 `stp x19-x30`/`sp` |
@@ -410,7 +410,7 @@ export LD = ld.lld -m elf_$(ARCH)
 2. 替换裸汇编为 `arch_` 函数调用
 3. 注意 `sched/smp.c` 中的 `lgdt/lidt` + `lretq` CS reload 是 x86 特有——保留裸汇编，加注释标记
 4. 注意 `sched/task.c` 的 `switch_to` 宏和 `__switch_to()` — 不抽象，Section 5 已记录
-5. `driver/pit.c` 和 `pic/8259A.c` 保留直接 include
+5. `driver/pit.c` 和 `intr/pic/8259A.c` 保留直接 include
 
 每迁移 3-4 个文件后 `make` 编译验证。
 
@@ -436,7 +436,7 @@ make clean && make                         # 无警告编译
 make run                                   # 启动到 shell
 make test-syscall                          # 70/70 PASS
 make DEBUG_CHANNELS=sched,irq,mm run       # SMP + TLB shootdown 高覆盖
-grep -r '__asm__' kernel/memory/ kernel/sched/ kernel/driver/ kernel/kernel/ kernel/fs/ kernel/apic/ kernel/intr/ kernel/tty/ --include='*.c' | grep -v 'arch/x86_64/' | grep -v '.d:'
+grep -r '__asm__' kernel/memory/ kernel/sched/ kernel/driver/ kernel/kernel/ kernel/fs/ kernel/intr/apic/ kernel/intr/ kernel/tty/ --include='*.c' | grep -v 'arch/x86_64/' | grep -v '.d:'
 # 确认通用代码中无裸汇编（仅允许在 arch/x86_64/ 内）
 ```
 
@@ -492,6 +492,6 @@ grep -r '__asm__' kernel/memory/ kernel/sched/ kernel/driver/ kernel/kernel/ ker
 | 11 | `get_current_task()`/`switch_to`/`__switch_to` | 不抽象 | 上下文切换协议在架构间差异过大——RSP 掩码、callee-saved regs、返回协议完全不同。将它们标记为架构特定比抽象更有价值 |
 | 12 | `arch_set_percpu_base()` 命名 | 不包含 `gs` | GS 是 x86 MSR 名；语义化命名使 aarch64 实现自然对应 `tpidr_el1` |
 | 13 | `percpu_t.tlb_wanted`/`tlb_ack` | 保留 | 即使 aarch64 使用不同的 TLB 维护协议（在广播 TLBI 时），ACK 同步是通用需求 |
-| 14 | `driver/pit.c` + `pic/8259A.c` | 保留 arch/x86_64/ 直接 include | 纯 x86 驱动，aarch64 不会编译它们 |
+| 14 | `driver/pit.c` + `intr/pic/8259A.c` | 保留 arch/x86_64/ 直接 include | 纯 x86 驱动，aarch64 不会编译它们 |
 | 15 | `pmm.c` `<string.h>` | 切换到通用 `<string.h>` | x86 优化的 `rep stosq` memset 在当前编译优化下无显著收益，且是唯一依赖 `<arch/x86_64/string.h>` 的通用文件 |
 | 16 | `arch_nop()` | 放入 `arch/io.h` | `nop()` 主要用例在 `driver/ahci.c` 的 `WAIT_WHILE` 循环中，紧邻 I/O 操作 |

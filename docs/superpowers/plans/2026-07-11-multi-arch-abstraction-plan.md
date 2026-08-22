@@ -846,8 +846,8 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 **Files:**
 - Modify: `kernel/driver/serial.c`
 - Modify: `kernel/driver/keyboard.c`
-- Modify: `kernel/apic/ioapic.c`
-- Modify: `kernel/apic/lapic.c`
+- Modify: `kernel/intr/apic/ioapic.c`
+- Modify: `kernel/intr/apic/lapic.c`
 
 **Interfaces:**
 - Consumes: `arch/irq.h`, `arch/io.h`, `arch/cpu.h` (all from prior tasks)
@@ -872,11 +872,11 @@ Replace:
 
 Add at top: `#include <kernel/arch/io.h>`, `#include <kernel/arch/cpu.h>`
 
-- [ ] **Step 3: Migrate `kernel/apic/ioapic.c`**
+- [ ] **Step 3: Migrate `kernel/intr/apic/ioapic.c`**
 
 Replace `#include <kernel/arch/x86_64/asm.h>` and `<kernel/arch/x86_64/hw.h>` with `#include <kernel/arch/io.h>`.
 
-- [ ] **Step 4: Migrate `kernel/apic/lapic.c`**
+- [ ] **Step 4: Migrate `kernel/intr/apic/lapic.c`**
 
 Replace generic-use arch includes:
 - `#include <kernel/arch/x86_64/asm.h>` → `#include <kernel/arch/irq.h>`
@@ -897,7 +897,7 @@ cd /home/aagu/OS01 && make clean && make 2>&1 | grep -ci 'warning'
 ```bash
 cd /home/aagu/OS01
 git add kernel/driver/serial.c kernel/driver/keyboard.c \
-        kernel/apic/ioapic.c kernel/apic/lapic.c
+        kernel/intr/apic/ioapic.c kernel/intr/apic/lapic.c
 git commit -m "refactor(arch): migrate group-B .c files (irq + io)
 
 - serial.c: pushfq/cli/sti/pause/inb/outb → arch_* equivalents
@@ -917,8 +917,8 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 - Modify: `kernel/memory/tlb.c`
 - Modify: `kernel/memory/vmm.c`
 - Modify: `kernel/sched/smp.c`
-- Modify: `kernel/apic/lapic_timer.c`
-- Modify: `kernel/apic/ipi.c`
+- Modify: `kernel/intr/apic/lapic_timer.c`
+- Modify: `kernel/intr/apic/ipi.c`
 - Modify: `kernel/kernel/main.c`
 
 **Interfaces:**
@@ -952,14 +952,14 @@ Replace:
 
 Add: `#include <kernel/arch/cpu.h>`, `#include <kernel/arch/irq.h>`
 
-- [ ] **Step 4: Migrate `kernel/apic/lapic_timer.c`**
+- [ ] **Step 4: Migrate `kernel/intr/apic/lapic_timer.c`**
 
 Replace:
 - `#include <kernel/arch/x86_64/gate.h>` + `<kernel/arch/x86_64/regs.h>` → `#include <kernel/arch/irq.h>` + `#include <kernel/arch/thread.h>`
 
 Keep `#include <kernel/arch/x86_64/gate.h>` if `DEFINE_INTR_STUB`/`REGISTER_INTR_HANDLER` macros are used (they are x86-specific).
 
-- [ ] **Step 5: Migrate `kernel/apic/ipi.c`**
+- [ ] **Step 5: Migrate `kernel/intr/apic/ipi.c`**
 
 Replace `#include <kernel/arch/x86_64/gate.h>` with `#include <kernel/arch/irq.h>`.
 Keep `#include <kernel/arch/x86_64/gate.h>` for `DEFINE_INTR_STUB`/`REGISTER_INTR_HANDLER`.
@@ -986,7 +986,7 @@ cd /home/aagu/OS01 && make clean && make 2>&1 | grep -ci 'warning'
 ```bash
 cd /home/aagu/OS01
 git add kernel/memory/tlb.c kernel/memory/vmm.c kernel/sched/smp.c \
-        kernel/apic/lapic_timer.c kernel/apic/ipi.c kernel/kernel/main.c
+        kernel/intr/apic/lapic_timer.c kernel/intr/apic/ipi.c kernel/kernel/main.c
 git commit -m "refactor(arch): migrate group-C .c files (mmu + irq)
 
 - tlb.c, vmm.c: invlpg/pause → arch_flush_tlb_page/arch_cpu_pause
@@ -1115,10 +1115,10 @@ cd /home/aagu/OS01 && make clean && make 2>&1 | grep -ci 'warning'
 # Expected: 0
 
 # Check: zero bare __asm__ in generic .c files
-# Exceptions per spec Section 5: arch/x86_64/, pic/, sched/smp.c, sched/task.c
+# Exceptions per spec Section 5: arch/x86_64/, intr/pic/, sched/smp.c, sched/task.c
 grep -r '__asm__' kernel/ --include='*.c' \
     | grep -v 'arch/x86_64/' \
-    | grep -v 'pic/' \
+    | grep -v 'intr/pic/' \
     | grep -v 'sched/smp.c' \
     | grep -v 'sched/task.c' \
     | grep -v '.d:'
@@ -1194,12 +1194,12 @@ cd /home/aagu/OS01
 # Verify zero bare __asm__ in generic .c files.
 # Exceptions (spec Section 5 "不抽象的内容"):
 #   - arch/x86_64/  — architecture files
-#   - pic/          — pure x86 8259A driver
+#   - intr/pic/          — pure x86 8259A driver
 #   - sched/smp.c   — lgdt/lidt AP GDT/IDT reload (x86-specific protocol)
 #   - sched/task.c  — switch_to/__switch_to, get_current_task() RSP mask
 grep -r '__asm__' kernel/ --include='*.c' \
     | grep -v 'arch/x86_64/' \
-    | grep -v 'pic/' \
+    | grep -v 'intr/pic/' \
     | grep -v 'sched/smp.c' \
     | grep -v 'sched/task.c' \
     | grep -v '.d:'

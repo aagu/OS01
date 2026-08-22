@@ -25,9 +25,9 @@
 * `driver/` — 硬件驱动（keyboard, serial, pit, rtc, ahci, pci）
 * `include/` — 头文件，会和 lib 一起安装到 sysroot 中
 * `memory/` — 内存管理相关（pmm.c, vmm.c, slab.c, vma.c, tlb.c, dump.c）
-* `pic/` — 8259A PIC 控制器（APIC 已完全实现，位于 apic/）
 * `time/` — 时间子系统（clocksource.c, tick.c, timer.c：时钟源/节拍/软件定时器）
-* `apic/` — APIC 子系统（acpi.c, lapic.c, ioapic.c, ipi.c, lapic_timer.c）
+* `intr/apic/` — APIC 子系统（acpi.c, lapic.c, ioapic.c, ipi.c, lapic_timer.c）
+* `intr/pic/` — 8259A PIC 控制器（APIC 已完全实现，位于 intr/apic/）
 * `block/` — 块设备层（blockdev.c）
 * `fs/` — 文件系统（vfs.c, fat.c, ext2.c, devfs.c, procfs.c, tmpfs.c, elf.c, file.c, gpt.c, poll.c, select.c）
 * `sched/` — 调度器 (task.c, deferred_free.c)

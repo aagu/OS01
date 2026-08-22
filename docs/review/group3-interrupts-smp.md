@@ -1,7 +1,7 @@
 # 架构评审 — Group 3: 中断 + 时钟 + SMP
 
 > **审查日期**: 2026-07-25
-> **覆盖文件**: `kernel/apic/lapic.c`, `ioapic.c`, `ipi.c`, `lapic_timer.c`, `kernel/intr/dispatch.c`, `softirq.c`, `irq.c`, `kernel/driver/pit.c`, `kernel/time/timer.c`, `kernel/arch/x86_64/smp.c`, `kernel/percpu/percpu.c`, `kernel/include/kernel/smp.h`, `kernel/include/kernel/ipi.h`, `kernel/include/kernel/softirq.h`
+> **覆盖文件**: `kernel/intr/apic/lapic.c`, `ioapic.c`, `ipi.c`, `lapic_timer.c`, `kernel/intr/dispatch.c`, `softirq.c`, `irq.c`, `kernel/driver/pit.c`, `kernel/time/timer.c`, `kernel/arch/x86_64/smp.c`, `kernel/percpu/percpu.c`, `kernel/include/kernel/smp.h`, `kernel/include/kernel/ipi.h`, `kernel/include/kernel/softirq.h`
 
 ## 问题清单
 
@@ -77,7 +77,7 @@
 
 ### [P2] 6. `ipi_send` ICR 等待超时后无恢复
 
-- **位置**: `kernel/apic/ipi.c:57-63`
+- **位置**: `kernel/intr/apic/ipi.c:57-63`
 - **现象**: 等待 ICR 清除 `ICR_STATUS_PENDING` 的超时循环只有 10000 次迭代。超时后打印 debug 消息但继续发送新 IPI。如果 ICR 实际仍忙，新写入会被忽略
 - **建议**: 超时后等待更长时间或返回错误码让调用方重试
 
@@ -95,7 +95,7 @@
 
 ### [P2] 8. LAPIC timer calibration busy-wait
 
-- **位置**: `kernel/apic/lapic_timer.c:58-60`
+- **位置**: `kernel/intr/apic/lapic_timer.c:58-60`
 - **现象**: `while (jiffies == start) arch_cpu_pause();` 在 calibration 中忙等 PIT 的 jiffies 递增。最多等待 10ms（一次 PIT tick）。只在启动时执行一次
 - **建议**: 无紧迫修复，可考虑添加超时防止意外挂起
 

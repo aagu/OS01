@@ -110,7 +110,7 @@ Replace existing ad-hoc `serial_printk` debug lines with `debug_<channel>()` mac
 | `kernel/tty/tty.c` | commented-out `serial_printk` | `debug_tty(...)` |
 | `kernel/fs/vfs.c` | commented-out `serial_printk` | `debug_vfs(...)` |
 | `kernel/memory/*.c` | commented-out `serial_printk` | `debug_mm(...)` |
-| `kernel/apic/ipi.c` | commented-out `serial_printk` | `debug_ipi(...)` |
+| `kernel/intr/apic/ipi.c` | commented-out `serial_printk` | `debug_ipi(...)` |
 | `kernel/intr/irq.c` | commented-out `serial_printk` | `debug_irq(...)` |
 | `kernel/fs/fat.c` | commented-out `serial_printk` | `debug_fs(...)` |
 | `kernel/block/ahci.c` | commented-out `serial_printk` | `debug_block(...)` |
@@ -131,7 +131,7 @@ Without `DEBUG_CHANNELS`, all macros expand to nothing — zero overhead.
 | `kernel/tty/tty.c` | uncomment + convert |
 | `kernel/fs/vfs.c` | uncomment + convert |
 | `kernel/memory/*.c` | uncomment + convert |
-| `kernel/apic/ipi.c` | uncomment + convert |
+| `kernel/intr/apic/ipi.c` | uncomment + convert |
 | `kernel/intr/irq.c` | uncomment + convert |
 | `kernel/fs/fat.c` | uncomment + convert |
 | `kernel/block/blockdev.c` | uncomment + convert |

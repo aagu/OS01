@@ -105,7 +105,7 @@ uint64_t tick_get_jiffies(void);
 | `arch_cycle_freq()` | CPUID15h + RTC PIE 联合校准 | 读 CNTFRQ（待实现） |
 | `arch_tick_start()` | LAPIC 周期模式（每 CPU 写 per-LAPIC DIV） | CNTP（待实现） |
 
-### 4. LAPIC 定时器（tick 源，kernel/apic/lapic_timer.c）
+### 4. LAPIC 定时器（tick 源，kernel/intr/apic/lapic_timer.c）
 
 - `lapic_timer_init()`：注册 IDT 门 + 校准（subsys Phase 4）
 - `lapic_timer_calibrate()`：**RTC PIE 联合结果优先**（250ms 窗口更稳），
@@ -179,7 +179,7 @@ add_timer(t);                                  // 到期自动删除（一次性
 |------|------|
 | `kernel/time/clocksource.c` + `include/kernel/clocksource.h` | 单调纳秒层（mult/shift 换算） |
 | `kernel/time/tick.c` + `include/kernel/clockevent.h` | tick 语义层（jiffies/poll 扫描/源选择） |
-| `kernel/apic/lapic_timer.c` | LAPIC tick 源（校准 + 周期模式 + per-LAPIC DIV） |
+| `kernel/intr/apic/lapic_timer.c` | LAPIC tick 源（校准 + 周期模式 + per-LAPIC DIV） |
 | `kernel/driver/pit.c` | PIT（boot 窗口 + fallback） |
 | `kernel/time/timer.c` + `include/device/timer.h` | 软件定时器轮（timer wheel） |
 | `kernel/arch/x86_64/`（arch hook） | TSC/RTC 校准、LAPIC 启动 |

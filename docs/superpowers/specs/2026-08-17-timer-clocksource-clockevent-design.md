@@ -660,7 +660,7 @@ progress claims」规则。
 
 | 文件 | 改动 |
 |---|---|
-| `kernel/apic/lapic_timer.c` | 校准改 §5.1（TSC 窗口 / RTC PIE 复用）；handler BSP→tick_handler / AP→need_resched，**BSP 分支不再单独 `watchdog_counter++`**（避免与 `tick_handler()` 内的 watchdog++ 双计，现 lapic_timer.c:129 是无条件 ++）；start 返回 bool；**删 divisor-16 retry 死代码**（TSC 窗口法下 10ms 内 32 位溢出需 LAPIC>429THz，原 lapic_timer.c:68-80 不再可达） |
+| `kernel/intr/apic/lapic_timer.c` | 校准改 §5.1（TSC 窗口 / RTC PIE 复用）；handler BSP→tick_handler / AP→need_resched，**BSP 分支不再单独 `watchdog_counter++`**（避免与 `tick_handler()` 内的 watchdog++ 双计，现 lapic_timer.c:129 是无条件 ++）；start 返回 bool；**删 divisor-16 retry 死代码**（TSC 窗口法下 10ms 内 32 位溢出需 LAPIC>429THz，原 lapic_timer.c:68-80 不再可达） |
 | `kernel/driver/pit.c` | handler 改调 tick_handler()；serial_poll 留在本层 |
 | `kernel/driver/rtc.c` + `rtc.h` | 新增 RTC PIE 联合校准（§5.1：IRQ8 临时注册 + PIE + 超时 + TSC/LAPIC 采样） |
 | `kernel/arch/x86_64/subsys.c` | 初始化顺序重排：加 clocksource；保留 pit 启动；lapic-timer 改校准 |

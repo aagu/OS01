@@ -457,10 +457,10 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 - [ ] **Step 0: Make LAPIC timer trigger TIMER_SIRQ on APs**
 
-In `kernel/apic/lapic_timer.c`, first add the include:
+In `kernel/intr/apic/lapic_timer.c`, first add the include:
 
 ```c
-// kernel/apic/lapic_timer.c — add near other #include lines
+// kernel/intr/apic/lapic_timer.c — add near other #include lines
 #include <kernel/softirq.h>
 ```
 
@@ -661,7 +661,7 @@ Expected: boots to shell, timer softirqs work, no corruption.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add kernel/intr/softirq.c kernel/time/timer.c kernel/include/device/timer.h kernel/apic/lapic_timer.c
+git add kernel/intr/softirq.c kernel/time/timer.c kernel/include/device/timer.h kernel/intr/apic/lapic_timer.c
 git commit -m "fix: atomic softirq_status + spinlock-protected timer list + AP TIMER_SIRQ
 
 softirq_status: lock orq/andq for concurrent set/clear from

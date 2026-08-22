@@ -105,7 +105,7 @@ test/include/ 镜像（本次同步迁移）:
 1. **零行为变更** — 所有 refactor 必须 `make clean && make` 0 warning，`make test-syscall` 70/70
 2. **逐步可提交** — 每个 Task 可独立 git commit，bisectable
 3. **保持向后兼容** — `spinlock_T` 类型名、`cli/sti` 宏等不对外接口不变
-4. **最小化影响范围** — 明确豁免：`apic/`, `pic/`, `pit.c`, `sched/smp.c`, `kernel/kernel/main.c`（入口文件，纯 x86 启动序列，aarch64 有自己的启动流程）；`kernel/sched/task.c` 不豁免——**拆分**（x86 `__switch_to` / 线程入口 asm 移出，其余架构无关逻辑保留）
+4. **最小化影响范围** — 明确豁免：`apic/`, `intr/pic/`, `pit.c`, `sched/smp.c`, `kernel/kernel/main.c`（入口文件，纯 x86 启动序列，aarch64 有自己的启动流程）；`kernel/sched/task.c` 不豁免——**拆分**（x86 `__switch_to` / 线程入口 asm 移出，其余架构无关逻辑保留）
 5. **test/include/ 同步** — 镜像文件跟随内核头文件同步迁移，保持一致
 
 ---
@@ -353,11 +353,11 @@ test/include/ 镜像（本次同步迁移）:
 
 | 文件/目录 | 原因 |
 |-----------|------|
-| `kernel/apic/`, `kernel/pic/`, `kernel/pit.c` | 原则 4 豁免 |
+| `kernel/intr/apic/`, `kernel/intr/pic/`, `kernel/pit.c` | 原则 4 豁免 |
 | `kernel/sched/smp.c` | 原则 4 豁免 |
 | `kernel/kernel/main.c`（trap.h, gate.h, asm.h, trampoline.h 引用） | 原则 4 豁免（入口文件 = 纯 x86 启动序列） |
 | `kernel/arch/x86_64/` 内所有文件 | 这些是 x86 的实现，不需要动 |
-| `kernel/pic/8259A.c:6` | arch 内部代码，豁免 |
+| `kernel/intr/pic/8259A.c:6` | arch 内部代码，豁免 |
 | `kernel/kernel/hang.c:7` | hang 使用 pt_regs 但仅 x86 路径调用，豁免 |
 
 ---
