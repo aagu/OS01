@@ -8,7 +8,7 @@
 
 **Tech Stack:** C11 freestanding (kernel), POSIX (libc), x86_64 PS/2 keyboard IRQ1, busybox hush (CONFIG_ASH_JOB_CONTROL=n), QEMU gtk display.
 
-**Spec:** [docs/superpowers/specs/2026-08-22-tty-line-discipline-design.md](../specs/2026-08-22-tty-line-discipline-design.md) — this plan implements spec v5 (commits fcd2219/4e3783f/3fb161e/aa4daa0/d296aa4). **This is plan v2** — applies review fixes C1/C2/C3/H2/M2 over the v1 plan (commit b43dcb9). See "v2 changes" at end of file.
+**Spec:** [docs/superpowers/specs/2026-08-22-tty-line-discipline-design.md](../specs/2026-08-22-tty-line-discipline-design.md) — this plan implements spec v5 (commits fcd2219/4e3783f/3fb161e/aa4daa0/d296aa4). **This is plan v3** — applies review fixes D1/D2/D3 over the v2 plan (commit a3c5ded). See "v3 changes" at end of file.
 
 ## Global Constraints
 
@@ -34,7 +34,7 @@ These apply to every task; each task's requirements implicitly include them.
 |---|---|---|
 | `kernel/include/kernel/task.h` | Add `pid_t pgrp, session` to `task_struct` | Modify |
 | `kernel/sched/task.c` | `init_task_union.task.pgrp/session = 1`; new `signal_pgrp()` function | Modify |
-| `kernel/arch/x86_64/trap.c` | SYS_fork +2 lines; 4 new syscall cases (setpgid/getpgid/setsid/getsid); SYS_kill extensions | Modify |
+| `kernel/arch/x86_64/trap.c` | 4 new syscall cases (setpgid/getpgid/setsid/getsid); SYS_kill extensions | Modify |
 | `kernel/include/kernel/tty.h` | Add `pid_t fg_pgrp; spinlock_T fg_pgrp_lock;` to `tty_struct` | Modify |
 | `kernel/include/kernel/file.h` | Add `struct tty_struct *tty;` to `file_t` | Modify |
 | `kernel/tty/tty.c` | `tty_alloc` defaults (ISIG + c_cc); `tty_push_input` line discipline; `tty_phys_ioctl` real TIOCSPGRP/TIOCGPGRP | Modify |
@@ -72,22 +72,88 @@ Create `test/cases/test_pgrp_signal.c`:
 ```c
 // Kernel-level unit test for signal_pgrp().
 // Called from kernel selftest framework (similar to test/cases/test_poll_requested.c).
+//
+// v3 D2 fix: original v1/v2 plan had placeholder // ... body. Concrete impl:
+// spawn a kernel_thread target, demote PF_KTHREAD (so signal_pgrp delivers
+// to it), set its pgrp, call signal_pgrp() in three modes (no-op / ESRCH /
+// hit), verify signal bit set + state moved to TASK_RUNNING.
+//
+// Note: target stays in TASK_INTERRUPTIBLE in the spin loop after being
+// signalled, because arch_do_signal_delivery (which moves it to RUNNING
+// when delivering to ring-3) only runs on return-to-user; in this kernel
+// test we manually verify t->signal directly.
 #include <kernel/task.h>
 #include <kernel/debug.h>
+#include <kernel/sched.h>
 
 #define TEST_NAME "test_pgrp_signal"
 
+static volatile int pgrp_thread_ready = 0;
+static volatile int pgrp_thread_pid = 0;
+
+static int pgrp_thread_fn(void *arg) {
+    (void)arg;
+    pgrp_thread_pid = current->pid;
+    for (;;) {
+        current->state = TASK_INTERRUPTIBLE;
+        __sync_synchronize();
+        pgrp_thread_ready = 1;
+        schedule();
+        // After wakeup, exit on SIGUSR1 (test will SIGKILL if it didn't
+        // actually signal us — avoids hanging forever)
+        if (current->signal & (1ULL << SIGUSR1)) break;
+    }
+    return 0;
+}
+
 void test_pgrp_signal(void) {
-    // Fork a child in its own pgrp, have it pause(), parent signal_pgrp's it.
-    // Use existing kernel_thread helper (see test_poll_requested.c for pattern).
-    // ...
-    // ASSERTIONS:
-    //  1. signal_pgrp(0, SIGUSR1) returns 0 (silent no-op for target==0)
-    //  2. signal_pgrp(99999, SIGUSR1) returns -ESRCH (no such pgrp)
-    //  3. After fork in own pgrp + signal_pgrp(child.pid, SIGUSR1):
-    //     - returns 0
-    //     - child.signal has SIGUSR1 bit set
-    //     - child.state was TASK_INTERRUPTIBLE → now TASK_RUNNING
+    pgrp_thread_ready = 0;
+    pgrp_thread_pid = 0;
+
+    task_t *t = (task_t *)kernel_thread(pgrp_thread_fn, NULL, "pgrp_test");
+    if (!t) { debug_test("%s: kernel_thread failed\n", TEST_NAME); return; }
+
+    // Wait for thread to register pid and reach INTERRUPTIBLE
+    while (!pgrp_thread_ready || t->state != TASK_INTERRUPTIBLE) {
+        arch_local_irq_enable();
+        for (volatile int i = 0; i < 1000; i++);
+        arch_local_irq_disable();
+    }
+
+    // v3 D1 fix (same trick as test_tty_vintr): kernel_thread sets
+    // PF_KTHREAD; signal_pgrp skips PF_KTHREAD per spec §3.3. Demote so
+    // this fixture becomes a valid signal target.
+    t->flags &= ~PF_KTHREAD;
+
+    // Make thread its own pgrp leader
+    uint64_t f1 = spin_lock_irqsave(&task_list_lock);
+    t->pgrp = t->pid;
+    spin_unlock_irqrestore(&task_list_lock, f1);
+
+    int prev_signal = (int)(t->signal & (1ULL << SIGUSR1));
+    enum task_state prev_state = t->state;
+
+    // Assertion 1: signal_pgrp(0, ...) is silent no-op (returns 0)
+    ASSERT(signal_pgrp(0, SIGUSR1) == 0);
+
+    // Assertion 2: signal_pgrp with no matching pgrp returns -ESRCH
+    ASSERT(signal_pgrp(99999, SIGUSR1) == -ESRCH);
+
+    // Assertion 3: signal_pgrp(self.pid, SIGUSR1) hits the target
+    ASSERT(signal_pgrp(t->pid, SIGUSR1) == 0);
+
+    // Assertion 4: SIGUSR1 bit set on target's signal field
+    ASSERT((t->signal & (1ULL << SIGUSR1)) != 0);
+    ASSERT(prev_signal == 0);   // bit was not set before
+
+    // Assertion 5: target was TASK_INTERRUPTIBLE → moved to TASK_RUNNING
+    // (signal_pgrp calls task_wake if state == TASK_INTERRUPTIBLE)
+    ASSERT(prev_state == TASK_INTERRUPTIBLE);
+    ASSERT(t->state == TASK_RUNNING);
+
+    // Cleanup: send SIGKILL in case thread didn't see SIGUSR1 (defensive;
+    // thread will exit either way on next schedule())
+    t->signal |= (1ULL << SIGKILL);
 }
 ```
 
@@ -189,9 +255,12 @@ Expected: kernel compiles; selftest passes.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add kernel/include/kernel/task.h kernel/sched/task.c kernel/arch/x86_64/trap.c test/cases/test_pgrp_signal.c
+git add kernel/include/kernel/task.h kernel/include/uapi/syscall.h \
+        kernel/sched/task.c test/cases/test_pgrp_signal.c
 git commit -m "feat(pgrp): task_struct pgrp/session + signal_pgrp() + fork inheritance"
 ```
+
+(v3 fix: do NOT `git add kernel/arch/x86_64/trap.c` here — C1 fixed the edit point out of trap.c. trap.c edits come in Task 2.)
 
 ---
 
@@ -590,7 +659,7 @@ struct tty_struct;       // v2: forward decl for file_t->tty field
 Then inside `file_t` (after `socket_t *sock;`):
 
 ```c
-    struct tty_struct *tty;       // v3: 标记此 fd 指向控制台 TTY
+    struct tty_struct *tty;       // spec §4.1.1: 标记此 fd 指向控制台 TTY
 ```
 
 (Do NOT `#include <kernel/tty.h>` from file.h — that creates a circular include because tty.h itself uses file_t through `keyboard_poll`. Forward declaration only.)
@@ -600,7 +669,7 @@ Then inside `file_t` (after `socket_t *sock;`):
 In `kernel/fs/devfs.c`, `tty_magic_open` (~line 368-383), after `(*out_file)->node = node;`, before `return 0;`:
 
 ```c
-        // v3 新增：标记 TTY + 默认 fg_pgrp 兜底
+        // spec §4.1.1：标记 TTY + 默认 fg_pgrp 兜底
         (*out_file)->tty = get_dev_tty();
         if (current->pgrp != 0) {
             tty_t *tty = get_dev_tty();
@@ -617,7 +686,7 @@ In `kernel/fs/devfs.c`, `tty_magic_open` (~line 368-383), after `(*out_file)->no
 In `kernel/fs/devfs.c`, `devfs_open_node` FD_DEV default branch (~line 307-313), replace `return 0;` with:
 
 ```c
-    // v3 新增：若该设备是控制台 TTY，标记 tty + 默认 fg_pgrp
+    // spec §4.1.1：若该设备是控制台 TTY，标记 tty + 默认 fg_pgrp
     int didx = (int)(uintptr_t)node->fs_data;
     if (didx >= 0 && didx < DEVFS_MAX_DEVICES && devices[didx].registered &&
         devices[didx].private_data == keyboard_get_tty()) {
@@ -790,7 +859,15 @@ void test_tty_vintr(void) {
         arch_local_irq_disable();
     }
 
-    // 3. Set t->pgrp = unique value, tty->fg_pgrp = same value
+    // 3. v3 D1 fix: kernel_thread creates PF_KTHREAD tasks. signal_pgrp
+    //    deliberately skips PF_KTHREAD per spec §3.3. Clear the flag so this
+    //    test thread (which we explicitly want as a signal target) is no
+    //    longer skipped. Without this, tty_push_input → signal_pgrp → task
+    //    enumeration silently bypasses our target, vintr_seen stays 0, and
+    //    the test would time out without ever exercising the code path.
+    t->flags &= ~PF_KTHREAD;
+
+    // 4. Set t->pgrp = unique value, tty->fg_pgrp = same value
     uint64_t flags = spin_lock_irqsave(&task_list_lock);
     t->pgrp = t->pid;          // become own pgrp leader
     spin_unlock_irqrestore(&task_list_lock, flags);
@@ -801,7 +878,7 @@ void test_tty_vintr(void) {
     dev_tty->fg_pgrp = t->pid;
     spin_unlock_irqrestore(&dev_tty->fg_pgrp_lock, f);
 
-    // 4. Inject VINTR char (0x03 = Ctrl-C) into tty
+    // 5. Inject VINTR char (0x03 = Ctrl-C) into tty
     tty_push_input(dev_tty, 0x03);
 
     // 5. Wait for thread to wake and ack
@@ -828,7 +905,7 @@ void test_tty_vintr(void) {
 
 Wire into the existing kernel selftest runner (find the `tests[]` array in `kernel/test/`, add an entry). Match the pattern of other `test_*.c` files in `test/cases/`.
 
-Note: This test exercises the tty_push_input → signal_pgrp → task_wake → signal delivery chain end-to-end in kernel context. It does NOT exercise the `arch_do_signal_delivery` ring-3 path (that requires returning to user space). Manual acceptance (Task 10) covers the full user-space path.
+Note: This test exercises the tty_push_input → signal_pgrp → task_wake → signal delivery chain end-to-end in kernel context. It does NOT exercise the `arch_do_signal_delivery` ring-3 path (that requires returning to user space). Manual acceptance (Task 10) covers the full user-space path. The `t->flags &= ~PF_KTHREAD` step is a deliberate test-only trick — production code never demotes a kthread; only this signal-target fixture does.
 
 - [ ] **Step 2: Run selftest to verify it fails**
 
@@ -1360,7 +1437,7 @@ All spec sections covered. ✓
 
 - No "TBD"/"TODO"/"implement later" in step descriptions ✓
 - No "appropriate error handling" without code ✓
-- All test code is concrete (not "similar to Task N") ✓
+- All test code is concrete (v3 fix: test_pgrp_signal previously had `// ...` placeholder, now has full concrete body — D2) ✓
 - Every step has explicit code blocks or commands ✓
 
 **Type/signature consistency check:**
@@ -1385,6 +1462,21 @@ No reverse-nesting anywhere. ✓
 **Out-of-spec changes:**
 
 None. Plan implements exactly spec v5.
+
+---
+
+## v3 changes (over v2, commit a3c5ded)
+
+Reviewer feedback on v2 found 3 remaining issues:
+
+- **D1 (high, test would fail)**: `test_tty_vintr` uses `kernel_thread()` to create the signal target. `kernel_thread()` sets `PF_KTHREAD` (kernel/sched/task.c:1801). But `signal_pgrp()` (Task 1 Step 4) deliberately skips `PF_KTHREAD` per spec §3.3 — so `tty_push_input → signal_pgrp → task enumeration` silently bypasses the target thread, `vintr_seen` stays 0, test times out. The v2 plan's comment claiming "pgrp doesn't care about kthread flag" was wrong.
+  - **v3 fix**: After spawning the kernel_thread, do `t->flags &= ~PF_KTHREAD;` to demote it. This is a test-only trick (production code never demotes a kthread); documented inline.
+
+- **D2 (high, test is no-op placeholder)**: v1 and v2 plans both had `test_pgrp_signal` body as just `// ...` plus an ASSERTIONS comment. Would compile as empty function → test "passes" but verifies nothing. Violated plan self-review's claim "All test code is concrete".
+  - **v3 fix**: Filled in concrete body using same kernel_thread + PF_KTHREAD-demote pattern as D1. Spawns target, sets its pgrp, asserts three signal_pgrp modes (no-op / ESRCH / hit), verifies `signal` bit set and `state` moved to TASK_RUNNING.
+
+- **D3 (medium, doc inconsistency)**: cosmetic — three code comments used "v3" label inconsistently with this plan's version; Task 1 Step 7 `git add` still listed `kernel/arch/x86_64/trap.c` (no longer edited after C1 fix); File Structure table still had "SYS_fork +2 lines" row.
+  - **v3 fixes**: Comments rewritten to reference spec §4.1.1 (not "v3"). Task 1 Step 7 git add trimmed. File Structure row updated.
 
 ---
 
