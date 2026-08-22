@@ -1,6 +1,6 @@
-# libc 兼容性修复设计（printf 浮点 + getopt）— 修订版 v9
+# libc 兼容性修复设计（printf 浮点 + getopt）— 修订版 v10
 
-- 日期：2026-08-22（v9 修订）
+- 日期：2026-08-22（v10 修订）
 - 验收基线：`docs/applet-verification.md`（BusyBox Applet 验证报告 2026-08-18）
 - 范围：仅修复代码中**已确证**的两个 libc 缺陷——`printf` 格式化器（无符号路径缺失 + 浮点缺失 + 大小保护缺失）与 `getopt`（逻辑错误 + 公开头多重定义）。
 - 方针：最小范围、最低风险；不引入外部依赖（除非浮点部分明确选择成熟 dtoa）。
@@ -65,6 +65,10 @@
 - **P1（浮点默认精度 / `%g` 规则）**：明确 `%f/%e/%g` 默认精度 6；`%g` 显式 `.0` 按 precision=1；`%g` 选 `%e` 当且仅当 `exp < -4` 或 `exp >= precision`；新增对应验收用例。
 - **P1（`#` 归属矛盾）**：明确 `floatconv_render(..., fl, ...)` 负责浮点专属数字生成（含 `#` 的小数点/尾随零、指数格式、舍入），`vformatter` 仅做宽度/左对齐/零填充（符号感知 ZEROPAD）；二者不重叠，消除 `#` 由谁负责的歧义。
 
+### 0.10 补充修订（v10，本轮）
+- **P0（其余 wrapper 的 `int` 窄化）**：`snprintf`/`vsnprintf`/`sprintf`/`vsprintf` 公开返回类型也是 `int`，此前未统一溢出守卫。现规定：`vformatter` 计数溢出返回 `SIZE_MAX`；所有 `int` 返回接口在 `total == SIZE_MAX` 或 `total > INT_MAX` 时一律返回 `-1`，与 `printf`/`vfprintf`/`vasprintf` 一致。
+- **P1（`%.0g` 期望错误）**：`1.5e-5` 在 round-to-nearest 下应为 `"2e-05"`（非 `"1e-05"`）；同步修正 §3.4 与 §5.3 期望值。
+
 ## 1. 背景与上下文（修正后的根因归类）
 
 | # | 根因 | 核查结论 | 本方案处理 |
@@ -105,10 +109,11 @@
   - 写入条件固定为 **`cap > 0 && pos < cap - 1`**（**防 `cap == 0` 时 `cap - 1` 下溢为 `SIZE_MAX`**：纯计数模式下 `dst == NULL`，不得写入 `dst[0]`）；满足时写 `dst[pos]`，自增 `pos` 与 `total`；`cap == 0` 进入纯计数路径，不写、不终止。
   - 当 `cap > 0` 时，无论是否被截断，**最后都写 `dst[min(total, cap-1)] = '\0'`**（核心负责终止，调用方无需再补）。
   - 当 `cap == 0`（含 `dst==NULL`）时：只累计 `total`，不写、不终止。
-  - 返回 `total`（C 标准 `snprintf` 语义：本应写入的总长度，不含 NUL）。
+  - 返回 `total`（C 标准 `snprintf` 语义：本应写入的总长度，不含 NUL）。若内部计数溢出无法用 `size_t` 表示，`vformatter` 返回 `SIZE_MAX`。
+  - **统一溢出约定（满足 P0）**：`vformatter` 返回 `SIZE_MAX` 或 `total > INT_MAX` 时，所有返回 `int` 的公开接口（`snprintf`/`vsnprintf`/`sprintf`/`vsprintf`）一律返回 `-1`；这与既有的 `printf`/`vfprintf`/`vasprintf` 的 `>INT_MAX → -1` 行为完全一致。仅 `vasprintf` 额外保证 `*strp = NULL`。
 - wrapper 接入：
-  - `vsnprintf`/`snprintf`：`vformatter(buf, size, …)`；`size>0` 返回 `total`（截断亦同 `size==0` 走 `vformatter(NULL,0,…)` 仅计长度）。`cap>0` 已由核心保证 NUL。
-  - `vsprintf`：**保留历史 4 KiB 上限**，`vformatter(buf, 4096, …)`——最多保存 4095 个可见字符 + NUL，与现状语义一致。
+  - `vsnprintf`/`snprintf`：`vformatter(buf, size, …)`；`size>0` 返回 `total`（截断亦同 `size==0` 走 `vformatter(NULL,0,…)` 仅计长度）；**溢出时按统一约定返回 `-1`**。`cap>0` 已由核心保证 NUL。
+  - `vsprintf`：**保留历史 4 KiB 上限**，`vformatter(buf, 4096, …)`——最多保存 4095 个可见字符 + NUL，与现状语义一致；**溢出（`total > INT_MAX`/`SIZE_MAX`）按统一约定返回 `-1`**。
   - `sprintf` / `vsprintf`：**采用标准契约——调用者必须保证缓冲足够**（这两个函数**无 size 参数，无法提供大小保护**）。内核 `vformatter(buf, 4096, …)` 只是“至多尝试格式化 4095 字符”的内部上限，**不构成对小缓冲的安全保证**；若调用者传入 `char buf[8]`，写越界属调用方 UB（与标准 `sprintf` 一致）。**本设计只承诺 `snprintf`/`vsnprintf`/`vasprintf` 的大小安全**，`sprintf`/`vsprintf` 不纳入“大小保护已解决”范围（仅保证 NUL 终止与已知 4 KiB 内部上限行为）。
   - `vasprintf`：**双 pass**——`va_copy(ap2, ap)` 调 `vformatter(NULL, 0, …, ap2)` 得 `total`；检查错误（`total == SIZE_MAX`、或 `total + 1` 溢出 `SIZE_MAX`、或 `total > INT_MAX`）→ 返回 `-1` 且 `*strp = NULL`；否则分配 `total+1`，用**原始 `ap`** 调 `vformatter(buf, total+1, …, ap)` 填充（`cap>0` 保证 NUL），`va_end(ap2)`。绝不用同一 `va_list` 格式化两次。
 - **二进制输出 sink（printf/vfprintf，P1 一致性修复）**：公开返回类型为 `int`，故须与 `vasprintf` 一致防御 `total > INT_MAX`。采用 **2-pass 堆缓冲**：`va_copy` 计数得 `total` → **若 `total > INT_MAX` 直接返回 `-1`（不分配、不写出）** → 否则分配 `total+1` → 用原始 `ap` 调 `vformatter(heap, total+1, …)` 填充（受 `cap` 约束、保证 NUL 于 `heap[total]`）→ 经由 **`write_all(fd, heap, total)`** 写出 → `free` → 返回 `total`（或 `-1`）。
@@ -157,7 +162,7 @@
       `size_t floatconv_render(char *scratch, size_t scap, double d, int w, int p, int fl, int conv, char *sign_out)`；其中 `sign_out` 输出符号字符（`'+'`/`'-'`/`' '`/`'\0'`），`scratch` 仅接收**数字主体串**（不含符号、不含宽度/填充），返回主体长度。该接口契约保证符号与数字分离，供 `vformatter` 做符号感知的 `ZEROPAD` 填充（`%+08.2f`→`+0003.14`）。
     - **精度默认值与 `%g` 规则（满足 P1）**：`vformatter` 对未指定 precision 传负值；`floatconv_render` 必须按以下契约处理（被 `seq`、BusyBox `printf`、普通 `%f/%g` 验收依赖）：
       - `%f`/`%e`/`%g` 未指定 precision 时**默认精度 = 6**（如 `%f` 的 `1.0`→`"1.000000"`）。
-      - `%g`/`%G` 显式 `.0` 按 **precision = 1** 处理（C 标准：`%.0g` 至少 1 位有效数字，如 `%.0g` 的 `1.5e-5`→`"1e-05"`）。
+      - `%g`/`%G` 显式 `.0` 按 **precision = 1** 处理（C 标准：`%.0g` 至少 1 位有效数字，如 `%.0g` 的 `1.5e-5`→`"2e-05"`，round-to-nearest 下 `1.5`→`2`）。
       - `%g`/`%G` 选择 `%e` 风格当且仅当规约化十进制指数 `exp < -4` 或 `exp >= precision`；否则用 `%f` 风格，并据此去尾随零与无谓小数点（受 `#` 影响）。
     - `libc/stdio/floatconv.h`：**私有内部头**（置于 `libc/stdio/`，**不安装到公开 `include/`**），声明该函数 + `FLOATCONV_MAX_PREC` 等宏；`vsprintf.c` 包含它以调用渲染器。
     - 两者均编译进 `libc.a`（遵循 `stdio/*.c` 自动发现）；`floatconv_render` 在 libc 内部可链接（非 `static`），但不在公开 API 导出。
@@ -222,7 +227,7 @@
 - **浮点**：`%.0f` 整数化；`%f/%e/%g` 正/负/零/inf/nan；`0.5`/`2.5` 四舍五入；`1e20` 大值；`%g`↔`%f` 切换。
 - **浮点舍入（v4.x 新增，ties-to-even；v5 修正用例）**：`%.0f` 的 `0.5→"0"`、`1.5→"2"`、`2.5→"2"`、`-0.5→"-0"`、`3.5→"4"`（这些是有效的 ties-to-even 覆盖）；`%.1f` 改用**精确二进制中点**（非 `2.05` 这种不可靠的非精确中点）：`2.25→"2.2"`（2.25=9/4 精确，.25 位于偶数侧 2）、`2.75→"2.8"`（2.75=11/4 精确，.75 进位到偶数 8）。断言默认舍入模式为 round-to-nearest-even。
 - **binary64 前提（v4.x 新增，v5 修正）**：预处理器 `#if DBL_MANT_DIG!=53 || DBL_MAX_EXP!=1024` → `#error`；C 级 `_Static_assert(sizeof(double)==8, "requires IEEE-754 binary64")`（`sizeof` 不用于 `#if`）；位模式单测校验真实编码：`(uint64_t)1.0==0x3FF0000000000000`、`(uint64_t)0.5==0x3FE0000000000000`。宏定义本身不构成充分证明。
-- **浮点默认精度与 `%g` 规则（v9 新增，P1）**：`%f` 默认精度 6（`1.0`→`"1.000000"`，`%f` 与 `%.6f` 等价）；`%.0g` 按 precision=1（`1.5e-5`→`"1e-05"`）；`%g` 阈值 `exp < -4` 或 `exp >= precision` 选 `%e`、否则 `%f`，并去尾随零（受 `#` 影响，如 `%g` 的 `1.0`→`"1"`、`%#g` 的 `1.0`→`"1.00000"`）。
+- **浮点默认精度与 `%g` 规则（v9 新增，P1；v10 修正 `%.0g` 期望）**：`%f` 默认精度 6（`1.0`→`"1.000000"`，`%f` 与 `%.6f` 等价）；`%.0g` 按 precision=1（`1.5e-5`→`"2e-05"`，ties-to-even 下 `1.5→2`）；`%g` 阈值 `exp < -4` 或 `exp >= precision` 选 `%e`、否则 `%f`，并去尾随零（受 `#` 影响，如 `%g` 的 `1.0`→`"1"`、`%#g` 的 `1.0`→`"1.00000"`）。
 
 - **浮点边界（v4.x 新增，bigint）**：`DBL_MAX`/`DBL_MIN` 的 `%f`/`%e` 经定容 bigint 正确展开；`%.100f` 等超 `FLOATCONV_MAX_PREC` 请求被钳制到上限且不崩溃、不越界（文档化行为）。
 - **浮点 flags（v4 新增，覆盖 §3.4 承诺语义）**：`%#.0f`（强制小数点，如 `1`→`1.`）、`%+08.2f`（`+` 号 + 零填充 + 宽度，如 `3.14`→`+0003.14`；**重点验证符号在零填充之前，`000+3.14` 为错误**）、`%-10.2e`（左对齐 + 宽度，如 `1.5e+00` 后补空格至 10 列）、`%#.5g`（`#` 保留尾随零/小数点后至少一位，如 `1.0`→`1.0000`）。这些用例用于捕获 musl 风格 flag 位映射错误或重复填充。
