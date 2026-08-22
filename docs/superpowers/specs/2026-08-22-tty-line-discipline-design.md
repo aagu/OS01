@@ -1,24 +1,23 @@
 # TTY 行规程与进程组（最小集）设计文档
 
 - 日期：2026-08-22
-- 状态：v2 待用户 review（尚未进入实现）
+- 状态：v3 待用户 review（尚未进入实现）
 - 目标：实现 POSIX 最小行规程（VINTR/VQUIT → 信号派发到前台进程组）+ 进程组/会话子系统骨架，使 Ctrl-C 能在 OS01 shell 中可靠终止前台任务（如 `cat /dev/urandom`、`cat` 无参数），同时为后续 job control 留出干净的扩展面
 - 修订记录：
   - v1：初版
-  - v2：并入 review 反馈——
-    - 🔴 致命：busybox `CONFIG_ASH_JOB_CONTROL is not set`（`.config:1125`）→ ash 内 `#if JOBS` 块全空，xtcsetpgrp 永不被调用，fg_pgrp 永远为 0，v1 设计静默失效
-    - 核心修复：新增 §3.5 自动 fg_pgrp 更新 + §4.2 devfs_open 默认 fg_pgrp = opener.pgrp，叠加后无论 ash 行为如何都能工作
-    - 🟠 §3.4 setpgid POSIX 校验（pgid 跨现存 pgrp 返 EPERM、pgid==pid 自检验）
-    - 🟠 §3.5 kill(-1) 广播（从非目标提升为实现目标）
-    - 🟠 §4.5 TIOCSPGRP 区间检查 + 调用者同 session 校验
-    - 🟡 §4.2 注释补 VSTART/VSTOP 已知未实现
-    - 🟡 §4.4 补 keyboard_poll 进程上下文说明
-    - 🟡 §6.2 修正 task_wake 实际取 rq_lock 的事实
-    - 🟡 §6.3 增 t->signal 同步故事（task_list_lock 写 + x86 TSO 原子读）
-    - 🟡 §4.4 去掉 VSUSP warned 静态计数器（重复日志无害）
-    - 🟡 §11 加默认 ISIG 影响面扫描 + CONFIG_ASH_JOB_CONTROL=n 已确认风险
-    - 🟡 §8 测试集扩到 6 个 systest（含 setpgid 自动 fg_pgrp 验证）
-    - 🟡 §9 文件清单更新：kernel/fs/devfs.c +5 行；总工作量 ~530 行
+  - v2：并入 review 反馈（CONFIG_ASH_JOB_CONTROL=n 确认；加 §3.4 自动 fg_pgrp 更新 + §4.1.1 devfs_open 默认；其余文档/测试修正）
+  - v3：并入 v2 review——v2 的兜底机制（§3.4 + §4.1.1）对不上真实 devfs 代码：
+    - 🔴 致命：`tty_set_dev_tty`（tty.c:305）只设 `dev_tty = tty`，**不写 `tty->vfs_node`**——v2 §4.1 的 `vfs_node` 字段从未被赋值，`dev_tty_vfs_node()` 永远返 NULL
+    - 🔴 致命：`tty_magic_open`（devfs.c:371）每次 calloc 新 `vfs_node_t`，f0->node 永不等任何固定 node，node 指针比较从根上行不通
+    - 🔴 致命：`devfs_open_node` 在 line 302 收到 `*out` 后立即 return 0，**根本到不了 §4.1.1 想要的"函数末尾"**
+    - 🟠 修复：删除 `tty->vfs_node` 字段 + `dev_tty_vfs_node()`；改用 `file_t->tty` 字段 + `private_data == keyboard_get_tty()` 判据；§4.1.1 默认 fg_pgrp 改到 `tty_magic_open` 物理分支和 `devfs_open_node` FD_DEV 默认分支两处
+    - 🟠 修复：§6.2 "两锁不嵌套"→"唯一锁序 task_list_lock → fg_pgrp_lock，禁止反向"——§3.4 实际是嵌套
+    - 🟠 修复：§7.2 重画——ash JOBS=0 不调 setpgid/tcsetpgrp，真正 load-bearing 是 §4.1.1 默认 fg_pgrp=pgrp=1 共享
+    - 🟠 §8.6 测试逻辑修复：父进程不能预先 open /dev/tty（否则 fg_pgrp 被占）；改为 fork 后子 open
+    - 🟡 §11 加共享 pgrp=1 耦合风险（shell + cat 同在 pgrp 1，Ctrl-C 会同时命中；shell 因 SIGINT handler 幸免但任何其它 pgrp-1 后台任务会死）
+    - 🟡 §10 加非目标："不解决 shell 自杀风险"，属第二档
+  - v2 历史改动：见 `git show 4e3783f`
+  - v1 历史改动：见 `git show fcd2219`
 
 ---
 
@@ -33,12 +32,12 @@
 1. **缺失行规程（主因）** — `kernel/tty/tty.c:125-140` 的 `tty_push_input` 只做 echo + ring push，**完全没读 `c_lflag & ISIG`、也没比较 `c_cc[VINTR]`**。`grep -rn 'ISIG\|VINTR\|VQUIT\|VSUSP\|cc_special' kernel/` 输出为空。整个内核从未把字符翻译成信号。
 2. **tty_struct 没有 pgrp 字段** — `kernel/include/kernel/tty.h:18-50` 的 `tty_struct` 没有 `fg_pgrp`/`pgrp` 字段（pty_struct 有，但那是 PTY 设备不是物理控制台 TTY）。即使实现了行规程，也没东西可派发。
 3. **TIOCSPGRP ioctl 是 stub** — `kernel/tty/tty.c:289-290` `case TIOCSPGRP: return 0;` 连 arg 都没读。
-4. **🔴 v2 新发现：busybox ash 在 OS01 上不会调 tcsetpgrp** —
+4. **🔴 v2/v3 已确认：busybox ash 在 OS01 上不会调 tcsetpgrp / setpgid** —
    - `thirdpart/busybox-1.36.1/.config:1125: # CONFIG_ASH_JOB_CONTROL is not set`
    - ash 内 `#define JOBS ENABLE_ASH_JOB_CONTROL`（`ash.c:186`）→ JOBS=0
-   - 所有 `xtcsetpgrp` 调用点都在 `#if JOBS` 块内（行 4124/4131/4228/5253/5424），编译为空
-   - 后果：v1 设计依赖"shell 调 tcsetpgrp"是单点失败——fg_pgrp 永远为 0，VINTR 静默 no-op
-   - v2 修复：§3.5 自动 fg_pgrp 更新 + §4.2 devfs_open 默认 fg_pgrp 兜底
+   - 所有 `xtcsetpgrp` / `setpgid(0, pgrp)` 调用点都在 `#if JOBS` 块内（行 4123/4124/4131/4132/4228/5251/5253/5318/5424），编译为空
+   - 后果：v1 设计的"shell 调 tcsetpgrp"是单点失败；fg_pgrp 永远为 0，VINTR 静默 no-op
+   - v3 修复：§3.4 自动 fg_pgrp 更新 + §4.1.1 devfs_open 默认 fg_pgrp 兜底（v2 设计有效，但 v2 用 node 指针比较失效；v3 改用 `file_t->tty` 字段 + `private_data == keyboard_get_tty()` 判据——见 §11.4）
 
 附加信号派发缺陷（即使行规程修了，信号也送不到前台进程组）：
 
@@ -188,13 +187,14 @@ case SYS_setpgid: {
     }
     target->pgrp = pgid;
 
-    // ── v2 核心：自动 fg_pgrp 更新（见 §3.5）──────────────────
-    // 若 target 刚成为新 pgrp leader（pgid==pid），且 fd 0 指向 dev_tty，
+    // ── v3 核心：自动 fg_pgrp 更新──────────────────
+    // 若 target 刚成为新 pgrp leader（pgid==pid），且 fd 0 指向控制台 TTY
+    // （file_t->tty == get_dev_tty()，由 §4.1.1 在 open 路径置位），
     // 把 dev_tty.fg_pgrp 同步到新 pgid——替代 POSIX 要求的"shell 调 tcsetpgrp"
     tty_t *dev_tty = get_dev_tty();
     if (dev_tty && current->files && current->files->fd[0]) {
         file_t *f0 = current->files->fd[0];
-        if (f0->node == dev_tty_vfs_node()) {
+        if (f0->tty == dev_tty) {
             uint64_t ftf = spin_lock_irqsave(&dev_tty->fg_pgrp_lock);
             dev_tty->fg_pgrp = pgid;
             spin_unlock_irqrestore(&dev_tty->fg_pgrp_lock, ftf);
@@ -239,19 +239,9 @@ case SYS_getsid: {
 }
 ```
 
-`dev_tty_vfs_node()` 是新增 helper（`kernel/tty/tty.c`）：
-
-```c
-vfs_node_t *dev_tty_vfs_node(void) {
-    return get_dev_tty() ? (vfs_node_t *)get_dev_tty()->vfs_node : NULL;
-}
-```
-
-`tty_t` 加 `vfs_node_t *vfs_node` 字段（指向 `/dev/tty` 对应的 vfs 节点），在 `tty_set_dev_tty` 时设置。
+`dev_tty_vfs_node()` helper **v3 删除**——v2 设计的 `tty->vfs_node` 字段无赋值代码，`tty_magic_open` 每次 calloc 新 node，pointer compare 永远失败。v3 改用 `file_t->tty` 字段判据（见 §4.1.1）。
 
 POSIX exec 后 EACCES：本档不追踪 exec 状态（task_struct 无 exec_count 之类字段），留 TODO，第二档补；当前对所有 setpgid 调用一视同仁，不阻塞 ash 的 setpgid(0,0) 用例（ash 不 exec 自身）。
-
-`dev_tty_vfs_node()` 与 `get_dev_tty()` 都需要在 tty 模块导出。
 
 ### 3.5 SYS_kill 扩展
 
@@ -308,7 +298,8 @@ typedef struct tty_struct {
     // ... 既有字段 ...
     pid_t       fg_pgrp;         // 前台进程组 ID（TIOCSPGRP / 自动 setpgid 路径设置）
     spinlock_T  fg_pgrp_lock;    // 保护 fg_pgrp，IRQ-safe
-    struct vfs_node *vfs_node;    // /dev/tty 对应的 vfs 节点；setpgid 自动更新时比对用
+    // struct vfs_node *vfs_node  ← v3 删除（实测 tty_set_dev_tty 不写此字段）
+
 } tty_t;
 ```
 
@@ -319,36 +310,106 @@ typedef struct tty_struct {
 ```c
 tty->fg_pgrp = 0;
 spin_init(&tty->fg_pgrp_lock);
-tty->vfs_node = NULL;  // 由 tty_set_dev_tty() 设置
+// v3: tty->vfs_node 字段删除——实测 tty_set_dev_tty()（tty.c:305）只设
+// dev_tty = tty，从未写 tty->vfs_node；tty_magic_open() 每次 calloc 新 node，
+// pointer compare 永远失败。改用 file_t->tty 字段（见 §4.1.1）。
 ```
 
-`vfs_node` 字段为 §3.4 自动 fg_pgrp 更新提供比对目标（setpgid 时检查 current->files->fd[0] 是否指向 /dev/tty）。
+### 4.1.1 file_t 加 tty 字段 + 默认 fg_pgrp 兜底（v3 重写）
 
-### 4.1.1 devfs_open 默认 fg_pgrp（v2 兜底）
+**v3 重写原因**：v2 的 `tty_magic_open()` 物理分支（devfs.c:368）每次 calloc 新 `vfs_node_t`，node 指针比较永远失败；`devfs_open_node()`（devfs.c:298-302）收到 `*out` 后立即 return 0，根本到不了 §4.1.1 想要的"函数末尾"。新设计用 `file_t->tty` 字段在两处 open 路径独立置位，**判据换成 `private_data == keyboard_get_tty()`**。
 
-`kernel/fs/devfs.c` `devfs_open_node` 中，字符设备 open 成功后，若 node 是 `/dev/tty` 对应的 devfs 节点，调用：
+**步骤 1**：`kernel/include/kernel/file.h:78-91` `file_t` 加 1 字段：
 
 ```c
-tty_t *tty = get_dev_tty();
-if (tty && tty->vfs_node == node && current->pgrp != 0) {
-    uint64_t f = spin_lock_irqsave(&tty->fg_pgrp_lock);
-    if (tty->fg_pgrp == 0)  // 仅当尚未设置时（避免覆盖后续 tcsetpgrp）
-        tty->fg_pgrp = current->pgrp;
-    spin_unlock_irqrestore(&tty->fg_pgrp_lock, f);
+typedef struct file {
+    enum file_type type;
+    uint32_t       refcount;
+    int            flags;
+    uint64_t       offset;
+    struct vfs_node *node;       // FD_VFS / FD_DEV
+    pipe_t         *pipe;       // FD_PIPE
+    pty_t          *pty;        // FD_PTY_MASTER / FD_PTY_SLAVE
+    socket_t       *sock;       // FD_SOCKET
+    struct tty_struct *tty;     // v3 新增：标记此 fd 指向控制台 TTY
+} file_t;
+```
+
+非 union 形式，多占 8 字节/file（fd 总数有限，影响可忽略）。
+
+**步骤 2A**：`/dev/tty` magic 路径——`kernel/fs/devfs.c:368-383` `tty_magic_open` 物理分支，在 `return 0` 之前插入：
+
+```c
+for (int i = 0; i < device_count; i++) {
+    if (devices[i].private_data == target && devices[i].type == VFS_CHRDEV
+        && devices[i].registered) {
+        vfs_node_t *node = calloc(1, sizeof(vfs_node_t));
+        if (!node) return -ENOMEM;
+        node->type = VFS_CHRDEV;
+        node->fs_data = (void *)(uintptr_t)i;
+        node->ops = &devfs_ops;
+        node->refcount = 1;
+        *out_file = file_alloc();
+        if (!*out_file) { free(node); return -ENOMEM; }
+        (*out_file)->type = FD_DEV;
+        (*out_file)->node = node;
+
+        // v3 新增：标记 TTY + 默认 fg_pgrp 兜底（仅当尚未设置时）
+        (*out_file)->tty = get_dev_tty();
+        if (current->pgrp != 0) {
+            tty_t *tty = get_dev_tty();
+            if (tty) {
+                uint64_t f = spin_lock_irqsave(&tty->fg_pgrp_lock);
+                if (tty->fg_pgrp == 0) tty->fg_pgrp = current->pgrp;
+                spin_unlock_irqrestore(&tty->fg_pgrp_lock, f);
+            }
+        }
+        return 0;
+    }
 }
 ```
 
-**效果**：shell（init 子进程，pgrp=1）首次 open `/dev/tty` 时，fg_pgrp 默认设为 1。即使 shell 后续不调 tcsetpgrp，VINTR 仍能派发到 pgrp=1 的所有成员（shell + 所有未 setpgid 的子进程）。
+**步骤 2B**：`/dev/tty0` 默认 FD_DEV 路径——`kernel/fs/devfs.c:307-313` `devfs_open_node` FD_DEV default 分支替换为：
 
-**与 §3.4 自动 fg_pgrp 更新的协同**：
+```c
+// Default: FD_DEV
+*out = file_alloc();
+if (!*out) return -ENOMEM;
+(*out)->type = FD_DEV;
+(*out)->node = vfs_node_get(node);
+(*out)->flags = flags;
+
+// v3 新增：若该设备是控制台 TTY（private_data == keyboard_get_tty()），
+// 标记 tty 字段 + 默认 fg_pgrp 兜底
+int didx = (int)(uintptr_t)node->fs_data;
+if (didx >= 0 && didx < DEVFS_MAX_DEVICES && devices[didx].registered &&
+    devices[didx].private_data == keyboard_get_tty()) {
+    (*out)->tty = get_dev_tty();
+    if (current->pgrp != 0) {
+        tty_t *tty = get_dev_tty();
+        if (tty) {
+            uint64_t f = spin_lock_irqsave(&tty->fg_pgrp_lock);
+            if (tty->fg_pgrp == 0) tty->fg_pgrp = current->pgrp;
+            spin_unlock_irqrestore(&tty->fg_pgrp_lock, f);
+        }
+    }
+}
+return 0;
+```
+
+判据 `private_data == keyboard_get_tty()` 与 `tty_magic_open` 物理分支（devfs.c:369）一致——`keyboard_get_tty()` 与 `get_dev_tty()` 都返回 `main.c:238-240` 设置的同一个 `console` 指针。
+
+**PTY slave 分支**：`tty_magic_open` 的 `current->ctty_type == CTTY_PTY` 分支（devfs.c:351-363）本档**不设 tty 字段**（pty_t 与 tty_t 类型不同，强转不安全；PTY 已有自己的 pgrp 字段与 pty_slave_ioctl 路径）。PTY slave 用户仍可通过 TIOCSPGRP/TIOCGPGRP 走 pty_slave_ioctl（已实现）——与本档无冲突。
+
+**协同**：
 
 | 场景 | 行为 |
 |---|---|
-| shell open /dev/tty，未调任何 setpgid | fg_pgrp=1；fork 出的 child 默认 pgrp=1 → Ctrl-C 命中 shell+child |
-| shell open /dev/tty，child 调 setpgid(0,0) | §3.4 自动更新 fg_pgrp=child.pid → Ctrl-C 命中 child |
-| shell 调 tcsetpgrp 显式覆盖 | fg_pgrp=任意值；§4.1.1 不覆盖（仅当 fg_pgrp==0 时设） |
+| shell open /dev/tty 或 /dev/tty0，未调任何 setpgid | fg_pgrp=1；fork child 默认 pgrp=1 → Ctrl-C 命中 shell+child |
+| child 调 setpgid(0,0) 且 fd0->tty == get_dev_tty() | §3.4 自动更新 fg_pgrp=child.pid → Ctrl-C 命中 child |
+| shell 显式 tcsetpgrp | fg_pgrp=任意值；§4.1.1 不覆盖（仅当 fg_pgrp==0 时设） |
 
-注意：`current->pgrp == 0` 时跳过——避免 init 在 pgrp=0 状态下 open /dev/tty 时把 fg_pgrp 设成 0（虽然无意义但稳妥）。
+**已知耦合风险**（§11.6 详述）：ash JOBS=0 不调 setpgid(0,0)，cat 与 shell 共享 pgrp=1，Ctrl-C 同时命中两者。shell 因 busybox ash 的 SIGINT handler 幸免（raise EXINT 而非自杀），但任何其它从 init fork 且未 setpgid 的后台进程会一并被杀。**精确解（仅 cat 死）需 busybox `CONFIG_ASH_JOB_CONTROL=y` 或 OS01 改造 shell——本档不碰**，第二档再处理。
 
 ### 4.2 默认 termios
 
@@ -581,22 +642,33 @@ int killpg(pid_t pgrp, int sig) {
 | `tty->ring_lock` | `tty->ring[head/tail]` | spin_lock_irqsave | 是 |
 | `tty->read_wait_lock` | `tty->read_wait` 链表 | spin_lock_irqsave | 是 |
 
-### 6.2 锁顺序
+### 6.2 锁顺序（v3 修正）
 
-**嵌套路径**：`signal_pgrp` → `task_wake`（持 task_list_lock 下调用）。
+**v3 修正**：v2 写"两锁不嵌套"是错的。实际唯一锁序：
 
-- `signal_pgrp` 持 `task_list_lock`，对每个匹配 task：
-  - 写 `t->signal`（受 task_list_lock 保护）
-  - 若 `state == TASK_INTERRUPTIBLE` → `task_wake(t)`
-- `task_wake`（`kernel/sched/task.c:177`）实际**取 rq_lock**（每个 CPU 的 runqueue 锁）操作 runqueue——v1 文档表述"task_wake 仅操作 wait_list，不取锁"是错的，本档修正。`task_send_signal` 早已在 task_list_lock 下调 task_wake，所以锁序 `task_list_lock → rq_lock` 是已验证存在的（沿用既有模式）。本档不引入新的锁序反转。
+```
+task_list_lock → fg_pgrp_lock  （§3.4 SYS_setpgid 路径）
+fg_pgrp_lock → 释放 → task_list_lock  （tty_push_input → signal_pgrp 路径）
+```
 
-**VINTR 路径下两把锁的获取顺序**（`tty_push_input` → `signal_pgrp`）：
+**禁止反向嵌套**（task_list_lock → fg_pgrp_lock → ... → task_list_lock 会死锁）。
 
-1. `spin_lock_irqsave(&tty->fg_pgrp_lock)` （读 fg_pgrp 到局部变量）
-2. 立即 `spin_unlock_irqrestore`
-3. 然后 `signal_pgrp` → `spin_lock_irqsave(&task_list_lock)`
+详细：
 
-两锁**不嵌套**——fg_pgrp_lock 持锁期间不进入 signal_pgrp，避免反向嵌套（task_list_lock → fg_pgrp_lock）的可能性。读出的 fg_pgrp 是快照，可能在派发瞬间已变化，但这是 POSIX 允许的（"派发时按当时 pgrp 计"，内核不阻塞保证一致）。
+- **§3.4 SYS_setpgid**（持 task_list_lock）：
+  - 写 `t->pgrp`（受 task_list_lock 保护）
+  - 若 caller fd0 是 TTY → 在 task_list_lock 持锁下取 `fg_pgrp_lock` → 写 `dev_tty->fg_pgrp`
+  - 嵌套方向：task_list_lock → fg_pgrp_lock（**唯一嵌套点**）
+- **tty_push_input → signal_pgrp**（持 task_list_lock 之前先放 fg_pgrp_lock）：
+  - `spin_lock_irqsave(&tty->fg_pgrp_lock)` → 读 fg_pgrp 到局部变量 → 立即 `spin_unlock`
+  - `signal_pgrp` → `spin_lock_irqsave(&task_list_lock)`
+  - 嵌套方向：fg_pgrp_lock → 释放 → task_list_lock（**不嵌套**）
+
+**task_wake 取 rq_lock**：`task_wake`（`kernel/sched/task.c:177`）实际取 `rq_lock`。`signal_pgrp` 持 task_list_lock 下调 task_wake，锁序 task_list_lock → rq_lock 是已验证存在的（沿用 `task_send_signal` 模式）。v3 沿用。
+
+**未来约束**：
+- 任何新代码若需在 `fg_pgrp_lock` 持锁下访问 task_list（包括 t->signal 写），会引入反向嵌套——**禁止**。fg_pgrp_lock 持锁时间应足够短（如本档的"读快照"模式）。
+- `SYS_setpgid` 已在嵌套路径，**禁止在 §3.4 内部再次取 task_list_lock**（已显式不进 `signal_pgrp`）。
 
 ### 6.3 SMP + t->signal 同步故事
 
@@ -654,21 +726,54 @@ shell waitpid() 返回（child reaped）
 shell 打印提示符
 ```
 
-### 7.2 shell 启动前台任务（busybox ash 已实现）
+### 7.2 shell 启动前台任务（v3 重写：实际 ash JOBS=0 路径）
+
+**v3 重写**：v2 此节描述"child 调 setpgid(0,0) + parent 调 tcsetpgrp"——实测 busybox `CONFIG_ASH_JOB_CONTROL=n`（`ash.c:186 #define JOBS ENABLE_ASH_JOB_CONTROL`）→ JOBS=0 → 这两条调用都不会发生。**真正 load-bearing 的路径是 §4.1.1 默认 fg_pgrp 兜底**。下面重画：
 
 ```
-ash 解析 "cat /dev/urandom"
-  → fork()
-     child: kernel/fork → 子进程 pgrp 继承 = ash.pgrp
-  → child: setpgid(0, 0) → SYS_setpgid(pid=0, pgid=0)
-     → 解析为 setpgid(child_pid, child_pid)
-     → child.pgrp = child_pid
-  → child: exec("/bin/cat", ...) → exec 不改 pgrp
-  → parent: tcsetpgrp(tty_fd, child_pid)
-     → ioctl(fd, TIOCSPGRP, &child_pid)
-     → tty.fg_pgrp = child_pid
-shell 在 waitpid() 阻塞
+[init 启动] main.c:1924 spawn_user_task("/bin/init")
+  init_task_union.task.pgrp = 1（§3.1 init 必须显式设）
+  
+[shell / busybox hush（OS01 默认 shell）启动]
+  hush 继承 init 的 pgrp=1
+  
+[hush open /dev/tty 或 /dev/tty0]
+  走 tty_magic_open 物理分支（/dev/tty）或 devfs_open_node FD_DEV（/dev/tty0）
+  → (*out_file)->tty = get_dev_tty()      // §4.1.1 步骤 2A/2B
+  → dev_tty->fg_pgrp == 0 → 设为 hush.pgrp = 1
+  
+[用户键入 "cat /dev/urandom" 回车]
+  hush fork()
+     child: kernel/fork → child.pgrp 继承 = 1
+  child: exec /bin/cat → pgrp 仍 = 1
+  hush: waitpid() 阻塞（JOBS=0，不调 setpgid/tcsetpgrp）
+  
+[用户按 Ctrl-C]
+  kernel/driver/keyboard.c:keyboard_handler
+    → translate_and_push 产生 0x03
+    → tty_push_input(kbd_tty, 0x03)
+  kernel/tty/tty.c:tty_push_input
+    → ISIG && c_cc[VINTR]==3, c==3 → 命中
+    → spin_lock fg_pgrp_lock → 读 fg_pgrp = 1
+    → spin_unlock
+    → signal_pgrp(1, SIGINT)  // §3.3
+  
+  signal_pgrp 持 task_list_lock：
+    → hush.pgrp==1 → hush.signal |= SIGINT
+    → cat.pgrp==1  → cat.signal  |= SIGINT
+    → task_wake 若 INTERRUPTIBLE
+    
+  后续 ret_from_intr / do_system_call → arch_do_signal_delivery：
+    → hush: SIGINT handler → raise EXINT（busybox hush 实现，非自杀）
+    → cat:  SIG_DFL → do_exit(2<<8)
+  
+  hush 继续主循环 → 显示提示符
+  cat 已死 → hush waitpid() 回收
 ```
+
+**§3.4 自动 fg_pgrp 更新在 ash JOBS=0 路径上不会被触发**（ash 不调 setpgid）。§3.4 仅当用户态程序主动调 `setpgid(0, 0)`（如自己写一个"exec 前 setpgid"的小程序）时才会触发。
+
+**已知耦合**（§11.6）：因 ash/cat 同在 pgrp=1，Ctrl-C 同时命中两者。hush 因 SIGINT handler 幸免，但任何其它从 init fork 且未 setpgid 的后台进程会一并被杀——这是 v3 已知限制。
 
 ---
 
@@ -797,11 +902,10 @@ static void test_kill_neg_pid_pgrp(void) {
 
 ```c
 // 验证 §4.1.1：open /dev/tty 后，tcgetpgrp 返回 opener.pgrp
-// 必须 fork 后子进程 open（父进程已 open 过 /dev/tty 会先占 fg_pgrp）
+// v3 修复：父进程不能预先 open /dev/tty，否则 fg_pgrp 被父 pgrp 占住
+// （§4.1.1 仅当 fg_pgrp==0 时设置），子 open 时不再触发。
+// 改为：父不 open，直接 fork；子 setpgid(0, <独特 pid>) → open → tcgetpgrp
 static void test_devfs_open_default_fg_pgrp(void) {
-    int fd = open("/dev/tty", O_RDWR);
-    if (fd < 0) { FAIL("devfs_open_fg", "no /dev/tty"); return; }
-    // 子进程：setpgid(0, <独特 pid>) → open /dev/tty → tcgetpgrp 应回 <独特 pid>
     int64_t pid = fork();
     if (pid < 0) { FAIL("devfs_open_fg", "fork"); return; }
     if (pid == 0) {
@@ -809,12 +913,14 @@ static void test_devfs_open_default_fg_pgrp(void) {
         int cfd = open("/dev/tty", O_RDWR);
         if (cfd < 0) { _exit(2); }
         pid_t p = tcgetpgrp(cfd);
+        // §4.1.1：open 时 fg_pgrp==0 → 设为 caller.pgrp = getpid()
+        // 注：fork 不会触发 §4.1.1（仅 open 触发），父进程的 open 行为
+        // 不影响子进程的独立 open；子 open 时 fg_pgrp 应仍为 0
         _exit(p == getpid() ? 0 : 3);
     }
     int status; waitpid(pid, &status, 0);
     CHECK3(WIFEXITED(status) && WEXITSTATUS(status) == 0,
            "devfs_open_fg", "tcgetpgrp after open returns self pgrp");
-    close(fd);
 }
 ```
 
@@ -878,11 +984,12 @@ VINTR 端到端无法从用户态测试（用户态无法直接调 `tty_push_inp
 | 文件 | 改动 | 行数 |
 |---|---|---|
 | `kernel/include/kernel/task.h` | `task_struct` 加 `pgrp`/`session` 字段 | +2 |
-| `kernel/include/kernel/tty.h` | `tty_struct` 加 `fg_pgrp`/`fg_pgrp_lock`/`vfs_node` | +3 |
+| `kernel/include/kernel/tty.h` | `tty_struct` 加 `fg_pgrp`/`fg_pgrp_lock`（**v3 移除 vfs_node**） | +2 |
+| `kernel/include/kernel/file.h` | `file_t` 加 `tty` 字段（v3 新增） | +1 |
 | `kernel/sched/task.c` | `signal_pgrp()` 新函数；`init_task_union.task.pgrp/session` 初值 | +30 |
-| `kernel/tty/tty.c` | `tty_alloc` 默认 ISIG + c_cc 默认；`tty_push_input` 行规程；`tty_phys_ioctl` 真 TIOCSPGRP/TIOCGPGRP（区间检查+session 校验）；`dev_tty_vfs_node()` helper；`_POSIX_VDISABLE` 局部宏 | +75 |
-| `kernel/arch/x86_64/trap.c` | 4 个新 syscall case；SYS_fork 子任务加 2 行；SYS_kill 扩展（含 -1 广播内联）；SYS_setpgid 自动 fg_pgrp 更新 | +110 |
-| `kernel/fs/devfs.c` | `devfs_open_node` 末尾加 §4.1.1 默认 fg_pgrp 设置 | +8 |
+| `kernel/tty/tty.c` | `tty_alloc` 默认 ISIG + c_cc 默认；`tty_push_input` 行规程；`tty_phys_ioctl` 真 TIOCSPGRP/TIOCGPGRP（区间检查+session 校验）；`_POSIX_VDISABLE` 局部宏 | +75 |
+| `kernel/arch/x86_64/trap.c` | 4 个新 syscall case；SYS_fork 子任务加 2 行；SYS_kill 扩展（含 -1 广播内联）；SYS_setpgid 自动 fg_pgrp 更新（**v3 判据改用 file_t->tty**） | +110 |
+| `kernel/fs/devfs.c` | `tty_magic_open` 物理分支 + `devfs_open_node` FD_DEV 分支加 §4.1.1 默认 fg_pgrp + file_t->tty 字段（v3 两处都改） | +25 |
 | `test/cases/test_tty_vintr.c` | 新文件：VINTR e2e selftest | +50 |
 | `kernel/include/uapi/syscall.h` | +4 行 syscall 号 | +4 |
 | `libc/include/sys/syscall.h` | +4 行 syscall 号 | +4 |
@@ -890,10 +997,10 @@ VINTR 端到端无法从用户态测试（用户态无法直接调 `tty_push_inp
 | `libc/unistd/tcsetpgrp.c` | stub → ioctl | +5 |
 | `libc/unistd/tcgetpgrp.c` | fake-return-1 → ioctl | +5 |
 | `libc/signal/killpg.c` | stub → kill(-pgrp,sig) | +5 |
-| `user/systest.c` | 新增 6 测试函数（5 + §8.6 devfs_open 默认 fg_pgrp 测试）+ 注册 | +230 |
+| `user/systest.c` | 新增 7 测试函数（5 + §8.6 v3 修正版 + §8.7 setpgid_auto_fg_pgrp）+ 注册 | +250 |
 | `docs/syscall.md` | 4 行：setpgid/getpgid/setsid/getsid 条目 | +20 |
 
-合计：~558 行（内核 ~325，libc ~25，测试 ~280，文档 ~20）。
+合计：~575 行（内核 ~335，libc ~25，测试 ~280，文档 ~20）。
 
 ---
 
@@ -906,6 +1013,7 @@ VINTR 端到端无法从用户态测试（用户态无法直接调 `tty_push_inp
 - **不做** busybox ash 源码修改——busybox `.config:1125: # CONFIG_ASH_JOB_CONTROL is not set` 已确证 ash 内 `#if JOBS` 块全空，xtcsetpgrp 永不被调用。本档依赖 §3.4 自动 fg_pgrp 更新 + §4.1.1 devfs_open 默认 fg_pgrp 兜底，不依赖 ash 源码改造。
 - **不做** Linux x86_64 ABI 翻译表 `linux_to_os01[121]` (setpgid/getpgid) 等补全（native syscall 已够 native 程序使用；busybox 走 native 表）。
 - **不做** IXON/IXOFF 流控（VSTART/VSTOP 字符处理）——属第二档；本档 cbreak 模式下按 Ctrl-S/Ctrl-Q 会作为普通字符入 TTY 环，注释已注明（§4.2 末尾）。
+- **v3 新增**：**不解决 shell 与 child 共享 pgrp=1 导致的 Ctrl-C 同时命中问题**——属第二档。本档接受 §11.11 已知耦合（hush 因 SIGINT handler 幸免，但其它 pgrp-1 后台进程会一并被杀）；精确解需 busybox `CONFIG_ASH_JOB_CONTROL=y` 或 OS01 自写 minimal shell（不在本档爆炸半径内）。
 
 ---
 
@@ -925,6 +1033,15 @@ VINTR 端到端无法从用户态测试（用户态无法直接调 `tty_push_inp
 8. **multicore IRQ routing**：keyboard IRQ1 绑定到 BSP（既定事实，`kbd_lctrl` 等静态变量依赖此不变量，见 `kernel/driver/keyboard.c:49-51`）。VINTR 派发在 BSP 上完成，AP 上的 task 接收信号经 task_wake → schedule → cross-CPI/IPI 不在本档范围（沿用现有 signal 投递路径）。
 9. **§3.4 自动 fg_pgrp 更新的潜在误用**：若用户态程序非预期地调 setpgid(0, 0) 且 fd 0 是 /dev/tty，会"劫持"前台 pgrp。低严重性（setpgid 是 POSIX 主动调用，调用方需明确知道），且后果仅是 VINTR 派发范围变化，无安全/数据损失。
 10. **§8.1 systest 现有 132 测试回归风险**（v2 增）：SYS_kill 的 pid==0 语义变更（kill(0,sig) 从返 -ESRCH 变为 signal_pgrp），pid==-1 从返 -ESRCH 变为广播成功，可能影响依赖原语义的测试用例。**验收阶段必须先跑 `make test` 全量通过再合入**。
+11. **🔴 v3 已知耦合：共享 pgrp=1 的所有进程同时收到 Ctrl-C**（v3 增）：因 §4.1.1 默认 fg_pgrp=opener.pgrp=1（init pgrp），且 busybox ash JOBS=0 不调 setpgid(0,0)，shell 与所有 fork 出的 child 共享 pgrp=1。Ctrl-C → signal_pgrp(1) → 同时命中 shell + 所有 pgrp-1 成员：
+    - shell（busybox hush/ash）有 SIGINT handler（`raise_interrupt()` / `raise(EXINT)`）→ 不自杀，结束当前命令
+    - init（PID=1）有 PID-1 特判（`arch_do_signal_delivery` line 808）→ 永远忽略致命信号
+    - 其它从 init fork 且未 setpgid 的后台进程（如 systest、辅助服务）会被一并杀死
+    - **精确解**：需要 busybox `CONFIG_ASH_JOB_CONTROL=y`（让 ash 调 setpgid+tcsetpgrp 隔离 child），或 OS01 自己写一个 minimal shell。本档**不解决**，作为已知限制。第二档处理。
+12. **§3.4 自动 fg_pgrp 更新在 busybox 路径上不被触发**（v3 增）：因 ash JOBS=0 不调 setpgid，§3.4 的代码路径**永远不会被 busybox 触发**。但仍是必要的——为以下场景铺路：
+    - 其它程序（mbedtls/test/cases、用户态 demo、busybox hush 若未来开 JOB）主动调 setpgid(0,0) 时
+    - 第二档开 ash job control 时
+    不删 §3.4 是为"扩展面已就位"，但**§3.4 不是 v3 功能正确性的 load-bearing**——真正 load-bearing 是 §4.1.1 默认 fg_pgrp（§11.11 详述）。
 
 ---
 
