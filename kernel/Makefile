@@ -26,6 +26,7 @@ KERNEL_C_SOURCES := \
     $(wildcard memory/*.c) \
     $(wildcard fs/*.c) \
     $(wildcard sched/*.c) \
+    $(wildcard sync/*.c) \
     $(wildcard driver/*.c) \
     $(wildcard tty/*.c) \
     $(wildcard intr/*.c) \
@@ -34,8 +35,7 @@ KERNEL_C_SOURCES := \
     $(wildcard time/*.c) \
     $(wildcard percpu/*.c) \
     $(wildcard test/*.c) \
-    $(wildcard subsys/*.c) \
-    $(wildcard *.c)               # completion.c
+    $(wildcard subsys/*.c)
 
 # Platform devices are selected by arch/<arch>/make.config.  Keep x86-only
 # APIC/PIC/PIT/RTC code out of architecture-neutral source discovery.
