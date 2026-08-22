@@ -35,6 +35,12 @@
 - **P1（printf NUL 写 stdout）**：`printf`/`vfprintf` 改用 `min(total, 4095)` 写出（绝不把 `buf[4095]` 的终止 NUL 发出去）；新增长度 ≥4096 的字节级回归，断言输出无嵌入 NUL。
 - **P2（浮点 flags 测试）**：§5.3 增加 `%#.0f`、`%+08.2f`、`%-10.2e`、`%#.5g` 等 flag 用例。
 
+### 0.4 补充修订（v4.x，本轮）
+- **P0（跨 TU 调用）**：`floatconv` 不再标 `static`；改为 `libc/stdio/floatconv.c` 提供非 `static` 内部函数 `floatconv_render`，并新增私有头 `libc/stdio/floatconv.h`（不安装到公开 `include/`）由 `vsprintf.c` 包含调用。
+- **P0（uint64_t 不足）**：引入**定容 bigint**（80×`uint32_t`≈2560 bit，覆盖任意有限 `double` 十进制展开至 ~770 位），并明确支持上界：所有有限 `double`；`precision` 上限 `FLOATCONV_MAX_PREC`（如 100），超出钳制到上限（文档化、不崩溃）。
+- **P1（`DBL_MANT_DIG` 错误）**：修正为 **53**（52 fraction + 1 隐含位）；`float.h` 加编译期 `#error` 断言 binary64（`DBL_MANT_DIG==53 && DBL_MAX_EXP==1024 && sizeof(double)==8`），并配单测。
+- **P1（舍入规则）**：明确默认 **round-to-nearest, ties-to-even**（不实现 `fenv`）；验收串固定 `0.5→"0"`、`2.5→"2"`、`-0.5→"-0"`、`3.5→"4"` 等。
+
 ## 1. 背景与上下文（修正后的根因归类）
 
 | # | 根因 | 核查结论 | 本方案处理 |
@@ -104,18 +110,28 @@
 - 支持 `double`：`%f/%F/%e/%E/%g/%G`。**`%lf` 等同 `%f`**（qualifier `l` 对 `double` 无额外语义）。
 - **`%Lf/%Le/%Lg`（long double）：本期显式不支持，且统一处理**——**不调用 `va_arg(args, long double)`**（避免类型不匹配 UB），将 `%Lf`/`%Le`/`%Lg` 原样输出字面量（`%Lf`→`%Lf` 等），**不消费该实参**。三条 `%L` 形态行为一致，须分别测试（见 §5.3）。
 - **`%a/%A`（十六进制浮点）：本期显式不支持**——原样输出 `%a`/`%A`。
-- 算法（呼应 P2，已冻结具体方案，v4 调整）：**不采用朴素 `frac*=10`**，也**不再移植 musl `fmt_fp`**。原因：`fmt_fp(FILE*, long double, …)` 内部依赖 `long double` 运算及 `math.h`/`float.h`（`signbit`/`isfinite`/`frexpl`/`LDBL_*`）；当前 OS01 libc 既无 `math.h`/`float.h`，也无这些函数/常量实现，引入会显著扩大依赖面与运行时辅助符号。改为 **自包含 `double`-only 浮点格式化器**，零外部依赖：
-  - **依赖面（明确，满足 P0）**：
-    - 新增 `libc/include/float.h`：仅定义格式化所需常量 `FLT_RADIX=2`、`DBL_MANT_DIG=52`、`DBL_MAX_EXP=1024`、`DBL_MIN_EXP=-1021`（即硬编码 IEEE-754 双精度布局，无需 `LDBL_*`）。
-    - 新增 `libc/include/math.h`（最小子集）：`signbit(x)`、`isfinite(x)` 实现为**位级宏**（经 `union { double; uint64_t }` 取 64 位位模式，检查符号位/指数域），**不调用任何运行时 libm 函数、不产生 helper 符号**。
-    - **不引入 `frexpl`/`scalbnl` 或任何 `long double` 运算**；`%f/%e/%g` 全部基于 `double` 的 64 位位模式 + 整数运算完成，无 long-double 辅助符号。
-  - **实现位置与链接**：新增 `libc/stdio/floatconv.c`（编译进 `libc.a`/`libk.a` 的 `stdio/` 目标；遵循 `libc/Makefile` 的 `stdio/*.c` 自动发现）。提供 `static` 的 `double→decimal` 渲染（Gay/Dragon4 风格：由位模式提取符号/指数/尾数，以 `uint64_t` 整数运算做 10 的幂次缩放与四舍五入），由 `vformatter` 在浮点转换符处调用，输入 `va_arg(args, double)` 与已解析的 `w`/`p`/`fl`/`t`。
-  - **集成边界（避免两层 flags/width 重复）**：`floatconv` 只生成“数字串 + 小数点 + 指数 + 符号”的原始序列；前导零/空格填充、宽度、`#`、左对齐、零填充由 `vformatter` 现有 padding 逻辑统一处理（浮点数字串复用 `number()` 风格的填充），**不在浮点渲染器内重复做宽度/填充**。
-  - 仍须满足 §3.4 全部逐例验收（含 §5.3 的 flags 用例：舍入进位、正负/零/负零、`inf`/`nan`、`%e` 指数归一化、`%g` 有效数字与去尾随零、`#`/`+`/宽度/对齐/零填充语义）。
-- **验收边界值**：`%.0f` 整数化、`%f/%e/%g` 正/负/零/inf/nan、`0.5`/`2.5` 四舍五入、大值（如 `1e20`）、`%g` 与 `%f` 切换阈值。
+- 算法（呼应 P2，已冻结具体方案，v4 定稿）：**不采用朴素 `frac*=10`**，亦**不移植 musl `fmt_fp`**（其 `long double`/`math.h` 依赖过重）。改为 **自包含 `double`-only 浮点格式化器**，零 `math.h`/`long double` 依赖：
+  - **依赖面（满足 P0）**：
+    - 新增 `libc/include/float.h`：定义 `FLT_RADIX=2`、`DBL_MANT_DIG=53`（**修正：53 = 52 显式 fraction 位 + 1 隐含整数位；此前写 52 错误**）、`DBL_MAX_EXP=1024`、`DBL_MIN_EXP=-1021`。并加**编译期断言** `#if DBL_MANT_DIG!=53 || DBL_MAX_EXP!=1024 || sizeof(double)!=8` → `#error "requires IEEE-754 binary64"`，并配单测校验 binary64 前提。
+    - 新增 `libc/include/math.h`（最小子集）：`signbit(x)`、`isfinite(x)` 为**位级宏**（`union{double;uint64_t}` 取符号/指数域），无 libm 调用、无 helper 符号。
+    - **不引入 `frexpl`/`scalbnl` 或任何 `long double` 运算**；仅用 `double` 的 64 位位模式 + 整数/大整数运算。
+  - **大整数支撑（满足 P0：纯 `uint64_t` 不足）**：`%f` 大指数（`DBL_MAX`≈1e308）、`%g`/高精度 `%.100f`、以及 10 的幂缩放中间值都超出 64 位，故**引入定容大整数（bigint）**——定长字数组（如 80×`uint32_t`≈2560 bit，足以容纳任意有限 `double` 的完整十进制展开至 ~770 位），提供 `init/adc/sub/mul_small/divmod_small/mul_pow10`。**明确支持上界**：
+    - 支持**所有有限 `double`**；`precision p` 上限 `FLOATCONV_MAX_PREC`（如 100）。`p > FLOATCONV_MAX_PREC` 时**钳制 `p = MAX_PREC`**（文档化：超精度请求只输出到上限，不崩溃、不越界），确保 bigint/栈占用有界。
+    - 非有限：`inf`/`nan` 走专用分支（文本 `inf`/`nan` + 可选符号），不经 bigint。
+    - 全程栈上定容缓冲（如 768 字节 scratch），无动态分配。
+  - **舍入规则（满足 P1）**：默认且仅保证 **round-to-nearest, ties-to-even**（不实现 `fenv`/`FLT_ROUNDS`，文档声明仅默认舍入模式）。验收串明确：
+    - `%.0f`：`0.5`→`"0"`、`1.5`→`"2"`、`2.5`→`"2"`、`-0.5`→`"-0"`、`3.5`→`"4"`。
+    - 任意精度 `%.1f`：`2.5`→`"2.5"`、`2.05`→`"2.0"`（中间位偶数判定）。
+  - **实现位置与链接（满足 P0 跨 TU 调用）**：拆为两个文件：
+    - `libc/stdio/floatconv.c`：提供**非 `static`** 的内部函数，如 `size_t floatconv_render(char *scratch, size_t scap, double d, int w, int p, int fl, int conv)`，生成“数字串+小数点+指数+符号”原始序列（不含宽度/填充），返回长度。
+    - `libc/stdio/floatconv.h`：**私有内部头**（置于 `libc/stdio/`，**不安装到公开 `include/`**），声明该函数 + `FLOATCONV_MAX_PREC` 等宏；`vsprintf.c` 包含它以调用渲染器。
+    - 两者均编译进 `libc.a`（遵循 `stdio/*.c` 自动发现）；`floatconv_render` 在 libc 内部可链接（非 `static`），但不在公开 API 导出。
+  - **集成边界（避免两层 flags/width 重复）**：`vformatter` 在浮点转换符处调用 `floatconv_render` 得到核心数字串，再由 `vformatter` 现有 padding 逻辑统一处理前导零/空格、宽度、`#`、左对齐、零填充（浮点数字串复用 `number()` 风格填充），**渲染器内不做宽度/填充**。
+  - 仍须满足 §3.4 全部逐例验收（含 §5.3 的 flags / 舍入 / 大值用例：`inf`/`nan`、负零、`%e` 指数归一、`%g` 有效数字与去尾随零、`#`/`+`/宽度/对齐/零填充语义）。
+- **验收边界值**：`%.0f` 整数化、`%f/%e/%g` 正/负/零/inf/nan、ties-to-even 舍入（`0.5→0`、`2.5→2`、`-0.5→-0`）、大值（如 `1e20`、`DBL_MAX` 的 `%f` 经 bigint）、`%g` 与 `%f` 切换阈值、超 `FLOATCONV_MAX_PREC` 精度的钳制行为。
 
 ### 3.5 方案选择（综合 P2，v4 定稿）
-- **推荐（已冻结）**：§3.2 重构 + §3.3 无符号/`ll` 路径（必做，自实现）；浮点采用 **自包含 `double`-only 浮点格式化器**（`libc/stdio/floatconv.c`，零 `math.h`/`long double` 依赖，见 §3.4 依赖面），填充复用 `vformatter` 现有逻辑。
+- **推荐（已冻结）**：§3.2 重构 + §3.3 无符号/`ll` 路径（必做，自实现）；浮点采用 **自包含 `double`-only 浮点格式化器**（`libc/stdio/floatconv.c` + 私有 `floatconv.h`，零 `math.h`/`long double` 依赖，定容 bigint 支撑，见 §3.4 依赖面），填充复用 `vformatter` 现有逻辑。
 - **备选（已弃用）**：musl `fmt_fp` 因 long-double/`math.h` 依赖过重已排除；D.M. Gay `dtoa` 同样需自行集成 flags/缓冲且可能触碰 long double，亦不采用。
 - 内核 `printk` 不受影响（独立文件，且内核 `-mno-sse` 编译，与本文无关）。
 
@@ -166,6 +182,10 @@
 - **浮点 `%L` 三形态（v3 修正）**：`%Lf`/`%Le`/`%Lg` 均原样输出字面量（`%Lf`→`%Lf`）、不消费实参，三种形态分别验证。
 - **真实回归（BusyBox）**：`du`（`%llu`）与 `sum`（`%u %llu`）的输出格式须与预期一致（见 §3.3）。
 - **浮点**：`%.0f` 整数化；`%f/%e/%g` 正/负/零/inf/nan；`0.5`/`2.5` 四舍五入；`1e20` 大值；`%g`↔`%f` 切换。
+- **浮点舍入（v4.x 新增，ties-to-even）**：`%.0f` 的 `0.5→"0"`、`1.5→"2"`、`2.5→"2"`、`-0.5→"-0"`、`3.5→"4"`；`%.1f` 的 `2.5→"2.5"`、`2.05→"2.0"`（中间位偶数判定）。断言默认舍入模式为 round-to-nearest-even。
+- **binary64 前提（v4.x 新增）**：编译期 `static_assert`/`#error`（`DBL_MANT_DIG==53 && DBL_MAX_EXP==1024 && sizeof(double)==8`）通过；单测校验 `DBL_MANT_DIG==53`。
+
+- **浮点边界（v4.x 新增，bigint）**：`DBL_MAX`/`DBL_MIN` 的 `%f`/`%e` 经定容 bigint 正确展开；`%.100f` 等超 `FLOATCONV_MAX_PREC` 请求被钳制到上限且不崩溃、不越界（文档化行为）。
 - **浮点 flags（v4 新增，覆盖 §3.4 承诺语义）**：`%#.0f`（强制小数点，如 `1`→`1.`）、`%+08.2f`（`+` 号 + 零填充 + 宽度，如 `3.14`→`+0003.14`）、`%-10.2e`（左对齐 + 宽度，如 `1.5e+00` 后补空格至 10 列）、`%#.5g`（`#` 保留尾随零/小数点后至少一位，如 `1.0`→`1.0000`）。这些用例用于捕获 musl 风格 flag 位映射错误或重复填充。
 - **`printf`/`fprintf` 无嵌入 NUL（v4 新增）**：构造长度 ≥4096 的格式化输出（如 `printf("%s", 长串)` 或循环拼出 ≥4096 字节），做**字节级**断言：经 `write` 发出去的字节数 = 可见长度，且输出缓冲中**无任何字节为 `'\0'`**（即 `buf[4095]` 的终止符未被写出）。
 - **自包含浮点依赖的编译/链接（v4 新增，回应 P0）**：`libc/include/float.h`、`libc/include/math.h`（仅位级宏）、`libc/stdio/floatconv.c` 必须随 libc 构建进 `libc.a`，且链接 busybox/测试程序时**无 `undefined reference`**（尤其不得引入 `frexpl`/`scalbnl`/任何 `__*_ld` 等 long-double helper 符号）；链接产物用 `nm`/`objdump` 核对无意外外部浮点符号。
