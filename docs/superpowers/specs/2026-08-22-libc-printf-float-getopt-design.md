@@ -1,6 +1,6 @@
-# libc 兼容性修复设计（printf 浮点 + getopt）— 修订版 v13
+# libc 兼容性修复设计（printf 浮点 + getopt）— 修订版 v16
 
-- 日期：2026-08-22（v13 修订）
+- 日期：2026-08-22（v16 修订）
 - 验收基线：`docs/applet-verification.md`（BusyBox Applet 验证报告 2026-08-18）
 - 范围：仅修复代码中**已确证**的两个 libc 缺陷——`printf` 格式化器（无符号路径缺失 + 浮点缺失 + 大小保护缺失）与 `getopt`（逻辑错误 + 公开头多重定义）。
 - 方针：最小范围、最低风险；不引入外部依赖（除非浮点部分明确选择成熟 dtoa）。
@@ -78,7 +78,17 @@
 - **P1（`%n` 长度修饰符）**：`ll` 解析扩展后，`%n`/`%ln`/`%lln` 分支显式列入（分别 `int*`/`long*`/`long long *`，写入当前 `total`），禁止 `%lln` 被误当未知修饰符原样输出；新增对应验收。
 
 ### 0.13 补充修订（v13，本轮）
-- **P1（`%n` 双 pass 副作用）**：`vformatter` 新增内部模式参数 `perform_assign`（`0`=纯计数不写 `%n`、`1`=执行一次写入）。双 pass 的 `printf`/`vfprintf`/`vasprintf` 计数 pass 传 `0`、渲染 pass 传 `1`，避免 `%n`/`%ln`/`%lln` 被写入两次。新增 `printf`/`vfprintf`/`vasprintf` 的 `%n` 用例，断言写入一次且值等于 `total`。
+- **P1（`%n` 双 pass 副作用）**：`vformatter` 新增内部模式参数 `perform_assign`（`0`=纯计数不写 `%n`、`1`=执行一次写入）。双 pass 的 `printf`/`vfprintf`/`vasprintf` 计数 pass 传 `0`、渲染 pass 传 `1`，避免 `%n`/`%ln`/`%lln` 被写入两次。新增 `printf`/`vfprintf`/`vasprintf` 的 `%n` 用例，断言仅写入一次且值为该转换点的当前累计 `total`。
+
+### 0.14 补充修订（v14，本轮）
+- **P1（`%n` 计数时点）**：`%n` 写入的是**该转换符出现位置之前**的累计输出字符数，而非整次格式化的最终总长度。验收固定采用带后缀格式（如 `"ab%ncd"`）：断言 `%n` 写入 `2`、函数最终返回 `4`；同样覆盖 `%ln`/`%lln` 及发生输出截断的 `snprintf`。
+
+### 0.15 补充修订（v15，本轮）
+- **P0（私有核心器与双 pass）**：`vformatter` 由私有 `libc/stdio/stdio_internal.h` 声明给 stdio 各 TU 使用；计数 pass 传 `perform_assign=0`，渲染 pass 传 `1`。`perform_assign` **仅**禁止 `%n` 解引用写入，绝不改变任意转换符的 `va_arg` 消费，保证两个 pass 分别完整、同序地消费各自的 `va_list`。
+- **P1（`%a/%A` 参数对齐）**：本期仍不实现十六进制浮点文本，但遇 `%a/%A` 必须先 `va_arg(args, double)` 消费其匹配实参，再原样输出 `%a`/`%A`，以免后续转换错位；仅 `%Lf/%Le/%Lg` 保持原样输出且不消费 `long double`。
+
+### 0.16 补充修订（v16，本轮）
+- **P1（空输出与次正规数）**：`write_all(len==0)` 必须直接成功返回 0，不调用 `write`；仅仍有剩余字节时单次 `write()==0` 才失败。binary64 解码必须区分指数域 `0x7ff`（非有限）、`0`（零/次正规：无隐含位、指数 `1-1023`）与普通数，覆盖 `1e-310` 等次正规输入。
 
 ## 1. 背景与上下文（修正后的根因归类）
 
@@ -115,7 +125,7 @@
 
 ### 3.2 步骤 A：抽取核心格式化器 `vformatter`（解决 P1，v3 接口）
 - 接口契约：**`cap` = 完整目标数组大小（含 NUL 终止符）**。
-  `static size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perform_assign)`
+  `size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perform_assign)`（仅由 `libc/stdio/stdio_internal.h` 声明给 stdio 内部 TU，不安装为公开 API）
   - **`perform_assign` 模式（满足 P1，v13）**：控制 `%n` 类副作用是否真正写入。计数量（count pass）时**必须传 `0`**——`%n`/`%ln`/`%lln` 仍按 `va_arg` 取走指针参数（保证 `va_list` 推进与渲染 pass 一致），但**不对其解引用写入**；渲染量（render pass）传 `1`——执行一次真实写入（写入值 = 当前 `total`）。这避免 `printf`/`vfprintf`/`vasprintf` 的“计数 + 渲染”双 pass 对 `%n` 产生两次可观察副作用。单 pass 的 `snprintf`/`vsnprintf`/`sprintf`/`vsprintf` 直接以 `perform_assign=1` 调用。
   - 内部维护 `total`（本应生成的字符总数）与 `pos`（已写入 `dst` 的可见字符数）。
   - 写入条件固定为 **`cap > 0 && pos < cap - 1`**（**防 `cap == 0` 时 `cap - 1` 下溢为 `SIZE_MAX`**：纯计数模式下 `dst == NULL`，不得写入 `dst[0]`）；满足时写 `dst[pos]`，自增 `pos` 与 `total`；`cap == 0` 进入纯计数路径，不写、不终止。
@@ -154,7 +164,7 @@
 - **验收边界值**（写入 §5 用例）：
   - 无符号：`%lu`=`0xFFFFFFFFFFFFFFFF`、`0x8000000000000000`；`%lx`、`%lo`；`%u`=`0xFFFFFFFF`、`0x80000000`。
   - **`long long`**：`%lld`=`-9223372036854775808`（INT64_MIN）、`%llu`=`0xFFFFFFFFFFFFFFFF`、`%llx`、`%llo`。
-  - **`%n` 修饰符（v12 新增，P1；v13 补双 pass 单次写入）**：`%n`→`int*`、`%ln`→`long*`、`%lln`→`long long *`，写入值 = 截至目前输出字符数（即 `total`）；明确三者均实现，禁止 `%lln` 被误当未知修饰符原样输出。针对**双 pass 的 `printf`/`vfprintf`/`vasprintf`**，须断言 `%n`/`%ln`/`%lln` 仅被写入**一次**且值等于最终 `total`（计数 pass 禁止写入、渲染 pass 写入一次），不出现两次副作用或错误值。
+  - **`%n` 修饰符（v12 新增，v13 补双 pass 单次写入，v14 修正计数时点）**：`%n`→`int*`、`%ln`→`long*`、`%lln`→`long long *`，写入值 = **该转换符之前**已生成的字符数（当前 `total`）；明确三者均实现，禁止 `%lln` 被误当未知修饰符原样输出。针对**双 pass 的 `printf`/`vfprintf`/`vasprintf`**，须断言三种 `%n` 均仅被写入**一次**（计数 pass 禁止写入、渲染 pass 写入一次），且用带后缀格式验证计数时点：`"ab%ncd"` 的 `%n` 值为 `2`、函数最终返回 `4`。另以截断 `snprintf(buf, 3, "ab%ncd", &n)` 验证：`n == 2`、返回 `4`、`buf == "ab"`；`%ln`/`%lln` 复用相同布局与期望值。
   - **真实回归用例**：`du`（`%llu`，见 `thirdpart/busybox-1.36.1/coreutils/du.c:140`）、`sum`（`%u %llu`，见 `sum.c:85`）的输出格式须与预期一致。
 
 ### 3.4 步骤 C：浮点路径（明确契约，解决 P2）
