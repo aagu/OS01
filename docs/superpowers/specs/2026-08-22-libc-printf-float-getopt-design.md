@@ -1,6 +1,6 @@
-# libc 兼容性修复设计（printf 浮点 + getopt）— 修订版 v5
+# libc 兼容性修复设计（printf 浮点 + getopt）— 修订版 v6
 
-- 日期：2026-08-22（v5 修订）
+- 日期：2026-08-22（v6 修订）
 - 验收基线：`docs/applet-verification.md`（BusyBox Applet 验证报告 2026-08-18）
 - 范围：仅修复代码中**已确证**的两个 libc 缺陷——`printf` 格式化器（无符号路径缺失 + 浮点缺失 + 大小保护缺失）与 `getopt`（逻辑错误 + 公开头多重定义）。
 - 方针：最小范围、最低风险；不引入外部依赖（除非浮点部分明确选择成熟 dtoa）。
@@ -46,6 +46,11 @@
 - **P1（缺 `DBL_MAX`/`DBL_MIN`）**：`float.h` 补充 `DBL_MAX`（≈1.7976931348623157e308）、`DBL_MIN`（最小正规数，≈2.2250738585072014e-308），使 §5.3 的 `DBL_MAX`/`DBL_MIN` 用例可编译。
 - **P1（不可靠的中点用例）**：`%.1f(2.05)→"2.0"` 因 `2.05` 非精确二进制中点而不可靠；改为精确中点 `2.25→"2.2"`、`2.75→"2.8"`。
 
+### 0.6 补充修订（v6，本轮）
+- **P1（`sprintf` 越界）**：`sprintf`/`vsprintf` 无 size 参数，**无法提供大小保护**；明确采用标准契约（调用者须保证缓冲足够），本设计仅承诺 `snprintf`/`vsnprintf`/`vasprintf` 大小安全，移除“sprintf 不要求调用者保证”的错误表述。
+- **P1（`printf` 返回值不一致）**：`printf`/`vfprintf` 改为 **2-pass 堆缓冲**写出**全部 `total` 字节**并返回 `total`（分配失败返回 `-1`、无部分写出）；不再写 `min(total,4095)` 静默丢弃，消除“返回 5000 却只写 4095”的不一致。
+- **P2（零填充符号位）**：`floatconv_render` 将符号与数字主体**分开返回**；`vformatter` 的 `ZEROPAD` 路径先输出符号再补零（复用整数 `number()` 的符号感知填充），保证 `%+08.2f`→`+0003.14` 而非 `000+3.14`。
+
 ## 1. 背景与上下文（修正后的根因归类）
 
 | # | 根因 | 核查结论 | 本方案处理 |
@@ -90,10 +95,10 @@
 - wrapper 接入：
   - `vsnprintf`/`snprintf`：`vformatter(buf, size, …)`；`size>0` 返回 `total`（截断亦同 `size==0` 走 `vformatter(NULL,0,…)` 仅计长度）。`cap>0` 已由核心保证 NUL。
   - `vsprintf`：**保留历史 4 KiB 上限**，`vformatter(buf, 4096, …)`——最多保存 4095 个可见字符 + NUL，与现状语义一致。
-  - `sprintf`：与 `vsprintf` 同为 **4 KiB 固定截断上限**，`vformatter(buf, 4096, …)`；**不要求调用者保证缓冲大小**，超出部分按 4 KiB 截断（与 `vsprintf` 对称，标准契约明确）。
+  - `sprintf` / `vsprintf`：**采用标准契约——调用者必须保证缓冲足够**（这两个函数**无 size 参数，无法提供大小保护**）。内核 `vformatter(buf, 4096, …)` 只是“至多尝试格式化 4095 字符”的内部上限，**不构成对小缓冲的安全保证**；若调用者传入 `char buf[8]`，写越界属调用方 UB（与标准 `sprintf` 一致）。**本设计只承诺 `snprintf`/`vsnprintf`/`vasprintf` 的大小安全**，`sprintf`/`vsprintf` 不纳入“大小保护已解决”范围（仅保证 NUL 终止与已知 4 KiB 内部上限行为）。
   - `vasprintf`：**双 pass**——`va_copy(ap2, ap)` 调 `vformatter(NULL, 0, …, ap2)` 得 `total`；检查错误（`total == SIZE_MAX`、或 `total + 1` 溢出 `SIZE_MAX`、或 `total > INT_MAX`）→ 返回 `-1` 且 `*strp = NULL`；否则分配 `total+1`，用**原始 `ap`** 调 `vformatter(buf, total+1, …, ap)` 填充（`cap>0` 保证 NUL），`va_end(ap2)`。绝不用同一 `va_list` 格式化两次。
-- **二进制输出 sink（printf/vfprintf）**：`printf.c` / `vfprintf`（`stdio_file.c`）不依赖 NUL 终止。使用固定 **4096 字节**内部缓冲，`vformatter(buf, 4096, …)` 写入（最多 4095 可见字符，NUL 落在 `buf[4095]`）；`write()` 实际写出 **`min(total, 4095)`** 字节——**绝不把 `buf[4095]` 的终止 NUL 发出去**（修正此前 `min(total, 4096)` 会把 NUL 写入标准输出的问题）；超出 4095 字节按 4 KiB 截断语义丢弃。等价于“复用字符串缓冲但只写 `min(total, 4095)`”，杜绝嵌入 NUL。
-- 此步为纯重构，行为不变，须通过现有 printf 测试不变。
+- **二进制输出 sink（printf/vfprintf，P1 一致性修复）**：`printf.c` / `vfprintf`（`stdio_file.c`）**实际写出全部 `total` 字节，且返回 `total`**，避免“返回 5000 却只写 4095”的不一致。实现采用与 `vasprintf` 同源的 **2-pass 堆缓冲**：`va_copy` 计数得 `total` → 分配 `total+1` → 用原始 `ap` 调 `vformatter(heap, total+1, …)` 填充（受 `cap` 约束、保证 NUL 于 `heap[total]`）→ 将 `heap[0..total-1]` 全部 `write()` 出去（**绝不写出 NUL**）→ `free` → 返回 `total`。分配失败时返回 `-1`（先分配后写出，无部分写出）。此路径同样杜绝嵌入 NUL、且不截断长输出。
+- 此步对 `snprintf`/`vsnprintf`/`vasprintf`/`sprintf`/`vsprintf` 是行为保持的重构（仅修正大小保护与 NUL 契约）；`printf`/`vfprintf` 的 >4095 字节输出由“静默截断”改为“实际写出全部字节”（返回值 == 实际写入字节数），属已明确的语义修正，须以新验收（§5.3 长输出用例）覆盖。
 
 ### 3.3 步骤 B：无符号整数路径 + `ll` 修饰符（P0，必做）
 - qualifier 解析支持**连续 `ll`**：逐个识别 `h`/`l`/`L`/`Z` 后，再检查下一个字符是否同为 `l` 以升级为 `ll`（即 `long long`）。
@@ -133,6 +138,7 @@
     - `libc/stdio/floatconv.h`：**私有内部头**（置于 `libc/stdio/`，**不安装到公开 `include/`**），声明该函数 + `FLOATCONV_MAX_PREC` 等宏；`vsprintf.c` 包含它以调用渲染器。
     - 两者均编译进 `libc.a`（遵循 `stdio/*.c` 自动发现）；`floatconv_render` 在 libc 内部可链接（非 `static`），但不在公开 API 导出。
   - **集成边界（避免两层 flags/width 重复）**：`vformatter` 在浮点转换符处调用 `floatconv_render` 得到核心数字串，再由 `vformatter` 现有 padding 逻辑统一处理前导零/空格、宽度、`#`、左对齐、零填充（浮点数字串复用 `number()` 风格填充），**渲染器内不做宽度/填充**。
+  - **零填充符号位契约（满足 P2）**：`floatconv_render` **将符号与数字主体分开返回**（如 out-param `char *sign` = `'+'`/`'-'`/`' '`/`'\0'`，以及数字串主体 `digits`）。`vformatter` 的 `ZEROPAD` 路径**先输出符号字符，再在符号与数字之间补零**，复用整数 `number()` 已有的符号感知填充逻辑——确保 `%+08.2f` 的 `3.14` 得到 `+0003.14`，**而非** `000+3.14`。此契约同时覆盖整数 `%08d` 的负号位置（如 `-5`→`-0000005`）。
   - 仍须满足 §3.4 全部逐例验收（含 §5.3 的 flags / 舍入 / 大值用例：`inf`/`nan`、负零、`%e` 指数归一、`%g` 有效数字与去尾随零、`#`/`+`/宽度/对齐/零填充语义）。
 - **验收边界值**：`%.0f` 整数化、`%f/%e/%g` 正/负/零/inf/nan、ties-to-even 舍入（`0.5→0`、`2.5→2`、`-0.5→-0`）、大值（如 `1e20`、`DBL_MAX` 的 `%f` 经 bigint）、`%g` 与 `%f` 切换阈值、超 `FLOATCONV_MAX_PREC` 精度的钳制行为。
 
@@ -185,6 +191,7 @@
   - 截断后返回值 = 本应生成的总长度（非 `size-1`）。
   - 输出超过 4096 字节时不越界、`total` 正确；`printf`/`vfprintf` 用独立非 NUL sink 输出，不依赖终止符。
   - `vasprintf` 用 `va_copy` 计数 pass + 原始 `va_list` 格式化 pass，验证两次调用结果等价；错误路径：`total==SIZE_MAX`、`total+1` 溢出、或 `total>INT_MAX` → 返回 `-1` 且 `*strp=NULL`，且不泄露部分分配。
+- **`sprintf`/`vsprintf` 为标准契约（v6 明确）**：二者无 size 参数，**不提供大小保护**，调用者须保证缓冲足够；本设计的“大小保护已解决”仅覆盖 `snprintf`/`vsnprintf`/`vasprintf`。验收中不得把 `sprintf` 当大小安全函数测试（如 `char b[8]; sprintf(b, "%s", 长串)` 属调用方 UB，不在范围内）。
 - **浮点 `%L` 三形态（v3 修正）**：`%Lf`/`%Le`/`%Lg` 均原样输出字面量（`%Lf`→`%Lf`）、不消费实参，三种形态分别验证。
 - **真实回归（BusyBox）**：`du`（`%llu`）与 `sum`（`%u %llu`）的输出格式须与预期一致（见 §3.3）。
 - **浮点**：`%.0f` 整数化；`%f/%e/%g` 正/负/零/inf/nan；`0.5`/`2.5` 四舍五入；`1e20` 大值；`%g`↔`%f` 切换。
@@ -192,8 +199,8 @@
 - **binary64 前提（v4.x 新增，v5 修正）**：预处理器 `#if DBL_MANT_DIG!=53 || DBL_MAX_EXP!=1024` → `#error`；C 级 `_Static_assert(sizeof(double)==8, "requires IEEE-754 binary64")`（`sizeof` 不用于 `#if`）；位模式单测校验真实编码：`(uint64_t)1.0==0x3FF0000000000000`、`(uint64_t)0.5==0x3FE0000000000000`。宏定义本身不构成充分证明。
 
 - **浮点边界（v4.x 新增，bigint）**：`DBL_MAX`/`DBL_MIN` 的 `%f`/`%e` 经定容 bigint 正确展开；`%.100f` 等超 `FLOATCONV_MAX_PREC` 请求被钳制到上限且不崩溃、不越界（文档化行为）。
-- **浮点 flags（v4 新增，覆盖 §3.4 承诺语义）**：`%#.0f`（强制小数点，如 `1`→`1.`）、`%+08.2f`（`+` 号 + 零填充 + 宽度，如 `3.14`→`+0003.14`）、`%-10.2e`（左对齐 + 宽度，如 `1.5e+00` 后补空格至 10 列）、`%#.5g`（`#` 保留尾随零/小数点后至少一位，如 `1.0`→`1.0000`）。这些用例用于捕获 musl 风格 flag 位映射错误或重复填充。
-- **`printf`/`fprintf` 无嵌入 NUL（v4 新增）**：构造长度 ≥4096 的格式化输出（如 `printf("%s", 长串)` 或循环拼出 ≥4096 字节），做**字节级**断言：经 `write` 发出去的字节数 = 可见长度，且输出缓冲中**无任何字节为 `'\0'`**（即 `buf[4095]` 的终止符未被写出）。
+- **浮点 flags（v4 新增，覆盖 §3.4 承诺语义）**：`%#.0f`（强制小数点，如 `1`→`1.`）、`%+08.2f`（`+` 号 + 零填充 + 宽度，如 `3.14`→`+0003.14`；**重点验证符号在零填充之前，`000+3.14` 为错误**）、`%-10.2e`（左对齐 + 宽度，如 `1.5e+00` 后补空格至 10 列）、`%#.5g`（`#` 保留尾随零/小数点后至少一位，如 `1.0`→`1.0000`）。这些用例用于捕获 musl 风格 flag 位映射错误或重复填充。
+- **`printf`/`fprintf` 长输出 = 全量写出且返回值一致（v6 修正）**：构造长度 ≥4096（如 5000）的格式化输出（如 `printf("%s", 长串)` 或循环拼出）；做**字节级**断言：① 经 `write` 发出去的字节数 == `total`（实际写入全部字节，无静默截断）；② 函数返回值 == `total`（返回值 = 实际写入字节数）；③ 输出缓冲中**无任何字节为 `'\0'`**（终止符未被写出）。覆盖此前“返回 5000 却只写 4095”的不一致缺陷。
 - **自包含浮点依赖的编译/链接（v4 新增，回应 P0）**：`libc/include/float.h`、`libc/include/math.h`（仅位级宏）、`libc/stdio/floatconv.c` 必须随 libc 构建进 `libc.a`，且链接 busybox/测试程序时**无 `undefined reference`**（尤其不得引入 `frexpl`/`scalbnl`/任何 `__*_ld` 等 long-double helper 符号）；链接产物用 `nm`/`objdump` 核对无意外外部浮点符号。
 - **getopt**：§4.4 全部用例（含 `-` 前缀连续非选项取 `optarg`）。
 
