@@ -89,6 +89,10 @@
 #define SYS_shutdown      64
 #define SYS_clock_gettime 65
 #define SYS_getrandom     66
+#define SYS_setpgid       67
+#define SYS_getpgid       68
+#define SYS_setsid        69
+#define SYS_getsid        70
 
 // ── reboot(2) commands ──────────────────────────────────────
 #define RB_AUTOBOOT    0x01234567

@@ -1049,7 +1049,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
     }
     switch (regs->rax) {
     // ── Syscall name table (for strace) ─────────────────────
-    static const char *syscall_names[67] = {
+    static const char *syscall_names[71] = {
         [0]  = "putchar",
         [1]  = "write",
         [2]  = "exit",
@@ -1107,8 +1107,12 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         [64] = "shutdown",
         [65] = "clock_gettime",
         [66] = "getrandom",
+        [67] = "setpgid",
+        [68] = "getpgid",
+        [69] = "setsid",
+        [70] = "getsid",
     };
-    const char *sname = (regs->rax < 67 && syscall_names[regs->rax])
+    const char *sname = (regs->rax < 71 && syscall_names[regs->rax])
                         ? syscall_names[regs->rax] : "?";
     debug_syscall("[strace] pid=%d syscall(%s, arg1=%#lx, arg2=%#lx, arg3=%#lx)\n",
                   (int)current->pid, sname,
@@ -1923,6 +1927,84 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         regs->rax = len;                                     // actual bytes filled
         break;
     }
+case SYS_setpgid: {
+    int pid = (int)(int64_t)regs->rdi;
+    int pgid = (int)(int64_t)regs->rsi;
+    if (pid == 0) pid = current->pid;
+    if (pgid == 0) pgid = pid;
+    if (pid < 0 || pgid < 0 || pid == 1) {
+        regs->rax = -EINVAL; break;
+    }
+    uint64_t f = spin_lock_irqsave(&task_list_lock);
+    task_t *target = NULL;
+    list_t *pos = init_task_union.task.list.next;
+    while (pos != &init_task_union.task.list) {
+        task_t *t = container_of(pos, task_t, list);
+        pos = task_list_next(pos);
+        if (t->pid == pid && !(t->flags & PF_KTHREAD)) {
+            target = t; break;
+        }
+    }
+    if (!target) {
+        spin_unlock_irqrestore(&task_list_lock, f);
+        regs->rax = -ESRCH; break;
+    }
+    if (current->pid != target->pid && current->session != target->session) {
+        spin_unlock_irqrestore(&task_list_lock, f);
+        regs->rax = -EPERM; break;
+    }
+    // v4: pgid == pid OR pgid exists in caller's session
+    bool pgid_ok = (pgid == pid);
+    if (!pgid_ok) {
+        list_t *pos2 = init_task_union.task.list.next;
+        while (pos2 != &init_task_union.task.list) {
+            task_t *t2 = container_of(pos2, task_t, list);
+            pos2 = task_list_next(pos2);
+            if (t2->pgrp == pgid && t2->session == current->session) {
+                pgid_ok = true; break;
+            }
+        }
+    }
+    if (!pgid_ok) {
+        spin_unlock_irqrestore(&task_list_lock, f);
+        regs->rax = -EPERM; break;
+    }
+    target->pgrp = pgid;
+    spin_unlock_irqrestore(&task_list_lock, f);
+    regs->rax = 0;
+    break;
+}
+case SYS_getpgid: {
+    int pid = (int)(int64_t)regs->rdi;
+    if (pid == 0) pid = current->pid;
+    uint64_t f = spin_lock_irqsave(&task_list_lock);
+    int ret = -ESRCH;
+    list_t *pos = init_task_union.task.list.next;
+    while (pos != &init_task_union.task.list) {
+        task_t *t = container_of(pos, task_t, list);
+        pos = task_list_next(pos);
+        if (t->pid == pid) { ret = t->pgrp; break; }
+    }
+    spin_unlock_irqrestore(&task_list_lock, f);
+    regs->rax = ret;
+    break;
+}
+case SYS_setsid: {
+    uint64_t f = spin_lock_irqsave(&task_list_lock);
+    if (current->pgrp == current->pid) {
+        spin_unlock_irqrestore(&task_list_lock, f);
+        regs->rax = -EBUSY; break;
+    }
+    current->session = current->pid;
+    current->pgrp = current->pid;
+    spin_unlock_irqrestore(&task_list_lock, f);
+    regs->rax = current->pid;
+    break;
+}
+case SYS_getsid: {
+    regs->rax = current->session;
+    break;
+}
     case SYS_nanosleep: {
         // nanosleep(const struct timespec *req, struct timespec *rem)
         const struct timespec *req = (const struct timespec *)regs->rdi;

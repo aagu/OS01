@@ -1680,6 +1680,43 @@ static void test_getrandom(void)
     }
 }
 
+// ── 67: setpgid / getpgid ─────────────────────────
+static volatile int setpgid_seen = 0;
+static void on_setpgid_test(int sig __attribute__((unused))) { setpgid_seen = 1; }
+
+static void test_setpgid_getpgid(void) {
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("setpgid_getpgid", "fork"); return; }
+    if (pid == 0) {
+        int r = setpgid(0, 0);
+        if (r != 0) { _exit(2); }
+        pid_t me = getpid();
+        pid_t pg = getpgid(0);
+        if (pg != me) { _exit(3); }
+        _exit(0);
+    }
+    int status; waitpid(pid, &status, 0);
+    CHECK3(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+           "setpgid_getpgid", "child: setpgid(0,0)+getpgid(0)==getpid");
+}
+
+// ── 68: setsid ───────────────────────────────────
+static void test_setsid(void) {
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("setsid", "fork"); return; }
+    if (pid == 0) {
+        // children inherit parent pgrp, so setsid() should succeed
+        // (not be pgrp leader yet since we just forked from main)
+        pid_t sid = setsid();
+        if (sid != getpid()) { _exit(2); }
+        if (getpgid(0) != getpid()) { _exit(3); }
+        _exit(0);
+    }
+    int status; waitpid(pid, &status, 0);
+    CHECK3(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+           "setsid", "child: setsid() returns own pid; getpgid==pid");
+}
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
@@ -1744,6 +1781,8 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"proc_maps",           test_proc_maps},
     {"proc_fd",             test_proc_fd},
     {"termios",             test_termios},
+    {"setpgid_getpgid",   test_setpgid_getpgid},
+    {"setsid",            test_setsid},
     {"getrandom",           test_getrandom},
 };
 

@@ -33,14 +33,14 @@
 // init_task_union.task.list.  schedule() paths use
 // spin_trylock_irqsave — if the lock is contended they
 // skip one cycle (no deadlock possible).
-static spinlock_T task_list_lock = { .lock = 1L };
+spinlock_T task_list_lock = { .lock = 1L };
 
 // ── Safe task-list iteration ─────────────────────────────
 // Writers hold task_list_lock (see task_list_add() called from
 // smp_boot_aps, do_fork, spawn_user_task), so concurrent readers
 // in schedule() see consistent pointers.  The NULL guard below
 // survives any remaining edge cases (e.g. memory corruption).
-static inline list_t *task_list_next(list_t *pos)
+list_t *task_list_next(list_t *pos)
 {
     list_t *next = pos->next;
     if ((uintptr_t)next < 0x1000) {

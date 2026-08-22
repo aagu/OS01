@@ -361,6 +361,10 @@ void task_wake(struct task_struct *t);
 // scanners on other CPUs see a consistent list.
 void task_list_add(struct task_struct *tsk);
 
+// ── Exported for use by syscall implementations ──────────
+extern spinlock_T task_list_lock;
+list_t *task_list_next(list_t *pos);
+
 // ── SMP-safe signal delivery ──────────────────────
 // Finds task by pid and delivers signal under
 // task_list_lock.  Returns 0 on success, -ESRCH if
