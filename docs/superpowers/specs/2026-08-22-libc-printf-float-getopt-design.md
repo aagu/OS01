@@ -1,6 +1,6 @@
-# libc 兼容性修复设计（printf 浮点 + getopt）— 修订版 v3
+# libc 兼容性修复设计（printf 浮点 + getopt）— 修订版 v4
 
-- 日期：2026-08-22（v3 修订）
+- 日期：2026-08-22（v4 修订）
 - 验收基线：`docs/applet-verification.md`（BusyBox Applet 验证报告 2026-08-18）
 - 范围：仅修复代码中**已确证**的两个 libc 缺陷——`printf` 格式化器（无符号路径缺失 + 浮点缺失 + 大小保护缺失）与 `getopt`（逻辑错误 + 公开头多重定义）。
 - 方针：最小范围、最低风险；不引入外部依赖（除非浮点部分明确选择成熟 dtoa）。
@@ -25,10 +25,15 @@
 - **措辞修正**：v2 称 `%lu`“因负数除法错误”不准确——现有 `do_div` 用 `divq` 对位模式做无符号除法；真正缺陷是 `va_arg` 类型不匹配与 `%u` 符号扩展。类型正确的无符号路径仍是正确的修复方向。
 
 ### 0.2 补充修订（v3 → v3.x，本轮）
-- **P0（musl `fmt_fp` 集成边界）**：v3 误将 `fmt_fp` 描述为接收 `char *` 缓冲的渲染器；实际 musl 1.2.5 的 `fmt_fp(FILE *f, long double, int w, int p, int fl, int t)` 通过同文件 `out`/`pad` 与内部 `FILE/__fwritex` 输出。改为**已选方案①：移植 `fmt_fp` + 适配 `out`/`pad` 回调**（见 §3.4），并固定上游 tag `v1.2.5` 与待记录的 commit hash。
+- **P0（musl `fmt_fp` 集成边界）**：v3 误将 `fmt_fp` 描述为接收 `char *` 缓冲的渲染器；实际 musl 1.2.5 的 `fmt_fp(FILE *f, long double, int w, int p, int fl, int t)` 通过同文件 `out`/`pad` 与内部 `FILE/__fwritex` 输出。**（此方案在 v4 被弃用——`fmt_fp` 的 long-double/`math.h` 依赖过重，改为自包含 `double`-only 实现，见 §0.3 / §3.4。）**
 - **P1（`vformatter` NUL 契约）**：`cap` 定义为**完整目标数组大小（含 NUL）**，核心最多保存 `cap-1` 字符；`cap>0` 时所有字符串 wrapper 都终止。二进制输出（`printf`/`vfprintf`）走独立的非 NUL sink。
 - **P1（`sprintf`/`vasprintf` 容量与溢出）**：`sprintf` 沿用历史 4 KiB 截断上限（与 `vsprintf` 一致，非“调用者保证”）；`vasprintf` 补齐错误路径（`total==SIZE_MAX`、`total+1` 溢出、超出 `int` 返回范围 → 返回 `-1` 且 `*strp=NULL`）。
 - **P2（`%Lf` 自相矛盾）**：改为 `%lf == %f`；`%Lf/%Le/%Lg` 统一原样输出且不消费实参；§5.3 增加三种 `%L` 测试。
+
+### 0.3 补充修订（v4，本轮）
+- **P0（浮点依赖面）**：v3 冻结的 musl `fmt_fp` 移植在实践中会引入 `long double` 运算及 `math.h`/`float.h`（`signbit`/`isfinite`/`frexpl`/`LDBL_*`）依赖，而 OS01 libc 当前两者皆无、也无实现。改为**放弃 `fmt_fp` 移植**，采用**自包含 `double`-only 浮点格式化器**（零 `math.h`/`long double` 依赖）：位级 `signbit`/`isfinite` 宏 + 最小 `float.h`，全部基于 `double` 的 64 位位模式与 `uint64_t` 整数运算，无运行时 helper 符号。
+- **P1（printf NUL 写 stdout）**：`printf`/`vfprintf` 改用 `min(total, 4095)` 写出（绝不把 `buf[4095]` 的终止 NUL 发出去）；新增长度 ≥4096 的字节级回归，断言输出无嵌入 NUL。
+- **P2（浮点 flags 测试）**：§5.3 增加 `%#.0f`、`%+08.2f`、`%-10.2e`、`%#.5g` 等 flag 用例。
 
 ## 1. 背景与上下文（修正后的根因归类）
 
@@ -76,7 +81,7 @@
   - `vsprintf`：**保留历史 4 KiB 上限**，`vformatter(buf, 4096, …)`——最多保存 4095 个可见字符 + NUL，与现状语义一致。
   - `sprintf`：与 `vsprintf` 同为 **4 KiB 固定截断上限**，`vformatter(buf, 4096, …)`；**不要求调用者保证缓冲大小**，超出部分按 4 KiB 截断（与 `vsprintf` 对称，标准契约明确）。
   - `vasprintf`：**双 pass**——`va_copy(ap2, ap)` 调 `vformatter(NULL, 0, …, ap2)` 得 `total`；检查错误（`total == SIZE_MAX`、或 `total + 1` 溢出 `SIZE_MAX`、或 `total > INT_MAX`）→ 返回 `-1` 且 `*strp = NULL`；否则分配 `total+1`，用**原始 `ap`** 调 `vformatter(buf, total+1, …, ap)` 填充（`cap>0` 保证 NUL），`va_end(ap2)`。绝不用同一 `va_list` 格式化两次。
-- **二进制输出 sink（printf/vfprintf）**：`printf.c` / `vfprintf`（`stdio_file.c`）不依赖 NUL 终止。它们使用**独立的非 NUL sink**——`vformatter` 写入固定 4 KiB 内部缓冲（容量已知），`write` 的字节数取 `min(total, 4096)`；或实现分段输出（超出 4096 时分多次 `write`）。明确“只写实际保存长度”，杜绝越界读与依赖终止符。
+- **二进制输出 sink（printf/vfprintf）**：`printf.c` / `vfprintf`（`stdio_file.c`）不依赖 NUL 终止。使用固定 **4096 字节**内部缓冲，`vformatter(buf, 4096, …)` 写入（最多 4095 可见字符，NUL 落在 `buf[4095]`）；`write()` 实际写出 **`min(total, 4095)`** 字节——**绝不把 `buf[4095]` 的终止 NUL 发出去**（修正此前 `min(total, 4096)` 会把 NUL 写入标准输出的问题）；超出 4095 字节按 4 KiB 截断语义丢弃。等价于“复用字符串缓冲但只写 `min(total, 4095)`”，杜绝嵌入 NUL。
 - 此步为纯重构，行为不变，须通过现有 printf 测试不变。
 
 ### 3.3 步骤 B：无符号整数路径 + `ll` 修饰符（P0，必做）
@@ -99,22 +104,19 @@
 - 支持 `double`：`%f/%F/%e/%E/%g/%G`。**`%lf` 等同 `%f`**（qualifier `l` 对 `double` 无额外语义）。
 - **`%Lf/%Le/%Lg`（long double）：本期显式不支持，且统一处理**——**不调用 `va_arg(args, long double)`**（避免类型不匹配 UB），将 `%Lf`/`%Le`/`%Lg` 原样输出字面量（`%Lf`→`%Lf` 等），**不消费该实参**。三条 `%L` 形态行为一致，须分别测试（见 §5.3）。
 - **`%a/%A`（十六进制浮点）：本期显式不支持**——原样输出 `%a`/`%A`。
-- 算法（呼应 P2，已冻结具体上游与方案）：**不采用朴素 `frac*=10`**。采用 **方案①：移植 musl 1.2.5 的 `fmt_fp` + 适配 `out`/`pad` 输出回调**，而非把 `fmt_fp` 当 `char*` 缓冲渲染器：
-  - **上游冻结点**：musl **git tag `v1.2.5`**（不可变标签，cgit：`src/stdio/vfprintf.c?h=v1.2.5`）。实施时 `git rev-parse v1.2.5` 得到的 SHA 记入本 spec 依赖清单（标签不可变 ⇒ 选择已冻结；SHA 仅作审计记录，不再“实施前再定”）。
-  - **许可证**：musl 为 **MIT**，与仓库自包含风格兼容。
-  - **移植范围（须列出的符号/文件）**：从 `src/stdio/vfprintf.c` 抽取并改写：
-    - `fmt_fp(FILE *f, long double y, int w, int p, int fl, int t)`（核心；我们用 `double` 调用，内部 `long double` 提升可接受）。
-    - 同文件的 `out(FILE*, const char*, size_t)` 与 `pad(FILE*, int, int, int)`——改写为向我们的 `char *dst` + `size_t pos` + `size_t cap` sink 追加/填充的回调（返回已写字节，越界即停）。
-    - 其依赖的内部辅助（`shuint`、`__seterr` 等）一并移植或提供等效实现；`__fwritex` 不需要（由我们的 `out` 替代）。
-    - 所需宏/头：musl 的 `FILE` 最小结构体（仅需 `out`/`pad` 用到的字段，如写偏移/缓冲指针）、`__lock`/`__flockfile` 可降级为无锁（单线程用户态早期可用），或仅保留 `f->buf`/`f->pos` 字段。
-  - **集成边界（避免两层 flags/width 重复处理）**：`vformatter` 解析出 `w`(宽度)/`p`(精度)/`fl`(flags 位)/`t`(类型 `FMT_f/E/G` 等) 后，**整段交给 `fmt_fp`**，由 `fmt_fp` 自行完成数字生成与宽度/填充并通过我们的 `out`/`pad` 写入 `dst`（受 `cap` 约束）。即浮点转换符**完全委托 `fmt_fp`**，非“自研前导填充 + fmt_fp 再填充”。非浮点转换符仍走 `vformatter` 现有路径。
-  - **为何非 D.M. Gay `dtoa`**：`dtoa` 只做浮点→十进制字符串转换，仍需我们自己实现 `%f/%e/%g` 的 flags/宽度/精度/`#` 与缓冲输出集成；`fmt_fp` 已包含这部分，集成面更小、风险更低。
-  - 仍须满足 §3.4 全部逐例验收（舍入进位、正负/零/负零、`inf`/`nan`、`%e` 指数归一化、`%g` 有效数字与去尾随零、`#` 语义）。
+- 算法（呼应 P2，已冻结具体方案，v4 调整）：**不采用朴素 `frac*=10`**，也**不再移植 musl `fmt_fp`**。原因：`fmt_fp(FILE*, long double, …)` 内部依赖 `long double` 运算及 `math.h`/`float.h`（`signbit`/`isfinite`/`frexpl`/`LDBL_*`）；当前 OS01 libc 既无 `math.h`/`float.h`，也无这些函数/常量实现，引入会显著扩大依赖面与运行时辅助符号。改为 **自包含 `double`-only 浮点格式化器**，零外部依赖：
+  - **依赖面（明确，满足 P0）**：
+    - 新增 `libc/include/float.h`：仅定义格式化所需常量 `FLT_RADIX=2`、`DBL_MANT_DIG=52`、`DBL_MAX_EXP=1024`、`DBL_MIN_EXP=-1021`（即硬编码 IEEE-754 双精度布局，无需 `LDBL_*`）。
+    - 新增 `libc/include/math.h`（最小子集）：`signbit(x)`、`isfinite(x)` 实现为**位级宏**（经 `union { double; uint64_t }` 取 64 位位模式，检查符号位/指数域），**不调用任何运行时 libm 函数、不产生 helper 符号**。
+    - **不引入 `frexpl`/`scalbnl` 或任何 `long double` 运算**；`%f/%e/%g` 全部基于 `double` 的 64 位位模式 + 整数运算完成，无 long-double 辅助符号。
+  - **实现位置与链接**：新增 `libc/stdio/floatconv.c`（编译进 `libc.a`/`libk.a` 的 `stdio/` 目标；遵循 `libc/Makefile` 的 `stdio/*.c` 自动发现）。提供 `static` 的 `double→decimal` 渲染（Gay/Dragon4 风格：由位模式提取符号/指数/尾数，以 `uint64_t` 整数运算做 10 的幂次缩放与四舍五入），由 `vformatter` 在浮点转换符处调用，输入 `va_arg(args, double)` 与已解析的 `w`/`p`/`fl`/`t`。
+  - **集成边界（避免两层 flags/width 重复）**：`floatconv` 只生成“数字串 + 小数点 + 指数 + 符号”的原始序列；前导零/空格填充、宽度、`#`、左对齐、零填充由 `vformatter` 现有 padding 逻辑统一处理（浮点数字串复用 `number()` 风格的填充），**不在浮点渲染器内重复做宽度/填充**。
+  - 仍须满足 §3.4 全部逐例验收（含 §5.3 的 flags 用例：舍入进位、正负/零/负零、`inf`/`nan`、`%e` 指数归一化、`%g` 有效数字与去尾随零、`#`/`+`/宽度/对齐/零填充语义）。
 - **验收边界值**：`%.0f` 整数化、`%f/%e/%g` 正/负/零/inf/nan、`0.5`/`2.5` 四舍五入、大值（如 `1e20`）、`%g` 与 `%f` 切换阈值。
 
-### 3.5 方案选择（综合 P2）
-- **推荐（已冻结）**：§3.2 重构 + §3.3 无符号/`ll` 路径（必做，自实现）；浮点采用 **musl `fmt_fp`** 作为渲染层（§3.4 已定义集成边界与许可证/版本要求），解析层仍自研。
-- **备选**：若 `fmt_fp` 适配成本超预估，回退到 D.M. Gay `dtoa` + 自研 `%f/%e/%g` flags/缓冲集成，但须先把 `dtoa` 的依赖清单与适配边界写入 spec。
+### 3.5 方案选择（综合 P2，v4 定稿）
+- **推荐（已冻结）**：§3.2 重构 + §3.3 无符号/`ll` 路径（必做，自实现）；浮点采用 **自包含 `double`-only 浮点格式化器**（`libc/stdio/floatconv.c`，零 `math.h`/`long double` 依赖，见 §3.4 依赖面），填充复用 `vformatter` 现有逻辑。
+- **备选（已弃用）**：musl `fmt_fp` 因 long-double/`math.h` 依赖过重已排除；D.M. Gay `dtoa` 同样需自行集成 flags/缓冲且可能触碰 long double，亦不采用。
 - 内核 `printk` 不受影响（独立文件，且内核 `-mno-sse` 编译，与本文无关）。
 
 ## 4. 设计 2：getopt 重写 + 头文件修复
@@ -164,10 +166,13 @@
 - **浮点 `%L` 三形态（v3 修正）**：`%Lf`/`%Le`/`%Lg` 均原样输出字面量（`%Lf`→`%Lf`）、不消费实参，三种形态分别验证。
 - **真实回归（BusyBox）**：`du`（`%llu`）与 `sum`（`%u %llu`）的输出格式须与预期一致（见 §3.3）。
 - **浮点**：`%.0f` 整数化；`%f/%e/%g` 正/负/零/inf/nan；`0.5`/`2.5` 四舍五入；`1e20` 大值；`%g`↔`%f` 切换。
+- **浮点 flags（v4 新增，覆盖 §3.4 承诺语义）**：`%#.0f`（强制小数点，如 `1`→`1.`）、`%+08.2f`（`+` 号 + 零填充 + 宽度，如 `3.14`→`+0003.14`）、`%-10.2e`（左对齐 + 宽度，如 `1.5e+00` 后补空格至 10 列）、`%#.5g`（`#` 保留尾随零/小数点后至少一位，如 `1.0`→`1.0000`）。这些用例用于捕获 musl 风格 flag 位映射错误或重复填充。
+- **`printf`/`fprintf` 无嵌入 NUL（v4 新增）**：构造长度 ≥4096 的格式化输出（如 `printf("%s", 长串)` 或循环拼出 ≥4096 字节），做**字节级**断言：经 `write` 发出去的字节数 = 可见长度，且输出缓冲中**无任何字节为 `'\0'`**（即 `buf[4095]` 的终止符未被写出）。
+- **自包含浮点依赖的编译/链接（v4 新增，回应 P0）**：`libc/include/float.h`、`libc/include/math.h`（仅位级宏）、`libc/stdio/floatconv.c` 必须随 libc 构建进 `libc.a`，且链接 busybox/测试程序时**无 `undefined reference`**（尤其不得引入 `frexpl`/`scalbnl`/任何 `__*_ld` 等 long-double helper 符号）；链接产物用 `nm`/`objdump` 核对无意外外部浮点符号。
 - **getopt**：§4.4 全部用例（含 `-` 前缀连续非选项取 `optarg`）。
 
 ## 6. 风险
-- 浮点采用成熟 dtoa 会引入外部代码 + 许可证审查（若选 B 路线）；若自实现须逐例验收（§3.4/§5.3）。
+- 浮点改为**自包含 `double`-only 实现**（无外部代码、无许可证审查）；风险转移到自实现的正确性，须靠 §3.4/§5.3 的逐例验收（尤其舍入、长尾数、`%e`/`%g` 边界）。
 - 核心格式化器抽取需同步改多个 wrapper（`vsprintf/vsnprintf/snprintf/sprintf/vasprintf`），回归面广——靠 §5 测试覆盖。
 - `getopt.h` 改 `extern` 后须确认现有 `.c` 中确有单一定义（当前 `getopt.c` 已定义，满足）。
 
