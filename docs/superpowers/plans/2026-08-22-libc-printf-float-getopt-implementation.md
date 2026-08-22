@@ -202,27 +202,27 @@ git commit -m "feat: add self-contained printf float conversion"
 
 **Interfaces:** Consumes `vformatter`; produces private `ssize_t write_all(int fd, const char *buf, size_t len)` returning `len` on success or `-1` on error.
 
-- [ ] **Step 1: Add wrapper units and explicit host shims**
+- [x] **Step 1: Add wrapper units and explicit host shims**
 
 Add `vasprintf.c`, `printf.c`, and `stdio_file.c` to the formatter test only in this task. List linked production units separately from mocks in `test/Makefile`: production units are those three files plus the Task 2/3 formatter units; mocks are scripted `write`/`syscall`, `fileno_unlocked`, and controlled host-backed `malloc`, `calloc`, `free`, `open`, `close`, and `read`. Include `stdio.h` so its `stdin`/`stdout`/`stderr` macros resolve consistently; if any build configuration exposes them as extern objects, define matching test shim objects. Expose reset/capture APIs for the test case.
 
-- [ ] **Step 2: Add failing two-pass/write tests**
+- [x] **Step 2: Add failing two-pass/write tests**
 
 With the scripted write stub, test 5000-byte full output, short write retry, `EINTR` retry, zero write failure, and a normal write failure. Assert no emitted NUL and `%n` assignment happens only in the render pass.
 
-- [ ] **Step 3: Implement `vasprintf`**
+- [x] **Step 3: Implement `vasprintf`**
 
 Set `*strp = NULL`; count with `va_copy` and `perform_assign=0`; reject unrepresentable totals; allocate `total + 1`; render original `ap` once with `perform_assign=1`; free on render error.
 
-- [ ] **Step 4: Implement `write_all`, `printf`, and `vfprintf`**
+- [x] **Step 4: Implement `write_all`, `printf`, and `vfprintf`**
 
 Count with assignment disabled, reject oversized result before allocation/output, render one heap buffer, write exactly `total` bytes, and free on every branch. `write_all(…, 0)` succeeds immediately with 0; retry only `errno == EINTR`, while an in-loop zero write with remaining bytes and all other errors return `-1`. `write_all` returns `(ssize_t)len` only after all bytes are written; use `if (r < 0) return -1; return (int)total;` in `printf`/`vfprintf`.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify (commit deferred to Task 6)**
 
 Run: `make -C test clean all && test/build/test_libc_vsprintf.elf`
 
-Expected: output/error/%n tests pass.
+Expected: output/error/%n tests pass. Verified: 56/56 pass; `libc.a` builds. Commit is part of Task 6.
 
 ```bash
 git add libc/stdio/vasprintf.c libc/stdio/printf.c libc/stdio/stdio_file.c test/mock/stdio_test_shims.c test/mock/stdio_test_shims.h test/Makefile test/cases/test_libc_vsprintf.c
@@ -237,19 +237,19 @@ git commit -m "fix: make printf wrappers length-safe"
 
 **Interfaces:** Defines globals only in `getopt.c`; header exports `extern int opterr, optind, optopt;` and `extern char *optarg;`.
 
-- [ ] **Step 1: Repair public globals**
+- [x] **Step 1: Repair public globals**
 
 Replace all four definitions in `getopt.h` with `extern` declarations; retain initialized definitions in `getopt.c`.
 
-- [ ] **Step 2: Implement reset, prefixes, and arguments**
+- [x] **Step 2: Implement reset, prefixes, and arguments**
 
 On `optind == 0`, reset `optind=1`, `optpos=1`, `optarg=NULL`, and `optopt=0`; then, at every getopt entry, set `optarg=NULL` before parsing the next token. For a leading `-` optstring and a non-option `argv[optind]`, execute exactly `optarg = argv[optind]; optind++; optpos = 1; return 1;`; this is the BusyBox unzip path. A leading `+` instead stops at the first non-option **without advancing `optind`**. Support clustered options and `--`. For an option requiring an argument, if `arg[optpos+1] != '\0'`, set `optarg = (char *)&arg[optpos+1]`, increment `optind`, and reset `optpos=1`; otherwise consume `argv[optind+1]`, increment `optind` past both elements, and reset `optpos=1`.
 
-- [ ] **Step 3: Verify and commit**
+- [x] **Step 3: Verify (commit deferred to Task 6)**
 
 Run: `make -C test clean all && test/build/test_libc_getopt.elf`
 
-Expected: every tested argv stream has the expected return sequence and global state.
+Expected: every tested argv stream has the expected return sequence and global state. Verified: 22/22 pass. Commit is part of Task 6.
 
 ```bash
 git add libc/unistd/getopt.c libc/include/getopt.h test/cases/test_libc_getopt.c

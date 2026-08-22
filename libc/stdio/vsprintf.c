@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <limits.h>
 #include "stdio_internal.h"
+#include "floatconv.h"
 
 int skip_atoi(const char **s)
 {
@@ -139,9 +140,10 @@ size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perfor
 				fmt++;
 				precision = va_arg(ap, int);
 			}
-			if (precision < 0)
-				precision = 0;
-		}
+		if (precision < 0)
+			precision = -1; /* -1 => "unspecified"; floats fall back to default,
+					   integers treat as no precision */
+	}
 
 		/* qualifier */
 		qualifier = -1;
@@ -274,14 +276,47 @@ size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perfor
 
 			case 'f': case 'F':
 			case 'e': case 'E':
-			case 'g': case 'G':
-			case 'a': case 'A': {
-				/* Float rendering is implemented in a later task. For now
-				 * consume the double (keeping va_list alignment) and emit the
-				 * literal conversion text as a stub. %L* does NOT consume. */
+			case 'g': case 'G': {
+				/* Float rendering (binary64, double-only). %L* (long double)
+				 * is not supported: emit the literal text and do NOT consume. */
 				char conv = *fmt;
-				if (qualifier != 'L')
-					(void)va_arg(ap, double);
+				if (qualifier == 'L') {
+					vf_out(&st, '%');
+					vf_out(&st, 'L');
+					vf_out(&st, conv);
+					break;
+				}
+			double d = va_arg(ap, double);
+			char fbuf[768];
+				char sign = 0;
+			size_t flen = floatconv_render(fbuf, sizeof(fbuf), d,
+							field_width, precision, flags,
+							conv, &sign);
+			if (flen == SIZE_MAX) break;
+			int left = (flags & LEFT) != 0;
+				int zeropad = (flags & ZEROPAD) != 0;
+				size_t i, written = 0;
+				if (sign) {
+					vf_out(&st, sign);
+					written++;
+				}
+				if (!left && (int)(written + flen) < field_width) {
+					char pad = zeropad ? '0' : ' ';
+					for (i = written + flen; i < (size_t)field_width; i++)
+						vf_out(&st, pad);
+				}
+				for (i = 0; i < flen; i++)
+					vf_out(&st, fbuf[i]);
+				if (left) {
+					for (i = written + flen; i < (size_t)field_width; i++)
+						vf_out(&st, ' ');
+				}
+				break;
+			}
+
+			case 'a': case 'A': {
+				/* Hex float: not supported, emit literal text. */
+				char conv = *fmt;
 				vf_out(&st, '%');
 				if (qualifier == 'L')
 					vf_out(&st, 'L');

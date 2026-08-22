@@ -4,6 +4,8 @@
 #include "test_framework.h"
 #include <string.h>
 #include <stdarg.h>
+#include <stdlib.h>
+#include "stdio_test_shims.h"
 
 extern int vsprintf(char *buf, const char *fmt, va_list args);
 extern int sprintf(char *buf, const char *fmt, ...);
@@ -135,6 +137,89 @@ TEST_FUNC(test_vsnprintf_basic) {
     assert_str_eq(buf, "val=7");
 }
 
+TEST_FUNC(test_sprintf_float) {
+    char b[128];
+    /* defaults and integerization */
+    my_sprintf(b, "%.0f", 2.5);      assert_str_eq(b, "2");
+    my_sprintf(b, "%#.5g", 1.0);    assert_str_eq(b, "1.0000");
+    my_sprintf(b, "%.*f", -1, 1.0); assert_str_eq(b, "1.000000");
+    my_sprintf(b, "%.0f", -0.0);    assert_str_eq(b, "-0");
+    my_sprintf(b, "%f", -0.0);      assert_str_eq(b, "-0.000000");
+    my_sprintf(b, "%+.1f", -0.0);   assert_str_eq(b, "-0.0");
+    /* %e / %E exponent normalization */
+    my_sprintf(b, "%e", 1.5);       assert_str_eq(b, "1.500000e+00");
+    my_sprintf(b, "%e", 0.0015);    assert_str_eq(b, "1.500000e-03");
+    my_sprintf(b, "%E", 1.5);       assert_str_eq(b, "1.500000E+00");
+    /* %g / %G switching + trailing-zero strip */
+    my_sprintf(b, "%g", 1e7);       assert_str_eq(b, "1e+07");
+    my_sprintf(b, "%g", 0.0001);    assert_str_eq(b, "0.0001");
+    /* non-finite, case-sensitive */
+    my_sprintf(b, "%f", __builtin_inf()); assert_str_eq(b, "inf");
+    my_sprintf(b, "%F", __builtin_inf()); assert_str_eq(b, "INF");
+    my_sprintf(b, "%e", __builtin_nan("")); assert_str_eq(b, "nan");
+    my_sprintf(b, "%E", __builtin_nan("")); assert_str_eq(b, "NAN");
+}
+
+static int my_vasprintf(char **out, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vasprintf(out, fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+TEST_FUNC(test_sprintf_wrappers) {
+    /* vasprintf: allocate + render via the two-pass core */
+    char *s = NULL;
+    int n = my_vasprintf(&s, "%d-%s", 42, "x");
+    assert_eq(n, 4);
+    assert_str_eq(s ? s : "", "42-x");
+    free(s);
+
+    /* 5000-byte payload for the write_all paths */
+    char big[5000];
+    for (int i = 0; i < 5000; i++) big[i] = 'A';
+
+    shim_write_reset();
+    n = printf("%s", big);
+    assert_eq(n, 5000);
+    assert_eq((int)shim_write_total_bytes(), 5000);
+
+    /* short write: write_all must loop until everything is out */
+    shim_write_reset();
+    shim_write_push(WRITE_MODE_SHORT, 100);
+    n = printf("%s", big);
+    assert_eq(n, 5000);
+    assert_eq((int)shim_write_total_bytes(), 5000);
+
+    /* EINTR: write_all must retry and succeed */
+    shim_write_reset();
+    shim_write_push(WRITE_MODE_EINTR, 0);
+    n = printf("%s", big);
+    assert_eq(n, 5000);
+    assert_eq((int)shim_write_total_bytes(), 5000);
+
+    /* zero write while bytes remain -> failure */
+    shim_write_reset();
+    shim_write_push(WRITE_MODE_ZERO, 0);
+    n = printf("%s", big);
+    assert_eq(n, -1);
+
+    /* normal write error -> failure */
+    shim_write_reset();
+    shim_write_push(WRITE_MODE_ERROR, 0);
+    n = printf("%s", big);
+    assert_eq(n, -1);
+
+    /* %n is assigned only in the render pass */
+    shim_write_reset();
+    int k = -1;
+    n = printf("abc%n", &k);
+    assert_eq(k, 3);
+    assert_eq(n, 3);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_sprintf_strings),
     TEST_ENTRY(test_sprintf_integers),
@@ -149,6 +234,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_snprintf_truncation_value),
     TEST_ENTRY(test_snprintf_null_zero),
     TEST_ENTRY(test_vsnprintf_basic),
+    TEST_ENTRY(test_sprintf_float),
+    TEST_ENTRY(test_sprintf_wrappers),
 TEST_LIST_END
 
 int main() {

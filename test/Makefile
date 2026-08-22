@@ -147,6 +147,24 @@ $(TEST_BLD)/libc_floatconv.o: $(LIBC_SRC)/stdio/floatconv.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
+$(TEST_BLD)/libc_vasprintf.o: $(LIBC_SRC)/stdio/vasprintf.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/libc_printf.o: $(LIBC_SRC)/stdio/printf.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/libc_stdio_file.o: $(LIBC_SRC)/stdio/stdio_file.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+# printf/vasprintf/write_all test shim — overrides host write() with a scriptable,
+# capturing, real-stdout-forwarding stub.
+$(TEST_BLD)/stdio_test_shims.o: $(TEST_MOCK)/stdio_test_shims.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK)/include -I$(TEST_INC) -c $< -o $@
+
 # Mock stubs — compiled as HOST binary (no custom headers)
 $(TEST_BLD)/mock_kernel.o: $(TEST_MOCK)/mock_kernel.c
 	@mkdir -p $(TEST_BLD)
@@ -162,6 +180,11 @@ $(TEST_BLD)/%.o: $(TEST_CASES)/%.c
 $(TEST_BLD)/test_libc_getopt.o: $(TEST_CASES)/test_libc_getopt.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) -fcommon $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+# vsprintf test exercises printf/vasprintf/write_all with the scripted write shim.
+$(TEST_BLD)/test_libc_vsprintf.o: $(TEST_CASES)/test_libc_vsprintf.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
 # Focused poll test compiles and links the real production paths.
 $(TEST_BLD)/test_poll_requested.o: $(TEST_CASES)/test_poll_requested.c
@@ -195,7 +218,9 @@ $(TEST_BLD)/test_libc_string.elf: $(TEST_BLD)/test_libc_string.o $(LIBC_OBJS)
 $(TEST_BLD)/test_libc_list.elf: $(TEST_BLD)/test_libc_list.o $(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^
 
-$(TEST_BLD)/test_libc_vsprintf.elf: $(TEST_BLD)/test_libc_vsprintf.o $(LIBC_OBJS)
+$(TEST_BLD)/test_libc_vsprintf.elf: $(TEST_BLD)/test_libc_vsprintf.o $(LIBC_OBJS) \
+		$(TEST_BLD)/libc_vasprintf.o $(TEST_BLD)/libc_printf.o \
+		$(TEST_BLD)/libc_stdio_file.o $(TEST_BLD)/stdio_test_shims.o
 	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/test_libc_getopt.elf: $(TEST_BLD)/test_libc_getopt.o $(LIBC_OBJS)

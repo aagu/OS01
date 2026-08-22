@@ -37,4 +37,6 @@
 #define	ERANGE		34	/* Math result not representable */
 #define	ENAMETOOLONG	36	/* File name too long */
 
+extern int errno;
+
 #endif

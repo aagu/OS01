@@ -3,6 +3,7 @@
 
 #include <stdarg.h>
 #include <stddef.h>
+#include <sys/types.h>
 
 /*
  * Bounded core formatter. Internal to the stdio implementation; not part of
@@ -17,5 +18,10 @@
  * if the internal counter overflows.
  */
 size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perform_assign);
+
+/* Length-safe write: returns len on success, -1 on error. write_all(…, 0)
+ * succeeds immediately. Retries only on EINTR; a zero write while bytes remain
+ * and all other errors return -1. Never writes past the requested length. */
+ssize_t write_all(int fd, const char *buf, size_t len);
 
 #endif /* _STDIO_INTERNAL_H */

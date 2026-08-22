@@ -63,6 +63,7 @@ typedef struct {
     uint32_t tlb_wanted, tlb_ack;
     void *run_queue, *idle;
     uint64_t schedule_count, tsc_boot;
+    int64_t  tsc_offset;        /* bsp_tsc - ap_tsc (BSP=0), used by clocksource_read_ns */
 } percpu_t;
 static inline percpu_t *this_cpu(void) { return NULL; }
 static inline uint32_t cpu_id(void) { return 0; }
