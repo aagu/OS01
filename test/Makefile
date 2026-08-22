@@ -211,6 +211,12 @@ $(TEST_BLD)/devfs_poll_production.o: $(TESTS_DIR)/kernel/fs/devfs.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
 
+# clocksource globals referenced by inlined clocksource_read_ns() in the
+# poll/select production objects; stubbed for the host harness.
+$(TEST_BLD)/poll_clocksource_stub.o: $(TEST_MOCK)/poll_clocksource_stub.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
+
 # Link rules
 $(TEST_BLD)/test_libc_string.elf: $(TEST_BLD)/test_libc_string.o $(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^
@@ -286,7 +292,8 @@ POLL_PRODUCTION_OBJS := \
     $(TEST_BLD)/select_production.o \
     $(TEST_BLD)/file_poll_production.o \
     $(TEST_BLD)/tty_poll_production.o \
-    $(TEST_BLD)/devfs_poll_production.o
+    $(TEST_BLD)/devfs_poll_production.o \
+    $(TEST_BLD)/poll_clocksource_stub.o
 
 $(TEST_BLD)/test_poll_requested.elf: $(TEST_BLD)/test_poll_requested.o $(POLL_PRODUCTION_OBJS)
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
