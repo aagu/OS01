@@ -1739,6 +1739,28 @@ static void test_tiocspgrp_roundtrip(void) {
     close(fd);
 }
 
+// ── 70: devfs open default fg_pgrp (§4.1.1) ─────────
+static void test_devfs_open_default_fg_pgrp(void) {
+    // 复位全局 fg_pgrp=0（new_pg==0 §4.4 始终允许）
+    int rfd = open("/dev/tty", O_RDWR);
+    if (rfd < 0) { FAIL("devfs_open_fg", "no /dev/tty"); return; }
+    tcsetpgrp(rfd, 0);
+    close(rfd);
+
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("devfs_open_fg", "fork"); return; }
+    if (pid == 0) {
+        setpgid(0, getpid());   // 设 pgrp 为自己
+        int cfd = open("/dev/tty", O_RDWR);
+        if (cfd < 0) { _exit(2); }
+        pid_t p = tcgetpgrp(cfd);
+        _exit(p == getpid() ? 0 : 3);
+    }
+    int status; waitpid(pid, &status, 0);
+    CHECK3(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+           "devfs_open_fg", "tcgetpgrp after open returns self pgrp");
+}
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
@@ -1804,6 +1826,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"proc_fd",             test_proc_fd},
     {"termios",             test_termios},
     {"tiocspgrp",           test_tiocspgrp_roundtrip},
+    {"devfs_open_fg",       test_devfs_open_default_fg_pgrp},
     {"setpgid_getpgid",   test_setpgid_getpgid},
     {"setsid",            test_setsid},
     {"getrandom",           test_getrandom},
