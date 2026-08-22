@@ -36,9 +36,10 @@ PROGRAMS := $(patsubst %.c,$(BUILD_DIR)/%.elf,$(C_SOURCES))
 # ── Targets ────────────────────────────────────────────────
 .PHONY: all clean
 
-# Build all programs, then copy .elf files back to source dir
+# Build all programs into $(BUILD_DIR); the root Makefile packages
+# them from there into config/fsroot/bin/ — do NOT copy back to the
+# source dir (that would pollute user/ with build artifacts).
 all: $(PROGRAMS)
-	cp $(BUILD_DIR)/*.elf .
 
 # ── Compile rules (into build dir) ─────────────────────────
 $(OBJ_DIR)/%.o: %.c

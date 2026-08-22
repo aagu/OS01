@@ -1,0 +1,3 @@
+# Build artifacts — user programs are linked into build/x86_64/user/*.elf
+# and packaged from there by the root Makefile. Never emit .elf here.
+*.elf
