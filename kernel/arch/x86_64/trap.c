@@ -1954,14 +1954,14 @@ case SYS_setpgid: {
         regs->rax = -EPERM; break;
     }
     // v4: pgid == pid OR pgid exists in caller's session
-    bool pgid_ok = (pgid == pid);
+    int pgid_ok = (pgid == pid);
     if (!pgid_ok) {
         list_t *pos2 = init_task_union.task.list.next;
         while (pos2 != &init_task_union.task.list) {
             task_t *t2 = container_of(pos2, task_t, list);
             pos2 = task_list_next(pos2);
             if (t2->pgrp == pgid && t2->session == current->session) {
-                pgid_ok = true; break;
+                pgid_ok = 1; break;
             }
         }
     }
