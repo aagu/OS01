@@ -36,7 +36,8 @@ LIBC_OBJS := \
     $(TEST_BLD)/libc_vsnprintf.o \
     $(TEST_BLD)/libc_sprintf.o \
     $(TEST_BLD)/libc_getopt.o \
-    $(TEST_BLD)/libc_list.o
+    $(TEST_BLD)/libc_list.o \
+    $(TEST_BLD)/libc_floatconv.o
 
 MOCK_OBJS := $(TEST_BLD)/mock_kernel.o
 
@@ -141,6 +142,10 @@ $(TEST_BLD)/libc_getopt.o: $(LIBC_SRC)/unistd/getopt.c
 $(TEST_BLD)/libc_list.o: $(LIBC_SRC)/list/list.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -fgnu89-inline -c $< -o $@
+
+$(TEST_BLD)/libc_floatconv.o: $(LIBC_SRC)/stdio/floatconv.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
 # Mock stubs — compiled as HOST binary (no custom headers)
 $(TEST_BLD)/mock_kernel.o: $(TEST_MOCK)/mock_kernel.c
