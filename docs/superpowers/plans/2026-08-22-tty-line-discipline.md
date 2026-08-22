@@ -8,7 +8,7 @@
 
 **Tech Stack:** C11 freestanding (kernel), POSIX (libc), x86_64 PS/2 keyboard IRQ1, busybox hush (CONFIG_ASH_JOB_CONTROL=n), QEMU gtk display.
 
-**Spec:** [docs/superpowers/specs/2026-08-22-tty-line-discipline-design.md](../specs/2026-08-22-tty-line-discipline-design.md) — this plan implements spec v5 (commits fcd2219/4e3783f/3fb161e/aa4daa0/d296aa4). **This is plan v3** — applies review fixes D1/D2/D3 over the v2 plan (commit a3c5ded). See "v3 changes" at end of file.
+**Spec:** [docs/superpowers/specs/2026-08-22-tty-line-discipline-design.md](../specs/2026-08-22-tty-line-discipline-design.md) — this plan implements spec v5 (commits fcd2219/4e3783f/3fb161e/aa4daa0/d296aa4). **This is plan v4** — applies review fixes E1-E7 over the v3 plan (commit f43cd3c). See "v4 changes" at end of file.
 
 ## Global Constraints
 
@@ -39,8 +39,8 @@ These apply to every task; each task's requirements implicitly include them.
 | `kernel/include/kernel/file.h` | Add `struct tty_struct *tty;` to `file_t` | Modify |
 | `kernel/tty/tty.c` | `tty_alloc` defaults (ISIG + c_cc); `tty_push_input` line discipline; `tty_phys_ioctl` real TIOCSPGRP/TIOCGPGRP | Modify |
 | `kernel/fs/devfs.c` | `tty_magic_open` physical branch + `devfs_open_node` FD_DEV branch set `file_t->tty` and default fg_pgrp | Modify |
-| `test/cases/test_pgrp_signal.c` | Kernel selftest for signal_pgrp (Task 1) | Create |
-| `test/cases/test_tty_vintr.c` | Kernel selftest for VINTR end-to-end (Task 6) | Create |
+| `kernel/test/test_pgrp_signal.c` | **v4 fix E5**: in-kernel selftest for signal_pgrp (Task 1). MUST be guarded by `#ifdef OS01_SELFTEST` (matches `kernel/test/test_kthread_self_reap.c` pattern). Lives in `kernel/test/` NOT `test/cases/`. | Create |
+| `kernel/test/test_tty_vintr.c` | **v4 fix E5**: in-kernel selftest for VINTR end-to-end (Task 6). Same guards. | Create |
 | `user/systest.c` | 7 new test functions (8.1..8.7) + register in `tests[]` | Modify |
 | `kernel/include/uapi/syscall.h` | +4 syscall numbers (67-70) | Modify |
 | `libc/include/sys/syscall.h` | +4 syscall numbers (kept in sync with kernel) | Modify |
@@ -58,35 +58,31 @@ These apply to every task; each task's requirements implicitly include them.
 - Modify: `kernel/include/kernel/task.h:128-145` (add fields to `task_struct`)
 - Modify: `kernel/sched/task.c:1900-1930` (init_task_union init + new `signal_pgrp()` function)
 - Modify: `kernel/arch/x86_64/trap.c` SYS_fork case (+2 lines after child mm/files setup)
-- Create: `test/cases/test_pgrp_signal.c` (kernel selftest)
+- Create: `kernel/test/test_pgrp_signal.c` (**v4 fix E5** — in-kernel selftest, not test/cases/)
 
 **Interfaces:**
 - Produces: `int signal_pgrp(pid_t target, int sig)` — exported from `kernel/sched/task.c`, declared in `kernel/include/kernel/task.h`. Returns 0 on match, -ESRCH if no match, 0 if target==0 (silent no-op).
 - Consumes: existing `task_list_lock` (spin_lock_irqsave), `task_send_signal` pattern.
 - Produces: `task_t.pgrp` and `task_t.session` fields of type `pid_t` (already defined in `kernel/include/kernel/task.h:130`).
 
-- [ ] **Step 1: Write the failing kernel selftest**
+- [ ] **Step 1: Write the failing in-kernel selftest (v4 fix E1/E2/E3/E4/E6)**
 
-Create `test/cases/test_pgrp_signal.c`:
+**v4 corrections** (review found 5 issues with v3's test body):
+- `ASSERT` not used (it panics via `hlt` loop in `<kernel/assert.h>`); use `serial_printk` + return -1 for fail
+- `debug_test` doesn't exist anywhere in kernel/; replace with `serial_printk("[selftest] ...\n")`
+- `enum task_state` doesn't exist; `task_struct.state` is `volatile int64_t` (values are `#define TASK_RUNNING`, `TASK_INTERRUPTIBLE`)
+- Real registration is via `SELFTEST(name)` macro in `<kernel/selftest.h>` that creates `.selftest_table` section; there is no `tests[]` array or `TEST_NAME` macro
+- Real test functions return `int` (0 PASS, nonzero FAIL) per `typedef int (*selftest_fn)(void)`
+
+Create `kernel/test/test_pgrp_signal.c`:
 
 ```c
-// Kernel-level unit test for signal_pgrp().
-// Called from kernel selftest framework (similar to test/cases/test_poll_requested.c).
-//
-// v3 D2 fix: original v1/v2 plan had placeholder // ... body. Concrete impl:
-// spawn a kernel_thread target, demote PF_KTHREAD (so signal_pgrp delivers
-// to it), set its pgrp, call signal_pgrp() in three modes (no-op / ESRCH /
-// hit), verify signal bit set + state moved to TASK_RUNNING.
-//
-// Note: target stays in TASK_INTERRUPTIBLE in the spin loop after being
-// signalled, because arch_do_signal_delivery (which moves it to RUNNING
-// when delivering to ring-3) only runs on return-to-user; in this kernel
-// test we manually verify t->signal directly.
-#include <kernel/task.h>
-#include <kernel/debug.h>
-#include <kernel/sched.h>
+#if defined(OS01_SELFTEST)
 
-#define TEST_NAME "test_pgrp_signal"
+#include <kernel/task.h>
+#include <kernel/printk.h>
+#include <kernel/selftest.h>
+#include <kernel/sched.h>
 
 static volatile int pgrp_thread_ready = 0;
 static volatile int pgrp_thread_pid = 0;
@@ -99,30 +95,37 @@ static int pgrp_thread_fn(void *arg) {
         __sync_synchronize();
         pgrp_thread_ready = 1;
         schedule();
-        // After wakeup, exit on SIGUSR1 (test will SIGKILL if it didn't
-        // actually signal us — avoids hanging forever)
         if (current->signal & (1ULL << SIGUSR1)) break;
     }
     return 0;
 }
 
-void test_pgrp_signal(void) {
+static int test_pgrp_signal(void)
+{
+    serial_printk("[selftest] test_pgrp_signal: start\n");
     pgrp_thread_ready = 0;
     pgrp_thread_pid = 0;
 
     task_t *t = (task_t *)kernel_thread(pgrp_thread_fn, NULL, "pgrp_test");
-    if (!t) { debug_test("%s: kernel_thread failed\n", TEST_NAME); return; }
+    if (!t) {
+        serial_printk("[selftest] test_pgrp_signal: FAIL: kernel_thread returned NULL\n");
+        return -1;
+    }
 
     // Wait for thread to register pid and reach INTERRUPTIBLE
-    while (!pgrp_thread_ready || t->state != TASK_INTERRUPTIBLE) {
+    int spin_count = 0;
+    while ((!pgrp_thread_ready || t->state != TASK_INTERRUPTIBLE) && spin_count++ < 10000) {
         arch_local_irq_enable();
         for (volatile int i = 0; i < 1000; i++);
         arch_local_irq_disable();
     }
+    if (!pgrp_thread_ready || t->state != TASK_INTERRUPTIBLE) {
+        serial_printk("[selftest] test_pgrp_signal: FAIL: thread did not become ready\n");
+        return -1;
+    }
 
-    // v3 D1 fix (same trick as test_tty_vintr): kernel_thread sets
-    // PF_KTHREAD; signal_pgrp skips PF_KTHREAD per spec §3.3. Demote so
-    // this fixture becomes a valid signal target.
+    // v3 D1 fix: kernel_thread sets PF_KTHREAD; signal_pgrp skips it per
+    // spec §3.3. Demote so this fixture becomes a valid signal target.
     t->flags &= ~PF_KTHREAD;
 
     // Make thread its own pgrp leader
@@ -131,7 +134,56 @@ void test_pgrp_signal(void) {
     spin_unlock_irqrestore(&task_list_lock, f1);
 
     int prev_signal = (int)(t->signal & (1ULL << SIGUSR1));
-    enum task_state prev_state = t->state;
+    int64_t prev_state = t->state;  // v4 fix E3: volatile int64_t, not enum
+
+    // Assertion 1: signal_pgrp(0, ...) is silent no-op (returns 0)
+    if (signal_pgrp(0, SIGUSR1) != 0) {
+        serial_printk("[selftest] test_pgrp_signal: FAIL: signal_pgrp(0,..) != 0\n");
+        return -1;
+    }
+
+    // Assertion 2: signal_pgrp with no matching pgrp returns -ESRCH
+    if (signal_pgrp(99999, SIGUSR1) != -ESRCH) {
+        serial_printk("[selftest] test_pgrp_signal: FAIL: signal_pgrp(99999,..) != -ESRCH\n");
+        return -1;
+    }
+
+    // Assertion 3: signal_pgrp(self.pid, SIGUSR1) hits the target
+    if (signal_pgrp(t->pid, SIGUSR1) != 0) {
+        serial_printk("[selftest] test_pgrp_signal: FAIL: signal_pgrp(target,..) != 0\n");
+        return -1;
+    }
+
+    // Assertion 4: SIGUSR1 bit set on target's signal field
+    if ((t->signal & (1ULL << SIGUSR1)) == 0 || prev_signal != 0) {
+        serial_printk("[selftest] test_pgrp_signal: FAIL: SIGUSR1 bit not set (prev=%d cur=%llx)\n",
+                      prev_signal, (unsigned long long)t->signal);
+        return -1;
+    }
+
+    // Assertion 5: target was TASK_INTERRUPTIBLE → moved to TASK_RUNNING
+    if (prev_state != TASK_INTERRUPTIBLE || t->state != TASK_RUNNING) {
+        serial_printk("[selftest] test_pgrp_signal: FAIL: state not moved (prev=%lld cur=%lld)\n",
+                      (long long)prev_state, (long long)t->state);
+        return -1;
+    }
+
+    // Cleanup: SIGKILL so thread exits deterministically
+    t->signal |= (1ULL << SIGKILL);
+
+    serial_printk("[selftest] test_pgrp_signal: PASS\n");
+    return 0;
+}
+
+// v4 fix E4: register via SELFTEST macro (NOT a tests[] array or TEST_NAME)
+SELFTEST(pgrp_signal);
+
+#endif // OS01_SELFTEST
+```
+
+**Wire to runner**: no separate wire step. The `SELFTEST(pgrp_signal)` macro emits a `.selftest_table` section entry that `selftest_run_all()` (in `kernel/test/selftest.c:130`) iterates over when `OS01_SELFTEST=1`. No need to edit `kernel/test/selftest.c`.
+
+**v4 fix E7 timing prerequisite — `get_dev_tty()` readiness**: not a concern for Task 1's `test_pgrp_signal` (doesn't touch TTY). Document only matters for Task 6's `test_tty_vintr` (will note there).
 
     // Assertion 1: signal_pgrp(0, ...) is silent no-op (returns 0)
     ASSERT(signal_pgrp(0, SIGUSR1) == 0);
@@ -256,11 +308,11 @@ Expected: kernel compiles; selftest passes.
 
 ```bash
 git add kernel/include/kernel/task.h kernel/include/uapi/syscall.h \
-        kernel/sched/task.c test/cases/test_pgrp_signal.c
+        kernel/sched/task.c kernel/test/test_pgrp_signal.c
 git commit -m "feat(pgrp): task_struct pgrp/session + signal_pgrp() + fork inheritance"
 ```
 
-(v3 fix: do NOT `git add kernel/arch/x86_64/trap.c` here — C1 fixed the edit point out of trap.c. trap.c edits come in Task 2.)
+(v3 fix: do NOT `git add kernel/arch/x86_64/trap.c` here — C1 fixed the edit point out of trap.c. trap.c edits come in Task 2. v4 fix: test file is `kernel/test/test_pgrp_signal.c`, not `test/cases/`.)
 
 ---
 
@@ -808,23 +860,22 @@ Create `test/cases/test_tty_vintr.c`:
 
 ```c
 // Kernel selftest for VINTR → signal_pgrp delivery.
-// Strategy: create a kernel_thread that just sleeps in pause() (idle wait),
-// set its pgrp to a unique value, set dev_tty->fg_pgrp to that value,
-// inject VINTR via tty_push_input, verify thread's signal bit has SIGINT
-// and thread state moved to TASK_RUNNING.
+// Strategy: create a kernel_thread that sleeps in INTERRUPTIBLE state,
+// demote its PF_KTHREAD so signal_pgrp delivers to it, set its pgrp and
+// dev_tty->fg_pgrp to the same value, inject VINTR via tty_push_input,
+// verify thread's signal bit has SIGINT and thread state moved to RUNNING.
 //
-// No fork/exec/waitpid needed — the kernel_thread helper (kernel/sched/task.c)
-// creates a kthread (PF_KTHREAD), but we can override pgrp/session post-creation
-// since pgrp doesn't care about the kthread flag for signal_pgrp delivery
-// (signal_pgrp skips kthread — see Task 1, but here we're using the thread as
-// a signal target directly via t->signal, NOT through signal_pgrp broadcast).
+// v4 fix: same v1→v3 corrections as test_pgrp_signal — use serial_printk
+// + return int, no ASSERT/debug_test/enum task_state, register via
+// SELFTEST macro, file in kernel/test/ under #ifdef OS01_SELFTEST.
+
+#if defined(OS01_SELFTEST)
 
 #include <kernel/task.h>
 #include <kernel/tty.h>
-#include <kernel/debug.h>
+#include <kernel/printk.h>
+#include <kernel/selftest.h>
 #include <kernel/sched.h>
-
-#define TEST_NAME "test_tty_vintr"
 
 static volatile int vintr_seen = 0;
 static volatile int vintr_thread_pid = 0;
@@ -833,8 +884,8 @@ static int vintr_thread_fn(void *arg) {
     (void)arg;
     vintr_thread_pid = current->pid;
     for (;;) {
-        // Sleep until signal wakes us
         current->state = TASK_INTERRUPTIBLE;
+        __sync_synchronize();
         schedule();
         if (current->signal & (1ULL << SIGINT)) {
             vintr_seen = 1;
@@ -844,36 +895,45 @@ static int vintr_thread_fn(void *arg) {
     return 0;
 }
 
-void test_tty_vintr(void) {
+static int test_tty_vintr(void)
+{
+    serial_printk("[selftest] test_tty_vintr: start\n");
     vintr_seen = 0;
     vintr_thread_pid = 0;
 
     // 1. Spawn kernel_thread
     task_t *t = (task_t *)kernel_thread(vintr_thread_fn, NULL, "vintr_test");
-    if (!t) { debug_test("%s: kernel_thread failed\n", TEST_NAME); return; }
+    if (!t) {
+        serial_printk("[selftest] test_tty_vintr: FAIL: kernel_thread returned NULL\n");
+        return -1;
+    }
 
-    // 2. Spin until thread is in TASK_INTERRUPTIBLE
-    while (t->state != TASK_INTERRUPTIBLE || vintr_thread_pid == 0) {
+    // 2. Spin until thread is in TASK_INTERRUPTIBLE (bounded)
+    int spin1 = 0;
+    while ((t->state != TASK_INTERRUPTIBLE || vintr_thread_pid == 0) && spin1++ < 10000) {
         arch_local_irq_enable();
         for (volatile int i = 0; i < 1000; i++);
         arch_local_irq_disable();
     }
+    if (t->state != TASK_INTERRUPTIBLE || vintr_thread_pid == 0) {
+        serial_printk("[selftest] test_tty_vintr: FAIL: thread did not become ready\n");
+        return -1;
+    }
 
-    // 3. v3 D1 fix: kernel_thread creates PF_KTHREAD tasks. signal_pgrp
-    //    deliberately skips PF_KTHREAD per spec §3.3. Clear the flag so this
-    //    test thread (which we explicitly want as a signal target) is no
-    //    longer skipped. Without this, tty_push_input → signal_pgrp → task
-    //    enumeration silently bypasses our target, vintr_seen stays 0, and
-    //    the test would time out without ever exercising the code path.
+    // 3. v3 D1 fix: kernel_thread creates PF_KTHREAD. signal_pgrp skips
+    //    PF_KTHREAD per spec §3.3. Demote so this fixture is a valid target.
     t->flags &= ~PF_KTHREAD;
 
     // 4. Set t->pgrp = unique value, tty->fg_pgrp = same value
     uint64_t flags = spin_lock_irqsave(&task_list_lock);
-    t->pgrp = t->pid;          // become own pgrp leader
+    t->pgrp = t->pid;
     spin_unlock_irqrestore(&task_list_lock, flags);
 
     tty_t *dev_tty = get_dev_tty();
-    if (!dev_tty) { debug_test("%s: no dev_tty\n", TEST_NAME); return; }
+    if (!dev_tty) {
+        serial_printk("[selftest] test_tty_vintr: FAIL: get_dev_tty returned NULL\n");
+        return -1;
+    }
     uint64_t f = spin_lock_irqsave(&dev_tty->fg_pgrp_lock);
     dev_tty->fg_pgrp = t->pid;
     spin_unlock_irqrestore(&dev_tty->fg_pgrp_lock, f);
@@ -881,35 +941,52 @@ void test_tty_vintr(void) {
     // 5. Inject VINTR char (0x03 = Ctrl-C) into tty
     tty_push_input(dev_tty, 0x03);
 
-    // 5. Wait for thread to wake and ack
-    int spin = 0;
-    while (!vintr_seen && spin++ < 10000) {
+    // 6. Wait for thread to wake and ack (bounded)
+    int spin2 = 0;
+    while (!vintr_seen && spin2++ < 10000) {
         arch_local_irq_enable();
         for (volatile int i = 0; i < 1000; i++);
         arch_local_irq_disable();
     }
 
-    // ASSERTIONS:
-    //  - vintr_seen == 1 (thread got SIGINT via signal_pgrp → task_wake)
-    //  - (dev_tty->fg_pgrp got reset; cleanup for next test)
+    if (!vintr_seen) {
+        serial_printk("[selftest] test_tty_vintr: FAIL: thread did not receive SIGINT\n");
+        // Cleanup
+        uint64_t fc = spin_lock_irqsave(&dev_tty->fg_pgrp_lock);
+        dev_tty->fg_pgrp = 0;
+        spin_unlock_irqrestore(&dev_tty->fg_pgrp_lock, fc);
+        t->signal |= (1ULL << SIGKILL);
+        return -1;
+    }
 
     // Cleanup
     uint64_t f2 = spin_lock_irqsave(&dev_tty->fg_pgrp_lock);
     dev_tty->fg_pgrp = 0;
     spin_unlock_irqrestore(&dev_tty->fg_pgrp_lock, f2);
-    // Signal thread to exit if still alive
-    if (!vintr_seen) t->signal |= (1ULL << SIGKILL);
-    // (Thread cleanup — kthread will be reaped by task reaper or linger; OK for selftest)
+    // Ensure thread exits cleanly
+    t->signal |= (1ULL << SIGKILL);
+
+    serial_printk("[selftest] test_tty_vintr: PASS\n");
+    return 0;
 }
+
+// v4 fix E4: register via SELFTEST macro (NOT tests[] / TEST_NAME)
+SELFTEST(tty_vintr);
+
+#endif // OS01_SELFTEST
 ```
 
-Wire into the existing kernel selftest runner (find the `tests[]` array in `kernel/test/`, add an entry). Match the pattern of other `test_*.c` files in `test/cases/`.
+**v4 fix E7 timing prerequisite**: `get_dev_tty()` returns the pointer set by `kernel/kernel/main.c:240` (`tty_set_dev_tty(console)`), which runs BEFORE `task_init()` (`main.c:1924`) and BEFORE `selftest_run_all()`. So by the time `test_tty_vintr` runs, `get_dev_tty()` is non-NULL. No timing hazard. (If the boot sequence ever changes, this test would silently skip via the `dev_tty==NULL` branch — documenting the assumption above for future maintainers.)
 
-Note: This test exercises the tty_push_input → signal_pgrp → task_wake → signal delivery chain end-to-end in kernel context. It does NOT exercise the `arch_do_signal_delivery` ring-3 path (that requires returning to user space). Manual acceptance (Task 10) covers the full user-space path. The `t->flags &= ~PF_KTHREAD` step is a deliberate test-only trick — production code never demotes a kthread; only this signal-target fixture does.
+**v4 fix E1/E2/E3/E6**: No ASSERT, no debug_test, no enum task_state, returns int 0/-1, serial_printk for diagnostics.
+
+**v4 fix E4**: Registration via `SELFTEST(tty_vintr)` macro; no edit to `kernel/test/selftest.c` needed.
 
 - [ ] **Step 2: Run selftest to verify it fails**
 
-Expected: child cat never receives SIGINT (no line discipline) — waitpid hangs or child times out.
+Expected: FAIL — `vintr_seen` stays 0 after spin timeout. Serial output shows "test_tty_vintr: FAIL: thread did not receive SIGINT". (v4 fix E7: removed v1's "child cat never receives SIGINT — waitpid hangs" leftover comment; no waitpid in in-kernel test.)
+
+To enable: build kernel with `OS01_SELFTEST=1` flag (whatever the project uses; check `kernel/Makefile` for the exact variable name — likely `-DOS01_SELFTEST`). Run under QEMU; serial output shows `[selftest] test_pgrp_signal: PASS` / `[selftest] test_tty_vintr: PASS` or `: FAIL`.
 
 - [ ] **Step 3: Set default termios in tty_alloc**
 
@@ -1477,6 +1554,32 @@ Reviewer feedback on v2 found 3 remaining issues:
 
 - **D3 (medium, doc inconsistency)**: cosmetic — three code comments used "v3" label inconsistently with this plan's version; Task 1 Step 7 `git add` still listed `kernel/arch/x86_64/trap.c` (no longer edited after C1 fix); File Structure table still had "SYS_fork +2 lines" row.
   - **v3 fixes**: Comments rewritten to reference spec §4.1.1 (not "v3"). Task 1 Step 7 git add trimmed. File Structure row updated.
+
+---
+
+## v4 changes (over v3, commit f43cd3c)
+
+Reviewer feedback on v3 found 7 issues — **all 7 confirmed** (no false alarms this round):
+
+- **E1 (compile error)**: `ASSERT(...)` had no header include. Even if added, `<kernel/assert.h>`'s `ASSERT` panics via `while(1) hlt` (kernel/include/kernel/assert.h:6-13) — wrong model for selftests that should report failure.
+  - **v4 fix**: Replace `ASSERT` with explicit `if (!cond) { serial_printk("[selftest] ... FAIL ...\n"); return -1; }`.
+
+- **E2 (compile error)**: `debug_test(...)` does not exist anywhere in kernel/. Used at test_pgrp_signal line 114 and test_tty_vintr lines 905/928.
+  - **v4 fix**: Replace with `serial_printk("[selftest] ...\n")` — matches `kernel/test/selftest.c:33` style.
+
+- **E3 (compile error)**: `enum task_state` doesn't exist. `task_struct.state` is `volatile int64_t` (kernel/include/kernel/task.h:122); values are `#define TASK_RUNNING (1<<0)` / `TASK_INTERRUPTIBLE (1<<1)`.
+  - **v4 fix**: Change `enum task_state prev_state` to `int64_t prev_state`.
+
+- **E4 (wiring error)**: Plan wrote "find tests[] array + use TEST_NAME macro". Real registration is `SELFTEST(name)` macro in `kernel/include/kernel/selftest.h:25-30` that emits `.selftest_table` section entry; runner is `selftest_run_all()` (kernel/test/selftest.c:130).
+  - **v4 fix**: Each test ends with `SELFTEST(pgrp_signal)` / `SELFTEST(tty_vintr)`. No edit to `kernel/test/selftest.c` needed.
+
+- **E5 (framework mismatch)**: Plan placed tests in `test/cases/` (HOST_CC=clang with mocks — test/Makefile:11) where real kernel APIs are stubbed. Real in-kernel tests live in `kernel/test/*` guarded by `#ifdef OS01_SELFTEST` (matches `kernel/test/test_kthread_self_reap.c:1`).
+  - **v4 fix**: Both test files moved to `kernel/test/test_*.c`, wrapped in `#if defined(OS01_SELFTEST)`.
+
+- **E6 (signature error)**: Plan wrote `void test_*(void)`. Real `selftest_fn` typedef is `typedef int (*selftest_fn)(void)` (kernel/include/kernel/selftest.h:15). Void return won't compile against the section entry pointer.
+  - **v4 fix**: All test functions return `int` (0 PASS, nonzero FAIL).
+
+- **E7 (timing + leftover comments)**: Added bounded spin loops (10000 iters). Removed v1 Step 2 comment "child cat never receives SIGINT — waitpid hangs" (irrelevant to in-kernel test). Added note that `get_dev_tty()` is set by `main.c:240` BEFORE `task_init()` (main.c:1924) and BEFORE `selftest_run_all()` — timing hazard absent.
 
 ---
 
