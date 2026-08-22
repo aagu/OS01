@@ -31,7 +31,6 @@ KERNEL_C_SOURCES := \
     $(wildcard tty/*.c) \
     $(wildcard intr/*.c) \
     $(wildcard block/*.c) \
-    $(wildcard timer/*.c) \
     $(wildcard time/*.c) \
     $(wildcard percpu/*.c) \
     $(wildcard test/*.c) \

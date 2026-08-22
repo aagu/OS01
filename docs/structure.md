@@ -19,13 +19,14 @@
 在 `kernel` 目录内，根据各文件的职责范围，大致分为以下几个子目录：
 
 * `kernel/` — 内核主文件（main.c, printk.c, panic.c, log.c, trace.c, kallsyms.c）
-* `intr/` — 中断处理相关（irq.c, softirq.c, dispatch.c, wait.c）
+* `intr/` — 中断处理相关（irq.c, softirq.c, dispatch.c）
+* `sync/` — 同步原语（mutex.c, completion.c, futex.c, wait.c）
 * `arch/x86_64/` — 处理器体系架构相关（head.S, trap.c, entry.S, smp.c, subsys.c, subsys_percpu.c）
 * `driver/` — 硬件驱动（keyboard, serial, pit, rtc, ahci, pci）
 * `include/` — 头文件，会和 lib 一起安装到 sysroot 中
 * `memory/` — 内存管理相关（pmm.c, vmm.c, slab.c, vma.c, tlb.c, dump.c）
 * `pic/` — 8259A PIC 控制器（APIC 已完全实现，位于 apic/）
-* `timer/` — 软件定时器核心（timer.c）
+* `time/` — 时间子系统（clocksource.c, tick.c, timer.c：时钟源/节拍/软件定时器）
 * `apic/` — APIC 子系统（acpi.c, lapic.c, ioapic.c, ipi.c, lapic_timer.c）
 * `block/` — 块设备层（blockdev.c）
 * `fs/` — 文件系统（vfs.c, fat.c, ext2.c, devfs.c, procfs.c, tmpfs.c, elf.c, file.c, gpt.c, poll.c, select.c）

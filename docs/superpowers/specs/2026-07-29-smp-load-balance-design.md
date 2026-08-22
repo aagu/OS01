@@ -80,7 +80,7 @@ These must be resolved before or alongside this design:
    andq` inline asm.
 
 5. **Global timer list (`timer_list_head`) must be spinlock-protected.**
-   `do_timer()` (`kernel/timer/timer.c:27-49`), `add_timer()` (line
+   `do_timer()` (`kernel/time/timer.c:27-49`), `add_timer()` (line
    58-68), and `del_timer()` (line 70-73) traverse and mutate the
    global `timer_list_head` without any lock.  When two CPUs both enter
    `do_softirq` → `do_timer` (triggered by `softirq_status`), the
@@ -646,7 +646,7 @@ its vruntime was already behind.
 |---|---|
 | `kernel/memory/slab.c` (prereq) | +global spinlock around `kmalloc`/`kfree` |
 | `kernel/softirq/softirq.c` (prereq) | atomic `softirq_status` operations (lock orq/andq) |
-| `kernel/timer/timer.c` (prereq) | +spinlock protecting `timer_list_head` |
+| `kernel/time/timer.c` (prereq) | +spinlock protecting `timer_list_head` |
 | `kernel/driver/pit.c` (prereq) | timer list peek under lock (or lockless flag) |
 | `kernel/sched/task.c` (prereq) | COW: `flush_tlb()` → `tlb_shootdown()` in `fork_mm_copy()` |
 | `kernel/include/kernel/percpu.h` | +`uint32_t nr_running` |

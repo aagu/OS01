@@ -9,7 +9,7 @@
 
 The AGENTS.md rule states: "never add/remove `serial_printk` debug lines ad-hoc.
 Gate all debug prints behind a build-time flag."  Currently only
-`-DOS01_DEBUG_SCHED`, `-DOS01_DEBUG_TTY` exist as ad-hoc flags in `kernel/timer/timer.c`.
+`-DOS01_DEBUG_SCHED`, `-DOS01_DEBUG_TTY` exist as ad-hoc flags in `kernel/time/timer.c`.
 Every other subsystem relies on commented-out `serial_printk` calls.
 
 ## Solution
@@ -105,7 +105,7 @@ Replace existing ad-hoc `serial_printk` debug lines with `debug_<channel>()` mac
 
 | File | Old pattern | New macro |
 |------|------------|-----------|
-| `kernel/timer/timer.c` | `#ifdef OS01_DEBUG_SCHED` + `serial_printk` | `debug_sched(...)` |
+| `kernel/time/timer.c` | `#ifdef OS01_DEBUG_SCHED` + `serial_printk` | `debug_sched(...)` |
 | `kernel/sched/task.c` | commented-out `serial_printk` | `debug_sched(...)` / `debug_task(...)` |
 | `kernel/tty/tty.c` | commented-out `serial_printk` | `debug_tty(...)` |
 | `kernel/fs/vfs.c` | commented-out `serial_printk` | `debug_vfs(...)` |
@@ -126,7 +126,7 @@ Without `DEBUG_CHANNELS`, all macros expand to nothing — zero overhead.
 |------|--------|
 | `kernel/include/kernel/debug.h` | **NEW** — channel macros |
 | `kernel/Makefile` | ~5 lines — `DEBUG_CHANNELS` support |
-| `kernel/timer/timer.c` | migrate existing `#ifdef OS01_DEBUG_SCHED` blocks |
+| `kernel/time/timer.c` | migrate existing `#ifdef OS01_DEBUG_SCHED` blocks |
 | `kernel/sched/task.c` | uncomment + convert `serial_printk` → `debug_*` |
 | `kernel/tty/tty.c` | uncomment + convert |
 | `kernel/fs/vfs.c` | uncomment + convert |

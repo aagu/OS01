@@ -33,7 +33,7 @@ jiffies（tick 粒度）。tick 源修好后 jiffies 恢复真 10ms，两类消�
 `jiffies` 仍隐含 **10ms/tick** 的时间语义，精度就是 tick 粒度。它继续服务于：
 
 - 调度器（EEVDF vruntime/deadline 以 tick 计）—— tick 语义，不是时间
-- watchdog（`watchdog_counter`）、kernel timer 轮（`kernel/timer/timer.c`）
+- watchdog（`watchdog_counter`）、kernel timer 轮（`kernel/time/timer.c`）
 - lwIP 粗超时（`sys_arch.c`，粒度 100ms+ 足够）
 - AHCI 初始化 busy-wait 超时（`WAIT_WHILE`）
 - `LWIP_RAND()` 种子、`hang.c` 调试时间戳
@@ -125,7 +125,7 @@ uint64_t tick_get_jiffies(void);
   真实硬件 PIT 是真 100Hz。LAPIC LVT 本地投递天然免疫。证据链见
   `docs/pit-200hz-analysis.md`。
 
-### 6. 软件定时器管理（timer wheel，kernel/timer/timer.c，未变）
+### 6. 软件定时器管理（timer wheel，kernel/time/timer.c，未变）
 
 ```c
 typedef struct timer {
@@ -181,7 +181,7 @@ add_timer(t);                                  // 到期自动删除（一次性
 | `kernel/time/tick.c` + `include/kernel/clockevent.h` | tick 语义层（jiffies/poll 扫描/源选择） |
 | `kernel/apic/lapic_timer.c` | LAPIC tick 源（校准 + 周期模式 + per-LAPIC DIV） |
 | `kernel/driver/pit.c` | PIT（boot 窗口 + fallback） |
-| `kernel/timer/timer.c` + `include/device/timer.h` | 软件定时器轮（timer wheel） |
+| `kernel/time/timer.c` + `include/device/timer.h` | 软件定时器轮（timer wheel） |
 | `kernel/arch/x86_64/`（arch hook） | TSC/RTC 校准、LAPIC 启动 |
 
 ## 精度说明

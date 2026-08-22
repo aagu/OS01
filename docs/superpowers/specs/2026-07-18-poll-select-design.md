@@ -795,7 +795,7 @@ if (timeout > 0) {
 ### 11.2 Timer 回调 (PIT do_timer 中)
 
 ```c
-// kernel/timer/timer.c — do_timer() 中:
+// kernel/time/timer.c — do_timer() 中:
 if (current_poll_wq && g_sched_ticks >= poll_deadline) {
     wait_queue_wake_all(current_poll_wq);
     current_poll_wq = NULL;

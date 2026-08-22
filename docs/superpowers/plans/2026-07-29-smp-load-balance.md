@@ -449,7 +449,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 **Files:**
 - Modify: `kernel/intr/softirq.c:1-47`
 - Modify: `kernel/include/kernel/softirq.h:1-26`
-- Modify: `kernel/timer/timer.c:1-73`
+- Modify: `kernel/time/timer.c:1-73`
 - Modify: `kernel/driver/pit.c:1-68`
 
 **Interfaces:**
@@ -514,10 +514,10 @@ void do_softirq()
 
 - [ ] **Step 2: Add timer_list_lock**
 
-In `kernel/timer/timer.c`, add spinlock and protect all list accesses:
+In `kernel/time/timer.c`, add spinlock and protect all list accesses:
 
 ```c
-// kernel/timer/timer.c — add after #include lines
+// kernel/time/timer.c — add after #include lines
 #include <kernel/arch/spinlock.h>
 
 static spinlock_T timer_lock = { .lock = 1L };
@@ -613,7 +613,7 @@ void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attri
 But `timer_lock` is `static` in `timer.c`.  Add an accessor:
 
 ```c
-// kernel/timer/timer.c — add:
+// kernel/time/timer.c — add:
 int timer_has_expired(uint64_t now)
 {
     if (list_is_empty(&timer_list_head.list)) return 0;
@@ -661,7 +661,7 @@ Expected: boots to shell, timer softirqs work, no corruption.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add kernel/intr/softirq.c kernel/timer/timer.c kernel/include/device/timer.h kernel/apic/lapic_timer.c
+git add kernel/intr/softirq.c kernel/time/timer.c kernel/include/device/timer.h kernel/apic/lapic_timer.c
 git commit -m "fix: atomic softirq_status + spinlock-protected timer list + AP TIMER_SIRQ
 
 softirq_status: lock orq/andq for concurrent set/clear from

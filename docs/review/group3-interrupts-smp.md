@@ -1,7 +1,7 @@
 # 架构评审 — Group 3: 中断 + 时钟 + SMP
 
 > **审查日期**: 2026-07-25
-> **覆盖文件**: `kernel/apic/lapic.c`, `ioapic.c`, `ipi.c`, `lapic_timer.c`, `kernel/intr/dispatch.c`, `softirq.c`, `irq.c`, `kernel/driver/pit.c`, `kernel/timer/timer.c`, `kernel/arch/x86_64/smp.c`, `kernel/percpu/percpu.c`, `kernel/include/kernel/smp.h`, `kernel/include/kernel/ipi.h`, `kernel/include/kernel/softirq.h`
+> **覆盖文件**: `kernel/apic/lapic.c`, `ioapic.c`, `ipi.c`, `lapic_timer.c`, `kernel/intr/dispatch.c`, `softirq.c`, `irq.c`, `kernel/driver/pit.c`, `kernel/time/timer.c`, `kernel/arch/x86_64/smp.c`, `kernel/percpu/percpu.c`, `kernel/include/kernel/smp.h`, `kernel/include/kernel/ipi.h`, `kernel/include/kernel/softirq.h`
 
 ## 问题清单
 
@@ -41,7 +41,7 @@
 
 ### [P1] 2. TIMER_SIRQ handler (`do_timer`) 操作全局 timer list 无锁
 
-- **位置**: `kernel/timer/timer.c:27-49` (do_timer), `58-68` (add_timer), `70-73` (del_timer)
+- **位置**: `kernel/time/timer.c:27-49` (do_timer), `58-68` (add_timer), `70-73` (del_timer)
 - **现象**: `do_timer` 遍历 `timer_list_head` 链表并调用 timer 回调；`add_timer` 插入链表；均无锁保护。当前只从 BSP softirq 调用，但若未来任何 AP 调用 `add_timer`/`del_timer`，链表会损坏
 - **建议**: 添加 `timer_lock` spinlock，在 `do_timer`/`add_timer`/`del_timer` 中持有
 
@@ -65,7 +65,7 @@
 
 ### [P1] 4. Timer list 操作无锁
 
-- **位置**: `kernel/timer/timer.c:27-73` 全局链表
+- **位置**: `kernel/time/timer.c:27-73` 全局链表
 - **现象**: 同上，#2 已说明。timer list 从初始化到过期回调均无锁保护
 - **建议**: 添加全局 `timer_lock`，在 `do_timer`/`add_timer`/`del_timer`/`init_timer` 中加锁
 

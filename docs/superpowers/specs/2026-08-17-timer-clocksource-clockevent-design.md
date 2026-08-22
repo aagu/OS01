@@ -62,7 +62,7 @@ IRQ0。于是 1 jiffy 实际只有 5ms，所有基于 jiffies 的时间/超时�
 `jiffies` **仍然隐含 10ms/tick 的时间语义**，精度就是 tick 粒度。它继续服务于：
 
 - 调度器（EEVDF vruntime/deadline 以 tick 计）——这是 tick 语义，不是时间
-- watchdog、kernel timer 轮（`kernel/timer/timer.c`）
+- watchdog、kernel timer 轮（`kernel/time/timer.c`）
 - lwIP 粗超时（`sys_arch.c`，粒度 100ms+ 足够）
 - AHCI 初始化 busy-wait 超时
 - `LWIP_RAND()` 种子、`hang.c` 调试时间戳、`test_kthread_self_reap.c` 的

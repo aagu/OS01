@@ -498,7 +498,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 - Produces: `void console_init(void)` — 注册光标闪烁回调和设置终端初始状态
 - Produces: `void console_putchar(char c)` — 单字符驱动的 VT100 状态机 + 字符输出（用作 TTY 的 output_char 回调）
 - Consumes: `putchar_at()` from Task 1
-- Consumes: `jiffies` (extern) from `kernel/timer/timer.c`
+- Consumes: `jiffies` (extern) from `kernel/time/timer.c`
 - Consumes: `font` (extern psf2_t *) and `Pos` (extern position) from printk.h
 
 - [ ] **Step 1: 创建 console.h**

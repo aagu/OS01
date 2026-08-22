@@ -52,7 +52,7 @@
 - 关注点: PMM 三区管理、Slab 递归初始化、VMM 页表操作、VMA 查找/拆分、COW 引用计数、4KB subpage pool、TLB shootdown
 
 ### Group 3: 中断 + 时钟 + SMP
-- 文件: `kernel/apic/*.c`, `kernel/intr/*.c`, `kernel/pic/*.c`, `kernel/timer/*.c`, `kernel/sched/smp.c`, `kernel/percpu/*.c`, `kernel/arch/x86_64/trampoline.S`
+- 文件: `kernel/apic/*.c`, `kernel/intr/*.c`, `kernel/pic/*.c`, `kernel/time/*.c`, `kernel/sched/smp.c`, `kernel/percpu/*.c`, `kernel/arch/x86_64/trampoline.S`
 - 关注点: APIC/IOAPIC/LAPIC 初始化顺序、IRQ 向量分配、PIT/LAPIC timer 共存、IPI 广播、SMP bringup 8 阶段、percpu GS base
 
 ### Group 4: 调度

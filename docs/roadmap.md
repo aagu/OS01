@@ -486,7 +486,7 @@ CPU N: schedule()
 | **修改** | `kernel/memory/slab.c` | per-CPU 递归 slab_lock |
 | **修改** | `kernel/memory/pmm.c` | pmm_lock for alloc_pages/free_pages |
 | **修改** | `kernel/intr/softirq.c` | lock orq/andq atomic softirq_status |
-| **修改** | `kernel/timer/timer.c` | timer_lock + do_timer 解锁回调模式 |
+| **修改** | `kernel/time/timer.c` | timer_lock + do_timer 解锁回调模式 |
 | **修改** | `kernel/apic/lapic_timer.c` | AP TIMER_SIRQ + softirq.h include |
 | **修改** | `kernel/arch/x86_64/trampoline.S` | wrmsr EDX:EAX + CR4 SSE bits |
 | **修改** | `kernel/arch/x86_64/trap.c` | kill_current_user_task RSP switch |
