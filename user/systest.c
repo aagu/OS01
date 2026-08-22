@@ -112,6 +112,38 @@ static void test_fork_exec_waitpid(void)
            "exec", "/bin/spin exit 42");
 }
 
+// ── 70b: §4.1.1 默认继承路径验证（v2 M1）────────────
+// 不调 setpgid(0,0)。靠 fork 继承父 pgrp + §4.1.1 open 默认路径，
+// 验证 child open /dev/tty 后 tcgetpgrp 返回 child.pid 的继承 pgrp
+// (而非 0 — 这才能抓 C1 fork 不复制 pgrp 的 bug)。
+// 设计：父 (systest) pgrp 继承自 hush = 1。child fork 继承 pgrp=1。
+// 复位 fg_pgrp=0（new_pg==0 §4.4 始终允许），child open → §4.1.1 设 fg_pgrp=child.pgrp=1。
+// 正确断言：p == child.pgrp（继承自父）—— 即 p == 1 (若 systest pgrp=1) 或
+// 任何 child.pgrp 的实际值。简化：直接断言 p == child 的 getpgid(0)。
+static void test_devfs_open_inherited_fg_pgrp(void) {
+    int rfd = open("/dev/tty", O_RDWR);
+    if (rfd < 0) { FAIL("devfs_open_inherit", "no /dev/tty"); return; }
+    tcsetpgrp(rfd, 0);  // 复位
+    close(rfd);
+
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("devfs_open_inherit", "fork"); return; }
+    if (pid == 0) {
+        // 不调 setpgid！靠 fork 继承父 pgrp（必须 ≠ 0，验证 C1）
+        pid_t my_pgrp = getpgid(0);
+        if (my_pgrp == 0) { _exit(2); }       // C1 broken: fork 没复制 pgrp
+        int cfd = open("/dev/tty", O_RDWR);
+        if (cfd < 0) { _exit(3); }
+        pid_t fg = tcgetpgrp(cfd);
+        // §4.1.1: fg_pgrp==0 时设 = opener.pgrp = my_pgrp
+        _exit(fg == my_pgrp ? 0 : 4);
+    }
+    int status; waitpid(pid, &status, 0);
+    CHECK3(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+           "devfs_open_inherit",
+           "tcgetpgrp after open returns inherited pgrp (catches C1)");
+}
+
 // ── orphan reparent: child dies while its own child is alive ──
 // The grandchild becomes an orphan, reparented to init (PID 1) by the
 // child's do_exit; init's supervision loop (waitpid(-1, WNOHANG)) reaps
@@ -1773,6 +1805,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"brk",               test_brk},
     {"getpid/getppid",    test_getpid_getppid},
     {"fork+exec+waitpid", test_fork_exec_waitpid},
+    {"devfs_open_inherit", test_devfs_open_inherited_fg_pgrp},
     {"orphan_reparent",   test_orphan_reparent},
     {"read",              test_read},
     {"open/close",        test_open_close},
