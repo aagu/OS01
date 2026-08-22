@@ -1,6 +1,6 @@
-# libc 兼容性修复设计（printf 浮点 + getopt）— 修订版 v12
+# libc 兼容性修复设计（printf 浮点 + getopt）— 修订版 v13
 
-- 日期：2026-08-22（v12 修订）
+- 日期：2026-08-22（v13 修订）
 - 验收基线：`docs/applet-verification.md`（BusyBox Applet 验证报告 2026-08-18）
 - 范围：仅修复代码中**已确证**的两个 libc 缺陷——`printf` 格式化器（无符号路径缺失 + 浮点缺失 + 大小保护缺失）与 `getopt`（逻辑错误 + 公开头多重定义）。
 - 方针：最小范围、最低风险；不引入外部依赖（除非浮点部分明确选择成熟 dtoa）。
@@ -77,6 +77,9 @@
 - **P1（动态精度语义）**：`vformatter → floatconv_render` 契约新增：经 `*` 取得的负精度视为“未指定”，浮点回退默认精度 6（不当 `.0`），整数按无精度处理；新增 `%.*f`/`%*.*g` 负值验收。
 - **P1（`%n` 长度修饰符）**：`ll` 解析扩展后，`%n`/`%ln`/`%lln` 分支显式列入（分别 `int*`/`long*`/`long long *`，写入当前 `total`），禁止 `%lln` 被误当未知修饰符原样输出；新增对应验收。
 
+### 0.13 补充修订（v13，本轮）
+- **P1（`%n` 双 pass 副作用）**：`vformatter` 新增内部模式参数 `perform_assign`（`0`=纯计数不写 `%n`、`1`=执行一次写入）。双 pass 的 `printf`/`vfprintf`/`vasprintf` 计数 pass 传 `0`、渲染 pass 传 `1`，避免 `%n`/`%ln`/`%lln` 被写入两次。新增 `printf`/`vfprintf`/`vasprintf` 的 `%n` 用例，断言写入一次且值等于 `total`。
+
 ## 1. 背景与上下文（修正后的根因归类）
 
 | # | 根因 | 核查结论 | 本方案处理 |
@@ -112,7 +115,8 @@
 
 ### 3.2 步骤 A：抽取核心格式化器 `vformatter`（解决 P1，v3 接口）
 - 接口契约：**`cap` = 完整目标数组大小（含 NUL 终止符）**。
-  `static size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap)`
+  `static size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perform_assign)`
+  - **`perform_assign` 模式（满足 P1，v13）**：控制 `%n` 类副作用是否真正写入。计数量（count pass）时**必须传 `0`**——`%n`/`%ln`/`%lln` 仍按 `va_arg` 取走指针参数（保证 `va_list` 推进与渲染 pass 一致），但**不对其解引用写入**；渲染量（render pass）传 `1`——执行一次真实写入（写入值 = 当前 `total`）。这避免 `printf`/`vfprintf`/`vasprintf` 的“计数 + 渲染”双 pass 对 `%n` 产生两次可观察副作用。单 pass 的 `snprintf`/`vsnprintf`/`sprintf`/`vsprintf` 直接以 `perform_assign=1` 调用。
   - 内部维护 `total`（本应生成的字符总数）与 `pos`（已写入 `dst` 的可见字符数）。
   - 写入条件固定为 **`cap > 0 && pos < cap - 1`**（**防 `cap == 0` 时 `cap - 1` 下溢为 `SIZE_MAX`**：纯计数模式下 `dst == NULL`，不得写入 `dst[0]`）；满足时写 `dst[pos]`，自增 `pos` 与 `total`；`cap == 0` 进入纯计数路径，不写、不终止。
   - 当 `cap > 0` 时，无论是否被截断，**最后都写 `dst[min(total, cap-1)] = '\0'`**（核心负责终止，调用方无需再补）。
@@ -120,11 +124,11 @@
   - 返回 `total`（C 标准 `snprintf` 语义：本应写入的总长度，不含 NUL）。若内部计数溢出无法用 `size_t` 表示，`vformatter` 返回 `SIZE_MAX`。
   - **统一溢出约定（满足 P0）**：`vformatter` 返回 `SIZE_MAX` 或 `total > INT_MAX` 时，所有返回 `int` 的公开接口（`snprintf`/`vsnprintf`/`sprintf`/`vsprintf`）一律返回 `-1`；这与既有的 `printf`/`vfprintf`/`vasprintf` 的 `>INT_MAX → -1` 行为完全一致。仅 `vasprintf` 额外保证 `*strp = NULL`。
 - wrapper 接入：
-  - `vsnprintf`/`snprintf`：`vformatter(buf, size, …)`；`size>0` 返回 `total`（截断亦同 `size==0` 走 `vformatter(NULL,0,…)` 仅计长度）；**溢出时按统一约定返回 `-1`**。`cap>0` 已由核心保证 NUL。
-  - `vsprintf`：**保留历史 4 KiB 上限**，`vformatter(buf, 4096, …)`——最多保存 4095 个可见字符 + NUL，与现状语义一致；**溢出（`total > INT_MAX`/`SIZE_MAX`）按统一约定返回 `-1`**。
+  - `vsnprintf`/`snprintf`：单 pass，直接 `vformatter(buf, size, …, ap, 1)`（`size==0` 时 `vformatter(NULL, 0, …, ap, 1)` 仅计长度但 `%n` 仍执行，标准语义）；`size>0` 返回 `total`；**溢出时按统一约定返回 `-1`**。`cap>0` 已由核心保证 NUL。
+  - `vsprintf`：**保留历史 4 KiB 上限**，单 pass `vformatter(buf, 4096, …, ap, 1)`——最多保存 4095 个可见字符 + NUL，与现状语义一致；**溢出（`total > INT_MAX`/`SIZE_MAX`）按统一约定返回 `-1`**。
   - `sprintf` / `vsprintf`：**采用标准契约——调用者必须保证缓冲足够**（这两个函数**无 size 参数，无法提供大小保护**）。内核 `vformatter(buf, 4096, …)` 只是“至多尝试格式化 4095 字符”的内部上限，**不构成对小缓冲的安全保证**；若调用者传入 `char buf[8]`，写越界属调用方 UB（与标准 `sprintf` 一致）。**本设计只承诺 `snprintf`/`vsnprintf`/`vasprintf` 的大小安全**，`sprintf`/`vsprintf` 不纳入“大小保护已解决”范围（仅保证 NUL 终止与已知 4 KiB 内部上限行为）。
-  - `vasprintf`：**双 pass**——`va_copy(ap2, ap)` 调 `vformatter(NULL, 0, …, ap2)` 得 `total`；检查错误（`total == SIZE_MAX`、或 `total + 1` 溢出 `SIZE_MAX`、或 `total > INT_MAX`）→ 返回 `-1` 且 `*strp = NULL`；否则分配 `total+1`，用**原始 `ap`** 调 `vformatter(buf, total+1, …, ap)` 填充（`cap>0` 保证 NUL），`va_end(ap2)`。绝不用同一 `va_list` 格式化两次。
-- **二进制输出 sink（printf/vfprintf，P1 一致性修复）**：公开返回类型为 `int`，故须与 `vasprintf` 一致防御 `total > INT_MAX`。采用 **2-pass 堆缓冲**：`va_copy` 计数得 `total` → **若 `total > INT_MAX` 直接返回 `-1`（不分配、不写出）** → 否则分配 `total+1` → 用原始 `ap` 调 `vformatter(heap, total+1, …)` 填充（受 `cap` 约束、保证 NUL 于 `heap[total]`）→ 经由 **`write_all(fd, heap, total)`** 写出 → `free` → 返回 `total`（或 `-1`）。
+  - `vasprintf`：**双 pass**——`va_copy(ap2, ap)` 调 `vformatter(NULL, 0, …, ap2, 0)`（**`perform_assign=0`，不执行 `%n` 写入**）得 `total`；检查错误（`total == SIZE_MAX`、或 `total + 1` 溢出 `SIZE_MAX`、或 `total > INT_MAX`）→ 返回 `-1` 且 `*strp = NULL`；否则分配 `total+1`，用**原始 `ap`** 调 `vformatter(buf, total+1, …, ap, 1)`（**`perform_assign=1`，执行一次 `%n`**）填充（`cap>0` 保证 NUL），`va_end(ap2)`。绝不用同一 `va_list` 格式化两次。
+- **二进制输出 sink（printf/vfprintf，P1 一致性修复）**：公开返回类型为 `int`，故须与 `vasprintf` 一致防御 `total > INT_MAX`。采用 **2-pass 堆缓冲**：`va_copy(ap2, ap)` 调 `vformatter(NULL, 0, …, ap2, 0)`（**`perform_assign=0`，不执行 `%n` 写入**）得 `total` → **若 `total > INT_MAX` 直接返回 `-1`（不分配、不写出）** → 否则分配 `total+1` → 用原始 `ap` 调 `vformatter(heap, total+1, …, ap, 1)`（**`perform_assign=1`，执行一次 `%n`**）填充（受 `cap` 约束、保证 NUL 于 `heap[total]`）→ 经由 **`write_all(fd, heap, total)`** 写出 → `free` → 返回 `total`（或 `-1`）。
   - **`write_all` 语义（满足 P1 短写/失败，v8 补充 `write==0`）**：循环调用 `write`，累计已写字节，直至写完 `total` 或失败。单次 `write` 返回值处理：
     - `>0 且 < 请求`：**短写** → 推进偏移、继续循环（重试剩余）。
     - `== 0`：**视为失败**，中止循环、返回 `-1`（否则零长度会令循环不前进而无限循环）。
@@ -150,7 +154,7 @@
 - **验收边界值**（写入 §5 用例）：
   - 无符号：`%lu`=`0xFFFFFFFFFFFFFFFF`、`0x8000000000000000`；`%lx`、`%lo`；`%u`=`0xFFFFFFFF`、`0x80000000`。
   - **`long long`**：`%lld`=`-9223372036854775808`（INT64_MIN）、`%llu`=`0xFFFFFFFFFFFFFFFF`、`%llx`、`%llo`。
-  - **`%n` 修饰符（v12 新增，P1）**：`%n`→`int*`、`%ln`→`long*`、`%lln`→`long long *`，写入值 = 截至目前输出字符数（即 `total`）；明确三者均实现，禁止 `%lln` 被误当未知修饰符原样输出。
+  - **`%n` 修饰符（v12 新增，P1；v13 补双 pass 单次写入）**：`%n`→`int*`、`%ln`→`long*`、`%lln`→`long long *`，写入值 = 截至目前输出字符数（即 `total`）；明确三者均实现，禁止 `%lln` 被误当未知修饰符原样输出。针对**双 pass 的 `printf`/`vfprintf`/`vasprintf`**，须断言 `%n`/`%ln`/`%lln` 仅被写入**一次**且值等于最终 `total`（计数 pass 禁止写入、渲染 pass 写入一次），不出现两次副作用或错误值。
   - **真实回归用例**：`du`（`%llu`，见 `thirdpart/busybox-1.36.1/coreutils/du.c:140`）、`sum`（`%u %llu`，见 `sum.c:85`）的输出格式须与预期一致。
 
 ### 3.4 步骤 C：浮点路径（明确契约，解决 P2）
