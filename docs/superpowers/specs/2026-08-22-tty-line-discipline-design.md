@@ -1,21 +1,27 @@
 # TTY 行规程与进程组（最小集）设计文档
 
 - 日期：2026-08-22
-- 状态：v4 待用户 review（尚未进入实现）
+- 状态：v5 待用户 review（尚未进入实现）
 - 目标：实现 POSIX 最小行规程（VINTR/VQUIT → 信号派发到前台进程组）+ 进程组/会话子系统骨架，使 Ctrl-C 能在 OS01 shell 中可靠终止前台任务（如 `cat /dev/urandom`、`cat` 无参数），同时为后续 job control 留出干净的扩展面
 - 修订记录：
   - v1：初版
   - v2：并入 review 反馈（CONFIG_ASH_JOB_CONTROL=n 确认；加 §3.4 自动 fg_pgrp 更新 + §4.1.1 devfs_open 默认；其余文档/测试修正）
   - v3：并入 v2 review——删 v2 vfs_node 设计，改 file_t->tty；§4.1.1 拆 tty_magic_open + devfs_open_node FD_DEV 两处；§6.2 锁序修正；§7.2 重画（ash JOBS=0 不调 setpgid/tcsetpgrp）；§8.6 测试修复；§11 加共享 pgrp 耦合风险
   - v4：并入 v3 review——
-    - 🟠 §3.4 setpgid 权限放宽：`pgid == pid` **或** `pgid` 是 caller 同 session 内已存在 pgrp；抽 `pgrp_exists_in_session()` helper
-    - 🟠 §4.4 TIOCSPGRP 权限放宽：`new_pg == 0` **或** `new_pg` 是 caller 同 session 内已存在 pgrp；复用 helper
+    - 🟠 §3.4 setpgid 权限放宽：`pgid == pid` **或** `pgid` 是 caller 同 session 内已存在 pgrp（两处内联复用同一 task_list 扫描逻辑）
+    - 🟠 §4.4 TIOCSPGRP 权限放宽：`new_pg == 0` **或** `new_pg` 是 caller 同 session 内已存在 pgrp（同上内联扫描）
     - 🟠 §8.6 测试顺序修复：开头先 `tcsetpgrp(fd, 0)` 复位 fg_pgrp，避免被 8.4 等前置用例污染
     - 🟠 §2 架构图重画：去掉 v1 旧流程（child setpgid + parent tcsetpgrp），改 §4.1.1 默认 fg_pgrp 路径
     - 🟠 §7.2 加"§4 实施第一步手动确认 hush fd0 节点名落在 §4.1.1 覆盖范围（/dev/tty 或 /dev/tty0）"
     - 🟠 §8.9 验收清单加首条："hush 收到 SIGINT 后不自杀（busybox SIGINT handler 装在且 raise EXINT 而非 SIG_DFL）"
     - 🟡 §8 开头测试计数统一为 7 systest + 1 kernel selftest，目标 139/139
     - 🟡 §9 文件清单一致化
+  - v5：收尾——
+    - 🟡 §3.4 注释与代码对齐（修"pgid==pid 才更新"为"任一成功 setpgid"）
+    - 🟡 §8.7 测试在 child 里 `dup2(cfd, 0)`，消除对 systest runner 继承 fd0 的依赖
+    - 🟡 §7.2 扩展：实施第一步也确认 systest runner fd0 落在覆盖范围
+    - 🟢 §4.4 锁序确认：new_pg 校验分支独立取 task_list_lock，与 §3.4 单向 task_list_lock → fg_pgrp_lock，无反向嵌套
+  - v4 历史改动：见 `git show aa4daa0`
   - v3 历史改动：见 `git show 3fb161e`
   - v2 历史改动：见 `git show 4e3783f`
   - v1 历史改动：见 `git show fcd2219`
@@ -216,7 +222,7 @@ case SYS_setpgid: {
     target->pgrp = pgid;
 
     // ── v3 核心：自动 fg_pgrp 更新──────────────────
-    // 若 target 刚成为新 pgrp leader（pgid==pid），且 fd 0 指向控制台 TTY
+    // 任一成功 setpgid（含 join 现有 pgrp）且 fd 0 指向控制台 TTY 时
     // （file_t->tty == get_dev_tty()，由 §4.1.1 在 open 路径置位），
     // 把 dev_tty.fg_pgrp 同步到新 pgid——替代 POSIX 要求的"shell 调 tcsetpgrp"
     tty_t *dev_tty = get_dev_tty();
@@ -829,11 +835,23 @@ shell 打印提示符
 
 若落到其它节点，§4 实施时需在 `devfs_register_chrdev` 注册时把该节点 private_data 也指向 `keyboard_get_tty()`，并保证 open 路径走到 §4.1.1 任一分支。
 
+**v5 扩展：systest runner 的 fd0 也必须落在覆盖范围**
+
+测试 8.7（setpgid_auto_fg_pgrp）依赖 §3.4 的 `current->files->fd[0]->tty == get_dev_tty()` 分支，**即 systest 进程的 fd0 必须是 /dev/tty 或 /dev/tty0**。若 systest runner 的 fd0 是别的节点（如被重定向），§3.4 永不触发，8.7 红。
+
+**实施第一步**也要确认：systest runner 启动后读 `/proc/<systest_pid>/fd/0` 看节点名。
+
+修复方案二选一（实施时决定）：
+- 让 init 脚本 / 启动顺序确保 systest fd0 是 /dev/tty
+- 测试代码里 `dup2(open("/dev/tty"), 0)` 强制（8.7 已显式 dup2，§7.2 兜底）
+
+**同理，systest 自身（及其 fork 出的子进程）的 fd0 也须是 /dev/tty**，否则 §8.4/§8.5/§8.6/§8.7 依赖 §3.4 自动 fg_pgrp 更新的分支不会触发（§3.4 固定读 `current->files->fd[0]`）。建议在测试里显式 `dup2(cfd, 0)` 把打开到的 /dev/tty 放到 fd0 再调用 setpgid，避免依赖继承环境。
+
 ---
 
 ## 8. 测试（`user/systest.c` 新增 7 个 + kernel selftest 1 个，目标 132+7=139/139）
 
-`tests/run_test.py` 现有 132/132 PASS，本档新增 5 测试，目标 137/137。
+`tests/run_test.py` 现有 132/132 PASS，本档新增 7 个 systest（+1 kernel selftest），目标 139/139。
 
 ### 8.1 test_signal_pgrp_basic（用 negative pid 路径触发 signal_pgrp）
 
@@ -1003,10 +1021,14 @@ static void test_setpgid_auto_fg_pgrp(void) {
         // 子进程 open /dev/tty（不会改 fg_pgrp，因父已设过非零）
         int cfd = open("/dev/tty", O_RDWR);
         if (cfd < 0) { _exit(2); }
+        // v5 修复：§3.4 检查 current->files->fd[0]，不能依赖父继承的 fd0
+        // （systest runner 的 fd0 可能不是 /dev/tty）。显式 dup2 把 tty 放到 fd0
+        // 才能触发 §3.4 的 fd0->tty == get_dev_tty() 分支。
+        if (dup2(cfd, 0) < 0) { _exit(5); }
         // 调 setpgid(0, 0) → 应自动把 fg_pgrp 设为 child.pid
         if (setpgid(0, 0) != 0) _exit(3);
         // 现在 tcgetpgrp 应返回 child.pid
-        pid_t p = tcgetpgrp(cfd);
+        pid_t p = tcgetpgrp(0);
         _exit(p == getpid() ? 0 : 4);
     }
     int status; waitpid(pid, &status, 0);
@@ -1060,7 +1082,7 @@ VINTR 端到端无法从用户态测试（用户态无法直接调 `tty_push_inp
 | `libc/unistd/tcsetpgrp.c` | stub → ioctl | +5 |
 | `libc/unistd/tcgetpgrp.c` | fake-return-1 → ioctl | +5 |
 | `libc/signal/killpg.c` | stub → kill(-pgrp,sig) | +5 |
-| `user/systest.c` | 新增 7 测试函数（5 + §8.6 v3 修正版 + §8.7 setpgid_auto_fg_pgrp）+ 注册 | +250 |
+| `user/systest.c` | 新增 7 测试函数（§8.1..§8.7，含 §8.6 修正版与 §8.7 setpgid_auto_fg_pgrp）+ 注册 | +250 |
 | `docs/syscall.md` | 4 行：setpgid/getpgid/setsid/getsid 条目 | +20 |
 
 合计：~575 行（内核 ~335，libc ~25，测试 ~280，文档 ~20）。
