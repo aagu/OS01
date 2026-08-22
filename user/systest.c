@@ -1680,6 +1680,57 @@ static void test_getrandom(void)
     }
 }
 
+// ── 6b: libc printf float/getopt (printf hardening / getopt compat) ──
+static int libc_expect(const char *got, const char *exp)
+{
+    return strcmp(got, exp) == 0;
+}
+
+static void test_libc_printf_getopt(void)
+{
+    char b[128];
+
+    // integer (incl. %llu)
+    snprintf(b, sizeof(b), "%llu", 18446744073709551615ULL);
+    CHECK3(libc_expect(b, "18446744073709551615"), "printf %llu", b);
+    snprintf(b, sizeof(b), "%d-%s", 42, "x");
+    CHECK3(libc_expect(b, "42-x"), "printf %d-%s", b);
+
+    // float family
+    snprintf(b, sizeof(b), "%.0f", 2.5);       CHECK3(libc_expect(b, "2"),           "printf %.0f", b);
+    snprintf(b, sizeof(b), "%f", -0.0);        CHECK3(libc_expect(b, "-0.000000"),  "printf %f -0", b);
+    snprintf(b, sizeof(b), "%e", 1.5);        CHECK3(libc_expect(b, "1.500000e+00"),"printf %e", b);
+    snprintf(b, sizeof(b), "%g", 1e7);         CHECK3(libc_expect(b, "1e+07"),      "printf %g", b);
+    snprintf(b, sizeof(b), "%+.1f", -0.0);    CHECK3(libc_expect(b, "-0.0"),       "printf %+.1f", b);
+    snprintf(b, sizeof(b), "%f", __builtin_inf());    CHECK3(libc_expect(b, "inf"), "printf inf", b);
+    snprintf(b, sizeof(b), "%e", __builtin_nan(""));  CHECK3(libc_expect(b, "nan"), "printf nan", b);
+
+    // bounded snprintf: output truncated, NUL always present, returns full len
+    int r = snprintf(b, 4, "%s", "abcdef");
+    CHECK3(r == 6 && b[0] == 'a' && b[1] == 'b' && b[2] == 'c' && b[3] == '\0',
+           "snprintf bounded", "ret=6 truncated+NUL");
+
+    // %n assigned only in the render pass (count pass must not touch it)
+    int n = -1;
+    snprintf(b, sizeof(b), "abc%n", &n);
+    CHECK3(n == 3, "printf %n", "n=3 after render");
+
+    // getopt: optind==0 reset + separated argument
+    {
+        char *argv[] = { "prog", "-a", "-b", "file", NULL };
+        int argc = 4;
+        optind = 0; /* reset */
+        int c, seen_a = 0, seen_b = 0;
+        char *barg = NULL;
+        while ((c = getopt(argc, argv, "ab:")) != -1) {
+            if (c == 'a') seen_a = 1;
+            else if (c == 'b') { seen_b = 1; barg = optarg; }
+        }
+        CHECK3(seen_a && seen_b && barg && strcmp(barg, "file") == 0,
+               "getopt -a -b file", "a,b,arg=file");
+    }
+}
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
@@ -1745,6 +1796,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"proc_fd",             test_proc_fd},
     {"termios",             test_termios},
     {"getrandom",           test_getrandom},
+    {"libc_printf_getopt",  test_libc_printf_getopt},
 };
 
 int main(void)
