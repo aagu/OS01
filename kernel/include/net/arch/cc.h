@@ -1,4 +1,4 @@
-// kernel/net/arch/cc.h — lwIP platform compiler abstraction for OS01
+// kernel/include/net/arch/cc.h — lwIP platform compiler abstraction for OS01
 #ifndef LWIP_ARCH_CC_H
 #define LWIP_ARCH_CC_H
 

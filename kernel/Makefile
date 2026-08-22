@@ -99,7 +99,7 @@ LWIP_OBJECTS  := $(patsubst $(LWIP_SRC_DIR)/%.c,$(BUILD_DIR)/lwip/%.o,$(LWIP_SOU
 
 KERNEL_OBJECTS += $(LWIP_OBJECTS)
 
-ALL_CFLAGS     += -I$(LWIP_SRC_DIR)/include -I../kernel/net
+ALL_CFLAGS     += -I$(LWIP_SRC_DIR)/include -I../kernel/include/net
 ALL_LDFLAGS    +=
 ifdef DEBUG_CHANNELS
   comma := ,

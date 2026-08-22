@@ -1,4 +1,4 @@
-// kernel/net/arch/sys_arch.h — lwIP sys_arch types + prototypes for OS01
+// kernel/include/net/arch/sys_arch.h — lwIP sys_arch types + prototypes for OS01
 // Matches lwIP 2.2.0 API: all functions take pointer-to-handle.
 #ifndef LWIP_ARCH_SYS_ARCH_H
 #define LWIP_ARCH_SYS_ARCH_H

@@ -98,7 +98,7 @@ git commit -m "feat(pci): add PCI_CLASS_NETWORK and PCI_SUBCLASS_ETHERNET consta
 ### Task 1.3: Create lwIP configuration and kernel net headers
 
 **Files:**
-- Create: `kernel/net/lwipopts.h`
+- Create: `kernel/include/net/lwipopts.h`
 - Create: `kernel/include/net/net.h`
 - Create: `kernel/include/net/socket.h` (empty placeholder for Phase 2)
 
@@ -107,10 +107,10 @@ git commit -m "feat(pci): add PCI_CLASS_NETWORK and PCI_SUBCLASS_ETHERNET consta
 - Produces: `net.h` — declares `int net_hw_init(void);` and `void net_lwip_init(void);`
 - Produces: `socket.h` — placeholder, expanded in Phase 2
 
-- [ ] **Step 1: Create `kernel/net/lwipopts.h`**
+- [ ] **Step 1: Create `kernel/include/net/lwipopts.h`**
 
 ```c
-// kernel/net/lwipopts.h — OS01 lwIP compile-time configuration
+// kernel/include/net/lwipopts.h — OS01 lwIP compile-time configuration
 #ifndef LWIP_OPTS_H
 #define LWIP_OPTS_H
 
@@ -179,7 +179,7 @@ ls kernel/net/ kernel/include/net/
 - [ ] **Step 5: Commit**
 
 ```bash
-git add kernel/net/lwipopts.h kernel/include/net/net.h kernel/include/net/socket.h
+git add kernel/include/net/lwipopts.h kernel/include/net/net.h kernel/include/net/socket.h
 git commit -m "feat(net): add lwipopts, net.h, and socket.h placeholder"
 ```
 

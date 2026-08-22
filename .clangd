@@ -17,4 +17,4 @@ CompileFlags:
   Add:
     - -I/home/aagu/OS01/kernel/include
     - -I/home/aagu/OS01/thirdpart/lwip/src/include
-    - -I/home/aagu/OS01/kernel/net
+    - -I/home/aagu/OS01/kernel/include/net

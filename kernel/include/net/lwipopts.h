@@ -1,4 +1,4 @@
-// kernel/net/lwipopts.h — OS01 lwIP compile-time configuration
+// kernel/include/net/lwipopts.h — OS01 lwIP compile-time configuration
 #ifndef LWIP_OPTS_H
 #define LWIP_OPTS_H
 
