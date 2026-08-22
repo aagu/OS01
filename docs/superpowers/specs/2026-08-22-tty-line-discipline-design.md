@@ -1,21 +1,22 @@
 # TTY 行规程与进程组（最小集）设计文档
 
 - 日期：2026-08-22
-- 状态：v3 待用户 review（尚未进入实现）
+- 状态：v4 待用户 review（尚未进入实现）
 - 目标：实现 POSIX 最小行规程（VINTR/VQUIT → 信号派发到前台进程组）+ 进程组/会话子系统骨架，使 Ctrl-C 能在 OS01 shell 中可靠终止前台任务（如 `cat /dev/urandom`、`cat` 无参数），同时为后续 job control 留出干净的扩展面
 - 修订记录：
   - v1：初版
   - v2：并入 review 反馈（CONFIG_ASH_JOB_CONTROL=n 确认；加 §3.4 自动 fg_pgrp 更新 + §4.1.1 devfs_open 默认；其余文档/测试修正）
-  - v3：并入 v2 review——v2 的兜底机制（§3.4 + §4.1.1）对不上真实 devfs 代码：
-    - 🔴 致命：`tty_set_dev_tty`（tty.c:305）只设 `dev_tty = tty`，**不写 `tty->vfs_node`**——v2 §4.1 的 `vfs_node` 字段从未被赋值，`dev_tty_vfs_node()` 永远返 NULL
-    - 🔴 致命：`tty_magic_open`（devfs.c:371）每次 calloc 新 `vfs_node_t`，f0->node 永不等任何固定 node，node 指针比较从根上行不通
-    - 🔴 致命：`devfs_open_node` 在 line 302 收到 `*out` 后立即 return 0，**根本到不了 §4.1.1 想要的"函数末尾"**
-    - 🟠 修复：删除 `tty->vfs_node` 字段 + `dev_tty_vfs_node()`；改用 `file_t->tty` 字段 + `private_data == keyboard_get_tty()` 判据；§4.1.1 默认 fg_pgrp 改到 `tty_magic_open` 物理分支和 `devfs_open_node` FD_DEV 默认分支两处
-    - 🟠 修复：§6.2 "两锁不嵌套"→"唯一锁序 task_list_lock → fg_pgrp_lock，禁止反向"——§3.4 实际是嵌套
-    - 🟠 修复：§7.2 重画——ash JOBS=0 不调 setpgid/tcsetpgrp，真正 load-bearing 是 §4.1.1 默认 fg_pgrp=pgrp=1 共享
-    - 🟠 §8.6 测试逻辑修复：父进程不能预先 open /dev/tty（否则 fg_pgrp 被占）；改为 fork 后子 open
-    - 🟡 §11 加共享 pgrp=1 耦合风险（shell + cat 同在 pgrp 1，Ctrl-C 会同时命中；shell 因 SIGINT handler 幸免但任何其它 pgrp-1 后台任务会死）
-    - 🟡 §10 加非目标："不解决 shell 自杀风险"，属第二档
+  - v3：并入 v2 review——删 v2 vfs_node 设计，改 file_t->tty；§4.1.1 拆 tty_magic_open + devfs_open_node FD_DEV 两处；§6.2 锁序修正；§7.2 重画（ash JOBS=0 不调 setpgid/tcsetpgrp）；§8.6 测试修复；§11 加共享 pgrp 耦合风险
+  - v4：并入 v3 review——
+    - 🟠 §3.4 setpgid 权限放宽：`pgid == pid` **或** `pgid` 是 caller 同 session 内已存在 pgrp；抽 `pgrp_exists_in_session()` helper
+    - 🟠 §4.4 TIOCSPGRP 权限放宽：`new_pg == 0` **或** `new_pg` 是 caller 同 session 内已存在 pgrp；复用 helper
+    - 🟠 §8.6 测试顺序修复：开头先 `tcsetpgrp(fd, 0)` 复位 fg_pgrp，避免被 8.4 等前置用例污染
+    - 🟠 §2 架构图重画：去掉 v1 旧流程（child setpgid + parent tcsetpgrp），改 §4.1.1 默认 fg_pgrp 路径
+    - 🟠 §7.2 加"§4 实施第一步手动确认 hush fd0 节点名落在 §4.1.1 覆盖范围（/dev/tty 或 /dev/tty0）"
+    - 🟠 §8.9 验收清单加首条："hush 收到 SIGINT 后不自杀（busybox SIGINT handler 装在且 raise EXINT 而非 SIG_DFL）"
+    - 🟡 §8 开头测试计数统一为 7 systest + 1 kernel selftest，目标 139/139
+    - 🟡 §9 文件清单一致化
+  - v3 历史改动：见 `git show 3fb161e`
   - v2 历史改动：见 `git show 4e3783f`
   - v1 历史改动：见 `git show fcd2219`
 
@@ -84,16 +85,29 @@ keyboard_handler 返回 → ret_from_intr → arch_do_signal_delivery
 ```
 
 ```
-[shell 启动前台任务]
+[shell 启动前台任务 — v4 重写]
         ↓
-busybox ash (已在用)
-  fork() → child
-  child: setpgid(0, 0)         ← libc stub 之前吞掉，本设计改成真调用
-  child: exec cat
-  parent: tcsetpgrp(tty_fd, child_pid)   ← libc stub 之前吞掉，本设计改成真调用
+[init 启动] main.c spawn_user_task("/bin/init")  → init.pgrp = 1（§3.1 显式设）
         ↓
-kernel/arch/x86_64/trap.c:SYS_setpgid → current->pgrp = pid
-kernel/fs/devfs.c:devfs_ioctl → TIOCSPGRP → tty->fg_pgrp = pid
+[busybox hush 继承 init]
+  hush.pgrp = 1（fork 继承）
+        ↓
+[hush open /dev/tty 或 /dev/tty0]    ← §4.1.1 默认 fg_pgrp 兜底（v3+ 关键路径）
+        ↓
+kernel/fs/devfs.c:tty_magic_open (物理分支, /dev/tty)
+  或 devfs_open_node FD_DEV 分支 (/dev/tty0)
+        ↓
+判据: devices[idx].private_data == keyboard_get_tty()  ← §4.1.1 步骤 2A/2B
+        ↓
+  → (*out)->tty = get_dev_tty()
+  → 若 fg_pgrp==0 && current->pgrp!=0:
+       fg_pgrp = current->pgrp (= 1)
+        ↓
+[hush fork → cat]
+  child.pgrp 继承 = 1（v3 关键：ash JOBS=0 不调 setpgid）
+  child exec /bin/cat，pgrp 仍 = 1
+        ↓
+注：hush 不调 tcsetpgrp；fg_pgrp 全程是 §4.1.1 写入的 1
 ```
 
 接口边界：
@@ -173,15 +187,29 @@ case SYS_setpgid: {
         spin_unlock_irqrestore(&task_list_lock, f);
         regs->rax = -ESRCH; break;
     }
-    // POSIX 校验：
+    // POSIX 校验（v4 放宽）：
     //   1. caller 必须是 target 自身，或与 target 同 session
-    //   2. pgid 必须等于 pid（成为新 leader）
-    //   3. target 已 exec 后应返 EACCES（本档不追踪 exec 状态，留 TODO）
+    //   2. v4 放宽：pgid == pid（成为新 leader）**或** pgid 是 caller 同 session
+    //      内已存在的 pgrp（POSIX 允许加入已存在 pgrp；OS01 单 session=1 下
+    //      等价于"任意现存 pgrp"，扫一遍 task_list 校验）
+    //   3. target 已 exec 后应返 EACCES（本档不追踪 exec 状态，留 TODO，第二档补）
     if (current->pid != target->pid && current->session != target->session) {
         spin_unlock_irqrestore(&task_list_lock, f);
         regs->rax = -EPERM; break;
     }
-    if (pgid != pid) {
+    bool pgid_ok = (pgid == pid);
+    if (!pgid_ok) {
+        // 扫 task_list 找 pgid 存在且同 session 的 task
+        list_t *pos2 = init_task_union.task.list.next;
+        while (pos2 != &init_task_union.task.list) {
+            task_t *t2 = container_of(pos2, task_t, list);
+            pos2 = task_list_next(pos2);
+            if (t2->pgrp == pgid && t2->session == current->session) {
+                pgid_ok = true; break;
+            }
+        }
+    }
+    if (!pgid_ok) {
         spin_unlock_irqrestore(&task_list_lock, f);
         regs->rax = -EPERM; break;
     }
@@ -535,12 +563,25 @@ case TIOCSPGRP: {
     // 用户→内核拷贝（典型 4 字节）
     memcpy(&new_pg, p, sizeof(pid_t));
     if (new_pg < 0) return -EINVAL;
-    // v2: POSIX 要求 caller 与目标 pgrp 同 session。OS01 无 controlling-tty
-    // 基础设施，做近似校验：caller.session == current.session（自身必然满足）
-    // + new_pg == 0（合法）或 new_pg 与 current 同 session 内某现存 pgrp
-    // 简化：本档只接受 new_pg == 0 或 new_pg == current.pgrp；其他返 -EPERM
-    // （POSIX 严格语义第二档补，要求先有 controlling-tty 跟踪）
-    if (new_pg != 0 && new_pg != current->pgrp) return -EPERM;
+    // v4 放宽：new_pg == 0 **或** new_pg 是 caller 同 session 内已存在 pgrp。
+    // 复用 §3.4 的扫 task_list 逻辑。OS01 单 session=1 下等价于"任意现存 pgrp"，
+    // 这是 POSIX 标准要求——shell (parent) 把 fg_pgrp 设成 child.pid 必须能通过。
+    // 仍保留同 session 校验（防止跨 session 操纵别人 fg_pgrp）。
+    if (new_pg != 0 && new_pg != current->pgrp) {
+        // 扫 task_list：new_pg 是否存在且同 session
+        uint64_t f2 = spin_lock_irqsave(&task_list_lock);
+        bool found = false;
+        list_t *pos3 = init_task_union.task.list.next;
+        while (pos3 != &init_task_union.task.list) {
+            task_t *t3 = container_of(pos3, task_t, list);
+            pos3 = task_list_next(pos3);
+            if (t3->pgrp == new_pg && t3->session == current->session) {
+                found = true; break;
+            }
+        }
+        spin_unlock_irqrestore(&task_list_lock, f2);
+        if (!found) return -EPERM;
+    }
     uint64_t f = spin_lock_irqsave(&tty->fg_pgrp_lock);
     tty->fg_pgrp = new_pg;
     spin_unlock_irqrestore(&tty->fg_pgrp_lock, f);
@@ -775,9 +816,22 @@ shell 打印提示符
 
 **已知耦合**（§11.6）：因 ash/cat 同在 pgrp=1，Ctrl-C 同时命中两者。hush 因 SIGINT handler 幸免，但任何其它从 init fork 且未 setpgid 的后台进程会一并被杀——这是 v3 已知限制。
 
+**v4 新增：§4 实施第一步手动确认 hush fd0 节点名**
+
+§4.1.1 兜底机制只在 open 命中以下两类设备时触发：
+- `/dev/tty`（magic 路径，`tty_magic_open` 物理分支）
+- `/dev/tty0`（FD_DEV 默认分支，private_data == keyboard_get_tty()）
+
+**实施第一步必须实测确认 busybox hush 的 stdin 节点名落在上述两类之一**：
+- 启动后 `cat /proc/self/status` 或读 `/proc/<hush_pid>/fd/0` 拿节点路径
+- 或临时在 `tty_magic_open` / `devfs_open_node` 加 `debug_printk("devfs_open name=%s\n", name);`，跑一次 hush 看日志
+- 若 hush 的 fd0 是其它节点（如 `/dev/console` 或 serial console），§4.1.1 不触发，fg_pgrp 恒 0，Ctrl-C 仍静默失效
+
+若落到其它节点，§4 实施时需在 `devfs_register_chrdev` 注册时把该节点 private_data 也指向 `keyboard_get_tty()`，并保证 open 路径走到 §4.1.1 任一分支。
+
 ---
 
-## 8. 测试（`user/systest.c` 新增 7 个 + kernel selftest 1 个）
+## 8. 测试（`user/systest.c` 新增 7 个 + kernel selftest 1 个，目标 132+7=139/139）
 
 `tests/run_test.py` 现有 132/132 PASS，本档新增 5 测试，目标 137/137。
 
@@ -902,20 +956,24 @@ static void test_kill_neg_pid_pgrp(void) {
 
 ```c
 // 验证 §4.1.1：open /dev/tty 后，tcgetpgrp 返回 opener.pgrp
-// v3 修复：父进程不能预先 open /dev/tty，否则 fg_pgrp 被父 pgrp 占住
-// （§4.1.1 仅当 fg_pgrp==0 时设置），子 open 时不再触发。
-// 改为：父不 open，直接 fork；子 setpgid(0, <独特 pid>) → open → tcgetpgrp
+// v4 修复：fg_pgrp 是 tty 全局字段，可能被前置用例（如 8.4 tiocspgrp_roundtrip）
+// 污染。开头用 tcsetpgrp(fd, 0) 复位 fg_pgrp=0，关闭后再 fork+子 open，
+// 保证子 open 时 fg_pgrp==0，§4.1.1 的兜底保护生效。
 static void test_devfs_open_default_fg_pgrp(void) {
+    // 复位全局 fg_pgrp=0（new_pg==0 §4.4 v4 始终允许）
+    int rfd = open("/dev/tty", O_RDWR);
+    if (rfd < 0) { FAIL("devfs_open_fg", "no /dev/tty"); return; }
+    tcsetpgrp(rfd, 0);  // 复位
+    close(rfd);
+
     int64_t pid = fork();
     if (pid < 0) { FAIL("devfs_open_fg", "fork"); return; }
     if (pid == 0) {
-        setpgid(0, getpid());   // 设 pgrp 为自己
+        setpgid(0, getpid());   // 设 pgrp 为自己（避免继承父 pgrp=1 触发 §4.1.1 兜底时撞值）
         int cfd = open("/dev/tty", O_RDWR);
         if (cfd < 0) { _exit(2); }
         pid_t p = tcgetpgrp(cfd);
-        // §4.1.1：open 时 fg_pgrp==0 → 设为 caller.pgrp = getpid()
-        // 注：fork 不会触发 §4.1.1（仅 open 触发），父进程的 open 行为
-        // 不影响子进程的独立 open；子 open 时 fg_pgrp 应仍为 0
+        // §4.1.1：open 时 fg_pgrp==0（已复位）→ 设为 caller.pgrp = getpid()
         _exit(p == getpid() ? 0 : 3);
     }
     int status; waitpid(pid, &status, 0);
@@ -970,12 +1028,17 @@ VINTR 端到端无法从用户态测试（用户态无法直接调 `tty_push_inp
 - `waitpid` child，断言 `WIFSIGNALED && WTERMSIG == SIGINT`
 - 测试结束恢复 fg_pgrp=0
 
-### 8.9 验收
+### 8.9 验收（v4 加首条）
 
-- `make` 编译通过
-- `make test` 全量回归——现有 132 测试 + 新增 7 个 = 139/139 PASS（**关键：kill(0) 语义变更未翻红**）
-- kernel selftest `test_tty_vintr` PASS
-- 手动：OS01 shell 跑 `cat` / `cat /dev/urandom`，按 Ctrl-C 能终止，shell 回到提示符
+1. **🔴 头号：手动 OS01 shell 中验证 hush 收到 SIGINT 不自杀**（v4 新增首条）：v3/§11.11 已承认 Ctrl-C 命中整个 pgrp=1，hush 与 cat 同收信号。**hush 必须装了 SIGINT handler 且 raise EXINT 而非 SIG_DFL 自杀**——这是 v3 实际交付的用户体验关键。手动验证：
+   - 启动 OS01，在 hush 提示符下按 Ctrl-C → hush 应打印新提示符（raise EXINT）
+   - 在 hush 下 `cat /dev/urandom`，按 Ctrl-C → cat 应退出，hush 回到提示符（SIGINT 双向，hush 不死）
+   - 若 hush 收到 SIGINT 后直接退出（无 handler 或 SIG_DFL），**Ctrl-C 用户体验失败**，需要修 busybox 配置或 OS01 shell
+
+2. `make` 编译通过
+3. `make test` 全量回归——现有 132 测试 + 新增 7 个 = 139/139 PASS（**关键：kill(0) 语义变更未翻红**）
+4. kernel selftest `test_tty_vintr` PASS
+5. 手动：OS01 shell 跑 `cat` / `cat /dev/urandom`，按 Ctrl-C 终止前台任务，shell 回到提示符
 
 ---
 
