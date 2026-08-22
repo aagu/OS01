@@ -117,9 +117,10 @@ TEST_FUNC(test_snprintf_truncation) {
 
 TEST_FUNC(test_snprintf_truncation_value) {
     char buf[16];
-    /* snprintf must return the full would-be length, not size-1 */
+    /* snprintf must return the full would-be length, not size-1.
+     * With size==1 only the NUL fits (cap-1 guard), so buf is empty. */
     assert_eq(snprintf(buf, 1, "abcd"), 4);
-    assert_str_eq(buf, "a");
+    assert_str_eq(buf, "");
 }
 
 TEST_FUNC(test_snprintf_null_zero) {
@@ -130,7 +131,7 @@ TEST_FUNC(test_snprintf_null_zero) {
 TEST_FUNC(test_vsnprintf_basic) {
     char buf[16];
     int ret = my_vsnprintf(buf, sizeof(buf), "val=%d", 7);
-    assert_eq(ret, 6);
+    assert_eq(ret, 5);
     assert_str_eq(buf, "val=7");
 }
 

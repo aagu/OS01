@@ -1,31 +1,33 @@
 #include <stdio.h>
 #include <stdarg.h>
+#include <stddef.h>
+#include <limits.h>
+#include "stdio_internal.h"
 
 int sprintf(char *buf, const char *fmt, ...)
 {
-    va_list args;
-    va_start(args, fmt);
-    int ret = vsprintf(buf, fmt, args);
-    va_end(args);
-    return ret;
+	va_list args;
+	va_start(args, fmt);
+	size_t r = vformatter(buf, 4096, fmt, args, 1);
+	va_end(args);
+	if (r == SIZE_MAX || r > INT_MAX)
+		return -1;
+	return (int)r;
 }
 
 int snprintf(char *buf, size_t size, const char *fmt, ...)
 {
-    // snprintf: at most size-1 bytes written, null-terminated.
-    // We use a temporary buffer and then copy.
-    // For kernel simplicity, vsprintf already limits output to 4096 bytes.
-    va_list args;
-    va_start(args, fmt);
-    int ret = vsprintf(buf, fmt, args);
-    va_end(args);
+	va_list args;
+	va_start(args, fmt);
+	size_t r = vformatter(buf, size, fmt, args, 1);
+	va_end(args);
 
-    // vsprintf always null-terminates within 4096 bytes, but we need to
-    // enforce the `size` limit.  Our vsprintf writes to a 4K buffer already;
-    // for snprintf we ensure we don't write past size.
-    if (size > 0 && (size_t)ret >= size) {
-        buf[size - 1] = '\0';
-        return (int)(size - 1);
-    }
-    return ret;
+	/* vformatter already NUL-terminates when cap > 0; re-assert the
+	 * truncation termination explicitly for safety. */
+	if (size > 0 && r >= size)
+		buf[size - 1] = '\0';
+
+	if (r == SIZE_MAX || r > INT_MAX)
+		return -1;
+	return (int)r;
 }

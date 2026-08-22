@@ -75,7 +75,7 @@ int fflush(void *f);
 int vprintf(const char *fmt, __builtin_va_list ap);
 int vfprintf(void *f, const char *fmt, __builtin_va_list ap);
 int fprintf(void *f, const char *fmt, ...);
-int vsnprintf(char *b, unsigned long s, const char *fmt, __builtin_va_list ap);
+int vsnprintf(char *b, unsigned long s, const char *fmt, va_list ap);
 int putchar_unlocked(int c);
 int fputc(int c, void *f);
 size_t fwrite(const void *p, size_t s, size_t n, void *f);
