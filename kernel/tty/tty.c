@@ -2,6 +2,7 @@
 #include <kernel/arch/irq.h>
 #include <kernel/task.h>
 #include <kernel/printk.h>
+#include <kernel/log.h>
 #include <kernel/percpu.h>
 #include <driver/serial.h>
 #include <driver/keyboard.h>
@@ -12,6 +13,9 @@
 #include <stdlib.h>
 #include <termios.h>
 #include <uapi/stat.h>
+
+// Local: NOT yet in libc/include/termios.h. 0 == "special char disabled".
+#define _POSIX_VDISABLE 0
 
 // ═══════════════════════════════════════════════════════
 //  Internal helpers
@@ -104,9 +108,18 @@ tty_t *tty_alloc(void (*output_char)(char), void (*echo_char)(char))
     memset(&tty->term, 0, sizeof(struct termios));
     tty->term.c_iflag = ICRNL;
     tty->term.c_oflag = OPOST | ONLCR;
-    tty->term.c_lflag = 0;               // raw default — honest
-    tty->term.c_cc[VMIN] = 1;
-    tty->term.c_cc[VTIME] = 0;
+    tty->term.c_lflag = ISIG;            // default: raw + signal-aware
+    tty->term.c_cc[VMIN]   = 1;
+    tty->term.c_cc[VTIME]  = 0;
+    // Default special chars: VINTR=3 must be explicit or the line
+    // discipline in tty_push_input never fires.
+    tty->term.c_cc[VINTR]  = 3;          // Ctrl-C
+    tty->term.c_cc[VQUIT]  = 28;         // Ctrl-\
+    tty->term.c_cc[VERASE] = 127;        // DEL
+    tty->term.c_cc[VKILL]  = 21;         // Ctrl-U
+    tty->term.c_cc[VEOF]   = 4;          // Ctrl-D
+    // VSUSP / VSTART / VSTOP stay 0 = _POSIX_VDISABLE
+    // (VSTART/VSTOP flow control is a later tier).
     list_init(&tty->read_wait);
     list_init(&tty->read_poll);
     spin_init(&tty->read_wait_lock);
@@ -128,6 +141,35 @@ void tty_push_input(tty_t *tty, char c)
 {
     if (!tty)
         return;
+
+    // ── Line discipline: VINTR / VQUIT / VSUSP → signal ──
+    // _POSIX_VDISABLE = 0 means "this special char is disabled".
+    // Must run BEFORE echo/ring push: signal chars are neither
+    // echoed nor queued to the read side.
+    if (tty->term.c_lflag & ISIG) {
+        cc_t vintr = tty->term.c_cc[VINTR];
+        if (vintr != 0 && c == vintr) {
+            uint64_t f = spin_lock_irqsave(&tty->fg_pgrp_lock);
+            pid_t pg = tty->fg_pgrp;
+            spin_unlock_irqrestore(&tty->fg_pgrp_lock, f);
+            if (pg != 0) signal_pgrp(pg, SIGINT);
+            return;
+        }
+        cc_t vquit = tty->term.c_cc[VQUIT];
+        if (vquit != 0 && c == vquit) {
+            uint64_t f = spin_lock_irqsave(&tty->fg_pgrp_lock);
+            pid_t pg = tty->fg_pgrp;
+            spin_unlock_irqrestore(&tty->fg_pgrp_lock, f);
+            if (pg != 0) signal_pgrp(pg, SIGQUIT);
+            return;
+        }
+        cc_t vsusp = tty->term.c_cc[VSUSP];
+        if (vsusp != 0 && c == vsusp) {
+            // SIGTSTP not implemented: just drop the char.
+            log_debug("tty: VSUSP char dropped (SIGTSTP not implemented)\n");
+            return;
+        }
+    }
 
     // Echo in canonical+echo mode (input-time echo, typewriter style)
     if ((tty->term.c_lflag & ICANON) && (tty->term.c_lflag & ECHO)) {
