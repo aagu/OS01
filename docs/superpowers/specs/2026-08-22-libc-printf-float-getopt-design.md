@@ -1,6 +1,6 @@
-# libc 兼容性修复设计（printf 浮点 + getopt）— 修订版 v2
+# libc 兼容性修复设计（printf 浮点 + getopt）— 修订版 v3
 
-- 日期：2026-08-22（v2 修订）
+- 日期：2026-08-22（v3 修订）
 - 验收基线：`docs/applet-verification.md`（BusyBox Applet 验证报告 2026-08-18）
 - 范围：仅修复代码中**已确证**的两个 libc 缺陷——`printf` 格式化器（无符号路径缺失 + 浮点缺失 + 大小保护缺失）与 `getopt`（逻辑错误 + 公开头多重定义）。
 - 方针：最小范围、最低风险；不引入外部依赖（除非浮点部分明确选择成熟 dtoa）。
@@ -23,6 +23,12 @@
 - **P1（getopt `-` 前缀缺 `optarg`）**：返回 `1` 时必须 `optarg = argv[optind]` 并递增 `optind`、复位 `optpos`（BusyBox `unzip` 在 `case 1` 直接使用 `optarg`）。补测试：连续多个非选项。
 - **P2（成熟浮点未冻结）**：musl 路径与 D.M. Gay `dtoa` 非可互换单文件；`dtoa` 只做转换，`%f/%e/%g` 的 flags/宽度/精度/`#`/缓冲仍需自集成。本版冻结具体上游（musl `fmt_fp`）、版本、许可证、依赖与适配边界。
 - **措辞修正**：v2 称 `%lu`“因负数除法错误”不准确——现有 `do_div` 用 `divq` 对位模式做无符号除法；真正缺陷是 `va_arg` 类型不匹配与 `%u` 符号扩展。类型正确的无符号路径仍是正确的修复方向。
+
+### 0.2 补充修订（v3 → v3.x，本轮）
+- **P0（musl `fmt_fp` 集成边界）**：v3 误将 `fmt_fp` 描述为接收 `char *` 缓冲的渲染器；实际 musl 1.2.5 的 `fmt_fp(FILE *f, long double, int w, int p, int fl, int t)` 通过同文件 `out`/`pad` 与内部 `FILE/__fwritex` 输出。改为**已选方案①：移植 `fmt_fp` + 适配 `out`/`pad` 回调**（见 §3.4），并固定上游 tag `v1.2.5` 与待记录的 commit hash。
+- **P1（`vformatter` NUL 契约）**：`cap` 定义为**完整目标数组大小（含 NUL）**，核心最多保存 `cap-1` 字符；`cap>0` 时所有字符串 wrapper 都终止。二进制输出（`printf`/`vfprintf`）走独立的非 NUL sink。
+- **P1（`sprintf`/`vasprintf` 容量与溢出）**：`sprintf` 沿用历史 4 KiB 截断上限（与 `vsprintf` 一致，非“调用者保证”）；`vasprintf` 补齐错误路径（`total==SIZE_MAX`、`total+1` 溢出、超出 `int` 返回范围 → 返回 `-1` 且 `*strp=NULL`）。
+- **P2（`%Lf` 自相矛盾）**：改为 `%lf == %f`；`%Lf/%Le/%Lg` 统一原样输出且不消费实参；§5.3 增加三种 `%L` 测试。
 
 ## 1. 背景与上下文（修正后的根因归类）
 
@@ -47,7 +53,7 @@
   - `vsnprintf.c` → `vsprintf(b, …)`（仅事后截断）
   - `vasprintf.c` → `vsnprintf(NULL,0)` → `vsprintf(dummy)`
   - **后果**：`vsprintf` 内部 `end = buf + 4096`，对调用者真实缓冲区大小一无所知；当调用者 `size < 4096`（典型 `snprintf` 小缓冲）即越界写。浮点使单行输出更长，越界风险放大。
-  - **设计**：抽取 `vformatter(buf, end, fmt, ap)`（受 `end` 约束），所有 wrapper 以正确 `end` 接入（见 §3.2）。修复后“改核心器即覆盖 printf 家族”的断言才成立。
+  - **设计**：抽取 `vformatter(dst, cap, fmt, ap)`（`cap` = 完整目标数组大小含 NUL，受 `cap` 约束），所有 wrapper 以正确 `cap` 接入（见 §3.2）。修复后“改核心器即覆盖 printf 家族”的断言才成立。
 - **`getopt`**：仅 `libc/unistd/getopt.c` + `libc/include/getopt.h`；全局量定义在 `.c`，头文件需改 `extern`。
 
 ## 3. 设计 1：printf 核心器重构 + 无符号路径 + 浮点
@@ -58,18 +64,19 @@
 - 大小保护：见 §2。
 
 ### 3.2 步骤 A：抽取核心格式化器 `vformatter`（解决 P1，v3 接口）
-- 接口固定为**“输出槽容量 + 独立总字符计数”**，避免 NULL 推进指针、`end=buf+size`、`str-buf` 算长度等 UB：
+- 接口契约：**`cap` = 完整目标数组大小（含 NUL 终止符）**。
   `static size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap)`
-  - 内部维护 `total`（本应生成的字符总数）与 `pos`（已写入 `dst` 的字节数）。
-  - `dst==NULL && cap==0`：只累计 `total`，不写。
-  - 写入时仅当 `pos < cap` 才真正写 `dst[pos]`；每次成功自增 `pos` 与 `total`。
-  - 返回 `total`（C 标准 `snprintf` 语义）。
+  - 内部维护 `total`（本应生成的字符总数）与 `pos`（已写入 `dst` 的可见字符数）。
+  - 仅当 `pos < cap-1` 时才真正写 `dst[pos]`；每次成功自增 `pos` 与 `total`。
+  - 当 `cap > 0` 时，无论是否被截断，**最后都写 `dst[min(total, cap-1)] = '\0'`**（核心负责终止，调用方无需再补）。
+  - 当 `cap == 0`（含 `dst==NULL`）时：只累计 `total`，不写、不终止。
+  - 返回 `total`（C 标准 `snprintf` 语义：本应写入的总长度，不含 NUL）。
 - wrapper 接入：
-  - `vsnprintf`/`snprintf`：`vformatter(buf, size, …)`；`size>0` 时保证 `buf[min(total,size-1)]` 处写 `'\0'`，返回 `total`（即便被截断）。`size==0` 时 `vformatter(NULL,0,…)` 仅计长度。
-  - `sprintf`：`vformatter(buf, SIZE_MAX_or_4K, …)`，调用者保证缓冲足够（文档注明 ≥4K 或自担风险）。
-  - `vsprintf`：保留 4 KiB 上限语义，等价于 `vformatter(buf, 4096, …)`。
-  - `vasprintf`：**双 pass**——先 `va_copy(ap2, ap)` 调 `vformatter(NULL, 0, …, ap2)` 得 `total`；分配 `total+1`；再用**原始 `ap`** 调 `vformatter(buf, total+1, …, ap)` 填充。`va_end(ap2)`。绝不用同一 `va_list` 格式化两次。
-- `printf.c` / `vfprintf`（`stdio_file.c`）：不再按返回长度从固定 4 KiB 缓冲直接 `write`。改为：用 `vformatter` 写入固定缓冲（容量 = 缓冲大小），`write` 的字节数取 `min(total, 容量)`；或实现分段输出（超出缓冲时分多次 `write`）。明确实现为“只写实际保存长度”，杜绝越界读。
+  - `vsnprintf`/`snprintf`：`vformatter(buf, size, …)`；`size>0` 返回 `total`（截断亦同 `size==0` 走 `vformatter(NULL,0,…)` 仅计长度）。`cap>0` 已由核心保证 NUL。
+  - `vsprintf`：**保留历史 4 KiB 上限**，`vformatter(buf, 4096, …)`——最多保存 4095 个可见字符 + NUL，与现状语义一致。
+  - `sprintf`：与 `vsprintf` 同为 **4 KiB 固定截断上限**，`vformatter(buf, 4096, …)`；**不要求调用者保证缓冲大小**，超出部分按 4 KiB 截断（与 `vsprintf` 对称，标准契约明确）。
+  - `vasprintf`：**双 pass**——`va_copy(ap2, ap)` 调 `vformatter(NULL, 0, …, ap2)` 得 `total`；检查错误（`total == SIZE_MAX`、或 `total + 1` 溢出 `SIZE_MAX`、或 `total > INT_MAX`）→ 返回 `-1` 且 `*strp = NULL`；否则分配 `total+1`，用**原始 `ap`** 调 `vformatter(buf, total+1, …, ap)` 填充（`cap>0` 保证 NUL），`va_end(ap2)`。绝不用同一 `va_list` 格式化两次。
+- **二进制输出 sink（printf/vfprintf）**：`printf.c` / `vfprintf`（`stdio_file.c`）不依赖 NUL 终止。它们使用**独立的非 NUL sink**——`vformatter` 写入固定 4 KiB 内部缓冲（容量已知），`write` 的字节数取 `min(total, 4096)`；或实现分段输出（超出 4096 时分多次 `write`）。明确“只写实际保存长度”，杜绝越界读与依赖终止符。
 - 此步为纯重构，行为不变，须通过现有 printf 测试不变。
 
 ### 3.3 步骤 B：无符号整数路径 + `ll` 修饰符（P0，必做）
@@ -89,12 +96,18 @@
   - **真实回归用例**：`du`（`%llu`，见 `thirdpart/busybox-1.36.1/coreutils/du.c:140`）、`sum`（`%u %llu`，见 `sum.c:85`）的输出格式须与预期一致。
 
 ### 3.4 步骤 C：浮点路径（明确契约，解决 P2）
-- 支持 `double`：`%f/%F/%e/%E/%g/%G`；qualifier `l`/`L` 对 `double` 无额外语义（`%lf == %f`）。
-- **`%Lf`（long double）：本期显式不支持**——**不调用 `va_arg(args, long double)`**（避免类型不匹配 UB），原样输出 `%Lf`。
+- 支持 `double`：`%f/%F/%e/%E/%g/%G`。**`%lf` 等同 `%f`**（qualifier `l` 对 `double` 无额外语义）。
+- **`%Lf/%Le/%Lg`（long double）：本期显式不支持，且统一处理**——**不调用 `va_arg(args, long double)`**（避免类型不匹配 UB），将 `%Lf`/`%Le`/`%Lg` 原样输出字面量（`%Lf`→`%Lf` 等），**不消费该实参**。三条 `%L` 形态行为一致，须分别测试（见 §5.3）。
 - **`%a/%A`（十六进制浮点）：本期显式不支持**——原样输出 `%a`/`%A`。
-- 算法（呼应 P2，已冻结具体上游）：**不采用朴素 `frac*=10`**。冻结采用 **musl libc 的 `fmt_fp` 浮点渲染器**（来自 musl `src/stdio/vfprintf.c` 内的 `fmt_fp`，配合其内部辅助 `shuint`/`__uintarith` 等）：
-  - **版本/许可证**：pin musl 1.2.x，许可证 **MIT**（与仓库自包含风格兼容，需在实施前将确切文件与 commit 写入本 spec 的“依赖清单”小节）。
-  - **职责边界**：`fmt_fp` 负责把 `double` 按 `%f/%e/%g` 的 flags/宽度/精度/`#` 渲染到缓冲；我们保留自己的 `vformatter` 作 flags/width/precision 解析与前导填充，仅在遇到浮点转换符时把（已解析的 flags、width、precision、`#`、符号、`double` 值、目标缓冲与剩余容量）交给 `fmt_fp`，由其完成数字串生成并回写。即“解析层自研 + 渲染层用 musl”，而非整体替换 `vformatter`。
+- 算法（呼应 P2，已冻结具体上游与方案）：**不采用朴素 `frac*=10`**。采用 **方案①：移植 musl 1.2.5 的 `fmt_fp` + 适配 `out`/`pad` 输出回调**，而非把 `fmt_fp` 当 `char*` 缓冲渲染器：
+  - **上游冻结点**：musl **git tag `v1.2.5`**（不可变标签，cgit：`src/stdio/vfprintf.c?h=v1.2.5`）。实施时 `git rev-parse v1.2.5` 得到的 SHA 记入本 spec 依赖清单（标签不可变 ⇒ 选择已冻结；SHA 仅作审计记录，不再“实施前再定”）。
+  - **许可证**：musl 为 **MIT**，与仓库自包含风格兼容。
+  - **移植范围（须列出的符号/文件）**：从 `src/stdio/vfprintf.c` 抽取并改写：
+    - `fmt_fp(FILE *f, long double y, int w, int p, int fl, int t)`（核心；我们用 `double` 调用，内部 `long double` 提升可接受）。
+    - 同文件的 `out(FILE*, const char*, size_t)` 与 `pad(FILE*, int, int, int)`——改写为向我们的 `char *dst` + `size_t pos` + `size_t cap` sink 追加/填充的回调（返回已写字节，越界即停）。
+    - 其依赖的内部辅助（`shuint`、`__seterr` 等）一并移植或提供等效实现；`__fwritex` 不需要（由我们的 `out` 替代）。
+    - 所需宏/头：musl 的 `FILE` 最小结构体（仅需 `out`/`pad` 用到的字段，如写偏移/缓冲指针）、`__lock`/`__flockfile` 可降级为无锁（单线程用户态早期可用），或仅保留 `f->buf`/`f->pos` 字段。
+  - **集成边界（避免两层 flags/width 重复处理）**：`vformatter` 解析出 `w`(宽度)/`p`(精度)/`fl`(flags 位)/`t`(类型 `FMT_f/E/G` 等) 后，**整段交给 `fmt_fp`**，由 `fmt_fp` 自行完成数字生成与宽度/填充并通过我们的 `out`/`pad` 写入 `dst`（受 `cap` 约束）。即浮点转换符**完全委托 `fmt_fp`**，非“自研前导填充 + fmt_fp 再填充”。非浮点转换符仍走 `vformatter` 现有路径。
   - **为何非 D.M. Gay `dtoa`**：`dtoa` 只做浮点→十进制字符串转换，仍需我们自己实现 `%f/%e/%g` 的 flags/宽度/精度/`#` 与缓冲输出集成；`fmt_fp` 已包含这部分，集成面更小、风险更低。
   - 仍须满足 §3.4 全部逐例验收（舍入进位、正负/零/负零、`inf`/`nan`、`%e` 指数归一化、`%g` 有效数字与去尾随零、`#` 语义）。
 - **验收边界值**：`%.0f` 整数化、`%f/%e/%g` 正/负/零/inf/nan、`0.5`/`2.5` 四舍五入、大值（如 `1e20`）、`%g` 与 `%f` 切换阈值。
@@ -142,10 +155,13 @@
 - **无符号**：`%lu`=`0xFFFFFFFFFFFFFFFF`、`0x8000000000000000`；`%lx`、`%lo`；`%u`=`0xFFFFFFFF`、`0x80000000`。
 - **`long long`（v3 新增）**：`%lld`=`-9223372036854775808`（INT64_MIN）、`%llu`=`0xFFFFFFFFFFFFFFFF`、`%llx`、`%llo`。
 - **`vformatter` 接口（v3 新增）**：
+  - **NUL 契约**：`vsnprintf`/`vsprintf`/`sprintf`/`vasprintf` 在 `cap>0` 时输出均被 NUL 终止；`vformatter(buf, 4096, …)` 写满 4096 时第 4096 字节为 `'\0'`（最多 4095 可见字符），与历史语义一致；`cap==0`/`dst==NULL` 不写不终止。
+  - `sprintf(buf, …)` 复用 **4 KiB 固定截断上限**（非“调用者保证”），超出部分截断；与 `vsprintf` 对称。
   - `snprintf(buf, 0, …)` 仅返回长度、不写；`snprintf(buf, 1, …)` 只写 `'\0'`、返回总长度。
   - 截断后返回值 = 本应生成的总长度（非 `size-1`）。
-  - 输出超过 4096 字节时不越界、`total` 正确、`vasprintf` 双 pass 结果一致。
-  - `vasprintf` 用 `va_copy` 计数 pass + 原始 `va_list` 格式化 pass，验证两次调用结果等价。
+  - 输出超过 4096 字节时不越界、`total` 正确；`printf`/`vfprintf` 用独立非 NUL sink 输出，不依赖终止符。
+  - `vasprintf` 用 `va_copy` 计数 pass + 原始 `va_list` 格式化 pass，验证两次调用结果等价；错误路径：`total==SIZE_MAX`、`total+1` 溢出、或 `total>INT_MAX` → 返回 `-1` 且 `*strp=NULL`，且不泄露部分分配。
+- **浮点 `%L` 三形态（v3 修正）**：`%Lf`/`%Le`/`%Lg` 均原样输出字面量（`%Lf`→`%Lf`）、不消费实参，三种形态分别验证。
 - **真实回归（BusyBox）**：`du`（`%llu`）与 `sum`（`%u %llu`）的输出格式须与预期一致（见 §3.3）。
 - **浮点**：`%.0f` 整数化；`%f/%e/%g` 正/负/零/inf/nan；`0.5`/`2.5` 四舍五入；`1e20` 大值；`%g`↔`%f` 切换。
 - **getopt**：§4.4 全部用例（含 `-` 前缀连续非选项取 `optarg`）。
