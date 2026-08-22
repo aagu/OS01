@@ -83,6 +83,30 @@ TEST_FUNC(test_getopt_double_dash) {
     assert_eq(r, -1);
 }
 
+TEST_FUNC(test_getopt_plus_stop) {
+    reset_getopt();
+    char *argv[] = {"prog", "-a", "file", "-b", NULL};
+    int argc = 4;
+    int r;
+    /* optstring begins with '+' => POSIX + mode:
+     * stop scanning at the first non-option, no permutation. */
+    r = getopt(argc, argv, "+ab");
+    assert_eq(r, 'a');
+    r = getopt(argc, argv, "+ab");
+    assert_eq(r, -1);
+    /* must stop at "file" (index 2), leaving "-b" unprocessed */
+    assert_eq(optind, 2);
+
+    /* In + mode the leading '+' is a mode flag, NOT an option char.
+     * A "-+" token must be reported as an unknown option ('?'),
+     * not matched as option '+'. */
+    reset_getopt();
+    char *argv2[] = {"prog", "-+", NULL};
+    int argc2 = 2;
+    r = getopt(argc2, argv2, "+ab");
+    assert_eq(r, '?');
+}
+
 TEST_FUNC(test_getopt_reset) {
     reset_getopt();
     char *argv[] = {"prog", "-a", "-b", NULL};
@@ -106,6 +130,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_getopt_missing_arg_colon),
     TEST_ENTRY(test_getopt_dash_mode),
     TEST_ENTRY(test_getopt_double_dash),
+    TEST_ENTRY(test_getopt_plus_stop),
     TEST_ENTRY(test_getopt_reset),
 TEST_LIST_END
 
