@@ -1,2 +1,6 @@
 #include <unistd.h>
-int tcsetpgrp(int fd, pid_t pgrp) { (void)fd; (void)pgrp; return 0; }
+#include <sys/ioctl.h>
+
+int tcsetpgrp(int fd, pid_t pgrp) {
+    return ioctl(fd, TIOCSPGRP, &pgrp);
+}
