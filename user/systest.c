@@ -1534,11 +1534,13 @@ static void test_termios(void)
     struct termios t;
     int ret;
 
-    // Test 1: TCGETS default — honest raw mode (c_lflag == 0)
+    // Test 1: TCGETS default — signal-aware half-raw (spec §4.2 Option 1:
+    // c_lflag = ISIG so Ctrl-C → SIGINT to fg_pgrp works out of the box)
     memset(&t, 0xAA, sizeof(t));
     ret = ioctl(fd, TCGETS, &t);
     CHECK3(ret == 0, "termios", "TCGETS returns 0");
-    CHECK3((t.c_lflag & (ICANON | ECHO | ISIG)) == 0, "termios", "default c_lflag is raw");
+    CHECK3((t.c_lflag & (ICANON | ECHO)) == 0 && (t.c_lflag & ISIG) != 0,
+           "termios", "default c_lflag is ISIG (raw + signal-aware)");
 
     // Test 2: TCSETS then TCGETS — settings must persist
     memset(&t, 0, sizeof(t));
@@ -1555,8 +1557,10 @@ static void test_termios(void)
     CHECK3(t2.c_lflag == t.c_lflag, "termios", "TCSETS persisted (c_lflag round-trip)");
     CHECK3(t2.c_iflag == t.c_iflag, "termios", "TCSETS persisted (c_iflag round-trip)");
 
-    // Test 3: restore raw — don't pollute later readers
+    // Test 3: restore spec default (ISIG raw) — don't pollute later readers
+    // (spec §4.2: default c_lflag = ISIG, not 0)
     memset(&t, 0, sizeof(t));
+    t.c_lflag = ISIG;
     ioctl(fd, TCSETS, &t);
 
     close(fd);
