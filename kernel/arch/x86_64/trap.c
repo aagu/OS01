@@ -428,6 +428,12 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 	// Detect kernel-mode PF (IST 0 = task stack)
 	if (!(regs->cs & 3)) {
 		task_t *t = task_from_tss();
+		// uaccess _ft recovery: user-range fault while a copy buffer is armed.
+		// current == task_from_ist0 (verified by Task 0; eq=1 on kernel-mode PF
+		// because the #PF frames on IST 0 = the task's kernel stack).  Longjmp
+		// value is the Clang-required compile-time constant 1.
+		if (cr2 < current->addr_limit && current->fault_jmp)
+			__builtin_longjmp(current->fault_jmp, 1);
 		serial_printk("PF-KRN: err=%lx rip=%lx rsp=%lx rbp=%lx cr2=%lx "
 			"pid=%d cpu=%d\n",
 			error_code, regs->rip, regs->rsp, regs->rbp, cr2,
