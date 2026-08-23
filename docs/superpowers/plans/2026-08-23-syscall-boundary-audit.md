@@ -465,7 +465,7 @@
   /* page-tail NUL: string at 0x600ffc "AB" NUL at 0x600ffe (next page unmapped) -> returns 2 */
   /* no NUL within max -> returns max; unmapped -> -EFAULT */
   ```
-  说明：`get_leaf`/`set_leaf` 是**层级探测的叶子 PTE 槽助手**（参考 `arch_virt_to_phys` mmu.h:38-56 的 l4/l3/l2/l1 索引计算）。**0x600000/0x601000 是 guard/未映射区，不能假定 PML1 槽已存在**。具体实现（写入 Task 3 代码）：
+  说明：`ensure_pt` 是**层级探测的叶子 PTE 槽提供者**（参考 `arch_virt_to_phys` mmu.h:38-56 的 l4/l3/l2/l1 索引计算）。**0x600000/0x601000 是 guard/未映射区，不能假定 PML1 槽已存在**。具体实现（写入 Task 3 代码）：
 
   ```c
   /* ── hierarchy-probing leaf helpers (guard/unmapped region) ── */
@@ -487,22 +487,27 @@
       if (l2val & PAGE_PS) {                           /* 2MB huge page: SPLIT */
           uint64_t *pml1 = alloc_4k_page_as_tbl();
           uint64_t base  = l2val & ~(uint64_t)0x1FFFFF;   /* 2MB phys base (bits 21+) */
-          /* derive table-entry/PTE flags FROM the original PDE — do NOT force
-             Present|RW|User (would turn a supervisor/RO mapping into user+RW,
-             violating "preserve the original 2MB mapping"): keep P(0)/RW(1)/
-             US(2)/PWT(3)/PCD(4)/A(5)/D(6)/G(8)/PAT(12)/XD(63), CLEAR PS(7). */
-          uint64_t tflags = (l2val & ~(uint64_t)0x80ULL)    /* bits 0-11 minus PS */
-                          | (l2val & 0x1000ULL)             /* PAT bit (12) */
-                          | (l2val & 0x8000000000000000ULL);/* XD bit (63) */
+          /* ⚠️ 位级修正：不得把 l2val 的物理地址字段(21+)或 PAT 直接 OR 进新表项。
+             PAT: 2MB PDE 是 bit 12, 4KB PTE 是 bit 7 -> 必须重映射; 非叶 table entry
+             不继承 huge-page PAT。 拆成独立 flags: */
+          uint64_t leaf_flags  = (l2val & (0x7F | 0x100))          /* P(0),RW(1),US(2),
+                                       PWT(3),PCD(4),A(5),D(6) + G(8) — 无 PS(7)、无物理位 */
+                               | ((l2val & 0x1000ULL) >> 5)        /* PAT: PDE bit12 -> PTE bit7 */
+                               | (l2val & 0x8000000000000000ULL);  /* XD(63) */
+          uint64_t table_flags = (l2val & (0x7F | 0x100))          /* 仅非叶允许的权限/cache/NX;
+                                       清 PS、PAT、物理地址字段 */
+                               | (l2val & 0x8000000000000000ULL);  /* XD(63) */
           for (int i = 0; i < 512; i++)                   /* preserve ALL 512 4KB maps:
                                                              the other 511 must keep working */
-              pml1[i] = base | ((uint64_t)i << 12) | tflags;
+              pml1[i] = base + ((uint64_t)i << 12) | leaf_flags;
           ctx->split_2m = 1; ctx->saved_pde = l2val;
-          pml2[l2] = Phy(pml1) | tflags;                  /* split PDE: table entry with
-                                                             derived perms (PAT carries over;
-                                                             huge-page->4KB leaf PAT is bit 12
-                                                             in both, no remap needed) */
+          pml2[l2] = Phy(pml1) | table_flags;             /* table entry: phys 恰为 pml1, 无物理位混入 */
           ctx->new_pml1 = pml1;
+          /* selftest 断言（防本次错误复发）:
+             SELFTEST_ASSERT((pml2[l2] & PAGE_ADDR_MASK) == Phy(pml1));   // 表指针恰为 pml1
+             // 未覆盖的相邻 4KB 子页仍翻译回原物理地址 (证明 511 个映射保留):
+             uint64_t probe = arch_virt_to_phys(cur_pml4, 0x600000 + 0x2000);
+             SELFTEST_ASSERT(probe == base + 0x2000); */
       } else if (!(l2val & 1)) { ctx->saved_l2 = l2val; ctx->new_l2 = alloc_4k_page_as_tbl(); pml2[l2] = Phy(new_l2)|flags; }
       /* similarly probe/create l3 (and l4 can't be absent for kernel) */
       return &pml1[l1];                                /* the leaf slot */
@@ -515,9 +520,9 @@
   static void restore_pt(struct test_map_ctx *ctx) { ... }
   ```
   用例顺序（所有失败路径先 `restore_pt` 再失败）：
-  1. `ensure_pt(0x600000)` → `get_leaf` 得槽 → 存原叶 → `set_leaf(0x600000, pa, flags)`；
+  1. `slot_a = ensure_pt(0x600000)` → 保存 `saved_a = *slot_a` → `*slot_a = pa | flags`；
   2. no-short-copy 用例（0x601000 未映射，跨页 fault 在第二页）；
-  3. `ensure_pt(0x601000)` → `set_leaf(0x601000, pb, flags)` → 跨页成功用例；
+  3. `slot_b = ensure_pt(0x601000)` → 保存 `saved_b` → `*slot_b = pb | flags` → 跨页成功用例；
   4. `_ft_res` cleanup 用例（页 A 仍映射）；
   5. `restore_pt` 统一恢复两个 ctx（父项 + 叶槽 + TLB）+ free pa/pb。
   4KB 页用 `alloc_4k_page()`/`free_4k_page(phys)`（pmm.h:102-103）——`alloc_pages` 单位是 2MB 且 `free_pages` 要 number 参数，不适用。非连续用**实际物理页框比较断言**（`(pa>>12)+1 != (pb>>12)`），不写死 `+3*PAGE` 假设；相邻则 bounded 重试，仍不满足则**必需门禁失败**（记录 FAIL，不静默跳过）。
