@@ -21,6 +21,9 @@
     - 🟢 **信号投递写用户栈**（§5.3，`arch_do_signal_delivery` trap.c:780-924 输出路径，v6 只覆盖了 sigreturn 读路径）：`new_rsp` 从用户可控 `regs->rsp` 算出（trap.c:892），`user_va_to_phys` 只翻译起始地址（896），`memcpy(kstack, &frame, 200)`+`memcpy(kstack-8, &tramp, 8)` **经 `Phy_To_Virt` 直映射连续写**（903-905）——4KB 映射跨页物理不连续 → **写错物理页（内存破坏源）**；`kstack-8` 页首写前页；2MB-only helper 在 4KB 栈本身翻译错。**修复**：先 `check_user_range([new_rsp, new_rsp+total), writable)` 快速拒绝 → 两次 `copy_to_user_ft` **写用户虚拟地址**（跨页落到正确虚拟页，fault→-EFAULT）；任一失败 → **不改 regs、信号保持 pending**。投递路径在返回用户态处无持锁（合规 §4 硬约束）
   - v8：七轮 review（1 P0）——
     - 🟢 **sigreturn 同构跨页问题**（矩阵 #43）：v6 只把起始翻译改 `arch_virt_to_phys`，仍 `Phy_To_Virt` + `struct sigframe` **连续读**——frame 在 4KB 页末、下一虚拟页物理不连续 → 读错物理页（"直 map 不 fault"≠"读对用户页"）。**修复**：`check_user_range(regs->rsp, sizeof(frame), false)` 快速拒绝 + **`copy_from_user_ft(&frame, (void*)regs->rsp, sizeof(frame))` 走用户虚拟地址读整帧**（跨页正确，fault→-EFAULT），之后 CS/SS/RIP/RSP/flags 校验与寄存器恢复**只用内核栈上的 `frame`**；弃 `Phy_To_Virt` 连续读。sigreturn 无锁无调度（合规 §4 硬约束）。E2E：sigframe 跨 4KB 页边界、下一虚拟页映射不连续物理页 → 正确恢复或 -EFAULT，绝不读错 frame
+  - v8 测试补强（design 已获批，进实现）——
+    - 🟡 **跨页确定性验证下沉 selftest**：用户态无法控制物理页分配 → 在合成 pml4 构造两个**不连续物理页**的 4KB PTE（phys 人为错开），确定性验证 `copy_from_user_ft`/`copy_to_user_ft` 跨页落到正确虚拟页（§8.1）；E2E 保留为用户可见行为回归
+    - 🟡 **信号投递 E2E 的 RSP 处理**：子进程用**内联汇编保存原 RSP 并在 syscall 返回后立即恢复**，否则带页尾 RSP 继续执行，失败归因变成用户栈耗尽而非投递逻辑（§8.2）
 
 ---
 
@@ -358,6 +361,7 @@ stat/fstat: 内核 struct stat ← vfs_stat → copy_to_user_ft 回写
 - **地址数学**（`check_user_range`，无需映射）：NULL→false、0x1→false、≥addr_limit→false、len 溢出→false、len==0→true
 - **longjmp 路径**：**临时覆盖 `current->addr_limit` 为用户值** → `copy_to_user_ft(低地址未映射, ksrc, 16)` → #PF（cr2<临时 addr_limit）→ longjmp → `-EFAULT` → 恢复。不依赖用户映射
 - `copy_to_user_ft` 跨 2 页第二页未映射 → `-EFAULT` **非部分正计数**；`copy_from_user_ft`/`strnlen_user`（页尾 NUL/无 NUL/fault）同构
+- **跨页正确性（确定性，不依赖物理分配）**：合成 pml4 里构造**两个不连续物理页**的 4KB PTE（物理地址人为错开，如 `phys A` 与 `phys A + 3·PAGE_SIZE`），映射到相邻虚拟页；`copy_from_user_ft`/`copy_to_user_ft` 跨页边界读写 → 断言数据落在**正确虚拟页**（分别在 `phys A` / `phys A+3·PAGE_SIZE` 各自页内校验内容），证明虚拟地址拷贝不受物理连续性影响——这是 §5.3/#43 跨页修复的核心验证。**systest 用户态无法控制物理页分配，此用例只在 selftest 合成页表做**
 
 ### 8.2 systest hostile 组（`user/systest.c`，~100 行，~15 断言）
 
@@ -377,7 +381,7 @@ stat/fstat: 内核 struct stat ← vfs_stat → copy_to_user_ft 回写
 | 路径页尾 NUL、下一页未映射 | 正常 open（不过度拒绝） |
 | ioctl 坏 arg（TCGETS 到 0x1） | -EFAULT（H9） |
 | poll/select 坏 fd_set/超长 nfds | -EFAULT（H7） |
-| **信号投递写栈**（§5.3 E2E）：RSP 放 4KB 页尾 + 可捕获信号 | 不崩溃、不错误进入 handler（frame 写 fault → 保持 pending） |
+| **信号投递写栈**（§5.3 E2E）：RSP 放 4KB 页尾 + 可捕获信号 | 不崩溃、不错误进入 handler（frame 写 fault → 保持 pending）。**实现注**：子进程用**内联汇编保存原 RSP 并在 syscall 返回后立即恢复**（`mov %rsp,<save>; mov <页尾>,%rsp; kill; ...; mov <save>,%rsp`）——否则带页尾 RSP 继续执行，失败归因变成用户栈耗尽而非投递逻辑 |
 | **sigreturn 跨页**（#43 E2E，H11）：sigframe 跨 4KB 页边界、下一虚拟页映射不连续物理页，填已知 RIP 后 syscall(SYS_sigreturn) | 正确恢复到该 RIP 或返回 -EFAULT；**绝不读错 frame**（读到错页则 RIP 是垃圾 → 崩溃，断言不崩） |
 
 ### 8.3 回归
