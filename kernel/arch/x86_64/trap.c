@@ -28,6 +28,7 @@ typedef int pid_t;
 #include <fs/vfs.h>
 #include <fs/devfs.h>
 #include <kernel/debug.h>
+#include <kernel/uaccess.h>   // strnlen_user, copy_from_user_ft, VFS_NAME_MAX
 #include <kernel/file.h>
 #include <kernel/poll.h>     // struct pollfd, do_poll()
 #include <kernel/select.h>   // sigset_t, do_select(), do_pselect6()
@@ -1221,10 +1222,17 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             break;
         }
 
-        // Copy path to kernel heap to avoid TOCTOU with user memory
-        char *path_copy = strdup(path);
-        if (!path_copy) {
-            regs->rax = -ENOMEM;
+        // Copy path to kernel heap (bounded + fault-tolerant) so that
+        // user-mapped pages cannot fault us mid-VFS-walk.  argv/envp
+        // deep-copy is handled by Task 5.
+        int plen = strnlen_user(path, VFS_NAME_MAX);
+        if (plen < 0) { regs->rax = -EFAULT; break; }
+        if (plen >= VFS_NAME_MAX) { regs->rax = -ENAMETOOLONG; break; }
+        char *path_copy = kmalloc(plen + 1);
+        if (!path_copy) { regs->rax = -ENOMEM; break; }
+        if (copy_from_user_ft(path_copy, path, plen + 1) < 0) {
+            kfree(path_copy);
+            regs->rax = -EFAULT;
             break;
         }
 
@@ -1257,6 +1265,10 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         // open(const char *path, int flags) → fd
         const char *path = (const char *)regs->rdi;
         int flags = (int)regs->rsi;
+        char *path_copy = NULL;
+        vfs_node_t *parent = NULL;
+        file_t *f = NULL;
+        vfs_node_t *node = NULL;
 
         if ((uint64_t)path >= current->addr_limit) {
             regs->rax = -EFAULT;
@@ -1267,73 +1279,78 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             break;
         }
 
-        char *path_copy = strdup(path);
-        if (!path_copy) {
-            regs->rax = -ENOMEM;
+        // Bounded fault-tolerant copy of the user path.
+        // strnlen_user faults on bad addresses (returns -EFAULT) and
+        // bounds the length at VFS_NAME_MAX-1 (returns >= VFS_NAME_MAX
+        // -> ENAMETOOLONG).  copy_from_user_ft then materializes the
+        // kernel-side buffer with a single fault-tolerant pass.
+        int plen = strnlen_user(path, VFS_NAME_MAX);
+        if (plen < 0) { regs->rax = -EFAULT; break; }
+        if (plen >= VFS_NAME_MAX) { regs->rax = -ENAMETOOLONG; break; }
+        path_copy = kmalloc(plen + 1);
+        if (!path_copy) { regs->rax = -ENOMEM; break; }
+        if (copy_from_user_ft(path_copy, path, plen + 1) < 0) {
+            kfree(path_copy);
+            regs->rax = -EFAULT;
             break;
         }
 
-        vfs_node_t *node = vfs_lookup_from(path_copy, current->files->cwd);
-        kfree(path_copy);
+        node = vfs_lookup_from(path_copy, current->files->cwd);
 
         // O_CREAT: create file if it doesn't exist
         if (!node && (flags & O_CREAT)) {
-            // Find parent directory — parse the path to extract parent
+            // Find parent directory — parse path_copy to extract parent
             char parent_path[VFS_NAME_MAX];
             const char *name = NULL;
 
-            // Copy path and find last '/'
-            char pbuf[VFS_NAME_MAX];
-            size_t plen = strlen(path);
-            if (plen >= VFS_NAME_MAX) { regs->rax = -ENAMETOOLONG; break; }
-            memcpy(pbuf, path, plen + 1);
-
+            // path_copy is the kernel-side copy; plen is its strlen.
             char *last_slash = NULL;
-            for (char *s = pbuf; *s; s++)
+            for (char *s = path_copy; *s; s++)
                 if (*s == '/') last_slash = s;
 
-            if (last_slash && last_slash != pbuf) {
+            if (last_slash && last_slash != path_copy) {
                 // e.g., "/dir/file" — parent is "/dir", name is "file"
                 *last_slash = '\0';
                 name = last_slash + 1;
-                strcpy(parent_path, pbuf);
-            } else if (last_slash == pbuf && plen > 1) {
+                strcpy(parent_path, path_copy);
+            } else if (last_slash == path_copy && plen > 1) {
                 // e.g., "/file" — parent is "/", name is "file"
                 parent_path[0] = '/'; parent_path[1] = '\0';
-                name = pbuf + 1;
+                name = path_copy + 1;
             } else {
                 // No slash — relative path, parent is cwd
-                name = pbuf;
+                name = path_copy;
                 // Use cwd as parent path
                 size_t cwd_len = strlen(current->files->cwd);
-                if (cwd_len >= VFS_NAME_MAX) { regs->rax = -ENAMETOOLONG; break; }
+                if (cwd_len >= VFS_NAME_MAX) { regs->rax = -ENAMETOOLONG; goto out_open; }
                 memcpy(parent_path, current->files->cwd, cwd_len + 1);
             }
 
-            if (!name || *name == '\0') { regs->rax = -EINVAL; break; }
+            if (!name || *name == '\0') { regs->rax = -EINVAL; goto out_open; }
 
-            vfs_node_t *parent = vfs_lookup_from(parent_path, current->files->cwd);
-            if (!parent) { regs->rax = -ENOENT; break; }
-            if (parent->type != VFS_DIR) { vfs_node_put(parent); regs->rax = -ENOTDIR; break; }
+            parent = vfs_lookup_from(parent_path, current->files->cwd);
+            if (!parent) { regs->rax = -ENOENT; goto out_open; }
+            if (parent->type != VFS_DIR) { regs->rax = -ENOTDIR; goto out_open; }
             if (!parent->ops || (uint64_t)parent->ops < 0xffff800000000000ULL || !parent->ops->create) {
-                vfs_node_put(parent);
                 regs->rax = -EROFS;
-                break;
+                goto out_open;
             }
             if ((uint64_t)parent->ops->create < 0xffff800000000000ULL) {
-                vfs_node_put(parent);
                 regs->rax = -1;
-                break;
+                goto out_open;
             }
 
             node = parent->ops->create(parent, name);
+            if (!node) { regs->rax = -EEXIST; goto out_open; }
+            // Successful create: ownership of parent ref transfers
+            // implicitly when we vfs_node_put below.
             vfs_node_put(parent);
-            if (!node) { regs->rax = -EEXIST; break; }
+            parent = NULL;
         }
 
         if (!node) {
             regs->rax = -ENOENT;
-            break;
+            goto out_open;
         }
 
         // O_TRUNC: truncate regular files to size 0 via filesystem op
@@ -1347,28 +1364,43 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             }
         }
 
-        file_t *f = NULL;
-        int rc = devfs_open_node(node, path, flags, &f);
+        // devfs_open_node passes path_copy (kernel-side) to device
+        // .open callbacks.  None of the registered device opens
+        // (pty.c ptmx_open / ptsN_open) dereference the string, so
+        // this is safe; future device opens MUST treat the argument
+        // as kernel memory, not user memory.
+        int rc = devfs_open_node(node, path_copy, flags, &f);
         if (rc == -ENOSYS) {
             // Not a devfs device node → fall through to default FD_VFS
             f = file_alloc();
-            if (!f) { vfs_node_put(node); regs->rax = -ENOMEM; break; }
+            if (!f) { vfs_node_put(node); node = NULL; regs->rax = -ENOMEM; goto out_open; }
             f->type = FD_VFS;
             f->node = node;  // takes ownership of lookup ref
+            node = NULL;     // f owns the ref now; don't double-put on cleanup
             f->flags = flags;
         } else {
             vfs_node_put(node);  // devfs path owns its own ref
-            if (rc < 0) { regs->rax = rc; break; }
-            if (!f) { regs->rax = -ENOMEM; break; }
+            node = NULL;
+            if (rc < 0) { regs->rax = rc; goto out_open; }
+            if (!f) { regs->rax = -ENOMEM; goto out_open; }
         }
 
         int newfd = fd_alloc(current->files, f);
         if (newfd < 0) {
             file_free(f);
+            f = NULL;          // already freed
             regs->rax = -ENFILE;
-            break;
+            goto out_open;
         }
+        f = NULL;  // fd_alloc took ownership
         regs->rax = newfd;
+    out_open:
+        // Cleanup: free path_copy and any node/parent/f refs still
+        // owned by this code path.
+        if (parent) vfs_node_put(parent);
+        if (node) vfs_node_put(node);
+        if (f) file_free(f);
+        if (path_copy) kfree(path_copy);
         break;
     }
     case SYS_close: {
@@ -1429,6 +1461,8 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
     case SYS_chdir: {
         // chdir(const char *path) → 0 / -errno
         const char *path = (const char *)regs->rdi;
+        char *path_copy = NULL;
+        char *new_cwd = NULL;
         if ((uint64_t)path >= current->addr_limit) {
             regs->rax = -EFAULT;
             break;
@@ -1438,39 +1472,51 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             break;
         }
 
-        char *path_copy = strdup(path);
+        // Bounded fault-tolerant copy.  After this point, `path` (the
+        // raw user pointer) MUST NOT be touched — all uses go through
+        // path_copy.  kfree(path_copy) is at `out:`.
+        int plen = strnlen_user(path, VFS_NAME_MAX);
+        if (plen < 0) { regs->rax = -EFAULT; break; }
+        if (plen >= VFS_NAME_MAX) { regs->rax = -ENAMETOOLONG; break; }
+        path_copy = kmalloc(plen + 1);
         if (!path_copy) { regs->rax = -ENOMEM; break; }
+        if (copy_from_user_ft(path_copy, path, plen + 1) < 0) {
+            regs->rax = -EFAULT;
+            goto out;
+        }
 
         vfs_node_t *node = vfs_lookup_from(path_copy, current->files->cwd);
-        kfree(path_copy);
-        if (!node) { regs->rax = -ENOENT; break; }
-        if (node->type != VFS_DIR) { vfs_node_put(node); regs->rax = -ENOTDIR; break; }
+        if (!node) { regs->rax = -ENOENT; goto out; }
+        if (node->type != VFS_DIR) { vfs_node_put(node); regs->rax = -ENOTDIR; goto out; }
         vfs_node_put(node);
 
-        // Build the new absolute cwd
-        char new_cwd[256];
-        if (path[0] == '/') {
+        // Build the new absolute cwd from path_copy (NEVER the raw user
+        // pointer — that window was the old chdir bug).
+        new_cwd = kmalloc(2 * VFS_NAME_MAX);
+        if (!new_cwd) { regs->rax = -ENOMEM; goto out; }
+        if (path_copy[0] == '/') {
             // absolute
-            size_t len = strlen(path);
-            if (len >= 255) { regs->rax = -EINVAL; break; }
-            memcpy(new_cwd, path, len + 1);
+            size_t len = plen;
+            if (len >= 2 * VFS_NAME_MAX - 1) { regs->rax = -EINVAL; goto out; }
+            memcpy(new_cwd, path_copy, len + 1);
         } else {
-            // relative: cwd + "/" + path
+            // relative: cwd + "/" + path_copy
             int cwd_len = (int)strlen(current->files->cwd);
-            int path_len = (int)strlen(path);
-            if (cwd_len + 1 + path_len >= 256) { regs->rax = -EINVAL; break; }
+            if (cwd_len + 1 + plen >= 2 * VFS_NAME_MAX) { regs->rax = -EINVAL; goto out; }
             memcpy(new_cwd, current->files->cwd, cwd_len);
             new_cwd[cwd_len] = '/';
-            memcpy(new_cwd + cwd_len + 1, path, path_len + 1);
+            memcpy(new_cwd + cwd_len + 1, path_copy, plen + 1);
         }
         // Collapse "//" and trailing "/"
         // For now, simple store
         kfree(current->files->cwd);
-        current->files->cwd = strdup(new_cwd);
-        if (!current->files->cwd) { regs->rax = -ENOMEM; break; }
-
+        current->files->cwd = new_cwd;          // transfer ownership
+        new_cwd = NULL;
         log_info("chdir: pid=%d -> '%s'\n", (int)current->pid, current->files->cwd);
         regs->rax = 0;
+    out:
+        if (new_cwd) kfree(new_cwd);
+        if (path_copy) kfree(path_copy);
         break;
     }
     case SYS_getcwd: {
@@ -1500,6 +1546,8 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
     }
     case SYS_stat: {
         // stat(const char *path, struct stat *buf) → 0 / -errno
+        // buf write-back is hardened in Task 6 (Cat B).  This task
+        // only handles the path.
         const char *path = (const char *)regs->rdi;
         struct stat *buf = (struct stat *)regs->rsi;
 
@@ -1509,8 +1557,16 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             break;
         }
 
-        char *path_copy = strdup(path);
+        int plen = strnlen_user(path, VFS_NAME_MAX);
+        if (plen < 0) { regs->rax = -EFAULT; break; }
+        if (plen >= VFS_NAME_MAX) { regs->rax = -ENAMETOOLONG; break; }
+        char *path_copy = kmalloc(plen + 1);
         if (!path_copy) { regs->rax = -ENOMEM; break; }
+        if (copy_from_user_ft(path_copy, path, plen + 1) < 0) {
+            kfree(path_copy);
+            regs->rax = -EFAULT;
+            break;
+        }
 
         const char *cwd = current->files ? current->files->cwd : "/";
         vfs_node_t *node = vfs_lookup_from(path_copy, cwd);
@@ -1712,8 +1768,16 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             break;
         }
 
-        char *path_copy = strdup(path);
+        int plen = strnlen_user(path, VFS_NAME_MAX);
+        if (plen < 0) { regs->rax = -EFAULT; break; }
+        if (plen >= VFS_NAME_MAX) { regs->rax = -ENAMETOOLONG; break; }
+        char *path_copy = kmalloc(plen + 1);
         if (!path_copy) { regs->rax = -ENOMEM; break; }
+        if (copy_from_user_ft(path_copy, path, plen + 1) < 0) {
+            kfree(path_copy);
+            regs->rax = -EFAULT;
+            break;
+        }
 
         const char *cwd = current->files ? current->files->cwd : "/";
         vfs_node_t *node = vfs_lookup_from(path_copy, cwd);
@@ -1754,8 +1818,16 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             break;
         }
 
-        char *path_copy = strdup(path);
+        int plen = strnlen_user(path, VFS_NAME_MAX);
+        if (plen < 0) { regs->rax = -EFAULT; break; }
+        if (plen >= VFS_NAME_MAX) { regs->rax = -ENAMETOOLONG; break; }
+        char *path_copy = kmalloc(plen + 1);
         if (!path_copy) { regs->rax = -ENOMEM; break; }
+        if (copy_from_user_ft(path_copy, path, plen + 1) < 0) {
+            kfree(path_copy);
+            regs->rax = -EFAULT;
+            break;
+        }
 
         const char *cwd = current->files ? current->files->cwd : "/";
         int ret = vfs_unlink(path_copy, cwd);
@@ -1775,8 +1847,16 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             break;
         }
 
-        char *path_copy = strdup(path);
+        int plen = strnlen_user(path, VFS_NAME_MAX);
+        if (plen < 0) { regs->rax = -EFAULT; break; }
+        if (plen >= VFS_NAME_MAX) { regs->rax = -ENAMETOOLONG; break; }
+        char *path_copy = kmalloc(plen + 1);
         if (!path_copy) { regs->rax = -ENOMEM; break; }
+        if (copy_from_user_ft(path_copy, path, plen + 1) < 0) {
+            kfree(path_copy);
+            regs->rax = -EFAULT;
+            break;
+        }
 
         const char *cwd = current->files ? current->files->cwd : "/";
         int ret = vfs_mkdir(path_copy, cwd);
@@ -1794,8 +1874,16 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             break;
         }
 
-        char *path_copy = strdup(path);
+        int plen = strnlen_user(path, VFS_NAME_MAX);
+        if (plen < 0) { regs->rax = -EFAULT; break; }
+        if (plen >= VFS_NAME_MAX) { regs->rax = -ENAMETOOLONG; break; }
+        char *path_copy = kmalloc(plen + 1);
         if (!path_copy) { regs->rax = -ENOMEM; break; }
+        if (copy_from_user_ft(path_copy, path, plen + 1) < 0) {
+            kfree(path_copy);
+            regs->rax = -EFAULT;
+            break;
+        }
 
         const char *cwd = current->files ? current->files->cwd : "/";
         int ret = vfs_rmdir(path_copy, cwd);
@@ -1808,6 +1896,8 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         // rename(const char *oldpath, const char *newpath) → 0 / -errno
         const char *oldpath = (const char *)regs->rdi;
         const char *newpath = (const char *)regs->rsi;
+        char *old_copy = NULL;
+        char *new_copy = NULL;
 
         if ((uint64_t)oldpath >= current->addr_limit ||
             (uint64_t)newpath >= current->addr_limit) {
@@ -1815,12 +1905,28 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             break;
         }
 
-        char *old_copy = strdup(oldpath);
-        char *new_copy = strdup(newpath);
-        if (!old_copy || !new_copy) {
-            if (old_copy) kfree(old_copy);
-            if (new_copy) kfree(new_copy);
-            regs->rax = -ENOMEM;
+        // Bounded copy of oldpath.
+        int olen = strnlen_user(oldpath, VFS_NAME_MAX);
+        if (olen < 0) { regs->rax = -EFAULT; break; }
+        if (olen >= VFS_NAME_MAX) { regs->rax = -ENAMETOOLONG; break; }
+        old_copy = kmalloc(olen + 1);
+        if (!old_copy) { regs->rax = -ENOMEM; break; }
+        if (copy_from_user_ft(old_copy, oldpath, olen + 1) < 0) {
+            kfree(old_copy);
+            regs->rax = -EFAULT;
+            break;
+        }
+
+        // Bounded copy of newpath.
+        int nlen = strnlen_user(newpath, VFS_NAME_MAX);
+        if (nlen < 0) { kfree(old_copy); regs->rax = -EFAULT; break; }
+        if (nlen >= VFS_NAME_MAX) { kfree(old_copy); regs->rax = -ENAMETOOLONG; break; }
+        new_copy = kmalloc(nlen + 1);
+        if (!new_copy) { kfree(old_copy); regs->rax = -ENOMEM; break; }
+        if (copy_from_user_ft(new_copy, newpath, nlen + 1) < 0) {
+            kfree(old_copy);
+            kfree(new_copy);
+            regs->rax = -EFAULT;
             break;
         }
 
@@ -1842,8 +1948,16 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             break;
         }
 
-        char *path_copy = strdup(path);
+        int plen = strnlen_user(path, VFS_NAME_MAX);
+        if (plen < 0) { regs->rax = -EFAULT; break; }
+        if (plen >= VFS_NAME_MAX) { regs->rax = -ENAMETOOLONG; break; }
+        char *path_copy = kmalloc(plen + 1);
         if (!path_copy) { regs->rax = -ENOMEM; break; }
+        if (copy_from_user_ft(path_copy, path, plen + 1) < 0) {
+            kfree(path_copy);
+            regs->rax = -EFAULT;
+            break;
+        }
 
         const char *cwd = current->files ? current->files->cwd : "/";
         vfs_node_t *node = vfs_lookup_from(path_copy, cwd);
