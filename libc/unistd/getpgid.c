@@ -1,6 +1,9 @@
 #include <unistd.h>
+#include <errno.h>
 #include <sys/syscall.h>
 
 pid_t getpgid(pid_t pid) {
-    return (pid_t)syscall(SYS_getpgid, (uint64_t)pid, 0, 0);
+    int64_t ret = syscall(SYS_getpgid, (uint64_t)pid, 0, 0);
+    if (ret < 0) { errno = (int)(-ret); return -1; }
+    return (pid_t)ret;
 }
