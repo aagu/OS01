@@ -11,6 +11,7 @@ void abort(void) {
 	// TODO: Add proper kernel panic.
 	// printf("kernel: panic: abort()\n");
 	kpanic("[kernel panic]\n");
+	__builtin_unreachable();
 #else
 	syscall(SYS_exit, 1, 0, 0);
 	__builtin_unreachable();

@@ -30,7 +30,7 @@ long strtol(const char *nptr, char **endptr, int base)
     }
 
     // Overflow limits
-    cutoff = neg ? LONG_MIN : LONG_MAX;
+    cutoff = neg ? -(LONG_MAX) - 1 : LONG_MAX;
     cutlim = cutoff % base;
     cutoff /= base;
     if (neg) cutoff = -cutoff;
@@ -52,7 +52,7 @@ long strtol(const char *nptr, char **endptr, int base)
         any = 1;
         if (neg) {
             if (acc < cutoff || (acc == cutoff && digit > cutlim)) {
-                acc = LONG_MIN;
+                acc = -(LONG_MAX) - 1;
                 errno = ERANGE;
                 break;
             }

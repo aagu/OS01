@@ -20,7 +20,7 @@ int read_symbol(FILE *filp,struct symbol_entry *sym_entry)
 	char string[100];
 	int rc;
 
-	rc = fscanf(filp,"%lx %c %499s\n",&sym_entry->address,&sym_entry->type,string);
+	rc = fscanf(filp,"%lx %c %99s\n",&sym_entry->address,&sym_entry->type,string);
 	if(rc != 3) 
 	{
 		if (rc != EOF)

@@ -61,7 +61,7 @@ uint64_t set_page_attribute(struct Page * page, uint64_t flags)
     }
 }
 
-struct Physical_Memory_Manager PMMngr = {{0},0};
+struct Physical_Memory_Manager PMMngr = {0};
 
 uint32_t ZONE_DMA_INDEX;
 uint32_t ZONE_NORMAL_INDEX;

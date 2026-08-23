@@ -118,7 +118,7 @@ void ap_entry(void)
     // smp_boot_aps).  Without this, the CPU would use the BSP's TSS
     // and corrupt the BSP's ring-0 stack pointer on every context
     // switch.
-    load_TR(8 + cpu->cpu_id * 2);
+    load_TR((8 + cpu->cpu_id * 2));
 
     // Start per-CPU scheduling tick
     lapic_timer_start(100);

@@ -186,6 +186,7 @@ void task_wake(task_t *t)
     t->state = TASK_RUNNING;
 
 retry:
+    ;
     /*
      * Read t->cpu locklessly — sched_balance may change it concurrently.
      * We re-check both t->cpu and t->on_rq under the acquired rq_lock

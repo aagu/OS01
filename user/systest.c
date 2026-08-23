@@ -443,7 +443,7 @@ static void test_gettimeofday(void)
     struct timeval tv = {0};
     int ret = gettimeofday(&tv, NULL);
     CHECK3(ret == 0, "gettimeofday", "ret 0");
-    CHECKF(tv.tv_sec >= 0, "gettimeofday", "sec=%lu", "sec=%lu", (unsigned long)tv.tv_sec);
+    CHECKF((long)tv.tv_sec >= 0, "gettimeofday", "sec=%lu", "sec=%lu", (unsigned long)tv.tv_sec);
     CHECK3(tv.tv_usec < 1000000ULL, "gettimeofday", "tv_usec < 1e6");
 }
 
@@ -546,7 +546,7 @@ static void test_times(void)
 {
     struct tms buf;
     uint64_t t = times(&buf);
-    CHECK3(t >= 0, "times", "called");
+    CHECK3((long)t >= 0, "times", "called");
 }
 
 // ── 35: uname ──────────────────────────────────────────────

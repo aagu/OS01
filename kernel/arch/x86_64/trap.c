@@ -1584,7 +1584,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             new_offset = (int64_t)f->node->size + offset;
             break;
         default:
-            regs->rax = -EINVAL;
+            new_offset = -1;
             break;
         }
         if (new_offset < 0) { regs->rax = -EINVAL; break; }
