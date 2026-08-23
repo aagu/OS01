@@ -464,15 +464,36 @@
       uint64_t saved_l3, saved_l2, saved_pde;   /* original parent slots (0 = absent) */
       uint64_t *new_l3, *new_l2, *new_pml1;     /* test-only tables we created */
       int    created;                   /* 1 if we created/split anything */
+      int    split_2m;                  /* 1 if we split a 2MB PDE -> new_pml1 */
   };
-  /* Walk l4->l3->l2; create missing intermediates (alloc_4k_page) and RECORD
-     each parent slot's original value + the created table; if l2 is a 2MB huge
-     PDE (PAGE_PS bit), allocate a PML1 table, write the SPLIT PDE (pml1 phys |
-     Present|RW|User) and RECORD the original PDE value.  Returns the pml1 slot. */
-  static uint64_t *ensure_pt(uint64_t *pml4, uint64_t va, struct test_map_ctx *ctx) { ... }
-  /* restore(ctx): put back saved_l3/l2/pde slots, free test-only tables
-     (free_4k_page), flush TLB.  Runs on EVERY exit path (normal + any
-     SELFTEST_ASSERT failure — call restore() BEFORE the failing assert). */
+  /* ensure_pt: walk l4->l3->l2, creating missing intermediates (alloc_4k_page,
+     RECORD parent slot originals + created tables).  **If l2 is a 2MB huge PDE,
+     do NOT just replace it**: first read the PDE's phys base + permission bits,
+     allocate a PML1 table and INITIALIZE ALL 512 PTEs to map each 4KB subpage of
+     the original 2MB (preserving the whole mapping), THEN modify only the two
+     test slots.  Records the original PDE for restore. */
+  static uint64_t *ensure_pt(uint64_t *pml4, uint64_t va, struct test_map_ctx *ctx) {
+      uint64_t l2val = pml2[l2];                       /* read original PDE */
+      if (l2val & PAGE_PS) {                           /* 2MB huge page: SPLIT */
+          uint64_t *pml1 = alloc_4k_page_as_tbl();
+          uint64_t base  = l2val & ~(uint64_t)0x1FFFFF;   /* 2MB phys base (bits 21+) */
+          uint64_t flags = (l2val & 0xFFF) & ~0x80ULL;    /* PDE perms, CLEAR PS (bit 7) —
+                                                             PS is not valid on 4KB PTEs */
+          for (int i = 0; i < 512; i++)                   /* preserve ALL 512 4KB maps:
+                                                             the other 511 must keep working */
+              pml1[i] = base | ((uint64_t)i << 12) | flags;
+          ctx->split_2m = 1; ctx->saved_pde = l2val;
+          pml2[l2] = Phy(pml1) | PAGE_Present | PAGE_R_W | PAGE_USER;  /* split PDE */
+          ctx->new_pml1 = pml1;
+      } else if (!(l2val & 1)) { ctx->saved_l2 = l2val; ctx->new_l2 = alloc_4k_page_as_tbl(); pml2[l2] = Phy(new_l2)|flags; }
+      /* similarly probe/create l3 (and l4 can't be absent for kernel) */
+      return &pml1[l1];                                /* the leaf slot */
+  }
+  /* restore_pt(ctx): 恢复顺序必须与创建顺序相反 (LIFO)：先恢复本 ctx 的叶项/
+     l2 槽，再（若本 ctx split）恢复 saved_pde + free new_pml1，最后恢复上层父槽
+     + free 测试表 + flush TLB。 两个测试 VA 同在 0x600000..0x7fffff 的同一 2MB
+     区间 → 只有一个 ctx 会 split；但若两次 ensure_pt 各建了部分层级，按"后创建
+     先恢复"逆序调用 restore。 所有失败路径先 restore_pt 再失败。 */
   static void restore_pt(struct test_map_ctx *ctx) { ... }
   ```
   用例顺序（所有失败路径先 `restore_pt` 再失败）：
@@ -512,7 +533,7 @@
 
 **Interfaces:**
 - Consumes: `strnlen_user`/`copy_from_user_ft`（Task 2）
-- Produces: 统一模式 `strnlen_user(path, VFS_NAME_MAX) → strdup`（后续 Task 5 复用）
+- Produces: 统一模式 `strnlen_user(path, VFS_NAME_MAX)` 定长 → `kmalloc` + `copy_from_user_ft`（后续 Task 5 复用）
 
 **模式（所有 Cat A handler 统一）**：
 
@@ -534,10 +555,10 @@ if (copy_from_user_ft(path_copy, path, plen + 1) < 0) {   // 含 NUL, 单次容�
 
 - [ ] **Step 1: 给 open/exec/stat/chdir 补 strnlen_user + 全路径替换（含 §5.2）**
   逐 handler：
-  - `SYS_open`（trap.c:1249-1365）：strnlen_user 定界 + strdup；**O_CREAT 分支（1280-1282）的 `strlen(path)`/`memcpy(pbuf, path, ...)` 改用 `path_copy`**（parent_path 解析在 strdup 之后做，用 path_copy）。
-  - `SYS_exec`（1194-1227）：path 定界 + strdup（argv/envp 深拷贝在 Task 5）。
-  - `SYS_chdir`（1422-1468）：strnlen_user + strdup；**`kfree(path_copy)` 移到 `path[0]`/`strlen(path)`/`memcpy(new_cwd, path, ...)`（1446-1458）全部使用之后，且这些改用 `path_copy`**。
-  - `SYS_stat`（1494-1523）：path 定界 + strdup（buf 写回在 Task 6）。
+  - `SYS_open`（trap.c:1249-1365）：strnlen_user 定长 + kmalloc + copy_from_user_ft；**O_CREAT 分支（1280-1282）的 `strlen(path)`/`memcpy(pbuf, path, ...)` 改用 `path_copy`**（parent_path 解析在拷贝之后做，用 path_copy）。
+  - `SYS_exec`（1194-1227）：path 定长 + 内核拷贝（argv/envp 深拷贝在 Task 5）。
+  - `SYS_chdir`（1422-1468）：strnlen_user + 内核拷贝；**`kfree(path_copy)` 移到 `path[0]`/`strlen(path)`/`memcpy(new_cwd, path, ...)`（1446-1458）全部使用之后，且这些改用 `path_copy`**。
+  - `SYS_stat`（1494-1523）：path 定长 + 内核拷贝（buf 写回在 Task 6）。
   验证：`make clean && make` + QEMU：`cd /bin; ls` 正常、相对/绝对路径、超长路径 `-ENAMETOOLONG`、坏路径 `-EFAULT`。
 
 - [ ] **Step 2: access/unlink/mkdir/rmdir/rename/truncate 定界**
@@ -901,30 +922,49 @@ if (buf) {   // NULL 合法处
         spin_unlock_irqrestore(&p->read_busy_lock, f);
         wake_all(&p->read_busy_wq);
     }
-    /* in pipe_read_internal: */
-    pipe_read_reserve(p);                                 /* serialize whole reads */
-    /* ... block-for-data (reservation held) ... */
-    /* three-phase under reservation (no pipe spinlock during _ft): */
-    uint64_t f = spin_lock_irqsave(&p->lock);
-    avail = pipe_avail(p); memcpy(bounce, ring + p->tail, avail);  /* peek, no consume */
-    spin_unlock_irqrestore(&p->lock, f);
-    ssize_t rc = copy_to_user_ft_res(user, bounce, avail,
-                                     pipe_read_release, p);
-    /* copy_to_user_ft_res runs pipe_read_release ONLY on the FAULT path
-       (longjmp branch).  On fault: reservation already released, tail UNCHANGED
-       -> no data loss, no reservation leak, no tail race.  On SUCCESS: the res
-       variant does NOT auto-release — the caller must NOT release before commit. */
-    if (rc < 0)
-        return -EFAULT;                                   /* reservation already freed by callback */
-    f = spin_lock_irqsave(&p->lock);
-    p->tail = (p->tail + avail) % PIPE_SIZE;              /* COMMIT FIRST */
-    pipe_wake_writers(p);
-    spin_unlock_irqrestore(&p->lock, f);
-    pipe_read_release(p);                                 /* normal path: release ONLY AFTER commit */
-    return avail;
-    /* 时序保证：read_busy 在 commit 完成后才释放 → reader 2 只能预约到
-       commit 之后的 tail，绝无两个 reader 竞争同一段数据。fault 路径由
-       callback 释放（无 commit，tail 未动），同样不竞争。 */
+    /* in pipe_read_internal — SINGLE out_release exit (all paths, not just
+       page-fault: EOF / -EINTR / read-write state change / wait anomalies all
+       release the reservation, since copy_to_user_ft_res only handles the
+       page-fault longjmp path): */
+    struct pipe_read_rsv { pipe_t *p; int *released; };
+    static void pipe_read_release_cb(void *arg) {        /* _ft_res fault callback */
+        struct pipe_read_rsv *r = arg;
+        *r->released = 1;                                /* mark released — out_release
+                                                           must NOT double-release */
+        pipe_read_release(r->p);                         /* read_busy=0 + wake (idempotent) */
+    }
+    int64_t pipe_read_internal(pipe_t *p, void *buf, uint64_t size) {
+        uint8_t bounce[PIPE_SIZE];
+        struct pipe_read_rsv rsv = { p, &(int){0} };
+        int released = 0;  rsv.released = &released;
+        pipe_read_reserve(p);                            /* acquire read_busy (may block) */
+        int64_t result = 0;
+        for (;;) {
+            /* ... block-for-data loop (reservation held) ... */
+            /*  EOF:            result = 0;      goto out_release; */
+            /*  -EINTR:         result = -EINTR; goto out_release; */
+            /*  data available: break; */
+        }
+        uint64_t f = spin_lock_irqsave(&p->lock);
+        size_t avail = pipe_avail(p);
+        memcpy(bounce, ring + p->tail, avail);           /* peek, no consume */
+        spin_unlock_irqrestore(&p->lock, f);
+        ssize_t rc = copy_to_user_ft_res(buf, bounce, avail,
+                                         pipe_read_release_cb, &rsv);
+        if (rc < 0) { result = -EFAULT; goto out_release; }   /* fault cb set released=1 */
+        f = spin_lock_irqsave(&p->lock);
+        p->tail = (p->tail + avail) % PIPE_SIZE;         /* COMMIT FIRST */
+        pipe_wake_writers(p);
+        spin_unlock_irqrestore(&p->lock, f);
+        result = (int64_t)avail;
+    out_release:
+        if (!released) pipe_read_release(p);             /* every path exits here ONCE;
+                                                           fault cb already released -> skipped */
+        return result;
+    }
+    /* 时序：commit 后才释放（out_release 在 commit 后）→ reader 2 只能预约 commit 之后
+       tail，无竞争。fault 路径 cb 释放一次（无 commit、tail 未动）+ released 标志防止
+       out_release 二次释放。EOF/-EINTR/状态变化全部经 out_release 释放 → read_busy 不泄漏。 */
     ```
     **并发正确**：`read_busy` 使同时最多一个 read 在 peek→copy→commit 窗口内 → tail 无竞态（第二个 reader 阻塞等待预约释放，不竞争）。**fault 清理**：`copy_to_user_ft_res` 的 longjmp 路径运行 `pipe_read_release`（回到原内核栈，正常 IRQ 态，可安全 spin_lock）→ 预约不泄漏；tail 未动 → 数据不丢。**无裸 memcpy、无 `_ft` 持锁**。`pipe_read_internal` 的字节循环（file.c:399-466 `dst[total++]`）改为该模式。
     **替代方案（若不想加 `_ft_res`）**：显式收窄语义并在 fd/pipe 层阻止共享读端——但 `cmd1 | cmd2` 管道依赖 fork 继承读端，**不可行**。故选 `_ft_res` 预约方案。
