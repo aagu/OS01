@@ -968,6 +968,113 @@ static bool nanosleep_should_unblock(struct task_struct *waiter)
     return clocksource_read_ns() >= waiter->wakeup_ns;
 }
 
+// ── exec argv/envp bounded deep-copy (Task 5, Cat A') ───────
+// Allocates a kernel-heap copy of a user-space NULL-terminated array
+// of string pointers, including a kernel copy of every string.
+//
+// Bounds:
+//   * at most MAX_ARGV pointers in the array
+//   * each string is at most MAX_ARG_STRLEN bytes (incl. NUL)
+//   * total bytes across all strings <= MAX_ARG_TOTAL
+//
+// On any fault or bound violation:
+//   * array element pointer < USER_MIN_ADDR or >= addr_limit → -EFAULT
+//   * strnlen_user fault → -EFAULT
+//   * strnlen_user returns MAX_ARG_STRLEN (no NUL within cap) → -E2BIG
+//   * element count > MAX_ARGV → -E2BIG
+//   * total bytes > MAX_ARG_TOTAL → -E2BIG
+//   * kmalloc failure → -ENOMEM
+//
+// On failure all already-allocated strings + the partial array are freed.
+// On success *out_arr is a NULL-terminated kmalloc'd array of kmalloc'd
+// strings; caller frees with free_deep_argv().
+static void free_deep_argv(char **kargv, char **kenvp)
+{
+    if (kargv) {
+        for (size_t i = 0; kargv[i] != NULL; i++) kfree(kargv[i]);
+        kfree(kargv);
+    }
+    if (kenvp) {
+        for (size_t i = 0; kenvp[i] != NULL; i++) kfree(kenvp[i]);
+        kfree(kenvp);
+    }
+}
+
+// Internal helper: free all strings + the array (allocated so far).
+// Used on the failure paths before the array is fully populated.
+static void free_partial_argv(char **arr, size_t filled)
+{
+    if (!arr) return;
+    for (size_t i = 0; i < filled; i++) kfree(arr[i]);
+    kfree(arr);
+}
+
+static int64_t deep_copy_argv(const char *const *user_arr, char ***out_arr)
+{
+    *out_arr = NULL;
+    if (user_arr == NULL) return 0;
+
+    // Phase 1: scan the array (fault-tolerant per pointer) to count
+    // entries and validate every element pointer.  Bound the loop by
+    // MAX_ARGV so a hostile unbounded array cannot loop forever.
+    const char *ptrs[MAX_ARGV + 1];
+    size_t count = 0;
+    uint64_t addr_limit = current->addr_limit;
+
+    for (size_t i = 0; i <= MAX_ARGV; i++) {
+        uint64_t p = 0;
+        if (copy_from_user_ft(&p, &user_arr[i], sizeof(p)) < 0)
+            return -EFAULT;
+        if (p == 0) {                       // NULL terminator
+            count = i;
+            break;
+        }
+        // Bad element pointer: kernel address or below USER_MIN_ADDR.
+        if (p < USER_MIN_ADDR || p >= addr_limit)
+            return -EFAULT;
+        ptrs[i] = (const char *)p;
+    }
+    // If the loop ran to MAX_ARGV+1 without seeing NULL, either the
+    // array has more than MAX_ARGV entries (over cap) or it's not
+    // NUL-terminated within MAX_ARGV+1 (treated the same).
+    if (count == 0) return -E2BIG;
+
+    // Phase 2: for each element, strnlen + bounded total accumulator.
+    size_t total = 0;
+    size_t lens[MAX_ARGV];
+    for (size_t i = 0; i < count; i++) {
+        int n = strnlen_user(ptrs[i], MAX_ARG_STRLEN);
+        if (n < 0) return -EFAULT;
+        if (n >= MAX_ARG_STRLEN) return -E2BIG;     // no NUL within cap
+        lens[i] = (size_t)n + 1;                    // incl. NUL
+        total += lens[i];
+        if (total > MAX_ARG_TOTAL) return -E2BIG;
+    }
+
+    // Phase 3: allocate the kernel array (NULL-terminated) and copy
+    // every string.  Any failure mid-way frees everything we already
+    // allocated.
+    char **arr = (char **)kmalloc((count + 1) * sizeof(char *));
+    if (!arr) return -ENOMEM;
+    size_t filled = 0;
+    for (size_t i = 0; i < count; i++) {
+        char *kstr = (char *)kmalloc(lens[i]);
+        if (!kstr) {
+            free_partial_argv(arr, filled);
+            return -ENOMEM;
+        }
+        if (copy_from_user_ft(kstr, ptrs[i], lens[i]) < 0) {
+            kfree(kstr);
+            free_partial_argv(arr, filled);
+            return -EFAULT;
+        }
+        arr[filled++] = kstr;
+    }
+    arr[count] = NULL;
+    *out_arr = arr;
+    return 0;
+}
+
 void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused)))
 {
 #ifndef NDEBUG
@@ -1199,10 +1306,15 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         regs->rax = current->pid;
         break;
     }
+// ── exec argv/envp bounded deep-copy (Task 5, Cat A') ───────
+// (Definitions live at file scope, just above do_system_call.)
+
     case SYS_exec: {
         // exec(const char *path, char *const argv[], char *const envp[])
         // If argv == NULL: old behavior (no args)
-        // If argv != NULL: copy argv/envp strings to new user stack
+        // If argv != NULL: deep-copy argv/envp arrays+strings to kernel
+        // heap (Task 5) before calling sys_exec.  sys_exec then operates
+        // ONLY on the kernel copies — no user-memory dereference.
         const char *path = (const char *)regs->rdi;
         const char *const *argv = (const char *const *)regs->rsi;
         const char *const *envp = (const char *const *)regs->rdx;
@@ -1223,8 +1335,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         }
 
         // Copy path to kernel heap (bounded + fault-tolerant) so that
-        // user-mapped pages cannot fault us mid-VFS-walk.  argv/envp
-        // deep-copy is handled by Task 5.
+        // user-mapped pages cannot fault us mid-VFS-walk.
         int plen = strnlen_user(path, VFS_NAME_MAX);
         if (plen < 0) { regs->rax = -EFAULT; break; }
         if (plen >= VFS_NAME_MAX) { regs->rax = -ENAMETOOLONG; break; }
@@ -1236,7 +1347,52 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             break;
         }
 
-        int64_t ret = sys_exec(path_copy, regs, argv, envp);
+        // Deep-copy argv/envp arrays+strings to kernel heap.  Done
+        // BEFORE sys_exec builds the new pml4 / frees the old space
+        // (no UAF on the old address space).  sys_exec never touches
+        // user memory after this point.
+        char **kargv = NULL;
+        char **kenvp = NULL;
+        if (argv != NULL) {
+            int64_t r = deep_copy_argv(argv, &kargv);
+            if (r < 0) {
+                kfree(path_copy);
+                regs->rax = r;
+                break;
+            }
+        }
+        if (envp != NULL) {
+            int64_t r = deep_copy_argv(envp, &kenvp);
+            if (r < 0) {
+                free_deep_argv(kargv, NULL);
+                kfree(path_copy);
+                regs->rax = r;
+                break;
+            }
+        }
+
+        // sys_exec builds argv/envp on the user stack using a fixed
+        // str_offset[128] table (task.c) — the COMBINED argc+envc must
+        // fit (each array alone is bounded to MAX_ARGV=128 by
+        // deep_copy_argv, but both together could reach 256).  Enforce
+        // the combined cap here so sys_exec's fixed table cannot be
+        // overrun (kernel-stack corruption).
+        if ((argv != NULL) && (envp != NULL)) {
+            size_t ac = 0, ec = 0;
+            while (kargv[ac]) ac++;
+            while (kenvp[ec]) ec++;
+            if (ac + ec > 128) {
+                free_deep_argv(kargv, kenvp);
+                kfree(path_copy);
+                regs->rax = -E2BIG;
+                break;
+            }
+        }
+
+        int64_t ret = sys_exec(path_copy, regs,
+                               (const char *const *)kargv,
+                               (const char *const *)kenvp);
+        free_deep_argv(kargv, kenvp);
         kfree(path_copy);
         regs->rax = ret;
         break;

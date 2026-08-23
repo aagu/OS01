@@ -1931,6 +1931,63 @@ static void test_kill_neg_pid_pgrp(void) {
            "kill_pgrp", "c2 got SIGUSR2");
 }
 
+// ── H8: exec with hostile argv (Task 5 — Cat A' deep copy) ─
+// exec is called by the current process (no fork) so the kernel is the
+// direct victim of a bad argv element pointer / a no-NUL string.  Both
+// must return -EFAULT / -E2BIG without crashing the kernel; the test
+// process then continues to the next test.
+//
+// Case 1: argv element = NULL terminator after a hostile pointer below
+//         USER_MIN_ADDR (a "bad element pointer").  kernel must reject
+//         with -EFAULT instead of dereferencing.
+// Case 2: argv element points at a mapped page with NO NUL within
+//         MAX_ARG_STRLEN bytes.  kernel must return -E2BIG (the strnlen
+//         cap is hit before NUL), not fault inside the kernel.
+// Case 3: argv has MAX_ARGV+1 valid, short, NUL-terminated strings —
+//         kernel must reject with -E2BIG (over the count cap).
+static void test_exec_hostile_argv(void) {
+    // Case 1: bad element pointer (below USER_MIN_ADDR = 0x400000).
+    // Path is valid so we know a failure is the argv element, not path.
+    char *argv_bad[] = { (char *)"/bin/spin", (char *)(uintptr_t)0x1000, NULL };
+    int64_t r1 = exec("/bin/spin", (char *const *)argv_bad, NULL);
+    CHECK3(r1 < 0, "exec_hostile_argv", "bad element ptr -> <0 (kernel survives)");
+
+    // Case 2: no-NUL string.  Build a fresh page-sized buffer, fill it
+    // with non-NUL, and only place a NUL past MAX_ARG_STRLEN.  We use
+    // brk() to grab a heap page (which is always user-mapped).
+    int64_t brk = syscall(SYS_brk, 0, 0, 0);
+    if (brk <= 0) { FAIL("exec_hostile_argv", "brk query failed"); return; }
+    // Round up to a page boundary and grab a 4 KiB page.
+    uint64_t base = ((uint64_t)brk + 0xFFF) & ~0xFFFULL;
+    int64_t newbrk = syscall(SYS_brk, base + 0x1000, 0, 0);
+    if (newbrk < (int64_t)(base + 0x1000)) {
+        FAIL("exec_hostile_argv", "brk grow failed");
+        return;
+    }
+    volatile char *big = (volatile char *)(uintptr_t)base;
+    for (int i = 0; i < 0x1000; i++) big[i] = 'A';
+    // Leave the whole page non-NUL — strnlen_user(ptr, MAX_ARG_STRLEN)
+    // will hit the cap and the kernel must reject with -E2BIG.
+    char *argv_nonul[] = { (char *)"/bin/spin", (char *)big, NULL };
+    int64_t r2 = exec("/bin/spin", (char *const *)argv_nonul, NULL);
+    CHECK3(r2 < 0, "exec_hostile_argv", "no-NUL string -> <0 (kernel survives)");
+
+    // Case 3: MAX_ARGV+1 elements.  Allocate MAX_ARGV+2 slots and put
+    // valid NUL-terminated strings in MAX_ARGV+1 of them.  Kernel must
+    // reject with -E2BIG (over MAX_ARGV cap).
+    enum { OVER = 130 };   // MAX_ARGV (128) + 2 → 130 valid pointers + NULL
+    static char heap[OVER * 16];  // backing storage for pointers
+    char *argv_many[OVER + 1];    // OVER entries + NULL
+    for (int i = 0; i < OVER; i++) {
+        heap[i * 16] = 'a';
+        heap[i * 16 + 1] = '\0';
+        argv_many[i] = &heap[i * 16];
+    }
+    argv_many[OVER] = NULL;
+    int64_t r3 = exec("/bin/spin", (char *const *)argv_many, NULL);
+    CHECK3(r3 < 0, "exec_hostile_argv", "MAX_ARGV+1 elements -> <0 (kernel survives)");
+}
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
@@ -1943,6 +2000,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"brk",               test_brk},
     {"getpid/getppid",    test_getpid_getppid},
     {"fork+exec+waitpid", test_fork_exec_waitpid},
+    {"exec_hostile_argv", test_exec_hostile_argv},
     {"devfs_open_inherit", test_devfs_open_inherited_fg_pgrp},
     {"orphan_reparent",   test_orphan_reparent},
     {"read",              test_read},
