@@ -16,6 +16,9 @@
 - setjmp buffer 类型：`typedef void *os01_jmp_buf[8]`（64B，已验证 -O2/-O0 编译通过）
 - `task.h` 结构体变更（`fault_jmp`）→ **必须 `make clean && make`**，旧 .o 静默崩（AGENTS.md）
 - `_ft`/`strnlen_user` **禁止在持有 spinlock / IRQ critical section / 持有必须解锁的资源时使用**（longjmp 绕过解锁 → 死锁）
+- **所有用户内存解引用一律经 uaccess 原语**（`_ft`/`strnlen_user`/`copy_from_user_ft`）；**禁止裸 `memcpy`/`strdup` 读写用户指针**（fault_jmp 未 armed 时 #PF → PF-KRN panic）
+- `syscall_check_user_range` **对 `!current->mm || !current->mm->pml4` fail-closed**（检查顺序：`len==0`→true → 算术拒绝 → mm 检查 → walker；boot 上下文 `init_mm.pml4` 未设置，selftest 依赖此 fail-closed）
+- **pipe/PTY 读端单-reader 契约**：同一读端同一时刻只允许一个 reader（POSIX 常态；OS01 无线程）。三阶段 peek/`_ft`/commit 依赖此契约保证并发正确
 - 用户布局：`USER_MIN_ADDR = USER_CODE_ADDR = 0x400000`；栈 0x800000（2MB），0x600000 guard 未映射
 - 路径长度用 `VFS_NAME_MAX`（256，vfs.h:12），内核无 `PATH_MAX`
 - exec argv/envp 三上限：`MAX_ARGV=128` / `MAX_ARG_STRLEN=4096` / `MAX_ARG_TOTAL=65536`
@@ -236,13 +239,17 @@
   }
 
   // ── Range validation (fast reject + semantic filter; _ft is the authority) ──
+  // Order matters: len==0 -> true (no mm needed); arithmetic rejects; then
+  // fail-closed on missing mm/pml4 (boot ctx: init_mm.pml4 is unset) so the
+  // walker is NEVER invoked with a null table.
   bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable)
   {
       if (len == 0) return true;
       if (addr == 0 || addr < USER_MIN_ADDR) return false;
       if (addr >= current->addr_limit || len > current->addr_limit - addr)
           return false;
-      if (current->mm == NULL) return false;
+      if (current->mm == NULL || current->mm->pml4 == NULL)
+          return false;                       // fail-closed: no user address space
       uint64_t *pml4 = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
       return arch_user_range_accessible(pml4, addr, len, writable);
   }
@@ -349,31 +356,38 @@
   current->addr_limit = saved_limit;
   SELFTEST_ASSERT(rc == -EFAULT);                           /* longjmp path works */
 
-  /* no short count: cross 2 pages, 2nd unmapped (only 0x600000 mapped) */
+  /* cross-page tests need the live CR3 (boot ctx: current->mm==&init_mm but
+     init_mm.pml4 NOT set, task.h:232 — never use current->mm->pml4 here). */
+  uint64_t *cur_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)arch_get_page_table());
+  /* Save original leaf PTEs so we can restore (intermediate pml3/pml2 pages
+     may be SHARED with real mappings — only save/restore leaf slots + invlpg): */
+  uint64_t saved_a = get_leaf(cur_pml4, 0x600000);
+  uint64_t saved_b = get_leaf(cur_pml4, 0x601000);
+  uint64_t pa = alloc_4k_page(), pb = alloc_4k_page();      /* 4KB allocator, pmm.h:102 */
+  SELFTEST_ASSERT(pa != 0 && pb != 0);                      /* alloc failure = hard fail */
+  int tries = 0;
+  while ((pa >> 12) + 1 == (pb >> 12) && tries++ < 16)      /* require non-adjacent */
+      { free_4k_page(pa); pa = alloc_4k_page(); }
+  SELFTEST_ASSERT((pa >> 12) + 1 != (pb >> 12));            /* REQUIRED gate: if still
+      adjacent after retries, the cross-page-correctness test CANNOT run — FAIL the
+      selftest (record SKIP/FAIL in log), do NOT silently continue mapping. */
+
+  /* no short count (prove cross-page no partial count): FIRST map page A only,
+     confirm 0x601000 unmapped, then a copy spanning the boundary faults on the
+     2nd page -> -EFAULT (NOT +N partial).  If page A were unmapped too, it would
+     fault on page 1 and not prove cross-page semantics — order matters: */
+  set_leaf(cur_pml4, 0x600000, pa, PAGE_Present|PAGE_R_W|PAGE_USER);
+  arch_flush_tlb_page(0x600000);
+  SELFTEST_ASSERT(get_leaf(cur_pml4, 0x601000) == 0);       /* 2nd page genuinely unmapped */
   current->addr_limit = 0x00007FFFFFFFFFFFULL;
-  rc = copy_to_user_ft((void *)0x600ff0, ksrc, 32);         /* 2nd page unmapped -> fault */
+  rc = copy_to_user_ft((void *)0x600ff0, ksrc, 32);         /* 0x600ff0..0x601010: page A mapped,
+      page B unmapped -> faults on page 2 -> -EFAULT (no short count) */
   current->addr_limit = saved_limit;
   SELFTEST_ASSERT(rc == -EFAULT);
 
-  /* cross-page correctness with non-contiguous phys (deterministic):
-     map two 4KB pages at 0x600000/0x601000 in the CURRENT page table.
-     Boot ctx has current->mm == &init_mm but init_mm.pml4 is NOT set
-     (task.h:232) — use the live CR3 instead: */
-  uint64_t *cur_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)arch_get_page_table());
-  /* Save original leaf PTEs so we can restore (the intermediate pml3/pml2
-     pages may be SHARED with real mappings — never unmap/free them, only
-     save/restore the two leaf PTE slots + invlpg): */
-  uint64_t saved_a = get_leaf(cur_pml4, 0x600000);
-  uint64_t saved_b = get_leaf(cur_pml4, 0x601000);
-  uint64_t pa = alloc_4k_page();              /* 4KB allocator (pmm.h:102) */
-  uint64_t pb = alloc_4k_page();
-  int tries = 0;
-  while ((pa >> 12) + 1 == (pb >> 12) && tries++ < 16)   /* assert non-adjacent */
-      { free_4k_page(pa); pa = alloc_4k_page(); }         /* retry, bounded */
-  SELFTEST_ASSERT((pa >> 12) + 1 != (pb >> 12));         /* skip-able if can't */
-  set_leaf(cur_pml4, 0x600000, pa, PAGE_Present|PAGE_R_W|PAGE_USER);
+  /* cross-page correctness with non-contiguous phys (deterministic success path): */
   set_leaf(cur_pml4, 0x601000, pb, PAGE_Present|PAGE_R_W|PAGE_USER);
-  arch_flush_tlb_page(0x600000); arch_flush_tlb_page(0x601000);
+  arch_flush_tlb_page(0x601000);
   uint8_t *kA = (uint8_t *)Phy_To_Virt(pa);
   uint8_t *kB = (uint8_t *)Phy_To_Virt(pb);
   memset(kA, 0xAA, 4096); memset(kB, 0xBB, 4096);
@@ -427,14 +441,19 @@
 
 ```c
 // 原: (uint64_t)path >= current->addr_limit → -EFAULT;  char *path_copy = strdup(path);
-// 新:
+// 新 (strdup 是裸读用户内存 — 同纪律禁止; 改 strnlen_user 定长 + copy_from_user_ft 单次容错拷):
 int plen = strnlen_user(path, VFS_NAME_MAX);
 if (plen < 0) { regs->rax = -EFAULT; break; }        // fault
 if (plen >= VFS_NAME_MAX) { regs->rax = -ENAMETOOLONG; break; }
-char *path_copy = strdup(path);                      // strdup 仍可（已定界验证映射）
+char *path_copy = kmalloc(plen + 1);
 if (!path_copy) { regs->rax = -ENOMEM; break; }
+if (copy_from_user_ft(path_copy, path, plen + 1) < 0) {   // 含 NUL, 单次容错拷贝
+    kfree(path_copy);
+    regs->rax = -EFAULT;
+    break;
+}
 ```
-说明：`strnlen_user` 已逐字节容错读（页尾 NUL 合法）；`strdup` 在已映射的 `[path, path+plen+1]` 上跑，不再无界扫。**后续所有对路径的操作一律用 `path_copy`，释放移到所有使用之后。**
+说明：`strnlen_user` 逐字节容错读（页尾 NUL 合法）确定 `plen`；`copy_from_user_ft` 把 `[path, path+plen+1]` 一次拷进内核堆（含 NUL）——**无 strdup 裸读窗口**。**后续所有对路径的操作一律用 `path_copy`，释放移到所有使用之后。**
 
 - [ ] **Step 1: 给 open/exec/stat/chdir 补 strnlen_user + 全路径替换（含 §5.2）**
   逐 handler：
@@ -755,7 +774,7 @@ if (buf) {   // NULL 合法处
 
 ## Task 8: Cat C 大缓冲 VFS bounce 分块层 + 阻塞触点 + do_pipe（Task 6 已含 do_pipe 回滚，此处只 VFS bounce + socket rx/tx）
 
-> **相对 spec 的偏差（已按 review 优化）**：pipe/PTY 读不用 bounce + `_ft`（spec §5.1 原写法），改为**锁内校验 + 锁内直拷**协议（见下）——更简单、并发正确、无 `_ft` 预留清理问题。spec §6 "pipe 经 bounce 无数据丢失" 语义由"校验失败不消费"等效满足。
+> **相对 spec 的偏差（已按 review 收敛）**：pipe/PTY 读的并发正确性通过**显式单-reader 契约**（POSIX 常态，OS01 无线程）而非多-reader 原子性保证；用户拷贝始终经 `_ft`（fault-recoverable），Phase 1 不消费 ring 状态 → longjmp 路径零预留遗留。spec §6 "pipe 经 bounce 无数据丢失" 语义由"Phase 1 peek 不消费 + fault 时 tail 不动"满足。
 
 **Files:**
 - Modify: `kernel/fs/file.c`（`fd_read`/`fd_write` 分块 bounce + socket rx `_ft` / tx 分块 bounce）
@@ -782,21 +801,18 @@ if (buf) {   // NULL 合法处
   }
   ```
   - **VFS/DEV 同步读**：`kbuf = kmalloc(UACCESS_BOUNCE_SIZE)`；循环 `n = vfs_read(f->node, f->offset, min(size-committed, BOUNCE), kbuf)` → `put_user_chunk`；n==0 结束；`kfree`。
-  - **pipe/PTY 读——锁内校验 + 锁内直拷（无 `_ft`、无预留、并发安全）**：三阶段 peek/commit 在并发 reader 下不正确（Phase 1 解锁后另一 reader 可推进 tail，Phase 3 按旧快照推进 → 重复读/错跳/覆盖并发进展）；`_ft` 也不能持 `p->lock`（§4 硬约束）。改用**无需保留 pipe 状态的协议**——整段操作原子地持锁完成，用户拷贝不可能 fault：
+  - **pipe/PTY 读——三阶段 peek/`_ft`/commit + 单-reader 契约（fault-recoverable，无预留遗留）**：用户拷贝**必须经 `_ft`**（不得裸 memcpy——裸拷在 `fault_jmp` 未 armed 时若 #PF 会回 PF-KRN panic，且违反"所有用户解引用经 uaccess 原语"纪律）。`_ft` 不能持 `p->lock`（§4 硬约束），因此：
     ```c
-    // past the block, under p->lock:
-    if (!syscall_check_user_range((uint64_t)buf, avail, true)) {
-        /* unlock; return -EFAULT — nothing consumed (no data loss) */
-    }
-    memcpy(buf, ring + tail, avail);   /* CANNOT fault: validated just above,
-        no schedule between validate and copy (both under lock, no schedule
-        call), and munmap requires return-to-user which can't happen mid-
-        locked-copy on a single-threaded process */
-    tail = (tail + avail) % PIPE_SIZE;
-    pipe_wake_writers(p);
-    unlock; return avail;
+    // Phase 1 (peek, under p->lock): mirror ring[tail..tail+avail) -> bounce
+    //   (plain memcpy of KERNEL-to-KERNEL, cannot fault). Unlock.
+    // Phase 2 (NO lock): rc = copy_to_user_ft(user, bounce, avail)
+    //   fault -> return -EFAULT.  **Nothing was committed in Phase 1** — tail
+    //   unchanged, ring intact, no lock held, no reservation to release on the
+    //   longjmp path (fault recovery leaves zero pipe state behind).
+    // Phase 3 (commit, under p->lock): tail = (tail + n) % PIPE_SIZE;
+    //   pipe_wake_writers(p).  Unlock.
     ```
-    **并发正确性**：validate + memcpy + tail 推进全部在 `p->lock` 内原子完成——并发 reader 被锁挡住，无重复读/错跳。**"不丢数据"**：check_user_range 失败时 tail 未动（数据保留）；校验通过后拷贝不可能 fault（无调度窗口，单线程进程的页不可能在拷贝中被 munmap）。**无 `_ft`、无预留、无 longjmp 清理问题**——比三阶段方案更简单且正确。`pipe_read_internal` 的字节循环（file.c:399-466 `dst[total++]`）改为该模式。
+    **单-reader 契约（明确定义，解决并发正确性）**：pipe/PTY 读端**同一时刻只允许一个 reader**——这是 POSIX 管道常态（多进程读同一读端 fd 是无定义语义/用户错误），且 OS01 无线程（clone 是 P5）。在此契约下 Phase 1→3 之间 tail 不可能被别的 reader 移动（本 reader 未提交、无其他合法 reader），Phase 3 的提交无重复/错跳。**`_ft` longjmp 路径上：无锁（Phase 2 不持锁）、无预留（Phase 1 未消费任何 ring 状态）→ 没有可遗留的锁/预留**，符合 review 要求。数据不丢：fault 时 tail 未动。`pipe_read_internal` 的字节循环（file.c:399-466 `dst[total++]`）改为该模式。
   - **tty_read**（tty.c，`schedule()` 后写 buf）：同 socket RX——最终排水（canon/ring → buf）在无锁处，**`copy_to_user_ft` 后置**（post-block）；`_ft` 失败 → `-EFAULT`，已排水的数据留在 tty 缓冲下次可重读（tty ring 不因失败丢失）。
   - **socket RX**（file.c:513-563）：`copy_to_user_ft(buf, data, copy)` **成功后**才 `s->rx_off += copy` / 推进 netbuf / 释放（525-535、543-555 现有"先 memcpy 后推进"改为先 `_ft` 后推进；`_ft` 失败 → 返回 `-EFAULT`，rx_off/netbuf 原样保留可重试）。
   - 块间 fault：返回 `committed`（前块已提交字节，offset 已推进）；首块 fault：`-EFAULT`。
