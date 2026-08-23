@@ -200,3 +200,88 @@ add_timer(t);                                  // 到期自动删除（一次性
 | `clocksource_read_ns()` 崩溃 | GS base 装之前调用（boot 期）——tick_handler 有 `poll_timeout_head` 短路保护，新调用点需同样注意 |
 | 定时器不执行 | timer 未 add / `expire_jiffies` 错误 / TIMER_SIRQ 未触发 |
 | 定时器执行多次 | 回调中重复 add_timer |
+
+---
+
+## nanosleep 修复实施总结（已完成，2026-08-17）
+
+> 状态：**已完成**（commit `2faccbc`）— 唤醒走 blocker（`wakeup_jiffies` + `BLOCKER_NANOSLEEP`）+ 掩码感知信号唤醒 + `-EINTR`/rem + `CLOCK_MONOTONIC`。systest 150/150。
+> 连带发现的 PIT 200Hz（jiffies 2x）为 QEMU TCG artifact——已由 timer 重构根治（见上文），不再阻塞任何后续工作。证据链归档 `docs/pit-200hz-analysis.md`。
+
+### 背景（tetris 开发中实证发现）
+
+`SYS_nanosleep`（kernel/arch/x86_64/trap.c）睡眠实现无唤醒源：
+
+```c
+uint64_t target = jiffies + ticks;
+while (jiffies < target) {
+    current->state = TASK_INTERRUPTIBLE;   // 标记睡眠
+    schedule();                              // dequeue 后不重新入队
+    ...
+}
+```
+
+schedule() 对 INTERRUPTIBLE 任务 dequeue 后**不重新入队**；nanosleep **没有注册任何唤醒机制**（无 wait queue、无 timer 回调、无 wake 路径），PIT tick 不唤醒普通睡眠任务 → 无 signal 任务**永久睡死**。
+
+QEMU 实证：
+- tetris game-over 后 `nanosleep(1s)` 永久卡死（无 `\e[?1049l`、init 不 respawn）
+- busybox `sleep 1` **0.05s 瞬间返回**（pending signal 假醒，根本没睡）
+- 与 poll bug 同源（1ef8e1f 已修）：睡眠/超时机制缺唤醒注册；nanosleep 比 poll 更严重（连 wq 都没有）
+
+### 修复方案
+
+| 方案 | 改动 | 代价 |
+|------|------|------|
+| A 最小可用 | nanosleep 循环**不置 INTERRUPTIBLE**（保持 RUNNING）→ schedule 轮询，每 tick 调度回来检查 jiffies | 10ms 粒度空转；信号打断靠循环检查 |
+| B 事件驱动（推荐） | task 加 `wakeup_jiffies` 字段 + PIT tick 扫描唤醒到期的 INTERRUPTIBLE 任务（复用 poll timeout registry 思路，~30 行） | 干净、真睡眠；需处理多核并发唤醒 |
+
+### 分步实现（TDD 门禁）
+
+1. **Step 1 复现测试**（RED）：systest 加 nanosleep case——`nanosleep(100ms)` 断言实际睡眠时长 ≥80ms。当前实现：无 signal 时睡死（systest 超时失败）；有 signal 时假醒（时长断言失败）
+2. **Step 2 GREEN**：方案 B 优先（wakeup_jiffies + PIT 扫描）；方案 A 作 fallback
+3. **Step 3 回归**：systest 全量 + host 全绿 + QEMU 实证——`sleep 1` 真睡 ~1s（非 0.05s）；tetris game-over 后正常退出恢复终端
+4. **Step 4 commit**：`fix(sched): nanosleep with real wakeup`（独立 commit）
+
+### 连带问题（待查，不阻塞）
+
+- **signal 假醒**：busybox `sleep 1` 0.05s 返回——pending signal 来源待确认（疑似 fork 复制父进程 pending SIGCHLD / exec 未清 signal）。修复后 sleep 应真睡 1 秒，假醒自然消除
+
+---
+
+## Timer 重构实施总结（commit 与验证）
+
+> 目标：根治 QEMU TCG 下 PIT 200Hz 伪影（jiffies 2x），把精粒度时间与 tick 解耦，为 aarch64 预留时钟接口。前置：`docs/pit-200hz-handoff.md`（根因定位）。spec/plan 见 `docs/superpowers/specs/2026-08-17-timer-clocksource-clockevent-design.md`（v8 修订）。
+> 架构与组件细节见本文档上文各节。
+
+### 关键决策（摘要）
+
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| tick 源 | LAPIC 周期模式接管，PIT 掩蔽 + 未校准回退 | LVT 本地投递免疫 QEMU IOAPIC edge 伪影；PIT 先跑保证 boot 窗口有 tick |
+| TSC 频率校准 | CPUID15h + RTC PIE 联合校准（RTC PIE 结果优先复用） | 250ms PIE 窗口比 TSC 窗口更稳；AP 复用 BSP 校准状态 |
+| mult/shift | `__uint128_t` 中间值 + shift 上限放宽 | 高频 TSC（≥4.3GHz）需 shift≥35，64 位中间值会溢出（commit 496a210） |
+| 时间语义 | 精粒度路径迁纳秒；调度器/watchdog/lwIP 粗超时保持 jiffies | 亚 tick 分辨率只对用户可感知路径有价值；避免重写已验证的 deadline 算术 |
+| jiffies | 仍隐含 10ms/tick，修好 tick 源后自动恢复正确速率 | EEVDF 是 tick 粒度语义，不迁纳秒 |
+| aarch64 | clocksource/clockevent 接口 hook 预留（cntvct_el0 + CNTP），不写 ARM 代码 | YAGNI，避免未验证代码 |
+
+### 实现期发现
+
+- **per-LAPIC DIV 必须写**：QEMU 双核实测 298Hz 定位——AP 复位后 DIV 为 ÷1，静态值 ÷2 折算导致 AP 200Hz。`lapic_timer_start` 必须在每个 CPU 写 `LAPIC_TIMER_DIV`（spec v8 门① 实证）。
+
+### Commit 列表
+
+| Commit | 内容 |
+|--------|------|
+| `dc25e97`~`41b3541` | spec/plan 迭代 v1→v8 + Hermes 外部评审归档（9 个 docs commit） |
+| `de052f2` | clocksource + clockevent 双层抽象（TSC/cntvct_el0，接口层） |
+| `4cc5779` | TSC 频率校准（CPUID15h + RTC PIE 联合校准，含超时） |
+| `67f99e2` | BSP 切 LAPIC 周期 tick，先掩 PIT 再接管 + 握手采样 |
+| `86f4ceb` | CLOCK_MONOTONIC/REALTIME + nanosleep + poll 迁纳秒 |
+| `7a06a6e` | 内核 jiffies 频率 self-test + 验证门证据 + 回归 |
+| `14db988` | 最终评审修复 — RTC PIE 窗口对齐/mult-shift 上界/aarch64 stub/CPUID 守卫/删死代码/IRQ-safe 锁 |
+| `496a210` | compute_mult_shift 高频 TSC 溢出 — __uint128_t 中间值 |
+
+### 验证
+
+- systest **150/150**（含 jiffies 频率 self-test：QEMU 实测 tick 速率与期望值匹配）
+- 回归：select/poll 超时、EEVDF 时间片、lwIP 超时、busybox `sleep 1` ≈ 1s（恢复真 10ms/tick）

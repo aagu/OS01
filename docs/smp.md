@@ -281,3 +281,46 @@ Called by `schedule()` **before** `pick_eevdf()` on the local CPU:
 ## Clean-build requirement
 
 The Makefile does NOT track header dependencies. After changing any struct definition (`percpu_t`, `task_t`, `tss_struct`, etc.), a full `make clean && make` is required. Stale `.o` files with mismatched `sizeof()` produce silent ABI mismatches that manifest as cryptic crashes.
+
+---
+
+## SMP 负载均衡实施总结（已完成）
+
+> 负载均衡（`sched_balance()`）的设计与运行语义见上文「EEVDF scheduler with SMP load balancing」。本节记录实现期的加固、AP 启动 bug 修复与变更清单。
+
+### SMP 前置条件（6 项加固）
+
+| 提交 | 说明 |
+|------|------|
+| `90da765` | PMM alloc_pages/free_pages 全局 spinlock |
+| `052f3e6` | Slab kmalloc/kfree 递归 per-CPU spinlock |
+| `7b1b52e` | softirq_status 原子操作 + timer_list_lock + AP TIMER_SIRQ |
+| `29d129c` | fork_mm_copy flush_tlb() → tlb_shootdown() |
+| `40ccd3d` | task_wake 重试模式（t->cpu/on_rq 迁移竞态） |
+| `b3465ff` | AP 启动 3 个修复（wrmsr EDX:EAX、CR4 SSE、IST 栈重定向） |
+
+### AP 启动 Bug 修复（验证中发现）
+
+| Bug | 症状 | 修复 |
+|-----|------|------|
+| wrmsr EDX:EAX 分割 | AP #PF at ret_from_intr (GS base 错误) | trampoline.S 添加 `movq %rax,%rdx; shrq $32,%rdx` |
+| CR4_OSFXSR\|OSXMMEXCPT 缺失 | AP 用户任务 #UD on movups/movaps (SSE) | trampoline.S `orl $(CR4_PAE\|CR4_OSFXSR\|CR4_OSXMMEXCPT)` |
+| kill_current_user_task IST 栈重定向 | #PF at RIP=0 after task kill | iretq → direct RSP switch + call do_exit |
+
+### 文件变更
+
+| 类别 | 文件 | 说明 |
+|------|------|------|
+| **修改** | `kernel/sched/task.c` | sched_pick_cpu、sched_notify_remote、sched_balance、task_wake 重试、do_fork/spawn/schedule 集成、idle_task_resume、nr_running |
+| **修改** | `kernel/include/kernel/percpu.h` | +`uint32_t nr_running` |
+| **修改** | `kernel/memory/slab.c` | per-CPU 递归 slab_lock |
+| **修改** | `kernel/memory/pmm.c` | pmm_lock for alloc_pages/free_pages |
+| **修改** | `kernel/intr/softirq.c` | lock orq/andq atomic softirq_status |
+| **修改** | `kernel/time/timer.c` | timer_lock + do_timer 解锁回调模式 |
+| **修改** | `kernel/intr/apic/lapic_timer.c` | AP TIMER_SIRQ + softirq.h include |
+| **修改** | `kernel/arch/x86_64/trampoline.S` | wrmsr EDX:EAX + CR4 SSE bits |
+| **修改** | `kernel/arch/x86_64/trap.c` | kill_current_user_task RSP switch |
+| **新增** | `libc/rbtree/rbtree.c` | rbtree_last、rbtree_prev |
+| **新增** | `user/smp_stress.c` | CPU-bound 多进程负载均衡验证 |
+
+**总计: 15+ commits, 12 files, 126/126 systest pass (-smp 2)**
