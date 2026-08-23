@@ -1,7 +1,7 @@
 # OS01 syscall 边界审计设计文档
 
 - 日期：2026-08-23
-- 状态：v5 待用户 review（尚未进入实现）
+- 状态：v6 待用户 review（尚未进入实现）
 - 目标：**DoS 防护** —— 任何 syscall 收到敌意用户指针（NULL / 低地址 / 内核区间 / 未映射 / 超长 size 越界）返回 `-EFAULT`，**永不导致内核崩溃**；顺带关闭路径字符串的 TOCTOU 主窗口。roadmap P1「syscall 边界审计」项。
 - 修订记录：
   - v1：初版（方案 A：PTE 走查校验 + TOCTOU strdup + 窄容错拷贝原语）
@@ -13,6 +13,10 @@
     - 🟢 **futex 方案修正**：`do_futex_wait` 是 `user_va_to_phys`+`Phy_To_Virt` **内核直映射读**（不可能 #PF），且**无阻塞后重读**（wake 后只清 wq）——v4 矩阵"WAIT 阻塞后重读需 `copy_from_user_ft`"是**错误**。futex 保留内核映射读，只加入口 `check_user_range`+`USER_MIN_ADDR` 一致性，**不用 `_ft`**
     - 🟢 **§4 硬约束**：`_ft` 禁止在持有 spinlock / IRQ critical section / 持有必须解锁的资源时使用（longjmp 绕过解锁 → 永久死锁）
     - 🟢 **§6/§7 语义统一**：分块层 `submitted == 0` → 返回 `-EFAULT`（非 0，避免与 EOF 混淆）；`submitted > 0` → 返回短计数
+  - v6：五轮 review（2 阻断 + 1 高优先级正确性）——
+    - 🟢 **§4 `_ft` 真实 ABI 契约 + 独立编译验证**：编译器是 **Clang**（`clang -target x86_64-unknown-none`，Makefile:2，非 GCC）；内核标志 `-ffreestanding -fno-stack-protector` + `-O2`(release)/`-O0`(DEBUG=1)（kernel/Makefile:80,83）。**已验证**：`typedef void *os01_jmp_buf[8]` 在 -O2/-O0 均编译通过；runtime setjmp→longjmp(1)→1 **PASS**；**`__builtin_longjmp` 值参数必须是编译期常量**（变量报错，hook 恒用 1）；disasm 确认存 callee-saved+SP+PC、fault 路径预载 `-EFAULT`，不读 `[RBP+8]`（规避 setjmp-frame-pointer-bug）
+    - 🟢 **waitpid 清理顺序**：捕获 copy 结果 → **无条件**释放 child（thread/fpu/stack）→ 再返回成功或 `-EFAULT`；不在 `_ft` 失败分支直接 return（否则"child 已收割不泄漏"承诺不成立）
+    - 🟢 **futex `user_va_to_phys` 2MB-only 正确性修复**：trap.c:56-67 只走 l4→l3→l2 且按 2MB 折算——**4KB/COW 映射会把页表页当数据页，futex 值读错**。改复用 `arch_virt_to_phys`（mmu.h:38，4KB/2MB/1GB 全支持，返回完整物理地址）
 
 ---
 
@@ -114,20 +118,28 @@ ssize_t copy_from_user_ft(void *dst, const void *src, size_t n);  // n==0 → 0
 int    strnlen_user(const void *user_addr, size_t max);           // ≤max，遇 NUL 即停；fault → -EFAULT
 ```
 
-GCC `__builtin_setjmp`/`__builtin_longjmp`（零手写汇编，规避 setjmp-frame-pointer-bug）：
+**机制**：**Clang**（`clang -target x86_64-unknown-none`，Makefile:2，**非 GCC**）`__builtin_setjmp`/`__builtin_longjmp`（编译器 builtin，零手写汇编，规避 setjmp-frame-pointer-bug——libc setjmp 用 `[RBP+8]` 读返回地址，builtin 由编译器直接发射存 callee-saved+SP+PC）。
+
+**✅ 独立编译验证（2026-08-23 实测，项目 Clang + 内核标志 `-ffreestanding -fno-stack-protector`）**：
+- buffer 类型 `typedef void *os01_jmp_buf[8];`（64B）在 **-O2（release，kernel/Makefile:80）与 -O0（DEBUG=1，:83）均编译通过**
+- 原型 `int __builtin_setjmp(void **buf)` / `void __builtin_longjmp(void **buf, int val)`
+- **`val` 必须是编译期常量**（传变量 → 编译错误；内核 hook 恒用 `1`）
+- runtime：setjmp → longjmp(1) → setjmp 返回 1（host 实测 PASS）
 
 ```c
+typedef void *os01_jmp_buf[8];          // 64B，Clang 验证可用（-O2/-O0）
+
 ssize_t copy_to_user_ft(void *dst, const void *src, size_t n) {
     if (n == 0) return 0;
-    __builtin_setjmp_buffer jb;
-    jmp_buf_t *old = current->fault_jmp;
-    current->fault_jmp = (jmp_buf_t *)&jb;
-    if (__builtin_setjmp(jb) == 0) {
-        memcpy(dst, src, n);
+    os01_jmp_buf jb;
+    void **old = current->fault_jmp;
+    current->fault_jmp = (void **)jb;   // 数组衰减为 void**
+    if (__builtin_setjmp((void **)jb) == 0) {
+        __builtin_memcpy(dst, src, n);
         current->fault_jmp = old;
         return (ssize_t)n;
     }
-    current->fault_jmp = old;
+    current->fault_jmp = old;           // fault 路径
     return -EFAULT;
 }
 ```
@@ -138,12 +150,12 @@ ssize_t copy_to_user_ft(void *dst, const void *src, size_t n) {
 
 ```c
 if (cr2 < current->addr_limit && current->fault_jmp)
-    __builtin_longjmp(current->fault_jmp, 1);
+    __builtin_longjmp(current->fault_jmp, 1);   // 值参数恒为编译期常量 1
 ```
 
 **关键守卫**：`cr2 < addr_limit` 门控——只重定向用户区间 fault；真内核 bug 仍走 dump。`current`（RSP 推导，task.h:285-291）+ #PF 用 IST 0（trap.c:2519）→ 解析为 faulting task；**等价性以 Step 0 实证**（§12）。
 
-**`task_t` 变更**：+`void *fault_jmp`（**结构体变更 → `make clean`**）。
+**`task_t` 变更**：+`void **fault_jmp`（**结构体变更 → `make clean`**）。
 
 **生命周期纪律**：武装↔解除之间无 schedule。fault 返回恰 `-EFAULT`，**无短计数**；调用方将 dst 视为垃圾。
 
@@ -151,7 +163,7 @@ if (cr2 < current->addr_limit && current->fault_jmp)
 1. 持有 spinlock（含 `bucket->lock`、`mm->lock`、各种 wq lock 等）——longjmp 跳过 unlock → 永久死锁
 2. IRQ critical section / `local_irq_disable` 段——跳过恢复 → IRQ 永久关
 3. 持有必须按序释放的嵌套锁/资源（如 VFS 锁链）——跳过中间释放 → 锁序破坏
-需要持锁读用户内存的场合（如 futex 持 `bucket->lock` 读 futex 值），**改用内核直映射读**（`user_va_to_phys`+`Phy_To_Virt`，见矩阵 #47）或先校验再读，不用 `_ft`。
+需要持锁读用户内存的场合（如 futex 持 `bucket->lock` 读 futex 值），**改用内核直映射读**（`arch_virt_to_phys`+`Phy_To_Virt`，见矩阵 #47，**弃用 2MB-only 的 `user_va_to_phys`**）或先校验再读，不用 `_ft`。
 
 ---
 
@@ -174,7 +186,7 @@ if (cr2 < current->addr_limit && current->fault_jmp)
 | 9 | dup | — | — | N | — | D | — | — |
 | 10 | dup2 | — | — | N | — | D | — | — |
 | 11 | fork | — | — | N | — | D | — | — |
-| 12 | **waitpid** | status(写) | 固定 4 | **Y** | do_waitpid `*user_status`（task.c:993，schedule 后） | **B**：入口 `check_user_range(status,4,true)`（NULL 合法）+ 最终 `copy_to_user_ft` | fault→child 已收割（阻塞 wait 已发生），返回 -EFAULT（child 不泄漏，不崩） | H6 |
+| 12 | **waitpid** | status(写) | 固定 4 | **Y** | do_waitpid `*user_status`（task.c:993，schedule 后） | **B**：入口 `check_user_range(status,4,true)`（NULL 合法）+ 最终 `copy_to_user_ft`。**清理顺序（关键）**：捕获 copy 结果 → **无条件**释放 child（thread/fpu/stack，task.c:1000-1002）→ 再返回 `(rc<0) ? -EFAULT : child_pid`；**绝不在 `_ft` 失败分支直接 return**（否则 child 泄漏，"已收割不泄漏"承诺不成立） | 见左（copy 失败仍回收 child） | H6 |
 | 13 | **pipe** | fds[2](写) | 固定 8 | N | do_pipe `memcpy(user_fds,...)`（file.c:766） | **B**：`copy_to_user_ft` 写回 | **fault→只 `fd_close(rfd)+fd_close(wfd)`（file.c:758-761 同款）——最后 close 经 `file_free` 自动 `pipe_free`（file.c:64），不显式 `pipe_free`，否则 double-free** | H10 |
 | 14 | chdir | path(读) | 无界 | N | strdup + **kfree 后 path[0]** | A + §5.2 修 path[0] | — | H3 |
 | 15 | getcwd | buf(写) | strlen(cwd)+1 | N | `memcpy(buf,cwd,len)`（trap.c:1491） | B：内核拷 → `copy_to_user_ft` | — | H4 |
@@ -205,11 +217,11 @@ if (cr2 < current->addr_limit && current->fault_jmp)
 | 40 | sync | — | — | N | — | D | — | — |
 | 41 | reboot | —（int） | — | N | — | D | — | — |
 | 42 | sigprocmask | set(读)+oldset(写，可 NULL) | 固定 | N | `*set`/`*oldset`（trap.c:2208,2219） | B：`copy_from_user_ft` + `_ft` | — | H5 |
-| 43 | sigreturn | 用户帧(读) | 固定 sigframe | N | user_va_to_phys + Phy_To_Virt 读帧（trap.c:2238-2259） | **特殊**：自上下文帧，CS 校验 ring-3（2244），直 map 读不越页 fault（物理连续），用户只能破坏自己上下文 → 不崩 | — | — |
+| 43 | sigreturn | 用户帧(读) | 固定 sigframe | N | 帧读取（trap.c:2238-2259） | **特殊**：自上下文帧，CS 校验 ring-3（2244）。帧物理翻译**与 futex 同改 `arch_virt_to_phys`**（原 `user_va_to_phys` 2MB-only，4KB 栈上读错帧）；`frame_phys==0`→-EFAULT。直 map 读不越页 fault，用户只能破坏自己上下文 → 不崩 | — | — |
 | 44 | mmap | —（range） | length | N | do_mmap（vma.c:527 已有范围校验） | D + **do_mmap 强制 USER_MIN_ADDR** | — | — |
 | 45 | mprotect | —（range） | length | N | do_mprotect（vma.c:306-308） | D（已有校验） | — | — |
 | 46 | munmap | —（range） | length | N | do_munmap（vma.c:273） | D（已有校验） | — | — |
-| 47 | futex | uaddr(读写) | 固定 4 | **Y**(WAIT) | do_futex_wait/wake（futex.c:48,97） | **B'（特殊）**：入口 `check_user_range(uaddr,4,rw)`+`USER_MIN_ADDR` 一致性；**持 `bucket->lock` 内的值读取保持现状**——已是 `user_va_to_phys`+`Phy_To_Virt` **内核直映射读**（不可能 #PF，futex.c:40-49），且 **WAIT 无阻塞后重读**（wake 后只清 wq，futex.c:58-66）→ **不用 `_ft`**（禁止持锁用 `_ft`，§4 硬约束） | — | H7 |
+| 47 | futex | uaddr(读写) | 固定 4 | **Y**(WAIT) | do_futex_wait/wake（futex.c:48,97） | **B'（特殊）**：入口 `check_user_range(uaddr,4,rw)`+`USER_MIN_ADDR` 一致性；**持 `bucket->lock` 内的值读取保持现状**——**改为复用 `arch_virt_to_phys`（mmu.h:38）做 4KB/2MB 完整叶子翻译**（弃用 2MB-only 的 `user_va_to_phys`，trap.c:56-67 会把 4KB/COW 的页表页当数据页 → futex 值读错破坏同步），`Phy_To_Virt` 内核直映射读（不可能 #PF）；**WAIT 无阻塞后重读**（wake 后只清 wq，futex.c:58-66）→ **不用 `_ft`**（§4 硬约束） | — | H7 |
 | 48 | poll | fds[](读写) | nfds | **Y** | do_poll（poll.c:481 现只查起点） | B：入口 `check_user_range` + pollfd 数组拷内核 + 回写 `_ft` | — | H7 |
 | 49 | ppoll | —（**ENOSYS**） | — | N | — | D（stub） | — | — |
 | 50 | select | fd_set×3+timeout(读写) | nfds | **Y** | do_select（select.c:124-376 已有 range） | B：统一 `check_user_range` + 回写 `_ft` | — | H7 |
@@ -251,7 +263,7 @@ if (cr2 < current->addr_limit && current->fault_jmp)
 - 校验失败 / `_ft` fault → `-EFAULT`（统一）；`strnlen_user` fault → `-EFAULT`；超 `VFS_NAME_MAX` → `-ENAMETOOLONG`（同 trap.c:1280）
 - **`_ft` 无短计数**：fault 恰 `-EFAULT`，不返回部分正计数；调用方将 dst 视为垃圾
 - **分块 syscall 级短读写**（read/write/getdents64/sendto/recvfrom）：`UACCESS_BOUNCE_SIZE`（64KB）分块，**offset 只在 `_ft` 拷贝成功后推进**。**fault 语义统一**：`submitted == 0`（第一块即 fault）→ 返回 `-EFAULT`（**非 0**，避免与 EOF 混淆）；`submitted > 0` → 返回已提交短计数，offset 停在 fault 分块前（**数据不丢、可重试**）。`_ft` 本身无短计数，分块层提供 syscall 级短计数
-- **waitpid status fault**：child 已收割（阻塞 wait 已发生），返回 `-EFAULT`；child 不泄漏、不崩（接受"wait 已消费"语义）
+- **waitpid status fault**：捕获 copy 结果后 **无条件回收 child**（thread/fpu/stack），`rc<0` → 返回 `-EFAULT`（child 已收割不泄漏）；`rc≥0` → 返回 child_pid。**不在 `_ft` 失败分支提前 return**
 - **pipe 写 fds fault**：只 `fd_close(rfd)+fd_close(wfd)`（最后 close 自动 `pipe_free`，file.c:64），不显式 `pipe_free`（double-free）
 - **recvfrom sockaddr 写 fault**：返回已收字节（ret≥0），addr 不填
 - `len == 0` → 成功 no-op；`NULL` 合法处（time/gettimeofday/times/sigprocmask/signal/nanosleep rem）保持合法
@@ -361,7 +373,7 @@ stat/fstat: 内核 struct stat ← vfs_stat → copy_to_user_ft 回写
 | `kernel/fs/file.c` | **VFS bounce 分块层**（fd_read/fd_write/getdents 重构）+ pipe r/w bounce + socket rx `_ft`/tx 分块 + **do_pipe 回滚**（~90 行） |
 | `kernel/tty/tty.c` | tty_read bounce + `_ft`（~10 行） |
 | `kernel/fs/select.c` | fd_set 回写 `_ft`（~4 行） |
-| `kernel/sync/futex.c` | 仅入口 `check_user_range`+`USER_MIN_ADDR` 一致性（保留内核直映射读，**不加 `_ft`**）~6 行 |
+| `kernel/sync/futex.c` | 入口 `check_user_range`+`USER_MIN_ADDR` 一致性 + **读改用 `arch_virt_to_phys`（4KB/2MB 完整翻译，弃 2MB-only `user_va_to_phys`）**，不加 `_ft` ~10 行 |
 | 新 `kernel/test/test_uaccess.c` | 合成页表 + 临时 addr_limit + 地址数学（~90 行） |
 | `user/systest.c` | hostile 组（~100 行） |
 | `docs/syscall.md` + `docs/roadmap.md` | 文档同步 |
@@ -391,7 +403,8 @@ stat/fstat: 内核 struct stat ← vfs_stat → copy_to_user_ft 回写
 | **走查器 vs `_ft` 关系** | 所有用户解引用走 bounce/`_ft`；走查器漏判最坏 `-EFAULT` 不崩 |
 | **VFS bounce 分块** | offset 仅在 `_ft` 成功后推进 → fault 数据不丢；`UACCESS_BOUNCE_SIZE=64KB` 内核栈外（kmalloc） |
 | **do_pipe 回滚** | `_ft` 写失败 → 只 `fd_close×2`（最后 close 经 file_free 自动 `pipe_free`，file.c:64）；**不显式 `pipe_free`**（double-free） |
-| **futex 持锁读** | 持 `bucket->lock` 内**不用 `_ft`**（§4 硬约束：longjmp 绕过 unlock → 死锁）；保持 `user_va_to_phys`+`Phy_To_Virt` 内核直映射读（不可能 #PF）。仅入口补 `check_user_range`+`USER_MIN_ADDR` |
+| **futex 持锁读 + 叶子翻译** | 持 `bucket->lock` 内**不用 `_ft`**（§4 硬约束：longjmp 绕过 unlock → 死锁）；**读改用 `arch_virt_to_phys`**（4KB/2MB 完整翻译，弃 2MB-only `user_va_to_phys`——后者把 4KB/COW 页表页当数据页，futex 值读错破坏同步）。入口补 `check_user_range`+`USER_MIN_ADDR` |
+| **waitpid 清理顺序** | `_ft` 写 status 失败仍必须回收 child：捕获 rc → 无条件 kfree(thread/fpu/stack) → `rc<0 ? -EFAULT : child_pid`；**不在 `_ft` 分支提前 return**（否则 child 泄漏） |
 | USER_MIN_ADDR 布局耦合 | `do_mmap` 强制同约束保不变量；走查器仍逐页验证 |
 | exec argv/envp 上限 | 超 → `-E2BIG`；深拷贝在旧空间释放前完成 |
 | socket TX lwIP 中间态 | 分块 bounce 首选（lwIP 不触用户内存）；setjmp 包 netconn_write 否决（pbuf 泄漏） |
@@ -407,7 +420,7 @@ Step 0: 语义验证（无代码）——① 信号只在返回用户态投递�
         ② current == task_from_tss()（do_page_fault IST 0 中临时打印实证）；不等则钩子用 task_from_tss()
 Step 1: 基础设施 — uaccess.h + mmu.h arch_user_range_accessible(跨级,4KB+2MB) + task.h fault_jmp
         + vma.c user_write_range walker 升级 + do_mmap USER_MIN_ADDR 强制
-Step 2: 原语 + do_page_fault 挂钩（cr2 门控）
+Step 2: 原语（**Clang 验证契约**：`os01_jmp_buf[8]` + 常量 `longjmp(…,1)`）+ do_page_fault 挂钩（cr2 门控）
 Step 3: kernel selftest test_uaccess（合成页表测 walker + 临时 addr_limit 测 longjmp）→ 原语门禁
 Step 4: Cat A 路径字符串（strnlen_user+strdup 推广）+ chdir/open O_CREAT 旧指针替换
 Step 5: Cat A' exec argv/envp 有界深拷贝（trap.c + task.c sys_exec）
