@@ -15,10 +15,10 @@
 - **编译器是 Clang，非 GCC**；`__builtin_longjmp` 的值参数**必须是编译期常量**（内核 hook 恒用 `1`）
 - setjmp buffer 类型：`typedef void *os01_jmp_buf[8]`（64B，已验证 -O2/-O0 编译通过）
 - `task.h` 结构体变更（`fault_jmp`）→ **必须 `make clean && make`**，旧 .o 静默崩（AGENTS.md）
-- `_ft`/`strnlen_user` **禁止在持有 spinlock / IRQ critical section / 持有必须解锁的资源时使用**（longjmp 绕过解锁 → 死锁）
+- `_ft`/`strnlen_user` **禁止在持有 spinlock / IRQ critical section / 持有必须解锁的资源时使用**（longjmp 绕过解锁 → 死锁）。**例外**：`_ft` **res 变体**（`copy_*_ft_res`）通过 `fault_cleanup` 回调在 fault 路径显式释放资源/预约，可用于需要跨用户拷贝持有内核状态（如 pipe `read_busy` 预约）的场景
 - **所有用户内存解引用一律经 uaccess 原语**（`_ft`/`strnlen_user`/`copy_from_user_ft`）；**禁止裸 `memcpy`/`strdup` 读写用户指针**（fault_jmp 未 armed 时 #PF → PF-KRN panic）
 - `syscall_check_user_range` **对 `!current->mm || !current->mm->pml4` fail-closed**（检查顺序：`len==0`→true → 算术拒绝 → mm 检查 → walker；boot 上下文 `init_mm.pml4` 未设置，selftest 依赖此 fail-closed）
-- **pipe/PTY 读端单-reader 契约**：同一读端同一时刻只允许一个 reader（POSIX 常态；OS01 无线程）。三阶段 peek/`_ft`/commit 依赖此契约保证并发正确
+- **pipe 读端并发：内核强制的 `read_busy` 预约序列化**（非调用者契约）——`fork`/`dup` 共享读端 + 默认 SMP 下两个独立 task 可能并发读；`read_busy` 预约 + `_ft` fault 路径 cleanup 释放，杜绝 tail 竞态
 - 用户布局：`USER_MIN_ADDR = USER_CODE_ADDR = 0x400000`；栈 0x800000（2MB），0x600000 guard 未映射
 - 路径长度用 `VFS_NAME_MAX`（256，vfs.h:12），内核无 `PATH_MAX`
 - exec argv/envp 三上限：`MAX_ARGV=128` / `MAX_ARG_STRLEN=4096` / `MAX_ARG_TOTAL=65536`
@@ -63,15 +63,16 @@
 - Produces:
   - `#define USER_MIN_ADDR 0x400000UL`、`#define UACCESS_BOUNCE_SIZE (64*1024)`、`#define MAX_ARGV 128`、`#define MAX_ARG_STRLEN 4096`、`#define MAX_ARG_TOTAL 65536`、`typedef void *os01_jmp_buf[8]`
   - `bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable);`（声明）
+  - `ssize_t copy_to_user_ft_res(void *dst, const void *src, size_t n, void (*on_fault)(void *), void *arg);`、`ssize_t copy_from_user_ft_res(void *dst, const void *src, size_t n, void (*on_fault)(void *), void *arg);`（声明，Task 2 实现）
   - `bool arch_user_range_accessible(void *pgtbl, uint64_t addr, uint64_t len, bool writable);`（mmu.h inline）
-  - `task_t.fault_jmp`（`void **`）
+  - `task_t.fault_jmp`（`void **`）、`task_t.fault_cleanup`（`void (*)(void*)`）、`task_t.fault_cleanup_arg`（`void *`）
 
 - [ ] **Step 1: 写失败测试（编译门）——新建 uaccess.h 头骨架 + task.h 字段**
-  先只加 `uaccess.h` 的宏/类型/声明 + `task.h` 的 `void **fault_jmp;` 字段，不加实现。
+  先只加 `uaccess.h` 的宏/类型/声明 + `task.h` 的 `void **fault_jmp; void (*fault_cleanup)(void *); void *fault_cleanup_arg;` 字段，不加实现。
   ```bash
   make clean && make
   ```
-  预期：编译通过（结构体变更，任务内无需运行，仅确认不破坏构建）。注意 `fault_jmp` 未初始化——`memset(tsk, 0, sizeof(task_t))` 的初始化点已置 NULL（task.c:1099 等），无需额外。
+  预期：编译通过（结构体变更，任务内无需运行，仅确认不破坏构建）。注意 `fault_jmp`/`fault_cleanup`/`fault_cleanup_arg` 未初始化——`memset(tsk, 0, sizeof(task_t))` 的初始化点已置 NULL（task.c:1099 等），无需额外。
 
 - [ ] **Step 2: 实现 `arch_user_range_accessible`（跨级有效权限）**
   在 `kernel/include/kernel/arch/mmu.h`（x86_64 分支）加：
@@ -177,8 +178,8 @@
 - Modify: `kernel/arch/x86_64/trap.c`（`do_page_fault` 挂钩，trap.c:429 内核态分支顶部）
 
 **Interfaces:**
-- Consumes: `os01_jmp_buf`（Task 1）、`task_t.fault_jmp`（Task 1）、`USER_MIN_ADDR`（Task 1）、`arch_user_range_accessible`（Task 1）
-- Produces: `ssize_t copy_to_user_ft(void*,const void*,size_t)`、`ssize_t copy_from_user_ft(void*,const void*,size_t)`、`int strnlen_user(const void*,size_t)`、`bool syscall_check_user_range(uint64_t,uint64_t,bool)`（实现）
+- Consumes: `os01_jmp_buf`（Task 1）、`task_t.fault_jmp`/`fault_cleanup`/`fault_cleanup_arg`（Task 1）、`USER_MIN_ADDR`（Task 1）、`arch_user_range_accessible`（Task 1）
+- Produces: `ssize_t copy_to_user_ft(void*,const void*,size_t)`、`ssize_t copy_from_user_ft(void*,const void*,size_t)`、`int strnlen_user(const void*,size_t)`、`bool syscall_check_user_range(uint64_t,uint64_t,bool)`（实现）、**`ssize_t copy_to_user_ft_res(void*,const void*,size_t,void(*)(void*),void*)`、`ssize_t copy_from_user_ft_res(void*,const void*,size_t,void(*)(void*),void*)`**（on-fault cleanup 变体，Task 8 pipe 预约依赖）
 
 - [ ] **Step 1: 写 `kernel/memory/uaccess.c` 全部原语**
 
@@ -220,6 +221,39 @@
       current->fault_jmp = old;
       return -EFAULT;
   }
+
+  // ── res variants: on-fault cleanup callback ──────────────────────
+  // For holding kernel state across a user copy (e.g. pipe read_busy
+  // reservation): the cleanup runs on the LONGJMP path (setjmp != 0
+  // branch, back on the original kernel stack) so the reservation/lock
+  // is released even when the copy faults.  NULL on_fault == plain _ft.
+  ssize_t copy_to_user_ft_res(void *dst, const void *src, size_t n,
+                              void (*on_fault)(void *), void *arg)
+  {
+      if (n == 0) return 0;
+      os01_jmp_buf jb;
+      void **old = current->fault_jmp;
+      void (*old_cb)(void *) = current->fault_cleanup;
+      void *old_arg = current->fault_cleanup_arg;
+      current->fault_jmp = (void **)jb;
+      current->fault_cleanup = on_fault;
+      current->fault_cleanup_arg = arg;
+      if (__builtin_setjmp((void **)jb) == 0) {
+          __builtin_memcpy(dst, src, n);
+          current->fault_jmp = old;
+          current->fault_cleanup = old_cb;
+          current->fault_cleanup_arg = old_arg;
+          return (ssize_t)n;
+      }
+      if (on_fault) on_fault(arg);          // release reservation on the fault path
+      current->fault_jmp = old;
+      current->fault_cleanup = old_cb;
+      current->fault_cleanup_arg = old_arg;
+      return -EFAULT;
+  }
+  ssize_t copy_from_user_ft_res(void *dst, const void *src, size_t n,
+                                void (*on_fault)(void *), void *arg)
+  { /* identical, memcpy args swapped */ }
 
   // Bounded fault-tolerant string scan: stop at NUL or max.  Fault -> -EFAULT.
   int strnlen_user(const void *user_addr, size_t max)
@@ -395,6 +429,23 @@
   SELFTEST_ASSERT(n == 32);
   SELFTEST_ASSERT(memcmp(kA + 0xff0, ksrc, 16) == 0);       /* first 16B in page A */
   SELFTEST_ASSERT(memcmp(kB, ksrc + 16, 16) == 0);          /* last 16B in page B */
+
+  /* _ft_res: on-fault cleanup MUST run on the longjmp path (Task 8 pipe
+     reservation depends on this).  Success path must NOT run it.  Runs
+     while page A is still mapped (before the restore below). */
+  static int cleanup_ran = 0;
+  static void cb_cleanup(void *arg) { (void)arg; cleanup_ran = 1; }
+  cleanup_ran = 0;
+  current->addr_limit = 0x00007FFFFFFFFFFFULL;
+  rc = copy_to_user_ft_res((void *)0x2000, ksrc, 16, cb_cleanup, NULL); /* unmapped -> fault */
+  current->addr_limit = saved_limit;
+  SELFTEST_ASSERT(rc == -EFAULT);
+  SELFTEST_ASSERT(cleanup_ran == 1);      /* cleanup ran on the fault path */
+  cleanup_ran = 0;
+  rc = copy_to_user_ft_res((void *)0x600000, ksrc, 16, cb_cleanup, NULL); /* page A mapped -> ok */
+  SELFTEST_ASSERT(rc == 16);
+  SELFTEST_ASSERT(cleanup_ran == 0);      /* success path: no cleanup */
+
   /* restore original leaf PTEs (do NOT free shared intermediate tables): */
   set_leaf(cur_pml4, 0x600000, saved_a, 0);  set_leaf(cur_pml4, 0x601000, saved_b, 0);
   arch_flush_tlb_page(0x600000); arch_flush_tlb_page(0x601000);
@@ -404,7 +455,11 @@
   /* page-tail NUL: string at 0x600ffc "AB" NUL at 0x600ffe (next page unmapped) -> returns 2 */
   /* no NUL within max -> returns max; unmapped -> -EFAULT */
   ```
-  说明：`get_leaf`/`set_leaf` 是**叶子 PTE 槽读写助手**（参考 `arch_virt_to_phys` mmu.h:38-56 的 l4/l3/l2/l1 索引计算，`set_leaf` 仅写最终 pml1 槽，不创建/销毁中间表——boot 上下文中间表可能被真实映射共享，**只保存/恢复叶槽 + `arch_flush_tlb_page`**）。4KB 页用 `alloc_4k_page()`/`free_4k_page(phys)`（pmm.h:102-103）——`alloc_pages` 单位是 2MB 且 `free_pages` 要 number 参数，不适用。非连续用**实际物理页框比较断言**（`(pa>>12)+1 != (pb>>12)`），不写死 `+3*PAGE` 假设；相邻则 bounded 重试，仍不满足则跳过该用例（不硬失败）。
+  说明：`get_leaf`/`set_leaf` 是**层级探测的叶子 PTE 槽助手**（参考 `arch_virt_to_phys` mmu.h:38-56 的 l4/l3/l2/l1 索引计算）。**0x600000/0x601000 是 guard/未映射区，不能假定 PML1 槽已存在**：
+  - `ensure_pt(cur_pml4, va)`：走 l4→l3→l2；任一级中间表缺失 → `alloc_4k_page()` 建**仅供测试的表**并**记录父项原值**（清理时恢复父项 + free 测试表）；若 l2 槽是 **2MB 大页 PDE**（bit `PAGE_PS`=0x80）→ 分配新 PML1 表、写入拆分 PDE（PML1 物理地址 | Present | RW | User），**记录原 PDE 值**（清理时恢复）。
+  - `get_leaf`/`set_leaf`：先 `ensure_pt`，再读/写最终 pml1 槽。
+  - **清理路径（必须覆盖任意断言/分配失败）**：用 `selftest` 的失败处理 + 收尾统一恢复——按记录恢复原 pml3/pml2/pde 槽 + `arch_flush_tlb_page` + `free_4k_page` 测试表；恢复/释放在任何 `SELFTEST_ASSERT` 失败前执行（或 selftest 框架的 failure hook 先跑清理）。
+  4KB 页用 `alloc_4k_page()`/`free_4k_page(phys)`（pmm.h:102-103）——`alloc_pages` 单位是 2MB 且 `free_pages` 要 number 参数，不适用。非连续用**实际物理页框比较断言**（`(pa>>12)+1 != (pb>>12)`），不写死 `+3*PAGE` 假设；相邻则 bounded 重试，仍不满足则**必需门禁失败**（记录 FAIL，不静默跳过）。
 
 - [ ] **Step 3: 注册到 selftest.c**
   在 `kernel/test/selftest.c` 加 `extern void selftest_uaccess(void);` + 在 `selftest_run_all()` 调用表加 `selftest_uaccess();`（参考 test_timer.c 等注册方式）。
@@ -774,14 +829,15 @@ if (buf) {   // NULL 合法处
 
 ## Task 8: Cat C 大缓冲 VFS bounce 分块层 + 阻塞触点 + do_pipe（Task 6 已含 do_pipe 回滚，此处只 VFS bounce + socket rx/tx）
 
-> **相对 spec 的偏差（已按 review 收敛）**：pipe/PTY 读的并发正确性通过**显式单-reader 契约**（POSIX 常态，OS01 无线程）而非多-reader 原子性保证；用户拷贝始终经 `_ft`（fault-recoverable），Phase 1 不消费 ring 状态 → longjmp 路径零预留遗留。spec §6 "pipe 经 bounce 无数据丢失" 语义由"Phase 1 peek 不消费 + fault 时 tail 不动"满足。
+> **相对 spec 的偏差（已按 review 收敛）**：pipe/PTY 读的并发正确性通过**内核强制的 `read_busy` 预约序列化**（`fork`/`dup` 共享读端 + 默认 SMP 下单-reader 契约不成立）；`_ft_res` 变体的 fault 路径 cleanup 显式释放预约（longjmp 不遗留）。spec §6 "pipe 经 bounce 无数据丢失" 语义由"peek 不消费 + fault 时 tail 不动"满足。为此 `task_t` 新增 `fault_cleanup`/`fault_cleanup_arg` 字段 + `copy_*_ft_res` 原语（Task 1/2）。
 
 **Files:**
-- Modify: `kernel/fs/file.c`（`fd_read`/`fd_write` 分块 bounce + socket rx `_ft` / tx 分块 bounce）
+- Modify: `kernel/fs/file.c`（`fd_read`/`fd_write` 分块 bounce + socket rx `_ft` / tx 分块 bounce + **pipe `read_busy` 预约序列化**）
+- Modify: `kernel/include/kernel/file.h`（`pipe_t` 加 `read_busy` + `read_busy_lock` + `read_busy_wq` 字段）
 
 **Interfaces:**
-- Consumes: `UACCESS_BOUNCE_SIZE`（Task 1）、`copy_to_user_ft`/`copy_from_user_ft`/`syscall_check_user_range`（Task 2）
-- Produces: `fd_read`/`fd_write` 分块语义（offset 只在 `_ft` 成功后推进；`submitted==0` → `-EFAULT`）
+- Consumes: `UACCESS_BOUNCE_SIZE`（Task 1）、`copy_to_user_ft`/`copy_from_user_ft`/`syscall_check_user_range`（Task 2）、`copy_to_user_ft_res`/`copy_from_user_ft_res`（Task 2）
+- Produces: `fd_read`/`fd_write` 分块语义（offset 只在 `_ft` 成功后推进；`submitted==0` → `-EFAULT`）；pipe 读端并发由 `read_busy` 预约序列化 + `_ft_res` fault cleanup 释放
 
 - [ ] **Step 1: `fd_read` 分块 bounce（file.c:485-567）**
 
@@ -801,18 +857,49 @@ if (buf) {   // NULL 合法处
   }
   ```
   - **VFS/DEV 同步读**：`kbuf = kmalloc(UACCESS_BOUNCE_SIZE)`；循环 `n = vfs_read(f->node, f->offset, min(size-committed, BOUNCE), kbuf)` → `put_user_chunk`；n==0 结束；`kfree`。
-  - **pipe/PTY 读——三阶段 peek/`_ft`/commit + 单-reader 契约（fault-recoverable，无预留遗留）**：用户拷贝**必须经 `_ft`**（不得裸 memcpy——裸拷在 `fault_jmp` 未 armed 时若 #PF 会回 PF-KRN panic，且违反"所有用户解引用经 uaccess 原语"纪律）。`_ft` 不能持 `p->lock`（§4 硬约束），因此：
+  - **pipe/PTY 读——`read_busy` 内核预约 + `_ft_res` cleanup（并发正确 + fault 清理预约）**：`fork`/`dup` 共享读端 + 默认 SMP 下两个独立 task 可能并发读同一 pipe——**单-reader 契约不成立**（非强制）。内核强制的预约序列化 + fault 路径显式释放：
     ```c
-    // Phase 1 (peek, under p->lock): mirror ring[tail..tail+avail) -> bounce
-    //   (plain memcpy of KERNEL-to-KERNEL, cannot fault). Unlock.
-    // Phase 2 (NO lock): rc = copy_to_user_ft(user, bounce, avail)
-    //   fault -> return -EFAULT.  **Nothing was committed in Phase 1** — tail
-    //   unchanged, ring intact, no lock held, no reservation to release on the
-    //   longjmp path (fault recovery leaves zero pipe state behind).
-    // Phase 3 (commit, under p->lock): tail = (tail + n) % PIPE_SIZE;
-    //   pipe_wake_writers(p).  Unlock.
+    /* pipe_t: + int read_busy; + wait_queue_t read_busy_wq;   (per-pipe) */
+    /* acquire: wait until !read_busy, then set it (kernel-enforced — a
+       second reader BLOCKS, it does not race tail) */
+    static void pipe_read_reserve(pipe_t *p) {
+        for (;;) {
+            uint64_t f = spin_lock_irqsave(&p->read_busy_lock);
+            if (!p->read_busy) { p->read_busy = 1; spin_unlock_irqrestore(&p->read_busy_lock, f); return; }
+            /* block on read_busy_wq until the active reader finishes (its
+               normal or fault cleanup releases read_busy + wakes us) */
+            spin_unlock_irqrestore(&p->read_busy_lock, f);
+            wait_queue_add(&p->read_busy_wq); schedule(); ...  /* wait + re-check */
+        }
+    }
+    static void pipe_read_release(void *arg) {           /* on-fault cleanup */
+        pipe_t *p = arg;
+        uint64_t f = spin_lock_irqsave(&p->read_busy_lock);
+        p->read_busy = 0;
+        spin_unlock_irqrestore(&p->read_busy_lock, f);
+        wake_all(&p->read_busy_wq);
+    }
+    /* in pipe_read_internal: */
+    pipe_read_reserve(p);                                 /* serialize whole reads */
+    /* ... block-for-data (reservation held) ... */
+    /* three-phase under reservation (no pipe spinlock during _ft): */
+    uint64_t f = spin_lock_irqsave(&p->lock);
+    avail = pipe_avail(p); memcpy(bounce, ring + p->tail, avail);  /* peek, no consume */
+    spin_unlock_irqrestore(&p->lock, f);
+    ssize_t rc = copy_to_user_ft_res(user, bounce, avail,
+                                     pipe_read_release, p);  /* fault -> cleanup releases
+        read_busy (the LONGJMP path runs pipe_read_release), tail UNCHANGED -> no data loss */
+    pipe_read_release(p);                                 /* normal path also releases */
+    if (rc < 0) return -EFAULT;                           /* data still in ring, retryable */
+    f = spin_lock_irqsave(&p->lock);
+    p->tail = (p->tail + avail) % PIPE_SIZE;              /* commit — no concurrent reader
+        can be mid-copy (read_busy serializes) -> no tail race */
+    pipe_wake_writers(p);
+    spin_unlock_irqrestore(&p->lock, f);
+    return avail;
     ```
-    **单-reader 契约（明确定义，解决并发正确性）**：pipe/PTY 读端**同一时刻只允许一个 reader**——这是 POSIX 管道常态（多进程读同一读端 fd 是无定义语义/用户错误），且 OS01 无线程（clone 是 P5）。在此契约下 Phase 1→3 之间 tail 不可能被别的 reader 移动（本 reader 未提交、无其他合法 reader），Phase 3 的提交无重复/错跳。**`_ft` longjmp 路径上：无锁（Phase 2 不持锁）、无预留（Phase 1 未消费任何 ring 状态）→ 没有可遗留的锁/预留**，符合 review 要求。数据不丢：fault 时 tail 未动。`pipe_read_internal` 的字节循环（file.c:399-466 `dst[total++]`）改为该模式。
+    **并发正确**：`read_busy` 使同时最多一个 read 在 peek→copy→commit 窗口内 → tail 无竞态（第二个 reader 阻塞等待预约释放，不竞争）。**fault 清理**：`copy_to_user_ft_res` 的 longjmp 路径运行 `pipe_read_release`（回到原内核栈，正常 IRQ 态，可安全 spin_lock）→ 预约不泄漏；tail 未动 → 数据不丢。**无裸 memcpy、无 `_ft` 持锁**。`pipe_read_internal` 的字节循环（file.c:399-466 `dst[total++]`）改为该模式。
+    **替代方案（若不想加 `_ft_res`）**：显式收窄语义并在 fd/pipe 层阻止共享读端——但 `cmd1 | cmd2` 管道依赖 fork 继承读端，**不可行**。故选 `_ft_res` 预约方案。
   - **tty_read**（tty.c，`schedule()` 后写 buf）：同 socket RX——最终排水（canon/ring → buf）在无锁处，**`copy_to_user_ft` 后置**（post-block）；`_ft` 失败 → `-EFAULT`，已排水的数据留在 tty 缓冲下次可重读（tty ring 不因失败丢失）。
   - **socket RX**（file.c:513-563）：`copy_to_user_ft(buf, data, copy)` **成功后**才 `s->rx_off += copy` / 推进 netbuf / 释放（525-535、543-555 现有"先 memcpy 后推进"改为先 `_ft` 后推进；`_ft` 失败 → 返回 `-EFAULT`，rx_off/netbuf 原样保留可重试）。
   - 块间 fault：返回 `committed`（前块已提交字节，offset 已推进）；首块 fault：`-EFAULT`。
@@ -954,7 +1041,9 @@ if (buf) {   // NULL 合法处
 - **Spec §8.1 selftest**（合成页表 + 临时 addr_limit + 跨页非连续物理页）→ Task 3 ✅
 - **Spec §8.2 systest hostile**（H1-H11 + 信号投递 E2E 的 RSP 保存/恢复）→ Task 7/9 ✅
 - **Spec §8.3 回归 + applet** → Task 10 ✅
-- **Spec §9 文件清单** → Tasks 1-10 覆盖全部 14 文件 ✅
+- **Spec §9 文件清单** → Tasks 1-10 覆盖全部 14 文件 ✅（额外：`kernel/include/kernel/file.h` pipe_t 字段 + `task_t` cleanup 字段）
 - **Spec §12 实施顺序** → Task 0-10 与 Step 0-9 一一对应 ✅
+
+**超出 spec 的补充（plan review 驱动，均已入 Task）**：① pipe 读端并发从"bounce+`_ft`"升级为 **`read_busy` 内核预约序列化 + `copy_*_ft_res` fault cleanup**（spec §5.1/§6 的 pipe 写法据此修订——并发 reader 正确性 + fault 预约清理）；② `check_user_range` fail-closed（boot 上下文安全）。
 
 **类型一致性核查**：`os01_jmp_buf`（Task 1 定义，Task 2/3 使用）✅；`copy_to_user_ft`/`copy_from_user_ft` 签名 `(void*, const void*, size_t)->ssize_t` 全程一致 ✅；`strnlen_user(const void*, size_t)->int` 一致 ✅；`check_user_range(uint64_t, uint64_t, bool)->bool` 一致 ✅；`arch_user_range_accessible(void*, uint64_t, uint64_t, bool)->bool` 一致 ✅。
