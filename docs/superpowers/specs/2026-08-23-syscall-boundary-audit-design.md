@@ -1,7 +1,7 @@
 # OS01 syscall 边界审计设计文档
 
 - 日期：2026-08-23
-- 状态：v7 待用户 review（尚未进入实现）
+- 状态：v8 待用户 review（尚未进入实现）
 - 目标：**DoS 防护** —— 任何 syscall 收到敌意用户指针（NULL / 低地址 / 内核区间 / 未映射 / 超长 size 越界）返回 `-EFAULT`，**永不导致内核崩溃**；顺带关闭路径字符串的 TOCTOU 主窗口。roadmap P1「syscall 边界审计」项。
 - 修订记录：
   - v1：初版（方案 A：PTE 走查校验 + TOCTOU strdup + 窄容错拷贝原语）
@@ -19,6 +19,8 @@
     - 🟢 **futex `user_va_to_phys` 2MB-only 正确性修复**：trap.c:56-67 只走 l4→l3→l2 且按 2MB 折算——**4KB/COW 映射会把页表页当数据页，futex 值读错**。改复用 `arch_virt_to_phys`（mmu.h:38，4KB/2MB/1GB 全支持，返回完整物理地址）
   - v7：六轮 review（1 P0）——
     - 🟢 **信号投递写用户栈**（§5.3，`arch_do_signal_delivery` trap.c:780-924 输出路径，v6 只覆盖了 sigreturn 读路径）：`new_rsp` 从用户可控 `regs->rsp` 算出（trap.c:892），`user_va_to_phys` 只翻译起始地址（896），`memcpy(kstack, &frame, 200)`+`memcpy(kstack-8, &tramp, 8)` **经 `Phy_To_Virt` 直映射连续写**（903-905）——4KB 映射跨页物理不连续 → **写错物理页（内存破坏源）**；`kstack-8` 页首写前页；2MB-only helper 在 4KB 栈本身翻译错。**修复**：先 `check_user_range([new_rsp, new_rsp+total), writable)` 快速拒绝 → 两次 `copy_to_user_ft` **写用户虚拟地址**（跨页落到正确虚拟页，fault→-EFAULT）；任一失败 → **不改 regs、信号保持 pending**。投递路径在返回用户态处无持锁（合规 §4 硬约束）
+  - v8：七轮 review（1 P0）——
+    - 🟢 **sigreturn 同构跨页问题**（矩阵 #43）：v6 只把起始翻译改 `arch_virt_to_phys`，仍 `Phy_To_Virt` + `struct sigframe` **连续读**——frame 在 4KB 页末、下一虚拟页物理不连续 → 读错物理页（"直 map 不 fault"≠"读对用户页"）。**修复**：`check_user_range(regs->rsp, sizeof(frame), false)` 快速拒绝 + **`copy_from_user_ft(&frame, (void*)regs->rsp, sizeof(frame))` 走用户虚拟地址读整帧**（跨页正确，fault→-EFAULT），之后 CS/SS/RIP/RSP/flags 校验与寄存器恢复**只用内核栈上的 `frame`**；弃 `Phy_To_Virt` 连续读。sigreturn 无锁无调度（合规 §4 硬约束）。E2E：sigframe 跨 4KB 页边界、下一虚拟页映射不连续物理页 → 正确恢复或 -EFAULT，绝不读错 frame
 
 ---
 
@@ -219,7 +221,7 @@ if (cr2 < current->addr_limit && current->fault_jmp)
 | 40 | sync | — | — | N | — | D | — | — |
 | 41 | reboot | —（int） | — | N | — | D | — | — |
 | 42 | sigprocmask | set(读)+oldset(写，可 NULL) | 固定 | N | `*set`/`*oldset`（trap.c:2208,2219） | B：`copy_from_user_ft` + `_ft` | — | H5 |
-| 43 | sigreturn | 用户帧(读) | 固定 sigframe | N | 帧读取（trap.c:2238-2259） | **特殊**：自上下文帧，CS 校验 ring-3（2244）。帧物理翻译**与 futex 同改 `arch_virt_to_phys`**（原 `user_va_to_phys` 2MB-only，4KB 栈上读错帧）；`frame_phys==0`→-EFAULT。直 map 读不越页 fault，用户只能破坏自己上下文 → 不崩 | — | — |
+| 43 | sigreturn | 用户帧(读) | 固定 sigframe | N | 帧读取（trap.c:2238-2259） | **B（特殊，跨页修复）**：`check_user_range(regs->rsp, sizeof(frame), false)` 快速拒绝 + **`copy_from_user_ft(&frame, (void*)regs->rsp, sizeof(frame))` 走用户虚拟地址读整帧**（跨页落到正确虚拟页，fault→`-EFAULT`），任一失败 `regs->rax=-EFAULT` 不改其余 regs；之后 `frame.cs & 3` ring-3 校验（→-EINVAL）+ blocked/GPR/iretq 恢复**只用内核栈 `frame`**。**弃 `Phy_To_Virt` 连续读**。无锁无调度，`_ft` 合规 | — | H11 |
 | 44 | mmap | —（range） | length | N | do_mmap（vma.c:527 已有范围校验） | D + **do_mmap 强制 USER_MIN_ADDR** | — | — |
 | 45 | mprotect | —（range） | length | N | do_mprotect（vma.c:306-308） | D（已有校验） | — | — |
 | 46 | munmap | —（range） | length | N | do_munmap（vma.c:273） | D（已有校验） | — | — |
@@ -248,7 +250,7 @@ if (cr2 < current->addr_limit && current->fault_jmp)
 | 69 | setsid | —（ints） | — | N | — | D | — | — |
 | 70 | getsid | —（ints） | — | N | — | D | — | — |
 
-**矩阵统计**（71 项，stat 双角色 A+B 重叠一次）：**D=33**（含 chmod/fchmod/ppoll stub、accept 简化无 deref、sigreturn 特殊、getpeername 未实现）、**A=10**（路径字符串，含 stat 的 path 侧）、**A'=1**（exec argv/envp 深拷贝）、**B=24**（定长结构体/out-buffer，含 stat 的 buf 侧）、**C=4**（read/write/sendto/recvfrom 大缓冲）、**R=1**（getrandom 沿用 user_write_range）。**post-block 用户触点 7 处**：waitpid status、nanosleep rem、pipe read、pipe write、socket rx、socket tx、recvfrom addr 写回——全部 `_ft`/bounce；另有 poll/select 阻塞后 fd_set 回写。
+**矩阵统计**（71 项，stat 双角色 A+B 重叠一次）：**D=32**（含 chmod/fchmod/ppoll stub、accept 简化无 deref、getpeername 未实现）、**A=10**（路径字符串，含 stat 的 path 侧）、**A'=1**（exec argv/envp 深拷贝）、**B=25**（定长结构体/out-buffer + **sigreturn 特殊**，含 stat 的 buf 侧）、**C=4**（read/write/sendto/recvfrom 大缓冲）、**R=1**（getrandom 沿用 user_write_range）。**post-block 用户触点 7 处**：waitpid status、nanosleep rem、pipe read、pipe write、socket rx、socket tx、recvfrom addr 写回——全部 `_ft`/bounce；另有 poll/select 阻塞后 fd_set 回写。**信号读写两条跨页路径**（§5.3 写栈 + #43 sigreturn 读帧）对称闭环。
 
 ### 5.2 旧指针替换清单（strdup 后窗口仍在）
 
@@ -289,6 +291,7 @@ if (cr2 < current->addr_limit && current->fault_jmp)
 - **waitpid status fault**：捕获 copy 结果后 **无条件回收 child**（thread/fpu/stack），`rc<0` → 返回 `-EFAULT`（child 已收割不泄漏）；`rc≥0` → 返回 child_pid。**不在 `_ft` 失败分支提前 return**
 - **pipe 写 fds fault**：只 `fd_close(rfd)+fd_close(wfd)`（最后 close 自动 `pipe_free`，file.c:64），不显式 `pipe_free`（double-free）
 - **recvfrom sockaddr 写 fault**：返回已收字节（ret≥0），addr 不填
+- **sigreturn 读帧 fault**：`check_user_range` 失败或 `copy_from_user_ft` fault → `regs->rax = -EFAULT`，其余 regs 不动（用户可重试/处理）；`frame.cs` 非 ring-3 → `-EINVAL`
 - `len == 0` → 成功 no-op；`NULL` 合法处（time/gettimeofday/times/sigprocmask/signal/nanosleep rem）保持合法
 - 不改变任何正常路径返回码（184/0 systest 原样通过）
 
@@ -375,6 +378,7 @@ stat/fstat: 内核 struct stat ← vfs_stat → copy_to_user_ft 回写
 | ioctl 坏 arg（TCGETS 到 0x1） | -EFAULT（H9） |
 | poll/select 坏 fd_set/超长 nfds | -EFAULT（H7） |
 | **信号投递写栈**（§5.3 E2E）：RSP 放 4KB 页尾 + 可捕获信号 | 不崩溃、不错误进入 handler（frame 写 fault → 保持 pending） |
+| **sigreturn 跨页**（#43 E2E，H11）：sigframe 跨 4KB 页边界、下一虚拟页映射不连续物理页，填已知 RIP 后 syscall(SYS_sigreturn) | 正确恢复到该 RIP 或返回 -EFAULT；**绝不读错 frame**（读到错页则 RIP 是垃圾 → 崩溃，断言不崩） |
 
 ### 8.3 回归
 
@@ -392,7 +396,7 @@ stat/fstat: 内核 struct stat ← vfs_stat → copy_to_user_ft 回写
 | `kernel/include/kernel/arch/mmu.h` | +`arch_user_range_accessible`（跨级累积，x86 4KB+2MB ~40 行 + aarch64 stub） |
 | `kernel/memory/vma.c` | `user_write_range_begin` walker 升级跨级权限（复用/内联 `arch_user_range_accessible`）；`do_mmap` 强制 `USER_MIN_ADDR`（~25 行） |
 | `kernel/include/kernel/task.h` | +`fault_jmp`（**`make clean`**） |
-| `kernel/arch/x86_64/trap.c` | `do_page_fault` 挂钩 + ~30 handler 接入 + SYS_exec argv/envp 深拷贝 + chdir/open O_CREAT 修 + **`arch_do_signal_delivery` 写栈改 `_ft`（§5.3）**（~170 行） |
+| `kernel/arch/x86_64/trap.c` | `do_page_fault` 挂钩 + ~30 handler 接入 + SYS_exec argv/envp 深拷贝 + chdir/open O_CREAT 修 + **`arch_do_signal_delivery` 写栈改 `_ft`（§5.3）+ `sigreturn` 读帧改 `_ft`（#43）**（~180 行） |
 | `kernel/sched/task.c` | `do_waitpid` status `_ft` 写回 + `sys_exec` 深拷贝后 argv/envp（~30 行） |
 | `kernel/fs/file.c` | **VFS bounce 分块层**（fd_read/fd_write/getdents 重构）+ pipe r/w bounce + socket rx `_ft`/tx 分块 + **do_pipe 回滚**（~90 行） |
 | `kernel/tty/tty.c` | tty_read bounce + `_ft`（~10 行） |
@@ -433,6 +437,7 @@ stat/fstat: 内核 struct stat ← vfs_stat → copy_to_user_ft 回写
 | exec argv/envp 上限 | 超 → `-E2BIG`；深拷贝在旧空间释放前完成 |
 | socket TX lwIP 中间态 | 分块 bounce 首选（lwIP 不触用户内存）；setjmp 包 netconn_write 否决（pbuf 泄漏） |
 | **信号投递写栈（§5.3）** | `check_user_range([new_rsp,total), true)` 快速拒绝 + `copy_to_user_ft` 写虚拟地址（跨页正确、fault-safe）；任一失败不改 regs、保持 pending。**弃 `Phy_To_Virt(frame_phys)` 连续写**（4KB 跨页写错物理页）。投递路径无持锁 → `_ft` 合规 |
+| **sigreturn 跨页读（#43）** | `check_user_range` + `copy_from_user_ft` 走虚拟地址读整帧（跨页正确、fault→-EFAULT），恢复只用内核栈 `frame`；**弃 `Phy_To_Virt` 连续读**（4KB 跨页读错物理页）。与 §5.3 写路径对称闭环 |
 | 误伤内核 bug 被吞 | cr2 门控 + 184/0 回归 |
 | 性能 | 走查≤len/4096 页循环 + 每拷贝一次 setjmp（~几十 ns）；非热路径 |
 
@@ -453,6 +458,7 @@ Step 6: Cat B 定长结构体/out-buffer（waitpid/pipe/ioctl/time/nanosleep/sig
         uname/getdents/stat/fstat/getcwd/clock_gettime/poll/select/socket 族 → 全 _ft/bounce；
         futex 仅入口 check_user_range，持锁读保持内核直映射，不加 _ft）
         + **§5.3 信号投递写栈改 _ft**（arch_do_signal_delivery）
+        + **sigreturn 跨页读改 _ft**（#43，check_user_range + copy_from_user_ft 读整帧）
 Step 7: Cat C 大缓冲 VFS bounce 分块层（fd_read/fd_write/socket rx/tx）+ 阻塞触点 + do_pipe 回滚
 Step 8: systest hostile 组 + 回归（184/0 + 网络 + ash）+ applet user-fault 复查
 Step 9: 文档同步（syscall.md / roadmap.md）
