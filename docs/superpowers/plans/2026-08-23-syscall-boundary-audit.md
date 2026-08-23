@@ -30,22 +30,21 @@
 **Files:** 无（只读验证）
 **Interfaces:** 无
 
-- [ ] **Step 1: 验证"信号只在返回用户态时投递"**
+- [ ] **Step 1: 语义验证（无代码）——确认"信号只在返回用户态时投递"**
   读 `kernel/arch/x86_64/entry.S` `check_signal` 块（~92-102）：确认 `arch_do_signal_delivery` 只在 `ret_from_intr`/`do_resched` 返回用户态路径调用（`RESTORE_ALL` 前）。结论记录：信号 handler 不可能在 `_ft` 的 memcpy 中途运行（投递需 iret 回用户态）。
   验证：`sed -n '80,115p' kernel/arch/x86_64/entry.S`
 
-- [ ] **Step 2: 验证 `current == task_from_tss()`**
-  在 `do_page_fault` 内核态分支（trap.c:429）临时加：`serial_printk("PF-VERIFY: current=%p tss=%p eq=%d\n", current, task_from_tss(), current==task_from_tss());`（DEBUG 构建），QEMU 触发一次用户 `read(fd, 0x1, 4)`（systest 或手工），确认打印 `eq=1`。
-  若 `eq=0`：`_ft` 的 `do_page_fault` 钩子改用 `task_from_tss()->fault_jmp`（而不是 `current->fault_jmp`），并在 Task 2 如此实现。
-  验证：`make clean && make DEBUG=1` + QEMU 触发 #PF，grep `PF-VERIFY`
+- [ ] **Step 2: 验证 `current == task_from_tss()`（一次性、抓串口证据，不进回归）**
+  在 `do_page_fault` 内核态分支（trap.c:429）临时加：`serial_printk("PF-VERIFY: current=%p tss=%p eq=%d\n", current, task_from_tss(), current==task_from_tss());`（DEBUG 构建）。
+  **⚠️ 注意：此刻（Task 2 之前）内核态 #PF 仍会 panic/halt**——触发方式是用 QEMU 跑一次故意坏指针 `read(fd, 0x1, 4)`（systest 临时用例或 QEMU 内手工），内核 dump 前打印 `PF-VERIFY`，从**串口输出抓证据**后内核 halt。这是**一次性、仅抓证据的 QEMU 运行**，不是正常回归命令；跑完删掉临时 print 与临时用例。
+  若 `eq=1`：钩子用 `current->fault_jmp`；若 `eq=0`：Task 2 钩子改用 `task_from_tss()->fault_jmp`。
+  验证：`make clean && make DEBUG=1` + 一次性 QEMU，串口 grep `PF-VERIFY`
 
 - [ ] **Step 3: 确认 selftest 上下文**
-  确认 `selftest_run_all()`（main.c:306）在 init_task（addr_limit=内核高半区）上下文跑，无用户映射 → 决定 Task 3 的测试策略（合成 pml4 + 临时 addr_limit 覆盖）。
+  确认 `selftest_run_all()`（main.c:306）在 init_task（addr_limit=内核高半区）上下文跑，无用户映射 → 决定 Task 3 的测试策略（合成 pml4 + 临时 addr_limit 覆盖 + 当前 pml4 受控映射）。
 
-- [ ] **Step 4: 提交验证记录（无代码）**
-  ```bash
-  git commit --allow-empty -m "docs(uaccess): Step 0 semantic verification (signal-at-return-to-user, current==task_from_tss) — see spec v8"
-  ```
+- [ ] **Step 4: 记录验证结论（无空提交）**
+  把 Step 1-3 的结论（信号投递时机、`current==task_from_tss` 实证结果、selftest 上下文）追加到 spec §12 Step 0 段或本 plan Task 0 注释，随 Task 1 的 commit 一并提交（不单独空提交）。
 
 ---
 
@@ -83,6 +82,7 @@
                                                  uint64_t len, bool writable)
   {
       uint64_t *pml4 = (uint64_t *)pgtbl;
+      if (addr + len < addr) return false;      // self-guard: addr+len overflow (not just caller)
       uint64_t end = addr + len;
       for (uint64_t va = addr & ~0xFFFULL; va < end; ) {
           uint64_t l4 = (va >> 39) & 0x1FF;
@@ -162,8 +162,7 @@
   - do_mmap enforces USER_MIN_ADDR (keeps 'nothing below 0x400000 mapped')
   - task_t.fault_jmp field; uaccess.h macro/type declarations
 
-  ⚠️ task.h struct change -> make clean && make (AGENTS.md)
-  Co-Authored-By: Claude <noreply@anthropic.com>"
+  ⚠️ task.h struct change -> make clean && make (AGENTS.md)"
   ```
 
 ---
@@ -272,9 +271,7 @@
   - copy_to_user_ft/copy_from_user_ft/strnlen_user via Clang __builtin_setjmp
     (os01_jmp_buf[8], constant longjmp value 1)
   - syscall_check_user_range: USER_MIN_ADDR + addr_limit + cross-level walk
-  - do_page_fault: cr2 < addr_limit && fault_jmp -> __builtin_longjmp(1)
-
-  Co-Authored-By: Claude <noreply@anthropic.com>"
+  - do_page_fault: cr2 < addr_limit && fault_jmp -> __builtin_longjmp(1)"
   ```
 
 ---
@@ -288,8 +285,8 @@
 - Consumes: `arch_user_range_accessible`（Task 1）、`copy_to_user_ft`/`copy_from_user_ft`/`strnlen_user`/`syscall_check_user_range`（Task 2）、`Phy_To_Virt`/`Virt_To_Phy`/`alloc_pages`（内核内存）
 - Produces: selftest 注册函数 `void selftest_uaccess(void);`
 
-- [ ] **Step 1: 写失败测试——合成页表构建 + 断言**
-  自建 scratch pml4（分配页作 pml4/pdp/pd/pt），构造已知 U/S/RW 组合。**先注册空测试跑一遍确认 selftest 框架**，再填断言。
+- [ ] **Step 1: 写失败测试——合成页表构建 + walker 断言**
+  自建 scratch pml4（分配页作 pml4/pdp/pd/pt），构造已知 U/S/RW 组合。**合成页表只用于 `arch_user_range_accessible()` 测试**（walker 接收 `g_pml4` 参数，不依赖当前 CR3）——`copy_*_ft` 走的是**当前 CR3**，不能用合成表（见 Step 2）。
 
   ```c
   // kernel/test/test_uaccess.c
@@ -299,26 +296,16 @@
   #include <kernel/pmm.h>
   #include <kernel/task.h>
 
-  // ── Synthetic pml4 builder ─────────────────────────────
-  // One 4KB mapping (phys A) at VA 0x400000, one 2MB (phys B) at 0x800000,
-  // two non-contiguous 4KB pages (phys A, phys A+3*PAGE) at adjacent VAs
-  // 0x600000/0x601000 (cross-page correctness), plus unmapped gap.
+  // ── Synthetic pml4 builder (walker-only) ────────────────
   static uint64_t *g_pml4;
-  static uint64_t g_phys[4];      // allocated physical pages
 
   static uint64_t *alloc_page_pml4(void) {
       struct Page *pg = alloc_pages(ZONE_NORMAL, 1, 0);
       return (uint64_t *)Phy_To_Virt(pg->phy_address);
   }
-
   static uint64_t *pt_for(uint64_t va) { /* create pml4->pdp->pd->pt chain on demand */ }
-
-  static void map_4k(uint64_t va, uint64_t phys, uint32_t flags) {
-      // walk to pml1 leaf, set *pml1 = phys | flags
-  }
-  static void map_2m(uint64_t va, uint64_t phys, uint32_t flags) {
-      // walk to pml2, set *pml2 = phys | flags | PAGE_PS(0x80)
-  }
+  static void map_4k(uint64_t va, uint64_t phys, uint32_t flags) { /* walk to pml1 leaf */ }
+  static void map_2m(uint64_t va, uint64_t phys, uint32_t flags) { /* walk to pml2 | PAGE_PS */ }
   ```
   （`pt_for`/`map_*` 用 `arch_virt_to_phys` 同款走查索引，参考 mmu.h:38-56 的 l4/l3/l2/l1 计算。）
 
@@ -331,7 +318,7 @@
   | 0x400000 上层 pml4 U/S=0 但叶 U/S=1 | false |
   | 0x400000 上层 RW=0 但叶 RW=1 | read true、write false |
   | 0x800000 2MB present+user+RW | true |
-  | [0x600000, 0x601000+16) 跨两 4KB 页 | true |
+  | [0x600000, 0x600ff0+32) 跨两 4KB 页 | true |
 
   ```c
   void selftest_uaccess(void) {
@@ -343,44 +330,54 @@
   ```
   （SELFTEST_ASSERT 宏参考 `kernel/test/selftest.c` 既有测试写法。）
 
-- [ ] **Step 2: 地址数学 + longjmp 路径（临时 addr_limit 覆盖）**
+- [ ] **Step 2: `copy_*_ft` 跨页测试——在当前地址空间建立受控映射（非合成表）**
+  `copy_to_user_ft`/`copy_from_user_ft` 通过**当前 CR3** 访问虚拟地址，合成表无效。因此在 boot 上下文**修改当前 pml4**：把两个**不连续物理页**（phys A、phys A+3·PAGE_SIZE）映射到相邻虚拟页 `0x600000`/`0x601000`（当前 pml4 用户区，`< addr_limit`），测试后解除映射。
 
   ```c
-      /* address math: check_user_range in boot ctx (init_task, no user mm) */
-      SELFTEST_ASSERT(!syscall_check_user_range(0, 4, true));            /* NULL */
-      SELFTEST_ASSERT(!syscall_check_user_range(0x1, 4, true));          /* < USER_MIN_ADDR */
-      SELFTEST_ASSERT(!syscall_check_user_range(0xffff800000000000ULL, 4, true)); /* kernel range */
-      SELFTEST_ASSERT(!syscall_check_user_range(0x400000, (1ULL<<40), true));      /* overflow */
-      SELFTEST_ASSERT(syscall_check_user_range(0x400000, 0, true));               /* len==0 */
+  /* address math: check_user_range in boot ctx (init_task, no user mm) */
+  SELFTEST_ASSERT(!syscall_check_user_range(0, 4, true));            /* NULL */
+  SELFTEST_ASSERT(!syscall_check_user_range(0x1, 4, true));          /* < USER_MIN_ADDR */
+  SELFTEST_ASSERT(!syscall_check_user_range(0xffff800000000000ULL, 4, true)); /* kernel range */
+  SELFTEST_ASSERT(!syscall_check_user_range(0x400000, (1ULL<<40), true));      /* overflow */
+  SELFTEST_ASSERT(syscall_check_user_range(0x400000, 0, true));               /* len==0 */
 
-      /* longjmp path: temp addr_limit override + low unmapped copy */
-      uint64_t saved_limit = current->addr_limit;
-      current->addr_limit = 0x00007FFFFFFFFFFFULL;
-      char ksrc[16] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
-      ssize_t rc = copy_to_user_ft((void *)0x1000, ksrc, 16);   /* unmapped low -> #PF -> longjmp */
-      current->addr_limit = saved_limit;
-      SELFTEST_ASSERT(rc == -EFAULT);                           /* longjmp path works */
+  /* longjmp path: temp addr_limit override + low unmapped copy */
+  uint64_t saved_limit = current->addr_limit;
+  current->addr_limit = 0x00007FFFFFFFFFFFULL;
+  char ksrc[16] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
+  ssize_t rc = copy_to_user_ft((void *)0x1000, ksrc, 16);   /* unmapped low -> #PF -> longjmp */
+  current->addr_limit = saved_limit;
+  SELFTEST_ASSERT(rc == -EFAULT);                           /* longjmp path works */
 
-      /* no short count: cross 2 pages, 2nd unmapped */
-      current->addr_limit = 0x00007FFFFFFFFFFFULL;
-      rc = copy_to_user_ft((void *)0x600000, ksrc, 16);         /* 0x600000 mapped? use unmapped gap */
-      current->addr_limit = saved_limit;
-      SELFTEST_ASSERT(rc == -EFAULT);
+  /* no short count: cross 2 pages, 2nd unmapped (only 0x600000 mapped) */
+  current->addr_limit = 0x00007FFFFFFFFFFFULL;
+  rc = copy_to_user_ft((void *)0x600ff0, ksrc, 32);         /* 2nd page unmapped -> fault */
+  current->addr_limit = saved_limit;
+  SELFTEST_ASSERT(rc == -EFAULT);
 
-      /* cross-page correctness with non-contiguous phys (deterministic) */
-      char kbuf[64];
-      /* fill phys A page tail + phys A+3*PAGE page head via kernel maps, then: */
-      ssize_t n = copy_to_user_ft((void *)0x601000, ksrc, 16);  /* spans 0x601000..0x601010 = 2nd page only */
-      /* or span: 0x600ff0..0x601008 across boundary into non-contiguous phys */
-      SELFTEST_ASSERT(n == 16);
-      /* verify bytes landed in correct virtual pages (check phys A page and phys A+3*PAGE page contents) */
+  /* cross-page correctness with non-contiguous phys (deterministic):
+     map phys A at 0x600000, phys A+3*PAGE at 0x601000 in CURRENT pml4 */
+  uint64_t *cur_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
+  struct Page *pa = alloc_pages(ZONE_NORMAL, 1, 0), *pb = alloc_pages(ZONE_NORMAL, 1, 0);
+  /* ensure pb is non-contiguous: if adjacent, free & re-alloc until not (bounded loop) */
+  map_4k_in(cur_pml4, 0x600000, pa->phy_address, PAGE_Present|PAGE_R_W|PAGE_USER);
+  map_4k_in(cur_pml4, 0x601000, pb->phy_address, PAGE_Present|PAGE_R_W|PAGE_USER);
+  uint8_t *kA = (uint8_t *)Phy_To_Virt(pa->phy_address);
+  uint8_t *kB = (uint8_t *)Phy_To_Virt(pb->phy_address);
+  memset(kA, 0xAA, 4096); memset(kB, 0xBB, 4096);
+  ssize_t n = copy_to_user_ft((void *)0x600ff0, ksrc, 32);  /* spans into 0x601000 */
+  SELFTEST_ASSERT(n == 32);
+  SELFTEST_ASSERT(memcmp(kA + 0xff0, ksrc, 16) == 0);       /* first 16B in phys A */
+  SELFTEST_ASSERT(memcmp(kB, ksrc + 16, 16) == 0);          /* last 16B in phys A+3*PAGE */
+  /* unmap + free both */
+  selftest_unmap(cur_pml4, 0x600000); selftest_unmap(cur_pml4, 0x601000);
+  free_pages(pa); free_pages(pb);
 
-      /* strnlen_user */
-      /* page-tail NUL: string at 0x600ffc "AB" NUL at 0x600ffe (next page unmapped) -> returns 2 */
-      /* no NUL within max -> returns max; unmapped -> -EFAULT */
-  }
+  /* strnlen_user */
+  /* page-tail NUL: string at 0x600ffc "AB" NUL at 0x600ffe (next page unmapped) -> returns 2 */
+  /* no NUL within max -> returns max; unmapped -> -EFAULT */
   ```
-  说明：合成表里 0x600000 页尾 NUL 场景需把两个非连续页映射到 0x600000/0x601000（相邻虚拟页，phys 错开），`copy_to_user_ft((void*)0x600ff0, ...)` 跨页边界，验证数据分别落在两物理页的正确位置。
+  说明：`map_4k_in`/`selftest_unmap` 在 `pt_for` 基础上落到**当前 pml4**（非合成表）并写 TLB flush（`arch_flush_tlb_page`）。物理页非连续用**分配后检查**保证（pa/pb 相邻则换页重试，bounded）。
 
 - [ ] **Step 3: 注册到 selftest.c**
   在 `kernel/test/selftest.c` 加 `extern void selftest_uaccess(void);` + 在 `selftest_run_all()` 调用表加 `selftest_uaccess();`（参考 test_timer.c 等注册方式）。
@@ -399,9 +396,7 @@
 
   Deterministic cross-page correctness with two non-contiguous physical
   pages (user space can't control phys alloc; systest can't guarantee it).
-  Longjmp path via temp addr_limit override (boot ctx has no user mm).
-
-  Co-Authored-By: Claude <noreply@anthropic.com>"
+  Longjmp path via temp addr_limit override (boot ctx has no user mm)."
   ```
 
 ---
@@ -448,9 +443,7 @@ if (!path_copy) { regs->rax = -ENOMEM; break; }
 
   chdir path[0] after kfree, open O_CREAT strlen/memcpy on original user
   path now use kernel path_copy (TOCTOU/fault windows closed). No unbounded
-  strdup scan (page-tail NUL paths no longer over-rejected).
-
-  Co-Authored-By: Claude <noreply@anthropic.com>"
+  strdup scan (page-tail NUL paths no longer over-rejected)."
   ```
 
 ---
@@ -529,9 +522,7 @@ if (!path_copy) { regs->rax = -ENOMEM; break; }
 
   Deep-copy arrays+strings to kernel heap before sys_exec builds new pml4
   (no UAF on old space). Bad element ptr / no-NUL / over-limit -> -EFAULT/-E2BIG.
-  sys_exec now operates on kernel copies only.
-
-  Co-Authored-By: Claude <noreply@anthropic.com>"
+  sys_exec now operates on kernel copies only."
   ```
 
 ---
@@ -597,7 +588,22 @@ if (buf) {   // NULL 合法处
   - `uname`（2081）：`copy_to_user_ft(buf, &kuts, sizeof(kuts))`（内核构造 kuts，不再 memset/strcpy 直写用户）
   - `getcwd`（1470）：`copy_to_user_ft(buf, cwd, len)`（len= strlen(cwd)+1，`check_user_range(buf, size, true)` 入口）
   - `stat.buf`（1494）：`vfs_stat(node, &kstat)`（内核 struct）→ `copy_to_user_ft(buf, &kstat, sizeof(kstat))`；`fstat` 同
-  - `getdents64`（1668）：**内核 bounce**：`uint8_t *kbuf = kmalloc(min(count, UACCESS_BOUNCE_SIZE));` → `vfs_getdents(node, kbuf, cap, &f->offset)` → `copy_to_user_ft(buf, kbuf, n)` → `kfree(kbuf)`；n 为实际写入字节，offset 推进
+  - `getdents64`（1668）：**内核 bounce + offset 成功后提交**（`vfs_getdents` 生成目录项时就推进传入 offset，若拷贝失败用户没拿到目录项但偏移已前进——必须改为）：
+    ```c
+    uint64_t cap = min(count, (uint64_t)UACCESS_BOUNCE_SIZE);
+    uint8_t *kbuf = kmalloc(cap);
+    if (!kbuf) { regs->rax = -ENOMEM; break; }
+    uint64_t next_offset = f->offset;
+    int n = vfs_getdents(f->node, (struct linux_dirent64 *)kbuf, (unsigned)cap, &next_offset);
+    ssize_t rc = (n >= 0) ? copy_to_user_ft(buf, kbuf, n) : n;
+    kfree(kbuf);
+    if (n >= 0 && rc >= 0) {
+        f->offset = next_offset;      // commit offset ONLY on successful copy
+        regs->rax = n;
+    } else {
+        regs->rax = (n < 0) ? -EIO : -EFAULT;   // offset NOT advanced on failure
+    }
+    ```
   - `nanosleep`（2026）：`req` 读用 `copy_from_user_ft(&kreq, req, sizeof(kreq))`；`rem` 写（可 NULL）在 `blocker_wait` 后 `copy_to_user_ft`
   - `signal`（2152）：`act` `copy_from_user_ft` 拷内核 `struct sigaction` → 校验 → 装；`oldact` `copy_to_user_ft`
   - `sigprocmask`（2196）：`set` `copy_from_user_ft`、`oldset` `copy_to_user_ft`
@@ -605,7 +611,14 @@ if (buf) {   // NULL 合法处
   - `poll`（poll.c:481）：`copy_from_user_ft(fds 内核副本)` → do_poll → `copy_to_user_ft` 回写 revents；`check_user_range(fds, nfds*sizeof(pollfd), rw)` 入口
   - `select`/`pselect6`（select.c:124-376）：统一 `check_user_range` + 回写 `copy_to_user_ft`（现有 range 检查保留入口，拷贝改 `_ft`）
   - **futex**（futex.c:48,97）：仅入口 `check_user_range(uaddr, 4, rw)`（trap.c:2326 起点检查升级）；**持 `bucket->lock` 内的值读取改用 `arch_virt_to_phys`（4KB/2MB 完整叶子翻译）**：`uint64_t phys = arch_virt_to_phys(user_pml4, (uint64_t)uaddr); if (!phys){unlock;-EFAULT;} void *kaddr=(void*)Phy_To_Virt(phys); int v=*(volatile int*)kaddr;`（弃 `user_va_to_phys` 2MB-only）
-  - socket 族（53/54/57/58/59/60/61）：bind/connect/setsockopt 读 `copy_from_user_ft` 拷内核栈（替换现有 memcpy）；getsockname/getsockopt/recvfrom 写回 `copy_to_user_ft`
+  - socket 族（53/54/57/58/59/60/61）——**具体桥接**（不能笼统"bounce"）：
+    - `bind`（trap.c:2438）：`struct sockaddr_in a; if (!check_user_range(rsi,sizeof(a),false)){-EFAULT;} if (copy_from_user_ft(&a,(void*)rsi,sizeof(a))<0){-EFAULT;} do_bind(fd, a.sin_addr, os01_ntohs(a.sin_port));`
+    - `connect`（2371）：同 bind（拷内核栈后再 do_connect）
+    - `setsockopt`（2456）：`void *optval = kmalloc(r8); if (copy_from_user_ft(optval,(void*)r10,r8)<0){kfree;-EFAULT;} do_setsockopt(fd,lv,opt,optval,r8); kfree(optval);`
+    - `getsockname`（2464）：**现直接读写 addr_ptr/addrlen_ptr** → 改本地内核 `sockaddr_in`+`uint32_t`：`struct sockaddr_in kaddr; uint32_t klen = sizeof(kaddr); ret = do_getsockname(fd, &kaddr, &klen); if (ret>=0){ if(copy_to_user_ft((void*)rsi,&kaddr,sizeof(kaddr))<0){-EFAULT;} if(copy_to_user_ft((void*)rdx,&klen,sizeof(klen))<0){-EFAULT;} }`
+    - `getsockopt`（2477）：同 getsockname（内核 optval 缓冲 + `_ft` 回写 optlen/optval）
+    - `sendto`（2382）：sockaddr `copy_from_user_ft` 拷内核（同 bind）；**buf 走 Task 8 的 socket TX 分块 bounce**
+    - `recvfrom`（2402）：**buf 写回 + 地址写回都 `_ft`**——`do_recvfrom` 收数据到内核 bounce 或直接到 `_ft`；`addr_ptr`/`addrlen_ptr`（trap.c:2431,2433）post-block 写回 `copy_to_user_ft`；**只有 `_ft` 成功才推进/释放 netbuf（rx_off）**
 
 - [ ] **Step 4: 构建 + 回归**
   ```bash
@@ -624,9 +637,7 @@ if (buf) {   // NULL 合法处
   clock_gettime/times/uname/getcwd/stat/fstat/getdents/nanosleep/signal/
   sigprocmask/ioctl/poll/select/socket family -> check_user_range +
   copy_*_ft. futex: entry check + arch_virt_to_phys full leaf translation
-  (was 2MB-only user_va_to_phys, wrong page for 4KB/COW).
-
-  Co-Authored-By: Claude <noreply@anthropic.com>"
+  (was 2MB-only user_va_to_phys, wrong page for 4KB/COW)."
   ```
 
 ---
@@ -696,9 +707,7 @@ if (buf) {   // NULL 合法处
   addresses (was Phy_To_Virt contiguous write — wrong physical page for 4KB
   cross-page); any write failure keeps signal pending, regs untouched.
   sigreturn: copy_from_user_ft reads whole frame via virtual addresses,
-  restore uses kernel-stack frame only. Read+write cross-page paths symmetric.
-
-  Co-Authored-By: Claude <noreply@anthropic.com>"
+  restore uses kernel-stack frame only. Read+write cross-page paths symmetric."
   ```
 
 ---
@@ -730,8 +739,17 @@ if (buf) {   // NULL 合法处
   }
   ```
   - **VFS/DEV 同步读**：`kbuf = kmalloc(UACCESS_BOUNCE_SIZE)`；循环 `n = vfs_read(f->node, f->offset, min(size-committed, BOUNCE), kbuf)` → `put_user_chunk`；n==0 结束；`kfree`。
-  - **pipe/PTY**：`pipe_read_internal` 内先搬 ring 到内核 bounce（≤PIPE_SIZE 4KB）再 `copy_to_user_ft` 一次（原子、fault 不丢数据）。
-  - **socket RX**（file.c:525,543）：`copy_to_user_ft(buf, data, copy)` 直接（netbuf 已在内核）。
+  - **pipe/PTY 读——两阶段 peek/commit（fault 不丢数据，且不在持锁时拷贝）**：`_ft` 不能持 `p->lock`（§4 硬约束：longjmp 绕过解锁 → 死锁），所以：
+    ```c
+    // Phase 1 (peek, under p->lock): mirror ring[tail..tail+avail) -> bounce
+    //   (plain memcpy, no user memory, cannot fault). Unlock.
+    // Phase 2 (NO lock): rc = copy_to_user_ft(user, bounce, avail)
+    //   fault -> return -EFAULT (tail NOT advanced -> data stays in ring).
+    // Phase 3 (commit, under p->lock): tail = (tail + n) % PIPE_SIZE;
+    //   pipe_wake_writers(p).  Unlock.
+    ```
+    `pipe_read_internal` 的字节循环（file.c:399-466 `dst[total++]`）改为该两阶段：先在锁内把 ring 内容镜像到 bounce（不消费），锁外 `_ft` 到用户，成功后锁内推进 tail。**用户拷贝失败 → tail 不动 → 数据不丢**（满足 spec §6 "pipe/tty 经 bounce buffer 无数据丢失"）。
+  - **socket RX**（file.c:513-563）：`copy_to_user_ft(buf, data, copy)` **成功后**才 `s->rx_off += copy` / 推进 netbuf / 释放（525-535、543-555 现有"先 memcpy 后推进"改为先 `_ft` 后推进；`_ft` 失败 → 返回 `-EFAULT`，rx_off/netbuf 原样保留可重试）。
   - 块间 fault：返回 `committed`（前块已提交字节，offset 已推进）；首块 fault：`-EFAULT`。
 
 - [ ] **Step 2: `fd_write` 分块 bounce（file.c:651-710）**
@@ -748,7 +766,7 @@ if (buf) {   // NULL 合法处
   }
   ```
   - **VFS/DEV 同步写**：`kbuf = kmalloc(BOUNCE)`；循环 `chunk = min(size-off, BOUNCE)` → `get_user_chunk` → `vfs_write(node, f->offset, chunk, kbuf)` → offset += 实际写字节（短写由 vfs_write 返回值定）。
-  - **pipe/PTY**（pipe_write_internal：file.c:570）：先 `copy_from_user_ft` 搬 ≤PIPE_SIZE 进内核 bounce，再逐字节入 pipe。
+  - **pipe/PTY 写**（pipe_write_internal：file.c:570）：`copy_from_user_ft(kbuf, user, chunk)` **先于持锁**（无锁，fault-safe）→ 锁内 kbuf→ring + 推进 head → 解锁（现有 `src[total++]` 改为搬内核 bounce 后入 ring）。写侧天然"先拷后消费"，无丢数据问题。
   - **socket TX**：**分块 bounce**——`copy_from_user_ft(kbuf, user+off, min(remaining, 16KB))` → `netconn_write_partly(conn, kbuf, chunk, ...)`（lwIP 永不触用户内存）；`netconn_write` 保持阻塞语义，用户数据已搬内核。备选（不推荐）：setjmp 包整次 netconn_write（pbuf 泄漏风险，否决）。
 
 - [ ] **Step 3: 构建 + 回归**
@@ -765,9 +783,7 @@ if (buf) {   // NULL 合法处
   fd_read/fd_write chunk through UACCESS_BOUNCE_SIZE kernel buffers;
   offset advances only after successful _ft copy (submitted==0 -> -EFAULT,
   else short count, data not lost). socket tx chunked bounce (lwIP never
-  touches user memory).
-
-  Co-Authored-By: Claude <noreply@anthropic.com>"
+  touches user memory)."
   ```
 
 ---
@@ -799,7 +815,18 @@ if (buf) {   // NULL 合法处
   | munmap 后 read/write 该区 | -EFAULT |
   | 路径页尾 NUL、下一页未映射 | 正常 open（不过度拒绝） |
 
-  每个用例：`int64_t pid = fork(); if (pid==0){ <敌意调用>; _exit(0);} waitpid(pid,&st,0); CHECK3(WIFEXITED(st) && WEXITSTATUS(st)==0, ...)`。敌意调用返回值可忽略（子进程不因返回值退出非零，重点是**不崩**）。
+  每个用例：**child 必须断言真实返回值**（不只"不崩"）——敌意调用在 child 里做，child 检查返回值后按结果退出：
+  ```c
+  int64_t pid = fork();
+  if (pid == 0) {
+      int r = (int)read(fd, (void *)0x1, 16);     // H1 例
+      _exit(r == -EFAULT ? 0 : 1);                // 必须是 -EFAULT；返回 0/其他 → 子退出 1 → 父断言失败
+  }
+  int st; waitpid(pid, &st, 0);
+  CHECK3(WIFEXITED(st) && WEXITSTATUS(st) == 0,
+         "h1_read_bad_ptr", "read(0x1) == -EFAULT, child survives");
+  ```
+  这样错误地返回成功（如 0）也会暴露——不是"不崩就过"。**H1/H3/H4/H6/H9/H10** 断言 `== -EFAULT`；H8 断言 `< 0`；H2/H7/H11 断言 `-EFAULT` 或 `-EINTR`/`-EAGAIN`（按 syscall 语义）。
 
 - [ ] **Step 2: 跑测试（GREEN）**
   ```bash
@@ -814,9 +841,7 @@ if (buf) {   // NULL 合法处
 
   fork children call syscalls with NULL/low/unmapped/kernel-range/oversized
   pointers; parent asserts child exits normally (no signal) => kernel survives.
-  pipe rollback leak check via fd count. Path page-tail NUL not over-rejected.
-
-  Co-Authored-By: Claude <noreply@anthropic.com>"
+  pipe rollback leak check via fd count. Path page-tail NUL not over-rejected."
   ```
 
 ---
