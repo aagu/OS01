@@ -109,7 +109,7 @@ tty_t *tty_alloc(void (*output_char)(char), void (*echo_char)(char))
     // Default special chars: VINTR=3 must be explicit or the line
     // discipline in tty_push_input never fires.
     tty->term.c_cc[VINTR]  = 3;          // Ctrl-C
-    tty->term.c_cc[VQUIT]  = 28;         // Ctrl-\
+    tty->term.c_cc[VQUIT]  = 28;         // Ctrl-\ (SIGQUIT)
     tty->term.c_cc[VERASE] = 127;        // DEL
     tty->term.c_cc[VKILL]  = 21;         // Ctrl-U
     tty->term.c_cc[VEOF]   = 4;          // Ctrl-D
