@@ -1114,6 +1114,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
     };
     const char *sname = (regs->rax < 71 && syscall_names[regs->rax])
                         ? syscall_names[regs->rax] : "?";
+    (void)sname;
     debug_syscall("[strace] pid=%d syscall(%s, arg1=%#lx, arg2=%#lx, arg3=%#lx)\n",
                   (int)current->pid, sname,
                   (unsigned long)regs->rdi,

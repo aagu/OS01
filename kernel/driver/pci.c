@@ -317,7 +317,6 @@ int pci_enable_msix(uint8_t bus, uint8_t dev, uint8_t func, uint8_t vector)
 
             // Map the MSI-X table for CPU access
             uint64_t table_phys = bar_phys + tbl_off;
-            uint64_t page_base = table_phys & 0xFFFFFFFFFFE00000ULL; // 2MB align
 
             
             // Use the identity-mapped page table - table is within the first 32MB

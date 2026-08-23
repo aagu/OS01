@@ -72,12 +72,6 @@ uintptr_t vmm_unmap_page(uint64_t *pagemap, uintptr_t virtual_address)
     return phys;
 }
 
-static void dump_memory_map()
-{
-    mem_dump(kernel_map, kernel_map+512);
-    // mem_dump(kernel_map+PAGE_4K_SIZE, kernel_map+512+PAGE_4K_SIZE);
-}
-
 void vmm_init()
 {
     kernel_map = (uint64_t *)Phy_To_Virt(0x101000);

@@ -1224,10 +1224,10 @@ int fat32_init(block_device_t *dev, fat32_fs_t **out_fs)
     // For FAT32: sectors_per_fat_16 must be 0, and sectors_per_fat_32 > 0
     if (bpb->sectors_per_fat_16 != 0) {
         // Could be FAT12/16 — check total sectors
-        uint32_t total = (bpb->total_sectors_16 != 0)
-                         ? bpb->total_sectors_16 : bpb->total_sectors_32;
         debug_fs("FAT: not FAT32 (FAT16=%u, total=%u)\n",
-                       bpb->sectors_per_fat_16, total);
+                 bpb->sectors_per_fat_16,
+                 (bpb->total_sectors_16 != 0)
+                     ? bpb->total_sectors_16 : bpb->total_sectors_32);
         return -1;
     }
 

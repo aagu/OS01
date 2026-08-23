@@ -229,7 +229,7 @@ static void translate_and_push(uint8_t sc, bool ext)
 //  IRQ handler — port 0x60 → ring buffer + TTY
 // ═══════════════════════════════════════════════════════════
 
-void keyboard_handler(uint64_t nr, uint64_t parameter __attribute__((unused)),
+void keyboard_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attribute__((unused)),
                       pt_regs_t *regs __attribute__((unused)))
 {
     uint8_t sc = arch_inb(0x60);

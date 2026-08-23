@@ -167,7 +167,7 @@ int main(int argc, char **argv)
     memset(&piece, 0, sizeof(piece));
     memset(prev_view, 0, sizeof(prev_view));
 
-    int lines = 0, score = 0;
+    int lines = 0;
     int tick_ms = fast ? 50 : 800;   // classic-start gravity (0.8s/row)
     bool game_over = false;
     // RNG seed: time ^ pid — different every launch
@@ -212,7 +212,6 @@ lock_piece:
             int cleared = tetris_lock(&board, &piece);
             if (cleared > 0) {
                 lines += cleared;
-                score += cleared * 100;
                 if (!fast) {
                     tick_ms = 800 - (lines / 10) * 40;
                     if (tick_ms < 150) tick_ms = 150;

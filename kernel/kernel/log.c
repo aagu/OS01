@@ -58,7 +58,7 @@ static void write_serial_buf(const char *buf, int len)
 // ── Output dispatcher ─────────────────────────────────────
 // Lock is acquired BEFORE vsnprintf to protect the shared static
 // buffer from concurrent access (TOCTOU race on SMP).
-void _log_write(int level, const char *fmt, ...)
+void _log_write(int level __attribute__((unused)), const char *fmt, ...)
 {
     static char log_buf[1024];
     va_list args;

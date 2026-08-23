@@ -133,11 +133,6 @@ static void handle_input(char *buf, int n, int pty_fd, int ash_pid)
 
 #define ASH_PATH "/bin/busybox"
 
-// Early debug: write a string to serial via kernel putchar syscall
-static void dbg(const char *s) {
-    while (*s) syscall(SYS_putchar, (uint64_t)*s++, 0, 0);
-}
-
 int main(void)
 {
     char *ash_argv[] = { "ash", NULL };

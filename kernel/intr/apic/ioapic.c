@@ -42,9 +42,9 @@ void ioapic_dump_entries(void)
                       i, ioapic->mmio_base, ioapic->gsi_base, ioapic->max_redir);
         for (uint32_t n = 0; n <= ioapic->max_redir; n++) {
             uint32_t low  = ioapic_read_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(n));
-            uint32_t high = ioapic_read_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(n) + 1);
-            uint64_t entry = ((uint64_t)high << 32) | low;
-            debug_irq("  [%2u] %#018lx", n, entry);
+            debug_irq("  [%2u] %#018lx", n,
+                      ((uint64_t)ioapic_read_reg(ioapic->mmio_base,
+                                                 IOAPIC_REG_REDTBL(n) + 1) << 32) | low);
             if (!(low & IOAPIC_RED_MASK))
                 debug_irq(" (enabled vec=%#x dest=%u)",
                               low & 0xFF, (high >> 24) & 0xFF);
@@ -78,11 +78,9 @@ static int find_ioapic_for_gsi(uint32_t gsi, uint8_t *redir_index)
 
 static uint64_t ioapic_install(uint64_t nr, void *arg __attribute__((unused)))
 {
-    uint32_t isa_irq = (uint32_t)(nr - 0x20);
-    uint32_t gsi = isa_irq_to_gsi((uint8_t)isa_irq);
-
     debug_irq("IOAPIC: install IRQ %u (ISA %u → GSI %u)\n",
-                  (unsigned)nr, isa_irq, gsi);
+                  (unsigned)nr, (uint32_t)(nr - 0x20),
+                  isa_irq_to_gsi((uint8_t)(nr - 0x20)));
 
     (void)nr;
     return 0;

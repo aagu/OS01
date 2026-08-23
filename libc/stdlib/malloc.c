@@ -38,7 +38,9 @@ static uint64_t get_brk(void)
     return (uint64_t)ret;
 }
 
-static int set_brk(uint64_t addr)
+
+
+static int __attribute__((unused)) set_brk(uint64_t addr)
 {
     int64_t actual = syscall(SYS_brk, addr, 0, 0);
     if (actual < 0) return -1;
@@ -46,14 +48,14 @@ static int set_brk(uint64_t addr)
 }
 
 // Initialize the heap
-static void heap_init(void)
+static void __attribute__((unused)) heap_init(void)
 {
     heap_initialized = 1;
     freelist = NULL;
 }
 
 // Round up to alignment
-static inline size_t align_up(size_t n, size_t align)
+static inline size_t __attribute__((unused)) align_up(size_t n, size_t align)
 {
     return (n + align - 1) & ~(align - 1);
 }
@@ -62,7 +64,7 @@ static inline size_t align_up(size_t n, size_t align)
 // This is a simplified version — only coalesces with the next block
 // if it's also free.  Full coalescing with previous block would require
 // a doubly-linked list or boundary tags.
-static void try_coalesce(free_block_t *block)
+static void __attribute__((unused)) try_coalesce(free_block_t *block)
 {
     uint8_t *b = (uint8_t *)block;
     size_t block_size = block->header.size;

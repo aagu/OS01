@@ -73,7 +73,7 @@ struct subpage_pool {
     list_t      list;
     uint64_t    base_phys;
     uint64_t    bitmap[SUBPAGE_4K_COUNT / 64];
-    int         alloc_count;
+    uint32_t    alloc_count;
     uint16_t    cow_count[SUBPAGE_4K_COUNT];  // COW refcount: how many COW PTEs map each 4KB slot
 };
 
@@ -260,9 +260,9 @@ void pmm_init(struct MEMORY_INFO E820_Info)
     zone_select: zone select from DMA, Mapped in Pagetable, Unmapped in Pagetable
     page_flags: struct Page flags
 */
-struct Page * alloc_pages(int32_t zone_select, int32_t number, uint64_t page_flags)
+struct Page * alloc_pages(int32_t zone_select, uint64_t number, uint64_t page_flags __attribute__((unused)))
 {
-    if (number > 64 || number < 0)
+    if (number > 64)
     {
         color_printk(RED, BLACK, "alloc_pages() ERROR: number is invalid\n");
         return NULL;
@@ -511,8 +511,8 @@ void free_4k_page(uint64_t phys)
     struct subpage_pool *pool = find_pool_locked(phys);
     if (pool) {
         uint64_t offset = phys - pool->base_phys;
-        int slot = (int)(offset / PAGE_4K_SIZE);
-        if (slot >= 0 && slot < SUBPAGE_4K_COUNT) {
+        uint32_t slot = (uint32_t)(offset / PAGE_4K_SIZE);
+        if (slot < SUBPAGE_4K_COUNT) {
             int word = slot / 64;
             int bit  = slot % 64;
             if (pool->bitmap[word] & (1ULL << bit)) {

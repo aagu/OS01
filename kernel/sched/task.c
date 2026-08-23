@@ -1652,7 +1652,7 @@ fail:
 }
 
 // ── do_fork ──────────────────────────────────────────────
-uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags,
+uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags __attribute__((unused)),
                  uint64_t stack_start __attribute__((unused)),
                  uint64_t stack_size __attribute__((unused)))
 {
@@ -1962,6 +1962,7 @@ void task_init()
     init_task_union.task.pgrp = 1;
     init_task_union.task.session = 1;
     int64_t init_pid = spawn_user_task("/bin/init", NULL);
+    (void)init_pid;
     debug_task("init: spawned user-space init, pid=%d\n", (int)init_pid);
 
     // Activate the scheduler and enter the idle loop.

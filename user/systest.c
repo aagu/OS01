@@ -624,7 +624,7 @@ static void test_sigprocmask(void)
     CHECK3((cur & block) == 0, "sigprocmask", "SIGUSR1 unblocked");
 }
 
-static void test_pipe_dup2_inherit(void)
+static void __attribute__((unused)) test_pipe_dup2_inherit(void)
 {
     int fds[2];
     if (pipe(fds) < 0) { FAIL("pipe+dup2", "pipe failed"); return; }
@@ -1028,7 +1028,7 @@ static void test_select_timeout(void)
            "elapsed ~0-100ms", "got %ldms", (long)elapsed);
 }
 
-static void test_select_null_timeout(void)
+static void __attribute__((unused)) test_select_null_timeout(void)
 {
     int fds[2];
     if (pipe(fds) < 0) { FAIL("select_null_timeout", "pipe failed"); return; }
@@ -1769,7 +1769,7 @@ static void test_libc_printf_getopt(void)
 
 // ── 67: setpgid / getpgid ─────────────────────────
 static volatile int setpgid_seen = 0;
-static void on_setpgid_test(int sig __attribute__((unused))) { setpgid_seen = 1; }
+static void __attribute__((unused)) on_setpgid_test(int sig __attribute__((unused))) { setpgid_seen = 1; }
 
 static void test_setpgid_getpgid(void) {
     int64_t pid = fork();

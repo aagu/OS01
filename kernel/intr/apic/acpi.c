@@ -209,9 +209,10 @@ static void parse_madt(struct MADT_HEADER *madt)
         }
 
         case MADT_TYPE_NMI: {
-            struct MADT_NMI *nmi = (struct MADT_NMI *)ptr;
             debug_irq("APIC:   NMI acpi_processor=%u lint=%u flags=%#x\n",
-                          nmi->acpi_processor_id, nmi->lint, nmi->flags);
+                          ((struct MADT_NMI *)ptr)->acpi_processor_id,
+                          ((struct MADT_NMI *)ptr)->lint,
+                          ((struct MADT_NMI *)ptr)->flags);
             break;
         }
 

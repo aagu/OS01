@@ -157,23 +157,6 @@ void virtio_net_handler(uint64_t nr, uint64_t param, pt_regs_t *regs) {
         virtio_net_poll_rx();
 }
 
-// Fill RX with empty buffers
-static int virtio_fill_rx(void) {
-    virtq_t *vq = &vnet.rx_vq;
-    for (int i = 0; i < VQ_SIZE; i++) {
-        uint64_t phys = alloc_4k_page();
-        if (!phys) return -1;
-        vq->desc[i].addr  = phys;
-        vq->desc[i].len   = RX_BUF_SIZE;
-        vq->desc[i].flags = VIRTQ_DESC_F_WRITE;
-    }
-    for (int i = 0; i < VQ_SIZE; i++)
-        vq->avail->ring[i] = i;
-    vq->avail->idx = VQ_SIZE;
-    virtq_notify(vq, VIRTIO_NET_RX_QUEUE);
-    return 0;
-}
-
 int virtio_net_init(uint64_t bar_phys, uint8_t bus, uint8_t dev, uint8_t func, uint8_t gsi) {
     io_base = (uint16_t)(bar_phys & 0xFFFF);
     vnet.pci_bus = bus; vnet.pci_dev = dev; vnet.pci_func = func;

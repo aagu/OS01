@@ -100,9 +100,9 @@ void ahci_init(void)
     debug_block("AHCI: found controller at PCI %d:%d.%d\n", bus, dev, func);
 
     // Read vendor/device ID
-    uint32_t vendor_dev = pci_config_read(bus, dev, func, PCI_VENDOR_ID);
     debug_block("AHCI: vendor=%#04x device=%#04x\n",
-                  vendor_dev & 0xFFFF, vendor_dev >> 16);
+                  pci_config_read(bus, dev, func, PCI_VENDOR_ID) & 0xFFFF,
+                  pci_config_read(bus, dev, func, PCI_VENDOR_ID) >> 16);
 
     // Enable bus mastering and MMIO space
     pci_enable_bus_mastering(bus, dev, func);
@@ -129,16 +129,14 @@ void ahci_init(void)
     HBA_MEM *hba = g_hba;
 
     // Read version
-    uint32_t vs = hba->vs;
     debug_block("AHCI: version %u.%u.%u\n",
-                  (vs >> 16) & 0xF, (vs >> 8) & 0xF, vs & 0xF);
+                  (hba->vs >> 16) & 0xF, (hba->vs >> 8) & 0xF, hba->vs & 0xF);
 
     // Read capabilities
-    uint32_t cap = hba->cap;
     uint32_t cap2 = hba->cap2;
-    uint32_t n_ports = AHCI_CAP_NP(cap) + 1;
     uint32_t pi = hba->pi;
-    debug_block("AHCI: %u ports, ports implemented = %#x\n", n_ports, pi);
+    debug_block("AHCI: %u ports, ports implemented = %#x\n",
+                  AHCI_CAP_NP(hba->cap) + 1, pi);
 
     // BIOS/OS handoff if supported
     if (cap2 & AHCI_CAP2_BOH(cap2)) {

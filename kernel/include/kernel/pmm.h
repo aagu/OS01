@@ -94,7 +94,7 @@ struct Zone
 };
 
 uint64_t page_init(struct Page * page, uint64_t flags);
-struct Page * alloc_pages(int32_t zone_select, int32_t number, uint64_t page_flags);
+struct Page * alloc_pages(int32_t zone_select, uint64_t number, uint64_t page_flags);
 void free_pages(struct Page * page,int32_t number);
 uint64_t page_clean(struct Page * page);
 

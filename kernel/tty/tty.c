@@ -21,11 +21,6 @@
 //  Internal helpers
 // ═══════════════════════════════════════════════════════
 
-static inline bool tty_ring_empty(tty_t *tty)
-{
-    return tty->head == tty->tail;
-}
-
 static inline bool tty_ring_full(tty_t *tty)
 {
     int next = (tty->head + 1) % TTY_BUF_SIZE;
