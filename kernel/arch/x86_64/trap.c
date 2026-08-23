@@ -958,6 +958,12 @@ static inline bool syscall_user_range_ok(uint64_t addr, uint64_t len)
            len <= current->addr_limit - addr;
 }
 
+// SOCKOPT_MAX: ABI cap on the optlen argument of setsockopt/getsockopt
+// (regs->r8 in the trap handlers).  A hostile r8 (e.g. 0xFFFFFFFF)
+// would otherwise allow a kmalloc(4GB) DoS.  4 KiB matches typical
+// socket option payloads (IP_PKTINFO, SO_LINGER, TCP_* etc.).
+#define SOCKOPT_MAX 4096
+
 // ── nanosleep blocker condition ────────────────────────────
 // Condition callback for blocker_wait(): true once the sleep deadline
 // (current->wakeup_ns) has been reached.  sched_unblock_blocked()
@@ -1599,8 +1605,11 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         int *status = (int *)regs->rsi;
         int options = (int)regs->rdx;
 
-        // Validate status pointer
-        if (status && (uint64_t)status >= current->addr_limit) {
+        // Validate status pointer (NULL legal → skip).
+        // check_user_range is a fast reject; the actual _ft copy in
+        // do_waitpid is the authority (handles racing munmap).
+        if (status &&
+            !syscall_check_user_range((uint64_t)status, sizeof(int), true)) {
             regs->rax = -EFAULT;
             break;
         }
@@ -1611,6 +1620,14 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
     case SYS_pipe: {
         // pipe(int fds[2]) → 0 / -errno
         int *fds = (int *)regs->rdi;
+        // Fast reject: ensure 8 bytes are mapped writable.  The
+        // authoritative _ft write happens in do_pipe.  NULL is
+        // rejected here (no graceful "ignore write" semantic).
+        if (!fds ||
+            !syscall_check_user_range((uint64_t)fds, sizeof(int) * 2, true)) {
+            regs->rax = -EFAULT;
+            break;
+        }
         regs->rax = do_pipe(fds);
         break;
     }
@@ -1691,24 +1708,23 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             regs->rax = -EINVAL;
             break;
         }
-        if ((uint64_t)buf >= current->addr_limit) {
+        if (!syscall_check_user_range((uint64_t)buf, size, true)) {
             regs->rax = -EFAULT;
             break;
         }
         if (len > size) { regs->rax = -ERANGE; break; }
-        memcpy((void *)buf, current->files->cwd, len);
+        ssize_t r = copy_to_user_ft(buf, current->files->cwd, len);
+        if (r < 0) { regs->rax = -EFAULT; break; }
         regs->rax = (int64_t)(uint64_t)buf;
         break;
     }
     case SYS_stat: {
         // stat(const char *path, struct stat *buf) → 0 / -errno
-        // buf write-back is hardened in Task 6 (Cat B).  This task
-        // only handles the path.
+        // Cat B: build kernel struct stat first, then _ft write to user.
         const char *path = (const char *)regs->rdi;
         struct stat *buf = (struct stat *)regs->rsi;
 
-        if ((uint64_t)path >= current->addr_limit ||
-            (uint64_t)buf >= current->addr_limit) {
+        if (!buf) {
             regs->rax = -EFAULT;
             break;
         }
@@ -1730,17 +1746,19 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
 
         if (!node) { regs->rax = -ENOENT; break; }
 
-        if (vfs_stat(node, buf) != 0) {
-            vfs_node_put(node);
-            regs->rax = -EIO;
-            break;
-        }
+        // Fill kernel struct, then _ft write to user.
+        struct stat kstat;
+        int ret = vfs_stat(node, &kstat);
         vfs_node_put(node);
+        if (ret != 0) { regs->rax = -EIO; break; }
+        ssize_t r = copy_to_user_ft(buf, &kstat, sizeof(kstat));
+        if (r < 0) { regs->rax = -EFAULT; break; }
         regs->rax = 0;
         break;
     }
     case SYS_fstat: {
         // fstat(int fd, struct stat *buf) → 0 / -errno
+        // Cat B: build kernel struct first, then _ft write to user.
         int fd = (int)regs->rdi;
         struct stat *buf = (struct stat *)regs->rsi;
 
@@ -1749,7 +1767,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             regs->rax = -EBADF;
             break;
         }
-        if ((uint64_t)buf >= current->addr_limit) {
+        if (!buf) {
             regs->rax = -EFAULT;
             break;
         }
@@ -1757,21 +1775,26 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         file_t *f = current->files->fd[fd];
 
         // PTY and pipe fds have no vfs_node — fill a synthetic stat
+        struct stat kstat;
         if (!f->node) {
-            memset(buf, 0, sizeof(struct stat));
+            memset(&kstat, 0, sizeof(kstat));
             if (f->type == FD_PTY_MASTER || f->type == FD_PTY_SLAVE)
-                buf->st_mode = S_IFCHR | 0600;
+                kstat.st_mode = S_IFCHR | 0600;
             else if (f->type == FD_PIPE)
-                buf->st_mode = S_IFIFO | 0600;
+                kstat.st_mode = S_IFIFO | 0600;
             else { regs->rax = -ENOENT; break; }
+            ssize_t r = copy_to_user_ft(buf, &kstat, sizeof(kstat));
+            if (r < 0) { regs->rax = -EFAULT; break; }
             regs->rax = 0;
             break;
         }
 
-        if (vfs_stat(f->node, buf) != 0) {
+        if (vfs_stat(f->node, &kstat) != 0) {
             regs->rax = -EIO;
             break;
         }
+        ssize_t r = copy_to_user_ft(buf, &kstat, sizeof(kstat));
+        if (r < 0) { regs->rax = -EFAULT; break; }
         regs->rax = 0;
         break;
     }
@@ -1874,11 +1897,11 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
 			    }
 			    file_t *f = current->files->fd[fd];
 
-			    // User pointer validation
-			    if ((uint64_t)arg >= current->addr_limit) {
-			        regs->rax = -EFAULT;
-			        break;
-			    }
+			    // Cat B: per-request bounce happens inside the
+			    // ioctl handler (e.g. tty_phys_ioctl in tty.c).
+			    // The trap.c entry does NOT pre-validate arg
+			    // because each request has its own size/perm
+			    // semantics; arg may be NULL.
 
 			    regs->rax = fd_ioctl(f, request, arg);
 			    break;
@@ -1886,6 +1909,10 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
     case SYS_getdents64: {
         // getdents64(int fd, struct linux_dirent64 *buf, unsigned int count)
         // → bytes read / -errno
+        // Cat B: kernel bounce (cap = UACCESS_BOUNCE_SIZE) + offset
+        // commit ONLY on successful _ft write-back.  If the user
+        // pointer is bogus, the offset is NOT advanced (so the next
+        // call retries — no silently-lost directory entries).
         int fd = (int)regs->rdi;
         struct linux_dirent64 *buf = (struct linux_dirent64 *)regs->rsi;
         unsigned int count = (unsigned int)regs->rdx;
@@ -1895,7 +1922,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             regs->rax = -EBADF;
             break;
         }
-        if ((uint64_t)buf >= current->addr_limit) {
+        if (!buf) {
             regs->rax = -EFAULT;
             break;
         }
@@ -1906,12 +1933,34 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             break;
         }
 
-        int ret = vfs_getdents(f->node, buf, count, &f->offset);
-        if (ret < 0) {
+        uint64_t cap = count;
+        if (cap > UACCESS_BOUNCE_SIZE) cap = UACCESS_BOUNCE_SIZE;
+        uint8_t *kbuf = kmalloc(cap);
+        if (!kbuf) { regs->rax = -ENOMEM; break; }
+        uint64_t next_offset = f->offset;
+        int n = vfs_getdents(f->node, (struct linux_dirent64 *)kbuf,
+                             (unsigned)cap, &next_offset);
+        if (n < 0) {
+            kfree(kbuf);
             regs->rax = -EIO;
             break;
         }
-        regs->rax = (int64_t)ret;
+        ssize_t rc;
+        if (n == 0) {
+            // No entries: nothing to copy.  Treat as EOF — do NOT
+            // commit next_offset (which equals f->offset) since it
+            // would be a no-op anyway; just return 0.
+            rc = 0;
+        } else {
+            rc = copy_to_user_ft(buf, kbuf, n);
+        }
+        kfree(kbuf);
+        if (rc < 0) {
+            regs->rax = -EFAULT;     // offset NOT advanced
+        } else {
+            f->offset = next_offset; // commit only on success
+            regs->rax = n;
+        }
         break;
     }
     case SYS_access: {
@@ -2145,25 +2194,31 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         break;
     }
     case SYS_time: {
-        // time(time_t *tloc) → 0 (Jan 1 1970 for MVP)
+        // time(time_t *tloc) → 0 (Jan 1 1970 for MVP).
+        // NULL → skip; otherwise copy_to_user_ft writes 0 to tloc.
         uint64_t *tloc = (uint64_t *)regs->rdi;
-        if (tloc && (uint64_t)tloc < current->addr_limit) {
-            *tloc = 0;
+        if (tloc) {
+            uint64_t zero = 0;
+            ssize_t r = copy_to_user_ft(tloc, &zero, sizeof(zero));
+            if (r < 0) { regs->rax = -EFAULT; break; }
         }
         regs->rax = 0;
         break;
     }
     case SYS_gettimeofday: {
-        // gettimeofday(struct timeval *tv, struct timezone *tz) → 0
+        // gettimeofday(struct timeval *tv, struct timezone *tz) → 0.
+        // Both pointers may be NULL (POSIX).
         struct timeval *tv = (struct timeval *)regs->rdi;
         struct timezone *tz = (struct timezone *)regs->rsi;
-        if (tv && (uint64_t)tv < current->addr_limit) {
-            tv->tv_sec = 0;
-            tv->tv_usec = 0;
+        if (tv) {
+            struct timeval ktv = { 0, 0 };
+            ssize_t r = copy_to_user_ft(tv, &ktv, sizeof(ktv));
+            if (r < 0) { regs->rax = -EFAULT; break; }
         }
-        if (tz && (uint64_t)tz < current->addr_limit) {
-            tz->tz_minuteswest = 0;
-            tz->tz_dsttime = 0;
+        if (tz) {
+            struct timezone ktz = { 0, 0 };
+            ssize_t r = copy_to_user_ft(tz, &ktz, sizeof(ktz));
+            if (r < 0) { regs->rax = -EFAULT; break; }
         }
         regs->rax = 0;
         break;
@@ -2179,13 +2234,17 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             regs->rax = -EINVAL;
             break;
         }
-        if (!tp || (uint64_t)tp >= current->addr_limit) {
+        if (!tp) {
             regs->rax = -EFAULT;
             break;
         }
         uint64_t ns = clocksource_read_ns();
-        tp->tv_sec  = ns / 1000000000ULL;
-        tp->tv_nsec = ns % 1000000000ULL;
+        struct timespec kts = {
+            .tv_sec  = ns / 1000000000ULL,
+            .tv_nsec = ns % 1000000000ULL,
+        };
+        ssize_t r = copy_to_user_ft(tp, &kts, sizeof(kts));
+        if (r < 0) { regs->rax = -EFAULT; break; }
         regs->rax = 0;
         break;
     }
@@ -2300,12 +2359,23 @@ case SYS_getsid: {
     break;
 }
     case SYS_nanosleep: {
-        // nanosleep(const struct timespec *req, struct timespec *rem)
+        // nanosleep(const struct timespec *req, struct timespec *rem).
+        // req → kernel copy; rem ← kernel copy on -EINTR (NULL legal).
         const struct timespec *req = (const struct timespec *)regs->rdi;
         struct timespec *rem = (struct timespec *)regs->rsi;
         uint64_t ns = 0;
-        if (req && (uint64_t)req < current->addr_limit) {
-            ns = req->tv_sec * 1000000000ULL + req->tv_nsec;
+        if (req) {
+            // entry fast reject: 16 B must be mapped readable
+            if (!syscall_check_user_range((uint64_t)req, sizeof(*req), false)) {
+                regs->rax = -EFAULT;
+                break;
+            }
+            struct timespec kreq;
+            if (copy_from_user_ft(&kreq, req, sizeof(kreq)) < 0) {
+                regs->rax = -EFAULT;
+                break;
+            }
+            ns = kreq.tv_sec * 1000000000ULL + kreq.tv_nsec;
         }
 
         uint64_t target_ns = clocksource_read_ns() + ns;
@@ -2325,9 +2395,13 @@ case SYS_getsid: {
             // remaining time (guarded against unsigned underflow).
             uint64_t now_ns = clocksource_read_ns();
             uint64_t remain_ns = (now_ns < target_ns) ? (target_ns - now_ns) : 0;
-            if (rem && (uint64_t)rem < current->addr_limit) {
-                rem->tv_sec  = remain_ns / 1000000000ULL;
-                rem->tv_nsec = remain_ns % 1000000000ULL;
+            if (rem) {
+                struct timespec krem = {
+                    .tv_sec  = remain_ns / 1000000000ULL,
+                    .tv_nsec = remain_ns % 1000000000ULL,
+                };
+                ssize_t wr = copy_to_user_ft(rem, &krem, sizeof(krem));
+                if (wr < 0) { regs->rax = -EFAULT; break; }
             }
             regs->rax = -EINTR;
         } else {
@@ -2346,27 +2420,36 @@ case SYS_getsid: {
         break;
     }
     case SYS_times: {
-        // times(struct tms *buf) — stub: return 0
+        // times(struct tms *buf) — stub: return 0.
+        // NULL → skip; otherwise zero-init user struct.
         struct tms *buf = (struct tms *)regs->rdi;
-        if (buf && (uint64_t)buf < current->addr_limit) {
-            memset(buf, 0, sizeof(struct tms));
+        if (buf) {
+            struct tms kbuf;
+            memset(&kbuf, 0, sizeof(kbuf));
+            ssize_t r = copy_to_user_ft(buf, &kbuf, sizeof(kbuf));
+            if (r < 0) { regs->rax = -EFAULT; break; }
         }
         regs->rax = 0;
         break;
     }
     case SYS_uname: {
-        // uname(struct utsname *buf) → 0 / -EFAULT
+        // uname(struct utsname *buf) → 0 / -EFAULT.
+        // Build kernel struct first, then _ft write it.  This avoids
+        // bare field writes into user space (sa_handler/sa_mask path).
         struct utsname *buf = (struct utsname *)regs->rdi;
-        if (!buf || (uint64_t)buf >= current->addr_limit) {
+        if (!buf) {
             regs->rax = -EFAULT;
             break;
         }
-        memset(buf, 0, sizeof(struct utsname));
-        strcpy(buf->sysname, "OS01");
-        strcpy(buf->nodename, "os01");
-        strcpy(buf->release, "0.1.0");
-        strcpy(buf->version, "0.1.0");
-        strcpy(buf->machine, "x86_64");
+        struct utsname kuts;
+        memset(&kuts, 0, sizeof(kuts));
+        strcpy(kuts.sysname, "OS01");
+        strcpy(kuts.nodename, "os01");
+        strcpy(kuts.release, "0.1.0");
+        strcpy(kuts.version, "0.1.0");
+        strcpy(kuts.machine, "x86_64");
+        ssize_t r = copy_to_user_ft(buf, &kuts, sizeof(kuts));
+        if (r < 0) { regs->rax = -EFAULT; break; }
         regs->rax = 0;
         break;
     }
@@ -2426,8 +2509,10 @@ case SYS_getsid: {
         break;
     }
     case SYS_signal: {
-        // sigaction(int signum, const struct sigaction *act,
+        // sigaction(signum, const struct sigaction *act,
         //           struct sigaction *oldact) → 0 / -errno
+        // Cat B: read user act into kernel copy via _ft, validate, install;
+        // write kernel → user oldact via _ft.
         int signum = (int)regs->rdi;
         const struct sigaction *act = (const struct sigaction *)regs->rsi;
         struct sigaction *oldact = (struct sigaction *)regs->rdx;
@@ -2436,69 +2521,97 @@ case SYS_getsid: {
             regs->rax = -EINVAL;
             break;
         }
-        if (act && (uint64_t)act >= current->addr_limit) {
-            regs->rax = -EFAULT;
-            break;
-        }
-        if (oldact && (uint64_t)oldact >= current->addr_limit) {
-            regs->rax = -EFAULT;
-            break;
+
+        // Read user act into kernel copy (NULL legal → skip).
+        struct sigaction kact;
+        if (act) {
+            if (!syscall_check_user_range((uint64_t)act, sizeof(kact), false)) {
+                regs->rax = -EFAULT;
+                break;
+            }
+            if (copy_from_user_ft(&kact, act, sizeof(kact)) < 0) {
+                regs->rax = -EFAULT;
+                break;
+            }
         }
 
-        // Return old action if requested
+        // Return old action if requested.  Build kernel copy, then _ft
+        // write to user.  No bare field writes into user.
         if (oldact) {
-            // Copy from kernel sighand to user oldact
-            oldact->sa_handler = current->sighand[signum].sa_handler;
-            oldact->sa_flags   = current->sighand[signum].sa_flags;
-            oldact->sa_restorer = current->sighand[signum].sa_restorer;
-            oldact->sa_mask    = current->sighand[signum].sa_mask;
+            if (!syscall_check_user_range((uint64_t)oldact, sizeof(kact), true)) {
+                regs->rax = -EFAULT;
+                break;
+            }
+            struct sigaction kold = {
+                .sa_handler  = current->sighand[signum].sa_handler,
+                .sa_flags    = current->sighand[signum].sa_flags,
+                .sa_restorer = current->sighand[signum].sa_restorer,
+                .sa_mask     = current->sighand[signum].sa_mask,
+            };
+            if (copy_to_user_ft(oldact, &kold, sizeof(kold)) < 0) {
+                regs->rax = -EFAULT;
+                break;
+            }
         }
 
         // Install new handler (SIGKILL and SIGSTOP cannot be caught or ignored)
         if (act && signum != SIGKILL && signum != SIGSTOP) {
-            if ((uint64_t)act->sa_restorer >= current->addr_limit ||
-                (uint64_t)act->sa_handler >= current->addr_limit) {
+            // Validate user function pointers are not in kernel space
+            if ((uint64_t)kact.sa_restorer >= current->addr_limit ||
+                (uint64_t)kact.sa_handler  >= current->addr_limit) {
                 regs->rax = -EINVAL;
                 break;
             }
-            current->sighand[signum].sa_handler  = act->sa_handler;
-            current->sighand[signum].sa_flags    = act->sa_flags;
-            current->sighand[signum].sa_restorer = act->sa_restorer;
-            current->sighand[signum].sa_mask     = act->sa_mask;
+            current->sighand[signum].sa_handler  = kact.sa_handler;
+            current->sighand[signum].sa_flags    = kact.sa_flags;
+            current->sighand[signum].sa_restorer = kact.sa_restorer;
+            current->sighand[signum].sa_mask     = kact.sa_mask;
         }
         regs->rax = 0;
         break;
     }
     case SYS_sigprocmask: {
-        // sigprocmask(int how, const sigset_t *set, sigset_t *oldset)
+        // sigprocmask(int how, const sigset_t *set, sigset_t *oldset).
+        // NULL → skip; otherwise _ft bounce.
         int how = (int)regs->rdi;
         const sigset_t *set = (const sigset_t *)regs->rsi;
         sigset_t *oldset = (sigset_t *)regs->rdx;
 
         // Return current mask if requested
         if (oldset) {
-            if ((uint64_t)oldset >= current->addr_limit) {
+            if (!syscall_check_user_range((uint64_t)oldset,
+                                          sizeof(sigset_t), true)) {
                 regs->rax = -EFAULT;
                 break;
             }
-            *oldset = (sigset_t)current->blocked;
+            sigset_t kold = (sigset_t)current->blocked;
+            if (copy_to_user_ft(oldset, &kold, sizeof(kold)) < 0) {
+                regs->rax = -EFAULT;
+                break;
+            }
         }
 
         // Update mask if set is provided
         if (set) {
-            if ((uint64_t)set >= current->addr_limit) {
+            if (!syscall_check_user_range((uint64_t)set,
+                                          sizeof(sigset_t), false)) {
+                regs->rax = -EFAULT;
+                break;
+            }
+            sigset_t kset;
+            if (copy_from_user_ft(&kset, set, sizeof(kset)) < 0) {
                 regs->rax = -EFAULT;
                 break;
             }
             switch (how) {
             case SIG_BLOCK:
-                current->blocked |= *set;
+                current->blocked |= kset;
                 break;
             case SIG_UNBLOCK:
-                current->blocked &= ~*set;
+                current->blocked &= ~kset;
                 break;
             case SIG_SETMASK:
-                current->blocked = (int64_t)*set;
+                current->blocked = (int64_t)kset;
                 break;
             default:
                 regs->rax = -EINVAL;
@@ -2645,30 +2758,40 @@ case SYS_getsid: {
         break;
     }
     case SYS_connect: {
-        struct sockaddr_in addr;
-        if (regs->rdx < sizeof(addr) ||
-            !syscall_user_range_ok(regs->rsi, sizeof(addr))) {
+        // Cat B: copy user sockaddr_in to kernel via _ft, then call.
+        if (regs->rdx < sizeof(struct sockaddr_in) ||
+            !syscall_check_user_range(regs->rsi,
+                                      sizeof(struct sockaddr_in), false)) {
             regs->rax = -EFAULT; break;
         }
-        memcpy(&addr, (void *)regs->rsi, sizeof(addr));
+        struct sockaddr_in addr;
+        if (copy_from_user_ft(&addr, (void *)regs->rsi, sizeof(addr)) < 0) {
+            regs->rax = -EFAULT; break;
+        }
         // sin_port is network byte order; lwIP netconn_connect wants host order.
         regs->rax = do_connect((int)regs->rdi, addr.sin_addr, os01_ntohs(addr.sin_port));
         break;
     }
     case SYS_sendto: {
+        // Cat B: addr → kernel copy via _ft.  buf goes through
+        // Task 8 (Cat C VFS bounce) — the kernel→user bounce
+        // for write direction; here we only validate the buf range.
         uint64_t len = regs->rdx;
         uint32_t ip = 0; uint16_t port = 0;
         uint64_t addr_ptr = regs->r8;
-        if (len && !syscall_user_range_ok(regs->rsi, len)) {
+        if (len && !syscall_check_user_range(regs->rsi, len, false)) {
             regs->rax = -EFAULT; break;
         }
         if (addr_ptr) {
             if (regs->r9 < sizeof(struct sockaddr_in) ||
-                !syscall_user_range_ok(addr_ptr, sizeof(struct sockaddr_in))) {
+                !syscall_check_user_range(addr_ptr,
+                                          sizeof(struct sockaddr_in), false)) {
                 regs->rax = -EFAULT; break;
             }
             struct sockaddr_in a;
-            memcpy(&a, (void *)addr_ptr, sizeof(a));
+            if (copy_from_user_ft(&a, (void *)addr_ptr, sizeof(a)) < 0) {
+                regs->rax = -EFAULT; break;
+            }
             ip = a.sin_addr; port = a.sin_port;
         }
         regs->rax = do_sendto((int)regs->rdi, (void *)regs->rsi,
@@ -2676,21 +2799,28 @@ case SYS_getsid: {
         break;
     }
     case SYS_recvfrom: {
+        // Cat B: addrlen → kernel via _ft; addr/buf write-back via _ft.
+        // Only the _ft write-back success commits the recv (do_recvfrom
+        // already consumed the netbuf; on _ft failure we return -EFAULT
+        // but the data is gone — POSIX semantics; the user must retry).
         uint64_t addr_ptr = regs->r8;
         uint64_t addrlen_ptr = regs->r9;
-        if (regs->rdx && !syscall_user_range_ok(regs->rsi, regs->rdx)) {
+        if (regs->rdx && !syscall_check_user_range(regs->rsi, regs->rdx, true)) {
             regs->rax = -EFAULT; break;
         }
         uint32_t ip = 0;
         uint16_t port = 0;
         uint32_t addrlen = 0;
         if (addr_ptr) {
-            if (!syscall_user_range_ok(addrlen_ptr, sizeof(addrlen))) {
+            if (!syscall_check_user_range(addrlen_ptr, sizeof(addrlen), false)) {
                 regs->rax = -EFAULT; break;
             }
-            memcpy(&addrlen, (void *)addrlen_ptr, sizeof(addrlen));
+            if (copy_from_user_ft(&addrlen, (void *)addrlen_ptr, sizeof(addrlen)) < 0) {
+                regs->rax = -EFAULT; break;
+            }
             if (addrlen < sizeof(struct sockaddr_in) ||
-                !syscall_user_range_ok(addr_ptr, sizeof(struct sockaddr_in))) {
+                !syscall_check_user_range(addr_ptr,
+                                          sizeof(struct sockaddr_in), true)) {
                 regs->rax = -EINVAL; break;
             }
         }
@@ -2704,20 +2834,29 @@ case SYS_getsid: {
             src.sin_family = AF_INET;
             src.sin_port = os01_htons(port);
             src.sin_addr = ip;
-            memcpy((void *)addr_ptr, &src, sizeof(src));
-            addrlen = sizeof(src);
-            memcpy((void *)addrlen_ptr, &addrlen, sizeof(addrlen));
+            if (copy_to_user_ft((void *)addr_ptr, &src, sizeof(src)) < 0) {
+                regs->rax = -EFAULT; break;
+            }
+            uint32_t new_addrlen = sizeof(src);
+            if (copy_to_user_ft((void *)addrlen_ptr, &new_addrlen,
+                                sizeof(new_addrlen)) < 0) {
+                regs->rax = -EFAULT; break;
+            }
         }
         regs->rax = ret;
         break;
     }
     case SYS_bind: {
-        struct sockaddr_in a;
-        if (regs->rdx < sizeof(a) ||
-            !syscall_user_range_ok(regs->rsi, sizeof(a))) {
+        // Cat B: copy user sockaddr_in to kernel via _ft.
+        if (regs->rdx < sizeof(struct sockaddr_in) ||
+            !syscall_check_user_range(regs->rsi,
+                                      sizeof(struct sockaddr_in), false)) {
             regs->rax = -EFAULT; break;
         }
-        memcpy(&a, (void *)regs->rsi, sizeof(a));
+        struct sockaddr_in a;
+        if (copy_from_user_ft(&a, (void *)regs->rsi, sizeof(a)) < 0) {
+            regs->rax = -EFAULT; break;
+        }
         regs->rax = do_bind((int)regs->rdi, a.sin_addr, os01_ntohs(a.sin_port));
         break;
     }
@@ -2730,20 +2869,44 @@ case SYS_getsid: {
         break;
     }
     case SYS_setsockopt: {
-        if (regs->r8 && !syscall_user_range_ok(regs->r10, regs->r8)) {
+        // Cat B: optlen is a hostile r8 — cap + reject 0 BEFORE kmalloc
+        // to prevent DoS via giant allocations.  Read optval via _ft.
+        uint64_t optlen = regs->r8;
+        if (optlen == 0 || optlen > SOCKOPT_MAX) {
+            regs->rax = -EINVAL; break;
+        }
+        if (!syscall_check_user_range(regs->r10, optlen, false)) {
+            regs->rax = -EFAULT; break;
+        }
+        void *optval = kmalloc(optlen);
+        if (!optval) { regs->rax = -ENOMEM; break; }
+        if (copy_from_user_ft(optval, (void *)regs->r10, optlen) < 0) {
+            kfree(optval);
             regs->rax = -EFAULT; break;
         }
         regs->rax = do_setsockopt((int)regs->rdi, (int)regs->rsi,
-                                  (int)regs->rdx, (void *)regs->r10, regs->r8);
+                                  (int)regs->rdx, optval, optlen);
+        kfree(optval);
         break;
     }
     case SYS_getsockname: {
-        if (!syscall_user_range_ok(regs->rdx, sizeof(uint32_t)) ||
-            !syscall_user_range_ok(regs->rsi, sizeof(struct sockaddr_in))) {
+        // Cat B: do_getsockname into kernel sockaddr_in + klen, then
+        // _ft write both back to user (so a hostile user pointer in
+        // rsi/rdx can't make the kernel scribble into itself).
+        if (!syscall_check_user_range(regs->rsi,
+                                      sizeof(struct sockaddr_in), true) ||
+            !syscall_check_user_range(regs->rdx, sizeof(uint32_t), true)) {
             regs->rax = -EFAULT; break;
         }
-        regs->rax = do_getsockname((int)regs->rdi,
-                                   (void *)regs->rsi, (uint32_t *)regs->rdx);
+        struct sockaddr_in kaddr;
+        uint32_t klen = sizeof(kaddr);
+        int64_t ret = do_getsockname((int)regs->rdi, &kaddr, &klen);
+        if (ret < 0) { regs->rax = ret; break; }
+        if (copy_to_user_ft((void *)regs->rsi, &kaddr, sizeof(kaddr)) < 0 ||
+            copy_to_user_ft((void *)regs->rdx, &klen, sizeof(klen)) < 0) {
+            regs->rax = -EFAULT; break;
+        }
+        regs->rax = ret;
         break;
     }
     case SYS_getifaddr: {
@@ -2751,11 +2914,32 @@ case SYS_getsid: {
         break;
     }
     case SYS_getsockopt: {
-        if (!syscall_user_range_ok(regs->r8, sizeof(uint32_t))) {
+        // Cat B: read user optlen (r8 points to user uint32_t) FIRST,
+        // bounded by SOCKOPT_MAX.  Only then allocate + do_getsockopt
+        // + _ft write-back.  This prevents DoS via r8=0xFFFFFFFF
+        // (which would kmalloc a 4GB buffer).
+        if (!syscall_check_user_range(regs->r8, sizeof(uint32_t), false)) {
             regs->rax = -EFAULT; break;
         }
-        regs->rax = do_getsockopt((int)regs->rdi, (int)regs->rsi,
-                                  (int)regs->rdx, (void *)regs->r10, (uint32_t *)regs->r8);
+        uint32_t klen = 0;
+        if (copy_from_user_ft(&klen, (void *)regs->r8, sizeof(klen)) < 0) {
+            regs->rax = -EFAULT; break;
+        }
+        if (klen > SOCKOPT_MAX) { regs->rax = -EINVAL; break; }
+        void *kopt = kmalloc(klen ? klen : 1);
+        if (!kopt) { regs->rax = -ENOMEM; break; }
+        int64_t ret = do_getsockopt((int)regs->rdi, (int)regs->rsi,
+                                    (int)regs->rdx, kopt, &klen);
+        if (ret < 0) {
+            kfree(kopt);
+            regs->rax = ret;
+            break;
+        }
+        ssize_t wr = copy_to_user_ft((void *)regs->r10, kopt, klen);
+        ssize_t wlr = copy_to_user_ft((void *)regs->r8, &klen, sizeof(klen));
+        kfree(kopt);
+        if (wr < 0 || wlr < 0) { regs->rax = -EFAULT; break; }
+        regs->rax = ret;
         break;
     }
     case SYS_shutdown: {
