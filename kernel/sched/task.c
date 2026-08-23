@@ -12,6 +12,7 @@
 #include <kernel/vma.h>
 #include <kernel/vmm.h>
 #include <kernel/slab.h>
+#include <kernel/uaccess.h>
 
 #include <fs/vfs.h>
 #include <fs/elf.h>
@@ -985,13 +986,14 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
         }
 
         if (child) {
+            // Cat B write-back: copy status to user via _ft, then
+            // UNCONDITIONALLY reclaim the child.  NEVER return inside
+            // the _ft failure branch — that would leak the child's
+            // thread/fpu_save/stack_alloc_base slabs.
+            ssize_t status_rc = 0;
             if (user_status) {
-                // exit_code is already in Linux wait status format:
-                //   normal exit → (code & 0xFF) << 8   (WIFEXITED/WEXITSTATUS)
-                //   signal death → sig (low byte)       (WIFSIGNALED/WTERMSIG)
                 int status = (int)exit_code;
-                if ((uint64_t)user_status < current->addr_limit)
-                    *user_status = status;
+                status_rc = copy_to_user_ft(user_status, &status, sizeof(status));
             }
 
             // Synchronous reclamation (no more schedule() reaper).
@@ -1003,7 +1005,7 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
 
             debug_task("waitpid: pid=%d reaped child %d (exit=%d)\n",
                           (int)current->pid, (int)child_pid, (int)exit_code);
-            return child_pid;
+            return (status_rc < 0) ? -EFAULT : child_pid;
         }
 
         // No reapable child — check existence for -ECHILD / WNOHANG.

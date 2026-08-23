@@ -12,6 +12,7 @@
 #include <kernel/pty.h>
 #include <fs/devfs.h>
 #include <uapi/stat.h>
+#include <kernel/uaccess.h>
 
 // ── Forward declarations ─────────────────────────────────────
 void pipe_wake_readers(pipe_t *p);
@@ -761,11 +762,21 @@ int64_t do_pipe(int *user_fds)
         return -ENFILE;
     }
 
-    // Write fd numbers to user space
+    // Cat B write-back: copy fds to user via _ft.  On _ft failure,
+    // H10 rollback: close both fds only — the last close auto-frees
+    // the pipe via file_free (file.c:64).  Do NOT pipe_free() explicitly
+    // (would double-free: the file_t for the LAST-closed end owns the
+    // pipe refcount, and pipe_free()'s kfree(p->buf)/free(p) runs from
+    // inside file_free's refcount==0 path).  The first fd_close drops
+    // the reader ref to 0; the second drops the writer ref to 0 and
+    // triggers file_free → kfree(pipe->buf) → kfree(pipe).  After
+    // rollback, the pipe is gone and both fds are gone — clean.
     int fds[2] = { rfd, wfd };
-    if ((uint64_t)user_fds >= current->addr_limit)
+    if (copy_to_user_ft(user_fds, fds, sizeof(fds)) < 0) {
+        fd_close(current->files, rfd);
+        fd_close(current->files, wfd);
         return -EFAULT;
-    memcpy((void *)user_fds, fds, sizeof(fds));
+    }
 
     debug_fs("pipe: pid=%d fds=[%d,%d]\n",
                   (int)current->pid, rfd, wfd);
