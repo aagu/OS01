@@ -104,7 +104,7 @@
 | HTTPS/TLS | mbedTLS 集成 BusyBox wget（原 P2#10） | mbedTLS ✅ | |
 | AF_UNIX/socketpair | 本地 socket IPC（原 P2#11） | socket ✅ | |
 | 更多 applet | grep/sed/find，先补 libc regex/fnmatch（原 P1#7） | libc | |
-| **libc 完整性** | printf 补 `%f/%ld/%lu`、strtod、getopt、stdio 行读取；验收基线 `docs/applet-verification.md`（28/52 完整工作） | 独立 | |
+| **libc 完整性** | 🔧 部分完成：printf `%f/%F/%e/%E/%g/%G` + `%ld/%lu` + `%x/%o` ✅、strtod（小数/指数）✅、getopt 短选项 ✅（sleep/seq/du/cksum/sum 已恢复，详见 `docs/applet-verification.md`）；**仍缺**：stdio 行读取/seek（nl/tail/tac/expand 空 + nl user-fault 崩溃）、getcwd（pwd 空）、cut/paste 的 getopt 解析 | 独立 | |
 | Alpine apk/musl | musl 二进制包兼容路线（原 P3#16） | 动态链接器 | cavOS |
 
 ### 依赖链总览

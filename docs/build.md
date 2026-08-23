@@ -154,7 +154,7 @@ Fallback 模式（无 GPT）时使用单一 FAT32 分区。
 * `kernel/` - 内核代码
   * `kernel/` - 内核主文件（main.c, printk.c, panic.c, log.c 等）
   * `arch/x86_64/` - x86_64 架构代码（head.S, trap.c, subsys.c）
-  * `apic/` - APIC 子系统（ACPI, LAPIC, IOAPIC, IPI, LAPIC 定时器）
+  * `intr/apic/` - APIC 子系统（acpi.c, lapic.c, ioapic.c, ipi.c, lapic_timer.c）
   * `block/` - 块设备层
   * `driver/` - 驱动程序（keyboard, serial, pit, rtc, ahci, pci）
   * `fs/` - 文件系统（VFS, FAT32, ext2, devfs, procfs, tmpfs）
@@ -162,10 +162,10 @@ Fallback 模式（无 GPT）时使用单一 FAT32 分区。
   * `memory/` - 内存管理（pmm, vmm, slab, vma, tlb）
   * `sched/` - 调度器（task.c, smp.c）
   * `subsys/` - 子系统注册框架
-  * `timer/` - 软件定时器
+  * `time/` - 时钟源与定时器（clocksource + 软件定时器，subsys 名 `timer`）
   * `tty/` - TTY 子系统
   * `percpu/` - 每 CPU 数据结构
-  * `pic/` - 8259A PIC 控制器
+  * `intr/pic/` - 8259A PIC 控制器
 * `libc/` - 系统库（libk 供内核，libc 供用户程序）
 * `user/` - 用户空间程序（init, spin, sigtest, poweroff 等）
 * `sysroot/` - 系统根目录

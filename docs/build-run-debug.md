@@ -146,7 +146,7 @@ make debug
 在另一个终端中，使用 GDB 连接到 QEMU 调试服务器：
 
 ```bash
-gdb kernel/kernel.bin
+gdb kernel/kernel.elf
 ```
 
 然后在 GDB 中执行以下命令：
@@ -240,8 +240,8 @@ resolution 1440x900
   * `include/` - 头文件
   * `intr/` - 中断处理
   * `memory/` - 内存管理
-  * `pic/` - PIC 控制器
-  * `timer/` - 定时器
+  * `intr/pic/` - PIC 控制器
+  * `time/` - 时钟源与定时器（subsys 名 `timer`）
 * `libc/` - 系统库
 * `sysroot/` - 系统根目录
 * `config/` - 配置文件
