@@ -1,10 +1,19 @@
 # OS01 syscall 边界审计设计文档
 
 - 日期：2026-08-23
-- 状态：v1 待用户 review（尚未进入实现）
+- 状态：v2 待用户 review（尚未进入实现）
 - 目标：**DoS 防护** —— 任何 syscall 收到敌意用户指针（NULL / 低地址 / 内核区间 / 未映射 / 超长 size 越界）返回 `-EFAULT`，**永不导致内核崩溃**；顺带关闭路径字符串的 TOCTOU 主窗口。roadmap P1「syscall 边界审计」项。
 - 修订记录：
   - v1：初版（brainstorming 产出，方案 A：PTE 走查校验 + TOCTOU strdup + 窄容错拷贝原语）
+  - v2：并入 review——
+    - 🟢 §12 加 **Step 0**（信号投递语义验证，引 entry.S check_signal ~92-102）
+    - 🟢 §4 字段访问统一 `current->fault_jmp`（注明 `current`=RSP 推导，IST 0 上解析正确）
+    - 🟢 §3/§9 arch_pte_flags 简化为 4KB+2MB（核实 OS01 无 1GB 页创建，vmm.c 走 2MB）
+    - 🟢 §5 Cat A syscall 列表逐条 ✅ 标注（grep "case SYS_" 核实全部存在 + 行号）
+    - 🟢 §8.1/§6 加无短计数 + dst 不污染断言与语义
+    - 🟢 §8.3 applet user-fault 具体名单（docs/applet-verification.md：sum 已脱险，nl 仍在）
+    - 🟢 §11 加 `_ft` 期间 schedule() 合规性风险条
+    - 🟢 §12 加 commit message 模板（含 make clean 警示）
 
 ---
 
@@ -75,10 +84,10 @@ bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable);
 1. `addr != 0` —— 挡 NULL/低地址
 2. `addr < current->addr_limit` —— 挡内核区间（`addr_limit` 定义 task.h:131，用户态 0x00007FFFFFFFFFFF）
 3. `len <= current->addr_limit - addr` —— 溢出安全，挡超长 size 越过边界
-4. 逐页走查 `[addr, addr+len)`（每页按 PTE 4KB/2MB/1GB 粒度，复用 `arch_virt_to_phys` 的走查骨架）：**present + U/S +（writable 时 RW）**。任一页不满足 → false
+4. 逐页走查 `[addr, addr+len)`（每页按 PTE **4KB/2MB** 粒度，复用 `arch_virt_to_phys` 的走查骨架）：**present + U/S +（writable 时 RW）**。任一页不满足 → false
 
 **架构钩子**：新增 `arch_pte_flags(pgtbl, va) → uint64_t`（`kernel/include/kernel/arch/mmu.h`）返回该页最终 PTE 原始值供位检查：
-- x86_64 实现：present=bit0、RW=bit1、U/S=bit2，处理 4KB/2MB/1GB
+- x86_64 实现：present=bit0、RW=bit1、U/S=bit2。**OS01 只创建 4KB 页和 2MB 大页**（vmm.c 映射走 `pml2[...] = phys & PAGE_2M_MASK`，无 1GB 页创建；`PAGE_1G_SHIFT` 仅用于索引计算）→ **arch_pte_flags 只处理 4KB + 2MB 两种粒度，不处理 1GB**
 - aarch64：stub 返回 0（= 未映射，**fail-closed**）——YAGNI，不写 ARM 代码（roadmap P2 前不动）
 
 **COW 页特例（必须拒绝）**：writable=true 时，PTE 若为 COW/RW-clear（`PAGE_COW` bit10 或 RW 位清除），**拒绝**——内核直写 COW PTE 不会触发拷贝机制，会直接 #PF。内核不参与用户 COW 语义。
@@ -102,20 +111,21 @@ ssize_t copy_from_user_ft(void *dst, const void *src, size_t n);  // n==0 → 0
 ssize_t copy_to_user_ft(void *dst, const void *src, size_t n) {
     if (n == 0) return 0;
     __builtin_setjmp_buffer jb;
-    task_t *cur = current;
-    jmp_buf_t *old = cur->fault_jmp;
-    cur->fault_jmp = (jmp_buf_t *)&jb;
+    jmp_buf_t *old = current->fault_jmp;            // 统一用 current->fault_jmp
+    current->fault_jmp = (jmp_buf_t *)&jb;
     if (__builtin_setjmp(jb) == 0) {
         memcpy(dst, src, n);
-        cur->fault_jmp = old;
+        current->fault_jmp = old;
         return (ssize_t)n;
     }
-    cur->fault_jmp = old;       // fault 路径
+    current->fault_jmp = old;                       // fault 路径
     return -EFAULT;
 }
 ```
 
 `copy_from_user_ft` 同构（memcpy 参数对调）。
+
+**字段访问一致性**：copy_ft 与 `do_page_fault` 钩子**都统一用 `current->fault_jmp`**（非 `task->`）。`current` = `get_current_task()` = `rsp & ~(STACK_SIZE-1)`（task.h:285-291），基于当前内核栈推导；#PF 用 IST 0（`set_trap_gate(14,0,page_fault)`，trap.c:2519）跑在任务内核栈上 → `current` 正确解析为 faulting task，与 dump 用的 `task_from_tss()` 一致。
 
 **`do_page_fault` 挂钩**（trap.c:429 内核态分支**顶部**，panic dump 之前）：
 
@@ -138,7 +148,7 @@ if (cr2 < current->addr_limit && current->fault_jmp)
 
 | 类 | 站点 | 处理 |
 |----|------|------|
-| **A 路径字符串** | open / exec(path+argv+envp) / chdir / unlink / mkdir / rmdir / rename(×2) / truncate / access / chmod | `syscall_check_user_range(path, VFS_NAME_MAX, false)` 定界校验（内核无 PATH_MAX，用 `VFS_NAME_MAX`=256，vfs.h:12，open handler 同款判 `-ENAMETOOLONG`，trap.c:1280）→ `strnlen_user(path, VFS_NAME_MAX)` + `strdup` 到内核堆 → 后续全部操作内核副本。**杀无界 strdup 扫描窗口**（现 open/exec 的 strdup 若 path 无 NUL 扫过页 → fault） |
+| **A 路径字符串** | open ✅(trap.c:1249) / exec ✅(1194) / chdir ✅(1422) / unlink ✅(1741) / mkdir ✅(1760) / rmdir ✅(1781) / rename ✅(1800) / truncate ✅(1828) / access ✅(1698) / chmod ✅(2061) —— **全部 `grep "case SYS_"` 核实存在，均取路径指针** | `syscall_check_user_range(path, VFS_NAME_MAX, false)` 定界校验（内核无 PATH_MAX，用 `VFS_NAME_MAX`=256，vfs.h:12，open handler 同款判 `-ENAMETOOLONG`，trap.c:1280）→ `strnlen_user(path, VFS_NAME_MAX)` + `strdup` 到内核堆 → 后续全部操作内核副本。**杀无界 strdup 扫描窗口**（现 open/exec 的 strdup 若 path 无 NUL 扫过页 → fault） |
 | **B 定长结构体** | timespec / sockaddr / fd_set / sigset / stat / optval / addrlen / getcwd / getdents64 等 | `syscall_check_user_range`（按方向 rw）+ 拷贝到内核栈/内核缓冲。**统一** select.c:124-376、socket trap.c:2373-2464 已有的零散 range 检查到本原语（行为不变，只统一入口） |
 | **C 大缓冲 in-place** | read / write fd 数据 | read: 入口校验 `(buf,size,writable=true)` → VFS 同步路径直接 memcpy（busy-wait 无调度，安全）；tty/pipe/socket 最终写用 `copy_to_user_ft`。write: 入口校验 `(buf,size,readable)` → pipe/socket 阻塞后读用户缓冲用 `copy_from_user_ft` |
 | **D 无指针** | fd 号 / 纯整数值（getpid/kill/waitpid/brk/setpgid…） | 不动 |
@@ -161,6 +171,7 @@ if (cr2 < current->addr_limit && current->fault_jmp)
 ## 6. 错误码与边界语义
 
 - 校验失败 / `_ft` fault → `-EFAULT`（统一；与现有 socket/select 一致）
+- **`_ft` 无短计数语义**：fault 时返回恰为 `-EFAULT`，**绝不返回部分正计数**；即使 fault 前已拷贝部分字节，返回值仍是 `-EFAULT`，调用方将 dst 视为垃圾（不承诺 dst 未被污染——memcpy 中途 fault 时前段字节确实已写入）
 - `len == 0` → 成功 no-op（`_ft` 返回 0，`check_user_range` 返回 true）
 - pipe/tty 经 bounce buffer **无数据丢失**（fault 前数据留在内核，未消费用户侧承诺）
 - socket RX fault → `-EFAULT`，丢已 dequeue 的 netbuf（可重试）
@@ -224,6 +235,8 @@ copy_to_user_ft 武装 setjmp → memcpy → #PF (cr2 < addr_limit && fault_jmp)
 | COW/RW-clear 页 writable=true | false |
 | `copy_to_user_ft(userbuf, ksrc, n)` 正常 | n |
 | `copy_to_user_ft(in_range_unmapped, ksrc, 16)` | `-EFAULT`（**longjmp 路径**） |
+| `copy_to_user_ft(跨 2 页目标，第二页未映射，n=8192)` | `-EFAULT`，**绝不返回部分正计数**（验证无短计数语义：即使第一页已拷，返回值必须 -EFAULT） |
+| `copy_from_user_ft(kdst, 跨 2 页源，第二页未映射, n)` | `-EFAULT`；**kdst 只断言返回值**——调用方契约是 fault→`-EFAULT`、dst 视为垃圾（不做 Linux 短计数） |
 | `copy_from_user_ft` 对称 | 同上 |
 
 ### 8.2 systest hostile 组（`user/systest.c`，~80 行，~10-15 断言）
@@ -245,7 +258,7 @@ copy_to_user_ft 武装 setjmp → memcpy → #PF (cr2 < addr_limit && fault_jmp)
 
 - 184/0 systest 全量原样通过
 - 网络 harness（make test-network）+ QEMU ash 手工回归
-- **顺带复查 roadmap「4 处 applet user-fault 崩溃」**——很可能同源（坏指针触发内核 #PF），修完即愈，逐处确认
+- **复查 applet user-fault 崩溃**（`docs/applet-verification.md` §「💥 崩溃（内核 user-fault 杀任务）」）：原 4 处 cut/nl/expand/sum，2026-08-22 重测 **sum 已脱险（printf 修复），nl 仍在同一类 libc 缺陷上 user-fault 崩溃**（固定 RIP，指向 libc 内部函数）。本审计若发现这些是坏指针触发内核 #PF 同源，修完即愈——逐处确认；若 nl 是纯 libc 内部缺陷（非坏指针），则不属于本审计范围，保持 ❌ 记录
 
 ---
 
@@ -255,7 +268,7 @@ copy_to_user_ft 武装 setjmp → memcpy → #PF (cr2 < addr_limit && fault_jmp)
 |------|------|
 | 新 `kernel/memory/uaccess.c` | 三原语 + `strnlen_user`（~120 行） |
 | 新 `kernel/include/kernel/uaccess.h` | 声明 + `arch_pte_flags` 钩子（~40 行） |
-| `kernel/include/kernel/arch/mmu.h` | +`arch_pte_flags`（x86 实现 ~30 行 + aarch64 stub） |
+| `kernel/include/kernel/arch/mmu.h` | +`arch_pte_flags`（x86：4KB+2MB 两粒度 ~30 行 + aarch64 stub） |
 | `kernel/include/kernel/task.h` | +`fault_jmp`（**`make clean`**） |
 | `kernel/arch/x86_64/trap.c` | `do_page_fault` 挂钩 ~12 行 + ~30 handler 接入 |
 | `kernel/fs/file.c` | pipe r+w bounce + socket rx `_ft` / tx 分块 bounce ~30 行 |
@@ -287,7 +300,8 @@ copy_to_user_ft 武装 setjmp → memcpy → #PF (cr2 < addr_limit && fault_jmp)
 | `__builtin_setjmp` 在 `-ffreestanding` 下行为 | 编译器内建，实测单测（test_uaccess）验证；若异常再评估手写 asm 备选 |
 | longjmp 跨 #PF 中断帧 | fault 后长跳回原语，中断帧残留在栈 RSP 之下无害；`cr2 < addr_limit` 门控防吞真内核 bug |
 | `task_t` 结构体变更（sizeof 变化） | **必须 `make clean && make`**，旧 .o 静默崩（AGENTS.md） |
-| 信号 handler munmap 竞态 | 阻塞触点 `_ft` 兜底；**依赖"信号只在返回用户态时投递"语义**（handler 不能在 memcpy 中途跑）——实施第一步手动确认此语义成立 |
+| 信号 handler munmap 竞态 | 阻塞触点 `_ft` 兜底；**依赖"信号只在返回用户态时投递"语义**（handler 不能在 memcpy 中途跑）——**Step 0 验证此语义成立**（entry.S `check_signal` 块，~92-102：`arch_do_signal_delivery` 只在返回用户态路径调用） |
+| **`_ft` 武装期间 schedule() 合规性** | 纪律强制"武装↔解除之间无 schedule"（纯 memcpy/字节拷贝）；若违反，`fault_jmp` 跨调度残留——`jb` 是栈上局部，任务迁移/栈复用后失效 → 后续任意用户区间 #PF 误 longjmp 到失效缓冲 → 未定义行为。缓解：① 纪律（原语内部无调度点）② `cr2 < addr_limit` 门控 ③ Step 0 信号只在返回用户态投递（handler 不会切入内核 memcpy 中途） |
 | socket TX lwIP 中间态 | 首选分块 bounce（lwIP 永不触用户内存）；备选 setjmp 包 netconn_write 有 pbuf 泄漏（已否决为主方案） |
 | 误伤：内核 bug 被 `_ft` 吞 | `cr2 < addr_limit` 门控 + 单测覆盖正常路径返回码不变（184/0 回归） |
 | 性能 | 每 syscall 一次 PTE 走查（≤len/4096 次循环，通常 1-2 页）可忽略；`_ft` 只在阻塞触点，非热路径 |
@@ -297,7 +311,11 @@ copy_to_user_ft 武装 setjmp → memcpy → #PF (cr2 < addr_limit && fault_jmp)
 ## 12. 实施顺序（依赖驱动）
 
 ```
-Step 1: 基础设施 — uaccess.h + mmu.h arch_pte_flags + task.h fault_jmp
+Step 0: 语义验证（无代码）——确认"信号只在返回用户态时投递"，handler 不能在内核 memcpy
+        中途运行。读 kernel/arch/x86_64/entry.S 的 check_signal 块（~92-102）：
+        arch_do_signal_delivery 只在返回用户态路径调用 → 阻塞读被信号打断时先 EINTR/
+        处理 handler，唤醒后的用户缓冲写由 _ft 兜底，无中间态。此步是 _ft 正确性前提。
+Step 1: 基础设施 — uaccess.h + mmu.h arch_pte_flags(4KB+2MB) + task.h fault_jmp
 Step 2: 原语 + do_page_fault 挂钩（含 cr2 门控）
 Step 3: kernel selftest test_uaccess.c（验证原语 + longjmp 路径）→ 先于一切站点接入
 Step 4: Cat A 路径字符串（strnlen_user + strdup 推广）
@@ -307,4 +325,14 @@ Step 7: systest hostile 组 + 回归（184/0 + 网络 + ash）+ applet user-faul
 Step 8: 文档同步（syscall.md / roadmap.md）
 ```
 
-依赖：Step 3 必须先于 4-6（原语正确性门禁）；Step 4/5/6 相互独立可并行（各自独立 commit）。
+依赖：Step 0/3 必须先于 4-6（语义前提 + 原语正确性门禁）；Step 4/5/6 相互独立可并行（各自独立 commit）。
+
+**Commit message 模板**（含 make clean 警示，防旧 .o 静默崩）：
+
+```
+fix(uaccess): syscall boundary DoS hardening — <step 主题>
+
+- <改动要点：如 "add syscall_check_user_range PTE-walk validation">
+- ⚠️ task.h struct 变更 → 必须 `make clean && make`（AGENTS.md，旧 .o 静默崩）
+- 验证：kernel selftest test_uaccess / systest 184/0 hostile 组
+```
