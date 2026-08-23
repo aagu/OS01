@@ -455,10 +455,32 @@
   /* page-tail NUL: string at 0x600ffc "AB" NUL at 0x600ffe (next page unmapped) -> returns 2 */
   /* no NUL within max -> returns max; unmapped -> -EFAULT */
   ```
-  说明：`get_leaf`/`set_leaf` 是**层级探测的叶子 PTE 槽助手**（参考 `arch_virt_to_phys` mmu.h:38-56 的 l4/l3/l2/l1 索引计算）。**0x600000/0x601000 是 guard/未映射区，不能假定 PML1 槽已存在**：
-  - `ensure_pt(cur_pml4, va)`：走 l4→l3→l2；任一级中间表缺失 → `alloc_4k_page()` 建**仅供测试的表**并**记录父项原值**（清理时恢复父项 + free 测试表）；若 l2 槽是 **2MB 大页 PDE**（bit `PAGE_PS`=0x80）→ 分配新 PML1 表、写入拆分 PDE（PML1 物理地址 | Present | RW | User），**记录原 PDE 值**（清理时恢复）。
-  - `get_leaf`/`set_leaf`：先 `ensure_pt`，再读/写最终 pml1 槽。
-  - **清理路径（必须覆盖任意断言/分配失败）**：用 `selftest` 的失败处理 + 收尾统一恢复——按记录恢复原 pml3/pml2/pde 槽 + `arch_flush_tlb_page` + `free_4k_page` 测试表；恢复/释放在任何 `SELFTEST_ASSERT` 失败前执行（或 selftest 框架的 failure hook 先跑清理）。
+  说明：`get_leaf`/`set_leaf` 是**层级探测的叶子 PTE 槽助手**（参考 `arch_virt_to_phys` mmu.h:38-56 的 l4/l3/l2/l1 索引计算）。**0x600000/0x601000 是 guard/未映射区，不能假定 PML1 槽已存在**。具体实现（写入 Task 3 代码）：
+
+  ```c
+  /* ── hierarchy-probing leaf helpers (guard/unmapped region) ── */
+  struct test_map_ctx {                 /* records everything created, for restore */
+      uint64_t va;
+      uint64_t saved_l3, saved_l2, saved_pde;   /* original parent slots (0 = absent) */
+      uint64_t *new_l3, *new_l2, *new_pml1;     /* test-only tables we created */
+      int    created;                   /* 1 if we created/split anything */
+  };
+  /* Walk l4->l3->l2; create missing intermediates (alloc_4k_page) and RECORD
+     each parent slot's original value + the created table; if l2 is a 2MB huge
+     PDE (PAGE_PS bit), allocate a PML1 table, write the SPLIT PDE (pml1 phys |
+     Present|RW|User) and RECORD the original PDE value.  Returns the pml1 slot. */
+  static uint64_t *ensure_pt(uint64_t *pml4, uint64_t va, struct test_map_ctx *ctx) { ... }
+  /* restore(ctx): put back saved_l3/l2/pde slots, free test-only tables
+     (free_4k_page), flush TLB.  Runs on EVERY exit path (normal + any
+     SELFTEST_ASSERT failure — call restore() BEFORE the failing assert). */
+  static void restore_pt(struct test_map_ctx *ctx) { ... }
+  ```
+  用例顺序（所有失败路径先 `restore_pt` 再失败）：
+  1. `ensure_pt(0x600000)` → `get_leaf` 得槽 → 存原叶 → `set_leaf(0x600000, pa, flags)`；
+  2. no-short-copy 用例（0x601000 未映射，跨页 fault 在第二页）；
+  3. `ensure_pt(0x601000)` → `set_leaf(0x601000, pb, flags)` → 跨页成功用例；
+  4. `_ft_res` cleanup 用例（页 A 仍映射）；
+  5. `restore_pt` 统一恢复两个 ctx（父项 + 叶槽 + TLB）+ free pa/pb。
   4KB 页用 `alloc_4k_page()`/`free_4k_page(phys)`（pmm.h:102-103）——`alloc_pages` 单位是 2MB 且 `free_pages` 要 number 参数，不适用。非连续用**实际物理页框比较断言**（`(pa>>12)+1 != (pb>>12)`），不写死 `+3*PAGE` 假设；相邻则 bounded 重试，仍不满足则**必需门禁失败**（记录 FAIL，不静默跳过）。
 
 - [ ] **Step 3: 注册到 selftest.c**
@@ -887,16 +909,22 @@ if (buf) {   // NULL 合法处
     avail = pipe_avail(p); memcpy(bounce, ring + p->tail, avail);  /* peek, no consume */
     spin_unlock_irqrestore(&p->lock, f);
     ssize_t rc = copy_to_user_ft_res(user, bounce, avail,
-                                     pipe_read_release, p);  /* fault -> cleanup releases
-        read_busy (the LONGJMP path runs pipe_read_release), tail UNCHANGED -> no data loss */
-    pipe_read_release(p);                                 /* normal path also releases */
-    if (rc < 0) return -EFAULT;                           /* data still in ring, retryable */
+                                     pipe_read_release, p);
+    /* copy_to_user_ft_res runs pipe_read_release ONLY on the FAULT path
+       (longjmp branch).  On fault: reservation already released, tail UNCHANGED
+       -> no data loss, no reservation leak, no tail race.  On SUCCESS: the res
+       variant does NOT auto-release — the caller must NOT release before commit. */
+    if (rc < 0)
+        return -EFAULT;                                   /* reservation already freed by callback */
     f = spin_lock_irqsave(&p->lock);
-    p->tail = (p->tail + avail) % PIPE_SIZE;              /* commit — no concurrent reader
-        can be mid-copy (read_busy serializes) -> no tail race */
+    p->tail = (p->tail + avail) % PIPE_SIZE;              /* COMMIT FIRST */
     pipe_wake_writers(p);
     spin_unlock_irqrestore(&p->lock, f);
+    pipe_read_release(p);                                 /* normal path: release ONLY AFTER commit */
     return avail;
+    /* 时序保证：read_busy 在 commit 完成后才释放 → reader 2 只能预约到
+       commit 之后的 tail，绝无两个 reader 竞争同一段数据。fault 路径由
+       callback 释放（无 commit，tail 未动），同样不竞争。 */
     ```
     **并发正确**：`read_busy` 使同时最多一个 read 在 peek→copy→commit 窗口内 → tail 无竞态（第二个 reader 阻塞等待预约释放，不竞争）。**fault 清理**：`copy_to_user_ft_res` 的 longjmp 路径运行 `pipe_read_release`（回到原内核栈，正常 IRQ 态，可安全 spin_lock）→ 预约不泄漏；tail 未动 → 数据不丢。**无裸 memcpy、无 `_ft` 持锁**。`pipe_read_internal` 的字节循环（file.c:399-466 `dst[total++]`）改为该模式。
     **替代方案（若不想加 `_ft_res`）**：显式收窄语义并在 fd/pipe 层阻止共享读端——但 `cmd1 | cmd2` 管道依赖 fork 继承读端，**不可行**。故选 `_ft_res` 预约方案。
