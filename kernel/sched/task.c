@@ -985,7 +985,10 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
 
         if (child) {
             if (user_status) {
-                int status = (int)((exit_code & 0xFF) << 8);
+                // exit_code is already in Linux wait status format:
+                //   normal exit → (code & 0xFF) << 8   (WIFEXITED/WEXITSTATUS)
+                //   signal death → sig (low byte)       (WIFSIGNALED/WTERMSIG)
+                int status = (int)exit_code;
                 if ((uint64_t)user_status < current->addr_limit)
                     *user_status = status;
             }

@@ -810,7 +810,7 @@ int arch_do_signal_delivery(pt_regs_t *regs)
                         break;
                     }
                     current->signal &= ~(1ULL << sig);
-                    do_exit((uint64_t)sig << 8);
+                    do_exit((uint64_t)sig);
                     return 1;  // unreachable
                 }
             }
@@ -851,7 +851,7 @@ int arch_do_signal_delivery(pt_regs_t *regs)
                     break;   // ignore for init
                 log_err("task %d killed by signal %d (default)\n",
                         (int)current->pid, sig);
-                do_exit((uint64_t)sig << 8);
+                do_exit((uint64_t)sig);
                 return 1;  // unreachable — do_exit switches away
             }
             continue;
@@ -870,7 +870,7 @@ int arch_do_signal_delivery(pt_regs_t *regs)
             log_err("task %d: signal %d handler has no restorer, "
                     "killing\n", (int)current->pid, sig);
             current->signal &= ~(1ULL << sig);
-            do_exit((uint64_t)sig << 8);
+            do_exit((uint64_t)sig);
             return 1;  // unreachable
         }
 
@@ -1152,9 +1152,13 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         break;
     }
     case SYS_exit: {
-        // exit(int code) — terminate current process
-        current->exit_code = regs->rdi;
-        do_exit(regs->rdi);
+        // exit(int code) — terminate current process.
+        // Encode as Linux does: exit code in the high byte (code<<8),
+        // so waitpid() status can distinguish a normal exit (WIFEXITED)
+        // from a signal death (low byte = signal → WIFSIGNALED).
+        uint64_t code = regs->rdi & 0xFF;
+        current->exit_code = code << 8;
+        do_exit(code << 8);
         // unreachable — do_exit calls schedule() which never returns
     }
     case SYS_brk: {
@@ -2103,7 +2107,11 @@ case SYS_getsid: {
         break;
     }
     case SYS_kill: {
-        // kill(int pid, int sig) → 0 / -ESRCH / -EINVAL
+        // kill(pid, sig) — POSIX process-group semantics:
+        //   pid > 0   → signal single task (pid)
+        //   pid == 0  → signal caller's process group
+        //   pid == -1 → broadcast: all non-init, non-kthread, non-self
+        //   pid < -1  → signal process group (-pid)
         int pid = (int)(int64_t)regs->rdi;
         int sig = (int)regs->rsi;
 
@@ -2112,8 +2120,32 @@ case SYS_getsid: {
             break;
         }
 
-        int ret = task_send_signal(pid, sig);
-        regs->rax = ret;
+        if (pid > 0) {
+            regs->rax = task_send_signal(pid, sig);
+        } else if (pid == 0) {
+            regs->rax = signal_pgrp(current->pgrp, sig);
+        } else if (pid == -1) {
+            // POSIX pid==-1: signal to all tasks the caller may signal —
+            // everyone except init (pid 1), kernel threads, and self.
+            uint64_t f = spin_lock_irqsave(&task_list_lock);
+            int matched = 0;
+            list_t *pos = init_task_union.task.list.next;
+            while (pos != &init_task_union.task.list) {
+                task_t *t = container_of(pos, task_t, list);
+                pos = task_list_next(pos);
+                if (t == current) continue;
+                if (t->flags & PF_KTHREAD) continue;
+                if (t->pid == 1) continue;
+                t->signal |= (1ULL << sig);
+                if (t->state == TASK_INTERRUPTIBLE)
+                    task_wake(t);
+                matched++;
+            }
+            spin_unlock_irqrestore(&task_list_lock, f);
+            regs->rax = matched > 0 ? 0 : -ESRCH;
+        } else { // pid < -1
+            regs->rax = signal_pgrp(-pid, sig);
+        }
         break;
     }
     case SYS_signal: {

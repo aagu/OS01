@@ -1822,6 +1822,64 @@ static void test_setpgid_auto_fg_pgrp(void) {
     close(pfd);
 }
 
+// ── 72: kill(-pid) → signal_pgrp ─────────────────
+static void test_signal_pgrp_basic(void) {
+    signal(SIGUSR1, SIG_IGN);  // 父不响应
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("signal_pgrp_basic", "fork"); return; }
+    if (pid == 0) {
+        // fork 继承父的 SIG_IGN；child 必须恢复 SIG_DFL 才能被 SIGUSR1 杀掉
+        signal(SIGUSR1, SIG_DFL);
+        setpgid(0, 0);
+        struct timespec ts = { .tv_sec = 5, .tv_nsec = 0 };
+        nanosleep(&ts, NULL);   // 阻塞直到信号打断（本 libc 无 pause()）
+        _exit(0);
+    }
+    setpgid(pid, pid);
+    int64_t r = syscall(SYS_kill, (int64_t)(-(int64_t)pid),
+                        (uint64_t)SIGUSR1, 0);
+    CHECK3(r == 0, "signal_pgrp_basic", "kill(-pid,SIGUSR1) returns 0");
+    int status; waitpid(pid, &status, 0);
+    CHECK3(WIFSIGNALED(status) && WTERMSIG(status) == SIGUSR1,
+           "signal_pgrp_basic", "child got SIGUSR1");
+}
+
+// ── 73: kill(-pgid) hits whole group ─────────────
+static void test_kill_neg_pid_pgrp(void) {
+    signal(SIGUSR2, SIG_IGN);
+    int64_t c1 = fork();
+    if (c1 < 0) { FAIL("kill_pgrp", "fork1"); return; }
+    if (c1 == 0) {
+        signal(SIGUSR2, SIG_DFL);
+        setpgid(0, 0);
+        struct timespec ts = { .tv_sec = 5, .tv_nsec = 0 };
+        nanosleep(&ts, NULL);
+        _exit(0);
+    }
+    // 先建立 pgrp c1，c2 的 setpgid(0, c1) 才能 join（内核要求 pgrp 已存在）
+    setpgid(c1, c1);
+    int64_t c2 = fork();
+    if (c2 < 0) { FAIL("kill_pgrp", "fork2"); return; }
+    if (c2 == 0) {
+        signal(SIGUSR2, SIG_DFL);
+        setpgid(0, c1);
+        struct timespec ts = { .tv_sec = 5, .tv_nsec = 0 };
+        nanosleep(&ts, NULL);
+        _exit(0);
+    }
+    setpgid(c2, c1);
+    int64_t r = syscall(SYS_kill, (int64_t)(-(int64_t)c1),
+                        (uint64_t)SIGUSR2, 0);
+    CHECK3(r == 0, "kill_pgrp", "kill(-pgid,sig) returns 0");
+    int s1 = 0, s2 = 0;
+    waitpid(c1, &s1, 0);
+    waitpid(c2, &s2, 0);
+    CHECK3(WIFSIGNALED(s1) && WTERMSIG(s1) == SIGUSR2,
+           "kill_pgrp", "c1 got SIGUSR2");
+    CHECK3(WIFSIGNALED(s2) && WTERMSIG(s2) == SIGUSR2,
+           "kill_pgrp", "c2 got SIGUSR2");
+}
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
@@ -1892,6 +1950,8 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"setpgid_getpgid",   test_setpgid_getpgid},
     {"setsid",            test_setsid},
     {"setpgid_auto_fg", test_setpgid_auto_fg_pgrp},
+    {"signal_pgrp_basic",  test_signal_pgrp_basic},
+    {"kill_pgrp",          test_kill_neg_pid_pgrp},
     {"getrandom",           test_getrandom},
 };
 
