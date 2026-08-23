@@ -8,6 +8,7 @@
 #include <driver/keyboard.h>
 #include <kernel.h>
 #include <kernel/poll.h>
+#include <kernel/uaccess.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
@@ -309,44 +310,65 @@ int tty_phys_ioctl(struct vfs_node *node, int cmd, void *arg)
     (void)node;
     switch (cmd) {
     case TCGETS: {
+        // Write direction: kernel termios → user struct.
         tty_t *tty = get_dev_tty();
         if (!tty) return -ENODEV;
-        memcpy(arg, &tty->term, sizeof(struct termios));
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg,
+                                      sizeof(struct termios), true))
+            return -EFAULT;
+        ssize_t r = copy_to_user_ft(arg, &tty->term, sizeof(struct termios));
+        if (r < 0) return -EFAULT;
         return 0;
     }
     case TCSETS:
     case TCSETSW: {
+        // Read direction: user termios → kernel termios.
         tty_t *tty = get_dev_tty();
         if (!tty) return -ENODEV;
-        memcpy(&tty->term, arg, sizeof(struct termios));
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg,
+                                      sizeof(struct termios), false))
+            return -EFAULT;
+        struct termios kterm;
+        if (copy_from_user_ft(&kterm, arg, sizeof(kterm)) < 0)
+            return -EFAULT;
+        tty->term = kterm;
         return 0;
     }
     case TIOCGWINSZ:
-        ((struct winsize *)arg)->ws_row = 25;
-        ((struct winsize *)arg)->ws_col = 80;
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg,
+                                      sizeof(struct winsize), true))
+            return -EFAULT;
+        struct winsize kws = { .ws_row = 25, .ws_col = 80 };
+        if (copy_to_user_ft(arg, &kws, sizeof(kws)) < 0)
+            return -EFAULT;
         return 0;
     case TIOCGPGRP: {
         tty_t *tty = get_dev_tty();
         if (!tty) return -ENODEV;
         pid_t *p = (pid_t *)arg;
-        // v2: 区间检查 p..p+sizeof(pid_t)
-        if ((uint64_t)p >= current->addr_limit ||
-            (uint64_t)p + sizeof(pid_t) > current->addr_limit)
+        if (!p) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)p, sizeof(pid_t), true))
             return -EFAULT;
         uint64_t f = spin_lock_irqsave(&tty->fg_pgrp_lock);
-        *p = tty->fg_pgrp;
+        pid_t kp = tty->fg_pgrp;
         spin_unlock_irqrestore(&tty->fg_pgrp_lock, f);
+        if (copy_to_user_ft(p, &kp, sizeof(kp)) < 0)
+            return -EFAULT;
         return 0;
     }
     case TIOCSPGRP: {
         tty_t *tty = get_dev_tty();
         if (!tty) return -ENODEV;
         pid_t *p = (pid_t *)arg;
-        if ((uint64_t)p >= current->addr_limit ||
-            (uint64_t)p + sizeof(pid_t) > current->addr_limit)
+        if (!p) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)p, sizeof(pid_t), false))
             return -EFAULT;
         pid_t new_pg;
-        memcpy(&new_pg, p, sizeof(pid_t));
+        if (copy_from_user_ft(&new_pg, p, sizeof(new_pg)) < 0)
+            return -EFAULT;
         if (new_pg < 0) return -EINVAL;
         // v4 放宽：new_pg == 0 OR new_pg exists in caller's session
         if (new_pg != 0 && new_pg != current->pgrp) {
@@ -370,7 +392,12 @@ int tty_phys_ioctl(struct vfs_node *node, int cmd, void *arg)
     }
     case FIONREAD: {
         tty_t *tty = get_dev_tty();
-        *(int *)arg = tty ? (tty->head - tty->tail + TTY_BUF_SIZE) % TTY_BUF_SIZE : 0;
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg, sizeof(int), true))
+            return -EFAULT;
+        int avail = tty ? (tty->head - tty->tail + TTY_BUF_SIZE) % TTY_BUF_SIZE : 0;
+        if (copy_to_user_ft(arg, &avail, sizeof(avail)) < 0)
+            return -EFAULT;
         return 0;
     }
     default: return -ENOTTY;

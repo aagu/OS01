@@ -7,12 +7,12 @@
 #include <kernel/percpu.h>
 #include <kernel/vmm.h>
 #include <kernel/pmm.h>
+#include <kernel/arch/mmu.h> // arch_virt_to_phys (4KB/2MB full leaf)
+#include <kernel/uaccess.h>  // syscall_check_user_range
 
 #include <uapi/futex.h>
 #include <list.h>
 #include <errno.h>
-
-extern uint64_t user_va_to_phys(uint64_t *pml4, uint64_t va);
 
 #define FUTEX_BUCKETS 64
 
@@ -44,8 +44,14 @@ static uint64_t offset_in_page(uint64_t va)
 
 int do_futex_wait(int *uaddr, int val)
 {
-    // 1. Validate address
-    if ((uint64_t)uaddr >= current->addr_limit || ((uint64_t)uaddr & 3))
+    // 1. Validate address (alignment, range, perms) BEFORE acquiring
+    //    the bucket lock.  check_user_range is a snapshot but catches
+    //    the easy null-pointer, kernel-ptr, and unmapped cases.
+    //    Use _ft under the lock for the actual read so a racing
+    //    munmap doesn't blow up here.
+    if (((uint64_t)uaddr & 3))
+        return -EFAULT;
+    if (!syscall_check_user_range((uint64_t)uaddr, 4, true))
         return -EFAULT;
 
     task_t *self = current;
@@ -53,15 +59,23 @@ int do_futex_wait(int *uaddr, int val)
 
     uint64_t flags = spin_lock_irqsave(&bucket->lock);
 
-    // 2. Walk page table — page must be present
+    // 2. Walk page table — use arch_virt_to_phys (full-leaf translation
+    //    handling 4KB + 2MB correctly).  The old user_va_to_phys was
+    //    2MB-only and would return the wrong page for 4KB/COW entries
+    //    (see plan v9).
     uint64_t *user_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)self->mm->pml4);
-    uint64_t page_phys = user_va_to_phys(user_pml4, (uint64_t)uaddr & ~0xFFFULL);
+    uint64_t page_phys = arch_virt_to_phys(user_pml4, (uint64_t)uaddr & ~0xFFFULL);
     if (!page_phys) {
         spin_unlock_irqrestore(&bucket->lock, flags);
         return -EFAULT;
     }
 
-    // 3. Read *uaddr via kernel mapping
+    // 3. Read *uaddr via kernel mapping.  We translate the page ONCE
+    //    (under the lock) and read the in-page offset directly.  This
+    //    is NOT a copy_*_ft — we have the physical page mapped, so a
+    //    user-side munmap can't reach this read; the worst case is a
+    //    transient stale value, which the bucket-spinlock + val retry
+    //    loop already covers (the standard futex FUTEX_WAIT semantic).
     void *kaddr = (void *)Phy_To_Virt(page_phys) + offset_in_page((uint64_t)uaddr);
     int futex_val = *(volatile int *)kaddr;
 
@@ -94,7 +108,13 @@ int do_futex_wait(int *uaddr, int val)
 
 int do_futex_wake(int *uaddr, int val)
 {
-    if ((uint64_t)uaddr >= current->addr_limit)
+    // Fast-reject range check (defends against kernel-pointer/null).
+    // do_futex_wait also does this; do_futex_wake is the companion
+    // path that doesn't dereference user memory (just hashes uaddr
+    // and wakes wakers), so the check is purely a hardening
+    // measurement.
+    if ((uint64_t)uaddr < USER_MIN_ADDR ||
+        (uint64_t)uaddr >= current->addr_limit)
         return -EFAULT;
 
     struct futex_bucket *bucket = futex_hash(current->mm->pml4, uaddr);
