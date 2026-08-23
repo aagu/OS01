@@ -4,6 +4,7 @@
 #include <kernel/debug.h>
 #include <kernel/random.h>
 #include <kernel/vmm.h>
+#include <kernel/uaccess.h>   // USER_MIN_ADDR (Cat C — Task 8 random_read user/kernel split)
 // kernel/vmm.h defines a legacy `mmap` type macro (uint64_t*) that collides
 // with devfs_ops.mmap / ops->mmap below — undef it here.  devfs.c never uses
 // `mmap` as a type.  (Same pattern as vma.c and fb.c.)
@@ -122,16 +123,27 @@ static int serial_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *
 // syscall (a deliberate deviation from the other devices' raw writes —
 // see spec §5.2).  Cap mirrors the syscall so one huge read can't hold
 // mm->lock while serializing that mm's munmap/mprotect.
+//
+// Task 8 (Cat C): fd_read FD_DEV bounces through a kernel buffer, so
+// `buffer` here is kernel heap memory, NOT a user pointer.  Skip the
+// user_write_range_begin/end pair when the address lies in kernel
+// space — those helpers are designed to validate user ranges and
+// would (correctly) reject a kernel address with -EFAULT.
 static int random_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 {
     (void)node; (void)offset;
     if (!buffer || size == 0) return 0;
     if (size > RANDOM_MAX_LEN) size = RANDOM_MAX_LEN;
 
-    int rc = user_write_range_begin((uint64_t)buffer, (size_t)size);
-    if (rc < 0) return rc;                 // -EFAULT (lock released)
+    bool in_user = ((uint64_t)buffer >= USER_MIN_ADDR &&
+                    (uint64_t)buffer < current->addr_limit);
+    int rc = 0;
+    if (in_user) {
+        rc = user_write_range_begin((uint64_t)buffer, (size_t)size);
+        if (rc < 0) return rc;                 // -EFAULT (lock released)
+    }
     get_random_bytes(buffer, (size_t)size);
-    user_write_range_end();
+    if (in_user) user_write_range_end();
     return (int)size;
 }
 

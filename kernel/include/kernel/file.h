@@ -51,6 +51,17 @@ typedef struct pipe {
     wait_queue_t  write_wait;   // task 直接阻塞 (fd_write)
     list_t        read_poll;    // poll entry — 挂 poll_wait_entry_t.node
     list_t        write_poll;   // poll entry
+    // ── Cat C read_busy (Task 8) ──
+    // Kernel-enforced single-reader serialization for the
+    // peek→copy→commit window in pipe_read_internal.  fork()/dup()
+    // can share a read end across two tasks; without this, the second
+    // reader racing in the peek→commit window would corrupt tail.
+    // Acquired in pipe_read_reserve(); released in pipe_read_release()
+    // (lock-protected IDEMPOTENT — also safe to call from the _ft_res
+    // fault-cleanup path, since out_release checks the `released` flag).
+    int          read_busy;
+    spinlock_T   read_busy_lock;
+    wait_queue_t read_busy_wq;
 } pipe_t;
 
 // ── Socket ────────────────────────────────────────────────────

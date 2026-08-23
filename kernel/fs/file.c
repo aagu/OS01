@@ -174,6 +174,11 @@ pipe_t *pipe_alloc(void)
     wait_queue_init(&p->write_wait);
     list_init(&p->read_poll);
     list_init(&p->write_poll);
+    // Task 8: read_busy reservation fields.  calloc zeros memory so
+    // read_busy==0 == "available" already.  Spinlocks/wait_queues must
+    // still be initialized explicitly (calloc gives lock=0 == "locked").
+    spin_init(&p->read_busy_lock);
+    wait_queue_init(&p->read_busy_wq);
     return p;
 }
 
@@ -397,42 +402,133 @@ void pipe_wake_writers(pipe_t *p)
 }
 
 // ── Pipe read internal (blocking, exported for PTY) ─────────
+//
+// Task 8 (Cat C): three-phase + read_busy reservation + copy_to_user_ft_res.
+//
+// Concurrency contract:
+//   The pipe is a 1-producer / 1-consumer ring buffer.  fork()/dup()
+//   can share the read end across two tasks, so the "single reader"
+//   guarantee is NOT structural.  We enforce it KERNEL-side: the
+//   peek→copy→commit window is serialized by p->read_busy (Task 8a).
+//
+// Three phases:
+//   (1) reserve   — acquire read_busy (blocks if another reader holds
+//                   it; second reader blocks instead of racing tail)
+//   (2) wait data — block on read_wait until pipe has data or writers
+//                   reach 0; reservation held throughout
+//   (3) peek      — under p->lock, copy ring→kernel bounce WITHOUT
+//                   advancing tail (no consume; concurrent peek would
+//                   corrupt tail)
+//   (4) _ft_res   — copy_to_user_ft_res with on_fault callback that
+//                   releases read_busy (NO p->lock held here, so fault
+//                   safe; on fault tail is unchanged → data preserved)
+//   (5) commit    — under p->lock, advance tail + wake writers
+//   (6) release   — every exit path (EOF / -EINTR / -EFAULT / success)
+//                   routes through out_release; the `released` flag
+//                   guards against double-release when the fault cb
+//                   already ran (pipe_read_release is itself
+//                   idempotent — see below — but the flag is the
+//                   contract that makes it auditable)
+//
+// pipe_read_release is lock-protected IDEMPOTENT: only clears+wakes
+// when read_busy==1.  This is the by-construction safety against
+// double-release (fault cb + out_release), not a comment.
+
+// Bytes available in pipe (head != tail mod PIPE_SIZE).  Used by the
+// peek phase to know how much to copy into the kernel bounce.
+static inline size_t pipe_avail(pipe_t *p)
+{
+    return (p->head - p->tail + PIPE_SIZE) % PIPE_SIZE;
+}
+
+// Block until read_busy clears, then atomically set it.
+// wait_queue_sleep uses current->io_wait_node; that node is FREE for
+// re-use here because pipe_read_internal hasn't enqueued itself on
+// read_wait yet (reservation is acquired FIRST).  The reserve loop
+// wakes when pipe_read_release wakes read_busy_wq.
+static void pipe_read_reserve(pipe_t *p)
+{
+    for (;;) {
+        uint64_t flags = spin_lock_irqsave(&p->read_busy_lock);
+        if (!p->read_busy) {
+            p->read_busy = 1;
+            spin_unlock_irqrestore(&p->read_busy_lock, flags);
+            return;
+        }
+        spin_unlock_irqrestore(&p->read_busy_lock, flags);
+        wait_queue_sleep(&p->read_busy_wq);
+        // loop and re-check read_busy
+    }
+}
+
+// Lock-protected idempotent release.  Safe to call from both the
+// fault-cleanup path (longjmp from copy_to_user_ft_res) and the
+// normal out_release path — only clears+wakes when read_busy==1.
+// The `released` flag in pipe_read_rsv is the AUDITABLE contract on
+// top of this; we still keep idempotency because it makes the
+// callback safe even if someone adds a future release site.
+static void pipe_read_release(pipe_t *p)
+{
+    uint64_t flags = spin_lock_irqsave(&p->read_busy_lock);
+    if (p->read_busy) {
+        p->read_busy = 0;
+        spin_unlock_irqrestore(&p->read_busy_lock, flags);
+        wait_queue_wake_all(&p->read_busy_wq);   // wake outside the lock
+    } else {
+        spin_unlock_irqrestore(&p->read_busy_lock, flags);
+    }
+}
+
+// Forward declared here so pipe_read_release_cb can use it.  Full
+// struct is defined inside pipe_read_internal below.
+struct pipe_read_rsv {
+    pipe_t *p;
+    int    *released;
+};
+
+// on_fault callback for copy_to_user_ft_res — matches the
+// void (*)(void *) signature the primitive requires.
+static void pipe_read_release_cb(void *arg)
+{
+    struct pipe_read_rsv *r = (struct pipe_read_rsv *)arg;
+    *r->released = 1;                  // out_release must NOT re-release
+    pipe_read_release(r->p);           // idempotent: only clears when set
+}
+
 int64_t pipe_read_internal(pipe_t *p, void *buf, uint64_t size)
 {
     if (!p) return -1;
+    if (!buf || size == 0) return -1;
 
-    uint8_t *dst = (uint8_t *)buf;
-    uint64_t total = 0;
+    int released = 0;
+    struct pipe_read_rsv rsv = { p, &released };
+
+    pipe_read_reserve(p);
+
+    int64_t result = 0;
 
     for (;;) {
+        // ── Phase 2: wait for data ──────────────────────────
+        // (Equivalent to the old block-for-data loop, but with the
+        // read_busy reservation held so a concurrent reader cannot
+        // race tail during peek→commit.)
         uint64_t flags = spin_lock_irqsave(&p->lock);
 
-        while (total < size && !pipe_empty(p)) {
-            // Read one byte at a time from the ring buffer
-            dst[total++] = p->buf[p->tail];
-            p->tail = (p->tail + 1) % PIPE_SIZE;
-        }
-
-        if (total > 0) {
-            // Data consumed — wake any blocked writers
-            pipe_wake_writers(p);
+        if (!pipe_empty(p)) {
             spin_unlock_irqrestore(&p->lock, flags);
-            return (int64_t)total;
+            break;
         }
 
         // Pipe empty — check if any writer still exists
         if (p->writers == 0) {
             spin_unlock_irqrestore(&p->lock, flags);
-            return 0;  // EOF
+            result = 0;                       // EOF
+            goto out_release;
         }
 
         spin_unlock_irqrestore(&p->lock, flags);
 
-        // Register on pipe's wait queue, then double-check
-        // under p->lock to close the lost-wakeup race:
-        //  1. check writers=1 → 2. unlock → 3. writer exits, wake
-        //     (queue empty) → 4. add to queue → sleep forever.
-        // Double-check after queue registration catches step 3.
+        // Double-check after queue registration to close lost-wakeup
         {
             wait_queue_t *wq = &p->read_wait;
             int do_eof = 0;
@@ -443,12 +539,15 @@ int64_t pipe_read_internal(pipe_t *p, void *buf, uint64_t size)
             {
                 uint64_t p2_flags = spin_lock_irqsave(&p->lock);
                 if (p->writers == 0 && pipe_empty(p)) {
-                    // No more data will ever arrive → EOF
                     list_del_init(&current->io_wait_node);
                     do_eof = 1;
                 } else if (p->writers == 0 && !pipe_empty(p)) {
                     // Last writer gone but data still in buffer —
                     // don't sleep, go back and read it
+                    list_del_init(&current->io_wait_node);
+                } else if (!pipe_empty(p)) {
+                    // Race: writer arrived between the outer check
+                    // and queue registration — don't sleep, retry.
                     list_del_init(&current->io_wait_node);
                 }
                 spin_unlock_irqrestore(&p->lock, p2_flags);
@@ -456,7 +555,8 @@ int64_t pipe_read_internal(pipe_t *p, void *buf, uint64_t size)
 
             if (do_eof) {
                 spin_unlock_irqrestore(&wq->lock, wq_flags);
-                return 0;
+                result = 0;
+                goto out_release;
             }
 
             current->state = TASK_INTERRUPTIBLE;
@@ -464,7 +564,6 @@ int64_t pipe_read_internal(pipe_t *p, void *buf, uint64_t size)
             spin_unlock_irqrestore(&wq->lock, wq_flags);
 
             if (!was_queued) {
-                // Dequeued by double-check (buffer has data) — skip sleep
                 current->state = TASK_RUNNING;
             } else {
                 schedule();
@@ -475,14 +574,78 @@ int64_t pipe_read_internal(pipe_t *p, void *buf, uint64_t size)
             }
         }
 
-        if (arch_signal_pending_fatal())
-            return -EINTR;
+        if (arch_signal_pending_fatal()) {
+            result = -EINTR;
+            goto out_release;
+        }
     }
+
+    // ── Phase 3: peek — copy ring→bounce WITHOUT advancing tail ──
+    uint8_t bounce[PIPE_SIZE];
+    size_t avail;
+    {
+        uint64_t flags = spin_lock_irqsave(&p->lock);
+        avail = pipe_avail(p);
+        if (avail > size) avail = size;
+        // Linear copy if tail+avail <= PIPE_SIZE, else two halves
+        if (p->tail + avail <= PIPE_SIZE) {
+            memcpy(bounce, p->buf + p->tail, avail);
+        } else {
+            size_t first = PIPE_SIZE - p->tail;
+            memcpy(bounce, p->buf + p->tail, first);
+            memcpy(bounce + first, p->buf, avail - first);
+        }
+        spin_unlock_irqrestore(&p->lock, flags);
+    }
+
+    // ── Phase 4: _ft_res copy bounce→user with fault cleanup ──
+    // NO pipe lock held here.  on_fault releases read_busy (tail
+    // unchanged → no data lost).  If _ft succeeds, we commit.
+    ssize_t rc = copy_to_user_ft_res(buf, bounce, avail,
+                                     pipe_read_release_cb, &rsv);
+    if (rc < 0) {
+        // Fault cb already set *released=1 AND called pipe_read_release
+        // (idempotent: cleared read_busy if set).  Do NOT release again.
+        result = -EFAULT;
+        goto out_release;
+    }
+
+    // ── Phase 5: commit — advance tail + wake writers ────────
+    {
+        uint64_t flags = spin_lock_irqsave(&p->lock);
+        p->tail = (p->tail + avail) % PIPE_SIZE;
+        pipe_wake_writers(p);
+        spin_unlock_irqrestore(&p->lock, flags);
+    }
+    result = (int64_t)avail;
+
+out_release:
+    if (!released) {
+        pipe_read_release(p);
+    }
+    return result;
 }
 
 // ── Read through a file descriptor ──────────────────────────
-// Returns bytes read, 0 for EOF (pipe with no writers), or
-// negative on error.
+//
+// Task 8 (Cat C): all read paths route user-space destinations through
+// the kernel bounce (UACCESS_BOUNCE_SIZE) so the FS / lwIP callback
+// never touches a user pointer.  Offset advances ONLY after a
+// successful copy_to_user_ft; first-chunk fault returns -EFAULT,
+// later-chunk fault returns the short count already committed.
+//
+//   FD_VFS / FD_DEV   — kmalloc(BOUNCE), vfs_read into kbuf, _ft to
+//                       user; loop until vfs_read returns 0 or all
+//                       bytes consumed
+//   FD_PIPE / PTY     — pipe_read_internal (Task 8d three-phase +
+//                       read_busy + _ft_res)
+//   FD_SOCKET         — drain rx_nb cache OR netconn_recv into
+//                       kbuf, _ft to user, advance rx_off only on
+//                       success (per brief: "rx_off/netbuf 原样保留
+//                       可重试" on _ft fault)
+//
+// Returns bytes read, 0 for EOF (pipe with no writers), or negative
+// on error.
 int64_t fd_read(file_t *f, void *buf, uint64_t size)
 {
     if (!f || !buf || size == 0) return -1;
@@ -498,10 +661,42 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
         int acc = f->flags & 3;
         if (!(acc == O_RDONLY || acc == O_RDWR))
             return -1;
-        int64_t n = vfs_read(f->node, f->offset, size, buf);
-        if (n > 0)
+
+        // Task 8: chunk bounce through kernel buffer.  vfs_read
+        // never sees a user pointer (writes into kbuf); _ft copies
+        // to user; offset advances ONLY after a successful _ft copy.
+        // submitted==0 → -EFAULT (block never made it past user).
+        void *kbuf = kmalloc(UACCESS_BOUNCE_SIZE);
+        if (!kbuf) return -1;
+
+        uint64_t committed = 0;
+        for (;;) {
+            uint64_t remaining = size - committed;
+            if (remaining == 0) break;
+            uint64_t chunk = remaining < UACCESS_BOUNCE_SIZE
+                             ? remaining : UACCESS_BOUNCE_SIZE;
+
+            int64_t n = vfs_read(f->node, f->offset, chunk, kbuf);
+            if (n <= 0) break;            // 0 = EOF, <0 = error
+
+            ssize_t rc = copy_to_user_ft(
+                (uint8_t *)buf + committed, kbuf, (size_t)n);
+            if (rc < 0) {
+                // User buffer fault: stop here.  If we already
+                // committed bytes, return the short count; else -EFAULT.
+                if (committed == 0) {
+                    kfree(kbuf);
+                    return -EFAULT;
+                }
+                break;
+            }
             f->offset += (uint64_t)n;
-        return n;
+            committed += (uint64_t)n;
+            if ((uint64_t)n < chunk) break;   // short read (EOF)
+        }
+        kfree(kbuf);
+        if (committed == 0) return -1;        // vfs_read error
+        return (int64_t)committed;
     }
     case FD_PIPE:
         return pipe_read_internal(f->pipe, buf, size);
@@ -515,15 +710,22 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
         socket_t *s = f->sock;
         if (!s || !s->conn) return -1;
         if (arch_signal_pending_fatal()) return -EINTR;
+
         // Drain a partially-consumed netbuf first (a 1-byte fgets
         // read must not lose the rest of the 370-byte response).
         if (s->rx_nb) {
-                struct netbuf *nb = (struct netbuf *)s->rx_nb;
-                void *data; u16_t data_len;
-                netbuf_data(nb, &data, &data_len);
-                u16_t avail = (data_len > (u16_t)s->rx_off) ? (u16_t)(data_len - s->rx_off) : 0;
-                size_t copy = (avail < size) ? avail : size;
-                if (copy > 0) memcpy(buf, (uint8_t *)data + s->rx_off, copy);
+            struct netbuf *nb = (struct netbuf *)s->rx_nb;
+            void *data; u16_t data_len;
+            netbuf_data(nb, &data, &data_len);
+            u16_t avail = (data_len > (u16_t)s->rx_off)
+                          ? (u16_t)(data_len - s->rx_off) : 0;
+            size_t copy = (avail < size) ? avail : size;
+            if (copy > 0) {
+                // Task 8: bounce through kernel, _ft to user, advance
+                // rx_off only on _ft success.
+                ssize_t rc = copy_to_user_ft(
+                    buf, (uint8_t *)data + s->rx_off, copy);
+                if (rc < 0) return -EFAULT;
                 s->rx_off += (int)copy;
                 if (s->rx_off >= data_len) {
                     s->rx_off = 0;
@@ -532,66 +734,114 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
                         s->rx_nb = NULL;
                     }
                 }
-                if (copy > 0) return (int64_t)copy;
-                return -EAGAIN;
             }
-            struct netbuf *nb;
-            err_t err = netconn_recv((struct netconn *)s->conn, &nb);
-            if (err == ERR_OK) {
-                void *data; u16_t data_len;
-                netbuf_data(nb, &data, &data_len);
-                size_t copy = (data_len < size) ? data_len : size;
-                if (copy > 0) memcpy(buf, data, copy);
-                if (copy < data_len) {
-                    // Keep the rest for the next read.
-                    s->rx_nb = nb;
-                    s->rx_off = (int)copy;
-                } else {
-                    if (netbuf_next(nb) >= 0) {
-                        s->rx_nb = nb;
-                        s->rx_off = 0;
-                    } else {
-                        netbuf_delete(nb);
-                    }
-                }
-                if (copy > 0) return (int64_t)copy;
-                return -EAGAIN;
-            }
-            if (arch_signal_pending_fatal()) return -EINTR;
-            if (err == ERR_CLSD) return 0;
-            if (err == ERR_WOULDBLOCK) return -EAGAIN;
-            return -EIO;
+            if (copy > 0) return (int64_t)copy;
+            return -EAGAIN;
         }
+        struct netbuf *nb;
+        err_t err = netconn_recv((struct netconn *)s->conn, &nb);
+        if (err == ERR_OK) {
+            void *data; u16_t data_len;
+            netbuf_data(nb, &data, &data_len);
+            size_t copy = (data_len < size) ? data_len : size;
+            if (copy > 0) {
+                // Task 8: same _ft-first commit-later discipline.
+                ssize_t rc = copy_to_user_ft(buf, data, copy);
+                if (rc < 0) {
+                    // Drop nb (one-shot netbuf, can't safely cache
+                    // here without state inflation).  POSIX recv on
+                    // bad user ptr is a documented loss.
+                    netbuf_delete(nb);
+                    return -EFAULT;
+                }
+            }
+            if (copy < data_len) {
+                // Keep the rest for the next read.
+                s->rx_nb = nb;
+                s->rx_off = (int)copy;
+            } else {
+                if (netbuf_next(nb) >= 0) {
+                    s->rx_nb = nb;
+                    s->rx_off = 0;
+                } else {
+                    netbuf_delete(nb);
+                }
+            }
+            if (copy > 0) return (int64_t)copy;
+            return -EAGAIN;
+        }
+        if (arch_signal_pending_fatal()) return -EINTR;
+        if (err == ERR_CLSD) return 0;
+        if (err == ERR_WOULDBLOCK) return -EAGAIN;
+        return -EIO;
+    }
     default:
         return -1;
     }
 }
 
 // ── Pipe write internal (blocking, exported for PTY) ────────
+//
+// Task 8 (Cat C): the user source is staged into a kernel bounce
+// buffer BEFORE we ever touch p->lock.  The write side is naturally
+// copy-then-consume: once a byte is in the ring we never have to
+// re-fetch it from user memory, so a fault on the user side just
+// truncates the chunk and returns a short count — no data loss, no
+// memcpy under lock.
+//
+// Pipe is small (PIPE_SIZE = 512B), so we can stack-allocate the
+// bounce and stage at most one pipe-buffer's worth per call to the
+// ring (the rest stays in the user pointer loop and is staged on
+// retry).  This keeps the lock-held section minimal.
 int64_t pipe_write_internal(pipe_t *p, const void *buf, uint64_t size)
 {
     if (!p) return -1;
+    if (!buf || size == 0) return -1;
 
-    const uint8_t *src = (const uint8_t *)buf;
     uint64_t total = 0;
 
     for (;;) {
+        // ── Stage: copy user→kernel bounce BEFORE taking p->lock ──
+        // We copy at most one pipe buffer's worth per iteration
+        // (the rest stays in the user pointer for the next loop).
+        // copy_from_user_ft is fault-safe — longjmp on bad user ptr
+        // returns -EFAULT without any state corruption here.
+        uint64_t remaining = size - total;
+        uint64_t want = remaining < PIPE_SIZE ? remaining : PIPE_SIZE;
+
+        uint8_t bounce[PIPE_SIZE];
+        ssize_t rc = copy_from_user_ft(bounce,
+                                       (const uint8_t *)buf + total,
+                                       (size_t)want);
+        if (rc < 0) {
+            // Fault on the user source.  Whatever we already wrote
+            // in earlier iterations stays in the pipe; return the
+            // short count (or -EFAULT if nothing was written yet).
+            if (total == 0) return -EFAULT;
+            return (int64_t)total;
+        }
+        uint64_t staged = want;
+
+        // ── Locked section: drain bounce into ring ─────────────
+        uint64_t written = 0;
         uint64_t flags = spin_lock_irqsave(&p->lock);
 
-        while (total < size && !pipe_full(p)) {
-            p->buf[p->head] = src[total++];
+        while (written < staged && !pipe_full(p)) {
+            p->buf[p->head] = bounce[written++];
             p->head = (p->head + 1) % PIPE_SIZE;
         }
 
-        if (total > 0) {
-            // Wrote some data — wake blocked readers, return
+        total += written;
+
+        if (written > 0) {
+            // Wrote some data — wake blocked readers, return or loop
             pipe_wake_readers(p);
             spin_unlock_irqrestore(&p->lock, flags);
-            return (int64_t)total;
+            if (total == size) return (int64_t)total;   // all consumed
+            continue;
         }
 
-        // Pipe is full (total == 0)
-        // Check if any reader still exists
+        // Pipe is full (written == 0).  Check if any reader still exists.
         if (p->readers == 0) {
             spin_unlock_irqrestore(&p->lock, flags);
             return -EPIPE;
@@ -648,6 +898,19 @@ int64_t pipe_write_internal(pipe_t *p, const void *buf, uint64_t size)
 }
 
 // ── Write through a file descriptor ─────────────────────────
+//
+// Task 8 (Cat C): all write paths read user data into a kernel
+// bounce (UACCESS_BOUNCE_SIZE) before handing it to the FS / lwIP
+// callback.  The user pointer never reaches a callback that might
+// dereference it.  For socket TX, lwIP never touches user memory
+// at all — we hand it pure kernel memory via netconn_write_partly.
+//
+//   FD_VFS / FD_DEV   — kmalloc(BOUNCE), copy_from_user_ft → kbuf,
+//                       vfs_write, loop until all bytes consumed
+//   FD_PIPE / PTY     — pipe_write_internal (Task 8e staged _ft)
+//   FD_SOCKET         — kmalloc(16KB), copy_from_user_ft → kbuf,
+//                       netconn_write_partly (Task 8g chunked bounce)
+//
 // Returns bytes written or negative on error.
 int64_t fd_write(file_t *f, const void *buf, uint64_t size)
 {
@@ -664,10 +927,46 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
         int acc = f->flags & 3;
         if (!(acc == O_WRONLY || acc == O_RDWR))
             return -1;
-        int64_t n = vfs_write(f->node, f->offset, size, (void *)buf);
-        if (n > 0)
+
+        // Task 8: chunk bounce through kernel buffer.  We _ft-copy
+        // a chunk into kbuf, then vfs_write it; offset advances
+        // after the _ft succeeds (so user-fault on chunk N leaves
+        // chunks 0..N-1 committed).  submitted==0 → -EFAULT.
+        void *kbuf = kmalloc(UACCESS_BOUNCE_SIZE);
+        if (!kbuf) return -1;
+
+        uint64_t committed = 0;
+        for (;;) {
+            uint64_t remaining = size - committed;
+            if (remaining == 0) break;
+            uint64_t chunk = remaining < UACCESS_BOUNCE_SIZE
+                             ? remaining : UACCESS_BOUNCE_SIZE;
+
+            ssize_t rc = copy_from_user_ft(
+                kbuf, (const uint8_t *)buf + committed, (size_t)chunk);
+            if (rc < 0) {
+                if (committed == 0) {
+                    kfree(kbuf);
+                    return -EFAULT;
+                }
+                break;          // short count
+            }
+
+            int64_t n = vfs_write(f->node, f->offset, chunk, kbuf);
+            if (n <= 0) {
+                if (committed == 0) {
+                    kfree(kbuf);
+                    return (n < 0) ? n : -1;   // propagate error
+                }
+                break;
+            }
             f->offset += (uint64_t)n;
-        return n;
+            committed += (uint64_t)n;
+            if ((uint64_t)n < chunk) break;    // short write
+        }
+        kfree(kbuf);
+        if (committed == 0) return -1;
+        return (int64_t)committed;
     }
     case FD_PIPE:
         return pipe_write_internal(f->pipe, buf, size);
@@ -680,10 +979,41 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
     case FD_SOCKET: {
         socket_t *s = f->sock;
         if (!s || !s->conn) return -EIO;
-        err_t err = netconn_write((struct netconn *)s->conn, buf,
-                                  (size_t)size, NETCONN_COPY);
-        if (err == ERR_OK) { f->offset += size; return (int64_t)size; }
-        return -EIO;
+        if (arch_signal_pending_fatal()) return -EINTR;
+
+        // Task 8g: chunked bounce.  lwIP never touches user memory.
+        // 16 KiB chunk keeps TCP segmentation efficient without
+        // ballooning kernel memory.  netconn_write_partly blocks
+        // internally on its own mbox; we loop until the user
+        // buffer is exhausted or a fatal error occurs.
+        uint64_t committed = 0;
+        while (committed < size) {
+            uint64_t remaining = size - committed;
+            uint64_t chunk = remaining < (16 * 1024)
+                             ? remaining : (16 * 1024);
+            uint8_t kbuf[16 * 1024];
+
+            ssize_t rc = copy_from_user_ft(
+                kbuf, (const uint8_t *)buf + committed, (size_t)chunk);
+            if (rc < 0) {
+                if (committed == 0) return -EFAULT;
+                return (int64_t)committed;     // short count
+            }
+
+            err_t err = netconn_write_partly(
+                (struct netconn *)s->conn, kbuf, (size_t)chunk,
+                NETCONN_COPY, NULL);
+            if (err != ERR_OK) {
+                if (committed == 0) return -EIO;
+                return (int64_t)committed;     // short count
+            }
+            committed += chunk;
+            f->offset += chunk;
+            if (arch_signal_pending_fatal()) {
+                return (committed == 0) ? -EINTR : (int64_t)committed;
+            }
+        }
+        return (int64_t)committed;
     }
     default:
         return -1;

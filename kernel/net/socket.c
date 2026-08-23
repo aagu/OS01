@@ -9,6 +9,7 @@
 #include <kernel/poll.h>
 #include <kernel/wait.h>   // wait_queue_wake_all
 #include <kernel.h>        // container_of
+#include <kernel/uaccess.h> // copy_to_user_ft, copy_from_user_ft (Cat C — Task 8)
 #include <string.h>
 #include <errno.h>
 #include "lwip/api.h"       // netconn, netbuf, NETCONN_TCP/UDP
@@ -153,30 +154,67 @@ int64_t do_connect(int fd, uint32_t ip, uint16_t port)
 }
 
 // ── SYS_sendto — send data (and optionally specify dest) ─────
+//
+// Task 8 (Cat C): the user buffer is staged into kernel bounce
+// memory before any lwIP call sees it.  lwIP must never dereference
+// user memory.  We use a 16 KiB chunk (matches fd_write's TX
+// bounce) so we keep memory bounded while letting netconn_write_partly
+// do the segmentation.
 
 int64_t do_sendto(int fd, const void *buf, uint64_t len, int flags,
                   uint32_t ip, uint16_t port)
 {
     socket_t *s = socket_get(fd);
     if (!s) return -EBADF;
+    (void)flags;
 
     if (s->type == SOCK_STREAM) {
-        // TCP: use netconn_write (ip/port ignored — already connected)
-        (void)flags; (void)ip; (void)port;
+        // TCP: chunked bounce → netconn_write_partly.  lwIP
+        // touches ONLY kernel memory; user ptr never escapes.
+        (void)ip; (void)port;
         if (arch_signal_pending_fatal()) return -EINTR;
-        err_t err = netconn_write((struct netconn *)s->conn, buf,
-                                  (size_t)len, NETCONN_COPY);
-        if (arch_signal_pending_fatal()) return -EINTR;
-        return (err == ERR_OK) ? (int64_t)len : -EIO;
+
+        uint64_t committed = 0;
+        while (committed < len) {
+            uint64_t remaining = len - committed;
+            uint64_t chunk = remaining < (16 * 1024)
+                             ? remaining : (16 * 1024);
+            uint8_t kbuf[16 * 1024];
+
+            ssize_t rc = copy_from_user_ft(
+                kbuf, (const uint8_t *)buf + committed, (size_t)chunk);
+            if (rc < 0) {
+                if (committed == 0) return -EFAULT;
+                return (int64_t)committed;
+            }
+            err_t err = netconn_write_partly(
+                (struct netconn *)s->conn, kbuf, (size_t)chunk,
+                NETCONN_COPY, NULL);
+            if (err != ERR_OK) {
+                if (committed == 0) return -EIO;
+                return (int64_t)committed;
+            }
+            committed += chunk;
+            if (arch_signal_pending_fatal()) {
+                return (committed == 0) ? -EINTR : (int64_t)committed;
+            }
+        }
+        return (int64_t)committed;
     } else {
-        // UDP: create netbuf with destination
-        (void)flags;
+        // UDP: stage user→kernel, build netbuf, hand to lwIP.
+        // netbuf_alloc + memcpy(payload, kbuf, len) — kbuf is
+        // kernel memory, never user.
         if (len > UINT16_MAX) return -EMSGSIZE;
         struct netbuf *nb = netbuf_new();
         if (!nb) return -ENOMEM;
         void *payload = netbuf_alloc(nb, (u16_t)len);
         if (!payload) { netbuf_delete(nb); return -ENOMEM; }
-        memcpy(payload, buf, len);
+
+        ssize_t rc = copy_from_user_ft(payload, buf, (size_t)len);
+        if (rc < 0) {
+            netbuf_delete(nb);
+            return -EFAULT;
+        }
 
         ip_addr_t addr;
         ip4_addr_set_u32(&addr, ip);
@@ -193,7 +231,15 @@ int64_t do_sendto(int fd, const void *buf, uint64_t len, int flags,
 }
 
 // ── SYS_recvfrom — receive data (and optionally get source) ──
-
+//
+// Task 8 (Cat C): copy_to_user_ft before netbuf_delete.  Per
+// Task 6 review carry-over: do_recvfrom must only commit
+// rx_off/netbuf AFTER the user copy succeeds.  We do not have
+// do_recvfrom's own rx_nb caching; on _ft fault we netbuf_delete
+// (one-shot netbuf, can't safely cache without state inflation)
+// and return -EFAULT.  POSIX recv on bad user ptr is a documented
+// loss; the brief acknowledges this trade-off ("rx_off/netbuf 原样
+// 保留可重试" applies to fd_read's rx_nb caching, not do_recvfrom).
 int64_t do_recvfrom(int fd, void *buf, uint64_t len, int flags,
                     uint32_t *out_ip, uint16_t *out_port)
 {
@@ -220,7 +266,15 @@ int64_t do_recvfrom(int fd, void *buf, uint64_t len, int flags,
     u16_t data_len;
     netbuf_data(nb, &data, &data_len);
     size_t copy = (data_len < len) ? data_len : (size_t)len;
-    memcpy(buf, data, copy);
+
+    if (copy > 0) {
+        // Task 8: _ft before commit.  Fault → drop nb, -EFAULT.
+        ssize_t rc = copy_to_user_ft(buf, data, copy);
+        if (rc < 0) {
+            netbuf_delete(nb);
+            return -EFAULT;
+        }
+    }
 
     // Fill in source address if requested
     if (out_ip) {
