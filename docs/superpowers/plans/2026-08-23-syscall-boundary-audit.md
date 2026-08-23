@@ -356,28 +356,41 @@
   SELFTEST_ASSERT(rc == -EFAULT);
 
   /* cross-page correctness with non-contiguous phys (deterministic):
-     map phys A at 0x600000, phys A+3*PAGE at 0x601000 in CURRENT pml4 */
-  uint64_t *cur_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
-  struct Page *pa = alloc_pages(ZONE_NORMAL, 1, 0), *pb = alloc_pages(ZONE_NORMAL, 1, 0);
-  /* ensure pb is non-contiguous: if adjacent, free & re-alloc until not (bounded loop) */
-  map_4k_in(cur_pml4, 0x600000, pa->phy_address, PAGE_Present|PAGE_R_W|PAGE_USER);
-  map_4k_in(cur_pml4, 0x601000, pb->phy_address, PAGE_Present|PAGE_R_W|PAGE_USER);
-  uint8_t *kA = (uint8_t *)Phy_To_Virt(pa->phy_address);
-  uint8_t *kB = (uint8_t *)Phy_To_Virt(pb->phy_address);
+     map two 4KB pages at 0x600000/0x601000 in the CURRENT page table.
+     Boot ctx has current->mm == &init_mm but init_mm.pml4 is NOT set
+     (task.h:232) — use the live CR3 instead: */
+  uint64_t *cur_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)arch_get_page_table());
+  /* Save original leaf PTEs so we can restore (the intermediate pml3/pml2
+     pages may be SHARED with real mappings — never unmap/free them, only
+     save/restore the two leaf PTE slots + invlpg): */
+  uint64_t saved_a = get_leaf(cur_pml4, 0x600000);
+  uint64_t saved_b = get_leaf(cur_pml4, 0x601000);
+  uint64_t pa = alloc_4k_page();              /* 4KB allocator (pmm.h:102) */
+  uint64_t pb = alloc_4k_page();
+  int tries = 0;
+  while ((pa >> 12) + 1 == (pb >> 12) && tries++ < 16)   /* assert non-adjacent */
+      { free_4k_page(pa); pa = alloc_4k_page(); }         /* retry, bounded */
+  SELFTEST_ASSERT((pa >> 12) + 1 != (pb >> 12));         /* skip-able if can't */
+  set_leaf(cur_pml4, 0x600000, pa, PAGE_Present|PAGE_R_W|PAGE_USER);
+  set_leaf(cur_pml4, 0x601000, pb, PAGE_Present|PAGE_R_W|PAGE_USER);
+  arch_flush_tlb_page(0x600000); arch_flush_tlb_page(0x601000);
+  uint8_t *kA = (uint8_t *)Phy_To_Virt(pa);
+  uint8_t *kB = (uint8_t *)Phy_To_Virt(pb);
   memset(kA, 0xAA, 4096); memset(kB, 0xBB, 4096);
   ssize_t n = copy_to_user_ft((void *)0x600ff0, ksrc, 32);  /* spans into 0x601000 */
   SELFTEST_ASSERT(n == 32);
-  SELFTEST_ASSERT(memcmp(kA + 0xff0, ksrc, 16) == 0);       /* first 16B in phys A */
-  SELFTEST_ASSERT(memcmp(kB, ksrc + 16, 16) == 0);          /* last 16B in phys A+3*PAGE */
-  /* unmap + free both */
-  selftest_unmap(cur_pml4, 0x600000); selftest_unmap(cur_pml4, 0x601000);
-  free_pages(pa); free_pages(pb);
+  SELFTEST_ASSERT(memcmp(kA + 0xff0, ksrc, 16) == 0);       /* first 16B in page A */
+  SELFTEST_ASSERT(memcmp(kB, ksrc + 16, 16) == 0);          /* last 16B in page B */
+  /* restore original leaf PTEs (do NOT free shared intermediate tables): */
+  set_leaf(cur_pml4, 0x600000, saved_a, 0);  set_leaf(cur_pml4, 0x601000, saved_b, 0);
+  arch_flush_tlb_page(0x600000); arch_flush_tlb_page(0x601000);
+  free_4k_page(pa); free_4k_page(pb);        /* free_4k_page(phys), pmm.h:103 */
 
   /* strnlen_user */
   /* page-tail NUL: string at 0x600ffc "AB" NUL at 0x600ffe (next page unmapped) -> returns 2 */
   /* no NUL within max -> returns max; unmapped -> -EFAULT */
   ```
-  说明：`map_4k_in`/`selftest_unmap` 在 `pt_for` 基础上落到**当前 pml4**（非合成表）并写 TLB flush（`arch_flush_tlb_page`）。物理页非连续用**分配后检查**保证（pa/pb 相邻则换页重试，bounded）。
+  说明：`get_leaf`/`set_leaf` 是**叶子 PTE 槽读写助手**（参考 `arch_virt_to_phys` mmu.h:38-56 的 l4/l3/l2/l1 索引计算，`set_leaf` 仅写最终 pml1 槽，不创建/销毁中间表——boot 上下文中间表可能被真实映射共享，**只保存/恢复叶槽 + `arch_flush_tlb_page`**）。4KB 页用 `alloc_4k_page()`/`free_4k_page(phys)`（pmm.h:102-103）——`alloc_pages` 单位是 2MB 且 `free_pages` 要 number 参数，不适用。非连续用**实际物理页框比较断言**（`(pa>>12)+1 != (pb>>12)`），不写死 `+3*PAGE` 假设；相邻则 bounded 重试，仍不满足则跳过该用例（不硬失败）。
 
 - [ ] **Step 3: 注册到 selftest.c**
   在 `kernel/test/selftest.c` 加 `extern void selftest_uaccess(void);` + 在 `selftest_run_all()` 调用表加 `selftest_uaccess();`（参考 test_timer.c 等注册方式）。
@@ -614,9 +627,37 @@ if (buf) {   // NULL 合法处
   - socket 族（53/54/57/58/59/60/61）——**具体桥接**（不能笼统"bounce"）：
     - `bind`（trap.c:2438）：`struct sockaddr_in a; if (!check_user_range(rsi,sizeof(a),false)){-EFAULT;} if (copy_from_user_ft(&a,(void*)rsi,sizeof(a))<0){-EFAULT;} do_bind(fd, a.sin_addr, os01_ntohs(a.sin_port));`
     - `connect`（2371）：同 bind（拷内核栈后再 do_connect）
-    - `setsockopt`（2456）：`void *optval = kmalloc(r8); if (copy_from_user_ft(optval,(void*)r10,r8)<0){kfree;-EFAULT;} do_setsockopt(fd,lv,opt,optval,r8); kfree(optval);`
+    - `setsockopt`（2456）：**optlen 必须设 ABI 上限 + 处理 0**（敌意 `r8` 可造成超大 kmalloc/DoS）：
+      ```c
+      #define SOCKOPT_MAX 4096
+      uint64_t optlen = regs->r8;
+      if (optlen == 0 || optlen > SOCKOPT_MAX) { regs->rax = -EINVAL; break; }
+      if (!check_user_range(regs->r10, optlen, false)) { regs->rax = -EFAULT; break; }
+      void *optval = kmalloc(optlen);
+      if (!optval) { regs->rax = -ENOMEM; break; }
+      if (copy_from_user_ft(optval, (void *)regs->r10, optlen) < 0) { kfree(optval); regs->rax = -EFAULT; break; }
+      regs->rax = do_setsockopt(fd, lv, opt, optval, optlen);
+      kfree(optval);
+      ```
     - `getsockname`（2464）：**现直接读写 addr_ptr/addrlen_ptr** → 改本地内核 `sockaddr_in`+`uint32_t`：`struct sockaddr_in kaddr; uint32_t klen = sizeof(kaddr); ret = do_getsockname(fd, &kaddr, &klen); if (ret>=0){ if(copy_to_user_ft((void*)rsi,&kaddr,sizeof(kaddr))<0){-EFAULT;} if(copy_to_user_ft((void*)rdx,&klen,sizeof(klen))<0){-EFAULT;} }`
-    - `getsockopt`（2477）：同 getsockname（内核 optval 缓冲 + `_ft` 回写 optlen/optval）
+    - `getsockopt`（2477）：**先安全读用户 optlen 到本地，再按受限长度分配和回写**（`r8` 指向用户 optlen，不能直接当长度用）：
+      ```c
+      uint32_t klen = 0;
+      if (!check_user_range(regs->r8, sizeof(uint32_t), false) ||
+          copy_from_user_ft(&klen, (void *)regs->r8, sizeof(klen)) < 0) {
+          regs->rax = -EFAULT; break;
+      }
+      if (klen > SOCKOPT_MAX) { regs->rax = -EINVAL; break; }
+      void *kopt = kmalloc(klen ? klen : 1);
+      if (!kopt) { regs->rax = -ENOMEM; break; }
+      regs->rax = do_getsockopt(fd, lv, opt, kopt, &klen);
+      if (regs->rax >= 0) {
+          if (copy_to_user_ft((void *)regs->r10, kopt, klen) < 0 ||
+              copy_to_user_ft((void *)regs->r8, &klen, sizeof(klen)) < 0)
+              regs->rax = -EFAULT;
+      }
+      kfree(kopt);
+      ```
     - `sendto`（2382）：sockaddr `copy_from_user_ft` 拷内核（同 bind）；**buf 走 Task 8 的 socket TX 分块 bounce**
     - `recvfrom`（2402）：**buf 写回 + 地址写回都 `_ft`**——`do_recvfrom` 收数据到内核 bounce 或直接到 `_ft`；`addr_ptr`/`addrlen_ptr`（trap.c:2431,2433）post-block 写回 `copy_to_user_ft`；**只有 `_ft` 成功才推进/释放 netbuf（rx_off）**
 
@@ -714,6 +755,8 @@ if (buf) {   // NULL 合法处
 
 ## Task 8: Cat C 大缓冲 VFS bounce 分块层 + 阻塞触点 + do_pipe（Task 6 已含 do_pipe 回滚，此处只 VFS bounce + socket rx/tx）
 
+> **相对 spec 的偏差（已按 review 优化）**：pipe/PTY 读不用 bounce + `_ft`（spec §5.1 原写法），改为**锁内校验 + 锁内直拷**协议（见下）——更简单、并发正确、无 `_ft` 预留清理问题。spec §6 "pipe 经 bounce 无数据丢失" 语义由"校验失败不消费"等效满足。
+
 **Files:**
 - Modify: `kernel/fs/file.c`（`fd_read`/`fd_write` 分块 bounce + socket rx `_ft` / tx 分块 bounce）
 
@@ -739,16 +782,22 @@ if (buf) {   // NULL 合法处
   }
   ```
   - **VFS/DEV 同步读**：`kbuf = kmalloc(UACCESS_BOUNCE_SIZE)`；循环 `n = vfs_read(f->node, f->offset, min(size-committed, BOUNCE), kbuf)` → `put_user_chunk`；n==0 结束；`kfree`。
-  - **pipe/PTY 读——两阶段 peek/commit（fault 不丢数据，且不在持锁时拷贝）**：`_ft` 不能持 `p->lock`（§4 硬约束：longjmp 绕过解锁 → 死锁），所以：
+  - **pipe/PTY 读——锁内校验 + 锁内直拷（无 `_ft`、无预留、并发安全）**：三阶段 peek/commit 在并发 reader 下不正确（Phase 1 解锁后另一 reader 可推进 tail，Phase 3 按旧快照推进 → 重复读/错跳/覆盖并发进展）；`_ft` 也不能持 `p->lock`（§4 硬约束）。改用**无需保留 pipe 状态的协议**——整段操作原子地持锁完成，用户拷贝不可能 fault：
     ```c
-    // Phase 1 (peek, under p->lock): mirror ring[tail..tail+avail) -> bounce
-    //   (plain memcpy, no user memory, cannot fault). Unlock.
-    // Phase 2 (NO lock): rc = copy_to_user_ft(user, bounce, avail)
-    //   fault -> return -EFAULT (tail NOT advanced -> data stays in ring).
-    // Phase 3 (commit, under p->lock): tail = (tail + n) % PIPE_SIZE;
-    //   pipe_wake_writers(p).  Unlock.
+    // past the block, under p->lock:
+    if (!syscall_check_user_range((uint64_t)buf, avail, true)) {
+        /* unlock; return -EFAULT — nothing consumed (no data loss) */
+    }
+    memcpy(buf, ring + tail, avail);   /* CANNOT fault: validated just above,
+        no schedule between validate and copy (both under lock, no schedule
+        call), and munmap requires return-to-user which can't happen mid-
+        locked-copy on a single-threaded process */
+    tail = (tail + avail) % PIPE_SIZE;
+    pipe_wake_writers(p);
+    unlock; return avail;
     ```
-    `pipe_read_internal` 的字节循环（file.c:399-466 `dst[total++]`）改为该两阶段：先在锁内把 ring 内容镜像到 bounce（不消费），锁外 `_ft` 到用户，成功后锁内推进 tail。**用户拷贝失败 → tail 不动 → 数据不丢**（满足 spec §6 "pipe/tty 经 bounce buffer 无数据丢失"）。
+    **并发正确性**：validate + memcpy + tail 推进全部在 `p->lock` 内原子完成——并发 reader 被锁挡住，无重复读/错跳。**"不丢数据"**：check_user_range 失败时 tail 未动（数据保留）；校验通过后拷贝不可能 fault（无调度窗口，单线程进程的页不可能在拷贝中被 munmap）。**无 `_ft`、无预留、无 longjmp 清理问题**——比三阶段方案更简单且正确。`pipe_read_internal` 的字节循环（file.c:399-466 `dst[total++]`）改为该模式。
+  - **tty_read**（tty.c，`schedule()` 后写 buf）：同 socket RX——最终排水（canon/ring → buf）在无锁处，**`copy_to_user_ft` 后置**（post-block）；`_ft` 失败 → `-EFAULT`，已排水的数据留在 tty 缓冲下次可重读（tty ring 不因失败丢失）。
   - **socket RX**（file.c:513-563）：`copy_to_user_ft(buf, data, copy)` **成功后**才 `s->rx_off += copy` / 推进 netbuf / 释放（525-535、543-555 现有"先 memcpy 后推进"改为先 `_ft` 后推进；`_ft` 失败 → 返回 `-EFAULT`，rx_off/netbuf 原样保留可重试）。
   - 块间 fault：返回 `committed`（前块已提交字节，offset 已推进）；首块 fault：`-EFAULT`。
 
