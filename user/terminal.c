@@ -142,6 +142,15 @@ int main(void)
 {
     char *ash_argv[] = { "ash", NULL };
 
+    // The console TTY's VINTR line discipline broadcasts SIGINT to the
+    // whole foreground pgrp (pgrp 1 here — job control is disabled).  This
+    // process is the terminal emulator, not a job: it must survive ^C.
+    // It already handles ^C itself by forwarding SIGINT to ash
+    // (handle_input → kill(ash_pid, SIGINT)), so it ignores the broadcast.
+    // (init sets SIGINT=SIG_IGN, but exec() resets all handlers to SIG_DFL
+    // per kernel/sched/task.c:1452, so we must re-ignore here.)
+    signal(SIGINT, SIG_IGN);
+
     // 1. Open /dev/tty
     int tty_fd = open("/dev/tty", O_RDONLY);
     if (tty_fd < 0) { exec(ASH_PATH, ash_argv, environ); return 1; }
