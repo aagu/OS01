@@ -898,20 +898,24 @@ int arch_do_signal_delivery(pt_regs_t *regs)
         size_t total = sizeof(frame) + 8;  // 200 + 8 = 208
         uint64_t new_rsp = ((regs->rsp - total - 8) & ~15UL) + 8;
 
-        // 3. Translate user stack VA → kernel pointer
-        uint64_t *user_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
-        uint64_t frame_phys = user_va_to_phys(user_pml4, new_rsp + 8);
-        if (!frame_phys) {
-            continue;  // leave pending, retry
-        }
-        void *kstack = (void *)Phy_To_Virt(frame_phys);
-
-        // 4. Write sigframe + trampoline return address to user stack
-        memcpy(kstack, &frame, sizeof(frame));           // sigframe at new_rsp+8
+        // 3. Fast-reject + authoritative write via user VIRTUAL addresses.
+        //    copy_to_user_ft walks pml4 per page, so a write that crosses
+        //    a 4KB page boundary lands in the correct second page (the
+        //    old Phy_To_Virt+memcpy translated only the start address and
+        //    would corrupt the wrong physical page for 4KB mappings).
+        //    If either copy fails the signal stays pending and regs are
+        //    untouched — the next return-to-userspace retries with a
+        //    possibly fixed user stack.
+        if (!syscall_check_user_range(new_rsp, total, true))
+            continue;   // keep pending, retry
         uint64_t tramp = restorer;
-        memcpy(kstack - 8, &tramp, 8);                   // trampoline at new_rsp
+        if (copy_to_user_ft((void *)new_rsp, &tramp, 8) < 0)
+            continue;   // keep pending — do NOT touch regs
+        if (copy_to_user_ft((void *)(new_rsp + 8), &frame,
+                            sizeof(frame)) < 0)
+            continue;   // keep pending — do NOT touch regs
 
-        // 5. Rewrite pt_regs → RESTORE_ALL → iretq → handler
+        // 4. Rewrite pt_regs → RESTORE_ALL → iretq → handler
         regs->rdi = sig;
         regs->rip = (uint64_t)handler;
         regs->rsp = new_rsp;
@@ -2624,28 +2628,35 @@ case SYS_getsid: {
     case SYS_sigreturn: {
         // regs->rsp == sigframe start in user space (handler ret pop'd
         // trampoline, then int $0x80 saved this RSP as pt_regs->rsp).
-        uint64_t *user_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
-        uint64_t frame_phys = user_va_to_phys(user_pml4, regs->rsp);
-        if (!frame_phys) { regs->rax = -EFAULT; break; }
-        struct sigframe *kframe = (struct sigframe *)Phy_To_Virt(frame_phys);
+        // Read the whole frame via VIRTUAL addresses (per-page walker)
+        // so a frame that crosses a 4KB page boundary is read correctly;
+        // the old user_va_to_phys+Phy_To_Virt only translated the start
+        // and would read junk for the second page under 4KB mappings.
+        struct sigframe frame;
+        if (!syscall_check_user_range(regs->rsp, sizeof(frame), false) ||
+            copy_from_user_ft(&frame, (void *)regs->rsp,
+                              sizeof(frame)) < 0) {
+            regs->rax = -EFAULT;
+            break;                       // other regs untouched
+        }
 
         // Validate sigframe: iretq CS must be ring-3
-        if ((kframe->cs & 3) != 3) { regs->rax = -EINVAL; break; }
+        if ((frame.cs & 3) != 3) { regs->rax = -EINVAL; break; }
 
         // Restore blocked mask
-        current->blocked = kframe->blocked;
+        current->blocked = frame.blocked;
 
-        // Restore all GPRs
-        regs->r15=kframe->r15; regs->r14=kframe->r14; regs->r13=kframe->r13;
-        regs->r12=kframe->r12; regs->r11=kframe->r11; regs->r10=kframe->r10;
-        regs->r9=kframe->r9;   regs->r8=kframe->r8;
-        regs->rbx=kframe->rbx; regs->rcx=kframe->rcx; regs->rdx=kframe->rdx;
-        regs->rsi=kframe->rsi; regs->rdi=kframe->rdi; regs->rbp=kframe->rbp;
-        regs->ds=kframe->ds;   regs->es=kframe->es;    regs->rax=kframe->rax;
+        // Restore all GPRs (from kernel-stack frame only)
+        regs->r15=frame.r15; regs->r14=frame.r14; regs->r13=frame.r13;
+        regs->r12=frame.r12; regs->r11=frame.r11; regs->r10=frame.r10;
+        regs->r9=frame.r9;   regs->r8=frame.r8;
+        regs->rbx=frame.rbx; regs->rcx=frame.rcx; regs->rdx=frame.rdx;
+        regs->rsi=frame.rsi; regs->rdi=frame.rdi; regs->rbp=frame.rbp;
+        regs->ds=frame.ds;   regs->es=frame.es;    regs->rax=frame.rax;
 
         // Restore iretq frame → RESTORE_ALL → iretq to original context
-        regs->rip=kframe->rip; regs->cs=kframe->cs; regs->rflags=kframe->rflags;
-        regs->rsp=kframe->rsp; regs->ss=kframe->ss;
+        regs->rip=frame.rip; regs->cs=frame.cs; regs->rflags=frame.rflags;
+        regs->rsp=frame.rsp; regs->ss=frame.ss;
 
         // Note: do_system_call's tail arch_do_signal_delivery() runs after
         // this break.  If there are additional pending signals, they
