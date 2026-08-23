@@ -23,6 +23,7 @@
 
 struct vfs_node;
 struct pty_struct;
+struct tty_struct;       // v2: forward decl for file_t->tty field
 typedef struct pty_struct pty_t;
 
 // ── File types ─────────────────────────────────────────────
@@ -88,6 +89,8 @@ typedef struct file {
     pty_t          *pty;
     // FD_SOCKET
     socket_t       *sock;
+    // spec §4.1.1: 标记此 fd 指向控制台 TTY（仅由两个控制台 TTY open 路径设置）
+    struct tty_struct *tty;
 } file_t;
 
 // ── Per-process file descriptor table ──────────────────────

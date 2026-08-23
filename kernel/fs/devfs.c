@@ -310,6 +310,20 @@ int devfs_open_node(vfs_node_t *node, const char *path, int flags, file_t **out)
     (*out)->type = FD_DEV;
     (*out)->node = vfs_node_get(node);
     (*out)->flags = flags;
+    // spec §4.1.1：若该设备是控制台 TTY，标记 tty + 默认 fg_pgrp
+    int didx = (int)(uintptr_t)node->fs_data;
+    if (didx >= 0 && didx < DEVFS_MAX_DEVICES && devices[didx].registered &&
+        devices[didx].private_data == keyboard_get_tty()) {
+        (*out)->tty = get_dev_tty();
+        if (current->pgrp != 0) {
+            tty_t *tty = get_dev_tty();
+            if (tty) {
+                uint64_t f = spin_lock_irqsave(&tty->fg_pgrp_lock);
+                if (tty->fg_pgrp == 0) tty->fg_pgrp = current->pgrp;
+                spin_unlock_irqrestore(&tty->fg_pgrp_lock, f);
+            }
+        }
+    }
     return 0;
 }
 
@@ -378,6 +392,16 @@ static int tty_magic_open(const char *name, file_t **out_file)
             if (!*out_file) { free(node); return -ENOMEM; }
             (*out_file)->type = FD_DEV;
             (*out_file)->node = node;
+            // spec §4.1.1：标记 TTY + 默认 fg_pgrp 兜底
+            (*out_file)->tty = get_dev_tty();
+            if (current->pgrp != 0) {
+                tty_t *tty = get_dev_tty();
+                if (tty) {
+                    uint64_t f = spin_lock_irqsave(&tty->fg_pgrp_lock);
+                    if (tty->fg_pgrp == 0) tty->fg_pgrp = current->pgrp;
+                    spin_unlock_irqrestore(&tty->fg_pgrp_lock, f);
+                }
+            }
             return 0;
         }
     }

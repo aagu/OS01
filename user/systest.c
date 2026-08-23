@@ -112,6 +112,38 @@ static void test_fork_exec_waitpid(void)
            "exec", "/bin/spin exit 42");
 }
 
+// ── 70b: §4.1.1 默认继承路径验证（v2 M1）────────────
+// 不调 setpgid(0,0)。靠 fork 继承父 pgrp + §4.1.1 open 默认路径，
+// 验证 child open /dev/tty 后 tcgetpgrp 返回 child.pid 的继承 pgrp
+// (而非 0 — 这才能抓 C1 fork 不复制 pgrp 的 bug)。
+// 设计：父 (systest) pgrp 继承自 hush = 1。child fork 继承 pgrp=1。
+// 复位 fg_pgrp=0（new_pg==0 §4.4 始终允许），child open → §4.1.1 设 fg_pgrp=child.pgrp=1。
+// 正确断言：p == child.pgrp（继承自父）—— 即 p == 1 (若 systest pgrp=1) 或
+// 任何 child.pgrp 的实际值。简化：直接断言 p == child 的 getpgid(0)。
+static void test_devfs_open_inherited_fg_pgrp(void) {
+    int rfd = open("/dev/tty", O_RDWR);
+    if (rfd < 0) { FAIL("devfs_open_inherit", "no /dev/tty"); return; }
+    tcsetpgrp(rfd, 0);  // 复位
+    close(rfd);
+
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("devfs_open_inherit", "fork"); return; }
+    if (pid == 0) {
+        // 不调 setpgid！靠 fork 继承父 pgrp（必须 ≠ 0，验证 C1）
+        pid_t my_pgrp = getpgid(0);
+        if (my_pgrp == 0) { _exit(2); }       // C1 broken: fork 没复制 pgrp
+        int cfd = open("/dev/tty", O_RDWR);
+        if (cfd < 0) { _exit(3); }
+        pid_t fg = tcgetpgrp(cfd);
+        // §4.1.1: fg_pgrp==0 时设 = opener.pgrp = my_pgrp
+        _exit(fg == my_pgrp ? 0 : 4);
+    }
+    int status; waitpid(pid, &status, 0);
+    CHECK3(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+           "devfs_open_inherit",
+           "tcgetpgrp after open returns inherited pgrp (catches C1)");
+}
+
 // ── orphan reparent: child dies while its own child is alive ──
 // The grandchild becomes an orphan, reparented to init (PID 1) by the
 // child's do_exit; init's supervision loop (waitpid(-1, WNOHANG)) reaps
@@ -1502,11 +1534,13 @@ static void test_termios(void)
     struct termios t;
     int ret;
 
-    // Test 1: TCGETS default — honest raw mode (c_lflag == 0)
+    // Test 1: TCGETS default — signal-aware half-raw (spec §4.2 Option 1:
+    // c_lflag = ISIG so Ctrl-C → SIGINT to fg_pgrp works out of the box)
     memset(&t, 0xAA, sizeof(t));
     ret = ioctl(fd, TCGETS, &t);
     CHECK3(ret == 0, "termios", "TCGETS returns 0");
-    CHECK3((t.c_lflag & (ICANON | ECHO | ISIG)) == 0, "termios", "default c_lflag is raw");
+    CHECK3((t.c_lflag & (ICANON | ECHO)) == 0 && (t.c_lflag & ISIG) != 0,
+           "termios", "default c_lflag is ISIG (raw + signal-aware)");
 
     // Test 2: TCSETS then TCGETS — settings must persist
     memset(&t, 0, sizeof(t));
@@ -1523,8 +1557,10 @@ static void test_termios(void)
     CHECK3(t2.c_lflag == t.c_lflag, "termios", "TCSETS persisted (c_lflag round-trip)");
     CHECK3(t2.c_iflag == t.c_iflag, "termios", "TCSETS persisted (c_iflag round-trip)");
 
-    // Test 3: restore raw — don't pollute later readers
+    // Test 3: restore spec default (ISIG raw) — don't pollute later readers
+    // (spec §4.2: default c_lflag = ISIG, not 0)
     memset(&t, 0, sizeof(t));
+    t.c_lflag = ISIG;
     ioctl(fd, TCSETS, &t);
 
     close(fd);
@@ -1731,6 +1767,170 @@ static void test_libc_printf_getopt(void)
     }
 }
 
+// ── 67: setpgid / getpgid ─────────────────────────
+static volatile int setpgid_seen = 0;
+static void on_setpgid_test(int sig __attribute__((unused))) { setpgid_seen = 1; }
+
+static void test_setpgid_getpgid(void) {
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("setpgid_getpgid", "fork"); return; }
+    if (pid == 0) {
+        int r = setpgid(0, 0);
+        if (r != 0) { _exit(2); }
+        pid_t me = getpid();
+        pid_t pg = getpgid(0);
+        if (pg != me) { _exit(3); }
+        _exit(0);
+    }
+    int status; waitpid(pid, &status, 0);
+    CHECK3(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+           "setpgid_getpgid", "child: setpgid(0,0)+getpgid(0)==getpid");
+}
+
+// ── 68: setsid ───────────────────────────────────
+static void test_setsid(void) {
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("setsid", "fork"); return; }
+    if (pid == 0) {
+        // children inherit parent pgrp, so setsid() should succeed
+        // (not be pgrp leader yet since we just forked from main)
+        pid_t sid = setsid();
+        if (sid != getpid()) { _exit(2); }
+        if (getpgid(0) != getpid()) { _exit(3); }
+        _exit(0);
+    }
+    int status; waitpid(pid, &status, 0);
+    CHECK3(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+           "setsid", "child: setsid() returns own pid; getpgid==pid");
+}
+
+// ── 69: TIOCSPGRP/TIOCGPGRP roundtrip ──────────────
+static void test_tiocspgrp_roundtrip(void) {
+    int fd = open("/dev/tty", O_RDWR);
+    if (fd < 0) { FAIL("tiocspgrp", "no /dev/tty"); return; }
+    // 复位 fg_pgrp=0（new_pg==0 §4.4 始终允许），避免被前置用例污染
+    tcsetpgrp(fd, 0);
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("tiocspgrp", "fork"); return; }
+    if (pid == 0) {
+        setpgid(0, 0);
+        _exit(0);
+    }
+    setpgid(pid, pid);
+    // v4 放宽：parent 可设 fg_pgrp = child.pid（child 在同 session）
+    int rc = tcsetpgrp(fd, pid);
+    if (rc < 0) { FAIL("tiocspgrp", "tcsetpgrp returns <0"); close(fd); return; }
+    int status; waitpid(pid, &status, 0);
+    pid_t p = tcgetpgrp(fd);
+    CHECK3(p == pid, "tiocspgrp", "tcgetpgrp returns set child pid");
+    close(fd);
+}
+
+// ── 70: devfs open default fg_pgrp (§4.1.1) ─────────
+static void test_devfs_open_default_fg_pgrp(void) {
+    // 复位全局 fg_pgrp=0（new_pg==0 §4.4 始终允许）
+    int rfd = open("/dev/tty", O_RDWR);
+    if (rfd < 0) { FAIL("devfs_open_fg", "no /dev/tty"); return; }
+    tcsetpgrp(rfd, 0);
+    close(rfd);
+
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("devfs_open_fg", "fork"); return; }
+    if (pid == 0) {
+        setpgid(0, getpid());   // 设 pgrp 为自己
+        int cfd = open("/dev/tty", O_RDWR);
+        if (cfd < 0) { _exit(2); }
+        pid_t p = tcgetpgrp(cfd);
+        _exit(p == getpid() ? 0 : 3);
+    }
+    int status; waitpid(pid, &status, 0);
+    CHECK3(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+           "devfs_open_fg", "tcgetpgrp after open returns self pgrp");
+}
+
+// ── 71: setpgid auto fg_pgrp update (§3.4) ─────────
+static void test_setpgid_auto_fg_pgrp(void) {
+    int pfd = open("/dev/tty", O_RDWR);
+    if (pfd < 0) { FAIL("setpgid_auto_fg", "no /dev/tty"); return; }
+    // 父先设一个非零 fg_pgrp 让 child open 不触发 §4.1.1 兜底
+    setpgid(0, getpid());
+    tcsetpgrp(pfd, getpid());
+
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("setpgid_auto_fg", "fork"); return; }
+    if (pid == 0) {
+        int cfd = open("/dev/tty", O_RDWR);
+        if (cfd < 0) { _exit(2); }
+        // v5: dup2 把 tty 放到 fd0，§3.4 才能触发（消除继承依赖）
+        if (dup2(cfd, 0) < 0) { _exit(5); }
+        if (setpgid(0, 0) != 0) _exit(3);
+        pid_t p = tcgetpgrp(0);
+        _exit(p == getpid() ? 0 : 4);
+    }
+    int status; waitpid(pid, &status, 0);
+    CHECK3(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+           "setpgid_auto_fg", "tcgetpgrp after setpgid(0,0)==child.pid");
+    close(pfd);
+}
+
+// ── 72: kill(-pid) → signal_pgrp ─────────────────
+static void test_signal_pgrp_basic(void) {
+    signal(SIGUSR1, SIG_IGN);  // 父不响应
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("signal_pgrp_basic", "fork"); return; }
+    if (pid == 0) {
+        // fork 继承父的 SIG_IGN；child 必须恢复 SIG_DFL 才能被 SIGUSR1 杀掉
+        signal(SIGUSR1, SIG_DFL);
+        setpgid(0, 0);
+        struct timespec ts = { .tv_sec = 5, .tv_nsec = 0 };
+        nanosleep(&ts, NULL);   // 阻塞直到信号打断（本 libc 无 pause()）
+        _exit(0);
+    }
+    setpgid(pid, pid);
+    int64_t r = syscall(SYS_kill, (int64_t)(-(int64_t)pid),
+                        (uint64_t)SIGUSR1, 0);
+    CHECK3(r == 0, "signal_pgrp_basic", "kill(-pid,SIGUSR1) returns 0");
+    int status; waitpid(pid, &status, 0);
+    CHECK3(WIFSIGNALED(status) && WTERMSIG(status) == SIGUSR1,
+           "signal_pgrp_basic", "child got SIGUSR1");
+}
+
+// ── 73: kill(-pgid) hits whole group ─────────────
+static void test_kill_neg_pid_pgrp(void) {
+    signal(SIGUSR2, SIG_IGN);
+    int64_t c1 = fork();
+    if (c1 < 0) { FAIL("kill_pgrp", "fork1"); return; }
+    if (c1 == 0) {
+        signal(SIGUSR2, SIG_DFL);
+        setpgid(0, 0);
+        struct timespec ts = { .tv_sec = 5, .tv_nsec = 0 };
+        nanosleep(&ts, NULL);
+        _exit(0);
+    }
+    // 先建立 pgrp c1，c2 的 setpgid(0, c1) 才能 join（内核要求 pgrp 已存在）
+    setpgid(c1, c1);
+    int64_t c2 = fork();
+    if (c2 < 0) { FAIL("kill_pgrp", "fork2"); return; }
+    if (c2 == 0) {
+        signal(SIGUSR2, SIG_DFL);
+        setpgid(0, c1);
+        struct timespec ts = { .tv_sec = 5, .tv_nsec = 0 };
+        nanosleep(&ts, NULL);
+        _exit(0);
+    }
+    setpgid(c2, c1);
+    int64_t r = syscall(SYS_kill, (int64_t)(-(int64_t)c1),
+                        (uint64_t)SIGUSR2, 0);
+    CHECK3(r == 0, "kill_pgrp", "kill(-pgid,sig) returns 0");
+    int s1 = 0, s2 = 0;
+    waitpid(c1, &s1, 0);
+    waitpid(c2, &s2, 0);
+    CHECK3(WIFSIGNALED(s1) && WTERMSIG(s1) == SIGUSR2,
+           "kill_pgrp", "c1 got SIGUSR2");
+    CHECK3(WIFSIGNALED(s2) && WTERMSIG(s2) == SIGUSR2,
+           "kill_pgrp", "c2 got SIGUSR2");
+}
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
@@ -1743,6 +1943,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"brk",               test_brk},
     {"getpid/getppid",    test_getpid_getppid},
     {"fork+exec+waitpid", test_fork_exec_waitpid},
+    {"devfs_open_inherit", test_devfs_open_inherited_fg_pgrp},
     {"orphan_reparent",   test_orphan_reparent},
     {"read",              test_read},
     {"open/close",        test_open_close},
@@ -1795,6 +1996,13 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"proc_maps",           test_proc_maps},
     {"proc_fd",             test_proc_fd},
     {"termios",             test_termios},
+    {"tiocspgrp",           test_tiocspgrp_roundtrip},
+    {"devfs_open_fg",       test_devfs_open_default_fg_pgrp},
+    {"setpgid_getpgid",   test_setpgid_getpgid},
+    {"setsid",            test_setsid},
+    {"setpgid_auto_fg", test_setpgid_auto_fg_pgrp},
+    {"signal_pgrp_basic",  test_signal_pgrp_basic},
+    {"kill_pgrp",          test_kill_neg_pid_pgrp},
     {"getrandom",           test_getrandom},
     {"libc_printf_getopt",  test_libc_printf_getopt},
 };

@@ -3,6 +3,7 @@
 
 #include <list.h>
 #include <stdint.h>
+#include <sys/types.h>      // pid_t (task_struct.pgrp/session, signal_pgrp)
 #include <kernel/arch/cpu.h>
 #include <kernel/arch/thread.h>
 #include <kernel/arch/segment.h>
@@ -130,6 +131,8 @@ typedef struct task_struct
     uint64_t addr_limit;
 
     int64_t pid; // process id
+    pid_t pgrp;       // 进程组 ID（fork 继承父；setpgid 可改）
+    pid_t session;    // 会话 ID（fork 继承父；setsid 可改）
     int64_t counter; // time slice counter, used in round-robin scheduling
     int64_t signal; // signal mask, e.g. 0x0000000000000001 means SIGINT
     int64_t blocked; // signal mask of blocked signals (bit N = 1 means signal N+1 is blocked)
@@ -211,6 +214,8 @@ thread_t init_thread;
     .addr_limit = 0xffff800000000000, \
                 .blocked = 0, \
     .pid = 0,                         \
+    .pgrp = 1,                        \
+    .session = 1,                     \
     .counter = 0,                     \
     .signal = 0,                      \
     .priority = 2,                    /* idle task quantum = 20 ms */ \
@@ -357,12 +362,22 @@ void task_wake(struct task_struct *t);
 // scanners on other CPUs see a consistent list.
 void task_list_add(struct task_struct *tsk);
 
+// ── Exported for use by syscall implementations ──────────
+extern spinlock_T task_list_lock;
+list_t *task_list_next(list_t *pos);
+
 // ── SMP-safe signal delivery ──────────────────────
 // Finds task by pid and delivers signal under
 // task_list_lock.  Returns 0 on success, -ESRCH if
 // the task doesn't exist, -EPERM if the target is
 // a kernel thread or init.
 int task_send_signal(int pid, int sig);
+
+// ── signal_pgrp ─────────────────────────────────────────
+// Sends a signal to all tasks in process group `target`.
+// Skips PF_KTHREAD tasks per spec §3.3.
+// Returns 0 on match, -ESRCH if no match, 0 if target==0 (silent no-op).
+int signal_pgrp(pid_t target, int sig);
 
 // ── SMP-safe fd-table pinning ─────────────────────────
 // Finds task by pid under task_list_lock, pins its files_t, returns

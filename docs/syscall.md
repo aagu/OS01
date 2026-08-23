@@ -1,6 +1,6 @@
 # Syscall interface
 
-System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`. Up to 6 arguments via the `syscall6()` wrapper. Return value in `rax`. 67 syscalls total (0..66).
+System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`. Up to 6 arguments via the `syscall6()` wrapper. Return value in `rax`. 71 syscalls total (0..70).
 
 ## Syscall table
 
@@ -73,6 +73,10 @@ System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`
 | 64 | `SYS_shutdown` | rdi=fd, rsi=how | Shutdown socket |
 | 65 | `SYS_clock_gettime` | rdi=clk_id, rsi=timespec | 纳秒时间；仅支持 CLOCK_REALTIME/MONOTONIC，**两者同值**（无 RTC 墙钟，gettimeofday 返回 0） |
 | 66 | `SYS_getrandom` | rdi=buf, rsi=len, rdx=flags | 内核 ChaCha20 池；GRND_NONBLOCK/GRND_RANDOM 为语义 NOP；len>33554431 截断；未映射/只读 buffer → -EFAULT |
+| 67 | `SYS_setpgid` | rdi=pid, rsi=pgid | 设进程组；pid=0→当前，pgid=0→pgid=pid；pgid 需为 pid 自身或同 session 已存在 pgrp（v4 放宽）；caller 须为 target 或同 session；PID 1 不可改；成功且 fd0 指向控制台 TTY 时自动同步 dev_tty.fg_pgrp |
+| 68 | `SYS_getpgid` | rdi=pid | 读进程组；pid=0→当前；找不到 → -ESRCH |
+| 69 | `SYS_setsid` | — | 建新会话+进程组，caller 为 leader；已是 pgrp leader → -EBUSY；返回新 sid（= caller pid） |
+| 70 | `SYS_getsid` | rdi=pid | 返回会话 ID（当前仅返回 current->session，pid 参数暂忽略） |
 
 ## Definitions
 
@@ -112,7 +116,7 @@ Higher-level libc functions (`read()`, `exec()`, etc.) call these wrappers.
 - For `PF_LINUX_ABI` processes (busybox etc.): translates Linux x86_64 syscall numbers to OS01 via `linux_to_os01[320]` (expanded from `[256]`) before dispatch; Linux `getrandom` (318) → `SYS_getrandom` (66)
 - Return via `ret_from_exception` → `RESTORE_ALL` → `iretq`
 
-> ⚠️ **已定义未实现**：`SYS_getpeername`（62）在 syscall 名映射表存在但无 dispatch case（`do_getpeername` 不存在）。调用会落入默认分支返回 `-ENOSYS`。其余 66 个均有实现。
+> ⚠️ **已定义未实现**：`SYS_getpeername`（62）在 syscall 名映射表存在但无 dispatch case（`do_getpeername` 不存在）。调用会落入默认分支返回 `-ENOSYS`。其余 70 个均有实现。
 
 ## Known bug
 

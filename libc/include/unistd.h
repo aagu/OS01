@@ -148,6 +148,7 @@ int settimeofday(const struct timeval *tv, const struct timezone *tz);
 /* Process groups */
 pid_t getpgrp(void);
 int setpgid(pid_t pid, pid_t pgid);
+pid_t getpgid(pid_t pid);
 int tcsetpgrp(int fd, pid_t pgrp);
 pid_t tcgetpgrp(int fd);
 int killpg(pid_t pgrp, int sig);

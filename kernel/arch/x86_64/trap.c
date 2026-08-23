@@ -810,7 +810,7 @@ int arch_do_signal_delivery(pt_regs_t *regs)
                         break;
                     }
                     current->signal &= ~(1ULL << sig);
-                    do_exit((uint64_t)sig << 8);
+                    do_exit((uint64_t)sig);
                     return 1;  // unreachable
                 }
             }
@@ -851,7 +851,7 @@ int arch_do_signal_delivery(pt_regs_t *regs)
                     break;   // ignore for init
                 log_err("task %d killed by signal %d (default)\n",
                         (int)current->pid, sig);
-                do_exit((uint64_t)sig << 8);
+                do_exit((uint64_t)sig);
                 return 1;  // unreachable — do_exit switches away
             }
             continue;
@@ -870,7 +870,7 @@ int arch_do_signal_delivery(pt_regs_t *regs)
             log_err("task %d: signal %d handler has no restorer, "
                     "killing\n", (int)current->pid, sig);
             current->signal &= ~(1ULL << sig);
-            do_exit((uint64_t)sig << 8);
+            do_exit((uint64_t)sig);
             return 1;  // unreachable
         }
 
@@ -1049,7 +1049,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
     }
     switch (regs->rax) {
     // ── Syscall name table (for strace) ─────────────────────
-    static const char *syscall_names[67] = {
+    static const char *syscall_names[71] = {
         [0]  = "putchar",
         [1]  = "write",
         [2]  = "exit",
@@ -1107,8 +1107,12 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         [64] = "shutdown",
         [65] = "clock_gettime",
         [66] = "getrandom",
+        [67] = "setpgid",
+        [68] = "getpgid",
+        [69] = "setsid",
+        [70] = "getsid",
     };
-    const char *sname = (regs->rax < 67 && syscall_names[regs->rax])
+    const char *sname = (regs->rax < 71 && syscall_names[regs->rax])
                         ? syscall_names[regs->rax] : "?";
     debug_syscall("[strace] pid=%d syscall(%s, arg1=%#lx, arg2=%#lx, arg3=%#lx)\n",
                   (int)current->pid, sname,
@@ -1148,9 +1152,13 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         break;
     }
     case SYS_exit: {
-        // exit(int code) — terminate current process
-        current->exit_code = regs->rdi;
-        do_exit(regs->rdi);
+        // exit(int code) — terminate current process.
+        // Encode as Linux does: exit code in the high byte (code<<8),
+        // so waitpid() status can distinguish a normal exit (WIFEXITED)
+        // from a signal death (low byte = signal → WIFSIGNALED).
+        uint64_t code = regs->rdi & 0xFF;
+        current->exit_code = code << 8;
+        do_exit(code << 8);
         // unreachable — do_exit calls schedule() which never returns
     }
     case SYS_brk: {
@@ -1923,6 +1931,97 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         regs->rax = len;                                     // actual bytes filled
         break;
     }
+case SYS_setpgid: {
+    int pid = (int)(int64_t)regs->rdi;
+    int pgid = (int)(int64_t)regs->rsi;
+    if (pid == 0) pid = current->pid;
+    if (pgid == 0) pgid = pid;
+    if (pid < 0 || pgid < 0 || pid == 1) {
+        regs->rax = -EINVAL; break;
+    }
+    uint64_t f = spin_lock_irqsave(&task_list_lock);
+    task_t *target = NULL;
+    list_t *pos = init_task_union.task.list.next;
+    while (pos != &init_task_union.task.list) {
+        task_t *t = container_of(pos, task_t, list);
+        pos = task_list_next(pos);
+        if (t->pid == pid && !(t->flags & PF_KTHREAD)) {
+            target = t; break;
+        }
+    }
+    if (!target) {
+        spin_unlock_irqrestore(&task_list_lock, f);
+        regs->rax = -ESRCH; break;
+    }
+    if (current->pid != target->pid && current->session != target->session) {
+        spin_unlock_irqrestore(&task_list_lock, f);
+        regs->rax = -EPERM; break;
+    }
+    // v4: pgid == pid OR pgid exists in caller's session
+    int pgid_ok = (pgid == pid);
+    if (!pgid_ok) {
+        list_t *pos2 = init_task_union.task.list.next;
+        while (pos2 != &init_task_union.task.list) {
+            task_t *t2 = container_of(pos2, task_t, list);
+            pos2 = task_list_next(pos2);
+            if (t2->pgrp == pgid && t2->session == current->session) {
+                pgid_ok = 1; break;
+            }
+        }
+    }
+    if (!pgid_ok) {
+        spin_unlock_irqrestore(&task_list_lock, f);
+        regs->rax = -EPERM; break;
+    }
+    target->pgrp = pgid;
+    // ── v3 自动 fg_pgrp 更新──────────────────
+    // 任一成功 setpgid（含 join 现有 pgrp）且 fd 0 指向控制台 TTY 时
+    // （file_t->tty == get_dev_tty()，由 §4.1.1 在 open 路径置位），
+    // 把 dev_tty.fg_pgrp 同步到新 pgid——替代 POSIX 要求的"shell 调 tcsetpgrp"
+    tty_t *dev_tty = get_dev_tty();
+    if (dev_tty && current->files && current->files->fd[0]) {
+        file_t *f0 = current->files->fd[0];
+        if (f0->tty == dev_tty) {
+            uint64_t ftf = spin_lock_irqsave(&dev_tty->fg_pgrp_lock);
+            dev_tty->fg_pgrp = pgid;
+            spin_unlock_irqrestore(&dev_tty->fg_pgrp_lock, ftf);
+        }
+    }
+    spin_unlock_irqrestore(&task_list_lock, f);
+    regs->rax = 0;
+    break;
+}
+case SYS_getpgid: {
+    int pid = (int)(int64_t)regs->rdi;
+    if (pid == 0) pid = current->pid;
+    uint64_t f = spin_lock_irqsave(&task_list_lock);
+    int ret = -ESRCH;
+    list_t *pos = init_task_union.task.list.next;
+    while (pos != &init_task_union.task.list) {
+        task_t *t = container_of(pos, task_t, list);
+        pos = task_list_next(pos);
+        if (t->pid == pid) { ret = t->pgrp; break; }
+    }
+    spin_unlock_irqrestore(&task_list_lock, f);
+    regs->rax = ret;
+    break;
+}
+case SYS_setsid: {
+    uint64_t f = spin_lock_irqsave(&task_list_lock);
+    if (current->pgrp == current->pid) {
+        spin_unlock_irqrestore(&task_list_lock, f);
+        regs->rax = -EBUSY; break;
+    }
+    current->session = current->pid;
+    current->pgrp = current->pid;
+    spin_unlock_irqrestore(&task_list_lock, f);
+    regs->rax = current->pid;
+    break;
+}
+case SYS_getsid: {
+    regs->rax = current->session;
+    break;
+}
     case SYS_nanosleep: {
         // nanosleep(const struct timespec *req, struct timespec *rem)
         const struct timespec *req = (const struct timespec *)regs->rdi;
@@ -2008,7 +2107,11 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         break;
     }
     case SYS_kill: {
-        // kill(int pid, int sig) → 0 / -ESRCH / -EINVAL
+        // kill(pid, sig) — POSIX process-group semantics:
+        //   pid > 0   → signal single task (pid)
+        //   pid == 0  → signal caller's process group
+        //   pid == -1 → broadcast: all non-init, non-kthread, non-self
+        //   pid < -1  → signal process group (-pid)
         int pid = (int)(int64_t)regs->rdi;
         int sig = (int)regs->rsi;
 
@@ -2017,8 +2120,32 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             break;
         }
 
-        int ret = task_send_signal(pid, sig);
-        regs->rax = ret;
+        if (pid > 0) {
+            regs->rax = task_send_signal(pid, sig);
+        } else if (pid == 0) {
+            regs->rax = signal_pgrp(current->pgrp, sig);
+        } else if (pid == -1) {
+            // POSIX pid==-1: signal to all tasks the caller may signal —
+            // everyone except init (pid 1), kernel threads, and self.
+            uint64_t f = spin_lock_irqsave(&task_list_lock);
+            int matched = 0;
+            list_t *pos = init_task_union.task.list.next;
+            while (pos != &init_task_union.task.list) {
+                task_t *t = container_of(pos, task_t, list);
+                pos = task_list_next(pos);
+                if (t == current) continue;
+                if (t->flags & PF_KTHREAD) continue;
+                if (t->pid == 1) continue;
+                t->signal |= (1ULL << sig);
+                if (t->state == TASK_INTERRUPTIBLE)
+                    task_wake(t);
+                matched++;
+            }
+            spin_unlock_irqrestore(&task_list_lock, f);
+            regs->rax = matched > 0 ? 0 : -ESRCH;
+        } else { // pid < -1
+            regs->rax = signal_pgrp(-pid, sig);
+        }
         break;
     }
     case SYS_signal: {

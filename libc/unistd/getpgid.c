@@ -2,8 +2,8 @@
 #include <errno.h>
 #include <sys/syscall.h>
 
-pid_t getsid(pid_t pid) {
-    int64_t ret = syscall(SYS_getsid, (uint64_t)pid, 0, 0);
+pid_t getpgid(pid_t pid) {
+    int64_t ret = syscall(SYS_getpgid, (uint64_t)pid, 0, 0);
     if (ret < 0) { errno = (int)(-ret); return -1; }
     return (pid_t)ret;
 }
