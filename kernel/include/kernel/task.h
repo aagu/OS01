@@ -193,6 +193,17 @@ typedef struct task_struct
     // ── Controlling terminal ─────────────────────────────
     enum ctty_type { CTTY_NONE = 0, CTTY_PHYS, CTTY_PTY } ctty_type;
     void *ctty;  // → tty_t (CTTY_PHYS) or pty_t (CTTY_PTY)
+
+    // ── Fault recovery (uaccess) ─────────────────────────────
+    // Set by copy_to_user_ft / copy_from_user_ft / strnlen_user (Task 2).
+    // do_page_fault (kernel-mode branch) longjmps here when cr2 < addr_limit.
+    // NULL = no recovery slot armed; a fault then takes the normal panic path.
+    // Initialized to NULL via the memset(tsk, 0, sizeof(task_t)) call sites
+    // (see task.c do_fork / kernel_thread), so no extra INIT_TASK field is
+    // needed for the idle task.
+    void **fault_jmp;              // points into the caller's os01_jmp_buf
+    void (*fault_cleanup)(void *); // optional resource release (Task 2 wiring)
+    void *fault_cleanup_arg;       // opaque arg to fault_cleanup
 } task_t;
 
 union task_union

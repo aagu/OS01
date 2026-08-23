@@ -470,6 +470,51 @@ Step 9: 文档同步（syscall.md / roadmap.md）
 
 依赖：Step 0/3 先于 4-7；Step 4/5/6 独立可并行（各自 commit）；Step 7 依赖 2/3（`_ft` 就绪）。
 
+### Step 0 实测结论（2026-08-23，Task 0 完成）
+
+**结论 1 — 信号 handler 仅在返回用户态投递。** `arch_do_signal_delivery` 只在
+`entry.S:check_signal`（line 90-104）被调用——位于
+`ret_from_intr → softirq_handler → check_resched → check_signal → RESTORE_ALL → iretq`
+（或 `do_resched → check_signal → RESTORE_ALL → iretq`）路径，**始终在 `iretq` 之前**。
+syscall tail 调用 (`trap.c:2500-2501`) 受 `regs->cs & 3` 门控保护（内核态
+syscall `cs & 3 == 0`，整个调用被跳过）；异常路径 `ret_from_exception`
+(line 55) **直接跳 `RESTORE_ALL`**，绕过 `check_signal`——因为 IST exception
+stack 上 RSP masking 返回垃圾，故设计要求"kernel fault 不返回"，下次正常
+中断返回会在 task kernel stack 上重做 signal 检查。tty.c:243 的 NULL-regs
+调用仅处理 SIG_IGN + 非致命 SIG_DFL（不投递 registered handler，见
+trap.c:786-790 注释）。**下游影响**：`_ft` memcpy 中途不可能运行 signal
+handler——`copy_*_ft` 只需处理 #PF 本身，无须抗信号可重入。
+
+**结论 2 — `current == task_from_tss()` 在内核态 #PF 成立（eq=1）。**
+抓取的串口证据 `PF-VERIFY: current=FFFF800001E20000 tss=FFFF800001E20000 eq=1`
+（一次性 QEMU 跑 throwaway `/bin/badread` 触发内核态 #PF；badread 程序、
+`config/inittab.badread`、trap.c 中 PF-VERIFY printk、根 Makefile 的 badread
+cp 行——全部已清除，`git status --short` 仅剩原本就 untracked 的 thirdpart
+目录）。`#PF` 在 `set_trap_gate(14, 0, page_fault)` 上注册，**IST=0**——即
+运行在 task kernel stack（不是 IST exception stack），RSP masking 与 TSS
+rsp0 推导必然返回同一 task_t。抓到的 `FFFF800001E20000` 与 tasklist dump
+中 pid=3 (badread) 的 `stk=ffff800001e20000` 完全吻合。**下游影响**：
+Task 2 的故障恢复 hook 使用 `current->fault_jmp`，无需为
+`task_from_tss()->fault_jmp` 准备备用路径——`current` 在
+`do_page_fault` 内核态分支中是稳定可靠的。
+
+**结论 3 — selftest 在 init_task 上下文运行，无用户地址空间。**
+`selftest_run_all()`（`main.c:306`）在 BSP kernel init 主线程上运行——位于
+`smp_boot_aps()` 之后、`task_init()` 之前，此时 `current ==
+&init_task_union.task`，`current->mm == &init_mm`，`init_mm.pml4 == NULL`
+（`task.h:232` 仅初始化 `.lock`），无 user VMA list。
+`init_task_union.task.addr_limit = 0xffff800000000000`（kernel high half）。
+**下游影响**：Task 3 selftest 必须**合成一个临时 pml4**（用 kernel 自映射
+的低 256 entries + 一个 user test entry），`__write_cr3(test_pml4_phys)`
+后用 `arch_user_range_accessible` 直接测 walker；测完后恢复原 CR3。同时
+为测 longjmp 路径需**临时覆盖 `current->addr_limit`** 为 user range，否则
+`cr2 < addr_limit` 门控永远不会命中 user 范围 fault 而走 dump 路径。
+
+**结论 0 偏差**——`make DEBUG=1` 在项目层不可用（`switch_to` inline asm
+需 -O2、`ioapic.c` 条件编译变量作用域），故所有验证用 release flags
+（`make` 默认 `-O2 -DNDEBUG`）跑——PF-VERIFY printk 是无条件 emit，不依赖
+debug 开关。
+
 **Commit message 模板**（含 make clean 警示）：
 ```
 fix(uaccess): syscall boundary DoS hardening — <step 主题>
