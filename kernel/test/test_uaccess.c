@@ -408,23 +408,42 @@ int selftest_uaccess(void)
     if (!slot_b) SELFTEST_FAIL_AT("ensure_pt(0x601000) returned NULL");
     uint64_t saved_b = *slot_b;
 
-    // Allocate two 4KB pages.  alloc_4k_page returns physically
-    // adjacent slots within a 2MB subpage pool, but pa != pb is
-    // sufficient to prove cross-page correctness: each byte of the
-    // test payload is asserted to live in the CORRECT phys page (pa
-    // for the first half, pb for the second).
-    uint64_t pa = alloc_4k_page(), pb = alloc_4k_page();
-    if (!pa || !pb || pa == pb) {
-        if (pa) free_4k_page(pa);
-        if (pb) free_4k_page(pb);
+    // Allocate two genuinely non-adjacent 4KB pages by grabbing two
+    // distinct 2 MB pages from the page allocator and using subpage 0
+    // of each.  Two 2 MB blocks from alloc_pages are always at
+    // >=2 MB apart, so pa and pb are guaranteed non-adjacent
+    // (>=512 4 KB pages between them).  Free with free_pages(pg, 1)
+    // — note the struct Page* is from alloc_pages, NOT a uint64 phys
+    // from alloc_4k_page.
+    struct Page *pgA = alloc_pages(ZONE_NORMAL, 1, 0);
+    struct Page *pgB = alloc_pages(ZONE_NORMAL, 1, 0);
+    if (!pgA || !pgB || pgA == pgB) {
+        if (pgA) free_pages(pgA, 1);
+        if (pgB) free_pages(pgB, 1);
         *slot_a = saved_a;
         *slot_b = saved_b;
         arch_flush_tlb_page(0x600000);
         arch_flush_tlb_page(0x601000);
         restore_pt(&ctb);
         restore_pt(&cta);
-        SELFTEST_FAIL_AT("alloc_4k_page failed or returned same page "
-                         "(pa=%lx pb=%lx)", (unsigned long)pa, (unsigned long)pb);
+        SELFTEST_FAIL_AT("alloc_pages returned NULL or same 2MB block "
+                         "(pgA=%p pgB=%p)", (void *)pgA, (void *)pgB);
+    }
+    uint64_t pa = pgA->phy_address;
+    uint64_t pb = pgB->phy_address;
+    // Hard gate: two distinct 2 MB blocks MUST be >=2 MB apart in
+    // phys.  If this ever fires, that's a real allocator anomaly.
+    if ((pa >> 12) + 1 == (pb >> 12)) {
+        free_pages(pgA, 1);
+        free_pages(pgB, 1);
+        *slot_a = saved_a;
+        *slot_b = saved_b;
+        arch_flush_tlb_page(0x600000);
+        arch_flush_tlb_page(0x601000);
+        restore_pt(&ctb);
+        restore_pt(&cta);
+        SELFTEST_FAIL_AT("non-adjacency gate fired (pa=%lx pb=%lx)",
+                         (unsigned long)pa, (unsigned long)pb);
     }
 
     // ── Step 5: cross-page no-short-count fault test ───────────
@@ -515,8 +534,8 @@ int selftest_uaccess(void)
     arch_flush_tlb_page(0x601000);
     restore_pt(&ctb);    // LIFO: later-created first
     restore_pt(&cta);
-    free_4k_page(pa);
-    free_4k_page(pb);
+    free_pages(pgA, 1); // 2 MB block (count arg required)
+    free_pages(pgB, 1);
 
     serial_printk("[selftest] uaccess: PASS\n");
     return 0;
