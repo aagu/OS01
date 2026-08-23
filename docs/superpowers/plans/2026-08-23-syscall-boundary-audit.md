@@ -393,10 +393,16 @@
   /* cross-page tests need the live CR3 (boot ctx: current->mm==&init_mm but
      init_mm.pml4 NOT set, task.h:232 — never use current->mm->pml4 here). */
   uint64_t *cur_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)arch_get_page_table());
-  /* Save original leaf PTEs so we can restore (intermediate pml3/pml2 pages
-     may be SHARED with real mappings — only save/restore leaf slots + invlpg): */
-  uint64_t saved_a = get_leaf(cur_pml4, 0x600000);
-  uint64_t saved_b = get_leaf(cur_pml4, 0x601000);
+  /* Map two 4KB pages at 0x600000/0x601000 via ensure_pt (hierarchy-probing:
+     the guard region may lack PML1 or be a 2MB PDE — ensure_pt creates/splits
+     and records in the ctx; we then save the returned SLOT and write through
+     it; restore in reverse creation order via the two ctxs).  NO get_leaf/
+     set_leaf (they assumed PML1 exists). */
+  struct test_map_ctx cta = {0}, ctb = {0};
+  uint64_t *slot_a = ensure_pt(cur_pml4, 0x600000, &cta);
+  uint64_t saved_a = *slot_a;
+  uint64_t *slot_b = ensure_pt(cur_pml4, 0x601000, &ctb);
+  uint64_t saved_b = *slot_b;
   uint64_t pa = alloc_4k_page(), pb = alloc_4k_page();      /* 4KB allocator, pmm.h:102 */
   SELFTEST_ASSERT(pa != 0 && pb != 0);                      /* alloc failure = hard fail */
   int tries = 0;
@@ -404,15 +410,15 @@
       { free_4k_page(pa); pa = alloc_4k_page(); }
   SELFTEST_ASSERT((pa >> 12) + 1 != (pb >> 12));            /* REQUIRED gate: if still
       adjacent after retries, the cross-page-correctness test CANNOT run — FAIL the
-      selftest (record SKIP/FAIL in log), do NOT silently continue mapping. */
+      selftest (record FAIL in log), do NOT silently continue mapping. */
 
   /* no short count (prove cross-page no partial count): FIRST map page A only,
      confirm 0x601000 unmapped, then a copy spanning the boundary faults on the
      2nd page -> -EFAULT (NOT +N partial).  If page A were unmapped too, it would
      fault on page 1 and not prove cross-page semantics — order matters: */
-  set_leaf(cur_pml4, 0x600000, pa, PAGE_Present|PAGE_R_W|PAGE_USER);
+  *slot_a = pa | PAGE_Present | PAGE_R_W | PAGE_USER;
   arch_flush_tlb_page(0x600000);
-  SELFTEST_ASSERT(get_leaf(cur_pml4, 0x601000) == 0);       /* 2nd page genuinely unmapped */
+  SELFTEST_ASSERT(*slot_b == 0);                           /* 2nd page genuinely unmapped */
   current->addr_limit = 0x00007FFFFFFFFFFFULL;
   rc = copy_to_user_ft((void *)0x600ff0, ksrc, 32);         /* 0x600ff0..0x601010: page A mapped,
       page B unmapped -> faults on page 2 -> -EFAULT (no short count) */
@@ -420,7 +426,7 @@
   SELFTEST_ASSERT(rc == -EFAULT);
 
   /* cross-page correctness with non-contiguous phys (deterministic success path): */
-  set_leaf(cur_pml4, 0x601000, pb, PAGE_Present|PAGE_R_W|PAGE_USER);
+  *slot_b = pb | PAGE_Present | PAGE_R_W | PAGE_USER;
   arch_flush_tlb_page(0x601000);
   uint8_t *kA = (uint8_t *)Phy_To_Virt(pa);
   uint8_t *kB = (uint8_t *)Phy_To_Virt(pb);
@@ -446,9 +452,13 @@
   SELFTEST_ASSERT(rc == 16);
   SELFTEST_ASSERT(cleanup_ran == 0);      /* success path: no cleanup */
 
-  /* restore original leaf PTEs (do NOT free shared intermediate tables): */
-  set_leaf(cur_pml4, 0x600000, saved_a, 0);  set_leaf(cur_pml4, 0x601000, saved_b, 0);
+  /* restore: leaf slots first, then reverse-creation-order restore of the two
+     ctxs (LIFO: ctb created after cta -> restore ctb FIRST, then cta) which puts
+     back parent PDE/l2/l3 slots, frees test-only tables, flushes TLB. */
+  *slot_a = saved_a; *slot_b = saved_b;                     /* restore leaf entries */
   arch_flush_tlb_page(0x600000); arch_flush_tlb_page(0x601000);
+  restore_pt(&ctb);                                         /* LIFO: later-created first */
+  restore_pt(&cta);
   free_4k_page(pa); free_4k_page(pb);        /* free_4k_page(phys), pmm.h:103 */
 
   /* strnlen_user */
@@ -477,13 +487,21 @@
       if (l2val & PAGE_PS) {                           /* 2MB huge page: SPLIT */
           uint64_t *pml1 = alloc_4k_page_as_tbl();
           uint64_t base  = l2val & ~(uint64_t)0x1FFFFF;   /* 2MB phys base (bits 21+) */
-          uint64_t flags = (l2val & 0xFFF) & ~0x80ULL;    /* PDE perms, CLEAR PS (bit 7) —
-                                                             PS is not valid on 4KB PTEs */
+          /* derive table-entry/PTE flags FROM the original PDE — do NOT force
+             Present|RW|User (would turn a supervisor/RO mapping into user+RW,
+             violating "preserve the original 2MB mapping"): keep P(0)/RW(1)/
+             US(2)/PWT(3)/PCD(4)/A(5)/D(6)/G(8)/PAT(12)/XD(63), CLEAR PS(7). */
+          uint64_t tflags = (l2val & ~(uint64_t)0x80ULL)    /* bits 0-11 minus PS */
+                          | (l2val & 0x1000ULL)             /* PAT bit (12) */
+                          | (l2val & 0x8000000000000000ULL);/* XD bit (63) */
           for (int i = 0; i < 512; i++)                   /* preserve ALL 512 4KB maps:
                                                              the other 511 must keep working */
-              pml1[i] = base | ((uint64_t)i << 12) | flags;
+              pml1[i] = base | ((uint64_t)i << 12) | tflags;
           ctx->split_2m = 1; ctx->saved_pde = l2val;
-          pml2[l2] = Phy(pml1) | PAGE_Present | PAGE_R_W | PAGE_USER;  /* split PDE */
+          pml2[l2] = Phy(pml1) | tflags;                  /* split PDE: table entry with
+                                                             derived perms (PAT carries over;
+                                                             huge-page->4KB leaf PAT is bit 12
+                                                             in both, no remap needed) */
           ctx->new_pml1 = pml1;
       } else if (!(l2val & 1)) { ctx->saved_l2 = l2val; ctx->new_l2 = alloc_4k_page_as_tbl(); pml2[l2] = Phy(new_l2)|flags; }
       /* similarly probe/create l3 (and l4 can't be absent for kernel) */
@@ -915,12 +933,18 @@ if (buf) {   // NULL 合法处
             wait_queue_add(&p->read_busy_wq); schedule(); ...  /* wait + re-check */
         }
     }
-    static void pipe_read_release(void *arg) {           /* on-fault cleanup */
+    static void pipe_read_release(void *arg) {           /* lock-protected IDEMPOTENT:
+        only clear+wake when read_busy==1, so double-release (fault cb + out_release)
+        is safe by construction, not by comment */ 
         pipe_t *p = arg;
         uint64_t f = spin_lock_irqsave(&p->read_busy_lock);
-        p->read_busy = 0;
-        spin_unlock_irqrestore(&p->read_busy_lock, f);
-        wake_all(&p->read_busy_wq);
+        if (p->read_busy) {
+            p->read_busy = 0;
+            spin_unlock_irqrestore(&p->read_busy_lock, f);
+            wake_all(&p->read_busy_wq);                  /* wake outside the lock */
+        } else {
+            spin_unlock_irqrestore(&p->read_busy_lock, f);
+        }
     }
     /* in pipe_read_internal — SINGLE out_release exit (all paths, not just
        page-fault: EOF / -EINTR / read-write state change / wait anomalies all
