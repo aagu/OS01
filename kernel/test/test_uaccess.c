@@ -74,6 +74,7 @@
 // unmapped-VA test.
 
 static uint64_t *g_pml4;
+static struct Page *g_pml4_page;
 
 // Per-chain table pointers (virtual addresses).
 static uint64_t *chain_rw_pml3,   *chain_rw_pml2,   *chain_rw_pml1;
@@ -82,12 +83,34 @@ static uint64_t *chain_uss0_pml3, *chain_uss0_pml2, *chain_uss0_pml1;
 static uint64_t *chain_rw0_pml3,  *chain_rw0_pml2,  *chain_rw0_pml1;
 static uint64_t *chain_ro_pml3,   *chain_ro_pml2,   *chain_ro_pml1;
 
-static uint64_t *alloc_pgtbl_page_zeroed(void)
+// Matching struct Page* for each chain table (so we can free_pages
+// the 2 MB blocks at end of selftest instead of leaking them).
+static struct Page *chain_rw_pml3_page,   *chain_rw_pml2_page,   *chain_rw_pml1_page;
+static struct Page *chain_2m_pml3_page,   *chain_2m_pml2_page;
+static struct Page *chain_uss0_pml3_page, *chain_uss0_pml2_page, *chain_uss0_pml1_page;
+static struct Page *chain_rw0_pml3_page,  *chain_rw0_pml2_page,  *chain_rw0_pml1_page;
+static struct Page *chain_ro_pml3_page,   *chain_ro_pml2_page,   *chain_ro_pml1_page;
+
+// Per-chain leaf 4 KB pages (separate alloc_pages calls; also need
+// freeing to avoid leaking the 2 MB block each was carved from).
+static struct Page *chain_rw_leaf_page;
+static struct Page *chain_2m_leaf_page;
+static struct Page *chain_uss0_leaf_page;
+static struct Page *chain_rw0_leaf_page;
+static struct Page *chain_ro_leaf_page;
+
+// Allocate a zeroed 2 MB block via alloc_pages() and return its
+// kernel-mapped VA.  Also writes back the struct Page* via *out_pg
+// so the caller can free_pages() the block later.  Symmetric with
+// restore_pt() which calls free_pages(*out_pg, 1).
+static uint64_t *alloc_pgtbl_page_zeroed(struct Page **out_pg)
 {
+    *out_pg = (struct Page *)0;
     struct Page *pg = alloc_pages(ZONE_NORMAL, 1, 0);
     if (!pg) return (uint64_t *)0;
     uint64_t *v = (uint64_t *)Phy_To_Virt(pg->phy_address);
     memset(v, 0, PAGE_4K_SIZE);
+    *out_pg = pg;
     return v;
 }
 
@@ -101,61 +124,61 @@ static void use_chain(uint64_t *pml3)
 // exercise.  See header comment above for the chain layout.
 static void build_synthetic_pml4(void)
 {
-    g_pml4 = alloc_pgtbl_page_zeroed();
+    g_pml4 = alloc_pgtbl_page_zeroed(&g_pml4_page);
 
     // chain_rw: 4KB user+RW at VA 0x400000 (l4=0,l3=0,l2=2,l1=0)
     {
-        chain_rw_pml3 = alloc_pgtbl_page_zeroed();
-        chain_rw_pml2 = alloc_pgtbl_page_zeroed();
-        chain_rw_pml1 = alloc_pgtbl_page_zeroed();
+        chain_rw_pml3 = alloc_pgtbl_page_zeroed(&chain_rw_pml3_page);
+        chain_rw_pml2 = alloc_pgtbl_page_zeroed(&chain_rw_pml2_page);
+        chain_rw_pml1 = alloc_pgtbl_page_zeroed(&chain_rw_pml1_page);
         chain_rw_pml3[0] = Virt_To_Phy((uint64_t)chain_rw_pml2) | PAGE_USER_Dir;
         chain_rw_pml2[2] = Virt_To_Phy((uint64_t)chain_rw_pml1) | PAGE_USER_Dir;
-        struct Page *phys = alloc_pages(ZONE_NORMAL, 1, 0);
-        chain_rw_pml1[0] = phys->phy_address | PAGE_USER_4K;
+        chain_rw_leaf_page = alloc_pages(ZONE_NORMAL, 1, 0);
+        chain_rw_pml1[0] = chain_rw_leaf_page->phy_address | PAGE_USER_4K;
     }
 
     // chain_2m: 2MB huge user+RW at VA 0x800000 (l4=0,l3=0,l2=4)
     {
-        chain_2m_pml3 = alloc_pgtbl_page_zeroed();
-        chain_2m_pml2 = alloc_pgtbl_page_zeroed();
+        chain_2m_pml3 = alloc_pgtbl_page_zeroed(&chain_2m_pml3_page);
+        chain_2m_pml2 = alloc_pgtbl_page_zeroed(&chain_2m_pml2_page);
         chain_2m_pml3[0] = Virt_To_Phy((uint64_t)chain_2m_pml2) | PAGE_USER_Dir;
-        struct Page *phys = alloc_pages(ZONE_NORMAL, 1, 0);
-        chain_2m_pml2[4] = (phys->phy_address & ~(uint64_t)0x1FFFFFULL) | PAGE_USER_Page;
+        chain_2m_leaf_page = alloc_pages(ZONE_NORMAL, 1, 0);
+        chain_2m_pml2[4] = (chain_2m_leaf_page->phy_address & ~(uint64_t)0x1FFFFFULL) | PAGE_USER_Page;
     }
 
     // chain_uss0: 4KB leaf U/S=1, upper U/S=0 — walker rejects
     {
-        chain_uss0_pml3 = alloc_pgtbl_page_zeroed();
-        chain_uss0_pml2 = alloc_pgtbl_page_zeroed();
-        chain_uss0_pml1 = alloc_pgtbl_page_zeroed();
+        chain_uss0_pml3 = alloc_pgtbl_page_zeroed(&chain_uss0_pml3_page);
+        chain_uss0_pml2 = alloc_pgtbl_page_zeroed(&chain_uss0_pml2_page);
+        chain_uss0_pml1 = alloc_pgtbl_page_zeroed(&chain_uss0_pml1_page);
         chain_uss0_pml3[0] = Virt_To_Phy((uint64_t)chain_uss0_pml2)
                            | PAGE_KERNEL_Dir;   // U/S=0 here
         chain_uss0_pml2[2] = Virt_To_Phy((uint64_t)chain_uss0_pml1) | PAGE_USER_Dir;
-        struct Page *phys = alloc_pages(ZONE_NORMAL, 1, 0);
-        chain_uss0_pml1[0] = phys->phy_address | PAGE_USER_4K;   // leaf U/S=1
+        chain_uss0_leaf_page = alloc_pages(ZONE_NORMAL, 1, 0);
+        chain_uss0_pml1[0] = chain_uss0_leaf_page->phy_address | PAGE_USER_4K;   // leaf U/S=1
     }
 
     // chain_rw0: 4KB leaf RW=1, upper RW=0 — read OK, write rejected
     {
-        chain_rw0_pml3 = alloc_pgtbl_page_zeroed();
-        chain_rw0_pml2 = alloc_pgtbl_page_zeroed();
-        chain_rw0_pml1 = alloc_pgtbl_page_zeroed();
+        chain_rw0_pml3 = alloc_pgtbl_page_zeroed(&chain_rw0_pml3_page);
+        chain_rw0_pml2 = alloc_pgtbl_page_zeroed(&chain_rw0_pml2_page);
+        chain_rw0_pml1 = alloc_pgtbl_page_zeroed(&chain_rw0_pml1_page);
         chain_rw0_pml3[0] = Virt_To_Phy((uint64_t)chain_rw0_pml2) | PAGE_USER_Dir;
         chain_rw0_pml2[2] = Virt_To_Phy((uint64_t)chain_rw0_pml1)
                           | (PAGE_USER_Dir & ~(uint64_t)PAGE_R_W); // upper RW=0
-        struct Page *phys = alloc_pages(ZONE_NORMAL, 1, 0);
-        chain_rw0_pml1[0] = phys->phy_address | PAGE_USER_4K;    // leaf RW=1
+        chain_rw0_leaf_page = alloc_pages(ZONE_NORMAL, 1, 0);
+        chain_rw0_pml1[0] = chain_rw0_leaf_page->phy_address | PAGE_USER_4K;    // leaf RW=1
     }
 
     // chain_ro: 4KB user+RO at VA 0x400000 — read OK, write rejected
     {
-        chain_ro_pml3 = alloc_pgtbl_page_zeroed();
-        chain_ro_pml2 = alloc_pgtbl_page_zeroed();
-        chain_ro_pml1 = alloc_pgtbl_page_zeroed();
+        chain_ro_pml3 = alloc_pgtbl_page_zeroed(&chain_ro_pml3_page);
+        chain_ro_pml2 = alloc_pgtbl_page_zeroed(&chain_ro_pml2_page);
+        chain_ro_pml1 = alloc_pgtbl_page_zeroed(&chain_ro_pml1_page);
         chain_ro_pml3[0] = Virt_To_Phy((uint64_t)chain_ro_pml2) | PAGE_USER_Dir;
         chain_ro_pml2[2] = Virt_To_Phy((uint64_t)chain_ro_pml1) | PAGE_USER_Dir;
-        struct Page *phys = alloc_pages(ZONE_NORMAL, 1, 0);
-        chain_ro_pml1[0] = phys->phy_address | PAGE_USER_4K_RO;  // RO leaf
+        chain_ro_leaf_page = alloc_pages(ZONE_NORMAL, 1, 0);
+        chain_ro_pml1[0] = chain_ro_leaf_page->phy_address | PAGE_USER_4K_RO;  // RO leaf
     }
     // 0x500000 (l2=2) is intentionally NOT mapped in any chain (the
     // unmapped test runs before use_chain is called).
@@ -181,6 +204,7 @@ struct test_map_ctx {
     uint64_t  saved_l4, saved_l3, saved_l2;   // originals (0 = absent, allocated)
     uint64_t  saved_pde;                      // original 2MB PDE if we split
     uint64_t  *new_l3, *new_l2, *new_pml1;    // test-only tables we created
+    struct Page *new_l3_page, *new_l2_page, *new_pml1_page;  // matching 2 MB blocks for free_pages()
     uint64_t  *leaf_slot;                     // pointer into a table to leaf PTE
     int       created_l3;
     int       created_l2;
@@ -203,7 +227,7 @@ static uint64_t *ensure_pt(uint64_t *pml4, uint64_t va, struct test_map_ctx *ctx
     // ── l4 ──────────────────────────────────────────────────────
     ctx->saved_l4 = pml4[l4];
     if (!(pml4[l4] & PAGE_Present)) {
-        ctx->new_l3 = alloc_pgtbl_page_zeroed();
+        ctx->new_l3 = alloc_pgtbl_page_zeroed(&ctx->new_l3_page);
         if (!ctx->new_l3) return (uint64_t *)0;
         pml4[l4] = Virt_To_Phy((uint64_t)ctx->new_l3) | PAGE_USER_GDT;
         ctx->created_l3 = 1;
@@ -213,7 +237,7 @@ static uint64_t *ensure_pt(uint64_t *pml4, uint64_t va, struct test_map_ctx *ctx
     // ── l3 ──────────────────────────────────────────────────────
     ctx->saved_l3 = pml3[l3];
     if (!(pml3[l3] & PAGE_Present)) {
-        ctx->new_l2 = alloc_pgtbl_page_zeroed();
+        ctx->new_l2 = alloc_pgtbl_page_zeroed(&ctx->new_l2_page);
         if (!ctx->new_l2) return (uint64_t *)0;
         pml3[l3] = Virt_To_Phy((uint64_t)ctx->new_l2) | PAGE_USER_Dir;
         ctx->created_l2 = 1;
@@ -226,7 +250,7 @@ static uint64_t *ensure_pt(uint64_t *pml4, uint64_t va, struct test_map_ctx *ctx
     if (l2val & PAGE_PS) {
         // 2MB huge PDE — split into 512 4KB PTEs that preserve the
         // original mapping (all 511 sibling 4KB pages remain reachable).
-        ctx->new_pml1 = alloc_pgtbl_page_zeroed();
+        ctx->new_pml1 = alloc_pgtbl_page_zeroed(&ctx->new_pml1_page);
         if (!ctx->new_pml1) return (uint64_t *)0;
         uint64_t base = l2val & ~(uint64_t)0x1FFFFFULL;
         // Leaf PTE perms: P,RW,U/S, PWT,PCD,A,D, G(8) preserved; PS(7)=0;
@@ -247,7 +271,7 @@ static uint64_t *ensure_pt(uint64_t *pml4, uint64_t va, struct test_map_ctx *ctx
         ctx->created_pml1 = 1;
         ctx->split_2m = 1;
     } else if (!(l2val & PAGE_Present)) {
-        ctx->new_pml1 = alloc_pgtbl_page_zeroed();
+        ctx->new_pml1 = alloc_pgtbl_page_zeroed(&ctx->new_pml1_page);
         if (!ctx->new_pml1) return (uint64_t *)0;
         pml2[l2] = Virt_To_Phy((uint64_t)ctx->new_pml1) | PAGE_USER_Dir;
         ctx->created_pml1 = 1;
@@ -278,14 +302,19 @@ static void restore_pt(struct test_map_ctx *ctx)
         uint64_t *pml3 = (uint64_t *)Phy_To_Virt(pml4[l4] & PAGE_4K_MASK);
         uint64_t *pml2 = (uint64_t *)Phy_To_Virt(pml3[l3] & PAGE_4K_MASK);
         pml2[l2] = ctx->saved_pde;
-        // Free the test-only pml1 we created during split
-        if (ctx->new_pml1) free_4k_page(Virt_To_Phy((uint64_t)ctx->new_pml1));
+        // Free the test-only pml1 we created during split.  alloc_pgtbl_page_zeroed
+        // used alloc_pages(ZONE_NORMAL, 1, ...) which returns a 2 MB block;
+        // free_4k_page() only handles subpage_pool 4 KB slots, so we must
+        // use free_pages(pg, 1) to release the underlying 2 MB block.
+        if (ctx->new_pml1_page) free_pages(ctx->new_pml1_page, 1);
         ctx->new_pml1 = (uint64_t *)0;
+        ctx->new_pml1_page = (struct Page *)0;
         ctx->split_2m = 0;
     } else if (ctx->created_pml1) {
-        // We created a fresh pml1 with nothing in it.  Free it.
-        if (ctx->new_pml1) free_4k_page(Virt_To_Phy((uint64_t)ctx->new_pml1));
+        // We created a fresh pml1 with nothing in it.  Free it (2 MB block).
+        if (ctx->new_pml1_page) free_pages(ctx->new_pml1_page, 1);
         ctx->new_pml1 = (uint64_t *)0;
+        ctx->new_pml1_page = (struct Page *)0;
         ctx->created_pml1 = 0;
     }
 
@@ -293,16 +322,18 @@ static void restore_pt(struct test_map_ctx *ctx)
     if (ctx->created_l2) {
         uint64_t *pml3 = (uint64_t *)Phy_To_Virt(pml4[l4] & PAGE_4K_MASK);
         pml3[l3] = ctx->saved_l3;
-        if (ctx->new_l2) free_4k_page(Virt_To_Phy((uint64_t)ctx->new_l2));
+        if (ctx->new_l2_page) free_pages(ctx->new_l2_page, 1);
         ctx->new_l2 = (uint64_t *)0;
+        ctx->new_l2_page = (struct Page *)0;
         ctx->created_l2 = 0;
     }
 
     // Restore l4 slot if we created the l3 table it points to.
     if (ctx->created_l3) {
         pml4[l4] = ctx->saved_l4;
-        if (ctx->new_l3) free_4k_page(Virt_To_Phy((uint64_t)ctx->new_l3));
+        if (ctx->new_l3_page) free_pages(ctx->new_l3_page, 1);
         ctx->new_l3 = (uint64_t *)0;
+        ctx->new_l3_page = (struct Page *)0;
         ctx->created_l3 = 0;
     }
 
@@ -357,9 +388,10 @@ int selftest_uaccess(void)
     // Cross-two-pages: 0x600ff0..0x601010 spans the boundary at
     // 0x601000.  Build a dedicated chain for this row (it needs l2=3).
     {
-        uint64_t *pml3 = alloc_pgtbl_page_zeroed();
-        uint64_t *pml2 = alloc_pgtbl_page_zeroed();
-        uint64_t *pml1 = alloc_pgtbl_page_zeroed();
+        struct Page *pml3_page, *pml2_page, *pml1_page;
+        uint64_t *pml3 = alloc_pgtbl_page_zeroed(&pml3_page);
+        uint64_t *pml2 = alloc_pgtbl_page_zeroed(&pml2_page);
+        uint64_t *pml1 = alloc_pgtbl_page_zeroed(&pml1_page);
         pml3[0] = Virt_To_Phy((uint64_t)pml2) | PAGE_USER_Dir;
         pml2[3] = Virt_To_Phy((uint64_t)pml1) | PAGE_USER_Dir;
         struct Page *p0 = alloc_pages(ZONE_NORMAL, 1, 0);
@@ -369,6 +401,12 @@ int selftest_uaccess(void)
         use_chain(pml3);
         SELFTEST_ASSERT(arch_user_range_accessible(g_pml4, 0x600ff0, 32, false));
         SELFTEST_ASSERT(arch_user_range_accessible(g_pml4, 0x600ff0, 32, true));
+        // Free chain (each is its own 2 MB block; free_pages(pg, 1) releases it).
+        free_pages(p0, 1);
+        free_pages(p1, 1);
+        free_pages(pml1_page, 1);
+        free_pages(pml2_page, 1);
+        free_pages(pml3_page, 1);
     }
 
     serial_printk("[selftest] uaccess: walker OK\n");
@@ -388,7 +426,8 @@ int selftest_uaccess(void)
     // so we use 0x40000000 (in the unmapped 1GB..2GB gap) for the fault.
     uint64_t saved_limit = current->addr_limit;
     current->addr_limit = 0x00007FFFFFFFFFFFULL;
-    char ksrc[16] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
+    char ksrc[32] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,
+                     17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32};
     ssize_t rc = copy_to_user_ft((void *)0x40000000, ksrc, 16);  // unmapped -> #PF -> longjmp
     current->addr_limit = saved_limit;
     SELFTEST_ASSERT(rc == -EFAULT);
@@ -536,6 +575,31 @@ int selftest_uaccess(void)
     restore_pt(&cta);
     free_pages(pgA, 1); // 2 MB block (count arg required)
     free_pages(pgB, 1);
+
+    // ── Step 10: free the synthetic pml4 + chains + leaf pages ─
+    // Each alloc_pgtbl_page_zeroed() + each chain leaf came from
+    // alloc_pages(ZONE_NORMAL, 1, ...), i.e. a 2 MB block.  Free them
+    // symmetrically with free_pages(pg, 1).
+    free_pages(chain_rw_leaf_page,  1);
+    free_pages(chain_2m_leaf_page,  1);
+    free_pages(chain_uss0_leaf_page,1);
+    free_pages(chain_rw0_leaf_page, 1);
+    free_pages(chain_ro_leaf_page,  1);
+    free_pages(chain_rw_pml1_page,  1);
+    free_pages(chain_rw_pml2_page,  1);
+    free_pages(chain_rw_pml3_page,  1);
+    free_pages(chain_2m_pml2_page,  1);
+    free_pages(chain_2m_pml3_page,  1);
+    free_pages(chain_uss0_pml1_page,1);
+    free_pages(chain_uss0_pml2_page,1);
+    free_pages(chain_uss0_pml3_page,1);
+    free_pages(chain_rw0_pml1_page, 1);
+    free_pages(chain_rw0_pml2_page, 1);
+    free_pages(chain_rw0_pml3_page, 1);
+    free_pages(chain_ro_pml1_page,  1);
+    free_pages(chain_ro_pml2_page,  1);
+    free_pages(chain_ro_pml3_page,  1);
+    free_pages(g_pml4_page, 1);
 
     serial_printk("[selftest] uaccess: PASS\n");
     return 0;
