@@ -121,3 +121,65 @@ Higher-level libc functions (`read()`, `exec()`, etc.) call these wrappers.
 ## Known bug
 
 `SYS_putchar` → `color_printk` shares a static 4KB buffer with `serial_printk`. Repeated spawn of programs using framebuffer I/O (like `/init.elf` with `printf`) can corrupt the buffer during concurrent use, causing crashes on the 3rd–4th spawn. See [[spawn-ud-crash-syscall-prefault]].
+
+## User-pointer boundary semantics
+
+Every syscall that takes a user-space pointer MUST go through the `uaccess` primitives (`kernel/include/kernel/uaccess.h`). Kernel-side dereferences of a user pointer without going through these primitives can result in a kernel `#PF` that has no recovery path — historically the OS01 kernel has not rebooted cleanly from such faults, so a hostile syscall with bad pointers could DoS the whole kernel. The 2026-08-23 syscall-boundary audit (commits `ad4c28a`..`80eab1a`) introduced the fault-tolerant primitives and routed every handler through them.
+
+### Primitives
+
+```c
+// kernel/include/kernel/uaccess.h — fault-tolerant user memory access.
+
+ssize_t copy_to_user_ft(void *dst, const void *src, size_t n);
+ssize_t copy_from_user_ft(void *dst, const void *src, size_t n);
+// _res variants take on_fault callback for resource release on fault.
+
+int     strnlen_user(const void *user_addr, size_t max);
+// Returns strlen(user_addr) bounded by max, or -EFAULT on fault.
+
+bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable);
+// Fast-reject gate: checks addr != 0, addr >= USER_MIN_ADDR, plus pml4
+// walk for full user-range accessibility with effective permissions.
+// Returns true iff the range is safe to dereference; _ft is still the
+// authority (the walker is a snapshot — munmap can race the gap).
+
+bool arch_user_range_accessible(void *pml4, uint64_t addr, uint64_t len,
+                                bool writable);
+// Cross-level user-range walker; uses the calling task's pml4 to walk
+// pml4→pml3→pml2→pml1 and check PT_USER + PT_WRITABLE bits per level.
+```
+
+### -EFAULT boundary semantics
+
+| Case | Kernel returns to user |
+|------|------------------------|
+| NULL pointer (`addr == 0`) | `-EFAULT` |
+| Below `USER_MIN_ADDR` (0x400000) | `-EFAULT` |
+| Out of range vs `addr_limit` | `-EFAULT` |
+| Range wraps the address space (`addr + len < addr`) | `-EFAULT` |
+| Page not present / wrong effective permissions | `-EFAULT` (not -EACCES) |
+| Fault during mid-copy (page boundary) | `-EFAULT` — primitives never short-count |
+| Forked child crashes on bad argv/envp element | `-EFAULT` or `-E2BIG` |
+| Pipe/socket/tty read or write hits a mid-copy fault | `-EFAULT`; pipe rollback releases the read-side `read_busy` reservation (Task 8) |
+
+The fault-tolerant primitives **never return short counts** — either they copy all `n` bytes and return `n`, or they return `-EFAULT`. This matches Linux `copy_{to,from}_user` semantics and removes the entire class of "kernel derefs bad user pointer" crashes.
+
+### Kernel-mode fault recovery
+
+`kernel/arch/x86_64/trap.c` `do_page_fault` — when a kernel-mode #PF occurs (`!(regs->cs & 3)`) at a user-range address (`cr2 < current->addr_limit`) and `current->fault_jmp` is armed (by a `copy_*_ft` in flight), the handler `__builtin_longjmp`s to the primitive instead of printing `PF-KRN` and panicking. Task 0 verified `current == task_from_tss()` (eq=1 on kernel-mode #PF because the IST 0 stack matches the task's kernel stack).
+
+This recover path only fires for **kernel-mode #PF** at a user-range address. **User-mode #PF** (e.g. `nl`'s libc NULL deref at `RIP=0x41CE98`) goes to the existing `kill_current_user_task` path — the audit does NOT touch user-mode fault handling, so user-mode libc bugs are still killed by the kernel. See `docs/applet-verification.md` §💥 for the applet user-fault review.
+
+### Where the audit touched
+
+| Cat | Sites | Commit |
+|-----|-------|--------|
+| **A** path strings | `SYS_exec` path, `SYS_open` path, `SYS_chdir` path, `SYS_stat`/`SYS_lstat` path, `SYS_access`/`unlink`/`mkdir`/`rmdir`/`rename`/`truncate` paths — `strnlen_user` + bounded deep-copy, stale-pointer fixes, kfree ordering | `6b04532` |
+| **A'** argv/envp | `SYS_exec` argv/envp bounded deep-copy: `MAX_ARGV=128`, `MAX_ARG_STRLEN=4096`, `MAX_ARG_TOTAL=65536`; argv+envp combined cap; syscall returns `-E2BIG` if any cap is exceeded | `63674a0` |
+| **B** fixed-struct / out-buffer | `waitpid`, `pipe`, `signal`, `sigprocmask`, `kill`, `getcwd`, `gettimeofday`, `times`, `uname`, `getppid`, `nanosleep`, `setsockopt`/`getsockopt`/`getsockname`, `getdents64`, `ioctl`, `poll`/`ppoll`, `select`/`pselect6`, `futex`, `socket`, `connect`, `accept`, `bind`, `recvfrom`, `sendto`, `recvmsg`/`sendmsg`, `signalfd` — bounce or in-place read | `01f1f47` `abb61b1` `f4046e3` |
+| **C** VFS bounce | `fd_read`/`fd_write` chunked into 64 KiB bounce buffers for VFS, DEV, pipe, socket, tty; FS callbacks never touch the user pointer; pipe three-phase (compute → reserve → copy) + `read_busy` reservation; socket rx success-only commit; tty post-block `_ft` | `e73c47c` `80eab1a` |
+| **signal** | `do_signal_delivery` writes the user trampoline frame via `copy_to_user_ft`; `SYS_sigreturn` reads the saved frame via `copy_from_user_ft`; both cross-page safe (pml4 walked per page); keep pending if fault | `e73c47c` |
+| **kernel selftest** | `kernel/test/test_uaccess.c` (17 cases): synthetic pml4 walker, cross-page non-adjacent pages, longjmp path, no-short-count, `_ft_res` cleanup double | `f8e056c` `115594b` |
+
+The audit self-test (`KERNEL_SELFTEST=1`) runs all 17 cases during boot; the user-space systest (199 cases) remains the primary regression.

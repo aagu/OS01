@@ -44,7 +44,7 @@
 | 用户栈 canary | libc `-fstack-protector-strong` + ELF 加载器 AT_RANDOM auxv 传种子（原 P1#5） | getrandom | |
 | ASLR | mmap 基址随机化 + ET_DYN/PIE 加载随机化（原 P3#12） | getrandom | |
 | UBSan + KASan | 内核编译期 instrument（原 P3#13） | 独立 | ArvernOS |
-| syscall 边界审计 | copy_from_user 全路径核查 + TOCTOU（现仅 read/exec 防） | 独立 | |
+| syscall 边界审计 ✅ | **已完成**（2026-08-24，commits `a1ad1b9`..`80eab1a`，11 commits）。详见下文「Syscall 边界审计实施总结」 | 独立 | |
 | 堆加固 | malloc double-free/溢出检测 | 独立 | |
 | NX 页 | 栈/堆不可执行 + mmap PROT_EXEC 审计 | 独立 | |
 
@@ -552,6 +552,99 @@ CPU N: schedule()
 
 - systest **150/150**（含 jiffies 频率 self-test：QEMU 实测 tick 速率与期望值匹配）
 - 回归：select/poll 超时、EEVDF 时间片、lwIP 超时、busybox `sleep 1` ≈ 1s（恢复真 10ms/tick）
+
+---
+
+## Syscall 边界审计实施总结 ✅ P1（已完成）
+
+> **状态**：已完成（2026-08-24）。Commit 范围 `a1ad1b9`..`80eab1a`（11 commits），覆盖 Task 1-8（基础设施 + Cat A/A'/B/C + 信号投递 + selftest）。**Task 9 systest hostile 组因独立时序敏感内核缺陷暂缓**（parked — 见 `progress.md`，Task 10 文档同步先于该修复，hostile 改动保留在 `user/systest.c` 工作区未提交）。**Task 10 回归 + applet 复查 + 文档同步**为计划最后一步（本文档自身提交）。spec/plan：`docs/superpowers/specs/2026-08-23-syscall-boundary-audit-design.md`。
+
+### 目标
+
+消除「内核解引用用户指针→kernel #PF→系统 panic/重启」整类 DoS。修复前：单条恶意 syscall（`read(fd, 0x1, 16)`、`open(NULL, 0)`、`chdir(0x1000)` 等）即可使整个内核不可用。修复后：所有 syscall 入口用户指针经 `syscall_check_user_range` 快速拒绝，中段拷贝用 `_ft` 容错 → 整条 syscall 返回 `-EFAULT`，内核存活。
+
+### 架构
+
+```
+              libc（用户态 syscall wrapper）
+                  │
+                  ▼
+      kernel/arch/x86_64/trap.c:do_system_call()
+                  │
+    ┌─────────────┼────────────────────────────┐
+    ▼             ▼                            ▼
+syscall_check_user_range    strnlen_user      copy_{to,from}_user_ft
+   (fast reject)           (路径/argv)        (中段拷贝)
+    │                          │                    │
+    │  ┌───────────────────────┘                    │
+    │  │   ┌────────────────────────────────────────┘
+    ▼  ▼   ▼
+  fail → -EFAULT
+   ├─ addr == 0 || addr < USER_MIN_ADDR(0x400000)
+   ├─ addr >= addr_limit || len > addr_limit - addr
+   └─ pml4 walk: PT_USER + (writable ? PT_WRITABLE : 1)
+
+  copy_*_ft fault path:
+   ├─ __builtin_setjmp armed
+   ├─ memcpy(dirty_side, other, n)
+   ├─ mid-page #PF (kernel-mode, cr2<addr_limit, fault_jmp armed)
+   └─ do_page_fault → __builtin_longjmp(fault_jmp, 1) → -EFAULT
+                       └─ 不 panicking, 不打印 PF-KRN
+
+  copy_*_ft_res 在 longjmp 前调用 on_fault(arg) → 释放预约资源
+                       └─ pipe read_busy、mm->lock 等
+```
+
+### 关键决策
+
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| 钩子位置 | `do_page_fault` kernel-mode 分支（`cs & 3 == 0`）+ `cr2 < addr_limit` + `fault_jmp` 已 armed | 只钩内核侧解引用用户指针；用户侧 #PF 走 `kill_current_user_task` 原路（applet 崩溃仍杀任务，行为不变）|
+| longjmp 协议 | `__builtin_setjmp`/`__builtin_longjmp`（Clang 内建）| 不用 libc `setjmp`：busybox `-fomit-frame-pointer` 后 RBP=0，libc setjmp 用 `[RBP+8]` 读返回地址会 #PF（见 `setjmp-frame-pointer-bug.md`）；Clang 内建直接汇编保存 RBX/RBP/R12-R15/RSP/PC |
+| longjmp 值 | 编译期常量 `1` | Clang 内建硬约束；运行时 const 1 → setjmp 返回 0、longjmp 返回非零 1 |
+| walker 位置 | `arch_user_range_accessible` 跨级累积 | 4 级页表各抽 N，连续 N 个 PTE 命中 + 权限匹配一次返回；不解析 PAT/PSE → 仅看 P 位 |
+| USER_MIN_ADDR | 0x400000 | 用户代码起始；`do_mmap` 强制下界，空洞不可被用户填充 |
+| 失败语义 | `-EFAULT`（不是 `-EACCES`）| 跟 Linux 兼容；POSIX 期望 EFAULT 跨页缺失/权限/对齐 |
+| 拷贝返回 | n 或 `-EFAULT`（绝不短计）| `read`/`write` 之类的 syscall 不希望得到部分字节；保留 Linux `copy_*_user` 语义 |
+| Max argv | 128 项 / 项 4096 B / 合计 65536 B | 覆盖任何真实 exec 参数组合 |
+
+### Commit 列表
+
+| Commit | 内容 |
+|--------|------|
+| `a1ad1b9`~`ad4c28a` | spec/plan 迭代 v1→v9 + 9 docs commit |
+| `ad4c28a` | 跨级 pml4 walker + USER_MIN_ADDR + arch_user_range_accessible |
+| `d8c3940` | `_ft` 容错拷贝原语 + `do_page_fault` 钩子 + task_t {fault_jmp, fault_cleanup, fault_cleanup_arg} |
+| `f8e056c` | selftest 17/17（合成 pml4 + 跨页 + longjmp 路径） |
+| `115594b` | selftest 强化：双 `alloc_pages(ZONE_NORMAL,1,0)` 取非相邻物理页 |
+| `6b04532` | Cat A 10 个 path handler：`strnlen_user` 有界深拷 + 残留指针修复 + kfree 顺序 |
+| `63674a0` | Cat A' exec argv/envp 深拷贝：`MAX_ARGV/STRLEN/TOTAL`、argv+envp 合计上限 |
+| `01f1f47` `abb61b1` `f4046e3` | Cat B 23 站点：`waitpid`/`pipe`/`signal`/`sigprocmask`/`kill`/`ioctl`/`futex`/`socket`/`setsockopt`/`getsockopt`/`getsockname`/`getsockname`/`getsockname`/`poll`/`ppoll`/`select`/`pselect6`/`pipe` 回滚 + `waitpid` 清理顺序 |
+| `e73c47c` | 信号投递写栈 + sigreturn 读帧：`copy_to_user_ft`/`copy_from_user_ft`，跨页安全，fault keep pending |
+| `80eab1a` | Cat C VFS bounce：`fd_read`/`fd_write` 64 KiB 分块；pipe 三阶段 + `read_busy` + `_ft_res` 释放；socket rx 成功才推 `rx_off`；socket tx 分块 bounce（lwIP 不触用户内存）；tty post-block `_ft` |
+
+### 文件变更
+
+| 类别 | 文件 | 说明 |
+|------|------|------|
+| 新增 | `kernel/include/kernel/uaccess.h` | 公共 uaccess 原语（`copy_*_ft`、`strnlen_user`、`check_user_range`、`MAX_ARGV*`、`USER_MIN_ADDR`、`os01_jmp_buf`）|
+| 新增 | `kernel/memory/uaccess.c` | `_ft`/`_ft_res` 实现 + `strnlen_user` + `check_user_range`（boot 上下文 fail-closed）|
+| 新增 | `kernel/test/test_uaccess.c` | 17/17 selftest |
+| 新增 | `kernel/include/kernel/arch/mmu.h` | `arch_user_range_accessible` 跨级 walker 声明 |
+| 修改 | `kernel/arch/x86_64/trap.c` | `do_page_fault` 钩子 + 23 个 Cat B 站点 + 信号投递/sigreturn _ft |
+| 修改 | `kernel/fs/file.c` | 23 个 Cat B 站点 + pipe 三阶段 + `read_busy` |
+| 修改 | `kernel/fs/devfs.c` | devfs 串口/随机 read _ft bounce |
+| 修改 | `kernel/fs/poll.c` | poll/ppoll _ft 写回 |
+| 修改 | `kernel/fs/select.c` | select/pselect6 _ft 写回 |
+| 修改 | `kernel/include/kernel/file.h` | `pipe_t` 加 `read_busy`/`released` 字段 |
+| 修改 | `kernel/include/kernel/task.h` | `task_t` 加 `fault_jmp`/`fault_cleanup`/`fault_cleanup_arg` |
+| 修改 | `kernel/memory/vma.c` | `do_mmap` 强制 `USER_MIN_ADDR` 下界（潜在)；walker dead code 清理 |
+| 修改 | `kernel/net/socket.c` | socket 家族 Cat B 站点 _ft |
+| 修改 | `kernel/sched/task.c` | `sys_exec` 操作内核副本 argv/envp（不再 deref 用户指针）|
+| 修改 | `kernel/sync/futex.c` | `arch_virt_to_phys` 改 `arch_walk_virt_to_phys`（抗任意指针）|
+| 修改 | `kernel/tty/tty.c` | tty ioctl/setspeed bounce；tty_read post-block `_ft` |
+
+总计：11 commits、19 文件、+2434/-392 行；systest 199/199 + test-network 6/6 + selftest 17/17 + phase-0 boot+shell。
 
 ---
 

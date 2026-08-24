@@ -4,6 +4,7 @@
 > 方法：自定义 inittab `once:` 执行验证脚本 → QEMU（-smp 1, -serial file）→ 串口镜像收集。
 > 环境：homeserver QEMU TCG，busybox v1.36.1 静态链接 OS01 libc，root 为 ext2 R/W。
 > 更新（2026-08-22）：`CONFIG_FLOAT_DURATION=y` 已默认开启，busybox 用 `strtod` 的浮点时长路径已验证。
+> 更新（2026-08-24，syscall 边界审计 Task 10）：见 §💥，**applet user-fault 属用户态 libc 缺陷，不在 syscall 边界审计作用域**（审计钩子只覆盖内核解引用用户指针，不覆盖用户态非法 RIP）。
 
 ## 结论（TL;DR）
 
@@ -77,6 +78,7 @@
 ### 💥 崩溃（内核 user-fault 杀任务）
 
 > 2026-08-22 重测：`sum` 崩溃已消失（printf 修复），`nl` 仍在同一类 libc 缺陷上崩溃。
+> 2026-08-24 复查（syscall 边界审计 Task 10）：applet 崩溃均为**用户态 libc 函数缺陷**（`nl` RIP `0x41CE98`、stdio 行读取相关 libc 函数），是 user-mode #PF。audit 在 `do_page_fault` kernel-mode 分支（`!(regs->cs & 3)`）钩了 `__builtin_longjmp(current->fault_jmp, 1)` 用于恢复内核解引用用户指针；user-mode #PF 不进入此分支，仍走 `kill_current_user_task`（杀任务），**审计未触及此路径**。`nl` 仍按原行为崩溃，根因（libc stdio 缺陷）属于 P5 ABI「libc 完整性」工作流，与本次 syscall 边界审计解耦。
 
 - RIP `0x41CE98`：`nl` 子进程（stdio 行读取相关 libc 函数缺陷，固定 RIP = 非随机）
 - 需 `addr2line -e build/x86_64/user/busybox.elf 0x41CE98` 定位后修复
