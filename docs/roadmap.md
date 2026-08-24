@@ -48,7 +48,7 @@
 | 用户栈 canary | libc `-fstack-protector-strong` + ELF 加载器 AT_RANDOM auxv 传种子（原 P1#5） | getrandom | |
 | ASLR | mmap 基址随机化 + ET_DYN/PIE 加载随机化（原 P3#12） | getrandom | |
 | UBSan + KASan | 内核编译期 instrument（原 P3#13） | 独立 | ArvernOS |
-| syscall 边界审计 | copy_from_user 全路径核查 + TOCTOU（现仅 read/exec 防） | 独立 | |
+| syscall 边界审计 ✅ | **已完成**（2026-08-24，commits `a1ad1b9`..`80eab1a`，11 commits）。详见下文「Syscall 边界审计实施总结」 | 独立 | |
 | 堆加固 | malloc double-free/溢出检测 | 独立 | |
 | NX 页 | 栈/堆不可执行 + mmap PROT_EXEC 审计 | 独立 | |
 

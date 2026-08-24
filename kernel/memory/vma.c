@@ -6,6 +6,7 @@
 #include <kernel/file.h>
 #include <kernel/pmm.h>
 #include <kernel/memory.h>
+#include <kernel/uaccess.h>          // USER_MIN_ADDR, arch_user_range_accessible
 #include <kernel/arch/spinlock.h>   // mm->lock: guards munmap/MAP_FIXED/mprotect
 #include <string.h>
 #include <stdlib.h>                 // calloc (used by mm_alloc)
@@ -247,6 +248,15 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
 {
     // ── 1. Argument validation ──────────────────────────
     if (length == 0)
+        return -EINVAL;
+
+    // Keep the "nothing below 0x400000 mapped" invariant: any explicit
+    // address (MAP_FIXED or otherwise) below USER_MIN_ADDR is rejected
+    // here.  Without this guard a buggy or hostile caller could map at
+    // 0x1000 and later trigger kernel faults on what looks like a NULL
+    // deref — see design §3 invariant.  addr == 0 (let the kernel pick)
+    // is unaffected.
+    if (addr != 0 && addr < USER_MIN_ADDR)
         return -EINVAL;
 
     uint64_t end = PAGE_4K_ALIGN(addr + length);
@@ -492,8 +502,12 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
 // /dev/urandom) skips the check/lock entirely — its buffer is a trusted
 // kernel buffer.
 //
-// Walk is huge-page aware: the user stack is a single 2MB page (PAGE_PS),
-// so buffers on the stack must validate the PDE itself rather than a 4KB PTE.
+// Permission check is delegated to arch_user_range_accessible (mmu.h) so
+// that upper-level PML4/PDP/PD entries are ANDed into the effective
+// permissions — a leaf PTE marked user+RW above a supervisor-only PML4E
+// is still inaccessible from ring-3.  COW (PAGE_COW, RW=0) is rejected
+// here, consistent with the design choice that the lock-and-write path
+// never allocates a private copy.
 static uint64_t *user_leaf_pte(uint64_t *pml4, uint64_t va)
 {
     size_t l4 = (size_t)(va >> 39) & 0x1ff;
@@ -524,27 +538,19 @@ int user_write_range_begin(uint64_t addr, size_t len)
     if (current->mm == NULL)
         return 0;
 
-    if (addr == 0 || addr >= current->addr_limit ||
+    // USER_MIN_ADDR rejects NULL and any address below 0x400000 — together
+    // with the existing >= addr_limit check this covers the whole low half.
+    if (addr < USER_MIN_ADDR ||
+        addr >= current->addr_limit ||
         len > current->addr_limit - addr)
         return -EFAULT;
 
     spin_lock(&current->mm->lock);
 
     uint64_t *user_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
-    uint64_t end = addr + len;
-    for (uint64_t va = addr & PAGE_4K_MASK; va < end; ) {
-        uint64_t *leaf = user_leaf_pte(user_pml4, va);
-        // Require present + writable.  A COW page (P=1, W=0, PAGE_COW set)
-        // fails here — a documented deviation from Linux's COW-fault-on-write.
-        if (!leaf || !(*leaf & (PAGE_Present | PAGE_R_W))) {
-            spin_unlock(&current->mm->lock);
-            return -EFAULT;
-        }
-        // Huge page: the single PDE covers 2 MB — validate it once, skip to
-        // the next 2 MB boundary.  Otherwise advance one 4 KB page.
-        va = (*leaf & PAGE_PS)
-             ? (va & PAGE_2M_MASK) + PAGE_2M_SIZE
-             : va + PAGE_4K_SIZE;
+    if (!arch_user_range_accessible(user_pml4, addr, len, true)) {
+        spin_unlock(&current->mm->lock);
+        return -EFAULT;
     }
     return 0;   // lock held
 }

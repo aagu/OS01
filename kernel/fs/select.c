@@ -13,6 +13,7 @@
 #include <kernel/poll.h>
 #include <kernel/task.h>
 #include <kernel/slab.h>
+#include <kernel/uaccess.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -89,9 +90,47 @@ static int64_t do_select_common(int nfds,
     }
 
     // ── Write back to user space (NULL → skip) ──────────────
-    if (ur) memcpy(ur, kr, sizeof(kernel_fd_set));
-    if (uw) memcpy(uw, kw, sizeof(kernel_fd_set));
-    if (ue) memcpy(ue, ke, sizeof(kernel_fd_set));
+    // Cat B: each set → _ft.  On any failure, return -EFAULT so the
+    // caller knows the write-back was incomplete.
+    if (ur) {
+        if (!syscall_check_user_range((uint64_t)ur,
+                                      sizeof(kernel_fd_set), true)) {
+            kfree(pfds);
+            poll_table_destroy(pt);
+            return -EFAULT;
+        }
+        if (copy_to_user_ft(ur, kr, sizeof(kernel_fd_set)) < 0) {
+            kfree(pfds);
+            poll_table_destroy(pt);
+            return -EFAULT;
+        }
+    }
+    if (uw) {
+        if (!syscall_check_user_range((uint64_t)uw,
+                                      sizeof(kernel_fd_set), true)) {
+            kfree(pfds);
+            poll_table_destroy(pt);
+            return -EFAULT;
+        }
+        if (copy_to_user_ft(uw, kw, sizeof(kernel_fd_set)) < 0) {
+            kfree(pfds);
+            poll_table_destroy(pt);
+            return -EFAULT;
+        }
+    }
+    if (ue) {
+        if (!syscall_check_user_range((uint64_t)ue,
+                                      sizeof(kernel_fd_set), true)) {
+            kfree(pfds);
+            poll_table_destroy(pt);
+            return -EFAULT;
+        }
+        if (copy_to_user_ft(ue, ke, sizeof(kernel_fd_set)) < 0) {
+            kfree(pfds);
+            poll_table_destroy(pt);
+            return -EFAULT;
+        }
+    }
 
 out:
     kfree(pfds);
@@ -121,9 +160,10 @@ int64_t do_select(int nfds, void *readfds, void *writefds,
             return -ENOSYS;
 
         struct timeval ktv;
-        if ((uint64_t)timeout_tv + sizeof(ktv) > current->addr_limit)
+        if (!syscall_check_user_range((uint64_t)timeout_tv, sizeof(ktv), false))
             return -EFAULT;
-        memcpy(&ktv, timeout_tv, sizeof(ktv));
+        if (copy_from_user_ft(&ktv, timeout_tv, sizeof(ktv)) < 0)
+            return -EFAULT;
         if (ktv.tv_sec > INT32_MAX / 1000)
             return -EINVAL;
         if (ktv.tv_usec >= 1000000)
@@ -147,19 +187,25 @@ int64_t do_select(int nfds, void *readfds, void *writefds,
 
     // ── Copy fd_sets from user space (NULL → skip) ──────────
     if (readfds) {
-        if ((uint64_t)readfds + sizeof(kernel_fd_set) > current->addr_limit)
+        if (!syscall_check_user_range((uint64_t)readfds,
+                                      sizeof(kernel_fd_set), false))
             return -EFAULT;
-        memcpy(&kr, readfds, sizeof(kernel_fd_set));
+        if (copy_from_user_ft(&kr, readfds, sizeof(kernel_fd_set)) < 0)
+            return -EFAULT;
     }
     if (writefds) {
-        if ((uint64_t)writefds + sizeof(kernel_fd_set) > current->addr_limit)
+        if (!syscall_check_user_range((uint64_t)writefds,
+                                      sizeof(kernel_fd_set), false))
             return -EFAULT;
-        memcpy(&kw, writefds, sizeof(kernel_fd_set));
+        if (copy_from_user_ft(&kw, writefds, sizeof(kernel_fd_set)) < 0)
+            return -EFAULT;
     }
     if (exceptfds) {
-        if ((uint64_t)exceptfds + sizeof(kernel_fd_set) > current->addr_limit)
+        if (!syscall_check_user_range((uint64_t)exceptfds,
+                                      sizeof(kernel_fd_set), false))
             return -EFAULT;
-        memcpy(&ke, exceptfds, sizeof(kernel_fd_set));
+        if (copy_from_user_ft(&ke, exceptfds, sizeof(kernel_fd_set)) < 0)
+            return -EFAULT;
     }
 
     // ── Parse timeout ────────────────────────────────────────
@@ -168,9 +214,11 @@ int64_t do_select(int nfds, void *readfds, void *writefds,
         ms = -1;   // block indefinitely
     } else {
         struct timeval ktv;
-        if ((uint64_t)timeout_tv + sizeof(ktv) > current->addr_limit)
+        if (!syscall_check_user_range((uint64_t)timeout_tv,
+                                      sizeof(ktv), false))
             return -EFAULT;
-        memcpy(&ktv, timeout_tv, sizeof(ktv));
+        if (copy_from_user_ft(&ktv, timeout_tv, sizeof(ktv)) < 0)
+            return -EFAULT;
         if (ktv.tv_sec > INT32_MAX / 1000)
             return -EINVAL;
         if (ktv.tv_usec >= 1000000)
@@ -246,9 +294,11 @@ int64_t do_pselect6(int nfds, void *readfds, void *writefds,
             return -ENOSYS;
 
         struct timespec kts;
-        if ((uint64_t)timeout_ts + sizeof(kts) > current->addr_limit)
+        if (!syscall_check_user_range((uint64_t)timeout_ts,
+                                      sizeof(kts), false))
             return -EFAULT;
-        memcpy(&kts, timeout_ts, sizeof(kts));
+        if (copy_from_user_ft(&kts, timeout_ts, sizeof(kts)) < 0)
+            return -EFAULT;
         if (kts.tv_sec > INT32_MAX / 1000)
             return -EINVAL;
         if (kts.tv_nsec >= 1000000000)
@@ -264,15 +314,20 @@ int64_t do_pselect6(int nfds, void *readfds, void *writefds,
         sigset_t sigmask_kern_n0 = 0;
         sigset_t *sigmask_ptr_n0 = NULL;
         if (sigmask_packed) {
-            if ((uint64_t)sigmask_packed + sizeof(sm) > current->addr_limit)
+            if (!syscall_check_user_range((uint64_t)sigmask_packed,
+                                          sizeof(sm), false))
                 return -EFAULT;
-            memcpy(&sm, sigmask_packed, sizeof(sm));
+            if (copy_from_user_ft(&sm, sigmask_packed, sizeof(sm)) < 0)
+                return -EFAULT;
             if (sm.ss_len != sizeof(sigset_t))
                 return -EINVAL;
             if (sm.ss) {
-                if ((uint64_t)sm.ss + sizeof(sigset_t) > current->addr_limit)
+                if (!syscall_check_user_range((uint64_t)sm.ss,
+                                              sizeof(sigset_t), false))
                     return -EFAULT;
-                memcpy(&sigmask_kern_n0, sm.ss, sizeof(sigset_t));
+                if (copy_from_user_ft(&sigmask_kern_n0, sm.ss,
+                                      sizeof(sigset_t)) < 0)
+                    return -EFAULT;
                 sigmask_ptr_n0 = &sigmask_kern_n0;
             }
         }
@@ -298,15 +353,20 @@ int64_t do_pselect6(int nfds, void *readfds, void *writefds,
     sigset_t *sigmask_ptr = NULL;
 
     if (sigmask_packed) {
-        if ((uint64_t)sigmask_packed + sizeof(sm) > current->addr_limit)
+        if (!syscall_check_user_range((uint64_t)sigmask_packed,
+                                      sizeof(sm), false))
             return -EFAULT;
-        memcpy(&sm, sigmask_packed, sizeof(sm));
+        if (copy_from_user_ft(&sm, sigmask_packed, sizeof(sm)) < 0)
+            return -EFAULT;
         if (sm.ss_len != sizeof(sigset_t))
             return -EINVAL;
         if (sm.ss) {
-            if ((uint64_t)sm.ss + sizeof(sigset_t) > current->addr_limit)
+            if (!syscall_check_user_range((uint64_t)sm.ss,
+                                          sizeof(sigset_t), false))
                 return -EFAULT;
-            memcpy(&sigmask_kern, sm.ss, sizeof(sigset_t));
+            if (copy_from_user_ft(&sigmask_kern, sm.ss,
+                                  sizeof(sigset_t)) < 0)
+                return -EFAULT;
             sigmask_ptr = &sigmask_kern;
         }
     }
@@ -339,11 +399,15 @@ int64_t do_pselect6(int nfds, void *readfds, void *writefds,
     }
 
     struct timespec kts;
-    if ((uint64_t)timeout_ts + sizeof(kts) > current->addr_limit) {
+    if (!syscall_check_user_range((uint64_t)timeout_ts,
+                                  sizeof(kts), false)) {
         ret = -EFAULT;
         goto out;
     }
-    memcpy(&kts, timeout_ts, sizeof(kts));
+    if (copy_from_user_ft(&kts, timeout_ts, sizeof(kts)) < 0) {
+        ret = -EFAULT;
+        goto out;
+    }
     if (kts.tv_sec > INT32_MAX / 1000) {
         ret = -EINVAL;
         goto out;
@@ -359,25 +423,37 @@ after_timeout:
     // ── Copy fd_sets from user space (NULL → skip) ──────────
 
     if (readfds) {
-        if ((uint64_t)readfds + sizeof(kernel_fd_set) > current->addr_limit) {
+        if (!syscall_check_user_range((uint64_t)readfds,
+                                      sizeof(kernel_fd_set), false)) {
             ret = -EFAULT;
             goto out;
         }
-        memcpy(&kr, readfds, sizeof(kernel_fd_set));
+        if (copy_from_user_ft(&kr, readfds, sizeof(kernel_fd_set)) < 0) {
+            ret = -EFAULT;
+            goto out;
+        }
     }
     if (writefds) {
-        if ((uint64_t)writefds + sizeof(kernel_fd_set) > current->addr_limit) {
+        if (!syscall_check_user_range((uint64_t)writefds,
+                                      sizeof(kernel_fd_set), false)) {
             ret = -EFAULT;
             goto out;
         }
-        memcpy(&kw, writefds, sizeof(kernel_fd_set));
+        if (copy_from_user_ft(&kw, writefds, sizeof(kernel_fd_set)) < 0) {
+            ret = -EFAULT;
+            goto out;
+        }
     }
     if (exceptfds) {
-        if ((uint64_t)exceptfds + sizeof(kernel_fd_set) > current->addr_limit) {
+        if (!syscall_check_user_range((uint64_t)exceptfds,
+                                      sizeof(kernel_fd_set), false)) {
             ret = -EFAULT;
             goto out;
         }
-        memcpy(&ke, exceptfds, sizeof(kernel_fd_set));
+        if (copy_from_user_ft(&ke, exceptfds, sizeof(kernel_fd_set)) < 0) {
+            ret = -EFAULT;
+            goto out;
+        }
     }
 
     // ── Allocate and fill pollfd array ───────────────────────

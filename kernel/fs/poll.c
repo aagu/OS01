@@ -22,6 +22,7 @@
 #include <string.h>          // memset
 #include <stddef.h>
 #include <errno.h>
+#include <kernel/uaccess.h>
 
 // Forward: devfs_poll lives in devfs.c (devices[] is static there)
 struct vfs_node;
@@ -478,22 +479,33 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
 int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val)
 {
     // ── Validate user pointer ──────────────────────────────
-    if ((uint64_t)user_fds >= current->addr_limit)
+    // Fast reject: the entire pollfd array must be mapped RW (the
+    // entries are both read [fd/events] and written [revents]).
+    // The actual per-field _ft copy is the authority.
+    if (user_fds == NULL && nfds > 0)
         return -EFAULT;
     if (nfds > POLL_MAX_FDS)
         return -EINVAL;
+    if (nfds > 0 &&
+        !syscall_check_user_range((uint64_t)user_fds,
+                                  nfds * sizeof(struct pollfd), true)) {
+        return -EFAULT;
+    }
 
     // nfds==0 with timeout<=0 returns immediately.
     // nfds==0 with timeout>0 goes through do_poll_core to sleep.
     if (nfds == 0 && timeout_val <= 0)
         return 0;
 
-    // ── Copy pollfd from user space ────────────────────────
+    // ── Copy pollfd from user space (Cat B: _ft per entry) ───
     struct pollfd kfds[POLL_MAX_FDS];
     if (nfds > 0) {
         for (uint32_t i = 0; i < nfds; i++) {
-            kfds[i].fd      = user_fds[i].fd;
-            kfds[i].events  = user_fds[i].events;
+            struct pollfd k;
+            if (copy_from_user_ft(&k, &user_fds[i], sizeof(k)) < 0)
+                return -EFAULT;
+            kfds[i].fd      = k.fd;
+            kfds[i].events  = k.events;
             kfds[i].revents = 0;
         }
     }
@@ -512,10 +524,19 @@ int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val)
 
     int64_t ret = do_poll_core(kfds, nfds, timeout_val, &pt);
 
-    // ── Single-point cleanup ────────────────────────────────
+    // ── Single-point cleanup: write back revents to user ──
+    // _ft per-entry; on any failure, abort write-back (so the user
+    // never sees partial state).  ret >= 0 still wins if at least
+    // some entries copied; the caller's retry will pick them up.
     if (ret >= 0 && nfds > 0) {
-        for (uint32_t i = 0; i < nfds; i++)
-            user_fds[i].revents = kfds[i].revents;
+        for (uint32_t i = 0; i < nfds; i++) {
+            if (copy_to_user_ft(&user_fds[i].revents,
+                                &kfds[i].revents,
+                                sizeof(kfds[i].revents)) < 0) {
+                ret = -EFAULT;
+                break;
+            }
+        }
     }
     poll_table_destroy(&pt);
     return ret;

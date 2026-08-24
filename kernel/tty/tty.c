@@ -8,6 +8,7 @@
 #include <driver/keyboard.h>
 #include <kernel.h>
 #include <kernel/poll.h>
+#include <kernel/uaccess.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
@@ -183,10 +184,16 @@ void tty_push_input(tty_t *tty, char c)
 // ═══════════════════════════════════════════════════════
 //
 //  Blocking protocol (prevents lost wakeup):
-//    1. Drain ring buffer directly
-//    2. Set INTERRUPTIBLE, enqueue, double-check
-//    3. If still empty: schedule() — sleeps until tty_wake_waiters()
-//    4. On wake: dequeue self, loop back to Phase 1
+//    1. Drain ring buffer into kernel bounce (NO tail/canon advance)
+//    2. copy_to_user_ft bounce→user buf
+//    3. On _ft success: advance tail/canon (commit)
+//    4. On _ft fault: return -1 (data still in ring/canon for retry)
+//    5. If drain returned 0 bytes and we should block: schedule()
+//    6. On wake: dequeue self, loop back to Step 1
+//
+//  Task 8 (Cat C): "post-block drain via _ft".  The user pointer is
+//  only ever touched by copy_to_user_ft (released lock, no spinlock
+//  held, no resource requiring _ft_res cleanup).
 
 int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
 {
@@ -194,25 +201,76 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
         return 0;
 
     for (;;) {
-        // ── Phase 1: drain the ring buffer directly ──────────
-        uint64_t flags = spin_lock_irqsave(&tty->ring_lock);
+        // ── Phase 1: drain ring/canon → kernel bounce (no commit) ─
+        // We stage the bytes under ring_lock but do NOT advance
+        // tail / canon yet — that happens after copy_to_user_ft
+        // succeeds.  This is the "peek" half of the tty equivalent
+        // of pipe_read_internal's 3-phase.
+        char kbuf[TTY_BUF_SIZE];
         int n = 0;
         bool canonical = (tty->term.c_lflag & ICANON) != 0;
 
-        if (canonical) {
-            canon_accumulate(&tty->canon, tty->ring, &tty->head, &tty->tail,
-                             TTY_BUF_SIZE);
-            n = canon_read(&tty->canon, buf, size);
-        } else {
-            while (n < size && tty->head != tty->tail) {
-                buf[n++] = tty->ring[tty->tail];
-                tty->tail = (tty->tail + 1) % TTY_BUF_SIZE;
-            }
-        }
-        spin_unlock_irqrestore(&tty->ring_lock, flags);
+        {
+            uint64_t flags = spin_lock_irqsave(&tty->ring_lock);
 
-        if (n > 0)
+            if (canonical) {
+                // Move ring → canon buffer (only mutates canon.len
+                // + ring tail, NOT user-facing state).
+                canon_accumulate(&tty->canon, tty->ring,
+                                 &tty->head, &tty->tail, TTY_BUF_SIZE);
+                // Find the first '\n' boundary; copy that slice
+                // into kbuf but DO NOT advance canon.len yet.
+                int i;
+                for (i = 0; i < tty->canon.len; i++) {
+                    if (tty->canon.buf[i] == '\n')
+                        break;
+                }
+                if (i < tty->canon.len) {
+                    int copy = (i + 1) < size ? (i + 1) : size;
+                    memcpy(kbuf, tty->canon.buf, copy);
+                    n = copy;
+                }
+            } else {
+                // Raw mode: copy bytes ring→kbuf up to size, but DO
+                // NOT advance tail yet.
+                int avail = (tty->head - tty->tail + TTY_BUF_SIZE) % TTY_BUF_SIZE;
+                int want = (avail < size) ? avail : size;
+                if (want > 0) {
+                    // Handle ring wrap
+                    if (tty->tail + want <= TTY_BUF_SIZE) {
+                        memcpy(kbuf, tty->ring + tty->tail, want);
+                    } else {
+                        int first = TTY_BUF_SIZE - tty->tail;
+                        memcpy(kbuf, tty->ring + tty->tail, first);
+                        memcpy(kbuf + first, tty->ring, want - first);
+                    }
+                    n = want;
+                }
+            }
+
+            spin_unlock_irqrestore(&tty->ring_lock, flags);
+        }
+
+        if (n > 0) {
+            // ── Phase 2: _ft copy kbuf→user ────────────────────
+            ssize_t rc = copy_to_user_ft(buf, kbuf, (size_t)n);
+            if (rc < 0) {
+                // Fault: do NOT advance ring tail / canon state.
+                // Data stays in tty buffer for retry on next call.
+                return -1;
+            }
+            // ── Phase 3: commit (advance ring tail / canon) ─────
+            uint64_t flags = spin_lock_irqsave(&tty->ring_lock);
+            if (canonical) {
+                memmove(tty->canon.buf, tty->canon.buf + n,
+                        tty->canon.len - n);
+                tty->canon.len -= n;
+            } else {
+                tty->tail = (tty->tail + n) % TTY_BUF_SIZE;
+            }
+            spin_unlock_irqrestore(&tty->ring_lock, flags);
             return n;
+        }
 
         if (nonblock)
             return 0;
@@ -221,7 +279,7 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
         if (arch_signal_pending_fatal())
             return 0;
 
-        // ── Phase 2: blocking sleep on wait queue ──────────
+        // ── Phase 2 (block path): blocking sleep on wait queue ──
         {
             uint64_t wq_flags = spin_lock_irqsave(&tty->read_wait_lock);
             current->state = TASK_INTERRUPTIBLE;
@@ -309,44 +367,65 @@ int tty_phys_ioctl(struct vfs_node *node, int cmd, void *arg)
     (void)node;
     switch (cmd) {
     case TCGETS: {
+        // Write direction: kernel termios → user struct.
         tty_t *tty = get_dev_tty();
         if (!tty) return -ENODEV;
-        memcpy(arg, &tty->term, sizeof(struct termios));
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg,
+                                      sizeof(struct termios), true))
+            return -EFAULT;
+        ssize_t r = copy_to_user_ft(arg, &tty->term, sizeof(struct termios));
+        if (r < 0) return -EFAULT;
         return 0;
     }
     case TCSETS:
     case TCSETSW: {
+        // Read direction: user termios → kernel termios.
         tty_t *tty = get_dev_tty();
         if (!tty) return -ENODEV;
-        memcpy(&tty->term, arg, sizeof(struct termios));
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg,
+                                      sizeof(struct termios), false))
+            return -EFAULT;
+        struct termios kterm;
+        if (copy_from_user_ft(&kterm, arg, sizeof(kterm)) < 0)
+            return -EFAULT;
+        tty->term = kterm;
         return 0;
     }
     case TIOCGWINSZ:
-        ((struct winsize *)arg)->ws_row = 25;
-        ((struct winsize *)arg)->ws_col = 80;
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg,
+                                      sizeof(struct winsize), true))
+            return -EFAULT;
+        struct winsize kws = { .ws_row = 25, .ws_col = 80 };
+        if (copy_to_user_ft(arg, &kws, sizeof(kws)) < 0)
+            return -EFAULT;
         return 0;
     case TIOCGPGRP: {
         tty_t *tty = get_dev_tty();
         if (!tty) return -ENODEV;
         pid_t *p = (pid_t *)arg;
-        // v2: 区间检查 p..p+sizeof(pid_t)
-        if ((uint64_t)p >= current->addr_limit ||
-            (uint64_t)p + sizeof(pid_t) > current->addr_limit)
+        if (!p) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)p, sizeof(pid_t), true))
             return -EFAULT;
         uint64_t f = spin_lock_irqsave(&tty->fg_pgrp_lock);
-        *p = tty->fg_pgrp;
+        pid_t kp = tty->fg_pgrp;
         spin_unlock_irqrestore(&tty->fg_pgrp_lock, f);
+        if (copy_to_user_ft(p, &kp, sizeof(kp)) < 0)
+            return -EFAULT;
         return 0;
     }
     case TIOCSPGRP: {
         tty_t *tty = get_dev_tty();
         if (!tty) return -ENODEV;
         pid_t *p = (pid_t *)arg;
-        if ((uint64_t)p >= current->addr_limit ||
-            (uint64_t)p + sizeof(pid_t) > current->addr_limit)
+        if (!p) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)p, sizeof(pid_t), false))
             return -EFAULT;
         pid_t new_pg;
-        memcpy(&new_pg, p, sizeof(pid_t));
+        if (copy_from_user_ft(&new_pg, p, sizeof(new_pg)) < 0)
+            return -EFAULT;
         if (new_pg < 0) return -EINVAL;
         // v4 放宽：new_pg == 0 OR new_pg exists in caller's session
         if (new_pg != 0 && new_pg != current->pgrp) {
@@ -370,7 +449,12 @@ int tty_phys_ioctl(struct vfs_node *node, int cmd, void *arg)
     }
     case FIONREAD: {
         tty_t *tty = get_dev_tty();
-        *(int *)arg = tty ? (tty->head - tty->tail + TTY_BUF_SIZE) % TTY_BUF_SIZE : 0;
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg, sizeof(int), true))
+            return -EFAULT;
+        int avail = tty ? (tty->head - tty->tail + TTY_BUF_SIZE) % TTY_BUF_SIZE : 0;
+        if (copy_to_user_ft(arg, &avail, sizeof(avail)) < 0)
+            return -EFAULT;
         return 0;
     }
     default: return -ENOTTY;
