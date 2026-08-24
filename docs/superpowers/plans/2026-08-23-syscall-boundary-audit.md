@@ -1039,6 +1039,11 @@ if (buf) {   // NULL 合法处
 
 ## Task 9: systest hostile 组（完整 E2E）
 
+**Status:** ✅ done — un-parked 2026-08-24. The exec-ENOEXEC crash was a
+`do_page_fault` demand-paging align bug (`PAGE_4K_ALIGN` rounds up;
+fixed to `cr2 & PAGE_4K_MASK`). See
+`2026-08-24-fix-task9-exec-enoexec-leak.md`. Full result: `227 passed, 0 failed`.
+
 **Files:**
 - Modify: `user/systest.c`（+hostile 组，~15 断言）
 

@@ -624,7 +624,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 					return;
 				}
 				int rc = vmm_map_4k_page(user_pml4, phys,
-							     PAGE_4K_ALIGN(cr2), vma->vm_page_prot);
+							     cr2 & PAGE_4K_MASK, vma->vm_page_prot);
 				if (rc != 0) {
 					free_4k_page(phys);
 					kill_current_user_task(regs);
@@ -655,7 +655,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 				    memset((char *)Phy_To_Virt(phys) + n, 0,
 				           PAGE_4K_SIZE - (size_t)n);
 				int rc = vmm_map_4k_page(user_pml4, phys,
-							     PAGE_4K_ALIGN(cr2), vma->vm_page_prot);
+							     cr2 & PAGE_4K_MASK, vma->vm_page_prot);
 				if (rc != 0) {
 					free_4k_page(phys);
 					kill_current_user_task(regs);
