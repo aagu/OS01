@@ -1036,7 +1036,7 @@ static void test_select_timeout(void)
            "elapsed ~0-100ms", "got %ldms", (long)elapsed);
 }
 
-static void __attribute__((unused)) test_select_null_timeout(void)
+static void test_select_null_timeout(void)
 {
     int fds[2];
     if (pipe(fds) < 0) { FAIL("select_null_timeout", "pipe failed"); return; }
@@ -2507,7 +2507,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"select_basic",        test_select_basic},
     {"select_write",        test_select_write},
     {"select_timeout",      test_select_timeout},
-    // {"select_null_timeout", test_select_null_timeout}, // FIXME: fork+pipe+wake
+    {"select_null_timeout", test_select_null_timeout},
     {"select_multifd",      test_select_multifd},
     {"select_zero_timeout", test_select_zero_timeout},
     {"select_sleep",        test_select_sleep},

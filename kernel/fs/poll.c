@@ -457,8 +457,16 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
         }
 
         // ── Post-sleep signal check ───────────────────────
+        // A signal (e.g. SIGCHLD from a fork child that wrote then
+        // exited) can be pending by the time we wake.  Rescan first:
+        // ready data takes priority over -EINTR (POSIX — a wake from
+        // the fd and a signal delivery can land in the same window, and
+        // the data must not be lost to a spurious EINTR).
         if (current->signal & ~current->blocked) {
+            int rc = poll_scan(kfds, nfds, NULL);
             if (timed) poll_tmo_unregister(pt);
+            if (rc > 0)
+                return rc;
             return -EINTR;
         }
 

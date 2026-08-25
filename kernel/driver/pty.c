@@ -13,6 +13,7 @@
 #include <kernel/pty.h>
 #include <kernel/file.h>
 #include <fs/devfs.h>
+#include <kernel/uaccess.h>
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -80,37 +81,84 @@ int pty_slave_ioctl(pty_t *pty, int cmd, void *arg)
 {
     if (!pty) return -ENODEV;
     switch (cmd) {
-    case TCGETS:
-        memcpy(arg, &pty->term, sizeof(struct termios));
+    case TCGETS: {
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg,
+                                      sizeof(struct termios), true))
+            return -EFAULT;
+        if (copy_to_user_ft(arg, &pty->term, sizeof(struct termios)) < 0)
+            return -EFAULT;
         return 0;
+    }
     case TCSETS:
-    case TCSETSW:
-        memcpy(&pty->term, arg, sizeof(struct termios));
+    case TCSETSW: {
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg,
+                                      sizeof(struct termios), false))
+            return -EFAULT;
+        struct termios kterm;
+        if (copy_from_user_ft(&kterm, arg, sizeof(kterm)) < 0)
+            return -EFAULT;
+        pty->term = kterm;
         return 0;
-    case TIOCGWINSZ:
-        ((struct winsize *)arg)->ws_row = pty->ws_row;
-        ((struct winsize *)arg)->ws_col = pty->ws_col;
+    }
+    case TIOCGWINSZ: {
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg,
+                                      sizeof(struct winsize), true))
+            return -EFAULT;
+        struct winsize kws = {0};
+        kws.ws_row = pty->ws_row;
+        kws.ws_col = pty->ws_col;
+        if (copy_to_user_ft(arg, &kws, sizeof(kws)) < 0)
+            return -EFAULT;
         return 0;
-    case TIOCSWINSZ:
-        pty->ws_row = ((struct winsize *)arg)->ws_row;
-        pty->ws_col = ((struct winsize *)arg)->ws_col;
+    }
+    case TIOCSWINSZ: {
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg,
+                                      sizeof(struct winsize), false))
+            return -EFAULT;
+        struct winsize kws;
+        if (copy_from_user_ft(&kws, arg, sizeof(kws)) < 0)
+            return -EFAULT;
+        pty->ws_row = kws.ws_row;
+        pty->ws_col = kws.ws_col;
         return 0;
-    case TIOCGPGRP:
-        *(pid_t *)arg = pty->pgrp;
+    }
+    case TIOCGPGRP: {
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg, sizeof(pid_t), true))
+            return -EFAULT;
+        pid_t kp = pty->pgrp;
+        if (copy_to_user_ft(arg, &kp, sizeof(kp)) < 0)
+            return -EFAULT;
         return 0;
-    case TIOCSPGRP:
-        pty->pgrp = *(pid_t *)arg;
+    }
+    case TIOCSPGRP: {
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg, sizeof(pid_t), false))
+            return -EFAULT;
+        pid_t new_pg;
+        if (copy_from_user_ft(&new_pg, arg, sizeof(new_pg)) < 0)
+            return -EFAULT;
+        pty->pgrp = new_pg;
         return 0;
+    }
     case TIOCSCTTY:
         // stub: ctty is set by ptsN_open
         return 0;
     // FIONREAD — busybox ash needs this for get_more_input()
     case FIONREAD: {
         if (!pty->master_to_slave) return -ENODEV;
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg, sizeof(int), true))
+            return -EFAULT;
         uint64_t fl = spin_lock_irqsave(&pty->master_to_slave->lock);
         int avail = (pty->master_to_slave->head - pty->master_to_slave->tail + PIPE_SIZE) % PIPE_SIZE;
         spin_unlock_irqrestore(&pty->master_to_slave->lock, fl);
-        *(int *)arg = avail;
+        if (copy_to_user_ft(arg, &avail, sizeof(avail)) < 0)
+            return -EFAULT;
         return 0;
     }
     default:

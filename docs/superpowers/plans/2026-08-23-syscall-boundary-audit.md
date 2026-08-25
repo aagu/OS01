@@ -1042,7 +1042,11 @@ if (buf) {   // NULL 合法处
 **Status:** ✅ done — un-parked 2026-08-24. The exec-ENOEXEC crash was a
 `do_page_fault` demand-paging align bug (`PAGE_4K_ALIGN` rounds up;
 fixed to `cr2 & PAGE_4K_MASK`). See
-`2026-08-24-fix-task9-exec-enoexec-leak.md`. Full result: `227 passed, 0 failed`.
+`2026-08-24-fix-task9-exec-enoexec-leak.md`. The remaining two deferred
+defects — select_timeout hang (spurious -EINTR from SIGCHLD racing the pipe
+wake) and tiocspgrp user-fault (PTY ioctl direct user-pointer deref) — are
+fixed in `2026-08-24-fix-task9-select-tiocspgrp.md`. Full result:
+`228 passed, 0 failed`.
 
 **Files:**
 - Modify: `user/systest.c`（+hostile 组，~15 断言）

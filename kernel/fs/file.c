@@ -1042,8 +1042,12 @@ int64_t fd_ioctl(file_t *f, int cmd, void *arg)
         pty_t *pty = f->pty;
         if (!pty) return -ENOTTY;
         if (cmd == TCGETS) {
-            if (!arg) return -EINVAL;
-            memcpy(arg, &pty->term, sizeof(struct termios));
+            if (!arg) return -EFAULT;
+            if (!syscall_check_user_range((uint64_t)arg,
+                                          sizeof(struct termios), true))
+                return -EFAULT;
+            if (copy_to_user_ft(arg, &pty->term, sizeof(struct termios)) < 0)
+                return -EFAULT;
             return 0;
         }
         return -ENOTTY;
