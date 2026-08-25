@@ -378,9 +378,35 @@ static int tty_magic_open(const char *name, file_t **out_file)
         // PTY slave: create FD_PTY_SLAVE file directly (I/O goes through
         // pipe_read_internal/pipe_write_internal, not devfs callbacks)
         pty_t *pty = (pty_t *)current->ctty;
-        if (!pty || !pty->allocated) return -ENXIO;
+        if (!pty) return -ENXIO;
         file_t *f = file_alloc();
         if (!f) return -ENOMEM;
+
+        // /dev/tty opens are *extra* slave references beyond the one the
+        // placeholder pipe counts (readers=writers=1 from pty_alloc) cover.
+        // file_free() decrements master_to_slave->readers and
+        // slave_to_master->writers on close, so we must increment them here
+        // to stay balanced — otherwise each close underflows the count and
+        // the terminal misjudges EOF (systest fork-35 hang).  Lock order
+        // matches file_free(): pty_lock first, then the pipe locks.
+        uint64_t pty_flags = spin_lock_irqsave(&pty_lock);
+        if (!pty->allocated) {
+            spin_unlock_irqrestore(&pty_lock, pty_flags);
+            free(f);  // bare file_t, nothing committed yet — no pipe cleanup
+            return -ENXIO;
+        }
+        if (pty->master_to_slave) {
+            uint64_t fl = spin_lock_irqsave(&pty->master_to_slave->lock);
+            pty->master_to_slave->readers++;   // slave reads master_to_slave
+            spin_unlock_irqrestore(&pty->master_to_slave->lock, fl);
+        }
+        if (pty->slave_to_master) {
+            uint64_t fl = spin_lock_irqsave(&pty->slave_to_master->lock);
+            pty->slave_to_master->writers++;   // slave writes slave_to_master
+            spin_unlock_irqrestore(&pty->slave_to_master->lock, fl);
+        }
+        spin_unlock_irqrestore(&pty_lock, pty_flags);
+
         f->type = FD_PTY_SLAVE;
         f->pty = pty;
         f->flags = O_RDWR;
