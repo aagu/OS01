@@ -188,10 +188,18 @@ bool serial_received(void)
 
 // Serial output lock — protects COM1 from interleaved writes
 // when multiple code paths (tty_write, SYS_putchar, serial_printk,
-// panic/stack_chk_fail) try to write concurrently.
-// Used with plain spin_lock (not irqsave) because no interrupt
-// handler calls write_serial or any function that acquires this
-// lock while a task may already hold it.
+// panic/stack_chk_fail, console_putchar, fb_write, log_emit,
+// trap.c echo, early main.c panic) try to write concurrently.
+//
+// Used with spin_lock_irqsave because (a) we may be called from
+// interrupt context (serial_poll/serial_handler indirectly via
+// tty_push_input wakes, plus IRQ-time stack traces), and (b) the
+// wait inside is_transmit_empty() can be unbounded under load.
+//
+// Callers that already hold this lock (serial_printk, tty_write)
+// must keep their outer lock — write_serial will spin trying
+// to re-acquire a non-recursive spinlock and deadlock the SMP.
+// See kernel/driver/serial.c comment block above the lock.
 spinlock_T serial_lock = {1};
 
 static bool is_transmit_empty(void)
@@ -199,10 +207,32 @@ static bool is_transmit_empty(void)
     return (arch_inb(SERIAL_COM1 + 5) & 0x20) != 0;
 }
 
-void write_serial(char c)
+// write_serial_unlocked: write one byte to the UART FIFO.
+// Caller MUST hold serial_lock (irqsave variant) — using the
+// unlocked variant while another writer holds the lock avoids
+// non-recursive deadlock from re-entering spin_lock().  Used
+// by write_serial() (after taking the lock) and by the
+// already-locked fast paths in serial_printk() / tty_write() /
+// _log_write().
+//
+// Exposed in kernel/include/driver/serial.h.
+void write_serial_unlocked(char c)
 {
     while (!is_transmit_empty())
         arch_cpu_pause();
+    arch_outb(SERIAL_COM1, (unsigned char)c);
+}
 
-    arch_outb(SERIAL_COM1, c);
+// write_serial: atomic per-character output.  Acquires serial_lock
+// so two CPUs/threads writing concurrently cannot interleave their
+// bytes inside the UART FIFO.  Safe to call from any context that
+// does NOT already hold serial_lock (e.g. early main.c panic,
+// fb_write when fb is surrendered, log_emit, trap.c echo).
+// Callers that DO hold the lock (serial_printk / tty_write) must
+// use the unlocked variant — see kernel/include/driver/serial.h.
+void write_serial(char c)
+{
+    uint64_t flags = spin_lock_irqsave(&serial_lock);
+    write_serial_unlocked(c);
+    spin_unlock_irqrestore(&serial_lock, flags);
 }

@@ -86,7 +86,11 @@ static void tty_wake_waiters(tty_t *tty)
 static void tty_def_output(char c)
 {
     color_printk(WHITE, BLACK, "%c", c);
-    write_serial(c);
+    // write_serial_unlocked: tty_write() holds serial_lock across
+    // the whole emission (see kernel/tty/tty.c tty_write); calling
+    // write_serial() here would re-acquire the non-recursive
+    // spinlock and deadlock.
+    write_serial_unlocked(c);
 }
 
 // ═══════════════════════════════════════════════════════

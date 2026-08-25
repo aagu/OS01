@@ -27,8 +27,19 @@ char read_serial(void);
 // Check if data is available without blocking
 bool serial_received(void);
 
-// Send one character (busy-waits until TX buffer empty)
+// Send one character (busy-waits until TX buffer empty).
+// Acquires serial_lock internally.  DO NOT call this from any
+// code path that already holds serial_lock — use the
+// write_serial_locked() inline helper instead, otherwise the
+// non-recursive spinlock will deadlock.
 void write_serial(char c);
+
+// Internal unlocked variant for callers that already hold
+// serial_lock (irqsave variant) — typically fast paths inside
+// tty_write / serial_printk.  Implemented as an inline in the
+// .c file; we expose it here so .c files that need it don't
+// have to re-import the entire serial.c.
+void write_serial_unlocked(char c);
 
 // Poll UART for available data and push to the console TTY.
 // Safe to call from any context — provides IRQ fallback.

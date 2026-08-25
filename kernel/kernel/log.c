@@ -44,21 +44,24 @@ static int level_to_color(int level)
 #endif
 
 // ── Batch serial write ────────────────────────────────────
-// Loops over buf calling write_serial().  Could be optimized
-// to fill the UART FIFO, but one-char-at-a-time is sufficient
-// for a debug OS.
+// Loops over buf.  write_serial_unlocked() writes one byte
+// without taking serial_lock — caller MUST hold serial_lock
+// (irqsave variant).  Used by _log_write() which keeps
+// serial_lock across the whole buffer to prevent IRQ handlers
+// from interleaving their own write_serial() calls into the
+// log line.
 #if LOG_TARGET_SERIAL
-static void write_serial_buf(const char *buf, int len)
+static void write_serial_buf_locked(const char *buf, int len)
 {
     for (int i = 0; i < len; i++)
-        write_serial((unsigned char)buf[i]);
+        write_serial_unlocked((unsigned char)buf[i]);
 }
 #endif
 
 // ── Output dispatcher ─────────────────────────────────────
 // Lock is acquired BEFORE vsnprintf to protect the shared static
 // buffer from concurrent access (TOCTOU race on SMP).
-void _log_write(int level __attribute__((unused)), const char *fmt, ...)
+void _log_write(int level, const char *fmt, ...)
 {
     static char log_buf[1024];
     va_list args;
@@ -75,8 +78,12 @@ void _log_write(int level __attribute__((unused)), const char *fmt, ...)
 
 #if LOG_TARGET_SERIAL
     {
+        // Hold serial_lock across the whole log line so IRQ
+        // handlers can't interleave their own bytes into it.
+        // write_serial_buf_locked() uses write_serial_unlocked
+        // to avoid re-locking deadlock.
         uint64_t sf = spin_lock_irqsave(&serial_lock);
-        write_serial_buf(log_buf, len);
+        write_serial_buf_locked(log_buf, len);
         spin_unlock_irqrestore(&serial_lock, sf);
     }
 #endif

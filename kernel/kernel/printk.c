@@ -201,14 +201,25 @@ void serial_printk(const char * fmt,...)
 	int count = 0;
 	va_list args;
 
-	va_start(args, fmt);
+	// Hold serial_lock for the whole emission: vsprintf fills
+	// buf_serial, then we write it byte-by-byte.  Without this
+	// outer lock an IRQ handler (e.g. serial_poll / a debug
+	// printk in an IRQ context) could call write_serial between
+	// our vsprintf and our loop, clobbering buf_serial and
+	// corrupting output.  write_serial() re-acquires the same
+	// non-recursive lock — see kernel/driver/serial.c — so we
+	// cannot call write_serial() while holding it.  Use the
+	// _unlocked helper instead.
 	uint64_t sf = spin_lock_irqsave(&serial_lock);
+
+	va_start(args, fmt);
 	i = vsprintf(buf_serial, fmt, args);
 	va_end(args);
 
 	for(count = 0;count < i ;count++)
 	{
-		write_serial((unsigned char)*(buf_serial + count));
+		write_serial_unlocked((unsigned char)*(buf_serial + count));
 	}
+
 	spin_unlock_irqrestore(&serial_lock, sf);
 }
