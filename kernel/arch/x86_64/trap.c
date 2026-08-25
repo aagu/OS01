@@ -1249,8 +1249,13 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         char c = (char)regs->rdi;
         color_printk(WHITE, BLACK, "%c", c);
         {
+            // Hold serial_lock across the putchar so the byte is
+            // emitted atomically with respect to other writers.
+            // Use write_serial_unlocked to avoid re-locking deadlock
+            // (write_serial() now acquires serial_lock internally —
+            // see kernel/driver/serial.c).
             uint64_t sf = spin_lock_irqsave(&serial_lock);
-            write_serial(c);  // also echo to serial for interactive shell
+            write_serial_unlocked(c);  // also echo to serial for interactive shell
             spin_unlock_irqrestore(&serial_lock, sf);
         }
         regs->rax = (uint64_t)(unsigned char)c;
