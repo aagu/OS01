@@ -104,6 +104,12 @@ class TestRunner:
         # Timeout: dump what we have
         print(f"\n[TEST] TIMEOUT waiting for pattern: {pattern}")
         print(f"[TEST] Last output: {buf[-500:]}")
+        # If this was a systest run, surface the last test that completed so a
+        # hang is attributable to a specific test name.
+        last = [l for l in buf.splitlines()
+                if '[PASS]' in l or '[FAIL]' in l or 'SYS TEST] RESULT' in l]
+        if last:
+            print(f"[TEST] Last completed test: {last[-1]}")
         return None
 
     def send(self, text):
@@ -155,26 +161,37 @@ def test_systest(tester):
     """System test: runs systest.elf in QEMU, parses results."""
     tester.start_qemu()
 
-    # Wait for test summary line
-    output = tester.read_until("[SYS TEST] RESULT:", timeout=60)
-    if not output:
+    # Wait for the test summary, but ALSO race against a wrong-mode boot.
+    # If the disk was built without OS01_SYSTEST (init spawns /bin/terminal
+    # and a BusyBox prompt appears) there will never be a "[SYS TEST] RESULT:"
+    # line — without this the runner spins the full 60s timeout, which reads
+    # as a "hang" to a user.  Match either outcome so we return as soon as
+    # one happens.  read_until() returns the re.Match for a regex pattern;
+    # use the matched group to tell which outcome fired.
+    pat = re.compile(
+        r'(\[SYS TEST\] RESULT:|\'/bin/terminal|BusyBox v)')
+    m = tester.read_until(pat, timeout=60)
+    if not m:
         print("FAIL: systest did not complete")
         return False
+    matched = m.group(0)
+    if "'/bin/terminal" in matched or "BusyBox v" in matched:
+        print("FAIL: disk.img is not a systest build (booted /bin/terminal "
+              "instead of /bin/systest). Rebuild with: make OS01_SYSTEST=1 test-syscall")
+        return False
 
-    # Continue reading for a few more seconds to capture trailing output
+    # RESULT line matched — drain whatever remains so the parse regex has a
+    # stable snapshot (the matched group only holds the prefix match).
     time.sleep(2)
-    remaining = tester._read_available()
-    if remaining:
-        text = remaining.decode('utf-8', errors='replace')
-        output += text
+    output = tester._read_available().decode('utf-8', errors='replace')
 
     # Parse: "[SYS TEST] RESULT: N passed, M failed"
-    m = re.search(r'\[SYS TEST\] RESULT:\s*(\d+)\s*passed,\s*(\d+)\s*failed', output)
-    if not m:
+    m2 = re.search(r'\[SYS TEST\] RESULT:\s*(\d+)\s*passed,\s*(\d+)\s*failed', output)
+    if not m2:
         print(f"FAIL: could not parse result line. output={output[-200:]!r}")
         return False
 
-    passed, failed = int(m.group(1)), int(m.group(2))
+    passed, failed = int(m2.group(1)), int(m2.group(2))
     if failed > 0:
         print(f"FAIL: {failed} tests failed ({passed} passed)")
         return False
