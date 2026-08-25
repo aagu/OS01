@@ -2,6 +2,25 @@
 
 ## Status: DONE — 228/228 systest, QEMU-verified
 
+## Follow-up (2026-08-25): "3rd systest run hangs" — investigated
+
+User reported an intermittent hang on repeated runs. Investigation:
+
+- **46+ consecutive fresh-build systest runs all pass** — no reproducible
+  kernel hang in the current code.
+- **Root cause of most "hangs": a wrong-mode disk.** `make run` /
+  `make disk.img` (without `OS01_SYSTEST=1`) builds a disk.img whose
+  inittab spawns `/bin/terminal`, not `/bin/systest`. Running the systest
+  runner against it waits the full 60s timer (no `[SYS TEST] RESULT:` line)
+  — reads as a hang. Reproduced exactly; fixed by making the runner fail
+  fast (~3s) with a "rebuild with OS01_SYSTEST=1" message
+  (`tests/run_test.py`, commit 40a34fc).
+- The standard `test-syscall` target always `rm`s + rebuilds disk.img, so
+  it produces the correct systest image every time (verified under both
+  normal→systest and systest→normal mode toggles).
+- `read_until` now prints the last completed test on timeout, so a future
+  hang is attributable to the exact test that stopped.
+
 ## Context
 
 The bf49bcf parked commit listed four deferred defects: select_timeout
