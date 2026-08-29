@@ -1,12 +1,35 @@
 /* aarch64 phase 1: EL1 vector table (VBAR_EL1 base).
  *
  * The table is 2 KiB-aligned (16 entries * 128 bytes), placed in
- * `.text` (high half).  head.S installs it via `msr vbar_el1, ...`
- * immediately AFTER MMU is enabled and we have jumped high.
+ * `.text` (high half).  main.c (not head.S!) installs it via
+ * `msr vbar_el1, ...` immediately after PL011 init — see the
+ * comment in main.c for why head.S's pre-MMU `boot_vectors`
+ * install is not enough.
  *
- * Phase 1 only needs EL1h IRQ routing (Task 3 will fill GIC dispatch);
- * everything else is a sync spinloop.  Sync/FIQ/SError from EL1 all
- * spin: spec says "b ."; they should never fire before Task 3.
+ * Phase 1 (Task 3) wires up the EL1h IRQ slot (entry #5) to the
+ * C-side dispatch (el1_irq_dispatch) which reads GICC_IAR, re-arms
+ * CNTP_TVAL_EL0, and EOI's the GIC.  Every other slot still spins
+ * — we don't expect to see any of them fire in phase 1.
+ *
+ * Slot numbering: the architecture orders the 16 entries by
+ * exception class then source SP.  Layout (offset within the
+ * 2 KiB-aligned base):
+ *   +0x000  Sync  SP_EL0
+ *   +0x080  IRQ   SP_EL0
+ *   +0x100  FIQ   SP_EL0
+ *   +0x180  SError SP_EL0
+ *   +0x200  Sync  SP_ELx
+ *   +0x280  IRQ   SP_ELx   ← the EL1h IRQ we dispatch
+ *   +0x300  FIQ   SP_ELx
+ *   +0x380  SError SP_ELx
+ *   +0x400..+0x780   same 4 classes from EL0 (AArch64)
+ *   +0x800..+0x980   AArch32 entries (unused; AArch64 EL0 traps
+ *                    these, but we keep the table complete so
+ *                    the architecture is satisfied)
+ *
+ * The vector table itself is fixed-size so the table address is
+ * 2 KiB-aligned by construction; VBAR_EL1 accepts a 2 KiB-aligned
+ * base (per ARM ARM D17.2.86).
  */
 
 .section .text.entry, "ax"
@@ -35,12 +58,25 @@ exception_vectors:
 .balign 0x80
 5:  b   .
 
-/* ───── IRQ, current SP_ELx (this is what kernel uses at EL1h) ───── */
+/* ───── IRQ, current SP_ELx (this is what kernel uses at EL1h) ─────
+ *
+ * The kernel runs at EL1 with SP_EL1; on IRQ entry the CPU jumps
+ * here with the same SP_EL1 (the architecture saves PSTATE+ELR
+ * into the per-bank save area).  We don't need to save any
+ * additional state in phase 1 (no syscall ABI, no userspace).
+ *
+ * Dispatch:
+ *   1. Branch to the C handler (bl el1_irq_dispatch).
+ *   2. The C handler reads GICC_IAR, re-arms CNTP, EOI's the GIC,
+ *      and prints a tick counter.
+ *   3. eret returns to the wfi in aarch64_main.
+ *
+ * The bl clobbers LR; that's fine because eret reads ELR_EL1,
+ * which the architecture keeps across the IRQ entry. */
 .balign 0x80
-6:  /* Phase 1 stub.  Once GIC is wired (Task 3) we read ICCIAR_EL1,
-      * dispatch to the GIC handler, and acknowledge via ICCEOIR_EL1.
-      * For now: spin.  IRQ remains masked at this point in boot. */
-    b   6b
+6:
+    bl  el1_irq_dispatch
+    eret
 
 /* ───── FIQ, current SP_ELx ───── */
 .balign 0x80

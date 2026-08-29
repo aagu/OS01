@@ -4,17 +4,41 @@
  * MMU, jumps to the high-half kernel image, clears the high-half .bss,
  * installs the VBAR table, parks the DTB slot, and finally calls here.
  *
- * For Task 1 we just print "OS01 aarch64 phase1 boot ok" on the PL011
- * and idle in `wfi`.  Interrupts stay masked (Phase 1 keeps IRQs off
- * until Task 3 enables them explicitly).
+ * Boot sequence (Task 3):
+ *   1. arch_local_irq_disable() (idempotent — DAIF already masked in head.S)
+ *   2. pl011_init() — program PL011 for polled output
+ *   3. Re-point VBAR_EL1 to the high-half exception_vectors
+ *   4. dtb_init(dtb_base) — minimal FDT parse
+ *   5. gic_init() — distributor + CPU interface, only PPI 30 enabled
+ *   6. arch_tick_start() — arm CNTP for one period
+ *   7. test_spinlock() — Task 2a single-core benchmark
+ *   8. arch_local_irq_enable() — last step; tick ISR now runs
+ *   9. wfi idle loop; the ISR prints "[tick] N" once a second
  *
- * No libc, no printk.c linkage: per controller ruling R2 we use the
- * local `kputs()` and a tiny memset().
+ * Per spec §2.3, `arch_local_irq_enable()` is the LAST init step.
+ * The tick ISR will not fire before that, regardless of how early
+ * CNTP is enabled, because DAIF.IRQ is still set.
+ *
+ * Note on VBAR: head.S installed the early `boot_vectors` (panic-
+ * only) before MMU enable and never switched it, so by default the
+ * EL1h IRQ slot would spin in boot_vectors.Lirq_spin instead of
+ * dispatching to our C ISR.  Step 3 re-points VBAR_EL1 to the high-
+ * half `exception_vectors`, which entry.S populates with the actual
+ * `bl el1_irq_dispatch; eret` sequence.
+ *
+ * Note on dtb_base: head.S does not propagate the original x0 (DTB
+ * pointer) into aarch64_main — by the time it returns from
+ * build_pagetables / write_tcr_mair_tttr the value has been
+ * clobbered.  Phase 1 falls back to QEMU virt defaults when the
+ * pointer looks invalid (the C `aarch64_dtb_slot` is .bss-cleared
+ * because head.S never writes to it).  This matches spec decision
+ * #6 ("the boot must not hang if the DTB is absent").
  */
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <kernel/arch/cpu.h>
-#include <kernel/arch/irq.h>          /* arch_local_irq_disable (idempotent) */
+#include <kernel/arch/irq.h>          /* arch_local_irq_disable / enable */
 
 /* Tiny helpers — libc/libk are NOT linked (LIBS := -nostdlib for
  * aarch64).  Just enough for our local use. */
@@ -26,11 +50,22 @@ static void aarch64_memset(void *dst, int c, uint64_t n)
     }
 }
 
-/* Forward from pl011.c — `void kputs(const char *)`. */
+/* Forward from pl011.c. */
 void kputs(const char *s);
+void kputu(uint64_t v);
+void kputx(uint64_t v);
 void pl011_init(void);
 void pl011_putc(char c);
 void arch_install_exception_vectors(void);
+
+/* Forward from dtb.c. */
+void dtb_init(uint64_t dtb_base);
+
+/* Forward from gic.c. */
+void gic_init(void);
+
+/* Forward from time.c — declared in kernel/include/kernel/arch/cpu.h. */
+bool arch_tick_start(void);
 
 /* Forward from test_spinlock.c — Task 2a single-core benchmark. */
 void test_spinlock(void);
@@ -44,26 +79,61 @@ static const char banner[] = "OS01 aarch64 phase1 boot ok\n";
 
 void aarch64_main(uint64_t dtb_base)
 {
-    (void)dtb_base;          /* not used in Task 1; Task 3 will parse.  */
-
-    /* Idempotent: a re-entry (early bring-up debugging) shouldn't
-     * unmask IRQs by accident. */
+    /* Step 1: idempotent — a re-entry (early bring-up debugging)
+     * shouldn't unmask IRQs by accident. */
     arch_local_irq_disable();
 
-    /* Bring up PL011 (QEMU already works with reset values, but it
-     * doesn't hurt to program LCR_H+CR for a clean state). */
+    /* Step 2: PL011.  QEMU already works with reset values, but
+     * it doesn't hurt to program LCR_H+CR for a clean state. */
     pl011_init();
 
-    /* Hello, world. */
+    /* Step 3: re-point VBAR_EL1 to the high-half vector table.
+     * See file header for the rationale.  The high-half
+     * exception_vectors is 2 KiB-aligned by construction (see
+     * entry.S) so VBAR accepts it directly. */
+    {
+        uint64_t vbar = (uint64_t)(uintptr_t)exception_vectors;
+        __asm__ __volatile__("msr vbar_el1, %0" :: "r"(vbar) : "memory");
+        __asm__ __volatile__("isb" ::: "memory");
+    }
+
+    /* Step 4: DTB.  Parses 5 nodes (/cpus, /psci, /timer,
+     * /interrupt-controller, /pl011) and enforces the spec §2.1
+     * failure conditions (CPU>NR_CPUS / duplicate MPIDR / BSP
+     * MPIDR not in table).  If the DTB is missing or unparsable,
+     * QEMU virt defaults are used. */
+    dtb_init(dtb_base);
+
+    /* Hello, world.  Printed after dtb_init so a DTB parse failure
+     * produces a [dtb] PANIC line before the banner. */
     kputs(banner);
 
+    /* Step 5: GICv2.  Distributor + CPU interface, only PPI 30. */
+    gic_init();
+
+    /* Step 6: CNTP physical-timer period mode.  Arms TVAL with
+     * period = CNTFRQ_EL0 / HZ and enables the timer.  The first
+     * tick will fire only after step 8 unmasks IRQs. */
+    if (!arch_tick_start()) {
+        kputs("[cntp] arch_tick_start FAILED\n");
+        for (;;) {
+            arch_cpu_halt();
+        }
+    }
+
     /* Task 2a: single-core spinlock benchmark.  Runs after the
-     * banner so the user always sees the boot line first; emits
-     * "[spinlock] single-core 1M PASS" (or a FAIL line with the
-     * actual counter) on the PL011 before we drop into WFI. */
+     * tick is configured so any timing observation works, but
+     * before IRQs are unmasked so the tick ISR does not preempt
+     * the (already non-preempted) benchmark. */
     test_spinlock();
 
-    /* Done: idle forever.  PL011 stays the only output channel. */
+    /* Step 8: ENABLE IRQs.  Per spec §2.3 this is the last init
+     * step.  After this, the tick ISR fires every 10 ms and
+     * prints "[tick] N" once a second. */
+    arch_local_irq_enable();
+
+    /* Step 9: idle forever.  The tick ISR will return via eret
+     * back to the wfi; the BSP never leaves this loop. */
     for (;;) {
         arch_cpu_halt();         /* wfi */
     }

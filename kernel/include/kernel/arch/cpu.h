@@ -82,9 +82,10 @@ static inline uint64_t arch_cycle_freq(void)
     return val;
 }
 
-// 启动 arch tick 源（x86: LAPIC 周期模式；aarch64: 未实现）。返回是否启动成功；
-// 失败由 clockevent 层回退 PIT。x86 定义在 arch/x86_64/time.c。
-static inline bool arch_tick_start(void) { return false; }  // CNTP 未实现，见 spec §4.2
+// 启动 arch tick 源（x86: LAPIC 周期模式；aarch64: CNTP 周期模式）。实现见
+// 各自 arch 的 time.c。返回是否启动成功；失败由 clockevent 层回退 PIT。
+// aarch64 端是 extern —— time.c 提供真实现，static inline 会遮蔽它。
+bool arch_tick_start(void);
 
 // Enable No-eXecute: set SCTLR_EL1.WXN (bit 19)
 static inline void arch_cpu_enable_nx(void)

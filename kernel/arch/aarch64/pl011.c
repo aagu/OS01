@@ -91,3 +91,45 @@ void kputs(const char *s)
         pl011_putc(*s++);
     }
 }
+
+/* Write an unsigned 64-bit integer in decimal.  Task 3's tick counter
+ * uses this to print a per-second summary; phase 1 has no printf and
+ * no libc, so we hand-roll a single helper here.  Max 21 characters
+ * for a uint64_t; we use 24 to stay safe with future 128-bit widening. */
+void kputu(uint64_t v)
+{
+    char buf[24];
+    int i = 0;
+    if (v == 0) {
+        pl011_putc('0');
+        return;
+    }
+    while (v > 0) {
+        buf[i++] = '0' + (char)(v % 10);
+        v /= 10;
+    }
+    while (i > 0) {
+        pl011_putc(buf[--i]);
+    }
+}
+
+/* Write an unsigned 64-bit integer in hexadecimal (no leading "0x").
+ * Used by the boot/dtb/gic print paths to make address dumps
+ * legible. */
+void kputx(uint64_t v)
+{
+    static const char hex[] = "0123456789abcdef";
+    char buf[17];
+    int i = 16;
+    if (v == 0) {
+        pl011_putc('0');
+        return;
+    }
+    while (v > 0 && i >= 0) {
+        buf[--i] = hex[v & 0xFU];
+        v >>= 4;
+    }
+    while (i < 16) {
+        pl011_putc(buf[i++]);
+    }
+}
