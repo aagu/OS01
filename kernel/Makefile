@@ -8,18 +8,38 @@ DEST_DIR    := ..                  # root of the project (for kernel.bin)
 # ── Load architecture configuration ────────────────────────
 include $(ARCHDIR)/make.config
 
-# ── Compiler / Linker (inherited from root Makefile exports) ─
-CC       ?= clang -target x86_64-unknown-none
-LD       ?= ld.lld -m elf_x86_64
+# ── Compiler / Linker (selected by ARCH) ────────────────────
+# Note: root Makefile no longer exports CC/LD — we pick per ARCH here.
+# Use `:=` (immediate assignment) rather than `?=`, because GNU Make has
+# built-in defaults `CC=cc` / `LD=ld` that would otherwise pre-empt `?=`
+# and we'd silently fall back to the host toolchain.
+ifeq ($(ARCH),aarch64)
+CC := clang -target aarch64-none-elf
+LD := ld.lld -m aarch64elf
+else
+CC := clang -target x86_64-unknown-none
+LD := ld.lld -m elf_x86_64
+# OBJFORMAT for kernel.bin's objcopy step. aarch64/make.config sets it
+# directly via `=`; we use `?=` here so the included config wins.
+OBJFORMAT ?= elf64-x86-64
+endif
 AR       ?= llvm-ar
 OBJ_CPY  ?= llvm-objcopy
-OBJFORMAT ?= elf64-x86-64
 
 # Kernel headers path (relative to kernel/ CWD)
 KERNEL_HEADERS := include
 
 # ── Source discovery via wildcard (no manual lists!) ───────
 # All paths are relative to kernel/ (CWD after make -C kernel)
+#
+# Arch gate: aarch64 phase 1 starts from an empty whitelist (linker pulls
+# in arch/aarch64/*.c via ARCH_C_SOURCES below). x86_64 keeps the full
+# legacy wildcard set. Sources are added back to the aarch64 whitelist
+# incrementally as the port grows (e.g. arch-neutral helpers), gated by
+# "what the linker complains about".
+ifeq ($(ARCH),aarch64)
+KERNEL_C_SOURCES :=
+else
 KERNEL_C_SOURCES := \
     $(wildcard kernel/*.c) \
     $(wildcard net/*.c) \
@@ -40,6 +60,7 @@ KERNEL_C_SOURCES := \
 # APIC/PIC/PIT/RTC code out of architecture-neutral source discovery.
 KERNEL_C_SOURCES := $(filter-out driver/pit.c driver/rtc.c,$(KERNEL_C_SOURCES))
 KERNEL_C_SOURCES += $(ARCH_PLATFORM_C_SOURCES)
+endif
 
 # Architecture C sources and asm sources
 ARCH_C_SOURCES  := $(wildcard $(ARCHDIR)/*.c)
@@ -59,9 +80,14 @@ ALL_S_SOURCES   := $(ARCH_ASM_SOURCES)
 C_OBJECTS       := $(patsubst %.c,$(BUILD_DIR)/%.o,$(ALL_C_SOURCES))
 ASM_OBJECTS     := $(patsubst %.S,$(BUILD_DIR)/%.o,$(ALL_S_SOURCES))
 
-EXTRA_OBJECTS := \
+EXTRA_OBJECTS :=
+ifeq ($(ARCH),x86_64)
+# aarch64 has no trampoline (no real-mode bootstrap) and no framebuffer
+# (serial-only early boot in phase 1).
+EXTRA_OBJECTS += \
     $(BUILD_DIR)/kernel/font.o \
     $(BUILD_DIR)/$(ARCHDIR)/trampoline_bin.o
+endif
 
 KERNEL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS) $(EXTRA_OBJECTS)
 
@@ -70,7 +96,14 @@ ALL_CFLAGS   := $(CFLAGS) $(ARCH_CFLAGS)   -I$(KERNEL_HEADERS)
 ALL_ASMFLAGS := $(ASFLAGS) $(ARCH_ASMFLAGS)
 ALL_LDFLAGS  := $(LDFLAGS) $(ARCH_LDFLAGS) -L$(SYSROOT)/usr/lib
 
+# x86_64 links against the freestanding libc.a (-lk) and the x86 libgcc
+# intrinsics (-lgcc). aarch64 phase 1 is freestanding only — no libc.a
+# exists for aarch64 yet, and x86 libgcc would break the link.
+ifeq ($(ARCH),x86_64)
 LIBS := -nostdlib -lk -lgcc
+else
+LIBS := -nostdlib
+endif
 
 # ── DEBUG / NDEBUG (align with busybox convention) ────────
 # Release (default): compile out log_debug() via -DNDEBUG, -O2.
@@ -97,7 +130,11 @@ LWIP_SOURCES  := $(LWIP_CORE) $(LWIP_CORE4) $(LWIP_NETIF) $(LWIP_API)
 # Map lwIP sources to build dir: thirdpart/lwip/src/core/tcp.c → build/.../lwip/core/tcp.o
 LWIP_OBJECTS  := $(patsubst $(LWIP_SRC_DIR)/%.c,$(BUILD_DIR)/lwip/%.o,$(LWIP_SOURCES))
 
+# lwIP is x86-only for phase 1 (e1000/virtio-net drivers live under
+# kernel/driver/, not yet ported to aarch64).
+ifeq ($(ARCH),x86_64)
 KERNEL_OBJECTS += $(LWIP_OBJECTS)
+endif
 
 ALL_CFLAGS     += -I$(LWIP_SRC_DIR)/include -I../kernel/include/net
 ALL_LDFLAGS    +=
