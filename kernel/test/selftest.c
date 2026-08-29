@@ -109,6 +109,9 @@ static int test_pipe_basic(void)
     return 0;
 }
 
+int test_rwlock_basic(void);
+int test_seqlock_basic(void);
+
 // ── External test functions (defined in subsystem .c files) ──
 // Forward-declared here instead of polluting public headers.
 // Only available when KERNEL_SELFTEST=1 (guarded by OS01_SELFTEST in each .c file).
@@ -135,6 +138,8 @@ int selftest_run_all(void)
     selftest_register("vfs_mount_root",    test_vfs_mount_root);
     selftest_register("procfs_read_meminfo", test_procfs_read_meminfo);
     selftest_register("spinlock_basic",    test_spinlock_basic);
+    selftest_register("rwlock_basic",      test_rwlock_basic);
+    selftest_register("seqlock_basic",     test_seqlock_basic);
     selftest_register("pipe_basic",        test_pipe_basic);
 
 #ifdef OS01_SELFTEST

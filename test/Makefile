@@ -21,6 +21,8 @@ POLL_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
     -include $(TEST_MOCK)/poll_test_runtime.h \
     -I$(TEST_MOCK)/include $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
 
+SYNC_HOST_CFLAGS := $(HOST_CFLAGS) -I$(TEST_INC) $(KERNEL_INC)
+
 LIBC_SRC := $(TESTS_DIR)/libc
 
 LIBC_OBJS := \
@@ -55,6 +57,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_canon.elf \
     $(TEST_BLD)/test_terminal_core.elf \
     $(TEST_BLD)/test_tetris_logic.elf \
+    $(TEST_BLD)/test_sync_primitives.elf \
     $(TEST_BLD)/test_poll_requested.elf
 
 .PHONY: all clean run
@@ -250,6 +253,23 @@ $(TEST_BLD)/test_elf_validate.elf: $(TEST_BLD)/test_elf_validate.o $(LIBC_OBJS) 
 # standalone test (no kernel/libc deps)
 $(TEST_BLD)/test_wait_basic.elf: $(TEST_BLD)/test_wait_basic.o
 	$(HOST_CC) -o $@ $<
+
+# Sync primitive test — compiles the real rwlock/seqlock implementations.
+$(TEST_BLD)/test_sync_primitives.o: $(TEST_CASES)/test_sync_primitives.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SYNC_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/rwlock.o: $(TESTS_DIR)/kernel/sync/rwlock.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SYNC_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/seqlock.o: $(TESTS_DIR)/kernel/sync/seqlock.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SYNC_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_sync_primitives.elf: $(TEST_BLD)/test_sync_primitives.o \
+		$(TEST_BLD)/rwlock.o $(TEST_BLD)/seqlock.o
+	$(HOST_CC) -pthread -o $@ $^
 
 # Canon line discipline test — compiles REAL kernel/tty/canon.c (pure logic)
 $(TEST_BLD)/canon.o: $(TESTS_DIR)/kernel/tty/canon.c

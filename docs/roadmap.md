@@ -60,7 +60,7 @@
 
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
-| rwlock/seqlock | VFS lookup + `/proc` read 多核缩放（原 P1#4 提为前置） | 独立 | |
+| rwlock/seqlock | 基础原语 ✅；VFS mount/lookup ✅；`/proc` 读路径未纳入本次范围（原 P1#4 提为前置） | 独立 | |
 | head.S + MMU | 启动入口 + TTBR0_EL1/页表 | 独立 | ArvernOS |
 | GICv2 驱动 | 中断控制器 | head.S | opuntiaOS |
 | Generic Timer | cntvct_el0 读数 + CNTP 周期定时器（clockevent hook 已预留） | head.S | opuntiaOS |

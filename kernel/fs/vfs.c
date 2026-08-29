@@ -1,6 +1,7 @@
 #include <fs/vfs.h>
 #include <kernel/debug.h>
 #include <kernel/slab.h>
+#include <kernel/rwlock.h>
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -9,6 +10,7 @@
 static vfs_mount_t *mount_list = NULL;
 static int mount_count = 0;
 static int vfs_initialized = 0;
+static rwlock_t mount_lock;
 
 // ── Helpers ────────────────────────────────────────────────
 // Case-insensitive string compare — FAT32 stores 8.3 names in
@@ -30,6 +32,7 @@ void vfs_init(void)
 {
     mount_list = NULL;
     mount_count = 0;
+    rwlock_init(&mount_lock);
     vfs_initialized = 1;
     debug_vfs("VFS: initialized\n");
 }
@@ -75,10 +78,12 @@ int vfs_mount(const char *path, block_device_t *dev,
         return -1;
     }
 
-    // Prepend to mount list
+    // Publish the fully initialized mount atomically to concurrent lookups.
+    rwlock_write_lock(&mount_lock);
     mp->next = mount_list;
     mount_list = mp;
     mount_count++;
+    rwlock_write_unlock(&mount_lock);
     debug_vfs("VFS: mounted '%s'\n", path);
     return 0;
 }
@@ -116,6 +121,7 @@ static vfs_mount_t *find_mount(const char *path)
     vfs_mount_t *best = NULL;
     size_t best_len = 0;
 
+    rwlock_read_lock(&mount_lock);
     for (vfs_mount_t *mp = mount_list; mp; mp = mp->next) {
         size_t len = strlen(mp->path);
         if (strncmp(path, mp->path, len) == 0) {
@@ -128,6 +134,9 @@ static vfs_mount_t *find_mount(const char *path)
             }
         }
     }
+    rwlock_read_unlock(&mount_lock);
+    // VFS has no unmount operation: a published mount remains valid after
+    // this short lookup critical section ends.
     return best;
 }
 
@@ -464,6 +473,7 @@ int vfs_getdents(vfs_node_t *dir, struct linux_dirent64 *buf, unsigned int count
     // ── Phase 2: Inject sub-mount entries ──────────────────────
     // Only when listing a mount root (e.g., "/" which is FAT32's root).
     if (dir->mount && dir == dir->mount->root) {
+        rwlock_read_lock(&mount_lock);
         for (vfs_mount_t *mp = mount_list; mp && total < VFS_GETDENTS_SORT_MAX; mp = mp->next) {
             if (mp == dir->mount) continue;  // skip self
             if (!vfs_is_child_mount(dir->mount->path, mp->path))
@@ -481,6 +491,7 @@ int vfs_getdents(vfs_node_t *dir, struct linux_dirent64 *buf, unsigned int count
             entries[total].ino  = (uint32_t)(0x80000000 | total);
             total++;
         }
+        rwlock_read_unlock(&mount_lock);
     }
 
     // ── Phase 3: Sort by name (case-insensitive) ──────────────
