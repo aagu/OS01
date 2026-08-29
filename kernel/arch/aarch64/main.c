@@ -32,6 +32,9 @@ void pl011_init(void);
 void pl011_putc(char c);
 void arch_install_exception_vectors(void);
 
+/* Forward from test_spinlock.c — Task 2a single-core benchmark. */
+void test_spinlock(void);
+
 /* Symbol from head.S: address of the vector table in high half. */
 extern char exception_vectors[];
 extern uint8_t _bss_start[], _bss_end[];
@@ -53,6 +56,12 @@ void aarch64_main(uint64_t dtb_base)
 
     /* Hello, world. */
     kputs(banner);
+
+    /* Task 2a: single-core spinlock benchmark.  Runs after the
+     * banner so the user always sees the boot line first; emits
+     * "[spinlock] single-core 1M PASS" (or a FAIL line with the
+     * actual counter) on the PL011 before we drop into WFI. */
+    test_spinlock();
 
     /* Done: idle forever.  PL011 stays the only output channel. */
     for (;;) {

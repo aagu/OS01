@@ -77,9 +77,12 @@ static inline uint64_t arch_atomic_read(volatile uint64_t *ptr)
 static inline void arch_atomic_write(volatile uint64_t *ptr, uint64_t val)
 {
     uint64_t tmp;
+    /* LDAXR + STLXR pair: the STLXR is a RELEASE store.  This gives
+     * spin_unlock() the release semantics that pairs with the ACQUIRE
+     * in the matching spin_lock's LDAXR/CAS. */
     __asm__ __volatile__(
-        "1: ldxr %0, [%1]       \n\t"
-        "   stxr %w0, %2, [%1]  \n\t"
+        "1: ldaxr %0, [%1]       \n\t"
+        "   stlxr %w0, %2, [%1]  \n\t"
         "   cbnz %w0, 1b        \n\t"
         : "=&r"(tmp) : "r"(ptr), "r"(val) : "memory"
     );
@@ -89,11 +92,14 @@ static inline int arch_atomic_cas(volatile uint64_t *ptr, uint64_t old, uint64_t
 {
     uint64_t cur;
     int result;
+    /* LDAXR = ACQUIRE load: a successful CAS here is an ACQUIRE that
+     * orders subsequent loads/stores after the critical section's
+     * release in the unlock path.  STLXR is RELEASE on the store side. */
     __asm__ __volatile__(
-        "1: ldxr %0, [%2]       \n\t"
+        "1: ldaxr %0, [%2]       \n\t"
         "   cmp  %0, %3         \n\t"
         "   b.ne 2f             \n\t"
-        "   stxr %w1, %4, [%2]  \n\t"
+        "   stlxr %w1, %4, [%2]  \n\t"
         "   cbnz %w1, 1b        \n\t"
         "   mov  %w1, #1         \n\t"
         "   b    3f             \n\t"
@@ -108,9 +114,10 @@ static inline uint64_t arch_atomic_xchg(volatile uint64_t *ptr, uint64_t val)
 {
     uint64_t old;
     int tmp;
+    /* LDAXR + STLXR: ACQUIRE on the read, RELEASE on the write. */
     __asm__ __volatile__(
-        "1: ldxr %0, [%2]       \n\t"
-        "   stxr %w1, %3, [%2]  \n\t"
+        "1: ldaxr %0, [%2]       \n\t"
+        "   stlxr %w1, %3, [%2]  \n\t"
         "   cbnz %w1, 1b        \n\t"
         : "=&r"(old), "=&r"(tmp) : "r"(ptr), "r"(val) : "memory"
     );
