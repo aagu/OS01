@@ -1,8 +1,8 @@
-# OS01 优化路线图 v20
+# OS01 优化路线图 v21
 
-> **基准**: `16a78c3` (docs(roadmap): v18 — timer 重构完成)
-> **日期**: 2026-08-23
-> **变更**: 将已完成内容（实施总结、设计决策、完成记录、借鉴表）迁出到 `docs/` 各专题文档，roadmap 仅保留**前向规划**。
+> **基准**: `2ddb422` (test(systest): fix 5 flaky cases under interactive make run)
+> **日期**: 2026-08-29
+> **变更**: 同步 v20 之后的实际进展——getrandom 完成、进程组/会话 + tty 行规程落地、syscall 边界审计收尾、syscall 数 66→71、applet 9→52；作业控制项标记部分完成。
 
 标记: ✅ 已完成 | 🔒 P1 安全加固 | 🏗 P2 aarch64 适配 | 🖥 P3 GUI | 🔧 P4 硬件适配 | 📐 P5 ABI 扩展/兼容性
 
@@ -14,10 +14,10 @@
 |-------|------|------|
 | **Phase 1: COW + 内存** | Copy-On-Write Fork, mmap/mprotect/munmap, demand paging | ✅ |
 | **Phase 2: 内核基础设施** | arch 抽象层、子系统注册框架、x86 平台源隔离、aarch64 dispatch 桩、SMP（percpu+GS-base+AP boot+负载均衡）、canary、hang detector、debug channels、kallsyms、FPU 保存、slab/PMM/softirq/timer SMP 加固 | ✅ |
-| **Phase 3: 信号 + 调度** | arch 信号帧投递、Ctrl-C→SIGINT、per-CPU EEVDF rbtree 可运行队列、SMP 负载均衡 | ✅ |
+| **Phase 3: 信号 + 调度** | arch 信号帧投递、进程组/会话（setpgid/setsid/getpgid/getsid 67-70）、tty 行规程（VINTR/VQUIT→SIGINT/SIGQUIT）、SYS_kill 支持 pid=0/-pid/-1、per-CPU EEVDF rbtree 可运行队列、SMP 负载均衡 | ✅ |
 | **Phase 4: 文件系统** | ext2 R/W、FAT32 R/W、tmpfs、devfs、procfs、GPT 双分区 | ✅ |
 | **Phase 5: 设备驱动** | 8259A PIC、APIC/IOAPIC/LAPIC、PIT/LAPIC timer、PS/2 键盘、16550 串口、AHCI SATA | ✅ |
-| **Phase 6: 用户态** | busybox ash shell（方向键行编辑+光标闪烁+raw mode TTY）、9 applet、init（/etc/inittab 配置解析、4 阶段引导）、libc、VT100 CSI 终端模拟器 | ✅ |
+| **Phase 6: 用户态** | busybox ash shell（方向键行编辑+光标闪烁+行规程 TTY）、52 applet（见 `docs/applet-verification.md`）、init（/etc/inittab 配置解析、4 阶段引导）、libc、VT100 CSI 终端模拟器 | ✅ |
 | **Phase 7: poll/select** | poll_table + 双队列级联唤醒、select/pselect、do_poll_core 共享、pselect6 sigmask 原子 swap、requested-event-aware 注册、per-poll timeout registry | ✅ |
 | **Phase 8: 网络** | lwIP 2.2.1、E1000 + virtio-net、PCI/MSI-X、DHCP/DNS、TCP/UDP socket、poll/select 集成、BusyBox HTTP wget、自动化网络回归 harness | ✅ |
 | **Phase 9: 时间系统** | clocksource + clockevent 双层抽象、TSC 频率校准、LAPIC 周期 tick 接管、CLOCK_MONOTONIC/REALTIME + nanosleep + poll/select 迁纳秒 | ✅ |
@@ -26,7 +26,7 @@
 
 ---
 
-## 待实施路线图（v20 按 5 优先级）
+## 待实施路线图（v21 按 5 优先级）
 
 > 优先级框架（用户确认，2026-08-18）：**P0 工程基础** → **P1 安全加固** → **P2 aarch64 适配** → **P3 GUI** → **P4 硬件适配** → **P5 ABI 扩展/兼容性**
 
@@ -34,7 +34,7 @@
 
 | 项 | 内容 | 状态 |
 |----|------|------|
-| 文档同步 | `docs/syscall.md` 51→66、`docs/timer.md` 新架构、`pit-200hz-handoff.md` 状态 | ✅（ba56d34） |
+| 文档同步 | `docs/syscall.md` 71 syscall（0..70）、`docs/timer.md` 新架构、`pit-200hz-handoff.md` 状态 | ✅（ba56d34） |
 | applet 验证清单 | 52/52 编译进 busybox；详见 `docs/applet-verification.md` | ✅（2026-08-18） |
 | roadmap 瘦身 | 已完成内容迁出到 `docs/` 专题文档（见下） | ✅（2026-08-23） |
 
@@ -44,7 +44,7 @@
 
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
-| getrandom syscall | 内核安全随机数（熵池：TSC + RTC + 周期熵累积），LWIP_RAND/种子改用 | 独立 | Linux getrandom(2) |
+| getrandom syscall ✅ | **已完成**（SYS_getrandom=66，ChaCha20 池 + RDRAND/RDSEED 熵源 + 周期 reseed，`/dev/urandom` 同源）。详见 `docs/syscall.md`。`LWIP_RAND`/AT_RANDOM 种子改用仍待做 | 独立 | Linux getrandom(2) |
 | 用户栈 canary | libc `-fstack-protector-strong` + ELF 加载器 AT_RANDOM auxv 传种子（原 P1#5） | getrandom | |
 | ASLR | mmap 基址随机化 + ET_DYN/PIE 加载随机化（原 P3#12） | getrandom | |
 | UBSan + KASan | 内核编译期 instrument（原 P3#13） | 独立 | ArvernOS |
@@ -102,7 +102,7 @@
 | openat/dup3/pipe2 | 现代 syscall 变体 | 独立 | |
 | FIFO 命名管道 | S_IFIFO 语义 + mkfifo | 独立 | |
 | alarm/setitimer | POSIX 定时器（busybox timeout 需要） | 独立 | |
-| 作业控制 | setpgid/setsid/tcgetpgrp 真实现 + tty ISIG + SIGWINCH | tty termios ✅ | |
+| 作业控制（部分完成）| ✅ ~~setpgid/setsid/getpgid/getsid（67-70）~~、✅ ~~tcgetpgrp/tcsetpgrp 真实现~~、✅ ~~tty ISIG + VINTR/VQUIT~~、✅ ~~kill 支持 pid=0/-pid/-1~~；**剩余**：SIGWINCH 派发、SIGTSTP/SIGCONT 完整作业控制（bg/fg/jobs，需 busybox `CONFIG_ASH_JOB_CONTROL=y` 或自写 shell） | tty termios ✅ | |
 | /proc 完善 | status（signal mask/ppid/utime/stime）+ cmdline + stat | 独立 | |
 | symlink/readlink | VFS 软链接 + ext2 symlink（in-inode 快链接）（原 P1#6） | 独立 | |
 | HTTPS/TLS | mbedTLS 集成 BusyBox wget（原 P2#10） | mbedTLS ✅ | |
@@ -114,7 +114,7 @@
 ### 依赖链总览
 
 ```
-P1: getrandom → AT_RANDOM → canary / ASLR
+P1: getrandom ✅ → AT_RANDOM → canary / ASLR
 P2: rwlock → aarch64 SMP；timer hook ✅ → CNTP
 P3: fb ✅ → 2D API → 字体 → Window Server；PS/2 鼠标并行
 P4: USB 栈 → 真机启动；NVMe / HPET / ACPI 独立
@@ -131,6 +131,8 @@ P5: ELF ✅ → ld.so → 共享 libc → apk/musl；futex ✅ → clone → pth
 | `docs/changelog.md` | 已完成工作按时间汇总（截至 2026-08-18） |
 | `docs/decisions.md` | 46 条关键设计决策总账（按主题分区，供交叉引用） |
 | `docs/references.md` | 开源 OS 项目借鉴表（已用 / 可拿） |
+| `docs/syscall.md` | 71 syscall 表 + 用户指针边界语义 + syscall 边界审计触达清单 |
+| `docs/signal.md` | 信号投递、handler、sigreturn、Ctrl-C→SIGINT |
 | `docs/timer.md` | Timer 重构架构 + nanosleep 修复 + 重构实施总结（commit/验证） |
 | `docs/smp.md` | SMP 架构 + 负载均衡实施总结（前置加固 / AP bug 修复 / 变更清单） |
 | `docs/gui.md` | Tetris 游戏实施总结 + P3 GUI 路线图 |
