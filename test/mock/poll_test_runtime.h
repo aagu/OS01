@@ -16,9 +16,12 @@
 struct files_struct;
 
 typedef struct task_struct {
+    list_t list;
     volatile int64_t state;
     uint64_t addr_limit;
     int64_t pid;
+    pid_t pgrp;
+    pid_t session;
     int64_t signal;
     int64_t blocked;
     struct files_struct *files;
@@ -26,6 +29,10 @@ typedef struct task_struct {
     int ctty_type;
     void *ctty;
 } task_t;
+
+typedef struct {
+    task_t task;
+} poll_test_task_union_t;
 
 #include <kernel/file.h>
 
@@ -38,6 +45,10 @@ extern task_t *poll_test_current;
 
 void task_wake(task_t *task);
 void schedule(void);
+extern spinlock_T task_list_lock;
+extern poll_test_task_union_t init_task_union;
+list_t *task_list_next(list_t *pos);
+int signal_pgrp(pid_t target, int sig);
 static inline void arch_local_irq_enable(void) {}
 static inline uint64_t arch_cycle_counter(void) { return 0; }
 static inline int arch_signal_pending_fatal(void) { return 0; }
