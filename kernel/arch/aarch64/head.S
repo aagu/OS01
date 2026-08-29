@@ -242,7 +242,10 @@ _start:
     /* 10. BSP stack + TPIDR_EL1. */
     bl      setup_bsp_stack_and_tpidr
 
-    /* 11. Absolute branch to aarch64_main (high-half). */
+    /* 11. Absolute branch to aarch64_main (high-half).
+     *     x19 still holds the DTB base from _start; setup_* clobbered
+     *     x0, so restore it before the call. */
+    mov     x0, x19
     ldr     x30, =aarch64_main
     blr     x30
 
