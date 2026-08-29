@@ -129,8 +129,11 @@ static void test_fork_exec_waitpid(void)
 // 正确断言：p == child.pgrp（继承自父）—— 即 p == 1 (若 systest pgrp=1) 或
 // 任何 child.pgrp 的实际值。简化：直接断言 p == child 的 getpgid(0)。
 static void test_devfs_open_inherited_fg_pgrp(void) {
-    int rfd = open("/dev/tty", O_RDWR);
-    if (rfd < 0) { FAIL("devfs_open_inherit", "no /dev/tty"); return; }
+    // 用 /dev/tty0（物理控制台）而非 /dev/tty：§4.1.1 只作用于物理控制台
+    // TTY（get_dev_tty()）；/dev/tty 是"控制终端"重定向，在 terminal.elf→ash
+    // 的 PTY 环境下会解析成 PTY slave（语义不同）。测试必须直指物理 TTY。
+    int rfd = open("/dev/tty0", O_RDWR);
+    if (rfd < 0) { FAIL("devfs_open_inherit", "no /dev/tty0"); return; }
     tcsetpgrp(rfd, 0);  // 复位
     close(rfd);
 
@@ -140,7 +143,7 @@ static void test_devfs_open_inherited_fg_pgrp(void) {
         // 不调 setpgid！靠 fork 继承父 pgrp（必须 ≠ 0，验证 C1）
         pid_t my_pgrp = getpgid(0);
         if (my_pgrp == 0) { _exit(2); }       // C1 broken: fork 没复制 pgrp
-        int cfd = open("/dev/tty", O_RDWR);
+        int cfd = open("/dev/tty0", O_RDWR);
         if (cfd < 0) { _exit(3); }
         pid_t fg = tcgetpgrp(cfd);
         // §4.1.1: fg_pgrp==0 时设 = opener.pgrp = my_pgrp
@@ -826,9 +829,19 @@ static void test_poll(void)
     // Test 4: poll on /dev/keyboard — empty ring must time out (not always-ready)
     int kbd = open("/dev/keyboard", O_RDONLY);
     if (kbd >= 0) {
+        // 先排空 scancode ring。在 make run -display gtk 场景下，用户键入
+        // "systest\n" 会产生 PS/2 原始 scancode（press+release）堆积在
+        // kernel/driver/keyboard.c 的 scancode_ring 里——正常交互路径只有
+        // terminal.elf 读 /dev/tty（走 tty ring），从不读 /dev/keyboard，所以
+        // 这些 scancode 不会被消耗。若不排空，ring 非空 → keyboard_poll_dev
+        // 返回 POLLIN → poll 返回 1，本断言"空 ring 超时返回 0"就会概率性失败
+        // （取决于测试前是否敲过键盘）。排空后 ring 确实为空，断言才成立。
+        char junk[256];
+        while (read(kbd, junk, sizeof(junk)) > 0) {}
+
         struct pollfd kpfd;
         kpfd.fd = kbd; kpfd.events = POLLIN; kpfd.revents = 0;
-        ret = poll(&kpfd, 1, 100);  // 100ms — no key pressed in QEMU
+        ret = poll(&kpfd, 1, 100);  // 100ms — ring 已排空，必须超时返回 0
         CHECK3(ret == 0, "poll", "keyboard empty ring -> poll timeout yields 0");
         close(kbd);
     } else {
@@ -1536,8 +1549,8 @@ static void test_proc_fd(void)
 // ── termios honesty test ───────────────────────────────────
 static void test_termios(void)
 {
-    int fd = open("/dev/tty", O_RDONLY);
-    if (fd < 0) { FAIL("termios", "open /dev/tty failed"); return; }
+    int fd = open("/dev/tty0", O_RDONLY);  // 物理控制台（§4.2 默认 ISIG 属物理 TTY）
+    if (fd < 0) { FAIL("termios", "open /dev/tty0 failed"); return; }
 
     struct termios t;
     int ret;
@@ -1837,8 +1850,8 @@ static void test_tiocspgrp_roundtrip(void) {
 // ── 70: devfs open default fg_pgrp (§4.1.1) ─────────
 static void test_devfs_open_default_fg_pgrp(void) {
     // 复位全局 fg_pgrp=0（new_pg==0 §4.4 始终允许）
-    int rfd = open("/dev/tty", O_RDWR);
-    if (rfd < 0) { FAIL("devfs_open_fg", "no /dev/tty"); return; }
+    int rfd = open("/dev/tty0", O_RDWR);  // 物理控制台（§4.1.1 属物理 TTY）
+    if (rfd < 0) { FAIL("devfs_open_fg", "no /dev/tty0"); return; }
     tcsetpgrp(rfd, 0);
     close(rfd);
 
@@ -1846,7 +1859,7 @@ static void test_devfs_open_default_fg_pgrp(void) {
     if (pid < 0) { FAIL("devfs_open_fg", "fork"); return; }
     if (pid == 0) {
         setpgid(0, getpid());   // 设 pgrp 为自己
-        int cfd = open("/dev/tty", O_RDWR);
+        int cfd = open("/dev/tty0", O_RDWR);
         if (cfd < 0) { _exit(2); }
         pid_t p = tcgetpgrp(cfd);
         _exit(p == getpid() ? 0 : 3);
@@ -1858,8 +1871,8 @@ static void test_devfs_open_default_fg_pgrp(void) {
 
 // ── 71: setpgid auto fg_pgrp update (§3.4) ─────────
 static void test_setpgid_auto_fg_pgrp(void) {
-    int pfd = open("/dev/tty", O_RDWR);
-    if (pfd < 0) { FAIL("setpgid_auto_fg", "no /dev/tty"); return; }
+    int pfd = open("/dev/tty0", O_RDWR);  // 物理控制台（§3.4 自动更新属物理 TTY）
+    if (pfd < 0) { FAIL("setpgid_auto_fg", "no /dev/tty0"); return; }
     // 父先设一个非零 fg_pgrp 让 child open 不触发 §4.1.1 兜底
     setpgid(0, getpid());
     tcsetpgrp(pfd, getpid());
@@ -1867,7 +1880,7 @@ static void test_setpgid_auto_fg_pgrp(void) {
     int64_t pid = fork();
     if (pid < 0) { FAIL("setpgid_auto_fg", "fork"); return; }
     if (pid == 0) {
-        int cfd = open("/dev/tty", O_RDWR);
+        int cfd = open("/dev/tty0", O_RDWR);
         if (cfd < 0) { _exit(2); }
         // v5: dup2 把 tty 放到 fd0，§3.4 才能触发（消除继承依赖）
         if (dup2(cfd, 0) < 0) { _exit(5); }
