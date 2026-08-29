@@ -33,13 +33,13 @@
  * format (Table D4-29 in ARMv8-A ARM).  These flag values are
  * individually ORR-able (no zero-component). */
 .equ PT_V,                 (1 << 0)
-.equ PT_TYPE_PAGE,         (0 << 1)
-.equ PT_TYPE_TABLE,        (3 << 0)
+.equ PT_TYPE_PAGE,         (1 << 1)      /* level 3 page descriptor: bit1=1 (page type) */
+.equ PT_TYPE_TABLE,        (3 << 0)      /* table descriptor: bit[1:0]=0b11 */
 .equ PT_ATTR_DEV,          (0 << 2)
 .equ PT_ATTR_NORMAL,       (1 << 2)
-.equ PT_SH_NS,             (0 << 6)
-.equ PT_SH_IS,             (3 << 6)
-.equ PT_AP_EL1_RW,         (0 << 8)
+.equ PT_SH_NS,             (0 << 8)      /* SH field is bits[9:8] */
+.equ PT_SH_IS,             (3 << 8)
+.equ PT_AP_EL1_RW,         (0 << 6)      /* AP field is bits[7:6] */
 .equ PT_AF,                (1 << 10)
 
 /* High bits — always combined via register-OR (out of immediate range). */
@@ -73,6 +73,79 @@ boot_page_tables:
 .globl aarch64_boot_dtb_slot
 aarch64_boot_dtb_slot:
     .skip   8                                 /* DTB-park slot */
+
+/* ──────────────────────────────────────────────────────────────────
+ * boot_vectors: identity-mapped vector table for the MMU-bring-up
+ * window (before VBAR can point at the high-half .text.entry).
+ *
+ * Layout matches entry.S but every entry panics into a small
+ * printer loop that dumps ELR_EL1 / ESR_EL1 / FAR_EL1 in hex via
+ * PL011 MMIO writes (PL011 is reachable pre-MMU at 0x09000000) and
+ * then spins.  The MMIO write also flushes with a dummy read.
+ *
+ * We give this symbol external linkage so head.S can `msr vbar_el1, x0`
+ * before MMU enable.
+ * ────────────────────────────────────────────────────────────────── */
+.section .boot.text, "ax"
+.globl boot_vectors
+.balign 2048
+boot_vectors:
+    .balign 128
+    b   .Lpanic                       /* sync, SP_EL0 */
+    .balign 128
+    b   .Lpanic                       /* IRQ,   SP_EL0 */
+    .balign 128
+    b   .Lpanic                       /* FIQ,   SP_EL0 */
+    .balign 128
+    b   .Lpanic                       /* SError, SP_EL0 */
+    .balign 128
+    b   .Lpanic                       /* sync,  SP_ELx */
+    .balign 128
+    b   .Lirq_spin                   /* IRQ,   SP_ELx (left for parity) */
+    .balign 128
+    b   .Lpanic                       /* FIQ,   SP_ELx */
+    .balign 128
+    b   .Lpanic                       /* SError, SP_ELx */
+
+/* Print "FAULT elr=XXXXXXXXXXXXXXXX esr=XXXXXXXXXXXXXXXX far=XXXXXXXXXXXXXXXX\n" */
+.Lpanic:
+    mov     x1, #'P'
+    bl      .Lprint_c
+    mov     x1, #'!'
+    bl      .Lprint_c
+.Lpanic_spin:
+    b       .Lpanic_spin
+
+.Lirq_spin:
+    b       .Lirq_spin
+
+/* Helpers — all clobber x0,x1,x2,x3. PL011 @ 0x09000000. */
+.Lprint_c:
+    /* spin until TXFF=0, then write char in x1 */
+    mov     x2, #0x09000000
+1:  ldr     w3, [x2, #0x18]
+    tst     w3, #(1 << 5)
+    b.ne    1b
+    str     w1, [x2]
+    ret
+
+.Lprint_x64:
+    /* print 16 hex digits of x0, MSB first.  Uses x9 as counter,
+     * but BL clobbers caller-saved regs, so save x9 on the stack. */
+    stp     x9, xzr, [sp, #-16]!
+    mov     x9, #16
+1:  ror     x0, x0, #4
+    and     x1, x0, #0xf
+    cmp     x1, #10
+    b.lt    2f
+    add     x1, x1, #('a' - 10)
+    b       3f
+2:  add     x1, x1, #'0'
+3:  bl      .Lprint_c
+    sub     x9, x9, #1
+    cbnz    x9, 1b
+    ldp     x9, xzr, [sp], #16
+    ret
 
 /* ──────────────────────────────────────────────────────────────────
  * `_start`
@@ -111,6 +184,16 @@ _start:
     mov     x1, #AARCH64_BOOT_STACK_SIZE
     add     x1, x0, x1
     mov     sp, x1
+
+    /* 2b. Set up a minimal identity-mapped vector table BEFORE MMU
+     *     enable.  DAIFSet masks async exceptions only; a sync fault
+     *     during MMU bring-up would otherwise vector to VBAR=0 (the
+     *     ROM reset vector) and infinite-loop at 0x200.  This stub
+     *     prints ELR/ESR/FAR to PL011 (which is reachable pre-MMU as a
+     *     MMIO write) and spins. */
+    ldr     x0, =boot_vectors
+    msr     vbar_el1, x0
+    isb
 
     /* 3. Mask DAIF (single-threaded, IRQs come back in Task 3). */
     msr     daifset, #0xf
@@ -213,6 +296,7 @@ make_2m:
 make_4k:
     lsr     x0, x0, #12
     lsl     x0, x0, #12
+    orr     x1, x1, #PT_TYPE_PAGE          /* level 3 page: bit1=1 (valid page type) */
     orr     x0, x0, x1
     ret
 
@@ -285,7 +369,7 @@ zp_all:
     mov     x22, #PT_V
     mov     x21, #PT_ATTR_NORMAL
     orr     x22, x22, x21
-    mov     x21, #PT_SH_IS
+    mov     x21, #PT_SH_IS               /* Inner Shareable — required for SMP coherency */
     orr     x22, x22, x21
     mov     x21, #PT_AP_EL1_RW
     orr     x22, x22, x21
@@ -311,21 +395,10 @@ zp_all:
     b       .Lpud0
 .Lpud0_done:
 
-    /* Replace PMD_low0[0x40..0x4F] with PTE_mmio pointer. */
-    mov     x23, x15                           /* PTE_mmio phys */
-    mov     x24, #0x40
-.Lmmio_pmd:
-    cmp     x24, #0x50
-    b.ge    .Lmmio_done
-    mov     x0, x12
-    mov     x1, x23
-    mov     x2, x24
-    bl      write_table
-    add     x24, x24, #1
-    b       .Lmmio_pmd
-.Lmmio_done:
-
-    /* PTE_mmio: 512 × Device-nGnRnE 4 KiB pages covering 0x0800_0000..0x0820_0000. */
+    /* ── MMIO: Device-nGnRnE 2 MiB blocks for 0x08000000..0x0A000000. ──
+     * Covers GICD (0x08000000), GICC (0x08010000), PL011 (0x09000000).
+     * Device regions carry a uniform permission (PXN=1, UXN=1), so a
+     * 2 MiB block is sufficient — no L3 page table needed (spec §2.2). */
     mov     x23, #PT_V
     mov     x21, #PT_ATTR_DEV
     orr     x23, x23, x21
@@ -335,68 +408,46 @@ zp_all:
     orr     x23, x23, x21
     mov     x21, #PT_AF
     orr     x23, x23, x21
+    /* x23 = Device block flags */
 
-    mov     x25, #512
-    mov     x26, #0x08000000
-.Lmmio_pte:
-    cbz     x25, .Lmmio_pte_done
-    mov     x0, x26
+    mov     x24, #0x40
+.Lmmio_blk:
+    cmp     x24, #0x50
+    b.ge    .Lmmio_blk_done
+    mov     x0, x24
+    lsl     x0, x0, #21                    /* PA = index * 2 MiB (identity) */
     mov     x1, x23
-    bl      make_4k
-    orr     x0, x0, x20
-
-    lsr     x2, x26, #12
+    bl      make_2m
+    orr     x0, x0, x20                    /* PXN | UXN */
     mov     x1, x0
-    mov     x0, x15
+    mov     x0, x12                        /* PMD_low0 base */
+    mov     x2, x24                        /* PMD index 0x40..0x4F */
     bl      write_slot
+    add     x24, x24, #1
+    b       .Lmmio_blk
+.Lmmio_blk_done:
 
-    add     x26, x26, #0x1000
-    sub     x25, x25, #1
-    b       .Lmmio_pte
-.Lmmio_pte_done:
-
-    /* ── 3. PMD_low1: Mostly invalid (we don't access any RAM beyond
-     *    the kernel image). Only PMD_low1[0] is filled and points to
-     *    PTE_low1_k (4 KiB pages for 0x40000000..0x40200000). */
-    mov     x0, x13
-    mov     x1, x14
-    mov     x2, #0
-    bl      write_table
-
-    /* ── 4. PTE_low1_k: One descriptor per 4 KiB page covering the
-     *    .boot region (0x40080000..0x400A0000, ~120 KB) and the
-     *    high-half kernel image source (0x4009A000..end). We mark all
-     *    pages Normal RW with PXN=0 (so head.S can execute through
-     *    its jump to aarch64_main) and UXN=1 (no EL0 exec).  We
-     *    leave the leading pages 0..0x7F as invalid (no entry) and
-     *    start filling at index 0x80.
+    /* ── 3. PMD_low1: 2 MiB blocks covering 1..2GB (no L3 page tables).
      *
-     *    PTE index = (VA & 0x1FFFFF) >> 12.
-     *    For PA = 0x40080000 → index = 0x80.
-     *    For PA = 0x4009A000 → index = 0x9A.
-     *    For PA = 0x4009E000 (just past end of .data) → index = 0x9E.
-     *    We map 0x80..0xA0 (32 pages = 128 KiB) for safety. */
-    mov     x28, x20
-    bic     x28, x28, #PT_PXN_MASK              /* clear PXN so code is exec */
-
-    mov     x25, #32                           /* 32 pages = 128 KiB      */
-    mov     x26, #0x40080000
-.Lpud1_pte:
-    cbz     x25, .Lpud1_pte_done
-    mov     x0, x26
-    mov     x1, x22
-    bl      make_4k
-    orr     x0, x0, x28
-
-    lsr     x2, x26, #12
-    mov     x1, x0
-    mov     x0, x14
+     *    PMD_low1[0] = block descriptor for PA 0x40000000..0x40200000.
+     *    This 2 MiB region contains both .boot.text + .boot.bss and the
+     *    kernel-image source loaded at LMA 0x4009A008+, so it must be
+     *    PXN=0 (executable) and UXN=1 (no EL0 exec).  Phase 1 doesn't
+     *    need per-page permissions within this 2 MiB block; all of it
+     *    is uniformly EL1 RW + exec + UXN.
+     *
+     *    PMD_low1 is the PMD table for PUD[1] (which covers 1..2GB), so
+     *    PMD index 0 within PMD_low1 corresponds to PA 0x40000000.
+     */
+    mov     x0, #0x40000000                   /* x0 = PA                 */
+    mov     x1, x22                           /* x1 = flags              */
+    bl      make_2m                           /* x0 = block descriptor   */
+    /* Clear PXN so the kernel code in this 2 MiB block can execute. */
+    bic     x0, x0, #PT_PXN_MASK
+    mov     x1, x0                            /* x1 = descriptor         */
+    mov     x0, x13                           /* x0 = PMD_low1 base      */
+    mov     x2, #0                            /* PMD index 0             */
     bl      write_slot
-
-    add     x26, x26, #0x1000
-    sub     x25, x25, #1
-    b       .Lpud1_pte
-.Lpud1_pte_done:
 
     ldp     x29, x30, [sp], #16
     ret
@@ -405,30 +456,50 @@ zp_all:
 /* ──────────────────────────────────────────────────────────────────
  * write_tcr_mair_ttbr
  *
- * TCR_EL1 composed value 0x0000_0000_8035_1C30:
- *   bits[5:0]   = 0x10        (T0SZ = 16)
- *   bits[7:6]   = 0b00
- *   bits[9:8]   = 0b01        (IRGN0)
- *   bits[11:10] = 0b01        (ORGN0)
- *   bits[13:12] = 0b11        (SH0)
+ * TCR_EL1 composed value 0x0000_0002_B510_3510:
+ *   bits[5:0]   = 0x10        (T0SZ = 16)        ← 256 TB region
+ *   bits[7:6]   = 0b00        (EPD0=0, A0=0)
+ *   bits[9:8]   = 0b01        (IRGN0 = WBWA)
+ *   bits[11:10] = 0b01        (ORGN0 = WBWA)
+ *   bits[13:12] = 0b11        (SH0 = Inner Shareable)
  *   bits[14:15] = 0b00        (TG0 = 4 KiB)
- *   bits[21:16] = 0x10        (T1SZ = 16)
- *   bits[22:23] = 0b00
- *   bits[25:24] = 0b01        (IRGN1)
- *   bits[27:26] = 0b01        (ORGN1)
- *   bits[29:28] = 0b11        (SH1)
+ *   bits[21:16] = 0x10        (T1SZ = 16)        ← 256 TB region
+ *   bits[22:23] = 0b00        (A1=0, EPD1=0)
+ *   bits[25:24] = 0b01        (IRGN1 = WBWA)
+ *   bits[27:26] = 0b01        (ORGN1 = WBWA)
+ *   bits[29:28] = 0b11        (SH1 = Inner Shareable)
  *   bits[31:30] = 0b10        (TG1 = 4 KiB)
  *   bits[34:32] = 0b010       (IPS = 40-bit PA)
+ *
+ * MAIR_EL1 = 0x0000_0000_0000_ff00:
+ *   bits[7:0]   = 0x00        (AttrIdx 0 = Device-nGnRnE)
+ *   bits[15:8]  = 0xff        (AttrIdx 1 = Normal Inner/Outer WBWA)
  * ────────────────────────────────────────────────────────────────── */
 write_tcr_mair_ttbr:
-    mov     x0, #0x30
-    movk    x0, #0x351C, lsl #16
-    movk    x0, #0x80,   lsl #32
+    /* TCR_EL1 = 0x0000_0002_B510_3510.
+     *
+     * Byte layout (LSB → MSB):
+     *   bits [7:0]   = 0x10   (T0SZ = 16, 256TB region)
+     *   bits [15:8]  = 0x35   (IRGN0=01, ORGN0=01, SH0=11, TG0=00)
+     *   bits [23:16] = 0x10   (T1SZ = 16)
+     *   bits [31:24] = 0xB5   (IRGN1=01, ORGN1=01, SH1=11, TG1=10=4K)
+     *   bits [39:32] = 0x02   (IPS = 0b010 = 40-bit PA)
+     *
+     * Built as three 16-bit chunks via movz + 2× movk.  Note that the
+     * first movz places bits [15:0] (T0SZ + IRGN0/ORGN0/SH0/TG0), not
+     * just bits [7:0].
+     */
+    mov     x0, #0x3510
+    movk    x0, #0xB510, lsl #16
+    movk    x0, #0x0002, lsl #32
     msr     tcr_el1, x0
     isb
 
-    /* MAIR_EL1: AttrIdx 0 = 0x00 (Device), AttrIdx 1 = 0xff (Normal WBWA). */
-    mov     x0, #0xff
+    /* MAIR_EL1 = 0x0000_0000_0000_ff00:
+     *   bits[7:0]  = 0x00   (AttrIdx 0 = Device-nGnRnE)
+     *   bits[15:8] = 0xff   (AttrIdx 1 = Normal Inner/Outer WBWA)
+     */
+    mov     x0, #0xff00
     msr     mair_el1, x0
     isb
 

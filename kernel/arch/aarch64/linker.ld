@@ -60,13 +60,18 @@ SECTIONS
         *(.data.boot)
     } :boot
 
-    _boot_bss_start = .;
     .boot.bss ALIGN(0x1000) (NOLOAD) : {
+        _boot_bss_start = .;
         KEEP(*(.boot.bss))
         KEEP(*(.boot.bss.*))
         KEEP(*(.bss.boot))
     } :boot
     _boot_bss_end = .;
+    /* Align the .boot region end to a page so that .text's LMA and VMA keep
+     * the identity relationship VMA = LMA + ARCH_PAGE_OFFSET.  Without this,
+     * VMA (ALIGNed up) and LMA (= _boot_end, unaligned) diverge by <4 KiB and
+     * the high-half direct-map in head.S (identity) reads the wrong bytes. */
+    . = ALIGN(0x1000);
     _boot_end = .;
     _boot_size = _boot_end - _boot_start;
     _high_load_offset = _boot_size;
