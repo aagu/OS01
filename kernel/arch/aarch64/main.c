@@ -4,20 +4,22 @@
  * MMU, jumps to the high-half kernel image, clears the high-half .bss,
  * installs the VBAR table, parks the DTB slot, and finally calls here.
  *
- * Boot sequence (Task 3):
+ * Boot sequence (Task 4b — SMP):
  *   1. arch_local_irq_disable() (idempotent — DAIF already masked in head.S)
  *   2. pl011_init() — program PL011 for polled output
  *   3. Re-point VBAR_EL1 to the high-half exception_vectors
  *   4. dtb_init(dtb_base) — minimal FDT parse
  *   5. gic_init() — distributor + CPU interface, only PPI 30 enabled
  *   6. arch_tick_start() — arm CNTP for one period
- *   7. test_spinlock() — Task 2a single-core benchmark
+ *   7. smp_boot_aps() — bring up 3 APs via PSCI cpu_on + run 4-core
+ *      spinlock benchmark (BSP writes done[0]=1; acquires all
+ *      done[i]; PASS iff all done AND total == active*1M).
+ *      The deadline uses arch_cycle_counter(), NOT the tick ISR —
+ *      IRQs are still masked at this point.
  *   8. arch_local_irq_enable() — last step; tick ISR now runs
  *   9. wfi idle loop; the ISR prints "[tick] N" once a second
  *
  * Per spec §2.3, `arch_local_irq_enable()` is the LAST init step.
- * The tick ISR will not fire before that, regardless of how early
- * CNTP is enabled, because DAIF.IRQ is still set.
  *
  * Note on VBAR: head.S installed the early `boot_vectors` (panic-
  * only) before MMU enable and never switched it, so by default the
@@ -29,10 +31,9 @@
  * Note on dtb_base: head.S does not propagate the original x0 (DTB
  * pointer) into aarch64_main — by the time it returns from
  * build_pagetables / write_tcr_mair_tttr the value has been
- * clobbered.  Phase 1 falls back to QEMU virt defaults when the
- * pointer looks invalid (the C `aarch64_dtb_slot` is .bss-cleared
- * because head.S never writes to it).  This matches spec decision
- * #6 ("the boot must not hang if the DTB is absent").
+ * clobbered.  The DTB fallback in dtb_init() detects x0==0 (QEMU
+ * bare-ELF `-kernel`) and re-reads from the known loader_start
+ * 0x40000000.
  */
 
 #include <stdint.h>
@@ -67,8 +68,10 @@ void gic_init(void);
 /* Forward from time.c — declared in kernel/include/kernel/arch/cpu.h. */
 bool arch_tick_start(void);
 
-/* Forward from test_spinlock.c — Task 2a single-core benchmark. */
-void test_spinlock(void);
+/* Forward from smp.c — Task 4b brings up APs and runs the 4-core
+ * benchmark in one call (see spec §2.1 v11 — the BSP writes
+ * done[0]=1, acquires all done[i], and reports PASS/FAIL). */
+void smp_boot_aps(void);
 
 /* Symbol from head.S: address of the vector table in high half. */
 extern char exception_vectors[];
@@ -121,15 +124,20 @@ void aarch64_main(uint64_t dtb_base)
         }
     }
 
-    /* Task 2a: single-core spinlock benchmark.  Runs after the
-     * tick is configured so any timing observation works, but
-     * before IRQs are unmasked so the tick ISR does not preempt
-     * the (already non-preempted) benchmark. */
-    test_spinlock();
+    /* Task 4b: SMP bring-up + 4-core benchmark.  Runs after the
+     * tick is configured (for any future timing observation) but
+     * before IRQs are unmasked.  Inside smp_boot_aps() the BSP
+     * release-stores `benchmark_go`, runs its own 1M iterations,
+     * release-stores `done[0]`, acquire-polls `done[1..3]`, and
+     * prints PASS/FAIL.  The deadline is arch_cycle_counter() —
+     * not the CNTP tick, which would not fire because IRQs are
+     * still masked. */
+    smp_boot_aps();
 
     /* Step 8: ENABLE IRQs.  Per spec §2.3 this is the last init
      * step.  After this, the tick ISR fires every 10 ms and
      * prints "[tick] N" once a second. */
+    kputs("[IRQ] enabled (DAIF.IRQ cleared)\n");
     arch_local_irq_enable();
     /* Context-sync: ensure the DAIF.I clear is visible to subsequent
      * exception entry before we enter the idle wait. */

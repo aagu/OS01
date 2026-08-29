@@ -24,8 +24,20 @@
 .globl aarch64_boot_percpu
 .globl aarch64_boot_stacks
 .globl aarch64_dtb_slot
+.globl aarch64_dtb_mpidr_table
+.globl aarch64_dtb_cpu_count
 .globl aarch64_main
 .globl exception_vectors
+.globl secondary_start
+.globl secondary_panic
+/* Helpers exposed for high-half C code (smp.c) to access .boot.bss
+ * symbols without compiler-generated adrp+add failing the relocation
+ * range (high-half C cannot directly reference low-VMA symbols). */
+.globl aarch64_percpu_slot_addr
+.globl aarch64_boot_stack_top_addr
+.globl aarch64_dtb_mpidr_table_addr
+.globl aarch64_dtb_cpu_count_addr
+.globl secondary_start_addr
 
 .equ AARCH64_BOOT_STACK_SIZE, 0x1000
 
@@ -157,9 +169,55 @@ _start:
     /* 1. Park DTB into x19 (callee-saved across drop). */
     mov     x19, x0
 
-    /* 2. EL2 → EL1 drop if at EL2.  Idempotent: QEMU -kernel with
-     *    cortex-a53 lands at EL2 by default but `-smp 1` or some
-     *    other variants can land at EL1, so we check first. */
+    /* 1a. CPU-id check.  With `-M virt,secure=on -smp 4` QEMU starts
+     *     ALL four CPUs at _start in EL3 simultaneously, so we have
+     *     to distinguish BSP (logical 0) from APs before doing
+     *     anything that mutates shared state.  Use Aff0 (= the low
+     *     byte of MPIDR_EL1 after masking out the MT bit).  QEMU
+     *     virt reports Aff0 = 0/1/2/3 for the four cores; BSP is
+     *     always 0. */
+    mrs     x0, mpidr_el1
+    and     x0, x0, #0xffffff       /* keep Aff0..Aff2 + MT */
+    bic     x0, x0, #0x80000000     /* clear the RES1 MT bit */
+    and     x0, x0, #0xff           /* keep just Aff0 */
+    cbnz    x0, .Lap_wait_bsp       /* non-zero Aff0 → AP, wait */
+
+    /* 2. EL3 → EL1 drop if at EL3.  When QEMU is launched with
+     *    `-M virt,secure=on` the kernel is dropped into Secure EL3
+     *    (which the machine provides for PSCI SMC handling).
+     *    We must drop to Non-Secure EL1 before doing anything else.
+     *    Idempotent: `-M virt` (the default) starts at EL2 and
+     *    skips this branch. */
+    mrs     x0, CurrentEL
+    lsr     x0, x0, #2
+    cmp     x0, #3
+    b.ne    99f
+
+    /* Configure SCR_EL3 to route Non-Secure state.  NS=1, RW=1
+     * (AArch64 EL2/EL1), SMD=0 (SMC allowed at EL1 in NS). */
+    mov     x0, #0
+    orr     x0, x0, #1            /* NS = 1 */
+    lsl     x0, x0, #10
+    orr     x0, x0, #(1 << 10)    /* RW = 1 (AArch64 lower ELs) */
+    msr     scr_el3, x0
+
+    /* Return to EL1h, Non-Secure, DAIF masked.  SPSR_EL3 bit layout:
+     *   M[3:0] = 0b0101 = EL1h
+     *   F=1, I=1, A=1, D=1 (DAIF all masked)
+     *   M[4] = 0 (AArch64) */
+    mov     x0, #0x3c5
+    msr     spsr_el3, x0
+
+    /* eret target — go to the EL2 drop code (label 1f below). */
+    ldr     x0, =99f
+    msr     elr_el3, x0
+    isb
+    eret
+
+99:
+    /* 2a. (Optional) EL2 → EL1 drop if at EL2.  Idempotent: QEMU
+     *    -kernel with cortex-a53 (secure=off) lands at EL2 by
+     *    default; with secure=on lands at EL3 (handled above). */
     mrs     x0, CurrentEL
     lsr     x0, x0, #2
     cmp     x0, #2
@@ -250,6 +308,41 @@ _start:
     blr     x30
 
 99: b       99b
+
+
+/* AP wait loop.  When QEMU boots with `-smp 4 -kernel`, all CPUs
+ * land here before BSP has a chance to start secondary cores.
+ *
+ * Spin-table-style protocol: the BSP fills a per-Aff0 release
+ * address into aarch64_boot_percpu[Aff0].release from smp.c, then
+ * runs SEV to wake us.  We poll until the address is non-zero and
+ * jump to it (which is the secondary trampoline in this file).
+ *
+ * We can't easily use WFI here because SEV cross-core wakeups are
+ * not reliably delivered in the QEMU virt default configuration;
+ * a tight spin (with `yield` to reduce bus traffic) is good enough
+ * for phase 1 (only a handful of cycles until BSP catches up).
+ */
+.Lap_wait_bsp:
+    /* Reload Aff0 from MPIDR_EL1. */
+    mrs     x2, mpidr_el1
+    bic     x2, x2, #0x80000000             /* clear MT bit */
+    and     x2, x2, #0xff                   /* Aff0 */
+    ldr     x3, =aarch64_boot_percpu
+    /* aarch64_boot_percpu_t is 48 bytes; stride = 48 = 32 + 16. */
+    lsl     x4, x2, #5                      /* Aff0 * 32 */
+    add     x4, x4, x2, lsl #4              /* + Aff0 * 16 = Aff0 * 48 */
+    ldr     x5, [x3, x4]                    /* boot_percpu[Aff0].self (sanity) */
+    add     x3, x3, x4                      /* x3 = &boot_percpu[Aff0] */
+    ldr     x5, [x3, #40]                   /* .release (offset 40) */
+    cbnz    x5, .Lap_jump_release
+    yield
+    b       .Lap_wait_bsp
+
+.Lap_jump_release:
+    /* x2 = Aff0 (logical cpu_id on QEMU virt), x5 = release addr. */
+    mov     x0, x2
+    br      x5
 
 
 /* ──────────────────────────────────────────────────────────────────
@@ -515,4 +608,285 @@ write_tcr_mair_ttbr:
     ldr     x0, =boot_page_tables
     msr     ttbr1_el1, x0
     isb
+    ret
+
+
+/* ──────────────────────────────────────────────────────────────────
+ * secondary_start — physical entry point for APs after PSCI cpu_on.
+ *
+ * Lives in `.boot.text` so its address is the same in low physical
+ * RAM as the linker placed it.  QEMU's PSCI firmware resets the
+ * AP at this address with MMU OFF and all GPRs = 0 (except the
+ * context_id we put in x3, which QEMU doesn't actually propagate
+ * for cpu_on — see PSCI 0.2 spec).
+ *
+ * Flow (spec §2.1, §4):
+ *   1. EL2→EL1 drop (idempotent — the BSP path is the same code).
+ *   2. Mask DAIF.
+ *   3. Read full MPIDR_EL1 and walk the DTB {logical, mpidr} table
+ *      (see dtb.c `mpidr_to_logical_id`) by issuing an SMC to a
+ *      helper.  We can't call C directly yet because MMU is off and
+ *      the high-half C trampoline isn't mapped, so we walk a small
+ *      physical mirror table built by the BSP at SMP init.
+ *   4. Set SP_EL1 = aarch64_boot_percpu[cpu_id].stack and
+ *      TPIDR_EL1 = &aarch64_boot_percpu[cpu_id].
+ *   5. dsb sy; wait for BSP release (`online==1`).
+ *   6. Write the same TTBR/MAIR/SCTLR the BSP used (we can't re-run
+ *      build_pagetables — the walker already has the BSP's tables).
+ *      For phase 1 we share the BSP's TTBR base; the AP inherits the
+ *      BSP's page tables which are identity-mapped for the low
+ *      region and high-mapped for kernel .text.
+ *   7. Set VBAR_EL1 to exception_vectors (high half; this requires
+ *      MMU ON to dereference, so we set it AFTER enabling MMU).
+ *   8. Initialise the GIC CPU interface.
+ *   9. Branch to secondary_idle (in C) which spins on benchmark_go,
+ *      does 1M lock/incr/unlock, writes done[cpu_id], then wfi.
+ *
+ * Spec §2.1 "failure condition 4 — AP can't find itself" is the
+ * `secondary_panic` below.  We panic BEFORE setting SP, so the stack
+ * must not be touched.
+ * ────────────────────────────────────────────────────────────────── */
+.section .boot.text, "ax"
+.balign 0x80
+.globl secondary_start
+secondary_start:
+    /* Step 0: Save PSCI's x3 context_id (logical cpu_id) into x19.
+     * QEMU's cpu_on does not actually pass context_id through; we
+     * rely on the BSP writing the logical id into a known slot in
+     * .boot.bss (`aarch64_dtb_slot`-like) before issuing cpu_on.
+     * For QEMU virt we get the logical id by scanning the DTB MPIDR
+     * table from physical RAM — see .Lfind_cpu_id below. */
+    mov     x19, x0                       /* x0 = 0 from QEMU; unused */
+
+    /* Step 1: EL drop.  Idempotent across (EL3, EL2, EL1).
+     *
+     *   - secure=off (`-M virt` default): QEMU brings APs up at EL2
+     *   - secure=on: QEMU brings APs up at EL3
+     *
+     * We handle both: drop EL3→EL1 first if needed, then EL2→EL1.
+     * After this point we're at Non-Secure EL1. */
+    mrs     x0, CurrentEL
+    lsr     x0, x0, #2
+    cmp     x0, #3
+    b.ne    99f
+
+    /* EL3 → EL1.  Configure SCR_EL3 to route Non-Secure state.
+     * NS=1, RW=1 (AArch64 EL2/EL1), SMD=0 (SMC allowed). */
+    mov     x0, #0
+    orr     x0, x0, #1            /* NS = 1 */
+    lsl     x0, x0, #10
+    orr     x0, x0, #(1 << 10)    /* RW = 1 */
+    msr     scr_el3, x0
+    mov     x0, #0x3c5            /* SPSR_EL3 = EL1h + DAIF */
+    msr     spsr_el3, x0
+    ldr     x0, =99f              /* ERET target = EL2 check */
+    msr     elr_el3, x0
+    isb
+    eret
+
+99:
+    /* 1a. EL2 → EL1 drop if at EL2. */
+    mrs     x0, CurrentEL
+    lsr     x0, x0, #2
+    cmp     x0, #2
+    b.ne    1f
+
+    mov     x0, #1
+    lsl     x0, x0, #31                       /* HCR_EL2.RW = 1 */
+    msr     hcr_el2, x0
+    mov     x0, #0x3c5                        /* SPSR_EL2 = EL1h + DAIF */
+    msr     spsr_el2, x0
+    mov     x0, #3
+    msr     cnthctl_el2, x0
+    isb
+    eret
+
+1:
+    /* Step 2: Mask DAIF — IRQs stay off until the BSP releases us
+     * AND we've enabled the GIC CPU interface (which currently only
+     * PPI 30 is wired, and we want no spurious IRQ before SMP setup
+     * is complete). */
+    msr     daifset, #0xf
+
+    /* Step 2a: Set up a temporary stack so the per-CPU scan can use
+     * STP/LDP safely.  We use a small fixed-size region at the end of
+     .boot.bss until we know cpu_id.  This trampoline scratch is
+     * declared just below secondary_panic's scratch area. */
+    ldr     x0, =secondary_scratch_top
+    mov     sp, x0
+
+    /* Step 3: read MPIDR_EL1 and walk the BSP-built MPIDR table
+     * (a copy in low physical RAM, see dtb.c — we'll export
+     * `aarch64_dtb_mpidr_table`/`aarch64_dtb_cpu_count`).
+     *
+     * On QEMU virt the MPIDR_EL1 value for CPUs 0..3 is exactly the
+     * Aff0 byte 0..3 (reg property = Aff0).  We can't trust Aff0
+     * alone (spec §2.1), so we compare the full 64-bit value. */
+    mrs     x1, mpidr_el1
+    bic     x1, x1, #0x80000000               /* clear the MT bit (RES1 on CPU0) */
+    ldr     x2, =aarch64_dtb_cpu_count        /* 32-bit count */
+    ldr     x2, [x2]
+    ldr     x3, =aarch64_dtb_mpidr_table      /* uint64_t[NR_CPUS] */
+    mov     x4, #0                            /* x4 = logical cpu_id */
+2:
+    cmp     x4, x2
+    b.ge    .Lap_not_found
+    ldr     x5, [x3, x4, lsl #3]
+    cmp     x5, x1
+    b.eq    .Lap_got_id
+    add     x4, x4, #1
+    b       2b
+
+.Lap_got_id:
+    /* Step 4: SP_EL1 = aarch64_boot_percpu[x4].stack.
+     * struct stride = 48 (see aarch64_percpu.h). */
+    ldr     x6, =aarch64_boot_percpu
+    lsl     x7, x4, #5                      /* x4 * 32 */
+    add     x7, x7, x4, lsl #4              /* + x4 * 16 = x4 * 48 */
+    add     x6, x6, x7                      /* &boot_percpu[x4] */
+    ldr     x7, [x6, #24]                   /* .stack */
+    mov     sp, x7
+
+    /* TPIDR_EL1 = &aarch64_boot_percpu[x4] */
+    msr     tpidr_el1, x6
+    dsb     sy
+    isb
+
+    /* Step 5: Wait for BSP to release us.  The BSP sets
+     * boot_percpu[cpu_id].online == 1 once its smp_boot_aps() has
+     * completed setup and built page tables (which are the same
+     * tables we will use below — they were built into low physical
+     * RAM already, and we share them via TTBR0/TTBR1). */
+    mov     x9, x4                            /* preserve cpu_id across loop */
+.Lwait_online:
+    add     x11, x6, #32                       /* .online (offset 32) */
+    ldar    w10, [x11]                         /* ldar allows only imm=0 */
+    cbnz    w10, .Lgot_online
+    yield
+    b       .Lwait_online
+
+.Lgot_online:
+    /* Step 6: Re-enable MMU with the BSP's page tables.  The tables
+     * are in low RAM (.boot.bss) and reachable via the identity map
+     * — but they aren't yet mapped because we hadn't enabled MMU.
+     * We re-enable the same TCR/MAIR/TTBR0/TTBR1/SCTLR values the
+     * BSP used.  They are constant; rebuilding them here is simpler
+     * than asking the BSP to publish them. */
+    bl      write_tcr_mair_ttbr
+
+    /* SCTLR: same value the BSP used. */
+    ldr     x0, =SCTLR_VALUE
+    msr     sctlr_el1, x0
+    isb
+
+    /* Step 7: VBAR_EL1 = exception_vectors (high half). */
+    ldr     x0, =exception_vectors
+    msr     vbar_el1, x0
+    isb
+
+    /* Step 8: GIC CPU interface.  We just enable group 0 and set
+     * PMR=0xFF (allow all priorities).  CNTP isn't used on APs in
+     * phase 1. */
+    mov     x0, #0x08010000
+    mov     w1, #0xff
+    str     w1, [x0, #4]                       /* GICC_PMR */
+    mov     w1, #1
+    str     w1, [x0]                           /* GICC_CTLR.EnableGrp0 */
+
+    /* Step 9: Branch to secondary_idle (C, in high half). */
+    mov     x0, x9                             /* cpu_id (arg) */
+    ldr     x30, =secondary_idle
+    blr     x30
+
+    /* secondary_idle returns -> wfi forever. */
+1:  wfi
+    b       1b
+
+
+/* ──────────────────────────────────────────────────────────────────
+ * secondary_panic — AP cannot find its MPIDR in the BSP-built table.
+ *
+ * Called from secondary_start with NO valid stack.  We panic by
+ * writing 'P' to PL011 @ 0x09000000 and then spinning forever.
+ * ────────────────────────────────────────────────────────────────── */
+.globl secondary_panic
+secondary_panic:
+    /* Write '!' via PL011 @ 0x09000000 (Device MMIO pre-MMU). */
+    mov     x2, #0x09000000
+1:  ldr     w3, [x2, #0x18]
+    tst     w3, #(1 << 5)
+    b.ne    1b
+    mov     w1, #'P'
+    str     w1, [x2]
+2:  ldr     w3, [x2, #0x18]
+    tst     w3, #(1 << 5)
+    b.ne    2b
+    mov     w1, #'!'
+    str     w1, [x2]
+3:  b       3b
+
+
+.Lap_not_found:
+    /* x4 = logical id (out of range); print then halt.  We do NOT
+     * load any stack — use PL011 MMIO writes only. */
+    b       secondary_panic
+
+
+/* Scratch stack for the AP trampoline's MPIDR scan (1 KiB; the
+ * scan doesn't recurse, so this is plenty).  Force into .boot.bss
+ * so it's reachable pre-MMU via the identity map. */
+.section .boot.bss, "aw", @nobits
+.balign 16
+.globl secondary_scratch
+secondary_scratch:
+    .skip   0x400
+.globl secondary_scratch_top
+secondary_scratch_top:
+
+
+/* ──────────────────────────────────────────────────────────────────
+ * Helpers exposed to high-half C code (smp.c) so it can address the
+ * low-half .boot.bss storage without triggering an out-of-range
+ * R_AARCH64_ADR_PREL_PG_HI21 relocation.
+ *
+ * Each helper returns the absolute LOW PHYSICAL address of the
+ * corresponding structure in x0, which smp.c may then cast to a
+ * volatile pointer.
+ * ────────────────────────────────────────────────────────────────── */
+.section .text, "ax"
+
+/* x0 = cpu_id; returns &aarch64_boot_percpu[cpu_id] (low phys).
+ * aarch64_boot_percpu_t is 48 bytes; stride = 48 = 32 + 16. */
+.globl aarch64_percpu_slot_addr
+aarch64_percpu_slot_addr:
+    ldr     x1, =aarch64_boot_percpu
+    lsl     x2, x0, #5                      /* Aff0 * 32 */
+    add     x0, x2, x0, lsl #4              /* + Aff0 * 16 = Aff0 * 48 */
+    add     x0, x0, x1
+    ret
+
+/* x0 = cpu_id; returns stack top (low phys). */
+.globl aarch64_boot_stack_top_addr
+aarch64_boot_stack_top_addr:
+    ldr     x1, =aarch64_boot_stacks
+    add     x0, x1, x0, lsl #12               /* 4 KiB per CPU */
+    add     x0, x0, #0x1000
+    ret
+
+/* Returns &aarch64_dtb_mpidr_table (low phys). */
+.globl aarch64_dtb_mpidr_table_addr
+aarch64_dtb_mpidr_table_addr:
+    ldr     x0, =aarch64_dtb_mpidr_table
+    ret
+
+/* Returns &aarch64_dtb_cpu_count (low phys). */
+.globl aarch64_dtb_cpu_count_addr
+aarch64_dtb_cpu_count_addr:
+    ldr     x0, =aarch64_dtb_cpu_count
+    ret
+
+/* Returns secondary_start (low phys, PSCI cpu_on entry). */
+.globl secondary_start_addr
+secondary_start_addr:
+    ldr     x0, =secondary_start
     ret
