@@ -1,6 +1,8 @@
 base:=$(shell pwd)
-export CC=clang -target x86_64-unknown-none
-export LD=ld.lld -m elf_x86_64
+# CC/LD are NOT exported: kernel/Makefile picks them per ARCH (x86_64 vs
+# aarch64). User-space targets (busybox, mbedtls, etc.) below invoke
+# clang -target x86_64-unknown-none directly — those remain x86-only and
+# are out of scope for the aarch64 port.
 export AR=llvm-ar
 export OBJ_CPY=llvm-objcopy
 
