@@ -91,7 +91,8 @@ install-headers:
 
 install-libs: libc.a libk.a
 	mkdir -p $(SYSROOT)$(LIBDIR)
-	cp libc.a libk.a $(SYSROOT)$(LIBDIR)
+	@cmp -s libc.a $(SYSROOT)$(LIBDIR)/libc.a || cp libc.a $(SYSROOT)$(LIBDIR)/libc.a
+	@cmp -s libk.a $(SYSROOT)$(LIBDIR)/libk.a || cp libk.a $(SYSROOT)$(LIBDIR)/libk.a
 
 # ── Clean ──────────────────────────────────────────────────
 clean:

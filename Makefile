@@ -80,6 +80,18 @@ build/x86_64/user/busybox.elf: thirdpart/busybox-1.36.1/busybox
 
 BUSYBOX_SRC  = thirdpart/busybox-1.36.1
 BUSYBOX_CFG  = config/busybox.config
+BUSYBOX_LIBS = $(SYSROOT)$(LIBDIR)/libc.a $(SYSROOT)$(LIBDIR)/libk.a
+
+# The archives are normally installed by the phony `lib` target before the
+# disk-image prerequisites are considered.  Keep direct BusyBox builds usable
+# too, without making the BusyBox binary depend on the phony target itself.
+libc/libc.a libc/libk.a &:
+	$(MAKE) -C kernel install-headers
+	$(MAKE) -C libc
+
+$(BUSYBOX_LIBS) &: libc/libc.a libc/libk.a
+	$(MAKE) -C kernel install-headers
+	$(MAKE) -C libc install
 
 # ── mbedTLS ─────────────────────────────────────────────────
 MBEDTLS_SRC = thirdpart/mbedtls
@@ -126,32 +138,27 @@ $(MBEDTLS_LIB): lib config/mbedtls_config.h libc/network/entropy.c
 	@rm -rf /tmp/mbedtls_build
 	@echo "  [mbedtls] libmbedtls.a installed"
 
-thirdpart/busybox-1.36.1/busybox: lib $(BUSYBOX_SRC)/Makefile $(BUSYBOX_CFG) user/crt0.S user/sigreturn_trampoline.S
+thirdpart/busybox-1.36.1/busybox: $(BUSYBOX_LIBS) $(BUSYBOX_SRC)/Makefile $(BUSYBOX_CFG) user/crt0.S user/sigreturn_trampoline.S
 	@test -f $(BUSYBOX_SRC)/Makefile || { \
 	    echo "ERROR: busybox submodule not initialized"; \
 	    echo "Run: git submodule update --init"; false; }
-	cp user/crt0.S $(BUSYBOX_SRC)/applets/crt0.S
-	cp user/sigreturn_trampoline.S $(BUSYBOX_SRC)/applets/sigreturn_trampoline.S
-	cp $(BUSYBOX_CFG) $(BUSYBOX_SRC)/.config
-	@grep -q 'crt0.o' $(BUSYBOX_SRC)/applets/Kbuild.src || { \
-	    cp $(BUSYBOX_SRC)/applets/Kbuild.src $(BUSYBOX_SRC)/applets/Kbuild.src.bak; \
-	    echo 'obj-y += crt0.o' >> $(BUSYBOX_SRC)/applets/Kbuild.src; }
-	@grep -q 'sigreturn_trampoline.o' $(BUSYBOX_SRC)/applets/Kbuild.src || { \
-	    echo 'obj-y += sigreturn_trampoline.o' >> $(BUSYBOX_SRC)/applets/Kbuild.src; }
+	@cmp -s user/crt0.S $(BUSYBOX_SRC)/applets/crt0.S || cp user/crt0.S $(BUSYBOX_SRC)/applets/crt0.S
+	@cmp -s user/sigreturn_trampoline.S $(BUSYBOX_SRC)/applets/sigreturn_trampoline.S || cp user/sigreturn_trampoline.S $(BUSYBOX_SRC)/applets/sigreturn_trampoline.S
+	@cmp -s $(BUSYBOX_CFG) $(BUSYBOX_SRC)/.config || cp $(BUSYBOX_CFG) $(BUSYBOX_SRC)/.config
+	@grep -qxF 'obj-y += crt0.o' $(BUSYBOX_SRC)/applets/Kbuild.src || \
+	    echo 'obj-y += crt0.o' >> $(BUSYBOX_SRC)/applets/Kbuild.src
+	@grep -qxF 'obj-y += sigreturn_trampoline.o' $(BUSYBOX_SRC)/applets/Kbuild.src || \
+	    echo 'obj-y += sigreturn_trampoline.o' >> $(BUSYBOX_SRC)/applets/Kbuild.src
 	$(MAKE) -C $(BUSYBOX_SRC) silentoldconfig CC=clang LD=clang 2>/dev/null || \
 	yes "" | $(MAKE) -C $(BUSYBOX_SRC) oldconfig CC=clang LD=clang
-	@# Fixup config for cross-compilation quirks (oldconfig may flip these)
-	cd $(BUSYBOX_SRC) && sed -i \
-	    -e 's/^# CONFIG_STATIC is not set/CONFIG_STATIC=y/' \
-	    -e 's|^CONFIG_BUSYBOX_EXEC_PATH=.*|CONFIG_BUSYBOX_EXEC_PATH="/bin/busybox"|' \
-	    .config
 	@mkdir -p $(SYSROOT)/usr/lib
-	@touch /tmp/stub.c && clang -c -x c /tmp/stub.c -o /tmp/stub.o 2>/dev/null
-	@llvm-ar rcs $(SYSROOT)/usr/lib/libm.a /tmp/stub.o 2>/dev/null
-	@llvm-ar rcs $(SYSROOT)/usr/lib/librt.a /tmp/stub.o 2>/dev/null
-	@rm -f /tmp/stub.c /tmp/stub.o
+	@if [ ! -f $(SYSROOT)/usr/lib/libm.a ] || [ ! -f $(SYSROOT)/usr/lib/librt.a ]; then \
+	    touch /tmp/os01-busybox-stub.c && clang -c -x c /tmp/os01-busybox-stub.c -o /tmp/os01-busybox-stub.o 2>/dev/null; \
+	    test -f $(SYSROOT)/usr/lib/libm.a || llvm-ar rcs $(SYSROOT)/usr/lib/libm.a /tmp/os01-busybox-stub.o; \
+	    test -f $(SYSROOT)/usr/lib/librt.a || llvm-ar rcs $(SYSROOT)/usr/lib/librt.a /tmp/os01-busybox-stub.o; \
+	    rm -f /tmp/os01-busybox-stub.c /tmp/os01-busybox-stub.o; \
+	fi
 	$(MAKE) -C $(BUSYBOX_SRC) CC=clang LD=clang
-	@mv $(BUSYBOX_SRC)/applets/Kbuild.src.bak $(BUSYBOX_SRC)/applets/Kbuild.src 2>/dev/null || true
 
 # ── Disk image ──────────────────────────────────────────
 
