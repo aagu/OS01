@@ -131,10 +131,14 @@ void aarch64_main(uint64_t dtb_base)
      * step.  After this, the tick ISR fires every 10 ms and
      * prints "[tick] N" once a second. */
     arch_local_irq_enable();
+    /* Context-sync: ensure the DAIF.I clear is visible to subsequent
+     * exception entry before we enter the idle wait. */
+    __asm__ __volatile__("isb" ::: "memory");
 
     /* Step 9: idle forever.  The tick ISR will return via eret
      * back to the wfi; the BSP never leaves this loop. */
     for (;;) {
+        __asm__ __volatile__("dsb sy" ::: "memory");
         arch_cpu_halt();         /* wfi */
     }
 }

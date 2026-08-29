@@ -39,9 +39,14 @@ void arch_irq_install(void);
 
 #elif defined(__aarch64__)
 
-// DAIF: bit 7=Debug, bit 6=SError, bit 2=IRQ, bit 1=FIQ
-// daifclr clears bits → enables IRQs; daifset sets bits → disables IRQs
-#define DAIF_IRQ_BIT  (1UL << 2)
+// daifclr/daifset take a 4-bit immediate laid out {D, A, I, F}:
+//   imm[3]=D(Debug), imm[2]=A(SError), imm[1]=I(IRQ), imm[0]=F(FIQ).
+// So IRQ is bit 1 of the immediate (value 2), NOT bit 2.  A value of
+// 4 (=1<<2) targets the SError mask, leaving IRQ permanently masked —
+// that is the classic "timer IRQ never fires" bug.  The `mrs/msr daif`
+// register (used by save/restore) has a DIFFERENT layout (bit7=I); the
+// two must not be conflated.
+#define DAIF_IRQ_BIT  (1UL << 1)
 
 static inline void arch_local_irq_enable(void)
 {
