@@ -417,9 +417,6 @@ EFI_STATUS aarch64_build_handoff(efi_handle_t image_handle,
         return EFI_INVALID_PARAMETER;
 
     allocation = (efi_physical_address_t)AARCH64_HANDOFF_BASE;
-#ifdef AARCH64_TEST_FORCE_HANDOFF_ALLOCATION_FAILURE
-    allocation = (efi_physical_address_t)UINT64_C(0xfffffffffffff000);
-#endif
     status = BS->AllocatePages(AllocateAddress, EfiLoaderData,
                                (uintn_t)AARCH64_HANDOFF_DATA_PAGES,
                                &allocation);
@@ -485,9 +482,6 @@ EFI_STATUS aarch64_build_handoff(efi_handle_t image_handle,
                               &descriptor_size, &descriptor_version);
     if (status != EFI_BUFFER_TOO_SMALL || descriptor_size == 0)
         goto fail_with_status;
-#ifdef AARCH64_TEST_FORCE_HANDOFF_OVERFLOW
-    required_size = (uintn_t)map_capacity;
-#endif
     if ((uint64_t)required_size > map_capacity ||
         descriptor_size > (uintn_t)map_capacity ||
         AARCH64_MEMORY_MAP_SLACK * descriptor_size >

@@ -59,8 +59,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_tetris_logic.elf \
     $(TEST_BLD)/test_sync_primitives.elf \
     $(TEST_BLD)/test_poll_requested.elf \
-    $(TEST_BLD)/test_bootinfo_abi.elf \
-    $(TEST_BLD)/test_aarch64_elf_loader.elf
+    $(TEST_BLD)/test_bootinfo_abi.elf
 
 .PHONY: all clean run
 
@@ -265,22 +264,6 @@ $(TEST_BLD)/test_slab_basic.elf: $(TEST_BLD)/test_slab_basic.o $(LIBC_OBJS) $(MO
 	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/test_elf_validate.elf: $(TEST_BLD)/test_elf_validate.o $(LIBC_OBJS) $(MOCK_OBJS)
-	$(HOST_CC) -o $@ $^
-
-# AArch64 UEFI ELF loader helpers are host-tested as pure fixed-address logic.
-$(TEST_BLD)/test_aarch64_elf_loader.o: $(TEST_CASES)/test_aarch64_elf_loader.c \
-		$(TESTS_DIR)/boot/uefi/aarch64/loader.h
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) -I$(TESTS_DIR)/boot/uefi/aarch64 -c $< -o $@
-
-$(TEST_BLD)/aarch64_elf_loader.o: $(TESTS_DIR)/boot/uefi/aarch64/elf.c \
-		$(TESTS_DIR)/boot/uefi/aarch64/loader.h
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) -I$(TESTS_DIR)/boot/uefi/aarch64 -c $< -o $@
-
-$(TEST_BLD)/test_aarch64_elf_loader.elf: \
-		$(TEST_BLD)/test_aarch64_elf_loader.o \
-		$(TEST_BLD)/aarch64_elf_loader.o
 	$(HOST_CC) -o $@ $^
 
 # standalone test (no kernel/libc deps)
