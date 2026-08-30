@@ -282,6 +282,17 @@ run-aarch64-uefi: aarch64-uefi
 	  -device virtio-blk-device,drive=disk \
 	  -serial stdio -display none -no-reboot
 
+.PHONY: test-aarch64-uefi-smoke
+test-aarch64-uefi-smoke:
+	@mkdir -p $(AARCH64_BUILD_DIR)
+	@rm -f $(AARCH64_BUILD_DIR)/uefi-smoke.log
+	@status=0; timeout 30 $(MAKE) run-aarch64-uefi >$(AARCH64_BUILD_DIR)/uefi-smoke.log 2>&1 || status=$$?; \
+	[ $$status -eq 124 ] || { cat $(AARCH64_BUILD_DIR)/uefi-smoke.log; exit $$status; }; \
+	grep -F 'OS01 aarch64 uefi handoff ok' $(AARCH64_BUILD_DIR)/uefi-smoke.log; \
+	grep -F 'OS01 aarch64 phase1 boot ok' $(AARCH64_BUILD_DIR)/uefi-smoke.log; \
+	grep -F '[tick] 1' $(AARCH64_BUILD_DIR)/uefi-smoke.log; \
+	! grep -F '[spinlock] starting' $(AARCH64_BUILD_DIR)/uefi-smoke.log
+
 .PHONY: check-aarch64-uefi-artifacts
 check-aarch64-uefi-artifacts: aarch64-uefi
 	file build/aarch64/uefi/BOOTAA64.EFI | grep 'PE32+.*ARM64'
