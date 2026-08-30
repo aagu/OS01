@@ -240,9 +240,21 @@ AARCH64_SMP  ?= 4
 run-aarch64:
 	$(MAKE) -C kernel ARCH=aarch64
 	$(AARCH64_QEMU) -M virt,secure=on,gic-version=2 -cpu cortex-a53 \
-	  -smp $(AARCH64_SMP) -m 1G \
+	  -smp $(AARCH64_SMP) -m $(MEMORY) \
 	  -kernel build/aarch64/kernel/kernel.elf \
-	  -nographic -serial mon:stdio
+	  -display $(DISPLAY) -serial stdio -no-reboot
+
+# Start the AArch64 phase-1 kernel paused with QEMU's GDB remote stub on
+# TCP port 1234.  This is consumed by .vscode/launch.json.
+.PHONY: debug-aarch64
+debug-aarch64:
+	$(MAKE) -C kernel ARCH=aarch64 DEBUG=1
+	@echo "AArch64 QEMU GDB server listening on tcp://127.0.0.1:1234"
+	$(AARCH64_QEMU) -M virt,secure=on,gic-version=2 -cpu cortex-a53 \
+	  -smp $(AARCH64_SMP) -m $(MEMORY) \
+	  -kernel build/aarch64/kernel/kernel.elf \
+	  -display $(DISPLAY) -serial stdio -no-reboot \
+	  -S -gdb tcp::1234
 
 run-kvm: disk.img boot/uefi/OVMF.fd
 	$(QEMU_BIN) -M q35 -smp $(SMP) -pflash boot/uefi/OVMF.fd \

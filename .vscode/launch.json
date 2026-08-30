@@ -1,5 +1,5 @@
 {
-    // 使用 IntelliSense 了解相关属性。 
+    // 使用 IntelliSense 了解相关属性。
     // 悬停以查看现有属性的描述。
     // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
@@ -61,6 +61,26 @@
                 "gdb-remote 1234"
             ],
             "preLaunchTask": "Launch QEMU"
+        },
+        {
+            "name": "Debug AArch64 kernel (QEMU)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/aarch64/kernel/kernel.elf",
+            "cwd": "${workspaceFolder}",
+            "MIMode": "gdb",
+            "miDebuggerPath": "gdb",
+            "miDebuggerServerAddress": "localhost:1234",
+            "stopAtEntry": true,
+            "preLaunchTask": "Start AArch64 QEMU (GDB)",
+            "externalConsole": false,
+            "setupCommands": [
+                {
+                    "description": "Use the AArch64 instruction set before connecting to QEMU",
+                    "text": "set architecture aarch64",
+                    "ignoreFailures": false
+                }
+            ]
         }
     ]
 }
