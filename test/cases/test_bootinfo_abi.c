@@ -2,16 +2,6 @@
 #include <stdio.h>
 #include <kernel/bootinfo.h>
 
-enum aarch64_boot_mode {
-    AARCH64_BOOT_DIRECT_ZERO,
-    AARCH64_BOOT_DIRECT_FDT,
-    AARCH64_BOOT_UEFI,
-    AARCH64_BOOT_CORRUPT,
-};
-
-enum aarch64_boot_mode aarch64_select_boot_mode(
-    uint64_t x0, const struct boot_context *fixed_context);
-
 _Static_assert(BOOT_CONTEXT_MAGIC == UINT32_C(0x4f533031),
                "boot context magic");
 _Static_assert(BOOT_CONTEXT_VERSION == 2u, "boot context version");
@@ -85,22 +75,6 @@ int main(void)
         !(ctx.flags & BOOT_CONTEXT_HAS_BOOT_CPU_ID))
         return 1;
 
-    /* These cases protect the kernel-entry boundary: only the reserved
-     * UEFI address is interpreted as a boot_context; all other x0 values
-     * retain their direct-boot DTB/zero meaning. */
-    boot_context_init(&ctx);
-    if (aarch64_select_boot_mode(0, &ctx) != AARCH64_BOOT_DIRECT_ZERO)
-        return 1;
-    if (aarch64_select_boot_mode(UINT64_C(0x40000000), &ctx) !=
-        AARCH64_BOOT_DIRECT_FDT)
-        return 1;
-    if (aarch64_select_boot_mode(UINT64_C(0x401e0000), &ctx) !=
-        AARCH64_BOOT_UEFI)
-        return 1;
-    ctx.magic ^= 1u;
-    if (aarch64_select_boot_mode(UINT64_C(0x401e0000), &ctx) !=
-        AARCH64_BOOT_CORRUPT)
-        return 1;
     puts("bootinfo ABI: PASS");
     return 0;
 }

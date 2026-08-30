@@ -61,26 +61,6 @@
                 "gdb-remote 1234"
             ],
             "preLaunchTask": "Launch QEMU"
-        },
-        {
-            "name": "Debug AArch64 kernel (QEMU)",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build/aarch64/kernel/kernel.elf",
-            "cwd": "${workspaceFolder}",
-            "MIMode": "gdb",
-            "miDebuggerPath": "gdb",
-            "miDebuggerServerAddress": "localhost:1234",
-            "stopAtEntry": true,
-            "preLaunchTask": "Start AArch64 QEMU (GDB)",
-            "externalConsole": false,
-            "setupCommands": [
-                {
-                    "description": "Use the AArch64 instruction set before connecting to QEMU",
-                    "text": "set architecture aarch64",
-                    "ignoreFailures": false
-                }
-            ]
         }
     ]
 }

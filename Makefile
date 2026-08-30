@@ -234,10 +234,6 @@ run: disk.img boot/uefi/OVMF.fd
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio -no-reboot
 
-# aarch64 phase 1: bare-ELF -kernel boot (no disk.img / UEFI / userland).
-# See docs/superpowers/specs/2026-08-29-aarch64-phase1-design.md §9 for the
-# three QEMU-11.1 deviations: secure=on (else only BSP starts), gic-version=2
-# (code hardcodes GICv2 MMIO), and bare-ELF x0=0 / DTB@0x40000000.
 AARCH64_QEMU ?= qemu-system-aarch64
 AARCH64_SMP  ?= 4
 AARCH64_BUILD_DIR := build/aarch64
@@ -247,14 +243,6 @@ AARCH64_UEFI_FIRMWARE := $(AARCH64_BUILD_DIR)/QEMU_EFI.fd
 AARCH64_UEFI_FIRMWARE_SOURCE ?= /usr/share/edk2/aarch64/QEMU_EFI.fd
 AARCH64_KERNEL_ELF := $(AARCH64_BUILD_DIR)/kernel/kernel.elf
 AARCH64_HEAD_OBJECT := $(AARCH64_BUILD_DIR)/kernel/arch/aarch64/head.o
-
-.PHONY: run-aarch64
-run-aarch64:
-	$(MAKE) -C kernel ARCH=aarch64
-	$(AARCH64_QEMU) -M virt,secure=on,gic-version=2 -cpu cortex-a53 \
-	  -smp $(AARCH64_SMP) -m $(MEMORY) \
-	  -kernel build/aarch64/kernel/kernel.elf \
-	  -display $(DISPLAY) -serial stdio -no-reboot
 
 .PHONY: aarch64-uefi
 aarch64-uefi: $(AARCH64_UEFI_DISK) $(AARCH64_UEFI_FIRMWARE)
@@ -290,18 +278,6 @@ run-aarch64-uefi: aarch64-uefi
 	  -drive if=none,file=$(AARCH64_UEFI_DISK),format=raw,id=disk \
 	  -device virtio-blk-device,drive=disk \
 	  -serial stdio -display none -no-reboot
-
-# Start the AArch64 phase-1 kernel paused with QEMU's GDB remote stub on
-# TCP port 1234.  This is consumed by .vscode/launch.json.
-.PHONY: debug-aarch64
-debug-aarch64:
-	$(MAKE) -C kernel ARCH=aarch64 DEBUG=1
-	@echo "AArch64 QEMU GDB server listening on tcp://127.0.0.1:1234"
-	$(AARCH64_QEMU) -M virt,secure=on,gic-version=2 -cpu cortex-a53 \
-	  -smp $(AARCH64_SMP) -m $(MEMORY) \
-	  -kernel build/aarch64/kernel/kernel.elf \
-	  -display $(DISPLAY) -serial stdio -no-reboot \
-	  -S -gdb tcp::1234
 
 run-kvm: disk.img boot/uefi/OVMF.fd
 	$(QEMU_BIN) -M q35 -smp $(SMP) -pflash boot/uefi/OVMF.fd \
