@@ -44,8 +44,12 @@ all: disk.img
 
 # ── Bootloader ──────────────────────────────────────────
 
-boot/uefi/BOOTX64.EFI: boot/uefi/main.c
-	make -C boot/uefi
+BUILD_X86_64_UEFI := build/x86_64/uefi/BOOTX64.EFI
+
+$(BUILD_X86_64_UEFI): boot/uefi/Makefile boot/uefi/main.c \
+		boot/uefi/arch/arch.h boot/uefi/arch/x86_64/boot.c \
+		kernel/include/kernel/bootinfo.h
+	make -C boot/uefi ARCH=x86_64
 
 boot/uefi/OVMF.fd:
 	make -C boot/uefi OVMF.fd
@@ -164,7 +168,7 @@ thirdpart/busybox-1.36.1/busybox: $(BUSYBOX_LIBS) $(BUSYBOX_SRC)/Makefile $(BUSY
 
 # ── Disk image ──────────────────────────────────────────
 
-disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.elf
+disk.img: $(BUILD_X86_64_UEFI) lib kernel.bin user build/x86_64/user/busybox.elf
 	@mkdir -p config/fsroot/bin config/fsroot/home config/fsroot/etc
 	@cp build/x86_64/user/init.elf          config/fsroot/bin/init
 	@cp build/x86_64/user/busybox.elf        config/fsroot/bin/busybox
@@ -217,7 +221,7 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 	$(MAKE) -C tools check-deps
 	$(MAKE) -C tools
 	tools/mkdisk disk.img \
-	    --efi boot/uefi/BOOTX64.EFI \
+	    --efi $(BUILD_X86_64_UEFI) \
 	    --kernel kernel.bin \
 	    --rootfs config/fsroot/
 
@@ -355,7 +359,7 @@ test-network:
 .PHONY: clean
 clean:
 	rm -rf disk.img
-	make -C boot/uefi distclean
+	make -C boot/uefi clean-all
 	make -C kernel clean
 	make -C libc clean
 	make -C user clean

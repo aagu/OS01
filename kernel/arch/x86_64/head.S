@@ -12,7 +12,7 @@ ENTRY(_start)
     jnz     1f
     movq    %rdi,   %rax
 1:
-    movq    %rax,   BOOT_INFO(%rip)
+    movq    %rax,   BOOT_CONTEXT(%rip)
 	mov	%ss,	%ax
 	mov	%ax,	%ds
 	mov	%ax,	%es
@@ -110,7 +110,7 @@ setup_TSS64:
 
 //=======	call kernel_main
 
-	movq    BOOT_INFO(%rip),    %rax
+	movq    BOOT_CONTEXT(%rip),    %rax
     movq    %rax,   %rdi
 	movq    go_to_kernel(%rip),     %rax
     pushq   $X86_KERNEL_CS
@@ -246,11 +246,11 @@ IDT_POINTER:
 IDT_LIMIT:	.word	IDT_END - IDT_Table - 1
 IDT_BASE:	.quad	IDT_Table
 
-//=======	BOOT_INFO
+//=======	BOOT_CONTEXT
 
-.globl BOOT_INFO
+.globl BOOT_CONTEXT
 
-BOOT_INFO:
+BOOT_CONTEXT:
     .quad 0xffffffffffffffff
 
 //=======	TSS64_Table

@@ -84,14 +84,14 @@ static spinlock_T  pmm_lock     = { .lock = 1L };
 // Initialized explicitly in pmm_init() after slab_init().
 // Do NOT use lazy init — SMP race on first concurrent alloc_4k_page().
 
-void pmm_init(struct MEMORY_INFO E820_Info)
+void pmm_init(const struct BOOT_MEMORY_MAP *map)
 {
     uint32_t i, j;
     uint64_t TotalMem = 0;
-    struct E820_ENTRY *p = (struct E820_ENTRY *)(uintptr_t)E820_Info.E820_Entry;
+    struct E820_ENTRY *p = (struct E820_ENTRY *)(uintptr_t)map->entries;
 
     debug_mm("Display Physics Address MAP,Type(1:RAM,2:ROM or Reserved,3:ACPI Reclaim Memory,4:ACPI NVS Memory,Others:Undefine)\n");
-    for (i = 0; i < E820_Info.E820_Entry_count; i++)
+    for (i = 0; i < map->entry_count; i++)
     {
         debug_mm("Address:%#018lx\tLength:%#018lx\tType:%2d\n",p->address,p->length,p->type);
 		if(p->type == 1)
@@ -105,8 +105,6 @@ void pmm_init(struct MEMORY_INFO E820_Info)
         PMMngr.e820_length = i;
 
 		p++;
-        if (p->type > 4 || p->type < 1)
-            break;
     }
 
     debug_mm("OS Can Used Total RAM:%dMB\n",TotalMem>>20);

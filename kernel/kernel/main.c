@@ -118,19 +118,16 @@ void __stack_chk_fail(void)
 //    9. Scheduler + user-space init (/init.elf)
 //
 __attribute__((no_stack_protector))
-int kernel_main(struct BOOT_INFO *bootinfo)
+int kernel_main(const struct boot_context *bootctx)
 {
     // ═══ 0. Stack canary — MUST be the first statement ════════
     __stack_chk_guard = arch_cycle_counter() ^ 0xDEADBEEFCAFEBABE;
 
-    struct boot_context bootctx;
-    boot_context_from_legacy(&bootctx, bootinfo);
-
     // ═══ 1. CPU + interrupt infrastructure ═══════════════════
-    Pos.Phy_addr = (uint32_t *)bootctx.graphics.FrameBufferBase;
-    Pos.FB_length = bootctx.graphics.FrameBufferSize;
-    Pos.XResolution = bootctx.graphics.HorizontalResolution;
-    Pos.YResolution = bootctx.graphics.VerticalResolution;
+    Pos.Phy_addr = (uint32_t *)bootctx->graphics.FrameBufferBase;
+    Pos.FB_length = bootctx->graphics.FrameBufferSize;
+    Pos.XResolution = bootctx->graphics.HorizontalResolution;
+    Pos.YResolution = bootctx->graphics.VerticalResolution;
     spin_init(&Pos.lock);
 
     arch_task_init_early();
@@ -156,13 +153,13 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     frame_buffer_early_init();
     boot_logo_show();                 // OS01 boot logo
 
-    pmm_init(bootinfo->E820_Info);      // physical page allocator
+    pmm_init(&bootctx->memory);             // physical page allocator
     vmm_init();                          // virtual memory (page tables)
     frame_buffer_init();                 // remap FB at VIRT_FRAMEBUFFER_OFFSET
     color_printk(GREEN, BLACK, "frame buffer remap succeed\n");
 
     // ═══ RSDP: 传递给 arch 子系统 ═══
-    arch_boot_rsdp = bootctx.firmware.acpi_rsdp;
+    arch_boot_rsdp = bootctx->firmware.acpi_rsdp;
 
     // ═══ 3-6. Subsystem framework ══════════════════════════════════
     // arch_register_subsys() + subsys_init_all() dispatches:
