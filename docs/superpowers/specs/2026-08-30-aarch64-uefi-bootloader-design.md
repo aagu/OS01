@@ -91,12 +91,14 @@ milestone.
 | kernel image/load window | beginning at `0x40080000` | ELF `PT_LOAD` segments |
 | boot handoff area | `0x401e0000..0x40200000` (128 KiB) | loader/kernel ABI |
 
-Before loading each segment, the loader reserves its page-aligned physical
-interval with UEFI `AllocatePages(AllocateAddress, ...)`.  It copies file
-bytes to `p_paddr` and zeroes `p_memsz - p_filesz`; no segment is loaded at its
-virtual address.  It reserves the handoff area separately before the final
-memory-map transaction.  Page-aligned segment intervals must neither overlap
-each other nor overlap the handoff area.
+Before loading each segment, the loader validates that its byte interval does
+not overlap another loadable segment, then merges page-aligned intervals and
+reserves each union interval once with UEFI `AllocatePages(AllocateAddress,
+...)`.  This permits byte-adjacent ELF segments that share a final 4 KiB page.
+It copies file bytes to `p_paddr` and zeroes `p_memsz - p_filesz`; no segment
+is loaded at its virtual address.  It reserves the handoff area separately
+before the final memory-map transaction.  No byte interval or merged page
+interval may overlap the handoff area.
 
 The loader accepts only a bounded, little-endian, 64-bit ELF with:
 
@@ -148,11 +150,13 @@ The context records:
   `ExitBootServices()`, the loader validates the FDT header and total size,
   copies its complete byte sequence into the handoff area, and stores the
   physical address of that copy in `firmware.dtb`.  It never passes the
-  firmware-owned allocation to the kernel.  If no FDT table is exposed or the
-  copy cannot fit, `firmware.dtb` is zero and the existing QEMU synthetic
-  fallback remains valid; and
+  firmware-owned allocation to the kernel.  If no valid FDT table is exposed,
+  `firmware.dtb` is zero and the existing QEMU synthetic fallback remains
+  valid.  A valid FDT that cannot fit is instead a fatal handoff-overflow
+  error, matching the fixed-capacity rule for the final memory map; and
 - the final UEFI memory-map byte sequence, stored after the context inside the
-  reserved handoff area, including its descriptor stride and map format.
+  reserved handoff area, including its descriptor stride, descriptor version,
+  and map format.
 
 The first implementation will add an explicit UEFI raw-map format identifier
 to `bootinfo.h`, instead of labelling UEFI descriptors as the existing generic

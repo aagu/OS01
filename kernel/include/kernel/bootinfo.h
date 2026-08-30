@@ -2,6 +2,7 @@
 #define _KERNEL_BOOTINFO_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 // All fields use fixed-size types (uint32_t, uint64_t) to ensure
 // identical layout regardless of data model (LP64 vs LLP64).
@@ -55,13 +56,15 @@ enum BOOT_MEMORY_FORMAT {
     BOOT_MEMORY_FORMAT_UNKNOWN = 0,
     BOOT_MEMORY_FORMAT_E820 = 1,
     BOOT_MEMORY_FORMAT_GENERIC = 2,
+    BOOT_MEMORY_FORMAT_UEFI_RAW = 3,
 };
 
 struct BOOT_MEMORY_MAP {
-    uint64_t entries;       /* physical address of generic entries */
+    uint64_t entries;       /* physical address of entries/descriptors */
     uint32_t entry_count;
     uint32_t entry_size;
     uint32_t format;
+    uint32_t descriptor_version; /* UEFI descriptor version, else zero */
 };
 
 struct BOOT_FIRMWARE {
@@ -70,6 +73,7 @@ struct BOOT_FIRMWARE {
 };
 
 struct boot_context {
+    uint32_t magic;
     uint32_t version;
     uint32_t size;
     uint32_t flags;
@@ -80,7 +84,8 @@ struct boot_context {
     uint64_t boot_cpu_id;
 };
 
-#define BOOT_CONTEXT_VERSION 1u
+#define BOOT_CONTEXT_MAGIC UINT32_C(0x4f533031)
+#define BOOT_CONTEXT_VERSION 2u
 
 /* Keep construction trivial and freestanding so early arch code need not
  * pull in libc or any generic kernel subsystem. */
@@ -90,8 +95,17 @@ static inline void boot_context_init(struct boot_context *ctx)
     uint32_t i;
     for (i = 0; i < (uint32_t)sizeof(*ctx); i++)
         p[i] = 0;
+    ctx->magic = BOOT_CONTEXT_MAGIC;
     ctx->version = BOOT_CONTEXT_VERSION;
     ctx->size = (uint32_t)sizeof(*ctx);
+}
+
+static inline bool boot_context_valid(const struct boot_context *ctx)
+{
+    return ctx != (const struct boot_context *)0 &&
+           ctx->magic == BOOT_CONTEXT_MAGIC &&
+           ctx->version == BOOT_CONTEXT_VERSION &&
+           ctx->size == (uint32_t)sizeof(*ctx);
 }
 
 static inline void boot_context_from_legacy(struct boot_context *ctx,

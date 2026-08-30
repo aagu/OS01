@@ -236,6 +236,13 @@ run: disk.img boot/uefi/OVMF.fd
 # (code hardcodes GICv2 MMIO), and bare-ELF x0=0 / DTB@0x40000000.
 AARCH64_QEMU ?= qemu-system-aarch64
 AARCH64_SMP  ?= 4
+AARCH64_BUILD_DIR := build/aarch64
+AARCH64_UEFI_APP := $(AARCH64_BUILD_DIR)/uefi/BOOTAA64.EFI
+AARCH64_UEFI_DISK := $(AARCH64_BUILD_DIR)/disk.img
+AARCH64_UEFI_FIRMWARE := $(AARCH64_BUILD_DIR)/QEMU_EFI.fd
+AARCH64_UEFI_FIRMWARE_SOURCE ?= /usr/share/edk2/aarch64/QEMU_EFI.fd
+AARCH64_KERNEL_ELF := $(AARCH64_BUILD_DIR)/kernel/kernel.elf
+AARCH64_HEAD_OBJECT := $(AARCH64_BUILD_DIR)/kernel/arch/aarch64/head.o
 
 .PHONY: run-aarch64
 run-aarch64:
@@ -244,6 +251,40 @@ run-aarch64:
 	  -smp $(AARCH64_SMP) -m $(MEMORY) \
 	  -kernel build/aarch64/kernel/kernel.elf \
 	  -display $(DISPLAY) -serial stdio -no-reboot
+
+.PHONY: aarch64-uefi
+aarch64-uefi: $(AARCH64_UEFI_DISK) $(AARCH64_UEFI_FIRMWARE)
+
+$(AARCH64_UEFI_APP): boot/uefi/aarch64/Makefile \
+		boot/uefi/aarch64/main.c boot/uefi/aarch64/elf.c \
+		boot/uefi/aarch64/handoff.S \
+		boot/uefi/aarch64/loader.h kernel/include/kernel/bootinfo.h
+	$(MAKE) -C boot/uefi/aarch64
+
+.PHONY: aarch64-uefi-kernel
+aarch64-uefi-kernel:
+	$(MAKE) -B -C kernel ARCH=aarch64
+
+$(AARCH64_UEFI_DISK): $(AARCH64_UEFI_APP) aarch64-uefi-kernel
+	@mkdir -p $(AARCH64_BUILD_DIR)
+	rm -f $@
+	truncate -s 64M $@
+	mkfs.fat -F 32 $@
+	mmd -i $@ ::/EFI ::/EFI/BOOT
+	mcopy -i $@ $(AARCH64_UEFI_APP) ::/EFI/BOOT/BOOTAA64.EFI
+	mcopy -i $@ $(AARCH64_KERNEL_ELF) ::/kernel.elf
+
+$(AARCH64_UEFI_FIRMWARE): $(AARCH64_UEFI_FIRMWARE_SOURCE)
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+.PHONY: run-aarch64-uefi
+run-aarch64-uefi: aarch64-uefi
+	$(AARCH64_QEMU) -M virt,gic-version=2 -cpu cortex-a53 -smp 1 -m $(MEMORY) \
+	  -drive if=pflash,format=raw,file=$(AARCH64_UEFI_FIRMWARE) \
+	  -drive if=none,file=$(AARCH64_UEFI_DISK),format=raw,id=disk \
+	  -device virtio-blk-device,drive=disk \
+	  -serial stdio -display none -no-reboot
 
 # Start the AArch64 phase-1 kernel paused with QEMU's GDB remote stub on
 # TCP port 1234.  This is consumed by .vscode/launch.json.

@@ -79,7 +79,7 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
 - [ ] **Step 2: Run the test red**
 
-  Run: `make -C test build/test_bootinfo_abi.elf`
+  Run: `make -C test "$(realpath -m test/build/test_bootinfo_abi.elf)"`
 
   Expected: compilation failure because the new constants, member, and
   validator do not yet exist.
@@ -93,7 +93,7 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
 - [ ] **Step 4: Run ABI and x86 regressions**
 
-  Run: `make -C test build/test_bootinfo_abi.elf build/test_pmm_basic.elf`
+  Run: `make -C test "$(realpath -m test/build/test_bootinfo_abi.elf)" "$(realpath -m test/build/test_pmm_basic.elf)"`
 
   Expected: both succeed.
 
@@ -127,7 +127,7 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
 - [ ] **Step 2: Run the test red**
 
-  Run: `make -C test build/test_aarch64_elf_loader.elf`
+  Run: `make -C test "$(realpath -m test/build/test_aarch64_elf_loader.elf)"`
 
   Expected: target/source missing.
 
@@ -141,7 +141,7 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
 - [ ] **Step 4: Run the helper tests**
 
-  Run: `make -C test build/test_aarch64_elf_loader.elf`
+  Run: `make -C test "$(realpath -m test/build/test_aarch64_elf_loader.elf)"`
 
   Expected: PASS.
 
@@ -244,15 +244,20 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 - [ ] **Step 3: Implement loading and copied handoff state**
 
   Read `\\kernel.elf`; call the Task-2 validator; reserve each page-rounded
-  `PT_LOAD` range with `AllocatePages(AllocateAddress, EfiLoaderData, ...)`;
-  copy to `p_paddr`; zero BSS; reject interval overlap.  Reserve exactly
+  `PT_LOAD` byte range with `AllocatePages(AllocateAddress, EfiLoaderData, ...)`;
+  reject byte-range overlap, but merge page-rounded intervals and allocate
+  each union once so byte-adjacent segments may share a page; copy to
+  `p_paddr`; zero BSS.  Reserve exactly
   `0x401e0000..0x40200000` before map collection.  Discover GOP and copy its
   fixed-width values.  Search configuration tables for the FDT GUID, validate
   big-endian FDT magic and `totalsize`, then copy the FDT into the handoff
-  region and store that copied physical address.
+  region and store that copied physical address.  A missing or invalid FDT
+  leaves the field zero for the synthetic fallback; a valid FDT that cannot
+  fit is a fatal `UEFI-A64: handoff overflow` error.
 
   Fill `boot_context` with magic/version/size, `BOOT_CONTEXT_HAS_BOOT_CPU_ID`,
-  optional framebuffer/FDT flags, and `BOOT_MEMORY_FORMAT_UEFI_RAW` metadata.
+  optional framebuffer/FDT flags, and `BOOT_MEMORY_FORMAT_UEFI_RAW` metadata,
+  including the UEFI descriptor stride and descriptor version.
   Call `boot_context_valid()` on the completed context before the EBS
   transaction; on failure emit `UEFI-A64: corrupt handoff` via PL011 and
   return an EFI error without jumping to the kernel.
@@ -318,7 +323,7 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
 - [ ] **Step 2: Run the test red**
 
-  Run: `make -C test build/test_bootinfo_abi.elf`
+  Run: `make -C test "$(realpath -m test/build/test_bootinfo_abi.elf)"`
 
   Expected: helper or new invalid-handoff assertions absent.
 
@@ -376,7 +381,7 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
 - [ ] **Step 4: Run full verification**
 
-  Run: `make test-aarch64-uefi-smoke && make -C kernel ARCH=aarch64 && make -C test build/test_bootinfo_abi.elf build/test_pmm_basic.elf && make boot/uefi/BOOTX64.EFI`
+  Run: `make test-aarch64-uefi-smoke && make -C kernel ARCH=aarch64 && make -C test "$(realpath -m test/build/test_bootinfo_abi.elf)" "$(realpath -m test/build/test_pmm_basic.elf)" && make boot/uefi/BOOTX64.EFI`
 
   Expected: all commands succeed; smoke log has marker/banner/tick and no SMP
   benchmark line.
