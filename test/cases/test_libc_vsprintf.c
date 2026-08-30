@@ -178,8 +178,9 @@ TEST_FUNC(test_sprintf_wrappers) {
     free(s);
 
     /* 5000-byte payload for the write_all paths */
-    char big[5000];
+    char big[5001];
     for (int i = 0; i < 5000; i++) big[i] = 'A';
+    big[5000] = '\0';
 
     shim_write_reset();
     n = printf("%s", big);
