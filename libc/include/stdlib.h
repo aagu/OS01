@@ -67,3 +67,4 @@ int rand(void);
 char *realpath(const char *path, char *resolved);
 void srand(unsigned int seed);
 double strtod(const char *nptr, char **endptr);
+double atof(const char *nptr);

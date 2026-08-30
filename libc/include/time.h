@@ -27,6 +27,7 @@ time_t mktime(struct tm *tm);
 clock_t clock(void);
 
 size_t strftime(char *s, size_t maxsize, const char *format, const struct tm *tm);
+char *strptime(const char *buf, const char *format, struct tm *tm);
 
 #endif
 struct tm *localtime_r(const time_t *t, struct tm *r);
