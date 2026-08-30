@@ -59,7 +59,12 @@ char *strsep(char **stringp, const char *delim)
     begin += strspn(begin, delim);
 
     if (*begin == '\0') {
-        *stringp = begin;
+        /* Token list exhausted: glibc/BSD strsep set *stringp to NULL so
+         * callers can tell the last token was consumed.  The previous code
+         * left it pointing at the empty string, which broke token parsers
+         * that test `if (ltok == NULL)` (e.g. busybox cut -fN turned into
+         * "-fN-" and printed fields N..end instead of just field N). */
+        *stringp = NULL;
         return NULL;
     }
 
@@ -69,7 +74,9 @@ char *strsep(char **stringp, const char *delim)
         *end = '\0';
         *stringp = end + 1;
     } else {
-        *stringp = end;
+        /* Token ran to the end of the string: exhaust the list (NULL,
+         * not a pointer to the empty string). */
+        *stringp = NULL;
     }
 
     return begin;
