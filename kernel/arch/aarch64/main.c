@@ -28,19 +28,39 @@
  * half `exception_vectors`, which entry.S populates with the actual
  * `bl el1_irq_dispatch; eret` sequence.
  *
- * Note on dtb_base: head.S does not propagate the original x0 (DTB
- * pointer) into aarch64_main — by the time it returns from
- * build_pagetables / write_tcr_mair_tttr the value has been
- * clobbered.  The DTB fallback in dtb_init() detects x0==0 (QEMU
- * bare-ELF `-kernel`) and re-reads from the known loader_start
- * 0x40000000.
+ * The ABI has two modes.  Normal direct boot retains the traditional
+ * x0 DTB-or-zero argument.  The AArch64 UEFI loader instead passes its
+ * validated boot_context at the reserved physical address 0x401e0000.
  */
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <kernel/bootinfo.h>
+
+#define AARCH64_UEFI_HANDOFF_ADDRESS UINT64_C(0x401e0000)
+
+enum aarch64_boot_mode {
+    AARCH64_BOOT_DIRECT_ZERO,
+    AARCH64_BOOT_DIRECT_FDT,
+    AARCH64_BOOT_UEFI,
+    AARCH64_BOOT_CORRUPT,
+};
+
+/* This function intentionally has no architectural instructions or boot
+ * context construction so the host ABI test can compile the real selector. */
+enum aarch64_boot_mode aarch64_select_boot_mode(
+    uint64_t x0, const struct boot_context *fixed_context)
+{
+    if (x0 != AARCH64_UEFI_HANDOFF_ADDRESS)
+        return x0 == 0 ? AARCH64_BOOT_DIRECT_ZERO : AARCH64_BOOT_DIRECT_FDT;
+    return boot_context_valid(fixed_context) ?
+        AARCH64_BOOT_UEFI : AARCH64_BOOT_CORRUPT;
+}
+
+#ifndef AARCH64_BOOT_MODE_HOST_TEST
+
 #include <kernel/arch/cpu.h>
 #include <kernel/arch/irq.h>          /* arch_local_irq_disable / enable */
-#include <kernel/bootinfo.h>
 
 /* Tiny helpers — libc/libk are NOT linked (LIBS := -nostdlib for
  * aarch64).  Just enough for our local use. */
@@ -80,14 +100,34 @@ extern uint8_t _bss_start[], _bss_end[];
 
 /* boot message per controller ruling R2 — keep it terse and unambiguous. */
 static const char banner[] = "OS01 aarch64 phase1 boot ok\n";
+static const char uefi_handoff_banner[] = "OS01 aarch64 uefi handoff ok\n";
+static const char corrupt_handoff_banner[] = "UEFI-A64: corrupt handoff\n";
 
-void aarch64_main(uint64_t dtb_base)
+void aarch64_main(const struct boot_context *handoff)
 {
-    struct boot_context bootctx;
+    struct boot_context scratch;
+    const struct boot_context *bootctx;
+    enum aarch64_boot_mode boot_mode;
     uint64_t boot_cpu_id;
 
+    boot_mode = aarch64_select_boot_mode((uint64_t)(uintptr_t)handoff,
+                                         handoff);
+    if (boot_mode == AARCH64_BOOT_CORRUPT) {
+        pl011_init();
+        kputs(corrupt_handoff_banner);
+        for (;;) {
+            arch_cpu_halt();
+        }
+    }
+
     __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(boot_cpu_id));
-    boot_context_from_aarch64(&bootctx, dtb_base, boot_cpu_id);
+    if (boot_mode == AARCH64_BOOT_UEFI) {
+        bootctx = handoff;
+    } else {
+        boot_context_from_aarch64(&scratch, (uint64_t)(uintptr_t)handoff,
+                                  boot_cpu_id);
+        bootctx = &scratch;
+    }
 
     /* Step 1: idempotent — a re-entry (early bring-up debugging)
      * shouldn't unmask IRQs by accident. */
@@ -112,10 +152,12 @@ void aarch64_main(uint64_t dtb_base)
      * failure conditions (CPU>NR_CPUS / duplicate MPIDR / BSP
      * MPIDR not in table).  If the DTB is missing or unparsable,
      * QEMU virt defaults are used. */
-    dtb_init(bootctx.firmware.dtb);
+    dtb_init(bootctx->firmware.dtb);
 
     /* Hello, world.  Printed after dtb_init so a DTB parse failure
      * produces a [dtb] PANIC line before the banner. */
+    if (boot_mode == AARCH64_BOOT_UEFI)
+        kputs(uefi_handoff_banner);
     kputs(banner);
 
     /* Step 5: GICv2.  Distributor + CPU interface, only PPI 30. */
@@ -131,15 +173,12 @@ void aarch64_main(uint64_t dtb_base)
         }
     }
 
-    /* Task 4b: SMP bring-up + 4-core benchmark.  Runs after the
-     * tick is configured (for any future timing observation) but
-     * before IRQs are unmasked.  Inside smp_boot_aps() the BSP
-     * release-stores `benchmark_go`, runs its own 1M iterations,
-     * release-stores `done[0]`, acquire-polls `done[1..3]`, and
-     * prints PASS/FAIL.  The deadline is arch_cycle_counter() —
-     * not the CNTP tick, which would not fire because IRQs are
-     * still masked. */
-    smp_boot_aps();
+    /* Direct boot runs Task 4b's SMP bring-up + 4-core benchmark after
+     * the tick is configured but before IRQs are unmasked.  The UEFI
+     * handoff deliberately remains single-BSP: its firmware started this
+     * CPU, while GIC, timer, and IRQ setup below stay unchanged. */
+    if (boot_mode != AARCH64_BOOT_UEFI)
+        smp_boot_aps();
 
     /* Step 8: ENABLE IRQs.  Per spec §2.3 this is the last init
      * step.  After this, the tick ISR fires every 10 ms and
@@ -169,3 +208,5 @@ static void aarch64_clear_bss(void)
 {
     aarch64_memset(_bss_start, 0, (uintptr_t)_bss_end - (uintptr_t)_bss_start);
 }
+
+#endif /* AARCH64_BOOT_MODE_HOST_TEST */

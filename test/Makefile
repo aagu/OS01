@@ -226,13 +226,20 @@ $(TEST_BLD)/poll_clocksource_stub.o: $(TEST_MOCK)/poll_clocksource_stub.c
 $(TEST_BLD)/test_libc_string.elf: $(TEST_BLD)/test_libc_string.o $(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^
 
-$(TEST_BLD)/test_bootinfo_abi.elf: $(TEST_BLD)/test_bootinfo_abi.o
+$(TEST_BLD)/test_bootinfo_abi.elf: $(TEST_BLD)/test_bootinfo_abi.o \
+		$(TEST_BLD)/aarch64_boot_mode.o
 	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/test_bootinfo_abi.o: $(TEST_CASES)/test_bootinfo_abi.c \
 		$(TESTS_DIR)/kernel/include/kernel/bootinfo.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) -I$(TESTS_DIR)/kernel/include -c $< -o $@
+
+$(TEST_BLD)/aarch64_boot_mode.o: $(TESTS_DIR)/kernel/arch/aarch64/main.c \
+		$(TESTS_DIR)/kernel/include/kernel/bootinfo.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -DAARCH64_BOOT_MODE_HOST_TEST \
+		-I$(TESTS_DIR)/kernel/include -c $< -o $@
 
 $(TEST_BLD)/test_libc_list.elf: $(TEST_BLD)/test_libc_list.o $(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^

@@ -2,7 +2,7 @@
  * MMU enable, jump to high-half C entry.
  *
  * Boot flow (spec §4, strict order):
- *   1.  save x0 (dtb_base) → x19
+ *   1.  save x0 (direct-boot DTB or fixed UEFI boot_context) → x19
  *   2.  EL2 → EL1 drop (only if CurrentEL==EL2)
  *   3.  msr daifset, #0xf     — mask DAIF
  *   4.  panic if MIDR_EL1 != Cortex-A53
@@ -166,7 +166,7 @@ boot_vectors:
 .balign 0x1000
 .globl _start
 _start:
-    /* 1. Park DTB into x19 (callee-saved across drop). */
+    /* 1. Park the entry handoff into x19 (callee-saved across drop). */
     mov     x19, x0
 
     /* 1a. CPU-id check.  With `-M virt,secure=on -smp 4` QEMU starts
@@ -301,7 +301,7 @@ _start:
     bl      setup_bsp_stack_and_tpidr
 
     /* 11. Absolute branch to aarch64_main (high-half).
-     *     x19 still holds the DTB base from _start; setup_* clobbered
+     *     x19 still holds the entry handoff from _start; setup_* clobbered
      *     x0, so restore it before the call. */
     mov     x0, x19
     ldr     x30, =aarch64_main
