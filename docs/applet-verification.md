@@ -18,8 +18,7 @@
 - ✅ **2026-08-30：B 类 9 个 applet 全部修复**（原 ⚠️ ~9 个 libc 缺口）：`realloc` 丢内容、`libgen` 桩、
   `strsep` 耗尽不置 NULL、`fclose` 哨兵崩溃、`fd_read` EOF 返回 -1 → pwd / dirname / tail -n / tac /
   cut / paste / expand / unexpand / nl 全部 QEMU 真机实测通过，systest 回归 **228/228**。tr 经复查本就正常（旧报告误报）。
-- ❌ 未编译 applet：`sort`（config 缺 CONFIG_SORT）、`[`（LEFTBRACKET 未启用）、`touch`（不在 config）、
-  `grep`（CONFIG_GREP 未设置，故 R1/R2 脚本里的 grep 判定为误报）
+- ❌ 未编译 applet：`touch`（需文件时间戳）、`grep`（需 POSIX regex）——见 C 级 / Tier 2；`sort` 与 `[` 已于 2026-08-30 启用（见 C 级）。
 - ✅ **user-fault 崩溃已修复**：`nl` 崩溃根因是 `fclose(stdin)` 解引用哨兵 `(FILE*)1`，见 §2026-08-30 修复记录。
 
 ## 验证结果分级
@@ -71,14 +70,16 @@
 | nl | 缩进有、内容缺 + **user-fault 崩溃** | realloc 丢内容（缩进有内容缺）+ `fclose(stdin)` 解引用哨兵 `(FILE*)1` 崩溃 | `realloc` + `fclose` |
 | tr | （报告误报） | 实测 `tr a x` → `xbc`、`tr '\n' ','` → `1,2,` 均正常，无需修复 | — |
 
-### ❌ C 级 — 未编译 / 未配置（4 个）
+### C 级 — 未编译 / 未配置（4 个，2026-08-30 启用 2 个）
 
 | applet | 状态 |
 |--------|------|
-| sort | config 只有 `FEATURE_SORT_BIG`，缺 `CONFIG_SORT` → applet not found (rc=127) |
-| [ | `LEFTBRACKET` 未启用（ash 无内置 test，`[` 需外部 applet） |
-| touch | 不在 config（chmod 测试因此无法完整验证） |
-| grep | `CONFIG_GREP` 未设置 → R1/R2 脚本里依赖 `grep` 的判定为误报（RAW 输出本身仍可信）|
+| sort | ✅ 已启用（`CONFIG_SORT=y`；编译需 `atof`/`strverscmp`/`strptime`，已补入 libc）。实测 `sort`/`-u`/`-n`/`-V`（版本排序）/`-M`（月份排序）全部正确 |
+| [ | ✅ 已启用（`CONFIG_TEST1`/`CONFIG_TEST2=y`；本版 busybox 的 `[` 符号是 TEST1 而非 LEFTBRACKET）。实测 `[ ]`/`[[ ]]` 及 shell 脚本内 `if [ ... ]` 判断全部正常 |
+| touch | ❌ 未启用（Tier 2）：需 `utimensat`/`futimens` + 内核 mtime 支持（连 `utimes()` 都是 ENOSYS 桩）|
+| grep | ❌ 未启用（Tier 2）：需真实 POSIX regex（`regcomp`/`regexec` 现为恒返回 0 的桩 → grep 会匹配每一行）|
+
+> Tier 2（touch/grep）属 P5 ABI「libc 完整性」：文件时间戳族 + POSIX 正则引擎，需独立设计实现。
 
 ### 💥 崩溃（内核 user-fault 杀任务）
 
@@ -121,6 +122,16 @@ B 类 9 个 applet 的根因集中在一个核心缺陷（realloc）+ 三个独�
 验证：QEMU 真机（`-smp 1` + `-display gtk`）复测 pwd=/、dirname=/a/b、tail -n 2=b\nc、tac=c\nb\na、
 cut=b、paste=a,b、expand/unexpand/nl 正常、nl 300 字符长行不崩溃、tr=xbc；systest **228/228** 零回归。
 测试程序（realloc_test/eof_test）已清理，环境已还原。
+
+### C 级 Tier 1（2026-08-30 同日）：启用 sort 与 `[`
+
+- `config/busybox.config`：`CONFIG_SORT=y`、`CONFIG_TEST1=y`（`[`）、`CONFIG_TEST2=y`（`[[`）
+- sort 编译需要三个缺失的 libc 函数，已补实现：
+  - `atof`（`libc/stdlib/strtod.c`，strtod 薄封装）
+  - `strverscmp`（`libc/string/strverscmp.c`，版本号比较，sort -V）
+  - `strptime`（`libc/time/strptime.c`，日期解析，sort -M 的 %b）
+- `Makefile`：fsroot 增加 `sort` 符号链接
+- 实测：`[ 1 -eq 1 ]`/`[[ abc == abc ]]`/shell 脚本 `if [ ... ]` 全通；`sort`/`-u`/`-n`/`-V`（v1.2<v1.9<v1.10）/`-M`（Jan<Mar<Dec）全对；systest **228/228** 零回归
 
 ## 验证脚本
 
