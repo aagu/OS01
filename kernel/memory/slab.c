@@ -222,6 +222,31 @@ void * kmalloc(size_t size)
 	return NULL;
 }
 
+size_t ksize(void * address)
+{
+    if (!address) return 0;
+
+    uint32_t i;
+    struct Slab * slab = NULL;
+    void * page_base_address = (void *)((uint64_t)address & PAGE_2M_MASK);
+
+    /* Read-only size query: find which cache owns the object and return
+     * the cache's object size (an upper bound on the requested size).
+     * Same iteration as kfree(), minus the free.  Used by libk realloc. */
+    for (i = 0;i < 16; i++)
+    {
+        slab = kmalloc_cache_size[i].cache_pool;
+        if (!slab) continue;
+        do
+        {
+            if (slab->address == page_base_address)
+                return kmalloc_cache_size[i].size;
+            slab = container_of(list_next(&slab->list), struct Slab, list);
+        } while (slab != kmalloc_cache_size[i].cache_pool);
+    }
+    return 0;
+}
+
 size_t kfree(void * address)
 {
     if (!address) return 0;

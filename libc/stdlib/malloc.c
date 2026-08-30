@@ -208,11 +208,23 @@ void *realloc(void *ptr, size_t size) {
     if (size == 0) { free(ptr); return NULL; }
     void *new = malloc(size);
     if (!new) return NULL;
-    /* Copy old data (up to min(old_size, new_size)) */
-    size_t old_size = ((size_t*)ptr)[-1];
-    size_t copy = old_size < size ? old_size : size;
-    for (size_t i = 0; i < copy; i++)
-        ((unsigned char*)new)[i] = ((unsigned char*)ptr)[i];
+#if defined(__is_libk)
+    /* Kernel slab allocator: no user-visible size header.  ksize() returns
+     * the slab object size (an upper bound on the original request). */
+    extern size_t ksize(void *);
+    size_t old_usable = ksize(ptr);
+#else
+    /* Copy old data (up to min(old_usable, new_size)).
+     * The size header sits HEADER_SIZE bytes before the user pointer.
+     * The previous code read ((size_t*)ptr)[-1] — that is the is_free
+     * flag + padding (0 for an allocated block) — so copy was always 0
+     * and every realloc silently dropped the block contents (pwd, tail,
+     * cut/paste/tac/expand/nl all read empty/zeroed buffers). */
+    block_header_t *hdr = (block_header_t *)((uint8_t *)ptr - HEADER_SIZE);
+    size_t old_usable = hdr->size - HEADER_SIZE;
+#endif
+    size_t copy = old_usable < size ? old_usable : size;
+    memcpy(new, ptr, copy);
     free(ptr);
     return new;
 }
