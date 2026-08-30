@@ -16,6 +16,12 @@ _Static_assert(offsetof(struct BOOT_INFO, E820_Info) == 32,
 _Static_assert(offsetof(struct BOOT_INFO, RSDP) == 48,
                "legacy rsdp offset");
 _Static_assert(sizeof(struct BOOT_INFO) == 64, "legacy boot ABI");
+_Static_assert(offsetof(struct boot_context, magic) == 0,
+               "magic leading offset");
+_Static_assert(offsetof(struct boot_context, version) == 4,
+               "version leading offset");
+_Static_assert(offsetof(struct boot_context, size) == 8,
+               "size leading offset");
 _Static_assert(offsetof(struct boot_context, graphics) == 24,
                "graphics offset");
 _Static_assert(offsetof(struct boot_context, memory) == 56,
