@@ -58,7 +58,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_terminal_core.elf \
     $(TEST_BLD)/test_tetris_logic.elf \
     $(TEST_BLD)/test_sync_primitives.elf \
-    $(TEST_BLD)/test_poll_requested.elf
+    $(TEST_BLD)/test_poll_requested.elf \
+    $(TEST_BLD)/test_bootinfo_abi.elf
 
 .PHONY: all clean run
 
@@ -223,6 +224,13 @@ $(TEST_BLD)/poll_clocksource_stub.o: $(TEST_MOCK)/poll_clocksource_stub.c
 # Link rules
 $(TEST_BLD)/test_libc_string.elf: $(TEST_BLD)/test_libc_string.o $(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^
+
+$(TEST_BLD)/test_bootinfo_abi.elf: $(TEST_BLD)/test_bootinfo_abi.o
+	$(HOST_CC) -o $@ $^
+
+$(TEST_BLD)/test_bootinfo_abi.o: $(TEST_CASES)/test_bootinfo_abi.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TESTS_DIR)/kernel/include -c $< -o $@
 
 $(TEST_BLD)/test_libc_list.elf: $(TEST_BLD)/test_libc_list.o $(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^

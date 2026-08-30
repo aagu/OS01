@@ -1,0 +1,46 @@
+#include <stddef.h>
+#include <stdio.h>
+#include <kernel/bootinfo.h>
+
+_Static_assert(BOOT_CONTEXT_VERSION == 1u, "boot context version");
+_Static_assert(sizeof(struct BOOT_MEMORY_MAP) == 24, "memory map ABI");
+_Static_assert(sizeof(struct BOOT_FIRMWARE) == 16, "firmware ABI");
+_Static_assert(offsetof(struct BOOT_INFO, Graphics_Info) == 0,
+               "legacy graphics offset");
+_Static_assert(offsetof(struct BOOT_INFO, E820_Info) == 32,
+               "legacy memory offset");
+_Static_assert(offsetof(struct BOOT_INFO, RSDP) == 48,
+               "legacy rsdp offset");
+_Static_assert(sizeof(struct BOOT_INFO) == 64, "legacy boot ABI");
+_Static_assert(offsetof(struct boot_context, graphics) == 16,
+               "graphics offset");
+_Static_assert(offsetof(struct boot_context, memory) == 48,
+               "memory offset");
+_Static_assert(offsetof(struct boot_context, firmware) == 72,
+               "firmware offset");
+_Static_assert(sizeof(struct boot_context) == 96, "boot context ABI");
+
+int main(void)
+{
+    struct boot_context ctx;
+    struct BOOT_INFO legacy = { 0 };
+
+    legacy.E820_Info.E820_Entry = 0x200000;
+    legacy.E820_Info.E820_Entry_count = 2;
+    legacy.RSDP = 0x12340000;
+    boot_context_from_legacy(&ctx, &legacy);
+    if (ctx.version != BOOT_CONTEXT_VERSION ||
+        ctx.size != sizeof(ctx) || ctx.firmware.acpi_rsdp != legacy.RSDP ||
+        ctx.memory.format != BOOT_MEMORY_FORMAT_E820 ||
+        !(ctx.flags & BOOT_CONTEXT_HAS_ACPI) ||
+        (ctx.flags & BOOT_CONTEXT_HAS_BOOT_CPU_ID))
+        return 1;
+
+    boot_context_from_aarch64(&ctx, 0x40000000, 7);
+    if (ctx.firmware.dtb != 0x40000000 || ctx.boot_cpu_id != 7 ||
+        !(ctx.flags & BOOT_CONTEXT_HAS_DTB) ||
+        !(ctx.flags & BOOT_CONTEXT_HAS_BOOT_CPU_ID))
+        return 1;
+    puts("bootinfo ABI: PASS");
+    return 0;
+}

@@ -40,6 +40,7 @@
 #include <stdbool.h>
 #include <kernel/arch/cpu.h>
 #include <kernel/arch/irq.h>          /* arch_local_irq_disable / enable */
+#include <kernel/bootinfo.h>
 
 /* Tiny helpers — libc/libk are NOT linked (LIBS := -nostdlib for
  * aarch64).  Just enough for our local use. */
@@ -82,6 +83,12 @@ static const char banner[] = "OS01 aarch64 phase1 boot ok\n";
 
 void aarch64_main(uint64_t dtb_base)
 {
+    struct boot_context bootctx;
+    uint64_t boot_cpu_id;
+
+    __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(boot_cpu_id));
+    boot_context_from_aarch64(&bootctx, dtb_base, boot_cpu_id);
+
     /* Step 1: idempotent — a re-entry (early bring-up debugging)
      * shouldn't unmask IRQs by accident. */
     arch_local_irq_disable();
@@ -105,7 +112,7 @@ void aarch64_main(uint64_t dtb_base)
      * failure conditions (CPU>NR_CPUS / duplicate MPIDR / BSP
      * MPIDR not in table).  If the DTB is missing or unparsable,
      * QEMU virt defaults are used. */
-    dtb_init(dtb_base);
+    dtb_init(bootctx.firmware.dtb);
 
     /* Hello, world.  Printed after dtb_init so a DTB parse failure
      * produces a [dtb] PANIC line before the banner. */

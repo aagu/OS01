@@ -123,11 +123,14 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     // ═══ 0. Stack canary — MUST be the first statement ════════
     __stack_chk_guard = arch_cycle_counter() ^ 0xDEADBEEFCAFEBABE;
 
+    struct boot_context bootctx;
+    boot_context_from_legacy(&bootctx, bootinfo);
+
     // ═══ 1. CPU + interrupt infrastructure ═══════════════════
-    Pos.Phy_addr = (uint32_t *)bootinfo->Graphics_Info.FrameBufferBase;
-    Pos.FB_length = bootinfo->Graphics_Info.FrameBufferSize;
-    Pos.XResolution = bootinfo->Graphics_Info.HorizontalResolution;
-    Pos.YResolution = bootinfo->Graphics_Info.VerticalResolution;
+    Pos.Phy_addr = (uint32_t *)bootctx.graphics.FrameBufferBase;
+    Pos.FB_length = bootctx.graphics.FrameBufferSize;
+    Pos.XResolution = bootctx.graphics.HorizontalResolution;
+    Pos.YResolution = bootctx.graphics.VerticalResolution;
     spin_init(&Pos.lock);
 
     arch_task_init_early();
@@ -159,7 +162,7 @@ int kernel_main(struct BOOT_INFO *bootinfo)
     color_printk(GREEN, BLACK, "frame buffer remap succeed\n");
 
     // ═══ RSDP: 传递给 arch 子系统 ═══
-    arch_boot_rsdp = bootinfo->RSDP;
+    arch_boot_rsdp = bootctx.firmware.acpi_rsdp;
 
     // ═══ 3-6. Subsystem framework ══════════════════════════════════
     // arch_register_subsys() + subsys_init_all() dispatches:
