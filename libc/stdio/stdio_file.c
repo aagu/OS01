@@ -39,6 +39,11 @@ void *fdopen(int fd, const char *mode)
 int fclose(void *f)
 {
     if (!f) return -1;
+    /* stdin/stdout/stderr are sentinel values (1/2/3), not mini_file_t.
+     * fwrite() special-cases them but fclose() did not — closing stdin
+     * dereferenced address 1 and user-faulted (busybox nl crash). */
+    if (f == stdin || f == stdout || f == stderr)
+        return 0;
     mini_file_t *mf = (mini_file_t *)f;
     close(mf->fd);
     free(mf);
