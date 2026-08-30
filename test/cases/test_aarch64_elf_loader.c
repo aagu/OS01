@@ -131,11 +131,81 @@ static int test_same_page_intervals(void)
            first_start != 0x40081000 || first_pages != 1;
 }
 
+static int test_empty_load_interval(void)
+{
+    uint64_t start;
+    uint64_t pages;
+
+    if (aarch64_page_interval(0x40081001, 0, &start, &pages) != 0)
+        return 1;
+    return start != 0x40081000 || pages != 0;
+}
+
+static int test_overlapping_load_intervals(void)
+{
+    union elf_image image;
+    struct aarch64_elf64_ehdr *ehdr =
+        (struct aarch64_elf64_ehdr *)image.bytes;
+    struct aarch64_elf64_phdr *phdr =
+        (struct aarch64_elf64_phdr *)(image.bytes + 64);
+    uint64_t entry;
+
+    make_valid_image(&image);
+    ehdr->e_phnum = 2;
+    phdr[1].p_type = AARCH64_PT_LOAD;
+    phdr[1].p_offset = 256;
+    phdr[1].p_paddr = AARCH64_KERNEL_ENTRY + 0x800;
+    phdr[1].p_filesz = 1;
+    phdr[1].p_memsz = 0x1000;
+
+    return aarch64_elf_validate(image.bytes, sizeof(image.bytes), &entry) !=
+           AARCH64_ELF_ERR_RANGE;
+}
+
+static int test_byte_disjoint_segments_may_share_page(void)
+{
+    union elf_image image;
+    struct aarch64_elf64_ehdr *ehdr =
+        (struct aarch64_elf64_ehdr *)image.bytes;
+    struct aarch64_elf64_phdr *phdr =
+        (struct aarch64_elf64_phdr *)(image.bytes + 64);
+    uint64_t entry;
+
+    make_valid_image(&image);
+    ehdr->e_phnum = 2;
+    phdr[0].p_memsz = 0x1759;
+    phdr[1].p_type = AARCH64_PT_LOAD;
+    phdr[1].p_offset = 256;
+    phdr[1].p_paddr = AARCH64_KERNEL_ENTRY + 0x1759;
+    phdr[1].p_filesz = 0;
+    phdr[1].p_memsz = 0xc0;
+
+    return aarch64_elf_validate(image.bytes, sizeof(image.bytes), &entry) != 0;
+}
+
+static int test_entry_must_be_in_load_interval(void)
+{
+    union elf_image image;
+    struct aarch64_elf64_phdr *phdr =
+        (struct aarch64_elf64_phdr *)(image.bytes + 64);
+    uint64_t entry;
+
+    make_valid_image(&image);
+    phdr->p_paddr = AARCH64_KERNEL_ENTRY + 0x1000;
+
+    return aarch64_elf_validate(image.bytes, sizeof(image.bytes), &entry) !=
+           AARCH64_ELF_ERR_ENTRY;
+}
+
 int main(void)
 {
     if (test_valid_image() || test_malformed_header() || test_bad_entry() ||
         test_invalid_segment_sizes() || test_program_header_table_overflow() ||
-        test_segment_file_range() || test_same_page_intervals())
+        test_segment_file_range() || test_same_page_intervals() ||
+        test_empty_load_interval() ||
+        test_overlapping_load_intervals() ||
+        test_byte_disjoint_segments_may_share_page() ||
+        test_entry_must_be_in_load_interval())
         return 1;
 
     puts("aarch64 ELF loader: PASS");

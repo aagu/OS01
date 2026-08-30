@@ -254,6 +254,7 @@ aarch64-uefi: $(AARCH64_UEFI_DISK) $(AARCH64_UEFI_FIRMWARE)
 
 $(AARCH64_UEFI_APP): boot/uefi/aarch64/Makefile \
 		boot/uefi/aarch64/main.c boot/uefi/aarch64/elf.c \
+		boot/uefi/aarch64/handoff.S \
 		boot/uefi/aarch64/loader.h
 	$(MAKE) -C boot/uefi/aarch64
 
@@ -286,6 +287,10 @@ check-aarch64-uefi-artifacts: aarch64-uefi
 	file build/aarch64/uefi/BOOTAA64.EFI | grep 'PE32+.*ARM64'
 	mdir -i build/aarch64/disk.img ::/EFI/BOOT | grep BOOTAA64.EFI
 	mdir -b -i build/aarch64/disk.img :: | grep kernel.elf
+
+.PHONY: test-aarch64-uefi-negative
+test-aarch64-uefi-negative:
+	$(MAKE) -C boot/uefi/aarch64 test-negative
 
 # Start the AArch64 phase-1 kernel paused with QEMU's GDB remote stub on
 # TCP port 1234.  This is consumed by .vscode/launch.json.

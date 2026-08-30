@@ -91,12 +91,14 @@ milestone.
 | kernel image/load window | beginning at `0x40080000` | ELF `PT_LOAD` segments |
 | boot handoff area | `0x401e0000..0x40200000` (128 KiB) | loader/kernel ABI |
 
-Before loading each segment, the loader reserves its page-aligned physical
-interval with UEFI `AllocatePages(AllocateAddress, ...)`.  It copies file
-bytes to `p_paddr` and zeroes `p_memsz - p_filesz`; no segment is loaded at its
-virtual address.  It reserves the handoff area separately before the final
-memory-map transaction.  Page-aligned segment intervals must neither overlap
-each other nor overlap the handoff area.
+Before loading each segment, the loader validates that its byte interval does
+not overlap another loadable segment, then merges page-aligned intervals and
+reserves each union interval once with UEFI `AllocatePages(AllocateAddress,
+...)`.  This permits byte-adjacent ELF segments that share a final 4 KiB page.
+It copies file bytes to `p_paddr` and zeroes `p_memsz - p_filesz`; no segment
+is loaded at its virtual address.  It reserves the handoff area separately
+before the final memory-map transaction.  No byte interval or merged page
+interval may overlap the handoff area.
 
 The loader accepts only a bounded, little-endian, 64-bit ELF with:
 

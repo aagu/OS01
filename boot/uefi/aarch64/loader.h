@@ -69,6 +69,8 @@ _Static_assert(sizeof(struct aarch64_elf64_phdr) == 56,
 
 int aarch64_elf_validate(const void *image, uint64_t image_size,
                          uint64_t *entry_out);
+/* Page intervals are allocation units.  Valid byte-disjoint PT_LOAD records
+ * may share one and are coalesced by the UEFI loading transaction. */
 int aarch64_page_interval(uint64_t paddr, uint64_t memsz,
                           uint64_t *start_out, uint64_t *pages_out);
 

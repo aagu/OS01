@@ -244,8 +244,10 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 - [ ] **Step 3: Implement loading and copied handoff state**
 
   Read `\\kernel.elf`; call the Task-2 validator; reserve each page-rounded
-  `PT_LOAD` range with `AllocatePages(AllocateAddress, EfiLoaderData, ...)`;
-  copy to `p_paddr`; zero BSS; reject interval overlap.  Reserve exactly
+  `PT_LOAD` byte range with `AllocatePages(AllocateAddress, EfiLoaderData, ...)`;
+  reject byte-range overlap, but merge page-rounded intervals and allocate
+  each union once so byte-adjacent segments may share a page; copy to
+  `p_paddr`; zero BSS.  Reserve exactly
   `0x401e0000..0x40200000` before map collection.  Discover GOP and copy its
   fixed-width values.  Search configuration tables for the FDT GUID, validate
   big-endian FDT magic and `totalsize`, then copy the FDT into the handoff

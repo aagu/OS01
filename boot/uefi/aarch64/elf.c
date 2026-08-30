@@ -28,6 +28,12 @@ int aarch64_page_interval(uint64_t paddr, uint64_t memsz,
     if (!start_out || !pages_out)
         return AARCH64_ELF_ERR_HEADER;
 
+    *start_out = paddr & ~AARCH64_PAGE_MASK;
+    if (memsz == 0) {
+        *pages_out = 0;
+        return 0;
+    }
+
     rc = checked_add(paddr, memsz, &end);
     if (rc)
         return rc;
@@ -35,7 +41,6 @@ int aarch64_page_interval(uint64_t paddr, uint64_t memsz,
     if (rc)
         return rc;
 
-    *start_out = paddr & ~AARCH64_PAGE_MASK;
     rounded_end &= ~AARCH64_PAGE_MASK;
     if (rounded_end > AARCH64_HANDOFF_BASE)
         return AARCH64_ELF_ERR_RANGE;
@@ -51,6 +56,7 @@ int aarch64_elf_validate(const void *image, uint64_t image_size,
     const struct aarch64_elf64_ehdr *ehdr;
     uint64_t phdr_bytes;
     uint64_t phdr_end;
+    int entry_is_loaded = 0;
     uint16_t index;
     int rc;
 
@@ -89,8 +95,10 @@ int aarch64_elf_validate(const void *image, uint64_t image_size,
             (const struct aarch64_elf64_phdr *)
             (bytes + ehdr->e_phoff + (uint64_t)index * ehdr->e_phentsize);
         uint64_t file_end;
+        uint64_t load_end;
         uint64_t interval_start;
         uint64_t interval_pages;
+        uint16_t previous;
 
         if (phdr->p_type != AARCH64_PT_LOAD)
             continue;
@@ -107,7 +115,40 @@ int aarch64_elf_validate(const void *image, uint64_t image_size,
                                    &interval_start, &interval_pages);
         if (rc)
             return rc;
+
+        rc = checked_add(phdr->p_paddr, phdr->p_memsz, &load_end);
+        if (rc)
+            return rc;
+
+        if (phdr->p_memsz != 0 &&
+            ehdr->e_entry >= phdr->p_paddr &&
+            ehdr->e_entry - phdr->p_paddr < phdr->p_memsz)
+            entry_is_loaded = 1;
+
+        if (phdr->p_memsz == 0)
+            continue;
+        for (previous = 0; previous < index; previous++) {
+            const struct aarch64_elf64_phdr *other =
+                (const struct aarch64_elf64_phdr *)
+                (bytes + ehdr->e_phoff +
+                 (uint64_t)previous * ehdr->e_phentsize);
+            uint64_t other_end;
+
+            if (other->p_type != AARCH64_PT_LOAD)
+                continue;
+            if (other->p_memsz == 0)
+                continue;
+            rc = checked_add(other->p_paddr, other->p_memsz, &other_end);
+            if (rc)
+                return rc;
+            /* Adjacent byte ranges may share a rounded allocation page. */
+            if (phdr->p_paddr < other_end && other->p_paddr < load_end)
+                return AARCH64_ELF_ERR_RANGE;
+        }
     }
+
+    if (!entry_is_loaded)
+        return AARCH64_ELF_ERR_ENTRY;
 
     *entry_out = ehdr->e_entry;
     return 0;
