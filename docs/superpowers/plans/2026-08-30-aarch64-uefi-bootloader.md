@@ -46,13 +46,13 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 | File | Responsibility |
 |---|---|
 | `kernel/include/kernel/bootinfo.h` | v2 boot-context magic and raw-UEFI map format |
-| `tests/test_bootinfo_abi.c` | fixed-size ABI and constructor tests |
+| `test/cases/test_bootinfo_abi.c` | fixed-size ABI and constructor tests |
 | `boot/uefi/aarch64/loader.h` | fixed addresses, ELF/FDT limits, loader-only declarations |
 | `boot/uefi/aarch64/elf.c` | bounded ELF validation, page interval computation, segment load |
 | `boot/uefi/aarch64/main.c` | UEFI protocols, FDT/GOP/map handoff, EBS transaction |
 | `boot/uefi/aarch64/handoff.S` | physical MMU/TLB teardown and kernel branch |
 | `boot/uefi/aarch64/Makefile` | isolated ARM64 posix-uefi wrapper |
-| `tests/test_aarch64_elf_loader.c` | host tests for overflow, ELF and interval helpers |
+| `test/cases/test_aarch64_elf_loader.c` | host tests for overflow, ELF and interval helpers |
 | `kernel/arch/aarch64/main.c` | dual-mode context validation and UEFI single-BSP policy |
 | `Makefile` | ARM64 ESP, AAVMF copy, `run-aarch64-uefi` target |
 
@@ -60,8 +60,8 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
 **Files:**
 - Modify: `kernel/include/kernel/bootinfo.h`
-- Modify: `tests/test_bootinfo_abi.c`
-- Modify: `tests/Makefile`
+- Modify: `test/cases/test_bootinfo_abi.c`
+- Modify: `test/Makefile`
 
 **Interfaces:**
 - Produces `#define BOOT_CONTEXT_MAGIC UINT32_C(0x4f533031)`,
@@ -79,7 +79,7 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
 - [ ] **Step 2: Run the test red**
 
-  Run: `make -C tests test_bootinfo_abi`
+  Run: `make -C test build/test_bootinfo_abi.elf`
 
   Expected: compilation failure because the new constants, member, and
   validator do not yet exist.
@@ -93,21 +93,21 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
 - [ ] **Step 4: Run ABI and x86 regressions**
 
-  Run: `make -C tests test_bootinfo_abi && make -C tests test_pmm`
+  Run: `make -C test build/test_bootinfo_abi.elf build/test_pmm_basic.elf`
 
   Expected: both succeed.
 
 - [ ] **Step 5: Commit**
 
-  Run: `git add kernel/include/kernel/bootinfo.h tests/test_bootinfo_abi.c tests/Makefile && git commit -m "boot: version boot context handoff ABI"`
+  Run: `git add kernel/include/kernel/bootinfo.h test/cases/test_bootinfo_abi.c test/Makefile && git commit -m "boot: version boot context handoff ABI"`
 
 ### Task 2: Create testable fixed-address ELF helpers
 
 **Files:**
 - Create: `boot/uefi/aarch64/loader.h`
 - Create: `boot/uefi/aarch64/elf.c`
-- Create: `tests/test_aarch64_elf_loader.c`
-- Modify: `tests/Makefile`
+- Create: `test/cases/test_aarch64_elf_loader.c`
+- Modify: `test/Makefile`
 
 **Interfaces:**
 - Produces `int aarch64_elf_validate(const void *image, uint64_t image_size,
@@ -127,7 +127,7 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
 - [ ] **Step 2: Run the test red**
 
-  Run: `make -C tests test_aarch64_elf_loader`
+  Run: `make -C test build/test_aarch64_elf_loader.elf`
 
   Expected: target/source missing.
 
@@ -141,13 +141,13 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
 - [ ] **Step 4: Run the helper tests**
 
-  Run: `make -C tests test_aarch64_elf_loader`
+  Run: `make -C test build/test_aarch64_elf_loader.elf`
 
   Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
-  Run: `git add boot/uefi/aarch64/loader.h boot/uefi/aarch64/elf.c tests/test_aarch64_elf_loader.c tests/Makefile && git commit -m "boot: validate aarch64 kernel elf ranges"`
+  Run: `git add boot/uefi/aarch64/loader.h boot/uefi/aarch64/elf.c test/cases/test_aarch64_elf_loader.c test/Makefile && git commit -m "boot: validate aarch64 kernel elf ranges"`
 
 ### Task 3: Build an isolated ARM64 EFI application and ESP
 
@@ -182,9 +182,24 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
   In `boot/uefi/aarch64/Makefile`, copy only the posix-uefi runtime into
   `build/aarch64/uefi-runtime` and invoke its Makefile there with
-  `ARCH=aarch64`, `TARGET=BOOTAA64.EFI`, and an AArch64-only output directory.
-  Delete/recreate that private directory before each ARM64 build; do not run
-  `clean` in `boot/uefi/uefi` and do not write into `thirdpart/posix-uefi`.
+  `ARCH=aarch64`, `TARGET=BOOTAA64.EFI`, an AArch64-only output directory, and
+  an explicit source list:
+
+  ```makefile
+  SRCS := $(abspath boot/uefi/aarch64/main.c) \
+          $(abspath boot/uefi/aarch64/elf.c) \
+          $(abspath boot/uefi/aarch64/handoff.S)
+  $(MAKE) -C build/aarch64/uefi-runtime ARCH=aarch64 TARGET=BOOTAA64.EFI \
+      OUTDIR=$(abspath build/aarch64/uefi) SRCS="$(SRCS)"
+  ```
+
+  This is required because the runtime Makefile otherwise derives `SRCS` from
+  its own current working directory.  Do not override `OBJS`: it is derived
+  from the explicit `SRCS`.  `OUTDIR` isolates application objects and the EFI
+  image only; its `uefi/*.o`, `crt_aarch64.o`, and `libuefi.a` remain in the
+  private runtime tree by design.  Delete/recreate that private directory
+  before each ARM64 build; do not run `clean` in `boot/uefi/uefi` and do not
+  write into `thirdpart/posix-uefi`.
   In the root Makefile create a FAT image, make `EFI/BOOT`, copy the EFI app
   as `BOOTAA64.EFI`, copy `build/aarch64/kernel/kernel.elf` as `kernel.elf`,
   and copy the host combined firmware into `build/aarch64/QEMU_EFI.fd`.
@@ -238,6 +253,9 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
   Fill `boot_context` with magic/version/size, `BOOT_CONTEXT_HAS_BOOT_CPU_ID`,
   optional framebuffer/FDT flags, and `BOOT_MEMORY_FORMAT_UEFI_RAW` metadata.
+  Call `boot_context_valid()` on the completed context before the EBS
+  transaction; on failure emit `UEFI-A64: corrupt handoff` via PL011 and
+  return an EFI error without jumping to the kernel.
   Obtain the final map directly into remaining handoff storage.  Make no
   allocations, protocol calls, filesystem operations, or output between final
   `GetMemoryMap` and `ExitBootServices`; retry invalid map keys and recheck
@@ -276,17 +294,31 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 - Produces PL011 marker `OS01 aarch64 uefi handoff ok\n` and preserves direct
   boot behavior.
 
-- [ ] **Step 1: Add a kernel-side invalid-handoff test hook**
+- [ ] **Step 1: Add a host-testable mode selector**
 
-  Add a build-only/unit-testable helper `aarch64_select_boot_context(uint64_t
-  x0, struct boot_context *scratch, const struct boot_context **out)` with
-  cases: zero direct boot, nonzero direct FDT, valid fixed handoff, and fixed
-  handoff with invalid magic.  The final case returns an error consumed by a
-  PL011 diagnostic-and-halt path.
+  Add a helper which performs no `mrs` and no context construction:
+
+  ```c
+  enum aarch64_boot_mode {
+      AARCH64_BOOT_DIRECT_ZERO,
+      AARCH64_BOOT_DIRECT_FDT,
+      AARCH64_BOOT_UEFI,
+      AARCH64_BOOT_CORRUPT,
+  };
+  enum aarch64_boot_mode aarch64_select_boot_mode(
+      uint64_t x0, const struct boot_context *fixed_context);
+  ```
+
+  Test all four cases: zero, nonzero direct FDT address, a valid `x0 ==
+  0x401e0000` handoff, and that fixed-address mode with damaged magic.  The
+  host test passes a stack-resident context as `fixed_context`; production
+  passes `(const struct boot_context *)0x401e0000`.  Keep `MPIDR_EL1` reading
+  and `boot_context_from_aarch64()` construction in `aarch64_main`, so the
+  selector is compilable by the x86 host test.
 
 - [ ] **Step 2: Run the test red**
 
-  Run: `make -C tests test_bootinfo_abi`
+  Run: `make -C test build/test_bootinfo_abi.elf`
 
   Expected: helper or new invalid-handoff assertions absent.
 
@@ -309,7 +341,7 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
 - [ ] **Step 5: Commit**
 
-  Run: `git add kernel/arch/aarch64/main.c kernel/arch/aarch64/head.S tests && git commit -m "boot: accept aarch64 uefi boot context"`
+  Run: `git add kernel/arch/aarch64/main.c kernel/arch/aarch64/head.S test/cases/test_bootinfo_abi.c test/Makefile && git commit -m "boot: accept aarch64 uefi boot context"`
 
 ### Task 6: Execute end-to-end QEMU acceptance and document evidence
 
@@ -344,7 +376,7 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
 - [ ] **Step 4: Run full verification**
 
-  Run: `make test-aarch64-uefi-smoke && make -C kernel ARCH=aarch64 && make -C tests test_bootinfo_abi test_pmm && make boot/uefi/BOOTX64.EFI`
+  Run: `make test-aarch64-uefi-smoke && make -C kernel ARCH=aarch64 && make -C test build/test_bootinfo_abi.elf build/test_pmm_basic.elf && make boot/uefi/BOOTX64.EFI`
 
   Expected: all commands succeed; smoke log has marker/banner/tick and no SMP
   benchmark line.
