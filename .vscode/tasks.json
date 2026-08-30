@@ -37,30 +37,6 @@
             "args": ["-C", "kernel", "ARCH=aarch64", "DEBUG=1"],
             "group": "build",
             "problemMatcher": []
-        },
-        {
-            "label": "Start AArch64 QEMU (GDB)",
-            "type": "shell",
-            "command": "make",
-            "args": ["debug-aarch64"],
-            "isBackground": true,
-            "problemMatcher": {
-                "owner": "aarch64-qemu",
-                "pattern": [
-                    {
-                        "regexp": "^AArch64 QEMU GDB server listening on tcp://127\\.0\\.0\\.1:1234$"
-                    }
-                ],
-                "background": {
-                    "activeOnStart": true,
-                    "beginsPattern": "^AArch64 QEMU GDB server listening on tcp://127\\.0\\.0\\.1:1234$",
-                    "endsPattern": "^AArch64 QEMU GDB server listening on tcp://127\\.0\\.0\\.1:1234$"
-                }
-            },
-            "presentation": {
-                "reveal": "always",
-                "panel": "dedicated"
-            }
         }
     ]
 }

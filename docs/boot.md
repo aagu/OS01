@@ -16,16 +16,22 @@ ln -s ../../thirdpart/posix-uefi/uefi
 
 ## 引导流程概述
 
+x86_64 和 aarch64 共享同一个 UEFI 引导器源码（`boot/uefi/main.c` + `boot/uefi/arch/arch.h`），通过 `boot/uefi/arch/<arch>/boot.c` 里的钩子实现架构差异。两者都构建 `boot_context` v2 ABI 并通过 `kernel_main(const struct boot_context *)` 跳转到内核。
+
+aarch64 仅支持 UEFI 引导（旧的直接 `-kernel` 启动方式已删除）。
+
 1. **UEFI 固件初始化**：系统加电后，UEFI 固件初始化硬件并执行自检
 2. **UEFI 引导管理器**：UEFI 固件加载并执行引导管理器
-3. **引导程序加载**：引导管理器加载并执行系统的引导程序（BOOTX64.EFI）
-4. **内核加载**：引导程序加载内核到内存
-5. **系统信息收集**：引导程序收集系统信息（如内存映射、图形模式等）
-6. **跳转到内核**：引导程序退出引导服务并跳转到内核执行
-7. **内核初始化**：内核执行初始化操作
-8. **系统启动完成**：内核进入主循环，等待中断
+3. **引导程序加载**：引导管理器加载并执行系统的引导程序（x86_64: `BOOTX64.EFI`，aarch64: `BOOTAA64.EFI`）
+4. **构建 boot_context**：引导程序在固定物理地址分配 `struct boot_context`，初始化 magic/version/size/flags
+5. **加载内核**：通过 `arch_load_kernel` 钩子把内核加载到内存（x86 直接拷贝 `kernel.bin`，aarch64 通过 ELF 解析）
+6. **系统信息收集**：图形模式（`capture_graphics`）、固件表（`arch_fill_firmware`，aarch64 解析 FDT，x86 取 RSDP）、内存映射（UEFI `GetMemoryMap`，由 `arch_build_memory` 转成 `BOOT_MEMORY_MAP`）
+7. **退出引导服务**：`ExitBootServices` 循环（map_key 失效时重取）
+8. **跳转到内核**：`arch_enter_kernel(entry, context_phys)` → 内核入口
 
 ## 详细引导流程
+
+> 详细的内核加载、内存检测、图形模式设置等步骤的代码现在统一在 `boot/uefi/main.c`（共享生命周期）和 `boot/uefi/arch/<arch>/boot.c`（架构钩子）里。下面对每一步的描述对应到这个新结构，请直接阅读源码以了解具体实现。
 
 ### 1. UEFI 固件初始化
 
@@ -356,19 +362,13 @@ kernel_main(kern_boot_para_info);
 
 ## 引导参数结构及关键 ABI
 
-**⚠️ 关键 ABI 说明**: 引导器使用 clang `--target=x86_64-pc-win32-coff` 编译（LLP64 数据模型：`sizeof(long)=4`），而内核使用 SysV LP64（`sizeof(long)=8`）。为避免结构体布局不匹配，**`BOOT_INFO` 及其子结构中的所有字段必须使用固定大小类型（`uint32_t`、`uint64_t`）**，绝不能使用 `unsigned long`、`unsigned int` 或指针。参见 `kernel/include/kernel/bootinfo.h`。
+**⚠️ 关键 ABI 说明**: x86_64 引导器使用 clang `--target=x86_64-pc-win32-coff` 编译（LLP64 数据模型：`sizeof(long)=4`），而内核使用 SysV LP64（`sizeof(long)=8`）。为避免结构体布局不匹配，**`boot_context` 及其子结构中的所有字段必须使用固定大小类型（`uint32_t`、`uint64_t`）**，绝不能使用 `unsigned long`、`unsigned int` 或指针。参见 `kernel/include/kernel/bootinfo.h`。
+
+x86_64 和 aarch64 两个 UEFI 引导器都构建同一个 `boot_context` v2 结构体（在 `boot_context_init` 里初始化），magic 为 `BOOT_CONTEXT_MAGIC = 0x4f533031`，version 为 `2`，size 等于 `sizeof(struct boot_context)`（104 字节）。内核通过 `boot_context_valid()` 校验三者后再继续。
 
 引导程序传递给内核的引导参数结构如下（使用固定大小类型）：
 
 ```c
-struct BOOT_INFO
-{
-    struct GRAPHICS_INFO Graphics_Info;
-    struct MEMORY_INFO E820_Info;
-    uint64_t RSDP;
-    uint32_t BootFromBIOS;
-};
-
 struct GRAPHICS_INFO
 {
     uint32_t HorizontalResolution;
@@ -378,17 +378,43 @@ struct GRAPHICS_INFO
     uint64_t FrameBufferSize;
 };
 
-struct MEMORY_INFO
-{
-    uint32_t E820_Entry_count;
-    uint64_t E820_Entry;     // 物理地址指针
+enum BOOT_MEMORY_FORMAT {
+    BOOT_MEMORY_FORMAT_UNKNOWN  = 0,
+    BOOT_MEMORY_FORMAT_E820     = 1,
+    BOOT_MEMORY_FORMAT_GENERIC  = 2,
+    BOOT_MEMORY_FORMAT_UEFI_RAW = 3,
 };
 
-struct E820_ENTRY
+struct BOOT_MEMORY_MAP {
+    uint64_t entries;              /* 物理地址：条目 / 描述符数组 */
+    uint32_t entry_count;
+    uint32_t entry_size;
+    uint32_t format;
+    uint32_t descriptor_version;   /* UEFI 描述符版本，否则为 0 */
+};
+
+struct BOOT_FIRMWARE {
+    uint64_t dtb;            /* FDT 物理地址（aarch64），否则为 0 */
+    uint64_t acpi_rsdp;      /* ACPI RSDP 物理地址（x86_64），否则为 0 */
+};
+
+struct E820_ENTRY              /* x86_64 旧式 E820 记录，仍由 pmm.c 消费 */
 {
     uint64_t address;
     uint64_t length;
     uint32_t type;
+} __attribute__((packed));
+
+struct boot_context {
+    uint32_t magic;               /* = BOOT_CONTEXT_MAGIC */
+    uint32_t version;             /* = BOOT_CONTEXT_VERSION (2) */
+    uint32_t size;                /* = sizeof(struct boot_context) */
+    uint32_t flags;               /* BOOT_CONTEXT_HAS_* 位 */
+    uint32_t reserved;
+    struct GRAPHICS_INFO graphics;
+    struct BOOT_MEMORY_MAP memory;
+    struct BOOT_FIRMWARE firmware;
+    uint64_t boot_cpu_id;
 };
 ```
 
@@ -409,21 +435,32 @@ struct E820_ENTRY
 
 ### 主要文件
 
-* `main.c` - 引导程序的主要实现文件
-* `Makefile` - 引导程序的编译规则
-* `BOOTX64.EFI` - 编译后的引导程序
-* `OVMF.fd` - QEMU 模拟 UEFI 环境所需的固件文件
+x86_64 和 aarch64 共享同一份主代码，架构差异在 `arch/` 子目录里：
+
+* `boot/uefi/main.c` - 共享 UEFI 引导器主循环（生命周期、EBS loop、graphics/firmware/memory 收集）
+* `boot/uefi/arch/arch.h` - 共享钩子声明（`arch_init_handoff` / `arch_load_kernel` / `arch_setup_graphics` / `arch_fill_firmware` / `arch_memory_buffer` / `arch_build_memory` / `arch_release` / `arch_enter_kernel` / `arch_puts`）
+* `boot/uefi/arch/x86_64/boot.c` - x86_64 实现（固定 `0x100000` 直接加载 `kernel.bin`，RSDP via `arch_fill_firmware`，E820 via `arch_build_memory`，handoff `boot_context` @ `0x60000`）
+* `boot/uefi/arch/aarch64/boot.c` + `elf.c` + `handoff.S` + `loader.h` - aarch64 实现（ELF 解析、FDT dtb 提取、`aarch64_handoff_el_supported` / `aarch64_page_interval`、handoff `boot_context` 由 `arch_init_handoff` 分配）
+* `boot/uefi/Makefile` - 统一构建包装（`make -C boot/uefi ARCH=x86_64` → `BOOTX64.EFI`，`ARCH=aarch64` → `BOOTAA64.EFI`）
+* `BOOTX64.EFI` / `BOOTAA64.EFI` - 编译产物
+* `OVMF.fd` / `QEMU_EFI.fd` - QEMU 模拟 UEFI 环境所需的固件文件
 
 ### 核心函数
 
-* `main` - 引导程序的主函数
-* `GetResolution` - 解析分辨率配置
-* `CompareGuid` - 比较 GUID
-* `exit_bs` - 退出引导服务
+* `main` - 引导程序的主函数（`boot/uefi/main.c`）
+* `arch_init_handoff` / `arch_load_kernel` / `arch_setup_graphics` / `arch_fill_firmware` / `arch_build_memory` / `arch_enter_kernel` - 架构相关的钩子
+* `capture_graphics` / `guid_equal` - 共享辅助函数（`boot/uefi/main.c`）
+* `aarch64_handoff_el_supported` / `aarch64_page_interval` - aarch64 专用辅助（`loader.h`）
 
 ## 内核入口点
 
-内核的入口点是 `kernel_main` 函数，位于 `kernel/kernel/main.c` 文件中。该函数接收一个 `BOOT_INFO` 结构指针作为参数，包含了系统的内存映射、图形模式等信息。
+内核的入口点是 `kernel_main` 函数，位于 `kernel/kernel/main.c` 文件中。两个架构的引导器都通过 `arch_enter_kernel` 跳转到同一签名：
+
+```c
+void kernel_main(const struct boot_context *bootctx);
+```
+
+`bootctx` 由引导器放置在固定物理地址（x86_64 @ `0x60000`，aarch64 由 `arch_init_handoff` 分配），并通过 `boot_context_valid()` 校验 magic / version / size 后才使用。
 
 ## 故障排除
 
@@ -446,10 +483,10 @@ struct E820_ENTRY
 
 ### 支持 BIOS 引导
 
-当前系统只支持 UEFI 引导，可以通过以下方式添加 BIOS 引导支持：
+当前系统只支持 UEFI 引导（x86_64 通过 OVMF，aarch64 通过 `QEMU_EFI.fd`）。aarch64 原本存在的直接 `-kernel` 启动方式已删除，整个 aarch64 路径现在也走 UEFI。可以通过以下方式添加 BIOS 引导支持：
 
 1. **创建 BIOS 引导程序**：创建一个支持 BIOS 引导的引导程序
-2. **修改引导参数**：修改 `BOOT_INFO` 结构，添加 BIOS 引导相关的字段
+2. **修改引导参数**：调整 `boot_context` 结构，添加 BIOS 引导相关的字段
 3. **修改内核初始化**：修改内核初始化代码，支持从 BIOS 引导
 
 ### 支持更多引导选项
@@ -464,17 +501,17 @@ struct E820_ENTRY
 
 本系统的引导流程是一个从 UEFI 固件到内核执行的完整过程，包括：
 
-1. **UEFI 引导**：使用 UEFI 引导方式，支持现代硬件
-2. **内核加载**：将内核加载到固定地址
-3. **系统信息收集**：收集系统内存映射、图形模式等信息
-4. **引导参数传递**：将系统信息传递给内核
-5. **内核初始化**：内核执行初始化操作，启动系统
+1. **UEFI 引导**：使用 UEFI 引导方式，x86_64 与 aarch64 共享 `boot/uefi/main.c` 主循环，架构差异在 `boot/uefi/arch/<arch>/boot.c` 中
+2. **内核加载**：通过 `arch_load_kernel` 钩子加载（x86_64 直接拷贝 `kernel.bin` @ `0x100000`，aarch64 通过 ELF 解析）
+3. **系统信息收集**：共享 `capture_graphics`、架构相关 `arch_fill_firmware`（x86: RSDP，aarch64: FDT dtb）、共享 `BS->GetMemoryMap` → `BOOT_MEMORY_MAP`
+4. **引导参数传递**：统一通过 `boot_context` v2 结构体（magic / version / size / flags + graphics + memory + firmware + boot_cpu_id）
+5. **内核初始化**：内核通过 `kernel_main(const struct boot_context *)` 执行初始化操作，启动系统
 
 这种引导方式具有以下优点：
 
 * **支持现代硬件**：UEFI 引导支持现代硬件特性
-* **灵活的配置**：通过 `config.txt` 文件可以灵活配置引导选项
-* **详细的系统信息**：传递详细的系统信息给内核，便于内核初始化
+* **架构统一**：x86_64 与 aarch64 共享主代码，仅架构差异在 `boot/uefi/arch/` 钩子里
+* **ABI 稳定**：`boot_context` v2 + 固定大小类型，跨 LP64/LLP64 数据模型可移植
 * **图形模式支持**：支持设置图形模式，提供更好的用户体验
 
 引导流程的实现为系统的启动提供了可靠的基础，同时也为后续的功能扩展留下了空间。

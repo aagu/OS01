@@ -26,7 +26,7 @@ make kernel.bin            # Build kernel only
 ## Architecture
 
 ```
-Boot:    UEFI → BOOTX64.EFI → kernel.bin @ phys 0x100000
+Boot:    UEFI → BOOTX64.EFI → boot_context @ 0x60000 → kernel.bin @ 0x100000
 Kernel:  head.S → GDT/IDT/TSS → lretq → 0xffff800000100000 → kernel_main
 Memory:  PML4→PDPT→PDE (2MB huge) + PT (4KB). Higher-half: Phy_To_Virt(x)=x+0xffff800000000000
 SMP:     percpu(GS base) → MADT enum → trampoline 0x8000 → INIT-SIPI-SIPI → APs
@@ -36,7 +36,7 @@ Init:    head.S → kernel_main → subsys → VFS/FS → TTY → percpu → SMP
 
 ## Critical gotchas (will crash silently if wrong)
 
-- **BOOT_INFO ABI**: bootloader is LLP64 (`sizeof(long)=4`), kernel LP64 (`sizeof(long)=8`). All fields must use `uint32_t`/`uint64_t` — never `unsigned long`.
+- **boot_context ABI**: both UEFI bootloaders (x86_64 + aarch64) build a `boot_context` v2 struct at a fixed physical address; bootloader is LLP64 (`sizeof(long)=4`), kernel LP64 (`sizeof(long)=8`). All fields must use `uint32_t`/`uint64_t` — never `unsigned long`. See `kernel/include/kernel/bootinfo.h`.
 - **`make clean` mandatory** after any struct change (no header deps in Makefile — stale `.o` = silent `sizeof()` mismatch).
 - **Syscall E2E invocation**: always run `make OS01_SYSTEST=1 test-syscall`; do not omit the top-level `OS01_SYSTEST=1` even though the target invokes a recursive make.
 - **`set_intr_gate_raw` only accepts assembly stubs**. Bare C `ret` leaks CS+RFLAGS. Use `DEFINE_INTR_STUB` + `REGISTER_INTR_HANDLER`.
@@ -97,7 +97,7 @@ keyboard IRQ → console TTY (tty_push_input) → terminal.elf reads /dev/tty �
 | `user/terminal.c` | VT100 terminal emulator: /dev/tty → PTY → ash; must SIG_IGN SIGINT |
 | `kernel/subsys/subsys.c` | Subsystem registration framework |
 | `kernel/futex.c` | Futex hash table (SYS_futex=47) |
-| `kernel/include/kernel/bootinfo.h` | **Fixed-size types critical for ABI** |
+| `kernel/include/kernel/bootinfo.h` | **`boot_context` v2 ABI** (shared by both UEFI loaders); fixed-size types critical |
 | `kernel/include/uapi/syscall.h` | Syscall numbers (0..70) |
 | `user/init.c` | PID 1 init: inittab parsing, 4-phase boot (SYSINIT/WAIT/ONCE/RESPAWN), child supervision |
 | `config/inittab` | Default inittab template (id:action:process); `config/inittab.systest` for test mode |
