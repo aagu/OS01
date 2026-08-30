@@ -247,6 +247,11 @@ int main(int argc, char_t **argv)
                                   &desc_size, &desc_version);
         if (status != EFI_BUFFER_TOO_SMALL || desc_size == 0)
             break;
+        /* Fixed-capacity discipline (aarch64's established behavior): if the
+         * map grows between the size query and the fetch, fail rather than
+         * reallocate — the descriptor buffer is pre-reserved and must not be
+         * reallocated after it has been committed. A BUFFER_TOO_SMALL here
+         * is intentionally an error, not a retry. */
         if ((uint64_t)map_size + UEFI_MAP_SLACK * desc_size > desc_capacity) {
             arch_puts("UEFI: memory map overflow\r\n");
             status = EFI_BUFFER_TOO_SMALL;
@@ -700,10 +705,12 @@ $(OUTDIR)/$(TARGET): $(SRCS) $(ROOT)/boot/uefi/arch/arch.h \
 	sed -i 's/ARCH=$$(ARCH)/ARCH=$$(ARCH) OUTDIR=/' $(RUNTIME_DIR)/Makefile
 	sed -i '/^CFLAGS += -fshort-wchar/i CFLAGS += -DUEFI_NO_UTF8' $(RUNTIME_DIR)/Makefile
 	sed -i '/^CFLAGS += -fshort-wchar/i CFLAGS += -DUEFI_NO_UTF8' $(RUNTIME_DIR)/uefi/Makefile
-ifeq ($(DEBUG),1)
-	@sed -i '/^CFLAGS += -fshort-wchar/i CFLAGS += -DDEBUG=1' $(RUNTIME_DIR)/Makefile
-	@sed -i '/^CFLAGS += -fshort-wchar/i CFLAGS += -DDEBUG=1' $(RUNTIME_DIR)/uefi/Makefile
-endif
+	# The old x86 DEBUG=1 gate (the types[] memory-map print) was
+	# intentionally not carried into the new tree — there is no -DDEBUG
+	# consumer here, so no DEBUG injection. The deep mkdir paths below are
+	# harmless: they mirror where the inner make places per-source objects
+	# (OUTDIR + absolute source path), the same proven pattern the old
+	# aarch64 wrapper used.
 	@$(foreach source,$(SRCS),mkdir -p $(OUTDIR)$(dir $(source));)
 	$(MAKE) -C $(RUNTIME_DIR) ARCH=$(ARCH) TARGET=$(TARGET) \
 		OUTDIR=$(OUTDIR)/ SRCS="$(SRCS)"
@@ -792,6 +799,13 @@ void pmm_init(const struct BOOT_MEMORY_MAP *mmap)
 ```
 
 The old loop read one entry past the array (`p++; if (p->type > 4 || p->type < 1) break;`) relying on zero-terminated memory after the E820 array; the new fixed E820 range is not zero-terminated, so the loop must stop exactly at `entry_count`.
+
+Note (deliberate behavior fix, not just the OOB removal): the old break
+also truncated the map at the first E820 **type-5 (unusable)** entry — the
+type-5 entry and everything after it were dropped from
+`PMMngr.e820_entrys`. Strict `entry_count` iteration now keeps type-5
+entries. Negligible under QEMU (no EfiUnusableMemory regions), but
+different from the old behavior — do not "restore" the break.
 
 `kernel/arch/x86_64/head.S` — rename the handoff-pointer global `BOOT_INFO` → `BOOT_CONTEXT` (lines 15, 113, 251, 253). It is internal-only (no C references).
 
@@ -1091,6 +1105,9 @@ efi_status_t arch_init_handoff(struct boot_context **ctx_out)
     return EFI_SUCCESS;
 
 fail:
+    /* arch_release() is idempotent (its *_reserved flags clear on release),
+     * so this internal fail path and the common main.c fail path calling
+     * arch_release() again is safe — the second call is a no-op. */
     arch_release();
     return status;
 }
@@ -1659,3 +1676,12 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 - **Spec coverage:** §1/§4 (hooks + interface) → Task 1; §4a (x86 layout) → Task 1 boot.c; §5 (common lifecycle + EBS loop) → Task 1 main.c; §6 (unified ABI + kernel migration) → Task 1; §7 (E820 vs raw) → Tasks 1-2; §8 (wrapper + UEFI_NO_UTF8) → Task 1 Makefile; §9 (aarch64 direct boot removal) → Task 3; §10 (tests) → Tasks 3-4; §11 (docs) → Task 5; §12 (verification) → each task's smoke step + Task 5.
 - **Placeholders:** none — all files are fully specified. P1-P5 review items are implemented inline (arch_puts `%S`, `MAP_SLACK=2`, x86 sub-regions, `EFI_NOT_STARTED` fallback, `types[]` not carried over into the new tree because the DEBUG print was in the old x86 body and is intentionally dropped from the new common path — the DEBUG `types[]` table from the old x86 main.c is NOT migrated; if DEBUG output is wanted later, it should use `%S`).
 - **Type consistency:** `arch_fill_firmware` returns `efi_status_t` everywhere (arch.h, main.c, both boot.c). `capture_graphics`/`guid_equal` are non-static, declared in arch.h, defined in main.c. `arch_enter_kernel` is `noreturn` on both arches. `aarch64_handoff_el_supported` and `aarch64_page_interval` come from `loader.h`.
+
+## Review follow-ups (plan review pass)
+
+- **M1 (aarch64 kernel build):** verified no change needed — the aarch64 kernel build starts from an empty `KERNEL_C_SOURCES` whitelist (kernel/Makefile:41) and compiles only `arch/aarch64/*.c`; it never compiles `kernel/kernel/main.c` or `kernel/memory/pmm.c`, so Task 1's signature changes cannot break it.
+- **M2 (double arch_release):** noted inline in aarch64 `arch_init_handoff` — the internal fail path relies on `arch_release()` idempotency (flags clear on release); the common main.c fail path's second call is a no-op.
+- **M3 (type-5 semantics):** documented at the `pmm_init` step — strict iteration now keeps E820 type-5 (unusable) entries that the old sentinel break dropped.
+- **M4 (dead DEBUG flag):** the `-DDEBUG=1` injection branch was removed from the wrapper; the old x86 DEBUG print was intentionally not carried over (noted in the Makefile).
+- **M5 (deep mkdir):** kept as-is (harmless, mirrors the inner make's object placement, same pattern the old aarch64 wrapper used) — noted in the Makefile.
+- **M6 (BUFFER_TOO_SMALL on fetch is fatal):** documented in common main.c — fixed-capacity discipline inherited from aarch64; not a retry, by design.
