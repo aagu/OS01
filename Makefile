@@ -229,6 +229,21 @@ run: disk.img boot/uefi/OVMF.fd
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio -no-reboot
 
+# aarch64 phase 1: bare-ELF -kernel boot (no disk.img / UEFI / userland).
+# See docs/superpowers/specs/2026-08-29-aarch64-phase1-design.md §9 for the
+# three QEMU-11.1 deviations: secure=on (else only BSP starts), gic-version=2
+# (code hardcodes GICv2 MMIO), and bare-ELF x0=0 / DTB@0x40000000.
+AARCH64_QEMU ?= qemu-system-aarch64
+AARCH64_SMP  ?= 4
+
+.PHONY: run-aarch64
+run-aarch64:
+	$(MAKE) -C kernel ARCH=aarch64
+	$(AARCH64_QEMU) -M virt,secure=on,gic-version=2 -cpu cortex-a53 \
+	  -smp $(AARCH64_SMP) -m 1G \
+	  -kernel build/aarch64/kernel/kernel.elf \
+	  -nographic -serial mon:stdio
+
 run-kvm: disk.img boot/uefi/OVMF.fd
 	$(QEMU_BIN) -M q35 -smp $(SMP) -pflash boot/uefi/OVMF.fd \
 	  -accel kvm \
