@@ -198,6 +198,7 @@ disk.img: boot/uefi/BOOTX64.EFI lib kernel.bin user build/x86_64/user/busybox.el
 	@ln -sf busybox config/fsroot/bin/rmdir
 	@ln -sf busybox config/fsroot/bin/echo
 	@ln -sf busybox config/fsroot/bin/printf
+	@ln -sf busybox config/fsroot/bin/sort
 	@ln -sf busybox config/fsroot/bin/ps
 	@ln -sf busybox config/fsroot/bin/kill
 	@ln -sf busybox config/fsroot/bin/mount
