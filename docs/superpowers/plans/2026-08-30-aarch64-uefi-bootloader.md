@@ -79,7 +79,7 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
 - [ ] **Step 2: Run the test red**
 
-  Run: `make -C test build/test_bootinfo_abi.elf`
+  Run: `make -C test "$(realpath -m test/build/test_bootinfo_abi.elf)"`
 
   Expected: compilation failure because the new constants, member, and
   validator do not yet exist.
@@ -93,7 +93,7 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
 - [ ] **Step 4: Run ABI and x86 regressions**
 
-  Run: `make -C test build/test_bootinfo_abi.elf build/test_pmm_basic.elf`
+  Run: `make -C test "$(realpath -m test/build/test_bootinfo_abi.elf)" "$(realpath -m test/build/test_pmm_basic.elf)"`
 
   Expected: both succeed.
 
@@ -127,7 +127,7 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
 - [ ] **Step 2: Run the test red**
 
-  Run: `make -C test build/test_aarch64_elf_loader.elf`
+  Run: `make -C test "$(realpath -m test/build/test_aarch64_elf_loader.elf)"`
 
   Expected: target/source missing.
 
@@ -141,7 +141,7 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
 - [ ] **Step 4: Run the helper tests**
 
-  Run: `make -C test build/test_aarch64_elf_loader.elf`
+  Run: `make -C test "$(realpath -m test/build/test_aarch64_elf_loader.elf)"`
 
   Expected: PASS.
 
@@ -318,7 +318,7 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
 - [ ] **Step 2: Run the test red**
 
-  Run: `make -C test build/test_bootinfo_abi.elf`
+  Run: `make -C test "$(realpath -m test/build/test_bootinfo_abi.elf)"`
 
   Expected: helper or new invalid-handoff assertions absent.
 
@@ -376,7 +376,7 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
 
 - [ ] **Step 4: Run full verification**
 
-  Run: `make test-aarch64-uefi-smoke && make -C kernel ARCH=aarch64 && make -C test build/test_bootinfo_abi.elf build/test_pmm_basic.elf && make boot/uefi/BOOTX64.EFI`
+  Run: `make test-aarch64-uefi-smoke && make -C kernel ARCH=aarch64 && make -C test "$(realpath -m test/build/test_bootinfo_abi.elf)" "$(realpath -m test/build/test_pmm_basic.elf)" && make boot/uefi/BOOTX64.EFI`
 
   Expected: all commands succeed; smoke log has marker/banner/tick and no SMP
   benchmark line.
