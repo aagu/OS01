@@ -2,20 +2,26 @@
  *
  * After head.S drops to EL1, builds dual-TTBR page tables, enables the
  * MMU, jumps to the high-half kernel image, clears the high-half .bss,
- * installs the VBAR table, parks the DTB slot, and finally calls here.
+ * installs the VBAR table, preserves x0 across the transition, and finally
+ * calls here.
  *
- * Boot sequence (Task 4b — SMP):
+ * Entry ABI:
+ *   - x0 == 0x401e0000: AArch64 UEFI's fixed boot_context.  It must pass
+ *     boot_context_valid(); malformed contexts are reported via PL011 and
+ *     halt before normal initialization.
+ *   - all other x0 values: direct boot's original FDT-or-zero argument.  A
+ *     scratch boot_context retains the original FDT fallback semantics.
+ *
+ * Boot sequence:
  *   1. arch_local_irq_disable() (idempotent — DAIF already masked in head.S)
  *   2. pl011_init() — program PL011 for polled output
  *   3. Re-point VBAR_EL1 to the high-half exception_vectors
- *   4. dtb_init(dtb_base) — minimal FDT parse
+ *   4. dtb_init(boot_context.firmware.dtb) — minimal FDT parse
  *   5. gic_init() — distributor + CPU interface, only PPI 30 enabled
  *   6. arch_tick_start() — arm CNTP for one period
- *   7. smp_boot_aps() — bring up 3 APs via PSCI cpu_on + run 4-core
- *      spinlock benchmark (BSP writes done[0]=1; acquires all
- *      done[i]; PASS iff all done AND total == active*1M).
- *      The deadline uses arch_cycle_counter(), NOT the tick ISR —
- *      IRQs are still masked at this point.
+ *   7. direct boot only: smp_boot_aps() brings up APs and runs the SMP
+ *      benchmark.  UEFI intentionally remains single-BSP, but retains
+ *      the GIC, timer, and IRQ initialization in the surrounding steps.
  *   8. arch_local_irq_enable() — last step; tick ISR now runs
  *   9. wfi idle loop; the ISR prints "[tick] N" once a second
  *
@@ -28,9 +34,6 @@
  * half `exception_vectors`, which entry.S populates with the actual
  * `bl el1_irq_dispatch; eret` sequence.
  *
- * The ABI has two modes.  Normal direct boot retains the traditional
- * x0 DTB-or-zero argument.  The AArch64 UEFI loader instead passes its
- * validated boot_context at the reserved physical address 0x401e0000.
  */
 
 #include <stdint.h>
