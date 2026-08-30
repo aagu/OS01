@@ -141,6 +141,20 @@ static int test_empty_load_interval(void)
     return start != 0x40081000 || pages != 0;
 }
 
+static int test_handoff_boundary(void)
+{
+    uint64_t start;
+    uint64_t pages;
+
+    if (aarch64_page_interval(AARCH64_HANDOFF_BASE - 1, 1,
+                              &start, &pages) != 0)
+        return 1;
+    if (start != AARCH64_HANDOFF_BASE - AARCH64_PAGE_SIZE || pages != 1)
+        return 1;
+    return aarch64_page_interval(AARCH64_HANDOFF_BASE - 1, 2,
+                                 &start, &pages) != AARCH64_ELF_ERR_RANGE;
+}
+
 static int test_overlapping_load_intervals(void)
 {
     union elf_image image;
@@ -210,7 +224,7 @@ int main(void)
     if (test_valid_image() || test_malformed_header() || test_bad_entry() ||
         test_invalid_segment_sizes() || test_program_header_table_overflow() ||
         test_segment_file_range() || test_same_page_intervals() ||
-        test_empty_load_interval() ||
+        test_empty_load_interval() || test_handoff_boundary() ||
         test_overlapping_load_intervals() ||
         test_byte_disjoint_segments_may_share_page() ||
         test_entry_must_be_in_load_interval() ||

@@ -60,10 +60,11 @@ enum BOOT_MEMORY_FORMAT {
 };
 
 struct BOOT_MEMORY_MAP {
-    uint64_t entries;       /* physical address of generic entries */
+    uint64_t entries;       /* physical address of entries/descriptors */
     uint32_t entry_count;
     uint32_t entry_size;
     uint32_t format;
+    uint32_t descriptor_version; /* UEFI descriptor version, else zero */
 };
 
 struct BOOT_FIRMWARE {

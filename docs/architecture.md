@@ -31,10 +31,18 @@ The AArch64 phase-1 kernel supports two intentionally separate boot paths:
   `0x40080000` and writes its fixed-width `boot_context` handoff at physical
   `0x401e0000` (within the reserved `0x401e0000..0x40200000` handoff area).
   It then enters the kernel with that physical handoff address in `x0`.
+  Valid FDT data is copied into that area; an FDT that exceeds the fixed
+  capacity is a boot error rather than a silent fallback.
+
+  The loader runtime defaults to this checkout's
+  `thirdpart/posix-uefi/uefi`.  For a linked worktree whose submodule is not
+  initialized, pass an explicit read-only source, for example
+  `UEFI_RUNTIME_SOURCE=/path/to/posix-uefi/uefi`.
 
 The UEFI target is deliberately single-BSP (`-smp 1`): it initializes the
 GIC and timer but skips the direct-boot SMP benchmark.  UEFI raw memory
-descriptors are preserved in the handoff but are not yet consumed by PMM;
+descriptors, their stride, and their descriptor version are preserved in the
+handoff but are not yet consumed by PMM;
 normalizing them is a later core-init slice.  PSCI `CPU_ON` secondary-CPU
 bring-up is likewise a separate next slice.
 

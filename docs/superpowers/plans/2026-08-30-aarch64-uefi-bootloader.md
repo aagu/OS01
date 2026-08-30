@@ -251,10 +251,13 @@ clang/lld ARM64 PE/COFF, QEMU `virt`, AAVMF, FAT ESP tools (`mkfs.fat`, mtools).
   `0x401e0000..0x40200000` before map collection.  Discover GOP and copy its
   fixed-width values.  Search configuration tables for the FDT GUID, validate
   big-endian FDT magic and `totalsize`, then copy the FDT into the handoff
-  region and store that copied physical address.
+  region and store that copied physical address.  A missing or invalid FDT
+  leaves the field zero for the synthetic fallback; a valid FDT that cannot
+  fit is a fatal `UEFI-A64: handoff overflow` error.
 
   Fill `boot_context` with magic/version/size, `BOOT_CONTEXT_HAS_BOOT_CPU_ID`,
-  optional framebuffer/FDT flags, and `BOOT_MEMORY_FORMAT_UEFI_RAW` metadata.
+  optional framebuffer/FDT flags, and `BOOT_MEMORY_FORMAT_UEFI_RAW` metadata,
+  including the UEFI descriptor stride and descriptor version.
   Call `boot_context_valid()` on the completed context before the EBS
   transaction; on failure emit `UEFI-A64: corrupt handoff` via PL011 and
   return an EFI error without jumping to the kernel.

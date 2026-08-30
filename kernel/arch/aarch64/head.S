@@ -230,6 +230,8 @@ _start:
     msr     spsr_el2, x0
     mov     x0, #3                             /* CNTHCTL_EL2 */
     msr     cnthctl_el2, x0
+    adr     x0, 1f                             /* resume locally at EL1 */
+    msr     elr_el2, x0
     isb
     eret
 
@@ -698,6 +700,8 @@ secondary_start:
     msr     spsr_el2, x0
     mov     x0, #3
     msr     cnthctl_el2, x0
+    adr     x0, 1f                             /* resume locally at EL1 */
+    msr     elr_el2, x0
     isb
     eret
 

@@ -417,6 +417,9 @@ EFI_STATUS aarch64_build_handoff(efi_handle_t image_handle,
         return EFI_INVALID_PARAMETER;
 
     allocation = (efi_physical_address_t)AARCH64_HANDOFF_BASE;
+#ifdef AARCH64_TEST_FORCE_HANDOFF_ALLOCATION_FAILURE
+    allocation = (efi_physical_address_t)UINT64_C(0xfffffffffffff000);
+#endif
     status = BS->AllocatePages(AllocateAddress, EfiLoaderData,
                                (uintn_t)AARCH64_HANDOFF_DATA_PAGES,
                                &allocation);
@@ -425,6 +428,7 @@ EFI_STATUS aarch64_build_handoff(efi_handle_t image_handle,
             (void)BS->FreePages(allocation,
                                 (uintn_t)AARCH64_HANDOFF_DATA_PAGES);
         }
+        pl011_puts("UEFI-A64: handoff allocation failed\r\n");
         return EFI_ERROR(status) ? status : EFI_OUT_OF_RESOURCES;
     }
     data_reserved = 1;
@@ -434,6 +438,7 @@ EFI_STATUS aarch64_build_handoff(efi_handle_t image_handle,
     if (EFI_ERROR(status) || allocation != AARCH64_TRAMPOLINE_BASE) {
         if (!EFI_ERROR(status))
             (void)BS->FreePages(allocation, 1);
+        pl011_puts("UEFI-A64: handoff allocation failed\r\n");
         status = EFI_ERROR(status) ? status : EFI_OUT_OF_RESOURCES;
         goto fail;
     }
@@ -515,6 +520,7 @@ EFI_STATUS aarch64_build_handoff(efi_handle_t image_handle,
             (uint32_t)(final_size / descriptor_size);
         context->memory.entry_size = (uint32_t)descriptor_size;
         context->memory.format = BOOT_MEMORY_FORMAT_UEFI_RAW;
+        context->memory.descriptor_version = descriptor_version;
         context->flags |= BOOT_CONTEXT_HAS_MEMORY_MAP;
         if (!boot_context_valid(context)) {
             pl011_puts("UEFI-A64: corrupt handoff\r\n");

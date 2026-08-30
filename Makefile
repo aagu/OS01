@@ -240,6 +240,8 @@ AARCH64_UEFI_APP := $(AARCH64_BUILD_DIR)/uefi/BOOTAA64.EFI
 AARCH64_UEFI_DISK := $(AARCH64_BUILD_DIR)/disk.img
 AARCH64_UEFI_FIRMWARE := $(AARCH64_BUILD_DIR)/QEMU_EFI.fd
 AARCH64_UEFI_FIRMWARE_SOURCE ?= /usr/share/edk2/aarch64/QEMU_EFI.fd
+AARCH64_KERNEL_ELF := $(AARCH64_BUILD_DIR)/kernel/kernel.elf
+AARCH64_HEAD_OBJECT := $(AARCH64_BUILD_DIR)/kernel/arch/aarch64/head.o
 
 .PHONY: run-aarch64
 run-aarch64:
@@ -255,20 +257,21 @@ aarch64-uefi: $(AARCH64_UEFI_DISK) $(AARCH64_UEFI_FIRMWARE)
 $(AARCH64_UEFI_APP): boot/uefi/aarch64/Makefile \
 		boot/uefi/aarch64/main.c boot/uefi/aarch64/elf.c \
 		boot/uefi/aarch64/handoff.S \
-		boot/uefi/aarch64/loader.h
+		boot/uefi/aarch64/loader.h kernel/include/kernel/bootinfo.h
 	$(MAKE) -C boot/uefi/aarch64
 
-build/aarch64/kernel/kernel.elf:
-	$(MAKE) -C kernel ARCH=aarch64
+.PHONY: aarch64-uefi-kernel
+aarch64-uefi-kernel:
+	$(MAKE) -B -C kernel ARCH=aarch64
 
-$(AARCH64_UEFI_DISK): $(AARCH64_UEFI_APP) build/aarch64/kernel/kernel.elf
+$(AARCH64_UEFI_DISK): $(AARCH64_UEFI_APP) aarch64-uefi-kernel
 	@mkdir -p $(AARCH64_BUILD_DIR)
 	rm -f $@
 	truncate -s 64M $@
 	mkfs.fat -F 32 $@
 	mmd -i $@ ::/EFI ::/EFI/BOOT
 	mcopy -i $@ $(AARCH64_UEFI_APP) ::/EFI/BOOT/BOOTAA64.EFI
-	mcopy -i $@ build/aarch64/kernel/kernel.elf ::/kernel.elf
+	mcopy -i $@ $(AARCH64_KERNEL_ELF) ::/kernel.elf
 
 $(AARCH64_UEFI_FIRMWARE): $(AARCH64_UEFI_FIRMWARE_SOURCE)
 	@mkdir -p $(dir $@)
@@ -302,6 +305,35 @@ check-aarch64-uefi-artifacts: aarch64-uefi
 .PHONY: test-aarch64-uefi-negative
 test-aarch64-uefi-negative:
 	$(MAKE) -C boot/uefi/aarch64 test-negative
+
+.PHONY: test-aarch64-el2-return
+test-aarch64-el2-return:
+	$(MAKE) -C kernel ARCH=aarch64
+	python3 test/scripts/check_aarch64_el2_return.py $(AARCH64_HEAD_OBJECT)
+
+.PHONY: test-aarch64-uefi-rebuild
+test-aarch64-uefi-rebuild:
+	@set -eu; \
+	$(MAKE) aarch64-uefi; \
+	test_dir=$$(mktemp -d /tmp/os01-aarch64-rebuild.XXXXXX); \
+	touch -r kernel/include/kernel/bootinfo.h "$$test_dir/header.time"; \
+	trap 'touch -r "$$test_dir/header.time" kernel/include/kernel/bootinfo.h; \
+		rm -f "$$test_dir/header.time" "$$test_dir/stamp" \
+		      "$$test_dir/kernel.elf"; rmdir "$$test_dir"' EXIT INT TERM; \
+	touch "$$test_dir/stamp"; \
+	sleep 1; \
+	touch kernel/include/kernel/bootinfo.h; \
+	$(MAKE) aarch64-uefi; \
+	for artifact in $(AARCH64_UEFI_APP) \
+			build/aarch64/kernel/kernel.elf $(AARCH64_UEFI_DISK); do \
+		test "$$artifact" -nt "$$test_dir/stamp" || { \
+			echo "ERROR: $$artifact was not rebuilt after bootinfo.h changed"; \
+			exit 1; \
+		}; \
+	done; \
+	mcopy -o -i $(AARCH64_UEFI_DISK) ::/kernel.elf "$$test_dir/kernel.elf"; \
+	cmp -s build/aarch64/kernel/kernel.elf "$$test_dir/kernel.elf"; \
+	echo "aarch64 UEFI rebuild freshness: PASS"
 
 # Start the AArch64 phase-1 kernel paused with QEMU's GDB remote stub on
 # TCP port 1234.  This is consumed by .vscode/launch.json.

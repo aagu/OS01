@@ -150,11 +150,13 @@ The context records:
   `ExitBootServices()`, the loader validates the FDT header and total size,
   copies its complete byte sequence into the handoff area, and stores the
   physical address of that copy in `firmware.dtb`.  It never passes the
-  firmware-owned allocation to the kernel.  If no FDT table is exposed or the
-  copy cannot fit, `firmware.dtb` is zero and the existing QEMU synthetic
-  fallback remains valid; and
+  firmware-owned allocation to the kernel.  If no valid FDT table is exposed,
+  `firmware.dtb` is zero and the existing QEMU synthetic fallback remains
+  valid.  A valid FDT that cannot fit is instead a fatal handoff-overflow
+  error, matching the fixed-capacity rule for the final memory map; and
 - the final UEFI memory-map byte sequence, stored after the context inside the
-  reserved handoff area, including its descriptor stride and map format.
+  reserved handoff area, including its descriptor stride, descriptor version,
+  and map format.
 
 The first implementation will add an explicit UEFI raw-map format identifier
 to `bootinfo.h`, instead of labelling UEFI descriptors as the existing generic

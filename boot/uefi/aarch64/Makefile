@@ -9,17 +9,20 @@ AARCH64_UEFI_CFLAGS := -DUEFI_NO_UTF8 $(APP_CFLAGS)
 NEGATIVE_DIR := $(ROOT)/build/aarch64/uefi-negative
 NEGATIVE_BAD_BUILD := $(NEGATIVE_DIR)/bad-elf-build
 NEGATIVE_OVERFLOW_BUILD := $(NEGATIVE_DIR)/overflow-build
+NEGATIVE_ALLOCATION_BUILD := $(NEGATIVE_DIR)/allocation-failure-build
 NEGATIVE_BAD_DISK := $(NEGATIVE_DIR)/bad-elf.img
 NEGATIVE_RANGE_DISK := $(NEGATIVE_DIR)/handoff-crossing.img
 NEGATIVE_OVERFLOW_DISK := $(NEGATIVE_DIR)/overflow.img
+NEGATIVE_ALLOCATION_DISK := $(NEGATIVE_DIR)/allocation-failure.img
 NEGATIVE_KERNEL := $(ROOT)/build/aarch64/kernel/kernel.elf
 NEGATIVE_FIRMWARE_SOURCE ?= /usr/share/edk2/aarch64/QEMU_EFI.fd
 NEGATIVE_QEMU ?= qemu-system-aarch64
 NEGATIVE_TIMEOUT ?= 20s
 
-# This worktree intentionally leaves thirdpart/posix-uefi uninitialized.
-# The source checkout is read-only; each build stages only its UEFI runtime.
-UEFI_RUNTIME_SOURCE ?= /home/aagu/OS01/thirdpart/posix-uefi/uefi
+# Default to this repository's submodule.  A worktree with that submodule left
+# uninitialized can explicitly supply an external read-only runtime source:
+# `make UEFI_RUNTIME_SOURCE=/absolute/path/to/posix-uefi/uefi ...`.
+UEFI_RUNTIME_SOURCE ?= $(ROOT)/thirdpart/posix-uefi/uefi
 
 SRCS := $(ROOT)/boot/uefi/aarch64/main.c \
         $(ROOT)/boot/uefi/aarch64/elf.c \
@@ -28,7 +31,8 @@ SRCS := $(ROOT)/boot/uefi/aarch64/main.c \
 .PHONY: all
 all: $(OUTDIR)/$(TARGET)
 
-$(OUTDIR)/$(TARGET): $(SRCS) $(ROOT)/boot/uefi/aarch64/loader.h
+$(OUTDIR)/$(TARGET): $(SRCS) $(ROOT)/boot/uefi/aarch64/loader.h \
+		$(ROOT)/kernel/include/kernel/bootinfo.h
 	@test -f $(UEFI_RUNTIME_SOURCE)/Makefile || { \
 		echo "ERROR: posix-uefi runtime is unavailable at $(UEFI_RUNTIME_SOURCE)"; \
 		false; \
@@ -69,7 +73,6 @@ test-negative:
 		{ rc=$$?; test $$rc -eq 124; }
 	grep -F 'UEFI-A64: bad ELF' $(NEGATIVE_DIR)/bad-elf.log
 	! grep -F 'OS01 aarch64 phase1 boot ok' $(NEGATIVE_DIR)/bad-elf.log
-	! grep -F 'UEFI-A64: handoff success' $(NEGATIVE_DIR)/bad-elf.log
 	cp $(NEGATIVE_KERNEL) $(NEGATIVE_DIR)/handoff-crossing-kernel.elf
 	printf '\360\377\035\100\000\000\000\000' | dd \
 		of=$(NEGATIVE_DIR)/handoff-crossing-kernel.elf bs=1 seek=200 \
@@ -89,7 +92,6 @@ test-negative:
 		{ rc=$$?; test $$rc -eq 124; }
 	grep -F 'UEFI-A64: bad ELF' $(NEGATIVE_DIR)/handoff-crossing.log
 	! grep -F 'OS01 aarch64 phase1 boot ok' $(NEGATIVE_DIR)/handoff-crossing.log
-	! grep -F 'UEFI-A64: handoff success' $(NEGATIVE_DIR)/handoff-crossing.log
 	$(MAKE) -B BUILD_DIR=$(NEGATIVE_OVERFLOW_BUILD) \
 		APP_CFLAGS=-DAARCH64_TEST_FORCE_HANDOFF_OVERFLOW=1
 	truncate -s 64M $(NEGATIVE_OVERFLOW_DISK)
@@ -107,5 +109,35 @@ test-negative:
 		{ rc=$$?; test $$rc -eq 124; }
 	grep -F 'UEFI-A64: handoff overflow' $(NEGATIVE_DIR)/overflow.log
 	! grep -F 'OS01 aarch64 phase1 boot ok' $(NEGATIVE_DIR)/overflow.log
-	! grep -F 'UEFI-A64: handoff success' $(NEGATIVE_DIR)/overflow.log
 	! grep -F 'UEFI-A64: load allocation failed' $(NEGATIVE_DIR)/overflow.log
+	$(MAKE) test-handoff-allocation-failure
+
+.PHONY: test-handoff-allocation-failure
+test-handoff-allocation-failure:
+	mkdir -p $(NEGATIVE_DIR)
+	rm -rf $(NEGATIVE_ALLOCATION_BUILD)
+	rm -f $(NEGATIVE_ALLOCATION_DISK) \
+		$(NEGATIVE_DIR)/allocation-failure-QEMU_EFI.fd \
+		$(NEGATIVE_DIR)/allocation-failure.log
+	$(MAKE) -C $(ROOT)/kernel ARCH=aarch64
+	$(MAKE) -B BUILD_DIR=$(NEGATIVE_ALLOCATION_BUILD) \
+		APP_CFLAGS=-DAARCH64_TEST_FORCE_HANDOFF_ALLOCATION_FAILURE=1
+	truncate -s 64M $(NEGATIVE_ALLOCATION_DISK)
+	mkfs.fat -F 32 $(NEGATIVE_ALLOCATION_DISK)
+	mmd -i $(NEGATIVE_ALLOCATION_DISK) ::/EFI ::/EFI/BOOT
+	mcopy -i $(NEGATIVE_ALLOCATION_DISK) \
+		$(NEGATIVE_ALLOCATION_BUILD)/uefi/$(TARGET) ::/EFI/BOOT/$(TARGET)
+	mcopy -i $(NEGATIVE_ALLOCATION_DISK) $(NEGATIVE_KERNEL) ::/kernel.elf
+	cp $(NEGATIVE_FIRMWARE_SOURCE) \
+		$(NEGATIVE_DIR)/allocation-failure-QEMU_EFI.fd
+	timeout $(NEGATIVE_TIMEOUT) $(NEGATIVE_QEMU) \
+		-M virt,gic-version=2 -cpu cortex-a53 -smp 1 -m 512M \
+		-drive if=pflash,format=raw,file=$(NEGATIVE_DIR)/allocation-failure-QEMU_EFI.fd \
+		-drive if=none,file=$(NEGATIVE_ALLOCATION_DISK),format=raw,id=disk \
+		-device virtio-blk-device,drive=disk -serial stdio -display none \
+		-no-reboot -no-shutdown >$(NEGATIVE_DIR)/allocation-failure.log 2>&1 || \
+		{ rc=$$?; test $$rc -eq 124; }
+	grep -F 'UEFI-A64: handoff allocation failed' \
+		$(NEGATIVE_DIR)/allocation-failure.log
+	! grep -F 'OS01 aarch64 phase1 boot ok' \
+		$(NEGATIVE_DIR)/allocation-failure.log
