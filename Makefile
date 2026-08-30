@@ -286,8 +286,8 @@ run-aarch64-uefi: aarch64-uefi
 test-aarch64-uefi-smoke:
 	@mkdir -p $(AARCH64_BUILD_DIR)
 	@rm -f $(AARCH64_BUILD_DIR)/uefi-smoke.log
-	@status=0; timeout 30 $(MAKE) run-aarch64-uefi >$(AARCH64_BUILD_DIR)/uefi-smoke.log 2>&1 || status=$$?; \
-	[ $$status -eq 124 ] || { cat $(AARCH64_BUILD_DIR)/uefi-smoke.log; exit $$status; }; \
+	@set -e; status=0; timeout 30 $(MAKE) run-aarch64-uefi >$(AARCH64_BUILD_DIR)/uefi-smoke.log 2>&1 || status=$$?; \
+	if [ $$status -ne 124 ]; then cat $(AARCH64_BUILD_DIR)/uefi-smoke.log; exit 1; fi; \
 	grep -F 'OS01 aarch64 uefi handoff ok' $(AARCH64_BUILD_DIR)/uefi-smoke.log; \
 	grep -F 'OS01 aarch64 phase1 boot ok' $(AARCH64_BUILD_DIR)/uefi-smoke.log; \
 	grep -F '[tick] 1' $(AARCH64_BUILD_DIR)/uefi-smoke.log; \
