@@ -197,6 +197,14 @@ static int test_entry_must_be_in_load_interval(void)
            AARCH64_ELF_ERR_ENTRY;
 }
 
+static int test_handoff_accepts_el1_and_el2(void)
+{
+    return !aarch64_handoff_el_supported(UINT64_C(1) << 2) ||
+           !aarch64_handoff_el_supported(UINT64_C(2) << 2) ||
+           aarch64_handoff_el_supported(UINT64_C(0) << 2) ||
+           aarch64_handoff_el_supported(UINT64_C(3) << 2);
+}
+
 int main(void)
 {
     if (test_valid_image() || test_malformed_header() || test_bad_entry() ||
@@ -205,7 +213,8 @@ int main(void)
         test_empty_load_interval() ||
         test_overlapping_load_intervals() ||
         test_byte_disjoint_segments_may_share_page() ||
-        test_entry_must_be_in_load_interval())
+        test_entry_must_be_in_load_interval() ||
+        test_handoff_accepts_el1_and_el2())
         return 1;
 
     puts("aarch64 ELF loader: PASS");

@@ -4,6 +4,7 @@ RUNTIME_DIR := $(BUILD_DIR)/uefi-runtime
 OUTDIR := $(BUILD_DIR)/uefi
 TARGET := BOOTAA64.EFI
 APP_CFLAGS ?=
+AARCH64_UEFI_CFLAGS := -DUEFI_NO_UTF8 $(APP_CFLAGS)
 
 NEGATIVE_DIR := $(ROOT)/build/aarch64/uefi-negative
 NEGATIVE_BAD_BUILD := $(NEGATIVE_DIR)/bad-elf-build
@@ -39,9 +40,12 @@ $(OUTDIR)/$(TARGET): $(SRCS) $(ROOT)/boot/uefi/aarch64/loader.h
 	rm -f $(RUNTIME_DIR)/uefi/*.o $(RUNTIME_DIR)/uefi/*.a
 	sed -i 's/ARCH=$$(ARCH)/ARCH=$$(ARCH) OUTDIR=/' $(RUNTIME_DIR)/Makefile
 	sed -i '/^CFLAGS += -fshort-wchar/i CFLAGS += $$(APP_CFLAGS)' $(RUNTIME_DIR)/Makefile
+	sed -i '/^CFLAGS += -fshort-wchar/i CFLAGS += $$(APP_CFLAGS)' \
+		$(RUNTIME_DIR)/uefi/Makefile
 	@$(foreach source,$(SRCS),mkdir -p $(OUTDIR)$(dir $(source));)
 	$(MAKE) -C $(RUNTIME_DIR) ARCH=aarch64 TARGET=$(TARGET) \
-		OUTDIR=$(OUTDIR)/ SRCS="$(SRCS)" APP_CFLAGS="$(APP_CFLAGS)"
+		OUTDIR=$(OUTDIR)/ SRCS="$(SRCS)" \
+		APP_CFLAGS="$(AARCH64_UEFI_CFLAGS)"
 
 .PHONY: test-negative
 test-negative:
@@ -64,6 +68,8 @@ test-negative:
 		-no-reboot -no-shutdown >$(NEGATIVE_DIR)/bad-elf.log 2>&1 || \
 		{ rc=$$?; test $$rc -eq 124; }
 	grep -F 'UEFI-A64: bad ELF' $(NEGATIVE_DIR)/bad-elf.log
+	! grep -F 'OS01 aarch64 phase1 boot ok' $(NEGATIVE_DIR)/bad-elf.log
+	! grep -F 'UEFI-A64: handoff success' $(NEGATIVE_DIR)/bad-elf.log
 	cp $(NEGATIVE_KERNEL) $(NEGATIVE_DIR)/handoff-crossing-kernel.elf
 	printf '\360\377\035\100\000\000\000\000' | dd \
 		of=$(NEGATIVE_DIR)/handoff-crossing-kernel.elf bs=1 seek=200 \
@@ -82,6 +88,8 @@ test-negative:
 		-no-reboot -no-shutdown >$(NEGATIVE_DIR)/handoff-crossing.log 2>&1 || \
 		{ rc=$$?; test $$rc -eq 124; }
 	grep -F 'UEFI-A64: bad ELF' $(NEGATIVE_DIR)/handoff-crossing.log
+	! grep -F 'OS01 aarch64 phase1 boot ok' $(NEGATIVE_DIR)/handoff-crossing.log
+	! grep -F 'UEFI-A64: handoff success' $(NEGATIVE_DIR)/handoff-crossing.log
 	$(MAKE) -B BUILD_DIR=$(NEGATIVE_OVERFLOW_BUILD) \
 		APP_CFLAGS=-DAARCH64_TEST_FORCE_HANDOFF_OVERFLOW=1
 	truncate -s 64M $(NEGATIVE_OVERFLOW_DISK)
@@ -98,3 +106,6 @@ test-negative:
 		-no-reboot -no-shutdown >$(NEGATIVE_DIR)/overflow.log 2>&1 || \
 		{ rc=$$?; test $$rc -eq 124; }
 	grep -F 'UEFI-A64: handoff overflow' $(NEGATIVE_DIR)/overflow.log
+	! grep -F 'OS01 aarch64 phase1 boot ok' $(NEGATIVE_DIR)/overflow.log
+	! grep -F 'UEFI-A64: handoff success' $(NEGATIVE_DIR)/overflow.log
+	! grep -F 'UEFI-A64: load allocation failed' $(NEGATIVE_DIR)/overflow.log
