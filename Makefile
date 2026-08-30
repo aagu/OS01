@@ -259,11 +259,12 @@ run-aarch64:
 .PHONY: aarch64-uefi
 aarch64-uefi: $(AARCH64_UEFI_DISK) $(AARCH64_UEFI_FIRMWARE)
 
-$(AARCH64_UEFI_APP): boot/uefi/aarch64/Makefile \
-		boot/uefi/aarch64/main.c boot/uefi/aarch64/elf.c \
-		boot/uefi/aarch64/handoff.S \
-		boot/uefi/aarch64/loader.h kernel/include/kernel/bootinfo.h
-	$(MAKE) -C boot/uefi/aarch64
+$(AARCH64_UEFI_APP): boot/uefi/Makefile \
+		boot/uefi/main.c boot/uefi/arch/arch.h \
+		boot/uefi/arch/aarch64/boot.c boot/uefi/arch/aarch64/elf.c \
+		boot/uefi/arch/aarch64/handoff.S \
+		boot/uefi/arch/aarch64/loader.h kernel/include/kernel/bootinfo.h
+	$(MAKE) -C boot/uefi ARCH=aarch64
 
 .PHONY: aarch64-uefi-kernel
 aarch64-uefi-kernel:

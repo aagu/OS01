@@ -1,19 +1,15 @@
+/* boot/uefi/arch/aarch64/boot.c — aarch64 arch hooks.
+ *
+ * Kernel: validated ELF loaded at fixed PT_LOAD physical addresses
+ *   (entry 0x40080000, see loader.h).
+ * Handoff: boot_context at 0x401e0000 in a 31-page allocation; the
+ *   firmware FDT is copied after the context, and the raw UEFI memory
+ *   map is placed after that, up to the trampoline page @ 0x401ff000.
+ * Memory map: raw UEFI descriptors (BOOT_MEMORY_FORMAT_UEFI_RAW).
+ */
 #include <uefi.h>
-
-#ifndef UINT32_C
-#define UINT32_C(value) value##U
-#endif
-#ifndef UINT64_C
-#define UINT64_C(value) value##ULL
-#endif
-#ifndef UINT32_MAX
-#define UINT32_MAX UINT32_C(0xffffffff)
-#endif
-
-#include "../../../kernel/include/kernel/bootinfo.h"
+#include "../arch.h"
 #include "loader.h"
-
-typedef efi_status_t EFI_STATUS;
 
 /* QEMU virt's PL011 UART: physical MMIO at 0x09000000. */
 #define PL011_BASE       ((volatile uint32_t *)(uintptr_t)0x09000000U)
@@ -30,16 +26,6 @@ typedef efi_status_t EFI_STATUS;
 #define AARCH64_HANDOFF_DATA_PAGES (AARCH64_HANDOFF_PAGES - 1)
 #define AARCH64_FDT_MAGIC          UINT32_C(0xd00dfeed)
 #define AARCH64_FDT_HEADER_SIZE    UINT32_C(40)
-#define AARCH64_MEMORY_MAP_SLACK   2U
-#define AARCH64_EFI_STATUS_CODE_MASK UINT64_C(0x7fffffffffffffff)
-
-struct aarch64_fixed_allocation {
-    efi_physical_address_t address;
-    uintn_t pages;
-};
-
-static struct aarch64_fixed_allocation *kernel_allocations;
-static uint16_t kernel_allocation_count;
 
 /* UEFI Device Tree Table GUID: b1b621d5-f19c-41a5-830b-d9152c69aae0. */
 static const efi_guid_t fdt_table_guid = {
@@ -52,6 +38,17 @@ extern const uint8_t aarch64_handoff_stub_end[];
 __attribute__((noreturn)) void aarch64_enter_kernel(uint64_t entry,
                                                      uint64_t context_phys);
 
+struct aarch64_fixed_allocation {
+    efi_physical_address_t address;
+    uintn_t pages;
+};
+
+static struct aarch64_fixed_allocation *kernel_allocations;
+static uint16_t kernel_allocation_count;
+static uint64_t handoff_cursor;
+static int aarch64_data_reserved;        /* 0x401e0000, DATA_PAGES */
+static int aarch64_trampoline_reserved;  /* 0x401ff000, 1 page */
+
 static void pl011_putc(char c)
 {
     while (PL011_BASE[PL011_FR / sizeof(uint32_t)] & PL011_FR_TXFF)
@@ -63,66 +60,6 @@ static void pl011_puts(const char *s)
 {
     while (*s)
         pl011_putc(*s++);
-}
-
-static void release_kernel_allocations(void)
-{
-    while (kernel_allocation_count != 0) {
-        const struct aarch64_fixed_allocation *allocation;
-
-        kernel_allocation_count--;
-        allocation = &kernel_allocations[kernel_allocation_count];
-        (void)BS->FreePages(allocation->address, allocation->pages);
-    }
-    if (kernel_allocations) {
-        free(kernel_allocations);
-        kernel_allocations = NULL;
-    }
-}
-
-static void release_handoff_allocations(int data_reserved,
-                                        int trampoline_reserved)
-{
-    if (trampoline_reserved)
-        (void)BS->FreePages((efi_physical_address_t)AARCH64_TRAMPOLINE_BASE, 1);
-    if (data_reserved) {
-        (void)BS->FreePages((efi_physical_address_t)AARCH64_HANDOFF_BASE,
-                            (uintn_t)AARCH64_HANDOFF_DATA_PAGES);
-    }
-}
-
-/* The staged POSIX-UEFI UEFI_NO_UTF8 adapter converts this standard status
- * number back to EFIERR(number) at the application entry boundary. */
-static int main_error_code(EFI_STATUS status)
-{
-    uint32_t code =
-        (uint32_t)((uint64_t)status & AARCH64_EFI_STATUS_CODE_MASK);
-
-    if (code == 0) {
-        code = (uint32_t)((uint64_t)EFI_LOAD_ERROR &
-                          AARCH64_EFI_STATUS_CODE_MASK);
-    }
-    return (int)code;
-}
-
-static EFI_STATUS handoff_overflow(void)
-{
-    pl011_puts("UEFI-A64: handoff overflow\r\n");
-    return EFI_BUFFER_TOO_SMALL;
-}
-
-static int guid_equal(const efi_guid_t *left, const efi_guid_t *right)
-{
-    uint32_t index;
-
-    if (left->Data1 != right->Data1 || left->Data2 != right->Data2 ||
-        left->Data3 != right->Data3)
-        return 0;
-    for (index = 0; index < sizeof(left->Data4); index++) {
-        if (left->Data4[index] != right->Data4[index])
-            return 0;
-    }
-    return 1;
 }
 
 static uint32_t load_be32(const void *address)
@@ -179,6 +116,21 @@ static void synchronize_code_range(const void *address, uint64_t size)
     __asm__ volatile("dsb ish\n\tisb" : : : "memory");
 }
 
+static void release_kernel_allocations(void)
+{
+    while (kernel_allocation_count != 0) {
+        const struct aarch64_fixed_allocation *allocation;
+
+        kernel_allocation_count--;
+        allocation = &kernel_allocations[kernel_allocation_count];
+        (void)BS->FreePages(allocation->address, allocation->pages);
+    }
+    if (kernel_allocations) {
+        free(kernel_allocations);
+        kernel_allocations = NULL;
+    }
+}
+
 static EFI_STATUS prepare_trampoline(void)
 {
     uint64_t stub_size =
@@ -225,33 +177,62 @@ static const void *find_fdt(uint32_t *size_out)
     return NULL;
 }
 
-static void copy_gop(struct boot_context *context)
+const char_t *arch_kernel_path(void)
 {
-    efi_guid_t gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
-    efi_gop_t *gop = NULL;
-    EFI_STATUS status;
-
-    status = BS->LocateProtocol(&gop_guid, NULL, (void **)&gop);
-    if (EFI_ERROR(status) || !gop || !gop->Mode ||
-        !gop->Mode->Information || gop->Mode->FrameBufferBase == 0 ||
-        gop->Mode->FrameBufferSize == 0)
-        return;
-
-    context->graphics.HorizontalResolution =
-        gop->Mode->Information->HorizontalResolution;
-    context->graphics.VerticalResolution =
-        gop->Mode->Information->VerticalResolution;
-    context->graphics.PixelsPerScanLine =
-        gop->Mode->Information->PixelsPerScanLine;
-    context->graphics.FrameBufferBase =
-        (uint64_t)gop->Mode->FrameBufferBase;
-    context->graphics.FrameBufferSize =
-        (uint64_t)gop->Mode->FrameBufferSize;
-    context->flags |= BOOT_CONTEXT_HAS_FRAMEBUFFER;
+    return L"\\kernel.elf";
 }
 
-EFI_STATUS aarch64_load_kernel(const void *image, uint64_t image_size,
-                               uint64_t *entry_out)
+efi_status_t arch_init_handoff(struct boot_context **ctx_out)
+{
+    efi_physical_address_t addr;
+    struct boot_context *ctx;
+    EFI_STATUS status;
+
+    addr = (efi_physical_address_t)AARCH64_HANDOFF_BASE;
+    status = BS->AllocatePages(AllocateAddress, EfiLoaderData,
+                               (uintn_t)AARCH64_HANDOFF_DATA_PAGES, &addr);
+    if (EFI_ERROR(status) || addr != AARCH64_HANDOFF_BASE) {
+        if (!EFI_ERROR(status))
+            (void)BS->FreePages(addr, (uintn_t)AARCH64_HANDOFF_DATA_PAGES);
+        return EFI_ERROR(status) ? status : EFI_OUT_OF_RESOURCES;
+    }
+    aarch64_data_reserved = 1;
+
+    addr = (efi_physical_address_t)AARCH64_TRAMPOLINE_BASE;
+    status = BS->AllocatePages(AllocateAddress, EfiLoaderCode, 1, &addr);
+    if (EFI_ERROR(status) || addr != AARCH64_TRAMPOLINE_BASE) {
+        if (!EFI_ERROR(status))
+            (void)BS->FreePages(addr, 1);
+        status = EFI_ERROR(status) ? status : EFI_OUT_OF_RESOURCES;
+        goto fail;
+    }
+    aarch64_trampoline_reserved = 1;
+
+    memset((void *)(uintptr_t)AARCH64_HANDOFF_BASE, 0,
+           (size_t)(AARCH64_HANDOFF_END - AARCH64_HANDOFF_BASE));
+    ctx = (struct boot_context *)(uintptr_t)AARCH64_HANDOFF_BASE;
+    boot_context_init(ctx);
+    ctx->boot_cpu_id = read_mpidr();
+    ctx->flags |= BOOT_CONTEXT_HAS_BOOT_CPU_ID;
+    handoff_cursor = align_up_8(AARCH64_HANDOFF_BASE + sizeof(*ctx));
+
+    status = prepare_trampoline();   /* pre-EBS so failure is reportable */
+    if (EFI_ERROR(status))
+        goto fail;
+
+    *ctx_out = ctx;
+    return EFI_SUCCESS;
+
+fail:
+    /* arch_release() is idempotent (its *_reserved flags clear on release),
+     * so this internal fail path and the common main.c fail path calling
+     * arch_release() again is safe — the second call is a no-op. */
+    arch_release();
+    return status;
+}
+
+efi_status_t arch_load_kernel(const void *image, uint64_t image_size,
+                              uint64_t *entry_out)
 {
     const uint8_t *bytes = (const uint8_t *)image;
     const struct aarch64_elf64_ehdr *ehdr;
@@ -395,219 +376,71 @@ EFI_STATUS aarch64_load_kernel(const void *image, uint64_t image_size,
     return EFI_SUCCESS;
 }
 
-EFI_STATUS aarch64_build_handoff(efi_handle_t image_handle,
-                                 uint64_t *context_phys_out)
+efi_status_t arch_setup_graphics(struct boot_context *ctx)
 {
-    efi_physical_address_t allocation;
-    struct boot_context *context;
-    const void *firmware_fdt;
-    uint32_t fdt_size = 0;
-    uint64_t cursor;
-    uint64_t map_capacity;
-    efi_memory_descriptor_t *memory_map;
-    uintn_t required_size = 0;
-    uintn_t map_key = 0;
-    uintn_t descriptor_size = 0;
-    uint32_t descriptor_version = 0;
-    EFI_STATUS status;
-    int data_reserved = 0;
-    int trampoline_reserved = 0;
-
-    if (!context_phys_out)
-        return EFI_INVALID_PARAMETER;
-
-    allocation = (efi_physical_address_t)AARCH64_HANDOFF_BASE;
-    status = BS->AllocatePages(AllocateAddress, EfiLoaderData,
-                               (uintn_t)AARCH64_HANDOFF_DATA_PAGES,
-                               &allocation);
-    if (EFI_ERROR(status) || allocation != AARCH64_HANDOFF_BASE) {
-        if (!EFI_ERROR(status)) {
-            (void)BS->FreePages(allocation,
-                                (uintn_t)AARCH64_HANDOFF_DATA_PAGES);
-        }
-        pl011_puts("UEFI-A64: handoff allocation failed\r\n");
-        return EFI_ERROR(status) ? status : EFI_OUT_OF_RESOURCES;
-    }
-    data_reserved = 1;
-
-    allocation = (efi_physical_address_t)AARCH64_TRAMPOLINE_BASE;
-    status = BS->AllocatePages(AllocateAddress, EfiLoaderCode, 1, &allocation);
-    if (EFI_ERROR(status) || allocation != AARCH64_TRAMPOLINE_BASE) {
-        if (!EFI_ERROR(status))
-            (void)BS->FreePages(allocation, 1);
-        pl011_puts("UEFI-A64: handoff allocation failed\r\n");
-        status = EFI_ERROR(status) ? status : EFI_OUT_OF_RESOURCES;
-        goto fail;
-    }
-    trampoline_reserved = 1;
-
-    memset((void *)(uintptr_t)AARCH64_HANDOFF_BASE, 0,
-           (size_t)(AARCH64_HANDOFF_END - AARCH64_HANDOFF_BASE));
-    context = (struct boot_context *)(uintptr_t)AARCH64_HANDOFF_BASE;
-    boot_context_init(context);
-    context->boot_cpu_id = read_mpidr();
-    context->flags |= BOOT_CONTEXT_HAS_BOOT_CPU_ID;
-    copy_gop(context);
-
-    cursor = align_up_8(AARCH64_HANDOFF_BASE + sizeof(*context));
-    firmware_fdt = find_fdt(&fdt_size);
-    if (firmware_fdt) {
-        if ((uint64_t)fdt_size > AARCH64_TRAMPOLINE_BASE - cursor) {
-            status = handoff_overflow();
-            goto fail;
-        }
-        memcpy((void *)(uintptr_t)cursor, firmware_fdt, (size_t)fdt_size);
-        context->firmware.dtb = cursor;
-        context->flags |= BOOT_CONTEXT_HAS_DTB;
-        cursor = align_up_8(cursor + (uint64_t)fdt_size);
-    }
-
-    status = prepare_trampoline();
-    if (EFI_ERROR(status))
-        goto fail;
-    if (!boot_context_valid(context)) {
-        pl011_puts("UEFI-A64: corrupt handoff\r\n");
-        status = EFI_LOAD_ERROR;
-        goto fail;
-    }
-
-    if (cursor >= AARCH64_TRAMPOLINE_BASE) {
-        status = handoff_overflow();
-        goto fail;
-    }
-    map_capacity = AARCH64_TRAMPOLINE_BASE - cursor;
-    memory_map = (efi_memory_descriptor_t *)(uintptr_t)cursor;
-
-    status = BS->GetMemoryMap(&required_size, NULL, &map_key,
-                              &descriptor_size, &descriptor_version);
-    if (status != EFI_BUFFER_TOO_SMALL || descriptor_size == 0)
-        goto fail_with_status;
-    if ((uint64_t)required_size > map_capacity ||
-        descriptor_size > (uintn_t)map_capacity ||
-        AARCH64_MEMORY_MAP_SLACK * descriptor_size >
-            (uintn_t)map_capacity - required_size) {
-        status = handoff_overflow();
-        goto fail;
-    }
-
-    for (;;) {
-        uintn_t final_size = (uintn_t)map_capacity;
-
-        status = BS->GetMemoryMap(&final_size, memory_map, &map_key,
-                                  &descriptor_size, &descriptor_version);
-        if (status == EFI_BUFFER_TOO_SMALL) {
-            status = handoff_overflow();
-            goto fail;
-        }
-        if (EFI_ERROR(status))
-            goto fail;
-        if (descriptor_size == 0 || final_size > (uintn_t)map_capacity ||
-            final_size % descriptor_size != 0 ||
-            final_size / descriptor_size > UINT32_MAX) {
-            pl011_puts("UEFI-A64: corrupt handoff\r\n");
-            status = EFI_LOAD_ERROR;
-            goto fail;
-        }
-
-        context->memory.entries = cursor;
-        context->memory.entry_count =
-            (uint32_t)(final_size / descriptor_size);
-        context->memory.entry_size = (uint32_t)descriptor_size;
-        context->memory.format = BOOT_MEMORY_FORMAT_UEFI_RAW;
-        context->memory.descriptor_version = descriptor_version;
-        context->flags |= BOOT_CONTEXT_HAS_MEMORY_MAP;
-        if (!boot_context_valid(context)) {
-            pl011_puts("UEFI-A64: corrupt handoff\r\n");
-            status = EFI_LOAD_ERROR;
-            goto fail;
-        }
-
-        status = BS->ExitBootServices(image_handle, map_key);
-        if (status == EFI_INVALID_PARAMETER)
-            continue;
-        if (EFI_ERROR(status)) {
-            pl011_puts("UEFI-A64: ExitBootServices failed\r\n");
-            goto fail;
-        }
-
-        *context_phys_out = AARCH64_HANDOFF_BASE;
-        return EFI_SUCCESS;
-    }
-
-fail_with_status:
-    if (!EFI_ERROR(status))
-        status = EFI_LOAD_ERROR;
-fail:
-    release_handoff_allocations(data_reserved, trampoline_reserved);
-    return status;
-}
-
-static EFI_STATUS read_kernel_image(void **image_out, uint64_t *size_out)
-{
-    FILE *file;
-    void *image;
-    long size;
-
-    if (!image_out || !size_out)
-        return EFI_INVALID_PARAMETER;
-
-    file = fopen(L"\\kernel.elf", L"r");
-    if (!file)
-        return EFI_NOT_FOUND;
-    if (fseek(file, 0, SEEK_END) != 0) {
-        fclose(file);
-        return EFI_LOAD_ERROR;
-    }
-    size = ftell(file);
-    if (size <= 0 || fseek(file, 0, SEEK_SET) != 0) {
-        fclose(file);
-        return EFI_LOAD_ERROR;
-    }
-
-    image = malloc((size_t)size);
-    if (!image) {
-        fclose(file);
-        return EFI_OUT_OF_RESOURCES;
-    }
-    if (fread(image, 1, (size_t)size, file) != (size_t)size) {
-        fclose(file);
-        free(image);
-        return EFI_LOAD_ERROR;
-    }
-    fclose(file);
-
-    *image_out = image;
-    *size_out = (uint64_t)size;
+    /* Best-effort: a missing GOP must not abort the boot. */
+    (void)capture_graphics(ctx);
     return EFI_SUCCESS;
 }
 
-int main(int argc, char_t **argv)
+efi_status_t arch_fill_firmware(struct boot_context *ctx)
 {
-    EFI_STATUS status;
-    void *image = NULL;
-    uint64_t image_size = 0;
-    uint64_t entry = 0;
-    uint64_t context_phys = 0;
+    const void *firmware_fdt;
+    uint32_t fdt_size = 0;
 
-    (void)argc;
-    (void)argv;
+    firmware_fdt = find_fdt(&fdt_size);
+    if (!firmware_fdt)
+        return EFI_SUCCESS;
+    if ((uint64_t)fdt_size > AARCH64_TRAMPOLINE_BASE - handoff_cursor)
+        return EFI_BUFFER_TOO_SMALL;
+    memcpy((void *)(uintptr_t)handoff_cursor, firmware_fdt, (size_t)fdt_size);
+    ctx->firmware.dtb = handoff_cursor;
+    ctx->flags |= BOOT_CONTEXT_HAS_DTB;
+    handoff_cursor = align_up_8(handoff_cursor + (uint64_t)fdt_size);
+    return EFI_SUCCESS;
+}
 
-    status = read_kernel_image(&image, &image_size);
-    if (EFI_ERROR(status)) {
-        pl011_puts("UEFI-A64: bad ELF\r\n");
-        return main_error_code(status);
+void arch_memory_buffer(efi_physical_address_t *phys_out,
+                        uint64_t *capacity_out)
+{
+    *phys_out = handoff_cursor;
+    *capacity_out = AARCH64_TRAMPOLINE_BASE - handoff_cursor;
+}
+
+void arch_build_memory(struct boot_context *ctx,
+                       efi_physical_address_t desc_phys,
+                       uintn_t desc_size, uintn_t desc_count,
+                       uint32_t desc_version)
+{
+    ctx->memory.entries = desc_phys;
+    ctx->memory.entry_count = (uint32_t)desc_count;
+    ctx->memory.entry_size = (uint32_t)desc_size;
+    ctx->memory.format = BOOT_MEMORY_FORMAT_UEFI_RAW;
+    ctx->memory.descriptor_version = desc_version;
+    ctx->flags |= BOOT_CONTEXT_HAS_MEMORY_MAP;
+}
+
+void arch_release(void)
+{
+    release_kernel_allocations();
+    if (aarch64_trampoline_reserved) {
+        (void)BS->FreePages((efi_physical_address_t)AARCH64_TRAMPOLINE_BASE, 1);
+        aarch64_trampoline_reserved = 0;
     }
-
-    status = aarch64_load_kernel(image, image_size, &entry);
-    free(image);
-    if (EFI_ERROR(status))
-        return main_error_code(status);
-
-    status = aarch64_build_handoff(IM, &context_phys);
-    if (EFI_ERROR(status)) {
-        release_kernel_allocations();
-        return main_error_code(status);
+    if (aarch64_data_reserved) {
+        (void)BS->FreePages((efi_physical_address_t)AARCH64_HANDOFF_BASE,
+                            (uintn_t)AARCH64_HANDOFF_DATA_PAGES);
+        aarch64_data_reserved = 0;
     }
+}
 
+void arch_puts(const char *s)
+{
+    pl011_puts(s);
+}
+
+__attribute__((noreturn)) void arch_enter_kernel(uint64_t entry,
+                                                 uint64_t context_phys)
+{
     aarch64_enter_kernel(entry, context_phys);
 }
