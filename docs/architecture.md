@@ -8,13 +8,12 @@ UEFI firmware → boot/uefi/BOOTX64.EFI → kernel/kernel.bin (physical 0x100000
 
 The UEFI bootloader (`boot/uefi/main.c`, clang `--target=x86_64-pc-win32-coff` — LLP64) loads `kernel.bin` to physical `0x100000` and stores a `BOOT_INFO` struct at physical `0x60000`. **All BOOT_INFO fields must use `uint32_t`/`uint64_t`** because the LLP64 bootloader and LP64 kernel disagree on `sizeof(long)`.
 
-### AArch64 QEMU `virt` boot paths
+### AArch64 QEMU `virt` boot path
 
-The AArch64 phase-1 kernel supports two intentionally separate boot paths:
+The AArch64 phase-1 kernel boots exclusively through UEFI. There is no
+direct QEMU `-kernel` regression path — aarch64 is single-arch via
+`make run-aarch64-uefi`.
 
-- `make run-aarch64` retains the direct QEMU `-kernel` regression path.  QEMU
-  provides the existing FDT-or-zero `x0` input, and this path retains its
-  current SMP behavior.
 - `make run-aarch64-uefi` boots through AAVMF/UEFI.  It builds a 64 MiB ESP
   image with the removable-media fallback application at
   `/EFI/BOOT/BOOTAA64.EFI`, copies the host AAVMF image to

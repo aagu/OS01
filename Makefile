@@ -336,7 +336,7 @@ test-network:
 .PHONY: clean
 clean:
 	rm -rf disk.img
-	make -C boot/uefi clean-all
+	make -C boot/uefi clean
 	make -C kernel clean
 	make -C libc clean
 	make -C user clean

@@ -16,6 +16,8 @@
 #define X86_DESC_BASE         UINT64_C(0x61000)
 #define X86_DESC_CAPACITY     UINT64_C(0x2000)
 #define X86_E820_BASE         UINT64_C(0x63000)
+#define X86_E820_CAPACITY     UINT64_C(0x1000)
+#define X86_E820_ENTRY_COUNT  (X86_E820_CAPACITY / sizeof(struct E820_ENTRY))
 
 static int x86_kernel_reserved;       /* pages at 0x100000 allocated */
 static uintn_t x86_kernel_pages;
@@ -236,8 +238,8 @@ void arch_memory_buffer(efi_physical_address_t *phys_out,
 }
 
 static void x86_build_e820(efi_memory_descriptor_t *map, uintn_t map_size,
-                           uintn_t desc_size, struct E820_ENTRY *out,
-                           uint32_t *count_out)
+                           uintn_t desc_size, uint32_t capacity,
+                           struct E820_ENTRY *out, uint32_t *count_out)
 {
     struct E820_ENTRY *last = NULL;
     uint64_t last_end = 0;
@@ -277,9 +279,20 @@ static void x86_build_e820(efi_memory_descriptor_t *map, uintn_t map_size,
         }
         if (last && last->type == (uint32_t)type &&
             m->PhysicalStart == last_end) {
+            /* Always safe to extend the last entry — it was already
+             * counted toward capacity. */
             last->length += (uint64_t)m->NumberOfPages << 12;
             last_end += (uint64_t)m->NumberOfPages << 12;
         } else {
+            if (count >= capacity) {
+                /* E820 output full: stop writing new entries. Any
+                 * remaining descriptors would only be a coarse split
+                 * of an already-recorded RAM/reserved run, and the
+                 * kernel's 32-entry cap (pmm.c) makes further growth
+                 * unproductive. The kernel never sees more than
+                 * `capacity` entries. */
+                break;
+            }
             out[count].address = m->PhysicalStart;
             out[count].length = (uint64_t)m->NumberOfPages << 12;
             out[count].type = (uint32_t)type;
@@ -302,10 +315,12 @@ void arch_build_memory(struct boot_context *ctx,
 
     (void)desc_version;
 
-    /* E820 count <= raw descriptor count <= 170 (8 KB desc cap), well under
-     * the ~200-entry E820 range, so no separate overflow path is needed. */
+    /* x86_build_e820 caps its writes at X86_E820_ENTRY_COUNT, so the
+     * 4 KB E820 range cannot overflow regardless of how the firmware
+     * splits the descriptor stream. */
     x86_build_e820((efi_memory_descriptor_t *)(uintptr_t)desc_phys,
-                   (uintn_t)desc_count * desc_size, desc_size, e820, &count);
+                   (uintn_t)desc_count * desc_size, desc_size,
+                   X86_E820_ENTRY_COUNT, e820, &count);
 
     /* Sort ascending by address (the raw map is not guaranteed sorted). */
     for (i = 0; i < count; i++) {

@@ -79,18 +79,12 @@ VS Code 调试的配置可以查看 `.vscode` 文件夹。
 
 ### AArch64 phase 1
 
-`.vscode/launch.json` 提供 **Debug AArch64 kernel (QEMU)** 配置。它会先执行
-`make debug-aarch64`，以调试编译选项构建 AArch64 内核，然后启动暂停的 QEMU
-`virt` 机器并在 TCP 1234 开启 GDB 服务器。按 `F5` 并选择该配置即可连接，初始
-停在入口点。
-
-需要安装 VS Code 的 **C/C++** 扩展，以及支持 AArch64 的 GDB；本机 `gdb` 已支持
-AArch64 时可直接使用。若发行版将其拆分为多架构工具，请安装 `gdb-multiarch` 或
-`aarch64-none-elf-gdb`，并把 `.vscode/launch.json` 中的 `miDebuggerPath` 改为对应
-可执行文件路径。
-
-QEMU 正在运行时，调试终端会被保留；停止调试后请在该终端按 `Ctrl-C` 结束 QEMU，
-再启动下一次调试，避免 TCP 1234 被占用。
+AArch64 boots only through UEFI (`make run-aarch64-uefi`); the direct
+QEMU `-kernel` boot path has been removed, so the previous
+**Debug AArch64 kernel (QEMU)** launch configuration is no longer
+applicable.  UEFI hand-off and the early phase-1 setup are exercised by
+running `make run-aarch64-uefi` and inspecting the PL011 serial output.
+GDB attach against the UEFI boot path is not wired up.
 
 ## 4. 串口调试
 

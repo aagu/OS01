@@ -123,6 +123,14 @@ int kernel_main(const struct boot_context *bootctx)
     // ═══ 0. Stack canary — MUST be the first statement ════════
     __stack_chk_guard = arch_cycle_counter() ^ 0xDEADBEEFCAFEBABE;
 
+    // ═══ 0.5. Handoff sanity — symmetric with aarch64_main ═══
+    // init_serial() has not run yet, so report via write_serial directly.
+    if (!boot_context_valid(bootctx)) {
+        const char *p = "\n*** Corrupt UEFI handoff ***\n";
+        for (; *p; p++) write_serial(*p);
+        while (1) arch_cpu_halt();
+    }
+
     // ═══ 1. CPU + interrupt infrastructure ═══════════════════
     Pos.Phy_addr = (uint32_t *)bootctx->graphics.FrameBufferBase;
     Pos.FB_length = bootctx->graphics.FrameBufferSize;

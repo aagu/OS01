@@ -177,6 +177,15 @@ int main(int argc, char_t **argv)
                                   &map_key, &desc_size, &desc_version);
         if (EFI_ERROR(status))
             break;
+        if (map_size % desc_size != 0) {
+            /* Corrupt handoff: the firmware filled the buffer with a
+             * size that is not a whole number of descriptors, so the
+             * stream is unaligned with desc_size and cannot be safely
+             * walked. */
+            arch_puts("UEFI: corrupt handoff\r\n");
+            status = EFI_LOAD_ERROR;
+            break;
+        }
         arch_build_memory(ctx, desc_phys, desc_size,
                           (uint32_t)(map_size / desc_size), desc_version);
         if (!boot_context_valid(ctx)) {
