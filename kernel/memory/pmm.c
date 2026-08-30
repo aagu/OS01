@@ -91,7 +91,11 @@ void pmm_init(const struct BOOT_MEMORY_MAP *map)
     struct E820_ENTRY *p = (struct E820_ENTRY *)(uintptr_t)map->entries;
 
     debug_mm("Display Physics Address MAP,Type(1:RAM,2:ROM or Reserved,3:ACPI Reclaim Memory,4:ACPI NVS Memory,Others:Undefine)\n");
-    for (i = 0; i < map->entry_count; i++)
+    /* PMMngr.e820_entrys is a fixed 32-entry array; do not write past it.
+     * The old type-5 sentinel break used to truncate the map here, but that
+     * was removed (the loader no longer guarantees a sentinel) — cap by
+     * count instead, and ignore any entries beyond the array's capacity. */
+    for (i = 0; i < map->entry_count && i < 32; i++)
     {
         debug_mm("Address:%#018lx\tLength:%#018lx\tType:%2d\n",p->address,p->length,p->type);
 		if(p->type == 1)
