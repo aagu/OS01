@@ -670,6 +670,7 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
         if (!kbuf) return -1;
 
         uint64_t committed = 0;
+        int read_err = 0;
         for (;;) {
             uint64_t remaining = size - committed;
             if (remaining == 0) break;
@@ -677,7 +678,8 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
                              ? remaining : UACCESS_BOUNCE_SIZE;
 
             int64_t n = vfs_read(f->node, f->offset, chunk, kbuf);
-            if (n <= 0) break;            // 0 = EOF, <0 = error
+            if (n < 0) { read_err = 1; break; }   // I/O error
+            if (n == 0) break;                    // EOF
 
             ssize_t rc = copy_to_user_ft(
                 (uint8_t *)buf + committed, kbuf, (size_t)n);
@@ -695,7 +697,11 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
             if ((uint64_t)n < chunk) break;   // short read (EOF)
         }
         kfree(kbuf);
-        if (committed == 0) return -1;        // vfs_read error
+        /* EOF (vfs_read returned 0, no bytes committed) must return 0,
+         * not -1: the old "committed==0 → -1" made a clean read-at-EOF
+         * look like an I/O error (libc mapped it to EPERM), which broke
+         * busybox tail's read-to-EOF loops. */
+        if (committed == 0 && read_err) return -1;
         return (int64_t)committed;
     }
     case FD_PIPE:
