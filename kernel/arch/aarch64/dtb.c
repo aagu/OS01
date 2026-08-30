@@ -406,15 +406,22 @@ static void dtb_parse_cpus(struct fdt_cursor *c)
     }
 }
 
-/* /timer — single `interrupts` property; the first cell is the PPI. */
+/* /timer — ARM's generic-timer binding supplies four three-cell GIC
+ * specifiers in this order: secure physical, non-secure physical, virtual,
+ * and hypervisor.  Each GICv2 specifier is <type, number, flags>; the
+ * non-secure physical timer used by CNTP is the second tuple. */
 static void dtb_parse_timer(struct fdt_cursor *c)
 {
     uint32_t len = 0;
     const void *data = fdt_find_prop(c, "interrupts", &len);
-    if (data && len >= 4) {
-        uint32_t intid = load_be32(data);
-        if (intid <= 1023) {
-            g_dtb.cntp_ppi = intid;
+    const uint8_t *specifiers = (const uint8_t *)data;
+
+    if (specifiers && len >= 6 * sizeof(uint32_t)) {
+        uint32_t type = load_be32(specifiers + 3 * sizeof(uint32_t));
+        uint32_t number = load_be32(specifiers + 4 * sizeof(uint32_t));
+
+        if (type == 1 && number <= 15) {
+            g_dtb.cntp_ppi = 16 + number;
         }
     }
     fdt_skip_node(c);
