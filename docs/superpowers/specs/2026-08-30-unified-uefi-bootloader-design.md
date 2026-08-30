@@ -94,7 +94,9 @@ efi_status_t arch_setup_graphics(struct boot_context *ctx);
      * use the shared capture_graphics() helper from main.c:
      * x86:     parse config.txt, select + SetMode to the expected
      *          resolution, then capture_graphics() — fail HARD on GOP
-     *          error (preserves today's x86 behavior)
+     *          error (preserves today's x86 behavior). Must carry over the
+     *          EFI_NOT_STARTED fallback (SetMode(0) + ConOut/StdErr Reset)
+     *          from boot/uefi/main.c:212-217.
      * aarch64: capture_graphics() best-effort — silent on missing GOP,
      *          boot continues without a framebuffer (preserves today's
      *          aarch64 behavior) */
@@ -134,7 +136,10 @@ void arch_release(void);
      * any point after main() begins. */
 
 void arch_puts(const char *s);
-    /* Console for common lifecycle messages. x86: printf("%s", s)
+    /* Console for common lifecycle messages.
+     * x86:     printf(CL("%S"), s)  — uppercase %S: under UEFI_NO_UTF8 the
+     *          wide printf reads a narrow UTF-8 char* vararg (%s would read
+     *          a wide char_t* and garble ASCII). Never NULL.
      * aarch64: pl011_puts(s). Keeps aarch64 on the raw UART. */
 
 __attribute__((noreturn)) void arch_enter_kernel(uint64_t entry,
@@ -171,6 +176,11 @@ aarch64 entry 0x40080000 / handoff 0x401e0000·31 pages / trampoline
 already true, kept in sync by review.
 
 ## 5. Common `main.c` lifecycle (points 3, 4)
+
+`MAP_SLACK` is a shared constant **= 2** (aarch64's existing
+`AARCH64_MEMORY_MAP_SLACK`; it absorbs descriptor records split by a
+firmware allocation between the size query and the fetch). The x86 code's
+old 4·desc_size margin is subsumed by the fixed-capacity scratch.
 
 ```c
 int main(int argc, char_t **argv)
@@ -282,8 +292,13 @@ x86 no longer builds objects in `boot/uefi/`).
 **UEFI_NO_UTF8 on both sides.** `char_t == wchar_t` uniformly; main
 signature `int main(int argc, char_t **argv)` (argv unused in both). x86
 consequences:
-- all `printf`/`fprintf` format strings become wide via the `CL()` macro
-  (posix-uefi provides it: `CL("x")` → `L"x"` under UEFI_NO_UTF8),
+- all `printf`/`fprintf` **format strings** become wide via the `CL()`
+  macro (posix-uefi provides it: `CL("x")` → `L"x"` under UEFI_NO_UTF8),
+- **narrow string varargs must use uppercase `%S`** (not `%s`): under
+  UEFI_NO_UTF8 `%s` reads a wide `char_t*`, while `%S` reads a narrow
+  UTF-8 `char*` and decodes it. This applies wherever a narrow buffer is
+  printed, e.g. config.txt's `printf(CL("unknown config line: %S\n"),
+  line)` where `line` is the raw ASCII line buffer,
 - the DEBUG `types[]` table (boot/uefi/main.c:43) becomes `const char_t
   *types[]` with `CL()` per element — a plain `const char *[]` fed to
   wide `%s` is a silent ABI mismatch, not a compile error,
@@ -360,7 +375,11 @@ parameterized wrapper; the `boot/uefi/OVMF.fd` download target stays.
 - **E820/descriptor region sizing**: the x86 handoff region grows 2 → 4
   pages (16 KB) with fixed sub-ranges (descriptors 4 KB @ 0x61000, E820
   8 KB @ 0x62000); a map that overflows either fails cleanly (handoff
-  overflow) like aarch64.
+  overflow) like aarch64. The 4 KB descriptor cap (~85 × 48 B entries) is
+  **QEMU-targeted** (q35 maps are typically 50–80 entries); real multi-DIMM/
+  NUMA machines can exceed it and fail to boot. Acceptable for OS01's
+  QEMU-only goal — the E820 side is deliberately oversized, so a future
+  rebalance (E820 → 4 KB, descriptors → 8 KB) is a two-line change.
 - **UEFI_NO_UTF8 on x86** exercises the wide printf→ConOut path for the
   first time on x86 (aarch64 never used printf) — covered by the boot
   smoke.
