@@ -30,7 +30,7 @@ inline uint64_t * __attribute__((always_inline)) get_cr3()
     return tmp;
 }
 
-void pmm_init(struct MEMORY_INFO E820_Info);
+void pmm_init(const struct BOOT_MEMORY_MAP *map);
 // void free_pages(struct Page * page,int32_t number);
 // struct Page * alloc_pages(int32_t zone_select, int32_t number, uint64_t page_flags);
 void vmm_init();

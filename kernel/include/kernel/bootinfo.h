@@ -9,6 +9,12 @@
 // This matters because the EFI bootloader may be compiled with a
 // different toolchain (clang --target=x86_64-pc-win32-coff) that
 // uses 4-byte 'unsigned long', while the kernel uses 8-byte.
+//
+// This header defines the boot_context v2 ABI handed off from the
+// firmware-aware bootloader to the kernel. Pointers are physical
+// addresses. struct E820_ENTRY is the legacy E820 record layout
+// still produced by the x86_64 UEFI loader (boot.c) and consumed
+// by the physical memory manager (pmm.c).
 
 struct GRAPHICS_INFO
 {
@@ -27,23 +33,6 @@ struct E820_ENTRY
 	uint32_t type;
 }__attribute__((packed));
 
-struct MEMORY_INFO
-{
-	uint32_t E820_Entry_count;
-	uint64_t E820_Entry;  // physical address of E820 array
-};
-
-struct BOOT_INFO
-{
-	struct GRAPHICS_INFO Graphics_Info;
-	struct MEMORY_INFO E820_Info;
-	uint64_t RSDP;
-	uint8_t  BootFromBIOS;
-};
-
-/* Architecture-neutral boot handoff.  BOOT_INFO remains the legacy UEFI
- * ABI consumed by the x86 kernel; new architecture entries should populate
- * this fixed-width descriptor instead.  Pointers are physical addresses. */
 enum BOOT_CONTEXT_FLAGS {
     BOOT_CONTEXT_HAS_FRAMEBUFFER = 1u << 0,
     BOOT_CONTEXT_HAS_MEMORY_MAP  = 1u << 1,
@@ -106,37 +95,6 @@ static inline bool boot_context_valid(const struct boot_context *ctx)
            ctx->magic == BOOT_CONTEXT_MAGIC &&
            ctx->version == BOOT_CONTEXT_VERSION &&
            ctx->size == (uint32_t)sizeof(*ctx);
-}
-
-static inline void boot_context_from_legacy(struct boot_context *ctx,
-                                             const struct BOOT_INFO *legacy)
-{
-    boot_context_init(ctx);
-    ctx->graphics = legacy->Graphics_Info;
-    if (ctx->graphics.FrameBufferBase != 0 &&
-        ctx->graphics.FrameBufferSize != 0)
-        ctx->flags |= BOOT_CONTEXT_HAS_FRAMEBUFFER;
-    ctx->memory.entries = legacy->E820_Info.E820_Entry;
-    ctx->memory.entry_count = legacy->E820_Info.E820_Entry_count;
-    ctx->memory.entry_size = (uint32_t)sizeof(struct E820_ENTRY);
-    ctx->memory.format = BOOT_MEMORY_FORMAT_E820;
-    if (ctx->memory.entries != 0 && ctx->memory.entry_count != 0)
-        ctx->flags |= BOOT_CONTEXT_HAS_MEMORY_MAP;
-    ctx->firmware.acpi_rsdp = legacy->RSDP;
-    if (ctx->firmware.acpi_rsdp != 0)
-        ctx->flags |= BOOT_CONTEXT_HAS_ACPI;
-}
-
-static inline void boot_context_from_aarch64(struct boot_context *ctx,
-                                              uint64_t dtb,
-                                              uint64_t boot_cpu_id)
-{
-    boot_context_init(ctx);
-    ctx->firmware.dtb = dtb;
-    ctx->boot_cpu_id = boot_cpu_id;
-    if (dtb != 0)
-        ctx->flags |= BOOT_CONTEXT_HAS_DTB;
-    ctx->flags |= BOOT_CONTEXT_HAS_BOOT_CPU_ID;
 }
 
 #endif
