@@ -5,7 +5,7 @@ TEST_MOCK := $(TEST_SRC)/mock
 TEST_INC  := $(TEST_SRC)/include
 TEST_CASES := $(TEST_SRC)/cases
 
-HOST_CC   := clang
+HOST_CC   ?= clang
 
 KERNEL_INC := -I$(TESTS_DIR)/kernel/include
 LIBC_INC := -I$(TESTS_DIR)/libc/include

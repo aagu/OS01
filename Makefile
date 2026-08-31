@@ -1,10 +1,22 @@
-base:=$(shell pwd)
-# CC/LD are NOT exported: kernel/Makefile picks them per ARCH (x86_64 vs
-# aarch64). User-space targets (busybox, mbedtls, etc.) below invoke
-# clang -target x86_64-unknown-none directly — those remain x86-only and
-# are out of scope for the aarch64 port.
-export AR=llvm-ar
-export OBJ_CPY=llvm-objcopy
+ROOT_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
+base := $(patsubst %/,%,$(dir $(ROOT_MAKEFILE)))
+
+# ARCH dispatch. x86_64 selects the shared Clang/LLVM toolchain (root
+# toolchain.mk) and exports its validated tools/identity to children.
+# aarch64 keeps its own arch-specific toolchain and deliberately gets no
+# x86 exports. AR/OBJ_CPY are no longer hard-coded here — toolchain.mk
+# owns the LLVM tool aliases.
+ARCH ?= x86_64
+ifeq ($(ARCH),x86_64)
+include $(dir $(ROOT_MAKEFILE))toolchain.mk
+export CLANG CLANG_RESOURCE_DIR LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_READOBJ
+export TARGET_TRIPLE TARGET_CC TARGET_CCLD TARGET_LD SYSROOT TARGET_INCLUDEDIR TARGET_LIBDIR CFLAGS
+export CFLAGS=--sysroot=${SYSROOT} -isystem=${INCLUDEDIR} -g -fno-stack-protector
+else ifeq ($(ARCH),aarch64)
+# no x86 include or exports
+else
+$(error unsupported ARCH='$(ARCH)')
+endif
 
 ifneq ($(shell uname -m),aarch64)
 QEMU_BIN=qemu-system-x86_64
@@ -12,14 +24,6 @@ else
 export CROSS_BASE=$(base)/toolchain/cross
 QEMU_BIN=$(CROSS_BASE)/bin/qemu-system-x86_64
 endif
-
-export SYSROOT=$(base)/sysroot
-export PREFIX=/usr
-export EXEC_PREFIX=${PREFIX}
-export LIBDIR=${EXEC_PREFIX}/lib
-export INCLUDEDIR=${PREFIX}/include
-export CFLAGS=--sysroot=${SYSROOT} -isystem=${INCLUDEDIR} -g -fno-stack-protector
-export LDFLAGS=--sysroot=${SYSROOT}
 
 DISPLAY=gtk
 MEMORY=512M

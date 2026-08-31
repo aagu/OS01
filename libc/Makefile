@@ -3,13 +3,14 @@ HOSTARCH  := x86_64
 ARCHDIR   := arch/$(HOSTARCH)
 BUILD_DIR := ../build/$(HOSTARCH)/libc
 
-# ── Compiler / Linker (inherited from root Makefile exports) ─
-# Note: use := not ?= — make's built-in default `CC = cc` has origin "default",
-# so `?=` would NOT override it, causing standalone `make -C libc` to build
-# with the host compiler instead of the cross clang.
-CC     := clang -target x86_64-unknown-none
-LD     := ld.lld -m elf_x86_64
-AR     := llvm-ar
+# ── Shared x86 toolchain (root toolchain.mk) ────────────────
+# EFFECTIVE_CC/AR/LD/OBJ_CPY and SYSROOT/target directories all come from
+# the common file. Standalone `make -C libc` defaults ARCH to x86_64.
+ARCH ?= x86_64
+LOCAL_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
+ifeq ($(ARCH),x86_64)
+include $(dir $(LOCAL_MAKEFILE))../toolchain.mk
+endif
 
 # ── Load architecture config ────────────────────────────────
 include $(ARCHDIR)/make.config
@@ -76,23 +77,23 @@ libk.a: $(LIBK_ALL_OBJS)
 # ── Compile rules ──────────────────────────────────────────
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
 $(BUILD_DIR)/%.libk.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(LIBK_CFLAGS) -MMD -MP -c $< -o $@
+	$(EFFECTIVE_CC) $(LIBK_CFLAGS) -MMD -MP -c $< -o $@
 
 # ── Installation (into sysroot) ────────────────────────────
 install: install-headers install-libs
 
 install-headers:
-	mkdir -p $(SYSROOT)$(INCLUDEDIR)
-	cp -R --preserve=timestamps include/. $(SYSROOT)$(INCLUDEDIR)/.
+	mkdir -p $(TARGET_INCLUDEDIR)
+	cp -R --preserve=timestamps include/. $(TARGET_INCLUDEDIR)/.
 
 install-libs: libc.a libk.a
-	mkdir -p $(SYSROOT)$(LIBDIR)
-	@cmp -s libc.a $(SYSROOT)$(LIBDIR)/libc.a || cp libc.a $(SYSROOT)$(LIBDIR)/libc.a
-	@cmp -s libk.a $(SYSROOT)$(LIBDIR)/libk.a || cp libk.a $(SYSROOT)$(LIBDIR)/libk.a
+	mkdir -p $(TARGET_LIBDIR)
+	@cmp -s libc.a $(TARGET_LIBDIR)/libc.a || cp libc.a $(TARGET_LIBDIR)/libc.a
+	@cmp -s libk.a $(TARGET_LIBDIR)/libk.a || cp libk.a $(TARGET_LIBDIR)/libk.a
 
 # ── Clean ──────────────────────────────────────────────────
 clean:

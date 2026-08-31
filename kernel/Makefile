@@ -5,13 +5,23 @@ ARCHDIR     := arch/$(ARCH)
 BUILD_DIR   := ../build/$(ARCH)/kernel
 DEST_DIR    := ..                  # root of the project (for kernel.bin)
 
+# ── Shared x86 toolchain (root toolchain.mk) ────────────────
+# EFFECTIVE_CC/AR/LD/OBJ_CPY and SYSROOT/target dirs come from the common
+# file for ARCH=x86_64; aarch64 uses its own toolchain from make.config.
+LOCAL_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
+ifeq ($(ARCH),x86_64)
+include $(dir $(LOCAL_MAKEFILE))../toolchain.mk
+endif
+
 # ── Load architecture configuration ────────────────────────
 include $(ARCHDIR)/make.config
 
 # Toolchain picks are architecture-specific and live in arch/<arch>/make.config.
 # Keep the generic kernel Makefile free from arch-specific compiler/linker logic.
-AR       ?= llvm-ar
-OBJ_CPY  ?= llvm-objcopy
+# x86_64 gets EFFECTIVE_CC/OBJ_CPY from toolchain.mk; aarch64 falls back to
+# its own CC (from make.config) and llvm-objcopy here.
+EFFECTIVE_CC ?= $(CC)
+OBJ_CPY ?= llvm-objcopy
 
 # Kernel headers path (relative to kernel/ CWD)
 KERNEL_HEADERS := include
@@ -140,29 +150,29 @@ all: $(BUILD_DIR)/kernel.bin
 # .c → .o + .d
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
 
 # .S → .o + .d
 $(BUILD_DIR)/%.o: %.S
 	@mkdir -p $(dir $@)
-	$(CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
 
 # ── lwIP compilation ──────────────────────────────────────────
 # lwIP sources live outside kernel/ under thirdpart/lwip/src
 $(BUILD_DIR)/lwip/%.o: $(LWIP_SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
 
 # ── Special objects ────────────────────────────────────────
 # PSF font → .o
 $(BUILD_DIR)/kernel/font.o: kernel/font.psf
 	@mkdir -p $(dir $@)
-	$(LD) -r -b binary -o $@ $<
+	$(LD) -m elf_x86_64 -r -b binary -o $@ $<
 
 # Trampoline: assemble → link at 0x8000 → binary → embed
 $(BUILD_DIR)/$(ARCHDIR)/trampoline.o: $(ARCHDIR)/trampoline.S
 	@mkdir -p $(dir $@)
-	$(CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
 
 $(BUILD_DIR)/$(ARCHDIR)/trampoline.elf: $(BUILD_DIR)/$(ARCHDIR)/trampoline.o $(ARCHDIR)/trampoline.ld
 	$(LD) -T $(ARCHDIR)/trampoline.ld $< -o $@
@@ -172,18 +182,18 @@ $(BUILD_DIR)/$(ARCHDIR)/trampoline.bin: $(BUILD_DIR)/$(ARCHDIR)/trampoline.elf
 
 $(BUILD_DIR)/$(ARCHDIR)/trampoline_bin.o: $(BUILD_DIR)/$(ARCHDIR)/trampoline.bin
 	cp $< $(ARCHDIR)/trampoline.bin
-	$(LD) -r -b binary $(ARCHDIR)/trampoline.bin -o $@
+	$(LD) -m elf_x86_64 -r -b binary $(ARCHDIR)/trampoline.bin -o $@
 	rm -f $(ARCHDIR)/trampoline.bin
 
 # ── Temporary: irq.o avoids .bss section issue ─────────────
 $(BUILD_DIR)/intr/irq.o: intr/irq.c
 	@mkdir -p $(dir $@)
-	$(CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
 
 # ── Kallsyms (two-pass link) ───────────────────────────────
 # Stage 1: link without kallsyms, just to get symbol table
 $(BUILD_DIR)/kernel.elf.stage1: $(KERNEL_OBJECTS) $(ARCHDIR)/$(ARCH_LINKER)
-	$(CC) $(ALL_LDFLAGS) -o $@ $(KERNEL_OBJECTS) -T $(ARCHDIR)/$(ARCH_LINKER) $(LIBS)
+	$(EFFECTIVE_CC) $(ALL_LDFLAGS) -o $@ $(KERNEL_OBJECTS) -T $(ARCHDIR)/$(ARCH_LINKER) $(LIBS)
 
 # Generate kallsyms object from stage1's nm output
 $(BUILD_DIR)/kernel/kallsyms.o: kernel/kallsyms.c $(BUILD_DIR)/kernel.elf.stage1
@@ -202,7 +212,7 @@ $(BUILD_DIR)/kernel/kallsyms.o: kernel/kallsyms.c $(BUILD_DIR)/kernel.elf.stage1
 
 # ── Final link ──────────────────────────────────────────────
 $(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o $(ARCHDIR)/$(ARCH_LINKER)
-	$(CC) $(ALL_LDFLAGS) -o $@ $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o \
+	$(EFFECTIVE_CC) $(ALL_LDFLAGS) -o $@ $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o \
 	    -T $(ARCHDIR)/$(ARCH_LINKER) $(LIBS)
 
 $(BUILD_DIR)/kernel.bin: $(BUILD_DIR)/kernel.elf
