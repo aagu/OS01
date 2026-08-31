@@ -1,8 +1,8 @@
-# OS01 Toolchain Refactor v5 Implementation Plan
+# OS01 Toolchain Refactor v6 Implementation Plan
 
 Goal: make x86_64 Clang-version independent without ELF settings leaking into UEFI or aarch64.
 
-Spec: docs/superpowers/specs/2026-08-31-toolchain-refactor-design.md, v5.
+Spec: docs/superpowers/specs/2026-08-31-toolchain-refactor-design.md, v6.
 
 Constraints: do not change libc/include/stdint.h, aarch64, CMake/Meson, CI, Make structure, or thirdpart/posix-uefi/uefi/Makefile. Use discovered LLVM variables in checks. The series has exactly 10 commits: A, B, C, D, E, F, G, H, K, M; and exactly 17 steps: S1-S17.
 
@@ -64,7 +64,7 @@ Files: boot/uefi/Makefile:11-31,57-58.
 
 Files: root Makefile and toolchain.mk.
 
-- [ ] S13. Add selected-tool kernel/UEFI validators: `$(LLVM_READELF) -Wl $(KERNEL_ELF)` for program headers, `$(LLVM_NM) --undefined-only $(KERNEL_ELF)`, `$(LLVM_READOBJ) --file-headers $(KERNEL_ELF)`, `$(LLVM_READELF) -Ws $(KERNEL_ELF)` for separate GLOBAL symbol checks, and `$(LLVM_READOBJ) --coff-exports $(UEFI_EFI)`.
+- [ ] S13. Add selected-tool kernel/UEFI validators: `$(LLVM_READELF) -Wl $(KERNEL_ELF)` for program headers, `$(LLVM_NM) --undefined-only $(KERNEL_ELF)`, `$(LLVM_READOBJ) --file-headers $(KERNEL_ELF)`, and three independently failing `$(LLVM_READELF) -Ws $(KERNEL_ELF)` checks for GLOBAL `_start`, `kernel_main`, and `_text`; also use `$(LLVM_READOBJ) --coff-exports $(UEFI_EFI)`.
 - [ ] Commit H: git add Makefile toolchain.mk; git commit -m "build: add selected-tool artifact validation"
 
 ## Commit K: gated libgcc removal

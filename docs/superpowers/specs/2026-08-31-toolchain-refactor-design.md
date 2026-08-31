@@ -1,13 +1,13 @@
 ---
-title: OS01 Toolchain Refactor v5
+title: OS01 Toolchain Refactor v6
 created: 2026-08-31
 updated: 2026-08-31
 type: spec
-status: v5-draft, patch round-4 PARTIAL/NEW
-version: 5
+status: v6-draft, patch round-5 UEFI guard + §8 symbol split
+version: 6
 ---
 
-# OS01 Toolchain Refactor v5 Design
+# OS01 Toolchain Refactor v6 Design
 
 Goal: make the x86_64 UEFI, kernel, libc, user, and BusyBox build select a validated Clang/LLVM family without host-version paths. Preserve v3's driver/raw-ld split, owned stdarg.h, surgical cc.h decision, and BusyBox content stamp.
 
@@ -163,20 +163,36 @@ BusyBox config generation may be phony only when it renders to a temporary, uses
 
 ## 6. UEFI isolation
 
-The copied runtime detects GCC at thirdpart/posix-uefi/uefi/Makefile:32-61 and assigns CC/LD at :63-68. Change only wrapper line 57-58:
+The copied runtime detects GCC at thirdpart/posix-uefi/uefi/Makefile:32-61 and assigns CC/LD at :63-68. The existing unguarded wrapper invocation is:
 
+    # BEFORE
+    $(MAKE) -C $(RUNTIME_DIR) ARCH=$(ARCH) TARGET=$(TARGET) OUTDIR=$(OUTDIR)/ SRCS="$(SRCS)"
+
+Replace it with this architecture guard. The x86_64 branch owns the UEFI
+Clang/LD validation and override invocation; the aarch64 branch falls through
+to the existing plain recursive invocation without UEFI_CLANG or UEFI_LD:
+
+    # AFTER
+    ifeq ($(ARCH),x86_64)
     UEFI_CLANG ?= $(CLANG)
     UEFI_CLANG_ID := $(shell $(UEFI_CLANG) --version 2>/dev/null | head -1)
     ifeq ($(findstring clang,$(UEFI_CLANG_ID)),)
     $(error UEFI_CLANG='$(UEFI_CLANG)' is not Clang)
+    endif
+    UEFI_CLANG_RESOURCE_DIR := $(shell $(UEFI_CLANG) -print-resource-dir 2>/dev/null)
+    ifeq ($(strip $(UEFI_CLANG_RESOURCE_DIR)),)
+    $(error UEFI_CLANG='$(UEFI_CLANG)' is unavailable or lacks -print-resource-dir)
     endif
     UEFI_LD_TOOL ?= $(TARGET_LD)
     $(eval $(call require_program,UEFI_LD_TOOL))
     UEFI_LD := $(UEFI_LD_TOOL) -flavor link
     $(MAKE) -C $(RUNTIME_DIR) ARCH=$(ARCH) TARGET=$(TARGET) OUTDIR=$(OUTDIR)/ SRCS="$(SRCS)" \
         MAKEOVERRIDES= USE_GCC= CC="$(UEFI_CLANG)" LD="$(UEFI_LD)" CFLAGS= LDFLAGS=
+    else
+    $(MAKE) -C $(RUNTIME_DIR) ARCH=$(ARCH) TARGET=$(TARGET) OUTDIR=$(OUTDIR)/ SRCS="$(SRCS)"
+    endif
 
-The default `UEFI_CLANG=$(CLANG)` inherits the CLANG identity check above; the parallel `UEFI_CLANG_ID` check covers an explicit UEFI-only override. USE_GCC= forces Clang. Command-line CC/LD override copied assignments; MAKEOVERRIDES= blocks parent override replay. Empty CFLAGS/LDFLAGS block outer ELF flags but retain the inner --target=$(ARCH)-pc-win32-coff and COFF flags at lines 63-65. Apply only for x86_64.
+The default `UEFI_CLANG=$(CLANG)` inherits the CLANG identity check above; the parallel `UEFI_CLANG_ID` and resource-directory checks cover an explicit UEFI-only override. USE_GCC= forces Clang. Command-line CC/LD override copied assignments; MAKEOVERRIDES= blocks parent override replay. Empty CFLAGS/LDFLAGS block outer ELF flags but retain the inner --target=$(ARCH)-pc-win32-coff and COFF flags at lines 63-65. Under `ARCH=aarch64`, the `else` branch deliberately preserves the original recursive invocation: its copied `thirdpart/posix-uefi/uefi/Makefile` auto-detects `clang` and `lld -flavor link`. Thus both `kernel/Makefile:259` (`$(MAKE) -B -C kernel ARCH=aarch64`) and root `Makefile:255` (`$(MAKE) -C boot/uefi ARCH=aarch64`) remain on paths with no x86 toolchain variables.
 
 ## 7. aarch64 proof
 
@@ -201,7 +217,9 @@ The gated libgcc experiment clean-builds first. The selected-tool commands are c
     $(LLVM_NM) --undefined-only $(KERNEL_ELF)
     ! $(LLVM_READELF) -Wl $(KERNEL_ELF) | grep -E 'INTERP|DYNAMIC'
     $(LLVM_READOBJ) --file-headers $(KERNEL_ELF) | grep -F 'EM_X86_64'
-    $(LLVM_READELF) -Ws $(KERNEL_ELF) | grep -E 'GLOBAL.*(_start|kernel_main|_text)'
+    $(LLVM_READELF) -Ws $(KERNEL_ELF) | grep -E 'GLOBAL.*\b_start\b'
+    $(LLVM_READELF) -Ws $(KERNEL_ELF) | grep -E 'GLOBAL.*\bkernel_main\b'
+    $(LLVM_READELF) -Ws $(KERNEL_ELF) | grep -E 'GLOBAL.*\b_text\b'
     $(LLVM_READOBJ) --coff-exports $(UEFI_EFI)
 
 Each of `_start`, `kernel_main`, and `_text` is asserted separately with `$(LLVM_READELF) -Ws $(KERNEL_ELF)` and requires `GLOBAL` binding; do not accept one broad match as a substitute. UEFI validation uses the discovered `$(LLVM_READOBJ) --coff-exports`, never an unqualified tool.
@@ -234,3 +252,4 @@ Exactly 10 commits: A, B, C, D, E, F, G, H, K, M. Exactly 17 matrix steps: S1-S1
 |---|---|
 | Round 2 | Retained from v4: driver/raw-ld split, owned stdarg.h, surgical cc.h decision, BusyBox content stamp, UEFI wrapper mechanics, and audit coverage. |
 | Round 4 | v5 closes all five findings: composed `EFFECTIVE_CC` plus unconditional `CC=cc` rejection (§3); concrete selected-tool validators and S1-S17 mapping (§8); raw auxiliary-link emulation for kernel/Makefile:160 and :175 (§4); guarded child includes (§2); and UEFI_CLANG identity validation (§6). |
+| Round 5 | v6 guards the entire UEFI validation/override block so aarch64 retains its plain recursive make (§6), adds explicit UEFI compiler resource-directory validation (§6), and replaces the broad identity-symbol match with three independently failing GLOBAL checks (§8). |
