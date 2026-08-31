@@ -84,7 +84,11 @@ KERNEL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_EXTRA_OBJECTS)
 # ── Flags ──────────────────────────────────────────────────
 ALL_CFLAGS   := $(CFLAGS) $(ARCH_CFLAGS)   -I$(KERNEL_HEADERS)
 ALL_ASMFLAGS := $(ASFLAGS) $(ARCH_ASMFLAGS)
+ifeq ($(ARCH),x86_64)
+ALL_LDFLAGS  := $(LDFLAGS) $(ARCH_LDFLAGS) -L$(TARGET_LIBDIR)
+else
 ALL_LDFLAGS  := $(LDFLAGS) $(ARCH_LDFLAGS) -L$(SYSROOT)/usr/lib
+endif
 LIBS         := $(ARCH_LIBS)
 
 # ── DEBUG / NDEBUG (align with busybox convention) ────────
@@ -165,9 +169,10 @@ $(BUILD_DIR)/lwip/%.o: $(LWIP_SRC_DIR)/%.c
 
 # ── Special objects ────────────────────────────────────────
 # PSF font → .o
+ifeq ($(ARCH),x86_64)
 $(BUILD_DIR)/kernel/font.o: kernel/font.psf
 	@mkdir -p $(dir $@)
-	$(LD) -m elf_x86_64 -r -b binary -o $@ $<
+	$(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary -o $@ $<
 
 # Trampoline: assemble → link at 0x8000 → binary → embed
 $(BUILD_DIR)/$(ARCHDIR)/trampoline.o: $(ARCHDIR)/trampoline.S
@@ -175,15 +180,16 @@ $(BUILD_DIR)/$(ARCHDIR)/trampoline.o: $(ARCHDIR)/trampoline.S
 	$(EFFECTIVE_CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
 
 $(BUILD_DIR)/$(ARCHDIR)/trampoline.elf: $(BUILD_DIR)/$(ARCHDIR)/trampoline.o $(ARCHDIR)/trampoline.ld
-	$(LD) -T $(ARCHDIR)/trampoline.ld $< -o $@
+	$(TARGET_LD) $(RAW_LD_EMULATION) -T $(ARCHDIR)/trampoline.ld $< -o $@
 
 $(BUILD_DIR)/$(ARCHDIR)/trampoline.bin: $(BUILD_DIR)/$(ARCHDIR)/trampoline.elf
 	$(OBJ_CPY) -O binary $< $@
 
 $(BUILD_DIR)/$(ARCHDIR)/trampoline_bin.o: $(BUILD_DIR)/$(ARCHDIR)/trampoline.bin
 	cp $< $(ARCHDIR)/trampoline.bin
-	$(LD) -m elf_x86_64 -r -b binary $(ARCHDIR)/trampoline.bin -o $@
+	$(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(ARCHDIR)/trampoline.bin -o $@
 	rm -f $(ARCHDIR)/trampoline.bin
+endif
 
 # ── Temporary: irq.o avoids .bss section issue ─────────────
 $(BUILD_DIR)/intr/irq.o: intr/irq.c
@@ -212,8 +218,13 @@ $(BUILD_DIR)/kernel/kallsyms.o: kernel/kallsyms.c $(BUILD_DIR)/kernel.elf.stage1
 
 # ── Final link ──────────────────────────────────────────────
 $(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o $(ARCHDIR)/$(ARCH_LINKER)
+ifeq ($(ARCH),x86_64)
+	$(TARGET_LD) $(KERNEL_RAW_LDFLAGS) $(KERNEL_RAW_LIBDIR) -o $@ $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o \
+	    -T $(ARCHDIR)/$(ARCH_LINKER) -lk -lgcc
+else
 	$(EFFECTIVE_CC) $(ALL_LDFLAGS) -o $@ $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o \
 	    -T $(ARCHDIR)/$(ARCH_LINKER) $(LIBS)
+endif
 
 $(BUILD_DIR)/kernel.bin: $(BUILD_DIR)/kernel.elf
 	$(OBJ_CPY) -I $(OBJFORMAT) -S -R ".eh_frame" -R ".comment" \

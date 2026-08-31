@@ -23,8 +23,7 @@ ifeq ($(OS01_SYSTEST),1)
 override CFLAGS += -DOS01_SYSTEST
 endif
 
-LDFLAGS  := -T linker.ld -static -nostdlib -no-pie \
-            -L$(SYSROOT)/usr/lib
+USER_RAW_LDFLAGS := -m elf_x86_64 -static -no-pie -T linker.ld -L$(TARGET_LIBDIR)
 
 # ── Source discovery ───────────────────────────────────────
 # crt0.S is startup code, not a program
@@ -71,7 +70,7 @@ $(SIGRETURN_OBJ): sigreturn_trampoline.S
 # init.c → $(OBJ_DIR)/init.o → $(BUILD_DIR)/init.elf
 $(BUILD_DIR)/%.elf: $(OBJ_DIR)/%.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
 	@mkdir -p $(dir $@)
-	$(LD) $(LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $< -lc
+	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $< -lc
 	$(OBJ_CPY) --strip-debug $@
 
 # ══════════════════════════════════════════════════════════════
@@ -81,7 +80,7 @@ TERMINAL_FONT_OBJ := $(OBJ_DIR)/terminal_font.o
 
 $(BUILD_DIR)/terminal.elf: $(OBJ_DIR)/terminal.o $(OBJ_DIR)/terminal_core.o $(CRT0_OBJ) $(SIGRETURN_OBJ) $(TERMINAL_FONT_OBJ) linker.ld
 	@mkdir -p $(dir $@)
-	$(LD) $(LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/terminal.o $(OBJ_DIR)/terminal_core.o $(TERMINAL_FONT_OBJ) -lc
+	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/terminal.o $(OBJ_DIR)/terminal_core.o $(TERMINAL_FONT_OBJ) -lc
 	$(OBJ_CPY) --strip-debug $@
 
 $(TERMINAL_FONT_OBJ): terminal_font.psf
@@ -93,7 +92,7 @@ $(TERMINAL_FONT_OBJ): terminal_font.psf
 # ══════════════════════════════════════════════════════════════
 $(BUILD_DIR)/tetris.elf: $(OBJ_DIR)/tetris.o $(OBJ_DIR)/tetris_logic.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
 	@mkdir -p $(dir $@)
-	$(LD) $(LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/tetris.o $(OBJ_DIR)/tetris_logic.o -lc
+	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/tetris.o $(OBJ_DIR)/tetris_logic.o -lc
 	$(OBJ_CPY) --strip-debug $@
 
 # ── Clean ──────────────────────────────────────────────────
