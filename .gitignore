@@ -20,6 +20,7 @@ boot/uefi/OVMF.fd
 kernel/kernel/kallsyms
 build/
 config/fsroot/
+config/busybox.config
 .superpowers/
 .worktrees/
 tools/mkdisk

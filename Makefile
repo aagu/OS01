@@ -89,8 +89,8 @@ build/x86_64/user/busybox.elf: thirdpart/busybox-1.36.1/busybox
 # Submodule must be initialized: git submodule update --init
 
 BUSYBOX_SRC  = thirdpart/busybox-1.36.1
-BUSYBOX_CFG  = config/busybox.config
-BUSYBOX_LIBS = $(SYSROOT)$(LIBDIR)/libc.a $(SYSROOT)$(LIBDIR)/libk.a
+BUSYBOX_CFG  = config/busybox.config.in
+BUSYBOX_LIBS = $(TARGET_LIBDIR)/libc.a $(TARGET_LIBDIR)/libk.a
 
 # The archives are normally installed by the phony `lib` target before the
 # disk-image prerequisites are considered.  Keep direct BusyBox builds usable
@@ -105,20 +105,20 @@ $(BUSYBOX_LIBS) &: libc/libc.a libc/libk.a
 
 # ── mbedTLS ─────────────────────────────────────────────────
 MBEDTLS_SRC = thirdpart/mbedtls
-MBEDTLS_LIB = $(SYSROOT)/usr/lib/libmbedtls.a
+MBEDTLS_LIB = $(TARGET_LIBDIR)/libmbedtls.a
 
 $(MBEDTLS_LIB): lib config/mbedtls_config.h libc/network/entropy.c
 	@test -d $(MBEDTLS_SRC)/library || { \
 	    echo "ERROR: mbedtls submodule not initialized"; \
 	    echo "Run: git submodule update --init"; false; }
 	@cp config/mbedtls_config.h $(MBEDTLS_SRC)/include/mbedtls/os01_mbedtls_config.h
-	@mkdir -p $(SYSROOT)/usr/lib $(SYSROOT)/usr/include
+	@mkdir -p $(TARGET_LIBDIR) $(TARGET_INCLUDEDIR)
 	@rm -rf /tmp/mbedtls_build && mkdir -p /tmp/mbedtls_build
 	@echo "  [mbedtls] compiling 108 library files..."
 	@ok=0; fail=0; \
 	for src in $(MBEDTLS_SRC)/library/*.c; do \
 	    name=$$(basename $$src .c); \
-	    if clang -target x86_64-unknown-none \
+	    if $(TARGET_CC) \
 	        --sysroot=$(SYSROOT) -isystem=$(INCLUDEDIR) \
 	        -g -ffreestanding -fno-stack-protector \
 	        -I$(MBEDTLS_SRC)/include -I$(MBEDTLS_SRC)/library \
@@ -128,7 +128,7 @@ $(MBEDTLS_LIB): lib config/mbedtls_config.h libc/network/entropy.c
 	    else \
 	        fail=$$((fail+1)); \
 	        [ $$fail -le 3 ] && echo "  [mbedtls] FAIL: $$name" && \
-	          clang -target x86_64-unknown-none \
+	          $(TARGET_CC) \
 	            --sysroot=$(SYSROOT) -isystem=$(INCLUDEDIR) \
 	            -g -ffreestanding -fno-stack-protector \
 	            -I$(MBEDTLS_SRC)/include -I$(MBEDTLS_SRC)/library \
@@ -136,15 +136,15 @@ $(MBEDTLS_LIB): lib config/mbedtls_config.h libc/network/entropy.c
 	            -c $$src -o /tmp/mbedtls_build/$$name.o 2>&1 | grep "error:" | head -1; \
 	    fi; \
 	done; \
-	clang -target x86_64-unknown-none \
+	$(TARGET_CC) \
 	    --sysroot=$(SYSROOT) -isystem=$(INCLUDEDIR) \
 	    -g -ffreestanding -fno-stack-protector \
 	    -I$(MBEDTLS_SRC)/include -I$(MBEDTLS_SRC)/library \
 	    -DMBEDTLS_USER_CONFIG_FILE='<mbedtls/os01_mbedtls_config.h>' \
 	    -c libc/network/entropy.c -o /tmp/mbedtls_build/os01_entropy.o 2>/dev/null && ok=$$((ok+1)); \
 	echo "  [mbedtls] $$ok compiled"
-	@llvm-ar rcs $(MBEDTLS_LIB) /tmp/mbedtls_build/*.o
-	@cp -R $(MBEDTLS_SRC)/include/mbedtls $(SYSROOT)/usr/include/
+	@$(LLVM_AR) rcs $(MBEDTLS_LIB) /tmp/mbedtls_build/*.o
+	@cp -R $(MBEDTLS_SRC)/include/mbedtls $(TARGET_INCLUDEDIR)/
 	@rm -rf /tmp/mbedtls_build
 	@echo "  [mbedtls] libmbedtls.a installed"
 
@@ -154,21 +154,26 @@ thirdpart/busybox-1.36.1/busybox: $(BUSYBOX_LIBS) $(BUSYBOX_SRC)/Makefile $(BUSY
 	    echo "Run: git submodule update --init"; false; }
 	@cmp -s user/crt0.S $(BUSYBOX_SRC)/applets/crt0.S || cp user/crt0.S $(BUSYBOX_SRC)/applets/crt0.S
 	@cmp -s user/sigreturn_trampoline.S $(BUSYBOX_SRC)/applets/sigreturn_trampoline.S || cp user/sigreturn_trampoline.S $(BUSYBOX_SRC)/applets/sigreturn_trampoline.S
-	@cmp -s $(BUSYBOX_CFG) $(BUSYBOX_SRC)/.config || cp $(BUSYBOX_CFG) $(BUSYBOX_SRC)/.config
+	@sed -e 's|@TARGET_INCLUDEDIR@|$(TARGET_INCLUDEDIR)|g' \
+	    -e 's|@TARGET_LIBDIR@|$(TARGET_LIBDIR)|g' \
+	    -e 's|@CLANG_RESOURCE_DIR@|$(CLANG_RESOURCE_DIR)|g' \
+	    $(BUSYBOX_CFG) > $(BUSYBOX_SRC)/.config.tmp
+	@cmp -s $(BUSYBOX_SRC)/.config.tmp $(BUSYBOX_SRC)/.config || mv $(BUSYBOX_SRC)/.config.tmp $(BUSYBOX_SRC)/.config
+	@rm -f $(BUSYBOX_SRC)/.config.tmp
 	@grep -qxF 'obj-y += crt0.o' $(BUSYBOX_SRC)/applets/Kbuild.src || \
 	    echo 'obj-y += crt0.o' >> $(BUSYBOX_SRC)/applets/Kbuild.src
 	@grep -qxF 'obj-y += sigreturn_trampoline.o' $(BUSYBOX_SRC)/applets/Kbuild.src || \
 	    echo 'obj-y += sigreturn_trampoline.o' >> $(BUSYBOX_SRC)/applets/Kbuild.src
-	$(MAKE) -C $(BUSYBOX_SRC) silentoldconfig CC=clang LD=clang 2>/dev/null || \
-	yes "" | $(MAKE) -C $(BUSYBOX_SRC) oldconfig CC=clang LD=clang
-	@mkdir -p $(SYSROOT)/usr/lib
-	@if [ ! -f $(SYSROOT)/usr/lib/libm.a ] || [ ! -f $(SYSROOT)/usr/lib/librt.a ]; then \
-	    touch /tmp/os01-busybox-stub.c && clang -c -x c /tmp/os01-busybox-stub.c -o /tmp/os01-busybox-stub.o 2>/dev/null; \
-	    test -f $(SYSROOT)/usr/lib/libm.a || llvm-ar rcs $(SYSROOT)/usr/lib/libm.a /tmp/os01-busybox-stub.o; \
-	    test -f $(SYSROOT)/usr/lib/librt.a || llvm-ar rcs $(SYSROOT)/usr/lib/librt.a /tmp/os01-busybox-stub.o; \
+	$(MAKE) -C $(BUSYBOX_SRC) silentoldconfig CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)" 2>/dev/null || \
+	yes "" | $(MAKE) -C $(BUSYBOX_SRC) oldconfig CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)"
+	@mkdir -p $(TARGET_LIBDIR)
+	@if [ ! -f $(TARGET_LIBDIR)/libm.a ] || [ ! -f $(TARGET_LIBDIR)/librt.a ]; then \
+	    touch /tmp/os01-busybox-stub.c && $(TARGET_CC) -c -x c /tmp/os01-busybox-stub.c -o /tmp/os01-busybox-stub.o 2>/dev/null; \
+	    test -f $(TARGET_LIBDIR)/libm.a || $(LLVM_AR) rcs $(TARGET_LIBDIR)/libm.a /tmp/os01-busybox-stub.o; \
+	    test -f $(TARGET_LIBDIR)/librt.a || $(LLVM_AR) rcs $(TARGET_LIBDIR)/librt.a /tmp/os01-busybox-stub.o; \
 	    rm -f /tmp/os01-busybox-stub.c /tmp/os01-busybox-stub.o; \
 	fi
-	$(MAKE) -C $(BUSYBOX_SRC) CC=clang LD=clang
+	$(MAKE) -C $(BUSYBOX_SRC) CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)"
 
 # ── Disk image ──────────────────────────────────────────
 
