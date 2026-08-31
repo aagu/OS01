@@ -1,8 +1,8 @@
-# OS01 Toolchain Refactor v4 Implementation Plan
+# OS01 Toolchain Refactor v5 Implementation Plan
 
 Goal: make x86_64 Clang-version independent without ELF settings leaking into UEFI or aarch64.
 
-Spec: docs/superpowers/specs/2026-08-31-toolchain-refactor-design.md, v4.
+Spec: docs/superpowers/specs/2026-08-31-toolchain-refactor-design.md, v5.
 
 Constraints: do not change libc/include/stdint.h, aarch64, CMake/Meson, CI, Make structure, or thirdpart/posix-uefi/uefi/Makefile. Use discovered LLVM variables in checks. The series has exactly 10 commits: A, B, C, D, E, F, G, H, K, M; and exactly 17 steps: S1-S17.
 
@@ -10,9 +10,9 @@ Constraints: do not change libc/include/stdint.h, aarch64, CMake/Meson, CI, Make
 
 Files: new toolchain.mk; Makefile:1-22; kernel/Makefile:9-14; kernel/arch/x86_64/make.config:1-5; libc/Makefile:1-18; user/Makefile:1-24; tools/Makefile:1-12; test/Makefile:1-17.
 
-- [ ] S1. Add root-anchored include paths and x86 dispatch from spec sections 2 and 7. Verify standalone kernel/libc/user resolves repository sysroot.
-- [ ] S2. Implement origin CC policy and conditional tool discovery from spec section 3. Verify CC=gcc, CC='ccache gcc', CC=cc, and CC=gcc-12 reject while explicit Clang succeeds.
-- [ ] S3. Remove immediate tool assignments at kernel config:4-5, libc:10-12, user:6-8; do not use generic CC ?= or LD ?=. Keep libc arch config include-free.
+- [ ] S1. Add root-anchored include paths and x86 dispatch from spec sections 2 and 7. Wrap each kernel/libc/user child include itself in `ifeq ($(ARCH),x86_64)` using its correct `../toolchain.mk` path; verify standalone x86 resolves the repository sysroot and `make ARCH=aarch64 -C kernel -n` has no x86 triple.
+- [ ] S2. Implement origin CC policy and conditional tool discovery from spec section 3. Reject CC=cc unconditionally; validate other explicit Clang values; compose `EFFECTIVE_CC` with target/freestanding flags and use it in target compile/driver-link recipes. Verify CC=gcc, CC='ccache gcc', CC=cc, and CC=gcc-12 reject while explicit Clang retains target flags.
+- [ ] S3. Remove immediate tool assignments at kernel config:4-5, libc:10-12, user:6-8; do not use generic CC ?= or LD ?=. Keep libc arch config include-free and ensure the effective-compiler recipe conversion is complete.
 - [ ] S4. Keep tools/test host-only with HOST_CC ?= cc and HOST_CC ?= clang, retaining local flags.
 - [ ] Commit A: git add toolchain.mk Makefile kernel/Makefile kernel/arch/x86_64/make.config libc/Makefile user/Makefile tools/Makefile test/Makefile; git commit -m "build(toolchain): centralize x86_64 Clang discovery"
 
@@ -21,7 +21,7 @@ Files: new toolchain.mk; Makefile:1-22; kernel/Makefile:9-14; kernel/arch/x86_64
 Files: kernel/arch/x86_64/make.config:38-40; kernel/Makefile:77,158-176,185-206; user/Makefile:23-24,69-93.
 
 - [ ] S5. Add exact driver/raw groups; convert Wl syntax and replace direct kernel library path with TARGET_LIBDIR.
-- [ ] S6. Keep stage 1 driver-linked; raw-link final kernel, font, trampoline ELF/embed, and all user ELFs. Build kernel and user.
+- [ ] S6. Keep stage 1 driver-linked; raw-link final kernel, font, trampoline ELF/embed, and all user ELFs. Define `RAW_LD_EMULATION = -m elf_x86_64` and pass it explicitly to kernel/Makefile:160 font.o and :175 trampoline_bin.o. Build kernel and user.
 - [ ] Commit B: git add kernel/arch/x86_64/make.config kernel/Makefile user/Makefile; git commit -m "build(kernel): separate driver and raw linker flags"
 
 ## Commit C: owned varargs
@@ -57,14 +57,14 @@ Files: Makefile:87-167; config BusyBox template rename; .gitignore.
 
 Files: boot/uefi/Makefile:11-31,57-58.
 
-- [ ] S12. For x86_64 pass MAKEOVERRIDES= USE_GCC= CC UEFI_CLANG LD UEFI_LD CFLAGS= LDFLAGS= to inner make, and validate UEFI_LD_TOOL. Preserve inner COFF flags.
+- [ ] S12. For x86_64 pass MAKEOVERRIDES= USE_GCC= CC UEFI_CLANG LD UEFI_LD CFLAGS= LDFLAGS= to inner make; validate UEFI_LD_TOOL and UEFI_CLANG's Clang banner. Preserve inner COFF flags.
 - [ ] Commit G: git add boot/uefi/Makefile; git commit -m "build(uefi): isolate recursive Clang contract"
 
 ## Commit H: artifact checks
 
 Files: root Makefile and toolchain.mk.
 
-- [ ] S13. Add selected-tool kernel/UEFI validators. Require GLOBAL binding for _start, kernel_main, and _text.
+- [ ] S13. Add selected-tool kernel/UEFI validators: `$(LLVM_READELF) -Wl $(KERNEL_ELF)` for program headers, `$(LLVM_NM) --undefined-only $(KERNEL_ELF)`, `$(LLVM_READOBJ) --file-headers $(KERNEL_ELF)`, `$(LLVM_READELF) -Ws $(KERNEL_ELF)` for separate GLOBAL symbol checks, and `$(LLVM_READOBJ) --coff-exports $(UEFI_EFI)`.
 - [ ] Commit H: git add Makefile toolchain.mk; git commit -m "build: add selected-tool artifact validation"
 
 ## Commit K: gated libgcc removal
@@ -72,7 +72,7 @@ Files: root Makefile and toolchain.mk.
 Files: kernel/arch/x86_64/make.config:40.
 
 - [ ] S14. Remove -lgcc, clean-build kernel, and revert if link fails.
-- [ ] S15. Run spec section 8 discovered-tool proof: no undefined symbols, no INTERP/DYNAMIC, X86-64, three named GLOBAL symbols. Revert if any check fails.
+- [ ] S15. Run the spec section 8 discovered-tool proof: `$(LLVM_NM) --undefined-only $(KERNEL_ELF)` is empty; `$(LLVM_READELF) -Wl $(KERNEL_ELF)` has no INTERP/DYNAMIC; `$(LLVM_READOBJ) --file-headers $(KERNEL_ELF)` reports EM_X86_64; and separate `$(LLVM_READELF) -Ws $(KERNEL_ELF)` checks require GLOBAL _start, kernel_main, and _text. Revert if any check fails.
 - [ ] Commit K: git add kernel/arch/x86_64/make.config; git commit -m "build(kernel): remove unnecessary libgcc dependency"
 
 ## Commit M: docs and matrix
@@ -87,20 +87,20 @@ Files: new docs/build/toolchain.md, AGENTS.md, build documentation.
 
 | Step | Commit | Pass criterion |
 |---|---|---|
-| S1 | A | root-anchored standalone x86 includes |
-| S2 | A | built-in CC replaced; named GCC overrides fail |
-| S3 | A | basename/absolute LLVM override validates |
+| S1 | A | root-anchored standalone x86 includes; aarch64 child includes no toolchain.mk |
+| S2 | A | built-in CC replaced; named GCC and CC=cc overrides fail; explicit Clang preserves target identity |
+| S3 | A | basename/absolute LLVM override validates and recipes use EFFECTIVE_CC |
 | S4 | A | host builds have no target flags |
 | S5 | B | no Wl syntax reaches raw linker |
-| S6 | B | kernel/user raw links build |
+| S6 | B | kernel/user raw links build; auxiliary binary embeds pass explicit x86 emulation |
 | S7 | C | sysroot owns stdarg.h |
 | S8 | D | kallsyms uses host variables |
 | S9 | E | local cc.h ABI decision retained |
 | S10 | F | no hard-coded tool/path in mbedTLS/BusyBox |
 | S11 | F | identical config does not replace output |
-| S12 | G | isolated UEFI Clang/COFF build |
-| S13 | H | selected LLVM artifact checks |
+| S12 | G | isolated, identity-validated UEFI Clang/COFF build |
+| S13 | H | selected LLVM `-Wl`, `--undefined-only`, `--file-headers`, `-Ws`, and `--coff-exports` checks |
 | S14 | K | kernel links without libgcc |
-| S15 | K | static identity and GLOBAL symbols |
+| S15 | K | static identity, empty `--undefined-only`, `-Wl` program headers, and separate GLOBAL symbols |
 | S16 | M | same-host version matrix and aarch64 proof |
 | S17 | M | full test/disk/QEMU matrix |
