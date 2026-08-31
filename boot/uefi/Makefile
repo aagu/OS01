@@ -61,10 +61,18 @@ UEFI_LD := $(UEFI_LD_TOOL) -flavor link
 # uefi/Makefile:63-64) survive: a literal CFLAGS= on the command line would
 # wipe them instead (GNU make ignores += appends to command-line variables).
 unexport CFLAGS LDFLAGS
-UEFI_MAKE := $(MAKE) -C $(RUNTIME_DIR) ARCH=$(ARCH) TARGET=$(TARGET) OUTDIR=$(OUTDIR)/ SRCS="$(SRCS)" \
+# Serial inner make (G6): the runtime's $(TARGET).so depends on
+# OUTDIR-prefixed object paths that NO rule can build — they exist only as
+# side effects of building the plain $(OBJS) targets first (their `%.o: %.c`
+# recipes redirect output into OUTDIR). Serial order builds $(OBJS) before
+# the .so's prerequisites are checked, so the side-effect files are present
+# and need no rule. Under -j the .so prerequisite check races ahead of the
+# side effects and dies with "No rule to make target". The UEFI app is a
+# handful of files; -j1 costs nothing and keeps the outer build parallel.
+UEFI_MAKE := $(MAKE) -j1 -C $(RUNTIME_DIR) ARCH=$(ARCH) TARGET=$(TARGET) OUTDIR=$(OUTDIR)/ SRCS="$(SRCS)" \
 	MAKEOVERRIDES= USE_GCC= CC="$(UEFI_CLANG)" LD="$(UEFI_LD)"
 else
-UEFI_MAKE := $(MAKE) -C $(RUNTIME_DIR) ARCH=$(ARCH) TARGET=$(TARGET) OUTDIR=$(OUTDIR)/ SRCS="$(SRCS)"
+UEFI_MAKE := $(MAKE) -j1 -C $(RUNTIME_DIR) ARCH=$(ARCH) TARGET=$(TARGET) OUTDIR=$(OUTDIR)/ SRCS="$(SRCS)"
 endif
 
 .PHONY: all clean clean-all
