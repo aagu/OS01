@@ -11,6 +11,18 @@
 // Note: the kernel's clang target (x86_64-unknown-none with
 // -ffreestanding) does provide built-in integer types via compiler
 // builtins — we typedef from those.
+//
+// The widths below deliberately mirror OS01's libc/include/stdint.h
+// (e.g. uint64_t = unsigned long long), NOT canonical Clang stdint
+// ownership — on LP64 Clang would typedef uint64_t = unsigned long.
+// Keeping kernel and userspace ABI identical prevents lwIP structs
+// crossing the user/kern boundary (sockets, timevals, msghdr) from
+// aliasing differently at the same C type name.
+//
+// future-review pointer: a rewrite of libc/include/stdint.h must
+// re-review this local typedef block AND the ssize_t rationale above
+// (cc.h:5-23) — this block owns the kernel-side ABI for these names
+// until OS01 gains a clean freestanding/hosted stdint split.
 
 typedef unsigned char      uint8_t;
 typedef signed char        int8_t;
