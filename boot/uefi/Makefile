@@ -10,6 +10,13 @@
 
 ARCH ?= x86_64
 ROOT := $(abspath ../..)
+# require_program is a GNU make `define` in toolchain.mk — such defines are
+# never exported to child makes, so include toolchain.mk here (it is
+# location-independent) for the UEFI Clang contract below. x86_64 only:
+# the aarch64 path must stay free of x86 toolchain variables.
+ifeq ($(ARCH),x86_64)
+include $(ROOT)/toolchain.mk
+endif
 BUILD_DIR := $(ROOT)/build/$(ARCH)
 RUNTIME_DIR := $(BUILD_DIR)/uefi-runtime
 OUTDIR := $(BUILD_DIR)/uefi
@@ -28,6 +35,36 @@ SRCS := $(ROOT)/boot/uefi/main.c \
         $(ROOT)/boot/uefi/arch/aarch64/handoff.S
 else
 $(error "unsupported ARCH: $(ARCH)")
+endif
+
+# ── UEFI Clang/COFF contract (spec §6) ────────────────────────
+# x86_64 owns UEFI Clang/LD validation and the override invocation; aarch64
+# deliberately keeps the plain recursive call (the copied runtime
+# auto-detects clang + `lld -flavor link`). Parse-time directives live at
+# top level: GNU make rejects variable assignments interleaved with recipe
+# lines, and these must fire even under `make -n`.
+ifeq ($(ARCH),x86_64)
+UEFI_CLANG ?= $(CLANG)
+UEFI_CLANG_ID := $(shell $(UEFI_CLANG) --version 2>/dev/null | head -1)
+ifeq ($(findstring clang,$(UEFI_CLANG_ID)),)
+$(error UEFI_CLANG='$(UEFI_CLANG)' is not Clang)
+endif
+UEFI_CLANG_RESOURCE_DIR := $(shell $(UEFI_CLANG) -print-resource-dir 2>/dev/null)
+ifeq ($(strip $(UEFI_CLANG_RESOURCE_DIR)),)
+$(error UEFI_CLANG='$(UEFI_CLANG)' is unavailable or lacks -print-resource-dir)
+endif
+UEFI_LD_TOOL ?= $(TARGET_LD)
+$(eval $(call require_program,UEFI_LD_TOOL))
+UEFI_LD := $(UEFI_LD_TOOL) -flavor link
+# Block outer ELF CFLAGS/LDFLAGS from the environment so the inner `+=`
+# flags (--target=x86_64-pc-win32-coff and the COFF linker flags at
+# uefi/Makefile:63-64) survive: a literal CFLAGS= on the command line would
+# wipe them instead (GNU make ignores += appends to command-line variables).
+unexport CFLAGS LDFLAGS
+UEFI_MAKE := $(MAKE) -C $(RUNTIME_DIR) ARCH=$(ARCH) TARGET=$(TARGET) OUTDIR=$(OUTDIR)/ SRCS="$(SRCS)" \
+	MAKEOVERRIDES= USE_GCC= CC="$(UEFI_CLANG)" LD="$(UEFI_LD)"
+else
+UEFI_MAKE := $(MAKE) -C $(RUNTIME_DIR) ARCH=$(ARCH) TARGET=$(TARGET) OUTDIR=$(OUTDIR)/ SRCS="$(SRCS)"
 endif
 
 .PHONY: all clean clean-all
@@ -54,8 +91,7 @@ $(OUTDIR)/$(TARGET): $(SRCS) $(ROOT)/boot/uefi/arch/arch.h \
 	# (OUTDIR + absolute source path), the same proven pattern the old
 	# aarch64 wrapper used.
 	@$(foreach source,$(SRCS),mkdir -p $(OUTDIR)$(dir $(source));)
-	$(MAKE) -C $(RUNTIME_DIR) ARCH=$(ARCH) TARGET=$(TARGET) \
-		OUTDIR=$(OUTDIR)/ SRCS="$(SRCS)"
+	$(UEFI_MAKE)
 
 OVMF.fd:
 	wget -c https://retrage.github.io/edk2-nightly/bin/RELEASEX64_OVMF.fd -O $@
