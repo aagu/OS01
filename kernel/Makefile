@@ -197,6 +197,10 @@ $(BUILD_DIR)/intr/irq.o: intr/irq.c
 	$(EFFECTIVE_CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
 
 # ── Kallsyms (two-pass link) ───────────────────────────────
+# Host build tools for the kallsyms two-pass link (host-only; no target flags).
+HOST_CC ?= clang
+HOST_NM ?= nm
+
 # Stage 1: link without kallsyms, just to get symbol table
 $(BUILD_DIR)/kernel.elf.stage1: $(KERNEL_OBJECTS) $(ARCHDIR)/$(ARCH_LINKER)
 	$(EFFECTIVE_CC) $(ALL_LDFLAGS) -o $@ $(KERNEL_OBJECTS) -T $(ARCHDIR)/$(ARCH_LINKER) $(LIBS)
@@ -211,9 +215,9 @@ $(BUILD_DIR)/kernel/kallsyms.o: kernel/kallsyms.c $(BUILD_DIR)/kernel.elf.stage1
 # generated kallsyms.S fails under that sysroot.  Strip CFLAGS/LDFLAGS
 # from the environment for both compile steps; kallsyms.o is then
 # fed into the kernel linker as a normal arch object.
-	env -u CFLAGS -u LDFLAGS clang -o $(BUILD_DIR)/kernel/kallsyms kernel/kallsyms.c
-	nm -n $(BUILD_DIR)/kernel.elf.stage1 | $(BUILD_DIR)/kernel/kallsyms > $(BUILD_DIR)/kernel/kallsyms.S
-	env -u CFLAGS -u LDFLAGS clang -c -o $@ $(BUILD_DIR)/kernel/kallsyms.S
+	env -u CFLAGS -u LDFLAGS $(HOST_CC) -o $(BUILD_DIR)/kernel/kallsyms kernel/kallsyms.c
+	$(HOST_NM) -n $(BUILD_DIR)/kernel.elf.stage1 | $(BUILD_DIR)/kernel/kallsyms > $(BUILD_DIR)/kernel/kallsyms.S
+	env -u CFLAGS -u LDFLAGS $(HOST_CC) -c -o $@ $(BUILD_DIR)/kernel/kallsyms.S
 	rm -f $(BUILD_DIR)/kernel.elf.stage1
 
 # ── Final link ──────────────────────────────────────────────
