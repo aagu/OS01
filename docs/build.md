@@ -2,6 +2,8 @@
 
 本系统使用原生 Clang 交叉编译（`x86_64-unknown-none` 目标），无需单独的 GCC 交叉编译工具链。可重入（re-entrant）中断处理通过在 CFLAGS 中禁用 red zone 来保证。
 
+> **x86_64 工具链覆盖变量（`CLANG=clang-N`、`LLVM_NM=`、`UEFI_CLANG=` 等）和验证矩阵**：参见 [`docs/build/toolchain.md`](build/toolchain.md)。
+
 ## 必要的依赖项
 
 1. **编译工具链**

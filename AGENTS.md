@@ -21,6 +21,7 @@ make kernel.bin            # Build kernel only
 - `NDEBUG=1` — compile-time elimination of log_debug
 
 **Deps**: clang, llvm, lld, make, dosfstools, mtools, qemu-system-x86_64, edk2-ovmf.
+**Toolchain overrides** (`CLANG=clang-N`, `LLVM_NM=`, `UEFI_CLANG=`, etc.): see [`docs/build/toolchain.md`](docs/build/toolchain.md).
 **BusyBox**: `git submodule update --init` (built and included in disk.img automatically).
 
 ## Architecture
