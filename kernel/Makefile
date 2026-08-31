@@ -188,9 +188,16 @@ $(BUILD_DIR)/kernel.elf.stage1: $(KERNEL_OBJECTS) $(ARCHDIR)/$(ARCH_LINKER)
 # Generate kallsyms object from stage1's nm output
 $(BUILD_DIR)/kernel/kallsyms.o: kernel/kallsyms.c $(BUILD_DIR)/kernel.elf.stage1
 	@mkdir -p $(dir $@)
-	clang -o $(BUILD_DIR)/kernel/kallsyms $<
+# kallsyms.c and the kallsyms.S it generates are host build tools, NOT
+# kernel sources.  They must NOT pick up the --sysroot=OS01/sysroot
+# CFLAGS that the root Makefile exports — the OS01 user-space sysroot
+# is missing headers like <stdarg.h>, and even preprocessing the
+# generated kallsyms.S fails under that sysroot.  Strip CFLAGS/LDFLAGS
+# from the environment for both compile steps; kallsyms.o is then
+# fed into the kernel linker as a normal arch object.
+	env -u CFLAGS -u LDFLAGS clang -o $(BUILD_DIR)/kernel/kallsyms kernel/kallsyms.c
 	nm -n $(BUILD_DIR)/kernel.elf.stage1 | $(BUILD_DIR)/kernel/kallsyms > $(BUILD_DIR)/kernel/kallsyms.S
-	$(CC) $(ALL_CFLAGS) -c $(BUILD_DIR)/kernel/kallsyms.S -o $@
+	env -u CFLAGS -u LDFLAGS clang -c -o $@ $(BUILD_DIR)/kernel/kallsyms.S
 	rm -f $(BUILD_DIR)/kernel.elf.stage1
 
 # ── Final link ──────────────────────────────────────────────
