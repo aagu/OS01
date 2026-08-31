@@ -55,6 +55,27 @@ $(BUILD_X86_64_UEFI): boot/uefi/Makefile boot/uefi/main.c \
 		kernel/include/kernel/bootinfo.h
 	make -C boot/uefi ARCH=x86_64
 
+# ── Validation ─────────────────────────────────────────
+
+.PHONY: validate validate-kernel validate-uefi
+validate: validate-kernel validate-uefi
+validate-kernel: kernel.bin
+	@echo "  [validate] kernel.elf has no undefined symbols"
+	@test -z "$$($(LLVM_NM) --undefined-only $(KERNEL_ELF))"
+	@echo "  [validate] kernel.elf has no INTERP/DYNAMIC program headers"
+	@! $(LLVM_READELF) -Wl $(KERNEL_ELF) | grep -E 'INTERP|DYNAMIC'
+	@echo "  [validate] kernel.elf machine is EM_X86_64"
+	@$(LLVM_READOBJ) --file-headers $(KERNEL_ELF) | grep -F 'EM_X86_64'
+	@echo "  [validate] GLOBAL _start present"
+	@$(LLVM_READELF) -Ws $(KERNEL_ELF) | grep -E 'GLOBAL.*\b_start\b'
+	@echo "  [validate] GLOBAL kernel_main present"
+	@$(LLVM_READELF) -Ws $(KERNEL_ELF) | grep -E 'GLOBAL.*\bkernel_main\b'
+	@echo "  [validate] GLOBAL _text present"
+	@$(LLVM_READELF) -Ws $(KERNEL_ELF) | grep -E 'GLOBAL.*\b_text\b'
+validate-uefi: $(BUILD_X86_64_UEFI)
+	@echo "  [validate] BOOTX64.EFI coff-exports"
+	@$(LLVM_READOBJ) --coff-exports $(UEFI_EFI) >/dev/null
+
 boot/uefi/OVMF.fd:
 	make -C boot/uefi OVMF.fd
 

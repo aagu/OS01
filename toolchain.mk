@@ -67,3 +67,8 @@ $(foreach p,LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_READOBJ LLVM_READELF TARGET_LD,$(e
 AR := $(LLVM_AR)
 LD := $(TARGET_LD)
 OBJ_CPY := $(LLVM_OBJCOPY)
+
+# Selected artifacts validated by `make validate` (x86-only; toolchain.mk is
+# included only under ARCH=x86_64). ?= keeps them overridable.
+KERNEL_ELF ?= $(TOOLCHAIN_DIR)build/x86_64/kernel/kernel.elf
+UEFI_EFI   ?= $(TOOLCHAIN_DIR)build/x86_64/uefi/BOOTX64.EFI
