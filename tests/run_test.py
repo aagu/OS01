@@ -34,7 +34,7 @@ class TestRunner:
         args = [
             QEMU,
             "-M", "q35",
-            "-pflash", "boot/uefi/OVMF.fd",
+            "-drive", "if=pflash,format=raw,readonly=on,file=boot/uefi/OVMF.fd",
             "-drive", f"file={self.disk_img},format=raw,if=none,id=disk",
             "-device", "ahci,id=ahci",
             "-device", "ide-hd,drive=disk,bus=ahci.0",

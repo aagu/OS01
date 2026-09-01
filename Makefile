@@ -258,7 +258,8 @@ disk.img: $(BUILD_X86_64_UEFI) lib kernel.bin user build/x86_64/user/busybox.elf
 # ── Run / Debug ─────────────────────────────────────────
 
 run: disk.img boot/uefi/OVMF.fd
-	$(QEMU_BIN) -M q35 -smp $(SMP) -pflash boot/uefi/OVMF.fd \
+	$(QEMU_BIN) -M q35 -smp $(SMP) \
+	  -drive if=pflash,format=raw,readonly=on,file=boot/uefi/OVMF.fd \
 	  -netdev user,id=net0 -device e1000e,netdev=net0 \
 	  -drive file=disk.img,format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
@@ -310,7 +311,8 @@ run-aarch64-uefi: aarch64-uefi
 	  -serial stdio -display none -no-reboot
 
 run-kvm: disk.img boot/uefi/OVMF.fd
-	$(QEMU_BIN) -M q35 -smp $(SMP) -pflash boot/uefi/OVMF.fd \
+	$(QEMU_BIN) -M q35 -smp $(SMP) \
+	  -drive if=pflash,format=raw,readonly=on,file=boot/uefi/OVMF.fd \
 	  -accel kvm \
 	  -netdev user,id=net0 -device e1000e,netdev=net0 \
 	  -drive file=disk.img,format=raw,if=none,id=disk \
@@ -319,14 +321,16 @@ run-kvm: disk.img boot/uefi/OVMF.fd
 
 # ── VirtIO-net test ──────────────────────────────────────
 run-virtio: disk.img boot/uefi/OVMF.fd
-	$(QEMU_BIN) -M q35 -smp $(SMP) -pflash boot/uefi/OVMF.fd \
+	$(QEMU_BIN) -M q35 -smp $(SMP) \
+	  -drive if=pflash,format=raw,readonly=on,file=boot/uefi/OVMF.fd \
 	  -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
 	  -drive file=disk.img,format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio
 
 debug: disk.img boot/uefi/OVMF.fd
-	$(QEMU_BIN) -M q35 -smp $(SMP) -pflash boot/uefi/OVMF.fd \
+	$(QEMU_BIN) -M q35 -smp $(SMP) \
+	  -drive if=pflash,format=raw,readonly=on,file=boot/uefi/OVMF.fd \
 	  -S -s \
 	  -netdev user,id=net0 -device e1000e,netdev=net0 \
 	  -drive file=disk.img,format=raw,if=none,id=disk \

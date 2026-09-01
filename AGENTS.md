@@ -68,7 +68,8 @@ keyboard IRQ → console TTY (tty_push_input) → terminal.elf reads /dev/tty �
 ```bash
 # Boot normal OS01, run cat /dev/urandom, send literal Ctrl-C (0x03), verify shell alive
 ( sleep 18; printf 'cat /dev/urandom\n'; sleep 4; printf '\x03'; sleep 4; printf 'echo SHELL_ALIVE_123\n'; sleep 3; ) \
-  | timeout 50 qemu-system-x86_64 -M q35 -pflash boot/uefi/OVMF.fd \
+  | timeout 50 qemu-system-x86_64 -M q35 \
+      -drive if=pflash,format=raw,readonly=on,file=boot/uefi/OVMF.fd \
       -drive file=disk.img,format=raw,if=none,id=disk -device ahci,id=ahci \
       -device ide-hd,drive=disk,bus=ahci.0 -m 512 -smp 1 -serial stdio \
       -display none -no-reboot -no-shutdown > /tmp/log 2>&1

@@ -107,7 +107,7 @@ make run
 
 ```bash
 qemu-system-x86_64 \
-  -pflash boot/uefi/OVMF.fd \
+  -drive if=pflash,format=raw,readonly=on,file=boot/uefi/OVMF.fd \
   -hda disk.img \
   -m 2G \
   -serial stdio
@@ -115,7 +115,7 @@ qemu-system-x86_64 \
 
 参数说明：
 
-* `-pflash boot/uefi/OVMF.fd`：使用 OVMF.fd 作为 UEFI 固件
+* `-drive if=pflash,format=raw,readonly=on,file=boot/uefi/OVMF.fd`：使用 OVMF.fd 作为 UEFI 固件
 * `-hda disk.img`：使用 disk.img 作为硬盘
 * `-m 2G`：分配 2GB 内存
 * `-serial stdio`：将串口输出重定向到标准输出
@@ -339,7 +339,7 @@ make clean
 
 ```makefile
 run: disk.img boot/uefi/OVMF.fd
-	$(QEMU_BIN) -pflash boot/uefi/OVMF.fd -hda disk.img -m 2G -serial stdio -netdev user,id=net0 -device e1000,netdev=net0
+	$(QEMU_BIN) -drive if=pflash,format=raw,readonly=on,file=boot/uefi/OVMF.fd -hda disk.img -m 2G -serial stdio -netdev user,id=net0 -device e1000,netdev=net0
 ```
 
 ### 3. 交叉编译

@@ -396,7 +396,7 @@ Host: homeserver, `clang-22.1.8` (`/usr/bin/clang` = `clang-22.1.8`).
 | 3 | `make kernel.bin` | exit 0; `kernel.bin` = 1,706,256 bytes |
 | 3 | `make user` | exit 0; 19 ELFs in `build/x86_64/user/`, including `busybox.elf` = 192,976 bytes |
 | 4 | `rm -f disk.img && make disk.img` | exit 0; `disk.img` = 202,375,168 bytes (192 MB, GPT dual-partition) |
-| 5 | Headless QEMU boot (`-M q35 -smp 2 -pflash boot/uefi/OVMF.fd … -serial stdio -no-reboot`) | reached userspace; last lines of the boot log:<br>`+--------------------------------+`<br>`\|  OS01 Init v1.0 (PID 1)        \|`<br>`+--------------------------------+`<br>`init: running as PID 2`<br>`init: phase SYSINIT`<br>`init: phase WAIT`<br>`init: phase ONCE`<br>`init: entering supervision loop`<br>`init: started pid 3: '/bin/terminal' (respawn)`<br>`BusyBox v1.36.1 (2026-09-01 00:14:57 CST) built-in shell (ash)`<br>`#` |
+| 5 | Headless QEMU boot (`-M q35 -smp 2 -drive if=pflash,format=raw,readonly=on,file=boot/uefi/OVMF.fd … -serial stdio -no-reboot`) | reached userspace; last lines of the boot log:<br>`+--------------------------------+`<br>`\|  OS01 Init v1.0 (PID 1)        \|`<br>`+--------------------------------+`<br>`init: running as PID 2`<br>`init: phase SYSINIT`<br>`init: phase WAIT`<br>`init: phase ONCE`<br>`init: entering supervision loop`<br>`init: started pid 3: '/bin/terminal' (respawn)`<br>`BusyBox v1.36.1 (2026-09-01 00:14:57 CST) built-in shell (ash)`<br>`#` |
 | 6 | `make -C boot/uefi ARCH=aarch64 -n` then `grep -c x86_64-unknown-none` | **0** (no x86 toolchain triple in the aarch64 dry-run) |
 
 ### Manual follow-up: `clang-18`
