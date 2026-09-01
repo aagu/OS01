@@ -19,10 +19,16 @@
 // crossing the user/kern boundary (sockets, timevals, msghdr) from
 // aliasing differently at the same C type name.
 //
-// future-review pointer: a rewrite of libc/include/stdint.h must
-// re-review this local typedef block AND the ssize_t rationale above
-// (cc.h:5-23) — this block owns the kernel-side ABI for these names
-// until OS01 gains a clean freestanding/hosted stdint split.
+// HOW the canonical-width typedef is enforced today:
+// Clang's freestanding builtin <stdint.h> is forcibly skipped via
+// -D__CLANG_STDINT_H in kernel/Makefile, and the sysroot's libc
+// stdint.h is forced in via -include.  This makes uint64_t =
+// unsigned long long the kernel-wide canonical width, which lets
+// cc.h's own typedef block below (matching libc) compile without
+// the previously-fatal "typedef redefinition with different types"
+// error.  Any future change here must keep these three widths in
+// sync: kernel/Makefile CFLAGS, libc/include/stdint.h, and this
+// file's typedef block.
 
 typedef unsigned char      uint8_t;
 typedef signed char        int8_t;

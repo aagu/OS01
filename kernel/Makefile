@@ -121,7 +121,25 @@ ifneq ($(ARCH_ENABLE_LWIP),0)
 KERNEL_OBJECTS += $(LWIP_OBJECTS)
 endif
 
+# ── stdint.h injection (see net/arch/cc.h) ─────────────────
+# Clang's freestanding builtin <stdint.h> typedefs uint64_t =
+# __UINT64_TYPE__ (= `unsigned long` on LP64 x86_64).  OS01's
+# libc/include/stdint.h (and net/arch/cc.h by extension) typedef
+# uint64_t = `unsigned long long` so kernel+userspace ABIs match
+# across syscall / lwIP struct boundaries (sockets, timeval, msghdr).
+# Without these two flags, every kernel TU that #includes <stdint.h>
+# before net/arch/cc.h hits:
+#   typedef redefinition with different types ('unsigned long long'
+#   vs 'unsigned long')
+# (-D__CLANG_STDINT_H skips Clang's whole builtin; -include forces
+#  sysroot's libc stdint.h to be parsed first, so the canonical
+#  OS01 libc widths win everywhere in the kernel.)
+#
+# Stored in ALL_C_ONLY_FLAGS (not ALL_CFLAGS) because the .S → .o
+# rule assembles through the C preprocessor, which can't parse C
+# typedefs and would choke on libc's stdint.h.
 ALL_CFLAGS     += -I$(LWIP_SRC_DIR)/include -I../kernel/include/net
+ALL_C_ONLY_FLAGS := -D__CLANG_STDINT_H -include $(SYSROOT)$(INCLUDEDIR)/stdint.h
 ALL_LDFLAGS    +=
 ifdef DEBUG_CHANNELS
   comma := ,
@@ -152,9 +170,12 @@ all: $(BUILD_DIR)/kernel.bin
 
 # ── Compilation rules ──────────────────────────────────────
 # .c → .o + .d
+# C-only flags carry the stdint.h injection (see CFLAGS comment above);
+# ASM files (.S) get ALL_CFLAGS only since the assembler preprocessor
+# can't parse a C typedef.
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(EFFECTIVE_CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS) -MMD -MP -c $< -o $@
 
 # .S → .o + .d
 $(BUILD_DIR)/%.o: %.S
@@ -165,7 +186,7 @@ $(BUILD_DIR)/%.o: %.S
 # lwIP sources live outside kernel/ under thirdpart/lwip/src
 $(BUILD_DIR)/lwip/%.o: $(LWIP_SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
-	$(EFFECTIVE_CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS) -MMD -MP -c $< -o $@
 
 # ── Special objects ────────────────────────────────────────
 # PSF font → .o
