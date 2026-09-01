@@ -10,8 +10,8 @@ ARCH ?= x86_64
 ifeq ($(ARCH),x86_64)
 include $(dir $(ROOT_MAKEFILE))toolchain.mk
 export CLANG CLANG_RESOURCE_DIR LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_READOBJ
-export TARGET_TRIPLE TARGET_CC TARGET_CCLD TARGET_LD SYSROOT INCLUDEDIR TARGET_INCLUDEDIR TARGET_LIBDIR CFLAGS
-export CFLAGS=--sysroot=${SYSROOT} -isystem=${INCLUDEDIR} -g -fno-stack-protector
+export TARGET_TRIPLE TARGET_CC TARGET_CCLD TARGET_LD SYSROOT HOST_INCLUDEDIR TARGET_INCLUDEDIR TARGET_LIBDIR CFLAGS
+export CFLAGS=--sysroot=${SYSROOT} -isystem=${HOST_INCLUDEDIR} -g -fno-stack-protector
 else ifeq ($(ARCH),aarch64)
 # no x86 include or exports
 else
@@ -140,7 +140,7 @@ $(MBEDTLS_LIB): lib config/mbedtls_config.h libc/network/entropy.c
 	for src in $(MBEDTLS_SRC)/library/*.c; do \
 	    name=$$(basename $$src .c); \
 	    if $(TARGET_CC) \
-	        --sysroot=$(SYSROOT) -isystem=$(INCLUDEDIR) \
+	        --sysroot=$(SYSROOT) -isystem=$(HOST_INCLUDEDIR) \
 	        -g -ffreestanding -fno-stack-protector \
 	        -I$(MBEDTLS_SRC)/include -I$(MBEDTLS_SRC)/library \
 	        -DMBEDTLS_USER_CONFIG_FILE='<mbedtls/os01_mbedtls_config.h>' \
@@ -150,7 +150,7 @@ $(MBEDTLS_LIB): lib config/mbedtls_config.h libc/network/entropy.c
 	        fail=$$((fail+1)); \
 	        [ $$fail -le 3 ] && echo "  [mbedtls] FAIL: $$name" && \
 	          $(TARGET_CC) \
-	            --sysroot=$(SYSROOT) -isystem=$(INCLUDEDIR) \
+	            --sysroot=$(SYSROOT) -isystem=$(HOST_INCLUDEDIR) \
 	            -g -ffreestanding -fno-stack-protector \
 	            -I$(MBEDTLS_SRC)/include -I$(MBEDTLS_SRC)/library \
 	            -DMBEDTLS_USER_CONFIG_FILE='<mbedtls/os01_mbedtls_config.h>' \
@@ -158,7 +158,7 @@ $(MBEDTLS_LIB): lib config/mbedtls_config.h libc/network/entropy.c
 	    fi; \
 	done; \
 	$(TARGET_CC) \
-	    --sysroot=$(SYSROOT) -isystem=$(INCLUDEDIR) \
+	    --sysroot=$(SYSROOT) -isystem=$(HOST_INCLUDEDIR) \
 	    -g -ffreestanding -fno-stack-protector \
 	    -I$(MBEDTLS_SRC)/include -I$(MBEDTLS_SRC)/library \
 	    -DMBEDTLS_USER_CONFIG_FILE='<mbedtls/os01_mbedtls_config.h>' \

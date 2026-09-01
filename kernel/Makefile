@@ -139,7 +139,7 @@ endif
 # rule assembles through the C preprocessor, which can't parse C
 # typedefs and would choke on libc's stdint.h.
 ALL_CFLAGS     += -I$(LWIP_SRC_DIR)/include -I../kernel/include/net
-ALL_C_ONLY_FLAGS := -D__CLANG_STDINT_H -include $(SYSROOT)$(INCLUDEDIR)/stdint.h
+ALL_C_ONLY_FLAGS := -D__CLANG_STDINT_H -include $(TARGET_INCLUDEDIR)/stdint.h
 ALL_LDFLAGS    +=
 ifdef DEBUG_CHANNELS
   comma := ,
@@ -260,8 +260,8 @@ kernel.bin: all
 
 # ── Install headers ────────────────────────────────────────
 install-headers:
-	mkdir -p $(SYSROOT)$(INCLUDEDIR)
-	cp -R --preserve=timestamps include/. $(SYSROOT)$(INCLUDEDIR)/.
+	mkdir -p $(TARGET_INCLUDEDIR)
+	cp -R --preserve=timestamps include/. $(TARGET_INCLUDEDIR)/.
 
 # ── Clean ───────────────────────────────────────────────────
 clean:

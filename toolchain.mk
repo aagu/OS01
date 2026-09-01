@@ -6,11 +6,14 @@
 
 TOOLCHAIN_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 SYSROOT       ?= $(TOOLCHAIN_DIR)sysroot
+# PREFIX is the host package-manager prefix (for example, Termux's
+# /data/data/com.termux/files/usr).  Keep it separate from the OS01 target
+# layout, which is always rooted at /usr inside SYSROOT.
 PREFIX        ?= /usr
-INCLUDEDIR    ?= $(PREFIX)/include
-LIBDIR        ?= $(PREFIX)/lib
-TARGET_INCLUDEDIR := $(SYSROOT)$(INCLUDEDIR)
-TARGET_LIBDIR     := $(SYSROOT)$(LIBDIR)
+HOST_INCLUDEDIR ?= $(PREFIX)/include
+TARGET_PREFIX   ?= /usr
+TARGET_INCLUDEDIR := $(SYSROOT)$(TARGET_PREFIX)/include
+TARGET_LIBDIR     := $(SYSROOT)$(TARGET_PREFIX)/lib
 
 # ── Clang-only override and discovery contract ────────────────
 # CLANG=clang-N is the preferred override. An explicit CC is accepted only
