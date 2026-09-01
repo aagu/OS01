@@ -10,7 +10,7 @@ ARCH ?= x86_64
 ifeq ($(ARCH),x86_64)
 include $(dir $(ROOT_MAKEFILE))toolchain.mk
 export CLANG CLANG_RESOURCE_DIR LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_READOBJ
-export TARGET_TRIPLE TARGET_CC TARGET_CCLD TARGET_LD SYSROOT TARGET_INCLUDEDIR TARGET_LIBDIR CFLAGS
+export TARGET_TRIPLE TARGET_CC TARGET_CCLD TARGET_LD SYSROOT INCLUDEDIR TARGET_INCLUDEDIR TARGET_LIBDIR CFLAGS
 export CFLAGS=--sysroot=${SYSROOT} -isystem=${INCLUDEDIR} -g -fno-stack-protector
 else ifeq ($(ARCH),aarch64)
 # no x86 include or exports
@@ -286,7 +286,7 @@ $(AARCH64_UEFI_APP): boot/uefi/Makefile \
 	$(MAKE) -C boot/uefi ARCH=aarch64
 
 .PHONY: aarch64-uefi-kernel
-aarch64-uefi-kernel:
+aarch64-uefi-kernel: lib
 	$(MAKE) -B -C kernel ARCH=aarch64
 
 $(AARCH64_UEFI_DISK): $(AARCH64_UEFI_APP) aarch64-uefi-kernel

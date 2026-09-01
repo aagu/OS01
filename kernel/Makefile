@@ -229,16 +229,14 @@ $(BUILD_DIR)/kernel.elf.stage1: $(KERNEL_OBJECTS) $(ARCHDIR)/$(ARCH_LINKER)
 # Generate kallsyms object from stage1's nm output
 $(BUILD_DIR)/kernel/kallsyms.o: kernel/kallsyms.c $(BUILD_DIR)/kernel.elf.stage1
 	@mkdir -p $(dir $@)
-# kallsyms.c and the kallsyms.S it generates are host build tools, NOT
-# kernel sources.  They must NOT pick up the --sysroot=OS01/sysroot
-# CFLAGS that the root Makefile exports — the OS01 user-space sysroot
-# is missing headers like <stdarg.h>, and even preprocessing the
-# generated kallsyms.S fails under that sysroot.  Strip CFLAGS/LDFLAGS
-# from the environment for both compile steps; kallsyms.o is then
-# fed into the kernel linker as a normal arch object.
+# kallsyms.c is a host build tool, so it must not pick up the OS01
+# sysroot flags from the root Makefile.  Its generated kallsyms.S,
+# however, is linked into the kernel and must be assembled with the
+# selected target compiler.  Strip exported CFLAGS/LDFLAGS in both
+# cases, while retaining the target triple for kallsyms.o.
 	env -u CFLAGS -u LDFLAGS $(HOST_CC) -o $(BUILD_DIR)/kernel/kallsyms kernel/kallsyms.c
 	$(HOST_NM) -n $(BUILD_DIR)/kernel.elf.stage1 | $(BUILD_DIR)/kernel/kallsyms > $(BUILD_DIR)/kernel/kallsyms.S
-	env -u CFLAGS -u LDFLAGS $(HOST_CC) -c -o $@ $(BUILD_DIR)/kernel/kallsyms.S
+	env -u CFLAGS -u LDFLAGS $(EFFECTIVE_CC) -c -o $@ $(BUILD_DIR)/kernel/kallsyms.S
 	rm -f $(BUILD_DIR)/kernel.elf.stage1
 
 # ── Final link ──────────────────────────────────────────────
