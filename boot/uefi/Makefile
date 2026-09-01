@@ -89,6 +89,10 @@ $(OUTDIR)/$(TARGET): $(SRCS) $(ROOT)/boot/uefi/arch/arch.h \
 	cp -a $(UEFI_RUNTIME_SOURCE) $(RUNTIME_DIR)/uefi
 	cp $(RUNTIME_DIR)/uefi/Makefile $(RUNTIME_DIR)/Makefile
 	rm -f $(RUNTIME_DIR)/uefi/*.o $(RUNTIME_DIR)/uefi/*.a
+	# Termux Clang uses __CLANG_STDINT_H rather than the legacy _STDINT_H
+	# guard.  The copied runtime must recognize both before falling back to
+	# its own fixed-width typedefs.
+	sed -i 's/!defined(_GCC_STDINT_H) && !defined(_EFI_INCLUDE_)/!defined(_GCC_STDINT_H) \&\& !defined(__CLANG_STDINT_H) \&\& !defined(_EFI_INCLUDE_)/' $(RUNTIME_DIR)/uefi/uefi.h
 	sed -i 's/ARCH=$$(ARCH)/ARCH=$$(ARCH) OUTDIR=/' $(RUNTIME_DIR)/Makefile
 	sed -i '/^CFLAGS += -fshort-wchar/i CFLAGS += -DUEFI_NO_UTF8' $(RUNTIME_DIR)/Makefile
 	sed -i '/^CFLAGS += -fshort-wchar/i CFLAGS += -DUEFI_NO_UTF8' $(RUNTIME_DIR)/uefi/Makefile

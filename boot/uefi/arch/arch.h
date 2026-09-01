@@ -1,6 +1,9 @@
 #ifndef OS01_UEFI_ARCH_H
 #define OS01_UEFI_ARCH_H
 
+/* Clang's resource header owns the fixed-width integer ABI for this UEFI
+ * target.  Include it before the legacy posix-uefi fallback typedefs. */
+#include <stdint.h>
 #include <uefi.h>
 
 /* The posix-uefi runtime spells the status type efi_status_t; the common
