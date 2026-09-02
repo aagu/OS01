@@ -98,6 +98,12 @@ $(UEFI_RUNTIME_STAMP): FORCE
 	  if [ -n "$(DRY_RUN)" ]; then \
 	    echo "  [uefi] dry-run: not rebuilding runtime"; \
 	  else \
+	    test -f "$(UEFI_RUNTIME_ADAPTER_INPUT)" || { \
+	      echo "ERROR: UEFI runtime adapter input '$(UEFI_RUNTIME_ADAPTER_INPUT)' does not exist"; \
+	      exit 1; }; \
+	    test -f "$(UEFI_RUNTIME_WRAPPER_INPUT)" || { \
+	      echo "ERROR: UEFI runtime wrapper input '$(UEFI_RUNTIME_WRAPPER_INPUT)' does not exist"; \
+	      exit 1; }; \
 	    digest=$$( { cd "$(OS01_ROOT)" && \
 	      printf "submodule: %s\n" "$(POSIX_UEFI_SOURCE)"; \
 	      printf "gitlink: %s\n" "$(POSIX_UEFI_REVISION)"; \

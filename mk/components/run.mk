@@ -248,6 +248,10 @@ image: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(DISK_IMG))
 # ── Build contract checks ───────────────────────────────────
 # Ordered behind the profile's artifacts so `make -j2 ... test-build-contract-*`
 # cannot race the build they inspect; capability-gated like every other alias.
+# host-test runs LAST: it ends with `make clean`, which destroys the profile
+# build dir (its purpose is to assert clean removes the profile outputs), and
+# the earlier modes — targets in particular, whose `-n` kernel artifact recipe
+# executes and resolves the sysroot generation — need that build dir intact.
 .PHONY: test-build-contract-x86
 test-build-contract-x86: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),disk.img)
 	$(call require_capability,rootfs)
@@ -256,8 +260,8 @@ test-build-contract-x86: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),disk.img)
 	sh tests/build_contract.sh x86_64-clang x86
 	sh tests/build_contract.sh x86_64-clang sysroot
 	sh tests/build_contract.sh x86_64-clang firmware
-	sh tests/build_contract.sh x86_64-clang host-test
 	sh tests/build_contract.sh x86_64-clang targets
+	sh tests/build_contract.sh x86_64-clang host-test
 
 .PHONY: test-build-contract-aarch64
 test-build-contract-aarch64: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES)),aarch64-uefi)
