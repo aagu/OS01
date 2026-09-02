@@ -41,6 +41,18 @@ else
 $(error "unsupported ARCH: $(ARCH)")
 endif
 
+# ── Runtime environment contract (spec: "删除 runtime Makefile overlay") ──
+# The root adapter (mk/components/uefi.mk) passes the FINAL values explicitly;
+# these ?= defaults exist so a standalone invocation behaves identically. The
+# runtime invocation starts the outer posix-uefi Make with
+# env CFLAGS="$(UEFI_RUNTIME_CFLAGS)" MAKE="$(UEFI_RUNTIME_MAKE)": upstream's
+# `CFLAGS +=` (outer + uefi/ Makefiles) appends the UTF-8 macro to both
+# compile classes, and upstream's recursive `$(MAKE)` for uefi/libuefi.a runs
+# with OUTDIR= so runtime archive objects land in the runtime dir while the
+# outer application invocation keeps OUTDIR=$(UEFI_BUILD_DIR)/.
+UEFI_RUNTIME_CFLAGS ?= -DUEFI_NO_UTF8
+UEFI_RUNTIME_MAKE ?= $(MAKE) OUTDIR=
+
 # ── UEFI Clang/COFF contract (spec §6) ────────────────────────
 # x86_64 owns UEFI Clang/LD validation and the override invocation; aarch64
 # deliberately keeps the plain recursive call (the copied runtime
@@ -94,7 +106,7 @@ $(OUTDIR)/$(TARGET): $(SRCS) $(ROOT)/boot/uefi/arch/arch.h \
 	# make places per-source objects (OUTDIR + absolute source path), the
 	# same proven pattern the aarch64 wrapper used.
 	@$(foreach source,$(SRCS),mkdir -p $(OUTDIR)$(dir $(source));)
-	$(UEFI_MAKE)
+	env CFLAGS="$(UEFI_RUNTIME_CFLAGS)" MAKE="$(UEFI_RUNTIME_MAKE)" $(UEFI_MAKE)
 
 clean:
 	rm -rf $(RUNTIME_DIR) $(OUTDIR)

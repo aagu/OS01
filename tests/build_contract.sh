@@ -88,6 +88,12 @@ legacy)
         default_profile=x86_64-clang
         fixture_profile=x86_64-clang-fixture
         test -f disk.img
+        # The fixture profile is build-contract-only and profile clean removes
+        # only build/<profile>, so a stale fixture build dir survives across
+        # runs. Remove it here: the rejection assertions below require the
+        # firmware to be genuinely absent (otherwise the real-file rule is up
+        # to date and the `! make` rejections invert into failures).
+        rm -rf "build/$fixture_profile"
         mkdir -p "build/$fixture_profile"
         sha256sum disk.img | cut -d' ' -f1 > "build/$fixture_profile/root-disk.before"
         fixture=$(mktemp)
@@ -150,6 +156,64 @@ EOF
         test -f "$fake_dir/url.log"
         head -1 "$fake_dir/url.log" | grep -E '^fake-wget-url=https://'
         rm -rf "$fake_dir"
+
+        # ── UEFI runtime env contract: receipt invalidation ──────────
+        # Changing any of the four contract inputs (UEFI_RUNTIME_CFLAGS,
+        # UEFI_RUNTIME_MAKE, adapter/wrapper input paths) must invalidate
+        # the runtime receipt, print "runtime input changed, recopying" and
+        # rebuild the profile-private runtime — while no OS01 source file or
+        # submodule file is modified. The normal build immediately after the
+        # fixtures uses the default real input paths again.
+        uefi_artifact="$(pwd)/build/$profile/artifacts/uefi/BOOTX64.EFI"
+        uefi_receipt="$(pwd)/build/$profile/receipts/uefi-runtime.stamp.receipt"
+        fixture_adapter=$(mktemp)
+        fixture_wrapper=$(mktemp)
+        cat mk/components/uefi.mk >"$fixture_adapter"
+        cat boot/uefi/Makefile >"$fixture_wrapper"
+        printf '\n# uefi-contract fixture: adapter copy (never the executing file)\n' >>"$fixture_adapter"
+        printf '\n# uefi-contract fixture: wrapper copy (never the executing file)\n' >>"$fixture_wrapper"
+        src_before=$(git status --porcelain | sort)
+        recopy_case() {
+            label=$1
+            shift
+            old=$(cat "$uefi_receipt" 2>/dev/null || true)
+            log=$(mktemp)
+            # MAKEOVERRIDES= on the root command line: GNU make otherwise
+            # auto-encodes command-line variable definitions into MAKEFLAGS,
+            # splitting a space-containing value into separate words; a
+            # fragment like "-DFIXTURE" then leaks through os01_submake's
+            # option filter into the boot wrapper's make invocation (invalid
+            # option -D). MAKEOVERRIDES= keeps the fixture value out of
+            # MAKEFLAGS while still defining it as a command-line variable.
+            if ! make PROFILE="$profile" MAKEOVERRIDES= "$@" "$uefi_artifact" >"$log" 2>&1; then
+                cat "$log"; rm -f "$log"; exit 1
+            fi
+            grep -F 'runtime input changed, recopying' "$log" >/dev/null || { cat "$log"; rm -f "$log"; exit 1; }
+            new=$(cat "$uefi_receipt" 2>/dev/null || true)
+            test -n "$new" && test "$new" != "$old" || { cat "$log"; rm -f "$log"; exit 1; }
+            rm -f "$log"
+            echo "  [uefi-contract] $label invalidated the runtime receipt"
+        }
+        recopy_case 'UEFI_RUNTIME_CFLAGS'         UEFI_RUNTIME_CFLAGS='-DUEFI_NO_UTF8 -DFIXTURE'
+        recopy_case 'UEFI_RUNTIME_MAKE'           UEFI_RUNTIME_MAKE='make OUTDIR= FIXTURE=1'
+        recopy_case 'UEFI_RUNTIME_ADAPTER_INPUT'  UEFI_RUNTIME_ADAPTER_INPUT="$fixture_adapter"
+        recopy_case 'UEFI_RUNTIME_WRAPPER_INPUT'  UEFI_RUNTIME_WRAPPER_INPUT="$fixture_wrapper"
+        # The normal build immediately after the fixtures uses the default
+        # real input paths again; the receipt must flip once more.
+        old=$(cat "$uefi_receipt")
+        log=$(mktemp)
+        if ! make PROFILE="$profile" "$uefi_artifact" >"$log" 2>&1; then
+            cat "$log"; rm -f "$log"; exit 1
+        fi
+        grep -F 'runtime input changed, recopying' "$log" >/dev/null || { cat "$log"; rm -f "$log"; exit 1; }
+        test "$(cat "$uefi_receipt")" != "$old" || { cat "$log"; rm -f "$log"; exit 1; }
+        rm -f "$log"
+        echo "  [uefi-contract] normal build reverted to the real adapter/wrapper inputs"
+        # No fixture run may have touched any OS01 source file or the
+        # posix-uefi submodule worktree.
+        test "$(git status --porcelain | sort)" = "$src_before"
+        test -z "$(git -C thirdpart/posix-uefi status --porcelain)"
+        rm -f "$fixture_adapter" "$fixture_wrapper"
         ;;
     host-test)
         # The focused poll-test binary lives under the profile's
