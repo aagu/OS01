@@ -1,9 +1,15 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-08-18）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-09-02）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
+
+## 2026-09-02
+
+| 项目 | 工作量 | 日期 |
+|------|--------|------|
+| **GNU Make 构建系统重构**（profiles + 受控递归 Make + 单 writer sysroot 原子 generation 发布 + 锁/租约协议 + kernel/libc/user/busybox/mbedtls/posix-uefi 组件适配器 + rootfs manifest + mkdisk 重写 + aarch64 bring-up 图分离 + 变体隔离镜像 + 全部公开 target 恢复。QEMU 验证：x86 disk.img 启动、aarch64 handoff/phase1 双签名、systest 228/228、nettest 6/6。契约测试 5 模式全绿）。**Plan deviation**：rootfs applet 项以 busybox 副本替代 symlink（内核 vfs 无软链接跟随 → exec symlink ENOEXEC，历史构建即副本规避）；kernel exec-symlink gap 列入 roadmap（P1/P5） | 1 天 | 09-02 |
 
 ## 2026-08-17 ~ 08-18
 

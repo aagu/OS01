@@ -51,6 +51,7 @@
 | syscall 边界审计 ✅ | **已完成**（2026-08-24，commits `a1ad1b9`..`80eab1a`，11 commits）。详见下文「Syscall 边界审计实施总结」 | 独立 | |
 | 堆加固 | malloc double-free/溢出检测 | 独立 | |
 | NX 页 | 栈/堆不可执行 + mmap PROT_EXEC 审计 | 独立 | |
+| **exec 软链接跟随** | `__vfs_lookup` 不跟随软链接（返回末段节点本身），execve symlink 读到的目标文本被当 ELF 解析 → ENOEXEC（2026-09-02 build refactor 暴露；构建期以 busybox 副本规避，见 P5 symlink 行）。高优先级：vfs lookup 加软链接跟随 + exec 路径解析（也是安全项——symlink 混淆/路径校验） | 独立 | Linux do_filp_open |
 
 ### 🏗 P2 aarch64 适配
 
@@ -105,6 +106,7 @@
 | 作业控制（部分完成）| ✅ ~~setpgid/setsid/getpgid/getsid（67-70）~~、✅ ~~tcgetpgrp/tcsetpgrp 真实现~~、✅ ~~tty ISIG + VINTR/VQUIT~~、✅ ~~kill 支持 pid=0/-pid/-1~~；**剩余**：SIGWINCH 派发、SIGTSTP/SIGCONT 完整作业控制（bg/fg/jobs，需 busybox `CONFIG_ASH_JOB_CONTROL=y` 或自写 shell） | tty termios ✅ | |
 | /proc 完善 | status（signal mask/ppid/utime/stime）+ cmdline + stat | 独立 | |
 | symlink/readlink | VFS 软链接 + ext2 symlink（in-inode 快链接）（原 P1#6） | 独立 | |
+| **exec symlink ABI** | POSIX exec 需跟随软链接（`execve("/bin/wget")` 目前 ENOEXEC——vfs lookup 不跟随）；2026-09-02 build refactor 已记录 plan deviation：rootfs applet 项用 busybox 副本替代 symlink 规避，待 kernel vfs 跟随软链接后切回 symlink | exec 软链接跟随（P1） | Linux |
 | HTTPS/TLS | mbedTLS 集成 BusyBox wget（原 P2#10） | mbedTLS ✅ | |
 | AF_UNIX/socketpair | 本地 socket IPC（原 P2#11） | socket ✅ | |
 | 更多 applet | grep/sed/find，先补 libc regex/fnmatch（原 P1#7） | libc | |

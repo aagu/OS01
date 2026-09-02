@@ -34,12 +34,20 @@ ROOTFS_MANIFEST := $(IMAGE_DIR)/rootfs.manifest
 
 # ── Rootfs manifest (x86) ───────────────────────────────────
 # config/rootfs.mk is version-controlled and lists every image input as
-# dest=source:mode (files) and dest=target (BusyBox applet symlinks). This
+# dest=source:mode (files) and dest=target (BusyBox applet entries). This
 # rule stages a FRESH tree (rm -rf of rootfs.next) so entries removed from
 # the manifest never linger, then emits the tab-separated manifest that
 # mkdisk consumes:
 #   file<TAB>dest<TAB>staged-source<TAB>mode
-#   symlink<TAB>dest<TAB>target
+#
+# PLAN DEVIATION (busybox copies instead of symlinks): the OS01 kernel has
+# no symlink support in path lookup / exec (vfs_lookup returns the last
+# component as-is; no follow_symlink exists), so an execve of a symlink
+# fails with ENOEXEC. The pre-refactor build masked this by writing full
+# busybox copies for every applet. Each ROOTFS_SYMLINKS entry is therefore
+# staged as a regular-file COPY of the busybox artifact (same content,
+# applet dispatched by argv[0]), and the manifest emits a `file` row. See
+# the ledger ruling + docs/roadmap.md (kernel exec-symlink gap).
 include $(OS01_ROOT)/config/rootfs.mk
 
 $(ROOTFS_MANIFEST): $(OS01_ROOT)/config/rootfs.mk \
@@ -61,7 +69,10 @@ $(ROOTFS_MANIFEST): $(OS01_ROOT)/config/rootfs.mk \
 	@for item in $(ROOTFS_SYMLINKS); do \
 	  dest=$${item%%=*}; \
 	  target=$${item#*=}; \
-	  printf 'symlink\t%s\t%s\n' "$$dest" "$$target" >> $@.tmp; \
+	  mkdir -p "$(ROOTFS_STAGING)/$$(dirname "$$dest")"; \
+	  cp "$(USER_ARTIFACT_DIR)/busybox.elf" "$(ROOTFS_STAGING)/$$dest"; \
+	  chmod 0755 "$(ROOTFS_STAGING)/$$dest"; \
+	  printf 'file\t%s\t%s\t%s\n' "$$dest" "$(ROOTFS_STAGING)/$$dest" "0755" >> $@.tmp; \
 	done
 	@test -s $@.tmp
 	@mv $@.tmp $@
