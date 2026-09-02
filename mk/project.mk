@@ -53,3 +53,24 @@ endef
 # its LOG_TARGET / INITTAB_FILE / ... defaults.
 OS01_SUBMAKE_ALLOWED := CLANG UEFI_CLANG LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_READOBJ LLVM_READELF TARGET_LD LOG_TARGET KERNEL_SELFTEST OS01_SYSTEST OS01_NETTEST INITTAB_FILE AARCH64_QEMU AARCH64_SMP AARCH64_UEFI_FIRMWARE_SOURCE QEMU_BIN
 OS01_SUBMAKE_ARGS = $(foreach v,$(OS01_SUBMAKE_ALLOWED),$(if $($(v)),$(v)=$($(v))))
+
+# ── Sysroot generation protocol (spec: sysroot single-writer) ──
+# The publish lock lives at build/.locks/<profile>/publish — OUTSIDE
+# $(BUILD_DIR), so profile clean (rm -rf build/<profile>) can never remove it.
+# It is acquired by atomic mkdir, retried for 60 s, and only a stale lock is
+# removed by `make unlock-profile FORCE_UNLOCK=1`. publish, clean and
+# unlock-profile all use it.
+LOCK_DIR := $(OS01_ROOT)/build/.locks/$(PROFILE)/publish
+# Generation read leases: one empty directory per in-flight artifact recipe
+# consuming the published generation. publish/clean check them while holding
+# the lock; clean fails (and deletes nothing) if any lease exists.
+LEASES_DIR := $(BUILD_DIR)/leases
+# Published immutable generations and the publish stamp (sysroot.mk is the
+# only writer of both).
+SYSROOT_GENERATIONS_DIR := $(BUILD_DIR)/sysroot-generations
+SYSROOT_STAMP := $(BUILD_DIR)/stamps/sysroot.stamp
+
+# FORCE — always out-of-date prerequisite for recipes that must run on every
+# invocation (content-gated staging stamps, the kernel artifact recipe).
+.PHONY: FORCE
+FORCE:

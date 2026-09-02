@@ -91,18 +91,20 @@ KERNEL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_EXTRA_OBJECTS)
 # ── Flags ──────────────────────────────────────────────────
 ALL_CFLAGS   := $(CFLAGS) $(ARCH_CFLAGS)   -I$(KERNEL_HEADERS)
 ifdef OS01_PROFILE_FILE
-# Profile mode: the root no longer exports a sysroot CFLAGS. The kernel
-# includes libc headers (<string.h>, <stdlib.h>, ...) from the STAGED libc
-# headers while `lib` stages them (Task 3 transitional; Task 4 publishes an
-# immutable sysroot generation instead).
-ALL_CFLAGS += -isystem $(LIBC_STAGING_INCLUDEDIR)
+ifeq ($(ARCH),x86_64)
+# Task 4: the kernel consumes libc headers (<string.h>, <stdlib.h>, ...) from
+# the immutable sysroot generation it is compiled against. SYSROOT_GENERATION_DIR
+# is passed by the root artifact rule (mk/components/kernel.mk) under the
+# generation lease. Guarded by ARCH so aarch64 profile mode never gets an
+# empty -isystem.
+ALL_CFLAGS += -isystem $(SYSROOT_GENERATION_DIR)/usr/include
+endif
 endif
 ALL_ASMFLAGS := $(ASFLAGS) $(ARCH_ASMFLAGS)
 ifeq ($(ARCH),x86_64)
 ifdef OS01_PROFILE_FILE
-# Task 3 transitional: the kernel links -lk/-lgcc against the staged libk.a
-# (final sysroot not populated until Task 4 publishes a generation).
-ALL_LDFLAGS  := $(LDFLAGS) $(ARCH_LDFLAGS) -L$(LIBC_STAGING_LIBDIR)
+# Task 4: the kernel links -lk against the immutable sysroot generation.
+ALL_LDFLAGS  := $(LDFLAGS) $(ARCH_LDFLAGS) -L$(SYSROOT_GENERATION_DIR)/usr/lib
 else
 ALL_LDFLAGS  := $(LDFLAGS) $(ARCH_LDFLAGS) -L$(TARGET_LIBDIR)
 endif
@@ -160,9 +162,12 @@ endif
 # typedefs and would choke on libc's stdint.h.
 ALL_CFLAGS     += -I$(LWIP_SRC_DIR)/include -I../kernel/include/net
 ifdef OS01_PROFILE_FILE
-# Explicit kernel-profile flag for the stdint.h injection (spec: kernel
-# profile flags). Task 3 transitional — references the staged libc include.
+ifeq ($(ARCH),x86_64)
+# Task 4: kernel-profile stdint injection, resolved against the immutable
+# generation (profile's KERNEL_STDINT_FLAGS). Guarded by ARCH so aarch64
+# profile mode makes no SYSROOT_GENERATION_DIR reference.
 ALL_C_ONLY_FLAGS := $(KERNEL_STDINT_FLAGS)
+endif
 else
 ALL_C_ONLY_FLAGS := -D__CLANG_STDINT_H -include $(SYSROOT)$(INCLUDEDIR)/stdint.h
 endif
@@ -192,7 +197,13 @@ ALL_CFLAGS += -DLOG_TARGET_FB=$(call bool,$(filter fb both,$(LOG_TARGET)))
 .PHONY: all clean install-headers
 
 all: $(BUILD_DIR)/kernel.bin
+ifdef OS01_PROFILE_FILE
+# Profile mode: the root artifact rule copies artifacts/kernel.bin from the
+# profile build dir; do not copy back into the source tree.
+	@true
+else
 	cp $< $(CURDIR)/../kernel.bin
+endif
 
 # ── Compilation rules ──────────────────────────────────────
 # .c → .o + .d
@@ -276,7 +287,9 @@ $(BUILD_DIR)/kernel/kallsyms.o: kernel/kallsyms.c $(BUILD_DIR)/kernel.elf.stage1
 	env -u CFLAGS -u LDFLAGS $(HOST_CC) -o $(BUILD_DIR)/kernel/kallsyms kernel/kallsyms.c
 	$(HOST_NM) -n $(BUILD_DIR)/kernel.elf.stage1 | $(BUILD_DIR)/kernel/kallsyms > $(BUILD_DIR)/kernel/kallsyms.S
 	env -u CFLAGS -u LDFLAGS $(EFFECTIVE_CC) -c -o $@ $(BUILD_DIR)/kernel/kallsyms.S
-	rm -f $(BUILD_DIR)/kernel.elf.stage1
+# NB: kernel.elf.stage1 is deliberately KEPT — it is the incremental trigger
+# of the kallsyms pass.  The two-pass re-runs only when an object (or the
+# linker script) changes, so a no-op `make kernel.bin` does not relink.
 
 # ── Final link ──────────────────────────────────────────────
 $(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o $(ARCHDIR)/$(ARCH_LINKER)
@@ -303,6 +316,11 @@ ifdef OS01_PROFILE_FILE
 	@test -n "$(INSTALL_ROOT)" || { echo "ERROR: install-headers (profile mode) requires INSTALL_ROOT (staging tree)"; exit 1; }
 	mkdir -p $(INSTALL_ROOT)/usr/include
 	cp -R --preserve=timestamps include/. $(INSTALL_ROOT)/usr/include/.
+	@# kernel/include/errno.h is resolved by the kernel build through its own
+	@# -Iinclude; in the SHARED sysroot, errno.h is owned by libc (userspace
+	@# ABI). Exclude it from the staged kernel headers so the generation
+	@# assembler never sees a duplicate destination.
+	rm -f $(INSTALL_ROOT)/usr/include/errno.h
 	@find $(INSTALL_ROOT) -type f ! -name manifest | sed 's|^$(INSTALL_ROOT)/||' | sort > $(INSTALL_ROOT)/manifest
 else
 	mkdir -p $(SYSROOT)$(INCLUDEDIR)

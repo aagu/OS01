@@ -23,18 +23,20 @@ UEFI_RUNTIME_DIR := $(BUILD_DIR)/uefi-runtime
 
 # Staging roots: component installs write ONLY their private staging tree
 # (INSTALL_ROOT), never the final sysroot. The single writer of the sysroot
-# is sysroot.mk (Task 4).
+# is sysroot.mk, which assembles immutable generations under
+# build/<profile>/sysroot-generations/ and publishes the $(SYSROOT) symlink.
 STAGING_DIR := $(BUILD_DIR)/staging
-# Task 3 transitional: kernel consumes libc headers from the libc staging
-# tree while `lib` stages it. Task 4 replaces this with the immutable
-# sysroot generation path.
-LIBC_STAGING_INCLUDEDIR := $(STAGING_DIR)/libc/usr/include
-# Task 3 transitional, parallel to the include dir: the kernel links -lk
-# against the staged libk.a while the final sysroot is not yet populated.
-LIBC_STAGING_LIBDIR := $(STAGING_DIR)/libc/usr/lib
+
+# Kernel artifact path (spec artifact-path table) — the profile is the single
+# source of artifact paths; kernel.mk's artifact rule consumes this.
+KERNEL_ARTIFACT := $(BUILD_DIR)/artifacts/kernel.bin
+
 # Explicit kernel-profile flag for the stdint.h injection (spec: kernel
-# profile flags). Task 3 transitional — references the staged libc include.
-KERNEL_STDINT_FLAGS := -D__CLANG_STDINT_H -include $(LIBC_STAGING_INCLUDEDIR)/stdint.h
+# profile flags), resolved against the immutable sysroot generation the
+# kernel is compiled against. SYSROOT_GENERATION_DIR is passed to the kernel
+# sub-make by the root artifact rule (mk/components/kernel.mk) under the
+# generation lease; recursive so it resolves inside that sub-make.
+KERNEL_STDINT_FLAGS = -D__CLANG_STDINT_H -include $(SYSROOT_GENERATION_DIR)/usr/include/stdint.h
 
 # Artifacts consumed by the root validation recipes.
 KERNEL_ELF ?= $(KERNEL_BUILD_DIR)/kernel.elf

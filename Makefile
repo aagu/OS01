@@ -9,6 +9,11 @@ base := $(patsubst %/,%,$(dir $(ROOT_MAKEFILE)))
 # Makefiles consume the profile directly (via OS01_PROFILE_FILE), never
 # through implicit environment inheritance.
 include $(base)/mk/project.mk
+# Cross-component dependency graph (spec: mk/components/*.mk is the only
+# place that wires components together). sysroot.mk is the single writer of
+# the sysroot; kernel.mk owns the kernel artifact.
+include $(base)/mk/components/sysroot.mk
+include $(base)/mk/components/kernel.mk
 
 # UEFI_EFI compat: boot/uefi still writes build/x86_64/uefi/BOOTX64.EFI until
 # Task 6 rewires it onto the profile layout; the profile's UEFI_EFI points at
@@ -72,21 +77,24 @@ boot/uefi/OVMF.fd:
 
 # ── Libraries ───────────────────────────────────────────
 
+# `lib` = the profile's sysroot libraries: stages kernel headers, libc/libk,
+# mbedTLS and compat-libs, then publishes an immutable sysroot generation
+# (the stamp's recipe in mk/components/sysroot.mk does the work). The
+# sysroot.stamp prerequisite only exists for userland profiles, so on others
+# this is a bare phony whose recipe fires the capability gate.
 .PHONY: lib
-lib:
+lib: $(if $(filter userland,$(PROFILE_CAPABILITIES)),$(SYSROOT_STAMP))
 	$(call require_capability,userland)
-	$(call os01_submake,kernel,install-headers INSTALL_ROOT=$(STAGING_DIR)/kernel-headers $(OS01_SUBMAKE_ARGS))
-	$(call os01_submake,libc,install INSTALL_ROOT=$(STAGING_DIR)/libc $(OS01_SUBMAKE_ARGS))
 
 # ── Kernel ──────────────────────────────────────────────
 
-.PHONY: kernel/kernel.bin
-kernel/kernel.bin: lib
-	$(call os01_submake,kernel,kernel.bin $(OS01_SUBMAKE_ARGS))
-
-# kernel.bin is built by kernel/Makefile and placed at project root
-kernel.bin: lib
-	$(call os01_submake,kernel,kernel.bin $(OS01_SUBMAKE_ARGS))
+# Project-root kernel.bin is a one-way copy of the profile's kernel artifact
+# (mk/components/kernel.mk). Only defined when the profile declares a kernel
+# artifact (x86_64-clang); other profiles simply fail on `make kernel.bin`.
+ifdef KERNEL_ARTIFACT
+kernel.bin: $(KERNEL_ARTIFACT)
+	cp $(KERNEL_ARTIFACT) kernel.bin
+endif
 
 # ── User programs ───────────────────────────────────────
 
@@ -103,71 +111,17 @@ $(USER_BUILD_DIR)/busybox.elf: thirdpart/busybox-1.36.1/busybox
 
 # ── BusyBox ─────────────────────────────────────────────
 # Submodule must be initialized: git submodule update --init
+#
+# BusyBox consumes the PUBLISHED sysroot: its link runs with
+# -L$(TARGET_LIBDIR) (the $(SYSROOT) symlink → the current immutable
+# generation), which the $(SYSROOT_STAMP) prerequisite guarantees is in
+# place. libm.a / librt.a come from the published compat-libs component;
+# this recipe no longer creates any sysroot file.
 
 BUSYBOX_SRC  = thirdpart/busybox-1.36.1
 BUSYBOX_CFG  = config/busybox.config.in
-BUSYBOX_LIBS = $(TARGET_LIBDIR)/libc.a $(TARGET_LIBDIR)/libk.a
 
-# The archives are normally installed by the phony `lib` target before the
-# disk-image prerequisites are considered.  Keep direct BusyBox builds usable
-# too, without making the BusyBox binary depend on the phony target itself.
-# `lib` is also a prerequisite of the profile-sysroot group rule below so the
-# profile TARGET_LIBDIR is always populated before the BusyBox link, under
-# -j as well (BUSYBOX_LIBS now points at the profile sysroot).
-libc/libc.a libc/libk.a &:
-	$(MAKE) -C kernel install-headers
-	$(MAKE) -C libc
-
-$(BUSYBOX_LIBS) &: libc/libc.a libc/libk.a lib
-	$(MAKE) -C kernel install-headers
-	$(MAKE) -C libc install
-
-# ── mbedTLS ─────────────────────────────────────────────────
-MBEDTLS_SRC = thirdpart/mbedtls
-MBEDTLS_LIB = $(TARGET_LIBDIR)/libmbedtls.a
-
-$(MBEDTLS_LIB): lib config/mbedtls_config.h libc/network/entropy.c
-	@test -d $(MBEDTLS_SRC)/library || { \
-	    echo "ERROR: mbedtls submodule not initialized"; \
-	    echo "Run: git submodule update --init"; false; }
-	@cp config/mbedtls_config.h $(MBEDTLS_SRC)/include/mbedtls/os01_mbedtls_config.h
-	@mkdir -p $(TARGET_LIBDIR) $(TARGET_INCLUDEDIR)
-	@rm -rf /tmp/mbedtls_build && mkdir -p /tmp/mbedtls_build
-	@echo "  [mbedtls] compiling 108 library files..."
-	@ok=0; fail=0; \
-	for src in $(MBEDTLS_SRC)/library/*.c; do \
-	    name=$$(basename $$src .c); \
-	    if $(TARGET_CC) \
-	        --sysroot=$(SYSROOT) -isystem=$(INCLUDEDIR) \
-	        -g -ffreestanding -fno-stack-protector \
-	        -I$(MBEDTLS_SRC)/include -I$(MBEDTLS_SRC)/library \
-	        -DMBEDTLS_USER_CONFIG_FILE='<mbedtls/os01_mbedtls_config.h>' \
-	        -c $$src -o /tmp/mbedtls_build/$$name.o 2>/dev/null; then \
-	        ok=$$((ok+1)); \
-	    else \
-	        fail=$$((fail+1)); \
-	        [ $$fail -le 3 ] && echo "  [mbedtls] FAIL: $$name" && \
-	          $(TARGET_CC) \
-	            --sysroot=$(SYSROOT) -isystem=$(INCLUDEDIR) \
-	            -g -ffreestanding -fno-stack-protector \
-	            -I$(MBEDTLS_SRC)/include -I$(MBEDTLS_SRC)/library \
-	            -DMBEDTLS_USER_CONFIG_FILE='<mbedtls/os01_mbedtls_config.h>' \
-	            -c $$src -o /tmp/mbedtls_build/$$name.o 2>&1 | grep "error:" | head -1; \
-	    fi; \
-	done; \
-	$(TARGET_CC) \
-	    --sysroot=$(SYSROOT) -isystem=$(INCLUDEDIR) \
-	    -g -ffreestanding -fno-stack-protector \
-	    -I$(MBEDTLS_SRC)/include -I$(MBEDTLS_SRC)/library \
-	    -DMBEDTLS_USER_CONFIG_FILE='<mbedtls/os01_mbedtls_config.h>' \
-	    -c libc/network/entropy.c -o /tmp/mbedtls_build/os01_entropy.o 2>/dev/null && ok=$$((ok+1)); \
-	echo "  [mbedtls] $$ok compiled"
-	@$(LLVM_AR) rcs $(MBEDTLS_LIB) /tmp/mbedtls_build/*.o
-	@cp -R $(MBEDTLS_SRC)/include/mbedtls $(TARGET_INCLUDEDIR)/
-	@rm -rf /tmp/mbedtls_build
-	@echo "  [mbedtls] libmbedtls.a installed"
-
-thirdpart/busybox-1.36.1/busybox: $(BUSYBOX_LIBS) $(BUSYBOX_SRC)/Makefile $(BUSYBOX_CFG) user/crt0.S user/sigreturn_trampoline.S
+thirdpart/busybox-1.36.1/busybox: $(SYSROOT_STAMP) $(BUSYBOX_SRC)/Makefile $(BUSYBOX_CFG) user/crt0.S user/sigreturn_trampoline.S
 	@test -f $(BUSYBOX_SRC)/Makefile || { \
 	    echo "ERROR: busybox submodule not initialized"; \
 	    echo "Run: git submodule update --init"; false; }
@@ -185,13 +139,6 @@ thirdpart/busybox-1.36.1/busybox: $(BUSYBOX_LIBS) $(BUSYBOX_SRC)/Makefile $(BUSY
 	    echo 'obj-y += sigreturn_trampoline.o' >> $(BUSYBOX_SRC)/applets/Kbuild.src
 	$(MAKE) -C $(BUSYBOX_SRC) silentoldconfig CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)" 2>/dev/null || \
 	yes "" | $(MAKE) -C $(BUSYBOX_SRC) oldconfig CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)"
-	@mkdir -p $(TARGET_LIBDIR)
-	@if [ ! -f $(TARGET_LIBDIR)/libm.a ] || [ ! -f $(TARGET_LIBDIR)/librt.a ]; then \
-	    touch /tmp/os01-busybox-stub.c && $(TARGET_CC) -c -x c /tmp/os01-busybox-stub.c -o /tmp/os01-busybox-stub.o 2>/dev/null; \
-	    test -f $(TARGET_LIBDIR)/libm.a || $(LLVM_AR) rcs $(TARGET_LIBDIR)/libm.a /tmp/os01-busybox-stub.o; \
-	    test -f $(TARGET_LIBDIR)/librt.a || $(LLVM_AR) rcs $(TARGET_LIBDIR)/librt.a /tmp/os01-busybox-stub.o; \
-	    rm -f /tmp/os01-busybox-stub.c /tmp/os01-busybox-stub.o; \
-	fi
 	$(MAKE) -C $(BUSYBOX_SRC) CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)"
 
 # ── Disk image ──────────────────────────────────────────
@@ -376,15 +323,59 @@ test-network:
 
 # ── Clean ───────────────────────────────────────────────
 
-.PHONY: clean
+# clean takes the publish lock (60 s retry), fails without deleting anything
+# if a generation read lease exists, then removes build/<profile> (NOT the
+# whole build/ tree — build/.locks/ and other profiles survive) plus the
+# legacy per-component build dirs and the project-root compat artifacts. All
+# of it runs in ONE shell line so the trap releases the lock in every path
+# (success or failure), and the lock is held for the whole clean.
+.PHONY: clean unlock-profile
 clean:
-	rm -rf disk.img
-	make -C boot/uefi clean
-	make -C kernel clean
-	make -C libc clean
-	make -C user clean
-	rm -rf test/build sysroot build
+	@set -e; \
+	mkdir -p "$(dir $(LOCK_DIR))"; \
+	i=0; \
+	while ! mkdir "$(LOCK_DIR)" 2>/dev/null; do \
+	  i=$$((i+1)); \
+	  if [ $$i -ge 600 ]; then \
+	    echo "ERROR: publish lock $(LOCK_DIR) held by:"; \
+	    cat "$(LOCK_DIR)/owner" 2>/dev/null || true; \
+	    exit 1; \
+	  fi; \
+	  sleep 0.1; \
+	done; \
+	trap 'rm -f "$(LOCK_DIR)/owner"; rmdir "$(LOCK_DIR)" 2>/dev/null || true' EXIT; \
+	echo "$$$$ $(MAKECMDGOALS) $$(date +%s)" > "$(LOCK_DIR)/owner"; \
+	if [ -d "$(LEASES_DIR)" ] && [ -n "$$(ls -A "$(LEASES_DIR)" 2>/dev/null)" ]; then \
+	  echo "ERROR: cannot clean while sysroot generations are leased:"; \
+	  ls -A "$(LEASES_DIR)"; \
+	  echo "lock owner: $$(cat "$(LOCK_DIR)/owner")"; \
+	  exit 1; \
+	fi; \
+	rm -rf build/$(PROFILE); \
+	rm -f disk.img kernel.bin; \
+	$(MAKE) -C boot/uefi clean; \
+	$(MAKE) -C kernel clean; \
+	$(MAKE) -C libc clean; \
+	$(MAKE) -C user clean; \
+	rm -rf test/build sysroot; \
 	if [ -f $(BUSYBOX_SRC)/Makefile ]; then \
-	    $(MAKE) -C $(BUSYBOX_SRC) clean 2>/dev/null || true; \
-	    rm -f $(BUSYBOX_SRC)/applets/crt0.S $(BUSYBOX_SRC)/applets/Kbuild.src.bak; \
+	  $(MAKE) -C $(BUSYBOX_SRC) clean 2>/dev/null || true; \
+	  rm -f $(BUSYBOX_SRC)/applets/crt0.S $(BUSYBOX_SRC)/applets/Kbuild.src.bak; \
+	fi
+
+# Diagnose and remove a stale publish lock. Prints the owner data and only
+# removes the lock when FORCE_UNLOCK=1 is set.
+unlock-profile:
+	@if [ -d "$(LOCK_DIR)" ]; then \
+	  echo "publish lock $(LOCK_DIR):"; \
+	  cat "$(LOCK_DIR)/owner" 2>/dev/null || true; \
+	  if [ "$$FORCE_UNLOCK" = "1" ]; then \
+	    rm -rf "$(LOCK_DIR)"; \
+	    echo "lock removed"; \
+	  else \
+	    echo "set FORCE_UNLOCK=1 to remove the stale lock"; \
+	    exit 1; \
+	  fi; \
+	else \
+	  echo "no lock held at $(LOCK_DIR)"; \
 	fi
