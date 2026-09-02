@@ -10,6 +10,11 @@ base := $(patsubst %/,%,$(dir $(ROOT_MAKEFILE)))
 # through implicit environment inheritance.
 include $(base)/mk/project.mk
 
+# UEFI_EFI compat: boot/uefi still writes build/x86_64/uefi/BOOTX64.EFI until
+# Task 6 rewires it onto the profile layout; the profile's UEFI_EFI points at
+# build/<profile>/uefi which nothing produces yet. Keep validate-uefi working.
+UEFI_EFI := build/x86_64/uefi/BOOTX64.EFI
+
 # ── Run parameters (profile-agnostic; shared by x86 and aarch64) ──
 DISPLAY=gtk
 MEMORY=512M
@@ -85,12 +90,14 @@ kernel.bin: lib
 
 # ── User programs ───────────────────────────────────────
 
+# user links against $(TARGET_LIBDIR)/libc.a, so it must wait for `lib` to
+# populate the profile sysroot — under -j as well as serial.
 .PHONY: user
-user:
+user: lib
 	$(call require_capability,userland)
 	$(call os01_submake,user,all $(OS01_SUBMAKE_ARGS))
 
-build/x86_64/user/busybox.elf: thirdpart/busybox-1.36.1/busybox
+$(USER_BUILD_DIR)/busybox.elf: thirdpart/busybox-1.36.1/busybox
 	@mkdir -p $(dir $@)
 	cp $< $@
 
@@ -104,11 +111,14 @@ BUSYBOX_LIBS = $(TARGET_LIBDIR)/libc.a $(TARGET_LIBDIR)/libk.a
 # The archives are normally installed by the phony `lib` target before the
 # disk-image prerequisites are considered.  Keep direct BusyBox builds usable
 # too, without making the BusyBox binary depend on the phony target itself.
+# `lib` is also a prerequisite of the profile-sysroot group rule below so the
+# profile TARGET_LIBDIR is always populated before the BusyBox link, under
+# -j as well (BUSYBOX_LIBS now points at the profile sysroot).
 libc/libc.a libc/libk.a &:
 	$(MAKE) -C kernel install-headers
 	$(MAKE) -C libc
 
-$(BUSYBOX_LIBS) &: libc/libc.a libc/libk.a
+$(BUSYBOX_LIBS) &: libc/libc.a libc/libk.a lib
 	$(MAKE) -C kernel install-headers
 	$(MAKE) -C libc install
 
@@ -186,27 +196,27 @@ thirdpart/busybox-1.36.1/busybox: $(BUSYBOX_LIBS) $(BUSYBOX_SRC)/Makefile $(BUSY
 
 # ── Disk image ──────────────────────────────────────────
 
-disk.img: $(BUILD_X86_64_UEFI) lib kernel.bin user build/x86_64/user/busybox.elf
+disk.img: $(BUILD_X86_64_UEFI) lib kernel.bin user $(USER_BUILD_DIR)/busybox.elf
 	@mkdir -p config/fsroot/bin config/fsroot/home config/fsroot/etc
-	@cp build/x86_64/user/init.elf          config/fsroot/bin/init
-	@cp build/x86_64/user/busybox.elf        config/fsroot/bin/busybox
-	@cp build/x86_64/user/spin.elf           config/fsroot/bin/spin
-	@cp build/x86_64/user/sigtest.elf        config/fsroot/bin/sigtest
-	@cp build/x86_64/user/poweroff.elf       config/fsroot/bin/poweroff
-	@cp build/x86_64/user/halt.elf           config/fsroot/bin/halt
-	@cp build/x86_64/user/reboot.elf         config/fsroot/bin/reboot
-	@cp build/x86_64/user/systest.elf        config/fsroot/bin/systest
-	@cp build/x86_64/user/test_mmap.elf      config/fsroot/bin/test_mmap
-	@cp build/x86_64/user/test_fork_mmap.elf config/fsroot/bin/test_fork_mmap
-	@cp build/x86_64/user/test_cow.elf       config/fsroot/bin/test_cow
-	@cp build/x86_64/user/terminal.elf       config/fsroot/bin/terminal
-	@cp build/x86_64/user/smp_stress.elf     config/fsroot/bin/smp_stress
+	@cp $(USER_BUILD_DIR)/init.elf          config/fsroot/bin/init
+	@cp $(USER_BUILD_DIR)/busybox.elf        config/fsroot/bin/busybox
+	@cp $(USER_BUILD_DIR)/spin.elf           config/fsroot/bin/spin
+	@cp $(USER_BUILD_DIR)/sigtest.elf        config/fsroot/bin/sigtest
+	@cp $(USER_BUILD_DIR)/poweroff.elf       config/fsroot/bin/poweroff
+	@cp $(USER_BUILD_DIR)/halt.elf           config/fsroot/bin/halt
+	@cp $(USER_BUILD_DIR)/reboot.elf         config/fsroot/bin/reboot
+	@cp $(USER_BUILD_DIR)/systest.elf        config/fsroot/bin/systest
+	@cp $(USER_BUILD_DIR)/test_mmap.elf      config/fsroot/bin/test_mmap
+	@cp $(USER_BUILD_DIR)/test_fork_mmap.elf config/fsroot/bin/test_fork_mmap
+	@cp $(USER_BUILD_DIR)/test_cow.elf       config/fsroot/bin/test_cow
+	@cp $(USER_BUILD_DIR)/terminal.elf       config/fsroot/bin/terminal
+	@cp $(USER_BUILD_DIR)/smp_stress.elf     config/fsroot/bin/smp_stress
 	@cp $(INITTAB_FILE) config/fsroot/etc/inittab
-	@cp build/x86_64/user/socktest.elf      config/fsroot/bin/socktest
-	@cp build/x86_64/user/udptest.elf       config/fsroot/bin/udptest
-	@cp build/x86_64/user/ipaddr.elf        config/fsroot/bin/ipaddr
-	@cp build/x86_64/user/nettest.elf       config/fsroot/bin/nettest
-	@cp build/x86_64/user/tetris.elf        config/fsroot/bin/tetris
+	@cp $(USER_BUILD_DIR)/socktest.elf      config/fsroot/bin/socktest
+	@cp $(USER_BUILD_DIR)/udptest.elf       config/fsroot/bin/udptest
+	@cp $(USER_BUILD_DIR)/ipaddr.elf        config/fsroot/bin/ipaddr
+	@cp $(USER_BUILD_DIR)/nettest.elf       config/fsroot/bin/nettest
+	@cp $(USER_BUILD_DIR)/tetris.elf        config/fsroot/bin/tetris
 	@ln -sf busybox config/fsroot/bin/wget
 	@ln -sf busybox config/fsroot/bin/login
 	@ln -sf busybox config/fsroot/bin/sh

@@ -46,8 +46,10 @@ endef
 
 # Whitelisted overrides allowed across the controlled sub-make boundary.
 # Each is appended as an explicit command-line argument only when set; never
-# through MAKEFLAGS. UEFI_CLANG and the QEMU path overrides (QEMU_BIN,
-# AARCH64_QEMU, ...) are whitelisted by policy for the adapters of later
-# tasks and are not consumed by any component sub-make yet.
-OS01_SUBMAKE_ALLOWED := CLANG LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_READOBJ LLVM_READELF TARGET_LD LOG_TARGET KERNEL_SELFTEST OS01_SYSTEST OS01_NETTEST INITTAB_FILE
-OS01_SUBMAKE_ARGS := $(foreach v,$(OS01_SUBMAKE_ALLOWED),$(if $($(v)),$(v)=$($(v))))
+# through MAKEFLAGS. UEFI_CLANG and the QEMU / firmware path overrides are
+# explicitly allowed by the spec and included here so the adapters of later
+# tasks can rely on them without rework. OS01_SUBMAKE_ARGS is recursive so it
+# is evaluated at recipe-expansion time — after the root Makefile has applied
+# its LOG_TARGET / INITTAB_FILE / ... defaults.
+OS01_SUBMAKE_ALLOWED := CLANG UEFI_CLANG LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_READOBJ LLVM_READELF TARGET_LD LOG_TARGET KERNEL_SELFTEST OS01_SYSTEST OS01_NETTEST INITTAB_FILE AARCH64_QEMU AARCH64_SMP AARCH64_UEFI_FIRMWARE_SOURCE QEMU_BIN
+OS01_SUBMAKE_ARGS = $(foreach v,$(OS01_SUBMAKE_ALLOWED),$(if $($(v)),$(v)=$($(v))))

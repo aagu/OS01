@@ -1,4 +1,9 @@
 # ── Shared x86_64 Clang/LLVM toolchain contract ────────────────
+# COMPAT ONLY — DO NOT EDIT. The source of truth for Clang/LLVM discovery
+# and validation is mk/toolchains/clang.mk (included by the x86_64 profile).
+# This file is kept for ONE release as the legacy include for standalone
+# component invocations (make -C kernel / libc / user without a profile) and
+# for boot/uefi. Any change here must be mirrored in mk/toolchains/clang.mk.
 # Location-independent common file, included by the root Makefile,
 # kernel/Makefile, libc/Makefile, user/Makefile and
 # kernel/arch/x86_64/make.config — each only under ARCH=x86_64.
