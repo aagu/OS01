@@ -75,20 +75,23 @@ $(USER_ARTIFACTS)&: $(SYSROOT_STAMP) FORCE
 # path and expected revision; the input digest covers the ACTUAL worktree
 # (so local uncommitted modifications invalidate the adapter even though the
 # git revision is unchanged), config/busybox.config.in, the manifest, all
-# tracked overlay files, user/crt0.S + user/sigreturn_trampoline.S, the
-# toolchain identity and the CURRENT generation id (its .config embeds the
-# generation paths). The digest is written to
-# $(BUILD_DIR)/receipts/busybox.input.digest and compared with
-# $(BUILD_DIR)/receipts/busybox.stamp.receipt; only a difference (or a
-# missing private binary) triggers a re-copy + rebuild. The private copy
-# lives in $(BUILD_DIR)/thirdparty/busybox; the tracked overlay is applied
-# there (applets/Kbuild.src + crt0.S + sigreturn_trampoline.S) and .config is
-# generated from config/busybox.config.in with the generation paths. The
-# relative -I../../libc/include -I../../kernel/include flags in the config
-# template are dropped (the generation usr/include is a superset of both and
-# the relative paths would point at nothing at this build depth) and the
-# linker script path is made absolute against $(OS01_ROOT). Depends on
-# $(SYSROOT_STAMP), which transitively includes the compat-libs stamp:
+# tracked overlay files, user/crt0.S + user/sigreturn_trampoline.S +
+# user/linker.ld (the link consumes the linker script), the toolchain
+# identity and the CURRENT generation id (its .config embeds the generation
+# paths). The digest is written to $(BUILD_DIR)/receipts/busybox.input.digest
+# and compared with $(BUILD_DIR)/receipts/busybox.stamp.receipt; only a
+# difference (or a missing private binary) triggers a re-copy + rebuild. The
+# private copy lives in $(BUILD_DIR)/thirdparty/busybox; the tracked overlay
+# is applied there (applets/Kbuild.src + crt0.S + sigreturn_trampoline.S) and
+# .config is generated from config/busybox.config.in with the generation
+# paths. The relative -I../../libc/include -I../../kernel/include flags in
+# the config template are dropped (the generation usr/include is a superset
+# of both, and the relative paths would point at nothing at this build depth)
+# and the linker script path is made absolute against $(OS01_ROOT). The
+# native busybox Make is invoked under the controlled environment (env -i
+# with the whitelisted MAKEFLAGS), same as every other sub-make, so ambient
+# CFLAGS/LDFLAGS/CPPFLAGS cannot contaminate the third-party build. Depends
+# on $(SYSROOT_STAMP), which transitively includes the compat-libs stamp:
 # BusyBox never creates libm.a / librt.a itself.
 
 BUSYBOX_MANIFEST  := $(OS01_ROOT)/thirdpart/busybox.manifest
@@ -123,6 +126,9 @@ $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	  rm -f "$(LOCK_DIR)/owner"; \
 	  rmdir "$(LOCK_DIR)" 2>/dev/null || true; \
 	  trap "rmdir \"$$lease\" 2>/dev/null || true" EXIT; \
+	  test -f "$(OS01_ROOT)/thirdpart/busybox-1.36.1/Makefile" || { \
+	    echo "ERROR: busybox submodule not initialized"; \
+	    echo "Run: git submodule update --init"; exit 1; }; \
 	  if [ -n "$(DRY_RUN)" ]; then \
 	    echo "  [busybox] dry-run: not rebuilding"; \
 	  else \
@@ -130,7 +136,7 @@ $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	      find thirdpart/busybox-1.36.1 -type f -exec sha256sum {} + 2>/dev/null | sort; \
 	      sha256sum config/busybox.config.in thirdpart/busybox.manifest; \
 	      find config/busybox.overlay -type f -exec sha256sum {} + 2>/dev/null | sort; \
-	      sha256sum user/crt0.S user/sigreturn_trampoline.S; \
+	      sha256sum user/crt0.S user/sigreturn_trampoline.S user/linker.ld; \
 	      printf "toolchain: %s\n" "$$($(CLANG) --version 2>/dev/null | head -1)"; \
 	      printf "generation: %s\n" "$$genid"; \
 	    } | sha256sum | cut -d" " -f1 ); \
@@ -153,9 +159,15 @@ $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	          -e "s|-I../../libc/include -I../../kernel/include ||" \
 	          -e "s|-Wl,-T,../../user/linker.ld|-Wl,-T,$(OS01_ROOT)/user/linker.ld|" \
 	          "$(OS01_ROOT)/config/busybox.config.in" > "$(BUSYBOX_PRIVATE)/.config"; \
-	      $(MAKE) -C "$(BUSYBOX_PRIVATE)" silentoldconfig CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)" 2>/dev/null || \
-	      yes "" | $(MAKE) -C "$(BUSYBOX_PRIVATE)" oldconfig CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)"; \
-	      $(MAKE) -C "$(BUSYBOX_PRIVATE)" CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)"; \
+	      env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
+	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
+	        -C "$(BUSYBOX_PRIVATE)" silentoldconfig CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)" 2>/dev/null || \
+	      yes "" | env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
+	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
+	        -C "$(BUSYBOX_PRIVATE)" oldconfig CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)"; \
+	      env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
+	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
+	        -C "$(BUSYBOX_PRIVATE)" CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)"; \
 	      [ -f "$(BUSYBOX_PRIVATE)/busybox" ] || { echo "ERROR: busybox build produced no binary"; exit 1; }; \
 	      printf "%s\n" "$$digest" > "$(BUSYBOX_RECEIPT)"; \
 	    fi; \
