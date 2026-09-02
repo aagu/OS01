@@ -1,43 +1,31 @@
-# boot/uefi/Makefile — unified UEFI bootloader build wrapper.
+# boot/uefi/Makefile — UEFI bootloader build wrapper.
 #
-# Builds both EFI applications from the shared main.c + per-arch hooks:
-#   make -C boot/uefi ARCH=x86_64    -> build/x86_64/uefi/BOOTX64.EFI (legacy)
-#   make -C boot/uefi ARCH=aarch64   -> build/aarch64/uefi/BOOTAA64.EFI (legacy)
+# Builds the EFI applications from the shared main.c + per-arch hooks:
+#   ARCH=x86_64   -> $(UEFI_BUILD_DIR)/BOOTX64.EFI
+#   ARCH=aarch64  -> $(UEFI_BUILD_DIR)/BOOTAA64.EFI
 #
-# Profile mode (OS01_PROFILE_FILE set, invoked by the root EFI artifact rule
-# in mk/components/uefi.mk): BUILD_DIR / OUTDIR / RUNTIME_DIR come from the
-# selected profile, and the UEFI runtime at $(UEFI_RUNTIME_DIR) is ALREADY
-# copied + patched by the root adapter — this Makefile only compiles the
-# boot sources against it (the copy + sed mutations live in the tracked
-# config/posix-uefi/*.patch files). Legacy standalone mode (no
-# OS01_PROFILE_FILE) keeps the old build/<arch> layout and performs the
-# runtime copy + sed mutations itself. Each ARCH gets a private runtime copy,
-# so objects never cross-pollinate between architectures.
+# Profile-only: the root EFI artifact rule (mk/components/uefi.mk) is the only
+# caller. The adapter stages the UEFI runtime at $(UEFI_RUNTIME_DIR) (copy +
+# tracked patches); this Makefile only compiles the boot sources against it.
+# ARCH is passed by the root rule — this Makefile never selects an
+# architecture by default.
 
 LOCAL_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
 ROOT := $(abspath $(dir $(LOCAL_MAKEFILE))../..)
 
-ifdef OS01_PROFILE_FILE
-# ── Profile mode ──────────────────────────────────────────
+# ── Profile-only contract ───────────────────────────────────
+# The root Makefile is the only supported entry; component Makefiles
+# require OS01_PROFILE_FILE at parse time. OUTDIR / RUNTIME_DIR come from
+# the selected profile (UEFI_BUILD_DIR / UEFI_RUNTIME_DIR).
+ifeq ($(strip $(OS01_PROFILE_FILE)),)
+$(error invoke from the repository root: make PROFILE=x86_64-clang <target>)
+endif
+ifeq ($(wildcard $(OS01_PROFILE_FILE)),)
+$(error OS01_PROFILE_FILE='$(OS01_PROFILE_FILE)' does not exist; invoke from the repository root)
+endif
 include $(OS01_PROFILE_FILE)
-ARCH ?= x86_64
 OUTDIR := $(UEFI_BUILD_DIR)
 RUNTIME_DIR := $(UEFI_RUNTIME_DIR)
-else
-# ── Legacy standalone mode ────────────────────────────────
-ARCH ?= x86_64
-BUILD_DIR := $(ROOT)/build/$(ARCH)
-RUNTIME_DIR := $(BUILD_DIR)/uefi-runtime
-OUTDIR := $(BUILD_DIR)/uefi
-UEFI_RUNTIME_SOURCE ?= $(ROOT)/thirdpart/posix-uefi/uefi
-# require_program is a GNU make `define` in toolchain.mk — such defines are
-# never exported to child makes, so include toolchain.mk here (it is
-# location-independent) for the UEFI Clang contract below. x86_64 only:
-# the aarch64 path must stay free of x86 toolchain variables.
-ifeq ($(ARCH),x86_64)
-include $(ROOT)/toolchain.mk
-endif
-endif
 
 ifeq ($(ARCH),x86_64)
 TARGET := BOOTX64.EFI
@@ -91,46 +79,22 @@ else
 UEFI_MAKE := $(MAKE) -j1 -C $(RUNTIME_DIR) ARCH=$(ARCH) TARGET=$(TARGET) OUTDIR=$(OUTDIR)/ SRCS="$(SRCS)"
 endif
 
-.PHONY: all clean clean-all
+.PHONY: all clean
 all: $(OUTDIR)/$(TARGET)
 
 $(OUTDIR)/$(TARGET): $(SRCS) $(ROOT)/boot/uefi/arch/arch.h \
 		$(ROOT)/kernel/include/kernel/bootinfo.h $(UEFI_RUNTIME_STAMP)
-ifndef OS01_PROFILE_FILE
-# Legacy standalone: copy + mutate the runtime inline (tracked in
-# config/posix-uefi/*.patch in profile mode).
-	@test -f $(UEFI_RUNTIME_SOURCE)/Makefile || { \
-		echo "ERROR: posix-uefi runtime is unavailable at $(UEFI_RUNTIME_SOURCE)"; \
-		false; \
-	}
-	rm -rf $(RUNTIME_DIR) $(OUTDIR)
-	mkdir -p $(RUNTIME_DIR) $(OUTDIR)
-	cp -a $(UEFI_RUNTIME_SOURCE) $(RUNTIME_DIR)/uefi
-	cp $(RUNTIME_DIR)/uefi/Makefile $(RUNTIME_DIR)/Makefile
-	rm -f $(RUNTIME_DIR)/uefi/*.o $(RUNTIME_DIR)/uefi/*.a
-	sed -i 's/ARCH=$$(ARCH)/ARCH=$$(ARCH) OUTDIR=/' $(RUNTIME_DIR)/Makefile
-	sed -i '/^CFLAGS += -fshort-wchar/i CFLAGS += -DUEFI_NO_UTF8' $(RUNTIME_DIR)/Makefile
-	sed -i '/^CFLAGS += -fshort-wchar/i CFLAGS += -DUEFI_NO_UTF8' $(RUNTIME_DIR)/uefi/Makefile
-else
-# Profile mode: the runtime is already staged + patched by the uefi.mk
-# adapter; never copy or mutate it here.
+	# The runtime is already staged + patched by the uefi.mk adapter; never
+	# copy or mutate it here.
 	@test -d $(RUNTIME_DIR) || { \
 		echo "ERROR: UEFI runtime not staged at $(RUNTIME_DIR) (run the uefi.mk adapter)"; \
 		false; \
 	}
-endif
 	# The deep mkdir paths below are harmless: they mirror where the inner
 	# make places per-source objects (OUTDIR + absolute source path), the
-	# same proven pattern the legacy aarch64 wrapper used.
+	# same proven pattern the aarch64 wrapper used.
 	@$(foreach source,$(SRCS),mkdir -p $(OUTDIR)$(dir $(source));)
 	$(UEFI_MAKE)
 
-OVMF.fd:
-	wget -c https://retrage.github.io/edk2-nightly/bin/RELEASEX64_OVMF.fd -O $@
-
 clean:
 	rm -rf $(RUNTIME_DIR) $(OUTDIR)
-
-clean-all:
-	rm -rf $(RUNTIME_DIR) $(OUTDIR)
-	rm -f OVMF.fd

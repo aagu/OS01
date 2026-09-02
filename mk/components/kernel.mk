@@ -53,6 +53,7 @@ $(KERNEL_ARTIFACT): $(SYSROOT_STAMP) FORCE
 	  env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
 	    MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
 	    -C kernel OS01_PROFILE_FILE="$(OS01_PROFILE_FILE)" PROFILE="$(PROFILE)" \
+	    ARCH=x86_64 \
 	    kernel.bin $$force SYSROOT_GENERATION_DIR="$$genabs" $(OS01_SUBMAKE_ARGS); \
 	  if [ -z "$(DRY_RUN)" ]; then printf "%s\n" "$$genid" > "$(KERNEL_BUILD_DIR)/.sysroot-generation"; fi; \
 	'

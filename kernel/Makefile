@@ -1,32 +1,30 @@
-# ── Architecture selection ──────────────────────────────────
-ARCH        ?= x86_64
+# ── Architecture ────────────────────────────────────────────
+# ARCH is supplied by the root artifact rules (mk/components/kernel.mk for
+# x86_64, mk/components/image.mk for aarch64) — the kernel never selects an
+# architecture by default.
 ARCHDIR     := arch/$(ARCH)
-DEST_DIR    := ..                  # root of the project (for kernel.bin)
 
-# ── Profile mode (root os01_submake) vs standalone legacy ──
-# With OS01_PROFILE_FILE set, include the selected profile instead of the
-# legacy toolchain.mk and take the build dir from the profile
-# (KERNEL_BUILD_DIR). The two paths are mutually exclusive.
+# ── Profile-only contract ───────────────────────────────────
+# The root Makefile is the only supported entry; component Makefiles
+# require OS01_PROFILE_FILE at parse time. Build dir and toolchain come
+# from the selected profile (KERNEL_BUILD_DIR).
 LOCAL_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
-ifdef OS01_PROFILE_FILE
+ifeq ($(strip $(OS01_PROFILE_FILE)),)
+$(error invoke from the repository root: make PROFILE=x86_64-clang <target>)
+endif
+ifeq ($(wildcard $(OS01_PROFILE_FILE)),)
+$(error OS01_PROFILE_FILE='$(OS01_PROFILE_FILE)' does not exist; invoke from the repository root)
+endif
 include $(OS01_PROFILE_FILE)
 BUILD_DIR := $(KERNEL_BUILD_DIR)
-else
-# Build directory: all .o .d .elf .bin go here, separate from source
-BUILD_DIR := ../build/$(ARCH)/kernel
-# Shared x86 toolchain (root toolchain.mk)
-ifeq ($(ARCH),x86_64)
-include $(dir $(LOCAL_MAKEFILE))../toolchain.mk
-endif
-endif
 
 # ── Load architecture configuration ────────────────────────
 include $(ARCHDIR)/make.config
 
 # Toolchain picks are architecture-specific and live in arch/<arch>/make.config.
 # Keep the generic kernel Makefile free from arch-specific compiler/linker logic.
-# x86_64 gets EFFECTIVE_CC/OBJ_CPY from toolchain.mk; aarch64 falls back to
-# its own CC (from make.config) and llvm-objcopy here.
+# x86_64 gets EFFECTIVE_CC/OBJ_CPY from the profile's clang.mk; aarch64 falls
+# back to its own CC (from make.config) and llvm-objcopy here.
 EFFECTIVE_CC ?= $(CC)
 OBJ_CPY ?= llvm-objcopy
 
@@ -90,24 +88,18 @@ KERNEL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_EXTRA_OBJECTS)
 
 # ── Flags ──────────────────────────────────────────────────
 ALL_CFLAGS   := $(CFLAGS) $(ARCH_CFLAGS)   -I$(KERNEL_HEADERS)
-ifdef OS01_PROFILE_FILE
 ifeq ($(ARCH),x86_64)
-# Task 4: the kernel consumes libc headers (<string.h>, <stdlib.h>, ...) from
+# The kernel consumes libc headers (<string.h>, <stdlib.h>, ...) from
 # the immutable sysroot generation it is compiled against. SYSROOT_GENERATION_DIR
 # is passed by the root artifact rule (mk/components/kernel.mk) under the
 # generation lease. Guarded by ARCH so aarch64 profile mode never gets an
 # empty -isystem.
 ALL_CFLAGS += -isystem $(SYSROOT_GENERATION_DIR)/usr/include
 endif
-endif
 ALL_ASMFLAGS := $(ASFLAGS) $(ARCH_ASMFLAGS)
 ifeq ($(ARCH),x86_64)
-ifdef OS01_PROFILE_FILE
-# Task 4: the kernel links -lk against the immutable sysroot generation.
+# The kernel links -lk against the immutable sysroot generation.
 ALL_LDFLAGS  := $(LDFLAGS) $(ARCH_LDFLAGS) -L$(SYSROOT_GENERATION_DIR)/usr/lib
-else
-ALL_LDFLAGS  := $(LDFLAGS) $(ARCH_LDFLAGS) -L$(TARGET_LIBDIR)
-endif
 else
 ALL_LDFLAGS  := $(LDFLAGS) $(ARCH_LDFLAGS) -L$(SYSROOT)/usr/lib
 endif
@@ -161,15 +153,11 @@ endif
 # rule assembles through the C preprocessor, which can't parse C
 # typedefs and would choke on libc's stdint.h.
 ALL_CFLAGS     += -I$(LWIP_SRC_DIR)/include -I../kernel/include/net
-ifdef OS01_PROFILE_FILE
 ifeq ($(ARCH),x86_64)
-# Task 4: kernel-profile stdint injection, resolved against the immutable
-# generation (profile's KERNEL_STDINT_FLAGS). Guarded by ARCH so aarch64
-# profile mode makes no SYSROOT_GENERATION_DIR reference.
+# Kernel-profile stdint injection, resolved against the immutable generation
+# (profile's KERNEL_STDINT_FLAGS). Guarded by ARCH so aarch64 profile mode
+# makes no SYSROOT_GENERATION_DIR reference.
 ALL_C_ONLY_FLAGS := $(KERNEL_STDINT_FLAGS)
-endif
-else
-ALL_C_ONLY_FLAGS := -D__CLANG_STDINT_H -include $(SYSROOT)$(INCLUDEDIR)/stdint.h
 endif
 ALL_LDFLAGS    +=
 ifdef DEBUG_CHANNELS
@@ -197,13 +185,9 @@ ALL_CFLAGS += -DLOG_TARGET_FB=$(call bool,$(filter fb both,$(LOG_TARGET)))
 .PHONY: all clean install-headers
 
 all: $(BUILD_DIR)/kernel.bin
-ifdef OS01_PROFILE_FILE
-# Profile mode: the root artifact rule copies artifacts/kernel.bin from the
-# profile build dir; do not copy back into the source tree.
+# The root artifact rule (mk/components/kernel.mk) copies artifacts/kernel.bin
+# from the profile build dir; do not copy back into the source tree.
 	@true
-else
-	cp $< $(CURDIR)/../kernel.bin
-endif
 
 # ── Compilation rules ──────────────────────────────────────
 # .c → .o + .d
@@ -243,23 +227,16 @@ $(BUILD_DIR)/$(ARCHDIR)/trampoline.elf: $(BUILD_DIR)/$(ARCHDIR)/trampoline.o $(A
 $(BUILD_DIR)/$(ARCHDIR)/trampoline.bin: $(BUILD_DIR)/$(ARCHDIR)/trampoline.elf
 	$(OBJ_CPY) -O binary $< $@
 
-ifdef OS01_PROFILE_FILE
-# Profile mode: the intermediate binary is generated under the profile build
-# dir (never written into the source tree). The kernel's trampoline.h
-# hardcodes the linker-derived symbols _binary_arch_x86_64_trampoline_bin_*,
-# which depend on the *path string* passed to `ld -r -b binary`. Run the
-# embed link from $(KERNEL_BUILD_DIR)/generated with the relative path
+# The intermediate binary is generated under the profile build dir (never
+# written into the source tree). The kernel's trampoline.h hardcodes the
+# linker-derived symbols _binary_arch_x86_64_trampoline_bin_*, which depend
+# on the *path string* passed to `ld -r -b binary`. Run the embed link from
+# $(KERNEL_BUILD_DIR)/generated with the relative path
 # arch/x86_64/trampoline.bin so lld emits exactly those symbol names.
 $(BUILD_DIR)/$(ARCHDIR)/trampoline_bin.o: $(BUILD_DIR)/$(ARCHDIR)/trampoline.bin
 	@mkdir -p $(KERNEL_BUILD_DIR)/generated/arch/x86_64
 	cp $< $(KERNEL_BUILD_DIR)/generated/arch/x86_64/trampoline.bin
 	cd $(KERNEL_BUILD_DIR)/generated && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary arch/x86_64/trampoline.bin -o $@
-else
-$(BUILD_DIR)/$(ARCHDIR)/trampoline_bin.o: $(BUILD_DIR)/$(ARCHDIR)/trampoline.bin
-	cp $< $(ARCHDIR)/trampoline.bin
-	$(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(ARCHDIR)/trampoline.bin -o $@
-	rm -f $(ARCHDIR)/trampoline.bin
-endif
 endif
 
 # ── Temporary: irq.o avoids .bss section issue ─────────────
@@ -312,7 +289,6 @@ kernel.bin: all
 
 # ── Install headers ────────────────────────────────────────
 install-headers:
-ifdef OS01_PROFILE_FILE
 	@test -n "$(INSTALL_ROOT)" || { echo "ERROR: install-headers (profile mode) requires INSTALL_ROOT (staging tree)"; exit 1; }
 	@# Rebuild the staging tree from source so headers removed from
 	@# kernel/include/ do not linger in staging (spec: deleted/renamed
@@ -326,10 +302,6 @@ ifdef OS01_PROFILE_FILE
 	@# assembler never sees a duplicate destination.
 	rm -f $(INSTALL_ROOT)/usr/include/errno.h
 	@find $(INSTALL_ROOT) -type f ! -name manifest | sed 's|^$(INSTALL_ROOT)/||' | sort > $(INSTALL_ROOT)/manifest
-else
-	mkdir -p $(SYSROOT)$(INCLUDEDIR)
-	cp -R --preserve=timestamps include/. $(SYSROOT)$(INCLUDEDIR)/.
-endif
 
 # ── Clean ───────────────────────────────────────────────────
 clean:

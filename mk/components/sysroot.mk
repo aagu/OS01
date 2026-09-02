@@ -45,7 +45,7 @@ endef
 
 $(STAMPS_DIR)/kernel-headers-install.stamp: FORCE
 	@mkdir -p $(dir $@)
-	$(call os01_submake,kernel,install-headers INSTALL_ROOT=$(STAGING_DIR)/kernel-headers $(OS01_SUBMAKE_ARGS))
+	$(call os01_submake,kernel,install-headers INSTALL_ROOT=$(STAGING_DIR)/kernel-headers ARCH=x86_64 $(OS01_SUBMAKE_ARGS))
 	$(call stamp_check,$(STAGING_DIR)/kernel-headers)
 
 $(STAMPS_DIR)/libc-install.stamp: FORCE

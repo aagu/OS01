@@ -274,11 +274,12 @@ CLEAN_COMPAT := $(if $(filter $(DEFAULT_PROFILE),$(PROFILE)),rm -f disk.img kern
 
 # clean takes the publish lock (60 s retry), fails without deleting anything
 # if a generation read lease exists, then removes build/<profile> (NOT the
-# whole build/ tree — build/.locks/ and other profiles survive) plus the
-# legacy per-component build dirs and, for the default profile, the
-# project-root compat artifacts. All of it runs in ONE shell line so the trap
-# releases the lock in every path (success or failure), and the lock is held
-# for the whole clean.
+# whole build/ tree — build/.locks/ and other profiles survive) plus, for the
+# default profile, the project-root compat artifacts. Component Makefiles are
+# never recursed into: they are profile-only now, and clean already removes
+# every component's profile output wholesale. All of it runs in ONE shell line
+# so the trap releases the lock in every path (success or failure), and the
+# lock is held for the whole clean.
 .PHONY: clean unlock-profile
 clean:
 	@if [ -n "$(DRY_RUN)" ]; then \
@@ -314,10 +315,6 @@ clean:
 	    echo "ERROR: refusing to remove boot/uefi/OVMF.fd (not a gitignored, untracked generated artifact); preserving it" >&2; \
 	  fi; \
 	fi; \
-	$(MAKE) -C boot/uefi clean; \
-	$(MAKE) -C kernel clean; \
-	$(MAKE) -C libc clean; \
-	$(MAKE) -C user clean; \
 	rm -rf test/build sysroot
 
 # Diagnose and remove a stale publish lock. Prints the owner data and only

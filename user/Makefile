@@ -1,30 +1,24 @@
 # ── Configuration ──────────────────────────────────────────
-ARCH ?= x86_64
 LOCAL_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
 
-# ── Profile mode (root os01_submake) vs standalone legacy ──
-# With OS01_PROFILE_FILE set, include the selected profile instead of the
-# legacy toolchain.mk and take the build dir from the profile
-# (USER_BUILD_DIR). The two paths are mutually exclusive.
-ifdef OS01_PROFILE_FILE
+# ── Profile-only contract ───────────────────────────────────
+# The root Makefile is the only supported entry; component Makefiles
+# require OS01_PROFILE_FILE at parse time. Build dir and toolchain come
+# from the selected profile (USER_BUILD_DIR).
+ifeq ($(strip $(OS01_PROFILE_FILE)),)
+$(error invoke from the repository root: make PROFILE=x86_64-clang <target>)
+endif
+ifeq ($(wildcard $(OS01_PROFILE_FILE)),)
+$(error OS01_PROFILE_FILE='$(OS01_PROFILE_FILE)' does not exist; invoke from the repository root)
+endif
 include $(OS01_PROFILE_FILE)
 BUILD_DIR := $(USER_BUILD_DIR)
-# Profile mode consumes the immutable generation the root artifact rule
+# Consumes the immutable generation the root artifact rule
 # (mk/components/user.mk) leased and passed as SYSROOT_GENERATION_DIR — never
 # the $(SYSROOT) symlink.
 SYSROOT_DIR   := $(SYSROOT_GENERATION_DIR)
 TARGET_INCDIR := $(SYSROOT_GENERATION_DIR)/usr/include
 TARGET_LIBDIR_LOCAL := $(SYSROOT_GENERATION_DIR)/usr/lib
-else
-BUILD_DIR := ../build/x86_64/user
-ifeq ($(ARCH),x86_64)
-include $(dir $(LOCAL_MAKEFILE))../toolchain.mk
-endif
-# Legacy standalone mode: unchanged — links against the published $(SYSROOT).
-SYSROOT_DIR   := $(SYSROOT)
-TARGET_INCDIR := $(TARGET_INCLUDEDIR)
-TARGET_LIBDIR_LOCAL := $(TARGET_LIBDIR)
-endif
 
 OBJ_DIR   := $(BUILD_DIR)/obj
 
@@ -128,7 +122,7 @@ $(BUILD_DIR)/tetris.elf: $(OBJ_DIR)/tetris.o $(OBJ_DIR)/tetris_logic.o $(CRT0_OB
 
 # ── Clean ──────────────────────────────────────────────────
 clean:
-	rm -rf $(BUILD_DIR) *.elf
+	rm -rf $(BUILD_DIR)
 
 # ── Dependency tracking ────────────────────────────────────
 C_DEPS := $(patsubst %.c,$(OBJ_DIR)/%.d,$(C_SOURCES))

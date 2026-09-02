@@ -1,22 +1,20 @@
 # ── Architecture ────────────────────────────────────────────
 HOSTARCH  := x86_64
 ARCHDIR   := arch/$(HOSTARCH)
-ARCH ?= x86_64
 LOCAL_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
 
-# ── Profile mode (root os01_submake) vs standalone legacy ──
-# With OS01_PROFILE_FILE set, include the selected profile instead of the
-# legacy toolchain.mk and take the build dir from the profile
-# (LIBC_BUILD_DIR). The two paths are mutually exclusive.
-ifdef OS01_PROFILE_FILE
+# ── Profile-only contract ───────────────────────────────────
+# The root Makefile is the only supported entry; component Makefiles
+# require OS01_PROFILE_FILE at parse time. Build dir and toolchain come
+# from the selected profile (LIBC_BUILD_DIR).
+ifeq ($(strip $(OS01_PROFILE_FILE)),)
+$(error invoke from the repository root: make PROFILE=x86_64-clang <target>)
+endif
+ifeq ($(wildcard $(OS01_PROFILE_FILE)),)
+$(error OS01_PROFILE_FILE='$(OS01_PROFILE_FILE)' does not exist; invoke from the repository root)
+endif
 include $(OS01_PROFILE_FILE)
 BUILD_DIR := $(LIBC_BUILD_DIR)
-else
-BUILD_DIR := ../build/$(HOSTARCH)/libc
-ifeq ($(ARCH),x86_64)
-include $(dir $(LOCAL_MAKEFILE))../toolchain.mk
-endif
-endif
 
 # ── Load architecture config ────────────────────────────────
 include $(ARCHDIR)/make.config
@@ -70,17 +68,12 @@ LIBC_ALL_OBJS := $(LIBC_OBJS) $(LIBC_ARCH_OBJS) $(LIBC_HOSTED_OBJS)
 LIBK_ALL_OBJS := $(LIBK_OBJS) $(LIBK_ARCH_OBJS)
 
 # ── Archives ─────────────────────────────────────────────────
-# Profile mode: archives live under the profile build dir (LIBC_BUILD_DIR),
-# never in the libc/ source tree. Legacy standalone mode keeps them in CWD.
-ifdef OS01_PROFILE_FILE
+# Archives live under the profile build dir (LIBC_BUILD_DIR), never in the
+# libc/ source tree.
 LIBC_ARCHIVE := $(LIBC_BUILD_DIR)/lib/libc.a
 LIBK_ARCHIVE := $(LIBC_BUILD_DIR)/lib/libk.a
-else
-LIBC_ARCHIVE := libc.a
-LIBK_ARCHIVE := libk.a
-endif
-# Archive tool: profile mode takes TARGET_AR from the profile (spec profile
-# variable); legacy standalone mode falls back to toolchain.mk's AR.
+# Archive tool: TARGET_AR comes from the profile (spec profile variable);
+# a command-line override wins.
 TARGET_AR ?= $(AR)
 
 # ── Targets ────────────────────────────────────────────────
@@ -105,47 +98,32 @@ $(BUILD_DIR)/%.libk.o: %.c
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(LIBK_CFLAGS) -MMD -MP -c $< -o $@
 
-# ── Installation (staging tree in profile mode, legacy sysroot otherwise) ──
-# Profile mode REBUILDS the staging tree from source (rm -rf then re-install)
-# so headers/archives removed from libc/ do not linger in staging (spec:
+# ── Installation (staging tree) ─────────────────────────────
+# REBUILDS the staging tree from source (rm -rf then re-install) so
+# headers/archives removed from libc/ do not linger in staging (spec:
 # deleted/renamed paths must vanish from the next generation). The two
 # sub-installs run through an inner make AFTER the cleanup, so they never
 # race with the rm -rf under -j.
 install:
-ifdef OS01_PROFILE_FILE
 	@test -n "$(INSTALL_ROOT)" || { echo "ERROR: install (profile mode) requires INSTALL_ROOT (staging tree)"; exit 1; }
 	rm -rf $(INSTALL_ROOT)
 	$(MAKE) install-headers install-libs
 	@find $(INSTALL_ROOT) -type f ! -name manifest | sed 's|^$(INSTALL_ROOT)/||' | sort > $(INSTALL_ROOT)/manifest
-else
-	$(MAKE) install-headers install-libs
-endif
 
 install-headers:
-ifdef OS01_PROFILE_FILE
 	@test -n "$(INSTALL_ROOT)" || { echo "ERROR: install (profile mode) requires INSTALL_ROOT (staging tree)"; exit 1; }
 	mkdir -p $(INSTALL_ROOT)/usr/include
 	cp -R --preserve=timestamps include/. $(INSTALL_ROOT)/usr/include/.
-else
-	mkdir -p $(TARGET_INCLUDEDIR)
-	cp -R --preserve=timestamps include/. $(TARGET_INCLUDEDIR)/.
-endif
 
 install-libs: $(LIBC_ARCHIVE) $(LIBK_ARCHIVE)
-ifdef OS01_PROFILE_FILE
 	@test -n "$(INSTALL_ROOT)" || { echo "ERROR: install (profile mode) requires INSTALL_ROOT (staging tree)"; exit 1; }
 	mkdir -p $(INSTALL_ROOT)/usr/lib
 	cp $(LIBC_ARCHIVE) $(INSTALL_ROOT)/usr/lib/libc.a
 	cp $(LIBK_ARCHIVE) $(INSTALL_ROOT)/usr/lib/libk.a
-else
-	mkdir -p $(TARGET_LIBDIR)
-	@cmp -s $(LIBC_ARCHIVE) $(TARGET_LIBDIR)/libc.a || cp $(LIBC_ARCHIVE) $(TARGET_LIBDIR)/libc.a
-	@cmp -s $(LIBK_ARCHIVE) $(TARGET_LIBDIR)/libk.a || cp $(LIBK_ARCHIVE) $(TARGET_LIBDIR)/libk.a
-endif
 
 # ── Clean ──────────────────────────────────────────────────
 clean:
-	rm -rf $(BUILD_DIR) libc.a libk.a
+	rm -rf $(BUILD_DIR)
 
 # ── Dependency tracking ────────────────────────────────────
 ALL_DEPS := $(patsubst %.o,%.d,$(LIBC_ALL_OBJS)) $(patsubst %.o,%.d,$(LIBK_ALL_OBJS))
