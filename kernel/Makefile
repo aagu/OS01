@@ -1,16 +1,23 @@
 # ── Architecture selection ──────────────────────────────────
 ARCH        ?= x86_64
 ARCHDIR     := arch/$(ARCH)
-# Build directory: all .o .d .elf .bin go here, separate from source
-BUILD_DIR   := ../build/$(ARCH)/kernel
 DEST_DIR    := ..                  # root of the project (for kernel.bin)
 
-# ── Shared x86 toolchain (root toolchain.mk) ────────────────
-# EFFECTIVE_CC/AR/LD/OBJ_CPY and SYSROOT/target dirs come from the common
-# file for ARCH=x86_64; aarch64 uses its own toolchain from make.config.
+# ── Profile mode (root os01_submake) vs standalone legacy ──
+# With OS01_PROFILE_FILE set, include the selected profile instead of the
+# legacy toolchain.mk and take the build dir from the profile
+# (KERNEL_BUILD_DIR). The two paths are mutually exclusive.
 LOCAL_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
+ifdef OS01_PROFILE_FILE
+include $(OS01_PROFILE_FILE)
+BUILD_DIR := $(KERNEL_BUILD_DIR)
+else
+# Build directory: all .o .d .elf .bin go here, separate from source
+BUILD_DIR := ../build/$(ARCH)/kernel
+# Shared x86 toolchain (root toolchain.mk)
 ifeq ($(ARCH),x86_64)
 include $(dir $(LOCAL_MAKEFILE))../toolchain.mk
+endif
 endif
 
 # ── Load architecture configuration ────────────────────────
@@ -83,6 +90,12 @@ KERNEL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_EXTRA_OBJECTS)
 
 # ── Flags ──────────────────────────────────────────────────
 ALL_CFLAGS   := $(CFLAGS) $(ARCH_CFLAGS)   -I$(KERNEL_HEADERS)
+ifdef OS01_PROFILE_FILE
+# Profile mode: the root no longer exports a sysroot CFLAGS. Consume the
+# profile's target include dir directly — the kernel includes libc headers
+# (<string.h>, <stdlib.h>, ...) from the sysroot.
+ALL_CFLAGS += -isystem $(TARGET_INCLUDEDIR)
+endif
 ALL_ASMFLAGS := $(ASFLAGS) $(ARCH_ASMFLAGS)
 ifeq ($(ARCH),x86_64)
 ALL_LDFLAGS  := $(LDFLAGS) $(ARCH_LDFLAGS) -L$(TARGET_LIBDIR)
@@ -139,7 +152,11 @@ endif
 # rule assembles through the C preprocessor, which can't parse C
 # typedefs and would choke on libc's stdint.h.
 ALL_CFLAGS     += -I$(LWIP_SRC_DIR)/include -I../kernel/include/net
+ifdef OS01_PROFILE_FILE
+ALL_C_ONLY_FLAGS := -D__CLANG_STDINT_H -include $(TARGET_INCLUDEDIR)/stdint.h
+else
 ALL_C_ONLY_FLAGS := -D__CLANG_STDINT_H -include $(SYSROOT)$(INCLUDEDIR)/stdint.h
+endif
 ALL_LDFLAGS    +=
 ifdef DEBUG_CHANNELS
   comma := ,
@@ -260,8 +277,13 @@ kernel.bin: all
 
 # ── Install headers ────────────────────────────────────────
 install-headers:
+ifdef OS01_PROFILE_FILE
+	mkdir -p $(TARGET_INCLUDEDIR)
+	cp -R --preserve=timestamps include/. $(TARGET_INCLUDEDIR)/.
+else
 	mkdir -p $(SYSROOT)$(INCLUDEDIR)
 	cp -R --preserve=timestamps include/. $(SYSROOT)$(INCLUDEDIR)/.
+endif
 
 # ── Clean ───────────────────────────────────────────────────
 clean:

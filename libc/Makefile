@@ -1,15 +1,21 @@
 # ── Architecture ────────────────────────────────────────────
 HOSTARCH  := x86_64
 ARCHDIR   := arch/$(HOSTARCH)
-BUILD_DIR := ../build/$(HOSTARCH)/libc
-
-# ── Shared x86 toolchain (root toolchain.mk) ────────────────
-# EFFECTIVE_CC/AR/LD/OBJ_CPY and SYSROOT/target directories all come from
-# the common file. Standalone `make -C libc` defaults ARCH to x86_64.
 ARCH ?= x86_64
 LOCAL_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
+
+# ── Profile mode (root os01_submake) vs standalone legacy ──
+# With OS01_PROFILE_FILE set, include the selected profile instead of the
+# legacy toolchain.mk and take the build dir from the profile
+# (LIBC_BUILD_DIR). The two paths are mutually exclusive.
+ifdef OS01_PROFILE_FILE
+include $(OS01_PROFILE_FILE)
+BUILD_DIR := $(LIBC_BUILD_DIR)
+else
+BUILD_DIR := ../build/$(HOSTARCH)/libc
 ifeq ($(ARCH),x86_64)
 include $(dir $(LOCAL_MAKEFILE))../toolchain.mk
+endif
 endif
 
 # ── Load architecture config ────────────────────────────────

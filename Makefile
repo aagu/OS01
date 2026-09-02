@@ -1,30 +1,16 @@
 ROOT_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
 base := $(patsubst %/,%,$(dir $(ROOT_MAKEFILE)))
 
-# ARCH dispatch. x86_64 selects the shared Clang/LLVM toolchain (root
-# toolchain.mk) and exports its validated tools/identity to children.
-# aarch64 keeps its own arch-specific toolchain and deliberately gets no
-# x86 exports. AR/OBJ_CPY are no longer hard-coded here — toolchain.mk
-# owns the LLVM tool aliases.
-ARCH ?= x86_64
-ifeq ($(ARCH),x86_64)
-include $(dir $(ROOT_MAKEFILE))toolchain.mk
-export CLANG CLANG_RESOURCE_DIR LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_READOBJ
-export TARGET_TRIPLE TARGET_CC TARGET_CCLD TARGET_LD SYSROOT INCLUDEDIR TARGET_INCLUDEDIR TARGET_LIBDIR CFLAGS
-export CFLAGS=--sysroot=${SYSROOT} -isystem=${INCLUDEDIR} -g -fno-stack-protector
-else ifeq ($(ARCH),aarch64)
-# no x86 include or exports
-else
-$(error unsupported ARCH='$(ARCH)')
-endif
+# ── Profile selection ───────────────────────────────────────
+# mk/project.mk selects PROFILE (default x86_64-clang), includes the
+# profile (validated toolchain + host/run/link parameters), and defines
+# require_capability / os01_submake / OS01_SUBMAKEFLAGS. The old ARCH
+# dispatch, root toolchain.mk include and broad exports are gone: component
+# Makefiles consume the profile directly (via OS01_PROFILE_FILE), never
+# through implicit environment inheritance.
+include $(base)/mk/project.mk
 
-ifneq ($(shell uname -m),aarch64)
-QEMU_BIN=qemu-system-x86_64
-else
-export CROSS_BASE=$(base)/toolchain/cross
-QEMU_BIN=$(CROSS_BASE)/bin/qemu-system-x86_64
-endif
-
+# ── Run parameters (profile-agnostic; shared by x86 and aarch64) ──
 DISPLAY=gtk
 MEMORY=512M
 SMP ?= 2
@@ -83,24 +69,26 @@ boot/uefi/OVMF.fd:
 
 .PHONY: lib
 lib:
-	make -C kernel install-headers
-	make -C libc install
+	$(call require_capability,userland)
+	$(call os01_submake,kernel,install-headers $(OS01_SUBMAKE_ARGS))
+	$(call os01_submake,libc,install $(OS01_SUBMAKE_ARGS))
 
 # ── Kernel ──────────────────────────────────────────────
 
 .PHONY: kernel/kernel.bin
 kernel/kernel.bin: lib
-	make -C kernel kernel.bin
+	$(call os01_submake,kernel,kernel.bin $(OS01_SUBMAKE_ARGS))
 
 # kernel.bin is built by kernel/Makefile and placed at project root
 kernel.bin: lib
-	make -C kernel kernel.bin
+	$(call os01_submake,kernel,kernel.bin $(OS01_SUBMAKE_ARGS))
 
 # ── User programs ───────────────────────────────────────
 
 .PHONY: user
 user:
-	make -C user
+	$(call require_capability,userland)
+	$(call os01_submake,user,all $(OS01_SUBMAKE_ARGS))
 
 build/x86_64/user/busybox.elf: thirdpart/busybox-1.36.1/busybox
 	@mkdir -p $(dir $@)

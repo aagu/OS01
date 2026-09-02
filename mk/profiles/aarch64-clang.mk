@@ -1,0 +1,42 @@
+# ── aarch64-clang profile ───────────────────────────────────────
+# aarch64 UEFI bring-up profile. Only the kernel and UEFI runtime
+# capabilities are declared: it must not depend on libc, mbedTLS,
+# BusyBox, a general rootfs, or the x86 test targets.
+
+PROFILE_CAPABILITIES := kernel uefi-bringup
+
+# Source root (repo root) — recomputed here so the profile can also be
+# included directly by component Makefiles (via OS01_PROFILE_FILE) without
+# project.mk. Identical to project.mk's value when included through it.
+OS01_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../..)
+
+# Profile-private layout (same shape as the x86_64 profile).
+BUILD_DIR := $(OS01_ROOT)/build/$(PROFILE)
+SYSROOT := $(BUILD_DIR)/sysroot
+TARGET_INCLUDEDIR := $(SYSROOT)/usr/include
+TARGET_LIBDIR := $(SYSROOT)/usr/lib
+KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel
+LIBC_BUILD_DIR := $(BUILD_DIR)/libc
+USER_BUILD_DIR := $(BUILD_DIR)/user
+UEFI_BUILD_DIR := $(BUILD_DIR)/uefi
+UEFI_RUNTIME_DIR := $(BUILD_DIR)/uefi-runtime
+
+# ── aarch64 compiler / QEMU settings (retained from the legacy Makefile) ──
+# This profile does NOT include mk/toolchains/clang.mk — that is the x86
+# Clang-family discovery. The aarch64 toolchain is the arch-specific pair
+# below; the kernel's arch/aarch64/make.config re-asserts the same CC/LD.
+CC             := clang -target aarch64-none-elf
+LD             := ld.lld -m aarch64elf
+TARGET_TRIPLE  := aarch64-none-elf
+TARGET_CC      ?= $(CC)
+TARGET_CCLD    ?= $(CC)
+EFFECTIVE_CC   ?= $(CC)
+TARGET_LD      ?= $(LD)
+AR             ?= llvm-ar
+OBJ_CPY        ?= llvm-objcopy
+AARCH64_QEMU   ?= qemu-system-aarch64
+AARCH64_SMP    ?= 4
+AARCH64_UEFI_FIRMWARE_SOURCE ?= /usr/share/edk2/aarch64/QEMU_EFI.fd
+
+# aarch64 link / UEFI / run parameters.
+include $(OS01_ROOT)/mk/targets/aarch64.mk

@@ -1,15 +1,22 @@
 # ── Configuration ──────────────────────────────────────────
-BUILD_DIR := ../build/x86_64/user
-OBJ_DIR   := $(BUILD_DIR)/obj
-
-# ── Shared x86 toolchain (root toolchain.mk) ────────────────
-# EFFECTIVE_CC/LD/OBJ_CPY and SYSROOT/target directories all come from the
-# common file. Standalone `make -C user` defaults ARCH to x86_64.
 ARCH ?= x86_64
 LOCAL_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
+
+# ── Profile mode (root os01_submake) vs standalone legacy ──
+# With OS01_PROFILE_FILE set, include the selected profile instead of the
+# legacy toolchain.mk and take the build dir from the profile
+# (USER_BUILD_DIR). The two paths are mutually exclusive.
+ifdef OS01_PROFILE_FILE
+include $(OS01_PROFILE_FILE)
+BUILD_DIR := $(USER_BUILD_DIR)
+else
+BUILD_DIR := ../build/x86_64/user
 ifeq ($(ARCH),x86_64)
 include $(dir $(LOCAL_MAKEFILE))../toolchain.mk
 endif
+endif
+
+OBJ_DIR   := $(BUILD_DIR)/obj
 
 CFLAGS   := --sysroot=$(SYSROOT) \
             -ffreestanding -fno-stack-protector -fno-asynchronous-unwind-tables \
