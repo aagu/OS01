@@ -1,0 +1,8 @@
+# BusyBox input manifest (spec: third-party source manifests).
+# Make-parseable record of where the BusyBox source lives and which commit
+# the adapter expects. The adapter also hashes the ACTUAL worktree contents
+# (so local uncommitted modifications invalidate it even though the git
+# revision is unchanged); this manifest pins the expected revision and is
+# itself part of the input digest.
+BUSYBOX_SOURCE   := thirdpart/busybox-1.36.1
+BUSYBOX_REVISION := 1a64f6a20aaf6ea4dbba68bbfa8cc1ab7e5c57c4

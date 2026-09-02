@@ -14,6 +14,7 @@ include $(base)/mk/project.mk
 # the sysroot; kernel.mk owns the kernel artifact.
 include $(base)/mk/components/sysroot.mk
 include $(base)/mk/components/kernel.mk
+include $(base)/mk/components/user.mk
 
 # UEFI_EFI compat: boot/uefi still writes build/x86_64/uefi/BOOTX64.EFI until
 # Task 6 rewires it onto the profile layout; the profile's UEFI_EFI points at
@@ -98,72 +99,36 @@ endif
 
 # ── User programs ───────────────────────────────────────
 
-# user links against $(TARGET_LIBDIR)/libc.a, so it must wait for `lib` to
-# populate the profile sysroot — under -j as well as serial.
+# user = the profile's user ELFs + BusyBox (mk/components/user.mk), all
+# built against the leased immutable sysroot generation. Only defined for
+# userland-capable profiles; on others the recipe fires the capability gate.
 .PHONY: user
-user: lib
+user: $(if $(filter userland,$(PROFILE_CAPABILITIES)),$(USER_ARTIFACTS) $(USER_ARTIFACT_DIR)/busybox.elf)
 	$(call require_capability,userland)
-	$(call os01_submake,user,all $(OS01_SUBMAKE_ARGS))
-
-$(USER_BUILD_DIR)/busybox.elf: thirdpart/busybox-1.36.1/busybox
-	@mkdir -p $(dir $@)
-	cp $< $@
-
-# ── BusyBox ─────────────────────────────────────────────
-# Submodule must be initialized: git submodule update --init
-#
-# BusyBox consumes the PUBLISHED sysroot: its link runs with
-# -L$(TARGET_LIBDIR) (the $(SYSROOT) symlink → the current immutable
-# generation), which the $(SYSROOT_STAMP) prerequisite guarantees is in
-# place. libm.a / librt.a come from the published compat-libs component;
-# this recipe no longer creates any sysroot file.
-
-BUSYBOX_SRC  = thirdpart/busybox-1.36.1
-BUSYBOX_CFG  = config/busybox.config.in
-
-thirdpart/busybox-1.36.1/busybox: $(SYSROOT_STAMP) $(BUSYBOX_SRC)/Makefile $(BUSYBOX_CFG) user/crt0.S user/sigreturn_trampoline.S
-	@test -f $(BUSYBOX_SRC)/Makefile || { \
-	    echo "ERROR: busybox submodule not initialized"; \
-	    echo "Run: git submodule update --init"; false; }
-	@cmp -s user/crt0.S $(BUSYBOX_SRC)/applets/crt0.S || cp user/crt0.S $(BUSYBOX_SRC)/applets/crt0.S
-	@cmp -s user/sigreturn_trampoline.S $(BUSYBOX_SRC)/applets/sigreturn_trampoline.S || cp user/sigreturn_trampoline.S $(BUSYBOX_SRC)/applets/sigreturn_trampoline.S
-	@sed -e 's|@TARGET_INCLUDEDIR@|$(TARGET_INCLUDEDIR)|g' \
-	    -e 's|@TARGET_LIBDIR@|$(TARGET_LIBDIR)|g' \
-	    -e 's|@CLANG_RESOURCE_DIR@|$(CLANG_RESOURCE_DIR)|g' \
-	    $(BUSYBOX_CFG) > $(BUSYBOX_SRC)/.config.tmp
-	@cmp -s $(BUSYBOX_SRC)/.config.tmp $(BUSYBOX_SRC)/.config || mv $(BUSYBOX_SRC)/.config.tmp $(BUSYBOX_SRC)/.config
-	@rm -f $(BUSYBOX_SRC)/.config.tmp
-	@grep -qxF 'obj-y += crt0.o' $(BUSYBOX_SRC)/applets/Kbuild.src || \
-	    echo 'obj-y += crt0.o' >> $(BUSYBOX_SRC)/applets/Kbuild.src
-	@grep -qxF 'obj-y += sigreturn_trampoline.o' $(BUSYBOX_SRC)/applets/Kbuild.src || \
-	    echo 'obj-y += sigreturn_trampoline.o' >> $(BUSYBOX_SRC)/applets/Kbuild.src
-	$(MAKE) -C $(BUSYBOX_SRC) silentoldconfig CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)" 2>/dev/null || \
-	yes "" | $(MAKE) -C $(BUSYBOX_SRC) oldconfig CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)"
-	$(MAKE) -C $(BUSYBOX_SRC) CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)"
 
 # ── Disk image ──────────────────────────────────────────
 
-disk.img: $(BUILD_X86_64_UEFI) lib kernel.bin user $(USER_BUILD_DIR)/busybox.elf
+disk.img: $(BUILD_X86_64_UEFI) lib kernel.bin user $(USER_ARTIFACT_DIR)/busybox.elf
 	@mkdir -p config/fsroot/bin config/fsroot/home config/fsroot/etc
-	@cp $(USER_BUILD_DIR)/init.elf          config/fsroot/bin/init
-	@cp $(USER_BUILD_DIR)/busybox.elf        config/fsroot/bin/busybox
-	@cp $(USER_BUILD_DIR)/spin.elf           config/fsroot/bin/spin
-	@cp $(USER_BUILD_DIR)/sigtest.elf        config/fsroot/bin/sigtest
-	@cp $(USER_BUILD_DIR)/poweroff.elf       config/fsroot/bin/poweroff
-	@cp $(USER_BUILD_DIR)/halt.elf           config/fsroot/bin/halt
-	@cp $(USER_BUILD_DIR)/reboot.elf         config/fsroot/bin/reboot
-	@cp $(USER_BUILD_DIR)/systest.elf        config/fsroot/bin/systest
-	@cp $(USER_BUILD_DIR)/test_mmap.elf      config/fsroot/bin/test_mmap
-	@cp $(USER_BUILD_DIR)/test_fork_mmap.elf config/fsroot/bin/test_fork_mmap
-	@cp $(USER_BUILD_DIR)/test_cow.elf       config/fsroot/bin/test_cow
-	@cp $(USER_BUILD_DIR)/terminal.elf       config/fsroot/bin/terminal
-	@cp $(USER_BUILD_DIR)/smp_stress.elf     config/fsroot/bin/smp_stress
+	@cp $(USER_ARTIFACT_DIR)/init.elf          config/fsroot/bin/init
+	@cp $(USER_ARTIFACT_DIR)/busybox.elf        config/fsroot/bin/busybox
+	@cp $(USER_ARTIFACT_DIR)/spin.elf           config/fsroot/bin/spin
+	@cp $(USER_ARTIFACT_DIR)/sigtest.elf        config/fsroot/bin/sigtest
+	@cp $(USER_ARTIFACT_DIR)/poweroff.elf       config/fsroot/bin/poweroff
+	@cp $(USER_ARTIFACT_DIR)/halt.elf           config/fsroot/bin/halt
+	@cp $(USER_ARTIFACT_DIR)/reboot.elf         config/fsroot/bin/reboot
+	@cp $(USER_ARTIFACT_DIR)/systest.elf        config/fsroot/bin/systest
+	@cp $(USER_ARTIFACT_DIR)/test_mmap.elf      config/fsroot/bin/test_mmap
+	@cp $(USER_ARTIFACT_DIR)/test_fork_mmap.elf config/fsroot/bin/test_fork_mmap
+	@cp $(USER_ARTIFACT_DIR)/test_cow.elf       config/fsroot/bin/test_cow
+	@cp $(USER_ARTIFACT_DIR)/terminal.elf       config/fsroot/bin/terminal
+	@cp $(USER_ARTIFACT_DIR)/smp_stress.elf     config/fsroot/bin/smp_stress
 	@cp $(INITTAB_FILE) config/fsroot/etc/inittab
-	@cp $(USER_BUILD_DIR)/socktest.elf      config/fsroot/bin/socktest
-	@cp $(USER_BUILD_DIR)/udptest.elf       config/fsroot/bin/udptest
-	@cp $(USER_BUILD_DIR)/ipaddr.elf        config/fsroot/bin/ipaddr
-	@cp $(USER_BUILD_DIR)/nettest.elf       config/fsroot/bin/nettest
-	@cp $(USER_BUILD_DIR)/tetris.elf        config/fsroot/bin/tetris
+	@cp $(USER_ARTIFACT_DIR)/socktest.elf      config/fsroot/bin/socktest
+	@cp $(USER_ARTIFACT_DIR)/udptest.elf       config/fsroot/bin/udptest
+	@cp $(USER_ARTIFACT_DIR)/ipaddr.elf        config/fsroot/bin/ipaddr
+	@cp $(USER_ARTIFACT_DIR)/nettest.elf       config/fsroot/bin/nettest
+	@cp $(USER_ARTIFACT_DIR)/tetris.elf        config/fsroot/bin/tetris
 	@ln -sf busybox config/fsroot/bin/wget
 	@ln -sf busybox config/fsroot/bin/login
 	@ln -sf busybox config/fsroot/bin/sh
@@ -361,11 +326,7 @@ clean:
 	$(MAKE) -C kernel clean; \
 	$(MAKE) -C libc clean; \
 	$(MAKE) -C user clean; \
-	rm -rf test/build sysroot; \
-	if [ -f $(BUSYBOX_SRC)/Makefile ]; then \
-	  $(MAKE) -C $(BUSYBOX_SRC) clean 2>/dev/null || true; \
-	  rm -f $(BUSYBOX_SRC)/applets/crt0.S $(BUSYBOX_SRC)/applets/Kbuild.src.bak; \
-	fi
+	rm -rf test/build sysroot
 
 # Diagnose and remove a stale publish lock. Prints the owner data and only
 # removes the lock when FORCE_UNLOCK=1 is set.

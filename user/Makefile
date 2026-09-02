@@ -9,19 +9,29 @@ LOCAL_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
 ifdef OS01_PROFILE_FILE
 include $(OS01_PROFILE_FILE)
 BUILD_DIR := $(USER_BUILD_DIR)
+# Profile mode consumes the immutable generation the root artifact rule
+# (mk/components/user.mk) leased and passed as SYSROOT_GENERATION_DIR — never
+# the $(SYSROOT) symlink.
+SYSROOT_DIR   := $(SYSROOT_GENERATION_DIR)
+TARGET_INCDIR := $(SYSROOT_GENERATION_DIR)/usr/include
+TARGET_LIBDIR_LOCAL := $(SYSROOT_GENERATION_DIR)/usr/lib
 else
 BUILD_DIR := ../build/x86_64/user
 ifeq ($(ARCH),x86_64)
 include $(dir $(LOCAL_MAKEFILE))../toolchain.mk
 endif
+# Legacy standalone mode: unchanged — links against the published $(SYSROOT).
+SYSROOT_DIR   := $(SYSROOT)
+TARGET_INCDIR := $(TARGET_INCLUDEDIR)
+TARGET_LIBDIR_LOCAL := $(TARGET_LIBDIR)
 endif
 
 OBJ_DIR   := $(BUILD_DIR)/obj
 
-CFLAGS   := --sysroot=$(SYSROOT) \
+CFLAGS   := --sysroot=$(SYSROOT_DIR) \
             -ffreestanding -fno-stack-protector -fno-asynchronous-unwind-tables \
             -fno-pic -fno-pie -mno-red-zone \
-            -I$(TARGET_INCLUDEDIR) \
+            -I$(TARGET_INCDIR) \
             -Wall -Wextra -O2
 
 # ── Syscall test mode ──────────────────────────────────────
@@ -30,7 +40,7 @@ ifeq ($(OS01_SYSTEST),1)
 override CFLAGS += -DOS01_SYSTEST
 endif
 
-USER_RAW_LDFLAGS := -m elf_x86_64 -static -no-pie -T linker.ld -L$(TARGET_LIBDIR)
+USER_RAW_LDFLAGS := -m elf_x86_64 -static -no-pie -T linker.ld -L$(TARGET_LIBDIR_LOCAL)
 
 # ── Source discovery ───────────────────────────────────────
 # crt0.S is startup code, not a program

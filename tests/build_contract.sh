@@ -9,6 +9,7 @@ test -L "$base/sysroot"
 test ! -e "$base/sysroot/data/data/com.termux/files/usr"
 case "$mode" in
 x86) test -f "$base/artifacts/kernel.bin"; test -f "$base/image/disk.img";
+     test -f "$base/artifacts/user/busybox.elf"; test -f "$base/artifacts/user/init.elf";
      test ! -e kernel/arch/x86_64/trampoline.bin;
      test ! -e libc/libc.a;
      test ! -e libc/libk.a;

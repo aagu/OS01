@@ -31,6 +31,10 @@ STAGING_DIR := $(BUILD_DIR)/staging
 # source of artifact paths; kernel.mk's artifact rule consumes this.
 KERNEL_ARTIFACT := $(BUILD_DIR)/artifacts/kernel.bin
 
+# User artifact paths (spec artifact-path table) — the profile is the single
+# source of artifact paths; user.mk's artifact rules consume this.
+USER_ARTIFACT_DIR := $(BUILD_DIR)/artifacts/user
+
 # Explicit kernel-profile flag for the stdint.h injection (spec: kernel
 # profile flags), resolved against the immutable sysroot generation the
 # kernel is compiled against. SYSROOT_GENERATION_DIR is passed to the kernel
