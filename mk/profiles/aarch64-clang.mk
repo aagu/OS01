@@ -17,6 +17,12 @@ TARGET_INCLUDEDIR := $(SYSROOT)/usr/include
 TARGET_LIBDIR := $(SYSROOT)/usr/lib
 KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel
 LIBC_BUILD_DIR := $(BUILD_DIR)/libc
+# Compile-affecting variant (only OS01_SYSTEST re-keys the user dirs).
+# project.mk sets USER_VARIANT before including this profile; the ?= default
+# lets component sub-makes that include ONLY the profile resolve it from
+# OS01_SYSTEST. The aarch64 bring-up profile builds no userland, so this only
+# keeps the profile self-contained.
+USER_VARIANT ?= $(if $(filter 1,$(OS01_SYSTEST)),systest)
 USER_BUILD_DIR := $(BUILD_DIR)/user
 UEFI_BUILD_DIR := $(BUILD_DIR)/uefi
 UEFI_RUNTIME_DIR := $(BUILD_DIR)/uefi-runtime

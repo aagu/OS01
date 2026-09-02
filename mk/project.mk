@@ -7,6 +7,27 @@
 #   make -f mk/project.mk PROFILE=<name> -n
 
 PROFILE ?= x86_64-clang
+# Default profile — owns the project-root kernel.bin / disk.img compat copies;
+# `clean` removes them only when PROFILE == DEFAULT_PROFILE.
+DEFAULT_PROFILE ?= x86_64-clang
+
+# ── Variant slugs (BEFORE the profile include!) ───────────────
+# IMAGE_VARIANT — the image/manifest dirs' variant suffix, derived from the
+# explicit switch variables. The root Makefile applies OS01_SYSTEST /
+# OS01_NETTEST to INITTAB_FILE BEFORE including project.mk, so all three
+# sources are resolved here. Each variant gets its own isolated image dir
+# (build/<profile>/image/<variant>/); a variant build NEVER writes the normal
+# image. USER_VARIANT — the compile-affecting variant: only OS01_SYSTEST
+# changes user CFLAGS (-DOS01_SYSTEST), so it is the only variant that
+# re-keys the user build/artifact dirs (build/<profile>/user/<variant> and
+# build/<profile>/artifacts/user/<variant>). Both are immediate (:=) so the
+# profile file and every component that consumes them sees the resolved
+# value at parse time — defining them after the profile include would make
+# the profile's own USER_BUILD_DIR/USER_ARTIFACT_DIR compute with an empty
+# USER_VARIANT.
+IMAGE_VARIANT := $(strip $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test))
+USER_VARIANT  := $(if $(filter 1,$(OS01_SYSTEST)),systest)
+
 OS01_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 OS01_PROFILE_FILE := $(OS01_ROOT)/mk/profiles/$(PROFILE).mk
 ifeq ($(wildcard $(OS01_PROFILE_FILE)),)
@@ -22,18 +43,21 @@ $(if $(filter $(1),$(PROFILE_CAPABILITIES)),,$(error PROFILE='$(PROFILE)' lacks 
 endef
 
 # ── Controlled recursive Make ──────────────────────────────────
-# OS01_SUBMAKEFLAGS retains only GNU Make options — dash-prefixed flags
-# (-j..., --jobserver-auth=..., long options) plus the bare letter flags GNU
-# Make emits without a dash and concatenates into one word (n, Bs, knw, ...)
-# — and drops every VAR=VALUE assignment. Assignment detection is by "="
-# (every assignment contains one); $(filter %=%,...) cannot be used because
-# GNU Make's filter patterns treat only the first "%" as a wildcard, so
-# "%=%" matches nothing. GNU Make 4.4+ puts command-line assignments after a
-# literal "--" word on MAKEFLAGS, which filter-out removes. Whitelisted
+# OS01_SUBMAKEFLAGS retains only GNU Make options — the bare letter flags
+# GNU Make emits without a dash and concatenates into one word (n, Bs, knw,
+# ...), then the dash-prefixed flags (-j..., --jobserver-auth=..., long
+# options) — and drops every VAR=VALUE assignment. Assignment detection is by
+# "=" (every assignment contains one); $(filter %=%,...) cannot be used
+# because GNU Make's filter patterns treat only the first "%" as a wildcard,
+# so "%=%" matches nothing. GNU Make 4.4+ puts command-line assignments after
+# a literal "--" word on MAKEFLAGS, which filter-out removes. The bare-letter
+# flags MUST stay the FIRST word: GNU Make only accepts concatenated letter
+# flags in the leading word of MAKEFLAGS (a trailing bare "n" is re-parsed as
+# a target name and fails with "No rule to make target 'n'"). Whitelisted
 # overrides are passed explicitly as command-line arguments by the call
 # sites (OS01_SUBMAKE_ARGS below); nothing but make options crosses via
 # MAKEFLAGS.
-OS01_SUBMAKEFLAGS = $(filter-out --,$(filter -%,$(MAKEFLAGS))) $(foreach w,$(filter-out -%,$(MAKEFLAGS)),$(if $(findstring =,$(w)),,$(w)))
+OS01_SUBMAKEFLAGS = $(foreach w,$(filter-out -%,$(MAKEFLAGS)),$(if $(findstring =,$(w)),,$(w))) $(filter-out --,$(filter -%,$(MAKEFLAGS)))
 
 # os01_submake — root-only controlled sub-make. The leading "+" is a recipe
 # prefix (runs even under -n) and is not part of the shell command; there is

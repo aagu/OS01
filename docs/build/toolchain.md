@@ -7,20 +7,109 @@ established on top of the pre-existing OS01 Makefiles. It documents the
 overrides you can pass on the `make` command line, where each override is
 validated, and which `make` target to run to check the resulting artifacts.
 
-The contract is intentionally narrow: OS01's x86_64 build is a self-contained,
-freestanding cross-compile that targets `x86_64-unknown-none` (no libc, no
-dynamic linker). The aarch64 build path is out of scope — it does not include
-the shared `toolchain.mk` and uses its own per-arch toolchain. Nothing in this
-document applies to `make ARCH=aarch64 ...`.
+> **2026-09-02 update (GNU Make build refactor):** the toolchain contract
+> moved into the profile system. The single source of truth is now
+> `mk/toolchains/clang.mk`, included by the `x86_64-clang` profile
+> (`mk/profiles/x86_64-clang.mk`); every component receives the tools through
+> the profile (`OS01_PROFILE_FILE`), never through the environment. The
+> validation rules below (Clang-only `CLANG`, `CC=cc` rejection, `LLVM_*`
+> PATH-safety, `UEFI_CLANG`) are unchanged in behavior — see
+> [Profile mode and allowed overrides](#profile-mode-and-allowed-overrides)
+> for the current entry points, and note the **controlled environment** rule.
+
+## Profile mode and allowed overrides
+
+Since the GNU Make refactor (2026-09-02), builds are profile-driven:
+`make PROFILE=x86_64-clang <target>` (the default profile) or
+`make PROFILE=aarch64-clang <target>` (aarch64 UEFI bring-up). The x86_64
+profile includes `mk/toolchains/clang.mk` (discovery + validation) and
+`mk/targets/x86_64.mk` (QEMU/run parameters).
+
+### Overrides that reach the build
+
+The refactor defines an explicit **whitelist of overrides** that may cross
+the controlled sub-make boundary (`OS01_SUBMAKE_ALLOWED` in `mk/project.mk`).
+Everything else — `CFLAGS`, `CPPFLAGS`, `CXXFLAGS`, `ASFLAGS`, `LDFLAGS`,
+`CC`, `LD`, `AR`, `PREFIX` and any unlisted environment variable — is
+**never** propagated to component or third-party builds.
+
+Allowed on the command line:
+
+| Override | Effect |
+|----------|--------|
+| `CLANG=clang-N` / `CLANG=/abs/path/clang` / `CLANG='ccache clang'` | validated Clang for kernel + userland (preferred override) |
+| `UEFI_CLANG=...` | validated Clang for the UEFI COFF build (defaults to `CLANG`) |
+| `LLVM_AR` / `LLVM_NM` / `LLVM_OBJCOPY` / `LLVM_READOBJ` / `LLVM_READELF` | individual LLVM tool overrides (PATH-validated) |
+| `TARGET_LD=...` | linker override (PATH-validated) |
+| `QEMU_BIN=...` / `AARCH64_QEMU=...` | QEMU binary overrides |
+| `AARCH64_UEFI_FIRMWARE_SOURCE=...` | aarch64 firmware source path |
+| `LOG_TARGET=serial\|fb\|both` | kernel log output target |
+| `KERNEL_SELFTEST=1` | in-kernel selftests at boot |
+| `OS01_SYSTEST=1` | **variant switch** — systest image variant; also the only compile-affecting variant (adds `-DOS01_SYSTEST` to user CFLAGS) |
+| `OS01_NETTEST=1` | **variant switch** — nettest image variant |
+| `INITTAB_FILE=config/inittab.test` | **variant switch** — inittab-test image variant |
+
+Each `name=value` whitelisted override is passed explicitly as a command-line
+argument to the controlled sub-makes; it is never replayed through
+`MAKEFLAGS`.
+
+### The controlled environment
+
+Every OS01-owned recursive Make (components and third-party adapters) runs
+under the `os01_submake` helper (`mk/project.mk`):
+
+```make
++env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
+    MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
+    -C <component> OS01_PROFILE_FILE="$(OS01_PROFILE_FILE)" <whitelisted-args>
+```
+
+`env -i` starts from an empty environment; only `PATH`, `HOME`, `TMPDIR`, a
+sanitized `MAKEFLAGS` (GNU Make options only — no `VAR=VALUE` assignments)
+and the whitelisted overrides cross the boundary. A sub-Make therefore never
+inherits an ambient `CFLAGS`, `CC`, `PREFIX` or other unlisted variable from
+the calling shell. Third-party upstream builds (BusyBox, posix-uefi) are
+called the same way, receiving only the whitelist-derived tools, flags and
+output directories they support.
+
+### Capability errors
+
+Entry points are capability-aware. Invoking a target the selected profile
+cannot provide fails at parse time, before any compilation:
+
+```text
+$ make PROFILE=aarch64-clang run
+Makefile:...: *** PROFILE='aarch64-clang' lacks capability 'rootfs'.  Stop.
+
+$ make PROFILE=x86_64-clang aarch64-uefi
+mk/components/run.mk:...: *** PROFILE='x86_64-clang' lacks capability 'uefi-bringup'.  Stop.
+```
+
+`make validate` also prints the resolved profile identity:
+
+```text
+$ make validate-profile
+profile=x86_64-clang triple=x86_64-unknown-none sysroot=/.../build/x86_64-clang/sysroot capabilities=kernel userland rootfs uefi
+```
+
+### Deferred Termux `-lgcc` work (out of scope)
+
+Per the build-system design spec (2026-09-02), replacing the `-lgcc` link
+argument with a compiler-runtime archive (`TARGET_RUNTIME_ARCHIVE`) is a
+**separate, future toolchain spec**. This refactor keeps the existing link
+arguments and the behavior of the working profiles exactly as they were; the
+`-lgcc` resolution, discovery and validation work is not part of this
+change. (Historical context on why `-lgcc` is required today — the
+`__udivti3` symbol in `kernel/time/clocksource.c` — is in the
+[libgcc / `-lgcc`](#libgcc---lgcc) section below.)
 
 ## Single source of truth: root `toolchain.mk`
 
-The single file that defines the x86_64 Clang/LLVM toolchain contract is the
-root `toolchain.mk`. It is **location-independent** — it anchors `SYSROOT`,
-`PREFIX`, and the target `INCLUDEDIR` / `LIBDIR` against its own absolute path
-(`TOOLCHAIN_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))`), so each
-child Makefile can include it via a different relative path and still resolve
-the same on-disk sysroot.
+> The sections below document the pre-refactor standalone contract. The root
+> `toolchain.mk` still exists and is still included by component Makefiles in
+> their **standalone** (non-profile) mode, but the refactored build path goes
+> through `mk/toolchains/clang.mk` via the profiles. The validation behavior
+> described below is preserved in both paths.
 
 `toolchain.mk` is included, **only when `ARCH=x86_64`**, by:
 

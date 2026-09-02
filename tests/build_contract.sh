@@ -31,6 +31,12 @@ sysroot) test -f "$base/sysroot/usr/include/kernel/bootinfo.h"; test -f "$base/s
          test -n "$(ls "$base/sysroot/usr/include/mbedtls"/*.h 2>/dev/null)" ;
          test "$(readlink "$base/sysroot")" = "sysroot-generations/$(find "$base/sysroot-generations" -maxdepth 1 -mindepth 1 -type d | xargs -n1 basename | sort -n | tail -1)" ;
          test -z "$(ls -A "$base/leases" 2>/dev/null)" ;;
-targets) make -n PROFILE=x86_64-clang kernel.bin disk.img lib user validate test-syscall >/dev/null; ! make -n PROFILE=aarch64-clang user ;;
+targets) make -n PROFILE=x86_64-clang kernel.bin disk.img lib user validate test-syscall >/dev/null
+         make -n PROFILE=x86_64-clang run >/dev/null
+         make -n PROFILE=aarch64-clang aarch64-uefi >/dev/null
+         ! make -n PROFILE=aarch64-clang user
+         ! make -n PROFILE=aarch64-clang run
+         ! make -n PROFILE=aarch64-clang test-syscall
+         ! make -n PROFILE=x86_64-clang aarch64-uefi ;;
 *) exit 64 ;;
 esac

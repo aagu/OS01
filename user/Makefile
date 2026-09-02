@@ -69,6 +69,13 @@ $(OBJ_DIR)/%.o: %.S
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
+# ── Keep intermediate objects ──────────────────────────────────
+# The user program objects are GNU-make intermediates of the .elf links;
+# without this GNU make deletes them after a successful build and the second
+# `make disk.img` after a clean rebuild recompiles them once. .SECONDARY
+# keeps them so the second build is a true 0-compile no-op.
+.SECONDARY: $(OBJ_DIR)/%.o
+
 # ── crt0 startup (compiled once, linked into every program) ─
 CRT0_OBJ := $(OBJ_DIR)/crt0.o
 

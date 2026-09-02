@@ -16,6 +16,22 @@ $(HOST_MKDISK): tools/mkdisk.c tools/Makefile
 
 ifeq ($(filter rootfs,$(PROFILE_CAPABILITIES)),rootfs)
 
+# ── Variant-scoped image dirs ─────────────────────────────────
+# IMAGE_VARIANT (mk/project.mk) is the slug that isolates the image/manifest
+# dirs so a variant build never touches the normal image:
+#   (none)         → build/<profile>/image/            (the normal image)
+#   systest        → build/<profile>/image/systest/
+#   nettest        → build/<profile>/image/nettest/
+#   inittab-test   → build/<profile>/image/inittab-test/
+# NORMAL_IMAGE is the fixed normal-image path — the project-root disk.img
+# compat copy and the test-integrity before/after checks always use it.
+IMAGE_DIR       := $(BUILD_DIR)/image$(if $(IMAGE_VARIANT),/$(IMAGE_VARIANT))
+NORMAL_IMAGE    := $(BUILD_DIR)/image/disk.img
+NORMAL_IMAGE_DIR := $(BUILD_DIR)/image
+DISK_IMG        := $(IMAGE_DIR)/disk.img
+ROOTFS_STAGING  := $(IMAGE_DIR)/rootfs.next
+ROOTFS_MANIFEST := $(IMAGE_DIR)/rootfs.manifest
+
 # ── Rootfs manifest (x86) ───────────────────────────────────
 # config/rootfs.mk is version-controlled and lists every image input as
 # dest=source:mode (files) and dest=target (BusyBox applet symlinks). This
@@ -25,9 +41,6 @@ ifeq ($(filter rootfs,$(PROFILE_CAPABILITIES)),rootfs)
 #   file<TAB>dest<TAB>staged-source<TAB>mode
 #   symlink<TAB>dest<TAB>target
 include $(OS01_ROOT)/config/rootfs.mk
-
-ROOTFS_STAGING  := $(BUILD_DIR)/image/rootfs.next
-ROOTFS_MANIFEST := $(BUILD_DIR)/image/rootfs.manifest
 
 $(ROOTFS_MANIFEST): $(OS01_ROOT)/config/rootfs.mk \
 		$(USER_ARTIFACTS) $(USER_ARTIFACT_DIR)/busybox.elf \
@@ -53,16 +66,17 @@ $(ROOTFS_MANIFEST): $(OS01_ROOT)/config/rootfs.mk \
 	@test -s $@.tmp
 	@mv $@.tmp $@
 
-$(BUILD_DIR)/image/disk.img: $(ROOTFS_MANIFEST) $(UEFI_EFI) $(HOST_MKDISK)
+$(DISK_IMG): $(ROOTFS_MANIFEST) $(UEFI_EFI) $(HOST_MKDISK)
 	@$(MAKE) -C tools check-deps HOST_TOOLS_DIR=$(BUILD_DIR)/host-tools
-	@mkdir -p $(dir $@) $(BUILD_DIR)/image/tmp
+	@mkdir -p $(dir $@) $(dir $@)tmp
 	@$(HOST_MKDISK) --output $@ --efi $(UEFI_EFI) \
-	  --temp-dir $(BUILD_DIR)/image/tmp --rootfs-manifest $(ROOTFS_MANIFEST)
+	  --temp-dir $(dir $@)tmp --rootfs-manifest $(ROOTFS_MANIFEST)
 
-# Project-root disk.img is a one-way, content-guarded copy of the profile's
-# disk artifact (legacy entry point; Task 7 moves the run/test recipes).
-disk.img: $(BUILD_DIR)/image/disk.img
-	@cmp -s $(BUILD_DIR)/image/disk.img $@ || cp $(BUILD_DIR)/image/disk.img $@
+# Project-root disk.img is a one-way, content-guarded copy of the NORMAL
+# image (legacy entry point) — never the variant image, regardless of
+# variant switches.
+disk.img: $(NORMAL_IMAGE)
+	@cmp -s $(NORMAL_IMAGE) $@ || cp $(NORMAL_IMAGE) $@
 
 endif
 

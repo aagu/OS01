@@ -17,7 +17,18 @@ TARGET_INCLUDEDIR := $(SYSROOT)/usr/include
 TARGET_LIBDIR := $(SYSROOT)/usr/lib
 KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel
 LIBC_BUILD_DIR := $(BUILD_DIR)/libc
-USER_BUILD_DIR := $(BUILD_DIR)/user
+# Compile-affecting variant (only OS01_SYSTEST re-keys the user dirs).
+# project.mk sets USER_VARIANT before including this profile; the ?= default
+# lets component sub-makes that include ONLY the profile (via
+# OS01_PROFILE_FILE, e.g. user/Makefile) resolve it from OS01_SYSTEST on
+# their own command line (passed through OS01_SUBMAKE_ARGS).
+USER_VARIANT ?= $(if $(filter 1,$(OS01_SYSTEST)),systest)
+# Variant-scoped user dirs: the compile-affecting variant keys the user object
+# dir and the user artifact dir, so a systest build compiles fresh objects
+# into build/<profile>/user/systest and publishes artifacts into
+# build/<profile>/artifacts/user/systest — it can never contaminate the
+# normal build/artifacts. Plain paths when no variant.
+USER_BUILD_DIR := $(BUILD_DIR)/user$(if $(USER_VARIANT),/$(USER_VARIANT))
 UEFI_BUILD_DIR := $(BUILD_DIR)/uefi
 UEFI_RUNTIME_DIR := $(BUILD_DIR)/uefi-runtime
 
@@ -33,7 +44,7 @@ KERNEL_ARTIFACT := $(BUILD_DIR)/artifacts/kernel.bin
 
 # User artifact paths (spec artifact-path table) — the profile is the single
 # source of artifact paths; user.mk's artifact rules consume this.
-USER_ARTIFACT_DIR := $(BUILD_DIR)/artifacts/user
+USER_ARTIFACT_DIR := $(BUILD_DIR)/artifacts/user$(if $(USER_VARIANT),/$(USER_VARIANT))
 
 # Explicit kernel-profile flag for the stdint.h injection (spec: kernel
 # profile flags), resolved against the immutable sysroot generation the
