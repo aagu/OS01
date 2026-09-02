@@ -2,8 +2,8 @@
 # Location-independent common file, included by the x86_64 profile
 # (mk/profiles/x86_64-clang.mk). Selects a validated Clang/LLVM family
 # without host-version paths. Component Makefiles receive these tools via
-# the profile include; the root toolchain.mk keeps the same logic for the
-# one-release standalone-component compatibility path.
+# the profile include only (the root toolchain.mk was removed in the
+# 2026-09-03 profile-only refactor).
 
 # ── Clang-only override and discovery contract ────────────────
 # CLANG=clang-N is the preferred override. An explicit CC is accepted only
