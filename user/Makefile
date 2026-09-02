@@ -70,11 +70,17 @@ $(OBJ_DIR)/%.o: %.S
 	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
 # ── Keep intermediate objects ──────────────────────────────────
-# The user program objects are GNU-make intermediates of the .elf links;
-# without this GNU make deletes them after a successful build and the second
-# `make disk.img` after a clean rebuild recompiles them once. .SECONDARY
-# keeps them so the second build is a true 0-compile no-op.
-.SECONDARY: $(OBJ_DIR)/%.o
+# The user program objects are GNU-make intermediates of the .elf links.
+# GNU make deletes intermediates after a successful build, so the second
+# `make disk.img` after a clean rebuild would recompile the pattern-linked
+# objects once. .SECONDARY keeps them so the second build is a true
+# 0-compile no-op. NOTE: the pattern form `.SECONDARY: $(OBJ_DIR)/%.o` does
+# NOT hold on GNU Make 4.4 — the object list must be expanded explicitly.
+# (The objects of the explicit-link programs — terminal/tetris and their
+# helpers — and the explicit targets crt0/sigreturn/terminal_font are not
+# intermediates and need no protection.)
+.SECONDARY: $(patsubst %.c,$(OBJ_DIR)/%.o,$(wildcard *.c)) \
+            $(patsubst %.S,$(OBJ_DIR)/%.o,$(wildcard *.S))
 
 # ── crt0 startup (compiled once, linked into every program) ─
 CRT0_OBJ := $(OBJ_DIR)/crt0.o

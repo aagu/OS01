@@ -145,7 +145,7 @@ make test-network     # nettest variant 镜像 + 网络回归
 | `build/<profile>/kernel`、`user`、`libc`、`uefi`、`uefi-runtime`、`thirdparty/` | 组件专有中间产物 |
 | `build/<profile>/staging/<component>/` | 组件安装暂存树 |
 | `build/<profile>/host-tools/mkdisk` | 宿主构建工具 |
-| `build/.locks/<profile>/publish` | 发布锁（在 build 目录之外，`clean` 不删除） |
+| `build/.locks/<profile>/publish` | 发布锁（在 `build/<profile>/` 之外，`clean` 不删除） |
 
 项目根 `kernel.bin` 与 `disk.img` 是默认 profile 产物的**单向兼容副本**（内容保护：内容相同则不覆盖）。
 
