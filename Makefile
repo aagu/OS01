@@ -359,6 +359,17 @@ test-inittab:
 	$(MAKE) INITTAB_FILE=config/inittab.test disk.img boot/uefi/OVMF.fd
 	python3 tests/run_test.py inittab-phase
 
+.PHONY: test-build-contract-x86
+test-build-contract-x86:
+	sh tests/build_contract.sh x86_64-clang x86
+	sh tests/build_contract.sh x86_64-clang sysroot
+	sh tests/build_contract.sh x86_64-clang targets
+
+.PHONY: test-build-contract-aarch64
+test-build-contract-aarch64:
+	sh tests/build_contract.sh aarch64-clang aarch64
+	sh tests/build_contract.sh aarch64-clang targets
+
 .PHONY: test-network
 test-network:
 	rm -f disk.img
