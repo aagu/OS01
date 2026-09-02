@@ -91,14 +91,21 @@ KERNEL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_EXTRA_OBJECTS)
 # ── Flags ──────────────────────────────────────────────────
 ALL_CFLAGS   := $(CFLAGS) $(ARCH_CFLAGS)   -I$(KERNEL_HEADERS)
 ifdef OS01_PROFILE_FILE
-# Profile mode: the root no longer exports a sysroot CFLAGS. Consume the
-# profile's target include dir directly — the kernel includes libc headers
-# (<string.h>, <stdlib.h>, ...) from the sysroot.
-ALL_CFLAGS += -isystem $(TARGET_INCLUDEDIR)
+# Profile mode: the root no longer exports a sysroot CFLAGS. The kernel
+# includes libc headers (<string.h>, <stdlib.h>, ...) from the STAGED libc
+# headers while `lib` stages them (Task 3 transitional; Task 4 publishes an
+# immutable sysroot generation instead).
+ALL_CFLAGS += -isystem $(LIBC_STAGING_INCLUDEDIR)
 endif
 ALL_ASMFLAGS := $(ASFLAGS) $(ARCH_ASMFLAGS)
 ifeq ($(ARCH),x86_64)
+ifdef OS01_PROFILE_FILE
+# Task 3 transitional: the kernel links -lk/-lgcc against the staged libk.a
+# (final sysroot not populated until Task 4 publishes a generation).
+ALL_LDFLAGS  := $(LDFLAGS) $(ARCH_LDFLAGS) -L$(LIBC_STAGING_LIBDIR)
+else
 ALL_LDFLAGS  := $(LDFLAGS) $(ARCH_LDFLAGS) -L$(TARGET_LIBDIR)
+endif
 else
 ALL_LDFLAGS  := $(LDFLAGS) $(ARCH_LDFLAGS) -L$(SYSROOT)/usr/lib
 endif
@@ -153,7 +160,9 @@ endif
 # typedefs and would choke on libc's stdint.h.
 ALL_CFLAGS     += -I$(LWIP_SRC_DIR)/include -I../kernel/include/net
 ifdef OS01_PROFILE_FILE
-ALL_C_ONLY_FLAGS := -D__CLANG_STDINT_H -include $(TARGET_INCLUDEDIR)/stdint.h
+# Explicit kernel-profile flag for the stdint.h injection (spec: kernel
+# profile flags). Task 3 transitional — references the staged libc include.
+ALL_C_ONLY_FLAGS := $(KERNEL_STDINT_FLAGS)
 else
 ALL_C_ONLY_FLAGS := -D__CLANG_STDINT_H -include $(SYSROOT)$(INCLUDEDIR)/stdint.h
 endif
@@ -223,10 +232,23 @@ $(BUILD_DIR)/$(ARCHDIR)/trampoline.elf: $(BUILD_DIR)/$(ARCHDIR)/trampoline.o $(A
 $(BUILD_DIR)/$(ARCHDIR)/trampoline.bin: $(BUILD_DIR)/$(ARCHDIR)/trampoline.elf
 	$(OBJ_CPY) -O binary $< $@
 
+ifdef OS01_PROFILE_FILE
+# Profile mode: the intermediate binary is generated under the profile build
+# dir (never written into the source tree). The kernel's trampoline.h
+# hardcodes the linker-derived symbols _binary_arch_x86_64_trampoline_bin_*,
+# which depend on the *path string* passed to `ld -r -b binary`. Run the
+# embed link from $(KERNEL_BUILD_DIR)/generated with the relative path
+# arch/x86_64/trampoline.bin so lld emits exactly those symbol names.
+$(BUILD_DIR)/$(ARCHDIR)/trampoline_bin.o: $(BUILD_DIR)/$(ARCHDIR)/trampoline.bin
+	@mkdir -p $(KERNEL_BUILD_DIR)/generated/arch/x86_64
+	cp $< $(KERNEL_BUILD_DIR)/generated/arch/x86_64/trampoline.bin
+	cd $(KERNEL_BUILD_DIR)/generated && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary arch/x86_64/trampoline.bin -o $@
+else
 $(BUILD_DIR)/$(ARCHDIR)/trampoline_bin.o: $(BUILD_DIR)/$(ARCHDIR)/trampoline.bin
 	cp $< $(ARCHDIR)/trampoline.bin
 	$(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(ARCHDIR)/trampoline.bin -o $@
 	rm -f $(ARCHDIR)/trampoline.bin
+endif
 endif
 
 # ── Temporary: irq.o avoids .bss section issue ─────────────
@@ -278,8 +300,10 @@ kernel.bin: all
 # ── Install headers ────────────────────────────────────────
 install-headers:
 ifdef OS01_PROFILE_FILE
-	mkdir -p $(TARGET_INCLUDEDIR)
-	cp -R --preserve=timestamps include/. $(TARGET_INCLUDEDIR)/.
+	@test -n "$(INSTALL_ROOT)" || { echo "ERROR: install-headers (profile mode) requires INSTALL_ROOT (staging tree)"; exit 1; }
+	mkdir -p $(INSTALL_ROOT)/usr/include
+	cp -R --preserve=timestamps include/. $(INSTALL_ROOT)/usr/include/.
+	@find $(INSTALL_ROOT) -type f ! -name manifest | sed 's|^$(INSTALL_ROOT)/||' | sort > $(INSTALL_ROOT)/manifest
 else
 	mkdir -p $(SYSROOT)$(INCLUDEDIR)
 	cp -R --preserve=timestamps include/. $(SYSROOT)$(INCLUDEDIR)/.

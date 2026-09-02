@@ -21,6 +21,11 @@ USER_BUILD_DIR := $(BUILD_DIR)/user
 UEFI_BUILD_DIR := $(BUILD_DIR)/uefi
 UEFI_RUNTIME_DIR := $(BUILD_DIR)/uefi-runtime
 
+# Staging roots: component installs write ONLY their private staging tree
+# (INSTALL_ROOT), never the final sysroot. The single writer of the sysroot
+# is sysroot.mk (Task 4).
+STAGING_DIR := $(BUILD_DIR)/staging
+
 # ── aarch64 compiler / QEMU settings (retained from the legacy Makefile) ──
 # This profile does NOT include mk/toolchains/clang.mk — that is the x86
 # Clang-family discovery. The aarch64 toolchain is the arch-specific pair
@@ -33,6 +38,8 @@ TARGET_CCLD    ?= $(CC)
 EFFECTIVE_CC   ?= $(CC)
 TARGET_LD      ?= $(LD)
 AR             ?= llvm-ar
+# Archive tool for the target (spec profile variable TARGET_AR).
+TARGET_AR      ?= llvm-ar
 OBJ_CPY        ?= llvm-objcopy
 AARCH64_QEMU   ?= qemu-system-aarch64
 AARCH64_SMP    ?= 4

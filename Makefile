@@ -75,8 +75,8 @@ boot/uefi/OVMF.fd:
 .PHONY: lib
 lib:
 	$(call require_capability,userland)
-	$(call os01_submake,kernel,install-headers $(OS01_SUBMAKE_ARGS))
-	$(call os01_submake,libc,install $(OS01_SUBMAKE_ARGS))
+	$(call os01_submake,kernel,install-headers INSTALL_ROOT=$(STAGING_DIR)/kernel-headers $(OS01_SUBMAKE_ARGS))
+	$(call os01_submake,libc,install INSTALL_ROOT=$(STAGING_DIR)/libc $(OS01_SUBMAKE_ARGS))
 
 # ── Kernel ──────────────────────────────────────────────
 

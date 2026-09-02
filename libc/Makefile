@@ -69,16 +69,32 @@ LIBC_HOSTED_OBJS := $(addprefix $(BUILD_DIR)/, $(ARCH_HOSTEDOBJS))
 LIBC_ALL_OBJS := $(LIBC_OBJS) $(LIBC_ARCH_OBJS) $(LIBC_HOSTED_OBJS)
 LIBK_ALL_OBJS := $(LIBK_OBJS) $(LIBK_ARCH_OBJS)
 
+# ── Archives ─────────────────────────────────────────────────
+# Profile mode: archives live under the profile build dir (LIBC_BUILD_DIR),
+# never in the libc/ source tree. Legacy standalone mode keeps them in CWD.
+ifdef OS01_PROFILE_FILE
+LIBC_ARCHIVE := $(LIBC_BUILD_DIR)/lib/libc.a
+LIBK_ARCHIVE := $(LIBC_BUILD_DIR)/lib/libk.a
+else
+LIBC_ARCHIVE := libc.a
+LIBK_ARCHIVE := libk.a
+endif
+# Archive tool: profile mode takes TARGET_AR from the profile (spec profile
+# variable); legacy standalone mode falls back to toolchain.mk's AR.
+TARGET_AR ?= $(AR)
+
 # ── Targets ────────────────────────────────────────────────
 .PHONY: all clean install install-headers install-libs
 
-all: libc.a libk.a
+all: $(LIBC_ARCHIVE) $(LIBK_ARCHIVE)
 
-libc.a: $(LIBC_ALL_OBJS)
-	$(AR) rcs $@ $(LIBC_ALL_OBJS)
+$(LIBC_ARCHIVE): $(LIBC_ALL_OBJS)
+	@mkdir -p $(dir $@)
+	$(TARGET_AR) rcs $@ $^
 
-libk.a: $(LIBK_ALL_OBJS)
-	$(AR) rcs $@ $(LIBK_ALL_OBJS)
+$(LIBK_ARCHIVE): $(LIBK_ALL_OBJS)
+	@mkdir -p $(dir $@)
+	$(TARGET_AR) rcs $@ $^
 
 # ── Compile rules ──────────────────────────────────────────
 $(BUILD_DIR)/%.o: %.c
@@ -89,17 +105,34 @@ $(BUILD_DIR)/%.libk.o: %.c
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(LIBK_CFLAGS) -MMD -MP -c $< -o $@
 
-# ── Installation (into sysroot) ────────────────────────────
+# ── Installation (staging tree in profile mode, legacy sysroot otherwise) ──
 install: install-headers install-libs
+ifdef OS01_PROFILE_FILE
+	@test -n "$(INSTALL_ROOT)" || { echo "ERROR: install (profile mode) requires INSTALL_ROOT (staging tree)"; exit 1; }
+	@find $(INSTALL_ROOT) -type f ! -name manifest | sed 's|^$(INSTALL_ROOT)/||' | sort > $(INSTALL_ROOT)/manifest
+endif
 
 install-headers:
+ifdef OS01_PROFILE_FILE
+	@test -n "$(INSTALL_ROOT)" || { echo "ERROR: install (profile mode) requires INSTALL_ROOT (staging tree)"; exit 1; }
+	mkdir -p $(INSTALL_ROOT)/usr/include
+	cp -R --preserve=timestamps include/. $(INSTALL_ROOT)/usr/include/.
+else
 	mkdir -p $(TARGET_INCLUDEDIR)
 	cp -R --preserve=timestamps include/. $(TARGET_INCLUDEDIR)/.
+endif
 
-install-libs: libc.a libk.a
+install-libs: $(LIBC_ARCHIVE) $(LIBK_ARCHIVE)
+ifdef OS01_PROFILE_FILE
+	@test -n "$(INSTALL_ROOT)" || { echo "ERROR: install (profile mode) requires INSTALL_ROOT (staging tree)"; exit 1; }
+	mkdir -p $(INSTALL_ROOT)/usr/lib
+	cp $(LIBC_ARCHIVE) $(INSTALL_ROOT)/usr/lib/libc.a
+	cp $(LIBK_ARCHIVE) $(INSTALL_ROOT)/usr/lib/libk.a
+else
 	mkdir -p $(TARGET_LIBDIR)
-	@cmp -s libc.a $(TARGET_LIBDIR)/libc.a || cp libc.a $(TARGET_LIBDIR)/libc.a
-	@cmp -s libk.a $(TARGET_LIBDIR)/libk.a || cp libk.a $(TARGET_LIBDIR)/libk.a
+	@cmp -s $(LIBC_ARCHIVE) $(TARGET_LIBDIR)/libc.a || cp $(LIBC_ARCHIVE) $(TARGET_LIBDIR)/libc.a
+	@cmp -s $(LIBK_ARCHIVE) $(TARGET_LIBDIR)/libk.a || cp $(LIBK_ARCHIVE) $(TARGET_LIBDIR)/libk.a
+endif
 
 # ── Clean ──────────────────────────────────────────────────
 clean:
