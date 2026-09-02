@@ -55,6 +55,7 @@ all: disk.img
 # Non-rootfs profiles (e.g. aarch64-clang) cannot build a disk image — give
 # the clean capability error instead of "No rule to make target 'disk.img'".
 ifneq ($(filter rootfs,$(PROFILE_CAPABILITIES)),rootfs)
+.PHONY: disk.img
 disk.img:
 	$(call require_capability,rootfs)
 endif

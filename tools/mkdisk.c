@@ -201,9 +201,13 @@ static int read_manifest(const char *path, manifest_entry_t *entries)
         if (!strcmp(line, "file")) {
             // file<TAB>dest<TAB>src<TAB>mode
             char *dest = rest;
-            char *p1 = strchr(dest, '\t'); if (!p1) continue; *p1++ = 0;
+            char *p1 = strchr(dest, '\t');
+            if (!p1) { fprintf(stderr, "ERROR: malformed file row '%s' (missing src field)\n", dest); fclose(f); return -1; }
+            *p1++ = 0;
             char *src = p1;
-            char *p2 = strchr(src, '\t'); if (!p2) continue; *p2++ = 0;
+            char *p2 = strchr(src, '\t');
+            if (!p2) { fprintf(stderr, "ERROR: malformed file row for '%s' (missing mode field)\n", dest); fclose(f); return -1; }
+            *p2++ = 0;
             char *mode = p2;
             if (!*mode) { fprintf(stderr, "ERROR: file row for '%s' missing mode\n", dest); fclose(f); return -1; }
             for (char *m = mode; *m; m++) {

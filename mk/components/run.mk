@@ -121,7 +121,6 @@ validate-uefi: $(if $(filter uefi,$(PROFILE_CAPABILITIES)),$(UEFI_EFI))
 	@echo "  [validate] $(notdir $(UEFI_EFI)) coff-exports"
 	@$(LLVM_READOBJ) --coff-exports $(UEFI_EFI) >/dev/null
 validate-profile:
-	$(call require_capability,uefi)
 	@printf 'profile=%s triple=%s sysroot=%s capabilities=%s\n' "$(PROFILE)" "$(TARGET_TRIPLE)" "$(SYSROOT)" "$(PROFILE_CAPABILITIES)"
 
 # ── Test ────────────────────────────────────────────────────
