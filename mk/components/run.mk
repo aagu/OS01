@@ -95,11 +95,15 @@ run-aarch64-uefi: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES)),aarch64-ue
 # validate keeps the x86 kernel + UEFI artifact checks (kernel ELF has no
 # undefined symbols / INTERP / DYNAMIC, is EM_X86_64, exports _start /
 # kernel_main / _text; the EFI app has a parseable COFF export table) and
-# prints the selected profile's identity. x86-only: validate-kernel depends
-# on the compat kernel.bin, which only exists for kernel profiles.
+# prints the selected profile's identity. x86-only: gated on the `uefi`
+# capability (x86_64-clang has it; aarch64-clang has uefi-bringup) so an
+# incapable profile gets the clean capability error instead of cryptic
+# empty-LLVM_* failures.
 .PHONY: validate validate-kernel validate-uefi validate-profile
-validate: validate-kernel validate-uefi validate-profile
-validate-kernel: kernel.bin
+validate: $(if $(filter uefi,$(PROFILE_CAPABILITIES)),validate-kernel validate-uefi validate-profile)
+	$(call require_capability,uefi)
+validate-kernel: $(if $(filter uefi,$(PROFILE_CAPABILITIES)),kernel.bin)
+	$(call require_capability,uefi)
 	@echo "  [validate] kernel.elf has no undefined symbols"
 	@test -z "$$($(LLVM_NM) --undefined-only $(KERNEL_ELF))"
 	@echo "  [validate] kernel.elf has no INTERP/DYNAMIC program headers"
@@ -112,10 +116,12 @@ validate-kernel: kernel.bin
 	@$(LLVM_READELF) -Ws $(KERNEL_ELF) | grep -E 'GLOBAL.*\bkernel_main\b'
 	@echo "  [validate] GLOBAL _text present"
 	@$(LLVM_READELF) -Ws $(KERNEL_ELF) | grep -E 'GLOBAL.*\b_text\b'
-validate-uefi: $(UEFI_EFI)
+validate-uefi: $(if $(filter uefi,$(PROFILE_CAPABILITIES)),$(UEFI_EFI))
+	$(call require_capability,uefi)
 	@echo "  [validate] $(notdir $(UEFI_EFI)) coff-exports"
 	@$(LLVM_READOBJ) --coff-exports $(UEFI_EFI) >/dev/null
 validate-profile:
+	$(call require_capability,uefi)
 	@printf 'profile=%s triple=%s sysroot=%s capabilities=%s\n' "$(PROFILE)" "$(TARGET_TRIPLE)" "$(SYSROOT)" "$(PROFILE_CAPABILITIES)"
 
 # ── Test ────────────────────────────────────────────────────

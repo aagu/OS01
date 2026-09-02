@@ -37,7 +37,7 @@ $(KERNEL_ARTIFACT): $(SYSROOT_STAMP) FORCE
 	  trap "rm -f \"$(LOCK_DIR)/owner\"; rmdir \"$(LOCK_DIR)\" 2>/dev/null || true" EXIT; \
 	  echo "$$$$ $(MAKECMDGOALS) $$(date +%s)" > "$(LOCK_DIR)/owner"; \
 	  gen=$$(readlink "$(SYSROOT)" 2>/dev/null) || gen=""; \
-	  if [ -z "$$gen" ]; then exit 0; fi; \
+	  if [ -z "$$gen" ]; then echo "ERROR: sysroot symlink is missing ($(SYSROOT)) — cannot resolve an immutable generation"; exit 1; fi; \
 	  genid=$${gen#sysroot-generations/}; \
 	  genabs="$(BUILD_DIR)/$$gen"; \
 	  lease="$(LEASES_DIR)/$${genid}.$$$$.kernel"; \

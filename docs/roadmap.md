@@ -107,6 +107,7 @@
 | /proc 完善 | status（signal mask/ppid/utime/stime）+ cmdline + stat | 独立 | |
 | symlink/readlink | VFS 软链接 + ext2 symlink（in-inode 快链接）（原 P1#6） | 独立 | |
 | **exec symlink ABI** | POSIX exec 需跟随软链接（`execve("/bin/wget")` 目前 ENOEXEC——vfs lookup 不跟随）；2026-09-02 build refactor 已记录 plan deviation：rootfs applet 项用 busybox 副本替代 symlink 规避，待 kernel vfs 跟随软链接后切回 symlink | exec 软链接跟随（P1） | Linux |
+| **sysroot 增量重编译** | 2026-09-02 build refactor 取舍：不可变 generation 发布 → 任一 sysroot 内容变化使内核/用户/BusyBox 整体重编译（-B/digest），非只重编依赖者（spec 209 未满足）。refinement：generation 内 .d 路径相对化/软链引用，使头文件变化只重编依赖者 | 独立 | |
 | HTTPS/TLS | mbedTLS 集成 BusyBox wget（原 P2#10） | mbedTLS ✅ | |
 | AF_UNIX/socketpair | 本地 socket IPC（原 P2#11） | socket ✅ | |
 | 更多 applet | grep/sed/find，先补 libc regex/fnmatch（原 P1#7） | libc | |

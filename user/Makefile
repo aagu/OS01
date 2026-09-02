@@ -55,9 +55,10 @@ PROGRAMS := $(patsubst %.c,$(BUILD_DIR)/%.elf,$(C_SOURCES))
 # ── Targets ────────────────────────────────────────────────
 .PHONY: all clean
 
-# Build all programs into $(BUILD_DIR); the root Makefile packages
-# them from there into config/fsroot/bin/ — do NOT copy back to the
-# source dir (that would pollute user/ with build artifacts).
+# Build all programs into $(BUILD_DIR); the root user.mk publishes them to
+# $(USER_ARTIFACT_DIR) (artifacts/user) which config/rootfs.mk references for
+# the disk image — do NOT copy back to the source dir (that would pollute
+# user/ with build artifacts).
 all: $(PROGRAMS)
 
 # ── Compile rules (into build dir) ─────────────────────────

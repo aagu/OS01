@@ -113,7 +113,7 @@ $(UEFI_RUNTIME_STAMP): FORCE
 $(UEFI_EFI_ARTIFACT): $(UEFI_RUNTIME_STAMP) boot/uefi/Makefile \
 		$(UEFI_BOOT_SRCS) boot/uefi/arch/arch.h kernel/include/kernel/bootinfo.h
 	@mkdir -p $(dir $@)
-	@$(call os01_submake,boot/uefi,ARCH=$(UEFI_ARCH_FAMILY) UEFI_RUNTIME_STAMP=$(UEFI_RUNTIME_STAMP))
+	@$(call os01_submake,boot/uefi,ARCH=$(UEFI_ARCH_FAMILY) UEFI_RUNTIME_STAMP=$(UEFI_RUNTIME_STAMP) $(OS01_SUBMAKE_ARGS))
 	@cmp -s $(UEFI_BUILD_DIR)/$(UEFI_TARGET_EFI) $@ || cp $(UEFI_BUILD_DIR)/$(UEFI_TARGET_EFI) $@
 
 endif

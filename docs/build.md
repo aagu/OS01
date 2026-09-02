@@ -108,6 +108,8 @@ make
 5. **编译 BusyBox**：`artifacts/user/busybox.elf`（adapter 拷贝到 `build/<profile>/thirdparty/busybox` 后构建）
 6. **创建磁盘镜像**：`build/x86_64-clang/image/disk.img`（manifest 驱动，`tools/mkdisk` 生成 GPT 双分区镜像），并内容保护地复制到项目根 `disk.img`
 
+> **失效语义（增量构建）**：sysroot 以不可变 generation 发布，组件编译/链接使用固定 generation 路径（`SYSROOT_GENERATION_DIR`）。任一 sysroot 内容变化（内核/libc 头文件或库）会使 generation id 递增，内核、用户程序与 BusyBox 因 generation 变化而**整体重编译**（`-B`/digest），而非只重编依赖者——这是不可变 generation 设计的取舍（编译期 .d 依赖指向不可变路径）。后续 refinement 见 `docs/roadmap.md`（P 系列增量构建条目）。组件自身源码修改（如改 `kernel/include/` 内头文件）仍走 .d 依赖图只重编依赖者。
+
 ### 3. 编译单个组件
 
 ```bash

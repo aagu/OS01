@@ -42,7 +42,10 @@ TARGET_TRIPLE  := aarch64-none-elf
 TARGET_CC      ?= $(CC)
 TARGET_CCLD    ?= $(CC)
 EFFECTIVE_CC   ?= $(CC)
-TARGET_LD      ?= $(LD)
+# TARGET_LD is a whitelisted sub-make arg — it must be a BARE command (no
+# embedded flags, or the space splits the make command line). The aarch64
+# link emulation flag lives in LD / ARCH_LDFLAGS instead.
+TARGET_LD      ?= ld.lld
 AR             ?= llvm-ar
 # Archive tool for the target (spec profile variable TARGET_AR).
 TARGET_AR      ?= llvm-ar

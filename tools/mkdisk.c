@@ -205,13 +205,22 @@ static int read_manifest(const char *path, manifest_entry_t *entries)
             char *src = p1;
             char *p2 = strchr(src, '\t'); if (!p2) continue; *p2++ = 0;
             char *mode = p2;
+            if (!*mode) { fprintf(stderr, "ERROR: file row for '%s' missing mode\n", dest); fclose(f); return -1; }
+            for (char *m = mode; *m; m++) {
+                if (*m < '0' || *m > '9') {
+                    fprintf(stderr, "ERROR: file row for '%s' has non-numeric mode '%s'\n", dest, mode);
+                    fclose(f); return -1;
+                }
+            }
             entries[n].is_symlink = 0;
             snprintf(entries[n].dest,   sizeof(entries[n].dest),   "%s", dest);
             snprintf(entries[n].src,    sizeof(entries[n].src),    "%s", src);
             snprintf(entries[n].mode,   sizeof(entries[n].mode),   "%s", mode);
             n++;
         } else if (!strcmp(line, "symlink")) {
-            // symlink<TAB>dest<TAB>target
+            // symlink<TAB>dest<TAB>target — retained for future use; image.mk
+            // currently emits busybox applets as `file` rows (kernel has no
+            // symlink exec support), so no symlink rows are produced today.
             char *dest = rest;
             char *p1 = strchr(dest, '\t'); if (!p1) continue; *p1++ = 0;
             char *target = p1;

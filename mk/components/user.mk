@@ -49,7 +49,7 @@ $(USER_ARTIFACTS)&: $(SYSROOT_STAMP) FORCE
 	  trap "rm -f \"$(LOCK_DIR)/owner\"; rmdir \"$(LOCK_DIR)\" 2>/dev/null || true" EXIT; \
 	  echo "$$$$ $(MAKECMDGOALS) $$(date +%s)" > "$(LOCK_DIR)/owner"; \
 	  gen=$$(readlink "$(SYSROOT)" 2>/dev/null) || gen=""; \
-	  if [ -z "$$gen" ]; then exit 0; fi; \
+	  if [ -z "$$gen" ]; then echo "ERROR: sysroot symlink is missing ($(SYSROOT)) — cannot resolve an immutable generation"; exit 1; fi; \
 	  genid=$${gen#sysroot-generations/}; \
 	  genabs="$(BUILD_DIR)/$$gen"; \
 	  lease="$(LEASES_DIR)/$${genid}.$$$$.user"; \
@@ -117,7 +117,7 @@ $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	  trap "rm -f \"$(LOCK_DIR)/owner\"; rmdir \"$(LOCK_DIR)\" 2>/dev/null || true" EXIT; \
 	  echo "$$$$ $(MAKECMDGOALS) $$(date +%s)" > "$(LOCK_DIR)/owner"; \
 	  gen=$$(readlink "$(SYSROOT)" 2>/dev/null) || gen=""; \
-	  if [ -z "$$gen" ]; then exit 0; fi; \
+	  if [ -z "$$gen" ]; then echo "ERROR: sysroot symlink is missing ($(SYSROOT)) — cannot resolve an immutable generation"; exit 1; fi; \
 	  genid=$${gen#sysroot-generations/}; \
 	  genabs="$(BUILD_DIR)/$$gen"; \
 	  lease="$(LEASES_DIR)/$${genid}.$$$$.busybox"; \
@@ -146,6 +146,8 @@ $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	      echo "  [busybox] input unchanged, reusing private copy"; \
 	    else \
 	      echo "  [busybox] input changed, rebuilding in $(BUSYBOX_PRIVATE)"; \
+	      cmp -s "$(OS01_ROOT)/user/crt0.S" "$(BUSYBOX_OVERLAY)/applets/crt0.S" || { echo "ERROR: $(BUSYBOX_OVERLAY)/applets/crt0.S has drifted from user/crt0.S — the overlay is the file actually compiled; regenerate the overlay copy"; exit 1; }; \
+	      cmp -s "$(OS01_ROOT)/user/sigreturn_trampoline.S" "$(BUSYBOX_OVERLAY)/applets/sigreturn_trampoline.S" || { echo "ERROR: $(BUSYBOX_OVERLAY)/applets/sigreturn_trampoline.S has drifted from user/sigreturn_trampoline.S — regenerate the overlay copy"; exit 1; }; \
 	      printf "%s\n" "$$digest" > "$(BUSYBOX_INPUT_DG)"; \
 	      rm -rf "$(BUSYBOX_PRIVATE)"; \
 	      cp -a "$(OS01_ROOT)/thirdpart/busybox-1.36.1" "$(BUSYBOX_PRIVATE)"; \
