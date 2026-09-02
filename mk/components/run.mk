@@ -174,7 +174,8 @@ TEST_INITTAB_IMAGE  := $(BUILD_DIR)/image/inittab-test/disk.img
 
 .PHONY: test
 test:
-	$(MAKE) -C test run
+	$(call require_capability,rootfs)
+	@$(call os01_submake,test,run $(OS01_SUBMAKE_ARGS))
 
 .PHONY: test-phase-0
 test-phase-0: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
@@ -315,7 +316,7 @@ clean:
 	    echo "ERROR: refusing to remove boot/uefi/OVMF.fd (not a gitignored, untracked generated artifact); preserving it" >&2; \
 	  fi; \
 	fi; \
-	rm -rf test/build sysroot
+	rm -rf sysroot
 
 # Diagnose and remove a stale publish lock. Prints the owner data and only
 # removes the lock when FORCE_UNLOCK=1 is set.

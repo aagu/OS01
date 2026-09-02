@@ -31,6 +31,9 @@ USER_VARIANT ?= $(if $(filter 1,$(OS01_SYSTEST)),systest)
 USER_BUILD_DIR := $(BUILD_DIR)/user$(if $(USER_VARIANT),/$(USER_VARIANT))
 UEFI_BUILD_DIR := $(BUILD_DIR)/uefi
 UEFI_RUNTIME_DIR := $(BUILD_DIR)/uefi-runtime
+# Host unit tests are an OS01 build: every test object/binary lives under
+# the profile's host-test dir (test/Makefile includes this profile).
+HOST_TEST_BUILD_DIR := $(BUILD_DIR)/host-test
 
 # Staging roots: component installs write ONLY their private staging tree
 # (INSTALL_ROOT), never the final sysroot. The single writer of the sysroot

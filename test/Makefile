@@ -1,6 +1,23 @@
+# ── Profile-only contract ───────────────────────────────────
+# The root Makefile is the only supported entry; test/Makefile
+# requires OS01_PROFILE_FILE at parse time (root `test` invokes it
+# via os01_submake). Host tests are an OS01 build: every object and
+# binary is written ONLY under the selected profile's host-test dir
+# (HOST_TEST_BUILD_DIR) and profile clean removes it. Host compilation
+# stays host-native (HOST_CC, no --target, no sysroot, no kernel link
+# flags) but obeys profile output isolation.
+LOCAL_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
+ifeq ($(strip $(OS01_PROFILE_FILE)),)
+$(error invoke from the repository root: make PROFILE=x86_64-clang <target>)
+endif
+ifeq ($(wildcard $(OS01_PROFILE_FILE)),)
+$(error OS01_PROFILE_FILE='$(OS01_PROFILE_FILE)' does not exist; invoke from the repository root)
+endif
+include $(OS01_PROFILE_FILE)
+
 TESTS_DIR := $(realpath ..)
 TEST_SRC  := $(TESTS_DIR)/test
-TEST_BLD := $(TEST_SRC)/build
+TEST_BLD := $(HOST_TEST_BUILD_DIR)
 TEST_MOCK := $(TEST_SRC)/mock
 TEST_INC  := $(TEST_SRC)/include
 TEST_CASES := $(TEST_SRC)/cases
@@ -325,10 +342,6 @@ POLL_PRODUCTION_OBJS := \
     $(TEST_BLD)/poll_clocksource_stub.o
 
 $(TEST_BLD)/test_poll_requested.elf: $(TEST_BLD)/test_poll_requested.o $(POLL_PRODUCTION_OBJS)
-	$(HOST_CC) -Wl,--gc-sections -o $@ $^
-
-# Keep the focused command usable from the repository root/task plan.
-build/test_poll_requested.elf: $(TEST_BLD)/test_poll_requested.o $(POLL_PRODUCTION_OBJS)
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 clean:
