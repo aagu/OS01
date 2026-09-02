@@ -1,0 +1,11 @@
+--- pu-a/uefi/uefi.h	2025-03-30 21:05:32.000000000 +0800
++++ pu-b/uefi/uefi.h	2026-09-02 12:31:44.728146532 +0800
+@@ -44,7 +44,7 @@
+ /* get these from the compiler or the efi headers, only define if we have neither */
+ #if !defined(_STDINT_H) && !defined(_GCC_STDINT_H) && !defined(_EFI_INCLUDE_)
+ #define _STDINT_H
+-typedef char                int8_t;
++typedef signed char         int8_t;
+ typedef unsigned char       uint8_t;
+ typedef short               int16_t;
+ typedef unsigned short      uint16_t;

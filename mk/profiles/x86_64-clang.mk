@@ -42,9 +42,11 @@ USER_ARTIFACT_DIR := $(BUILD_DIR)/artifacts/user
 # generation lease; recursive so it resolves inside that sub-make.
 KERNEL_STDINT_FLAGS = -D__CLANG_STDINT_H -include $(SYSROOT_GENERATION_DIR)/usr/include/stdint.h
 
-# Artifacts consumed by the root validation recipes.
+# Artifacts consumed by the root validation recipes. UEFI_EFI is the EFI app
+# artifact (spec artifact-path table); uefi.mk owns the rule that produces it
+# and validate-uefi depends on it.
 KERNEL_ELF ?= $(KERNEL_BUILD_DIR)/kernel.elf
-UEFI_EFI   ?= $(UEFI_BUILD_DIR)/BOOTX64.EFI
+UEFI_EFI   ?= $(BUILD_DIR)/artifacts/uefi/BOOTX64.EFI
 
 # x86 Clang/LLVM discovery + validation, and host/run/link parameters.
 include $(OS01_ROOT)/mk/toolchains/clang.mk

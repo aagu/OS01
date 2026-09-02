@@ -57,7 +57,7 @@ $(KERNEL_ARTIFACT): $(SYSROOT_STAMP) FORCE
 	  if [ -z "$(DRY_RUN)" ]; then printf "%s\n" "$$genid" > "$(KERNEL_BUILD_DIR)/.sysroot-generation"; fi; \
 	'
 	@$(LLVM_READOBJ) --file-headers $(KERNEL_BUILD_DIR)/kernel.elf | grep -qF 'EM_X86_64'
-	@cp $(KERNEL_BUILD_DIR)/kernel.bin $@
+	@cmp -s $(KERNEL_BUILD_DIR)/kernel.bin $@ || cp $(KERNEL_BUILD_DIR)/kernel.bin $@
 
 endif
 endif

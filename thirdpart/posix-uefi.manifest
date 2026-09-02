@@ -1,0 +1,10 @@
+# thirdpart/posix-uefi.manifest
+# posix-uefi input manifest (spec: third-party source manifests).
+# Make-parseable record of where the UEFI runtime lives and which submodule
+# revision the UEFI adapter expects. The adapter additionally verifies the
+# submodule HEAD equals this revision and its worktree is pristine
+# (`git status --porcelain` empty, including untracked .o/.a residue from
+# legacy in-tree builds); this manifest pins the expected revision and is
+# itself part of the adapter's input digest.
+POSIX_UEFI_SOURCE   := thirdpart/posix-uefi
+POSIX_UEFI_REVISION := 8d50e069f31dbfad6a19b426fdd1fe9cfa4e95ab

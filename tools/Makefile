@@ -1,15 +1,19 @@
 # tools/Makefile (host-only — runs on the build machine)
 HOST_CC ?= cc
 CFLAGS = -Wall -Wextra -O2 -std=c11
+# mkdisk builds into $(HOST_TOOLS_DIR) (the profile's host-tools dir), NOT
+# into tools/ — the root image rule invokes
+# `$(MAKE) -C tools HOST_TOOLS_DIR=$(BUILD_DIR)/host-tools` so parallel
+# profiles cannot share or collide on the binary.
+HOST_TOOLS_DIR ?= .
 
 .PHONY: all mkdisk check-deps clean
 
 all: mkdisk
 
-# mkdisk is a tracked host binary. Always rebuild it so checkout/archive
-# timestamps cannot make an older binary appear newer than mkdisk.c.
 mkdisk: mkdisk.c
-	$(HOST_CC) $(CFLAGS) -o $@ $<
+	@mkdir -p $(HOST_TOOLS_DIR)
+	$(HOST_CC) $(CFLAGS) -o $(HOST_TOOLS_DIR)/mkdisk $<
 
 check-deps:
 	@missing=0; \
@@ -19,4 +23,4 @@ check-deps:
 	exit $$missing
 
 clean:
-	rm -f mkdisk
+	rm -f $(HOST_TOOLS_DIR)/mkdisk

@@ -11,15 +11,13 @@ base := $(patsubst %/,%,$(dir $(ROOT_MAKEFILE)))
 include $(base)/mk/project.mk
 # Cross-component dependency graph (spec: mk/components/*.mk is the only
 # place that wires components together). sysroot.mk is the single writer of
-# the sysroot; kernel.mk owns the kernel artifact.
+# the sysroot; kernel.mk owns the kernel artifact; uefi.mk owns the UEFI
+# runtime adapter + EFI apps; image.mk owns the rootfs manifest and the disk
+# images.
 include $(base)/mk/components/sysroot.mk
 include $(base)/mk/components/kernel.mk
 include $(base)/mk/components/user.mk
-
-# UEFI_EFI compat: boot/uefi still writes build/x86_64/uefi/BOOTX64.EFI until
-# Task 6 rewires it onto the profile layout; the profile's UEFI_EFI points at
-# build/<profile>/uefi which nothing produces yet. Keep validate-uefi working.
-UEFI_EFI := build/x86_64/uefi/BOOTX64.EFI
+include $(base)/mk/components/uefi.mk
 
 # ── Run parameters (profile-agnostic; shared by x86 and aarch64) ──
 DISPLAY=gtk
@@ -41,16 +39,11 @@ ifeq ($(OS01_NETTEST),1)
 INITTAB_FILE := config/inittab.nettest
 endif
 
+# image.mk owns the rootfs manifest + disk images. It is included after the
+# INITTAB_FILE selection because config/rootfs.mk references $(INITTAB_FILE).
+include $(base)/mk/components/image.mk
+
 all: disk.img
-
-# ── Bootloader ──────────────────────────────────────────
-
-BUILD_X86_64_UEFI := build/x86_64/uefi/BOOTX64.EFI
-
-$(BUILD_X86_64_UEFI): boot/uefi/Makefile boot/uefi/main.c \
-		boot/uefi/arch/arch.h boot/uefi/arch/x86_64/boot.c \
-		kernel/include/kernel/bootinfo.h
-	make -C boot/uefi ARCH=x86_64
 
 # ── Validation ─────────────────────────────────────────
 
@@ -69,7 +62,7 @@ validate-kernel: kernel.bin
 	@$(LLVM_READELF) -Ws $(KERNEL_ELF) | grep -E 'GLOBAL.*\bkernel_main\b'
 	@echo "  [validate] GLOBAL _text present"
 	@$(LLVM_READELF) -Ws $(KERNEL_ELF) | grep -E 'GLOBAL.*\b_text\b'
-validate-uefi: $(BUILD_X86_64_UEFI)
+validate-uefi: $(UEFI_EFI)
 	@echo "  [validate] BOOTX64.EFI coff-exports"
 	@$(LLVM_READOBJ) --coff-exports $(UEFI_EFI) >/dev/null
 
@@ -94,7 +87,7 @@ lib: $(if $(filter userland,$(PROFILE_CAPABILITIES)),$(SYSROOT_STAMP))
 # artifact (x86_64-clang); other profiles simply fail on `make kernel.bin`.
 ifdef KERNEL_ARTIFACT
 kernel.bin: $(KERNEL_ARTIFACT)
-	cp $(KERNEL_ARTIFACT) kernel.bin
+	@cmp -s $(KERNEL_ARTIFACT) $@ || cp $(KERNEL_ARTIFACT) $@
 endif
 
 # ── User programs ───────────────────────────────────────
@@ -107,63 +100,9 @@ user: $(if $(filter userland,$(PROFILE_CAPABILITIES)),$(USER_ARTIFACTS) $(USER_A
 	$(call require_capability,userland)
 
 # ── Disk image ──────────────────────────────────────────
-
-disk.img: $(BUILD_X86_64_UEFI) lib kernel.bin user $(USER_ARTIFACT_DIR)/busybox.elf
-	@mkdir -p config/fsroot/bin config/fsroot/home config/fsroot/etc
-	@cp $(USER_ARTIFACT_DIR)/init.elf          config/fsroot/bin/init
-	@cp $(USER_ARTIFACT_DIR)/busybox.elf        config/fsroot/bin/busybox
-	@cp $(USER_ARTIFACT_DIR)/spin.elf           config/fsroot/bin/spin
-	@cp $(USER_ARTIFACT_DIR)/sigtest.elf        config/fsroot/bin/sigtest
-	@cp $(USER_ARTIFACT_DIR)/poweroff.elf       config/fsroot/bin/poweroff
-	@cp $(USER_ARTIFACT_DIR)/halt.elf           config/fsroot/bin/halt
-	@cp $(USER_ARTIFACT_DIR)/reboot.elf         config/fsroot/bin/reboot
-	@cp $(USER_ARTIFACT_DIR)/systest.elf        config/fsroot/bin/systest
-	@cp $(USER_ARTIFACT_DIR)/test_mmap.elf      config/fsroot/bin/test_mmap
-	@cp $(USER_ARTIFACT_DIR)/test_fork_mmap.elf config/fsroot/bin/test_fork_mmap
-	@cp $(USER_ARTIFACT_DIR)/test_cow.elf       config/fsroot/bin/test_cow
-	@cp $(USER_ARTIFACT_DIR)/terminal.elf       config/fsroot/bin/terminal
-	@cp $(USER_ARTIFACT_DIR)/smp_stress.elf     config/fsroot/bin/smp_stress
-	@cp $(INITTAB_FILE) config/fsroot/etc/inittab
-	@cp $(USER_ARTIFACT_DIR)/socktest.elf      config/fsroot/bin/socktest
-	@cp $(USER_ARTIFACT_DIR)/udptest.elf       config/fsroot/bin/udptest
-	@cp $(USER_ARTIFACT_DIR)/ipaddr.elf        config/fsroot/bin/ipaddr
-	@cp $(USER_ARTIFACT_DIR)/nettest.elf       config/fsroot/bin/nettest
-	@cp $(USER_ARTIFACT_DIR)/tetris.elf        config/fsroot/bin/tetris
-	@ln -sf busybox config/fsroot/bin/wget
-	@ln -sf busybox config/fsroot/bin/login
-	@ln -sf busybox config/fsroot/bin/sh
-	@ln -sf busybox config/fsroot/bin/[
-	@ln -sf busybox config/fsroot/bin/[[
-	@ln -sf busybox config/fsroot/bin/cat
-	@ln -sf busybox config/fsroot/bin/cp
-	@ln -sf busybox config/fsroot/bin/mv
-	@ln -sf busybox config/fsroot/bin/rm
-	@ln -sf busybox config/fsroot/bin/mkdir
-	@ln -sf busybox config/fsroot/bin/rmdir
-	@ln -sf busybox config/fsroot/bin/echo
-	@ln -sf busybox config/fsroot/bin/printf
-	@ln -sf busybox config/fsroot/bin/sort
-	@ln -sf busybox config/fsroot/bin/ps
-	@ln -sf busybox config/fsroot/bin/kill
-	@ln -sf busybox config/fsroot/bin/mount
-	@ln -sf busybox config/fsroot/bin/grep
-	@ln -sf busybox config/fsroot/bin/sed
-	@ln -sf busybox config/fsroot/bin/awk
-	@ln -sf busybox config/fsroot/bin/find
-	@ln -sf busybox config/fsroot/bin/xargs
-	@ln -sf busybox config/fsroot/bin/tar
-	@ln -sf busybox config/fsroot/bin/gzip
-	@ln -sf busybox config/fsroot/bin/gunzip
-	@ln -sf busybox config/fsroot/bin/ping
-	@ln -sf busybox config/fsroot/bin/ifconfig
-	@ln -sf busybox config/fsroot/bin/clear
-	@ln -sf busybox config/fsroot/bin/dmesg
-	$(MAKE) -C tools check-deps
-	$(MAKE) -C tools
-	tools/mkdisk disk.img \
-	    --efi $(BUILD_X86_64_UEFI) \
-	    --kernel kernel.bin \
-	    --rootfs config/fsroot/
+# disk.img (project root) is the image.mk compat target: a content-guarded
+# copy of the profile's $(BUILD_DIR)/image/disk.img. The rootfs contents and
+# mkdisk invocation live in mk/components/image.mk + config/rootfs.mk.
 
 # ── Run / Debug ─────────────────────────────────────────
 
@@ -175,45 +114,23 @@ run: disk.img boot/uefi/OVMF.fd
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio -no-reboot
 
-AARCH64_QEMU ?= qemu-system-aarch64
-AARCH64_SMP  ?= 4
-AARCH64_BUILD_DIR := build/aarch64
-AARCH64_UEFI_APP := $(AARCH64_BUILD_DIR)/uefi/BOOTAA64.EFI
-AARCH64_UEFI_DISK := $(AARCH64_BUILD_DIR)/disk.img
-AARCH64_UEFI_FIRMWARE := $(AARCH64_BUILD_DIR)/QEMU_EFI.fd
-AARCH64_UEFI_FIRMWARE_SOURCE ?= /usr/share/edk2/aarch64/QEMU_EFI.fd
-AARCH64_KERNEL_ELF := $(AARCH64_BUILD_DIR)/kernel/kernel.elf
-AARCH64_HEAD_OBJECT := $(AARCH64_BUILD_DIR)/kernel/arch/aarch64/head.o
-
+# ── aarch64 UEFI bring-up (uefi-bringup capability) ─────────
+# Targets are always defined so `make aarch64-uefi` under the default x86
+# profile fails at the capability gate (not "no rule to make target"); the
+# artifact prereqs exist only for uefi-bringup profiles (aarch64-clang). The
+# kernel artifact + image rules live in mk/components/image.mk; there is no
+# `lib` dependency — aarch64 does not consume the sysroot.
 .PHONY: aarch64-uefi
-aarch64-uefi: $(AARCH64_UEFI_DISK) $(AARCH64_UEFI_FIRMWARE)
-
-$(AARCH64_UEFI_APP): boot/uefi/Makefile \
-		boot/uefi/main.c boot/uefi/arch/arch.h \
-		boot/uefi/arch/aarch64/boot.c boot/uefi/arch/aarch64/elf.c \
-		boot/uefi/arch/aarch64/handoff.S \
-		boot/uefi/arch/aarch64/loader.h kernel/include/kernel/bootinfo.h
-	$(MAKE) -C boot/uefi ARCH=aarch64
+aarch64-uefi: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES)),$(AARCH64_UEFI_DISK) $(AARCH64_UEFI_FIRMWARE))
+	$(call require_capability,uefi-bringup)
 
 .PHONY: aarch64-uefi-kernel
-aarch64-uefi-kernel: lib
-	$(MAKE) -B -C kernel ARCH=aarch64
-
-$(AARCH64_UEFI_DISK): $(AARCH64_UEFI_APP) aarch64-uefi-kernel
-	@mkdir -p $(AARCH64_BUILD_DIR)
-	rm -f $@
-	truncate -s 64M $@
-	mkfs.fat -F 32 $@
-	mmd -i $@ ::/EFI ::/EFI/BOOT
-	mcopy -i $@ $(AARCH64_UEFI_APP) ::/EFI/BOOT/BOOTAA64.EFI
-	mcopy -i $@ $(AARCH64_KERNEL_ELF) ::/kernel.elf
-
-$(AARCH64_UEFI_FIRMWARE): $(AARCH64_UEFI_FIRMWARE_SOURCE)
-	@mkdir -p $(dir $@)
-	cp $< $@
+aarch64-uefi-kernel: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES)),$(BUILD_DIR)/artifacts/kernel.elf)
+	$(call require_capability,uefi-bringup)
 
 .PHONY: run-aarch64-uefi
-run-aarch64-uefi: aarch64-uefi
+run-aarch64-uefi: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES)),aarch64-uefi)
+	$(call require_capability,uefi-bringup)
 	$(AARCH64_QEMU) -M virt,gic-version=2 -cpu cortex-a53 -smp 1 -m $(MEMORY) \
 	  -drive if=pflash,format=raw,file=$(AARCH64_UEFI_FIRMWARE) \
 	  -drive if=none,file=$(AARCH64_UEFI_DISK),format=raw,id=disk \

@@ -4,9 +4,15 @@ profile=$1
 mode=$2
 base="build/$profile"
 test -d "$base"
-test -d "$base/sysroot-generations"
-test -L "$base/sysroot"
-test ! -e "$base/sysroot/data/data/com.termux/files/usr"
+# Sysroot contract prelude: the x86_64 profiles publish an immutable sysroot
+# generation, so those checks apply to every x86 mode. The aarch64 UEFI
+# bring-up profile (aarch64-clang) explicitly does NOT consume a sysroot, so
+# it has no sysroot-generations dir or sysroot symlink to check.
+if [ "$profile" != "aarch64-clang" ]; then
+	test -d "$base/sysroot-generations"
+	test -L "$base/sysroot"
+	test ! -e "$base/sysroot/data/data/com.termux/files/usr"
+fi
 case "$mode" in
 x86) test -f "$base/artifacts/kernel.bin"; test -f "$base/image/disk.img";
      test -f "$base/artifacts/user/busybox.elf"; test -f "$base/artifacts/user/init.elf";

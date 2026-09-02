@@ -67,7 +67,7 @@ $(USER_ARTIFACTS)&: $(SYSROOT_STAMP) FORCE
 	    all $$force SYSROOT_GENERATION_DIR="$$genabs" $(OS01_SUBMAKE_ARGS); \
 	  if [ -z "$(DRY_RUN)" ]; then printf "%s\n" "$$genid" > "$(USER_BUILD_DIR)/.sysroot-generation"; fi; \
 	'
-	@for p in $(USER_PROGRAMS); do cp $(USER_BUILD_DIR)/$$p.elf $(USER_ARTIFACT_DIR)/$$p.elf; done
+	@for p in $(USER_PROGRAMS); do cmp -s $(USER_BUILD_DIR)/$$p.elf $(USER_ARTIFACT_DIR)/$$p.elf || cp $(USER_BUILD_DIR)/$$p.elf $(USER_ARTIFACT_DIR)/$$p.elf; done
 	@for p in $(USER_PROGRAMS); do test -f $(USER_ARTIFACT_DIR)/$$p.elf || { echo "ERROR: missing user artifact $$p.elf"; exit 1; }; done
 
 # ── BusyBox adapter ───────────────────────────────────────────
@@ -171,7 +171,7 @@ $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	      [ -f "$(BUSYBOX_PRIVATE)/busybox" ] || { echo "ERROR: busybox build produced no binary"; exit 1; }; \
 	      printf "%s\n" "$$digest" > "$(BUSYBOX_RECEIPT)"; \
 	    fi; \
-	    cp "$(BUSYBOX_PRIVATE)/busybox" "$(USER_ARTIFACT_DIR)/busybox.elf"; \
+	    cmp -s "$(BUSYBOX_PRIVATE)/busybox" "$(USER_ARTIFACT_DIR)/busybox.elf" || cp "$(BUSYBOX_PRIVATE)/busybox" "$(USER_ARTIFACT_DIR)/busybox.elf"; \
 	    test -f "$(USER_ARTIFACT_DIR)/busybox.elf"; \
 	  fi; \
 	'

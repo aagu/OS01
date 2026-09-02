@@ -1,15 +1,35 @@
 # boot/uefi/Makefile — unified UEFI bootloader build wrapper.
 #
 # Builds both EFI applications from the shared main.c + per-arch hooks:
-#   make -C boot/uefi ARCH=x86_64    -> build/x86_64/uefi/BOOTX64.EFI
-#   make -C boot/uefi ARCH=aarch64   -> build/aarch64/uefi/BOOTAA64.EFI
+#   make -C boot/uefi ARCH=x86_64    -> build/x86_64/uefi/BOOTX64.EFI (legacy)
+#   make -C boot/uefi ARCH=aarch64   -> build/aarch64/uefi/BOOTAA64.EFI (legacy)
 #
-# Each ARCH gets a private copy of the posix-uefi runtime
-# (build/<arch>/uefi-runtime/) compiled with UEFI_NO_UTF8, so objects
-# never cross-pollinate between architectures.
+# Profile mode (OS01_PROFILE_FILE set, invoked by the root EFI artifact rule
+# in mk/components/uefi.mk): BUILD_DIR / OUTDIR / RUNTIME_DIR come from the
+# selected profile, and the UEFI runtime at $(UEFI_RUNTIME_DIR) is ALREADY
+# copied + patched by the root adapter — this Makefile only compiles the
+# boot sources against it (the copy + sed mutations live in the tracked
+# config/posix-uefi/*.patch files). Legacy standalone mode (no
+# OS01_PROFILE_FILE) keeps the old build/<arch> layout and performs the
+# runtime copy + sed mutations itself. Each ARCH gets a private runtime copy,
+# so objects never cross-pollinate between architectures.
 
+LOCAL_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
+ROOT := $(abspath $(dir $(LOCAL_MAKEFILE))../..)
+
+ifdef OS01_PROFILE_FILE
+# ── Profile mode ──────────────────────────────────────────
+include $(OS01_PROFILE_FILE)
 ARCH ?= x86_64
-ROOT := $(abspath ../..)
+OUTDIR := $(UEFI_BUILD_DIR)
+RUNTIME_DIR := $(UEFI_RUNTIME_DIR)
+else
+# ── Legacy standalone mode ────────────────────────────────
+ARCH ?= x86_64
+BUILD_DIR := $(ROOT)/build/$(ARCH)
+RUNTIME_DIR := $(BUILD_DIR)/uefi-runtime
+OUTDIR := $(BUILD_DIR)/uefi
+UEFI_RUNTIME_SOURCE ?= $(ROOT)/thirdpart/posix-uefi/uefi
 # require_program is a GNU make `define` in toolchain.mk — such defines are
 # never exported to child makes, so include toolchain.mk here (it is
 # location-independent) for the UEFI Clang contract below. x86_64 only:
@@ -17,11 +37,7 @@ ROOT := $(abspath ../..)
 ifeq ($(ARCH),x86_64)
 include $(ROOT)/toolchain.mk
 endif
-BUILD_DIR := $(ROOT)/build/$(ARCH)
-RUNTIME_DIR := $(BUILD_DIR)/uefi-runtime
-OUTDIR := $(BUILD_DIR)/uefi
-
-UEFI_RUNTIME_SOURCE ?= $(ROOT)/thirdpart/posix-uefi/uefi
+endif
 
 ifeq ($(ARCH),x86_64)
 TARGET := BOOTX64.EFI
@@ -79,7 +95,10 @@ endif
 all: $(OUTDIR)/$(TARGET)
 
 $(OUTDIR)/$(TARGET): $(SRCS) $(ROOT)/boot/uefi/arch/arch.h \
-		$(ROOT)/kernel/include/kernel/bootinfo.h
+		$(ROOT)/kernel/include/kernel/bootinfo.h $(UEFI_RUNTIME_STAMP)
+ifndef OS01_PROFILE_FILE
+# Legacy standalone: copy + mutate the runtime inline (tracked in
+# config/posix-uefi/*.patch in profile mode).
 	@test -f $(UEFI_RUNTIME_SOURCE)/Makefile || { \
 		echo "ERROR: posix-uefi runtime is unavailable at $(UEFI_RUNTIME_SOURCE)"; \
 		false; \
@@ -92,12 +111,17 @@ $(OUTDIR)/$(TARGET): $(SRCS) $(ROOT)/boot/uefi/arch/arch.h \
 	sed -i 's/ARCH=$$(ARCH)/ARCH=$$(ARCH) OUTDIR=/' $(RUNTIME_DIR)/Makefile
 	sed -i '/^CFLAGS += -fshort-wchar/i CFLAGS += -DUEFI_NO_UTF8' $(RUNTIME_DIR)/Makefile
 	sed -i '/^CFLAGS += -fshort-wchar/i CFLAGS += -DUEFI_NO_UTF8' $(RUNTIME_DIR)/uefi/Makefile
-	# The old x86 DEBUG=1 gate (the types[] memory-map print) was
-	# intentionally not carried into the new tree — there is no -DDEBUG
-	# consumer here, so no DEBUG injection. The deep mkdir paths below are
-	# harmless: they mirror where the inner make places per-source objects
-	# (OUTDIR + absolute source path), the same proven pattern the old
-	# aarch64 wrapper used.
+else
+# Profile mode: the runtime is already staged + patched by the uefi.mk
+# adapter; never copy or mutate it here.
+	@test -d $(RUNTIME_DIR) || { \
+		echo "ERROR: UEFI runtime not staged at $(RUNTIME_DIR) (run the uefi.mk adapter)"; \
+		false; \
+	}
+endif
+	# The deep mkdir paths below are harmless: they mirror where the inner
+	# make places per-source objects (OUTDIR + absolute source path), the
+	# same proven pattern the legacy aarch64 wrapper used.
 	@$(foreach source,$(SRCS),mkdir -p $(OUTDIR)$(dir $(source));)
 	$(UEFI_MAKE)
 

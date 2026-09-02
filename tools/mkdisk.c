@@ -1,6 +1,17 @@
 // tools/mkdisk.c — GPT dual-partition disk image builder
 // Compile: gcc -Wall -O2 -std=c11 -o mkdisk mkdisk.c
-// Usage: mkdisk disk.img --efi BOOTX64.EFI --kernel kernel.bin --rootfs config/fsroot/
+// Usage: mkdisk --output <image> --efi BOOTX64.EFI --temp-dir <dir> --rootfs-manifest <file>
+//
+// Builds a GPT dual-partition image: a 64 MiB FAT32 ESP at LBA 2048 and a
+// 128 MiB ext2 root at LBA 133120 (geometry kept from the legacy builder;
+// the verification commands depend on it). The ext2 is filled from a
+// tab-separated rootfs manifest produced by mk/components/image.mk:
+//   file<TAB>destination<TAB>source<TAB>mode
+//   symlink<TAB>destination<TAB>target
+// All temporary files live in --temp-dir (never /tmp) and the final image
+// is --output (never a hardcoded "disk.img"), so parallel profiles cannot
+// collide. The ESP carries BOOTX64.EFI plus the manifest's /kernel.bin entry
+// (the bootloader reads kernel.bin from the ESP).
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -115,6 +126,9 @@ static void build_partition_entry(uint8_t *entry, const uint8_t *type_guid,
     write_gpt_name(entry, name);
 }
 
+static const char *output_path = NULL;
+static const char *temp_dir = NULL;
+
 static void run_cmd(const char *fmt, ...)
 {
     char buf[4096];
@@ -130,26 +144,132 @@ static void run_cmd(const char *fmt, ...)
     }
 }
 
+// debugfs exits 0 even when its command fails, and prints its banner plus
+// error messages on stderr. Detect failures by grepping the merged output
+// for error markers (the banner and normal output do not match them).
+static void run_debugfs(const char *fmt, ...)
+{
+    char buf[4096], cmd[8192];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    printf("  [cmd] %s\n", buf);
+    snprintf(cmd, sizeof(cmd),
+             "%s 2>&1 | grep -Ei 'not found|no such|already exists|cannot|can.t|usage|invalid|failed' >/dev/null && exit 1 || true",
+             buf);
+    if (system(cmd) != 0) {
+        fprintf(stderr, "  [cmd] FAILED: %s\n", buf);
+        exit(1);
+    }
+}
+
+#define MAX_MANIFEST_ENTRIES 128
+
+typedef struct {
+    int is_symlink;
+    char dest[512];
+    char src[1024];
+    char mode[64];
+    char target[512];
+} manifest_entry_t;
+
+// Read the tab-separated rootfs manifest. Returns the number of entries or
+// -1 on error.
+static int read_manifest(const char *path, manifest_entry_t *entries)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) { perror(path); return -1; }
+    char line[2048];
+    int n = 0;
+    while (fgets(line, sizeof(line), f) && n < MAX_MANIFEST_ENTRIES) {
+        size_t len = strlen(line);
+        while (len && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = 0;
+        if (!len) continue;
+        char *rest = strchr(line, '\t');
+        if (!rest) continue;
+        *rest++ = 0;
+        if (!strcmp(line, "file")) {
+            // file<TAB>dest<TAB>src<TAB>mode
+            char *dest = rest;
+            char *p1 = strchr(dest, '\t'); if (!p1) continue; *p1++ = 0;
+            char *src = p1;
+            char *p2 = strchr(src, '\t'); if (!p2) continue; *p2++ = 0;
+            char *mode = p2;
+            entries[n].is_symlink = 0;
+            snprintf(entries[n].dest,   sizeof(entries[n].dest),   "%s", dest);
+            snprintf(entries[n].src,    sizeof(entries[n].src),    "%s", src);
+            snprintf(entries[n].mode,   sizeof(entries[n].mode),   "%s", mode);
+            n++;
+        } else if (!strcmp(line, "symlink")) {
+            // symlink<TAB>dest<TAB>target
+            char *dest = rest;
+            char *p1 = strchr(dest, '\t'); if (!p1) continue; *p1++ = 0;
+            char *target = p1;
+            entries[n].is_symlink = 1;
+            snprintf(entries[n].dest,   sizeof(entries[n].dest),   "%s", dest);
+            snprintf(entries[n].target, sizeof(entries[n].target), "%s", target);
+            n++;
+        }
+    }
+    fclose(f);
+    return n;
+}
+
+// Directories to create in the ext2 image (deduplicated, parent-before-child).
+static char dirs[MAX_MANIFEST_ENTRIES * 8][256];
+static int ndirs = 0;
+
+static void add_dir(const char *d)
+{
+    for (int i = 0; i < ndirs; i++)
+        if (!strcmp(dirs[i], d)) return;
+    if (ndirs < (int)(MAX_MANIFEST_ENTRIES * 8))
+        snprintf(dirs[ndirs++], 256, "%s", d);
+}
+
+// Add every absolute parent directory of an in-image destination.
+static void add_parent_dirs(const char *dest)
+{
+    char buf[512];
+    snprintf(buf, sizeof(buf), "%s", dest);
+    for (char *p = buf; *p; p++) {
+        if (*p == '/') {
+            *p = 0;
+            if (buf[0]) add_dir(buf);
+            *p = '/';
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
-    const char *efi_path    = NULL;
-    const char *kernel_path = NULL;
-    const char *rootfs_dir  = NULL;
+    const char *efi_path       = NULL;
+    const char *manifest_path  = NULL;
 
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--efi") && i+1 < argc)    efi_path    = argv[++i];
-        else if (!strcmp(argv[i], "--kernel") && i+1 < argc) kernel_path = argv[++i];
-        else if (!strcmp(argv[i], "--rootfs") && i+1 < argc)  rootfs_dir  = argv[++i];
+        if      (!strcmp(argv[i], "--output") && i+1 < argc)         output_path   = argv[++i];
+        else if (!strcmp(argv[i], "--efi") && i+1 < argc)            efi_path      = argv[++i];
+        else if (!strcmp(argv[i], "--temp-dir") && i+1 < argc)       temp_dir      = argv[++i];
+        else if (!strcmp(argv[i], "--rootfs-manifest") && i+1 < argc) manifest_path = argv[++i];
     }
-    if (!efi_path || !kernel_path || !rootfs_dir) {
-        fprintf(stderr, "Usage: mkdisk --efi BOOTX64.EFI --kernel kernel.bin --rootfs fsroot/\n");
+    if (!output_path || !efi_path || !temp_dir || !manifest_path) {
+        fprintf(stderr, "Usage: mkdisk --output <image> --efi BOOTX64.EFI --temp-dir <dir> --rootfs-manifest <file>\n");
         return 1;
     }
 
-    printf("Building disk.img: %dMB ESP + %dMB ext2 root\n", FAT32_SIZE_MB, EXT2_SIZE_MB);
+    manifest_entry_t entries[MAX_MANIFEST_ENTRIES];
+    int nentries = read_manifest(manifest_path, entries);
+    if (nentries < 0) return 1;
+    if (nentries == 0) {
+        fprintf(stderr, "ERROR: empty rootfs manifest: %s\n", manifest_path);
+        return 1;
+    }
+
+    printf("Building %s: %dMB ESP + %dMB ext2 root\n", output_path, FAT32_SIZE_MB, EXT2_SIZE_MB);
 
     // ── Phase 1: GPT structure ───────────────────────────
-    FILE *f = fopen("disk.img", "wb");
+    FILE *f = fopen(output_path, "wb");
     if (!f) { perror("fopen"); return 1; }
 
     uint8_t mbr[SECTOR_SIZE];
@@ -159,12 +279,12 @@ int main(int argc, char **argv)
     uint8_t gpt_hdr[92];
     build_gpt_header(gpt_hdr);
 
-    uint8_t entries[128 * 128];
-    memset(entries, 0, sizeof(entries));
-    build_partition_entry(entries,       ESP_GUID,      PART1_START, PART1_END, "ESP");
-    build_partition_entry(entries + 128, LINUX_FS_GUID, PART2_START, PART2_END, "rootfs");
+    uint8_t entries_buf[128 * 128];
+    memset(entries_buf, 0, sizeof(entries_buf));
+    build_partition_entry(entries_buf,       ESP_GUID,      PART1_START, PART1_END, "ESP");
+    build_partition_entry(entries_buf + 128, LINUX_FS_GUID, PART2_START, PART2_END, "rootfs");
 
-    uint32_t entries_crc = crc32(entries, sizeof(entries));
+    uint32_t entries_crc = crc32(entries_buf, sizeof(entries_buf));
     wr32(gpt_hdr, 88, entries_crc);
 
     wr32(gpt_hdr, 16, 0);
@@ -179,7 +299,7 @@ int main(int argc, char **argv)
         fwrite(pad, sizeof(pad), 1, f);
     }
     // LBA 2: partition entry array
-    fwrite(entries, sizeof(entries), 1, f);
+    fwrite(entries_buf, sizeof(entries_buf), 1, f);
 
     // Pad to PART1_START (starting from LBA 34 = after 32 sectors of entries)
     uint64_t pos = 34;
@@ -188,10 +308,20 @@ int main(int argc, char **argv)
     while (pos < PART1_START) { fwrite(zero, SECTOR_SIZE, 1, f); pos++; }
     fclose(f);
 
-    // Temp file paths with PID for concurrent build safety
-    char esp_tmp[64], rootfs_tmp[64];
-    snprintf(esp_tmp, sizeof(esp_tmp), "/tmp/_mkdisk_esp.%d.img", getpid());
-    snprintf(rootfs_tmp, sizeof(rootfs_tmp), "/tmp/_mkdisk_rootfs.%d.img", getpid());
+    // Temp file paths under --temp-dir with PID for concurrent build safety
+    char esp_tmp[512], rootfs_tmp[512];
+    snprintf(esp_tmp, sizeof(esp_tmp), "%s/_mkdisk_esp.%d.img", temp_dir, getpid());
+    snprintf(rootfs_tmp, sizeof(rootfs_tmp), "%s/_mkdisk_rootfs.%d.img", temp_dir, getpid());
+
+    // The bootloader reads kernel.bin from the ESP; the manifest's
+    // /kernel.bin file entry is its source (no separate --kernel argument).
+    const char *esp_kernel_src = NULL;
+    for (int i = 0; i < nentries; i++) {
+        if (!entries[i].is_symlink && !strcmp(entries[i].dest, "/kernel.bin")) {
+            esp_kernel_src = entries[i].src;
+            break;
+        }
+    }
 
     // ── Phase 2: Build + inject ESP (FAT32) ──────────────
     printf("Building ESP partition...\n");
@@ -200,55 +330,43 @@ int main(int argc, char **argv)
     run_cmd("mmd -i %s ::/EFI 2>/dev/null", esp_tmp);
     run_cmd("mmd -i %s ::/EFI/BOOT 2>/dev/null", esp_tmp);
     run_cmd("mcopy -i %s %s ::/EFI/BOOT 2>/dev/null", esp_tmp, efi_path);
-    run_cmd("mcopy -i %s %s ::/ 2>/dev/null", esp_tmp, kernel_path);
-    run_cmd("dd if=%s of=disk.img bs=512 seek=%lu conv=notrunc 2>/dev/null",
-            esp_tmp, (unsigned long)PART1_START);
+    if (esp_kernel_src)
+        run_cmd("mcopy -i %s %s ::/kernel.bin 2>/dev/null", esp_tmp, esp_kernel_src);
+    run_cmd("dd if=%s of=%s bs=512 seek=%lu conv=notrunc 2>/dev/null",
+            esp_tmp, output_path, (unsigned long)PART1_START);
 
     // ── Phase 3: Build + inject ext2 root ────────────────
     printf("Building ext2 root filesystem...\n");
     run_cmd("dd if=/dev/zero of=%s bs=1M count=%d 2>/dev/null", rootfs_tmp, EXT2_SIZE_MB);
     run_cmd("mke2fs -t ext2 -I 128 -b 4096 %s 2>/dev/null", rootfs_tmp);
-    run_cmd("debugfs -w %s -R \"mkdir /bin\" 2>/dev/null", rootfs_tmp);
-    run_cmd("debugfs -w %s -R \"mkdir /home\" 2>/dev/null", rootfs_tmp);
-    run_cmd("debugfs -w %s -R \"mkdir /etc\" 2>/dev/null", rootfs_tmp);
-    run_cmd("debugfs -w %s -R \"mkdir /opt\" 2>/dev/null", rootfs_tmp);
-    run_cmd("debugfs -w %s -R \"mkdir /opt/test\" 2>/dev/null", rootfs_tmp);
 
-    // Copy fsroot/bin/* to /bin/ using a shell loop
-    {
-        char glob_cmd[1024];
-        snprintf(glob_cmd, sizeof(glob_cmd),
-                 "for f in %s/bin/*; do "
-                 "  base=$(basename \"$f\"); "
-                 "  debugfs -w %s -R \"write $f /bin/$base\" 2>/dev/null; "
-                 "done", rootfs_dir, rootfs_tmp);
-        system(glob_cmd);
+    // Explicit layout dirs (kept from the legacy builder) plus every parent
+    // directory of the manifest destinations.
+    add_dir("/bin");
+    add_dir("/home");
+    add_dir("/etc");
+    add_dir("/opt");
+    add_dir("/opt/test");
+    for (int i = 0; i < nentries; i++)
+        add_parent_dirs(entries[i].dest);
+    for (int i = 0; i < ndirs; i++)
+        run_debugfs("debugfs -w %s -R \"mkdir %s\"", rootfs_tmp, dirs[i]);
+
+    // Fill the root from the manifest rows.
+    for (int i = 0; i < nentries; i++) {
+        if (entries[i].is_symlink) {
+            run_debugfs("debugfs -w %s -R \"symlink %s %s\"",
+                        rootfs_tmp, entries[i].dest, entries[i].target);
+        } else {
+            run_debugfs("debugfs -w %s -R \"write %s %s\"",
+                        rootfs_tmp, entries[i].src, entries[i].dest);
+            run_debugfs("debugfs -w %s -R \"set_inode_field %s mode 010%s\"",
+                        rootfs_tmp, entries[i].dest, entries[i].mode);
+        }
     }
 
-    // Copy fsroot/etc/* to /etc/
-    {
-        char glob_cmd[1024];
-        snprintf(glob_cmd, sizeof(glob_cmd),
-                 "for f in %s/etc/*; do "
-                 "  test -f \"$f\" || continue; "
-                 "  base=$(basename \"$f\"); "
-                 "  debugfs -w %s -R \"write $f /etc/$base\" 2>/dev/null; "
-                 "done", rootfs_dir, rootfs_tmp);
-        system(glob_cmd);
-    }
-
-    // Explicitly copy /etc/inittab (shell glob above may fail silently)
-    {
-        char inittab_src[256], inittab_cmd[512];
-        snprintf(inittab_src, sizeof(inittab_src), "%s/etc/inittab", rootfs_dir);
-        snprintf(inittab_cmd, sizeof(inittab_cmd),
-                 "debugfs -w %s -R \"write %s /etc/inittab\"",
-                 rootfs_tmp, inittab_src);
-        run_cmd("%s", inittab_cmd);
-    }
-
-    run_cmd("dd if=%s of=disk.img bs=512 seek=%lu conv=notrunc 2>/dev/null",
-            rootfs_tmp, (unsigned long)PART2_START);
+    run_cmd("dd if=%s of=%s bs=512 seek=%lu conv=notrunc 2>/dev/null",
+            rootfs_tmp, output_path, (unsigned long)PART2_START);
 
     // ── Phase 4: Write backup GPT at end of disk ─────────
     {
@@ -260,25 +378,25 @@ int main(int argc, char **argv)
         hdr_crc = crc32(gpt_hdr, 92);
         wr32(gpt_hdr, 16, hdr_crc);
 
-        f = fopen("disk.img", "r+b");
+        f = fopen(output_path, "r+b");
         if (f) {
             fseek(f, (long)(TOTAL_SECTORS - 1) * SECTOR_SIZE, SEEK_SET);
             fwrite(gpt_hdr, 92, 1, f);
             fseek(f, (long)(TOTAL_SECTORS - 33) * SECTOR_SIZE, SEEK_SET);
-            fwrite(entries, sizeof(entries), 1, f);
+            fwrite(entries_buf, sizeof(entries_buf), 1, f);
             fclose(f);
         }
     }
 
     // ── Cleanup ──────────────────────────────────────────
-    unlink("/tmp/_mkdisk_esp.img");
-    unlink("/tmp/_mkdisk_rootfs.img");
+    unlink(esp_tmp);
+    unlink(rootfs_tmp);
 
     // ── Self-check ───────────────────────────────────────
     printf("Self-check...\n");
     {
         uint8_t buf[1024];
-        f = fopen("disk.img", "rb");
+        f = fopen(output_path, "rb");
         if (f) {
             fseek(f, SECTOR_SIZE, SEEK_SET);
             fread(buf, 1, 92, f);
@@ -299,7 +417,8 @@ int main(int argc, char **argv)
         }
     }
 
-    printf("Done: disk.img (%u MB)\n",
+    printf("Done: %s (%u MB)\n",
+           output_path,
            (unsigned)((TOTAL_SIZE) / 1024 / 1024));
     return 0;
 }
