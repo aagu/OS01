@@ -85,7 +85,6 @@ legacy)
              test "$(readlink "$base/sysroot")" = "sysroot-generations/$(find "$base/sysroot-generations" -maxdepth 1 -mindepth 1 -type d | xargs -n1 basename | sort -n | tail -1)" ;
              test -z "$(ls -A "$base/leases" 2>/dev/null)" ;;
     firmware)
-        default_profile=x86_64-clang
         fixture_profile=x86_64-clang-fixture
         test -f disk.img
         # The fixture profile is build-contract-only and profile clean removes
@@ -221,11 +220,8 @@ EOF
         test -f "$base/host-test/test_poll_requested.elf"
         test ! -e test/build
         test ! -e build/test_poll_requested.elf
-        # Run the focused binary if it exists (Task 4 may not have
-        # built it yet; the path assertions above already fail RED).
-        if [ -f "$base/host-test/test_poll_requested.elf" ]; then
-            "$base/host-test/test_poll_requested.elf"
-        fi
+        # The hard `test -f` above already failed if the binary is absent.
+        "$base/host-test/test_poll_requested.elf"
         make PROFILE="$profile" clean
         test ! -d "$base/host-test"
         ;;

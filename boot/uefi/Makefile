@@ -43,7 +43,10 @@ endif
 
 # ── Runtime environment contract (spec: "删除 runtime Makefile overlay") ──
 # The root adapter (mk/components/uefi.mk) passes the FINAL values explicitly;
-# these ?= defaults exist so a standalone invocation behaves identically. The
+# these ?= defaults exist so a direct profile-internal invocation
+# (`make -C boot/uefi OS01_PROFILE_FILE=...`) without the explicit args still
+# behaves identically (standalone invocation without a profile is a parse
+# error). The
 # runtime invocation starts the outer posix-uefi Make with
 # env CFLAGS="$(UEFI_RUNTIME_CFLAGS)" MAKE="$(UEFI_RUNTIME_MAKE)": upstream's
 # `CFLAGS +=` (outer + uefi/ Makefiles) appends the UTF-8 macro to both

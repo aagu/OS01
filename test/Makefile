@@ -6,7 +6,6 @@
 # (HOST_TEST_BUILD_DIR) and profile clean removes it. Host compilation
 # stays host-native (HOST_CC, no --target, no sysroot, no kernel link
 # flags) but obeys profile output isolation.
-LOCAL_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
 ifeq ($(strip $(OS01_PROFILE_FILE)),)
 $(error invoke from the repository root: make PROFILE=x86_64-clang <target>)
 endif

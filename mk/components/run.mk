@@ -17,7 +17,11 @@
 # relative path, bad scheme, missing file — is rejected with a clear error
 # BEFORE any download/copy. wget's exit status is checked via set -e, so a
 # failed download never leaves a half-written file (and never reaches the
-# mv). Never calls boot/uefi for firmware.
+# mv). Never calls boot/uefi for firmware. Capability-gated on rootfs: the
+# x86-only OVMF_FIRMWARE variable is undefined for aarch64-clang, so without
+# the guard this rule expands to an empty-target rule with a recipe — a
+# make-version-sensitive parse hazard.
+ifeq ($(filter rootfs,$(PROFILE_CAPABILITIES)),rootfs)
 $(OVMF_FIRMWARE):
 	@set -e; \
 	mkdir -p "$(dir $@)"; \
@@ -40,6 +44,7 @@ $(OVMF_FIRMWARE):
 # makes `make build/<profile>/firmware/OVMF.fd` work too; the absolute rule
 # above does the actual work.
 build/$(PROFILE)/firmware/OVMF.fd: $(OVMF_FIRMWARE)
+endif
 
 # ── Kernel compat copy ─────────────────────────────────────────
 # Project-root kernel.bin is a one-way copy of the profile's kernel artifact
