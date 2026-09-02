@@ -175,20 +175,29 @@ typedef struct {
 } manifest_entry_t;
 
 // Read the tab-separated rootfs manifest. Returns the number of entries or
-// -1 on error.
+// -1 on error. Exceeding MAX_MANIFEST_ENTRIES is an error, not a silent
+// truncation: a silently dropped row would produce an image missing files.
 static int read_manifest(const char *path, manifest_entry_t *entries)
 {
     FILE *f = fopen(path, "r");
     if (!f) { perror(path); return -1; }
     char line[2048];
     int n = 0;
-    while (fgets(line, sizeof(line), f) && n < MAX_MANIFEST_ENTRIES) {
+    while (fgets(line, sizeof(line), f)) {
         size_t len = strlen(line);
         while (len && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = 0;
         if (!len) continue;
         char *rest = strchr(line, '\t');
         if (!rest) continue;
         *rest++ = 0;
+        if (strcmp(line, "file") && strcmp(line, "symlink"))
+            continue;   // unknown row type: ignore
+        if (n >= MAX_MANIFEST_ENTRIES) {
+            fprintf(stderr, "ERROR: rootfs manifest %s exceeds %d entries\n",
+                    path, MAX_MANIFEST_ENTRIES);
+            fclose(f);
+            return -1;
+        }
         if (!strcmp(line, "file")) {
             // file<TAB>dest<TAB>src<TAB>mode
             char *dest = rest;

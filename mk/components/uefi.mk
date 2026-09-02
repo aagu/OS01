@@ -94,6 +94,7 @@ $(UEFI_RUNTIME_STAMP): FORCE
 	      rm -rf "$(UEFI_RUNTIME_DIR)"; \
 	      mkdir -p "$(UEFI_RUNTIME_DIR)"; \
 	      cp -a "$(UEFI_RUNTIME_SOURCE)/." "$(UEFI_RUNTIME_DIR)/"; \
+	      rm -rf "$(UEFI_RUNTIME_DIR)/.git"; \
 	      [ -f "$(UEFI_RUNTIME_DIR)/uefi/Makefile" ] || { echo "ERROR: posix-uefi copy incomplete"; exit 1; }; \
 	      cp "$(UEFI_RUNTIME_DIR)/uefi/Makefile" "$(UEFI_RUNTIME_DIR)/Makefile"; \
 	      cd "$(UEFI_RUNTIME_DIR)" && patch -p1 -f < "$(UEFI_PATCH_DIR)/0001-clang-int8.patch"; \

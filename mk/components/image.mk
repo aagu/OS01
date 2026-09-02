@@ -34,7 +34,7 @@ $(ROOTFS_MANIFEST): $(OS01_ROOT)/config/rootfs.mk \
 		$(KERNEL_ARTIFACT) $(INITTAB_FILE)
 	@rm -rf $(ROOTFS_STAGING)
 	@mkdir -p $(ROOTFS_STAGING) $(dir $@)
-	@rm -f $@
+	@rm -f $@.tmp
 	@for item in $(ROOTFS_FILES); do \
 	  dest=$${item%%=*}; \
 	  rest=$${item#*=}; \
@@ -43,16 +43,18 @@ $(ROOTFS_MANIFEST): $(OS01_ROOT)/config/rootfs.mk \
 	  mkdir -p "$(ROOTFS_STAGING)/$$(dirname "$$dest")"; \
 	  cp "$$src" "$(ROOTFS_STAGING)/$$dest"; \
 	  chmod "$$mode" "$(ROOTFS_STAGING)/$$dest"; \
-	  printf 'file\t%s\t%s\t%s\n' "$$dest" "$(ROOTFS_STAGING)/$$dest" "$$mode" >> $@; \
+	  printf 'file\t%s\t%s\t%s\n' "$$dest" "$(ROOTFS_STAGING)/$$dest" "$$mode" >> $@.tmp; \
 	done
 	@for item in $(ROOTFS_SYMLINKS); do \
 	  dest=$${item%%=*}; \
 	  target=$${item#*=}; \
-	  printf 'symlink\t%s\t%s\n' "$$dest" "$$target" >> $@; \
+	  printf 'symlink\t%s\t%s\n' "$$dest" "$$target" >> $@.tmp; \
 	done
-	@test -s $@
+	@test -s $@.tmp
+	@mv $@.tmp $@
 
 $(BUILD_DIR)/image/disk.img: $(ROOTFS_MANIFEST) $(UEFI_EFI) $(HOST_MKDISK)
+	@$(MAKE) -C tools check-deps HOST_TOOLS_DIR=$(BUILD_DIR)/host-tools
 	@mkdir -p $(dir $@) $(BUILD_DIR)/image/tmp
 	@$(HOST_MKDISK) --output $@ --efi $(UEFI_EFI) \
 	  --temp-dir $(BUILD_DIR)/image/tmp --rootfs-manifest $(ROOTFS_MANIFEST)
