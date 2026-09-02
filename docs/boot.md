@@ -8,11 +8,7 @@
 
 本系统使用posix-uefi来编写uefi引导程序，posix-uefi提供posix风格的编码方式来编写uefi程序，且不需要使用交叉编译。posix-uefi可以自动生成PE格式的可执行文件，无需手工干预。
 
-为方便使用，将thirdpart/posix-uefi/uefi文件夹链接到boot/uefi/uefi:
-
-```shell
-cd boot/uefi/
-ln -s ../../thirdpart/posix-uefi/uefi
+posix-uefi 由 profile 私有的 adapter 受控拷贝到 `build/<profile>/uefi-runtime/` 并应用补丁后构建；不需要（也不允许）手工链接或修改 `thirdpart/posix-uefi` 源码树。构建入口是根 Makefile：`make PROFILE=x86_64-clang`（x86，产物 `BOOTX64.EFI`）或 `make PROFILE=aarch64-clang aarch64-uefi`（aarch64，产物 `BOOTAA64.EFI`）。
 
 ## 引导流程概述
 
@@ -441,9 +437,10 @@ x86_64 和 aarch64 共享同一份主代码，架构差异在 `arch/` 子目录�
 * `boot/uefi/arch/arch.h` - 共享钩子声明（`arch_init_handoff` / `arch_load_kernel` / `arch_setup_graphics` / `arch_fill_firmware` / `arch_memory_buffer` / `arch_build_memory` / `arch_release` / `arch_enter_kernel` / `arch_puts`）
 * `boot/uefi/arch/x86_64/boot.c` - x86_64 实现（固定 `0x100000` 直接加载 `kernel.bin`，RSDP via `arch_fill_firmware`，E820 via `arch_build_memory`，handoff `boot_context` @ `0x60000`）
 * `boot/uefi/arch/aarch64/boot.c` + `elf.c` + `handoff.S` + `loader.h` - aarch64 实现（ELF 解析、FDT dtb 提取、`aarch64_handoff_el_supported` / `aarch64_page_interval`、handoff `boot_context` 由 `arch_init_handoff` 分配）
-* `boot/uefi/Makefile` - 统一构建包装（`make -C boot/uefi ARCH=x86_64` → `BOOTX64.EFI`，`ARCH=aarch64` → `BOOTAA64.EFI`）
-* `BOOTX64.EFI` / `BOOTAA64.EFI` - 编译产物
-* `OVMF.fd` / `QEMU_EFI.fd` - QEMU 模拟 UEFI 环境所需的固件文件
+* `boot/uefi/Makefile` - 统一构建包装（profile-only 内部目标：由根 Makefile 经 `os01_submake` 调用，解析期要求 `OS01_PROFILE_FILE`；`ARCH=x86_64` → `BOOTX64.EFI`，`ARCH=aarch64` → `BOOTAA64.EFI`。独立构建入口是 `make PROFILE=x86_64-clang <target>` 或 `make PROFILE=aarch64-clang aarch64-uefi`）
+* `BOOTX64.EFI` / `BOOTAA64.EFI` - 编译产物（位于 `build/<profile>/artifacts/uefi/`）
+* `build/<profile>/firmware/OVMF.fd` - x86_64 的 profile 私有 UEFI 固件（首次使用时按 `OVMF_FIRMWARE_SOURCE` 自动获取）
+* `/usr/share/edk2/aarch64/QEMU_EFI.fd` - aarch64 固件（`AARCH64_UEFI_FIRMWARE_SOURCE`，复制到 profile build 目录 `build/<profile>/image/QEMU_EFI.fd`）
 
 ### 核心函数
 

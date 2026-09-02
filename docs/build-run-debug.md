@@ -22,7 +22,8 @@ contract and output layout.
 
 3. **Run and debug**
    * QEMU (`qemu-system-x86_64`; `qemu-system-aarch64` for the aarch64 profile)
-   * OVMF.fd (UEFI firmware — QEMU UEFI environment)
+   * OVMF.fd (UEFI firmware — QEMU UEFI environment; the x86_64 profile acquires
+     its own profile-private copy automatically, see [Firmware](#2-firmware-profile-private))
 
 ### Installing dependencies
 
@@ -32,15 +33,21 @@ contract and output layout.
 sudo apt update
 sudo apt install clang llvm lld make dosfstools mtools e2fsprogs qemu-system-x86
 
-# OVMF.fd, if needed
-wget https://retrage.github.io/edk2-nightly/bin/RELEASEX64_OVMF.fd -O boot/uefi/OVMF.fd
+# OVMF.fd is NOT installed manually: the x86_64 profile downloads its own
+# profile-private copy on first use (OVMF_FIRMWARE_SOURCE, default
+# https://retrage.github.io/edk2-nightly/bin/RELEASEX64_OVMF.fd) into
+# build/x86_64-clang/firmware/OVMF.fd.
 ```
 
 #### Arch Linux
 
 ```bash
 sudo pacman -S clang llvm lld make dosfstools mtools e2fsprogs qemu-system-x86_64 edk2-ovmf
-sudo cp /usr/share/edk2/x64/OVMF.fd boot/uefi/
+
+# Optional: point OVMF_FIRMWARE_SOURCE at the distro firmware instead of the
+# default download (OVMF_FIRMWARE_SOURCE accepts an https:// URL or an
+# existing absolute local file path):
+make PROFILE=x86_64-clang disk.img OVMF_FIRMWARE_SOURCE=/usr/share/edk2/x64/OVMF.fd
 ```
 
 ## Build steps
@@ -91,7 +98,35 @@ make run-kvm        # with KVM acceleration
 make run-virtio     # virtio-net instead of e1000e
 ```
 
-### 2. Debug
+### 2. Firmware (profile-private)
+
+The x86_64 profile owns its UEFI firmware at
+`build/<profile>/firmware/OVMF.fd` — never the source tree. On first use the
+root-owned firmware rule acquires it from `OVMF_FIRMWARE_SOURCE` (default
+`https://retrage.github.io/edk2-nightly/bin/RELEASEX64_OVMF.fd`), accepting
+only an `https://` URL or an existing **absolute** local file path; anything
+else fails before any download/copy:
+
+```bash
+make PROFILE=x86_64-clang disk.img OVMF_FIRMWARE_SOURCE=/abs/path/to/OVMF.fd
+```
+
+All x86 QEMU entry points (`run`, `run-kvm`, `run-virtio`, `debug`, `test-*`)
+use this profile firmware and the profile image (`build/<profile>/image/disk.img`)
+directly — never `boot/uefi/OVMF.fd` and never the project-root `disk.img`.
+
+For a manual QEMU invocation, resolve the two paths first:
+
+```bash
+make PROFILE=x86_64-clang print-run-paths
+#   firmware=/home/.../build/x86_64-clang/firmware/OVMF.fd
+#   image=/home/.../build/x86_64-clang/image/disk.img
+```
+
+then substitute them into `-drive if=pflash,format=raw,readonly=on,file=<firmware>`
+and `-drive file=<image>,format=raw,...` respectively.
+
+### 3. Debug
 
 ```bash
 make debug
@@ -107,7 +142,7 @@ gdb build/x86_64-clang/kernel/kernel.elf
 
 The VS Code configuration under `.vscode` also drives `make debug`.
 
-### 3. aarch64 UEFI bring-up
+### 4. aarch64 UEFI bring-up
 
 ```bash
 make PROFILE=aarch64-clang run-aarch64-uefi
@@ -186,7 +221,8 @@ The system behavior is configured via `config/` (BusyBox config, the
 
 ### Build artifacts
 
-* `boot/uefi/BOOTX64.EFI` - UEFI bootloader
+* `build/<profile>/artifacts/uefi/BOOTX64.EFI` - UEFI bootloader (BOOTAA64.EFI for aarch64-clang)
+* `build/<profile>/firmware/OVMF.fd` - profile-private UEFI firmware (x86_64)
 * `kernel.bin` - kernel binary (project root, default-profile compat copy)
 * `build/x86_64-clang/artifacts/kernel.bin` - kernel artifact
 * `build/x86_64-clang/kernel/kernel.elf` - kernel ELF (debug symbols, for GDB)
@@ -204,7 +240,10 @@ Use the matching profile/target.
 
 ### QEMU cannot start
 
-Check that QEMU is installed and that `boot/uefi/OVMF.fd` exists.
+Check that QEMU is installed. The profile firmware is acquired automatically
+on first use; resolve the expected paths with
+`make PROFILE=x86_64-clang print-run-paths` and confirm they exist
+(`build/<profile>/firmware/OVMF.fd` is created on the first QEMU run).
 
 ### No output after boot
 

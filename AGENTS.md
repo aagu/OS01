@@ -65,12 +65,27 @@ keyboard IRQ → console TTY (tty_push_input) → terminal.elf reads /dev/tty �
 
 **Headless interactive test (inject commands via serial stdio):**
 
+First resolve the profile's firmware and image paths — re-run after any
+`make clean`:
+
 ```bash
+make PROFILE=x86_64-clang print-run-paths
+#   firmware=/home/.../build/x86_64-clang/firmware/OVMF.fd
+#   image=/home/.../build/x86_64-clang/image/disk.img
+```
+
+Then substitute those `firmware=` and `image=` values into the QEMU command
+(the snippet below captures them into `$FW` / `$IMG` automatically):
+
+```bash
+FW=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^firmware=//p')
+IMG=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^image=//p')
+
 # Boot normal OS01, run cat /dev/urandom, send literal Ctrl-C (0x03), verify shell alive
 ( sleep 18; printf 'cat /dev/urandom\n'; sleep 4; printf '\x03'; sleep 4; printf 'echo SHELL_ALIVE_123\n'; sleep 3; ) \
   | timeout 50 qemu-system-x86_64 -M q35 \
-      -drive if=pflash,format=raw,readonly=on,file=boot/uefi/OVMF.fd \
-      -drive file=disk.img,format=raw,if=none,id=disk -device ahci,id=ahci \
+      -drive if=pflash,format=raw,readonly=on,file="$FW" \
+      -drive file="$IMG",format=raw,if=none,id=disk -device ahci,id=ahci \
       -device ide-hd,drive=disk,bus=ahci.0 -m 512 -smp 1 -serial stdio \
       -display none -no-reboot -no-shutdown > /tmp/log 2>&1
 ```

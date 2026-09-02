@@ -103,38 +103,22 @@ change. (Historical context on why `-lgcc` is required today — the
 `__udivti3` symbol in `kernel/time/clocksource.c` — is in the
 [libgcc / `-lgcc`](#libgcc---lgcc) section below.)
 
-## Single source of truth: root `toolchain.mk`
+## Single source of truth: `mk/toolchains/clang.mk`
 
-> The sections below document the pre-refactor standalone contract. The root
-> `toolchain.mk` still exists and is still included by component Makefiles in
-> their **standalone** (non-profile) mode, but the refactored build path goes
-> through `mk/toolchains/clang.mk` via the profiles. The validation behavior
-> described below is preserved in both paths.
+The Clang/LLVM discovery + validation module is `mk/toolchains/clang.mk`,
+included by the `x86_64-clang` profile (`mk/profiles/x86_64-clang.mk`).
+Component Makefiles and kernel arch configs receive the validated tools
+through the profile include (`OS01_PROFILE_FILE`), never by including a
+standalone root `toolchain.mk` — the standalone `toolchain.mk` and the
+standalone `make -C <component>` entry points were removed in the 2026-09-02
+GNU Make refactor. Every build goes through the root Makefile:
+`make PROFILE=<name> <target>`.
 
-`toolchain.mk` is included, **only when `ARCH=x86_64`**, by:
-
-| Makefile | Include line |
-|----------|--------------|
-| Root `Makefile` | `include $(dir $(ROOT_MAKEFILE))toolchain.mk` |
-| `kernel/Makefile` | `include $(dir $(LOCAL_MAKEFILE))../toolchain.mk` |
-| `libc/Makefile` | `include $(dir $(LOCAL_MAKEFILE))../toolchain.mk` |
-| `user/Makefile` | `include $(dir $(LOCAL_MAKEFILE))../toolchain.mk` |
-| `boot/uefi/Makefile` | `include $(ROOT)/toolchain.mk` |
-| `kernel/arch/x86_64/make.config` | `include $(dir $(ARCH_CONFIG))../../../toolchain.mk` |
-
-Each include is gated by `ifeq ($(ARCH),x86_64)`. Under `make ARCH=aarch64
--C kernel` (or any other aarch64 entry point) the guard is false, the include
-is skipped, and **no x86 toolchain variables leak into the aarch64 subtree**.
-This is the load-bearing property that lets both the root `Makefile:285` and
-`kernel/Makefile:289` keep their plain aarch64 recursive invocations. See
-the [aarch64 out-of-scope](#aarch64-out-of-scope) section for the proof.
-
-`libc/arch/x86_64/make.config` does not include `toolchain.mk`: the parent
-`libc/Makefile` includes the common file before it includes the arch config
-on its own line, and the config defines no compiler override. Idempotency:
-`toolchain.mk` is included twice in kernel builds (once from `kernel/Makefile`,
-once from `kernel/arch/x86_64/make.config`); GNU make parses it twice with no
-ill effect, but this is a known minor inefficiency flagged for future work.
+The x86 toolchain variables are therefore defined **only** for the
+`x86_64-clang` profile. The `aarch64-clang` profile does not include
+`clang.mk`, so no x86 toolchain variable (no `CLANG_ID`, no `EFFECTIVE_CC`,
+no `LLVM_*`) is ever set in the aarch64 DAG — see
+[aarch64 out of scope](#aarch64-out-of-scope).
 
 ## Override variables
 
@@ -177,7 +161,7 @@ sanitised binary strips driver plumbing.
 ### `CC` — accepted only when it is Clang
 
 GNU make's built-in default `CC=cc` is the only implicit value replaced.
-The policy, evaluated by `toolchain.mk`, is:
+The policy, evaluated by `mk/toolchains/clang.mk`, is:
 
 1. **Default / undefined `CC`** → `EFFECTIVE_CC := $(TARGET_CC)` (i.e.
    `$(CLANG) --target=x86_64-unknown-none -ffreestanding -fno-builtin`).
@@ -232,7 +216,7 @@ on the command line). The PATH-safety means a wrapper around `clang` that
 shadows `llvm-ar` with a different toolchain's `llvm-ar` cannot silently
 break the build.
 
-`toolchain.mk` then exposes:
+`mk/toolchains/clang.mk` then exposes:
 
 ```
 AR := $(LLVM_AR)
@@ -367,11 +351,12 @@ What each check proves:
    generated EFI app has a parseable COFF export table (proves the EFI is
    a valid PE32+ image, not an ELF masquerading as one).
 
-`KERNEL_ELF` and `UEFI_EFI` defaults live in `toolchain.mk`:
+`KERNEL_ELF` and `UEFI_EFI` defaults live in the `x86_64-clang` profile
+(`mk/profiles/x86_64-clang.mk`):
 
 ```
-KERNEL_ELF ?= $(TOOLCHAIN_DIR)build/x86_64/kernel/kernel.elf
-UEFI_EFI   ?= $(TOOLCHAIN_DIR)build/x86_64/uefi/BOOTX64.EFI
+KERNEL_ELF ?= $(KERNEL_BUILD_DIR)/kernel.elf          # build/x86_64-clang/kernel/kernel.elf
+UEFI_EFI   ?= $(BUILD_DIR)/artifacts/uefi/BOOTX64.EFI
 ```
 
 Both are overridable, so you can run `make validate KERNEL_ELF=...` against
@@ -380,39 +365,47 @@ an out-of-tree artifact.
 ## UEFI x86_64 contract (`boot/uefi/Makefile`)
 
 The UEFI bootloader runs the Clang driver and `lld -flavor link` against a
-**separate** copied runtime at `build/x86_64/uefi-runtime/` to keep x86 COFF
-objects isolated from kernel ELF objects. The wrapper is
-`boot/uefi/Makefile`, with two extra overrides layered on top of the
-`toolchain.mk` contract.
+**separate** profile-private copied runtime at
+`build/<profile>/uefi-runtime/` to keep x86 COFF objects isolated from
+kernel ELF objects. The wrapper is `boot/uefi/Makefile`, invoked by the
+root-owned EFI artifact rule (`mk/components/uefi.mk`) through
+`os01_submake` — never via a standalone `make -C boot/uefi`. The overrides
+below layer on top of the `clang.mk` contract; `UEFI_CLANG` is whitelisted
+(`OS01_SUBMAKE_ALLOWED`) and crosses the sub-make boundary.
 
 ### `UEFI_CLANG`
 
 `UEFI_CLANG ?= $(CLANG)` — by default inherits the validated `CLANG` (so you
 do not need to set it). A separate `UEFI_CLANG_ID` banner check plus a
-`-print-resource-dir` validation reject a UEFI-only override that is not
-Clang or lacks a resource dir (the failures look the same as the `CLANG`
-failures above but cite `UEFI_CLANG`). You can prove the guard with:
+`-print-resource-dir` validation (in `boot/uefi/Makefile`) reject a
+UEFI-only override that is not Clang or lacks a resource dir (the failures
+look the same as the `CLANG` failures above but cite `UEFI_CLANG`). You can
+prove the guard from the root:
 
 ```
-$ make -C boot/uefi ARCH=x86_64 UEFI_CLANG=gcc -n
-Makefile:50: *** UEFI_CLANG='gcc' is not Clang.  Stop.
+$ make PROFILE=x86_64-clang validate UEFI_CLANG=gcc
+...
+boot/uefi/Makefile:66: *** UEFI_CLANG='gcc' is not Clang.  Stop.
 ```
 
 ### `UEFI_LD_TOOL` / `UEFI_LD`
 
-`UEFI_LD_TOOL ?= $(TARGET_LD)`, validated by `require_program` so a missing
-or non-executable `ld.lld` is caught. `UEFI_LD := $(UEFI_LD_TOOL) -flavor
-link` is what the inner posix-uefi make actually sees. The proof of the
-`require_program` check:
+`UEFI_LD_TOOL ?= $(TARGET_LD)`, validated by `require_program` in
+`boot/uefi/Makefile` so a missing or non-executable `ld.lld` is caught;
+`UEFI_LD := $(UEFI_LD_TOOL) -flavor link` is what the inner posix-uefi make
+actually sees. At the root the operative override is `TARGET_LD` — the
+whitelisted variable `UEFI_LD_TOOL` derives from — and an invalid value
+fails at parse time in `clang.mk`:
 
 ```
-$ make -C boot/uefi ARCH=x86_64 UEFI_LD_TOOL=/nonexistent -n
-Makefile:57: *** UEFI_LD_TOOL='/nonexistent' is not executable or on PATH; override UEFI_LD_TOOL=/absolute/path.  Stop.
+$ make PROFILE=x86_64-clang validate TARGET_LD=/nonexistent
+mk/toolchains/clang.mk:55: *** TARGET_LD='/nonexistent' is not executable or on PATH; override TARGET_LD=/absolute/path.  Stop.
 ```
 
 ### Inner-make invocation
 
-The inner `$(MAKE) -C $(RUNTIME_DIR)` is invoked with:
+The inner `$(MAKE) -C $(RUNTIME_DIR)` in `boot/uefi/Makefile` is invoked
+with:
 
 ```
 MAKEOVERRIDES= USE_GCC= CC="$(UEFI_CLANG)" LD="$(UEFI_LD)"
@@ -428,50 +421,34 @@ MAKEOVERRIDES= USE_GCC= CC="$(UEFI_CLANG)" LD="$(UEFI_LD)"
 - `unexport CFLAGS LDFLAGS` is set in the wrapper so any outer environment
   `CFLAGS` / `LDFLAGS` cannot reach the inner make. This is critical:
   a literal `CFLAGS=` on the inner command line would **wipe** the inner
-  `CFLAGS += --target=x86_64-pc-win32-coff` and the COFF linker flags at
-  `uefi/Makefile:63-65` (GNU make ignores `+=` appends against a
-  command-line-origin variable), producing ELF objects instead of COFF.
-  `unexport` is the correct fix: it blocks inheritance without resetting
-  the inner make's own `+=` chain.
+  `CFLAGS += --target=x86_64-pc-win32-coff` and the COFF linker flags
+  (GNU make ignores `+=` appends against a command-line-origin variable),
+  producing ELF objects instead of COFF. `unexport` is the correct fix:
+  it blocks inheritance without resetting the inner make's own `+=` chain.
 
-Proof of the dry-run contract line:
-
-```
-$ rm -f build/x86_64/uefi/BOOTX64.EFI
-$ make -C boot/uefi ARCH=x86_64 -n
-make -C /home/aagu/OS01/build/x86_64/uefi-runtime ARCH=x86_64 TARGET=BOOTX64.EFI \
-  OUTDIR=/home/aagu/OS01/build/x86_64/uefi/ \
-  SRCS="/home/aagu/OS01/boot/uefi/main.c /home/aagu/OS01/boot/uefi/arch/x86_64/boot.c" \
-  MAKEOVERRIDES= USE_GCC= CC="clang" LD="/usr/bin/ld.lld -flavor link"
-```
+The adapter additionally passes `UEFI_RUNTIME_CFLAGS=-DUEFI_NO_UTF8` and
+`UEFI_RUNTIME_MAKE="$(MAKE) OUTDIR="` to the wrapper, which forwards them via
+`env` to the upstream posix-uefi make (see the
+profile-only UEFI overlay reduction spec under
+`docs/superpowers/specs/`).
 
 ## aarch64 out of scope
 
-The aarch64 build deliberately has **no x86 toolchain variables**: it
-does not include `toolchain.mk`, it does not see `--target=x86_64-unknown-none`,
-and it does not export any of the validated tools to the inner make. Proof:
+The aarch64 build deliberately has **no x86 toolchain variables**: the
+`aarch64-clang` profile does not include `mk/toolchains/clang.mk`, so it does
+not see `--target=x86_64-unknown-none`, and no validated x86 tool is exported
+to the inner make. Proof (the aarch64 UEFI dry run contains no x86 triple):
 
 ```
-$ make -C boot/uefi ARCH=aarch64 -n > /tmp/aarch64-dryrun.log
+$ make PROFILE=aarch64-clang aarch64-uefi -n > /tmp/aarch64-dryrun.log
 $ grep -c 'x86_64-unknown-none' /tmp/aarch64-dryrun.log
 0
-$ grep -c 'CC="clang"' /tmp/aarch64-dryrun.log
-0       # UEFI_CLANG not set; inner make auto-detects clang itself
-$ grep -c 'MAKEOVERRIDES' /tmp/aarch64-dryrun.log
-0       # wrapper else-branch is the plain recursive invocation
 ```
 
-```
-$ make -C kernel ARCH=aarch64 -n > /tmp/aarch64-kernel-dryrun.log
-$ grep -c 'x86_64-unknown-none' /tmp/aarch64-kernel-dryrun.log
-0
-```
-
-The aarch64 kernel uses its own per-arch make.config (`kernel/arch/aarch64/make.config`)
-which sets `clang -target aarch64-none-elf` directly. `toolchain.mk`'s
-`ifeq ($(ARCH),x86_64)` guards never fire for aarch64, so neither
-`CLANG_ID`, `EFFECTIVE_CC`, nor any `LLVM_*` variable is ever set in the
-aarch64 DAG.
+The aarch64 kernel uses its own per-arch make.config
+(`kernel/arch/aarch64/make.config`) which sets `clang -target aarch64-none-elf`
+directly. Because `clang.mk` is never included, neither `CLANG_ID`,
+`EFFECTIVE_CC`, nor any `LLVM_*` variable is ever set in the aarch64 DAG.
 
 ## Verification matrix (this host)
 
@@ -483,10 +460,10 @@ Host: homeserver, `clang-22.1.8` (`/usr/bin/clang` = `clang-22.1.8`).
 | 1 | `make validate` | **7/7 pass**, exit 0 (all labels printed; `Machine: EM_X86_64 (0x3E)`, three `GLOBAL` symbols, BOOTX64.EFI coff-exports OK) |
 | 2 | `make test` | **16/16 suites**, 0 failed (full pass: `Suites: 16 \| Failed: 0`) |
 | 3 | `make kernel.bin` | exit 0; `kernel.bin` = 1,706,256 bytes |
-| 3 | `make user` | exit 0; 19 ELFs in `build/x86_64/user/`, including `busybox.elf` = 192,976 bytes |
+| 3 | `make user` | exit 0; 19 ELFs in `build/x86_64-clang/user/`, including `busybox.elf` = 192,976 bytes |
 | 4 | `rm -f disk.img && make disk.img` | exit 0; `disk.img` = 202,375,168 bytes (192 MB, GPT dual-partition) |
-| 5 | Headless QEMU boot (`-M q35 -smp 2 -drive if=pflash,format=raw,readonly=on,file=boot/uefi/OVMF.fd … -serial stdio -no-reboot`) | reached userspace; last lines of the boot log:<br>`+--------------------------------+`<br>`\|  OS01 Init v1.0 (PID 1)        \|`<br>`+--------------------------------+`<br>`init: running as PID 2`<br>`init: phase SYSINIT`<br>`init: phase WAIT`<br>`init: phase ONCE`<br>`init: entering supervision loop`<br>`init: started pid 3: '/bin/terminal' (respawn)`<br>`BusyBox v1.36.1 (2026-09-01 00:14:57 CST) built-in shell (ash)`<br>`#` |
-| 6 | `make -C boot/uefi ARCH=aarch64 -n` then `grep -c x86_64-unknown-none` | **0** (no x86 toolchain triple in the aarch64 dry-run) |
+| 5 | Headless QEMU boot (`-M q35 -smp 2 -drive if=pflash,format=raw,readonly=on,file=build/x86_64-clang/firmware/OVMF.fd … -serial stdio -no-reboot`) | reached userspace; last lines of the boot log:<br>`+--------------------------------+`<br>`\|  OS01 Init v1.0 (PID 1)        \|`<br>`+--------------------------------+`<br>`init: running as PID 2`<br>`init: phase SYSINIT`<br>`init: phase WAIT`<br>`init: phase ONCE`<br>`init: entering supervision loop`<br>`init: started pid 3: '/bin/terminal' (respawn)`<br>`BusyBox v1.36.1 (2026-09-01 00:14:57 CST) built-in shell (ash)`<br>`#` |
+| 6 | `make PROFILE=aarch64-clang aarch64-uefi -n` then `grep -c x86_64-unknown-none` | **0** (no x86 toolchain triple in the aarch64 dry-run) |
 
 ### Manual follow-up: `clang-18`
 
@@ -496,10 +473,10 @@ The plan (S16) calls for a clean-build matrix on both `CLANG=clang-18` and
 verification matrix on a host that has both Clang versions:
 
 ```
-make clean && CLANG=clang-18 make kernel.bin && CLANG=clang-18 make validate
-CLANG=clang-18 make test
-make clean && CLANG=clang-22 make kernel.bin && CLANG=clang-22 make validate
-CLANG=clang-22 make test
+make PROFILE=x86_64-clang clean && CLANG=clang-18 make PROFILE=x86_64-clang kernel.bin && CLANG=clang-18 make PROFILE=x86_64-clang validate
+CLANG=clang-18 make PROFILE=x86_64-clang test
+make PROFILE=x86_64-clang clean && CLANG=clang-22 make PROFILE=x86_64-clang kernel.bin && CLANG=clang-22 make PROFILE=x86_64-clang validate
+CLANG=clang-22 make PROFILE=x86_64-clang test
 ```
 
 The expected outcome, based on the validation contract, is that all seven
@@ -514,17 +491,17 @@ non-empty path.
 **Default build** — equivalent to `CLANG=clang`:
 
 ```
-make kernel.bin           # uses clang, target=x86_64-unknown-none
-make test                 # 16 host-test suites
+make PROFILE=x86_64-clang kernel.bin   # uses clang, target=x86_64-unknown-none
+make PROFILE=x86_64-clang test         # 16 host-test suites
 ```
 
 **Pin a specific Clang**:
 
 ```
-make kernel.bin CLANG=clang-22
-make test    CLANG=clang-22
-make validate KERNEL_ELF=$PWD/build/x86_64/kernel/kernel.elf \
-             UEFI_EFI=$PWD/build/x86_64/uefi/BOOTX64.EFI
+make PROFILE=x86_64-clang kernel.bin CLANG=clang-22
+make PROFILE=x86_64-clang test    CLANG=clang-22
+make PROFILE=x86_64-clang validate KERNEL_ELF=$PWD/build/x86_64-clang/kernel/kernel.elf \
+             UEFI_EFI=$PWD/build/x86_64-clang/artifacts/uefi/BOOTX64.EFI
 ```
 
 **Use a toolchain outside `PATH`** (e.g. a custom-built LLVM):
@@ -533,14 +510,14 @@ make validate KERNEL_ELF=$PWD/build/x86_64/kernel/kernel.elf \
 LLVM_NM=/opt/llvm-22/bin/llvm-nm \
 LLVM_READELF=/opt/llvm-22/bin/llvm-readelf \
 LLVM_READOBJ=/opt/llvm-22/bin/llvm-readobj \
-make validate
+make PROFILE=x86_64-clang validate
 ```
 
 **Override the UEFI Clang independently** (rare — usually `UEFI_CLANG` is
-inherited from `CLANG`):
+inherited from `CLANG`; `TARGET_LD` is the operative linker override):
 
 ```
-make boot/uefi/OVMF.fd UEFI_CLANG=clang-22 UEFI_LD_TOOL=/opt/llvm-22/bin/ld.lld
+make PROFILE=x86_64-clang validate UEFI_CLANG=clang-22 TARGET_LD=/opt/llvm-22/bin/ld.lld
 ```
 
 ## Cross-references

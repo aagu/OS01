@@ -38,6 +38,7 @@ make lib              默认 profile 的 sysroot 库（stamp）
 make user             默认 profile 的用户 ELF 与 BusyBox
 make run              默认 profile 启动 QEMU（-display gtk；无显示环境用 run_test.py 的方式串口验证）
 make run-aarch64-uefi aarch64-clang profile 启动 QEMU（-display none -serial stdio）
+make print-run-paths   默认 profile 打印 firmware=/image= 绝对路径（手动 QEMU 用，见下文）
 make test             默认 profile 的宿主测试（test/Makefile）
 make validate         内核 ELF / EFI 产物验证 + profile 信息打印
 make clean            清理指定 profile（默认 profile 还删除项目根兼容文件）
@@ -58,7 +59,7 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 
 3. **运行和调试**
    * QEMU (用于模拟 x86_64 环境，`qemu-system-x86_64`；aarch64 用 `qemu-system-aarch64`)
-   * OVMF.fd (UEFI 固件，QEMU 模拟 UEFI 环境所需)
+   * OVMF.fd (UEFI 固件，QEMU 模拟 UEFI 环境所需；x86_64 profile 在首次使用时自动获取 profile 私有副本，见下文[固件与手动 QEMU](#5-固件与手动-qemuprint-run-paths))
 
 ## 安装依赖项
 
@@ -69,8 +70,9 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 sudo apt update
 sudo apt install clang llvm lld make dosfstools mtools e2fsprogs qemu-system-x86
 
-# 下载 OVMF.fd (如果需要)
-wget https://retrage.github.io/edk2-nightly/bin/RELEASEX64_OVMF.fd -O boot/uefi/OVMF.fd
+# OVMF.fd 无需手动下载：x86_64 profile 首次使用时自动获取
+# （OVMF_FIRMWARE_SOURCE，默认 https://retrage.github.io/edk2-nightly/bin/RELEASEX64_OVMF.fd）
+# 到 build/<profile>/firmware/OVMF.fd
 ```
 
 ### Arch Linux 系统
@@ -79,8 +81,9 @@ wget https://retrage.github.io/edk2-nightly/bin/RELEASEX64_OVMF.fd -O boot/uefi/
 # 安装编译工具和依赖
 sudo pacman -S clang llvm lld make dosfstools mtools e2fsprogs qemu-system-x86_64 edk2-ovmf
 
-# 复制 OVMF.fd 到正确位置
-sudo cp /usr/share/edk2/x64/OVMF.fd boot/uefi/
+# 可选：改用发行版固件而不是默认下载
+# （OVMF_FIRMWARE_SOURCE 只接受 https:// URL 或已存在的绝对本地文件路径）
+make PROFILE=x86_64-clang disk.img OVMF_FIRMWARE_SOURCE=/usr/share/edk2/x64/OVMF.fd
 ```
 
 ## 编译步骤
@@ -131,6 +134,26 @@ make test-network     # nettest variant 镜像 + 网络回归
 
 测试镜像采用 **variant 隔离**：`test-syscall`/`test-network`/`test-inittab` 各自构建独立的变体镜像到 `build/x86_64-clang/image/<variant>/disk.img`，**绝不删除或覆盖普通 `disk.img`**，并记录/比对普通镜像的 sha256 以证明未被触碰。详见 [`docs/build-run-debug.md`](build-run-debug.md)。
 
+### 5. 固件与手动 QEMU（print-run-paths）
+
+x86_64 profile 的 UEFI 固件是 **profile 私有** 的，位于 `build/<profile>/firmware/OVMF.fd`（不是源码树里的 `boot/uefi/OVMF.fd`）。首次使用时由根 Makefile 的固件规则从 `OVMF_FIRMWARE_SOURCE` 获取——只接受 `https://` URL（下载到临时文件后原子 rename）或已存在的**绝对**本地文件路径（内容保护拷贝），其它值在下载前报错：
+
+```bash
+make PROFILE=x86_64-clang disk.img OVMF_FIRMWARE_SOURCE=/abs/path/to/OVMF.fd
+```
+
+所有 x86 QEMU 入口（`run`/`run-kvm`/`run-virtio`/`debug`/`test-*`）都直接使用该 profile 固件与 profile 镜像（`build/<profile>/image/disk.img`），绝不读源码树固件，也绝不把项目根 `disk.img` 作为输入。
+
+手动启动 QEMU 时先解析路径：
+
+```bash
+make PROFILE=x86_64-clang print-run-paths
+#   firmware=/home/.../build/x86_64-clang/firmware/OVMF.fd
+#   image=/home/.../build/x86_64-clang/image/disk.img
+```
+
+再把这两条路径分别填入 `-drive if=pflash,format=raw,readonly=on,file=<firmware>` 与 `-drive file=<image>,format=raw,...`。
+
 ## 输出路径（profile 布局）
 
 `x86_64-clang` profile 的全部输出位于 `build/x86_64-clang/`：
@@ -147,6 +170,7 @@ make test-network     # nettest variant 镜像 + 网络回归
 | `build/<profile>/kernel`、`user`、`libc`、`uefi`、`uefi-runtime`、`thirdparty/` | 组件专有中间产物 |
 | `build/<profile>/staging/<component>/` | 组件安装暂存树 |
 | `build/<profile>/host-tools/mkdisk` | 宿主构建工具 |
+| `build/<profile>/host-test` | 宿主测试对象与二进制（`make test`；`clean` 一并删除） |
 | `build/.locks/<profile>/publish` | 发布锁（在 `build/<profile>/` 之外，`clean` 不删除） |
 
 项目根 `kernel.bin` 与 `disk.img` 是默认 profile 产物的**单向兼容副本**（内容保护：内容相同则不覆盖）。
@@ -184,7 +208,8 @@ make test-network     # nettest variant 镜像 + 网络回归
 
 ### 编译产物
 
-* `boot/uefi/BOOTX64.EFI` - UEFI 引导程序（`boot/uefi` 内部目标）
+* `build/<profile>/artifacts/uefi/BOOTX64.EFI` - UEFI 引导程序（aarch64 profile 为 BOOTAA64.EFI）
+* `build/<profile>/firmware/OVMF.fd` - profile 私有 UEFI 固件（x86_64）
 * `kernel.bin` - 内核二进制文件（项目根目录，默认 profile 兼容副本）
 * `build/x86_64-clang/artifacts/kernel.bin` - 内核 artifact
 * `build/x86_64-clang/kernel/kernel.elf` - 内核 ELF（含调试符号，供 GDB 使用）
@@ -200,12 +225,12 @@ make test-network     # nettest variant 镜像 + 网络回归
 
 **解决方案**：确保已正确安装所有编译工具和依赖项。工具链可覆盖：`make CLANG=clang-22 kernel.bin`（详见 [`docs/build/toolchain.md`](build/toolchain.md)）。
 
-#### 问题：缺少 OVMF.fd
+#### 问题：缺少固件（OVMF.fd）
 
-**解决方案**：下载 OVMF.fd 并放置到 `boot/uefi/` 目录。
+**解决方案**：无需手动下载。x86_64 profile 在首次使用 QEMU 入口时自动从 `OVMF_FIRMWARE_SOURCE` 获取固件到 `build/<profile>/firmware/OVMF.fd`；用 `make PROFILE=x86_64-clang print-run-paths` 查看当前固件/镜像路径。也可显式指定本地固件：
 
 ```bash
-wget https://retrage.github.io/edk2-nightly/bin/RELEASEX64_OVMF.fd -O boot/uefi/OVMF.fd
+make PROFILE=x86_64-clang disk.img OVMF_FIRMWARE_SOURCE=/abs/path/to/OVMF.fd
 ```
 
 #### 问题：`PROFILE='...' lacks capability '...'`
@@ -216,7 +241,7 @@ wget https://retrage.github.io/edk2-nightly/bin/RELEASEX64_OVMF.fd -O boot/uefi/
 
 #### 问题：QEMU 无法启动
 
-**解决方案**：检查 QEMU 是否正确安装，以及 OVMF.fd 是否存在。
+**解决方案**：检查 QEMU 是否正确安装；profile 固件会自动获取，可用 `make PROFILE=x86_64-clang print-run-paths` 确认固件/镜像路径（首次 QEMU 运行会创建 `build/<profile>/firmware/OVMF.fd`）。
 
 #### 问题：系统启动后无输出
 
