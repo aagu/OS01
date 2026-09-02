@@ -16,6 +16,14 @@ QEMU = os.environ.get("QEMU", "qemu-system-x86_64")
 DISK_IMG = os.environ.get("DISK_IMG", "disk.img")
 TIMEOUT = int(os.environ.get("TEST_TIMEOUT", "60"))
 
+# The x86 UEFI firmware is profile-private (build/<profile>/firmware/OVMF.fd)
+# and must be passed explicitly by the caller. There is deliberately NO
+# fallback to the source-tree boot/uefi/OVMF.fd. The check runs at module
+# load — before any QEMU process can start.
+OVMF_FIRMWARE = os.environ.get("OVMF_FIRMWARE")
+if not OVMF_FIRMWARE or not os.path.isfile(OVMF_FIRMWARE):
+    raise SystemExit("OVMF_FIRMWARE must name a readable firmware file")
+
 class TestRunner:
     def __init__(self, disk_img, timeout=TIMEOUT):
         self.disk_img = disk_img
@@ -34,7 +42,7 @@ class TestRunner:
         args = [
             QEMU,
             "-M", "q35",
-            "-drive", "if=pflash,format=raw,readonly=on,file=boot/uefi/OVMF.fd",
+            "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF_FIRMWARE}",
             "-drive", f"file={self.disk_img},format=raw,if=none,id=disk",
             "-device", "ahci,id=ahci",
             "-device", "ide-hd,drive=disk,bus=ahci.0",

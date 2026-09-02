@@ -85,9 +85,18 @@ $(DISK_IMG): $(ROOTFS_MANIFEST) $(UEFI_EFI) $(HOST_MKDISK)
 
 # Project-root disk.img is a one-way, content-guarded copy of the NORMAL
 # image (legacy entry point) — never the variant image, regardless of
-# variant switches.
+# variant switches. Only the DEFAULT_PROFILE owns this real compat copy;
+# for any other rootfs profile `disk.img` is a PHONY alias that merely
+# builds $(NORMAL_IMAGE) — it never creates or updates the project-root
+# disk.img, and can never be satisfied by a pre-existing root disk.img's
+# mtime (phony targets are always remade, and there is no copy recipe).
+ifeq ($(PROFILE),$(DEFAULT_PROFILE))
 disk.img: $(NORMAL_IMAGE)
 	@cmp -s $(NORMAL_IMAGE) $@ || cp $(NORMAL_IMAGE) $@
+else
+.PHONY: disk.img
+disk.img: $(NORMAL_IMAGE)
+endif
 
 endif
 

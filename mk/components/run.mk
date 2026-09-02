@@ -11,8 +11,35 @@
 # instead of "No rule to make target".
 
 # ── Firmware (x86 run targets) ─────────────────────────────────
-boot/uefi/OVMF.fd:
-	$(MAKE) -C boot/uefi OVMF.fd
+# Root-owned, profile-private real-file rule. OVMF_FIRMWARE_SOURCE accepts
+# ONLY an https:// URL (wget to "$@.tmp", then an atomic rename) or an
+# existing absolute local path (content-guarded copy). Every other value —
+# relative path, bad scheme, missing file — is rejected with a clear error
+# BEFORE any download/copy. wget's exit status is checked via set -e, so a
+# failed download never leaves a half-written file (and never reaches the
+# mv). Never calls boot/uefi for firmware.
+$(OVMF_FIRMWARE):
+	@set -e; \
+	mkdir -p "$(dir $@)"; \
+	case "$(OVMF_FIRMWARE_SOURCE)" in \
+	https://*) \
+	  wget -q -O "$@.tmp" "$(OVMF_FIRMWARE_SOURCE)"; \
+	  mv "$@.tmp" "$@";; \
+	/*) \
+	  test -f "$(OVMF_FIRMWARE_SOURCE)" || { \
+	    echo "ERROR: OVMF_FIRMWARE_SOURCE '$(OVMF_FIRMWARE_SOURCE)' is not an existing file" >&2; \
+	    exit 1; }; \
+	  cmp -s "$(OVMF_FIRMWARE_SOURCE)" "$@" || cp "$(OVMF_FIRMWARE_SOURCE)" "$@";; \
+	*) \
+	  echo "ERROR: OVMF_FIRMWARE_SOURCE '$(OVMF_FIRMWARE_SOURCE)' must be an https:// URL or an existing absolute local file path" >&2; \
+	  exit 1;; \
+	esac
+
+# $(OVMF_FIRMWARE) is absolute (BUILD_DIR is profile-absolute), so the same
+# on-disk file is also reachable through its relative spelling. This alias
+# makes `make build/<profile>/firmware/OVMF.fd` work too; the absolute rule
+# above does the actual work.
+build/$(PROFILE)/firmware/OVMF.fd: $(OVMF_FIRMWARE)
 
 # ── Kernel compat copy ─────────────────────────────────────────
 # Project-root kernel.bin is a one-way copy of the profile's kernel artifact
@@ -24,47 +51,48 @@ kernel.bin: $(KERNEL_ARTIFACT)
 endif
 
 # ── Run (x86, rootfs capability) ───────────────────────────────
-# Project-root disk.img is the concrete default-profile compat copy of the
-# NORMAL image (image.mk); OVMF.fd is the shared x86 UEFI firmware.
+# All x86 QEMU entry points consume the profile's NORMAL_IMAGE and
+# OVMF_FIRMWARE directly — never the project-root disk.img compat copy and
+# never the source-tree boot/uefi/OVMF.fd.
 .PHONY: run
-run: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),disk.img boot/uefi/OVMF.fd)
+run: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	$(QEMU_BIN) -M q35 -smp $(SMP) \
-	  -drive if=pflash,format=raw,readonly=on,file=boot/uefi/OVMF.fd \
+	  -drive if=pflash,format=raw,readonly=on,file=$(OVMF_FIRMWARE) \
 	  -netdev user,id=net0 -device e1000e,netdev=net0 \
-	  -drive file=disk.img,format=raw,if=none,id=disk \
+	  -drive file=$(NORMAL_IMAGE),format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio -no-reboot
 
 .PHONY: run-kvm
-run-kvm: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),disk.img boot/uefi/OVMF.fd)
+run-kvm: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	$(QEMU_BIN) -M q35 -smp $(SMP) \
-	  -drive if=pflash,format=raw,readonly=on,file=boot/uefi/OVMF.fd \
+	  -drive if=pflash,format=raw,readonly=on,file=$(OVMF_FIRMWARE) \
 	  -accel kvm \
 	  -netdev user,id=net0 -device e1000e,netdev=net0 \
-	  -drive file=disk.img,format=raw,if=none,id=disk \
+	  -drive file=$(NORMAL_IMAGE),format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio -no-reboot
 
 .PHONY: run-virtio
-run-virtio: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),disk.img boot/uefi/OVMF.fd)
+run-virtio: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	$(QEMU_BIN) -M q35 -smp $(SMP) \
-	  -drive if=pflash,format=raw,readonly=on,file=boot/uefi/OVMF.fd \
+	  -drive if=pflash,format=raw,readonly=on,file=$(OVMF_FIRMWARE) \
 	  -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
-	  -drive file=disk.img,format=raw,if=none,id=disk \
+	  -drive file=$(NORMAL_IMAGE),format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio
 
 .PHONY: debug
-debug: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),disk.img boot/uefi/OVMF.fd)
+debug: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	$(QEMU_BIN) -M q35 -smp $(SMP) \
-	  -drive if=pflash,format=raw,readonly=on,file=boot/uefi/OVMF.fd \
+	  -drive if=pflash,format=raw,readonly=on,file=$(OVMF_FIRMWARE) \
 	  -S -s \
 	  -netdev user,id=net0 -device e1000e,netdev=net0 \
-	  -drive file=disk.img,format=raw,if=none,id=disk \
+	  -drive file=$(NORMAL_IMAGE),format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio
 
@@ -149,12 +177,12 @@ test:
 	$(MAKE) -C test run
 
 .PHONY: test-phase-0
-test-phase-0: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE))
+test-phase-0: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
-	python3 tests/run_test.py phase-0 --disk $(NORMAL_IMAGE)
+	OVMF_FIRMWARE="$(OVMF_FIRMWARE)" python3 tests/run_test.py phase-0 --disk $(NORMAL_IMAGE)
 
 .PHONY: test-syscall
-test-syscall:
+test-syscall: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@set -e; \
 	if [ -f "$(NORMAL_IMAGE)" ]; then \
@@ -166,10 +194,10 @@ test-syscall:
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	fi
-	DISK_IMG="$(TEST_SYSTEST_IMAGE)" python3 tests/run_test.py systest
+	DISK_IMG="$(TEST_SYSTEST_IMAGE)" OVMF_FIRMWARE="$(OVMF_FIRMWARE)" python3 tests/run_test.py systest
 
 .PHONY: test-inittab
-test-inittab:
+test-inittab: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@set -e; \
 	if [ -f "$(NORMAL_IMAGE)" ]; then \
@@ -181,10 +209,10 @@ test-inittab:
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	fi
-	DISK_IMG="$(TEST_INITTAB_IMAGE)" python3 tests/run_test.py inittab-phase
+	DISK_IMG="$(TEST_INITTAB_IMAGE)" OVMF_FIRMWARE="$(OVMF_FIRMWARE)" python3 tests/run_test.py inittab-phase
 
 .PHONY: test-network
-test-network:
+test-network: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@set -e; \
 	if [ -f "$(NORMAL_IMAGE)" ]; then \
@@ -196,7 +224,17 @@ test-network:
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	fi
-	DISK_IMG="$(TEST_NETTEST_IMAGE)" python3 tests/run_test.py network
+	DISK_IMG="$(TEST_NETTEST_IMAGE)" OVMF_FIRMWARE="$(OVMF_FIRMWARE)" python3 tests/run_test.py network
+
+# ── Run paths ────────────────────────────────────────────────
+# Prints the current profile's absolute firmware and normal-image paths so a
+# manual QEMU invocation can reuse exactly the artifacts the root targets
+# use. Gated on rootfs like every other x86 run entry point.
+.PHONY: print-run-paths
+print-run-paths:
+	$(call require_capability,rootfs)
+	@echo firmware=$(abspath $(OVMF_FIRMWARE))
+	@echo image=$(abspath $(NORMAL_IMAGE))
 
 # ── Image alias ─────────────────────────────────────────────
 # `make image` builds the current profile's disk image — variant-resolved
@@ -228,7 +266,10 @@ test-build-contract-aarch64: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES))
 
 # ── Clean ───────────────────────────────────────────────────
 # Only the default profile owns the project-root kernel.bin / disk.img compat
-# copies; other profiles remove just build/<profile>.
+# copies; other profiles remove just build/<profile>. The obsolete source-tree
+# boot/uefi/OVMF.fd is removed at ROOT level (never by recursing into a
+# component) and only when it passes both guards: git-ignored AND untracked.
+# A tracked or user-owned file is preserved with an error.
 CLEAN_COMPAT := $(if $(filter $(DEFAULT_PROFILE),$(PROFILE)),rm -f disk.img kernel.bin;)
 
 # clean takes the publish lock (60 s retry), fails without deleting anything
@@ -266,6 +307,13 @@ clean:
 	fi; \
 	rm -rf build/$(PROFILE); \
 	$(CLEAN_COMPAT) \
+	if [ -f boot/uefi/OVMF.fd ]; then \
+	  if git check-ignore -q boot/uefi/OVMF.fd && ! git ls-files --error-unmatch boot/uefi/OVMF.fd >/dev/null 2>&1; then \
+	    rm -f boot/uefi/OVMF.fd; \
+	  else \
+	    echo "ERROR: refusing to remove boot/uefi/OVMF.fd (not a gitignored, untracked generated artifact); preserving it" >&2; \
+	  fi; \
+	fi; \
 	$(MAKE) -C boot/uefi clean; \
 	$(MAKE) -C kernel clean; \
 	$(MAKE) -C libc clean; \

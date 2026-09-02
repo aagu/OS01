@@ -92,6 +92,23 @@ legacy)
         sha256sum disk.img | cut -d' ' -f1 > "build/$fixture_profile/root-disk.before"
         fixture=$(mktemp)
         dd if=/dev/zero of="$fixture" bs=4096 count=1 status=none
+        # print-run-paths must report the FIXTURE profile's own absolute
+        # firmware and image paths, and must not require the firmware to
+        # already exist.
+        paths=$(make PROFILE="$fixture_profile" OVMF_FIRMWARE_SOURCE="$fixture" print-run-paths)
+        echo "$paths" | grep -F "firmware=$(pwd)/build/$fixture_profile/firmware/OVMF.fd"
+        echo "$paths" | grep -F "image=$(pwd)/build/$fixture_profile/image/disk.img"
+        # Invalid sources are rejected with a clear error BEFORE any download
+        # or copy: relative path, missing absolute path, non-HTTPS scheme.
+        ! make PROFILE="$fixture_profile" OVMF_FIRMWARE_SOURCE=relative.fd \
+          "$(pwd)/build/$fixture_profile/firmware/OVMF.fd"
+        ! make PROFILE="$fixture_profile" OVMF_FIRMWARE_SOURCE=/no/such/OVMF.fd \
+          "$(pwd)/build/$fixture_profile/firmware/OVMF.fd"
+        ! make PROFILE="$fixture_profile" OVMF_FIRMWARE_SOURCE=http://insecure/OVMF.fd \
+          "$(pwd)/build/$fixture_profile/firmware/OVMF.fd"
+        # The rejections must not have left a partial or completed firmware
+        # file behind.
+        test ! -e "$(pwd)/build/$fixture_profile/firmware/OVMF.fd"
         make PROFILE="$fixture_profile" OVMF_FIRMWARE_SOURCE="$fixture" \
           "$(pwd)/build/$fixture_profile/firmware/OVMF.fd"
         make PROFILE="$fixture_profile" disk.img
