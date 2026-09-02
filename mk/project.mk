@@ -74,3 +74,10 @@ SYSROOT_STAMP := $(BUILD_DIR)/stamps/sysroot.stamp
 # invocation (content-gated staging stamps, the kernel artifact recipe).
 .PHONY: FORCE
 FORCE:
+
+# DRY_RUN — nonempty exactly when the current invocation is a dry run (-n).
+# GNU make puts the bare-letter flags as the FIRST word of MAKEFLAGS whenever
+# any letter flag is set (e.g. "n", "knw"); value flags (-j2, -Oline for
+# --output-sync=line, ...) start with "-" and are excluded, so a bare-letter
+# first word containing "n" means -n precisely.
+DRY_RUN = $(if $(filter-out -%,$(firstword $(MAKEFLAGS))),$(findstring n,$(firstword $(MAKEFLAGS))))

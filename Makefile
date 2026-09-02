@@ -331,7 +331,11 @@ test-network:
 # (success or failure), and the lock is held for the whole clean.
 .PHONY: clean unlock-profile
 clean:
-	@set -e; \
+	@if [ -n "$(DRY_RUN)" ]; then \
+	  echo "  [clean] dry-run: not deleting the $(PROFILE) build"; \
+	  exit 0; \
+	fi; \
+	set -e; \
 	mkdir -p "$(dir $(LOCK_DIR))"; \
 	i=0; \
 	while ! mkdir "$(LOCK_DIR)" 2>/dev/null; do \

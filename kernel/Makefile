@@ -314,6 +314,10 @@ kernel.bin: all
 install-headers:
 ifdef OS01_PROFILE_FILE
 	@test -n "$(INSTALL_ROOT)" || { echo "ERROR: install-headers (profile mode) requires INSTALL_ROOT (staging tree)"; exit 1; }
+	@# Rebuild the staging tree from source so headers removed from
+	@# kernel/include/ do not linger in staging (spec: deleted/renamed
+	@# headers must vanish from the next generation).
+	rm -rf $(INSTALL_ROOT)
 	mkdir -p $(INSTALL_ROOT)/usr/include
 	cp -R --preserve=timestamps include/. $(INSTALL_ROOT)/usr/include/.
 	@# kernel/include/errno.h is resolved by the kernel build through its own

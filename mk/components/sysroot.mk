@@ -69,12 +69,16 @@ MBEDTLS_CC_FLAGS  := --sysroot=$(STAGING_DIR)/libc -isystem $(STAGING_DIR)/libc/
                      -I$(MBEDTLS_PRIVATE)/include -I$(MBEDTLS_PRIVATE)/library \
                      -DMBEDTLS_USER_CONFIG_FILE='<mbedtls/os01_mbedtls_config.h>'
 
-$(STAMPS_DIR)/mbedtls-install.stamp: FORCE
+# Ordered AFTER the libc staging stamp: the mbedTLS compile consumes the libc
+# headers (--sysroot=$(STAGING_DIR)/libc), so under -j the libc include tree
+# must be complete before any mbedTLS file compiles.
+$(STAMPS_DIR)/mbedtls-install.stamp: $(STAMPS_DIR)/libc-install.stamp FORCE
 	@mkdir -p $(STAMPS_DIR) $(RECEIPTS_DIR)
 	@digest=$$( { cd $(OS01_ROOT) && \
 	  find thirdpart/mbedtls -type f -exec sha256sum {} + 2>/dev/null | sort; \
 	  sha256sum config/mbedtls_config.h; \
 	  if [ -f libc/network/entropy.c ]; then sha256sum libc/network/entropy.c; fi; \
+	  printf 'toolchain: %s\n' "$(shell $(CLANG) --version 2>/dev/null | head -1)"; \
 	} | sha256sum | cut -d' ' -f1 ); \
 	old=""; \
 	if [ -f "$@.receipt" ]; then old=$$(cat "$@.receipt"); fi; \
@@ -189,6 +193,7 @@ $(SYSROOT_STAMP): $(STAMPS_DIR)/kernel-headers-install.stamp \
 	    if [ ! -f "$$gen/$$rel" ]; then echo "ERROR: missing $$rel in generation $$id"; exit 1; fi; \
 	  done < "$$mf"; \
 	done; \
+	rm -f "$(BUILD_DIR)/.sysroot.next"; \
 	ln -s "sysroot-generations/$$id" "$(BUILD_DIR)/.sysroot.next"; \
 	mv -Tf "$(BUILD_DIR)/.sysroot.next" "$(SYSROOT)"; \
 	touch "$@"; \

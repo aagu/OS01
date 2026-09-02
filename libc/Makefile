@@ -106,10 +106,19 @@ $(BUILD_DIR)/%.libk.o: %.c
 	$(EFFECTIVE_CC) $(LIBK_CFLAGS) -MMD -MP -c $< -o $@
 
 # ── Installation (staging tree in profile mode, legacy sysroot otherwise) ──
-install: install-headers install-libs
+# Profile mode REBUILDS the staging tree from source (rm -rf then re-install)
+# so headers/archives removed from libc/ do not linger in staging (spec:
+# deleted/renamed paths must vanish from the next generation). The two
+# sub-installs run through an inner make AFTER the cleanup, so they never
+# race with the rm -rf under -j.
+install:
 ifdef OS01_PROFILE_FILE
 	@test -n "$(INSTALL_ROOT)" || { echo "ERROR: install (profile mode) requires INSTALL_ROOT (staging tree)"; exit 1; }
+	rm -rf $(INSTALL_ROOT)
+	$(MAKE) install-headers install-libs
 	@find $(INSTALL_ROOT) -type f ! -name manifest | sed 's|^$(INSTALL_ROOT)/||' | sort > $(INSTALL_ROOT)/manifest
+else
+	$(MAKE) install-headers install-libs
 endif
 
 install-headers:
