@@ -212,8 +212,12 @@ image: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(DISK_IMG))
 .PHONY: test-build-contract-x86
 test-build-contract-x86: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),disk.img)
 	$(call require_capability,rootfs)
+	sh tests/build_contract.sh x86_64-clang legacy-components
+	sh tests/build_contract.sh x86_64-clang legacy
 	sh tests/build_contract.sh x86_64-clang x86
 	sh tests/build_contract.sh x86_64-clang sysroot
+	sh tests/build_contract.sh x86_64-clang firmware
+	sh tests/build_contract.sh x86_64-clang host-test
 	sh tests/build_contract.sh x86_64-clang targets
 
 .PHONY: test-build-contract-aarch64
