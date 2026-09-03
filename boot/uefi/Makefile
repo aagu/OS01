@@ -57,16 +57,24 @@ UEFI_RUNTIME_CFLAGS ?= -DUEFI_NO_UTF8
 UEFI_RUNTIME_MAKE ?= $(MAKE) OUTDIR=
 
 # ── UEFI Clang/COFF contract (spec §6) ────────────────────────
-# x86_64 owns UEFI Clang/LD validation and the override invocation; aarch64
-# deliberately keeps the plain recursive call (the copied runtime
-# auto-detects clang + `lld -flavor link`). Parse-time directives live at
-# top level: GNU make rejects variable assignments interleaved with recipe
-# lines, and these must fire even under `make -n`.
-ifeq ($(ARCH),x86_64)
-UEFI_CLANG ?= $(CLANG)
+# Both x86_64 and aarch64 pass explicit CC=clang LD=lld -flavor link to the
+# copied posix-uefi runtime, so the runtime never falls back to its
+# USE_GCC=1 path (which on e.g. Termux — clang lives outside the runtime's
+# hard-coded wildcards at uefi/Makefile:32 — would set CC=gcc and run the
+# broken `--subsystem=10` objcopy step at uefi/Makefile:96 instead of the
+# Clang + lld chain that already produces the EFI binary directly). Parse-time
+# directives live at top level: GNU make rejects variable assignments
+# interleaved with recipe lines, and these must fire even under `make -n`.
+#
+# CLANG comes from the profile (mk/profiles/x86_64-clang.mk includes
+# mk/toolchains/clang.mk which sets CLANG; aarch64-clang.mk may set CC
+# directly to 'clang -target ...' — extract the bare binary via
+# $(firstword) so a CC like 'clang -target aarch64-none-elf' resolves to
+# 'clang' for the UEFI_CLANG sanity check and the runtime invocation).
+UEFI_CLANG ?= $(firstword $(CC))
 UEFI_CLANG_ID := $(shell $(UEFI_CLANG) --version 2>/dev/null | head -1)
 ifeq ($(findstring clang,$(UEFI_CLANG_ID)),)
-$(error UEFI_CLANG='$(UEFI_CLANG)' is not Clang)
+$(error UEFI_CLANG='$(UEFI_CLANG)' (from CC='$(CC)') is not Clang)
 endif
 UEFI_CLANG_RESOURCE_DIR := $(shell $(UEFI_CLANG) -print-resource-dir 2>/dev/null)
 ifeq ($(strip $(UEFI_CLANG_RESOURCE_DIR)),)
@@ -76,9 +84,10 @@ UEFI_LD_TOOL ?= $(TARGET_LD)
 $(eval $(call require_program,UEFI_LD_TOOL))
 UEFI_LD := $(UEFI_LD_TOOL) -flavor link
 # Block outer ELF CFLAGS/LDFLAGS from the environment so the inner `+=`
-# flags (--target=x86_64-pc-win32-coff and the COFF linker flags at
-# uefi/Makefile:63-64) survive: a literal CFLAGS= on the command line would
-# wipe them instead (GNU make ignores += appends to command-line variables).
+# flags (--target=$(TARGET_TRIPLE) and the COFF linker flags at
+# posix-uefi/uefi/Makefile:64) survive: a literal CFLAGS= on the command
+# line would wipe them instead (GNU make ignores += appends to
+# command-line variables).
 unexport CFLAGS LDFLAGS
 # Serial inner make (G6): the runtime's $(TARGET).so depends on
 # OUTDIR-prefixed object paths that NO rule can build — they exist only as
@@ -90,9 +99,6 @@ unexport CFLAGS LDFLAGS
 # handful of files; -j1 costs nothing and keeps the outer build parallel.
 UEFI_MAKE := $(MAKE) -j1 -C $(RUNTIME_DIR) ARCH=$(ARCH) TARGET=$(TARGET) OUTDIR=$(OUTDIR)/ SRCS="$(SRCS)" \
 	MAKEOVERRIDES= USE_GCC= CC="$(UEFI_CLANG)" LD="$(UEFI_LD)"
-else
-UEFI_MAKE := $(MAKE) -j1 -C $(RUNTIME_DIR) ARCH=$(ARCH) TARGET=$(TARGET) OUTDIR=$(OUTDIR)/ SRCS="$(SRCS)"
-endif
 
 .PHONY: all clean
 all: $(OUTDIR)/$(TARGET)
