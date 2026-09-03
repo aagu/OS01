@@ -137,7 +137,19 @@ $(AARCH64_UEFI_FIRMWARE):
 	*) \
 	  echo "ERROR: AARCH64_UEFI_FIRMWARE_SOURCE '$(AARCH64_UEFI_FIRMWARE_SOURCE)' must be an https:// URL or an existing absolute local file path" >&2; \
 	  exit 1;; \
-	esac
+	esac; \
+	# QEMU `virt` machine cfi.pflash01 requires the block backend to be
+	# exactly 64 MiB (67108864 bytes) — edk2-nightly distributes the
+	# combined CODE+VARS image either pre-padded or code-only (~2-3 MiB),
+	# and any source file smaller than 64 MiB causes qemu to abort with
+	# `requires 67108864 bytes, pflash0 block backend provides N bytes`.
+	# Normalize the size after every fetch/copy so the QEMU topology in
+	# mk/components/run.mk works regardless of upstream packaging.
+	@sz="$$(stat -c '%s' "$@")"; \
+	if [ "$$sz" != "67108864" ]; then \
+	  echo "  [aarch64-uefi] QEMU_EFI.fd is $$sz bytes, truncating/padding to 64 MiB for cfi.pflash01"; \
+	  truncate -s 64M "$@"; \
+	fi
 
 # $(AARCH64_UEFI_FIRMWARE) is absolute (BUILD_DIR is profile-absolute), so the
 # same on-disk file is also reachable through its relative spelling. This
