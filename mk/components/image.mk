@@ -111,9 +111,39 @@ $(BUILD_DIR)/artifacts/kernel.elf: FORCE
 	@cmp -s $(KERNEL_BUILD_DIR)/kernel.elf $@ || cp $(KERNEL_BUILD_DIR)/kernel.elf $@
 
 # ── aarch64 UEFI firmware (profile build dir) ───────────────
-$(AARCH64_UEFI_FIRMWARE): $(AARCH64_UEFI_FIRMWARE_SOURCE)
-	@mkdir -p $(dir $@)
-	@cmp -s $< $@ || cp $< $@
+# Mirrors the x86 OVMF contract (mk/components/run.mk):
+#   AARCH64_UEFI_FIRMWARE_SOURCE accepts ONLY an https:// URL
+#   (wget to "$@.tmp", then atomic rename) or an existing absolute local
+#   path (content-guarded copy). Every other value is rejected with a clear
+#   error before any download/copy, so a missing or misspelled source
+#   never reaches QEMU and never leaves a half-written file (and never
+#   reaches the mv). Capability-gated on uefi-bringup: the aarch64-only
+#   AARCH64_UEFI_FIRMWARE variable is undefined for x86_64-clang, so
+#   without the guard this rule expands to an empty-target rule with a
+#   recipe — a make-version-sensitive parse hazard.
+ifeq ($(filter uefi-bringup,$(PROFILE_CAPABILITIES)),uefi-bringup)
+$(AARCH64_UEFI_FIRMWARE):
+	@set -e; \
+	mkdir -p "$(dir $@)"; \
+	case "$(AARCH64_UEFI_FIRMWARE_SOURCE)" in \
+	https://*) \
+	  wget -q -O "$@.tmp" "$(AARCH64_UEFI_FIRMWARE_SOURCE)"; \
+	  mv "$@.tmp" "$@";; \
+	/*) \
+	  test -f "$(AARCH64_UEFI_FIRMWARE_SOURCE)" || { \
+	    echo "ERROR: AARCH64_UEFI_FIRMWARE_SOURCE '$(AARCH64_UEFI_FIRMWARE_SOURCE)' is not an existing file" >&2; \
+	    exit 1; }; \
+	  cmp -s "$(AARCH64_UEFI_FIRMWARE_SOURCE)" "$@" || cp "$(AARCH64_UEFI_FIRMWARE_SOURCE)" "$@";; \
+	*) \
+	  echo "ERROR: AARCH64_UEFI_FIRMWARE_SOURCE '$(AARCH64_UEFI_FIRMWARE_SOURCE)' must be an https:// URL or an existing absolute local file path" >&2; \
+	  exit 1;; \
+	esac
+
+# $(AARCH64_UEFI_FIRMWARE) is absolute (BUILD_DIR is profile-absolute), so the
+# same on-disk file is also reachable through its relative spelling. This
+# alias mirrors the x86 `build/<profile>/firmware/OVMF.fd` rule.
+build/$(PROFILE)/firmware/QEMU_EFI.fd: $(AARCH64_UEFI_FIRMWARE)
+endif
 
 # ── aarch64 UEFI bring-up image (64 MiB FAT) ────────────────
 $(BUILD_DIR)/image/aarch64-uefi.img: $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI \
