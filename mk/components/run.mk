@@ -242,6 +242,91 @@ print-run-paths:
 	@echo firmware=$(abspath $(OVMF_FIRMWARE))
 	@echo image=$(abspath $(NORMAL_IMAGE))
 
+# ── Help ─────────────────────────────────────────────────────
+# Lists the root Makefile's user-facing targets, grouped by category, with the
+# capability each one needs under the active profile. Works for any profile
+# (no capability gate): the categories shown are the same, and the per-target
+# capability badge is evaluated against the active profile's
+# PROFILE_CAPABILITIES, so a user on aarch64-clang sees (uefi-bringup) badges
+# on aarch64 targets and "n/a (active profile lacks <cap>)" on x86-only ones
+# instead of a hard error. AGENTS.md Quick start and the docs are the canonical
+# recipes; this is the discoverability surface for `make` itself.
+.PHONY: help
+help:
+	@echo 'OS01 build — profile=$(PROFILE) capabilities=$(PROFILE_CAPABILITIES)'
+	@echo ''
+	@printf '  %-22s %-13s %s\n' 'TARGET' 'CAPABILITY' 'PURPOSE'
+	@echo '  --------------------- ------------- ------------------------------'
+	@printf '  %-22s %-13s %s\n' \
+		 'all / disk.img'    '(rootfs)'     'Build the normal disk image (default goal)';
+	@printf '  %-22s %-13s %s\n' \
+		 'kernel.bin'        '(rootfs)'     'Project-root kernel copy (cmp-guarded)';
+	@printf '  %-22s %-13s %s\n' \
+		 'lib'               '(userland)'   'Build the sysroot (libc, mbedtls, etc.)';
+	@printf '  %-22s %-13s %s\n' \
+		 'user'              '(userland)'   'Build userland ELFs (incl. busybox.elf)';
+	@printf '  %-22s %-13s %s\n' \
+		 'image'             '(rootfs)'     'Current profile'"'"'s disk image (variant-resolved)';
+	@echo ''
+	@echo 'Run / Debug (x86, rootfs):'
+	@printf '  %-22s %-13s %s\n' \
+		 'run'               '(rootfs)'     'QEMU q35 + e1000e + serial stdio';
+	@printf '  %-22s %-13s %s\n' \
+		 'run-kvm'           '(rootfs)'     'QEMU with KVM acceleration';
+	@printf '  %-22s %-13s %s\n' \
+		 'run-virtio'        '(rootfs)'     'QEMU with virtio-net-pci (instead of e1000e)';
+	@printf '  %-22s %-13s %s\n' \
+		 'debug'             '(rootfs)'     'QEMU paused, GDB :1234 (-S -s)';
+	@printf '  %-22s %-13s %s\n' \
+		 'print-run-paths'   '(rootfs)'     'Print absolute firmware + image paths';
+	@echo ''
+	@echo 'aarch64 UEFI bring-up (uefi-bringup):'
+	@printf '  %-22s %-13s %s\n' \
+		 'aarch64-uefi'           '(uefi-bringup)' 'Build aarch64 disk + firmware';
+	@printf '  %-22s %-13s %s\n' \
+		 'aarch64-uefi-kernel'    '(uefi-bringup)' 'Build aarch64 kernel.elf only';
+	@printf '  %-22s %-13s %s\n' \
+		 'run-aarch64-uefi'       '(uefi-bringup)' 'QEMU virt + cortex-a53 + virtio-blk';
+	@echo ''
+	@echo 'Validation (x86 uefi):'
+	@printf '  %-22s %-13s %s\n' \
+		 'validate'          '(rootfs)'     'kernel ELF + UEFI COFF + profile info';
+	@printf '  %-22s %-13s %s\n' \
+		 'validate-kernel'   '(rootfs)'     'kernel ELF sanity (no undef, EM_X86_64, exports)';
+	@printf '  %-22s %-13s %s\n' \
+		 'validate-uefi'     '(rootfs)'     'EFI app COFF exports parseable';
+	@printf '  %-22s %-13s %s\n' \
+		 'validate-profile'  '(always)'     'Print profile / triple / sysroot / capabilities';
+	@echo ''
+	@echo 'Test (x86, rootfs):'
+	@printf '  %-22s %-13s %s\n' \
+		 'test'              '(rootfs)'     'Recursive make run (alias)';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-phase-0'      '(rootfs)'     'QEMU phase-0 E2E against the normal image';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-syscall'      '(rootfs)'     'QEMU syscall E2E (OS01_SYSTEST=1, 228 tests)';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-inittab'      '(rootfs)'     'inittab variant E2E (INITTAB_FILE=config/inittab.test)';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-network'      '(rootfs)'     'QEMU network E2E (OS01_NETTEST=1, 6 tests)';
+	@echo ''
+	@echo 'Build contract (CI):'
+	@printf '  %-22s %-13s %s\n' \
+		 'test-build-contract-x86'      '(rootfs)'      'x86_64-clang full contract (7 modes)';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-build-contract-aarch64'  '(uefi-bringup)' 'aarch64-clang full contract';
+	@echo ''
+	@echo 'Maintenance:'
+	@printf '  %-22s %-13s %s\n' \
+		 'clean'             '(always)'     'Remove build/<profile> + root compat copies (lock-checked)';
+	@printf '  %-22s %-13s %s\n' \
+		 'unlock-profile'    '(always)'     'Diagnose stale publish lock (FORCE_UNLOCK=1 to remove)';
+	@echo ''
+	@echo 'Common flags: PROFILE=<name>, DEBUG_CHANNELS=<a,b>, OS01_SYSTEST=1,'
+	@echo '              OS01_NETTEST=1, INITTAB_FILE=<path>, KERNEL_SELFTEST=1,'
+	@echo '              NDEBUG=1, LOG_TARGET=serial|both.'
+	@echo 'See AGENTS.md Quick start and docs/build-run-debug.md for recipes.'
+
 # ── Image alias ─────────────────────────────────────────────
 # `make image` builds the current profile's disk image — variant-resolved
 # (OS01_SYSTEST=1 / OS01_NETTEST=1 / INITTAB_FILE=config/inittab.test select
