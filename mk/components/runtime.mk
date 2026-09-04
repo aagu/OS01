@@ -81,6 +81,14 @@ $(KERNEL_RUNTIME_ARCHIVE) $(KERNEL_RUNTIME_RECEIPT) &: \
 
 else ifeq ($(RUNTIME_PROVIDER),compiler-rt)
 
+# Compiler-rt is not assumed to have been built with the kernel's ABI and
+# -mno-red-zone constraints.  Without an explicit profile-owned eligibility
+# manifest, reject before discovery can select an unsafe archive or kernel
+# linking can begin.  There is intentionally no default manifest.
+ifeq ($(strip $(RUNTIME_COMPILER_RT_MANIFEST_kernel)),)
+$(error ERROR: compiler-rt is unsupported for kernel without eligibility manifest)
+endif
+
 # Compatibility discovery is explicit and target-specific.  The historical
 # driver spelling is only a Clang compiler-rt query; no GCC executable,
 # directory discovery, or fallback is permitted.
@@ -117,6 +125,10 @@ $(KERNEL_RUNTIME_RECEIPT): runtime-compiler-rt-force $(OS01_PROFILE_FILE)
 	if ! test -f "$$candidate"; then \
 	  echo "ERROR: compiler-rt candidate is not a regular file: $$candidate" >&2; exit 1; \
 	fi; \
+	manifest='$(call runtime_sq,$(RUNTIME_COMPILER_RT_MANIFEST_kernel))'; \
+	if ! test -f "$$manifest" || ! test -r "$$manifest"; then \
+	  echo "ERROR: compiler-rt eligibility manifest is not a readable regular file: $$manifest" >&2; exit 1; \
+	fi; \
 	mkdir -p "$(KERNEL_RUNTIME_VARIANT_DIR)"; \
 	members="$(KERNEL_RUNTIME_RECEIPT).members.tmp"; \
 	extract="$(KERNEL_RUNTIME_RECEIPT).members.tmp.d"; \
@@ -147,9 +159,27 @@ $(KERNEL_RUNTIME_RECEIPT): runtime-compiler-rt-force $(OS01_PROFILE_FILE)
 	  fi; \
 	done < "$$members"; \
 	archive_sha=$$(sha256sum "$$candidate" | cut -d' ' -f1); \
+	manifest_record() { \
+	  awk -F= -v key="$$1" '$$1 == key { count++; if (count == 1) value=substr($$0, length(key)+2) } END { if (count != 1) exit 1; printf "%s", value }' "$$manifest"; \
+	}; \
+	check_manifest_record() { \
+	  key="$$1"; expected="$$2"; \
+	  actual=$$(manifest_record "$$key") || actual='<missing-or-duplicate>'; \
+	  if test "$$actual" != "$$expected"; then \
+	    echo "ERROR: compiler-rt eligibility manifest has $$key '$$actual'; expected '$$expected' for consumer 'kernel'" >&2; exit 1; \
+	  fi; \
+	}; \
+	check_manifest_record archive_sha256 "$$archive_sha"; \
+	check_manifest_record clang_id '$(call runtime_sq,$(CLANG_ID))'; \
+	check_manifest_record clang_resource_dir '$(call runtime_sq,$(CLANG_RESOURCE_DIR))'; \
+	check_manifest_record target '$(call runtime_sq,$(RUNTIME_TARGET_kernel))'; \
+	check_manifest_record abi '$(call runtime_sq,$(RUNTIME_ABI_kernel))'; \
+	check_manifest_record no_red_zone_audit pass; \
+	manifest_sha=$$(sha256sum "$$manifest" | cut -d' ' -f1); \
 	{ \
 	  printf 'variant=%s\n' '$(call runtime_sq,$(RUNTIME_KERNEL_VARIANT_TUPLE))'; \
-	  printf 'archive=%s\narchive_sha256=%s\n' "$$candidate" "$$archive_sha"; \
+	  printf 'archive=%s\narchive_sha256=%s\nmanifest=%s\nmanifest_sha256=%s\n' \
+	    "$$candidate" "$$archive_sha" "$$manifest" "$$manifest_sha"; \
 	} > "$$receipt"; \
 	mv "$$receipt" "$(KERNEL_RUNTIME_RECEIPT)"
 

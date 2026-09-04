@@ -35,7 +35,9 @@ class Fixture:
         self.profile = root / "fixture-profile.mk"
         self.harness = root / "harness.mk"
         self.query = root / "query.py"
+        self.manifest = root / "compiler-rt-kernel.manifest"
         self.build = root / "build"
+        self.manifest.write_text("", encoding="utf-8")
 
         self.profile.write_text(
             textwrap.dedent(
@@ -56,6 +58,7 @@ class Fixture:
                 RUNTIME_OBJECT_FORMAT_kernel := ELF
                 RUNTIME_MACHINE_kernel := EM_X86_64
                 RUNTIME_ABI_kernel := x86_64-sysv
+                RUNTIME_COMPILER_RT_MANIFEST_kernel ?= {self.manifest}
                 """
             ),
             encoding="utf-8",
@@ -83,6 +86,30 @@ class Fixture:
                 \t@printf 'source_digest=%s\\nvariant_digest=%s\\n' "$(RUNTIME_KERNEL_SOURCE_DIGEST)" "$(RUNTIME_KERNEL_VARIANT_DIGEST)"
                 """
             ),
+            encoding="utf-8",
+        )
+
+    def write_manifest(
+        self, archive: Path, *, overrides: dict[str, str] | None = None
+    ) -> None:
+        archive_sha = subprocess.run(
+            ["sha256sum", str(archive)],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.split()[0]
+        records = {
+            "archive_sha256": archive_sha,
+            "clang_id": "fixture clang 1.0",
+            "clang_resource_dir": "/fixture/clang/resource",
+            "target": "x86_64-unknown-none",
+            "abi": "x86_64-sysv",
+            "no_red_zone_audit": "pass",
+        }
+        if overrides is not None:
+            records.update(overrides)
+        self.manifest.write_text(
+            "\n".join(f"{key}={value}" for key, value in records.items()) + "\n",
             encoding="utf-8",
         )
 
@@ -160,8 +187,9 @@ def require_failure(
     fixture: Fixture,
     provider: str,
     expected_diagnostic: str,
+    *extra_args: str,
 ) -> None:
-    result = fixture.make(provider)
+    result = fixture.make(provider, *extra_args)
     combined = result.stdout + result.stderr
     if result.returncode == 0:
         raise AssertionError(f"{name}: make unexpectedly succeeded:\n{combined}")
@@ -308,6 +336,44 @@ def main() -> int:
         valid_archive.parent.mkdir()
         fixture.archive(valid_archive, x86_object)
         fixture.set_query(output=str(valid_archive))
+        require_failure(
+            "kernel compiler-rt without eligibility manifest",
+            fixture,
+            "compiler-rt",
+            "ERROR: compiler-rt is unsupported for kernel without eligibility manifest",
+            "RUNTIME_COMPILER_RT_MANIFEST_kernel=",
+        )
+        expected_manifest_records = {
+            "archive_sha256": subprocess.run(
+                ["sha256sum", str(valid_archive)],
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.split()[0],
+            "clang_id": "fixture clang 1.0",
+            "clang_resource_dir": "/fixture/clang/resource",
+            "target": "x86_64-unknown-none",
+            "abi": "x86_64-sysv",
+            "no_red_zone_audit": "pass",
+        }
+        for key, wrong_value in (
+            ("archive_sha256", "0" * 64),
+            ("clang_id", "other clang"),
+            ("clang_resource_dir", "/other/resource"),
+            ("target", "aarch64-unknown-none"),
+            ("abi", "aarch64-aapcs"),
+            ("no_red_zone_audit", "failed"),
+        ):
+            fixture.write_manifest(valid_archive, overrides={key: wrong_value})
+            require_failure(
+                f"kernel compiler-rt manifest validates {key}",
+                fixture,
+                "compiler-rt",
+                "ERROR: compiler-rt eligibility manifest has "
+                f"{key} '{wrong_value}'; expected "
+                f"'{expected_manifest_records[key]}' for consumer 'kernel'",
+            )
+        fixture.write_manifest(valid_archive)
         valid_output = require_success(
             "valid singleton x86 ELF archive",
             fixture.make("compiler-rt"),
@@ -418,7 +484,7 @@ def main() -> int:
                 f"unlisted multiword assignment leaked into sub-make:\n{sanitized_output}"
             )
 
-    print("runtime provider tests: 14 passed")
+    print("runtime provider tests: 21 passed")
     return 0
 
 

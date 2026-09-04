@@ -79,3 +79,6 @@ RUNTIME_CFLAGS_kernel := -ffreestanding -fno-builtin -fno-stack-protector -mno-r
 RUNTIME_OBJECT_FORMAT_kernel := ELF
 RUNTIME_MACHINE_kernel := EM_X86_64
 RUNTIME_ABI_kernel := x86_64-sysv
+# compiler-rt remains opt-in for the kernel.  A separately audited, profile-
+# owned manifest must name the exact archive before this provider is eligible.
+RUNTIME_COMPILER_RT_MANIFEST_kernel ?=
