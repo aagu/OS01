@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import shlex
 import shutil
 import subprocess
@@ -11,8 +12,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PROFILE = ROOT / "mk/profiles/x86_64-clang.mk"
-SOURCE_RECEIPT = ROOT / "build/x86_64-clang/runtime/kernel-link.receipt"
+DEFAULT_PROFILE = ROOT / "mk/profiles/x86_64-clang.mk"
+DEFAULT_SOURCE_RECEIPT = ROOT / "build/x86_64-clang/runtime/kernel-link.receipt"
+DEFAULT_SYSROOT = ROOT / "build/x86_64-clang/sysroot"
+PROFILE = DEFAULT_PROFILE
+PROFILE_NAME = "x86_64-clang"
 
 
 def run(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -24,15 +28,15 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-def source_link_inputs() -> tuple[list[str], Path, Path]:
-    require(SOURCE_RECEIPT.is_file(), "build kernel.bin before kernel_runtime_link_test.py")
-    stage_line = SOURCE_RECEIPT.read_text(encoding="utf-8").splitlines()[0]
+def source_link_inputs(source_receipt: Path, sysroot: Path) -> tuple[list[str], Path, Path]:
+    require(source_receipt.is_file(), "build kernel.bin before kernel_runtime_link_test.py")
+    stage_line = source_receipt.read_text(encoding="utf-8").splitlines()[0]
     argv = shlex.split(stage_line.removeprefix("stage1="))
     objects = [arg for arg in argv if arg.endswith(".o")]
     runtimes = [Path(arg) for arg in argv if arg.endswith((".a", ".lib")) and "runtime/kernel" in arg]
     require(bool(objects), "stage1 receipt has no object inputs")
     require(len(runtimes) == 1 and runtimes[0].is_file(), "stage1 receipt has no unique runtime archive")
-    sysroot = (ROOT / "build/x86_64-clang/sysroot").resolve()
+    sysroot = sysroot.resolve()
     require((sysroot / "usr/lib/libk.a").is_file(), "built immutable sysroot is missing libk.a")
     return objects, runtimes[0], sysroot
 
@@ -48,7 +52,7 @@ def inner_make(
     return run(
         [
             "make", "--no-print-directory", "-C", "kernel",
-            f"OS01_PROFILE_FILE={PROFILE}", "PROFILE=x86_64-clang", "ARCH=x86_64",
+            f"OS01_PROFILE_FILE={PROFILE}", f"PROFILE={PROFILE_NAME}", "ARCH=x86_64",
             f"KERNEL_BUILD_DIR={build}", f"SYSROOT_GENERATION_DIR={sysroot}",
             f"KERNEL_OBJECTS={' '.join(objects)}", f"KERNEL_RUNTIME_INPUTS={runtime}",
             f"KERNEL_RUNTIME_PREREQ={provider_receipt}",
@@ -117,7 +121,16 @@ def require_identity(build: Path, provider_receipt: Path, runtime: Path) -> None
 
 
 def main() -> int:
-    objects, source_runtime, sysroot = source_link_inputs()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source-receipt", type=Path, default=DEFAULT_SOURCE_RECEIPT)
+    parser.add_argument("--sysroot", type=Path, default=DEFAULT_SYSROOT)
+    parser.add_argument("--profile-file", type=Path, default=DEFAULT_PROFILE)
+    parser.add_argument("--profile", default="x86_64-clang")
+    args = parser.parse_args()
+    global PROFILE, PROFILE_NAME
+    PROFILE = args.profile_file.resolve()
+    PROFILE_NAME = args.profile
+    objects, source_runtime, sysroot = source_link_inputs(args.source_receipt, args.sysroot)
     with tempfile.TemporaryDirectory(prefix="os01-kernel-runtime-link-") as raw:
         base = Path(raw)
 

@@ -262,7 +262,11 @@ test-runtime: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(KERNEL_ARTIFACT))
 	  --llvm-readobj "$(LLVM_READOBJ)"
 	@$(MAKE) validate-kernel
 	python3 tests/runtime_link_order_test.py
-	python3 tests/kernel_runtime_link_test.py
+	python3 tests/kernel_runtime_link_test.py \
+	  --source-receipt "$(KERNEL_RUNTIME_LINK_RECEIPT)" \
+	  --sysroot "$(SYSROOT)" \
+	  --profile-file "$(OS01_PROFILE_FILE)" \
+	  --profile "$(PROFILE)"
 
 # This target builds and boots only the selftest-scoped image.  In particular
 # it never uses the ordinary image, and it refuses a combined syscall/selftest
