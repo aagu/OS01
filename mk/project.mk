@@ -25,7 +25,7 @@ DEFAULT_PROFILE ?= x86_64-clang
 # value at parse time — defining them after the profile include would make
 # the profile's own USER_BUILD_DIR/USER_ARTIFACT_DIR compute with an empty
 # USER_VARIANT.
-IMAGE_VARIANT := $(strip $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test))
+IMAGE_VARIANT := $(strip $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test)$(if $(filter 1,$(KERNEL_SELFTEST)),selftest))
 USER_VARIANT  := $(if $(filter 1,$(OS01_SYSTEST)),systest)
 
 OS01_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)

@@ -92,16 +92,35 @@ $ make validate-profile
 profile=x86_64-clang triple=x86_64-unknown-none sysroot=/.../build/x86_64-clang/sysroot capabilities=kernel userland rootfs uefi
 ```
 
-### Deferred Termux `-lgcc` work (out of scope)
+### Compiler-runtime validation and E2E suites
 
-Per the build-system design spec (2026-09-02), replacing the `-lgcc` link
-argument with a compiler-runtime archive (`TARGET_RUNTIME_ARCHIVE`) is a
-**separate, future toolchain spec**. This refactor keeps the existing link
-arguments and the behavior of the working profiles exactly as they were; the
-`-lgcc` resolution, discovery and validation work is not part of this
-change. (Historical context on why `-lgcc` is required today — the
-`__udivti3` symbol in `kernel/time/clocksource.c` — is in the
-[libgcc / `-lgcc`](#libgcc---lgcc) section below.)
+The x86_64 kernel does not link `-lgcc`.  Its default provider is the
+profile-keyed selfhosted runtime archive, which currently supplies the
+observed `__udivti3` helper.  Validate the actual stage-1 and final kernel
+links (plus the archive-order regression fixture) with:
+
+```bash
+make RUNTIME_PROVIDER=selfhosted test-runtime
+```
+
+`compiler-rt` is opt-in and is rejected for the kernel unless the profile
+names a matching audited eligibility manifest.  That manifest binds the exact
+archive hash, selected Clang identity/resource directory, target ABI, and a
+no-red-zone audit; there is intentionally no checked-in default manifest.
+
+Keep the in-kernel and syscall E2E suites separate, since selftests start
+kernel threads that can interfere with the syscall suite:
+
+```bash
+make clean && make KERNEL_SELFTEST=1 test-kernel-selftest
+make clean && make OS01_SYSTEST=1 test-syscall
+```
+
+The selftest target builds only `kernel/selftest`, `artifacts/kernel/selftest`
+and `image/selftest`, preserving normal artifacts.  Future userland, BusyBox,
+UEFI, or aarch64 runtime support must be a distinct consumer variant and must
+be added only after an observed undefined helper justifies it; it must not
+reuse the x86_64 kernel archive by convention.
 
 ## Single source of truth: `mk/toolchains/clang.mk`
 

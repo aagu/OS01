@@ -176,6 +176,12 @@ validate-profile:
 TEST_SYSTEST_IMAGE  := $(BUILD_DIR)/image/systest/disk.img
 TEST_NETTEST_IMAGE  := $(BUILD_DIR)/image/nettest/disk.img
 TEST_INITTAB_IMAGE  := $(BUILD_DIR)/image/inittab-test/disk.img
+TEST_SELFTEST_IMAGE := $(BUILD_DIR)/image/selftest/disk.img
+# The fd_refcount selftest asserts actual cross-CPU coverage.  Four vCPUs
+# avoid a scheduler-migration false negative seen with the interactive
+# default of two, while keeping this test-only setting independently
+# overridable.
+KERNEL_SELFTEST_SMP ?= 4
 
 .PHONY: test
 test:
@@ -231,6 +237,61 @@ test-network: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	fi
 	DISK_IMG="$(TEST_NETTEST_IMAGE)" OVMF_FIRMWARE="$(OVMF_FIRMWARE)" python3 tests/run_test.py network
+
+# Runtime validation is deliberately rooted in a real, profile-resolved
+# kernel artifact.  The host-suite's link-order fixture is supplementary: it
+# must never substitute for auditing the two links that produced kernel.elf.
+.PHONY: test-runtime
+test-runtime: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(KERNEL_ARTIFACT))
+	$(call require_capability,rootfs)
+	python3 tests/runtime_audit.py \
+	  --stage1 "$(KERNEL_BUILD_DIR)/kernel.elf.stage1" \
+	  --final "$(KERNEL_ELF)" \
+	  --link-receipt "$(KERNEL_RUNTIME_LINK_RECEIPT)" \
+	  --runtime-input "$(KERNEL_RUNTIME_INPUTS)" \
+	  --llvm-nm "$(LLVM_NM)" \
+	  --llvm-readobj "$(LLVM_READOBJ)"
+	@$(MAKE) validate-kernel
+	python3 tests/runtime_link_order_test.py
+
+# This target builds and boots only the selftest-scoped image.  In particular
+# it never uses the ordinary image, and it refuses a combined syscall/selftest
+# request because those suites are intentionally run independently.
+.PHONY: test-kernel-selftest
+test-kernel-selftest: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
+	$(call require_capability,rootfs)
+	@if [ "$(OS01_SYSTEST)" = "1" ]; then \
+	  echo "ERROR: test-kernel-selftest must not be combined with OS01_SYSTEST=1; run test-syscall separately" >&2; \
+	  exit 1; \
+	fi
+	$(MAKE) KERNEL_SELFTEST=1 image
+	@set -eu; \
+	log="$(BUILD_DIR)/logs/kernel-selftest.log"; \
+	mkdir -p "$$(dirname "$$log")"; \
+	rm -f "$$log"; \
+	set +e; \
+	timeout 75 "$(QEMU_BIN)" -M q35 -smp "$(KERNEL_SELFTEST_SMP)" \
+	  -drive if=pflash,format=raw,readonly=on,file="$(OVMF_FIRMWARE)" \
+	  -drive file="$(TEST_SELFTEST_IMAGE)",format=raw,if=none,id=disk \
+	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
+	  -m "$(MEMORY)" -display none -serial stdio -no-reboot -no-shutdown >"$$log" 2>&1; \
+	rc=$$?; \
+	set -e; \
+	if [ "$$rc" -ne 0 ] && [ "$$rc" -ne 124 ]; then \
+	  echo "ERROR: kernel selftest QEMU exited with status $$rc; log: $$log" >&2; \
+	  cat "$$log" >&2; \
+	  exit 1; \
+	fi; \
+	grep -aF '[selftest] running built-in tests...' "$$log"; \
+	grep -aE '\[selftest\] [1-9][0-9]* total: [1-9][0-9]* passed, 0 failed' "$$log"; \
+	grep -aF '[selftest] done' "$$log"; \
+	if grep -aE '\[selftest\].*[[:space:]][1-9][0-9]* failed' "$$log" || grep -aF 'FAIL' "$$log"; then \
+	  echo "ERROR: kernel selftest reported a failure; log: $$log" >&2; \
+	  exit 1; \
+	fi; \
+	if [ "$$rc" -eq 124 ]; then \
+	  echo "  [selftest] QEMU timed out after complete passing markers (expected)"; \
+	fi
 
 # ── Run paths ────────────────────────────────────────────────
 # Prints the current profile's absolute firmware and normal-image paths so a
@@ -303,6 +364,10 @@ help:
 		 'test'              '(rootfs)'     'Recursive make run (alias)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-phase-0'      '(rootfs)'     'QEMU phase-0 E2E against the normal image';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-runtime'      '(rootfs)'     'Audit actual kernel runtime links + link-order fixture';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-kernel-selftest' '(rootfs)'   'QEMU built-in selftests (isolated selftest image)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-syscall'      '(rootfs)'     'QEMU syscall E2E (OS01_SYSTEST=1, 228 tests)';
 	@printf '  %-22s %-13s %s\n' \

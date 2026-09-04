@@ -15,7 +15,10 @@ BUILD_DIR := $(OS01_ROOT)/build/$(PROFILE)
 SYSROOT := $(BUILD_DIR)/sysroot
 TARGET_INCLUDEDIR := $(SYSROOT)/usr/include
 TARGET_LIBDIR := $(SYSROOT)/usr/lib
-KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel
+# KERNEL_SELFTEST changes generated kernel objects, so it gets a distinct
+# kernel build/artifact namespace.  Keep the ordinary paths exactly stable.
+KERNEL_VARIANT := $(if $(filter 1,$(KERNEL_SELFTEST)),selftest)
+KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel$(if $(KERNEL_VARIANT),/$(KERNEL_VARIANT))
 LIBC_BUILD_DIR := $(BUILD_DIR)/libc
 # Compile-affecting variant (only OS01_SYSTEST re-keys the user dirs).
 # project.mk sets USER_VARIANT before including this profile; the ?= default
@@ -43,7 +46,7 @@ STAGING_DIR := $(BUILD_DIR)/staging
 
 # Kernel artifact path (spec artifact-path table) — the profile is the single
 # source of artifact paths; kernel.mk's artifact rule consumes this.
-KERNEL_ARTIFACT := $(BUILD_DIR)/artifacts/kernel.bin
+KERNEL_ARTIFACT := $(if $(KERNEL_VARIANT),$(BUILD_DIR)/artifacts/kernel/$(KERNEL_VARIANT)/kernel.bin,$(BUILD_DIR)/artifacts/kernel.bin)
 
 # User artifact paths (spec artifact-path table) — the profile is the single
 # source of artifact paths; user.mk's artifact rules consume this.
