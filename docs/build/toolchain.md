@@ -41,6 +41,7 @@ Allowed on the command line:
 | `UEFI_CLANG=...` | validated Clang for the UEFI COFF build (defaults to `CLANG`) |
 | `LLVM_AR` / `LLVM_NM` / `LLVM_OBJCOPY` / `LLVM_READOBJ` / `LLVM_READELF` | individual LLVM tool overrides (PATH-validated) |
 | `TARGET_LD=...` | linker override (PATH-validated) |
+| `RUNTIME_PROVIDER=selfhosted\|compiler-rt` | compiler runtime provider (kernel defaults to `selfhosted`; `compiler-rt` requires an audited eligibility manifest) |
 | `QEMU_BIN=...` / `AARCH64_QEMU=...` | QEMU binary overrides |
 | `AARCH64_UEFI_FIRMWARE_SOURCE=...` | aarch64 firmware source path |
 | `LOG_TARGET=serial\|fb\|both` | kernel log output target |
