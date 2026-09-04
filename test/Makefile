@@ -77,7 +77,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_poll_requested.elf \
     $(TEST_BLD)/test_bootinfo_abi.elf
 
-.PHONY: all clean run
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe
 
 all: $(TEST_BINS)
 
@@ -109,6 +109,23 @@ run: $(TEST_BINS)
 	echo "  Suites: $$total | Failed: $$failed"; \
 	echo "=============================================="; \
 	exit $$failed
+
+# Runtime fixtures (the provider object and hosted vector binary are added in
+# the next migration task; this task intentionally keeps the probe unresolved).
+$(TEST_BLD)/runtime_udivti3_link_probe.o: $(TEST_SRC)/../runtime/tests/udivti3_link_probe.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) -ffreestanding -fno-builtin -c $< -o $@
+
+runtime-udivti3-link-probe: $(TEST_BLD)/runtime_udivti3_link_probe.o
+	$(HOST_CC) -nostdlib -Wl,-e,_start -o $(TEST_BLD)/runtime_udivti3-link-probe.elf $<
+
+$(TEST_BLD)/test_runtime_udivti3.o: $(TEST_SRC)/../runtime/tests/test_udivti3.c \
+		$(TEST_SRC)/../runtime/tests/udivti3_vectors.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TESTS_DIR)/runtime/tests -c $< -o $@
+
+test-runtime-udivti3: $(TEST_BLD)/test_runtime_udivti3.o
+	@echo "runtime vector fixture compiled (provider pending Task 2)"
 
 # libc compilation
 $(TEST_BLD)/libc_memset.o: $(LIBC_SRC)/string/memset.c
