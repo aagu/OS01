@@ -53,7 +53,11 @@ endif
 
 override KERNEL_RUNTIME_VARIANT_DIR := $(BUILD_DIR)/runtime/kernel/$(RUNTIME_PROVIDER)-$(RUNTIME_KERNEL_VARIANT_DIGEST)
 override KERNEL_RUNTIME_RECEIPT := $(KERNEL_RUNTIME_VARIANT_DIR)/runtime.receipt
-override KERNEL_RUNTIME_LINK_RECEIPT := $(BUILD_DIR)/runtime/kernel-link.receipt
+# The link receipt is produced by the two-pass kernel link, so it must follow
+# the kernel output variant rather than the provider archive variant.  Keep
+# the established normal path byte-for-byte stable; KERNEL_SELFTEST gets its
+# own receipt beside its isolated kernel build/artifact namespace.
+override KERNEL_RUNTIME_LINK_RECEIPT := $(BUILD_DIR)/runtime$(if $(KERNEL_VARIANT),/kernel/$(KERNEL_VARIANT))/kernel-link.receipt
 
 ifeq ($(RUNTIME_PROVIDER),selfhosted)
 

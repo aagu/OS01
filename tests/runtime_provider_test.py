@@ -82,6 +82,7 @@ class Fixture:
                 \t@printf 'input=%s\\n' "$(KERNEL_RUNTIME_INPUTS)"
                 \t@printf 'prereq=%s\\n' "$(KERNEL_RUNTIME_PREREQ)"
                 \t@printf 'receipt=%s\\n' "$(KERNEL_RUNTIME_RECEIPT)"
+                \t@printf 'link_receipt=%s\\n' "$(KERNEL_RUNTIME_LINK_RECEIPT)"
                 \t@printf 'variant_dir=%s\\n' "$(KERNEL_RUNTIME_VARIANT_DIR)"
                 \t@printf 'source_digest=%s\\nvariant_digest=%s\\n' "$(RUNTIME_KERNEL_SOURCE_DIGEST)" "$(RUNTIME_KERNEL_VARIANT_DIGEST)"
                 """
@@ -430,6 +431,38 @@ def main() -> int:
         if len(selfhosted_archives) != 1:
             raise AssertionError(
                 f"expected one protected selfhosted archive: {selfhosted_archives!r}"
+            )
+
+        normal_link_receipt = next(
+            line.removeprefix("link_receipt=")
+            for line in override_output.splitlines()
+            if line.startswith("link_receipt=")
+        )
+        if normal_link_receipt != str(fixture.build / "runtime/kernel-link.receipt"):
+            raise AssertionError(
+                "normal kernel runtime link receipt changed its stable path: "
+                f"{normal_link_receipt}"
+            )
+        selftest_output = require_success(
+            "selftest runtime link receipt is variant-scoped",
+            fixture.make("selfhosted", f"CLANG={TOOLS['clang']}", "KERNEL_VARIANT=selftest"),
+        )
+        selftest_link_receipt = next(
+            line.removeprefix("link_receipt=")
+            for line in selftest_output.splitlines()
+            if line.startswith("link_receipt=")
+        )
+        if selftest_link_receipt == normal_link_receipt:
+            raise AssertionError(
+                "selftest kernel runtime link receipt aliases the normal variant: "
+                f"{selftest_link_receipt}"
+            )
+        if selftest_link_receipt != str(
+            fixture.build / "runtime/kernel/selftest/kernel-link.receipt"
+        ):
+            raise AssertionError(
+                "selftest kernel runtime link receipt is not in its variant namespace: "
+                f"{selftest_link_receipt}"
             )
 
         runtime_makefile = ROOT / "runtime/Makefile"
