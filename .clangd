@@ -9,6 +9,7 @@ CompileFlags:
     - -ffreestanding
     - -isystem
     - /home/aagu/OS01/sysroot/usr/include
+    - -I/home/aagu/OS01/runtime/include
 
 ---
 If:
@@ -17,4 +18,3 @@ CompileFlags:
   Add:
     - -I/home/aagu/OS01/kernel/include
     - -I/home/aagu/OS01/thirdpart/lwip/src/include
-    - -I/home/aagu/OS01/kernel/include/net

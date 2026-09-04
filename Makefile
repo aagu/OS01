@@ -73,6 +73,24 @@ endif
 lib: $(if $(filter userland,$(PROFILE_CAPABILITIES)),$(SYSROOT_STAMP))
 	$(call require_capability,userland)
 
+# ── Editor support: project-root sysroot for clangd ─────
+# .clangd still resolves its include paths through the legacy project-root
+# sysroot/ directory. The refactor publishes immutable sysroot generations
+# under build/<profile>/sysroot-generations/ and re-points the
+# build/<profile>/sysroot symlink; this phony rebuilds that generation (via
+# the sysroot stamp) and exposes it at the root path as a symlink, so no
+# header is ever installed twice — sysroot.mk remains the single writer.
+# `make clean` already removes the root sysroot (mk/components/run.mk).
+.PHONY: sysroot
+sysroot: $(if $(filter userland,$(PROFILE_CAPABILITIES)),$(SYSROOT_STAMP))
+	$(call require_capability,userland)
+	@if [ -e "$(base)/sysroot" ] && [ ! -L "$(base)/sysroot" ]; then \
+	  echo "ERROR: $(base)/sysroot exists as a real entry; refusing to replace it" >&2; \
+	  exit 1; \
+	fi
+	@ln -sfn build/$(PROFILE)/sysroot $(base)/sysroot
+	@echo '  [sysroot] $(base)/sysroot -> build/$(PROFILE)/sysroot'
+
 # ── User programs ───────────────────────────────────────
 
 # user = the profile's user ELFs + BusyBox (mk/components/user.mk), all

@@ -342,6 +342,8 @@ help:
 		 'user'              '(userland)'   'Build userland ELFs (incl. busybox.elf)';
 	@printf '  %-22s %-13s %s\n' \
 		 'image'             '(rootfs)'     'Current profile'"'"'s disk image (variant-resolved)';
+	@printf '  %-22s %-13s %s\n' \
+		 'sysroot'           '(userland)'   'Project-root sysroot/ symlink for clangd (editor)';
 	@echo ''
 	@echo 'Run / Debug (x86, rootfs):'
 	@printf '  %-22s %-13s %s\n' \
