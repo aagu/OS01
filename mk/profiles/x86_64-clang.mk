@@ -69,3 +69,13 @@ include $(OS01_ROOT)/mk/targets/x86_64.mk
 # Archive tool for the target (spec profile variable TARGET_AR); command-line
 # overridable.
 TARGET_AR ?= $(LLVM_AR)
+
+# Compiler-runtime policy and the x86_64 kernel variant.  Consumer-specific
+# declarations live in the profile so kernel-only flags never leak into a
+# future userland or UEFI runtime archive.
+RUNTIME_PROVIDER ?= selfhosted
+RUNTIME_TARGET_kernel := $(TARGET_TRIPLE)
+RUNTIME_CFLAGS_kernel := -ffreestanding -fno-builtin -fno-stack-protector -mno-red-zone -mcmodel=kernel
+RUNTIME_OBJECT_FORMAT_kernel := ELF
+RUNTIME_MACHINE_kernel := EM_X86_64
+RUNTIME_ABI_kernel := x86_64-sysv

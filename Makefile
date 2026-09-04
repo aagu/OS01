@@ -24,10 +24,12 @@ endif
 include $(base)/mk/project.mk
 # Cross-component dependency graph (spec: mk/components/*.mk is the only
 # place that wires components together). sysroot.mk is the single writer of
-# the sysroot; kernel.mk owns the kernel artifact; uefi.mk owns the UEFI
-# runtime adapter + EFI apps; image.mk owns the rootfs manifest and the disk
-# images; run.mk owns the run/debug/test/validate/clean entry points.
+# the sysroot; runtime.mk owns compiler-runtime provider resolution and
+# variant artifacts; kernel.mk owns the kernel artifact; uefi.mk owns the
+# UEFI runtime adapter + EFI apps; image.mk owns the rootfs manifest and the
+# disk images; run.mk owns the run/debug/test/validate/clean entry points.
 include $(base)/mk/components/sysroot.mk
+include $(base)/mk/components/runtime.mk
 include $(base)/mk/components/kernel.mk
 include $(base)/mk/components/user.mk
 include $(base)/mk/components/uefi.mk
