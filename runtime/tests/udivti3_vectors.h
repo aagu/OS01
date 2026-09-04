@@ -14,7 +14,12 @@ static const struct udivti3_vector udivti3_vectors[] = {
     { 0, 0, 0, 1, 0, 0 },
     { 0, 1, 0, 1, 0, 1 },
     { 1, 0, 0, 2, 0, UINT64_C(0x8000000000000000) },
-    { UINT64_MAX, UINT64_MAX, 1, 0, UINT64_MAX, UINT64_MAX },
+    { UINT64_MAX, UINT64_MAX, 1, 0, 0, UINT64_MAX },
+    { 0, UINT64_MAX, 0, 1, 0, UINT64_MAX }, /* max-64-bit dividend */
+    { 0, 42, 0, 42, 0, 1 },                /* equality */
+    { 0, 5, 0, 7, 0, 0 },                  /* dividend less than divisor */
+    { 0, 84, 0, 7, 0, 12 },                /* exact division */
+    { 0, 85, 0, 7, 0, 12 },                /* nonzero remainder */
     { UINT64_C(0xc689a470f91c2f28), UINT64_C(0x6cf641d752c10dcf), UINT64_C(0x4315d66302921c4e), UINT64_C(0x3589b3638ed7303f), UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000002) },
     { UINT64_C(0x66a1fa8d9a3ccc46), UINT64_C(0xd324a814b02b1471), UINT64_C(0x8467d27ecadc8579), UINT64_C(0xa887731c3fd68e89), UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000) },
     { UINT64_C(0x21ecead4e03cf482), UINT64_C(0x195c18226f561631), UINT64_C(0x25a1512f18c4f493), UINT64_C(0xad63bc89642d5165), UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000) },
