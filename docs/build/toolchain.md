@@ -295,35 +295,39 @@ RAW_LD_EMULATION := -m elf_x86_64
 because `ld.lld` errors with `target emulation unknown` when every input is
 `-b binary` and no `-m` is given.
 
-### libgcc / `-lgcc`
+### Compiler runtime / no `-lgcc`
 
-The kernel's `ARCH_LIBS` are `-nostdlib -lk -lgcc`. `-lgcc` is resolved by
-the Clang driver against the host GCC's private `libgcc` directory, which
-raw `ld.lld` does **not** search by default. To keep the raw final link
-behaving identically to the driver stage1, `kernel/arch/x86_64/make.config`
-appends one extra `-L`:
+The x86_64 kernel has no dependency on GCC's private runtime directory and no
+`-lgcc` link input.  Its default provider is the profile-keyed, self-hosted
+runtime archive.  The archive and both kernel link stages publish receipts;
+the receipts bind the provider, target, ABI, archive hash, and final ELF
+undefined-symbol audit.  `make test-runtime` and `make validate-kernel` check
+these properties against the actual build outputs.
 
-```
-KERNEL_RAW_LIBDIR := -L$(TARGET_LIBDIR) -L$(dir $(shell $(CLANG) -print-libgcc-file-name))
-```
+`RUNTIME_PROVIDER=compiler-rt` is an opt-in candidate path only.  A kernel
+build rejects it unless `RUNTIME_COMPILER_RT_MANIFEST_kernel` names a reviewed
+eligibility manifest matching the exact archive hash, Clang identity/resource
+directory, target ABI, and no-red-zone audit.  This conservative default
+prevents a host toolchain's incidental runtime from becoming a kernel input.
 
-Discovery via the validated `$(CLANG)` preserves the exact prior driver
-resolution.
+The discovery implementation may query Clang's compiler-rt candidate using
+`-print-libgcc-file-name`; this is only a Clang resource lookup, never a GCC
+fallback or a link flag.  Candidate archives are independently checked for
+the expected compiler-rt basename, target machine, and homogeneous members.
 
-`-lgcc` is genuinely required today: `kernel/time/clocksource.c` uses
-`__uint128_t` division in `compute_mult_shift`, which lowers to the
-compiler-rt `__udivti3` symbol that only `-lgcc` provides. The gated
-"remove `-lgcc`" experiment in Commit K verified this by failing the
-clean-build link with:
+### Future runtime consumers
 
-```
-undefined reference to `__udivti3'
-relocation truncated to fit: R_X86_64_PLT32 against undefined symbol `__udivti3'
-```
+The kernel is currently the only enabled runtime consumer.  Each additional
+consumer must have its own provider key, receipt, and ordered runtime input;
+do not place shared runtime objects under `kernel/` or reuse the kernel
+archive by convention.
 
-(see `.superpowers/sdd/2026-08-31-toolchain-refactor-plan/task-K-report.md`).
-Removing `-lgcc` is a future kernel-runtime series, **not** part of this
-toolchain refactor.
+| Consumer | Trigger | Required proof before enabling |
+| --- | --- | --- |
+| user | Actual unresolved helper from a program or `libc.a` | Separate ELF/SysV variant, fixture after `-lc`, and a QEMU run |
+| BusyBox | Actual unresolved helper | Separate receipt and link input after its static libraries |
+| x86 UEFI | Actual final COFF unresolved helper | Copied-runtime `OS01_RUNTIME_INPUTS` hook plus COFF/x64 member audit |
+| aarch64 kernel/UEFI | Actual unresolved helper | AArch64 variant plus EM_AARCH64/COFF ARM64 target smoke test |
 
 ## `make validate`
 
