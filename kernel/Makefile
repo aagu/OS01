@@ -250,8 +250,21 @@ HOST_CC ?= clang
 HOST_NM ?= nm
 
 # Stage 1: link without kallsyms, just to get symbol table
-$(BUILD_DIR)/kernel.elf.stage1: $(KERNEL_OBJECTS) $(ARCHDIR)/$(ARCH_LINKER)
-	$(EFFECTIVE_CC) $(ALL_LDFLAGS) -o $@ $(KERNEL_OBJECTS) -T $(ARCHDIR)/$(ARCH_LINKER) $(LIBS)
+$(BUILD_DIR)/kernel.elf.stage1: $(KERNEL_OBJECTS) $(ARCHDIR)/$(ARCH_LINKER) $(KERNEL_RUNTIME_PREREQ)
+	@set -eu; \
+	partial="$(KERNEL_RUNTIME_LINK_RECEIPT).stage1"; \
+	tmp="$$partial.tmp.$$$$"; \
+	mkdir -p "$$(dirname "$$partial")"; \
+	trap 'rm -f "'"$$tmp"'"' EXIT; \
+	write_command() { \
+	  label="$$1"; shift; printf '%s=' "$$label"; \
+	  for arg do escaped=$$(printf '%s' "$$arg" | sed "s/'/'\\\\''/g"); printf " '%s'" "$$escaped"; done; \
+	  printf '\n'; \
+	}; \
+	set -- $(EFFECTIVE_CC) $(ALL_LDFLAGS) -o $@ $(KERNEL_OBJECTS) -T $(ARCHDIR)/$(ARCH_LINKER) $(LIBS) $(KERNEL_RUNTIME_INPUTS); \
+	"$$@"; \
+	write_command stage1 "$$@" > "$$tmp"; \
+	mv "$$tmp" "$$partial"
 
 # Generate kallsyms object from stage1's nm output
 $(BUILD_DIR)/kernel/kallsyms.o: kernel/kallsyms.c $(BUILD_DIR)/kernel.elf.stage1
@@ -269,10 +282,30 @@ $(BUILD_DIR)/kernel/kallsyms.o: kernel/kallsyms.c $(BUILD_DIR)/kernel.elf.stage1
 # linker script) changes, so a no-op `make kernel.bin` does not relink.
 
 # ── Final link ──────────────────────────────────────────────
-$(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o $(ARCHDIR)/$(ARCH_LINKER)
+$(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o $(ARCHDIR)/$(ARCH_LINKER) $(KERNEL_RUNTIME_PREREQ)
 ifeq ($(ARCH),x86_64)
-	$(TARGET_LD) $(KERNEL_RAW_LDFLAGS) $(KERNEL_RAW_LIBDIR) -o $@ $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o \
-	    -T $(ARCHDIR)/$(ARCH_LINKER) -lk -lgcc
+	@set -eu; \
+	partial="$(KERNEL_RUNTIME_LINK_RECEIPT).stage1"; \
+	receipt="$(KERNEL_RUNTIME_LINK_RECEIPT)"; \
+	tmp="$$receipt.tmp.$$$$"; \
+	trap 'rm -f "'"$$tmp"'"' EXIT; \
+	if ! test -f "$$partial" || ! test "$$(wc -l < "$$partial")" -eq 1 || ! grep -q '^stage1=.' "$$partial"; then \
+	  echo "ERROR: missing or invalid stage1 kernel link receipt: $$partial" >&2; exit 1; \
+	fi; \
+	if ! tr -d '\000' < "$$partial" | cmp -s - "$$partial"; then \
+	  echo "ERROR: stage1 kernel link receipt contains a NUL byte: $$partial" >&2; exit 1; \
+	fi; \
+	write_command() { \
+	  label="$$1"; shift; printf '%s=' "$$label"; \
+	  for arg do escaped=$$(printf '%s' "$$arg" | sed "s/'/'\\\\''/g"); printf " '%s'" "$$escaped"; done; \
+	  printf '\n'; \
+	}; \
+	set -- $(TARGET_LD) $(KERNEL_RAW_LDFLAGS) $(KERNEL_RAW_LIBDIR) -o $@ $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o \
+	    -T $(ARCHDIR)/$(ARCH_LINKER) -lk $(KERNEL_RUNTIME_INPUTS); \
+	"$$@"; \
+	cat "$$partial" > "$$tmp"; \
+	write_command final "$$@" >> "$$tmp"; \
+	mv "$$tmp" "$$receipt"
 else
 	$(EFFECTIVE_CC) $(ALL_LDFLAGS) -o $@ $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o \
 	    -T $(ARCHDIR)/$(ARCH_LINKER) $(LIBS)

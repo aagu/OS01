@@ -20,7 +20,7 @@
 ifeq ($(filter userland,$(PROFILE_CAPABILITIES)),userland)
 ifdef KERNEL_ARTIFACT
 
-$(KERNEL_ARTIFACT): $(SYSROOT_STAMP) FORCE
+$(KERNEL_ARTIFACT): $(SYSROOT_STAMP) $(KERNEL_RUNTIME_PREREQ) FORCE
 	@mkdir -p $(dir $@)
 	@+$(SHELL) -ec '\
 	  mkdir -p "$(dir $(LOCK_DIR))"; \
@@ -49,12 +49,16 @@ $(KERNEL_ARTIFACT): $(SYSROOT_STAMP) FORCE
 	  trap "rmdir \"$$lease\" 2>/dev/null || true" EXIT; \
 	  prev=""; \
 	  if [ -f "$(KERNEL_BUILD_DIR)/.sysroot-generation" ]; then prev=$$(cat "$(KERNEL_BUILD_DIR)/.sysroot-generation"); fi; \
-	  if [ "$$prev" != "$$genid" ]; then force="-B"; else force=""; fi; \
+	  if [ "$$prev" != "$$genid" ] || [ ! -f "$(KERNEL_RUNTIME_LINK_RECEIPT)" ]; then force="-B"; else force=""; fi; \
 	  env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
 	    MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
 	    -C kernel OS01_PROFILE_FILE="$(OS01_PROFILE_FILE)" PROFILE="$(PROFILE)" \
 	    ARCH=x86_64 \
-	    kernel.bin $$force SYSROOT_GENERATION_DIR="$$genabs" $(OS01_SUBMAKE_ARGS); \
+	    kernel.bin $$force SYSROOT_GENERATION_DIR="$$genabs" \
+	    KERNEL_RUNTIME_INPUTS="$(KERNEL_RUNTIME_INPUTS)" \
+	    KERNEL_RUNTIME_PREREQ="$(KERNEL_RUNTIME_PREREQ)" \
+	    KERNEL_RUNTIME_LINK_RECEIPT="$(KERNEL_RUNTIME_LINK_RECEIPT)" \
+	    $(OS01_SUBMAKE_ARGS); \
 	  if [ -z "$(DRY_RUN)" ]; then printf "%s\n" "$$genid" > "$(KERNEL_BUILD_DIR)/.sysroot-generation"; fi; \
 	'
 	@$(LLVM_READOBJ) --file-headers $(KERNEL_BUILD_DIR)/kernel.elf | grep -qF 'EM_X86_64'
