@@ -194,6 +194,15 @@ test-phase-0: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OV
 	OVMF_FIRMWARE="$(OVMF_FIRMWARE)" python3 tests/run_test.py phase-0 --disk $(NORMAL_IMAGE)
 
 .PHONY: test-syscall
+# KERNEL_SELFTEST starts kernel threads at boot and can perturb the syscall
+# suite's fork/exec/wait sequencing.  Reject the combination while Make is
+# parsing the requested goals, before firmware/image prerequisites or the
+# normal-image hash sandwich can run.
+ifneq ($(filter test-syscall,$(MAKECMDGOALS)),)
+ifeq ($(filter 1,$(KERNEL_SELFTEST)),1)
+$(error ERROR: test-syscall must not be combined with KERNEL_SELFTEST=1; run test-kernel-selftest separately)
+endif
+endif
 test-syscall: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@set -e; \
