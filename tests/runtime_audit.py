@@ -14,6 +14,14 @@ def fail(message: str) -> None:
     raise AssertionError(message)
 
 
+def contains_gcc_runtime_reference(value: str) -> bool:
+    folded = value.casefold()
+    components = folded.replace("\\", "/").split("/")
+    return "libgcc" in folded or folded == "-lgcc" or any(
+        component.startswith("gcc") for component in components
+    )
+
+
 def parse_receipt(path: Path) -> dict[str, str]:
     try:
         data = path.read_bytes()
@@ -42,9 +50,12 @@ def parse_receipt(path: Path) -> dict[str, str]:
 
 
 def run_tool(tool: str, arguments: list[str], description: str) -> str:
-    result = subprocess.run(
-        [tool, *arguments], check=False, text=True, capture_output=True
-    )
+    try:
+        result = subprocess.run(
+            [tool, *arguments], check=False, text=True, capture_output=True
+        )
+    except OSError as exc:
+        fail(f"cannot execute tool {tool}: {exc}")
     if result.returncode != 0:
         fail(
             f"{description} failed with exit {result.returncode}:\n"
@@ -86,8 +97,8 @@ def main() -> int:
     if not runtime_path.is_file():
         fail(f"runtime input is missing or not a regular file: {runtime_path}")
     runtime_input = str(runtime_path)
-    if "libgcc" in runtime_input:
-        fail(f"runtime input contains forbidden libgcc path: {runtime_input}")
+    if contains_gcc_runtime_reference(runtime_input):
+        fail(f"runtime input contains a forbidden GCC runtime path: {runtime_input}")
 
     records = parse_receipt(args.link_receipt)
     for name in ("stage1", "final"):
@@ -100,9 +111,7 @@ def main() -> int:
             fail(f"{name} link must contain the exact runtime input exactly once")
         if "-lk" not in argv or argv.index("-lk") >= argv.index(runtime_input):
             fail(f"{name} link must place the runtime input after -lk")
-        if any(
-            arg == "-lgcc" or "libgcc" in arg or "/gcc/" in arg for arg in argv
-        ):
+        if any(contains_gcc_runtime_reference(arg) for arg in argv):
             fail(f"{name} link contains a forbidden GCC runtime reference")
 
     audit_elf(args.stage1, args.llvm_nm, args.llvm_readobj)

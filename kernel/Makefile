@@ -249,22 +249,49 @@ $(BUILD_DIR)/intr/irq.o: intr/irq.c
 HOST_CC ?= clang
 HOST_NM ?= nm
 
+ifeq ($(ARCH),x86_64)
+ifneq ($(KERNEL_RUNTIME_LINK_REQUESTED),)
+KERNEL_RUNTIME_INPUT_SHA256 := $(strip $(shell sha256sum "$(KERNEL_RUNTIME_INPUTS)" 2>/dev/null | cut -d' ' -f1))
+ifeq ($(KERNEL_RUNTIME_INPUT_SHA256),)
+$(error failed to compute x86_64 kernel runtime input digest for '$(KERNEL_RUNTIME_INPUTS)')
+endif
+KERNEL_RUNTIME_IDENTITY_FILE := $(BUILD_DIR)/.runtime-link.identity
+KERNEL_RUNTIME_IDENTITY := prereq=$(KERNEL_RUNTIME_PREREQ)|input=$(KERNEL_RUNTIME_INPUTS)|sha256=$(KERNEL_RUNTIME_INPUT_SHA256)
+KERNEL_RUNTIME_LINKED_IDENTITY := $(strip $(shell cat "$(KERNEL_RUNTIME_IDENTITY_FILE)" 2>/dev/null))
+ifneq ($(KERNEL_RUNTIME_LINKED_IDENTITY),$(KERNEL_RUNTIME_IDENTITY))
+KERNEL_RUNTIME_RELINK_PREREQ := FORCE_KERNEL_RUNTIME_RELINK
+.PHONY: FORCE_KERNEL_RUNTIME_RELINK
+FORCE_KERNEL_RUNTIME_RELINK:
+endif
+endif
+endif
+
 # Stage 1: link without kallsyms, just to get symbol table
-$(BUILD_DIR)/kernel.elf.stage1: $(KERNEL_OBJECTS) $(ARCHDIR)/$(ARCH_LINKER) $(KERNEL_RUNTIME_PREREQ)
+$(BUILD_DIR)/kernel.elf.stage1: $(KERNEL_OBJECTS) $(ARCHDIR)/$(ARCH_LINKER) $(KERNEL_RUNTIME_PREREQ) $(KERNEL_RUNTIME_RELINK_PREREQ)
 	@set -eu; \
 	partial="$(KERNEL_RUNTIME_LINK_RECEIPT).stage1"; \
-	tmp="$$partial.tmp.$$$$"; \
+	complete="$(KERNEL_RUNTIME_LINK_RECEIPT)"; \
+	identity="$(KERNEL_RUNTIME_IDENTITY_FILE)"; \
+	elf_tmp="$@.tmp.$$$$"; \
+	partial_tmp="$$partial.tmp.$$$$"; \
+	success=0; \
 	mkdir -p "$$(dirname "$$partial")"; \
-	trap 'rm -f "'"$$tmp"'"' EXIT; \
+	cleanup() { rc=$$?; trap - EXIT HUP INT TERM; if [ "$$success" -ne 1 ]; then rm -f "$@" "$(BUILD_DIR)/kernel.elf" "$$partial" "$$complete" "$$identity" "$$elf_tmp" "$$partial_tmp"; fi; exit $$rc; }; \
+	trap cleanup EXIT HUP INT TERM; \
+	rm -f "$$complete" "$$partial" "$$identity"; \
 	write_command() { \
 	  label="$$1"; shift; printf '%s=' "$$label"; \
 	  for arg do escaped=$$(printf '%s' "$$arg" | sed "s/'/'\\\\''/g"); printf " '%s'" "$$escaped"; done; \
 	  printf '\n'; \
 	}; \
-	set -- $(EFFECTIVE_CC) $(ALL_LDFLAGS) -o $@ $(KERNEL_OBJECTS) -T $(ARCHDIR)/$(ARCH_LINKER) $(LIBS) $(KERNEL_RUNTIME_INPUTS); \
+	set -- $(EFFECTIVE_CC) $(ALL_LDFLAGS) -o "$$elf_tmp" $(KERNEL_OBJECTS) -T $(ARCHDIR)/$(ARCH_LINKER) $(LIBS) $(KERNEL_RUNTIME_INPUTS); \
+	if [ "$(KERNEL_LINK_FAULT_INJECT)" = stage1-link ]; then echo "ERROR: injected stage1 link failure" >&2; false; fi; \
 	"$$@"; \
-	write_command stage1 "$$@" > "$$tmp"; \
-	mv "$$tmp" "$$partial"
+	write_command stage1 "$$@" > "$$partial_tmp"; \
+	if [ "$(KERNEL_LINK_FAULT_INJECT)" = stage1-publish ]; then echo "ERROR: injected stage1 publish failure" >&2; false; fi; \
+	mv "$$elf_tmp" "$@"; \
+	mv "$$partial_tmp" "$$partial"; \
+	success=1
 
 # Generate kallsyms object from stage1's nm output
 $(BUILD_DIR)/kernel/kallsyms.o: kernel/kallsyms.c $(BUILD_DIR)/kernel.elf.stage1
@@ -282,13 +309,19 @@ $(BUILD_DIR)/kernel/kallsyms.o: kernel/kallsyms.c $(BUILD_DIR)/kernel.elf.stage1
 # linker script) changes, so a no-op `make kernel.bin` does not relink.
 
 # ── Final link ──────────────────────────────────────────────
-$(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o $(ARCHDIR)/$(ARCH_LINKER) $(KERNEL_RUNTIME_PREREQ)
+$(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o $(ARCHDIR)/$(ARCH_LINKER) $(KERNEL_RUNTIME_PREREQ) $(KERNEL_RUNTIME_RELINK_PREREQ)
 ifeq ($(ARCH),x86_64)
 	@set -eu; \
 	partial="$(KERNEL_RUNTIME_LINK_RECEIPT).stage1"; \
 	receipt="$(KERNEL_RUNTIME_LINK_RECEIPT)"; \
-	tmp="$$receipt.tmp.$$$$"; \
-	trap 'rm -f "'"$$tmp"'"' EXIT; \
+	elf_tmp="$@.tmp.$$$$"; \
+	receipt_tmp="$$receipt.tmp.$$$$"; \
+	identity="$(KERNEL_RUNTIME_IDENTITY_FILE)"; \
+	identity_tmp="$$identity.tmp.$$$$"; \
+	success=0; \
+	cleanup() { rc=$$?; trap - EXIT HUP INT TERM; if [ "$$success" -ne 1 ]; then rm -f "$(BUILD_DIR)/kernel.elf.stage1" "$@" "$$partial" "$$receipt" "$$identity" "$$elf_tmp" "$$receipt_tmp" "$$identity_tmp"; fi; exit $$rc; }; \
+	trap cleanup EXIT HUP INT TERM; \
+	rm -f "$$receipt" "$$identity"; \
 	if ! test -f "$$partial" || ! test "$$(wc -l < "$$partial")" -eq 1 || ! grep -q '^stage1=.' "$$partial"; then \
 	  echo "ERROR: missing or invalid stage1 kernel link receipt: $$partial" >&2; exit 1; \
 	fi; \
@@ -300,12 +333,18 @@ ifeq ($(ARCH),x86_64)
 	  for arg do escaped=$$(printf '%s' "$$arg" | sed "s/'/'\\\\''/g"); printf " '%s'" "$$escaped"; done; \
 	  printf '\n'; \
 	}; \
-	set -- $(TARGET_LD) $(KERNEL_RAW_LDFLAGS) $(KERNEL_RAW_LIBDIR) -o $@ $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o \
+	set -- $(TARGET_LD) $(KERNEL_RAW_LDFLAGS) $(KERNEL_RAW_LIBDIR) -o "$$elf_tmp" $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o \
 	    -T $(ARCHDIR)/$(ARCH_LINKER) -lk $(KERNEL_RUNTIME_INPUTS); \
+	if [ "$(KERNEL_LINK_FAULT_INJECT)" = final-link ]; then echo "ERROR: injected final link failure" >&2; false; fi; \
 	"$$@"; \
-	cat "$$partial" > "$$tmp"; \
-	write_command final "$$@" >> "$$tmp"; \
-	mv "$$tmp" "$$receipt"
+	cat "$$partial" > "$$receipt_tmp"; \
+	write_command final "$$@" >> "$$receipt_tmp"; \
+	printf '%s\n' '$(KERNEL_RUNTIME_IDENTITY)' > "$$identity_tmp"; \
+	if [ "$(KERNEL_LINK_FAULT_INJECT)" = receipt-publish ]; then echo "ERROR: injected receipt publish failure" >&2; false; fi; \
+	mv "$$elf_tmp" "$@"; \
+	mv "$$receipt_tmp" "$$receipt"; \
+	mv "$$identity_tmp" "$$identity"; \
+	success=1
 else
 	$(EFFECTIVE_CC) $(ALL_LDFLAGS) -o $@ $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o \
 	    -T $(ARCHDIR)/$(ARCH_LINKER) $(LIBS)

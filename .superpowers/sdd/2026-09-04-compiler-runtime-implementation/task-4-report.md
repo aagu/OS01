@@ -109,3 +109,68 @@ Planned commit subject: `build(kernel): link selfhosted compiler runtime`.
   `install-headers` sub-make, which does not consume or link a runtime.
 - Compiler-rt eligibility remains intentionally untouched for Task 5, and the
   public runtime/selftest targets remain Task 6.
+
+## Fix round 1 — reviewer findings
+
+### Provider identity forces both links
+
+`kernel/Makefile` records the selected provider receipt, resolved archive, and
+archive digest in `.runtime-link.identity`.  A changed identity adds the same
+phony relink prerequisite to both stage1 and final targets.  The focused test
+now keeps the archive path and contents identical while changing only the
+provider receipt A → B → A.  It verifies both stage1 and final ELF mtimes
+advance on each change and that the published identity names the selected
+receipt.  This proves provider identity, rather than archive timestamp or
+pathname, drives both inner links.
+
+### Failure-atomic link publication
+
+Starting either link transaction now invalidates the complete receipt and its
+identity marker.  Every failure cleanup removes stage1/final ELFs, partial and
+complete receipts, identity metadata, and temporary outputs.  A new
+`stage1-publish` fault point complements the existing stage1-link, final-link,
+and receipt-publish fault points.  The focused test establishes a successful
+publication before each injected failure and then requires that none of those
+published outputs or temporary files remains.
+
+### Runtime audit robustness
+
+`tests/runtime_audit.py` rejects `libgcc` and case-insensitive `gcc*` path
+components after normalizing slash direction.  Its subprocess wrapper catches
+`OSError` and reports a single `ERROR: cannot execute tool …` diagnostic rather
+than a Python traceback.  The adversarial test covers `GCC-13`, `GcCtools`,
+and a missing LLVM tool.
+
+### Fix-round verification
+
+The red regression initially failed with:
+
+```text
+AssertionError: fault 'stage1-link' left published .runtime-link.identity
+```
+
+After cleanup and the publication fault point were added, these commands all
+exited 0:
+
+```text
+python3 tests/kernel_runtime_link_test.py
+# kernel runtime link tests: identity-only A→B→A and 4 fault cases passed
+python3 tests/runtime_audit_test.py
+# runtime audit adversarial tests: 3 passed
+make clean
+make RUNTIME_PROVIDER=selfhosted kernel.bin
+python3 tests/runtime_audit.py --stage1 build/x86_64-clang/kernel/kernel.elf.stage1 \
+  --final build/x86_64-clang/kernel/kernel.elf \
+  --link-receipt build/x86_64-clang/runtime/kernel-link.receipt \
+  --runtime-input build/x86_64-clang/runtime/kernel/selfhosted-30752fc680945315a2203c5db5759f797cc15dcf388b29a39ccb5b50cece7209/libos01-builtins.a \
+  --llvm-nm /usr/bin/llvm-nm --llvm-readobj /usr/bin/llvm-readobj
+make validate-kernel
+python3 tests/runtime_provider_test.py
+# runtime provider tests: 14 passed
+python3 tests/runtime_link_order_test.py
+make -C test OS01_PROFILE_FILE="$PWD/mk/profiles/x86_64-clang.mk" \
+  PROFILE=x86_64-clang test-runtime-udivti3
+make test
+# Suites: 17 | Failed: 0
+git diff --check
+```
