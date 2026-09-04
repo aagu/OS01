@@ -43,21 +43,14 @@ $(if $(filter $(1),$(PROFILE_CAPABILITIES)),,$(error PROFILE='$(PROFILE)' lacks 
 endef
 
 # ── Controlled recursive Make ──────────────────────────────────
-# OS01_SUBMAKEFLAGS retains only GNU Make options — the bare letter flags
-# GNU Make emits without a dash and concatenates into one word (n, Bs, knw,
-# ...), then the dash-prefixed flags (-j..., --jobserver-auth=..., long
-# options) — and drops every VAR=VALUE assignment. Assignment detection is by
-# "=" (every assignment contains one); $(filter %=%,...) cannot be used
-# because GNU Make's filter patterns treat only the first "%" as a wildcard,
-# so "%=%" matches nothing. GNU Make 4.4+ puts command-line assignments after
-# a literal "--" word on MAKEFLAGS, which filter-out removes. The bare-letter
-# flags MUST stay the FIRST word: GNU Make only accepts concatenated letter
-# flags in the leading word of MAKEFLAGS (a trailing bare "n" is re-parsed as
-# a target name and fails with "No rule to make target 'n'"). Whitelisted
-# overrides are passed explicitly as command-line arguments by the call
-# sites (OS01_SUBMAKE_ARGS below); nothing but make options crosses via
-# MAKEFLAGS.
-OS01_SUBMAKEFLAGS = $(foreach w,$(filter-out -%,$(MAKEFLAGS)),$(if $(findstring =,$(w)),,$(w))) $(filter-out --,$(filter -%,$(MAKEFLAGS)))
+# GNU Make's MFLAGS contains only options, never command-line variable
+# definitions.  Using it directly avoids trying to parse MAKEFLAGS ourselves:
+# escaped whitespace in a value (VAR=one\ two) spans Make words and can leave
+# a tail that looks like an option or target after a word-at-a-time filter.
+# MFLAGS also keeps concatenated letter flags in their required leading,
+# dash-prefixed form and preserves jobserver/long options.  Whitelisted
+# overrides are passed explicitly by OS01_SUBMAKE_ARGS below.
+OS01_SUBMAKEFLAGS = $(MFLAGS)
 
 # os01_submake — root-only controlled sub-make. The leading "+" is a recipe
 # prefix (runs even under -n) and is not part of the shell command; there is

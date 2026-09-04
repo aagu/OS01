@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,11 +65,22 @@ class Fixture:
                 f"""\
                 PROFILE := fixture
                 OS01_PROFILE_FILE := {self.profile}
+                OS01_SUBMAKEFLAGS = $(MFLAGS)
+                OS01_SUBMAKE_ARGS = CLANG=$(CLANG) LLVM_AR=$(LLVM_AR) LLVM_NM=$(LLVM_NM) LLVM_READOBJ=$(LLVM_READOBJ) RUNTIME_PROVIDER=$(RUNTIME_PROVIDER)
+                define os01_submake
+                +env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \\
+                  MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \\
+                  -C $(1) OS01_PROFILE_FILE="$(OS01_PROFILE_FILE)" PROFILE="$(PROFILE)" $(2)
+                endef
                 include {ROOT / 'mk/components/runtime.mk'}
 
                 .PHONY: probe
                 probe: $(KERNEL_RUNTIME_PREREQ)
                 \t@printf 'input=%s\\n' "$(KERNEL_RUNTIME_INPUTS)"
+                \t@printf 'prereq=%s\\n' "$(KERNEL_RUNTIME_PREREQ)"
+                \t@printf 'receipt=%s\\n' "$(KERNEL_RUNTIME_RECEIPT)"
+                \t@printf 'variant_dir=%s\\n' "$(KERNEL_RUNTIME_VARIANT_DIR)"
+                \t@printf 'source_digest=%s\\nvariant_digest=%s\\n' "$(RUNTIME_KERNEL_SOURCE_DIGEST)" "$(RUNTIME_KERNEL_VARIANT_DIGEST)"
                 """
             ),
             encoding="utf-8",
@@ -90,7 +102,9 @@ class Fixture:
         )
         self.query.chmod(0o755)
 
-    def make(self, provider: str) -> subprocess.CompletedProcess[str]:
+    def make(
+        self, provider: str, *extra_args: str
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 TOOLS["make"],
@@ -98,6 +112,7 @@ class Fixture:
                 "-f",
                 str(self.harness),
                 f"RUNTIME_PROVIDER={provider}",
+                *extra_args,
                 "probe",
             ],
             cwd=ROOT,
@@ -155,6 +170,15 @@ def require_failure(
             f"{name}: expected exact diagnostic fragment:\n{expected_diagnostic}\n"
             f"actual output:\n{combined}"
         )
+
+
+def require_success(
+    name: str, result: subprocess.CompletedProcess[str]
+) -> str:
+    combined = result.stdout + result.stderr
+    if result.returncode != 0:
+        raise AssertionError(f"{name}: make failed:\n{combined}")
+    return combined
 
 
 def main() -> int:
@@ -251,7 +275,150 @@ def main() -> int:
             "ERROR: compiler-rt member 'aarch64.o' has wrong object format/machine for consumer 'kernel'; expected ELF/EM_X86_64",
         )
 
-    print("runtime provider tests: 9 passed")
+        duplicate_wrong_dir = fixture.root / "duplicate-wrong"
+        duplicate_valid_dir = fixture.root / "duplicate-valid"
+        duplicate_wrong_dir.mkdir()
+        duplicate_valid_dir.mkdir()
+        duplicate_wrong = duplicate_wrong_dir / "same.o"
+        duplicate_valid = duplicate_valid_dir / "same.o"
+        fixture.compile_object("aarch64-unknown-none", duplicate_wrong)
+        fixture.compile_object("x86_64-unknown-none", duplicate_valid)
+        duplicate_archive = fixture.root / "duplicate" / "libclang_rt.builtins.a"
+        duplicate_archive.parent.mkdir()
+        fixture.archive(duplicate_archive, duplicate_wrong, duplicate_valid)
+        duplicate_members = subprocess.run(
+            [TOOLS["llvm-ar"], "t", str(duplicate_archive)],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.splitlines()
+        if duplicate_members != ["same.o", "same.o"]:
+            raise AssertionError(
+                f"duplicate archive fixture is invalid: {duplicate_members!r}"
+            )
+        fixture.set_query(output=str(duplicate_archive))
+        require_failure(
+            "duplicate archive member basenames",
+            fixture,
+            "compiler-rt",
+            "ERROR: compiler-rt archive contains duplicate member basename 'same.o'",
+        )
+
+        valid_archive = fixture.root / "valid" / "libclang_rt.builtins.a"
+        valid_archive.parent.mkdir()
+        fixture.archive(valid_archive, x86_object)
+        fixture.set_query(output=str(valid_archive))
+        valid_output = require_success(
+            "valid singleton x86 ELF archive",
+            fixture.make("compiler-rt"),
+        )
+        if f"input={valid_archive}\n" not in valid_output:
+            raise AssertionError(f"valid archive was not published:\n{valid_output}")
+        compiler_receipts = list(fixture.build.rglob("runtime.receipt"))
+        if len(compiler_receipts) != 1:
+            raise AssertionError(f"expected one compiler-rt receipt: {compiler_receipts!r}")
+        compiler_receipt = compiler_receipts[0].read_text(encoding="utf-8")
+        expected_archive_sha = subprocess.run(
+            ["sha256sum", str(valid_archive)],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.split()[0]
+        for expected in (
+            "provider=compiler-rt",
+            f"archive={valid_archive}",
+            f"archive_sha256={expected_archive_sha}",
+            "target=x86_64-unknown-none",
+            "format=ELF",
+            "machine=EM_X86_64",
+            "abi=x86_64-sysv",
+        ):
+            if expected not in compiler_receipt:
+                raise AssertionError(
+                    f"valid compiler-rt receipt lacks {expected!r}:\n{compiler_receipt}"
+                )
+
+        override_marker = fixture.root / "libgcc-command-line-override"
+        override_args = (
+            f"RUNTIME_KERNEL_SOURCE_INPUTS={override_marker}/source.c",
+            "RUNTIME_KERNEL_SOURCE_DIGEST=libgcc-source-digest",
+            "RUNTIME_KERNEL_VARIANT_TUPLE=libgcc-variant-tuple",
+            "RUNTIME_KERNEL_VARIANT_DIGEST=libgcc-variant-digest",
+            f"KERNEL_RUNTIME_VARIANT_DIR={override_marker}/variant",
+            f"KERNEL_RUNTIME_ARCHIVE={override_marker}/libgcc.a",
+            f"KERNEL_RUNTIME_RECEIPT={override_marker}/runtime.receipt",
+            f"KERNEL_RUNTIME_LINK_RECEIPT={override_marker}/link.receipt",
+            f"KERNEL_RUNTIME_PREREQ={override_marker}/prereq",
+            f"KERNEL_RUNTIME_INPUTS={override_marker}/libgcc.a",
+            f"CLANG={TOOLS['clang']}",
+        )
+        override_output = require_success(
+            "derived runtime command-line overrides are ignored",
+            fixture.make("selfhosted", *override_args),
+        )
+        if "libgcc-command-line-override" in override_output or override_marker.exists():
+            raise AssertionError(
+                f"derived runtime override escaped into the build:\n{override_output}"
+            )
+        selfhosted_archives = list(fixture.build.rglob("libos01-builtins.a"))
+        if len(selfhosted_archives) != 1:
+            raise AssertionError(
+                f"expected one protected selfhosted archive: {selfhosted_archives!r}"
+            )
+
+        runtime_makefile = ROOT / "runtime/Makefile"
+        original_stat = runtime_makefile.stat()
+        archive = selfhosted_archives[0]
+        archive_mtime = archive.stat().st_mtime_ns
+        future_mtime = max(time.time_ns(), archive_mtime) + 2_000_000_000
+        try:
+            os.utime(
+                runtime_makefile,
+                ns=(original_stat.st_atime_ns, future_mtime),
+            )
+            require_success(
+                "runtime Makefile invalidates archive",
+                fixture.make("selfhosted", f"CLANG={TOOLS['clang']}"),
+            )
+            if archive.stat().st_mtime_ns <= archive_mtime:
+                raise AssertionError(
+                    "runtime/Makefile changed but libos01-builtins.a was not rebuilt"
+                )
+        finally:
+            os.utime(
+                runtime_makefile,
+                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+            )
+
+        escaped_value = "alpha beta\\\\gamma escaped-tail"
+        sanitized = subprocess.run(
+            [
+                TOOLS["make"],
+                "--no-print-directory",
+                "-n",
+                "-B",
+                "RUNTIME_PROVIDER=selfhosted",
+                f"UNLISTED_RUNTIME_VALUE={escaped_value}",
+                "runtime-kernel",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        sanitized_output = require_success(
+            "escaped multiword assignment is sanitized", sanitized
+        )
+        if "RUNTIME_PROVIDER=selfhosted" not in sanitized_output:
+            raise AssertionError(
+                f"whitelisted provider did not reach runtime sub-make:\n{sanitized_output}"
+            )
+        if "UNLISTED_RUNTIME_VALUE" in sanitized_output or "escaped-tail" in sanitized_output:
+            raise AssertionError(
+                f"unlisted multiword assignment leaked into sub-make:\n{sanitized_output}"
+            )
+
+    print("runtime provider tests: 14 passed")
     return 0
 
 

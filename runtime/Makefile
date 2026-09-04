@@ -1,4 +1,5 @@
 # ── Profile-only compiler-runtime variant build ────────────────
+override RUNTIME_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
 ifeq ($(strip $(OS01_PROFILE_FILE)),)
 $(error invoke from the repository root: make PROFILE=x86_64-clang runtime-kernel)
 endif
@@ -45,7 +46,7 @@ runtime-receipt: $(RUNTIME_ARCHIVE)
 	} > "$$tmp"; \
 	mv "$$tmp" "$(RUNTIME_RECEIPT)"
 
-$(RUNTIME_OBJ): $(RUNTIME_SOURCE) $(RUNTIME_HEADER)
+$(RUNTIME_OBJ): $(RUNTIME_SOURCE) $(RUNTIME_HEADER) $(RUNTIME_MAKEFILE)
 	@mkdir -p $(dir $@)
 	$(CLANG) --target=$(RUNTIME_TARGET) $(RUNTIME_CFLAGS_NORMALIZED) \
 		-I$(RUNTIME_SOURCE_DIR)/include -c $< -o $@

@@ -194,3 +194,79 @@ The requested closeout sequence was repeated after removing the generated
   `-print-libgcc-file-name` only with `-rtlib=compiler-rt`.  No GCC executable,
   GCC private-library lookup, `-L` injection, `-lgcc`, or fallback exists in
   the new build path.
+
+## Fix round 1/5
+
+Reviewer findings were converted into executable regressions before the
+corresponding production edits.
+
+### RED sequence
+
+Running `python3 tests/runtime_provider_test.py` exposed the findings in
+order:
+
+1. A deliberately ordered archive containing an AArch64 `same.o` followed by
+   a valid x86_64 `same.o` unexpectedly succeeded.  Extraction had overwritten
+   the first occurrence.
+2. After duplicate rejection was added, command-line overrides of
+   `KERNEL_RUNTIME_PREREQ` redirected the harness to
+   `libgcc-command-line-override/prereq`, producing `No rule to make target`.
+3. After derived variables were protected, touching `runtime/Makefile` left
+   `libos01-builtins.a` at its old modification time.
+4. After adding the inner Makefile prerequisite, an unlisted assignment with
+   escaped whitespace leaked `beta\\gamma escaped-tail` into the recursive
+   `MAKEFLAGS` and failed as a nonexistent target.
+
+Each run exited 1 at the named assertion.  The existing provider cases stayed
+ahead of the new assertions, so reaching the next RED also re-proved earlier
+fixes.
+
+### Changes
+
+- All component-derived source inputs/digest, normalized tuple/digest,
+  variant directory, archive, receipts, prerequisite, compiler-rt candidate,
+  and published input now use GNU Make `override` assignments.  The only
+  intended external selector remains `RUNTIME_PROVIDER`; a synthetic
+  command-line path containing `libgcc` cannot redirect any output or input.
+- Compiler-rt validation rejects duplicate member basenames before
+  extraction, preventing later members from hiding earlier incompatible
+  objects.
+- Controlled recursion now copies GNU Make's option-only `MFLAGS` into the
+  clean environment instead of reparsing `MAKEFLAGS` word by word.  This
+  preserves `-n`/`-B` and the explicit provider while dropping a multiword,
+  backslash-containing unlisted assignment as a whole.
+- `runtime/Makefile` captures its own path before including the profile and
+  makes every runtime object depend on it, so build-rule changes recompile the
+  object and rebuild the archive.
+- The suite now accepts one valid singleton x86 ELF archive and asserts the
+  published input plus receipt provider, target, format, machine, ABI, archive
+  path, and independently calculated archive SHA-256.
+
+### GREEN evidence
+
+Fresh closeout commands:
+
+```text
+make clean
+python3 tests/runtime_provider_test.py
+make RUNTIME_PROVIDER=selfhosted runtime-kernel
+make test
+git diff --check
+git diff --name-only -- kernel kernel/Makefile mk/components/kernel.mk \
+  kernel/arch/x86_64/make.config
+```
+
+Results:
+
+```text
+runtime provider tests: 14 passed
+Suites: 17 | Failed: 0
+```
+
+The selfhosted archive again contained only `udivti3.o`, its object had no
+undefined symbols, and its recorded archive digest matched `sha256sum`.
+`git diff --check` exited 0 and the kernel-link path-limited diff was empty.
+
+Fix-round commit subject:
+
+- `fix(runtime): harden provider build invariants`
