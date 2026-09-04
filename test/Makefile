@@ -75,7 +75,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_tetris_logic.elf \
     $(TEST_BLD)/test_sync_primitives.elf \
     $(TEST_BLD)/test_poll_requested.elf \
-    $(TEST_BLD)/test_bootinfo_abi.elf
+    $(TEST_BLD)/test_bootinfo_abi.elf \
+    $(TEST_BLD)/test_runtime_udivti3.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe
 
@@ -110,8 +111,7 @@ run: $(TEST_BINS)
 	echo "=============================================="; \
 	exit $$failed
 
-# Runtime fixtures (the provider object and hosted vector binary are added in
-# the next migration task; this task intentionally keeps the probe unresolved).
+# Runtime fixtures.
 $(TEST_BLD)/runtime_udivti3_link_probe.o: $(TEST_SRC)/../runtime/tests/udivti3_link_probe.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) -ffreestanding -fno-builtin -c $< -o $@
@@ -122,10 +122,17 @@ runtime-udivti3-link-probe: $(TEST_BLD)/runtime_udivti3_link_probe.o
 $(TEST_BLD)/test_runtime_udivti3.o: $(TEST_SRC)/../runtime/tests/test_udivti3.c \
 		$(TEST_SRC)/../runtime/tests/udivti3_vectors.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) -I$(TESTS_DIR)/runtime/tests -c $< -o $@
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TESTS_DIR)/runtime/include -I$(TESTS_DIR)/runtime/tests -c $< -o $@
 
-test-runtime-udivti3: $(TEST_BLD)/test_runtime_udivti3.o
-	@echo "runtime vector fixture compiled (provider pending Task 2)"
+$(TEST_BLD)/runtime_udivti3_host.o: $(TESTS_DIR)/runtime/builtins/udivti3.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -fno-stack-protector -I$(TESTS_DIR)/runtime/include -c $< -o $@
+
+$(TEST_BLD)/test_runtime_udivti3.elf: $(TEST_BLD)/test_runtime_udivti3.o $(TEST_BLD)/runtime_udivti3_host.o
+	$(HOST_CC) -o $@ $^
+
+test-runtime-udivti3: $(TEST_BLD)/test_runtime_udivti3.elf
+	$<
 
 # libc compilation
 $(TEST_BLD)/libc_memset.o: $(LIBC_SRC)/string/memset.c
