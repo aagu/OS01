@@ -14,31 +14,51 @@ from pathlib import Path
 
 complete_log_for_4_cpus = """\
 UEFI: booting OS01\n
-[smp-test] requested=4 online=4 status=PASS\n
-[smp-test] cpu=0 state=done\n
-[smp-test] cpu=1 state=done\n
-[smp-test] cpu=2 state=done\n
-[smp-test] cpu=3 state=done\n
-[spinlock] status=PASS\n
+[smp] topology requested=4 discovered=4\n
+[smp] cpu=0 online\n
+[smp] cpu=1 online\n
+[smp] cpu=2 online\n
+[smp] cpu=3 online\n
+[smp] summary requested=4 online=4 status=PASS\n
+[spinlock] cpu 0: done=1000000/1000000\n
+[spinlock] cpu 1: done=1000000/1000000\n
+[spinlock] cpu 2: done=1000000/1000000\n
+[spinlock] cpu 3: done=1000000/1000000\n
+[spinlock] total=4000000 (active_cpus=4 × 1000000, PASS)\n
 [smp-test] no_ack_cpu=0\n
-[smp-test] tick=1\n
-[smp-test] tick=2\n
-[smp-test] tick=3\n
+[tick] 1\n
+[tick] 2\n
+[tick] 3\n
 """
 
 log_with_only_uefi_banner = "UEFI: booting OS01\n"
 log_with_online4_but_no_done = "\n".join(
-    line for line in complete_log_for_4_cpus.splitlines() if " state=done" not in line
+    line for line in complete_log_for_4_cpus.splitlines() if " done=1000000" not in line
 )
 log_with_degraded_and_ticks = complete_log_for_4_cpus.replace(
-    "requested=4 online=4 status=PASS", "requested=4 online=1 status=DEGRADED"
+    "[smp] summary requested=4 online=4 status=PASS",
+    "[smp] summary requested=4 online=1 status=DEGRADED",
 )
 log_with_duplicate_cpu_ack = complete_log_for_4_cpus.replace(
-    "[smp-test] cpu=3 state=done", "[smp-test] cpu=2 state=done"
+    "[spinlock] cpu 3: done=1000000/1000000", "[spinlock] cpu 2: done=1000000/1000000"
 )
 log_with_wrong_total = complete_log_for_4_cpus.replace(
-    "requested=4 online=4 status=PASS", "requested=4 online=3 status=PASS"
+    "total=4000000", "total=3999999"
 )
+log_with_missing_total = complete_log_for_4_cpus.replace(
+    "[spinlock] total=4000000 (active_cpus=4 × 1000000, PASS)\n", ""
+)
+complete_degraded_log = """\
+[smp] topology requested=2 discovered=2\n
+[smp] cpu=0 online\n
+[smp] timeout cpu=1 reason=online-timeout\n
+[smp] summary requested=2 online=1 status=DEGRADED\n
+[spinlock] status=SKIP\n
+[smp-test] no_ack_cpu=1\n
+[tick] 1\n
+[tick] 2\n
+[tick] 3\n
+"""
 
 
 def self_test() -> None:
@@ -47,7 +67,10 @@ def self_test() -> None:
     assert not passed(log_with_degraded_and_ticks, cpus=4)
     assert not passed(log_with_duplicate_cpu_ack, cpus=4)
     assert not passed(log_with_wrong_total, cpus=4)
+    assert not passed(log_with_missing_total, cpus=4)
     assert passed(complete_log_for_4_cpus, cpus=4)
+    assert degraded_passed(complete_degraded_log)
+    assert not degraded_passed(complete_degraded_log + "[smp] FATAL: test failure\n")
     command_args = argparse.Namespace(
         qemu="qemu-system-aarch64", firmware="firmware.fd", image="disk.img"
     )
@@ -57,7 +80,15 @@ def self_test() -> None:
 def kernel_failure(text: str) -> bool:
     """Return true only for structured kernel failure diagnostics."""
     return bool(re.search(
-        r"^\[(?:smp-test|spinlock)\][^\n]*\b(?:FATAL|PANIC|FAIL|DEGRADED)\b",
+        r"^\[(?:smp|spinlock)\][^\n]*\b(?:FATAL|PANIC|FAIL|DEGRADED)\b",
+        text,
+        re.MULTILINE,
+    ))
+
+
+def hard_kernel_failure(text: str) -> bool:
+    return bool(re.search(
+        r"^\[(?:smp|spinlock)\][^\n]*\b(?:FATAL|PANIC|FAIL)\b",
         text,
         re.MULTILINE,
     ))
@@ -67,29 +98,47 @@ def passed(text: str, cpus: int) -> bool:
     """Recognize a complete normal-mode SMP run without QEMU dependencies."""
     if kernel_failure(text):
         return False
-    if f"[smp-test] requested={cpus} online={cpus} status=PASS" not in text:
+    topology = re.search(r"^\[smp\] topology\b[^\n]*\brequested=(\d+)\b[^\n]*\bdiscovered=(\d+)\b", text, re.MULTILINE)
+    if not topology or tuple(map(int, topology.groups())) != (cpus, cpus):
         return False
-    done = re.findall(r"^\[smp-test\] cpu=(\d+) state=done$", text, re.MULTILINE)
+    online = re.findall(r"^\[smp\] cpu=(\d+) online$", text, re.MULTILINE)
+    if len(online) != cpus or {int(cpu) for cpu in online} != set(range(cpus)):
+        return False
+    summary = re.search(r"^\[smp\] summary\b[^\n]*\brequested=(\d+)\b[^\n]*\bonline=(\d+)\b[^\n]*\bstatus=PASS$", text, re.MULTILINE)
+    if not summary or tuple(map(int, summary.groups())) != (cpus, cpus):
+        return False
+    done = re.findall(r"^\[spinlock\] cpu (\d+): done=1000000/1000000$", text, re.MULTILINE)
     if len(done) != cpus or {int(cpu) for cpu in done} != set(range(cpus)):
+        return False
+    total = cpus * 1000000
+    if f"[spinlock] total={total} (active_cpus={cpus} × 1000000, PASS)" not in text:
         return False
     if "[smp-test] no_ack_cpu=0" not in text:
         return False
-    return len(re.findall(r"^\[smp-test\] tick=\d+$", text, re.MULTILINE)) >= 3
+    return len(re.findall(r"^\[tick\] \d+$", text, re.MULTILINE)) >= 3
 
 
 def degraded_passed(text: str) -> bool:
     """Recognize the one intentionally degraded, non-benchmark case."""
+    if hard_kernel_failure(text):
+        return False
     required = (
-        "[smp-test] requested=2 online=1 status=DEGRADED",
-        "[smp-test] cpu=1 reason=online-timeout",
+        "[smp] topology requested=2 discovered=2",
+        "[smp] cpu=0 online",
+        "[smp] timeout cpu=1 reason=online-timeout",
+        "[smp] summary requested=2 online=1 status=DEGRADED",
         "[spinlock] status=SKIP",
         "[smp-test] no_ack_cpu=1",
     )
     if not all(marker in text for marker in required):
         return False
-    if len(re.findall(r"^\[smp-test\] tick=\d+$", text, re.MULTILINE)) < 3:
+    if len(re.findall(r"^\[tick\] \d+$", text, re.MULTILINE)) < 3:
         return False
     return not bool(re.search(r"^\[[^]]*(?:bench|spinlock)[^]]*\][^\n]*\bPASS\b", text, re.MULTILINE | re.IGNORECASE))
+
+
+def acceptance_evidence(args: argparse.Namespace, text: str, cpus: int) -> bool:
+    return degraded_passed(text) if args.expect_no_ack is not None else passed(text, cpus)
 
 
 def qemu_command(args: argparse.Namespace, cpus: int) -> list[str]:
@@ -111,6 +160,7 @@ def run_case(args: argparse.Namespace, cpus: int, iteration: int) -> bool:
     stdout = bytearray()
     stderr = bytearray()
     timed_out = False
+    complete = False
     returncode = None
     try:
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
@@ -136,6 +186,10 @@ def run_case(args: argparse.Namespace, cpus: int, iteration: int) -> bool:
                     streams[key.fileobj].extend(chunk)
                 else:
                     selector.unregister(key.fileobj)
+            text = (stdout + stderr).decode("utf-8", errors="replace")
+            if acceptance_evidence(args, text, cpus):
+                complete = True
+                break
             if process.poll() is not None and not selector.get_map():
                 break
     finally:
@@ -152,11 +206,11 @@ def run_case(args: argparse.Namespace, cpus: int, iteration: int) -> bool:
         stderr_path.write_bytes(stderr)
 
     text = (stdout + stderr).decode("utf-8", errors="replace")
-    accepted = degraded_passed(text) if args.expect_no_ack is not None else passed(text, cpus)
+    accepted = acceptance_evidence(args, text, cpus)
     result = accepted and not timed_out
     print(json.dumps({
         "event": "case", "cpus": cpus, "run": iteration, "result": "PASS" if result else "FAIL",
-        "timeout": timed_out, "returncode": returncode,
+        "timeout": timed_out, "complete": complete, "returncode": returncode,
         "stdout": str(stdout_path), "stderr": str(stderr_path),
     }))
     return result
