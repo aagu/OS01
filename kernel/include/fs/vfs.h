@@ -131,6 +131,15 @@ struct vfs_node *vfs_lookup(const char *path);
 // only absolute paths are supported (same as vfs_lookup).
 struct vfs_node *vfs_lookup_from(const char *path, const char *cwd);
 
+// Symlink-aware lookup with mid-path + last-component follow loop.
+// Returns 0 on success (*out_node refcount++) or -errno on failure.
+// Honors dirfd: AT_FDCWD for current cwd, or any other (currently -EBADF).
+// flags: LOOKUP_FOLLOW (default) follows symlinks at any depth;
+//        LOOKUP_NOFOLLOW only blocks the LAST component (mid-path symlinks
+//        are still followed, per POSIX semantics).
+int vfs_lookup_at(int dirfd, const char *path, lookup_flags_t flags,
+                  vfs_node_t **out_node);
+
 // Read from a file
 int vfs_read(struct vfs_node *node, uint64_t offset,
              uint64_t size, void *buffer);
