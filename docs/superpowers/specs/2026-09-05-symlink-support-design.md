@@ -1,22 +1,21 @@
 # OS01 软链接（symlink）支持 — 设计方案
 
 > **日期**: 2026-09-05
-> **状态**: v3，待用户 review（v1/v2 评审 11 项修订已落地）
+> **状态**: v4，待用户 review（v1/v2/v3 评审 14 项修订已落地）
 > **目标**: 在 VFS + ext2 + syscall + libc + Linux ABI 翻译五处落地 POSIX 对称的软链接支持：`symlink(2)` 创建、`readlink(2)` 读取、`lstat(2)` 不跟随、`fstatat(2)` 带 `AT_SYMLINK_NOFOLLOW`。自动让 `exec`/`open`/`stat` 跟随末段与中间段软链接（POSIX-correct），关闭三项 roadmap 项：
 > - **P1**「exec 软链接跟随」（同时移除 `b32e1e0` busybox 副本化构建期规避，可选切回符号链接）
 > - **P5**「symlink/readlink」
 > - **P5**「exec symlink ABI ✅ 缓解」—— 升级为完全解决
 >
 > **修订**:
-> - v1：初版（基于 brainstorming：方案 B lookup flags、MAXSYMLINKS=8、跨 mount 跟随、全套范围）
-> - v2：5 项评审修订——中段 symlink 解析、用户指针安全、libc syscall3/4 + ABI 表、errno 传播、DT_LNK + EOPNOTSUPP
-> - v3：6 项评审修订——
->   - **🟢 [P1] NOFOLLOW 仅限末段**：v3 重构 `__vfs_lookup_raw` 不再传 flags；NOFOLLOW 决策移至 caller（vfs_lookup_at），仅当 suffix=="" 时返回 symlink 本身；中段 symlink 即使 NOFOLLOW 也跟随
->   - **🟢 [P1] 相对 linkpath**：`sys_symlink` 复用现有 `vfs_split_parent`（vfs.c:590），处理「无 slash → parent=cwd」；vfs_split_parent 改为非 static 并导出
->   - **🟢 [P1] 用户字符串复制原语**：v2 误用不存在的 `strncpy_from_user`；v3 改用 `strnlen_user` + `copy_from_user_ft` 两步（与既有 syscall 边界审计模式一致）
->   - **🟢 [P1] ext2 unlink 类型感知**：现有 `ext2_vfs_unlink`（ext2.c:801）无条件释放 `i_block[0..11]` 会损坏 fast symlink（把 target 字符串当块号）；v3 用 `(i_mode & EXT2_S_IFMT) == EXT2_S_IFLNK` 区分走专用路径
->   - **🟢 [P1] fstatat flag 校验**：`flags & ~AT_SYMLINK_NOFOLLOW` 静默接受 → 改为返回 -EINVAL
->   - **🟢 [non-blocking] 测试数量**：§6 header "26 个 case" 与列表 27 项不一致 → 改为 27 + 调整测试编号
+> - v1：初版
+> - v2：5 项修订——中段 symlink、用户指针安全、libc syscall3/4 + ABI 表、errno 传播、DT_LNK + EOPNOTSUPP
+> - v3：6 项修订——NOFOLLOW 仅末段、相对 linkpath 复用 vfs_split_parent、strnlen_user + copy_from_user_ft、ext2 unlink 类型感知、fstatat flag 校验、测试数量对齐
+> - v4：4 项修订（3 P1 + 1 文档）——
+>   - **🟢 [P1] COPY_USER_STR 长度边界**：原 `_l >= max → EFAULT` 错把 strnlen_user 的「无 NUL 超长」信号当 fault；`_l == max-1` 是合法长度却被拒。改为 `_l < 0 → EFAULT`，`_l >= max → ENAMETOOLONG`，其余 `_l+1` 字节复制。与 uaccess.c:91-105 注释一致
+>   - **🟢 [P1] splice_symlink_path 返回值被忽略**：超长展开路径继续用未初始化 remaining 解析；改为检查返回值，失败时 kfree(target) + vfs_node_put(node) + 上抛 -ENAMETOOLONG。新测试 29
+>   - **🟢 [P1] dirent_add 失败泄漏 inode + data block**：参考 ext2_vfs_create(ext2.c:774) 模式，失败时先 `free_block(i_block[0])`（long symlink）再 `free_inode(ino)`。新测试 30
+>   - **🟢 [doc] §6 header 数量**：§6 header 与 §2.2 写 30 个，但 v3 测试清单已是 28 unit + 2 systest；统一为 30，再加 v4 新增 2 → 共 32
 
 ---
 
@@ -119,7 +118,7 @@
 | `libc/include/sys/stat.h` | `lstat` / `fstatat` 声明 + `AT_*` 常量 |
 | `libc/unistd/symlink.c`、`readlink.c` | 替换 stub 为真实现 |
 | `libc/sys/stat/lstat.c`、`fstatat.c` | 新建 |
-| `test/cases/test_vfs_symlink.c` | 新建——30 个 case（§6：25 unit + 2 systest + 3 v3 新增 [相对 linkpath、mid-path NOFOLLOW 跟随、fstatat 未知 flag EINVAL]） |
+| `test/cases/test_vfs_symlink.c` | 新建——32 个 case（§6：30 unit + 2 systest，其中 v4 新增 2 个 unit：splice 超限 ENAMETOOLONG、dirent_add 回滚） |
 
 ---
 
@@ -242,8 +241,15 @@ int vfs_lookup_at(int dirfd, const char *path, lookup_flags_t flags,
         target[tlen] = '\0';
 
         char new_remaining[VFS_NAME_MAX];
-        splice_symlink_path(consumed, target, suffix,
-                            new_remaining, sizeof(new_remaining));
+        // ★ v4 修复：splice 可能返回 -ENAMETOOLONG（target+suffix 拼成新路径超 max）
+        //    v3 漏检会导致 memcpy 未定义内容进 remaining 继续解析
+        int src = splice_symlink_path(consumed, target, suffix,
+                                      new_remaining, sizeof(new_remaining));
+        if (src < 0) {
+            kfree(target);
+            vfs_node_put(node);
+            return src;     // 上抛 -ENAMETOOLONG
+        }
         kfree(target);
 
         vfs_node_put(node);
@@ -262,6 +268,8 @@ static int resolve_at(int dirfd, const char *path,
 // splice_symlink_path: 把 consumed + target + suffix 合成新绝对路径
 //   - target[0] == '/' → new = target + suffix（绝对覆盖）
 //   - 否则 → new = dirname(consumed) + "/" + target + suffix
+// Returns:
+//   0 on success; -ENAMETOOLONG if expanded path exceeds out_size
 static int splice_symlink_path(const char *consumed, const char *target,
                                const char *suffix,
                                char *out, size_t out_size);
@@ -351,7 +359,20 @@ int ext2_vfs_symlink(struct vfs_node *parent, const char *name,
     }
     ext2_write_inode(fs, ino, &inode);
 
+    // ★ v4 修复：dirent_add 失败时必须回滚已分配资源，避免 ENOSPC/EIO 重试耗尽空间
+    //   - Long symlink (i_blocks > 0): 先 free_block(i_block[0]) 再 free_inode
+    //   - Fast symlink (i_blocks == 0): 仅 free_inode
+    //   - 参考 ext2_vfs_create (ext2.c:774) 的 inode 回滚模式
     int rc = dirent_add(fs, parent_ino, name, ino, EXT2_FT_SYMLINK);
+    if (rc != 0) {
+        if (inode.i_blocks > 0) {
+            free_block(fs, inode.i_block[0]);
+        }
+        free_inode(fs, ino);
+        spin_unlock(&fs->lock);
+        return rc;   // 上抛 -ENOSPC / -EIO 等
+    }
+
     spin_unlock(&fs->lock);
     return rc;
 }
@@ -490,10 +511,14 @@ Linux nr 范围：`man 2 syscall` 即可查证（lstat=6, symlink=88, readlink=8
 
 ```c
 // 辅助宏：从用户字符串复制到 kernel buf（strlen + fault-tolerant copy）
+// strnlen_user(p, max) 语义（uaccess.c:91-105）：
+//   返回 [0, max] —— 实际 strlen（≤ max-1 表示含 NUL 在内总 ≤ max 字节）
+//                  或 max（无 NUL 终止，超长）
+//   返回 -EFAULT —— 用户指针不可读
 #define COPY_USER_STR(kbuf, uptr, max) ({                          \
     long _l = strnlen_user((uptr), (max));                         \
-    if (_l < 0 || _l >= (long)(max)) return -EFAULT;              \
-    if (_l == (long)(max) - 1) return -ENAMETOOLONG;              \
+    if (_l < 0) return -EFAULT;                                   \
+    if (_l >= (long)(max)) return -ENAMETOOLONG;                  \
     if (copy_from_user_ft((kbuf), (uptr), _l + 1) < 0)            \
         return -EFAULT;                                           \
     _l; })
@@ -684,7 +709,7 @@ int fstatat(int dirfd, const char *path, struct stat *buf, int flags);
 
 ## 6. 测试矩阵
 
-`test/cases/test_vfs_symlink.c` —— **27 个 case**（25 unit + 2 systest）：
+`test/cases/test_vfs_symlink.c` —— **32 个 case**（30 unit + 2 systest）：
 
 ```
 基础创建与读取
@@ -719,18 +744,20 @@ int fstatat(int dirfd, const char *path, struct stat *buf, int flags);
   23 symlink_depth_8_passes()              link1→…→link8 (8 跳 OK)
   24 symlink_depth_mid_path()              /a/link1/link2/.../link8/f (中段 8 跳)
 
-错误码传播（v2 + v3 新增）
+错误码传播（v2 + v3 + v4 新增）
   25 lookup_enotdir_for_mid()              /file/link_to_dir/f → ENOTDIR
   26 lookup_enametoolong()                 用户 path 长度 ≥ VFS_NAME_MAX → ENAMETOOLONG
   27 stat_eopnotsupp_on_tmpfs()            /tmp 路径下 symlink 不支持 → EOPNOTSUPP
   28 fstatat_unknown_flag_einval()          fstatat(..., flags=AT_EMPTY_PATH) → EINVAL
+  29 splice_symlink_path_enametoolong()     /short → /long_symlink → target 超 VFS_NAME_MAX → ENAMETOOLONG（v4 新增）
+  30 ext2_symlink_rollback_on_dirent_fail() 模拟 dirent_add 失败（block bitmap 满）→ long symlink 的 data block 与 inode 必须回滚（v4 新增）
 
 集成（systest）
-  29 systest_busybox_ln_exec()             ln -s /bin/busybox /tmp/x; /tmp/x --help → exit 0
-  30 systest_find_type_l()                 find / -type l → 输出含 symlink 行 → DT_LNK 验证
+  31 systest_busybox_ln_exec()             ln -s /bin/busybox /tmp/x; /tmp/x --help → exit 0
+  32 systest_find_type_l()                 find / -type l → 输出含 symlink 行 → DT_LNK 验证
 ```
 
-`test/cases/test_systest.c` 加 case 29, 30。
+`test/cases/test_systest.c` 加 case 31, 32。
 
 ### 6.1 错误码矩阵（v3 增强）
 
