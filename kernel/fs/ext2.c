@@ -1094,13 +1094,24 @@ static __attribute__((noinline)) int ext2_vfs_readdir(struct vfs_node *node, uin
                     entry->name[nlen] = '\0';
                     entry->ino  = de->inode;
                     entry->size = 0;
-                    entry->type = (de->file_type == 2) ? VFS_DIR : VFS_FILE;
+                    // de->file_type per ext2 spec: 1=REG_FILE, 2=DIR,
+                    // 3=CHRDEV, 4=BLKDEV, 5=FIFO, 6=SOCK, 7=SYMLINK.
+                    // EXT2_FT_* names are not yet defined in ext2.h; using
+                    // numeric literals (task brief permits this — the values
+                    // are stable per the on-disk spec).
+                    switch (de->file_type) {
+                        case 2:  entry->type = VFS_DIR;     break;
+                        case 7:  entry->type = VFS_SYMLINK; break;
+                        default: entry->type = VFS_FILE;    break;
+                    }
 
-                    // ext2 dirent has no size field — read from inode
-                    if (entry->type == VFS_FILE) {
-                        ext2_inode_t finode;
-                        if (ext2_read_inode(fs, de->inode, &finode) == 0)
-                            entry->size = finode.i_size;
+                    // ext2 dirent has no size field — read from inode.
+                    // Populate for both FILE (rsize) and SYMLINK (target
+                    // length) so lstat reports correct st_size.
+                    if (entry->type == VFS_FILE || entry->type == VFS_SYMLINK) {
+                        ext2_inode_t _inode;
+                        if (ext2_read_inode(fs, de->inode, &_inode) == 0)
+                            entry->size = _inode.i_size;
                     }
                     kfree(block_data);
                     spin_unlock(&fs->lock);
