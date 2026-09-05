@@ -2,13 +2,24 @@
 #define _FS_VFS_H
 
 #include <stdint.h>
+#include <stddef.h>   // size_t
 #include <block/blockdev.h>
 #include <uapi/stat.h>
 
-#define VFS_FILE   1
-#define VFS_DIR    2
-#define VFS_CHRDEV 3   // character device
-#define VFS_BLKDEV 4   // block device
+typedef enum {
+    VFS_FILE    = 1,
+    VFS_DIR     = 2,
+    VFS_CHRDEV  = 3,
+    VFS_BLKDEV  = 4,
+    VFS_SYMLINK = 5,   // appended; never renumber existing values (spec §3.1, v5)
+} vfs_node_type_t;
+
+typedef enum {
+    LOOKUP_FOLLOW    = 0,
+    LOOKUP_NOFOLLOW  = 1,
+} lookup_flags_t;
+
+#define MAXSYMLINKS 8
 #define VFS_NAME_MAX 256
 
 // ── Forward declarations ──────────────────────────────────
@@ -60,6 +71,15 @@ typedef struct vfs_ops {
 #define mmap uint64_t*
 #undef VFS_MMAP_RESTORE
 #endif
+
+    // Create a symbolic link named `name` in `parent` whose target is
+    // `target`.  Returns 0 or -errno.
+    int (*symlink)(struct vfs_node *parent, const char *name,
+                   const char *target);
+
+    // Read the symlink target into `buf` (up to `size` bytes).
+    // Returns bytes written (excluding NUL) or -errno.
+    int (*readlink)(struct vfs_node *node, char *buf, size_t size);
 } vfs_ops_t;
 
 // ── A mounted filesystem instance ─────────────────────────
@@ -93,8 +113,6 @@ typedef struct vfs_node {
     struct vfs_ops   *ops;
     uint32_t          refcount;
 } vfs_node_t;
-
-#include <stddef.h>   // size_t
 
 // ── VFS API ───────────────────────────────────────────────
 
