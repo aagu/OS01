@@ -1,7 +1,7 @@
 # OS01 软链接（symlink）支持 — 设计方案
 
 > **日期**: 2026-09-05
-> **状态**: v2，待用户 review（v1 评审 5 项修订已落地）
+> **状态**: v3，待用户 review（v1/v2 评审 11 项修订已落地）
 > **目标**: 在 VFS + ext2 + syscall + libc + Linux ABI 翻译五处落地 POSIX 对称的软链接支持：`symlink(2)` 创建、`readlink(2)` 读取、`lstat(2)` 不跟随、`fstatat(2)` 带 `AT_SYMLINK_NOFOLLOW`。自动让 `exec`/`open`/`stat` 跟随末段与中间段软链接（POSIX-correct），关闭三项 roadmap 项：
 > - **P1**「exec 软链接跟随」（同时移除 `b32e1e0` busybox 副本化构建期规避，可选切回符号链接）
 > - **P5**「symlink/readlink」
@@ -9,12 +9,14 @@
 >
 > **修订**:
 > - v1：初版（基于 brainstorming：方案 B lookup flags、MAXSYMLINKS=8、跨 mount 跟随、全套范围）
-> - v2：评审修订——
->   - **🟢 [P1] 中间路径组件 symlink**：vfs_lookup 现在单函数内 fold 跟随循环，遇到中段 symlink 立即 splice `target+suffix` 后 restart；不再只跟随末段
->   - **🟢 [P1] 用户指针安全复制**：sys_lstat/sys_fstatat 复用 sys_stat 的 `struct stat kstat; copy_to_user_ft(buf, &kstat, sizeof(kstat))` 模式；用户 buf 坏地址 → -EFAULT 永不 panic
->   - **🟢 [P1] libc syscall3/4 + PF_LINUX_ABI 表**：新增 `syscall3()`（即现行 3-arg `syscall()`）、`syscall4()`（r10 ABI）；Linux→OS01 表补 `[6]=73 lstat`、`[88]=71 symlink`、`[89]=72 readlink`、`[262]=74 newfstatat`（同时修正 v1 `[89]=26` 错映射 SYS_rename 的 bug）
->   - **🟢 [P1] errno 传播**：vfs_lookup_at 改签名为 `int vfs_lookup_at(dirfd, path, flags, vfs_node_t **out)`，返回 0 / -errno（ENOENT/ENOMEM/EIO/ELOOP/ENOTDIR/EOPNOTSUPP/ENAMETOOLONG 原样上抛）；所有 6+ 调用点迁移
->   - **🟡 [P2] DT_LNK + EOPNOTSUPP**：`vfs_getdents` 加 `case VFS_SYMLINK: d_type = DT_LNK`；非 ext2 FS（devfs/procfs/tmpfs/fat）调用 symlink/readlink 时 `sys_*` 检查 `parent->ops->symlink == NULL` → -EOPNOTSUPP
+> - v2：5 项评审修订——中段 symlink 解析、用户指针安全、libc syscall3/4 + ABI 表、errno 传播、DT_LNK + EOPNOTSUPP
+> - v3：6 项评审修订——
+>   - **🟢 [P1] NOFOLLOW 仅限末段**：v3 重构 `__vfs_lookup_raw` 不再传 flags；NOFOLLOW 决策移至 caller（vfs_lookup_at），仅当 suffix=="" 时返回 symlink 本身；中段 symlink 即使 NOFOLLOW 也跟随
+>   - **🟢 [P1] 相对 linkpath**：`sys_symlink` 复用现有 `vfs_split_parent`（vfs.c:590），处理「无 slash → parent=cwd」；vfs_split_parent 改为非 static 并导出
+>   - **🟢 [P1] 用户字符串复制原语**：v2 误用不存在的 `strncpy_from_user`；v3 改用 `strnlen_user` + `copy_from_user_ft` 两步（与既有 syscall 边界审计模式一致）
+>   - **🟢 [P1] ext2 unlink 类型感知**：现有 `ext2_vfs_unlink`（ext2.c:801）无条件释放 `i_block[0..11]` 会损坏 fast symlink（把 target 字符串当块号）；v3 用 `(i_mode & EXT2_S_IFMT) == EXT2_S_IFLNK` 区分走专用路径
+>   - **🟢 [P1] fstatat flag 校验**：`flags & ~AT_SYMLINK_NOFOLLOW` 静默接受 → 改为返回 -EINVAL
+>   - **🟢 [non-blocking] 测试数量**：§6 header "26 个 case" 与列表 27 项不一致 → 改为 27 + 调整测试编号
 
 ---
 
@@ -25,6 +27,8 @@
 | 项 | 现状 | 影响 |
 |---|---|---|
 | `__vfs_lookup`（vfs.c:145） | 逐组件 readdir，不区分 symlink 类型（无 `VFS_SYMLINK` 节点）；不处理中段 symlink；返回 NULL 时 errno 丢失 | busybox 符号链接 + `find -type l` 全部失败 |
+| `vfs_split_parent`（vfs.c:590） | 已实现并被 `vfs_unlink/mkdir/rmdir/rename` 使用，正确处理相对路径（无 slash → 用 cwd） | `sys_symlink` 应复用此 helper，不要重新实现 |
+| `ext2_vfs_unlink`（ext2.c:801） | 已无条件遍历 `i_block[0..11]` 释放 | **对 fast symlink（i_block[] 装 target 字符串）会把字符串字节当块号释放 → 位图损坏；对 long symlink 会 free `i_block[0]`** —— 必须 type-aware 重构 |
 | `sys_exec`（task.c:1286） | `vfs_lookup_from` → `node->type != VFS_FILE` 即 -EACCES；若末段是 symlink，ELF 头字节被当 ELF 解析 → -ENOEXEC | busybox rootfs 内 `/bin/wget` 等符号链接失败 |
 | `sys_stat`（trap.c:1759） | 用 `struct stat kstat; copy_to_user_ft(buf, &kstat, ...)` ✅ 安全 | 现成模板，需复用 |
 | `libc/unistd/symlink.c` | stub `return -1` | 6 个 busybox 调用点（libarchive / copy_file / devfsd / mdev 等）拿不到符号链接 |
@@ -54,6 +58,8 @@
 | 跨 mount 跟随 | 跟随（Linux 行为） | OS01 单 mount，跨 mount 问题不实际出现；统一 Linux 语义便于参考 |
 | 范围 | 全套：`symlink` + `readlink` + `lstat` + `fstatat(AT_SYMLINK_NOFOLLOW)` | 用户确认 |
 | **中段 symlink** | **resolve**：vfs_lookup 单函数内 fold 跟随循环，遇到中段 symlink splice `target+suffix` 后 restart | POSIX 必需（如 `/link_to_dir/file`） |
+| **NOFOLLOW 语义** | **仅禁止末段 symlink**；中段 symlink 始终跟随（POSIX AT_SYMLINK_NOFOLLOW 语义） | `lstat("/link/file")` 必须跟随 `/link` 返回 `/real/file` 的 stat |
+| **ext2 unlink 类型感知** | 必须用 `(i_mode & EXT2_S_IFMT) == EXT2_S_IFLNK` 区分 fast/long symlink，跳过通用块释放循环 | fast symlink 的 `i_block[]` 是 target 字符串，误当块号会损坏位图 |
 | lookup API | `int vfs_lookup_at(int dirfd, const char *path, lookup_flags_t flags, vfs_node_t **out)` —— 0 成功/-errno 失败 | errno 传播必需（v1 返回 NULL 丢 errno） |
 | `stat` 行为 | 改为跟随（POSIX-correct） | 当前无 symlink，外部不可见 breaking |
 | 内核栈 | 单 256B 栈 buf（fold 进 `vfs_lookup_at`，无外层/内层分离）+ 必要时 kmalloc target | 用户提出的栈压力顾虑 |
@@ -105,15 +111,15 @@
 
 | 文件 | 改动 |
 |---|---|
-| `kernel/fs/vfs.c` + `kernel/include/fs/vfs.h` | `__vfs_lookup` 改名为 `__vfs_lookup_raw`，签名改为 `(path, flags, consumed_out, size, remaining_out, size)` 中段 symlink 早返；新增 `vfs_lookup_at(dirfd, path, flags, **out)` 单函数 fold 跟随循环；`vfs_stat` 加 `S_IFLNK` case；新增 `VFS_SYMLINK` 类型；新增 `vfs_ops.symlink`/`vfs_ops.readlink` ops；`vfs_getdents` 加 `case VFS_SYMLINK: DT_LNK` |
-| `kernel/fs/ext2.c` | 新增 `ext2_vfs_symlink` + `ext2_vfs_readlink`；`ext2_vfs_readdir` 把 `EXT2_FT_SYMLINK` 映射到 `VFS_SYMLINK`；`vfs_ops` 注册新 ops；`ext2_vfs_unlink` 补 long symlink 的 `free_block(i_block[0])` |
+| `kernel/fs/vfs.c` + `kernel/include/fs/vfs.h` | `__vfs_lookup` 改名为 `__vfs_lookup_raw(path, &node, consumed_out, size, remaining_out, size)`（**无 flags**，NOFOLLOW 决策在 caller）；新增 `vfs_lookup_at(dirfd, path, flags, **out)` 单函数 fold 跟随循环（NOFOLLOW 仅末段生效）；`vfs_split_parent` 改为非 static 导出（sys_symlink 复用）；`vfs_stat` 加 `S_IFLNK` case；新增 `VFS_SYMLINK` 类型；新增 `vfs_ops.symlink`/`vfs_ops.readlink` ops；`vfs_getdents` 加 `case VFS_SYMLINK: DT_LNK` |
+| `kernel/fs/ext2.c` | 新增 `ext2_vfs_symlink` + `ext2_vfs_readlink`；`ext2_vfs_readdir` 把 `EXT2_FT_SYMLINK` 映射到 `VFS_SYMLINK`；`vfs_ops` 注册新 ops；**`ext2_vfs_unlink` 类型感知重构**：用 `(i_mode & EXT2_S_IFMT) == EXT2_S_IFLNK` 分支走专用路径，**避免把 fast symlink 的 i_block[] target 字符串当块号释放导致位图损坏** |
 | `kernel/sched/task.c` | 新增 `sys_symlink` / `sys_readlink` / `sys_lstat` / `sys_fstatat`；现有 `sys_stat`/`sys_open`/`sys_exec` 改走 `vfs_lookup_at` |
 | `kernel/arch/x86_64/trap.c` | syscall 表注册 71..74；`PF_LINUX_ABI` 表补 `[6]=73`、`[88]=71`、`[89]=72`、`[262]=74`（同时修复 v1 `[89]=26` 错映射 bug） |
 | `libc/include/sys/syscall.h` | `SYS_symlink=71` 等 4 个宏；`AT_FDCWD=-100`、`AT_SYMLINK_NOFOLLOW=0x100`；新增 `syscall3()` (= 现有 3-arg `syscall()` 别名) 与 `syscall4()`（r10 ABI） |
 | `libc/include/sys/stat.h` | `lstat` / `fstatat` 声明 + `AT_*` 常量 |
 | `libc/unistd/symlink.c`、`readlink.c` | 替换 stub 为真实现 |
 | `libc/sys/stat/lstat.c`、`fstatat.c` | 新建 |
-| `test/cases/test_vfs_symlink.c` | 新建——26 个 case（§6） |
+| `test/cases/test_vfs_symlink.c` | 新建——30 个 case（§6：25 unit + 2 systest + 3 v3 新增 [相对 linkpath、mid-path NOFOLLOW 跟随、fstatat 未知 flag EINVAL]） |
 
 ---
 
@@ -152,19 +158,16 @@ typedef struct vfs_ops {
 
 ```c
 // 原：static vfs_node_t *__vfs_lookup(const char *path);
-// 新：4-状态返回值 + 3 个 out 参数
+// 新：2-状态返回值 + 3 个 out 参数（无 flags —— NOFOLLOW 语义在 caller 处理）
 
 // 返回值：
-//   0    = 成功，*out_node 是最终节点（refcount++），无 remaining suffix
-//   1    = 遇到 symlink，*out_node 是 symlink（refcount++），
+//   0    = 成功（不含 symlink），*out_node 是最终节点（refcount++），无 suffix
+//   1    = 遇到 symlink（mid-path 或末段），*out_node 是 symlink（refcount++），
 //          *consumed_out 写到 symlink 为止的绝对前缀，
-//          *remaining_out 是 symlink 之后未消费的 suffix
+//          *remaining_out 是 symlink 之后未消费的 suffix（末段 symlink 时为 ""）
 //   < 0  = -errno (ENOENT/ENOTDIR/ENAMETOOLONG/EIO/...)
 //          *out_node = NULL
-// 当 flags=LOOKUP_NOFOLLOW 时遇到 symlink 行为同 0（直接返回 symlink 节点本身，
-// 不进入 remaining_out 路径）—— 因为 caller 不需要继续解析。
 static int __vfs_lookup_raw(const char *path,
-                            lookup_flags_t flags,
                             vfs_node_t **out_node,
                             char *consumed_out, size_t consumed_size,
                             char *remaining_out, size_t remaining_size);
@@ -172,9 +175,8 @@ static int __vfs_lookup_raw(const char *path,
 
 **实现要点**：
 - walk 循环里遇到目录项，先看 `entry.type == VFS_SYMLINK`
-- 若 `flags & LOOKUP_FOLLOW` 且是中段（后面还有组件）→ 早返 status=1，consumed=`已 walk 完到 symlink 的绝对路径`，remaining=`symlink 之后的部分`
-- 若 `flags & LOOKUP_FOLLOW` 且是末段 → 早返 status=1（caller 负责 splice + restart）；实际由 caller（vfs_lookup_at）splice 成新 path 后从头 walk
-- 若 `flags & LOOKUP_NOFOLLOW` → 一律 status=0（把 symlink 节点本身当最终节点返回，caller 不再 follow）
+- 任何位置的 symlink 都早返 status=1，consumed=`已 walk 完到 symlink 的绝对路径`，remaining=`symlink 之后的部分（末段 symlink 时为 ""）`
+- **NOFOLLOW 决策在 caller（vfs_lookup_at）**：若 `flags=NOFOLLOW && suffix==""` → 把 symlink 节点当最终节点返回（status=0 语义）；否则 splice + restart
 - 非 symlink 节点正常 walk，最后返回 status=0
 - consumed 累计：walk 完成时 `consumed = path` 全长
 
@@ -210,30 +212,35 @@ int vfs_lookup_at(int dirfd, const char *path, lookup_flags_t flags,
     int depth = 0;
 
     for (;;) {
-        // Walk 当前 remaining，遇到 symlink 可能早返
-        int st = __vfs_lookup_raw(remaining, flags, &node,
+        // Walk 当前 remaining，遇到 symlink 早返 status=1
+        int st = __vfs_lookup_raw(remaining, &node,
                                    consumed, sizeof(consumed),
                                    suffix, sizeof(suffix));
         if (st < 0) return st;
         if (st == 0) {
-            // 终态：node 是最终节点（symlink 节点本身 if NOFOLLOW；普通节点 if FOLLOW 且末段非 symlink）
+            // 终态：node 是非 symlink 最终节点
             *out_node = node;
             return 0;
         }
-        // st == 1: 遇到 symlink，需要 splice + restart
+        // st == 1: 遇到 symlink
         if (depth >= MAXSYMLINKS) {
             vfs_node_put(node);
             return -ELOOP;
         }
 
-        // 读 symlink target
+        // NOFOLLOW 语义：仅当 symlink 是末段（suffix 为空）时返回 symlink 本身
+        if ((flags & LOOKUP_NOFOLLOW) && suffix[0] == '\0') {
+            *out_node = node;   // node 本身就是 symlink
+            return 0;
+        }
+
+        // 否则 splice + restart（无论 FOLLOW 还是 NOFOLLOW+mid-path）
         char *target = kmalloc(VFS_NAME_MAX);
         if (!target) { vfs_node_put(node); return -ENOMEM; }
         int tlen = node->ops->readlink(node, target, VFS_NAME_MAX - 1);
         if (tlen < 0) { kfree(target); vfs_node_put(node); return tlen; }
         target[tlen] = '\0';
 
-        // splice 成新 path：target[0]=='/' → 覆盖；否则 → dirname(consumed) + "/" + target + suffix
         char new_remaining[VFS_NAME_MAX];
         splice_symlink_path(consumed, target, suffix,
                             new_remaining, sizeof(new_remaining));
@@ -395,15 +402,52 @@ int ext2_vfs_readlink(struct vfs_node *node, char *buf, size_t size) {
 case EXT2_FT_SYMLINK: entry->type = VFS_SYMLINK; break;
 ```
 
-### 4.4 `ext2_vfs_unlink` 补 long symlink 释放
+### 4.4 `ext2_vfs_unlink` 类型感知重构（**重要**：现有逻辑损坏 symlink）
+
+**问题分析**（v2 spec 遗留）：
+- 现有 `ext2_vfs_unlink`（ext2.c:801）无条件遍历 `i_block[0..11]` 释放
+- 对 **fast symlink**（`i_blocks==0`，`i_block[]` 装 target 字符串）：循环把字符串字节当块号 → 释放任意块，**位图损坏**
+- 对 **long symlink**（`i_blocks>0`，`i_block[0]` 是 data block）：循环正确释放 `i_block[0]`，但 v2 spec 在此之前又调 `free_block(i_block[0])` → **double free**
+
+**修复方案**：在通用块释放前 type-check，按 symlink 类型走专用路径：
 
 ```c
-if (inode.i_mode & EXT2_S_IFLNK && inode.i_blocks > 0) {
-    free_block(fs, inode.i_block[0]);
+// 替换 ext2_vfs_unlink 现有 i_links_count==0 分支（约 ext2.c:825-852）
+inode.i_links_count--;
+if (inode.i_links_count == 0) {
+    if ((inode.i_mode & EXT2_S_IFMT) == EXT2_S_IFLNK) {
+        // ── Symlink：必须 type-aware ──
+        if (inode.i_blocks > 0) {
+            // Long symlink: i_block[0] 是装 target 的 data block
+            // i_blocks == block_size/512（fast path i_blocks==0）
+            free_block(fs, inode.i_block[0]);
+            // 注：i_block[1..11] 对 long symlink 为 0（symlink target 只用一个 block）
+            // 单 indirect 不用管
+        }
+        // Fast symlink (i_blocks==0): i_block[] 装 target 字符串，绝不释放
+        // （通用循环会损坏位图）
+    } else {
+        // ── 普通文件/目录：原逻辑保留 ──
+        for (int i = 0; i < 12; i++) {
+            if (inode.i_block[i] != 0) {
+                free_block(fs, inode.i_block[i]);
+                inode.i_block[i] = 0;
+            }
+        }
+        if (inode.i_block[12] != 0) {
+            // ... 单 indirect 处理不变 ...
+        }
+    }
+    inode.i_blocks = 0;
+    inode.i_size = 0;
+    ext2_write_inode(fs, target_ino, &inode);
+    free_inode(fs, target_ino);
 }
 ```
 
-`ext2_vfs_unlink` 现有实现需先 `ext2_read_inode`（已有）→ 加入此分支。
+**新增 type-aware 测试**：
+- `test 25 (revised)`：`symlink_long_unlink_releases_block` —— 创建 long symlink，检查 `free_block` 被调一次且仅一次（位图前后对比）；`fs->sb_raw.s_free_blocks_count` 增 1
+- `test 26 (new)`：`symlink_fast_unlink_no_block_free` —— 创建 fast symlink，检查 `i_block[]` 区域**未被 free_block 误调**（位图前后无变化）
 
 ---
 
@@ -439,36 +483,38 @@ Linux nr 范围：`man 2 syscall` 即可查证（lstat=6, symlink=88, readlink=8
 
 ### 5.3 syscall 实现（`kernel/sched/task.c`）
 
-所有用户指针走 `strncpy_from_user` / `copy_to_user_ft` 等已审计原语。**所有写用户 buf 都走 fault-tolerant 模式**（先 build kernel-local copy，再 `_ft` 复制）。
+**用户指针访问规范**（与 sys_stat/open/exec 一致）：
+- uaccess API 只有 `strnlen_user()` + `copy_from_user_ft()` + `copy_to_user_ft()`（**没有 `strncpy_from_user`**，v2 误用）
+- path/target 模式：先 `strnlen_user(ptr, VFS_NAME_MAX)`，若等于上限 → -ENAMETOOLONG；否则 `copy_from_user_ft(buf, ptr, len+1)`（含 NUL）
+- 所有写用户 buf（如 lstat/fstatat 的 `struct stat`）：先 build kernel-local `kstat`，再 `copy_to_user_ft(buf, &kstat, sizeof)`
 
 ```c
+// 辅助宏：从用户字符串复制到 kernel buf（strlen + fault-tolerant copy）
+#define COPY_USER_STR(kbuf, uptr, max) ({                          \
+    long _l = strnlen_user((uptr), (max));                         \
+    if (_l < 0 || _l >= (long)(max)) return -EFAULT;              \
+    if (_l == (long)(max) - 1) return -ENAMETOOLONG;              \
+    if (copy_from_user_ft((kbuf), (uptr), _l + 1) < 0)            \
+        return -EFAULT;                                           \
+    _l; })
+
 // ── SYS_symlink(71): symlink(target, linkpath) ────────────
 int64_t sys_symlink(const char *target, const char *linkpath, pt_regs_t *regs) {
     (void)regs;
-    if (!target || !linkpath) return -EFAULT;
-
     char target_copy[VFS_NAME_MAX];
-    int tlen = strncpy_from_user(target_copy, target, VFS_NAME_MAX);
-    if (tlen < 0) return -EFAULT;
+    long tlen = COPY_USER_STR(target_copy, target, VFS_NAME_MAX);
     if (tlen == 0) return -ENOENT;     // 拒绝空 target
 
     char linkpath_copy[VFS_NAME_MAX];
-    if (strncpy_from_user(linkpath_copy, linkpath, VFS_NAME_MAX) < 0)
-        return -EFAULT;
+    COPY_USER_STR(linkpath_copy, linkpath, VFS_NAME_MAX);
 
-    // 解析 linkpath 的父目录（split: parent dir + basename）
+    // ★ v3 修订：复用 vfs_split_parent (vfs.c:590) 而非重新实现
+    // vfs_split_parent 处理三种情形："/dir/file" → parent="/dir" name="file"；
+    // "/file" → parent="/" name="file"；"file" → parent=cwd name="file"
+    const char *cwd = current->files ? current->files->cwd : "/";
     char parent_path[VFS_NAME_MAX];
-    strncpy(parent_path, linkpath_copy, sizeof(parent_path));
-    char *base = strrchr(parent_path, '/');
-    if (!base) return -ENOENT;
-    if (base == parent_path) {
-        // linkpath = "/name" → parent = "/"
-        base[1] = '\0';
-        base = parent_path + 1;
-    } else {
-        *base = '\0';
-        base++;
-    }
+    const char *name = vfs_split_parent(linkpath_copy, cwd, parent_path);
+    if (!name || *name == '\0') return -EINVAL;     // 拒绝空 basename
 
     vfs_node_t *parent = NULL;
     int rc = vfs_lookup_at(AT_FDCWD, parent_path, LOOKUP_FOLLOW, &parent);
@@ -480,7 +526,7 @@ int64_t sys_symlink(const char *target, const char *linkpath, pt_regs_t *regs) {
         vfs_node_put(parent); return -EOPNOTSUPP;
     }
 
-    rc = parent->ops->symlink(parent, base, target_copy);
+    rc = parent->ops->symlink(parent, name, target_copy);
     vfs_node_put(parent);
     return rc;
 }
@@ -489,12 +535,11 @@ int64_t sys_symlink(const char *target, const char *linkpath, pt_regs_t *regs) {
 int64_t sys_readlink(const char *path, char *buf, size_t bufsize,
                      pt_regs_t *regs) {
     (void)regs;
-    if (!path || !buf) return -EFAULT;
-    if (bufsize == 0) return -EINVAL;
+    if (!buf || bufsize == 0) return -EINVAL;
+    // 注：允许 path==NULL 当 EFAULT 处理
 
     char path_copy[VFS_NAME_MAX];
-    if (strncpy_from_user(path_copy, path, VFS_NAME_MAX) < 0)
-        return -EFAULT;
+    COPY_USER_STR(path_copy, path, VFS_NAME_MAX);
 
     vfs_node_t *node = NULL;
     int rc = vfs_lookup_at(AT_FDCWD, path_copy, LOOKUP_NOFOLLOW, &node);
@@ -519,16 +564,15 @@ int64_t sys_readlink(const char *path, char *buf, size_t bufsize,
 // ── SYS_lstat(73): lstat(path, buf) — NOFOLLOW ───────────
 int64_t sys_lstat(const char *path, struct stat *buf, pt_regs_t *regs) {
     (void)regs;
-    if (!path || !buf) return -EFAULT;
+    if (!buf) return -EFAULT;
     char path_copy[VFS_NAME_MAX];
-    if (strncpy_from_user(path_copy, path, VFS_NAME_MAX) < 0)
-        return -EFAULT;
+    COPY_USER_STR(path_copy, path, VFS_NAME_MAX);
 
     vfs_node_t *node = NULL;
     int rc = vfs_lookup_at(AT_FDCWD, path_copy, LOOKUP_NOFOLLOW, &node);
     if (rc < 0) return rc;
 
-    // ★ v1 错位：vfs_stat 直接 memset 用户 buf；现先 build kernel-local 再 _ft copy
+    // ★ v2 修复：vfs_stat 直接 memset 用户 buf 会 fault；现先 build kernel-local
     struct stat kstat;
     rc = vfs_stat(node, &kstat);
     vfs_node_put(node);
@@ -539,13 +583,18 @@ int64_t sys_lstat(const char *path, struct stat *buf, pt_regs_t *regs) {
 }
 
 // ── SYS_fstatat(74): fstatat(dirfd, path, buf, flags) ────
+// ★ v3 新增：仅接受 AT_SYMLINK_NOFOLLOW 与 0；其他 flag 一律 -EINVAL
+//    （POSIX 严格要求，避免静默忽略调用方的语义请求）
+#define FSTATAT_SUPPORTED_FLAGS (AT_SYMLINK_NOFOLLOW)
+
 int64_t sys_fstatat(int dirfd, const char *path, struct stat *buf,
                     int flags, pt_regs_t *regs) {
     (void)regs;
-    if (!path || !buf) return -EFAULT;
+    if (!buf) return -EFAULT;
+    if (flags & ~FSTATAT_SUPPORTED_FLAGS) return -EINVAL;   // ★ v3: 拒绝未知 flag
+
     char path_copy[VFS_NAME_MAX];
-    if (strncpy_from_user(path_copy, path, VFS_NAME_MAX) < 0)
-        return -EFAULT;
+    COPY_USER_STR(path_copy, path, VFS_NAME_MAX);
 
     lookup_flags_t lflags =
         (flags & AT_SYMLINK_NOFOLLOW) ? LOOKUP_NOFOLLOW : LOOKUP_FOLLOW;
@@ -635,52 +684,55 @@ int fstatat(int dirfd, const char *path, struct stat *buf, int flags);
 
 ## 6. 测试矩阵
 
-`test/cases/test_vfs_symlink.c` —— 26 个 case：
+`test/cases/test_vfs_symlink.c` —— **27 个 case**（25 unit + 2 systest）：
 
 ```
 基础创建与读取
-  01 fast_symlink_create_read()        target ≤60B
-  02 long_symlink_create_read()         target 80B
-  03 symlink_eexist()                  linkpath 已存在 → -EEXIST
-  04 symlink_empty_target()            target="" → -ENOENT
-  05 symlink_nonexist_parent()         parent 目录不存在 → -ENOENT
-  06 readlink_on_regular()              -EINVAL
-  07 readlink_bufsize_zero()            -EINVAL
-  08 unlink_cleans_long_symlink()      long symlink unlink 后 data block 已释放
+  01 fast_symlink_create_read()           target ≤60B
+  02 long_symlink_create_read()            target 80B
+  03 symlink_eexist()                     linkpath 已存在 → -EEXIST
+  04 symlink_empty_target()               target="" → -ENOENT
+  05 symlink_nonexist_parent()            parent 目录不存在 → -ENOENT
+  06 symlink_relative_linkpath()          "link" (no slash) → parent=cwd，期望成功
+  07 readlink_on_regular()                 -EINVAL
+  08 readlink_bufsize_zero()               -EINVAL
+  09 unlink_cleans_long_symlink_bitmap()  long symlink unlink 后 sb_raw.s_free_blocks_count +1，bitmap 一位翻转
+  10 unlink_fast_symlink_doesnt_free()    fast symlink unlink 后 sb_raw.s_free_blocks_count 不变（i_block[] 是字符串）
 
 跟随语义（末段）
-  09 symlink_follow_in_lookup()         FOLLOW → 跟随到 target
-  10 symlink_no_follow_returns_link()   NOFOLLOW → 返回 link 节点本身
-  11 stat_follows()                     stat 跟随到 target
-  12 stat_on_link_no_follow()           lstat → S_IFLNK
-  13 fstatat_no_follow()                AT_SYMLINK_NOFOLLOW
-  14 fstatat_follow_default()           flags=0 跟随
+  11 symlink_follow_in_lookup()            FOLLOW → 跟随到 target
+  12 symlink_no_follow_returns_link()      NOFOLLOW + 末段 symlink → 返回 link 节点本身
+  13 stat_follows()                        stat 跟随到 target
+  14 lstat_returns_S_IFLNK()               lstat → S_IFLNK | 0777, size=target len
+  15 fstatat_no_follow()                   AT_SYMLINK_NOFOLLOW
+  16 fstatat_follow_default()              flags=0 跟随
 
-跟随语义（中段 + v2 新增）
-  15 symlink_mid_path_absolute()        /link_to_dir/file → /real_dir/file
-  16 symlink_mid_path_relative()        /a/link_to_dir/file → /a/real_dir/file
-  17 symlink_mid_path_no_follow()       /link_to_dir/file NOFOLLOW → 返回 link
-  18 symlink_mid_path_with_suffix()     /link_to_dir/a/b → /real_dir/a/b
-  19 symlink_chained_mid_path()         /a/link1/link2/file（双层）
+跟随语义（中段，v3 关键 — NOFOLLOW 不阻止中段跟随）
+  17 symlink_mid_path_absolute_follow()    /link_to_dir/file FOLLOW → 跟随 /link_to_dir，返回 file
+  18 symlink_mid_path_absolute_nofollow()  /link_to_dir/file NOFOLLOW → 仍跟随 /link_to_dir，返回 file
+  19 symlink_mid_path_relative_follow()    /a/link_to_dir/file → /a/real_dir/file
+  20 symlink_mid_path_with_suffix()        /link_to_dir/a/b → /real_dir/a/b
+  21 symlink_chained_mid_path()            /a/link1/link2/file（双层中段）
 
 环路与深度
-  20 symlink_loop_eloop()               A→B→A → ELOOP
-  21 symlink_depth_8_passes()           link1→…→link8 (8 跳 OK)
-  22 symlink_depth_mid_path()           /a/link1/link2/.../link8/f (中段 8 跳)
+  22 symlink_loop_eloop()                  A→B→A → ELOOP
+  23 symlink_depth_8_passes()              link1→…→link8 (8 跳 OK)
+  24 symlink_depth_mid_path()              /a/link1/link2/.../link8/f (中段 8 跳)
 
-错误码传播（v2 新增）
-  23 lookup_enotdir_for_mid()           /file/link_to_dir/f → ENOTDIR
-  24 lookup_enametoolong()              VFS_NAME_MAX+1 path → ENAMETOOLONG
-  25 stat_eopnotsupp_on_tmpfs()         /tmp 路径下 symlink 不支持 → EOPNOTSUPP
+错误码传播（v2 + v3 新增）
+  25 lookup_enotdir_for_mid()              /file/link_to_dir/f → ENOTDIR
+  26 lookup_enametoolong()                 用户 path 长度 ≥ VFS_NAME_MAX → ENAMETOOLONG
+  27 stat_eopnotsupp_on_tmpfs()            /tmp 路径下 symlink 不支持 → EOPNOTSUPP
+  28 fstatat_unknown_flag_einval()          fstatat(..., flags=AT_EMPTY_PATH) → EINVAL
 
-集成
-  26 systest_busybox_ln_exec()          ln -s /bin/busybox /tmp/x; /tmp/x --help → exit 0
-  27 systest_find_type_l()              find / -type l → 输出含 l → DT_LNK
+集成（systest）
+  29 systest_busybox_ln_exec()             ln -s /bin/busybox /tmp/x; /tmp/x --help → exit 0
+  30 systest_find_type_l()                 find / -type l → 输出含 symlink 行 → DT_LNK 验证
 ```
 
-`test/cases/test_systest.c` 加 case 26, 27。
+`test/cases/test_systest.c` 加 case 29, 30。
 
-### 6.1 错误码矩阵（v2 增强）
+### 6.1 错误码矩阵（v3 增强）
 
 | 场景 | 返回 | errno |
 |---|---|---|
@@ -688,7 +740,9 @@ int fstatat(int dirfd, const char *path, struct stat *buf, int flags);
 | `symlink("", "/y")` 空 target | -ENOENT | ENOENT |
 | `symlink("/x", "/nonexist/z")` 父不存在 | -ENOENT | ENOENT |
 | `symlink("/x", "/regular-file/z")` 父是普通文件 | -ENOTDIR | ENOTDIR |
+| `symlink("/x", "link")` (无 slash, cwd=/tmp) | 0 | -  (v3 修订：相对 linkpath 走 vfs_split_parent → parent=cwd) |
 | `symlink("/x", NULL)` / 用户指针非法 | -EFAULT | EFAULT |
+| `symlink` 用户字符串 len ≥ VFS_NAME_MAX | -ENAMETOOLONG | ENAMETOOLONG (v3 新增) |
 | `symlink("/x", "/tmp/x")` tmpfs 无 symlink op | -EOPNOTSUPP | EOPNOTSUPP |
 | `readlink("/regular-file", ...)` | -EINVAL | EINVAL |
 | `readlink("/loop1", buf, 0)` bufsize=0 | -EINVAL | EINVAL |
@@ -697,16 +751,18 @@ int fstatat(int dirfd, const char *path, struct stat *buf, int flags);
 | `readlink("/regular-file", buf, 0xdeadbeef)` 用户 buf 非法 | -EFAULT | EFAULT |
 | `lstat("/bin/sh")` (symlink) → S_IFLNK \| 0777, size=target 长度 | 0 | - |
 | `lstat("/bin/regular")` → S_IFREG \| 0755 | 0 | - |
+| `lstat("/link_to_dir/file")` (mid-path) → 跟随 /link_to_dir 返回 file | 0 | -  (v3 修订：NOFOLLOW 不阻止中段) |
 | `lstat("/no/such")` | -ENOENT | ENOENT |
 | `lstat(..., 0xdeadbeef)` 用户 buf 非法 | -EFAULT | EFAULT |
 | `stat("/bin/sh")` 跟随到 /bin/busybox | 0 | - |
 | `fstatat(AT_FDCWD, "/bin/sh", buf, AT_SYMLINK_NOFOLLOW)` → link 自身 | 0 | - |
 | `fstatat(AT_FDCWD, "/bin/sh", buf, 0)` → busybox | 0 | - |
+| `fstatat(AT_FDCWD, "/x", buf, AT_EMPTY_PATH)` (未支持 flag) | -EINVAL | EINVAL (v3 新增) |
 | 跟随超过 8 跳（末段或中段） | -ELOOP | ELOOP |
 | 跟随中间 readlink 失败 | -EIO | EIO |
 | 跟随到不存在的 target | -ENOENT | ENOENT |
 | 跟随路径含非法组件（ENOTDIR 等） | -ENOTDIR | ENOTDIR |
-| 路径总长 > VFS_NAME_MAX | -ENAMETOOLONG | ENAMETOOLONG |
+| 路径总长 ≥ VFS_NAME_MAX（vfs_lookup_at 内部） | -ENAMETOOLONG | ENAMETOOLONG |
 
 ---
 
