@@ -1125,6 +1125,55 @@ static __attribute__((noinline)) int ext2_vfs_readdir(struct vfs_node *node, uin
     return 0;
 }
 
+// ── VFS readlink implementation ────────────────────────
+// Reads the symlink target into `buf`. Two storage forms:
+//   fast symlink (i_blocks == 0): target inline in i_block[0..59] (60 B max)
+//   long symlink (i_blocks > 0):  target lives in i_block[0]'s data block
+// Honors caller's bufsize — truncates silently (matches readlink(2)).
+// Holds fs->lock for the duration; returns -EINVAL/-EIO on error or tlen.
+static __attribute__((noinline)) int ext2_vfs_readlink(struct vfs_node *node, char *buf,
+                             size_t size)
+{
+    if (!node || !buf || size == 0) return -EINVAL;
+    if (!node->mount) return -EINVAL;
+    ext2_fs_t *fs = (ext2_fs_t *)node->mount->fs_data;
+
+    spin_lock(&fs->lock);
+
+    ext2_inode_t inode;
+    if (ext2_read_inode(fs, ext2_node_ino(node), &inode) != 0) {
+        spin_unlock(&fs->lock); return -EIO;
+    }
+
+    int rc;
+    if (inode.i_blocks == 0) {
+        // Fast symlink: target inline in i_block[0..59]
+        size_t tlen = inode.i_size;
+        if (tlen > sizeof(inode.i_block)) tlen = sizeof(inode.i_block);
+        if (tlen > size) tlen = size;
+        memcpy(buf, inode.i_block, tlen);
+        rc = (int)tlen;
+    } else {
+        // Long symlink: target in i_block[0]'s data block
+        uint32_t phys = inode.i_block[0];
+        if (phys == 0) { spin_unlock(&fs->lock); return -EIO; }
+
+        uint8_t *block_buf = kmalloc(fs->block_size);
+        if (!block_buf) { spin_unlock(&fs->lock); return -ENOMEM; }
+        if (ext2_read_block(fs, phys, block_buf) != 0) {
+            kfree(block_buf); spin_unlock(&fs->lock); return -EIO;
+        }
+        size_t tlen = inode.i_size;
+        if (tlen > fs->block_size) tlen = fs->block_size;
+        if (tlen > size) tlen = size;
+        memcpy(buf, block_buf, tlen);
+        kfree(block_buf);
+        rc = (int)tlen;
+    }
+    spin_unlock(&fs->lock);
+    return rc;
+}
+
 // ── VFS rename ──────────────────────────────────────────
 static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, const char *oldname,
                             struct vfs_node *newdir, const char *newname)
@@ -1294,6 +1343,7 @@ struct vfs_ops ext2_vfs_ops = {
     .read    = ext2_vfs_read,
     .write   = ext2_vfs_write,
     .readdir = ext2_vfs_readdir,
+    .readlink = ext2_vfs_readlink,
     .create  = ext2_vfs_create,
     .unlink  = ext2_vfs_unlink,
     .mkdir   = ext2_vfs_mkdir,
