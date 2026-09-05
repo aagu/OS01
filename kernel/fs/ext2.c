@@ -1094,15 +1094,11 @@ static __attribute__((noinline)) int ext2_vfs_readdir(struct vfs_node *node, uin
                     entry->name[nlen] = '\0';
                     entry->ino  = de->inode;
                     entry->size = 0;
-                    // de->file_type per ext2 spec: 1=REG_FILE, 2=DIR,
-                    // 3=CHRDEV, 4=BLKDEV, 5=FIFO, 6=SOCK, 7=SYMLINK.
-                    // EXT2_FT_* names are not yet defined in ext2.h; using
-                    // numeric literals (task brief permits this — the values
-                    // are stable per the on-disk spec).
+                    // ext2 dirent file_type identifies the on-disk entry kind.
                     switch (de->file_type) {
-                        case 2:  entry->type = VFS_DIR;     break;
-                        case 7:  entry->type = VFS_SYMLINK; break;
-                        default: entry->type = VFS_FILE;    break;
+                        case EXT2_FT_DIR:     entry->type = VFS_DIR;     break;
+                        case EXT2_FT_SYMLINK: entry->type = VFS_SYMLINK; break;
+                        default:             entry->type = VFS_FILE;    break;
                     }
 
                     // ext2 dirent has no size field — read from inode.
