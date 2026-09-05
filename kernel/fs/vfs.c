@@ -564,13 +564,13 @@ static int vfs_lookup_resolved(const char *absolute,
 // ── Public lookup: absolute path only ─────────────────────
 //
 // Legacy contract: returns vfs_node_t* (NULL on error, no errno).
-// In T2 this still calls __vfs_lookup_raw directly (T6 migrates to
-// vfs_lookup_resolved, which adds symlink following + dirfd support).
+// T6 migration: call vfs_lookup_resolved so symlinks at any depth
+// are followed (LOOKUP_FOLLOW).  errno from the resolver is dropped.
 vfs_node_t *vfs_lookup(const char *path)
 {
-    vfs_node_t *node = NULL;
     if (!path) return NULL;
-    if (__vfs_lookup_raw(path, &node, NULL, 0, NULL, 0) < 0) {
+    vfs_node_t *node = NULL;
+    if (vfs_lookup_resolved(path, LOOKUP_FOLLOW, &node) < 0) {
         return NULL;
     }
     return node;
@@ -580,8 +580,9 @@ vfs_node_t *vfs_lookup(const char *path)
 //
 // If path is absolute (starts with '/'), cwd is ignored.
 // Otherwise, path is resolved relative to cwd (cwd must be non-NULL).
-// Legacy contract: NULL on error.  Migrated in T6 to call
-// vfs_lookup_resolved directly.
+// Legacy contract: NULL on error.  T6 migration: call
+// vfs_lookup_resolved directly to apply the same symlink-following
+// behavior as vfs_lookup (LOOKUP_FOLLOW).
 vfs_node_t *vfs_lookup_from(const char *path, const char *cwd)
 {
     if (!path) return NULL;
@@ -721,6 +722,7 @@ int vfs_stat(vfs_node_t *node, struct stat *buf)
     case VFS_DIR:   buf->st_mode = S_IFDIR | 0755; break;
     case VFS_CHRDEV: buf->st_mode = S_IFCHR | 0600; break;
     case VFS_BLKDEV: buf->st_mode = S_IFBLK | 0600; break;
+    case VFS_SYMLINK: buf->st_mode = S_IFLNK | 0777; break;
     default:        buf->st_mode = 0; break;
     }
 
@@ -870,6 +872,7 @@ int vfs_getdents(vfs_node_t *dir, struct linux_dirent64 *buf, unsigned int count
         case VFS_DIR:    d->d_type = DT_DIR; break;
         case VFS_CHRDEV: d->d_type = DT_CHR; break;
         case VFS_BLKDEV: d->d_type = DT_BLK; break;
+        case VFS_SYMLINK: d->d_type = DT_LNK; break;
         default:         d->d_type = DT_UNKNOWN; break;
         }
 
@@ -924,8 +927,9 @@ void vfs_debug_list(const char *path)
 // Given "/file", sets parent to "/" and returns "file".
 // Given "file" (no slash), uses cwd as parent and returns "file".
 // Returns pointer into a static buffer (parent_path), or NULL on error.
-static const char *vfs_split_parent(const char *path, const char *cwd,
-                                    char parent_path[VFS_NAME_MAX])
+// Exported (T6): sys_symlink (T7) needs relative linkpath handling.
+const char *vfs_split_parent(const char *path, const char *cwd,
+                             char parent_path[VFS_NAME_MAX])
 {
     if (!path || !parent_path) return NULL;
 

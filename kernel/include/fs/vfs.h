@@ -184,6 +184,16 @@ int vfs_rmdir(const char *path, const char *cwd);
 // Rename oldpath to newpath.  Returns 0 or -errno.
 int vfs_rename(const char *oldpath, const char *newpath, const char *cwd);
 
+// Split a path into parent directory path and base name.
+// Given "/foo/bar/baz", sets parent_path to "/foo/bar" and returns "baz".
+// Given "/file", sets parent_path to "/" and returns "file".
+// Given "file" (no slash), uses cwd as parent and returns "file".
+// Returns pointer into parent_path, or NULL on error.  parent_path must
+// be at least VFS_NAME_MAX bytes.  Exported (T6): sys_symlink (T7) uses
+// it for relative linkpath handling.
+const char *vfs_split_parent(const char *path, const char *cwd,
+                             char parent_path[VFS_NAME_MAX]);
+
 // Truncate a file node to a new size.  Returns 0 or -errno.
 int vfs_truncate(vfs_node_t *node, uint64_t new_size);
 
