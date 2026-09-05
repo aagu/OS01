@@ -2471,6 +2471,419 @@ static void h11_sig_handler(int sig)
     h11_sig_called = 1;
 }
 
+// ══ Symlink systest (T12) ═══════════════════════════════════
+// Spec: docs/superpowers/specs/2026-09-05-symlink-support-design.md §6.
+//
+// All fixtures live under /symlink-systest (root fs = ext2, which has
+// .symlink/.readlink), NOT /tmp — tmpfs intentionally has no .symlink op
+// and returns -EOPNOTSUPP (that is itself asserted below).
+
+#define SYMDIR "/symlink-systest"
+
+// Deterministic fixture: /symlink-systest does not exist in a freshly
+// built image, so every symlink case creates it first.  EEXIST is the
+// normal steady-state result and is not reported; anything else is a
+// real failure and goes through CHECK3.
+static void symlink_fixture_reset(void)
+{
+    if (mkdir(SYMDIR, 0777) != 0) {
+        int e = errno;
+        if (e != EEXIST)
+            CHECK3(0, "symlink_fixture", "mkdir " SYMDIR " failed");
+    }
+}
+
+// ── T12a: creation + readback (fast and long symlinks) ─────
+static void test_symlink_create_readlink(void)
+{
+    symlink_fixture_reset();
+
+    // Fast symlink: target <= 60 bytes -> stored inline in i_block[].
+    const char *fast = "/bin/busybox";
+    unlink(SYMDIR "/t_fast");
+    if (symlink(fast, SYMDIR "/t_fast") != 0) {
+        FAIL("symlink_fast: create failed errno=%d", errno);
+        return;
+    }
+    PASS("symlink_fast (created)");
+
+    char buf[300];
+    memset(buf, 0, sizeof(buf));
+    ssize_t n = readlink(SYMDIR "/t_fast", buf, sizeof(buf) - 1);
+    CHECKF(n == (ssize_t)strlen(fast), "readlink_fast", "len=%ld",
+           "len=%ld", (long)n);
+    CHECK3(n > 0 && memcmp(buf, fast, (size_t)n) == 0,
+           "readlink_fast", "target matches");
+
+    // Long symlink: target > 60 bytes -> stored in a data block.
+    char longt[128];
+    memset(longt, 'a', sizeof(longt));
+    longt[0] = '/';
+    longt[100] = '\0';                 // 100-byte target
+    unlink(SYMDIR "/t_long");
+    if (symlink(longt, SYMDIR "/t_long") != 0) {
+        FAIL("symlink_long: create failed errno=%d", errno);
+    } else {
+        PASS("symlink_long (created)");
+        memset(buf, 0, sizeof(buf));
+        n = readlink(SYMDIR "/t_long", buf, sizeof(buf) - 1);
+        CHECKF(n == 100, "readlink_long", "len=%ld", "len=%ld", (long)n);
+        CHECK3(n == 100 && memcmp(buf, longt, 100) == 0,
+               "readlink_long", "target matches");
+    }
+
+    unlink(SYMDIR "/t_fast");
+    unlink(SYMDIR "/t_long");
+}
+
+// ── T12b: error matrix (exact errno per spec §5.3) ─────────
+static void test_symlink_errors(void)
+{
+    symlink_fixture_reset();
+
+    int rc, e;
+
+    // EEXIST — linkpath already present.
+    unlink(SYMDIR "/t_eexist");
+    symlink("/bin/busybox", SYMDIR "/t_eexist");
+    rc = symlink("/bin/busybox", SYMDIR "/t_eexist");
+    e = errno;
+    CHECKF(rc == -1 && e == EEXIST, "symlink_EEXIST", "rc=%d errno=%d",
+           "rc=%d errno=%d", rc, e);
+    unlink(SYMDIR "/t_eexist");
+
+    // ENOENT — parent directory does not exist.
+    rc = symlink("/bin/busybox", SYMDIR "/no_such_dir/t");
+    e = errno;
+    CHECKF(rc == -1 && e == ENOENT, "symlink_ENOENT", "rc=%d errno=%d",
+           "rc=%d errno=%d", rc, e);
+
+    // ENOTDIR — a mid-path component is a regular file.
+    int fd = open(SYMDIR "/t_reg", O_CREAT | O_WRONLY, 0644);
+    if (fd >= 0) { write(fd, "x", 1); close(fd); }
+    rc = symlink("/bin/busybox", SYMDIR "/t_reg/t");
+    e = errno;
+    CHECKF(rc == -1 && e == ENOTDIR, "symlink_ENOTDIR", "rc=%d errno=%d",
+           "rc=%d errno=%d", rc, e);
+
+    // EINVAL — readlink on a non-symlink.
+    char rb[64];
+    rc = (int)readlink(SYMDIR "/t_reg", rb, sizeof(rb));
+    e = errno;
+    CHECKF(rc == -1 && e == EINVAL, "readlink_EINVAL_notlink", "rc=%d errno=%d",
+           "rc=%d errno=%d", rc, e);
+
+    // EINVAL — readlink with bufsize 0.
+    unlink(SYMDIR "/t_ei");
+    symlink("/bin/busybox", SYMDIR "/t_ei");
+    rc = (int)readlink(SYMDIR "/t_ei", rb, 0);
+    e = errno;
+    CHECKF(rc == -1 && e == EINVAL, "readlink_EINVAL_bufsize", "rc=%d errno=%d",
+           "rc=%d errno=%d", rc, e);
+    unlink(SYMDIR "/t_ei");
+    unlink(SYMDIR "/t_reg");
+
+    // ENAMETOOLONG — linkpath with no NUL inside VFS_NAME_MAX (256).
+    char toolong[300];
+    memset(toolong, 'z', sizeof(toolong));
+    toolong[0] = '/';
+    toolong[sizeof(toolong) - 1] = '\0';   // 299 chars > 255
+    rc = symlink("/bin/busybox", toolong);
+    e = errno;
+    CHECKF(rc == -1 && e == ENAMETOOLONG, "symlink_ENAMETOOLONG",
+           "rc=%d errno=%d", "rc=%d errno=%d", rc, e);
+
+    // EOPNOTSUPP — tmpfs has no .symlink op (intentional, spec §3).
+    rc = symlink("/bin/busybox", "/tmp/t_nosym");
+    e = errno;
+    CHECKF(rc == -1 && e == EOPNOTSUPP, "symlink_EOPNOTSUPP_tmpfs",
+           "rc=%d errno=%d", "rc=%d errno=%d", rc, e);
+
+    // EEXIST — linkpath is exactly "/" (would replace the mount root).
+    rc = symlink("/bin/busybox", "/");
+    e = errno;
+    CHECKF(rc == -1 && e == EEXIST, "symlink_root_EEXIST", "rc=%d errno=%d",
+           "rc=%d errno=%d", rc, e);
+}
+
+// ── T12c: stat / lstat / fstatat follow semantics ──────────
+static void test_symlink_stat(void)
+{
+    symlink_fixture_reset();
+
+    const char *target = "/bin/busybox";
+    unlink(SYMDIR "/t_st");
+    if (symlink(target, SYMDIR "/t_st") != 0) {
+        FAIL("symlink_stat: create failed errno=%d", errno);
+        return;
+    }
+
+    struct stat lst, st, tst;
+
+    // lstat -> the link itself; st_size == strlen(target).
+    int rc = lstat(SYMDIR "/t_st", &lst);
+    CHECK3(rc == 0, "lstat_link", "lstat ok");
+    CHECKF(rc == 0 && S_ISLNK(lst.st_mode), "lstat_link", "S_IFLNK",
+           "mode=%o", (unsigned)lst.st_mode);
+    CHECKF(rc == 0 && lst.st_size == (off_t)strlen(target),
+           "lstat_link", "size=%ld", "size=%ld", (long)lst.st_size);
+
+    // stat -> follows to the target (a regular file).
+    rc = stat(SYMDIR "/t_st", &st);
+    CHECK3(rc == 0, "stat_follow", "stat ok");
+    CHECKF(rc == 0 && !S_ISLNK(st.st_mode) && S_ISREG(st.st_mode),
+           "stat_follow", "S_IFREG", "mode=%o", (unsigned)st.st_mode);
+    if (stat(target, &tst) == 0)
+        CHECKF(rc == 0 && st.st_ino == tst.st_ino, "stat_follow",
+               "same inode as target", "ino=%lu vs %lu",
+               (unsigned long)st.st_ino, (unsigned long)tst.st_ino);
+
+    // fstatat(AT_SYMLINK_NOFOLLOW) == lstat.
+    struct stat a1, a2;
+    rc = fstatat(AT_FDCWD, SYMDIR "/t_st", &a1, AT_SYMLINK_NOFOLLOW);
+    CHECKF(rc == 0 && S_ISLNK(a1.st_mode), "fstatat_NOFOLLOW", "S_IFLNK",
+           "rc=%d mode=%o", rc, (unsigned)a1.st_mode);
+
+    // fstatat(flags=0) == stat (follows).
+    rc = fstatat(AT_FDCWD, SYMDIR "/t_st", &a2, 0);
+    CHECKF(rc == 0 && S_ISREG(a2.st_mode), "fstatat_follow", "S_IFREG",
+           "rc=%d mode=%o", rc, (unsigned)a2.st_mode);
+
+    // An absolute path ignores dirfd entirely — even a bogus one.
+    struct stat a3;
+    rc = fstatat(9999, SYMDIR "/t_st", &a3, AT_SYMLINK_NOFOLLOW);
+    CHECKF(rc == 0 && S_ISLNK(a3.st_mode), "fstatat_abs_ignores_dirfd",
+           "S_IFLNK", "rc=%d errno=%d", rc, errno);
+
+    unlink(SYMDIR "/t_st");
+}
+
+// ── T12d: mid-path following (absolute + relative) ─────────
+static void test_symlink_follow_midpath(void)
+{
+    symlink_fixture_reset();
+
+    // Fixture: SYMDIR/sub/f  +  SYMDIR/dabs -> SYMDIR/sub  (absolute)
+    //                        +  SYMDIR/drel -> "sub"       (relative)
+    mkdir(SYMDIR "/sub", 0777);
+    int fd = open(SYMDIR "/sub/f", O_CREAT | O_WRONLY, 0644);
+    if (fd < 0) { FAIL("symlink_midpath: fixture file failed"); return; }
+    write(fd, "hello", 5);
+    close(fd);
+
+    unlink(SYMDIR "/dabs");
+    unlink(SYMDIR "/drel");
+    CHECK3(symlink(SYMDIR "/sub", SYMDIR "/dabs") == 0,
+           "symlink_dir_abs", "created");
+    CHECK3(symlink("sub", SYMDIR "/drel") == 0,
+           "symlink_dir_rel", "created");
+
+    // Absolute-target mid-path following.
+    char buf[16];
+    memset(buf, 0, sizeof(buf));
+    fd = open(SYMDIR "/dabs/f", O_RDONLY);
+    if (fd >= 0) {
+        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        CHECK3(n == 5 && memcmp(buf, "hello", 5) == 0,
+               "follow_midpath_abs", "read through symlinked dir");
+    } else {
+        FAIL("follow_midpath_abs: open failed errno=%d", errno);
+    }
+
+    // Relative-target mid-path following (resolved against the link's dir).
+    memset(buf, 0, sizeof(buf));
+    fd = open(SYMDIR "/drel/f", O_RDONLY);
+    if (fd >= 0) {
+        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        CHECK3(n == 5 && memcmp(buf, "hello", 5) == 0,
+               "follow_midpath_rel", "read through relative symlinked dir");
+    } else {
+        FAIL("follow_midpath_rel: open failed errno=%d", errno);
+    }
+
+    // NOFOLLOW must NOT follow the trailing link: lstat sees the link.
+    struct stat ls;
+    int rc = lstat(SYMDIR "/dabs", &ls);
+    CHECKF(rc == 0 && S_ISLNK(ls.st_mode), "follow_NOFOLLOW_trailing",
+           "S_IFLNK", "rc=%d mode=%o", rc, (unsigned)ls.st_mode);
+    // ... but a mid-path link is still followed even under NOFOLLOW.
+    rc = fstatat(AT_FDCWD, SYMDIR "/dabs/f", &ls, AT_SYMLINK_NOFOLLOW);
+    CHECKF(rc == 0 && S_ISREG(ls.st_mode), "follow_NOFOLLOW_midpath",
+           "midpath still followed", "rc=%d errno=%d", rc, errno);
+
+    unlink(SYMDIR "/dabs");
+    unlink(SYMDIR "/drel");
+    unlink(SYMDIR "/sub/f");
+    rmdir(SYMDIR "/sub");
+}
+
+// ── T12e: loop / depth limits (MAXSYMLINKS = 8) ────────────
+static void test_symlink_loop_depth(void)
+{
+    symlink_fixture_reset();
+
+    // Two-link cycle: a -> b, b -> a.  stat() must give ELOOP.
+    unlink(SYMDIR "/t_a");
+    unlink(SYMDIR "/t_b");
+    symlink(SYMDIR "/t_b", SYMDIR "/t_a");
+    symlink(SYMDIR "/t_a", SYMDIR "/t_b");
+
+    struct stat st;
+    int rc = stat(SYMDIR "/t_a", &st);
+    int e = errno;
+    CHECKF(rc == -1 && e == ELOOP, "symlink_ELOOP_cycle", "rc=%d errno=%d",
+           "rc=%d errno=%d", rc, e);
+
+    // lstat on a cycle member still works (no follow).
+    rc = lstat(SYMDIR "/t_a", &st);
+    CHECKF(rc == 0 && S_ISLNK(st.st_mode), "symlink_ELOOP_lstat_ok",
+           "S_IFLNK", "rc=%d errno=%d", rc, errno);
+    unlink(SYMDIR "/t_a");
+    unlink(SYMDIR "/t_b");
+
+    // Depth chain: c0 -> c1 -> ... -> c9 -> /bin/busybox.
+    // A short chain (<= MAXSYMLINKS) resolves; a long one gives ELOOP.
+    char p[64], t[64];
+    for (int i = 0; i <= 10; i++) {
+        snprintf(p, sizeof(p), SYMDIR "/t_c%d", i);
+        unlink(p);
+    }
+    symlink("/bin/busybox", SYMDIR "/t_c10");
+    for (int i = 9; i >= 0; i--) {
+        snprintf(p, sizeof(p), SYMDIR "/t_c%d", i);
+        snprintf(t, sizeof(t), SYMDIR "/t_c%d", i + 1);
+        symlink(t, p);
+    }
+
+    // 4 hops from t_c7 (7->8->9->10->file): under the limit.
+    rc = stat(SYMDIR "/t_c7", &st);
+    CHECKF(rc == 0, "symlink_depth_ok", "short chain resolves",
+           "rc=%d errno=%d", rc, errno);
+
+    // 11 hops from t_c0: over MAXSYMLINKS (8) -> ELOOP.
+    rc = stat(SYMDIR "/t_c0", &st);
+    e = errno;
+    CHECKF(rc == -1 && e == ELOOP, "symlink_depth_ELOOP", "rc=%d errno=%d",
+           "rc=%d errno=%d", rc, e);
+
+    for (int i = 0; i <= 10; i++) {
+        snprintf(p, sizeof(p), SYMDIR "/t_c%d", i);
+        unlink(p);
+    }
+}
+
+// ── 41: exec through a symlink ─────────────────────────────
+// End-to-end: libc symlink() -> SYS_symlink -> ext2_vfs_symlink -> ext2
+// on-disk write, then libc exec() -> sys_exec -> vfs_lookup_at (follows
+// the symlink) -> finds the busybox ELF.  A successful exec never
+// returns, so _exit(127) in the child would mean exec came back
+// (ENOENT / ENOEXEC / EACCES) — the exact failure this case guards.
+//
+// Deviations from the task brief, each verified against the build
+// config rather than assumed:
+//   * The brief creates the link with `busybox ln -s`, but this image's
+//     busybox has no `ln` applet (config/busybox.config.in:
+//     "# CONFIG_LN is not set"), so the libc symlink() wrapper is used.
+//   * The brief runs `x --help`.  CONFIG_BUSYBOX is also unset, so
+//     busybox_main (which implements --help) is compiled out entirely;
+//     appletlib.c:1103 instead shifts argv when argv[0] starts with
+//     "busybox", making the applet name the *second* argument.  So the
+//     child runs the `true` applet, which is compiled in and exits 0
+//     deterministically with no output.
+static void test_41_exec_via_symlink(void)
+{
+    symlink_fixture_reset();
+    unlink(SYMDIR "/x");
+
+    if (symlink("/bin/busybox", SYMDIR "/x") != 0) {
+        FAIL("41_exec_via_symlink: symlink failed errno=%d", errno);
+        return;
+    }
+    PASS("41_exec_via_symlink (link created)");
+
+    int64_t pid = fork();
+    if (pid < 0) {
+        FAIL("41_exec_via_symlink: fork failed");
+        unlink(SYMDIR "/x");
+        return;
+    }
+    if (pid == 0) {
+        char *exec_argv[] = { "busybox", "true", NULL };
+        exec(SYMDIR "/x", exec_argv, NULL);
+        _exit(127);                 // exec returned -> lookup failed
+    }
+
+    int status = 0;
+    int64_t w = waitpid(pid, &status, 0);
+    CHECK3(w == pid, "41_exec_via_symlink", "waitpid returned child");
+    CHECKF(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+           "41_exec_via_symlink", "exec through symlink exited 0",
+           "status=%d exited=%d code=%d", status,
+           WIFEXITED(status), WEXITSTATUS(status));
+
+    unlink(SYMDIR "/x");            // cleanup stays in the parent
+}
+
+// ── 42: getdents64 reports DT_LNK ──────────────────────────
+// Validates the vfs_getdents VFS_SYMLINK -> DT_LNK mapping.
+//
+// Deviation from the task brief: the brief drives this through
+// `busybox find /symlink-systest -type l`, but this image's busybox has
+// neither `find` nor its -type predicate (config/busybox.config.in:
+// "# CONFIG_FIND is not set", "# CONFIG_FEATURE_FIND_TYPE is not set"),
+// so the directory stream is read with getdents64 directly — the same
+// kernel code path find would exercise, minus the userland hop.
+static void test_42_getdents_dt_lnk(void)
+{
+    symlink_fixture_reset();
+    unlink(SYMDIR "/lnk");
+
+    if (symlink("/bin/busybox", SYMDIR "/lnk") != 0) {
+        FAIL("42_getdents_dt_lnk: symlink failed errno=%d", errno);
+        return;
+    }
+    // A regular file in the same directory, so DT_LNK is not simply
+    // "whatever this fs returns for everything".
+    int rfd = open(SYMDIR "/reg42", O_CREAT | O_WRONLY, 0644);
+    if (rfd >= 0) { write(rfd, "r", 1); close(rfd); }
+
+    int fd = open(SYMDIR, O_RDONLY);
+    if (fd < 0) {
+        FAIL("42_getdents_dt_lnk: open " SYMDIR " failed errno=%d", errno);
+        unlink(SYMDIR "/lnk");
+        unlink(SYMDIR "/reg42");
+        return;
+    }
+
+    int saw_lnk = 0, saw_reg = 0, entries = 0;
+    char buf[1024];
+    int64_t n;
+    while ((n = syscall(SYS_getdents64, (uint64_t)fd, (uint64_t)buf,
+                        sizeof(buf))) > 0) {
+        int64_t off = 0;
+        while (off < n) {
+            struct dirent *d = (struct dirent *)(buf + off);
+            entries++;
+            if (strcmp(d->d_name, "lnk") == 0 && d->d_type == DT_LNK)
+                saw_lnk = 1;
+            if (strcmp(d->d_name, "reg42") == 0 && d->d_type == DT_REG)
+                saw_reg = 1;
+            off += d->d_reclen;
+        }
+    }
+    close(fd);
+
+    CHECKF(entries > 0, "42_getdents_dt_lnk", "%d entries", "%d entries",
+           entries);
+    CHECK3(saw_lnk, "42_getdents_dt_lnk", "lnk reported as DT_LNK");
+    CHECK3(saw_reg, "42_getdents_dt_lnk", "reg42 reported as DT_REG");
+
+    unlink(SYMDIR "/lnk");
+    unlink(SYMDIR "/reg42");
+}
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
@@ -2547,6 +2960,14 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"kill_pgrp",          test_kill_neg_pid_pgrp},
     {"getrandom",           test_getrandom},
     {"libc_printf_getopt",  test_libc_printf_getopt},
+    // ── symlink support (T12) ──
+    {"symlink_create_readlink", test_symlink_create_readlink},
+    {"symlink_errors",          test_symlink_errors},
+    {"symlink_stat",            test_symlink_stat},
+    {"symlink_follow_midpath",  test_symlink_follow_midpath},
+    {"symlink_loop_depth",      test_symlink_loop_depth},
+    {"41_exec_via_symlink",     test_41_exec_via_symlink},
+    {"42_getdents_dt_lnk",      test_42_getdents_dt_lnk},
 };
 
 int main(void)
