@@ -34,6 +34,7 @@ C_SOURCES := \
     $(wildcard stdlib/*.c) \
     $(wildcard string/*.c) \
     $(wildcard time/*.c) \
+    $(wildcard sys/stat/*.c) \
     $(wildcard unistd/*.c) \
     $(wildcard termios/*.c) \
     $(wildcard socket/*.c) \

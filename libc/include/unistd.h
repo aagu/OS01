@@ -71,7 +71,7 @@ int64_t execle(const char *path, const char *arg, ...);
 int unlink(const char *path);
 int link(const char *oldpath, const char *newpath);
 int symlink(const char *target, const char *linkpath);
-int readlink(const char *path, char *buf, size_t buf_size);
+ssize_t readlink(const char *path, char *buf, size_t buf_size);
 int mkdir(const char *path, int mode);
 int rmdir(const char *path);
 int rename(const char *oldpath, const char *newpath);
