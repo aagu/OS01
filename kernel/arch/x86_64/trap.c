@@ -1481,10 +1481,14 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             break;
         }
 
-        node = vfs_lookup_from(path_copy, current->files->cwd);
+        int lookup_rc = vfs_lookup_at(AT_FDCWD, path_copy, LOOKUP_FOLLOW, &node);
+        if (lookup_rc < 0 && !(lookup_rc == -ENOENT && (flags & O_CREAT))) {
+            regs->rax = lookup_rc;
+            goto out_open;  /* releases path_copy and any owned node/parent ref */
+        }
 
         // O_CREAT: create file if it doesn't exist
-        if (!node && (flags & O_CREAT)) {
+        if (lookup_rc == -ENOENT && (flags & O_CREAT)) {
             // Find parent directory — parse path_copy to extract parent
             char parent_path[VFS_NAME_MAX];
             const char *name = NULL;
@@ -1514,8 +1518,8 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
 
             if (!name || *name == '\0') { regs->rax = -EINVAL; goto out_open; }
 
-            parent = vfs_lookup_from(parent_path, current->files->cwd);
-            if (!parent) { regs->rax = -ENOENT; goto out_open; }
+            int parent_rc = vfs_lookup_at(AT_FDCWD, parent_path, LOOKUP_FOLLOW, &parent);
+            if (parent_rc < 0) { regs->rax = parent_rc; goto out_open; }
             if (parent->type != VFS_DIR) { regs->rax = -ENOTDIR; goto out_open; }
             if (!parent->ops || (uint64_t)parent->ops < 0xffff800000000000ULL || !parent->ops->create) {
                 regs->rax = -EROFS;
@@ -1682,8 +1686,9 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             goto out;
         }
 
-        vfs_node_t *node = vfs_lookup_from(path_copy, current->files->cwd);
-        if (!node) { regs->rax = -ENOENT; goto out; }
+        vfs_node_t *node = NULL;
+        int lookup_rc = vfs_lookup_at(AT_FDCWD, path_copy, LOOKUP_FOLLOW, &node);
+        if (lookup_rc < 0) { regs->rax = lookup_rc; goto out; }
         if (node->type != VFS_DIR) { vfs_node_put(node); regs->rax = -ENOTDIR; goto out; }
         vfs_node_put(node);
 
@@ -1764,11 +1769,13 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             break;
         }
 
-        const char *cwd = current->files ? current->files->cwd : "/";
-        vfs_node_t *node = vfs_lookup_from(path_copy, cwd);
-        kfree(path_copy);
-
-        if (!node) { regs->rax = -ENOENT; break; }
+        vfs_node_t *node = NULL;
+        int lookup_rc = vfs_lookup_at(AT_FDCWD, path_copy, LOOKUP_FOLLOW, &node);
+        kfree(path_copy);  /* preserve sys_stat's existing ownership boundary */
+        if (lookup_rc < 0) {
+            regs->rax = lookup_rc;
+            break;  /* path_copy was freed immediately after lookup above */
+        }
 
         // Fill kernel struct, then _ft write to user.
         struct stat kstat;

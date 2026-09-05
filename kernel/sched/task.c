@@ -1303,10 +1303,9 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
 {
     debug_task("sys_exec: pid=%d path=%s argv=%p\n", current->pid, path ? path : "(null)", (void*)argv);
     // 1. Look up the ELF file (support relative paths)
-    const char *cwd = current->files ? current->files->cwd : "/";
-    vfs_node_t *node = vfs_lookup_from(path, cwd);
-    if (!node)
-        return -ENOENT;
+    vfs_node_t *node = NULL;
+    int lookup_rc = vfs_lookup_at(AT_FDCWD, path, LOOKUP_FOLLOW, &node);
+    if (lookup_rc < 0) return lookup_rc;
     if (node->type != VFS_FILE) {
         vfs_node_put(node);
         return -EACCES;
