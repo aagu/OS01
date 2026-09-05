@@ -124,6 +124,20 @@ run-aarch64-uefi: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES)),aarch64-ue
 	  -device virtio-blk-device,drive=disk \
 	  -serial stdio -display none -no-reboot
 
+# The AArch64 PSCI SMP acceptance suite intentionally runs the production
+# firmware/image with multiple vCPU counts.  Its Python parser is host-only
+# and asserts structured kernel diagnostics; it does not mistake a UEFI
+# banner or arbitrary firmware "FAIL" text for kernel test results.
+.PHONY: test-aarch64-uefi-smp
+test-aarch64-uefi-smp: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES)),aarch64-uefi)
+	$(call require_capability,uefi-bringup)
+	python3 tests/aarch64_uefi_smp.py \
+	  --cpus 1 2 4 --repeat 3 --timeout 90 \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+	  --image "$(AARCH64_UEFI_DISK)" \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --log-dir "$(BUILD_DIR)/logs/aarch64-uefi-smp"
+
 # ── Validation ─────────────────────────────────────────────
 # validate keeps the x86 kernel + UEFI artifact checks (kernel ELF has no
 # undefined symbols / INTERP / DYNAMIC, is EM_X86_64, exports _start /
