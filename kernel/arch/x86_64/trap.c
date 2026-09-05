@@ -50,6 +50,17 @@ typedef int pid_t;
 #define SIG_SETMASK  2
 #endif
 
+// ── Forward declarations for syscall handlers (Task 7) ───────
+// The 4 symlink-related sys_* are defined in kernel/sched/task.c but
+// have no header prototype (declared static to the kernel).  trap.c
+// dispatches to them via the SYS_* switch; declare here so the
+// compiler typechecks the call signatures.
+int64_t sys_symlink(const char *target, const char *linkpath, pt_regs_t *regs);
+int64_t sys_readlink(const char *path, char *buf, size_t bufsize, pt_regs_t *regs);
+int64_t sys_lstat(const char *path, struct stat *buf, pt_regs_t *regs);
+int64_t sys_fstatat(int dirfd, const char *path, struct stat *buf,
+                    int flags, pt_regs_t *regs);
+
 // ── User address translation ─────────────────────────────────
 // Walk the user page table to resolve a user-space virtual
 // address to its physical address.  Returns 0 on failure.
@@ -1173,7 +1184,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
     }
     switch (regs->rax) {
     // ── Syscall name table (for strace) ─────────────────────
-    static const char *syscall_names[71] = {
+    static const char *syscall_names[75] = {
         [0]  = "putchar",
         [1]  = "write",
         [2]  = "exit",
@@ -1235,8 +1246,12 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         [68] = "getpgid",
         [69] = "setsid",
         [70] = "getsid",
+        [71] = "symlink",
+        [72] = "readlink",
+        [73] = "lstat",
+        [74] = "fstatat",
     };
-    const char *sname = (regs->rax < 71 && syscall_names[regs->rax])
+    const char *sname = (regs->rax < 75 && syscall_names[regs->rax])
                         ? syscall_names[regs->rax] : "?";
     (void)sname;
     debug_syscall("[strace] pid=%d syscall(%s, arg1=%#lx, arg2=%#lx, arg3=%#lx)\n",
@@ -2365,6 +2380,38 @@ case SYS_setsid: {
 }
 case SYS_getsid: {
     regs->rax = current->session;
+    break;
+}
+case SYS_symlink: {
+    // symlink(target, linkpath) — kernel handler in task.c.
+    // Both args are user pointers; the handler runs COPY_USER_STR
+    // and vfs_split_parent, so the trap.c entry is a thin wrapper.
+    regs->rax = sys_symlink((const char *)regs->rdi,
+                            (const char *)regs->rsi, regs);
+    break;
+}
+case SYS_readlink: {
+    // readlink(path, buf, bufsize) — NOFOLLOW; non-symlink → -EINVAL.
+    regs->rax = sys_readlink((const char *)regs->rdi,
+                             (char *)regs->rsi,
+                             (size_t)regs->rdx, regs);
+    break;
+}
+case SYS_lstat: {
+    // lstat(path, buf) — NOFOLLOW (last component); kernel-local kstat
+    // then copy_to_user_ft (v2 fix).
+    regs->rax = sys_lstat((const char *)regs->rdi,
+                          (struct stat *)regs->rsi, regs);
+    break;
+}
+case SYS_fstatat: {
+    // fstatat(dirfd, path, buf, flags) — 4th arg in r10 per Linux x86-64
+    // ABI (the standard syscall ABI's 4th register is r10, not rcx).
+    // v3 fix: flags & ~AT_SYMLINK_NOFOLLOW → -EINVAL.
+    regs->rax = sys_fstatat((int)regs->rdi,
+                            (const char *)regs->rsi,
+                            (struct stat *)regs->rdx,
+                            (int)regs->r10, regs);
     break;
 }
     case SYS_nanosleep: {
