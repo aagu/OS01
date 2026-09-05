@@ -34,6 +34,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <kernel/bootinfo.h>
+#include <kernel/arch/aarch64/dtb.h>
 
 #include <kernel/arch/cpu.h>
 #include <kernel/arch/irq.h>          /* arch_local_irq_disable / enable */
@@ -55,9 +56,6 @@ void kputx(uint64_t v);
 void pl011_init(void);
 void pl011_putc(char c);
 void arch_install_exception_vectors(void);
-
-/* Forward from dtb.c. */
-void dtb_init(uint64_t dtb_base);
 
 /* Forward from gic.c. */
 void gic_init(void);
@@ -99,10 +97,8 @@ void aarch64_main(const struct boot_context *handoff)
         __asm__ __volatile__("isb" ::: "memory");
     }
 
-    /* Step 4: DTB.  Parses 5 nodes (/cpus, /psci, /timer,
-     * /interrupt-controller, /pl011); missing/unparsable DTB falls back
-     * to QEMU virt defaults. */
-    dtb_init(handoff->firmware.dtb);
+    /* Step 4: validate the UEFI DTB copy before any GIC/PSCI access. */
+    dtb_init(handoff);
 
     kputs(uefi_handoff_banner);
     kputs(banner);
