@@ -1119,7 +1119,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             [3] = 8,   // close -> SYS_close
             [4] = 16,  // stat -> SYS_stat
             [5] = 17,  // fstat -> SYS_fstat
-            [6] = -1,  // lstat -> unsupported
+            [6]   = 73, // lstat      → SYS_lstat     (was -1 unsupported)
             [8] = 18,  // lseek -> SYS_lseek
             [9]  = 44,  // mmap
             [10] = 45,  // mprotect
@@ -1148,13 +1148,15 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             [85] = 23, // unlink -> SYS_unlink (Linux 85 = rmdir on some)
             [86] = 25, // rmdir -> SYS_rmdir
             [87] = 23, // unlink -> SYS_unlink
-            [89] = 26, // readlink -> SYS_? (Linux 89)
+            [88]  = 71, // symlink    → SYS_symlink   (was missing)
+            [89]  = 72, // readlink   → SYS_readlink  (was 26 = SYS_rename; pre-existing bug)
             [102] = 36,// getppid -> SYS_getppid (Linux: 110? no, 102)
             [110] = 36,// getppid -> SYS_getppid
             [162] = 31,// nanosleep -> SYS_nanosleep
             [201] = 34,// times -> SYS_times
             [217] = 21,// getdents64 -> SYS_getdents64
             [231] = 2, // exit_group -> SYS_exit
+            [262] = 74,// newfstatat → SYS_fstatat   (was missing)
 
 		// Socket syscalls (Phase 10 networking)
 		[41] = 52,	// socket	→ SYS_socket
