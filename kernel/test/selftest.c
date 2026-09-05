@@ -128,6 +128,8 @@ int tmpfs_selftest_mounted(void);
 int test_timer_tsc_freq(void);
 int test_timer_jiffies_hz(void);
 int selftest_uaccess(void);
+int symlink_selftest_resolver(void);
+int symlink_selftest_ext2_rollback(void);
 #endif
 
 // ── Test runner ────────────────────────────────────────────
@@ -154,6 +156,8 @@ int selftest_run_all(void)
     selftest_register("timer_tsc_freq",    test_timer_tsc_freq);
     selftest_register("timer_jiffies_hz",  test_timer_jiffies_hz);
     selftest_register("uaccess",           selftest_uaccess);
+    selftest_register("symlink_resolver",  symlink_selftest_resolver);
+    selftest_register("symlink_ext2_rollback", symlink_selftest_ext2_rollback);
 #endif
 
     int passed = 0, failed = 0;

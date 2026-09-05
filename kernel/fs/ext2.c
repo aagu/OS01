@@ -11,6 +11,29 @@
 static ext2_fs_t *ext2_selftest_fs;  // set by ext2_init, used by selftests
 #endif
 
+// ── Symlink fault injection (selftest only) ─────────────
+// ext2_symlink_fault_hit(f) is a compile-time 0 in normal builds, so every
+// injection point below folds back to the plain call with no added branch.
+#ifdef OS01_SELFTEST
+static enum ext2_symlink_test_fault ext2_symlink_fault = EXT2_SYMLINK_TEST_NONE;
+
+void ext2_symlink_test_set_fault(enum ext2_symlink_test_fault fault)
+{
+    ext2_symlink_fault = fault;
+}
+
+static int ext2_symlink_fault_hit(enum ext2_symlink_test_fault fault)
+{
+    return ext2_symlink_fault == fault;
+}
+#else
+void ext2_symlink_test_set_fault(enum ext2_symlink_test_fault fault)
+{
+    (void)fault;  // no-op outside KERNEL_SELFTEST builds
+}
+#define ext2_symlink_fault_hit(f)  0
+#endif
+
 // ── ext2 mode type bits (Linux ABI values, see man 2 stat) ─────
 // Defined locally because the public header only exposes EXT2_S_IFREG/IFDIR;
 // ext2_vfs_symlink/unlink both need the full type field mask.
@@ -834,9 +857,11 @@ static __attribute__((noinline)) int ext2_vfs_symlink(struct vfs_node *parent,
     uint32_t existing_ino;
     uint8_t  existing_ft;
     uint32_t existing_blk, existing_off;
-    int find_rc = ext2_find_dirent(fs, parent_ino, name,
-                                   &existing_ino, &existing_ft,
-                                   &existing_blk, &existing_off);
+    int find_rc = ext2_symlink_fault_hit(EXT2_SYMLINK_TEST_FIND_DIRENT)
+                      ? -EIO
+                      : ext2_find_dirent(fs, parent_ino, name,
+                                         &existing_ino, &existing_ft,
+                                         &existing_blk, &existing_off);
     if (find_rc == 0) {
         spin_unlock(&fs->lock);
         return -EEXIST;
@@ -861,7 +886,9 @@ static __attribute__((noinline)) int ext2_vfs_symlink(struct vfs_node *parent,
 
     // 3) Initialize the inode: fast (inline in i_block) or long (data block).
     ext2_inode_t inode;
-    int rc = ext2_read_inode(fs, ino, &inode);
+    int rc = ext2_symlink_fault_hit(EXT2_SYMLINK_TEST_READ_INODE)
+                 ? -EIO
+                 : ext2_read_inode(fs, ino, &inode);
     if (rc != 0) {
         free_inode(fs, ino);
         spin_unlock(&fs->lock);
@@ -895,7 +922,9 @@ static __attribute__((noinline)) int ext2_vfs_symlink(struct vfs_node *parent,
         memcpy(block_buf, target, tlen);
         memset(block_buf + tlen, 0, fs->block_size - tlen);
 
-        rc = ext2_write_block(fs, target_blk, block_buf);
+        rc = ext2_symlink_fault_hit(EXT2_SYMLINK_TEST_WRITE_BLOCK)
+                 ? -EIO
+                 : ext2_write_block(fs, target_blk, block_buf);
         if (rc != 0) {
             kfree(block_buf);
             free_block(fs, target_blk);
@@ -907,7 +936,9 @@ static __attribute__((noinline)) int ext2_vfs_symlink(struct vfs_node *parent,
         block_buf = NULL;
     }
 
-    rc = ext2_write_inode(fs, ino, &inode);
+    rc = ext2_symlink_fault_hit(EXT2_SYMLINK_TEST_WRITE_INODE)
+             ? -EIO
+             : ext2_write_inode(fs, ino, &inode);
     if (rc != 0) {
         if (inode.i_blocks > 0) free_block(fs, target_blk);
         free_inode(fs, ino);
@@ -916,7 +947,9 @@ static __attribute__((noinline)) int ext2_vfs_symlink(struct vfs_node *parent,
     }
 
     // 4) Link the inode into the parent directory.
-    rc = dirent_add(fs, parent_ino, name, ino, EXT2_FT_SYMLINK);
+    rc = ext2_symlink_fault_hit(EXT2_SYMLINK_TEST_DIRENT_ADD)
+             ? -EIO
+             : dirent_add(fs, parent_ino, name, ino, EXT2_FT_SYMLINK);
     if (rc != 0) {
         if (inode.i_blocks > 0) free_block(fs, target_blk);
         free_inode(fs, ino);
