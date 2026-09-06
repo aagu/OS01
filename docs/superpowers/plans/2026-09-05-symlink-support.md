@@ -1181,7 +1181,7 @@ Expected: aarch64 build succeeds (untouched by this work).
 Open `docs/roadmap.md`. Mark three items:
 - **P1**「exec 软链接跟随」→ done
 - **P5**「symlink/readlink」→ done
-- **P5**「exec symlink ABI done mitigation」→ upgraded to fully solved (can remove `b32e1e0` busybox-copies build-time workaround; verify in next refactor)
+- **P5**「exec symlink ABI done mitigation」→ upgraded to fully solved (`b32e1e0` busybox-copies build-time workaround reverted 2026-09-06; rootfs applet entries are debugfs symlinks again; busybox `ln`/`find -type l` validated end-to-end by systest cases 41/42)
 
 ```bash
 git add docs/roadmap.md

@@ -222,9 +222,7 @@ static int read_manifest(const char *path, manifest_entry_t *entries)
             snprintf(entries[n].mode,   sizeof(entries[n].mode),   "%s", mode);
             n++;
         } else if (!strcmp(line, "symlink")) {
-            // symlink<TAB>dest<TAB>target — retained for future use; image.mk
-            // currently emits busybox applets as `file` rows (kernel has no
-            // symlink exec support), so no symlink rows are produced today.
+            // symlink<TAB>dest<TAB>target
             char *dest = rest;
             char *p1 = strchr(dest, '\t'); if (!p1) continue; *p1++ = 0;
             char *target = p1;

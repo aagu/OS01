@@ -57,7 +57,7 @@
 
 **架构收益**：
 1. 一次性落地四项 POSIX 接口 + ext2 存储 + libc 包装 + Linux ABI 翻译 → 关闭 P1 + P5 三项阻塞 roadmap 项（exec 软链接跟随、symlink/readlink、exec symlink ABI）
-2. exec 跟随让 busybox rootfs 内的符号链接正常工作，可选移除 `b32e1e0` busybox 副本化构建期变通（节省 rootfs 空间）
+2. exec 跟随让 busybox rootfs 内的符号链接正常工作；`b32e1e0` busybox 副本化构建期变通已于 2026-09-06 回退（节省 rootfs 空间 + 启用 `ln`/`find -type l` applet）
 3. 为后续 `openat(2)` / `readlinkat(2)` / `symlinkat(2)` / `linkat(2)` 留好 `dirfd` 入口
 4. 同时修补 `PF_LINUX_ABI[89]` 错映射为 SYS_rename 的预存 bug（readlink→rename 路径在 busybox 中几乎不会触发，但若运行 `readlink` 命令会触发 — 致命回归）
 
@@ -896,7 +896,7 @@ STACK_SIZE = 32KB（task.h:46）。**峰值 1720B ≈ 5%**。安全余量充足�
 | **新增 kmalloc 失败路径** | vfs_lookup_at 处理 kmalloc 失败返回 -ENOMEM |
 | **`consumed_out`/`suffix` 截断**：buffer < path 长度时不写 | 不影响主路径（vfs_lookup_at 用 sizeof = 256），只影响理论极端长路径；v1 矩阵新增 ENAMETOOLONG 显式错误 |
 | **ext2 unlink 回收错误** | §4.4 类型感知专用路径：long link 释放一次 block，fast link 不将 target 字节解释为块号 |
-| **busybox rootfs 切回符号链接**（移除 `b32e1e0`） | **不在本次范围**——本次仅启用 kernel 支持，下次重构验证后切回 |
+| **busybox rootfs 切回符号链接**（移除 `b32e1e0`） | **已完成**（2026-09-06 commit <pending>） |
 | **非 ext2 FS 未实现 symlink/readlink** | sys_* 守卫 → -EOPNOTSUPP（显式失败）而非 NULL deref |
 
 ### 8.2 不在范围（明确不做）
@@ -916,6 +916,6 @@ STACK_SIZE = 32KB（task.h:46）。**峰值 1720B ≈ 5%**。安全余量充足�
 完成后可关闭/升级：
 - P1「exec 软链接跟随」→ ✅
 - P5「symlink/readlink」→ ✅
-- P5「exec symlink ABI ✅ 缓解」→ 完全解决（可移除 `b32e1e0` busybox 副本化构建期变通，下次重构验证）
+- P5「exec symlink ABI ✅ 缓解」→ 完全解决（已移除 `b32e1e0` busybox 副本化构建期变通，rootfs 切回符号链接）
 - P5「更多 applet」→ 部分解锁（`find -type l`、`ln` 等可工作）
 - **附带修复**：PF_LINUX_ABI 表 `[89]=26 readlink→rename` 错映射 bug 同期修复

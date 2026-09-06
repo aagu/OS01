@@ -1,9 +1,15 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-09-02）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-09-06）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
+
+## 2026-09-06
+
+| 项目 | 工作量 | 日期 |
+|------|--------|------|
+| **回退 busybox 副本变通，切回符号链接 rootfs**（回退 `b32e1e0`；开启 busybox `CONFIG_LN/CONFIG_FIND/CONFIG_FEATURE_FIND_TYPE`；rootfs manifest 重新以 debugfs symlink 写入 29 条 applet 链（含 `/bin/ln`）；`mkdisk` 注释同步；`user/systest.c` case 41 改用 busybox `ln` 创链 + lstat 验证 + exec 跟随；case 42 改用 busybox `find -type l` 验证 `VFS_SYMLINK→DT_LNK` 映射。QEMU：systest 268/268（含 41/42 新断言全部 PASS）、nettest 6/6。spec §6 全部落地） | 半天 | 09-06 |
 
 ## 2026-09-02
 

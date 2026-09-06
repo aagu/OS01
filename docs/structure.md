@@ -161,7 +161,7 @@
 ### config 目录
 * `busybox.config.in` - BusyBox 构建配置模板（adapter 生成 .config 用）
 * `rootfs.mk` - 磁盘镜像输入清单（dest=source:mode / busybox applet 项，image.mk 解析）
-* `busybox.overlay/` - BusyBox adapter 的受控 overlay（crt0/sigreturn/Kbuild.src，2026-09-02 起以 busybox 副本替代 applet symlink）
+* `busybox.overlay/` - BusyBox adapter 的受控 overlay（crt0/sigreturn/Kbuild.src）
 
 ### test / tests 目录
 * `test/` - 单元测试代码和 mock

@@ -2775,37 +2775,53 @@ static void test_symlink_loop_depth(void)
 }
 
 // ── 41: exec through a symlink ─────────────────────────────
-// End-to-end: libc symlink() -> SYS_symlink -> ext2_vfs_symlink -> ext2
-// on-disk write, then libc exec() -> sys_exec -> vfs_lookup_at (follows
-// the symlink) -> finds the busybox ELF.  A successful exec never
-// returns, so _exit(127) in the child would mean exec came back
-// (ENOENT / ENOEXEC / EACCES) — the exact failure this case guards.
-//
-// Deviations from the task brief, each verified against the build
-// config rather than assumed:
-//   * The brief creates the link with `busybox ln -s`, but this image's
-//     busybox has no `ln` applet (config/busybox.config.in:
-//     "# CONFIG_LN is not set"), so the libc symlink() wrapper is used.
-//   * The brief runs `x --help`.  CONFIG_BUSYBOX is also unset, so
-//     busybox_main (which implements --help) is compiled out entirely;
-//     appletlib.c:1103 instead shifts argv when argv[0] starts with
-//     "busybox", making the applet name the *second* argument.  So the
-//     child runs the `true` applet, which is compiled in and exits 0
-//     deterministically with no output.
+// End-to-end validation of the symlink-aware exec path:
+//   1. busybox `ln` applet creates the link (proves the applet
+//      works + the resulting inode is a real ext2 symlink, not a copy).
+//   2. lstat in the parent confirms the link.
+//   3. The kernel execs through the link: SYS_exec calls vfs_lookup_at
+//      which follows the last component, finds /bin/busybox, loads the
+//      ELF, and runs it. The child runs busybox's `true` applet via
+//      argv[0]="busybox" + argv[1]="true" (CONFIG_BUSYBOX is unset, so
+//      appletlib.c:1103 shifts argv when argv[0] starts with "busybox").
+//      A successful exec never returns, so _exit(127) in the child
+//      would mean exec came back (ENOENT / ENOEXEC / EACCES) — the
+//      exact failure this case guards.
 static void test_41_exec_via_symlink(void)
 {
     symlink_fixture_reset();
     unlink(SYMDIR "/x");
 
-    if (symlink("/bin/busybox", SYMDIR "/x") != 0) {
-        FAIL("41_exec_via_symlink: symlink failed errno=%d", errno);
-        return;
-    }
-    PASS("41_exec_via_symlink (link created)");
-
+    // Step 1: create the link with the busybox ln applet (not libc symlink).
+    // /bin/ln is a real symlink to /bin/busybox in the staged rootfs;
+    // exec resolves it, argv[0]="ln" → busybox dispatches to the ln applet.
     int64_t pid = fork();
     if (pid < 0) {
-        FAIL("41_exec_via_symlink: fork failed");
+        FAIL("41_exec_via_symlink: fork-ln failed");
+        return;
+    }
+    if (pid == 0) {
+        char *ln_argv[] = { "ln", "-s", "/bin/busybox", SYMDIR "/x", NULL };
+        exec("/bin/ln", ln_argv, NULL);
+        _exit(127);
+    }
+    int status = 0;
+    int64_t w = waitpid(pid, &status, 0);
+    CHECK3(w == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+           "41_exec_via_symlink", "busybox ln applet created link");
+
+    // Step 2: lstat the path the applet produced.
+    struct stat lst;
+    int rc = lstat(SYMDIR "/x", &lst);
+    CHECK3(rc == 0, "41_exec_via_symlink", "lstat of ln-created path");
+    CHECKF(rc == 0 && S_ISLNK(lst.st_mode), "41_exec_via_symlink",
+           "is a symlink", "mode=%o", (unsigned)lst.st_mode);
+
+    // Step 3: exec through the link. The kernel follows the symlink to
+    // /bin/busybox and runs the `true` applet, which exits 0.
+    pid = fork();
+    if (pid < 0) {
+        FAIL("41_exec_via_symlink: fork-exec failed");
         unlink(SYMDIR "/x");
         return;
     }
@@ -2815,8 +2831,7 @@ static void test_41_exec_via_symlink(void)
         _exit(127);                 // exec returned -> lookup failed
     }
 
-    int status = 0;
-    int64_t w = waitpid(pid, &status, 0);
+    w = waitpid(pid, &status, 0);
     CHECK3(w == pid, "41_exec_via_symlink", "waitpid returned child");
     CHECKF(WIFEXITED(status) && WEXITSTATUS(status) == 0,
            "41_exec_via_symlink", "exec through symlink exited 0",
@@ -2826,15 +2841,13 @@ static void test_41_exec_via_symlink(void)
     unlink(SYMDIR "/x");            // cleanup stays in the parent
 }
 
-// ── 42: getdents64 reports DT_LNK ──────────────────────────
-// Validates the vfs_getdents VFS_SYMLINK -> DT_LNK mapping.
-//
-// Deviation from the task brief: the brief drives this through
-// `busybox find /symlink-systest -type l`, but this image's busybox has
-// neither `find` nor its -type predicate (config/busybox.config.in:
-// "# CONFIG_FIND is not set", "# CONFIG_FEATURE_FIND_TYPE is not set"),
-// so the directory stream is read with getdents64 directly — the same
-// kernel code path find would exercise, minus the userland hop.
+// ── 42: busybox find -type l finds the symlink ─────────────
+// End-to-end validation that the userland consumer (busybox find)
+// reads the vfs_getdents VFS_SYMLINK -> DT_LNK mapping. The find
+// applet uses getdents64 to enumerate, then filters by d_type — if
+// the kernel returned DT_REG for symlinks, find -type l would miss
+// them entirely. Setup uses libc symlink() (we just need a link
+// to be present); the assertion is that the busybox applet reports it.
 static void test_42_getdents_dt_lnk(void)
 {
     symlink_fixture_reset();
@@ -2844,41 +2857,64 @@ static void test_42_getdents_dt_lnk(void)
         FAIL("42_getdents_dt_lnk: symlink failed errno=%d", errno);
         return;
     }
-    // A regular file in the same directory, so DT_LNK is not simply
-    // "whatever this fs returns for everything".
+    // A regular file in the same directory, so the result is not
+    // trivially "everything is a symlink".
     int rfd = open(SYMDIR "/reg42", O_CREAT | O_WRONLY, 0644);
     if (rfd >= 0) { write(rfd, "r", 1); close(rfd); }
 
-    int fd = open(SYMDIR, O_RDONLY);
-    if (fd < 0) {
-        FAIL("42_getdents_dt_lnk: open " SYMDIR " failed errno=%d", errno);
+    // Run `busybox find <dir> -type l` via pipe — busybox find uses
+    // getdents64 + d_type filtering, so this exercises the DT_LNK
+    // mapping through a real userland consumer.
+    int fds[2];
+    if (pipe(fds) < 0) {
+        FAIL("42_getdents_dt_lnk: pipe failed errno=%d", errno);
         unlink(SYMDIR "/lnk");
         unlink(SYMDIR "/reg42");
         return;
     }
-
-    int saw_lnk = 0, saw_reg = 0, entries = 0;
-    char buf[1024];
-    int64_t n;
-    while ((n = syscall(SYS_getdents64, (uint64_t)fd, (uint64_t)buf,
-                        sizeof(buf))) > 0) {
-        int64_t off = 0;
-        while (off < n) {
-            struct dirent *d = (struct dirent *)(buf + off);
-            entries++;
-            if (strcmp(d->d_name, "lnk") == 0 && d->d_type == DT_LNK)
-                saw_lnk = 1;
-            if (strcmp(d->d_name, "reg42") == 0 && d->d_type == DT_REG)
-                saw_reg = 1;
-            off += d->d_reclen;
-        }
+    int64_t pid = fork();
+    if (pid < 0) {
+        close(fds[0]); close(fds[1]);
+        FAIL("42_getdents_dt_lnk: fork failed");
+        unlink(SYMDIR "/lnk"); unlink(SYMDIR "/reg42");
+        return;
     }
-    close(fd);
+    if (pid == 0) {
+        close(fds[0]);
+        dup2(fds[1], 1);
+        close(fds[1]);
+        char *find_argv[] = { "find", SYMDIR, "-type", "l", NULL };
+        exec("/bin/find", find_argv, NULL);
+        _exit(127);
+    }
+    close(fds[1]);
 
-    CHECKF(entries > 0, "42_getdents_dt_lnk", "%d entries", "%d entries",
-           entries);
-    CHECK3(saw_lnk, "42_getdents_dt_lnk", "lnk reported as DT_LNK");
-    CHECK3(saw_reg, "42_getdents_dt_lnk", "reg42 reported as DT_REG");
+    // Drain the pipe: find prints one path per line; we only need to
+    // see whether "lnk" appears at all.
+    char out[256] = {0};
+    int off = 0;
+    for (;;) {
+        if (off >= (int)sizeof(out) - 1) break;
+        int64_t n = read(fds[0], out + off, (size_t)(sizeof(out) - 1 - off));
+        if (n <= 0) break;
+        off += (int)n;
+    }
+    close(fds[0]);
+
+    int saw_lnk = (strstr(out, "lnk") != NULL);
+    // Sanity: reg42 must NOT appear in -type l output (and we don't
+    // verify the absence of every other line — find may print the
+    // directory itself depending on options, but with -type l it
+    // should only list symlink leaves).
+    int saw_reg = (strstr(out, "reg42") != NULL);
+
+    int status = 0;
+    int64_t w = waitpid(pid, &status, 0);
+    CHECK3(w == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+           "42_getdents_dt_lnk", "find exited 0");
+    CHECKF(saw_lnk && !saw_reg, "42_getdents_dt_lnk",
+           "lnk reported, reg42 absent", "out=%.200s lnk=%d reg=%d",
+           out, saw_lnk, saw_reg);
 
     unlink(SYMDIR "/lnk");
     unlink(SYMDIR "/reg42");
