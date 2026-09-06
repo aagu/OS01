@@ -1,7 +1,7 @@
 # OS01 软链接（symlink）支持 — 设计方案
 
 > **日期**: 2026-09-05
-> **状态**: v4，待用户 review（v1/v2/v3 评审 14 项修订已落地）
+> **状态**: v5，评审通过（主代理完整审计 + 子代理复审 approve）
 > **目标**: 在 VFS + ext2 + syscall + libc + Linux ABI 翻译五处落地 POSIX 对称的软链接支持：`symlink(2)` 创建、`readlink(2)` 读取、`lstat(2)` 不跟随、`fstatat(2)` 带 `AT_SYMLINK_NOFOLLOW`。自动让 `exec`/`open`/`stat` 跟随末段与中间段软链接（POSIX-correct），关闭三项 roadmap 项：
 > - **P1**「exec 软链接跟随」（同时移除 `b32e1e0` busybox 副本化构建期规避，可选切回符号链接）
 > - **P5**「symlink/readlink」
@@ -16,6 +16,18 @@
 >   - **🟢 [P1] splice_symlink_path 返回值被忽略**：超长展开路径继续用未初始化 remaining 解析；改为检查返回值，失败时 kfree(target) + vfs_node_put(node) + 上抛 -ENAMETOOLONG。新测试 29
 >   - **🟢 [P1] dirent_add 失败泄漏 inode + data block**：参考 ext2_vfs_create(ext2.c:774) 模式，失败时先 `free_block(i_block[0])`（long symlink）再 `free_inode(ino)`。新测试 30
 >   - **🟢 [doc] §6 header 数量**：§6 header 与 §2.2 写 30 个，但 v3 测试清单已是 28 unit + 2 systest；统一为 30，再加 v4 新增 2 → 共 32
+> - v5：完整实现前审计修订——
+>   - **🟢 [P1] tmpfs E2E 矛盾**：tmpfs 明确不支持 symlink，BusyBox E2E 从 `/tmp/x` 改到 ext2 根上的 `/symlink-systest/x`
+>   - **🟢 [P1] ext2 symlink size**：readdir 对 `VFS_SYMLINK` 也读取 inode `i_size`，保证 `lstat.st_size` 正确
+>   - **🟢 [P1] lookup 错误语义**：walk 下一组件前显式检查当前节点为目录（否则 `-ENOTDIR`）；底层 readdir 非零统一为 `-EIO`
+>   - **🟢 [P1] suffix 拼接契约**：raw lookup 保证 suffix 为空或以 `/` 开头，splice 才可安全执行 `target + suffix`
+>   - **🟢 [P1] ext2 创建 I/O 原子性**：检查 read-inode、write-target-block 与 write-inode；任一步失败均在发布 dirent 前回收已分配 block/inode
+>   - **🟢 [P1] 公共 lookup 迁移闭环**：将 fold 解析抽为绝对路径内部 helper；`vfs_lookup`、`vfs_lookup_from` 与 `vfs_lookup_at` 全部经此 helper，旧 pointer API 仅丢失 errno、绝不丢失 symlink 语义
+>   - **🟢 [P1] 自动跟随 op 守卫**：VFS 内部的 `readlink` 调用也检查 `.ops/.readlink`，缺失则 `-EOPNOTSUPP`
+>   - **🟢 [P1] ext2 查重错误**：仅 `-ENOENT` 可继续创建，其他 `ext2_find_dirent` 错误原样返回
+>   - **🟡 [P2] at 绝对路径**：绝对 path 先解析并忽略 dirfd；只对相对 path 的非 `AT_FDCWD` 返回 `-EBADF`
+>   - **🟡 [P2] 根路径保护**：`symlink(..., "/")` 不得被拆成 cwd 下名称为 `/` 的目录项，明确返回 `-EEXIST`
+>   - **🟡 [P2] VFS type 值稳定性**：保留既有 `VFS_FILE..VFS_BLKDEV` 的数值，仅追加 `VFS_SYMLINK=5`
 
 ---
 
@@ -53,7 +65,7 @@
 
 | 项 | 决定 | 理由 |
 |---|---|---|
-| 跟随深度 | `MAXSYMLINKS = 8` | Linux 同值，足以覆盖实际误用且不误判 |
+| 跟随深度 | `MAXSYMLINKS = 8` | OS01 有意采用的小上限（Linux 常用上限为 40）；足以覆盖本系统目标，超过即 ELOOP |
 | 跨 mount 跟随 | 跟随（Linux 行为） | OS01 单 mount，跨 mount 问题不实际出现；统一 Linux 语义便于参考 |
 | 范围 | 全套：`symlink` + `readlink` + `lstat` + `fstatat(AT_SYMLINK_NOFOLLOW)` | 用户确认 |
 | **中段 symlink** | **resolve**：vfs_lookup 单函数内 fold 跟随循环，遇到中段 symlink splice `target+suffix` 后 restart | POSIX 必需（如 `/link_to_dir/file`） |
@@ -65,7 +77,7 @@
 | syscall 编号 | 71..74（71=`symlink`、72=`readlink`、73=`lstat`、74=`fstatat`） | 接续现有 0..70 |
 | 用户指针安全 | 所有 syscall 走 `copy_from_user_ft` / `copy_to_user_ft` | 复用 sys_stat 模式，零特殊 |
 | libc helper | 新增 `syscall3()`（= 现有 3-arg `syscall()`）+ `syscall4()`（r10 ABI） | fstatat 4 参必需 |
-| 非 ext2 FS 行为 | `sys_symlink`/`sys_readlink` 检查 `ops->symlink/readlink == NULL` → -EOPNOTSUPP | 显式失败而非 NULL deref |
+| 非 ext2 FS 行为 | `sys_symlink`/`sys_readlink` 及 lookup 自动跟随均检查 `ops->symlink/readlink == NULL` → -EOPNOTSUPP | 显式失败而非 NULL deref |
 | getdents | 加 `VFS_SYMLINK → DT_LNK` | `find -type l` 解锁 |
 
 ---
@@ -110,15 +122,16 @@
 
 | 文件 | 改动 |
 |---|---|
-| `kernel/fs/vfs.c` + `kernel/include/fs/vfs.h` | `__vfs_lookup` 改名为 `__vfs_lookup_raw(path, &node, consumed_out, size, remaining_out, size)`（**无 flags**，NOFOLLOW 决策在 caller）；新增 `vfs_lookup_at(dirfd, path, flags, **out)` 单函数 fold 跟随循环（NOFOLLOW 仅末段生效）；`vfs_split_parent` 改为非 static 导出（sys_symlink 复用）；`vfs_stat` 加 `S_IFLNK` case；新增 `VFS_SYMLINK` 类型；新增 `vfs_ops.symlink`/`vfs_ops.readlink` ops；`vfs_getdents` 加 `case VFS_SYMLINK: DT_LNK` |
-| `kernel/fs/ext2.c` | 新增 `ext2_vfs_symlink` + `ext2_vfs_readlink`；`ext2_vfs_readdir` 把 `EXT2_FT_SYMLINK` 映射到 `VFS_SYMLINK`；`vfs_ops` 注册新 ops；**`ext2_vfs_unlink` 类型感知重构**：用 `(i_mode & EXT2_S_IFMT) == EXT2_S_IFLNK` 分支走专用路径，**避免把 fast symlink 的 i_block[] target 字符串当块号释放导致位图损坏** |
-| `kernel/sched/task.c` | 新增 `sys_symlink` / `sys_readlink` / `sys_lstat` / `sys_fstatat`；现有 `sys_stat`/`sys_open`/`sys_exec` 改走 `vfs_lookup_at` |
-| `kernel/arch/x86_64/trap.c` | syscall 表注册 71..74；`PF_LINUX_ABI` 表补 `[6]=73`、`[88]=71`、`[89]=72`、`[262]=74`（同时修复 v1 `[89]=26` 错映射 bug） |
+| `kernel/fs/vfs.c` + `kernel/include/fs/vfs.h` | `__vfs_lookup` 改名为 raw；新增绝对路径 `vfs_lookup_resolved()` fold helper，`vfs_lookup`/`vfs_lookup_from`/`vfs_lookup_at` 统一委托，确保所有既有调用点跟随 symlink；walk 显式 `ENOTDIR`/`EIO`；其余同上 |
+| `kernel/fs/ext2.c` | 新增 symlink/readlink；readdir 映射并读取 symlink `i_size`；find_dirent 仅 ENOENT 可继续；**read/write inode、target block 写入与 dirent 失败均回滚**；注册 ops；unlink 类型感知重构 |
+| `kernel/sched/task.c` | `sys_exec` 改走 `vfs_lookup_at` |
+| `kernel/arch/x86_64/trap.c` | 新 syscall case/用户指针处理；现有 `SYS_stat`/`SYS_open`/`SYS_chdir` 改走 `vfs_lookup_at`；Linux ABI 表补映射；扩 `syscall_names` 至 75 |
+| `kernel/include/uapi/syscall.h` | 追加 71..74 的内核权威 syscall 常量 |
 | `libc/include/sys/syscall.h` | `SYS_symlink=71` 等 4 个宏；`AT_FDCWD=-100`、`AT_SYMLINK_NOFOLLOW=0x100`；新增 `syscall3()` (= 现有 3-arg `syscall()` 别名) 与 `syscall4()`（r10 ABI） |
 | `libc/include/sys/stat.h` | `lstat` / `fstatat` 声明 + `AT_*` 常量 |
 | `libc/unistd/symlink.c`、`readlink.c` | 替换 stub 为真实现 |
 | `libc/sys/stat/lstat.c`、`fstatat.c` | 新建 |
-| `test/cases/test_vfs_symlink.c` | 新建——32 个 case（§6：30 unit + 2 systest，其中 v4 新增 2 个 unit：splice 超限 ENAMETOOLONG、dirent_add 回滚） |
+| `test/cases/test_vfs_symlink.c` | 新建——42 个 case（§6） |
 
 ---
 
@@ -130,11 +143,11 @@
 // kernel/include/fs/vfs.h
 
 typedef enum {
-    VFS_FILE = 0,
-    VFS_DIR  = 1,
-    VFS_CHRDEV = 2,
-    VFS_BLKDEV = 3,
-    VFS_SYMLINK = 4,   // 新增
+    VFS_FILE    = 1,  // preserve current public VFS values
+    VFS_DIR     = 2,
+    VFS_CHRDEV  = 3,
+    VFS_BLKDEV  = 4,
+    VFS_SYMLINK = 5,  // appended; never renumber existing values
 } vfs_node_type_t;
 
 typedef enum {
@@ -173,18 +186,22 @@ static int __vfs_lookup_raw(const char *path,
 ```
 
 **实现要点**：
-- walk 循环里遇到目录项，先看 `entry.type == VFS_SYMLINK`
+- 处理每个普通组件前必须检查 `current->type == VFS_DIR`；否则直接 `-ENOTDIR`，不得以 readdir 未命中伪装成 `-ENOENT`
+- walk 循环里遇到目录项，先看 `entry.type == VFS_SYMLINK`；`vfs_readdir()` 任意非零失败统一转为 `-EIO`
 - 任何位置的 symlink 都早返 status=1，consumed=`已 walk 完到 symlink 的绝对路径`，remaining=`symlink 之后的部分（末段 symlink 时为 ""）`
+- `remaining_out`（下文简称 suffix）严格为 `""` 或以 `/` 开头的未消费路径；例如解析 `/a/link/x/y` 时，遇到 `link` 的 suffix 必须是 `/x/y`，不是 `x/y`。这使 `target + suffix` 不会丢失组件边界。
+- raw walk 在识别 symlink 时须从 tokenizer 的 `ptr` 生成 suffix：跳过连续 `/` 后，若仍有未消费字符，写 `suffix[0] = '/'` 再复制余串和 NUL；否则写空串。不得直接复制 tokenizer 已越过分隔符后的 `ptr`。
 - **NOFOLLOW 决策在 caller（vfs_lookup_at）**：若 `flags=NOFOLLOW && suffix==""` → 把 symlink 节点当最终节点返回（status=0 语义）；否则 splice + restart
 - 非 symlink 节点正常 walk，最后返回 status=0
 - consumed 累计：walk 完成时 `consumed = path` 全长
 
-**现有调用点迁移**：
-- 6 个原 `__vfs_lookup(path)` 调用点全部改用 `vfs_lookup_at(AT_FDCWD, path, LOOKUP_FOLLOW, &node)`，errno 由 caller 按需映射（stat → -ENOENT/-EIO；exec → -ENOENT/-EACCES；open → -ENOENT；chdir → -ENOENT）
-- 暂不保留 `__vfs_lookup` 旧 wrapper——所有调用点一起迁移，避免新旧 API 长期共存导致分叉
-- 行为变化：`vfs_lookup_at` 现在会跟随末段与中段 symlink；现有调用点的语义对 `LOOKUP_FOLLOW` 都是 POSIX-correct 行为，外部不可见
+**公共 API 迁移闭环**：
+- 将 §3.3 的 fold 循环抽为 `static int vfs_lookup_resolved(const char *absolute_path, lookup_flags_t flags, vfs_node_t **out)`；它只接受规范化绝对路径。
+- `vfs_lookup_at()` 先经 `resolve_at()` 得到绝对路径，再调用 helper；errno 完整上抛。
+- 兼容指针 API 不能继续调用 raw：`vfs_lookup(absolute)` 与 `vfs_lookup_from(path, cwd)` 分别规范化输入后调用同一 helper，成功返回 node，失败返回 NULL（这两个旧 API 的既有 errno 丢失语义保持不变）。
+- 因而 task 的 spawn/exec、trap 的 access/truncate、VFS 的 unlink/mkdir/rmdir/rename、main/selftest/tmpfs 等所有既有 public API 调用点同步得到中段和末段 link 跟随；不要求逐项机械替换，也不会形成新旧解析分叉。
 
-### 3.3 `vfs_lookup_at` 单函数 fold 跟随循环
+### 3.3 `vfs_lookup_resolved` fold 跟随循环与公共包装
 
 ```c
 // Returns:
@@ -198,12 +215,14 @@ int vfs_lookup_at(int dirfd, const char *path, lookup_flags_t flags,
 **核心算法**（fold into single function）：
 
 ```c
-int vfs_lookup_at(int dirfd, const char *path, lookup_flags_t flags,
-                  vfs_node_t **out_node) {
+// absolute_path 已由调用方规范化；唯一负责 walk/follow，避免 API 语义分叉。
+static int vfs_lookup_resolved(const char *absolute_path,
+                               lookup_flags_t flags, vfs_node_t **out_node) {
     *out_node = NULL;
-    char remaining[VFS_NAME_MAX];    // 唯一栈 buf（256B）
-    int rc = resolve_at(dirfd, path, remaining, sizeof(remaining));
-    if (rc < 0) return rc;
+    char remaining[VFS_NAME_MAX];
+    size_t plen = strlen(absolute_path);
+    if (plen >= sizeof(remaining)) return -ENAMETOOLONG;
+    memcpy(remaining, absolute_path, plen + 1);
 
     vfs_node_t *node = NULL;
     char consumed[VFS_NAME_MAX];
@@ -236,6 +255,11 @@ int vfs_lookup_at(int dirfd, const char *path, lookup_flags_t flags,
         // 否则 splice + restart（无论 FOLLOW 还是 NOFOLLOW+mid-path）
         char *target = kmalloc(VFS_NAME_MAX);
         if (!target) { vfs_node_put(node); return -ENOMEM; }
+        if (!node->ops || !node->ops->readlink) {
+            kfree(target);
+            vfs_node_put(node);
+            return -EOPNOTSUPP;
+        }
         int tlen = node->ops->readlink(node, target, VFS_NAME_MAX - 1);
         if (tlen < 0) { kfree(target); vfs_node_put(node); return tlen; }
         target[tlen] = '\0';
@@ -258,14 +282,23 @@ int vfs_lookup_at(int dirfd, const char *path, lookup_flags_t flags,
     }
 }
 
+int vfs_lookup_at(int dirfd, const char *path, lookup_flags_t flags,
+                  vfs_node_t **out_node) {
+    char absolute[VFS_NAME_MAX];
+    int rc = resolve_at(dirfd, path, absolute, sizeof(absolute));
+    if (rc < 0) { *out_node = NULL; return rc; }
+    return vfs_lookup_resolved(absolute, flags, out_node);
+}
+
 // resolve_at: 本次只实现 AT_FDCWD 语义
-//   - dirfd == AT_FDCWD 且 path 绝对 → remaining = path
+//   - path 绝对 → remaining = path，忽略 dirfd（fstatat POSIX 语义）
 //   - dirfd == AT_FDCWD 且 path 相对 → 用 current->files->cwd 拼接
-//   - 其他 dirfd 值 → -EBADF；本次明确不支持真实 fd，留待 openat 任务
+//   - path 相对且其他 dirfd 值 → -EBADF；本次明确不支持真实 fd，留待 openat 任务
 static int resolve_at(int dirfd, const char *path,
                       char *out, size_t out_size);
 
-// splice_symlink_path: 把 consumed + target + suffix 合成新绝对路径
+// splice_symlink_path: 把 consumed + target + suffix 合成新绝对路径。
+// Contract: suffix is "" or begins with '/'.
 //   - target[0] == '/' → new = target + suffix（绝对覆盖）
 //   - 否则 → new = dirname(consumed) + "/" + target + suffix
 // Returns:
@@ -277,7 +310,7 @@ static int splice_symlink_path(const char *consumed, const char *target,
 
 **关键不变量**：
 - **无内层递归调用**：所有 stack frame 都在 `vfs_lookup_at` 内（除 `readlink` 与 `__vfs_lookup_raw` 返回前）
-- peak stack = `remaining[256]` + `consumed[256]` + `suffix[256]` + `new_remaining[256]` + 局部变量 ≈ **1200B**（详见 §7）
+- 外层同时持有四个 256B 路径缓冲（不是“单一 256B buf”）；加上局部变量约 **1200B**，与内层 raw walk 同时在栈时峰值约 **1720B**（详见 §7）
 - `target` 总在 heap（避免栈累计）
 - 跟随时释放上一轮 `node` 避免 refcount 泄漏
 
@@ -287,7 +320,7 @@ static int splice_symlink_path(const char *consumed, const char *target,
 case VFS_SYMLINK: buf->st_mode = S_IFLNK | 0777; break;
 ```
 
-`st_size` = link target 字节数（由 `__vfs_lookup_raw` 在创建 node 时写入 `vfs_node.size`；ext2 readdir 已返回 `entry.size`）。
+`st_size` = link target 字节数。ext2 的 `readdir` 必须对 `VFS_FILE` **和** `VFS_SYMLINK` 都读 inode `i_size` 填入 `entry.size`；只改 file_type 映射会令 link 的 `st_size` 错为 0。
 
 ### 3.5 `vfs_getdents` 加 DT_LNK
 
@@ -317,10 +350,15 @@ int ext2_vfs_symlink(struct vfs_node *parent, const char *name,
 
     spin_lock(&fs->lock);
 
-    // 1) 检查 linkpath 已存在
+    // 1) 检查 linkpath 已存在。只有 -ENOENT 才可继续创建；I/O、OOM、ENOTDIR 均上抛。
     uint32_t existing_ino; uint8_t ft; uint32_t blk, off;
-    if (ext2_find_dirent(fs, parent_ino, name, &existing_ino, &ft, &blk, &off) == 0) {
+    int find_rc = ext2_find_dirent(fs, parent_ino, name,
+                                   &existing_ino, &ft, &blk, &off);
+    if (find_rc == 0) {
         spin_unlock(&fs->lock); return -EEXIST;
+    }
+    if (find_rc != -ENOENT) {
+        spin_unlock(&fs->lock); return find_rc;
     }
 
     // 2) 分配 inode（mode = S_IFLNK | 0777）
@@ -329,35 +367,51 @@ int ext2_vfs_symlink(struct vfs_node *parent, const char *name,
 
     // 3) 写 target
     ext2_inode_t inode;
-    ext2_read_inode(fs, ino, &inode);
+    if (ext2_read_inode(fs, ino, &inode) != 0) {
+        free_inode(fs, ino);
+        spin_unlock(&fs->lock);
+        return -EIO;
+    }
     inode.i_size = (uint32_t)tlen;
+    uint32_t target_blk = 0;
     if (tlen <= 60) {
         inode.i_blocks = 0;
         memset(inode.i_block, 0, sizeof(inode.i_block));
         memcpy(inode.i_block, target, tlen);
     } else {
-        uint32_t blk = alloc_block(fs);
-        if (blk == 0) {
+        target_blk = alloc_block(fs);
+        if (target_blk == 0) {
             free_inode(fs, ino);
             spin_unlock(&fs->lock);
             return -ENOSPC;
         }
         inode.i_blocks = fs->block_size / 512;
-        inode.i_block[0] = blk;
+        inode.i_block[0] = target_blk;
 
         uint8_t *buf = kmalloc(fs->block_size);
         if (!buf) {
-            free_block(fs, blk);
+            free_block(fs, target_blk);
             free_inode(fs, ino);
             spin_unlock(&fs->lock);
             return -ENOMEM;
         }
         memcpy(buf, target, tlen);
         memset(buf + tlen, 0, fs->block_size - tlen);
-        ext2_write_block(fs, blk, buf);
+        int write_rc = ext2_write_block(fs, target_blk, buf);
         kfree(buf);
+        if (write_rc != 0) {
+            free_block(fs, target_blk);
+            free_inode(fs, ino);
+            spin_unlock(&fs->lock);
+            return -EIO;
+        }
     }
-    ext2_write_inode(fs, ino, &inode);
+    if (ext2_write_inode(fs, ino, &inode) != 0) {
+        if (target_blk != 0) free_block(fs, target_blk);
+        free_inode(fs, ino);
+        spin_unlock(&fs->lock);
+        return -EIO;
+    }
 
     // ★ v4 修复：dirent_add 失败时必须回滚已分配资源，避免 ENOSPC/EIO 重试耗尽空间
     //   - Long symlink (i_blocks > 0): 先 free_block(i_block[0]) 再 free_inode
@@ -365,9 +419,7 @@ int ext2_vfs_symlink(struct vfs_node *parent, const char *name,
     //   - 参考 ext2_vfs_create (ext2.c:774) 的 inode 回滚模式
     int rc = dirent_add(fs, parent_ino, name, ino, EXT2_FT_SYMLINK);
     if (rc != 0) {
-        if (inode.i_blocks > 0) {
-            free_block(fs, inode.i_block[0]);
-        }
+        if (target_blk != 0) free_block(fs, target_blk);
         free_inode(fs, ino);
         spin_unlock(&fs->lock);
         return rc;   // 上抛 -ENOSPC / -EIO 等
@@ -417,10 +469,17 @@ int ext2_vfs_readlink(struct vfs_node *node, char *buf, size_t size) {
 }
 ```
 
-### 4.3 `ext2_vfs_readdir` 映射 symlink file_type
+### 4.3 `ext2_vfs_readdir` 映射 symlink file_type 与 size
 
 ```c
 case EXT2_FT_SYMLINK: entry->type = VFS_SYMLINK; break;
+
+// ext2 dirent 不带 i_size；regular file 与 symlink 都需要读取 inode。
+if (entry->type == VFS_FILE || entry->type == VFS_SYMLINK) {
+    ext2_inode_t inode;
+    if (ext2_read_inode(fs, de->inode, &inode) == 0)
+        entry->size = inode.i_size;
+}
 ```
 
 ### 4.4 `ext2_vfs_unlink` 类型感知重构（**重要**：现有逻辑损坏 symlink）
@@ -477,14 +536,14 @@ if (inode.i_links_count == 0) {
 ### 5.1 syscall 表
 
 ```c
-// kernel/arch/x86_64/trap.c
+// kernel/include/uapi/syscall.h (kernel canonical source; trap.c includes it)
 #define SYS_symlink    71
 #define SYS_readlink   72
 #define SYS_lstat      73
 #define SYS_fstatat    74
 ```
 
-`sys_stat(16)` / `sys_open(7)` / `sys_exec(5)` 改走 `vfs_lookup_at(AT_FDCWD, path_copy, LOOKUP_FOLLOW, &node)`。语义变化：`stat` 现在跟随 symlink（POSIX-correct；当前无 symlink 所以外部不可见）。
+`SYS_stat(16)` / `SYS_open(7)` / `SYS_chdir(14)` / `sys_exec(5)` 改走 `vfs_lookup_at(AT_FDCWD, path_copy, LOOKUP_FOLLOW, &node)`。`SYS_stat`、`SYS_open` 与 `SYS_chdir` 的 dispatch 本就在 `trap.c`；`sys_exec` 在 `task.c`，由 trap 的 `SYS_exec` case 调用。`trap.c` 的 `syscall_names` 数组扩至 75 并补齐 71..74 名称。语义变化：`stat` 现在跟随 symlink（POSIX-correct；当前无 symlink 所以外部不可见）。
 
 ### 5.2 `PF_LINUX_ABI` 翻译表（trap.c:1104）
 
@@ -538,6 +597,8 @@ int64_t sys_symlink(const char *target, const char *linkpath, pt_regs_t *regs) {
     // "/file" → parent="/" name="file"；"file" → parent=cwd name="file"
     const char *cwd = current->files ? current->files->cwd : "/";
     char parent_path[VFS_NAME_MAX];
+    // Root is an existing directory, never a legal directory-entry name.
+    if (strcmp(linkpath_copy, "/") == 0) return -EEXIST;
     const char *name = vfs_split_parent(linkpath_copy, cwd, parent_path);
     if (!name || *name == '\0') return -EINVAL;     // 拒绝空 basename
 
@@ -709,7 +770,7 @@ int fstatat(int dirfd, const char *path, struct stat *buf, int flags);
 
 ## 6. 测试矩阵
 
-`test/cases/test_vfs_symlink.c` —— **32 个 case**（30 unit + 2 systest）：
+`test/cases/test_vfs_symlink.c` —— **42 个 case**（40 unit + 2 systest）：
 
 ```
 基础创建与读取
@@ -751,13 +812,23 @@ int fstatat(int dirfd, const char *path, struct stat *buf, int flags);
   28 fstatat_unknown_flag_einval()          fstatat(..., flags=AT_EMPTY_PATH) → EINVAL
   29 splice_symlink_path_enametoolong()     /short → /long_symlink → target 超 VFS_NAME_MAX → ENAMETOOLONG（v4 新增）
   30 ext2_symlink_rollback_on_dirent_fail() 模拟 dirent_add 失败（block bitmap 满）→ long symlink 的 data block 与 inode 必须回滚（v4 新增）
+  31 lstat_symlink_reports_target_size()    fast + long symlink 的 st_size == target 字节数
+  32 lookup_readlink_op_missing()           VFS_SYMLINK 缺 readlink op → EOPNOTSUPP，绝不调用空指针
+  33 ext2_symlink_find_dirent_error()       ext2_find_dirent 的 EIO/ENOMEM/ENOTDIR 原样返回，不分配 inode/block
+  34 symlink_root_linkpath_eexist()         symlink("x", "/") → EEXIST，绝不创建名称为 "/" 的 dirent
+  35 fstatat_absolute_ignores_dirfd()       fstatat(invalid_fd, "/file", ...) 成功；相对 path 才 EBADF
+  36 lookup_non_directory_returns_enotdir() 普通文件后接组件 → ENOTDIR（不退化为 ENOENT）
+  37 lookup_readdir_failure_is_eio()        底层 readdir 失败 → EIO
+  38 ext2_symlink_read_inode_failure()      读新 inode 失败 → EIO，inode 已回收
+  39 ext2_symlink_write_block_failure()     long target block 写失败 → EIO，block 与 inode 已回收
+  40 ext2_symlink_write_inode_failure()     inode 写失败 → EIO，block（如有）与 inode 已回收
 
 集成（systest）
-  31 systest_busybox_ln_exec()             ln -s /bin/busybox /tmp/x; /tmp/x --help → exit 0
-  32 systest_find_type_l()                 find / -type l → 输出含 symlink 行 → DT_LNK 验证
+  41 systest_busybox_ln_exec()             ln -s /bin/busybox /symlink-systest/x; /symlink-systest/x --help → exit 0（根 ext2）
+  42 systest_find_type_l()                 find / -type l → 输出含 symlink 行 → DT_LNK 验证
 ```
 
-`test/cases/test_systest.c` 加 case 31, 32。
+`test/cases/test_systest.c` 加 case 41, 42。Systest 在执行 case 41 前须 `mkdir /symlink-systest`（若已存在则复用），结束后 unlink/rmdir 清理；不得使用 `/tmp`，因为它是故意不支持 symlink 的 tmpfs。
 
 ### 6.1 错误码矩阵（v3 增强）
 
@@ -771,6 +842,7 @@ int fstatat(int dirfd, const char *path, struct stat *buf, int flags);
 | `symlink("/x", NULL)` / 用户指针非法 | -EFAULT | EFAULT |
 | `symlink` 用户字符串 len ≥ VFS_NAME_MAX | -ENAMETOOLONG | ENAMETOOLONG (v3 新增) |
 | `symlink("/x", "/tmp/x")` tmpfs 无 symlink op | -EOPNOTSUPP | EOPNOTSUPP |
+| `symlink("/x", "/")` | -EEXIST | EEXIST |
 | `readlink("/regular-file", ...)` | -EINVAL | EINVAL |
 | `readlink("/loop1", buf, 0)` bufsize=0 | -EINVAL | EINVAL |
 | `readlink("/dev/null", ...)` devfs 无 readlink op | -EOPNOTSUPP | EOPNOTSUPP |
@@ -785,6 +857,7 @@ int fstatat(int dirfd, const char *path, struct stat *buf, int flags);
 | `fstatat(AT_FDCWD, "/bin/sh", buf, AT_SYMLINK_NOFOLLOW)` → link 自身 | 0 | - |
 | `fstatat(AT_FDCWD, "/bin/sh", buf, 0)` → busybox | 0 | - |
 | `fstatat(AT_FDCWD, "/x", buf, AT_EMPTY_PATH)` (未支持 flag) | -EINVAL | EINVAL (v3 新增) |
+| `fstatat(bad_fd, "/x", buf, 0)` | 0（绝对 path 忽略 dirfd） | - |
 | 跟随超过 8 跳（末段或中段） | -ELOOP | ELOOP |
 | 跟随中间 readlink 失败 | -EIO | EIO |
 | 跟随到不存在的 target | -ENOENT | ENOENT |
@@ -819,10 +892,10 @@ STACK_SIZE = 32KB（task.h:46）。**峰值 1720B ≈ 5%**。安全余量充足�
 | 风险 | 缓解 |
 |---|---|
 | **exec symlink TOCTOU**：lookup 时 link → X，exec 加载时 X 被替换为 Y | OS01 单用户，影响小；文档化。Linux 同样不防此 TOCTOU（需 `O_NOFOLLOW` open 语义配合，OS01 无 `open` flag 扩展） |
-| **`__vfs_lookup_raw` 签名变化**：3 个 out 参数影响 6 个现有调用点 | 提供 thin wrapper `vfs_lookup_legacy(path)`；迁移期机械替换 |
+| **`__vfs_lookup_raw` 签名变化**：3 个 out 参数影响既有调用点 | 全部迁移至 `vfs_lookup_at`；不保留旧 wrapper，避免语义分叉 |
 | **新增 kmalloc 失败路径** | vfs_lookup_at 处理 kmalloc 失败返回 -ENOMEM |
 | **`consumed_out`/`suffix` 截断**：buffer < path 长度时不写 | 不影响主路径（vfs_lookup_at 用 sizeof = 256），只影响理论极端长路径；v1 矩阵新增 ENAMETOOLONG 显式错误 |
-| **ext2 unlink 漏释放 long symlink 的 data block** | §4.4 显式补；若现状已正确则 no-op |
+| **ext2 unlink 回收错误** | §4.4 类型感知专用路径：long link 释放一次 block，fast link 不将 target 字节解释为块号 |
 | **busybox rootfs 切回符号链接**（移除 `b32e1e0`） | **不在本次范围**——本次仅启用 kernel 支持，下次重构验证后切回 |
 | **非 ext2 FS 未实现 symlink/readlink** | sys_* 守卫 → -EOPNOTSUPP（显式失败）而非 NULL deref |
 

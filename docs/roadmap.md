@@ -1,8 +1,8 @@
-# OS01 优化路线图 v21
+# OS01 优化路线图 v23
 
-> **基准**: `2ddb422` (test(systest): fix 5 flaky cases under interactive make run)
-> **日期**: 2026-08-29
-> **变更**: 同步 v20 之后的实际进展——getrandom 完成、进程组/会话 + tty 行规程落地、syscall 边界审计收尾、syscall 数 66→71、applet 9→52；作业控制项标记部分完成。
+> **基准**: `c64c854` (test: symlink systest cases — syscall matrix + exec via symlink + DT_LNK)
+> **日期**: 2026-09-06
+> **变更**: 同步 v22 之后的实际进展——**软链接支持落地**（12 commits `43588c8..c64c854`，4 新 syscall `symlink/readlink/lstat/fstatat` + VFS `__vfs_lookup_raw` mid-path 解析 + ext2 fast/long symlink storage + type-aware unlink rollback + libc POSIX wrappers + PF_LINUX_ABI table 4 项修复 + 67 systest case + 6 kernel selftest）；关闭 P1「exec 软链接跟随」+ P5「symlink/readlink」+ P5「exec symlink ABI ✅ 缓解」三项阻塞 roadmap 项。Parked follow-up：`__vfs_lookup_raw` 的 `consumed` 路径需以 mount prefix 播种（潜在 bug，仅在非根 mount + 相对 target 时触发）。
 
 标记: ✅ 已完成 | 🔒 P1 安全加固 | 🏗 P2 aarch64 适配 | 🖥 P3 GUI | 🔧 P4 硬件适配 | 📐 P5 ABI 扩展/兼容性
 
@@ -13,7 +13,7 @@
 | Phase | 说明 | 状态 |
 |-------|------|------|
 | **Phase 1: COW + 内存** | Copy-On-Write Fork, mmap/mprotect/munmap, demand paging | ✅ |
-| **Phase 2: 内核基础设施** | arch 抽象层、子系统注册框架、x86 平台源隔离、aarch64 dispatch 桩、SMP（percpu+GS-base+AP boot+负载均衡）、canary、hang detector、debug channels、kallsyms、FPU 保存、slab/PMM/softirq/timer SMP 加固 | ✅ |
+| **Phase 2: 内核基础设施** | arch 抽象层、子系统注册框架、x86 平台源隔离、aarch64 dispatch 桩、SMP（percpu+GS-base+AP boot+负载均衡）、canary、hang detector、debug channels、kallsyms、FPU 保存、slab/PMM/softirq/timer SMP 加固、**profile 化 GNU Make 构建体系**（`make PROFILE=<name>` + 自管 sysroot generation + host-tool mkdisk + make help capability 标签）、**profile-only UEFI overlay 简化**（x86 固件 per-profile + UEFI runtime 补丁删除）、**自托管 compiler runtime**（udivti3 + provider-keyed archive + kernel link publication + kernel runtime validation targets）、**aarch64 UEFI bootloader 统一**（x86_64+aarch64 共享 `boot/uefi/main.c` + `boot_context` handoff ABI） | ✅ |
 | **Phase 3: 信号 + 调度** | arch 信号帧投递、进程组/会话（setpgid/setsid/getpgid/getsid 67-70）、tty 行规程（VINTR/VQUIT→SIGINT/SIGQUIT）、SYS_kill 支持 pid=0/-pid/-1、per-CPU EEVDF rbtree 可运行队列、SMP 负载均衡 | ✅ |
 | **Phase 4: 文件系统** | ext2 R/W、FAT32 R/W、tmpfs、devfs、procfs、GPT 双分区 | ✅ |
 | **Phase 5: 设备驱动** | 8259A PIC、APIC/IOAPIC/LAPIC、PIT/LAPIC timer、PS/2 键盘、16550 串口、AHCI SATA | ✅ |
@@ -26,7 +26,7 @@
 
 ---
 
-## 待实施路线图（v21 按 5 优先级）
+## 待实施路线图（v22 按 5 优先级）
 
 > 优先级框架（用户确认，2026-08-18）：**P0 工程基础** → **P1 安全加固** → **P2 aarch64 适配** → **P3 GUI** → **P4 硬件适配** → **P5 ABI 扩展/兼容性**
 
@@ -37,6 +37,11 @@
 | 文档同步 | `docs/syscall.md` 71 syscall（0..70）、`docs/timer.md` 新架构、`pit-200hz-handoff.md` 状态 | ✅（ba56d34） |
 | applet 验证清单 | 52/52 编译进 busybox；详见 `docs/applet-verification.md` | ✅（2026-08-18） |
 | roadmap 瘦身 | 已完成内容迁出到 `docs/` 专题文档（见下） | ✅（2026-08-23） |
+| GNU Make profile 重构 | profile 化构建入口（`make PROFILE=<name>`）+ profile-aware Make 接口 + 自管 sysroot generation（原子发布）+ UEFI/image 产物按 profile 隔离 + host-tool mkdisk + capability-aware 入口校验（缺少能力的 profile 在解析期 fail-fast）+ profile-only cleanup contract + make help capability 标签 | ✅（e567394，15 commits `26920ad..e567394`，2026-09-02） |
+| profile-only UEFI overlay 简化 | x86 UEFI 固件 per-profile（不再用运行时 overlay patch）+ host test 按 profile 隔离 + 所有组件强制声明 profile + profile-only UEFI cleanup contract | ✅（T1–T5 landed，2026-09-03，T6 docs/wget flag 待办） |
+| 自托管 compiler runtime | udivti3 实现 + provider-keyed selfhosted archive + provider 构建不变量硬化 + 内核链接 compiler runtime + kernel link publication 加固 + compiler-rt eligibility 验证 + kernel runtime validation targets + syscall/selftest suite 隔离 + variant link paths + root `make sysroot` 入口 | ✅（多 commits 2026-09-04/05，详见 `runtime/` + `docs/build.md`） |
+| aarch64 UEFI bootloader 统一 | x86_64 + aarch64 共享 `boot/uefi/main.c` + arch 分发 + `boot_context` handoff ABI + boot_context 头部偏移断言 | ✅（commits `af166bc`..`06e6127`，merge `06e6127`） |
+| aarch64 UEFI 固件修复 | firmware 截断 64MiB 适配 QEMU pflash（`11aa6ed`）+ aarch64 UEFI 默认 URL 下载（`bad8825`）+ aarch64 也显式传 clang+lld 到 posix-uefi（`25872d1`） | ✅（2026-09-03） |
 
 ### 🔒 P1 安全加固
 
@@ -51,7 +56,7 @@
 | syscall 边界审计 ✅ | **已完成**（2026-08-24，commits `a1ad1b9`..`80eab1a`，11 commits）。详见下文「Syscall 边界审计实施总结」 | 独立 | |
 | 堆加固 | malloc double-free/溢出检测 | 独立 | |
 | NX 页 | 栈/堆不可执行 + mmap PROT_EXEC 审计 | 独立 | |
-| **exec 软链接跟随** | `__vfs_lookup` 不跟随软链接（返回末段节点本身），execve symlink 读到的目标文本被当 ELF 解析 → ENOEXEC（2026-09-02 build refactor 暴露；构建期以 busybox 副本规避，见 P5 symlink 行）。高优先级：vfs lookup 加软链接跟随 + exec 路径解析（也是安全项——symlink 混淆/路径校验） | 独立 | Linux do_filp_open |
+| **exec 软链接跟随** ✅ | **已完成**（2026-09-06，commits `43588c8`..`c64c854`）。`__vfs_lookup_raw` 早返中段/末段 symlink；`vfs_lookup_at` fold walk + splice + restart（≤ MAXSYMLINKS=8）；NOFOLLOW 仅禁止末段（POSIX）；sys_stat/open/chdir/exec 均已改走 `vfs_lookup_at`。spec §5.3 v3/v4/v5 修复全部应用。Parked follow-up：`__vfs_lookup_raw` 的 `consumed` 路径需以 mount prefix 播种（潜在 bug，仅在非根 mount + 相对 target 时触发）。 | 独立 | Linux do_filp_open |
 
 ### 🏗 P2 aarch64 适配
 
@@ -105,9 +110,9 @@
 | alarm/setitimer | POSIX 定时器（busybox timeout 需要） | 独立 | |
 | 作业控制（部分完成）| ✅ ~~setpgid/setsid/getpgid/getsid（67-70）~~、✅ ~~tcgetpgrp/tcsetpgrp 真实现~~、✅ ~~tty ISIG + VINTR/VQUIT~~、✅ ~~kill 支持 pid=0/-pid/-1~~；**剩余**：SIGWINCH 派发、SIGTSTP/SIGCONT 完整作业控制（bg/fg/jobs，需 busybox `CONFIG_ASH_JOB_CONTROL=y` 或自写 shell） | tty termios ✅ | |
 | /proc 完善 | status（signal mask/ppid/utime/stime）+ cmdline + stat | 独立 | |
-| symlink/readlink | VFS 软链接 + ext2 symlink（in-inode 快链接）（原 P1#6） | 独立 | |
-| **exec symlink ABI** | POSIX exec 需跟随软链接（`execve("/bin/wget")` 目前 ENOEXEC——vfs lookup 不跟随）；2026-09-02 build refactor 已记录 plan deviation：rootfs applet 项用 busybox 副本替代 symlink 规避，待 kernel vfs 跟随软链接后切回 symlink | exec 软链接跟随（P1） | Linux |
-| **sysroot 增量重编译** | 2026-09-02 build refactor 取舍：不可变 generation 发布 → 任一 sysroot 内容变化使内核/用户/BusyBox 整体重编译（-B/digest），非只重编依赖者（spec 209 未满足）。refinement：generation 内 .d 路径相对化/软链引用，使头文件变化只重编依赖者 | 独立 | |
+| symlink/readlink ✅ | **已完成**（2026-09-06，commits `43588c8`..`c64c854`）。VFS 软链接 + ext2 symlink（fast ≤60B inline `i_block[0..59]` / long data block via `i_block[0]`）；4 新 syscall `SYS_symlink/readlink/lstat/fstatat`=71..74；libc `syscall3`/`syscall4`（r10 ABI for fstatat）；`vfs_getdents` `VFS_SYMLINK→DT_LNK`；67 systest + 6 kernel selftest。详见 `docs/superpowers/specs/2026-09-05-symlink-support-design.md` v5 | 独立 | |
+| **exec symlink ABI** ✅ | **已完成**（2026-09-06）。busybox symlink 执行路径已可用：`__vfs_lookup_at(LOOKUP_FOLLOW)` 让 execve 跟随末段 symlink。**`b32e1e0` busybox 副本化构建期变通可在下次重构时切回符号链接**——本次未做（不在 T1-T13 范围内）；推荐在下一次 busybox rootfs 重构中验证并切回。 | exec 软链接跟随（P1）✅ | Linux |
+| **sysroot 增量重编译** | 2026-09-02 build refactor 取舍：不可变 generation 发布 → 任一 sysroot 内容变化使内核/用户/BusyBox 整体重编译（-B/digest），非只重编依赖者（spec 209 未满足）。GNU Make 重构 T1–T7 已落地 `c1a64c5`/`9efb970` 的 provider-keyed archive + 原子发布，但头文件级增量重编仍未达成。refinement：generation 内 .d 路径相对化/软链引用，使头文件变化只重编依赖者 | 独立 | |
 | HTTPS/TLS | mbedTLS 集成 BusyBox wget（原 P2#10） | mbedTLS ✅ | |
 | AF_UNIX/socketpair | 本地 socket IPC（原 P2#11） | socket ✅ | |
 | 更多 applet | grep/sed/find，先补 libc regex/fnmatch（原 P1#7） | libc | |
@@ -143,3 +148,6 @@ P5: ELF ✅ → ld.so → 共享 libc → apk/musl；futex ✅ → clone → pth
 | `docs/network.md` | lwIP 网络栈 + 正确性加固实施总结 |
 | `docs/scheduler.md` / `docs/scheduler-complexity.md` | EEVDF 调度器设计与复杂度评估 |
 | `docs/applet-verification.md` | busybox applet 验证清单 |
+| `docs/build.md` | GNU Make profile 化构建体系（2026-09-02 重构后）：profile 入口 / 能力契约 / 用户入口 / 工具链覆盖变量 / provider-keyed selfhosted archive / runtime validation targets / host-tool mkdisk / make help capability 标签 |
+| `docs/boot.md` | x86_64 + aarch64 UEFI bootloader 统一 + `boot_context` handoff ABI + 架构中立生命周期 |
+| `docs/architecture.md` / `docs/structure.md` / `docs/driver.md` / `docs/debug.md` / `docs/build-run-debug.md` / `docs/lwip-debugging-experience.md` | 系统整体架构 + 源码目录约定 + 驱动子系统 + 调试通道 + 端到端构建运行调试 + lwIP 调试经验 |

@@ -6,7 +6,7 @@
 
 **Architecture:** Two new kernel concepts (symlink node type + lookup follow loop) plus two new filesystem ops (`.symlink` / `.readlink` in `vfs_ops_t`) implemented in ext2 (fast inline + long block-pointer storage). Four new syscalls (71..74) + libc POSIX wrappers + four-entry `PF_LINUX_ABI` translation table so busybox's Linux-ABI-built `ln` / `readlink` / `find -type l` all work. Symlink-following folded into a single `vfs_lookup_resolved` helper that all public lookup APIs (including legacy `vfs_lookup` / `vfs_lookup_from`) route through.
 
-**Tech Stack:** OS01 kernel (C, x86_64 freestanding), ext2 driver, libc freestanding (C), POSIX syscalls via `int $0x80`, Linux x86-64 ABI translation via `PF_LINUX_ABI` flag + 320-entry `linux_to_os01[]` table. Build: GNU Make profile-aware, `make PROFILE=x86_64-clang {kernel,user,disk.img,run,test,validate}`. Host tests: `make test` (clang, no sysroot).
+**Tech Stack:** OS01 kernel (C, x86_64 freestanding), ext2 driver, libc freestanding (C), POSIX syscalls via `int $0x80`, Linux x86-64 ABI translation via `PF_LINUX_ABI` flag + 320-entry `linux_to_os01[]` table. Build: GNU Make profile-aware. Host tests (`make PROFILE=x86_64-clang test`) cover host-safe pure logic only; kernel behavior is verified by `make PROFILE=x86_64-clang test-kernel-selftest` and `make OS01_SYSTEST=1 test-syscall`.
 
 **Spec:** `docs/superpowers/specs/2026-09-05-symlink-support-design.md` — v5, audit-approved. The plan argues from the spec; the executor reads both. The spec contains the complete reference code for every function — the plan only re-shows code that's tricky, non-obvious, or referenced by multiple tasks.
 
@@ -41,15 +41,15 @@ Copied verbatim from the spec; every task implicitly inherits these:
 | kernel impl | `kernel/fs/vfs.c` | `__vfs_lookup_raw`, `vfs_lookup_resolved`, `vfs_lookup_at`, `resolve_at`, `splice_symlink_path`; `vfs_lookup`/`vfs_lookup_from` migration; `vfs_split_parent` un-static; `vfs_stat` S_IFLNK; `vfs_getdents` DT_LNK | T2, T6 |
 | kernel impl | `kernel/fs/ext2.c` | `ext2_vfs_symlink`, `ext2_vfs_readlink`, readdir `EXT2_FT_SYMLINK` + i_size, unlink type-aware, find_dirent error handling, ops table registration | T3, T4, T5 |
 | kernel header | `kernel/include/uapi/syscall.h` | SYS_symlink=71..SYS_fstatat=74 | T1 |
+| kernel header | `kernel/include/uapi/stat.h` | `S_IFLNK`, `S_ISLNK`, `DT_LNK`, `AT_FDCWD`, `AT_SYMLINK_NOFOLLOW` for kernel callers | T1 |
 | kernel syscall | `kernel/arch/x86_64/trap.c` | syscall dispatch 71..74, `syscall_names[75]`, `linux_to_os01` table, `sys_stat/open/chdir` migration | T7, T8, T9 |
 | kernel syscall | `kernel/sched/task.c` | `sys_symlink`, `sys_readlink`, `sys_lstat`, `sys_fstatat`, `sys_exec` migration, `COPY_USER_STR` macro | T7, T8 |
 | libc header | `libc/include/sys/syscall.h` | `SYS_symlink=71..74`, `syscall3()`, `syscall4()` | T1 |
 | libc header | `libc/include/sys/stat.h` | `AT_FDCWD`, `AT_SYMLINK_NOFOLLOW`, `lstat`/`fstatat` decls | T1 |
 | libc impl | `libc/unistd/symlink.c`, `readlink.c` | real impls | T10 |
 | libc impl | `libc/sys/stat/lstat.c`, `fstatat.c` | real impls | T10 |
-| tests | `test/cases/test_vfs_symlink.c` | 40 unit cases | T11 |
-| tests | `test/cases/test_systest.c` | 2 systest cases | T12 |
-| tests | `test/Makefile` | wire new test binary | T11 |
+| kernel tests | `kernel/test/symlink_selftest.c` | deterministic VFS/ext2 failure-path tests with in-kernel fakes | T11 |
+| OS E2E tests | `user/systest.c` | syscall/libc/ext2 cases and busybox integration | T12 |
 
 ---
 
@@ -62,13 +62,13 @@ Bottom-up by dependency, each independently buildable:
 - **T3** ext2 readdir mapping + i_size read
 - **T4** ext2_vfs_readlink
 - **T5** ext2_vfs_symlink + type-aware ext2_vfs_unlink
-- **T6** VFS public API migration + DT_LNK + S_IFLNK
+- **T6** VFS directory/stat integration + exported split-parent helper
 - **T7** sys_symlink / sys_readlink / sys_lstat / sys_fstatat in trap.c + task.c
 - **T8** Migrate sys_stat / sys_open / sys_chdir / sys_exec to vfs_lookup_at
 - **T9** PF_LINUX_ABI table fix
 - **T10** libc POSIX wrappers
-- **T11** test_vfs_symlink.c (40 unit cases)
-- **T12** systest cases (busybox ln + find -type l)
+- **T11** kernel symlink selftests (resolver + injected ext2 failures)
+- **T12** OS01 systest cases (syscalls + busybox ln/find integration)
 - **T13** End-to-end verification + roadmap update
 
 ---
@@ -78,14 +78,15 @@ Bottom-up by dependency, each independently buildable:
 **Files:**
 - Modify: `kernel/include/fs/vfs.h`
 - Modify: `kernel/include/uapi/syscall.h`
+- Modify: `kernel/include/uapi/stat.h`
 - Modify: `libc/include/sys/syscall.h`
 - Modify: `libc/include/sys/stat.h`
 
-**Produces:** `VFS_SYMLINK=5`; `lookup_flags_t`; `MAXSYMLINKS=8`; `vfs_ops.symlink/.readlink`; `SYS_symlink/readlink/lstat/fstatat=71..74` in both kernel and libc headers; `syscall3()` and `syscall4()` (r10 ABI) in libc; `AT_FDCWD=-100`, `AT_SYMLINK_NOFOLLOW=0x100`; `lstat`/`fstatat` declarations.
+**Produces:** `VFS_SYMLINK=5`; `lookup_flags_t`; `MAXSYMLINKS=8`; `vfs_ops.symlink/.readlink`; `SYS_symlink/readlink/lstat/fstatat=71..74` in both kernel and libc headers; `syscall3()` and `syscall4()` (r10 ABI) in libc; kernel-and-libc `AT_FDCWD=-100`, `AT_SYMLINK_NOFOLLOW=0x100`, `S_IFLNK`, `S_ISLNK`, and `DT_LNK`; `lstat`/`fstatat` declarations.
 
 - [ ] **Step 1: Add VFS_SYMLINK + lookup flags to vfs.h**
 
-Locate `vfs_node_type_t` in `kernel/include/fs/vfs.h`. Replace with:
+`vfs.h` currently defines `VFS_FILE` through `VFS_BLKDEV` as macros, not as a `vfs_node_type_t` enum. Replace those four macro definitions with:
 
 ```c
 typedef enum {
@@ -108,7 +109,7 @@ If existing enum uses different numeric values, preserve them — only APPEND `V
 
 - [ ] **Step 2: Add `.symlink` and `.readlink` to `vfs_ops_t`**
 
-At the END of the `vfs_ops_t` struct (before closing brace):
+Move the existing `#include <stddef.h>` from below `vfs_node_t` to immediately after `#include <stdint.h>`, because the following new callback uses `size_t` before the current include location. Then add, at the END of the `vfs_ops_t` struct (before closing brace):
 
 ```c
     int (*symlink)(struct vfs_node *parent, const char *name,
@@ -159,7 +160,21 @@ static inline int64_t syscall4(uint64_t nr,
 }
 ```
 
-- [ ] **Step 5: Add AT_* + lstat/fstatat decls to `libc/include/sys/stat.h`**
+- [ ] **Step 5: Add kernel UAPI file-type and at-style lookup constants**
+
+In `kernel/include/uapi/stat.h`, append the missing ABI definitions next to the existing file-type and dirent constants:
+
+```c
+#define S_IFLNK  0120000
+#define S_ISLNK(m) (((m) & S_IFMT) == S_IFLNK)
+#define DT_LNK   10
+#define AT_FDCWD              -100
+#define AT_SYMLINK_NOFOLLOW    0x100
+```
+
+The kernel uses `AT_*` in `task.c` and `trap.c`; do not define them only in libc. `vfs_stat()` and `vfs_getdents()` use `S_IFLNK` and `DT_LNK`, respectively, so this step must precede T6.
+
+- [ ] **Step 6: Add AT_* + lstat/fstatat decls to `libc/include/sys/stat.h`**
 
 ```c
 #define AT_FDCWD              -100
@@ -168,7 +183,7 @@ int lstat(const char *path, struct stat *buf);
 int fstatat(int dirfd, const char *path, struct stat *buf, int flags);
 ```
 
-- [ ] **Step 6: Build to verify no regressions**
+- [ ] **Step 7: Build to verify no regressions**
 
 ```bash
 cd /home/aagu/OS01
@@ -179,11 +194,12 @@ make PROFILE=x86_64-clang test
 
 Expected: clean build. Tests still pass (scaffolding only).
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add kernel/include/fs/vfs.h \
         kernel/include/uapi/syscall.h \
+        kernel/include/uapi/stat.h \
         libc/include/sys/syscall.h \
         libc/include/sys/stat.h
 git commit -m "feat(symlink): add types, ops slots, syscall numbers, libc helpers
@@ -195,6 +211,8 @@ Foundation for symlink support — no behavioral change yet.
   vfs_ops.symlink(parent, name, target), vfs_ops.readlink(node, buf, size).
 - uapi/syscall.h: SYS_symlink=71, SYS_readlink=72, SYS_lstat=73,
   SYS_fstatat=74 (continue 0..70 numbering).
+- uapi/stat.h: S_IFLNK/S_ISLNK/DT_LNK plus AT_FDCWD and
+  AT_SYMLINK_NOFOLLOW for kernel callers.
 - libc/syscall.h: same 4 SYS_* macros; syscall3() alias for the existing
   3-arg syscall(); syscall4() helper with 4th arg via r10 (Linux x86-64
   ABI) for fstatat's dirfd+path+buf+flags.
@@ -214,7 +232,7 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 - Modify: `kernel/fs/vfs.c` (replace `__vfs_lookup` body; add 4 helpers + 1 public API)
 - Modify: `kernel/include/fs/vfs.h` (add `vfs_lookup_at` prototype)
 
-**Produces:** the 4 static helpers + public `vfs_lookup_at(int dirfd, const char *path, lookup_flags_t flags, vfs_node_t **out_node)` that returns 0/-errno with refcount++ on success.
+**Produces:** the 4 static helpers + public `vfs_lookup_at(int dirfd, const char *path, lookup_flags_t flags, vfs_node_t **out_node)` that returns 0/-errno with refcount++ on success; migrated pointer-compatible `vfs_lookup` and `vfs_lookup_from` wrappers that both delegate to `vfs_lookup_resolved`.
 
 Reference: spec §3.2 (`__vfs_lookup_raw`), §3.3 (`vfs_lookup_resolved`, `resolve_at`, `splice_symlink_path`, `vfs_lookup_at`) has the complete reference code for all of these. The key shape:
 
@@ -251,24 +269,40 @@ In the same file, below `__vfs_lookup_raw`. Reference the complete implementatio
 - Every iteration: `vfs_node_put(node)` the previous symlink before reading the next node
 - `splice_symlink_path` failure (negative return) MUST free `target` AND `vfs_node_put(node)` before returning
 
-- [ ] **Step 4: Build kernel**
+- [ ] **Step 4: Migrate the two legacy pointer wrappers in the same change**
+
+The old wrappers cannot call the new raw function: its signature and return type have changed. Replace their bodies in this task, before compiling:
+
+```c
+vfs_node_t *vfs_lookup(const char *path)
+{
+    vfs_node_t *node = NULL;
+    if (vfs_lookup_at(AT_FDCWD, path, LOOKUP_FOLLOW, &node) < 0)
+        return NULL;
+    return node;
+}
+```
+
+For `vfs_lookup_from(path, cwd)`, retain its existing absolute-path and `cwd == NULL` rejection behavior, construct its bounded absolute path exactly as the current wrapper does, then call `vfs_lookup_resolved(abs_path, LOOKUP_FOLLOW, &node)` and return `NULL` on a negative result. Do not route this wrapper through `vfs_lookup_at`: its explicit `cwd` parameter is part of the legacy API contract.
+
+- [ ] **Step 5: Build kernel**
 
 ```bash
 cd /home/aagu/OS01
 make PROFILE=x86_64-clang kernel.bin
 ```
 
-Expected: compiles. Legacy `vfs_lookup` / `vfs_lookup_from` still call `__vfs_lookup_raw` directly (T6 migrates them).
+Expected: compiles. No public API calls `__vfs_lookup_raw` directly; it is used only by `vfs_lookup_resolved`.
 
-- [ ] **Step 5: Run host tests**
+- [ ] **Step 6: Run host tests**
 
 ```bash
 make PROFILE=x86_64-clang test
 ```
 
-Expected: 16/16 suites green.
+Expected: all pre-existing host suites green.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add kernel/fs/vfs.c kernel/include/fs/vfs.h
@@ -291,8 +325,8 @@ Adds VFS lookup infrastructure:
 - EIO on readdir failure (v5 fix).
 - ops->readlink NULL guard → -EOPNOTSUPP (v5 fix).
 
-Legacy vfs_lookup / vfs_lookup_from still call __vfs_lookup_raw
-directly here — T6 routes them through vfs_lookup_resolved.
+Both legacy pointer APIs now route through vfs_lookup_resolved in this
+commit, so the raw helper has no signature-incompatible public callers.
 
 Spec: docs/superpowers/specs/2026-09-05-symlink-support-design.md v5
 §3.2, §3.3.
@@ -304,11 +338,25 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 
 ## Task 3: ext2 readdir — Map EXT2_FT_SYMLINK and Read i_size
 
-**Files:** Modify: `kernel/fs/ext2.c` (`ext2_vfs_readdir`)
+**Files:** Modify: `kernel/fs/ext2.c` (`ext2_vfs_readdir`); `kernel/include/fs/ext2.h` (missing ext2 constants).
 
 **Produces:** `vfs_readdir()` on ext2 directories returns entries with `entry.type = VFS_SYMLINK` and `entry.size = i_size` for symlinks.
 
-- [ ] **Step 1: Locate `ext2_vfs_readdir`**
+- [ ] **Step 1: Define the missing ext2 constants, then locate `ext2_vfs_readdir`**
+
+`kernel/include/fs/ext2.h` currently defines only `EXT2_S_IFREG` and `EXT2_S_IFDIR`; it has no `EXT2_FT_*` constants. Add these exact definitions before using them:
+
+```c
+#define EXT2_S_IFMT    0xF000
+#define EXT2_S_IFLNK   0xA000
+#define EXT2_FT_REG_FILE  1
+#define EXT2_FT_DIR       2
+#define EXT2_FT_CHRDEV    3
+#define EXT2_FT_BLKDEV    4
+#define EXT2_FT_FIFO      5
+#define EXT2_FT_SOCK      6
+#define EXT2_FT_SYMLINK   7
+```
 
 Search for the function backing the `vfs_ops.readdir` slot for ext2 (the one with `switch (de->file_type)` translating `ext2_dirent_t.file_type` to `vfs_dirent_t.type`).
 
@@ -351,7 +399,7 @@ Expected: green.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add kernel/fs/ext2.c
+git add kernel/fs/ext2.c kernel/include/fs/ext2.h
 git commit -m "feat(ext2): map EXT2_FT_SYMLINK to VFS_SYMLINK + i_size in readdir
 
 ext2 dirent file_type byte 7 (EXT2_FT_SYMLINK) now translates to
@@ -534,57 +582,13 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 
 ---
 
-## Task 6: VFS Public API Migration + DT_LNK + S_IFLNK
+## Task 6: VFS Directory/Stat Integration
 
 **Files:** Modify: `kernel/fs/vfs.c`, `kernel/include/fs/vfs.h`
 
-**Produces:** Legacy `vfs_lookup(absolute)` and `vfs_lookup_from(path, cwd)` route through `vfs_lookup_resolved`; `vfs_split_parent` exported; `vfs_getdents` outputs `DT_LNK` for symlinks; `vfs_stat` returns `S_IFLNK | 0777`.
+**Produces:** `vfs_split_parent` exported; `vfs_getdents` outputs `DT_LNK` for symlinks; `vfs_stat` returns `S_IFLNK | 0777`. The public lookup wrappers were migrated atomically in T2.
 
-- [ ] **Step 1: Migrate `vfs_lookup`**
-
-Replace the body:
-
-```c
-vfs_node_t *vfs_lookup(const char *path)
-{
-    vfs_node_t *node = NULL;
-    vfs_lookup_resolved(path ? path : "/", LOOKUP_FOLLOW, &node);
-    return node;  // NULL on error (legacy contract: errno not propagated)
-}
-```
-
-- [ ] **Step 2: Migrate `vfs_lookup_from`**
-
-Replace the body to honor an explicit `cwd` parameter, then call `vfs_lookup_resolved`:
-
-```c
-vfs_node_t *vfs_lookup_from(const char *path, const char *cwd)
-{
-    if (!path) return NULL;
-    char absolute[VFS_NAME_MAX];
-    if (path[0] != '/' && cwd) {
-        size_t cwd_len = strlen(cwd);
-        size_t plen = strlen(path);
-        int add_sep = (cwd_len > 0 && cwd[cwd_len - 1] != '/') ? 1 : 0;
-        if (cwd_len + add_sep + plen + 1 > sizeof(absolute)) return NULL;
-        char *p = absolute;
-        memcpy(p, cwd, cwd_len); p += cwd_len;
-        if (add_sep) *p++ = '/';
-        memcpy(p, path, plen + 1);
-    } else if (path[0] == '/') {
-        size_t l = strlen(path);
-        if (l + 1 > sizeof(absolute)) return NULL;
-        memcpy(absolute, path, l + 1);
-    } else {
-        return NULL;
-    }
-    vfs_node_t *node = NULL;
-    vfs_lookup_resolved(absolute, LOOKUP_FOLLOW, &node);
-    return node;
-}
-```
-
-- [ ] **Step 3: Export `vfs_split_parent`**
+- [ ] **Step 1: Export `vfs_split_parent`**
 
 Remove `static` keyword from `vfs_split_parent` (vfs.c:590). Add prototype to `kernel/include/fs/vfs.h`:
 
@@ -593,7 +597,7 @@ const char *vfs_split_parent(const char *path, const char *cwd,
                              char parent_path[VFS_NAME_MAX]);
 ```
 
-- [ ] **Step 4: Add `VFS_SYMLINK → DT_LNK` in `vfs_getdents`**
+- [ ] **Step 2: Add `VFS_SYMLINK → DT_LNK` in `vfs_getdents`**
 
 Find `switch (e->type)` in `vfs_getdents` (~line 531). Add:
 
@@ -601,7 +605,7 @@ Find `switch (e->type)` in `vfs_getdents` (~line 531). Add:
 case VFS_SYMLINK: d->d_type = DT_LNK; break;
 ```
 
-- [ ] **Step 5: Add `S_IFLNK` case in `vfs_stat`**
+- [ ] **Step 3: Add `S_IFLNK` case in `vfs_stat`**
 
 Find `switch (node->type)` in `vfs_stat` (~line 382). Add:
 
@@ -609,7 +613,7 @@ Find `switch (node->type)` in `vfs_stat` (~line 382). Add:
 case VFS_SYMLINK: buf->st_mode = S_IFLNK | 0777; break;
 ```
 
-- [ ] **Step 6: Build + test**
+- [ ] **Step 4: Build + test**
 
 ```bash
 cd /home/aagu/OS01
@@ -619,15 +623,12 @@ make PROFILE=x86_64-clang test
 
 Expected: green.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add kernel/fs/vfs.c kernel/include/fs/vfs.h
-git commit -m "feat(vfs): migrate public lookup APIs + DT_LNK + S_IFLNK
+git commit -m "feat(vfs): export split-parent + DT_LNK + S_IFLNK
 
-- vfs_lookup / vfs_lookup_from route through vfs_lookup_resolved.
-  Legacy callers (sys_exec, devfs, kernel/main.c) gain symlink-follow
-  semantics. NULL-return contract preserved.
 - vfs_split_parent: un-static + export. sys_symlink needs it for
   relative linkpath handling.
 - vfs_getdents: VFS_SYMLINK → DT_LNK. find -type l will work.
@@ -806,18 +807,51 @@ Find `sys_stat`. Replace its `vfs_lookup_from` call:
 ```c
 vfs_node_t *node = NULL;
 int lookup_rc = vfs_lookup_at(AT_FDCWD, path_copy, LOOKUP_FOLLOW, &node);
-if (lookup_rc < 0) return lookup_rc;
+kfree(path_copy);  /* preserve sys_stat's existing ownership boundary */
+if (lookup_rc < 0) {
+    regs->rax = lookup_rc;
+    break;  /* path_copy was freed immediately after lookup above */
+}
 ```
 
 Rest of function (kstat; copy_to_user_ft; vfs_node_put) unchanged.
 
 - [ ] **Step 2: Migrate `sys_open` in trap.c**
 
-Same pattern.
+Preserve the existing `O_CREAT` control flow. Perform `vfs_lookup_at` first, but only return an error when it is not the createable miss:
+
+```c
+vfs_node_t *node = NULL;
+int lookup_rc = vfs_lookup_at(AT_FDCWD, path_copy, LOOKUP_FOLLOW, &node);
+if (lookup_rc < 0 && !(lookup_rc == -ENOENT && (flags & O_CREAT)))
+{
+    regs->rax = lookup_rc;
+    goto out_open;  /* releases path_copy and any owned node/parent ref */
+}
+if (lookup_rc == -ENOENT) {
+    /* enter the current O_CREAT branch, which declares and fills parent_path/name */
+} else {
+    /* node is the successful lookup result; continue at the current O_TRUNC/devfs/fd path */
+}
+```
+
+Do not use the `sys_stat` early-return pattern here: it would make every `open(path, O_CREAT, ...)` fail with `ENOENT`.
+
+Inside the existing `if (lookup_rc == -ENOENT)` create branch, retain the current `parent_path`/`name` parsing first. Replace only its current `parent = vfs_lookup_from(parent_path, current->files->cwd);` statement in place with:
+
+```c
+int parent_rc = vfs_lookup_at(AT_FDCWD, parent_path, LOOKUP_FOLLOW, &parent);
+if (parent_rc < 0) {
+    regs->rax = parent_rc;
+    goto out_open;
+}
+```
+
+This placement guarantees `parent_path` is initialized and preserves the existing cleanup label.
 
 - [ ] **Step 3: Migrate `sys_chdir` in trap.c**
 
-Same pattern.
+On a negative lookup result, assign `regs->rax = lookup_rc; goto out;`, using the existing `SYS_chdir` cleanup label so its allocated `path_copy` and `new_cwd` are released. Then retain the existing directory-type check, `current->files->cwd` update, and `vfs_node_put` ownership flow. Do not use `return lookup_rc` inside `do_system_call`.
 
 - [ ] **Step 4: Migrate `sys_exec` in task.c**
 
@@ -837,7 +871,7 @@ if (lookup_rc < 0) return lookup_rc;
 cd /home/aagu/OS01
 make PROFILE=x86_64-clang kernel.bin user
 make PROFILE=x86_64-clang test
-make PROFILE=x86_64-clang run-systest
+make OS01_SYSTEST=1 PROFILE=x86_64-clang test-syscall
 ```
 
 Expected: green. No user-visible behavior change (no symlinks in rootfs yet).
@@ -911,36 +945,44 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 
 ## Task 10: libc POSIX Wrappers
 
-**Files:** Modify: `libc/unistd/symlink.c`, `libc/unistd/readlink.c`. Create: `libc/sys/stat/lstat.c`, `libc/sys/stat/fstatat.c`.
+**Files:** Modify: `libc/unistd/symlink.c`, `libc/unistd/readlink.c`, `libc/include/unistd.h`, `libc/Makefile`. Create: `libc/sys/stat/lstat.c`, `libc/sys/stat/fstatat.c`.
 
 **Produces:** Real libc implementations; 6 previously-blocked busybox callers (libarchive, copy_file, devfsd, mdev, etc.) work.
 
-- [ ] **Step 1: Verify libc build paths**
+- [ ] **Step 1: Include the new stat wrapper directory in libc.a**
+
+`libc/Makefile` does not currently search `sys/stat`, so add `$(wildcard sys/stat/*.c)` to `C_SOURCES` beside its other source-directory wildcards. Without this, `lstat.c` and `fstatat.c` compile nowhere and will be unresolved for user programs.
+
+- [ ] **Step 2: Correct the public readlink declaration**
+
+In `libc/include/unistd.h`, replace the existing `int readlink(const char *path, char *buf, size_t bufsize);` declaration with `ssize_t readlink(const char *path, char *buf, size_t bufsize);`. Ensure the header already exposes `ssize_t` (or include the header that defines it) before this declaration. This must precede compiling the `ssize_t` implementation.
+
+- [ ] **Step 3: Verify libc build paths**
 
 ```bash
 ls /home/aagu/OS01/libc/unistd/
 ls /home/aagu/OS01/libc/sys/stat/ 2>/dev/null || mkdir -p /home/aagu/OS01/libc/sys/stat
 ```
 
-If existing symlink.c/readlink.c are stubs (likely `return -1;`), replace fully. If there are wildcards in the libc Makefile that pick up new files automatically, no build-system edits needed.
+Confirm the two existing files are stubs before replacing them. The `sys/stat` Makefile wildcard was added in Step 1 and is mandatory for these new sources.
 
-- [ ] **Step 2: Rewrite `libc/unistd/symlink.c`**
+- [ ] **Step 4: Rewrite `libc/unistd/symlink.c`**
 
 Replace the file with the standard OS01 libc pattern: include `unistd.h`, `<sys/syscall.h>`, `stdint.h`, `errno.h`; `int symlink(const char *target, const char *linkpath)` calls `syscall3(SYS_symlink, (uint64_t)target, (uint64_t)linkpath, 0)`, on negative return sets `errno = (int)(-ret)` and returns `-1`, else returns `0`.
 
-- [ ] **Step 3: Rewrite `libc/unistd/readlink.c`**
+- [ ] **Step 5: Rewrite `libc/unistd/readlink.c`**
 
 Replace with: same headers; `ssize_t readlink(const char *path, char *buf, size_t bufsize)` calls `syscall3(SYS_readlink, (uint64_t)path, (uint64_t)buf, (uint64_t)bufsize)`, on negative return sets `errno` and returns `-1`, else returns `(ssize_t)ret`.
 
-- [ ] **Step 4: Create `libc/sys/stat/lstat.c`**
+- [ ] **Step 6: Create `libc/sys/stat/lstat.c`**
 
 New file: include `<sys/stat.h>`, `<sys/syscall.h>`, `stdint.h`, `errno.h`; `int lstat(const char *path, struct stat *buf)` calls `syscall3(SYS_lstat, (uint64_t)path, (uint64_t)buf, 0)`, on negative return sets `errno` and returns `-1`, else returns `0`.
 
-- [ ] **Step 5: Create `libc/sys/stat/fstatat.c`**
+- [ ] **Step 7: Create `libc/sys/stat/fstatat.c`**
 
 New file: same headers; `int fstatat(int dirfd, const char *path, struct stat *buf, int flags)` calls `syscall4(SYS_fstatat, dirfd, (uint64_t)path, (uint64_t)buf, (uint64_t)flags)`, on negative return sets `errno` and returns `-1`, else returns `0`.
 
-- [ ] **Step 6: Build libc + rootfs**
+- [ ] **Step 8: Build libc + rootfs**
 
 ```bash
 cd /home/aagu/OS01
@@ -950,18 +992,19 @@ make PROFILE=x86_64-clang disk.img
 
 Expected: builds clean.
 
-- [ ] **Step 7: Run host tests**
+- [ ] **Step 9: Run host tests**
 
 ```bash
 make PROFILE=x86_64-clang test
 ```
 
-Expected: 16/16 suites green.
+Expected: all pre-existing host suites green.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
-git add libc/unistd/symlink.c libc/unistd/readlink.c \
+git add libc/Makefile libc/include/unistd.h \
+        libc/unistd/symlink.c libc/unistd/readlink.c \
         libc/sys/stat/lstat.c libc/sys/stat/fstatat.c
 git commit -m "feat(libc): real symlink/readlink/lstat/fstatat implementations
 
@@ -979,147 +1022,69 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 
 ---
 
-## Task 11: Host Test Suite — test_vfs_symlink.c (40 unit cases)
+## Task 11: Kernel Symlink Selftests — Resolver and Failure Paths
 
-**Files:** Create: `test/cases/test_vfs_symlink.c`. Modify: `test/Makefile`.
+**Files:** Create: `kernel/test/symlink_selftest.c`. Modify: `kernel/test/selftest.c`, `kernel/include/fs/ext2.h`, `kernel/fs/ext2.c`.
 
-**Produces:** New host-test binary that runs as part of `make test`. Covers the spec §6 matrix.
+**Produces:** Actual kernel tests for spec cases 09, 10, 30, 32, 33, and 37–40. This deliberately does not add a host binary: host-native linking would invoke the host's Linux syscalls rather than OS01's VFS/ext2 code.
 
-Reference: spec §6 has the full case list with expectations (cases 01–40 unit). Existing test pattern: see `test/cases/test_libc_getopt.c` for the framework shape.
+- [ ] **Step 1: Add a selftest source compiled by the existing wildcard**
 
-- [ ] **Step 1: Read existing test pattern**
+`kernel/Makefile` already includes `$(wildcard test/*.c)`, so create `kernel/test/symlink_selftest.c` and include `<kernel/selftest.h>`, `<fs/vfs.h>`, `<fs/ext2.h>`, and `<errno.h>`. Do **not** use `SELFTEST(name)`: the current runner does not scan `.selftest_table`. Export ordinary `int symlink_selftest_resolver(void);` and `int symlink_selftest_ext2_rollback(void);`. In `kernel/test/selftest.c`, add their forward declarations with the other test declarations and explicitly add `selftest_register("symlink_resolver", symlink_selftest_resolver);` and `selftest_register("symlink_ext2_rollback", symlink_selftest_ext2_rollback);` in `selftest_run_all`.
 
-```bash
-head -50 /home/aagu/OS01/test/cases/test_libc_getopt.c
-```
+- [ ] **Step 2: Test the real resolver using a deterministic in-memory VFS**
 
-Understand framework header, exit code convention, main() shape.
+Implement a private, fixed tree with `readdir` and `readlink` ops, create a directory root node, and mount it once at `/symlink-selftest` through the production `vfs_mount` API. Then call the production public interface `vfs_lookup_at` against that mount. Cover case 32 by supplying a `VFS_SYMLINK` node with `.readlink = NULL`, case 36 with a file followed by a component, and case 37 by making the fake `readdir` return a non-zero value. Assert the exact results `-EOPNOTSUPP`, `-ENOTDIR`, and `-EIO`; a passing test must never be an empty no-op.
 
-- [ ] **Step 2: Create `test/cases/test_vfs_symlink.c`**
+- [ ] **Step 3: Add explicit ext2 fault injection hooks under `KERNEL_SELFTEST`**
 
-The file uses these standard includes (test_framework.h, sys/stat.h, unistd.h, fcntl.h, errno.h, string.h, stdio.h, stdlib.h) and defines: `FIXTURE_DIR "/tmp/symlink-test"`, `FAIL` macro (printfs + exit(1)), `EXPECT_EQ` and `EXPECT_LSTAT_FIELD` macros for assertions, and a `setup_fixture()` that does `mkdir(FIXTURE_DIR, 0777)`. Define `AT_FDCWD=-100` and `AT_SYMLINK_NOFOLLOW=0x100` if not already from headers.
+Declare in `ext2.h` the exact enum `ext2_symlink_test_fault { EXT2_SYMLINK_TEST_NONE, EXT2_SYMLINK_TEST_FIND_DIRENT, EXT2_SYMLINK_TEST_READ_INODE, EXT2_SYMLINK_TEST_WRITE_BLOCK, EXT2_SYMLINK_TEST_WRITE_INODE, EXT2_SYMLINK_TEST_DIRENT_ADD };` and `void ext2_symlink_test_set_fault(enum ext2_symlink_test_fault fault);` unconditionally, because `kernel/test/symlink_selftest.c` is compiled in normal kernel builds too. In `ext2.c`, make the setter and selected failure branches functional only under `KERNEL_SELFTEST`; in ordinary builds the setter is a no-op and no I/O path branches. In selftest builds each selected operation returns `-EIO` before mutation. The selftest calls `root->ops->symlink(root, name, target)` and `root->ops->unlink(root, name)`, snapshots the free-inode/free-block counts and relevant bitmap bit before and after, then resets the selector to NONE. It verifies cases 09/10 and 30/33/38/39/40: a failed operation returns `-EIO`, allocates no surviving dirent, and restores every allocation; successful fast unlink changes no block count while successful long unlink releases exactly one target block.
 
-- [ ] **Step 3: Implement cases 01–40**
-
-Per spec §6 (cases 01–40 unit). Each is a `static int case_NN_name(void)` returning 0 on pass:
-
-- 01–10: basic create / read / unlink (fast, long, eexist, empty target, nonexist parent, relative linkpath, readlink-on-regular, bufsize-zero, long unlink, fast unlink)
-- 11–16: last-component follow (stat follows, lstat returns link, fstatat with/without NOFOLLOW)
-- 17–21: mid-path follow (incl. NOFOLLOW-still-follows at 18, the v3 key test)
-- 22–24: loop (ELOOP) + depth bounds (8 deep OK)
-- 25–32: errno propagation (ENOTDIR, ENAMETOOLONG, EOPNOTSUPP, EINVAL, splice overflow, rollback, lstat size, ops-missing)
-- 33–40: edge cases (find_dirent error, root-linkpath EEXIST, absolute-ignores-dirfd, non-dir ENOTDIR, readdir/read-inode/write-block/write-inode failures). Cases 32, 33, 37–40 are no-ops returning 0 (kernel-internal failure paths; covered by kernel selftest in `make validate`).
-
-Implementation pattern (one example):
-
-```c
-static int case_01_fast_symlink_create_read(void)
-{
-    if (symlink("hello", FIXTURE_DIR "/01-fast") != 0) FAIL("symlink: errno=%d", errno);
-    char buf[64];
-    ssize_t n = readlink(FIXTURE_DIR "/01-fast", buf, sizeof(buf) - 1);
-    if (n != 5) FAIL("readlink returned %zd, expected 5", n);
-    if (memcmp(buf, "hello", 5) != 0) FAIL("readlink content mismatch");
-    return 0;
-}
-```
-
-- [ ] **Step 4: Add main()**
-
-Use the `TC(fn)` macro pattern with `struct test_case { const char *name; int (*fn)(void); }`. List all 40 cases in a `cases[]` array. main() calls `setup_fixture()`, iterates cases, prints `=== name ===` then `PASS` or `FAIL`, increments passed/failed, prints `Total: %d  Failed: %d` summary, exits 0 on all-pass, 1 on any-fail.
-
-- [ ] **Step 5: Wire into `test/Makefile`**
-
-Add to `TEST_BINS`:
-
-```makefile
-    $(TEST_BLD)/test_vfs_symlink.elf \
-```
-
-Add link rule:
-
-```makefile
-$(TEST_BLD)/test_vfs_symlink.elf: $(TEST_BLD)/test_vfs_symlink.o $(LIBC_OBJS) $(MOCK_OBJS)
-	$(HOST_CC) -o $@ $^
-```
-
-- [ ] **Step 6: Build + run**
+- [ ] **Step 4: Run the real kernel selftest image**
 
 ```bash
 cd /home/aagu/OS01
-make PROFILE=x86_64-clang test
+make PROFILE=x86_64-clang test-kernel-selftest
 ```
 
-Expected: new `test_vfs_symlink.elf` runs as part of the suite.
+Expected: QEMU boots with `KERNEL_SELFTEST=1` and reports every new symlink selftest as PASS. Do not substitute `make validate`: it validates artifacts and does not execute tests.
 
-- [ ] **Step 7: Iterate if needed**
-
-Some cases (esp. 22–24 loop/depth) may need adjustment based on the actual mock filesystem behavior. Run iteratively until all 40 cases pass or are no-ops (kernel-internal failure paths that need a kernel selftest, see `make validate`).
-
-- [ ] **Step 8: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add test/cases/test_vfs_symlink.c test/Makefile
-git commit -m "test: 40 unit cases for symlink (test_vfs_symlink.c)
-
-Covers the spec §6 matrix:
-- Basic create/read/unlink (01-10)
-- Last-component follow semantics (11-16)
-- Mid-path follow (17-21), NOFOLLOW-still-follows (18)
-- Loop + depth bounds (22-24)
-- errno propagation (25-32): ENOTDIR, ENAMETOOLONG, EOPNOTSUPP,
-  EINVAL, splice overflow, rollback, lstat size
-- Edge cases (33-40): some no-op in host-test mock; covered by
-  kernel selftest in validate.
-
-Wired into test/Makefile.
-
-Spec: docs/superpowers/specs/2026-09-05-symlink-support-design.md v5
-§6.
-
-Co-Authored-By: Claude Code <noreply@anthropic.com>"
+git add kernel/test/symlink_selftest.c kernel/test/selftest.c kernel/fs/ext2.c kernel/include/fs/ext2.h
+git commit -m "test(kernel): cover symlink resolver and ext2 rollback paths"
 ```
 
 ---
 
-## Task 12: Systest Cases (busybox ln + find -type l)
+## Task 12: OS01 Systest Cases (syscalls + busybox ln/find)
 
-**Files:** Modify: `test/cases/test_systest.c`
+**Files:** Modify: `user/systest.c`
 
 **Produces:** 2 systest cases (41, 42) that run inside a real OS01 boot via QEMU, exercising busybox's `ln -s` + exec via symlink, and `find -type l`. Use `/symlink-systest` (NOT `/tmp`) since tmpfs intentionally lacks symlink op.
 
-- [ ] **Step 1: Find the systest framework**
+- [ ] **Step 1: Use the actual systest runner**
 
-```bash
-find /home/aagu/OS01/test -name "test_systest*" -o -name "*systest*" 2>/dev/null | head -5
-grep -l "systest_run_all\|TEST_CASE\|test_case" /home/aagu/OS01/test/cases/test_systest.c 2>/dev/null
-```
+The runner is `user/systest.c`: each `static void test_*` reports through the existing `CHECK`/`CHECK3` macros and is registered in its bottom-of-file `tests[]` table. Add new `static void` functions there; do not create `test/cases/test_systest.c`, and do not use placeholder helpers such as `run_cmd` or `run_cmd_capture`.
 
-Read the existing structure to understand case registration (typically a `static struct test_case cases[]` or similar).
+- [ ] **Step 1a: Add a deterministic fixture setup helper**
+
+Add `static void symlink_fixture_reset(void)` that calls `mkdir("/symlink-systest", 0777)` and accepts `errno == EEXIST`; any other failure is reported through `CHECK3`. Before every case, call this helper and unlink the case's known names (`x`, `lnk`, and that case's numbered paths). This is required because `/symlink-systest` is absent in a freshly built image.
 
 - [ ] **Step 2: Add systest case 41 — busybox ln + exec**
 
-`test_41_busybox_ln_exec()`:
-- mkdir -p /symlink-systest
-- rm -f /symlink-systest/x
-- ln -s /bin/busybox /symlink-systest/x
-- exec /symlink-systest/x --help
-- The success criterion is that exec returned (not -ENOENT, -ENOEXEC, -EACCES). busybox --help exits non-zero but prints usage; rc != -ENOENT && rc != -ENOEXEC && rc != -EACCES
-- Cleanup: rm + rmdir
+Call `symlink_fixture_reset()`. `test_41_busybox_ln_exec()` forks and execs `/bin/busybox` with the concrete array `char *ln_argv[] = { "ln", "-s", "/bin/busybox", "/symlink-systest/x", NULL };`, then waits for status 0. It then forks again; the second child uses `char *exec_argv[] = { "x", "--help", NULL };`, calls `exec("/symlink-systest/x", exec_argv, NULL)`, and calls `_exit(127)` only if `exec` returns. The parent calls `waitpid` and asserts `WIFEXITED(status) && WEXITSTATUS(status) == 0`; `_exit(127)` specifically identifies an unexpected exec return. This tests both PF_LINUX_ABI `ln -s` and successful non-returning exec correctly; cleanup remains in the parent.
 
 - [ ] **Step 3: Add systest case 42 — find -type l**
 
-`test_42_find_type_l()`:
-- mkdir -p /symlink-systest
-- rm -f /symlink-systest/lnk
-- ln -s /bin/busybox /symlink-systest/lnk
-- Run `find /symlink-systest -type l` and capture output
-- Assert output contains "/symlink-systest/lnk"
-- Cleanup: rm + rmdir
+Call `symlink_fixture_reset()`. `test_42_find_type_l()` creates `/symlink-systest/lnk` through the libc `symlink` wrapper, forks a child, redirects its stdout to a pipe, and execs `/bin/busybox` with `char *find_argv[] = { "find", "/symlink-systest", "-type", "l", NULL };`. The parent reads the pipe, waits for normal exit status 0, and asserts the output contains `/symlink-systest/lnk`. It then unlinks the link; leave the shared fixture directory in place so later cases are order-independent.
 
-(Adapt to the actual systest framework helper names — `ASSERT_OK`, `ASSERT`, `run_cmd`, `run_cmd_capture` are placeholders.)
+- [ ] **Step 4: Add direct syscall/libc coverage before registering integration cases**
 
-- [ ] **Step 4: Register cases**
+In the same `user/systest.c`, add focused functions for the externally observable matrix: fast/long creation and readback; EEXIST, ENOENT, ENOTDIR, ENAMETOOLONG, EOPNOTSUPP (`/tmp`), EINVAL, root-linkpath EEXIST; `stat`/`lstat`/`fstatat` follow semantics and link target size; absolute and relative mid-path following including NOFOLLOW; loop/depth limits; and absolute path ignoring invalid dirfd. Each test creates a unique path below `/symlink-systest`, uses the real libc/syscall interface, checks exact `errno`, and cleans up in its parent process.
+
+- [ ] **Step 5: Register cases**
 
 Add to the systest runner's case list:
 
@@ -1128,20 +1093,19 @@ Add to the systest runner's case list:
     { "42_find_type_l",     test_42_find_type_l },
 ```
 
-- [ ] **Step 5: Build + run systest**
+- [ ] **Step 6: Build + run systest**
 
 ```bash
 cd /home/aagu/OS01
-make PROFILE=x86_64-clang disk.img
-make PROFILE=x86_64-clang run-systest
+make OS01_SYSTEST=1 PROFILE=x86_64-clang test-syscall
 ```
 
 Expected: all systest cases pass, including 41, 42.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add test/cases/test_systest.c
+git add user/systest.c
 git commit -m "test: 2 systest cases — busybox ln/exec + find -type l
 
 - 41_busybox_ln_exec: validates end-to-end libc symlink → syscall →
@@ -1178,7 +1142,7 @@ Expected: clean build, no new warnings.
 make PROFILE=x86_64-clang test
 ```
 
-Expected: 17/17 suites green (16 existing + new test_vfs_symlink).
+Expected: existing host suites green. No symlink kernel behavior is credited to this host-native suite.
 
 - [ ] **Step 3: Kernel validate**
 
@@ -1188,15 +1152,23 @@ make PROFILE=x86_64-clang validate
 
 Expected: kernel.bin and EFI artifacts validate.
 
-- [ ] **Step 4: Full systest**
+- [ ] **Step 4: Kernel symlink selftests**
 
 ```bash
-make PROFILE=x86_64-clang run-systest
+make PROFILE=x86_64-clang test-kernel-selftest
+```
+
+Expected: all symlink resolver and ext2 rollback selftests pass. Run separately from systest because this target deliberately rejects `OS01_SYSTEST=1`.
+
+- [ ] **Step 5: Full systest**
+
+```bash
+make OS01_SYSTEST=1 PROFILE=x86_64-clang test-syscall
 ```
 
 Expected: all systest cases pass including 41, 42.
 
-- [ ] **Step 5: Aarch64 regression probe**
+- [ ] **Step 6: Aarch64 regression probe**
 
 ```bash
 make PROFILE=aarch64-clang kernel.elf BOOTAA64.EFI
@@ -1204,7 +1176,7 @@ make PROFILE=aarch64-clang kernel.elf BOOTAA64.EFI
 
 Expected: aarch64 build succeeds (untouched by this work).
 
-- [ ] **Step 6: Update roadmap**
+- [ ] **Step 7: Update roadmap**
 
 Open `docs/roadmap.md`. Mark three items:
 - **P1**「exec 软链接跟随」→ done
@@ -1239,13 +1211,13 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 | §5.2 PF_LINUX_ABI fixes (4 entries) | T9 |
 | §5.3 sys_* (COPY_USER_STR, sys_symlink guards, sys_lstat/fstatat kstat pattern) | T7, T8 |
 | §5.4 libc wrappers (syscall3/4, AT_*, real impls) | T1, T10 |
-| §6 40 unit + 2 systest cases | T11, T12 |
+| §6 cases 09/10/30/32/33/36–40 in kernel; all user-visible cases plus 41/42 in systest | T11, T12 |
 | v5 fix: tmpfs E2E in /symlink-systest | T12 |
 | v5 fix: ext2 readdir i_size | T3 |
 | v5 fix: ENOTDIR/EIO in __vfs_lookup_raw | T2 |
 | v5 fix: suffix contract | T2 |
 | v5 fix: ext2 symlink I/O atomicity | T5 |
-| v5 fix: public lookup migration closure | T6 |
+| v5 fix: public lookup migration closure | T2 |
 | v5 fix: EOPNOTSUPP guard | T2, T7 |
 | v5 fix: find_dirent non-ENOENT propagation | T5 |
 | v5 fix: resolve_at ignores dirfd for absolute | T2, T7 |
@@ -1268,8 +1240,3 @@ Two execution options:
 2. **Inline Execution** — Execute tasks in this session using executing-plans, batch execution with checkpoints
 
 Which approach?
-
-
-
-
-
