@@ -33,6 +33,7 @@ PHDRS
  * address 0x40080000 that yields 0xffff0000_40080000.  Sections after
  * .boot live here virtually and at sequential low LMAs physically. */
 _kernel_high_vma = 0xffff000040080000;
+_kernel_page_offset = 0xffff000000000000;
 
 SECTIONS
 {
@@ -87,7 +88,7 @@ SECTIONS
         _text_end = .;
     } :text
 
-    .rodata ALIGN(0x1000) : AT(LOADADDR(.text) + SIZEOF(.text)) {
+    .rodata ALIGN(0x1000) : AT(ADDR(.rodata) - _kernel_page_offset) {
         _rodata_start = .;
         *(.rodata)
         *(.rodata.*)
@@ -95,7 +96,7 @@ SECTIONS
     } :text
 
     . = ALIGN(0x1000);
-    .data ALIGN(0x1000) : AT(LOADADDR(.rodata) + SIZEOF(.rodata)) {
+    .data ALIGN(0x1000) : AT(ADDR(.data) - _kernel_page_offset) {
         _data_start = .;
         *(.data)
         *(.data.*)
@@ -103,7 +104,9 @@ SECTIONS
     } :data
 
     . = ALIGN(0x1000);
-    .bss ALIGN(0x1000) (NOLOAD) : AT(LOADADDR(.data) + SIZEOF(.data)) {
+    /* The loader reserves/zeros physical LOAD addresses. Keep page-aligned
+     * high-half BSS at the physical address our direct mapping accesses. */
+    .bss ALIGN(0x1000) (NOLOAD) : AT(ADDR(.bss) - _kernel_page_offset) {
         _bss_start = .;
         *(.bss)
         *(.bss.*)

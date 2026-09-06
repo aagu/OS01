@@ -8,10 +8,223 @@ import os
 from pathlib import Path
 import struct
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 HANDOFF = 0x401E0000
+
+
+def check_boot_core(tmp):
+    # Regressions caught: optimistic CPU_ON counting, retrying firmware,
+    # accepting boundary/late ACKs, truncating Aff3, absolute deadlines,
+    # unvalidated counter frequency, or releasing a partial benchmark.
+    source = r'''
+#include <assert.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <kernel/arch/aarch64/smp_boot_core.h>
+
+struct event { uint64_t at; uint32_t cpu; };
+struct fake {
+    uint64_t base, elapsed, call_cost;
+    int32_t rc[8];
+    uint32_t ack[8], go[8], calls[8], commands[8];
+    uint64_t target[8], entry[8];
+    struct event events[8];
+    uint32_t events_len;
+};
+static void deliver(struct fake *f)
+{
+    for (uint32_t e = 0; e < f->events_len; ++e)
+        if (f->elapsed >= f->events[e].at)
+            f->ack[f->events[e].cpu] = 1;
+}
+static uint64_t counter(void *ctx)
+{
+    struct fake *f = ctx;
+    deliver(f);
+    return f->base + f->elapsed;
+}
+static int32_t cpu_on(void *ctx, uint64_t target, uint64_t entry, uint64_t id)
+{
+    struct fake *f = ctx;
+    assert(id > 0 && id < 8); /* the BSP must never be started */
+    assert(++f->calls[id] == 1);
+    assert(f->ack[id] == 0 && f->go[id] == 0);
+    f->target[id] = target;
+    f->entry[id] = entry;
+    f->elapsed += f->call_cost;
+    return f->rc[id];
+}
+static uint32_t online(void *ctx, uint32_t id)
+{
+    return ((struct fake *)ctx)->ack[id];
+}
+static void command(void *ctx, uint32_t id, uint32_t value)
+{
+    struct fake *f = ctx;
+    assert(id > 0 && id < 8);
+    assert(value == 2); /* never release the benchmark from the boot core */
+    f->go[id] = value;
+    ++f->commands[id];
+}
+static void relax(void *ctx)
+{
+    struct fake *f = ctx;
+    assert(++f->elapsed < 2000); /* catch an unbounded wait without wall time */
+}
+static struct aarch64_topology topology(uint32_t count)
+{
+    struct aarch64_topology t = {.cpu_count=count};
+    t.mpidr[0] = 0x100;
+    t.mpidr[1] = UINT64_C(0x0000000100000000); /* Aff3 survives CPU_ON */
+    for (uint32_t i = 2; i < count; ++i) t.mpidr[i] = i;
+    return t;
+}
+static struct smp_boot_ops ops(struct fake *f)
+{
+    return (struct smp_boot_ops){f, counter, cpu_on, online, command, relax};
+}
+static int run(struct fake *f, uint32_t count, uint64_t hz,
+               struct smp_boot_result *r)
+{
+    struct aarch64_topology t = topology(count);
+    struct smp_boot_ops o = ops(f);
+    return smp_boot_run(&t, 0x40080c00, hz, &o, r);
+}
+static void commands_are(struct fake *f, uint32_t count, uint32_t expected)
+{
+    assert(f->calls[0] == 0 && f->commands[0] == 0);
+    for (uint32_t i = 1; i < count; ++i) {
+        assert(f->calls[i] == 1);
+        assert(f->go[i] == expected);
+        assert(f->commands[i] == (expected == 2 ? 1U : 0U));
+    }
+}
+int main(void)
+{
+    struct fake f = {0};
+    struct smp_boot_result r;
+    f.events[0] = (struct event){3, 1};
+    f.events[1] = (struct event){8, 2};
+    f.events_len = 2;
+    assert(run(&f, 3, 100, &r) == 0);
+    assert(r.requested == 3 && r.online == 3 && r.online_mask == 7);
+    assert(r.failure[1] == SMP_FAILURE_NONE && r.failure[2] == SMP_FAILURE_NONE);
+    assert(f.target[1] == UINT64_C(0x0000000100000000));
+    assert(f.entry[1] == 0x40080c00);
+    commands_are(&f, 3, 0);
+    puts("PASS: success, full Aff3 target and no premature go");
+
+    const int32_t errors[] = {-1, -2, -3, -6, -7, -8, -9, 1};
+    for (uint32_t e = 0; e < sizeof(errors)/sizeof(errors[0]); ++e) {
+        memset(&f, 0, sizeof(f));
+        f.rc[1] = errors[e];
+        f.events[0] = (struct event){3, 2}; f.events_len = 1;
+        assert(run(&f, 3, 100, &r) == 1);
+        assert(r.online == 2 && r.online_mask == 5);
+        assert(r.psci_rc[1] == errors[e] && r.failure[1] == SMP_FAILURE_CPU_ON);
+        assert(r.failure[2] == SMP_FAILURE_NONE);
+        commands_are(&f, 3, 2);
+    }
+    puts("PASS: raw CPU_ON errors, continued startup and all-AP idle");
+
+    memset(&f, 0, sizeof(f)); f.rc[1] = -4;
+    assert(run(&f, 2, 100, &r) == 1);
+    assert(r.online == 1 && r.online_mask == 1 && r.psci_rc[1] == -4);
+    assert(r.failure[1] == SMP_FAILURE_TIMEOUT && f.elapsed == 200);
+    commands_are(&f, 2, 2);
+    puts("PASS: ALREADY_ON needs a kernel ACK");
+
+    const int32_t waiting[] = {0, -4, -5};
+    for (uint32_t i = 0; i < 3; ++i) {
+        memset(&f, 0, sizeof(f)); f.rc[1] = waiting[i];
+        f.events[0] = (struct event){199, 1}; f.events_len = 1;
+        assert(run(&f, 2, 100, &r) == 0);
+        assert(r.online_mask == 3 && r.psci_rc[1] == waiting[i]);
+        commands_are(&f, 2, 0);
+    }
+    puts("PASS: success/already-on/on-pending delayed ACK");
+
+    memset(&f, 0, sizeof(f));
+    f.events[0] = (struct event){200, 1}; f.events_len = 1;
+    assert(run(&f, 2, 100, &r) == 1);
+    assert(r.online_mask == 1 && r.failure[1] == SMP_FAILURE_TIMEOUT);
+    commands_are(&f, 2, 2);
+    puts("PASS: exact timeout boundary rejects ACK");
+
+    memset(&f, 0, sizeof(f));
+    f.events[0] = (struct event){201, 1};
+    f.events[1] = (struct event){210, 2}; f.events_len = 2;
+    assert(run(&f, 3, 100, &r) == 1);
+    assert(f.ack[1] == 1 && r.online == 2 && r.online_mask == 5);
+    commands_are(&f, 3, 2);
+    puts("PASS: late ACK excluded from frozen online mask");
+
+    memset(&f, 0, sizeof(f)); f.call_cost = 200;
+    f.events[0] = (struct event){199, 1}; f.events_len = 1;
+    assert(run(&f, 2, 100, &r) == 1);
+    assert(r.online_mask == 1 && r.failure[1] == SMP_FAILURE_TIMEOUT);
+    puts("PASS: deadline begins before CPU_ON transport");
+
+    memset(&f, 0, sizeof(f)); f.base = UINT64_MAX - 100;
+    f.events[0] = (struct event){110, 1}; f.events_len = 1;
+    assert(run(&f, 2, 60, &r) == 0 && r.online_mask == 3);
+    memset(&f, 0, sizeof(f)); f.base = UINT64_MAX - 100;
+    assert(run(&f, 2, 60, &r) == 1 && r.online_mask == 1 && f.elapsed == 120);
+    puts("PASS: counter wrap, successful ACK and timeout");
+
+    memset(&f, 0, sizeof(f));
+    assert(run(&f, 1, 100, &r) == 0);
+    assert(r.online == 1 && r.online_mask == 1 && r.requested == 1);
+    assert(f.calls[0] == 0 && f.calls[1] == 0 && f.elapsed == 0);
+    puts("PASS: single CPU does not invoke firmware");
+
+    memset(&f, 0, sizeof(f));
+    assert(run(&f, 2, 0, &r) == -1);
+    assert(run(&f, 2, UINT64_MAX/2 + 1, &r) == -1);
+    assert(run(&f, 1, UINT64_MAX/2, &r) == 0);
+    assert(run(&f, 0, 100, &r) == -1);
+    assert(f.calls[1] == 0 && f.commands[1] == 0);
+    struct aarch64_topology t = topology(2);
+    struct smp_boot_ops o = ops(&f);
+    assert(smp_boot_run(NULL, 4, 100, &o, &r) == -1);
+    assert(smp_boot_run(&t, 4, 100, NULL, &r) == -1);
+    assert(smp_boot_run(&t, 4, 100, &o, NULL) == -1);
+    assert(smp_boot_run(&t, 0, 100, &o, &r) == -1);
+    t.cpu_count = 9;
+    assert(smp_boot_run(&t, 4, 100, &o, &r) == -1);
+    t.cpu_count = 2;
+    o.counter = NULL;
+    assert(smp_boot_run(&t, 4, 100, &o, &r) == -1);
+    o = ops(&f); o.cpu_on = NULL;
+    assert(smp_boot_run(&t, 4, 100, &o, &r) == -1);
+    o = ops(&f); o.online_acquire = NULL;
+    assert(smp_boot_run(&t, 4, 100, &o, &r) == -1);
+    o = ops(&f); o.command_release = NULL;
+    assert(smp_boot_run(&t, 4, 100, &o, &r) == -1);
+    o = ops(&f); o.relax = NULL;
+    assert(smp_boot_run(&t, 4, 100, &o, &r) == -1);
+    f.ack[1] = 1;
+    assert(run(&f, 2, 100, &r) == -1);
+    assert(f.calls[1] == 0 && f.commands[1] == 0);
+    f.ack[1] = 0; f.ack[2] = 1;
+    assert(run(&f, 3, 100, &r) == -1);
+    assert(f.calls[1] == 0 && f.calls[2] == 0);
+    puts("PASS: invalid frequency/input/initial ACK rejected before CPU_ON");
+    return 0;
+}
+'''
+    runner = tmp / "boot_runner.c"
+    runner.write_text(source)
+    executable = tmp / "boot_runner"
+    subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra",
+                    "-Werror", "-Ikernel/include",
+                    "kernel/arch/aarch64/smp_boot_core.c", str(runner),
+                    "-o", str(executable)], cwd=ROOT, check=True)
+    subprocess.run([str(executable)], check=True)
 
 
 def elf_layout(path):
@@ -46,6 +259,9 @@ def check_elf(path):
     for seg in loads:
         assert 0x40080000 <= seg["pa"] < HANDOFF, "PT_LOAD outside boot RAM"
         assert seg["pa"] + seg["memsz"] <= HANDOFF, "PT_LOAD overlaps handoff"
+        if seg["va"] >= 0xffff000000000000:
+            assert seg["va"] - 0xffff000000000000 == seg["pa"], \
+                "high-half runtime address differs from loader allocation/zeroing"
 
     def mapped(start, size, flags):
         return any(seg["va"] == seg["pa"] and seg["flags"] & flags == flags
@@ -123,6 +339,9 @@ def main():
     clang = os.environ.get("CLANG", "clang")
     with tempfile.TemporaryDirectory(prefix="aarch64-smp-") as tmp:
         tmp = Path(tmp)
+        check_boot_core(tmp)
+        if "--host-only" in sys.argv:
+            return
         check_layout_compile(tmp, clang)
         check_linker_guard(tmp, clang)
     subprocess.run(["make", "PROFILE=aarch64-clang", "aarch64-uefi-kernel"],

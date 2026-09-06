@@ -7,7 +7,12 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <kernel/arch/aarch64/dtb.h>
+#include <kernel/arch/aarch64/psci.h>
+#include <kernel/arch/aarch64/smp.h>
+#include <kernel/arch/aarch64/smp_boot_core.h>
+#include <kernel/arch/aarch64/boot_log.h>
 #include "aarch64_percpu.h"
+#include "reg.h"
 
 static bool boot_published;
 
@@ -66,4 +71,151 @@ int aarch64_smp_publish_boot(const struct aarch64_topology *topology)
     __asm__ __volatile__("dsb sy" ::: "memory");
     boot_published = true;
     return 0;
+}
+
+/* Preserve the frozen result for post-boot debugger diagnostics too. */
+static volatile struct smp_boot_result boot_result;
+
+static __attribute__((noreturn)) void smp_fatal(const char *reason)
+{
+    log_err("[smp] FATAL: ");
+    log_err(reason);
+    log_err("\n");
+    for (;;) arch_cpu_halt();
+}
+
+static uint64_t boot_counter(void *ctx)
+{
+    (void)ctx;
+    return arch_cycle_counter();
+}
+
+static int32_t boot_cpu_on(void *ctx, uint64_t mpidr, uint64_t entry, uint64_t id)
+{
+    (void)ctx;
+    return psci_cpu_on(mpidr, entry, id);
+}
+
+static uint32_t boot_online(void *ctx, uint32_t id)
+{
+    (void)ctx;
+    return boot_online_get(id);
+}
+
+static void boot_command(void *ctx, uint32_t id, uint32_t command)
+{
+    (void)ctx;
+    boot_go_set(id, command);
+}
+
+static void boot_relax(void *ctx)
+{
+    (void)ctx;
+    arch_cpu_pause();
+}
+
+static void log_summary(uint32_t requested, uint32_t online)
+{
+    log_info("[smp] requested=");
+    kputu(requested);
+    log_info(" online=");
+    kputu(online);
+    if (online == requested) log_info(" status=PASS\n");
+    else log_warn(" status=DEGRADED\n");
+}
+
+uint32_t smp_boot_aps(void)
+{
+    if (boot_published) smp_fatal("repeated SMP boot");
+    const struct aarch64_topology *topology = dtb_topology();
+    uint64_t hz = cntfrq_el0();
+    if (!hz || hz > UINT64_MAX / 2)
+        smp_fatal("invalid counter frequency");
+
+    /* Before the one-shot publication, initialize all shared test data.
+     * Nothing may reset slots, stacks or test state after CPU_ON. */
+    spin_init(&bench_lock);
+    benchmark_total = 0;
+    for (uint32_t id = 0; id < NR_CPUS; ++id)
+        bench_done_set(id, 0);
+    if (aarch64_smp_publish_boot(topology))
+        smp_fatal("invalid or repeated boot publication");
+
+    uint64_t el;
+    __asm__ __volatile__("mrs %0, CurrentEL" : "=r"(el));
+    log_info("[smp] boot el=");
+    kputu(el >> 2);
+    log_info(" conduit=");
+    log_info(topology->cpu_count == 1 ? "none" :
+             topology->conduit == PSCI_CONDUIT_HVC ? "hvc" : "smc");
+    log_info("\n");
+    log_info("[smp-test] no_ack_cpu=0\n");
+
+    /* A valid uniprocessor platform needs no PSCI transport at all. */
+    if (topology->cpu_count > 1 && psci_init(topology->conduit)) {
+        boot_result.requested = topology->cpu_count;
+        boot_result.online = 1;
+        boot_result.online_mask = 1;
+        for (uint32_t id = 1; id < topology->cpu_count; ++id) {
+            boot_result.psci_rc[id] = -1;
+            boot_result.failure[id] = SMP_FAILURE_CPU_ON;
+            boot_go_set(id, AARCH64_BOOT_GO_IDLE);
+        }
+        log_warn("[smp] reason=psci-unavailable\n");
+        log_summary(topology->cpu_count, 1);
+        return 1;
+    }
+
+    const struct smp_boot_ops ops = {
+        .ctx = 0, .counter = boot_counter, .cpu_on = boot_cpu_on,
+        .online_acquire = boot_online, .command_release = boot_command,
+        .relax = boot_relax,
+    };
+    struct smp_boot_result result;
+    int status = smp_boot_run(topology, secondary_start_addr(), hz, &ops, &result);
+    if (status < 0) smp_fatal("invalid boot state machine input");
+    boot_result = result;
+    for (uint32_t id = 0; id < result.requested; ++id) {
+        log_info("[smp] cpu=");
+        kputu(id);
+        if (result.online_mask & (UINT32_C(1) << id)) {
+            log_info(" online mpidr=0x");
+            kputx(topology->mpidr[id]);
+        } else {
+            log_warn(result.failure[id] == SMP_FAILURE_TIMEOUT ?
+                     " reason=online-timeout" : " reason=cpu-on-error");
+            log_warn("\n[smp] cpu=");
+            kputu(id);
+            log_warn(" target_mpidr=0x");
+            kputx(topology->mpidr[id]);
+            log_warn(" rc=");
+            int64_t rc = result.psci_rc[id];
+            if (rc < 0) { log_warn("-"); rc = -rc; }
+            kputu((uint64_t)rc);
+        }
+        log_info("\n");
+    }
+    log_summary(result.requested, result.online);
+    return result.online;
+}
+
+void secondary_idle(uint32_t cpu_id)
+{
+    /* Assembly validated our slot/MPIDR, SP, TPIDR and vectors. All
+     * accesses below retain the slot's identity VA. IRQs stay masked. */
+    gic_cpu_init();
+    cntp_ctl_el0_write(cntp_ctl_el0_read() & ~UINT64_C(1));
+    boot_online_set(cpu_id);
+    uint32_t command;
+    do {
+        command = boot_go_get(cpu_id);
+        if (command == AARCH64_BOOT_GO_WAIT) arch_cpu_pause();
+    } while (command == AARCH64_BOOT_GO_WAIT);
+    if (command == AARCH64_BOOT_GO_TEST)
+        smp_bench_iter(cpu_id, 1000000);
+
+    /* Includes a late AP: go=2 persists even if the BSP already resumed
+     * ticks. APs never enable their timer or unmask IRQs in this phase. */
+    cntp_ctl_el0_write(cntp_ctl_el0_read() & ~UINT64_C(1));
+    for (;;) arch_cpu_halt();
 }

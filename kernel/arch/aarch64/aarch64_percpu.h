@@ -78,22 +78,32 @@ extern uint64_t aarch64_dtb_slot;
  *
  * The participating CPUs access this state in high-half .bss after
  * MMU-on. Release/acquire ordering on
- * benchmark_go and benchmark_done[] is provided by stlr/ldar (see
+ * per-slot online/go and benchmark_done[] is provided by stlr/ldar (see
  * the accessor helpers below), not by `volatile` alone.
  */
 extern spinlock_T        bench_lock;
-extern volatile uint32_t benchmark_go;             /* 0 → 1 to release */
 extern volatile uint32_t benchmark_done[NR_CPUS]; /* each core writes 1 */
 extern volatile uint32_t benchmark_total;          /* non-atomic counter */
 
 /* Release-store / acquire-load helpers (spec §2.1: must NOT be plain
  * volatile writes; need stlr / ldar for cross-core memory ordering). */
-static inline void bench_go_set(uint32_t v) {
-    __asm__ __volatile__("stlr %w0, [%1]" :: "r"(v), "r"(&benchmark_go) : "memory");
+static inline aarch64_boot_percpu_t *boot_slot(uint32_t cpu_id) {
+    return (aarch64_boot_percpu_t *)(uintptr_t)aarch64_percpu_slot_addr(cpu_id);
 }
-static inline uint32_t bench_go_get(void) {
+static inline void boot_online_set(uint32_t cpu_id) {
+    __asm__ __volatile__("stlr %w0, [%1]" :: "r"(1U), "r"(&boot_slot(cpu_id)->online) : "memory");
+}
+static inline uint32_t boot_online_get(uint32_t cpu_id) {
     uint32_t v;
-    __asm__ __volatile__("ldar %w0, [%1]" : "=r"(v) : "r"(&benchmark_go) : "memory");
+    __asm__ __volatile__("ldar %w0, [%1]" : "=r"(v) : "r"(&boot_slot(cpu_id)->online) : "memory");
+    return v;
+}
+static inline void boot_go_set(uint32_t cpu_id, uint32_t v) {
+    __asm__ __volatile__("stlr %w0, [%1]" :: "r"(v), "r"(&boot_slot(cpu_id)->go) : "memory");
+}
+static inline uint32_t boot_go_get(uint32_t cpu_id) {
+    uint32_t v;
+    __asm__ __volatile__("ldar %w0, [%1]" : "=r"(v) : "r"(&boot_slot(cpu_id)->go) : "memory");
     return v;
 }
 static inline void bench_done_set(uint32_t cpu_id, uint32_t v) {

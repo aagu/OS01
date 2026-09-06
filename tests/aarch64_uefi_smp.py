@@ -60,6 +60,20 @@ complete_degraded_log = """\
 [tick] 3\n
 """
 
+current_log_for_2_cpus = """\
+[smp] topology source=uefi-dtb cpus=2
+[smp] cpu=0 online mpidr=0x0
+[smp] cpu=1 online mpidr=0x1
+[smp] requested=2 online=2 status=PASS
+[spinlock] cpu=0 done=1000000
+[spinlock] cpu=1 done=1000000
+[spinlock] active=2 iterations=1000000 total=2000000 status=PASS
+[smp-test] no_ack_cpu=0
+[tick] 1
+[tick] 2
+[tick] 3
+"""
+
 
 def self_test() -> None:
     assert not passed(log_with_only_uefi_banner, cpus=4)
@@ -69,6 +83,12 @@ def self_test() -> None:
     assert not passed(log_with_wrong_total, cpus=4)
     assert not passed(log_with_missing_total, cpus=4)
     assert passed(complete_log_for_4_cpus, cpus=4)
+    assert passed(current_log_for_2_cpus, cpus=2)
+    assert passed(current_log_for_2_cpus.replace("\n", "\n\r"), cpus=2)
+    assert not passed(current_log_for_2_cpus.replace(
+        "cpu=1 done=1000000", "cpu=0 done=1000000"), cpus=2)
+    assert not passed(current_log_for_2_cpus.replace(
+        "total=2000000", "total=1999999"), cpus=2)
     assert degraded_passed(complete_degraded_log)
     assert not degraded_passed(complete_degraded_log + "[smp] FATAL: test failure\n")
     command_args = argparse.Namespace(
@@ -96,22 +116,30 @@ def hard_kernel_failure(text: str) -> bool:
 
 def passed(text: str, cpus: int) -> bool:
     """Recognize a complete normal-mode SMP run without QEMU dependencies."""
+    # PL011 currently emits LF+CR. Match lines consistently for saved logs
+    # and live serial drains, while retaining the original fixture format.
+    text = text.replace("\r", "")
     if kernel_failure(text):
         return False
     topology = re.search(r"^\[smp\] topology\b[^\n]*\brequested=(\d+)\b[^\n]*\bdiscovered=(\d+)\b", text, re.MULTILINE)
-    if not topology or tuple(map(int, topology.groups())) != (cpus, cpus):
+    if topology:
+        if tuple(map(int, topology.groups())) != (cpus, cpus):
+            return False
+    elif f"[smp] topology source=uefi-dtb cpus={cpus}\n" not in text:
         return False
-    online = re.findall(r"^\[smp\] cpu=(\d+) online$", text, re.MULTILINE)
+    online = re.findall(r"^\[smp\] cpu=(\d+) online(?: mpidr=0x[0-9a-fA-F]+)?$", text, re.MULTILINE)
     if len(online) != cpus or {int(cpu) for cpu in online} != set(range(cpus)):
         return False
-    summary = re.search(r"^\[smp\] summary\b[^\n]*\brequested=(\d+)\b[^\n]*\bonline=(\d+)\b[^\n]*\bstatus=PASS$", text, re.MULTILINE)
+    summary = re.search(r"^\[smp\] (?:summary )?requested=(\d+) online=(\d+) status=PASS$", text, re.MULTILINE)
     if not summary or tuple(map(int, summary.groups())) != (cpus, cpus):
         return False
-    done = re.findall(r"^\[spinlock\] cpu (\d+): done=1000000/1000000$", text, re.MULTILINE)
+    done = re.findall(r"^\[spinlock\] cpu[ =](\d+):? done=1000000(?:/1000000)?$", text, re.MULTILINE)
     if len(done) != cpus or {int(cpu) for cpu in done} != set(range(cpus)):
         return False
     total = cpus * 1000000
-    if f"[spinlock] total={total} (active_cpus={cpus} × 1000000, PASS)" not in text:
+    legacy_total = f"[spinlock] total={total} (active_cpus={cpus} × 1000000, PASS)"
+    current_total = f"[spinlock] active={cpus} iterations=1000000 total={total} status=PASS"
+    if legacy_total not in text and current_total not in text:
         return False
     if "[smp-test] no_ack_cpu=0" not in text:
         return False
