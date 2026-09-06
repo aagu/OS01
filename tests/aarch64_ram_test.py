@@ -23,34 +23,44 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 RUNNER = r'''
+#include <kernel/bootinfo.h>
 #include <kernel/arch/aarch64/ram.h>
 #include <kernel/arch/aarch64/ram_core.h>
 #include <stddef.h>
 
-/* Exercise every signature the contracts advertise: the linker must
- * resolve them from kernel/arch/aarch64/ram_core.c. Calling them with
- * NULL is fine for the stub (it just returns a non-zero error). */
+/* Compile-time contracts pinned by the spec. Any drift between the
+ * spec values and the header macros aborts the translation; runtime
+ * checks cannot catch a header-only regression because they execute
+ * against the in-memory constants, not the preprocessor tokens. */
+_Static_assert(AARCH64_UEFI_DESCRIPTOR_PREFIX_SIZE == 32u, "wire prefix");
+_Static_assert(AARCH64_EFI_CONVENTIONAL_MEMORY == 7u, "UEFI type");
+_Static_assert(AARCH64_RAM_GRANULE == (UINT64_C(1) << 21), "granule");
+_Static_assert(AARCH64_RAM_MAX_RANGES == 16, "map capacity");
+
+/* Synthetic descriptor bytes — Task 2 will define the real
+ * normalizer that decodes them; here we only need to prove that the
+ * eight-parameter signature links and type-checks against a real
+ * byte buffer. The stub still returns -1 for any input. */
+static const uint8_t synthetic_bytes[4] = { 0xAA, 0xBB, 0xCC, 0xDD };
+
 int main(void)
 {
     int initialized = 0;
     int rc;
 
-    if (AARCH64_UEFI_DESCRIPTOR_PREFIX_SIZE != 32u) return 10;
-    if (AARCH64_EFI_CONVENTIONAL_MEMORY != 7u) return 11;
-    if (AARCH64_RAM_GRANULE != (UINT64_C(1) << 21)) return 12;
-    if (AARCH64_RAM_MAX_RANGES != 16) return 13;
-    if (sizeof(struct aarch64_ram_map) == 0) return 14;
-    if (sizeof(struct aarch64_ram_interval) == 0) return 15;
-
-    /* The stub normalizer must accept a NULL out without UB and report
-     * an error (Task 2 will define the real return). */
-    rc = aarch64_ram_normalize((const struct boot_context *)0,
+    /* The stub normalizer must accept the synthetic bytes (any
+     * entry_count) and report a non-zero error. The four wire
+     * constants are already enforced above at compile time. */
+    rc = aarch64_ram_normalize(synthetic_bytes, 0u, 32u,
+                               (uint32_t)BOOT_MEMORY_FORMAT_UEFI_RAW,
+                               1u, NULL, 0u,
                                (struct aarch64_ram_map *)0);
     if (rc == 0) return 20;
 
-    /* The stub publisher must round-trip a candidate into the destination
-     * (returning an error is fine; what we need to prove here is that the
-     * symbol exists and the signature matches the header). */
+    /* The stub publisher must round-trip a candidate into the
+     * destination (returning a non-zero error is fine; what we need
+     * to prove here is that the symbol exists and the signature
+     * matches the header). */
     rc = aarch64_ram_publish_once((const struct aarch64_ram_map *)0,
                                   (struct aarch64_ram_map *)0,
                                   &initialized);

@@ -8,37 +8,19 @@
  *
  * The wire format the loader hands the kernel — the raw UEFI memory
  * descriptors with a 32-byte prefix the kernel needs to skip — is
- * described by the constants at the top of this file. Those four
- * constants are pinned by the host contract test (see
+ * described by the wire constants in `ram_core.h`. The capacity
+ * constant is pinned by the host contract test (see
  * tests/aarch64_ram_test.py); any drift fails the build.
  *
  * `aarch64_ram_map` is the public target the kernel's early MMU code
  * will iterate; the internal `struct aarch64_ram_interval` lives in
- * ram_core.h next to the normalizer's signature.
+ * `ram_core.h` next to the normalizer's signature and is reserved
+ * for the exclusion list passed into the pure normalizer.
  */
 #ifndef OS01_AARCH64_RAM_H
 #define OS01_AARCH64_RAM_H
 
 #include <stdint.h>
-
-/* The raw UEFI memory descriptor the firmware emits is 48 bytes; the
- * loader prepends a 32-byte prefix (a `boot_memory_map` head that
- * already lives inside `boot_context`) before the descriptor array.
- * `AARCH64_UEFI_DESCRIPTOR_PREFIX_SIZE` lets the kernel skip that
- * prefix without re-parsing the layout every boot. */
-#define AARCH64_UEFI_DESCRIPTOR_PREFIX_SIZE  32u
-
-/* UEFI memory type 7 = EfiConventionalMemory, the only descriptor
- * type the normalizer retains. Everything else (MMIO, reserved,
- * ACPI, runtime services) is mapped by the loader or firmware and
- * must NOT be handed to the kernel's general-purpose page pool. */
-#define AARCH64_EFI_CONVENTIONAL_MEMORY      7u
-
-/* The normalizer rounds every retained interval to this granule so
- * the kernel can map each range with section descriptors in the
- * early page tables. 2 MiB also matches the largest block the
- * page-table walker recognises on the bring-up path. */
-#define AARCH64_RAM_GRANULE                  (UINT64_C(1) << 21)
 
 /* Fixed map capacity: 16 ranges cover the AArch64 virt platform's
  * practical RAM distribution (a few low DRAM blocks plus the high
@@ -48,14 +30,35 @@
  * enlargement here also touches the storage layout. */
 #define AARCH64_RAM_MAX_RANGES               16
 
-struct aarch64_ram_interval {
-    uint64_t start;
-    uint64_t end;
+struct aarch64_ram_range {
+    uint64_t start;  /* inclusive physical address, 2 MiB aligned */
+    uint64_t end;    /* exclusive physical address, 2 MiB aligned */
 };
 
 struct aarch64_ram_map {
     uint32_t count;
-    struct aarch64_ram_interval ranges[AARCH64_RAM_MAX_RANGES];
+    struct aarch64_ram_range ranges[AARCH64_RAM_MAX_RANGES];
 };
+
+/* Forward declaration of the handoff layout owned by
+ * <kernel/bootinfo.h>. The full type is not required here because the
+ * public surface only takes its pointer; downstream translation units
+ * that need the fields can include bootinfo.h themselves. */
+struct boot_context;
+
+/* Initialize the published RAM map from the UEFI handoff. Returns 0
+ * only when it has published a complete map; every negative return
+ * is fatal to the boot caller (the BSP halts before GIC, SMP, or
+ * timer setup). The definitions live in `ram.c` and are owned by
+ * Task 3 of the AArch64 UEFI RAM normalization plan; this header
+ * only publishes the contract so callers may compile against it
+ * without waiting on Task 3. */
+int aarch64_ram_init(const struct boot_context *handoff);
+
+/* Return a non-null pointer to the published, immutable RAM map
+ * after a successful aarch64_ram_init() call. Callers must treat
+ * the returned object as read-only; the pointer is null until
+ * initialization completes. */
+const struct aarch64_ram_map *aarch64_ram_map_get(void);
 
 #endif /* OS01_AARCH64_RAM_H */
