@@ -1,14 +1,7 @@
-/* aarch64 phase 1: per-CPU boot storage (low VMA/LMA, .boot.bss).
- *
- * Defines the per-CPU array and the early-stack array, plus the DTB slot.
- * Forced into `.boot.bss` so the BSP can index into it pre-MMU via the
- * identity map, and APs can read `stack`/`go` after PSCI cpu_on (with
- * MMU still off).
- *
- * Per controller ruling R6, Task 1 only: NO benchmark_* state — that
- * belongs to Task 2 once the real spinlock header is filled in.
- * (Task 4b now adds them — spec §2.1 v11.  They stay in .boot.bss so
- * APs reach them via the identity map.)
+/* Early metadata/stacks use low VMA=LMA in .boot.bss. The BSP fills
+ * and publishes every slot before CPU_ON; an AP validates context_id
+ * and affinity here without a stack before selecting its own stack.
+ * Once CPUs start, coherent accesses retain this same identity VA.
  */
 
 #include <kernel/arch/cpu.h>                  /* NR_CPUS */
@@ -51,12 +44,11 @@ volatile uint32_t benchmark_done[NR_CPUS];
 __attribute__((aligned(4)))
 volatile uint32_t benchmark_total;
 
-/* ── Low-physical MPIDR table for AP pre-MPU lookup ─────────────────
+/* ── Low-physical MPIDR table for AP pre-MMU validation ─────────────
  *
  * The dtb.c parser stores its results in normal .bss (high half), but
- * the AP trampoline reads MPIDR_EL1 pre-MMU and must find its logical
- * cpu_id via a low-physical identity-mapped table.  smp.c copies the
- * parsed values here before issuing PSCI cpu_on.
+ * the AP verifies its context index against the same ordered topology
+ * pre-MMU. The BSP publication helper fills this table exactly once.
  */
 __attribute__((section(".boot.bss"), aligned(8)))
 uint64_t aarch64_dtb_mpidr_table[NR_CPUS];

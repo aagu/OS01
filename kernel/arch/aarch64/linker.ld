@@ -114,6 +114,7 @@ SECTIONS
 
     _kernel_end = .;
     _kernel_lma_end = LOADADDR(.bss) + SIZEOF(.bss);
+    ASSERT(_kernel_lma_end <= 0x401e0000, "kernel overlaps UEFI handoff")
 
     /* Sentinel: a couple of known symbols used by head.S to size .boot.bss
      * clearing and to compute page-table addresses. */
