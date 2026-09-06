@@ -94,6 +94,12 @@
 #define SYS_setsid        69
 #define SYS_getsid        70
 
+// ── Symlink support ───────────────────────────────────────
+#define SYS_symlink       71   // symlink(target, linkpath)
+#define SYS_readlink      72   // readlink(path, buf, bufsz)
+#define SYS_lstat         73   // lstat(path, buf)
+#define SYS_fstatat       74   // fstatat(dirfd, path, buf, flags)
+
 // ── reboot(2) commands ──────────────────────────────────────
 #define RB_AUTOBOOT    0x01234567
 #define RB_POWER_OFF   0x4321FEDC

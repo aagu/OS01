@@ -78,6 +78,12 @@
 #define SYS_setsid        69
 #define SYS_getsid        70
 
+// ── Symlink support ───────────────────────────────────────
+#define SYS_symlink       71   // symlink(target, linkpath)
+#define SYS_readlink      72   // readlink(path, buf, bufsz)
+#define SYS_lstat         73   // lstat(path, buf)
+#define SYS_fstatat       74   // fstatat(dirfd, path, buf, flags)
+
 // ── Generic syscall helper ─────────────────────────────────
 
 static inline int64_t syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3)
@@ -86,6 +92,25 @@ static inline int64_t syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_
     __asm__ volatile ("int $0x80"
         : "=a" (ret)
         : "a" (nr), "D" (arg1), "S" (arg2), "d" (arg3)
+        : "memory");
+    return ret;
+}
+
+// 3-arg alias for clarity at call sites (same as syscall(nr, a1, a2, a3))
+static inline int64_t syscall3(uint64_t nr,
+                                uint64_t arg1, uint64_t arg2, uint64_t arg3) {
+    return syscall(nr, arg1, arg2, arg3);
+}
+
+// 4-arg: 4th arg via r10 (Linux x86-64 ABI)
+static inline int64_t syscall4(uint64_t nr,
+                                uint64_t arg1, uint64_t arg2, uint64_t arg3,
+                                uint64_t arg4) {
+    int64_t ret;
+    register uint64_t r10 __asm__("r10") = arg4;
+    __asm__ volatile ("int $0x80"
+        : "=a" (ret)
+        : "a" (nr), "D" (arg1), "S" (arg2), "d" (arg3), "r" (r10)
         : "memory");
     return ret;
 }

@@ -2,6 +2,7 @@
 #include <kernel/debug.h>
 #include <kernel/slab.h>
 #include <kernel/rwlock.h>
+#include <kernel/task.h>      // current->files->cwd for resolve_at
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -140,28 +141,57 @@ static vfs_mount_t *find_mount(const char *path)
     return best;
 }
 
-// ── Lookup (core) ─────────────────────────────────────────
-// Resolves an absolute path to a VFS node.
-static vfs_node_t *__vfs_lookup(const char *path)
+// ── Lookup (core, raw) ────────────────────────────────────
+// Resolves an absolute path to a VFS node, with mid-path symlink early-return.
+//
+// Return value (2-state):
+//   0    = walked to a non-symlink final node; *out_node holds the node
+//          with refcount++.  consumed_out / remaining_out are optional and
+//          contain the walked path / "" respectively.
+//   1    = hit a symlink (mid-path or last component); *out_node holds the
+//          symlink with refcount++.  *consumed_out is the absolute prefix
+//          walked up to (but not including) the symlink; *remaining_out is
+//          the unconsumed suffix after the symlink (contract: "" or starts
+//          with '/').
+//   < 0  = -errno (ENOENT / ENOTDIR / ENAMETOOLONG / EIO / EINVAL / ENOMEM);
+//          *out_node = NULL.
+//
+// NOFOLLOW semantics are NOT applied here — the caller (vfs_lookup_at /
+// vfs_lookup_resolved) decides whether to splice + restart based on flags
+// and the suffix content.
+static int __vfs_lookup_raw(const char *path,
+                            vfs_node_t **out_node,
+                            char *consumed_out, size_t consumed_size,
+                            char *remaining_out, size_t remaining_size)
 {
-    if (!vfs_initialized || !path) return NULL;
+    *out_node = NULL;
+    if (consumed_out && consumed_size > 0) consumed_out[0] = '\0';
+    if (remaining_out && remaining_size > 0) remaining_out[0] = '\0';
+
+    if (!vfs_initialized || !path) return -EINVAL;
+
+    size_t plen = strlen(path);
+    if (plen >= VFS_NAME_MAX) return -ENAMETOOLONG;
 
     // Handle root
     if (strcmp(path, "/") == 0) {
         vfs_mount_t *mp = find_mount("/");
-        if (!mp || !mp->root) return NULL;
+        if (!mp || !mp->root) return -ENOENT;
         __sync_add_and_fetch(&mp->root->refcount, 1);
-        return mp->root;
+        *out_node = mp->root;
+        if (consumed_out && consumed_size >= 2) {
+            consumed_out[0] = '/';
+            consumed_out[1] = '\0';
+        }
+        return 0;
     }
 
     // Find the mount point
     vfs_mount_t *mp = find_mount(path);
-    if (!mp || !mp->root || !mp->root->ops) return NULL;
+    if (!mp || !mp->root || !mp->root->ops) return -ENOENT;
 
     // Tokenize path — skip mount point prefix for sub-mounts
     char path_copy[VFS_NAME_MAX];
-    size_t plen = strlen(path);
-    if (plen >= VFS_NAME_MAX) return NULL;
     memcpy(path_copy, path, plen + 1);
 
     char *ptr;
@@ -175,26 +205,53 @@ static vfs_node_t *__vfs_lookup(const char *path)
 
     char *comp;
 
-    vfs_node_t *current = mp->root;
-    __sync_add_and_fetch(&current->refcount, 1);
+    // Use `cur` (not `current` — `current` is a kernel-wide macro).
+    vfs_node_t *cur = mp->root;
+    __sync_add_and_fetch(&cur->refcount, 1);
+
+    // Initialize consumed to the absolute root prefix "/".
+    size_t consumed_len = 1;
+    if (consumed_out && consumed_size >= 2) {
+        consumed_out[0] = '/';
+        consumed_out[1] = '\0';
+    }
 
     while ((comp = next_component(&ptr)) != NULL) {
-        if (strlen(comp) == 0) {
-            continue;
-        }
+        if (strlen(comp) == 0) continue;
 
         // "." — stay in current directory
-        if (strcmp(comp, ".") == 0) {
-            continue;
+        if (strcmp(comp, ".") == 0) continue;
+
+        // Explicit VFS_DIR check before readdir — walking through a non-dir
+        // would otherwise surface as a confusing readdir failure (v5 fix).
+        if (cur->type != VFS_DIR) {
+            __sync_sub_and_fetch(&cur->refcount, 1);
+            return -ENOTDIR;
         }
 
-        // ".." — go to parent, or stay if at root
+        // ".." — go to parent, or stay at mount root
         if (strcmp(comp, "..") == 0) {
-            if (current->parent) {
-                vfs_node_t *parent = current->parent;
+            if (cur->parent) {
+                vfs_node_t *parent = cur->parent;
                 __sync_add_and_fetch(&parent->refcount, 1);
-                __sync_sub_and_fetch(&current->refcount, 1);
-                current = parent;
+                __sync_sub_and_fetch(&cur->refcount, 1);
+                cur = parent;
+            }
+            // Trim consumed to last "/": "/foo/bar" → "/foo", "/foo" → "/".
+            if (consumed_out) {
+                size_t clen = strlen(consumed_out);
+                if (clen > 1) {
+                    char *last = consumed_out + clen - 1;
+                    while (last > consumed_out && *last != '/') last--;
+                    if (last == consumed_out) {
+                        // Stay at root: e.g., "/foo" → "/".
+                        last[1] = '\0';
+                        consumed_len = 1;
+                    } else {
+                        *last = '\0';
+                        consumed_len = (size_t)(last - consumed_out);
+                    }
+                }
             }
             continue;
         }
@@ -207,69 +264,332 @@ static vfs_node_t *__vfs_lookup(const char *path)
         int max_iter = 256;  // safety bound for corrupted ops
 
         while (max_iter-- > 0) {
-            int ret = vfs_readdir(current, idx, &entry);
-            if (ret == 0 && entry.name[0] == '\0') break;
-            if (ret == 0) {
-                int match;
-                if (current->ops &&
-                    (uint64_t)current->ops >= 0xffff800000000000ULL &&
-                    (current->ops->flags & VFS_OPS_CASE_INSENSITIVE))
-                    match = (vfs_name_cmp(entry.name, comp) == 0);
-                else
-                    match = (strcmp(entry.name, comp) == 0);
+            int ret = vfs_readdir(cur, idx, &entry);
+            if (ret != 0) {
+                // readdir error on a directory we just verified is a DIR.
+                // Treat as I/O failure (v5 fix).
+                __sync_sub_and_fetch(&cur->refcount, 1);
+                return -EIO;
+            }
+            if (entry.name[0] == '\0') break;
+            int match;
+            if (cur->ops &&
+                (uint64_t)cur->ops >= 0xffff800000000000ULL &&
+                (cur->ops->flags & VFS_OPS_CASE_INSENSITIVE))
+                match = (vfs_name_cmp(entry.name, comp) == 0);
+            else
+                match = (strcmp(entry.name, comp) == 0);
 
-                if (match) {
-                    found = 1;
-                    break;
-                }
+            if (match) {
+                found = 1;
+                break;
             }
             idx++;
         }
 
         if (!found) {
-            __sync_sub_and_fetch(&current->refcount, 1);
-            return NULL;
+            __sync_sub_and_fetch(&cur->refcount, 1);
+            return -ENOENT;
         }
 
         vfs_node_t *child = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
         if (!child) {
-            __sync_sub_and_fetch(&current->refcount, 1);
-            return NULL;
+            __sync_sub_and_fetch(&cur->refcount, 1);
+            return -ENOMEM;
         }
 
         child->mount = mp;
-        child->parent = current;
-        __sync_add_and_fetch(&current->refcount, 1);  // child holds a ref through parent pointer
+        child->parent = cur;
+        __sync_add_and_fetch(&cur->refcount, 1);  // child holds a ref through parent pointer
         child->type = entry.type;
         child->size = entry.size;
-        child->ops = current->ops;
+        child->ops = cur->ops;
         child->fs_data = (void *)(uintptr_t)entry.ino;
         child->refcount = 1;
         child->name = strndup(entry.name, VFS_NAME_MAX - 1);
 
-        __sync_sub_and_fetch(&current->refcount, 1);
-        current = child;
+        // Append "/" + comp to consumed (bounded by VFS_NAME_MAX, same as path).
+        if (consumed_out && consumed_size > 0) {
+            size_t cl = strlen(comp);
+            if (consumed_len + 1 + cl + 1 > consumed_size) {
+                free(child->name);
+                free(child);
+                __sync_sub_and_fetch(&cur->refcount, 1);
+                return -ENAMETOOLONG;
+            }
+            consumed_out[consumed_len] = '/';
+            memcpy(consumed_out + consumed_len + 1, comp, cl);
+            consumed_len += 1 + cl;
+            consumed_out[consumed_len] = '\0';
+        }
+
+        // Symlink early-return: caller decides whether to follow.
+        if (child->type == VFS_SYMLINK) {
+            if (remaining_out && remaining_size > 0) {
+                size_t rem_len = strlen(ptr);
+                if (rem_len == 0) {
+                    // Last component → empty suffix.
+                    remaining_out[0] = '\0';
+                } else {
+                    // Mid-path: contract requires suffix starts with '/'.
+                    if (1 + rem_len + 1 > remaining_size) {
+                        free(child->name);
+                        free(child);
+                        __sync_sub_and_fetch(&cur->refcount, 1);
+                        return -ENAMETOOLONG;
+                    }
+                    remaining_out[0] = '/';
+                    memcpy(remaining_out + 1, ptr, rem_len);
+                    remaining_out[1 + rem_len] = '\0';
+                }
+            }
+            // Drop our walk ref on cur; child keeps its parent ref.
+            __sync_sub_and_fetch(&cur->refcount, 1);
+            *out_node = child;
+            return 1;  // symlink hit
+        }
+
+        __sync_sub_and_fetch(&cur->refcount, 1);
+        cur = child;
     }
 
-    return current;
+    // Walk completed with no symlink — *out_node is the final node.
+    *out_node = cur;
+    return 0;
+}
+
+// ── Splice symlink target + remaining suffix ─────────────
+// Builds the next iteration's absolute path from the consumed prefix,
+// the symlink target (read via ops->readlink), and the unconsumed suffix.
+//
+//   target[0] == '/'  →  new = target + suffix       (absolute override)
+//   else              →  new = dirname(consumed) + "/" + target + suffix
+//
+// Returns 0 on success or -ENAMETOOLONG if the expanded path exceeds
+// out_size.  On error, the caller is responsible for freeing `target`
+// and dropping the symlink node (handled in vfs_lookup_resolved).
+static int splice_symlink_path(const char *consumed, const char *target,
+                               const char *suffix,
+                               char *out, size_t out_size)
+{
+    if (!consumed || !target || !out || out_size == 0) return -EINVAL;
+
+    size_t pos = 0;
+
+    if (target[0] == '/') {
+        // Absolute override — consumed is irrelevant.
+        size_t tlen = strlen(target);
+        if (tlen + 1 > out_size) return -ENAMETOOLONG;
+        memcpy(out, target, tlen);
+        pos = tlen;
+    } else {
+        // Relative: prepend dirname(consumed).
+        //   consumed "/foo/bar" → prefix "/foo"
+        //   consumed "/foo"     → prefix "/"    (root)
+        //   consumed "/"        → prefix "/"    (no change)
+        const char *last_slash = NULL;
+        for (const char *s = consumed; *s; s++)
+            if (*s == '/') last_slash = s;
+
+        const char *prefix;
+        size_t prefix_len;
+        if (!last_slash) {
+            // No "/" in consumed (shouldn't happen for absolute paths).
+            prefix = "";
+            prefix_len = 0;
+        } else if (last_slash == consumed) {
+            // consumed is "/" or "/foo" — prefix is just "/".
+            prefix = "/";
+            prefix_len = 1;
+        } else {
+            // consumed is "/foo/bar" or deeper.
+            prefix = consumed;
+            prefix_len = (size_t)(last_slash - consumed);
+        }
+
+        if (prefix_len + 1 + 1 > out_size) return -ENAMETOOLONG;
+        if (prefix_len > 0) memcpy(out, prefix, prefix_len);
+        out[prefix_len] = '/';
+        pos = prefix_len + 1;
+
+        size_t tlen = strlen(target);
+        if (pos + tlen + 1 > out_size) return -ENAMETOOLONG;
+        memcpy(out + pos, target, tlen);
+        pos += tlen;
+    }
+
+    // Append suffix (already starts with '/' or is empty per contract).
+    size_t slen = strlen(suffix);
+    if (pos + slen + 1 > out_size) return -ENAMETOOLONG;
+    if (slen > 0) memcpy(out + pos, suffix, slen);
+    pos += slen;
+    out[pos] = '\0';
+
+    return 0;
+}
+
+// ── Resolve dirfd + path into an absolute path ───────────
+//
+//   dirfd == AT_FDCWD && path absolute → out = path
+//   dirfd == AT_FDCWD && path relative → out = current->files->cwd + "/" + path
+//   dirfd != AT_FDCWD                 → -EBADF (real fd support deferred)
+//
+// Absolute paths always ignore dirfd (v5 fix).
+static int resolve_at(int dirfd, const char *path,
+                      char *out, size_t out_size)
+{
+    if (!path || !out || out_size == 0) return -EINVAL;
+
+    size_t plen = strlen(path);
+    if (plen == 0) return -EINVAL;
+
+    // Absolute path — ignore dirfd entirely.
+    if (path[0] == '/') {
+        if (plen + 1 > out_size) return -ENAMETOOLONG;
+        memcpy(out, path, plen + 1);
+        return 0;
+    }
+
+    // Relative path — require AT_FDCWD for now.
+    if (dirfd != AT_FDCWD) return -EBADF;
+
+    const char *cwd = "/";
+    if (current && current->files && current->files->cwd) {
+        cwd = current->files->cwd;
+    }
+
+    size_t cwd_len = strlen(cwd);
+    int add_sep = (cwd_len > 0 && cwd[cwd_len - 1] != '/') ? 1 : 0;
+    size_t total = cwd_len + add_sep + plen;
+    if (total + 1 > out_size) return -ENAMETOOLONG;
+
+    size_t off = 0;
+    if (cwd_len > 0) {
+        memcpy(out, cwd, cwd_len);
+        off = cwd_len;
+    }
+    if (add_sep) out[off++] = '/';
+    memcpy(out + off, path, plen + 1);
+
+    return 0;
+}
+
+// ── Symlink-aware lookup (fold walk + splice + restart) ──
+//
+// Iterates: walk → if symlink, splice + restart, up to MAXSYMLINKS hops.
+// NOFOLLOW only blocks when suffix is empty (last-component symlink).
+//
+// Returns 0 on success (*out_node refcount++) or -errno on failure.
+// Caller must vfs_node_put(*out_node) on success.
+static int vfs_lookup_resolved(const char *absolute,
+                               lookup_flags_t flags,
+                               vfs_node_t **out_node)
+{
+    *out_node = NULL;
+
+    size_t alen = strlen(absolute);
+    if (alen >= VFS_NAME_MAX) return -ENAMETOOLONG;
+
+    // Co-located stack buffers per spec §7.  Peak ~1.7 KB.
+    char remaining[VFS_NAME_MAX];
+    char consumed[VFS_NAME_MAX];
+    char suffix[VFS_NAME_MAX];
+    memcpy(remaining, absolute, alen + 1);
+
+    vfs_node_t *node = NULL;
+    int depth = 0;
+
+    for (;;) {
+        int st = __vfs_lookup_raw(remaining, &node,
+                                  consumed, sizeof(consumed),
+                                  suffix, sizeof(suffix));
+        if (st < 0) return st;
+        if (st == 0) {
+            *out_node = node;
+            return 0;
+        }
+        // st == 1: symlink hit.
+        if (depth >= MAXSYMLINKS) {
+            vfs_node_put(node);
+            return -ELOOP;
+        }
+
+        // NOFOLLOW semantics: only block the last-component symlink.
+        if ((flags & LOOKUP_NOFOLLOW) && suffix[0] == '\0') {
+            *out_node = node;
+            return 0;
+        }
+
+        if (!node->ops || !node->ops->readlink) {
+            vfs_node_put(node);
+            return -EOPNOTSUPP;
+        }
+
+        char *target = kmalloc(VFS_NAME_MAX);
+        if (!target) {
+            vfs_node_put(node);
+            return -ENOMEM;
+        }
+        int tlen = node->ops->readlink(node, target, VFS_NAME_MAX - 1);
+        if (tlen < 0) {
+            kfree(target);
+            vfs_node_put(node);
+            return tlen;
+        }
+        if (tlen >= VFS_NAME_MAX - 1) {
+            // readlink returned >= bufsize; we couldn't NUL-terminate.
+            kfree(target);
+            vfs_node_put(node);
+            return -ENAMETOOLONG;
+        }
+        target[tlen] = '\0';
+
+        char new_remaining[VFS_NAME_MAX];
+        int src = splice_symlink_path(consumed, target, suffix,
+                                      new_remaining, sizeof(new_remaining));
+        if (src < 0) {
+            // Per hard rule: free target AND vfs_node_put(node) on failure.
+            kfree(target);
+            vfs_node_put(node);
+            return src;
+        }
+        kfree(target);
+
+        vfs_node_put(node);
+        memcpy(remaining, new_remaining, VFS_NAME_MAX);
+        depth++;
+    }
 }
 
 // ── Public lookup: absolute path only ─────────────────────
+//
+// Legacy contract: returns vfs_node_t* (NULL on error, no errno).
+// T6 migration: call vfs_lookup_resolved so symlinks at any depth
+// are followed (LOOKUP_FOLLOW).  errno from the resolver is dropped.
 vfs_node_t *vfs_lookup(const char *path)
 {
-    return __vfs_lookup(path);
+    if (!path) return NULL;
+    vfs_node_t *node = NULL;
+    if (vfs_lookup_resolved(path, LOOKUP_FOLLOW, &node) < 0) {
+        return NULL;
+    }
+    return node;
 }
 
 // ── Public lookup: relative path support ──────────────────
+//
 // If path is absolute (starts with '/'), cwd is ignored.
-// Otherwise, path is resolved relative to cwd.
+// Otherwise, path is resolved relative to cwd (cwd must be non-NULL).
+// Legacy contract: NULL on error.  T6 migration: call
+// vfs_lookup_resolved directly to apply the same symlink-following
+// behavior as vfs_lookup (LOOKUP_FOLLOW).
 vfs_node_t *vfs_lookup_from(const char *path, const char *cwd)
 {
     if (!path) return NULL;
 
     // Absolute path — use directly
     if (path[0] == '/')
-        return __vfs_lookup(path);
+        return vfs_lookup(path);
 
     // Relative path with no cwd — can't resolve
     if (!cwd)
@@ -299,7 +619,25 @@ vfs_node_t *vfs_lookup_from(const char *path, const char *cwd)
         abs_path[off++] = '/';
     memcpy(abs_path + off, path, path_len + 1);  // include NUL
 
-    return __vfs_lookup(abs_path);
+    return vfs_lookup(abs_path);
+}
+
+// ── Public lookup: dirfd + flags + errno ─────────────────
+//
+// New T2 API: returns 0/-errno with refcount++ on success.
+// Normalizes via resolve_at, then loops in vfs_lookup_resolved.
+int vfs_lookup_at(int dirfd, const char *path, lookup_flags_t flags,
+                  vfs_node_t **out_node)
+{
+    if (!out_node) return -EINVAL;
+    *out_node = NULL;
+    if (!path) return -EINVAL;
+
+    char remaining[VFS_NAME_MAX];
+    int rc = resolve_at(dirfd, path, remaining, sizeof(remaining));
+    if (rc < 0) return rc;
+
+    return vfs_lookup_resolved(remaining, flags, out_node);
 }
 
 // ── Read ──────────────────────────────────────────────────
@@ -384,6 +722,7 @@ int vfs_stat(vfs_node_t *node, struct stat *buf)
     case VFS_DIR:   buf->st_mode = S_IFDIR | 0755; break;
     case VFS_CHRDEV: buf->st_mode = S_IFCHR | 0600; break;
     case VFS_BLKDEV: buf->st_mode = S_IFBLK | 0600; break;
+    case VFS_SYMLINK: buf->st_mode = S_IFLNK | 0777; break;
     default:        buf->st_mode = 0; break;
     }
 
@@ -533,6 +872,7 @@ int vfs_getdents(vfs_node_t *dir, struct linux_dirent64 *buf, unsigned int count
         case VFS_DIR:    d->d_type = DT_DIR; break;
         case VFS_CHRDEV: d->d_type = DT_CHR; break;
         case VFS_BLKDEV: d->d_type = DT_BLK; break;
+        case VFS_SYMLINK: d->d_type = DT_LNK; break;
         default:         d->d_type = DT_UNKNOWN; break;
         }
 
@@ -587,8 +927,9 @@ void vfs_debug_list(const char *path)
 // Given "/file", sets parent to "/" and returns "file".
 // Given "file" (no slash), uses cwd as parent and returns "file".
 // Returns pointer into a static buffer (parent_path), or NULL on error.
-static const char *vfs_split_parent(const char *path, const char *cwd,
-                                    char parent_path[VFS_NAME_MAX])
+// Exported (T6): sys_symlink (T7) needs relative linkpath handling.
+const char *vfs_split_parent(const char *path, const char *cwd,
+                             char parent_path[VFS_NAME_MAX])
 {
     if (!path || !parent_path) return NULL;
 

@@ -32,6 +32,7 @@ struct stat {
 #define S_IFCHR  0020000
 #define S_IFBLK  0060000
 #define S_IFIFO  0010000
+#define S_IFLNK  0120000
 
 /* Permission bits */
 #define S_IRWXU  00700
@@ -45,6 +46,7 @@ struct stat {
 #define S_ISDIR(m)  (((m) & S_IFMT) == S_IFDIR)
 #define S_ISCHR(m)  (((m) & S_IFMT) == S_IFCHR)
 #define S_ISBLK(m)  (((m) & S_IFMT) == S_IFBLK)
+#define S_ISLNK(m)  (((m) & S_IFMT) == S_IFLNK)
 
 /* Seek whence */
 #define SEEK_SET  0
@@ -102,5 +104,10 @@ struct linux_dirent64 {
 #define DT_DIR      4
 #define DT_CHR      2
 #define DT_BLK      6
+#define DT_LNK      10
+
+/* at-style lookup flags (used by *at() syscalls) */
+#define AT_FDCWD              -100
+#define AT_SYMLINK_NOFOLLOW   0x100
 
 #endif /* _UAPI_STAT_H */

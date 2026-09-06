@@ -11,6 +11,35 @@
 static ext2_fs_t *ext2_selftest_fs;  // set by ext2_init, used by selftests
 #endif
 
+// ── Symlink fault injection (selftest only) ─────────────
+// ext2_symlink_fault_hit(f) is a compile-time 0 in normal builds, so every
+// injection point below folds back to the plain call with no added branch.
+#ifdef OS01_SELFTEST
+static enum ext2_symlink_test_fault ext2_symlink_fault = EXT2_SYMLINK_TEST_NONE;
+
+void ext2_symlink_test_set_fault(enum ext2_symlink_test_fault fault)
+{
+    ext2_symlink_fault = fault;
+}
+
+static int ext2_symlink_fault_hit(enum ext2_symlink_test_fault fault)
+{
+    return ext2_symlink_fault == fault;
+}
+#else
+void ext2_symlink_test_set_fault(enum ext2_symlink_test_fault fault)
+{
+    (void)fault;  // no-op outside KERNEL_SELFTEST builds
+}
+#define ext2_symlink_fault_hit(f)  0
+#endif
+
+// ── ext2 mode type bits (Linux ABI values, see man 2 stat) ─────
+// Defined locally because the public header only exposes EXT2_S_IFREG/IFDIR;
+// ext2_vfs_symlink/unlink both need the full type field mask.
+#define EXT2_S_IFMT         0xF000
+#define EXT2_S_IFLNK        0xA000
+
 // ── Helper: resolve node->fs_data to inode number ────────
 // Root mount node has fs_data=NULL (set by vfs_mount).
 // Subdirectory nodes have fs_data=(void*)(uintptr_t)ino.
@@ -797,6 +826,141 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_create(struct vfs_nod
     return node;
 }
 
+// ── VFS symlink (create) ───────────────────────────────
+// Creates a symlink named `name` in `parent` whose target is `target`.
+// Two on-disk forms:
+//   - Fast symlink (tlen ≤ 60): target lives inline in inode.i_block[0..59],
+//     i_blocks == 0, no data block allocated.
+//   - Long symlink (tlen > 60):  target lives in a single data block pointed
+//     to by i_block[0]; i_blocks == block_size/512.
+// Rollback (v5 fix): every I/O step that can fail (read_inode, write_block,
+// write_inode, dirent_add) frees the allocated inode and (if long) the
+// allocated target block before returning the error. find_dirent non-ENOENT
+// errors propagate without allocating anything.
+// Holds fs->lock throughout.
+static __attribute__((noinline)) int ext2_vfs_symlink(struct vfs_node *parent,
+                             const char *name, const char *target)
+{
+    if (!parent || !parent->mount || !name || !target) return -EINVAL;
+    ext2_fs_t *fs = (ext2_fs_t *)parent->mount->fs_data;
+
+    size_t tlen = strlen(target);
+    if (tlen == 0) return -EINVAL;  // POSIX: empty target is invalid
+
+    spin_lock(&fs->lock);
+
+    uint32_t parent_ino = ext2_node_ino(parent);
+
+    // 1) Reject if name already exists. ext2_find_dirent returns 0 on match,
+    //    -ENOENT when absent, or some other -errno on I/O / non-dir errors.
+    //    Only -ENOENT proceeds to allocation; everything else is propagated.
+    uint32_t existing_ino;
+    uint8_t  existing_ft;
+    uint32_t existing_blk, existing_off;
+    int find_rc = ext2_symlink_fault_hit(EXT2_SYMLINK_TEST_FIND_DIRENT)
+                      ? -EIO
+                      : ext2_find_dirent(fs, parent_ino, name,
+                                         &existing_ino, &existing_ft,
+                                         &existing_blk, &existing_off);
+    if (find_rc == 0) {
+        spin_unlock(&fs->lock);
+        return -EEXIST;
+    }
+    if (find_rc != -ENOENT) {
+        spin_unlock(&fs->lock);
+        return find_rc;  // -EIO / -ENOTDIR / -ENOMEM etc.
+    }
+
+    // 2) Allocate a new inode (mode = symlink | 0777). alloc_inode writes
+    //    the on-disk inode to zero-init + mode + links_count=1.
+    uint32_t ino = alloc_inode(fs, EXT2_S_IFLNK | 0777);
+    if (ino == 0) {
+        spin_unlock(&fs->lock);
+        return -ENOSPC;
+    }
+
+    // Track which long-symlink resources have been acquired so far, so each
+    // rollback path can free exactly what was allocated up to that point.
+    uint32_t target_blk = 0;   // 0 means "not allocated"
+    uint8_t *block_buf = NULL; // non-NULL only while we own target_blk
+
+    // 3) Initialize the inode: fast (inline in i_block) or long (data block).
+    ext2_inode_t inode;
+    int rc = ext2_symlink_fault_hit(EXT2_SYMLINK_TEST_READ_INODE)
+                 ? -EIO
+                 : ext2_read_inode(fs, ino, &inode);
+    if (rc != 0) {
+        free_inode(fs, ino);
+        spin_unlock(&fs->lock);
+        return -EIO;
+    }
+
+    inode.i_size = (uint32_t)tlen;
+    if (tlen <= 60) {
+        // ── Fast symlink ──
+        inode.i_blocks = 0;
+        memset(inode.i_block, 0, sizeof(inode.i_block));
+        memcpy(inode.i_block, target, tlen);
+    } else {
+        // ── Long symlink ──
+        target_blk = alloc_block(fs);
+        if (target_blk == 0) {
+            free_inode(fs, ino);
+            spin_unlock(&fs->lock);
+            return -ENOSPC;
+        }
+        inode.i_blocks = fs->block_size / 512;
+        inode.i_block[0] = target_blk;
+
+        block_buf = kmalloc(fs->block_size);
+        if (!block_buf) {
+            free_block(fs, target_blk);
+            free_inode(fs, ino);
+            spin_unlock(&fs->lock);
+            return -ENOMEM;
+        }
+        memcpy(block_buf, target, tlen);
+        memset(block_buf + tlen, 0, fs->block_size - tlen);
+
+        rc = ext2_symlink_fault_hit(EXT2_SYMLINK_TEST_WRITE_BLOCK)
+                 ? -EIO
+                 : ext2_write_block(fs, target_blk, block_buf);
+        if (rc != 0) {
+            kfree(block_buf);
+            free_block(fs, target_blk);
+            free_inode(fs, ino);
+            spin_unlock(&fs->lock);
+            return -EIO;
+        }
+        kfree(block_buf);
+        block_buf = NULL;
+    }
+
+    rc = ext2_symlink_fault_hit(EXT2_SYMLINK_TEST_WRITE_INODE)
+             ? -EIO
+             : ext2_write_inode(fs, ino, &inode);
+    if (rc != 0) {
+        if (inode.i_blocks > 0) free_block(fs, target_blk);
+        free_inode(fs, ino);
+        spin_unlock(&fs->lock);
+        return -EIO;
+    }
+
+    // 4) Link the inode into the parent directory.
+    rc = ext2_symlink_fault_hit(EXT2_SYMLINK_TEST_DIRENT_ADD)
+             ? -EIO
+             : dirent_add(fs, parent_ino, name, ino, EXT2_FT_SYMLINK);
+    if (rc != 0) {
+        if (inode.i_blocks > 0) free_block(fs, target_blk);
+        free_inode(fs, ino);
+        spin_unlock(&fs->lock);
+        return rc;
+    }
+
+    spin_unlock(&fs->lock);
+    return 0;
+}
+
 // ── VFS unlink (delete file) ────────────────────────────
 static __attribute__((noinline)) int ext2_vfs_unlink(struct vfs_node *dir, const char *name)
 {
@@ -823,29 +987,41 @@ static __attribute__((noinline)) int ext2_vfs_unlink(struct vfs_node *dir, const
 
     inode.i_links_count--;
     if (inode.i_links_count == 0) {
-        // Free all data blocks (direct + single indirect)
-        for (int i = 0; i < 12; i++) {
-            if (inode.i_block[i] != 0) {
-                free_block(fs, inode.i_block[i]);
-                inode.i_block[i] = 0;
+        // v5 fix: type-aware cleanup. Symlinks' i_block[] holds the target
+        // STRING, not block numbers; the generic loop would free random
+        // blocks (bitmap corruption) and double-free long-symlink data
+        // blocks.
+        if ((inode.i_mode & EXT2_S_IFMT) == EXT2_S_IFLNK) {
+            if (inode.i_blocks > 0) {
+                // Long symlink: i_block[0] is the target data block.
+                // Fast symlink (i_blocks == 0): i_block[] is target bytes;
+                // nothing to free.
+                free_block(fs, inode.i_block[0]);
             }
-        }
-        if (inode.i_block[12] != 0) {
-            uint32_t ptrs_per_block = fs->block_size / sizeof(uint32_t);
-            uint32_t *indirect = kmalloc(4096);
-            if (!indirect) { spin_unlock(&fs->lock); return -ENOMEM; }
-            if (ext2_read_block(fs, inode.i_block[12], indirect) != 0) {
-                kfree(indirect);
-                spin_unlock(&fs->lock); return -EIO;
-            }
-            for (uint32_t i = 0; i < ptrs_per_block; i++) {
-                if (indirect[i] != 0) {
-                    free_block(fs, indirect[i]);
+        } else {
+            // Regular file / directory: original 12-direct + single-indirect
+            // loop, unchanged.
+            for (int i = 0; i < 12; i++) {
+                if (inode.i_block[i] != 0) {
+                    free_block(fs, inode.i_block[i]);
+                    inode.i_block[i] = 0;
                 }
             }
-            kfree(indirect);
-            free_block(fs, inode.i_block[12]);
-            inode.i_block[12] = 0;
+            if (inode.i_block[12] != 0) {
+                uint32_t ptrs_per_block = fs->block_size / sizeof(uint32_t);
+                uint32_t *indirect = kmalloc(4096);
+                if (!indirect) { spin_unlock(&fs->lock); return -ENOMEM; }
+                if (ext2_read_block(fs, inode.i_block[12], indirect) != 0) {
+                    kfree(indirect);
+                    spin_unlock(&fs->lock); return -EIO;
+                }
+                for (uint32_t i = 0; i < ptrs_per_block; i++) {
+                    if (indirect[i] != 0) free_block(fs, indirect[i]);
+                }
+                kfree(indirect);
+                free_block(fs, inode.i_block[12]);
+                inode.i_block[12] = 0;
+            }
         }
         inode.i_blocks = 0;
         inode.i_size = 0;
@@ -1094,13 +1270,20 @@ static __attribute__((noinline)) int ext2_vfs_readdir(struct vfs_node *node, uin
                     entry->name[nlen] = '\0';
                     entry->ino  = de->inode;
                     entry->size = 0;
-                    entry->type = (de->file_type == 2) ? VFS_DIR : VFS_FILE;
+                    // ext2 dirent file_type identifies the on-disk entry kind.
+                    switch (de->file_type) {
+                        case EXT2_FT_DIR:     entry->type = VFS_DIR;     break;
+                        case EXT2_FT_SYMLINK: entry->type = VFS_SYMLINK; break;
+                        default:             entry->type = VFS_FILE;    break;
+                    }
 
-                    // ext2 dirent has no size field — read from inode
-                    if (entry->type == VFS_FILE) {
-                        ext2_inode_t finode;
-                        if (ext2_read_inode(fs, de->inode, &finode) == 0)
-                            entry->size = finode.i_size;
+                    // ext2 dirent has no size field — read from inode.
+                    // Populate for both FILE (rsize) and SYMLINK (target
+                    // length) so lstat reports correct st_size.
+                    if (entry->type == VFS_FILE || entry->type == VFS_SYMLINK) {
+                        ext2_inode_t _inode;
+                        if (ext2_read_inode(fs, de->inode, &_inode) == 0)
+                            entry->size = _inode.i_size;
                     }
                     kfree(block_data);
                     spin_unlock(&fs->lock);
@@ -1116,6 +1299,55 @@ static __attribute__((noinline)) int ext2_vfs_readdir(struct vfs_node *node, uin
     entry->name[0] = '\0';
     spin_unlock(&fs->lock);
     return 0;
+}
+
+// ── VFS readlink implementation ────────────────────────
+// Reads the symlink target into `buf`. Two storage forms:
+//   fast symlink (i_blocks == 0): target inline in i_block[0..59] (60 B max)
+//   long symlink (i_blocks > 0):  target lives in i_block[0]'s data block
+// Honors caller's bufsize — truncates silently (matches readlink(2)).
+// Holds fs->lock for the duration; returns -EINVAL/-EIO on error or tlen.
+static __attribute__((noinline)) int ext2_vfs_readlink(struct vfs_node *node, char *buf,
+                             size_t size)
+{
+    if (!node || !buf || size == 0) return -EINVAL;
+    if (!node->mount) return -EINVAL;
+    ext2_fs_t *fs = (ext2_fs_t *)node->mount->fs_data;
+
+    spin_lock(&fs->lock);
+
+    ext2_inode_t inode;
+    if (ext2_read_inode(fs, ext2_node_ino(node), &inode) != 0) {
+        spin_unlock(&fs->lock); return -EIO;
+    }
+
+    int rc;
+    if (inode.i_blocks == 0) {
+        // Fast symlink: target inline in i_block[0..59]
+        size_t tlen = inode.i_size;
+        if (tlen > sizeof(inode.i_block)) tlen = sizeof(inode.i_block);
+        if (tlen > size) tlen = size;
+        memcpy(buf, inode.i_block, tlen);
+        rc = (int)tlen;
+    } else {
+        // Long symlink: target in i_block[0]'s data block
+        uint32_t phys = inode.i_block[0];
+        if (phys == 0) { spin_unlock(&fs->lock); return -EIO; }
+
+        uint8_t *block_buf = kmalloc(fs->block_size);
+        if (!block_buf) { spin_unlock(&fs->lock); return -ENOMEM; }
+        if (ext2_read_block(fs, phys, block_buf) != 0) {
+            kfree(block_buf); spin_unlock(&fs->lock); return -EIO;
+        }
+        size_t tlen = inode.i_size;
+        if (tlen > fs->block_size) tlen = fs->block_size;
+        if (tlen > size) tlen = size;
+        memcpy(buf, block_buf, tlen);
+        kfree(block_buf);
+        rc = (int)tlen;
+    }
+    spin_unlock(&fs->lock);
+    return rc;
 }
 
 // ── VFS rename ──────────────────────────────────────────
@@ -1287,6 +1519,8 @@ struct vfs_ops ext2_vfs_ops = {
     .read    = ext2_vfs_read,
     .write   = ext2_vfs_write,
     .readdir = ext2_vfs_readdir,
+    .readlink = ext2_vfs_readlink,
+    .symlink  = ext2_vfs_symlink,
     .create  = ext2_vfs_create,
     .unlink  = ext2_vfs_unlink,
     .mkdir   = ext2_vfs_mkdir,

@@ -96,6 +96,10 @@ struct stat {
 #define W_OK  2
 #define X_OK  1
 
+/* at-style lookup flags (used by *at() syscalls) */
+#define AT_FDCWD              -100
+#define AT_SYMLINK_NOFOLLOW   0x100
+
 /* dirent types */
 #define DT_UNKNOWN  0
 #define DT_FIFO     1
@@ -136,6 +140,7 @@ struct linux_dirent64 {
 int    stat(const char *path, struct stat *buf);
 int    lstat(const char *path, struct stat *buf);
 int    fstat(int fd, struct stat *buf);
+int    fstatat(int dirfd, const char *path, struct stat *buf, int flags);
 int64_t lseek(int fd, int64_t offset, int whence);
 int    fcntl(int fd, int cmd, ...);
 int    ioctl(int fd, unsigned long request, ...);

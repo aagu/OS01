@@ -14,6 +14,16 @@
 #define EXT2_S_IFREG        0x8000
 #define EXT2_S_IFDIR        0x4000
 
+/* ext2 dirent file_type values (per ext2 on-disk spec) */
+#define EXT2_FT_UNKNOWN     0
+#define EXT2_FT_REG_FILE    1
+#define EXT2_FT_DIR         2
+#define EXT2_FT_CHRDEV      3
+#define EXT2_FT_BLKDEV      4
+#define EXT2_FT_FIFO        5
+#define EXT2_FT_SOCK        6
+#define EXT2_FT_SYMLINK     7
+
 // ── On-disk superblock (first 264 meaningful bytes of 1024-byte block) ──
 typedef struct __attribute__((packed)) {
     uint32_t s_inodes_count;
@@ -115,5 +125,22 @@ typedef struct {
 // ── API ────────────────────────────────────────────────
 int ext2_init(block_device_t *dev, ext2_fs_t **out_fs);
 extern struct vfs_ops ext2_vfs_ops;
+
+// ── Symlink fault injection (selftest only) ────────────
+// Declared unconditionally because kernel/test/symlink_selftest.c is
+// compiled in ordinary kernel builds too (kernel/Makefile globs test/*.c).
+// Only under KERNEL_SELFTEST=1 does the setter do anything and do the
+// ext2_vfs_symlink() I/O steps consult the selector; in normal builds the
+// setter is a no-op and every injection point folds away to the plain call.
+enum ext2_symlink_test_fault {
+    EXT2_SYMLINK_TEST_NONE,
+    EXT2_SYMLINK_TEST_FIND_DIRENT,
+    EXT2_SYMLINK_TEST_READ_INODE,
+    EXT2_SYMLINK_TEST_WRITE_BLOCK,
+    EXT2_SYMLINK_TEST_WRITE_INODE,
+    EXT2_SYMLINK_TEST_DIRENT_ADD,
+};
+
+void ext2_symlink_test_set_fault(enum ext2_symlink_test_fault fault);
 
 #endif

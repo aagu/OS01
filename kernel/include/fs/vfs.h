@@ -2,13 +2,24 @@
 #define _FS_VFS_H
 
 #include <stdint.h>
+#include <stddef.h>   // size_t
 #include <block/blockdev.h>
 #include <uapi/stat.h>
 
-#define VFS_FILE   1
-#define VFS_DIR    2
-#define VFS_CHRDEV 3   // character device
-#define VFS_BLKDEV 4   // block device
+typedef enum {
+    VFS_FILE    = 1,
+    VFS_DIR     = 2,
+    VFS_CHRDEV  = 3,
+    VFS_BLKDEV  = 4,
+    VFS_SYMLINK = 5,   // appended; never renumber existing values (spec §3.1, v5)
+} vfs_node_type_t;
+
+typedef enum {
+    LOOKUP_FOLLOW    = 0,
+    LOOKUP_NOFOLLOW  = 1,
+} lookup_flags_t;
+
+#define MAXSYMLINKS 8
 #define VFS_NAME_MAX 256
 
 // ── Forward declarations ──────────────────────────────────
@@ -60,6 +71,15 @@ typedef struct vfs_ops {
 #define mmap uint64_t*
 #undef VFS_MMAP_RESTORE
 #endif
+
+    // Create a symbolic link named `name` in `parent` whose target is
+    // `target`.  Returns 0 or -errno.
+    int (*symlink)(struct vfs_node *parent, const char *name,
+                   const char *target);
+
+    // Read the symlink target into `buf` (up to `size` bytes).
+    // Returns bytes written (excluding NUL) or -errno.
+    int (*readlink)(struct vfs_node *node, char *buf, size_t size);
 } vfs_ops_t;
 
 // ── A mounted filesystem instance ─────────────────────────
@@ -94,8 +114,6 @@ typedef struct vfs_node {
     uint32_t          refcount;
 } vfs_node_t;
 
-#include <stddef.h>   // size_t
-
 // ── VFS API ───────────────────────────────────────────────
 
 void vfs_init(void);
@@ -112,6 +130,15 @@ struct vfs_node *vfs_lookup(const char *path);
 // If path starts with '/', cwd is ignored.  If cwd is NULL,
 // only absolute paths are supported (same as vfs_lookup).
 struct vfs_node *vfs_lookup_from(const char *path, const char *cwd);
+
+// Symlink-aware lookup with mid-path + last-component follow loop.
+// Returns 0 on success (*out_node refcount++) or -errno on failure.
+// Honors dirfd: AT_FDCWD for current cwd, or any other (currently -EBADF).
+// flags: LOOKUP_FOLLOW (default) follows symlinks at any depth;
+//        LOOKUP_NOFOLLOW only blocks the LAST component (mid-path symlinks
+//        are still followed, per POSIX semantics).
+int vfs_lookup_at(int dirfd, const char *path, lookup_flags_t flags,
+                  vfs_node_t **out_node);
 
 // Read from a file
 int vfs_read(struct vfs_node *node, uint64_t offset,
@@ -156,6 +183,16 @@ int vfs_rmdir(const char *path, const char *cwd);
 
 // Rename oldpath to newpath.  Returns 0 or -errno.
 int vfs_rename(const char *oldpath, const char *newpath, const char *cwd);
+
+// Split a path into parent directory path and base name.
+// Given "/foo/bar/baz", sets parent_path to "/foo/bar" and returns "baz".
+// Given "/file", sets parent_path to "/" and returns "file".
+// Given "file" (no slash), uses cwd as parent and returns "file".
+// Returns pointer into parent_path, or NULL on error.  parent_path must
+// be at least VFS_NAME_MAX bytes.  Exported (T6): sys_symlink (T7) uses
+// it for relative linkpath handling.
+const char *vfs_split_parent(const char *path, const char *cwd,
+                             char parent_path[VFS_NAME_MAX]);
 
 // Truncate a file node to a new size.  Returns 0 or -errno.
 int vfs_truncate(vfs_node_t *node, uint64_t new_size);
