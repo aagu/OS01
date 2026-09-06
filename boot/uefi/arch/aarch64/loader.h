@@ -3,9 +3,19 @@
 
 #include <stdint.h>
 
+/* boot/uefi has no -Ikernel/include, so include the shared handoff
+ * layout via a relative path that resolves from this header's location. */
+#include "../../../../kernel/include/kernel/arch/aarch64/handoff_layout.h"
+
 #define AARCH64_KERNEL_ENTRY       UINT64_C(0x40080000)
-#define AARCH64_HANDOFF_BASE       UINT64_C(0x401e0000)
 #define AARCH64_PAGE_SIZE          UINT64_C(0x1000)
+
+/* The trampoline page must sit one page below the handoff window's end.
+ * A drift between the shared header's literal and this derived invariant
+ * is a layout bug that bricks the BSP jump — lock them at compile time. */
+_Static_assert(AARCH64_TRAMPOLINE_BASE ==
+               (AARCH64_HANDOFF_END - AARCH64_PAGE_SIZE),
+               "AARCH64_TRAMPOLINE_BASE drifted from handoff end - page size");
 
 #define AARCH64_EI_MAG0            0
 #define AARCH64_EI_MAG1            1

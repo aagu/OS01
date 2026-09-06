@@ -74,6 +74,19 @@ endif
 
 UEFI_EFI_ARTIFACT := $(BUILD_DIR)/artifacts/uefi/$(UEFI_TARGET_EFI)
 
+# Receipt-digest input set: the SRCS the inner make compiles, the
+# per-arch dispatch header, the shared boot_context ABI header, and
+# (for aarch64) the shared handoff layout that the AArch64 loader
+# pulls in via a relative path. Keep every x86 input present and add
+# the AArch64-only header inside the family conditional so a header-
+# only layout change still re-keys both the staged runtime receipt
+# and the EFI artifact.
+UEFI_BOOT_INPUTS := $(UEFI_BOOT_SRCS) boot/uefi/arch/arch.h \
+                    kernel/include/kernel/bootinfo.h
+ifeq ($(UEFI_ARCH_FAMILY),aarch64)
+UEFI_BOOT_INPUTS += kernel/include/kernel/arch/aarch64/handoff_layout.h
+endif
+
 # ── Runtime adapter (FORCE: digest-gated, always checks) ──────────
 # ONE shell line: verify submodule initialized + HEAD == gitlink + worktree
 # pristine; compute the canonical input digest (submodule path, gitlink SHA,
@@ -118,7 +131,7 @@ $(UEFI_RUNTIME_STAMP): FORCE
 	      printf "profile: %s %s\n" "$(PROFILE)" "$(BUILD_DIR)"; \
 	      printf "uefi-clang: %s\n" "$$($(UEFI_DIGEST_CLANG) --version 2>/dev/null | head -1)"; \
 	      find thirdpart/posix-uefi -type f ! -path "thirdpart/posix-uefi/.git*" -exec stat -c "%y %n" {} + 2>/dev/null | sort; \
-	      sha256sum $(UEFI_BOOT_SRCS); \
+	      sha256sum $(UEFI_BOOT_INPUTS); \
 	    } | sha256sum | cut -d" " -f1 ); \
 	    old=""; \
 	    if [ -f "$(UEFI_RUNTIME_RECEIPT)" ]; then old=$$(cat "$(UEFI_RUNTIME_RECEIPT)"); fi; \
@@ -146,7 +159,7 @@ $(UEFI_RUNTIME_STAMP): FORCE
 # rebuild on a no-op run. boot/uefi/Makefile compiles against the staged
 # $(UEFI_RUNTIME_DIR); the artifact copy is content-guarded.
 $(UEFI_EFI_ARTIFACT): $(UEFI_RUNTIME_STAMP) boot/uefi/Makefile \
-		$(UEFI_BOOT_SRCS) boot/uefi/arch/arch.h kernel/include/kernel/bootinfo.h
+		$(UEFI_BOOT_INPUTS)
 	@mkdir -p $(dir $@)
 	@$(call os01_submake,boot/uefi,ARCH=$(UEFI_ARCH_FAMILY) \
 	  UEFI_RUNTIME_STAMP=$(UEFI_RUNTIME_STAMP) \

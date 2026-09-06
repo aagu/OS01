@@ -17,11 +17,11 @@
 #define PL011_FR          0x18U
 #define PL011_FR_TXFF     (1U << 5)
 
-#define AARCH64_HANDOFF_END        UINT64_C(0x40200000)
+/* AARCH64_HANDOFF_BASE / AARCH64_HANDOFF_END / AARCH64_TRAMPOLINE_BASE
+ * come from the shared handoff_layout.h (via loader.h). The derived
+ * page counts stay local since they depend on AARCH64_PAGE_SIZE. */
 #define AARCH64_HANDOFF_PAGES      ((AARCH64_HANDOFF_END - \
                                      AARCH64_HANDOFF_BASE) / \
-                                    AARCH64_PAGE_SIZE)
-#define AARCH64_TRAMPOLINE_BASE    (AARCH64_HANDOFF_END - \
                                     AARCH64_PAGE_SIZE)
 #define AARCH64_HANDOFF_DATA_PAGES (AARCH64_HANDOFF_PAGES - 1)
 #define AARCH64_FDT_MAGIC          UINT32_C(0xd00dfeed)
