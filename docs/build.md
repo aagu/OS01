@@ -13,7 +13,7 @@
 | Profile | 能力 | 产物 |
 | --- | --- | --- |
 | `x86_64-clang`（默认） | `kernel userland rootfs uefi` | `kernel.bin`、用户 ELF + BusyBox、`image/disk.img`、BOOTX64.EFI |
-| `aarch64-clang` | `kernel uefi-bringup` | `kernel.elf`、BOOTAA64.EFI、64 MiB FAT `image/aarch64-uefi.img` |
+| `aarch64-clang` | `kernel uefi` | `kernel.elf`、BOOTAA64.EFI、64 MiB FAT `image/aarch64-uefi.img` |
 
 **能力契约**：每个入口 target 都是能力感知的。在缺少对应能力的 profile 上执行会立即失败（解析期报错，不会等到编译）：
 
@@ -23,7 +23,7 @@ make: *** PROFILE='aarch64-clang' lacks capability 'rootfs'.  Stop.
 ```
 
 - `run` / `run-kvm` / `run-virtio` / `debug` / `test-*`（x86 E2E）需要 `rootfs`。
-- `aarch64-uefi` / `aarch64-uefi-kernel` / `run-aarch64-uefi` 需要 `uefi-bringup`。
+- `aarch64-uefi` / `aarch64-uefi-kernel` / `run-aarch64-uefi` 需要 `uefi`。
 - `lib` / `user` 需要 `userland`。
 - `validate`（x86 内核 + UEFI 产物检查）与 `make test`（宿主测试）不依赖 rootfs。
 

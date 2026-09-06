@@ -83,7 +83,7 @@ $ make PROFILE=aarch64-clang run
 Makefile:...: *** PROFILE='aarch64-clang' lacks capability 'rootfs'.  Stop.
 
 $ make PROFILE=x86_64-clang aarch64-uefi
-mk/components/run.mk:...: *** PROFILE='x86_64-clang' lacks capability 'uefi-bringup'.  Stop.
+mk/components/run.mk:...: *** PROFILE='x86_64-clang' lacks capability 'uefi'.  Stop.
 ```
 
 `make validate` also prints the resolved profile identity:

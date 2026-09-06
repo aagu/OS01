@@ -101,23 +101,31 @@ debug: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRM
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio
 
-# ── aarch64 UEFI bring-up (uefi-bringup capability) ────────────
+# ── aarch64 UEFI bring-up (uefi capability) ────────────
 # Targets are always defined so `make aarch64-uefi` under the default x86
-# profile fails at the capability gate (not "no rule to make target"); the
-# artifact prereqs exist only for uefi-bringup profiles (aarch64-clang). The
-# kernel artifact + image rules live in mk/components/image.mk; there is no
-# `lib` dependency — aarch64 does not consume the sysroot.
+# profile fails at the capability gate (not "no rule to make target");
+# the aarch64-only AARCH64_UEFI_* variables are empty under x86, so the
+# guard inside `require_capability aarch64-only` errors out cleanly. The
+# kernel artifact + image rules live in mk/components/image.mk; there is
+# no `lib` dependency — aarch64 does not consume the sysroot.
+define require_aarch64_uefi
+$(if $(AARCH64_UEFI_DISK),,$(error ERROR: aarch64-uefi targets require the aarch64-clang profile (AARCH64_UEFI_DISK is empty)))
+endef
+
 .PHONY: aarch64-uefi
-aarch64-uefi: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES)),$(AARCH64_UEFI_DISK) $(AARCH64_UEFI_FIRMWARE))
-	$(call require_capability,uefi-bringup)
+aarch64-uefi: $(AARCH64_UEFI_DISK) $(AARCH64_UEFI_FIRMWARE)
+	$(call require_aarch64_uefi)
+	$(call require_capability,uefi)
 
 .PHONY: aarch64-uefi-kernel
-aarch64-uefi-kernel: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES)),$(BUILD_DIR)/artifacts/kernel.elf)
-	$(call require_capability,uefi-bringup)
+aarch64-uefi-kernel: $(BUILD_DIR)/artifacts/kernel.elf
+	$(call require_aarch64_uefi)
+	$(call require_capability,uefi)
 
 .PHONY: run-aarch64-uefi
-run-aarch64-uefi: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES)),aarch64-uefi)
-	$(call require_capability,uefi-bringup)
+run-aarch64-uefi: aarch64-uefi
+	$(call require_aarch64_uefi)
+	$(call require_capability,uefi)
 	@set -e; \
 	case "$(AARCH64_UEFI_SMP_DIAGNOSTIC_DTB)" in \
 	0) extra_dtb= ;; \
@@ -151,8 +159,9 @@ run-aarch64-uefi: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES)),aarch64-ue
 # per case and pass it via `-dtb` (with `acpi=off`). Set
 # AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0 to require the production firmware path.
 .PHONY: test-aarch64-uefi-smp
-test-aarch64-uefi-smp: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES)),aarch64-uefi)
-	$(call require_capability,uefi-bringup)
+test-aarch64-uefi-smp: aarch64-uefi
+	$(call require_aarch64_uefi)
+	$(call require_capability,uefi)
 	python3 tests/aarch64_uefi_smp.py \
 	  --cpus 1 2 4 --repeat 3 --timeout 90 \
 	  $(if $(filter 0,$(AARCH64_UEFI_SMP_DIAGNOSTIC_DTB)),,--diagnostic-dtb=auto) \
@@ -171,7 +180,8 @@ test-aarch64-uefi-smp: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES)),aarch
 # Then run a normal two-core recovery case with the rebuilt image paths.
 .PHONY: test-aarch64-uefi-smp-no-ack
 test-aarch64-uefi-smp-no-ack:
-	$(call require_capability,uefi-bringup)
+	$(call require_aarch64_uefi)
+	$(call require_capability,uefi)
 	$(if $(and $(filter 1,$(words $(AARCH64_SMP_TEST_NO_ACK_CPU))),$(filter 1,$(AARCH64_SMP_TEST_NO_ACK_CPU))),,$(error AARCH64_SMP_TEST_NO_ACK_CPU must be 1; clean and build the injected image first))
 	@test "$(AARCH64_SMP_TEST_NO_ACK_CPU)" = 1
 	@test -f "$(AARCH64_UEFI_DISK)" -a -f "$(AARCH64_UEFI_FIRMWARE)" || { echo 'Build the injected aarch64-uefi image first' >&2; exit 1; }
@@ -187,7 +197,7 @@ test-aarch64-uefi-smp-no-ack:
 # undefined symbols / INTERP / DYNAMIC, is EM_X86_64, exports _start /
 # kernel_main / _text; the EFI app has a parseable COFF export table) and
 # prints the selected profile's identity. x86-only: gated on the `uefi`
-# capability (x86_64-clang has it; aarch64-clang has uefi-bringup) so an
+# capability (x86_64-clang has it; aarch64-clang has uefi) so an
 # incapable profile gets the clean capability error instead of cryptic
 # empty-LLVM_* failures.
 .PHONY: validate validate-kernel validate-uefi validate-profile
@@ -199,8 +209,8 @@ validate-kernel: $(if $(filter uefi,$(PROFILE_CAPABILITIES)),kernel.bin)
 	@test -z "$$($(LLVM_NM) --undefined-only $(KERNEL_ELF))"
 	@echo "  [validate] kernel.elf has no INTERP/DYNAMIC program headers"
 	@! $(LLVM_READELF) -Wl $(KERNEL_ELF) | grep -E 'INTERP|DYNAMIC'
-	@echo "  [validate] kernel.elf machine is EM_X86_64"
-	@$(LLVM_READOBJ) --file-headers $(KERNEL_ELF) | grep -F 'EM_X86_64'
+	@echo "  [validate] kernel.elf machine is $(RUNTIME_MACHINE_kernel)"
+	@$(LLVM_READOBJ) --file-headers $(KERNEL_ELF) | grep -F '$(RUNTIME_MACHINE_kernel)'
 	@echo "  [validate] GLOBAL _start present"
 	@$(LLVM_READELF) -Ws $(KERNEL_ELF) | grep -E 'GLOBAL.*\b_start\b'
 	@echo "  [validate] GLOBAL kernel_main present"
@@ -380,7 +390,7 @@ print-run-paths:
 # capability each one needs under the active profile. Works for any profile
 # (no capability gate): the categories shown are the same, and the per-target
 # capability badge is evaluated against the active profile's
-# PROFILE_CAPABILITIES, so a user on aarch64-clang sees (uefi-bringup) badges
+# PROFILE_CAPABILITIES, so a user on aarch64-clang sees (uefi) badges
 # on aarch64 targets and "n/a (active profile lacks <cap>)" on x86-only ones
 # instead of a hard error. AGENTS.md Quick start and the docs are the canonical
 # recipes; this is the discoverability surface for `make` itself.
@@ -415,17 +425,17 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'print-run-paths'   '(rootfs)'     'Print absolute firmware + image paths';
 	@echo ''
-	@echo 'aarch64 UEFI bring-up (uefi-bringup):'
+	@echo 'aarch64 UEFI bring-up (uefi):'
 	@printf '  %-22s %-13s %s\n' \
-		 'aarch64-uefi'           '(uefi-bringup)' 'Build aarch64 disk + firmware';
+		 'aarch64-uefi'           '(uefi)' 'Build aarch64 disk + firmware';
 	@printf '  %-22s %-13s %s\n' \
-		 'aarch64-uefi-kernel'    '(uefi-bringup)' 'Build aarch64 kernel.elf only';
+		 'aarch64-uefi-kernel'    '(uefi)' 'Build aarch64 kernel.elf only';
 	@printf '  %-22s %-13s %s\n' \
-		 'run-aarch64-uefi'       '(uefi-bringup)' 'QEMU virt + cortex-a53 + virtio-blk (override SMP with SMP=N; AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0 to skip auto DTB)';
+		 'run-aarch64-uefi'       '(uefi)' 'QEMU virt + cortex-a53 + virtio-blk (override SMP with SMP=N; AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0 to skip auto DTB)';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-aarch64-uefi-smp'  '(uefi-bringup)' 'QEMU 1/2/4 PSCI SMP ×3 with PASS/DEGRADED evidence';
+		 'test-aarch64-uefi-smp'  '(uefi)' 'QEMU 1/2/4 PSCI SMP ×3 with PASS/DEGRADED evidence';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-aarch64-uefi-smp-no-ack' '(uefi-bringup)' 'Consumes prebuilt AARCH64_SMP_TEST_NO_ACK_CPU=1 image for DEGRADED recovery';
+		 'test-aarch64-uefi-smp-no-ack' '(uefi)' 'Consumes prebuilt AARCH64_SMP_TEST_NO_ACK_CPU=1 image for DEGRADED recovery';
 	@echo ''
 	@echo 'Validation (x86 uefi):'
 	@printf '  %-22s %-13s %s\n' \
@@ -457,7 +467,7 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'test-build-contract-x86'      '(rootfs)'      'x86_64-clang full contract (7 modes)';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-build-contract-aarch64'  '(uefi-bringup)' 'aarch64-clang full contract';
+		 'test-build-contract-aarch64'  '(uefi)' 'aarch64-clang full contract';
 	@echo ''
 	@echo 'Maintenance:'
 	@printf '  %-22s %-13s %s\n' \
@@ -497,8 +507,9 @@ test-build-contract-x86: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),disk.img)
 	sh tests/build_contract.sh x86_64-clang host-test
 
 .PHONY: test-build-contract-aarch64
-test-build-contract-aarch64: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES)),aarch64-uefi)
-	$(call require_capability,uefi-bringup)
+test-build-contract-aarch64: aarch64-uefi
+	$(call require_aarch64_uefi)
+	$(call require_capability,uefi)
 	sh tests/build_contract.sh aarch64-clang aarch64
 	sh tests/build_contract.sh aarch64-clang targets
 

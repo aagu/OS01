@@ -153,7 +153,7 @@ Runs `qemu-system-aarch64 -M virt -display none -serial stdio` with the
 signatures on serial: `aarch64 uefi handoff ok`, then `phase1 boot ok`.
 `make PROFILE=aarch64-clang aarch64-uefi` builds the image + firmware;
 `aarch64-uefi-kernel` builds the kernel ELF. All three require the
-`uefi-bringup` capability (they fail cleanly under the x86 profile).
+`uefi` capability (they fail cleanly under the x86 profile).
 
 ## Tests
 

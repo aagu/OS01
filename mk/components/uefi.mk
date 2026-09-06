@@ -14,10 +14,14 @@
 # keep separate per-profile runtime copies (never shared); the inner build
 # stays -j1 (the G6 serial constraint lives inside the adapter).
 #
-# Only profiles that declare `uefi` (x86_64) or `uefi-bringup` (aarch64) own
-# these rules.
+# Only profiles that declare `uefi` (x86_64 and aarch64) own these
+# rules. The `uefi` capability covers both architectures' UEFI needs
+# (x86_64 with full rootfs; aarch64 with a 64 MiB bring-up FAT). The
+# per-arch UEFI boot sources and EFI target names are picked below
+# from the cap-x86 sub-branch; the aarch64 branch falls through and
+# selects aarch64 sources by elimination.
 
-ifeq ($(filter uefi uefi-bringup,$(PROFILE_CAPABILITIES)),)
+ifeq ($(filter uefi,$(PROFILE_CAPABILITIES)),)
 # No UEFI capability: nothing to define.
 else
 

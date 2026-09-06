@@ -3,9 +3,12 @@
 # (spec: component boundary). The x86 disk image is built from the
 # version-controlled rootfs manifest (config/rootfs.mk) into a fresh staging
 # tree ($(ROOTFS_STAGING)); mkdisk then fills a GPT dual-partition image from
-# the generated file/symlink manifest. The aarch64 bring-up image
-# (uefi-bringup capability) is a plain 64 MiB FAT carrying exactly
-# BOOTAA64.EFI + kernel.elf + firmware — no BusyBox/mbedTLS/user/rootfs.
+# the generated file/symlink manifest. The aarch64 bring-up image (uefi
+# capability) is a plain 64 MiB FAT carrying exactly BOOTAA64.EFI +
+# kernel.elf + firmware — no BusyBox/mbedTLS/user/rootfs. AARCH64_UEFI_DISK
+# is defined only by mk/targets/aarch64.mk (aarch64-clang profile), so the
+# `ifdef AARCH64_UEFI_DISK` gates below keep aarch64-only rules out of
+# x86_64-clang now that both profiles share the `uefi` capability.
 
 # ── Host mkdisk binary (profile-private: build/<profile>/host-tools) ──
 HOST_MKDISK := $(BUILD_DIR)/host-tools/mkdisk
@@ -89,7 +92,7 @@ endif
 
 endif
 
-ifeq ($(filter uefi-bringup,$(PROFILE_CAPABILITIES)),uefi-bringup)
+ifdef AARCH64_UEFI_DISK
 
 # ── aarch64 kernel artifact ─────────────────────────────────
 # No sysroot, no lease, no `lib` dependency: aarch64 does not consume the
@@ -106,11 +109,11 @@ $(BUILD_DIR)/artifacts/kernel.elf: FORCE
 #   path (content-guarded copy). Every other value is rejected with a clear
 #   error before any download/copy, so a missing or misspelled source
 #   never reaches QEMU and never leaves a half-written file (and never
-#   reaches the mv). Capability-gated on uefi-bringup: the aarch64-only
+#   reaches the mv). Capability-gated on uefi: the aarch64-only
 #   AARCH64_UEFI_FIRMWARE variable is undefined for x86_64-clang, so
 #   without the guard this rule expands to an empty-target rule with a
 #   recipe — a make-version-sensitive parse hazard.
-ifeq ($(filter uefi-bringup,$(PROFILE_CAPABILITIES)),uefi-bringup)
+ifdef AARCH64_UEFI_DISK
 $(AARCH64_UEFI_FIRMWARE):
 	@set -e; \
 	mkdir -p "$(dir $@)"; \

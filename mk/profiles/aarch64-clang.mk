@@ -3,7 +3,7 @@
 # capabilities are declared: it must not depend on libc, mbedTLS,
 # BusyBox, a general rootfs, or the x86 test targets.
 
-PROFILE_CAPABILITIES := kernel uefi-bringup
+PROFILE_CAPABILITIES := kernel uefi
 
 # Source root (repo root) — recomputed here so the profile can also be
 # included directly by component Makefiles (via OS01_PROFILE_FILE) without
@@ -26,6 +26,7 @@ USER_VARIANT ?= $(if $(filter 1,$(OS01_SYSTEST)),systest)
 USER_BUILD_DIR := $(BUILD_DIR)/user
 UEFI_BUILD_DIR := $(BUILD_DIR)/uefi
 UEFI_RUNTIME_DIR := $(BUILD_DIR)/uefi-runtime
+UEFI_EFI   ?= $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI
 # Host unit tests are an OS01 build: every test object/binary lives under
 # the profile's host-test dir (test/Makefile includes this profile).
 HOST_TEST_BUILD_DIR := $(BUILD_DIR)/host-test
@@ -55,6 +56,7 @@ TARGET_AR      ?= llvm-ar
 OBJ_CPY        ?= llvm-objcopy
 AARCH64_QEMU   ?= qemu-system-aarch64
 AARCH64_UEFI_FIRMWARE_SOURCE ?= https://retrage.github.io/edk2-nightly/bin/RELEASEAARCH64_QEMU_EFI.fd
+RUNTIME_MACHINE_kernel := EM_AARCH64
 
 # aarch64 link / UEFI / run parameters.
 include $(OS01_ROOT)/mk/targets/aarch64.mk
