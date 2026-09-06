@@ -127,8 +127,8 @@
 | `kernel/sched/task.c` | `sys_exec` 改走 `vfs_lookup_at` |
 | `kernel/arch/x86_64/trap.c` | 新 syscall case/用户指针处理；现有 `SYS_stat`/`SYS_open`/`SYS_chdir` 改走 `vfs_lookup_at`；Linux ABI 表补映射；扩 `syscall_names` 至 75 |
 | `kernel/include/uapi/syscall.h` | 追加 71..74 的内核权威 syscall 常量 |
-| `libc/include/sys/syscall.h` | `SYS_symlink=71` 等 4 个宏；`AT_FDCWD=-100`、`AT_SYMLINK_NOFOLLOW=0x100`；新增 `syscall3()` (= 现有 3-arg `syscall()` 别名) 与 `syscall4()`（r10 ABI） |
-| `libc/include/sys/stat.h` | `lstat` / `fstatat` 声明 + `AT_*` 常量 |
+| `libc/include/sys/syscall.h` | `SYS_symlink=71` 等 4 个宏；新增 `syscall3()` (= 现有 3-arg `syscall()` 别名) 与 `syscall4()`（r10 ABI） |
+| `libc/include/sys/stat.h` | `lstat` / `fstatat` 声明 + `AT_FDCWD=-100` + `AT_SYMLINK_NOFOLLOW=0x100` |
 | `libc/unistd/symlink.c`、`readlink.c` | 替换 stub 为真实现 |
 | `libc/sys/stat/lstat.c`、`fstatat.c` | 新建 |
 | `test/cases/test_vfs_symlink.c` | 新建——42 个 case（§6） |

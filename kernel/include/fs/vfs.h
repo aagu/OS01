@@ -14,6 +14,12 @@ typedef enum {
     VFS_SYMLINK = 5,   // appended; never renumber existing values (spec §3.1, v5)
 } vfs_node_type_t;
 
+// vfs_node_t.type and vfs_dirent_t.type are stored as uint8_t to keep the
+// struct small and match the on-disk ext2 dirent file_type width. Lock the
+// enum to uint8_t range so adding a new node type that doesn't fit is a
+// build break (caught here, not at runtime as a -EIO from a readdir).
+_Static_assert(VFS_SYMLINK <= 0xFF, "vfs_node_type_t does not fit in uint8_t");
+
 typedef enum {
     LOOKUP_FOLLOW    = 0,
     LOOKUP_NOFOLLOW  = 1,
