@@ -141,6 +141,7 @@ int main(void)
                                    0u, &out);
         if (check(rc == AARCH64_RAM_ERR_ARGUMENT)) return 1;
         if (check(out.count == 0u)) return 1;
+        if (check(out_is_zero(&out))) return 1;
     }
 
     {
@@ -156,6 +157,7 @@ int main(void)
                                    0u, &out);
         if (check(rc == AARCH64_RAM_ERR_GEOMETRY)) return 2;
         if (check(out.count == 0u)) return 2;
+        if (check(out_is_zero(&out))) return 2;
     }
 
     {
@@ -170,6 +172,7 @@ int main(void)
                                    0u, &out);
         if (check(rc == AARCH64_RAM_ERR_FORMAT)) return 3;
         if (check(out.count == 0u)) return 3;
+        if (check(out_is_zero(&out))) return 3;
     }
 
     {
@@ -185,6 +188,7 @@ int main(void)
                                    0u, &out);
         if (check(rc == AARCH64_RAM_ERR_VERSION)) return 4;
         if (check(out.count == 0u)) return 4;
+        if (check(out_is_zero(&out))) return 4;
     }
 
     {
@@ -200,6 +204,7 @@ int main(void)
                                    1u, &out);
         if (check(rc == AARCH64_RAM_ERR_ARGUMENT)) return 5;
         if (check(out.count == 0u)) return 5;
+        if (check(out_is_zero(&out))) return 5;
     }
 
     {
@@ -215,6 +220,7 @@ int main(void)
                                    1u, &bad, 1u, &out);
         if (check(rc == AARCH64_RAM_ERR_ARGUMENT)) return 6;
         if (check(out.count == 0u)) return 6;
+        if (check(out_is_zero(&out))) return 6;
     }
 
     {
@@ -453,6 +459,31 @@ int main(void)
         if (check(invariants_ok(&out,
                                 (const struct aarch64_ram_interval *)0, 0u)))
             return 15;
+    }
+
+    {
+        /* Case 16: exclude_count >= RAM_FRAG_SCRATCH_MAX →
+         * ERR_ARGUMENT. The normalizer's fragment-scratch buffer is
+         * bounded at RAM_FRAG_SCRATCH_MAX (8); a larger exclude
+         * list would silently overflow the buffer and violate the
+         * spec's O(1)-scratch contract. The cap must fail closed. */
+        struct aarch64_ram_interval excl[RAM_FRAG_SCRATCH_MAX];
+        uint8_t buf[32];
+        struct aarch64_ram_map out;
+        uint32_t i;
+        int rc;
+        for (i = 0u; i < RAM_FRAG_SCRATCH_MAX; ++i) {
+            excl[i].start = (uint64_t)i * M2;
+            excl[i].end   = excl[i].start + M2;
+        }
+        memset(&out, 0xAA, sizeof(out));
+        make_descriptor(buf, 32u, AARCH64_EFI_CONVENTIONAL_MEMORY,
+                        UINT64_C(0), (100u * M2) / M4);
+        rc = aarch64_ram_normalize(buf, 1u, 32u,
+                                   (uint32_t)BOOT_MEMORY_FORMAT_UEFI_RAW,
+                                   1u, excl, RAM_FRAG_SCRATCH_MAX, &out);
+        if (check(rc == AARCH64_RAM_ERR_ARGUMENT)) return 16;
+        if (check(out_is_zero(&out))) return 16;
     }
 
     return 0;

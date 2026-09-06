@@ -68,12 +68,6 @@
  * fragment with start == UINT64_MAX would be empty (end must be
  * > start). */
 #define RAM_NO_CANDIDATE    (UINT64_C(0) - UINT64_C(1))
-/* Per-descriptor scratch cap for exclusion subtraction. After k
- * exclusions a `[start, end)` interval splits into at most k + 1
- * surviving fragments; the kernel hands the normalizer exactly two
- * exclusions (kernel image + handoff allocation), so 8 is comfortable
- * headroom. */
-#define RAM_FRAG_SCRATCH_MAX 8u
 
 /* ── Tiny helpers ────────────────────────────────────────────── */
 static void zero_bytes(void *buffer, size_t size)
@@ -140,9 +134,10 @@ typedef void (*fragment_cb)(uint64_t start, uint64_t end, void *ctx);
  * inward and emitted via the callback.
  *
  * The scratch holds at most `RAM_FRAG_SCRATCH_MAX` intervals. The
- * spec promises the kernel hands the normalizer exactly two
- * exclusions (kernel image + handoff allocation), so this cap is
- * comfortable headroom. */
+ * public validation block rejects any call whose `exclude_count`
+ * reaches the cap, so this buffer is the strict upper bound. The
+ * kernel hands the normalizer exactly two exclusions (kernel image
+ * + handoff allocation); 8 is comfortable headroom. */
 static void emit_aligned_fragments(uint64_t d_s, uint64_t d_e,
                                    const struct aarch64_ram_interval *exclude,
                                    uint32_t exclude_count,
@@ -318,8 +313,10 @@ int aarch64_ram_normalize(const uint8_t *bytes, uint32_t entry_count,
         zero_bytes(out, sizeof(*out));
         return AARCH64_RAM_ERR_VERSION;
     }
-    if (bytes == (const uint8_t *)0 || out == (struct aarch64_ram_map *)0)
+    if (bytes == (const uint8_t *)0 || out == (struct aarch64_ram_map *)0) {
+        zero_bytes(out, sizeof(*out));
         return AARCH64_RAM_ERR_ARGUMENT;
+    }
     if (exclude_count > 0u
         && exclude == (const struct aarch64_ram_interval *)0) {
         zero_bytes(out, sizeof(*out));
@@ -330,6 +327,14 @@ int aarch64_ram_normalize(const uint8_t *bytes, uint32_t entry_count,
             zero_bytes(out, sizeof(*out));
             return AARCH64_RAM_ERR_ARGUMENT;
         }
+    }
+    /* Enforce the exclusion-count cap before any work. The internal
+     * fragment scratch buffer is sized to RAM_FRAG_SCRATCH_MAX; with
+     * more exclusions the subtraction would silently drop overflow
+     * fragments and violate the spec's O(1)-scratch contract. */
+    if (exclude_count >= RAM_FRAG_SCRATCH_MAX) {
+        zero_bytes(out, sizeof(*out));
+        return AARCH64_RAM_ERR_ARGUMENT;
     }
     /* entry_count * entry_size overflow check. Both fit in u32; the
      * product must fit in u64. */

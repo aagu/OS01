@@ -50,6 +50,13 @@
  * page-table walker recognises on the bring-up path. */
 #define AARCH64_RAM_GRANULE                  (UINT64_C(1) << 21)
 
+/* Maximum number of exclusion intervals the normalizer accepts in a
+ * single call. The internal `emit_aligned_fragments()` keeps a fixed
+ * stack scratch array sized to this cap; rejecting the call here keeps
+ * the spec's O(1)-scratch contract honest by failing closed instead of
+ * silently truncating overflow exclusions. */
+#define RAM_FRAG_SCRATCH_MAX                 8u
+
 /* Distinct error codes for `aarch64_ram_normalize()` and
  * `aarch64_ram_publish_once()`. Each maps to one concrete failure
  * mode so the boot caller can log the right reason. They are
