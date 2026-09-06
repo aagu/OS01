@@ -53,13 +53,12 @@ typedef struct {
     const char *target;   // symlinks only
 } fake_ent_t;
 
-// NOTE: every target below is ABSOLUTE.  __vfs_lookup_raw() builds `consumed`
-// from the mount-relative walk, so for a non-root mount it omits the mount
-// prefix ("/midlink" rather than "/symlink-selftest/midlink"); a relative
-// target would then be spliced against the wrong directory and resolve in the
-// root mount instead.  See the T11 report — that is a resolver defect, not a
-// property this test wants to bake in, so the fake tree sidesteps it by using
-// absolute targets, which splice_symlink_path() handles without `consumed`.
+// NOTE: most targets below are absolute.  FAKE_RELLINK deliberately uses a
+// relative target ("dir/target") so the sub-mount relative-resolution
+// selftest at the bottom of symlink_selftest_resolver() exercises the
+// __vfs_lookup_raw() fix that seeds consumed with mp->path — without that
+// fix, splice_symlink_path() splices the relative target against "/" and
+// resolves in the root mount instead of inside the symlink-selftest mount.
 
 // An absolute target of exactly 254 bytes: short enough to clear the readlink
 // length guard (tlen >= VFS_NAME_MAX - 1), long enough that splicing it onto a
@@ -80,6 +79,7 @@ enum {
     FAKE_MIDLINK,    // /midlink    -> /symlink-selftest/dir
     FAKE_BIG,        // /big        -> 254-char absolute target
     FAKE_BADDIR,     // /baddir     (readdir fails, for the EIO case)
+    FAKE_RELLINK,    // /rellink    -> "dir/target"  (RELATIVE target)
     FAKE_L0,         // /l0 .. /l9  chain of 10 symlinks (MAXSYMLINKS is 8)
 };
 
@@ -91,6 +91,7 @@ static const fake_ent_t fake_ents[] = {
     [FAKE_MIDLINK] = { "midlink", VFS_SYMLINK, FAKE_ROOT, "/symlink-selftest/dir" },
     [FAKE_BIG]     = { "big",     VFS_SYMLINK, FAKE_ROOT, fake_big_target },
     [FAKE_BADDIR]  = { "baddir",  VFS_DIR,     FAKE_ROOT, NULL },
+    [FAKE_RELLINK] = { "rellink", VFS_SYMLINK, FAKE_ROOT, "dir/target" },
     [FAKE_L0 + 0]  = { "l0",      VFS_SYMLINK, FAKE_ROOT, "/symlink-selftest/l1" },
     [FAKE_L0 + 1]  = { "l1",      VFS_SYMLINK, FAKE_ROOT, "/symlink-selftest/l2" },
     [FAKE_L0 + 2]  = { "l2",      VFS_SYMLINK, FAKE_ROOT, "/symlink-selftest/l3" },
@@ -255,6 +256,17 @@ int symlink_selftest_resolver(void)
 
     // Case 37: readdir failure on a verified directory.
     if (expect_err(FAKE_MNT "/baddir/x", LOOKUP_FOLLOW, -EIO) != 0)
+        return -1;
+
+    // Sub-mount relative-target resolution.  FAKE_RELLINK's target is the
+    // RELATIVE string "dir/target"; without the __vfs_lookup_raw() fix that
+    // seeds consumed with mp->path, splice_symlink_path() splices the target
+    // against the root mount ("//dir/target") instead of this mount, and
+    // resolution fails.  With the fix, FOLLOW resolves to FAKE_TARGET and
+    // NOFOLLOW returns the symlink itself.
+    if (expect_type(FAKE_MNT "/rellink", LOOKUP_FOLLOW, VFS_FILE) != 0)
+        return -1;
+    if (expect_type(FAKE_MNT "/rellink", LOOKUP_NOFOLLOW, VFS_SYMLINK) != 0)
         return -1;
 
     return 0;

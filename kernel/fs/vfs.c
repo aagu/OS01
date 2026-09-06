@@ -209,11 +209,24 @@ static int __vfs_lookup_raw(const char *path,
     vfs_node_t *cur = mp->root;
     __sync_add_and_fetch(&cur->refcount, 1);
 
-    // Initialize consumed to the absolute root prefix "/".
-    size_t consumed_len = 1;
-    if (consumed_out && consumed_size >= 2) {
-        consumed_out[0] = '/';
-        consumed_out[1] = '\0';
+    // Seed consumed with the mount prefix so that mid-path symlink splicing
+    // resolves relative targets against the correct directory.  For the root
+    // mount (mp->path == "/") we leave the buffer empty so the first append
+    // produces "/comp" rather than the spurious "//comp"; for sub-mounts we
+    // copy mp->path verbatim.  Without this, a relative symlink target on a
+    // sub-mount would be spliced against the root mount instead of the
+    // mount's own directory.
+    size_t consumed_len = 0;
+    if (consumed_out && consumed_size > 0) consumed_out[0] = '\0';
+    if (mp->path && mp->path[0] == '/' && mp->path[1] != '\0') {
+        size_t mp_path_len = strlen(mp->path);
+        if (consumed_out && mp_path_len + 1 > consumed_size)
+            return -ENAMETOOLONG;
+        if (consumed_out) {
+            memcpy(consumed_out, mp->path, mp_path_len);
+            consumed_out[mp_path_len] = '\0';
+        }
+        consumed_len = mp_path_len;
     }
 
     while ((comp = next_component(&ptr)) != NULL) {
