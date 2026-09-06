@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-"""Compile-time contracts for the AArch64 UEFI RAM map normalizer and the
-shared layout between the UEFI loader and the kernel.
+"""Behavioural coverage for the AArch64 UEFI RAM map normalizer.
 
-The runner is a tiny C program that pulls in the production headers
-(`kernel/arch/aarch64/ram_core.h`, `kernel/arch/aarch64/ram.h`) and forces
-the wire-format constants, capacity, and granule into the executable so a
-drift between the spec and the headers fails the build. The same runner
-links against `kernel/arch/aarch64/ram_core.c` (the linkable empty core)
-to prove the host-linkable contract for the next task.
+The runner is a small C program that compiles against the production
+`kernel/arch/aarch64/ram_core.c`. Each test case synthesises UEFI
+descriptor bytes via bytewise little-endian helpers (no struct
+casts) and asserts both the negative-error path and the success-path
+invariants — alignment, sortedness, disjointness, and "outside all
+exclusions".
 
-No behavioral coverage lives here yet: Task 2/3 add the real normalizer
-and publisher. This file's job is to make a header-only or stub change
-that silently drops a constant fail CI.
+The four wire-format constants stay enforced via `_Static_assert`
+(Task 1 contract) and the eight-parameter signature stays linkable
+against `ram_core.c`. Task 2 adds the behavioural matrix.
 """
 import os
 from pathlib import Path
@@ -27,6 +26,8 @@ RUNNER = r'''
 #include <kernel/arch/aarch64/ram.h>
 #include <kernel/arch/aarch64/ram_core.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <string.h>
 
 /* Compile-time contracts pinned by the spec. Any drift between the
  * spec values and the header macros aborts the translation; runtime
@@ -37,46 +38,432 @@ _Static_assert(AARCH64_EFI_CONVENTIONAL_MEMORY == 7u, "UEFI type");
 _Static_assert(AARCH64_RAM_GRANULE == (UINT64_C(1) << 21), "granule");
 _Static_assert(AARCH64_RAM_MAX_RANGES == 16, "map capacity");
 
-/* Synthetic descriptor bytes — Task 2 will define the real
- * normalizer that decodes them; here we only need to prove that the
- * eight-parameter signature links and type-checks against a real
- * byte buffer. The stub still returns -1 for any input. */
-static const uint8_t synthetic_bytes[4] = { 0xAA, 0xBB, 0xCC, 0xDD };
+/* ── Bytewise little-endian helpers ─────────────────────────── */
+/* The spec says never cast raw descriptor bytes to a struct — the
+ * test mirrors that by writing every field byte by byte. The wire
+ * offsets (Type=0 u32, PhysicalStart=8 u64, NumberOfPages=24 u64)
+ * are fixed regardless of the per-descriptor stride. */
+static void put_le32(uint8_t *buf, uint32_t v)
+{
+    buf[0] = (uint8_t)(v & 0xffu);
+    buf[1] = (uint8_t)((v >> 8) & 0xffu);
+    buf[2] = (uint8_t)((v >> 16) & 0xffu);
+    buf[3] = (uint8_t)((v >> 24) & 0xffu);
+}
+
+static void put_le64(uint8_t *buf, uint64_t v)
+{
+    buf[0] = (uint8_t)(v & 0xffu);
+    buf[1] = (uint8_t)((v >> 8) & 0xffu);
+    buf[2] = (uint8_t)((v >> 16) & 0xffu);
+    buf[3] = (uint8_t)((v >> 24) & 0xffu);
+    buf[4] = (uint8_t)((v >> 32) & 0xffu);
+    buf[5] = (uint8_t)((v >> 40) & 0xffu);
+    buf[6] = (uint8_t)((v >> 48) & 0xffu);
+    buf[7] = (uint8_t)((v >> 56) & 0xffu);
+}
+
+/* Write one descriptor at `buf` using the wire offsets described
+ * above. Remaining bytes (up to `stride`) are zeroed so padding
+ * does not accidentally look like a Type byte when the next
+ * descriptor is read. */
+static void make_descriptor(uint8_t *buf, uint32_t stride,
+                            uint32_t type, uint64_t phys_start,
+                            uint64_t num_pages)
+{
+    uint32_t i;
+    for (i = 0u; i < stride; ++i)
+        buf[i] = 0u;
+    put_le32(buf + 0u,  type);
+    put_le64(buf + 8u,  phys_start);
+    put_le64(buf + 24u, num_pages);
+}
+
+/* ── Output invariant checker ───────────────────────────────── */
+/* Returns 1 on success — every published range granule-aligned,
+ * strictly ascending, disjoint from its neighbours, and outside
+ * every supplied exclusion. */
+static int invariants_ok(const struct aarch64_ram_map *out,
+                         const struct aarch64_ram_interval *exclude,
+                         uint32_t exclude_count)
+{
+    uint32_t i, j;
+    if (out->count == 0u || out->count > AARCH64_RAM_MAX_RANGES)
+        return 0;
+    for (i = 0u; i < out->count; ++i) {
+        uint64_t s = out->ranges[i].start;
+        uint64_t e = out->ranges[i].end;
+        if ((s & (AARCH64_RAM_GRANULE - 1u)) != 0u) return 0;
+        if ((e & (AARCH64_RAM_GRANULE - 1u)) != 0u) return 0;
+        if (s >= e) return 0;
+        if (i > 0u && s <= out->ranges[i - 1u].end) return 0;
+        for (j = 0u; j < exclude_count; ++j) {
+            if (s < exclude[j].end && e > exclude[j].start)
+                return 0;
+        }
+    }
+    return 1;
+}
+
+static int out_is_zero(const struct aarch64_ram_map *out)
+{
+    uint32_t i;
+    if (out->count != 0u)
+        return 0;
+    for (i = 0u; i < AARCH64_RAM_MAX_RANGES; ++i) {
+        if (out->ranges[i].start != 0u) return 0;
+        if (out->ranges[i].end   != 0u) return 0;
+    }
+    return 1;
+}
+
+static int check(int cond) { return cond ? 0 : 1; }
 
 int main(void)
 {
-    int initialized = 0;
-    int rc;
+    /* Fixed widths: 2 MiB = 0x200000, 4 KiB = 0x1000. */
+    const uint64_t M2 = UINT64_C(0x200000);
+    const uint64_t M4 = UINT64_C(0x1000);
 
-    /* The stub normalizer must accept the synthetic bytes (any
-     * entry_count) and report a non-zero error. The four wire
-     * constants are already enforced above at compile time. */
-    rc = aarch64_ram_normalize(synthetic_bytes, 0u, 32u,
-                               (uint32_t)BOOT_MEMORY_FORMAT_UEFI_RAW,
-                               1u, NULL, 0u,
-                               (struct aarch64_ram_map *)0);
-    if (rc == 0) return 20;
+    /* Test cases 0–15. Each case ends in a unique `return N;`
+     * label so a regression points straight at the failed case. */
 
-    /* The stub publisher must round-trip a candidate into the
-     * destination (returning a non-zero error is fine; what we need
-     * to prove here is that the symbol exists and the signature
-     * matches the header). */
-    rc = aarch64_ram_publish_once((const struct aarch64_ram_map *)0,
-                                  (struct aarch64_ram_map *)0,
-                                  &initialized);
-    if (rc == 0) return 21;
+    {
+        /* Case 1: zero entry_count → ERR_ARGUMENT, out zeroed. */
+        struct aarch64_ram_map out;
+        uint8_t scratch[32];
+        int rc;
+        memset(&out, 0xAA, sizeof(out));
+        memset(scratch, 0xCC, sizeof(scratch));
+        rc = aarch64_ram_normalize(scratch, 0u, 32u,
+                                   (uint32_t)BOOT_MEMORY_FORMAT_UEFI_RAW,
+                                   1u, (const struct aarch64_ram_interval *)0,
+                                   0u, &out);
+        if (check(rc == AARCH64_RAM_ERR_ARGUMENT)) return 1;
+        if (check(out.count == 0u)) return 1;
+    }
+
+    {
+        /* Case 2: entry_size < 32 → ERR_GEOMETRY. */
+        struct aarch64_ram_map out;
+        uint8_t scratch[32];
+        int rc;
+        memset(&out, 0xAA, sizeof(out));
+        memset(scratch, 0, sizeof(scratch));
+        rc = aarch64_ram_normalize(scratch, 1u, 31u,
+                                   (uint32_t)BOOT_MEMORY_FORMAT_UEFI_RAW,
+                                   1u, (const struct aarch64_ram_interval *)0,
+                                   0u, &out);
+        if (check(rc == AARCH64_RAM_ERR_GEOMETRY)) return 2;
+        if (check(out.count == 0u)) return 2;
+    }
+
+    {
+        /* Case 3: format != BOOT_MEMORY_FORMAT_UEFI_RAW → ERR_FORMAT. */
+        struct aarch64_ram_map out;
+        uint8_t scratch[32];
+        int rc;
+        memset(&out, 0xAA, sizeof(out));
+        memset(scratch, 0, sizeof(scratch));
+        rc = aarch64_ram_normalize(scratch, 1u, 32u, 0u, 1u,
+                                   (const struct aarch64_ram_interval *)0,
+                                   0u, &out);
+        if (check(rc == AARCH64_RAM_ERR_FORMAT)) return 3;
+        if (check(out.count == 0u)) return 3;
+    }
+
+    {
+        /* Case 4: descriptor_version != 1 → ERR_VERSION. */
+        struct aarch64_ram_map out;
+        uint8_t scratch[32];
+        int rc;
+        memset(&out, 0xAA, sizeof(out));
+        memset(scratch, 0, sizeof(scratch));
+        rc = aarch64_ram_normalize(scratch, 1u, 32u,
+                                   (uint32_t)BOOT_MEMORY_FORMAT_UEFI_RAW,
+                                   2u, (const struct aarch64_ram_interval *)0,
+                                   0u, &out);
+        if (check(rc == AARCH64_RAM_ERR_VERSION)) return 4;
+        if (check(out.count == 0u)) return 4;
+    }
+
+    {
+        /* Case 5: exclude_count > 0 && exclude == NULL → ERR_ARGUMENT. */
+        struct aarch64_ram_map out;
+        uint8_t scratch[32];
+        int rc;
+        memset(&out, 0xAA, sizeof(out));
+        memset(scratch, 0, sizeof(scratch));
+        rc = aarch64_ram_normalize(scratch, 1u, 32u,
+                                   (uint32_t)BOOT_MEMORY_FORMAT_UEFI_RAW,
+                                   1u, (const struct aarch64_ram_interval *)0,
+                                   1u, &out);
+        if (check(rc == AARCH64_RAM_ERR_ARGUMENT)) return 5;
+        if (check(out.count == 0u)) return 5;
+    }
+
+    {
+        /* Case 6: invalid exclusion (end <= start) → ERR_ARGUMENT. */
+        struct aarch64_ram_interval bad = { 50u * M2, 40u * M2 };
+        struct aarch64_ram_map out;
+        uint8_t scratch[32];
+        int rc;
+        memset(&out, 0xAA, sizeof(out));
+        memset(scratch, 0, sizeof(scratch));
+        rc = aarch64_ram_normalize(scratch, 1u, 32u,
+                                   (uint32_t)BOOT_MEMORY_FORMAT_UEFI_RAW,
+                                   1u, &bad, 1u, &out);
+        if (check(rc == AARCH64_RAM_ERR_ARGUMENT)) return 6;
+        if (check(out.count == 0u)) return 6;
+    }
+
+    {
+        /* Case 7: NumberOfPages == 0 → ERR_ARGUMENT. */
+        uint8_t buf[32];
+        struct aarch64_ram_map out;
+        int rc;
+        memset(&out, 0xAA, sizeof(out));
+        make_descriptor(buf, 32u, AARCH64_EFI_CONVENTIONAL_MEMORY,
+                        UINT64_C(0), UINT64_C(0));
+        rc = aarch64_ram_normalize(buf, 1u, 32u,
+                                   (uint32_t)BOOT_MEMORY_FORMAT_UEFI_RAW,
+                                   1u, (const struct aarch64_ram_interval *)0,
+                                   0u, &out);
+        if (check(rc == AARCH64_RAM_ERR_ARGUMENT)) return 7;
+        if (check(out_is_zero(&out))) return 7;
+    }
+
+    {
+        /* Case 8: NumberOfPages * 4096 overflow → ERR_OVERFLOW. */
+        uint8_t buf[32];
+        struct aarch64_ram_map out;
+        uint64_t huge;
+        int rc;
+        memset(&out, 0xAA, sizeof(out));
+        /* Largest page count that does NOT overflow: UINT64_MAX / 4096.
+         * Add 1 so the multiplication wraps. */
+        huge = (UINT64_C(0) - UINT64_C(1)) / M4 + UINT64_C(1);
+        make_descriptor(buf, 32u, AARCH64_EFI_CONVENTIONAL_MEMORY,
+                        UINT64_C(0), huge);
+        rc = aarch64_ram_normalize(buf, 1u, 32u,
+                                   (uint32_t)BOOT_MEMORY_FORMAT_UEFI_RAW,
+                                   1u, (const struct aarch64_ram_interval *)0,
+                                   0u, &out);
+        if (check(rc == AARCH64_RAM_ERR_OVERFLOW)) return 8;
+        if (check(out_is_zero(&out))) return 8;
+    }
+
+    {
+        /* Case 9: 17 disjoint type-7 descriptors → ERR_CAPACITY.
+         * Each descriptor is exactly 4 MiB followed by a 4 MiB gap,
+         * so the aligned fragments stay disjoint — no two fragments
+         * touch or overlap. After 16 emissions the discovery probe
+         * finds a 17th range and the normalizer returns
+         * AARCH64_RAM_ERR_CAPACITY. */
+        uint8_t buf[17u * 32u];
+        struct aarch64_ram_map out;
+        int rc;
+        uint32_t i;
+        memset(buf, 0, sizeof(buf));
+        memset(&out, 0xAA, sizeof(out));
+        for (i = 0u; i < 17u; ++i) {
+            uint64_t start = (uint64_t)i * 8u * M2;
+            uint64_t pages = (4u * M2) / M4;
+            make_descriptor(buf + i * 32u, 32u,
+                            AARCH64_EFI_CONVENTIONAL_MEMORY,
+                            start, pages);
+        }
+        rc = aarch64_ram_normalize(buf, 17u, 32u,
+                                   (uint32_t)BOOT_MEMORY_FORMAT_UEFI_RAW,
+                                   1u, (const struct aarch64_ram_interval *)0,
+                                   0u, &out);
+        if (check(rc == AARCH64_RAM_ERR_CAPACITY)) return 9;
+        if (check(out_is_zero(&out))) return 9;
+    }
+
+    {
+        /* Case 10 (positive): non-type-7 descriptor silently dropped. */
+        uint8_t buf[2u * 32u];
+        struct aarch64_ram_map out;
+        int rc;
+        memset(buf, 0, sizeof(buf));
+        memset(&out, 0xAA, sizeof(out));
+        make_descriptor(buf + 0u * 32u, 32u,
+                        /* type 4 = EfiReservedMemoryType */ 4u,
+                        UINT64_C(0), (100u * M2) / M4);
+        make_descriptor(buf + 1u * 32u, 32u,
+                        AARCH64_EFI_CONVENTIONAL_MEMORY,
+                        UINT64_C(0), (100u * M2) / M4);
+        rc = aarch64_ram_normalize(buf, 2u, 32u,
+                                   (uint32_t)BOOT_MEMORY_FORMAT_UEFI_RAW,
+                                   1u, (const struct aarch64_ram_interval *)0,
+                                   0u, &out);
+        if (check(rc == AARCH64_RAM_OK)) return 10;
+        if (check(out.count == 1u)) return 10;
+        if (check(out.ranges[0].start == UINT64_C(0))) return 10;
+        if (check(out.ranges[0].end == 100u * M2)) return 10;
+        if (check(invariants_ok(&out,
+                                (const struct aarch64_ram_interval *)0, 0u)))
+            return 10;
+    }
+
+    {
+        /* Case 11 (positive): unsorted adjacent type-7 descriptors
+         * merge into a single range. Descriptor order is reversed
+         * so the smaller-start descriptor sits at index 1. */
+        uint8_t buf[2u * 32u];
+        struct aarch64_ram_map out;
+        int rc;
+        memset(buf, 0, sizeof(buf));
+        memset(&out, 0xAA, sizeof(out));
+        /* D0: [50 MiB, 75 MiB) — comes first in the buffer. */
+        make_descriptor(buf + 0u * 32u, 32u,
+                        AARCH64_EFI_CONVENTIONAL_MEMORY,
+                        50u * M2, (25u * M2) / M4);
+        /* D1: [0, 60 MiB) — overlaps D0. */
+        make_descriptor(buf + 1u * 32u, 32u,
+                        AARCH64_EFI_CONVENTIONAL_MEMORY,
+                        UINT64_C(0), (60u * M2) / M4);
+        rc = aarch64_ram_normalize(buf, 2u, 32u,
+                                   (uint32_t)BOOT_MEMORY_FORMAT_UEFI_RAW,
+                                   1u, (const struct aarch64_ram_interval *)0,
+                                   0u, &out);
+        if (check(rc == AARCH64_RAM_OK)) return 11;
+        if (check(out.count == 1u)) return 11;
+        if (check(out.ranges[0].start == UINT64_C(0))) return 11;
+        if (check(out.ranges[0].end == 75u * M2)) return 11;
+        if (check(invariants_ok(&out,
+                                (const struct aarch64_ram_interval *)0, 0u)))
+            return 11;
+    }
+
+    {
+        /* Case 12 (positive): deliberately unaligned stride = 40
+         * bytes. The fields still live at offsets 0/8/24; the
+         * extra 8 bytes per descriptor are zeroed padding. */
+        uint8_t buf[40u];
+        struct aarch64_ram_map out;
+        int rc;
+        memset(buf, 0, sizeof(buf));
+        memset(&out, 0xAA, sizeof(out));
+        make_descriptor(buf, 40u, AARCH64_EFI_CONVENTIONAL_MEMORY,
+                        UINT64_C(0), (100u * M2) / M4);
+        rc = aarch64_ram_normalize(buf, 1u, 40u,
+                                   (uint32_t)BOOT_MEMORY_FORMAT_UEFI_RAW,
+                                   1u, (const struct aarch64_ram_interval *)0,
+                                   0u, &out);
+        if (check(rc == AARCH64_RAM_OK)) return 12;
+        if (check(out.count == 1u)) return 12;
+        if (check(out.ranges[0].start == UINT64_C(0))) return 12;
+        if (check(out.ranges[0].end == 100u * M2)) return 12;
+        if (check(invariants_ok(&out,
+                                (const struct aarch64_ram_interval *)0, 0u)))
+            return 12;
+    }
+
+    {
+        /* Case 13 (positive): fragment below one 2 MiB granule
+         * dropped. D0 starts at 1 MiB and spans only 1 MiB, which
+         * rounds inward to a 0-byte aligned interval and is
+         * therefore discarded. D1 survives as the sole published
+         * range. */
+        uint8_t buf[2u * 32u];
+        struct aarch64_ram_map out;
+        int rc;
+        memset(buf, 0, sizeof(buf));
+        memset(&out, 0xAA, sizeof(out));
+        /* 1 MiB / 4 KiB = 256 pages. */
+        make_descriptor(buf + 0u * 32u, 32u,
+                        AARCH64_EFI_CONVENTIONAL_MEMORY,
+                        M2, UINT64_C(256));
+        make_descriptor(buf + 1u * 32u, 32u,
+                        AARCH64_EFI_CONVENTIONAL_MEMORY,
+                        10u * M2, (10u * M2) / M4);
+        rc = aarch64_ram_normalize(buf, 2u, 32u,
+                                   (uint32_t)BOOT_MEMORY_FORMAT_UEFI_RAW,
+                                   1u, (const struct aarch64_ram_interval *)0,
+                                   0u, &out);
+        if (check(rc == AARCH64_RAM_OK)) return 13;
+        if (check(out.count == 1u)) return 13;
+        if (check(out.ranges[0].start == 10u * M2)) return 13;
+        if (check(out.ranges[0].end == 20u * M2)) return 13;
+        if (check(invariants_ok(&out,
+                                (const struct aarch64_ram_interval *)0, 0u)))
+            return 13;
+    }
+
+    {
+        /* Case 14 (positive): a single range split by an
+         * exclusion. The descriptor [0, 100 MiB) minus the
+         * closed-open interval [40 MiB, 60 MiB) becomes two
+         * aligned ranges. */
+        uint8_t buf[32];
+        struct aarch64_ram_interval excl[1];
+        struct aarch64_ram_map out;
+        int rc;
+        memset(buf, 0, sizeof(buf));
+        memset(&out, 0xAA, sizeof(out));
+        make_descriptor(buf, 32u, AARCH64_EFI_CONVENTIONAL_MEMORY,
+                        UINT64_C(0), (100u * M2) / M4);
+        excl[0].start = 40u * M2;
+        excl[0].end   = 60u * M2;
+        rc = aarch64_ram_normalize(buf, 1u, 32u,
+                                   (uint32_t)BOOT_MEMORY_FORMAT_UEFI_RAW,
+                                   1u, excl, 1u, &out);
+        if (check(rc == AARCH64_RAM_OK)) return 14;
+        if (check(out.count == 2u)) return 14;
+        if (check(out.ranges[0].start == UINT64_C(0))) return 14;
+        if (check(out.ranges[0].end == 40u * M2)) return 14;
+        if (check(out.ranges[1].start == 60u * M2)) return 14;
+        if (check(out.ranges[1].end == 100u * M2)) return 14;
+        if (check(invariants_ok(&out, excl, 1u))) return 14;
+    }
+
+    {
+        /* Case 15 (positive): later bridging descriptor proves
+         * capacity is checked only after final merging. Without
+         * bridging, D0 [0, 100 MiB), D1 [200 MiB, 300 MiB),
+         * D2 [150 MiB, 250 MiB) would produce 3 fragments, but
+         * the repeated-scan algorithm merges them into
+         * [0, 100 MiB) and [150 MiB, 300 MiB) — 2 final ranges. */
+        uint8_t buf[3u * 32u];
+        struct aarch64_ram_map out;
+        int rc;
+        memset(buf, 0, sizeof(buf));
+        memset(&out, 0xAA, sizeof(out));
+        make_descriptor(buf + 0u * 32u, 32u,
+                        AARCH64_EFI_CONVENTIONAL_MEMORY,
+                        UINT64_C(0), (100u * M2) / M4);
+        make_descriptor(buf + 1u * 32u, 32u,
+                        AARCH64_EFI_CONVENTIONAL_MEMORY,
+                        200u * M2, (100u * M2) / M4);
+        make_descriptor(buf + 2u * 32u, 32u,
+                        AARCH64_EFI_CONVENTIONAL_MEMORY,
+                        150u * M2, (100u * M2) / M4);
+        rc = aarch64_ram_normalize(buf, 3u, 32u,
+                                   (uint32_t)BOOT_MEMORY_FORMAT_UEFI_RAW,
+                                   1u, (const struct aarch64_ram_interval *)0,
+                                   0u, &out);
+        if (check(rc == AARCH64_RAM_OK)) return 15;
+        if (check(out.count == 2u)) return 15;
+        if (check(out.ranges[0].start == UINT64_C(0))) return 15;
+        if (check(out.ranges[0].end == 100u * M2)) return 15;
+        if (check(out.ranges[1].start == 150u * M2)) return 15;
+        if (check(out.ranges[1].end == 300u * M2)) return 15;
+        if (check(invariants_ok(&out,
+                                (const struct aarch64_ram_interval *)0, 0u)))
+            return 15;
+    }
+
     return 0;
 }
 '''
 
 
 def build(tmp):
-    """Compile the runner with the host C compiler and the linkable
-    empty core. -I. keeps the relative `#include "kernel/include/..."`
-    paths from `boot/uefi/arch/aarch64/loader.h` honest if the test
-    ever pulls in the loader header (it does not today, but the
-    contract here mirrors the runner pattern used by the other
-    aarch64 host tests)."""
+    """Compile the runner with the host C compiler and the production
+    ram_core.c. -I. and -Ikernel/include keep the relative
+    `<kernel/...>` paths from the production headers honest."""
     runner_c = tmp / 'runner.c'
     runner_c.write_text(RUNNER)
     executable = tmp / 'runner'
@@ -101,7 +488,7 @@ def main():
             sys.stderr.write(result.stdout)
             sys.stderr.write(result.stderr)
             raise SystemExit(f'aarch64_ram_test: runner exit {result.returncode}')
-    print('aarch64_ram_test: contracts ok')
+    print('aarch64_ram_test: contracts and behaviour ok')
 
 
 if __name__ == '__main__':

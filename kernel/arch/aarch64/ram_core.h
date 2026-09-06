@@ -50,6 +50,19 @@
  * page-table walker recognises on the bring-up path. */
 #define AARCH64_RAM_GRANULE                  (UINT64_C(1) << 21)
 
+/* Distinct error codes for `aarch64_ram_normalize()` and
+ * `aarch64_ram_publish_once()`. Each maps to one concrete failure
+ * mode so the boot caller can log the right reason. They are
+ * negative small literals (no `<errno.h>`) so the kernel and the
+ * host runner share the same wire values. */
+#define AARCH64_RAM_OK                       0
+#define AARCH64_RAM_ERR_ARGUMENT            (-1)
+#define AARCH64_RAM_ERR_GEOMETRY            (-2)
+#define AARCH64_RAM_ERR_FORMAT              (-3)
+#define AARCH64_RAM_ERR_VERSION             (-4)
+#define AARCH64_RAM_ERR_OVERFLOW            (-5)
+#define AARCH64_RAM_ERR_CAPACITY            (-6)
+
 /* Closed-open `[start, end)` physical interval used by the
  * normalizer's exclusion list. Reserved for the internal contract
  * layer — the public range type the kernel iterates is
