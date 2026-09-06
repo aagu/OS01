@@ -1,26 +1,18 @@
-/* aarch64 phase 1: per-CPU boot data structure.
- *
- * Lives in `kernel/arch/aarch64/aarch64_percpu.h` (NOT kernel/include/kernel/arch/aarch64,
- * because we touch only what the spec authorizes).
- *
- * Phase 1 has no general `percpu_t` (it drags in `task.h`/sched/tty/etc),
- * so we define a minimal structure forced into `.boot.bss` so APs can
- * read their stack/go/online fields before MMU is on.
- *
- * Phase 4b adds benchmark state to the same .boot.bss region (spec §2.1
- * v11 — the release-acquire protocol needs the variables to be readable
- * by all 4 cores before MMU is on for the APs, which is satisfied by
- * the .boot.bss identity mapping already built for `aarch64_boot_percpu`).
+/* Minimal AArch64 boot per-CPU ABI, independent of scheduler state.
+ * The low .boot.bss slots are readable before MMU-on and retain their
+ * identity VA afterward. Benchmark state lives in high-half .bss and
+ * is only accessed after MMU-on.
  */
 
 #ifndef _ARCH_AARCH64_BOOT_PERCPU_H
 #define _ARCH_AARCH64_BOOT_PERCPU_H
 
 #include <stdint.h>
+#include <stddef.h>
 #include <kernel/arch/cpu.h>   /* NR_CPUS */
+#include <kernel/arch/aarch64/boot_offsets.h>
+#include <kernel/arch/aarch64/dtb.h>
 #include <kernel/arch/aarch64/spinlock.h> /* spinlock_T */
-
-#define AARCH64_BOOT_STACK_SIZE  0x1000   /* 4 KiB per CPU */
 
 /* Per-CPU data used from boot through SMP bring-up (see spec §2.6).
  * Use plain unsigned types so the layout matches the C ABI the assembler
@@ -31,10 +23,44 @@ typedef struct aarch64_boot_percpu {
     uint32_t pad0;
     uint64_t mpidr;      /* offset 16: full MPIDR_EL1 (PSCI target)   */
     uint64_t stack;      /* offset 24: top of independent stack        */
-    uint32_t online;     /* offset 32: 1 = secondary has reached idle  */
-    uint32_t go;         /* offset 36: BSP→AP release gate             */
-    uint64_t release;    /* offset 40: spin-table release address      */
+    uint32_t online;     /* offset 32: AP-only init ACK (BSP excepted) */
+    uint32_t go;         /* offset 36: BSP command, 0 wait/1 test/2 idle */
+    uint64_t reserved;   /* offset 40: keep the 48-byte boot ABI       */
 } aarch64_boot_percpu_t;
+
+_Static_assert(sizeof(aarch64_boot_percpu_t) == AARCH64_BOOT_PERCPU_SIZE,
+               "boot slot stride differs from assembly");
+#define BOOT_OFFSET_ASSERT(field, constant) \
+    _Static_assert(offsetof(aarch64_boot_percpu_t, field) == constant, \
+                   "boot slot " #field " differs from assembly")
+BOOT_OFFSET_ASSERT(self, AARCH64_BOOT_SELF_OFFSET);
+BOOT_OFFSET_ASSERT(cpu_id, AARCH64_BOOT_CPU_ID_OFFSET);
+BOOT_OFFSET_ASSERT(mpidr, AARCH64_BOOT_MPIDR_OFFSET);
+BOOT_OFFSET_ASSERT(stack, AARCH64_BOOT_STACK_OFFSET);
+BOOT_OFFSET_ASSERT(online, AARCH64_BOOT_ONLINE_OFFSET);
+BOOT_OFFSET_ASSERT(go, AARCH64_BOOT_GO_OFFSET);
+BOOT_OFFSET_ASSERT(reserved, AARCH64_BOOT_RESERVED_OFFSET);
+#undef BOOT_OFFSET_ASSERT
+_Static_assert(NR_CPUS == AARCH64_BOOT_CAPACITY &&
+               NR_CPUS == AARCH64_BOOT_MAX_CPUS, "boot CPU capacity mismatch");
+_Static_assert(AARCH64_BOOT_AFFINITY_MASK == AARCH64_MPIDR_AFFINITY_MASK,
+               "boot affinity mask mismatch");
+_Static_assert(AARCH64_BOOT_STACK_SIZE == (1U << AARCH64_BOOT_STACK_SHIFT),
+               "boot stack stride mismatch");
+
+/* Low identity addresses: use these in high-half C without a VA alias. */
+uint64_t aarch64_percpu_slot_addr(uint32_t cpu_id);
+uint64_t aarch64_boot_stack_top_addr(uint32_t cpu_id);
+uint64_t aarch64_dtb_mpidr_table_addr(void);
+uint64_t aarch64_dtb_cpu_count_addr(void);
+uint64_t aarch64_boot_page_tables_addr(void);
+uint64_t aarch64_boot_page_tables_end_addr(void);
+uint64_t secondary_start_addr(void);
+
+/* BSP-only, once, after shared test initialization and before any CPU_ON.
+ * Returns -1 for invalid input or repeated publication; neither writes
+ * metadata. No slot/stack reinitialization or full-range clean afterward. */
+int aarch64_smp_publish_boot(const struct aarch64_topology *topology);
 
 extern aarch64_boot_percpu_t aarch64_boot_percpu[NR_CPUS];
 
@@ -50,25 +76,34 @@ extern uint64_t aarch64_dtb_slot;
 
 /* ── Benchmark shared state (spec §2.1 v11) ─────────────────────
  *
- * All four cores participate in the 1M-iteration spinlock benchmark.
- * The state is in .boot.bss so every core can reach it via the
- * identity map (pre-MMU for APs).  Release/acquire ordering on
- * benchmark_go and benchmark_done[] is provided by stlr/ldar (see
+ * The participating CPUs access this state in high-half .bss after
+ * MMU-on. Release/acquire ordering on
+ * per-slot online/go and benchmark_done[] is provided by stlr/ldar (see
  * the accessor helpers below), not by `volatile` alone.
  */
 extern spinlock_T        bench_lock;
-extern volatile uint32_t benchmark_go;             /* 0 → 1 to release */
 extern volatile uint32_t benchmark_done[NR_CPUS]; /* each core writes 1 */
 extern volatile uint32_t benchmark_total;          /* non-atomic counter */
 
 /* Release-store / acquire-load helpers (spec §2.1: must NOT be plain
  * volatile writes; need stlr / ldar for cross-core memory ordering). */
-static inline void bench_go_set(uint32_t v) {
-    __asm__ __volatile__("stlr %w0, [%1]" :: "r"(v), "r"(&benchmark_go) : "memory");
+static inline aarch64_boot_percpu_t *boot_slot(uint32_t cpu_id) {
+    return (aarch64_boot_percpu_t *)(uintptr_t)aarch64_percpu_slot_addr(cpu_id);
 }
-static inline uint32_t bench_go_get(void) {
+static inline void boot_online_set(uint32_t cpu_id) {
+    __asm__ __volatile__("stlr %w0, [%1]" :: "r"(1U), "r"(&boot_slot(cpu_id)->online) : "memory");
+}
+static inline uint32_t boot_online_get(uint32_t cpu_id) {
     uint32_t v;
-    __asm__ __volatile__("ldar %w0, [%1]" : "=r"(v) : "r"(&benchmark_go) : "memory");
+    __asm__ __volatile__("ldar %w0, [%1]" : "=r"(v) : "r"(&boot_slot(cpu_id)->online) : "memory");
+    return v;
+}
+static inline void boot_go_set(uint32_t cpu_id, uint32_t v) {
+    __asm__ __volatile__("stlr %w0, [%1]" :: "r"(v), "r"(&boot_slot(cpu_id)->go) : "memory");
+}
+static inline uint32_t boot_go_get(uint32_t cpu_id) {
+    uint32_t v;
+    __asm__ __volatile__("ldar %w0, [%1]" : "=r"(v) : "r"(&boot_slot(cpu_id)->go) : "memory");
     return v;
 }
 static inline void bench_done_set(uint32_t cpu_id, uint32_t v) {
