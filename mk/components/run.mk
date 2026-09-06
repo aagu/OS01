@@ -126,13 +126,13 @@ run-aarch64-uefi: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES)),aarch64-ue
 	  mkdir -p "$$dtb_dir"; \
 	  sparse="$$dtb_dir/qemu-virt.dtb.sparse"; \
 	  packed="$$dtb_dir/qemu-virt.dtb"; \
-	  $(AARCH64_QEMU) -M virt,gic-version=2 -cpu cortex-a53 -smp $(AARCH64_SMP) \
+	  $(AARCH64_QEMU) -M virt,gic-version=2 -cpu cortex-a53 -smp $(SMP) \
 	    -machine "dumpdtb=$$sparse" -display none -m $(MEMORY); \
 	  dtc -I dtb -O dtb -o "$$packed" "$$sparse"; \
 	  rm -f "$$sparse"; \
 	  extra_dtb="-dtb $$packed" ;; \
 	esac; \
-	$(AARCH64_QEMU) -M virt,gic-version=2$${extra_dtb:+,acpi=off} -cpu cortex-a53 -smp $(AARCH64_SMP) -m $(MEMORY) \
+	$(AARCH64_QEMU) -M virt,gic-version=2$${extra_dtb:+,acpi=off} -cpu cortex-a53 -smp $(SMP) -m $(MEMORY) \
 	  -drive if=pflash,format=raw,readonly=on,file=$(AARCH64_UEFI_FIRMWARE) \
 	  -drive if=none,file=$(AARCH64_UEFI_DISK),format=raw,readonly=on,id=disk \
 	  -device virtio-blk-device,drive=disk \
@@ -421,7 +421,7 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'aarch64-uefi-kernel'    '(uefi-bringup)' 'Build aarch64 kernel.elf only';
 	@printf '  %-22s %-13s %s\n' \
-		 'run-aarch64-uefi'       '(uefi-bringup)' 'QEMU virt + cortex-a53 + virtio-blk (override SMP with AARCH64_SMP=N; AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0 to skip auto DTB)';
+		 'run-aarch64-uefi'       '(uefi-bringup)' 'QEMU virt + cortex-a53 + virtio-blk (override SMP with SMP=N; AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0 to skip auto DTB)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-aarch64-uefi-smp'  '(uefi-bringup)' 'QEMU 1/2/4 PSCI SMP ×3 with PASS/DEGRADED evidence';
 	@printf '  %-22s %-13s %s\n' \

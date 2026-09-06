@@ -54,7 +54,6 @@ AR             ?= llvm-ar
 TARGET_AR      ?= llvm-ar
 OBJ_CPY        ?= llvm-objcopy
 AARCH64_QEMU   ?= qemu-system-aarch64
-AARCH64_SMP    ?= 4
 AARCH64_UEFI_FIRMWARE_SOURCE ?= https://retrage.github.io/edk2-nightly/bin/RELEASEAARCH64_QEMU_EFI.fd
 
 # aarch64 link / UEFI / run parameters.
