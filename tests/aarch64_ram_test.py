@@ -540,7 +540,7 @@ int main(void)
         struct aarch64_ram_map candidate;
         struct aarch64_ram_map published;
         struct aarch64_ram_map saved_published;
-        int initialized = 0x42;
+        int initialized = 0;
         int saved_init = initialized;
         int rc;
         memset(&candidate, 0, sizeof(candidate));
@@ -549,6 +549,7 @@ int main(void)
         candidate.count = 0u;
         rc = aarch64_ram_publish_once(&candidate, &published, &initialized);
         if (check(rc < 0)) return 19;
+        if (check(initialized == 0)) return 19;
         if (check(initialized == saved_init)) return 19;
         if (check(published.count == saved_published.count)) return 19;
         if (check(published.ranges[0].start == saved_published.ranges[0].start))
@@ -566,7 +567,7 @@ int main(void)
         struct aarch64_ram_map candidate;
         struct aarch64_ram_map published;
         struct aarch64_ram_map saved_published;
-        int initialized = 0x42;
+        int initialized = 0;
         int saved_init = initialized;
         int rc;
         uint32_t i;
@@ -580,6 +581,7 @@ int main(void)
         }
         rc = aarch64_ram_publish_once(&candidate, &published, &initialized);
         if (check(rc < 0)) return 20;
+        if (check(initialized == 0)) return 20;
         if (check(initialized == saved_init)) return 20;
         if (check(published.count == saved_published.count)) return 20;
     }
@@ -591,7 +593,7 @@ int main(void)
         struct aarch64_ram_map candidate;
         struct aarch64_ram_map published;
         struct aarch64_ram_map saved_published;
-        int initialized = 0x42;
+        int initialized = 0;
         int saved_init = initialized;
         int rc;
         memset(&candidate, 0, sizeof(candidate));
@@ -602,6 +604,7 @@ int main(void)
         candidate.ranges[0].end   = 4u * M2;
         rc = aarch64_ram_publish_once(&candidate, &published, &initialized);
         if (check(rc < 0)) return 21;
+        if (check(initialized == 0)) return 21;
         if (check(initialized == saved_init)) return 21;
         if (check(published.count == saved_published.count)) return 21;
         if (check(published.ranges[0].start == saved_published.ranges[0].start))
@@ -613,7 +616,7 @@ int main(void)
         struct aarch64_ram_map candidate;
         struct aarch64_ram_map published;
         struct aarch64_ram_map saved_published;
-        int initialized = 0x42;
+        int initialized = 0;
         int saved_init = initialized;
         int rc;
         memset(&candidate, 0, sizeof(candidate));
@@ -624,6 +627,7 @@ int main(void)
         candidate.ranges[0].end   = 4u * M2 + M4; /* not 2 MiB aligned */
         rc = aarch64_ram_publish_once(&candidate, &published, &initialized);
         if (check(rc < 0)) return 22;
+        if (check(initialized == 0)) return 22;
         if (check(initialized == saved_init)) return 22;
         if (check(published.count == saved_published.count)) return 22;
         if (check(published.ranges[0].end == saved_published.ranges[0].end))
@@ -635,7 +639,7 @@ int main(void)
         struct aarch64_ram_map candidate;
         struct aarch64_ram_map published;
         struct aarch64_ram_map saved_published;
-        int initialized = 0x42;
+        int initialized = 0;
         int saved_init = initialized;
         int rc;
         memset(&candidate, 0, sizeof(candidate));
@@ -648,6 +652,7 @@ int main(void)
         candidate.ranges[1].end   = 4u * M2;
         rc = aarch64_ram_publish_once(&candidate, &published, &initialized);
         if (check(rc < 0)) return 23;
+        if (check(initialized == 0)) return 23;
         if (check(initialized == saved_init)) return 23;
         if (check(published.count == saved_published.count)) return 23;
     }
@@ -660,7 +665,7 @@ int main(void)
         struct aarch64_ram_map candidate;
         struct aarch64_ram_map published;
         struct aarch64_ram_map saved_published;
-        int initialized = 0x42;
+        int initialized = 0;
         int saved_init = initialized;
         int rc;
         memset(&candidate, 0, sizeof(candidate));
@@ -673,6 +678,7 @@ int main(void)
         candidate.ranges[1].end   = 6u * M2;
         rc = aarch64_ram_publish_once(&candidate, &published, &initialized);
         if (check(rc < 0)) return 24;
+        if (check(initialized == 0)) return 24;
         if (check(initialized == saved_init)) return 24;
         if (check(published.count == saved_published.count)) return 24;
     }
