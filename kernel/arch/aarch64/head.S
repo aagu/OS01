@@ -737,3 +737,19 @@ aarch64_boot_page_tables_addr:
 aarch64_boot_page_tables_end_addr:
     ldr     x0, =boot_page_tables_end
     ret
+
+/* Returns _boot_start (low physical LMA of the kernel image). High-half
+ * C cannot take the address directly because adrp+add cannot span the
+ * ~2^48 gap to the low physical linker symbol; the ldr literal pool
+ * stays within +/-1 MiB of the PC and is link-time resolved. */
+.globl aarch64_boot_image_start_addr
+aarch64_boot_image_start_addr:
+    ldr     x0, =_boot_start
+    ret
+
+/* Returns _kernel_lma_end (low physical LMA just past the kernel
+ * image). Same rationale as aarch64_boot_image_start_addr. */
+.globl aarch64_kernel_lma_end_addr
+aarch64_kernel_lma_end_addr:
+    ldr     x0, =_kernel_lma_end
+    ret

@@ -46,6 +46,13 @@ struct aarch64_ram_map {
  * that need the fields can include bootinfo.h themselves. */
 struct boot_context;
 
+/* Low physical LMA helpers. Provided by head.S via `ldr literal`
+ * from the constant pool so high-half C code can pick up these
+ * symbols without the ~2^48 adrp range crossing that the standard
+ * adrp+add sequence would need. */
+uint64_t aarch64_boot_image_start_addr(void);
+uint64_t aarch64_kernel_lma_end_addr(void);
+
 /* Initialize the published RAM map from the UEFI handoff. Returns 0
  * only when it has published a complete map; every negative return
  * is fatal to the boot caller (the BSP halts before GIC, SMP, or

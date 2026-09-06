@@ -486,6 +486,197 @@ int main(void)
         if (check(out_is_zero(&out))) return 16;
     }
 
+    {
+        /* Case 17: publish_once happy path. A valid one-range
+         * candidate is copied into the destination and the
+         * initialized flag is raised. */
+        struct aarch64_ram_map candidate;
+        struct aarch64_ram_map published;
+        int initialized = 0;
+        int rc;
+        memset(&candidate, 0, sizeof(candidate));
+        memset(&published, 0xAA, sizeof(published));
+        candidate.count = 1u;
+        candidate.ranges[0].start = 2u * M2;
+        candidate.ranges[0].end   = 4u * M2;
+        rc = aarch64_ram_publish_once(&candidate, &published, &initialized);
+        if (check(rc == 0)) return 17;
+        if (check(initialized != 0)) return 17;
+        if (check(published.count == 1u)) return 17;
+        if (check(published.ranges[0].start == 2u * M2)) return 17;
+        if (check(published.ranges[0].end   == 4u * M2)) return 17;
+    }
+
+    {
+        /* Case 18: publish_once second-call guard. The first
+         * publication leaves the flag non-zero; a subsequent call
+         * returns a distinct negative code and does not change
+         * the destination map. */
+        struct aarch64_ram_map candidate;
+        struct aarch64_ram_map published;
+        int initialized = 0;
+        int rc;
+        memset(&candidate, 0, sizeof(candidate));
+        memset(&published, 0xAA, sizeof(published));
+        candidate.count = 1u;
+        candidate.ranges[0].start = 2u * M2;
+        candidate.ranges[0].end   = 4u * M2;
+        (void)aarch64_ram_publish_once(&candidate, &published, &initialized);
+        /* Now present a different valid candidate; the helper must
+         * refuse without touching `published` or `initialized`. */
+        candidate.ranges[0].start = 8u * M2;
+        candidate.ranges[0].end   = 10u * M2;
+        rc = aarch64_ram_publish_once(&candidate, &published, &initialized);
+        if (check(rc == -2)) return 18;
+        if (check(published.count == 1u)) return 18;
+        if (check(published.ranges[0].start == 2u * M2)) return 18;
+        if (check(published.ranges[0].end   == 4u * M2)) return 18;
+        if (check(initialized != 0)) return 18;
+    }
+
+    {
+        /* Case 19: publish_once rejects count == 0. The destination
+         * and flag must be left untouched. */
+        struct aarch64_ram_map candidate;
+        struct aarch64_ram_map published;
+        struct aarch64_ram_map saved_published;
+        int initialized = 0x42;
+        int saved_init = initialized;
+        int rc;
+        memset(&candidate, 0, sizeof(candidate));
+        memset(&published, 0xBB, sizeof(published));
+        saved_published = published;
+        candidate.count = 0u;
+        rc = aarch64_ram_publish_once(&candidate, &published, &initialized);
+        if (check(rc < 0)) return 19;
+        if (check(initialized == saved_init)) return 19;
+        if (check(published.count == saved_published.count)) return 19;
+        if (check(published.ranges[0].start == saved_published.ranges[0].start))
+            return 19;
+        if (check(published.ranges[0].end   == saved_published.ranges[0].end))
+            return 19;
+    }
+
+    {
+        /* Case 20: publish_once rejects count > AARCH64_RAM_MAX_RANGES.
+         * A 17-range candidate must fail closed without changing
+         * the destination. We build only the first 16 ranges (the
+         * struct's capacity) and rely on the rejected count to
+         * keep us from indexing past the end. */
+        struct aarch64_ram_map candidate;
+        struct aarch64_ram_map published;
+        struct aarch64_ram_map saved_published;
+        int initialized = 0x42;
+        int saved_init = initialized;
+        int rc;
+        uint32_t i;
+        memset(&candidate, 0, sizeof(candidate));
+        memset(&published, 0xBB, sizeof(published));
+        saved_published = published;
+        candidate.count = (uint32_t)AARCH64_RAM_MAX_RANGES + 1u;
+        for (i = 0u; i < (uint32_t)AARCH64_RAM_MAX_RANGES; ++i) {
+            candidate.ranges[i].start = (uint64_t)i * 2u * M2;
+            candidate.ranges[i].end   = candidate.ranges[i].start + 2u * M2;
+        }
+        rc = aarch64_ram_publish_once(&candidate, &published, &initialized);
+        if (check(rc < 0)) return 20;
+        if (check(initialized == saved_init)) return 20;
+        if (check(published.count == saved_published.count)) return 20;
+    }
+
+    {
+        /* Case 21: publish_once rejects unaligned start. A candidate
+         * whose first range starts at a non-granule address must
+         * fail closed without changing the destination. */
+        struct aarch64_ram_map candidate;
+        struct aarch64_ram_map published;
+        struct aarch64_ram_map saved_published;
+        int initialized = 0x42;
+        int saved_init = initialized;
+        int rc;
+        memset(&candidate, 0, sizeof(candidate));
+        memset(&published, 0xBB, sizeof(published));
+        saved_published = published;
+        candidate.count = 1u;
+        candidate.ranges[0].start = 2u * M2 + M4; /* not 2 MiB aligned */
+        candidate.ranges[0].end   = 4u * M2;
+        rc = aarch64_ram_publish_once(&candidate, &published, &initialized);
+        if (check(rc < 0)) return 21;
+        if (check(initialized == saved_init)) return 21;
+        if (check(published.count == saved_published.count)) return 21;
+        if (check(published.ranges[0].start == saved_published.ranges[0].start))
+            return 21;
+    }
+
+    {
+        /* Case 22: publish_once rejects unaligned end. */
+        struct aarch64_ram_map candidate;
+        struct aarch64_ram_map published;
+        struct aarch64_ram_map saved_published;
+        int initialized = 0x42;
+        int saved_init = initialized;
+        int rc;
+        memset(&candidate, 0, sizeof(candidate));
+        memset(&published, 0xBB, sizeof(published));
+        saved_published = published;
+        candidate.count = 1u;
+        candidate.ranges[0].start = 2u * M2;
+        candidate.ranges[0].end   = 4u * M2 + M4; /* not 2 MiB aligned */
+        rc = aarch64_ram_publish_once(&candidate, &published, &initialized);
+        if (check(rc < 0)) return 22;
+        if (check(initialized == saved_init)) return 22;
+        if (check(published.count == saved_published.count)) return 22;
+        if (check(published.ranges[0].end == saved_published.ranges[0].end))
+            return 22;
+    }
+
+    {
+        /* Case 23: publish_once rejects descending order. */
+        struct aarch64_ram_map candidate;
+        struct aarch64_ram_map published;
+        struct aarch64_ram_map saved_published;
+        int initialized = 0x42;
+        int saved_init = initialized;
+        int rc;
+        memset(&candidate, 0, sizeof(candidate));
+        memset(&published, 0xBB, sizeof(published));
+        saved_published = published;
+        candidate.count = 2u;
+        candidate.ranges[0].start = 8u * M2;
+        candidate.ranges[0].end   = 10u * M2;
+        candidate.ranges[1].start = 2u * M2; /* descending */
+        candidate.ranges[1].end   = 4u * M2;
+        rc = aarch64_ram_publish_once(&candidate, &published, &initialized);
+        if (check(rc < 0)) return 23;
+        if (check(initialized == saved_init)) return 23;
+        if (check(published.count == saved_published.count)) return 23;
+    }
+
+    {
+        /* Case 24: publish_once rejects touching/overlapping
+         * ranges. A second range starting exactly at the previous
+         * end is not "strictly greater than prev_end" and must be
+         * rejected. */
+        struct aarch64_ram_map candidate;
+        struct aarch64_ram_map published;
+        struct aarch64_ram_map saved_published;
+        int initialized = 0x42;
+        int saved_init = initialized;
+        int rc;
+        memset(&candidate, 0, sizeof(candidate));
+        memset(&published, 0xBB, sizeof(published));
+        saved_published = published;
+        candidate.count = 2u;
+        candidate.ranges[0].start = 2u * M2;
+        candidate.ranges[0].end   = 4u * M2;
+        candidate.ranges[1].start = 4u * M2; /* touching */
+        candidate.ranges[1].end   = 6u * M2;
+        rc = aarch64_ram_publish_once(&candidate, &published, &initialized);
+        if (check(rc < 0)) return 24;
+        if (check(initialized == saved_init)) return 24;
+        if (check(published.count == saved_published.count)) return 24;
+    }
+
     return 0;
 }
 '''

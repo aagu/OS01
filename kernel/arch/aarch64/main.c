@@ -5,6 +5,7 @@
 #include <kernel/arch/irq.h>
 #include <kernel/arch/aarch64/boot_log.h>
 #include <kernel/arch/aarch64/dtb.h>
+#include <kernel/arch/aarch64/ram.h>
 #include <kernel/arch/aarch64/smp.h>
 
 void pl011_init(void);
@@ -21,6 +22,12 @@ void aarch64_main(const struct boot_context *handoff)
     }
     uint64_t vbar = (uint64_t)(uintptr_t)exception_vectors;
     __asm__ __volatile__("msr vbar_el1, %0\n\tisb" :: "r"(vbar) : "memory");
+
+    /* Turn the raw UEFI memory map into the published 2 MiB-aligned
+     * aarch64_ram_map before any further hardware bring-up. The
+     * helper halts the BSP on failure, so a non-zero return here
+     * means the BSP is already gone. */
+    aarch64_ram_init(handoff);
 
     /* Invalid or missing platform information is FATAL here, before any
      * GIC or PSCI access. Only valid platforms can degrade and keep ticks. */

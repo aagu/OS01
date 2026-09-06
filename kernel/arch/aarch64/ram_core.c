@@ -427,14 +427,78 @@ int aarch64_ram_normalize(const uint8_t *bytes, uint32_t entry_count,
     return AARCH64_RAM_OK;
 }
 
-/* ── Stub publisher (Task 3 owns the real one) ─────────────────── */
+/* ── Publisher ─────────────────────────────────────────────────
+ * Validate-then-copy map publication helper, shared by the boot
+ * wrapper and the host runner. Returns 0 on the first successful
+ * publication, -2 (-AARCH64_RAM_ERR_GEOMETRY, the spec's "-EALREADY"
+ * wire code) on any subsequent call without touching either the
+ * destination or the initialized flag, or a distinct negative error
+ * code on validation failure.
+ *
+ * Strict ascending + non-overlapping is enforced explicitly so a
+ * caller cannot push a misordered map downstream — the normalizer
+ * already guarantees this contract but the publisher is also called
+ * directly by the host runner with hand-built candidates. */
 int aarch64_ram_publish_once(const struct aarch64_ram_map *candidate,
                              struct aarch64_ram_map *destination,
                              int *initialized)
 {
-    (void)candidate;
-    zero_bytes(destination, sizeof(*destination));
-    if (initialized)
-        *initialized = 0;
-    return -1;
+    uint32_t count;
+    uint32_t i;
+
+    /* Guard against a misuse where the flag is non-null but the
+     * destination isn't (or vice versa). The spec leaves the
+     * out-parameter contract implicit; we make it explicit so the
+     * host runner's negative-case assertions catch the failure. */
+    if (candidate == (const struct aarch64_ram_map *)0 ||
+        destination == (struct aarch64_ram_map *)0 ||
+        initialized == (int *)0) {
+        return AARCH64_RAM_ERR_ARGUMENT;
+    }
+
+    /* Second-publication guard: refuse any further call regardless
+     * of the candidate's validity, and do NOT touch either
+     * destination or the flag (spec lines 195-199). */
+    if (*initialized != 0)
+        return AARCH64_RAM_ERR_GEOMETRY;  /* wire code -2 == -EALREADY */
+
+    /* Validate candidate. count must be in [1, AARCH64_RAM_MAX_RANGES].
+     * Every range must satisfy start < end, both endpoints 2 MiB
+     * aligned, and ranges strictly ascending with start_next >
+     * end_prev (touching is rejected — alignment would have folded
+     * a legitimately touching pair into one range upstream). */
+    count = candidate->count;
+    if (count == 0u || count > (uint32_t)AARCH64_RAM_MAX_RANGES)
+        return AARCH64_RAM_ERR_ARGUMENT;
+
+    for (i = 0u; i < count; ++i) {
+        uint64_t s = candidate->ranges[i].start;
+        uint64_t e = candidate->ranges[i].end;
+        if ((s & (RAM_GRANULE_BYTES - UINT64_C(1))) != UINT64_C(0))
+            return AARCH64_RAM_ERR_ARGUMENT;
+        if ((e & (RAM_GRANULE_BYTES - UINT64_C(1))) != UINT64_C(0))
+            return AARCH64_RAM_ERR_ARGUMENT;
+        if (s >= e)
+            return AARCH64_RAM_ERR_ARGUMENT;
+        if (i > 0u) {
+            uint64_t prev_end = candidate->ranges[i - 1u].end;
+            if (s <= prev_end)
+                return AARCH64_RAM_ERR_ARGUMENT;
+        }
+    }
+
+    /* All checks passed — copy the candidate bytewise into the
+     * destination and raise the initialized flag. The caller treats
+     * the published map as immutable afterwards; we use bytewise
+     * copy to stay compatible with both LLP64 and LP64. */
+    {
+        const uint8_t *src = (const uint8_t *)candidate;
+        uint8_t *dst = (uint8_t *)destination;
+        size_t n = sizeof(*candidate);
+        size_t k;
+        for (k = 0u; k < n; ++k)
+            dst[k] = src[k];
+    }
+    *initialized = 1;
+    return AARCH64_RAM_OK;
 }
