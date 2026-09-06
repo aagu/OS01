@@ -119,6 +119,15 @@ def self_test() -> None:
     assert not degraded_passed(complete_degraded_log + "[smp] FATAL: test failure\n")
     assert degraded_passed(current_degraded_log)
     assert degraded_passed(current_degraded_log.replace("\n", "\n\r"))
+    assert degraded_passed(current_degraded_log.rstrip("\n"))
+    # A serial drain may end exactly at SKIP, with no final newline. Old
+    # ticks must not make run_case terminate QEMU before recovery ticks.
+    late_skip = current_degraded_log.replace("[spinlock] status=SKIP\n", "") + "[spinlock] status=SKIP"
+    assert not degraded_passed(late_skip)
+    negative_args = argparse.Namespace(expect_no_ack=1)
+    for suffix in ("", "\n", "\n[tick] 4\n", "\n[tick] 4\n[tick] 5\n"):
+        assert not acceptance_evidence(negative_args, late_skip + suffix, 2)
+    assert acceptance_evidence(negative_args, late_skip + "\n[tick] 4\n[tick] 5\n[tick] 6", 2)
     for extra in ("[smp] cpu=1 online mpidr=0x1\n", "[smp] cpu=0 online\n",
                   "[spinlock] cpu=0 done=1000000\n", "[spinlock] total=1000000 status=PASS\n",
                   "[smp-test] no_ack_cpu=0\n", "[smp] FATAL: bad state\n"):
@@ -199,10 +208,10 @@ def degraded_passed(text: str) -> bool:
     if timeouts != ["1"] or summaries != [("2", "1", "DEGRADED")] or injections != ["1"]:
         return False
     # A no-ACK case must never start even a partial shared-count test.
-    spinlock = re.findall(r"^\[spinlock\][^\n]*$", text, re.MULTILINE)
-    if spinlock != ["[spinlock] status=SKIP"]:
+    spinlock = list(re.finditer(r"^\[spinlock\][^\n]*$", text, re.MULTILINE))
+    if len(spinlock) != 1 or spinlock[0].group() != "[spinlock] status=SKIP":
         return False
-    after_skip = text.split("[spinlock] status=SKIP\n", 1)[-1]
+    after_skip = text[spinlock[0].end():]
     if len(re.findall(r"^\[tick\] \d+$", after_skip, re.MULTILINE)) < 3:
         return False
     return not bool(re.search(r"^\[[^]]*(?:bench|spinlock)[^]]*\][^\n]*\bPASS\b", text, re.MULTILINE | re.IGNORECASE))

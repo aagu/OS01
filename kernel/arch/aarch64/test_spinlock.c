@@ -86,9 +86,22 @@ bool test_spinlock_smp(uint32_t active)
             timed_out = true;
             break;
         }
+        if (done_mask == expected_mask) break;
         arch_cpu_pause();
     }
 
+    uint32_t total = 0;
+    if (!timed_out && done_mask == expected_mask) {
+        /* No pause or UART output between acquiring all done ACKs and
+         * this final deadline check. Snapshot the total before logging. */
+        if ((uint64_t)(arch_cycle_counter() - start) >= hz * 30) {
+            timed_out = true;
+        } else {
+            spin_lock(&bench_lock);
+            total = benchmark_total;
+            spin_unlock(&bench_lock);
+        }
+    }
     for (uint32_t id = 0; id < active; ++id) {
         log_info("[spinlock] cpu=");
         kputu(id);
@@ -102,9 +115,6 @@ bool test_spinlock_smp(uint32_t active)
         log_err("[spinlock] total=unavailable status=FAIL reason=done-timeout\n");
         return false;
     }
-    spin_lock(&bench_lock);
-    uint32_t total = benchmark_total;
-    spin_unlock(&bench_lock);
     bool passed = total == active * ITERATIONS_PER_CORE;
     log_info("[spinlock] active=");
     kputu(active);

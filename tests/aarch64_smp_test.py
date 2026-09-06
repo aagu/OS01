@@ -35,15 +35,19 @@ def check_benchmark(tmp):
 typedef struct { unsigned long lock; } spinlock_T;
 static spinlock_T bench_lock;
 static uint32_t benchmark_total, done[8], online[8], commands[8];
-static uint32_t active_count, missing_done, lost_increment;
-static uint64_t hz, base, elapsed, counter_reads, bsp_cost;
+static uint32_t active_count, missing_done, lost_increment, pauses, final_locks;
+static uint64_t hz, base, elapsed, counter_reads, bsp_cost, log_cost, recheck_cost, final_lock_at;
 static char output[4096];
 static void spin_init(spinlock_T *lock) { lock->lock = 1; }
 static void spin_lock(spinlock_T *lock)
 {
-    /* A stuck AP might hold this lock forever: do not even attempt it
-     * after the real deadline while its done is still missing. */
-    assert(!(lock == &bench_lock && done[0] && missing_done < active_count && elapsed >= hz * 30));
+    if (lock == &bench_lock && done[0]) {
+        /* Even a complete done set cannot permit a final acquisition
+         * after a pause or serial logging has consumed the deadline. */
+        assert(elapsed < hz * 30);
+        ++final_locks;
+        final_lock_at = elapsed;
+    }
     assert(lock->lock); lock->lock = 0;
 }
 static void spin_unlock(spinlock_T *lock) { assert(!lock->lock); lock->lock = 1; }
@@ -53,8 +57,12 @@ static uint64_t spin_lock_irqsave(spinlock_T *lock) { spin_lock(lock); return 0;
 static void spin_unlock_irqrestore(spinlock_T *lock, uint64_t flags)
 { (void)flags; spin_unlock(lock); }
 static uint64_t cntfrq_el0(void) { return hz; }
-static uint64_t arch_cycle_counter(void) { ++counter_reads; return base + elapsed; }
-static void arch_cpu_pause(void) { assert(++elapsed <= hz * 30); }
+static uint64_t arch_cycle_counter(void)
+{
+    if (++counter_reads == 3) elapsed += recheck_cost;
+    return base + elapsed;
+}
+static void arch_cpu_pause(void) { ++pauses; assert(++elapsed <= hz * 30); }
 uint32_t boot_online_get(uint32_t id) { return online[id]; }
 uint32_t boot_go_get(uint32_t id) { return commands[id]; }
 static uint32_t bench_done_get(uint32_t id) { return done[id]; }
@@ -65,7 +73,11 @@ static void bench_done_set(uint32_t id, uint32_t value)
     if (id != missing_done) done[id] = value;
     if (id == 0) elapsed += bsp_cost;
 }
-void kputs(const char *s) { assert(strlen(output) + strlen(s) < sizeof(output)); strcat(output, s); }
+void kputs(const char *s)
+{
+    elapsed += log_cost;
+    assert(strlen(output) + strlen(s) < sizeof(output)); strcat(output, s);
+}
 void kputu(uint64_t value) { char s[32]; snprintf(s, sizeof(s), "%llu", (unsigned long long)value); kputs(s); }
 void kputx(uint64_t value) { (void)value; }
 void smp_bench_iter(uint32_t, uint32_t);
@@ -85,6 +97,7 @@ static void reset(uint32_t active)
     active_count = active; missing_done = lost_increment = 8;
     for (uint32_t id = 0; id < active; ++id) online[id] = 1;
     hz = 60; base = elapsed = counter_reads = benchmark_total = bsp_cost = 0;
+    log_cost = recheck_cost = final_lock_at = pauses = final_locks = 0;
     spin_init(&bench_lock);
 }
 int main(void)
@@ -114,6 +127,15 @@ int main(void)
     assert(!test_spinlock_smp(2) && elapsed == 3690);
     reset(2); hz = 1; bsp_cost = 30;
     assert(!test_spinlock_smp(2) && strstr(output, "status=FAIL"));
+    reset(2); hz = 1; bsp_cost = 29;
+    assert(test_spinlock_smp(2) && !pauses && final_locks == 1 && final_lock_at == 29);
+    reset(2); hz = 1; bsp_cost = 29; log_cost = 1;
+    assert(test_spinlock_smp(2) && !pauses && final_locks == 1 && final_lock_at == 29);
+    assert(elapsed > 30 && strstr(output, "total=2000000 status=PASS"));
+    reset(2); hz = 1; bsp_cost = 29; recheck_cost = 1;
+    assert(!test_spinlock_smp(2) && !pauses && !final_locks);
+    assert(strstr(output, "total=unavailable") && strstr(output, "status=FAIL"));
+    puts("PASS: completed done skips pause, snapshots before logging and rechecks final deadline");
     reset(2); hz = 0; assert(!test_spinlock_smp(2)); assert(!commands[1]);
     reset(2); hz = UINT64_MAX/30 + 1; assert(!test_spinlock_smp(2));
     assert(!commands[1]);
