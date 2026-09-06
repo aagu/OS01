@@ -115,6 +115,61 @@ static char *next_component(char **path_ptr)
     return start;
 }
 
+// ── Path normalizer ──────────────────────────────────────
+// Collapse repeated '/' and remove "/./" segments in-place.  Without
+// this, paths like "/./dev" (which busybox's ls produces via
+// concat_path_file(".", "dev") when scanning the cwd) fail to match
+// the /dev mount in find_mount() because find_mount uses strict
+// prefix matching — "/./dev" ≠ "/dev", so the lookup falls through
+// to the root ext2 inode, which doesn't contain /dev.  ".." is
+// intentionally NOT handled here (it requires the cwd, which
+// resolve_at has already collapsed into the absolute path before us).
+//
+// Caller must ensure `out` has room for at least VFS_NAME_MAX bytes.
+// Returns 0 on success; the normalized path is always ≤ strlen(in).
+static int normalize_vfs_path(const char *in, char *out)
+{
+    const char *r = in;
+    char *w = out;
+
+    // Collapse leading "/" runs to a single "/".
+    if (*r == '/') {
+        *w++ = '/';
+        r++;
+        while (*r == '/') r++;
+    }
+
+    while (*r) {
+        // Read next component up to the next '/' (or end).
+        const char *start = r;
+        while (*r && *r != '/') r++;
+        size_t len = (size_t)(r - start);
+
+        if (len == 1 && start[0] == '.') {
+            // Skip "." segment.
+        } else if (len == 0) {
+            // Empty (consecutive '/') — already collapsed above.
+        } else {
+            // Add a '/' separator if this isn't the first emitted
+            // component.
+            if (w > out && w[-1] != '/') *w++ = '/';
+            memcpy(w, start, len);
+            w += len;
+        }
+
+        // Skip the '/' and any additional ones (handles "//" and
+        // "/foo//bar" — also the "/" that follows a stripped "./").
+        while (*r == '/') r++;
+    }
+
+    // "/." → "/" trailing trim: if the last emitted char is '.'
+    // preceded by '/', drop the '.'.
+    if (w > out + 1 && w[-1] == '.' && w[-2] == '/') w--;
+
+    *w = '\0';
+    return 0;
+}
+
 // ── Find mount point by prefix match ──────────────────────
 static vfs_mount_t *find_mount(const char *path)
 {
@@ -170,11 +225,23 @@ static int __vfs_lookup_raw(const char *path,
 
     if (!vfs_initialized || !path) return -EINVAL;
 
-    size_t plen = strlen(path);
+    // Normalize the input path so find_mount() sees the canonical form
+    // (collapse "//", strip "/./").  See normalize_vfs_path() for the
+    // why — the short version is that busybox's ls calls
+    // concat_path_file(".", entry) which produces paths like "./dev",
+    // and resolve_at prepends the cwd "/" to make "/./dev".  Without
+    // this step, find_mount()'s strict prefix match fails to recognize
+    // the /dev mount and the lookup falls through to the root ext2
+    // inode, which doesn't contain /dev, so lstat returns ENOENT.
+    char path_buf[VFS_NAME_MAX];
+    normalize_vfs_path(path, path_buf);
+    const char *norm_path = path_buf;
+
+    size_t plen = strlen(norm_path);
     if (plen >= VFS_NAME_MAX) return -ENAMETOOLONG;
 
     // Handle root
-    if (strcmp(path, "/") == 0) {
+    if (strcmp(norm_path, "/") == 0) {
         vfs_mount_t *mp = find_mount("/");
         if (!mp || !mp->root) return -ENOENT;
         __sync_add_and_fetch(&mp->root->refcount, 1);
@@ -187,12 +254,12 @@ static int __vfs_lookup_raw(const char *path,
     }
 
     // Find the mount point
-    vfs_mount_t *mp = find_mount(path);
+    vfs_mount_t *mp = find_mount(norm_path);
     if (!mp || !mp->root || !mp->root->ops) return -ENOENT;
 
     // Tokenize path — skip mount point prefix for sub-mounts
     char path_copy[VFS_NAME_MAX];
-    memcpy(path_copy, path, plen + 1);
+    memcpy(path_copy, norm_path, plen + 1);
 
     char *ptr;
     size_t mp_len = strlen(mp->path);
