@@ -107,7 +107,7 @@ ifeq ($(filter uefi-bringup,$(PROFILE_CAPABILITIES)),uefi-bringup)
 # sysroot. The sub-make is incremental; the artifact copy is content-guarded.
 $(BUILD_DIR)/artifacts/kernel.elf: FORCE
 	@mkdir -p $(dir $@)
-	@$(call os01_submake,kernel,all ARCH=aarch64)
+	@$(call os01_submake,kernel,all ARCH=aarch64 $(OS01_SUBMAKE_ARGS))
 	@cmp -s $(KERNEL_BUILD_DIR)/kernel.elf $@ || cp $(KERNEL_BUILD_DIR)/kernel.elf $@
 
 # ── aarch64 UEFI firmware (profile build dir) ───────────────

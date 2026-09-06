@@ -2,6 +2,7 @@
 """Acceptance harness for the AArch64 UEFI PSCI SMP bring-up."""
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -74,6 +75,19 @@ current_log_for_2_cpus = """\
 [tick] 3
 """
 
+current_degraded_log = """\
+[smp] topology source=uefi-dtb cpus=2
+[smp-test] no_ack_cpu=1
+[smp] cpu=0 online mpidr=0x0
+[smp] cpu=1 reason=online-timeout
+[smp] cpu=1 target_mpidr=0x1 rc=0
+[smp] requested=2 online=1 status=DEGRADED
+[spinlock] status=SKIP
+[tick] 1
+[tick] 2
+[tick] 3
+"""
+
 
 def self_test() -> None:
     assert not passed(log_with_only_uefi_banner, cpus=4)
@@ -89,8 +103,31 @@ def self_test() -> None:
         "cpu=1 done=1000000", "cpu=0 done=1000000"), cpus=2)
     assert not passed(current_log_for_2_cpus.replace(
         "total=2000000", "total=1999999"), cpus=2)
+    assert not passed(current_log_for_2_cpus + "[smp] cpu=1 online mpidr=0x1\n", cpus=2)
+    assert not passed(current_log_for_2_cpus.replace(
+        "requested=2 online=2", "requested=2 online=1"), cpus=2)
+    assert not passed(current_log_for_2_cpus.replace("[spinlock] cpu=1 done=1000000\n", ""), cpus=2)
+    assert not passed(current_log_for_2_cpus.replace("no_ack_cpu=0", "no_ack_cpu=01"), cpus=2)
+    single = current_log_for_2_cpus.replace("cpus=2", "cpus=1").replace(
+        "[smp] cpu=1 online mpidr=0x1\n", "").replace(
+        "requested=2 online=2", "requested=1 online=1").replace(
+        "[spinlock] cpu=1 done=1000000\n", "").replace(
+        "active=2", "active=1").replace("total=2000000", "total=1000000")
+    assert passed(single, cpus=1)
+    assert not passed(single, cpus=2)
     assert degraded_passed(complete_degraded_log)
     assert not degraded_passed(complete_degraded_log + "[smp] FATAL: test failure\n")
+    assert degraded_passed(current_degraded_log)
+    assert degraded_passed(current_degraded_log.replace("\n", "\n\r"))
+    for extra in ("[smp] cpu=1 online mpidr=0x1\n", "[smp] cpu=0 online\n",
+                  "[spinlock] cpu=0 done=1000000\n", "[spinlock] total=1000000 status=PASS\n",
+                  "[smp-test] no_ack_cpu=0\n", "[smp] FATAL: bad state\n"):
+        assert not degraded_passed(current_degraded_log + extra), extra
+    for old, new in (("no_ack_cpu=1", "no_ack_cpu=0"),
+                     ("reason=online-timeout", "reason=cpu-on-error"),
+                     ("online=1 status=DEGRADED", "online=2 status=PASS"),
+                     ("[spinlock] status=SKIP\n", ""), ("[tick] 3\n", "")):
+        assert not degraded_passed(current_degraded_log.replace(old, new)), old
     command_args = argparse.Namespace(
         qemu="qemu-system-aarch64", firmware="firmware.fd", image="disk.img"
     )
@@ -141,26 +178,32 @@ def passed(text: str, cpus: int) -> bool:
     current_total = f"[spinlock] active={cpus} iterations=1000000 total={total} status=PASS"
     if legacy_total not in text and current_total not in text:
         return False
-    if "[smp-test] no_ack_cpu=0" not in text:
+    if re.findall(r"^\[smp-test\] no_ack_cpu=([^\n]+)$", text, re.MULTILINE) != ["0"]:
         return False
     return len(re.findall(r"^\[tick\] \d+$", text, re.MULTILINE)) >= 3
 
 
 def degraded_passed(text: str) -> bool:
     """Recognize the one intentionally degraded, non-benchmark case."""
+    text = text.replace("\r", "")
     if hard_kernel_failure(text):
         return False
-    required = (
-        "[smp] topology requested=2 discovered=2",
-        "[smp] cpu=0 online",
-        "[smp] timeout cpu=1 reason=online-timeout",
-        "[smp] summary requested=2 online=1 status=DEGRADED",
-        "[spinlock] status=SKIP",
-        "[smp-test] no_ack_cpu=1",
-    )
-    if not all(marker in text for marker in required):
+    if not re.search(r"^\[smp\] topology (?:requested=2 discovered=2|source=uefi-dtb cpus=2)$", text, re.MULTILINE):
         return False
-    if len(re.findall(r"^\[tick\] \d+$", text, re.MULTILINE)) < 3:
+    online = re.findall(r"^\[smp\] cpu=(\d+) online(?: mpidr=0x[0-9a-fA-F]+)?$", text, re.MULTILINE)
+    if online != ["0"]:
+        return False
+    timeouts = re.findall(r"^\[smp\] (?:timeout )?cpu=(\d+) reason=online-timeout$", text, re.MULTILINE)
+    summaries = re.findall(r"^\[smp\] (?:summary )?requested=(\d+) online=(\d+) status=(\w+)$", text, re.MULTILINE)
+    injections = re.findall(r"^\[smp-test\] no_ack_cpu=([^\n]+)$", text, re.MULTILINE)
+    if timeouts != ["1"] or summaries != [("2", "1", "DEGRADED")] or injections != ["1"]:
+        return False
+    # A no-ACK case must never start even a partial shared-count test.
+    spinlock = re.findall(r"^\[spinlock\][^\n]*$", text, re.MULTILINE)
+    if spinlock != ["[spinlock] status=SKIP"]:
+        return False
+    after_skip = text.split("[spinlock] status=SKIP\n", 1)[-1]
+    if len(re.findall(r"^\[tick\] \d+$", after_skip, re.MULTILINE)) < 3:
         return False
     return not bool(re.search(r"^\[[^]]*(?:bench|spinlock)[^]]*\][^\n]*\bPASS\b", text, re.MULTILINE | re.IGNORECASE))
 
@@ -170,13 +213,23 @@ def acceptance_evidence(args: argparse.Namespace, text: str, cpus: int) -> bool:
 
 
 def qemu_command(args: argparse.Namespace, cpus: int) -> list[str]:
-    return [
-        args.qemu, "-M", "virt,gic-version=2", "-cpu", "cortex-a53", "-smp", str(cpus),
+    diagnostic_dtb = getattr(args, "diagnostic_dtb", None)
+    command = [
+        args.qemu, "-M", "virt,gic-version=2" + (",acpi=off" if diagnostic_dtb else ""),
+        "-cpu", "cortex-a53", "-smp", str(cpus),
         "-m", "512", "-drive", f"if=pflash,format=raw,file={args.firmware}",
         "-drive", f"if=none,file={args.image},format=raw,readonly=on,id=disk",
         "-device", "virtio-blk-device,drive=disk", "-serial", "stdio", "-display", "none",
         "-no-reboot", "-no-shutdown",
     ]
+    if diagnostic_dtb:
+        command.extend(["-dtb", diagnostic_dtb])
+    return command
+
+
+def file_sha256(path: str) -> str:
+    with open(path, "rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def run_case(args: argparse.Namespace, cpus: int, iteration: int) -> bool:
@@ -185,6 +238,20 @@ def run_case(args: argparse.Namespace, cpus: int, iteration: int) -> bool:
     stdout_path = prefix.with_suffix(".stdout.log")
     stderr_path = prefix.with_suffix(".stderr.log")
     command = qemu_command(args, cpus)
+    started = time.monotonic()
+    metadata_path = prefix.with_suffix(".metadata.json")
+    metadata = {
+        "command": command, "cpus": cpus, "run": iteration,
+        "expected_no_ack_cpu": args.expect_no_ack or 0,
+        "firmware": str(Path(args.firmware).resolve()),
+        "firmware_sha256": file_sha256(args.firmware),
+        "image": str(Path(args.image).resolve()),
+        "image_sha256": file_sha256(args.image),
+        "diagnostic_dtb": getattr(args, "diagnostic_dtb", None),
+    }
+    if metadata["diagnostic_dtb"]:
+        metadata["diagnostic_dtb_sha256"] = file_sha256(metadata["diagnostic_dtb"])
+    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
     stdout = bytearray()
     stderr = bytearray()
     timed_out = False
@@ -236,6 +303,14 @@ def run_case(args: argparse.Namespace, cpus: int, iteration: int) -> bool:
     text = (stdout + stderr).decode("utf-8", errors="replace")
     accepted = acceptance_evidence(args, text, cpus)
     result = accepted and not timed_out
+    metadata.update({
+        "compiled_no_ack_cpu": [int(value) for value in re.findall(
+            r"^\[smp-test\] no_ack_cpu=(\d+)$", text.replace("\r", ""), re.MULTILINE)],
+        "elapsed_seconds": time.monotonic() - started,
+        "timeout": timed_out, "complete": complete, "returncode": returncode,
+        "result": "PASS" if result else "FAIL",
+    })
+    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
     print(json.dumps({
         "event": "case", "cpus": cpus, "run": iteration, "result": "PASS" if result else "FAIL",
         "timeout": timed_out, "complete": complete, "returncode": returncode,
@@ -255,6 +330,8 @@ def main() -> int:
     parser.add_argument("--qemu")
     parser.add_argument("--log-dir")
     parser.add_argument("--expect-no-ack", type=int, metavar="CPU_ID")
+    parser.add_argument("--diagnostic-dtb", metavar="PATH",
+                        help="explicit firmware diagnostic: acpi=off with this packed QEMU DTB (one CPU count only)")
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -266,6 +343,8 @@ def main() -> int:
         parser.error("--cpus and --repeat must be positive; --timeout must be greater than zero")
     if args.expect_no_ack is not None and (args.cpus != [2] or args.repeat != 1 or args.expect_no_ack != 1):
         parser.error("--expect-no-ack only accepts CPU_ID=1 with --cpus 2 --repeat 1")
+    if args.diagnostic_dtb and len(args.cpus) != 1:
+        parser.error("--diagnostic-dtb requires one --cpus value matching the DTB")
     Path(args.log_dir).mkdir(parents=True, exist_ok=True)
     outcomes = [run_case(args, cpus, iteration)
                 for cpus in args.cpus for iteration in range(1, args.repeat + 1)]

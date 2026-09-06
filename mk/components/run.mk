@@ -136,7 +136,28 @@ test-aarch64-uefi-smp: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES)),aarch
 	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
 	  --image "$(AARCH64_UEFI_DISK)" \
 	  --qemu "$(AARCH64_QEMU)" \
-	  --log-dir "$(BUILD_DIR)/logs/aarch64-uefi-smp"
+	  --log-dir "$(OS01_ROOT)/test-results/aarch64-uefi-smp/$$(date -u +%Y%m%dT%H%M%S)-normal-$$$$"
+
+# This target only consumes an already injected image. Switching the
+# compiled value requires the following profile-clean sequence:
+# make PROFILE=aarch64-clang clean
+# make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=1 aarch64-uefi
+# make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=1 test-aarch64-uefi-smp-no-ack
+# make PROFILE=aarch64-clang clean
+# make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
+# Then run a normal two-core recovery case with the rebuilt image paths.
+.PHONY: test-aarch64-uefi-smp-no-ack
+test-aarch64-uefi-smp-no-ack:
+	$(call require_capability,uefi-bringup)
+	$(if $(and $(filter 1,$(words $(AARCH64_SMP_TEST_NO_ACK_CPU))),$(filter 1,$(AARCH64_SMP_TEST_NO_ACK_CPU))),,$(error AARCH64_SMP_TEST_NO_ACK_CPU must be 1; clean and build the injected image first))
+	@test "$(AARCH64_SMP_TEST_NO_ACK_CPU)" = 1
+	@test -f "$(AARCH64_UEFI_DISK)" -a -f "$(AARCH64_UEFI_FIRMWARE)" || { echo 'Build the injected aarch64-uefi image first' >&2; exit 1; }
+	python3 tests/aarch64_uefi_smp.py \
+	  --cpus 2 --repeat 1 --timeout 90 --expect-no-ack 1 \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+	  --image "$(AARCH64_UEFI_DISK)" \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --log-dir "$(OS01_ROOT)/test-results/aarch64-uefi-smp/$$(date -u +%Y%m%dT%H%M%S)-no-ack-$$$$"
 
 # ── Validation ─────────────────────────────────────────────
 # validate keeps the x86 kernel + UEFI artifact checks (kernel ELF has no

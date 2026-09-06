@@ -149,7 +149,9 @@ uint32_t smp_boot_aps(void)
     log_info(topology->cpu_count == 1 ? "none" :
              topology->conduit == PSCI_CONDUIT_HVC ? "hvc" : "smc");
     log_info("\n");
-    log_info("[smp-test] no_ack_cpu=0\n");
+    log_info("[smp-test] no_ack_cpu=");
+    kputu(AARCH64_SMP_TEST_NO_ACK_CPU);
+    log_info("\n");
 
     /* A valid uniprocessor platform needs no PSCI transport at all. */
     if (topology->cpu_count > 1 && psci_init(topology->conduit)) {
@@ -205,7 +207,10 @@ void secondary_idle(uint32_t cpu_id)
      * accesses below retain the slot's identity VA. IRQs stay masked. */
     gic_cpu_init();
     cntp_ctl_el0_write(cntp_ctl_el0_read() & ~UINT64_C(1));
-    boot_online_set(cpu_id);
+    /* Test-only loss of ACK: the AP still reaches C initialization and
+     * observes the persistent idle command after the BSP times out. */
+    if (cpu_id != AARCH64_SMP_TEST_NO_ACK_CPU)
+        boot_online_set(cpu_id);
     uint32_t command;
     do {
         command = boot_go_get(cpu_id);

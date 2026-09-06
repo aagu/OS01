@@ -15,6 +15,154 @@ ROOT = Path(__file__).resolve().parents[1]
 HANDOFF = 0x401E0000
 
 
+def check_benchmark(tmp):
+    # Execute the actual benchmark C with test-local hardware substitutes.
+    # This catches blocking total reads after missing-done timeout, early
+    # go publication, wrong iteration totals and fixed-frequency deadlines.
+    # ARM instructions/order are checked by cross-build and QEMU separately.
+    source = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#define _ARCH_CPU_H
+#define _ARCH_AARCH64_SPINLOCK_H
+#define _ARCH_AARCH64_BOOT_PERCPU_H
+#define _ARCH_AARCH64_GIC_H
+#include <kernel/arch/aarch64/boot_offsets.h>
+#define NR_CPUS 8
+typedef struct { unsigned long lock; } spinlock_T;
+static spinlock_T bench_lock;
+static uint32_t benchmark_total, done[8], online[8], commands[8];
+static uint32_t active_count, missing_done, lost_increment;
+static uint64_t hz, base, elapsed, counter_reads, bsp_cost;
+static char output[4096];
+static void spin_init(spinlock_T *lock) { lock->lock = 1; }
+static void spin_lock(spinlock_T *lock)
+{
+    /* A stuck AP might hold this lock forever: do not even attempt it
+     * after the real deadline while its done is still missing. */
+    assert(!(lock == &bench_lock && done[0] && missing_done < active_count && elapsed >= hz * 30));
+    assert(lock->lock); lock->lock = 0;
+}
+static void spin_unlock(spinlock_T *lock) { assert(!lock->lock); lock->lock = 1; }
+static int spin_trylock(spinlock_T *lock)
+{ if (!lock->lock) return 0; lock->lock = 0; return 1; }
+static uint64_t spin_lock_irqsave(spinlock_T *lock) { spin_lock(lock); return 0; }
+static void spin_unlock_irqrestore(spinlock_T *lock, uint64_t flags)
+{ (void)flags; spin_unlock(lock); }
+static uint64_t cntfrq_el0(void) { return hz; }
+static uint64_t arch_cycle_counter(void) { ++counter_reads; return base + elapsed; }
+static void arch_cpu_pause(void) { assert(++elapsed <= hz * 30); }
+uint32_t boot_online_get(uint32_t id) { return online[id]; }
+uint32_t boot_go_get(uint32_t id) { return commands[id]; }
+static uint32_t bench_done_get(uint32_t id) { return done[id]; }
+static void bench_done_set(uint32_t id, uint32_t value)
+{
+    assert(bench_lock.lock); /* publish done only after the final unlock */
+    if (value && id == lost_increment) --benchmark_total;
+    if (id != missing_done) done[id] = value;
+    if (id == 0) elapsed += bsp_cost;
+}
+void kputs(const char *s) { assert(strlen(output) + strlen(s) < sizeof(output)); strcat(output, s); }
+void kputu(uint64_t value) { char s[32]; snprintf(s, sizeof(s), "%llu", (unsigned long long)value); kputs(s); }
+void kputx(uint64_t value) { (void)value; }
+void smp_bench_iter(uint32_t, uint32_t);
+static void boot_go_set(uint32_t id, uint32_t command)
+{
+    assert(counter_reads); /* deadline starts before the first release */
+    assert(id && id < active_count && command == 1 && !commands[id]);
+    for (uint32_t i = 0; i < active_count; ++i) assert(online[i] == 1);
+    commands[id] = command;
+    smp_bench_iter(id, 1000000);
+}
+#include "kernel/arch/aarch64/test_spinlock.c"
+static void reset(uint32_t active)
+{
+    memset(done, 0, sizeof(done)); memset(commands, 0, sizeof(commands));
+    memset(online, 0, sizeof(online)); output[0] = 0;
+    active_count = active; missing_done = lost_increment = 8;
+    for (uint32_t id = 0; id < active; ++id) online[id] = 1;
+    hz = 60; base = elapsed = counter_reads = benchmark_total = bsp_cost = 0;
+    spin_init(&bench_lock);
+}
+int main(void)
+{
+    reset(2); missing_done = 1;
+    assert(!test_spinlock_smp(2));
+    assert(elapsed == 1800 && strstr(output, "status=FAIL"));
+    assert(strstr(output, "total=unavailable") && !strstr(output, "status=PASS"));
+    puts("PASS: missing done reaches frequency deadline without lock read");
+    reset(1); assert(test_spinlock_smp(1)); assert(benchmark_total == 1000000);
+    assert(strstr(output, "active=1 iterations=1000000 total=1000000 status=PASS"));
+    reset(2); assert(test_spinlock_smp(2)); assert(benchmark_total == 2000000);
+    reset(4); assert(test_spinlock_smp(4)); assert(benchmark_total == 4000000);
+    puts("PASS: exact one/two/four CPU totals from production iteration function");
+    reset(2); lost_increment = 1; assert(!test_spinlock_smp(2));
+    assert(benchmark_total == 1999999 && strstr(output, "status=FAIL"));
+    reset(2); online[1] = 0; assert(!test_spinlock_smp(2));
+    assert(!commands[1] && !benchmark_total);
+    reset(2); done[1] = 1; assert(!test_spinlock_smp(2));
+    assert(!commands[1] && !benchmark_total);
+    reset(2); commands[1] = 2; assert(!test_spinlock_smp(2));
+    assert(commands[1] == 2 && !benchmark_total);
+    puts("PASS: lost increment, incomplete ACK and stale lifecycle fail");
+    reset(2); hz = 1; base = UINT64_MAX - 10; missing_done = 1;
+    assert(!test_spinlock_smp(2) && elapsed == 30);
+    reset(2); hz = 123; missing_done = 1;
+    assert(!test_spinlock_smp(2) && elapsed == 3690);
+    reset(2); hz = 1; bsp_cost = 30;
+    assert(!test_spinlock_smp(2) && strstr(output, "status=FAIL"));
+    reset(2); hz = 0; assert(!test_spinlock_smp(2)); assert(!commands[1]);
+    reset(2); hz = UINT64_MAX/30 + 1; assert(!test_spinlock_smp(2));
+    assert(!commands[1]);
+    puts("PASS: frequency-derived deadline, counter wrap and invalid frequency");
+}
+'''
+    runner = tmp / "benchmark_runner.c"
+    runner.write_text(source)
+    executable = tmp / "benchmark_runner"
+    subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra",
+                    "-Werror", "-I.", "-Ikernel/include", str(runner),
+                    "-o", str(executable)], cwd=ROOT, check=True)
+    subprocess.run([str(executable)], check=True)
+
+
+def check_build_controls():
+    # Run make's real configuration parser and recursive build recipes.
+    # Missing validation/whitelist/explicit submake args must fail here.
+    config = "include kernel/arch/aarch64/make.config\nall:\n\t@echo $(ARCH_CFLAGS)\n"
+    for value in ("0", "1", "7", "8", "-1", "1 2", "", "01", "x", "%"):
+        result = subprocess.run(["make", "--no-print-directory", "-f", "-",
+                                 "OS01_PROFILE_FILE=test", "AARCH64_SMP_TEST_NO_ACK_CPU=" + value],
+                                input=config, cwd=ROOT, text=True, capture_output=True)
+        if value in ("0", "1", "7"):
+            assert result.returncode == 0, result.stderr
+            assert "-DAARCH64_SMP_TEST_NO_ACK_CPU=" + value in result.stdout
+        else:
+            assert result.returncode != 0, "accepted invalid injection: " + repr(value)
+    result = subprocess.run(["make", "-Bn", "PROFILE=aarch64-clang",
+                             "AARCH64_SMP_TEST_NO_ACK_CPU=1", "aarch64-uefi-kernel"],
+                            cwd=ROOT, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert "-DAARCH64_SMP_TEST_NO_ACK_CPU=1" in result.stdout, "lost injection at recursive boundary"
+    for profile, value, valid in (("aarch64-clang", "1", True),
+                                  ("aarch64-clang", "0", False),
+                                  ("aarch64-clang", "1 2", False),
+                                  ("x86_64-clang", "1", False)):
+        result = subprocess.run(["make", "-n", "PROFILE=" + profile,
+                                 "AARCH64_SMP_TEST_NO_ACK_CPU=" + value,
+                                 "test-aarch64-uefi-smp-no-ack"],
+                                cwd=ROOT, text=True, capture_output=True)
+        assert (result.returncode == 0) == valid, result.stderr
+        if valid:
+            assert "--cpus 2 --repeat 1" in result.stdout
+            assert "--expect-no-ack 1" in result.stdout
+            assert "-target aarch64" not in result.stdout, "negative target rebuilt its image"
+    print("PASS: injection validation, recursive compiler define and prebuilt-only target gate")
+
+
 def check_boot_core(tmp):
     # Regressions caught: optimistic CPU_ON counting, retrying firmware,
     # accepting boundary/late ACKs, truncating Aff3, absolute deadlines,
@@ -340,6 +488,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="aarch64-smp-") as tmp:
         tmp = Path(tmp)
         check_boot_core(tmp)
+        check_benchmark(tmp)
+        check_build_controls()
         if "--host-only" in sys.argv:
             return
         check_layout_compile(tmp, clang)
