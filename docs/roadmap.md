@@ -66,7 +66,8 @@
 | GICv2 驱动 | 中断控制器 | head.S | opuntiaOS |
 | Generic Timer | cntvct_el0 读数 + CNTP 周期定时器（clockevent hook 已预留） | head.S | opuntiaOS |
 | 交叉编译链 | aarch64-linux-gnu-gcc + QEMU virt 平台 | 独立 | |
-| SMP 验证 | percpu/GS 抽象已就绪，AP 启动 ARM 侧 | GIC | |
+| UEFI 启动链 | 共享 boot/uefi/main.c，aarch64 通过 PSCI 启动 AP；DTB handoff 副本固定 `[0x401e0000,0x401ff000)` | 独立 | |
+| SMP 验证 (UEFI PSCI) | QEMU virt/Cortex-A53/GICv2 下 BSP+AP 独立栈+TPIDR+异常向量+每核 GIC interface；共享 spinlock 计数 1/2/4 核 ×3 验证；故障注入 `AARCH64_SMP_TEST_NO_ACK_CPU=1` 验证降级恢复 | GIC、UEFI 链 | |
 | 用户态 syscall ABI | `svc #0` 入口 + 参数传递 | 启动 | |
 
 ### 🖥 P3 GUI

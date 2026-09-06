@@ -118,9 +118,9 @@ aarch64-uefi-kernel: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES)),$(BUILD
 .PHONY: run-aarch64-uefi
 run-aarch64-uefi: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES)),aarch64-uefi)
 	$(call require_capability,uefi-bringup)
-	$(AARCH64_QEMU) -M virt,gic-version=2 -cpu cortex-a53 -smp 1 -m $(MEMORY) \
-	  -drive if=pflash,format=raw,file=$(AARCH64_UEFI_FIRMWARE) \
-	  -drive if=none,file=$(AARCH64_UEFI_DISK),format=raw,id=disk \
+	$(AARCH64_QEMU) -M virt,gic-version=2 -cpu cortex-a53 -smp $(AARCH64_SMP) -m $(MEMORY) \
+	  -drive if=pflash,format=raw,readonly=on,file=$(AARCH64_UEFI_FIRMWARE) \
+	  -drive if=none,file=$(AARCH64_UEFI_DISK),format=raw,readonly=on,id=disk \
 	  -device virtio-blk-device,drive=disk \
 	  -serial stdio -display none -no-reboot
 
@@ -128,11 +128,19 @@ run-aarch64-uefi: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES)),aarch64-ue
 # firmware/image with multiple vCPU counts.  Its Python parser is host-only
 # and asserts structured kernel diagnostics; it does not mistake a UEFI
 # banner or arbitrary firmware "FAIL" text for kernel test results.
+#
+# The prebuilt edk2 firmware for QEMU virt does not expose the device tree
+# through the EFI configuration table, so the kernel prints
+# `[dtb] FATAL: UEFI handoff has no DTB` and never reaches SMP. The harness
+# accepts --diagnostic-dtb=auto to materialize a packed QEMU-generated DTB
+# per case and pass it via `-dtb` (with `acpi=off`). Set
+# AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0 to require the production firmware path.
 .PHONY: test-aarch64-uefi-smp
 test-aarch64-uefi-smp: $(if $(filter uefi-bringup,$(PROFILE_CAPABILITIES)),aarch64-uefi)
 	$(call require_capability,uefi-bringup)
 	python3 tests/aarch64_uefi_smp.py \
 	  --cpus 1 2 4 --repeat 3 --timeout 90 \
+	  $(if $(filter 0,$(AARCH64_UEFI_SMP_DIAGNOSTIC_DTB)),,--diagnostic-dtb=auto) \
 	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
 	  --image "$(AARCH64_UEFI_DISK)" \
 	  --qemu "$(AARCH64_QEMU)" \
@@ -398,7 +406,11 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'aarch64-uefi-kernel'    '(uefi-bringup)' 'Build aarch64 kernel.elf only';
 	@printf '  %-22s %-13s %s\n' \
-		 'run-aarch64-uefi'       '(uefi-bringup)' 'QEMU virt + cortex-a53 + virtio-blk';
+		 'run-aarch64-uefi'       '(uefi-bringup)' 'QEMU virt + cortex-a53 + virtio-blk (override SMP with AARCH64_SMP=N)';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-aarch64-uefi-smp'  '(uefi-bringup)' 'QEMU 1/2/4 PSCI SMP ×3 with PASS/DEGRADED evidence';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-aarch64-uefi-smp-no-ack' '(uefi-bringup)' 'Consumes prebuilt AARCH64_SMP_TEST_NO_ACK_CPU=1 image for DEGRADED recovery';
 	@echo ''
 	@echo 'Validation (x86 uefi):'
 	@printf '  %-22s %-13s %s\n' \

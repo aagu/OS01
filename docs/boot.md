@@ -476,6 +476,29 @@ void kernel_main(const struct boot_context *bootctx);
 3. **UEFI Shell**：使用 UEFI Shell 手动执行引导程序，查看错误信息
 4. **QEMU 调试**：使用 QEMU 模拟器进行调试，设置 `-serial stdio` 查看串口输出
 
+## AArch64 UEFI PSCI SMP 验收
+
+### 验收入口
+
+- `make PROFILE=aarch64-clang test-aarch64-uefi-smp`：在 QEMU virt + Cortex-A53 + GICv2 下用 1/2/4 核 ×3 重复跑完整 PSCI SMP 流程，每核独立栈 + TPIDR_EL1 + 异常向量 + 每核 GIC interface。host 解析器只识别 `[smp]`/`[spinlock]` 结构化内核诊断，不把固件任意 `FAIL` 字符串当作失败。
+- `make PROFILE=aarch64-clang test-aarch64-uefi-smp-no-ack`：消费事先以 `AARCH64_SMP_TEST_NO_ACK_CPU=1` 构建的镜像，注入 cpu1 不 ACK，验证 `[spinlock] status=SKIP` 与 `[tick]` 恢复证据。
+- 切换注入参数必须走完整 profile clean 重建：
+  ```sh
+  make PROFILE=aarch64-clang clean
+  make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=1 aarch64-uefi
+  make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=1 test-aarch64-uefi-smp-no-ack
+  make PROFILE=aarch64-clang clean
+  make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
+  ```
+
+### 已知范围
+
+- BSP 开启 CNTP 周期 tick；AP IRQ 保持屏蔽，执行完 `smp_bench_iter` 后进入 idle，不参与调度器与用户态。
+- 不实现每核 tick、IPI、调度器、用户态、热插拔、GICv3、RPi 真机、ACPI CPU 枚举；这些另立任务。
+- 仅在 QEMU virt + Cortex-A53 + GICv2 + PSCI ≥0.2 上验证；固件默认从 `https://retrage.github.io/edk2-nightly/bin/RELEASEAARCH64_QEMU_EFI.fd` 拉取，本地缺失会自动下载到 `build/aarch64-clang/image/QEMU_EFI.fd`。固件 hash 与 conduit 写入 `test-results/aarch64-uefi-smp/<run-id>/cpus-*-run-*.metadata.json`。
+- 运行日志保留在仓库 `test-results/aarch64-uefi-smp/<run-id>/`（不提交，但本机可回放）：stdout/stderr/.metadata.json 三件套；正常模式与降级模式各一行 `python3 tests/aarch64_uefi_smp.py --help` 可查。
+- 锁死类故障由外部 90 s watchdog 判失败；当前 `test_spinlock_smp` 的 30 s deadline 仅覆盖 AP done 缺失，不替代外部 watchdog。
+
 ## 扩展引导功能
 
 ### 支持 BIOS 引导

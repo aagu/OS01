@@ -140,7 +140,7 @@ def self_test() -> None:
     command_args = argparse.Namespace(
         qemu="qemu-system-aarch64", firmware="firmware.fd", image="disk.img"
     )
-    assert "if=none,file=disk.img,format=raw,readonly=on,id=disk" in qemu_command(command_args, 4)
+    assert "if=none,file=disk.img,format=raw,readonly=on,id=disk" in qemu_command(command_args, 4, None)
 
 
 def kernel_failure(text: str) -> bool:
@@ -221,8 +221,7 @@ def acceptance_evidence(args: argparse.Namespace, text: str, cpus: int) -> bool:
     return degraded_passed(text) if args.expect_no_ack is not None else passed(text, cpus)
 
 
-def qemu_command(args: argparse.Namespace, cpus: int) -> list[str]:
-    diagnostic_dtb = getattr(args, "diagnostic_dtb", None)
+def qemu_command(args: argparse.Namespace, cpus: int, diagnostic_dtb: str | None) -> list[str]:
     command = [
         args.qemu, "-M", "virt,gic-version=2" + (",acpi=off" if diagnostic_dtb else ""),
         "-cpu", "cortex-a53", "-smp", str(cpus),
@@ -241,12 +240,51 @@ def file_sha256(path: str) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def generate_diagnostic_dtb(qemu: str, log_dir: str, cpus: int) -> str:
+    """Materialize a packed QEMU-generated virt DTB into the run log dir.
+
+    Some prebuilt UEFI firmwares do not expose the device tree through the EFI
+    configuration table. The kernel then cannot boot beyond `[dtb] FATAL:
+    UEFI handoff has no DTB`. Passing a QEMU-emitted DTB via `-dtb` (with
+    `acpi=off`) is the documented diagnostic workaround; this helper produces
+    such a file on demand so the matrix harness remains runnable on those
+    firmwares.
+
+    The DTB carries the visible CPU count: with `acpi=off` the kernel reads
+    `/cpus` directly from the blob, so `-smp N` only succeeds when the DTB
+    was generated for the same N. Each matrix run therefore materializes its
+    own DTB in a per-case log dir. The sparse QEMU dumpdtb output is repacked
+    via `dtc` (its raw form is ~1 MiB of zero padding; a few KiB is what
+    UEFI actually consumes).
+    """
+    case_dir = os.path.join(log_dir, f"dtb-cpus-{cpus}")
+    Path(case_dir).mkdir(parents=True, exist_ok=True)
+    sparse = os.path.join(case_dir, "qemu-virt.dtb.sparse")
+    packed = os.path.join(case_dir, "qemu-virt.dtb")
+    completed = subprocess.run(
+        [qemu, "-M", "virt,gic-version=2", "-cpu", "cortex-a53", "-smp", str(cpus),
+         "-machine", f"dumpdtb={sparse}", "-display", "none", "-m", "512"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+    )
+    if completed.returncode != 0 or not os.path.exists(sparse):
+        raise RuntimeError(
+            f"failed to generate diagnostic DTB via '{qemu} -machine dumpdtb='"
+        )
+    subprocess.run(["dtc", "-I", "dtb", "-O", "dtb", "-o", packed, sparse],
+                   check=True)
+    os.unlink(sparse)
+    return packed
+
+
 def run_case(args: argparse.Namespace, cpus: int, iteration: int) -> bool:
     """Run one QEMU case with a monotonic deadline and non-blocking drains."""
+    diagnostic_dtb = None
+    if getattr(args, "diagnostic_dtb", None):
+        diagnostic_dtb = generate_diagnostic_dtb(args.qemu, args.log_dir, cpus)
     prefix = Path(args.log_dir) / f"cpus-{cpus}-run-{iteration}"
     stdout_path = prefix.with_suffix(".stdout.log")
     stderr_path = prefix.with_suffix(".stderr.log")
-    command = qemu_command(args, cpus)
+    command = qemu_command(args, cpus, diagnostic_dtb)
     started = time.monotonic()
     metadata_path = prefix.with_suffix(".metadata.json")
     metadata = {
@@ -256,10 +294,10 @@ def run_case(args: argparse.Namespace, cpus: int, iteration: int) -> bool:
         "firmware_sha256": file_sha256(args.firmware),
         "image": str(Path(args.image).resolve()),
         "image_sha256": file_sha256(args.image),
-        "diagnostic_dtb": getattr(args, "diagnostic_dtb", None),
+        "diagnostic_dtb": diagnostic_dtb,
     }
-    if metadata["diagnostic_dtb"]:
-        metadata["diagnostic_dtb_sha256"] = file_sha256(metadata["diagnostic_dtb"])
+    if diagnostic_dtb:
+        metadata["diagnostic_dtb_sha256"] = file_sha256(diagnostic_dtb)
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
     stdout = bytearray()
     stderr = bytearray()
@@ -271,13 +309,20 @@ def run_case(args: argparse.Namespace, cpus: int, iteration: int) -> bool:
     except OSError as error:
         print(json.dumps({"event": "spawn-error", "cpus": cpus, "run": iteration, "error": str(error)}))
         return False
+    if process.stdout is None or process.stderr is None:
+        # stdout=PIPE/stderr=PIPE guarantees both are set; this guards the
+        # type narrowing that selectors.DefaultSelector.register needs.
+        return False
 
-    streams = {process.stdout: stdout, process.stderr: stderr}
+    # key by file descriptor (int) so selector.get_key and select()'s
+    # key.fd both stay int-keyed and consistent with the streams map.
+    streams = {process.stdout.fileno(): (process.stdout, stdout),
+               process.stderr.fileno(): (process.stderr, stderr)}
     selector = selectors.DefaultSelector()
     deadline = time.monotonic() + args.timeout
     try:
-        for stream in streams:
-            os.set_blocking(stream.fileno(), False)
+        for fd, (stream, _) in streams.items():
+            os.set_blocking(fd, False)
             selector.register(stream, selectors.EVENT_READ)
         while selector.get_map():
             remaining = deadline - time.monotonic()
@@ -285,9 +330,9 @@ def run_case(args: argparse.Namespace, cpus: int, iteration: int) -> bool:
                 timed_out = True
                 break
             for key, _ in selector.select(remaining):
-                chunk = os.read(key.fileobj.fileno(), 4096)
+                chunk = os.read(key.fd, 4096)
                 if chunk:
-                    streams[key.fileobj].extend(chunk)
+                    streams[key.fd][1].extend(chunk)
                 else:
                     selector.unregister(key.fileobj)
             text = (stdout + stderr).decode("utf-8", errors="replace")
@@ -339,8 +384,11 @@ def main() -> int:
     parser.add_argument("--qemu")
     parser.add_argument("--log-dir")
     parser.add_argument("--expect-no-ack", type=int, metavar="CPU_ID")
-    parser.add_argument("--diagnostic-dtb", metavar="PATH",
-                        help="explicit firmware diagnostic: acpi=off with this packed QEMU DTB (one CPU count only)")
+    parser.add_argument("--diagnostic-dtb", metavar="PATH_OR_AUTO",
+                        help="firmware does not expose DTB via EFI config table: "
+                             "use acpi=off and a QEMU-generated DTB. Pass an explicit "
+                             "PATH to a prebuilt DTB or 'auto' to materialize one "
+                             "into the run log dir. One --cpus value matching the DTB.")
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -352,7 +400,7 @@ def main() -> int:
         parser.error("--cpus and --repeat must be positive; --timeout must be greater than zero")
     if args.expect_no_ack is not None and (args.cpus != [2] or args.repeat != 1 or args.expect_no_ack != 1):
         parser.error("--expect-no-ack only accepts CPU_ID=1 with --cpus 2 --repeat 1")
-    if args.diagnostic_dtb and len(args.cpus) != 1:
+    if args.diagnostic_dtb and args.diagnostic_dtb != "auto" and len(args.cpus) != 1:
         parser.error("--diagnostic-dtb requires one --cpus value matching the DTB")
     Path(args.log_dir).mkdir(parents=True, exist_ok=True)
     outcomes = [run_case(args, cpus, iteration)

@@ -228,10 +228,17 @@ EOF
     targets) make -n PROFILE=x86_64-clang kernel.bin disk.img lib user validate test-syscall >/dev/null
              make -n PROFILE=x86_64-clang run >/dev/null
              make -n PROFILE=aarch64-clang aarch64-uefi >/dev/null
+             make -n PROFILE=aarch64-clang test-aarch64-uefi-smp >/dev/null
              ! make -n PROFILE=aarch64-clang user
              ! make -n PROFILE=aarch64-clang run
              ! make -n PROFILE=aarch64-clang test-syscall
-             ! make -n PROFILE=x86_64-clang aarch64-uefi ;;
+             ! make -n PROFILE=x86_64-clang aarch64-uefi
+             ! make -n PROFILE=x86_64-clang test-aarch64-uefi-smp
+             ! make -n PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=0 test-aarch64-uefi-smp-no-ack
+             # aarch64 targets must not pull BusyBox/sysroot into ARM builds.
+             dry_aarch64=$(make -n PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=1 aarch64-uefi-kernel)
+             ! echo "$dry_aarch64" | grep -q busybox
+             ! echo "$dry_aarch64" | grep -q sysroot-generations ;;
     *) exit 64 ;;
     esac
     ;;
