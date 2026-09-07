@@ -34,9 +34,55 @@
             "label": "Build AArch64 kernel (debug)",
             "type": "shell",
             "command": "make",
-            "args": ["-C", "kernel", "ARCH=aarch64", "DEBUG=1"],
+            "args": ["PROFILE=aarch64-clang", "aarch64-uefi-kernel"],
             "group": "build",
             "problemMatcher": []
+        },
+        {
+            "label": "Launch QEMU (aarch64, paused for debug)",
+            "type": "shell",
+            "isBackground": true,
+            "linux": {
+                "command": "bash",
+                "args": [
+                    "-c",
+                    "set -e; make PROFILE=aarch64-clang aarch64-uefi && mkdir -p build/aarch64-clang/logs/aarch64-uefi-dtb && qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a53 -smp 2 -machine 'dumpdtb=build/aarch64-clang/logs/aarch64-uefi-dtb/qemu-virt.dtb.sparse' -display none -m 512 && dtc -I dtb -O dtb -o build/aarch64-clang/logs/aarch64-uefi-dtb/qemu-virt.dtb build/aarch64-clang/logs/aarch64-uefi-dtb/qemu-virt.dtb.sparse && rm -f build/aarch64-clang/logs/aarch64-uefi-dtb/qemu-virt.dtb.sparse && exec qemu-system-aarch64 -M virt,gic-version=2,acpi=off -cpu cortex-a53 -smp 2 -m 512 -S -s -drive if=pflash,format=raw,readonly=on,file=build/aarch64-clang/image/QEMU_EFI.fd -drive if=none,file=build/aarch64-clang/image/aarch64-uefi.img,format=raw,readonly=on,id=disk -device virtio-blk-device,drive=disk -dtb build/aarch64-clang/logs/aarch64-uefi-dtb/qemu-virt.dtb -serial stdio -display none -no-reboot"
+                ]
+            },
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                {
+                    "owner": "cpp",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}"
+                    ],
+                    "pattern": {
+                        "regexp": "^(.*?):(\\d+):(\\d+):\\s+(warning|error):\\s+(.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "severity": 4,
+                        "message": 5
+                    },
+                    "background": {
+                        "activeOnStart": true,
+                        "beginsPattern": "^make\\[\\d+\\]: Entering directory"
+                    }
+                },
+                {
+                    "owner": "aarch64-uefi",
+                    "pattern": {
+                        "regexp": "^UEFI-A64: RAM.*$"
+                    },
+                    "background": {
+                        "activeOnStart": true,
+                        "beginsPattern": "^.*UEFI-A64: RAM.*$"
+                    }
+                }
+            ]
         }
     ]
 }

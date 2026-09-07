@@ -21,6 +21,28 @@
                 "-isystem",
                 "${workspaceFolder}/sysroot/usr/include"
             ]
+        },
+        {
+            "name": "OS01 aarch64",
+            "includePath": [
+                "${workspaceFolder}/kernel/include",
+                "${workspaceFolder}/thirdpart/lwip/src/include",
+                "${workspaceFolder}/kernel/net"
+            ],
+            "defines": [],
+            "compilerPath": "/usr/bin/clang",
+            "cStandard": "gnu11",
+            "cppStandard": "gnu++11",
+            "intelliSenseMode": "linux-clang-arm64",
+            "compilerArgs": [
+                "--target=aarch64-unknown-none",
+                "-march=armv8-a",
+                "-mgeneral-regs-only",
+                "-ffreestanding",
+                "-fno-pie",
+                "-fno-pic",
+                "-DAARCH64_SMP_TEST_NO_ACK_CPU=0"
+            ]
         }
     ],
     "version": 4

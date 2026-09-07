@@ -2,6 +2,11 @@
     // 使用 IntelliSense 了解相关属性。
     // 悬停以查看现有属性的描述。
     // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    //
+    // 注意: 现有的 x86_64 GDB 配置 (Launch with GDB) 引用
+    // ${workspaceFolder}/toolchain/cross/bin/x86_64-elf-gdb 这个路径在仓库中
+    // 并不实际存在 (toolchain/cross/bin/ 下只有 qemu-* 二进制)。沿用历史
+    // 配置不动它; aarch64 GDB 配置则使用真实存在的 /usr/bin/gdb。
     "version": "0.2.0",
     "configurations": [
         {
@@ -61,6 +66,48 @@
                 "gdb-remote 1234"
             ],
             "preLaunchTask": "Launch QEMU"
+        },
+        {
+            "name": "Launch AArch64 with LLDB",
+            "type": "lldb-dap",
+            "request": "attach",
+            "program": "${workspaceFolder}/build/aarch64-clang/artifacts/kernel.elf",
+            "targetCreateCommands": [
+                "target create ${workspaceFolder}/build/aarch64-clang/artifacts/kernel.elf",
+                "platform select remote-aarch64"
+            ],
+            "attachCommands": [
+                "process plugin load",
+                "gdb-remote 1234"
+            ],
+            "preLaunchTask": "Launch QEMU (aarch64, paused for debug)"
+        },
+        {
+            "name": "Launch AArch64 with GDB",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/aarch64-clang/artifacts/kernel.elf",
+            "targetArchitecture": "arm",
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "customLaunchSetupCommands": [
+                {
+                    "text": "target remote localhost:1234",
+                    "description": "Connect to QEMU remote debugger"
+                }
+            ],
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "Launch QEMU (aarch64, paused for debug)"
         }
     ]
 }
