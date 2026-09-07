@@ -187,6 +187,7 @@ test-aarch64-uefi-smp-no-ack:
 	@test -f "$(AARCH64_UEFI_DISK)" -a -f "$(AARCH64_UEFI_FIRMWARE)" || { echo 'Build the injected aarch64-uefi image first' >&2; exit 1; }
 	python3 tests/aarch64_uefi_smp.py \
 	  --cpus 2 --repeat 1 --timeout 90 --expect-no-ack 1 \
+	  $(if $(filter 0,$(AARCH64_UEFI_SMP_DIAGNOSTIC_DTB)),,--diagnostic-dtb=auto) \
 	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
 	  --image "$(AARCH64_UEFI_DISK)" \
 	  --qemu "$(AARCH64_QEMU)" \
