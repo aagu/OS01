@@ -15,6 +15,7 @@ from pathlib import Path
 
 complete_log_for_4_cpus = """\
 UEFI: booting OS01\n
+UEFI-A64: RAM ranges=3 pages2m=236 bytes=494927872\n
 [smp] topology requested=4 discovered=4\n
 [smp] cpu=0 online\n
 [smp] cpu=1 online\n
@@ -50,6 +51,8 @@ log_with_missing_total = complete_log_for_4_cpus.replace(
     "[spinlock] total=4000000 (active_cpus=4 × 1000000, PASS)\n", ""
 )
 complete_degraded_log = """\
+UEFI: booting OS01\n
+UEFI-A64: RAM ranges=3 pages2m=236 bytes=494927872\n
 [smp] topology requested=2 discovered=2\n
 [smp] cpu=0 online\n
 [smp] timeout cpu=1 reason=online-timeout\n
@@ -62,6 +65,7 @@ complete_degraded_log = """\
 """
 
 current_log_for_2_cpus = """\
+UEFI-A64: RAM ranges=3 pages2m=236 bytes=494927872
 [smp] topology source=uefi-dtb cpus=2
 [smp] cpu=0 online mpidr=0x0
 [smp] cpu=1 online mpidr=0x1
@@ -76,6 +80,7 @@ current_log_for_2_cpus = """\
 """
 
 current_degraded_log = """\
+UEFI-A64: RAM ranges=3 pages2m=236 bytes=494927872
 [smp] topology source=uefi-dtb cpus=2
 [smp-test] no_ack_cpu=1
 [smp] cpu=0 online mpidr=0x0
@@ -137,6 +142,40 @@ def self_test() -> None:
                      ("online=1 status=DEGRADED", "online=2 status=PASS"),
                      ("[spinlock] status=SKIP\n", ""), ("[tick] 3\n", "")):
         assert not degraded_passed(current_degraded_log.replace(old, new)), old
+
+    # RAM-summary evidence must be present, unique, and arithmetically
+    # consistent across all four positive fixtures. The live QEMU virt
+    # -m 512 layout under this firmware produces three 2 MiB-aligned
+    # ranges totalling 236 pages = 494,927,872 bytes (236 * 2097152).
+    RAM_LINE = "UEFI-A64: RAM ranges=3 pages2m=236 bytes=494927872"
+    for label, fixture, predicate in (
+        ("complete_log_for_4_cpus", complete_log_for_4_cpus,
+         lambda text: passed(text, cpus=4)),
+        ("complete_degraded_log", complete_degraded_log, degraded_passed),
+        ("current_log_for_2_cpus", current_log_for_2_cpus,
+         lambda text: passed(text, cpus=2)),
+        ("current_degraded_log", current_degraded_log, degraded_passed),
+    ):
+        assert predicate(fixture), f"unmutated {label} must pass"
+        # Mutation: remove the RAM line.
+        assert not predicate(fixture.replace(RAM_LINE + "\n", "")), \
+            f"{label}: removing RAM line must reject"
+        # Mutation: duplicate the RAM line.
+        assert not predicate(fixture + RAM_LINE + "\n"), \
+            f"{label}: duplicating RAM line must reject"
+        # Mutation: ranges=0 violates the 1..16 bound.
+        assert not predicate(fixture.replace(
+            "ranges=3", "ranges=0")), \
+            f"{label}: ranges=0 must reject"
+        # Mutation: non-decimal field; regex anchors reject any non-digit.
+        assert not predicate(fixture.replace(
+            "pages2m=236", "pages2m=12a")), \
+            f"{label}: non-decimal pages2m must reject"
+        # Mutation: bytes off by one breaks the arithmetical check.
+        assert not predicate(fixture.replace(
+            "bytes=494927872", "bytes=494927871")), \
+            f"{label}: bytes != pages2m * 2097152 must reject"
+
     command_args = argparse.Namespace(
         qemu="qemu-system-aarch64", firmware="firmware.fd", image="disk.img"
     )
@@ -152,6 +191,22 @@ def kernel_failure(text: str) -> bool:
     ))
 
 
+def ram_summary_ok(text: str) -> bool:
+    """Return True iff exactly one syntactically valid RAM summary
+    line is present, with ranges in 1..16, pages2m > 0, and
+    bytes == pages2m * 2097152."""
+    text = text.replace("\r", "")
+    lines = re.findall(
+        r"^UEFI-A64: RAM ranges=(\d+) pages2m=(\d+) bytes=(\d+)$",
+        text, re.MULTILINE,
+    )
+    if len(lines) != 1:
+        return False
+    ranges, pages2m, bytes_ = (int(x) for x in lines[0])
+    return (1 <= ranges <= 16 and pages2m > 0
+            and bytes_ == pages2m * 2097152)
+
+
 def hard_kernel_failure(text: str) -> bool:
     return bool(re.search(
         r"^\[(?:smp|spinlock)\][^\n]*\b(?:FATAL|PANIC|FAIL)\b",
@@ -165,6 +220,8 @@ def passed(text: str, cpus: int) -> bool:
     # PL011 currently emits LF+CR. Match lines consistently for saved logs
     # and live serial drains, while retaining the original fixture format.
     text = text.replace("\r", "")
+    if not ram_summary_ok(text):
+        return False
     if kernel_failure(text):
         return False
     topology = re.search(r"^\[smp\] topology\b[^\n]*\brequested=(\d+)\b[^\n]*\bdiscovered=(\d+)\b", text, re.MULTILINE)
@@ -195,6 +252,8 @@ def passed(text: str, cpus: int) -> bool:
 def degraded_passed(text: str) -> bool:
     """Recognize the one intentionally degraded, non-benchmark case."""
     text = text.replace("\r", "")
+    if not ram_summary_ok(text):
+        return False
     if hard_kernel_failure(text):
         return False
     if not re.search(r"^\[smp\] topology (?:requested=2 discovered=2|source=uefi-dtb cpus=2)$", text, re.MULTILINE):
