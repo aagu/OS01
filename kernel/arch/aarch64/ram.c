@@ -231,4 +231,3 @@ const struct aarch64_ram_map *aarch64_ram_map_get(void)
         return (const struct aarch64_ram_map *)0;
     return &published_map;
 }
-
