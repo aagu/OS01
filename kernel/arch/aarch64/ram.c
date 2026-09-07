@@ -185,14 +185,32 @@ int aarch64_ram_init(const struct boot_context *handoff)
             span = e - s;
 
             pages2m = span / AARCH64_RAM_GRANULE;
-            if (pages2m > (UINT64_C(0) - pages2m_total))
+            /* Correct pre-addition overflow check:
+             * pages2m_total + pages2m would overflow uint64_t iff
+             * pages2m_total > UINT64_MAX - pages2m. (The earlier
+             *  pages2m > (0 - pages2m_total) wrapped in unsigned
+             *  arithmetic and fired on the first iteration with a
+             *  zero total.) */
+            if (pages2m_total > UINT64_MAX - pages2m)
                 ram_fatal("[smp] FATAL: pages2m sum overflows\n");
             pages2m_total += pages2m;
 
-            if (pages2m > (UINT64_C(0) - bytes_total /
-                           AARCH64_RAM_GRANULE))
-                ram_fatal("[smp] FATAL: bytes sum overflows\n");
-            bytes_total += pages2m * AARCH64_RAM_GRANULE;
+            /* Correct pre-addition overflow check for the byte total:
+             * first ensure the per-range contribution does not itself
+             * overflow (i.e. pages2m <= UINT64_MAX / GRANULE), then
+             * ensure bytes_total + contribution would not overflow.
+             * The earlier `pages2m > (0 - bytes_total / GRANULE)`
+             * pattern was unsigned wrap-around and fired on the first
+             * iteration. */
+            if (pages2m > UINT64_MAX / AARCH64_RAM_GRANULE)
+                ram_fatal("[smp] FATAL: bytes contribution overflows\n");
+            {
+                uint64_t bytes_contribution = pages2m *
+                                              AARCH64_RAM_GRANULE;
+                if (bytes_total > UINT64_MAX - bytes_contribution)
+                    ram_fatal("[smp] FATAL: bytes sum overflows\n");
+                bytes_total += bytes_contribution;
+            }
         }
 
         log_info("UEFI-A64: RAM ranges=");
