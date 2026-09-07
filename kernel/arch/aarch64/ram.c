@@ -158,8 +158,12 @@ int aarch64_ram_init(const struct boot_context *handoff)
                                    excludes, 2u, &candidate);
     }
 
-    if (rc != AARCH64_RAM_OK)
-        ram_fatal("[smp] FATAL: normalizer rejected UEFI map\n");
+    if (rc != AARCH64_RAM_OK) {
+        if (rc == AARCH64_RAM_ERR_CAPACITY)
+            ram_fatal("[smp] FATAL: normalizer rejected UEFI map (too many ranges)\n");
+        else
+            ram_fatal("[smp] FATAL: normalizer rejected UEFI map\n");
+    }
 
     /* Publish the validated candidate. The publisher revalidates
      * the map; a non-zero return here would be a developer bug. */
