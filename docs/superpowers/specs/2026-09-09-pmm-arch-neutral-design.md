@@ -32,7 +32,7 @@ The two paths duplicate the same policy in two different languages (E820
 type field vs UEFI `EfiConventionalMemory`), two different normalization
 strategies (none on x86_64, repeated scan on AArch64), and two different
 exclusion strategies (implicit on x86_64, explicit kernel-LMA + handoff on
-AArch64). Future boot sources (ACPI SRIT, RISC-V OpenSBI, etc.) would each
+AArch64). Future boot sources (ACPI SRAT, RISC-V OpenSBI, etc.) would each
 re-introduce the same duplication.
 
 ## Goals
@@ -174,21 +174,33 @@ allocator consumer. It requires:
 
 - `ctx != 0`, `boot_context_valid(ctx)` is true;
 - `(ctx->flags & BOOT_CONTEXT_HAS_MEMORY_MAP) != 0`;
-- `ctx->memory.entries != 0`, `ctx->memory.entry_count != 0`,
-  `ctx->memory.entry_size >= MEMORY_RANGE_DESCRIPTOR_MIN_SIZE`
-  (32 bytes, matching `AARCH64_UEFI_DESCRIPTOR_PREFIX_SIZE`);
+- `ctx->memory.entries != 0`, `ctx->memory.entry_count != 0`;
 - `ctx->memory.format` is one of `BOOT_MEMORY_FORMAT_E820` or
-  `BOOT_MEMORY_FORMAT_UEFI_RAW`.
+  `BOOT_MEMORY_FORMAT_UEFI_RAW`;
+- `ctx->memory.entry_size` is at least the **per-format minimum**:
+  - `BOOT_MEMORY_FORMAT_E820`: `entry_size >= sizeof(struct E820_ENTRY)`
+    (20 bytes; the size of the bootloader-produced record);
+  - `BOOT_MEMORY_FORMAT_UEFI_RAW`: `entry_size >= 32` (matching
+    `AARCH64_UEFI_DESCRIPTOR_PREFIX_SIZE`).
 
-The function returns `void`. A static `pmm_initialized` guard inside
-`pmm.c` enforces single-call semantics:
+A single global `entry_size >= 32` check would reject every E820 boot,
+because `struct E820_ENTRY` is 20 bytes. The check must therefore be
+format-specific. The adapter itself may additionally enforce a tighter
+stride if needed.
+
+The function returns `void`. A real (non-assert) guard inside `pmm.c`
+enforces single-call semantics and is set only on the successful path:
 
 ```c
+#include <kernel/arch/cpu.h>   /* arch_cpu_halt */
 static int pmm_initialized;
 void pmm_init(const struct boot_context *ctx) {
-    assert(pmm_initialized == 0);  /* debug-only */
-    pmm_initialized = 1;
-    /* ... body ... */
+    if (pmm_initialized) {
+        log_err("[smp] FATAL: pmm_init called twice\n");
+        arch_cpu_halt();          /* never returns */
+    }
+    /* ... validate, build bits_map/pages_struct/zones_struct ... */
+    pmm_initialized = 1;          /* only on success */
 }
 ```
 
@@ -271,10 +283,22 @@ Strong overrides of both weak symbols. Translates E820 entries to
 After type mapping, the adapter subtracts three closed-open intervals:
 
 - **kernel image LMA**: derived from the x86_64 linker symbols
-  `_text` (start) and `_edata` (end of initialized data). These are the
-  existing x86_64 linker symbols defined in
-  `kernel/arch/x86_64/linker.ld`; the new x86_64 handoff-layout header
-  declares them as `extern char _text[], _edata[]`.
+  `_text` and `_edata` via `Virt_To_Phy()`. The x86_64 linker script
+  places these at high-half virtual addresses
+  (`0xffff800000100000 + offset`); `Virt_To_Phy` is the existing
+  macro (`vaddr - 0xffff800000000000`) that converts them to the
+  physical addresses the bootloader actually loaded the kernel at.
+  Concretely:
+  ```c
+  extern char _text[], _edata[];
+  uint64_t lma_start = Virt_To_Phy((uint64_t)&_text);
+  uint64_t lma_end   = Virt_To_Phy((uint64_t)&_edata);
+  ```
+  `_text`/`_edata` are declared in the new
+  `kernel/include/kernel/arch/x86_64/handoff_layout.h`; `Virt_To_Phy`
+  is the existing x86_64 macro. (Subtracting the raw VMAs
+  `0xffff800000100000+...` directly would be a no-op — the values are
+  above any physical RAM range.)
 - **boot handoff window**: `X86_64_HANDOFF_BASE = 0x60000`,
   `X86_64_HANDOFF_END = 0x64000`, declared in the new
   `kernel/include/kernel/arch/x86_64/handoff_layout.h`. These values
@@ -388,11 +412,33 @@ does not start at physical zero) does not get a fake page at address 0.
 
 Step 4 relies on `PMMngr.start_brk` being set by the caller before
 `pmm_init`. Today only `kernel/kernel/main.c:155-159` sets it; the
-spec adds an equivalent five-line prelude in
-`kernel/arch/aarch64/main.c` so that `aarch64_main` populates
-`PMMngr.start_code`, `end_code`, `end_data`, `end_rodata`, and
-`start_brk` from the aarch64 linker symbols (`_text`/`_edata`/`_end`
-or the LMA helpers) before calling `pmm_init`.
+spec adds the equivalent prelude in `kernel/arch/aarch64/main.c` so
+that `aarch64_main` populates `PMMngr.start_code`, `end_code`,
+`end_data`, `end_rodata`, and `start_brk` from the aarch64 VMA
+linker symbols before calling `pmm_init`. Concretely:
+
+```c
+extern char _text_start[], _text_end[];
+extern char _rodata_start[], _rodata_end[];
+extern char _data_start[], _data_end[];
+extern char _kernel_end[];
+
+PMMngr.start_code  = (uint64_t)&_text_start;
+PMMngr.end_code    = (uint64_t)&_text_end;
+PMMngr.end_data    = (uint64_t)&_data_end;
+PMMngr.end_rodata  = (uint64_t)&_rodata_end;
+PMMngr.start_brk   = (uint64_t)&_kernel_end;
+```
+
+These are the VMA symbols already defined in
+`kernel/arch/aarch64/linker.ld:83-119` (note: aarch64 does **not**
+define `_text`/`_edata`/`_end` — those names are x86_64-only). The
+values are high-half VMAs; `pmm.c` later calls `Virt_To_Phy` on
+`start_brk`-derived pointers, so storing VMAs is correct (matches the
+x86_64 convention). Do **not** use the LMA helpers
+(`aarch64_boot_image_start_addr` / `aarch64_kernel_lma_end_addr`)
+here — those return physical addresses and would put `start_brk` in
+the wrong address space, breaking step 7.
 
 `alloc_pages`, `free_pages`, `alloc_4k_page`, `free_4k_page`,
 `page_cow_get`, `page_cow_put`, `page_cow_refs`, `page_init`, and
@@ -432,7 +478,9 @@ failure (no partial zones, no partial `bits_map`). The
 | `kernel/arch/aarch64/main.c` | Add `PMMngr.start_brk` prelude (5 lines mirroring x86_64 main.c:155-159) and `pmm_init(handoff)` call after `aarch64_ram_init` |
 | `kernel/kernel/main.c` | Update call site from `pmm_init(&bootctx->memory)` to `pmm_init(bootctx)` |
 | `kernel/include/kernel/bootinfo.h` | Keep `BOOT_MEMORY_MAP`, `BOOT_MEMORY_FORMAT_*`, `E820_ENTRY`; add comment pointing to `memory_map.h` for the arch-neutral type |
-| `kernel/Makefile` | x86_64 branch: `$(wildcard memory/*.c)` already picks up `pmm_arch.c`; aarch64 branch: add `memory/pmm.c memory/pmm_arch.c` to the explicit `KERNEL_C_SOURCES` list |
+| `kernel/Makefile` | x86_64 branch: `$(wildcard memory/*.c)` already picks up `pmm_arch.c`; aarch64 branch: the current `KERNEL_C_SOURCES :=` is empty, so the patch **creates** the list: ```make ifeq ($(ARCH),aarch64) KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c endif ``` This makes future `kernel/memory/*.c` additions require an explicit Makefile update; a follow-up could move back to a wildcard. |
+| `mk/components/run.mk` | `test-aarch64-uefi-smp` rule must pass `KERNEL_SELFTEST=1` so the new `#if OS01_SELFTEST` block is compiled in. Mirror `test-kernel-selftest` at `run.mk:350`. |
+| `tests/aarch64_uefi_smp.py` | Add an assertion (or new `--expect-line` arg) requiring the new `UEFI-A64: pmm alloc smoke OK` log line for the `KERNEL_SELFTEST=1` path; preserve the existing `DEGRADED` regex set for the no-ACK path. |
 
 Files **not** modified:
 
@@ -456,9 +504,35 @@ Add `tests/pmm_arch_test.py` (host-side, mirrors
   compiler;
 - links against `kernel/arch/aarch64/ram_core.c` when the AArch64
   profile is selected (so the runner can publish a synthetic
-  `aarch64_ram_map` before invoking the adapter); on x86_64 the
-  trampoline blob symbols are provided by a host-side stub TU that
-  returns empty ranges.
+  `aarch64_ram_map` before invoking the adapter).
+
+**External symbols the host TU must satisfy** (enumerated so the
+implementer does not discover them at link time):
+
+For the **x86_64 adapter**, the host TU must provide:
+
+- `_text`, `_edata` — `char` arrays (the kernel's `_text[]`/`_edata[]`
+  linker symbols). The stub defines them with `_text = (char*)0xffff800000200000;`
+  and `_edata = (char*)0xffff800000300000;` so `Virt_To_Phy` yields
+  sensible physical addresses for the test;
+- `Virt_To_Phy` — the existing x86_64 macro
+  (`(vaddr) - 0xffff800000000000UL`). If the host TU cannot pull in
+  the macro (because the x86_64 kernel headers are not host-safe),
+  the runner compiles a tiny inline definition: `#define Virt_To_Phy(v) ((v) - 0xffff800000000000UL)`;
+- `_binary_arch_x86_64_trampoline_bin_{start,end}` — the embedded
+  trampoline blob symbols. The stub defines them as
+  `_binary_arch_x86_64_trampoline_bin_start = (char*)0;` and
+  `_binary_arch_x86_64_trampoline_bin_end = (char*)0;` so the
+  trampoline exclude interval is empty;
+- `X86_64_HANDOFF_BASE`, `X86_64_HANDOFF_END` — the stub overrides
+  these to fixed test values (e.g. `0x100000`, `0x104000`) so the
+  test fixture can predict the post-exclusion layout.
+
+For the **AArch64 adapter**, the host TU needs only:
+
+- `aarch64_ram_init`, `aarch64_ram_map_get`, `aarch64_ram_normalize`,
+  `aarch64_ram_publish_once` — all already provided by the linked
+  `ram_core.c`. No stubs needed.
 
 The C runner (`tests/pmm_arch_test_runner.c`) shape:
 
@@ -526,16 +600,28 @@ Extend the AArch64 QEMU UEFI test profile to assert:
   appear);
 - a new `OS01_SELFTEST`-gated block in `kernel/arch/aarch64/main.c`
   emits a single known log line after `pmm_init` returns, e.g.
-  `UEFI-A64: pmm alloc smoke OK`. The block does:
+  `UEFI-A64: pmm alloc smoke OK`. The block uses the **macro**
+  `ZONE_NORMAL` (matching every other call site in the kernel:
+  `kernel/memory/slab.c:71`, `pmm.c:480`, `driver/ahci.c:214`), **not**
+  the runtime variable `ZONE_NORMAL_INDEX` — the runtime variable is
+  the index of `ZONE_NORMAL` within `PMMngr.zones_struct`, not the
+  bit-flag value `alloc_pages` switches on:
   ```c
   #if OS01_SELFTEST
-      struct Page *p = alloc_pages(ZONE_NORMAL_INDEX, 1, 0);
+      struct Page *p = alloc_pages(ZONE_NORMAL, 1, 0);
       if (p) { free_pages(p, 1); log_info("UEFI-A64: pmm alloc smoke OK\n"); }
+      else   { log_err("UEFI-A64: pmm alloc smoke FAIL\n"); }
   #endif
   ```
-  The block is enabled by the existing `OS01_SELFTEST` make-variable
-  knob used elsewhere; the test profile sets it; the parser asserts
-  the line appears.
+  The block is enabled by the `KERNEL_SELFTEST=1` make-variable
+  knob; `kernel/Makefile:171-174` defines `-DOS01_SELFTEST=1` only
+  when `KERNEL_SELFTEST=1` is set. The `test-aarch64-uefi-smp` make
+  rule in `mk/components/run.mk:161-170` must be updated to pass
+  `KERNEL_SELFTEST=1` (mirroring `test-kernel-selftest`'s convention
+  at `run.mk:350`), otherwise the block is compiled out and the
+  parser assertion fails. The parser
+  (`tests/aarch64_uefi_smp.py:98-115,131-144`) is extended to
+  accept/require the new log line.
 
 The x86_64 systest suite must remain green:
 
@@ -559,10 +645,16 @@ python3 tests/nettest.py
 make PROFILE=aarch64-clang aarch64-uefi-kernel
 python3 tests/aarch64_ram_test.py
 python3 tests/pmm_arch_test.py
-make PROFILE=aarch64-clang test-aarch64-uefi-smp
+make PROFILE=aarch64-clang KERNEL_SELFTEST=1 aarch64-uefi
+make PROFILE=aarch64-clang KERNEL_SELFTEST=1 test-aarch64-uefi-smp
 make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=1 aarch64-uefi
 make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=1 test-aarch64-uefi-smp-no-ack
 ```
+
+`KERNEL_SELFTEST=1` on the aarch64 lines is required so the new
+smoke-test block in `kernel/arch/aarch64/main.c` is compiled in; the
+no-ACK line must remain without `KERNEL_SELFTEST` to match the
+established `DEGRADED` regression evidence.
 
 The host unit test and the AArch64 QEMU extension are the new
 acceptance bars; x86_64 is the regression bar.
