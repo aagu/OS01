@@ -215,7 +215,6 @@ interrupts disabled. The same behaviour holds on every architecture.
 ```c
 #define MEMORY_RANGE_MAX             64u
 #define MEMORY_RANGE_GRANULE         (1u << 21)   /* 2 MiB, matches PAGE_2M_SIZE */
-#define MEMORY_RANGE_DESCRIPTOR_MIN_SIZE 32u
 
 enum MEMORY_TYPE {
     MEMORY_TYPE_RAM          = 1u,   /* usable */
@@ -467,20 +466,22 @@ failure (no partial zones, no partial `bits_map`). The
 
 | File | Change |
 |---|---|
-| `kernel/include/kernel/memory_map.h` | **NEW** — `enum MEMORY_TYPE`, `struct MEMORY_RANGE`, `MEMORY_RANGE_MAX`, `MEMORY_RANGE_GRANULE`, `MEMORY_RANGE_DESCRIPTOR_MIN_SIZE` |
+| `kernel/include/kernel/memory_map.h` | **NEW** — `enum MEMORY_TYPE`, `struct MEMORY_RANGE`, `MEMORY_RANGE_MAX`, `MEMORY_RANGE_GRANULE` (no `MEMORY_RANGE_DESCRIPTOR_MIN_SIZE` macro; per-format minimums are checked in `pmm_init` directly) |
 | `kernel/include/kernel/memory.h` | Update `pmm_init` declaration to `void pmm_init(const struct boot_context *ctx)` |
-| `kernel/include/kernel/pmm.h` | `pmm_init` declaration removed (now in `memory.h`); `struct E820` removed; `e820_entrys[32]` field removed from `Physical_Memory_Manager`; keep `Physical_Memory_Manager`, `Zone`, `Page`; add `MEMORY_RANGE_GRANULE` shim |
-| `kernel/memory/pmm.c` | Rewrite `pmm_init` body per §"`pmm_init` rewrite"; add `pmm_initialized` guard |
+| `kernel/include/kernel/pmm.h` | `pmm_init` declaration removed (now in `memory.h`); `struct E820` declaration (currently lines 35–40) removed; `e820_entrys[32]` field removed from `Physical_Memory_Manager`; remaining public surface: `PAGE_*_SHIFT/SIZE/MASK/ALIGN`, `ZONE_*` macros, page attribute flags, `Physical_Memory_Manager`, `Zone`, `Page`, and the public allocator entry points |
+| `kernel/memory/pmm.c` | Rewrite `pmm_init` body per §"`pmm_init` rewrite"; add real `pmm_initialized` guard; replace every `color_printk` call (5 sites: `set_page_attribute`, `page_init`, `page_clean`) with arch-portable logging (`printk` non-color variant or `log_err`, both already provided by `kernel/arch/boot_log.h` on aarch64 and by `kernel/kernel/printk.c` on x86_64) |
 | `kernel/memory/pmm_arch.c` | **NEW** — weak default `pmm_arch_normalize` and `pmm_arch_zone_split` (x86_64 behaviour) |
 | `kernel/arch/x86_64/pmm_arch.c` | **NEW** — strong override; E820 to `MEMORY_RANGE[]` translation with kernel-LMA + handoff + trampoline excludes |
 | `kernel/arch/x86_64/handoff_layout.h` | **NEW** (path: `kernel/include/kernel/arch/x86_64/handoff_layout.h`) — declares `X86_64_HANDOFF_BASE`, `X86_64_HANDOFF_END`, and `extern char _text[], _edata[]` |
 | `kernel/arch/aarch64/pmm_arch.c` | **NEW** — strong override of `pmm_arch_normalize` only; reads `aarch64_ram_map_get()` |
-| `kernel/arch/aarch64/main.c` | Add `PMMngr.start_brk` prelude (5 lines mirroring x86_64 main.c:155-159) and `pmm_init(handoff)` call after `aarch64_ram_init` |
+| `kernel/arch/aarch64/printk_stub.c` | **NEW** — minimal `color_printk` shim that forwards to `log_err` from `kernel/arch/boot_log.h`. The existing `kernel/kernel/printk.c` is x86-specific (references `_binary_kernel_font_psf_start`, framebuffer `Pos.FB_addr`), so it cannot be linked on aarch64; this stub provides the symbol `pmm.c` (and any other aarch64 TU that transitively includes its old logging path) needs. |
+| `kernel/memory/slab.c` | Added to aarch64 KERNEL_C_SOURCES. If `slab.c` has x86-only references, an aarch64 stub TU (or `#ifdef __aarch64__` guards) makes `slab_init()` a no-op on aarch64. The PMM-rewrite's step 9 (`slab_init()` call) then compiles unchanged on both arches. |
+| `kernel/arch/aarch64/main.c` | Insertion order is pinned: after `aarch64_ram_init(handoff)` returns successfully → set `PMMngr.start_*`/`end_*`/`start_brk` prelude (5 lines) → `pmm_init(handoff)` → `#if OS01_SELFTEST` smoke-test block (alloc/free roundtrip) → `dtb_init(handoff)` → `gic_init(handoff)` → `smp_boot_aps(handoff)` → `arch_tick_start()` → halt. The smoke-test block sits between `pmm_init` and `dtb_init` so it runs only when `pmm_init` is known-good, and `dtb_init`/`gic_init`/`smp_boot_aps` (the first allocator consumers on aarch64) follow it. |
 | `kernel/kernel/main.c` | Update call site from `pmm_init(&bootctx->memory)` to `pmm_init(bootctx)` |
 | `kernel/include/kernel/bootinfo.h` | Keep `BOOT_MEMORY_MAP`, `BOOT_MEMORY_FORMAT_*`, `E820_ENTRY`; add comment pointing to `memory_map.h` for the arch-neutral type |
-| `kernel/Makefile` | x86_64 branch: `$(wildcard memory/*.c)` already picks up `pmm_arch.c`; aarch64 branch: the current `KERNEL_C_SOURCES :=` is empty, so the patch **creates** the list: ```make ifeq ($(ARCH),aarch64) KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c endif ``` This makes future `kernel/memory/*.c` additions require an explicit Makefile update; a follow-up could move back to a wildcard. |
+| `kernel/Makefile` | x86_64 branch: `$(wildcard memory/*.c)` already picks up `pmm_arch.c`; aarch64 branch: the current `KERNEL_C_SOURCES :=` is empty, so the patch **creates** the list: ```make ifeq ($(ARCH),aarch64) KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/slab.c ARCH_C_SOURCES += $(ARCHDIR)/printk_stub.c endif ``` The wildcard `$(ARCH_C_SOURCES := $(wildcard $(ARCHDIR)/*.c))` already picks up `pmm_arch.c` and `printk_stub.c`. This makes future `kernel/memory/*.c` additions require an explicit Makefile update; a follow-up could move back to a wildcard. |
 | `mk/components/run.mk` | `test-aarch64-uefi-smp` rule must pass `KERNEL_SELFTEST=1` so the new `#if OS01_SELFTEST` block is compiled in. Mirror `test-kernel-selftest` at `run.mk:350`. |
-| `tests/aarch64_uefi_smp.py` | Add an assertion (or new `--expect-line` arg) requiring the new `UEFI-A64: pmm alloc smoke OK` log line for the `KERNEL_SELFTEST=1` path; preserve the existing `DEGRADED` regex set for the no-ACK path. |
+| `tests/aarch64_uefi_smp.py` | Add a new predicate in `passed()` (around line 218): when the run was launched with `KERNEL_SELFTEST=1` (i.e. normal aarch64 path, not no-ACK) and the log contains the success summary `UEFI-A64: RAM ranges=...`, the log MUST also contain `UEFI-A64: pmm alloc smoke OK` before the next `SMP`/`[smp]` line. The `degraded_passed()` path (no-ACK regression) is unchanged. |
 
 Files **not** modified:
 
@@ -512,17 +513,26 @@ implementer does not discover them at link time):
 For the **x86_64 adapter**, the host TU must provide:
 
 - `_text`, `_edata` — `char` arrays (the kernel's `_text[]`/`_edata[]`
-  linker symbols). The stub defines them with `_text = (char*)0xffff800000200000;`
-  and `_edata = (char*)0xffff800000300000;` so `Virt_To_Phy` yields
-  sensible physical addresses for the test;
+  linker symbols). The stub defines them with
+  `_text = (char*)0xffff800000200000;` and
+  `_edata = (char*)0xffff800000300000;` so `Virt_To_Phy` yields a
+  1 MiB `[0x200000, 0x300000)` exclude. Combined with the test
+  fixture's E820 type-1 entry spanning `[0, 0x40000000)`, the
+  adapter must produce two MEMORY_RANGE fragments — `[0, 0x200000)`
+  (2 MiB) and `[0x300000, 0x40000000)` — so the test exercises the
+  granule-aligned multi-fragment output path, not just the
+  single-range happy path;
 - `Virt_To_Phy` — the existing x86_64 macro
   (`(vaddr) - 0xffff800000000000UL`). If the host TU cannot pull in
   the macro (because the x86_64 kernel headers are not host-safe),
   the runner compiles a tiny inline definition: `#define Virt_To_Phy(v) ((v) - 0xffff800000000000UL)`;
 - `_binary_arch_x86_64_trampoline_bin_{start,end}` — the embedded
-  trampoline blob symbols. The stub defines them as
-  `_binary_arch_x86_64_trampoline_bin_start = (char*)0;` and
-  `_binary_arch_x86_64_trampoline_bin_end = (char*)0;` so the
+  trampoline blob symbols. The stub declares them with the same
+  signature as `kernel/include/kernel/arch/x86_64/trampoline.h`
+  (`extern char _binary_arch_x86_64_trampoline_bin_start[]; extern
+  char _binary_arch_x86_64_trampoline_bin_end[];`) and defines them
+  as `_binary_arch_x86_64_trampoline_bin_start =
+  _binary_arch_x86_64_trampoline_bin_end = (char*)0;` so the
   trampoline exclude interval is empty;
 - `X86_64_HANDOFF_BASE`, `X86_64_HANDOFF_END` — the stub overrides
   these to fixed test values (e.g. `0x100000`, `0x104000`) so the
