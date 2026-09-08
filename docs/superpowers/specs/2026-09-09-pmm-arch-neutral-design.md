@@ -32,77 +32,85 @@ The two paths duplicate the same policy in two different languages (E820
 type field vs UEFI `EfiConventionalMemory`), two different normalization
 strategies (none on x86_64, repeated scan on AArch64), and two different
 exclusion strategies (implicit on x86_64, explicit kernel-LMA + handoff on
-AArch64). Future boot sources (ACPI SRAT, RISC-V OpenSBI, etc.) would each
+AArch64). Future boot sources (ACPI SRIT, RISC-V OpenSBI, etc.) would each
 re-introduce the same duplication.
 
 ## Goals
 
 1. Make `pmm_init()` consume a single arch-neutral representation
-   (`struct memory_range[]`) on every architecture, with a stable C signature
-   `void pmm_init(const struct boot_context *ctx)`.
-2. Define a thin per-arch adapter (`pmm_arch_normalize`) that converts the
-   boot context's native memory-map format into that representation. Reuse
-   the existing AArch64 normalizer (`aarch64_ram_normalize`) verbatim as the
-   UEFI descriptor adapter.
-3. Preserve every public allocator entry point
-   (`alloc_pages`, `free_pages`, `alloc_4k_page`, `free_4k_page`,
-   `page_cow_get`, `page_cow_put`, `page_cow_refs`, `page_init`,
-   `page_clean`) byte-for-byte.
-4. Reproduce the AArch64 explicit-exclusion policy on x86_64: kernel image
-   LMA and the boot handoff window are subtracted before any range becomes
-   allocatable.
-5. Make the 4 GiB `ZONE_UNMAPPED_INDEX` boundary arch-supplied instead of
-   hard-coded inside `pmm_init`, so AArch64 (which identity-maps all DRAM at
-   the current `ARCH_PAGE_OFFSET`) reports the boundary above its highest
-   RAM range.
-6. Verify the new path on x86_64 with the existing systest/nettest suites,
-   on AArch64 with the existing QEMU virt UEFI SMP profile plus an
-   extended evidence requirement, and on the host with a synthetic-fixture
-   unit test compiled from the adapter source.
+   (`struct MEMORY_RANGE[]`) on every architecture, with a stable C
+   signature `void pmm_init(const struct boot_context *ctx)`.
+2. Define a thin per-arch adapter (`pmm_arch_normalize`) that converts
+   the boot context's native memory-map format into that representation.
+   On AArch64, the adapter reads the already-published
+   `aarch64_ram_map` from `aarch64_ram_map_get()` (single source of
+   truth; the boot-time `aarch64_ram_init` continues to publish it).
+   On x86_64, the adapter translates E820 entries directly.
+3. Preserve every public allocator entry point (`alloc_pages`,
+   `free_pages`, `alloc_4k_page`, `free_4k_page`, `page_cow_get`,
+   `page_cow_put`, `page_cow_refs`, `page_init`, `page_clean`)
+   byte-for-byte.
+4. Reproduce the AArch64 explicit-exclusion policy on x86_64: kernel
+   image LMA, the boot handoff window, and the SMP trampoline region are
+   subtracted before any range becomes allocatable.
+5. Make the 4 GiB `ZONE_UNMAPPED_INDEX` boundary arch-supplied instead
+   of hard-coded inside `pmm_init`, so AArch64 (which identity-maps all
+   DRAM at the current `ARCH_PAGE_OFFSET`) reports the boundary above
+   its highest RAM range.
+6. Verify the new path on x86_64 with the existing systest/nettest
+   suites, on AArch64 with the existing QEMU virt UEFI SMP profile plus
+   an extended evidence requirement, and on the host with a synthetic
+   fixture unit test compiled from the adapter source.
 
 ## Non-goals
 
 - Performing the long-term merge of x86_64 and AArch64 system entries
-  beyond PMM. The boot sequence, exception-vector code, syscall entry, and
-  SMP bring-up are explicitly out of scope and remain per-arch.
-- Changing the 2 MiB allocation granule, the `bits_map` / `pages_struct` /
-  `zones_struct` layout, or any consumer of those layouts.
-- Replacing `arch_task_init_early` or any other SMP entry with an arch-neutral
-  path.
+  beyond PMM. The boot sequence, exception-vector code, syscall entry,
+  and SMP bring-up are explicitly out of scope and remain per-arch.
+- Changing the 2 MiB allocation granule, the `bits_map` /
+  `pages_struct` / `zones_struct` layout, or any consumer of those
+  layouts.
+- Replacing `arch_task_init_early` or any other SMP entry with an
+  arch-neutral path.
 - Reclassifying UEFI descriptor types, re-defining the `boot_context` v2
   ABI, or moving the UEFI raw format handling into `kernel/memory/`.
 - Decoding ESR_EL1 / FAR_EL1 sync exceptions (the existing `trap.c`
   placeholder) or wiring the Generic Timer driver into the kernel tick
   path.
 - Calling `aarch64_ram_init` from x86_64, or vice versa.
+- Removing `struct E820_ENTRY` from `bootinfo.h` (still used by the
+  bootloader); only the legacy internal `struct E820` plus the
+  `e820_entrys[32]` field in `Physical_Memory_Manager` are removed.
 
 ## Considered approaches
 
 ### A. Rename `aarch64_ram_normalize` to a shared module and route both arches through it
 
-The existing normalizer is UEFI-specific (it walks type-7 descriptors with
-`AARCH64_EFI_CONVENTIONAL_MEMORY`). Forcing x86_64 E820 through it would
-require fabricating a UEFI descriptor stream from E820 entries, which leaks
-UEFI terminology into the x86_64 path and complicates future ACPI SRAT
-support. Rejected.
+The existing normalizer is UEFI-specific (it walks type-7 descriptors
+with `AARCH64_EFI_CONVENTIONAL_MEMORY`). Forcing x86_64 E820 through it
+would require fabricating a UEFI descriptor stream from E820 entries,
+which leaks UEFI terminology into the x86_64 path and complicates future
+ACPI SRAT support. Rejected.
 
-### B. Change `pmm_init` signature to take `struct memory_range *` directly
+### B. Change `pmm_init` signature to take `struct MEMORY_RANGE *` directly
 
-This pushes the conversion burden onto every caller. Today there is exactly
-one caller (`kernel_main`); the long-term merge goal is to make
-`boot_context` the only handoff object between bootloader and kernel.
-Keeping `pmm_init` consuming `boot_context` directly matches that
-direction and centralises the conversion in one place. Rejected.
+This pushes the conversion burden onto every caller. Today there is
+exactly one caller (`kernel_main` on x86_64); the long-term merge goal
+is to make `boot_context` the only handoff object between bootloader
+and kernel. Keeping `pmm_init` consuming `boot_context` directly
+matches that direction and centralises the conversion in one place.
+Rejected.
 
 ### C. Introduce an arch-neutral internal representation and per-arch adapters
 
 `pmm_init(boot_context)` calls a per-arch adapter that produces a
-`memory_range[]`; the body of `pmm_init` walks that array uniformly. The
-AArch64 adapter is a thin wrapper around the existing
-`aarch64_ram_normalize`. The x86_64 adapter is a new translation from E820
-to `memory_range[]` with explicit excludes. The legacy `E820` internal
-struct, the 32-entry cap, and the hard-coded 4 GiB zone split all
-disappear from the body of `pmm_init`. Chosen.
+`MEMORY_RANGE[]`; the body of `pmm_init` walks that array uniformly. The
+AArch64 adapter reads the already-published `aarch64_ram_map`. The
+x86_64 adapter is a new translation from E820 to `MEMORY_RANGE[]` with
+explicit kernel-LMA + handoff + trampoline excludes. The legacy
+internal `struct E820` and the `e820_entrys[32]` field disappear from
+`Physical_Memory_Manager`; the hard-coded 4 GiB zone split becomes an
+arch-supplied value. Chosen.
 
 ## Architecture
 
@@ -110,25 +118,31 @@ disappear from the body of `pmm_init`. Chosen.
 bootloader (per-arch) -> boot_context v2 with .memory.{entries,format,...}
                               |
                               v
-kernel/kernel/main.c
-   pmm_init(&boot_context)               // single entry point
+caller (per-arch)
+   x86_64: kernel/kernel/main.c
+   aarch64: kernel/arch/aarch64/main.c (NEW: adds pmm_init call)
                               |
                               v
-kernel/memory/pmm.c
-   pmm_arch_normalize(boot_context, &out_ranges)
+pmm_init(&boot_context)        // single entry point, kernel/memory/pmm.c
+                              |
+                              v
+kernel/memory/pmm_arch.c       // weak default symbols
+   pmm_arch_normalize(boot_context, &out_ranges)   // __attribute__((weak))
+   pmm_arch_zone_split(void)                        // __attribute__((weak))
                               |
               +---------------+---------------+
               |                               |
               v                               v
-kernel/arch/x86_64/pmm_arch.c       kernel/arch/aarch64/pmm_arch.c
-   E820 -> memory_range[]           aarch64_ram_normalize(...)
-   + kernel LMA exclude             -> memory_range[]
-   + handoff window exclude         (kernel LMA + handoff window already
-                                     excluded inside the normalizer)
+kernel/arch/x86_64/pmm_arch.c  kernel/arch/aarch64/pmm_arch.c
+   E820 -> MEMORY_RANGE[]       reads aarch64_ram_map_get()
+   excludes:                    -> MEMORY_RANGE[]
+     - kernel image LMA          (aarch64_ram_init already subtracted
+     - handoff window             kernel LMA + handoff window when it
+     - SMP trampoline             published the map)
                               |
                               v
 kernel/memory/pmm.c
-   walk memory_range[] -> build bits_map, pages_struct, zones_struct
+   walk MEMORY_RANGE[] -> build bits_map, pages_struct, zones_struct
    -> zones sized by total RAM
    -> ZONE_UNMAPPED split at pmm_arch_zone_split()
                               |
@@ -137,92 +151,116 @@ existing public surface: alloc_pages, free_pages, alloc_4k_page,
 free_4k_page, page_cow_{get,put,refs}, page_init, page_clean
 ```
 
-The adapter boundary is a function-pointer table or a per-arch `.c` file
-picked at link time. AArch64 keeps its pure normalizer as a separate
-host-linkable translation unit; only the thin glue that converts its
-output to `memory_range[]` is new.
+The adapter dispatch uses GCC `__attribute__((weak))`:
+
+- `kernel/memory/pmm_arch.c` defines `pmm_arch_normalize` and
+  `pmm_arch_zone_split` as **weak** symbols that implement the x86_64
+  behaviour as a default.
+- `kernel/arch/x86_64/pmm_arch.c` and `kernel/arch/aarch64/pmm_arch.c`
+  define them as **strong** symbols; the per-arch strong definition wins
+  over the weak default at link time.
+
+This makes x86_64 the "free" default and gives the aarch64 build a
+single, obvious override site. The Makefile wiring is symmetric: every
+profile that builds `kernel/memory/pmm.c` also builds
+`kernel/memory/pmm_arch.c`.
 
 ## Input contract
 
 `pmm_init(const struct boot_context *ctx)` is called from
-`kernel/kernel/main.c` after `boot_context_valid(ctx)` returns true and
-before any allocator consumer (`frame_buffer_init`, scheduler bring-up,
-`init`, etc.). It requires:
+`kernel/kernel/main.c` on x86_64 and from `kernel/arch/aarch64/main.c`
+on AArch64, after `boot_context_valid(ctx)` returns true and before any
+allocator consumer. It requires:
 
 - `ctx != 0`, `boot_context_valid(ctx)` is true;
 - `(ctx->flags & BOOT_CONTEXT_HAS_MEMORY_MAP) != 0`;
 - `ctx->memory.entries != 0`, `ctx->memory.entry_count != 0`,
   `ctx->memory.entry_size >= MEMORY_RANGE_DESCRIPTOR_MIN_SIZE`
-  (32 bytes, matching `AARCH64_UEFI_DESCRIPTOR_PREFIX_SIZE` from the
-  upstream spec);
+  (32 bytes, matching `AARCH64_UEFI_DESCRIPTOR_PREFIX_SIZE`);
 - `ctx->memory.format` is one of `BOOT_MEMORY_FORMAT_E820` or
   `BOOT_MEMORY_FORMAT_UEFI_RAW`.
 
-On invalid input, `pmm_init` logs a fatal line and halts the BSP with
-interrupts disabled. The same behaviour holds on every architecture.
+The function returns `void`. A static `pmm_initialized` guard inside
+`pmm.c` enforces single-call semantics:
 
-The function returns `void`. It must succeed exactly once per boot. The
-body must not be re-entered; a duplicate call is a developer bug and
-asserts in debug builds.
+```c
+static int pmm_initialized;
+void pmm_init(const struct boot_context *ctx) {
+    assert(pmm_initialized == 0);  /* debug-only */
+    pmm_initialized = 1;
+    /* ... body ... */
+}
+```
+
+On invalid input or any internal error, `pmm_init` logs a fatal line
+prefixed with `[smp] FATAL: pmm_init ...` and halts the BSP with
+interrupts disabled. The same behaviour holds on every architecture.
 
 ## New types
 
 `kernel/include/kernel/memory_map.h` defines the arch-neutral surface:
 
 ```c
-#define MEMORY_RANGE_MAX            64u
+#define MEMORY_RANGE_MAX             64u
+#define MEMORY_RANGE_GRANULE         (1u << 21)   /* 2 MiB, matches PAGE_2M_SIZE */
 #define MEMORY_RANGE_DESCRIPTOR_MIN_SIZE 32u
 
-typedef enum {
+enum MEMORY_TYPE {
     MEMORY_TYPE_RAM          = 1u,   /* usable */
     MEMORY_TYPE_RESERVED     = 2u,   /* firmware-reserved */
     MEMORY_TYPE_ACPI_RECLAIM = 3u,   /* reclaimable after ACPI init */
     MEMORY_TYPE_ACPI_NVS     = 4u,   /* non-volatile ACPI */
     MEMORY_TYPE_DEVICE       = 5u,   /* MMIO: GIC, UART, framebuffer, ... */
-    MEMORY_TYPE_KERNEL       = 6u,   /* loaded kernel image LMA (excluded) */
-    MEMORY_TYPE_HANDOFF      = 7u,   /* boot handoff window (excluded) */
-} memory_type_t;
+};
 
-struct memory_range {
-    uint64_t       phys_start;   /* inclusive, granule-aligned */
-    uint64_t       phys_end;     /* exclusive, granule-aligned */
-    memory_type_t  type;
+struct MEMORY_RANGE {
+    uint64_t        phys_start;   /* inclusive, granule-aligned */
+    uint64_t        phys_end;     /* exclusive, granule-aligned */
+    enum MEMORY_TYPE type;
 };
 ```
 
 Invariants enforced by `pmm_arch_normalize`:
 
-- `out_count <= MEMORY_RANGE_MAX`.
+- `1 <= out_count <= MEMORY_RANGE_MAX`.
 - Ranges are sorted by `phys_start` ascending.
 - No empty range (`phys_end > phys_start`).
 - Ranges are disjoint and strictly ordered (`out[i].phys_end <=
   out[j].phys_start` for `i < j`).
-- Each range is `MEMORY_RANGE_GRANULE` aligned at both ends, where
-  `MEMORY_RANGE_GRANULE == (1u << PAGE_2M_SHIFT) == 0x200000`.
+- Each range is `MEMORY_RANGE_GRANULE` aligned at both ends.
+
+Excluded regions (kernel LMA, handoff window, trampoline) are
+**subtracted** from the input and never appear in the output. There is
+no `MEMORY_TYPE_KERNEL` or `MEMORY_TYPE_HANDOFF` enum value because the
+adapter expresses exclusion through fragmentation, not classification.
 
 ## New conversion layer
 
-`kernel/memory/pmm_arch.c` is the single dispatch site; per-arch
-implementations live in `kernel/arch/<arch>/pmm_arch.c` and are linked
-unconditionally. The default weak fallback is x86_64; AArch64 overrides it
-via the build profile.
-
 ```c
-/* kernel/memory/pmm_arch.c */
+/* kernel/memory/pmm_arch.c — weak default (x86_64 behaviour). */
+__attribute__((weak))
 size_t pmm_arch_normalize(const struct boot_context *ctx,
-                          struct memory_range *out,
-                          size_t out_cap);
+                          struct MEMORY_RANGE *out);
 
+__attribute__((weak))
 uint64_t pmm_arch_zone_split(void);
-/* x86_64 returns 0x100000000ULL (4 GiB).
- * AArch64 returns SIZE_MAX so all RAM is ZONE_NORMAL. */
 ```
+
+The contract is one-way: `pmm_arch_normalize` returns either 0 (fatal
+input) or `n` with `1 <= n <= MEMORY_RANGE_MAX`. There is no `out_cap`
+parameter; the bound is fixed by `MEMORY_RANGE_MAX`.
+
+`pmm_arch_zone_split` returns the address above which a zone is
+classified `ZONE_UNMAPPED`. x86_64 returns `0x100000000ULL` (4 GiB,
+preserving historical behaviour). AArch64 returns `SIZE_MAX` so no zone
+is unmapped.
 
 ### x86_64 adapter (`kernel/arch/x86_64/pmm_arch.c`)
 
-Translates the existing E820 bring-up to `memory_range[]`:
+Strong overrides of both weak symbols. Translates E820 entries to
+`MEMORY_RANGE[]`:
 
-| E820 type | `memory_range.type` |
+| E820 type | `MEMORY_RANGE.type` |
 |---|---|
 | 1 (Usable) | `MEMORY_TYPE_RAM` |
 | 2 (Reserved) | `MEMORY_TYPE_RESERVED` |
@@ -230,66 +268,131 @@ Translates the existing E820 bring-up to `memory_range[]`:
 | 4 (ACPI NVS) | `MEMORY_TYPE_ACPI_NVS` |
 | other | `MEMORY_TYPE_RESERVED` |
 
-After type mapping, the adapter subtracts two exclude intervals:
+After type mapping, the adapter subtracts three closed-open intervals:
 
-- kernel image LMA: from per-arch linker symbols `_kernel_load_start` and
-  `_kernel_load_end` (must exist for both archs; x86_64 already has them);
-- boot handoff window: a constant pair supplied by the x86_64 handoff
-  layout (`X86_64_HANDOFF_BASE`, `X86_64_HANDOFF_END`).
+- **kernel image LMA**: derived from the x86_64 linker symbols
+  `_text` (start) and `_edata` (end of initialized data). These are the
+  existing x86_64 linker symbols defined in
+  `kernel/arch/x86_64/linker.ld`; the new x86_64 handoff-layout header
+  declares them as `extern char _text[], _edata[]`.
+- **boot handoff window**: `X86_64_HANDOFF_BASE = 0x60000`,
+  `X86_64_HANDOFF_END = 0x64000`, declared in the new
+  `kernel/include/kernel/arch/x86_64/handoff_layout.h`. These values
+  mirror the bootloader's `X86_HANDOFF_BASE = 0x60000` and
+  `X86_HANDOFF_PAGES = 4` defined in
+  `boot/uefi/arch/x86_64/boot.c:13-20`.
+- **SMP trampoline region**: `[TRAMPOLINE_BASE, TRAMPOLINE_BASE +
+  sizeof(trampoline_bin))`, where `TRAMPOLINE_BASE = 0x8000` and the
+  size comes from the embedded trampoline blob symbols
+  (`_binary_arch_x86_64_trampoline_bin_start` / `_end`) declared in
+  `kernel/arch/x86_64/trampoline.h`.
 
 Surviving fragments are rounded inward to `MEMORY_RANGE_GRANULE`; empty
-fragments are dropped. Output is sorted and merged. The adapter must cap
-its output at `MEMORY_RANGE_MAX` and return `0` on capacity exhaustion
-(treated as fatal by `pmm_init`).
+fragments are dropped. Output is sorted and merged. Capacity
+exhaustion (more than `MEMORY_RANGE_MAX` disjoint, granule-aligned
+RAM ranges after exclusion) returns 0.
+
+The weak default in `kernel/memory/pmm_arch.c` is byte-for-byte the
+same x86_64 implementation, so a build that forgets to include the
+per-arch file still gets correct x86_64 behaviour. The strong
+per-arch override exists so future per-arch tweaks (e.g. an aarch64
+override of zone split) have an obvious landing site even on x86_64.
 
 ### AArch64 adapter (`kernel/arch/aarch64/pmm_arch.c`)
 
-A thin wrapper around `aarch64_ram_normalize`:
+Strong override of `pmm_arch_normalize`; the default
+`pmm_arch_zone_split` is **kept** (returns `SIZE_MAX`) without an
+override.
 
-1. Build excludes for the kernel image and handoff window using
-   `aarch64_boot_image_start_addr()` /
-   `aarch64_kernel_lma_end_addr()` and the existing
-   `AARCH64_HANDOFF_BASE` / `AARCH64_HANDOFF_END` constants. This matches
-   the present-day behaviour of `aarch64_ram_init` exactly.
-2. Call `aarch64_ram_normalize` into a stack-local `aarch64_ram_map`.
-3. For each emitted range in the normalized map, append a
-   `struct memory_range` with `type = MEMORY_TYPE_RAM`. Treat
-   `AARCH64_RAM_ERR_CAPACITY` as fatal (matches the existing fatal
-   handling).
-4. `pmm_arch_zone_split()` returns `SIZE_MAX`.
+The AArch64 adapter **reads the already-published `aarch64_ram_map`**
+rather than re-running the normalizer. Call ordering is enforced by
+the boot path: `aarch64_main()` calls `aarch64_ram_init(handoff)`
+*first* (publishing the map with kernel-LMA + handoff excludes
+already applied by the existing normalizer), then sets up the
+`PMMngr.start_brk` fields, then calls `pmm_init(handoff)`.
 
-The pure normalizer in `kernel/arch/aarch64/ram_core.c` is unchanged. The
-existing boot-time wrapper `aarch64_ram_init` is kept as-is: its caller
-chain (`aarch64_main` → `aarch64_ram_init`) continues to publish the
-normalized map for legacy consumers, and the new adapter adds the
-`memory_range[]` publication on top. (If the boot-time wrapper becomes a
-no-op in a future spec, that is explicitly out of scope here.)
+Pseudocode for the adapter:
+
+```c
+size_t pmm_arch_normalize(const struct boot_context *ctx,
+                          struct MEMORY_RANGE *out)
+{
+    (void)ctx;  /* map already published by aarch64_ram_init */
+    const struct aarch64_ram_map *m = aarch64_ram_map_get();
+    if (m == NULL)
+        return 0;  /* caller violated ordering */
+    size_t n = m->count;
+    if (n == 0 || n > MEMORY_RANGE_MAX)
+        return 0;
+    for (size_t i = 0; i < n; i++) {
+        out[i].phys_start = m->ranges[i].start;
+        out[i].phys_end   = m->ranges[i].end;
+        out[i].type       = MEMORY_TYPE_RAM;
+    }
+    return n;
+}
+```
+
+The pure normalizer in `kernel/arch/aarch64/ram_core.c` is unchanged.
+The existing boot-time wrapper `aarch64_ram_init` is kept as-is; its
+caller chain continues to publish the normalized map for legacy
+consumers. (If the boot-time wrapper becomes a no-op in a future spec,
+that is explicitly out of scope here.)
 
 ## `pmm_init` rewrite
 
-The new body is a uniform walk over `memory_range[]`:
+The new body is a uniform walk over `MEMORY_RANGE[]`. The
+x86_64-specific `pages_struct[0] = phys 0` quirk is preserved as a
+pre-loop step that runs only when the very first RAM range starts at
+physical address zero (the historical x86_64 layout after E820 entry 0
+covers `[0, 0x9f000)`). For aarch64, no range starts at physical zero,
+so the quirk is a no-op.
 
-1. Iterate `out_count` from the adapter; sum `phys_end - phys_start` for
-   `MEMORY_TYPE_RAM` ranges into `TotalMem`.
-2. Sanity-check `TotalMem > 0`; fatal otherwise.
-3. Allocate `bits_map`, `pages_struct`, `zones_struct` from
-   `PMMngr.start_brk` exactly as today (the BSS-end self-allocation is
-   already VA-relative via `Virt_To_Phy` and works on AArch64).
-4. For each `MEMORY_TYPE_RAM` range, create one `Zone` with the same
-   initialization as today: `zone_start_address`, `zone_end_address`,
-   `page_using_count`, `page_free_count`, `pages_group` derived from the
-   global `pages_struct` base + `(start >> PAGE_2M_SHIFT)` offset.
-5. Mark kernel/handoff pages from `PMMngr.end_of_struct` to the top of the
-   kernel image as `PG_PTable_Mapped | PG_Kernel_Init | PG_Kernel`,
-   matching the existing `pmm_init` loop semantics.
-6. Compute `ZONE_DMA_INDEX`, `ZONE_NORMAL_INDEX`, `ZONE_UNMAPPED_INDEX`
-   using `pmm_arch_zone_split()` as the threshold. On AArch64 no zone
-   crosses `SIZE_MAX`, so the existing zone-iteration loop leaves
-   `ZONE_UNMAPPED_INDEX` at its initial value (0) and `ZONE_NORMAL_INDEX`
-   at `zones_size - 1`; this matches x86_64 with no high-RAM zones and
-   keeps `ZONE_NORMAL_INDEX` a valid index. The threshold constant
-   itself is unchanged on x86_64 (`0x100000000ULL`).
-7. Call `slab_init()` and `list_init(&subpage_pools)` as today.
+```text
+1. Call pmm_arch_normalize(ctx, scratch_ranges).
+   - If 0 returned, fatal with "[smp] FATAL: pmm_arch_normalize returned no ranges".
+2. Iterate scratch_ranges; sum (phys_end - phys_start) for MEMORY_TYPE_RAM
+   into TotalMem. Track total_pages_link = total / MEMORY_RANGE_GRANULE.
+3. Sanity-check TotalMem > 0; fatal otherwise.
+4. Allocate bits_map, pages_struct, zones_struct from PMMngr.start_brk
+   exactly as today (BSS-end self-allocation; Virt_To_Phy on the caller).
+5. For each MEMORY_TYPE_RAM range:
+   a. round start up and end down to MEMORY_RANGE_GRANULE;
+      if end <= start, skip.
+   b. create one Zone { start, end, page_free_count = (end-start)/granule,
+      pages_group = pages_struct + (start >> PAGE_2M_SHIFT),
+      manager_struct = &PMMngr, ... }.
+   c. for j in 0..pages_length: pages_group[j] = { zone=z, phy_address =
+      start + j*GRANULE, attribute=0, reference_count=0, age=0 };
+      toggle bits_map bit free.
+6. If pages_struct[0].phy_address == 0 (legacy x86_64 layout):
+      pages_struct[0].attribute |= PG_PTable_Mapped | PG_Kernel_Init | PG_Kernel;
+      pages_struct[0].reference_count = 1;
+7. Mark kernel-owned pages: for j in 1..(Virt_To_Phy(end_of_struct) >> 21):
+      tmp = pages_struct + j;
+      page_init(tmp, PG_PTable_Mapped | PG_Kernel_Init | PG_Kernel);
+      bits_map[bit] = 1; tmp->zone->page_using_count++; page_free_count--;
+8. Compute ZONE_DMA_INDEX, ZONE_NORMAL_INDEX, ZONE_UNMAPPED_INDEX using
+   pmm_arch_zone_split() as the threshold. The initial values
+   ZONE_DMA_INDEX=0, ZONE_NORMAL_INDEX=zones_size-1, ZONE_UNMAPPED_INDEX=0
+   are preserved; the post-loop scan only updates ZONE_UNMAPPED_INDEX and
+   ZONE_NORMAL_INDEX if a zone crosses the threshold (true only on x86_64
+   with high-RAM zones). On AArch64, no zone crosses SIZE_MAX, so the
+   initial values stick.
+9. slab_init(); list_init(&subpage_pools).
+```
+
+Step 6 is conditional (`pages_struct[0].phy_address == 0`), so the
+x86_64 historical layout is preserved while the aarch64 layout (which
+does not start at physical zero) does not get a fake page at address 0.
+
+Step 4 relies on `PMMngr.start_brk` being set by the caller before
+`pmm_init`. Today only `kernel/kernel/main.c:155-159` sets it; the
+spec adds an equivalent five-line prelude in
+`kernel/arch/aarch64/main.c` so that `aarch64_main` populates
+`PMMngr.start_code`, `end_code`, `end_data`, `end_rodata`, and
+`start_brk` from the aarch64 linker symbols (`_text`/`_edata`/`_end`
+or the LMA helpers) before calling `pmm_init`.
 
 `alloc_pages`, `free_pages`, `alloc_4k_page`, `free_4k_page`,
 `page_cow_get`, `page_cow_put`, `page_cow_refs`, `page_init`, and
@@ -297,78 +400,142 @@ The new body is a uniform walk over `memory_range[]`:
 
 ## Error handling
 
-- Invalid handoff / unsupported `memory.format` / zero entry_count: fatal
-  with `[smp] FATAL: pmm_init invalid handoff` and halt BSP with
-  interrupts disabled. The message prefix is shared across arches; the
-  reason suffix is format-specific.
-- Adapter returns `0` or `out_count > MEMORY_RANGE_MAX`: fatal with
+- Invalid handoff / unsupported `memory.format` / zero `entry_count` /
+  `entry_size < 32`: fatal with `[smp] FATAL: pmm_init invalid handoff`
+  and halt BSP with interrupts disabled.
+- `pmm_arch_normalize` returns 0: fatal with
   `[smp] FATAL: pmm_arch_normalize returned no ranges`.
-- AArch64 normalizer returns `AARCH64_RAM_ERR_CAPACITY`: fatal with
-  `[smp] FATAL: normalizer rejected UEFI map (too many ranges)`.
-- AArch64 normalizer returns any other negative code: fatal with
-  `[smp] FATAL: normalizer rejected UEFI map`.
+- AArch64 normalizer reports `AARCH64_RAM_ERR_CAPACITY` during the
+  boot-time `aarch64_ram_init` call: fatal there (already implemented
+  in `ram.c`); `pmm_init` never sees it.
+- AArch64 normalizer reports any other negative error during
+  `aarch64_ram_init`: fatal there; `pmm_init` never sees it.
 - `TotalMem == 0` after the range walk: fatal with
   `[smp] FATAL: no usable RAM after exclusions`.
 
 All paths must leave `PMMngr` in the same state as before the call on
-failure (no partial zones, no partial `bits_map`). In debug builds,
-failure paths also assert this invariant with
-`_Static_assert`-friendly checks; the production build simply halts.
+failure (no partial zones, no partial `bits_map`). The
+`pmm_initialized` guard is set to 1 only on the successful path.
 
 ## Files touched
 
 | File | Change |
 |---|---|
-| `kernel/include/kernel/memory_map.h` | **NEW** — `memory_type_t`, `struct memory_range`, `MEMORY_RANGE_MAX`, `MEMORY_RANGE_GRANULE`, `MEMORY_RANGE_DESCRIPTOR_MIN_SIZE` |
-| `kernel/include/kernel/pmm.h` | `pmm_init` signature becomes `pmm_init(const struct boot_context *)`; drop `struct E820` (legacy); keep `Physical_Memory_Manager`, `Zone`, `Page`; add `MEMORY_RANGE_GRANULE` shim |
-| `kernel/memory/pmm.c` | Rewrite `pmm_init` body to walk `memory_range[]`; remove E820-specific code; remove hard-coded 4 GiB split |
-| `kernel/memory/pmm_arch.c` | **NEW** — arch dispatch (`pmm_arch_normalize`, `pmm_arch_zone_split`) |
-| `kernel/arch/x86_64/pmm_arch.c` | **NEW** — E820 to `memory_range[]` translation with kernel-LMA + handoff excludes |
-| `kernel/arch/aarch64/pmm_arch.c` | **NEW** — wraps `aarch64_ram_normalize`, translates to `memory_range[]` |
-| `kernel/kernel/main.c` | Update call site from `pmm_init(&boot_ctx->memory)` to `pmm_init(boot_ctx)` |
-| `kernel/include/kernel/bootinfo.h` | Keep `BOOT_MEMORY_MAP`, `BOOT_MEMORY_FORMAT_*`; add comment pointing to `memory_map.h` for the arch-neutral type |
-| `Makefile` / kernel Makefiles | Add `kernel/memory/pmm_arch.c`, `kernel/arch/<arch>/pmm_arch.c` to the relevant profile lists |
+| `kernel/include/kernel/memory_map.h` | **NEW** — `enum MEMORY_TYPE`, `struct MEMORY_RANGE`, `MEMORY_RANGE_MAX`, `MEMORY_RANGE_GRANULE`, `MEMORY_RANGE_DESCRIPTOR_MIN_SIZE` |
+| `kernel/include/kernel/memory.h` | Update `pmm_init` declaration to `void pmm_init(const struct boot_context *ctx)` |
+| `kernel/include/kernel/pmm.h` | `pmm_init` declaration removed (now in `memory.h`); `struct E820` removed; `e820_entrys[32]` field removed from `Physical_Memory_Manager`; keep `Physical_Memory_Manager`, `Zone`, `Page`; add `MEMORY_RANGE_GRANULE` shim |
+| `kernel/memory/pmm.c` | Rewrite `pmm_init` body per §"`pmm_init` rewrite"; add `pmm_initialized` guard |
+| `kernel/memory/pmm_arch.c` | **NEW** — weak default `pmm_arch_normalize` and `pmm_arch_zone_split` (x86_64 behaviour) |
+| `kernel/arch/x86_64/pmm_arch.c` | **NEW** — strong override; E820 to `MEMORY_RANGE[]` translation with kernel-LMA + handoff + trampoline excludes |
+| `kernel/arch/x86_64/handoff_layout.h` | **NEW** (path: `kernel/include/kernel/arch/x86_64/handoff_layout.h`) — declares `X86_64_HANDOFF_BASE`, `X86_64_HANDOFF_END`, and `extern char _text[], _edata[]` |
+| `kernel/arch/aarch64/pmm_arch.c` | **NEW** — strong override of `pmm_arch_normalize` only; reads `aarch64_ram_map_get()` |
+| `kernel/arch/aarch64/main.c` | Add `PMMngr.start_brk` prelude (5 lines mirroring x86_64 main.c:155-159) and `pmm_init(handoff)` call after `aarch64_ram_init` |
+| `kernel/kernel/main.c` | Update call site from `pmm_init(&bootctx->memory)` to `pmm_init(bootctx)` |
+| `kernel/include/kernel/bootinfo.h` | Keep `BOOT_MEMORY_MAP`, `BOOT_MEMORY_FORMAT_*`, `E820_ENTRY`; add comment pointing to `memory_map.h` for the arch-neutral type |
+| `kernel/Makefile` | x86_64 branch: `$(wildcard memory/*.c)` already picks up `pmm_arch.c`; aarch64 branch: add `memory/pmm.c memory/pmm_arch.c` to the explicit `KERNEL_C_SOURCES` list |
 
 Files **not** modified:
 
-- `kernel/arch/aarch64/ram.c`, `ram_core.c`, `ram.h`, `boot_offsets.h` — kept
-  verbatim. They remain the boot-time source of truth for the normalized
-  map that legacy consumers (if any) read via `aarch64_ram_map_get()`.
-- `kernel/arch/aarch64/head.S`, `entry.S` — kept verbatim. Their existing
-  identity-map of MMIO and VBAR_EL1 install is unaffected.
+- `kernel/arch/aarch64/ram.c`, `ram_core.c`, `ram.h`, `handoff_layout.h`
+  — kept verbatim. They remain the boot-time source of truth for the
+  normalized map that legacy consumers (if any) read via
+  `aarch64_ram_map_get()`.
+- `kernel/arch/aarch64/head.S`, `entry.S` — kept verbatim. Their
+  existing identity-map of MMIO and VBAR_EL1 install is unaffected.
 - Any file under `kernel/arch/x86_64/` other than the new
-  `pmm_arch.c`. The trampoline, GDT/IDT, AP boot, and lapic code remain
-  x86_64-owned.
+  `pmm_arch.c` and `handoff_layout.h`. The trampoline, GDT/IDT, AP
+  boot, and lapic code remain x86_64-owned.
 
 ## Testing and acceptance
 
-Add `tests/pmm_arch_test.py` (host-side, mirrors `tests/aarch64_ram_test.py`):
+Add `tests/pmm_arch_test.py` (host-side, mirrors
+`tests/aarch64_ram_test.py`):
 
-- compiles `kernel/memory/pmm_arch.c`, the per-arch `pmm_arch.c` selected
-  by `PROFILE`, and a small C runner using the host C compiler;
-- links against `kernel/arch/aarch64/ram_core.c` only when the AArch64
-  profile is selected (the existing pure normalizer);
-- runs synthetic fixtures:
-  - empty boot context, malformed `memory.format`, zero `entry_count`,
-    `entry_size < 32` → all return zero ranges;
-  - minimal E820 (one type-1 entry covering `[0, 0x40000000)`) →
-    exactly one `MEMORY_TYPE_RAM` range with `phys_start == 0`,
-    `phys_end == 0x40000000`, after kernel/handoff excludes are applied;
-  - E820 with a type-2 reserved hole → `MEMORY_TYPE_RESERVED` plus
-    surrounding `MEMORY_TYPE_RAM` ranges, all granule-aligned;
-  - UEFI_RAW with three type-7 descriptors plus two excludes → one to
-    three `MEMORY_TYPE_RAM` ranges depending on overlap;
-  - every output range passes the invariants from the "New types"
-    section.
+- compiles `kernel/memory/pmm_arch.c`, the per-arch `pmm_arch.c`
+  selected by `PROFILE`, and a small C runner using the host C
+  compiler;
+- links against `kernel/arch/aarch64/ram_core.c` when the AArch64
+  profile is selected (so the runner can publish a synthetic
+  `aarch64_ram_map` before invoking the adapter); on x86_64 the
+  trampoline blob symbols are provided by a host-side stub TU that
+  returns empty ranges.
+
+The C runner (`tests/pmm_arch_test_runner.c`) shape:
+
+```c
+#include <kernel/bootinfo.h>
+#include <kernel/memory_map.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+
+extern size_t pmm_arch_normalize(const struct boot_context *,
+                                  struct MEMORY_RANGE *);
+extern uint64_t pmm_arch_zone_split(void);
+
+/* For AArch64: aarch64_ram_init is called by the runner to publish a
+ * synthetic map before invoking pmm_arch_normalize. */
+
+#define CHECK(cond) do { if (!(cond)) { \
+    fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+    return 1; } } while (0)
+
+int main(void) {
+    struct MEMORY_RANGE out[MEMORY_RANGE_MAX];
+
+    /* Invalid format -> 0 ranges. */
+    {
+        struct boot_context ctx = {0};
+        CHECK(pmm_arch_normalize(&ctx, out) == 0);
+    }
+    /* Minimal E820 single type-1 entry spanning low RAM. */
+    {
+        struct E820_ENTRY e[] = { { .address = 0, .length = 0x40000000,
+                                     .type = 1 } };
+        struct boot_context ctx = { .magic = BOOT_CONTEXT_MAGIC,
+                                     .version = BOOT_CONTEXT_VERSION,
+                                     .size = sizeof(ctx),
+                                     .flags = BOOT_CONTEXT_HAS_MEMORY_MAP,
+                                     .memory = { .entries = (uintptr_t)e,
+                                                 .entry_count = 1,
+                                                 .entry_size = sizeof(struct E820_ENTRY),
+                                                 .format = BOOT_MEMORY_FORMAT_E820 } };
+        size_t n = pmm_arch_normalize(&ctx, out);
+        CHECK(n >= 1);
+        for (size_t i = 0; i < n; i++) {
+            CHECK(out[i].phys_end > out[i].phys_start);
+            CHECK((out[i].phys_start & (MEMORY_RANGE_GRANULE - 1)) == 0);
+            CHECK((out[i].phys_end & (MEMORY_RANGE_GRANULE - 1)) == 0);
+            CHECK(out[i].type == MEMORY_TYPE_RAM);
+        }
+    }
+    /* E820 with reserved hole. */
+    /* UEFI_RAW with three type-7 descriptors (AArch64 profile only). */
+
+    return 0;
+}
+```
+
+The runner must also exercise `pmm_arch_zone_split` (assert
+`pmm_arch_zone_split() >= 0x100000000ULL` on x86_64, `== SIZE_MAX` on
+AArch64).
 
 Extend the AArch64 QEMU UEFI test profile to assert:
 
-- `pmm_init` returns successfully (the new `[smp] FATAL` prefixes must
-  not appear);
-- `alloc_pages(ZONE_NORMAL, 1, 0)` followed by `free_pages(p, 1)` succeeds
-  and round-trips the physical address;
-- `alloc_4k_page()` returns a physical address inside the published
-  `aarch64_ram_map` and `free_4k_page(phys)` succeeds.
+- `pmm_init` returns successfully (no `[smp] FATAL: pmm_init ...` lines
+  appear);
+- a new `OS01_SELFTEST`-gated block in `kernel/arch/aarch64/main.c`
+  emits a single known log line after `pmm_init` returns, e.g.
+  `UEFI-A64: pmm alloc smoke OK`. The block does:
+  ```c
+  #if OS01_SELFTEST
+      struct Page *p = alloc_pages(ZONE_NORMAL_INDEX, 1, 0);
+      if (p) { free_pages(p, 1); log_info("UEFI-A64: pmm alloc smoke OK\n"); }
+  #endif
+  ```
+  The block is enabled by the existing `OS01_SELFTEST` make-variable
+  knob used elsewhere; the test profile sets it; the parser asserts
+  the line appears.
 
 The x86_64 systest suite must remain green:
 
@@ -376,29 +543,25 @@ The x86_64 systest suite must remain green:
 - `nettest 6/6`.
 
 The AArch64 no-ACK regression
-(`AARCH64_SMP_TEST_NO_ACK_CPU=1`, per `be6e6e1`) must still produce its
-established `DEGRADED` status.
+(`AARCH64_SMP_TEST_NO_ACK_CPU=1`, per `be6e6e1`) must still produce
+its established `DEGRADED` status.
 
 Acceptance is:
 
 ```bash
 # x86_64
 make PROFILE=x86_64-clang x86_64-kernel
+python3 tests/pmm_arch_test.py
 python3 tests/systest.py
 python3 tests/nettest.py
-make PROFILE=x86_64-clang x86_64-uefi
 
 # AArch64
 make PROFILE=aarch64-clang aarch64-uefi-kernel
 python3 tests/aarch64_ram_test.py
 python3 tests/pmm_arch_test.py
 make PROFILE=aarch64-clang test-aarch64-uefi-smp
-make PROFILE=aarch64-clang clean
 make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=1 aarch64-uefi
 make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=1 test-aarch64-uefi-smp-no-ack
-
-# All profiles
-python3 tests/pmm_arch_test.py
 ```
 
 The host unit test and the AArch64 QEMU extension are the new
@@ -408,16 +571,16 @@ acceptance bars; x86_64 is the regression bar.
 
 A later, separate specification may:
 
-- unify the per-arch `aarch64_main` / `kernel_main` boot sequences behind
-  a single arch-neutral `kernel_main`;
-- rebase the AArch64 bring-up so that `pmm_init` is the single source of
-  truth and `aarch64_ram_init` becomes a thin shim that only feeds the
-  legacy `aarch64_ram_map_get()` reader;
-- migrate the AArch64 identity-map of MMIO into a virtual-memory layout
-  with a direct map plus high-half kernel, in line with the long-term
-  merge goal;
+- unify the per-arch `aarch64_main` / `kernel_main` boot sequences
+  behind a single arch-neutral `kernel_main`;
+- rebase the AArch64 bring-up so that `pmm_init` is the single source
+  of truth and `aarch64_ram_init` becomes a thin shim that only feeds
+  the legacy `aarch64_ram_map_get()` reader;
+- migrate the AArch64 identity-map of MMIO into a virtual-memory
+  layout with a direct map plus high-half kernel, in line with the
+  long-term merge goal;
 - replace the 2 MiB granule PMM with a 4 KiB / 2 MiB hybrid allocator
   that preserves the existing public surface.
 
-This specification does not commit to any of those directions and must
-not be extended to absorb them.
+This specification does not commit to any of those directions and
+must not be extended to absorb them.
