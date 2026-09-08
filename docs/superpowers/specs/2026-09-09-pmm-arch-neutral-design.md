@@ -342,11 +342,10 @@ fragments are dropped. Output is sorted and merged. Capacity
 exhaustion (more than `MEMORY_RANGE_MAX` disjoint, granule-aligned
 RAM ranges after exclusion) returns 0.
 
-The weak default in `kernel/memory/pmm_arch.c` is byte-for-byte the
-same x86_64 implementation, so a build that forgets to include the
-per-arch file still gets correct x86_64 behaviour. The strong
-per-arch override exists so future per-arch tweaks (e.g. an aarch64
-override of zone split) have an obvious landing site even on x86_64.
+The strong per-arch override is the **only** definition on x86_64;
+"forgetting" to include it correctly triggers the
+`[smp] FATAL: pmm_arch_normalize returned no ranges` halt (since the
+weak default returns 0), not a silent fallback.
 
 ### AArch64 adapter (`kernel/arch/aarch64/pmm_arch.c`)
 
@@ -414,17 +413,30 @@ no-op.
 2. Iterate scratch_ranges; sum (phys_end - phys_start) for MEMORY_TYPE_RAM
    into TotalMem. Compute pages_total = TotalMem / MEMORY_RANGE_GRANULE.
    Also compute lowest_ram = MIN over MEMORY_TYPE_RAM ranges of
-   round_down(phys_start, MEMORY_RANGE_GRANULE); fatal if no RAM ranges.
+   round_down(phys_start, MEMORY_RANGE_GRANULE) and highest_ram = MAX
+   over MEMORY_TYPE_RAM ranges of round_up(phys_end, MEMORY_RANGE_GRANULE).
+   Compute **ram_span_pages = (highest_ram - lowest_ram) /
+   MEMORY_RANGE_GRANULE** — this is the **array-size metric**, used
+   below to size `pages_struct` and `bits_map` for non-contiguous RAM.
+   For contiguous RAM (the common case on x86_64 and current QEMU
+   virt aarch64), ram_span_pages == pages_total. For sparse RAM
+   (future ACPI SRAT boards), ram_span_pages > pages_total.
+   Fatal if no RAM ranges.
 3. Sanity-check TotalMem > 0 and pages_total > 0; fatal otherwise.
 4. Allocate bits_map, pages_struct, zones_struct from PMMngr.start_brk
    exactly as today (BSS-end self-allocation; Virt_To_Phy on the caller).
-   sizes:
-     bits_size  = pages_total
-     bits_length = round_up_8(pages_total / 8)
-     pages_size  = pages_total
-     pages_length = round_up_8(pages_total * sizeof(struct Page))
+   sizes (note: arrays are sized by ram_span_pages, not pages_total,
+   so the index `(start - lowest_ram) >> 21` is always in-bounds even
+   for sparse RAM layouts):
+     bits_size  = ram_span_pages
+     bits_length = round_up_8(ram_span_pages / 8)
+     pages_size  = ram_span_pages
+     pages_length = round_up_8(ram_span_pages * sizeof(struct Page))
      zones_length = MEMORY_RANGE_MAX * sizeof(struct Zone)
-   memset pages_struct to zero (so pages_group[i].zone_struct = NULL by default).
+   memset pages_struct to zero (so pages_group[i].zone_struct = NULL
+   by default; sparse gaps between RAM ranges are unowned pages with
+   no zone, and any `alloc_pages`/`free_pages` call into a gap is
+   rejected by the existing zone_struct == NULL guard).
 5. For each MEMORY_TYPE_RAM range:
    a. round start up and end down to MEMORY_RANGE_GRANULE;
       if end <= start, skip.
@@ -436,18 +448,28 @@ no-op.
       toggle bits_map bit free. The bits index is also RAM-relative:
       (p->phy_address - lowest_ram) >> 21.
 6. If pages_struct[0].phy_address == 0 (legacy x86_64 layout):
-      attribute |= PG_PTable_Mapped | PG_Kernel_Init | PG_Kernel;
-      reference_count = 1;
-      age = 0;
-   (Body verbatim from existing pmm.c:212-215.)
-7. Mark kernel-owned pages: for j in 1..(Virt_To_Phy(end_of_struct) >> 21):
+      PMMngr.pages_struct->phy_address = 0UL;
+      set_page_attribute(PMMngr.pages_struct,
+                         PG_PTable_Mapped | PG_Kernel_Init | PG_Kernel);
+      PMMngr.pages_struct->reference_count = 1;
+      PMMngr.pages_struct->age = 0;
+   (Behaviorally equivalent to existing pmm.c:212-215; the
+   pseudo-code matches because step 4 zeroes the array, so a plain
+   assignment to `attribute` would also work. We use `set_page_attribute`
+   for the side-effect-free discipline.)
+7. Mark kernel-owned pages. **RAM-relative walk**:
+   for j in 1..((Virt_To_Phy(end_of_struct) - lowest_ram) >> 21):
       tmp = pages_struct + j;
       page_init(tmp, PG_PTable_Mapped | PG_Kernel_Init | PG_Kernel);
-      bits_map bit set; tmp->zone->page_using_count++; page_free_count--;
-   (j is in physical pages, so on aarch64 this walks
-    pages_struct[1..kernel_size_in_2MiB_pages], which is correct:
-    those are the kernel-image pages, all within the first zone and
-    therefore within pages_struct[] bounds.)
+      *(bits_map + (((tmp->phy_address - lowest_ram) >> 21) >> 6))
+          |= 1UL << ((tmp->phy_address - lowest_ram) >> 21) % 64;
+      tmp->zone->page_using_count++; tmp->zone->page_free_count--;
+   The bound `((Virt_To_Phy(end_of_struct) - lowest_ram) >> 21)` is
+   the RAM-relative kernel-image size in 2 MiB pages. On x86_64
+   (`lowest_ram = 0`) this reduces to the original `Virt_To_Phy(...)
+   >> 21`; on aarch64 it correctly walks only the kernel-image
+   pages, all within the first zone and within `pages_struct[]`
+   bounds.
 8. Compute ZONE_DMA_INDEX, ZONE_NORMAL_INDEX, ZONE_UNMAPPED_INDEX using
    pmm_arch_zone_split() as the threshold. The initial values
    ZONE_DMA_INDEX=0, ZONE_NORMAL_INDEX=zones_size-1, ZONE_UNMAPPED_INDEX=0
@@ -538,6 +560,7 @@ failure (no partial zones, no partial `bits_map`). The
 | `kernel/arch/x86_64/handoff_layout.h` | **NEW** (path: `kernel/include/kernel/arch/x86_64/handoff_layout.h`) — declares `X86_64_HANDOFF_BASE`, `X86_64_HANDOFF_END`, and `extern char _text[], _edata[]` |
 | `kernel/arch/aarch64/pmm_arch.c` | **NEW** — strong override of `pmm_arch_normalize` only; reads `aarch64_ram_map_get()` |
 | `kernel/arch/aarch64/printk_stub.c` | **NEW** — `color_printk(...)` forwarder that calls `kputs(fmt)` directly without expanding format specifiers. **Why no `vsprintf`**: the aarch64 kernel uses `-nostdlib` and does not link `libc/stdio/vsprintf.c` (`pl011.c:96` explicitly states "phase 1 has no printf"). The 5 preserved `color_printk` call sites in `pmm.c` (`alloc_pages` ×3, `free_pages` ×2 at lines 269/297/348/369/376) all pass a plain string literal with **no format specifiers**, so `kputs(fmt)` is sufficient. If a future caller needs specifiers, the stub grows a small `number()` helper alongside `kputu` rather than pulling in libc vsprintf. Required because the existing `kernel/kernel/printk.c` cannot link on aarch64 (references `_binary_kernel_font_psf_start`, framebuffer `Pos.FB_addr`). |
+| `kernel/arch/aarch64/memset.c` | **NEW** — minimal freestanding `memset(void *, int, size_t)` byte-fill loop. **Why needed**: `pmm.c` calls `memset` 3 times (lines 144/148/155 of the existing file, carried into the rewrite at step 4). The aarch64 kernel links with `-nostdlib` (`kernel/arch/aarch64/make.config:36`); the only existing `memset` implementation is `kernel/include/kernel/arch/x86_64/string.h:7` (uses `stosq`, x86_64-only). Without this stub the aarch64 link fails. x86_64 keeps using the existing inline `stosq` implementation; the stub is **only** built on aarch64 (picked up by `$(wildcard $(ARCHDIR)/*.c)`). |
 | `kernel/include/kernel/arch/log.h` | **NEW** — arch-neutral log-error dispatch header that picks the right `log_err` definition per arch (mirrors the existing `kernel/arch/spinlock.h` model). On aarch64 it includes `kernel/include/kernel/arch/aarch64/boot_log.h`; on x86_64 it includes `kernel/include/kernel/log.h`. **`pmm.c` `#include`s this single header instead of writing per-arch `#ifdef`s for the two private-helper `log_err` replacements.** Critical implementation note: the dispatch header must `#undef log_err log_warn log_info` before including the per-arch definitions, because `kernel/include/kernel/log.h` defines them as `do { … } while(0)` macros (which would swallow the `static inline` keyword from aarch64's `boot_log.h`). Verified failure mode without the `#undef`: aarch64 compile errors with "expected identifier or `('`" when `boot_log.h` is included after `log.h`. |
 | `kernel/arch/aarch64/slab_stub.c` | **NEW** — `slab_init()` no-op (and `kmalloc`/`kfree`/`kzalloc`/`ksize` stubs in case any later TU links against them). Required because `kernel/memory/slab.c` has x86-only references at **file scope outside** `slab_init`: `slab_lock_acquire` (L38, `pushfq; popq %0; cli` inline asm), `slab_lock_release` (L54, `sti` inline asm), the `RFLAGS_IF` macro `(1UL << 9)`, and 8 `color_printk` calls. Guarding only `slab_init` leaves the rest un-compilable on aarch64. The actual approach: wrap `slab.c` body in `#ifdef __x86_64__ ... #endif` and provide the aarch64 stub TU here. |
 | `kernel/arch/aarch64/main.c` | Insertion order is pinned: after `aarch64_ram_init(handoff)` returns successfully → set `PMMngr.start_*`/`end_*`/`start_brk` prelude (5 lines) → `pmm_init(handoff)` → `#if OS01_SELFTEST` smoke-test block (alloc/free roundtrip) → `dtb_init(handoff)` → `gic_init(handoff)` → `smp_boot_aps(handoff)` → `arch_tick_start()` → halt. The smoke-test block sits between `pmm_init` and `dtb_init` so it runs only when `pmm_init` is known-good, and `dtb_init`/`gic_init`/`smp_boot_aps` (the first allocator consumers on aarch64) follow it. |
@@ -610,25 +633,25 @@ For the **x86_64 adapter**, the host TU must provide:
   fragment — i.e. would silently fail to exercise the multi-fragment
   path.)
 
-For the **AArch64 adapter**, the host runner compiles BOTH the
-weak default `kernel/memory/pmm_arch.c` AND the per-arch strong
-override `kernel/arch/aarch64/pmm_arch.c`. The strong override
-wins at link time for `pmm_arch_normalize`, but the weak default
-`pmm_arch_normalize` and `pmm_arch_zone_split` symbols still exist
-in the binary, so their x86_64 references must resolve. The host
-runner therefore needs the same x86_64 stub surface listed above:
+For the **AArch64 adapter**, the host runner compiles
+`kernel/arch/aarch64/pmm_arch.c` (the strong override) plus the
+weak default `kernel/memory/pmm_arch.c` (which is now arch-neutral
+and links cleanly on aarch64). The aarch64 host runner needs **no
+x86_64 stubs** (no `_text`, no `_edata`, no trampoline blob, no
+`X86_64_HANDOFF_*`) because the weak default no longer references
+them.
 
-- `_text`, `_edata` — same stub values as the x86_64 runner;
-- `Virt_To_Phy` — same inline `#define`;
-- `_binary_arch_x86_64_trampoline_bin_{start,end}` — same zero-stub;
-- `X86_64_HANDOFF_BASE`, `X86_64_HANDOFF_END` — same `0x204000` /
-  `0x208000` test values.
+The runner must link `kernel/arch/aarch64/ram.c` AND
+`kernel/arch/aarch64/ram_core.c` to obtain the four aarch64_ram_*
+symbols:
 
-In addition the aarch64 runner needs:
+- `aarch64_ram_init` and `aarch64_ram_map_get` are defined in
+  `ram.c` (the boot-time wrapper, lines 69 and 232);
+- `aarch64_ram_normalize` and `aarch64_ram_publish_once` are
+  defined in `ram_core.c` (the pure normalizer, lines 287 and 442).
 
-- `aarch64_ram_init`, `aarch64_ram_map_get`, `aarch64_ram_normalize`,
-  `aarch64_ram_publish_once` — all already provided by the linked
-  `ram_core.c`.
+Linking only `ram_core.c` (as the round-5 spec claimed) leaves
+`aarch64_ram_init` and `aarch64_ram_map_get` unresolved.
 
 The runner's first test case (`/* Invalid format -> 0 ranges */`)
 runs **only on x86_64**: it asserts that the x86_64 adapter
