@@ -469,19 +469,19 @@ failure (no partial zones, no partial `bits_map`). The
 | `kernel/include/kernel/memory_map.h` | **NEW** — `enum MEMORY_TYPE`, `struct MEMORY_RANGE`, `MEMORY_RANGE_MAX`, `MEMORY_RANGE_GRANULE` (no `MEMORY_RANGE_DESCRIPTOR_MIN_SIZE` macro; per-format minimums are checked in `pmm_init` directly) |
 | `kernel/include/kernel/memory.h` | Update `pmm_init` declaration to `void pmm_init(const struct boot_context *ctx)` |
 | `kernel/include/kernel/pmm.h` | `pmm_init` declaration removed (now in `memory.h`); `struct E820` declaration (currently lines 35–40) removed; `e820_entrys[32]` field removed from `Physical_Memory_Manager`; remaining public surface: `PAGE_*_SHIFT/SIZE/MASK/ALIGN`, `ZONE_*` macros, page attribute flags, `Physical_Memory_Manager`, `Zone`, `Page`, and the public allocator entry points |
-| `kernel/memory/pmm.c` | Rewrite `pmm_init` body per §"`pmm_init` rewrite"; add real `pmm_initialized` guard; replace every `color_printk` call (5 sites: `set_page_attribute`, `page_init`, `page_clean`) with arch-portable logging (`printk` non-color variant or `log_err`, both already provided by `kernel/arch/boot_log.h` on aarch64 and by `kernel/kernel/printk.c` on x86_64) |
+| `kernel/memory/pmm.c` | Rewrite `pmm_init` body per §"`pmm_init` rewrite"; add real `pmm_initialized` guard. **7 `color_printk` call sites** in the current code are: `get_page_attribute` (1), `set_page_attribute` (1), `alloc_pages` (3), `free_pages` (2). `page_init`/`page_clean` have no `color_printk` calls today. The private-helper calls (`get_page_attribute`, `set_page_attribute`) are replaced with arch-portable `log_err` from `kernel/arch/boot_log.h` (single-string signature, 2 sites). The public `alloc_pages`/`free_pages` `color_printk` calls (5 sites) are **kept as-is** to preserve the public surface byte-for-byte; they resolve at link time against `kernel/kernel/printk.c`'s `color_printk` on x86_64 and against `kernel/arch/aarch64/printk_stub.c`'s forwarder on aarch64 (see that row). |
 | `kernel/memory/pmm_arch.c` | **NEW** — weak default `pmm_arch_normalize` and `pmm_arch_zone_split` (x86_64 behaviour) |
 | `kernel/arch/x86_64/pmm_arch.c` | **NEW** — strong override; E820 to `MEMORY_RANGE[]` translation with kernel-LMA + handoff + trampoline excludes |
 | `kernel/arch/x86_64/handoff_layout.h` | **NEW** (path: `kernel/include/kernel/arch/x86_64/handoff_layout.h`) — declares `X86_64_HANDOFF_BASE`, `X86_64_HANDOFF_END`, and `extern char _text[], _edata[]` |
 | `kernel/arch/aarch64/pmm_arch.c` | **NEW** — strong override of `pmm_arch_normalize` only; reads `aarch64_ram_map_get()` |
-| `kernel/arch/aarch64/printk_stub.c` | **NEW** — minimal `color_printk` shim that forwards to `log_err` from `kernel/arch/boot_log.h`. The existing `kernel/kernel/printk.c` is x86-specific (references `_binary_kernel_font_psf_start`, framebuffer `Pos.FB_addr`), so it cannot be linked on aarch64; this stub provides the symbol `pmm.c` (and any other aarch64 TU that transitively includes its old logging path) needs. |
-| `kernel/memory/slab.c` | Added to aarch64 KERNEL_C_SOURCES. If `slab.c` has x86-only references, an aarch64 stub TU (or `#ifdef __aarch64__` guards) makes `slab_init()` a no-op on aarch64. The PMM-rewrite's step 9 (`slab_init()` call) then compiles unchanged on both arches. |
+| `kernel/arch/aarch64/printk_stub.c` | **NEW** — `color_printk(...)` forwarder that vsprintf's its variadic args into a static 256-byte buffer and calls `kputs(buf)`. Cannot forward directly to `log_err` because `log_err(const char *)` takes a single string (the aarch64 signature in `kernel/arch/boot_log.h`), while `color_printk` is variadic. Required because the public `alloc_pages`/`free_pages` in `pmm.c` keep their 5 `color_printk` calls (preserved by Goal 3), and the existing `kernel/kernel/printk.c` cannot link on aarch64 (references `_binary_kernel_font_psf_start`, framebuffer `Pos.FB_addr`). |
+| `kernel/arch/aarch64/slab_stub.c` | **NEW** — `slab_init()` no-op (and `kmalloc`/`kfree`/`kzalloc`/`ksize` stubs in case any later TU links against them). Required because `kernel/memory/slab.c` has x86-only references at **file scope outside** `slab_init`: `slab_lock_acquire` (L38, `pushfq; popq %0; cli` inline asm), `slab_lock_release` (L54, `sti` inline asm), the `RFLAGS_IF` macro `(1UL << 9)`, and 8 `color_printk` calls. Guarding only `slab_init` leaves the rest un-compilable on aarch64. The actual approach: wrap `slab.c` body in `#ifdef __x86_64__ ... #endif` and provide the aarch64 stub TU here. |
 | `kernel/arch/aarch64/main.c` | Insertion order is pinned: after `aarch64_ram_init(handoff)` returns successfully → set `PMMngr.start_*`/`end_*`/`start_brk` prelude (5 lines) → `pmm_init(handoff)` → `#if OS01_SELFTEST` smoke-test block (alloc/free roundtrip) → `dtb_init(handoff)` → `gic_init(handoff)` → `smp_boot_aps(handoff)` → `arch_tick_start()` → halt. The smoke-test block sits between `pmm_init` and `dtb_init` so it runs only when `pmm_init` is known-good, and `dtb_init`/`gic_init`/`smp_boot_aps` (the first allocator consumers on aarch64) follow it. |
 | `kernel/kernel/main.c` | Update call site from `pmm_init(&bootctx->memory)` to `pmm_init(bootctx)` |
 | `kernel/include/kernel/bootinfo.h` | Keep `BOOT_MEMORY_MAP`, `BOOT_MEMORY_FORMAT_*`, `E820_ENTRY`; add comment pointing to `memory_map.h` for the arch-neutral type |
 | `kernel/Makefile` | x86_64 branch: `$(wildcard memory/*.c)` already picks up `pmm_arch.c`; aarch64 branch: the current `KERNEL_C_SOURCES :=` is empty, so the patch **creates** the list: ```make ifeq ($(ARCH),aarch64) KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/slab.c ARCH_C_SOURCES += $(ARCHDIR)/printk_stub.c endif ``` The wildcard `$(ARCH_C_SOURCES := $(wildcard $(ARCHDIR)/*.c))` already picks up `pmm_arch.c` and `printk_stub.c`. This makes future `kernel/memory/*.c` additions require an explicit Makefile update; a follow-up could move back to a wildcard. |
 | `mk/components/run.mk` | `test-aarch64-uefi-smp` rule must pass `KERNEL_SELFTEST=1` so the new `#if OS01_SELFTEST` block is compiled in. Mirror `test-kernel-selftest` at `run.mk:350`. |
-| `tests/aarch64_uefi_smp.py` | Add a new predicate in `passed()` (around line 218): when the run was launched with `KERNEL_SELFTEST=1` (i.e. normal aarch64 path, not no-ACK) and the log contains the success summary `UEFI-A64: RAM ranges=...`, the log MUST also contain `UEFI-A64: pmm alloc smoke OK` before the next `SMP`/`[smp]` line. The `degraded_passed()` path (no-ACK regression) is unchanged. |
+| `tests/aarch64_uefi_smp.py` | Add `args.expect_selftest` to the existing argparse (around line 436–446); thread it into both `passed()` and `degraded_passed()`. The `passed()` predicate requires: if `args.expect_selftest` is true and the log contains the success summary `UEFI-A64: RAM ranges=...`, then the log MUST contain `UEFI-A64: pmm alloc smoke OK` **between that summary line and the first `[smp] topology source=uefi-dtb cpus=` line**. Anchoring on the specific topology line (rather than a naive `[smp]` substring search) avoids false-positives on `[smp-test] FATAL: ...` lines that appear later in the log. The `degraded_passed()` path is unchanged and never requires the smoke line (the no-ACK build does not pass `KERNEL_SELFTEST=1`). |
 
 Files **not** modified:
 
@@ -535,8 +535,16 @@ For the **x86_64 adapter**, the host TU must provide:
   _binary_arch_x86_64_trampoline_bin_end = (char*)0;` so the
   trampoline exclude interval is empty;
 - `X86_64_HANDOFF_BASE`, `X86_64_HANDOFF_END` — the stub overrides
-  these to fixed test values (e.g. `0x100000`, `0x104000`) so the
-  test fixture can predict the post-exclusion layout.
+  these to fixed test values. **Concrete values that exercise the
+  two-fragment output path** are `X86_64_HANDOFF_BASE = 0x204000`
+  and `X86_64_HANDOFF_END = 0x208000`. The handoff sits inside the
+  kernel-LMA exclude gap `[0x200000, 0x300000)`, so it does not
+  perturb the surviving fragments `[0, 0x200000)` and
+  `[0x300000, 0x40000000)`. (Using `0x100000`/`0x104000` would
+  shrink the first fragment to `[0, 0x100000)`, which then rounds
+  to empty under 2 MiB granule alignment, leaving only one
+  fragment — i.e. would silently fail to exercise the multi-fragment
+  path.)
 
 For the **AArch64 adapter**, the host TU needs only:
 
