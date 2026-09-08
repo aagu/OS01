@@ -154,16 +154,24 @@ free_4k_page, page_cow_{get,put,refs}, page_init, page_clean
 The adapter dispatch uses GCC `__attribute__((weak))`:
 
 - `kernel/memory/pmm_arch.c` defines `pmm_arch_normalize` and
-  `pmm_arch_zone_split` as **weak** symbols that implement the x86_64
-  behaviour as a default.
-- `kernel/arch/x86_64/pmm_arch.c` and `kernel/arch/aarch64/pmm_arch.c`
-  define them as **strong** symbols; the per-arch strong definition wins
-  over the weak default at link time.
+  `pmm_arch_zone_split` as **weak** symbols. The weak default returns
+  **`SIZE_MAX`** from `pmm_arch_zone_split` (i.e. the safest
+  assumption: no zone is unmapped). This makes new architectures
+  (RISC-V, etc.) conservative by default.
+- `kernel/arch/x86_64/pmm_arch.c` defines both as **strong** symbols:
+  `pmm_arch_normalize` translates E820 entries; `pmm_arch_zone_split`
+  returns `0x100000000ULL` (4 GiB threshold, the historical x86_64
+  policy).
+- `kernel/arch/aarch64/pmm_arch.c` defines only `pmm_arch_normalize`
+  as a strong override; it does **not** override
+  `pmm_arch_zone_split`, so the weak default (`SIZE_MAX`) applies
+  (no aarch64 zone is unmapped).
 
-This makes x86_64 the "free" default and gives the aarch64 build a
-single, obvious override site. The Makefile wiring is symmetric: every
-profile that builds `kernel/memory/pmm.c` also builds
-`kernel/memory/pmm_arch.c`.
+This resolves the earlier confusion about which default applies where:
+the weak default is the conservative `SIZE_MAX`, not "x86_64
+behaviour". The x86_64 strong override is what installs the 4 GiB
+threshold; every other arch inherits `SIZE_MAX` until it provides its
+own strong override.
 
 ## Input contract
 
@@ -323,9 +331,9 @@ override of zone split) have an obvious landing site even on x86_64.
 
 ### AArch64 adapter (`kernel/arch/aarch64/pmm_arch.c`)
 
-Strong override of `pmm_arch_normalize`; the default
-`pmm_arch_zone_split` is **kept** (returns `SIZE_MAX`) without an
-override.
+Strong override of `pmm_arch_normalize` only. The default
+`pmm_arch_zone_split` (returning `SIZE_MAX`) is inherited from the
+weak default; the aarch64 adapter does not need its own override.
 
 The AArch64 adapter **reads the already-published `aarch64_ram_map`**
 rather than re-running the normalizer. Call ordering is enforced by
@@ -474,7 +482,8 @@ failure (no partial zones, no partial `bits_map`). The
 | `kernel/arch/x86_64/pmm_arch.c` | **NEW** — strong override; E820 to `MEMORY_RANGE[]` translation with kernel-LMA + handoff + trampoline excludes |
 | `kernel/arch/x86_64/handoff_layout.h` | **NEW** (path: `kernel/include/kernel/arch/x86_64/handoff_layout.h`) — declares `X86_64_HANDOFF_BASE`, `X86_64_HANDOFF_END`, and `extern char _text[], _edata[]` |
 | `kernel/arch/aarch64/pmm_arch.c` | **NEW** — strong override of `pmm_arch_normalize` only; reads `aarch64_ram_map_get()` |
-| `kernel/arch/aarch64/printk_stub.c` | **NEW** — `color_printk(...)` forwarder that vsprintf's its variadic args into a static 256-byte buffer and calls `kputs(buf)`. Cannot forward directly to `log_err` because `log_err(const char *)` takes a single string (the aarch64 signature in `kernel/arch/boot_log.h`), while `color_printk` is variadic. Required because the public `alloc_pages`/`free_pages` in `pmm.c` keep their 5 `color_printk` calls (preserved by Goal 3), and the existing `kernel/kernel/printk.c` cannot link on aarch64 (references `_binary_kernel_font_psf_start`, framebuffer `Pos.FB_addr`). |
+| `kernel/arch/aarch64/printk_stub.c` | **NEW** — `color_printk(...)` forwarder that calls `kputs(fmt)` directly without expanding format specifiers. **Why no `vsprintf`**: the aarch64 kernel uses `-nostdlib` and does not link `libc/stdio/vsprintf.c` (`pl011.c:96` explicitly states "phase 1 has no printf"). The 5 preserved `color_printk` call sites in `pmm.c` (`alloc_pages` ×3, `free_pages` ×2 at lines 269/297/348/369/376) all pass a plain string literal with **no format specifiers**, so `kputs(fmt)` is sufficient. If a future caller needs specifiers, the stub grows a small `number()` helper alongside `kputu` rather than pulling in libc vsprintf. Required because the existing `kernel/kernel/printk.c` cannot link on aarch64 (references `_binary_kernel_font_psf_start`, framebuffer `Pos.FB_addr`). |
+| `kernel/include/kernel/arch/log.h` | **NEW** — arch-neutral log-error dispatch header that picks the right `log_err` definition per arch (mirrors the existing `kernel/arch/spinlock.h` model). On aarch64 it includes `kernel/include/kernel/arch/aarch64/boot_log.h`; on x86_64 it includes `kernel/include/kernel/log.h`. `pmm.c` `#include`s this single header instead of writing per-arch `#ifdef`s for the two private-helper `log_err` replacements. |
 | `kernel/arch/aarch64/slab_stub.c` | **NEW** — `slab_init()` no-op (and `kmalloc`/`kfree`/`kzalloc`/`ksize` stubs in case any later TU links against them). Required because `kernel/memory/slab.c` has x86-only references at **file scope outside** `slab_init`: `slab_lock_acquire` (L38, `pushfq; popq %0; cli` inline asm), `slab_lock_release` (L54, `sti` inline asm), the `RFLAGS_IF` macro `(1UL << 9)`, and 8 `color_printk` calls. Guarding only `slab_init` leaves the rest un-compilable on aarch64. The actual approach: wrap `slab.c` body in `#ifdef __x86_64__ ... #endif` and provide the aarch64 stub TU here. |
 | `kernel/arch/aarch64/main.c` | Insertion order is pinned: after `aarch64_ram_init(handoff)` returns successfully → set `PMMngr.start_*`/`end_*`/`start_brk` prelude (5 lines) → `pmm_init(handoff)` → `#if OS01_SELFTEST` smoke-test block (alloc/free roundtrip) → `dtb_init(handoff)` → `gic_init(handoff)` → `smp_boot_aps(handoff)` → `arch_tick_start()` → halt. The smoke-test block sits between `pmm_init` and `dtb_init` so it runs only when `pmm_init` is known-good, and `dtb_init`/`gic_init`/`smp_boot_aps` (the first allocator consumers on aarch64) follow it. |
 | `kernel/kernel/main.c` | Update call site from `pmm_init(&bootctx->memory)` to `pmm_init(bootctx)` |
@@ -519,9 +528,9 @@ For the **x86_64 adapter**, the host TU must provide:
   1 MiB `[0x200000, 0x300000)` exclude. Combined with the test
   fixture's E820 type-1 entry spanning `[0, 0x40000000)`, the
   adapter must produce two MEMORY_RANGE fragments — `[0, 0x200000)`
-  (2 MiB) and `[0x300000, 0x40000000)` — so the test exercises the
-  granule-aligned multi-fragment output path, not just the
-  single-range happy path;
+  (2 MiB) and `[0x300000, 0x40000000)` (≈1020 MiB) — so the test
+  exercises the granule-aligned multi-fragment output path, not
+  just the single-range happy path;
 - `Virt_To_Phy` — the existing x86_64 macro
   (`(vaddr) - 0xffff800000000000UL`). If the host TU cannot pull in
   the macro (because the x86_64 kernel headers are not host-safe),
@@ -546,11 +555,32 @@ For the **x86_64 adapter**, the host TU must provide:
   fragment — i.e. would silently fail to exercise the multi-fragment
   path.)
 
-For the **AArch64 adapter**, the host TU needs only:
+For the **AArch64 adapter**, the host runner compiles BOTH the
+weak default `kernel/memory/pmm_arch.c` AND the per-arch strong
+override `kernel/arch/aarch64/pmm_arch.c`. The strong override
+wins at link time for `pmm_arch_normalize`, but the weak default
+`pmm_arch_normalize` and `pmm_arch_zone_split` symbols still exist
+in the binary, so their x86_64 references must resolve. The host
+runner therefore needs the same x86_64 stub surface listed above:
+
+- `_text`, `_edata` — same stub values as the x86_64 runner;
+- `Virt_To_Phy` — same inline `#define`;
+- `_binary_arch_x86_64_trampoline_bin_{start,end}` — same zero-stub;
+- `X86_64_HANDOFF_BASE`, `X86_64_HANDOFF_END` — same `0x204000` /
+  `0x208000` test values.
+
+In addition the aarch64 runner needs:
 
 - `aarch64_ram_init`, `aarch64_ram_map_get`, `aarch64_ram_normalize`,
   `aarch64_ram_publish_once` — all already provided by the linked
-  `ram_core.c`. No stubs needed.
+  `ram_core.c`.
+
+The runner's first test case (`/* Invalid format -> 0 ranges */`)
+runs **only on x86_64**: it asserts that the x86_64 adapter
+rejects a zeroed `boot_context`. The aarch64 adapter ignores
+`ctx` entirely (it reads the published `aarch64_ram_map`), so this
+case is meaningless on aarch64 and is guarded with
+`#if !defined(__aarch64__)`.
 
 The C runner (`tests/pmm_arch_test_runner.c`) shape:
 
@@ -575,11 +605,16 @@ extern uint64_t pmm_arch_zone_split(void);
 int main(void) {
     struct MEMORY_RANGE out[MEMORY_RANGE_MAX];
 
-    /* Invalid format -> 0 ranges. */
+#if !defined(__aarch64__)
+    /* x86_64-only: aarch64 adapter ignores ctx and reads the
+     * already-published map, so a zeroed boot_context has no
+     * defined meaning on aarch64. */
     {
         struct boot_context ctx = {0};
         CHECK(pmm_arch_normalize(&ctx, out) == 0);
     }
+#endif
+
     /* Minimal E820 single type-1 entry spanning low RAM. */
     {
         struct E820_ENTRY e[] = { { .address = 0, .length = 0x40000000,
@@ -601,16 +636,38 @@ int main(void) {
             CHECK(out[i].type == MEMORY_TYPE_RAM);
         }
     }
-    /* E820 with reserved hole. */
-    /* UEFI_RAW with three type-7 descriptors (AArch64 profile only). */
+
+    /* x86_64-only: zone_split must return the 4 GiB threshold;
+     * aarch64 inherits the weak default (SIZE_MAX). */
+#if defined(__x86_64__)
+    CHECK(pmm_arch_zone_split() == 0x100000000ULL);
+#elif defined(__aarch64__)
+    CHECK(pmm_arch_zone_split() == SIZE_MAX);
+#endif
 
     return 0;
 }
 ```
 
-The runner must also exercise `pmm_arch_zone_split` (assert
-`pmm_arch_zone_split() >= 0x100000000ULL` on x86_64, `== SIZE_MAX` on
-AArch64).
+**TODO cases deferred to the implementer** (the spec intentionally
+leaves them for the implementer to design test inputs, modeled on the
+`tests/aarch64_ram_test.py` Case 1–16 pattern):
+
+- `/* E820 with reserved hole. */` — E820 fixture with one type-2
+  Reserved range inside the type-1 span; expected output: one
+  `MEMORY_TYPE_RESERVED` range flanked by two `MEMORY_TYPE_RAM`
+  fragments, all granule-aligned.
+- `/* UEFI_RAW with three type-7 descriptors (AArch64 profile only). */`
+  — Three `EfiConventionalMemory` descriptors with overlapping or
+  adjacent ranges; expected output: 1–3 `MEMORY_TYPE_RAM` ranges
+  depending on overlap, all 2 MiB-aligned, sorted by `phys_start`,
+  disjoint. The aarch64 runner must call `aarch64_ram_init` (via
+  `aarch64_ram_normalize` + `aarch64_ram_publish_once`) with a
+  synthetic descriptor blob before invoking the adapter.
+
+Both TODO cases use the same fixture-driven pattern as the existing
+minimal E820 case; the runner's harness already has the
+`CHECK`/`return 1` infrastructure.
 
 Extend the AArch64 QEMU UEFI test profile to assert:
 
