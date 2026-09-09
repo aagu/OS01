@@ -1,9 +1,11 @@
 /* UEFI-only AArch64 BSP entry. APs enter secondary_idle independently. */
 #include <stdint.h>
 #include <kernel/bootinfo.h>
+#include <kernel/log.h>
+#include <kernel/memory.h>
+#include <kernel/pmm.h>
 #include <kernel/arch/cpu.h>
 #include <kernel/arch/irq.h>
-#include <kernel/arch/aarch64/boot_log.h>
 #include <kernel/arch/aarch64/dtb.h>
 #include <kernel/arch/aarch64/ram.h>
 #include <kernel/arch/aarch64/smp.h>
@@ -28,6 +30,41 @@ void aarch64_main(const struct boot_context *handoff)
      * helper halts the BSP on failure, so a non-zero return here
      * means the BSP is already gone. */
     aarch64_ram_init(handoff);
+
+    /* Populate PMMngr fields that pmm_init reads. Mirrors the
+     * kernel/kernel/main.c:155-159 prelude on x86_64, but uses the
+     * aarch64 VMA linker symbols (_text_start/_text_end/.../_kernel_end)
+     * because _text/_edata/_end do not exist on aarch64. */
+    extern char _text_start[], _text_end[];
+    extern char _rodata_start[], _rodata_end[];
+    extern char _data_start[], _data_end[];
+    extern char _kernel_end[];
+
+    /* Sanity check: the aarch64 identity map must be active before
+     * pmm_init runs (otherwise Virt_To_Phy on high-half VMAs returns
+     * nonsense and the kernel-image walk in Step 7 silently corrupts
+     * pages_struct[]). head.S installs the identity map before
+     * dropping to C. */
+    if ((uint64_t)&_text_start < ARCH_PAGE_OFFSET) {
+        log_err("[smp] FATAL: aarch64 identity map not active\n");
+        arch_cpu_halt();
+    }
+
+    PMMngr.start_code  = (uint64_t)&_text_start;
+    PMMngr.end_code    = (uint64_t)&_text_end;
+    PMMngr.end_data    = (uint64_t)&_data_end;
+    PMMngr.end_rodata  = (uint64_t)&_rodata_end;
+    PMMngr.start_brk   = (uint64_t)&_kernel_end;
+
+    pmm_init(handoff);
+
+#if OS01_SELFTEST
+    {
+        struct Page *p = alloc_pages(ZONE_NORMAL, 1, 0);
+        if (p) { free_pages(p, 1); log_info("UEFI-A64: pmm alloc smoke OK\n"); }
+        else   { log_err("UEFI-A64: pmm alloc smoke FAIL\n"); }
+    }
+#endif
 
     /* Invalid or missing platform information is FATAL here, before any
      * GIC or PSCI access. Only valid platforms can degrade and keep ticks. */
