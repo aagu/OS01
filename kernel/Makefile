@@ -40,7 +40,7 @@ KERNEL_HEADERS := include
 # incrementally as the port grows (e.g. arch-neutral helpers), gated by
 # "what the linker complains about".
 ifeq ($(ARCH),aarch64)
-KERNEL_C_SOURCES :=
+KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c
 else
 KERNEL_C_SOURCES := \
     $(wildcard kernel/*.c) \
