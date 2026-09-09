@@ -2,7 +2,7 @@
 #define _ARCH_IRQ_H
 
 #include <stdint.h>
-#include <kernel/arch/thread.h>   // for pt_regs_t
+#include <kernel/arch/regs.h>   // for pt_regs_t (via the arch-neutral facade)
 
 // IRQ state type: 64-bit for RFLAGS (x86) and DAIF (aarch64).
 // aarch64 only needs 4 bits, but uint64_t keeps the save/restore

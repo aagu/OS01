@@ -1,20 +1,19 @@
 #include <kernel/rwlock.h>
 #include <kernel/arch/atomic.h>
+#include <kernel/arch/cpu.h>     // arch_cpu_pause — arch-neutral spin hint
 
 #define RWLOCK_WRITER       (1ULL << 63)
 #define RWLOCK_WAITER_ONE   (1ULL << 32)
 #define RWLOCK_READERS      (RWLOCK_WAITER_ONE - 1)
 #define RWLOCK_WAITERS      (RWLOCK_WRITER - RWLOCK_WAITER_ONE)
 
+// Architecture-neutral back-off hint inside the CAS spin. On x86_64
+// arch_cpu_pause() emits `pause`; on aarch64 it emits `yield`. Both
+// are hints to the CPU that we're in a spin loop — improves power /
+// SMT behaviour without changing semantics.
 static inline void rwlock_relax(void)
 {
-#if defined(__x86_64__)
-    __asm__ __volatile__("pause" ::: "memory");
-#elif defined(__aarch64__)
-    __asm__ __volatile__("yield" ::: "memory");
-#else
-    __asm__ __volatile__("" ::: "memory");
-#endif
+    arch_cpu_pause();
 }
 
 void rwlock_init(rwlock_t *lock)

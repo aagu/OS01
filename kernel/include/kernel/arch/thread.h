@@ -1,46 +1,52 @@
 #ifndef _ARCH_THREAD_H
 #define _ARCH_THREAD_H
 
-#ifdef __x86_64__
-#include <kernel/arch/x86_64/regs.h>   // provides pt_regs_t
+// arch/regs.h provides `pt_regs_t` (and arch-specific register-layout
+// constants). Always include via the facade, not the per-arch path
+// directly, so that arch-neutral callers stay neutral.
+#include <kernel/arch/regs.h>
 
-// Architecture-specific task init (TSS, CR3 setup).
-// The early hook runs before interrupt vectors and memory/task setup.
+// ── Thread lifecycle / signal delivery ──────────────────
+//
+// Two flavors, depending on whether the arch has its own task_arch.c
+// or relies on static-inline stubs (aarch64 phase 1).
+//
+//  • Archs with task_arch.c (x86_64): extern declarations here, real
+//    definitions in kernel/arch/<arch>/task_arch.c.
+//  • Archs without task_arch.c (aarch64 phase 1): static-inline no-op
+//    stubs. Keeps kernel/sched/task.c etc. linkable while aarch64
+//    grows TSS / signal-delivery support incrementally.
+//
+// Adding a new arch: if it ships its own task_arch.c, add it to the
+// `#else` branch below. If it's a phase-1 port, model after aarch64.
+
+#ifdef __aarch64__
+
+static inline void  arch_task_init_early(void)              { }
+static inline void *arch_task_boot_state(void)               { return (void *)0; }
+static inline void  arch_task_init_platform(void)           { }
+static inline int   arch_do_signal_delivery(pt_regs_t *regs) { (void)regs; return 0; }
+static inline int   arch_signal_pending_fatal(void)         { return 0; }
+
+#else
+
+// Early platform init (TSS, CR3, ...). Runs before interrupt vectors
+// and memory/task setup. Called once by the BSP during boot.
 void arch_task_init_early(void);
+
+// Returns a pointer to the architecture's per-CPU boot-state blob
+// (TSS on x86_64, NULL on archs that don't need one). Used by
+// kernel_main to install / restore it during bringup.
 void *arch_task_boot_state(void);
-// Called once by task_init() during boot.
+
+// Called once by task_init() during boot. Programs BSP TSS, etc.
 void arch_task_init_platform(void);
 
-// Signal delivery — arch-specific because it manipulates the
-// user-mode register frame on the kernel stack before iretq.
+// Signal delivery — arch-specific because it manipulates the user-mode
+// register frame on the kernel stack before returning to userspace.
 int  arch_do_signal_delivery(pt_regs_t *regs);
-int  arch_signal_pending_fatal(void);   // non-zero if a fatal signal is pending
-#elif defined(__aarch64__)
+int  arch_signal_pending_fatal(void);
 
-// aarch64 exception frame as pushed by the exception vector handler.
-// x0-x29 (30 regs), plus SP_EL0, ELR_EL1, SPSR_EL1.
-typedef struct pt_regs
-{
-    uint64_t x0, x1, x2, x3, x4, x5, x6, x7;
-    uint64_t x8, x9, x10, x11, x12, x13, x14, x15;
-    uint64_t x16, x17, x18, x19, x20, x21, x22, x23;
-    uint64_t x24, x25, x26, x27, x28, x29;
-    uint64_t sp_el0;
-    uint64_t elr_el1;
-    uint64_t spsr_el1;
-} pt_regs_t;
-
-// arch_task_init_platform placeholder — aarch64 doesn't need TSS setup.
-// Declared in this header's x86_64 block. For aarch64 it's a no-op.
-static inline void arch_task_init_early(void) {}
-static inline void *arch_task_boot_state(void) { return (void *)0; }
-static inline void arch_task_init_platform(void) {}
-
-// Signal delivery stubs — aarch64 not yet implemented.
-static inline int arch_do_signal_delivery(pt_regs_t *regs) { (void)regs; return 0; }
-static inline int arch_signal_pending_fatal(void) { return 0; }
-#else
-#error "Unsupported architecture"
 #endif
 
 #endif
