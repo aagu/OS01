@@ -6,17 +6,36 @@ Compiles the production ``kernel/memory/pmm_arch.c`` together with the
 per-arch strong override (when the profile picks an arch with a real
 override) plus ``tests/pmm_arch_test_runner.c`` and runs the result.
 
+This driver is intentionally a *compile-and-link smoke test*. It verifies
+that all TUs compile, all TUs link, and the runner exits 0 with the
+basic invariants of the produced MEMORY_RANGE[]. The on-target
+multi-fragment verification happens via the QEMU harness
+(``make test-aarch64-uefi-smp`` / ``tests/aarch64_uefi_smp.py``),
+which uses real linker symbols and a real E820 fixture.
+
 For x86_64, the host cannot link the real trampoline blob or the
-real ``_text``/``_edata`` linker symbols, so the driver writes a small
-stub TU that provides zero-storage definitions. ``_text`` and ``_edata``
-addresses are forced at link time via ``--defsym`` to
-``0x200000`` and ``0x300000`` respectively; this guarantees the
-relative LMA ordering ``_text < _edata`` regardless of host BSS
-placement. The handoff constants are overridden inline to
-``0x204000..0x208000`` (inside the kernel-LMA gap in the on-target
-fixture), and ``Virt_To_Phy`` is redefined inline so the host TU
-does not pull in ``kernel/memory.h`` (which transitively includes
-``arch/mmu.h`` inline asm the test does not exercise).
+real ``_text``/``_edata`` linker symbols, so the driver writes a
+small stub TU that provides zero-storage definitions for the
+externs the kernel TU references. ``_text`` is forced to a low
+address (0x200000) at link time via ``-Wl,--defsym`` so the
+adapter's ``Virt_To_Phy(&_text)`` computation lands well above
+the host's reachable physical range and the kernel-LMA exclude
+does not intersect the test fixture. ``_edata`` stays at its
+host BSS placement; the resulting kernel-LMA exclude may be
+wider than the on-target exclude, but the host runner only
+checks invariants (n >= 1, alignment, phys_end > phys_start,
+type == MEMORY_TYPE_RAM), not specific fragment counts.
+
+Note: a previous version of this driver also tried
+``-Wl,--defsym=_edata=0x300000`` and an ``#undef``/``#define``
+override of ``X86_64_HANDOFF_BASE/END`` in the stub TU. Both
+were no-ops: the GNU ld linker silently ignores all but the
+first ``--defsym`` for a given symbol, and C preprocessor
+defines are file-scoped (the kernel TU
+``kernel/arch/x86_64/pmm_arch.c`` includes
+``handoff_layout.h`` directly and always sees the production
+values 0x60000 / 0x64000). The host smoke test is robust to
+both of those quirks by design.
 
 For aarch64, the runner's only assertion is
 ``pmm_arch_zone_split() == SIZE_MAX`` (the weak default), so the
@@ -43,35 +62,25 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 # ── x86_64 stub TU ──────────────────────────────────────────────
-# Provides storage for the four x86_64-only external symbols the
-# kernel TU references. Symbol addresses are set at link time via
-# ``--defsym``: ``_text`` = 0x200000 and ``_edata`` = 0x300000.
-# After ``Virt_To_Phy(addr) = addr - 0xffff800000000000`` the
-# effective LMA is a huge unsigned value above 4 GiB, which means
-# the kernel-LMA exclude does not intersect the test fixture
-# ``[0, 0x40000000)``. The handoff and trampoline excludes do
-# intersect and produce surviving fragments that the runner
-# validates. ``Virt_To_Phy`` is redefined inline so the host TU
-# does not pull in ``kernel/memory.h`` (which transitively includes
+# Provides storage for the x86_64-only external symbols the kernel
+# TU references. Symbol addresses that need to live at a specific
+# address use ``--defsym`` at link time (only ``_text`` here; see
+# the module docstring for why ``_edata`` stays at BSS placement).
+# ``Virt_To_Phy`` is redefined inline so the host TU does not pull
+# in ``kernel/memory.h`` (which transitively includes
 # ``arch/mmu.h`` and its inline asm the test does not exercise).
 X86_64_STUB_C = r"""
 #include <kernel/arch/x86_64/handoff_layout.h>
 #include <kernel/arch/x86_64/trampoline.h>
 
-/* Override handoff constants: drop them inside the kernel-LMA gap so
- * the resulting fragment list still exercises the multi-fragment
- * output path. Done with #undef+#define because the kernel header
- * does not guard these macros with #ifndef. */
-#undef X86_64_HANDOFF_BASE
-#undef X86_64_HANDOFF_END
-#define X86_64_HANDOFF_BASE 0x204000UL
-#define X86_64_HANDOFF_END  0x208000UL
-
 /* handoff_layout.h declares ``extern char _text; extern char _edata;``.
- * The kernel TU takes addresses via &-operator. Their actual link-time
- * values are forced via ``--defsym=_text=0x200000`` and
- * ``--defsym=_edata=0x300000`` so the relative LMA ordering
- * (_text < _edata) is guaranteed regardless of BSS placement. */
+ * The kernel TU takes addresses via &-operator. ``_text`` is forced
+ * to 0x200000 via ``-Wl,--defsym=_text=0x200000`` at link time;
+ * ``_edata`` stays at whatever address the host BSS places it.
+ * The kernel TU reads the handoff and trampoline constants from
+ * the production headers (handoff_layout.h, trampoline.h) directly,
+ * which the stub cannot override (preprocessor macros are
+ * file-scoped). */
 char _text  = 0;
 char _edata = 0;
 
@@ -103,9 +112,10 @@ AARCH64_STUB_C = r"""
 def _build_x86_64(tmp, cc, runner_c):
     """Compile the x86_64 host runner and return its path.
 
-    ``--defsym`` overrides the address of the ``_text`` and ``_edata``
-    symbols at link time so their relative order is independent of
-    the host BSS layout. ``-no-pie`` is required because ``--defsym``
+    ``-Wl,--defsym=_text=0x200000`` overrides the ``_text`` symbol
+    at link time so the kernel-LMA exclude (Virt_To_Phy of the
+    ``_text``/``_edata`` pair) lands above the host's reachable
+    physical range. ``-no-pie`` is required because ``--defsym``
     values need absolute addressing (PIE's PC-relative relocations
     can't reach the addresses the test wants).
     """
@@ -117,7 +127,6 @@ def _build_x86_64(tmp, cc, runner_c):
         "-I", ".",
         "-I", "kernel/include",
         "-Wl,--defsym=_text=0x200000",
-        "-Wl,--defsym=_edata=0x300000",
         str(ROOT / "kernel" / "memory" / "pmm_arch.c"),
         str(ROOT / "kernel" / "arch" / "x86_64" / "pmm_arch.c"),
         str(stub_c),
@@ -186,7 +195,10 @@ def main():
             sys.stderr.write(result.stderr)
             raise SystemExit(f"pmm_arch_test: runner exit {result.returncode} "
                              f"(PROFILE={profile})")
-    print(f"pmm_arch_test: contracts and behaviour ok (PROFILE={profile})")
+    print(f"pmm_arch_test: host smoke test ok (PROFILE={profile}; "
+          "1 fragment survives on host - multi-fragment verification "
+          "happens on-target via the QEMU harness "
+          "`make test-aarch64-uefi-smp`)")
 
 
 if __name__ == "__main__":

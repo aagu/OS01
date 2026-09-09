@@ -28,11 +28,13 @@ int main(void)
         CHECK(pmm_arch_normalize(&ctx, out) == 0);
     }
 
-    /* Minimal E820 single type-1 entry spanning low RAM.
-     * x86_64 stub provides _text = 0xffff800000200000,
-     * _edata = 0xffff800000300000, handoff in kernel-LMA gap.
-     * Expected: two surviving MEMORY_TYPE_RAM fragments
-     *   [0, 0x200000), [0x300000, 0x40000000). */
+    /* Minimal E820 fixture exercising the host smoke test. The
+     * on-target multi-fragment verification happens via
+     * `make test-aarch64-uefi-smp` (see pmm_arch implementation
+     * plan: tests/aarch64_uefi_smp.py). The host runner only
+     * verifies: (a) `n >= 1` (at least one RAM range survives),
+     * (b) `phys_end > phys_start`, (c) granule alignment,
+     * (d) type == MEMORY_TYPE_RAM. */
     {
         struct E820_ENTRY e[] = { { .address = 0, .length = 0x40000000,
                                      .type = 1 } };
