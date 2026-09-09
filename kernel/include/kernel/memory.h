@@ -23,7 +23,7 @@ extern struct Physical_Memory_Manager PMMngr;
 // New code should use arch_get_page_table() directly.
 #define get_cr3() arch_get_page_table()
 
-void pmm_init(const struct BOOT_MEMORY_MAP *map);
+void pmm_init(const struct boot_context *ctx);
 // void free_pages(struct Page * page,int32_t number);
 // struct Page * alloc_pages(int32_t zone_select, int32_t number, uint64_t page_flags);
 void vmm_init();

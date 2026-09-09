@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <kernel/memory_map.h>
 
 #define PAGE_1G_SHIFT  30
 #define PAGE_2M_SHIFT  21
@@ -32,17 +33,7 @@
 // shared=1, single-sue=0
 #define PG_Shared        (1 << 4)
 
-struct E820
-{
-    uint64_t address;
-    uint64_t length;
-    uint8_t type;
-}__attribute__((packed));
-
 struct Physical_Memory_Manager{
-    struct E820 e820_entrys[32];
-    uint64_t e820_length;
-
     uint64_t * bits_map;
     uint64_t   bits_size;
     uint64_t   bits_length;
