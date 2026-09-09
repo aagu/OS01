@@ -18,7 +18,7 @@ These constraints come from the spec and apply to every task. Read them before s
 
 1. **Branch discipline**: create a git worktree for this work before editing any source file (per project memory: "use git worktrees"). The plan runs on a feature branch; do not commit to master.
 2. **Commit messages**: end every commit with `Co-Authored-By: Claude <noreply@anthropic.com>`. Use `git -c user.email=claude@anthropic.com -c user.name=Claude commit ...`.
-3. **Build**: `make PROFILE=x86_64-clang x86_64-kernel` and `make PROFILE=aarch64-clang aarch64-uefi-kernel` must both succeed after each task that touches shared code.
+3. **Build**: `make PROFILE=x86_64-clang kernel.bin` and `make PROFILE=aarch64-clang aarch64-uefi-kernel` must both succeed after each task that touches shared code. (There is no `x86_64-kernel` target — the canonical x86_64 artifact is `kernel.bin` or `kernel.elf`.)
 4. **No libc on aarch64**: aarch64 builds use `-nostdlib`. No `vsnprintf`/`vsprintf`/`memset`/`memcpy` from libc. All helpers must be in-tree or skipped.
 5. **Naming**: kernel-wide types are UPPER_CASE (`MEMORY_RANGE`, `MEMORY_TYPE`). Per-arch types remain snake_case (existing convention).
 6. **Style**: 4-space indent in C, ALL_CAPS for enums and macros, lowercase with underscores for functions and variables. Comments are sentence case with a period.
@@ -222,8 +222,9 @@ Create `kernel/arch/x86_64/pmm_arch.c` with:
 #include <kernel/arch/x86_64/trampoline.h>
 
 extern uint64_t Virt_To_Phy(uint64_t vaddr);
+extern void arch_cpu_halt(void);
 
-#define AARCH64_E820_TYPE_RAM  1
+#define E820_TYPE_RAM  1
 
 static uint64_t round_up(uint64_t v, uint64_t a) {
     return (v + a - 1) & ~(a - 1);
@@ -264,7 +265,12 @@ size_t pmm_arch_normalize(const struct boot_context *ctx,
     if (ctx->memory.entry_size < sizeof(struct E820_ENTRY)) return 0;
     if (ctx->memory.entry_count == 0) return 0;
 
-    /* Compute exclusion intervals. */
+    /* Compute exclusion intervals. The kernel-LMA exclude spans
+     * _text to _edata (text + rodata + data); BSS pages between
+     * _edata and _end are deliberately left in the output range so
+     * that Step 7's `end_of_struct` walk has somewhere to mark
+     * them allocated. Excluding them with `_end` would create a
+     * sparse pages_struct that the walk can't reach. */
     uint64_t kernel_lma_start = Virt_To_Phy((uint64_t)&_text);
     uint64_t kernel_lma_end   = Virt_To_Phy((uint64_t)&_edata);
     if (kernel_lma_start >= kernel_lma_end) return 0;
@@ -280,7 +286,18 @@ size_t pmm_arch_normalize(const struct boot_context *ctx,
     size_t out_count = 0;
 
     for (uint32_t i = 0; i < ctx->memory.entry_count; i++) {
-        if (entries[i].type != AARCH64_E820_TYPE_RAM) continue;
+        enum MEMORY_TYPE t;
+        switch (entries[i].type) {
+        case 1: t = MEMORY_TYPE_RAM; break;
+        case 2: t = MEMORY_TYPE_RESERVED; break;
+        case 3: t = MEMORY_TYPE_ACPI_RECLAIM; break;
+        case 4: t = MEMORY_TYPE_ACPI_NVS; break;
+        default: t = MEMORY_TYPE_RESERVED; break;
+        }
+        /* pmm_init's Step 2 walks only MEMORY_TYPE_RAM ranges, so the
+         * non-RAM entries below are reserved for future consumers
+         * (e.g. ACPI reclaim after init). They are still emitted so the
+         * full MEMORY_RANGE[] surface is available. */
         uint64_t s = entries[i].address;
         uint64_t e = entries[i].address + entries[i].length;
         /* Walk through up to 4 exclusions (kernel, handoff, trampoline) */
@@ -553,7 +570,17 @@ void *memset(void *s, int c, size_t n)
 
 - [ ] **Step 3: Create slab_stub.c (no-op slab_init + kmalloc/kfree/kzalloc/ksize)**
 
-Create `kernel/arch/aarch64/slab_stub.c` with:
+Create `kernel/arch/aarch64/slab_stub.c` with signatures **matching `kernel/include/kernel/slab.h` exactly** (verify by reading the header before writing — the exact arity and return types are hard compile errors if mismatched). At the time of writing this plan the header declares:
+
+```c
+size_t slab_init(void);
+void *kmalloc(size_t size);
+void  kfree(const void *address);
+void *kzalloc(size_t size);
+size_t ksize(const void *address);
+```
+
+So the stub is:
 
 ```c
 /* kernel/arch/aarch64/slab_stub.c — slab_init + allocator stubs.
@@ -562,20 +589,20 @@ Create `kernel/arch/aarch64/slab_stub.c` with:
  * file-scope x86-only references: pushfq/sti inline asm, RFLAGS_IF
  * macro, 8 color_printk calls). This stub provides the symbols so
  * pmm.c's slab_init() / list_init() calls resolve.
+ *
+ * Signatures MUST mirror kernel/include/kernel/slab.h exactly.
+ * Verify with: grep -n "^size_t slab_init\|^void \*kmalloc\|^void  kfree\|^void \*kzalloc\|^size_t ksize" kernel/include/kernel/slab.h
  */
 
 #include <stddef.h>
-#include <stdint.h>
 
-void slab_init(void) { /* no-op on aarch64 */ }
+size_t slab_init(void) { return 0; /* no-op on aarch64 */ }
 
-void *kmalloc(uint64_t size)             { (void)size; return NULL; }
-void  kfree(void *ptr, uint64_t size)   { (void)ptr; (void)size; }
-void *kzalloc(uint64_t size)            { (void)size; return NULL; }
-uint64_t ksize(void *ptr)               { (void)ptr; return 0; }
+void *kmalloc(size_t size)            { (void)size; return NULL; }
+void  kfree(const void *address)     { (void)address; }
+void *kzalloc(size_t size)           { (void)size; return NULL; }
+size_t ksize(const void *address)    { (void)address; return 0; }
 ```
-
-(Verify the exact kmalloc/kfree signatures from `kernel/include/kernel/slab.h` and adjust.)
 
 - [ ] **Step 4: Verify aarch64 build still works**
 
@@ -748,9 +775,9 @@ Create `kernel/arch/aarch64/log_impl.c` with:
 #include <kernel/log.h>
 #include <kernel/arch/aarch64/boot_log.h>   /* for kputs */
 
-void _log_err_impl(const char *fmt, ...)  { (void)va_arg; kputs(fmt); }
-void _log_warn_impl(const char *fmt, ...) { (void)va_arg; kputs(fmt); }
-void _log_info_impl(const char *fmt, ...) { (void)va_arg; kputs(fmt); }
+void _log_err_impl(const char *fmt, ...)  { va_list ap; (void)ap; (void)fmt; kputs(fmt); }
+void _log_warn_impl(const char *fmt, ...) { va_list ap; (void)ap; (void)fmt; kputs(fmt); }
+void _log_info_impl(const char *fmt, ...) { va_list ap; (void)ap; (void)fmt; kputs(fmt); }
 ```
 
 (The `(void)va_arg` cast suppresses unused-parameter warnings; replace with `va_list ap; va_start(ap, fmt); va_end(ap);` if your compiler is stricter.)
@@ -838,15 +865,18 @@ Read `kernel/memory/pmm.c` in full to understand:
 - The 5 public-surface sites to be preserved (`alloc_pages:269/297/348`, `free_pages:369/376`)
 - The existing `set_page_attribute`, `page_init`, `page_clean` implementations
 
-- [ ] **Step 2: Add `#include <kernel/bootinfo.h>` and `<kernel/log.h>` to pmm.c**
+- [ ] **Step 2: Add `#include <kernel/bootinfo.h>`, `<kernel/log.h>`, `<kernel/arch/cpu.h>`, and `<kernel/memory_map.h>` to pmm.c**
 
-In `kernel/memory/pmm.c`, add to the include block (or confirm already present):
+In `kernel/memory/pmm.c`, add to the include block:
 
 ```c
 #include <kernel/bootinfo.h>
 #include <kernel/log.h>
+#include <kernel/arch/cpu.h>     /* arch_cpu_halt — required for fatal paths */
 #include <kernel/memory_map.h>
 ```
+
+(`arch_cpu_halt` is called on every fatal path of the rewritten `pmm_init`; without this include the x86_64 build fails with "implicit declaration of function 'arch_cpu_halt'".)
 
 - [ ] **Step 3: Replace color_printk in get_page_attribute and set_page_attribute with log_err**
 
@@ -977,6 +1007,13 @@ void pmm_init(const struct boot_context *ctx)
         }
     }
 
+    /* end_of_struct must be assigned BEFORE Step 7, because Step 7
+     * computes the kernel-image walk bound from it. Mirror the
+     * computation in pmm.c:240 exactly. */
+    PMMngr.end_of_struct =
+        ((uint64_t)PMMngr.zones_struct + PMMngr.zones_length + sizeof(long) * 32)
+        & ~(sizeof(long) - 1);
+
     /* Step 6: page-0 quirk (x86_64 historical) */
     if (PMMngr.pages_struct->phy_address == 0) {
         PMMngr.pages_struct->zone_struct = PMMngr.zones_struct;
@@ -1015,7 +1052,7 @@ void pmm_init(const struct boot_context *ctx)
 
     /* Step 9: slab + subpage pools */
     slab_init();
-    /* list_init(&subpage_pools); — copy verbatim from existing pmm.c */
+    list_init(&subpage_pools);
 
     pmm_initialized = 1;
 }
@@ -1132,6 +1169,16 @@ extern char _text_start[], _text_end[];
 extern char _rodata_start[], _rodata_end[];
 extern char _data_start[], _data_end[];
 extern char _kernel_end[];
+
+/* Sanity check: the aarch64 identity map must be active before
+ * pmm_init runs (otherwise Virt_To_Phy on high-half VMAs returns
+ * nonsense and the kernel-image walk in Step 7 silently corrupts
+ * pages_struct[]). head.S installs the identity map before
+ * dropping to C. */
+if ((uint64_t)&_text_start < ARCH_PAGE_OFFSET) {
+    log_err("[smp] FATAL: aarch64 identity map not active\n");
+    arch_cpu_halt();
+}
 
 PMMngr.start_code  = (uint64_t)&_text_start;
 PMMngr.end_code    = (uint64_t)&_text_end;
@@ -1262,13 +1309,12 @@ int main(void)
 
 #if !defined(__aarch64__)
     /* x86_64-only: aarch64 adapter ignores ctx and reads the
-     * already-published map, so a zeroed boot_context has no
-     * defined meaning on aarch64. */
+     * already-published map (aarch64_ram_map_get), so a zeroed
+     * boot_context has no defined meaning on aarch64. */
     {
         struct boot_context ctx = {0};
         CHECK(pmm_arch_normalize(&ctx, out) == 0);
     }
-#endif
 
     /* Minimal E820 single type-1 entry spanning low RAM.
      * x86_64 stub provides _text = 0xffff800000200000,
@@ -1295,6 +1341,7 @@ int main(void)
             CHECK(out[i].type == MEMORY_TYPE_RAM);
         }
     }
+#endif
 
 #if defined(__x86_64__)
     CHECK(pmm_arch_zone_split() == 0x100000000ULL);
