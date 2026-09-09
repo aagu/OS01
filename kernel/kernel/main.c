@@ -161,7 +161,7 @@ int kernel_main(const struct boot_context *bootctx)
     frame_buffer_early_init();
     boot_logo_show();                 // OS01 boot logo
 
-    pmm_init(&bootctx->memory);             // physical page allocator
+    pmm_init(bootctx);                       // physical page allocator
     vmm_init();                          // virtual memory (page tables)
     frame_buffer_init();                 // remap FB at VIRT_FRAMEBUFFER_OFFSET
     color_printk(GREEN, BLACK, "frame buffer remap succeed\n");

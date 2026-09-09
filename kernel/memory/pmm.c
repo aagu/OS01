@@ -1,14 +1,67 @@
+/* kernel/memory/pmm.c — physical memory manager.
+ *
+ * Arch-neutral pmm_init body (RAM-relative indexing + clamp). Public
+ * surface (alloc_pages, free_pages, alloc_4k_page, free_4k_page,
+ * page_cow_*) is preserved byte-for-byte; only pmm_init changes form.
+ * Two private-helper color_printk calls in get_page_attribute and
+ * set_page_attribute are replaced with log_err.
+ *
+ * aarch64 link is -nostdlib -ffreestanding; libc headers (<string.h>,
+ * <list.h>) are unavailable. Inline the few libc-only symbols used by
+ * the public surface (list_t, list_init, list_add_to_behind) at the
+ * top; forward-declare memset and slab_init so the rewritten pmm_init
+ * body can call them without dragging libc into the translation unit.
+ */
+
 #include <stdint.h>
 #include <stddef.h>
-#include <kernel/memory.h>
+#include <stdbool.h>
+#include <kernel/bootinfo.h>
+#include <kernel/log.h>
+#include <kernel/arch/cpu.h>     /* arch_cpu_halt — required for fatal paths */
+#include <kernel/memory_map.h>
 #include <kernel/pmm.h>
-#include <kernel/printk.h>
-#include <kernel/debug.h>
-#include <kernel/slab.h>
+#include <kernel/memory.h>       /* Virt_To_Phy, Phy_To_Virt */
+#include <kernel/printk.h>       /* color_printk (public surface) */
+#include <kernel/debug.h>        /* debug_mm (existing call sites) */
 #include <kernel/arch/spinlock.h>
-#include <kernel.h>
-#include <list.h>
-#include <string.h>
+#include <kernel.h>              /* container_of */
+
+/* ── Inlined libc-only helpers ────────────────────────────────
+ * The public surface uses list_t / list_init / list_add_to_behind.
+ * On aarch64 there is no <list.h>; inline the minimal set so the
+ * preserved surface compiles without the libc header. */
+typedef struct List {
+    struct List * prev;
+    struct List * next;
+} list_t;
+
+static inline void list_init(struct List * lst)
+{
+    lst->prev = lst;
+    lst->next = lst;
+}
+
+static inline void list_add_to_behind(struct List * entry,
+                                      struct List * new_entry)
+{
+    new_entry->next = entry->next;
+    new_entry->prev = entry;
+    new_entry->next->prev = new_entry;
+    entry->next = new_entry;
+}
+
+/* ── Forward declarations ────────────────────────────────────
+ * memset: libc on x86_64 (linked through -lk) and kernel/arch/aarch64/
+ * memset.c on aarch64.  slab_init: kernel/memory/slab.c on x86_64 and
+ * kernel/arch/aarch64/slab_stub.c on aarch64.  pmm_arch_normalize /
+ * pmm_arch_zone_split: kernel/memory/pmm_arch.c weak default; per-arch
+ * strong overrides in kernel/arch/<arch>/pmm_arch.c. */
+void *memset(void *s, int c, size_t n);
+size_t slab_init(void);
+size_t pmm_arch_normalize(const struct boot_context *ctx,
+                          struct MEMORY_RANGE *out);
+uint64_t pmm_arch_zone_split(void);
 
 uint64_t page_init(struct Page * page, uint64_t flags)
 {
@@ -38,7 +91,7 @@ uint64_t get_page_attribute(struct Page *page)
 {
     if (page == NULL)
     {
-        color_printk(RED, BLACK, "get_page_attribute() ERROR: page == NULL\n");
+        log_err("get_page_attribute() ERROR: page == NULL\n");
         return 0;
     }
     else
@@ -51,7 +104,7 @@ uint64_t set_page_attribute(struct Page * page, uint64_t flags)
 {
     if (page == NULL)
     {
-        color_printk(RED, BLACK, "set_page_attribute() ERROR: page == NULL\n");
+        log_err("set_page_attribute() ERROR: page == NULL\n");
         return 0;
     }
     else
@@ -84,177 +137,179 @@ static spinlock_T  pmm_lock     = { .lock = 1L };
 // Initialized explicitly in pmm_init() after slab_init().
 // Do NOT use lazy init — SMP race on first concurrent alloc_4k_page().
 
-void pmm_init(const struct BOOT_MEMORY_MAP *map)
+void pmm_init(const struct boot_context *ctx)
 {
-    uint32_t i, j;
-    uint64_t TotalMem = 0;
-    struct E820_ENTRY *p = (struct E820_ENTRY *)(uintptr_t)map->entries;
-
-    debug_mm("Display Physics Address MAP,Type(1:RAM,2:ROM or Reserved,3:ACPI Reclaim Memory,4:ACPI NVS Memory,Others:Undefine)\n");
-    /* PMMngr.e820_entrys is a fixed 32-entry array; do not write past it.
-     * The old type-5 sentinel break used to truncate the map here, but that
-     * was removed (the loader no longer guarantees a sentinel) — cap by
-     * count instead, and ignore any entries beyond the array's capacity. */
-    for (i = 0; i < map->entry_count && i < 32; i++)
-    {
-        debug_mm("Address:%#018lx\tLength:%#018lx\tType:%2d\n",p->address,p->length,p->type);
-		if(p->type == 1)
-		{
-			TotalMem += p->length;
-		}
-
-        PMMngr.e820_entrys[i].address =  p->address;
-        PMMngr.e820_entrys[i].length = p->length;
-        PMMngr.e820_entrys[i].type = p->type;
-        PMMngr.e820_length = i;
-
-		p++;
+    /* Real guard. Prior implementations used an NDEBUG'd assert which
+     * left pmm_init re-entrant in release builds. */
+    static int pmm_initialized = 0;
+    if (pmm_initialized) {
+        log_err("[smp] FATAL: pmm_init called twice\n");
+        arch_cpu_halt();
+    }
+    if (!ctx) {
+        log_err("[smp] FATAL: pmm_init null ctx\n");
+        arch_cpu_halt();
+    }
+    if (!boot_context_valid(ctx)) {
+        log_err("[smp] FATAL: pmm_init invalid handoff\n");
+        arch_cpu_halt();
+    }
+    if ((ctx->flags & BOOT_CONTEXT_HAS_MEMORY_MAP) == 0) {
+        log_err("[smp] FATAL: pmm_init invalid handoff\n");
+        arch_cpu_halt();
+    }
+    /* Per-format entry_size check: E820 needs >= sizeof(struct E820_ENTRY)
+     * (20 bytes); UEFI_RAW needs >= 32. Unknown formats are fatal. */
+    if (ctx->memory.format == BOOT_MEMORY_FORMAT_E820) {
+        if (ctx->memory.entry_size < sizeof(struct E820_ENTRY)) {
+            log_err("[smp] FATAL: pmm_init invalid handoff\n");
+            arch_cpu_halt();
+        }
+    } else if (ctx->memory.format == BOOT_MEMORY_FORMAT_UEFI_RAW) {
+        if (ctx->memory.entry_size < 32u) {
+            log_err("[smp] FATAL: pmm_init invalid handoff\n");
+            arch_cpu_halt();
+        }
+    } else {
+        log_err("[smp] FATAL: pmm_init invalid handoff\n");
+        arch_cpu_halt();
     }
 
-    debug_mm("OS Can Used Total RAM:%dMB\n",TotalMem>>20);
+    /* Step 1: adapter -> MEMORY_RANGE[] */
+    struct MEMORY_RANGE scratch[MEMORY_RANGE_MAX];
+    size_t n = pmm_arch_normalize(ctx, scratch);
+    if (n == 0) {
+        log_err("[smp] FATAL: pmm_arch_normalize returned no ranges\n");
+        arch_cpu_halt();
+    }
 
-    // TotalMem = 0;
-    // for (i = 0; i <= PMMngr.e820_length; i++)
-    // {
-    //     uint64_t start, end;
-    //     if (PMMngr.e820_entrys[i].type != 1)
-    //         continue;
-    //     start = PAGE_2M_ALIGN(PMMngr.e820_entrys[i].address);
-    //     end = ((PMMngr.e820_entrys[i].address + PMMngr.e820_entrys[i].length) >> PAGE_2M_SHIFT) << PAGE_2M_SHIFT;
-    //     if (end <= start)
-    //         continue;
-    //     TotalMem += (end - start) >> PAGE_2M_SHIFT;
-    // }
-    // color_printk(ORANGE,BLACK,"OS Can Used Total 2M PAGEs:%#018lx=%018ld\n",TotalMem,TotalMem);
+    /* Step 2: compute TotalMem, lowest_ram, highest_ram. */
+    uint64_t TotalMem = 0;
+    uint64_t lowest_ram  = UINT64_MAX;
+    uint64_t highest_ram = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (scratch[i].type != MEMORY_TYPE_RAM) continue;
+        uint64_t s = scratch[i].phys_start;
+        uint64_t e = scratch[i].phys_end;
+        TotalMem += (e - s);
+        uint64_t s_aligned = s & ~(MEMORY_RANGE_GRANULE - 1);
+        if (s_aligned < lowest_ram)  lowest_ram  = s_aligned;
+        uint64_t e_aligned = (e + MEMORY_RANGE_GRANULE - 1) & ~(MEMORY_RANGE_GRANULE - 1);
+        if (e_aligned > highest_ram) highest_ram = e_aligned;
+    }
+    if (TotalMem == 0) {
+        log_err("[smp] FATAL: no usable RAM after exclusions\n");
+        arch_cpu_halt();
+    }
+    uint64_t ram_span_pages = (highest_ram - lowest_ram) / MEMORY_RANGE_GRANULE;
+    if (ram_span_pages == 0) ram_span_pages = 1;   /* floor 1 */
 
-    //PMMngr.e820_length points to the last `valid` e820_entry
-    // TotalMem = PMMngr.e820_entrys[PMMngr.e820_length].address + PMMngr.e820_entrys[PMMngr.e820_length].length;
-    // for (i = 0; i < PMMngr.e820_length; i++)
-    // {
-    //     uint64_t end;
-    //     if (PMMngr.e820_entrys[i].type != 1)
-    //         continue;
-    //     end = (PMMngr.e820_entrys[i].address + PMMngr.e820_entrys[i].length);
-    //     // TotalMem is the max address of the last valid e820_entry
-    //     if (end > TotalMem)
-    //         TotalMem = end;
-    // }
-
-    //bits map construction init
-    PMMngr.bits_map = (uint64_t *)((PMMngr.start_brk + PAGE_4K_SIZE - 1) & PAGE_4K_MASK);
-    PMMngr.bits_size = TotalMem >> PAGE_2M_SHIFT;
-    PMMngr.bits_length = (((uint64_t)(TotalMem >> PAGE_2M_SHIFT) + sizeof(long) * 8 - 1) / 8) & ( ~ (sizeof(long) - 1));
-    // mem_dump(PMMngr.bits_map, PMMngr.bits_map + sizeof(uint64_t)*64);
+    /* Step 3: allocate bits_map, pages_struct, zones_struct from start_brk.
+     * Mirror the existing pmm.c sizing math (PMMngr.start_brk + 0xFFF &
+     * ~0xFFF), but with the new ram_span_pages. */
+    PMMngr.bits_map = (uint64_t *)((PMMngr.start_brk + 0xFFFUL) & ~0xFFFUL);
+    PMMngr.bits_size  = ram_span_pages;
+    PMMngr.bits_length = ((ram_span_pages + 63) & ~63UL) / 8;
     memset(PMMngr.bits_map, 0xff, PMMngr.bits_length);
-    // mem_dump(PMMngr.bits_map, PMMngr.bits_map + sizeof(uint64_t)*64);
-
-    //pages construction init
-    PMMngr.pages_struct = (struct Page *)(((uint64_t)PMMngr.bits_map + PMMngr.bits_length + PAGE_4K_SIZE - 1) & PAGE_4K_MASK);
-    PMMngr.pages_size = TotalMem >> PAGE_2M_SHIFT;
-    PMMngr.pages_length = ((TotalMem >> PAGE_2M_SHIFT) * sizeof(struct Page) + sizeof(long) - 1) & ( ~ (sizeof(long) - 1));
-    memset(PMMngr.pages_struct, 0x00, PMMngr.pages_length);
-
-    //zones construction init
-    PMMngr.zones_struct = (struct Zone *)(((uint64_t)PMMngr.pages_struct + PMMngr.pages_length + PAGE_4K_SIZE - 1) & PAGE_4K_MASK);
+    PMMngr.pages_struct = (struct Page *)(((uint64_t)PMMngr.bits_map + PMMngr.bits_length + 0xFFFUL) & ~0xFFFUL);
+    PMMngr.pages_size  = ram_span_pages;
+    PMMngr.pages_length = ((ram_span_pages * sizeof(struct Page) + sizeof(long) - 1) & ~(sizeof(long) - 1));
+    memset(PMMngr.pages_struct, 0, PMMngr.pages_length);
+    PMMngr.zones_struct = (struct Zone *)(((uint64_t)PMMngr.pages_struct + PMMngr.pages_length + 0xFFFUL) & ~0xFFFUL);
     PMMngr.zones_size = 0;
-    PMMngr.zones_length = (5 * sizeof(struct Zone) + sizeof(long) - 1) & ( ~ (sizeof(long) - 1));
-    memset(PMMngr.zones_struct, 0x00, PMMngr.zones_length);
+    PMMngr.zones_length = ((MEMORY_RANGE_MAX * sizeof(struct Zone) + sizeof(long) - 1) & ~(sizeof(long) - 1));
+    memset(PMMngr.zones_struct, 0, PMMngr.zones_length);
 
-    for (i = 0; i <= PMMngr.e820_length; i++)
-    {
-        uint64_t start, end;
-        struct Zone * z;
-        struct Page * p;
-
-        if (PMMngr.e820_entrys[i].type != 1)
-            continue;
-        start = PAGE_2M_ALIGN(PMMngr.e820_entrys[i].address);
-        end = ((PMMngr.e820_entrys[i].address + PMMngr.e820_entrys[i].length) >> PAGE_2M_SHIFT) << PAGE_2M_SHIFT;
-        if(end <= start)
-            continue;
-        //zone init
-        z = PMMngr.zones_struct + PMMngr.zones_size;
+    /* Step 4: walk RAM ranges, create zones. RAM-relative indexing:
+     * pages_group = pages_struct + ((start - lowest_ram) >> 21), and the
+     * bits_map bit is at ((start - lowest_ram) >> 21) + j. On x86_64
+     * lowest_ram = 0 so this collapses to the legacy p->phy_address >> 21
+     * indexing. */
+    for (size_t i = 0; i < n; i++) {
+        if (scratch[i].type != MEMORY_TYPE_RAM) continue;
+        uint64_t start = (scratch[i].phys_start + MEMORY_RANGE_GRANULE - 1) & ~(MEMORY_RANGE_GRANULE - 1);
+        uint64_t end   = scratch[i].phys_end & ~(MEMORY_RANGE_GRANULE - 1);
+        if (end <= start) continue;
+        if (PMMngr.zones_size >= MAX_NR_ZONES) continue;
+        struct Zone *z = PMMngr.zones_struct + PMMngr.zones_size;
         PMMngr.zones_size++;
-
         z->zone_start_address = start;
-        z->zone_end_address = end;
-        z->zone_length = end - start;
-
+        z->zone_end_address   = end;
+        z->zone_length        = end - start;
         z->page_using_count = 0;
-        z->page_free_count = (end - start) >> PAGE_2M_SHIFT;
-
+        z->page_free_count  = (end - start) >> 21;   /* PAGE_2M_SHIFT */
         z->total_pages_link = 0;
-
         z->attribute = 0;
         z->manager_struct = &PMMngr;
-
-        z->pages_length = (end - start) >> PAGE_2M_SHIFT;
-        z->pages_group = (struct Page *)(PMMngr.pages_struct + (start >> PAGE_2M_SHIFT));
-
-        //page init
-        p = z->pages_group;
-        for (j = 0; j < z->pages_length; j++, p++)
-        {
+        z->pages_length = (end - start) >> 21;
+        z->pages_group  = (struct Page *)(PMMngr.pages_struct + ((start - lowest_ram) >> 21));
+        uint64_t zone_bit_base = (start - lowest_ram) >> 21;
+        struct Page *p = z->pages_group;
+        for (uint64_t j = 0; j < z->pages_length; j++, p++) {
             p->zone_struct = z;
-            p->phy_address = start + PAGE_2M_SIZE * j;
+            p->phy_address = start + ((uint64_t)j << 21);
             p->attribute = 0;
-
             p->reference_count = 0;
             p->age = 0;
-            // bits_map array start at 0, so right shift 2^6
-            *(PMMngr.bits_map + ((p->phy_address >> PAGE_2M_SHIFT) >> 6)) ^= 1UL << (p->phy_address >> PAGE_2M_SHIFT) % 64;
+            /* RAM-relative bit index: zone base + local j. */
+            uint64_t rel_idx = zone_bit_base + j;
+            *(PMMngr.bits_map + (rel_idx >> 6)) ^= 1UL << (rel_idx % 64);
         }
-        
     }
 
-    //init address 0 to page struct 0; because the PMMngr.e820[0].type != 1
-    PMMngr.pages_struct->zone_struct = PMMngr.zones_struct;
-    PMMngr.pages_struct->phy_address = 0UL;
-    set_page_attribute(PMMngr.pages_struct, PG_PTable_Mapped | PG_Kernel_Init | PG_Kernel);
-    PMMngr.pages_struct->reference_count = 1;
-    PMMngr.pages_struct->age = 0;
+    /* end_of_struct must be assigned BEFORE Step 7, because Step 7
+     * computes the kernel-image walk bound from it. Mirror the existing
+     * pmm.c:240 computation exactly. */
+    PMMngr.end_of_struct =
+        ((uint64_t)PMMngr.zones_struct + PMMngr.zones_length + sizeof(long) * 32)
+        & ~(sizeof(long) - 1);
 
-    PMMngr.zones_length = (PMMngr.zones_size * sizeof(struct Zone) + sizeof(long) - 1) & ( ~ (sizeof(long) - 1));
+    /* Step 5: page-0 quirk (x86_64 historical). */
+    if (PMMngr.pages_struct->phy_address == 0) {
+        PMMngr.pages_struct->zone_struct = PMMngr.zones_struct;
+        PMMngr.pages_struct->phy_address = 0UL;
+        set_page_attribute(PMMngr.pages_struct,
+                           PG_PTable_Mapped | PG_Kernel_Init | PG_Kernel);
+        PMMngr.pages_struct->reference_count = 1;
+        PMMngr.pages_struct->age = 0;
+    }
 
-    debug_mm("bits_map:%#018lx,bits_size:%#018lx,bits_length:%#018lx\n",PMMngr.bits_map,PMMngr.bits_size,PMMngr.bits_length);
-	debug_mm("pages_struct:%#018lx,pages_size:%#018lx,pages_length:%#018lx\n",PMMngr.pages_struct,PMMngr.pages_size,PMMngr.pages_length);
-	debug_mm("zones_struct:%#018lx,zones_size:%#018lx,zones_length:%#018lx\n",PMMngr.zones_struct,PMMngr.zones_size,PMMngr.zones_length);
+    /* Step 6: mark kernel-owned pages. RAM-relative walk with clamp:
+     * unsigned underflow would otherwise corrupt the loop bound on
+     * aarch64 where end_phys (kernel LMA ~0x401e0000) < lowest_ram
+     * (first surviving RAM range starts at 0x40200000). */
+    uint64_t end_phys = Virt_To_Phy(PMMngr.end_of_struct);
+    uint64_t walk_pages = (end_phys > lowest_ram)
+        ? ((end_phys - lowest_ram) >> 21) : 0;
+    for (uint64_t j = 1; j <= walk_pages; j++) {
+        struct Page *tmp = PMMngr.pages_struct + j;
+        page_init(tmp, PG_PTable_Mapped | PG_Kernel_Init | PG_Kernel);
+        uint64_t rel_idx = (tmp->phy_address - lowest_ram) >> 21;
+        *(PMMngr.bits_map + (rel_idx >> 6)) |= 1UL << (rel_idx % 64);
+        tmp->zone_struct->page_using_count++;
+        tmp->zone_struct->page_free_count--;
+    }
 
+    /* Step 7: zone index computation. */
     ZONE_DMA_INDEX = 0;
-	ZONE_NORMAL_INDEX = PMMngr.zones_size - 1;  // all mapped zones
-	ZONE_UNMAPPED_INDEX = 0;
-
-    for (i = 0; i < PMMngr.zones_size; i++)
-    {
-        struct Zone * z = PMMngr.zones_struct + i;
-        debug_mm("zone_start_address:%#018lx,zone_end_address:%#018lx,zone_length:%#018lx,pages_group:%#018lx,pages_length:%#018lx\n",z->zone_start_address,z->zone_end_address,z->zone_length,z->pages_group,z->pages_length);
-
-        if (z->zone_start_address >= 0x100000000 && !ZONE_UNMAPPED_INDEX) {
-            ZONE_UNMAPPED_INDEX = i;
-            ZONE_NORMAL_INDEX = i - 1;  // last zone below 4GB
+    ZONE_NORMAL_INDEX = (PMMngr.zones_size > 0) ? (PMMngr.zones_size - 1) : 0;
+    ZONE_UNMAPPED_INDEX = 0;
+    uint64_t threshold = pmm_arch_zone_split();
+    for (uint32_t zi = 0; zi < PMMngr.zones_size; zi++) {
+        struct Zone *z = PMMngr.zones_struct + zi;
+        if (z->zone_start_address >= threshold && ZONE_UNMAPPED_INDEX == 0) {
+            ZONE_UNMAPPED_INDEX = zi;
+            ZONE_NORMAL_INDEX = (zi > 0) ? (zi - 1) : 0;
         }
     }
 
-    debug_mm("ZONE_DMA_INDEX:%d\tZONE_NORMAL_INDEX:%d\tZONE_UNMAPED_INDEX:%d\n",ZONE_DMA_INDEX,ZONE_NORMAL_INDEX,ZONE_UNMAPPED_INDEX);
-
-    PMMngr.end_of_struct = (uint64_t)((uint64_t)PMMngr.zones_struct + PMMngr.zones_length + sizeof(long) * 32) & ( ~ (sizeof(long) - 1)); //leave some blank after PMMngr
-    debug_mm("start_code:%#018lx,end_code:%#018lx,end_data:%#018lx,start_brk:%#018lx,end_of_struct:%#018lx\n",PMMngr.start_code,PMMngr.end_code,PMMngr.end_data,PMMngr.start_brk, PMMngr.end_of_struct);
-
-    // page from 0 to PMMngr.end_of_struct are all ready used
-    i = Virt_To_Phy(PMMngr.end_of_struct) >> PAGE_2M_SHIFT;
-
-    for (j = 1; j <= i; j++)
-    {
-        struct Page * tmp_page = PMMngr.pages_struct + j;
-        page_init(tmp_page, PG_PTable_Mapped | PG_Kernel_Init | PG_Kernel);
-        *(PMMngr.bits_map + ((tmp_page->phy_address >> PAGE_2M_SHIFT) >> 6)) |= 1UL << (tmp_page->phy_address >> PAGE_2M_SHIFT) % 64;
-        tmp_page->zone_struct->page_using_count++;
-        tmp_page->zone_struct->page_free_count--;
-    }
-    debug_mm("1.PMMngr.bits_map:%#018lx\tzone_struct->page_using_count:%d\tzone_struct->page_free_count:%d\n",*PMMngr.bits_map,PMMngr.zones_struct->page_using_count,PMMngr.zones_struct->page_free_count);
-
+    /* Step 8: slab + subpage pools. Inline the subpage_pools init since
+     * <list.h> is libc (not on the aarch64 include path). */
     slab_init();
-    list_init(&subpage_pools);
+    subpage_pools.prev = &subpage_pools;
+    subpage_pools.next = &subpage_pools;
+
+    pmm_initialized = 1;
 }
 
 /*
@@ -344,7 +399,7 @@ struct Page * alloc_pages(int32_t zone_select, uint64_t number, uint64_t page_fl
             }
         }
     }
-    
+
     color_printk(RED, BLACK, "alloc_pages() ERROR: no page can alloc\n");
     spin_unlock_irqrestore(&pmm_lock, flags);
     return NULL;
@@ -377,7 +432,7 @@ void free_pages(struct Page * page,int32_t number)
 		spin_unlock_irqrestore(&pmm_lock, flags);
 		return ;
 	}
-	
+
 	for(i = 0;i<number;i++,page++)
 	{
 		*(PMMngr.bits_map + ((page->phy_address >> PAGE_2M_SHIFT) >> 6)) &= ~(1UL << (page->phy_address >> PAGE_2M_SHIFT) % 64);

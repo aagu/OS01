@@ -26,3 +26,10 @@ void _log_err_impl(const char *fmt, ...)
 }
 void _log_warn_impl(const char *fmt, ...) { kputs(fmt); }
 void _log_info_impl(const char *fmt, ...) { kputs(fmt); }
+
+/* g_log_level is required by the gate-wrapped log_err/log_warn/log_info
+ * macros in kernel/log.h. The x86_64 build defines it in kernel/log.c;
+ * on aarch64 kernel/log.c is not linked (it pulls libc via vsnprintf),
+ * so the symbol must live here. Default to LOG_INFO — matches the
+ * production release intent of the new kernel/log.h API. */
+int g_log_level = LOG_INFO;
