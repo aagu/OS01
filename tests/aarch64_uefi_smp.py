@@ -129,7 +129,7 @@ def self_test() -> None:
     # ticks must not make run_case terminate QEMU before recovery ticks.
     late_skip = current_degraded_log.replace("[spinlock] status=SKIP\n", "") + "[spinlock] status=SKIP"
     assert not degraded_passed(late_skip)
-    negative_args = argparse.Namespace(expect_no_ack=1)
+    negative_args = argparse.Namespace(expect_no_ack=1, expect_selftest=False)
     for suffix in ("", "\n", "\n[tick] 4\n", "\n[tick] 4\n[tick] 5\n"):
         assert not acceptance_evidence(negative_args, late_skip + suffix, 2)
     assert acceptance_evidence(negative_args, late_skip + "\n[tick] 4\n[tick] 5\n[tick] 6", 2)
@@ -181,6 +181,28 @@ def self_test() -> None:
     )
     assert "if=none,file=disk.img,format=raw,readonly=on,id=disk" in qemu_command(command_args, 4, None)
 
+    # expect_selftest: requires 'UEFI-A64: pmm alloc smoke OK' between the
+    # RAM summary and the topology line. The default (False) preserves the
+    # legacy behavior of every existing fixture.
+    selftest_log = current_log_for_2_cpus.replace(
+        "[smp] topology source=uefi-dtb cpus=2",
+        "UEFI-A64: pmm alloc smoke OK\n[smp] topology source=uefi-dtb cpus=2",
+    )
+    assert passed(selftest_log, cpus=2, expect_selftest=True), \
+        "smoke line between RAM and topology must pass with expect_selftest=True"
+    assert passed(current_log_for_2_cpus, cpus=2, expect_selftest=True) is False, \
+        "missing smoke line must reject when expect_selftest=True"
+    # Default-off: legacy fixture passes even without smoke line.
+    assert passed(current_log_for_2_cpus, cpus=2), \
+        "expect_selftest default-off preserves legacy behavior"
+    # Smoke line present but after topology: still rejected (ordering check).
+    smoke_after = current_log_for_2_cpus + "UEFI-A64: pmm alloc smoke OK\n"
+    assert passed(smoke_after, cpus=2, expect_selftest=True) is False, \
+        "smoke line after topology must reject (ordering enforced)"
+    # degraded_passed ignores expect_selftest (signature only).
+    assert degraded_passed(current_degraded_log, expect_selftest=True), \
+        "degraded_passed ignores expect_selftest"
+
 
 def kernel_failure(text: str) -> bool:
     """Return true only for structured kernel failure diagnostics."""
@@ -215,7 +237,7 @@ def hard_kernel_failure(text: str) -> bool:
     ))
 
 
-def passed(text: str, cpus: int) -> bool:
+def passed(text: str, cpus: int, expect_selftest: bool = False) -> bool:
     """Recognize a complete normal-mode SMP run without QEMU dependencies."""
     # PL011 currently emits LF+CR. Match lines consistently for saved logs
     # and live serial drains, while retaining the original fixture format.
@@ -224,6 +246,28 @@ def passed(text: str, cpus: int) -> bool:
         return False
     if kernel_failure(text):
         return False
+    if expect_selftest:
+        # Anchor on the specific topology line via re.search to avoid
+        # false-positives on '[smp-test] FATAL' or other prefixes that
+        # appear later in the log.
+        topo_match = re.search(
+            rf"^\[smp\] topology source=uefi-dtb cpus={cpus}$",
+            text, re.MULTILINE,
+        )
+        ram_match = re.search(
+            r"^UEFI-A64: RAM ranges=\d+ pages2m=\d+ bytes=\d+$",
+            text, re.MULTILINE,
+        )
+        if topo_match and ram_match and ram_match.start() < topo_match.start():
+            between = text[ram_match.end():topo_match.start()]
+            if "UEFI-A64: pmm alloc smoke OK" not in between:
+                print(f"FAIL: 'UEFI-A64: pmm alloc smoke OK' missing between "
+                      f"RAM summary and topology line (text length {len(text)})")
+                return False
+        else:
+            print(f"FAIL: cannot anchor RAM summary and topology line for "
+                  f"smoke check (text length {len(text)})")
+            return False
     topology = re.search(r"^\[smp\] topology\b[^\n]*\brequested=(\d+)\b[^\n]*\bdiscovered=(\d+)\b", text, re.MULTILINE)
     if topology:
         if tuple(map(int, topology.groups())) != (cpus, cpus):
@@ -249,8 +293,12 @@ def passed(text: str, cpus: int) -> bool:
     return len(re.findall(r"^\[tick\] \d+$", text, re.MULTILINE)) >= 3
 
 
-def degraded_passed(text: str) -> bool:
-    """Recognize the one intentionally degraded, non-benchmark case."""
+def degraded_passed(text: str, expect_selftest: bool = False) -> bool:
+    """Recognize the one intentionally degraded, non-benchmark case.
+
+    The no-ACK path never requires the smoke line; ``expect_selftest`` is
+    accepted for signature symmetry with ``passed()`` and ignored.
+    """
     text = text.replace("\r", "")
     if not ram_summary_ok(text):
         return False
@@ -277,7 +325,8 @@ def degraded_passed(text: str) -> bool:
 
 
 def acceptance_evidence(args: argparse.Namespace, text: str, cpus: int) -> bool:
-    return degraded_passed(text) if args.expect_no_ack is not None else passed(text, cpus)
+    expect_selftest = getattr(args, "expect_selftest", False)
+    return degraded_passed(text, expect_selftest=expect_selftest) if args.expect_no_ack is not None else passed(text, cpus, expect_selftest=expect_selftest)
 
 
 def qemu_command(args: argparse.Namespace, cpus: int, diagnostic_dtb: str | None) -> list[str]:
@@ -443,6 +492,9 @@ def main() -> int:
     parser.add_argument("--qemu")
     parser.add_argument("--log-dir")
     parser.add_argument("--expect-no-ack", type=int, metavar="CPU_ID")
+    parser.add_argument("--expect-selftest", action="store_true",
+                        help="Require 'UEFI-A64: pmm alloc smoke OK' log line "
+                             "between RAM summary and topology line")
     parser.add_argument("--diagnostic-dtb", metavar="PATH_OR_AUTO",
                         help="firmware does not expose DTB via EFI config table: "
                              "use acpi=off and a QEMU-generated DTB. Pass an explicit "
