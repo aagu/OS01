@@ -16,7 +16,7 @@
 // Filled by the BSP before sending SIPI to each AP.
 // Must match the layout in kernel/arch/x86_64/trampoline.S.
 typedef struct {
-    uint64_t cr3;        // offset 0:  PML4 physical address
+    uint64_t cr3;        // offset 0:  PGD physical address
     uint64_t gs_base;    // offset 8:  per-CPU data (VA for IA32_GS_BASE MSR)
     uint64_t stack;      // offset 16: initial kernel stack pointer (VA)
     uint64_t entry;      // offset 24: C entry point (ap_entry)

@@ -31,9 +31,9 @@ void futex_init(void)
     }
 }
 
-static struct futex_bucket *futex_hash(void *pml4, const int *uaddr)
+static struct futex_bucket *futex_hash(void *pgd, const int *uaddr)
 {
-    uint64_t key = (uint64_t)pml4 ^ ((uint64_t)uaddr >> 12);
+    uint64_t key = (uint64_t)pgd ^ ((uint64_t)uaddr >> 12);
     return &futex_buckets[key & (FUTEX_BUCKETS - 1)];
 }
 
@@ -55,7 +55,7 @@ int do_futex_wait(int *uaddr, int val)
         return -EFAULT;
 
     task_t *self = current;
-    struct futex_bucket *bucket = futex_hash(self->mm->pml4, uaddr);
+    struct futex_bucket *bucket = futex_hash(self->mm->pgdir, uaddr);
 
     uint64_t flags = spin_lock_irqsave(&bucket->lock);
 
@@ -63,8 +63,8 @@ int do_futex_wait(int *uaddr, int val)
     //    handling 4KB + 2MB correctly).  The old user_va_to_phys was
     //    2MB-only and would return the wrong page for 4KB/COW entries
     //    (see plan v9).
-    uint64_t *user_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)self->mm->pml4);
-    uint64_t page_phys = arch_virt_to_phys(user_pml4, (uint64_t)uaddr & ~0xFFFULL);
+    uint64_t *user_pgd = (uint64_t *)Phy_To_Virt((uint64_t)self->mm->pgdir);
+    uint64_t page_phys = arch_virt_to_phys(user_pgd, (uint64_t)uaddr & ~0xFFFULL);
     if (!page_phys) {
         spin_unlock_irqrestore(&bucket->lock, flags);
         return -EFAULT;
@@ -117,7 +117,7 @@ int do_futex_wake(int *uaddr, int val)
         (uint64_t)uaddr >= current->addr_limit)
         return -EFAULT;
 
-    struct futex_bucket *bucket = futex_hash(current->mm->pml4, uaddr);
+    struct futex_bucket *bucket = futex_hash(current->mm->pgdir, uaddr);
 
     uint64_t flags = spin_lock_irqsave(&bucket->lock);
 

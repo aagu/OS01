@@ -51,7 +51,7 @@ trampoline_protected:
     orl     $(CR4_PAE|CR4_OSFXSR|CR4_OSXMMEXCPT), %eax
     movl    %eax, %cr4
 
-    // Load PML4 from trampoline data
+    // Load PGD from trampoline data
     movl    $trampoline_data, %esi
     movl    0(%esi), %eax                  // tdata->cr3 (low 32 bits)
     movl    %eax, %cr3

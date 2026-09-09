@@ -106,7 +106,7 @@ int strnlen_user(const void *user_addr, size_t max)
 
 // ── Range validation (fast reject + semantic filter; _ft is the authority) ──
 // Order matters: len==0 -> true (no mm needed); arithmetic rejects; then
-// fail-closed on missing mm/pml4 (boot ctx: init_mm.pml4 is unset) so the
+// fail-closed on missing mm/pgd (boot ctx: init_mm.pgdir is unset) so the
 // walker is NEVER invoked with a null table.
 bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable)
 {
@@ -114,8 +114,8 @@ bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable)
     if (addr == 0 || addr < USER_MIN_ADDR) return false;
     if (addr >= current->addr_limit || len > current->addr_limit - addr)
         return false;
-    if (current->mm == NULL || current->mm->pml4 == NULL)
+    if (current->mm == NULL || current->mm->pgdir == NULL)
         return false;                       // fail-closed: no user address space
-    uint64_t *pml4 = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
-    return arch_user_range_accessible(pml4, addr, len, writable);
+    uint64_t *pgd = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pgdir);
+    return arch_user_range_accessible(pgd, addr, len, writable);
 }

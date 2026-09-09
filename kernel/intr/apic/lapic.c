@@ -102,7 +102,7 @@ int lapic_init(void)
     // 3. Map the LAPIC MMIO region (2MB page, uncacheable)
     uint64_t lapic_page = apic_info.lapic_base & PAGE_2M_MASK;
     vmm_map_page(kernel_map, lapic_page,
-                 (uintptr_t)Phy_To_Virt(lapic_page), PAGE_KERNEL_MMIO);
+                 (uintptr_t)Phy_To_Virt(lapic_page), PAGE_KERNEL_PMD_NOCACHE);
 
     // 4. Ensure APIC is enabled in the MSR (set bit 11)
     if (!(apic_base_msr & APIC_BASE_ENABLE)) {

@@ -65,17 +65,17 @@ int64_t sys_fstatat(int dirfd, const char *path, struct stat *buf,
 // Walk the user page table to resolve a user-space virtual
 // address to its physical address.  Returns 0 on failure.
 // The caller passes Phy_To_Virt(result) to get a kernel pointer.
-uint64_t user_va_to_phys(uint64_t *pml4, uint64_t va)
+uint64_t user_va_to_phys(uint64_t *pgd, uint64_t va)
 {
-    size_t l4 = (va >> PAGE_GDT_SHIFT) & 0x1ff;
+    size_t l4 = (va >> PAGE_PGD_SHIFT) & 0x1ff;
     size_t l3 = (va >> PAGE_1G_SHIFT) & 0x1ff;
     size_t l2 = (va >> PAGE_2M_SHIFT) & 0x1ff;
-    if (!(pml4[l4] & PAGE_Present)) return 0;
-    uint64_t *pml3 = (uint64_t *)Phy_To_Virt(pml4[l4] & PAGE_4K_MASK);
-    if (!(pml3[l3] & PAGE_Present)) return 0;
-    uint64_t *pml2 = (uint64_t *)Phy_To_Virt(pml3[l3] & PAGE_4K_MASK);
-    if (!(pml2[l2] & PAGE_Present)) return 0;
-    return (pml2[l2] & PAGE_2M_MASK & ~PAGE_XD) | (va & 0x1FFFFF);
+    if (!(pgd[l4] & PAGE_VALID)) return 0;
+    uint64_t *pud = (uint64_t *)Phy_To_Virt(pgd[l4] & PAGE_4K_MASK);
+    if (!(pud[l3] & PAGE_VALID)) return 0;
+    uint64_t *pmd = (uint64_t *)Phy_To_Virt(pud[l3] & PAGE_4K_MASK);
+    if (!(pmd[l2] & PAGE_VALID)) return 0;
+    return (pmd[l2] & PAGE_2M_MASK & ~PAGE_NO_EXEC) | (va & 0x1FFFFF);
 }
 
 // ── Helper: find the current task from TSS.rsp0 ──────────────
@@ -597,9 +597,9 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 		}
 		// -- COW resolution (P=1, W=1, VM_WRITE is set) --
 		if ((error_code & 0x03) == 0x03) {
-			uint64_t *user_pml4 =
-			    (uint64_t *)Phy_To_Virt((uint64_t)t->mm->pml4);
-			uint64_t *pte = vmm_pt_walk(user_pml4, cr2, 0, 0);
+			uint64_t *user_pgd =
+			    (uint64_t *)Phy_To_Virt((uint64_t)t->mm->pgdir);
+			uint64_t *pte = vmm_pt_walk(user_pgd, cr2, 0, 0);
 			if (pte && (*pte & PAGE_COW)) {
 				uint64_t old_phys = *pte & PAGE_4K_MASK;
 				if (page_cow_refs(old_phys) > 1) {
@@ -624,8 +624,8 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 
 		// -- Page not present (P=0) - demand allocation --
 		if (!(error_code & 0x01)) {
-			uint64_t *user_pml4 =
-			    (uint64_t *)Phy_To_Virt((uint64_t)t->mm->pml4);
+			uint64_t *user_pgd =
+			    (uint64_t *)Phy_To_Virt((uint64_t)t->mm->pgdir);
 
 			if (vma->vm_flags & VM_ANON) {
 				uint64_t phys = alloc_4k_page();
@@ -634,7 +634,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 					kill_current_user_task(regs);
 					return;
 				}
-				int rc = vmm_map_4k_page(user_pml4, phys,
+				int rc = vmm_map_4k_page(user_pgd, phys,
 							     cr2 & PAGE_4K_MASK, vma->vm_page_prot);
 				if (rc != 0) {
 					free_4k_page(phys);
@@ -665,7 +665,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 				if ((size_t)n < PAGE_4K_SIZE)
 				    memset((char *)Phy_To_Virt(phys) + n, 0,
 				           PAGE_4K_SIZE - (size_t)n);
-				int rc = vmm_map_4k_page(user_pml4, phys,
+				int rc = vmm_map_4k_page(user_pgd, phys,
 							     cr2 & PAGE_4K_MASK, vma->vm_page_prot);
 				if (rc != 0) {
 					free_4k_page(phys);
@@ -910,7 +910,7 @@ int arch_do_signal_delivery(pt_regs_t *regs)
         uint64_t new_rsp = ((regs->rsp - total - 8) & ~15UL) + 8;
 
         // 3. Fast-reject + authoritative write via user VIRTUAL addresses.
-        //    copy_to_user_ft walks pml4 per page, so a write that crosses
+        //    copy_to_user_ft walks pgd per page, so a write that crosses
         //    a 4KB page boundary lands in the correct second page (the
         //    old Phy_To_Virt+memcpy translated only the start address and
         //    would corrupt the wrong physical page for 4KB mappings).
@@ -1380,7 +1380,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         }
 
         // Deep-copy argv/envp arrays+strings to kernel heap.  Done
-        // BEFORE sys_exec builds the new pml4 / frees the old space
+        // BEFORE sys_exec builds the new pgd / frees the old space
         // (no UAF on the old address space).  sys_exec never touches
         // user memory after this point.
         char **kargv = NULL;

@@ -66,9 +66,9 @@ void vma_free_all(mm_t *mm)
 {
     if (!mm) return;
 
-    uint64_t *user_pml4 = NULL;
-    if (mm->pml4)
-        user_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)mm->pml4);
+    uint64_t *user_pgd = NULL;
+    if (mm->pgdir)
+        user_pgd = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
 
     while (mm->vma_list.next != &mm->vma_list) {
         vma_t *v = container_of(mm->vma_list.next, vma_t, list);
@@ -78,13 +78,13 @@ void vma_free_all(mm_t *mm)
             continue;
         }
 
-        // If we have a valid pml4, unmap the physical pages.
-        // If pml4 is NULL (shouldn't happen), skip unmap but still
+        // If we have a valid pgd, unmap the physical pages.
+        // If pgd is NULL (shouldn't happen), skip unmap but still
         // free the VMA node + vfs_node_put to avoid leaks.
-        if (user_pml4) {
+        if (user_pgd) {
             for (uint64_t va = v->vm_start; va < v->vm_end;
                  va += PAGE_4K_SIZE) {
-                vmm_unmap_4k_page(user_pml4, va);
+                vmm_unmap_4k_page(user_pgd, va);
             }
         }
 
@@ -146,17 +146,17 @@ static int prot_to_page_flags(int prot, uint64_t *page_prot, uint64_t *vm_flags)
         prot |= PROT_READ;
 
     if (prot == PROT_NONE) {
-        *page_prot = PAGE_U_S;
+        *page_prot = PAGE_USER;
         *vm_flags = 0;
     } else if (prot == PROT_READ) {
-        *page_prot = PAGE_USER_4K_RO;
+        *page_prot = PAGE_USER_PTE_RO;
         *vm_flags = VM_READ;
     } else if (prot == (PROT_READ | PROT_WRITE)) {
-        *page_prot = PAGE_USER_4K;
+        *page_prot = PAGE_USER_PTE;
         *vm_flags = VM_READ | VM_WRITE;
     } else if (prot == (PROT_READ | PROT_EXEC) ||
                prot == (PROT_READ | PROT_WRITE | PROT_EXEC)) {
-        *page_prot = PAGE_USER_4K;  // no NX support yet
+        *page_prot = PAGE_USER_PTE;  // no NX support yet
         *vm_flags = VM_READ | VM_EXEC
                   | ((prot & PROT_WRITE) ? VM_WRITE : 0);
     } else {
@@ -183,7 +183,7 @@ static int64_t do_munmap_locked(uint64_t addr, uint64_t length)
         return -EINVAL;
 
     uint64_t end = addr + length;
-    uint64_t *user_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
+    uint64_t *user_pgd = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pgdir);
 
     list_t *pos = current->mm->vma_list.next;
     while (pos != &current->mm->vma_list) {
@@ -196,7 +196,7 @@ static int64_t do_munmap_locked(uint64_t addr, uint64_t length)
         uint64_t u_start = (addr > v->vm_start) ? addr : v->vm_start;
         uint64_t u_end   = (end  < v->vm_end)   ? end  : v->vm_end;
         for (uint64_t va = u_start; va < u_end; va += PAGE_4K_SIZE)
-            vmm_unmap_4k_page(user_pml4, va);
+            vmm_unmap_4k_page(user_pgd, va);
 
         uint64_t orig_start = v->vm_start;
         uint64_t orig_end   = v->vm_end;
@@ -414,7 +414,7 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
 
     spin_lock(&current->mm->lock);
 
-    uint64_t *user_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
+    uint64_t *user_pgd = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pgdir);
 
     list_t *pos = current->mm->vma_list.next;
     while (pos != &current->mm->vma_list) {
@@ -437,16 +437,16 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
         uint64_t va_start = (addr > v->vm_start) ? addr : v->vm_start;
         uint64_t va_end   = (end < v->vm_end) ? end : v->vm_end;
         for (uint64_t va = va_start; va < va_end; va += PAGE_4K_SIZE) {
-            uint64_t *pte = vmm_pt_walk(user_pml4, va, 0, 0);
+            uint64_t *pte = vmm_pt_walk(user_pgd, va, 0, 0);
             if (!pte) continue;
-            if (!(*pte & (PAGE_Present | PAGE_PROTNONE))) continue;
+            if (!(*pte & (PAGE_VALID | PAGE_PROTNONE))) continue;
 
             uint64_t phys = *pte & PAGE_4K_MASK;
 
             if (prot == PROT_NONE) {
                 // Stash phys for later restore.
                 // Preserve PAGE_COW if set — we keep our COW reference.
-                uint64_t stash = phys | PAGE_U_S | PAGE_PROTNONE;
+                uint64_t stash = phys | PAGE_USER | PAGE_PROTNONE;
                 if (*pte & PAGE_COW)
                     stash |= PAGE_COW;
                 *pte = stash;
@@ -503,12 +503,12 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
 // kernel buffer.
 //
 // Permission check is delegated to arch_user_range_accessible (mmu.h) so
-// that upper-level PML4/PDP/PD entries are ANDed into the effective
-// permissions — a leaf PTE marked user+RW above a supervisor-only PML4E
+// that upper-level PGD/PDP/PD entries are ANDed into the effective
+// permissions — a leaf PTE marked user+RW above a supervisor-only PGDE
 // is still inaccessible from ring-3.  COW (PAGE_COW, RW=0) is rejected
 // here, consistent with the design choice that the lock-and-write path
 // never allocates a private copy.
-static uint64_t *user_leaf_pte(uint64_t *pml4, uint64_t va)
+static uint64_t *user_leaf_pte(uint64_t *pgd, uint64_t va)
 {
     size_t l4 = (size_t)(va >> 39) & 0x1ff;
     size_t l3 = (size_t)(va >> 30) & 0x1ff;
@@ -517,19 +517,19 @@ static uint64_t *user_leaf_pte(uint64_t *pml4, uint64_t va)
 
     if (l4 >= 256) return NULL;                       // kernel half — out of scope
 
-    if (!(pml4[l4] & PAGE_Present)) return NULL;
-    uint64_t *pml3 = (uint64_t *)Phy_To_Virt(pml4[l4] & PAGE_4K_MASK);
+    if (!(pgd[l4] & PAGE_VALID)) return NULL;
+    uint64_t *pud = (uint64_t *)Phy_To_Virt(pgd[l4] & PAGE_4K_MASK);
 
-    if (!(pml3[l3] & PAGE_Present)) return NULL;
-    if (pml3[l3] & PAGE_PS) return NULL;   // 1GB huge page: unsupported here (same gap as vmm_pt_walk)
-    uint64_t *pml2 = (uint64_t *)Phy_To_Virt(pml3[l3] & PAGE_4K_MASK);
+    if (!(pud[l3] & PAGE_VALID)) return NULL;
+    if (pud[l3] & PAGE_HUGE) return NULL;   // 1GB huge page: unsupported here (same gap as vmm_pt_walk)
+    uint64_t *pmd = (uint64_t *)Phy_To_Virt(pud[l3] & PAGE_4K_MASK);
 
-    if (!(pml2[l2] & PAGE_Present)) return NULL;
+    if (!(pmd[l2] & PAGE_VALID)) return NULL;
 
-    if (pml2[l2] & PAGE_PS)                            // 2MB huge page: PDE is the leaf
-        return &pml2[l2];
+    if (pmd[l2] & PAGE_HUGE)                            // 2MB huge page: PDE is the leaf
+        return &pmd[l2];
 
-    uint64_t *pte_table = (uint64_t *)Phy_To_Virt(pml2[l2] & PAGE_4K_MASK);
+    uint64_t *pte_table = (uint64_t *)Phy_To_Virt(pmd[l2] & PAGE_4K_MASK);
     return &pte_table[l1];
 }
 
@@ -547,8 +547,8 @@ int user_write_range_begin(uint64_t addr, size_t len)
 
     spin_lock(&current->mm->lock);
 
-    uint64_t *user_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
-    if (!arch_user_range_accessible(user_pml4, addr, len, true)) {
+    uint64_t *user_pgd = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pgdir);
+    if (!arch_user_range_accessible(user_pgd, addr, len, true)) {
         spin_unlock(&current->mm->lock);
         return -EFAULT;
     }

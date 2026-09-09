@@ -19,8 +19,8 @@ void *arch_task_boot_state(void)
 void arch_task_init_platform(void)
 {
     // Save current page table base (set up by head.S / EFI stub).
-    init_mm.pml4 = (uint64_t *)arch_get_page_table();
-    init_thread.cr3 = (uint64_t)init_mm.pml4;
+    init_mm.pgdir = (uint64_t *)arch_get_page_table();
+    init_thread.cr3 = (uint64_t)init_mm.pgdir;
 
     // Program BSP TSS with kernel stack pointers and IST entries.
     // BSP uses the legacy global TSS64_Table as its hardware TSS.

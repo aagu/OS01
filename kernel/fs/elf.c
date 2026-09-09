@@ -71,11 +71,11 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
     /* 2. Page base dedup table with per-page writable-or-not tracking */
     uint64_t mapped_base[MAX_LOAD_PAGES];
     int      mapped_writable[MAX_LOAD_PAGES];
-    uint64_t *mapped_pml4 = NULL; /* virtual addr of mm->pml4 for cleanup */
+    uint64_t *mapped_pgd = NULL; /* virtual addr of mm->pgdir for cleanup */
     int      mapped_count = 0;
 
-    /* Resolve the PML4 virtual address for vmm_map_page (mm->pml4 is physical) */
-    mapped_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)mm->pml4);
+    /* Resolve the PGD virtual address for vmm_map_page (mm->pgdir is physical) */
+    mapped_pgd = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
 
     /* 3. Walk program headers */
     for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
@@ -124,22 +124,22 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
 
             /* Map the fresh page — always RWX for user space (2MB
              * pages can't enforce per-4KB permissions). */
-            vmm_map_page(mapped_pml4, phys, page_base, PAGE_USER_Page);
+            vmm_map_page(mapped_pgd, phys, page_base, PAGE_USER_PMD);
         }
 
         /* Re-read phys from the page table for the data copy below.
          * This handles both new mappings and upgrades uniformly. */
         {
-            uint64_t *entry_pml4 = mapped_pml4;
-            size_t l4 = (page_base >> PAGE_GDT_SHIFT) & 0x1ff;
+            uint64_t *entry_pgd = mapped_pgd;
+            size_t l4 = (page_base >> PAGE_PGD_SHIFT) & 0x1ff;
             size_t l3 = (page_base >> PAGE_1G_SHIFT) & 0x1ff;
             size_t l2 = (page_base >> PAGE_2M_SHIFT) & 0x1ff;
 
-            uint64_t pml4e = entry_pml4[l4];
-            uint64_t *pml3 = (uint64_t *)Phy_To_Virt(pml4e & PAGE_4K_MASK);
-            uint64_t pml3e = pml3[l3];
-            uint64_t *pml2 = (uint64_t *)Phy_To_Virt(pml3e & PAGE_4K_MASK);
-            phys = pml2[l2] & (PAGE_2M_MASK & ~PAGE_XD);
+            uint64_t pgde = entry_pgd[l4];
+            uint64_t *pud = (uint64_t *)Phy_To_Virt(pgde & PAGE_4K_MASK);
+            uint64_t pude = pud[l3];
+            uint64_t *pmd = (uint64_t *)Phy_To_Virt(pude & PAGE_4K_MASK);
+            phys = pmd[l2] & (PAGE_2M_MASK & ~PAGE_NO_EXEC);
         }
 
         /* Copy segment data from file into the physical page */
@@ -170,9 +170,9 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
 
 cleanup:
     /* Unmap and free the pages we just mapped, but do NOT free the
-     * PML4 itself — the caller owns and will free it. */
+     * PGD itself — the caller owns and will free it. */
     for (int j = 0; j < mapped_count; j++) {
-        uintptr_t phys = vmm_unmap_page(mapped_pml4, mapped_base[j]);
+        uintptr_t phys = vmm_unmap_page(mapped_pgd, mapped_base[j]);
         if (phys) {
             struct Page *page = Phy_to_2M_Page(phys);
             page_clean(page);

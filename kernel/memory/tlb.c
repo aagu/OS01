@@ -8,7 +8,7 @@
 // ── TLB shootdown for SMP ──────────────────────────────────
 //
 // When a CPU modifies shared kernel page tables (kernel_map,
-// PML4 entries 256–511), other CPUs may still cache stale
+// PGD entries 256–511), other CPUs may still cache stale
 // TLB mappings.  This function:
 //
 //   1. Sets tlb_wanted = 1 on every OTHER online CPU

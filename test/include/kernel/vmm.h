@@ -6,36 +6,36 @@
 //page table attribute
 
 //bit 63 Execution Disable:
-#define PAGE_XD       (1UL << 63)
+#define PAGE_NO_EXEC       (1UL << 63)
 //bit 12 Page Attribute Table:
 #define PAGE_PAT      (1UL << 12)
 //bit 8 Global Page:1,global;0,part
-#define PAGE_Global   (1UL << 8)
+#define PAGE_GLOBAL   (1UL << 8)
 //bit 7 Page Size:1,big page;0,small page
-#define PAGE_PS       (1UL << 7)
+#define PAGE_HUGE       (1UL << 7)
 //bit 6 Dirty:1,dirty;0,clean
 #define PAGE_Dirty    (1UL << 6)
 //bit 5 Accessed:1,visited;0,unvisited
 #define PAGE_Accessed (1UL << 5)
 //bit 4 Page Level Cache Disable
-#define PAGE_PCD      (1UL << 4)
+#define PAGE_CACHE_DISABLE      (1UL << 4)
 //bit 3 Page Level Write Through
-#define PAGE_PWT      (1UL << 3)
+#define PAGE_WRITE_THROUGH      (1UL << 3)
 //bit 2 User Supervisor:1,user and supervisor;0,supervisor
-#define PAGE_U_S      (1UL << 2)
+#define PAGE_USER      (1UL << 2)
 //bit 1 Read Write:1,read and write;0,read
-#define PAGE_R_W      (1UL << 1)
+#define PAGE_WRITE      (1UL << 1)
 //bit 0 Present:1,present;0,not present
-#define PAGE_Present  (1UL << 0)
+#define PAGE_VALID  (1UL << 0)
 
-#define PAGE_KERNEL_GDT  (PAGE_R_W | PAGE_Present)
-#define PAGE_KERNEL_Dir  (PAGE_R_W | PAGE_Present)
-#define	PAGE_KERNEL_Page (PAGE_PS  | PAGE_R_W | PAGE_Present)
+#define PAGE_KERNEL_PGD  (PAGE_WRITE | PAGE_VALID)
+#define PAGE_KERNEL_PUD  (PAGE_WRITE | PAGE_VALID)
+#define	PAGE_KERNEL_PMD (PAGE_HUGE  | PAGE_WRITE | PAGE_VALID)
 // MMIO (uncacheable): PCD=1, PWT=1 for Strong Uncacheable (UC)
-#define PAGE_KERNEL_MMIO (PAGE_PS | PAGE_R_W | PAGE_PCD | PAGE_PWT | PAGE_Present)
-#define PAGE_USER_GDT    (PAGE_U_S | PAGE_R_W | PAGE_Present)
-#define PAGE_USER_Dir    (PAGE_U_S | PAGE_R_W | PAGE_Present)
-#define	PAGE_USER_Page   (PAGE_PS  | PAGE_U_S | PAGE_R_W | PAGE_Present)
+#define PAGE_KERNEL_MMIO (PAGE_HUGE | PAGE_WRITE | PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH | PAGE_VALID)
+#define PAGE_USER_PGD    (PAGE_USER | PAGE_WRITE | PAGE_VALID)
+#define PAGE_USER_PUD    (PAGE_USER | PAGE_WRITE | PAGE_VALID)
+#define	PAGE_USER_PMD   (PAGE_HUGE  | PAGE_USER | PAGE_WRITE | PAGE_VALID)
 
 #define KERNEL_MEM_OFFSET 0xffffffff80000000
 #define PHYS_MEM_OFFSET 0xffff800000000000

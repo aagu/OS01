@@ -136,7 +136,7 @@ static void ensure_mapped(uint64_t phys_addr)
         // We just call vmm_map_page unconditionally; it's idempotent for the
         // same physical->virtual mapping since get_next_level reuses existing
         // table entries.
-        vmm_map_page(kernel_map, base, virt, PAGE_KERNEL_MMIO);
+        vmm_map_page(kernel_map, base, virt, PAGE_KERNEL_PMD_NOCACHE);
     }
 }
 

@@ -1,7 +1,7 @@
 // kernel/driver/e1000.c — Intel 82540EM (e1000) NIC driver
 #include <driver/e1000.h>
 #include <driver/pci.h>
-#include <kernel/vmm.h>       // vmm_map_page, kernel_map, PAGE_KERNEL_MMIO
+#include <kernel/vmm.h>       // vmm_map_page, kernel_map, PAGE_KERNEL_PMD_NOCACHE
 #include <kernel/pmm.h>       // PAGE_2M_MASK, alloc_pages, alloc_4k_page
 #include <kernel/memory.h>    // Phy_To_Virt
 #include <kernel/interrupt.h> // register_irq
@@ -247,7 +247,7 @@ int e1000_init(uint64_t bar_phys, uint8_t irq, int use_msi)
     e1000.mmio_phys = bar_phys;
     uint64_t bar_page = bar_phys & PAGE_2M_MASK;
     vmm_map_page(kernel_map, bar_page,
-                 (uintptr_t)Phy_To_Virt(bar_page), PAGE_KERNEL_MMIO);
+                 (uintptr_t)Phy_To_Virt(bar_page), PAGE_KERNEL_PMD_NOCACHE);
     e1000.mmio = (volatile uint8_t *)Phy_To_Virt(bar_phys);
     e1000.irq = irq;
 

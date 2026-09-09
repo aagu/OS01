@@ -122,7 +122,7 @@ void ahci_init(void)
     // Map the ABAR MMIO region (2MB-aligned)
     uint64_t abar_page = abar_phys & PAGE_2M_MASK;
     vmm_map_page(kernel_map, abar_page,
-                 (uintptr_t)Phy_To_Virt(abar_page), PAGE_KERNEL_MMIO);
+                 (uintptr_t)Phy_To_Virt(abar_page), PAGE_KERNEL_PMD_NOCACHE);
     flush_tlb();
 
     g_hba = (HBA_MEM *)Phy_To_Virt(abar_phys);

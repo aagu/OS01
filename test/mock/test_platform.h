@@ -50,7 +50,7 @@ extern char *strstr(const char *haystack, const char *needle);
 #define PAGE_4K_SIZE (1UL << 12)
 #define PAGE_4K_MASK (~(PAGE_4K_SIZE - 1))
 #define PAGE_2M_MASK (~(PAGE_2M_SIZE - 1))
-#define PAGE_GDT_SHIFT 39
+#define PAGE_PGD_SHIFT 39
 #define PAGE_1G_SHIFT 30
 
 #define NR_CPUS 8

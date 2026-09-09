@@ -93,18 +93,18 @@ static int fb_mmap(struct vfs_node *node, struct vma *vma_)
 
     // Eagerly fill PTEs with uncacheable MMIO attributes.
     // The physical framebuffer pages start at Pos.Phy_addr.
-    uint64_t *user_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
+    uint64_t *user_pgd = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pgdir);
     uint64_t fb_phys = (uint64_t)Pos.Phy_addr;
 
-    // Use PAGE_USER_4K (R/W, U/S, Present) for the MMIO pages.
+    // Use PAGE_USER_PTE (R/W, U/S, Present) for the MMIO pages.
     // Userspace needs write access to the framebuffer.
-    uint64_t page_flags = PAGE_USER_4K | PAGE_PCD | PAGE_PWT;
+    uint64_t page_flags = PAGE_USER_PTE | PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH;
     // Preserve write-combining or other attributes by using the VMA's
     // page_prot if it already has PCD/PWT set, otherwise use defaults.
 
     for (uint64_t va = vma->vm_start; va < vma->vm_end; va += PAGE_4K_SIZE) {
         uint64_t phys = fb_phys + (va - vma->vm_start);
-        vmm_map_4k_page(user_pml4, phys, va, page_flags);
+        vmm_map_4k_page(user_pgd, phys, va, page_flags);
     }
 
     flush_tlb();

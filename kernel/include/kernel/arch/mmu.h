@@ -7,7 +7,7 @@
 #ifdef __x86_64__
 
 // Higher-half base address for direct physical memory mapping.
-// All physical RAM is mapped at this offset (256th PML4 entry).
+// All physical RAM is mapped at this offset (256th PGD entry).
 #define ARCH_PAGE_OFFSET 0xffff800000000000ULL
 
 // Return the current page table base (CR3 on x86_64, TTBR0_EL1 on aarch64).
@@ -29,40 +29,41 @@ static inline void arch_flush_tlb_page(uintptr_t vaddr) {
 }
 
 // Switch address space (load page table base)
-static inline void arch_switch_mm(uint64_t *pml4) {
-    __asm__ __volatile__("movq %0, %%cr3" : : "r"(pml4) : "memory");
+static inline void arch_switch_mm(uint64_t *pgdir) {
+    __asm__ __volatile__("movq %0, %%cr3" : : "r"(pgdir) : "memory");
 }
 
-// Walk 4-level page table (PML4→PDPT→PD→PT), return full physical
+// Walk 4-level page table (PGD→PUD→PMD→PT), return full physical
 // address (page base + in-page offset), or 0 if unmapped.
-// Does NOT interpret PTE flags — that stays in arch/x86_64/trap.c.
+// Does NOT interpret PTE flags -- that stays in arch/x86_64/trap.c.
 static inline uintptr_t arch_virt_to_phys(void *pgtbl, uintptr_t va) {
-    uint64_t *pml4 = (uint64_t *)pgtbl;
-    uint64_t l4 = (va >> 39) & 0x1FF;
-    if (!(pml4[l4] & 1)) return 0;
-    uint64_t *pml3 = (uint64_t *)((pml4[l4] & ~(uint64_t)0xFFF) + ARCH_PAGE_OFFSET);
-    uint64_t l3 = (va >> 30) & 0x1FF;
-    if (!(pml3[l3] & 1)) return 0;
-    if (pml3[l3] & 0x80)  // 1GB huge page
-        return (pml3[l3] & 0xFFFFFC0000000ULL) | (va & 0x3FFFFFFF);
-    uint64_t *pml2 = (uint64_t *)((pml3[l3] & ~(uint64_t)0xFFF) + ARCH_PAGE_OFFSET);
+    uint64_t *pgd = (uint64_t *)pgtbl;
+    uint64_t l0 = (va >> 39) & 0x1FF;
+    if (!(pgd[l0] & 1)) return 0;
+    uint64_t *pud = (uint64_t *)((pgd[l0] & ~(uint64_t)0xFFF) + ARCH_PAGE_OFFSET);
+    uint64_t l1 = (va >> 30) & 0x1FF;
+    if (!(pud[l1] & 1)) return 0;
+    if (pud[l1] & 0x80)  // 1GB huge page
+        return (pud[l1] & 0xFFFFFC0000000ULL) | (va & 0x3FFFFFFF);
+    uint64_t *pmd = (uint64_t *)((pud[l1] & ~(uint64_t)0xFFF) + ARCH_PAGE_OFFSET);
     uint64_t l2 = (va >> 21) & 0x1FF;
-    if (!(pml2[l2] & 1)) return 0;
-    if (pml2[l2] & 0x80)  // 2MB huge page
-        return (pml2[l2] & 0xFFFFFFFE00000ULL) | (va & 0x1FFFFF);
-    uint64_t *pml1 = (uint64_t *)((pml2[l2] & ~(uint64_t)0xFFF) + ARCH_PAGE_OFFSET);
-    uint64_t l1 = (va >> 12) & 0x1FF;
-    if (!(pml1[l1] & 1)) return 0;
-    return (pml1[l1] & 0xFFFFFFFFFFFFF000ULL) | (va & 0xFFF);
+    if (!(pmd[l2] & 1)) return 0;
+    if (pmd[l2] & 0x80)  // 2MB huge page
+        return (pmd[l2] & 0xFFFFFFFE00000ULL) | (va & 0x1FFFFF);
+    uint64_t *pte = (uint64_t *)((pmd[l2] & ~(uint64_t)0xFFF) + ARCH_PAGE_OFFSET);
+    uint64_t l3 = (va >> 12) & 0x1FF;
+    if (!(pte[l3] & 1)) return 0;
+    return (pte[l3] & 0xFFFFFFFFFFFFF000ULL) | (va & 0xFFF);
 }
 
 // Cross-level effective-permission walk: returns true iff every page in
-// [addr, addr+len) is present + user-accessible + (writable ? RW set),
-// ANDing perms across pml4→pdp→pd→pt (x86 semantics: any level U/S=0 →
-// supervisor page, any level RW=0 → read-only).  Handles 4KB + 2MB pages
-// (OS01 creates no 1GB pages, defensive false on 1GB PDP entry).
+// [addr, addr+len) is valid + user-accessible + (writable ? RW set),
+// ANDing perms across pgd→pud→pmd→pte (x86 semantics: any level
+// USER=0 → supervisor page, any level WRITE=0 → read-only).  Handles
+// 4KB + 2MB pages (OS01 creates no 1GB pages, defensive false on 1GB
+// PUD entry).
 //
-// addr+len overflow is self-guarded here — callers may legitimately pass
+// addr+len overflow is self-guarded here -- callers may legitimately pass
 // (addr=2, len=UINT64_MAX) for hostile-input filtering, so we cannot rely
 // on the caller to pre-check.
 //
@@ -71,38 +72,38 @@ static inline uintptr_t arch_virt_to_phys(void *pgtbl, uintptr_t va) {
 static inline bool arch_user_range_accessible(void *pgtbl, uint64_t addr,
                                               uint64_t len, bool writable)
 {
-    uint64_t *pml4 = (uint64_t *)pgtbl;
+    uint64_t *pgd = (uint64_t *)pgtbl;
     if (len == 0) return true;                       // empty range → trivially OK
     if (addr + len < addr) return false;              // addr+len overflow
     uint64_t end = addr + len;
     for (uint64_t va = addr & ~(uint64_t)0xFFF; va < end; ) {
-        uint64_t l4 = (va >> 39) & 0x1FF;
-        if (!(pml4[l4] & 1)) return false;
-        bool user = !!(pml4[l4] & 4), rw = !!(pml4[l4] & 2);
+        uint64_t l0 = (va >> 39) & 0x1FF;
+        if (!(pgd[l0] & 1)) return false;
+        bool user = !!(pgd[l0] & 4), rw = !!(pgd[l0] & 2);
 
-        uint64_t *pml3 = (uint64_t *)((pml4[l4] & ~(uint64_t)0xFFF) + ARCH_PAGE_OFFSET);
-        uint64_t l3 = (va >> 30) & 0x1FF;
-        if (!(pml3[l3] & 1)) return false;
-        user = user && !!(pml3[l3] & 4);
-        rw   = rw   && !!(pml3[l3] & 2);
-        if (pml3[l3] & 0x80) return false;           // 1GB: defensive (not created)
+        uint64_t *pud = (uint64_t *)((pgd[l0] & ~(uint64_t)0xFFF) + ARCH_PAGE_OFFSET);
+        uint64_t l1 = (va >> 30) & 0x1FF;
+        if (!(pud[l1] & 1)) return false;
+        user = user && !!(pud[l1] & 4);
+        rw   = rw   && !!(pud[l1] & 2);
+        if (pud[l1] & 0x80) return false;           // 1GB: defensive (not created)
 
-        uint64_t *pml2 = (uint64_t *)((pml3[l3] & ~(uint64_t)0xFFF) + ARCH_PAGE_OFFSET);
+        uint64_t *pmd = (uint64_t *)((pud[l1] & ~(uint64_t)0xFFF) + ARCH_PAGE_OFFSET);
         uint64_t l2 = (va >> 21) & 0x1FF;
-        if (!(pml2[l2] & 1)) return false;
-        user = user && !!(pml2[l2] & 4);
-        rw   = rw   && !!(pml2[l2] & 2);
-        if (pml2[l2] & 0x80) {                       // 2MB huge page (PDE is leaf)
+        if (!(pmd[l2] & 1)) return false;
+        user = user && !!(pmd[l2] & 4);
+        rw   = rw   && !!(pmd[l2] & 2);
+        if (pmd[l2] & 0x80) {                       // 2MB huge page (PMD is leaf)
             if (!user || (writable && !rw)) return false;
             va = (va & ~(uint64_t)0x1FFFFF) + 0x200000ULL;
             continue;
         }
 
-        uint64_t *pml1 = (uint64_t *)((pml2[l2] & ~(uint64_t)0xFFF) + ARCH_PAGE_OFFSET);
-        uint64_t l1 = (va >> 12) & 0x1FF;
-        if (!(pml1[l1] & 1)) return false;
-        user = user && !!(pml1[l1] & 4);
-        rw   = rw   && !!(pml1[l1] & 2);
+        uint64_t *pte = (uint64_t *)((pmd[l2] & ~(uint64_t)0xFFF) + ARCH_PAGE_OFFSET);
+        uint64_t l3 = (va >> 12) & 0x1FF;
+        if (!(pte[l3] & 1)) return false;
+        user = user && !!(pte[l3] & 4);
+        rw   = rw   && !!(pte[l3] & 2);
         if (!user || (writable && !rw)) return false;
         va += 0x1000ULL;
     }

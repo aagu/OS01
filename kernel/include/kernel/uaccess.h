@@ -93,7 +93,7 @@ int strnlen_user(const void *user_addr, size_t max);
 //   1. addr != 0 && len > 0           (len==0 → true no-op)
 //   2. addr >= USER_MIN_ADDR
 //   3. addr < addr_limit && len <= addr_limit - addr (overflow-safe)
-//   4. arch_user_range_accessible(mm->pml4, addr, len, writable)
+//   4. arch_user_range_accessible(mm->pgdir, addr, len, writable)
 bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable);
 
 #endif // _KERNEL_UACCESS_H

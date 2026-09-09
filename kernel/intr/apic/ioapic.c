@@ -245,7 +245,7 @@ int ioapic_init(void)
         // Map the I/O APIC's 2MB MMIO region
         uint64_t ioapic_page = ioapic->mmio_base & PAGE_2M_MASK;
         vmm_map_page(kernel_map, ioapic_page,
-                     (uintptr_t)Phy_To_Virt(ioapic_page), PAGE_KERNEL_MMIO);
+                     (uintptr_t)Phy_To_Virt(ioapic_page), PAGE_KERNEL_PMD_NOCACHE);
 
         // Read version to get maximum redirection entry — cache it
         uint32_t ver = ioapic_read_reg(ioapic->mmio_base, IOAPIC_REG_VER);

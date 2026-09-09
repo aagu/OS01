@@ -77,7 +77,10 @@ extern void idle_resume(void);
 
 typedef struct mm_struct
 {
-    uint64_t *pml4; // page map level 4 table, used in virtual memory
+    // Physical address of the top-level page table (PGD on x86_64,
+    // TTBR0_EL1 on aarch64). The kernel never dereferences this
+    // directly; vmm.c Phy_To_Virt()s it on demand.
+    uint64_t *pgdir;
 
     uint64_t start_code, end_code; // start and end address of code segment
     uint64_t start_data, end_data; // start and end address of data segment

@@ -51,7 +51,7 @@ extern void idle_resume(void);
 
 typedef struct mm_struct
 {
-    uint64_t *pml4; // page map level 4 table, used in virtual memory
+    uint64_t *pgd; // page map level 4 table, used in virtual memory
 
     uint64_t start_code, end_code; // start and end address of code segment
     uint64_t start_data, end_data; // start and end address of data segment

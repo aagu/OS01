@@ -797,11 +797,11 @@ uint64_t do_exit(uint64_t exit_code)
     vma_free_all(current->mm);
 
     if (!(current->flags & PF_KTHREAD) && current->mm) {
-        uint64_t *pml4_virt = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pml4);
+        uint64_t *pgd_virt = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pgdir);
         bool mm_is_shared = (current->parent != NULL &&
                              current->parent->mm == current->mm);
-        if (!mm_is_shared && current->mm->pml4)
-            vmm_free_user_map(pml4_virt);
+        if (!mm_is_shared && current->mm->pgdir)
+            vmm_free_user_map(pgd_virt);
         kfree(current->mm);
         current->mm = NULL;
     }
@@ -1157,24 +1157,24 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     tsk->fpu_save = fpu_area_alloc();
 
     // 4. Create per-process page table
-    uint64_t *user_pml4 = (uint64_t *)vmm_alloc_map();  // 4KB zeroed PML4
-    if (!user_pml4) {
+    uint64_t *user_pgd = (uint64_t *)vmm_alloc_map();  // 4KB zeroed PGD
+    if (!user_pgd) {
         kfree(raw_alloc); kfree(thd); kfree(mm);
         vfs_node_put(node);
         return -1;
     }
-    uint64_t *kernel_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)init_mm.pml4);
-    memcpy(&user_pml4[256], &kernel_pml4[256], 256 * sizeof(uint64_t));
+    uint64_t *kernel_pgd = (uint64_t *)Phy_To_Virt((uint64_t)init_mm.pgdir);
+    memcpy(&user_pgd[256], &kernel_pgd[256], 256 * sizeof(uint64_t));
 
-    mm->pml4 = (uint64_t *)Virt_To_Phy((uint64_t)user_pml4);
+    mm->pgdir = (uint64_t *)Virt_To_Phy((uint64_t)user_pgd);
     tsk->mm = mm;
-    thd->cr3 = (uint64_t)mm->pml4;
+    thd->cr3 = (uint64_t)mm->pgdir;
 
     // 5. Load ELF segments into the new address space
     uint64_t entry_point;
     if (elf_load(node, mm, &entry_point) != 0) {
         debug_task("spawn: ELF load failed for '%s'\n", path);
-        vmm_free_user_map(user_pml4);
+        vmm_free_user_map(user_pgd);
         kfree(mm);
         kfree(thd);
         kfree(raw_alloc);
@@ -1190,12 +1190,12 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     // 6. Map the user stack page (separate 2MB page at 0x600000)
     struct Page *stack_page = alloc_pages(ZONE_NORMAL, 1, 0);
     if (!stack_page) {
-        vmm_free_user_map(user_pml4);
+        vmm_free_user_map(user_pgd);
         kfree(mm); kfree(thd); kfree(raw_alloc);
         return -1;
     }
-    vmm_map_page(user_pml4, stack_page->phy_address,
-                 USER_STACK_BASE, PAGE_USER_Page | PAGE_XD);
+    vmm_map_page(user_pgd, stack_page->phy_address,
+                 USER_STACK_BASE, PAGE_USER_PMD | PAGE_NO_EXEC);
     mm->start_stack = USER_STACK_BASE;
 
     // ââ 6.5 Set up argv on user stack âââââââââââââââ
@@ -1318,26 +1318,26 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     }
 
     // 3. Create a fresh page table for the new process image
-    uint64_t *new_pml4 = (uint64_t *)vmm_alloc_map();
-    if (!new_pml4) {
+    uint64_t *new_pgd = (uint64_t *)vmm_alloc_map();
+    if (!new_pgd) {
         vfs_node_put(node);
         return -ENOMEM;
     }
-    uint64_t *kernel_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)init_mm.pml4);
-    memcpy(&new_pml4[256], &kernel_pml4[256], 256 * sizeof(uint64_t));
+    uint64_t *kernel_pgd = (uint64_t *)Phy_To_Virt((uint64_t)init_mm.pgdir);
+    memcpy(&new_pgd[256], &kernel_pgd[256], 256 * sizeof(uint64_t));
 
     // 4. Create new mm_struct
     mm_t *new_mm = mm_alloc();
     if (!new_mm) {
-        kfree(new_pml4);
+        kfree(new_pgd);
         vfs_node_put(node);
         return -ENOMEM;
     }
-    new_mm->pml4 = (uint64_t *)Virt_To_Phy((uint64_t)new_pml4);
+    new_mm->pgdir = (uint64_t *)Virt_To_Phy((uint64_t)new_pgd);
     // 5. Load ELF segments into the new address space
     uint64_t entry_point;
     if (elf_load(node, new_mm, &entry_point) != 0) {
-        vmm_free_user_map(new_pml4);
+        vmm_free_user_map(new_pgd);
         kfree(new_mm);
         vfs_node_put(node);
         return -ENOEXEC;
@@ -1351,12 +1351,12 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     // 6. Map the user stack page
     struct Page *stack_page = alloc_pages(ZONE_NORMAL, 1, 0);
     if (!stack_page) {
-        vmm_free_user_map(new_pml4);
+        vmm_free_user_map(new_pgd);
         kfree(new_mm);
         return -ENOMEM;
     }
-    vmm_map_page(new_pml4, stack_page->phy_address,
-                 USER_STACK_BASE, PAGE_USER_Page | PAGE_XD);
+    vmm_map_page(new_pgd, stack_page->phy_address,
+                 USER_STACK_BASE, PAGE_USER_PMD | PAGE_NO_EXEC);
     new_mm->start_stack = USER_STACK_BASE;
 
     // ── 6.5 Set up argv/envp on user stack ──────────────────
@@ -1443,10 +1443,10 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     // 7. Free the OLD user address space (both VMA pages and page tables).
     // fork_mm_copy creates fully independent page table hierarchies
     // (vmm_alloc_map + calloc per level), so vmm_free_user_map on the
-    // child's PML4 is safe — it won't corrupt the parent's address space.
+    // child's PGD is safe — it won't corrupt the parent's address space.
     if (current->mm) {
         mm_t *old_mm = current->mm;
-        uint64_t *old_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)old_mm->pml4);
+        uint64_t *old_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)old_mm->pgdir);
 
         vma_free_all(old_mm);            // free VMA-tracked 4KB pages + VMA nodes
         vmm_free_user_map(old_pml4);     // free page tables + remaining 2MB pages
@@ -1470,7 +1470,7 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
 
     // 8. Install new mm and page table
     current->mm = new_mm;
-    current->thread->cr3 = (uint64_t)new_mm->pml4;
+    current->thread->cr3 = (uint64_t)new_mm->pgdir;
 
     // 9. Switch CR3 to the new page table
     __asm__ __volatile__("movq %0, %%cr3" :: "r"(current->thread->cr3) : "memory");
@@ -1668,71 +1668,71 @@ int64_t sys_fstatat(int dirfd, const char *path, struct stat *buf,
 }
 
 // ── fork_mm_copy — create private address space for fork child ─
-// Builds a new PML4 with private copies of all user 2MB pages.
+// Builds a new PGD with private copies of all user 2MB pages.
 // Uses inline rep movsb instead of memcpy because libk's memcpy
 // has a bug with 2MB copies (CR2=0x8).
 static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
 {
     mm_t *child_mm = mm_alloc();
-    uint64_t *child_pml4 = (uint64_t *)vmm_alloc_map();
-    if (!child_mm || !child_pml4)
+    uint64_t *child_pgd = (uint64_t *)vmm_alloc_map();
+    if (!child_mm || !child_pgd)
         goto fail;
 
-    uint64_t *parent_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)parent_mm->pml4);
-    uint64_t *kernel_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)init_mm.pml4);
+    uint64_t *parent_pgd = (uint64_t *)Phy_To_Virt((uint64_t)parent_mm->pgdir);
+    uint64_t *kernel_pgd = (uint64_t *)Phy_To_Virt((uint64_t)init_mm.pgdir);
 
-    memcpy(&child_pml4[256], &kernel_pml4[256], 256 * sizeof(uint64_t));
+    memcpy(&child_pgd[256], &kernel_pgd[256], 256 * sizeof(uint64_t));
 
     for (int l4 = 0; l4 < 256; l4++) {
-        uint64_t pml4e = parent_pml4[l4];
-        if (!(pml4e & PAGE_Present)) continue;
+        uint64_t pgde = parent_pgd[l4];
+        if (!(pgde & PAGE_VALID)) continue;
 
-        uint64_t *parent_pml3 = (uint64_t *)Phy_To_Virt(pml4e & PAGE_4K_MASK);
-        uint64_t *child_pml3  = (uint64_t *)calloc(1, PAGE_4K_SIZE);
-        if (!child_pml3) continue;
-        child_pml4[l4] = Virt_To_Phy((uint64_t)child_pml3) | PAGE_USER_GDT;
+        uint64_t *parent_pud = (uint64_t *)Phy_To_Virt(pgde & PAGE_4K_MASK);
+        uint64_t *child_pud  = (uint64_t *)calloc(1, PAGE_4K_SIZE);
+        if (!child_pud) continue;
+        child_pgd[l4] = Virt_To_Phy((uint64_t)child_pud) | PAGE_USER_PGD;
 
         for (int l3 = 0; l3 < 512; l3++) {
-            uint64_t pml3e = parent_pml3[l3];
-            if (!(pml3e & PAGE_Present)) continue;
+            uint64_t pude = parent_pud[l3];
+            if (!(pude & PAGE_VALID)) continue;
 
-            uint64_t *parent_pml2 = (uint64_t *)Phy_To_Virt(pml3e & PAGE_4K_MASK);
-            uint64_t *child_pml2  = (uint64_t *)calloc(1, PAGE_4K_SIZE);
-            if (!child_pml2) continue;
-            child_pml3[l3] = Virt_To_Phy((uint64_t)child_pml2) | PAGE_USER_Dir;
+            uint64_t *parent_pmd = (uint64_t *)Phy_To_Virt(pude & PAGE_4K_MASK);
+            uint64_t *child_pmd  = (uint64_t *)calloc(1, PAGE_4K_SIZE);
+            if (!child_pmd) continue;
+            child_pud[l3] = Virt_To_Phy((uint64_t)child_pmd) | PAGE_USER_PUD;
 
             for (int l2 = 0; l2 < 512; l2++) {
-                uint64_t pml2e = parent_pml2[l2];
-                if (!(pml2e & PAGE_Present)) continue;
+                uint64_t pmde = parent_pmd[l2];
+                if (!(pmde & PAGE_VALID)) continue;
 
                 // Eager copy: allocate a private 2MB page and copy
                 // using rep movsb.  Inline asm is used instead of
                 // memcpy because the kernel's libk memcpy has a bug
                 // with 2MB copies (CR2=0x8).
-                // Only 2MB huge pages (PAGE_PS) are eagerly copied.
+                // Only 2MB huge pages (PAGE_HUGE) are eagerly copied.
                 // Non-2MB entries (4KB page table pointers, etc.) are
                 // shared -- the child inherits the parent's mapping.
                 // 4KB PTE table: share pages via COW.
-                // Check PAGE_COW before PAGE_R_W — a COW page has R/W=0
+                // Check PAGE_COW before PAGE_WRITE — a COW page has R/W=0
                 // and must not be misclassified as plain read-only.
-                if (!(pml2e & PAGE_PS)) {
-                    if (!(pml2e & PAGE_Present)) {
-                        child_pml2[l2] = 0;
+                if (!(pmde & PAGE_HUGE)) {
+                    if (!(pmde & PAGE_VALID)) {
+                        child_pmd[l2] = 0;
                         continue;
                     }
                     uint64_t *parent_pte =
-                        (uint64_t *)Phy_To_Virt(pml2e & PAGE_4K_MASK);
+                        (uint64_t *)Phy_To_Virt(pmde & PAGE_4K_MASK);
                     uint64_t *child_pte =
                         (uint64_t *)calloc(1, PAGE_4K_SIZE);
                     if (!child_pte) {
-                        child_pml2[l2] = pml2e;  // OOM: share PDE
+                        child_pmd[l2] = pmde;  // OOM: share PDE
                         continue;
                     }
-                    child_pml2[l2] = Virt_To_Phy((uint64_t)child_pte)
-                                   | (pml2e & 0xfff);
+                    child_pmd[l2] = Virt_To_Phy((uint64_t)child_pte)
+                                   | (pmde & 0xfff);
                     for (int l1 = 0; l1 < 512; l1++) {
                         uint64_t pte = parent_pte[l1];
-                        if (!(pte & (PAGE_Present | PAGE_PROTNONE)))
+                        if (!(pte & (PAGE_VALID | PAGE_PROTNONE)))
                             continue;
 
                         // Compute VA from page table indices
@@ -1750,11 +1750,11 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                             // Already COW-shared (fork-of-fork)
                             page_cow_get(pte & PAGE_4K_MASK);
                             child_pte[l1] = pte;
-                        } else if (pte & PAGE_R_W) {
+                        } else if (pte & PAGE_WRITE) {
                             // Path A: writable -> COW on BOTH parent and child.
                             // page_cow_get TWICE: parent PTE (R/W->R/O+COW) +1,
                             // child PTE (new COW) +1 -> cow_count grows by 2.
-                            parent_pte[l1] &= ~PAGE_R_W;
+                            parent_pte[l1] &= ~PAGE_WRITE;
                             parent_pte[l1] |= PAGE_COW;
                             page_cow_get(pte & PAGE_4K_MASK);
                             page_cow_get(pte & PAGE_4K_MASK);
@@ -1766,7 +1766,7 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                     }
                     continue;
                 }
-                uint64_t phys = pml2e & PAGE_2M_MASK;
+                uint64_t phys = pmde & PAGE_2M_MASK;
                 // VM_IO guard: skip MMIO huge pages, share directly
                 {
                     uint64_t vaddr_2m = ((uint64_t)l4 << 39)
@@ -1774,14 +1774,14 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                                        | ((uint64_t)l2 << 21);
                     vma_t *vm = vma_find(parent_mm, vaddr_2m);
                     if (vm && (vm->vm_flags & VM_IO)) {
-                        child_pml2[l2] = pml2e;
+                        child_pmd[l2] = pmde;
                         continue;
                     }
                 }
                 struct Page *s = alloc_pages(ZONE_NORMAL, 1, 0);
                 if (s) {
                     uint64_t dst = (uint64_t)Phy_To_Virt(s->phy_address);
-                    uint64_t src = (uint64_t)Phy_To_Virt(phys & ~PAGE_XD);
+                    uint64_t src = (uint64_t)Phy_To_Virt(phys & ~PAGE_NO_EXEC);
                     uint64_t sz  = PAGE_2M_SIZE;
                     __asm__ __volatile__(
                         "cld\n\t"
@@ -1790,10 +1790,10 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                         :
                         : "memory"
                     );
-                    child_pml2[l2] = s->phy_address
-                                   | (pml2e & ~PAGE_2M_MASK);
+                    child_pmd[l2] = s->phy_address
+                                   | (pmde & ~PAGE_2M_MASK);
                 } else {
-                    child_pml2[l2] = pml2e; // OOM fallback: share
+                    child_pmd[l2] = pmde; // OOM fallback: share
                 }
             }
         }
@@ -1803,8 +1803,8 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
     // vma_list must NOT be shared — fork_vma_copy will fill child's own
     list_init(&child_mm->vma_list);
     spin_init(&child_mm->lock);   // memcpy copied parent's lock value — reset
-    child_mm->pml4 = (uint64_t *)Virt_To_Phy((uint64_t)child_pml4);
-    *cr3_out = (uint64_t)child_mm->pml4;
+    child_mm->pgdir = (uint64_t *)Virt_To_Phy((uint64_t)child_pgd);
+    *cr3_out = (uint64_t)child_mm->pgdir;
 
     // TLB shootdown: parent's in-memory PTEs were modified (R/W → R/O+COW).
     // With SMP load balancing the parent may run on any CPU — must
@@ -1814,28 +1814,28 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
     return child_mm;
 
 fail:
-    if (child_pml4) {
+    if (child_pgd) {
         for (int l4 = 0; l4 < 256; l4++) {
-            uint64_t pml4e = child_pml4[l4];
-            if (!(pml4e & PAGE_Present)) continue;
-            uint64_t *pml3 = (uint64_t *)Phy_To_Virt(pml4e & PAGE_4K_MASK);
+            uint64_t pgde = child_pgd[l4];
+            if (!(pgde & PAGE_VALID)) continue;
+            uint64_t *pud = (uint64_t *)Phy_To_Virt(pgde & PAGE_4K_MASK);
             for (int l3 = 0; l3 < 512; l3++) {
-                uint64_t pml3e = pml3[l3];
-                if (!(pml3e & PAGE_Present)) continue;
-                uint64_t *pml2 = (uint64_t *)Phy_To_Virt(pml3e & PAGE_4K_MASK);
+                uint64_t pude = pud[l3];
+                if (!(pude & PAGE_VALID)) continue;
+                uint64_t *pmd = (uint64_t *)Phy_To_Virt(pude & PAGE_4K_MASK);
                 for (int l2 = 0; l2 < 512; l2++) {
-                    uint64_t pml2e = pml2[l2];
-                    if (!(pml2e & PAGE_Present)) continue;
-                    if (!(pml2e & PAGE_PS)) {
-                        uint64_t *pte = (uint64_t *)Phy_To_Virt(pml2e & PAGE_4K_MASK);
+                    uint64_t pmde = pmd[l2];
+                    if (!(pmde & PAGE_VALID)) continue;
+                    if (!(pmde & PAGE_HUGE)) {
+                        uint64_t *pte = (uint64_t *)Phy_To_Virt(pmde & PAGE_4K_MASK);
                         kfree(pte);
                     }
                 }
-                kfree(pml2);
+                kfree(pmd);
             }
-            kfree(pml3);
+            kfree(pud);
         }
-        kfree(child_pml4);
+        kfree(child_pgd);
     }
     if (child_mm)   kfree(child_mm);
     if (cr3_out)    *cr3_out = 0;
@@ -1935,7 +1935,7 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags __attribute__((unused)),
     if ((regs->cs & 3) == 3) {
         tsk->flags &= ~PF_KTHREAD;
         tsk->addr_limit = 0x00007FFFFFFFFFFF;
-        if (current->mm && current->mm->pml4) {
+        if (current->mm && current->mm->pgdir) {
             tsk->mm = fork_mm_copy(current->mm, &thd->cr3);
             if (!tsk->mm) {
                 debug_task("fork: pid=%d fork_mm_copy FAILED, falling back to shared mm\n",
@@ -1946,7 +1946,7 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags __attribute__((unused)),
             if (tsk->mm)
                 fork_vma_copy(tsk->mm, current->mm);
         } else if (current->mm) {
-            debug_task("fork: pid=%d parent_mm->pml4 is NULL, sharing mm\n",
+            debug_task("fork: pid=%d parent_mm->pgdir is NULL, sharing mm\n",
                 (int)current->pid);
         }
     }

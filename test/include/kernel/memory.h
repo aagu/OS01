@@ -8,7 +8,7 @@
 
 #define PAGE_OFFSET ((unsigned long)0xffff800000000000)
 
-#define PAGE_GDT_SHIFT 39
+#define PAGE_PGD_SHIFT 39
 
 #define Virt_To_Phy(addr) ((unsigned long)(addr) - PAGE_OFFSET)
 #define Phy_To_Virt(addr) ((unsigned long *)((unsigned long)(addr) + PAGE_OFFSET))

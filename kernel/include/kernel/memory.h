@@ -9,7 +9,7 @@
 
 #define PAGE_OFFSET ARCH_PAGE_OFFSET
 
-#define PAGE_GDT_SHIFT 39
+#define PAGE_PGD_SHIFT 39   // top-level page-table index shift (39 on x86_64, etc.)
 
 #define Virt_To_Phy(addr) ((unsigned long)(addr) - PAGE_OFFSET)
 #define Phy_To_Virt(addr) ((unsigned long *)((unsigned long)(addr) + PAGE_OFFSET))

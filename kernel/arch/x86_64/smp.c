@@ -100,7 +100,7 @@ void ap_entry(void)
     cpu->idle->thread->rsp  = (uint64_t)cpu->idle + STACK_SIZE - sizeof(pt_regs_t);
     cpu->idle->thread->fs   = KERNEL_DS;
     cpu->idle->thread->gs   = KERNEL_DS;
-    cpu->idle->thread->cr3  = (uint64_t)init_mm.pml4;
+    cpu->idle->thread->cr3  = (uint64_t)init_mm.pgdir;
 
     // Seed the per-CPU TSS with idle-task ring-0 stack + IST values
     // copied from the BSP template.

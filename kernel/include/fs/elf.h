@@ -80,7 +80,7 @@ int elf_validate(vfs_node_t *node);
 
 /**
  * elf_load() — Load PT_LOAD segments from an ELF into the given mm's
- *              address space. The mm must already have a fresh PML4
+ *              address space. The mm must already have a fresh PGD
  *              (kernel entries copied, no user mappings yet).
  *
  * @node:          VFS node for the ELF file (read position 0)
