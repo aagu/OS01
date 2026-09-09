@@ -570,17 +570,23 @@ void *memset(void *s, int c, size_t n)
 
 - [ ] **Step 3: Create slab_stub.c (no-op slab_init + kmalloc/kfree/kzalloc/ksize)**
 
-Create `kernel/arch/aarch64/slab_stub.c` with signatures **matching `kernel/include/kernel/slab.h` exactly** (verify by reading the header before writing — the exact arity and return types are hard compile errors if mismatched). At the time of writing this plan the header declares:
+Create `kernel/arch/aarch64/slab_stub.c` with signatures **matching `kernel/include/kernel/slab.h` exactly** (verify by reading the header before writing — the exact arity, return types, and pointer constness are hard compile errors if mismatched). The implementer MUST run the verification grep and paste its output into the commit message:
 
-```c
-size_t slab_init(void);
-void *kmalloc(size_t size);
-void  kfree(const void *address);
-void *kzalloc(size_t size);
-size_t ksize(const void *address);
+```bash
+grep -nE '^void \* kmalloc|^void \* kfree|^void \* kzalloc|^size_t ksize|^size_t slab_init' kernel/include/kernel/slab.h
 ```
 
-So the stub is:
+The plan's expected output (at the time of writing) is:
+
+```
+...:void * kmalloc(size_t size);
+...:void * kfree(void * address);
+...:void * kzalloc(size_t size);
+...:size_t ksize(const void *address);
+...:size_t slab_init(void);
+```
+
+Note in particular `kfree` returns `void *` (not `void`) and takes `void *` (not `const void *`). The stub mirrors these exactly:
 
 ```c
 /* kernel/arch/aarch64/slab_stub.c — slab_init + allocator stubs.
@@ -591,17 +597,16 @@ So the stub is:
  * pmm.c's slab_init() / list_init() calls resolve.
  *
  * Signatures MUST mirror kernel/include/kernel/slab.h exactly.
- * Verify with: grep -n "^size_t slab_init\|^void \*kmalloc\|^void  kfree\|^void \*kzalloc\|^size_t ksize" kernel/include/kernel/slab.h
  */
 
 #include <stddef.h>
 
 size_t slab_init(void) { return 0; /* no-op on aarch64 */ }
 
-void *kmalloc(size_t size)            { (void)size; return NULL; }
-void  kfree(const void *address)     { (void)address; }
-void *kzalloc(size_t size)           { (void)size; return NULL; }
-size_t ksize(const void *address)    { (void)address; return 0; }
+void *kmalloc(size_t size)        { (void)size; return NULL; }
+void *kfree(void *address)        { (void)address; return NULL; }
+void *kzalloc(size_t size)       { (void)size; return NULL; }
+size_t ksize(const void *address) { (void)address; return 0; }
 ```
 
 - [ ] **Step 4: Verify aarch64 build still works**
@@ -643,9 +648,18 @@ Read `kernel/include/kernel/log.h` and `kernel/kernel/log.c` to confirm:
 
 Do not modify until you understand the existing layout.
 
-- [ ] **Step 2: Modify kernel/log.h to add gate-wrapped macros and prototypes**
+- [ ] **Step 2: Modify kernel/log.h to replace the existing convenience macros**
 
-In `kernel/include/kernel/log.h`, after the existing infrastructure, add:
+In `kernel/include/kernel/log.h`, the existing layout (at the time of writing this plan) is:
+
+- Lines 15–20: `log(level, fmt, ...)` core macro (gated on `g_log_level`)
+- Lines 23–25: `log_err` / `log_warn` / `log_info` convenience macros (currently `log_err(fmt, ...) log(LOG_ERR, fmt, ##__VA_ARGS__)` etc.)
+- Lines 28–32: `log_debug` (NDEBUG-gated)
+- Lines 38–41: `g_log_level` / `log_set_level` / `log_get_level` (runtime gate)
+
+**Edit**: DELETE the existing `log_err` / `log_warn` / `log_info` macros at lines 23–25 (they currently call the `log()` macro and route through `_log_write`). REPLACE them with the gate-wrapped `_log_*_impl` form. KEEP the `log()` core macro at lines 15–20 unchanged. KEEP `log_debug`, `g_log_level`, `log_set_level`, `log_get_level` unchanged.
+
+Concretely, replace lines 23–25 with:
 
 ```c
 /* Gate-wrapped convenience macros — single source of truth on every arch.
@@ -662,7 +676,7 @@ void _log_warn_impl(const char *fmt, ...);
 void _log_info_impl(const char *fmt, ...);
 void _log_writev(int level, const char *fmt, va_list args);
 
-#define log_err(...) do { if (LOG_ERR <= g_log_level) _log_err_impl(__VA_ARGS__); } while (0)
+#define log_err(...)  do { if (LOG_ERR  <= g_log_level) _log_err_impl(__VA_ARGS__);  } while (0)
 #define log_warn(...) do { if (LOG_WARN <= g_log_level) _log_warn_impl(__VA_ARGS__); } while (0)
 #define log_info(...) do { if (LOG_INFO <= g_log_level) _log_info_impl(__VA_ARGS__); } while (0)
 
@@ -672,6 +686,8 @@ void _log_writev(int level, const char *fmt, va_list args);
 ```
 
 (Use the exact `LOG_ERR` / `LOG_WARN` / `LOG_INFO` constants already defined in this file. Verify with: `grep -n "LOG_ERR\|LOG_WARN\|LOG_INFO" kernel/include/kernel/log.h`.)
+
+The `__VA_ARGS__` pattern requires at least one argument (the format string); all current callers pass a plain string literal as the first arg, so this is satisfied. If a future caller needs empty-args support, replace with `__VA_OPT__(,) __VA_ARGS__` (C2x) or use `##__VA_ARGS__` GCC extension (which the old macros used).
 
 - [ ] **Step 3: Modify kernel/log.c — split _log_write and add wrappers**
 
@@ -775,9 +791,16 @@ Create `kernel/arch/aarch64/log_impl.c` with:
 #include <kernel/log.h>
 #include <kernel/arch/aarch64/boot_log.h>   /* for kputs */
 
-void _log_err_impl(const char *fmt, ...)  { va_list ap; (void)ap; (void)fmt; kputs(fmt); }
-void _log_warn_impl(const char *fmt, ...) { va_list ap; (void)ap; (void)fmt; kputs(fmt); }
-void _log_info_impl(const char *fmt, ...) { va_list ap; (void)ap; (void)fmt; kputs(fmt); }
+void _log_err_impl(const char *fmt, ...)
+{
+    /* All current aarch64 callers pass plain string literals; ignore
+     * the variadic args entirely. Using the proper va_start/va_end
+     * dance is unnecessary work and `(void)va_arg;` is invalid C
+     * (the macro requires an arg list). */
+    kputs(fmt);
+}
+void _log_warn_impl(const char *fmt, ...) { kputs(fmt); }
+void _log_info_impl(const char *fmt, ...) { kputs(fmt); }
 ```
 
 (The `(void)va_arg` cast suppresses unused-parameter warnings; replace with `va_list ap; va_start(ap, fmt); va_end(ap);` if your compiler is stricter.)
