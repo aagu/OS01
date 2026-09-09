@@ -12,9 +12,9 @@
 //
 // This header defines the boot_context v2 ABI handed off from the
 // firmware-aware bootloader to the kernel. Pointers are physical
-// addresses. struct E820_ENTRY is the legacy E820 record layout
-// still produced by the x86_64 UEFI loader (boot.c) and consumed
-// by the physical memory manager (pmm.c).
+// addresses. The boot_context itself is fully arch-neutral — no
+// architecture-specific data structure is defined here. x86_64-only
+// E820 bits live in kernel/include/kernel/arch/x86_64/bootinfo_x86.h.
 
 struct GRAPHICS_INFO
 {
@@ -26,13 +26,6 @@ struct GRAPHICS_INFO
 	uint64_t FrameBufferSize;
 };
 
-struct E820_ENTRY
-{
-	uint64_t address;
-	uint64_t length;
-	uint32_t type;
-}__attribute__((packed));
-
 enum BOOT_CONTEXT_FLAGS {
     BOOT_CONTEXT_HAS_FRAMEBUFFER = 1u << 0,
     BOOT_CONTEXT_HAS_MEMORY_MAP  = 1u << 1,
@@ -41,9 +34,17 @@ enum BOOT_CONTEXT_FLAGS {
     BOOT_CONTEXT_HAS_BOOT_CPU_ID = 1u << 4,
 };
 
+// Memory-map format tags. Values are wire-level: each arch's bootloader
+// writes the corresponding constant into ctx->memory.format, and the
+// kernel-side format dispatch (pmm_arch_normalize, aarch64_ram_init) reads
+// it. BOOT_MEMORY_FORMAT_E820 (value 1) is x86_64-only and is declared in
+// kernel/include/kernel/arch/x86_64/bootinfo_x86.h.
+//
+// The enum below intentionally leaves a hole at value 1 so the E820
+// constant keeps its wire-level value without being defined here.
 enum BOOT_MEMORY_FORMAT {
     BOOT_MEMORY_FORMAT_UNKNOWN = 0,
-    BOOT_MEMORY_FORMAT_E820 = 1,
+    /* value 1 reserved: BOOT_MEMORY_FORMAT_E820 (x86_64-only, see bootinfo_x86.h) */
     BOOT_MEMORY_FORMAT_GENERIC = 2,
     BOOT_MEMORY_FORMAT_UEFI_RAW = 3,
 };

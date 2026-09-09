@@ -11,6 +11,7 @@
 #include <stddef.h>
 
 #include <kernel/bootinfo.h>
+#include <kernel/arch/x86_64/bootinfo_x86.h>   /* struct E820_ENTRY, BOOT_MEMORY_FORMAT_E820 (x86_64-only) */
 #include <kernel/memory.h>            /* Virt_To_Phy macro (existing x86_64 helper) */
 #include <kernel/memory_map.h>
 #include <kernel/arch/x86_64/handoff_layout.h>

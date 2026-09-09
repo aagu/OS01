@@ -6,6 +6,7 @@
 
 #include <kernel/bootinfo.h>
 #include <kernel/memory_map.h>
+#include <kernel/arch/x86_64/bootinfo_x86.h>   /* struct E820_ENTRY, BOOT_MEMORY_FORMAT_E820 */
 
 extern size_t pmm_arch_normalize(const struct boot_context *,
                                   struct MEMORY_RANGE *);

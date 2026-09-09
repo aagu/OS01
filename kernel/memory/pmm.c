@@ -158,22 +158,11 @@ void pmm_init(const struct boot_context *ctx)
         log_err("[smp] FATAL: pmm_init invalid handoff\n");
         arch_cpu_halt();
     }
-    /* Per-format entry_size check: E820 needs >= sizeof(struct E820_ENTRY)
-     * (20 bytes); UEFI_RAW needs >= 32. Unknown formats are fatal. */
-    if (ctx->memory.format == BOOT_MEMORY_FORMAT_E820) {
-        if (ctx->memory.entry_size < sizeof(struct E820_ENTRY)) {
-            log_err("[smp] FATAL: pmm_init invalid handoff\n");
-            arch_cpu_halt();
-        }
-    } else if (ctx->memory.format == BOOT_MEMORY_FORMAT_UEFI_RAW) {
-        if (ctx->memory.entry_size < 32u) {
-            log_err("[smp] FATAL: pmm_init invalid handoff\n");
-            arch_cpu_halt();
-        }
-    } else {
-        log_err("[smp] FATAL: pmm_init invalid handoff\n");
-        arch_cpu_halt();
-    }
+    /* Per-format entry_size / format validation lives in each arch's
+     * pmm_arch_normalize: x86_64 checks `format == E820 && entry_size
+     * >= sizeof(struct E820_ENTRY)`; aarch64 checks `format == UEFI_RAW
+     * && entry_size >= AARCH64_UEFI_DESCRIPTOR_PREFIX_SIZE`. Both return
+     * 0 on mismatch, which the caller below translates to FATAL. */
 
     /* Step 1: adapter -> MEMORY_RANGE[] */
     struct MEMORY_RANGE scratch[MEMORY_RANGE_MAX];
