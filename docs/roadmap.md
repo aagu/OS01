@@ -1,8 +1,8 @@
-# OS01 优化路线图 v23
+# OS01 优化路线图 v24
 
-> **基准**: `c64c854` (test: symlink systest cases — syscall matrix + exec via symlink + DT_LNK)
-> **日期**: 2026-09-06
-> **变更**: 同步 v22 之后的实际进展——**软链接支持落地**（12 commits `43588c8..c64c854`，4 新 syscall `symlink/readlink/lstat/fstatat` + VFS `__vfs_lookup_raw` mid-path 解析 + ext2 fast/long symlink storage + type-aware unlink rollback + libc POSIX wrappers + PF_LINUX_ABI table 4 项修复 + 67 systest case + 6 kernel selftest）；关闭 P1「exec 软链接跟随」+ P5「symlink/readlink」+ P5「exec symlink ABI ✅ 缓解」三项阻塞 roadmap 项。Parked follow-up：`__vfs_lookup_raw` 的 `consumed` 路径需以 mount prefix 播种（潜在 bug，仅在非根 mount + 相对 target 时触发）。
+> **基准**: `a2e7389` (pmm(arch): final cleanups for x86_64/pmm_arch.c)
+> **日期**: 2026-09-09
+> **变更**: 同步 v23 之后的实际进展——**PMM arch-neutral 落地**（17 commits `2c08e78..a2e7389`）：`pmm_init` 改走 `struct boot_context *`，新增 arch-neutral `struct MEMORY_RANGE[]` 中介表示 + 弱默认/强覆盖 dispatch（`pmm_arch_normalize`/`pmm_arch_zone_split`），x86_64 E820 + kernel-LMA/handoff/trampoline excludes + 2 MiB granule 全套，aarch64 读 `aarch64_ram_map_get()`；log API 统一（gate-wrapped `_log_*_impl`，x86_64 走 `_log_writev`/vsnprintf，aarch64 走 `kputs(fmt)`）；`pmm.c` 重写为 RAM-relative indexing + step 7 clamp 防 unsigned-underflow；aarch64 新增 `printk_stub.c`/`memset.c`/`slab_stub.c`/`log_impl.c` 桩；x86_64 systest 268/268 + nettest 6/6 回归零退化，aarch64 `test-aarch64-uefi-smp` 9/9 PASS（cpus 1/2/4 ×3），no-ACK DEGRADED 保留。详见 spec `docs/superpowers/specs/2026-09-09-pmm-arch-neutral-design.md`（13 轮 subagent review 通过）+ plan `docs/superpowers/plans/2026-09-09-pmm-arch-neutral.md`（3 轮 + 全 16 task 实现+1 final fix round 通过）+ 最终 whole-branch review APPROVE。
 
 标记: ✅ 已完成 | 🔒 P1 安全加固 | 🏗 P2 aarch64 适配 | 🖥 P3 GUI | 🔧 P4 硬件适配 | 📐 P5 ABI 扩展/兼容性
 
@@ -13,7 +13,7 @@
 | Phase | 说明 | 状态 |
 |-------|------|------|
 | **Phase 1: COW + 内存** | Copy-On-Write Fork, mmap/mprotect/munmap, demand paging | ✅ |
-| **Phase 2: 内核基础设施** | arch 抽象层、子系统注册框架、x86 平台源隔离、aarch64 dispatch 桩、SMP（percpu+GS-base+AP boot+负载均衡）、canary、hang detector、debug channels、kallsyms、FPU 保存、slab/PMM/softirq/timer SMP 加固、**profile 化 GNU Make 构建体系**（`make PROFILE=<name>` + 自管 sysroot generation + host-tool mkdisk + make help capability 标签）、**profile-only UEFI overlay 简化**（x86 固件 per-profile + UEFI runtime 补丁删除）、**自托管 compiler runtime**（udivti3 + provider-keyed archive + kernel link publication + kernel runtime validation targets）、**aarch64 UEFI bootloader 统一**（x86_64+aarch64 共享 `boot/uefi/main.c` + `boot_context` handoff ABI） | ✅ |
+| **Phase 2: 内核基础设施** | arch 抽象层、子系统注册框架、x86 平台源隔离、aarch64 dispatch 桩、SMP（percpu+GS-base+AP boot+负载均衡）、canary、hang detector、debug channels、kallsyms、FPU 保存、slab/PMM/softirq/timer SMP 加固、**profile 化 GNU Make 构建体系**（`make PROFILE=<name>` + 自管 sysroot generation + host-tool mkdisk + make help capability 标签）、**profile-only UEFI overlay 简化**（x86 固件 per-profile + UEFI runtime 补丁删除）、**自托管 compiler runtime**（udivti3 + provider-keyed archive + kernel link publication + kernel runtime validation targets）、**aarch64 UEFI bootloader 统一**（x86_64+aarch64 共享 `boot/uefi/main.c` + `boot_context` handoff ABI）、**PMM arch-neutral**（`pmm_init(const struct boot_context*)` 单一入口 + `MEMORY_RANGE[]` 中介 + 弱默认/强覆盖 dispatch + RAM-relative indexing，aarch64/x86_64 复用同一 body，2 MiB granule 统一）、**log API arch-neutral**（gate-wrapped `_log_*_impl` 宏 + `_log_writev` va_list core + per-arch impl：x86_64 vsnprintf/串口，aarch64 `kputs(fmt)` 忽略 variadic） | ✅ |
 | **Phase 3: 信号 + 调度** | arch 信号帧投递、进程组/会话（setpgid/setsid/getpgid/getsid 67-70）、tty 行规程（VINTR/VQUIT→SIGINT/SIGQUIT）、SYS_kill 支持 pid=0/-pid/-1、per-CPU EEVDF rbtree 可运行队列、SMP 负载均衡 | ✅ |
 | **Phase 4: 文件系统** | ext2 R/W、FAT32 R/W、tmpfs、devfs、procfs、GPT 双分区 | ✅ |
 | **Phase 5: 设备驱动** | 8259A PIC、APIC/IOAPIC/LAPIC、PIT/LAPIC timer、PS/2 键盘、16550 串口、AHCI SATA | ✅ |
@@ -62,7 +62,7 @@
 
 前置：**rwlock/seqlock**（多核并发正确性，VFS/`/proc` 多核缩放，SMP 基础）。
 
-已有基座：arch 抽象层 ✅、dispatch 桩 ✅、平台源隔离 ✅、aarch64 spinlock（ldxr/stlxr）✅、clocksource/clockevent 接口 hook ✅
+已有基座：arch 抽象层 ✅、dispatch 桩 ✅、平台源隔离 ✅、aarch64 spinlock（ldxr/stlxr）✅、clocksource/clockevent 接口 hook ✅、**PMM arch-neutral ✅**（`pmm_init(boot_context)` 单一入口 + `MEMORY_RANGE[]` 中介 + 弱默认/强覆盖 dispatch + RAM-relative indexing；x86_64 systest 268/268 + nettest 6/6 零退化，aarch64 uefi-smp 9/9 PASS）、**log API arch-neutral ✅**（gate-wrapped `_log_*_impl`：x86_64 走 `_log_writev`/vsnprintf，aarch64 走 `kputs(fmt)`）、**boot_context v2 handoff ABI ✅**（arch 中立）。
 
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
@@ -73,7 +73,27 @@
 | 交叉编译链 | aarch64-linux-gnu-gcc + QEMU virt 平台 | 独立 | |
 | UEFI 启动链 | 共享 boot/uefi/main.c，aarch64 通过 PSCI 启动 AP；DTB handoff 副本固定 `[0x401e0000,0x401ff000)` | 独立 | |
 | SMP 验证 (UEFI PSCI) | QEMU virt/Cortex-A53/GICv2 下 BSP+AP 独立栈+TPIDR+异常向量+每核 GIC interface；共享 spinlock 计数 1/2/4 核 ×3 验证；故障注入 `AARCH64_SMP_TEST_NO_ACK_CPU=1` 验证降级恢复 | GIC、UEFI 链 | |
-| 用户态 syscall ABI | `svc #0` 入口 + 参数传递 | 启动 | |
+| **PMM arch-neutral** ✅ | **已完成**（2026-09-09，17 commits `2c08e78..a2e7389`）。`pmm_init(const struct boot_context *ctx)` 单一入口 + 弱默认 `pmm_arch_normalize`/`pmm_arch_zone_split` 在 `kernel/memory/pmm_arch.c`，x86_64 强覆盖在 `kernel/arch/x86_64/pmm_arch.c`（E820 + kernel-LMA/handoff/trampoline excludes + 2 MiB granule + sort/merge），aarch64 强覆盖在 `kernel/arch/aarch64/pmm_arch.c`（读 `aarch64_ram_map_get()`）。`pmm.c` body 用 RAM-relative indexing（`pages_struct + ((start - lowest_ram) >> 21)`），Step 7 clamp 防 aarch64 unsigned-underflow。详见 spec `docs/superpowers/specs/2026-09-09-pmm-arch-neutral-design.md`（13 轮 review 通过）+ plan（3 轮 review + 16 task + final fix 通过）。**Follow-on（独立 spec）**：把 ACPI/RECLAIM 等非-RAM 类型真正消费到 `out[].type`（当前 `enum MEMORY_TYPE t` 算出来但丢弃，循环 hardcode `MEMORY_TYPE_RAM`）。 | 独立 | |
+| **log API 统一** ✅ | **已完成**（2026-09-09）。`kernel/log.h` 提供 gate-wrapped `log_err/warn/info` 宏（`do { if (LEVEL <= g_log_level) _log_*_impl(__VA_ARGS__); } while(0)`），保留 `log()` core macro 和 `g_log_level`/`log_set_level`/`log_get_level` 调度；`_log_write` 拆为 variadic forwarder + `_log_writev` va_list core；x86_64 走 `_log_writev`/vsnprintf 串口，aarch64 走 `kputs(fmt)` 忽略 variadic（-nostdlib）；aarch64 `g_log_level = LOG_INFO` 在 `kernel/arch/aarch64/log_impl.c` 定义。 | `pmm_init` ✅ | Linux printk |
+| **统一 kernel_main** | `pmm_init` 之后 aarch64_main (91 行) 与 x86_64 kernel_main 仍然分叉：aarch64 走 `dtb_init→gic_init→smp_boot_aps→arch_tick_start→halt`；x86_64 走 scheduler init/IDT/APIC/syscall table。目标：单 `kernel_main` 按固定顺序调 `arch_early_init()`/`arch_late_init()`/`scheduler_init()`/`arch_late_init()`。**设计决策**：aarch64 必须先 dtb 才能用 DTB 信息；init 顺序契约需明确。 | PMM ✅, SMP ✅, 调度器 core | 长项 spec（独立） |
+| **中断/异常 dispatch 统一** | `arch_intr_dispatch(vector, pt_regs*)` 单入口抽象；x86_64 IDT vs aarch64 VBAR_EL1 vector tables 各自封装；x86_64 IST stack vs aarch64 SP_EL1 切换。**最大代码量减少**：`x86_64/trap.c` 3065 行（大部分是 x86 register decode）；aarch64 `trap.c` 20 行（占位）。驱动接入层 (`intr_handler_table[256]`) 已经是 arch-neutral。 | head.S ✅ | Linux do_IRQ |
+| **SMP 启动统一** | `arch_smp_boot_aps(cpu_count, entry, per_cpu_data)` 单入口；内部 aarch64 PSCI CPU_ON / x86_64 INIT-SIPI + trampoline 各自实现。`boot_percpu` / `subsys_percpu` layout 已经统一。 | GIC ✅, 启动链 ✅ | opuntiaOS |
+| **上下文切换统一** | `arch_task_switch(prev, next)` + `arch_thread_entry()`；aarch64 ret 到 user vs x86_64 sysret/iret。寄存器保存集不同但语义同。x86_64 `task_arch.c` 34 行，aarch64 SMP 内含 context switch。 | SMP 启动统一 | Tilck |
+| **定时器统一** | Phase 9 的 `clocksource`/`clockevent` 抽象已经存在；把两个 arch 的 timer driver 都注册到 `clockevent` 框架即可。aarch64 `time.c` 133 行 (Generic Timer)，x86_64 `time.c` 28 行 (LAPIC/HPET)。 | clocksource/clockevent hook ✅ | Linux tick |
+| **CPU 特性探测** | `arch_cpu_features()` 返回统一位图 (has_fpu / has_virt / has_cache_coherency)；x86 CPUID vs aarch64 ID_AA64* 各实现一份。 | 独立 | Linux cpufeature |
+| **DTB/BIOS 解析** | 解析保持 per-arch（DTB vs BIOS E820/UEFI），但输出已经是 `boot_context v2` arch-neutral。**此层已统一**，解析层保持 per-arch。 | boot_context v2 ✅ | |
+| **用户态 syscall ABI** | `svc #0` 入口 + 参数传递 | 启动 | |
+| **设备驱动 (UART/timer/...)** | 保持 per-arch（pl011 vs 16550、GIC vs APIC/IOAPIC）。抽象接口已部分存在 (`driver/serial.h`)，新驱动按抽象接入。 | Phase 2 基础设施 | |
+
+**距离单一 kernel_main 还差多远（粗估，一个人全职）**：~6–10 周。建议 3 个独立 spec/plan 增量推进：
+
+1. **Spec A — 中断/异常 dispatch + 上下文切换 arch 抽象**：设计 `arch_intr_dispatch` + `arch_task_switch` 接口，x86_64 `trap.c` 从 3065 行减到 ~200 行，aarch64 `smp.c` 拆分 context switch 部分。预计 3–5 周。
+2. **Spec B — 统一 SMP 启动 + 定时器 + CPU 特性**：`arch_smp_boot_aps` + `clockevent` 双 arch 注册 + `arch_cpu_features()`。预计 2–3 周。
+3. **Spec C — 统一 kernel_main**：在 A、B 之上定义 `arch_early_init`/`arch_late_init`，单 `kernel_main` 按固定 init 顺序调（pmm_init → arch_early_init → scheduler → arch_late_init → ...）。设计 init 顺序契约。预计 2–4 周。
+
+**永远无法统一的（ISA/HW 差异）**：`head.S`/`entry.S` 指令集差异；MMU 页表格式；中断控制器驱动；SoC 外设（UART/timer/GPIO 等）。这些靠 arch 抽象层封装，统一接口、不统一实现。
+
+**详细盘点见 session 期间的对话**（已落地 spec `2026-09-09-pmm-arch-neutral-design.md` + plan `2026-09-09-pmm-arch-neutral.md`，执行后 systest 268/268 + nettest 6/6 零退化，aarch64 uefi-smp 9/9 PASS，no-ACK DEGRADED 保留）。
 
 ### 🖥 P3 GUI
 
@@ -124,7 +144,7 @@
 
 ```
 P1: getrandom ✅ → AT_RANDOM → canary / ASLR
-P2: rwlock → aarch64 SMP；timer hook ✅ → CNTP
+P2: PMM ✅ → 统一 kernel_main（interrupt/SMP/context-switch 三独立 spec）；rwlock → aarch64 SMP；timer hook ✅ → CNTP
 P3: fb ✅ → 2D API → 字体 → Window Server；PS/2 鼠标并行
 P4: USB 栈 → 真机启动；NVMe / HPET / ACPI 独立
 P5: ELF ✅ → ld.so → 共享 libc → apk/musl；futex ✅ → clone → pthread
@@ -150,5 +170,7 @@ P5: ELF ✅ → ld.so → 共享 libc → apk/musl；futex ✅ → clone → pth
 | `docs/scheduler.md` / `docs/scheduler-complexity.md` | EEVDF 调度器设计与复杂度评估 |
 | `docs/applet-verification.md` | busybox applet 验证清单 |
 | `docs/build.md` | GNU Make profile 化构建体系（2026-09-02 重构后）：profile 入口 / 能力契约 / 用户入口 / 工具链覆盖变量 / provider-keyed selfhosted archive / runtime validation targets / host-tool mkdisk / make help capability 标签 |
+| `docs/superpowers/specs/2026-09-09-pmm-arch-neutral-design.md` | PMM arch-neutral spec（13 轮 subagent review 通过）：`pmm_init(boot_context)` 单一入口 + `MEMORY_RANGE[]` 中介 + 弱默认/强覆盖 dispatch + RAM-relative indexing + Step 7 unsigned-underflow clamp |
+| `docs/superpowers/plans/2026-09-09-pmm-arch-neutral.md` | PMM arch-neutral implementation plan（3 轮 subagent review 通过 + 16 task + 1 final fix round 通过）：x86_64 E820 → MEMORY_RANGE[]，aarch64 读 `aarch64_ram_map_get()`，log API gate-wrapped `_log_*_impl` 统一，aarch64 stubs (printk/memset/slab/log_impl) |
 | `docs/boot.md` | x86_64 + aarch64 UEFI bootloader 统一 + `boot_context` handoff ABI + 架构中立生命周期 |
 | `docs/architecture.md` / `docs/structure.md` / `docs/driver.md` / `docs/debug.md` / `docs/build-run-debug.md` / `docs/lwip-debugging-experience.md` | 系统整体架构 + 源码目录约定 + 驱动子系统 + 调试通道 + 端到端构建运行调试 + lwIP 调试经验 |
