@@ -9,16 +9,12 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <string.h>
 
 #include <kernel/bootinfo.h>
 #include <kernel/memory.h>            /* Virt_To_Phy macro (existing x86_64 helper) */
 #include <kernel/memory_map.h>
-#include <kernel/arch/cpu.h>          /* arch_cpu_halt (future fatal paths) */
 #include <kernel/arch/x86_64/handoff_layout.h>
 #include <kernel/arch/x86_64/trampoline.h>
-
-extern void arch_cpu_halt(void);
 
 #define E820_TYPE_RAM  1
 
@@ -27,28 +23,6 @@ static uint64_t round_up(uint64_t v, uint64_t a) {
 }
 static uint64_t round_down(uint64_t v, uint64_t a) {
     return v & ~(a - 1);
-}
-
-/* Subtract closed-open intervals from a MEMORY_RANGE fragment.
- * Outputs a list of surviving fragments (caller-provided buffer).
- * Returns the number of surviving fragments (0..2). */
-static size_t subtract_range(uint64_t in_start, uint64_t in_end,
-                             uint64_t ex_start, uint64_t ex_end,
-                             uint64_t out_starts[2], uint64_t out_ends[2])
-{
-    size_t n = 0;
-    if (in_start < ex_start && in_end > ex_start) {
-        out_starts[n] = in_start;
-        out_ends[n]   = (ex_end < in_end) ? ex_end : in_end;
-        n++;
-    }
-    if (ex_end < in_end && ex_end > in_start) {
-        out_starts[n] = (ex_start > in_start) ? ex_start : in_start;
-        out_ends[n]   = in_end;
-        n++;
-    }
-    (void)out_ends; (void)out_starts;
-    return n;
 }
 
 /* Strong override of the weak default in kernel/memory/pmm_arch.c.
@@ -86,7 +60,7 @@ size_t pmm_arch_normalize(const struct boot_context *ctx,
     for (uint32_t i = 0; i < ctx->memory.entry_count; i++) {
         enum MEMORY_TYPE t;
         switch (entries[i].type) {
-        case 1: t = MEMORY_TYPE_RAM; break;
+        case E820_TYPE_RAM: t = MEMORY_TYPE_RAM; break;
         case 2: t = MEMORY_TYPE_RESERVED; break;
         case 3: t = MEMORY_TYPE_ACPI_RECLAIM; break;
         case 4: t = MEMORY_TYPE_ACPI_NVS; break;
