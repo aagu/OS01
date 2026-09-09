@@ -4,10 +4,29 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define CMOS_ADDR 0x70
-#define CMOS_DATA 0x71
-
-#define BCD2BIN(value)  (((value) & 0xf) + ((value) >> 4) * 10);
+// ─────────────────────────────────────────────────────────
+//  RTC — arch-neutral public API
+//
+//  OS01's RTC abstraction covers "read/write wall-clock datetime".
+//  The hardware-specific register layout (CMOS indices, BCD packing,
+//  PL031 MMIO, etc.) lives in per-arch overrides of `arch_rtc_read`
+//  and `arch_rtc_write` and is invisible to kernel code outside the
+//  per-arch rtc_*.c file.
+//
+//  Return convention: `true` if the read/write succeeded; `false`
+//  if the arch has no RTC wired up (e.g. aarch64 phase 1, before
+//  PL031 lands). Callers should treat `false` as "no wall clock
+//  available" and either fall back to TSC uptime or simply log.
+//
+//  Per-arch hooks (declared in kernel/include/kernel/arch/rtc.h):
+//
+//    bool arch_rtc_read(datetime_t *out);
+//    bool arch_rtc_write(const datetime_t *in);
+//
+//  Default: both return false (kernel/include/kernel/arch/rtc.h
+//  weak defaults). Override: kernel/arch/<arch>/rtc_*.c provides
+//  the strong definition.
+// ─────────────────────────────────────────────────────────
 
 typedef struct datetime
 {
@@ -18,21 +37,9 @@ typedef struct datetime
     uint8_t hour;
     uint8_t minute;
     uint8_t second;
-}datetime_t;
+} datetime_t;
 
-bool is_updating_rtc();
+bool rtc_read_datetime(datetime_t *dt);
+bool rtc_write_datetime(const datetime_t *dt);
 
-uint8_t get_rtc_register(uint8_t nr);
-
-void set_rtc_register(uint8_t nr, uint8_t val);
-
-void rtc_read_datetime(datetime_t * dt);
-
-void rtc_write_datetime(datetime_t * dt);
-
-// RTC PIE 联合校准：一次 PIE 窗口（1024Hz × N=256 tick ≈250ms）同时测 TSC 和
-// LAPIC 两个计数器频率。返回 0 成功 / -1 失败（超时或 IRQ8 不到）。
-// tsc_hz_out / lapic_hz_out 仅在成功时被写。
-int rtc_pie_calibrate(uint64_t *tsc_hz_out, uint64_t *lapic_hz_out);
-
-#endif
+#endif /* _KERNEL_RTC_H */

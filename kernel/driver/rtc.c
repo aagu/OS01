@@ -1,157 +1,48 @@
+/* kernel/driver/rtc.c -- arch-neutral RTC core.
+ *
+ * Thin layer that forwards the public rtc_read/write_datetime
+ * (declared in kernel/include/driver/rtc.h) to the per-arch
+ * implementation in kernel/arch/<arch>/rtc_*.c.
+ *
+ * The weak default below returns `false` for both ops -- meaning
+ * "no wall clock wired up". This is the correct behaviour for any
+ * arch that hasn't provided a strong override (e.g. aarch64 phase
+ * 1, before PL031 lands).
+ *
+ * Strong overrides registered so far:
+ *   - kernel/arch/x86_64/rtc_cmos.c: CMOS port-I/O RTC.
+ *
+ * Per-arch source discovery:
+ *   - kernel/Makefile's wildcard rule automatically pulls in the
+ *     arch override (kernel/arch/<arch>/rtc_<chip>.c); no Makefile
+ *     change needed for future arches.
+ */
+
 #include <driver/rtc.h>
-#include <kernel/arch/io.h>
-#include <kernel/interrupt.h>      // register_irq / unregister_irq / IRQF_TRIGGER_LEVEL
-#include <kernel/apic.h>           // lapic_read / lapic_write / LAPIC_* / LVT_MASK
-#include <kernel/arch/cpu.h>       // arch_cycle_counter / arch_cpu_pause
-#include <stddef.h>                // NULL
+#include <kernel/arch/rtc.h>   // arch_rtc_read / arch_rtc_write hooks
 
-#if defined(__x86_64__)
-
-#define RTC_PIE_TICKS    256      // 采样 tick 数（~250ms）
-#define RTC_PIE_IRQ_GSI  8        // register_irq / unregister_irq 都用 gsi
-
-static volatile uint32_t rtc_pie_count;
-static volatile uint64_t rtc_pie_tsc0;
-static volatile uint64_t rtc_pie_tsc1;
-// LAPIC 腿在 handler 内沿 #1/#N 采样，与 TSC 严格同一窗口。
-static volatile uint32_t rtc_pie_lapic0;
-static volatile uint32_t rtc_pie_lapic1;
-
-static void rtc_pie_handler(uint64_t nr, uint64_t parameter, pt_regs_t *regs)
+__attribute__((weak))
+bool arch_rtc_read(datetime_t *out)
 {
-    (void)nr; (void)parameter; (void)regs;
-    // 读 RTC reg 0x0C 清 PIE 中断标志（否则真实硬件第一个中断后 PIE 停摆）。
-    arch_outb(CMOS_ADDR, 0x80 | 0x0C);
-    arch_inb(CMOS_DATA);
-
-    // 沿 #1 采 tsc0+lapic0、沿 #N 采 tsc1+lapic1：LAPIC 与 TSC 共享同一
-    // N-1 个 PIE 周期窗口，消除主循环外测量的 ~0.2-0.4% 系统性偏大。
-    if (rtc_pie_count == 0) {
-        rtc_pie_tsc0 = arch_cycle_counter();
-        rtc_pie_lapic0 = lapic_read(LAPIC_TIMER_CUR);
-    }
-    rtc_pie_count++;
-    if (rtc_pie_count >= RTC_PIE_TICKS) {
-        rtc_pie_tsc1 = arch_cycle_counter();
-        rtc_pie_lapic1 = lapic_read(LAPIC_TIMER_CUR);
-    }
+    (void)out;
+    return false;   // no RTC wired up on this arch
 }
 
-int rtc_pie_calibrate(uint64_t *tsc_hz_out, uint64_t *lapic_hz_out)
+__attribute__((weak))
+bool arch_rtc_write(const datetime_t *in)
 {
-    // 1. 掩 LAPIC timer，避免 countdown 到零触发未注册的 vector 0x38（GP# 三重故障）。
-    lapic_write(LAPIC_LVT_TIMER, LVT_MASK);
-    //    divisor=0（÷2，SDM 000b；lapic_timer.c 原文 "divide by 1" 注释是错的）。
-    //    必须显式写。
-    lapic_write(LAPIC_TIMER_DIV, 0);
-    lapic_write(LAPIC_TIMER_INIT, 0xFFFFFFFF);
-
-    // 2. 临时注册 IRQ8（gsi=8），level 触发，检查返回值。
-    //    register_irq 和 unregister_irq 都用 gsi；arch 层（x86_64
-    //    irq_hooks.c）负责 gsi ↔ vector 转换。
-    if (!register_irq(RTC_PIE_IRQ_GSI, NULL, rtc_pie_handler, 0,
-                      IRQF_TRIGGER_LEVEL, "rtc-pie")) {
-        return -1;
-    }
-
-    // 3. 使能 PIE：reg 0x0B bit6 = PIE；reg 0x0A 低 4 位 = 1024Hz (0b0110=6)。
-    uint8_t b = get_rtc_register(0x0B);
-    set_rtc_register(0x0B, b | 0x40);
-    uint8_t a = get_rtc_register(0x0A);
-    set_rtc_register(0x0A, (a & 0xF0) | 0x06);
-
-    // 4. 主循环：双条件（tick 数未达 && TSC 流逝 < 宽松上限）。
-    //    RTC PIE 校准时 freq 未知（cpuid 15h=0 才会进这里），无法把「500ms」精确
-    //    换算成 cycle 数。用 2^32 cycle 作宽松兜底：@8.6GHz ≈ 500ms、@3GHz ≈
-    //    1.43s、@1GHz ≈ 4.3s。正常路径 250ms 内 tick 达标，不依赖此值精度；
-    //    它只防 IRQ8 完全失效时的无限自旋（挂 boot）。
-    rtc_pie_count = 0;
-    uint64_t tsc_start = arch_cycle_counter();
-    while (rtc_pie_count < RTC_PIE_TICKS) {
-        if (arch_cycle_counter() - tsc_start > 0x100000000ULL) {  // 2^32 cycle 兜底
-            break;
-        }
-        arch_cpu_pause();
-    }
-
-    // 5. 禁 PIE，注销 IRQ8（gsi）。
-    b = get_rtc_register(0x0B);
-    set_rtc_register(0x0B, b & ~0x40);
-    unregister_irq(RTC_PIE_IRQ_GSI);
-
-    // 6. LAPIC 腿：elapsed = 沿#1计数 - 沿#N计数（递减，lapic0 > lapic1）。
-    //    handler 内采样 → 与 TSC 同一 N-1 窗口，不再从 INIT 装载处算起。
-    uint64_t elapsed_lapic = (uint64_t)rtc_pie_lapic0 - (uint64_t)rtc_pie_lapic1;
-
-    // 7. 检查是否采到足够 tick。
-    if (rtc_pie_count < RTC_PIE_TICKS)
-        return -1;                        // 超时/中断不到
-
-    uint64_t tsc_elapsed = rtc_pie_tsc1 - rtc_pie_tsc0;
-    // off-by-one 修正：tsc0/lapic0 在沿#1、tsc1/lapic1 在沿#N，两条腿均跨 N-1 个周期。
-    uint64_t n = RTC_PIE_TICKS - 1;
-    *tsc_hz_out   = tsc_elapsed * 1024 / n;
-    // ⚠️ lapic_hz_out = 递减率（divisor ÷2 已折算），**不 ×2**：elapsed_lapic 是
-    // ÷2 后递减量，除以窗口秒数 n/1024 即递减率；lapic_timer_start 的
-    // init_count=hz/freq 直接基于递减率。×2 会得真实频率 → init_count 被 divisor
-    // 再 ÷2 → 50Hz。与 Task 3 Step 1 的 `elapsed * 100`（不 ×2）语义一致。
-    *lapic_hz_out = elapsed_lapic * 1024 / n;
-    return 0;
+    (void)in;
+    return false;
 }
 
-#endif // __x86_64__
-
-bool is_updating_rtc()
+bool rtc_read_datetime(datetime_t *dt)
 {
-    arch_outb(CMOS_ADDR, 0x0a);
-    uint32_t status = arch_inb(CMOS_DATA);
-    return (status & 0x80);
+    if (dt == (datetime_t *)0) return false;
+    return arch_rtc_read(dt);
 }
 
-uint8_t get_rtc_register(uint8_t nr)
+bool rtc_write_datetime(const datetime_t *dt)
 {
-    arch_outb(CMOS_ADDR, 0x80 | nr);
-    return arch_inb(CMOS_DATA);
-}
-
-void set_rtc_register(uint8_t nr, uint8_t val)
-{
-    arch_outb(CMOS_ADDR, 0x80 | nr);
-    arch_outb(CMOS_DATA,val);
-}
-
-void rtc_read_datetime(datetime_t * dt)
-{
-    while (is_updating_rtc());
-    
-    dt->year = get_rtc_register(0x09);
-    dt->month = get_rtc_register(0x08);
-    dt->day = get_rtc_register(0x07);
-    dt->hour = get_rtc_register(0x04);
-    dt->minute = get_rtc_register(0x02);
-    dt->second = get_rtc_register(0x00);
-    
-    uint8_t Use_BCD = get_rtc_register(0x0b);
-    if (!(Use_BCD & 0x04))
-    {
-        dt->year = BCD2BIN(dt->year);
-        dt->month = BCD2BIN(dt->month);
-        dt->day = BCD2BIN(dt->day);
-        dt->hour = BCD2BIN(dt->hour);
-        dt->minute = BCD2BIN(dt->minute);
-        dt->second = BCD2BIN(dt->second);
-    }
-    
-}
-
-void rtc_write_datetime(datetime_t * dt)
-{
-    while (is_updating_rtc());
-
-    set_rtc_register(0x00, dt->second);
-    set_rtc_register(0x02, dt->minute);
-    set_rtc_register(0x04, dt->hour);
-    set_rtc_register(0x07, dt->day);
-    set_rtc_register(0x08, dt->month);
-    set_rtc_register(0x09, dt->year);
+    if (dt == (datetime_t *)0) return false;
+    return arch_rtc_write(dt);
 }

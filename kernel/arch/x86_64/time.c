@@ -2,7 +2,7 @@
 #include <stdbool.h>
 #include <kernel/arch/x86_64/cpuid.h>   // cpuid()
 #include <kernel/apic.h>                 // lapic_timer_start / lapic_timer_set_premeasured
-#include <driver/rtc.h>                  // rtc_pie_calibrate
+#include <kernel/arch/x86_64/rtc.h>     // rtc_pie_calibrate (x86_64 platform glue)
 
 // 三级回落：CPUID 15h → RTC PIE（Task 2 接入）→ 0。
 uint64_t arch_cycle_freq(void)

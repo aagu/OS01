@@ -60,7 +60,7 @@ KERNEL_C_SOURCES := \
 
 # Platform devices are selected by arch/<arch>/make.config.  Keep x86-only
 # APIC/PIC/PIT/RTC code out of architecture-neutral source discovery.
-KERNEL_C_SOURCES := $(filter-out driver/pit.c driver/rtc.c,$(KERNEL_C_SOURCES))
+KERNEL_C_SOURCES := $(filter-out driver/pit.c,$(KERNEL_C_SOURCES))
 KERNEL_C_SOURCES += $(ARCH_PLATFORM_C_SOURCES)
 endif
 

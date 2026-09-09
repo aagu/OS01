@@ -4,10 +4,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define CMOS_ADDR 0x70
-#define CMOS_DATA 0x71
-
-#define BCD2BIN(value)  (((value) & 0xf) + ((value) >> 4) * 10);
+// Host-side mirror of kernel/include/driver/rtc.h. Kept in sync
+// with the in-kernel public API: arch-neutral datetime struct and
+// rtc_read/write_datetime entry points.
 
 typedef struct datetime
 {
@@ -18,16 +17,9 @@ typedef struct datetime
     uint8_t hour;
     uint8_t minute;
     uint8_t second;
-}datetime_t;
+} datetime_t;
 
-bool is_updating_rtc();
+bool rtc_read_datetime(datetime_t *dt);
+bool rtc_write_datetime(const datetime_t *dt);
 
-uint8_t get_rtc_register(uint8_t nr);
-
-void set_rtc_register(uint8_t nr, uint8_t val);
-
-void rtc_read_datetime(datetime_t * dt);
-
-void rtc_write_datetime(datetime_t * dt);
-
-#endif
+#endif /* _KERNEL_RTC_H */
