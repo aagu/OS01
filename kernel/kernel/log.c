@@ -1,3 +1,4 @@
+#include <stdarg.h>
 #include <kernel/log.h>
 #include <kernel/printk.h>
 #include <kernel/arch/spinlock.h>
@@ -61,17 +62,19 @@ static void write_serial_buf_locked(const char *buf, int len)
 // ── Output dispatcher ─────────────────────────────────────
 // Lock is acquired BEFORE vsnprintf to protect the shared static
 // buffer from concurrent access (TOCTOU race on SMP).
-void _log_write(int level, const char *fmt, ...)
+//
+// _log_writev is the body of the old _log_write, factored out so
+// that the per-level wrappers (_log_err_impl / _log_warn_impl /
+// _log_info_impl) can call it without re-acquiring the gate. The
+// public _log_write() entry point remains for legacy log() callers.
+void _log_writev(int level, const char *fmt, va_list args)
 {
     static char log_buf[1024];
-    va_list args;
     int len;
 
     uint64_t flags = spin_lock_irqsave(&log_lock);
 
-    va_start(args, fmt);
     len = vsnprintf(log_buf, sizeof(log_buf), fmt, args);
-    va_end(args);
     if (len < 0) { spin_unlock_irqrestore(&log_lock, flags); return; }
     if (len >= (int)sizeof(log_buf))
         len = (int)sizeof(log_buf) - 1;
@@ -92,4 +95,40 @@ void _log_write(int level, const char *fmt, ...)
 #endif
 
     spin_unlock_irqrestore(&log_lock, flags);
+}
+
+void _log_write(int level, const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    _log_writev(level, fmt, args);
+    va_end(args);
+}
+
+// ── Per-level wrappers (referenced by kernel/log.h macros) ──
+// Each is a thin forwarder to _log_writev with the level baked
+// in. The gate in the calling macro means these are only entered
+// when the message would actually be emitted.
+void _log_err_impl(const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    _log_writev(LOG_ERR, fmt, args);
+    va_end(args);
+}
+
+void _log_warn_impl(const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    _log_writev(LOG_WARN, fmt, args);
+    va_end(args);
+}
+
+void _log_info_impl(const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    _log_writev(LOG_INFO, fmt, args);
+    va_end(args);
 }

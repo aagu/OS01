@@ -1,6 +1,8 @@
 #ifndef _KERNEL_LOG_H
 #define _KERNEL_LOG_H
 
+#include <stdarg.h>
+
 // ── Log levels ────────────────────────────────────────────
 // Higher number = more verbose.  Matches Linux KERN_* convention.
 #define LOG_ERR    3   // Error conditions
@@ -19,10 +21,19 @@
     }                                                            \
 } while(0)
 
-// ── Convenience macros ────────────────────────────────────
-#define log_err(fmt, ...)   log(LOG_ERR,   fmt, ##__VA_ARGS__)
-#define log_warn(fmt, ...)  log(LOG_WARN,  fmt, ##__VA_ARGS__)
-#define log_info(fmt, ...)  log(LOG_INFO,  fmt, ##__VA_ARGS__)
+// ── Convenience macros (gate-wrapped) ─────────────────────
+// Each macro is gate-wrapped on its own level constant so that
+// filtered messages pay zero cost (no call to _log_*_impl).
+// The naive unwrapped form `#define log_err(...) _log_err_impl(__VA_ARGS__)`
+// would bypass g_log_level at compile time, defeating the gate.
+void _log_err_impl(const char *fmt, ...);
+void _log_warn_impl(const char *fmt, ...);
+void _log_info_impl(const char *fmt, ...);
+void _log_writev(int level, const char *fmt, va_list args);
+
+#define log_err(...)  do { if (LOG_ERR  <= g_log_level) _log_err_impl(__VA_ARGS__);  } while (0)
+#define log_warn(...) do { if (LOG_WARN <= g_log_level) _log_warn_impl(__VA_ARGS__); } while (0)
+#define log_info(...) do { if (LOG_INFO <= g_log_level) _log_info_impl(__VA_ARGS__); } while (0)
 
 // ── Debug level (compile-time eliminable) ─────────────────
 #ifndef NDEBUG
