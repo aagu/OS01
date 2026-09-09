@@ -1,9 +1,9 @@
 /* UEFI-only AArch64 BSP entry. APs enter secondary_idle independently. */
 #include <stdint.h>
 #include <kernel/bootinfo.h>
-#include <kernel/log.h>
-#include <kernel/memory.h>
-#include <kernel/pmm.h>
+#include <kernel/log.h>      /* for log_err/log_info macros */
+#include <kernel/memory.h>   /* for struct boot_context / Virt_To_Phy */
+#include <kernel/pmm.h>      /* for PMMngr, struct Page, alloc_pages, free_pages, ZONE_NORMAL */
 #include <kernel/arch/cpu.h>
 #include <kernel/arch/irq.h>
 #include <kernel/arch/aarch64/dtb.h>
@@ -36,8 +36,8 @@ void aarch64_main(const struct boot_context *handoff)
      * aarch64 VMA linker symbols (_text_start/_text_end/.../_kernel_end)
      * because _text/_edata/_end do not exist on aarch64. */
     extern char _text_start[], _text_end[];
-    extern char _rodata_start[], _rodata_end[];
-    extern char _data_start[], _data_end[];
+    extern char _rodata_end[];
+    extern char _data_end[];
     extern char _kernel_end[];
 
     /* Sanity check: the aarch64 identity map must be active before
