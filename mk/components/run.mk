@@ -159,9 +159,10 @@ run-aarch64-uefi: aarch64-uefi
 # per case and pass it via `-dtb` (with `acpi=off`). Set
 # AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0 to require the production firmware path.
 .PHONY: test-aarch64-uefi-smp
-test-aarch64-uefi-smp: aarch64-uefi
+test-aarch64-uefi-smp:
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
+	$(MAKE) KERNEL_SELFTEST=1 aarch64-uefi
 	python3 tests/aarch64_uefi_smp.py \
 	  --cpus 1 2 4 --repeat 3 --timeout 90 \
 	  $(if $(filter 0,$(AARCH64_UEFI_SMP_DIAGNOSTIC_DTB)),,--diagnostic-dtb=auto) \
