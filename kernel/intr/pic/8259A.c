@@ -29,30 +29,11 @@ void pic_init()
     arch_local_irq_enable();
 }
 
-void do_IRQ(pt_regs_t * regs, uint64_t nr)	//regs,nr
-{
-    arch_local_irq_disable();
-    switch (nr & 0x80)
-    {
-    case 0x00:
-        {
-            irq_desc_t * irq = &irq_table[nr - 32];
-
-            if (irq->handler != NULL)
-                irq->handler(nr, irq->parameter, regs);
-
-            if (irq->controller != NULL)
-                irq->controller->ack(nr);
-        }
-        break;
-    
-    default:
-        color_printk(RED,BLACK,"do_IRQ:%#018lx\t",nr);
-        color_printk(RED,BLACK,"regs:%#018lx\t<RIP:%#018lx\tRSP:%#018lx>\n",regs,regs->rip,regs->rsp);
-        break;
-    }
-    arch_local_irq_enable();
-}
+// NOTE: The hardware-IRQ dispatch path (formerly `do_IRQ`) lives in
+// kernel/arch/x86_64/irq_hooks.c as `arch_irq_dispatch`. The IDT
+// assembly stubs in kernel/arch/x86_64/irq.c `jmp arch_irq_dispatch`
+// directly. The PIC controller implementation stays here because it
+// is a x86_64 platform driver, not arch-neutral plumbing.
 
 void pic_enable(uint64_t nr)
 {

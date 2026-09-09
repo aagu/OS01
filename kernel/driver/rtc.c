@@ -8,8 +8,7 @@
 #if defined(__x86_64__)
 
 #define RTC_PIE_TICKS    256      // 采样 tick 数（~250ms）
-#define RTC_PIE_IRQ_GSI  8        // register_irq 用 gsi
-#define RTC_PIE_IRQ_VEC  0x28     // unregister_irq 用 vector（0x20 + 8）
+#define RTC_PIE_IRQ_GSI  8        // register_irq / unregister_irq 都用 gsi
 
 static volatile uint32_t rtc_pie_count;
 static volatile uint64_t rtc_pie_tsc0;
@@ -48,9 +47,8 @@ int rtc_pie_calibrate(uint64_t *tsc_hz_out, uint64_t *lapic_hz_out)
     lapic_write(LAPIC_TIMER_INIT, 0xFFFFFFFF);
 
     // 2. 临时注册 IRQ8（gsi=8），level 触发，检查返回值。
-    //    ⚠️ 这里传 gsi（8）；unregister_irq 才传 vector（0x28）。传反 →
-    //    register_irq(0x28) 因 gsi=40≥MAX_GSI(24) 静默不注册；unregister_irq(8)
-    //    → irq_table[-24] 野内存写。
+    //    register_irq 和 unregister_irq 都用 gsi；arch 层（x86_64
+    //    irq_hooks.c）负责 gsi ↔ vector 转换。
     if (!register_irq(RTC_PIE_IRQ_GSI, NULL, rtc_pie_handler, 0,
                       IRQF_TRIGGER_LEVEL, "rtc-pie")) {
         return -1;
@@ -76,10 +74,10 @@ int rtc_pie_calibrate(uint64_t *tsc_hz_out, uint64_t *lapic_hz_out)
         arch_cpu_pause();
     }
 
-    // 5. 禁 PIE，注销 IRQ8。
+    // 5. 禁 PIE，注销 IRQ8（gsi）。
     b = get_rtc_register(0x0B);
     set_rtc_register(0x0B, b & ~0x40);
-    unregister_irq(RTC_PIE_IRQ_VEC);     // ⚠️ 传 vector 0x28（非 gsi 8）
+    unregister_irq(RTC_PIE_IRQ_GSI);
 
     // 6. LAPIC 腿：elapsed = 沿#1计数 - 沿#N计数（递减，lapic0 > lapic1）。
     //    handler 内采样 → 与 TSC 同一 N-1 窗口，不再从 INIT 装载处算起。

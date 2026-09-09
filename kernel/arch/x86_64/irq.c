@@ -4,9 +4,12 @@
 
 #include <kernel/arch/x86_64/gate.h>
 #include <kernel/arch/x86_64/linkage.h>
+#include <kernel/arch/irq.h>      // arch_irq_dispatch (arch-neutral hook)
 
 extern void ret_from_intr(void);
-extern void do_IRQ(pt_regs_t *regs, uint64_t nr);
+// do_IRQ used to live in kernel/intr/pic/8259A.c. It now lives as
+// `arch_irq_dispatch` in kernel/arch/x86_64/irq_hooks.c (alongside
+// the rest of the x86_64 IRQ-hook strong overrides).
 
 #define Build_IRQ(nr, vector)                                              \
     extern void IRQ##nr##_interrupt(void);                                  \
@@ -43,7 +46,7 @@ extern void do_IRQ(pt_regs_t *regs, uint64_t nr);
         "movq   $" #vector ", %rsi;\n\t" /* IRQ vector (arg 2) */          \
         "leaq   ret_from_intr(%rip), %rax;\n\t"                            \
         "pushq  %rax;\n\t"               /* return via ret_from_intr */    \
-        "jmp    do_IRQ\n\t"                                              \
+        "jmp    arch_irq_dispatch\n\t"                                   \
     );                                                                     \
     static inline void __attribute__((always_inline))                      \
     _irq_install_##nr(void) {                                              \

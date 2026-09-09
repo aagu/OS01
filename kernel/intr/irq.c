@@ -4,7 +4,14 @@
 #include <stddef.h>
 #include <kernel/softirq.h>
 #include <string.h>
-#include <kernel/apic.h>
+
+// kernel/intr/irq.c — arch-neutral IRQ registration API.
+//
+// All public functions (register_irq, unregister_irq, irq_mask,
+// irq_unmask) take a GSI number. The GSI→vector/hwirq translation
+// and the controller-selection logic live in arch-specific hooks
+// declared in kernel/include/kernel/arch/irq.h. This file knows
+// nothing about APIC / PIC / GIC.
 
 int32_t register_irq(uint32_t gsi, void * arg,
         void (*handler)(uint64_t nr, uint64_t parameter, pt_regs_t * regs),
@@ -15,21 +22,13 @@ int32_t register_irq(uint32_t gsi, void * arg,
         return 0;
     }
 
-    // ── Auto-select controller ───────────────────────────────
-    hw_int_controller_t *controller = NULL;
-    if (apic_available()) {
-        controller = get_ioapic_controller();
-    } else if (gsi < 16) {
-        // PIC only handles ISA IRQs 0-15; PCI GSIs (16+) need IOAPIC
-        extern hw_int_controller_t *get_pic_controller(void);
-        controller = get_pic_controller();
-    } else {
-        debug_irq("IRQ: GSI %u needs IOAPIC but APIC not available\n", gsi);
+    hw_int_controller_t *controller = arch_irq_select_controller(gsi);
+    if (controller == NULL) {
+        debug_irq("IRQ: no controller available for GSI %u\n", gsi);
         return 0;
     }
 
-    // ── Vector = 0x20 + gsi ──────────────────────────────────
-    uint64_t vector = 0x20 + gsi;
+    uint64_t vector = arch_irq_gsi_to_vector(gsi);
 
     irq_desc_t *p = &irq_table[gsi];
 
@@ -47,13 +46,22 @@ int32_t register_irq(uint32_t gsi, void * arg,
     return 1;
 }
 
-uint32_t unregister_irq(uint64_t nr)
+// Signature now takes a GSI (consistent with register_irq). The
+// previous code took a "vector" — which on x86_64 was 0x20 + gsi —
+// and the off-by-swap footgun is documented in
+// docs/superpowers/plans/2026-08-17-timer-clocksource-clockevent.md.
+uint32_t unregister_irq(uint32_t gsi)
 {
-    irq_desc_t *p = &irq_table[nr - 32];
+    if (gsi >= MAX_GSI) {
+        debug_irq("unregister_irq: GSI %u out of range (max %u)\n", gsi, MAX_GSI);
+        return 0;
+    }
+    irq_desc_t *p = &irq_table[gsi];
 
+    uint64_t vector = arch_irq_gsi_to_vector(gsi);
     if (p->controller != NULL) {
-        p->controller->disable(nr);
-        p->controller->uninstall(nr);
+        p->controller->disable(vector);
+        p->controller->uninstall(vector);
     }
     p->controller = NULL;
     p->irq_name[0] = '\0';
@@ -72,14 +80,16 @@ void irq_install()
 
 void irq_mask(uint32_t gsi)
 {
+    if (gsi >= MAX_GSI) return;
     irq_desc_t *p = &irq_table[gsi];
     if (p->controller)
-        p->controller->disable(0x20 + gsi);
+        p->controller->disable(arch_irq_gsi_to_vector(gsi));
 }
 
 void irq_unmask(uint32_t gsi)
 {
+    if (gsi >= MAX_GSI) return;
     irq_desc_t *p = &irq_table[gsi];
     if (p->controller)
-        p->controller->enable(0x20 + gsi);
+        p->controller->enable(arch_irq_gsi_to_vector(gsi));
 }
