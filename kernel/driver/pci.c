@@ -1,6 +1,9 @@
 #include <driver/pci.h>
 #include <kernel/arch/io.h>
 #include <kernel/debug.h>
+#include <kernel/memory.h>   // Phy_To_Virt
+#include <kernel/pmm.h>      // PAGE_2M_MASK
+#include <kernel/vmm.h>      // vmm_map_page, PAGE_KERNEL_PMD_NOCACHE
 #include <stdint.h>
 
 // ── Legacy PCI config space access via 0xCF8 / 0xCFC ─────
@@ -315,12 +318,19 @@ int pci_enable_msix(uint8_t bus, uint8_t dev, uint8_t func, uint8_t vector)
             extern uint32_t lapic_read(uint32_t offset);
             uint32_t bsp_lapic_id = (lapic_read(0x020) >> 24) & 0xFF;
 
-            // Map the MSI-X table for CPU access
+            // Map the MSI-X table for CPU access. The MSI-X BAR is often
+            // outside the kernel's pre-mapped RAM range (e.g. QEMU puts
+            // e1000's BAR3 above 128 MiB), so we must map the table's
+            // own 2 MiB page before writing it. This used to rely on
+            // ahci_init happening to map a page covering the MSI-X BAR
+            // — a load-order coincidence broken when driver init order
+            // changed (see arch(subsys): platform-decides driver
+            // registration on arch-cleanup-gh).
             uint64_t table_phys = bar_phys + tbl_off;
-
-            
-            // Use the identity-mapped page table - table is within the first 32MB
-            // which is already identity-mapped by the kernel, so no explicit map needed.
+            uint64_t table_page = table_phys & PAGE_2M_MASK;
+            vmm_map_page(kernel_map, table_page,
+                         (uintptr_t)Phy_To_Virt(table_page),
+                         PAGE_KERNEL_PMD_NOCACHE);
 
             volatile uint32_t *entry = (volatile uint32_t *)(table_phys + 0xFFFF800000000000ULL);
 
