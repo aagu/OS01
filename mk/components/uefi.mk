@@ -130,7 +130,10 @@ $(UEFI_RUNTIME_STAMP): FORCE
 	      printf "uefi-runtime-make: %s\n" "$(UEFI_RUNTIME_MAKE)"; \
 	      printf "profile: %s %s\n" "$(PROFILE)" "$(BUILD_DIR)"; \
 	      printf "uefi-clang: %s\n" "$$($(UEFI_DIGEST_CLANG) --version 2>/dev/null | head -1)"; \
-	      find thirdpart/posix-uefi -type f ! -path "thirdpart/posix-uefi/.git*" -exec stat -c "%y %n" {} + 2>/dev/null | sort; \
+	      find thirdpart/posix-uefi -type f \
+		  ! -path "thirdpart/posix-uefi/.git*" \
+		  ! -name "*.o" ! -name "*.a" ! -name "*.lib" \
+		  -exec stat -c "%y %n" {} + 2>/dev/null | sort; \
 	      sha256sum $(UEFI_BOOT_INPUTS); \
 	    } | sha256sum | cut -d" " -f1 ); \
 	    old=""; \
@@ -143,6 +146,8 @@ $(UEFI_RUNTIME_STAMP): FORCE
 	      rm -rf "$(UEFI_RUNTIME_DIR)"; \
 	      mkdir -p "$(UEFI_RUNTIME_DIR)"; \
 	      cp -a "$(UEFI_RUNTIME_SOURCE)/." "$(UEFI_RUNTIME_DIR)/"; \
+	      find "$(UEFI_RUNTIME_DIR)" \
+		  \( -name "*.o" -o -name "*.a" -o -name "*.lib" \) -delete; \
 	      rm -rf "$(UEFI_RUNTIME_DIR)/.git"; \
 	      [ -f "$(UEFI_RUNTIME_DIR)/uefi/Makefile" ] || { echo "ERROR: posix-uefi copy incomplete"; exit 1; }; \
 	      cp "$(UEFI_RUNTIME_DIR)/uefi/Makefile" "$(UEFI_RUNTIME_DIR)/Makefile"; \
