@@ -42,6 +42,16 @@ SECTIONS
 		_edata = .;
 	} :data
 
+	/* Subsys self-registration table. Each driver places a function
+	 * pointer here via SUBSYS_INITCALL(); arch_register_subsys()
+	 * iterates this range to call each one. */
+	.subsys_init :
+	{
+		PROVIDE(__subsys_init_start = .);
+		KEEP(*(.subsys_init))
+		PROVIDE(__subsys_init_end = .);
+	} :data
+
 	. = ALIGN(32768);
 	.data.init_task : { *(.data.init_task) } :data
 

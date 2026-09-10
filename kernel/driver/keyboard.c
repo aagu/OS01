@@ -416,3 +416,26 @@ void keyboard_init(void)
 
     register_irq(1, NULL, &keyboard_handler, 0, IRQF_TRIGGER_EDGE, "keyboard");
 }
+
+#ifdef __x86_64__
+#include <kernel/subsys.h>
+// Register this driver into the platform's subsystem table. The
+// _register function is collected by arch_register_subsys() at boot via
+// the .subsys_init linker section; it calls register_subsys() to queue
+// the init wrapper for subsys_init_phase() to run later. The split
+// (register vs init) ensures each driver's init runs ONCE — at the
+// right phase — and never during the .subsys_init pass (which would
+// race init order with sibling drivers).
+static int _keyboard_init_wrapper(void)
+{
+    keyboard_init();
+    return 0;
+}
+static int _keyboard_register(void)
+{
+    register_subsys("keyboard", _keyboard_init_wrapper,
+                    SUBSYS_PHASE_5, SUBSYS_FLAG_OPTIONAL);
+    return 0;
+}
+SUBSYS_INITCALL(_keyboard_register);
+#endif

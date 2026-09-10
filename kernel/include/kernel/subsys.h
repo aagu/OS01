@@ -45,4 +45,19 @@ void subsys_init_phase(int phase);
 void subsys_init_percpu(void);
 int  subsys_status(const char *name);
 
+// ── Self-registration via linker section ─────────────────
+// Drivers place a function pointer in the .subsys_init section via
+// SUBSYS_INITCALL(). The platform's arch_register_subsys() iterates
+// __subsys_init_start..__subsys_init_end and calls each. This avoids
+// __attribute__((constructor)), which has no runtime support in this
+// libc-free kernel (no .init_array iteration in startup code).
+typedef int (*subsys_initcall_t)(void);
+
+#define SUBSYS_INITCALL(fn)                                            \
+    static subsys_initcall_t __subsys_initcall_##fn                   \
+        __attribute__((used, section(".subsys_init"))) = fn
+
+extern subsys_initcall_t __subsys_init_start[];
+extern subsys_initcall_t __subsys_init_end[];
+
 #endif

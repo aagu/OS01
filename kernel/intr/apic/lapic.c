@@ -176,3 +176,26 @@ void apic_init(uint64_t rsdp_phys)
     // 3. Initialize I/O APICs
     ioapic_init();
 }
+
+#ifdef __x86_64__
+#include <kernel/subsys.h>
+// Register this driver into the platform's subsystem table. The
+// _register function is collected by arch_register_subsys() at boot via
+// the .subsys_init linker section; it calls register_subsys() to queue
+// the init wrapper for subsys_init_phase() to run later. The split
+// (register vs init) ensures each driver's init runs ONCE — at the
+// right phase — and never during the .subsys_init pass (which would
+// race init order with sibling drivers).
+extern uint64_t arch_boot_rsdp;
+static int _apic_init_wrapper(void)
+{
+    apic_init(arch_boot_rsdp);
+    return 0;
+}
+static int _apic_register(void)
+{
+    register_subsys("apic", _apic_init_wrapper, SUBSYS_PHASE_3, 0);
+    return 0;
+}
+SUBSYS_INITCALL(_apic_register);
+#endif

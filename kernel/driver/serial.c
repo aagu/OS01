@@ -236,3 +236,26 @@ void write_serial(char c)
     write_serial_unlocked(c);
     spin_unlock_irqrestore(&serial_lock, flags);
 }
+
+#ifdef __x86_64__
+#include <kernel/subsys.h>
+// Register this driver into the platform's subsystem table. The
+// _register function is collected by arch_register_subsys() at boot via
+// the .subsys_init linker section; it calls register_subsys() to queue
+// the init wrapper for subsys_init_phase() to run later. The split
+// (register vs init) ensures each driver's init runs ONCE — at the
+// right phase — and never during the .subsys_init pass (which would
+// race init order with sibling drivers).
+static int _init_serial_irq_wrapper(void)
+{
+    init_serial_irq();
+    return 0;
+}
+static int _serial_register(void)
+{
+    register_subsys("serial", _init_serial_irq_wrapper,
+                    SUBSYS_PHASE_5, 0);
+    return 0;
+}
+SUBSYS_INITCALL(_serial_register);
+#endif

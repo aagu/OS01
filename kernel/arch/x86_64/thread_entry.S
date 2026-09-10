@@ -4,8 +4,8 @@
 # the fake pt_regs frame, loads data segments, and calls fn(arg).
 # On return, calls do_exit().
 
-.globl kernel_thread_func
-kernel_thread_func:
+.globl arch_kernel_thread_entry
+arch_kernel_thread_entry:
     sti                         # re-enable IRQs after first context switch
     popq %r15
     popq %r14

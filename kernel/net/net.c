@@ -134,3 +134,24 @@ void net_lwip_init(void)
 
     log_info("net: lwIP stack initialized, DHCP started\n");
 }
+
+#ifdef __x86_64__
+// Register this driver into the platform's subsystem table. The
+// _register function is collected by arch_register_subsys() at boot via
+// the .subsys_init linker section; it calls register_subsys() to queue
+// the init wrapper for subsys_init_phase() to run later. The split
+// (register vs init) ensures each driver's init runs ONCE — at the
+// right phase — and never during the .subsys_init pass (which would
+// race init order with sibling drivers).
+static int _net_hw_init_wrapper(void)
+{
+    return net_hw_init();
+}
+static int _net_hw_register(void)
+{
+    register_subsys("net-hw", _net_hw_init_wrapper,
+                    SUBSYS_PHASE_6, SUBSYS_FLAG_OPTIONAL);
+    return 0;
+}
+SUBSYS_INITCALL(_net_hw_register);
+#endif
