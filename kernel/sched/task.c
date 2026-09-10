@@ -856,7 +856,7 @@ uint64_t do_exit(uint64_t exit_code)
         // always switches away. But if a future early-return path
         // (scheduler_ok==0, or in_schedule) ever let us fall through, we
         // are off-list + ZOMBIE + PF_SELF_REAP — halt rather than return
-        // into kernel_thread_func's epilogue, which would do_exit() again
+        // into arch_kernel_thread_entry's epilogue, which would do_exit() again
         // and double-list_del our already-NULL'd list node.
         for (;;) __asm__ __volatile__("hlt");
     }
@@ -1059,8 +1059,9 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
     }
 }
 
-// kernel_thread_func is defined in arch/x86_64/thread_entry.S.
-extern void kernel_thread_func(void);
+// arch_kernel_thread_entry is defined per-arch (x86_64 in arch/x86_64/thread_entry.S;
+// arch-neutral weak default in sched/arch_kernel_thread_entry.c).
+extern void arch_kernel_thread_entry(void);
 
 #define USER_CODE_ADDR   0x400000UL
 
@@ -1993,7 +1994,7 @@ int kernel_thread(uint64_t (*fn)(uint64_t), uint64_t arg, uint64_t flags)
     regs.cs = KERNEL_CS;
     regs.ss = KERNEL_DS;
     regs.rflags = (1 << 9);
-    regs.rip = (uint64_t)kernel_thread_func;
+    regs.rip = (uint64_t)arch_kernel_thread_entry;
 
     return do_fork(&regs, flags, 0, 0);
 }
