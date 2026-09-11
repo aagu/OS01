@@ -201,10 +201,17 @@ def self_test() -> None:
     # Default-off: legacy fixture passes even without smoke lines.
     assert passed(current_log_for_2_cpus, cpus=2), \
         "expect_selftest default-off preserves legacy behavior"
-    # Smoke line present but after topology: still rejected (ordering check).
-    smoke_after = current_log_for_2_cpus + "UEFI-A64: pt map smoke OK\n"
-    assert passed(smoke_after, cpus=2, expect_selftest=True) is False, \
-        "pt smoke line after topology must reject (ordering enforced)"
+    # Pt smoke line OUTSIDE the (RAM, topology) window: rejection must
+    # fire from the between-window count check (between.count(...) != 1),
+    # NOT from the full-log duplicate count. We remove the in-window pt
+    # line and append a single pt line at the end of the log — `pt_total`
+    # across the whole log is exactly 1, so the only path that can reject
+    # is the window check.
+    out_of_window = current_log_for_2_cpus.replace(
+        "UEFI-A64: pt map smoke OK\n", "") + "UEFI-A64: pt map smoke OK\n"
+    assert passed(out_of_window, cpus=2, expect_selftest=True) is False, \
+        "pt smoke line outside the RAM/topology window must reject " \
+        "(rejection must fire from window check, not duplicate count)"
     # Duplicate pt smoke line: still rejected (exactly-one enforcement).
     dup_pt = current_log_for_2_cpus + "UEFI-A64: pt map smoke OK\n"
     assert passed(dup_pt, cpus=2, expect_selftest=True) is False, \
