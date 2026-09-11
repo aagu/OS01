@@ -62,6 +62,16 @@ static void write_hex(uint64_t val)
 
 uint64_t __stack_chk_guard = 0xDEADBEEFCAFEBABE;
 
+#ifdef OS01_CANARY_SELFTEST
+__attribute__((noinline))
+static void kernel_canary_selftest_trip(void)
+{
+    volatile char buffer[16];
+    for (unsigned int i = 0; i < 32; ++i)
+        ((volatile char *)buffer)[i] = (char)i;
+}
+#endif
+
 // ── Stack smashing handler (safety net, rarely called) ────
 __attribute__((noreturn, no_stack_protector, cold))
 void __stack_chk_fail(void)
@@ -122,6 +132,11 @@ int kernel_main(const struct boot_context *bootctx)
 {
     // ═══ 0. Stack canary — MUST be the first statement ════════
     __stack_chk_guard = arch_cycle_counter() ^ 0xDEADBEEFCAFEBABE;
+
+#ifdef OS01_CANARY_SELFTEST
+    kernel_canary_selftest_trip();
+    __builtin_unreachable();
+#endif
 
     // ═══ 0.5. Handoff sanity — symmetric with aarch64_main ═══
     // init_serial() has not run yet, so report via write_serial directly.

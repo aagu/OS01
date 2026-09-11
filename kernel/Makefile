@@ -116,6 +116,10 @@ ALL_CFLAGS += -DDEBUG=1
 ALL_CFLAGS += -O0     # Debug: easy GDB single-stepping
 endif
 
+ifneq ($(filter 1,$(KERNEL_CANARY_SELFTEST)),)
+ALL_CFLAGS += -DOS01_CANARY_SELFTEST
+endif
+
 # ── lwIP networking stack ────────────────────────────────────
 LWIP_SRC_DIR  := ../thirdpart/lwip/src
 LWIP_CORE     := $(wildcard $(LWIP_SRC_DIR)/core/*.c)

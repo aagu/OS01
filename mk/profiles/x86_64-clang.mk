@@ -15,9 +15,19 @@ BUILD_DIR := $(OS01_ROOT)/build/$(PROFILE)
 SYSROOT := $(BUILD_DIR)/sysroot
 TARGET_INCLUDEDIR := $(SYSROOT)/usr/include
 TARGET_LIBDIR := $(SYSROOT)/usr/lib
-# KERNEL_SELFTEST changes generated kernel objects, so it gets a distinct
-# kernel build/artifact namespace.  Keep the ordinary paths exactly stable.
-KERNEL_VARIANT := $(if $(filter 1,$(KERNEL_SELFTEST)),selftest)
+# KERNEL_SELFTEST and KERNEL_CANARY_SELFTEST change generated kernel objects,
+# so each gets a distinct kernel build/artifact namespace.  Keep the ordinary
+# paths exactly stable and reject the destructive combination.
+ifneq ($(filter 1,$(KERNEL_SELFTEST)),)
+ifneq ($(filter 1,$(KERNEL_CANARY_SELFTEST)),)
+$(error KERNEL_SELFTEST=1 and KERNEL_CANARY_SELFTEST=1 are mutually exclusive)
+endif
+KERNEL_VARIANT := selftest
+else ifneq ($(filter 1,$(KERNEL_CANARY_SELFTEST)),)
+KERNEL_VARIANT := canary-selftest
+else
+KERNEL_VARIANT :=
+endif
 KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel$(if $(KERNEL_VARIANT),/$(KERNEL_VARIANT))
 LIBC_BUILD_DIR := $(BUILD_DIR)/libc
 # Compile-affecting variant (only OS01_SYSTEST re-keys the user dirs).
