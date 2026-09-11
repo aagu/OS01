@@ -115,10 +115,26 @@ static int  decode_perm(uint64_t desc, uint32_t *perm_out);
 static int  encode_perm(uint32_t perm, uint64_t *desc_out);
 static void zero_page(uint64_t pa);
 static int  parent_pa(uint64_t desc, uint64_t *pa_out);
+static uint64_t encode_table_desc(uint64_t pa);
 static int  walk_to_l3(uint64_t *root, uint64_t va, bool create,
                        uint64_t **pte_out, int *result_out);
 
 /* ── Small helpers ──────────────────────────────────────────────── */
+
+/* Minimal L0/L1/L2 table descriptor. Per ARM ARM D5.4.3 every bit
+ * outside [V | TYPE_TABLE | PA] is SBZ (should-be-zero) for
+ * intermediate translation-table entries. QEMU TCG strictly
+ * enforces this and faults a translation walk on any non-zero SBZ
+ * bit — using `encode_perm(KERNEL_RW)` here would set AP/AF/
+ * AttrIndx/SH/PXN/UXN, all of which are SBZ at L0/L1/L2.
+ *
+ * This is intentionally different from `encode_perm`, which produces
+ * a full 4 KiB leaf descriptor for L3 only. Do not collapse them. */
+static uint64_t encode_table_desc(uint64_t pa)
+{
+    return AARCH64_PT_DESC_VALID | AARCH64_PT_DESC_TABLE |
+           (pa & AARCH64_PT_PA_MASK);
+}
 
 /* Zero one 4 KiB table page through the high-half direct map. The
  * volatile store prevents the optimizer from collapsing the loop. */
@@ -331,19 +347,12 @@ static int ensure_child_table(uint64_t *root, uint64_t *parent,
         if (pa == 0) { *rc_out = AARCH64_PT_ENOMEM; return -1; }
         zero_page(pa);
         dsb_ishst();
-        uint64_t new_desc;
-        int enc_rc = encode_perm(AARCH64_PT_KERNEL_RW, &new_desc);
-        /* encode_perm on KERNEL_RW is unreachable-fail; guard anyway. */
-        if (enc_rc != AARCH64_PT_OK) {
-            free_4k_page(pa);
-            *rc_out = enc_rc;
-            return -1;
-        }
-        new_desc |= pa & AARCH64_PT_PA_MASK;
-        parent[index] = new_desc;
+        /* Intermediate table descriptors must be minimal — only
+         * V | TYPE_TABLE | PA. See encode_table_desc. */
+        parent[index] = encode_table_desc(pa);
         dsb_ishst();
         if (is_active_root(root)) tlb_invalidate_local(va);
-        desc = new_desc;
+        desc = parent[index];
     } else if ((desc & AARCH64_PT_DESC_TABLE) == 0) {
         *rc_out = is_l0 ? AARCH64_PT_EINVAL : AARCH64_PT_ECONFLICT;
         return -1;
