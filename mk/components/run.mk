@@ -330,6 +330,11 @@ test-runtime: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(KERNEL_ARTIFACT))
 	  --runtime-input "$(KERNEL_RUNTIME_INPUTS)" \
 	  --llvm-nm "$(LLVM_NM)" \
 	  --llvm-readobj "$(LLVM_READOBJ)"
+	python3 tests/stack_canary_audit.py \
+	  --object "$(KERNEL_BUILD_DIR)/sched/task.o" \
+	  --elf "$(KERNEL_ELF)" \
+	  --llvm-readelf "$(LLVM_READELF)" \
+	  --llvm-objdump "$(LLVM_OBJDUMP)"
 	@$(MAKE) validate-kernel
 	python3 tests/runtime_link_order_test.py
 	python3 tests/kernel_runtime_link_test.py \
