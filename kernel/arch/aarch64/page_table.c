@@ -45,30 +45,55 @@
 #define AARCH64_PT_DESC_SH_IS  UINT64_C(0x300)            /* bits [9:8] inner-shareable */
 #define AARCH64_PT_DESC_SH_NS  UINT64_C(0x000)            /* bits [9:8] non-shareable */
 
-/* AttrIndx: bits [4:2]. Matches the boot-table encoding in head.S:
- *   PT_ATTR_DEV    = 0<<2 (AttrIdx 0 = Device-nGnRnE in MAIR_EL1[7:0])
- *   PT_ATTR_NORMAL = 1<<2 (AttrIdx 1 = Normal WBWA in MAIR_EL1[15:8])
- * If MAIR_EL1 is rebuilt, these MUST be updated to track the new
- * AttrIdx slot assignments. */
-#define AARCH64_PT_ATTR_NORMAL UINT64_C(0x008)
+/* AttrIndx: bits [4:2] of the descriptor. Matches the boot-table
+ * encoding in head.S:
+ *   PT_ATTR_DEV    = 0<<2 = 0x0  (AttrIdx 0 = Device-nGnRnE in MAIR_EL1[7:0])
+ *   PT_ATTR_NORMAL = 1<<2 = 0x4  (AttrIdx 1 = Normal WBWA in MAIR_EL1[15:8])
+ * The AttrIdx arithmetic is bit-N = 1<<N, so AttrIdx 1 = bit 2 = 0x4 —
+ * NOT 0x8 (which would be AttrIdx 2 = MAIR slot 2 = 0x00, silently
+ * downgrading to Device-nGnRnE). If MAIR_EL1 is rebuilt, these MUST be
+ * updated to track the new AttrIdx slot assignments. */
+#define AARCH64_PT_ATTR_NORMAL UINT64_C(0x004)
 #define AARCH64_PT_ATTR_DEVICE UINT64_C(0x000)
+/* Compile-time guard so any regression that confuses bit positions is
+ * caught at build time instead of via silent memory-type drift. */
+_Static_assert(AARCH64_PT_ATTR_NORMAL == 0x4,
+               "AttrIndx 1 must be bit 2 = 0x4, not 0x8");
+_Static_assert(AARCH64_PT_ATTR_DEVICE == 0x0,
+               "AttrIndx 0 must be 0x0");
 
 /* Execute-never bits. UXN clears for an executable user mapping;
  * PXN clears for an executable kernel mapping. */
 #define AARCH64_PT_DESC_PXN    UINT64_C(0x20000000000000)  /* bit 53 */
 #define AARCH64_PT_DESC_UXN    UINT64_C(0x40000000000000)  /* bit 54 */
 
-/* AP[2:1] encoding for stage 1 (ARM ARM D4-1506):
+/* AP[2:1] encoding for stage 1 (ARM ARM D4-1506), occupying descriptor
+ * bits [7:6]:
  *   00 = EL1 RW,  EL0 no access      (kernel RW)
  *   01 = EL1 RW,  EL0 RW             (user RW)
  *   10 = EL1 RO,  EL0 no access      (kernel RO)
  *   11 = EL1 RO,  EL0 RO             (user RO)
- * Bits [7:6] of the descriptor. */
-#define AARCH64_PT_AP_MASK     UINT64_C(0x180)            /* bits [7:6] */
-#define AARCH64_PT_AP_KERNEL_RW UINT64_C(0x000)
-#define AARCH64_PT_AP_USER_RW   UINT64_C(0x040)
-#define AARCH64_PT_AP_KERNEL_RO UINT64_C(0x100)
-#define AARCH64_PT_AP_USER_RO   UINT64_C(0x140)
+ * Bit 7 = AP[2], bit 6 = AP[1]. Bit 8 is the shareability field (SH[1])
+ * and MUST NOT appear in the AP value — using it would make the kernel
+ * RO encoding actually set SH=inner-shareable twice (no harm) while
+ * leaving AP[2:1]=00 = kernel-RW (silently wrong). */
+#define AARCH64_PT_AP_MASK      UINT64_C(0x0C0)            /* bits [7:6] */
+#define AARCH64_PT_AP_KERNEL_RW UINT64_C(0x000)            /* 00 */
+#define AARCH64_PT_AP_USER_RW   UINT64_C(0x040)            /* 01 */
+#define AARCH64_PT_AP_KERNEL_RO UINT64_C(0x080)            /* 10 */
+#define AARCH64_PT_AP_USER_RO   UINT64_C(0x0C0)            /* 11 */
+/* Bit-position guards — any future drift is caught at compile time
+ * rather than via silently-wrong AP decoding of boot-table RO maps. */
+_Static_assert(AARCH64_PT_AP_MASK == 0x0C0,
+               "AP mask must cover descriptor bits [7:6]");
+_Static_assert(AARCH64_PT_AP_KERNEL_RW == 0x0,
+               "AP[2:1]=00 kernel-RW is 0x0");
+_Static_assert(AARCH64_PT_AP_USER_RW == 0x40,
+               "AP[2:1]=01 user-RW sets only bit 6");
+_Static_assert(AARCH64_PT_AP_KERNEL_RO == 0x80,
+               "AP[2:1]=10 kernel-RO sets only bit 7");
+_Static_assert(AARCH64_PT_AP_USER_RO == 0xC0,
+               "AP[2:1]=11 user-RO sets bits 7 and 6");
 
 /* TTBR0_EL1 layout. The base address field is bits [47:12]; the
  * permitted non-base bits are the ASID (bits [63:48]) and the CnP bit
@@ -92,7 +117,7 @@ static int  is_active_root(const uint64_t *root);
 static void tlb_invalidate_local(uint64_t va);
 static int  decode_perm(uint64_t desc, uint32_t *perm_out);
 static int  encode_perm(uint32_t perm, uint64_t *desc_out);
-static void zero_page_via_root(uint64_t *root_hint, uint64_t pa);
+static void zero_page(uint64_t pa);
 static int  parent_pa(uint64_t desc, uint64_t *pa_out);
 static int  walk_to_l3(uint64_t *root, uint64_t va, bool create,
                        uint64_t **pte_out, int *result_out);
@@ -101,11 +126,10 @@ static int  walk_to_l3(uint64_t *root, uint64_t va, bool create,
 
 /* Zero one 4 KiB table page through the high-half direct map. The
  * volatile store prevents the optimizer from collapsing the loop. */
-static void zero_page_via_root(uint64_t *root_hint, uint64_t pa)
+static void zero_page(uint64_t pa)
 {
     volatile uint64_t *cursor = (volatile uint64_t *)(pa + ARCH_PAGE_OFFSET);
     volatile uint64_t *end    = cursor + (PAGE_4K_SIZE / sizeof(uint64_t));
-    (void)root_hint;
     while (cursor < end) {
         *cursor = 0;
         ++cursor;
@@ -148,9 +172,9 @@ static int is_active_root(const uint64_t *root)
     if (ttbr_pa == 0) return 0;
     if ((ttbr_pa & (PAGE_4K_SIZE - 1)) != 0) return 0;
     if (ttbr_pa >= AARCH64_PT_PA_LIMIT) return 0;
+    /* ttbr_pa < 1 TiB and ARCH_PAGE_OFFSET = 0xffff000000000000, so
+     * ttbr_pa + ARCH_PAGE_OFFSET < ARCH_PAGE_OFFSET + 1 TiB (no overflow). */
     uintptr_t active_root = (uintptr_t)ttbr_pa + (uintptr_t)ARCH_PAGE_OFFSET;
-    if ((uintptr_t)ARCH_PAGE_OFFSET + (uintptr_t)AARCH64_PT_PA_LIMIT
-        < (uintptr_t)ARCH_PAGE_OFFSET) return 0;
     return active_root == (uintptr_t)root;
 }
 
@@ -197,24 +221,26 @@ static int parent_pa(uint64_t desc, uint64_t *pa_out)
 /* Translate the public permission word into an AArch64 descriptor's
  * AP / SH / AttrIndx / XN bits. Validates the word first; returns
  * EINVAL for an unknown bit, an ambiguous kernel/user or RO/RW
- * selection, or the DEVICE | EXEC combination. */
+ * selection, or the DEVICE | EXEC combination. The DEVICE | EXEC
+ * check is intentionally independent of the access-class check so a
+ * future restructure cannot accidentally hide it behind dead code. */
 static int encode_perm(uint32_t perm, uint64_t *desc_out)
 {
     if ((perm & ~AARCH64_PT_PERM_ALL_BITS) != 0) return AARCH64_PT_EINVAL;
 
-    uint32_t access = perm & (AARCH64_PT_KERNEL_RO | AARCH64_PT_KERNEL_RW |
-                              AARCH64_PT_USER_RO   | AARCH64_PT_USER_RW);
-    if (access == 0) return AARCH64_PT_EINVAL;
-    /* Exactly one kernel/user, exactly one RO/RW. */
+    /* Reject the forbidden combination first; doesn't depend on which
+     * access class (if any) the caller picked. */
+    if ((perm & AARCH64_PT_DEVICE) && (perm & AARCH64_PT_EXEC))
+        return AARCH64_PT_EINVAL;
+
+    /* Exactly one kernel/user, exactly one RO/RW. Missing both kernel
+     * and user → has_kernel == has_user (false == false) → EINVAL. */
     bool has_kernel = (perm & (AARCH64_PT_KERNEL_RO | AARCH64_PT_KERNEL_RW)) != 0;
     bool has_user   = (perm & (AARCH64_PT_USER_RO   | AARCH64_PT_USER_RW))   != 0;
     if (has_kernel == has_user) return AARCH64_PT_EINVAL;
     bool is_rw = (perm & (AARCH64_PT_KERNEL_RW | AARCH64_PT_USER_RW)) != 0;
     bool is_ro = (perm & (AARCH64_PT_KERNEL_RO | AARCH64_PT_USER_RO)) != 0;
     if (is_rw == is_ro) return AARCH64_PT_EINVAL;
-
-    if ((perm & AARCH64_PT_DEVICE) && (perm & AARCH64_PT_EXEC))
-        return AARCH64_PT_EINVAL;
 
     bool is_kernel = has_kernel;
     bool is_exec   = (perm & AARCH64_PT_EXEC) != 0;
@@ -259,8 +285,13 @@ static int decode_perm(uint64_t desc, uint32_t *perm_out)
     if (attr == AARCH64_PT_ATTR_DEVICE)
         perm |= AARCH64_PT_DEVICE;
 
-    bool is_kernel = (ap & UINT64_C(0x80)) == 0;  /* AP bit 7 */
-    bool is_ro     = (ap & UINT64_C(0x40)) != 0;  /* AP bit 6 */
+    /* AP[2:1] lives at descriptor bits [7:6]. Bit 7 = AP[2] = the RO
+     * bit (0 → RW, 1 → RO). Bit 6 = AP[1] = the user-allowed bit
+     * (0 → kernel-only, 1 → kernel+user). Reading these backwards
+     * (calling bit 7 "kernel" and bit 6 "RO") silently swaps KERNEL_RO
+     * with USER_RW in decode — caught by the decode-roundtrip check. */
+    bool is_ro     = (ap & UINT64_C(0x80)) != 0;  /* AP[2] */
+    bool is_kernel = (ap & UINT64_C(0x40)) == 0;  /* AP[1] */
     if (is_kernel) perm |= is_ro ? AARCH64_PT_KERNEL_RO : AARCH64_PT_KERNEL_RW;
     else           perm |= is_ro ? AARCH64_PT_USER_RO   : AARCH64_PT_USER_RW;
 
@@ -302,7 +333,7 @@ static int ensure_child_table(uint64_t *root, uint64_t *parent,
         if (!create) { *rc_out = AARCH64_PT_ENOENT; return -1; }
         uint64_t pa = alloc_4k_page();
         if (pa == 0) { *rc_out = AARCH64_PT_ENOMEM; return -1; }
-        zero_page_via_root(root, pa);
+        zero_page(pa);
         dsb_ishst();
         uint64_t new_desc;
         int enc_rc = encode_perm(AARCH64_PT_KERNEL_RW, &new_desc);
@@ -440,9 +471,10 @@ int aarch64_pt_unmap_4k(uint64_t *root, uint64_t va,
 
     uint64_t desc = *pte;
     if ((desc & AARCH64_PT_DESC_VALID) == 0) return AARCH64_PT_ENOENT;
-    /* Block descriptors at PUD/PMD are already handled by walk_to_l3
-     * (ECONFLICT) before reaching here; a leaf is V=1, bit1=1. */
-    if ((desc & AARCH64_PT_DESC_TABLE) == 0) return AARCH64_PT_EINVAL;
+    /* A block descriptor at PUD/PMD is already rejected by walk_to_l3
+     * (ECONFLICT) before reaching here, so this slot is either a 4 KiB
+     * leaf (V=1, bit1=1) or RES0 at L3 — both are accepted by decode_perm
+     * which returns EINVAL for any other shape. */
 
     uint32_t perm;
     rv = decode_perm(desc, &perm);
@@ -475,8 +507,8 @@ bool aarch64_pt_range_accessible(const uint64_t *root, uint64_t va,
         uint32_t perm;
         int rc = aarch64_pt_query_4k(root, cursor, &pa, &perm);
         if (rc != AARCH64_PT_OK) return false;
-        /* Blocks installed by boot code → not in this layer's domain. */
-        if (rc == AARCH64_PT_ECONFLICT) return false;
+        /* rc == AARCH64_PT_OK is the only path past the previous line;
+         * a block descriptor already returned ECONFLICT from query_4k. */
         bool have_user = (perm & AARCH64_PT_USER_RO) != 0 ||
                          (perm & AARCH64_PT_USER_RW) != 0;
         bool have_rw   = (perm & AARCH64_PT_KERNEL_RW) != 0 ||
