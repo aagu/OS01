@@ -355,8 +355,13 @@ struct Page * alloc_pages(int32_t zone_select, uint64_t number, uint64_t page_fl
         if ((PMMngr.zones_struct + i)->page_free_count < number)
             continue;
         z = PMMngr.zones_struct + i;
-        start = z->zone_start_address >> PAGE_2M_SHIFT;
-        end = z->zone_end_address >> PAGE_2M_SHIFT;
+        /* bits_map is indexed RAM-relative (rel_idx = (PA - lowest_ram) /
+         * 2 MiB). zone_start_address is the absolute PA, so convert via
+         * the zone's pages_group pointer (which already points to the
+         * first Page struct for this zone). */
+        start = (uint64_t)(z->pages_group - PMMngr.pages_struct);
+        end = start + (z->zone_end_address >> PAGE_2M_SHIFT)
+                    - (z->zone_start_address >> PAGE_2M_SHIFT);
 
         tmp = 64 - start % 64;
 
