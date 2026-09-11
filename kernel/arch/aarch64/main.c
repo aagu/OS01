@@ -12,6 +12,7 @@
 #include <kernel/arch/aarch64/smp.h>
 
 void pl011_init(void);
+void aarch64_extend_direct_map(void);
 extern char exception_vectors[];
 
 #if OS01_SELFTEST
@@ -226,6 +227,15 @@ void aarch64_main(const struct boot_context *handoff)
         if (p) { free_pages(p, 1); log_info("UEFI-A64: pmm alloc smoke OK\n"); }
         else   { log_err("UEFI-A64: pmm alloc smoke FAIL\n"); }
     }
+    /* head.S build_pagetables only writes PMD_low1[0]; slots 1..511
+     * are left zero, so physical 0x40200000..0x80000000 has no
+     * direct-map alias. Without this fixup the first runtime
+     * alloc_4k_page() whose PA lies above 0x40200000 faults in
+     * pmm.c when it writes the subpage_pool header. The fixup walks
+     * the installed PGD → PUD → PMD_low1 and fills the missing slots
+     * with 2 MiB Normal kernel-RW non-exec block descriptors. Pre-SMP
+     * single-threaded; mutates the active root. */
+    aarch64_extend_direct_map();
     aarch64_pt_smoke_test();
 #endif
 
