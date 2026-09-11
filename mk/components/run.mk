@@ -164,7 +164,7 @@ test-aarch64-uefi-smp:
 	$(call require_capability,uefi)
 	$(MAKE) KERNEL_SELFTEST=1 aarch64-uefi
 	python3 tests/aarch64_uefi_smp.py \
-	  --cpus 1 2 4 --repeat 3 --timeout 90 \
+	  --cpus 1 2 4 --repeat 3 --timeout 90 --expect-selftest \
 	  $(if $(filter 0,$(AARCH64_UEFI_SMP_DIAGNOSTIC_DTB)),,--diagnostic-dtb=auto) \
 	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
 	  --image "$(AARCH64_UEFI_DISK)" \

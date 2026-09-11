@@ -33,6 +33,17 @@
  * the smoke test ensures no leaf is left behind. */
 #define AARCH64_PT_SELFTEST_VA UINT64_C(0xffff800000000000)
 
+/* TTBR0_EL1 layout. The base address field is bits [47:12]; the
+ * permitted non-base bits are the ASID (bits [63:48]) and the CnP bit
+ * (bit 0). All other bits must read as zero on the live TTBR. Exposed
+ * here so the BSP pre-SMP self-test can validate the active root's
+ * raw TTBR0_EL1 value before converting to a direct-map pointer. */
+#define AARCH64_TTBR_BASE_MASK       UINT64_C(0x000000fffffff000)
+#define AARCH64_TTBR_ALLOWED_NONBASE (UINT64_C(0xffff000000000000) | \
+                                      UINT64_C(1))
+#define AARCH64_TTBR_ALLOWED_MASK    (AARCH64_TTBR_BASE_MASK | \
+                                      AARCH64_TTBR_ALLOWED_NONBASE)
+
 /* Permission word (bit-flag style). The caller MUST set exactly one
  * kernel/user flag and exactly one RO/RW flag, may optionally add
  * EXEC and/or DEVICE. Undefined bit combinations are EINVAL; the

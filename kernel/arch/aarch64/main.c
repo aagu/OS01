@@ -7,11 +7,158 @@
 #include <kernel/arch/cpu.h>
 #include <kernel/arch/irq.h>
 #include <kernel/arch/aarch64/dtb.h>
+#include <kernel/arch/aarch64/page_table.h>
 #include <kernel/arch/aarch64/ram.h>
 #include <kernel/arch/aarch64/smp.h>
 
 void pl011_init(void);
 extern char exception_vectors[];
+
+#if OS01_SELFTEST
+/* Pre-SMP page-table round-trip against the active kernel root. The
+ * helper validates the raw TTBR0_EL1 value, requires the self-test VA
+ * to be initially absent, allocates one 4 KiB data page, maps it
+ * kernel-RW + non-executable, exercises read/write through both the
+ * self-test VA and the high-half direct-map alias, proves duplicate
+ * map is EEXIST, then unmaps and confirms ENOENT. On any failure it
+ * frees/unmaps what it owns, logs `UEFI-A64: pt map smoke FAIL` and
+ * `[smp] FATAL: pt map selftest`, and halts before hardware bring-up.
+ * No intermediate table reclamation is attempted; only the unlinked
+ * data page and the unlinked active leaf are torn down. */
+static void aarch64_pt_smoke_test(void)
+{
+    /* Step 1: read raw TTBR0_EL1, reject bits outside
+     * AARCH64_TTBR_BASE_MASK | AARCH64_TTBR_ALLOWED_NONBASE. */
+    uint64_t ttbr_raw = (uint64_t)(uintptr_t)arch_get_page_table();
+    if ((ttbr_raw & ~AARCH64_TTBR_ALLOWED_MASK) != 0) {
+        log_err("UEFI-A64: pt map smoke FAIL\n");
+        log_err("[smp] FATAL: pt map selftest: ttbr_raw has disallowed bits\n");
+        for (;;) arch_cpu_halt();
+    }
+
+    /* Step 2: derive ttbr_pa. Nonzero, 4 KiB-aligned, < 1 TiB (IPS=40). */
+    uint64_t ttbr_pa = ttbr_raw & AARCH64_TTBR_BASE_MASK;
+    if (ttbr_pa == 0
+        || (ttbr_pa & (PAGE_4K_SIZE - 1)) != 0
+        || ttbr_pa >= (UINT64_C(1) << 40)) {
+        log_err("UEFI-A64: pt map smoke FAIL\n");
+        log_err("[smp] FATAL: pt map selftest: ttbr_pa invalid\n");
+        for (;;) arch_cpu_halt();
+    }
+
+    /* Step 3: convert only the validated base to a direct-map pointer. */
+    uint64_t *root = (uint64_t *)(uintptr_t)(ttbr_pa + ARCH_PAGE_OFFSET);
+
+    /* Step 4: require AARCH64_PT_SELFTEST_VA to be initially absent. */
+    uint64_t pa_q = 0;
+    uint32_t perm_q = 0;
+    int rc = aarch64_pt_query_4k(root, AARCH64_PT_SELFTEST_VA, &pa_q, &perm_q);
+    if (rc != AARCH64_PT_ENOENT) {
+        log_err("UEFI-A64: pt map smoke FAIL\n");
+        log_err("[smp] FATAL: pt map selftest: initial query not ENOENT\n");
+        for (;;) arch_cpu_halt();
+    }
+
+    /* Step 5: allocate one 4 KiB page and map it kernel-RW, non-exec. */
+    uint64_t data_pa = alloc_4k_page();
+    if (data_pa == 0) {
+        log_err("UEFI-A64: pt map smoke FAIL\n");
+        log_err("[smp] FATAL: pt map selftest: alloc_4k_page returned 0\n");
+        for (;;) arch_cpu_halt();
+    }
+    bool mapped = false;
+    int map_rc = aarch64_pt_map_4k(root, AARCH64_PT_SELFTEST_VA, data_pa,
+                                   AARCH64_PT_KERNEL_RW);
+    if (map_rc != AARCH64_PT_OK) {
+        log_err("UEFI-A64: pt map smoke FAIL\n");
+        log_err("[smp] FATAL: pt map selftest: map_4k failed\n");
+        free_4k_page(data_pa);
+        for (;;) arch_cpu_halt();
+    }
+    mapped = true;
+
+    /* Step 6: write two distinct 64-bit sentinels through the VA and
+     * verify they read back through BOTH the self-test VA and the
+     * high-half direct-map alias of the same physical page. */
+    volatile uint64_t *selftest_va =
+        (volatile uint64_t *)(uintptr_t)AARCH64_PT_SELFTEST_VA;
+    volatile uint64_t *direct =
+        (volatile uint64_t *)(uintptr_t)(data_pa + ARCH_PAGE_OFFSET);
+    const uint64_t SENTINEL_A = UINT64_C(0xa5a5a5a55a5a5a5a);
+    const uint64_t SENTINEL_B = UINT64_C(0x5a5a5a5aa5a5a5a5);
+    *selftest_va = SENTINEL_A;
+    if (*selftest_va != SENTINEL_A || *direct != SENTINEL_A) {
+        log_err("UEFI-A64: pt map smoke FAIL\n");
+        log_err("[smp] FATAL: pt map selftest: sentinel A roundtrip failed\n");
+        goto fail_unmap;
+    }
+    *selftest_va = SENTINEL_B;
+    if (*selftest_va != SENTINEL_B || *direct != SENTINEL_B) {
+        log_err("UEFI-A64: pt map smoke FAIL\n");
+        log_err("[smp] FATAL: pt map selftest: sentinel B roundtrip failed\n");
+        goto fail_unmap;
+    }
+
+    /* Step 7a: query the same PA and KERNEL_RW/non-exec permission. */
+    uint64_t pa_q2 = 0;
+    uint32_t perm_q2 = 0;
+    int qrc = aarch64_pt_query_4k(root, AARCH64_PT_SELFTEST_VA,
+                                  &pa_q2, &perm_q2);
+    if (qrc != AARCH64_PT_OK
+        || pa_q2 != data_pa
+        || perm_q2 != AARCH64_PT_KERNEL_RW) {
+        log_err("UEFI-A64: pt map smoke FAIL\n");
+        log_err("[smp] FATAL: pt map selftest: post-map query mismatch\n");
+        goto fail_unmap;
+    }
+
+    /* Step 7b: prove a second map returns EEXIST. */
+    int rc2 = aarch64_pt_map_4k(root, AARCH64_PT_SELFTEST_VA, data_pa,
+                                AARCH64_PT_KERNEL_RW);
+    if (rc2 != AARCH64_PT_EEXIST) {
+        log_err("UEFI-A64: pt map smoke FAIL\n");
+        log_err("[smp] FATAL: pt map selftest: second map not EEXIST\n");
+        goto fail_unmap;
+    }
+
+    /* Step 7c: unmap, expect the prior PA and permission. */
+    uint64_t unmapped_pa = 0;
+    uint32_t unmapped_perm = 0;
+    int urc = aarch64_pt_unmap_4k(root, AARCH64_PT_SELFTEST_VA,
+                                  &unmapped_pa, &unmapped_perm);
+    if (urc != AARCH64_PT_OK
+        || unmapped_pa != data_pa
+        || unmapped_perm != AARCH64_PT_KERNEL_RW) {
+        log_err("UEFI-A64: pt map smoke FAIL\n");
+        log_err("[smp] FATAL: pt map selftest: unmap_4k failed\n");
+        free_4k_page(data_pa);
+        for (;;) arch_cpu_halt();
+    }
+    mapped = false;
+
+    /* Step 7d: a later query must return ENOENT. */
+    int qrc2 = aarch64_pt_query_4k(root, AARCH64_PT_SELFTEST_VA,
+                                   &pa_q2, &perm_q2);
+    if (qrc2 != AARCH64_PT_ENOENT) {
+        log_err("UEFI-A64: pt map smoke FAIL\n");
+        log_err("[smp] FATAL: pt map selftest: post-unmap query not ENOENT\n");
+        free_4k_page(data_pa);
+        for (;;) arch_cpu_halt();
+    }
+
+    /* Step 8: free the data page and emit the success marker exactly. */
+    free_4k_page(data_pa);
+    log_info("UEFI-A64: pt map smoke OK\n");
+    return;
+
+fail_unmap:
+    if (mapped) {
+        (void)aarch64_pt_unmap_4k(root, AARCH64_PT_SELFTEST_VA, NULL, NULL);
+    }
+    free_4k_page(data_pa);
+    for (;;) arch_cpu_halt();
+}
+#endif
 
 void aarch64_main(const struct boot_context *handoff)
 {
@@ -64,6 +211,7 @@ void aarch64_main(const struct boot_context *handoff)
         if (p) { free_pages(p, 1); log_info("UEFI-A64: pmm alloc smoke OK\n"); }
         else   { log_err("UEFI-A64: pmm alloc smoke FAIL\n"); }
     }
+    aarch64_pt_smoke_test();
 #endif
 
     /* Invalid or missing platform information is FATAL here, before any

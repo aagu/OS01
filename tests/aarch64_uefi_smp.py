@@ -66,6 +66,8 @@ UEFI-A64: RAM ranges=3 pages2m=236 bytes=494927872\n
 
 current_log_for_2_cpus = """\
 UEFI-A64: RAM ranges=3 pages2m=236 bytes=494927872
+UEFI-A64: pmm alloc smoke OK
+UEFI-A64: pt map smoke OK
 [smp] topology source=uefi-dtb cpus=2
 [smp] cpu=0 online mpidr=0x0
 [smp] cpu=1 online mpidr=0x1
@@ -181,24 +183,38 @@ def self_test() -> None:
     )
     assert "if=none,file=disk.img,format=raw,readonly=on,id=disk" in qemu_command(command_args, 4, None)
 
-    # expect_selftest: requires 'UEFI-A64: pmm alloc smoke OK' between the
-    # RAM summary and the topology line. The default (False) preserves the
-    # legacy behavior of every existing fixture.
-    selftest_log = current_log_for_2_cpus.replace(
-        "[smp] topology source=uefi-dtb cpus=2",
-        "UEFI-A64: pmm alloc smoke OK\n[smp] topology source=uefi-dtb cpus=2",
-    )
+    # expect_selftest: requires 'UEFI-A64: pmm alloc smoke OK' then
+    # 'UEFI-A64: pt map smoke OK' between the RAM summary and the
+    # topology line. The default (False) preserves the legacy behavior
+    # of every existing fixture.
+    selftest_log = current_log_for_2_cpus
     assert passed(selftest_log, cpus=2, expect_selftest=True), \
-        "smoke line between RAM and topology must pass with expect_selftest=True"
-    assert passed(current_log_for_2_cpus, cpus=2, expect_selftest=True) is False, \
-        "missing smoke line must reject when expect_selftest=True"
-    # Default-off: legacy fixture passes even without smoke line.
+        "smoke lines between RAM and topology must pass with expect_selftest=True"
+    # Explicit mutation: remove only the page-table smoke line; the
+    # PMM line is still there. The current parser accepts this because
+    # it only recognizes the PMM smoke line, so this fails before the
+    # parser changes in Step 4.
+    missing_pt = current_log_for_2_cpus.replace(
+        "UEFI-A64: pt map smoke OK\n", "")
+    assert passed(missing_pt, cpus=2, expect_selftest=True) is False, \
+        "missing pt map smoke line must reject when expect_selftest=True"
+    # Default-off: legacy fixture passes even without smoke lines.
     assert passed(current_log_for_2_cpus, cpus=2), \
         "expect_selftest default-off preserves legacy behavior"
     # Smoke line present but after topology: still rejected (ordering check).
-    smoke_after = current_log_for_2_cpus + "UEFI-A64: pmm alloc smoke OK\n"
+    smoke_after = current_log_for_2_cpus + "UEFI-A64: pt map smoke OK\n"
     assert passed(smoke_after, cpus=2, expect_selftest=True) is False, \
-        "smoke line after topology must reject (ordering enforced)"
+        "pt smoke line after topology must reject (ordering enforced)"
+    # Duplicate pt smoke line: still rejected (exactly-one enforcement).
+    dup_pt = current_log_for_2_cpus + "UEFI-A64: pt map smoke OK\n"
+    assert passed(dup_pt, cpus=2, expect_selftest=True) is False, \
+        "duplicate pt smoke line must reject (exactly-one enforced)"
+    # FAIL line anywhere: always rejected (kernel failure check).
+    fail_pt = current_log_for_2_cpus.replace(
+        "UEFI-A64: pt map smoke OK\n",
+        "UEFI-A64: pt map smoke FAIL\n")
+    assert passed(fail_pt, cpus=2, expect_selftest=True) is False, \
+        "pt smoke FAIL line must always reject"
     # degraded_passed ignores expect_selftest (signature only).
     assert degraded_passed(current_degraded_log, expect_selftest=True), \
         "degraded_passed ignores expect_selftest"
@@ -258,15 +274,47 @@ def passed(text: str, cpus: int, expect_selftest: bool = False) -> bool:
             r"^UEFI-A64: RAM ranges=\d+ pages2m=\d+ bytes=\d+$",
             text, re.MULTILINE,
         )
-        if topo_match and ram_match and ram_match.start() < topo_match.start():
-            between = text[ram_match.end():topo_match.start()]
-            if "UEFI-A64: pmm alloc smoke OK" not in between:
-                print(f"FAIL: 'UEFI-A64: pmm alloc smoke OK' missing between "
-                      f"RAM summary and topology line (text length {len(text)})")
-                return False
-        else:
+        if not (topo_match and ram_match and ram_match.start() < topo_match.start()):
             print(f"FAIL: cannot anchor RAM summary and topology line for "
                   f"smoke check (text length {len(text)})")
+            return False
+        between = text[ram_match.end():topo_match.start()]
+        # Require exactly one PMM and exactly one pt map smoke line
+        # across the whole log, both inside the (RAM, topology) window,
+        # in that order.
+        pmm_total = len(re.findall(r"^UEFI-A64: pmm alloc smoke OK$",
+                                   text, re.MULTILINE))
+        pt_total = len(re.findall(r"^UEFI-A64: pt map smoke OK$",
+                                  text, re.MULTILINE))
+        if pmm_total != 1:
+            print(f"FAIL: expected exactly one 'UEFI-A64: pmm alloc smoke OK' "
+                  f"in the log, found {pmm_total} (text length {len(text)})")
+            return False
+        if pt_total != 1:
+            print(f"FAIL: expected exactly one 'UEFI-A64: pt map smoke OK' "
+                  f"in the log, found {pt_total} (text length {len(text)})")
+            return False
+        if between.count("UEFI-A64: pmm alloc smoke OK\n") != 1:
+            print(f"FAIL: 'UEFI-A64: pmm alloc smoke OK' missing between "
+                  f"RAM summary and topology line (text length {len(text)})")
+            return False
+        if between.count("UEFI-A64: pt map smoke OK\n") != 1:
+            print(f"FAIL: 'UEFI-A64: pt map smoke OK' missing between "
+                  f"RAM summary and topology line (text length {len(text)})")
+            return False
+        pmm_pos = between.find("UEFI-A64: pmm alloc smoke OK\n")
+        pt_pos = between.find("UEFI-A64: pt map smoke OK\n")
+        if pmm_pos > pt_pos:
+            print(f"FAIL: 'UEFI-A64: pt map smoke OK' must follow the PMM "
+                  f"smoke line (ordering enforced, text length {len(text)})")
+            return False
+        # A FAIL line anywhere in the run is fatal regardless of the
+        # ordered PASS markers — kernel_failure() above already catches
+        # the [smp]/[spinlock] FATAL form, so an exact 'pt map smoke FAIL'
+        # outside the kernel_failure regex would otherwise be missed.
+        if re.search(r"^UEFI-A64: pt map smoke FAIL$", text, re.MULTILINE):
+            print(f"FAIL: 'UEFI-A64: pt map smoke FAIL' present in log "
+                  f"(text length {len(text)})")
             return False
     topology = re.search(r"^\[smp\] topology\b[^\n]*\brequested=(\d+)\b[^\n]*\bdiscovered=(\d+)\b", text, re.MULTILINE)
     if topology:

@@ -95,14 +95,10 @@ _Static_assert(AARCH64_PT_AP_KERNEL_RO == 0x80,
 _Static_assert(AARCH64_PT_AP_USER_RO == 0xC0,
                "AP[2:1]=11 user-RO sets bits 7 and 6");
 
-/* TTBR0_EL1 layout. The base address field is bits [47:12]; the
- * permitted non-base bits are the ASID (bits [63:48]) and the CnP bit
- * (bit 0). All other bits must read as zero on the live TTBR. */
-#define AARCH64_TTBR_BASE_MASK       UINT64_C(0x000000fffffff000)
-#define AARCH64_TTBR_ALLOWED_NONBASE (UINT64_C(0xffff000000000000) | \
-                                      UINT64_C(1))
-#define AARCH64_TTBR_ALLOWED_MASK    (AARCH64_TTBR_BASE_MASK | \
-                                      AARCH64_TTBR_ALLOWED_NONBASE)
+/* TTBR0_EL1 layout constants (AARCH64_TTBR_BASE_MASK and
+ * AARCH64_TTBR_ALLOWED_NONBASE) now live in page_table.h so the
+ * BSP pre-SMP self-test can validate the active TTBR before
+ * converting to a direct-map pointer. */
 
 /* Permission word bit set. */
 #define AARCH64_PT_PERM_ALL_BITS \
