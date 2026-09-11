@@ -67,8 +67,8 @@ __attribute__((noinline))
 static void kernel_canary_selftest_trip(void)
 {
     volatile char buffer[16];
-    for (unsigned int i = 0; i < 32; ++i)
-        ((volatile char *)buffer)[i] = (char)i;
+    __asm__ __volatile__("" :: "r"(buffer) : "memory");
+    __asm__ __volatile__("movq $0, -8(%%rbp)" ::: "memory");
 }
 #endif
 
