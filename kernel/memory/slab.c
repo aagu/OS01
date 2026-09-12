@@ -371,8 +371,10 @@ size_t slab_init()
     i = Virt_To_Phy(PMMngr.end_of_struct) >> PAGE_2M_SHIFT;
     for (j = PAGE_2M_ALIGN(Virt_To_Phy(tmp_address)) >> PAGE_2M_SHIFT; j <= i; j++)
     {
-        page = PMMngr.pages_struct + j;
-        *(PMMngr.bits_map + ((page->phy_address >> PAGE_2M_SHIFT) >> 6)) |= 1UL << (page->phy_address >> PAGE_2M_SHIFT) % 64;
+        page = Phy_to_2M_Page(j << PAGE_2M_SHIFT);
+        /* Reserve the descriptor's RAM-relative bit, not its physical PFN. */
+        uint64_t page_index = (uint64_t)(page - PMMngr.pages_struct);
+        PMMngr.bits_map[page_index >> 6] |= 1UL << (page_index % 64);
         page->zone_struct->page_using_count++;
         page->zone_struct->page_free_count--;
         page_init(page, PG_PTable_Mapped | PG_Kernel_Init | PG_Kernel);
@@ -391,7 +393,9 @@ size_t slab_init()
 		page_offset += PAGE_2M_SIZE;
 		page = Virt_To_2M_Page(virtual);
 
-		*(PMMngr.bits_map + ((page->phy_address >> PAGE_2M_SHIFT) >> 6)) |= 1UL << (page->phy_address >> PAGE_2M_SHIFT) % 64;
+		/* Reserve the descriptor's RAM-relative bit, not its physical PFN. */
+        uint64_t page_index = (uint64_t)(page - PMMngr.pages_struct);
+        PMMngr.bits_map[page_index >> 6] |= 1UL << (page_index % 64);
 		page->zone_struct->page_using_count++;
 		page->zone_struct->page_free_count--;
 

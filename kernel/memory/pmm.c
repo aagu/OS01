@@ -253,28 +253,20 @@ void pmm_init(const struct boot_context *ctx)
         ((uint64_t)PMMngr.zones_struct + PMMngr.zones_length + sizeof(long) * 32)
         & ~(sizeof(long) - 1);
 
-    /* Step 5: page-0 quirk (x86_64 historical). */
-    if (PMMngr.pages_struct->phy_address == 0) {
-        PMMngr.pages_struct->zone_struct = PMMngr.zones_struct;
-        PMMngr.pages_struct->phy_address = 0UL;
-        set_page_attribute(PMMngr.pages_struct,
-                           PG_PTable_Mapped | PG_Kernel_Init | PG_Kernel);
-        PMMngr.pages_struct->reference_count = 1;
-        PMMngr.pages_struct->age = 0;
-    }
-
-    /* Step 6: mark kernel-owned pages. RAM-relative walk with clamp:
-     * unsigned underflow would otherwise corrupt the loop bound on
-     * aarch64 where end_phys (kernel LMA ~0x401e0000) < lowest_ram
-     * (first surviving RAM range starts at 0x40200000). */
+    /* Reserve every represented RAM frame overlapping the kernel image
+     * and early metadata. Slot zero is the first RAM frame, not necessarily
+     * physical page zero (x86 UEFI commonly leaves lowest_ram == 2 MiB).
+     * The end address is exclusive; sparse non-RAM slots stay reserved. */
     uint64_t end_phys = Virt_To_Phy(PMMngr.end_of_struct);
     uint64_t walk_pages = (end_phys > lowest_ram)
-        ? ((end_phys - lowest_ram) >> 21) : 0;
-    for (uint64_t j = 1; j <= walk_pages; j++) {
+        ? ((end_phys - lowest_ram + PAGE_2M_SIZE - 1) >> PAGE_2M_SHIFT) : 0;
+    if (walk_pages > PMMngr.pages_size)
+        walk_pages = PMMngr.pages_size;
+    for (uint64_t j = 0; j < walk_pages; j++) {
         struct Page *tmp = PMMngr.pages_struct + j;
+        if (!tmp->zone_struct) continue;
         page_init(tmp, PG_PTable_Mapped | PG_Kernel_Init | PG_Kernel);
-        uint64_t rel_idx = (tmp->phy_address - lowest_ram) >> 21;
-        *(PMMngr.bits_map + (rel_idx >> 6)) |= 1UL << (rel_idx % 64);
+        PMMngr.bits_map[j >> 6] |= 1UL << (j % 64);
         tmp->zone_struct->page_using_count++;
         tmp->zone_struct->page_free_count--;
     }
