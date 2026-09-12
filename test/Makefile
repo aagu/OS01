@@ -67,6 +67,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_vfs_basic.elf \
     $(TEST_BLD)/test_fat32_basic.elf \
     $(TEST_BLD)/test_pmm_basic.elf \
+    $(TEST_BLD)/test_pmm_ram_rel_index.elf \
     $(TEST_BLD)/test_slab_basic.elf \
     $(TEST_BLD)/test_elf_validate.elf \
     $(TEST_BLD)/test_wait_basic.elf \
@@ -97,11 +98,11 @@ run: $(TEST_BINS)
 	    printf '%s\n' "$$output" | \
 	        grep -E "===|Total|Failed|>>>|ALL" --color=never || true; \
 	    total=$$((total + 1)); \
-	    if [ "$${rc}" -ne 0 ] && [ "$${rc}" -ne 1 ]; then \
-	        echo "  >>> $$name CRASHED (rc=$$rc) <<<"; \
+	    if [ "$${rc}" -ne 0 ]; then \
 	        failed=$$((failed + 1)); \
-	    elif [ "$${rc}" -eq 1 ]; then \
-	        failed=$$((failed + 1)); \
+	        if [ "$${rc}" -ne 1 ]; then \
+	            echo "  >>> $$name CRASHED (rc=$$rc) <<<"; \
+	        fi; \
 	    fi; \
 	    echo "  -> exit code: $$rc"; \
 	done; \
@@ -291,6 +292,37 @@ $(TEST_BLD)/test_fat32_basic.elf: $(TEST_BLD)/test_fat32_basic.o $(LIBC_OBJS) $(
 	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/test_pmm_basic.elf: $(TEST_BLD)/test_pmm_basic.o $(LIBC_OBJS) $(MOCK_OBJS)
+	$(HOST_CC) -o $@ $^
+
+# PMM RAM-relative bits_map indexing regression — compiles the REAL
+# kernel/memory/pmm.c. pmm.c's spinlock and arch_cpu_halt carry
+# privileged inline asm (cli/sti/hlt), so those two headers are
+# shadowed by mock headers placed BEFORE kernel/include on the path
+# (PMM_SHADOW_INC); everything else resolves to the production
+# headers. The test TU puts kernel/include first so <kernel/pmm.h>
+# is the real one, not the (stale) test/include shadow.
+PMM_SHADOW_INC := -I$(TEST_MOCK)/pmm_include
+
+$(TEST_BLD)/pmm_production.o: $(TESTS_DIR)/kernel/memory/pmm.c \
+		$(TEST_MOCK)/pmm_include/kernel/arch/spinlock.h \
+		$(TEST_MOCK)/pmm_include/kernel/arch/cpu.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) -c $< -o $@
+
+# The weak-default dispatcher (pmm_arch_normalize / zone_split) lives in
+# kernel/memory/pmm_arch.c; this suite does not exercise it but the linker
+# requires the symbols to resolve when compiling the real pmm.c.
+$(TEST_BLD)/pmm_arch_default.o: $(TESTS_DIR)/kernel/memory/pmm_arch.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) -c $< -o $@
+
+$(TEST_BLD)/test_pmm_ram_rel_index.o: $(TEST_CASES)/test_pmm_ram_rel_index.c \
+		$(TESTS_DIR)/kernel/include/kernel/pmm.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -I$(TEST_INC) -c $< -o $@
+
+$(TEST_BLD)/test_pmm_ram_rel_index.elf: $(TEST_BLD)/test_pmm_ram_rel_index.o \
+		$(TEST_BLD)/pmm_production.o $(TEST_BLD)/pmm_arch_default.o
 	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/test_slab_basic.elf: $(TEST_BLD)/test_slab_basic.o $(LIBC_OBJS) $(MOCK_OBJS)

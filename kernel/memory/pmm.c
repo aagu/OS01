@@ -383,7 +383,14 @@ struct Page * alloc_pages(int32_t zone_select, uint64_t number, uint64_t page_fl
                     {
                         struct Page * pageptr = PMMngr.pages_struct + page + l;
 
-                        *(PMMngr.bits_map + ((pageptr->phy_address >> PAGE_2M_SHIFT) >> 6)) |= 1UL << (pageptr->phy_address >> PAGE_2M_SHIFT) % 64;
+                        /* bits_map is RAM-relative (pmm_init Step 4
+                         * indexes it via (PA - lowest_ram) >> 21), so
+                         * alloc/free must use the same index.
+                         * pages_struct is densely packed in RAM-
+                         * relative order, so (pageptr - pages_struct)
+                         * is the right index. */
+                        uint64_t rel_idx = (uint64_t)(pageptr - PMMngr.pages_struct);
+                        *(PMMngr.bits_map + (rel_idx >> 6)) |= 1UL << (rel_idx % 64);
                         z->page_using_count++;
                         z->page_free_count--;
                         pageptr->attribute = attribute;
@@ -429,7 +436,11 @@ void free_pages(struct Page * page,int32_t number)
 
 	for(i = 0;i<number;i++,page++)
 	{
-		*(PMMngr.bits_map + ((page->phy_address >> PAGE_2M_SHIFT) >> 6)) &= ~(1UL << (page->phy_address >> PAGE_2M_SHIFT) % 64);
+		/* bits_map is RAM-relative (see alloc_pages and pmm_init
+		 * Step 4); pages_struct is densely packed in the same
+		 * order, so (page - pages_struct) is the right index. */
+		uint64_t rel_idx = (uint64_t)(page - PMMngr.pages_struct);
+		*(PMMngr.bits_map + (rel_idx >> 6)) &= ~(1UL << (rel_idx % 64));
 		page->zone_struct->page_using_count--;
 		page->zone_struct->page_free_count++;
 		page->attribute = 0;
