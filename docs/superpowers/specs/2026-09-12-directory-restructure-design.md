@@ -176,6 +176,10 @@ runtime/selftest/     # ← 原 runtime/tests/
   - `boot/uefi/arch/arch.h:21`：`../../../kernel/include/kernel/bootinfo.h` → `../../../kernel/include/core/bootinfo.h`
   - `boot/uefi/arch/x86_64/boot.c:12`：`../../../../kernel/include/kernel/arch/x86_64/bootinfo_x86.h` → `../../../../kernel/include/arch/x86_64/bootinfo_x86.h`
   - `boot/uefi/arch/aarch64/loader.h:8`：`../../../../kernel/include/kernel/arch/aarch64/handoff_layout.h` → `../../../../kernel/include/arch/aarch64/handoff_layout.h`
+- **测试侧头路径（随头移动一并迁移，否则相关脚本/ runner 编译失败）**：
+  - `qemutests/**/*.py` 内嵌 C include 片段：`pmm_arch_test.py` 生成 `<kernel/arch/x86_64/{handoff_layout,trampoline}.h>`；`aarch64_psci_test.py` `<kernel/arch/aarch64/psci.h>`；`aarch64_ram_test.py` `<kernel/bootinfo.h>` + `<kernel/arch/aarch64/{ram,ram_core}.h>`；`aarch64_smp_test.py` `<kernel/arch/aarch64/{boot_offsets,smp_boot_core}.h>`；`aarch64_dtb_test.py` `<kernel/arch/aarch64/dtb.h>`——全部改 `<arch/...>` / `<core/...>`。`-Ikernel/include` 根不变；`kernel/arch/aarch64/*.c|*.ld|make.config` 源路径不变。
+  - `qemutests/arch_runner/pmm_arch_test_runner.c`：`<kernel/bootinfo.h>` → `<core/bootinfo.h>`；`<kernel/memory_map.h>` → `<memory/memory_map.h>`；`<kernel/arch/x86_64/bootinfo_x86.h>` → `<arch/x86_64/bootinfo_x86.h>`。
+  - `hosttests/cases/*.c` + `hosttests/include/**`（影子树）+ `hosttests/mock/**`：直接 host 编译的 `<kernel/...>`/`<fs/...>` 等一并改新路径；影子树 `hosttests/include/kernel/`（旧布局）结构迁移为镜像新布局，或按 P5 审计删死头。
 - **`mk/components/kernel.mk` / `mk/profiles/*.mk`**：注释中的 `test/Makefile` 路径更新。
 - **`.gitignore`**：`kernel/kernel/kallsyms` → `kernel/core/kallsyms`；新增 `test-results/`。
 
@@ -188,7 +192,7 @@ runtime/selftest/     # ← 原 runtime/tests/
 | P1 | 测试目录重命名（4 处）+ 脚本内部硬编码路径改写（§4.3）+ `.gitignore` + 游离 C 归位 + 文档 | `make test`、`make KERNEL_SELFTEST=1`、`python3 qemutests/run_test.py` 及受影响脚本（runtime_audit_test.py / kernel_canary_contract_test.py / build_contract.sh / pmm_arch_test.py）；`rg` 旧目录名零残留 |
 | P2 | `kernel/kernel/` → `core/`（纯改名，不拆功能） | `kernel.bin` 字节相同 |
 | P3 | 核心拆分（random→random/、log→log/、font+logo→driver/、hang→panic） | 编译通过 + `make` 全量 + `make KERNEL_SELFTEST=1` |
-| P4 | 头文件按子系统拆分（~90 头 + 46 arch 头移动 + ~411 `kernel/` + 201 `kernel/arch/` `#include` 更新 + `hosttests` 影子同步 + UEFI 链 `boot/uefi/*` 与 `uefi.mk` bootinfo/handoff 路径） | `kernel.bin` 字节相同（注意 `__FILE__` 泄漏，见 §8）；x86_64 + aarch64 UEFI 构建通过（`make PROFILE=aarch64-clang` 产出 BOOTAA64.EFI 及 x86_64 BOOTX64.EFI） |
+| P4 | 头文件按子系统拆分（~90 头 + 46 arch 头移动 + ~411 `kernel/` + 201 `kernel/arch/` `#include` 更新 + 测试侧头路径（§6：qemutests 内嵌 C / arch_runner / hosttests 影子+case+mock）+ UEFI 链 `boot/uefi/*` 与 `uefi.mk` bootinfo/handoff 路径） | `kernel.bin` 字节相同（注意 `__FILE__` 泄漏，见 §8）；x86_64 + aarch64 UEFI 构建通过（`make PROFILE=aarch64-clang` 产出 BOOTAA64.EFI 及 x86_64 BOOTX64.EFI）；`make test` + `python3 qemutests/aarch64_{smp,dtb,ram,psci}_test.py` + `pmm_arch_test.py` 通过 |
 | P5 | 单文件目录/device 归并、pty 移位、`hosttests` 镜像树审计删冗余 | 编译 + 测试回归 |
 | P6 | `AGENTS.md` + 活文档路径全局更新 | grep 无残留旧路径 |
 
@@ -196,7 +200,7 @@ runtime/selftest/     # ← 原 runtime/tests/
 
 ## 8. 风险与豁免
 
-1. **`__FILE__` 泄漏**：若 `log_err`/`assert`/`color_printk` 把 `__FILE__` 编译进字符串，纯 rename 后 `kernel.bin` 也会变。处理：优先用 `-ffile-prefix-map=<旧前缀>=<新前缀>`（如 `-ffile-prefix-map=$PWD=$(ROOT)`）归一，或接受「重新拍摄基线」再走字节相同验证。
+1. **`__FILE__` 泄漏**：若 `log_err`/`assert`/`color_printk` 把 `__FILE__` 编译进字符串，纯 rename 后 `kernel.bin` 也会变。处理：优先用 `-ffile-prefix-map=<旧前缀>=<新前缀>`（如 `-ffile-prefix-map=$(CURDIR)=.`；避免 `$PWD`/`$(ROOT)` 被 GNU make 误展开）归一，或接受「重新拍摄基线」再走字节相同验证。
 2. **`#include` 顺序敏感**：`kernel/include` 内的头相互 include（如 `tty.h`→`canon.h`），拆分后需逐文件核对 include 归属，避免漏改导致「旧路径仍可编译」但「文档指向失效」。
 3. **孤行子目录构建产物**：`build/` 下旧路径的 `.o` 在 rename 后残留，需 `make clean`（或依赖 `.d` 自动失效）。
 4. **豁免**：`docs/superpowers/specs/`、`plans/` 历史归档不溯及改；`libc/` 布局（musl 风格）不属本次范围。
@@ -204,7 +208,7 @@ runtime/selftest/     # ← 原 runtime/tests/
 ## 9. 成功标准
 
 - `grep -rn 'kernel/kernel' kernel/ mk/ Makefile .gitignore AGENTS.md docs/`（活文档）无残留。
-- `#include <kernel/...>`（含 `<kernel/arch/...>`）在 `kernel/` 无残留；arch 头改 `<arch/...>`，其余改 `<subsys/...>`。
+- `#include <kernel/...>`（含 `<kernel/arch/...>`）在 `kernel/ boot/ hosttests/ qemutests/` 无残留；arch 头改 `<arch/...>`，其余改 `<subsys/...>`。
 - `grep -rn 'kernel/include/kernel/' kernel/ mk/ boot/ Makefile` 无残留（含 `uefi.mk` + `boot/uefi/*` 的 bootinfo/handoff）。
 - 测试脚本内部无残留旧路径：`rg 'tests/runtime_audit\.py|tests/kernel_canary_contract|test/build|\btests/|\btest/' qemutests/ mk/` 零命中（build 产物路径除外）。
 - `find . -name test -o -name tests` 仅剩语义明确的新名；四个测试入口名互不混淆。
