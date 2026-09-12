@@ -43,7 +43,7 @@ ifeq ($(ARCH),aarch64)
 KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c
 else
 KERNEL_C_SOURCES := \
-    $(wildcard kernel/*.c) \
+    $(wildcard core/*.c) \
     $(wildcard net/*.c) \
     $(wildcard memory/*.c) \
     $(wildcard fs/*.c) \
@@ -55,7 +55,7 @@ KERNEL_C_SOURCES := \
     $(wildcard block/*.c) \
     $(wildcard time/*.c) \
     $(wildcard percpu/*.c) \
-    $(wildcard test/*.c) \
+    $(wildcard selftest/*.c) \
     $(wildcard subsys/*.c)
 
 # Platform devices are selected by arch/<arch>/make.config.  Keep x86-only
@@ -72,7 +72,7 @@ ARCH_ASM_SOURCES := $(filter-out $(ARCHDIR)/trampoline.S, $(ARCH_ASM_SOURCES))
 
 ALL_C_SOURCES   := $(KERNEL_C_SOURCES) $(ARCH_C_SOURCES)
 # kallsyms is a two-pass build artifact, not a regular source
-ALL_C_SOURCES   := $(filter-out kernel/kallsyms.c, $(ALL_C_SOURCES))
+ALL_C_SOURCES   := $(filter-out core/kallsyms.c, $(ALL_C_SOURCES))
 ALL_S_SOURCES   := $(ARCH_ASM_SOURCES)
 
 # ── Object files (under BUILD_DIR) ─────────────────────────
@@ -95,6 +95,10 @@ ifeq ($(ARCH),x86_64)
 # generation lease. Guarded by ARCH so aarch64 profile mode never gets an
 # empty -isystem.
 ALL_CFLAGS += -isystem $(SYSROOT_GENERATION_DIR)/usr/include
+# Map the absolute build prefix in __FILE__ etc. to a relative path so that
+# source-directory renames (e.g. kernel/kernel/ → kernel/core/) do not change
+# the compiled image byte-for-byte.
+ALL_CFLAGS += -ffile-prefix-map=$(CURDIR)=.
 endif
 ALL_ASMFLAGS := $(ASFLAGS) $(ARCH_ASMFLAGS)
 ifeq ($(ARCH),x86_64)
@@ -226,9 +230,16 @@ $(BUILD_DIR)/lwip/%.o: $(LWIP_SRC_DIR)/%.c
 # ── Special objects ────────────────────────────────────────
 # PSF font → .o
 ifeq ($(ARCH),x86_64)
-$(BUILD_DIR)/kernel/font.o: kernel/font.psf
-	@mkdir -p $(dir $@)
-	$(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary -o $@ $<
+# `ld -r -b binary` derives the embedded symbols (_binary_kernel_font_psf_*)
+# from the *path string* of the input file. The font source now lives at
+# core/font.psf, but code (printk.c) still references the kernel/font.o-era
+# symbol names — and keeping them identical keeps kernel.bin byte-identical.
+# Link from a copy placed under generated/kernel/ so lld emits exactly those
+# symbol names (same trick as trampoline_bin.o below).
+$(BUILD_DIR)/kernel/font.o: core/font.psf
+	@mkdir -p $(dir $@) $(KERNEL_BUILD_DIR)/generated/kernel
+	cp $< $(KERNEL_BUILD_DIR)/generated/kernel/font.psf
+	cd $(KERNEL_BUILD_DIR)/generated && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary kernel/font.psf -o $@
 
 # Trampoline: assemble → link at 0x8000 → binary → embed
 $(BUILD_DIR)/$(ARCHDIR)/trampoline.o: $(ARCHDIR)/trampoline.S
@@ -308,14 +319,14 @@ $(BUILD_DIR)/kernel.elf.stage1: $(KERNEL_OBJECTS) $(ARCHDIR)/$(ARCH_LINKER) $(KE
 	success=1
 
 # Generate kallsyms object from stage1's nm output
-$(BUILD_DIR)/kernel/kallsyms.o: kernel/kallsyms.c $(BUILD_DIR)/kernel.elf.stage1
+$(BUILD_DIR)/kernel/kallsyms.o: core/kallsyms.c $(BUILD_DIR)/kernel.elf.stage1
 	@mkdir -p $(dir $@)
 # kallsyms.c is a host build tool, so it must not pick up the OS01
 # sysroot flags from the root Makefile.  Its generated kallsyms.S,
 # however, is linked into the kernel and must be assembled with the
 # selected target compiler.  Strip exported CFLAGS/LDFLAGS in both
 # cases, while retaining the target triple for kallsyms.o.
-	env -u CFLAGS -u LDFLAGS $(HOST_CC) -o $(BUILD_DIR)/kernel/kallsyms kernel/kallsyms.c
+	env -u CFLAGS -u LDFLAGS $(HOST_CC) -o $(BUILD_DIR)/kernel/kallsyms core/kallsyms.c
 	$(HOST_NM) -n $(BUILD_DIR)/kernel.elf.stage1 | $(BUILD_DIR)/kernel/kallsyms > $(BUILD_DIR)/kernel/kallsyms.S
 	env -u CFLAGS -u LDFLAGS $(EFFECTIVE_CC) -c -o $@ $(BUILD_DIR)/kernel/kallsyms.S
 # NB: kernel.elf.stage1 is deliberately KEPT — it is the incremental trigger

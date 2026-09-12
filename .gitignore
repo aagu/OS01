@@ -17,7 +17,7 @@ toolchain/*
 qemu-8.2.1/*
 boot/uefi/OVMF.fd
 !toolchain/setup.sh
-kernel/kernel/kallsyms
+kernel/core/kallsyms
 kernel/.stage1
 kernel/.stage2
 build/
