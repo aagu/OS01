@@ -1,5 +1,6 @@
 #include <fs/vfs.h>
 #include <kernel/debug.h>
+#include <kernel/printk.h>
 #include <kernel/slab.h>
 #include <kernel/rwlock.h>
 #include <kernel/task.h>      // current->files->cwd for resolve_at
@@ -171,6 +172,19 @@ static int normalize_vfs_path(const char *in, char *out)
 }
 
 // ── Find mount point by prefix match ──────────────────────
+//
+// Walks the mount list and returns the deepest mount whose path is a
+// prefix of `path`.  Used by vfs_lookup_at to choose the root node
+// before walking a path component-by-component.
+//
+// Defensive guard: a known fork/exec-loop corruption (see
+// docs/superpowers/handoff/find-mount-pf-fork-exec-handoff.md) can
+// leave an entry in the mount list pointing into the user address
+// range.  Without the check, the next iteration dereferences
+// mp->path at mp+8 and faults at the next unmapped page.  We
+// refuse to dereference such an entry, dump the chain, and break
+// out — the caller treats the result as "no matching mount" and
+// returns -ENOENT instead of crashing the kernel.
 static vfs_mount_t *find_mount(const char *path)
 {
     // Find the deepest matching mount point
@@ -178,7 +192,24 @@ static vfs_mount_t *find_mount(const char *path)
     size_t best_len = 0;
 
     rwlock_read_lock(&mount_lock);
+    int _iter = 0;
     for (vfs_mount_t *mp = mount_list; mp; mp = mp->next) {
+        // Diagnostic: detect mount-list corruption (find_mount PF in
+        // fork/exec loop — kernel-heap / PMM bug).  A legitimate mount
+        // entry pointer is a kernel-high-half address (above PAGE_OFFSET);
+        // anything below is user space or zero-page garbage.
+        if ((unsigned long)mp < 0xffff800000000000UL) {
+            serial_printk("VFS: find_mount: CORRUPT mp=%p path=%p "
+                          "iter=%d\n",
+                          (void *)mp, (const void *)path, _iter);
+            // Dump the rest of the chain so we can see how we got here.
+            for (vfs_mount_t *q = mount_list; q && q != mp; q = q->next) {
+                serial_printk("  [chain] mp=%p path=%p next=%p\n",
+                              (void *)q, (void *)q->path, (void *)q->next);
+            }
+            break;
+        }
+        _iter++;
         size_t len = strlen(mp->path);
         if (strncmp(path, mp->path, len) == 0) {
             // Root mount ("/") matches any path.
