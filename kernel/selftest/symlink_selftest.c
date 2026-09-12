@@ -1,4 +1,4 @@
-// kernel/test/symlink_selftest.c — kernel selftests for symlink support.
+// kernel/selftest/symlink_selftest.c — kernel selftests for symlink support.
 //
 // Covers the resolver and ext2 rollback paths that userspace cannot reach:
 //

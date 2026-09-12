@@ -35,10 +35,10 @@ legacy-components)
     ;;
 legacy)
     # Same scan + parse-time invocations as legacy-components, extended
-    # to include the test/ host-test machinery (Task 4).
-    ! rg -n 'toolchain\.mk|build/\$\(ARCH\)|Legacy standalone|ifndef OS01_PROFILE_FILE|test/build|build/test_poll_requested\.elf' \
-      kernel libc user boot/uefi test
-    for d in kernel libc user boot/uefi test; do
+    # to include the hosttests/ host-test machinery (Task 4).
+    ! rg -n 'toolchain\.mk|build/\$\(ARCH\)|Legacy standalone|ifndef OS01_PROFILE_FILE|hosttests/build|build/test_poll_requested\.elf' \
+      kernel libc user boot/uefi hosttests
+    for d in kernel libc user boot/uefi hosttests; do
         log=$(mktemp)
         if make -C "$d" -n >"$log" 2>&1; then
             cat "$log"; rm -f "$log"; exit 1
@@ -216,9 +216,9 @@ EOF
         ;;
     host-test)
         # The focused poll-test binary lives under the profile's
-        # host-test dir, not under test/build or root-level build/.
+        # host-test dir, not under hosttests/build or root-level build/.
         test -f "$base/host-test/test_poll_requested.elf"
-        test ! -e test/build
+        test ! -e hosttests/build
         test ! -e build/test_poll_requested.elf
         # The hard `test -f` above already failed if the binary is absent.
         "$base/host-test/test_poll_requested.elf"

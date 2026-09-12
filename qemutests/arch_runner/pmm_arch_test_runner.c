@@ -1,4 +1,4 @@
-/* tests/pmm_arch_test_runner.c — host-side test for pmm_arch. */
+/* qemutests/arch_runner/pmm_arch_test_runner.c — host-side test for pmm_arch. */
 
 #include <stddef.h>
 #include <stdio.h>
@@ -46,7 +46,7 @@ int main(void)
     /* Minimal E820 fixture exercising the host smoke test. The
      * on-target multi-fragment verification happens via
      * `make test-aarch64-uefi-smp` (see pmm_arch implementation
-     * plan: tests/aarch64_uefi_smp.py). The host runner only
+     * plan: qemutests/aarch64_uefi_smp.py). The host runner only
      * verifies: (a) `n >= 1` (at least one RAM range survives),
      * (b) `phys_end > phys_start`, (c) granule alignment,
      * (d) type == MEMORY_TYPE_RAM. */

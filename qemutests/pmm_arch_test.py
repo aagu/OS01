@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Host test driver for the arch-neutral PMM adapter layer.
 
-Profile-aware Python driver that mirrors ``tests/aarch64_ram_test.py``.
+Profile-aware Python driver that mirrors ``qemutests/aarch64_ram_test.py``.
 Compiles the production ``kernel/memory/pmm_arch.c`` together with the
 per-arch strong override (when the profile picks an arch with a real
-override) plus ``tests/pmm_arch_test_runner.c`` and runs the result.
+override) plus ``qemutests/arch_runner/pmm_arch_test_runner.c`` and runs
+the result.
 
 This driver is intentionally a *compile-and-link smoke test*. It verifies
 that all TUs compile, all TUs link, and the runner exits 0 with the
 basic invariants of the produced MEMORY_RANGE[]. The on-target
 multi-fragment verification happens via the QEMU harness
-(``make test-aarch64-uefi-smp`` / ``tests/aarch64_uefi_smp.py``),
+(``make test-aarch64-uefi-smp`` / ``qemutests/aarch64_uefi_smp.py``),
 which uses real linker symbols and a real E820 fixture.
 
 For x86_64, the host cannot link the real trampoline blob or the
@@ -45,7 +46,7 @@ per-arch aarch64 files (``ram.c`` + ``ram_core.c`` + the per-arch
 contract and is intentionally skipped: the strong override reads the
 already-published ``aarch64_ram_map``, which would require a
 synthetic init sequence that adds no coverage beyond what the QEMU
-harness in ``tests/aarch64_uefi_smp.py`` provides.
+harness in ``qemutests/aarch64_uefi_smp.py`` provides.
 
 Profile is selected via the ``PROFILE`` env var (default
 ``x86_64-clang``). The aarch64 host path requires the host ``cc`` to
@@ -168,7 +169,7 @@ def _build_aarch64(tmp, cc, runner_c):
 def main():
     profile = os.environ.get("PROFILE", "x86_64-clang")
     cc = os.environ.get("CC", "cc")
-    runner_c = ROOT / "tests" / "pmm_arch_test_runner.c"
+    runner_c = ROOT / "qemutests" / "arch_runner" / "pmm_arch_test_runner.c"
     if not runner_c.exists():
         raise SystemExit(f"pmm_arch_test: missing runner {runner_c}")
 

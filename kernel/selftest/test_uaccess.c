@@ -1,4 +1,4 @@
-// kernel/test/test_uaccess.c — kernel selftest for the uaccess primitives
+// kernel/selftest/test_uaccess.c — kernel selftest for the uaccess primitives
 // (Tasks 1-2).  This is the make-or-break gate BEFORE any syscall-site
 // wiring: it must deterministically prove (a) the cross-level walker,
 // (b) the _ft longjmp fault-recovery path, (c) cross-page correctness

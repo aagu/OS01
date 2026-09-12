@@ -28,7 +28,7 @@ UEFI_BUILD_DIR := $(BUILD_DIR)/uefi
 UEFI_RUNTIME_DIR := $(BUILD_DIR)/uefi-runtime
 UEFI_EFI   ?= $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI
 # Host unit tests are an OS01 build: every test object/binary lives under
-# the profile's host-test dir (test/Makefile includes this profile).
+# the profile's host-test dir (hosttests/Makefile includes this profile).
 HOST_TEST_BUILD_DIR := $(BUILD_DIR)/host-test
 
 # Staging roots: component installs write ONLY their private staging tree

@@ -1,4 +1,4 @@
-// kernel/test/test_fd_refcount.c
+// kernel/selftest/test_fd_refcount.c
 // ── fd reference-protocol SMP race tests ──────────────────
 // Two scenarios, run from task_init() AFTER scheduler_ok=1
 // (kernel_thread + schedule() work).  files_unpin is now a

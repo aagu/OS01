@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Adversarial CLI tests for tests/runtime_audit.py."""
+"""Adversarial CLI tests for qemutests/runtime_audit.py."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-AUDIT = ROOT / "tests/runtime_audit.py"
+AUDIT = ROOT / "qemutests/runtime_audit.py"
 
 
 def make_tool(path: Path, output: str) -> None:

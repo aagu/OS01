@@ -6,7 +6,7 @@
 //
 // v4 fixes: no ASSERT (panics via hlt loop), no debug_test (doesn't exist),
 // no enum task_state (state is volatile int64_t), returns void,
-// serial_printk for diagnostics. Follows kernel/test/test_kthread_self_reap.c
+// serial_printk for diagnostics. Follows kernel/selftest/test_kthread_self_reap.c
 // pattern EXACTLY: non-static void entry + explicit call from task_init()
 // (NOT the SELFTEST() macro — its .selftest_table section is never consumed
 // by selftest_run_all(), which only runs explicitly-registered tests).

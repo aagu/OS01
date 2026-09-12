@@ -28,7 +28,7 @@ def main() -> None:
     result = run_make(
         "-s",
         "-f",
-        "tests/kernel_canary_contract.mk",
+        "qemutests/kernel_canary_contract.mk",
         "KERNEL_CANARY_SELFTEST=1",
         "LLVM_OBJDUMP=/bin/true",
         "canary-contract-probe",

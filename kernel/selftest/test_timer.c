@@ -1,4 +1,4 @@
-// kernel/test/test_timer.c
+// kernel/selftest/test_timer.c
 // ── timer subsystem selftests ─────────────────────────────
 // 本任务只放最小 arch_cycle_freq 验证（RTC PIE 回落是否解出非零 TSC 频率）；
 // Task 5 扩展 jiffies/clockevent 相关测试。

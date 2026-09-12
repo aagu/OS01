@@ -1,5 +1,5 @@
 # ── Profile-only contract ───────────────────────────────────
-# The root Makefile is the only supported entry; test/Makefile
+# The root Makefile is the only supported entry; hosttests/Makefile
 # requires OS01_PROFILE_FILE at parse time (root `test` invokes it
 # via os01_submake). Host tests are an OS01 build: every object and
 # binary is written ONLY under the selected profile's host-test dir
@@ -15,7 +15,7 @@ endif
 include $(OS01_PROFILE_FILE)
 
 TESTS_DIR := $(realpath ..)
-TEST_SRC  := $(TESTS_DIR)/test
+TEST_SRC  := $(TESTS_DIR)/hosttests
 TEST_BLD := $(HOST_TEST_BUILD_DIR)
 TEST_MOCK := $(TEST_SRC)/mock
 TEST_INC  := $(TEST_SRC)/include
@@ -113,17 +113,17 @@ run: $(TEST_BINS)
 	exit $$failed
 
 # Runtime fixtures.
-$(TEST_BLD)/runtime_udivti3_link_probe.o: $(TEST_SRC)/../runtime/tests/udivti3_link_probe.c
+$(TEST_BLD)/runtime_udivti3_link_probe.o: $(TEST_SRC)/../runtime/selftest/udivti3_link_probe.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) -ffreestanding -fno-builtin -c $< -o $@
 
 runtime-udivti3-link-probe: $(TEST_BLD)/runtime_udivti3_link_probe.o
 	$(HOST_CC) -nostdlib -Wl,-e,_start -o $(TEST_BLD)/runtime_udivti3-link-probe.elf $<
 
-$(TEST_BLD)/test_runtime_udivti3.o: $(TEST_SRC)/../runtime/tests/test_udivti3.c \
-		$(TEST_SRC)/../runtime/tests/udivti3_vectors.h
+$(TEST_BLD)/test_runtime_udivti3.o: $(TEST_SRC)/../runtime/selftest/test_udivti3.c \
+		$(TEST_SRC)/../runtime/selftest/udivti3_vectors.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) -I$(TESTS_DIR)/runtime/include -I$(TESTS_DIR)/runtime/tests -c $< -o $@
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TESTS_DIR)/runtime/include -I$(TESTS_DIR)/runtime/selftest -c $< -o $@
 
 $(TEST_BLD)/runtime_udivti3_host.o: $(TESTS_DIR)/runtime/builtins/udivti3.c
 	@mkdir -p $(TEST_BLD)
