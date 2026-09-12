@@ -43,6 +43,7 @@ endif
 LLVM_AR      ?= $(shell $(CLANG) -print-prog-name=llvm-ar 2>/dev/null)
 LLVM_NM      ?= $(shell $(CLANG) -print-prog-name=llvm-nm 2>/dev/null)
 LLVM_OBJCOPY ?= $(shell $(CLANG) -print-prog-name=llvm-objcopy 2>/dev/null)
+LLVM_OBJDUMP ?= $(shell $(CLANG) -print-prog-name=llvm-objdump 2>/dev/null)
 LLVM_READOBJ ?= $(shell $(CLANG) -print-prog-name=llvm-readobj 2>/dev/null)
 LLVM_READELF ?= $(shell $(CLANG) -print-prog-name=llvm-readelf 2>/dev/null)
 TARGET_LD    ?= $(shell $(CLANG) -print-prog-name=ld.lld 2>/dev/null)
@@ -52,7 +53,7 @@ ifneq ($(shell command -v "$(strip $($(1)))" >/dev/null 2>&1 && printf y),y)
 $$(error $(1)='$$($(1))' is not executable or on PATH; override $(1)=/absolute/path)
 endif
 endef
-$(foreach p,LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_READOBJ LLVM_READELF TARGET_LD,$(eval $(call require_program,$(p))))
+$(foreach p,LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_OBJDUMP LLVM_READOBJ LLVM_READELF TARGET_LD,$(eval $(call require_program,$(p))))
 
 # ── Consumer aliases ─────────────────────────────────────────
 # Immediate := assignments: immune to make's built-in default CC=cc quirk,

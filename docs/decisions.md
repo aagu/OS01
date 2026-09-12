@@ -39,7 +39,7 @@
 |----|------|------|------|
 | 6 | 测试 | Tilck 3 层 (unit+self+sys) | 126/126 systest pass |
 | 7 | 用户态 | busybox → 动态链接 → Alpine apk | cavOS 已验证可行 |
-| 10 | 内核栈 canary | 全局 `__stack_chk_guard` (`arch_cycle_counter()` 种子) | clang 生成 RIP-relative全局引用，无需 TLS/FS |
+| 10 | 内核栈 canary | x86_64 固定高半内核采用全局 per-boot `__stack_chk_guard`，以 `-fno-pic -mcmodel=large -fstack-protector-strong` 生成直接 `R_X86_64_64` 引用 | 链接地址 `0xffff800000100000` 超出 kernel 代码模型的有符号 2 GiB 范围；large 模型避免 32 位重定位截断，同时禁止 PIE/GOT，避免历史误触发 |
 | 12 | 子系统注册模式 | 运行时 `register_subsys()` | 不引入 ELF section 依赖 |
 | 13 | 多架构 dispatch | `arch/*.h` 用 `#ifdef __x86_64__` / `#elif __aarch64__` | ISP 在 include 层解决 |
 | 14 | VT100 CSI 终端模拟器 | `console_putchar()` state machine (~330 行) | framebuffer 与终端分离 |

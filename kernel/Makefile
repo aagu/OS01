@@ -116,6 +116,20 @@ ALL_CFLAGS += -DDEBUG=1
 ALL_CFLAGS += -O0     # Debug: easy GDB single-stepping
 endif
 
+ifneq ($(filter 1,$(KERNEL_CANARY_SELFTEST)),)
+ALL_CFLAGS += -DOS01_CANARY_SELFTEST
+endif
+
+# Test-only introspection point used by tests/kernel_canary_contract_test.py
+# to prove the root's sanitized sub-make preserves the canary variant.
+.PHONY: print-canary-contract
+print-canary-contract:
+	@printf '%s\n' \
+	  'KERNEL_CANARY_SELFTEST=$(KERNEL_CANARY_SELFTEST)' \
+	  'LLVM_OBJDUMP=$(LLVM_OBJDUMP)' \
+	  'KERNEL_BUILD_DIR=$(KERNEL_BUILD_DIR)' \
+	  '$(if $(findstring -DOS01_CANARY_SELFTEST,$(ALL_CFLAGS)),OS01_CANARY_SELFTEST=1,OS01_CANARY_SELFTEST=0)'
+
 # ── lwIP networking stack ────────────────────────────────────
 LWIP_SRC_DIR  := ../thirdpart/lwip/src
 LWIP_CORE     := $(wildcard $(LWIP_SRC_DIR)/core/*.c)

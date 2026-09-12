@@ -15,9 +15,8 @@ sources with `-fpie` and without `-fstack-protector-strong`.
 With the existing target flags, `-fpie` produces
 `R_X86_64_REX_GOTPCRELX __stack_chk_guard` relocations.  Canary checks then
 load the guard address through the GOT.  This was disabled after large
-functions produced false stack-smashing failures.  A controlled compile of
-`kernel/sched/task.c` with `-fno-pic -fstack-protector-strong` produces direct
-`R_X86_64_PC32 __stack_chk_guard` relocations instead.
+functions produced false stack-smashing failures.  A controlled compile with
+non-PIC code produces a direct canary reference instead.
 
 The kernel already has a fixed higher-half link address and static image
 contract.  Kernel ASLR is not a current feature; the roadmap's ASLR work is
@@ -25,9 +24,11 @@ for user mappings and ET_DYN executables.
 
 ## Design
 
-For `ARCH=x86_64`, replace `-fpie` with `-fno-pic` and append
-`-fstack-protector-strong` to `ARCH_CFLAGS`.  Keep `-mcmodel=kernel`, which
-continues to describe the negative 2 GiB high-half kernel address range.
+For `ARCH=x86_64`, replace `-fpie` with `-fno-pic`, select
+`-mcmodel=large`, and append `-fstack-protector-strong` to `ARCH_CFLAGS`.
+The actual link address (`0xffff800000100000`) is outside
+`-mcmodel=kernel`'s signed 2 GiB range; the large model emits direct 64-bit
+addresses instead of invalid 32-bit absolute relocations.
 
 Retain the existing global guard and the `no_stack_protector` attributes on
 `kernel_main` and `__stack_chk_fail`.  They are required respectively to seed
@@ -43,9 +44,10 @@ object (`sched/task.o`) and the final `kernel.elf`.
 It must fail when:
 
 1. a `__stack_chk_guard` relocation in the selected object is GOT-based;
-2. no direct `R_X86_64_PC32 __stack_chk_guard` relocation is present; or
-3. the final image contains no call/reference to `__stack_chk_fail` outside
-   the handler's own symbol body.
+2. no direct `R_X86_64_PC32` or `R_X86_64_64` `__stack_chk_guard` relocation
+   is present; or
+3. the selected object has no direct `__stack_chk_fail` relocation, or the
+   final image lacks the global failure-handler symbol.
 
 The audit gives a deterministic regression signal for the exact compile/link
 property that caused SSP to be disabled.  It supplements, rather than
