@@ -181,7 +181,7 @@ add_timer(t);                                  // 到期自动删除（一次性
 | `kernel/time/tick.c` + `kernel/include/time/clockevent.h` | tick 语义层（jiffies/poll 扫描/源选择） |
 | `kernel/intr/apic/lapic_timer.c` | LAPIC tick 源（校准 + 周期模式 + per-LAPIC DIV） |
 | `kernel/driver/pit.c` | PIT（boot 窗口 + fallback） |
-| `kernel/time/timer.c` + `include/device/timer.h` | 软件定时器轮（timer wheel） |
+| `kernel/time/timer.c` + `kernel/include/time/timer.h` | 软件定时器轮（timer wheel） |
 | `kernel/arch/x86_64/`（arch hook） | TSC/RTC 校准、LAPIC 启动 |
 
 ## 精度说明

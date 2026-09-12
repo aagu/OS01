@@ -308,8 +308,8 @@ typedef struct hw_int_type {
 
 ### 设备相关头文件
 
-* `kernel/include/device/pic.h` - PIC/IOAPIC 控制器头文件
-* `kernel/include/device/timer.h` - 定时器设备头文件
+* `kernel/include/intr/pic.h` - PIC/IOAPIC 控制器头文件
+* `kernel/include/time/timer.h` - 定时器设备头文件
 * `kernel/include/block/blockdev.h` - 块设备层头文件
 
 ## 扩展驱动程序
@@ -332,7 +332,7 @@ typedef struct hw_int_type {
 ```c
 // example_driver.c
 #include <driver/example_driver.h>
-#include <device/pic.h>
+#include <intr/pic.h>
 #include <intr/interrupt.h>
 #include <arch/x86_64/hw.h>
 

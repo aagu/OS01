@@ -256,7 +256,7 @@ KERNEL_SELFTEST_SMP ?= 4
 .PHONY: test
 test:
 	$(call require_capability,rootfs)
-@$(call os01_submake,hosttests,run $(OS01_SUBMAKE_ARGS))
+	@$(call os01_submake,hosttests,run $(OS01_SUBMAKE_ARGS))
 	python3 qemutests/pmm_boot_reservation_test.py
 
 .PHONY: test-pmm-boot-reservation
