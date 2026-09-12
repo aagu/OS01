@@ -127,7 +127,7 @@ IMG=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^image=//p')
 | `kernel/subsys/subsys.c` | Subsystem registration framework |
 | `kernel/sync/futex.c` | Futex hash table (SYS_futex=47) |
 | `kernel/include/core/bootinfo.h` | **`boot_context` v2 ABI** (shared by both UEFI loaders); fixed-size types critical |
-| `kernel/include/uapi/syscall.h` | Syscall numbers (0..70) |
+| `kernel/include/uapi/syscall.h` | Syscall numbers (0..74) |
 | `user/init.c` | PID 1 init: inittab parsing, 4-phase boot (SYSINIT/WAIT/ONCE/RESPAWN), child supervision |
 | `config/inittab` | Default inittab template (id:action:process); `config/inittab.systest` for test mode |
 

@@ -22,7 +22,7 @@
 * `intr/` — 中断处理相关（irq.c, softirq.c, dispatch.c）
 * `sync/` — 同步原语（mutex.c, completion.c, futex.c, wait.c）
 * `arch/x86_64/` — 处理器体系架构相关（head.S, trap.c, entry.S, smp.c, subsys.c, subsys_percpu.c）
-* `driver/` — 硬件驱动（keyboard, serial, pit, rtc, ahci, pci）
+* `driver/` — 硬件驱动（keyboard, serial, pit, rtc, ahci, pci, fb, e1000, virtio-net）
 * `include/` — 头文件，会和 lib 一起安装到 sysroot 中
 * `memory/` — 内存管理相关（pmm.c, vmm.c, slab.c, vma.c, tlb.c, dump.c）
 * `time/` — 时间子系统（clocksource.c, tick.c, timer.c：时钟源/节拍/软件定时器）
@@ -32,7 +32,9 @@
 * `fs/` — 文件系统（vfs.c, fat.c, ext2.c, devfs.c, procfs.c, tmpfs.c, elf.c, file.c, gpt.c, poll.c, select.c）
 * `sched/` — 调度器 (task.c, deferred_free.c)
 * `subsys/` — 子系统注册框架（subsys.c）
-* `tty/` — 终端/TTY 子系统（tty.c）
+* `tty/` — 终端/TTY 子系统（tty.c, console.c, canon.c 行规程, pty.c PTY 主/从）
+* `net/` — 网络子系统（net.c, socket.c, sys_arch.c — lwIP 适配）
+* `log/`、`random/` — 独立子系统（log.c；random.c CS.PRNG）
 * `percpu/` — 每 CPU 数据结构（percpu.c）
 * `selftest/` — 内核内自测试（KERNEL_SELFTEST=1：selftest.c, test_mutex.c …）
 
@@ -124,15 +126,15 @@
 * `console.c` — VT100 CSI 终端模拟器（console_putchar, console_init, console_blink_tick）
 
 ### include 目录
-包含系统头文件，按功能分类组织：
+包含系统头文件，P4 头文件拆分后**按子系统分类**，与 `kernel/<subsys>/` 源目录一一对称（统一在 `kernel/include/` 单一根解析，`#include <subsys/foo.h>`）：
 
-* `device/` - 设备相关头文件（pic.h, timer.h）
-* `driver/` - 驱动相关头文件（keyboard.h, serial.h, pit.h, rtc.h, ahci.h, pci.h）
-* `kernel/` - 内核核心头文件（main.h, task.h, sched.h, debug.h, log.h, softirq.h, interrupt.h, subsys.h, tty.h, console.h, apic.h, percpu.h, printk.h）
-* `block/` - 块设备头文件（blockdev.h）
-* `kernel/arch/x86_64/` - x86_64 架构特定头文件（cpu.h, gate.h, hw.h, spinlock.h）
-* `list.h` - 通用链表实现
-* `stdatomic.h` - 原子操作宏
+* `core/` - 内核核心（bootinfo.h, panic.h, printk.h, debug.h, trace.h, smp.h, selftest.h, assert.h）
+* `arch/` - arch-neutral facade（regs.h 等）+ `arch/x86_64/`、`arch/aarch64/` 架构特定头文件（cpu.h, gate.h, spinlock.h, bootinfo_x86.h, rtc.h …）
+* `driver/` - 驱动头文件（keyboard.h, serial.h, pit.h, rtc.h, ahci.h, pci.h, fb.h, e1000.h, virtio-net.h, font.h, logo.h）
+* `intr/` - 中断相关（interrupt.h, apic.h, ipi.h, pic.h, softirq.h）
+* `memory/`、`sched/`、`fs/`、`net/`、`tty/`、`sync/`、`time/`、`block/`、`log/`、`random/`、`percpu/`、`subsys/` - 各子系统公开头
+* `uapi/` - 用户态 ABI（syscall.h 等跨边界结构，变动需评估 ABI）
+* `kernel.h`、`errno.h` - 顶层公共头
 
 ### sysroot 目录
 系统根目录，用于安装编译好的头文件和库文件（libk.a, libc.a），模拟完整的系统环境。
@@ -150,10 +152,13 @@
 * `poweroff.c` - 关机程序（发送信号至 PID 1）
 * `halt.c` - 停机程序
 * `reboot.c` - 重启程序
-* `systest.c` - 系统调用测试（126/126）
+* `systest.c` - 系统调用 E2E 测试
 * `test_mmap.c`, `test_fork_mmap.c`, `test_cow.c` - 内存映射测试
 * `smp_stress.c` - SMP 多核负载均衡压力测试
-* `terminal.c` - 交互终端（PTY + framebuffer + busybox ash）
+* `terminal.c` + `terminal_core.c/h` - 交互终端（PTY + framebuffer + busybox ash）
+* `sh.c` - 简单 shell；`tetris.c` + `tetris_logic.c/h` - 俄罗斯方块（自托管演示）
+* 网络测试：`nettest.c`、`socktest.c`、`udptest.c`、`ipaddr.c`（lwIP E2E）
+* `crt0.S`、`linker.ld`、`sigreturn_trampoline.S` - 用户态启动/链接/信号 trampoline
 
 ### tools 目录
 * `mkdisk.c` - GPT 双分区磁盘镜像创建工具（FAT32 ESP + ext2 rootfs）
