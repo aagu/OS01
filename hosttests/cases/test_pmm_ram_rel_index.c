@@ -21,7 +21,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
-#include <kernel/pmm.h>
+#include <memory/pmm.h>
 
 extern struct Physical_Memory_Manager PMMngr;
 extern uint32_t ZONE_DMA_INDEX;

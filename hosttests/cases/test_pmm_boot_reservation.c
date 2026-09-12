@@ -4,9 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <kernel/pmm.h>
-#include <kernel/memory.h>
-#include <kernel/slab.h>
+#include <memory/pmm.h>
+#include <memory/memory.h>
+#include <memory/slab.h>
 
 uintptr_t test_direct_map_offset;
 static uint64_t ram_base;

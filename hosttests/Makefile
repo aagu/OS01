@@ -304,8 +304,8 @@ $(TEST_BLD)/test_pmm_basic.elf: $(TEST_BLD)/test_pmm_basic.o $(LIBC_OBJS) $(MOCK
 PMM_SHADOW_INC := -I$(TEST_MOCK)/pmm_include
 
 $(TEST_BLD)/pmm_production.o: $(TESTS_DIR)/kernel/memory/pmm.c \
-		$(TEST_MOCK)/pmm_include/kernel/arch/spinlock.h \
-		$(TEST_MOCK)/pmm_include/kernel/arch/cpu.h
+		$(TEST_MOCK)/pmm_include/arch/spinlock.h \
+		$(TEST_MOCK)/pmm_include/arch/cpu.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) -c $< -o $@
 
@@ -317,7 +317,7 @@ $(TEST_BLD)/pmm_arch_default.o: $(TESTS_DIR)/kernel/memory/pmm_arch.c
 	$(HOST_CC) $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) -c $< -o $@
 
 $(TEST_BLD)/test_pmm_ram_rel_index.o: $(TEST_CASES)/test_pmm_ram_rel_index.c \
-		$(TESTS_DIR)/kernel/include/kernel/pmm.h
+		$(TESTS_DIR)/kernel/include/memory/pmm.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -I$(TEST_INC) -c $< -o $@
 
