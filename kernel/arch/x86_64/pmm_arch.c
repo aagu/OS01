@@ -118,7 +118,11 @@ size_t pmm_arch_normalize(const struct boot_context *ctx,
                 frags[j].e = next[j].e;
             }
         }
-        /* Emit surviving fragments rounded to MEMORY_RANGE_GRANULE. */
+        /* Emit surviving fragments rounded to MEMORY_RANGE_GRANULE.
+         * Preserve the E820-derived type so pmm_init's Step 2 (which
+         * only walks MEMORY_TYPE_RAM ranges) and any future non-RAM
+         * consumer (ACPI reclaim, NVS) see the right surface; do NOT
+         * force everything to MEMORY_TYPE_RAM. */
         for (size_t j = 0; j < fcount; j++) {
             uint64_t rs = round_up(frags[j].s, MEMORY_RANGE_GRANULE);
             uint64_t re = round_down(frags[j].e, MEMORY_RANGE_GRANULE);
@@ -126,7 +130,7 @@ size_t pmm_arch_normalize(const struct boot_context *ctx,
             if (out_count >= MEMORY_RANGE_MAX) return 0;
             out[out_count].phys_start = rs;
             out[out_count].phys_end   = re;
-            out[out_count].type       = MEMORY_TYPE_RAM;
+            out[out_count].type       = t;
             out_count++;
         }
     }
@@ -139,10 +143,13 @@ size_t pmm_arch_normalize(const struct boot_context *ctx,
         }
         out[j] = tmp;
     }
-    /* Merge adjacent/overlapping ranges. */
+    /* Merge adjacent/overlapping ranges — but only neighbours with
+     * the same type. Different types mark a hardware boundary (e.g.
+     * RAM next to MMIO/reserved) that must not be collapsed. */
     size_t w = 0;
     for (size_t i = 0; i < out_count; i++) {
-        if (w == 0 || out[i].phys_start > out[w-1].phys_end) {
+        if (w == 0 || out[i].phys_start > out[w-1].phys_end ||
+            out[i].type != out[w-1].type) {
             out[w++] = out[i];
         } else {
             if (out[i].phys_end > out[w-1].phys_end)
