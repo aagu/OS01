@@ -1,7 +1,7 @@
 // kernel/fs/ext2.c
 #include <fs/ext2.h>
-#include <kernel/debug.h>
-#include <kernel/slab.h>     // kmalloc, kfree
+#include <core/debug.h>
+#include <memory/slab.h>     // kmalloc, kfree
 #include <string.h>
 #include <stdlib.h>          // calloc
 #include <errno.h>

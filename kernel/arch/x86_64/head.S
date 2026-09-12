@@ -1,5 +1,5 @@
-#include <kernel/arch/x86_64/linkage.h>
-#include <kernel/arch/x86_64/regs.h>
+#include <arch/x86_64/linkage.h>
+#include <arch/x86_64/regs.h>
 
 .section .text.head, "ax"
 

@@ -6,7 +6,7 @@ From the normal terminal/BusyBox ash, run `systest`, followed by
 `for i in 1..3; do systest; done`. In ash, `1..3` is one literal word;
 `for i in 1 2 3; do systest; done` actually runs three iterations.
 
-The new `tests/x86_64_systest_repeat.py` runs all three stages (five suites
+The new `qemutests/x86_64_systest_repeat.py` runs all three stages (five suites
 total) on a private copy of the normal disk. On the original image it
 passed the first two stages and QEMU exited during the last stage. Other
 four-CPU runs failed during the first suite, so the failure is timing

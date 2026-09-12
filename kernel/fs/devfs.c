@@ -1,23 +1,23 @@
 #include <fs/devfs.h>
 #include <fs/vfs.h>
 #include <block/blockdev.h>
-#include <kernel/debug.h>
-#include <kernel/random.h>
-#include <kernel/vmm.h>
-#include <kernel/uaccess.h>   // USER_MIN_ADDR (Cat C — Task 8 random_read user/kernel split)
+#include <core/debug.h>
+#include <random/random.h>
+#include <memory/vmm.h>
+#include <memory/uaccess.h>   // USER_MIN_ADDR (Cat C — Task 8 random_read user/kernel split)
 // kernel/vmm.h defines a legacy `mmap` type macro (uint64_t*) that collides
 // with devfs_ops.mmap / ops->mmap below — undef it here.  devfs.c never uses
 // `mmap` as a type.  (Same pattern as vma.c and fb.c.)
 #undef mmap
-#include <kernel/arch/cpu.h>
-#include <kernel/slab.h>
+#include <arch/cpu.h>
+#include <memory/slab.h>
 #include <driver/serial.h>
 #include <driver/keyboard.h>
-#include <kernel/tty.h>
-#include <kernel/task.h>
-#include <kernel/poll.h>
-#include <kernel/file.h>
-#include <kernel/pty.h>
+#include <tty/tty.h>
+#include <sched/task.h>
+#include <fs/poll.h>
+#include <fs/file.h>
+#include <tty/pty.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>

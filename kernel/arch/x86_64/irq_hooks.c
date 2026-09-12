@@ -1,5 +1,5 @@
 /* kernel/arch/x86_64/irq_hooks.c — strong overrides for the
- * arch-neutral IRQ dispatch hooks (kernel/include/kernel/arch/irq.h).
+ * arch-neutral IRQ dispatch hooks (kernel/include/arch/irq.h).
  *
  * Provides the x86_64-specific implementations of:
  *   • arch_irq_select_controller  → IOAPIC / PIC fallback
@@ -11,16 +11,16 @@
  * weak defaults in kernel/intr/arch_irq_hooks.c.
  */
 
-#include <kernel/arch/irq.h>
-#include <kernel/arch/x86_64/regs.h>     // IA32_EFER, etc. (unused here but kept
+#include <arch/irq.h>
+#include <arch/x86_64/regs.h>     // IA32_EFER, etc. (unused here but kept
                                           //   for consistency with the rest of the
                                           //   x86_64 arch layer)
-#include <kernel/apic.h>                  // apic_available, get_ioapic_controller
-#include <device/pic.h>                   // get_pic_controller
-#include <kernel/interrupt.h>             // MAX_GSI, irq_table, hw_int_controller_t
-#include <kernel/debug.h>                 // debug_irq
-#include <kernel/printk.h>                // color_printk (for spurious-vector log)
-#include <kernel/arch/cpu.h>              // arch_local_irq_disable
+#include <intr/apic.h>                  // apic_available, get_ioapic_controller
+#include <intr/pic.h>                   // get_pic_controller
+#include <intr/interrupt.h>             // MAX_GSI, irq_table, hw_int_controller_t
+#include <core/debug.h>                 // debug_irq
+#include <core/printk.h>                // color_printk (for spurious-vector log)
+#include <arch/cpu.h>              // arch_local_irq_disable
 #include <stddef.h>                       // NULL
 
 // IDs ISA IRQs 0-15. GSI 16+ come from PIRQ routing on Q35/ICH9.

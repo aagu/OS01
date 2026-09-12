@@ -13,7 +13,7 @@
 //  32-bit range — so 16/32-bit code can use absolute addressing.
 // ──────────────────────────────────────────────────────────
 
-#include <kernel/arch/x86_64/regs.h>
+#include <arch/x86_64/regs.h>
 
 .code16
 .globl trampoline_code_start

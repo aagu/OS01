@@ -2,10 +2,10 @@
  * AP lifecycle; this file owns iterations and BSP result verification. */
 #include <stdint.h>
 #include <stdbool.h>
-#include <kernel/arch/cpu.h>
-#include <kernel/arch/aarch64/spinlock.h>
-#include <kernel/arch/aarch64/boot_log.h>
-#include <kernel/arch/aarch64/smp.h>
+#include <arch/cpu.h>
+#include <arch/aarch64/spinlock.h>
+#include <arch/aarch64/boot_log.h>
+#include <arch/aarch64/smp.h>
 #include "aarch64_percpu.h"
 #include "reg.h"
 

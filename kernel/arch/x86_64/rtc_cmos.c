@@ -1,5 +1,5 @@
 /* kernel/arch/x86_64/rtc_cmos.c -- x86_64 strong override for the
- * arch-neutral RTC wall-clock hooks (kernel/include/kernel/arch/rtc.h).
+ * arch-neutral RTC wall-clock hooks (kernel/include/arch/rtc.h).
  *
  * Implements arch_rtc_read / arch_rtc_write on top of the legacy
  * PC-AT CMOS RTC (I/O ports 0x70 / 0x71). All register numbers,
@@ -12,8 +12,8 @@
  * builds via $(wildcard $(ARCHDIR)/*.c).
  */
 
-#include <kernel/arch/rtc.h>        // arch_rtc_read / arch_rtc_write
-#include <kernel/arch/io.h>         // arch_inb / arch_outb (port I/O)
+#include <arch/rtc.h>        // arch_rtc_read / arch_rtc_write
+#include <arch/io.h>         // arch_inb / arch_outb (port I/O)
 #include <driver/rtc.h>             // datetime_t
 
 // PC-AT CMOS RTC port pair. Local to this file -- never escape.

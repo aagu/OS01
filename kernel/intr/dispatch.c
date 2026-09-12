@@ -1,5 +1,5 @@
-#include <kernel/arch/irq.h>
-#include <kernel/debug.h>
+#include <arch/irq.h>
+#include <core/debug.h>
 #include <stddef.h>
 
 // ── Per-vector C handler table ──────────────────────────────

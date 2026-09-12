@@ -3,7 +3,7 @@
 ## Boot chain
 
 ```
-UEFI firmware → boot/uefi/BOOTX64.EFI → kernel/kernel.bin (physical 0x100000)
+UEFI firmware → boot/uefi/BOOTX64.EFI → kernel.bin (physical 0x100000)
 ```
 
 The UEFI bootloader (`boot/uefi/main.c`, clang `--target=x86_64-pc-win32-coff` — LLP64) loads `kernel.bin` to physical `0x100000` and stores a `BOOT_INFO` struct at physical `0x60000`. **All BOOT_INFO fields must use `uint32_t`/`uint64_t`** because the LLP64 bootloader and LP64 kernel disagree on `sizeof(long)`.
@@ -126,7 +126,7 @@ Checks softirq_status, then per-CPU `need_resched` via `%gs:8`. Calls `do_softir
 ### Softirqs (`kernel/intr/softirq.c`)
 Deferred processing; `TIMER_SIRQ` set by timer hardirq.
 
-### Safe interrupt registration (`include/kernel/arch/x86_64/gate.h`)
+### Safe interrupt registration (`kernel/include/arch/x86_64/gate.h`)
 - `DEFINE_INTR_STUB(name, vector)` — file-scope asm trampoline
 - `REGISTER_INTR_HANDLER(name, vector, handler_fn)` — runtime C handler + IDT gate install
 - `set_intr_gate_raw()` for assembly stubs only

@@ -1,4 +1,4 @@
-#include <kernel/arch/aarch64/boot_offsets.h>
+#include <arch/aarch64/boot_offsets.h>
 
 /* aarch64 phase 1: head.S — low-level boot, page-table construction,
  * MMU enable, jump to high-half C entry.

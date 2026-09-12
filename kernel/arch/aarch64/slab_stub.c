@@ -4,7 +4,7 @@
  * These no-op definitions provide the allocator symbols required by the
  * AArch64 kernel until a native slab allocator is available.
  *
- * Signatures mirror kernel/include/kernel/slab.h exactly.
+ * Signatures mirror kernel/include/memory/slab.h exactly.
  */
 
 #include <stddef.h>

@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <sys/syscall.h>
 #if defined(__is_libk)
-#include <kernel/panic.h>
+#include <core/panic.h>
 #endif
 
 __attribute__((__noreturn__))

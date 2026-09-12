@@ -2,9 +2,9 @@
 //
 // Build_IRQ expansions and arch_irq_install() — one per IRQ line.
 
-#include <kernel/arch/x86_64/gate.h>
-#include <kernel/arch/x86_64/linkage.h>
-#include <kernel/arch/irq.h>      // arch_irq_dispatch (arch-neutral hook)
+#include <arch/x86_64/gate.h>
+#include <arch/x86_64/linkage.h>
+#include <arch/irq.h>      // arch_irq_dispatch (arch-neutral hook)
 
 extern void ret_from_intr(void);
 // do_IRQ used to live in kernel/intr/pic/8259A.c. It now lives as

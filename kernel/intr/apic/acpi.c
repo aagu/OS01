@@ -1,8 +1,8 @@
-#include <kernel/apic.h>
-#include <kernel/memory.h>
-#include <kernel/pmm.h>
-#include <kernel/vmm.h>
-#include <kernel/debug.h>
+#include <intr/apic.h>
+#include <memory/memory.h>
+#include <memory/pmm.h>
+#include <memory/vmm.h>
+#include <core/debug.h>
 #include <stdint.h>
 #include <string.h>
 

@@ -35,25 +35,21 @@ Sched:   EEVDF O(log n) — per-CPU rbtree 可运行队列 + vruntime/deadline +
 Init:    head.S → kernel_main → subsys → VFS/FS → TTY → percpu → SMP → task_init → /init.elf (→ parse_inittab)
 ```
 
-## Directory organization
+## Directory organization (2026-09-12)
 
-目录组织遵循「**源目录 ↔ 头目录 一一对称**」约定：
+组织规范（新增/迁移代码必须遵守）：
 
-- **内核源与公开头成对出现**：`kernel/<subsys>/*.c` 的头放 `kernel/include/<subsys>/*.h`，统一在 `kernel/include/` 单一 include 根下解析（`-Iinclude`），代码里 `#include <subsys/foo.h>`。头不得散落在源目录旁。
-- **`kernel/core/` 只放核心**：启动序列 + 致命路径 + 内核早期输出（`main`、`printk`、`panic`、`kallsyms`）。`random`、`log`、字库(font/logo)、`pty` 等非核心功能拆到各自子系统（`kernel/random/`、`kernel/log/`、`kernel/driver/`、`kernel/tty/`）。
-- **架构相关**：per-arch 实现放 `kernel/arch/<arch>/`，跨架构 facade 头放 `kernel/include/<subsys>/arch/*`（派发到 `arch/{x86_64,aarch64}/`）。
-- **测试目录按用途命名**（不用单复数区分）：
-  - `hosttests/` — 宿主 C 单元测试（mock 头、shim）
-  - `qemutests/` — QEMU Python 集成/架构测试
-  - `kernel/selftest/` — 内核内自测（`KERNEL_SELFTEST=1`）
-  - `runtime/selftest/` — runtime 内建自测
-- **`kernel/include/uapi/`** — 用户态 ABI（syscall 号、跨边界 `struct`），变动必须评估 ABI 影响。
+1. **源目录 ↔ 头目录一一对称**：`kernel/<subsys>/*.c` 的公开头放 `kernel/include/<subsys>/*.h`；头统一在 `kernel/include/` 单一根解析（`-Iinclude`），`#include <subsys/foo.h>`。禁止头散落源目录旁。
+2. **`kernel/core/` 最小化**：只容纳启动序列 + 致命路径 + 内核早期输出（`main`/`printk`/`panic`/`kallsyms`）；`random`/`log`/`font`/`logo`/`pty` 等必须下沉到对应子系统。
+3. **架构分层**：per-arch 实现 `kernel/arch/<arch>/`；arch-neutral facade 头 + per-arch 头统一放 `kernel/include/arch/`（facade `arch/*.h` + `arch/<arch>/*.h`），与源目录 `kernel/arch/<arch>/` 对称。
+4. **测试目录按用途命名**：`hosttests/`（宿主 C 单元）、`qemutests/`（QEMU Python 集成）、`kernel/selftest/`（内核内自测）、`runtime/selftest/`（runtime 内测）。
+5. **`kernel/include/uapi/` 为用户态 ABI**：只放 syscall 号与跨边界结构，变动需评估 ABI。
 
-> **迁移进行中**：现状路径（`kernel/kernel/`、`kernel/include/kernel/`、`kernel/test/`、`test/`、`tests/` 等）正按 `docs/superpowers/specs/2026-09-12-directory-restructure-design.md` 收敛到本节约定；迁移落地前，「Key files」表与旧路径引用暂以现状为准。
+后续新增子系统必须先确定「源目录 + 头目录」成对后才落文件。以上规范自 2026-09-12 目录重构（P1–P6）起全面生效，完整映射见 `docs/superpowers/specs/2026-09-12-directory-restructure-design.md`。
 
 ## Critical gotchas (will crash silently if wrong)
 
-- **boot_context ABI**: both UEFI bootloaders (x86_64 + aarch64) build a `boot_context` v2 struct at a fixed physical address; bootloader is LLP64 (`sizeof(long)=4`), kernel LP64 (`sizeof(long)=8`). All fields must use `uint32_t`/`uint64_t` — never `unsigned long`. See `kernel/include/kernel/bootinfo.h`.
+- **boot_context ABI**: both UEFI bootloaders (x86_64 + aarch64) build a `boot_context` v2 struct at a fixed physical address; bootloader is LLP64 (`sizeof(long)=4`), kernel LP64 (`sizeof(long)=8`). All fields must use `uint32_t`/`uint64_t` — never `unsigned long`. See `kernel/include/core/bootinfo.h`.
 - **`make clean` mandatory** after any struct change (no header deps in Makefile — stale `.o` = silent `sizeof()` mismatch).
 - **Syscall E2E invocation**: always run `make OS01_SYSTEST=1 test-syscall`; do not omit the top-level `OS01_SYSTEST=1` even though the target invokes a recursive make.
 - **`set_intr_gate_raw` only accepts assembly stubs**. Bare C `ret` leaks CS+RFLAGS. Use `DEFINE_INTR_STUB` + `REGISTER_INTR_HANDLER`.
@@ -115,22 +111,22 @@ IMG=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^image=//p')
 
 | File | Purpose |
 |------|---------|
-| `kernel/kernel/main.c` | Init sequence (subsys → VFS → SMP → futex_init → task_init) |
+| `kernel/core/main.c` | Init sequence (subsys → VFS → SMP → futex_init → task_init) |
 | `kernel/arch/x86_64/head.S` | Entry, page tables, GDT, IDT, TSS |
 | `kernel/arch/x86_64/entry.S` | Exception/intr/syscall entry/exit, ret_from_intr |
 | `kernel/arch/x86_64/trap.c` | Exception handlers + do_system_call + do_signal_delivery |
 | `kernel/arch/x86_64/trampoline.S` | AP startup (16→32→64 bit) |
 | `kernel/arch/x86_64/smp.c` | smp_boot_aps() + ap_entry() — INIT-SIPI-SIPI + AP idle loop |
 | `kernel/memory/` | pmm.c, slab.c, vmm.c, vma.c, tlb.c — full memory stack |
-| `kernel/apic/` | acpi.c, lapic.c, lapic_timer.c, ioapic.c, ipi.c |
+| `kernel/intr/apic/` | acpi.c, lapic.c, lapic_timer.c, ioapic.c, ipi.c |
 | `kernel/sched/` | task.c (EEVDF scheduler, COW fork, schedule, spawn, sched_balance), deferred_free.c (async reaper kthread) |
 | `kernel/fs/` | vfs.c, fat.c, ext2.c, devfs.c, procfs.c, tmpfs.c, elf.c, file.c, poll.c, select.c |
 | `kernel/tty/tty.c` | Console TTY: fg_pgrp field, VINTR/VQUIT line discipline (ISIG), TIOCSPGRP/TIOCGPGRP, cooked readline |
-| `kernel/driver/pty.c` | PTY master/slave (terminal.elf runs ash on a PTY slave); pty_slave_ioctl TIOCSPGRP |
+| `kernel/tty/pty.c` | PTY master/slave (terminal.elf runs ash on a PTY slave); pty_slave_ioctl TIOCSPGRP |
 | `user/terminal.c` | VT100 terminal emulator: /dev/tty → PTY → ash; must SIG_IGN SIGINT |
 | `kernel/subsys/subsys.c` | Subsystem registration framework |
-| `kernel/futex.c` | Futex hash table (SYS_futex=47) |
-| `kernel/include/kernel/bootinfo.h` | **`boot_context` v2 ABI** (shared by both UEFI loaders); fixed-size types critical |
+| `kernel/sync/futex.c` | Futex hash table (SYS_futex=47) |
+| `kernel/include/core/bootinfo.h` | **`boot_context` v2 ABI** (shared by both UEFI loaders); fixed-size types critical |
 | `kernel/include/uapi/syscall.h` | Syscall numbers (0..70) |
 | `user/init.c` | PID 1 init: inittab parsing, 4-phase boot (SYSINIT/WAIT/ONCE/RESPAWN), child supervision |
 | `config/inittab` | Default inittab template (id:action:process); `config/inittab.systest` for test mode |

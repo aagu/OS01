@@ -18,7 +18,7 @@ typedef efi_status_t EFI_STATUS;
 #define UINT64_C(value) value##ULL
 #endif
 
-#include "../../../kernel/include/kernel/bootinfo.h"
+#include "../../../kernel/include/core/bootinfo.h"
 
 /* Shared helpers provided by common main.c, used by arch code. */
 efi_status_t capture_graphics(struct boot_context *ctx);

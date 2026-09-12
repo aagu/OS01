@@ -1,4 +1,4 @@
-#include <kernel/arch/aarch64/smp_boot_core.h>
+#include <arch/aarch64/smp_boot_core.h>
 
 int smp_boot_run(const struct aarch64_topology *topology,
                  uint64_t entry_pa, uint64_t counter_hz,

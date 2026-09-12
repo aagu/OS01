@@ -1,14 +1,14 @@
 #include <fs/procfs.h>
 #include <fs/vfs.h>
-#include <kernel/debug.h>
-#include <kernel/task.h>
-#include <kernel/vma.h>
-#include <kernel/percpu.h>
-#include <kernel/pmm.h>
-#include <kernel/memory.h>
+#include <core/debug.h>
+#include <sched/task.h>
+#include <memory/vma.h>
+#include <percpu/percpu.h>
+#include <memory/pmm.h>
+#include <memory/memory.h>
 #include <kernel.h>
-#include <kernel/file.h>   // file_t / files_t full definition
-#include <kernel/pty.h>    // pty_struct full definition (file.h only fwd-declares)
+#include <fs/file.h>   // file_t / files_t full definition
+#include <tty/pty.h>    // pty_struct full definition (file.h only fwd-declares)
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>

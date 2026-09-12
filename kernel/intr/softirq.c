@@ -1,4 +1,4 @@
-#include <kernel/softirq.h>
+#include <intr/softirq.h>
 #include <stddef.h>
 #include <string.h>
 

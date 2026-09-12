@@ -187,7 +187,7 @@ rp_sidt:
 | 5 | 设备 IRQ（键盘, 串口 IRQ） |
 | 6 | 存储（AHCI） |
 
-参见 `kernel/arch/x86_64/subsys.c` 和 `kernel/include/kernel/subsys.h`。
+参见 `kernel/arch/x86_64/subsys.c` 和 `kernel/include/subsys/subsys.h`。
 
 ## 硬件访问
 

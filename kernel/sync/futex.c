@@ -1,14 +1,14 @@
-#include <kernel/futex.h>
-#include <kernel/arch/irq.h>
+#include <sync/futex.h>
+#include <arch/irq.h>
 #include <kernel.h>           // container_of
-#include <kernel/task.h>      // task_t, current
-#include <kernel/wait.h>      // wait_queue_t
-#include <kernel/memory.h>    // Phy_To_Virt
-#include <kernel/percpu.h>
-#include <kernel/vmm.h>
-#include <kernel/pmm.h>
-#include <kernel/arch/mmu.h> // arch_virt_to_phys (4KB/2MB full leaf)
-#include <kernel/uaccess.h>  // syscall_check_user_range
+#include <sched/task.h>      // task_t, current
+#include <sync/wait.h>      // wait_queue_t
+#include <memory/memory.h>    // Phy_To_Virt
+#include <percpu/percpu.h>
+#include <memory/vmm.h>
+#include <memory/pmm.h>
+#include <arch/mmu.h> // arch_virt_to_phys (4KB/2MB full leaf)
+#include <memory/uaccess.h>  // syscall_check_user_range
 
 #include <uapi/futex.h>
 #include <list.h>

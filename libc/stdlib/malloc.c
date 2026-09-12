@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #if defined(__is_libk)
-#include <kernel/slab.h>
+#include <memory/slab.h>
 #endif
 
 // ── Freelist allocator ───────────────────────────────────────

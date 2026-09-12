@@ -1,8 +1,8 @@
-#include <kernel/interrupt.h>
-#include <kernel/arch/irq.h>
-#include <kernel/debug.h>
+#include <intr/interrupt.h>
+#include <arch/irq.h>
+#include <core/debug.h>
 #include <stddef.h>
-#include <kernel/softirq.h>
+#include <intr/softirq.h>
 #include <string.h>
 
 // kernel/intr/irq.c — arch-neutral IRQ registration API.
@@ -10,7 +10,7 @@
 // All public functions (register_irq, unregister_irq, irq_mask,
 // irq_unmask) take a GSI number. The GSI→vector/hwirq translation
 // and the controller-selection logic live in arch-specific hooks
-// declared in kernel/include/kernel/arch/irq.h. This file knows
+// declared in kernel/include/arch/irq.h. This file knows
 // nothing about APIC / PIC / GIC.
 
 int32_t register_irq(uint32_t gsi, void * arg,

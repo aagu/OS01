@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <block/blockdev.h>
 #include <fs/vfs.h>
-#include <kernel/arch/spinlock.h>
+#include <arch/spinlock.h>
 
 // ── Constants ──────────────────────────────────────────
 #define EXT2_SB_OFFSET      1024
@@ -127,7 +127,7 @@ int ext2_init(block_device_t *dev, ext2_fs_t **out_fs);
 extern struct vfs_ops ext2_vfs_ops;
 
 // ── Symlink fault injection (selftest only) ────────────
-// Declared unconditionally because kernel/test/symlink_selftest.c is
+// Declared unconditionally because kernel/selftest/symlink_selftest.c is
 // compiled in ordinary kernel builds too (kernel/Makefile globs test/*.c).
 // Only under KERNEL_SELFTEST=1 does the setter do anything and do the
 // ext2_vfs_symlink() I/O steps consult the selector; in normal builds the

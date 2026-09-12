@@ -7,14 +7,14 @@
 // VM_IO guards in fork_mm_copy, do_page_fault, and vma_free_all protect
 // the MMIO pages from COW, demand paging, and premature freeing.
 
-#include <kernel/fb.h>
-#include <kernel/printk.h>      // Pos, frame_buffer
-#include <kernel/vma.h>         // vma_t, VM_IO, VM_SHARED
-#include <kernel/vmm.h>         // vmm_map_4k_page, flush_tlb, PAGE_4K_SIZE
-#include <kernel/task.h>        // current
-#include <kernel/pmm.h>         // Phy_To_Virt
-#include <kernel/memory.h>      // PAGE_OFFSET, Virt_To_Phy, Phy_To_Virt
-#include <kernel/console.h>     // console_surrender_fb
+#include <driver/fb.h>
+#include <core/printk.h>      // Pos, frame_buffer
+#include <memory/vma.h>         // vma_t, VM_IO, VM_SHARED
+#include <memory/vmm.h>         // vmm_map_4k_page, flush_tlb, PAGE_4K_SIZE
+#include <sched/task.h>        // current
+#include <memory/pmm.h>         // Phy_To_Virt
+#include <memory/memory.h>      // PAGE_OFFSET, Virt_To_Phy, Phy_To_Virt
+#include <tty/console.h>     // console_surrender_fb
 #include <driver/serial.h>      // write_serial
 #include <fs/vfs.h>             // vfs_node_t, vfs_node_put
 #include <fs/devfs.h>           // devfs_ops

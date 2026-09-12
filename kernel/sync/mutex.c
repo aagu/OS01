@@ -1,6 +1,6 @@
-#include <kernel/mutex.h>
-#include <kernel/task.h>
-#include <kernel/arch/atomic.h>
+#include <sync/mutex.h>
+#include <sched/task.h>
+#include <arch/atomic.h>
 #include <errno.h>
 
 void mutex_init(mutex_t *m)

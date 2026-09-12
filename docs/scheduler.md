@@ -209,8 +209,8 @@ Tasks register a blocking condition instead of busy-waiting:
 | `kernel/sched/deferred_free.c` | Async deferred-free kthread for remote-CPU task teardown |
 | `kernel/arch/x86_64/smp.c` | `ap_entry()`, `smp_boot_aps()` — AP bringup and idle loop |
 | `kernel/arch/x86_64/entry.S` | `ret_from_intr` → need_resched check → schedule() |
-| `kernel/include/kernel/task.h` | `task_t` definition with EEVDF fields |
-| `kernel/include/kernel/percpu.h` | `percpu_t` with `run_queue`, `rq_lock`, `nr_running` |
+| `kernel/include/sched/task.h` | `task_t` definition with EEVDF fields |
+| `kernel/include/percpu/percpu.h` | `percpu_t` with `run_queue`, `rq_lock`, `nr_running` |
 
 ## Known pitfalls
 

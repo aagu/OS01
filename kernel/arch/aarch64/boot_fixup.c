@@ -33,7 +33,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <kernel/arch/mmu.h>        /* ARCH_PAGE_OFFSET */
+#include <arch/mmu.h>        /* ARCH_PAGE_OFFSET */
 #include "aarch64_percpu.h"         /* aarch64_boot_page_tables_addr */
 
 /* ── Block-descriptor flag bits ─────────────────────────────────── */

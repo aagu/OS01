@@ -1,14 +1,14 @@
 #include <driver/ahci.h>
 #include <driver/pci.h>
-#include <kernel/debug.h>
-#include <kernel/memory.h>
-#include <kernel/pmm.h>
-#include <kernel/vmm.h>
-#include <kernel/arch/io.h>
-#include <kernel/arch/cpu.h>
-#include <kernel/interrupt.h>
-#include <kernel/apic.h>
-#include <device/timer.h>
+#include <core/debug.h>
+#include <memory/memory.h>
+#include <memory/pmm.h>
+#include <memory/vmm.h>
+#include <arch/io.h>
+#include <arch/cpu.h>
+#include <intr/interrupt.h>
+#include <intr/apic.h>
+#include <time/timer.h>
 #include <block/blockdev.h>
 #include <string.h>
 #include <stdint.h>
@@ -609,7 +609,7 @@ uint64_t ahci_port_sector_count(int port_num)
 }
 
 #ifdef __x86_64__
-#include <kernel/subsys.h>
+#include <subsys/subsys.h>
 // Register this driver into the platform's subsystem table. The
 // _register function is collected by arch_register_subsys() at boot via
 // the .subsys_init linker section; it calls register_subsys() to queue

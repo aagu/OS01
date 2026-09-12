@@ -22,10 +22,10 @@ make debug
 在另一个终端中，使用 GDB 连接到 QEMU 调试服务器：
 
 ```bash
-gdb kernel/kernel.elf
+gdb build/x86_64-clang/kernel/kernel.elf
 ```
 
-**注意**：内核编译时包含 `-g` 调试符号。使用 `kernel/kernel.elf`（ELf 格式，含符号表），而非 `kernel/kernel.bin`（纯二进制）。
+**注意**：内核编译时包含 `-g` 调试符号。使用 `kernel.elf`（ELF 格式，含符号表），而非同目录的 `kernel.bin`（纯二进制）。
 
 然后在 GDB 中执行以下命令：
 
@@ -104,7 +104,7 @@ serial_printk("Debug message: %x\n", value);
 
 ### 5.1 日志级别
 
-日志级别定义在 `kernel/include/kernel/log.h`：
+日志级别定义在 `kernel/include/log/log.h`：
 
 | 宏 | 值 | 说明 |
 |----|-----|------|
@@ -134,7 +134,7 @@ make kernel.bin DEBUG_CHANNELS=sched,vfs,mm
 
 可用通道：`sched`, `tty`, `vfs`, `mm`, `irq`, `syscall`, `task`, `ipi`, `block`, `fs`。
 
-通道宏在 `kernel/include/kernel/debug.h` 中定义：
+通道宏在 `kernel/include/core/debug.h` 中定义：
 
 ```c
 debug_sched("cpu %d: switching to pid %d\n", cpu, pid);

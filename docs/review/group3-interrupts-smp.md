@@ -1,7 +1,7 @@
 # 架构评审 — Group 3: 中断 + 时钟 + SMP
 
 > **审查日期**: 2026-07-25
-> **覆盖文件**: `kernel/intr/apic/lapic.c`, `ioapic.c`, `ipi.c`, `lapic_timer.c`, `kernel/intr/dispatch.c`, `softirq.c`, `irq.c`, `kernel/driver/pit.c`, `kernel/time/timer.c`, `kernel/arch/x86_64/smp.c`, `kernel/percpu/percpu.c`, `kernel/include/kernel/smp.h`, `kernel/include/kernel/ipi.h`, `kernel/include/kernel/softirq.h`
+> **覆盖文件**: `kernel/intr/apic/lapic.c`, `ioapic.c`, `ipi.c`, `lapic_timer.c`, `kernel/intr/dispatch.c`, `softirq.c`, `irq.c`, `kernel/driver/pit.c`, `kernel/time/timer.c`, `kernel/arch/x86_64/smp.c`, `kernel/percpu/percpu.c`, `kernel/include/core/smp.h`, `kernel/include/intr/ipi.h`, `kernel/include/intr/softirq.h`
 
 ## 问题清单
 

@@ -1,7 +1,7 @@
-#include <kernel/wait.h>
-#include <kernel/arch/irq.h>
+#include <sync/wait.h>
+#include <arch/irq.h>
 #include <kernel.h>
-#include <kernel/percpu.h>
+#include <percpu/percpu.h>
 
 void wait_queue_init(wait_queue_t *wq)
 {

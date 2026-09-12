@@ -6,11 +6,11 @@
  */
 #include <stdint.h>
 #include <stdbool.h>
-#include <kernel/arch/aarch64/dtb.h>
-#include <kernel/arch/aarch64/psci.h>
-#include <kernel/arch/aarch64/smp.h>
-#include <kernel/arch/aarch64/smp_boot_core.h>
-#include <kernel/arch/aarch64/boot_log.h>
+#include <arch/aarch64/dtb.h>
+#include <arch/aarch64/psci.h>
+#include <arch/aarch64/smp.h>
+#include <arch/aarch64/smp_boot_core.h>
+#include <arch/aarch64/boot_log.h>
 #include "aarch64_percpu.h"
 #include "reg.h"
 

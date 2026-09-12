@@ -16,15 +16,15 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include <kernel/bootinfo.h>
-#include <kernel/log.h>
-#include <kernel/arch/cpu.h>     /* arch_cpu_halt — required for fatal paths */
-#include <kernel/memory_map.h>
-#include <kernel/pmm.h>
-#include <kernel/memory.h>       /* Virt_To_Phy, Phy_To_Virt */
-#include <kernel/printk.h>       /* color_printk (public surface) */
-#include <kernel/debug.h>        /* debug_mm (existing call sites) */
-#include <kernel/arch/spinlock.h>
+#include <core/bootinfo.h>
+#include <log/log.h>
+#include <arch/cpu.h>     /* arch_cpu_halt — required for fatal paths */
+#include <memory/memory_map.h>
+#include <memory/pmm.h>
+#include <memory/memory.h>       /* Virt_To_Phy, Phy_To_Virt */
+#include <core/printk.h>       /* color_printk (public surface) */
+#include <core/debug.h>        /* debug_mm (existing call sites) */
+#include <arch/spinlock.h>
 #include <kernel.h>              /* container_of */
 
 /* ── Inlined libc-only helpers ────────────────────────────────

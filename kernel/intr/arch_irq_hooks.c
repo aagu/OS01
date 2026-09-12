@@ -1,5 +1,5 @@
 /* kernel/intr/arch_irq_hooks.c — weak defaults for the arch-neutral
- * IRQ dispatch hooks declared in kernel/include/kernel/arch/irq.h.
+ * IRQ dispatch hooks declared in kernel/include/arch/irq.h.
  *
  * Each arch (x86_64 today, aarch64 in a future slice) provides a
  * strong override in kernel/arch/<arch>/irq_hooks.c. The weak
@@ -16,9 +16,9 @@
  * controller yet.
  */
 
-#include <kernel/arch/irq.h>
-#include <kernel/log.h>
-#include <kernel/arch/cpu.h>   /* arch_cpu_halt for the FATAL path */
+#include <arch/irq.h>
+#include <log/log.h>
+#include <arch/cpu.h>   /* arch_cpu_halt for the FATAL path */
 
 __attribute__((weak))
 hw_int_controller_t *arch_irq_select_controller(uint32_t gsi)

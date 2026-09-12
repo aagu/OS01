@@ -5,7 +5,7 @@
 
 /* boot/uefi has no -Ikernel/include, so include the shared handoff
  * layout via a relative path that resolves from this header's location. */
-#include "../../../../kernel/include/kernel/arch/aarch64/handoff_layout.h"
+#include "../../../../kernel/include/arch/aarch64/handoff_layout.h"
 
 #define AARCH64_KERNEL_ENTRY       UINT64_C(0x40080000)
 #define AARCH64_PAGE_SIZE          UINT64_C(0x1000)

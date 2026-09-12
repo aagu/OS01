@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include <fs/vfs.h>
-#include <kernel/task.h>
+#include <sched/task.h>
 
 #define EI_NIDENT 16
 

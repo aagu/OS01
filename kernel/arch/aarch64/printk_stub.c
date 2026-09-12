@@ -4,7 +4,7 @@
  * literals, so kputs(fmt) is sufficient. Variadic arguments are ignored.
  */
 
-#include <kernel/arch/aarch64/boot_log.h>
+#include <arch/aarch64/boot_log.h>
 
 void color_printk(const char *fmt, ...)
 {

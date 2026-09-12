@@ -2,14 +2,14 @@
 #include <net/socket.h>
 #include <uapi/sockaddr.h>
 #include <net/net.h>
-#include <kernel/file.h>
+#include <fs/file.h>
 #include "lwip/netif.h"
-#include <kernel/task.h>
-#include <kernel/slab.h>   // kmalloc, kfree
-#include <kernel/poll.h>
-#include <kernel/wait.h>   // wait_queue_wake_all
+#include <sched/task.h>
+#include <memory/slab.h>   // kmalloc, kfree
+#include <fs/poll.h>
+#include <sync/wait.h>   // wait_queue_wake_all
 #include <kernel.h>        // container_of
-#include <kernel/uaccess.h> // copy_to_user_ft, copy_from_user_ft (Cat C — Task 8)
+#include <memory/uaccess.h> // copy_to_user_ft, copy_from_user_ft (Cat C — Task 8)
 #include <string.h>
 #include <errno.h>
 #include "lwip/api.h"       // netconn, netbuf, NETCONN_TCP/UDP

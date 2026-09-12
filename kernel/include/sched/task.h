@@ -1,0 +1,403 @@
+#ifndef KERNEL_TASK_H
+#define KERNEL_TASK_H
+
+#include <list.h>
+#include <stdint.h>
+#include <sys/types.h>      // pid_t (task_struct.pgrp/session, signal_pgrp)
+#include <arch/cpu.h>
+#include <arch/thread.h>
+#include <arch/segment.h>
+#include <fs/file.h>
+#include <uapi/time.h>
+#include <rbtree.h>
+#include <stdbool.h>
+#include <arch/spinlock.h>
+
+/* ── Blocker framework ─────────────────────────── */
+#define BLOCKER_NONE      0
+#define BLOCKER_WAITPID   1
+#define BLOCKER_NANOSLEEP 2
+
+struct task_struct;
+typedef bool (*blocker_check_t)(struct task_struct *waiter);
+
+typedef struct blocker {
+    int type;                  // BLOCKER_NONE when not blocked
+    blocker_check_t check;     // callback: returns true when condition met
+    bool signal_can_wake;      // can a pending signal break this block?
+} blocker_t;
+
+typedef struct blocker_data {
+    // Deprecated: do_waitpid no longer reads/writes this (it re-scans the
+    // task list to reap).  Kept to avoid changing task_t layout — do not
+    // rely on it.  Remove it only alongside a full task_t layout review.
+    struct task_struct *waited_child;
+    int64_t waited_pid;
+} blocker_data_t;
+
+/* ── Blocker API ──────────────────────────────── */
+int  blocker_wait(blocker_check_t check, int type, bool signal_can_wake);
+void blocker_wake(struct task_struct *task);
+
+#define CLONE_FS (1 << 0)
+#define CLONE_FILES (1 << 1)
+#define CLONE_SIGNAL (1 << 2)
+
+#define STACK_SIZE (32 * 1024) // 32KB — heap migration + -O2 makes this safe
+
+extern char _text;
+extern char _etext;
+extern char _data;
+extern char _edata;
+extern char _rodata;
+extern char _erodata;
+extern char _bss;
+extern char _ebss;
+extern char _end;
+
+extern uint64_t _stack_start;
+
+extern void ret_from_intr(void);
+extern void idle_resume(void);
+
+#define TASK_RUNNING (1 << 0)
+#define TASK_INTERRUPTIBLE (1 << 1)
+#define TASK_UNINTERRUPTIBLE (1 << 2)
+#define TASK_ZOMBIE (1 << 3)
+#define TASK_STOPPED (1 << 4)
+
+#define PF_KTHREAD (1 << 0)
+#define PF_PROCESS (1 << 1)
+#define PF_THREAD (1 << 2)
+#define PF_LINUX_ABI (1 << 3)
+#define PF_SELF_REAP (1 << 5)   // kthread exited; __switch_to epilogue frees it
+
+// waitpid options
+#define WNOHANG 1
+
+typedef struct mm_struct
+{
+    // Physical address of the top-level page table (PGD on x86_64,
+    // TTBR0_EL1 on aarch64). The kernel never dereferences this
+    // directly; vmm.c Phy_To_Virt()s it on demand.
+    uint64_t *pgdir;
+
+    uint64_t start_code, end_code; // start and end address of code segment
+    uint64_t start_data, end_data; // start and end address of data segment
+    uint64_t start_rodata, end_rodata; // start and end address of read-only data segment
+    uint64_t start_brk, end_brk; // start and end address of break segment, used in dynamic memory allocation
+    uint64_t start_stack; // base address pointer of stack segment
+
+    // ── mmap / VMA support ──────────────────────────────
+    list_t   vma_list;    // sorted by vm_start
+    uint64_t mmap_base;   // start search address for mmap
+    spinlock_T lock;      // guards munmap/MAP_FIXED/mprotect vs getrandom write
+} mm_t;
+
+typedef struct thread_struct
+{
+    uint64_t rsp0; // in tss, points to the base of stack
+    
+    uint64_t rip;
+    uint64_t rsp; // current stack pointer, points to the top of stack
+
+    uint64_t fs;
+    uint64_t gs;
+
+    uint64_t cr3; // page table base (physical address for CR3)
+
+    uint64_t cr2;
+    uint64_t trap_nr;
+    uint64_t error_code;
+
+    // IRQ state saved by schedule() when this task entered it.
+    // Per-TASK (not per-CPU): a per-CPU global gets overwritten by
+    // the next task that calls schedule() on the same CPU, so the
+    // resumed task would restore another task's flags (e.g. IRQ
+    // opened in ret_from_intr -> nested tick frame -> #PF with
+    // RFLAGS-as-RIP).  Saved in thread so each task restores its
+    // own state when switched back in.
+    uint64_t sched_flags;
+} thread_t;
+
+typedef struct task_struct
+{
+    list_t list; // link each task in task_list
+    volatile int64_t state; // task state, RUNNING, SLEEPING, INTERRUPTIBLE
+    uint64_t flags; // task flags, e.g. PF_KTHREAD, PF_PROCESS, PF_THREAD
+
+    mm_t *mm; // memory management struct, e.g. page table
+    thread_t *thread; // thread struct, save thread context before switching
+
+    // address limit, e.g. userpace 0x0000000000000000 ~ 0x000000007fffffffffffff, 
+    // kernel 0x0000000080000000 ~ 0x00000000ffffffffffffffff
+    uint64_t addr_limit;
+
+    int64_t pid; // process id
+    pid_t pgrp;       // 进程组 ID（fork 继承父；setpgid 可改）
+    pid_t session;    // 会话 ID（fork 继承父；setsid 可改）
+    int64_t counter; // time slice counter, used in round-robin scheduling
+    int64_t signal; // signal mask, e.g. 0x0000000000000001 means SIGINT
+    int64_t blocked; // signal mask of blocked signals (bit N = 1 means signal N+1 is blocked)
+    int64_t priority; // priority, used in priority scheduling
+    // ── EEVDF scheduling fields ────────────────────────
+    rbtree_node_t rb_node;    // node on per-CPU runqueue rbtree
+    uint64_t      vruntime;   // accumulated virtual runtime (ticks)
+    uint64_t      deadline;   // vruntime + slice, rbtree sort key
+    bool          on_rq;      // true when on a CPU's runqueue
+    uint32_t cpu; // CPU affinity — which CPU owns this task (for SMP)
+
+    blocker_t blocker;              // current block state (BLOCKER_NONE = not blocked)
+    blocker_data_t blocker_data;    // per-type blocking data
+
+    // ── Sleep deadline (nanoseconds) ────────────────────
+    // When a task blocks in nanosleep (BLOCKER_NANOSLEEP), its
+    // nanosleep_should_unblock callback checks clocksource_read_ns() >= wakeup_ns.
+    // Generic: reusable by any future time-based block (timer_wait, etc.).
+    uint64_t wakeup_ns;
+
+    void *fpu_save; // 512-byte FXSAVE/FXRSTOR area (16-byte aligned)
+
+    void *stack_alloc_base; // original malloc ptr (before STACK_SIZE alignment)
+
+    // ── File descriptor table ──────────────────────────
+    struct files_struct *files;     // per-process fd table
+
+    // ── Process tree ───────────────────────────────────
+    struct task_struct *parent;     // parent process (for waitpid)
+    int64_t exit_code;              // exit status (harvested by waitpid)
+    list_t wait_list;               // tasks waiting on this process
+
+    // ── I/O wait queue node ────────────────────────────
+    // When a task blocks on I/O (tty, pipe, etc.), its
+    // io_wait_node is added to the device's wait queue.
+    // Use list_is_empty(&t->io_wait_node) to check if
+    // the task is NOT currently waiting on any I/O.
+    list_t io_wait_node;
+
+    // ── Nested-schedule guard (Linux preempt_count idea) ──
+    // PER-TASK: set by schedule() while this task is inside it,
+    // cleared on the switch_to resume path (or the very first
+    // switch-in entry).  Blocks a tick's do_resched from re-entering
+    // schedule() on top of an in-flight one.
+    uint32_t in_schedule;
+
+    // ── on_cpu (Linux on_cpu semantics) ──────────────────
+    // 1 = this task is currently ON a CPU (running or being
+    // switched): its kernel stack is in use.  0 = off-CPU; only
+    // then may a waiter free it (do_waitpid reap, or __switch_to's
+    // PF_SELF_REAP epilogue for kthreads).  do_exit sets 1 at entry
+    // and only becomes reapable after __switch_to clears it.
+    uint32_t on_cpu;
+
+    // ── Signal handling ────────────────────────────────
+    struct sigaction sighand[NSIG]; // registered signal handlers
+
+    // ── Controlling terminal ─────────────────────────────
+    enum ctty_type { CTTY_NONE = 0, CTTY_PHYS, CTTY_PTY } ctty_type;
+    void *ctty;  // → tty_t (CTTY_PHYS) or pty_t (CTTY_PTY)
+
+    // ── Fault recovery (uaccess) ─────────────────────────────
+    // Set by copy_to_user_ft / copy_from_user_ft / strnlen_user (Task 2).
+    // do_page_fault (kernel-mode branch) longjmps here when cr2 < addr_limit.
+    // NULL = no recovery slot armed; a fault then takes the normal panic path.
+    // Initialized to NULL via the memset(tsk, 0, sizeof(task_t)) call sites
+    // (see task.c do_fork / kernel_thread), so no extra INIT_TASK field is
+    // needed for the idle task.
+    void **fault_jmp;              // points into the caller's os01_jmp_buf
+    void (*fault_cleanup)(void *); // optional resource release (Task 2 wiring)
+    void *fault_cleanup_arg;       // opaque arg to fault_cleanup
+} task_t;
+
+union task_union
+{
+    task_t task;
+    char stack[STACK_SIZE];
+} __attribute__((aligned(8))); // 8 Byte aligned
+
+mm_t init_mm;
+thread_t init_thread;
+
+#define INIT_TASK(task)               \
+{                                     \
+    .state = TASK_UNINTERRUPTIBLE,    \
+    .flags = PF_KTHREAD,              \
+    .list = {&(task).list, &(task).list}, \
+    .mm = &init_mm,                   \
+    .thread = &init_thread,           \
+    .addr_limit = 0xffff800000000000, \
+                .blocked = 0, \
+    .pid = 0,                         \
+    .pgrp = 1,                        \
+    .session = 1,                     \
+    .counter = 0,                     \
+    .signal = 0,                      \
+    .priority = 2,                    /* idle task quantum = 20 ms */ \
+    .ctty_type = CTTY_NONE,           \
+    .ctty = NULL,                     \
+}
+
+union task_union init_task_union __attribute__((__section__(".data.init_task"))) = {INIT_TASK(init_task_union.task)};
+
+task_t *init_task[NR_CPUS] = {&init_task_union.task,0};
+// .lock = { .lock = 1L }: mm_t.lock is a spinlock_T whose own field is
+// `lock`.  1 = unlocked; leaving it 0 would deadlock the first task that
+// takes it (INIT_TASK points .mm at this struct).
+mm_t init_mm = { .lock = { .lock = 1L } };
+thread_t init_thread =
+{
+    .rsp0 = (uint64_t)(init_task_union.stack + STACK_SIZE),  // idle task kernel stack
+    .rip = (uint64_t)idle_resume,
+    .rsp = (uint64_t)(init_task_union.stack + STACK_SIZE),
+    .fs = KERNEL_DS,
+    .gs = KERNEL_DS,
+    .cr2 = 0,
+    .trap_nr = 0,
+    .error_code = 0,
+};
+
+struct tss_struct
+{
+    uint32_t reserved0;
+    uint64_t rsp0;
+    uint64_t rsp1;
+    uint64_t rsp2;
+    uint64_t reserved1;
+    uint64_t ist1;
+    uint64_t ist2;
+    uint64_t ist3;
+    uint64_t ist4;
+    uint64_t ist5;
+    uint64_t ist6;
+    uint64_t ist7;
+    uint32_t reserved2;
+    uint16_t reserved3;
+    uint16_t iomapbaseaddr;
+} __attribute__((packed));
+
+#define INIT_TSS \
+{ \
+    .reserved0 = 0, \
+    .rsp0 = 0xffff800000007c00, \
+    .rsp1 = 0xffff800000007c00, \
+    .rsp2 = 0xffff800000007c00, \
+    .reserved1 = 0, \
+    .ist1 = 0xffff800000007c00, /* exception stack (4KB from 0x6c00) */ \
+    .ist2 = 0xffff800000006c00, /* IRQ stack (4KB from 0x5c00) */ \
+    .ist3 = 0xffff800000005c00, /* double fault stack (4KB from 0x4c00) */ \
+    .ist4 = 0, \
+    .ist5 = 0, \
+    .ist6 = 0, \
+    .ist7 = 0, \
+    .reserved2 = 0, \
+    .reserved3 = 0, \
+    .iomapbaseaddr = 0 \
+}
+
+struct tss_struct init_tss[NR_CPUS] = { [0 ... NR_CPUS - 1] = INIT_TSS };
+
+inline task_t* __attribute__((always_inline)) get_current_task()
+{
+    task_t *task = NULL;
+    // -(int64_t)STACK_SIZE = 0xFFFFFFFFFFFF8000 in 64-bit two's complement
+    __asm__ __volatile__("andq %%rsp, %0 \n\t" : "=r"(task) : "0"(-(int64_t)STACK_SIZE));
+    return task;
+}
+
+#define current get_current_task()
+
+#define GET_CURRENT \
+    "movq %rsp, %rbx \n\t" \
+    "andq $-32768, %rbx \n\t"
+
+#define switch_to(prev, next) \
+    do { \
+        __asm__ __volatile__(                \
+            "pushq %%rbp \n\t"       \
+            "pushq %%rax \n\t"       \
+            "cli \n\t"               /* disable IRQs during stack switch */ \
+            "movq %%rsp, %0 \n\t"    /* save prev->rsp */ \
+            "leaq 1f(%%rip), %%rax \n\t" \
+            "movq %%rax, %1 \n\t"    /* save prev->rip = resume label */ \
+            "movq %2, %%rsp \n\t"    /* load next->rsp */ \
+            "pushq %3 \n\t"          /* push next->rip */ \
+            "movq %4, %%rdi \n\t"    /* 1st arg: prev (SysV) */ \
+            "movq %5, %%rsi \n\t"    /* 2nd arg: next (SysV) */ \
+            "jmp __switch_to \n\t"   \
+            "1: \n\t"                \
+            /* IRQ state restored by schedule() after switch */ \
+            "popq %%rax \n\t"        \
+            "popq %%rbp \n\t"        \
+            : "=m"((prev)->thread->rsp), "=m"((prev)->thread->rip) \
+            : "m"((next)->thread->rsp), "m"((next)->thread->rip), \
+              "r"((uint64_t)(prev)), "r"((uint64_t)(next)) \
+            : "memory", "rax", "rcx", "rdx", "rdi", "rsi", \
+              "r8", "r9", "r10", "r11", "cc" \
+        ); \
+    } while (0)
+
+
+uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags, uint64_t stack_start, uint64_t stack_size);
+void task_init();
+int64_t spawn_user_task(const char *path, const char *const *argv);
+int64_t sys_exec(const char *path, pt_regs_t *regs,
+                 const char *const *argv, const char *const *envp);
+void schedule(void);
+uint64_t do_exit(uint64_t exit_code);
+int64_t do_waitpid(int64_t pid, int *user_status, int options);
+
+// ── Kernel thread API ──────────────────────────────────────
+// Create a PF_KTHREAD task that runs fn(arg), then do_exit(0).
+// Returns the new task_t or NULL on failure.
+struct task_struct *create_kthread(uint64_t (*fn)(uint64_t), uint64_t arg,
+                                   const char *name);
+
+// Create a PF_KTHREAD task that runs fn(arg), then do_exit(0).
+// Returns the new pid (>= 0), or a negative errno on failure.
+// Unlike create_kthread(), this does NOT do a second lockless
+// task-list scan to recover a task_t* — the returned pid is the
+// authoritative "did it get created" signal, safe under SMP.
+int kernel_thread(uint64_t (*fn)(uint64_t), uint64_t arg, uint64_t flags);
+
+/* User stack layout (separate 2MB page at 0x800000).
+ * The 2MB page at 0x600000 is left unmapped as a stack guard —
+ * overflow past the stack bottom triggers #PF instead of silent
+ * corruption of code/data below. */
+#define USER_STACK_BASE 0x800000UL
+#define USER_STACK_TOP  (USER_STACK_BASE + 0x200000UL - 16)
+
+/* ── EEVDF scheduler ─────────────────────────── */
+void task_wake(struct task_struct *t);
+void task_finish_switch(struct task_struct *prev);
+
+// ── Safe task-list insertion (SMP-aware) ───────────
+// Must be used by any code outside task.c that adds
+// tasks to the global list (e.g. smp_boot_aps).
+// Holds task_list_lock so concurrent schedule()
+// scanners on other CPUs see a consistent list.
+void task_list_add(struct task_struct *tsk);
+
+// ── Exported for use by syscall implementations ──────────
+extern spinlock_T task_list_lock;
+list_t *task_list_next(list_t *pos);
+
+// ── SMP-safe signal delivery ──────────────────────
+// Finds task by pid and delivers signal under
+// task_list_lock.  Returns 0 on success, -ESRCH if
+// the task doesn't exist, -EPERM if the target is
+// a kernel thread or init.
+int task_send_signal(int pid, int sig);
+
+// ── signal_pgrp ─────────────────────────────────────────
+// Sends a signal to all tasks in process group `target`.
+// Skips PF_KTHREAD tasks per spec §3.3.
+// Returns 0 on match, -ESRCH if no match, 0 if target==0 (silent no-op).
+int signal_pgrp(pid_t target, int sig);
+
+// ── SMP-safe fd-table pinning ─────────────────────────
+// Finds task by pid under task_list_lock, pins its files_t, returns
+// it (or NULL).  Caller owns a reference and must files_unpin() it.
+// Caller does NOT touch task_t after return.
+files_t *task_files_pin_by_pid(int pid);
+
+#endif

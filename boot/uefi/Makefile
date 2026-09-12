@@ -104,8 +104,8 @@ UEFI_MAKE := $(MAKE) -j1 -C $(RUNTIME_DIR) ARCH=$(ARCH) TARGET=$(TARGET) OUTDIR=
 all: $(OUTDIR)/$(TARGET)
 
 $(OUTDIR)/$(TARGET): $(SRCS) $(ROOT)/boot/uefi/arch/arch.h \
-		$(ROOT)/kernel/include/kernel/bootinfo.h \
-		$(ROOT)/kernel/include/kernel/arch/aarch64/handoff_layout.h \
+		$(ROOT)/kernel/include/core/bootinfo.h \
+		$(ROOT)/kernel/include/arch/aarch64/handoff_layout.h \
 		$(UEFI_RUNTIME_STAMP)
 	# The runtime is already staged + patched by the uefi.mk adapter; never
 	# copy or mutate it here.

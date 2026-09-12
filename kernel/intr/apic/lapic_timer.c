@@ -1,14 +1,14 @@
-#include <kernel/apic.h>
-#include <kernel/percpu.h>
-#include <kernel/debug.h>
-#include <kernel/arch/irq.h>
-#include <kernel/arch/thread.h>
-#include <kernel/arch/cpu.h>
-#include <kernel/arch/x86_64/gate.h>
-#include <device/timer.h>
-#include <kernel/softirq.h>
-#include <kernel/clockevent.h>   // tick_handler()
-#include <kernel/clocksource.h>  // clocksource_freq_hz()
+#include <intr/apic.h>
+#include <percpu/percpu.h>
+#include <core/debug.h>
+#include <arch/irq.h>
+#include <arch/thread.h>
+#include <arch/cpu.h>
+#include <arch/x86_64/gate.h>
+#include <time/timer.h>
+#include <intr/softirq.h>
+#include <time/clockevent.h>   // tick_handler()
+#include <time/clocksource.h>  // clocksource_freq_hz()
 #include <stdbool.h>
 
 // Assembly stub created below
@@ -216,7 +216,7 @@ void lapic_timer_init(void)
 }
 
 #ifdef __x86_64__
-#include <kernel/subsys.h>
+#include <subsys/subsys.h>
 // Register this driver into the platform's subsystem table. The
 // _register function is collected by arch_register_subsys() at boot via
 // the .subsys_init linker section; it calls register_subsys() to queue

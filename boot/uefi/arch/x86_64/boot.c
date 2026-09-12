@@ -9,7 +9,7 @@
  */
 #include <uefi.h>
 #include "../arch.h"
-#include "../../../../kernel/include/kernel/arch/x86_64/bootinfo_x86.h"   /* struct E820_ENTRY, BOOT_MEMORY_FORMAT_E820 */
+#include "../../../../kernel/include/arch/x86_64/bootinfo_x86.h"   /* struct E820_ENTRY, BOOT_MEMORY_FORMAT_E820 */
 
 #define X86_KERNEL_BASE       UINT64_C(0x100000)
 #define X86_HANDOFF_BASE      UINT64_C(0x60000)

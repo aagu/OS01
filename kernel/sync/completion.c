@@ -1,4 +1,4 @@
-#include <kernel/completion.h>
+#include <sync/completion.h>
 
 void completion_init(completion_t *c)
 {

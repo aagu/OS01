@@ -179,7 +179,7 @@ rtc_write_datetime(&new_dt);
 
 ### 帧缓冲驱动
 
-帧缓冲在 `kernel/kernel/main.c` 中初始化：
+帧缓冲在 `kernel/core/main.c` 中初始化：
 
 * `frame_buffer_early_init` - 从 bootinfo 读取帧缓冲基址和分辨率
 * `frame_buffer_init` - 将帧缓冲重映射到 `VIRT_FRAMEBUFFER_OFFSET`
@@ -187,7 +187,7 @@ rtc_write_datetime(&new_dt);
 
 ### TTY 驱动
 
-位于 `kernel/tty/tty.c` + `kernel/tty/console.c`，头文件 `kernel/include/kernel/tty.h` + `kernel/include/kernel/console.h`：
+位于 `kernel/tty/tty.c` + `kernel/tty/console.c`，头文件 `kernel/include/tty/tty.h` + `kernel/include/tty/console.h`：
 
 * `tty_alloc` — 分配 TTY 实例，设置输出/回显回调
 * `tty_push_input` — IRQ 上下文中推送字符（来自 keyboard/serial 处理程序）
@@ -215,7 +215,7 @@ rtc_write_datetime(&new_dt);
 
 ### 键盘 devfs 读处理
 
-键盘驱动在 `kernel/kernel/main.c` 中注册到 devfs：
+键盘驱动在 `kernel/core/main.c` 中注册到 devfs：
 
 ```c
 devfs_register_chrdev("keyboard", NULL, keyboard_devfs_read, NULL);
@@ -308,8 +308,8 @@ typedef struct hw_int_type {
 
 ### 设备相关头文件
 
-* `kernel/include/device/pic.h` - PIC/IOAPIC 控制器头文件
-* `kernel/include/device/timer.h` - 定时器设备头文件
+* `kernel/include/intr/pic.h` - PIC/IOAPIC 控制器头文件
+* `kernel/include/time/timer.h` - 定时器设备头文件
 * `kernel/include/block/blockdev.h` - 块设备层头文件
 
 ## 扩展驱动程序
@@ -332,9 +332,9 @@ typedef struct hw_int_type {
 ```c
 // example_driver.c
 #include <driver/example_driver.h>
-#include <device/pic.h>
-#include <kernel/interrupt.h>
-#include <kernel/arch/x86_64/hw.h>
+#include <intr/pic.h>
+#include <intr/interrupt.h>
+#include <arch/x86_64/hw.h>
 
 hw_int_controller_t example_controller = 
 {

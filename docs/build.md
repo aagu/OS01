@@ -39,7 +39,7 @@ make user             默认 profile 的用户 ELF 与 BusyBox
 make run              默认 profile 启动 QEMU（-display gtk；无显示环境用 run_test.py 的方式串口验证）
 make run-aarch64-uefi aarch64-clang profile 启动 QEMU（-display none -serial stdio）
 make print-run-paths   默认 profile 打印 firmware=/image= 绝对路径（手动 QEMU 用，见下文）
-make test             默认 profile 的宿主测试（test/Makefile）
+make test             默认 profile 的宿主测试（hosttests/Makefile）
 make validate         内核 ELF / EFI 产物验证 + profile 信息打印
 make clean            清理指定 profile（默认 profile 还删除项目根兼容文件）
 ```
@@ -125,7 +125,7 @@ make image           # 磁盘镜像（产物路径，不是项目根副本）
 ### 4. 运行测试
 
 ```bash
-make test             # 宿主测试（test/Makefile）
+make test             # 宿主测试（hosttests/Makefile）
 make test-phase-0     # QEMU 启动 + shell 提示符（用普通镜像）
 make test-syscall     # systest variant 镜像 + QEMU syscall E2E
 make test-inittab     # inittab.test variant 镜像 + 相位派发验证
@@ -200,8 +200,8 @@ make PROFILE=x86_64-clang print-run-paths
 * `user/` - 用户空间程序（init, spin, sigtest, poweroff 等）
 * `config/` - 配置文件（busybox.config.in、rootfs.mk 镜像清单、inittab 模板、posix-uefi patch）
 * `mk/` - 构建模块（project.mk、profiles/、targets/、toolchains/、components/）
-* `test/` - 宿主测试代码
-* `tests/` - E2E 测试脚本（run_test.py）
+* `hosttests/` - 宿主测试代码
+* `qemutests/` - E2E 测试脚本（run_test.py）
 * `tools/` - 构建工具（mkdisk）
 * `docs/` - 文档
 * `thirdpart/` - 第三方依赖（posix-uefi, busybox-1.36.1, mbedtls）

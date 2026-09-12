@@ -3,7 +3,7 @@
 ## Motivation
 
 Clean separation of init into ordered phases, enabling:
-- **Arch-agnostic initialization**: the `kernel_main` init sequence in `kernel/kernel/main.c` calls `arch_register_subsys()` and `subsys_init_all()` without knowing which architecture it runs on. x86_64 and future aarch64 backends each provide their own registration.
+- **Arch-agnostic initialization**: the `kernel_main` init sequence in `kernel/core/main.c` calls `arch_register_subsys()` and `subsys_init_all()` without knowing which architecture it runs on. x86_64 and future aarch64 backends each provide their own registration.
 - **Modularity**: each subsystem (APIC, timer, keyboard, AHCI, etc.) is a self-contained `int init(void)` function, registered independently.
 - **Failure isolation**: optional subsystems can fail without halting boot (`SUBSYS_FLAG_OPTIONAL`).
 - **Order guarantees**: phases run sequentially; all entries in phase _N_ complete before phase _N+1_ starts.
@@ -12,7 +12,7 @@ Clean separation of init into ordered phases, enabling:
 
 ## Key Structures
 
-Defined in `kernel/include/kernel/subsys.h`:
+Defined in `kernel/include/subsys/subsys.h`:
 
 ### BSP-side entry (one-shot init)
 
@@ -129,7 +129,7 @@ void arch_register_subsys_percpu(void)
 }
 ```
 
-### Arch API header (`kernel/include/kernel/arch/subsys.h`)
+### Arch API header (`kernel/include/arch/subsys.h`)
 
 Declares the arch-provided registration functions:
 
@@ -143,7 +143,7 @@ Each architecture provides its own `subsys.c` and `subsys_percpu.c`; the subsys 
 
 ---
 
-## Init Flow in kernel_main (`kernel/kernel/main.c`)
+## Init Flow in kernel_main (`kernel/core/main.c`)
 
 ```c
 // Phases 1-2: hardcoded
@@ -179,8 +179,8 @@ task_init();
 | File | Purpose |
 |------|---------|
 | `kernel/subsys/subsys.c` | Framework implementation: registration, init dispatch, status query |
-| `kernel/include/kernel/subsys.h` | API header: structures, phase constants, flags, function declarations |
+| `kernel/include/subsys/subsys.h` | API header: structures, phase constants, flags, function declarations |
 | `kernel/arch/x86_64/subsys.c` | x86_64 BSP subsystem registrations (APIC, PIC, timers, keyboard, serial, AHCI) |
 | `kernel/arch/x86_64/subsys_percpu.c` | x86_64 per-CPU subsystem registrations (LAPIC timer start) |
-| `kernel/include/kernel/arch/subsys.h` | Arch API header: `arch_register_subsys()` and `arch_register_subsys_percpu()` declarations |
-| `kernel/kernel/main.c` | Init sequence: calls `arch_register_subsys()`, `subsys_init_all()`, `arch_register_subsys_percpu()`, `subsys_init_percpu()` |
+| `kernel/include/arch/subsys.h` | Arch API header: `arch_register_subsys()` and `arch_register_subsys_percpu()` declarations |
+| `kernel/core/main.c` | Init sequence: calls `arch_register_subsys()`, `subsys_init_all()`, `arch_register_subsys_percpu()`, `subsys_init_percpu()` |

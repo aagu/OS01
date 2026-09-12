@@ -1,16 +1,16 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <driver/keyboard.h>
-#include <kernel/apic.h>
-#include <kernel/interrupt.h>
-#include <kernel/debug.h>
-#include <kernel/tty.h>
-#include <kernel/arch/io.h>
-#include <kernel/arch/cpu.h>
-#include <kernel/arch/spinlock.h>
+#include <intr/apic.h>
+#include <intr/interrupt.h>
+#include <core/debug.h>
+#include <tty/tty.h>
+#include <arch/io.h>
+#include <arch/cpu.h>
+#include <arch/spinlock.h>
 #include <fs/vfs.h>
-#include <kernel/poll.h>
-#include <kernel/percpu.h>
+#include <fs/poll.h>
+#include <percpu/percpu.h>
 #include <kernel.h>
 
 // ═══════════════════════════════════════════════════════════
@@ -418,7 +418,7 @@ void keyboard_init(void)
 }
 
 #ifdef __x86_64__
-#include <kernel/subsys.h>
+#include <subsys/subsys.h>
 // Register this driver into the platform's subsystem table. The
 // _register function is collected by arch_register_subsys() at boot via
 // the .subsys_init linker section; it calls register_subsys() to queue

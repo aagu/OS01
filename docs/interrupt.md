@@ -67,7 +67,7 @@
 
 ## 中断安全注册 API（推荐）
 
-当前推荐使用 `kernel/include/kernel/arch/x86_64/gate.h` 中的两步骤模式：
+当前推荐使用 `kernel/include/arch/x86_64/gate.h` 中的两步骤模式：
 - `DEFINE_INTR_STUB(name, vector)` — 文件作用域宏，生成汇编跳板
 - `REGISTER_INTR_HANDLER(name, vector, handler_fn)` — 运行时宏，存储 C 处理函数并安装 IDT 门
 - `set_intr_gate_raw()` — 底层 API，**只接受汇编跳板**（不接受裸 C 函数）
@@ -178,5 +178,5 @@ register_irq(IRQ0, NULL, timer_irq_handler, 0, &pic_controller, "timer");
 * `kernel/intr/irq.c` - 外部中断处理
 * `kernel/intr/softirq.c` - 软中断处理
 * `kernel/arch/x86_64/trap.c` - 处理器异常处理
-* `kernel/include/kernel/interrupt.h` - 中断相关头文件
-* `kernel/include/kernel/arch/x86_64/trap.h` - x86_64 架构陷阱相关头文件
+* `kernel/include/intr/interrupt.h` - 中断相关头文件
+* `kernel/include/arch/x86_64/trap.h` - x86_64 架构陷阱相关头文件

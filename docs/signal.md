@@ -30,7 +30,7 @@ Defined in `kernel/include/uapi/time.h` (kernel) and `libc/include/signal.h` (us
 ## Kernel data structures
 
 ```c
-// kernel/include/kernel/task.h (simplified)
+// kernel/include/sched/task.h (simplified)
 typedef struct task_struct {
     int64_t signal;                    // pending mask: bit N = signal N is pending
     int64_t blocked;                   // blocked mask: bit N-1 = signal N is blocked
@@ -117,7 +117,7 @@ This sets SIGINT pending on the foreground task. On the next return-to-userspace
 | File | Purpose |
 |------|---------|
 | `kernel/include/uapi/time.h` | `struct sigaction`, `struct sigframe`, signal number definitions |
-| `kernel/include/kernel/task.h` | `task_t` signal/blocked fields, `sighand[]` array |
+| `kernel/include/sched/task.h` | `task_t` signal/blocked fields, `sighand[]` array |
 | `kernel/arch/x86_64/trap.c` | `do_signal_delivery`, `kill_current_user_task`, syscall dispatch |
 | `libc/include/signal.h` | Userspace signal API, `sigset_t` macros |
 | `libc/signal/signal.c` | `signal()` — BSD-style wrapper |

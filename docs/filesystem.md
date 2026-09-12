@@ -195,7 +195,7 @@ The dual-partition layout expects partition 0 = FAT32 ESP, partition 1 = ext2 ro
 
 ---
 
-## Init Sequence (`kernel/kernel/main.c:170-218`)
+## Init Sequence (`kernel/core/main.c:170-218`)
 
 1. `vfs_init()` — zero the mount table
 2. `devfs_init()` — mount `/dev`, register built-in char devices (null, zero, random, serial, tty)

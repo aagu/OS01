@@ -17,7 +17,7 @@ toolchain/*
 qemu-8.2.1/*
 boot/uefi/OVMF.fd
 !toolchain/setup.sh
-kernel/kernel/kallsyms
+kernel/core/kallsyms
 kernel/.stage1
 kernel/.stage2
 build/
@@ -26,3 +26,7 @@ config/busybox.config
 .superpowers/
 .worktrees/
 tools/mkdisk
+
+# Build products (added 2026-09-12 per directory-restructure design §4.3)
+test-results/
+__pycache__/

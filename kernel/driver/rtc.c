@@ -19,7 +19,7 @@
  */
 
 #include <driver/rtc.h>
-#include <kernel/arch/rtc.h>   // arch_rtc_read / arch_rtc_write hooks
+#include <arch/rtc.h>   // arch_rtc_read / arch_rtc_write hooks
 
 __attribute__((weak))
 bool arch_rtc_read(datetime_t *out)

@@ -1,9 +1,9 @@
-#include <kernel/vmm.h>
-#include <kernel/ipi.h>
-#include <kernel/percpu.h>
-#include <kernel/debug.h>
-#include <kernel/arch/cpu.h>
-#include <kernel/arch/mmu.h>
+#include <memory/vmm.h>
+#include <intr/ipi.h>
+#include <percpu/percpu.h>
+#include <core/debug.h>
+#include <arch/cpu.h>
+#include <arch/mmu.h>
 
 // ── TLB shootdown for SMP ──────────────────────────────────
 //

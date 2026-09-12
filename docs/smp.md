@@ -1,13 +1,13 @@
 # SMP — Symmetric Multi-Processing
 
-OS01 supports up to `NR_CPUS=8` CPUs (compile-time limit in `kernel/include/kernel/task.h`). The runtime count `num_cpus` is discovered from the MADT. Default QEMU invocation is `-smp 2` (see root `Makefile`).
+OS01 supports up to `NR_CPUS=8` CPUs (compile-time limit in `kernel/include/sched/task.h`). The runtime count `num_cpus` is discovered from the MADT. Default QEMU invocation is `-smp 2` (see root `Makefile`).
 
 **Scheduling**: EEVDF O(log n) per-CPU rbtree runqueues + `sched_balance()` work stealing. See [docs/scheduler.md](scheduler.md) and [docs/scheduler-complexity.md](scheduler-complexity.md).
 
 ## Architecture overview
 
 ```
-Phase 0: per-CPU data (GS base)               kernel/include/kernel/percpu.h
+Phase 0: per-CPU data (GS base)               kernel/include/percpu/percpu.h
 Phase 1: AP enumeration (MADT LAPIC/x2APIC)    kernel/intr/apic/acpi.c
 Phase 2: AP trampoline + INIT-SIPI-SIPI        kernel/arch/x86_64/trampoline.S, kernel/arch/x86_64/smp.c
 Phase 3: interrupt controllers (APIC, PIC)     kernel/arch/x86_64/subsys.c (subsys phase 3)
@@ -19,7 +19,7 @@ Phase 8: TSC sync and warp check               cpu.h rdtsc(), smp.c comparison
 
 ## Per-CPU data
 
-`kernel/include/kernel/percpu.h` — `percpu_t` struct:
+`kernel/include/percpu/percpu.h` — `percpu_t` struct:
 
 | Offset | Field | Purpose |
 |--------|-------|---------|
@@ -155,10 +155,10 @@ Without these, any interrupt delivery would raise #GP because the IDT gate refer
 
 ## Atomic operations and spinlocks
 
-`kernel/include/kernel/arch/x86_64/cpu.h`:
+`kernel/include/arch/x86_64/cpu.h`:
 - `atomic_fetch_add`, `atomic_fetch_sub`, `atomic_inc`, `atomic_read`, `atomic_write`, `atomic_cas`, `atomic_xchg` — all with `lock` prefix
 
-`kernel/include/kernel/arch/x86_64/spinlock.h`:
+`kernel/include/arch/x86_64/spinlock.h`:
 - `spin_lock(lock)`: `lock decq` with `pause`-based spin-wait
 - `spin_unlock(lock)`: stores `1` to release
 - `spin_trylock(lock)`: uses `xchgq` for non-blocking attempt
@@ -176,7 +176,7 @@ SMP locks in use:
 
 ## IPI infrastructure
 
-Vectors (see `kernel/include/kernel/ipi.h`):
+Vectors (see `kernel/include/intr/ipi.h`):
 - `IPI_VECTOR_TLB = 0x40` — TLB shootdown
 - `IPI_VECTOR_RESCHED = 0x41` — reschedule request
 
@@ -268,7 +268,7 @@ Called by `schedule()` **before** `pick_eevdf()` on the local CPU:
 
 ## TSC sync
 
-`kernel/include/kernel/arch/x86_64/cpu.h`:
+`kernel/include/arch/x86_64/cpu.h`:
 - `rdtsc()` — reads full 64-bit TSC
 - `rdtscp_serialized()` — CPUID serialisation + RDTSC
 
@@ -312,7 +312,7 @@ The Makefile does NOT track header dependencies. After changing any struct defin
 | 类别 | 文件 | 说明 |
 |------|------|------|
 | **修改** | `kernel/sched/task.c` | sched_pick_cpu、sched_notify_remote、sched_balance、task_wake 重试、do_fork/spawn/schedule 集成、idle_task_resume、nr_running |
-| **修改** | `kernel/include/kernel/percpu.h` | +`uint32_t nr_running` |
+| **修改** | `kernel/include/percpu/percpu.h` | +`uint32_t nr_running` |
 | **修改** | `kernel/memory/slab.c` | per-CPU 递归 slab_lock |
 | **修改** | `kernel/memory/pmm.c` | pmm_lock for alloc_pages/free_pages |
 | **修改** | `kernel/intr/softirq.c` | lock orq/andq atomic softirq_status |

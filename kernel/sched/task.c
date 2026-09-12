@@ -1,18 +1,18 @@
-#include <kernel/task.h>
-#include <kernel/percpu.h>
-#include <kernel/ipi.h>
+#include <sched/task.h>
+#include <percpu/percpu.h>
+#include <intr/ipi.h>
 #include <kernel.h>
-#include <kernel/arch/spinlock.h>
-#include <kernel/arch/irq.h>
-#include <kernel/hang.h>
-#include <kernel/debug.h>
-#include <kernel/log.h>
-#include <kernel/memory.h>
-#include <kernel/pmm.h>
-#include <kernel/vma.h>
-#include <kernel/vmm.h>
-#include <kernel/slab.h>
-#include <kernel/uaccess.h>
+#include <arch/spinlock.h>
+#include <arch/irq.h>
+#include <core/debug.h>
+#include <core/panic.h>
+#include <log/log.h>
+#include <memory/memory.h>
+#include <memory/pmm.h>
+#include <memory/vma.h>
+#include <memory/vmm.h>
+#include <memory/slab.h>
+#include <memory/uaccess.h>
 
 #include <fs/vfs.h>
 #include <fs/elf.h>
@@ -21,8 +21,8 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <uapi/time.h>
-#include <kernel/assert.h>
-#include <kernel/printk.h>   // serial_printk
+#include <core/assert.h>
+#include <core/printk.h>   // serial_printk
 
 // ── COPY_USER_STR macro (Task 7, symlink support) ───────────
 // Returns the string length (>=0) on success.

@@ -1,18 +1,18 @@
-#include <kernel/file.h>
+#include <fs/file.h>
 #include <fs/vfs.h>
-#include <kernel/debug.h>
-#include <kernel/task.h>
-#include <kernel/arch/irq.h>
-#include <kernel/slab.h>
+#include <core/debug.h>
+#include <sched/task.h>
+#include <arch/irq.h>
+#include <memory/slab.h>
 #include <kernel.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <kernel/poll.h>
-#include <kernel/pty.h>
+#include <fs/poll.h>
+#include <tty/pty.h>
 #include <fs/devfs.h>
 #include <uapi/stat.h>
-#include <kernel/uaccess.h>
+#include <memory/uaccess.h>
 
 // ── Forward declarations ─────────────────────────────────────
 void pipe_wake_readers(pipe_t *p);

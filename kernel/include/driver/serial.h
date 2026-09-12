@@ -2,8 +2,8 @@
 #define _KERNEL_SERIAL_H
 #include <stdint.h>
 #include <stdbool.h>
-#include <kernel/tty.h>
-#include <kernel/arch/spinlock.h>
+#include <tty/tty.h>
+#include <arch/spinlock.h>
 
 #define SERIAL_COM1 0x3f8
 

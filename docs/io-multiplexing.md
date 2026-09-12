@@ -46,19 +46,19 @@
 
 | 类别 | 文件 | 行数 | 说明 |
 |------|------|------|------|
-| **修改** | `kernel/include/kernel/poll.h` | +24/−8 | poll_table_t 动态化 + do_poll_core 声明 |
+| **修改** | `kernel/include/fs/poll.h` | +24/−8 | poll_table_t 动态化 + do_poll_core 声明 |
 | **修改** | `kernel/fs/poll.c` | +60/−25 | 提取 do_poll_core() + 包装器重构 |
-| **新增** | `kernel/include/kernel/select.h` | 73 | kernel_fd_set、sigset_t、pselect6_sigmask、原型 |
+| **新增** | `kernel/include/fs/select.h` | 73 | kernel_fd_set、sigset_t、pselect6_sigmask、原型 |
 | **新增** | `kernel/fs/select.c` | 423 | do_select、do_pselect6、do_select_common、do_select_nofds |
 | **修改** | `kernel/arch/x86_64/trap.c` | +15 | SYS_select + SYS_pselect6 dispatch + 移除 sigset_t |
 | **修改** | `kernel/include/uapi/syscall.h` | +1 | SYS_pselect6=51 |
-| **新增** | `test/include/kernel/select.h` | 73 | 镜像 |
-| **修改** | `test/include/kernel/poll.h` | 镜像 | 同步动态化 |
+| **新增** | hosttests 镜像 `include/fs/select.h`（P5 随影子头清理已删除） | 73 | 镜像 |
+| **修改** | hosttests 镜像 `include/fs/poll.h`（P5 随影子头清理已删除） | 镜像 | 同步动态化 |
 | **新增** | `libc/include/sys/select.h` | 59 | FD_ZERO/SET/CLR/ISSET + select/pselect 声明 |
 | **新增** | `libc/unistd/select.c` | 52 | libc wrapper + pselect6 打包 |
 | **修改** | `libc/include/sys/syscall.h` | +1 | SYS_pselect6 |
 | **修改** | `user/systest.c` | +258 | 10 测试组 (20 个断言) |
-| **修改** | `tests/run_test.py` | +3 | QEMU AHCI 驱动参数 |
+| **修改** | `qemutests/run_test.py` | +3 | QEMU AHCI 驱动参数 |
 
 **总计: 11 commits, 14 files, +1042 / −33**
 

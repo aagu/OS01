@@ -1,21 +1,21 @@
-#include <kernel/arch/x86_64/trap.h>
-#include <kernel/arch/irq.h>
-#include <kernel/arch/x86_64/gate.h>
-#include <kernel/arch/x86_64/hw.h>
-#include <kernel/arch/segment.h>
+#include <arch/x86_64/trap.h>
+#include <arch/irq.h>
+#include <arch/x86_64/gate.h>
+#include <arch/x86_64/hw.h>
+#include <arch/segment.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <kernel/printk.h>
-#include <kernel/log.h>
-#include <kernel/trace.h>
-#include <kernel/arch/x86_64/asm.h>
-#include <kernel/task.h>
-#include <kernel/memory.h>
-#include <kernel/vmm.h>
-#include <kernel/pmm.h>
-#include <kernel/percpu.h>
-#include <kernel/apic.h>
-#include <kernel/slab.h>
+#include <core/printk.h>
+#include <log/log.h>
+#include <core/trace.h>
+#include <arch/x86_64/asm.h>
+#include <sched/task.h>
+#include <memory/memory.h>
+#include <memory/vmm.h>
+#include <memory/pmm.h>
+#include <percpu/percpu.h>
+#include <intr/apic.h>
+#include <memory/slab.h>
 #include <driver/serial.h>
 #include <errno.h>
 #include <uapi/syscall.h>
@@ -23,24 +23,24 @@
 #include <string.h>
 typedef int pid_t;
 #include <termios.h>
-#include <kernel/tty.h>
+#include <tty/tty.h>
 #include <stdlib.h>
 #include <fs/vfs.h>
 #include <fs/devfs.h>
-#include <kernel/debug.h>
-#include <kernel/uaccess.h>   // strnlen_user, copy_from_user_ft, VFS_NAME_MAX
-#include <kernel/file.h>
-#include <kernel/poll.h>     // struct pollfd, do_poll()
-#include <kernel/select.h>   // sigset_t, do_select(), do_pselect6()
-#include <device/timer.h>
-#include <kernel/clocksource.h>  // clocksource_read_ns()
+#include <core/debug.h>
+#include <memory/uaccess.h>   // strnlen_user, copy_from_user_ft, VFS_NAME_MAX
+#include <fs/file.h>
+#include <fs/poll.h>     // struct pollfd, do_poll()
+#include <fs/select.h>   // sigset_t, do_select(), do_pselect6()
+#include <time/timer.h>
+#include <time/clocksource.h>  // clocksource_read_ns()
 #include <uapi/time.h>
 #include <kernel.h>
-#include <kernel/vma.h>
+#include <memory/vma.h>
 #include <sys/random.h>   // GRND_NONBLOCK, GRND_RANDOM (for SYS_getrandom)
-#include <kernel/random.h>  // get_random_bytes(), RANDOM_MAX_LEN
+#include <random/random.h>  // get_random_bytes(), RANDOM_MAX_LEN
 #include <uapi/futex.h>
-#include <kernel/futex.h>
+#include <sync/futex.h>
 #include <uapi/sockaddr.h>  // struct sockaddr_in (shared with userspace)
 #include <net/socket.h>     // do_socket, do_connect, etc.
 // ── Local signal constants (kernel has its own signal.h) ──

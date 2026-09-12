@@ -1,9 +1,9 @@
 #include <fs/elf.h>
-#include <kernel/memory.h>
-#include <kernel/vmm.h>
-#include <kernel/pmm.h>
-#include <kernel/debug.h>
-#include <kernel/arch/elf.h>
+#include <memory/memory.h>
+#include <memory/vmm.h>
+#include <memory/pmm.h>
+#include <core/debug.h>
+#include <arch/elf.h>
 #include <stdint.h>
 #include <string.h>
 #include <driver/serial.h>

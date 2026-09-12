@@ -1,7 +1,7 @@
 // kernel/arch/x86_64/subsys.c
 
 #include <stdint.h>
-#include <kernel/subsys.h>
+#include <subsys/subsys.h>
 
 // ── RSDP 地址（由 kernel_main 在调用 arch_register_subsys 前设置） ──
 uint64_t arch_boot_rsdp = 0;

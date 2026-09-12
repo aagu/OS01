@@ -20,10 +20,10 @@
  * lapic_timer_set_premeasured for the LAPIC period-mode init.
  */
 
-#include <kernel/arch/io.h>
-#include <kernel/interrupt.h>   // register_irq / unregister_irq
-#include <kernel/apic.h>        // lapic_read / lapic_write / LAPIC_* / LVT_MASK
-#include <kernel/arch/cpu.h>    // arch_cycle_counter / arch_cpu_pause
+#include <arch/io.h>
+#include <intr/interrupt.h>   // register_irq / unregister_irq
+#include <intr/apic.h>        // lapic_read / lapic_write / LAPIC_* / LVT_MASK
+#include <arch/cpu.h>    // arch_cycle_counter / arch_cpu_pause
 #include <stddef.h>             // NULL
 
 // ── CMOS RTC port I/O (local to this file; same as rtc_cmos.c) ──

@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include <fs/vfs.h>
-#include <kernel/tty.h>
+#include <tty/tty.h>
 
 void keyboard_init(void);
 

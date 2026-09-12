@@ -10,9 +10,9 @@
  */
 
 #include <stddef.h>
-#include <kernel/bootinfo.h>
-#include <kernel/memory_map.h>
-#include <kernel/arch/aarch64/ram.h>
+#include <core/bootinfo.h>
+#include <memory/memory_map.h>
+#include <arch/aarch64/ram.h>
 
 size_t pmm_arch_normalize(const struct boot_context *ctx,
                           struct MEMORY_RANGE *out)

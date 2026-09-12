@@ -163,7 +163,7 @@ test-aarch64-uefi-smp:
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
 	$(MAKE) KERNEL_SELFTEST=1 aarch64-uefi
-	python3 tests/aarch64_uefi_smp.py \
+	python3 qemutests/aarch64_uefi_smp.py \
 	  --cpus 1 2 4 --repeat 3 --timeout 90 --expect-selftest \
 	  $(if $(filter 0,$(AARCH64_UEFI_SMP_DIAGNOSTIC_DTB)),,--diagnostic-dtb=auto) \
 	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
@@ -186,7 +186,7 @@ test-aarch64-uefi-smp-no-ack:
 	$(if $(and $(filter 1,$(words $(AARCH64_SMP_TEST_NO_ACK_CPU))),$(filter 1,$(AARCH64_SMP_TEST_NO_ACK_CPU))),,$(error AARCH64_SMP_TEST_NO_ACK_CPU must be 1; clean and build the injected image first))
 	@test "$(AARCH64_SMP_TEST_NO_ACK_CPU)" = 1
 	@test -f "$(AARCH64_UEFI_DISK)" -a -f "$(AARCH64_UEFI_FIRMWARE)" || { echo 'Build the injected aarch64-uefi image first' >&2; exit 1; }
-	python3 tests/aarch64_uefi_smp.py \
+	python3 qemutests/aarch64_uefi_smp.py \
 	  --cpus 2 --repeat 1 --timeout 90 --expect-no-ack 1 \
 	  $(if $(filter 0,$(AARCH64_UEFI_SMP_DIAGNOSTIC_DTB)),,--diagnostic-dtb=auto) \
 	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
@@ -228,7 +228,7 @@ validate-profile:
 
 # ── Test ────────────────────────────────────────────────────
 # Each x86 E2E test builds its image VARIANT in an isolated dir
-# (build/<profile>/image/<variant>/disk.img) and runs tests/run_test.py
+# (build/<profile>/image/<variant>/disk.img) and runs qemutests/run_test.py
 # against that exact image (DISK_IMG env). Variant builds NEVER delete or
 # write the normal image: when the normal image exists, its sha256 is
 # recorded before and after the variant build (image/normal.before /
@@ -256,17 +256,17 @@ KERNEL_SELFTEST_SMP ?= 4
 .PHONY: test
 test:
 	$(call require_capability,rootfs)
-	@$(call os01_submake,test,run $(OS01_SUBMAKE_ARGS))
-	python3 tests/pmm_boot_reservation_test.py
+	@$(call os01_submake,hosttests,run $(OS01_SUBMAKE_ARGS))
+	python3 qemutests/pmm_boot_reservation_test.py
 
 .PHONY: test-pmm-boot-reservation
 test-pmm-boot-reservation:
-	python3 tests/pmm_boot_reservation_test.py
+	python3 qemutests/pmm_boot_reservation_test.py
 
 .PHONY: test-phase-0
 test-phase-0: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
-	OVMF_FIRMWARE="$(OVMF_FIRMWARE)" python3 tests/run_test.py phase-0 --disk $(NORMAL_IMAGE)
+	OVMF_FIRMWARE="$(OVMF_FIRMWARE)" python3 qemutests/run_test.py phase-0 --disk $(NORMAL_IMAGE)
 
 .PHONY: test-syscall
 # KERNEL_SELFTEST starts kernel threads at boot and can perturb the syscall
@@ -290,7 +290,7 @@ test-syscall: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	fi
-	DISK_IMG="$(TEST_SYSTEST_IMAGE)" OVMF_FIRMWARE="$(OVMF_FIRMWARE)" python3 tests/run_test.py systest
+	DISK_IMG="$(TEST_SYSTEST_IMAGE)" OVMF_FIRMWARE="$(OVMF_FIRMWARE)" python3 qemutests/run_test.py systest
 
 # Exercise repeated exec/exit through the normal terminal and ash path.
 .PHONY: test-syscall-repeat
@@ -301,7 +301,7 @@ endif
 endif
 test-syscall-repeat: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
-	python3 tests/x86_64_systest_repeat.py --disk "$(NORMAL_IMAGE)" \
+	python3 qemutests/x86_64_systest_repeat.py --disk "$(NORMAL_IMAGE)" \
 	  --firmware "$(OVMF_FIRMWARE)" --smp "$(SMP)"
 
 .PHONY: test-inittab
@@ -317,7 +317,7 @@ test-inittab: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	fi
-	DISK_IMG="$(TEST_INITTAB_IMAGE)" OVMF_FIRMWARE="$(OVMF_FIRMWARE)" python3 tests/run_test.py inittab-phase
+	DISK_IMG="$(TEST_INITTAB_IMAGE)" OVMF_FIRMWARE="$(OVMF_FIRMWARE)" python3 qemutests/run_test.py inittab-phase
 
 .PHONY: test-network
 test-network: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
@@ -332,7 +332,7 @@ test-network: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	fi
-	DISK_IMG="$(TEST_NETTEST_IMAGE)" OVMF_FIRMWARE="$(OVMF_FIRMWARE)" python3 tests/run_test.py network
+	DISK_IMG="$(TEST_NETTEST_IMAGE)" OVMF_FIRMWARE="$(OVMF_FIRMWARE)" python3 qemutests/run_test.py network
 
 # Runtime validation is deliberately rooted in a real, profile-resolved
 # kernel artifact.  The host-suite's link-order fixture is supplementary: it
@@ -340,21 +340,21 @@ test-network: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 .PHONY: test-runtime
 test-runtime: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(KERNEL_ARTIFACT))
 	$(call require_capability,rootfs)
-	python3 tests/runtime_audit.py \
+	python3 qemutests/runtime_audit.py \
 	  --stage1 "$(KERNEL_BUILD_DIR)/kernel.elf.stage1" \
 	  --final "$(KERNEL_ELF)" \
 	  --link-receipt "$(KERNEL_RUNTIME_LINK_RECEIPT)" \
 	  --runtime-input "$(KERNEL_RUNTIME_INPUTS)" \
 	  --llvm-nm "$(LLVM_NM)" \
 	  --llvm-readobj "$(LLVM_READOBJ)"
-	python3 tests/stack_canary_audit.py \
+	python3 qemutests/stack_canary_audit.py \
 	  --object "$(KERNEL_BUILD_DIR)/sched/task.o" \
 	  --elf "$(KERNEL_ELF)" \
 	  --llvm-readelf "$(LLVM_READELF)" \
 	  --llvm-objdump "$(LLVM_OBJDUMP)"
 	@$(MAKE) validate-kernel
-	python3 tests/runtime_link_order_test.py
-	python3 tests/kernel_runtime_link_test.py \
+	python3 qemutests/runtime_link_order_test.py
+	python3 qemutests/kernel_runtime_link_test.py \
 	  --source-receipt "$(KERNEL_RUNTIME_LINK_RECEIPT)" \
 	  --sysroot "$(SYSROOT)" \
 	  --profile-file "$(OS01_PROFILE_FILE)" \
@@ -412,12 +412,12 @@ print-run-paths:
 # Verify the actual linked x86 image before PMM can reuse memory at _end.
 .PHONY: test-kernel-layout
 test-kernel-layout: kernel.bin
-	python3 tests/x86_64_kernel_layout_test.py "$(KERNEL_BUILD_DIR)/kernel.elf" \
+	python3 qemutests/x86_64_kernel_layout_test.py "$(KERNEL_BUILD_DIR)/kernel.elf" \
 	  --llvm-nm "$(LLVM_NM)" --llvm-readelf "$(LLVM_READELF)"
 
 .PHONY: test-kernel-canary-contract
 test-kernel-canary-contract:
-	python3 tests/kernel_canary_contract_test.py
+	python3 qemutests/kernel_canary_contract_test.py
 
 # ── Help ─────────────────────────────────────────────────────
 # Lists the root Makefile's user-facing targets, grouped by category, with the
@@ -532,20 +532,20 @@ image: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(DISK_IMG))
 .PHONY: test-build-contract-x86
 test-build-contract-x86: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),disk.img)
 	$(call require_capability,rootfs)
-	sh tests/build_contract.sh x86_64-clang legacy-components
-	sh tests/build_contract.sh x86_64-clang legacy
-	sh tests/build_contract.sh x86_64-clang x86
-	sh tests/build_contract.sh x86_64-clang sysroot
-	sh tests/build_contract.sh x86_64-clang firmware
-	sh tests/build_contract.sh x86_64-clang targets
-	sh tests/build_contract.sh x86_64-clang host-test
+	sh qemutests/build_contract.sh x86_64-clang legacy-components
+	sh qemutests/build_contract.sh x86_64-clang legacy
+	sh qemutests/build_contract.sh x86_64-clang x86
+	sh qemutests/build_contract.sh x86_64-clang sysroot
+	sh qemutests/build_contract.sh x86_64-clang firmware
+	sh qemutests/build_contract.sh x86_64-clang targets
+	sh qemutests/build_contract.sh x86_64-clang host-test
 
 .PHONY: test-build-contract-aarch64
 test-build-contract-aarch64: aarch64-uefi
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
-	sh tests/build_contract.sh aarch64-clang aarch64
-	sh tests/build_contract.sh aarch64-clang targets
+	sh qemutests/build_contract.sh aarch64-clang aarch64
+	sh qemutests/build_contract.sh aarch64-clang targets
 
 # ── Clean ───────────────────────────────────────────────────
 # Only the default profile owns the project-root kernel.bin / disk.img compat

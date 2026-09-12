@@ -1,5 +1,5 @@
 /* Bounded, freestanding FDT v17 parser for the supported QEMU virt platform. */
-#include <kernel/arch/aarch64/dtb.h>
+#include <arch/aarch64/dtb.h>
 
 #define FDT_MAGIC UINT32_C(0xd00dfeed)
 #define MAX_DEPTH 32

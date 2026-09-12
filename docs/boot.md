@@ -358,7 +358,7 @@ kernel_main(kern_boot_para_info);
 
 ## 引导参数结构及关键 ABI
 
-**⚠️ 关键 ABI 说明**: x86_64 引导器使用 clang `--target=x86_64-pc-win32-coff` 编译（LLP64 数据模型：`sizeof(long)=4`），而内核使用 SysV LP64（`sizeof(long)=8`）。为避免结构体布局不匹配，**`boot_context` 及其子结构中的所有字段必须使用固定大小类型（`uint32_t`、`uint64_t`）**，绝不能使用 `unsigned long`、`unsigned int` 或指针。参见 `kernel/include/kernel/bootinfo.h`。
+**⚠️ 关键 ABI 说明**: x86_64 引导器使用 clang `--target=x86_64-pc-win32-coff` 编译（LLP64 数据模型：`sizeof(long)=4`），而内核使用 SysV LP64（`sizeof(long)=8`）。为避免结构体布局不匹配，**`boot_context` 及其子结构中的所有字段必须使用固定大小类型（`uint32_t`、`uint64_t`）**，绝不能使用 `unsigned long`、`unsigned int` 或指针。参见 `kernel/include/core/bootinfo.h`。
 
 x86_64 和 aarch64 两个 UEFI 引导器都构建同一个 `boot_context` v2 结构体（在 `boot_context_init` 里初始化），magic 为 `BOOT_CONTEXT_MAGIC = 0x4f533031`，version 为 `2`，size 等于 `sizeof(struct boot_context)`（104 字节）。内核通过 `boot_context_valid()` 校验三者后再继续。
 
@@ -451,7 +451,7 @@ x86_64 和 aarch64 共享同一份主代码，架构差异在 `arch/` 子目录�
 
 ## 内核入口点
 
-内核的入口点是 `kernel_main` 函数，位于 `kernel/kernel/main.c` 文件中。两个架构的引导器都通过 `arch_enter_kernel` 跳转到同一签名：
+内核的入口点是 `kernel_main` 函数，位于 `kernel/core/main.c` 文件中。两个架构的引导器都通过 `arch_enter_kernel` 跳转到同一签名：
 
 ```c
 void kernel_main(const struct boot_context *bootctx);
@@ -496,7 +496,7 @@ void kernel_main(const struct boot_context *bootctx);
 - BSP 开启 CNTP 周期 tick；AP IRQ 保持屏蔽，执行完 `smp_bench_iter` 后进入 idle，不参与调度器与用户态。
 - 不实现每核 tick、IPI、调度器、用户态、热插拔、GICv3、RPi 真机、ACPI CPU 枚举；这些另立任务。
 - 仅在 QEMU virt + Cortex-A53 + GICv2 + PSCI ≥0.2 上验证；固件默认从 `https://retrage.github.io/edk2-nightly/bin/RELEASEAARCH64_QEMU_EFI.fd` 拉取，本地缺失会自动下载到 `build/aarch64-clang/image/QEMU_EFI.fd`。固件 hash 与 conduit 写入 `test-results/aarch64-uefi-smp/<run-id>/cpus-*-run-*.metadata.json`。
-- 运行日志保留在仓库 `test-results/aarch64-uefi-smp/<run-id>/`（不提交，但本机可回放）：stdout/stderr/.metadata.json 三件套；正常模式与降级模式各一行 `python3 tests/aarch64_uefi_smp.py --help` 可查。
+- 运行日志保留在仓库 `test-results/aarch64-uefi-smp/<run-id>/`（不提交，但本机可回放）：stdout/stderr/.metadata.json 三件套；正常模式与降级模式各一行 `python3 qemutests/aarch64_uefi_smp.py --help` 可查。
 - 锁死类故障由外部 90 s watchdog 判失败；当前 `test_spinlock_smp` 的 30 s deadline 仅覆盖 AP done 缺失，不替代外部 watchdog。
 
 ## 扩展引导功能
