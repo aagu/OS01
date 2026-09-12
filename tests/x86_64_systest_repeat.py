@@ -50,6 +50,8 @@ def main():
                         log.write(block)
                         log.flush()
                         output += block
+                        if b'VFS: find_mount: CORRUPT' in output or b'PF-KRN:' in output:
+                            raise RuntimeError(f'kernel corruption detected; see {args.log}')
                     ready = stage == -1 and b'built-in shell (ash)' in output and b'# ' in output
                     if stage >= 0 and f'__REPEAT_DONE_{stage}__'.encode() in output:
                         results = re.findall(rb'\[SYS TEST\] RESULT: (\d+) passed, (\d+) failed', output)
