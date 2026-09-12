@@ -5,6 +5,12 @@
 
 void arch_task_init_early(void)
 {
+    // AP idle tasks and boot-time kthreads inherit this before task_init().
+    // A zero saved CR3 makes switch_to leave a user's page table active
+    // on an idle CPU even after that process migrates away and exits.
+    init_mm.pgdir = arch_get_page_table();
+    init_thread.cr3 = (uint64_t)init_mm.pgdir;
+
     load_TR(8);
     set_tss64(TSS64_Table,
               0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7800, 0x7400,
@@ -18,10 +24,6 @@ void *arch_task_boot_state(void)
 
 void arch_task_init_platform(void)
 {
-    // Save current page table base (set up by head.S / EFI stub).
-    init_mm.pgdir = (uint64_t *)arch_get_page_table();
-    init_thread.cr3 = (uint64_t)init_mm.pgdir;
-
     // Program BSP TSS with kernel stack pointers and IST entries.
     // BSP uses the legacy global TSS64_Table as its hardware TSS.
     set_tss64(TSS64_Table,

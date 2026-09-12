@@ -287,6 +287,18 @@ test-syscall: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	fi
 	DISK_IMG="$(TEST_SYSTEST_IMAGE)" OVMF_FIRMWARE="$(OVMF_FIRMWARE)" python3 tests/run_test.py systest
 
+# Exercise repeated exec/exit through the normal terminal and ash path.
+.PHONY: test-syscall-repeat
+ifneq ($(filter test-syscall-repeat,$(MAKECMDGOALS)),)
+ifneq ($(filter 1,$(OS01_SYSTEST) $(KERNEL_SELFTEST)),)
+$(error ERROR: test-syscall-repeat requires normal init and KERNEL_SELFTEST=0)
+endif
+endif
+test-syscall-repeat: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
+	$(call require_capability,rootfs)
+	python3 tests/x86_64_systest_repeat.py --disk "$(NORMAL_IMAGE)" \
+	  --firmware "$(OVMF_FIRMWARE)" --smp "$(SMP)"
+
 .PHONY: test-inittab
 test-inittab: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)

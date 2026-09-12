@@ -793,6 +793,16 @@ uint64_t do_exit(uint64_t exit_code)
             blocker_wake(current->parent);
     }
 
+    // Stop using this address space before any of its pages can be reused.
+    // Keep the saved CR3 in sync with hardware while preemption is disabled:
+    // otherwise a later switch-in could reload the freed user PGD.
+    if (!(current->flags & PF_KTHREAD) && current->mm) {
+        arch_irq_state_t irq_flags = arch_local_irq_save();
+        current->thread->cr3 = (uint64_t)init_mm.pgdir;
+        arch_switch_mm(init_mm.pgdir);
+        arch_local_irq_restore(irq_flags);
+    }
+
     // Free VMA-managed pages (anon + file-backed unmaps, not 2MB ELF pages)
     vma_free_all(current->mm);
 
@@ -1441,19 +1451,24 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
         #undef KSTACK
     }
 
-    // 7. Free the OLD user address space (both VMA pages and page tables).
-    // fork_mm_copy creates fully independent page table hierarchies
-    // (vmm_alloc_map + calloc per level), so vmm_free_user_map on the
-    // child's PGD is safe — it won't corrupt the parent's address space.
-    if (current->mm) {
-        mm_t *old_mm = current->mm;
+    // 7. Commit the new address space before releasing the old one.
+    // All fallible preparation and user argument copies are complete.
+    // Publish mm + saved CR3 + hardware CR3 without a scheduling window.
+    mm_t *old_mm = current->mm;
+    arch_irq_state_t irq_flags = arch_local_irq_save();
+    current->mm = new_mm;
+    current->thread->cr3 = (uint64_t)new_mm->pgdir;
+    arch_switch_mm(new_mm->pgdir);
+    arch_local_irq_restore(irq_flags);
+
+    // The old hierarchy is private and is no longer active on this CPU.
+    if (old_mm) {
         uint64_t *old_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)old_mm->pgdir);
 
         vma_free_all(old_mm);            // free VMA-tracked 4KB pages + VMA nodes
         vmm_free_user_map(old_pml4);     // free page tables + remaining 2MB pages
 
         kfree(old_mm);
-        current->mm = NULL;
     }
 
     // 7.5 POSIX: exec() resets caught signal handlers to SIG_DFL.
@@ -1469,14 +1484,7 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     for (int sig = 1; sig < NSIG; sig++)
         current->sighand[sig].sa_handler = SIG_DFL;
 
-    // 8. Install new mm and page table
-    current->mm = new_mm;
-    current->thread->cr3 = (uint64_t)new_mm->pgdir;
-
-    // 9. Switch CR3 to the new page table
-    __asm__ __volatile__("movq %0, %%cr3" :: "r"(current->thread->cr3) : "memory");
-
-    // 10. Overwrite pt_regs for RESTORE_ALL → iretq to the new process
+    // 8. Overwrite pt_regs for RESTORE_ALL → iretq to the new process
     regs->cs      = USER_CS;
     regs->ss      = USER_DS;
     regs->ds      = USER_DS;
