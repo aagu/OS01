@@ -1,12 +1,12 @@
-#include <kernel/selftest.h>
-#include <kernel/printk.h>
-#include <kernel/slab.h>
-#include <kernel/vmm.h>
-#include <kernel/pmm.h>
+#include <core/selftest.h>
+#include <core/printk.h>
+#include <memory/slab.h>
+#include <memory/vmm.h>
+#include <memory/pmm.h>
 #include <fs/vfs.h>
-#include <kernel/task.h>
-#include <kernel/arch/spinlock.h>
-#include <kernel/file.h>
+#include <sched/task.h>
+#include <arch/spinlock.h>
+#include <fs/file.h>
 #include <string.h>
 #include <stdlib.h>
 

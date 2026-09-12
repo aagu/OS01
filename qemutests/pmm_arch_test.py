@@ -71,8 +71,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # in ``kernel/memory.h`` (which transitively includes
 # ``arch/mmu.h`` and its inline asm the test does not exercise).
 X86_64_STUB_C = r"""
-#include <kernel/arch/x86_64/handoff_layout.h>
-#include <kernel/arch/x86_64/trampoline.h>
+#include <arch/x86_64/handoff_layout.h>
+#include <arch/x86_64/trampoline.h>
 
 /* handoff_layout.h declares ``extern char _text; extern char _edata;``.
  * The kernel TU takes addresses via &-operator. ``_text`` is forced

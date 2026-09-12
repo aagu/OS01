@@ -1,5 +1,5 @@
-#include <kernel/console.h>
-#include <kernel/printk.h>
+#include <tty/console.h>
+#include <core/printk.h>
 #include <driver/font.h>
 #include <stdint.h>
 #include <stdbool.h>

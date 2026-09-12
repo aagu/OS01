@@ -19,10 +19,10 @@
 
 #if defined(OS01_SELFTEST)
 
-#include <kernel/printk.h>
-#include <kernel/task.h>
-#include <kernel/file.h>
-#include <kernel/percpu.h>
+#include <core/printk.h>
+#include <sched/task.h>
+#include <fs/file.h>
+#include <percpu/percpu.h>
 
 #define FD_RACE_ITERS  10000
 #define SPIN_LIMIT     10000000

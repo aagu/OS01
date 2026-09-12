@@ -1,6 +1,6 @@
-#include <kernel/mutex.h>
-#include <kernel/printk.h>
-#include <kernel/task.h>
+#include <sync/mutex.h>
+#include <core/printk.h>
+#include <sched/task.h>
 
 static mutex_t test_mtx;
 static volatile int shared_counter = 0;

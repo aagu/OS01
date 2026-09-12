@@ -1,5 +1,5 @@
-#include <kernel/seqlock.h>
-#include <kernel/arch/atomic.h>
+#include <sync/seqlock.h>
+#include <arch/atomic.h>
 
 void seqlock_init(seqlock_t *lock)
 {

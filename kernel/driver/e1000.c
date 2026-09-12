@@ -1,15 +1,15 @@
 // kernel/driver/e1000.c — Intel 82540EM (e1000) NIC driver
 #include <driver/e1000.h>
 #include <driver/pci.h>
-#include <kernel/vmm.h>       // vmm_map_page, kernel_map, PAGE_KERNEL_PMD_NOCACHE
-#include <kernel/pmm.h>       // PAGE_2M_MASK, alloc_pages, alloc_4k_page
-#include <kernel/memory.h>    // Phy_To_Virt
-#include <kernel/interrupt.h> // register_irq
-#include <kernel/arch/spinlock.h>
-#include <kernel/arch/barrier.h>
-#include <kernel/apic.h>      // lapic_eoi, get_ioapic_controller
-#include <kernel/log.h>
-#include <kernel/slab.h>       // log_info
+#include <memory/vmm.h>       // vmm_map_page, kernel_map, PAGE_KERNEL_PMD_NOCACHE
+#include <memory/pmm.h>       // PAGE_2M_MASK, alloc_pages, alloc_4k_page
+#include <memory/memory.h>    // Phy_To_Virt
+#include <intr/interrupt.h> // register_irq
+#include <arch/spinlock.h>
+#include <arch/barrier.h>
+#include <intr/apic.h>      // lapic_eoi, get_ioapic_controller
+#include <log/log.h>
+#include <memory/slab.h>       // log_info
 #include <string.h>
 #include "lwip/netif.h"
 #include "lwip/pbuf.h"

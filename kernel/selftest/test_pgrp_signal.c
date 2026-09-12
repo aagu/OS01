@@ -1,8 +1,8 @@
 #if defined(OS01_SELFTEST)
 
-#include <kernel/task.h>
-#include <kernel/printk.h>
-#include <kernel/arch/irq.h>
+#include <sched/task.h>
+#include <core/printk.h>
+#include <arch/irq.h>
 #include <errno.h>
 
 static volatile int pgrp_thread_ready = 0;

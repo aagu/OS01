@@ -7,8 +7,8 @@
  * its strong override in kernel/arch/<arch>/pmm_arch.c.
  */
 
-#include <kernel/bootinfo.h>
-#include <kernel/memory_map.h>
+#include <core/bootinfo.h>
+#include <memory/memory_map.h>
 
 __attribute__((weak))
 size_t pmm_arch_normalize(const struct boot_context *ctx,

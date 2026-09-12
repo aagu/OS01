@@ -12,8 +12,8 @@
  * builds via $(wildcard $(ARCHDIR)/*.c).
  */
 
-#include <kernel/arch/rtc.h>        // arch_rtc_read / arch_rtc_write
-#include <kernel/arch/io.h>         // arch_inb / arch_outb (port I/O)
+#include <arch/rtc.h>        // arch_rtc_read / arch_rtc_write
+#include <arch/io.h>         // arch_inb / arch_outb (port I/O)
 #include <driver/rtc.h>             // datetime_t
 
 // PC-AT CMOS RTC port pair. Local to this file -- never escape.

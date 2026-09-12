@@ -1,15 +1,15 @@
 /* UEFI-only AArch64 BSP entry. APs enter secondary_idle independently. */
 #include <stdint.h>
-#include <kernel/bootinfo.h>
-#include <kernel/log.h>      /* for log_err/log_info macros */
-#include <kernel/memory.h>   /* for struct boot_context / Virt_To_Phy */
-#include <kernel/pmm.h>      /* for PMMngr, struct Page, alloc_pages, free_pages, ZONE_NORMAL */
-#include <kernel/arch/cpu.h>
-#include <kernel/arch/irq.h>
-#include <kernel/arch/aarch64/dtb.h>
-#include <kernel/arch/aarch64/page_table.h>
-#include <kernel/arch/aarch64/ram.h>
-#include <kernel/arch/aarch64/smp.h>
+#include <core/bootinfo.h>
+#include <log/log.h>      /* for log_err/log_info macros */
+#include <memory/memory.h>   /* for struct boot_context / Virt_To_Phy */
+#include <memory/pmm.h>      /* for PMMngr, struct Page, alloc_pages, free_pages, ZONE_NORMAL */
+#include <arch/cpu.h>
+#include <arch/irq.h>
+#include <arch/aarch64/dtb.h>
+#include <arch/aarch64/page_table.h>
+#include <arch/aarch64/ram.h>
+#include <arch/aarch64/smp.h>
 
 void pl011_init(void);
 void aarch64_extend_direct_map(void);

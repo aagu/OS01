@@ -10,10 +10,10 @@
 #include <driver/e1000.h>
 #include <driver/virtio-net.h>
 #include <driver/pci.h>
-#include <kernel/subsys.h>
-#include <kernel/debug.h>
-#include <kernel/memory.h>  // Phy_To_Virt
-#include <kernel/slab.h>    // kmalloc, kfree
+#include <subsys/subsys.h>
+#include <core/debug.h>
+#include <memory/memory.h>  // Phy_To_Virt
+#include <memory/slab.h>    // kmalloc, kfree
 #include <string.h>
 #include <errno.h>
 #include "lwip/init.h"

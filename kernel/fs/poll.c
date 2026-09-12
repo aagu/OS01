@@ -10,19 +10,19 @@
 //   poll_table_cleanup uses entry.fd_lock for mutual exclusion
 //   with concurrent fd wake paths.
 
-#include <kernel/poll.h>
-#include <kernel/file.h>
-#include <kernel/task.h>
-#include <kernel/slab.h>
+#include <fs/poll.h>
+#include <fs/file.h>
+#include <sched/task.h>
+#include <memory/slab.h>
 #include <fs/vfs.h>
-#include <kernel/percpu.h>
-#include <kernel/pty.h>
-#include <kernel/clocksource.h>   // clocksource_read_ns()
+#include <percpu/percpu.h>
+#include <tty/pty.h>
+#include <time/clocksource.h>   // clocksource_read_ns()
 #include <net/socket.h>     // SOCK_CONNECTED, SOCK_LISTENING
 #include <string.h>          // memset
 #include <stddef.h>
 #include <errno.h>
-#include <kernel/uaccess.h>
+#include <memory/uaccess.h>
 
 // Forward: devfs_poll lives in devfs.c (devices[] is static there)
 struct vfs_node;

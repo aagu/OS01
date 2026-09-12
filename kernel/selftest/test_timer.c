@@ -6,8 +6,8 @@
 
 #if defined(OS01_SELFTEST)
 
-#include <kernel/clocksource.h>
-#include <kernel/printk.h>
+#include <time/clocksource.h>
+#include <core/printk.h>
 
 // 验证 arch_cycle_freq 在 QEMU（RTC PIE 回落）下返回非零（~2.99GHz）。
 int test_timer_tsc_freq(void)

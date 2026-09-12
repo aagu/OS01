@@ -1,5 +1,5 @@
-#include <kernel/rwlock.h>
-#include <kernel/seqlock.h>
+#include <sync/rwlock.h>
+#include <sync/seqlock.h>
 
 int test_rwlock_basic(void)
 {

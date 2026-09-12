@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <block/blockdev.h>
 #include <fs/vfs.h>
-#include <kernel/arch/spinlock.h>
+#include <arch/spinlock.h>
 
 // ── Constants ──────────────────────────────────────────
 #define EXT2_SB_OFFSET      1024

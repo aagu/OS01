@@ -1,5 +1,5 @@
-#include <kernel/trace.h>
-#include <kernel/printk.h>
+#include <core/trace.h>
+#include <core/printk.h>
 
 void backtrace(pt_regs_t* regs)
 {

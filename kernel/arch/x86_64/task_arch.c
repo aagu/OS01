@@ -1,7 +1,7 @@
-#include <kernel/task.h>
-#include <kernel/arch/mmu.h>
-#include <kernel/arch/x86_64/gate.h>
-#include <kernel/arch/thread.h>
+#include <sched/task.h>
+#include <arch/mmu.h>
+#include <arch/x86_64/gate.h>
+#include <arch/thread.h>
 
 void arch_task_init_early(void)
 {

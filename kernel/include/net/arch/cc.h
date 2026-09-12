@@ -40,7 +40,7 @@ typedef unsigned long long uint64_t;
 typedef signed long long   int64_t;
 typedef unsigned long      uintptr_t;
 
-#include <kernel/log.h>
+#include <log/log.h>
 #include <device/timer.h>  // jiffies (for LWIP_RAND)
 #include <errno.h>          // EIO, EINVAL, etc.
 // EWOULDBLOCK = EAGAIN (same as Linux)

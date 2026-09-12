@@ -22,9 +22,9 @@
 // forwarding to the _res variants with NULL callback.  No out-of-line
 // definitions live here.
 
-#include <kernel/uaccess.h>
-#include <kernel/task.h>       // current, fault_jmp, fault_cleanup, fault_cleanup_arg, addr_limit
-#include <kernel/memory.h>     // Phy_To_Virt
+#include <memory/uaccess.h>
+#include <sched/task.h>       // current, fault_jmp, fault_cleanup, fault_cleanup_arg, addr_limit
+#include <memory/memory.h>     // Phy_To_Virt
 #include <errno.h>
 
 // ── Fault-tolerant user copy with optional on-fault cleanup ──

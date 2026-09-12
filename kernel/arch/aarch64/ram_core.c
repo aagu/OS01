@@ -49,7 +49,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <kernel/bootinfo.h>
+#include <core/bootinfo.h>
 
 /* ram_core.h is kernel-internal (kernel/arch/aarch64/), not in
  * kernel/include/, so the kernel's `-Iinclude` search path does not

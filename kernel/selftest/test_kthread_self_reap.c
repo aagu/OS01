@@ -1,10 +1,10 @@
 #if defined(OS01_SELFTEST)
 
-#include <kernel/task.h>
-#include <kernel/slab.h>      // kmalloc_cache_size[] — assert object-level reclaim
+#include <sched/task.h>
+#include <memory/slab.h>      // kmalloc_cache_size[] — assert object-level reclaim
 #include <device/timer.h>     // jiffies — time-bounded wait (cross-CPU safe)
-#include <kernel/arch/irq.h>  // arch_local_irq_enable — schedule() returns with IRQs off
-#include <kernel/printk.h>
+#include <arch/irq.h>  // arch_local_irq_enable — schedule() returns with IRQs off
+#include <core/printk.h>
 
 // kthread that exits immediately. Its thread/fpu_save/stack must be
 // reclaimed by __switch_to's PF_SELF_REAP epilogue, NOT by a reaper.

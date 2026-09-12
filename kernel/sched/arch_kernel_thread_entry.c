@@ -8,7 +8,7 @@
 // linker resolves; the trampoline will be replaced once kthread
 // bringup lands on that arch.
 
-#include <kernel/printk.h>
+#include <core/printk.h>
 
 __attribute__((weak)) void arch_kernel_thread_entry(void);
 

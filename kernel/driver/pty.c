@@ -10,14 +10,14 @@
 //   Poll goes through fd_poll dispatch.
 //   ioctl goes through fd_ioctl → pty_slave_ioctl.
 
-#include <kernel/pty.h>
-#include <kernel/file.h>
+#include <tty/pty.h>
+#include <fs/file.h>
 #include <fs/devfs.h>
-#include <kernel/uaccess.h>
+#include <memory/uaccess.h>
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
-#include <kernel/task.h>
+#include <sched/task.h>
 
 // ── Forward declarations for ops tables ─────────────────────────
 static int ptmx_open(const char *name, file_t **out_file);

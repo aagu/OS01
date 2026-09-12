@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <fs/vfs.h>
 #include <block/blockdev.h>
-#include <kernel/tty.h>
+#include <tty/tty.h>
 
 // Forward declarations for poll support
 struct poll_table;

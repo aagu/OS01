@@ -1,13 +1,13 @@
-#include <kernel/apic.h>
-#include <kernel/memory.h>
-#include <kernel/pmm.h>
-#include <kernel/vmm.h>
-#include <kernel/debug.h>
-#include <kernel/arch/msr.h>
-#include <kernel/arch/cpuid.h>
-#include <kernel/arch/x86_64/gate.h>
-#include <kernel/arch/irq.h>
-#include <kernel/arch/thread.h>
+#include <intr/apic.h>
+#include <memory/memory.h>
+#include <memory/pmm.h>
+#include <memory/vmm.h>
+#include <core/debug.h>
+#include <arch/msr.h>
+#include <arch/cpuid.h>
+#include <arch/x86_64/gate.h>
+#include <arch/irq.h>
+#include <arch/thread.h>
 #include <stdint.h>
 
 // ──────────────────────────────────────────────
@@ -178,7 +178,7 @@ void apic_init(uint64_t rsdp_phys)
 }
 
 #ifdef __x86_64__
-#include <kernel/subsys.h>
+#include <subsys/subsys.h>
 // Register this driver into the platform's subsystem table. The
 // _register function is collected by arch_register_subsys() at boot via
 // the .subsys_init linker section; it calls register_subsys() to queue

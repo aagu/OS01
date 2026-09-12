@@ -4,11 +4,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <fs/devfs.h>
-#include <kernel/file.h>
-#include <kernel/poll.h>
-#include <kernel/pty.h>
-#include <kernel/select.h>
-#include <kernel/tty.h>
+#include <fs/file.h>
+#include <fs/poll.h>
+#include <tty/pty.h>
+#include <fs/select.h>
+#include <tty/tty.h>
 
 static task_t test_task;
 static files_t test_files;

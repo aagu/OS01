@@ -1,14 +1,14 @@
 #include <driver/pit.h>
 #include <device/timer.h>
-#include <kernel/arch/io.h>
-#include <kernel/interrupt.h>
+#include <arch/io.h>
+#include <intr/interrupt.h>
 #include <stddef.h>
-#include <kernel/apic.h>
+#include <intr/apic.h>
 #include <kernel.h>
-#include <kernel/clockevent.h>  // tick_handler()
+#include <time/clockevent.h>  // tick_handler()
 #include <driver/serial.h>
-#include <kernel/console.h>
-#include <kernel/debug.h>
+#include <tty/console.h>
+#include <core/debug.h>
 
 void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attribute__((unused)), pt_regs_t * regs __attribute__((unused)))
 {
@@ -31,7 +31,7 @@ void set_frequency(uint16_t hz)
 }
 
 #ifdef __x86_64__
-#include <kernel/subsys.h>
+#include <subsys/subsys.h>
 // Register this driver into the platform's subsystem table. The
 // _register function is collected by arch_register_subsys() at boot via
 // the .subsys_init linker section; it calls register_subsys() to queue

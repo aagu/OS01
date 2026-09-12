@@ -4,7 +4,7 @@
  * Once CPUs start, coherent accesses retain this same identity VA.
  */
 
-#include <kernel/arch/cpu.h>                  /* NR_CPUS */
+#include <arch/cpu.h>                  /* NR_CPUS */
 #include "aarch64_percpu.h"
 
 __attribute__((section(".boot.bss"), aligned(8)))

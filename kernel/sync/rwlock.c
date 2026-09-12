@@ -1,6 +1,6 @@
-#include <kernel/rwlock.h>
-#include <kernel/arch/atomic.h>
-#include <kernel/arch/cpu.h>     // arch_cpu_pause — arch-neutral spin hint
+#include <sync/rwlock.h>
+#include <arch/atomic.h>
+#include <arch/cpu.h>     // arch_cpu_pause — arch-neutral spin hint
 
 #define RWLOCK_WRITER       (1ULL << 63)
 #define RWLOCK_WAITER_ONE   (1ULL << 32)

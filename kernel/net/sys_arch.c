@@ -11,12 +11,12 @@
 // We allocate structs via kmalloc and store pointers in *sem/*mbox.
 
 #include "lwip/sys.h"       // SYS_ARCH_TIMEOUT, SYS_MBOX_EMPTY, err_t
-#include <kernel/arch/spinlock.h>
-#include <kernel/arch/irq.h>
-#include <kernel/wait.h>
-#include <kernel/task.h>
-#include <kernel/percpu.h>
-#include <kernel/slab.h>      // kmalloc, kfree
+#include <arch/spinlock.h>
+#include <arch/irq.h>
+#include <sync/wait.h>
+#include <sched/task.h>
+#include <percpu/percpu.h>
+#include <memory/slab.h>      // kmalloc, kfree
 #include <device/timer.h>     // jiffies
 #include <string.h>           // strdup
 #include <errno.h>            // for errno extern

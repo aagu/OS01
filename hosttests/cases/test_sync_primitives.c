@@ -1,6 +1,6 @@
 #include "test_framework.h"
-#include <kernel/rwlock.h>
-#include <kernel/seqlock.h>
+#include <sync/rwlock.h>
+#include <sync/seqlock.h>
 #include <pthread.h>
 #include <sched.h>
 

@@ -1,13 +1,13 @@
 // kernel/memory/vma.c — VMA linked-list management
-#include <kernel/vma.h>
-#include <kernel/task.h>
+#include <memory/vma.h>
+#include <sched/task.h>
 #include <kernel.h>
-#include <kernel/slab.h>
-#include <kernel/file.h>
-#include <kernel/pmm.h>
-#include <kernel/memory.h>
-#include <kernel/uaccess.h>          // USER_MIN_ADDR, arch_user_range_accessible
-#include <kernel/arch/spinlock.h>   // mm->lock: guards munmap/MAP_FIXED/mprotect
+#include <memory/slab.h>
+#include <fs/file.h>
+#include <memory/pmm.h>
+#include <memory/memory.h>
+#include <memory/uaccess.h>          // USER_MIN_ADDR, arch_user_range_accessible
+#include <arch/spinlock.h>   // mm->lock: guards munmap/MAP_FIXED/mprotect
 #include <string.h>
 #include <stdlib.h>                 // calloc (used by mm_alloc)
 #include <errno.h>

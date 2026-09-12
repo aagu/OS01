@@ -1,10 +1,10 @@
 #include <device/pic.h>
-#include <kernel/printk.h>
-#include <kernel/arch/io.h>
+#include <core/printk.h>
+#include <arch/io.h>
 #include <kernel.h>
-#include <kernel/arch/irq.h>
-#include <kernel/arch/thread.h>
-#include <kernel/interrupt.h>
+#include <arch/irq.h>
+#include <arch/thread.h>
+#include <intr/interrupt.h>
 #include <stddef.h>
 
 void pic_init()
@@ -102,7 +102,7 @@ hw_int_controller_t *get_pic_controller(void)
 }
 
 #ifdef __x86_64__
-#include <kernel/subsys.h>
+#include <subsys/subsys.h>
 // Register this driver into the platform's subsystem table. The
 // _register function is collected by arch_register_subsys() at boot via
 // the .subsys_init linker section; it calls register_subsys() to queue

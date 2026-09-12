@@ -1,5 +1,5 @@
-#include <kernel/memory.h>
-#include <kernel/printk.h>
+#include <memory/memory.h>
+#include <core/printk.h>
 #include <stdbool.h>
 
 static uint64_t mem_char(uint64_t val)

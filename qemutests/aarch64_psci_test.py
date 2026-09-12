@@ -8,7 +8,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 
 RUNNER = r'''
-#include <kernel/arch/aarch64/psci.h>
+#include <arch/aarch64/psci.h>
 #include <stdint.h>
 
 static uint64_t smc_result;

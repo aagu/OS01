@@ -34,7 +34,7 @@ typedef struct {
     task_t task;
 } poll_test_task_union_t;
 
-#include <kernel/file.h>
+#include <fs/file.h>
 
 #define TASK_RUNNING       (1 << 0)
 #define TASK_INTERRUPTIBLE (1 << 1)

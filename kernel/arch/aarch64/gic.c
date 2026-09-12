@@ -1,9 +1,9 @@
 /* Minimal QEMU virt GICv2: distributor setup is BSP-only; each CPU
  * configures its banked PPI registers and CPU interface with IRQ masked. */
 #include <stdint.h>
-#include <kernel/arch/aarch64/boot_log.h>
-#include <kernel/arch/aarch64/dtb.h>
-#include <kernel/arch/aarch64/smp.h>
+#include <arch/aarch64/boot_log.h>
+#include <arch/aarch64/dtb.h>
+#include <arch/aarch64/smp.h>
 #include "reg.h"
 
 void gic_cpu_init(void)

@@ -1,5 +1,5 @@
 #include <driver/logo.h>
-#include <kernel/printk.h>
+#include <core/printk.h>
 
 // ── OS01 boot logo (7 rows x 31 cols ASCII art) ──────────────
 // O S 0 1, drawn with putchar_at at character-cell granularity.

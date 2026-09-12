@@ -11,10 +11,10 @@
 
 #include <fs/tmpfs.h>
 #include <fs/vfs.h>
-#include <kernel/debug.h>
-#include <kernel/pmm.h>      // alloc_4k_page, free_4k_page
-#include <kernel/memory.h>    // Phy_To_Virt, Virt_To_Phy
-#include <kernel/slab.h>      // kmalloc, kfree
+#include <core/debug.h>
+#include <memory/pmm.h>      // alloc_4k_page, free_4k_page
+#include <memory/memory.h>    // Phy_To_Virt, Virt_To_Phy
+#include <memory/slab.h>      // kmalloc, kfree
 #include <string.h>
 #include <stdlib.h>          // calloc
 

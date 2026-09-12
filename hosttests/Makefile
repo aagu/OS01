@@ -270,7 +270,7 @@ $(TEST_BLD)/test_bootinfo_abi.elf: $(TEST_BLD)/test_bootinfo_abi.o
 	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/test_bootinfo_abi.o: $(TEST_CASES)/test_bootinfo_abi.c \
-		$(TESTS_DIR)/kernel/include/kernel/bootinfo.h
+		$(TESTS_DIR)/kernel/include/core/bootinfo.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) -I$(TESTS_DIR)/kernel/include -c $< -o $@
 

@@ -9,11 +9,11 @@
 //   fd_set write-back).  The shared core is do_select_common().
 //   do_select_nofds() handles the degenerate nfds==0 case for both.
 
-#include <kernel/select.h>
-#include <kernel/poll.h>
-#include <kernel/task.h>
-#include <kernel/slab.h>
-#include <kernel/uaccess.h>
+#include <fs/select.h>
+#include <fs/poll.h>
+#include <sched/task.h>
+#include <memory/slab.h>
+#include <memory/uaccess.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdbool.h>

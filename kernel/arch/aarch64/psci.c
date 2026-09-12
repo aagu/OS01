@@ -1,5 +1,5 @@
 #include <stdint.h>
-#include <kernel/arch/aarch64/psci.h>
+#include <arch/aarch64/psci.h>
 
 #define PSCI_VERSION_FID       UINT64_C(0x84000000)
 #define PSCI_CPU_ON64_FID      UINT64_C(0xc4000003)

@@ -29,7 +29,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#include <kernel/arch/aarch64/ram.h>
+#include <arch/aarch64/ram.h>
 
 /* The raw UEFI memory descriptor the firmware emits is 48 bytes; the
  * loader prepends a 32-byte prefix (a `boot_memory_map` head that
@@ -73,7 +73,7 @@
 /* Closed-open `[start, end)` physical interval used by the
  * normalizer's exclusion list. Reserved for the internal contract
  * layer — the public range type the kernel iterates is
- * `struct aarch64_ram_range` in <kernel/arch/aarch64/ram.h>. */
+ * `struct aarch64_ram_range` in <arch/aarch64/ram.h>. */
 struct aarch64_ram_interval {
     uint64_t start;
     uint64_t end;

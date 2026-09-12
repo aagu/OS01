@@ -78,7 +78,7 @@ def flatten(tree):
 
 
 RUNNER = r'''
-#include <kernel/arch/aarch64/dtb.h>
+#include <arch/aarch64/dtb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

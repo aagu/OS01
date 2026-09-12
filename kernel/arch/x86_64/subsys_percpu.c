@@ -1,7 +1,7 @@
 // kernel/arch/x86_64/subsys_percpu.c
 
-#include <kernel/subsys.h>
-#include <kernel/apic.h>
+#include <subsys/subsys.h>
+#include <intr/apic.h>
 
 static int _lapic_timer_start_percpu(int cpu_id)
 {

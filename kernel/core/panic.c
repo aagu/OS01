@@ -1,14 +1,13 @@
-#include <kernel/panic.h>
-#include <kernel/printk.h>
-#include <kernel/arch/cpu.h>
-#include <kernel/arch/irq.h>
+#include <core/panic.h>
+#include <core/printk.h>
+#include <arch/cpu.h>
+#include <arch/irq.h>
 #include <stddef.h>
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
-#include <kernel/hang.h>
-#include <kernel/percpu.h>
-#include <kernel/task.h>
+#include <percpu/percpu.h>
+#include <sched/task.h>
 #include <kernel.h>
 #include <device/timer.h>
 

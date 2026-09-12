@@ -1,12 +1,12 @@
-#include <kernel/slab.h>
-#include <kernel/memory.h>
-#include <kernel/debug.h>
-#include <kernel/printk.h>
+#include <memory/slab.h>
+#include <memory/memory.h>
+#include <core/debug.h>
+#include <core/printk.h>
 #include <kernel.h>
 #include <string.h>
 
-#include <kernel/arch/spinlock.h>
-#include <kernel/percpu.h>
+#include <arch/spinlock.h>
+#include <percpu/percpu.h>
 
 struct Slab_Cache kmalloc_cache_size[16] = 
 {

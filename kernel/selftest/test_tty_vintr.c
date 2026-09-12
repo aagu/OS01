@@ -19,10 +19,10 @@
 
 #if defined(OS01_SELFTEST)
 
-#include <kernel/task.h>
-#include <kernel/tty.h>
-#include <kernel/printk.h>
-#include <kernel/arch/irq.h>
+#include <sched/task.h>
+#include <tty/tty.h>
+#include <core/printk.h>
+#include <arch/irq.h>
 
 static volatile int vintr_seen = 0;
 static volatile int vintr_thread_pid = 0;

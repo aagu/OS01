@@ -1,6 +1,6 @@
 #include <block/blockdev.h>
 #include <driver/ahci.h>
-#include <kernel/debug.h>
+#include <core/debug.h>
 #include <string.h>
 
 // ── Global device table ───────────────────────────────────

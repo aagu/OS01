@@ -28,7 +28,7 @@ void pic_uninstall(uint64_t nr);
 void pic_ack(uint64_t nr);
 
 // Get the global PIC hw_int_controller_t (for ISA IRQ fallback when no IOAPIC)
-#include <kernel/interrupt.h>
+#include <intr/interrupt.h>
 hw_int_controller_t *get_pic_controller(void);
 
 #endif

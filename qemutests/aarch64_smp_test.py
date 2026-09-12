@@ -30,7 +30,7 @@ def check_benchmark(tmp):
 #define _ARCH_AARCH64_SPINLOCK_H
 #define _ARCH_AARCH64_BOOT_PERCPU_H
 #define _ARCH_AARCH64_GIC_H
-#include <kernel/arch/aarch64/boot_offsets.h>
+#include <arch/aarch64/boot_offsets.h>
 #define NR_CPUS 8
 typedef struct { unsigned long lock; } spinlock_T;
 static spinlock_T bench_lock;
@@ -194,7 +194,7 @@ def check_boot_core(tmp):
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <kernel/arch/aarch64/smp_boot_core.h>
+#include <arch/aarch64/smp_boot_core.h>
 
 struct event { uint64_t at; uint32_t cpu; };
 struct fake {
@@ -471,7 +471,7 @@ def check_layout_compile(tmp, clang):
     # the shared constants; moving online/go silently breaks the AP ACK ABI.
     source = r'''
 #include "aarch64_percpu.h"
-#include <kernel/arch/aarch64/boot_offsets.h>
+#include <arch/aarch64/boot_offsets.h>
 _Static_assert(sizeof(aarch64_boot_percpu_t) == 48, "slot size");
 _Static_assert(__builtin_offsetof(aarch64_boot_percpu_t, online) == 32, "ACK offset");
 _Static_assert(__builtin_offsetof(aarch64_boot_percpu_t, go) == 36, "command offset");

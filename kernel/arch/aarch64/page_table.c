@@ -17,9 +17,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <kernel/arch/mmu.h>
-#include <kernel/arch/aarch64/page_table.h>
-#include <kernel/pmm.h>
+#include <arch/mmu.h>
+#include <arch/aarch64/page_table.h>
+#include <memory/pmm.h>
 
 /* ── Constants private to this TU ──────────────────────────────── */
 

@@ -1,10 +1,10 @@
-#include <kernel/task.h>
-#include <kernel/percpu.h>
-#include <kernel/arch/spinlock.h>
-#include <kernel/arch/x86_64/gate.h>
-#include <kernel/arch/cpu.h>
-#include <kernel/printk.h>
-#include <kernel/slab.h>   // kfree — for PF_SELF_REAP epilogue
+#include <sched/task.h>
+#include <percpu/percpu.h>
+#include <arch/spinlock.h>
+#include <arch/x86_64/gate.h>
+#include <arch/cpu.h>
+#include <core/printk.h>
+#include <memory/slab.h>   // kfree — for PF_SELF_REAP epilogue
 
 /**
  * __switch_to — architecture-specific context switch

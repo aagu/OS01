@@ -17,14 +17,14 @@
 //
 // Registered in selftest_run_all() under the OS01_SELFTEST gate.
 
-#include <kernel/selftest.h>
-#include <kernel/uaccess.h>
-#include <kernel/memory.h>
-#include <kernel/vmm.h>
-#include <kernel/pmm.h>
-#include <kernel/task.h>
-#include <kernel/printk.h>
-#include <kernel/arch/mmu.h>
+#include <core/selftest.h>
+#include <memory/uaccess.h>
+#include <memory/memory.h>
+#include <memory/vmm.h>
+#include <memory/pmm.h>
+#include <sched/task.h>
+#include <core/printk.h>
+#include <arch/mmu.h>
 #include <errno.h>
 #include <string.h>
 #include <stdint.h>

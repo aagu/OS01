@@ -12,7 +12,7 @@
  */
 
 #include <stdint.h>
-#include <kernel/arch/cpu.h>   /* arch_nop for tiny spin waits */
+#include <arch/cpu.h>   /* arch_nop for tiny spin waits */
 
 /* MMIO base: QEMU virt wires PL011 here (per spec §2.2). */
 #define PL011_BASE       ((volatile uint32_t *)0x09000000UL)

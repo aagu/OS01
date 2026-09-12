@@ -1,8 +1,8 @@
-#include <kernel/interrupt.h>
-#include <kernel/arch/irq.h>
-#include <kernel/debug.h>
+#include <intr/interrupt.h>
+#include <arch/irq.h>
+#include <core/debug.h>
 #include <stddef.h>
-#include <kernel/softirq.h>
+#include <intr/softirq.h>
 #include <string.h>
 
 // kernel/intr/irq.c — arch-neutral IRQ registration API.

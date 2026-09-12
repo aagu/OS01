@@ -1,11 +1,11 @@
 #include <driver/serial.h>
-#include <kernel/interrupt.h>
-#include <kernel/printk.h>
-#include <kernel/tty.h>
-#include <kernel/apic.h>
-#include <kernel/arch/io.h>
-#include <kernel/arch/cpu.h>
-#include <kernel/arch/irq.h>
+#include <intr/interrupt.h>
+#include <core/printk.h>
+#include <tty/tty.h>
+#include <intr/apic.h>
+#include <arch/io.h>
+#include <arch/cpu.h>
+#include <arch/irq.h>
 #include <stddef.h>
 
 // ═══════════════════════════════════════════════════════════
@@ -238,7 +238,7 @@ void write_serial(char c)
 }
 
 #ifdef __x86_64__
-#include <kernel/subsys.h>
+#include <subsys/subsys.h>
 // Register this driver into the platform's subsystem table. The
 // _register function is collected by arch_register_subsys() at boot via
 // the .subsys_init linker section; it calls register_subsys() to queue

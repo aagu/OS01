@@ -1,11 +1,11 @@
-#include <kernel/ipi.h>
-#include <kernel/apic.h>
-#include <kernel/percpu.h>
-#include <kernel/debug.h>
-#include <kernel/vmm.h>
-#include <kernel/arch/irq.h>
-#include <kernel/arch/cpu.h>
-#include <kernel/arch/x86_64/gate.h>
+#include <intr/ipi.h>
+#include <intr/apic.h>
+#include <percpu/percpu.h>
+#include <core/debug.h>
+#include <memory/vmm.h>
+#include <arch/irq.h>
+#include <arch/cpu.h>
+#include <arch/x86_64/gate.h>
 
 // ── File-scope: generate assembly stubs ──────────────────
 // MUST be outside any function so the stub code is not

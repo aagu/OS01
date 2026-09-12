@@ -1,7 +1,7 @@
 #include <fs/fat.h>
 #include <block/blockdev.h>
 #include <fs/vfs.h>
-#include <kernel/debug.h>
+#include <core/debug.h>
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>

@@ -5,12 +5,12 @@
 #include <lwip/etharp.h>
 #include <driver/virtio-net.h>
 #include <driver/pci.h>
-#include <kernel/debug.h>
-#include <kernel/memory.h>
-#include <kernel/pmm.h>
-#include <kernel/interrupt.h>
-#include <kernel/apic.h>
-#include <kernel/vmm.h>
+#include <core/debug.h>
+#include <memory/memory.h>
+#include <memory/pmm.h>
+#include <intr/interrupt.h>
+#include <intr/apic.h>
+#include <memory/vmm.h>
 #include <string.h>
 
 #define VQ_SIZE         64

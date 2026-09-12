@@ -20,13 +20,13 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <kernel/arch/cpu.h>
-#include <kernel/arch/mmu.h>
-#include <kernel/arch/aarch64/boot_log.h>
-#include <kernel/arch/aarch64/handoff_layout.h>
-#include <kernel/arch/aarch64/ram.h>
+#include <arch/cpu.h>
+#include <arch/mmu.h>
+#include <arch/aarch64/boot_log.h>
+#include <arch/aarch64/handoff_layout.h>
+#include <arch/aarch64/ram.h>
 #include "ram_core.h"
-#include <kernel/bootinfo.h>
+#include <core/bootinfo.h>
 
 
 /* Low physical LMA helpers defined in head.S. Direct C references

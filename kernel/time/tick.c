@@ -1,13 +1,13 @@
-#include <kernel/clockevent.h>
+#include <time/clockevent.h>
 #include <device/timer.h>
-#include <kernel/clocksource.h>   // clocksource_read_ns()
-#include <kernel/softirq.h>       // set_softirq_status, TIMER_SIRQ
-#include <kernel/percpu.h>        // this_cpu()
-#include <kernel/arch/cpu.h>      // arch_tick_start()
-#include <kernel/interrupt.h>     // irq_mask / irq_unmask
-#include <kernel/poll.h>          // poll_timeout_node_t, poll_timeout_head/lock
-#include <kernel/wait.h>          // wait_queue_wake_all
-#include <kernel/task.h>          // current
+#include <time/clocksource.h>   // clocksource_read_ns()
+#include <intr/softirq.h>       // set_softirq_status, TIMER_SIRQ
+#include <percpu/percpu.h>        // this_cpu()
+#include <arch/cpu.h>      // arch_tick_start()
+#include <intr/interrupt.h>     // irq_mask / irq_unmask
+#include <fs/poll.h>          // poll_timeout_node_t, poll_timeout_head/lock
+#include <sync/wait.h>          // wait_queue_wake_all
+#include <sched/task.h>          // current
 #include <kernel.h>               // container_of
 
 // 从 pit_handler 迁来的 poll 超时注册表（定义在 kernel/fs/poll.c）。

@@ -16,9 +16,9 @@
  * controller yet.
  */
 
-#include <kernel/arch/irq.h>
-#include <kernel/log.h>
-#include <kernel/arch/cpu.h>   /* arch_cpu_halt for the FATAL path */
+#include <arch/irq.h>
+#include <log/log.h>
+#include <arch/cpu.h>   /* arch_cpu_halt for the FATAL path */
 
 __attribute__((weak))
 hw_int_controller_t *arch_irq_select_controller(uint32_t gsi)

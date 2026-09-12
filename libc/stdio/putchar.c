@@ -3,7 +3,7 @@
 #include <unistd.h>
 
 #if defined(__is_libk)
-#include <kernel/printk.h>
+#include <core/printk.h>
 #endif
 
 int putchar(int ic) {

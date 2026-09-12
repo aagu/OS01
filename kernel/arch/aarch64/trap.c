@@ -11,7 +11,7 @@
  */
 
 #include <stdint.h>
-#include <kernel/arch/cpu.h>
+#include <arch/cpu.h>
 
 /* No-op for now.  Phase 2 may install a vector-table helper. */
 void arch_install_exception_vectors(void)

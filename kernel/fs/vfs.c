@@ -1,9 +1,9 @@
 #include <fs/vfs.h>
-#include <kernel/debug.h>
-#include <kernel/printk.h>
-#include <kernel/slab.h>
-#include <kernel/rwlock.h>
-#include <kernel/task.h>      // current->files->cwd for resolve_at
+#include <core/debug.h>
+#include <core/printk.h>
+#include <memory/slab.h>
+#include <sync/rwlock.h>
+#include <sched/task.h>      // current->files->cwd for resolve_at
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>

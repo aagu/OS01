@@ -9,10 +9,10 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <kernel/arch/cpu.h>   /* NR_CPUS */
-#include <kernel/arch/aarch64/boot_offsets.h>
-#include <kernel/arch/aarch64/dtb.h>
-#include <kernel/arch/aarch64/spinlock.h> /* spinlock_T */
+#include <arch/cpu.h>   /* NR_CPUS */
+#include <arch/aarch64/boot_offsets.h>
+#include <arch/aarch64/dtb.h>
+#include <arch/aarch64/spinlock.h> /* spinlock_T */
 
 /* Per-CPU data used from boot through SMP bring-up (see spec §2.6).
  * Use plain unsigned types so the layout matches the C ABI the assembler

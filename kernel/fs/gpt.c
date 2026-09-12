@@ -2,8 +2,8 @@
 #include <fs/gpt.h>
 #include <fs/devfs.h>
 #include <block/blockdev.h>
-#include <kernel/debug.h>
-#include <kernel/slab.h>     // kmalloc, kfree
+#include <core/debug.h>
+#include <memory/slab.h>     // kmalloc, kfree
 #include <string.h>
 #include <stdlib.h>          // calloc
 

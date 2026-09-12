@@ -1,9 +1,9 @@
 #include <driver/pci.h>
-#include <kernel/arch/io.h>
-#include <kernel/debug.h>
-#include <kernel/memory.h>   // Phy_To_Virt
-#include <kernel/pmm.h>      // PAGE_2M_MASK
-#include <kernel/vmm.h>      // vmm_map_page, PAGE_KERNEL_PMD_NOCACHE
+#include <arch/io.h>
+#include <core/debug.h>
+#include <memory/memory.h>   // Phy_To_Virt
+#include <memory/pmm.h>      // PAGE_2M_MASK
+#include <memory/vmm.h>      // vmm_map_page, PAGE_KERNEL_PMD_NOCACHE
 #include <stdint.h>
 
 // ── Legacy PCI config space access via 0xCF8 / 0xCFC ─────

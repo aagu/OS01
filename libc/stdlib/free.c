@@ -1,6 +1,6 @@
 #include <stdlib.h>
 #if defined(__is_libk)
-#include <kernel/slab.h>
+#include <memory/slab.h>
 #endif
 
 void free (void * ptr)

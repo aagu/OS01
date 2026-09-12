@@ -24,8 +24,8 @@
 // selftest_run_all(); the runner does not scan .selftest_table, so SELFTEST()
 // is deliberately not used.
 
-#include <kernel/selftest.h>
-#include <kernel/printk.h>
+#include <core/selftest.h>
+#include <core/printk.h>
 #include <fs/vfs.h>
 #include <fs/ext2.h>
 #include <uapi/stat.h>       // AT_FDCWD

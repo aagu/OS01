@@ -1,7 +1,7 @@
 /* UEFI-only DTB handoff wrapper. Pure parsing lives in dtb_parse.c. */
-#include <kernel/arch/aarch64/dtb.h>
-#include <kernel/arch/cpu.h>
-#include <kernel/bootinfo.h>
+#include <arch/aarch64/dtb.h>
+#include <arch/cpu.h>
+#include <core/bootinfo.h>
 
 void kputs(const char *s);
 void kputu(uint64_t v);

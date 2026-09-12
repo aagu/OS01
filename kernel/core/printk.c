@@ -1,9 +1,9 @@
-#include <kernel/printk.h>
-#include <kernel/memory.h>
-#include <kernel/vmm.h>
-#include <kernel/pmm.h>
-#include <kernel/slab.h>
-#include <kernel/arch/spinlock.h>
+#include <core/printk.h>
+#include <memory/memory.h>
+#include <memory/vmm.h>
+#include <memory/pmm.h>
+#include <memory/slab.h>
+#include <arch/spinlock.h>
 #include <driver/serial.h>
 #include <stdio.h>
 #include <driver/font.h>

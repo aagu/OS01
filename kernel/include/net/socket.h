@@ -2,7 +2,7 @@
 #ifndef _NET_SOCKET_H
 #define _NET_SOCKET_H
 
-#include <kernel/file.h>
+#include <fs/file.h>
 #include <stdint.h>
 
 // Kernel-side byte swap helper (network order -> host order).

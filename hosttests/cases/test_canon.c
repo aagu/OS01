@@ -6,7 +6,7 @@
  * remainder buffering, short user buffers, capacity.
  */
 #include "test_framework.h"
-#include <kernel/canon.h>
+#include <tty/canon.h>
 #include <string.h>
 #include <stdlib.h>
 

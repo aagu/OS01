@@ -82,9 +82,9 @@ UEFI_EFI_ARTIFACT := $(BUILD_DIR)/artifacts/uefi/$(UEFI_TARGET_EFI)
 # only layout change still re-keys both the staged runtime receipt
 # and the EFI artifact.
 UEFI_BOOT_INPUTS := $(UEFI_BOOT_SRCS) boot/uefi/arch/arch.h \
-                    kernel/include/kernel/bootinfo.h
+                    kernel/include/core/bootinfo.h
 ifeq ($(UEFI_ARCH_FAMILY),aarch64)
-UEFI_BOOT_INPUTS += kernel/include/kernel/arch/aarch64/handoff_layout.h
+UEFI_BOOT_INPUTS += kernel/include/arch/aarch64/handoff_layout.h
 endif
 
 # ── Runtime adapter (FORCE: digest-gated, always checks) ──────────

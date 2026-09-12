@@ -1,7 +1,7 @@
 #include <stdarg.h>
-#include <kernel/log.h>
-#include <kernel/printk.h>
-#include <kernel/arch/spinlock.h>
+#include <log/log.h>
+#include <core/printk.h>
+#include <arch/spinlock.h>
 #include <driver/serial.h>
 #include <stdio.h>
 

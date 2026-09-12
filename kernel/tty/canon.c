@@ -8,7 +8,7 @@
 //                      TTY_BUF_SIZE);
 //     n = canon_read(&tty->canon, buf, size);
 
-#include <kernel/canon.h>
+#include <tty/canon.h>
 #include <string.h>
 
 int canon_accumulate(canon_buf_t *cb,

@@ -1,6 +1,6 @@
 #include <stddef.h>
 #include <stdio.h>
-#include <kernel/bootinfo.h>
+#include <core/bootinfo.h>
 
 _Static_assert(BOOT_CONTEXT_MAGIC == UINT32_C(0x4f533031),
                "boot context magic");

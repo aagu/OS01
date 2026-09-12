@@ -1,11 +1,11 @@
 #include <device/timer.h>
-#include <kernel/debug.h>
-#include <kernel/softirq.h>
+#include <core/debug.h>
+#include <intr/softirq.h>
 #include <kernel.h>
-#include <kernel/printk.h>
+#include <core/printk.h>
 #include <stdlib.h>
-#include <kernel/task.h>
-#include <kernel/arch/spinlock.h>
+#include <sched/task.h>
+#include <arch/spinlock.h>
 
 uint64_t volatile jiffies;
 timer_t timer_list_head;
@@ -134,7 +134,7 @@ int timer_has_expired(uint64_t now)
 }
 
 #ifdef __x86_64__
-#include <kernel/subsys.h>
+#include <subsys/subsys.h>
 // Register this driver into the platform's subsystem table. The
 // _register function is collected by arch_register_subsys() at boot via
 // the .subsys_init linker section; it calls register_subsys() to queue

@@ -11,10 +11,10 @@
 /* boot_log.h must come first: it defines static-inline log_err/warn/info
  * that would conflict with the kernel/log.h macros if those were already
  * defined when boot_log.h is parsed. */
-#include <kernel/arch/aarch64/boot_log.h>   /* for kputs */
+#include <arch/aarch64/boot_log.h>   /* for kputs */
 
 #include <stdarg.h>
-#include <kernel/log.h>
+#include <log/log.h>
 
 void _log_err_impl(const char *fmt, ...)
 {

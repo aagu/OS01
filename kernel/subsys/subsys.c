@@ -1,8 +1,8 @@
 // kernel/subsys/subsys.c
 
-#include <kernel/subsys.h>
-#include <kernel/printk.h>
-#include <kernel/percpu.h>
+#include <subsys/subsys.h>
+#include <core/printk.h>
+#include <percpu/percpu.h>
 #include <string.h>
 
 #define MAX_SUBSYS        64

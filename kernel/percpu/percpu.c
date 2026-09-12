@@ -1,5 +1,5 @@
-#include <kernel/percpu.h>
-#include <kernel/arch/cpu.h>
+#include <percpu/percpu.h>
+#include <arch/cpu.h>
 #include <string.h>
 
 percpu_t percpu_data[NR_CPUS];

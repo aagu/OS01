@@ -22,8 +22,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 RUNNER = r'''
-#include <kernel/bootinfo.h>
-#include <kernel/arch/aarch64/ram.h>
+#include <core/bootinfo.h>
+#include <arch/aarch64/ram.h>
+/* ram_core.h lives in kernel/arch/aarch64/ (source dir, not the include
+ * dir), so use the relative form that -I. resolves from cwd=ROOT. */
 #include <kernel/arch/aarch64/ram_core.h>
 #include <stddef.h>
 #include <stdint.h>

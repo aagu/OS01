@@ -6,11 +6,11 @@
 // periodic reseed (every 1 MiB of output) — never per-call — because RDRAND
 // throughput is bounded and per-call rekeying would turn a CSPRNG back into
 // a hardware dependency without adding security.
-#include <kernel/random.h>
-#include <kernel/arch/random.h>
-#include <kernel/arch/cpu.h>        // arch_cycle_counter()
-#include <kernel/arch/spinlock.h>
-#include <kernel/log.h>
+#include <random/random.h>
+#include <arch/random.h>
+#include <arch/cpu.h>        // arch_cycle_counter()
+#include <arch/spinlock.h>
+#include <log/log.h>
 #include <device/timer.h>            // jiffies
 #include <chacha20.h>
 #include <string.h>

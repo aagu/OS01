@@ -1,4 +1,4 @@
-#include <kernel/clocksource.h>
+#include <time/clocksource.h>
 
 bool     clocksource_active = false;
 uint32_t clocksource_mult   = 0;
@@ -43,7 +43,7 @@ uint64_t clocksource_freq_hz(void) { return clocksource_freq; }
 uint64_t clocksource_cycles(void)  { return arch_cycle_counter(); }
 
 #ifdef __x86_64__
-#include <kernel/subsys.h>
+#include <subsys/subsys.h>
 // Register this driver into the platform's subsystem table. The
 // _register function is collected by arch_register_subsys() at boot via
 // the .subsys_init linker section; it calls register_subsys() to queue
