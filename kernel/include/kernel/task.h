@@ -368,6 +368,7 @@ int kernel_thread(uint64_t (*fn)(uint64_t), uint64_t arg, uint64_t flags);
 
 /* ── EEVDF scheduler ─────────────────────────── */
 void task_wake(struct task_struct *t);
+void task_finish_switch(struct task_struct *prev);
 
 // ── Safe task-list insertion (SMP-aware) ───────────
 // Must be used by any code outside task.c that adds

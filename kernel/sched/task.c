@@ -189,6 +189,23 @@ static task_t *pick_eevdf(percpu_t *rq)
     return t;
 }
 
+/* Called on the incoming stack, after the architecture has stopped using
+ * prev. A wake between schedule's dequeue and this point observes on_cpu
+ * and leaves enqueueing to us. Use the same lock as task_wake so neither
+ * side can miss that handoff. No access to prev is allowed after release:
+ * a waiter may immediately reap a zombie once on_cpu becomes zero. */
+void task_finish_switch(task_t *prev)
+{
+    percpu_t *rq = &percpu_data[prev->cpu];
+    uint64_t flags = spin_lock_irqsave(&rq->rq_lock);
+    if (prev->state == TASK_RUNNING && !prev->on_rq && prev != rq->idle) {
+        enqueue_task(prev, rq);
+        rq->need_resched = 1;
+    }
+    __atomic_store_n(&prev->on_cpu, 0, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&rq->rq_lock, flags);
+}
+
 /* ── task_wake: mark RUNNING + enqueue (exported) ─── */
 void task_wake(task_t *t)
 {
@@ -199,8 +216,6 @@ void task_wake(task_t *t)
     if (t == percpu_data[t->cpu].idle)
         return;
 
-    t->state = TASK_RUNNING;
-
 retry:
     ;
     /*
@@ -210,6 +225,13 @@ retry:
      */
     percpu_t *rq = &percpu_data[*(volatile uint32_t *)&t->cpu];
     uint64_t flags = spin_lock_irqsave(&rq->rq_lock);
+
+    /* Serialize the state transition with the final switch-out check. */
+    if (rq != &percpu_data[*(volatile uint32_t *)&t->cpu]) {
+        spin_unlock_irqrestore(&rq->rq_lock, flags);
+        goto retry;
+    }
+    t->state = TASK_RUNNING;
 
     /* Re-check on_rq under lock — sched_balance may have enqueued it.
      * ACQUIRE loads: the picker's RELEASE stores of on_rq/on_cpu are
@@ -228,12 +250,6 @@ retry:
     if (__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
         spin_unlock_irqrestore(&rq->rq_lock, flags);
         return;
-    }
-
-    /* Re-check t->cpu under lock — sched_balance may have migrated it */
-    if ((uintptr_t)rq != (uintptr_t)&percpu_data[*(volatile uint32_t *)&t->cpu]) {
-        spin_unlock_irqrestore(&rq->rq_lock, flags);
-        goto retry;
     }
 
     /* Wakeup boost: prevent starvation by raising vruntime floor */
