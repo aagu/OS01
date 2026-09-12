@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -50,10 +51,17 @@ def main() -> int:
     if not any("R_X86_64_PC32" in line for line in guard_lines):
         fail("no direct R_X86_64_PC32 __stack_chk_guard relocation")
 
-    call_count = sum(
-        "call" in line and "<__stack_chk_fail>" in line
-        for line in disassembly.splitlines()
-    )
+    symbol_header = re.compile(r"^\s*[0-9A-Fa-f]+\s+<([^>]+)>:\s*$")
+    current_symbol: str | None = None
+    call_count = 0
+    for line in disassembly.splitlines():
+        match = symbol_header.match(line)
+        if match:
+            current_symbol = match.group(1)
+            continue
+        if (current_symbol != "__stack_chk_fail" and "call" in line
+                and "<__stack_chk_fail>" in line):
+            call_count += 1
     if call_count == 0:
         fail("no call to __stack_chk_fail")
 

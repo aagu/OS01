@@ -383,14 +383,18 @@ test-kernel-selftest: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMW
 	fi
 
 # ── Run paths ────────────────────────────────────────────────
-# Prints the current profile's absolute firmware and normal-image paths so a
-# manual QEMU invocation can reuse exactly the artifacts the root targets
-# use. Gated on rootfs like every other x86 run entry point.
+# Prints the current profile's absolute firmware and active image path so a
+# manual QEMU invocation can reuse exactly the selected variant. Gated on
+# rootfs like every other x86 run entry point.
 .PHONY: print-run-paths
 print-run-paths:
 	$(call require_capability,rootfs)
 	@echo firmware=$(abspath $(OVMF_FIRMWARE))
-	@echo image=$(abspath $(NORMAL_IMAGE))
+	@echo image=$(abspath $(DISK_IMG))
+
+.PHONY: test-kernel-canary-contract
+test-kernel-canary-contract:
+	python3 tests/kernel_canary_contract_test.py
 
 # ── Help ─────────────────────────────────────────────────────
 # Lists the root Makefile's user-facing targets, grouped by category, with the

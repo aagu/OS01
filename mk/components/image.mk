@@ -26,6 +26,7 @@ ifeq ($(filter rootfs,$(PROFILE_CAPABILITIES)),rootfs)
 #   systest        → build/<profile>/image/systest/
 #   nettest        → build/<profile>/image/nettest/
 #   inittab-test   → build/<profile>/image/inittab-test/
+#   canary-selftest → build/<profile>/image/canary-selftest/
 # NORMAL_IMAGE is the fixed normal-image path — the project-root disk.img
 # compat copy and the test-integrity before/after checks always use it.
 IMAGE_DIR       := $(BUILD_DIR)/image$(if $(IMAGE_VARIANT),/$(IMAGE_VARIANT))

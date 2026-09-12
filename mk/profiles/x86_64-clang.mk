@@ -17,11 +17,14 @@ TARGET_INCLUDEDIR := $(SYSROOT)/usr/include
 TARGET_LIBDIR := $(SYSROOT)/usr/lib
 # KERNEL_SELFTEST and KERNEL_CANARY_SELFTEST change generated kernel objects,
 # so each gets a distinct kernel build/artifact namespace.  Keep the ordinary
-# paths exactly stable and reject the destructive combination.
-ifneq ($(filter 1,$(KERNEL_SELFTEST)),)
+# paths exactly stable; the destructive canary variant cannot share an image
+# with any normal selftest, syscall, or network-test mode.
 ifneq ($(filter 1,$(KERNEL_CANARY_SELFTEST)),)
-$(error KERNEL_SELFTEST=1 and KERNEL_CANARY_SELFTEST=1 are mutually exclusive)
+ifneq ($(filter 1,$(KERNEL_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST)),)
+$(error KERNEL_CANARY_SELFTEST=1 cannot be combined with KERNEL_SELFTEST=1, OS01_SYSTEST=1, or OS01_NETTEST=1)
 endif
+endif
+ifneq ($(filter 1,$(KERNEL_SELFTEST)),)
 KERNEL_VARIANT := selftest
 else ifneq ($(filter 1,$(KERNEL_CANARY_SELFTEST)),)
 KERNEL_VARIANT := canary-selftest

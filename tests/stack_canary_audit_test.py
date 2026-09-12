@@ -50,6 +50,10 @@ def main() -> None:
     direct = "Relocation section '.rela.text' contains:\n"
     direct += "0000000000000010 R_X86_64_PC32 __stack_chk_guard - 4\n"
     calls = "0000000000000010: callq 0x20 <__stack_chk_fail>\n"
+    handler_self_call = (
+        "0000000000000010 <__stack_chk_fail>:\n"
+        "0000000000000010: callq 0x20 <__stack_chk_fail>\n"
+    )
     got = "0000000000000010 R_X86_64_REX_GOTPCRELX __stack_chk_guard - 4\n"
 
     failures: list[str] = []
@@ -67,9 +71,13 @@ def main() -> None:
         if result.returncode == 0 or "no call" not in result.stderr:
             failures.append(f"direct + no call: rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}")
 
+        result = invoke(root, direct, handler_self_call)
+        if result.returncode == 0 or "no call" not in result.stderr:
+            failures.append(f"direct + handler self-call: rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}")
+
     if failures:
         raise AssertionError("; ".join(failures))
-    print("stack canary audit tests: 3 passed")
+    print("stack canary audit tests: 4 passed")
 
 
 if __name__ == "__main__":
