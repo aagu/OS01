@@ -8,6 +8,8 @@ PHDRS
 	data PT_LOAD FLAGS(6);   /* PF_R | PF_W */
 }
 
+/* Large-model sections must stay inside these bounds: PMM reuses
+ * memory starting at _end, so orphan data there would be overwritten. */
 SECTIONS
 {
 
@@ -16,20 +18,20 @@ SECTIONS
 	{
 		_text = .;
 		*(.text.head)
-		*(.text)
-		_etext = .;
+		*(.text .text.*)
 	} :text
 	.ltext :
 	{
 		_ltext = .;
-		*(.ltext)
+		*(.ltext .ltext.*)
 		_eltext = .;
+		_etext = .;
 	} :text
 
 	.rodata :
 	{
 		_rodata = .;
-		*(.rodata)
+		*(.rodata .rodata.* .lrodata .lrodata.*)
 		_erodata = .;
 	} :text
 
@@ -38,7 +40,9 @@ SECTIONS
 	.data :
 	{
 		_data = .;
+		/* Keep .data.init_task in its aligned output section below. */
 		*(.data)
+		*(.ldata .ldata.*)
 		_edata = .;
 	} :data
 
@@ -58,7 +62,8 @@ SECTIONS
 	.bss :
 	{
 		_bss = .;
-		*(.bss)
+		*(.bss .bss.* .lbss .lbss.*)
+		*(COMMON)
 		_ebss = .;
 	} :data
 

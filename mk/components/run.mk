@@ -392,6 +392,12 @@ print-run-paths:
 	@echo firmware=$(abspath $(OVMF_FIRMWARE))
 	@echo image=$(abspath $(DISK_IMG))
 
+# Verify the actual linked x86 image before PMM can reuse memory at _end.
+.PHONY: test-kernel-layout
+test-kernel-layout: kernel.bin
+	python3 tests/x86_64_kernel_layout_test.py "$(KERNEL_BUILD_DIR)/kernel.elf" \
+	  --llvm-nm "$(LLVM_NM)" --llvm-readelf "$(LLVM_READELF)"
+
 .PHONY: test-kernel-canary-contract
 test-kernel-canary-contract:
 	python3 tests/kernel_canary_contract_test.py
