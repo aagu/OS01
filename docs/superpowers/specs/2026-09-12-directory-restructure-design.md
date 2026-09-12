@@ -147,7 +147,7 @@ runtime/selftest/     # ← 原 runtime/tests/
 
 - `qemutests/runtime_audit_test.py` 定位 `ROOT / "tests/runtime_audit.py"`（含 docstring）→ 改 `qemutests/runtime_audit.py`
 - `qemutests/kernel_canary_contract_test.py` 引用 `"tests/kernel_canary_contract.mk"` → `qemutests/...`
-- `qemutests/pmm_arch_test.py` docstring 引 `tests/aarch64_ram_test.py`、`tests/pmm_arch_test_runner.c`、`tests/aarch64_uefi_smp.py`
+- `qemutests/pmm_arch_test.py`：docstring 引 `tests/aarch64_ram_test.py`、`tests/aarch64_uefi_smp.py`；**运行时**（:171）`runner_c = ROOT / "tests" / "pmm_arch_test_runner.c"` → `ROOT / "qemutests" / "arch_runner" / "pmm_arch_test_runner.c"`（不改则报 runner 缺失）
 - `qemutests/build_contract.sh` 含 `test/build`、`host-test` 产物路径、`test_poll_requested.elf` 期望（host-test 构建产物若非改名则保持 `host-test`）
 - `mk/components/run.mk` 全部 `tests/*.py|.sh` 调用点 + `host-test` 目标
 
@@ -185,7 +185,7 @@ runtime/selftest/     # ← 原 runtime/tests/
 
 | 阶段 | 内容 | 验证 |
 |---|---|---|
-| P1 | 测试目录重命名（4 处）+ 脚本内部硬编码路径改写（§4.3）+ `.gitignore` + 游离 C 归位 + 文档 | `make test`、`make KERNEL_SELFTEST=1`、`python3 qemutests/run_test.py` 及受影响脚本（runtime_audit_test.py / kernel_canary_contract_test.py / build_contract.sh）；`rg` 旧目录名零残留 |
+| P1 | 测试目录重命名（4 处）+ 脚本内部硬编码路径改写（§4.3）+ `.gitignore` + 游离 C 归位 + 文档 | `make test`、`make KERNEL_SELFTEST=1`、`python3 qemutests/run_test.py` 及受影响脚本（runtime_audit_test.py / kernel_canary_contract_test.py / build_contract.sh / pmm_arch_test.py）；`rg` 旧目录名零残留 |
 | P2 | `kernel/kernel/` → `core/`（纯改名，不拆功能） | `kernel.bin` 字节相同 |
 | P3 | 核心拆分（random→random/、log→log/、font+logo→driver/、hang→panic） | 编译通过 + `make` 全量 + `make KERNEL_SELFTEST=1` |
 | P4 | 头文件按子系统拆分（~90 头 + 46 arch 头移动 + ~411 `kernel/` + 201 `kernel/arch/` `#include` 更新 + `hosttests` 影子同步 + UEFI 链 `boot/uefi/*` 与 `uefi.mk` bootinfo/handoff 路径） | `kernel.bin` 字节相同（注意 `__FILE__` 泄漏，见 §8）；x86_64 + aarch64 UEFI 构建通过（`make PROFILE=aarch64-clang` 产出 BOOTAA64.EFI 及 x86_64 BOOTX64.EFI） |
@@ -196,7 +196,7 @@ runtime/selftest/     # ← 原 runtime/tests/
 
 ## 8. 风险与豁免
 
-1. **`__FILE__` 泄漏**：若 `log_err`/`assert`/`color_printk` 把 `__FILE__` 编译进字符串，纯 rename 后 `kernel.bin` 也会变。处理：优先用 `-ffile-prefix-map=. <root>` 归一，或接受「重新拍摄基线」再走字节相同验证。
+1. **`__FILE__` 泄漏**：若 `log_err`/`assert`/`color_printk` 把 `__FILE__` 编译进字符串，纯 rename 后 `kernel.bin` 也会变。处理：优先用 `-ffile-prefix-map=<旧前缀>=<新前缀>`（如 `-ffile-prefix-map=$PWD=$(ROOT)`）归一，或接受「重新拍摄基线」再走字节相同验证。
 2. **`#include` 顺序敏感**：`kernel/include` 内的头相互 include（如 `tty.h`→`canon.h`），拆分后需逐文件核对 include 归属，避免漏改导致「旧路径仍可编译」但「文档指向失效」。
 3. **孤行子目录构建产物**：`build/` 下旧路径的 `.o` 在 rename 后残留，需 `make clean`（或依赖 `.d` 自动失效）。
 4. **豁免**：`docs/superpowers/specs/`、`plans/` 历史归档不溯及改；`libc/` 布局（musl 风格）不属本次范围。
