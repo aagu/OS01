@@ -1,6 +1,6 @@
 #include <kernel/console.h>
 #include <kernel/printk.h>
-#include <font.h>
+#include <driver/font.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>

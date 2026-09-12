@@ -44,6 +44,8 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c
 else
 KERNEL_C_SOURCES := \
     $(wildcard core/*.c) \
+    $(wildcard random/*.c) \
+    $(wildcard log/*.c) \
     $(wildcard net/*.c) \
     $(wildcard memory/*.c) \
     $(wildcard fs/*.c) \
@@ -231,12 +233,12 @@ $(BUILD_DIR)/lwip/%.o: $(LWIP_SRC_DIR)/%.c
 # PSF font → .o
 ifeq ($(ARCH),x86_64)
 # `ld -r -b binary` derives the embedded symbols (_binary_kernel_font_psf_*)
-# from the *path string* of the input file. The font source now lives at
-# core/font.psf, but code (printk.c) still references the kernel/font.o-era
+# from the *path string* of the input file. The font asset lives at
+# driver/font.psf, but code (printk.c) still references the kernel/font.o-era
 # symbol names — and keeping them identical keeps kernel.bin byte-identical.
 # Link from a copy placed under generated/kernel/ so lld emits exactly those
 # symbol names (same trick as trampoline_bin.o below).
-$(BUILD_DIR)/kernel/font.o: core/font.psf
+$(BUILD_DIR)/kernel/font.o: driver/font.psf
 	@mkdir -p $(dir $@) $(KERNEL_BUILD_DIR)/generated/kernel
 	cp $< $(KERNEL_BUILD_DIR)/generated/kernel/font.psf
 	cd $(KERNEL_BUILD_DIR)/generated && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary kernel/font.psf -o $@

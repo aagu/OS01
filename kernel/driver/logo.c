@@ -1,4 +1,4 @@
-#include <kernel/logo.h>
+#include <driver/logo.h>
 #include <kernel/printk.h>
 
 // ── OS01 boot logo (7 rows x 31 cols ASCII art) ──────────────

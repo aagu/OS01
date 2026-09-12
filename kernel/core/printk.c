@@ -6,7 +6,7 @@
 #include <kernel/arch/spinlock.h>
 #include <driver/serial.h>
 #include <stdio.h>
-#include <font.h>
+#include <driver/font.h>
 #include <stddef.h>
 #include <string.h>
 

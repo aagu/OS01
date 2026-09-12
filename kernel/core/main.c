@@ -28,7 +28,7 @@
 #include <kernel/subsys.h>
 #include <kernel/arch/subsys.h>
 #include <kernel/console.h>
-#include <kernel/logo.h>
+#include <driver/logo.h>
 #include <kernel/fb.h>
 #include <kernel/pty.h>
 #include <kernel/clockevent.h>
