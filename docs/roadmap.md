@@ -50,7 +50,7 @@
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
 | getrandom syscall ✅ | **已完成**（SYS_getrandom=66，ChaCha20 池 + RDRAND/RDSEED 熵源 + 周期 reseed，`/dev/urandom` 同源）。详见 `docs/syscall.md`。`LWIP_RAND`/AT_RANDOM 种子改用仍待做 | 独立 | Linux getrandom(2) |
-| x86_64 内核栈保护 ✅ | **已完成**：x86_64 内核使用 `-fno-pic -fstack-protector-strong`，全局 per-boot guard；已完成直接 `R_X86_64_PC32 __stack_chk_guard` 审计，并保留编译门控的 QEMU 破坏性 canary trip test（完整镜像/QEMU 验收待环境恢复）。用户态 canary/`AT_RANDOM` 仍待做 | 独立 | Linux SSP |
+| x86_64 内核栈保护 ✅ | **已完成**：x86_64 内核使用 `-fno-pic -mcmodel=large -fstack-protector-strong`，全局 per-boot guard；审计直接 `R_X86_64_PC32` 或 `R_X86_64_64` guard 引用并拒绝 GOT；编译门控的 QEMU 破坏性 canary trip test 已打印预期诊断。用户态 canary/`AT_RANDOM` 仍待做 | 独立 | Linux SSP |
 | 用户栈 canary | libc `-fstack-protector-strong` + ELF 加载器 AT_RANDOM auxv 传种子（原 P1#5） | getrandom | |
 | ASLR | mmap 基址随机化 + ET_DYN/PIE 加载随机化（原 P3#12） | getrandom | |
 | UBSan + KASan | 内核编译期 instrument（原 P3#13） | 独立 | ArvernOS |

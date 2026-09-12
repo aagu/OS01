@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -40,30 +39,24 @@ def main() -> int:
 
     relocations = run_tool(args.llvm_readelf, ["-r", str(object_path)],
                            "relocation audit")
-    disassembly = run_tool(args.llvm_objdump,
-                           ["-d", "--no-show-raw-insn", str(elf_path)],
-                           "disassembly audit")
-
+    final_symbols = run_tool(args.llvm_readelf, ["-Ws", str(elf_path)],
+                             "final ELF symbol audit")
     guard_lines = [line for line in relocations.splitlines()
                    if "__stack_chk_guard" in line]
     if any("GOTPCREL" in line for line in guard_lines):
         fail("GOT-based __stack_chk_guard relocation")
-    if not any("R_X86_64_PC32" in line for line in guard_lines):
-        fail("no direct R_X86_64_PC32 __stack_chk_guard relocation")
+    if not any(("R_X86_64_PC32" in line or "R_X86_64_64" in line)
+               for line in guard_lines):
+        fail("no direct __stack_chk_guard relocation")
 
-    symbol_header = re.compile(r"^\s*[0-9A-Fa-f]+\s+<([^>]+)>:\s*$")
-    current_symbol: str | None = None
-    call_count = 0
-    for line in disassembly.splitlines():
-        match = symbol_header.match(line)
-        if match:
-            current_symbol = match.group(1)
-            continue
-        if (current_symbol != "__stack_chk_fail" and "call" in line
-                and "<__stack_chk_fail>" in line):
-            call_count += 1
-    if call_count == 0:
-        fail("no call to __stack_chk_fail")
+    failure_lines = [line for line in relocations.splitlines()
+                     if "__stack_chk_fail" in line]
+    if not any(("R_X86_64_PC32" in line or "R_X86_64_PLT32" in line
+                or "R_X86_64_64" in line) for line in failure_lines):
+        fail("no direct __stack_chk_fail relocation")
+    if not any("FUNC" in line and "__stack_chk_fail" in line
+               for line in final_symbols.splitlines()):
+        fail("no global __stack_chk_fail symbol in final ELF")
 
     print("kernel stack canary audit: passed")
     return 0

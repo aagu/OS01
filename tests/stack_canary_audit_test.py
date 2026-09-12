@@ -13,20 +13,28 @@ from pathlib import Path
 AUDIT = Path(__file__).with_name("stack_canary_audit.py")
 
 
-def make_stub(path: Path, output: str) -> None:
-    path.write_text(f"#!/bin/sh\nprintf '%s' {shlex.quote(output)}\n")
+def make_readelf_stub(path: Path, relocations: str, symbols: str) -> None:
+    path.write_text(
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        f"-r) printf '%s' {shlex.quote(relocations)};;\n"
+        f"-Ws) printf '%s' {shlex.quote(symbols)};;\n"
+        "esac\n"
+    )
     path.chmod(0o755)
 
 
-def invoke(root: Path, relocations: str, disassembly: str) -> subprocess.CompletedProcess[str]:
+def invoke(root: Path, relocations: str, disassembly: str,
+           symbols: str = "1: 0 0 FUNC GLOBAL DEFAULT 1 __stack_chk_fail\n") -> subprocess.CompletedProcess[str]:
     object_path = root / "kernel.o"
     elf_path = root / "kernel.elf"
     object_path.write_bytes(b"")
     elf_path.write_bytes(b"")
     readelf = root / "llvm-readelf"
     objdump = root / "llvm-objdump"
-    make_stub(readelf, relocations)
-    make_stub(objdump, disassembly)
+    make_readelf_stub(readelf, relocations, symbols)
+    objdump.write_text(f"#!/bin/sh\nprintf '%s' {shlex.quote(disassembly)}\n")
+    objdump.chmod(0o755)
     return subprocess.run(
         [
             sys.executable,
@@ -49,6 +57,12 @@ def invoke(root: Path, relocations: str, disassembly: str) -> subprocess.Complet
 def main() -> None:
     direct = "Relocation section '.rela.text' contains:\n"
     direct += "0000000000000010 R_X86_64_PC32 __stack_chk_guard - 4\n"
+    direct += "0000000000000018 R_X86_64_PLT32 __stack_chk_fail - 4\n"
+    direct_guard_only = "Relocation section '.rela.text' contains:\n"
+    direct_guard_only += "0000000000000010 R_X86_64_PC32 __stack_chk_guard - 4\n"
+    direct_large = "Relocation section '.rela.text' contains:\n"
+    direct_large += "0000000000000010 R_X86_64_64 __stack_chk_guard + 0\n"
+    direct_large += "0000000000000018 R_X86_64_64 __stack_chk_fail + 0\n"
     calls = "0000000000000010: callq 0x20 <__stack_chk_fail>\n"
     handler_self_call = (
         "0000000000000010 <__stack_chk_fail>:\n"
@@ -63,21 +77,33 @@ def main() -> None:
         if result.returncode != 0 or "kernel stack canary audit: passed" not in result.stdout:
             failures.append(f"direct + call: rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}")
 
+        result = invoke(root, direct_large, calls)
+        if result.returncode != 0 or "kernel stack canary audit: passed" not in result.stdout:
+            failures.append(f"large-model direct + call: rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}")
+
+        result = invoke(root, direct_large, "0000000000000010: nop\n")
+        if result.returncode != 0 or "kernel stack canary audit: passed" not in result.stdout:
+            failures.append(f"large-model direct failure relocation: rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}")
+
         result = invoke(root, got, calls)
         if result.returncode == 0 or "GOT-based" not in result.stderr:
             failures.append(f"GOT + call: rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}")
 
-        result = invoke(root, direct, "0000000000000010: nop\n")
-        if result.returncode == 0 or "no call" not in result.stderr:
-            failures.append(f"direct + no call: rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}")
+        result = invoke(root, direct_guard_only, "0000000000000010: nop\n")
+        if result.returncode == 0 or "no direct __stack_chk_fail relocation" not in result.stderr:
+            failures.append(f"direct + no failure relocation: rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}")
 
-        result = invoke(root, direct, handler_self_call)
-        if result.returncode == 0 or "no call" not in result.stderr:
+        result = invoke(root, direct_guard_only, handler_self_call)
+        if result.returncode == 0 or "no direct __stack_chk_fail relocation" not in result.stderr:
             failures.append(f"direct + handler self-call: rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}")
+
+        result = invoke(root, direct, calls, symbols="")
+        if result.returncode == 0 or "no global __stack_chk_fail symbol" not in result.stderr:
+            failures.append(f"direct + missing final handler: rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}")
 
     if failures:
         raise AssertionError("; ".join(failures))
-    print("stack canary audit tests: 4 passed")
+    print("stack canary audit tests: 7 passed")
 
 
 if __name__ == "__main__":
