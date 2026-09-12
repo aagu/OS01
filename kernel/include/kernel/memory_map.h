@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 #define MEMORY_RANGE_MAX      64u
-#define MEMORY_RANGE_GRANULE  (1u << 21)   /* 2 MiB, matches PAGE_2M_SIZE */
+#define MEMORY_RANGE_GRANULE  (1UL << 21)  /* 2 MiB, matches PAGE_2M_SIZE; MUST be unsigned long so the round-up mask ~(GRANULE-1) is canonical 64-bit (avoids truncating >4 GiB addresses to 32-bit zero-extended mask). */
 
 enum MEMORY_TYPE {
     MEMORY_TYPE_RAM          = 1u,

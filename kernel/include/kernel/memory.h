@@ -14,8 +14,12 @@
 #define Virt_To_Phy(addr) ((unsigned long)(addr) - PAGE_OFFSET)
 #define Phy_To_Virt(addr) ((unsigned long *)((unsigned long)(addr) + PAGE_OFFSET))
 
-#define Virt_To_2M_Page(kaddr) (PMMngr.pages_struct + (Virt_To_Phy(kaddr) >> PAGE_2M_SHIFT))
-#define Phy_to_2M_Page(kaddr) (PMMngr.pages_struct + ((unsigned long)(kaddr) >> PAGE_2M_SHIFT))
+/* pmm_init indexes descriptors relative to the first RAM frame. Its
+ * physical address is recorded in slot zero, including for nonzero RAM
+ * bases. Callers pass addresses belonging to represented RAM frames. */
+#define Phy_to_2M_Page(paddr) (PMMngr.pages_struct + \
+    (((unsigned long)(paddr) - PMMngr.pages_struct[0].phy_address) >> PAGE_2M_SHIFT))
+#define Virt_To_2M_Page(kaddr) Phy_to_2M_Page(Virt_To_Phy(kaddr))
 
 extern struct Physical_Memory_Manager PMMngr;
 

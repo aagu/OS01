@@ -257,6 +257,11 @@ KERNEL_SELFTEST_SMP ?= 4
 test:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,test,run $(OS01_SUBMAKE_ARGS))
+	python3 tests/pmm_boot_reservation_test.py
+
+.PHONY: test-pmm-boot-reservation
+test-pmm-boot-reservation:
+	python3 tests/pmm_boot_reservation_test.py
 
 .PHONY: test-phase-0
 test-phase-0: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
