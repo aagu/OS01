@@ -35,6 +35,22 @@ Sched:   EEVDF O(log n) — per-CPU rbtree 可运行队列 + vruntime/deadline +
 Init:    head.S → kernel_main → subsys → VFS/FS → TTY → percpu → SMP → task_init → /init.elf (→ parse_inittab)
 ```
 
+## Directory organization
+
+目录组织遵循「**源目录 ↔ 头目录 一一对称**」约定：
+
+- **内核源与公开头成对出现**：`kernel/<subsys>/*.c` 的头放 `kernel/include/<subsys>/*.h`，统一在 `kernel/include/` 单一 include 根下解析（`-Iinclude`），代码里 `#include <subsys/foo.h>`。头不得散落在源目录旁。
+- **`kernel/core/` 只放核心**：启动序列 + 致命路径 + 内核早期输出（`main`、`printk`、`panic`、`kallsyms`）。`random`、`log`、字库(font/logo)、`pty` 等非核心功能拆到各自子系统（`kernel/random/`、`kernel/log/`、`kernel/driver/`、`kernel/tty/`）。
+- **架构相关**：per-arch 实现放 `kernel/arch/<arch>/`，跨架构 facade 头放 `kernel/include/<subsys>/arch/*`（派发到 `arch/{x86_64,aarch64}/`）。
+- **测试目录按用途命名**（不用单复数区分）：
+  - `hosttests/` — 宿主 C 单元测试（mock 头、shim）
+  - `qemutests/` — QEMU Python 集成/架构测试
+  - `kernel/selftest/` — 内核内自测（`KERNEL_SELFTEST=1`）
+  - `runtime/selftest/` — runtime 内建自测
+- **`kernel/include/uapi/`** — 用户态 ABI（syscall 号、跨边界 `struct`），变动必须评估 ABI 影响。
+
+> **迁移进行中**：现状路径（`kernel/kernel/`、`kernel/include/kernel/`、`kernel/test/`、`test/`、`tests/` 等）正按 `docs/superpowers/specs/2026-09-12-directory-restructure-design.md` 收敛到本节约定；迁移落地前，「Key files」表与旧路径引用暂以现状为准。
+
 ## Critical gotchas (will crash silently if wrong)
 
 - **boot_context ABI**: both UEFI bootloaders (x86_64 + aarch64) build a `boot_context` v2 struct at a fixed physical address; bootloader is LLP64 (`sizeof(long)=4`), kernel LP64 (`sizeof(long)=8`). All fields must use `uint32_t`/`uint64_t` — never `unsigned long`. See `kernel/include/kernel/bootinfo.h`.

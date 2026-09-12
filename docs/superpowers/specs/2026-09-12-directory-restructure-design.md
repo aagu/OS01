@@ -78,6 +78,18 @@ qemutests/            # ← 原 tests/
 runtime/selftest/     # ← 原 runtime/tests/
 ```
 
+### 3.1 组织规范（新增/迁移代码必须遵守）
+
+这些规则同步写入 `AGENTS.md`「Directory organization」节，作为迁移后的长期约定：
+
+1. **源目录 ↔ 头目录一一对称**：`kernel/<subsys>/*.c` 的公开头放 `kernel/include/<subsys>/*.h`；头统一在 `kernel/include/` 单一根解析（`-Iinclude`），`#include <subsys/foo.h>`。禁止头散落源目录旁。
+2. **`kernel/core/` 最小化**：只容纳启动序列 + 致命路径 + 内核早期输出（`main`/`printk`/`panic`/`kallsyms`）；`random`/`log`/`font`/`logo`/`pty` 等必须下沉到对应子系统。
+3. **架构分层**：per-arch 实现 `kernel/arch/<arch>/`，跨架构 facade 头 `kernel/include/<subsys>/arch/*`。
+4. **测试目录按用途命名**：`hosttests/`（宿主 C 单元）、`qemutests/`（QEMU Python 集成）、`kernel/selftest/`（内核内自测）、`runtime/selftest/`（runtime 内测）。
+5. **`kernel/include/uapi/` 为用户态 ABI**：只放 syscall 号与跨边界结构，变动需评估 ABI。
+
+后续新增子系统必须先确定「源目录 + 头目录」成对后才落文件；已有的旧路径在 P1–P6 逐一收敛到本节。
+
 ## 4. 完整文件迁移映射
 
 ### 4.1 核心源拆分（原 `kernel/kernel/` → 各归属）
