@@ -9,7 +9,7 @@
 #include <percpu/percpu.h>
 #include <sched/task.h>
 #include <kernel.h>
-#include <device/timer.h>
+#include <time/timer.h>
 
 char buf[4096] = {'[','k','e','r','n','e','l',' ','p','a','n','i','c',']',' ',0};
 

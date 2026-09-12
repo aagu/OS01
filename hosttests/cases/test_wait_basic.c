@@ -59,14 +59,14 @@ typedef struct task_struct {
     void       *fpu_save;
 } task_t;
 
-/* ── Copied from kernel/include/kernel/wait.h ─────────────── */
+/* ── Copied from kernel/include/sync/wait.h ─────────────── */
 
 typedef struct {
     list_t      head;
     spinlock_T  lock;
 } wait_queue_t;
 
-/* ── Copied from kernel/intr/wait.c (pure logic only) ─────── */
+/* ── Copied from kernel/sync/wait.c (pure logic only) ─────── */
 
 static void wait_queue_init(wait_queue_t *wq)
 {
@@ -98,14 +98,14 @@ static void wait_queue_wake_all(wait_queue_t *wq)
     spin_unlock_irqrestore(&wq->lock, flags);
 }
 
-/* ── Copied from kernel/include/kernel/completion.h ────────── */
+/* ── Copied from kernel/include/sync/completion.h ────────── */
 
 typedef struct {
     volatile int done;
     wait_queue_t wq;
 } completion_t;
 
-/* ── Copied from kernel/completion.c (pure logic only) ─────── */
+/* ── Copied from kernel/sync/completion.c (pure logic only) ─────── */
 
 static void completion_init(completion_t *c)
 {

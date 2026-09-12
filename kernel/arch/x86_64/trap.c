@@ -32,7 +32,7 @@ typedef int pid_t;
 #include <fs/file.h>
 #include <fs/poll.h>     // struct pollfd, do_poll()
 #include <fs/select.h>   // sigset_t, do_select(), do_pselect6()
-#include <device/timer.h>
+#include <time/timer.h>
 #include <time/clocksource.h>  // clocksource_read_ns()
 #include <uapi/time.h>
 #include <kernel.h>

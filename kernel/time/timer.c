@@ -1,4 +1,4 @@
-#include <device/timer.h>
+#include <time/timer.h>
 #include <core/debug.h>
 #include <intr/softirq.h>
 #include <kernel.h>

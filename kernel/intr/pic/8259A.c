@@ -1,4 +1,4 @@
-#include <device/pic.h>
+#include <intr/pic.h>
 #include <core/printk.h>
 #include <arch/io.h>
 #include <kernel.h>

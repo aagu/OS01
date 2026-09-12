@@ -17,7 +17,7 @@
 #include <sched/task.h>
 #include <percpu/percpu.h>
 #include <memory/slab.h>      // kmalloc, kfree
-#include <device/timer.h>     // jiffies
+#include <time/timer.h>     // jiffies
 #include <string.h>           // strdup
 #include <errno.h>            // for errno extern
 

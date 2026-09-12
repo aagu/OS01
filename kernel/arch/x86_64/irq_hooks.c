@@ -16,7 +16,7 @@
                                           //   for consistency with the rest of the
                                           //   x86_64 arch layer)
 #include <intr/apic.h>                  // apic_available, get_ioapic_controller
-#include <device/pic.h>                   // get_pic_controller
+#include <intr/pic.h>                   // get_pic_controller
 #include <intr/interrupt.h>             // MAX_GSI, irq_table, hw_int_controller_t
 #include <core/debug.h>                 // debug_irq
 #include <core/printk.h>                // color_printk (for spurious-vector log)

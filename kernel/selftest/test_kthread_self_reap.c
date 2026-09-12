@@ -2,7 +2,7 @@
 
 #include <sched/task.h>
 #include <memory/slab.h>      // kmalloc_cache_size[] — assert object-level reclaim
-#include <device/timer.h>     // jiffies — time-bounded wait (cross-CPU safe)
+#include <time/timer.h>     // jiffies — time-bounded wait (cross-CPU safe)
 #include <arch/irq.h>  // arch_local_irq_enable — schedule() returns with IRQs off
 #include <core/printk.h>
 

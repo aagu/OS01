@@ -1,5 +1,5 @@
 #include <time/clockevent.h>
-#include <device/timer.h>
+#include <time/timer.h>
 #include <time/clocksource.h>   // clocksource_read_ns()
 #include <intr/softirq.h>       // set_softirq_status, TIMER_SIRQ
 #include <percpu/percpu.h>        // this_cpu()

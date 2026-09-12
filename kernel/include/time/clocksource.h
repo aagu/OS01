@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include <device/timer.h>      // jiffies
+#include <time/timer.h>      // jiffies
 #include <percpu/percpu.h>     // this_cpu(), percpu_t->tsc_offset
 #include <arch/cpu.h>   // arch_cycle_counter()
 

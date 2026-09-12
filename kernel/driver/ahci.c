@@ -8,7 +8,7 @@
 #include <arch/cpu.h>
 #include <intr/interrupt.h>
 #include <intr/apic.h>
-#include <device/timer.h>
+#include <time/timer.h>
 #include <block/blockdev.h>
 #include <string.h>
 #include <stdint.h>

@@ -1,5 +1,5 @@
 #include <driver/pit.h>
-#include <device/timer.h>
+#include <time/timer.h>
 #include <arch/io.h>
 #include <intr/interrupt.h>
 #include <stddef.h>

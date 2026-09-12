@@ -11,7 +11,7 @@
 #include <arch/cpu.h>        // arch_cycle_counter()
 #include <arch/spinlock.h>
 #include <log/log.h>
-#include <device/timer.h>            // jiffies
+#include <time/timer.h>            // jiffies
 #include <chacha20.h>
 #include <string.h>
 #include <stdbool.h>

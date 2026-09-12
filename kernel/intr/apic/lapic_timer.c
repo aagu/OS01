@@ -5,7 +5,7 @@
 #include <arch/thread.h>
 #include <arch/cpu.h>
 #include <arch/x86_64/gate.h>
-#include <device/timer.h>
+#include <time/timer.h>
 #include <intr/softirq.h>
 #include <time/clockevent.h>   // tick_handler()
 #include <time/clocksource.h>  // clocksource_freq_hz()
