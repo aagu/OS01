@@ -1,4 +1,4 @@
-// kernel/include/kernel/subsys.h
+// kernel/include/subsys/subsys.h
 #ifndef _KERNEL_SUBSYS_H
 #define _KERNEL_SUBSYS_H
 

@@ -14,7 +14,7 @@
 // firmware-aware bootloader to the kernel. Pointers are physical
 // addresses. The boot_context itself is fully arch-neutral — no
 // architecture-specific data structure is defined here. x86_64-only
-// E820 bits live in kernel/include/kernel/arch/x86_64/bootinfo_x86.h.
+// E820 bits live in kernel/include/arch/x86_64/bootinfo_x86.h.
 
 struct GRAPHICS_INFO
 {
@@ -38,7 +38,7 @@ enum BOOT_CONTEXT_FLAGS {
 // writes the corresponding constant into ctx->memory.format, and the
 // kernel-side format dispatch (pmm_arch_normalize, aarch64_ram_init) reads
 // it. BOOT_MEMORY_FORMAT_E820 (value 1) is x86_64-only and is declared in
-// kernel/include/kernel/arch/x86_64/bootinfo_x86.h.
+// kernel/include/arch/x86_64/bootinfo_x86.h.
 //
 // The enum below intentionally leaves a hole at value 1 so the E820
 // constant keeps its wire-level value without being defined here.

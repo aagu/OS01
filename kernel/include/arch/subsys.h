@@ -1,4 +1,4 @@
-// kernel/include/kernel/arch/subsys.h
+// kernel/include/arch/subsys.h
 #ifndef _ARCH_SUBSYS_H
 #define _ARCH_SUBSYS_H
 

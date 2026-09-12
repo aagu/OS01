@@ -1,7 +1,7 @@
 # 架构评审 — Group 6: 同步原语
 
 > **审查日期**: 2026-07-25
-> **覆盖文件**: `kernel/futex.c`, `kernel/mutex.c`, `kernel/intr/wait.c`, `kernel/fs/file.c` (pipe_wake_*), `kernel/include/kernel/mutex.h`, `kernel/include/kernel/wait.h`, `kernel/include/kernel/arch/x86_64/spinlock.h`, `kernel/fs/poll.c`
+> **覆盖文件**: `kernel/futex.c`, `kernel/mutex.c`, `kernel/intr/wait.c`, `kernel/fs/file.c` (pipe_wake_*), `kernel/include/sync/mutex.h`, `kernel/include/sync/wait.h`, `kernel/include/arch/x86_64/spinlock.h`, `kernel/fs/poll.c`
 
 ## 问题清单
 
@@ -66,7 +66,7 @@
 
 ### [P2] 6. spinlock 无调试/死锁检测
 
-- **位置**: `kernel/include/kernel/arch/x86_64/spinlock.h:18-33`
+- **位置**: `kernel/include/arch/x86_64/spinlock.h:18-33`
 - **现象**: spinlock 实现是裸的 `lock decq` + 忙等。无 owner 追踪、无递归检测、无 lockdep 风格的依赖图
 - **建议**: 在 `#ifdef DEBUG_SPINLOCK` 中增加 owner 记录、持有时间统计、递归检测
 

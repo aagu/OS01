@@ -1,4 +1,4 @@
-/* kernel/include/kernel/arch/aarch64/ram.h
+/* kernel/include/arch/aarch64/ram.h
  *
  * Public AArch64 RAM map produced by the UEFI normalizer. The map is
  * a fixed-capacity array of `[start, end)` intervals expressed in

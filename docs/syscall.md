@@ -124,12 +124,12 @@ Higher-level libc functions (`read()`, `exec()`, etc.) call these wrappers.
 
 ## User-pointer boundary semantics
 
-Every syscall that takes a user-space pointer MUST go through the `uaccess` primitives (`kernel/include/kernel/uaccess.h`). Kernel-side dereferences of a user pointer without going through these primitives can result in a kernel `#PF` that has no recovery path — historically the OS01 kernel has not rebooted cleanly from such faults, so a hostile syscall with bad pointers could DoS the whole kernel. The 2026-08-23 syscall-boundary audit (commits `ad4c28a`..`80eab1a`) introduced the fault-tolerant primitives and routed every handler through them.
+Every syscall that takes a user-space pointer MUST go through the `uaccess` primitives (`kernel/include/memory/uaccess.h`). Kernel-side dereferences of a user pointer without going through these primitives can result in a kernel `#PF` that has no recovery path — historically the OS01 kernel has not rebooted cleanly from such faults, so a hostile syscall with bad pointers could DoS the whole kernel. The 2026-08-23 syscall-boundary audit (commits `ad4c28a`..`80eab1a`) introduced the fault-tolerant primitives and routed every handler through them.
 
 ### Primitives
 
 ```c
-// kernel/include/kernel/uaccess.h — fault-tolerant user memory access.
+// kernel/include/memory/uaccess.h — fault-tolerant user memory access.
 
 ssize_t copy_to_user_ft(void *dst, const void *src, size_t n);
 ssize_t copy_from_user_ft(void *dst, const void *src, size_t n);
@@ -180,6 +180,6 @@ This recover path only fires for **kernel-mode #PF** at a user-range address. **
 | **B** fixed-struct / out-buffer | `waitpid`, `pipe`, `signal`, `sigprocmask`, `kill`, `getcwd`, `gettimeofday`, `times`, `uname`, `getppid`, `nanosleep`, `setsockopt`/`getsockopt`/`getsockname`, `getdents64`, `ioctl`, `poll`/`ppoll`, `select`/`pselect6`, `futex`, `socket`, `connect`, `accept`, `bind`, `recvfrom`, `sendto`, `recvmsg`/`sendmsg`, `signalfd` — bounce or in-place read | `01f1f47` `abb61b1` `f4046e3` |
 | **C** VFS bounce | `fd_read`/`fd_write` chunked into 64 KiB bounce buffers for VFS, DEV, pipe, socket, tty; FS callbacks never touch the user pointer; pipe three-phase (compute → reserve → copy) + `read_busy` reservation; socket rx success-only commit; tty post-block `_ft` | `e73c47c` `80eab1a` |
 | **signal** | `do_signal_delivery` writes the user trampoline frame via `copy_to_user_ft`; `SYS_sigreturn` reads the saved frame via `copy_from_user_ft`; both cross-page safe (pml4 walked per page); keep pending if fault | `e73c47c` |
-| **kernel selftest** | `kernel/test/test_uaccess.c` (17 cases): synthetic pml4 walker, cross-page non-adjacent pages, longjmp path, no-short-count, `_ft_res` cleanup double | `f8e056c` `115594b` |
+| **kernel selftest** | `kernel/selftest/test_uaccess.c` (17 cases): synthetic pml4 walker, cross-page non-adjacent pages, longjmp path, no-short-count, `_ft_res` cleanup double | `f8e056c` `115594b` |
 
 The audit self-test (`KERNEL_SELFTEST=1`) runs all 17 cases during boot; the user-space systest (199 cases) remains the primary regression.

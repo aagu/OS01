@@ -163,12 +163,12 @@ signatures on serial: `aarch64 uefi handoff ok`, then `phase1 boot ok`.
 make test
 ```
 
-Runs the host-side test suites in `test/` (`Suites: 16 | Failed: 0`).
+Runs the host-side test suites in `hosttests/` (`Suites: 16 | Failed: 0`).
 
 ### QEMU E2E tests (variant-isolated images)
 
 Each x86 E2E target builds its image **variant** into an isolated directory
-and runs `tests/run_test.py` against that exact image via the `DISK_IMG`
+and runs `qemutests/run_test.py` against that exact image via the `DISK_IMG`
 environment variable. Variant builds **never delete or overwrite the normal
 image** `build/x86_64-clang/image/disk.img`: before and after each variant
 build the normal image's sha256 is recorded (`image/normal.before` /
@@ -214,8 +214,8 @@ The system behavior is configured via `config/` (BusyBox config, the
 * `user/` - user-space programs
 * `mk/` - build modules (project.mk, profiles/, targets/, toolchains/, components/)
 * `config/` - configuration files
-* `test/` - host test code
-* `tests/` - E2E scripts (`run_test.py`)
+* `hosttests/` - host test code
+* `qemutests/` - E2E scripts (`run_test.py`)
 * `tools/` - build tools (mkdisk)
 * `docs/` - documentation
 

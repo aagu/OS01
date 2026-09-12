@@ -1,4 +1,4 @@
-/* kernel/include/kernel/arch/aarch64/handoff_layout.h
+/* kernel/include/arch/aarch64/handoff_layout.h
  *
  * Shared physical-address contract between the AArch64 UEFI bootloader
  * (boot/uefi/arch/aarch64) and the kernel. The loader builds the

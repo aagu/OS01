@@ -56,7 +56,7 @@
  * find it under `<kernel/arch/aarch64/ram_core.h>`. Include it
  * relative to this file (matching the style of boot_percpu.c, smp.c,
  * and the other aarch64 C files). The header itself pulls in
- * kernel/include/kernel/arch/aarch64/ram.h. */
+ * kernel/include/arch/aarch64/ram.h. */
 #include "ram_core.h"
 
 /* ── Constants local to this TU ──────────────────────────────── */

@@ -1,7 +1,7 @@
 # 架构评审 — Group 1: Boot + 内核入口
 
 > **审查日期**: 2026-07-25
-> **覆盖文件**: `kernel/arch/x86_64/head.S`, `entry.S`, `trampoline.S`, `kernel/kernel/main.c`, `kernel/arch/x86_64/linker.ld`, `trampoline.ld`, `kernel/include/kernel/bootinfo.h`, `boot/uefi/main.c`, `kernel/include/kernel/arch/x86_64/gate.h`, `kernel/arch/x86_64/trap.c`
+> **覆盖文件**: `kernel/arch/x86_64/head.S`, `entry.S`, `trampoline.S`, `kernel/core/main.c`, `kernel/arch/x86_64/linker.ld`, `trampoline.ld`, `kernel/include/core/bootinfo.h`, `boot/uefi/main.c`, `kernel/include/arch/x86_64/gate.h`, `kernel/arch/x86_64/trap.c`
 
 ## 问题清单
 
@@ -19,7 +19,7 @@
 
 ### [P1] 1. GDT TSS 位置与文档不一致，索引偏移 1
 
-- **位置**: `kernel/arch/x86_64/head.S:106-109`, 行 253 注释; `kernel/include/kernel/arch/x86_64/gate.h:51`; `docs/architecture.md` GDT 表格
+- **位置**: `kernel/arch/x86_64/head.S:106-109`, 行 253 注释; `kernel/include/arch/x86_64/gate.h:51`; `docs/architecture.md` GDT 表格
 - **现象**: 
   - `head.S:107` 将 TSS descriptor 写入 `GDT_Table+64` (slot 8), 对应 selector 0x40
   - 静态 GDT 表格 slot 8 初始值为 KERNEL Data 32-bit (0x00cf92000000ffff), 被运行时覆盖
@@ -34,7 +34,7 @@
 
 ### [P1] 2. `set_tss64()` 只操作全局 TSS，BSP 的 per-CPU `init_tss` 未初始化
 
-- **位置**: `kernel/kernel/main.c:140` 和 `271-272`
+- **位置**: `kernel/core/main.c:140` 和 `271-272`
 - **现象**: 
   - `kernel_main:140`: `set_tss64(TSS64_Table, ...)` 填充全局 TSS (位于 head.S 的 `.data` 段)
   - `kernel_main:271-272`: BSP 设置 `percpu_data[0].tss = &init_tss[0]`, `percpu_data[0].tss_hw = TSS64_Table`
@@ -60,7 +60,7 @@
 
 ### [P2] 4. BootInfo ABI: bootloader 端 `boolean_t` vs 内核端 `uint8_t`
 
-- **位置**: `boot/uefi/main.c:37` vs `kernel/include/kernel/bootinfo.h:40`
+- **位置**: `boot/uefi/main.c:37` vs `kernel/include/core/bootinfo.h:40`
 - **现象**: 
   - Bootloader 端 `BootFromBIOS` 定义为 `boolean_t` (UEFI 类型)
   - 内核端定义为 `uint8_t`

@@ -98,7 +98,7 @@ ifeq ($(ARCH),x86_64)
 # empty -isystem.
 ALL_CFLAGS += -isystem $(SYSROOT_GENERATION_DIR)/usr/include
 # Map the absolute build prefix in __FILE__ etc. to a relative path so that
-# source-directory renames (e.g. kernel/kernel/ → kernel/core/) do not change
+# source-directory renames (see the 2026-09-12 kernel/ layout restructure) do not change
 # the compiled image byte-for-byte.
 ALL_CFLAGS += -ffile-prefix-map=$(CURDIR)=.
 endif

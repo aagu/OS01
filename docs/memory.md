@@ -250,17 +250,17 @@ Slab 分配器用于小内存分配，初始化函数为 `slab_init`，位于 `k
 ### 物理内存管理
 
 * `kernel/memory/pmm.c` - 物理内存管理实现
-* `kernel/include/kernel/pmm.h` - 物理内存管理头文件
+* `kernel/include/memory/pmm.h` - 物理内存管理头文件
 
 ### 虚拟内存管理
 
 * `kernel/memory/vmm.c` - 虚拟内存管理实现
-* `kernel/include/kernel/vmm.h` - 虚拟内存管理头文件
+* `kernel/include/memory/vmm.h` - 虚拟内存管理头文件
 
 ### 内存分配器
 
 * `kernel/memory/slab.c` - Slab 分配器实现
-* `kernel/include/kernel/slab.h` - Slab 分配器头文件
+* `kernel/include/memory/slab.h` - Slab 分配器头文件
 
 ### 内存工具
 
@@ -268,7 +268,7 @@ Slab 分配器用于小内存分配，初始化函数为 `slab_init`，位于 `k
 
 ### 内存头文件
 
-* `kernel/include/kernel/memory.h` - 内存管理公共头文件
+* `kernel/include/memory/memory.h` - 内存管理公共头文件
 
 ## 注意事项
 

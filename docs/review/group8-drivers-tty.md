@@ -1,7 +1,7 @@
 # 架构评审 — Group 8: 驱动 + TTY
 
 > **审查日期**: 2026-07-25
-> **覆盖文件**: `kernel/tty/tty.c`, `kernel/driver/keyboard.c`, `serial.c`, `ahci.c`, `kernel/kernel/main.c` (驱动初始化), `kernel/driver/pci.c`
+> **覆盖文件**: `kernel/tty/tty.c`, `kernel/driver/keyboard.c`, `serial.c`, `ahci.c`, `kernel/core/main.c` (驱动初始化), `kernel/driver/pci.c`
 
 ## 问题清单
 

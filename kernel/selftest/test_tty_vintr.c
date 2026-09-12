@@ -13,7 +13,7 @@
 //
 // v5 fix E4/E5: registered via explicit extern + call from task_init() after
 // scheduler_ok=1 (kernel_thread + schedule() work). get_dev_tty() is set by
-// kernel/kernel/main.c (tty_set_dev_tty(console)) BEFORE task_init(), so
+// kernel/core/main.c (tty_set_dev_tty(console)) BEFORE task_init(), so
 // get_dev_tty() is non-NULL here; if the boot sequence ever changes this test
 // silently skips via the dev_tty==NULL branch.
 

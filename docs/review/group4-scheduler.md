@@ -1,7 +1,7 @@
 # 架构评审 — Group 4: 调度器
 
 > **审查日期**: 2026-07-25
-> **覆盖文件**: `kernel/sched/task.c`, `deferred_free.c`, `kernel/arch/x86_64/switch.c`, `kernel/include/kernel/task.h`, `kernel/include/kernel/deferred_free.h`
+> **覆盖文件**: `kernel/sched/task.c`, `deferred_free.c`, `kernel/arch/x86_64/switch.c`, `kernel/include/sched/task.h`, `kernel/include/kernel/deferred_free.h`
 
 ## 问题清单
 

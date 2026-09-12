@@ -17,7 +17,7 @@
 │   tick_handler(): jiffies++ / poll超时纳秒扫描 /      │
 │                   need_resched / watchdog / TIMER_SIRQ
 ├─────────────────────────────────────────────────────┤
-│ arch hook (kernel/include/kernel/arch/*.h)           │
+│ arch hook (kernel/include/arch/*.h)           │
 │   arch_cycle_counter() [已有]  arch_cycle_freq() [新增]
 │   arch_tick_start() [新增]  ← x86: LAPIC; aarch64: CNTP(预留)
 └─────────────────────────────────────────────────────┘
@@ -73,7 +73,7 @@ uint64_t tick_get_jiffies(void);
 
 > 注意：**没有独立的 tick_init()**——PIT 在 phase 4 由 `pit_init()` 照常启动，
 > `tick_handler()` 由 PIT/LAPIC 的 arch IRQ handler 直接调用；`tick_start()` 在
-> `kernel/kernel/main.c:294`（percpu+GS 就绪后）显式调用。
+> `kernel/core/main.c:294`（percpu+GS 就绪后）显式调用。
 
 **tick_start() 的源选择**：
 
@@ -177,8 +177,8 @@ add_timer(t);                                  // 到期自动删除（一次性
 
 | 文件 | 职责 |
 |------|------|
-| `kernel/time/clocksource.c` + `include/kernel/clocksource.h` | 单调纳秒层（mult/shift 换算） |
-| `kernel/time/tick.c` + `include/kernel/clockevent.h` | tick 语义层（jiffies/poll 扫描/源选择） |
+| `kernel/time/clocksource.c` + `kernel/include/time/clocksource.h` | 单调纳秒层（mult/shift 换算） |
+| `kernel/time/tick.c` + `kernel/include/time/clockevent.h` | tick 语义层（jiffies/poll 扫描/源选择） |
 | `kernel/intr/apic/lapic_timer.c` | LAPIC tick 源（校准 + 周期模式 + per-LAPIC DIV） |
 | `kernel/driver/pit.c` | PIT（boot 窗口 + fallback） |
 | `kernel/time/timer.c` + `include/device/timer.h` | 软件定时器轮（timer wheel） |

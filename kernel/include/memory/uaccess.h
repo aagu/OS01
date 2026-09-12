@@ -1,7 +1,7 @@
 #ifndef _KERNEL_UACCESS_H
 #define _KERNEL_UACCESS_H
 
-// kernel/include/kernel/uaccess.h — syscall-boundary DoS hardening
+// kernel/include/memory/uaccess.h — syscall-boundary DoS hardening
 //
 // Public surface of the uaccess subsystem.  All user-pointer dereferences
 // on the syscall / signal-delivery path MUST go through the primitives

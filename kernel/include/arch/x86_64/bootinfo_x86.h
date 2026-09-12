@@ -4,7 +4,7 @@
 // ─────────────────────────────────────────────────────────
 //  x86_64 bootinfo extensions
 //
-//  bootinfo.h (kernel/include/kernel/bootinfo.h) defines the
+//  bootinfo.h (kernel/include/core/bootinfo.h) defines the
 //  arch-neutral boot_context ABI shared by every arch. This header
 //  carries the x86_64-specific bits — currently the legacy BIOS E820
 //  record layout and the format enum value used by the x86_64 UEFI

@@ -8,8 +8,8 @@
 * `user` — 用户空间程序（init, spin, sigtest, poweroff, systest 等）
 * `sysroot` — 系统根目录，用于安装头文件和库
 * `config` — 配置文件（busybox.config.in、rootfs.mk 磁盘镜像清单、inittab*、busybox.overlay/）
-* `test` — 测试代码和 mock
-* `tests` — 测试脚本（run_test.py）
+* `hosttests` — 宿主测试代码和 mock
+* `qemutests` — 测试脚本（run_test.py）
 * `tools` — 构建工具（mkdisk — GPT 双分区磁盘镜像创建工具）
 * `thirdpart` — 第三方依赖库（posix-uefi, busybox-1.36.1）
 * `docs` — 文档
@@ -34,7 +34,7 @@
 * `subsys/` — 子系统注册框架（subsys.c）
 * `tty/` — 终端/TTY 子系统（tty.c）
 * `percpu/` — 每 CPU 数据结构（percpu.c）
-* `test/` — 内置自测试（selftest.c, test_mutex.c）
+* `selftest/` — 内核内自测试（KERNEL_SELFTEST=1：selftest.c, test_mutex.c …）
 
 ## 详细文件说明
 
@@ -163,9 +163,9 @@
 * `rootfs.mk` - 磁盘镜像输入清单（dest=source:mode / busybox applet 项，image.mk 解析）
 * `busybox.overlay/` - BusyBox adapter 的受控 overlay（crt0/sigreturn/Kbuild.src）
 
-### test / tests 目录
-* `test/` - 单元测试代码和 mock
-* `tests/run_test.py` - 集成测试脚本
+### hosttests / qemutests 目录
+* `hosttests/` - 单元测试代码和 mock
+* `qemutests/run_test.py` - 集成测试脚本
 
 ### docs 目录
 项目文档。

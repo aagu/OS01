@@ -1,5 +1,5 @@
 /* kernel/arch/x86_64/irq_hooks.c — strong overrides for the
- * arch-neutral IRQ dispatch hooks (kernel/include/kernel/arch/irq.h).
+ * arch-neutral IRQ dispatch hooks (kernel/include/arch/irq.h).
  *
  * Provides the x86_64-specific implementations of:
  *   • arch_irq_select_controller  → IOAPIC / PIC fallback

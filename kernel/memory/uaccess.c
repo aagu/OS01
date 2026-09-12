@@ -1,5 +1,5 @@
 // kernel/memory/uaccess.c — syscall-boundary DoS hardening: fault-tolerant
-// user-memory copy primitives.  See kernel/include/kernel/uaccess.h for the
+// user-memory copy primitives.  See kernel/include/memory/uaccess.h for the
 // contract and docs/superpowers/specs/2026-08-23-syscall-boundary-audit-design.md
 // for the rationale.
 //
@@ -18,7 +18,7 @@
 // copy_to_user_ft_res below.
 //
 // Note: the plain copy_to_user_ft / copy_from_user_ft are provided as
-// static inline wrappers in kernel/include/kernel/uaccess.h (Task 1),
+// static inline wrappers in kernel/include/memory/uaccess.h (Task 1),
 // forwarding to the _res variants with NULL callback.  No out-of-line
 // definitions live here.
 

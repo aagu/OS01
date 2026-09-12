@@ -1,7 +1,7 @@
 # 架构评审 — Group 2: 内存管理
 
 > **审查日期**: 2026-07-25
-> **覆盖文件**: `kernel/memory/pmm.c`, `slab.c`, `vmm.c`, `vma.c`, `tlb.c`, `kernel/include/kernel/vmm.h`, `kernel/include/kernel/pmm.h`, `kernel/include/kernel/slab.h`, `kernel/include/kernel/vma.h`, `kernel/arch/x86_64/trap.c` (do_page_fault)
+> **覆盖文件**: `kernel/memory/pmm.c`, `slab.c`, `vmm.c`, `vma.c`, `tlb.c`, `kernel/include/memory/vmm.h`, `kernel/include/memory/pmm.h`, `kernel/include/memory/slab.h`, `kernel/include/memory/vma.h`, `kernel/arch/x86_64/trap.c` (do_page_fault)
 
 ## 问题清单
 

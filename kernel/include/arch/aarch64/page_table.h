@@ -1,4 +1,4 @@
-/* kernel/include/kernel/arch/aarch64/page_table.h
+/* kernel/include/arch/aarch64/page_table.h
  *
  * AArch64 stage-1 translation-table primitive layer.
  *

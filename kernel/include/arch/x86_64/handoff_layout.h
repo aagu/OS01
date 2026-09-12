@@ -8,8 +8,8 @@
 #define X86_64_HANDOFF_BASE  0x60000UL
 #define X86_64_HANDOFF_END    0x64000UL
 
-/* Linker symbols. Single-char style matches kernel/kernel/main.c:40-43
- * and kernel/include/kernel/task.h:48,51. */
+/* Linker symbols. Single-char style matches kernel/core/main.c:40-43
+ * and kernel/include/sched/task.h:48,51. */
 extern char _text;
 extern char _edata;
 

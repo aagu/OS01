@@ -1,4 +1,4 @@
-// kernel/kernel/random.c — ChaCha20 CSPRNG pool + RDRAND/RDSEED reseed.
+// kernel/random/random.c — ChaCha20 CSPRNG pool + RDRAND/RDSEED reseed.
 //
 // Stateless algorithm lives in libc (chacha20.c, linked via libk.a); this
 // file owns the secret state: the 32-byte key, a 64-bit block index, and

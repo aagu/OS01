@@ -127,11 +127,11 @@ system(glob_cmd);
 
 ---
 
-### P2-BUILD-8: 根 Makefile `kernel.bin` 与 `kernel/kernel.bin` 两个目标功能重复
+### P2-BUILD-8: 根 Makefile 的 `kernel.bin` 与 kernel/Makefile 内的 `kernel.bin` 两个目标功能重复
 
 **文件**: `Makefile:50-56`
 
-**问题**: 两个目标均执行 `make -C kernel kernel.bin`。仅 `kernel/kernel.bin` 标记 `.PHONY`；`kernel.bin`（无前缀）依赖文件存在性和时间戳。二者功能相同但实现方式不同，可能产生混淆。
+**问题**: 两个目标均执行 `make -C kernel kernel.bin`。仅 kernel/Makefile 内的 `kernel.bin` 目标标记 `.PHONY`；`kernel.bin`（无前缀）依赖文件存在性和时间戳。二者功能相同但实现方式不同，可能产生混淆。
 
 **建议**: 保留一个 `.PHONY` 目标即可。
 

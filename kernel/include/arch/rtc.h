@@ -17,7 +17,7 @@
 //
 //  IMPORTANT: the include guard MUST differ from any per-arch
 //  header (kernel/arch/<arch>/rtc_*.c uses its own guard). This
-//  is the same pattern as kernel/include/kernel/arch/regs.h
+//  is the same pattern as kernel/include/arch/regs.h
 //  (see the FACADE_H guard naming convention established there).
 // ─────────────────────────────────────────────────────────
 

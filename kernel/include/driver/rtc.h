@@ -18,12 +18,12 @@
 //  PL031 lands). Callers should treat `false` as "no wall clock
 //  available" and either fall back to TSC uptime or simply log.
 //
-//  Per-arch hooks (declared in kernel/include/kernel/arch/rtc.h):
+//  Per-arch hooks (declared in kernel/include/arch/rtc.h):
 //
 //    bool arch_rtc_read(datetime_t *out);
 //    bool arch_rtc_write(const datetime_t *in);
 //
-//  Default: both return false (kernel/include/kernel/arch/rtc.h
+//  Default: both return false (kernel/include/arch/rtc.h
 //  weak defaults). Override: kernel/arch/<arch>/rtc_*.c provides
 //  the strong definition.
 // ─────────────────────────────────────────────────────────

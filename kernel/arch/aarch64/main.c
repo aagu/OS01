@@ -195,7 +195,7 @@ void aarch64_main(const struct boot_context *handoff)
     aarch64_ram_init(handoff);
 
     /* Populate PMMngr fields that pmm_init reads. Mirrors the
-     * kernel/kernel/main.c:155-159 prelude on x86_64, but uses the
+     * kernel/core/main.c:155-159 prelude on x86_64, but uses the
      * aarch64 VMA linker symbols (_text_start/_text_end/.../_kernel_end)
      * because _text/_edata/_end do not exist on aarch64. */
     extern char _text_start[], _text_end[];

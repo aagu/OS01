@@ -43,7 +43,7 @@ managed by these helpers.
 ### Page table flag
 
 ```c
-#define PAGE_COW  (1UL << 10)   // kernel/include/kernel/vmm.h:50
+#define PAGE_COW  (1UL << 10)   // kernel/include/memory/vmm.h:50
 ```
 
 Bit 10 is an x86‑64 **ignored bit** (hardware never interprets it).  A COW page
@@ -127,12 +127,12 @@ memory still mapped by the parent.
 
 ## VMA (Virtual Memory Area) subsystem
 
-**Files:** `kernel/memory/vma.c`, `kernel/include/kernel/task.h` (`mm_t`)
+**Files:** `kernel/memory/vma.c`, `kernel/include/sched/task.h` (`mm_t`)
 
 ### Data structures
 
 ```c
-// kernel/include/kernel/task.h:68
+// kernel/include/sched/task.h:68
 typedef struct mm_struct {
     uint64_t *pml4;
     uint64_t start_code, end_code;
@@ -254,8 +254,8 @@ writable entries, which would bypass COW protection.
 | `kernel/memory/vmm.c` | `vmm_unmap_4k_page` (COW‑aware), `vmm_map_4k_page`, `vmm_pt_walk`, `vmm_alloc_map` |
 | `kernel/sched/task.c` | `fork_mm_copy` (page table walk + COW install), `do_fork` |
 | `kernel/arch/x86_64/trap.c` | `do_page_fault` COW resolution, `do_system_call` dispatch for `SYS_mmap/mprotect/munmap` |
-| `kernel/include/kernel/vmm.h` | `PAGE_COW`, `PAGE_PROTNONE`, page table flag constants |
-| `kernel/include/kernel/task.h` | `mm_t` (VMA list, `mmap_base`), `task_t` |
+| `kernel/include/memory/vmm.h` | `PAGE_COW`, `PAGE_PROTNONE`, page table flag constants |
+| `kernel/include/sched/task.h` | `mm_t` (VMA list, `mmap_base`), `task_t` |
 | `kernel/include/uapi/syscall.h` | `SYS_mmap` (44), `SYS_mprotect` (45), `SYS_munmap` (46) |
 | `libc/unistd/mmap.c` | User‑space `mmap()`/`munmap()` wrappers using `syscall6`/`syscall` |
 | `libc/unistd/mprotect.c` | User‑space `mprotect()` wrapper |

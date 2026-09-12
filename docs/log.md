@@ -2,7 +2,7 @@
 
 ## Design
 
-Four log levels defined in `kernel/include/kernel/log.h`:
+Four log levels defined in `kernel/include/log/log.h`:
 
 | Level     | Value | Description                              |
 |-----------|-------|------------------------------------------|
@@ -81,7 +81,7 @@ Framebuffer colors per level:
 
 ## Debug Channel Macros
 
-Defined in `kernel/include/kernel/debug.h`. Bridge between `DEBUG_CHANNELS` and `log_debug`:
+Defined in `kernel/include/core/debug.h`. Bridge between `DEBUG_CHANNELS` and `log_debug`:
 
 ```c
 debug_sched("cpu %d switching to pid %d\n", cpu, pid);
@@ -104,12 +104,12 @@ Each macro:
 
 | File | Purpose |
 |------|---------|
-| `kernel/kernel/log.c` | `_log_write()` dispatcher, `log_set_level()`, `log_get_level()`, level-to-color mapping |
-| `kernel/include/kernel/log.h` | Macros (`log`, `log_err`, `log_warn`, `log_info`, `log_debug`) and level definitions |
-| `kernel/include/kernel/debug.h` | Per-channel debug macros forwarding to `log_debug` |
+| `kernel/core/log.c` | `_log_write()` dispatcher, `log_set_level()`, `log_get_level()`, level-to-color mapping |
+| `kernel/include/log/log.h` | Macros (`log`, `log_err`, `log_warn`, `log_info`, `log_debug`) and level definitions |
+| `kernel/include/core/debug.h` | Per-channel debug macros forwarding to `log_debug` |
 | `kernel/Makefile` | `LOG_TARGET=`, `NDEBUG=`, `DEBUG_CHANNELS=` build flags |
 
-Key details in `kernel/kernel/log.c`:
+Key details in `kernel/core/log.c`:
 - `spin_lock_irqsave` protects both the shared static buffer and the UART write loop (prevents deadlock when `int $0x80` syscall handler calls `log()` while task context holds `log_lock`).
 - `vsnprintf` renders into a static 1024-byte buffer, then dispatched to serial and/or framebuffer based on compile-time flags.
 - Framebuffer output uses `color_printk()` with level-dependent colors.

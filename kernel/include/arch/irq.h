@@ -19,7 +19,7 @@ typedef uint64_t arch_irq_state_t;
 //   • x86_64 strong override: kernel/arch/x86_64/irq_hooks.c
 //
 // Forward decl avoids circular include — the full type lives in
-// kernel/include/kernel/interrupt.h, which already includes this
+// kernel/include/intr/interrupt.h, which already includes this
 // header.
 struct hw_int_type;
 typedef struct hw_int_type hw_int_controller_t;

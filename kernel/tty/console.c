@@ -6,7 +6,7 @@
 #include <string.h>
 #include <driver/serial.h>
 
-// font is a global in kernel/kernel/printk.c
+// font is a global in kernel/core/printk.c
 extern psf2_t *font;
 
 // Terminal cursor state
@@ -36,7 +36,7 @@ void console_putchar(char c)
     if (!term_initialized) return;
 
     // write_serial_unlocked: console_putchar is installed as the
-    // console TTY's output_char (see kernel/kernel/main.c), so it
+    // console TTY's output_char (see kernel/core/main.c), so it
     // runs inside tty_write() which already holds serial_lock.
     // Calling write_serial() here would re-acquire the non-
     // recursive spinlock and deadlock.  Other call sites (early

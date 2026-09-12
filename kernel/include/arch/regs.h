@@ -6,7 +6,7 @@
 //
 //  Dispatches to the per-arch register-layout header based on
 //  the compiler-defined target macro. Each per-arch header
-//  (kernel/include/kernel/arch/<arch>/regs.h) defines
+//  (kernel/include/arch/<arch>/regs.h) defines
 //  `pt_regs_t` plus any arch-specific register bit / MSR
 //  constants used by .c and .S code.
 //

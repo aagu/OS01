@@ -1,5 +1,5 @@
 /* kernel/intr/arch_irq_hooks.c — weak defaults for the arch-neutral
- * IRQ dispatch hooks declared in kernel/include/kernel/arch/irq.h.
+ * IRQ dispatch hooks declared in kernel/include/arch/irq.h.
  *
  * Each arch (x86_64 today, aarch64 in a future slice) provides a
  * strong override in kernel/arch/<arch>/irq_hooks.c. The weak
