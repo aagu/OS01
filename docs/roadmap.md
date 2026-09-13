@@ -1,8 +1,8 @@
-# OS01 优化路线图 v25
+# OS01 优化路线图 v26
 
-> **基准**: `3ab4ef1` (Merge branch 'arch-cleanup-gh')
-> **日期**: 2026-09-11
-> **变更**: 同步 v24 之后的实际进展——**arch-cleanup-gh 分支合并**（10 commits `67132e2..3ab4ef1`）：① **`mm(arch)` 页表层级统一 PGD/PUD/PMD/PTE**（Linux/ARM 命名）—— `mm->pml4 → mm->pgdir`、`PAGE_Present → PAGE_VALID`、`PAGE_R_W → PAGE_WRITE`、`PAGE_PS → PAGE_HUGE`、`PAGE_XD → PAGE_NO_EXEC` 等 bit-constant rename，`vmm.c`/`sched COW fork`/`elf loader`/`vma.c`/`uaccess.c`/`fb.c`/`futex.c` 共 ~150 站点停止硬编码 x86_64 命名，x86_64 `head.S` 硬件 label 与 `kernel/include/memory/vmm.h` bit-position 常量保留为 x86_64 层；② **`bootinfo(arch)` E820 拆出 `bootinfo_x86.h`**—— `struct E820_ENTRY` + `BOOT_MEMORY_FORMAT_E820=1u` 从 `bootinfo.h` 移到 `kernel/arch/x86_64/bootinfo_x86.h`，aarch64 编译时不再泄漏 x86 符号；③ **`arch(neutral)` pt_regs_t facade + rwlock 用 `arch_cpu_pause`** —— 新增 `kernel/include/arch/regs.h` 派发到 `arch/x86_64/regs.h` / `arch/aarch64/regs.h`，`rwlock_relax()` 本地 `#if __x86_64__/__aarch64__` switch 替换为共享 `arch_cpu_pause()`；④ **`intr(arch)` `arch_irq` hooks 拆分 controller selection + dispatch** —— 新增 `arch_irq_select_controller(gsi)`/`arch_irq_gsi_to_vector`/`arch_irq_vector_to_gsi`/`arch_irq_dispatch(regs, hwirq)` 三 hook + 弱默认 `kernel/intr/arch_irq_hooks.c`（FATAL-halt + identity + silent no-op）+ x86_64 强覆盖 `kernel/arch/x86_64/irq_hooks.c`（APIC→PIC ladder + 0x20+gsi 翻译 + 移动过来的 do_IRQ 体）；`unregister_irq` 从 `uint64_t nr`（vector）改为 `uint32_t gsi`，跟 `register_irq` 一致；do_IRQ 移出 `intr/pic/8259A.c`；⑤ **`rtc(arch)` core + per-arch impl 拆分** —— `kernel/driver/rtc.c` 重写为只走 `arch_rtc_read/write` hook 的 core，x86_64 强覆盖 `kernel/arch/x86_64/rtc_cmos.c`（CMOS port I/O + BCD）+ `kernel/arch/x86_64/rtc_pie.c`（PIE/LAPIC/TSC 校准，verbatim move），新 `kernel/include/arch/x86_64/rtc.h`；⑥ **`arch(subsys)` 平台自决 driver 注册** —— 新 `SUBSYS_INITCALL()` 宏 + `.subsys_init` linker section 替代 `arch_register_subsys()` 中 10 个 wrapper 硬编码列表，10 driver .c 自注册（ahci/keyboard/pci/pit/serial/lapic/lapic_timer/pic/net/clocksource/timer），平台 glue 缩到 7 行 loop；⑦ **`arch(sched)` arch-neutral `kernel_thread_entry`** —— 新 `arch_kernel_thread_entry` 名 + 弱默认 panic-on-call（`kernel/sched/arch_kernel_thread_entry.c`）+ x86_64 强覆盖（`thread_entry.S`），`task.c` 不再 include per-arch 头；⑧ **`build(uefi)` 排除 `*.o/*.a/*.lib` from runtime digest + staged copy** —— `find` digest 用 `! -name` 排除，`cp -a` 后 `find -delete` 清理，根治 worktree 里 posix-uefi submodule 残留污染 aarch64 BOOTAA64.EFI 链接（duplicate-symbol + machine-type mismatch）。验证：x86_64 `kernel.bin` 链接字节相同（1,739,024 B，rename 纯文本替换最强 correctness 证据）、aarch64 `-target aarch64-none-elf` 无 E820 符号泄漏、`pmm_arch_test.py` host smoke 通过、selftest 21/21 + syscall 268/268 + aarch64 UEFI BOOTAA64.EFI ARM64 PE32+ 验证。详见 `git log a2e7389..3ab4ef1` 各 commit message + spec/plan（arch-cleanup-gh 计划按 weak-default + strong-override 模式分阶段落地）。
+> **基准**: `f2085c3` (master, 2026-09-13)
+> **日期**: 2026-09-13
+> **变更**: 同步 v25 之后的实际进展（`a274f6f..f2085c3`，两大系列 + 若干加固）：① **aarch64 页表原语**（spec `2026-09-11-aarch64-page-table-primitives-design.md`，`169e0d5` + 修复 `c9c0246`/`cdb6625` + host smoke `466401d`/`28ac0ea`）——`kernel/arch/aarch64/page_table.c` 提供 arch-local 页表 walk/map 原语（descriptor bit 修正 + intermediate entry 用 minimal descriptor），配套 QEMU 级 smoke 断言，为 P2 `head.S + MMU` 铺路；附带两个 aarch64 PMM 修复（`1c51dfa` 多 zone `alloc_pages` 索引、`053a226` direct map 覆盖 PMM 分配范围）。② **目录重构 P1–P6**（merge `31bb128`，spec `2026-09-12-directory-restructure-design.md`）——test 目录改 `hosttests/qemutests/kernel-selftest/runtime-selftest`（P1）、`kernel/kernel/ → kernel/core/`（P2，字节相同）、random/log/font/logo 拆出 core/（P3）、headers 按 subsystem 拆分 + `arch/` lift 出 `include/kernel/`（P4）、pic/timer 归属 owning subsystem + pty 迁移（P5）、P6 清理 + 全量文档同步（`6730681`）+ master 新 PMM 测试移植（`11695b6`）。③ **PMM/sched 稳定性系列**（worktree `pmm-three-fixes`，merge `be7db4f`）——`ea89136` MEMORY_RANGE_GRANULE 32→64-bit、`beb351c` 保留 E820 MEMORY_TYPE、`0ba888a` alloc/free RAM-relative 索引、`0809100` boot/slab 帧预留 RAM-relative、`514e062` 调度 lost-wakeup 窗口修复、`b68e1b1` 6 例 PMM host 测试；另有 `4468e75` `find_mount` 防御（user-pointer mount entry → dump + ENOENT；**底层根因 devfs mount entry 0x600000 被覆写仍未定位**，疑似 boot slab 帧被 e1000 TX ring 复用，硬件 watchpoint 已取证，parked）。④ **SMP=4 boot crash 双 bug 修复**（`1506d6e` large-model orphan sections 进 `_end` 前、`36eb6a3` active PGD lifetime 与 CR3 同步）+ `tests/x86_64_systest_repeat.py` 回归。⑤ **文档学习层**（`2d289d3`/`414d022` docs/README 索引 + 调度器/trap.c/vfs+memory/tty+intr 4 份源码阅读指南）。v25 的 arch-cleanup 明细（PGD/PUD/PMD/PTE 统一等 10 commits）见 `git log 67132e2..3ab4ef1`。
 
 标记: ✅ 已完成 | 🔒 P1 安全加固 | 🏗 P2 aarch64 适配 | 🖥 P3 GUI | 🔧 P4 硬件适配 | 📐 P5 ABI 扩展/兼容性
 
@@ -42,6 +42,9 @@
 | 自托管 compiler runtime | udivti3 实现 + provider-keyed selfhosted archive + provider 构建不变量硬化 + 内核链接 compiler runtime + kernel link publication 加固 + compiler-rt eligibility 验证 + kernel runtime validation targets + syscall/selftest suite 隔离 + variant link paths + root `make sysroot` 入口 | ✅（多 commits 2026-09-04/05，详见 `runtime/` + `docs/build.md`） |
 | aarch64 UEFI bootloader 统一 | x86_64 + aarch64 共享 `boot/uefi/main.c` + arch 分发 + `boot_context` handoff ABI + boot_context 头部偏移断言 | ✅（commits `af166bc`..`06e6127`，merge `06e6127`） |
 | aarch64 UEFI 固件修复 | firmware 截断 64MiB 适配 QEMU pflash（`11aa6ed`）+ aarch64 UEFI 默认 URL 下载（`bad8825`）+ aarch64 也显式传 clang+lld 到 posix-uefi（`25872d1`） | ✅（2026-09-03） |
+| 目录重构 P1–P6 | test 目录 → `hosttests/qemutests/kernel-selftest/runtime-selftest`；`kernel/kernel/ → kernel/core/`（字节相同）；headers 按 subsystem 拆分 + `arch/` lift 出 `include/kernel/`；random/log/font/logo 拆出 core/；pic/timer 归属 owning subsystem + pty 迁移；P6 清理 + 全量文档同步 + PMM 测试移植。目录约定见 spec `2026-09-12-directory-restructure-design.md` 与 `docs/structure.md` | ✅（merge `31bb128`，2026-09-12） |
+| PMM/sched 稳定性系列 | MEMORY_RANGE_GRANULE 64-bit + E820 MEMORY_TYPE 保留 + alloc/free/预留 RAM-relative 索引（3 个独立 PMM 隐患，每个先 RED 后 GREEN）+ 调度 lost-wakeup 窗口修复 + 6 例 PMM host 测试 + `find_mount` 防御（user-pointer mount entry → ENOENT）。SMP=1/2/4 均通过，systest-repeat 7 连 268/268 | ✅（merge `be7db4f`，2026-09-12；`1506d6e`/`36eb6a3` SMP=4 boot 双 bug 修复同批落地） |
+| 文档学习层 | `docs/README.md` 索引 + 调度器/trap.c/vfs+memory/tty+intr 源码阅读指南 | ✅（2026-09-13） |
 
 ### 🔒 P1 安全加固
 
@@ -68,7 +71,8 @@
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
 | rwlock/seqlock | 基础原语 ✅；VFS mount/lookup ✅；`/proc` 读路径未纳入本次范围（原 P1#4 提为前置） | 独立 | |
-| head.S + MMU | 启动入口 + TTBR0_EL1/页表 | 独立 | ArvernOS |
+| **aarch64 页表原语** ✅ | **已完成**（2026-09-11/12，spec `2026-09-11-aarch64-page-table-primitives-design.md`，`169e0d5` + `c9c0246` descriptor bit 修正 + `cdb6625` intermediate entry minimal descriptor + `466401d`/`28ac0ea` QEMU smoke 断言）。`kernel/arch/aarch64/page_table.c` arch-local walk/map 原语，为 head.S + MMU 铺路。附带 aarch64 PMM 修复：`1c51dfa` 多 zone `alloc_pages` 索引、`053a226` direct map 覆盖 PMM 分配范围 | 独立 | ArvernOS |
+| head.S + MMU | 启动入口 + TTBR0_EL1/页表（**页表原语已就绪 ✅**，下一步是把原语接到 aarch64 `main.c` 建立内核恒等映射 + user 页表） | 页表原语 ✅ | ArvernOS |
 | GICv2 驱动 | 中断控制器 | head.S | opuntiaOS |
 | Generic Timer | cntvct_el0 读数 + CNTP 周期定时器（clockevent hook 已预留） | head.S | opuntiaOS |
 | 交叉编译链 | aarch64-linux-gnu-gcc + QEMU virt 平台 | 独立 | |
@@ -152,15 +156,26 @@
 ### 依赖链总览
 
 ```
-P1: getrandom ✅ → AT_RANDOM → canary / ASLR
-P2: PMM ✅ + log API ✅ + PGD/PUD/PMD/PTE ✅ + E820 拆分 ✅ + pt_regs_t facade ✅ + arch_irq hooks ✅ + rtc split ✅ + subsys initcall ✅ + kernel_thread_entry ✅ + UEFI 残留排除 ✅
-   → 统一 kernel_main（interrupt/SMP/context-switch 三独立 spec，arch_irq 已落地收尾）；
+P1: getrandom ✅ → AT_RANDOM → canary / ASLR（kernel SSP ✅，用户态 canary 是下一个）
+P2: PMM ✅ + log API ✅ + PGD/PUD/PMD/PTE ✅ + E820 拆分 ✅ + pt_regs_t facade ✅ + arch_irq hooks ✅ + rtc split ✅ + subsys initcall ✅ + kernel_thread_entry ✅ + UEFI 残留排除 ✅ + 页表原语 ✅
+   → head.S + MMU（原语就绪）→ GICv2 → Generic Timer；
+   统一 kernel_main（interrupt/SMP/context-switch 三独立 spec，arch_irq 已落地收尾）；
    rwlock → aarch64 SMP；timer hook ✅ → CNTP
 P3: fb ✅ → 2D API → 字体 → Window Server；PS/2 鼠标并行
 P4: USB 栈 → 真机启动；NVMe / HPET / ACPI 独立
 P5: ELF ✅ → ld.so → 共享 libc → apk/musl；futex ✅ → clone → pthread
     socket ✅ → AF_UNIX；mbedTLS ✅ → HTTPS
 ```
+
+### Parked（未闭环根因 / follow-on，随时可拾起）
+
+| 项 | 说明 |
+|----|------|
+| devfs mount entry 0x600000 被覆写 | `find_mount` PF 的底层根因未定位（`4468e75` 只是防御转 ENOENT）。硬件 watchpoint 取证指向 boot slab 帧被 e1000 TX ring 复用；建议下次复现时先查 e1000 TX buffer 生命周期 |
+| PMM 非-RAM 类型消费 | `enum MEMORY_TYPE t` 算出但丢弃，循环 hardcode `MEMORY_TYPE_RAM`（v24 follow-on，独立 spec） |
+| `__vfs_lookup_raw` consumed 路径 | 需以 mount prefix 播种，非根 mount + 相对 target 时有潜在 bug（exec symlink spec §5.3 遗留） |
+| sysroot 头文件级增量重编 | generation 内 .d 路径相对化/软链引用，使头文件变化只重编依赖者 |
+| `LWIP_RAND`/AT_RANDOM 种子 | getrandom ✅ 后改用内核熵池（与 P1 用户栈 canary 同批做） |
 
 ---
 
@@ -184,5 +199,8 @@ P5: ELF ✅ → ld.so → 共享 libc → apk/musl；futex ✅ → clone → pth
 | `docs/superpowers/specs/2026-09-09-pmm-arch-neutral-design.md` | v24 PMM arch-neutral spec（13 轮 subagent review 通过）：`pmm_init(boot_context)` 单一入口 + `MEMORY_RANGE[]` 中介 + 弱默认/强覆盖 dispatch + RAM-relative indexing + Step 7 unsigned-underflow clamp。**v25 已演化为 v24 之后的 arch-cleanup 基础层** |
 | `docs/superpowers/plans/2026-09-09-pmm-arch-neutral.md` | v24 PMM arch-neutral implementation plan（3 轮 subagent review 通过 + 16 task + 1 final fix round 通过）：x86_64 E820 → MEMORY_RANGE[]，aarch64 读 `aarch64_ram_map_get()`，log API gate-wrapped `_log_*_impl` 统一，aarch64 stubs (printk/memset/slab/log_impl) |
 | `git log a2e7389..3ab4ef1 --oneline` | **v25 arch-cleanup-gh 10 commits**（无独立 spec/plan，由 commit message 驱动实现）：① `67132e2` roadmap v24 doc；② `af9a6ce` bootinfo(arch) E820 → `bootinfo_x86.h`；③ `19b84a8` arch(neutral) `arch/regs.h` pt_regs_t facade + `rwlock_relax()` 走 `arch_cpu_pause()`；④ `dfead87` intr(arch) `arch_irq` hooks 拆分 controller selection + gsi↔vector + dispatch；⑤ `c37522a` rtc(arch) core + per-arch impl 拆分；⑥ `52f99a1` mm(arch) PGD/PUD/PMD/PTE 层级统一 + bit-constant rename；⑦ `0ecee53` arch(subsys) `SUBSYS_INITCALL()` + `.subsys_init` section 替代硬编码 driver 列表；⑧ `58db2a7` arch(sched) `arch_kernel_thread_entry` 弱默认 + x86_64 强覆盖；⑨ `5dbc63d` build(uefi) digest + staged copy 排除 `*.o/*.a/*.lib` 残留；⑩ `3ab4ef1` Merge branch 'arch-cleanup-gh'。共同模式：weak-default（panic/FATAL/identity/no-op 或友好默认）+ strong-override（per-arch 实现）+ `kernel/include/arch/{regs,irq,rtc,...}.h` facade 派发到 `kernel/arch/{x86_64,aarch64}/` |
+| `docs/superpowers/specs/2026-09-11-aarch64-page-table-primitives-design.md` / `plans/2026-09-11-aarch64-page-table-primitives.md` | aarch64 页表 walk/map 原语 + smoke 断言（descriptor bit + minimal intermediate descriptor 两轮修复） |
+| `docs/superpowers/specs/2026-09-12-directory-restructure-design.md` / `plans/2026-09-12-directory-restructure.md` | 目录重构 P1–P6：目录布局约定（core/hosttests/qemutests/include/<subsys>）+ 旧路径换算 |
+| `docs/README.md` + 4 份 reading guide | 文档学习入口层（调度器 / trap.c / vfs+memory / tty+intr） |
 | `docs/boot.md` | x86_64 + aarch64 UEFI bootloader 统一 + `boot_context` handoff ABI + 架构中立生命周期。**v25 增量**：`bootinfo.h` 剥离 E820 至 `arch/x86_64/bootinfo_x86.h`，aarch64 编译视图纯净；`pmm.c` 不再 arch-neutral `entry_size` 分支 |
 | `docs/architecture.md` / `docs/structure.md` / `docs/driver.md` / `docs/debug.md` / `docs/build-run-debug.md` / `docs/lwip-debugging-experience.md` | 系统整体架构 + 源码目录约定 + 驱动子系统 + 调试通道 + 端到端构建运行调试 + lwIP 调试经验。**v25 增量**：driver 注册从硬编码 `arch_register_subsys()` 列表改为 `SUBSYS_INITCALL()` + `.subsys_init` section 自注册；`arch/regs.h` facade 派发 pt_regs_t；`arch_irq_*` hook 三段式；RTC core + per-arch 拆分；页表层级 PGD/PUD/PMD/PTE |
