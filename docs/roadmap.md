@@ -54,7 +54,8 @@
 |----|------|------|------|
 | getrandom syscall ✅ | **已完成**（SYS_getrandom=66，ChaCha20 池 + RDRAND/RDSEED 熵源 + 周期 reseed，`/dev/urandom` 同源）。详见 `docs/syscall.md`。`LWIP_RAND`/AT_RANDOM 种子改用仍待做 | 独立 | Linux getrandom(2) |
 | x86_64 内核栈保护 ✅ | **已完成**：x86_64 内核使用 `-fno-pic -mcmodel=large -fstack-protector-strong`，全局 per-boot guard；审计直接 `R_X86_64_PC32` 或 `R_X86_64_64` guard 引用并拒绝 GOT；编译门控的 QEMU 破坏性 canary trip test 已打印预期诊断。用户态 canary/`AT_RANDOM` 仍待做 | 独立 | Linux SSP |
-| 用户栈 canary | libc `-fstack-protector-strong` + ELF 加载器 AT_RANDOM auxv 传种子（原 P1#5） | getrandom | |
+| **统一用户态启动方式** | `task.c` 两处用户栈构造（spawn argv-only / exec argc+envc）提取共享 `setup_user_stack()`（一处 auxv 逻辑，消除双站点漂移）；`crt0.S` 从寄存器传参（rdi/rsi/rdx）改为标准 SysV `_start`——从 `[rsp]` 解析 argc/argv/envp/auxv 传 `__libc_start_main`（libc/csu 已有但从未被调用），并正确设置 `environ`；busybox overlay crt0 同步。**为 P1 后续（AT_RANDOM/用户栈 canary/ASLR）与 P5 动态链接铺路**：musl crt1 只认栈布局不认寄存器，每个新 auxv 条目在双站点下成本 ×2。验收：systest 268/268 + busybox applet 无回归 | 独立 | musl/glibc crt1 |
+| 用户栈 canary | libc `-fstack-protector-strong` + ELF 加载器 AT_RANDOM auxv 传种子（原 P1#5）。**前置：统一用户态启动方式 ✅ 后在单站点压 AT_RANDOM**；同批把 `LWIP_RAND` 换内核熵池 | 统一启动方式, getrandom | |
 | ASLR | mmap 基址随机化 + ET_DYN/PIE 加载随机化（原 P3#12） | getrandom | |
 | UBSan + KASan | 内核编译期 instrument（原 P3#13） | 独立 | ArvernOS |
 | syscall 边界审计 ✅ | **已完成**（2026-08-24，commits `a1ad1b9`..`80eab1a`，11 commits）。详见下文「Syscall 边界审计实施总结」 | 独立 | |
@@ -156,7 +157,7 @@
 ### 依赖链总览
 
 ```
-P1: getrandom ✅ → AT_RANDOM → canary / ASLR（kernel SSP ✅，用户态 canary 是下一个）
+P1: getrandom ✅ → 统一用户态启动方式（进行中）→ AT_RANDOM → canary / ASLR（kernel SSP ✅，用户栈 canary 排在启动统一之后）
 P2: PMM ✅ + log API ✅ + PGD/PUD/PMD/PTE ✅ + E820 拆分 ✅ + pt_regs_t facade ✅ + arch_irq hooks ✅ + rtc split ✅ + subsys initcall ✅ + kernel_thread_entry ✅ + UEFI 残留排除 ✅ + 页表原语 ✅
    → head.S + MMU（原语就绪）→ GICv2 → Generic Timer；
    统一 kernel_main（interrupt/SMP/context-switch 三独立 spec，arch_irq 已落地收尾）；
