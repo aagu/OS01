@@ -1,7 +1,7 @@
 # 统一用户态进程启动方式（user startup unification）
 
 日期：2026-09-13
-状态：v2（评审后修订：NULL argv 启动契约 / padding 迁移到 auxv 之后 / auxv 起点指针 / 观测通道 / E2BIG 现状纠正）
+状态：v3（按 v2 评审修订：入口地址断言 / 自再入路径 / 奇偶矩阵与 NULL argv 覆盖 / rsp 保存顺序）
 范围：`kernel/sched/task.c`（两处用户栈构造）、`user/crt0.S`、`libc/csu/csu.c`、`config/busybox.overlay/applets/crt0.S`、`user/systest.c`
 
 ## 1. 背景与动机
@@ -80,6 +80,7 @@ _start:
     xorq %rbp, %rbp            # backtrace 终止
     # 清 BSS（保持在 call 之前）
     ...
+    movq %rsp, %rax           # BSS 清零后保存入口 rsp，此前不得修改 rsp
     # __libc_start_main(main, argc, argv, init, fini, rtld_fini, stack_end)
     # 寄存器映射（SysV）：rdi=main  rsi=argc  rdx=argv
     #                     rcx=init(0)  r8=fini(0)  r9=rtld_fini(0)
@@ -91,7 +92,7 @@ _start:
     xorq %r8d, %r8d
     xorq %r9d, %r9d
     subq $16, %rsp             # 对齐占位 + 第 7 参槽位
-    movq %rax, (%rsp)          # 进入前 movq 入口_rsp, %rax 保存的 stack_end
+    movq %rax, (%rsp)          # 第 7 参：准确的入口 rsp
     call __libc_start_main
     addq $16, %rsp
     movl %eax, %edi            # main 返回值
@@ -99,7 +100,7 @@ _start:
     int $0x80
 ```
 
-实现注意：入口 `%rsp` 16 对齐，`subq $16` 后仍 16 对齐，`call` 压返回地址后 `__libc_start_main` 内 `%rsp % 16 == 8`（SysV 不变式）。`stack_end` 必须在任何 `rsp` 修改前保存（如先 `movq %rsp, %rax`）。汇编细节以「入口 rsp 16 对齐 → call 瞬间 rsp%16==8」为不变式自检。
+实现注意：入口 `%rsp` 16 对齐，`subq $16` 后仍 16 对齐，`call` 压返回地址后 `__libc_start_main` 内 `%rsp % 16 == 8`（SysV 不变式）。`stack_end` 必须在 **BSS 清零之后、任何 `rsp` 修改之前**通过 `movq %rsp, %rax` 保存，且随后直到写入参数槽不得覆盖 rax；现有 BSS 清零使用 `xorb %al, %al`，会破坏提前保存到 rax 的地址。汇编细节以「入口及 call 指令执行前 rsp%16==0 → 被调函数入口 rsp%16==8」为不变式自检。
 
 ### 4.3 libc：`__libc_start_main` 真正启用
 
@@ -119,8 +120,13 @@ int __libc_start_main(int (*main)(int, char **, char **), int argc, char **argv,
     /* argv[argc]==NULL 之后是 envp[]；其终止 NULL 之后**紧邻** auxv（见 §4.1 pad 迁移） */
     char **ep = argv + argc + 1;
     environ = ep;
-    while (*ep != NULL) ep++;          /* envp 终止 */
-    uint64_t *av = (uint64_t *)(ep + 1);
+    int env_i;
+    for (env_i = 0; env_i < 128 && ep[env_i] != NULL; env_i++);  /* 有界：与 STR_OFFSET_MAX 对齐 */
+    if (env_i >= 128) {                    /* envp 缺终止 NULL：内核布局 bug，放弃 auxv 但让进程可活 */
+        __libc_auxv = NULL;
+        return main(argc, argv, environ);
+    }
+    uint64_t *av = (uint64_t *)(ep + env_i + 1);
     __libc_auxv = av;                  /* 保存起点 */
     for (int i = 0; i < 64; i++) {     /* 保守上限，防内核布局 bug 变死循环 */
         if (av[2 * i] == 0) goto found;
@@ -130,6 +136,8 @@ found:
     return main(argc, argv, environ);
 }
 ```
+
+- envp walk 与 auxv walk 均有界：无界 envp walk 最坏会越过 `USER_STACK_TOP` 进未映射页 fault，到不了 auxv 保护；超限时放弃 `__libc_auxv` 但照常进 main（environ 已不可信，测试可报告而非崩溃）。
 
 - auxv walk 加保守上限（如 64 对）防内核布局 bug 变用户态死循环；超限时 `__libc_auxv = NULL`。
 - `getauxval` 不在本任务公开（YAGNI，Task 2 按需加）。
@@ -147,7 +155,7 @@ found:
 | # | 变化 | 影响 |
 |---|---|---|
 | 1 | **NULL argv 不再走 `USER_STACK_TOP` 特殊分支**：一律构造完整最小布局（argc=0、argv[0]=NULL、envp 终止、auxv `AT_NULL`） | PID 1 `/bin/init`（task.c:2181）从 `main(0, NULL, NULL)` 变为 `main(0, {NULL}, {NULL, AT_NULL...})`——语义等价且更安全；init.c 现不消费 argv |
-| 2 | **align_pad 位置迁移**：envp-NULL/auxv 之间 → auxv 之上，并显式清零 | 结构性修正：auxv walk 不再依赖 pad 恰好为零；字节偏移与旧布局不同（同类 argc/envp 下 rsp 差 0 或 8 字节） |
+| 2 | **align_pad 位置迁移**：envp-NULL/auxv 之间 → auxv 之上，并显式清零 | 结构性修正：auxv walk 不再依赖 pad 恰好为零；对于原来已构造完整栈的相同参数，仅迁移 padding 不改变元数据总大小，最终 rsp 不变；auxv 起点在有 padding 时下移 8 字节（无 padding 时不变） |
 | 3 | `environ` 从 NULL 变为真实 envp | `getenv` 开始返回真值；`execvp` 的 `PATH` 搜索从 fallback `/bin` 变为真实 PATH（若父进程传了）。busybox applet 验证必须覆盖 PATH 相关命令 |
 | 4 | helper 内 `argv+envp > 128 → -E2BIG`（spawn 路径新增；exec 路径 trap.c:1406 已有，helper 为防御下沉） | 仅极端参数可见 |
 | 5 | crt0 调 `__libc_start_main` 而非直接 `call main` | main 返回值语义不变；多一层 C 函数 |
@@ -156,26 +164,40 @@ found:
 
 观测通道：`__libc_stack_end` / `__libc_auxv` 两个新全局（csu.c 定义，systest `extern` 声明使用）。
 
-1. **新增 systest case（RED 先行，编号顺延）**——`test_startup_layout()`，直接验证本进程入口：
-   - `((uint64_t)__libc_stack_end & 0xF) == 0`（入口 rsp 对齐）；
-   - 地址关系链：`argv + argc + 1 == environ`，且 `__libc_auxv == (uint64_t *)(environ 终止 NULL + 1)`（**同时覆盖 argc/envc 奇偶两种组合**，pad 存在与否都成立）；
-   - `__libc_auxv != NULL`，且在 64 对内存在 `type==0`（AT_NULL）；`__libc_auxv < __libc_stack_end`；
-   - argv 每项非空可读、`argv[argc]==NULL`；envp 每项含 `=`。
-2. **fork+exec 自再入用例**：systest fork 后 `execve("/systest.elf", {"systest", "--envcheck", NULL}, {"OS01_TEST_K=veRy42", NULL})`；子进程 main 入口检测 `--envcheck` 走专用分支：断言 `getenv("OS01_TEST_K")` 逐字节等于 `veRy42`、environ 恰好 1 项、地址关系链同上，exit 码报告结果。覆盖 exec 站点 + 非空 envp 精确值 + envc=1（奇偶另一侧）。
-3. **argc==0 用例**：spawn 路径 `argv==NULL` 的入口自检（PID 1 同款路径）——通过 nettest/systest 启动序或直接以 `execve(path, {NULL}, NULL)` 再入自检 argc==0 时布局链成立。
-4. **回归**：systest 全量（含新增 case）、busybox 启动 + 52 applet（重点 PATH/环境变量消费型：sh、env、exec 类）、sigtest、nettest。
+1. **新增 systest case（RED 先行，编号顺延）**——`test_startup_layout()`，在任何环境修改前验证入口布局，供正常入口及自再入子进程复用：
+   - `__libc_stack_end != NULL`，且 `((uintptr_t)__libc_stack_end & 0xF) == 0`；
+   - `argv == (char **)((uint64_t *)__libc_stack_end + 1)`，且入口栈上的 argc 与 main 收到的 argc 一致；
+   - 地址关系链：`argv + argc + 1 == environ`，且 `__libc_auxv == (uint64_t *)(environ 终止 NULL + 1)`；
+   - 先检查 `__libc_auxv != NULL`，再检查 `(uintptr_t)__libc_auxv > (uintptr_t)__libc_stack_end`；当前仅有 AT_NULL，精确断言 `__libc_auxv[0] == 0 && __libc_auxv[1] == 0`；
+   - 按本用例预期数量检查 argv/envp，验证字符串精确值及两个数组的终止 NULL，避免无界扫描；argc=0 时不读取 argv[0] 指向的字符串。
+2. **fork+exec 自再入矩阵**：统一执行实际安装路径 `/bin/systest`。使用专用 argv[0] `startup-probe` 标识 argc=1/2 的探针分支；argc=2 时第二项为 `--envcheck`。argc=0 直接进入空参数探针分支。所有探针均在正常测试调度前分流，只执行入口检查并 `_exit`，不再次运行全套测试或递归 fork。父进程逐例 fork，检查 waitpid、正常退出和退出码；execve 返回即为失败，以独立非零退出码报告。
+
+   | argc | argv 实参 | envc | envp 实参 | argc+envc 奇偶 / pad |
+   |---|---|---|---|---|
+   | 0 | `{NULL}` | 0 | `NULL` | 偶 / 8 |
+   | 0 | `{NULL}` | 1 | `{"OS01_TEST_K=veRy42", NULL}` | 奇 / 0 |
+   | 1 | `{"startup-probe", NULL}` | 0 | `NULL` | 奇 / 0 |
+   | 1 | `{"startup-probe", NULL}` | 1 | `{"OS01_TEST_K=veRy42", NULL}` | 偶 / 8 |
+   | 2 | `{"startup-probe", "--envcheck", NULL}` | 0 | `NULL` | 偶 / 8 |
+   | 2 | `{"startup-probe", "--envcheck", NULL}` | 1 | `{"OS01_TEST_K=veRy42", NULL}` | 奇 / 0 |
+
+   六组均执行 §6.1 的地址关系检查。envc=1 时断言 environ 恰好一项，且 `getenv("OS01_TEST_K")` 逐字节等于 `veRy42`；envc=0 时断言 environ 首项为 NULL，且 getenv 返回 NULL。探针成功时以 `10 + argc * 2 + envc` 作为退出码编码实际观测到的数量，失败统一退出 99；父进程按本组预期 argc/envc 核对退出码，避免环境丢失后被空环境分支误判为通过。子进程校验实际环境只能为上述两种形态。
+3. **NULL argv 与 spawn 单独覆盖**：
+   - 在六组矩阵之外，另执行 `execve("/bin/systest", NULL, NULL)` 和 `execve("/bin/systest", NULL, {"OS01_TEST_K=veRy42", NULL})`，复用 argc=0 探针，分别检查空环境及非空环境。NULL 指针与 `{NULL}` 数组必须分别测试。
+   - 正常内核启动继续使用 `spawn_user_task("/bin/init", NULL)`，验证 PID 1 成功进入 main、完成四阶段引导并进入 supervision loop，且能启动 systest/交互终端。此项验证 spawn 调用点确实采用 helper 返回的 rsp；exec 自再入不能替代此项。精确布局断言由上述探针覆盖，PID 1 启动由 QEMU 启动日志和后续子进程运行结果验证。
+4. **回归**：通过 `make OS01_SYSTEST=1 test-syscall` 运行 systest 全量（含新增用例，不设置 `KERNEL_SELFTEST=1`）；另跑正常启动、busybox 52 applet（重点 PATH/环境变量消费型：sh、env、exec 类）、sigtest、nettest。
 5. hosttests：无新增（纯内核/用户态运行时行为）。
 
 ## 7. 风险与对策
 
 | 风险 | 对策 |
 |---|---|
-| 对齐奇偶规则重构走样（meta_pad 与 argc/envc 奇偶耦合） | 单点实现 + `ASSERT(rsp&0xF==0)` 出口断言 + systest 奇偶矩阵（argc 0/1/2 × envp 0/1） |
+| 对齐奇偶规则重构走样（meta_pad 与 argc/envc 奇偶耦合） | 单点实现 + `ASSERT(rsp&0xF==0)` 出口断言 + systest 六组奇偶矩阵（argc 0/1/2 × envc 0/1） |
 | pad 迁移后 walk 仍错位 | 测试计划 §6.1/6.2 的地址关系链断言精确到 `environ NULL + 1 == __libc_auxv`，pad 任何残留都会被抓 |
 | 两份 crt0.S 副本漂移 | spec 明确 diff-identical 约定；实现 task 里包含 `diff user/crt0.S config/busybox.overlay/applets/crt0.S` 验证步 |
 | 7 参调用的栈对齐错误只在高优化度下炸 | crt0 手写汇编最小化；systest 第一个跑的 case 就是入口自检 |
 | `environ` 变真后 busybox 行为变化 | applet 验证全过 + 显式 PATH 用例 |
-| PID 1 NULL argv 新布局引入回归 | §6.3 argc==0 用例 + init 引导 4 阶段全过 |
+| PID 1 NULL argv 新布局引入回归 | §6.3 独立 NULL argv exec 用例 + PID 1 spawn 引导验证 |
 
 ## 8. 后续（不属于本任务）
 
