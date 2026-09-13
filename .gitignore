@@ -30,3 +30,4 @@ tools/mkdisk
 # Build products (added 2026-09-12 per directory-restructure design §4.3)
 test-results/
 __pycache__/
+.ua
