@@ -1,7 +1,7 @@
 # 统一用户态进程启动方式（user startup unification）
 
 日期：2026-09-13
-状态：v3（按 v2 评审修订：入口地址断言 / 自再入路径 / 奇偶矩阵与 NULL argv 覆盖 / rsp 保存顺序）
+状态：v4（plan v1 评审同步：libc envp 有界 walk 允许 128 项合法环境——终止槽在 index 128；§6.2 增补 envc=128 边界组与 getenv 精确值要求）
 范围：`kernel/sched/task.c`（两处用户栈构造）、`user/crt0.S`、`libc/csu/csu.c`、`config/busybox.overlay/applets/crt0.S`、`user/systest.c`
 
 ## 1. 背景与动机
@@ -120,9 +120,11 @@ int __libc_start_main(int (*main)(int, char **, char **), int argc, char **argv,
     /* argv[argc]==NULL 之后是 envp[]；其终止 NULL 之后**紧邻** auxv（见 §4.1 pad 迁移） */
     char **ep = argv + argc + 1;
     environ = ep;
+    /* Bounded walk: 读 ep[0..128]——128 项 envp 合法（内核上限是 argc+envc 合计
+     * 128，其终止 NULL 落在 index 128）；只有 0..128 内无终止 NULL 才是错误。 */
     int env_i;
-    for (env_i = 0; env_i < 128 && ep[env_i] != NULL; env_i++);  /* 有界：与 STR_OFFSET_MAX 对齐 */
-    if (env_i >= 128) {                    /* envp 缺终止 NULL：内核布局 bug，放弃 auxv 但让进程可活 */
+    for (env_i = 0; env_i <= 128 && ep[env_i] != NULL; env_i++);
+    if (env_i > 128) {                    /* envp 缺终止 NULL：内核布局 bug，放弃 auxv 但让进程可活 */
         __libc_auxv = NULL;
         return main(argc, argv, environ);
     }
@@ -181,7 +183,8 @@ found:
    | 2 | `{"startup-probe", "--envcheck", NULL}` | 0 | `NULL` | 偶 / 8 |
    | 2 | `{"startup-probe", "--envcheck", NULL}` | 1 | `{"OS01_TEST_K=veRy42", NULL}` | 奇 / 0 |
 
-   六组均执行 §6.1 的地址关系检查。envc=1 时断言 environ 恰好一项，且 `getenv("OS01_TEST_K")` 逐字节等于 `veRy42`；envc=0 时断言 environ 首项为 NULL，且 getenv 返回 NULL。探针成功时以 `10 + argc * 2 + envc` 作为退出码编码实际观测到的数量，失败统一退出 99；父进程按本组预期 argc/envc 核对退出码，避免环境丢失后被空环境分支误判为通过。子进程校验实际环境只能为上述两种形态。
+   六组均执行 §6.1 的地址关系检查。envc=1 时断言 environ 恰好一项，且 `getenv("OS01_TEST_K")` 逐字节等于 `veRy42`（getenv 必须真实消费 environ，仅比对原始字符串不充分）；envc=0 时断言 environ 首项为 NULL，且 getenv 返回 NULL。探针成功时以 `10 + argc * 2 + envc` 作为退出码编码实际观测到的数量，失败统一退出 99；父进程按本组预期 argc/envc 核对退出码，避免环境丢失后被空环境分支误判为通过。子进程校验实际环境只能为上述两种形态。
+   **边界组（第七组）**：argc=0 + envc=128（合计恰为内核上限）——libc 的有界 envp walk 必须接受第 128 项之后的终止槽并仍能找到 auxv（128 项 envp 合法，见 §4.3 修订）；探针退出码 138。
 3. **NULL argv 与 spawn 单独覆盖**：
    - 在六组矩阵之外，另执行 `execve("/bin/systest", NULL, NULL)` 和 `execve("/bin/systest", NULL, {"OS01_TEST_K=veRy42", NULL})`，复用 argc=0 探针，分别检查空环境及非空环境。NULL 指针与 `{NULL}` 数组必须分别测试。
    - 正常内核启动继续使用 `spawn_user_task("/bin/init", NULL)`，验证 PID 1 成功进入 main、完成四阶段引导并进入 supervision loop，且能启动 systest/交互终端。此项验证 spawn 调用点确实采用 helper 返回的 rsp；exec 自再入不能替代此项。精确布局断言由上述探针覆盖，PID 1 启动由 QEMU 启动日志和后续子进程运行结果验证。
