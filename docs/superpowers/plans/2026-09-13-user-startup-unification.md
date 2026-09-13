@@ -102,8 +102,8 @@ static int startup_layout_errors(int argc, char **argv)
 
 /* Entry probe: re-execed /bin/systest lands here BEFORE the test table.
  * Exit codes: 10 + argc*2 + envc on success (10..15, 138 for the envc=128
- * boundary case), 99 on any failure, 127 if execve itself returned.
- * Never runs the test suite or forks. */
+ * boundary case), 20 for the --pathcheck execvp case, 99 on any failure,
+ * 127 if execve itself returned. Never runs the test suite or forks. */
 static void startup_probe(int argc, char **argv)
 {
     int is_probe = (argc == 0) ||
@@ -111,14 +111,27 @@ static void startup_probe(int argc, char **argv)
                     strcmp(argv[0], "startup-probe") == 0);
     if (!is_probe) return;
 
+    int pathcheck = (argc == 2 && argv[1] != NULL &&
+                     strcmp(argv[1], "--pathcheck") == 0);
     int errs = startup_layout_errors(argc, argv);
-    if (argc == 2 && (argv[1] == NULL || strcmp(argv[1], "--envcheck") != 0))
+    if (argc == 2 && !pathcheck &&
+        (argv[1] == NULL || strcmp(argv[1], "--envcheck") != 0))
         errs |= SU_ERR_ARGV_STR;
     if (errs) exit(99);
 
     extern char **environ;
     int envc = 0;
     while (environ[envc] != NULL) envc++;
+    if (pathcheck) {
+        /* execvp PATH acceptance: the ONLY way this probe was found is
+         * execvp parsing our non-default PATH (spec §6.2, plan review #3).
+         * Exact env shape: PATH=/pathtest and nothing else. */
+        const char *v;
+        if (envc != 1 || strcmp(environ[0], "PATH=/pathtest") != 0) exit(99);
+        v = getenv("PATH");
+        if (v == NULL || strcmp(v, "/pathtest") != 0) exit(99);
+        exit(20);
+    }
     /* getenv must reflect the real envp (spec §6.2): exact value when
      * envc==1, NULL when empty. For envc>1 the '='-shape check in
      * startup_layout_errors covers correctness. */
@@ -187,6 +200,35 @@ static void test_startup_matrix(void)
     env128[128] = NULL;
     CHECK3(run_startup_probe_case(argv0, env128, 138), "startup boundary", "argc=0 envc=128 (combined cap)");
 }
+
+/* execvp PATH acceptance (plan review #3): proving libc execvp actually
+ * PARSES the passed PATH — plant a probe symlink in a non-/bin directory,
+ * point PATH at it, execvp by bare name. Exit 20 means the probe was
+ * found THROUGH our PATH; anything else (incl. the /bin fallback, which
+ * has no startup-probe) fails. */
+static void test_startup_execvp(void)
+{
+    extern char **environ;
+    mkdir("/pathtest", 0755);
+    symlink("/bin/systest", "/pathtest/startup-probe");
+    char *av[3] = {(char *)"startup-probe", (char *)"--pathcheck", NULL};
+    static char *env[2] = {(char *)"PATH=/pathtest", NULL};
+    pid_t pid = fork();
+    int ok = 0;
+    if (pid == 0) {
+        environ = env;              /* execvp passes environ to execve */
+        execvp("startup-probe", av);
+        exit(127);                  /* not found via PATH: failure */
+    }
+    if (pid > 0) {
+        int status = 0;
+        ok = waitpid(pid, &status, 0) == pid &&
+             (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 20;
+    }
+    CHECK3(ok, "startup execvp PATH", ok ? "resolved via non-default PATH" : "fallback or not found");
+    unlink("/pathtest/startup-probe");
+    rmdir("/pathtest");
+}
 ```
 
 再把 `main`（:3009）改为带参签名并在最前面分发探针：
@@ -208,12 +250,13 @@ tests[] 表（:2927）在 `{"signal handler sync", ...}` 之前插入两个条�
 ```c
     {"startup layout",    test_startup_layout},
     {"startup matrix",    test_startup_matrix},
+    {"startup execvp",    test_startup_execvp},
 ```
 
 - [ ] **Step 2: 运行验证 RED**
 
 Run: `make PROFILE=x86_64-clang OS01_SYSTEST=1 test-syscall`
-Expected: 编译链接通过（weak extern 落 0）；**基线全部 PASS（以本次运行报告的 passed 数为新基线，勿引用历史 268）**；新增 2 例 FAIL——`startup layout` 报 entry chain broken（SU_ERR_STACKEND_NULL），`startup matrix` 9 个 CHECK3 全 FAIL（六组矩阵 + 2 个 NULL 形态 + envc=128 边界，探针 exit 99）。**任何旧用例转红即为本步失败。**
+Expected: 编译链接通过（weak extern 落 0）；**基线全部 PASS（以本次运行报告的 passed 数为新基线，勿引用历史数字）**；新增 **3 组测试** FAIL，共 **11 个失败断言**——`startup layout`（1 个 CHECK3：SU_ERR_STACKEND_NULL）、`startup matrix`（9 个 CHECK3：六组矩阵 + 2 个 NULL 形态 + envc=128 边界，探针 exit 99）、`startup execvp`（1 个 CHECK3：environ 为 NULL 时 execvp 走 `/bin` fallback 找不到探针，exit 127）。**任何旧用例转红即为本步失败。**
 
 - [ ] **Step 3: Commit**
 
@@ -334,7 +377,7 @@ static void setup_user_stack(uint8_t *kstack, char *const argv[], char *const en
 
 - [ ] **Step 2: 替换 spawn 站点**
 
-(a) 在 `spawn_user_task()` **入口、任何资源分配/任务发布之前**（path lookup 之后即可）加前置校验：
+(a) 在 `spawn_user_task()` **入口第一行（vfs lookup 之前）**加前置校验——lookup 成功即持有 `node` 引用，之后再返回会泄漏（plan review #2）：
 
 ```c
     int s_argc = 0, s_envc = 0;
@@ -367,7 +410,7 @@ static void setup_user_stack(uint8_t *kstack, char *const argv[], char *const en
 
 - [ ] **Step 3: 替换 exec 站点**
 
-(a) 在 `sys_exec()` **入口、`mm_alloc`/页表/栈页分配之前**加同款前置校验：
+(a) 在 `sys_exec()` **入口第一行（vfs lookup 与 `mm_alloc` 之前）**加同款前置校验（同理：lookup 后返回需 `vfs_node_put(node)`，直接前置到 lookup 前最干净）：
 
 ```c
     int s_argc = 0, s_envc = 0;
@@ -389,10 +432,15 @@ static void setup_user_stack(uint8_t *kstack, char *const argv[], char *const en
 
 （此块上方的 `int s_argc = 0; int s_envc = 0; ...` 局部声明行删除，由 (a) 的前置声明接管；**不新增失败 unwind**——`-E2BIG` 只能来自 (a)，此时无任何待清理资源。）regs 设置（~1508）`regs->rsp = (argv != NULL) ? user_rsp : USER_STACK_TOP;` 改为 `regs->rsp = user_rsp;`（`rdi/rsi/rdx` 三行原样，`rdx` 本就是 `user_env_ptr`）。
 
-- [ ] **Step 4: 编译 + QEMU 验证（新内核 + 旧 crt0，注册表 ABI 未变）**
+- [ ] **Step 4: 编译 + QEMU 验证（新内核 + 旧 crt0，寄存器 ABI 未变）**
 
 Run: `make PROFILE=x86_64-clang OS01_SYSTEST=1 test-syscall`
-Expected: 原 268 例全部 PASS；Task 1 的 2 个新用例**仍 FAIL**（旧 crt0 不定义 `__libc_*`，探针 exit 99）——这是预期的中间 RED 态。busybox 正常启动（`make PROFILE=x86_64-clang test-syscall-repeat` 通过，正常 init/ash exec 路径即本站点回归）。
+Expected: Task 1 Step 2 记录的基线全部 PASS；Task 1 的 3 组新用例**仍 FAIL**（旧 crt0 不定义 `__libc_*`，探针 exit 99/127）——这是预期的中间 RED 态。
+
+Run: `make PROFILE=x86_64-clang run`（交互冒烟，见 docs/build-run-debug.md）
+Expected: busybox ash 正常起、能执行命令（新内核 + 旧 crt0 靠寄存器传参正常启动，验证 spawn/exec 两站点重写无回归）。
+
+**注意**：`test-syscall-repeat` 在此阶段**必然失败**（harness 于 ash 内跑完整 systest，`x86_64_systest_repeat.py:59` 对任何 `failed != 0` 报错，而新用例此刻还是 RED）——它的全绿门槛留给 Task 4，本步不要跑。
 
 - [ ] **Step 5: Commit**
 
@@ -470,7 +518,7 @@ found:
 - [ ] **Step 2: 编译验证（无行为变化——尚无人调用）**
 
 Run: `make PROFILE=x86_64-clang OS01_SYSTEST=1 test-syscall`
-Expected: 与 Task 2 末尾完全相同——268 旧例 PASS，2 个新用例仍 FAIL（crt0 还在直接 `call main`，`__libc_*` 落 bss 0 值）。链接不报重复定义/未定义。
+Expected: 与 Task 2 Step 4 的 systest 部分完全相同——基线全部 PASS，3 组新用例仍 FAIL（crt0 还在直接 `call main`，`__libc_*` 落 bss 0 值）。链接不报重复定义/未定义。
 
 - [ ] **Step 3: Commit**
 
@@ -556,7 +604,7 @@ Expected: `IDENTICAL`（busybox input digest 覆盖 overlay，自动重编）。
 - [ ] **Step 3: 全量验证（GREEN + 回归）**
 
 Run: `make PROFILE=x86_64-clang OS01_SYSTEST=1 test-syscall`
-Expected: **全部 PASS，0 failed**——Task 1 Step 2 记录的新基线 + `startup layout` + `startup matrix`（9 CHECK3：六组奇偶矩阵 + 2 个 NULL argv 形态 + envc=128 边界）。
+Expected: **全部 PASS，0 failed**——Task 1 Step 2 记录的基线 + 3 组新用例共 **11 个新 CHECK3**（layout 1 + matrix 9：六组奇偶矩阵/2 个 NULL 形态/envc=128 边界 + execvp PATH 1）。
 
 Run: `make PROFILE=x86_64-clang test-syscall-repeat`（**不带** `OS01_SYSTEST=1`——run.mk:298 显式拒绝该组合；正常镜像路径）
 Expected: PASS（正常 init + busybox ash 反复 exec/exit——exec 站点 + busybox crt0 + environ 变真的综合回归）。
@@ -579,10 +627,10 @@ Expected: A 级（28 个，含 `env`/`echo`/`which` 等 environ 消费型）、B
 
 任何 applet 结果与记录不符 → 记录差异、按 docs/applet-verification.md 的分级更新报告，修复后才可 commit。
 
-- [ ] **Step 3c: 交互冒烟（sigtest + 手动 PATH 用例）**
+- [ ] **Step 3c: 交互冒烟（sigtest + env 输出）**
 
 Run: `make PROFILE=x86_64-clang run`（交互，见 docs/build-run-debug.md）
-Expected: busybox ash 正常起；`/bin/sigtest` PASS（sigreturn trampoline 未受栈布局变化影响）；`env | grep PATH` 与 inittab 环境一致。
+Expected: busybox ash 正常起；`/bin/sigtest` PASS（sigreturn trampoline 未受栈布局变化影响）；`env` 输出的环境与 init/inittab 传入一致、无乱码/空值（**注意 busybox 未启用 grep**——不要写 `env | grep ...` 类命令）。execvp PATH 行为的**权威证明**是 Step 3 的 `startup execvp` systest 用例（非默认 PATH + 探针 + 退出码 20），交互冒烟不做重复验证。
 
 - [ ] **Step 4: Commit**
 
