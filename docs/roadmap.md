@@ -60,7 +60,7 @@
 | syscall 边界审计 ✅ | **已完成**（2026-08-24，commits `a1ad1b9`..`80eab1a`，11 commits）。详见下文「Syscall 边界审计实施总结」 | 独立 | |
 | 堆加固 | malloc double-free/溢出检测 | 独立 | |
 | NX 页 | 栈/堆不可执行 + mmap PROT_EXEC 审计 | 独立 | |
-| **exec 软链接跟随** ✅ | **已完成**（2026-09-06，commits `43588c8`..`c64c854`）。`__vfs_lookup_raw` 早返中段/末段 symlink；`vfs_lookup_at` fold walk + splice + restart（≤ MAXSYMLINKS=8）；NOFOLLOW 仅禁止末段（POSIX）；sys_stat/open/chdir/exec 均已改走 `vfs_lookup_at`。spec §5.3 v3/v4/v5 修复全部应用。Parked follow-up：`__vfs_lookup_raw` 的 `consumed` 路径需以 mount prefix 播种（潜在 bug，仅在非根 mount + 相对 target 时触发）。 | 独立 | Linux do_filp_open |
+| **exec 软链接跟随** ✅ | **已完成**（2026-09-06，commits `43588c8`..`c64c854`）。`__vfs_lookup_raw` 早返中段/末段 symlink；`vfs_lookup_at` fold walk + splice + restart（≤ MAXSYMLINKS=8）；NOFOLLOW 仅禁止末段（POSIX）；sys_stat/open/chdir/exec 均已改走 `vfs_lookup_at`。spec §5.3 v3/v4/v5 修复全部应用。~~Parked follow-up~~：`__vfs_lookup_raw` 的 `consumed` 路径 mount prefix 播种**已修**（`b0c95e3`，2026-09-13 核实）。 | 独立 | Linux do_filp_open |
 
 ### 🏗 P2 aarch64 适配
 
@@ -78,7 +78,7 @@
 | 交叉编译链 | aarch64-linux-gnu-gcc + QEMU virt 平台 | 独立 | |
 | UEFI 启动链 | 共享 boot/uefi/main.c，aarch64 通过 PSCI 启动 AP；DTB handoff 副本固定 `[0x401e0000,0x401ff000)` | 独立 | |
 | SMP 验证 (UEFI PSCI) | QEMU virt/Cortex-A53/GICv2 下 BSP+AP 独立栈+TPIDR+异常向量+每核 GIC interface；共享 spinlock 计数 1/2/4 核 ×3 验证；故障注入 `AARCH64_SMP_TEST_NO_ACK_CPU=1` 验证降级恢复 | GIC、UEFI 链 | |
-| **PMM arch-neutral** ✅ | **已完成**（2026-09-09，17 commits `2c08e78..a2e7389`）。`pmm_init(const struct boot_context *ctx)` 单一入口 + 弱默认 `pmm_arch_normalize`/`pmm_arch_zone_split` 在 `kernel/memory/pmm_arch.c`，x86_64 强覆盖在 `kernel/arch/x86_64/pmm_arch.c`（E820 + kernel-LMA/handoff/trampoline excludes + 2 MiB granule + sort/merge），aarch64 强覆盖在 `kernel/arch/aarch64/pmm_arch.c`（读 `aarch64_ram_map_get()`）。`pmm.c` body 用 RAM-relative indexing（`pages_struct + ((start - lowest_ram) >> 21)`），Step 7 clamp 防 aarch64 unsigned-underflow。详见 spec `docs/superpowers/specs/2026-09-09-pmm-arch-neutral-design.md`（13 轮 review 通过）+ plan（3 轮 review + 16 task + final fix 通过）。**Follow-on（独立 spec）**：把 ACPI/RECLAIM 等非-RAM 类型真正消费到 `out[].type`（当前 `enum MEMORY_TYPE t` 算出来但丢弃，循环 hardcode `MEMORY_TYPE_RAM`）。 | 独立 | |
+| **PMM arch-neutral** ✅ | **已完成**（2026-09-09，17 commits `2c08e78..a2e7389`）。`pmm_init(const struct boot_context *ctx)` 单一入口 + 弱默认 `pmm_arch_normalize`/`pmm_arch_zone_split` 在 `kernel/memory/pmm_arch.c`，x86_64 强覆盖在 `kernel/arch/x86_64/pmm_arch.c`（E820 + kernel-LMA/handoff/trampoline excludes + 2 MiB granule + sort/merge），aarch64 强覆盖在 `kernel/arch/aarch64/pmm_arch.c`（读 `aarch64_ram_map_get()`）。`pmm.c` body 用 RAM-relative indexing（`pages_struct + ((start - lowest_ram) >> 21)`），Step 7 clamp 防 aarch64 unsigned-underflow。详见 spec `docs/superpowers/specs/2026-09-09-pmm-arch-neutral-design.md`（13 轮 review 通过）+ plan（3 轮 review + 16 task + final fix 通过）。**Follow-on 已修**：非-RAM 类型写入 `out[].type` 由 `beb351c`（2026-09-12）完成，E820-derived type 完整保留到 `MEMORY_RANGE[]`。 | 独立 | |
 | **log API 统一** ✅ | **已完成**（2026-09-09）。`kernel/log.h` 提供 gate-wrapped `log_err/warn/info` 宏（`do { if (LEVEL <= g_log_level) _log_*_impl(__VA_ARGS__); } while(0)`），保留 `log()` core macro 和 `g_log_level`/`log_set_level`/`log_get_level` 调度；`_log_write` 拆为 variadic forwarder + `_log_writev` va_list core；x86_64 走 `_log_writev`/vsnprintf 串口，aarch64 走 `kputs(fmt)` 忽略 variadic（-nostdlib）；aarch64 `g_log_level = LOG_INFO` 在 `kernel/arch/aarch64/log_impl.c` 定义。 | `pmm_init` ✅ | Linux printk |
 | **mm(arch) PGD/PUD/PMD/PTE 层级统一** ✅ | **已完成**（2026-09-10，`52f99a1`）。Linux/ARM 命名替换 x86_64 PML4/PDPT/PDE：`mm->pml4 → mm->pgdir`、`vmm_walk_pml4` 系列 → `vmm_pt_walk`（参数已 `pgdir`）、`PAGE_GDT_SHIFT → PAGE_PGD_SHIFT`、`PAGE_USER_GDT/Dir/Page → PAGE_USER_PGD/PUD/PMD`、`PAGE_KERNEL_GDT/... → PAGE_KERNEL_PGD/PUD/PMD`、`PAGE_USER_4K/4K_RO → PAGE_USER_PTE/PTE_RO`、`PAGE_KERNEL_4K → PAGE_KERNEL_PTE`、`PAGE_KERNEL_MMIO → PAGE_KERNEL_PMD_NOCACHE`；bit-constant rename：`PAGE_Present → PAGE_VALID`、`PAGE_U_S → PAGE_USER`、`PAGE_R_W → PAGE_WRITE`、`PAGE_PS → PAGE_HUGE`、`PAGE_XD → PAGE_NO_EXEC`、`PAGE_Global → PAGE_GLOBAL`、`PAGE_PCD → PAGE_CACHE_DISABLE`、`PAGE_PWT → PAGE_WRITE_THROUGH`；~150 站点 rename（vmm.c / sched COW fork / elf loader / vma/uaccess/fb/futex / `test_uaccess.c`）。保留 x86_64 `head.S` `__PML4E:`/`__PDPTE:` 硬件 label + `kernel/include/memory/vmm.h` bit-position 常量（标为 x86_64 PTE 格式专属）。x86_64 `kernel.bin` 字节相同（1,739,024 B）、aarch64 pmm.c 编译干净。 | PMM ✅ | Linux/ARM |
 | **bootinfo(arch) E820 拆出 `bootinfo_x86.h`** ✅ | **已完成**（2026-09-10，`af9a6ce`）。`struct E820_ENTRY` + `BOOT_MEMORY_FORMAT_E820=1u` 从 `bootinfo.h` 移到 `kernel/arch/x86_64/bootinfo_x86.h`；`bootinfo.h` 保留 enum 值 1 + 注释指针；`pmm.c` 去掉 arch-neutral `entry_size` 分支（强覆盖已校验 `n==0`）；4 处 include 加 `bootinfo_x86.h`。字节相同，aarch64 编译视图无 E820 符号。 | PMM ✅ | |
@@ -167,15 +167,15 @@ P5: ELF ✅ → ld.so → 共享 libc → apk/musl；futex ✅ → clone → pth
     socket ✅ → AF_UNIX；mbedTLS ✅ → HTTPS
 ```
 
-### Parked（未闭环根因 / follow-on，随时可拾起）
+### Parked（未闭环 follow-on，随时可拾起；2026-09-13 逐项对照代码核实）
 
-| 项 | 说明 |
-|----|------|
-| devfs mount entry 0x600000 被覆写 | `find_mount` PF 的底层根因未定位（`4468e75` 只是防御转 ENOENT）。硬件 watchpoint 取证指向 boot slab 帧被 e1000 TX ring 复用；建议下次复现时先查 e1000 TX buffer 生命周期 |
-| PMM 非-RAM 类型消费 | `enum MEMORY_TYPE t` 算出但丢弃，循环 hardcode `MEMORY_TYPE_RAM`（v24 follow-on，独立 spec） |
-| `__vfs_lookup_raw` consumed 路径 | 需以 mount prefix 播种，非根 mount + 相对 target 时有潜在 bug（exec symlink spec §5.3 遗留） |
-| sysroot 头文件级增量重编 | generation 内 .d 路径相对化/软链引用，使头文件变化只重编依赖者 |
-| `LWIP_RAND`/AT_RANDOM 种子 | getrandom ✅ 后改用内核熵池（与 P1 用户栈 canary 同批做） |
+| 项 | 状态 | 说明 |
+|----|------|------|
+| ~~devfs mount entry 0x600000 被覆写~~ | **已闭环** | 根因已定位并修复：硬件 watchpoint 证明 e1000 TX ring 落在了 boot slab 帧上——PMM 的 kernel/slab 帧预留用物理 PFN 而非 RAM-relative 索引（`0809100` 修复），e1000 DMA buffer 本身一直是 `alloc_4k_page()`（`60ce39a` 起）。SMP=1/2/4 + systest-repeat 7 连 268/268 验证。`4468e75` 的 `find_mount` 防御保留作纵深防御 |
+| ~~PMM 非-RAM 类型丢弃~~ | **已闭环** | `beb351c` 已让 x86_64 `pmm_arch_normalize` 把 E820-derived type 写进 `out[].type`（代码注释明确 "do NOT force everything to MEMORY_TYPE_RAM"）；`pmm_init` Step 2 只 walk `MEMORY_TYPE_RAM` 是设计行为，非-RAM 条目留给未来 ACPI reclaim/NVS 消费者 |
+| ~~`__vfs_lookup_raw` consumed 路径~~ | **已闭环** | `b0c95e3`（2026-09-06）已以 mount prefix 播种 `consumed`，含 `..` 的 consumed 回剪与非根 mount 相对 symlink 正确解析；下文 exec 软链接行的旧备注已过时 |
+| sysroot 头文件级增量重编 | **仍开放** | `mk/components/kernel.mk` 仍是 genid 变化即 `-B` 全量重编；refinement：generation 内 .d 路径相对化/软链引用，使头文件变化只重编依赖者 |
+| `LWIP_RAND`/AT_RANDOM 种子 | **仍开放** | `kernel/include/net/arch/cc.h:98` 仍是 `jiffies * 1103515245 + 12345` LCG，未接内核 ChaCha20 熵池；auxv 仍只压 `AT_NULL`（`task.c` exec 两处）。与 P1 用户栈 canary 同批做 |
 
 ---
 
