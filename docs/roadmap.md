@@ -1,8 +1,8 @@
-# OS01 优化路线图 v26
+# OS01 优化路线图 v28
 
-> **基准**: `f2085c3` (master, 2026-09-13)
-> **日期**: 2026-09-13
-> **变更**: 同步 v25 之后的实际进展（`a274f6f..f2085c3`，两大系列 + 若干加固）：① **aarch64 页表原语**（spec `2026-09-11-aarch64-page-table-primitives-design.md`，`169e0d5` + 修复 `c9c0246`/`cdb6625` + host smoke `466401d`/`28ac0ea`）——`kernel/arch/aarch64/page_table.c` 提供 arch-local 页表 walk/map 原语（descriptor bit 修正 + intermediate entry 用 minimal descriptor），配套 QEMU 级 smoke 断言，为 P2 `head.S + MMU` 铺路；附带两个 aarch64 PMM 修复（`1c51dfa` 多 zone `alloc_pages` 索引、`053a226` direct map 覆盖 PMM 分配范围）。② **目录重构 P1–P6**（merge `31bb128`，spec `2026-09-12-directory-restructure-design.md`）——test 目录改 `hosttests/qemutests/kernel-selftest/runtime-selftest`（P1）、`kernel/kernel/ → kernel/core/`（P2，字节相同）、random/log/font/logo 拆出 core/（P3）、headers 按 subsystem 拆分 + `arch/` lift 出 `include/kernel/`（P4）、pic/timer 归属 owning subsystem + pty 迁移（P5）、P6 清理 + 全量文档同步（`6730681`）+ master 新 PMM 测试移植（`11695b6`）。③ **PMM/sched 稳定性系列**（worktree `pmm-three-fixes`，merge `be7db4f`）——`ea89136` MEMORY_RANGE_GRANULE 32→64-bit、`beb351c` 保留 E820 MEMORY_TYPE、`0ba888a` alloc/free RAM-relative 索引、`0809100` boot/slab 帧预留 RAM-relative、`514e062` 调度 lost-wakeup 窗口修复、`b68e1b1` 6 例 PMM host 测试；另有 `4468e75` `find_mount` 防御（user-pointer mount entry → dump + ENOENT；**底层根因 devfs mount entry 0x600000 被覆写仍未定位**，疑似 boot slab 帧被 e1000 TX ring 复用，硬件 watchpoint 已取证，parked）。④ **SMP=4 boot crash 双 bug 修复**（`1506d6e` large-model orphan sections 进 `_end` 前、`36eb6a3` active PGD lifetime 与 CR3 同步）+ `tests/x86_64_systest_repeat.py` 回归。⑤ **文档学习层**（`2d289d3`/`414d022` docs/README 索引 + 调度器/trap.c/vfs+memory/tty+intr 4 份源码阅读指南）。v25 的 arch-cleanup 明细（PGD/PUD/PMD/PTE 统一等 10 commits）见 `git log 67132e2..3ab4ef1`。
+> **基准**: `09264e4` (worktree-startup-unification, 2026-09-16)
+> **日期**: 2026-09-16
+> **变更**: 同步 v26 之后的实际进展（两批）：① **统一用户态启动方式文档准备**（`f2085c3..62cf56d`，5 commits，纯文档）——spec v3（首版 `bd74c5a` + review 修复 `b0981e9`/`2b7f00d`）+ plan 5-task TDD（`6636a61` + review 修复 `c16327d`/`62cf56d`）。② **统一用户态启动方式实施 ✅**（worktree `startup-unification`，`d7822cc..09264e4`，9 commits）：Task 0 ext2 稀疏洞读零填（RED `d7822cc` / GREEN `2773763`）；Task 1 systest 11 个启动探针 RED（`ccb3f1f`）；Task 2 内核 `setup_user_stack()` 单站点替换 spawn/exec 双站点构造（`56867f1`）；Task 3 `__libc_start_main` 真实现（`environ` 初始化 + auxv walk，`2a198ab`）；Task 4.5 `deep_copy_argv` 接受显式空 `{NULL}` argv/envp 数组（RED `e4e3a85` / GREEN `26be52e` / selftest 门控修复 `9100ea4`）；Task 4 crt0 标准 SysV `_start` + busybox overlay crt0 同步（GREEN 切换，`09264e4`）。验证：systest 基线 268 + 11 新启动探针全 GREEN、test-network 6/6、test-inittab PASS、52-applet 回归 clean。Task 0 / Task 4.5 为执行中发现的两个 latent kernel 缺陷，作为前置顺手修复。v26 及之前的进展明细（aarch64 页表原语、目录重构、PMM/sched 稳定性等）见 git 历史中 v26 头（`f2085c3`）的变更段。
 
 标记: ✅ 已完成 | 🔒 P1 安全加固 | 🏗 P2 aarch64 适配 | 🖥 P3 GUI | 🔧 P4 硬件适配 | 📐 P5 ABI 扩展/兼容性
 
@@ -54,7 +54,7 @@
 |----|------|------|------|
 | getrandom syscall ✅ | **已完成**（SYS_getrandom=66，ChaCha20 池 + RDRAND/RDSEED 熵源 + 周期 reseed，`/dev/urandom` 同源）。详见 `docs/syscall.md`。`LWIP_RAND`/AT_RANDOM 种子改用仍待做 | 独立 | Linux getrandom(2) |
 | x86_64 内核栈保护 ✅ | **已完成**：x86_64 内核使用 `-fno-pic -mcmodel=large -fstack-protector-strong`，全局 per-boot guard；审计直接 `R_X86_64_PC32` 或 `R_X86_64_64` guard 引用并拒绝 GOT；编译门控的 QEMU 破坏性 canary trip test 已打印预期诊断。用户态 canary/`AT_RANDOM` 仍待做 | 独立 | Linux SSP |
-| **统一用户态启动方式** | `task.c` 两处用户栈构造（spawn argv-only / exec argc+envc）提取共享 `setup_user_stack()`（一处 auxv 逻辑，消除双站点漂移）；`crt0.S` 从寄存器传参（rdi/rsi/rdx）改为标准 SysV `_start`——从 `[rsp]` 解析 argc/argv/envp/auxv 传 `__libc_start_main`（libc/csu 已有但从未被调用），并正确设置 `environ`；busybox overlay crt0 同步。**为 P1 后续（AT_RANDOM/用户栈 canary/ASLR）与 P5 动态链接铺路**：musl crt1 只认栈布局不认寄存器，每个新 auxv 条目在双站点下成本 ×2。验收：systest 268/268 + busybox applet 无回归 | 独立 | musl/glibc crt1 |
+| **统一用户态启动方式 ✅** | `task.c` 两处用户栈构造（spawn argv-only / exec argc+envc）提取共享 `setup_user_stack()`（一处 auxv 逻辑，消除双站点漂移）；`crt0.S` 从寄存器传参（rdi/rsi/rdx）改为标准 SysV `_start`——从 `[rsp]` 解析 argc/argv/envp/auxv 传 `__libc_start_main`（libc/csu 已有但从未被调用），并正确设置 `environ`；busybox overlay crt0 同步。**为 P1 后续（AT_RANDOM/用户栈 canary/ASLR）与 P5 动态链接铺路**：musl crt1 只认栈布局不认寄存器，每个新 auxv 条目在双站点下成本 ×2。**已完成**（2026-09-16，commits `d7822cc..09264e4`，9 commits）：内核 `setup_user_stack()` 单站点（`56867f1`）+ `__libc_start_main` 真实现（`2a198ab`）+ crt0 SysV 切换与 busybox overlay 同步（`09264e4`）；执行中发现并顺手修复两个 latent kernel 缺陷作前置——ext2 稀疏洞读零填（Task 0，`d7822cc`/`2773763`）+ `deep_copy_argv` 拒绝空 `{NULL}` 数组（Task 4.5，`e4e3a85`/`26be52e`/`9100ea4`）。验证：systest 基线 268 + 11 新启动探针全 GREEN（11/11 串口逐项核实；runner 超时为既有 printf 缓冲不 flush 问题，旧 crt0 同样复现）、test-network 6/6、test-inittab PASS（terminal→ash）、52-applet 回归 clean | 独立 | musl/glibc crt1 |
 | 用户栈 canary | libc `-fstack-protector-strong` + ELF 加载器 AT_RANDOM auxv 传种子（原 P1#5）。**前置：统一用户态启动方式 ✅ 后在单站点压 AT_RANDOM**；同批把 `LWIP_RAND` 换内核熵池 | 统一启动方式, getrandom | |
 | ASLR | mmap 基址随机化 + ET_DYN/PIE 加载随机化（原 P3#12） | getrandom | |
 | UBSan + KASan | 内核编译期 instrument（原 P3#13） | 独立 | ArvernOS |
@@ -157,7 +157,7 @@
 ### 依赖链总览
 
 ```
-P1: getrandom ✅ → 统一用户态启动方式（进行中）→ AT_RANDOM → canary / ASLR（kernel SSP ✅，用户栈 canary 排在启动统一之后）
+P1: getrandom ✅ → 统一用户态启动方式 ✅（commits `d7822cc..09264e4`；Task 0/4.5 顺手修了 ext2 稀疏洞 + `deep_copy_argv` 空数组两个 latent kernel 缺陷）→ AT_RANDOM → canary / ASLR（kernel SSP ✅，用户栈 canary 排在启动统一之后；与 LWIP_RAND 改内核熵池同批）
 P2: PMM ✅ + log API ✅ + PGD/PUD/PMD/PTE ✅ + E820 拆分 ✅ + pt_regs_t facade ✅ + arch_irq hooks ✅ + rtc split ✅ + subsys initcall ✅ + kernel_thread_entry ✅ + UEFI 残留排除 ✅ + 页表原语 ✅
    → head.S + MMU（原语就绪）→ GICv2 → Generic Timer；
    统一 kernel_main（interrupt/SMP/context-switch 三独立 spec，arch_irq 已落地收尾）；
@@ -176,7 +176,7 @@ P5: ELF ✅ → ld.so → 共享 libc → apk/musl；futex ✅ → clone → pth
 | ~~PMM 非-RAM 类型丢弃~~ | **已闭环** | `beb351c` 已让 x86_64 `pmm_arch_normalize` 把 E820-derived type 写进 `out[].type`（代码注释明确 "do NOT force everything to MEMORY_TYPE_RAM"）；`pmm_init` Step 2 只 walk `MEMORY_TYPE_RAM` 是设计行为，非-RAM 条目留给未来 ACPI reclaim/NVS 消费者 |
 | ~~`__vfs_lookup_raw` consumed 路径~~ | **已闭环** | `b0c95e3`（2026-09-06）已以 mount prefix 播种 `consumed`，含 `..` 的 consumed 回剪与非根 mount 相对 symlink 正确解析；下文 exec 软链接行的旧备注已过时 |
 | sysroot 头文件级增量重编 | **仍开放** | `mk/components/kernel.mk` 仍是 genid 变化即 `-B` 全量重编；refinement：generation 内 .d 路径相对化/软链引用，使头文件变化只重编依赖者 |
-| `LWIP_RAND`/AT_RANDOM 种子 | **仍开放** | `kernel/include/net/arch/cc.h:98` 仍是 `jiffies * 1103515245 + 12345` LCG，未接内核 ChaCha20 熵池；auxv 仍只压 `AT_NULL`（`task.c` exec 两处）。与 P1 用户栈 canary 同批做 |
+| `LWIP_RAND`/AT_RANDOM 种子 | **仍开放** | `kernel/include/net/arch/cc.h:98` 仍是 `jiffies * 1103515245 + 12345` LCG，未接内核 ChaCha20 熵池；auxv 构造已统一到 `setup_user_stack()` 单站点（仍只压 `AT_NULL`，AT_RANDOM 待压）。与 P1 用户栈 canary 同批做 |
 
 ---
 
