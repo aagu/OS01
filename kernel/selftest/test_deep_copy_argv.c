@@ -30,6 +30,8 @@
 // Pre-fix:  rc == -E2BIG  → FAIL
 // Post-fix: rc == 0, kargv != NULL, kargv[0] == NULL  → PASS
 
+#if defined(OS01_SELFTEST)
+
 #include <core/selftest.h>
 #include <core/printk.h>
 #include <memory/uaccess.h>
@@ -63,7 +65,6 @@
 
 // ── deep_copy_argv under test ──────────────────────────────
 // Static in trap.c; exposed via OS01_SELFTEST for this test only.
-#ifdef OS01_SELFTEST
 int64_t deep_copy_argv(const char *const *user_arr, char ***out_arr);
 
 // Free a deep_copy_argv result (kernel-side array+strings).
@@ -75,7 +76,6 @@ static void dca_free(char **kargv)
     for (size_t i = 0; kargv[i] != NULL; i++) kfree(kargv[i]);
     kfree(kargv);
 }
-#endif
 
 // ── Self-contained page-table setup (mirrors test_uaccess.c) ──
 //
@@ -305,3 +305,5 @@ int deep_copy_argv_selftest_empty(void)
     serial_printk("[selftest] deep_copy_argv: PASS\n");
     return 0;
 }
+
+#endif // OS01_SELFTEST
