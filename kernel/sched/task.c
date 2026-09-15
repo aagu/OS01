@@ -1108,11 +1108,104 @@ static void *fpu_area_alloc(void)
     return raw;  // raw ptr — caller aligns before FXSAVE/RSTOR
 }
 
+/* ── Unified SysV initial-stack builder (spec 2026-09-13-user-startup-unification §4.1) ── */
+
+/* Count argv/envp and enforce the combined cap. Call this BEFORE any
+ * resource allocation or task publication — failure then unwinds through
+ * the function's existing early-error path (no half-built task, no
+ * double-free of the mapped stack page: vmm_free_user_map already frees
+ * huge-page mappings itself, see vmm.c:160). */
+#define STARTUP_STR_MAX 128
+
+static int startup_args_count(char *const argv[], char *const envp[],
+                              int *out_argc, int *out_envc)
+{
+    int ac = 0, ec = 0;
+    while (argv != NULL && argv[ac] != NULL) ac++;
+    while (envp != NULL && envp[ec] != NULL) ec++;
+    if (ac + ec > STARTUP_STR_MAX) return -E2BIG;
+    *out_argc = ac;
+    *out_envc = ec;
+    return 0;
+}
+
+/* Build (low→high): argc | argv[]+NULL | envp[]+NULL | auxv{AT_NULL,0} |
+ * align_pad. The envp terminator NULL is STRICTLY adjacent to the auxv
+ * start; the align pad sits ABOVE auxv and is explicitly zeroed.
+ * argv/envp may be NULL (empty). argc/envc come from startup_args_count
+ * (already capped) — this function cannot fail. */
+static void setup_user_stack(uint8_t *kstack, char *const argv[], char *const envp[],
+                             int s_argc, int s_envc,
+                             uint64_t *out_argv_ptr, uint64_t *out_envp_ptr,
+                             uint64_t *out_rsp)
+{
+#define KSTACK(va) (kstack + ((va) - USER_STACK_BASE))
+    ASSERT(s_argc + s_envc <= STARTUP_STR_MAX);
+    uint64_t str_offset[STARTUP_STR_MAX];
+    int si = 0;
+    uint64_t rsp = USER_STACK_TOP;
+
+    /* strings, descending */
+    for (int i = 0; i < s_argc; i++) {
+        size_t len = strlen(argv[i]) + 1;
+        rsp -= len;
+        memcpy(KSTACK(rsp), argv[i], len);
+        str_offset[si++] = rsp;
+    }
+    for (int i = 0; i < s_envc; i++) {
+        size_t len = strlen(envp[i]) + 1;
+        rsp -= len;
+        memcpy(KSTACK(rsp), envp[i], len);
+        str_offset[si++] = rsp;
+    }
+    rsp &= ~15ULL;
+
+    /* align pad (0 or 8) — ABOVE auxv, zeroed */
+    if (((s_argc + s_envc) & 1) == 0) {
+        rsp -= 8;
+        *(uint64_t *)KSTACK(rsp) = 0;
+    }
+    /* auxv: single AT_NULL pair (Task: canary adds AT_RANDOM here) */
+    rsp -= 16;
+    *(uint64_t *)KSTACK(rsp)      = 0;   /* AT_NULL */
+    *(uint64_t *)KSTACK(rsp + 8)  = 0;
+    /* envp[] + terminator NULL (pushed descending: terminator first,
+     * then entries below it — the array START is rsp after the loop) */
+    rsp -= 8;
+    *(uint64_t *)KSTACK(rsp) = 0;
+    for (int i = s_envc - 1; i >= 0; i--) {
+        rsp -= 8;
+        *(uint64_t *)KSTACK(rsp) = str_offset[s_argc + i];
+    }
+    uint64_t envp_arr = rsp;              /* &envp[0] (== terminator slot when envc==0) */
+    /* argv[] + terminator NULL */
+    rsp -= 8;
+    *(uint64_t *)KSTACK(rsp) = 0;
+    for (int i = s_argc - 1; i >= 0; i--) {
+        rsp -= 8;
+        *(uint64_t *)KSTACK(rsp) = str_offset[i];
+    }
+    uint64_t argv_arr = rsp;              /* &argv[0] (== terminator slot when argc==0) */
+    /* argc */
+    rsp -= 8;
+    *(uint64_t *)KSTACK(rsp) = (uint64_t)s_argc;
+
+    ASSERT((rsp & 0xF) == 0);
+    *out_argv_ptr = argv_arr;
+    *out_envp_ptr = envp_arr;
+    *out_rsp = rsp;
+#undef KSTACK
+}
+
 // ── spawn_user_task(path) ──────────────────────────────────
 // Loads an ELF from the filesystem, creates a new user task,
 // and adds it to the scheduler. Returns the new task's PID or -1 on error.
 int64_t spawn_user_task(const char *path, const char *const *argv)
 {
+    int s_argc = 0, s_envc = 0;
+    if (startup_args_count((char *const *)argv, NULL, &s_argc, &s_envc) != 0)
+        return -E2BIG;
+
     // 1. Open the ELF file via VFS
     vfs_node_t *node = vfs_lookup(path);
     if (!node) {
@@ -1225,53 +1318,12 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
                  USER_STACK_BASE, PAGE_USER_PMD | PAGE_NO_EXEC);
     mm->start_stack = USER_STACK_BASE;
 
-    // ââ 6.5 Set up argv on user stack âââââââââââââââ
-    int s_argc = 0;
-    uint64_t user_rsp = USER_STACK_TOP;
-    uint64_t user_arg_ptr = 0;
+    // ── 6.5 Construct the SysV initial stack (argc/argv/envp/auxv) ──
+    uint8_t *kstack = (uint8_t *)Phy_To_Virt(stack_page->phy_address);
+    uint64_t user_rsp = 0, user_arg_ptr = 0, user_env_ptr = 0;
 
-    if (argv != NULL) {
-        while (argv[s_argc] != NULL) s_argc++;
-        char *kstack = (char *)Phy_To_Virt(stack_page->phy_address);
-#define KSTACK(va) (kstack + ((va) - USER_STACK_BASE))
-        uint64_t str_offset[128];
-        for (int i = 0; i < s_argc; i++) {
-            size_t len = strlen(argv[i]) + 1;
-            user_rsp -= len;
-            memcpy(KSTACK(user_rsp), argv[i], len);
-            str_offset[i] = user_rsp;
-        }
-        user_rsp &= ~15ULL;
-
-        // ── Calculate aligned metadata size ───────────────────
-        // Layout from bottom (RSP) up: argc | argv[]+NULL |
-        // envp_NULL | auxv AT_NULL.  Total must be 16-byte
-        // aligned so RSP (pointing to argc) & 0xF == 0.
-        // Without padding, total = 24 + (s_argc+1)*8 bytes.
-        // When s_argc is even, we need 8 extra bytes.
-        int meta_pad = (s_argc & 1) ? 0 : 8;
-
-        // ── auxv: AT_NULL terminator ──────────────────────────
-        user_rsp -= 16;
-        *(uint64_t *)KSTACK(user_rsp) = 0;      // AT_NULL type
-        *(uint64_t *)KSTACK(user_rsp + 8) = 0;  // value
-
-        // ── envp end NULL + optional alignment padding ────────
-        user_rsp -= 8 + meta_pad;
-        *(uint64_t *)KSTACK(user_rsp) = 0;      // NULL (end of envp)
-
-        // ── argv[] array (NULL-terminated) ────────────────────
-        user_rsp -= (s_argc + 1) * 8;
-        user_arg_ptr = user_rsp;
-        for (int i = 0; i < s_argc; i++)
-            *(uint64_t *)KSTACK(user_rsp + i * 8) = str_offset[i];
-        *(uint64_t *)KSTACK(user_rsp + s_argc * 8) = 0;  // NULL terminator
-
-        // ── argc ──────────────────────────────────────────────
-        user_rsp -= 8;
-        *(uint64_t *)KSTACK(user_rsp) = (uint64_t)s_argc;
-#undef KSTACK
-    }
+    setup_user_stack(kstack, (char *const *)argv, NULL, s_argc, s_envc,
+                     &user_arg_ptr, &user_env_ptr, &user_rsp);
 
     // 7. Set up pt_regs for iretq to ring 3
     pt_regs_t *regs = (pt_regs_t *)((uint64_t)tsk + STACK_SIZE - sizeof(pt_regs_t));
@@ -1280,12 +1332,12 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     regs->ss      = USER_DS;
     regs->ds      = USER_DS;
     regs->es      = USER_DS;
-    regs->rsp     = (argv != NULL) ? user_rsp : USER_STACK_TOP;
+    regs->rsp     = user_rsp;              // SysV initial stack (argc at lowest slot)
     regs->rip     = entry_point;
     regs->rflags  = (1 << 9);              // IF=1
     regs->rdi     = (uint64_t)s_argc;
     regs->rsi     = user_arg_ptr;
-    regs->rdx     = 0;                     // envp = NULL
+    regs->rdx     = user_env_ptr;          // envp (NULL for argv==NULL spawn)
 
     // 8. Thread context for switch_to / __switch_to
     thd->rsp0 = (uint64_t)tsk + STACK_SIZE;
@@ -1329,6 +1381,11 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
                  const char *const *argv, const char *const *envp)
 {
     debug_task("sys_exec: pid=%d path=%s argv=%p\n", current->pid, path ? path : "(null)", (void*)argv);
+    int s_argc = 0, s_envc = 0;
+    if (startup_args_count((char *const *)argv, (char *const *)envp,
+                           &s_argc, &s_envc) != 0)
+        return -E2BIG;
+
     // 1. Look up the ELF file (support relative paths)
     vfs_node_t *node = NULL;
     int lookup_rc = vfs_lookup_at(AT_FDCWD, path, LOOKUP_FOLLOW, &node);
@@ -1386,86 +1443,12 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
                  USER_STACK_BASE, PAGE_USER_PMD | PAGE_NO_EXEC);
     new_mm->start_stack = USER_STACK_BASE;
 
-    // ── 6.5 Set up argv/envp on user stack ──────────────────
-    int s_argc = 0;
-    int s_envc = 0;
-    uint64_t user_rsp = USER_STACK_TOP;
-    uint64_t user_arg_ptr = 0;   // rsi value
-    uint64_t user_env_ptr = 0;   // rdx value
+    // ── 6.5 Construct the SysV initial stack (argc/argv/envp/auxv) ──
+    uint8_t *kstack = (uint8_t *)Phy_To_Virt(stack_page->phy_address);
+    uint64_t user_rsp = 0, user_arg_ptr = 0, user_env_ptr = 0;
 
-    if (argv != NULL) {
-        // Count argv
-        while (argv[s_argc] != NULL) s_argc++;
-
-        // Count envp
-        if (envp != NULL) {
-            while (envp[s_envc] != NULL) s_envc++;
-        }
-
-        // Access the stack page through kernel mapping
-        char *kstack = (char *)Phy_To_Virt(stack_page->phy_address);
-        // kstack[0..0x1FFFFF] maps to USER_STACK_BASE..USER_STACK_TOP
-        #define KSTACK(va) (kstack + ((va) - USER_STACK_BASE))
-
-        // ── Copy string data to top of stack ──────────────────
-        // str_offsets[i] records the virtual address of each string on stack
-        uint64_t str_offset[128];  // enough for ~32 argv + envp each
-        int si = 0;
-
-        // Copy argv strings
-        for (int i = 0; i < s_argc; i++) {
-            size_t len = strlen(argv[i]) + 1;
-            user_rsp -= len;
-            memcpy(KSTACK(user_rsp), argv[i], len);
-            str_offset[si++] = user_rsp;
-        }
-
-        // Copy envp strings
-        for (int i = 0; i < s_envc; i++) {
-            size_t len = strlen(envp[i]) + 1;
-            user_rsp -= len;
-            memcpy(KSTACK(user_rsp), envp[i], len);
-            str_offset[si++] = user_rsp;
-        }
-
-        // ── 16-byte align ─────────────────────────────────────
-        user_rsp &= ~15ULL;
-
-        // ── Calculate aligned metadata size ───────────────────
-        // Layout from bottom (RSP) up: argc | argv[]+NULL |
-        // envp[]+NULL | auxv AT_NULL.  Total must be 16-byte
-        // aligned so RSP (pointing to argc) & 0xF == 0.
-        // Without padding, total = 24 + (argc+1)*8 + (envc+1)*8.
-        // When (s_argc + s_envc) is even, we need 8 extra bytes.
-        int meta_pad = ((s_argc + s_envc) & 1) ? 0 : 8;
-
-        // ── auxv: just AT_NULL terminator ─────────────────────
-        user_rsp -= 16;  // {AT_NULL=0, 0}
-        *(uint64_t *)KSTACK(user_rsp) = 0;      // AT_NULL
-        *(uint64_t *)KSTACK(user_rsp + 8) = 0;
-
-        // ── envp[] array (NULL-terminated) + alignment pad ────
-        user_rsp -= (s_envc + 1) * 8 + meta_pad;
-        user_env_ptr = user_rsp;
-        for (int i = 0; i < s_envc; i++) {
-            *(uint64_t *)KSTACK(user_rsp + i * 8) = str_offset[s_argc + i];
-        }
-        *(uint64_t *)KSTACK(user_rsp + s_envc * 8) = 0;  // NULL terminator
-
-        // ── argv[] array (NULL-terminated) ────────────────────
-        user_rsp -= (s_argc + 1) * 8;
-        user_arg_ptr = user_rsp;
-        for (int i = 0; i < s_argc; i++) {
-            *(uint64_t *)KSTACK(user_rsp + i * 8) = str_offset[i];
-        }
-        *(uint64_t *)KSTACK(user_rsp + s_argc * 8) = 0;  // NULL terminator
-
-        // ── argc ──────────────────────────────────────────────
-        user_rsp -= 8;
-        *(uint64_t *)KSTACK(user_rsp) = (uint64_t)s_argc;
-
-        #undef KSTACK
-    }
+    setup_user_stack(kstack, (char *const *)argv, (char *const *)envp,
+                     s_argc, s_envc, &user_arg_ptr, &user_env_ptr, &user_rsp);
 
     // 7. Commit the new address space before releasing the old one.
     // All fallible preparation and user argument copies are complete.
@@ -1505,7 +1488,7 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     regs->ss      = USER_DS;
     regs->ds      = USER_DS;
     regs->es      = USER_DS;
-    regs->rsp     = (argv != NULL) ? user_rsp : USER_STACK_TOP;
+    regs->rsp     = user_rsp;              // SysV initial stack (argc at lowest slot)
     regs->rip     = entry_point;
     regs->rflags  = (1 << 9);              // IF=1
     regs->rdi     = (uint64_t)s_argc;      // argc
