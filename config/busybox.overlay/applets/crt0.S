@@ -5,13 +5,6 @@ _start:
     # Clear frame pointer for backtrace termination
     xorq %rbp, %rbp
 
-    # ── Save argc, argv, envp BEFORE clobbering registers ──
-    # Kernel passes: rdi=argc, rsi=argv, rdx=envp
-    # Save to callee-saved registers that survive across function calls.
-    movq %rdi, %r12          # r12 = argc
-    movq %rsi, %r13          # r13 = argv
-    movq %rdx, %r14          # r14 = envp
-
     # Zero-initialize BSS
     leaq __bss_start(%rip), %rdi
     leaq __bss_end(%rip), %rcx
@@ -20,15 +13,27 @@ _start:
     xorb %al, %al
     rep stosb
 1:
-    # Restore argc, argv, envp and call main
-    movq %r12, %rdi          # argc
-    movq %r13, %rsi          # argv
-    movq %r14, %rdx          # envp
-    call main
+    # Save entry rsp AFTER BSS clear — xorb %al above clobbers rax, and rsp
+    # is unchanged by rep stosb, so saving here is equivalent (spec §4.2).
+    movq %rsp, %rax
 
-    # exit(return_value)
+    # __libc_start_main(main, argc, argv, init, fini, rtld_fini, stack_end)
+    # rdi=main rsi=argc rdx=argv rcx=init(0) r8=fini(0) r9=rtld_fini(0)
+    # 7th arg (stack_end) passed on the stack.
+    movq (%rsp), %rsi          # argc  ← from the stack (not kernel registers)
+    leaq 8(%rsp), %rdx         # argv
+    leaq main(%rip), %rdi      # main
+    xorl %ecx, %ecx
+    xorl %r8d, %r8d
+    xorl %r9d, %r9d
+    subq $16, %rsp             # keep rsp 16-aligned; [rsp] = arg slot
+    movq %rax, (%rsp)          # stack_end = entry rsp
+    call __libc_start_main
+    addq $16, %rsp
+
+    # exit(main's return value)
     movl %eax, %edi
-    movl $2, %eax        # SYS_exit = 2
+    movl $2, %eax              # SYS_exit = 2
     int $0x80
 
     # Should never reach here
