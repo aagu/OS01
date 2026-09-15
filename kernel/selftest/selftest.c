@@ -131,6 +131,7 @@ int test_timer_jiffies_hz(void);
 int selftest_uaccess(void);
 int symlink_selftest_resolver(void);
 int symlink_selftest_ext2_rollback(void);
+int deep_copy_argv_selftest_empty(void);
 #endif
 
 // ── Test runner ────────────────────────────────────────────
@@ -160,6 +161,7 @@ int selftest_run_all(void)
     selftest_register("uaccess",           selftest_uaccess);
     selftest_register("symlink_resolver",  symlink_selftest_resolver);
     selftest_register("symlink_ext2_rollback", symlink_selftest_ext2_rollback);
+    selftest_register("deep_copy_argv_empty", deep_copy_argv_selftest_empty);
 #endif
 
     int passed = 0, failed = 0;

@@ -1030,7 +1030,16 @@ static void free_partial_argv(char **arr, size_t filled)
     kfree(arr);
 }
 
+// Test-only export: deep_copy_argv is normally static.  Under
+// OS01_SELFTEST the storage class is dropped so the regression test in
+// kernel/selftest/test_deep_copy_argv.c can call it directly without
+// going through do_system_call.  No other callers exist outside this
+// translation unit.
+#ifdef OS01_SELFTEST
+int64_t deep_copy_argv(const char *const *user_arr, char ***out_arr)
+#else
 static int64_t deep_copy_argv(const char *const *user_arr, char ***out_arr)
+#endif
 {
     *out_arr = NULL;
     if (user_arr == NULL) return 0;
