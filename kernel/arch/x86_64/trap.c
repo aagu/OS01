@@ -1067,7 +1067,13 @@ static int64_t deep_copy_argv(const char *const *user_arr, char ***out_arr)
     // If the loop ran to MAX_ARGV+1 without seeing NULL, either the
     // array has more than MAX_ARGV entries (over cap) or it's not
     // NUL-terminated within MAX_ARGV+1 (treated the same).
-    if (count == 0) return -E2BIG;
+    //
+    // count == 0 is a legitimate empty argv/envp (POSIX: argv=NULL
+    // and argv={NULL} are both valid).  The downstream Phase 2/3 code
+    // handles it naturally — zero strnlen iterations, kmalloc(8) for
+    // the array, zero copies, arr[0]=NULL terminator.  Removing the
+    // prior defensive -E2BIG here aligns deep_copy_argv with
+    // setup_user_stack (task.c) which already accepts empty arrays.
 
     // Phase 2: for each element, strnlen + bounded total accumulator.
     size_t total = 0;
