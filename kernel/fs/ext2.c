@@ -596,7 +596,16 @@ static __attribute__((noinline)) int ext2_vfs_read(struct vfs_node *node, uint64
         uint32_t block_off     = (uint32_t)(file_off % fs->block_size);
 
         uint32_t phys = ext2_bmap(fs, &inode, logical_block);
-        if (phys == 0) { kfree(block_buf); spin_unlock(&fs->lock); return -1; }
+        if (phys == 0) {
+            // Sparse hole within i_size — POSIX requires zero-fill, not -EIO.
+            uint32_t chunk = (uint32_t)(fs->block_size - block_off);
+            if (chunk > remaining) chunk = (uint32_t)remaining;
+            memset(out, 0, chunk);
+            out       += chunk;
+            file_off  += chunk;
+            remaining -= chunk;
+            continue;
+        }
 
         if (ext2_read_block(fs, phys, block_buf) != 0) {
             kfree(block_buf); spin_unlock(&fs->lock); return -1;
