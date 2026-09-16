@@ -306,4 +306,149 @@ int deep_copy_argv_selftest_empty(void)
     return 0;
 }
 
+// ── Over-cap regression (commit 26be52e side-effect) ─────────
+//
+// Bug under test (post-26be52e regression): commit
+//   26be52e fix(deep_copy_argv): accept explicit empty argv/envp ({NULL})
+// replaced the defensive `if (count == 0) return -E2BIG;` with a comment
+// justifying its removal.  But that single check was serving TWO purposes
+// at once:
+//
+//   1. Rejecting legitimate empty arrays — the case the commit meant to
+//      fix (POSIX requires argv={NULL} to be accepted).
+//   2. Rejecting over-cap arrays (argv with more than MAX_ARGV=128 valid
+//      pointers followed by NULL) — silently broken by the removal:
+//
+//      Phase 1 loops i = 0..MAX_ARGV (129 iterations).  A 129-entry argv
+//      fills all 129 slots with valid pointers and exits the loop WITHOUT
+//      seeing the NULL terminator (which lives at slot 129, outside the
+//      loop's scan range).  count stays 0, Phase 2/3 then build a {NULL}
+//      kernel array — the over-cap argv is silently accepted as an empty
+//      one.  The contract comment in trap.c (line 1005) explicitly
+//      requires `element count > MAX_ARGV → -E2BIG`.
+//
+// User-visible effect (found via OS01 systest running on master
+// 01c96a8, exit code 42): test_exec_hostile_argv case 3 builds
+// argv_many with 130 valid pointers and calls
+//   exec("/bin/spin", argv_many, NULL)
+// expecting r < 0.  Instead, exec("/bin/spin") succeeds, the current
+// process image is replaced with /bin/spin, and spin's `return 42` from
+// main produces exit code 42 — no [FAIL] is printed (exec never
+// returns), no fail_count is incremented, and the systest loop never
+// runs any test after exec_hostile_argv.
+//
+// This test:
+//   1. Splits the boot kernel's 2MB PDEs and maps two fresh 4KB user
+//      pages: 0x600000 (the argv array) and 0x601000 (backing storage
+//      for the 129 single-character strings).
+//   2. Writes 129 valid non-NULL string pointers + one NULL terminator
+//      to 0x600000, and 'a\0' to each of the 129 backing strings at
+//      0x601000.
+//   3. Calls deep_copy_argv() with the array pointer.
+//   4. Asserts rc == -E2BIG (over-cap rejection).
+//
+// Pre-fix:  rc == 0 (silently accepted as empty)  → FAIL
+// Post-fix: rc == -E2BIG                            → PASS
+int deep_copy_argv_selftest_overcap(void)
+{
+    serial_printk("[selftest] deep_copy_argv_overcap: start\n");
+
+    // 1. Live CR3
+    uint64_t *cur_pml4 = (uint64_t *)Phy_To_Virt((uint64_t)arch_get_page_table());
+    if (!cur_pml4) SELFTEST_FAIL_AT("arch_get_page_table returned NULL");
+
+    // 2. Map ONE 4 KiB user page at 0x1000000 (1 MiB, well clear of the
+    //    kernel's stack-guard region at 0x600000) and use it for both
+    //    the argv array (slots [0..129], 130*8=1040 bytes) and the
+    //    backing string storage (each entry i points to
+    //    0x1000000 + 0x800 + i).  Single-page setup mirrors the
+    //    existing _empty test and avoids the 2MB PDE shared-PTE-page
+    //    subtleties that the two-page version surfaced.
+    #define DCA_VA    0x1000000UL
+    #define DCA_STR   (DCA_VA + 0x800)
+    struct dca_map_ctx cta = {0};
+    uint64_t *slot = dca_ensure_pt(cur_pml4, DCA_VA, &cta);
+    if (!slot) SELFTEST_FAIL_AT("dca_ensure_pt(0x1000000) returned NULL");
+    uint64_t saved_leaf = *slot;
+    struct Page *pg = alloc_pages(ZONE_NORMAL, 1, 0);
+    if (!pg) {
+        dca_restore_pt(&cta);
+        SELFTEST_FAIL_AT("alloc_pages returned NULL");
+    }
+    memset((void *)Phy_To_Virt(pg->phy_address), 0, PAGE_4K_SIZE);
+    *slot = pg->phy_address | PAGE_USER_PTE;
+    arch_flush_tlb_page(DCA_VA);
+
+    // 3. Switch to user-mode addr_limit and populate the page.
+    uint64_t saved_limit = current->addr_limit;
+    current->addr_limit = 0x00007FFFFFFFFFFFULL;
+
+    // Strings at 0x1000800..0x1000881 (129 single-byte strings, 'a\0' each).
+    // Heap-allocate the staging buffers so the function's stack frame
+    // stays small (1040+130 bytes would push the stack-protector
+    // canary far from RSP and expose it to setjmp/longjmp interactions
+    // during the deep_copy_argv call).
+    char *fill = (char *)kmalloc(130);
+    uint64_t *ptrs = (uint64_t *)kmalloc(130 * 8);
+    if (!fill || !ptrs) {
+        if (fill) kfree(fill);
+        if (ptrs) kfree(ptrs);
+        current->addr_limit = saved_limit;
+        *slot = saved_leaf; arch_flush_tlb_page(DCA_VA);
+        dca_restore_pt(&cta); free_pages(pg, 1);
+        SELFTEST_FAIL_AT("kmalloc(fill or ptrs) returned NULL");
+    }
+    for (int i = 0; i < 129; i++) {
+        fill[i * 2] = 'a';
+        fill[i * 2 + 1] = '\0';
+    }
+    ssize_t swrc = copy_to_user_ft((void *)DCA_STR, fill, 130);
+    if (swrc != 130) {
+        current->addr_limit = saved_limit;
+        kfree(fill); kfree(ptrs);
+        *slot = saved_leaf; arch_flush_tlb_page(DCA_VA);
+        dca_restore_pt(&cta); free_pages(pg, 1);
+        SELFTEST_FAIL_AT("copy_to_user_ft(strings) rc=%ld", (long)swrc);
+    }
+
+    // argv at 0x1000000: 129 pointers (each to its own 'a\0' string at
+    // 0x1000800+i) + NULL terminator at slot 129.
+    for (int i = 0; i < 129; i++) ptrs[i] = DCA_STR + (uint64_t)i;
+    ptrs[129] = 0;
+    ssize_t pwrc = copy_to_user_ft((void *)DCA_VA, ptrs, 130 * 8);
+    if (pwrc != 130 * 8) {
+        current->addr_limit = saved_limit;
+        kfree(fill); kfree(ptrs);
+        *slot = saved_leaf; arch_flush_tlb_page(DCA_VA);
+        dca_restore_pt(&cta); free_pages(pg, 1);
+        SELFTEST_FAIL_AT("copy_to_user_ft(argv) rc=%ld (expected %d)",
+                         (long)pwrc, 130 * 8);
+    }
+
+    // 4. Call deep_copy_argv with the 129-entry argv (over-cap by 1).
+    char **kargv = NULL;
+    int64_t rc = deep_copy_argv((const char *const *)DCA_VA, &kargv);
+    current->addr_limit = saved_limit;
+
+    // 5. Cleanup.  The post-fix code path rejects before any kmalloc;
+    //    defend against a pre-fix path that may have built a kargv.
+    kfree(fill);
+    kfree(ptrs);
+    if (kargv) dca_free(kargv);
+    *slot = saved_leaf;
+    arch_flush_tlb_page(DCA_VA);
+    dca_restore_pt(&cta);
+    free_pages(pg, 1);
+
+    // 6. Assert rc == -E2BIG.
+    if (rc != -E2BIG) {
+        serial_printk("[selftest] deep_copy_argv_overcap: FAIL rc=%ld "
+                     "(expected -E2BIG=%d)\n",
+                     (long)rc, -E2BIG);
+        return -1;
+    }
+    serial_printk("[selftest] deep_copy_argv_overcap: PASS\n");
+    return 0;
+}
+
 #endif // OS01_SELFTEST
