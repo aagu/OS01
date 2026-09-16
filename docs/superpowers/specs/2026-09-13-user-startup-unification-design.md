@@ -88,9 +88,9 @@ _start:
     movq (%rsp), %rsi          # argc  ← 从栈读（不再依赖内核寄存器）
     leaq 8(%rsp), %rdx         # argv
     leaq main(%rip), %rdi      # main
-    xorq %ecx, %ecx
-    xorq %r8d, %r8d
-    xorq %r9d, %r9d
+    xorl %ecx, %ecx
+    xorl %r8d, %r8d
+    xorl %r9d, %r9d
     subq $16, %rsp             # 对齐占位 + 第 7 参槽位
     movq %rax, (%rsp)          # 第 7 参：准确的入口 rsp
     call __libc_start_main

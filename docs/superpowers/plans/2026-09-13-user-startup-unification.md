@@ -573,9 +573,9 @@ _start:
     movq (%rsp), %rsi          # argc  ← from the stack (not kernel registers)
     leaq 8(%rsp), %rdx         # argv
     leaq main(%rip), %rdi      # main
-    xorq %ecx, %ecx
-    xorq %r8d, %r8d
-    xorq %r9d, %r9d
+    xorl %ecx, %ecx
+    xorl %r8d, %r8d
+    xorl %r9d, %r9d
     subq $16, %rsp             # keep rsp 16-aligned; [rsp] = arg slot
     movq %rax, (%rsp)          # stack_end = entry rsp
     call __libc_start_main
