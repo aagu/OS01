@@ -15,6 +15,50 @@
 /* Minimal FILE struct lives in stdio.h (shared with stdio_extras.c) */
 /* typedef struct { int fd; int mode; } mini_file_t; -- see stdio.h */
 
+/* ── Open-file registry ────────────────────────────────────
+ *
+ * Tracks every mini_file_t returned by fopen()/fdopen() until the
+ * matching fclose(). Used by fflush() to validate its FILE* argument
+ * (POSIX: fflush returns EOF on invalid stream) and by fclose() to
+ * catch use-after-free / double-close. Fixed-size array (mirrors
+ * libc/stdlib/atexit.c's ATEXIT_MAX pattern); slots are reused after
+ * fclose(). */
+#define OPEN_FILES_MAX 32
+static void *open_files[OPEN_FILES_MAX];
+static int   open_files_count = 0;
+
+static int register_file(void *f)
+{
+    if (!f) return -1;
+    for (int i = 0; i < open_files_count; i++) {
+        if (open_files[i] == NULL) {
+            open_files[i] = f;
+            return 0;
+        }
+    }
+    if (open_files_count >= OPEN_FILES_MAX) return -1;
+    open_files[open_files_count++] = f;
+    return 0;
+}
+
+static void unregister_file(void *f)
+{
+    for (int i = 0; i < open_files_count; i++) {
+        if (open_files[i] == f) {
+            open_files[i] = NULL;
+            return;
+        }
+    }
+}
+
+static int is_open_file(void *f)
+{
+    for (int i = 0; i < open_files_count; i++) {
+        if (open_files[i] == f) return 1;
+    }
+    return 0;
+}
+
 void *fopen(const char *path, const char *mode)
 {
     mini_file_t *mf = calloc(1, sizeof(*mf));
@@ -24,6 +68,11 @@ void *fopen(const char *path, const char *mode)
     int flags = (mf->mode == 0) ? O_RDONLY : (O_WRONLY | O_CREAT | O_TRUNC);
     mf->fd = open(path, flags, 0666);
     if (mf->fd < 0) { free(mf); return NULL; }
+    if (register_file(mf) != 0) {
+        close(mf->fd);
+        free(mf);
+        return NULL;
+    }
     return mf;
 }
 
@@ -33,6 +82,10 @@ void *fdopen(int fd, const char *mode)
     if (!mf) return NULL;
     mf->fd = fd;
     mf->mode = (mode[0] == 'r') ? 0 : 1;
+    if (register_file(mf) != 0) {
+        free(mf);
+        return NULL;
+    }
     return mf;
 }
 
@@ -44,7 +97,9 @@ int fclose(void *f)
      * dereferenced address 1 and user-faulted (busybox nl crash). */
     if (f == stdin || f == stdout || f == stderr)
         return 0;
+    if (!is_open_file(f)) return -1;   /* not ours / use-after-free */
     mini_file_t *mf = (mini_file_t *)f;
+    unregister_file(mf);
     close(mf->fd);
     free(mf);
     return 0;
@@ -74,7 +129,29 @@ size_t fwrite(const void *p, size_t s, size_t n, void *f)
     return (size_t)(written / s);
 }
 
-int fflush(void *f) { (void)f; return 0; }
+int fflush(void *f)
+{
+    /* fflush(FILE*): drain any pending writes for the given stream.
+     *   - f == NULL           → flush ALL streams (POSIX). No-op here
+     *                            because every printf/fwrite path in this
+     *                            libc is already unbuffered (per-call
+     *                            write_all() or direct write()).
+     *   - f is a sentinel     → stdin/stdout/stderr are libc-owned
+     *                            constant values ((FILE*)1/2/3); nothing
+     *                            to drain, return 0.
+     *   - f is a registered   → real fopen()/fdopen() FILE*. Nothing
+     *     FILE*                  to drain (unbuffered), return 0.
+     *   - f is unknown        → not a stream we own; POSIX says return
+     *                            EOF. Returning 0 here would silently
+     *                            accept garbage pointers (a real footgun
+     *                            — typo'd stream names would appear to
+     *                            succeed). */
+    if (f == NULL || f == stdin || f == stdout || f == stderr)
+        return 0;
+    if (is_open_file(f))
+        return 0;
+    return -1;
+}
 
 ssize_t write_all(int fd, const char *buf, size_t len)
 {

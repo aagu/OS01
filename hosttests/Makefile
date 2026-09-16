@@ -63,6 +63,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_libc_string.elf \
     $(TEST_BLD)/test_libc_list.elf \
     $(TEST_BLD)/test_libc_vsprintf.elf \
+    $(TEST_BLD)/test_libc_fflush.elf \
     $(TEST_BLD)/test_libc_getopt.elf \
     $(TEST_BLD)/test_vfs_basic.elf \
     $(TEST_BLD)/test_fat32_basic.elf \
@@ -231,6 +232,11 @@ $(TEST_BLD)/test_libc_vsprintf.o: $(TEST_CASES)/test_libc_vsprintf.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
+# fflush test exercises printf + fflush + fopen/fclose + write-shim capture.
+$(TEST_BLD)/test_libc_fflush.o: $(TEST_CASES)/test_libc_fflush.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
 # Focused poll test compiles and links the real production paths.
 $(TEST_BLD)/test_poll_requested.o: $(TEST_CASES)/test_poll_requested.c
 	@mkdir -p $(TEST_BLD)
@@ -278,6 +284,11 @@ $(TEST_BLD)/test_libc_list.elf: $(TEST_BLD)/test_libc_list.o $(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/test_libc_vsprintf.elf: $(TEST_BLD)/test_libc_vsprintf.o $(LIBC_OBJS) \
+		$(TEST_BLD)/libc_vasprintf.o $(TEST_BLD)/libc_printf.o \
+		$(TEST_BLD)/libc_stdio_file.o $(TEST_BLD)/stdio_test_shims.o
+	$(HOST_CC) -o $@ $^
+
+$(TEST_BLD)/test_libc_fflush.elf: $(TEST_BLD)/test_libc_fflush.o $(LIBC_OBJS) \
 		$(TEST_BLD)/libc_vasprintf.o $(TEST_BLD)/libc_printf.o \
 		$(TEST_BLD)/libc_stdio_file.o $(TEST_BLD)/stdio_test_shims.o
 	$(HOST_CC) -o $@ $^
