@@ -264,3 +264,16 @@ make clean
 ```
 
 此命令持有发布锁并确认没有 generation read lease 后，删除 `build/x86_64-clang/`（不会删除 `build/.locks/` 或其他 profile 的目录），并删除默认 profile 拥有的项目根兼容文件（`disk.img`、`kernel.bin`）。非默认 profile 的 `make PROFILE=<name> clean` 只删除该 profile 的 `build/<profile>/`，不动项目根兼容文件。
+
+---
+
+## v25 增量：UEFI 残留排除（`mk/components/uefi.mk`）
+
+**问题**：linked git worktree 的 `git -C posix-uefi status --porcelain` 用 submodule `config.worktree` 路径解析到 MAIN checkout（不在 worktree），与 find-based digest（跑在 OS01_ROOT 看 worktree 内容）不一致，导致前次 x86_64 build 残留 `*.o` / `*.a` / `*.lib` 经 `uefi/*.o` glob 进 aarch64 `BOOTAA64.EFI` ld.lld 链接产生 **duplicate-symbol + machine-type-mismatch**。
+
+**修复**（`5dbc63d`）：
+
+1. `find thirdpart/posix-uefi -type f` digest 用 `! -name "*.o" ! -name "*.a" ! -name "*.lib"` 排除
+2. `cp -a "$(UEFI_RUNTIME_SOURCE)/." "$(UEFI_RUNTIME_DIR)/"` 后加 `find "$(UEFI_RUNTIME_DIR)" \( -name "*.o" -o -name "*.a" -o -name "*.lib" \) -delete`
+
+干净 checkout 无行为变化。验证 selftest 21/21 + syscall 268/268 + aarch64 UEFI BOOTAA64.EFI ARM64 PE32+。

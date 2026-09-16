@@ -517,6 +517,19 @@ void kernel_main(const struct boot_context *bootctx);
 2. **支持多内核**：支持从多个内核中选择一个启动
 3. **支持启动菜单**：添加启动菜单，允许用户选择启动选项
 
+## v25 增量：bootinfo E820 拆分
+
+**问题**：`kernel/include/core/bootinfo.h` 同时承担 arch-neutral `struct boot_context` 定义 + x86_64 专属 `struct E820_ENTRY` + `BOOT_MEMORY_FORMAT_E820=1u` 常量。aarch64 编译视图看到 E820 符号（无意义）。
+
+**修复**（`af9a6ce`）：
+
+- `struct E820_ENTRY` + `BOOT_MEMORY_FORMAT_E820=1u` 从 `bootinfo.h` 移到 `kernel/arch/x86_64/bootinfo_x86.h`
+- `bootinfo.h` 保留 enum 值 `1` + 注释指针（x86_64 仍可消费 enum 值，无需修改 `boot_context` layout）
+- `pmm.c` 去掉 arch-neutral `entry_size` 分支（强覆盖已校验 `n==0`，无需运行时探测 entry size）
+- 4 处 include 加 `bootinfo_x86.h`
+
+字节相同，aarch64 编译视图纯净（看不到 E820 符号）。详见 `docs/arch.md`「bootinfo ABI」段。
+
 ## 总结
 
 本系统的引导流程是一个从 UEFI 固件到内核执行的完整过程，包括：

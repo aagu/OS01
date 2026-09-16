@@ -312,3 +312,34 @@ vmm_unmap_page(kernel_map, virtual_address);
 2. **位掩码跟踪**：使用位掩码快速跟踪页面使用情况
 3. **Slab 分配器**：使用 Slab 分配器提高小内存分配效率
 4. **内存区域划分**：根据内存用途划分不同区域，提高内存使用效率
+
+---
+
+## v25/v26 增量：arch-neutral 化
+
+### PMM arch-neutral（v24）
+
+单一入口：`pmm_init(const struct boot_context *ctx)`。
+
+- 弱默认 `pmm_arch_normalize` / `pmm_arch_zone_split` 在 `kernel/memory/pmm_arch.c`
+- x86_64 强覆盖在 `kernel/arch/x86_64/pmm_arch.c`：E820 + kernel-LMA/handoff/trampoline excludes + 2 MiB granule + sort/merge
+- aarch64 强覆盖在 `kernel/arch/aarch64/pmm_arch.c`：读 `aarch64_ram_map_get()`
+- 中介层 `MEMORY_RANGE[]`：x86_64 E820 / aarch64 DTB 统一归一化输出
+- `pmm.c` body 用 **RAM-relative indexing**（`pages_struct + ((start - lowest_ram) >> 21)`），Step 7 clamp 防 aarch64 unsigned-underflow
+
+### 页表层级 PGD/PUD/PMD/PTE（v25）
+
+Linux/ARM 命名替换 x86_64 PML4/PDPT/PDE。详见 `docs/arch.md`「页表层级」段。Bit-constant 同步 rename，~150 站点，x86_64 `kernel.bin` 字节相同（1,739,024 B），aarch64 编译视图纯净。
+
+### PMM/sched 稳定性系列（v25）
+
+5 commits + 6 例 PMM host 测试合并到 master：
+
+- `ea89136` `MEMORY_RANGE_GRANULE` 64-bit 化（防 aarch64 32-bit mask 截断）
+- `beb351c` x86_64 `pmm_arch_normalize` 保留 E820-derived `out[].type`（非-RAM 类型不丢；`pmm_init` Step 2 只 walk `MEMORY_TYPE_RAM` 是设计行为，非-RAM 留给未来 ACPI reclaim/NVS 消费者）
+- `0ba888a` `bits_map` 在 `alloc_pages` / `free_pages` 中 RAM-relative 索引
+- `0809100` kernel/slab 帧预留用 RAM-relative 索引而非物理 PFN（根因：devfs mount entry 0x600000 被 e1000 TX ring 覆写）
+- `514e062` 调度器 lost-wakeup 窗口修复（dequeue → on_cpu=0 之间）
+- `b68e1b1` 6 例 PMM host 测试（boot/slab RAM-relative 预留）
+
+SMP=1/2/4 + systest-repeat 7 连 268/268 验证。详见 `docs/superpowers/specs/2026-09-09-pmm-arch-neutral-design.md`（13 轮 review）+ `plans/2026-09-09-pmm-arch-neutral.md`（16 task）。
