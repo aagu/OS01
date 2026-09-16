@@ -3,10 +3,12 @@
 ## Motivation
 
 Clean separation of init into ordered phases, enabling:
-- **Arch-agnostic initialization**: the `kernel_main` init sequence in `kernel/core/main.c` calls `arch_register_subsys()` and `subsys_init_all()` without knowing which architecture it runs on. x86_64 and future aarch64 backends each provide their own registration.
+- **Arch-agnostic initialization**: drivers self-register via `SUBSYS_INITCALL()` into a `.subsys_init` linker section. The linker script (per-arch) collects these into a table that `kernel_main` iterates via `arch_register_subsys()` (a 7-line loop). No hardcoded list of drivers per arch.
 - **Modularity**: each subsystem (APIC, timer, keyboard, AHCI, etc.) is a self-contained `int init(void)` function, registered independently.
 - **Failure isolation**: optional subsystems can fail without halting boot (`SUBSYS_FLAG_OPTIONAL`).
 - **Order guarantees**: phases run sequentially; all entries in phase _N_ complete before phase _N+1_ starts.
+
+> **Why a custom macro instead of `__attribute__((constructor))`?** OS01 libc-free has no `.init_array` runtime support — constructor pointers land in a section nobody iterates. `SUBSYS_INITCALL()` + `.subsys_init` is the Linux initcall trick adapted to a libc-free freestanding environment.
 
 ---
 
@@ -89,57 +91,44 @@ void subsys_init_percpu(void);        // run on all online CPUs
 
 ## Architecture-Specific Registration
 
-### BSP subsystems (`kernel/arch/x86_64/subsys.c`)
-
-`arch_register_subsys()` registers all x86 subsystems:
+Driver self-registration via `SUBSYS_INITCALL()` (kernel/include/subsys/subsys.h):
 
 ```c
-void arch_register_subsys(void)
-{
-    // Phase 3: interrupt controllers
-    register_subsys("apic",        _apic_init,       SUBSYS_PHASE_3, 0);
-    register_subsys("pic",         _pic_init,        SUBSYS_PHASE_3, SUBSYS_FLAG_OPTIONAL);
+SUBSYS_INITCALL("apic", _apic_init, SUBSYS_PHASE_3, 0);
+SUBSYS_INITCALL("pic",  _pic_init,  SUBSYS_PHASE_3, SUBSYS_FLAG_OPTIONAL);
+SUBSYS_INITCALL("timer", _timer_init, SUBSYS_PHASE_4, 0);
+// ...
+```
 
-    // Phase 4: timers
-    register_subsys("timer",       _timer_init,      SUBSYS_PHASE_4, 0);
-    register_subsys("pit",         _pit_init,        SUBSYS_PHASE_4, SUBSYS_FLAG_OPTIONAL);
-    register_subsys("lapic-timer", _lapic_timer_init, SUBSYS_PHASE_4, SUBSYS_FLAG_OPTIONAL);
+The macro emits a `subsys_entry_t` instance into the `.subsys_init` linker section. Each arch's `kernel/arch/<arch>/linker.ld` collects these into a table with sentinel markers (`__subsys_init_start` / `__subsys_init_end`).
 
-    // Phase 5: device IRQs
-    register_subsys("keyboard",    _keyboard_init,   SUBSYS_PHASE_5, SUBSYS_FLAG_OPTIONAL);
-    register_subsys("serial",      _serial_irq_init,  SUBSYS_PHASE_5, 0);
+`arch_register_subsys()` is a 7-line loop over the table — **no per-arch hardcoded driver list**:
 
-    // Phase 6: storage
-    register_subsys("ahci",        _ahci_init,       SUBSYS_PHASE_6, SUBSYS_FLAG_OPTIONAL);
+```c
+void arch_register_subsys(void) {
+    extern subsys_entry_t __subsys_init_start[], __subsys_init_end[];
+    for (subsys_entry_t *e = __subsys_init_start; e < __subsys_init_end; e++)
+        register_subsys_entry(e);   // copies into framework table
 }
 ```
 
-Each wrapper function converts a `void → void` arch API call into an `int (*)(void)`.
+10 drivers self-register on x86_64 (apic, pic, pit, lapic-timer, timer, serial, keyboard, ahci, pci, net/clocksource variants — see each driver's `.c` for the `SUBSYS_INITCALL()` line).
 
-The RSDP address (`arch_boot_rsdp`) is set by `kernel_main` before calling `arch_register_subsys()` and consumed by `apic_init()`.
+### Per-CPU subsystems
 
-### Per-CPU subsystems (`kernel/arch/x86_64/subsys_percpu.c`)
-
-`arch_register_subsys_percpu()` registers entries that run once per online CPU after SMP bringup:
-
-```c
-void arch_register_subsys_percpu(void)
-{
-    register_subsys_percpu("lapic-timer-start", _lapic_timer_start_percpu, 0);
-}
-```
+Same `SUBSYS_INITCALL()` macro variant for per-CPU entries. E.g. `lapic_timer_start_percpu` registers as `SUBSYS_INITCALL_PERCPU()`. The framework iterates the per-CPU table once per online CPU (`0 .. num_cpus-1`) after SMP bringup.
 
 ### Arch API header (`kernel/include/arch/subsys.h`)
 
-Declares the arch-provided registration functions:
+The only arch-specific function still declared here:
 
 ```c
 extern uint64_t arch_boot_rsdp;
-void arch_register_subsys(void);
-void arch_register_subsys_percpu(void);
+void arch_register_subsys(void);          // iterate .subsys_init table
+void arch_register_subsys_percpu(void);   // iterate .subsys_init_percpu table
 ```
 
-Each architecture provides its own `subsys.c` and `subsys_percpu.c`; the subsys framework in `kernel/subsys/` is arch-agnostic.
+The RSDP address (`arch_boot_rsdp`) is set by `kernel_main` before calling `arch_register_subsys()` and consumed by `apic_init()`.
 
 ---
 
@@ -179,8 +168,9 @@ task_init();
 | File | Purpose |
 |------|---------|
 | `kernel/subsys/subsys.c` | Framework implementation: registration, init dispatch, status query |
-| `kernel/include/subsys/subsys.h` | API header: structures, phase constants, flags, function declarations |
-| `kernel/arch/x86_64/subsys.c` | x86_64 BSP subsystem registrations (APIC, PIC, timers, keyboard, serial, AHCI) |
-| `kernel/arch/x86_64/subsys_percpu.c` | x86_64 per-CPU subsystem registrations (LAPIC timer start) |
-| `kernel/include/arch/subsys.h` | Arch API header: `arch_register_subsys()` and `arch_register_subsys_percpu()` declarations |
+| `kernel/include/subsys/subsys.h` | API header: structures, phase constants, flags, `SUBSYS_INITCALL()` macro |
+| `kernel/arch/x86_64/linker.ld` | Collects `.subsys_init` / `.subsys_init_percpu` sections with sentinels |
+| `kernel/arch/<arch>/subsys.c` | arch-specific `arch_register_subsys()` 7-line loop iterating the table |
+| `kernel/driver/*.c` | Each driver `.c` has its own `SUBSYS_INITCALL()` line (10 drivers on x86_64) |
+| `kernel/include/arch/subsys.h` | Arch API header: `arch_register_subsys()` / `arch_register_subsys_percpu()` declarations |
 | `kernel/core/main.c` | Init sequence: calls `arch_register_subsys()`, `subsys_init_all()`, `arch_register_subsys_percpu()`, `subsys_init_percpu()` |
