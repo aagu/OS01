@@ -123,6 +123,7 @@ int ext2_selftest_block_alloc(void);
 int ext2_selftest_inode_alloc(void);
 int ext2_selftest_dirent_roundtrip(void);
 int ext2_selftest_write_read(void);
+int ext2_selftest_sparse_read(void);
 int gpt_selftest_crc32(void);
 int tmpfs_selftest_mounted(void);
 int test_timer_tsc_freq(void);
@@ -130,6 +131,7 @@ int test_timer_jiffies_hz(void);
 int selftest_uaccess(void);
 int symlink_selftest_resolver(void);
 int symlink_selftest_ext2_rollback(void);
+int deep_copy_argv_selftest_empty(void);
 #endif
 
 // ── Test runner ────────────────────────────────────────────
@@ -151,6 +153,7 @@ int selftest_run_all(void)
     selftest_register("ext2_inode_alloc",      ext2_selftest_inode_alloc);
     selftest_register("ext2_dirent_roundtrip", ext2_selftest_dirent_roundtrip);
     selftest_register("ext2_write_read",       ext2_selftest_write_read);
+    selftest_register("ext2_sparse_read",      ext2_selftest_sparse_read);
     selftest_register("gpt_crc32",         gpt_selftest_crc32);
     selftest_register("tmpfs_mounted",     tmpfs_selftest_mounted);
     selftest_register("timer_tsc_freq",    test_timer_tsc_freq);
@@ -158,6 +161,7 @@ int selftest_run_all(void)
     selftest_register("uaccess",           selftest_uaccess);
     selftest_register("symlink_resolver",  symlink_selftest_resolver);
     selftest_register("symlink_ext2_rollback", symlink_selftest_ext2_rollback);
+    selftest_register("deep_copy_argv_empty", deep_copy_argv_selftest_empty);
 #endif
 
     int passed = 0, failed = 0;

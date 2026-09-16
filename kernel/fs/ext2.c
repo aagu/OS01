@@ -596,7 +596,16 @@ static __attribute__((noinline)) int ext2_vfs_read(struct vfs_node *node, uint64
         uint32_t block_off     = (uint32_t)(file_off % fs->block_size);
 
         uint32_t phys = ext2_bmap(fs, &inode, logical_block);
-        if (phys == 0) { kfree(block_buf); spin_unlock(&fs->lock); return -1; }
+        if (phys == 0) {
+            // Sparse hole within i_size — POSIX requires zero-fill, not -EIO.
+            uint32_t chunk = (uint32_t)(fs->block_size - block_off);
+            if (chunk > remaining) chunk = (uint32_t)remaining;
+            memset(out, 0, chunk);
+            out       += chunk;
+            file_off  += chunk;
+            remaining -= chunk;
+            continue;
+        }
 
         if (ext2_read_block(fs, phys, block_buf) != 0) {
             kfree(block_buf); spin_unlock(&fs->lock); return -1;
@@ -1934,5 +1943,142 @@ cleanup:
     if (block_data) kfree(block_data);
     spin_unlock(&fs->lock);
     return ret;
+}
+
+// ext2_selftest_sparse_read — POSIX: reads from sparse holes return zeros.
+//
+// Bug under test: ext2_vfs_read() used to treat ext2_bmap() == 0 (a hole)
+// as -EIO and abort the whole read with -1.  POSIX requires sparse reads
+// to return zeros.  This regression was triggered when user programs grew
+// .bss past a 4 KB file boundary, leaving ext2-debugfs to encode the
+// intervening all-zero file blocks as holes — at which point sys_exec
+// could no longer load the ELF and /bin/systest (etc.) stopped being
+// runnable.
+//
+// Two cases exercised on the first regular file in the root directory:
+//   A) hole in middle: i_block[0] = real, i_block[1] = 0, i_size = 8192.
+//      A 8 KB read must return 8 KB and the second 4 KB must be zeros.
+//   B) fully sparse:   i_block[*] = 0,                  i_size = 4096.
+//      A 4 KB read must return 4 KB of zeros.
+//
+// The inode is restored before the test returns.
+int ext2_selftest_sparse_read(void)
+{
+    ext2_fs_t *fs = ext2_selftest_get_fs();
+    if (!fs) return 0;   // SKIP — ext2 not mounted
+
+    uint8_t *block_data = kmalloc(4096);
+    if (!block_data) return -1;
+
+    uint32_t test_ino = 0;
+    ext2_inode_t saved_inode;
+
+    spin_lock(&fs->lock);
+
+    // Find the first regular file in the root directory.
+    ext2_inode_t dir_inode;
+    ext2_read_inode(fs, EXT2_ROOT_INO, &dir_inode);
+    for (uint32_t bi = 0; ; bi++) {
+        uint32_t phys = ext2_bmap(fs, &dir_inode, bi);
+        if (phys == 0) break;
+        ext2_read_block(fs, phys, block_data);
+        uint32_t off = 0;
+        while (off < fs->block_size) {
+            ext2_dirent_t *de = (ext2_dirent_t *)(block_data + off);
+            if (de->rec_len == 0) break;
+            if (de->inode != 0 && de->file_type == 1 /* EXT2_FT_REG_FILE */) {
+                test_ino = de->inode;
+                break;
+            }
+            off += de->rec_len;
+        }
+        if (test_ino) break;
+    }
+    if (!test_ino) {
+        kfree(block_data);
+        spin_unlock(&fs->lock);
+        return 0;   // SKIP — no regular file in root
+    }
+
+    if (ext2_read_inode(fs, test_ino, &saved_inode) != 0) {
+        kfree(block_data);
+        spin_unlock(&fs->lock);
+        return -1;
+    }
+    if (saved_inode.i_block[0] == 0) {
+        // Case A needs at least one real block to interleave with a hole.
+        kfree(block_data);
+        spin_unlock(&fs->lock);
+        return 0;
+    }
+
+    spin_unlock(&fs->lock);
+
+    // Acquire the ext2 mount for the synthetic vfs_node_t.
+    vfs_node_t *root_node = vfs_lookup("/");
+    if (!root_node || !root_node->mount || !root_node->mount->fs_data) {
+        if (root_node) vfs_node_put(root_node);
+        kfree(block_data);
+        return 0;
+    }
+
+    uint8_t *buf = kmalloc(8192);
+    if (!buf) {
+        vfs_node_put(root_node);
+        kfree(block_data);
+        return -1;
+    }
+
+    // Synthetic node — ext2_vfs_read only dereferences mount, fs_data.
+    vfs_node_t fake = {0};
+    fake.ops = &ext2_vfs_ops;
+    fake.fs_data = (void *)(uintptr_t)test_ino;
+    fake.mount = root_node->mount;
+
+    int fail = 0;
+
+    // ===== Case A: hole in middle =====
+    spin_lock(&fs->lock);
+    ext2_inode_t mod = saved_inode;
+    mod.i_size = 8192;
+    mod.i_blocks = 8;   // one block × (block_size / 512)
+    for (int i = 1; i < 15; i++) mod.i_block[i] = 0;
+    int wrc = ext2_write_inode(fs, test_ino, &mod);
+    spin_unlock(&fs->lock);
+    if (wrc != 0) { fail = 1; goto cleanup; }
+
+    memset(buf, 0xCC, 8192);   // sentinel — hole must overwrite
+    int rc = ext2_vfs_ops.read(&fake, 0, 8192, buf);
+    if (rc != 8192) { fail = 1; goto cleanup; }
+    for (int i = 4096; i < 8192; i++) {
+        if (buf[i] != 0) { fail = 1; goto cleanup; }
+    }
+
+    // ===== Case B: fully sparse =====
+    spin_lock(&fs->lock);
+    mod.i_size = 4096;
+    mod.i_blocks = 0;
+    for (int i = 0; i < 15; i++) mod.i_block[i] = 0;
+    wrc = ext2_write_inode(fs, test_ino, &mod);
+    spin_unlock(&fs->lock);
+    if (wrc != 0) { fail = 1; goto cleanup; }
+
+    memset(buf, 0xCC, 4096);
+    rc = ext2_vfs_ops.read(&fake, 0, 4096, buf);
+    if (rc != 4096) { fail = 1; goto cleanup; }
+    for (int i = 0; i < 4096; i++) {
+        if (buf[i] != 0) { fail = 1; goto cleanup; }
+    }
+
+cleanup:
+    // Restore the original inode before returning.
+    spin_lock(&fs->lock);
+    ext2_write_inode(fs, test_ino, &saved_inode);
+    spin_unlock(&fs->lock);
+
+    kfree(buf);
+    kfree(block_data);
+    vfs_node_put(root_node);
+    return fail ? -1 : 0;
 }
 #endif

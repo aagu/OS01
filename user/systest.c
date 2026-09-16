@@ -2920,11 +2920,207 @@ static void test_42_getdents_dt_lnk(void)
     unlink(SYMDIR "/reg42");
 }
 
+// ── Unified startup self-checks (spec 2026-09-13-user-startup-unification) ──
+// Weak extern: under the old crt0/csu these resolve to 0, tests FAIL (RED);
+// Task 3/4 define them and the same code goes GREEN.
+extern uint64_t *__libc_auxv      __attribute__((weak));
+extern void     *__libc_stack_end __attribute__((weak));
+
+static int g_argc;
+static char **g_argv;
+
+#define SU_ERR_STACKEND_NULL 0x001
+#define SU_ERR_ALIGN         0x002
+#define SU_ERR_ARGC_MISMATCH 0x004
+#define SU_ERR_ARGV_ADDR     0x008
+#define SU_ERR_ENVIRON_ADDR  0x010
+#define SU_ERR_ENVIRON_NULL  0x020
+#define SU_ERR_AUXV_NULL     0x040
+#define SU_ERR_AUXV_ADDR     0x080
+#define SU_ERR_AUXV_ATNULL   0x100
+#define SU_ERR_AUXV_RANGE    0x200
+#define SU_ERR_ENV_WALK      0x400
+#define SU_ERR_ARGV_STR      0x800
+#define SU_ERR_ENV_STR       0x1000
+
+/* Validate the entry-stack chain of THIS process (spec §6.1). Returns 0 or
+ * an OR of SU_ERR_* bits. Never dereferences anything under the old crt0
+ * (returns SU_ERR_STACKEND_NULL before touching environ/auxv). */
+static int startup_layout_errors(int argc, char **argv)
+{
+    extern char **environ;
+    if (&__libc_stack_end == NULL || __libc_stack_end == NULL)
+        return SU_ERR_STACKEND_NULL;
+
+    int errs = 0;
+    if ((uintptr_t)__libc_stack_end & 0xF)              errs |= SU_ERR_ALIGN;
+    if (*(uint64_t *)__libc_stack_end != (uint64_t)argc) errs |= SU_ERR_ARGC_MISMATCH;
+    if (argv != (char **)((uint64_t *)__libc_stack_end + 1)) errs |= SU_ERR_ARGV_ADDR;
+    if (argv[argc] != NULL)                              errs |= SU_ERR_ARGV_STR;
+    for (int i = 0; i < argc; i++)
+        if (argv[i] == NULL || argv[i][0] == '\0')      errs |= SU_ERR_ARGV_STR;
+
+    if (environ == NULL) return errs | SU_ERR_ENVIRON_NULL;
+    if (argv + argc + 1 != environ)                      errs |= SU_ERR_ENVIRON_ADDR;
+
+    /* Bounded walk: read environ[0..128]; a 128-entry envp is legal (its
+     * terminator sits at index 128), only the absence of a terminator
+     * within 0..128 is an error. */
+    int envc = 0;
+    while (envc <= 128 && environ[envc] != NULL) {
+        if (strchr(environ[envc], '=') == NULL)          errs |= SU_ERR_ENV_STR;
+        envc++;
+    }
+    if (envc > 128)                                      errs |= SU_ERR_ENV_WALK;
+
+    if (__libc_auxv == NULL) {
+        errs |= SU_ERR_AUXV_NULL;
+    } else {
+        if ((uint64_t *)(environ + envc + 1) != __libc_auxv) errs |= SU_ERR_AUXV_ADDR;
+        if (!(__libc_auxv[0] == 0 && __libc_auxv[1] == 0))   errs |= SU_ERR_AUXV_ATNULL;
+        if (!((uintptr_t)__libc_auxv > (uintptr_t)__libc_stack_end)) errs |= SU_ERR_AUXV_RANGE;
+    }
+    return errs;
+}
+
+/* Entry probe: re-execed /bin/systest lands here BEFORE the test table.
+ * Exit codes: 10 + argc*2 + envc on success (10..15, 138 for the envc=128
+ * boundary case), 20 for the --pathcheck execvp case, 99 on any failure,
+ * 127 if execve itself returned. Never runs the test suite or forks. */
+static void startup_probe(int argc, char **argv)
+{
+    int is_probe = (argc == 0) ||
+                   (argc >= 1 && argc <= 2 && argv != NULL && argv[0] != NULL &&
+                    strcmp(argv[0], "startup-probe") == 0);
+    if (!is_probe) return;
+
+    int pathcheck = (argc == 2 && argv[1] != NULL &&
+                     strcmp(argv[1], "--pathcheck") == 0);
+    int errs = startup_layout_errors(argc, argv);
+    if (argc == 2 && !pathcheck &&
+        (argv[1] == NULL || strcmp(argv[1], "--envcheck") != 0))
+        errs |= SU_ERR_ARGV_STR;
+    if (errs) exit(99);
+
+    extern char **environ;
+    int envc = 0;
+    while (environ[envc] != NULL) envc++;
+    if (pathcheck) {
+        /* execvp PATH acceptance: the ONLY way this probe was found is
+         * execvp parsing our non-default PATH (spec §6.2, plan review #3).
+         * Exact env shape: PATH=/pathtest and nothing else. */
+        const char *v;
+        if (envc != 1 || strcmp(environ[0], "PATH=/pathtest") != 0) exit(99);
+        v = getenv("PATH");
+        if (v == NULL || strcmp(v, "/pathtest") != 0) exit(99);
+        exit(20);
+    }
+    /* getenv must reflect the real envp (spec §6.2): exact value when
+     * envc==1, NULL when empty. For envc>1 the '='-shape check in
+     * startup_layout_errors covers correctness. */
+    if (envc == 1) {
+        const char *v = getenv("OS01_TEST_K");
+        if (v == NULL || strcmp(v, "veRy42") != 0) exit(99);
+    }
+    if (envc == 0) {
+        if (getenv("OS01_TEST_K") != NULL) exit(99);
+    }
+    exit(10 + argc * 2 + envc);
+}
+
+/* Parent side: fork + execve actual install path + waitpid.
+ * status is the raw waitpid status (exit code << 8). */
+static int run_startup_probe_case(char **argv, char **envp, int expect_code)
+{
+    pid_t pid = fork();
+    if (pid < 0) return 0;              /* fork failed */
+    if (pid == 0) {
+        execve("/bin/systest", argv, envp);
+        exit(127);                      /* execve returned: failure */
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid) return 0;   /* waitpid failed */
+    return (status & 0x7f) == 0 && ((status >> 8) & 0xff) == expect_code;
+}
+
+static void test_startup_layout(void)
+{
+    int errs = startup_layout_errors(g_argc, g_argv);
+    CHECK3(errs == 0, "startup layout", errs ? "entry chain broken" : "entry chain ok");
+}
+
+/* spec §6.2 six-case parity matrix + §6.3 NULL-pointer forms */
+static void test_startup_matrix(void)
+{
+    char *argv0[1] = {NULL};
+    char *argv1[2] = {(char *)"startup-probe", NULL};
+    char *argv2[3] = {(char *)"startup-probe", (char *)"--envcheck", NULL};
+    char *env1[2]  = {(char *)"OS01_TEST_K=veRy42", NULL};
+    struct { char **av; char **ep; int code; const char *name; } cases[] = {
+        {argv0, NULL, 10, "argc=0 envc=0 (even/pad8)"},
+        {argv0, env1, 11, "argc=0 envc=1 (odd/pad0)"},
+        {argv1, NULL, 12, "argc=1 envc=0 (odd/pad0)"},
+        {argv1, env1, 13, "argc=1 envc=1 (even/pad8)"},
+        {argv2, NULL, 14, "argc=2 envc=0 (even/pad8)"},
+        {argv2, env1, 15, "argc=2 envc=1 (odd/pad0)"},
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+        CHECK3(run_startup_probe_case(cases[i].av, cases[i].ep, cases[i].code),
+               "startup matrix", cases[i].name);
+    CHECK3(run_startup_probe_case(NULL, NULL, 10), "startup NULL argv", "argv=NULL envp=NULL");
+    CHECK3(run_startup_probe_case(NULL, env1, 11), "startup NULL argv", "argv=NULL envp=1");
+
+    /* Boundary: argc=0 + envc=128 == combined cap exactly. The libc envp
+     * walk must ACCEPT a 128-entry envp (terminator at index 128) and
+     * still find auxv — this is the regression test for the off-by-one
+     * bound (plan review #3). */
+    static char env128_buf[128][16];
+    static char *env128[129];
+    for (int i = 0; i < 128; i++) {
+        sprintf(env128_buf[i], "E%03d=V%03d", i, i);
+        env128[i] = env128_buf[i];
+    }
+    env128[128] = NULL;
+    CHECK3(run_startup_probe_case(argv0, env128, 138), "startup boundary", "argc=0 envc=128 (combined cap)");
+}
+
+/* execvp PATH acceptance (plan review #3): proving libc execvp actually
+ * PARSES the passed PATH — plant a probe symlink in a non-/bin directory,
+ * point PATH at it, execvp by bare name. Exit 20 means the probe was
+ * found THROUGH our PATH; anything else (incl. the /bin fallback, which
+ * has no startup-probe) fails. */
+static void test_startup_execvp(void)
+{
+    extern char **environ;
+    mkdir("/pathtest", 0755);
+    symlink("/bin/systest", "/pathtest/startup-probe");
+    char *av[3] = {(char *)"startup-probe", (char *)"--pathcheck", NULL};
+    static char *env[2] = {(char *)"PATH=/pathtest", NULL};
+    pid_t pid = fork();
+    int ok = 0;
+    if (pid == 0) {
+        environ = env;              /* execvp passes environ to execve */
+        execvp("startup-probe", av);
+        exit(127);                  /* not found via PATH: failure */
+    }
+    if (pid > 0) {
+        int status = 0;
+        ok = waitpid(pid, &status, 0) == pid &&
+             (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 20;
+    }
+    CHECK3(ok, "startup execvp PATH", ok ? "resolved via non-default PATH" : "fallback or not found");
+    unlink("/pathtest/startup-probe");
+    rmdir("/pathtest");
+}
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
 
 static struct { const char *name; test_fn fn; } tests[] = {
+    {"startup layout",    test_startup_layout},
+    {"startup matrix",    test_startup_matrix},
+    {"startup execvp",    test_startup_execvp},
     {"signal handler sync", test_signal_handler_sync},
     {"poll",               test_poll},
     {"putchar",           test_putchar},
@@ -3006,8 +3202,13 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"42_getdents_dt_lnk",      test_42_getdents_dt_lnk},
 };
 
-int main(void)
+int main(int argc, char **argv, char **envp)
 {
+    (void)envp;
+    startup_probe(argc, argv);
+    g_argc = argc;
+    g_argv = argv;
+
     printf("[SYS TEST] OS01 Syscall Test Suite\n");
     printf("[SYS TEST] ----------------------------------------\n");
 
