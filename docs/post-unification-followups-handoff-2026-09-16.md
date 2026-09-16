@@ -136,12 +136,16 @@ in `01f1f47` Cat B uaccess fix). Compiler emits `unused function` warning.
 **Fix**: either delete the function or mark it with `__attribute__((used))` if
 it's reserved for future use. Recommend deleting — no callers, no KDoc.
 
-### F4. `user/crt0.S` + busybox overlay missing trailing newline
+### F4. `user/crt0.S` missing trailing newline
 
-Both files end with `hlt` (no `\n`). Compiler emits `\ No newline at end of
+File ends with `hlt` (no `\n`). Compiler emits `\ No newline at end of
 file`. Preserved from prior state — not introduced by `09264e4`.
 
-**Fix**: append `\n` to both files (preserving diff-identity). One commit.
+**Fix**: append `\n` to `user/crt0.S` (preserving diff-identity). The handoff
+originally also mentioned a "busybox overlay" file; that reference is stale
+(no `.S` file matching that name exists under `user/` — `user/crt0.S` and
+`user/sigreturn_trampoline.S` are the only candidates, and the latter already
+ends with `\n`). Defer the actual `\n` append to the F3/F5 cleanup bundle.
 
 ### F5. Task 4 brief + spec `xorq %ecx, %ecx` GAS typo
 
