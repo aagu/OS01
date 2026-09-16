@@ -132,6 +132,7 @@ int selftest_uaccess(void);
 int symlink_selftest_resolver(void);
 int symlink_selftest_ext2_rollback(void);
 int deep_copy_argv_selftest_empty(void);
+int deep_copy_argv_selftest_overcap(void);
 #endif
 
 // ── Test runner ────────────────────────────────────────────
@@ -162,6 +163,7 @@ int selftest_run_all(void)
     selftest_register("symlink_resolver",  symlink_selftest_resolver);
     selftest_register("symlink_ext2_rollback", symlink_selftest_ext2_rollback);
     selftest_register("deep_copy_argv_empty", deep_copy_argv_selftest_empty);
+    selftest_register("deep_copy_argv_overcap", deep_copy_argv_selftest_overcap);
 #endif
 
     int passed = 0, failed = 0;

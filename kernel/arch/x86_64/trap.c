@@ -5,6 +5,7 @@
 #include <arch/segment.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <core/printk.h>
 #include <log/log.h>
 #include <core/trace.h>
@@ -1049,6 +1050,7 @@ static int64_t deep_copy_argv(const char *const *user_arr, char ***out_arr)
     // MAX_ARGV so a hostile unbounded array cannot loop forever.
     const char *ptrs[MAX_ARGV + 1];
     size_t count = 0;
+    bool null_found = false;
     uint64_t addr_limit = current->addr_limit;
 
     for (size_t i = 0; i <= MAX_ARGV; i++) {
@@ -1057,6 +1059,7 @@ static int64_t deep_copy_argv(const char *const *user_arr, char ***out_arr)
             return -EFAULT;
         if (p == 0) {                       // NULL terminator
             count = i;
+            null_found = true;
             break;
         }
         // Bad element pointer: kernel address or below USER_MIN_ADDR.
@@ -1066,14 +1069,15 @@ static int64_t deep_copy_argv(const char *const *user_arr, char ***out_arr)
     }
     // If the loop ran to MAX_ARGV+1 without seeing NULL, either the
     // array has more than MAX_ARGV entries (over cap) or it's not
-    // NUL-terminated within MAX_ARGV+1 (treated the same).
+    // NUL-terminated within MAX_ARGV+1 (treated the same).  Reject
+    // with -E2BIG per the deep_copy_argv contract (line above).
     //
-    // count == 0 is a legitimate empty argv/envp (POSIX: argv=NULL
-    // and argv={NULL} are both valid).  The downstream Phase 2/3 code
-    // handles it naturally — zero strnlen iterations, kmalloc(8) for
-    // the array, zero copies, arr[0]=NULL terminator.  Removing the
-    // prior defensive -E2BIG here aligns deep_copy_argv with
-    // setup_user_stack (task.c) which already accepts empty arrays.
+    // Distinguish this from the legitimate empty case (argv={NULL},
+    // NULL found at i=0, null_found=true) which Phase 2/3 handles
+    // naturally: zero strnlen iterations, kmalloc(8) for the array,
+    // zero copies, arr[0]=NULL terminator.  setup_user_stack (task.c)
+    // accepts both argv=NULL and argv={NULL}.
+    if (!null_found) return -E2BIG;
 
     // Phase 2: for each element, strnlen + bounded total accumulator.
     size_t total = 0;
