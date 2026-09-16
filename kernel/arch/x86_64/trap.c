@@ -968,12 +968,6 @@ int arch_signal_pending_fatal(void)
     return false;
 }
 
-static inline bool syscall_user_range_ok(uint64_t addr, uint64_t len)
-{
-    return addr != 0 && addr < current->addr_limit &&
-           len <= current->addr_limit - addr;
-}
-
 // SOCKOPT_MAX: ABI cap on the optlen argument of setsockopt/getsockopt
 // (regs->r8 in the trap handlers).  A hostile r8 (e.g. 0xFFFFFFFF)
 // would otherwise allow a kmalloc(4GB) DoS.  4 KiB matches typical
