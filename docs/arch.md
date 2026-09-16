@@ -1,432 +1,127 @@
-# x86_64 架构实现
+# 架构抽象层（multi-arch）
 
-本系统针对 x86_64 架构进行了专门的实现，包括启动过程、内存管理、中断处理等方面。
+OS01 同时支持 **x86_64** 和 **aarch64**（后者仅 UEFI 启动路径）。本系统最重要的统一模式是：
 
-## 架构概述
+> **weak-default + strong-override**：每个 arch-neutral 头文件位于 `kernel/include/arch/<topic>.h`，作为派发 facade。弱默认实现在 `kernel/<subsys>/arch_*.c`（FATAL-halt / panic-on-call / silent no-op / identity），强覆盖实现在 `kernel/arch/<arch>/<topic>.c`（per-arch 真实现）。链接器按强覆盖优先解析。`SUBSYS_INITCALL()` + `.subsys_init` section 用于 driver 自注册。
 
-x86_64 是 64 位的 x86 架构处理器，具有以下特点：
+下面列出本模式涉及的所有 facade-override 对（截至 v25 arch-cleanup 系列完成）。
 
-* 64 位寄存器和寻址能力
-* 多级页表（PML4, PDPT, PD, PT）
-* 支持长模式（64 位模式）
-* 扩展的指令集
-* 更多的通用寄存器
+---
 
-## 启动过程
+## Facade / override 矩阵
 
-### 1. 实模式到保护模式的切换
+| Facade 头（arch-neutral） | 弱默认实现 | x86_64 强覆盖 | aarch64 强覆盖 | 用途 |
+|---|---|---|---|---|
+| `arch/include/regs.h` | — | `arch/x86_64/regs.h` | `arch/aarch64/regs.h` | `pt_regs_t` 跨 arch 定义；`arch_cpu_pause()` 共享 helper（替换 rwlock 本地 `#if` switch） |
+| `arch/include/irq.h` | `intr/arch_irq_hooks.c`（FATAL/identity/no-op） | `arch/x86_64/irq_hooks.c`（APIC→PIC ladder + 0x20+gsi 翻译 + do_IRQ） | — | 中断 controller selection / gsi↔vector / dispatch 三段 hook；do_IRQ 从 `intr/pic/8259A.c` 移出 |
+| `arch/include/rtc.h` | `driver/rtc.c` core（走 `arch_rtc_read/write` hook） | `arch/x86_64/rtc_cmos.c` + `rtc_pie.c`（CMOS port I/O + BCD + UIP regA bit7 + BIN regB bit2；PIE/LAPIC/TSC 校准） | — | 实时时钟 + PIE |
+| `arch/include/subsys.h` | — | `arch/x86_64/linker.ld` 收集 `.subsys_init` | — | 10 driver 自注册（apic/pic/pit/lapic-timer/timer/serial/keyboard/ahci/pci/net）；`arch_register_subsys()` 缩到 7 行 loop |
+| `arch/sched/...` `kernel_thread_entry` | `sched/arch_kernel_thread_entry.c`（panic-on-call） | `arch/x86_64/thread_entry.S` | — | arch-neutral 调度器线程入口；`task.c` 不再 include per-arch 头 |
+| `memory/pmm.h` `pmm_init(boot_context*)` | `memory/pmm_arch.c`（弱默认 `pmm_arch_normalize`/`pmm_arch_zone_split`） | `arch/x86_64/pmm_arch.c`（E820 + kernel-LMA/handoff/trampoline excludes + 2 MiB granule + sort/merge） | `arch/aarch64/pmm_arch.c`（读 `aarch64_ram_map_get()`） | 物理内存 arch-neutral 入口；`MEMORY_RANGE[]` 中介；RAM-relative indexing（`pages_struct + ((start - lowest_ram) >> 21)`） |
+| `log/log.h` `_log_*_impl` 宏 | `log/log.c` core（gate-wrapped） | `core/log.c` 走 `_log_writev` + vsnprintf + serial | `arch/aarch64/log_impl.c` 走 `kputs(fmt)` 忽略 variadic | 跨 arch 日志；aarch64 `-nostdlib` 无 vsnprintf |
 
-系统启动时，处理器首先进入实模式，然后通过以下步骤切换到长模式：
+**共同模式**：所有 facade 都满足「weak default 提供无操作/panic/FATAL/identity 默认行为，strong override 提供真实现，per-arch 通过头文件位于 `kernel/include/arch/<arch>/` 镜像」。链接器强覆盖优先解析同名符号。**没有运行时分派**：编译期决定。
 
-1. **初始化段寄存器**：设置段寄存器的值
-2. **加载页表**：设置 CR3 寄存器指向 PML4 表
-3. **加载 GDT**：加载全局描述符表
-4. **加载 IDT**：加载中断描述符表
-5. **切换到长模式**：通过远跳转切换到 64 位模式
+---
 
-### 2. 长模式初始化
+## 页表层级（arch-neutral 命名）
 
-在 `head.S` 中，系统完成长模式的初始化：
+**v25 统一**：x86_64 PML4/PDPT/PDE 三层命名 → Linux/ARM 标准 **PGD/PUD/PMD/PTE** 四层。Bit-constant 同步 rename：
 
-```assembly
-// 加载 CR3
-movq $0x101000, %rax
-movq %rax, %cr3
+| 旧名（x86_64） | 新名（arch-neutral） |
+|---|---|
+| `mm->pml4` | `mm->pgdir` |
+| `vmm_walk_pml4` 等 | `vmm_pt_walk` |
+| `PAGE_GDT_SHIFT` | `PAGE_PGD_SHIFT` |
+| `PAGE_USER_GDT/Dir/Page` | `PAGE_USER_PGD/PUD/PMD` |
+| `PAGE_KERNEL_GDT/...` | `PAGE_KERNEL_PGD/PUD/PMD` |
+| `PAGE_USER_4K/4K_RO` | `PAGE_USER_PTE/PTE_RO` |
+| `PAGE_KERNEL_4K` | `PAGE_KERNEL_PTE` |
+| `PAGE_KERNEL_MMIO` | `PAGE_KERNEL_PMD_NOCACHE` |
+| `PAGE_Present` | `PAGE_VALID` |
+| `PAGE_U_S` | `PAGE_USER` |
+| `PAGE_R_W` | `PAGE_WRITE` |
+| `PAGE_PS` | `PAGE_HUGE` |
+| `PAGE_XD` | `PAGE_NO_EXEC` |
+| `PAGE_Global` | `PAGE_GLOBAL` |
+| `PAGE_PCD` | `PAGE_CACHE_DISABLE` |
+| `PAGE_PWT` | `PAGE_WRITE_THROUGH` |
 
-// 加载 GDT
-lgdt GDT_POINTER(%rip)
+~150 站点 rename（vmm.c / sched COW fork / elf loader / vma/uaccess/fb/futex / `test_uaccess.c`）。保留 x86_64 `head.S` 的 `__PML4E`/`__PDPTE` 硬件 label（asm 段不可改）+ `kernel/include/memory/vmm.h` 的 PTE bit-position 常量（标为 x86_64 PTE 格式专属）。
 
-// 加载 IDT
-lidt IDT_POINTER(%rip)
+**Bit-position 仍 per-arch**（PGD/PUD/PMD 是层级名，PTE bit 字段 ISA-specific）。aarch64 PTE bit 与 x86_64 不同，由 `kernel/arch/aarch64/page_table.c` 自管。
 
-// 切换到长模式
-movq switch_seg(%rip), %rax
-pushq $0x08
-pushq %rax
-lretq
-```
+---
 
-### 3. 内核入口
+## bootinfo ABI
 
-系统切换到长模式后，调用 `kernel_main` 函数：
+- `kernel/include/core/bootinfo.h` — arch-neutral 部分：`struct boot_context` v2 ABI（magic/version/size/flags + 内存图 + 帧缓冲 + RSDP/FDT 指针）
+- `kernel/arch/x86_64/bootinfo_x86.h` — **v25 拆出**：`struct E820_ENTRY` + `BOOT_MEMORY_FORMAT_E820=1u`。`pmm.c` 强覆盖已校验 `n==0`，不再有 arch-neutral `entry_size` 分支。
+- aarch64 编译视图纯净（看不到 E820 符号）
 
-```assembly
-// 调用 kernel_main
-movq BOOT_INFO(%rip), %rax
-movq %rax, %rdi
-movq go_to_kernel(%rip), %rax
-pushq $0x08
-pushq %rax
-lretq
+---
 
-go_to_kernel:
-    .quad kernel_main
-```
+## 调度器 arch-neutral 入口
 
-## 内存管理
+- `arch_kernel_thread_entry` 在 `sched/arch_kernel_thread_entry.c`（弱默认 panic-on-call）
+- x86_64 强覆盖在 `arch/x86_64/thread_entry.S`
+- `task.c` 不再 include per-arch 头
+- v25 同批把 `kernel/.stage1` + `kernel/.stage2` 加进 `.gitignore`（避免每 make 重生成的中间产物污染 git status）
 
-### 1. 页表结构
+---
 
-x86_64 架构使用四级页表：
+## Driver 自注册
 
-* **PML4**（Page Map Level 4）：最高级页表
-* **PDPT**（Page Directory Pointer Table）：页目录指针表
-* **PD**（Page Directory）：页目录
-* **PT**（Page Table）：页表
+10 driver 自注册：ahci/keyboard/pci/pit/serial/lapic/lapic_timer/pic/net/clocksource/timer。每 `.c` 加 init wrapper + `SUBSYS_INITCALL()` 行。`arch_register_subsys()` 缩到 7 行 loop。
 
-### 2. 初始页表
+OS01 libc-free 无 `.init_array` runtime support，故采用 Linux initcall 同款 trick（不用 `__attribute__((constructor))`，否则指针落在没人迭代的 section）。
 
-在 `head.S` 中，系统定义了初始页表：
+详见 `docs/subsys.md`。
 
-```assembly
-.org 0x1000
+---
 
-__PML4E:
-    .quad 0x102003
-    .fill 255,8,0
-    .quad 0x102003
-    .fill 255,8,0
-
-.org 0x2000
-
-__PDPTE:
-    .quad 0x103003
-    .fill 511,8,0
-
-.org 0x3000
-
-__PDE:
-    .quad 0x000083
-    .quad 0x200083
-    .quad 0x400083
-    .quad 0x600083
-    .quad 0x800083
-    .quad 0xa00083
-    .quad 0xc00083
-    .quad 0xe00083
-    .quad 0x1000083
-    .quad 0x1200083
-    .quad 0x1400083
-    .quad 0x1600083
-    .quad 0x1800083
-    .quad 0x1a00083
-    .quad 0x1c00083
-    .quad 0x1e00083
-    .fill 496,8,0
-```
-
-### 3. 虚拟地址空间
-
-系统使用以下虚拟地址空间布局：
-
-* **内核空间**：从 0xffff800000000000 开始
-* **用户空间**：从 0x0000000000000000 到 0x00007fffffffffff
-
-### 4. 物理地址和虚拟地址转换
-
-系统提供了以下函数进行地址转换：
-
-* `Phy_To_Virt`：将物理地址转换为虚拟地址
-* `Virt_To_Phy`：将虚拟地址转换为物理地址
-
-## 中断处理
-
-### 1. 中断描述符表（IDT）
-
-系统使用中断描述符表（IDT）来管理中断处理函数。在 `head.S` 中，系统初始化 IDT：
-
-```assembly
-setup_IDT:
-    leaq ignore_int(%rip), %rdx
-    movq $(0x08 << 16), %rax
-    movw %dx, %ax
-    movq $(0x8e00 << 32), %rcx
-    addq %rcx, %rax
-    movl %edx, %ecx
-    shrl $16, %ecx
-    shlq $48, %rcx
-    addq %rcx, %rax
-    shrq $32, %rdx
-    leaq IDT_Table(%rip), %rdi
-    mov $256, %rcx
-rp_sidt:
-    movq %rax, (%rdi)
-    movq %rdx, 8(%rdi)
-    addq $0x10, %rdi
-    dec %rcx
-    jne rp_sidt
-```
-
-### 2. 中断门设置
-
-系统提供了以下函数设置中断门：
-
-* `set_intr_gate`：设置中断门
-* `set_trap_gate`：设置陷阱门
-* `set_system_gate`：设置系统门
-
-### 3. 中断处理函数
-
-系统实现了各种中断处理函数，包括：
-
-* 处理器异常处理（如除零错误、页错误等）
-* 外部设备中断处理（如键盘、定时器等）
-
-### 4. 中断堆栈
-
-系统为中断处理设置了专门的 IST 堆栈，确保中断处理过程中的堆栈安全。
-
-### 5. 子系统注册框架
-
-系统使用 `kernel/subsys/` 中的子系统注册框架按 Phase 初始化硬件：
-
-| Phase | 子系统 |
-|-------|--------|
-| 3 | 中断控制器（APIC, PIC） |
-| 4 | 定时器（PIT, LAPIC timer） |
-| 5 | 设备 IRQ（键盘, 串口 IRQ） |
-| 6 | 存储（AHCI） |
-
-参见 `kernel/arch/x86_64/subsys.c` 和 `kernel/include/subsys/subsys.h`。
-
-## 硬件访问
-
-### 1. I/O 端口访问
-
-系统提供了以下函数进行 I/O 端口访问：
-
-* `inb`：从 8 位端口读取数据
-* `outb`：向 8 位端口写入数据
-* `inw`：从 16 位端口读取数据
-* `outw`：向 16 位端口写入数据
-* `inl`：从 32 位端口读取数据
-* `outl`：向 32 位端口写入数据
-
-### 2. 特殊寄存器访问
-
-系统提供了以下函数访问特殊寄存器：
-
-* `rdmsr`：读取模型特定寄存器
-* `wrmsr`：写入模型特定寄存器
-* `rdtsc`：读取时间戳计数器
-
-### 3. 内存屏障
-
-系统提供了内存屏障指令，确保内存操作的顺序：
-
-* `mfence`：内存屏障
-* `lfence`：加载屏障
-* `sfence`：存储屏障
-
-## 同步原语
-
-### 1. 自旋锁
-
-系统实现了自旋锁，用于多处理器环境下的同步：
+## 中断 hook 三段式
 
 ```c
-typedef struct spinlock {
-    volatile uint32_t lock;
-} spinlock_t;
-
-void spin_init(spinlock_t *lock);
-void spin_lock(spinlock_t *lock);
-void spin_unlock(spinlock_t *lock);
-bool spin_trylock(spinlock_t *lock);
+// kernel/include/arch/irq.h
+void arch_irq_select_controller(uint32_t gsi);          // 选 controller
+uint8_t arch_irq_gsi_to_vector(uint32_t gsi);            // gsi → vector
+uint32_t arch_irq_vector_to_gsi(uint8_t vector);         // vector → gsi
+void arch_irq_dispatch(pt_regs_t *regs, uint32_t hwirq); // 实际 dispatch
 ```
 
-### 2. 原子操作
+弱默认：`kernel/intr/arch_irq_hooks.c`（select FATAL-halt；vector↔gsi identity；dispatch silent no-op）
+x86_64 强覆盖：`kernel/arch/x86_64/irq_hooks.c`（APIC→PIC ladder + 0x20+gsi 翻译 + 移动过来的 do_IRQ 体 + `nr & 0x80` spurious 检查）
 
-系统实现了各种原子操作，用于无锁编程：
+`unregister_irq(uint64_t nr)` → `unregister_irq(uint32_t gsi)`，跟 `register_irq` 对齐（消除 `2026-08-17-timer-clocksource-clockevent.md:20` 文档的 off-by-vector footgun）。
 
-* `atomic_add`：原子加法
-* `atomic_sub`：原子减法
-* `atomic_and`：原子与操作
-* `atomic_or`：原子或操作
-* `atomic_xchg`：原子交换
+---
 
-## 代码结构
+## RTC 三层拆分
 
-### 1. 汇编文件
+- `kernel/include/driver/rtc.h` — 只剩 `datetime_t` + `rtc_read/write_datetime`
+- `kernel/driver/rtc.c` — 走 `arch_rtc_read/write` hook 的 core（KERNEL_C_SOURCES 跨 arch 编译）
+- x86_64 强覆盖 `kernel/arch/x86_64/rtc_cmos.c`（CMOS port I/O + BCD + UIP regA bit7 + BIN regB bit2 全本地化）+ `kernel/arch/x86_64/rtc_pie.c`（PIE/LAPIC/TSC 校准 verbatim move）
 
-* `head.S` - 系统启动和初始化
-* `entry.S` - 中断入口点
+---
 
-### 2. C 文件
+## 距离单一 kernel_main 还差多远（v25 后）
 
-* `trap.c` - 陷阱处理
+~4–8 周（一个人全职），3 个独立 spec/plan 增量推进：
 
-### 3. 头文件
+1. **Spec A — 中断/异常 dispatch 收尾 + 上下文切换 arch 抽象**：`arch_irq_dispatch` 已落地，剩余 `x86_64/trap.c` 3065 行的 x86 register decode 抽到 arch 层；aarch64 `smp.c` 拆分 context switch。预计 2–4 周。
+2. **Spec B — 统一 SMP 启动 + 定时器 + CPU 特性**：`arch_smp_boot_aps` + `clockevent` 双 arch 注册 + `arch_cpu_features()`。预计 2–3 周。
+3. **Spec C — 统一 kernel_main**：在 A、B 之上定义 `arch_early_init`/`arch_late_init`，单 `kernel_main` 按固定 init 顺序调（pmm_init → arch_early_init → scheduler → arch_late_init → ...）。设计 init 顺序契约。预计 2–4 周。
 
-* `asm.h` - 汇编相关定义
-* `gate.h` - 门描述符相关定义
-* `hw.h` - 硬件访问相关定义
-* `linkage.h` - 链接相关定义
-* `regs.h` - 寄存器相关定义
-* `spinlock.h` - 自旋锁相关定义
-* `trap.h` - 陷阱相关定义
+**永远无法统一的（ISA/HW 差异）**：`head.S`/`entry.S` 指令集差异；MMU 页表格式（PTE bit-position）；中断控制器驱动；SoC 外设（UART/timer/GPIO 等）。这些靠 arch 抽象层封装，统一接口、不统一实现。
 
-### 4. 链接脚本
+**v25 已统一**：页表层级名（PGD/PUD/PMD/PTE，bit-position 仍 per-arch）、bootinfo ABI（解析层仍 per-arch，但输出 v2 已 arch-neutral）、intr dispatch hook 化、driver 自注册 initcall、kernel_thread_entry arch-neutral、RTC 拆分（核心 arch-neutral + per-arch CMOS/PIE）。
 
-* `linker.ld` - 链接脚本，定义内存布局
+---
 
-## 启动流程详解
+## 设计依据
 
-### 1. 处理器复位
-
-1. 处理器复位，进入实模式
-2. 执行 BIOS/UEFI 初始化
-3. 加载引导程序
-4. 引导程序加载内核
-
-### 2. 内核初始化
-
-1. **实模式初始化**：设置段寄存器，准备进入保护模式
-2. **保护模式初始化**：加载 GDT，设置分页
-3. **长模式初始化**：启用 PAE，设置长模式页表，切换到长模式
-4. **内核初始化**：调用 `kernel_main` 函数
-
-### 3. `kernel_main` 函数
-
-`kernel_main` 函数是内核的主入口点，执行以下操作：
-
-1. **初始化帧缓冲区**：设置图形显示
-2. **加载任务寄存器**：设置 TSS
-3. **初始化中断**：安装系统向量和 IRQ
-4. **初始化串口**：设置串口调试输出
-5. **初始化内存管理**：检测内存，初始化物理内存和虚拟内存
-6. **初始化驱动**：初始化 PIC、定时器、键盘等
-7. **创建定时器**：创建测试定时器
-8. **进入主循环**：执行 hlt 指令，等待中断
-
-## 内存布局
-
-### 1. 物理内存布局
-
-* **低内存**：0x00000000 到 0x000fffff，包含 BIOS 数据和中断向量表
-* **内核代码**：从某个物理地址开始，包含内核代码和数据
-* **可用内存**：其他物理内存区域
-
-### 2. 虚拟内存布局
-
-* **内核空间**：0xffff800000000000 到 0xffffffffffffffff
-  * 内核代码和数据
-  * 物理内存映射
-  * 设备内存映射
-* **用户空间**：0x0000000000000000 到 0x00007fffffffffff
-  * 用户代码和数据
-  * 堆
-  * 栈
-
-## 中断处理流程
-
-### 1. 外部中断处理
-
-1. 外部设备触发中断
-2. PIC/APIC 接收中断信号
-3. 处理器响应中断，保存现场
-4. 跳转到对应的中断处理函数
-5. 处理中断
-6. 发送 EOI 信号
-7. 恢复现场，返回中断点
-
-### 2. 处理器异常处理
-
-1. 处理器检测到异常
-2. 保存现场
-3. 跳转到对应的异常处理函数
-4. 处理异常
-5. 恢复现场，返回异常点或终止程序
-
-## 性能优化
-
-### 1. 内存访问优化
-
-* **大页面使用**：使用 2MB 大页面减少页表层级
-* **内存对齐**：确保数据结构对齐，提高内存访问速度
-* **缓存优化**：合理安排数据结构，提高缓存命中率
-
-### 2. 中断处理优化
-
-* **中断处理函数轻量化**：减少中断处理函数的执行时间
-* **软中断使用**：将耗时操作移到软中断中处理
-* **中断亲和性**：合理分配中断到不同的处理器核心
-
-### 3. 指令优化
-
-* **使用 64 位指令**：充分利用 64 位指令集的优势
-* **指令调度**：合理安排指令顺序，减少流水线停顿
-* **避免分支预测失败**：减少分支预测失败的概率
-
-## 扩展架构支持
-
-### 1. 多处理器支持
-
-系统可以通过以下方式扩展对多处理器的支持：
-
-* **APIC 支持**：实现 APIC 控制器的初始化和管理
-* **处理器启动**：实现 APs（应用处理器）的启动
-* **调度器**：实现多处理器调度器
-
-### 2. 高级功能支持
-
-系统可以扩展支持以下高级功能：
-
-* **SSE/AVX 指令集**：支持高级向量扩展指令
-* **PAE/NX**：支持物理地址扩展和执行禁用
-* **TSC 校准**：校准时间戳计数器
-* **MSR 访问**：访问模型特定寄存器
-
-## 调试技巧
-
-### 1. 串口调试
-
-系统使用串口进行调试输出：
-
-```c
-serial_printk("Debug message: %x\n", value);
-```
-
-### 2. 断点调试
-
-系统支持使用 int3 指令设置断点：
-
-```c
-__asm__ __volatile__("int3");
-```
-
-### 3. 堆栈跟踪
-
-系统提供了堆栈跟踪功能，用于调试崩溃：
-
-```c
-backtrace(regs);
-```
-
-### 4. 内存转储
-
-系统提供了内存转储功能，用于调试内存问题：
-
-```c
-mem_dump(address, length);
-```
-
-## 注意事项
-
-1. **内存对齐**：x86_64 架构要求某些数据结构必须对齐，否则会导致性能下降或错误
-2. **页表管理**：页表管理是系统稳定性的关键，需要仔细实现
-3. **中断处理**：中断处理函数必须正确保存和恢复现场，否则会导致系统崩溃
-4. **硬件访问**：硬件访问必须遵循正确的时序和协议，否则会导致硬件损坏
-5. **同步**：多处理器环境下的同步是一个复杂的问题，需要仔细设计
-
-## 总结
-
-本系统针对 x86_64 架构进行了全面的实现，包括：
-
-1. **启动过程**：从实模式到长模式的完整切换
-2. **内存管理**：多级页表和虚拟内存
-3. **中断处理**：完整的中断处理系统
-4. **硬件访问**：各种硬件访问接口
-5. **同步原语**：自旋锁和原子操作
-
-这些实现为系统提供了稳定、高效的运行环境，同时也为后续的功能扩展奠定了基础。
+- 详细 spec：`docs/superpowers/specs/2026-09-09-pmm-arch-neutral-design.md`（13 轮 subagent review 通过）
+- 实施 plan：`docs/superpowers/plans/2026-09-09-pmm-arch-neutral.md`（3 轮 subagent review + 16 task + final fix）
+- v25 arch-cleanup 系列 10 commits `67132e2..3ab4ef1`：roadmap v24 doc；bootinfo(arch) E820 → `bootinfo_x86.h`；arch(neutral) `arch/regs.h` pt_regs_t facade + `rwlock_relax()` 走 `arch_cpu_pause()`；intr(arch) `arch_irq` hooks 拆分；rtc(arch) core + per-arch impl 拆分；mm(arch) PGD/PUD/PMD/PTE 层级统一 + bit-constant rename；arch(subsys) `SUBSYS_INITCALL()` + `.subsys_init` section；arch(sched) `arch_kernel_thread_entry`；build(uefi) digest + staged copy 排除 `*.o/*.a/*.lib`；merge
+- x86_64 启动细节：见 `docs/architecture.md` + `docs/boot.md`
