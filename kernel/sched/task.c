@@ -1372,11 +1372,12 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
 // regs is the pt_regs frame on the kernel stack that will be
 // restored by RESTORE_ALL → iretq.
 //
-// If argv == NULL: old behavior (no args, rsp=USER_STACK_TOP,
-// argc=0, argv=NULL, envp=NULL).
-// If argv != NULL: copies argv/envp strings onto the user stack
-// and sets up the standard ABI stack layout so the child's
-// _start receives argc in %rdi, argv in %rsi, envp in %rdx.
+// argv/envp are optional: NULL entries count as empty lists, and
+// setup_user_stack() always builds a full minimal SysV layout
+// (argc=0, argv[0]=NULL, envp terminator) when given no strings.
+// An over-cap argv/envp is rejected up front by startup_args_count()
+// with -E2BIG. The child's _start reads argc from (rsp) and argv
+// from 8(rsp) — that contract lives in user/crt0.S.
 int64_t sys_exec(const char *path, pt_regs_t *regs,
                  const char *const *argv, const char *const *envp)
 {
