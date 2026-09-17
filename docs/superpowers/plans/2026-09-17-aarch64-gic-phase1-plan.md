@@ -1873,9 +1873,11 @@ make PROFILE=aarch64-clang test-aarch64-uefi-smp
   ```
   说明：① header 是 aarch64 专属，仅被 aarch64 .c/.S 引用（kernel/Makefile:42-43
   白名单），不存在被 x86 或 host 编译路径引用的可能；② x86 不需要此原语
-  （x86 强内存模型，Device MMIO 写自然带发布语义）；③ hosttests 用 aarch64
-  target 编译（PROFILE=aarch64-clang），与内核同走 `__aarch64__` 分支，
-  wrapper 静态 inline 自然可用。
+  （x86 强内存模型，Device MMIO 写自然带发布语义）；③ **hosttests 走
+  hosttests/Makefile 默认 HOST_CC=clang 编译并运行**（PROFILE=aarch64-clang
+  只决定输出目录，不切换 target）——host 路径**不直接 include** 该 aarch64
+  专属头；hosttest 对 gic driver 的覆盖（mock MMIO）走 Task 1.1/1.2 的
+  `struct gic_dev` + `gic_register_handler` API 路径，不调用本 wrapper。
 
 - [ ] 改 `secondary_idle`（smp.c:219-225 区；真实 diff）：
   ```c
@@ -2162,12 +2164,14 @@ grep -rn "TODO\|FIXME\|XXX\|占位\|placeholder\|实现 X\|写实现时\|按实�
   `kernel/include/arch/barrier.h`，后者被 `kernel/driver/e1000.c:9` include，
   改它破坏 x86 编译输入零变更边界），aarch64 = `__asm__ __volatile__("dsb ishst"
   ::: "memory")` static inline；x86 不需要此原语（强内存模型，Device MMIO
-  写自然带发布语义）；host 走 aarch64 target 编译（PROFILE=aarch64-clang），
-  与内核同走 `__aarch64__` 分支，wrapper 静态 inline 自然可用。**唯一调用点** =
-  Task 3.2 `gic_ipi_test()` 在两次 `gic_register_handler()` 成功后、首次
-  `gic_send_sgi()` 前——R3-1 跨核发布屏障；`gic_register_handler` 本身**不**
-  内置 barrier，避免无谓开销。其他注册点（cntp 仅 BSP 接收因 AP CNTP
-  disabled、pl011_rx SPI→BSP 本核、probe_sgi 自触发）不需本屏障。
+  写自然带发布语义）；**hosttests 走 hosttests/Makefile 默认 HOST_CC=clang
+  编译并运行**（PROFILE=aarch64-clang 只决定输出目录）——host 路径**不直接
+  include** 该 aarch64 专属头；hosttest 对 gic driver 的覆盖（mock MMIO）
+  走 `struct gic_dev` + `gic_register_handler` API 路径，不调用本 wrapper。
+  **唯一调用点** = Task 3.2 `gic_ipi_test()` 在两次 `gic_register_handler()`
+  成功后、首次 `gic_send_sgi()` 前——R3-1 跨核发布屏障；`gic_register_handler`
+  本身**不**内置 barrier，避免无谓开销。其他注册点（cntp 仅 BSP 接收因 AP
+  CNTP disabled、pl011_rx SPI→BSP 本核、probe_sgi 自触发）不需本屏障。
 - IPI harness 断言严格恰一次：`received==1`（多发=风暴、漏发=丢 IPI）/
   `summary targets=received`（自洽）/ `raw_iar==0x401` 恰一条（cpus≥2）。
   不允许多次确认——多余即 FAIL（不假阳、不假阴；AP 收到 SGI 0 后回 SGI 1
