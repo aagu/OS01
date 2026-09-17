@@ -23,7 +23,7 @@ TARGET_LIBDIR_LOCAL := $(SYSROOT_GENERATION_DIR)/usr/lib
 OBJ_DIR   := $(BUILD_DIR)/obj
 
 CFLAGS   := --sysroot=$(SYSROOT_DIR) \
-            -ffreestanding -fno-stack-protector -fno-asynchronous-unwind-tables \
+            -ffreestanding -fstack-protector-strong -fno-asynchronous-unwind-tables \
             -fno-pic -fno-pie -mno-red-zone \
             -I$(TARGET_INCDIR) \
             -Wall -Wextra -O2

@@ -1,5 +1,7 @@
 #include <stdlib.h>    /* environ (extern) */
 #include <stdint.h>
+#include <sys/ssp.h>
+#include <sys/random.h>
 
 extern char **environ;
 
@@ -40,5 +42,23 @@ int __libc_start_main(int (*main)(int, char **, char **),
     }
     __libc_auxv = NULL;                    /* no AT_NULL within 64 pairs */
 found:
+#if !defined(__is_libk)
+    /* 栈 canary 播种：每次 exec 单站点（spec 2026-09-17 §6.1）。
+     * fork 不经过这里——子进程继承父 guard（R9 已知弱点）；
+     * exec/spawn 每次重新拉 8B CSPRNG。 */
+    if (__stack_chk_guard == 0) {
+        ssize_t n = getrandom(&__stack_chk_guard, sizeof(__stack_chk_guard), 0);
+        /* R8 MAJOR-2 + MINOR: fail-closed.
+         *   - 若 getrandom 返回字节数 < sizeof(guard) → 不可信,abort。
+         *   - 若返回值恰为 8B 但全 0 → guard 仍是 0,SAP 被禁用,违背 G3。
+         *   - **不**使用 rdtsc 兜底(可预测);**不**写 magic|1 兜底值。
+         * fail-closed 路径调 __stack_chk_fail (noreturn,SIGABRT) ——
+         * 内核 trap.c:838 把 SIG_DFL 致命信号 do_exit(sig) 原样回,
+         * waitpid status = 6,可在 systest case 43 观察。 */
+        if (n != (ssize_t)sizeof(__stack_chk_guard) || __stack_chk_guard == 0) {
+            __stack_chk_fail();
+        }
+    }
+#endif
     return main(argc, argv, environ);
 }

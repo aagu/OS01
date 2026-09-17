@@ -20,8 +20,8 @@ BUILD_DIR := $(LIBC_BUILD_DIR)
 include $(ARCHDIR)/make.config
 
 # ── Compile flags ──────────────────────────────────────────
-CFLAGS := $(CFLAGS) -ffreestanding -Wall -Wextra -D__is_libc -Iinclude -fno-stack-protector -fomit-frame-pointer $(ARCH_CFLAGS)
-LIBK_CFLAGS := $(CFLAGS) -D__is_libk -mno-red-zone -I../kernel/include
+CFLAGS := $(CFLAGS) -ffreestanding -Wall -Wextra -D__is_libc -Iinclude -fstack-protector-strong -fomit-frame-pointer $(ARCH_CFLAGS)
+LIBK_CFLAGS := $(CFLAGS) -D__is_libk -mno-red-zone -I../kernel/include -fno-stack-protector
 
 # ── Source discovery (wildcard — no manual lists!) ──────────
 C_SOURCES := \
@@ -49,7 +49,8 @@ C_SOURCES := \
     $(wildcard arpa/*.c) \
     $(wildcard libgen/*.c) \
     $(wildcard pthread/*.c) \
-    $(wildcard random/*.c)
+    $(wildcard random/*.c) \
+    $(wildcard ssp/*.c) \
 
 # Remove duplicates: free.c conflicts with malloc.c (chown.c conflict gone — uid_stubs.c deleted)
 C_SOURCES := $(filter-out stdlib/free.c, $(C_SOURCES))
