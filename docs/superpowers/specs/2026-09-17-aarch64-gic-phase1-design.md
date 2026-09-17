@@ -1,10 +1,10 @@
 ---
 title: OS01 aarch64 GICv2 通用中断框架 Phase 1 设计
 created: 2026-09-17
-updated: 2026-09-17 (R1 修订)
+updated: 2026-09-17 (R1 修订 → R2 修订)
 type: spec
-status: draft-v2（R1 评审 NEEDS_REVISION → 9 条全数落地，待 R2）
-version: 2
+status: draft-v3（R2 评审 NEEDS_REVISION → 7 条全数落地，待 R3）
+version: 3
 tags: [osdev, aarch64, gic, interrupt, kernel]
 phase: GICv2 Phase 1（QEMU virt UEFI 路径）
 related: [2026-08-29-aarch64-phase1-design, os01-roadmap P2]
@@ -19,13 +19,23 @@ related: [2026-08-29-aarch64-phase1-design, os01-roadmap P2]
 > (4) SGI/IPI：GICD_SGIR 发送 + 跨核 handler，SMP 1/2/4 验证；
 > (5) 架构范式与 x86_64 中断路径镜像对齐（但不编 kernel core，不进调度器）。
 >
-> **v2 修订记录（R1，codex 评审 9 条全落地）**：
+> **v2 修订记录（R1，codex 评审 9 条落地 7 条，余 2 条在 v3 收口）**：
 > R1-1 dispatch 切换改为"过渡 shim 保链接"（§4.2）；R1-2 unexpected 探针必须
 > enable+route+拆除（§7.3）；R1-3 `gic_driver_set_unexpected` 补定义进 API（§4.1）；
-> R1-5 SPI 测试拆 RED/GREEN 两段（§7.4）；R1-6 IPI 计数/release-acquire 用项目
-> 既有 stlr/ldar + arch_atomic API 并写明内存序（§7.5）；R1-7 删除 x86 build 验证、
-> 边界核查改为源级 diff（§6）；R1-8 全部行数引用重核（§3）；R1-9 增加 CPUID
-> 保留的可观测钩子：hosttest dispatch-CPUID mock + `dbg_last_iar` E2E 回读（§2.3/§7.5/§8 R2）。
+> R1-5 SPI 测试拆 RED/GREEN 两段（§7.4，**R2 收口**：修 harness --self-test fixture，R2-1）；
+> R1-6 IPI 计数/release-acquire 用项目既有 stlr/ldar + arch_atomic API 并写明内存序（§7.5）；
+> R1-7 删除 x86 build 验证、边界核查改为源级 diff（§6）；R1-8 全部行数引用重核（§3）；
+> R1-9 增加 CPUID 保留的可观测钩子（**R2 收口**：IAR trace 改 per-CPU 槽，消除跨核
+> 覆写竞态，R2-6；§2.3/§7.5/§8 R2）。
+>
+> **v3 修订记录（R2，7 条全落地）**：
+> R2-1 SPI harness --self-test fixture 修正（注入窗口用例输入只含 armed 行，plan Task 2.3a）；
+> R2-2 hosttest INTID 33 的 IPRIORITYR/ITARGETSR 断言偏移 +8→+32（plan Task 1.1）；
+> R2-3 `intids` marker 独占一行（§7.2）；R2-4 clobber 探针改确定性 trampoline——
+> 自发 SGI 2 触发真实 IRQ，判据 = AAPCS64 实参寄存器 x0-x2 架构性必然被销毁（§7.3）；
+> R2-5 unexpected 探针改"观察递送恰一次"（回调计数 + release flag，§7.3）；
+> R2-6 IAR trace 改 per-CPU 槽 `trace_iar[cpu]`（`gic_driver_set_cpu_index` 注入
+> TPIDR 实现，§2.3/§4.1/§7.5）；R2-7 §7.5 引用改 aarch64_percpu.h:93-115。
 >
 > 衔接 `docs/superpowers/specs/2026-08-29-aarch64-phase1-design.md`（下称"phase1 spec"）：
 > 该 spec 交付了 QEMU virt 上的 UEFI 启动 + SMP(PSCI) + CNTP 100 Hz tick + 最小 GICv2 配置（只开 PPI 30），
@@ -128,21 +138,27 @@ ITARGETSR 指向至少一个核（route）之后，才会被递送到 CPU interf
   在 IAR 与 EOIR 之间，同优先级及更低优先级的中断被屏蔽——Phase 1 不做中断嵌套，
   dispatch 全程保持 IRQ masked（异常进入时硬件自动 set DAIF.I），这天然安全。
   这也意味着 dispatch 是**每核串行**的：IAR 读与 handler 执行之间不会有同核的
-  其他 dispatch 插入——§7.5 的 `dbg_last_iar` 观测钩子正是利用这一点做到无竞态。
+  其他 dispatch 插入——§7.5 的 per-CPU IAR trace 正是利用这一点做到无竞态。
 - **EOIR 必须写回"IAR 读到的原始值"**：IAR bits[12:10] 是 CPUID（仅 SGI 有意义），
   EOIR 写值若丢了 CPUID 位，SGI 的 deactivate 会被路由到错误的 CPU 接口。
   **现状缺陷（D7）**：time.c:110/119 写 `gicc_write32(GICC_EOIR, intid)` 只回写了低 10 位
   ——对 PPI 恰好无害（PPI 的 CPUID 位为 0），但 SGI 路径是 latent bug。本 Phase 的
   `gic_eoi(dev, iar)` 接收**完整 IAR 值**并原样写回。
-  **CPUID 保留的可观测性（R1-9）做三层**：
+  **CPUID 保留的可观测性（R1-9，R2-6 收口）做三层**：
   1. hosttest `suite_ack_eoi`：EOIR mock == IAR 原值（含 CPUID 位）；
   2. hosttest dispatch-CPUID case：IAR 预置 `(3<<10)|7`，走**真实 `gic_dev_dispatch` 路径**，
      断言 handler 收到 intid=7 且 EOIR mock == 0xC07；
-  3. E2E：driver 在 `gic_ack` 里记录 `dev->dbg_last_iar = 原始 IAR`（观测钩子），
-     IPI 测试中 AP1 回发 SGI 1 给 BSP，BSP 的 SGI-1 handler **在 handler 上下文里**
-     读 `gic_dbg_last_iar()`（per-CPU 串行 dispatch ⇒ 无竞态）并打印
-     `[ipi] bsp raw_iar=0x401`——非零 CPUID（bit10=来源核 1）真实穿越了 ack 路径，
-     而 EOIR 写回与 ack 用的是同一变量（结构性一致，由 1/2 两层 mock 把守）。
+  3. E2E：IAR trace 是 **per-CPU 槽** `trace_iar[cpu]`（driver 经
+     `gic_driver_set_cpu_index` 注入的"读本核逻辑号"实现——wrapper 用 TPIDR_EL1 槽、
+     hosttest 用 mock——在 `gic_ack` 里把原始 IAR 写**本核槽**；跨核 ack 写各自槽，
+     互不覆写）。IPI 测试中 AP1 回发 SGI 1 给 BSP，BSP 的 SGI-1 handler **在 handler
+     上下文里**读 `gic_dbg_last_iar()`（= 本核槽：同核 dispatch 串行 + IRQ masked 无
+     嵌套 ⇒ 读到的必是本 SGI 的原始 IAR）并打印 `[ipi] bsp raw_iar=0x401`——非零
+     CPUID（bit10=来源核 1）真实穿越了 ack 路径，而 EOIR 写回与 ack 用的是同一变量
+     （结构性一致，由 1/2 两层 mock 把守）。
+     R2-6 修正说明：v2 的单槽 `dev->dbg_last_iar` 存在跨核覆写竞态（"每核串行"
+     不排除跨核并发的 ack），v3 改 per-CPU 槽后消除；单槽字段保留作 hosttest 的
+     默认路径（未注入 cpu-index hook 时 `gic_ack` 照写）。
 - **handler 在 EOI 之前执行**：对 level 触发的 PL011 RX，handler 里清设备中断源
   （读 DR / 写 ICR）必须发生在 EOI 前，否则 EOI 后同一 level 会立刻再次 pending。
   phase1 spec §2.3 的"TVAL 重装先于 EOI"是同一原理。
@@ -282,7 +298,7 @@ AP 在 head.S:660-662 安装同一张表（MMU 打开后）。
 - 项目既有原子/屏障 API（R1-6 用）：`kernel/include/arch/atomic.h:43-110` 提供
   aarch64 的 `arch_atomic_fetch_add`（ldxr/stxr RMW）、`arch_atomic_write`
   （ldaxr/stlxr，RELEASE store）、`arch_atomic_cas`（acquire/release）；
-  `kernel/arch/aarch64/aarch64_percpu.h:88-113` 已有 **stlr/ldar release-store/
+  `kernel/arch/aarch64/aarch64_percpu.h:88-115` 已有 **stlr/ldar release-store/
   acquire-load** 的 32 位 helper 先例（boot_online_set/get、boot_go_set/get、
   bench_done_set/get）——IPI 计数协议直接沿用该模式（§7.5）。
 
@@ -334,9 +350,10 @@ AP 在 head.S:660-662 安装同一张表（MMU 打开后）。
 ├────────────────────────────────────────────────────────────┤
 │ hw 访问层（gic_driver.c，全部经 struct gic_dev 的指针）       │
 │   gic_dev_init / dist/cpu enable / irq_config(enable,prio,  │
-│   targets) / irq_type 分类 / ack / eoi / send_sgi /         │
-│   set_pending + clear_pending（测试注入/拆除） /             │
-│   set_unexpected 回调注入（R1-3：定义与声明同在 gic.h/gic_driver.c）│
+│   targets) / irq_type 分类 / ack(+per-CPU IAR trace) / eoi / │
+│   send_sgi / set_pending + clear_pending（测试注入/拆除）/   │
+│   set_unexpected 回调注入 + set_cpu_index/trace_get          │
+│   （R1-3/R2-6：定义与声明同在 gic.h/gic_driver.c）            │
 ├────────────────────────────────────────────────────────────┤
 │ 生产 wrapper（gic.c 改造）：static struct gic_dev 挂 DTB 基址 │
 │   gic_init() / gic_cpu_init() 签名不变（main.c/smp.c 不动）  │
@@ -353,7 +370,7 @@ AP 在 head.S:660-662 安装同一张表（MMU 打开后）。
   唯一来源：gic.h / gic_driver.c，R1-3）。
 - **driver 源文件是 `kernel/arch/aarch64/gic_driver.c`**，头文件
   `kernel/include/arch/aarch64/gic.h`。kernel/Makefile:70 的 wildcard 自动把它编进内核。
-- handler 表是**模块级全局、非 per-CPU**（Phase 1 无调度器/无 percpu_t）；SGI 0/1 的
+- handler 表是**模块级全局、非 per-CPU**（Phase 1 无调度器/无 percpu_t）；SGI 0/1/2 的
   handler 在所有核共享同一表项，handler 内部用 TPIDR_EL1 区分收到者。
 - 对齐 x86_64 的 `hw_int_controller_t`（interrupt.h:16-25）暂不做函数指针化——那是
   kernel/intr 接入时（Phase 2+）的事；本 Phase 保持直接函数 API，边界见 §6。
@@ -382,7 +399,7 @@ IRQ (EL1h, SP_EL1)
        bl   el1_irq                             ; trap.c
          └─ gic_dev_dispatch(&g_gic, regs)
               ├─ iar = GICC_IAR 读              ; 副作用: drop priority;
-              │                                  dev->dbg_last_iar = iar（观测钩子, §2.3）
+              │                                  trace_iar[本核] = iar（R2-6 per-CPU 槽）
               ├─ intid = iar & 0x3FF
               ├─ intid==1023 → return           ; spurious，绝不写 EOIR
               ├─ fn = gic_get_handler(intid)
@@ -531,33 +548,44 @@ make PROFILE=aarch64-clang test-aarch64-gic-spi
 
 | 断言行 | 含义 | 出现时机 |
 |---|---|---|
-| `[gic] GICv2 driver: intids=<N>` | driver init 读 TYPER 成功 | gic_init 后 |
+| `[gic] GICv2 driver: intids=<N>`（**整行**，R2-3：intids 后立即换行，CPU interface 地址另起一行） | driver init 读 TYPER 成功 | gic_init 后 |
 | `[gic] dispatch ready` | 向量表 + handler 表 + dispatch 链闭合 | 注册 tick handler 后 |
 | `[gic-probe] save-restore OK` | clobber 探针通过（§7.3） | irq_enable 后 |
-| `[gic-probe] unexpected intid=40 survived` | 破坏性探针：注入无 handler 的 SPI 40，打 unexpected、EOI、tick 继续 | 同上 |
+| `[gic-probe] unexpected intid=40 survived` | 破坏性探针：注入无 handler 的 SPI 40，**观察到递送恰一次**（回调计数，R2-5）、EOI、tick 继续 | 同上 |
 | `[ipi] send sgi=0 filter=others` / `[ipi] cpu=<n> received=1` / `[ipi] summary targets=<cpus-1> received=<cpus-1> status=PASS` | IPI 全收（cpus=1 时 targets=0 received=0、无 per-cpu 行） | IPI 测试后 |
-| `[ipi] bsp raw_iar=0x401`（cpus≥2 恰一条；cpus=1 无） | **R1-9 E2E**：AP1 回发 SGI 1 的原始 IAR 在 BSP handler 内被捕获，非零 CPUID（bit10=1）真实穿越 ack 路径 | IPI 回发确认 |
+| `[ipi] bsp raw_iar=0x401`（cpus≥2 恰一条；cpus=1 无） | **R1-9 E2E**：AP1 回发 SGI 1 的原始 IAR 在 BSP handler 内经 per-CPU trace 槽（R2-6）被捕获，非零 CPUID（bit10=1）真实穿越 ack 路径 | IPI 回发确认 |
 
 纯 Python fixture（self_test()）先行的红/绿：断言函数必须先在 `--self-test` 里对
 构造 log 红绿翻转，再上真机（镜像 expect_selftest 的既有纪律，aarch64_uefi_smp.py:186-227）。
 
 ### 7.3 破坏性探针（针对 D1 这个最大单点）
 
-- **clobber 探针**（`#if OS01_SELFTEST`，kernel/arch/aarch64/irq_probe.c）：
-  一段内联汇编把哨兵值放进 **x0-x5 + x18（7 个 caller-saved/platform 寄存器）**，
-  `wfi` 等至少一个 tick（读 time.c 导出的 `g_ticks` 全局），再校验哨兵未变。
-  **在现状 entry.S（零保存）下必红**——C dispatch 按 AAPCS64 可自由毁 x0-x17，
-  7 个哨兵寄存器全数存活的概率可忽略；在 Task 2.2 后必绿。探针必须整体在一个
-  asm 块内（编译器不能替它"恢复"哨兵），并打印：
-  `[gic-probe] save-restore OK` / `[gic-probe] save-restore FAIL regs=<mask>`。
-  **RED 稳定判据**：若旧 entry.S 上探针意外全绿，视为探针自身缺陷——必须停下调查
-  （反汇编确认 dispatch 的寄存器占用），修正探针后重跑，**不允许**带着"意外绿"继续。
-- **unexpected-intid 探针（R1-2 修订）**：SPI 递送需要 enable + route（§2.2）。
-  探针顺序：`gic_irq_configure(40, true, 0x00, 0x01)`（使能 + 路由 BSP）→
-  `gic_force_pending(40)`（ISPENDR 注入）→ dispatch 打 unexpected + EOI →
-  等一个 tick 证明存活 → **拆除**：`gic_irq_configure(40, false, ...)` +
-  `gic_clear_pending_irq(40)`（ICPENDR），打印
-  `[gic-probe] unexpected intid=40 survived`。现状代码无该 marker，可作 RED 证据。
+- **clobber 探针 = 确定性 trampoline（R2-4）**
+  （`#if OS01_SELFTEST`，kernel/arch/aarch64/irq_probe.c）：
+  - **触发**：探针的 asm 块内直写 GICD_SGIR（filter=SELF，SGI 2——已由
+    gic_cpu_init banked 使能）**自发一次真实 IRQ**（探针运行时 IRQ 已 unmask），
+    不依赖等 tick。
+  - **哨兵**：x0-x5 + x18（7 个 caller-saved/platform 寄存器），设在 SGIR 写之前。
+  - **判据的确定性来源**：dispatch 链以 `fn(intid, param, regs)` 调用 handler，
+    AAPCS64 规定前三个实参**必须**经 x0/x1/x2 传递——旧路径（entry.S 槽 6
+    `bl el1_irq_dispatch; eret`，零保存）下 x0-x2 的哨兵**架构性必然**被销毁，
+    与编译器寄存器分配无关（x3-x5/x18 是加宽覆盖）；新路径（el1_irq_entry）
+    先保存 x0-x30 再 bl、eret 前恢复——全部存活。
+  - **探针自身可靠性**：轮询状态（SGIR 地址 / flag 地址 / deadline）全部驻内存
+    （adrp 重取），RED 路径上 IRQ clobber 掉任何 caller-saved 寄存器都不影响
+    探针循环；结果经 `mov %0, #n` 显式回写输出操作数（0=OK/1=clobber/2=超时），
+    打印 `[gic-probe] save-restore OK` / `... FAIL regs=x0-x5,x18` / `... TIMEOUT`。
+  - **纪律**：出现 OK 或 TIMEOUT 而非 FAIL（RED 阶段）= 探针自身触发/轮询路径
+    缺陷，停下修复重跑，不允许跳过。
+- **unexpected-intid 探针（R1-2 + R2-5 修订）**：SPI 递送需要 enable + route
+  （§2.2）；"观察到递送"不依赖 g_ticks（CNTP tick 自己会来，构不成证据）。探针
+  顺序：注入专用 unexpected 回调（打印与 log_unexpected 同文案；对 intid 40
+  递增专用计数并 release 置 flag）→ `gic_irq_configure(40, true, 0x00, 0x01)`
+  （使能 + 路由 BSP）→ `gic_force_pending(40)`（ISPENDR 注入）→ **轮询到
+  递送 flag 且 count==1**（ldar acquire + cntvct deadline）→ **拆除**：
+  `gic_irq_configure(40, false, ...)` + `gic_clear_pending_irq(40)`（ICPENDR），
+  打印 `[gic-probe] unexpected intid=40 survived`（count!=1 打 FAIL 变体）。
+  现状代码无该 marker，可作 RED 证据。
 
 ### 7.4 SPI 中断源选型（核查结论）与 RED/GREEN 拆分（R1-5）
 
@@ -600,17 +628,20 @@ AP : SGI 0 handler 里读 TPIDR_EL1 → boot_percpu 槽 → cpu_id（head.S:650 
      → ipi_flag_release(&ipi_done[cpu_id], 1)             （stlr，镜像
         aarch64_percpu.h:93-95 boot_online_set 的既有模式）
      → cpu_id==1 时额外回发 gic_send_sgi(1, 0x01, FILTER_LIST) 给 BSP
-BSP: SGI 1 handler 在 handler 上下文读 gic_dbg_last_iar()（§2.3：per-CPU 串行
-     dispatch ⇒ 该值必为本 SGI 的原始 IAR，无竞态）→ ipi_flag_release(bsp_reply_flag)
+BSP: SGI 1 handler 在 handler 上下文读 gic_dbg_last_iar()（§2.3：per-CPU trace 槽
+     只被本核 ack 写入——同核 dispatch 串行 + IRQ masked 无嵌套，跨核 ack 写
+     各自槽 ⇒ 读到的必为本 SGI 的原始 IAR，无跨核覆写竞态, R2-6）
+     → ipi_flag_release(bsp_reply_flag)
 前置: secondary_idle 尾循环前 arch_local_irq_enable()（改 smp.c:225 前的行为，
-      §8 R5 详述风险）；gic_cpu_init 里为每核 banked 使能 SGI 0/1 bit。
+      §8 R5 详述风险）；gic_cpu_init 里为每核 banked 使能 SGI 0/1/2 bit
+      （0=IPI 主载荷、1=回发确认、2=clobber 探针，§7.3）。
 ```
 
 **内存序契约（精确到指令）**：AP 侧计数是 `arch_atomic_fetch_add`（ldxr/stxr RMW，
 单写者 per 槽，原子性防并发递增丢失）；完成标志是 `stlr`（RELEASE store）——它保证
 计数写入先于标志对其他核可见。BSP 侧用 `ldar`（acquire load）读标志——看到 1 之后
 对计数的后续读必然观察到 AP 的递增（release/acquire 配对，与项目既有
-boot_online_set/get、bench_done_set/get 完全同模式，aarch64_percpu.h:93-113）。
+boot_online_set/get、bench_done_set/get 完全同模式，aarch64_percpu.h:93-115）。
 超时兜底用 `arch_cycle_counter()` deadline（不依赖 IRQ，phase1 spec §2.1 既有方法）。
 
 ---
@@ -619,11 +650,11 @@ boot_online_set/get、bench_done_set/get 完全同模式，aarch64_percpu.h:93-1
 
 | # | 风险 | 等级 | 缓解 |
 |---|---|---|---|
-| R1 | **entry.S 零寄存器保存是最大单点**：改坏向量表/偏移即全静默 | 高 | ① clobber 探针（x0-x5+x18 七哨兵）作为 RED 证据 + 常驻 SELFTEST 断言（§7.3）；② 偏移常量单一来源（regs.h Section 2）+ `_Static_assert(sizeof==272)`；③ 每槽 ≤0x80 字节（槽内只放一条 `b`）；④ `--expect-gic` 进标准回归 target，1/2/4 ×3 反复打 |
-| R2 | EOIR 丢 CPUID 位（D7）在 SGI 路径爆雷 | 高 | `gic_eoi` 只接受完整 IAR；**三层可观测（R1-9）**：hosttest ack/eoi 原值断言 + hosttest dispatch-CPUID mock（IAR=(3<<10)\|7 → EOIR==0xC07）+ E2E `dbg_last_iar` 回发确认（`[ipi] bsp raw_iar=0x401`，§7.5） |
+| R1 | **entry.S 零寄存器保存是最大单点**：改坏向量表/偏移即全静默 | 高 | ① clobber 探针 = 确定性 trampoline（自发 SGI 2 真实 IRQ + AAPCS64 x0-x2 实参判据，R2-4）作为 RED 证据 + 常驻 SELFTEST 断言（§7.3）；② 偏移常量单一来源（regs.h Section 2）+ `_Static_assert(sizeof==272)`；③ 每槽 ≤0x80 字节（槽内只放一条 `b`）；④ `--expect-gic` 进标准回归 target，1/2/4 ×3 反复打 |
+| R2 | EOIR 丢 CPUID 位（D7）在 SGI 路径爆雷 | 高 | `gic_eoi` 只接受完整 IAR；**三层可观测（R1-9，R2-6 收口）**：hosttest ack/eoi 原值断言 + hosttest dispatch-CPUID mock（IAR=(3<<10)\|7 → EOIR==0xC07）+ E2E per-CPU trace 槽回发确认（`[ipi] bsp raw_iar=0x401`，§7.5；跨核 ack 写各自槽，无共享字段竞态） |
 | R3 | level 触发 SPI 在 EOI 前未清设备源 → 中断风暴 | 中 | 契约写进 §2.3；SPI handler 顺序（读 DR → ICR → 返回）由 dispatch 在 handler 之后 EOI 保证；harness 超时 90s 兜底 |
 | R4 | 多核并发写 PL011 绞线/死锁 | 中 | AP 侧 handler 不打印，只更新 per-CPU 计数/标志；所有打印由 BSP 串行完成 |
-| R5 | AP 开 DAIF.I 后可能收到非预期中断（若 AP banked enable 有残留） | 中 | gic_cpu_init 显式走"banked 白名单"路径（SGI 0/1 + CNTP PPI）；AP 的 CNTP 已关（smp.c:209/224）；unexpected 路径有回调日志 + EOI 兜底 |
+| R5 | AP 开 DAIF.I 后可能收到非预期中断（若 AP banked enable 有残留） | 中 | gic_cpu_init 显式走"banked 白名单"路径（SGI 0/1/2 + CNTP PPI）；AP 的 CNTP 已关（smp.c:209/224）；unexpected 路径有回调日志 + EOI 兜底 |
 | R6 | dtb_parse 新增 pl011 interrupts 校验过严导致某固件 DTB 被拒 | 低 | 与既有 device_reg 校验同等严格度；拒绝即 dtb_fatal，测试用的是 QEMU 生成 DTB（--diagnostic-dtb=auto），可复现可控 |
 | R7 | hosttest 编译真实 gic_driver.c 需要它零依赖 | 低 | hw 层禁日志/禁 arch asm；`struct pt_regs` 前向声明代替 include facade（facade 按 `__aarch64__` 分发，host x86_64 编译会 #error，regs.h:29-30）；**测试内不定义 pt_regs 对象**——dispatch 用例传 NULL（R1-4），不依赖不完整类型 |
 | R8 | KERNEL_SELFTEST=1 与生产镜像行为分叉 | 低 | 探针全部门控（§6.6）；唯一生产行为变化 = AP 开中断收 IPI，在 spec/commit message 里显式声明 |
@@ -636,11 +667,11 @@ boot_online_set/get、bench_done_set/get 完全同模式，aarch64_percpu.h:93-1
 
 | # | 目标 | 完成判据 |
 |---|---|---|
-| G1 | **GICv2 driver 泛化**：hw 访问抽象（struct gic_dev 指针式 MMIO）+ SGI/PPI/SPI/invalid 分类 + enable/disable/priority/targets 配置 + handler 注册表 + unexpected 回调注入 | hosttest `test_gic_driver`（mock MMIO 数组）覆盖 init(TYPER/IIDR)/enable(ICENABLER)/prio/targets/分类/注册表/SGIR 编码/set+clear pending/EOIR 回写（含 dispatch-CPUID case）/unexpected 回调；内核里 gic_init/gic_cpu_init 行为不回退 |
-| G2 | **entry.S 全量 save/restore + pt_regs_t**：31 GPR + sp_el0 + elr + spsr，布局=字段序=偏移常量，对齐 x86_64 facade | clobber 探针从红转绿并常驻 SELFTEST；`_Static_assert(sizeof(pt_regs_t)==272)`；全程无链接断裂中间态（shim 协议） |
-| G3 | **通用 IRQ dispatch**（trap.c）：IAR→查表→handler→EOIR(完整值)，spurious/unexpected 分支；time.c 硬编码 intid 比较删除，tick 变注册消费者 | `[gic] dispatch ready` + unexpected intid=40 探针（enable/route/拆除齐全）存活 + `[tick]` 不断流（--expect-gic 进 1/2/4 ×3 回归） |
+| G1 | **GICv2 driver 泛化**：hw 访问抽象（struct gic_dev 指针式 MMIO）+ SGI/PPI/SPI/invalid 分类 + enable/disable/priority/targets 配置 + handler 注册表 + unexpected 回调注入 + per-CPU IAR trace | hosttest `test_gic_driver`（mock MMIO 数组）覆盖 init(TYPER/IIDR)/enable(ICENABLER)/prio/targets（偏移 BASE+(intid/4)*4）/分类/注册表/SGIR 编码/set+clear pending/EOIR 回写（含 dispatch-CPUID case）/unexpected 回调/per-CPU trace 槽隔离（R2-6）；内核里 gic_init/gic_cpu_init 行为不回退 |
+| G2 | **entry.S 全量 save/restore + pt_regs_t**：31 GPR + sp_el0 + elr + spsr，布局=字段序=偏移常量，对齐 x86_64 facade | clobber 探针（确定性 trampoline，R2-4）从红转绿并常驻 SELFTEST；`_Static_assert(sizeof(pt_regs_t)==272)`；全程无链接断裂中间态（shim 协议） |
+| G3 | **通用 IRQ dispatch**（trap.c）：IAR→查表→handler→EOIR(完整值)，spurious/unexpected 分支；time.c 硬编码 intid 比较删除，tick 变注册消费者 | `[gic] dispatch ready` + unexpected intid=40 探针（enable/route→注入→**观察递送恰一次**→拆除，R2-5）+ `[tick]` 不断流（--expect-gic 进 1/2/4 ×3 回归） |
 | G4 | **SPI 中断源走 handler 表**：PL011 RX INTID 33（DTB 解析），QEMU socket 注入 | Task 2.3a harness（含 --self-test、--diagnostic-dtb）对现状内核 FAIL（RED 留档）→ Task 2.3b 后 `test-aarch64-gic-spi` PASS：armed → 注入 1 字节 → `[gic-spi] intid=33 handled count=1` |
-| G5 | **SGI/IPI**：GICD_SGIR 发送 + 跨核 handler + 原子计数/release-acquire 协议 + SMP 1/2/4 验证 | `[ipi] summary targets=N-1 received=N-1 status=PASS` 在 -smp 1/2/4 全部出现（cpus=1 为 targets=0）；cpus≥2 出现 `[ipi] bsp raw_iar=0x401`（R1-9 CPUID E2E） |
+| G5 | **SGI/IPI**：GICD_SGIR 发送 + 跨核 handler + 原子计数/release-acquire 协议 + SMP 1/2/4 验证 | `[ipi] summary targets=N-1 received=N-1 status=PASS` 在 -smp 1/2/4 全部出现（cpus=1 为 targets=0）；cpus≥2 出现 `[ipi] bsp raw_iar=0x401`（R1-9 CPUID E2E，per-CPU trace 槽，R2-6） |
 | G6 | **范式对齐 + 零回归**：不动 x86_64 任何文件、不编 kernel core、dispatch 不进调度器；既有 SMP/spinlock/tick 断言全绿 | `git diff --stat <起点> -- kernel/arch/x86_64 kernel/include/arch/x86_64 kernel/intr` 为空（源级零改动即构建输入不变，§6.2 R1-7）；`make PROFILE=aarch64-clang test-aarch64-uefi-smp` 全绿 |
 
 ---

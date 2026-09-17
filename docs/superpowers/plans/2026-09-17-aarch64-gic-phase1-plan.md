@@ -8,17 +8,31 @@
 
 **Tech Stack:** freestanding C（clang -target aarch64-none-elf）、AArch64 手写汇编（entry.S）、GNU Make profile 构建（mk/profiles/aarch64-clang.mk）、host clang 单元测试（hosttests/）、Python QEMU harness（qemutests/）。
 
-**Spec:** docs/superpowers/specs/2026-09-17-aarch64-gic-phase1-design.md（v2，R1 修订版）
+**Spec:** docs/superpowers/specs/2026-09-17-aarch64-gic-phase1-design.md（v3，R2 修订版）
 
-**R1 修订落点索引（9 条全落地）：**
+**R1 修订落点索引（9 条全落地；其中 R1-5/R1-9 在 R2 收口）：**
 R1-1→Task 2.2 过渡 shim；R1-2→Task 1.2 `gic_clear_pending` + Task 2.2 探针 enable/route/拆除；
 R1-3→Task 1.2 `gic_driver_set_unexpected` 定义进 API 块 + hosttest 回调用例；R1-4→Task 1.1
-dispatch 用例传 NULL；R1-5→Task 2.3 拆 2.3a（harness 完整交付 + RED）/ 2.3b（GREEN），
-harness 明确支持 `--diagnostic-dtb`；R1-6→Task 3.2 stlr/ldar + arch_atomic_fetch_add
-精确内存序；R1-7→删除全部 x86 build 验证，边界核查改为源级 diff；R1-8→全部行数引用重核
-（entry.S 116 / main.c 264 / dtb.c 83 / trap.c 20 / pl011.c 135 / harness 578 /
-hosttests TEST_BINS 62-82 等）；R1-9→hosttest dispatch-CPUID case + `dbg_last_iar`
-观测钩子 + AP1 回发 SGI 与 `[ipi] bsp raw_iar=0x401` E2E 断言。
+dispatch 用例传 NULL；R1-5→Task 2.3 拆 2.3a/2.3b + harness 明确支持 `--diagnostic-dtb`
+（R2-1 修复其 --self-test fixture 后收口）；R1-6→Task 3.2 stlr/ldar +
+arch_atomic_fetch_add 精确内存序；R1-7→删除全部 x86 build 验证，边界核查改为源级 diff；
+R1-8→全部行数引用重核（entry.S 116 / main.c 264 / dtb.c 83 / trap.c 20 / pl011.c 135 /
+harness 578 / hosttests TEST_BINS 62-82 等）；R1-9→hosttest dispatch-CPUID case +
+per-CPU IAR trace + AP1 回发 SGI 与 `[ipi] bsp raw_iar=0x401` E2E 断言
+（R2-6 改 per-CPU 槽后收口）。
+
+**R2 修订落点索引（7 条全落地）：**
+R2-1→Task 2.3a `--self-test` fixture：注入窗口用例输入只含 armed 行；
+R2-2→Task 1.1 INTID 33 的 IPRIORITYR/ITARGETSR 断言 +8→+32（(33/4)*4=32，保留 >>8）；
+R2-3→Task 1.2 wrapper 的 intids marker 后立即换行（独占一行），harness 全行 regex 不变；
+R2-4→Task 2.2 clobber 探针重写为**确定性 trampoline**：自发 SGI 2 触发真实 IRQ，
+RED 判据 = AAPCS64 实参寄存器 x0-x2 架构性必然被销毁（与编译器无关）；
+asm 输出经 `mov %0,...` 显式回写（不再依赖写死 x9）；
+R2-5→Task 2.2 unexpected 探针改观察递送：probe 注入的 unexpected 回调对 intid 40
+计数并 release 置 flag，轮询到 flag 且 count==1 才打 survived；
+R2-6→Task 1.2 IAR trace 改 per-CPU 槽（`gic_driver_set_cpu_index` 注入 TPIDR 实现，
+`trace_iar[cpu]`），`gic_dbg_last_iar()` 读本 CPU 槽——跨核 ack 不再互相覆写；
+R2-7→spec §7.5 引用改 aarch64_percpu.h:93-115。
 
 ## Global Constraints
 
@@ -155,6 +169,10 @@ static uint32_t gicc_mock[0x20];         /* 覆盖到 GICC_AHPPIR 0x28 */
   static uint32_t unexpected_hits; static uint32_t unexpected_last;
   static void probe_unexpected(uint32_t intid)
   { ++unexpected_hits; unexpected_last = intid; }
+
+  /* per-CPU IAR trace 的 cpu-index 探针（R2-6 的 hosttest 侧覆盖） */
+  static uint32_t mock_cpu_index; static uint32_t mock_cpu_index_calls;
+  static uint32_t probe_cpu_index(void) { ++mock_cpu_index_calls; return mock_cpu_index; }
   ```
 - [ ] 追加测试主体（各 suite 真实断言）：
   ```c
@@ -189,11 +207,12 @@ static uint32_t gicc_mock[0x20];         /* 覆盖到 GICC_AHPPIR 0x28 */
   {
       TEST_SUITE("enable/disable/priority/targets");
       mock_reset(2); gic_dev_init(&dev, gicd_mock, gicc_mock);
-      /* SPI 33: ISENABLER[1] bit1, 优先级字节 33, 目标 byte → cpu0 */
+      /* SPI 33: ISENABLER[1] bit1, 优先级字节 33, 目标 byte → cpu0。
+       * R2-2: byte 寄存器地址 = BASE + (33/4)*4 = BASE + 32; 33%4=1 → >>8。 */
       assert_eq(0, gic_irq_config(&dev, 33, true, 0x00, 0x01));
       assert_eq((uint32_t)(1u << 1), rd(gicd_mock, M_GICD_ISENABLER + 4));
-      assert_eq(0x00u, (rd(gicd_mock, M_GICD_IPRIORITYR + 8) >> 8) & 0xff);
-      assert_eq(0x01u, rd(gicd_mock, M_GICD_ITARGETSR + 8) & 0xff);
+      assert_eq(0x00u, (rd(gicd_mock, M_GICD_IPRIORITYR + 32) >> 8) & 0xff);
+      assert_eq(0x01u, rd(gicd_mock, M_GICD_ITARGETSR + 32) & 0xff);
       assert_eq(0u, rd(gicd_mock, M_GICD_IGROUPR + 4) & (1u << 1));   /* 组0 */
       /* disable 走 ICENABLER */
       assert_eq(0, gic_irq_disable(&dev, 33));
@@ -220,14 +239,30 @@ static uint32_t gicc_mock[0x20];         /* 覆盖到 GICC_AHPPIR 0x28 */
 
   static void suite_ack_eoi(void)
   {
-      TEST_SUITE("IAR/EOIR roundtrip (CPUID 位)");
+      TEST_SUITE("IAR/EOIR roundtrip + per-CPU trace");
       mock_reset(2); gic_dev_init(&dev, gicd_mock, gicc_mock);
       uint32_t iar = (2u << 10) | 35u;                  /* SGI 风格: CPUID=2 */
       gicc_mock[M_GICC_IAR / 4] = iar;
       assert_eq((int)iar, (int)gic_ack(&dev));          /* 原始值, 含 CPUID */
-      assert_eq((int)iar, (int)dev.dbg_last_iar);       /* R1-9 观测钩子 */
+      assert_eq((int)iar, (int)dev.dbg_last_iar);       /* 单槽 trace（无 hook 时） */
       gic_eoi(&dev, iar);
       assert_eq((int)iar, (int)rd(gicc_mock, M_GICC_EOIR));  /* 原样写回 — D7 修复 */
+      /* per-CPU trace (R2-6): 注入 cpu-index hook 后, ack 写本 CPU 槽,
+       * 单槽字段照写（向后兼容）, 其他核槽不受影响。 */
+      gic_driver_set_cpu_index(probe_cpu_index);
+      mock_cpu_index = 3; gicc_mock[M_GICC_IAR / 4] = (3u << 10) | 7u;
+      assert_eq(0xC07, (int)gic_ack(&dev));
+      assert_eq(0xC07, (int)gic_driver_trace_get(3));   /* 本 CPU 槽 */
+      assert_eq(0, (int)gic_driver_trace_get(0));       /* 其他槽仍为 0 */
+      mock_cpu_index = 0; gicc_mock[M_GICC_IAR / 4] = 99u;
+      assert_eq(99, (int)gic_ack(&dev));
+      assert_eq(99, (int)gic_driver_trace_get(0));
+      assert_eq(0xC07, (int)gic_driver_trace_get(3));   /* 旧槽不被跨"核"覆写 */
+      assert_true(mock_cpu_index_calls >= 2);
+      gic_driver_set_cpu_index(NULL);                   /* 清除 → 回退单槽路径 */
+      gicc_mock[M_GICC_IAR / 4] = 55u;
+      assert_eq(55, (int)gic_ack(&dev));
+      assert_eq(55, (int)dev.dbg_last_iar);
       gicc_mock[M_GICC_IAR / 4] = 1023;                 /* spurious */
       assert_eq(1023, (int)gic_ack(&dev));
   }
@@ -389,7 +424,8 @@ static uint32_t gicc_mock[0x20];         /* 覆盖到 GICC_AHPPIR 0x28 */
       volatile uint32_t *gicd;                 /* Device-nGnRnE, identity 映射 */
       volatile uint32_t *gicc;
       uint32_t nr_intids;                      /* (TYPER.ITLinesNumber+1)*32, cap 1020 */
-      volatile uint32_t dbg_last_iar;          /* R1-9 观测钩子: gic_ack 记录原始 IAR */
+      volatile uint32_t dbg_last_iar;          /* 单槽 trace（hosttest 默认路径）;
+                                                  内核配 set_cpu_index 后另写 per-CPU 槽 */
   };
 
   /* hw 层 —— 全部经 dev 指针；返回 0 成功 / 非 0 失败；不打印 */
@@ -412,6 +448,14 @@ static uint32_t gicc_mock[0x20];         /* 覆盖到 GICC_AHPPIR 0x28 */
 
   /* unexpected 回调注入（R1-3：声明在此，定义在 gic_driver.c） */
   void gic_driver_set_unexpected(void (*cb)(uint32_t intid));
+
+  /* per-CPU IAR trace（R2-6：消除共享单字段的跨核覆写竞态）。
+   * wrapper 注入"读本核逻辑 CPU 号"的实现（TPIDR_EL1 槽）；hosttest 注入
+   * mock。gic_ack 在 hook 就位时把原始 IAR 写 trace_iar[cpu]（单槽字段照写）；
+   * gic_driver_trace_get(cpu) 读指定槽。 */
+  #define GIC_TRACE_CPUS 8
+  void gic_driver_set_cpu_index(uint32_t (*fn)(void));
+  uint32_t gic_driver_trace_get(uint32_t cpu);
 
   /* handler 注册表 —— 模块级全局（Phase 1 非 per-CPU, spec §4.1） */
   int  gic_register_handler(uint32_t intid, gic_handler_fn fn, uint64_t param,
@@ -537,11 +581,26 @@ static uint32_t gicc_mock[0x20];         /* 覆盖到 GICC_AHPPIR 0x28 */
   hosttest 的 `suite_cpu_iface` 只断言 PMR/CTLR 两个 mock 值，与 Task 1.1 一致。
 - [ ] 实现 ack/eoi/sgi/pending（真实代码）：
   ```c
+  /* per-CPU IAR trace (R2-6)：跨核 ack 只写本 CPU 槽——BSP 在 handler 上下文
+   * 读到的必是本核最近一次 ack（同核 dispatch 串行 + IRQ masked，无嵌套），
+   * AP 的 ack 写各自槽，互不覆写。hosttest 用 mock hook 覆盖。 */
+  static uint32_t (*cpu_index_fn)(void);
+  static volatile uint32_t trace_iar[GIC_TRACE_CPUS];
+
+  void gic_driver_set_cpu_index(uint32_t (*fn)(void))
+  { cpu_index_fn = fn; }
+
+  uint32_t gic_driver_trace_get(uint32_t cpu)
+  { return cpu < GIC_TRACE_CPUS ? trace_iar[cpu] : 0u; }
+
   uint32_t gic_ack(struct gic_dev *dev)
   {
       uint32_t iar = r32(dev->gicc, GICC_IAR);
-      dev->dbg_last_iar = iar;        /* R1-9 观测钩子: per-CPU 串行 dispatch 下
-                                         handler 上下文读取必为本 IRQ 的原始 IAR */
+      dev->dbg_last_iar = iar;                /* 单槽 trace（hosttest 默认路径） */
+      if (cpu_index_fn) {
+          uint32_t c = cpu_index_fn();
+          if (c < GIC_TRACE_CPUS) trace_iar[c] = iar;
+      }
       return iar;
   }
 
@@ -620,6 +679,7 @@ static uint32_t gicc_mock[0x20];         /* 覆盖到 GICC_AHPPIR 0x28 */
   #include <arch/aarch64/dtb.h>
   #include <arch/aarch64/smp.h>
   #include <arch/aarch64/gic.h>
+  #include "aarch64_percpu.h"
 
   static struct gic_dev g_gic;
   struct gic_dev *gic_dev_current(void) { return &g_gic; }
@@ -631,13 +691,22 @@ static uint32_t gicc_mock[0x20];         /* 覆盖到 GICC_AHPPIR 0x28 */
       kputs("\n");
   }
 
+  static uint32_t k_cpu_index(void)                      /* R2-6: TPIDR 槽读本核号 */
+  {
+      uint64_t slot;
+      __asm__ __volatile__("mrs %0, tpidr_el1" : "=r"(slot));
+      return ((volatile aarch64_boot_percpu_t *)(uintptr_t)slot)->cpu_id;
+  }
+
   void gic_cpu_init(void)                                /* 每核各跑一次（banked） */
   {
       gic_dev_cpu_enable(&g_gic);
       /* banked SGI/PPI 白名单：SGI 0（IPI 主载荷）+ SGI 1（R1-9 回发确认）
-       * + CNTP PPI（dtb）。R5: 白名单外的 banked enable 位保持复位 0。 */
+       * + SGI 2（clobber 探针, R2-4）+ CNTP PPI（dtb）。
+       * R5: 白名单外的 banked enable 位保持复位 0。 */
       (void)gic_irq_config(&g_gic, 0, true, 0x00, 0x00);
       (void)gic_irq_config(&g_gic, 1, true, 0x00, 0x00);
+      (void)gic_irq_config(&g_gic, 2, true, 0x00, 0x00);
       uint32_t cntp = dtb_cntp_ppi();
       (void)gic_irq_config(&g_gic, cntp, true, 0x00, 0x00);
       __asm__ __volatile__("dsb sy\n\tisb" ::: "memory");   /* 屏障在 wrapper (hw 层零依赖) */
@@ -651,11 +720,14 @@ static uint32_t gicc_mock[0x20];         /* 覆盖到 GICC_AHPPIR 0x28 */
           for (;;) __asm__ __volatile__("wfi" ::: "memory");
       }
       gic_driver_set_unexpected(log_unexpected);        /* R1-3 */
+      gic_driver_set_cpu_index(k_cpu_index);            /* R2-6: per-CPU IAR trace */
       gic_dev_dist_enable(&g_gic);
       gic_cpu_init();
+      /* R2-3: intids marker 独占一行（harness 的 --expect-gic 全行 regex
+       * 要求 `^\[gic\] GICv2 driver: intids=\d+$`），CPU interface 另起一行。 */
       log_info("[gic] GICv2 driver: intids=");
       kputu(g_gic.nr_intids);
-      log_info(", CPU interface @ 0x");
+      log_info("\n[gic] CPU interface @ 0x");
       kputx(dtb_gicc_base());
       log_info("\n");
   }
@@ -670,11 +742,12 @@ static uint32_t gicc_mock[0x20];         /* 覆盖到 GICC_AHPPIR 0x28 */
   { gic_clear_pending(&g_gic, intid); }
 
   uint32_t gic_dbg_last_iar(void)
-  { return g_gic.dbg_last_iar; }
+  { return gic_driver_trace_get(k_cpu_index()); }       /* R2-6: 本 CPU 槽 */
   ```
-  与旧行为的差异（有意）：gic_cpu_init 现在还 banked 使能 SGI 0/1（Task 3 前置，
-  无害——SGI 只有软件写 SGIR 才会来）；打印文案改为
-  `[gic] GICv2 driver: intids=N, ...`（harness --expect-gic 的 marker，spec §7.2）。
+  与旧行为的差异（有意）：gic_cpu_init 现在还 banked 使能 SGI 0/1/2（Task 2.2 探针与
+  Task 3 IPI 的前置，无害——SGI 只有软件写 SGIR 才会来）；打印新增
+  `[gic] GICv2 driver: intids=N` **独占一行**（harness --expect-gic 的 marker，
+  spec §7.2；CPU interface 地址另起一行，R2-3）。
 - [ ] **跑 GREEN（hosttest）**：
   ```sh
   make -C hosttests PROFILE=aarch64-clang \
@@ -702,15 +775,18 @@ static uint32_t gicc_mock[0x20];         /* 覆盖到 GICC_AHPPIR 0x28 */
     + enable/disable/priority/targets + handler 注册表 + gic_dev_dispatch
     (IAR→查表→handler→EOIR 原样回写完整 IAR, 修 D7 CPUID 位丢失)
     + gic_driver_set_unexpected 回调注入 + SGIR 编码
-    + ISPENDR/ICPENDR 注入与拆除 + dbg_last_iar 观测钩子(R1-9);
+    + ISPENDR/ICPENDR 注入与拆除 + per-CPU IAR trace
+    (set_cpu_index/trace_get, R2-6 消除跨核覆写竞态);
     零依赖可 host 编译(屏障留 wrapper)
-  - gic.c 重写为生产 wrapper: DTB 基址 + PL011 日志 + unexpected 回调注入;
-    gic_init/gic_cpu_init 签名不变(main.c/smp.c 零改动);
-    gic_cpu_init 额外 banked 使能 SGI 0/1(Task 3 前置)
+  - gic.c 重写为生产 wrapper: DTB 基址 + PL011 日志 + unexpected 回调注入
+    + TPIDR cpu-index hook; gic_init/gic_cpu_init 签名不变(main.c/smp.c 零改动);
+    gic_cpu_init 额外 banked 使能 SGI 0/1/2(Task 2.2 探针/Task 3 前置);
+    intids marker 独占一行(R2-3)
   - hosttests/test_gic_driver: mock MMIO 覆盖 init(TYPER/IIDR)/分类/
-    enable(ICENABLER)/prio/targets/注册表/unexpected 回调注入清除/
-    SGIR 三种 filter/set+clear pending/EOIR 往返/dispatch 三分支
-    + dispatch-CPUID case(IAR=0xC07 → EOIR mock==0xC07, R1-9)
+    enable(ICENABLER)/prio/targets(偏移 +32=BASE+(33/4)*4, R2-2)/注册表/
+    unexpected 回调注入清除/SGIR 三种 filter/set+clear pending/EOIR 往返/
+    dispatch 三分支 + dispatch-CPUID case(IAR=0xC07 → EOIR mock==0xC07, R1-9)
+    + per-CPU trace 槽隔离(mock cpu-index hook, R2-6)
 
   Co-Authored-By: Claude Code <noreply@anthropic.com>"
   ```
@@ -835,7 +911,7 @@ make PROFILE=aarch64-clang test-aarch64-uefi-smp
 - Modify: `kernel/include/arch/aarch64/regs.h:19-28`（pt_regs_t 加 x30 + Section 2 偏移常量）
 - Modify: `kernel/arch/aarch64/entry.S`（EL1h IRQ 槽 61-79 改 `b el1_irq_entry`；表后新增 el1_irq_entry；头注释更新）
 - Modify: `kernel/arch/aarch64/trap.c`（el1_irq 三行壳 + arch_install_exception_vectors 保持 no-op）
-- Modify: `kernel/arch/aarch64/time.c`（删硬编码比较；tick 改注册 handler；**RED 阶段保留 `el1_irq_dispatch` 过渡 shim**，GREEN 同一变更内删除；`g_ticks` 去 static 导出）
+- Modify: `kernel/arch/aarch64/time.c`（删硬编码比较；tick 改注册 handler；**RED 阶段保留 `el1_irq_dispatch` 过渡 shim**，GREEN 同一变更内删除；`g_ticks` 保持 static——探针已不依赖它，v2 的导出要求撤销）
 - Create: `kernel/arch/aarch64/irq_probe.c`（clobber 探针 + unexpected-intid 探针，`#if OS01_SELFTEST`）
 - Modify: `kernel/arch/aarch64/main.c`（SELFTEST 块里调探针；注册 tick handler 后打 `[gic] dispatch ready`）
 - Modify: `mk/components/run.mk:167`（test-aarch64-uefi-smp 的 python 参数追加 `--expect-gic`）
@@ -848,12 +924,11 @@ make PROFILE=aarch64-clang test-aarch64-uefi-smp
   void el1_irq(struct pt_regs *regs);
   /* gic.c（Task 1.2 已产出，此处被 shim/dispatch 消费） */
   struct gic_dev *gic_dev_current(void);
-  /* time.c —— 探针/harness 观察 */
-  extern volatile uint64_t g_ticks;      /* 由 static 改为全局导出 */
+  /* time.c —— harness 经 [tick] 行观察（g_ticks 保持 static, 无导出） */
   bool arch_tick_start(void);            /* 内部注册 cntp handler（签名不变） */
   /* irq_probe.c（OS01_SELFTEST 门控） */
-  void gic_clobber_probe(void);          /* 打印 save-restore OK/FAIL 行 */
-  void gic_unexpected_probe(void);       /* SPI 40 enable→注入→存活→拆除 (R1-2) */
+  void gic_clobber_probe(void);          /* 自发 SGI 2 确定性 trampoline (R2-4) */
+  void gic_unexpected_probe(void);       /* SPI 40 enable→注入→观察恰一次→拆除 (R1-2/R2-5) */
   ```
 
 步骤（**shim 保链接**：先让新 dispatch 在旧入口下可运行并跑出探针 RED，再换 entry.S 转绿，R1-1）：
@@ -890,16 +965,24 @@ make PROFILE=aarch64-clang test-aarch64-uefi-smp
   ```c
   /* 破坏性探针（spec §7.3）——证明 entry.S save/restore 真实生效。
    *
-   * clobber 探针: 哨兵进 x0-x5 + x18（7 个 caller-saved/platform 寄存器）
-   * → wfi 等一个 tick → 校验。必须整体在一个 asm 块内（编译器不能替它
-   * "恢复"哨兵）。旧 entry.S（零保存）下 C dispatch 按 AAPCS64 可自由毁
-   * x0-x17 → 必红; 全量保存后必绿。哨兵数量取 7：dispatch 的 IAR 读/打印
-   * 链至少占用其中数个，全数存活的概率可忽略。若在旧 entry.S 上意外全绿，
-   * 视为探针缺陷：停下反汇编 dispatch 链确认寄存器占用，修正后重跑。
+   * clobber 探针 = 确定性 trampoline（R2-4）：
+   *   - 触发：asm 内直写 GICD_SGIR(filter=SELF, sgi=2) 自发一次【真实 IRQ】
+   *     （SGI 2 已由 gic_cpu_init banked 使能；探针运行时 IRQ 已 unmask）。
+   *   - 判据的确定性来源：dispatch 链以 fn(intid, param, regs) 调用 handler，
+   *     AAPCS64 规定前三个实参必须经 x0/x1/x2 传递——旧路径（槽 6:
+   *     bl el1_irq_dispatch; eret，零保存）下 x0-x2 的哨兵【架构性必然】
+   *     被销毁，与编译器寄存器分配无关；x3-x5/x18 是加宽覆盖。新路径
+   *     （el1_irq_entry）先保存 x0-x30 再 bl，eret 前恢复——全部存活。
+   *   - 可靠性：探针自身的轮询状态（flag 地址/SGIR 地址/deadline）全部驻
+   *     内存（adrp 重取），IRQ 在 RED 路径上 clobber 掉任何 caller-saved
+   *     寄存器都不影响探针循环；结果经 mov %0 显式回写输出操作数
+   *     （0=OK / 1=clobber / 2=超时）。
    *
-   * unexpected 探针 (R1-2): SPI 递送需 enable+route（spec §2.2）——
-   * gic_irq_configure(40,true,0,0x01) → gic_force_pending(40) → 等 tick
-   * 证明存活 → 拆除 disable + clear_pending。 */
+   * unexpected 探针（R1-2 + R2-5）：SPI 递送需 enable+route（spec §2.2）；
+   * 递送观察不再依赖 g_ticks（CNTP tick 自己会来，构不成证据），而是探针
+   * 注入的 unexpected 回调对 intid 40 计数并 release 置 flag——轮询到
+   * flag 且 count==1 才打 survived。回调打印与 wrapper 的 log_unexpected
+   * 同文案，替换后日志不变。 */
   #if OS01_SELFTEST
   #include <stdint.h>
   #include <stdbool.h>
@@ -907,11 +990,54 @@ make PROFILE=aarch64-clang test-aarch64-uefi-smp
   #include <arch/aarch64/boot_log.h>
   #include <arch/aarch64/gic.h>
 
-  extern volatile uint64_t g_ticks;      /* time.c 导出 */
+  #define PROBE_SGI_ID           2u      /* clobber 探针专用自发 SGI */
+  #define PROBE_UNEXPECTED_INTID 40u
+
+  static volatile uint32_t probe_sgi_seen;         /* stlr 置位 / ldar 轮询 */
+  static volatile uint32_t probe_unexpected_flag;
+  static volatile uint32_t probe_unexpected_count;
+  static volatile uint64_t probe_sgir_addr;        /* C 预计算, asm 经 adrp 重取 */
+  static volatile uint64_t probe_deadline;
+
+  static inline void probe_flag_release(volatile uint32_t *p, uint32_t v)
+  {
+      __asm__ __volatile__("stlr %w0, [%1]" :: "r"(v), "r"(p) : "memory");
+  }
+  static inline uint32_t probe_flag_acquire(const volatile uint32_t *p)
+  {
+      uint32_t v;
+      __asm__ __volatile__("ldar %w0, [%1]" : "=r"(v) : "r"(p) : "memory");
+      return v;
+  }
+
+  static void probe_sgi_handler(uint32_t intid, uint64_t param, struct pt_regs *regs)
+  {
+      (void)intid; (void)param; (void)regs;
+      probe_flag_release(&probe_sgi_seen, 1);
+  }
+
+  static void probe_unexpected_cb(uint32_t intid)
+  {
+      kputs("[gic] unexpected IRQ intid=");        /* 与 log_unexpected 同文案 */
+      kputu(intid);
+      kputs("\n");
+      if (intid == PROBE_UNEXPECTED_INTID) {
+          probe_unexpected_count += 1;
+          probe_flag_release(&probe_unexpected_flag, 1);
+      }
+  }
 
   void gic_clobber_probe(void)
   {
-      uint64_t bad = 0;                  /* 结果落在 x9（非哨兵寄存器） */
+      int rc = gic_register_handler(PROBE_SGI_ID, probe_sgi_handler, 0, "probe-sgi");
+      if (rc != 0 && rc != -2) {                   /* -2 = 已注册, 重复探针沿用 */
+          kputs("[gic-probe] save-restore FAIL regs=handler-register\n");
+          return;
+      }
+      probe_sgi_seen = 0;
+      probe_sgir_addr = (uint64_t)(uintptr_t)gic_dev_current()->gicd + 0xF00u;
+      probe_deadline  = arch_cycle_counter() + arch_cycle_freq() * 2;
+      uint64_t bad = 2;
       __asm__ __volatile__(
           "mov  x0, #0x1111\n\t"
           "mov  x1, #0x2222\n\t"
@@ -920,58 +1046,75 @@ make PROFILE=aarch64-clang test-aarch64-uefi-smp
           "mov  x4, #0x5555\n\t"
           "mov  x5, #0x6666\n\t"
           "mov  x18, #0x7777\n\t"
-          "adrp x6, g_ticks\n\t"
-          "add  x6, x6, :lo12:g_ticks\n\t"
-          "ldr  x7, [x6]\n"
-          "1: wfi\n\t"
-          "ldr  x8, [x6]\n\t"
-          "cmp  x8, x7\n\t"
-          "b.ls 1b\n\t"                  /* 等至少一个 tick (无符号比较) */
-          "mov  x9, #0\n\t"
-          "cmp  x0, #0x1111\n\t b.ne 2f\n\t"
+          "dsb  sy\n\t"
+          "adrp x9, probe_sgir_addr\n\t"
+          "ldr  x9, [x9, :lo12:probe_sgir_addr]\n\t"
+          "mov  x10, #2\n\t"
+          "movk x10, #2, lsl #24\n\t"              /* 0x02000002: SELF + SGI 2 */
+          "str  w10, [x9]\n\t"                     /* ← 自发 IRQ, 立即可入 */
+          "1: adrp x9, probe_sgi_seen\n\t"
+          "add  x9, x9, :lo12:probe_sgi_seen\n\t"
+          "ldar w11, [x9]\n\t"
+          "cbnz w11, 4f\n\t"
+          "adrp x10, probe_deadline\n\t"
+          "ldr  x10, [x10, :lo12:probe_deadline]\n\t"
+          "mrs  x11, cntvct_el0\n\t"
+          "cmp  x11, x10\n\t"
+          "b.lo 1b\n\t"
+          "mov  %0, #2\n\t"                        /* 超时: IRQ 未递送/未处理 */
+          "b    3f\n"
+          "4: cmp  x0, #0x1111\n\t b.ne 2f\n\t"
           "cmp  x1, #0x2222\n\t b.ne 2f\n\t"
           "cmp  x2, #0x3333\n\t b.ne 2f\n\t"
           "cmp  x3, #0x4444\n\t b.ne 2f\n\t"
           "cmp  x4, #0x5555\n\t b.ne 2f\n\t"
           "cmp  x5, #0x6666\n\t b.ne 2f\n\t"
           "cmp  x18, #0x7777\n\t b.ne 2f\n\t"
+          "mov  %0, #0\n\t"
           "b    3f\n"
-          "2: mov  x9, #1\n"
+          "2: mov  %0, #1\n"
           "3:"
           : "=r"(bad)
           :
-          : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x18",
+          : "x0", "x1", "x2", "x3", "x4", "x5", "x9", "x10", "x11", "x18",
             "cc", "memory");
-      if (bad == 0) kputs("[gic-probe] save-restore OK\n");
-      else          kputs("[gic-probe] save-restore FAIL regs=x0-x5,x18\n");
+      if (bad == 0)      kputs("[gic-probe] save-restore OK\n");
+      else if (bad == 1) kputs("[gic-probe] save-restore FAIL regs=x0-x5,x18\n");
+      else               kputs("[gic-probe] save-restore TIMEOUT\n");
   }
 
   void gic_unexpected_probe(void)
   {
-      if (gic_irq_configure(40, true, 0x00, 0x01) != 0) {  /* R1-2: enable+route */
+      probe_unexpected_count = 0;
+      probe_unexpected_flag = 0;
+      gic_driver_set_unexpected(probe_unexpected_cb);   /* R2-5: 观察递送本身 */
+      if (gic_irq_configure(PROBE_UNEXPECTED_INTID, true, 0x00, 0x01) != 0) {
           kputs("[gic-probe] unexpected intid=40 TIMEOUT\n");
           return;
       }
-      uint64_t before = g_ticks;
-      gic_force_pending(40);             /* ISPENDR 注入 → unexpected 路径 */
+      gic_force_pending(PROBE_UNEXPECTED_INTID);
       uint64_t deadline = arch_cycle_counter() + arch_cycle_freq() * 2;
-      while (g_ticks == before) {
+      while (probe_flag_acquire(&probe_unexpected_flag) == 0) {  /* 等递送证据 */
           if ((uint64_t)arch_cycle_counter() > deadline) {
               kputs("[gic-probe] unexpected intid=40 TIMEOUT\n");
-              gic_irq_configure(40, false, 0x00, 0x01);   /* 失败路径也拆除 */
-              gic_clear_pending_irq(40);
+              gic_irq_configure(PROBE_UNEXPECTED_INTID, false, 0x00, 0x01);
+              gic_clear_pending_irq(PROBE_UNEXPECTED_INTID);
               return;
           }
           arch_cpu_pause();
       }
-      gic_irq_configure(40, false, 0x00, 0x01);           /* R1-2: 拆除 */
-      gic_clear_pending_irq(40);
-      kputs("[gic-probe] unexpected intid=40 survived\n");
+      gic_irq_configure(PROBE_UNEXPECTED_INTID, false, 0x00, 0x01);   /* 拆除 */
+      gic_clear_pending_irq(PROBE_UNEXPECTED_INTID);
+      if (probe_unexpected_count == 1)
+          kputs("[gic-probe] unexpected intid=40 survived\n");       /* 恰一次 */
+      else
+          kputs("[gic-probe] unexpected intid=40 FAIL count!=1\n");
   }
   #endif
   ```
 - [ ] 改 `kernel/arch/aarch64/time.c`：
-  - `static volatile uint64_t g_ticks`（line 39）→ `volatile uint64_t g_ticks`（去 static，导出）。
+  - `static volatile uint64_t g_ticks`（line 39）**保持 static 不动**（探针已改用自发
+    SGI/递送观察，不再依赖它；v2 的"去 static 导出"要求撤销，避免死接口）。
   - 删除 `el1_irq_dispatch()` 的硬编码比较逻辑（96-133），新增注册式 handler +
     **过渡 shim**（真实代码）：
     ```c
@@ -1047,12 +1190,15 @@ make PROFILE=aarch64-clang test-aarch64-uefi-smp
     grep -a "gic" /tmp/gic-clobber-red-*/cpus-1-run-1.stdout.log
     ```
     **预期（RED 证据，旧 entry.S 零保存 + shim 保链接）**：
-    `[gic] GICv2 driver: ...` / `[gic] dispatch ready` /
+    `[gic] GICv2 driver: intids=...`（独占一行，R2-3）/ `[gic] dispatch ready` /
     `[gic-probe] save-restore FAIL regs=x0-x5,x18` /
     `[gic-probe] unexpected intid=40 survived`（unexpected 探针走 shim 的
-    dispatch，应已绿）出现。**必须见到 save-restore FAIL 行才继续**——
-    若意外 OK，按 irq_probe.c 头注释的纪律停下调查（反汇编 dispatch 链），
-    修正探针后重跑，不允许跳过。
+    dispatch，观察递送后应已绿）。
+    **save-restore FAIL 是确定性判据**（R2-4）：dispatch 链以
+    `fn(intid, param, regs)` 调 handler，AAPCS64 强制实参走 x0/x1/x2——
+    旧路径零保存下 x0-x2 哨兵必然被销毁，与编译器寄存器分配无关。
+    若日志出现 `save-restore OK` 或 `TIMEOUT` 而非 `FAIL`，说明探针自身
+    缺陷（触发/轮询路径坏了），停下修复重跑——不允许跳过。
 - [ ] **改 entry.S 并同变更删 shim**（关键 GREEN 步骤，R1-1）：
   - 文件头（line 33 后）加 `#include <arch/aarch64/regs.h>`。
   - EL1h IRQ 槽（61-79）替换为：
@@ -1208,11 +1354,13 @@ make PROFILE=aarch64-clang test-aarch64-uefi-smp
 
 
   def self_test() -> None:
-      ok = "[gic] spi-test armed intid=33\n[gic-spi] intid=33 handled count=1\n"
+      armed_only = "[gic] spi-test armed intid=33\n"
+      ok = armed_only + "[gic-spi] intid=33 handled count=1\n"
       assert spi_verdict(ok, injected=True)[0] == "pass"
-      assert spi_verdict(ok, injected=False) == (None, True)      # 注入窗口
-      assert spi_verdict("[gic] spi-test armed intid=33\n", injected=True) == (None, False)
-      wrong = "[gic] spi-test armed intid=33\n[gic-spi] intid=40 handled count=1\n"
+      assert spi_verdict(ok, injected=False) == ("pass", False)  # 已 handled, 注入与否不再影响
+      assert spi_verdict(armed_only, injected=False) == (None, True)   # 注入窗口
+      assert spi_verdict(armed_only, injected=True) == (None, False)   # 已注入未到 → 等
+      wrong = armed_only + "[gic-spi] intid=40 handled count=1\n"
       assert spi_verdict(wrong, injected=True)[0] == "fail"       # 错误 intid
       assert spi_verdict("", injected=False) == (None, False)     # 什么都没有 → 等
       assert spi_verdict(ok.replace("\n", "\n\r"), injected=True)[0] == "pass"  # LF+CR
@@ -1507,8 +1655,10 @@ make PROFILE=aarch64-clang test-aarch64-uefi-smp
     过渡 shim el1_irq_dispatch 在同一变更内删除(全程无链接断裂中间态, R1-1)
   - trap.c: el1_irq = gic_dev_dispatch 三行壳; time.c 删硬编码 intid
     比较, tick 改注册 handler (TVAL 重装仍最先, EOI 移交 dispatch)
-  - 破坏性探针(OS01_SELFTEST): clobber(x0-x5+x18 七哨兵跨 tick) +
-    unexpected(SPI 40 enable→ISPENDR 注入→存活→disable+ICPENDR 拆除, R1-2);
+  - 破坏性探针(OS01_SELFTEST): clobber 确定性 trampoline——asm 直写 SGIR
+    自发 SGI 2 真实 IRQ, 哨兵 x0-x5+x18, 判据 = AAPCS64 实参寄存器
+    x0-x2 架构性必然被销毁(R2-4); unexpected(SPI 40 enable+route→ISPENDR
+    注入→回调观察递送恰一次→disable+ICPENDR 拆除, R1-2/R2-5);
     --expect-gic 进标准回归
   - SPI: dtb_parse 补 pl011 interrupts 解析(33); pl011 只开 RXIM;
     gic_spi_test_init 注册 handler; harness aarch64_gic_spi.py
@@ -1637,7 +1787,7 @@ make PROFILE=aarch64-clang test-aarch64-uefi-smp
 - Modify: `kernel/arch/aarch64/main.c`（SELFTEST 区在 gic_unexpected_probe 之后、halt 循环前调 `gic_ipi_test(dtb_cpu_count())`）
 
 **Interfaces:**
-- Consumes: Task 1.2 `gic_send_sgi/gic_register_handler/gic_dev_current/gic_dbg_last_iar/GICD_SGIR_FILTER_LIST/GICD_SGIR_FILTER_OTHERS`；Task 2.2 `el1_irq` dispatch 链 + `g_ticks`；`arch_atomic_fetch_add`（kernel/include/arch/atomic.h:47-58，aarch64 段）；stlr/ldar release/acquire 模式先例（kernel/arch/aarch64/aarch64_percpu.h:93-99、108-113）；`aarch64_boot_percpu_t`（aarch64_percpu.h:21-22，cpu_id 在槽 offset 8）；TPIDR_EL1（BSP head.S:312-323 / AP head.S:650 都已设）；`arch_cycle_counter/arch_cycle_freq`（cpu.h:78-86）
+- Consumes: Task 1.2 `gic_send_sgi/gic_register_handler/gic_dev_current/gic_dbg_last_iar/GICD_SGIR_FILTER_LIST/GICD_SGIR_FILTER_OTHERS`（`gic_dbg_last_iar` 读 per-CPU trace 槽，R2-6）；Task 2.2 `el1_irq` dispatch 链；`arch_atomic_fetch_add`（kernel/include/arch/atomic.h:47-58，aarch64 段）；stlr/ldar release/acquire 模式先例（kernel/arch/aarch64/aarch64_percpu.h:93-115，R2-7）；`aarch64_boot_percpu_t`（aarch64_percpu.h:21-22，cpu_id 在槽 offset 8）；TPIDR_EL1（BSP head.S:312-323 / AP head.S:650 都已设）；`arch_cycle_counter/arch_cycle_freq`（cpu.h:78-86）
 - Produces:
   ```c
   /* ipi_test.c（OS01_SELFTEST） */
@@ -1649,7 +1799,8 @@ make PROFILE=aarch64-clang test-aarch64-uefi-smp
   ```c
       /* Includes a late AP: go=2 persists even if the BSP already resumed
        * ticks. APs keep their CNTP disabled; the only enabled banked lines
-       * are SGI 0/1 (IPI) and — for the BSP — the CNTP PPI. Unmask DAIF.I
+       * are SGI 0/1/2 (IPI + probe) and — for the BSP — the CNTP PPI.
+       * Unmask DAIF.I
        * so the AP can take SGIs through el1_irq (GIC Phase 1, spec §7.5). */
       cntp_ctl_el0_write(cntp_ctl_el0_read() & ~UINT64_C(1));
       arch_local_irq_enable();
@@ -1672,10 +1823,12 @@ make PROFILE=aarch64-clang test-aarch64-uefi-smp
    * 超时兜底 cntvct deadline（不依赖 IRQ，phase1 spec §2.1 既有方法）。
    * AP handler 不打印（多核并发写 PL011 会绞线, spec §8 R4）。
    *
-   * R1-9 回发确认：AP1 收到 SGI 0 后回发 SGI 1 (filter=LIST targets=0x01)
-   * 给 BSP；BSP 的 SGI-1 handler 在 handler 上下文读 gic_dbg_last_iar()
-   * （per-CPU 串行 dispatch ⇒ 必为本 SGI 的原始 IAR，无竞态），
-   * 期望 0x401 = CPUID(1)<<10 | SGI 1——非零 CPUID 真实穿越 ack 路径。 */
+   * R1-9 回发确认（R2-6 收口）：AP1 收到 SGI 0 后回发 SGI 1
+   * (filter=LIST targets=0x01) 给 BSP；BSP 的 SGI-1 handler 在 handler 上下文
+   * 读 gic_dbg_last_iar()——per-CPU trace 槽只被本核 ack 写入（同核 dispatch
+   * 串行 + IRQ masked 无嵌套，跨核 ack 写各自槽），因此读到的必是本 SGI 的
+   * 原始 IAR，无跨核覆写竞态。期望 0x401 = CPUID(1)<<10 | SGI 1——非零
+   * CPUID 真实穿越 ack 路径。 */
   #if OS01_SELFTEST
   #include <stdint.h>
   #include <stdbool.h>
@@ -1728,7 +1881,8 @@ make PROFILE=aarch64-clang test-aarch64-uefi-smp
   static void bsp_reply_handler(uint32_t intid, uint64_t param, struct pt_regs *regs)
   {
       (void)intid; (void)param; (void)regs;
-      bsp_raw_iar = gic_dbg_last_iar();               /* 本 SGI 的原始 IAR, 无竞态 */
+      bsp_raw_iar = gic_dbg_last_iar();               /* 本 CPU trace 槽 (R2-6):
+                                                         必为本 SGI 的原始 IAR */
       ipi_flag_release(&bsp_reply_flag, 1);
   }
 
@@ -1784,9 +1938,9 @@ make PROFILE=aarch64-clang test-aarch64-uefi-smp
   }
   #endif
   ```
-  注意：`gic_cpu_init`（Task 1.2）已为每核 banked 使能 SGI 0 与 SGI 1 的
-  ISENABLER0 位——AP 无需再配；handler 表是 BSP 注册的全局单份，对 AP 立即可见
-  （同一内核映像）。
+  注意：`gic_cpu_init`（Task 1.2）已为每核 banked 使能 SGI 0/1/2 的
+  ISENABLER0 位（0=IPI 主载荷、1=回发确认、2=clobber 探针）——AP 无需再配；
+  handler 表是 BSP 注册的全局单份，对 AP 立即可见（同一内核映像）。
 - [ ] main.c 在 `gic_unexpected_probe()` 之后追加（同一 SELFTEST 块内）：
   ```c
       gic_ipi_test(dtb_cpu_count());
@@ -1828,7 +1982,7 @@ make PROFILE=aarch64-clang test-aarch64-uefi-smp
     gic_dbg_last_iar() 捕获原始 IAR, 打 [ipi] bsp raw_iar=0x401
     (CPUID=1<<10 | SGI 1)
   - secondary_idle: 尾循环前 arch_local_irq_enable()——本 Phase 唯一
-    生产行为变化; AP banked 只使能 SGI 0/1 (CNTP 仍关, gic_cpu_init 白名单)
+    生产行为变化; AP banked 只使能 SGI 0/1/2 (CNTP 仍关, gic_cpu_init 白名单)
   - harness --expect-gic 追加 IPI 断言: send 恰一/每核 received=1 恰一/
     summary 数值自洽/raw_iar cpus>=2 恰一且 cpus=1 必无
   - SMP 1/2/4 ×3 全绿; SPI/hosttest 零回归; x86 源级零改动
@@ -1853,15 +2007,15 @@ make -C hosttests PROFILE=aarch64-clang OS01_PROFILE_FILE=$PWD/mk/profiles/aarch
 | Spec 目标 | 承载 Task | 验证 |
 |---|---|---|
 | G1 driver 泛化 | 1.1 + 1.2 | hosttest 8 suite 全绿 + `test-aarch64-uefi-smp` 不回归 |
-| G2 save/restore + pt_regs_t | 2.2 | clobber 探针 RED→GREEN 留档（七哨兵 x0-x5+x18）+ `_Static_assert` + `--expect-gic` marker + 全程无链接断裂（shim 协议，R1-1） |
-| G3 通用 dispatch | 2.2 | `[gic] dispatch ready` + unexpected intid=40 探针（enable/route/拆除齐全，R1-2）+ `[tick]` 不断流 |
+| G2 save/restore + pt_regs_t | 2.2 | clobber 探针 RED→GREEN 留档（确定性 trampoline：自发 SGI 2 + AAPCS64 x0-x2 实参判据，R2-4）+ `_Static_assert` + `--expect-gic` marker + 全程无链接断裂（shim 协议，R1-1） |
+| G3 通用 dispatch | 2.2 | `[gic] dispatch ready` + unexpected intid=40 探针（enable/route→注入→观察递送恰一次→拆除，R1-2/R2-5）+ `[tick]` 不断流 |
 | G4 SPI 通路 | 2.3a + 2.3b | 2.3a harness（--self-test/--diagnostic-dtb/干净 select 循环）对现状内核 FAIL（RED 留档）→ 2.3b 后 `test-aarch64-gic-spi` PASS（armed → 注入 → handled count=1） |
-| G5 SGI/IPI | 3.1 + 3.2 | SMP 1/2/4 ×3 全绿（cpus=1 为 targets=0 形态）；cpus≥2 `[ipi] bsp raw_iar=0x401`（R1-9） |
+| G5 SGI/IPI | 3.1 + 3.2 | SMP 1/2/4 ×3 全绿（cpus=1 为 targets=0 形态）；cpus≥2 `[ipi] bsp raw_iar=0x401`（R1-9，per-CPU trace 槽隔离 R2-6） |
 | G6 范式对齐 + 零回归 | 全部 | `git diff --stat master -- kernel/arch/x86_64 kernel/include/arch/x86_64 kernel/intr` 为空（源级零改动即构建输入不变，R1-7；不跑任何 x86 build）；`make PROFILE=aarch64-clang test-aarch64-uefi-smp` 全绿 |
 
 spec §5.2 布局（272B / 34 槽 / 16 对齐）↔ regs.h + entry.S 偏移逐条核对；
 spec §2.3 EOIR 完整回写 ↔ hosttest suite_ack_eoi + dispatch-CPUID case + E2E raw_iar；
-spec §7.3 探针顺序 ↔ irq_probe.c（configure→inject→survive→teardown）；
+spec §7.3 探针顺序 ↔ irq_probe.c（configure→inject→观察递送恰一次→teardown）；
 spec §7.4 DTB 解析 ↔ dtb_parse.c；spec §7.5 内存序 ↔ ipi_test.c 注释块。
 
 ### 查 2：占位符扫描
@@ -1875,9 +2029,10 @@ grep -rn "TODO\|FIXME\|XXX\|占位\|placeholder\|实现 X\|写实现时\|按实�
   hosttests/cases/test_gic_driver.c qemutests/aarch64_gic_spi.py
 # 预期: 空（entry.S/time.c 的注释性文字不算）
 ```
-本 v2 plan 中两处旧占位（SPI harness 的 selectors 混用、--diagnostic-dtb "按实现
-统一"）已通过 Task 2.3a 的完整 harness 代码消除——自查时确认交付代码与本 plan
-一致，无临时代码残留（`grep -n "selectors" qemutests/aarch64_gic_spi.py` 为空）。
+本 v3 plan 中 v1 的两处旧占位（SPI harness 的 selectors 混用、--diagnostic-dtb
+"按实现统一"）已通过 Task 2.3a 的完整 harness 代码消除，v2 的 --self-test fixture
+矛盾已按 R2-1 修正——自查时确认交付代码与本 plan 一致，无临时代码残留
+（`grep -n "selectors" qemutests/aarch64_gic_spi.py` 为空）。
 
 ### 查 3：类型一致性（跨 Task 接口）
 
@@ -1888,8 +2043,12 @@ grep -rn "TODO\|FIXME\|XXX\|占位\|placeholder\|实现 X\|写实现时\|按实�
   gic_driver.c / gic.c / test_gic_driver.c 四处一致；`gic_dev_current()` 返回
   `struct gic_dev *`。
 - `gic_driver_set_unexpected(void (*)(uint32_t))`：声明在 gic.h API 块，定义在
-  gic_driver.c，hosttest（注入/清除两态）与 gic.c wrapper（log_unexpected）
-  消费同一符号（R1-3）。
+  gic_driver.c，hosttest（注入/清除两态）、gic.c wrapper（log_unexpected）与
+  irq_probe.c（probe_unexpected_cb，观察 intid 40 递送）消费同一符号（R1-3/R2-5）。
+- `gic_driver_set_cpu_index(uint32_t (*)(void))` / `gic_driver_trace_get(uint32_t)`
+  / `GIC_TRACE_CPUS`：声明在 gic.h，定义在 gic_driver.c；wrapper 注入
+  `k_cpu_index`（TPIDR 槽）并经 `gic_driver_trace_get(k_cpu_index())` 实现
+  `gic_dbg_last_iar()`；hosttest 注入 `probe_cpu_index`——四方一致（R2-6）。
 - `gic_clear_pending(dev,intid)`（driver）与 `gic_clear_pending_irq(intid)`
   （wrapper）成对；`gic_set_pending`/`gic_force_pending` 同理（R1-2）。
 - `gic_send_sgi(dev, sgi, targets, filter)` 参数序在 gic.h / ipi_test.c /
@@ -1915,7 +2074,7 @@ grep -rn "TODO\|FIXME\|XXX\|占位\|placeholder\|实现 X\|写实现时\|按实�
   smp.c(226L), head.S(755L, secondary_start 580-672, TPIDR BSP 312-323/AP 650),
   dtb.c(83L), dtb_parse.c(279L, gic 115-121, pl011 122-127, timer 128-135),
   pl011.c(135L), main.c(264L), make.config(45L), linker.ld(137L),
-  aarch64_percpu.h(cpu_id@offset 8, stlr/ldar helpers 93-99/108-113)
+  aarch64_percpu.h(cpu_id@offset 8, stlr/ldar helpers 93-115)
 - kernel/include/arch/aarch64/: regs.h(pt_regs_t 19-28), dtb.h(40L), smp.h(14L)
 - kernel/include/arch/: regs.h facade(__aarch64__ 分发 27-28), irq.h(47/65-109),
   atomic.h(aarch64 arch_atomic_* 43-110), cpu.h(aarch64 78-90)
