@@ -8,7 +8,7 @@
 
 **Tech Stack:** freestanding C（clang -target aarch64-none-elf）、AArch64 手写汇编（entry.S）、GNU Make profile 构建（mk/profiles/aarch64-clang.mk）、host clang 单元测试（hosttests/）、Python QEMU harness（qemutests/）。
 
-**Spec:** docs/superpowers/specs/2026-09-17-aarch64-gic-phase1-design.md（v3，R2 修订版）
+**Spec:** docs/superpowers/specs/2026-09-17-aarch64-gic-phase1-design.md（v4，R3 修订版）
 
 **R1 修订落点索引（9 条全落地；其中 R1-5/R1-9 在 R2 收口）：**
 R1-1→Task 2.2 过渡 shim；R1-2→Task 1.2 `gic_clear_pending` + Task 2.2 探针 enable/route/拆除；
@@ -41,6 +41,18 @@ R3-1→Task 3.2 `gic_ipi_test()` 在两次 `gic_register_handler()` 成功后、
 IPI harness 断言 = 严格恰一次（received==1 / summary targets=received /
 raw_iar==0x401 恰一条），不允许多次确认——多次会 FAIL（不假阳、不假阴）。
 
+**R4 修订落点索引（4 条全落地）：**
+R4-1→Task 3.2 给出 wrapper 完整 header 代码（static inline + dsb ishst），Task
+步骤加精确调用行（arch_publish_handler_table(); 在 register 成功与 send_sgi
+之间）；
+R4-2→wrapper 改放 `kernel/include/arch/aarch64/gic_pub.h`（**仅 aarch64 头**），
+不进 `kernel/include/arch/barrier.h`（后者被 e1000.c:9 include，改它破坏
+"x86 编译输入逐字节不变"边界）；
+R4-3→spec §7.5 + 头文件注释：明确 dsb ishst = "完成 + 指令边界"（vs dmb ishst
+仅排序），并说明这是有意的较强选择；
+R4-4→spec 版本引用 v3/R2→v4/R3；cntp 描述纠正（实际在 smp_boot_aps() 后注册，
+但 AP CNTP disabled ⇒ 仅 BSP 接收，跨核问题不存在）。
+
 ## Global Constraints
 
 - **Worktree**：全部工作在 `feat/aarch64-gic` worktree（/home/aagu/aarch64-gic）完成，不碰 master。
@@ -51,10 +63,12 @@ raw_iar==0x401 恰一条），不允许多次确认——多次会 FAIL（不假
   **本 Phase 不跑任何 x86 build 作验证**（spec §6.2）。
 - **不编 kernel core**：kernel/Makefile:42-43 白名单不动；新文件只放 `kernel/arch/aarch64/`（wildcard 自动收编，kernel/Makefile:70-71）；新头文件只放 `kernel/include/arch/aarch64/`。
 - **探针门控**：所有测试/探针内核代码 `#if OS01_SELFTEST`（main.c:18/224 既有模式）；唯一生产行为变化 = AP 尾循环开 DAIF.I 收 IPI（Task 3.2，commit message 显式声明）。
-- **跨核发布屏障（R3-1）**：`kernel/include/arch/barrier.h` 新增 `arch_publish_handler_table()`
-  （aarch64 = `dsb ishst` + "memory" clobber；x86_64 = `arch_mb()` 兜底；host 空 inline），
+- **跨核发布屏障（R3-1）**：新建 `kernel/include/arch/aarch64/gic_pub.h`（**仅 aarch64 头**，
+  不进 `kernel/include/arch/barrier.h`——后者被 `kernel/driver/e1000.c:9` include，
+  改它会破坏 x86 编译输入零变更边界，R4-2 强制 aarch64 专属），声明并定义
+  `arch_publish_handler_table()` = aarch64 `__asm__ __volatile__("dsb ishst" ::: "memory")`。
   在"修改全局 handler 表之后、向 AP 发送 SGI 之前"调用。Task 3.2 的 `gic_ipi_test()`
-  是唯一当前调用点（cntp / pl011 / probe-sgi 在 SMP 启动前或本核自触发，不需）。spec §7.5 + §8 R3-1。
+  是唯一当前调用点。spec §7.5 + §8 R3-1。
 - **hw 层零依赖**：`gic_driver.c` 不 include boot_log/dtb/smp，不打日志，只返回错误码 + `gic_driver_set_unexpected` 回调注入（R1-3）。`struct pt_regs` 用前向声明（facade 按 `__aarch64__` 分发，host 编译会 #error，kernel/include/arch/regs.h:29-30）；**hosttest 内不得定义 pt_regs 对象**（不完整类型不可定义对象，R1-4）——dispatch 用例传 NULL。
 - **链接安全（R1-1）**：dispatch 切换期间旧入口符号 `el1_irq_dispatch`（entry.S:78 bl 的目标）必须始终可解析——RED 阶段保留 shim，entry.S 替换与 shim 删除在同一变更内。
 - **ISR 顺序契约不变**（phase1 spec §2.3）：TVAL 重装仍在 handler 最前；EOI 统一移交 dispatch（handler 返回后执行）。
@@ -1793,8 +1807,11 @@ make PROFILE=aarch64-clang test-aarch64-uefi-smp
 ### Task 3.2: GREEN — SGI send + handler，SMP 1/2/4 ×3 全绿
 
 **Files:**
+- Create: `kernel/include/arch/aarch64/gic_pub.h`（R3-1/R4-1/R4-2：仅 aarch64 头，
+  不进 `kernel/include/arch/barrier.h`；声明+定义 `arch_publish_handler_table()` = aarch64
+  `dsb ishst`；见下方完整代码）
 - Modify: `kernel/arch/aarch64/smp.c:204-226`（secondary_idle 尾循环前开 DAIF.I）
-- Create: `kernel/arch/aarch64/ipi_test.c`（`#if OS01_SELFTEST`）
+- Create: `kernel/arch/aarch64/ipi_test.c`（`#if OS01_SELFTEST`；include `<arch/aarch64/gic_pub.h>`）
 - Modify: `kernel/arch/aarch64/main.c`（SELFTEST 区在 gic_unexpected_probe 之后、halt 循环前调 `gic_ipi_test(dtb_cpu_count())`）
 
 **Interfaces:**
@@ -1805,6 +1822,60 @@ make PROFILE=aarch64-clang test-aarch64-uefi-smp
   void gic_ipi_test(uint32_t cpu_count);   /* 发 SGI 0 (others) → acquire 轮询 → summary →
                                               等 AP1 回发 SGI 1 → 打 bsp raw_iar 行 (R1-9) */
   ```
+
+- [ ] **新建** `kernel/include/arch/aarch64/gic_pub.h`（R3-1/R4-1/R4-2 完整代码，
+  **仅 aarch64 头**——不进 `kernel/include/arch/barrier.h`，那个 shared header 被
+  `kernel/driver/e1000.c:9` include，改它会破坏"x86 编译输入逐字节不变"边界）：
+  ```c
+  /* kernel/include/arch/aarch64/gic_pub.h — GICv2 跨核发布原语（spec §7.5 R3-1）。
+   *
+   * 作用：把对全局 `handlers[]` 表的写发布给 Inner-Shareable 域（AP），
+   *       保证后续 GICD_SGIR 写触发的 SGI 在 AP 端看到的是已发布过的 handler。
+   *
+   * 屏障选择：aarch64 `dsb ishst`，与 dmb ishst 的差别在于——
+   *   - dmb ishst 仅排序（ordering-only）：保证此屏障前的 store 在屏障后的
+   *     store 之前被观察到，但不阻塞屏障后指令的执行。
+   *   - dsb ishst 完成 + 指令边界（completion + instruction boundary）：
+   *     屏障前的所有 store 必须完成（cache/TLB/write buffer drain 到
+   *     Inner-Shareable 域的可见点）才执行屏障后的指令；屏障后指令也
+   *     不会重排到屏障前。本 Phase 选 dsb 是有意的较强选择：SGIR 写后
+   *     立即发 IRQ，必须保证 handler 表已全局可见。Linux GICv2 选
+   *     dmb(ishst) 是因为紧接 dsb sy 做隐含 ordering；OS01 此处直接
+   *     dsb ishst 省去再配对屏障的复杂度。
+   *
+   * 该 wrapper 不进 gic_register_handler()（避免无谓开销），由调用方按需
+   * 显式调——Task 3.2 的 gic_ipi_test() 是唯一当前调用点（cntp / pl011_rx
+   * / probe_sgi 的注册要么仅 BSP 接收、要么本核自触发，spec §7.5 + §8 R11）。 */
+  #ifndef _ARCH_AARCH64_GIC_PUB_H
+  #define _ARCH_AARCH64_GIC_PUB_H
+
+  #include <stdint.h>
+
+  #ifdef __cplusplus
+  extern "C" {
+  #endif
+
+  /* 发布内核 handler 表给 Inner-Shareable 域。SGIR 写之前必须调。 */
+  static inline void arch_publish_handler_table(void)
+  {
+      /* dsb ishst = Data Synchronization Barrier, Inner-Shareable,
+       * Store-only：屏障前的所有 store 必须完成（对其他核可见）才执行
+       * 屏障后的指令；屏障后指令不重排到屏障前。memory clobber 强制
+       * 编译器不把对 handlers[] 的写挪到屏障后。 */
+      __asm__ __volatile__("dsb ishst" ::: "memory");
+  }
+
+  #ifdef __cplusplus
+  }
+  #endif
+
+  #endif /* _ARCH_AARCH64_GIC_PUB_H */
+  ```
+  说明：① header 是 aarch64 专属，仅被 aarch64 .c/.S 引用（kernel/Makefile:42-43
+  白名单），不存在被 x86 或 host 编译路径引用的可能；② x86 不需要此原语
+  （x86 强内存模型，Device MMIO 写自然带发布语义）；③ hosttests 用 aarch64
+  target 编译（PROFILE=aarch64-clang），与内核同走 `__aarch64__` 分支，
+  wrapper 静态 inline 自然可用。
 
 - [ ] 改 `secondary_idle`（smp.c:219-225 区；真实 diff）：
   ```c
@@ -1843,7 +1914,7 @@ make PROFILE=aarch64-clang test-aarch64-uefi-smp
   #if OS01_SELFTEST
   #include <stdint.h>
   #include <stdbool.h>
-  #include <arch/barrier.h>      /* R3-1: arch_publish_handler_table() */
+  #include <arch/aarch64/gic_pub.h>  /* R3-1/R4-1: arch_publish_handler_table() */
   #include <arch/irq.h>
   #include <arch/atomic.h>
   #include <arch/cpu.h>
@@ -1964,8 +2035,11 @@ make PROFILE=aarch64-clang test-aarch64-uefi-smp
   ISENABLER0 位（0=IPI 主载荷、1=回发确认、2=clobber 探针）——AP 无需再配；
   handler 表是 BSP 注册的全局单份、AP 同核映射可见，**但跨核内存序需 R3-1
   显式屏障**（见 gic_ipi_test() 内 `arch_publish_handler_table()` 调用；
-  spec §7.5 + §8 R3-1）。注：本 Task 之外的注册点（cntp / pl011 /
-  probe-sgi）要么在 SMP 启动前、要么本核自触发，不需本屏障。
+  spec §7.5 + §8 R3-1）。**注：cntp handler 在 `smp_boot_aps()` 之后注册
+  （main.c:249 arch_tick_start）**，但 AP 的 CNTP 已在 smp.c:209/224 关掉——
+  **CNTP 仅 BSP 接收**，因此无跨核可见性问题；同理 pl011_rx_handler 是
+  SPI→BSP 本核、probe_sgi_handler 是 BSP 自触发 SGI 2——三处注册均**不需**
+  `arch_publish_handler_table()`。本 Task 的 IPI 是唯一跨核 SGI 路径。
 - [ ] main.c 在 `gic_unexpected_probe()` 之后追加（同一 SELFTEST 块内）：
   ```c
       gic_ipi_test(dtb_cpu_count());
@@ -2051,16 +2125,18 @@ grep -rn "TODO\|FIXME\|XXX\|占位\|placeholder\|实现 X\|写实现时\|按实�
   kernel/arch/aarch64/trap.c kernel/arch/aarch64/ipi_test.c \
   kernel/arch/aarch64/spi_test.c kernel/arch/aarch64/irq_probe.c \
   kernel/include/arch/aarch64/gic.h kernel/include/arch/aarch64/regs.h \
-  kernel/include/arch/barrier.h \
+  kernel/include/arch/aarch64/gic_pub.h \
   hosttests/cases/test_gic_driver.c qemutests/aarch64_gic_spi.py
 # 预期: 空（entry.S/time.c 的注释性文字不算）
 ```
 本 v3 plan 中 v1 的两处旧占位（SPI harness 的 selectors 混用、--diagnostic-dtb
 "按实现统一"）已通过 Task 2.3a 的完整 harness 代码消除，v2 的 --self-test fixture
 矛盾已按 R2-1 修正——自查时确认交付代码与本 plan 一致，无临时代码残留
-（`grep -n "selectors" qemutests/aarch64_gic_spi.py` 为空）。R3-1 新增
-`arch_publish_handler_table()` wrapper 同步写明屏障语义与唯一调用点，
-无"按实现统一"残留。
+（`grep -n "selectors" qemutests/aarch64_gic_spi.py` 为空）。R3-1/R4-1 新增
+`arch_publish_handler_table()` wrapper 同步写明屏障语义与唯一调用点，R4-2
+定位为 aarch64 专属头（`kernel/include/arch/aarch64/gic_pub.h`，**不进
+`kernel/include/arch/barrier.h`**——后者被 e1000.c:9 include，改它破坏 x86
+边界），无"按实现统一"残留。
 
 ### 查 3：类型一致性（跨 Task 接口）
 
@@ -2081,13 +2157,17 @@ grep -rn "TODO\|FIXME\|XXX\|占位\|placeholder\|实现 X\|写实现时\|按实�
   （wrapper）成对；`gic_set_pending`/`gic_force_pending` 同理（R1-2）。
 - `gic_send_sgi(dev, sgi, targets, filter)` 参数序在 gic.h / ipi_test.c /
   test_gic_driver.c 一致（filter 是第 4 参）。
-- `arch_publish_handler_table()`：声明+定义同在 `kernel/include/arch/barrier.h`，
-  aarch64 = `dsb ishst` + "memory" clobber，x86_64 = `arch_mb()` 兜底，host
-  测试编译 = 空 inline。**唯一调用点** = Task 3.2 `gic_ipi_test()` 在
-  两次 `gic_register_handler()` 成功后、首次 `gic_send_sgi()` 前——R3-1
-  跨核发布屏障；`gic_register_handler` 本身**不**内置 barrier，避免
-  无谓开销。其他注册点（cntp 在 SMP 启动前、pl011_rx SPI→BSP 本核、
-  probe_sgi 自触发）不需本屏障。
+- `arch_publish_handler_table()`：声明+定义同在
+  `kernel/include/arch/aarch64/gic_pub.h`（**仅 aarch64 头**——R4-2 不进
+  `kernel/include/arch/barrier.h`，后者被 `kernel/driver/e1000.c:9` include，
+  改它破坏 x86 编译输入零变更边界），aarch64 = `__asm__ __volatile__("dsb ishst"
+  ::: "memory")` static inline；x86 不需要此原语（强内存模型，Device MMIO
+  写自然带发布语义）；host 走 aarch64 target 编译（PROFILE=aarch64-clang），
+  与内核同走 `__aarch64__` 分支，wrapper 静态 inline 自然可用。**唯一调用点** =
+  Task 3.2 `gic_ipi_test()` 在两次 `gic_register_handler()` 成功后、首次
+  `gic_send_sgi()` 前——R3-1 跨核发布屏障；`gic_register_handler` 本身**不**
+  内置 barrier，避免无谓开销。其他注册点（cntp 仅 BSP 接收因 AP CNTP
+  disabled、pl011_rx SPI→BSP 本核、probe_sgi 自触发）不需本屏障。
 - IPI harness 断言严格恰一次：`received==1`（多发=风暴、漏发=丢 IPI）/
   `summary targets=received`（自洽）/ `raw_iar==0x401` 恰一条（cpus≥2）。
   不允许多次确认——多余即 FAIL（不假阳、不假阴；AP 收到 SGI 0 后回 SGI 1
