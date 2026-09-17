@@ -16,6 +16,8 @@
 
 #include <fs/vfs.h>
 #include <fs/elf.h>
+#include <random/random.h>
+#include <uapi/auxv.h>
 
 #include <string.h>
 #include <stdlib.h>
@@ -1160,15 +1162,45 @@ static void setup_user_stack(uint8_t *kstack, char *const argv[], char *const en
     }
     rsp &= ~15ULL;
 
-    /* align pad (0 or 8) — ABOVE auxv, zeroed */
-    if (((s_argc + s_envc) & 1) == 0) {
-        rsp -= 8;
-        *(uint64_t *)KSTACK(rsp) = 0;
+    /* R9 BLOCKER 修正: R8 公式漏算 metadata (argv/envp 总 slot)。
+     * 用 codex 提供的真 fixed + meta 公式:
+     *   fixed = 16 (random aligned push) + sizeof(platform_str) (8) + 3*16 (auxv pairs) = 72
+     *   meta  = (s_argc + s_envc + 3) * 8
+     *           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ argc(1) + argv NULL(1) + envp NULL(1) = +3 slots
+     *   pad   = (16 - (fixed + meta) & 15) & 15
+     * 总压入 (fixed + pad) 必为 16 倍数; ASSERT((rsp & 0xF)==0) 自动成立。 */
+    const char platform_str[] = "x86_64";    /* 8 bytes incl NUL */
+    /* AT_RANDOM payload：16B 内核 CSPRNG，16 字节对齐不跨字
+     * （spec 2026-09-17 §6.3）。 */
+    rsp = (rsp - 16) & ~15ULL;
+    get_random_bytes(KSTACK(rsp), 16);
+    uint64_t at_random_addr = rsp;
+    /* AT_PLATFORM payload：8 字节（"x86_64" + NUL） */
+    rsp -= sizeof(platform_str);
+    memcpy(KSTACK(rsp), platform_str, sizeof(platform_str));
+    uint64_t at_platform_addr = rsp;
+    /* R9 BLOCKER 修正: 真 fixed + meta 公式(替换 R8 的 total_descending 简化版) */
+    const size_t auxv_pair_count = 3;        /* AT_PLATFORM, AT_RANDOM, AT_NULL */
+    const size_t fixed = 16 + sizeof(platform_str) + auxv_pair_count * 16;
+    const size_t meta  = (s_argc + s_envc + 3) * 8;
+    const size_t pad   = (16 - ((fixed + meta) & 15)) & 15;
+    if (pad > 0) {
+        rsp -= pad;
+        memset(KSTACK(rsp), 0, pad);
     }
-    /* auxv: single AT_NULL pair (Task: canary adds AT_RANDOM here) */
+    /* auxv 三对（降序压入；内存低→高：AT_PLATFORM, AT_RANDOM, AT_NULL）。
+     * 与 Linux create_elf_tables() 同构：实体在前，AT_NULL 收尾；
+     * __libc_start_main 的 64-pair walk 直接消费。 */
     rsp -= 16;
-    *(uint64_t *)KSTACK(rsp)      = 0;   /* AT_NULL */
+    *(uint64_t *)KSTACK(rsp)      = AT_NULL;
     *(uint64_t *)KSTACK(rsp + 8)  = 0;
+    rsp -= 16;
+    *(uint64_t *)KSTACK(rsp)      = AT_RANDOM;
+    *(uint64_t *)KSTACK(rsp + 8)  = at_random_addr;
+    rsp -= 16;
+    *(uint64_t *)KSTACK(rsp)      = AT_PLATFORM;
+    *(uint64_t *)KSTACK(rsp + 8)  = at_platform_addr;
+    /* 末尾 ASSERT((rsp & 0xF)==0) 自动成立: fixed + meta + pad 是 16 倍数。 */
     /* envp[] + terminator NULL (pushed descending: terminator first,
      * then entries below it — the array START is rsp after the loop) */
     rsp -= 8;
@@ -2236,3 +2268,47 @@ void task_init()
         }
     }
 }
+
+#ifdef OS01_SELFTEST
+/* ── selftest 专用 auxv 探针（spec 2026-09-17 §7 Layer 2）──────────
+ * 在静态 2MB 镜像缓冲里构建完整初始栈（KSTACK 偏移以 USER_STACK_TOP
+ * =0x9FFFF0 计，缓冲必须整幅），walk auxv 并把 AT_RANDOM / AT_PLATFORM
+ * 的 a_val 换算成缓冲内内核地址一并返回。仅 selftest 变体存在。 */
+static uint8_t task_selftest_stack_img[0x200000] __attribute__((aligned(16)));
+
+int task_selftest_auxv_probe(char *const argv[], char *const envp[],
+                             uint64_t *out_rsp, uint64_t *out_auxv_kptr,
+                             uint64_t *out_at_random_kptr,
+                             uint64_t *out_at_platform_kptr)
+{
+    int argc = 0, envc = 0;
+    while (argv && argv[argc]) argc++;
+    while (envp && envp[envc]) envc++;
+    if (argc + envc > STARTUP_STR_MAX) return -1;
+
+    uint64_t argp, envpp, rsp;
+    memset(task_selftest_stack_img, 0, sizeof(task_selftest_stack_img));
+    setup_user_stack(task_selftest_stack_img, argv, envp, argc, envc,
+                     &argp, &envpp, &rsp);
+
+    /* auxv 紧跟 envp[] 终结 NULL 之后（csu.c walk 契约） */
+    const uint64_t *auxv_k = (const uint64_t *)(task_selftest_stack_img
+        + (envpp + (uint64_t)(envc + 1) * 8 - USER_STACK_BASE));
+
+    uint64_t rnd_k = 0, plat_k = 0;
+    for (int i = 0; i < 64; i++) {
+        if (auxv_k[2 * i] == AT_NULL) break;
+        if (auxv_k[2 * i] == AT_RANDOM && !rnd_k)
+            rnd_k = (uint64_t)(task_selftest_stack_img
+                + (auxv_k[2 * i + 1] - USER_STACK_BASE));
+        if (auxv_k[2 * i] == AT_PLATFORM && !plat_k)
+            plat_k = (uint64_t)(task_selftest_stack_img
+                + (auxv_k[2 * i + 1] - USER_STACK_BASE));
+    }
+    if (out_rsp)                *out_rsp = rsp;
+    if (out_auxv_kptr)          *out_auxv_kptr = (uint64_t)auxv_k;
+    if (out_at_random_kptr)     *out_at_random_kptr = rnd_k;
+    if (out_at_platform_kptr)   *out_at_platform_kptr = plat_k;
+    return 0;
+}
+#endif /* OS01_SELFTEST */

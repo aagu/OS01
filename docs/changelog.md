@@ -1,9 +1,18 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-09-16）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-09-17）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
+
+## 2026-09-17
+- feat(libc): 用户态栈 canary —— libc/user/busybox 全面
+  -fstack-protector-strong；guard 每次 exec 经 SYS_getrandom 播种；
+  systest 43-47；make test-user-canary 构建期审计
+- feat(kernel): auxv AT_RANDOM(16B CSPRNG)+AT_PLATFORM("x86_64")；
+  getauxval()；kernel selftest at_random_layout/entropy；systest 48-53
+- feat(net): LWIP_RAND 接内核 ChaCha20（替换 jiffies LCG）；
+  hosttest --wrap 白盒 + test-network 6/6
 
 ## 2026-09-16
 

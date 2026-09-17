@@ -24,6 +24,7 @@
 #include <rbtree.h>
 #include <sys/random.h>
 #include <sys/mman.h>
+#include <sys/ssp.h>
 
 // ── Forward declarations for the H11 signal-handler test ─────
 // Defined at file scope after test_hostile() so the handler's
@@ -2920,6 +2921,155 @@ static void test_42_getdents_dt_lnk(void)
     unlink(SYMDIR "/reg42");
 }
 
+// ── 43-53: 用户态栈 canary / AT_RANDOM（spec 2026-09-17-user-stack-canary）──
+
+/* hex nibble（libc sscanf 只有 %d/%s/%c/%x/%u，无 %lx——手工解析） */
+static int hexval(int c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* fork → dup2(pipe写端,1) → exec(path) → 父读全部输出 → waitpid。
+ * 返回读到的字节数（<0 失败）；*out_status 收原始 waitpid status。 */
+static int exec_capture(const char *path, char *out, size_t outsz, int *out_status)
+{
+    int fds[2];
+    if (pipe(fds) < 0) return -1;
+    int64_t pid = fork();
+    if (pid < 0) { close(fds[0]); close(fds[1]); return -1; }
+    if (pid == 0) {
+        close(fds[0]);
+        dup2(fds[1], 1);
+        close(fds[1]);
+        char *argv[] = { (char *)path, NULL };
+        exec(path, argv, NULL);
+        _exit(126);                          /* exec 返回即失败 */
+    }
+    close(fds[1]);
+    size_t n = 0;
+    while (n + 1 < outsz) {
+        int64_t r = read(fds[0], out + n, outsz - 1 - n);
+        if (r <= 0) break;                   /* EOF 或 -1 都终止 */
+        n += (size_t)r;
+    }
+    out[n] = '\0';
+    close(fds[0]);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    if (out_status) *out_status = st;
+    return (int)n;
+}
+
+/* systest.c 自身被 -fstack-protector-strong 编译后的内联溢出帧 */
+__attribute__((noinline))
+static void ssp_smash_frame(void)
+{
+    volatile char buf[16];
+    for (int i = 0; i < 64; i++)
+        buf[i] = 'S';
+}
+
+static void test_ssp_trip_sigabrt_exec(void)
+{
+    int64_t pid = fork();
+    if (pid == 0) {
+        char *argv[] = { (char *)"/bin/canary_smash", NULL };
+        exec("/bin/canary_smash", argv, NULL);
+        _exit(126);
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    CHECKF(WIFSIGNALED(st) && WTERMSIG(st) == SIGABRT,
+           "45_ssp_trip_sigabrt_exec", "status=%#x",
+           "want WIFSIGNALED&&SIGABRT(6), status=%#x", st);
+}
+
+static void test_ssp_trip_sigabrt_fork(void)
+{
+    int64_t pid = fork();
+    if (pid == 0) {
+        /* fork 不经 exec：guard 继承自父（spec R9 已知弱点），
+         * 但 trip 检测必须仍然工作。 */
+        ssp_smash_frame();
+        _exit(0);                            /* SSP 下不可达 */
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    CHECKF(WIFSIGNALED(st) && WTERMSIG(st) == SIGABRT,
+           "46_ssp_trip_sigabrt_fork", "status=%#x",
+           "want WIFSIGNALED&&SIGABRT(6), status=%#x", st);
+}
+
+static void test_ssp_no_false_trip(void)
+{
+    int64_t pid = fork();
+    if (pid == 0) {
+        volatile char buf[64];               /* SSP 覆盖的正常局部数组 */
+        int sum = 0;
+        for (int i = 0; i < 64; i++) { buf[i] = (char)i; sum += buf[i]; }
+        _exit(42 + (sum & 0));               /* 42，且 buf 不可被优化掉 */
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    CHECKF(WIFEXITED(st) && WEXITSTATUS(st) == 42,
+           "47_ssp_no_false_trip", "status=%#x",
+           "want WIFEXITED&&42, status=%#x", st);
+}
+
+/* 扫描 "TAG <16hex>[\n|\0]"（canary_dump 的输出格式 "GUARD %016lx\n"）。
+ * 返回 0 OK，-1 格式不符——不修改 *out。 */
+static int parse_hex16_line(const char *buf, const char *tag, uint64_t *out)
+{
+    size_t taglen = 0;
+    while (tag[taglen]) taglen++;
+    if (strncmp(buf, tag, taglen) != 0) return -1;
+    const char *p = buf + taglen;
+    if (*p != ' ') return -1;
+    p++;
+    uint64_t v = 0;
+    for (int i = 0; i < 16; i++) {
+        int h = hexval((unsigned char)p[i]);
+        if (h < 0) return -1;
+        v = (v << 4) | (uint64_t)h;
+    }
+    if (p[16] != '\n' && p[16] != '\0') return -1;
+    *out = v;
+    return 0;
+}
+
+static void test_ssp_guard_seeded(void)
+{
+    CHECKF(__stack_chk_guard != 0, "43_ssp_guard_seeded",
+           "guard=%016lx", "guard must be nonzero, got %016lx",
+           (unsigned long)__stack_chk_guard);
+}
+
+static void test_ssp_guard_distinct_across_exec(void)
+{
+    uint64_t seen[10];
+    int dup = 0;
+    for (int i = 0; i < 10; i++) {
+        char buf[64];
+        int st = 0;
+        int n = exec_capture("/bin/canary_dump", buf, sizeof(buf), &st);
+        uint64_t g = 0;
+        if (n <= 0 || parse_hex16_line(buf, "GUARD", &g) != 0
+                || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+            CHECKF(0, "44_ssp_guard_distinct_across_exec",
+                   "run %d ok", "run %d: bad canary_dump output/status", i);
+            return;
+        }
+        for (int j = 0; j < i; j++)
+            if (seen[j] == g) dup++;
+        seen[i] = g;
+    }
+    CHECKF(dup == 0, "44_ssp_guard_distinct_across_exec",
+           "dups=0", "10 execs, duplicate guard values (dups=%d)", dup);
+}
+
 // ── Unified startup self-checks (spec 2026-09-13-user-startup-unification) ──
 // Weak extern: under the old crt0/csu these resolve to 0, tests FAIL (RED);
 // Task 3/4 define them and the same code goes GREEN.
@@ -2977,7 +3127,14 @@ static int startup_layout_errors(int argc, char **argv)
         errs |= SU_ERR_AUXV_NULL;
     } else {
         if ((uint64_t *)(environ + envc + 1) != __libc_auxv) errs |= SU_ERR_AUXV_ADDR;
-        if (!(__libc_auxv[0] == 0 && __libc_auxv[1] == 0))   errs |= SU_ERR_AUXV_ATNULL;
+        /* R9/2.2f: auxv now starts with (AT_PLATFORM, …) so the old
+         * "first pair must be AT_NULL" check is wrong. Scan up to 64
+         * pairs for the AT_NULL terminator instead. */
+        int atnull_i = -1;
+        for (int i = 0; i < 64; i++)
+            if (__libc_auxv[2 * i] == 0) { atnull_i = i; break; }
+        if (atnull_i < 0 || __libc_auxv[2 * atnull_i + 1] != 0)
+            errs |= SU_ERR_AUXV_ATNULL;
         if (!((uintptr_t)__libc_auxv > (uintptr_t)__libc_stack_end)) errs |= SU_ERR_AUXV_RANGE;
     }
     return errs;
@@ -3200,6 +3357,11 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"symlink_loop_depth",      test_symlink_loop_depth},
     {"41_exec_via_symlink",     test_41_exec_via_symlink},
     {"42_getdents_dt_lnk",      test_42_getdents_dt_lnk},
+    {"43_ssp_guard_seeded",               test_ssp_guard_seeded},
+    {"44_ssp_guard_distinct_across_exec", test_ssp_guard_distinct_across_exec},
+    {"45_ssp_trip_sigabrt_exec",  test_ssp_trip_sigabrt_exec},
+    {"46_ssp_trip_sigabrt_fork",  test_ssp_trip_sigabrt_fork},
+    {"47_ssp_no_false_trip",      test_ssp_no_false_trip},
 };
 
 int main(int argc, char **argv, char **envp)

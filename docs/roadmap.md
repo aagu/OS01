@@ -37,13 +37,13 @@
 
 ### 🔒 P1 安全加固
 
-**已完成**：getrandom、x86_64 内核栈保护、统一用户态启动方式、syscall 边界审计、exec 软链接跟随。详见 `docs/changelog.md`。
+**已完成**：getrandom、x86_64 内核栈保护、统一用户态启动方式、syscall 边界审计、exec 软链接跟随、**用户栈 canary（worktree `feat/user-stack-canary`，commits `00a98e6`..`ae472a6`，8 commits：canary_smash RED → libc SSP GREEN → canary_dump + 43/44 熵守门 → `test-user-canary` 7 步 → SKIP_STRIP busybox 符号守门 → at_random selftest RED → AT_RANDOM auxv + selftest + getauxval → LWIP_RAND 接内核 ChaCha20 + hosttest）**。详见 `docs/changelog.md`。
 
-依赖链：`getrandom ✅ → 统一用户态启动方式 ✅ → AT_RANDOM → 用户栈 canary / ASLR`；UBSan/KASan 编译期独立。
+依赖链：`getrandom ✅ → 统一用户态启动方式 ✅ → 用户栈 canary ✅ + AT_RANDOM ✅ → ASLR`；UBSan/KASan 编译期独立。
 
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
-| 用户栈 canary | libc `-fstack-protector-strong` + ELF 加载器 AT_RANDOM auxv 传种子；同批把 `LWIP_RAND` 换内核熵池 | 统一启动方式 ✅, getrandom ✅ | Linux SSP |
+| 用户栈 canary | ✅ 完成（见上） | | |
 | ASLR | mmap 基址随机化 + ET_DYN/PIE 加载随机化 | getrandom ✅ | |
 | UBSan + KASan | 内核编译期 instrument | 独立 | ArvernOS |
 | 堆加固 | malloc double-free/溢出检测 | 独立 | |
@@ -122,7 +122,7 @@
 ### 依赖链总览
 
 ```
-P1: getrandom ✅ → 统一用户态启动方式 ✅ → AT_RANDOM → canary / ASLR
+P1: getrandom ✅ → 统一用户态启动方式 ✅ → 用户栈 canary ✅ + AT_RANDOM ✅ → ASLR
 P2: PMM ✅ + log ✅ + PGD/PUD/PMD/PTE ✅ + E820 ✅ + pt_regs_t ✅ + arch_irq ✅ + rtc ✅ + SUBSYS_INITCALL ✅ + kernel_thread_entry ✅ + UEFI 残留 ✅ + 页表原语 ✅
    → head.S + MMU → GICv2 → Generic Timer
    统一 kernel_main（interrupt/SMP/context-switch 三独立 spec，arch_irq 已落地收尾）
@@ -138,7 +138,7 @@ P5: ELF ✅ → ld.so → 共享 libc → apk/musl；futex ✅ → clone → pth
 | 项 | 状态 | 说明 |
 |----|------|------|
 | sysroot 头文件级增量重编 | **仍开放** | `mk/components/kernel.mk` 仍是 genid 变化即 `-B` 全量重编；refinement：generation 内 .d 路径相对化/软链引用，使头文件变化只重编依赖者 |
-| `LWIP_RAND`/AT_RANDOM 种子 | **仍开放** | `kernel/include/net/arch/cc.h:98` 仍是 `jiffies * 1103515245 + 12345` LCG，未接内核 ChaCha20 熵池；auxv 构造已统一到 `setup_user_stack()` 单站点（仍只压 `AT_NULL`，AT_RANDOM 待压）。与 P1 用户栈 canary 同批做 |
+| `LWIP_RAND`/AT_RANDOM 种子 | **已完成**（2026-09-17，worktree `feat/user-stack-canary`） | `kernel/include/net/arch/cc.h` `LWIP_RAND()` 已替换为 `lwip_getrandom_u32()`（新文件 `kernel/net/lwip_sys_arch.c` 直接走 `get_random_bytes()` ChaCha20）；auxv 构造 `setup_user_stack()` 单站点已压 `AT_RANDOM(16B CSPRNG)` + `AT_PLATFORM("x86_64")`（commits `e35c763` + `ae472a6`） |
 
 > 旧 Parked 项（devfs mount entry / PMM 非-RAM 类型 / `__vfs_lookup_raw` consumed 路径）已分别在 `0809100` / `beb351c` / `b0c95e3` 闭环，从 Parked 表移除。
 

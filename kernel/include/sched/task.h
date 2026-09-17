@@ -400,4 +400,15 @@ int signal_pgrp(pid_t target, int sig);
 // Caller does NOT touch task_t after return.
 files_t *task_files_pin_by_pid(int pid);
 
+#ifdef OS01_SELFTEST
+/* selftest-only auxv probe (spec 2026-09-17 §7 Layer 2).
+ * Builds a fresh initial stack into a private static 2MB buffer and
+ * walks the emitted auxv, converting each a_val (user VA) into a kernel
+ * pointer inside that buffer so selftest can dereference it directly. */
+int task_selftest_auxv_probe(char *const argv[], char *const envp[],
+                             uint64_t *out_rsp, uint64_t *out_auxv_kptr,
+                             uint64_t *out_at_random_kptr,
+                             uint64_t *out_at_platform_kptr);
+#endif
+
 #endif
