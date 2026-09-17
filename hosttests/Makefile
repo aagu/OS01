@@ -80,9 +80,10 @@ TEST_BINS := \
     $(TEST_BLD)/test_bootinfo_abi.elf \
     $(TEST_BLD)/test_runtime_udivti3.elf \
     $(TEST_BLD)/test_lwip_rand.elf \
-    $(TEST_BLD)/test_gic_driver.elf
+    $(TEST_BLD)/test_gic_driver.elf \
+    $(TEST_BLD)/test_gic_marker_lines.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines
 
 all: $(TEST_BINS)
 
@@ -451,6 +452,26 @@ $(TEST_BLD)/test_gic_driver.elf: $(TEST_BLD)/test_gic_driver.o $(TEST_BLD)/gic_d
 	$(HOST_CC) -o $@ $^
 
 test_gic_driver: $(TEST_BLD)/test_gic_driver.elf
+	$<
+
+# GICv2 marker lines: source-level RED check (Task 2.1). QEMU aarch64-uefi
+# is currently blocked by thirdpart/{posix-uefi,mbedtls,lwip} submodule
+# emptiness; the marker lines that the kernel would emit are checked at
+# the source-file level instead (full RED on the missing markers, GREEN
+# once Task 2.2 wires them up in main.c / irq_probe.c).
+GIC_MARKER_CFLAGS := $(HOST_CFLAGS) -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+                     -I$(TEST_INC) -include $(TEST_MOCK)/test_platform.h
+
+$(TEST_BLD)/test_gic_marker_lines.o: $(TEST_CASES)/test_gic_marker_lines.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/gic.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/main.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GIC_MARKER_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_gic_marker_lines.elf: $(TEST_BLD)/test_gic_marker_lines.o
+	$(HOST_CC) -o $@ $<
+
+test_gic_marker_lines: $(TEST_BLD)/test_gic_marker_lines.elf
 	$<
 
 clean:

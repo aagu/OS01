@@ -226,6 +226,29 @@ def self_test() -> None:
     assert degraded_passed(current_degraded_log, expect_selftest=True), \
         "degraded_passed ignores expect_selftest"
 
+    # --expect-gic: 四条 marker 恰一条; FAIL/TIMEOUT 行拒; 漏任一拒
+    # (Task 2.1 RED fixtures — 配合 gic_evidence_ok, 上方 Task 2.2/2.3b 跑完
+    # 后会自然变成 GREEN). 当前这些 marker 都不会真在 QEMU 日志里出现,
+    # RED 阶段需保证 harness 校验逻辑正确, 所以用 self_test 锁住.
+    gic_markers = [
+        "[gic] GICv2 driver: intids=96\n",
+        "[gic] dispatch ready\n",
+        "[gic-probe] save-restore OK\n",
+        "[gic-probe] unexpected intid=40 survived\n",
+    ]
+    gic_log = current_log_for_2_cpus + "".join(gic_markers)
+    assert passed(gic_log, cpus=2, expect_gic=True), "all gic markers must pass"
+    for marker in gic_markers:
+        assert not passed(current_log_for_2_cpus + marker, cpus=2, expect_gic=True), \
+            f"missing {marker.strip()} must reject"
+    assert not passed(gic_log.replace("save-restore OK", "save-restore FAIL"),
+                      cpus=2, expect_gic=True), "clobber FAIL must reject"
+    assert not passed(gic_log.replace("intid=40 survived", "intid=40 TIMEOUT"),
+                      cpus=2, expect_gic=True), "probe TIMEOUT must reject"
+    assert not passed(gic_log + "[gic] dispatch ready\n", cpus=2, expect_gic=True), \
+        "duplicate marker must reject"
+    assert passed(gic_log, cpus=2), "expect_gic default-off keeps legacy behavior"
+
 
 def kernel_failure(text: str) -> bool:
     """Return true only for structured kernel failure diagnostics."""
@@ -260,7 +283,33 @@ def hard_kernel_failure(text: str) -> bool:
     ))
 
 
-def passed(text: str, cpus: int, expect_selftest: bool = False) -> bool:
+def gic_evidence_ok(text: str, cpus: int) -> bool:
+    """--expect-gic: GICv2 框架证据（spec §7.2, Task 2.1 RED）。
+    marker 恰一条（多打/漏打都拒）；clobber FAIL 行出现即拒；
+    unexpected 探针超时行出现即拒。cpus 参数在本 Task 暂未使用——
+    Task 3.1 在同一函数追加 IPI per-cpu 断言时消费它；先带参数定形，
+    避免 Task 3.1 再改调用链。"""
+    text = text.replace("\r", "")
+    if re.search(r"^\[gic-probe\][^\n]*\bFAIL\b", text, re.MULTILINE):
+        return False
+    if re.search(r"^\[gic-probe\][^\n]*TIMEOUT", text, re.MULTILINE):
+        return False
+    checks = [
+        (r"^\[gic\] GICv2 driver: intids=\d+$", 1),
+        (r"^\[gic\] dispatch ready$", 1),
+        (r"^\[gic-probe\] save-restore OK$", 1),
+        (r"^\[gic-probe\] unexpected intid=40 survived$", 1),
+    ]
+    for pattern, want in checks:
+        found = re.findall(pattern, text, re.MULTILINE)
+        if len(found) != want:
+            print(f"FAIL: gic evidence {pattern!r} found {len(found)}, want {want}")
+            return False
+    return True
+
+
+def passed(text: str, cpus: int, expect_selftest: bool = False,
+           expect_gic: bool = False) -> bool:
     """Recognize a complete normal-mode SMP run without QEMU dependencies."""
     # PL011 currently emits LF+CR. Match lines consistently for saved logs
     # and live serial drains, while retaining the original fixture format.
@@ -268,6 +317,8 @@ def passed(text: str, cpus: int, expect_selftest: bool = False) -> bool:
     if not ram_summary_ok(text):
         return False
     if kernel_failure(text):
+        return False
+    if expect_gic and not gic_evidence_ok(text, cpus):
         return False
     if expect_selftest:
         # Anchor on the specific topology line via re.search to avoid
@@ -381,7 +432,10 @@ def degraded_passed(text: str, expect_selftest: bool = False) -> bool:
 
 def acceptance_evidence(args: argparse.Namespace, text: str, cpus: int) -> bool:
     expect_selftest = getattr(args, "expect_selftest", False)
-    return degraded_passed(text, expect_selftest=expect_selftest) if args.expect_no_ack is not None else passed(text, cpus, expect_selftest=expect_selftest)
+    expect_gic = getattr(args, "expect_gic", False)
+    if args.expect_no_ack is not None:
+        return degraded_passed(text, expect_selftest=expect_selftest)
+    return passed(text, cpus, expect_selftest=expect_selftest, expect_gic=expect_gic)
 
 
 def qemu_command(args: argparse.Namespace, cpus: int, diagnostic_dtb: str | None) -> list[str]:
@@ -550,6 +604,10 @@ def main() -> int:
     parser.add_argument("--expect-selftest", action="store_true",
                         help="Require 'UEFI-A64: pmm alloc smoke OK' log line "
                              "between RAM summary and topology line")
+    parser.add_argument("--expect-gic", action="store_true",
+                        help="Require GICv2 framework markers: driver init, "
+                             "dispatch ready, save-restore probe OK, "
+                             "unexpected-intid survival")
     parser.add_argument("--diagnostic-dtb", metavar="PATH_OR_AUTO",
                         help="firmware does not expose DTB via EFI config table: "
                              "use acpi=off and a QEMU-generated DTB. Pass an explicit "
