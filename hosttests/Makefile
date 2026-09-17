@@ -79,9 +79,11 @@ TEST_BINS := \
     $(TEST_BLD)/test_poll_requested.elf \
     $(TEST_BLD)/test_bootinfo_abi.elf \
     $(TEST_BLD)/test_runtime_udivti3.elf \
-    $(TEST_BLD)/test_lwip_rand.elf
+    $(TEST_BLD)/test_lwip_rand.elf \
+    $(TEST_BLD)/test_gic_driver.elf \
+    $(TEST_BLD)/test_gic_marker_lines.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines
 
 all: $(TEST_BINS)
 
@@ -425,6 +427,51 @@ $(TEST_BLD)/test_lwip_rand.elf: $(TEST_BLD)/test_lwip_rand.o $(TEST_BLD)/lwip_ra
 	$(HOST_CC) -Wl,--wrap=get_random_bytes -o $@ $^
 
 test_lwip_rand: $(TEST_BLD)/test_lwip_rand.elf
+	$<
+
+# GICv2 driver hosttest: host-compile the PRODUCTION
+# kernel/arch/aarch64/gic_driver.c against mock-MMIO arrays (spec §4.1).
+# gic_driver.c is dependency-free (no arch asm, no UART logging); the
+# pt_regs type is forward-declared in <arch/aarch64/gic.h> and the test
+# never defines a pt_regs object (R1-4: dispatch cases pass NULL).
+GIC_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC)
+
+$(TEST_BLD)/gic_driver_production.o: $(TESTS_DIR)/kernel/arch/aarch64/gic_driver.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/gic.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GIC_HOST_CFLAGS) -c $< -o $@
+
+# The test TU itself must see <arch/aarch64/gic.h>; the generic
+# $(TEST_BLD)/%.o rule below lacks KERNEL_INC. Add it explicitly.
+$(TEST_BLD)/test_gic_driver.o: $(TEST_CASES)/test_gic_driver.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/gic.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GIC_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_gic_driver.elf: $(TEST_BLD)/test_gic_driver.o $(TEST_BLD)/gic_driver_production.o
+	$(HOST_CC) -o $@ $^
+
+test_gic_driver: $(TEST_BLD)/test_gic_driver.elf
+	$<
+
+# GICv2 marker lines: source-level RED check (Task 2.1). QEMU aarch64-uefi
+# is currently blocked by thirdpart/{posix-uefi,mbedtls,lwip} submodule
+# emptiness; the marker lines that the kernel would emit are checked at
+# the source-file level instead (full RED on the missing markers, GREEN
+# once Task 2.2 wires them up in main.c / irq_probe.c).
+GIC_MARKER_CFLAGS := $(HOST_CFLAGS) -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+                     -I$(TEST_INC) -include $(TEST_MOCK)/test_platform.h
+
+$(TEST_BLD)/test_gic_marker_lines.o: $(TEST_CASES)/test_gic_marker_lines.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/gic.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/main.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GIC_MARKER_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_gic_marker_lines.elf: $(TEST_BLD)/test_gic_marker_lines.o
+	$(HOST_CC) -o $@ $<
+
+test_gic_marker_lines: $(TEST_BLD)/test_gic_marker_lines.elf
 	$<
 
 clean:

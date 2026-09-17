@@ -1,0 +1,738 @@
+---
+title: OS01 aarch64 GICv2 通用中断框架 Phase 1 设计
+created: 2026-09-17
+updated: 2026-09-17 (R1 修订 → R2 修订 → R3 修订 → R4 修订)
+type: spec
+status: draft-v5（R4 评审 NEEDS_REVISION → 4 条全数落地，待 R5）
+version: 5
+tags: [osdev, aarch64, gic, interrupt, kernel]
+phase: GICv2 Phase 1（QEMU virt UEFI 路径）
+related: [2026-08-29-aarch64-phase1-design, os01-roadmap P2]
+---
+
+# OS01 aarch64 GICv2 通用中断框架 Phase 1 设计
+
+> **目标**：把 aarch64 现状"单一 CNTP PPI 30 硬编码 ISR"泛化为一个通用 GICv2 中断框架——
+> (1) 寄存器访问抽象 + SGI/PPI/SPI 分类 + enable/disable + handler 注册表；
+> (2) entry.S 全量通用寄存器 save/restore + aarch64 `pt_regs_t`（对齐 x86_64 facade 模式）+ 通用 IRQ dispatch；
+> (3) 一个真实 SPI 中断源（PL011 RX，INTID 33）走 handler 表；
+> (4) SGI/IPI：GICD_SGIR 发送 + 跨核 handler，SMP 1/2/4 验证；
+> (5) 架构范式与 x86_64 中断路径镜像对齐（但不编 kernel core，不进调度器）。
+>
+> **v2 修订记录（R1，codex 评审 9 条落地 7 条，余 2 条在 v3 收口）**：
+> R1-1 dispatch 切换改为"过渡 shim 保链接"（§4.2）；R1-2 unexpected 探针必须
+> enable+route+拆除（§7.3）；R1-3 `gic_driver_set_unexpected` 补定义进 API（§4.1）；
+> R1-5 SPI 测试拆 RED/GREEN 两段（§7.4，**R2 收口**：修 harness --self-test fixture，R2-1）；
+> R1-6 IPI 计数/release-acquire 用项目既有 stlr/ldar + arch_atomic API 并写明内存序（§7.5）；
+> R1-7 删除 x86 build 验证、边界核查改为源级 diff（§6）；R1-8 全部行数引用重核（§3）；
+> R1-9 增加 CPUID 保留的可观测钩子（**R2 收口**：IAR trace 改 per-CPU 槽，消除跨核
+> 覆写竞态，R2-6；§2.3/§7.5/§8 R2）。
+>
+> **v3 修订记录（R2，7 条全落地）**：
+> R2-1 SPI harness --self-test fixture 修正（注入窗口用例输入只含 armed 行，plan Task 2.3a）；
+> R2-2 hosttest INTID 33 的 IPRIORITYR/ITARGETSR 断言偏移 +8→+32（plan Task 1.1）；
+> R2-3 `intids` marker 独占一行（§7.2）；R2-4 clobber 探针改确定性 trampoline——
+> 自发 SGI 2 触发真实 IRQ，判据 = AAPCS64 实参寄存器 x0-x2 架构性必然被销毁（§7.3）；
+> R2-5 unexpected 探针改"观察递送恰一次"（回调计数 + release flag，§7.3）；
+> R2-6 IAR trace 改 per-CPU 槽 `trace_iar[cpu]`（`gic_driver_set_cpu_index` 注入
+> TPIDR 实现，§2.3/§4.1/§7.5）；R2-7 §7.5 引用改 aarch64_percpu.h:93-115。
+>
+> **v4 修订记录（R3，1 条全落地）**：
+> R3-1 IPI 跨核发布屏障：plan Task 3.2 `gic_ipi_test()` 在两次
+> `gic_register_handler()` 成功后、首次 `gic_send_sgi()` 前调
+> `arch_publish_handler_table()`，发布 handler 表给被 SGI 唤醒的 AP。IPI harness
+> 断言保持严格恰一次（received==1 / summary targets=received / raw_iar==0x401
+> 恰一条，cpus≥2），不允许多次——多余即 FAIL（不假阳、不假阴，spec §7.5 + §8）。
+>
+> **v5 修订记录（R4，4 条全落地）**：
+> R4-1 wrapper 完整 header 代码：plan Task 3.2 步骤里 `kernel/include/arch/aarch64/gic_pub.h`
+> 给出 static inline 完整定义（`__asm__ __volatile__("dsb ishst" ::: "memory")`），
+> 配合 Task 步骤里精确调用行（`arch_publish_handler_table();` 在 register 成功与
+> send_sgi 之间）；R4-2 wrapper 改放 `kernel/include/arch/aarch64/gic_pub.h`
+> （**仅 aarch64 头**），不进 `kernel/include/arch/barrier.h`（后者被
+> `kernel/driver/e1000.c:9` include，改它破坏"x86 编译输入逐字节不变"边界）；
+> R4-3 §7.5 头注释明确 `dsb ishst` = "完成 + 指令边界"语义（vs `dmb ishst` 仅排序），
+> 并说明这是有意的较强选择（SGIR 写前必须保证 handler 表全局可见，省去再配对屏障）；
+> R4-4 文档交叉引用 v3/R2 → v4/R3；cntp 描述纠正为"仅 BSP 接收（AP CNTP disabled
+> in smp.c:209/224）"，注册时机在 `smp_boot_aps()` 后但跨核问题不存在。
+>
+> 衔接 `docs/superpowers/specs/2026-08-29-aarch64-phase1-design.md`（下称"phase1 spec"）：
+> 该 spec 交付了 QEMU virt 上的 UEFI 启动 + SMP(PSCI) + CNTP 100 Hz tick + 最小 GICv2 配置（只开 PPI 30），
+> 并在 §0"明确不做"中把"完整 GICv2 驱动"推迟——本 spec 就是那一项的兑现。
+
+---
+
+## 1. 背景与动机
+
+### 1.1 现状一句话
+
+aarch64 侧的中断路径是**教学式最小实现**：`entry.S` 的 EL1h IRQ 槽不保存任何通用寄存器，
+直接 `bl el1_irq_dispatch`（kernel/arch/aarch64/entry.S:78）；`el1_irq_dispatch` 在
+time.c 里把 INTID 与 `dtb_cntp_ppi()` 硬编码比较（kernel/arch/aarch64/time.c:100-115），
+除 PPI 30 之外任何中断都被当"misconfiguration"打日志后丢弃。没有 handler 注册表，
+没有 SPI 通路，没有 SGI/IPI，没有 `pt_regs_t` 落地（结构体已声明但从未填充）。
+
+### 1.2 为什么要现在做
+
+- **roadmap §P2（docs/roadmap.md:52-70）** 的中期目标是"中断/异常 dispatch 统一"：
+  `arch_irq_dispatch` 单入口抽象，x86_64 IDT 与 aarch64 VBAR_EL1 各自封装。
+  x86_64 侧的 weak-default + strong-override 钩子（kernel/include/arch/irq.h:31-47）
+  早已落地并在 roadmap 标 ✅，aarch64 侧只剩一个 20 行的占位 trap.c
+  （kernel/arch/aarch64/trap.c:17-20）。本 Phase 把 aarch64 侧的中断骨架补齐到
+  "能对齐 x86_64 范式"的形态，为 Phase 2（tick 接 kernel core jiffies、syscall/EL0、
+  调度器集成）铺路。
+- ** SMP 已就位但无法跨核通信**：PSCI CPU_ON、per-CPU 槽、spinlock benchmark 全部可用
+  （kernel/arch/aarch64/smp.c:127-202），但 AP 上线后 `secondary_idle` 直接
+  `for(;;) arch_cpu_halt()`（smp.c:225），DAIF 全掩（head.S:585/609）——没有 IPI 通路，
+  后续 TLB shootdown / 抢占调度 / RCU 式同步都无从谈起。
+- ** entry.S 零保存是最大单点风险**：当前能跑纯粹是因为被打断的代码
+  （`aarch64_main` 末尾的 `for(;;) arch_cpu_halt()`，main.c:263）不依赖跨中断点的
+  caller-saved 寄存器。任何后续内核代码（调度器、syscall、甚至更复杂的打印路径）
+  一旦在 x0-x18 里持有活值就会静默损坏。这个雷必须在铺更多功能前排掉。
+
+### 1.3 与 2026-08-29 phase1 spec 的关系
+
+| phase1 spec 交付 | 本 spec 复用/改造 |
+|---|---|
+| UEFI pflash 启动链（BOOTAA64.EFI + kernel.elf FAT 镜像） | 原样复用（构建路径不变） |
+| 16 槽 VBAR_EL1 向量表（entry.S） | EL1h IRQ 槽从"零保存 bl"改为全量 save/restore + `b el1_irq_entry` |
+| DTB 校验（gicd=0x08000000 / gicc=0x08010000 / pl011=0x09000000 / cntp_ppi=30） | 原样复用，新增 pl011 `interrupts` 解析出 SPI 33 |
+| 最小 GICv2（只开 PPI 30） | 泛化为通用 driver + handler 表 |
+| CNTP 100 Hz tick ISR（硬编码 intid） | 改为注册进 handler 表的第一个消费者 |
+| SMP PSCI + spinlock benchmark | 原样复用；AP 尾循环改为开 IRQ 以接收 IPI |
+| 测试通路 `test-aarch64-uefi-smp` | 扩展 `--expect-gic` 断言 + 新增 SPI 注入 harness |
+
+phase1 spec §2.3 定下的 ISR 顺序契约（先重装 TVAL、再 EOI、最后打印）在本 Phase 保持
+"TVAL 重装最先"的核心不变，EOI 统一移交 dispatch（在 handler 返回后执行，见 §4.2 注）。
+
+---
+
+## 2. GICv2 硬件模型（QEMU `virt,gic-version=2` 视角）
+
+实现参考 ARM IHI 0048B（GICv2）。本节只列 Phase 1 用到的语义，不追求完备。
+
+### 2.1 两级结构
+
+```
+        CPU0 GICC    CPU1 GICC    CPU2 GICC ...
+            ^            ^            ^
+            | (banked 视角) |            |
+        +---+------------+------------+---+
+        |        GIC Distributor (GICD)     |
+        |  全局 SPI 状态 + 每核 banked SGI/PPI |
+        +------------------------------------+
+```
+
+- **GICD（Distributor）**：全局配置 + 路由。GICD_CTLR bit0 = 全局使能（gic.c:34 已开）。
+  SGI/PPI 的 IGROUPR/IPRIORITYR/ISENABLER 等"每 INTID 寄存器组"是 **banked** 的——
+  每个 CPU 接口看到自己的一份（这正是 `gic_cpu_init()` 在每个核上各跑一次的原因，
+  BSP 在 gic.c:35，AP 在 smp.c:208）。
+- **GICC（CPU Interface）**：每核私有。GICC_PMR 优先级掩码（当前 0xff，gic.c:22）、
+  GICC_CTLR bit0 使能（gic.c:23）、GICC_IAR 应答读、GICC_EOIR 完成写。
+
+### 2.2 INTID 分类（Phase 1 需要的完整分类函数）
+
+| 区间 | 类型 | banking | 路由 | Phase 1 用途 |
+|---|---|---|---|---|
+| 0-15 | SGI | 每核 banked | 软件指定（GICD_SGIR） | IPI（G5） |
+| 16-31 | PPI | 每核 banked | 物理连线固定到本核 | CNTP tick（PPI 30，dtb_cntp_ppi()） |
+| 32-1019 | SPI | 全局 | GICD_ITARGETSR 指定核集合 | PL011 RX（INTID 33）；探针 SPI 40 |
+| 1020-1021 | 特殊 | — | — | 拒绝 |
+| 1022 | 特殊（v2） | — | — | 拒绝 |
+| 1023 | spurious | — | — | IAR 读到即静默返回（time.c:102-104 已处理） |
+
+`gic_irq_type(intid)` 返回 `{INVALID, SGI, PPI, SPI}`，是 driver 的公共分类原语。
+
+**SPI 递送的先决条件（R1-2）**：一个 SPI 只有在 ISENABLER 置位（enable）且
+ITARGETSR 指向至少一个核（route）之后，才会被递送到 CPU interface。
+仅写 GICD_ISPENDR 置 pending 的 **disabled/unrouted SPI 永远不会被递送**——
+软件置 pending 只是把它标记为 pending 状态。因此"软件注入 SPI"测试必须
+`config(enable, prio, targets)` → `set_pending` → 观察递送 → `disable` +
+`clear_pending`（GICD_ICPENDR，偏移 0x280，reg.h:34 已定义）拆除。
+
+### 2.3 IAR / EOIR 与"潜伏优先级"
+
+- **IAR 读的副作用是 drop priority**：读 GICC_IAR 把该 INTID 的运行优先级压栈
+  （进入 active 状态）。**EOIR 写的副作用是 deactivate**（弹栈）。
+  在 IAR 与 EOIR 之间，同优先级及更低优先级的中断被屏蔽——Phase 1 不做中断嵌套，
+  dispatch 全程保持 IRQ masked（异常进入时硬件自动 set DAIF.I），这天然安全。
+  这也意味着 dispatch 是**每核串行**的：IAR 读与 handler 执行之间不会有同核的
+  其他 dispatch 插入——§7.5 的 per-CPU IAR trace 正是利用这一点做到无竞态。
+- **EOIR 必须写回"IAR 读到的原始值"**：IAR bits[12:10] 是 CPUID（仅 SGI 有意义），
+  EOIR 写值若丢了 CPUID 位，SGI 的 deactivate 会被路由到错误的 CPU 接口。
+  **现状缺陷（D7）**：time.c:110/119 写 `gicc_write32(GICC_EOIR, intid)` 只回写了低 10 位
+  ——对 PPI 恰好无害（PPI 的 CPUID 位为 0），但 SGI 路径是 latent bug。本 Phase 的
+  `gic_eoi(dev, iar)` 接收**完整 IAR 值**并原样写回。
+  **CPUID 保留的可观测性（R1-9，R2-6 收口）做三层**：
+  1. hosttest `suite_ack_eoi`：EOIR mock == IAR 原值（含 CPUID 位）；
+  2. hosttest dispatch-CPUID case：IAR 预置 `(3<<10)|7`，走**真实 `gic_dev_dispatch` 路径**，
+     断言 handler 收到 intid=7 且 EOIR mock == 0xC07；
+  3. E2E：IAR trace 是 **per-CPU 槽** `trace_iar[cpu]`（driver 经
+     `gic_driver_set_cpu_index` 注入的"读本核逻辑号"实现——wrapper 用 TPIDR_EL1 槽、
+     hosttest 用 mock——在 `gic_ack` 里把原始 IAR 写**本核槽**；跨核 ack 写各自槽，
+     互不覆写）。IPI 测试中 AP1 回发 SGI 1 给 BSP，BSP 的 SGI-1 handler **在 handler
+     上下文里**读 `gic_dbg_last_iar()`（= 本核槽：同核 dispatch 串行 + IRQ masked 无
+     嵌套 ⇒ 读到的必是本 SGI 的原始 IAR）并打印 `[ipi] bsp raw_iar=0x401`——非零
+     CPUID（bit10=来源核 1）真实穿越了 ack 路径，而 EOIR 写回与 ack 用的是同一变量
+     （结构性一致，由 1/2 两层 mock 把守）。
+     R2-6 修正说明：v2 的单槽 `dev->dbg_last_iar` 存在跨核覆写竞态（"每核串行"
+     不排除跨核并发的 ack），v3 改 per-CPU 槽后消除；单槽字段保留作 hosttest 的
+     默认路径（未注入 cpu-index hook 时 `gic_ack` 照写）。
+- **handler 在 EOI 之前执行**：对 level 触发的 PL011 RX，handler 里清设备中断源
+  （读 DR / 写 ICR）必须发生在 EOI 前，否则 EOI 后同一 level 会立刻再次 pending。
+  phase1 spec §2.3 的"TVAL 重装先于 EOI"是同一原理。
+
+### 2.4 GICD_SGIR（软件生成中断）
+
+写 GICD_SGIR（reg.h:39 已有偏移 0xF00）触发 SGI：
+
+```
+bit[25:24] TargetListFilter:  0b00 = 用 bits[23:16] 的目标列表
+                              0b01 = 发给除自己外的所有核（All others）
+                              0b10 = 只发给自己
+bits[23:16] CPUTargetList:    Aff0 CPU 接口位图（filter=0b00 时有效）
+bits[3:0]   SGIINTID:         SGI 编号 0-15
+```
+
+IPI 测试主路径用 filter=0b01（All others）一次广播所有 AP；AP1 的回发确认用
+filter=0b00 + targets=0x01（只发 BSP），使 BSP 收到**非零 CPUID** 的 SGI（§2.3 R1-9）。
+
+### 2.5 Phase 1 用到的 GICD 每芯 INTID 寄存器组
+
+| 寄存器 | 偏移 | 密度 | 语义 |
+|---|---|---|---|
+| GICD_IGROUPR | 0x080 | 1 bit/INTID | 组 0（secure）/组 1。QEMU 无 EL3，统一清 0（沿用 gic.c:16 的做法） |
+| GICD_ISENABLER | 0x100 | 1 bit/INTID | 写 1 使能（写 0 无副作用）——**递送先决条件**（§2.2 R1-2） |
+| GICD_ICENABLER | 0x180 | 1 bit/INTID | 写 1 禁用 |
+| GICD_ISPENDR | 0x200 | 1 bit/INTID | 软件置 pending（测试注入；仅对已 enable+route 的 SPI 有效） |
+| GICD_ICPENDR | 0x280 | 1 bit/INTID | 软件清 pending（测试拆除，R1-2） |
+| GICD_IPRIORITYR | 0x400 | 1 byte/INTID | 值越小优先级越高；Phase 1 统一 0x00 |
+| GICD_ITARGETSR | 0x800 | 1 byte/INTID | SPI 目核位图（bit0=cpu0...）；SGI/PPI 只读 banked——**递送先决条件** |
+| GICD_TYPER | 0x004 | RO | bits[4:0] ITLinesNumber：`(v+1)*32` = 实现的总 INTID 线数 |
+
+以上偏移全部已在 `kernel/arch/aarch64/reg.h:27-39` 定义（含未用过的 ICENABLER/ISPENDR/
+ICPENDR/ITARGETSR/SGIR）——**driver 不需要新增任何寄存器常量**，只需要不再经由 reg.h:70-88
+那组**硬编码基址**的 inline 访问器（见 §3 缺口 D4）。
+
+---
+
+## 3. 现状代码审计（真实 line number；v2 全量重核，R1-8）
+
+### 3.1 kernel/arch/aarch64/gic.c（43 行）
+
+| 行号 | 现状行为 |
+|---|---|
+| 9-25 | `gic_cpu_init()`：banked PPI 配置——IGROUPR 清组位（16）、IPRIORITYR 清优先级字节（17-19）、ISENABLER 置位（21）、GICC PMR=0xff + CTLR=1（22-23）、`dsb sy; isb`（24）。**只处理 CNTP intid 一个中断**，函数名暗示通用实则专用 |
+| 13-14 | 基址来自 `dtb_gicd_base()/dtb_gicc_base()`——DTB 校验过（见 §3.6） |
+| 27-43 | `gic_init()`：GICD_IIDR==0 则打日志 `wfi` 死循环（30-33）；GICD_CTLR=1（34）；调 gic_cpu_init（35）；打印基址与 PPI 号，**并明说 "SPI 33 NOT enabled"（42）** |
+| — | 无 handler 注册、无 SPI/SGI 能力、无 IAR/EOIR（那两个在 time.c 里） |
+
+### 3.2 kernel/arch/aarch64/entry.S（116 行）
+
+| 行号 | 现状行为 |
+|---|---|
+| 35-39 | `.section .text.entry`，`.balign 0x800`，`exception_vectors` 16 槽表 |
+| 41-116 | 其余 15 个槽全部 `b .` 死循环（43/47/51/55/59/63/67/71/83/87/91/95/99/103/107/111/115 各槽） |
+| 61-79 | EL1h IRQ 槽（偏移 +0x280）：注释明说 "We don't need to save any additional state in phase 1"（64-66）；`bl el1_irq_dispatch`（78）+ `eret`（79）。**零通用寄存器保存**——依赖 AAPCS64 callee-saved 约定（x19-x28 由 C 被调方保存）+ 硬件 ELR/SPSR 自动保存；x0-x18（caller-saved）在异步中断点持有的任何活值都会被 C dispatch 静默毁掉 |
+| 74-75 | 注释承认 `bl` 会毁 LR，靠 `eret` 读 ELR_EL1 兜底——正确但仅在最窄的意义上 |
+
+`main.c:188-189` 在 PL011 初始化后用 `msr vbar_el1` 安装本表（BSP）；
+AP 在 head.S:660-662 安装同一张表（MMU 打开后）。
+
+### 3.3 kernel/arch/aarch64/time.c（133 行）
+
+| 行号 | 现状行为 |
+|---|---|
+| 32-33 | `HZ=100`、`TICKS_PER_SECOND` |
+| 39 | `static volatile uint64_t g_ticks`——每 tick ++，每 100 次（每秒）打印 `[tick] N`（127-131）。这是 SMP harness 的终止判据之一（aarch64_uefi_smp.py:348 要求 ≥3 个 `[tick]` 行） |
+| 46-84 | `arch_tick_start()`：CNTFRQ/HZ 算 period、装 TVAL、CNTP_CTL EN=1 IMASK=0、回读校验、打印 `[cntp] freq=...` |
+| 96-133 | `el1_irq_dispatch()`：读 IAR（98，**经 reg.h:85-88 的硬编码 GICC_BASE 访问器**）；1023 spurious 返回 0（102-104）；`intid != expected` → EOI 后打 `[gic] unexpected IRQ intid=N`（105-115）；命中 → 重装 TVAL（118）、EOI（119，**只写低 10 位**，见 §2.3 D7）、per-second 打印（125-131） |
+| 100 | `expected = dtb_cntp_ppi()`——**handler 逻辑与具体设备耦合**，没有注册机制 |
+
+### 3.4 kernel/arch/aarch64/trap.c（20 行）
+
+- 17-20：`arch_install_exception_vectors()` 是 no-op 占位；注释（4-11）说明这是
+  "future home for ESR_EL1/FAR_EL1 decoding"。**本 Phase 把通用 IRQ dispatch 落在这里**，
+  sync exception 解码仍留给 Phase 2。
+
+### 3.5 kernel/arch/aarch64/smp.c（226 行）与 head.S（755 行）
+
+- smp.c:204-226 `secondary_idle(cpu_id)`：AP 的 C 入口。208 `gic_cpu_init()`（banked
+  PPI/GICC 使能）；209 关本核 CNTP；212-218 等待 `boot_go` 命令；219-220 跑
+  spinlock benchmark；224 再次关 CNTP；**225 `for(;;) arch_cpu_halt()`（wfi），且全程
+  DAIF 掩死（head.S:585/609 `daifset #0xf`，此后从未清过）**——IPI 需要在这里开
+  DAIF.I。
+- head.S:580-672 `secondary_start`：EL2→EL1 降级、MPIDR/槽/栈校验、设 TPIDR_EL1
+  （650，指向 `aarch64_boot_percpu[cpu_id]` 槽——IPI handler 取本核逻辑号的现成途径）、
+  MMU on、换 `exception_vectors`（660-662）、`blr secondary_idle`（666-668）。
+  BSP 侧 TPIDR_EL1 由 `setup_bsp_stack_and_tpidr`（head.S:297 调用，312-323 实现）
+  同样设置——**所有核都可用 TPIDR_EL1 反查逻辑 CPU 号**。
+
+### 3.6 DTB 解析（dtb.c 83 行 / dtb_parse.c 279 行）
+
+- dtb.c:16-19 暴露 `dtb_gicd_base()/dtb_gicc_base()/dtb_pl011_base()/dtb_cntp_ppi()`。
+- **dtb_parse.c:115-121 并不真正解析 GIC `reg`**：它用 `device_reg(n,0,0x08000000)` /
+  `device_reg(n,1,0x08010000)` 校验后**硬编码回填**同样的值（119-120），compatible 只认
+  `"arm,cortex-a15-gic"`（115）——即"DTB 校验 + QEMU virt 固定值"，不是通用解析。
+- pl011 节点（122-127）同样只校验 reg=0x09000000；**`interrupts` 属性（含 SPI 33 信息）
+  目前完全不解析**——本 Phase 补上（INTID = 32 + DTB 第二个 word）。
+- timer 节点（128-135）校验 interrupts 形状后固定 `cntp_ppi=30`（134）。
+
+### 3.7 构建/测试通路（真实路径，纠正任务描述里的三处未验证路径）
+
+| 任务描述里的路径 | 实际情况 |
+|---|---|
+| `mk/components/aarch64.mk` | **不存在**。aarch64 构件规则在 `mk/components/image.mk:96-164`（kernel artifact / QEMU_EFI.fd / aarch64-uefi.img）与 `mk/components/run.mk:104-195`（run/test targets） |
+| `mk/qemu.mk` | **不存在**。QEMU 命令全在 `mk/components/run.mk`（aarch64 段 125-148）与 `qemutests/aarch64_uefi_smp.py:387-398` |
+| `thirdpart/aarch64/inc/aarch64.h` | **不存在**。`thirdpart/` 下只有 busybox/lwip/mbedtls/posix-uefi。GICv2 寄存器常量的真身在 `kernel/arch/aarch64/reg.h:18-65` |
+
+其余已核实的关键事实：
+
+- `kernel/Makefile:42-43`：aarch64 白名单 `KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c`；
+  `kernel/Makefile:70-71` `ARCH_C_SOURCES := $(wildcard $(ARCHDIR)/*.c)` ——**在
+  kernel/arch/aarch64/ 下新增的 .c 会自动编进内核**，无需改 Makefile。
+  aarch64 **不编** kernel/core、kernel/intr、selftest/systest（kernel/Makefile:44-67）。
+- `kernel/arch/aarch64/make.config:9-10`：`clang -target aarch64-none-elf` +
+  `ld.lld -m aarch64elf`；16-17 `-march=armv8-a -ffreestanding -mgeneral-regs-only -fno-pie`。
+- `mk/components/run.mk:161-172`：`test-aarch64-uefi-smp` 先 `$(MAKE) KERNEL_SELFTEST=1
+  aarch64-uefi`（165），再跑 `python3 qemutests/aarch64_uefi_smp.py --cpus 1 2 4 --repeat 3
+  --timeout 90 --expect-selftest --diagnostic-dtb=auto ...`（166-172）。
+  KERNEL_SELFTEST=1 经 kernel/Makefile:192-194 变成 `-DOS01_SELFTEST=1`——
+  **新探针代码的编译门**。
+- QEMU 启动形态（run.mk:143-148 / aarch64_uefi_smp.py:387-398）：UEFI pflash 引导
+  （`-drive if=pflash,...QEMU_EFI.fd` + FAT 镜像里的 BOOTAA64.EFI），**不是**
+  `-kernel boot.bin`；机器型号 `virt,gic-version=2`，CPU cortex-a53，m 512，
+  DTB 用 `--diagnostic-dtb=auto` 逐 case 生成（406-439）。
+- harness 断言模式（aarch64_uefi_smp.py:263-348 `passed()`）：RAM summary 唯一且算术
+  自洽、`[smp] topology/cpum/summary`、逐核 spinlock done、`[smp-test] no_ack_cpu=0`、
+  `[tick] N` ≥3 行；`--expect-selftest` 额外要求 RAM 与 topology 行之间恰有一条
+  `UEFI-A64: pmm alloc smoke OK` + 一条 `pt map smoke OK`（272-325）。
+  `--self-test` 模式（541-562）先跑纯 Python fixture 断言——新断言逻辑必须先在这里红。
+- hosttests 注册模式：`hosttests/Makefile` TEST_BINS 列表（62-82 行）+
+  逐 case 的 `.o`/`.elf` 规则 + PHONY 便捷 target（参考 test_lwip_rand 尾部规则）；
+  断言宏来自 `hosttests/include/test_framework.h`（assert_true/assert_eq...）。
+  hosttests 只能在 repo 根用 `PROFILE=aarch64-clang OS01_PROFILE_FILE=$PWD/mk/profiles/aarch64-clang.mk
+  make -C hosttests <target>` 直连调用（root 的 `test` target 被 rootfs capability 门挡住，
+  run.mk:258）。
+- 项目既有原子/屏障 API（R1-6 用）：`kernel/include/arch/atomic.h:43-110` 提供
+  aarch64 的 `arch_atomic_fetch_add`（ldxr/stxr RMW）、`arch_atomic_write`
+  （ldaxr/stlxr，RELEASE store）、`arch_atomic_cas`（acquire/release）；
+  `kernel/arch/aarch64/aarch64_percpu.h:88-115` 已有 **stlr/ldar release-store/
+  acquire-load** 的 32 位 helper 先例（boot_online_set/get、boot_go_set/get、
+  bench_done_set/get）——IPI 计数协议直接沿用该模式（§7.5）。
+
+### 3.8 x86_64 中断范式（镜像对象，全部只读不改）
+
+| 层 | x86_64 真实位置 | aarch64 Phase 1 对应物 |
+|---|---|---|
+| pt_regs_t | `kernel/include/arch/x86_64/regs.h:18-44`（字段顺序=INTR_SAVE_ALL 压栈序，注释 14-16 明说契约）；facade `kernel/include/arch/regs.h:25-31` | `kernel/include/arch/aarch64/regs.h:19-28` **已存在但缺 x30**，且无任何 .S 填充它 |
+| 向量桩（save/restore） | `kernel/arch/x86_64/irq.c:14-55` Build_IRQ 生成的汇编桩（push 序列 + `jmp arch_irq_dispatch`，rdi=pt_regs*, rsi=vector）；RESTORE_ALL 在 `kernel/arch/x86_64/entry.S:28-49` | entry.S EL1h IRQ 槽 + `el1_irq_entry` save/restore 序列（本 Phase 新增） |
+| arch dispatch 钩子 | `kernel/include/arch/irq.h:47` `arch_irq_dispatch(pt_regs_t*, uint64_t hwirq)` 声明；strong 实现在 `kernel/arch/x86_64/irq_hooks.c:65-85`（vector→gsi→irq_table 查 handler→ack） | trap.c `el1_irq(struct pt_regs*)` → `gic_dev_dispatch()`（driver 内，hosttest 可测） |
+| 中性 handler 表 | `kernel/include/intr/interrupt.h:27-35` irq_desc_t + 50-52 register_irq；`kernel/intr/dispatch.c:9-10` intr_handler_table[256] | aarch64 不编 kernel/intr——handler 表内嵌在 aarch64 gic driver 里，签名对齐 `(nr, param, regs)` |
+| 控制器 ops | hw_int_controller_t（interrupt.h:16-25，enable/disable/install/ack 函数指针） | Phase 1 以直接函数 API 呈现（gic_irq_enable 等），ops 结构体化留给 kernel/intr 接入时（Phase 2+） |
+| 中断状态原语 | arch/irq.h:52-66 sti/cli/save/restore | arch/irq.h:88-109 **已存在**（daifclr bit1，注释 79-86 还记载了"I 是 imm 的 bit1 不是 bit2"的经典坑）——原样复用 |
+
+### 3.9 缺口汇总表
+
+| # | 缺口 | 位置 | 后果 |
+|---|---|---|---|
+| D1 | entry.S 零寄存器保存 | entry.S:61-79 | 任何依赖 x0-x18 跨中断点的代码静默损坏（最大单点） |
+| D2 | pt_regs_t 声明但无 x30、无填充者 | include/arch/aarch64/regs.h:19-28 | facade 模式空转；未来 syscall/信号无法落地 |
+| D3 | ISR 与设备硬编码耦合 | time.c:96-133 | 加任何新中断源都要改 dispatch 本体 |
+| D4 | MMIO 访问器硬编码基址 | reg.h:70-88（time.c:98 在用） | 与 gic.c:13-14 的 DTB 基址路径不一致；不可 mock、不可 hosttest |
+| D5 | 无 SPI 通路 | gic.c:42 明说 SPI 33 NOT enabled | PL011 只能轮询输出，RX 中断不可用 |
+| D6 | 无 SGI/IPI | 全 aarch64 无 GICD_SGIR 写 | 跨核通信缺失 |
+| D7 | EOIR 丢 CPUID 位 | time.c:110/119 | SGI 路径 latent bug（本 Phase 修，三层可观测验证见 §2.3） |
+| D8 | AP 永久掩中断 | head.S:585/609 + smp.c:225 | IPI 无从接收 |
+| D9 | trap.c 是 no-op | trap.c:17-20 | 无 dispatch 落点 |
+| D10 | dtb 不解析 pl011 interrupts | dtb_parse.c:122-127 | SPI 33 只能硬编码（本 Phase 补解析） |
+
+---
+
+## 4. 目标架构
+
+### 4.1 分层
+
+```
+┌────────────────────────────────────────────────────────────┐
+│ 消费者：cntp tick handler（time.c）/ SPI 测试 handler /      │
+│         ipi handler（新 ipi_test.c）                        │
+│   签名统一：void fn(uint32_t intid, uint64_t param,          │
+│                     struct pt_regs *regs)                   │
+├────────────────────────────────────────────────────────────┤
+│ handler 注册表（gic_driver.c 模块级全局）                    │
+│   gic_register_handler / gic_get_handler / unregister       │
+├────────────────────────────────────────────────────────────┤
+│ 通用 dispatch（gic_driver.c::gic_dev_dispatch，hosttest 可测）│
+│   IAR 读 → 1023 静默返 → 查表 → handler(intid,param,regs)    │
+│   → 无 handler 走 unexpected_cb 回调 → EOIR 写回完整 IAR     │
+├────────────────────────────────────────────────────────────┤
+│ hw 访问层（gic_driver.c，全部经 struct gic_dev 的指针）       │
+│   gic_dev_init / dist/cpu enable / irq_config(enable,prio,  │
+│   targets) / irq_type 分类 / ack(+per-CPU IAR trace) / eoi / │
+│   send_sgi / set_pending + clear_pending（测试注入/拆除）/   │
+│   set_unexpected 回调注入 + set_cpu_index/trace_get          │
+│   （R1-3/R2-6：定义与声明同在 gic.h/gic_driver.c）            │
+├────────────────────────────────────────────────────────────┤
+│ 生产 wrapper（gic.c 改造）：static struct gic_dev 挂 DTB 基址 │
+│   gic_init() / gic_cpu_init() 签名不变（main.c/smp.c 不动）  │
+└────────────────────────────────────────────────────────────┘
+        ▲ 异常入口：entry.S el1_irq_entry（全量 save/restore）
+        ▲ trap.c el1_irq(regs) —— 三行壳，调 gic_dev_dispatch
+```
+
+设计规则：
+
+- **hw 层不落任何 UART 日志**（只返回错误码 + unexpected 回调注入）——这是 hosttest
+  能直接编译真实源文件的前提（镜像 test_lwip_rand 对 kernel/net/lwip_sys_arch.c 的做法）。
+  unexpected 打印由生产 wrapper 通过 `gic_driver_set_unexpected(cb)` 注入（声明与定义
+  唯一来源：gic.h / gic_driver.c，R1-3）。
+- **driver 源文件是 `kernel/arch/aarch64/gic_driver.c`**，头文件
+  `kernel/include/arch/aarch64/gic.h`。kernel/Makefile:70 的 wildcard 自动把它编进内核。
+- handler 表是**模块级全局、非 per-CPU**（Phase 1 无调度器/无 percpu_t）；SGI 0/1/2 的
+  handler 在所有核共享同一表项，handler 内部用 TPIDR_EL1 区分收到者。
+- 对齐 x86_64 的 `hw_int_controller_t`（interrupt.h:16-25）暂不做函数指针化——那是
+  kernel/intr 接入时（Phase 2+）的事；本 Phase 保持直接函数 API，边界见 §6。
+
+### 4.2 entry.S save/restore + 通用 dispatch 流程（文字流程图）
+
+**dispatch 切换的链接安全（R1-1）**：旧 entry.S 槽 6（entry.S:78）直接 `bl el1_irq_dispatch`。
+重构顺序必须是：time.c 先保留一个**过渡 shim** `el1_irq_dispatch()`（内部调
+`gic_dev_dispatch(gic_dev_current(), NULL)`——旧入口本就不保存寄存器，NULL 语义等价），
+使 RED 阶段（探针打 FAIL 时）内核可链接可运行；entry.S 替换为 `b el1_irq_entry` 的
+**同一变更内**删除 shim。绝不允许"先删符号后换入口"的中间提交存在。
+
+```
+IRQ (EL1h, SP_EL1)
+ └─ 硬件: ELR_EL1←返回PC, SPSR_EL1←PSTATE, DAIF.I 置位, SP 保持 SP_EL1
+ └─ 向量表 +0x280: b el1_irq_entry            （槽内只放这一条，≤0x80 字节约束）
+     el1_irq_entry:
+       sub  sp, sp, #PT_REGS_SIZE(272)          ; 保持 16 字节对齐
+       stp  x0,x1  .. stp x28,x29              ; 15 对 stp，偏移 0..224
+       str  x30, [sp,#240]
+       mrs  x1, spsr_el1; str [sp,#264]         ; 系统状态
+       mrs  x1, elr_el1; str [sp,#256]
+       mrs  x1, sp_el0;  str [sp,#248]          ; 无条件保存（EL1h 下 SP_EL0 未用
+                                                ;  但保存/恢复无害且为 EL0 铺路）
+       mov  x0, sp
+       bl   el1_irq                             ; trap.c
+         └─ gic_dev_dispatch(&g_gic, regs)
+              ├─ iar = GICC_IAR 读              ; 副作用: drop priority;
+              │                                  trace_iar[本核] = iar（R2-6 per-CPU 槽）
+              ├─ intid = iar & 0x3FF
+              ├─ intid==1023 → return           ; spurious，绝不写 EOIR
+              ├─ fn = gic_get_handler(intid)
+              │    ├─ fn → fn(intid, param, regs)   ; 设备清源在 EOI 前（§2.3）
+              │    └─ NULL → unexpected_cb(intid)    ; wrapper 注入的 PL011 打印
+              └─ gic_eoi(dev, iar)              ; 写回完整 IAR（含 CPUID）
+       ldr/msr 恢复 sp_el0/elr_el1/spsr_el1
+       ldr  x30; ldp x28,x29 .. ldp x0,x1
+       add  sp, sp, #PT_REGS_SIZE
+       eret
+```
+
+ISR 顺序契约的迁移说明：tick handler 内**TVAL 重装仍在最前**（phase1 spec §2.3 的
+"先重装避免丢 tick"核心不变）；EOI 统一移到 handler 返回之后由 dispatch 执行——
+只延长该 INTID 的 active 窗口（同优先级不嵌套本来就掩着），行为等价。
+
+其余 15 个槽维持 `b .`：sync exception 解码（ESR_EL1/FAR_EL1）是 Phase 2 范围；
+EL0 IRQ 槽不接——EL0 来源需要 SP_EL0→SP_EL1 切换语义，本 Phase 无用户态，先不做
+（见 §10 non-goals）。
+
+### 4.3 与 x86_64 范式对照（验收口径）
+
+| 范式要素 | x86_64 | aarch64 Phase 1 后 |
+|---|---|---|
+| pt_regs_t 字段序 = 压栈序 | regs.h:14-16 契约 | regs.h（x0..x30, sp_el0, elr, spsr）+ entry.S stp/str 偏移一一对应，偏移常量在头文件 Section 2 共享给 .S |
+| 桩只做 save + 跳 dispatch | Build_IRQ 桩 | el1_irq_entry |
+| dispatch 收 (regs, hwirq) | arch_irq_dispatch(regs, vector) | el1_irq(regs) → gic_dev_dispatch（hwirq 在内部 IAR 读出——GIC 的 vector 是 ack 的副产品，这是两架构的本质差异，spec 承认不强行同形） |
+| handler 签名 (nr, param, regs) | interrupt.h:33 | gic.h 同形（uint32_t intid 代替 uint64_t vector） |
+| spurious 处理 | irq_hooks.c:68-71 | intid 1023 静默返回 |
+| unexpected 处理 | gsi 越界 debug_irq（irq_hooks.c:73-77） | 无 handler 走 unexpected_cb 回调 + EOI |
+| 中断状态原语 | sti/cli 族 | arch/irq.h:88-109 已有，复用 |
+
+---
+
+## 5. save/restore 寄存器清单与 pt_regs_t 精确布局
+
+### 5.1 保存什么、为什么
+
+| 寄存器 | 保存? | 依据 |
+|---|---|---|
+| x0-x30（31 个 GPR） | **全部** | 异步中断可落在任意指令边界；AAPCS64 只约束**函数调用**，对中断点无 callee-saved 保障。x0-x17 caller-saved 必然被 C dispatch 毁；x18 是平台寄存器（clang -mgeneral-regs-only 下也保守保存）；x19-x28 虽是 callee-saved，但 dispatch 链上若有手写汇编（eret 路径）无 ABI 兜底，全量保存是唯一便宜的正确解 |
+| sp_el0 | **保存** | 为 EL0 来源铺路；EL1h 下未用但恢复无害。若 SPSR 显示来源 EL0（Phase 2），eret 后硬件用 SP_EL0 |
+| elr_el1 / spsr_el1 | **软件保存后由 C 侧可观察** | 硬件已自动保存，eret 自动恢复；再入 pt_regs 是为了让 C dispatch/未来信号框架能读/改返回状态（x86_64 的 pt_regs.rip/rflags 同理） |
+| tpidr_el1 | 不保存 | 只被启动路径写（head.S:312-323/650），handler/dispatch 链不改它 |
+| daif | 不显式保存 | 异常进入硬件置 SPSR，eret 恢复；dispatch 全程不嵌套开中断 |
+| FPSIMD v0-v31 | 不保存 | kernel 编译带 `-mgeneral-regs-only`（make.config:17），内核路径不碰浮点；EL0 FPSIMD 上下文属 Phase 2+ |
+| SCTLR/TTBR 等系统寄存器 | 不保存 | dispatch 不改页表 |
+
+### 5.2 pt_regs_t 布局（字段顺序 = 内存偏移序 = entry.S 写入序）
+
+修改 `kernel/include/arch/aarch64/regs.h:19-28`（现状缺 x30），新布局：
+
+```c
+typedef struct pt_regs
+{
+    uint64_t x0, x1, x2, x3, x4, x5, x6, x7;      /*   0 ..  56 */
+    uint64_t x8, x9, x10, x11, x12, x13, x14, x15;/*  64 .. 120 */
+    uint64_t x16, x17, x18, x19, x20, x21, x22, x23;/*128 .. 184 */
+    uint64_t x24, x25, x26, x27, x28, x29, x30;   /* 192 .. 240 */
+    uint64_t sp_el0;                              /* 248 */
+    uint64_t elr_el1;                             /* 256 */
+    uint64_t spsr_el1;                            /* 264 */
+} pt_regs_t;                                      /* sizeof = 272, 16 对齐 */
+```
+
+头文件 Section 2（`#ifndef __ASSEMBLER__` 之外）新增 .S 共享偏移常量：
+
+```c
+#define PT_REGS_X0        (0  * 8)
+#define PT_REGS_X2        (2  * 8)
+/* ... 偶数寄存器每个一对 stp ... */
+#define PT_REGS_X28       (28 * 8)
+#define PT_REGS_X30       (30 * 8)
+#define PT_REGS_SP_EL0    (31 * 8)
+#define PT_REGS_ELR_EL1   (32 * 8)
+#define PT_REGS_SPSR_EL1  (33 * 8)
+#define PT_REGS_SIZE      (34 * 8)   /* 272：15 对 stp + 1 str + 3 str */
+```
+
+272 % 16 == 0：`sub sp, sp, #272` 后每个 stp 地址都 16 对齐（AAPCS64 SP 契约），
+无 padding 字段、无 hole。`_Static_assert(sizeof(pt_regs_t) == 34*8)` 放头文件
+（C 侧）；.S 侧靠 PT_REGS_SIZE 与 stp 偏移由人审 + QEMU 探针测试兜底。
+
+### 5.3 栈预算
+
+IRQ 打在当前 SP_EL1 上（无独立 IST 概念）。BSP 的 C 栈与 AP 的
+`aarch64_boot_stacks` 栈（head.S:641-649）都要预留 ≥272 字节的 headroom 加上
+dispatch C 帧与 PL011 打印深度；现状栈尺寸（AARCH64_BOOT_STACK_SIZE）足够，
+不改动。
+
+---
+
+## 6. 集成边界（硬约束）
+
+1. **不编 kernel core**：kernel/Makefile:42-43 白名单不动。dispatch 不进调度器、
+   不碰 softirq、不调 `generic_intr_dispatch`/`register_irq`（那是 kernel/intr 的世界）。
+   aarch64 的 handler 表是 driver 私有的最小复刻，签名对齐以备 Phase 2 接管。
+2. **不动 x86_64 任何文件**：kernel/arch/x86_64/、kernel/include/arch/x86_64/、
+   kernel/intr/ 全部只读。`kernel/include/arch/aarch64/regs.h` 的修改只影响
+   aarch64 编译路径（facade 按 `__aarch64__` 分发，regs.h:27-28）。
+   **边界核查方式（R1-7）：只做源级验证**——`git diff --stat <起点> -- kernel/arch/x86_64
+   kernel/include/arch/x86_64 kernel/intr` 必须为空。源级零改动 ⇒ x86 构建输入逐字节
+   不变 ⇒ x86 构建产物不可能回归，无需（也不应）在本 Phase 跑任何 x86 build 来"验证"：
+   构建验证会引入与"不编 kernel core"边界含混的额外动作，本 spec 明确不做。
+3. **不动 task.c / 调度 / syscall / EL0**：tick ISR 仍只 `g_ticks++`，不产生
+   jiffies、不 set need_resched。Generic Timer 接 kernel core 是 Phase 2。
+4. **trap.c 只落 IRQ dispatch**：ESR_EL1/FAR_EL1 sync 解码、double fault 语义等
+   留给 Phase 2（trap.c:4-11 注释的原始意图）。
+5. **测试通过 UEFI 镜像 + serial 断言**：所有 QEMU 验证都走
+   `make PROFILE=aarch64-clang aarch64-uefi` 产出的 FAT 镜像（image.mk:154-162），
+   断言基于 PL011 serial 文本行（harness 模式见 §3.7）。
+6. **探针与测试代码一律 `#if OS01_SELFTEST` 门控**（镜像 main.c:18/224 与
+   aarch64_pt_smoke_test 的既有模式），生产启动路径零新增行为（IPI 的 AP 开中断除外，
+   见 §8 R5）。
+
+---
+
+## 7. QEMU 验证路径与断言设计
+
+### 7.1 真实命令
+
+```sh
+# 全量回归（SMP 1/2/4 ×3，KERNEL_SELFTEST=1 构建）
+make PROFILE=aarch64-clang test-aarch64-uefi-smp
+#   ↳ run.mk:161-172: $(MAKE) KERNEL_SELFTEST=1 aarch64-uefi
+#     + python3 qemutests/aarch64_uefi_smp.py --cpus 1 2 4 --repeat 3
+#       --timeout 90 --expect-selftest --diagnostic-dtb=auto ...
+#     每个case的真实 QEMU 形态（aarch64_uefi_smp.py:387-398）：
+#     qemu-system-aarch64 -M virt,gic-version=2,acpi=off -cpu cortex-a53 -smp <N>
+#       -drive if=pflash,format=raw,file=build/aarch64-clang/image/QEMU_EFI.fd
+#       -drive if=none,file=build/aarch64-clang/image/aarch64-uefi.img,format=raw,readonly=on,id=disk
+#       -device virtio-blk-device,drive=disk -dtb <generated> -serial stdio
+#       -display none -no-reboot -no-shutdown
+
+# hosttest（GIC driver 单元，RED 先行）
+make -C hosttests PROFILE=aarch64-clang \
+     OS01_PROFILE_FILE=$PWD/mk/profiles/aarch64-clang.mk test_gic_driver
+
+# SPI 注入（Task 2.3a harness + Task 2.3b make target）
+make PROFILE=aarch64-clang test-aarch64-gic-spi
+```
+
+### 7.2 SMP harness 扩展断言（`--expect-gic`）
+
+`aarch64_uefi_smp.py` 新增 `--expect-gic` flag；`passed()` 在该 flag 下追加：
+
+| 断言行 | 含义 | 出现时机 |
+|---|---|---|
+| `[gic] GICv2 driver: intids=<N>`（**整行**，R2-3：intids 后立即换行，CPU interface 地址另起一行） | driver init 读 TYPER 成功 | gic_init 后 |
+| `[gic] dispatch ready` | 向量表 + handler 表 + dispatch 链闭合 | 注册 tick handler 后 |
+| `[gic-probe] save-restore OK` | clobber 探针通过（§7.3） | irq_enable 后 |
+| `[gic-probe] unexpected intid=40 survived` | 破坏性探针：注入无 handler 的 SPI 40，**观察到递送恰一次**（回调计数，R2-5）、EOI、tick 继续 | 同上 |
+| `[ipi] send sgi=0 filter=others` / `[ipi] cpu=<n> received=1` / `[ipi] summary targets=<cpus-1> received=<cpus-1> status=PASS` | IPI 全收（cpus=1 时 targets=0 received=0、无 per-cpu 行） | IPI 测试后 |
+| `[ipi] bsp raw_iar=0x401`（cpus≥2 恰一条；cpus=1 无） | **R1-9 E2E**：AP1 回发 SGI 1 的原始 IAR 在 BSP handler 内经 per-CPU trace 槽（R2-6）被捕获，非零 CPUID（bit10=1）真实穿越 ack 路径 | IPI 回发确认 |
+
+纯 Python fixture（self_test()）先行的红/绿：断言函数必须先在 `--self-test` 里对
+构造 log 红绿翻转，再上真机（镜像 expect_selftest 的既有纪律，aarch64_uefi_smp.py:186-227）。
+
+### 7.3 破坏性探针（针对 D1 这个最大单点）
+
+- **clobber 探针 = 确定性 trampoline（R2-4）**
+  （`#if OS01_SELFTEST`，kernel/arch/aarch64/irq_probe.c）：
+  - **触发**：探针的 asm 块内直写 GICD_SGIR（filter=SELF，SGI 2——已由
+    gic_cpu_init banked 使能）**自发一次真实 IRQ**（探针运行时 IRQ 已 unmask），
+    不依赖等 tick。
+  - **哨兵**：x0-x5 + x18（7 个 caller-saved/platform 寄存器），设在 SGIR 写之前。
+  - **判据的确定性来源**：dispatch 链以 `fn(intid, param, regs)` 调用 handler，
+    AAPCS64 规定前三个实参**必须**经 x0/x1/x2 传递——旧路径（entry.S 槽 6
+    `bl el1_irq_dispatch; eret`，零保存）下 x0-x2 的哨兵**架构性必然**被销毁，
+    与编译器寄存器分配无关（x3-x5/x18 是加宽覆盖）；新路径（el1_irq_entry）
+    先保存 x0-x30 再 bl、eret 前恢复——全部存活。
+  - **探针自身可靠性**：轮询状态（SGIR 地址 / flag 地址 / deadline）全部驻内存
+    （adrp 重取），RED 路径上 IRQ clobber 掉任何 caller-saved 寄存器都不影响
+    探针循环；结果经 `mov %0, #n` 显式回写输出操作数（0=OK/1=clobber/2=超时），
+    打印 `[gic-probe] save-restore OK` / `... FAIL regs=x0-x5,x18` / `... TIMEOUT`。
+  - **纪律**：出现 OK 或 TIMEOUT 而非 FAIL（RED 阶段）= 探针自身触发/轮询路径
+    缺陷，停下修复重跑，不允许跳过。
+- **unexpected-intid 探针（R1-2 + R2-5 修订）**：SPI 递送需要 enable + route
+  （§2.2）；"观察到递送"不依赖 g_ticks（CNTP tick 自己会来，构不成证据）。探针
+  顺序：注入专用 unexpected 回调（打印与 log_unexpected 同文案；对 intid 40
+  递增专用计数并 release 置 flag）→ `gic_irq_configure(40, true, 0x00, 0x01)`
+  （使能 + 路由 BSP）→ `gic_force_pending(40)`（ISPENDR 注入）→ **轮询到
+  递送 flag 且 count==1**（ldar acquire + cntvct deadline）→ **拆除**：
+  `gic_irq_configure(40, false, ...)` + `gic_clear_pending_irq(40)`（ICPENDR），
+  打印 `[gic-probe] unexpected intid=40 survived`（count!=1 打 FAIL 变体）。
+  现状代码无该 marker，可作 RED 证据。
+
+### 7.4 SPI 中断源选型（核查结论）与 RED/GREEN 拆分（R1-5）
+
+- **选 PL011 RX（INTID 33）**：QEMU virt DTB 的 pl011 节点带
+  `interrupts = <0x00 0x01 0x04>`（GIC_SPI / #1 / LEVEL_HIGH），INTID = 32+1 = 33，
+  与 gic.c:42 的注释互证。真实设备、level 触发、能完整练习"handler 清设备源先于 EOI"
+  的 §2.3 契约（读 DR 清 RX + 写 ICR）。
+- **注入方式**：新 harness `qemutests/aarch64_gic_spi.py` 用
+  `-chardev socket,id=ser0,path=...,server=on,wait=off -serial chardev:ser0` 起 QEMU，
+  连接后读 serial，见 `[gic] spi-test armed intid=<N>` 行即向 socket 写 1 字节，断言
+  `[gic-spi] intid=<N> handled count=1`。UEFI 固件自身的输出也走这条 PL011，读端
+  只做行扫描不受影响；kernel 侧 IMSC 只开 RXIM（bit4），TX 中断保持掩死。
+  harness 支持 `--diagnostic-dtb auto`（复用 aarch64_uefi_smp.generate_diagnostic_dtb，
+  同目录 import），并自带 `--self-test`（纯 Python 状态机 fixture）。
+- **备选/辅助**：GICD_ISPENDR 软件置 pending 作为不依赖输入注入的 debug 通路保留在
+  driver API 里（§7.3 的 SPI 40 探针即此用法，注意必须配合 enable/route）。
+- **DTB 侧**：dtb_parse.c:122-127 补解析 pl011 `interrupts`（3 个 be32 word：
+  word0==0(SPI)、word1 为编号、word2==4(LEVEL_HIGH)）→ `platform.pl011_spi = 32+word1`，
+  校验失败按既有 -4 语义拒绝。driver/测试从 `dtb_pl011_spi()` 取号，不硬编码 33。
+- **RED/GREEN 拆分（R1-5）**：
+  - **Task 2.3a（RED）**：先完整交付 harness（argparse 含 --diagnostic-dtb、干净的
+    select 轮询循环、--self-test fixture、serial.log 落盘）——不含任何占位代码；
+    对未改内核运行 → 等 armed 行超时 → **FAIL 即 RED 证据**。此 Task 不改任何内核文件、
+    不加 make target。
+  - **Task 2.3b（GREEN）**：DTB 解析 + pl011 RX 使能 + spi_test.c 注册 handler +
+    run.mk `test-aarch64-gic-spi` target（传 `--diagnostic-dtb=auto`，harness 已支持）→ GREEN。
+
+### 7.5 IPI 测试（Task 3）与内存序协议（R1-6 + R3-1）
+
+```
+BSP: 注册 ipi handler(SGI 0) + bsp_reply handler(SGI 1)
+     → **arch_publish_handler_table()** （R3-1：dsb ishst 发布 handler 表给 AP）
+     → 打 "[ipi] send sgi=0 filter=others"
+     → gic_send_sgi(0, 0, FILTER_OTHERS)
+     → 有界轮询（cntvct deadline，镜像 phase1 spec §2.1 的无 IRQ 超时法）
+        所有 ipi_done[1..N-1] 的 acquire 读 == 1
+     → 逐核打印 "[ipi] cpu=<n> received=<k>" + summary 行
+     → 等待 bsp_reply_flag（acquire）后打印 "[ipi] bsp raw_iar=0x401"（R1-9）
+AP : SGI 0 handler 里读 TPIDR_EL1 → boot_percpu 槽 → cpu_id（head.S:650 的槽布局）
+     → arch_atomic_fetch_add(&ipi_received[cpu_id], 1)   （原子计数，atomic.h:47-58）
+     → ipi_flag_release(&ipi_done[cpu_id], 1)             （stlr，镜像
+        aarch64_percpu.h:93-95 boot_online_set 的既有模式）
+     → cpu_id==1 时额外回发 gic_send_sgi(1, 0x01, FILTER_LIST) 给 BSP
+BSP: SGI 1 handler 在 handler 上下文读 gic_dbg_last_iar()（§2.3：per-CPU trace 槽
+     只被本核 ack 写入——同核 dispatch 串行 + IRQ masked 无嵌套，跨核 ack 写
+     各自槽 ⇒ 读到的必为本 SGI 的原始 IAR，无跨核覆写竞态, R2-6）
+     → ipi_flag_release(bsp_reply_flag)
+前置: secondary_idle 尾循环前 arch_local_irq_enable()（改 smp.c:225 前的行为，
+      §8 R5 详述风险）；gic_cpu_init 里为每核 banked 使能 SGI 0/1/2 bit
+      （0=IPI 主载荷、1=回发确认、2=clobber 探针，§7.3）。
+```
+
+**跨核发布协议（R3-1 + R4-3 修订）**：BSP 在两次 `gic_register_handler()` 成功
+之后、向 GICD_SGIR 写 SGI 之前必须 `arch_publish_handler_table()`（wrapper 走
+**`kernel/include/arch/aarch64/gic_pub.h`（仅 aarch64 头，R4-2）**——不进
+`kernel/include/arch/barrier.h`，后者被 `kernel/driver/e1000.c:9` include，
+改它破坏"x86 编译输入逐字节不变"边界）——普通内存写（`handlers[]` 槽
+fn/param）对被 SGI 唤醒的 AP 必须在此点之前 Inner-Shareable 可见，否则 AP
+走 `unexpected_cb` 路径、不置 `ipi_done[cpu]`、致 BSP 超时。
+**屏障语义（R4-3）**：`dsb ishst` = Data Synchronization Barrier / Inner-Shareable /
+Store-only，相比 `dmb ishst`（仅排序）它还阻塞后续指令直到屏障前所有 store
+**完成**（cache/TLB/write buffer drain 到 Inner-Shareable 可见点），屏障后
+指令不重排到屏障前——这是"**完成 + 指令边界**"语义。SGIR 写后立即发 IRQ
+**必须**保证 handler 表已全局可见，所以选 `dsb` 是有意的较强选择；Linux
+GICv2 选 `dmb(ishst)` 是因为紧接 `dsb sy` 做隐含 ordering，本 Phase
+直接 `dsb ishst` 省去再配对屏障的复杂度。
+**该屏障只对 Task 3.2 必要**：cntp（time.c/main.c:249 arch_tick_start，**AP
+的 CNTP 已在 smp.c:209/224 关掉——仅 BSP 接收**）、pl011_rx（SPI→BSP 本核）、
+probe_sgi（自触发）三处均不需本屏障；`gic_register_handler()` 本身不内置
+barrier，避免无谓开销，由调用方按需显式 `arch_publish_handler_table()`。
+
+**内存序契约（精确到指令）**：AP 侧计数是 `arch_atomic_fetch_add`（ldxr/stxr RMW，
+单写者 per 槽，原子性防并发递增丢失）；完成标志是 `stlr`（RELEASE store）——它保证
+计数写入先于标志对其他核可见。BSP 侧用 `ldar`（acquire load）读标志——看到 1 之后
+对计数的后续读必然观察到 AP 的递增（release/acquire 配对，与项目既有
+boot_online_set/get、bench_done_set/get 完全同模式，aarch64_percpu.h:93-115）。
+超时兜底用 `arch_cycle_counter()` deadline（不依赖 IRQ，phase1 spec §2.1 既有方法）。
+
+---
+
+## 8. 风险表
+
+| # | 风险 | 等级 | 缓解 |
+|---|---|---|---|
+| R1 | **entry.S 零寄存器保存是最大单点**：改坏向量表/偏移即全静默 | 高 | ① clobber 探针 = 确定性 trampoline（自发 SGI 2 真实 IRQ + AAPCS64 x0-x2 实参判据，R2-4）作为 RED 证据 + 常驻 SELFTEST 断言（§7.3）；② 偏移常量单一来源（regs.h Section 2）+ `_Static_assert(sizeof==272)`；③ 每槽 ≤0x80 字节（槽内只放一条 `b`）；④ `--expect-gic` 进标准回归 target，1/2/4 ×3 反复打 |
+| R2 | EOIR 丢 CPUID 位（D7）在 SGI 路径爆雷 | 高 | `gic_eoi` 只接受完整 IAR；**三层可观测（R1-9，R2-6 收口）**：hosttest ack/eoi 原值断言 + hosttest dispatch-CPUID mock（IAR=(3<<10)\|7 → EOIR==0xC07）+ E2E per-CPU trace 槽回发确认（`[ipi] bsp raw_iar=0x401`，§7.5；跨核 ack 写各自槽，无共享字段竞态） |
+| R3 | level 触发 SPI 在 EOI 前未清设备源 → 中断风暴 | 中 | 契约写进 §2.3；SPI handler 顺序（读 DR → ICR → 返回）由 dispatch 在 handler 之后 EOI 保证；harness 超时 90s 兜底 |
+| R4 | 多核并发写 PL011 绞线/死锁 | 中 | AP 侧 handler 不打印，只更新 per-CPU 计数/标志；所有打印由 BSP 串行完成 |
+| R5 | AP 开 DAIF.I 后可能收到非预期中断（若 AP banked enable 有残留） | 中 | gic_cpu_init 显式走"banked 白名单"路径（SGI 0/1/2 + CNTP PPI）；AP 的 CNTP 已关（smp.c:209/224）；unexpected 路径有回调日志 + EOI 兜底 |
+| R6 | dtb_parse 新增 pl011 interrupts 校验过严导致某固件 DTB 被拒 | 低 | 与既有 device_reg 校验同等严格度；拒绝即 dtb_fatal，测试用的是 QEMU 生成 DTB（--diagnostic-dtb=auto），可复现可控 |
+| R7 | hosttest 编译真实 gic_driver.c 需要它零依赖 | 低 | hw 层禁日志/禁 arch asm；`struct pt_regs` 前向声明代替 include facade（facade 按 `__aarch64__` 分发，host x86_64 编译会 #error，regs.h:29-30）；**测试内不定义 pt_regs 对象**——dispatch 用例传 NULL（R1-4），不依赖不完整类型 |
+| R8 | KERNEL_SELFTEST=1 与生产镜像行为分叉 | 低 | 探针全部门控（§6.6）；唯一生产行为变化 = AP 开中断收 IPI，在 spec/commit message 里显式声明 |
+| R9 | reg.h 的 GICD_BASE/GICC_BASE 硬编码访问器残留误用 | 低 | Task 2.2 后 time.c 不再引用 gicc_read32/gicc_write32；reg.h 访问器加注释指向 gic_dev，逐步退役（不删，避免无关 churn） |
+| R10 | dispatch 切换期出现"符号已删、入口未换"的链接断裂中间态 | 高 | §4.2 的过渡 shim 协议（R1-1）：RED 阶段 shim 保链接，entry.S 替换与 shim 删除在同一变更内，commit 粒度上不存在断裂态 |
+| R11（R3-1 / R4-1/2/3/4） | **跨核 handler 表发布**：BSP 改 `handlers[]` 是普通内存写，Device-nGnRnE 的 GICD_SGIR 与之无 ordering 约束；AP 收到 SGI 时 handler 指针/param 可能未可见，走 `unexpected_cb` 不置 `ipi_done[cpu]`，BSP 超时（偶发，与硬件/启动时序相关） | 中 | `kernel/include/arch/aarch64/gic_pub.h` 新增 `arch_publish_handler_table()`（**仅 aarch64 头，R4-2**——不进 `kernel/include/arch/barrier.h`，后者被 `kernel/driver/e1000.c:9` include 改它破坏 x86 输入零变更边界）：aarch64 = `__asm__ __volatile__("dsb ishst" ::: "memory")` static inline（R4-1 完整代码）。R4-3：屏障语义 = "完成 + 指令边界"（vs `dmb ishst` 仅排序），SGIR 写前必须保证 handler 表全局可见，故选 `dsb`。R4-4：cntp 在 `smp_boot_aps()` 后注册但 AP CNTP disabled → 仅 BSP 接收，无跨核问题。**只在 Task 3.2 `gic_ipi_test()` 注册+发送 SGI 之间显式调**；`gic_register_handler` 不内置 barrier，避免无谓开销 |
+
+---
+
+## 9. G1-G6 目标列表（用户可校验）
+
+| # | 目标 | 完成判据 |
+|---|---|---|
+| G1 | **GICv2 driver 泛化**：hw 访问抽象（struct gic_dev 指针式 MMIO）+ SGI/PPI/SPI/invalid 分类 + enable/disable/priority/targets 配置 + handler 注册表 + unexpected 回调注入 + per-CPU IAR trace | hosttest `test_gic_driver`（mock MMIO 数组）覆盖 init(TYPER/IIDR)/enable(ICENABLER)/prio/targets（偏移 BASE+(intid/4)*4）/分类/注册表/SGIR 编码/set+clear pending/EOIR 回写（含 dispatch-CPUID case）/unexpected 回调/per-CPU trace 槽隔离（R2-6）；内核里 gic_init/gic_cpu_init 行为不回退 |
+| G2 | **entry.S 全量 save/restore + pt_regs_t**：31 GPR + sp_el0 + elr + spsr，布局=字段序=偏移常量，对齐 x86_64 facade | clobber 探针（确定性 trampoline，R2-4）从红转绿并常驻 SELFTEST；`_Static_assert(sizeof(pt_regs_t)==272)`；全程无链接断裂中间态（shim 协议） |
+| G3 | **通用 IRQ dispatch**（trap.c）：IAR→查表→handler→EOIR(完整值)，spurious/unexpected 分支；time.c 硬编码 intid 比较删除，tick 变注册消费者 | `[gic] dispatch ready` + unexpected intid=40 探针（enable/route→注入→**观察递送恰一次**→拆除，R2-5）+ `[tick]` 不断流（--expect-gic 进 1/2/4 ×3 回归） |
+| G4 | **SPI 中断源走 handler 表**：PL011 RX INTID 33（DTB 解析），QEMU socket 注入 | Task 2.3a harness（含 --self-test、--diagnostic-dtb）对现状内核 FAIL（RED 留档）→ Task 2.3b 后 `test-aarch64-gic-spi` PASS：armed → 注入 1 字节 → `[gic-spi] intid=33 handled count=1` |
+| G5 | **SGI/IPI**：GICD_SGIR 发送 + 跨核 handler + 原子计数/release-acquire 协议 + SMP 1/2/4 验证 | `[ipi] summary targets=N-1 received=N-1 status=PASS` 在 -smp 1/2/4 全部出现（cpus=1 为 targets=0）；cpus≥2 出现 `[ipi] bsp raw_iar=0x401`（R1-9 CPUID E2E，per-CPU trace 槽，R2-6） |
+| G6 | **范式对齐 + 零回归**：不动 x86_64 任何文件、不编 kernel core、dispatch 不进调度器；既有 SMP/spinlock/tick 断言全绿 | `git diff --stat <起点> -- kernel/arch/x86_64 kernel/include/arch/x86_64 kernel/intr` 为空（源级零改动即构建输入不变，§6.2 R1-7）；`make PROFILE=aarch64-clang test-aarch64-uefi-smp` 全绿 |
+
+---
+
+## 10. 明确 non-goals（本 Phase 不做）
+
+1. **Generic Timer 接 kernel core**：不产生 jiffies、不进 clockevent/clocksource 框架、
+   不设 need_resched。tick ISR 仍是"g_ticks++ + 每秒一行打印"（Phase 2 集成项）。
+2. **syscall / EL0 / 用户态**：entry.S 的 EL0 槽、AArch32 槽维持 `b .`；pt_regs 的
+   elr/spsr 修改权（信号回注入等）不暴露。
+3. **sync exception 解码**（ESR_EL1/FAR_EL1、data abort、page fault 路径）——trap.c:4-11
+   原注释的 Phase 2 内容。
+4. **kernel/intr 接入**：不实现 `arch_irq_select_controller` / `register_irq` 的
+   aarch64 strong override，不做 `hw_int_controller_t` 函数指针化，不编 kernel/intr/。
+5. **GICv3/v4、ITS、MSI、中断嵌套、优先级抢占**（GICC_BPR 组优先级）、**1-N NMI**、
+   虚拟化扩展——QEMU virt,gic-version=2 用不到。
+6. **per-CPU handler 表 / 中断亲和性 API**（irqbalance 之类）：handler 表 Phase 1 是
+   全局单份；ITARGETSR 只在 SPI enable 时写死 BSP 位图。
+7. **PL011 TX 中断 / console 框架接入**：输出继续轮询；只开 RXIM。
+8. **改 x86_64 任何文件**（含 kernel/intr/ 的 weak 默认）——对齐是"形似"，不是共享代码。
+   **亦不跑任何 x86 build 作验证**（§6.2 R1-7：源级 diff 即充分）。
+9. **真实多核 IPI 语义**（TLB shootdown 队列、smp_call_function）：只验证"发—收—计数"
+   加上回发确认（R1-9）。
+10. **RPi3 / 非 QEMU virt 平台**：DTB 解析仍限定 QEMU virt 的固定值校验范式。

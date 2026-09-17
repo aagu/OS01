@@ -164,7 +164,7 @@ test-aarch64-uefi-smp:
 	$(call require_capability,uefi)
 	$(MAKE) KERNEL_SELFTEST=1 aarch64-uefi
 	python3 qemutests/aarch64_uefi_smp.py \
-	  --cpus 1 2 4 --repeat 3 --timeout 90 --expect-selftest \
+	  --cpus 1 2 4 --repeat 3 --timeout 90 --expect-selftest --expect-gic \
 	  $(if $(filter 0,$(AARCH64_UEFI_SMP_DIAGNOSTIC_DTB)),,--diagnostic-dtb=auto) \
 	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
 	  --image "$(AARCH64_UEFI_DISK)" \
@@ -193,6 +193,22 @@ test-aarch64-uefi-smp-no-ack:
 	  --image "$(AARCH64_UEFI_DISK)" \
 	  --qemu "$(AARCH64_QEMU)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-uefi-smp/$$(date -u +%Y%m%dT%H%M%S)-no-ack-$$$$"
+
+# PL011 RX -> GIC SPI injection test (spec §7.4, Task 2.3b). Reuses the
+# SMP suite's firmware / image / DTB mechanism; harness injects one byte
+# into the PL011 socket and expects the kernel-side "handled count=1"
+# marker once the RX handler fires.
+.PHONY: test-aarch64-gic-spi
+test-aarch64-gic-spi:
+	$(call require_aarch64_uefi)
+	$(call require_capability,uefi)
+	$(MAKE) KERNEL_SELFTEST=1 aarch64-uefi
+	python3 qemutests/aarch64_gic_spi.py \
+	  --diagnostic-dtb=auto \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+	  --image "$(AARCH64_UEFI_DISK)" \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --log-dir "$(OS01_ROOT)/test-results/aarch64-gic-spi/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 
 # ── Validation ─────────────────────────────────────────────
 # validate keeps the x86 kernel + UEFI artifact checks (kernel ELF has no

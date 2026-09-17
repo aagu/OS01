@@ -226,6 +226,98 @@ def self_test() -> None:
     assert degraded_passed(current_degraded_log, expect_selftest=True), \
         "degraded_passed ignores expect_selftest"
 
+    # --expect-gic 断言（Task 2.1 + 3.1）：只用合成 log 测 gic_evidence_ok 解析
+    # 行为。不再组合 GIC+IPI marker 调 passed(), 因为 kernel 现状不发 IPI marker
+    # (Task 3.2 GREEN 才会发); 组合调用恒失败。每条 assertion 单独构造独立合成
+    # log, 只让 gic_evidence_ok 看到它需要验的那一项。
+    gic_markers = [
+        "[gic] GICv2 driver: intids=96\n",
+        "[gic] dispatch ready\n",
+        "[gic-probe] save-restore OK\n",
+        "[gic-probe] unexpected intid=40 survived\n",
+    ]
+    ipi_markers_cpus2 = [
+        "[ipi] send sgi=0 filter=others\n",
+        "[ipi] cpu=1 received=1\n",
+        "[ipi] summary targets=1 received=1 status=PASS\n",
+        "[ipi] bsp raw_iar=0x401\n",
+    ]
+    gic_log = current_log_for_2_cpus + "".join(gic_markers)
+    gic_ipi_log_cpus2 = gic_log + "".join(ipi_markers_cpus2)
+    gic_ipi_log_cpus1 = (current_log_for_2_cpus.replace("cpus=2", "cpus=1")
+                         .replace("[smp] cpu=1 online mpidr=0x1\n", "")
+                         .replace("requested=2 online=2", "requested=1 online=1")
+                         .replace("[spinlock] cpu=1 done=1000000\n", "")
+                         .replace("active=2", "active=1")
+                         .replace("total=2000000", "total=1000000")
+                         + "".join(gic_markers)
+                         + "[ipi] send sgi=0 filter=others\n"
+                         + "[ipi] summary targets=0 received=0 status=PASS\n")
+
+    # 单 marker 缺失 → 拒（GIC + IPI 各自覆盖）
+    for marker in gic_markers:
+        assert not passed(current_log_for_2_cpus + marker, cpus=2, expect_gic=True), \
+            f"missing other gic markers when {marker.strip()} present must reject"
+    for marker in ipi_markers_cpus2:
+        assert not passed(gic_log + marker, cpus=2, expect_gic=True), \
+            f"missing other ipi markers when {marker.strip()} present must reject"
+
+    # clobber FAIL / TIMEOUT 行 → 拒
+    assert not passed(gic_log.replace("save-restore OK", "save-restore FAIL"),
+                      cpus=2, expect_gic=True), "clobber FAIL must reject"
+    assert not passed(gic_log.replace("intid=40 survived", "intid=40 TIMEOUT"),
+                      cpus=2, expect_gic=True), "probe TIMEOUT must reject"
+
+    # marker 重复 → 拒
+    assert not passed(gic_log + "[gic] dispatch ready\n", cpus=2, expect_gic=True), \
+        "duplicate gic marker must reject"
+    assert not passed(gic_ipi_log_cpus2 + "[ipi] send sgi=0 filter=others\n",
+                      cpus=2, expect_gic=True), "duplicate ipi send must reject"
+
+    # 完整 GIC+IPI (cpus=2) → pass
+    assert passed(gic_ipi_log_cpus2, cpus=2, expect_gic=True), \
+        "all gic + ipi markers (2 cpus) must pass"
+    # 完整 GIC+IPI (cpus=1, 无 per-cpu / 无 raw_iar) → pass
+    assert passed(gic_ipi_log_cpus1, cpus=1, expect_gic=True), \
+        "all gic + ipi markers (1 cpu, targets=0) must pass"
+
+    # IPI 各 marker 单独破坏 → 拒
+    assert not passed(gic_ipi_log_cpus2.replace("[ipi] send sgi=0 filter=others\n", ""),
+                      cpus=2, expect_gic=True), "missing send must reject"
+    assert not passed(gic_ipi_log_cpus2.replace("[ipi] cpu=1 received=1\n", ""),
+                      cpus=2, expect_gic=True), "missing cpu=1 line must reject"
+    assert not passed(gic_ipi_log_cpus2.replace(
+        "[ipi] summary targets=1 received=1 status=PASS\n", ""),
+                      cpus=2, expect_gic=True), "missing summary must reject"
+    assert not passed(gic_ipi_log_cpus2.replace("[ipi] bsp raw_iar=0x401\n", ""),
+                      cpus=2, expect_gic=True), "missing raw_iar (2 cpus) must reject"
+
+    # IPI 数值/形态破坏 → 拒
+    assert not passed(gic_ipi_log_cpus2.replace("cpu=1 received=1", "cpu=1 received=2"),
+                      cpus=2, expect_gic=True), "received=2 must reject (storm)"
+    assert not passed(gic_ipi_log_cpus2.replace("cpu=1 received=1", "cpu=1 received=0"),
+                      cpus=2, expect_gic=True), "received=0 must reject (lost)"
+    assert not passed(gic_ipi_log_cpus2.replace(
+        "targets=1 received=1", "targets=1 received=0"),
+                      cpus=2, expect_gic=True), "summary received mismatch must reject"
+    assert not passed(gic_ipi_log_cpus2.replace(
+        "targets=1 received=1", "targets=2 received=2"),
+                      cpus=2, expect_gic=True), "summary over-count must reject"
+    assert not passed(gic_ipi_log_cpus2.replace(
+        "[ipi] bsp raw_iar=0x401\n", "[ipi] bsp raw_iar=0x402\n"),
+                      cpus=2, expect_gic=True), "raw_iar wrong CPUID must reject"
+    assert not passed(gic_ipi_log_cpus2 + "[ipi] cpu=2 received=1\n",
+                      cpus=2, expect_gic=True), "extra cpu line for cpus=2 must reject"
+    assert not passed(gic_ipi_log_cpus1 + "[ipi] bsp raw_iar=0x401\n",
+                      cpus=1, expect_gic=True), "raw_iar present with 1 cpu must reject"
+    assert not passed(gic_ipi_log_cpus1.replace(
+        "targets=0 received=0", "targets=0 received=1"),
+                      cpus=1, expect_gic=True), "summary 0/1 must reject (no targets)"
+
+    # expect_gic 默认关闭保留 legacy 行为
+    assert passed(gic_ipi_log_cpus2, cpus=2), \
+        "expect_gic default-off keeps legacy behavior"
+
 
 def kernel_failure(text: str) -> bool:
     """Return true only for structured kernel failure diagnostics."""
@@ -260,7 +352,50 @@ def hard_kernel_failure(text: str) -> bool:
     ))
 
 
-def passed(text: str, cpus: int, expect_selftest: bool = False) -> bool:
+def gic_evidence_ok(text: str, cpus: int) -> bool:
+    """--expect-gic: GICv2 框架证据（spec §7.2）。
+    marker 恰一条（多打/漏打都拒）；clobber FAIL/TIMEOUT 行出现即拒；
+    IPI per-cpu/summary/raw_iar 按 cpus 校验（Task 3.1 追加）。"""
+    text = text.replace("\r", "")
+    if re.search(r"^\[gic-probe\][^\n]*\bFAIL\b", text, re.MULTILINE):
+        return False
+    if re.search(r"^\[gic-probe\][^\n]*TIMEOUT", text, re.MULTILINE):
+        return False
+    checks = [
+        (r"^\[gic\] GICv2 driver: intids=\d+$", 1),
+        (r"^\[gic\] dispatch ready$", 1),
+        (r"^\[gic-probe\] save-restore OK$", 1),
+        (r"^\[gic-probe\] unexpected intid=40 survived$", 1),
+        (r"^\[ipi\] send sgi=0 filter=others$", 1),
+        (r"^\[ipi\] summary targets=(\d+) received=(\d+) status=PASS$", 1),
+    ]
+    for pattern, want in checks:
+        found = re.findall(pattern, text, re.MULTILINE)
+        if len(found) != want:
+            print(f"FAIL: gic evidence {pattern!r} found {len(found)}, want {want}")
+            return False
+    # 每个非 BSP 核恰一行 received=1（cpus=1 时无此行）
+    ipi_cpus = re.findall(r"^\[ipi\] cpu=(\d+) received=(\d+)$", text, re.MULTILINE)
+    if len(ipi_cpus) != cpus - 1 or {int(c) for c, _ in ipi_cpus} != set(range(1, cpus)):
+        print(f"FAIL: ipi per-cpu lines {ipi_cpus}, want cpus 1..{cpus - 1}")
+        return False
+    for _, k in ipi_cpus:
+        if int(k) != 1:                        # 多发=风暴, 漏发=丢 IPI
+            return False
+    m = re.search(r"^\[ipi\] summary targets=(\d+) received=(\d+) status=PASS$",
+                  text, re.MULTILINE)
+    if not m or tuple(map(int, m.groups())) != (cpus - 1, cpus - 1):
+        return False
+    # R1-9 CPUID E2E: cpus>=2 恰一条 0x401 (CPUID=1|SGI 1); cpus==1 必须无
+    raw_iar = re.findall(r"^\[ipi\] bsp raw_iar=0x401$", text, re.MULTILINE)
+    if len(raw_iar) != (1 if cpus >= 2 else 0):
+        print(f"FAIL: ipi bsp raw_iar lines {len(raw_iar)}, cpus={cpus}")
+        return False
+    return True
+
+
+def passed(text: str, cpus: int, expect_selftest: bool = False,
+           expect_gic: bool = False) -> bool:
     """Recognize a complete normal-mode SMP run without QEMU dependencies."""
     # PL011 currently emits LF+CR. Match lines consistently for saved logs
     # and live serial drains, while retaining the original fixture format.
@@ -268,6 +403,8 @@ def passed(text: str, cpus: int, expect_selftest: bool = False) -> bool:
     if not ram_summary_ok(text):
         return False
     if kernel_failure(text):
+        return False
+    if expect_gic and not gic_evidence_ok(text, cpus):
         return False
     if expect_selftest:
         # Anchor on the specific topology line via re.search to avoid
@@ -381,7 +518,10 @@ def degraded_passed(text: str, expect_selftest: bool = False) -> bool:
 
 def acceptance_evidence(args: argparse.Namespace, text: str, cpus: int) -> bool:
     expect_selftest = getattr(args, "expect_selftest", False)
-    return degraded_passed(text, expect_selftest=expect_selftest) if args.expect_no_ack is not None else passed(text, cpus, expect_selftest=expect_selftest)
+    expect_gic = getattr(args, "expect_gic", False)
+    if args.expect_no_ack is not None:
+        return degraded_passed(text, expect_selftest=expect_selftest)
+    return passed(text, cpus, expect_selftest=expect_selftest, expect_gic=expect_gic)
 
 
 def qemu_command(args: argparse.Namespace, cpus: int, diagnostic_dtb: str | None) -> list[str]:
@@ -550,6 +690,10 @@ def main() -> int:
     parser.add_argument("--expect-selftest", action="store_true",
                         help="Require 'UEFI-A64: pmm alloc smoke OK' log line "
                              "between RAM summary and topology line")
+    parser.add_argument("--expect-gic", action="store_true",
+                        help="Require GICv2 framework markers: driver init, "
+                             "dispatch ready, save-restore probe OK, "
+                             "unexpected-intid survival")
     parser.add_argument("--diagnostic-dtb", metavar="PATH_OR_AUTO",
                         help="firmware does not expose DTB via EFI config table: "
                              "use acpi=off and a QEMU-generated DTB. Pass an explicit "

@@ -120,10 +120,19 @@ static int finish_node(struct parse_state *s, const struct node *n, uint32_t dep
         s->info.gicc_base = 0x08010000;
     }
     if (contains(n->compatible, "arm,pl011")) {
+        /* interrupts = <GIC_SPI(0) nr IRQ_TYPE_LEVEL_HIGH(4)>: 3 be32 words
+         * QEMU virt pl011: <0x00 0x01 0x04> → SPI 33. The parse keeps
+         * INTID = 32 + nr; validation rejects any shape that would force
+         * the consumer to hardcode the wire (R6). */
         if (s->uart || (n->status.data && !exact(n->status, "okay") && !exact(n->status, "ok")) ||
-            !device_reg(n, 0, 0x09000000)) return -4;
+            !device_reg(n, 0, 0x09000000) ||
+            n->interrupts.len != 12 ||
+            be32(n->interrupts.data) != 0 ||
+            be32(n->interrupts.data + 4) == 0 ||
+            be32(n->interrupts.data + 8) != 4) return -4;
         s->uart = true;
         s->info.pl011_base = 0x09000000;
+        s->info.pl011_spi = 32u + be32(n->interrupts.data + 4);
     }
     if (contains(n->compatible, "arm,armv8-timer")) {
         if (s->timer || (n->status.data && !exact(n->status, "okay") && !exact(n->status, "ok")) ||
