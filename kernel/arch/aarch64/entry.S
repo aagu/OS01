@@ -6,10 +6,16 @@
  * comment in main.c for why head.S's pre-MMU `boot_vectors`
  * install is not enough.
  *
- * Phase 1 (Task 3) wires up the EL1h IRQ slot (entry #5) to the
- * C-side dispatch (el1_irq_dispatch) which reads GICC_IAR, re-arms
- * CNTP_TVAL_EL0, and EOI's the GIC.  Every other slot still spins
- * — we don't expect to see any of them fire in phase 1.
+ * Phase 1 (Task 2.2) wires the EL1h IRQ slot (entry #6) to a
+ * dedicated `el1_irq_entry` trampoline which:
+ *   - Saves the FULL 31 GPR + sp_el0 + elr_el1 + spsr_el1 frame
+ *     onto the IRQ stack (layout matches struct pt_regs).
+ *   - Calls `el1_irq(regs)` in trap.c, which delegates to the GIC
+ *     driver's generic dispatch (handler table lookup + EOI).
+ *   - Restores the frame and `eret`s back to the interrupted PC.
+ *
+ * The GIC handler table is populated by `arch_tick_start()` (CNTP)
+ * and the irq_probe (SGI 2 / SPI 40), all via gic_register_handler().
  *
  * Slot numbering: the architecture orders the 16 entries by
  * exception class then source SP.  Layout (offset within the
@@ -31,6 +37,8 @@
  * 2 KiB-aligned by construction; VBAR_EL1 accepts a 2 KiB-aligned
  * base (per ARM ARM D17.2.86).
  */
+
+#include <arch/aarch64/regs.h>
 
 .section .text.entry, "ax"
 
@@ -60,23 +68,13 @@ exception_vectors:
 
 /* ───── IRQ, current SP_ELx (this is what kernel uses at EL1h) ─────
  *
- * The kernel runs at EL1 with SP_EL1; on IRQ entry the CPU jumps
- * here with the same SP_EL1 (the architecture saves PSTATE+ELR
- * into the per-bank save area).  We don't need to save any
- * additional state in phase 1 (no syscall ABI, no userspace).
- *
- * Dispatch:
- *   1. Branch to the C handler (bl el1_irq_dispatch).
- *   2. The C handler reads GICC_IAR, re-arms CNTP, EOI's the GIC,
- *      and prints a tick counter.
- *   3. eret returns to the wfi in aarch64_main.
- *
- * The bl clobbers LR; that's fine because eret reads ELR_EL1,
- * which the architecture keeps across the IRQ entry. */
+ * Each slot must be ≤0x80 bytes (the architecture enforces 128-byte
+ * stride between entries).  This slot therefore only branches; the
+ * full save/restore happens in `el1_irq_entry` declared below the
+ * table. */
 .balign 0x80
 6:
-    bl  el1_irq_dispatch
-    eret
+    b   el1_irq_entry
 
 /* ───── FIQ, current SP_ELx ───── */
 .balign 0x80
@@ -114,3 +112,64 @@ exception_vectors:
 
 .balign 0x80
 16: b   .
+
+/* ──────────────────────────────────────────────────────────────
+ * el1_irq_entry — EL1h IRQ 通用入口（spec §4.2/§5）
+ *
+ * 入栈序 = pt_regs_t 字段序 = regs.h PT_REGS_* 偏移。
+ * 全量保存 31 GPR + sp_el0 + elr + spsr，布局 = 34 槽 × 8 = 272 字节。
+ * bl 到 el1_irq(struct pt_regs *)，x0 = sp（指向刚压好的帧）。
+ * eret 前完整恢复。
+ * ────────────────────────────────────────────────────────────── */
+.balign 0x80
+.globl el1_irq_entry
+el1_irq_entry:
+    sub     sp, sp, #PT_REGS_SIZE
+    stp     x0, x1,   [sp, #PT_REGS_X0]
+    stp     x2, x3,   [sp, #PT_REGS_X2]
+    stp     x4, x5,   [sp, #PT_REGS_X4]
+    stp     x6, x7,   [sp, #PT_REGS_X6]
+    stp     x8, x9,   [sp, #PT_REGS_X8]
+    stp     x10, x11, [sp, #PT_REGS_X10]
+    stp     x12, x13, [sp, #PT_REGS_X12]
+    stp     x14, x15, [sp, #PT_REGS_X14]
+    stp     x16, x17, [sp, #PT_REGS_X16]
+    stp     x18, x19, [sp, #PT_REGS_X18]
+    stp     x20, x21, [sp, #PT_REGS_X20]
+    stp     x22, x23, [sp, #PT_REGS_X22]
+    stp     x24, x25, [sp, #PT_REGS_X24]
+    stp     x26, x27, [sp, #PT_REGS_X26]
+    stp     x28, x29, [sp, #PT_REGS_X28]
+    str     x30,      [sp, #PT_REGS_X30]
+    mrs     x1, spsr_el1
+    str     x1,       [sp, #PT_REGS_SPSR_EL1]
+    mrs     x1, elr_el1
+    str     x1,       [sp, #PT_REGS_ELR_EL1]
+    mrs     x1, sp_el0
+    str     x1,       [sp, #PT_REGS_SP_EL0]
+    mov     x0, sp                       /* x0 = &regs for el1_irq */
+    bl      el1_irq
+    ldr     x1,       [sp, #PT_REGS_SP_EL0]
+    msr     sp_el0, x1
+    ldr     x1,       [sp, #PT_REGS_ELR_EL1]
+    msr     elr_el1, x1
+    ldr     x1,       [sp, #PT_REGS_SPSR_EL1]
+    msr     spsr_el1, x1
+    ldr     x30,      [sp, #PT_REGS_X30]
+    ldp     x28, x29, [sp, #PT_REGS_X28]
+    ldp     x26, x27, [sp, #PT_REGS_X26]
+    ldp     x24, x25, [sp, #PT_REGS_X24]
+    ldp     x22, x23, [sp, #PT_REGS_X22]
+    ldp     x20, x21, [sp, #PT_REGS_X20]
+    ldp     x18, x19, [sp, #PT_REGS_X18]
+    ldp     x16, x17, [sp, #PT_REGS_X16]
+    ldp     x14, x15, [sp, #PT_REGS_X14]
+    ldp     x12, x13, [sp, #PT_REGS_X12]
+    ldp     x10, x11, [sp, #PT_REGS_X10]
+    ldp     x8, x9,   [sp, #PT_REGS_X8]
+    ldp     x6, x7,   [sp, #PT_REGS_X6]
+    ldp     x4, x5,   [sp, #PT_REGS_X4]
+    ldp     x2, x3,   [sp, #PT_REGS_X2]
+    ldp     x0, x1,   [sp, #PT_REGS_X0]
+    add     sp, sp, #PT_REGS_SIZE
+    eret

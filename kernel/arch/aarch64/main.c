@@ -15,6 +15,15 @@ void pl011_init(void);
 void aarch64_extend_direct_map(void);
 extern char exception_vectors[];
 
+/* Forward declarations for boot_log helpers + GIC dispatch probes
+ * (Task 2.2).  Defined in kernel/arch/aarch64/boot_log.h / irq_probe.c
+ * (the latter is OS01_SELFTEST-gated). */
+void kputs(const char *s);
+#if OS01_SELFTEST
+void gic_clobber_probe(void);
+void gic_unexpected_probe(void);
+#endif
+
 #if OS01_SELFTEST
 /* Pre-SMP page-table round-trip against the active kernel root. The
  * helper validates the raw TTBR0_EL1 value, requires the self-test VA
@@ -260,5 +269,16 @@ void aarch64_main(const struct boot_context *handoff)
     log_info("[IRQ] enabled (DAIF.IRQ cleared)\n");
     arch_local_irq_enable();
     __asm__ __volatile__("isb" ::: "memory");
+#if OS01_SELFTEST
+    /* Task 2.2 — dispatch chain selftest probes.
+     * VBAR is installed (line 188-189); handler table is populated
+     * (arch_tick_start registered cntp_tick_handler); dispatch is
+     * live (gic.c::gic_init ran).  The probes fire a deterministic
+     * SGI 2 (clobber probe) and a SPI 40 (unexpected probe) and
+     * require IRQs to be unmasked above. */
+    kputs("[gic] dispatch ready\n");
+    gic_clobber_probe();
+    gic_unexpected_probe();
+#endif
     for (;;) arch_cpu_halt();
 }

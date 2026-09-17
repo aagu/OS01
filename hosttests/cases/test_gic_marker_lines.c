@@ -46,9 +46,9 @@ typedef struct {
 
 /* 4 个 spec §7.2 marker —— Task 2.1 RED 期望：intids= 在（Task 1.2），
  * 其余 3 个暂不在源里（Task 2.2 才补）。dispatch ready 在 main.c 里
- * （OS01_SELFTEST 门控区）；其余在 gic.c / irq_probe.c（本 Task 未创建，
- * RED 阶段允许 missing —— 检查仍是断言 grep=命中）。本 RED 只检查 gic.c
- * + main.c 已存在的两个文件即可证 3-marker missing → RED fail。 */
+ * （OS01_SELFTEST 门控区）；其余在 irq_probe.c（Task 2.2 才创建）。
+ * 本 RED 只检查 gic.c / main.c / irq_probe.c 已存在的三个文件即可证
+ * 3-marker missing → RED fail。 */
 static const marker_check_t kChecks[] = {
     {
         "marker: [gic] GICv2 driver: intids=",
@@ -62,12 +62,12 @@ static const marker_check_t kChecks[] = {
     },
     {
         "marker: [gic-probe] save-restore OK  (Task 2.2 will emit from irq_probe.c — file may not exist yet)",
-        "kernel/arch/aarch64/gic.c",
+        "kernel/arch/aarch64/irq_probe.c",
         "[gic-probe] save-restore OK",
     },
     {
         "marker: [gic-probe] unexpected intid=40 survived  (Task 2.2 will emit from irq_probe.c)",
-        "kernel/arch/aarch64/gic.c",
+        "kernel/arch/aarch64/irq_probe.c",
         "[gic-probe] unexpected intid=40 survived",
     },
 };

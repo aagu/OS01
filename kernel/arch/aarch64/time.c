@@ -1,13 +1,19 @@
-/* aarch64 phase 1: CNTP physical-timer tick ISR (Task 3).
+/* aarch64 phase 1: CNTP physical-timer tick ISR (Task 2.2).
  *
  * Spec §2.3 — strict ISR order:
  *   1. Rewrite CNTP_TVAL_EL0 = period  (FIRST; avoids losing a tick)
  *   2. Write GICC_EOIR = PPI intid      (THEN EOI)
- *   3. printk "+tick"                   (LAST; output may be slow)
+ *   3. printk "[tick] N" once per second (LAST; output may be slow)
  *
  * `arch_tick_start()` is called by aarch64_main AFTER dtb_init and
- * gic_init.  It enables the CNTP and arms it for one period ahead.
- * Subsequent re-arms happen in the ISR itself.
+ * gic_init.  It enables the CNTP, arms it for one period ahead, and
+ * registers `cntp_tick_handler` with the GIC handler table so the
+ * generic dispatch can route CNTP PPI ticks to it.  Subsequent re-arms
+ * happen in the ISR itself.
+ *
+ * EOI is no longer issued here: dispatch (gic_dev_dispatch) EOI's the
+ * GIC after the handler returns.  Phase 1 only enables the CNTP PPI so
+ * any other INTID in dispatch is "unexpected" and EOI'd by the wrapper.
  *
  * Output policy: printing on every 100 Hz tick would flood the
  * polled PL011 (~100 characters/second), so we print one line per
@@ -19,15 +25,15 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <arch/regs.h>
 #include "reg.h"
+#include <arch/aarch64/gic.h>
+#include <arch/aarch64/dtb.h>
 
 /* Forward from pl011.c. */
 void kputs(const char *s);
 void kputu(uint64_t v);
 void kputx(uint64_t v);
-
-/* From dtb.c.  The CNTP PPI defaults to 30 in dtb_init(). */
-extern uint32_t dtb_cntp_ppi(void);
 
 #define HZ                 100U
 #define TICKS_PER_SECOND   HZ
@@ -35,13 +41,38 @@ extern uint32_t dtb_cntp_ppi(void);
 /* Counter for once-per-second print.  This is per-CPU logically but
  * phase 1 is single-core so a plain uint64 is fine.  It is written
  * by the ISR and read by nobody; visibility across IRQ entries is
- * provided by the implicit dsb ish that eret implies. */
+ * provided by the implicit dsb ish that eret implies.
+ *
+ * Stays static (not exported) — the probes in irq_probe.c now drive
+ * a deterministic SGI/SPI pair rather than relying on this counter,
+ * so v2's "export g_ticks" requirement is retracted. */
 static volatile uint64_t g_ticks;
 
 /* Cached "current period in ticks" — set by arch_tick_start(),
  * re-read by the ISR from CNTP_TVAL_EL0.  We keep the integer so
  * the ISR doesn't have to re-issue the mrs every entry. */
 static uint64_t g_period;
+
+/* Registered CNTP PPI tick handler.  Order contract per phase1 spec §2.3:
+ *   1. Rewrite TVAL FIRST (avoid losing a tick).
+ *   2. EOI is performed by gic_dev_dispatch after this returns.
+ *   3. Print.
+ *
+ * Same-priority nesting is masked at the GIC anyway (PPI priority
+ * unique under CNTP), so extending the active window by one EOI
+ * round-trip is behaviorally equivalent to the in-handler EOI. */
+static void cntp_tick_handler(uint32_t intid, uint64_t param, struct pt_regs *regs)
+{
+    (void)intid; (void)param; (void)regs;
+    cntp_tval_el0_write(g_period);
+    uint64_t t = g_ticks + 1;
+    g_ticks = t;
+    if ((t % TICKS_PER_SECOND) == 0) {
+        kputs("[tick] ");
+        kputu(t / TICKS_PER_SECOND);
+        kputs("\n");
+    }
+}
 
 bool arch_tick_start(void)
 {
@@ -52,6 +83,16 @@ bool arch_tick_start(void)
     g_period = freq / HZ;
     if (g_period == 0) {
         g_period = 1;
+    }
+
+    /* Register the tick handler with the GIC handler table BEFORE we
+     * arm the timer.  If the registration fails (e.g. unexpected -2
+     * "already registered" from a re-init), we still proceed — the
+     * earlier registration is just as valid. */
+    int rc_reg = gic_register_handler(dtb_cntp_ppi(), cntp_tick_handler, 0,
+                                      "cntp-tick");
+    if (rc_reg != 0 && rc_reg != -2) {
+        return false;
     }
 
     /* Arm and enable.  CNTP_CTL_EL0 bit 0 = EN (enable).  bit 1 =
@@ -81,53 +122,4 @@ bool arch_tick_start(void)
     kputu(HZ);
     kputs(" Hz)\n");
     return true;
-}
-
-/* C-side EL1 IRQ handler.  Called by the EL1h IRQ vector slot in
- * entry.S after reading GICC_IAR.
- *
- * In phase 1 we hard-code the expected intid (= the CNTP PPI from
- * dtb.c).  Spurious INTID 1023 is treated as a benign "no IRQ
- * actually pending" and returns 0 so the caller does an eret
- * without EOI.
- *
- * Returns 1 if the IRQ was handled (caller should EOI + eret), 0
- * if spurious. */
-int el1_irq_dispatch(void)
-{
-    uint32_t iar = gicc_read32(GICC_IAR);
-    uint32_t intid = iar & 0x3FFU;          /* bits[9:0] */
-    uint32_t expected = dtb_cntp_ppi();     /* PPI 30 by default */
-
-    if (intid == GICC_INTID_SPURIOUS) {
-        return 0;
-    }
-    if (intid != expected) {
-        /* Phase 1 only enables the CNTP PPI.  Any other INTID is a
-         * misconfiguration (we did not enable SPI 33, so PL011
-         * never raises an IRQ).  EOI it anyway so the GIC doesn't
-         * lock up. */
-        gicc_write32(GICC_EOIR, intid);
-        kputs("[gic] unexpected IRQ intid=");
-        kputu(intid);
-        kputs("\n");
-        return 0;
-    }
-
-    /* Spec §2.3 order: rewrite TVAL FIRST, then EOI, then print. */
-    cntp_tval_el0_write(g_period);
-    gicc_write32(GICC_EOIR, intid);
-
-    /* Per-second print: every 100th tick.  The PL011 polled output
-     * is slow, so we don't print on every tick.  To make a
-     * "≈1000 times +tick" verification possible with this policy,
-     * we print the tick count once a second. */
-    uint64_t t = g_ticks + 1;
-    g_ticks = t;
-    if ((t % TICKS_PER_SECOND) == 0) {
-        kputs("[tick] ");
-        kputu(t / TICKS_PER_SECOND);
-        kputs("\n");
-    }
-    return 1;
 }
