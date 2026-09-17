@@ -66,6 +66,30 @@ void pl011_init(void)
     pl011_w32(PL011_CR, (1U << 0) | (1U << 8) | (1U << 9));
 }
 
+/* ── RX interrupt path (GIC Phase 1, spec §7.4) ── Only RXIM is enabled;
+ * polled TX continues to drive the console. The helpers below are the
+ * narrow surface spi_test.c consumes; nothing else should poke IMSC/ICR. */
+
+/* Read DR: also clears the RX FIFO data + status, which is required
+ * before EOI for level-triggered interrupts (spec §2.3). */
+uint32_t pl011_dr_read(void)
+{
+    return pl011_r32(PL011_DR);
+}
+
+/* Enable only the RX interrupt mask bit (RXIM = bit4); all other
+ * sources stay masked. */
+void pl011_irq_rx_enable(void)
+{
+    pl011_w32(PL011_IMSC, 1U << 4);
+}
+
+/* Clear all asserted PL011 interrupts (write-1-to-clear). */
+void pl011_clear_ints(void)
+{
+    pl011_w32(PL011_ICR, 0x7FF);
+}
+
 /* Write a single byte.  Waits until the TX FIFO has room. */
 void pl011_putc(char c)
 {

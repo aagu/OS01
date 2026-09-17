@@ -22,6 +22,7 @@ void kputs(const char *s);
 #if OS01_SELFTEST
 void gic_clobber_probe(void);
 void gic_unexpected_probe(void);
+void gic_spi_test_init(void);
 #endif
 
 #if OS01_SELFTEST
@@ -266,6 +267,11 @@ void aarch64_main(const struct boot_context *handoff)
         log_err("[smp] FATAL: BSP timer initialization failed\n");
         for (;;) arch_cpu_halt();
     }
+#if OS01_SELFTEST
+    /* Task 2.3b — arm the PL011 RX SPI handler BEFORE IRQ unmask, so a
+     * pending SPI cannot fire into an empty handler table. */
+    gic_spi_test_init();
+#endif
     log_info("[IRQ] enabled (DAIF.IRQ cleared)\n");
     arch_local_irq_enable();
     __asm__ __volatile__("isb" ::: "memory");
