@@ -440,6 +440,13 @@ $(TEST_BLD)/gic_driver_production.o: $(TESTS_DIR)/kernel/arch/aarch64/gic_driver
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(GIC_HOST_CFLAGS) -c $< -o $@
 
+# The test TU itself must see <arch/aarch64/gic.h>; the generic
+# $(TEST_BLD)/%.o rule below lacks KERNEL_INC. Add it explicitly.
+$(TEST_BLD)/test_gic_driver.o: $(TEST_CASES)/test_gic_driver.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/gic.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GIC_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
 $(TEST_BLD)/test_gic_driver.elf: $(TEST_BLD)/test_gic_driver.o $(TEST_BLD)/gic_driver_production.o
 	$(HOST_CC) -o $@ $^
 
