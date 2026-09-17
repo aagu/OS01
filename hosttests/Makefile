@@ -78,9 +78,10 @@ TEST_BINS := \
     $(TEST_BLD)/test_sync_primitives.elf \
     $(TEST_BLD)/test_poll_requested.elf \
     $(TEST_BLD)/test_bootinfo_abi.elf \
-    $(TEST_BLD)/test_runtime_udivti3.elf
+    $(TEST_BLD)/test_runtime_udivti3.elf \
+    $(TEST_BLD)/test_lwip_rand.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand
 
 all: $(TEST_BINS)
 
@@ -409,6 +410,22 @@ POLL_PRODUCTION_OBJS := \
 
 $(TEST_BLD)/test_poll_requested.elf: $(TEST_BLD)/test_poll_requested.o $(POLL_PRODUCTION_OBJS)
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+# LWIP_RAND white-box fixture: host-compile the PRODUCTION
+# kernel/net/lwip_sys_arch.c (it depends only on <random/random.h> +
+# <stdint.h>) and link with -Wl,--wrap=get_random_bytes so the test
+# asserts the real call path, not a mock of it.
+LWIP_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC)
+
+$(TEST_BLD)/lwip_rand_production.o: $(TESTS_DIR)/kernel/net/lwip_sys_arch.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(LWIP_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_lwip_rand.elf: $(TEST_BLD)/test_lwip_rand.o $(TEST_BLD)/lwip_rand_production.o
+	$(HOST_CC) -Wl,--wrap=get_random_bytes -o $@ $^
+
+test_lwip_rand: $(TEST_BLD)/test_lwip_rand.elf
+	$<
 
 clean:
 	rm -rf $(TEST_BLD)

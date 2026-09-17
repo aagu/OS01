@@ -94,8 +94,9 @@ typedef long ssize_t;
 #endif
 
 // ── Random (used by DNS for TXID) ─────────────────────────────
-// Simple LCG for DNS TXID — sufficient for a hobby OS
-#define LWIP_RAND() ((u32_t)(jiffies * 1103515245 + 12345))
+// kernel ChaCha20 CSPRNG via kernel/net/lwip_sys_arch.c
+uint32_t lwip_getrandom_u32(void);
+#define LWIP_RAND() lwip_getrandom_u32()
 
 // ── Packed struct macros ──────────────────────────────────────
 #define PACK_STRUCT_STRUCT __attribute__((packed))
