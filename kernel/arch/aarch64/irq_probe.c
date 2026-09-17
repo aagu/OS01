@@ -100,8 +100,9 @@ void gic_clobber_probe(void)
         "dsb  sy\n\t"
         "adrp x9, probe_sgir_addr\n\t"
         "ldr  x9, [x9, :lo12:probe_sgir_addr]\n\t"
-        "mov  x10, #0x200\n\t"
-        "movk x10, #0x0002, lsl #16\n\t"   /* x10 = 0x02000002: SELF + SGI 2 */
+        "mov  x10, #2\n\t"
+        "movk x10, #0x200, lsl #16\n\t"    /* x10 = 0x02000002: SGI 2 (bits 0-3) +
+                                              SELF filter 0b10 (bits 24-25) */
         "str  w10, [x9]\n\t"                /* ← 自发 IRQ, 立即可入 */
         "1: adrp x9, probe_sgi_seen\n\t"
         "add  x9, x9, :lo12:probe_sgi_seen\n\t"

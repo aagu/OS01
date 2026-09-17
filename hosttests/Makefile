@@ -81,9 +81,10 @@ TEST_BINS := \
     $(TEST_BLD)/test_runtime_udivti3.elf \
     $(TEST_BLD)/test_lwip_rand.elf \
     $(TEST_BLD)/test_gic_driver.elf \
-    $(TEST_BLD)/test_gic_marker_lines.elf
+    $(TEST_BLD)/test_gic_marker_lines.elf \
+    $(TEST_BLD)/test_gic_probe.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe
 
 all: $(TEST_BINS)
 
@@ -472,6 +473,23 @@ $(TEST_BLD)/test_gic_marker_lines.elf: $(TEST_BLD)/test_gic_marker_lines.o
 	$(HOST_CC) -o $@ $<
 
 test_gic_marker_lines: $(TEST_BLD)/test_gic_marker_lines.elf
+	$<
+
+# GIC clobber-probe encoding contract — host-side RED for the QEMU TIMEOUT bug.
+# Same compile pattern as test_gic_marker_lines: source-level check via
+# OS01_KERNEL_SRC. The C wrapper (gic_send_sgi) is exercised against the
+# production gic_driver.c (mock MMIO) AND the asm source is scanned for the
+# known-buggy immediate literal.
+$(TEST_BLD)/test_gic_probe.o: $(TEST_CASES)/test_gic_probe.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/irq_probe.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/gic.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GIC_HOST_CFLAGS) $(GIC_MARKER_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_gic_probe.elf: $(TEST_BLD)/test_gic_probe.o $(TEST_BLD)/gic_driver_production.o
+	$(HOST_CC) -o $@ $^
+
+test_gic_probe: $(TEST_BLD)/test_gic_probe.elf
 	$<
 
 clean:
