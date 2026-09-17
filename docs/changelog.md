@@ -6,6 +6,18 @@
 ---
 
 ## 2026-09-17
+- docs: **`user-stack-canary` 闭环** —— master `0819e20`（merge），R1-R14 codex review
+  + opus v2 重写 + 9 commits subagent-driven。commit 清单：
+  - `00a98e6` feat(user): RED canary_smash probe + systest 45/46/47
+  - `3d3fed8` feat(libc): GREEN user-space stack canary (SSP) + 3 build flags
+  - `414065c` feat(user): canary_dump probe + systest 43/44 guard entropy
+  - `2aa346a` feat(build): test-user-canary 7-step Layer 1 audit target
+  - `84b05fe` chore(build): preserve busybox symbols via SKIP_STRIP=y
+  - `9174fe0` feat(selftest): RED kernel selftest at_random (Task 2.1)
+  - `e35c763` feat(kernel+libc): AT_RANDOM auxv + selftest wrapper + getauxval (Task 2 GREEN)
+  - `ae472a6` feat(net): LWIP_RAND → kernel ChaCha20 CSPRNG + hosttest path test
+  - `815ba57` docs: roadmap + changelog 同步 (Task 4 — user-stack-canary 闭环)
+  - `0819e20` Merge feat/user-stack-canary: user-space stack canary + kernel CSPRNG + LWIP_RAND
 - feat(libc): 用户态栈 canary —— libc/user/busybox 全面
   -fstack-protector-strong；guard 每次 exec 经 SYS_getrandom 播种；
   systest 43-47；make test-user-canary 构建期审计

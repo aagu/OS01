@@ -37,7 +37,7 @@
 
 ### 🔒 P1 安全加固
 
-**已完成**：getrandom、x86_64 内核栈保护、统一用户态启动方式、syscall 边界审计、exec 软链接跟随、**用户栈 canary（worktree `feat/user-stack-canary`，commits `00a98e6`..`ae472a6`，8 commits：canary_smash RED → libc SSP GREEN → canary_dump + 43/44 熵守门 → `test-user-canary` 7 步 → SKIP_STRIP busybox 符号守门 → at_random selftest RED → AT_RANDOM auxv + selftest + getauxval → LWIP_RAND 接内核 ChaCha20 + hosttest）**。详见 `docs/changelog.md`。
+**已完成**：getrandom、x86_64 内核栈保护、统一用户态启动方式、syscall 边界审计、exec 软链接跟随、**用户栈 canary（worktree `feat/user-stack-canary`，commits `00a98e6`..`815ba57`，9 commits + 1 merge `0819e20`：canary_smash RED → libc SSP GREEN → canary_dump + 43/44 熵守门 → `test-user-canary` 7 步 → SKIP_STRIP busybox 符号守门 → at_random selftest RED → AT_RANDOM auxv + selftest + getauxval → LWIP_RAND 接内核 ChaCha20 + hosttest → roadmap/changelog 同步收尾）**，merge `0819e20` 进 master。详见 `docs/changelog.md`。
 
 依赖链：`getrandom ✅ → 统一用户态启动方式 ✅ → 用户栈 canary ✅ + AT_RANDOM ✅ → ASLR`；UBSan/KASan 编译期独立。
 
