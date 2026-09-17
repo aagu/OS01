@@ -24,6 +24,7 @@
 #include <rbtree.h>
 #include <sys/random.h>
 #include <sys/mman.h>
+#include <sys/ssp.h>
 
 // ── Forward declarations for the H11 signal-handler test ─────
 // Defined at file scope after test_hostile() so the handler's
@@ -3018,6 +3019,57 @@ static void test_ssp_no_false_trip(void)
            "want WIFEXITED&&42, status=%#x", st);
 }
 
+/* 扫描 "TAG <16hex>[\n|\0]"（canary_dump 的输出格式 "GUARD %016lx\n"）。
+ * 返回 0 OK，-1 格式不符——不修改 *out。 */
+static int parse_hex16_line(const char *buf, const char *tag, uint64_t *out)
+{
+    size_t taglen = 0;
+    while (tag[taglen]) taglen++;
+    if (strncmp(buf, tag, taglen) != 0) return -1;
+    const char *p = buf + taglen;
+    if (*p != ' ') return -1;
+    p++;
+    uint64_t v = 0;
+    for (int i = 0; i < 16; i++) {
+        int h = hexval((unsigned char)p[i]);
+        if (h < 0) return -1;
+        v = (v << 4) | (uint64_t)h;
+    }
+    if (p[16] != '\n' && p[16] != '\0') return -1;
+    *out = v;
+    return 0;
+}
+
+static void test_ssp_guard_seeded(void)
+{
+    CHECKF(__stack_chk_guard != 0, "43_ssp_guard_seeded",
+           "guard=%016lx", "guard must be nonzero, got %016lx",
+           (unsigned long)__stack_chk_guard);
+}
+
+static void test_ssp_guard_distinct_across_exec(void)
+{
+    uint64_t seen[10];
+    int dup = 0;
+    for (int i = 0; i < 10; i++) {
+        char buf[64];
+        int st = 0;
+        int n = exec_capture("/bin/canary_dump", buf, sizeof(buf), &st);
+        uint64_t g = 0;
+        if (n <= 0 || parse_hex16_line(buf, "GUARD", &g) != 0
+                || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+            CHECKF(0, "44_ssp_guard_distinct_across_exec",
+                   "run %d ok", "run %d: bad canary_dump output/status", i);
+            return;
+        }
+        for (int j = 0; j < i; j++)
+            if (seen[j] == g) dup++;
+        seen[i] = g;
+    }
+    CHECKF(dup == 0, "44_ssp_guard_distinct_across_exec",
+           "dups=0", "10 execs, duplicate guard values (dups=%d)", dup);
+}
+
 // ── Unified startup self-checks (spec 2026-09-13-user-startup-unification) ──
 // Weak extern: under the old crt0/csu these resolve to 0, tests FAIL (RED);
 // Task 3/4 define them and the same code goes GREEN.
@@ -3298,6 +3350,8 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"symlink_loop_depth",      test_symlink_loop_depth},
     {"41_exec_via_symlink",     test_41_exec_via_symlink},
     {"42_getdents_dt_lnk",      test_42_getdents_dt_lnk},
+    {"43_ssp_guard_seeded",               test_ssp_guard_seeded},
+    {"44_ssp_guard_distinct_across_exec", test_ssp_guard_distinct_across_exec},
     {"45_ssp_trip_sigabrt_exec",  test_ssp_trip_sigabrt_exec},
     {"46_ssp_trip_sigabrt_fork",  test_ssp_trip_sigabrt_fork},
     {"47_ssp_no_false_trip",      test_ssp_no_false_trip},
