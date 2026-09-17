@@ -24,7 +24,7 @@ ifeq ($(filter userland,$(PROFILE_CAPABILITIES)),userland)
 # artifacts; config/fsroot copies come from $(USER_ARTIFACT_DIR)).
 USER_PROGRAMS := init spin sigtest poweroff halt reboot systest \
                  test_mmap test_fork_mmap test_cow terminal smp_stress \
-                 socktest udptest ipaddr nettest tetris
+                 socktest udptest ipaddr nettest tetris canary_smash
 USER_ARTIFACTS := $(addprefix $(USER_ARTIFACT_DIR)/,$(addsuffix .elf,$(USER_PROGRAMS)))
 
 # One grouped rule (GNU make &:, runs once per invocation): under the

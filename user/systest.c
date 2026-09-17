@@ -2920,6 +2920,104 @@ static void test_42_getdents_dt_lnk(void)
     unlink(SYMDIR "/reg42");
 }
 
+// ── 43-53: 用户态栈 canary / AT_RANDOM（spec 2026-09-17-user-stack-canary）──
+
+/* hex nibble（libc sscanf 只有 %d/%s/%c/%x/%u，无 %lx——手工解析） */
+static int hexval(int c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* fork → dup2(pipe写端,1) → exec(path) → 父读全部输出 → waitpid。
+ * 返回读到的字节数（<0 失败）；*out_status 收原始 waitpid status。 */
+static int exec_capture(const char *path, char *out, size_t outsz, int *out_status)
+{
+    int fds[2];
+    if (pipe(fds) < 0) return -1;
+    int64_t pid = fork();
+    if (pid < 0) { close(fds[0]); close(fds[1]); return -1; }
+    if (pid == 0) {
+        close(fds[0]);
+        dup2(fds[1], 1);
+        close(fds[1]);
+        char *argv[] = { (char *)path, NULL };
+        exec(path, argv, NULL);
+        _exit(126);                          /* exec 返回即失败 */
+    }
+    close(fds[1]);
+    size_t n = 0;
+    while (n + 1 < outsz) {
+        int64_t r = read(fds[0], out + n, outsz - 1 - n);
+        if (r <= 0) break;                   /* EOF 或 -1 都终止 */
+        n += (size_t)r;
+    }
+    out[n] = '\0';
+    close(fds[0]);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    if (out_status) *out_status = st;
+    return (int)n;
+}
+
+/* systest.c 自身被 -fstack-protector-strong 编译后的内联溢出帧 */
+__attribute__((noinline))
+static void ssp_smash_frame(void)
+{
+    volatile char buf[16];
+    for (int i = 0; i < 64; i++)
+        buf[i] = 'S';
+}
+
+static void test_ssp_trip_sigabrt_exec(void)
+{
+    int64_t pid = fork();
+    if (pid == 0) {
+        char *argv[] = { (char *)"/bin/canary_smash", NULL };
+        exec("/bin/canary_smash", argv, NULL);
+        _exit(126);
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    CHECKF(WIFSIGNALED(st) && WTERMSIG(st) == SIGABRT,
+           "45_ssp_trip_sigabrt_exec", "status=%#x",
+           "want WIFSIGNALED&&SIGABRT(6), status=%#x", st);
+}
+
+static void test_ssp_trip_sigabrt_fork(void)
+{
+    int64_t pid = fork();
+    if (pid == 0) {
+        /* fork 不经 exec：guard 继承自父（spec R9 已知弱点），
+         * 但 trip 检测必须仍然工作。 */
+        ssp_smash_frame();
+        _exit(0);                            /* SSP 下不可达 */
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    CHECKF(WIFSIGNALED(st) && WTERMSIG(st) == SIGABRT,
+           "46_ssp_trip_sigabrt_fork", "status=%#x",
+           "want WIFSIGNALED&&SIGABRT(6), status=%#x", st);
+}
+
+static void test_ssp_no_false_trip(void)
+{
+    int64_t pid = fork();
+    if (pid == 0) {
+        volatile char buf[64];               /* SSP 覆盖的正常局部数组 */
+        int sum = 0;
+        for (int i = 0; i < 64; i++) { buf[i] = (char)i; sum += buf[i]; }
+        _exit(42 + (sum & 0));               /* 42，且 buf 不可被优化掉 */
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    CHECKF(WIFEXITED(st) && WEXITSTATUS(st) == 42,
+           "47_ssp_no_false_trip", "status=%#x",
+           "want WIFEXITED&&42, status=%#x", st);
+}
+
 // ── Unified startup self-checks (spec 2026-09-13-user-startup-unification) ──
 // Weak extern: under the old crt0/csu these resolve to 0, tests FAIL (RED);
 // Task 3/4 define them and the same code goes GREEN.
@@ -3200,6 +3298,9 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"symlink_loop_depth",      test_symlink_loop_depth},
     {"41_exec_via_symlink",     test_41_exec_via_symlink},
     {"42_getdents_dt_lnk",      test_42_getdents_dt_lnk},
+    {"45_ssp_trip_sigabrt_exec",  test_ssp_trip_sigabrt_exec},
+    {"46_ssp_trip_sigabrt_fork",  test_ssp_trip_sigabrt_fork},
+    {"47_ssp_no_false_trip",      test_ssp_no_false_trip},
 };
 
 int main(int argc, char **argv, char **envp)
