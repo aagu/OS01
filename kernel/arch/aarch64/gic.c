@@ -57,14 +57,7 @@ void gic_init(void)
     kputs("[gic] CPU interface @ 0x");
     kputx(dtb_gicc_base());
     kputs("\n");
-    /* Task 2.2: dispatch ready marker — emitted AFTER gic_init completes
-     * (handler table initialized, dist+cpu interface live). Emitted from
-     * gic_init so the harness can observe it regardless of which caller
-     * drives the bring-up; main.c also re-emits under OS01_SELFTEST so the
-     * source-level marker lines test (test_gic_marker_lines) finds it
-     * inside main.c. */
-    kputs("[gic] dispatch ready\n");
-}
+    }
 
 int gic_irq_configure(uint32_t intid, bool enable, uint8_t prio, uint8_t targets)
 { return gic_irq_config(&g_gic, intid, enable, prio, targets); }

@@ -23,6 +23,7 @@ void kputs(const char *s);
 void gic_clobber_probe(void);
 void gic_unexpected_probe(void);
 void gic_spi_test_init(void);
+void gic_ipi_test(uint32_t cpu_count);
 #endif
 
 #if OS01_SELFTEST
@@ -285,6 +286,7 @@ void aarch64_main(const struct boot_context *handoff)
     kputs("[gic] dispatch ready\n");
     gic_clobber_probe();
     gic_unexpected_probe();
+    gic_ipi_test(dtb_cpu_count());
 #endif
     for (;;) arch_cpu_halt();
 }

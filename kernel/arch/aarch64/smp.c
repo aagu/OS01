@@ -10,6 +10,7 @@
 #include <arch/aarch64/psci.h>
 #include <arch/aarch64/smp.h>
 #include <arch/aarch64/smp_boot_core.h>
+#include <arch/irq.h>
 #include <arch/aarch64/boot_log.h>
 #include "aarch64_percpu.h"
 #include "reg.h"
@@ -220,7 +221,15 @@ void secondary_idle(uint32_t cpu_id)
         smp_bench_iter(cpu_id, 1000000);
 
     /* Includes a late AP: go=2 persists even if the BSP already resumed
-     * ticks. APs never enable their timer or unmask IRQs in this phase. */
+     * ticks. APs keep their CNTP disabled; the only enabled banked lines
+     * are SGI 0/1/2 (IPI + probe) and — for the BSP — the CNTP PPI. */
     cntp_ctl_el0_write(cntp_ctl_el0_read() & ~UINT64_C(1));
+#if OS01_SELFTEST
+    /* R11 + Task 2.2 simplification: only the selftest build unmask DAIF.I
+     * on APs so they can take SGIs through el1_irq (GIC Phase 1, spec §7.5).
+     * Production build stays unchanged — APs remain IRQ-masked. */
+    arch_local_irq_enable();
+    __asm__ __volatile__("isb" ::: "memory");
+#endif
     for (;;) arch_cpu_halt();
 }
