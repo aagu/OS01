@@ -163,13 +163,13 @@ $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	          -e "s|-Wl,-T,../../user/linker.ld|-Wl,-T,$(OS01_ROOT)/user/linker.ld|" \
 	          "$(OS01_ROOT)/config/busybox.config.in" > "$(BUSYBOX_PRIVATE)/.config"; \
 	      env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
-	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
+	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" SKIP_STRIP=y $(MAKE) MAKEOVERRIDES= \
 	        -C "$(BUSYBOX_PRIVATE)" silentoldconfig CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)" 2>/dev/null || \
 	      yes "" | env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
-	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
+	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" SKIP_STRIP=y $(MAKE) MAKEOVERRIDES= \
 	        -C "$(BUSYBOX_PRIVATE)" oldconfig CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)"; \
 	      env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
-	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
+	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" SKIP_STRIP=y $(MAKE) MAKEOVERRIDES= \
 	        -C "$(BUSYBOX_PRIVATE)" CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)"; \
 	      [ -f "$(BUSYBOX_PRIVATE)/busybox" ] || { echo "ERROR: busybox build produced no binary"; exit 1; }; \
 	      printf "%s\n" "$$digest" > "$(BUSYBOX_RECEIPT)"; \
