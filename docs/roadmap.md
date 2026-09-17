@@ -57,8 +57,8 @@
 
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
-| head.S + MMU | 启动入口 + TTBR0_EL1/页表（原语 ✅，下一步是把原语接到 aarch64 `main.c` 建立内核恒等映射 + user 页表） | 页表原语 ✅ | ArvernOS |
-| GICv2 驱动 | 中断控制器 | head.S | opuntiaOS |
+| head.S + MMU | ✅ dual-TTBR 页表构建 + MMU 使能 + 高半部跳转（`kernel/arch/aarch64/head.S` 755 行 `ddc593b`；`aarch64_main` 已接页表原语 + PMM 跑 QEMU smoke）。**剩余**：user 页表 / uaccess facade（`mmu.h::arch_user_range_accessible` aarch64 仍 fail-closed stub）、boot 2MiB block 与 4K 原语合并（`boot_fixup.c` 自述 future work）、page_table 原语 host 测试为零 | 页表原语 ✅ | ArvernOS |
+| GICv2 驱动 | ✅ Phase 1 完成（merge `545a935`，14 commits：driver 泛化 + entry.S save/restore + 通用 dispatch + SPI/PL011 handler + SMP IPI harness；x86_64 0 改动 / 不进调度器 / 不编 kernel core）。**Phase 2 候选**：SError/真机覆盖率、`aarch64_main` 接 GIC init、handler 表扩容（SGIs 0-15 + PPI 16-31 全注册）、dtb_gicd_base 解耦 | head.S ✅ | opuntiaOS |
 | Generic Timer | cntvct_el0 读数 + CNTP 周期定时器 | head.S | opuntiaOS |
 | 交叉编译链 | aarch64-linux-gnu-gcc + QEMU virt 平台 | 独立 | |
 | UEFI 启动链 | 共享 boot/uefi/main.c，aarch64 通过 PSCI 启动 AP；DTB handoff 副本固定 `[0x401e0000,0x401ff000)` | 独立 | |
@@ -71,6 +71,10 @@
 | CPU 特性探测 | `arch_cpu_features()` 返回统一位图（has_fpu / has_virt / has_cache_coherency）；x86 CPUID vs aarch64 ID_AA64* 各实现一份 | 独立 | Linux cpufeature |
 
 **距离单一 kernel_main 还差多远（粗估，一个人全职）**：~4–8 周（v25 已落地 arch_irq hooks + pt_regs_t facade + rtc split + kernel_thread_entry + driver initcall + PGD/PUD/PMD/PTE）。详见 `docs/arch.md` 末段 3 个 spec/plan 增量推进。
+
+#### ✅ P2.a GICv2 Phase 1 收尾 fix（2026-09-18，commit `2481e1f`）
+
+`kernel/arch/aarch64/irq_probe.c:103-105` MOVZ/MOVK immediate 错位（`mov x10,#0x200` + `movk x10,#0x0002,lsl #16` → `0x0002_0200`，应得 `0x0200_0002` = SGI 2 + filter SELF）。QEMU `test-aarch64-uefi-smp` 9/9 PASS。详见 `docs/changelog.md` 2026-09-18。
 
 **永远无法统一的（ISA/HW 差异）**：`head.S`/`entry.S` 指令集差异；MMU 页表格式（PTE bit-position）；中断控制器驱动；SoC 外设（UART/timer/GPIO 等）。靠 arch 抽象层封装，统一接口、不统一实现。
 
