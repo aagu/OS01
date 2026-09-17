@@ -1,11 +1,21 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-09-17）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-09-18）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
 
+## 2026-09-18
+- fix(aarch64): **GIC clobber-probe TIMEOUT 修复** —— commit `2481e1f`（worktree `fix/gic-probe-timeout`）：`kernel/arch/aarch64/irq_probe.c:103-105` asm `mov x10,#0x200` + `movk x10,#0x0002,lsl #16` 两个 immediate 错位，实际算出 `0x0002_0200`（SGI 512, filter=LIST）而非 `0x0200_0002`（SGI 2 + filter SELF）；GICv2 静默丢弃 out-of-range SGI → 2 秒 ldar 轮询命中 deadline → `[gic-probe] save-restore TIMEOUT`。修正为 `mov x10,#2` + `movk x10,#0x200,lsl #16`，`x10 == 0x02000002 == gic_send_sgi(dev,2,0,FILTER_SELF)`（C wrapper 编码 `filter<<24 | targets<<16 | sgi&0xf`）。配套 RED→GREEN hosttest `hosttests/cases/test_gic_probe.c`（180 行 + Makefile wiring）：suite 1 用 production gic_driver.c + mock MMIO 断言 C wrapper 写 `0x02000002`；suite 2 静态扫描 irq_probe.c 源码禁止已知 buggy literal pair。QEMU E2E 矩阵 `make test-aarch64-uefi-smp --cpus 1 2 4 --repeat 3` = 9/9 PASS（0 TIMEOUT / 0 FAIL）；hosttests 23/23（x86_64-clang + aarch64-clang）；aarch64 uefi KERNEL_SELFTEST=1 build PASS。`docs/superpowers/specs/.../phase1` §7.3 clobber-probe 设计 + plan §2.2 评审均提及 SGI 2 self-trigger，但 plan:1078 原写法 `movk x10,#2,lsl #24` 本身是 assembler error（lsl #24 非法），实现层的 bug 制造了 *silent* TIMEOUT，plan 的 bug 只会产生 *obvious* 编译失败——一并记入 follow-up
+
 ## 2026-09-17
+- feat(aarch64): **GICv2 通用中断框架 Phase 1** —— merge `545a935`（worktree `feat/aarch64-gic`，14 commits = 6 spec/plan docs + 8 实现）：
+  - spec/plan docs：`1c555f5` GICv2 Phase 1 spec + plan → `2a0f30a` R1 (9) → `42ece05` R2 (7) → `7d59ac4` R3 (1) → `ccf5b47` R4 (4) → `08c6302` plan NIT-1 hosttest 编译路径（合计 22 条修订全落地）
+  - Task 1.1/1.2 GICv2 driver 泛化：`c885d94` gic.h + gic_driver.c 198 行 + gic.c wrapper + `a99ed71` mock-MMIO hosttest RED→GREEN（8 suites 69/69）
+  - Task 2.1/2.2 QEMU marker harness + entry.S 全量 save/restore + 通用 dispatch：`ec167ae` RED + `d601570` GREEN（4 marker + 22/22 hosttest grep）
+  - Task 2.3a/2.3b SPI harness + PL011 RX handler + DTB interrupts 解析 + test-aarch64-gic-spi target：`5180681` RED + `ef19203` GREEN（8 fixture self-test）
+  - Task 3.1/3.2 SMP IPI harness + gic_pub.h dsb ishst + ipi_test.c SGI send + handler + per-CPU trace：`a50b8aa` RED + `93bafb3` GREEN（14 fixture）
+  - 边界全守：x86_64 0 改动 / AGENTS.md 0 改动 / `kernel/include/arch/barrier.h` 0 改动（R4-2 决策）/ 不编 kernel core / 不进调度器；Spec G1-G6 + R1-R11 全落地。QEMU E2E `test-aarch64-uefi-smp` 全程 **6/6 触发 `[gic-probe] save-restore TIMEOUT`**——根因 asm immediate 错位，已在 09-18 commit `2481e1f` 修复
 - docs: **`user-stack-canary` 闭环** —— master `0819e20`（merge），R1-R14 codex review
   + opus v2 重写 + 9 commits subagent-driven。commit 清单：
   - `00a98e6` feat(user): RED canary_smash probe + systest 45/46/47
