@@ -3127,7 +3127,14 @@ static int startup_layout_errors(int argc, char **argv)
         errs |= SU_ERR_AUXV_NULL;
     } else {
         if ((uint64_t *)(environ + envc + 1) != __libc_auxv) errs |= SU_ERR_AUXV_ADDR;
-        if (!(__libc_auxv[0] == 0 && __libc_auxv[1] == 0))   errs |= SU_ERR_AUXV_ATNULL;
+        /* R9/2.2f: auxv now starts with (AT_PLATFORM, …) so the old
+         * "first pair must be AT_NULL" check is wrong. Scan up to 64
+         * pairs for the AT_NULL terminator instead. */
+        int atnull_i = -1;
+        for (int i = 0; i < 64; i++)
+            if (__libc_auxv[2 * i] == 0) { atnull_i = i; break; }
+        if (atnull_i < 0 || __libc_auxv[2 * atnull_i + 1] != 0)
+            errs |= SU_ERR_AUXV_ATNULL;
         if (!((uintptr_t)__libc_auxv > (uintptr_t)__libc_stack_end)) errs |= SU_ERR_AUXV_RANGE;
     }
     return errs;
