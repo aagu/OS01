@@ -1,10 +1,10 @@
 ---
 title: OS01 aarch64 GICv2 通用中断框架 Phase 1 设计
 created: 2026-09-17
-updated: 2026-09-17 (R1 修订 → R2 修订)
+updated: 2026-09-17 (R1 修订 → R2 修订 → R3 修订)
 type: spec
-status: draft-v3（R2 评审 NEEDS_REVISION → 7 条全数落地，待 R3）
-version: 3
+status: draft-v4（R3 评审 NEEDS_REVISION → 1 条全数落地，待 R4）
+version: 4
 tags: [osdev, aarch64, gic, interrupt, kernel]
 phase: GICv2 Phase 1（QEMU virt UEFI 路径）
 related: [2026-08-29-aarch64-phase1-design, os01-roadmap P2]
@@ -36,6 +36,15 @@ related: [2026-08-29-aarch64-phase1-design, os01-roadmap P2]
 > R2-5 unexpected 探针改"观察递送恰一次"（回调计数 + release flag，§7.3）；
 > R2-6 IAR trace 改 per-CPU 槽 `trace_iar[cpu]`（`gic_driver_set_cpu_index` 注入
 > TPIDR 实现，§2.3/§4.1/§7.5）；R2-7 §7.5 引用改 aarch64_percpu.h:93-115。
+>
+> **v4 修订记录（R3，1 条全落地）**：
+> R3-1 IPI 跨核发布屏障：plan Task 3.2 `gic_ipi_test()` 在两次
+> `gic_register_handler()` 成功后、首次 `gic_send_sgi()` 前调
+> `arch_publish_handler_table()`（`kernel/include/arch/barrier.h` 新增 wrapper，
+> aarch64 = `dsb ishst` + "memory" clobber；x86_64/host = 兜底 `arch_mb()` 或空
+> inline），发布 handler 表给被 SGI 唤醒的 AP。IPI harness 断言保持严格恰一次
+> （received==1 / summary targets=received / raw_iar==0x401 恰一条，cpus≥2），
+> 不允许多次——多余即 FAIL（不假阳、不假阴，spec §7.5 + §8）。
 >
 > 衔接 `docs/superpowers/specs/2026-08-29-aarch64-phase1-design.md`（下称"phase1 spec"）：
 > 该 spec 交付了 QEMU virt 上的 UEFI 启动 + SMP(PSCI) + CNTP 100 Hz tick + 最小 GICv2 配置（只开 PPI 30），
@@ -613,10 +622,11 @@ make PROFILE=aarch64-clang test-aarch64-gic-spi
   - **Task 2.3b（GREEN）**：DTB 解析 + pl011 RX 使能 + spi_test.c 注册 handler +
     run.mk `test-aarch64-gic-spi` target（传 `--diagnostic-dtb=auto`，harness 已支持）→ GREEN。
 
-### 7.5 IPI 测试（Task 3）与内存序协议（R1-6）
+### 7.5 IPI 测试（Task 3）与内存序协议（R1-6 + R3-1）
 
 ```
 BSP: 注册 ipi handler(SGI 0) + bsp_reply handler(SGI 1)
+     → **arch_publish_handler_table()** （R3-1：dsb ishst 发布 handler 表给 AP）
      → 打 "[ipi] send sgi=0 filter=others"
      → gic_send_sgi(0, 0, FILTER_OTHERS)
      → 有界轮询（cntvct deadline，镜像 phase1 spec §2.1 的无 IRQ 超时法）
@@ -636,6 +646,18 @@ BSP: SGI 1 handler 在 handler 上下文读 gic_dbg_last_iar()（§2.3：per-CPU
       §8 R5 详述风险）；gic_cpu_init 里为每核 banked 使能 SGI 0/1/2 bit
       （0=IPI 主载荷、1=回发确认、2=clobber 探针，§7.3）。
 ```
+
+**跨核发布协议（R3-1 新增）**：BSP 在两次 `gic_register_handler()` 成功
+之后、向 GICD_SGIR 写 SGI 之前必须 `arch_publish_handler_table()`（aarch64 = `dsb
+ishst` + "memory" clobber；x86_64/host = 兜底 `arch_mb()` 或空 inline，
+wrapper 走 `kernel/include/arch/barrier.h`）——普通内存写（`handlers[]` 槽
+fn/param）对被 SGI 唤醒的 AP 必须在此点之前 Inner-Shareable 可见，否则 AP
+走 `unexpected_cb` 路径、不置 `ipi_done[cpu]`、致 BSP 超时。
+**该屏障只对 Task 3.2 必要**：cntp（time.c，AP 不收）、pl011_rx（SPI→BSP
+本核）、probe_sgi（自触发）均在 SMP 启动前或本核自触发，不需本屏障；
+`gic_register_handler()` 本身不内置 barrier，避免无谓开销，由调用方按需
+显式 `arch_publish_handler_table()`（命名风格对齐既有 `arch_mb/rmb/wmb`
+`barrier.h` + `boot_*_set/get` `aarch64_percpu.h`）。
 
 **内存序契约（精确到指令）**：AP 侧计数是 `arch_atomic_fetch_add`（ldxr/stxr RMW，
 单写者 per 槽，原子性防并发递增丢失）；完成标志是 `stlr`（RELEASE store）——它保证
@@ -660,6 +682,7 @@ boot_online_set/get、bench_done_set/get 完全同模式，aarch64_percpu.h:93-1
 | R8 | KERNEL_SELFTEST=1 与生产镜像行为分叉 | 低 | 探针全部门控（§6.6）；唯一生产行为变化 = AP 开中断收 IPI，在 spec/commit message 里显式声明 |
 | R9 | reg.h 的 GICD_BASE/GICC_BASE 硬编码访问器残留误用 | 低 | Task 2.2 后 time.c 不再引用 gicc_read32/gicc_write32；reg.h 访问器加注释指向 gic_dev，逐步退役（不删，避免无关 churn） |
 | R10 | dispatch 切换期出现"符号已删、入口未换"的链接断裂中间态 | 高 | §4.2 的过渡 shim 协议（R1-1）：RED 阶段 shim 保链接，entry.S 替换与 shim 删除在同一变更内，commit 粒度上不存在断裂态 |
+| R11（R3-1） | **跨核 handler 表发布**：BSP 改 `handlers[]` 是普通内存写，Device-nGnRnE 的 GICD_SGIR 与之无 ordering 约束；AP 收到 SGI 时 handler 指针/param 可能未可见，走 `unexpected_cb` 不置 `ipi_done[cpu]`，BSP 超时（偶发，与硬件/启动时序相关） | 中 | `kernel/include/arch/barrier.h` 新增 `arch_publish_handler_table()`：aarch64 = `dsb ishst` + "memory" clobber，x86_64 = `arch_mb()` 兜底，host = 空 inline。**只在 Task 3.2 `gic_ipi_test()` 注册+发送 SGI 之间显式调**——其他注册点（cntp 在 SMP 启动前、pl011_rx SPI→BSP 本核、probe_sgi 自触发）不需。`gic_register_handler` 不内置 barrier，避免无谓开销 |
 
 ---
 
