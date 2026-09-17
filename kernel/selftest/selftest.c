@@ -133,6 +133,9 @@ int symlink_selftest_resolver(void);
 int symlink_selftest_ext2_rollback(void);
 int deep_copy_argv_selftest_empty(void);
 int deep_copy_argv_selftest_overcap(void);
+int at_random_selftest_layout(void);
+int at_random_selftest_layout_even(void);
+int at_random_selftest_entropy(void);
 #endif
 
 // ── Test runner ────────────────────────────────────────────
@@ -164,6 +167,9 @@ int selftest_run_all(void)
     selftest_register("symlink_ext2_rollback", symlink_selftest_ext2_rollback);
     selftest_register("deep_copy_argv_empty", deep_copy_argv_selftest_empty);
     selftest_register("deep_copy_argv_overcap", deep_copy_argv_selftest_overcap);
+    selftest_register("at_random_layout",       at_random_selftest_layout);
+    selftest_register("at_random_layout_even",  at_random_selftest_layout_even);
+    selftest_register("at_random_entropy",      at_random_selftest_entropy);
 #endif
 
     int passed = 0, failed = 0;
