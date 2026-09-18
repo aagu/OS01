@@ -184,17 +184,9 @@ void idle_resume(void)
 
 ### E. `kernel/intr/softirq.c` — gate x86 inline asm + make arch-neutral
 
-Open `kernel/intr/softirq.c`. The current `set_softirq_status` (lines 11-13) uses x86-only inline asm:
+Open `kernel/intr/softirq.c`. There are **two** x86-only inline asm sites that must be gated:
 
-```c
-void set_softirq_status(uint64_t status)
-{
-    __asm__ __volatile__("lock orq %0, softirq_status(%%rip)"
-                         :: "r"(status) : "memory");
-}
-```
-
-Wrap with `#if defined(__x86_64__)`:
+**Site 1**: `set_softirq_status` (lines 11-13):
 
 ```c
 void set_softirq_status(uint64_t status)
@@ -212,9 +204,31 @@ void set_softirq_status(uint64_t status)
 }
 ```
 
-Similarly `get_softirq_status()` doesn't need gating (no inline asm). Other functions (`register_softirq`, `unregister_softirq`, `softirq_init`) are arch-neutral already.
+**Site 2** (R3 NEW finding): `do_softirq` (lines 40-42) — also uses x86-only asm:
 
-`tick.c` line 41 `set_softirq_status(TIMER_SIRQ)` is **inside** the common-path tail, NOT inside the `#if defined(__x86_64__)` poll-scan block. So `set_softirq_status()` is always called on aarch64 — the asm gate in §E handles it.
+```c
+void do_softirq(void)
+{
+    for (int i = 0; i < 64; i++) {
+        if (softirq_status & (1ULL << i)) {
+#if defined(__x86_64__)
+            __asm__ __volatile__("lock andq %0, softirq_status(%%rip)"
+                                 :: "r"(~(1ULL << i)) : "memory");
+#else
+            softirq_status &= ~(1ULL << i);
+#endif
+            if (softirq_vector[i].action)
+                softirq_vector[i].action(softirq_vector[i].data);
+        }
+    }
+}
+```
+
+Both sites must be gated, because R2 §C adds `intr/softirq.c` to aarch64 KERNEL_C_SOURCES (so this file will be compiled under `clang -target aarch64-none-elf`, and the x86 `lock andq`/`lock orq` syntax will fail to assemble). `do_softirq` is invoked only from `kernel/arch/x86_64/entry.S:78` (x86_64-only); on aarch64 phase 2 it's dead code, but the asm-gated branch must still compile cleanly.
+
+`get_softirq_status()`, `register_softirq()`, `unregister_softirq()`, `softirq_init()` don't need gating (no inline asm).
+
+`tick.c` line 41 `set_softirq_status(TIMER_SIRQ)` is **inside** the common-path tail, NOT inside the `#if defined(__x86_64__)` poll-scan block. So `set_softirq_status()` is always called on aarch64 — the §E Site 1 asm gate handles it.
 
 `kernel/intr/softirq.c` was previously only in x86_64 whitelist. Adding it to aarch64 KERNEL_C_SOURCES is now **required** (since `tick.c` calls `set_softirq_status`):
 
@@ -277,6 +291,7 @@ Order:
 | `tick_handler` `this_cpu()->need_resched = 1` corrupts `aarch64_boot_percpu[0]` (offset 8/16) | High (latent), Low (immediate) | Phase 2 #3 per-CPU install fixes; documented as latent corruption (no scheduler reads today). |
 | `tick_handler` `this_cpu()->watchdog_counter++` writes out of bounds of 48-byte struct | High (latent), Low (immediate) | Same. |
 | `kernel/intr/softirq.c` adds `intr/` to aarch64 whitelist — verify `intr/irq.c` etc. aren't transitively pulled | Medium | R3 review: grep aarch64 build for `intr/irq.c` references. If pulled, add more stubs. |
+| `do_softirq` second asm site in `kernel/intr/softirq.c` (R3 NEW finding) | High | §E Site 2 gate handles it. Verified the function is invoked only from x86_64 entry.S:78 (dead code on aarch64); the asm-gated branch must still assemble cleanly. |
 | `set_softirq_status` plain write race on SMP aarch64 | Low (latent) | Documented; tick_handler runs at IRQ context with IRQs masked, no concurrent write. |
 | TIMER_SIRQ bit never cleared on aarch64 (no `do_softirq` invocation) | Medium (latent) | Documented; Phase 2 #3 scheduler fix. |
 | `kernel/time/timer.c` builds OK on aarch64 — verify all its `#include` headers resolve | High | R3 review: trace `#include` chain. If any header pulls x86-only types, gate. |
@@ -317,7 +332,7 @@ Estimated commit count: 4-7 functional + 1 docs.
 
 1. **Commit 1**: `feat(aarch64): provide idle_resume stub` — `kernel/arch/aarch64/idle_resume_stub.c` (NEW, ~10 lines) + `kernel/Makefile` aarch64 whitelist expansion (adds `idle_resume_stub.c`, `time/tick.c`, `time/timer.c`, `intr/softirq.c`). Verify build OK; verify `idle_resume` symbol present.
 
-2. **Commit 2**: `feat(kernel): gate x86 inline asm in softirq.c` — `#if defined(__x86_64__)` gate around `lock orq` asm. Verify x86_64 byte-identical + aarch64 build OK.
+2. **Commit 2**: `feat(kernel): gate x86 inline asm in softirq.c` (R3 NEW) — `#if defined(__x86_64__)` gates around **BOTH** `lock orq` (Site 1: `set_softirq_status`) AND `lock andq` (Site 2: `do_softirq`). Verify x86_64 byte-identical + aarch64 build OK.
 
 3. **Commit 3**: `feat(kernel): gate x86 poll-scan block in tick.c` — `#if defined(__x86_64__)` around poll-scan. Verify x86_64 byte-identical + aarch64 build OK.
 
