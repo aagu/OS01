@@ -228,6 +228,26 @@ Both sites must be gated, because R2 §C adds `intr/softirq.c` to aarch64 KERNEL
 
 `get_softirq_status()`, `register_softirq()`, `unregister_softirq()`, `softirq_init()` don't need gating (no inline asm).
 
+### E-bis. `kernel/time/timer.c` — gate x86 `pause` instruction (Task 1.5 deviation)
+
+**R3.2 NEW finding**: `kernel/time/timer.c:124` contains an unconditional `__asm__ volatile("pause");` inside `destroy_timer()` (wait-for-timer-done spin loop). The `pause` instruction is x86-only; on aarch64 it must be either gated or replaced with an arch-neutral spin-wait hint.
+
+Gate it with `#if defined(__x86_64__)`:
+
+```c
+        /* x86_64 `pause` instruction: power-saving + inter-thread
+         * politeness hint in spin loops. aarch64 maps to `yield`
+         * (a v8.0-A hint; same semantic family — give up the
+         * current execution slice in a spin). */
+#if defined(__x86_64__)
+        __asm__ volatile("pause");
+#else
+        __asm__ volatile("yield");
+#endif
+```
+
+(`yield` is the canonical aarch64 replacement for x86 `pause` in spin-wait contexts; both are v8-A-defined low-latency hints that improve SMT throughput without serializing the pipeline.)
+
 `tick.c` line 41 `set_softirq_status(TIMER_SIRQ)` is **inside** the common-path tail, NOT inside the `#if defined(__x86_64__)` poll-scan block. So `set_softirq_status()` is always called on aarch64 — the §E Site 1 asm gate handles it.
 
 `kernel/intr/softirq.c` was previously only in x86_64 whitelist. Adding it to aarch64 KERNEL_C_SOURCES is now **required** (since `tick.c` calls `set_softirq_status`):
@@ -235,7 +255,7 @@ Both sites must be gated, because R2 §C adds `intr/softirq.c` to aarch64 KERNEL
 ```make
 ifeq ($(ARCH),aarch64)
 KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c \
-                   time/clocksource.c time/tick.c time/timer.c \
+                   time/clocksource.c time/timer.c \
                    intr/softirq.c \
                    arch/aarch64/udivti3_stub.c arch/aarch64/subsys.c \
                    arch/aarch64/subsys_stub.c \
