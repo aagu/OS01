@@ -166,24 +166,39 @@ Result:
 #endif
 ```
 
-Note: this block no longer calls `clocksource_init()` — that's done by `arch_register_subsys()` from Group 2. If for any reason `arch_register_subsys()` doesn't run (e.g. linker setup broken), `clocksource_active` will be false and the marker block prints nothing — which itself is a tell that something is wrong (the harness `--expect-clk` will fail because no markers appear, surfacing the regression).
+Note: this block no longer calls `clocksource_init()` directly — `clocksource_init()` is dispatched by `subsys_init_phase(SUBSYS_PHASE_4)` (called from Group 2, see step F). The 5 forward decls `clocksource_active`, `clocksource_freq_hz`, `clocksource_mult`, `clocksource_shift`, `clocksource_init` are in the current `aarch64_main` (lines 29-33); after Group 3 lands, the `clocksource_init` extern becomes dead (call removed) and should be deleted. The other 4 forward decls stay — they're still needed by the marker prints below.
 
-### F. Hook `arch_register_subsys()` into the boot flow
+If for any reason `subsys_init_phase(4)` doesn't run (e.g. linker setup broken or Group 3 accidentally reverts the call), `clocksource_active` stays false and the marker block prints nothing — which itself is a tell that something is wrong (the harness `--expect-clk` will fail because no markers appear, surfacing the regression).
+
+### F. Hook `arch_register_subsys()` + `subsys_init_phase(SUBSYS_PHASE_4)` into the boot flow
 
 **File:** `kernel/arch/aarch64/main.c`
 
-Insert one call after `smp_boot_aps()` (line 272) and before `arch_tick_start()` (line 304):
+**R3-1 critical fix**: x86_64 pattern is **register → dispatch**, not register-only. `SUBSYS_INITCALL(_clocksource_register)` places a function pointer to `_clocksource_register` (which calls `register_subsys()` to queue the wrapper into `subsys_table[]`) — it does NOT call `_clocksource_init_wrapper` (which is what actually invokes `clocksource_init()`). The dispatch step requires a separate `subsys_init_phase()` or `subsys_init_all()` call. Verified on x86_64 at `kernel/core/main.c:193-194` (consecutive calls).
+
+Insert **two** calls after `smp_boot_aps()` (line 272) and before `arch_tick_start()` (line 304):
 
 ```c
 #if defined(__aarch64__)
     extern void arch_register_subsys(void);
+    extern void subsys_init_phase(int phase);
+    /* R3-1 critical: register queues wrappers; phase dispatch runs them.
+     * On x86_64 (kernel/core/main.c:193-194) this is the consecutive
+     * register+dispatch pair. Without subsys_init_phase, no SUBSYS_INITCALL
+     * registered initcall ever runs — clocksource_init never called,
+     * [clocksource] markers never appear, --expect-clk FAILS. */
     arch_register_subsys();
+    subsys_init_phase(SUBSYS_PHASE_4);
 #endif
 ```
 
-(Forward declaration because `arch/aarch64/subsys.h` doesn't exist yet — the inline `extern` form is a deliberate temporary form, see Non-goals §6 for the follow-up that could add the shared header.)
+(`SUBSYS_PHASE_4` is the only phase that has registered initcalls on aarch64 today — verified by `grep -rn 'SUBSYS_INITCALL' kernel/time/clocksource.c` showing only `_clocksource_register` registered with `SUBSYS_PHASE_4`. Phase 3 (early init) and phases 5-6 (late init) have no aarch64 registrations today. Using `subsys_init_all()` would also work; we pick `subsys_init_phase(SUBSYS_PHASE_4)` for minimum coverage and to match the existing single-phase registration.)
 
-**Timing requirement**: `arch_register_subsys()` must run BEFORE `arch_tick_start()` so `clocksource_init()` (one of the registered initcalls) sets `clocksource_active = true` before the first CNTP tick fires. The harness `--expect-clk` evidence gate verifies this: the 3 `[clocksource]` markers (emitted by the Option B block in §E) must appear in the QEMU stdout.log BEFORE the `[cntp]` marker.
+(Forward declarations because `kernel/include/subsys/subsys.h` is the canonical header for both functions, but including it from `aarch64_main` would transitively pull in `<arch/subsys.h>` → `<acpi/...>` etc., which is over-engineering for two extern decls. Phase 2 follow-up could clean this up; see Non-goals §6.)
+
+**Timing requirement**: both `arch_register_subsys()` AND `subsys_init_phase(SUBSYS_PHASE_4)` must run BEFORE `arch_tick_start()` so `clocksource_init()` is invoked (via the dispatch) before the first CNTP tick fires. The harness `--expect-clk` evidence gate verifies this: the 3 `[clocksource]` markers (emitted by the Option B block in §E) must appear in the QEMU stdout.log BEFORE the `[cntp]` marker.
+
+**Failure mode if R3-1 is forgotten** (R3-4 risk): if `subsys_init_phase(4)` is missing from the commit, `_clocksource_register()` runs (queues the wrapper) but the wrapper never gets called. `clocksource_active` stays false. All 3 `[clocksource]` markers disappear from QEMU stdout.log. The harness `--expect-clk` FAILS — `test-aarch64-uefi-smp` regresses from 9/9 PASS to FAIL. This is the kind of issue that QEMU E2E catches but host tests don't.
 
 ## Non-goals (out of scope)
 
@@ -192,7 +207,7 @@ Insert one call after `smp_boot_aps()` (line 272) and before `arch_tick_start()`
 3. **`__udivti3` hoist to `compiler_rt/`** — independent cleanup. Phase 2 follow-up item #4.
 4. **`-I libc/include` policy** — already in place from Task 2.2 (`12d3720`); this spec relies on it but doesn't change it.
 5. **Other framework files with `SUBSYS_INITCALL`** — `kernel/time/timer.c:136` has a `#ifdef __x86_64__` gate that could be flipped similarly, but only `kernel/time/timer.c:136` is gated today (verified). The other `SUBSYS_INITCALL` users (`pit.c`, `serial.c`, `keyboard.c`, `ahci.c`, `lapic.c`, `lapic_timer.c`, `8259A.c`, `net.c`) are arch-specific x86 drivers — they're not in the aarch64 build at all, so no gate flip is relevant. Future P2 follow-up could flip `timer.c:136` once item #1 is resolved.
-6. **`arch/aarch64/subsys.h` header file** — currently `subsys.h` is at `kernel/include/subsys/subsys.h` (shared); adding an `arch/*` variant for one extern declaration would be over-engineering. Using the inline `extern void arch_register_subsys(void);` form in step F is a deliberate temporary form.
+6. **`arch/aarch64/subsys.h` header file** — `kernel/include/arch/subsys.h` already exists (verified) and declares `arch_register_subsys` plus `arch_boot_rsdp` (x86 ACPI concept) and `arch_register_subsys_percpu`. Including it from `aarch64_main` is technically possible but transitively pulls in arch_boot_rsdp and other x86-specific symbols; using inline `extern` for the two functions `arch_register_subsys` and `subsys_init_phase` is a deliberate temporary form. A future P2 follow-up could split the header into x86-only / arch-neutral halves.
 
 ## Risks + mitigations
 
@@ -205,6 +220,7 @@ Insert one call after `smp_boot_aps()` (line 272) and before `arch_tick_start()`
 | Removing Option B block in step E without replacing it would silently break aarch64 timer | Low | Step E removes ONLY the `clocksource_init()` call line, keeps marker prints. Both commits land in Group 3 with the same plan; both verified by full regression before merge. |
 | **Commit-order violation** (R1 fix §7/§9): if Group 2 (hook call) lands before Group 1 (subsys.c defining the symbol), the build fails with `undefined reference to 'arch_register_subsys'`. If Group 3 (flip gate) lands before Group 2 (hook call), framework calls `clocksource_init()` twice (benign on clocksource but bad precedent). | High | The writing-plans skill MUST encode the strict commit order: **Group 1 → Group 2 → Group 3**. Verify the order is preserved when the plan is executed by checking the git log between them. |
 | GIC `gic_init()` interaction: `kernel/arch/aarch64/gic.c` does NOT use `SUBSYS_INITCALL` — `gic_init()` is called explicitly at `kernel/arch/aarch64/main.c:270` (BEFORE the new `arch_register_subsys()` hook runs). Will Group 2's hook break GIC? | Low | Verified by grep: gic.c has no SUBSYS_INITCALL. GIC's explicit call at line 270 is BEFORE the new hook at the post-`smp_boot_aps` position. After Group 1 lands, GIC's explicit call still works (no change). After Group 3 lands, GIC still uses the explicit call (no change to gic.c). No break. |
+| **Missing phase-init call** (R3-1 + R3-4): if `subsys_init_phase(SUBSYS_PHASE_4)` is omitted from step F, the `.subsys_init` table is populated by `arch_register_subsys()` but no queued initcall ever runs. `clocksource_active` stays false; all 3 `[clocksource]` markers disappear; `--expect-clk` fails; `test-aarch64-uefi-smp` regresses from 9/9 PASS to FAIL. | High | QEMU E2E regression is the canonical detection. The harness `--expect-clk` evidence gate fails loudly (exit 1, "FAIL" in case JSON). Mitigation is "don't omit the second call" — explicit `subsys_init_phase(SUBSYS_PHASE_4)` invocation in step F is mandatory, paired with `arch_register_subsys()` in the same commit. Verification matrix also includes a hosttest note: `test_clocksource` Suite E (host-side) verifies the framework's `clocksource_init` math directly, but does NOT exercise the SUBSYS_INITCALL dispatch path — so this specific regression would only be caught by QEMU. |
 
 ## Verification
 
