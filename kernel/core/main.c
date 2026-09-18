@@ -193,7 +193,7 @@ int kernel_main(const struct boot_context *bootctx)
     arch_register_subsys();
     subsys_init_all();
 
-    random_init();                      // seed the CSPRNG pool (BSP, once)
+    random_init(bootctx);               // seed the CSPRNG pool (BSP, once)
 
     vfs_init();                         // init mount table BEFORE any mount calls
 

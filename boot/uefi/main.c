@@ -94,6 +94,37 @@ efi_status_t capture_graphics(struct boot_context *ctx)
     return EFI_SUCCESS;
 }
 
+/* Issue AAGU-2 §1 P0-1: fetch 32 bytes from EFI_RNG_PROTOCOL so the
+ * kernel's CSPRNG has real entropy at boot. Without this, x86_64 in
+ * QEMU (no RDRAND/RDSEED) and aarch64 (no RNDR yet) would land in
+ * the cycle-counter ^ jiffies fallback, which random_init() now
+ * rejects as fail-closed — every user-space program then aborts on
+ * its all-zero stack canary. Best-effort: missing RNG must not
+ * abort the boot (the kernel's fallback path will log "no HW
+ * entropy" and the operator can decide whether to plug a TPM/RNG
+ * or accept the fail-closed boot). */
+efi_status_t capture_entropy(struct boot_context *ctx)
+{
+    efi_guid_t rng_guid = EFI_RNG_PROTOCOL_GUID;
+    efi_rng_protocol_t *rng = NULL;
+    EFI_STATUS status;
+
+    if (!ctx)
+        return EFI_INVALID_PARAMETER;
+
+    status = BS->LocateProtocol(&rng_guid, NULL, (void **)&rng);
+    if (EFI_ERROR(status) || !rng)
+        return EFI_SUCCESS;   /* best-effort */
+
+    status = rng->GetRNG(rng, NULL, sizeof(ctx->boot_entropy),
+                         ctx->boot_entropy);
+    if (EFI_ERROR(status))
+        return EFI_SUCCESS;   /* best-effort */
+
+    ctx->flags |= BOOT_CONTEXT_HAS_BOOT_ENTROPY;
+    return EFI_SUCCESS;
+}
+
 /* Mask a status to its low bits; the CRT's `ret ? EFIERR(ret) : EFI_SUCCESS`
  * re-applies the error bit at the application entry boundary. */
 static int main_error_code(EFI_STATUS status)

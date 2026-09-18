@@ -46,6 +46,13 @@ class TestRunner:
             "-drive", f"file={self.disk_img},format=raw,if=none,id=disk",
             "-device", "ahci,id=ahci",
             "-device", "ide-hd,drive=disk,bus=ahci.0",
+            # Issue AAGU-2 §1: provide real entropy at boot so the
+            # kernel's CSPRNG can seed itself in QEMU (no RDRAND/
+            # RDSEED on default CPU). OVMF exposes this via
+            # EFI_RNG_PROTOCOL, which the UEFI bootloader fetches
+            # into boot_context.boot_entropy.
+            "-object", "rng-random,filename=/dev/urandom,id=rng0",
+            "-device", "virtio-rng-pci,rng=rng0",
             "-m", "512",
             "-smp", "1",
             "-serial", f"file:{self.serial_path}",

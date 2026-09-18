@@ -22,6 +22,7 @@ typedef efi_status_t EFI_STATUS;
 
 /* Shared helpers provided by common main.c, used by arch code. */
 efi_status_t capture_graphics(struct boot_context *ctx);
+efi_status_t capture_entropy(struct boot_context *ctx);
 int guid_equal(const efi_guid_t *left, const efi_guid_t *right);
 
 /* Per-arch hooks (only one arch dir is compiled per build). */

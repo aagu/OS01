@@ -225,10 +225,15 @@ efi_status_t arch_fill_firmware(struct boot_context *ctx)
             ctx->firmware.acpi_rsdp =
                 (uint64_t)ST->ConfigurationTable[i].VendorTable;
             ctx->flags |= BOOT_CONTEXT_HAS_ACPI;
-            return EFI_SUCCESS;
+            break;
         }
     }
-    return EFI_SUCCESS;
+    /* Best-effort: if EFI_RNG_PROTOCOL is present (QEMU with
+     * -device virtio-rng, real hardware with TPM/RNG), fetch 32
+     * bytes of boot entropy so the kernel's CSPRNG can seed itself
+     * without depending on RDRAND/RDSEED. Missing RNG → no flag →
+     * kernel's random_init() falls through to its own check. */
+    return capture_entropy(ctx);
 }
 
 void arch_memory_buffer(efi_physical_address_t *phys_out,
