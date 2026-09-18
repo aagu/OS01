@@ -121,7 +121,7 @@ ifeq ($(ARCH),aarch64)
 # we instead expose the libc include dir directly via -I so the
 # include chain succeeds. This is x86_64-inert (guarded by ARCH)
 # and does NOT introduce a kernel-side copy of these headers.
-ALL_CFLAGS += -I$(CURDIR)/../libc/include
+ALL_CFLAGS += -I$(CURDIR)/include/compat
 endif
 ALL_ASMFLAGS := $(ASFLAGS) $(ARCH_ASMFLAGS)
 ifeq ($(ARCH),x86_64)
