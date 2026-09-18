@@ -5,6 +5,7 @@
 
 #include <core/selftest.h>
 #include <core/printk.h>
+#include <random/random.h>   /* random_is_ready */
 #include <sched/task.h>       /* USER_STACK_BASE/TOP + task_selftest_auxv_probe */
 #include <uapi/auxv.h>
 #include <string.h>
@@ -107,9 +108,19 @@ int at_random_selftest_layout_even(void)
 }
 
 /* 熵用例：同一 argv 构建两次，16B payload 必须不同（CSPRNG）。
- * 缓冲是同一块静态数组——先拷贝第一次再重建。 */
+ * 缓冲是同一块静态数组——先拷贝第一次再重建。
+ *
+ * Issue AAGU-2 §1: when the CSPRNG pool is not ready (QEMU default CPU
+ * without RDRAND/RDSEED, aarch64 stub), AT_RANDOM is fail-closed zeroed
+ * — the canary derived from it is also zeroed and libc aborts. That is
+ * the CORRECT secure behavior; this selftest only proves the ready path
+ * produces distinct keystream blocks. */
 int at_random_selftest_entropy(void)
 {
+    if (!random_is_ready()) {
+        serial_printk("[selftest] at_random_entropy: pool not ready (fail-closed) — skipped\n");
+        return 0;   /* not a regression; secure behavior */
+    }
     static uint8_t first[16];
     uint64_t rsp, auxv, rnd, plat;
     if (probe_build(odd_argv, odd_envp, &rsp, &auxv, &rnd, &plat) != 0 || rnd == 0) {
