@@ -45,7 +45,8 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c \
                    time/clocksource.c time/tick.c time/timer.c \
                    intr/softirq.c \
                    compiler_rt/udivti3.c arch/aarch64/subsys.c \
-                   arch/aarch64/subsys_stub.c \
+                   arch/aarch64/serial_printk.c arch/aarch64/strcmp.c \
+                   subsys/subsys.c \
                    arch/aarch64/idle_resume_stub.c \
                    arch/aarch64/libc_stub.c
 else
