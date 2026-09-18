@@ -1,177 +1,307 @@
-# AArch64 `cntp_tick_handler → tick_handler()` Integration — Design (v1)
+# AArch64 `cntp_tick_handler → tick_handler()` Integration — Design (R2)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:brainstorming for the design phase (this doc); then superpowers:writing-plans for the implementation plan.
+>
+> **R1 review**: sonnet aa8cf8d7 found 6 CRITICAL items. R1 verdict: **R2 required (major redesign)**. R2 rewrites the spec with explicit stubs + per-arch gates. R2-R4 review cycles may continue; this is the R2 baseline.
 
-**Goal:** Make `kernel/time/tick.c::tick_handler()` (the unified tick semantic) run on aarch64 by routing `cntp_tick_handler()` through it. After this spec lands, aarch64 joins x86_64 in producing the canonical unified tick semantic: `jiffies++` → poll timeout scan → `need_resched=1` → `watchdog_counter++` → `TIMER_SIRQ`. The per-second `[tick] N` debug print from Phase 1 GIC (`6be7735`) is replaced by the framework's own observability (none, today — debug visibility moves to the harness `--expect-clk` marker path).
+**Goal:** Make `kernel/time/tick.c::tick_handler()` (the unified tick semantic) run on aarch64 by routing `cntp_tick_handler()` through it. **Design revision (R2)**: rather than turning `tick_handler()` into a single-source cross-arch function, gate the x86_64-specific sections with `#if defined(__x86_64__)` and provide aarch64 stubs for the x86_64-only symbols (`idle_resume`, `softirq_status` lock-or inline asm, `clocksource_read_ns()`).
 
-**Architecture:** Three changes:
-1. **`kernel/arch/aarch64/time.c`**: `cntp_tick_handler` becomes a thin wrapper that rewrites `CNTP_TVAL_EL0` (spec §2.3 strict ISR order, FIRST), then calls `tick_handler()`. The per-second debug `g_ticks` counter and `[tick] N` print are removed (the GIC Phase 1 evidence gate is preserved by `qemutests/aarch64_uefi_smp.py`'s `--expect-clk` + `--expect-gic` markers; `[tick] N` lines are not referenced by the current harness per Task 1.2 spec §E note — **verify this in R1 review**).
-2. **`kernel/time/clocksource.c`**: flip the existing `#ifdef __x86_64__` gate at `kernel/time/timer.c:136` (verified by R1 grep) to `#if defined(__x86_64__) || defined(__aarch64__)` so `timer_init()` runs via the SUBSYS dispatch path on aarch64. Also extend `kernel/arch/aarch64/subsys_stub.c` to add `timer_init()` to the dispatch walk (or rely on `subsys_init_phase(SUBSYS_PHASE_4)` already walking phase 4 init wrappers — verify ordering in R1).
-3. **`kernel/arch/aarch64/main.c`**: add explicit `timer_init()` and `softirq_init()` calls in the `#if defined(__aarch64__)` block (mirror of the x86_64 implicit pattern via `SUBSYS_INITCALL` — but aarch64 needs explicit calls because the framework dispatch walk is not yet integrated with the framework's `_init_wrapper` mechanism on aarch64).
+**Architecture (R2):**
 
-**No-goal:** this spec does NOT address deferred items #3 (per-CPU timer / SMP timer), #4 (`__udivti3` hoist), or #5 (`-I libc/include` policy). Each is a separate spec when picked up.
+The unified tick semantic stays single-source, but is now an arch-conditional compilation. Three layers:
 
-## Context — why it's needed now
+1. **Common path** (runs on both arches): `jiffies++` → `this_cpu()->need_resched = 1` → `this_cpu()->watchdog_counter++` → timer_list_head scan → `set_softirq_status(TIMER_SIRQ)`.
+2. **x86_64-only path** (`#if defined(__x86_64__)`): poll-timeout scan using `clocksource_read_ns()` + `poll_timeout_head` + `wait_queue_wake_all` + `spin_lock_irqsave(&poll_timeout_lock)`.
+3. **aarch64-only stub layer**: `idle_resume`, `softirq_status` R/W (without x86 `lock orq` asm), `clocksource_read_ns()` (returns jiffies-based fallback or zero), `poll_timeout_head/lock` externs (NULL).
 
-Phase 1 Generic Timer (merge `b2b81fc`, 6 commits) and Phase 2 SUBSYS_INITCALL plumbing (merge `e115d79`, 10 commits) together provide the aarch64 timer infrastructure — CNTP + CNTVCT, `arch_cycle_freq/arch_cycle_counter`, framework `clocksource_init`, framework dispatch via `.subsys_init` — but the **unified tick semantic** in `kernel/time/tick.c::tick_handler()` is still x86_64-only because:
+The `[tick] N` per-second print stays in `cntp_tick_handler` (R2 keeps it; it's the harness evidence gate — see `Risks §H1`).
 
-1. **`cntp_tick_handler` bypasses `tick_handler()`** (`kernel/arch/aarch64/time.c:57-76`): rewrites TVAL, increments a debug counter, prints `[tick] N` once per second. Does NOT call `tick_handler()` — so `jiffies` stays 0 on aarch64, no `need_resched` set, no `TIMER_SIRQ` dispatched, no poll timeout scan runs.
-2. **`timer_init()` is not called** on aarch64 — `timer_list_head` (defined at `kernel/time/timer.c:11`) is BSS-initialized to all-zeros; `init_timer(&timer_list_head, NULL, NULL, -1UL)` (`kernel/time/timer.c:65-70`) is only invoked from `_timer_init_wrapper` registered via `SUBSYS_INITCALL(_timer_register)` at `kernel/time/timer.c:156`, which is gated `#ifdef __x86_64__` (verified by R1 grep). Without `timer_init`, calling `tick_handler()` would deref NULL via `container_of(list_next(&timer_list_head.list), …)` at `kernel/time/tick.c:40`.
-3. **`softirq_init()` is not called** on aarch64 — `softirq_status` (defined at `kernel/include/intr/softirq.h:8`) is BSS-initialized to 0; `softirq_init()` (defined at `kernel/intr/softirq.c`) clears the softirq vector and status. Without init, `set_softirq_status(TIMER_SIRQ)` at `kernel/time/tick.c:41` would write a never-cleared bit and `do_softirq` would NUL-deref on dispatch.
-4. **`this_cpu()->need_resched = 1`** at `kernel/time/tick.c:34` writes to aarch64's per-CPU area. On aarch64, `TPIDR_EL1 = &aarch64_boot_percpu[0]` (set at `kernel/arch/aarch64/head.S:296`), which is a 48-byte BSP-only structure (`kernel/arch/aarch64/aarch64_percpu.h:20-29`) — NOT the x86_64-style `percpu_data[cpu]` array. Writes corrupt `.boot.bss` slack. Phase 1 GIC accepted this latent corruption because Phase 1 has no scheduler (`docs/aarch64-timer-phase2-closure-2026-09-18.md` §"Outstanding P2 follow-ups" item #3). Phase 2 #2 connects `tick_handler()` which sets `need_resched` — the latent corruption is no longer latent.
+## R1 critical findings (recap, fixes in R2)
 
-## Design
+| R1 finding | R2 fix |
+|---|---|
+| CRITICAL-1: harness requires `≥3 [tick] N` lines; spec §A removed the print | R2 keeps `[tick] N` print in `cntp_tick_handler` (NOT `tick_handler`). Print stays GIC-Phase-1-style (per-second counter). |
+| CRITICAL-2: `time/tick.c` + `time/timer.c` not in aarch64 whitelist | R2 explicitly adds both. |
+| CRITICAL-3: `<sched/task.h>` file-scope `init_thread` references `idle_resume` | R2 provides `kernel/arch/aarch64/idle_resume_stub.c` (no-op). |
+| CRITICAL-4: `intr/softirq.c` uses x86 `lock orq` inline asm; not in aarch64 whitelist | R2 adds `intr/softirq.c` to aarch64 whitelist + gates the asm with `#if defined(__x86_64__)`. |
+| CRITICAL-5: `tick.c` references `fs/poll.c`'s `poll_timeout_head/lock`; poll.c not in aarch64 whitelist | R2 gates the poll-scan block in `tick.c` with `#if defined(__x86_64__)`. aarch64's `tick_handler` does the common path only. |
+| CRITICAL-6: `clocksource_read_ns()` gated `#if defined(__x86_64__)` in `kernel/include/time/clocksource.h:34` | R2 keeps the existing gate (x86_64-only); `tick.c`'s `clocksource_read_ns()` call is already inside the `#if defined(__x86_64__)` poll-scan block — so the call is naturally gated. |
 
-### A. `kernel/arch/aarch64/time.c` — `cntp_tick_handler` delegates to `tick_handler()`
+## Design (R2)
 
-Replace the current `cntp_tick_handler` body (lines 57-76) with:
+### A. `kernel/time/tick.c` — gate the poll-scan block
+
+Open `kernel/time/tick.c`. The current `tick_handler()` body (lines 17-41) becomes:
 
 ```c
-/* Unified tick handler: TVAL rewrite first (phase1 spec §2.3), then
- * delegate to the framework's tick_handler() which does
- *   jiffies++ → poll timeout scan (ns) → need_resched →
- *   watchdog → TIMER_SIRQ.  EOI is performed by gic_dev_dispatch
- * after this returns (no in-handler EOI). */
-static void cntp_tick_handler(uint32_t intid, uint64_t param, struct pt_regs *regs)
+void tick_handler(void)
 {
-    (void)intid; (void)param; (void)regs;
-    cntp_tval_el0_write(g_period);
-    tick_handler();
+    jiffies++;
+
+#if defined(__x86_64__)
+    // x86_64-only poll-timeout scan. aarch64 phase 1 has no userland
+    // processes (no init_thread, no scheduler, no /dev/poll); the
+    // poll-timeout scan is dead code on aarch64.
+    if (poll_timeout_head) {
+        uint64_t flags = spin_lock_irqsave(&poll_timeout_lock);
+        for (poll_timeout_node_t *n = poll_timeout_head; n; n = n->next)
+            if (clocksource_read_ns() >= n->deadline)
+                wait_queue_wake_all(n->wq);
+        spin_unlock_irqrestore(&poll_timeout_lock, flags);
+    }
+#endif
+
+    this_cpu()->need_resched = 1;
+    this_cpu()->watchdog_counter++;
+
+    if ((container_of(list_next(&timer_list_head.list), timer_t, list)->expire_jiffies <= jiffies))
+        set_softirq_status(TIMER_SIRQ);
 }
 ```
 
-Then delete:
-- The `static volatile uint64_t g_ticks;` debug counter (line ~49 — no longer used).
-- The `#define TICKS_PER_SECOND` (line ~40 — no longer used; `HZ` is sufficient).
-- The `[tick] N` debug print (lines 70-74 — replaced by framework observability).
-- Update the file-top comment (lines 1-24) to reflect the new contract.
+Result on aarch64:
+- `jiffies++` ✓
+- poll scan SKIPPED (gated)
+- `this_cpu()->need_resched = 1` → writes to `.boot.bss` slack (Phase 2 #3 per-CPU install will fix)
+- `this_cpu()->watchdog_counter++` → same (latent)
+- timer_list_head scan → if `timer_init()` ran via SUBSYS dispatch, `timer_list_head.list.next` is a sentinel (per `init_timer(... -1UL)`). `list_next` returns the sentinel, `container_of(sentinel, timer_t, list)->expire_jiffies` is `UINT64_MAX` (because `init_timer` sets `expire_jiffies = -1UL`). Comparison `UINT64_MAX <= jiffies` is false (jiffies is small). Skip softirq set. Latent OK.
 
-**Decision** (R1 review point): the `[tick] N` per-second print currently satisfies the GIC Phase 1 evidence gate (`qemutests/aarch64_uefi_smp.py:485/514` requires `≥3 [tick] N` lines — verified in Phase 2 #1 closure doc). After this spec, no `[tick]` lines appear in stdout.log — the `--expect-clk` evidence gate (3 `[clocksource]` markers) is the only remaining aarch64 evidence line.
+Result on x86_64: byte-identical (the `#if` block is identical to the current code).
 
-**If the harness still requires `[tick] N` lines after this spec lands**, this spec is REJECTED and a follow-up must add an arch-neutral `[tick]` debug print inside `kernel/time/tick.c::tick_handler()` (behind `#ifdef OS01_DEBUG_TIMER` or similar). **R1 review must verify the harness regex before approving.**
+### B. `kernel/arch/aarch64/time.c` — keep `[tick] N` print in `cntp_tick_handler`
 
-### B. `kernel/time/clocksource.c` — flip `timer.c:136` SUBSYS_INITCALL gate
+**R2 revision**: do NOT remove the per-second `[tick] N` print. Keep it as GIC Phase 1 evidence gate.
 
-Open `kernel/time/timer.c` (R1 grep confirms line 136 is the `#ifdef __x86_64__` wrapping `SUBSYS_INITCALL(_timer_register)` at line 156). Change:
-
-```c
-#ifdef __x86_64__
-SUBSYS_INITCALL(_timer_register);
-#endif
-```
-
-to:
+Replace `cntp_tick_handler` (lines 57-76) with:
 
 ```c
-#if defined(__x86_64__) || defined(__aarch64__)
-SUBSYS_INITCALL(_timer_register);
-#endif
+static void cntp_tick_handler(uint32_t intid, uint64_t param, struct pt_regs *regs)
+{
+    (void)intid; (void)param; (void)regs;
+    cntp_tval_el0_write(g_period);  /* TVAL rewrite FIRST (phase1 spec §2.3) */
+    tick_handler();                   /* unified tick semantic */
+    /* GIC Phase 1 evidence gate: qemutests/aarch64_uefi_smp.py:545/574
+     * requires >=3 [tick] N lines per case. */
+    uint64_t t = g_ticks + 1;
+    g_ticks = t;
+    if ((t % TICKS_PER_SECOND) == 0) {
+        kputs("[tick] ");
+        kputu(t / TICKS_PER_SECOND);
+        kputs("\n");
+    }
+}
 ```
 
-This is the same gate flip as Phase 2 #1's clocksource.c change — but for timer.c. After this commit, `_timer_register` runs on aarch64 via `arch_register_subsys()`, calling `register_subsys()` (stub in `subsys_stub.c` queues) → `_timer_init_wrapper` → `timer_init()`.
+Keep `g_ticks` (line ~49), `TICKS_PER_SECOND` (line ~40), and the `[tick] N` print block. `tick_handler()` runs first, then the per-second print. The order: TVAL → tick_handler → debug print. `tick_handler()`'s common path (`jiffies++`, `need_resched=1`, `watchdog_counter++`, timer scan) runs every tick; the per-second print fires once per second.
 
-**No new hosttest needed** — the existing `test_clocksource` Suite E (Phase 2 #1 commit `6f37a21`) verifies `clocksource_init()` is the dispatch target; `timer_init` follows the same pattern.
+This satisfies BOTH:
+- The framework integration (`tick_handler()` actually runs, aarch64 now has unified tick semantic — Phase 2 #2 goal achieved).
+- The GIC Phase 1 evidence gate (`[tick] N` lines still appear in stdout.log).
 
-### C. `kernel/arch/aarch64/main.c` — explicit `timer_init()` + `softirq_init()` calls
+### C. `kernel/Makefile` — expand aarch64 whitelist
 
-The framework dispatch walk (`subsys_init_phase(SUBSYS_PHASE_4)`) runs `_clocksource_init_wrapper` for phase 4 registrations. After the timer gate flip (B), it ALSO runs `_timer_init_wrapper`. So `timer_init()` runs via the dispatch path — no explicit call needed.
+Open `kernel/Makefile`. Locate the `ifeq ($(ARCH),aarch64)` block (around lines 42-45). Replace:
 
-**BUT** `softirq_init()` is NOT registered via SUBSYS_INITCALL — it's called explicitly from `kernel/intr/irq.c:78` on x86_64. On aarch64, nothing calls it. Add an explicit call in `aarch64_main`:
+```make
+ifeq ($(ARCH),aarch64)
+KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c time/clocksource.c \
+                   arch/aarch64/udivti3_stub.c arch/aarch64/subsys.c \
+                   arch/aarch64/subsys_stub.c
+endif
+```
+
+with:
+
+```make
+ifeq ($(ARCH),aarch64)
+KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c \
+                   time/clocksource.c time/timer.c \
+                   arch/aarch64/udivti3_stub.c arch/aarch64/subsys.c \
+                   arch/aarch64/subsys_stub.c \
+                   arch/aarch64/idle_resume_stub.c
+endif
+```
+
+Adds:
+- `time/timer.c` — the framework timer init (needed for `_timer_register` to run on aarch64 via SUBSYS dispatch)
+- `arch/aarch64/idle_resume_stub.c` — provides `idle_resume` symbol for `<sched/task.h>`'s file-scope `init_thread` initializer
+
+**Not added** (deliberately):
+- `time/tick.c` — see D below; tick.c is NOT directly linked on aarch64. The framework `tick_handler()` symbol is consumed via `kernel/time/tick.c`'s header path... wait, that's wrong; `tick_handler()` is **defined** in `kernel/time/tick.c`. Need to link tick.c.
+
+**Correction**: `time/tick.c` MUST be in the aarch64 whitelist (the `cntp_tick_handler` calls `tick_handler()`). Updated whitelist:
+
+```make
+ifeq ($(ARCH),aarch64)
+KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c \
+                   time/clocksource.c time/tick.c time/timer.c \
+                   arch/aarch64/udivti3_stub.c arch/aarch64/subsys.c \
+                   arch/aarch64/subsys_stub.c \
+                   arch/aarch64/idle_resume_stub.c
+endif
+```
+
+This expands aarch64's compiled TU set by **3 files** (`time/tick.c`, `time/timer.c`, `arch/aarch64/idle_resume_stub.c`).
+
+`kernel/intr/softirq.c` is **NOT** in this whitelist expansion. R2 relies on the existing `#if defined(__x86_64__)` gate in `kernel/intr/softirq.c::set_softirq_status` (R2 §E adds this gate) so that x86-only `lock orq` asm is only compiled on x86_64. On aarch64, the gate selects the aarch64 branch (no-op or arch-neutral). Verify in R3 review: `kernel/intr/softirq.c` is currently x86_64 whitelist only (`$(wildcard intr/*.c)` block — line 58). Adding it to aarch64 KERNEL_C_SOURCES is **not required** if `tick.c`'s `set_softirq_status(TIMER_SIRQ)` call (line 41) is wrapped in `#if defined(__x86_64__)` too. R3 review must trace this.
+
+### D. `kernel/arch/aarch64/idle_resume_stub.c` (NEW, ~10 lines)
+
+Create `kernel/arch/aarch64/idle_resume_stub.c`:
+
+```c
+// ── kernel/arch/aarch64/idle_resume_stub.c ──────────────────────
+//
+// <sched/task.h> file-scope declares
+//   thread_t init_thread = { ..., .rip = (uint64_t)idle_resume, ... };
+// unconditionally — no #ifdef __aarch64__ guard. On x86_64,
+// kernel/arch/x86_64/entry.S provides `idle_resume` as the entry
+// point that returns from idle. On aarch64 phase 2 we have no
+// scheduler and no idle thread (Phase 2 #3 = per-CPU timer / SMP
+// timer is the prerequisite for an actual scheduler), so this
+// stub is never called — its existence is solely to satisfy the
+// linker when time/tick.c and time/timer.c are pulled into the
+// aarch64 build (which transitively pulls <sched/task.h>'s
+// init_thread initializer).
+//
+// Phase 2 #3 follow-up: replace this stub with a real aarch64
+// idle_resume that re-enters the idle loop on each CPU.
+
+#include <stdint.h>
+
+void idle_resume(void)
+{
+    /* no-op: aarch64 phase 2 has no scheduler; init_thread is
+     * dead code (its .rip is never dereferenced because nothing
+     * schedules init_thread onto a CPU). */
+    for (;;) {
+        __asm__ __volatile__("wfi" ::: "memory");
+    }
+}
+```
+
+(`wfi` loop matches `kernel/arch/aarch64/smp.c:223-225`'s AP idle pattern.)
+
+### E. `kernel/intr/softirq.c` — gate x86 inline asm + make arch-neutral
+
+Open `kernel/intr/softirq.c`. The current `set_softirq_status` (lines 11-13) uses x86-only inline asm:
+
+```c
+void set_softirq_status(uint64_t status)
+{
+    __asm__ __volatile__("lock orq %0, softirq_status(%%rip)"
+                         :: "r"(status) : "memory");
+}
+```
+
+Wrap with `#if defined(__x86_64__)`:
+
+```c
+void set_softirq_status(uint64_t status)
+{
+#if defined(__x86_64__)
+    __asm__ __volatile__("lock orq %0, softirq_status(%%rip)"
+                         :: "r"(status) : "memory");
+#else
+    /* aarch64 (and other arches): plain write. SMP-safe in practice
+     * because tick_handler() runs at IRQ context with IRQs masked
+     * (no concurrent set_softirq_status); softirq_status is single
+     * uint64_t written by tick + cleared by do_softirq, no race. */
+    softirq_status |= status;
+#endif
+}
+```
+
+Similarly `get_softirq_status()` doesn't need gating (no inline asm). Other functions (`register_softirq`, `unregister_softirq`, `softirq_init`) are arch-neutral already.
+
+`tick.c` line 41 `set_softirq_status(TIMER_SIRQ)` is **inside** the common-path tail, NOT inside the `#if defined(__x86_64__)` poll-scan block. So `set_softirq_status()` is always called on aarch64 — the asm gate in §E handles it.
+
+`kernel/intr/softirq.c` was previously only in x86_64 whitelist. Adding it to aarch64 KERNEL_C_SOURCES is now **required** (since `tick.c` calls `set_softirq_status`):
+
+```make
+ifeq ($(ARCH),aarch64)
+KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c \
+                   time/clocksource.c time/tick.c time/timer.c \
+                   intr/softirq.c \
+                   arch/aarch64/udivti3_stub.c arch/aarch64/subsys.c \
+                   arch/aarch64/subsys_stub.c \
+                   arch/aarch64/idle_resume_stub.c
+endif
+```
+
+### F. `kernel/time/clocksource.c` — flip `timer.c:136` SUBSYS_INITCALL gate
+
+Same as v1 §B — flip `#ifdef __x86_64__` to `#if defined(__x86_64__) || defined(__aarch64__)`. After this lands, `_timer_register` runs on aarch64 via framework dispatch, calling `_timer_init_wrapper` → `timer_init()` (which calls `init_timer(&timer_list_head, NULL, NULL, -1UL)` + `register_softirq(0, &do_timer, NULL)`).
+
+`timer_init()` calls `register_softirq(0, ...)`. This is now arch-neutral (no asm gate needed). The softirq `do_timer` callback runs when `do_softirq` is invoked — but on aarch64 phase 2 there's no `do_softirq` invocation path yet (no scheduler to call it). **Documented as latent**: TIMER_SIRQ bit may stay set indefinitely on aarch64. Phase 2 #3 (scheduler integration) fixes this. No immediate crash.
+
+### G. `kernel/arch/aarch64/main.c` — verify no explicit `softirq_init()` needed
+
+After E, `softirq_init()` is in `kernel/intr/softirq.c` (now in aarch64 KERNEL_C_SOURCES). `softirq_init()` zeroes `softirq_status` + `softirq_vector`. It's called explicitly from `kernel/intr/irq.c:78` on x86_64. On aarch64, the `intr/irq.c` is x86_64-only — not linked. So `softirq_init()` is never called on aarch64.
+
+**Add explicit call in `aarch64_main`** (between the SUBSYS hook and `arch_tick_start()`):
 
 ```c
 #if defined(__aarch64__)
-    /* softirq_init() must run BEFORE arch_tick_start(): tick_handler()
-     * calls set_softirq_status(TIMER_SIRQ), which dereferences
-     * softirq_status (BSS; zeroed). softirq_init() clears the
-     * softirq vector and status. */
     extern void softirq_init(void);
     softirq_init();
 #endif
 ```
 
-Place this between the existing `#if defined(__aarch64__)` hook calls (the `arch_register_subsys()` + `subsys_init_phase(SUBSYS_PHASE_4)` block from Phase 2 #1 commit `bddf8eb`) and the `arch_tick_start()` call. The ordering is:
-
-1. `arch_register_subsys()` — queue `_timer_register` into `.subsys_init` walk
-2. `subsys_init_phase(SUBSYS_PHASE_4)` — run `_timer_init_wrapper` → `timer_init()` (subsys_stub.c path)
-3. `softirq_init()` (NEW) — explicit; clears `softirq_status`
+Order:
+1. `arch_register_subsys()` (Phase 2 #1 commit `bddf8eb`)
+2. `subsys_init_phase(SUBSYS_PHASE_4)` (Phase 2 #1) — runs `_clocksource_init_wrapper` + `_timer_init_wrapper`
+3. `softirq_init()` (NEW, R2) — explicit; clears `softirq_status`
 4. `arch_tick_start()` — registers `cntp_tick_handler` in GIC handler table
-5. (subsequent ticks fire `cntp_tick_handler` → `tick_handler()` → everything works)
 
-### D. `kernel/arch/aarch64/subsys_stub.c` — verify no extension needed
+### H. What does NOT change
 
-After B lands, the framework dispatch walk will:
-- `arch_register_subsys()` iterates `.subsys_init` → calls `_clocksource_register` + `_timer_register`
-- `_clocksource_register` calls `register_subsys()` (stub queue) → `subsys_table[0]`
-- `_timer_register` calls `register_subsys()` (stub queue) → `subsys_table[1]`
-- `subsys_init_phase(SUBSYS_PHASE_4)` walks `subsys_table[]`, calls `subsys_table[i].init()` matching phase 4
-- Both `_clocksource_init_wrapper` and `_timer_init_wrapper` are called in order
-
-**No subsys_stub.c changes needed.** R1 must verify by tracing the code.
-
-### E. `kernel/arch/aarch64/head.S` — `percpu_data` install (R1 critical risk)
-
-**This is the hardest part of the spec** and may cause R1 to flag it as REJECTED.
-
-When `tick_handler()` writes `this_cpu()->need_resched = 1`, it expects `this_cpu()` to return the **calling CPU's** `percpu_data[cpu_id]` structure. On aarch64, `TPIDR_EL1 = &aarch64_boot_percpu[0]` (set in `kernel/arch/aarch64/head.S:296`); `kernel/include/arch/aarch64/percpu.h` (R1 verify location) defines `this_cpu()` as `(aarch64_percpu_t *)(uintptr_t)TPIDR_EL1`. Writing to `->need_resched` corrupts `cpu_id` (offset 8) and `pad0` (offset 16) of `aarch64_boot_percpu[0]`.
-
-**Fix**: install `percpu_data[cpu]` (the x86_64-style structure that `this_cpu()` on x86_64 resolves to via GS base) for aarch64. This requires:
-
-- `kernel/Makefile` whitelist `kernel/percpu/percpu.c` (or wherever `percpu_data[]` is defined) for the aarch64 kernel build
-- `kernel/include/percpu/percpu.h` (or arch-specific) provide an aarch64 implementation of `this_cpu()` returning `(percpu_t *)percpu_data[cpu_id]` — NOT `(aarch64_percpu_t *)TPIDR_EL1`
-- `aarch64_main` calls `percpu_install_gs(cpu_id)` (or whatever the equivalent API is — verify in R1) for each CPU during bring-up
-
-**Alternative**: stub `tick_handler()` semantics on aarch64 — bypass `this_cpu()->need_resched = 1` writes (latent — Phase 1 GIC accepted this). But this defeats the purpose of the spec (the unified tick semantic must run).
-
-**R1 review must determine whether E is in scope for this spec or a follow-up.** If E is in scope, this spec's commit count grows from ~4 to ~7 (per-CPU install on each AP during `smp_boot_aps()`). If E is deferred, this spec marks `need_resched` writes as a known latent corruption with a TODO comment, and the per-CPU install becomes a separate Phase 2 #3 spec.
-
-**My recommendation**: defer E to Phase 2 #3 (per-CPU timer / SMP timer) — it's a substantially larger change that breaks the scope of this spec. The `need_resched = 1` writes will corrupt `.boot.bss` slack on BSP (no scheduler reads them today, latent damage only). Document this in the spec.
-
-### F. `kernel/arch/aarch64/head.S` — what does NOT need to change
-
-- No new MMU / page-table setup (the existing high-half identity map covers the new code paths)
-- No new interrupt controller setup (CNTP is already enabled)
-- No new linker script section (timer_init / softirq_init symbols are already in `.text`)
+- `kernel/time/clocksource.c` — Phase 2 #1 already flipped its gate.
+- `kernel/arch/aarch64/linker.ld` — already has `.subsys_init` (Phase 2 #1 commit `6a6026b`).
+- `kernel/arch/aarch64/subsys.c` — already exists (Phase 2 #1).
+- `kernel/arch/aarch64/subsys_stub.c` — already provides `register_subsys` etc. (Phase 2 #1 + commit `069e632`). Need to verify it can handle 2 initcalls (clocksource + timer) without cap issues — `MAX_SUBSYS = 16`, plenty of room.
 
 ## Non-goals (out of scope)
 
-1. **Per-CPU timer / SMP timer** — still pending item #1 above (E). Phase 2 #3 spec when picked up.
-2. **`__udivti3` hoist to `compiler_rt/`** — independent cleanup. Phase 2 follow-up item #4.
-3. **`-I libc/include` policy** — already in place from Task 2.2 (`12d3720`); this spec relies on it but doesn't change it.
-4. **`kernel/time/clocksource.c`'s SUBSYS_INITCALL gate** — already flipped in Phase 2 #1 (`4d7f7c9`); no change.
-5. **Other framework files with `SUBSYS_INITCALL`** — only `kernel/time/timer.c` is relevant (after B); `pit.c`, `serial.c`, `keyboard.c`, `ahci.c`, `lapic.c`, `lapic_timer.c`, `8259A.c`, `net.c` are x86_64-only drivers, not relevant.
-6. **`arch/aarch64/subsys.h` header file** — R3-3 unresolved NIT from Phase 2 #1; still using inline externs. Future P2 follow-up could clean up.
-7. **Replacing `subsys_stub.c` with real `kernel/subsys/subsys.c`** — depends on `serial_printk`, `num_cpus`, `strcmp`, `idle_resume` becoming available on aarch64.
+1. **Per-CPU timer / SMP timer** — Phase 2 #3.
+2. **`__udivti3` hoist to `compiler_rt/`** — Phase 2 follow-up #4.
+3. **`-I libc/include` policy cleanup** — already in place from Task 2.2.
+4. **Real aarch64 scheduler** — much larger follow-up.
+5. **Removing `idle_resume` stub** — replaced when scheduler lands.
+6. **Replacing `subsys_stub.c`** — replaced when `serial_printk`/`strcmp`/`num_cpus` available on aarch64.
 
 ## Risks + mitigations
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| `[tick] N` evidence gate — `qemutests/aarch64_uefi_smp.py:485/514` requires `≥3 [tick] N` lines; spec removes `[tick]` print | High | R1 review MUST grep the harness to verify the requirement. If still required, spec is REJECTED; follow-up adds arch-neutral `[tick]` print in `kernel/time/tick.c`. |
-| `timer_list_head` NULL deref at `kernel/time/tick.c:40` if `timer_init()` not run | High | B (gate flip) + C (explicit softirq_init) ensures init before first tick. QEMU E2E catches if first tick fails. |
-| `softirq_status` stale — `set_softirq_status(TIMER_SIRQ)` writes a never-cleared bit, `do_softirq` NUL-deref | High | C explicit `softirq_init()` before `arch_tick_start()`. QEMU E2E catches. |
-| `this_cpu()->need_resched = 1` corrupts `.boot.bss` slack on BSP (latent) | High (latent), Low (immediate) | E — defer to Phase 2 #3. Document as known latent corruption; no scheduler reads `need_resched` today. |
-| `kernel/Makefile` `timer.c` whitelist — aarch64 build currently doesn't include `kernel/time/timer.c` (only `kernel/time/clocksource.c`); adding `timer.c` may pull in `serial_printk`, `strcmp`, etc. | Medium | R1 grep must verify `kernel/time/timer.c`'s dependencies. If it pulls too much, similar to subsys_stub.c: provide a minimal `kernel/arch/aarch64/timer_stub.c` for now (mirroring `subsys_stub.c`). |
-| Build-cache CFLAGS trap (`KERNEL_SELFTEST=1` doesn't trigger `.o` rebuild) — Phase 2 #1 Task 3 noted this | Medium | Operational note in plan: always `make clean && make KERNEL_SELFTEST=1` before QEMU regression. |
-| `aarch64_main` order — `softirq_init()` must run BEFORE `arch_tick_start()` | Low | QEMU E2E marker ordering check: `[cntp]` marker must appear AFTER `[clocksource]` markers AND the kernel must reach `[IRQ] enabled` without hanging. |
-| `tick_handler()` reads `this_cpu()->tsc_offset` via `clocksource_read_ns()` (line 26) — on aarch64 this dereferences the wrong structure | High (latent) | E. If E deferred, the read returns garbage but `poll_timeout_head` is NULL so the loop is skipped; latent damage to `.boot.bss` slack. |
+| `tick_handler` `this_cpu()->need_resched = 1` corrupts `aarch64_boot_percpu[0]` (offset 8/16) | High (latent), Low (immediate) | Phase 2 #3 per-CPU install fixes; documented as latent corruption (no scheduler reads today). |
+| `tick_handler` `this_cpu()->watchdog_counter++` writes out of bounds of 48-byte struct | High (latent), Low (immediate) | Same. |
+| `kernel/intr/softirq.c` adds `intr/` to aarch64 whitelist — verify `intr/irq.c` etc. aren't transitively pulled | Medium | R3 review: grep aarch64 build for `intr/irq.c` references. If pulled, add more stubs. |
+| `set_softirq_status` plain write race on SMP aarch64 | Low (latent) | Documented; tick_handler runs at IRQ context with IRQs masked, no concurrent write. |
+| TIMER_SIRQ bit never cleared on aarch64 (no `do_softirq` invocation) | Medium (latent) | Documented; Phase 2 #3 scheduler fix. |
+| `kernel/time/timer.c` builds OK on aarch64 — verify all its `#include` headers resolve | High | R3 review: trace `#include` chain. If any header pulls x86-only types, gate. |
+| `idle_resume` stub never invoked — link OK but linker may strip unused symbols | Low | `kernel/arch/aarch64/idle_resume_stub.c` is in aarch64 whitelist via Makefile change; linker keeps it. |
 
 ## Verification
 
 ### Unit / host tests
 
-No new hosttest needed. The existing 5 hosttests must continue to pass byte-for-byte. The `test_clocksource` Suite E (Phase 2 #1 commit `6f37a21`) verifies `clocksource_init()` post-init globals — still passes (no change to clocksource.c semantics).
+- Existing 5 hosttests must continue to pass byte-for-byte.
+- `test_clocksource` 49/49 PASS (no change to clocksource semantics).
 
 ### QEMU end-to-end
 
-**Existing evidence gates** must continue to pass (with the `[tick] N` removal caveat above):
-- `make PROFILE=aarch64-clang test-aarch64-uefi-smp` (--expect-selftest --expect-gic --expect-clk): 9/9 PASS, SMP=1/2/4 × 3
-- `make PROFILE=aarch64-clang test-aarch64-gic-spi`: PASS
-- `make PROFILE=x86_64-clang test-user-canary`: audit passed
-- `make PROFILE=x86_64-clang test-kernel-selftest`: 27/27 PASS
+- `make PROFILE=aarch64-clang test-aarch64-uefi-smp` (--expect-selftest --expect-gic --expect-clk): 9/9 PASS
+- `[tick] N` lines still appear (R2 §B preserves the print)
+- `[clocksource]` markers still appear (Phase 2 #1 unchanged)
+- New: `timer_init()` is now invoked via SUBSYS dispatch — verifiable via `nm | grep -c subsys_init` going from 3 (Phase 2 #1) to 4 (R2 adds `_timer_register`)
 
-**New RED-then-GREEN test**: add a QEMU harness assertion that `[tick] N` lines are NOT in stdout.log (or are — pending R1 verification). If the harness rejects the absence of `[tick] N`, this spec is REJECTED.
+### x86_64 byte-identity
 
-**New x86_64 byte-identity check**: same as Phase 2 #1 — no x86_64 sources modified.
+- `kernel/intr/softirq.c` edit is `#if defined(__x86_64__)` gate — x86_64 path unchanged.
+- `kernel/time/tick.c` edit is `#if defined(__x86_64__)` gate — x86_64 path unchanged.
+- `kernel/Makefile` x86_64 `else` block untouched.
+- `kernel/time/timer.c` gate flip is `||` — x86_64 still works.
 
 ## Connection to roadmap §P2
 
@@ -179,10 +309,22 @@ Closes **Phase 2 follow-up item #2** from `docs/aarch64-timer-phase1-closure-202
 
 > 2. `cntp_tick_handler → tick_handler()` integration — needs `<list.h>` include-path fix
 
-The `<list.h>` include-path fix is already in place from Task 2.2 (`12d3720`); this spec consumes that fix. Remaining prerequisite is the `percpu_data` install (E) — deferred to Phase 2 #3.
-
-After this spec, `tick_handler()` runs on aarch64, identical to x86_64. The unified kernel_main spec's "timer unified" sub-task is one step closer to complete (the framework-init side is closed by Phase 2 #1; the unified-tick semantic is closed by this spec; the per-CPU side remains).
+`<list.h>` is already in place from Task 2.2 (`12d3720`); this spec consumes that fix. After this spec, `tick_handler()` runs on aarch64 (common path only — jiffies/need_resched/watchdog/TIMER_SIRQ set). x86_64 also gets the gated poll-scan block but the behavior is byte-identical (the `#if` only protects x86_64-only code).
 
 ## Subagent-driven plan (to be written via writing-plans skill)
 
-After this spec is approved, the writing-plans skill produces `docs/superpowers/plans/2026-09-18-aarch64-tick-handler-plan.md`. Estimated commit count: 4-7 functional + 1 docs. Estimated wall-clock: 2-3 days (per-CPU install deferred; the rest is straightforward delegation to existing framework).
+Estimated commit count: 4-7 functional + 1 docs.
+
+1. **Commit 1**: `feat(aarch64): provide idle_resume stub` — `kernel/arch/aarch64/idle_resume_stub.c` (NEW, ~10 lines) + `kernel/Makefile` aarch64 whitelist expansion (adds `idle_resume_stub.c`, `time/tick.c`, `time/timer.c`, `intr/softirq.c`). Verify build OK; verify `idle_resume` symbol present.
+
+2. **Commit 2**: `feat(kernel): gate x86 inline asm in softirq.c` — `#if defined(__x86_64__)` gate around `lock orq` asm. Verify x86_64 byte-identical + aarch64 build OK.
+
+3. **Commit 3**: `feat(kernel): gate x86 poll-scan block in tick.c` — `#if defined(__x86_64__)` around poll-scan. Verify x86_64 byte-identical + aarch64 build OK.
+
+4. **Commit 4**: `feat(aarch64): cntp_tick_handler delegates to tick_handler() with [tick] print kept` — modify `cntp_tick_handler` per §B. Add explicit `softirq_init()` call per §G. Flip `timer.c:136` gate per §F.
+
+5. **Commit 5** (if needed): fixup if Step 1's whitelist expansion breaks something.
+
+Total: 4-5 commits. Wall-clock: 1-2 days (mostly verification + QEMU runs).
+
+Each commit is RED→GREEN→QEMU verification → next commit.
