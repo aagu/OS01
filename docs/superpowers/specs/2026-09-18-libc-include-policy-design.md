@@ -1,108 +1,94 @@
-# aarch64 `-I libc/include` Policy Cleanup — Design (v1)
+# aarch64 `-I libc/include` Policy Cleanup — Design (R2, expanded Scope A)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:brainstorming for the design phase (this doc); then superpowers:writing-plans for the implementation plan.
+>
+> **R1 review**: sonnet a6c4452 found Scope A insufficient — the aarch64 build transitively pulls THREE libc headers, not one. R2 expands Scope A to copy all three.
 
-**Goal:** Close Phase 2 P2 follow-up item #5 from `docs/aarch64-timer-phase1-closure-2026-09-18.md` — eliminate the aarch64 kernel build's unconditional `-I libc/include` policy. The aarch64 kernel is freestanding (no userspace libc); the `-I libc/include` workaround was added in Phase 1 Task 2.2 (commit `12d3720`) to resolve `<list.h>` transitively pulled in by `time/clocksource.h` → `time/timer.h`. Long-term hygiene: aarch64 kernel should NOT depend on userspace libc headers at all.
+**Goal:** Close Phase 2 P2 follow-up item #5 from `docs/aarch64-timer-phase1-closure-2026-09-18.md` — eliminate the aarch64 kernel build's `-I libc/include` workaround by copying the THREE required libc headers (+ transitive `<sys/cdefs.h>`) into `kernel/include/compat/`. The aarch64 kernel is freestanding (no userspace libc); the `-I libc/include` workaround was added in Phase 1 Task 2.2 (commit `12d3720`).
 
-**Architecture — multi-commit, depends on scope decision:**
+**Architecture — single commit, 5 file changes:**
 
-Three scopes possible (R1 must pick one):
-- **(A) Minimal** (1-2 commits): convert ONLY `<list.h>` to a kernel-internal `kernel/include/compat/list.h`. Remove `-I libc/include` from aarch64 whitelist, add `-I kernel/include/compat`. Touches: `kernel/include/time/timer.h:5` (remove `#include <list.h>`) + `kernel/include/compat/list.h` (copy of libc/list.h). Minimum viable.
-- **(B) Standard** (3-5 commits): also convert `<string.h>` (`memset`/`memcpy`/`strlen`) and `<stdlib.h>` (`calloc`/`malloc`/`free` — already stubbed by Phase 2 #2 `kernel/arch/aarch64/libc_stub.c`). Touches: many more headers.
-- **(C) Comprehensive** (5-10 commits): also convert `<stdio.h>`, `<stdarg.h>`, etc. Touches all libc-include consumers. Long-term cleanup.
+1. Create `kernel/include/compat/list.h` (verbatim copy of `libc/include/list.h`, ~76 lines)
+2. Create `kernel/include/compat/sys/types.h` (verbatim copy of `libc/include/sys/types.h`, ~25 lines, just typedefs)
+3. Create `kernel/include/compat/sys/cdefs.h` (verbatim copy of `libc/include/sys/cdefs.h`, ~30 lines, macro-only) — transitive dep of `sys/types.h`
+4. Create `kernel/include/compat/rbtree.h` (verbatim copy of `libc/include/rbtree.h`, ~55 lines)
+5. Modify `kernel/Makefile:124`: remove `-I$(CURDIR)/../libc/include`; add `-I$(CURDIR)/include/compat`
 
-R1 must pick scope based on how invasive the change should be. **My recommendation: Scope A (minimal)** — convert only `<list.h>`. After Phase 2 #2's `kernel/arch/aarch64/libc_stub.c`, the remaining `<stdlib.h>` consumer is aarch64's `kernel/time/timer.c:7` which uses `calloc`/`free` (already stubbed — `<stdlib.h>` only declares the prototypes; the actual symbols come from `libc_stub.c`). `<string.h>` is similar — `memset`/`memcpy` come from `libc_stub.c`. So the only TRUE `<libc/...>` dependency is `<list.h>`.
+## Context — why R2 expanded Scope A
 
-## Context — why it's needed now
+R1 review (sonnet a6c4452) found the original Scope A insufficient. `kernel/Makefile:113-123` (the existing comment on `-I libc/include`) **explicitly documents** that the aarch64 build transitively pulls THREE libc headers, not one:
 
-`kernel/Makefile:124` adds `-I$(CURDIR)/../libc/include` to ALL_CFLAGS (unconditional). This works for x86_64 (where the kernel is built against the libc sysroot via `kernel/Makefile:99`) and accidentally works for aarch64 (where the aarch64 kernel should NOT depend on libc headers at all).
+- `<list.h>` — via `kernel/include/time/timer.h:5`
+- `<sys/types.h>` — via `kernel/include/sched/task.h:6` (for `pid_t`)
+- `<rbtree.h>` — via `kernel/include/sched/task.h:12` (for `rbtree_node_t`)
 
-The aarch64 dependency chain:
-- `kernel/include/time/clocksource.h:5` → `#include <time/timer.h>`
-- `kernel/include/time/timer.h:5` → `#include <list.h>`
-- `<list.h>` resolves via `-I libc/include` from `libc/include/list.h`
+`<sys/types.h>` also transitively pulls `<sys/cdefs.h>`. `<rbtree.h>` does not transitively pull other libc headers (verify by reading `libc/include/rbtree.h`).
 
-The aarch64 kernel compiles with `clang -target aarch64-none-elf -ffreestanding -nostdlib`. The freestanding flag tells clang to NOT include the host libc, but `-I` paths override that. So `libc/include/list.h` IS used at compile time.
+After this R2 commit, aarch64 kernel is fully freestanding. The kernel can migrate to a real libc later (e.g., musl) without breaking aarch64 kernel builds.
 
-Long-term problem: if the `libc/include/` layout changes (e.g., `<list.h>` is renamed, or the `<list>` namespace is updated), the aarch64 kernel breaks. The kernel should NOT depend on a userspace layout.
+## Design (R2)
 
-## Design
-
-### A. Minimal scope (Scope A)
+### A. Create 4 compat header files
 
 **Files:**
-- Create: `kernel/include/compat/list.h` (NEW, copy of `libc/include/list.h`)
-- Modify: `kernel/include/time/timer.h` (line 5) — change `#include <list.h>` to `#include <compat/list.h>`
-- Modify: `kernel/Makefile` (line 124) — remove `-I$(CURDIR)/../libc/include`; add `-I$(CURDIR)/include/compat` to aarch64 whitelist
+- Create: `kernel/include/compat/list.h` (NEW, ~76 lines)
+- Create: `kernel/include/compat/sys/types.h` (NEW, ~25 lines)
+- Create: `kernel/include/compat/sys/cdefs.h` (NEW, ~30 lines)
+- Create: `kernel/include/compat/rbtree.h` (NEW, ~55 lines)
 
-**Detailed changes:**
+Each file is a verbatim copy of the corresponding `libc/include/` file, with an updated header comment noting this is the kernel's own copy. Mark the compat version as "frozen, do not modify without updating both" — the kernel cannot use any list operation beyond what `libc/include/list.h` exposes (etc.).
 
-#### kernel/include/compat/list.h
+Files to read (verbatim source):
+- `/home/aagu/aarch64-libc-include-policy/libc/include/list.h`
+- `/home/aagu/aarch64-libc-include-policy/libc/include/sys/types.h`
+- `/home/aagu/aarch64-libc-include-policy/libc/include/sys/cdefs.h`
+- `/home/aagu/aarch64-libc-include-policy/libc/include/rbtree.h`
 
-Copy `libc/include/list.h` verbatim to `kernel/include/compat/list.h`. The file is ~50 lines (libc doubly-linked list implementation). Adjust the file header to note this is the kernel's own copy.
+### B. Modify `kernel/Makefile`
 
-#### kernel/include/time/timer.h
+**Files:**
+- Modify: `kernel/Makefile:124` — remove `-I$(CURDIR)/../libc/include`; add `-I$(CURDIR)/include/compat`
 
-Change line 5:
-```c
-#include <list.h>
-```
-to:
-```c
-#include <compat/list.h>
-```
+The change is INSIDE the `ifeq ($(ARCH),aarch64)` block (verified by R1: lines 112-125). x86_64 path is NOT affected (x86_64 gets libc headers via `-isystem $(SYSROOT_GENERATION_DIR)/usr/include` at `kernel/Makefile:106`).
 
-#### kernel/Makefile
-
-Line 124:
+old_string:
 ```make
 ALL_CFLAGS += -I$(CURDIR)/../libc/include
 ```
 
-Change to (gated by aarch64 + add compat include):
+new_string:
 ```make
-# Phase 2 #5: -I libc/include removed for aarch64. The kernel uses its
-# own compat headers (kernel/include/compat/) for libc-style types.
-# x86_64 still uses libc sysroot via kernel/Makefile:99 (separate -isystem).
+# Phase 2 #5: aarch64 kernel now uses its own compat headers
+# (kernel/include/compat/) for libc-style types. x86_64 path
+# uses libc sysroot via kernel/Makefile:106 (unchanged).
 ALL_CFLAGS += -I$(CURDIR)/include/compat
 ```
 
-(Or arch-gated: only add `-I include/compat` for aarch64, leave x86_64 unchanged. x86_64 doesn't NEED compat; it already has libc sysroot.)
+### C. Verify with grep
 
-Verify the change by reading `kernel/Makefile:35-130` and `kernel/Makefile:90-130` for the aarch64/x86_64 flag blocks.
+After the change:
 
-### B. Why Scope A is sufficient
+```sh
+grep -rn '#include <list\.h>\|#include <sys/types\.h>\|#include <sys/cdefs\.h>\|#include <rbtree\.h>' kernel/
+```
 
-After Phase 2 #2's `kernel/arch/aarch64/libc_stub.c`:
-- `<stdlib.h>` (`calloc`/`malloc`/`free`) — used by `kernel/time/timer.c` and `kernel/arch/aarch64/libc_stub.c`. Symbols stubbed; `<stdlib.h>` only declares the prototypes. The actual symbols come from `libc_stub.c` (Phase 2 #2).
-- `<string.h>` (`memset`/`memcpy`/`strlen`) — similar; symbols stubbed or come from the libc sysroot for x86_64. For aarch64, a minimal `memset`/`memcpy` is provided by compiler builtins or implicit declarations.
-- `<list.h>` — NOT stubbed; the actual `list_t` / `list_init` / etc. types come from `libc/include/list.h`. This is the only TRUE libc header dependency that can't be stubbed because the TYPES are needed at compile time.
-
-Scope A fixes the only hard dependency. Scope B (string.h + stdlib.h) is incremental but not necessary for aarch64 to be freestanding-clean.
-
-### C. What does NOT change
-
-- `kernel/arch/aarch64/libc_stub.c` (Phase 2 #2) — stays; still provides `calloc`/`free` runtime stubs.
-- `kernel/time/clocksource.c`, `kernel/time/tick.c`, `kernel/time/timer.c` body code — unchanged.
-- x86_64 build path — unchanged (x86_64 still uses libc sysroot).
-- All other Phase 2 follow-ups — unchanged.
+Expected: results only from `kernel/include/compat/list.h`, `kernel/include/compat/sys/types.h`, `kernel/include/compat/sys/cdefs.h`, `kernel/include/compat/rbtree.h` (the compat files themselves). NO direct consumers.
 
 ## Non-goals
 
 1. **Convert `<string.h>` types** (memset/memcpy are already compiler builtins on aarch64) — Scope B.
 2. **Convert `<stdlib.h>` types** (calloc/free already stubbed by Phase 2 #2) — Scope B.
 3. **Convert `<stdio.h>` / `<stdarg.h>` / etc.** — Scope C.
-4. **Replace `<time.h>` in `kernel/include/time/timer.h`** — that's the file's own header, not libc.
-5. **Replace other Phase 2 follow-ups** (`__udivti3` already hoisted; per-CPU timer/SMP timer already wired; SUBSYS_INITCALL already wired; tick_handler already integrated).
+4. **Migrate to a real libc** (e.g., musl) — future work; this commit enables the migration by removing the unconditional `-I libc/include` workaround.
+5. **Modify existing kernel TU `#include <list.h>` to `#include <compat/list.h>`** — not necessary; the `-I include/compat` flag already makes `<list.h>` (angle-bracket form) resolve to `compat/list.h`. The other 8 `<list.h>` consumers (per R1 finding 3) get the benefit transparently.
 
 ## Risks + mitigations
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| `kernel/include/compat/list.h` diverges from `libc/include/list.h` over time | Medium | Document the relationship in the file's header comment; mark the compat version as "frozen, do not modify without updating both" |
-| Other `<list.h>` consumers in the codebase break when include path changes | Low | grep `kernel/` for `#include <list.h>` and `#include "list.h"`; should be only `timer.h` |
-| `kernel/time/timer.h:5` is included transitively by many TUs — wrong include path breaks them all | Low | After change, clean build; verify all consumers (kernel/time/clocksource.c, kernel/time/tick.c, etc.) still compile |
-| x86_64 path breaks if `-I libc/include` removed without alternative | Low | Spec explicitly keeps x86_64 unchanged (gated change OR add `-I include/compat` only for aarch64) |
+| `kernel/include/compat/*.h` diverge from `libc/include/*.h` over time | Medium | Document the relationship in each file's header comment; mark each as "frozen, do not modify without updating both" |
+| New transitively-pulled libc header (e.g., `<stddef.h>` from a new `<sys/types.h>` consumer) breaks the build | Low | After change, clean build + verify all consumers still compile |
+| x86_64 path breaks if `-I libc/include` removed without alternative | Low | Spec explicitly keeps x86_64 unchanged (gated change inside `ifeq ($(ARCH),aarch64)`) |
 
 ## Verification
 
@@ -114,14 +100,14 @@ Scope A fixes the only hard dependency. Scope B (string.h + stdlib.h) is increme
 
 ### QEMU end-to-end
 
-- `make PROFILE=aarch64-clang test-aarch64-uefi-smp` (SMP=1/2/4 × 3): **9/9 PASS** for SMP=1, **same pre-existing GIC Phase 1 TIMEOUT pattern for SMP=2/4** (NOT introduced by this commit).
+- `make PROFILE=aarch64-clang test-aarch64-uefi-smp` (SMP=1/2/4 × 3): **9/9 PASS** for SMP=1 (×3); **same pre-existing GIC Phase 1 TIMEOUT pattern for SMP=2/4** (NOT introduced by this commit).
 - `make PROFILE=aarch64-clang test-aarch64-gic-spi`: PASS.
 
 ### Build verification
 
 - `make PROFILE=aarch64-clang SMP=1 aarch64-uefi`: exit 0.
 - `make PROFILE=x86_64-clang kernel.bin`: exit 0.
-- Verify `grep -r "#include <list.h>" kernel/`: should return only `kernel/include/compat/list.h` itself (the file documenting its own purpose) and possibly `kernel/include/time/timer.h` if include path update wasn't applied correctly. ZERO hits outside `compat/`.
+- Verify `grep -r "#include <list\.h>" kernel/`: should return only `kernel/include/compat/list.h` (the file documenting its own purpose) and the 9 transitive consumers (timer.h, sched/task.h, sync/wait.h, fs/file.h, fs/poll.h, sync/futex.c, memory/vma.h, memory/slab.h, tty/tty.h). The 9 consumers benefit transparently (their `<list.h>` etc. resolves to `compat/list.h` via `-I include/compat`).
 
 ## Connection to roadmap §P2
 
@@ -135,6 +121,6 @@ After this spec lands, aarch64 kernel is fully freestanding (no userspace libc h
 
 Estimated commit count: 1 functional + 1 docs. Estimated wall-clock: 0.5 day (small mechanical change).
 
-1. **Commit 1**: Create `kernel/include/compat/list.h` (copy of `libc/include/list.h`) + modify `kernel/include/time/timer.h:5` (include path) + modify `kernel/Makefile:124` (remove `-I libc/include`; add `-I include/compat` for aarch64). Single commit because all three changes are required together for the aarch64 build to succeed.
+1. **Commit 1**: Create 4 `kernel/include/compat/*.h` files (verbatim copies) + modify `kernel/Makefile:124`. Single commit because all 5 file changes are required together for the aarch64 build to succeed.
 
 Each commit RED→GREEN→QEMU 9/9 (1-CPU)→next.
