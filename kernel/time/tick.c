@@ -18,21 +18,18 @@ void tick_handler(void)
 {
     jiffies++;
 
-    // poll 超时扫描（纳秒比较）—— 从 pit_handler 迁来。
-    // 与 poll.c 单位一致：poll.c 用 `clocksource_read_ns() + timeout*1e6` 注册
-    // ns deadline（poll.c:do_poll_core），此扫描用同一时间轴比较。
-    // ⚠️ 时序假设：boot 期 poll_timeout_head 恒 NULL（poll 只在用户态进程里调，
-    // 用户态进程 task_init() 之后才有），此短路保证 GS base 装之前（phase 4 到
-    // main.c:276）不调 clocksource_read_ns()（它读 this_cpu()->tsc_offset）。
+#if defined(__x86_64__)
+    // x86_64-only poll-timeout scan. aarch64 phase 1 has no userland
+    // processes (no init_thread, no scheduler, no /dev/poll); the
+    // poll-timeout scan is dead code on aarch64.
     if (poll_timeout_head) {
-        // IRQ 上下文取锁必须 irqsave：若 poll.c 持有同一把锁时被本 tick 抢占，
-        // 普通 spin_lock 会自旋死锁（单 CPU 挂死）。irqsave 清 IF，unlock 恢复。
         uint64_t flags = spin_lock_irqsave(&poll_timeout_lock);
         for (poll_timeout_node_t *n = poll_timeout_head; n; n = n->next)
             if (clocksource_read_ns() >= n->deadline)
                 wait_queue_wake_all(n->wq);
         spin_unlock_irqrestore(&poll_timeout_lock, flags);
     }
+#endif
 
     this_cpu()->need_resched = 1;
     this_cpu()->watchdog_counter++;
@@ -43,7 +40,11 @@ void tick_handler(void)
 
 void tick_start(void)
 {
-    // 先掩 PIT IRQ0，防止交接窗口 LAPIC+PIT 双计 jiffies。
+#if defined(__x86_64__)
+    // x86_64-only PIT/LAPIC handoff ceremony. aarch64 phase 1 has
+    // no PIT, no LAPIC; kernel/arch/aarch64/main.c:334 calls
+    // arch_tick_start() directly without going through tick_start().
+    // tick_start() is dead code on aarch64.
     irq_mask(0);
     if (arch_tick_start()) {
         // LAPIC 接管成功，PIT 保持掩蔽。
@@ -51,4 +52,5 @@ void tick_start(void)
         // LAPIC 未校准/失败：回退 PIT。
         irq_unmask(0);
     }
+#endif
 }

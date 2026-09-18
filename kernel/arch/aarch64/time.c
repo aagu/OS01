@@ -1,27 +1,33 @@
-/* aarch64 phase 1: CNTP physical-timer tick ISR (Task 2.2).
+/* aarch64 CNTP physical-timer tick ISR (Phase 2 P2 follow-up #2).
  *
- * Spec §2.3 — strict ISR order:
+ * Phase 1 (Task 2.2) had the ISR do its own TVAL rewrite + per-second
+ * "[tick] N" print but DID NOT call tick_handler() — so jiffies stayed
+ * 0, need_resched was never set, the watchdog counter never incremented,
+ * the timer-list never scanned, and TIMER_SIRQ was never raised on
+ * aarch64.  Phase 2 P2 unifies the tick semantic with x86_64 by
+ * delegating to tick_handler() (kernel/time/tick.c:17) and KEEPING the
+ * per-second "[tick] N" print required by the harness evidence gate
+ * (R3.1 fix for R1 CRITICAL-1: qemutests/aarch64_uefi_smp.py:545/574
+ * asserts >=3 [tick] N lines per case).
+ *
+ * Order contract (phase1 spec §2.3 + phase2 unification):
  *   1. Rewrite CNTP_TVAL_EL0 = period  (FIRST; avoids losing a tick)
- *   2. Write GICC_EOIR = PPI intid      (THEN EOI)
- *   3. printk "[tick] N" once per second (LAST; output may be slow)
+ *   2. Call tick_handler() — jiffies++, need_resched=1, watchdog++,
+ *      timer-list scan, set_softirq_status(TIMER_SIRQ)
+ *   3. Print "[tick] N" once per second (LAST; output may be slow)
+ *   4. EOI is performed by gic_dev_dispatch after this returns.
  *
- * `arch_tick_start()` is called by aarch64_main AFTER dtb_init and
- * gic_init.  It enables the CNTP, arms it for one period ahead, and
- * registers `cntp_tick_handler` with the GIC handler table so the
- * generic dispatch can route CNTP PPI ticks to it.  Subsequent re-arms
- * happen in the ISR itself.
- *
- * EOI is no longer issued here: dispatch (gic_dev_dispatch) EOI's the
- * GIC after the handler returns.  Phase 1 only enables the CNTP PPI so
- * any other INTID in dispatch is "unexpected" and EOI'd by the wrapper.
+ * `arch_tick_start()` is called by aarch64_main AFTER dtb_init,
+ * gic_init, softirq_init() (explicit, see main.c) and the SUBSYS hook
+ * (Phase 2 #1 commit bddf8eb: arch_register_subsys() +
+ * subsys_init_phase(SUBSYS_PHASE_4)).  It enables the CNTP, arms it for
+ * one period ahead, and registers `cntp_tick_handler` with the GIC
+ * handler table so the generic dispatch can route CNTP PPI ticks to it.
+ * Subsequent re-arms happen in the ISR itself.
  *
  * Output policy: printing on every 100 Hz tick would flood the
  * polled PL011 (~100 characters/second), so we print one line per
- * second (every 100th tick).  The spec's exit B says "≈1000 times
- * +tick" but also allows "a per-second counter is equally valid
- * evidence; prefer whatever is clean" — the printed counter is
- * observable and easy to read.
- */
+ * second (every 100th tick). */
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -29,6 +35,7 @@
 #include "reg.h"
 #include <arch/aarch64/gic.h>
 #include <arch/aarch64/dtb.h>
+#include <time/clockevent.h>   /* tick_handler() */
 
 /* Forward from pl011.c. */
 void kputs(const char *s);
@@ -53,10 +60,12 @@ static volatile uint64_t g_ticks;
  * the ISR doesn't have to re-issue the mrs every entry. */
 static uint64_t g_period;
 
-/* Registered CNTP PPI tick handler.  Order contract per phase1 spec §2.3:
+/* Registered CNTP PPI tick handler.  Order contract per phase1 spec §2.3
+ * + phase2 unification:
  *   1. Rewrite TVAL FIRST (avoid losing a tick).
- *   2. EOI is performed by gic_dev_dispatch after this returns.
- *   3. Print.
+ *   2. Call tick_handler() — unified semantic with x86_64.
+ *   3. Per-second "[tick] N" debug print (KEEP per R3.1).
+ *   4. EOI is performed by gic_dev_dispatch after this returns.
  *
  * Same-priority nesting is masked at the GIC anyway (PPI priority
  * unique under CNTP), so extending the active window by one EOI
@@ -64,7 +73,10 @@ static uint64_t g_period;
 static void cntp_tick_handler(uint32_t intid, uint64_t param, struct pt_regs *regs)
 {
     (void)intid; (void)param; (void)regs;
-    cntp_tval_el0_write(g_period);
+    cntp_tval_el0_write(g_period);  /* TVAL rewrite FIRST (phase1 spec §2.3) */
+    tick_handler();                   /* unified tick semantic */
+    /* GIC Phase 1 evidence gate: qemutests/aarch64_uefi_smp.py:545/574
+     * requires >=3 [tick] N lines per case. */
     uint64_t t = g_ticks + 1;
     g_ticks = t;
     if ((t % TICKS_PER_SECOND) == 0) {
