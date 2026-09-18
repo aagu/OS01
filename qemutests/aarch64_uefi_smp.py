@@ -318,6 +318,45 @@ def self_test() -> None:
     assert passed(gic_ipi_log_cpus2, cpus=2), \
         "expect_gic default-off keeps legacy behavior"
 
+    # --expect-clk 断言（Timer Task 2.1）：用合成 log 测 clk_evidence_ok 解析行为。
+    # kernel 现状不发 [clocksource] marker（Task 2.2 GREEN 才会发），所以默认 fixture
+    # current_log_for_2_cpus 加 marker 后才能 pass。
+    clk_markers = [
+        "[clocksource] active=true\n",
+        "[clocksource] freq=62500000\n",
+        "[clocksource] mult=2147483648 shift=27\n",
+    ]
+    clk_log = current_log_for_2_cpus + "".join(clk_markers)
+
+    # 完整三 marker → pass
+    assert passed(clk_log, cpus=2, expect_clk=True), \
+        "all clocksource markers must pass"
+
+    # 单 marker 缺失 → 拒
+    for marker in clk_markers:
+        assert not passed(current_log_for_2_cpus + marker, cpus=2, expect_clk=True), \
+            f"missing other clk markers when {marker.strip()} present must reject"
+
+    # marker 重复 → 拒
+    assert not passed(clk_log + "[clocksource] active=true\n", cpus=2, expect_clk=True), \
+        "duplicate clocksource marker must reject"
+
+    # clocksource FAIL 行 → 拒
+    assert not passed(clk_log.replace("active=true", "active=FAIL"),
+                      cpus=2, expect_clk=True), "clocksource FAIL must reject"
+
+    # 非十进制 freq / mult / shift → 拒（regex 锚点只认 \d+）
+    assert not passed(clk_log.replace("freq=62500000", "freq=62a"),
+                      cpus=2, expect_clk=True), "non-decimal freq must reject"
+    assert not passed(clk_log.replace("mult=2147483648", "mult=21x"),
+                      cpus=2, expect_clk=True), "non-decimal mult must reject"
+    assert not passed(clk_log.replace("shift=27", "shift=2x"),
+                      cpus=2, expect_clk=True), "non-decimal shift must reject"
+
+    # expect_clk 默认关闭保留 legacy 行为
+    assert passed(clk_log, cpus=2), \
+        "expect_clk default-off keeps legacy behavior"
+
 
 def kernel_failure(text: str) -> bool:
     """Return true only for structured kernel failure diagnostics."""
@@ -350,6 +389,25 @@ def hard_kernel_failure(text: str) -> bool:
         text,
         re.MULTILINE,
     ))
+
+
+def clk_evidence_ok(text: str) -> bool:
+    """--expect-clk: Generic Timer 框架证据（Timer Task 2.1）。
+    marker 恰一条（多打/漏打都拒）；clocksource FAIL 行出现即拒。"""
+    text = text.replace("\r", "")
+    if re.search(r"^\[clocksource\][^\n]*\bFAIL\b", text, re.MULTILINE):
+        return False
+    checks = [
+        (r"^\[clocksource\] active=true$", 1),
+        (r"^\[clocksource\] freq=\d+$", 1),
+        (r"^\[clocksource\] mult=\d+ shift=\d+$", 1),
+    ]
+    for pattern, want in checks:
+        found = re.findall(pattern, text, re.MULTILINE)
+        if len(found) != want:
+            print(f"FAIL: clk evidence {pattern!r} found {len(found)}, want {want}")
+            return False
+    return True
 
 
 def gic_evidence_ok(text: str, cpus: int) -> bool:
@@ -395,7 +453,7 @@ def gic_evidence_ok(text: str, cpus: int) -> bool:
 
 
 def passed(text: str, cpus: int, expect_selftest: bool = False,
-           expect_gic: bool = False) -> bool:
+           expect_gic: bool = False, expect_clk: bool = False) -> bool:
     """Recognize a complete normal-mode SMP run without QEMU dependencies."""
     # PL011 currently emits LF+CR. Match lines consistently for saved logs
     # and live serial drains, while retaining the original fixture format.
@@ -405,6 +463,8 @@ def passed(text: str, cpus: int, expect_selftest: bool = False,
     if kernel_failure(text):
         return False
     if expect_gic and not gic_evidence_ok(text, cpus):
+        return False
+    if expect_clk and not clk_evidence_ok(text):
         return False
     if expect_selftest:
         # Anchor on the specific topology line via re.search to avoid
@@ -519,9 +579,11 @@ def degraded_passed(text: str, expect_selftest: bool = False) -> bool:
 def acceptance_evidence(args: argparse.Namespace, text: str, cpus: int) -> bool:
     expect_selftest = getattr(args, "expect_selftest", False)
     expect_gic = getattr(args, "expect_gic", False)
+    expect_clk = getattr(args, "expect_clk", False)
     if args.expect_no_ack is not None:
         return degraded_passed(text, expect_selftest=expect_selftest)
-    return passed(text, cpus, expect_selftest=expect_selftest, expect_gic=expect_gic)
+    return passed(text, cpus, expect_selftest=expect_selftest,
+                  expect_gic=expect_gic, expect_clk=expect_clk)
 
 
 def qemu_command(args: argparse.Namespace, cpus: int, diagnostic_dtb: str | None) -> list[str]:
@@ -694,6 +756,9 @@ def main() -> int:
                         help="Require GICv2 framework markers: driver init, "
                              "dispatch ready, save-restore probe OK, "
                              "unexpected-intid survival")
+    parser.add_argument("--expect-clk", action="store_true",
+                        help="Require clocksource markers: active=true, mult=..., "
+                             "shift=...")
     parser.add_argument("--diagnostic-dtb", metavar="PATH_OR_AUTO",
                         help="firmware does not expose DTB via EFI config table: "
                              "use acpi=off and a QEMU-generated DTB. Pass an explicit "
