@@ -329,6 +329,16 @@ void aarch64_main(const struct boot_context *handoff)
         kputu((uint64_t)clocksource_shift);
         kputs("\n");
     }
+
+    /* softirq_init() must run BEFORE arch_tick_start(): tick_handler()
+     * calls set_softirq_status(TIMER_SIRQ), which dereferences
+     * softirq_status (BSS; zeroed). softirq_init() clears the
+     * softirq vector and status.
+     *
+     * On x86_64, softirq_init() is called from kernel/intr/irq.c:78
+     * (existing). aarch64 has no irq.c — explicit call needed. */
+    extern void softirq_init(void);
+    softirq_init();
 #endif
 
     if (!arch_tick_start()) {

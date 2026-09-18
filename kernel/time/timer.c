@@ -141,7 +141,7 @@ int timer_has_expired(uint64_t now)
     return first->expire_jiffies <= now;
 }
 
-#ifdef __x86_64__
+#if defined(__x86_64__) || defined(__aarch64__)
 #include <subsys/subsys.h>
 // Register this driver into the platform's subsystem table. The
 // _register function is collected by arch_register_subsys() at boot via
