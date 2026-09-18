@@ -19,6 +19,18 @@ extern char exception_vectors[];
  * (Task 2.2).  Defined in kernel/arch/aarch64/boot_log.h / irq_probe.c
  * (the latter is OS01_SELFTEST-gated). */
 void kputs(const char *s);
+void kputu(uint64_t v);
+/* Forward declarations for the arch-neutral clocksource framework
+ * (aarch64 Generic Timer Task 2.2 GREEN). We intentionally do NOT
+ * `#include <time/clocksource.h>` here because its transitive
+ * `<time/timer.h>` pulls in `<list.h>`, which the aarch64 kernel
+ * profile does not expose (no libc sysroot). The forward decls are
+ * enough for our 3-line marker-print below. */
+extern bool     clocksource_active;
+extern uint64_t clocksource_freq_hz(void);
+extern uint32_t clocksource_mult;
+extern uint32_t clocksource_shift;
+extern void     clocksource_init(void);
 #if OS01_SELFTEST
 void gic_clobber_probe(void);
 void gic_unexpected_probe(void);
@@ -264,6 +276,31 @@ void aarch64_main(const struct boot_context *handoff)
         log_warn("[spinlock] status=SKIP\n");
 
     /* BSP-only timer and IRQs begin after AP startup/testing has settled. */
+#if defined(__aarch64__)
+    /* aarch64 Generic Timer Task 2.2 GREEN — emit the three
+     * [clocksource] markers required by
+     * qemutests/aarch64_uefi_smp.py --expect-clk (clk_evidence_ok
+     * asserts exactly one active=true, one freq=<N>, one mult= shift=).
+     * We print the markers here from main.c (instead of from inside
+     * clocksource_init()) so the kernel TU here avoids
+     * `#include <time/clocksource.h>`, which transitively pulls in
+     * <list.h> via <time/timer.h> — see the forward-decl block above.
+     * clocksource_init() is called once below, and the framework
+     * symbols come from kernel/time/clocksource.c, which the aarch64
+     * kernel Makefile whitelist now includes. */
+    clocksource_init();
+    if (clocksource_active) {
+        kputs("[clocksource] active=true\n");
+        kputs("[clocksource] freq=");
+        kputu(clocksource_freq_hz());
+        kputs("\n");
+        kputs("[clocksource] mult=");
+        kputu((uint64_t)clocksource_mult);
+        kputs(" shift=");
+        kputu((uint64_t)clocksource_shift);
+        kputs("\n");
+    }
+#endif
     if (!arch_tick_start()) {
         log_err("[smp] FATAL: BSP timer initialization failed\n");
         for (;;) arch_cpu_halt();

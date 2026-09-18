@@ -4,7 +4,17 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <time/timer.h>      // jiffies
-#include <percpu/percpu.h>     // this_cpu(), percpu_t->tsc_offset
+#if defined(__x86_64__)
+/* x86_64 path: this_cpu()->tsc_offset is used by clocksource_read_ns().
+ * <percpu/percpu.h> transitively pulls in <sched/task.h>, which is heavy
+ * (full scheduler + global init_thread/.rip=idle_resume initializer). On
+ * aarch64 phase 1 we never run the scheduler, so we deliberately skip
+ * the include: the only consumers of clocksource_read_ns() are x86_64
+ * TUs (fs/poll.c, time/tick.c). The init/freq/cycles symbols that
+ * clocksource.c (Timer Task 2.2) uses are all defined below with no
+ * percpu dependency. */
+#include <percpu/percpu.h>
+#endif
 #include <arch/cpu.h>   // arch_cycle_counter()
 
 // mult/shift 由 clocksource_init() 计算并导出（static inline read_ns 引用）。
@@ -21,6 +31,7 @@ uint64_t clocksource_freq_hz(void);
 // 原始 cycle 计数（调试/校准用），不加 tsc_offset。
 uint64_t clocksource_cycles(void);
 
+#if defined(__x86_64__)
 // 单调纳秒。active 时 = (cycle+tsc_offset)*mult>>shift；否则退 jiffies*10ms。
 // 仅在 GS base 装之后调用（boot 期校准用 arch_cycle_counter()）。
 static inline uint64_t clocksource_read_ns(void)
@@ -30,5 +41,6 @@ static inline uint64_t clocksource_read_ns(void)
     uint64_t c = arch_cycle_counter() + (uint64_t)this_cpu()->tsc_offset;
     return (uint64_t)(((__uint128_t)c * clocksource_mult) >> clocksource_shift);
 }
+#endif
 
 #endif

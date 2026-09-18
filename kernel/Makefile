@@ -40,7 +40,8 @@ KERNEL_HEADERS := include
 # incrementally as the port grows (e.g. arch-neutral helpers), gated by
 # "what the linker complains about".
 ifeq ($(ARCH),aarch64)
-KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c
+KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c time/clocksource.c \
+                   arch/aarch64/udivti3_stub.c
 else
 KERNEL_C_SOURCES := \
     $(wildcard core/*.c) \
@@ -101,6 +102,20 @@ ALL_CFLAGS += -isystem $(SYSROOT_GENERATION_DIR)/usr/include
 # source-directory renames (see the 2026-09-12 kernel/ layout restructure) do not change
 # the compiled image byte-for-byte.
 ALL_CFLAGS += -ffile-prefix-map=$(CURDIR)=.
+endif
+ifeq ($(ARCH),aarch64)
+# The aarch64 phase-1 profile does NOT build a libc sysroot (no
+# userspace at all in phase 1), but the arch-neutral
+# kernel/time/clocksource.c (Timer Task 2.2 GREEN) pulls in
+# <list.h>, <sys/types.h>, <rbtree.h> transitively via
+# <time/clocksource.h> -> <time/timer.h> and <percpu/percpu.h>
+# -> <sched/task.h>. These are libc headers used by kernel TUs
+# because the x86_64 kernel traditionally gets them via the libc
+# sysroot's -isystem path (see the x86_64 block above). On aarch64
+# we instead expose the libc include dir directly via -I so the
+# include chain succeeds. This is x86_64-inert (guarded by ARCH)
+# and does NOT introduce a kernel-side copy of these headers.
+ALL_CFLAGS += -I$(CURDIR)/../libc/include
 endif
 ALL_ASMFLAGS := $(ASFLAGS) $(ARCH_ASMFLAGS)
 ifeq ($(ARCH),x86_64)
