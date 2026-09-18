@@ -339,6 +339,19 @@ void aarch64_main(const struct boot_context *handoff)
      * (existing). aarch64 has no irq.c — explicit call needed. */
     extern void softirq_init(void);
     softirq_init();
+
+    /* Phase 2 #3: install real per-CPU data for BSP. head.S:323
+     * already set TPIDR_EL1 = &percpu_data[0]; percpu_install_gs
+     * re-confirms (idempotent) and percpu_init populates
+     * self/cpu_id/arch_processor_id/online/rq_lock. Inline asm
+     * 'mrs xN, mpidr_el1' (no helper function — does not exist
+     * in codebase, R3 NIT-2). */
+    extern void percpu_install_gs(uint32_t cpu);
+    extern void percpu_init(uint32_t cpu, uint32_t apic_id);
+    uint32_t mpidr_bsp;
+    __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr_bsp));
+    percpu_install_gs(0);
+    percpu_init(0, mpidr_bsp);
 #endif
 
     if (!arch_tick_start()) {

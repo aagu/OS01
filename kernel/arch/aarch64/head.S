@@ -310,17 +310,18 @@ _start:
  * setup_bsp_stack_and_tpidr
  * ────────────────────────────────────────────────────────────────── */
 setup_bsp_stack_and_tpidr:
-    ldr     x0, =aarch64_boot_percpu
-    str     x0, [x0, #AARCH64_BOOT_SELF_OFFSET]  /* self = self  */
-    mov     x1, #0
-    str     w1, [x0, #AARCH64_BOOT_CPU_ID_OFFSET] /* cpu_id = 0 */
+    /* Phase 2 #3: TPIDR_EL1 = &percpu_data[0] (real percpu_t with
+     * need_resched at offset 8), not &aarch64_boot_percpu[0]
+     * (48-byte struct without need_resched). percpu_init() in
+     * main.c later populates self/cpu_id/arch_processor_id/online
+     * — no need to write boot-percpu stubs here. */
+    ldr     x0, =percpu_data
+    msr     tpidr_el1, x0
 
     ldr     x1, =aarch64_boot_stacks
     mov     x2, #AARCH64_BOOT_STACK_SIZE
     add     x1, x1, x2
     mov     sp, x1
-
-    msr     tpidr_el1, x0
     ret
 
 
@@ -647,7 +648,15 @@ secondary_start:
     cmp     x7, x8                          /* cannot select another CPU's stack */
     b.ne    secondary_panic
     mov     sp, x7
-    msr     tpidr_el1, x6                   /* same identity VA used by BSP/C */
+    /* Phase 2 #3: TPIDR_EL1 = &percpu_data[cpu_id]. x19 is cpu_id
+     * (verified above via [x6, #AARCH64_BOOT_CPU_ID_OFFSET]).
+     * PERCPU_DATA_SIZE is a numeric literal in
+     * kernel/include/percpu/percpu.h (assembly context cannot use
+     * sizeof(percpu_t)). 144 (0x90) fits a 16-bit mov immediate. */
+    ldr     x7, =percpu_data
+    mov     x8, #PERCPU_DATA_SIZE
+    madd    x7, x19, x8, x7
+    msr     tpidr_el1, x7
 
     ldr     x0, =boot_vectors
     msr     vbar_el1, x0
