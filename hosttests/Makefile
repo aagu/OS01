@@ -82,9 +82,10 @@ TEST_BINS := \
     $(TEST_BLD)/test_lwip_rand.elf \
     $(TEST_BLD)/test_gic_driver.elf \
     $(TEST_BLD)/test_gic_marker_lines.elf \
-    $(TEST_BLD)/test_gic_probe.elf
+    $(TEST_BLD)/test_gic_probe.elf \
+    $(TEST_BLD)/test_clocksource.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource
 
 all: $(TEST_BINS)
 
@@ -490,6 +491,51 @@ $(TEST_BLD)/test_gic_probe.elf: $(TEST_BLD)/test_gic_probe.o $(TEST_BLD)/gic_dri
 	$(HOST_CC) -o $@ $^
 
 test_gic_probe: $(TEST_BLD)/test_gic_probe.elf
+	$<
+
+# Clocksource unit tests (aarch64 Timer integration Task 1.1 RED).
+# Compiles REAL kernel/time/clocksource.c against the host runtime
+# (clocksource_test_runtime.h short-circuits the aarch64 inline asm in
+# <arch/cpu.h>, <arch/spinlock.h>, <arch/percpu.h>, <percpu/percpu.h>,
+# <sched/task.h>). Link resolves arch_cycle_freq/arch_cycle_counter
+# against the mock symbols in clocksource_test_stubs.c.
+#
+# NOTE: this rule does NOT use $(FRAMEWORK_INC) — that would -include
+# test_platform.h and conflict with our percpu_t / this_cpu() definitions.
+# Instead we -include clocksource_test_runtime.h directly, which owns the
+# full host stub surface (including the pieces test_platform.h normally
+# provides, copied here).
+CLOCKSOURCE_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+CLOCKSOURCE_PREINCLUDE := -include $(TEST_MOCK)/clocksource_test_runtime.h
+
+$(TEST_BLD)/clocksource_production.o: $(TESTS_DIR)/kernel/time/clocksource.c \
+		$(TESTS_DIR)/kernel/include/time/clocksource.h \
+		$(TESTS_DIR)/kernel/include/time/clocksource_internal.h \
+		$(TEST_MOCK)/clocksource_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(CLOCKSOURCE_HOST_CFLAGS) \
+		$(CLOCKSOURCE_PREINCLUDE) -c $< -o $@
+
+$(TEST_BLD)/clocksource_test_stubs.o: $(TEST_MOCK)/clocksource_test_stubs.c \
+		$(TEST_MOCK)/clocksource_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(CLOCKSOURCE_HOST_CFLAGS) \
+		$(CLOCKSOURCE_PREINCLUDE) -c $< -o $@
+
+$(TEST_BLD)/test_clocksource.o: $(TEST_CASES)/test_clocksource.c \
+		$(TESTS_DIR)/kernel/include/time/clocksource.h \
+		$(TESTS_DIR)/kernel/include/time/clocksource_internal.h \
+		$(TEST_MOCK)/clocksource_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(CLOCKSOURCE_HOST_CFLAGS) \
+		$(CLOCKSOURCE_PREINCLUDE) -c $< -o $@
+
+$(TEST_BLD)/test_clocksource.elf: $(TEST_BLD)/test_clocksource.o \
+		$(TEST_BLD)/clocksource_production.o \
+		$(TEST_BLD)/clocksource_test_stubs.o
+	$(HOST_CC) -o $@ $^
+
+test_clocksource: $(TEST_BLD)/test_clocksource.elf
 	$<
 
 clean:

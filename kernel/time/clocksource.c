@@ -1,4 +1,5 @@
 #include <time/clocksource.h>
+#include <time/clocksource_internal.h>
 
 bool     clocksource_active = false;
 uint32_t clocksource_mult   = 0;
@@ -7,7 +8,10 @@ static uint64_t clocksource_freq = 0;
 
 // 找最大 shift 使 mult = (1e9 << shift)/freq 落在 [1, 2^32)，尽量接近 2^31
 // 以最大化精度。freq 在 1MHz~10GHz 范围时循环很快（s≈22..34）。
-static void compute_mult_shift(uint64_t freq_hz, uint32_t *mult, uint32_t *shift)
+// 注意：非 static，供 hosttests/cases/test_clocksource.c 直接断言
+// mult/shift 算法在已知 freq 下的输出（aarch64 Timer Task 1.1 RED）。
+void clocksource_compute_mult_shift(uint64_t freq_hz,
+                                    uint32_t *mult, uint32_t *shift)
 {
     uint32_t s = 1;
     uint64_t m = 0;
@@ -35,7 +39,8 @@ void clocksource_init(void)
         clocksource_active = false;
         return;
     }
-    compute_mult_shift(clocksource_freq, &clocksource_mult, &clocksource_shift);
+    clocksource_compute_mult_shift(clocksource_freq,
+                                   &clocksource_mult, &clocksource_shift);
     clocksource_active = true;
 }
 
