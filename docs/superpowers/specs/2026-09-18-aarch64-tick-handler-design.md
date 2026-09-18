@@ -29,9 +29,11 @@ The `[tick] N` per-second print stays in `cntp_tick_handler` (R2 keeps it; it's 
 
 ## Design (R2)
 
-### A. `kernel/time/tick.c` — gate the poll-scan block
+### A. `kernel/time/tick.c` — gate the poll-scan block AND `tick_start()`
 
-Open `kernel/time/tick.c`. The current `tick_handler()` body (lines 17-41) becomes:
+Open `kernel/time/tick.c`. The current `tick_handler()` body (lines 17-41) AND `tick_start()` body (lines 41-51) both become gated.
+
+**`tick_handler()`** becomes:
 
 ```c
 void tick_handler(void)
@@ -59,14 +61,36 @@ void tick_handler(void)
 }
 ```
 
+**`tick_start()`** also gets gated (R3.4 NEW finding — Task 3 originally stopped because `tick_start` calls `irq_mask`/`irq_unmask` which are x86-only via `kernel/intr/irq.c` not in aarch64 whitelist):
+
+```c
+void tick_start(void)
+{
+#if defined(__x86_64__)
+    // x86_64-only PIT/LAPIC handoff ceremony. aarch64 phase 1 has
+    // no PIT, no LAPIC; kernel/arch/aarch64/main.c:334 calls
+    // arch_tick_start() directly without going through tick_start().
+    // tick_start() is dead code on aarch64.
+    irq_mask(0);
+    if (arch_tick_start()) {
+        // LAPIC 接管成功，PIT 保持掩蔽。
+    } else {
+        // LAPIC 未校准/失败：回退 PIT。
+        irq_unmask(0);
+    }
+#endif
+}
+```
+
 Result on aarch64:
 - `jiffies++` ✓
 - poll scan SKIPPED (gated)
 - `this_cpu()->need_resched = 1` → writes to `.boot.bss` slack (Phase 2 #3 per-CPU install will fix)
 - `this_cpu()->watchdog_counter++` → same (latent)
 - timer_list_head scan → if `timer_init()` ran via SUBSYS dispatch, `timer_list_head.list.next` is a sentinel (per `init_timer(... -1UL)`). `list_next` returns the sentinel, `container_of(sentinel, timer_t, list)->expire_jiffies` is `UINT64_MAX` (because `init_timer` sets `expire_jiffies = -1UL`). Comparison `UINT64_MAX <= jiffies` is false (jiffies is small). Skip softirq set. Latent OK.
+- `tick_start()` body SKIPPED (gated). `tick_start` symbol still resolves (empty function on aarch64, can be called from anywhere that links against it; currently nothing on aarch64 calls it, dead code).
 
-Result on x86_64: byte-identical (the `#if` block is identical to the current code).
+Result on x86_64: byte-identical (the `#if` blocks are identical to the current code).
 
 ### B. `kernel/arch/aarch64/time.c` — keep `[tick] N` print in `cntp_tick_handler`
 
