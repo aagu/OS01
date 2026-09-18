@@ -18,4 +18,12 @@
 #define AARCH64_BOOT_GO_TEST          1
 #define AARCH64_BOOT_GO_IDLE          2
 
+/* Phase 2 #3: assembly-safe sizeof(percpu_t). Mirrors the value in
+ * kernel/include/percpu/percpu.h (the C header is not assembly-safe
+ * because it pulls in C function prototypes and struct types).
+ * Keep both copies in sync. */
+#ifndef PERCPU_DATA_SIZE
+#define PERCPU_DATA_SIZE  144
+#endif
+
 #endif

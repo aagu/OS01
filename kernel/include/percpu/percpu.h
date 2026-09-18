@@ -53,6 +53,15 @@ typedef struct percpu {
 // Number of CPUs supported (from arch/cpu.h via task.h)
 extern percpu_t percpu_data[NR_CPUS];
 
+/* Phase 2 #3: numeric literal sizeof percpu_t. Required for
+ * head.S:649 assembly use (cannot reference sizeof() from asm
+ * context). Verified by `nm | grep percpu_data` (size =
+ * NR_CPUS × PERCPU_DATA_SIZE = 8 × 144 = 1152 bytes on this
+ * build).
+ *
+ * R3 NIT-1: must be numeric literal for asm use. */
+#define PERCPU_DATA_SIZE  144
+
 // Number of CPUs actually discovered from MADT (≤ NR_CPUS).
 // Set by main.c after percpu_init loop.  All runtime loops
 // should iterate over num_cpus, not NR_CPUS.

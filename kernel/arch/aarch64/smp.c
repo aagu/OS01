@@ -207,6 +207,19 @@ void secondary_idle(uint32_t cpu_id)
     /* Assembly validated our slot/MPIDR, SP, TPIDR and vectors. All
      * accesses below retain the slot's identity VA. IRQs stay masked. */
     gic_cpu_init();
+    /* Phase 2 #3: install real per-CPU data for AP. head.S:649
+     * already set TPIDR_EL1 = &percpu_data[cpu_id]; percpu_install_gs
+     * re-confirms (idempotent) and percpu_init populates
+     * self/cpu_id/arch_processor_id/online/rq_lock. Inline asm
+     * 'mrs xN, mpidr_el1' (no helper function — does not exist
+     * in codebase, R3 NIT-2). */
+    extern void percpu_install_gs(uint32_t cpu);
+    extern void percpu_init(uint32_t cpu, uint32_t apic_id);
+    uint32_t mpidr_ap;
+    __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr_ap));
+    percpu_install_gs(cpu_id);
+    percpu_init(cpu_id, mpidr_ap);
+    /* Commit 2 removes the CNTP mask below. */
     cntp_ctl_el0_write(cntp_ctl_el0_read() & ~UINT64_C(1));
     /* Test-only loss of ACK: the AP still reaches C initialization and
      * observes the persistent idle command after the BSP times out. */
