@@ -18,6 +18,7 @@
 #include <fs/elf.h>
 #include <random/random.h>
 #include <uapi/auxv.h>
+#include <arch/auxv.h>      /* arch_auxv_platform / arch_auxv_payload_size */
 
 #include <string.h>
 #include <stdlib.h>
@@ -1164,24 +1165,28 @@ static void setup_user_stack(uint8_t *kstack, char *const argv[], char *const en
 
     /* R9 BLOCKER 修正: R8 公式漏算 metadata (argv/envp 总 slot)。
      * 用 codex 提供的真 fixed + meta 公式:
-     *   fixed = 16 (random aligned push) + sizeof(platform_str) (8) + 3*16 (auxv pairs) = 72
+     *   fixed = 16 (random aligned push) + platform_size + 3*16 (auxv pairs)
      *   meta  = (s_argc + s_envc + 3) * 8
      *           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ argc(1) + argv NULL(1) + envp NULL(1) = +3 slots
      *   pad   = (16 - (fixed + meta) & 15) & 15
      * 总压入 (fixed + pad) 必为 16 倍数; ASSERT((rsp & 0xF)==0) 自动成立。 */
-    const char platform_str[] = "x86_64";    /* 8 bytes incl NUL */
+    /* AT_PLATFORM payload sourced from arch-neutral facade so
+     * x86_64 ("x86_64") and aarch64 ("aarch64") share this builder.
+     * (issue AAGU-2 §3 — no #ifdef __x86_64__ in setup_user_stack.) */
+    const char *platform_str   = arch_auxv_platform();
+    const size_t platform_size = arch_auxv_payload_size();
     /* AT_RANDOM payload：16B 内核 CSPRNG，16 字节对齐不跨字
      * （spec 2026-09-17 §6.3）。 */
     rsp = (rsp - 16) & ~15ULL;
     get_random_bytes(KSTACK(rsp), 16);
     uint64_t at_random_addr = rsp;
-    /* AT_PLATFORM payload：8 字节（"x86_64" + NUL） */
-    rsp -= sizeof(platform_str);
-    memcpy(KSTACK(rsp), platform_str, sizeof(platform_str));
+    /* AT_PLATFORM payload（arch-neutral, NUL-terminated by facade） */
+    rsp -= platform_size;
+    memcpy(KSTACK(rsp), platform_str, platform_size);
     uint64_t at_platform_addr = rsp;
     /* R9 BLOCKER 修正: 真 fixed + meta 公式(替换 R8 的 total_descending 简化版) */
     const size_t auxv_pair_count = 3;        /* AT_PLATFORM, AT_RANDOM, AT_NULL */
-    const size_t fixed = 16 + sizeof(platform_str) + auxv_pair_count * 16;
+    const size_t fixed = 16 + platform_size + auxv_pair_count * 16;
     const size_t meta  = (s_argc + s_envc + 3) * 8;
     const size_t pad   = (16 - ((fixed + meta) & 15)) & 15;
     if (pad > 0) {
