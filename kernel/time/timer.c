@@ -121,7 +121,15 @@ void destroy_timer(timer_t *timer)
         spin_unlock_irqrestore(&timer_lock, flags);
         if (!running)
             break;
+        /* x86_64 `pause` instruction: power-saving + inter-thread
+         * politeness hint in spin loops. aarch64 maps to `yield`
+         * (a v8.0-A hint; same semantic family — give up the
+         * current execution slice in a spin). */
+#if defined(__x86_64__)
         __asm__ volatile("pause");
+#else
+        __asm__ volatile("yield");
+#endif
     }
     free(timer);
 }
