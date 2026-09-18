@@ -103,6 +103,21 @@ SECTIONS
         _data_end = .;
     } :data
 
+    /* KEEP-wrapped: drivers register a function pointer here via
+     * SUBSYS_INITCALL(); arch_register_subsys() iterates this range
+     * to call each one. Placement AFTER .data (not before) to byte-mirror
+     * kernel/arch/x86_64/linker.ld — same relative position keeps
+     * the kernel-image walk in pmm.c consistent across architectures.
+     * The AT(ADDR(...) - _kernel_page_offset) mirrors the surrounding
+     * .data section's high-half direct-map LMA mapping so the symbols
+     * are addressable from the kernel image's high-half VA. */
+    .subsys_init : AT(ADDR(.subsys_init) - _kernel_page_offset)
+    {
+        PROVIDE(__subsys_init_start = .);
+        KEEP(*(.subsys_init))
+        PROVIDE(__subsys_init_end = .);
+    } :data
+
     . = ALIGN(0x1000);
     /* The loader reserves/zeros physical LOAD addresses. Keep page-aligned
      * high-half BSS at the physical address our direct mapping accesses. */
