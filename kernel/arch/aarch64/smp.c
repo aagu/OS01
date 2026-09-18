@@ -219,8 +219,9 @@ void secondary_idle(uint32_t cpu_id)
     __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr_ap));
     percpu_install_gs(cpu_id);
     percpu_init(cpu_id, mpidr_ap);
-    /* Commit 2 removes the CNTP mask below. */
-    cntp_ctl_el0_write(cntp_ctl_el0_read() & ~UINT64_C(1));
+    /* Phase 2 #3 Commit 2: AP CNTP enabled. APs receive their own
+     * CNTP PPI tick on each timer cycle. tick_handler() runs per-CPU
+     * via this_cpu() (now pointing at percpu_data[cpu] from Commit 1). */
     /* Test-only loss of ACK: the AP still reaches C initialization and
      * observes the persistent idle command after the BSP times out. */
     if (cpu_id != AARCH64_SMP_TEST_NO_ACK_CPU)
@@ -233,10 +234,6 @@ void secondary_idle(uint32_t cpu_id)
     if (command == AARCH64_BOOT_GO_TEST)
         smp_bench_iter(cpu_id, 1000000);
 
-    /* Includes a late AP: go=2 persists even if the BSP already resumed
-     * ticks. APs keep their CNTP disabled; the only enabled banked lines
-     * are SGI 0/1/2 (IPI + probe) and — for the BSP — the CNTP PPI. */
-    cntp_ctl_el0_write(cntp_ctl_el0_read() & ~UINT64_C(1));
 #if OS01_SELFTEST
     /* R11 + Task 2.2 simplification: only the selftest build unmask DAIF.I
      * on APs so they can take SGIs through el1_irq (GIC Phase 1, spec §7.5).
