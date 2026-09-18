@@ -41,7 +41,8 @@ KERNEL_HEADERS := include
 # "what the linker complains about".
 ifeq ($(ARCH),aarch64)
 KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c time/clocksource.c \
-                   arch/aarch64/udivti3_stub.c arch/aarch64/subsys.c
+                   arch/aarch64/udivti3_stub.c arch/aarch64/subsys.c \
+                   arch/aarch64/subsys_stub.c
 else
 KERNEL_C_SOURCES := \
     $(wildcard core/*.c) \

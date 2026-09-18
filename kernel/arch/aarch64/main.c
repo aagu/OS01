@@ -10,6 +10,10 @@
 #include <arch/aarch64/page_table.h>
 #include <arch/aarch64/ram.h>
 #include <arch/aarch64/smp.h>
+#include <subsys/subsys.h>   /* SUBSYS_PHASE_4 macro + subsys_init_phase() decl
+                              * for SUBSYS_INITCALL Task 2 R3-1 register+dispatch
+                              * pair. Lightweight header — only <stdint.h>
+                              * transitively; does NOT pull in <arch/subsys.h>. */
 
 void pl011_init(void);
 void aarch64_extend_direct_map(void);
@@ -301,6 +305,32 @@ void aarch64_main(const struct boot_context *handoff)
         kputs("\n");
     }
 #endif
+
+#if defined(__aarch64__)
+    /* SUBSYS_INITCALL Task 2 — register+dispatch pair (R3-1 critical).
+     * Mirror of x86_64 kernel/core/main.c:193-194. Without the second
+     * call, no SUBSYS_INITCALL-registered initcall ever runs.
+     *
+     * - arch_register_subsys() iterates the .subsys_init linker range
+     *   and calls each queued _register wrapper, which populates
+     *   subsys_table[] via register_subsys().
+     * - subsys_init_phase(SUBSYS_PHASE_4) walks subsys_table[] and
+     *   invokes every registered init wrapper for phase 4 — once
+     *   Task 3's gate flip on clocksource.c lands, this is the path
+     *   that actually calls clocksource_init(). Until then, the
+     *   Option B fallback above already ran it (double-init is
+     *   benign on clocksource today, but Task 4 removes the
+     *   explicit call once the framework becomes the single source).
+     *
+     * arch_register_subsys() is declared via <arch/subsys.h>... NOT
+     * pulled in here (R3-3 NIT: avoid <arch/subsys.h> transitively),
+     * so we forward-declare it locally. subsys_init_phase() and the
+     * SUBSYS_PHASE_4 macro come from <subsys/subsys.h> (added above). */
+    extern void arch_register_subsys(void);
+    arch_register_subsys();
+    subsys_init_phase(SUBSYS_PHASE_4);
+#endif
+
     if (!arch_tick_start()) {
         log_err("[smp] FATAL: BSP timer initialization failed\n");
         for (;;) arch_cpu_halt();
