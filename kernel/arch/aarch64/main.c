@@ -34,7 +34,6 @@ extern bool     clocksource_active;
 extern uint64_t clocksource_freq_hz(void);
 extern uint32_t clocksource_mult;
 extern uint32_t clocksource_shift;
-extern void     clocksource_init(void);
 #if OS01_SELFTEST
 void gic_clobber_probe(void);
 void gic_unexpected_probe(void);
@@ -281,6 +280,28 @@ void aarch64_main(const struct boot_context *handoff)
 
     /* BSP-only timer and IRQs begin after AP startup/testing has settled. */
 #if defined(__aarch64__)
+    /* SUBSYS_INITCALL Task 2 — register+dispatch pair (R3-1 critical).
+     * Mirror of x86_64 kernel/core/main.c:193-194. Without the second
+     * call, no SUBSYS_INITCALL-registered initcall ever runs.
+     *
+     * - arch_register_subsys() iterates the .subsys_init linker range
+     *   and calls each queued _register wrapper, which populates
+     *   subsys_table[] via register_subsys().
+     * - subsys_init_phase(SUBSYS_PHASE_4) walks subsys_table[] and
+     *   invokes every registered init wrapper for phase 4 — after
+     *   Task 3's gate flip on clocksource.c landed, this is the path
+     *   that actually calls clocksource_init(). Group 3b (this commit)
+     *   removed the previous explicit Option B fallback so the
+     *   dispatch path is the single source of invocation.
+     *
+     * arch_register_subsys() is declared via <arch/subsys.h>... NOT
+     * pulled in here (R3-3 NIT: avoid <arch/subsys.h> transitively),
+     * so we forward-declare it locally. subsys_init_phase() and the
+     * SUBSYS_PHASE_4 macro come from <subsys/subsys.h> (added above). */
+    extern void arch_register_subsys(void);
+    arch_register_subsys();
+    subsys_init_phase(SUBSYS_PHASE_4);
+
     /* aarch64 Generic Timer Task 2.2 GREEN — emit the three
      * [clocksource] markers required by
      * qemutests/aarch64_uefi_smp.py --expect-clk (clk_evidence_ok
@@ -289,10 +310,14 @@ void aarch64_main(const struct boot_context *handoff)
      * clocksource_init()) so the kernel TU here avoids
      * `#include <time/clocksource.h>`, which transitively pulls in
      * <list.h> via <time/timer.h> — see the forward-decl block above.
-     * clocksource_init() is called once below, and the framework
-     * symbols come from kernel/time/clocksource.c, which the aarch64
-     * kernel Makefile whitelist now includes. */
-    clocksource_init();
+     *
+     * The block must come AFTER `subsys_init_phase(SUBSYS_PHASE_4)`
+     * above and BEFORE `arch_tick_start()` below so:
+     *   1. `clocksource_init()` has already been dispatched, so
+     *      `clocksource_active == true` and the markers print.
+     *   2. The markers appear in the QEMU stdout.log BEFORE the
+     *      `[cntp]` marker emitted by arch_tick_start(), satisfying
+     *      the harness evidence gate. */
     if (clocksource_active) {
         kputs("[clocksource] active=true\n");
         kputs("[clocksource] freq=");
@@ -304,31 +329,6 @@ void aarch64_main(const struct boot_context *handoff)
         kputu((uint64_t)clocksource_shift);
         kputs("\n");
     }
-#endif
-
-#if defined(__aarch64__)
-    /* SUBSYS_INITCALL Task 2 — register+dispatch pair (R3-1 critical).
-     * Mirror of x86_64 kernel/core/main.c:193-194. Without the second
-     * call, no SUBSYS_INITCALL-registered initcall ever runs.
-     *
-     * - arch_register_subsys() iterates the .subsys_init linker range
-     *   and calls each queued _register wrapper, which populates
-     *   subsys_table[] via register_subsys().
-     * - subsys_init_phase(SUBSYS_PHASE_4) walks subsys_table[] and
-     *   invokes every registered init wrapper for phase 4 — once
-     *   Task 3's gate flip on clocksource.c lands, this is the path
-     *   that actually calls clocksource_init(). Until then, the
-     *   Option B fallback above already ran it (double-init is
-     *   benign on clocksource today, but Task 4 removes the
-     *   explicit call once the framework becomes the single source).
-     *
-     * arch_register_subsys() is declared via <arch/subsys.h>... NOT
-     * pulled in here (R3-3 NIT: avoid <arch/subsys.h> transitively),
-     * so we forward-declare it locally. subsys_init_phase() and the
-     * SUBSYS_PHASE_4 macro come from <subsys/subsys.h> (added above). */
-    extern void arch_register_subsys(void);
-    arch_register_subsys();
-    subsys_init_phase(SUBSYS_PHASE_4);
 #endif
 
     if (!arch_tick_start()) {
