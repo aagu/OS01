@@ -239,6 +239,47 @@ static void suite_freq_zero_fallback(void)
     assert_eq(true, (int)clocksource_active);
 }
 
+/* ──────────────────────────────────────────────────────────────
+ * Suite E — aarch64 clocksource integration contract
+ *
+ * Locks the framework values main.c's explicit clocksource_init() call
+ * (Timer Task 1.2) will produce on aarch64 once the kernel is
+ * built.  QEMU virt default CNTP freq is 62.5 MHz; the math is the
+ * same as Suite A's 62.5 MHz row, but this is a separate contract on
+ * the post-init globals (active / freq_hz / mult / shift) and on
+ * read_ns roundtripping.
+ *
+ * RED→GREEN plan: these asserts are the GREEN hook; they were not in
+ * the original commit b6ac05f.
+ * ────────────────────────────────────────────────────────────── */
+static void suite_aarch64_integration(void)
+{
+    TEST_SUITE("aarch64 clocksource integration contract");
+
+    host_mock_cycle_freq = 62500000ULL;   /* QEMU virt CNTP freq */
+    clocksource_init();
+    assert_eq(true, (int)clocksource_active);
+    assert_eq((int)62500000ULL, (int)clocksource_freq_hz());
+    assert_eq((int)0x80000000u, (int)clocksource_mult);    /* 2^31 */
+    assert_eq((int)27u, (int)clocksource_shift);
+
+    /* read_ns at cycle=62500000 → exactly 1e9 ns (1 second). */
+    host_mock_cycle_counter = 62500000ULL;
+    assert_eq((int)1000000000ULL, (int)clocksource_read_ns());
+
+    /* read_ns at cycle=625000 → exactly 10 000 000 ns (10 ms = 1 jiffy @ 100 Hz).
+     * Math: 625000 * 2^31 >> 27 = 625000 × 16 = 10 000 000 ns. */
+    host_mock_cycle_counter = 625000ULL;
+    assert_eq((int)10000000ULL, (int)clocksource_read_ns());
+
+    /* Monotonicity across two reads. */
+    host_mock_cycle_counter = 1ULL;
+    uint64_t ns_a = clocksource_read_ns();
+    host_mock_cycle_counter = 1000ULL;
+    uint64_t ns_b = clocksource_read_ns();
+    assert_true(ns_b > ns_a);
+}
+
 /* ────────────────────────────────────────────────────────────── */
 int main(void)
 {
@@ -247,6 +288,7 @@ int main(void)
     suite_clocksource_read_ns();
     suite_clocksource_read_ns_inactive();
     suite_freq_zero_fallback();
+    suite_aarch64_integration();
 
     printf("\n%s: %d total, %d passed, %d failed\n", "test_clocksource",
              __test_stats.total, __test_stats.passed, __test_stats.failed);
