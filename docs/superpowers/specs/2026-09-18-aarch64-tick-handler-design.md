@@ -248,6 +248,58 @@ Gate it with `#if defined(__x86_64__)`:
 
 (`yield` is the canonical aarch64 replacement for x86 `pause` in spin-wait contexts; both are v8-A-defined low-latency hints that improve SMT throughput without serializing the pipeline.)
 
+### E-ter. `kernel/arch/aarch64/libc_stub.c` — provide `calloc`/`free` libc shims (R3.3 NEW)
+
+**R3.3 NEW finding** (Task 1.5 retry STOPPED): `kernel/time/timer.c` calls libc functions:
+
+- **line 25** `create_timer()`: `timer_t * timer = (timer_t *)calloc(1, sizeof(timer_t));`
+- **line 134** `destroy_timer()`: `free(timer);`
+
+aarch64 phase 2 has no userspace libc (the aarch64 kernel is freestanding). x86_64 pulls these symbols from the libc sysroot (`-isystem $(SYSROOT_GENERATION_DIR)/usr/include` per `kernel/Makefile:99`). aarch64 does NOT use the libc sysroot (per `kernel/Makefile:93-99`'s `ifeq ($(ARCH),x86_64)` guard).
+
+Provide minimal shims in NEW `kernel/arch/aarch64/libc_stub.c` (mirrors `subsys_stub.c` pattern):
+
+```c
+/* kernel/arch/aarch64/libc_stub.c — libc alloc/free shims for aarch64.
+ *
+ * kernel/time/timer.c uses calloc/free (lines 25, 134) for timer
+ * object allocation. x86_64 pulls these from the libc sysroot
+ * (kernel/Makefile:99); aarch64 phase 2 deliberately does NOT
+ * use the libc sysroot (kernel/Makefile:93-99 guards -isystem
+ * under ifeq x86_64). This stub provides minimal in-kernel
+ * replacements that delegate to the slab allocator.
+ *
+ * Mirrors the arch/aarch64/subsys_stub.c pattern (Phase 2 #1).
+ * Phase 2 follow-up: replace with real libc when one lands.
+ */
+
+#include <stdint.h>
+#include <stddef.h>
+
+void *calloc(size_t nmemb, size_t size)
+{
+    /* overflow check omitted (caller validates nmemb * size before
+     * calling calloc; timer.c callers pass 1, sizeof(timer_t))
+     */
+    size_t total = nmemb * size;
+    void *p = kmalloc(total);  /* slab allocator (arch/aarch64/slab_stub.c) */
+    if (p)
+        memset(p, 0, total);
+    return p;
+}
+
+void free(void *ptr)
+{
+    kfree(ptr);
+}
+```
+
+**Required includes** (verify R3 review): the prototype for `calloc`/`free` is declared in `<stdlib.h>` (libc header) which aarch64 kernel doesn't include directly. Options:
+- (a) Forward-declare in the stub file (cleanest).
+- (b) Define the prototype at top of `libc_stub.c` matching `<stdlib.h>` signatures.
+
+Option (a) recommended: `extern void *kmalloc(size_t); extern void kfree(void *); extern void *memset(void *, int, size_t);` at the top of the stub.
+
 `tick.c` line 41 `set_softirq_status(TIMER_SIRQ)` is **inside** the common-path tail, NOT inside the `#if defined(__x86_64__)` poll-scan block. So `set_softirq_status()` is always called on aarch64 — the §E Site 1 asm gate handles it.
 
 `kernel/intr/softirq.c` was previously only in x86_64 whitelist. Adding it to aarch64 KERNEL_C_SOURCES is now **required** (since `tick.c` calls `set_softirq_status`):
@@ -259,7 +311,8 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c \
                    intr/softirq.c \
                    arch/aarch64/udivti3_stub.c arch/aarch64/subsys.c \
                    arch/aarch64/subsys_stub.c \
-                   arch/aarch64/idle_resume_stub.c
+                   arch/aarch64/idle_resume_stub.c \
+                   arch/aarch64/libc_stub.c
 endif
 ```
 
