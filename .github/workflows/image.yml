@@ -1,0 +1,76 @@
+# OS01 CI image build + push
+#
+# Builds the custom toolchain image (see ci/Dockerfile) and pushes it to
+# ghcr.io on push to master. The ci.yml workflow then references the
+# pushed image via `container.image` so every job runs in an OS01-pinned
+# clang-22 / qemu-11.1.1 environment identical to the homeserver.
+#
+# Manual build (without push, for local testing):
+#   podman build -t os01-ci:dev -f ci/Dockerfile .
+#   podman run --rm -it os01-ci:dev bash
+#
+# First-time setup: this workflow needs `packages: write` permission
+# (already implied by the default GITHUB_TOKEN on ghcr.io for the same
+# repo). No additional secrets required.
+name: image
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    paths: [ci/Dockerfile, .github/workflows/image.yml, .github/workflows/ci.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: build + push os01-ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # BuildKit's cache-from / cache-to features cut the QEMU build
+      # (~5 min on cold cache) to ~30 s on warm cache. GitHub Actions
+      # ships a per-run cache at /tmp/.buildx-cache; we keep it across
+      # runs with the actions/cache action keyed off the Dockerfile hash
+      # so a touched unrelated file doesn't bust the cache.
+      - name: Set up BuildKit cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ hashFiles('ci/Dockerfile') }}
+          restore-keys: ${{ runner.os }}-buildx-
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to ghcr.io
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ci/Dockerfile
+          push: ${{ github.event_name == 'push' }}
+          tags: |
+            ghcr.io/aagu/os01-ci:latest
+            ghcr.io/aagu/os01-ci:${{ github.sha }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+          platforms: linux/amd64
+
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
