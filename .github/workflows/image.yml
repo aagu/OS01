@@ -5,6 +5,12 @@
 # pushed image via `container.image` so every job runs in an OS01-pinned
 # clang-22 / qemu-11.1.1 environment identical to the homeserver.
 #
+# Build on master only — the QEMU from-source build is ~5-8 min cold
+# cache / ~30 s warm, so per-PR rebuilds would add 30s-8min to every
+# ci.yml-touching PR. Push to master is the only place the image
+# actually needs to change (CI tags `:latest` on master push, PRs pin
+# to a specific SHA if they need a one-off).
+#
 # Manual build (without push, for local testing):
 #   podman build -t os01-ci:dev -f ci/Dockerfile .
 #   podman run --rm -it os01-ci:dev bash
@@ -17,8 +23,6 @@ name: image
 on:
   push:
     branches: [master]
-  pull_request:
-    paths: [ci/Dockerfile, .github/workflows/image.yml, .github/workflows/ci.yml]
   workflow_dispatch:
 
 permissions:
