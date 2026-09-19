@@ -32,6 +32,12 @@ enum BOOT_CONTEXT_FLAGS {
     BOOT_CONTEXT_HAS_DTB         = 1u << 2,
     BOOT_CONTEXT_HAS_ACPI        = 1u << 3,
     BOOT_CONTEXT_HAS_BOOT_CPU_ID = 1u << 4,
+    /* Issue AAGU-2 §1 P0-1: UEFI bootloader fetched 32 bytes of
+     * entropy via EFI_RNG_PROTOCOL and stored them in boot_entropy.
+     * The kernel's random_init() reads this before trying RDRAND/
+     * RDSEED, so QEMU dev/test (no RDRAND) and aarch64 (RNDR stub)
+     * have a real entropy source at boot. */
+    BOOT_CONTEXT_HAS_BOOT_ENTROPY = 1u << 5,
 };
 
 // Memory-map format tags. Values are wire-level: each arch's bootloader
@@ -72,6 +78,12 @@ struct boot_context {
     struct BOOT_MEMORY_MAP memory;
     struct BOOT_FIRMWARE firmware;
     uint64_t boot_cpu_id;
+    /* boot_entropy: 32 bytes from EFI_RNG_PROTOCOL when the
+     * firmware provides it (QEMU + virtio-rng, real hardware with
+     * TPM/RNG). Valid iff flags & BOOT_CONTEXT_HAS_BOOT_ENTROPY.
+     * Sized to fit two ChaCha20 keys — kernel uses it as initial
+     * seed material via generate-then-rekey (issue AAGU-2 §1). */
+    uint8_t boot_entropy[32];
 };
 
 #define BOOT_CONTEXT_MAGIC UINT32_C(0x4f533031)

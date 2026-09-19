@@ -387,17 +387,24 @@ efi_status_t arch_fill_firmware(struct boot_context *ctx)
 {
     const void *firmware_fdt;
     uint32_t fdt_size = 0;
+    EFI_STATUS status;
 
     firmware_fdt = find_fdt(&fdt_size);
-    if (!firmware_fdt)
-        return EFI_SUCCESS;
-    if ((uint64_t)fdt_size > AARCH64_TRAMPOLINE_BASE - handoff_cursor)
-        return EFI_BUFFER_TOO_SMALL;
-    memcpy((void *)(uintptr_t)handoff_cursor, firmware_fdt, (size_t)fdt_size);
-    ctx->firmware.dtb = handoff_cursor;
-    ctx->flags |= BOOT_CONTEXT_HAS_DTB;
-    handoff_cursor = align_up_8(handoff_cursor + (uint64_t)fdt_size);
-    return EFI_SUCCESS;
+    if (firmware_fdt) {
+        if ((uint64_t)fdt_size > AARCH64_TRAMPOLINE_BASE - handoff_cursor)
+            return EFI_BUFFER_TOO_SMALL;
+        memcpy((void *)(uintptr_t)handoff_cursor, firmware_fdt, (size_t)fdt_size);
+        ctx->firmware.dtb = handoff_cursor;
+        ctx->flags |= BOOT_CONTEXT_HAS_DTB;
+        handoff_cursor = align_up_8(handoff_cursor + (uint64_t)fdt_size);
+    }
+    /* Best-effort: if EFI_RNG_PROTOCOL is present, fetch 32 bytes
+     * of boot entropy for the kernel CSPRNG. Without this, aarch64
+     * (RNDR not yet wired) would land in the cycle-counter ^ jiffies
+     * fallback and random_init() would fail-closed, aborting every
+     * user-space program on its all-zero canary. */
+    status = capture_entropy(ctx);
+    return status;
 }
 
 void arch_memory_buffer(efi_physical_address_t *phys_out,

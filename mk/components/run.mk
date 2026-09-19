@@ -67,6 +67,8 @@ run: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWA
 	  -netdev user,id=net0 -device e1000e,netdev=net0 \
 	  -drive file=$(NORMAL_IMAGE),format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
+	  -object rng-random,filename=/dev/urandom,id=rng0 \
+	  -device virtio-rng-pci,rng=rng0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio -no-reboot
 
 .PHONY: run-kvm
@@ -78,6 +80,8 @@ run-kvm: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FI
 	  -netdev user,id=net0 -device e1000e,netdev=net0 \
 	  -drive file=$(NORMAL_IMAGE),format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
+	  -object rng-random,filename=/dev/urandom,id=rng0 \
+	  -device virtio-rng-pci,rng=rng0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio -no-reboot
 
 .PHONY: run-virtio
@@ -88,6 +92,8 @@ run-virtio: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF
 	  -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
 	  -drive file=$(NORMAL_IMAGE),format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
+	  -object rng-random,filename=/dev/urandom,id=rng0 \
+	  -device virtio-rng-pci,rng=rng0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio
 
 .PHONY: debug
@@ -99,6 +105,8 @@ debug: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRM
 	  -netdev user,id=net0 -device e1000e,netdev=net0 \
 	  -drive file=$(NORMAL_IMAGE),format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
+	  -object rng-random,filename=/dev/urandom,id=rng0 \
+	  -device virtio-rng-pci,rng=rng0 \
 	  -m $(MEMORY) -display $(DISPLAY) -serial stdio
 
 # ── aarch64 UEFI bring-up (uefi capability) ────────────
@@ -442,6 +450,8 @@ test-kernel-selftest: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMW
 	  -drive if=pflash,format=raw,readonly=on,file="$(OVMF_FIRMWARE)" \
 	  -drive file="$(TEST_SELFTEST_IMAGE)",format=raw,if=none,id=disk \
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
+	  -object rng-random,filename=/dev/urandom,id=rng0 \
+	  -device virtio-rng-pci,rng=rng0 \
 	  -m "$(MEMORY)" -display none -serial stdio -no-reboot -no-shutdown >"$$log" 2>&1; \
 	rc=$$?; \
 	set -e; \

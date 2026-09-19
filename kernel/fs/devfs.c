@@ -149,8 +149,15 @@ static int random_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *b
 
 static int random_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 {
-    (void)node; (void)offset; (void)buffer;
-    return (int)size;  // write accepted, data ignored (like Linux)
+    (void)node; (void)offset;
+    if (!buffer || size == 0) return 0;
+    /* Cap to one block so a runaway writer can't block the pool lock
+     * for long; the data still gets folded in (XOR accumulator in
+     * random_add_entropy). Mirrors Linux /dev/random write semantics
+     * (always succeeds, pool absorbs everything). */
+    if (size > RANDOM_MAX_LEN) size = RANDOM_MAX_LEN;
+    random_add_entropy(buffer, (size_t)size);
+    return (int)size;
 }
 
 // ── Dispatch read/write via device index stored in node->fs_data ──
