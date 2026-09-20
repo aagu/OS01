@@ -33,8 +33,7 @@ UEFI_PATCH_DIR       := $(OS01_ROOT)/config/posix-uefi
 # 0001 only — the 0002 runtime overlay is deleted (its two behaviors are the
 # env contract below). 0001 stays a receipt input so any change to the
 # int8-tweak re-keys the profile-private runtime copy.
-UEFI_PATCHES         := $(UEFI_PATCH_DIR)/0001-clang-int8.patch \
-                       $(UEFI_PATCH_DIR)/0002-freestanding-stdint.patch
+UEFI_PATCHES         := $(UEFI_PATCH_DIR)/0001-clang-int8.patch
 # Runtime environment contract (spec: "删除 runtime Makefile overlay"). The
 # root passes these two FINAL values explicitly to the boot wrapper
 # (shell-safe single-quoted, UEFI_RUNTIME_MAKE contains a space); the wrapper
@@ -161,8 +160,7 @@ $(UEFI_RUNTIME_STAMP): FORCE
 	      rm -rf "$(UEFI_RUNTIME_DIR)/.git"; \
 	      [ -f "$(UEFI_RUNTIME_DIR)/uefi/Makefile" ] || { echo "ERROR: posix-uefi copy incomplete"; exit 1; }; \
 	      cp "$(UEFI_RUNTIME_DIR)/uefi/Makefile" "$(UEFI_RUNTIME_DIR)/Makefile"; \
-	      cd "$(UEFI_RUNTIME_DIR)" && patch -p1 -f < "$(UEFI_PATCH_DIR)/0001-clang-int8.patch" && \
-	        patch -p1 -f < "$(UEFI_PATCH_DIR)/0002-freestanding-stdint.patch"; \
+	      cd "$(UEFI_RUNTIME_DIR)" && patch -p1 -f < "$(UEFI_PATCH_DIR)/0001-clang-int8.patch"; \
 	      printf "%s\n" "$$digest" > "$(UEFI_RUNTIME_RECEIPT)"; \
 	      touch "$(UEFI_RUNTIME_STAMP)"; \
 	    fi; \
