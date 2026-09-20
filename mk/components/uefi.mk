@@ -48,7 +48,16 @@ UEFI_PATCHES         := $(UEFI_PATCH_DIR)/0001-clang-int8.patch \
 # values are receipt-digest fixtures: production defaults name the real
 # files that always execute, and the build-contract tests point them at
 # fixture copies to prove digest invalidation.
-UEFI_RUNTIME_CFLAGS ?= -DUEFI_NO_UTF8
+# UEFI_RUNTIME_CFLAGS is prepended to posix-uefi's `CFLAGS +=` so that
+# OS01's freestanding headers are searched BEFORE the host glibc ones.
+# posix-uefi's -I/usr/include picks up glibc stdint.h, which on Ubuntu's
+# multiarch layout needs bits/libc-header-start.h from
+# /usr/include/x86_64-linux-gnu/bits/ — clang for --target=aarch64
+# -pc-win32-coff does not search that multiarch path, so the build
+# dies with "bits/libc-header-start.h file not found".
+# -D__need_wchar_t makes clang's stddef.h define wchar_t (the EFI
+# efibind.h does `typedef wchar_t CHAR16;`).
+UEFI_RUNTIME_CFLAGS ?= -DUEFI_NO_UTF8 -D__need_wchar_t -I$(OS01_ROOT)/libc/include
 UEFI_RUNTIME_MAKE ?= $(MAKE) OUTDIR=
 UEFI_RUNTIME_ADAPTER_INPUT ?= $(OS01_ROOT)/mk/components/uefi.mk
 UEFI_RUNTIME_WRAPPER_INPUT ?= $(OS01_ROOT)/boot/uefi/Makefile
