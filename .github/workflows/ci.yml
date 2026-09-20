@@ -69,8 +69,8 @@ jobs:
       # step becomes a no-op (apt-get install is idempotent).
       - name: Install transitional apt packages
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gnu-efi
+          apt-get update
+          apt-get install -y --no-install-recommends gnu-efi
 
       - name: Verify toolchain
         run: |
@@ -122,8 +122,8 @@ jobs:
       # contains them. Same rationale as the x86-checks step above.
       - name: Install transitional apt packages + aarch64 EFI headers
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gnu-efi
+          apt-get update
+          apt-get install -y --no-install-recommends gnu-efi
           # Ubuntu's gnu-efi package ships only x86_64 + ia32 EFI headers;
           # pull the aarch64 subarch from the upstream source (matches
           # the recipe ci/Dockerfile uses for the published image).
