@@ -206,6 +206,18 @@ void secondary_idle(uint32_t cpu_id)
 {
     /* Assembly validated our slot/MPIDR, SP, TPIDR and vectors. All
      * accesses below retain the slot's identity VA. IRQs stay masked. */
+    /* AAGU-3 Option A: BSP 独占 CNTP tick 所有权.
+     *
+     * timer core (kernel/time/timer.c) 与 softirq (kernel/intr/softirq.c)
+     * 目前没有 per-CPU 拆分, jiffies 与 g_ticks 都是 BSS 全局变量. 让 AP 也开
+     * CNTP 会让多个 CPU 并发跑 tick_handler() / do_timer(), 触发读写 race.
+     *
+     * 契约: BSP 在 aarch64_main 末尾调 arch_tick_start() 启动 BSP 本核的
+     * CNTP; AP 永不启动自己的 CNTP, 一律 wfi idle. AP 这里显式写
+     * CNTP_CTL_EL0 = 0 是防御性的 (reset 默认就是 0; 显式写一遍防止后续
+     * 任何路径意外把它打开). 此项决定落地为本 issue 评审建议的 Option A,
+     * 真正 per-CPU clockevent + per-CPU jiffies 留作后续单独 issue. */
+    cntp_ctl_el0_write(0);
     gic_cpu_init();
     /* Phase 2 #3: install real per-CPU data for AP. head.S:649
      * already set TPIDR_EL1 = &percpu_data[cpu_id]; percpu_install_gs
@@ -219,9 +231,8 @@ void secondary_idle(uint32_t cpu_id)
     __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr_ap));
     percpu_install_gs(cpu_id);
     percpu_init(cpu_id, mpidr_ap);
-    /* Phase 2 #3 Commit 2: AP CNTP enabled. APs receive their own
-     * CNTP PPI tick on each timer cycle. tick_handler() runs per-CPU
-     * via this_cpu() (now pointing at percpu_data[cpu] from Commit 1). */
+    /* AAGU-3: AP 不接收 CNTP tick (见上 Option A 契约). tick_handler()
+     * 仅在 BSP 上跑, 由全局 jiffies 推进. Per-CPU 路径是后续工作. */
     /* Test-only loss of ACK: the AP still reaches C initialization and
      * observes the persistent idle command after the BSP times out. */
     if (cpu_id != AARCH64_SMP_TEST_NO_ACK_CPU)
