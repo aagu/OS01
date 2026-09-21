@@ -604,6 +604,12 @@ image: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(DISK_IMG))
 .PHONY: test-build-contract-x86
 test-build-contract-x86: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),disk.img)
 	$(call require_capability,rootfs)
+	# host-test contract mode asserts $BUILD_DIR/host-test/test_poll_requested.elf
+	# exists; `make disk.img` does NOT produce it (only `make test` does, and the
+	# CI contract job starts with an empty workspace — the x86-checks job's
+	# `make test` doesn't share state). Build the host tests first via the
+	# standard sub-make helper.
+	$(call os01_submake,hosttests,all)
 	sh qemutests/build_contract.sh x86_64-clang legacy-components
 	sh qemutests/build_contract.sh x86_64-clang legacy
 	sh qemutests/build_contract.sh x86_64-clang x86
