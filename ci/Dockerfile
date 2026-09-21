@@ -111,14 +111,36 @@ RUN apt-get update && \
 # e2fsprogs (mkfs.ext2 + debugfs — mkdisk again).
 # device-tree-compiler (dtc — aarch64 SMP harness packs DTBs).
 # ripgrep (rg — build_contract.sh legacy-component scan).
+# gnu-efi (UEFI headers at /usr/include/efi — posix-uefi's
+# uefi/Makefile adds -I/usr/include/efi/{,protocol/,<arch>/}
+# looking for these so x86_64 BOOTX64.EFI builds).
+# libc6-dev (glibc bits headers: /usr/include/stdint.h pulls in
+# bits/libc-header-start.h). The aarch64 UEFI bootloader via
+# posix-uefi's `-I/usr/include` indirectly includes host stdint.h
+# which fails without libc6-dev.
 # python3 + wget were already pulled in above.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         dosfstools mtools e2fsprogs \
         device-tree-compiler \
         ripgrep \
+        gnu-efi \
+        libc6-dev \
     && \
     rm -rf /var/lib/apt/lists/*
+
+# ── aarch64 UEFI headers ─────────────────────────────────────
+# Ubuntu's gnu-efi package only ships x86_64 + ia32 EFI headers;
+# the aarch64 subarch lives in the upstream source tree under
+# inc/aarch64/. Pull the upstream headers and overlay them on top
+# of the apt-installed headers so posix-uefi's -I/usr/include/efi/aarch64
+# finds efibind.h etc. Pinned to the same release tag the homeserver
+# dev uses; bump together with gnu-efi on Ubuntu.
+RUN set -eux; \
+    git clone --depth 1 https://git.code.sf.net/p/gnu-efi/code /tmp/gnu-efi && \
+    mkdir -p /usr/include/efi/aarch64 && \
+    cp -r /tmp/gnu-efi/inc/. /usr/include/efi/ && \
+    rm -rf /tmp/gnu-efi
 
 # ── Verify the toolchain matches the dev box ──────────────────
 # If any of these checks regress, the next CI run will pull the
