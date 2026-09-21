@@ -75,7 +75,7 @@ legacy)
          test -f "$base/staging/kernel-headers/manifest";
          test -f "$base/staging/libc/manifest" ;;
     aarch64) test -f "$base/artifacts/kernel.elf"; test -f "$base/image/aarch64-uefi.img" ;;
-    sysroot) test -f "$base/sysroot/usr/include/kernel/bootinfo.h"; test -f "$base/sysroot/usr/lib/libc.a";
+    sysroot) test -f "$base/sysroot/usr/include/core/bootinfo.h"; test -f "$base/sysroot/usr/lib/libc.a";
              test ! -e "$base/sysroot/usr/include/os01-removed-header.h";
              test -f "$base/sysroot/usr/lib/libk.a";
              test -f "$base/sysroot/usr/lib/libmbedtls.a";
