@@ -136,6 +136,8 @@ IMG=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^image=//p')
 | Doc | What it covers |
 |-----|----------------|
 | [docs/architecture.md](docs/architecture.md) | Boot chain, memory layout, interrupt system, init sequence |
+| [docs/arch.md](docs/arch.md) | Multi-arch weak-default + strong-override overview (facade/override matrix, page-table hierarchy, bootinfo ABI, driver initcall, IRQ hook 3-segment, RTC split, distance to single `kernel_main`) |
+| [docs/arch/cross-boundary-symbols.md](docs/arch/cross-boundary-symbols.md) | **跨边界符号/ABI 边界规范**（AAGU-4）：compiler runtime / UAPI / arch-value / libc API 镜像 4 类规则 + 现状对照表 + 后续 issue 切分 |
 | [docs/smp.md](docs/smp.md) | 8-phase SMP bringup, per-CPU, IPI, TLB shootdown, load balancing, EEVDF rbtree runqueues |
 | [docs/scheduler.md](docs/scheduler.md) | Task system, EEVDF scheduler, context switch, spawn/fork/exec/exit, blocker framework |
 | [docs/scheduler-complexity.md](docs/scheduler-complexity.md) | Scheduler complexity assessment, feature-impact risk map, refactor triggers |
