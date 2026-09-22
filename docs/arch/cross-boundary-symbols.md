@@ -49,14 +49,16 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 ### 2.2 跨用户 ABI（UAPI：auxv 常量、syscall 号、共享结构体）
 
 **规则**：
-- **单一源**：`kernel/include/uapi/<topic>.h`
-- 安装机制：kernel UAPI 头由 build 步骤安装到 libc sysroot（Makefile 步骤，参见 `kernel/Makefile:106` x86_64 sysroot 路径）
+- **唯一定义在 libc**：所有用户态 ABI 头（`AT_*` / `DT_*` / syscall 号 / `struct stat` / `struct winsize` / ioctl codes / 共享结构体）的唯一定义点是 `libc/include/sys/<topic>.h` / `libc/include/sys/ioctl.h` 等。**`kernel/include/uapi/` 下不再保留 `auxv.h` / `stat.h`**（已删；AAGU-4.2 落地）。
+- **依赖方向：kernel → libc 单向**。kernel TUs 可以 `#include <sys/auxv.h>` / `<sys/stat.h>` / `<sys/ioctl.h>`（依赖方向：kernel → libc，**允许**），但 libc 编译期不得读 kernel 任何头（libc ⊥ kernel，**禁止**）。
+- sysroot 里 `<uapi/auxv.h>` / `<uapi/stat.h>` 路径消失（kernel install-headers 不再 stage）；user-program 取 ABI 常量的唯一路径是 `<sys/...>`。
 - libc 头**不再**通过 include-path 优先级伪造 libc ABI
-- 任何 libc 端「我也要一份」的镜像视为违例（无论 ABI 是否一致）
+- 任何 libc 编译期触达 `kernel/include/` 或 `$(STAGING_DIR)/kernel-headers/usr/include` 的 `-isystem` 注入视为违例（libc ⊥ kernel 边界）
 
 **判定标准**（违反 = 满足任一条）：
-- `libc/include/` 下的头包含 `AT_*` 常量 / syscall 号 / 共享结构体定义，且**未通过 sysroot 安装的 uapi 头**取得（典型违例：`libc/include/sys/auxv.h`）
-- `kernel/include/uapi/` 与 `libc/include/` 下同名 ABI 头**常量集不一致**
+- `kernel/include/uapi/{auxv,stat}.h` **重新出现**（禁止：kernel 不再拥有这两份 ABI 头，单源在 libc）
+- `libc/Makefile` 或 `mk/components/sysroot.mk` 在 libc submake 的 CFLAGS 里注入 `-isystem ...kernel-headers...`，让 libc 编译期能读 `kernel/include/uapi/<topic>.h`
+- `libc/include/sys/<topic>.h` 用 `#include <uapi/<topic>.h>` 形式转发（让 libc 编译期绕道 kernel 头）
 - 在 kernel 通用层或 libc 用户态源文件出现 `#ifdef __KERNEL__` / `#ifdef BUILDING_LIBC` 之类的 include-guard 分支来「选」头
 
 ### 2.3 arch value（AT_PLATFORM、HWCAP bits、x86_64-specific auxv entries）
@@ -111,11 +113,11 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 
 | 类别 | 位置 | 现状 | 说明 |
 |---|---|---|---|
-| auxv 常量 | `kernel/include/uapi/auxv.h:11-25`（15 个）+ `libc/include/sys/auxv.h:9-31`（23 个） | ❌ 违例 | **常量集已不一致**：libc 多出 **8 个**（`AT_NOTELF/UID/EUID/GID/EGID/SECURE/HWCAP2/EXECFN`），kernel UAPI 缺失。`kernel/include/uapi/auxv.h` 自身注释明确写「Kernel-side mirror of `libc/include/sys/auxv.h`. Both headers list the same AT_* constants」，但实际已不是同一份。违反 §2.2（常量集不一致）。建议落地：删除 `libc/include/sys/auxv.h`（或改为 `#include <uapi/auxv.h>` 转发），把全部 AT_* 常量集中在 `kernel/include/uapi/auxv.h`，由 build 步骤 install 到 libc sysroot。 |
+| auxv 常量 | `libc/include/sys/auxv.h`（23 个 `AT_*`，唯一定义） | ✅ 修 | AAGU-4.2 落地（最终路径：方案 B，单源在 libc）。kernel 不再持有自己的 `<uapi/auxv.h>`——`kernel/include/uapi/auxv.h` **删除**；kernel TUs（`kernel/sched/task.c:20` 等）改 `#include <sys/auxv.h>`，依赖方向 kernel → libc 单向，符合「kernel 反向可读 libc」约束。libc/sys/auxv.h 持有 23 个 `AT_*`（含 `AT_NOTELF/UID/EUID/GID/EGID/SECURE/HWCAP2/EXECFN`）+ `getauxval` 原型。sysroot 里 `<uapi/auxv.h>` 路径消失（kernel install-headers 不再 stage）；user-program 取常量的唯一路径是 `<sys/auxv.h>`。 |
 | syscall 号 | `kernel/include/uapi/syscall.h`（74 号）+ `libc/include/sys/syscall.h`（用户态通过 `__NR_*` 宏） | 🟡 部分 | kernel 端单一来源；libc 端通过 sysroot 安装（参见 `kernel/Makefile:106` x86_64 sysroot 路径）；不构成镜像违规。但 `__NR_*` 宏列表需定期与 `syscall.h` 同步，靠人工——建议把 syscall 号表生成由 build 步骤完成（参见 AAGU-6 cleanup batch）。 |
 | 共享结构体（`struct boot_context`、`sigaction`、`timespec` 等） | 主要在 `kernel/include/uapi/`；用户态通过 sysroot 包含 | ✅ 修 | 不存在镜像违规。 |
 | 其他 UAPI 头（`futex.h`、`sockaddr.h`、`time.h`） | 全部位于 `kernel/include/uapi/` | ✅ 修 | 未在 `libc/include/` 发现同名镜像。 |
-| `stat.h` 中的 `AT_FDCWD` / `AT_SYMLINK_NOFOLLOW` / `DT_*` 常量 | `kernel/include/uapi/stat.h:102-111`（6 个 `DT_*`）+ `libc/include/sys/stat.h:100-115`（9 个 `DT_*`） | ❌ 违例 | **第二对 UAPI 镜像**，且**常量集已不一致**。<br>实测 diff：<br>kernel 有 `DT_UNKNOWN/REG/DIR/CHR/BLK/LNK`（6 个）<br>libc 有 `DT_UNKNOWN/FIFO/CHR/DIR/BLK/REG/LNK/SOCK/WHT`（9 个）<br>libc 多 `DT_FIFO (1)`、`DT_SOCK (12)`、`DT_WHT (14)` —— 是 POSIX 完整集合。<br>kernel 没追上 = 镜像 + 不一致双重违例 §2.2。<br>`AT_FDCWD=-100` / `AT_SYMLINK_NOFOLLOW=0x100` 两处定义一致，但镜像本身违规。<br>建议落地：合并到 `kernel/include/uapi/stat.h`，补全 9 个 `DT_*`（POSIX 完整集合），libc 转发；install owner = `mk/components/sysroot.mk` 单一 writer（见 cleanup plan Task 2 修正）。 |
+| `stat.h` 中的 `AT_FDCWD` / `AT_SYMLINK_NOFOLLOW` / `DT_*` 常量 + `struct stat` + `struct winsize` + ioctl codes | `libc/include/sys/stat.h`（2 AT_* + 9 DT_* POSIX 完整集合 + `struct stat` + `struct winsize` + `S_IFSOCK` / `S_ISUID/SGID/SVTX` / per-group & per-other 权限位 / `FD_CLOEXEC` / `O_CLOEXEC` / `S_IRWXUGO` 等掩码 / `S_ISFIFO/SOCK` 谓词 / 函数原型 stat/lstat/fstat/fstatat/lseek/fcntl/ioctl/getdents64/access）+ `libc/include/sys/ioctl.h`（11 个 ioctl codes 包括 `TIOCSCTTY` / `FIONREAD` 等） | ✅ 修 | AAGU-4.2 落地（最终路径：方案 B，单源在 libc）。kernel 不再持有自己的 `<uapi/stat.h>`——`kernel/include/uapi/stat.h` **删除**；kernel TUs（`kernel/fs/file.c:14` / `kernel/tty/tty.c:16` / `kernel/arch/x86_64/trap.c:23` / `kernel/include/fs/vfs.h:7` / `kernel/selftest/{test_at_random,symlink_selftest}.c` 等）改 `#include <sys/stat.h>`（拿 AT_*/DT_* + struct stat + struct winsize）+ `#include <sys/ioctl.h>`（拿 ioctl codes）；libc 把原 `kernel/UAPI/stat.h` 里散落的 11 个 ioctl code（TCSETSW/TCSETSF/TIOCNOTTY/TIOCSCTTY/TIOCSWINSZ/FIONREAD + 原 5 个）吸收到 `<sys/ioctl.h>`。依赖方向 kernel → libc 单向，符合「kernel 反向可读 libc」约束。sysroot 里 `<uapi/stat.h>` 路径消失（kernel install-headers 不再 stage）。 |
 
 ### 3.3 arch value（facade + strong override）
 
@@ -168,6 +170,18 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 - 把 libc 端 `AT_*` 常量全部集中到 `kernel/include/uapi/auxv.h`
 - 删除 `libc/include/sys/auxv.h`（或改为转发）
 - 复用 `kernel/Makefile` 的现有 `install-headers` target（kernel 发布 `<uapi/...>`）；libc 唯一发布 `<sys/...>` wrapper
+- 加 Makefile install 步骤：kernel UAPI 头安装到 libc sysroot 的 `<sys/auxv.h>` 路径
+
+**状态：已关闭（commits `be6694a` + `add4179` 叠加 revert + 方案 B 重做）**。**最终落地路径（单源在 libc）**：
+
+- `kernel/include/uapi/auxv.h` **删除**；`kernel/include/uapi/stat.h` **删除**。
+- `libc/include/sys/auxv.h` 持有全部 23 个 `AT_*`（含 `AT_NOTELF/UID/EUID/GID/EGID/SECURE/HWCAP2/EXECFN` 八个补充）+ `getauxval` 原型——**唯一定义点**。
+- `libc/include/sys/stat.h` 持有 2 个 AT_* + 9 个 `DT_*` POSIX 完整集合（补 `DT_FIFO (1)` / `DT_SOCK (12)` / `DT_WHT (14)` 三个）+ `struct stat` + `struct winsize` + libc 独有声明（`S_IFSOCK` / `S_ISUID/SGID/SVTX` / per-group & per-other 权限位 / `FD_CLOEXEC` / `O_CLOEXEC` / `S_IRWXUGO` 等掩码 / `S_ISFIFO/SOCK` 谓词 / 函数原型 `stat/lstat/fstat/fstatat/lseek/fcntl/ioctl/getdents64/access`）——**唯一定义点**。
+- `libc/include/sys/ioctl.h` 持有 11 个 ioctl code（含 `TIOCSCTTY` / `FIONREAD` —— 这两个原在 `kernel/UAPI/stat.h` 里，已吸收）。
+- kernel TUs 改 include：`<uapi/auxv.h>` → `<sys/auxv.h>`（`kernel/sched/task.c:20`）；`<uapi/stat.h>` → `<sys/stat.h>` + `<sys/ioctl.h>`（`kernel/fs/file.c:14` / `kernel/tty/tty.c:16` / `kernel/arch/x86_64/trap.c:23` / `kernel/include/fs/vfs.h:7` / `kernel/selftest/{test_at_random,symlink_selftest}.c`）。
+- 依赖方向 **kernel → libc 单向**，符合 §2.2 「kernel 反向可读 libc」约束。libc ⊥ kernel 仍成立（libc 编译期不读 kernel 任何头）。
+- sysroot 里 `<uapi/auxv.h>` / `<uapi/stat.h>` 路径消失（kernel install-headers 不再 stage 这两个）；user-program 取 ABI 常量的唯一路径是 `<sys/...>`。最终 sysroot：`<arch/auxv.h>` (kernel arch facade, AAGU-2) + `<sys/auxv.h>` (libc) + `<sys/ioctl.h>` (libc) + `<sys/stat.h>` (libc)。
+- spec §3.2 auxv 行 + stat.h 行 status：**✅ 修**（单源在 libc，kernel 反向读，零物理重复）。
 
 ### 4.3 P2 — 镜像层收口
 
@@ -217,18 +231,18 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 ## 6. 验收对照（issue AAGU-4 验收条目）
 
 - [x] 规范文档草稿已写完，4 类边界规则清晰无歧义（§2）
-- [x] 现状对照清单覆盖 AAGU-1 两轮评审找到的所有违例 + Explore agent 抓出的额外违例（stat.h 镜像、softirq.c ifdef、atexit 死链）；合计：**10 ❌ 违例 + 4 🟡 部分 + 9 ✅ 修 = 23 行状态表**
+- [x] 现状对照清单覆盖 AAGU-1 两轮评审找到的所有违例 + Explore agent 抓出的额外违例（stat.h 镜像、softirq.c ifdef、atexit 死链）；合计：**7 ❌ 违例 + 3 🟡 部分 + 13 ✅ 修 = 23 行状态表**（AAGU-4.1 + AAGU-4.2 + AAGU-4.4 落地后；§3.2 auxv + stat.h 行单源在 libc（方案 B），所以从 ❌ 翻 ✅；剩余 7 ❌ 由 AAGU-4.3 + AAGU-4.5 + AAGU-4.6 收口）
 - [x] 规范文档 review 过 `AGENTS.md`「Directory organization」段 + `docs/arch.md` 现有概览，不重复造轮子（§1）
 - [x] 文档放在 `docs/arch/` 下，纳入 AGENTS.md「Documentation」索引（本 PR 同步）
 
-**recount 来源**（spec §3 表逐行核算）：
-- §3.1（compiler runtime）：`__stack_chk_guard` 🟡 1；`__udivti3` ✅ + `__divti3`等 ✅ 2
-- §3.2（UAPI）：auxv 常量 ❌ + stat.h DT_* ❌ 2；syscall 号 🟡 1；共享结构体 ✅ + 其他 UAPI 头 ✅ 2
+**recount 来源**（spec §3 表逐行核算，AAGU-4.2 落地后）：
+- §3.1（compiler runtime）：`__stack_chk_guard` ✅ 1（AAGU-4.4 已收口）；`__udivti3` ✅ + `__divti3`等 ✅ 2
+- §3.2（UAPI）：auxv 常量 ✅ + stat.h DT_* ✅ 2（**AAGU-4.2 已收口，方案 B**：单源在 libc，kernel 反向 include）；syscall 号 🟡 1；共享结构体 ✅ + 其他 UAPI 头 ✅ 2
 - §3.3（arch value）：AT_PLATFORM/`arch_cpu_pause`/`arch_irq_*`/`arch_kernel_thread_entry`/`arch_register_subsys` ✅ 5；softirq.c ifdef ❌ 1；x86-only 驱动 ifdef 🟡 1
 - §3.4（compat 镜像）：`compat/{list,rbtree,string,stdlib,sys/cdefs,sys/types}.h` ❌ 6
 - §3.5（stdio）：open_files[] ✅ + atexit 死链 🟡 2（AAGU-4.1 关闭，atexit 留 AAGU-4.6）
 
-**recount 合计**（AAGU-4.1 落地后）：9 ❌ + 4 🟡 + 10 ✅ = 23
+**recount 合计**（AAGU-4.1 + AAGU-4.2 + AAGU-4.4 落地后）：**7 ❌ + 3 🟡 + 13 ✅ = 23**
 
 **说明（Explore agent findings, 2026-09-22 补）**：
 - auxv 常量 delta 实测为 8 个（`AT_NOTELF/UID/EUID/GID/EGID/SECURE/HWCAP2/EXECFN`），AAGU-4 issue body 写 7 个；本 spec §3.2 已修正为 8 个。

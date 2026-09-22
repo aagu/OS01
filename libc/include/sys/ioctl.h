@@ -19,6 +19,8 @@ int ioctl(int fd, unsigned long request, ...);
 #define TIOCGPGRP   0x540F
 #define TIOCSPGRP   0x5410
 #define TIOCNOTTY   0x5422
+#define TIOCSCTTY   0x540E
+#define FIONREAD    0x541B
 
 #ifdef __cplusplus
 }

@@ -20,7 +20,7 @@
 #include <driver/serial.h>
 #include <errno.h>
 #include <uapi/syscall.h>
-#include <uapi/stat.h>
+#include <sys/stat.h>
 #include <string.h>
 typedef int pid_t;
 #include <termios.h>
