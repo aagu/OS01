@@ -135,14 +135,14 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 
 | 类别 | 位置 | 现状 | 说明 |
 |---|---|---|---|
-| `kernel/include/compat/list.h` | 与 `libc/include/list.h` 同时存在；头注释（行 1-14）自承 "FROZEN, do not modify without updating both" | ❌ 违例 | **典型人工同步镜像**。aarch64 freestanding 路径必须用它，但同步靠人工。违反 §2.4（头注释明文写出 "FROZEN, do not modify without updating both" = 人工约定 = 违例）。建议落地：合并模式（kernel 直接 include libc 的 `list.h`），前提是 aarch64 whitelist 不再 exclude libc——这又依赖 §2.2 sysroot 安装机制到位。 |
-| `kernel/include/compat/rbtree.h` | 与 `libc/include/rbtree.h` 同时存在；同上 "FROZEN" | ❌ 违例 | 同上。 |
-| `kernel/include/compat/string.h` | 与 `libc/include/string.h` 同时存在 | ❌ 违例 | 同上；头注释明确写 "Phase 2 #5 R2 + scope expansion: aarch64 kernel no longer pulls `<string.h>` from `libc/include/`"。 |
-| `kernel/include/compat/stdlib.h` | 与 `libc/include/stdlib.h` 同时存在 | ❌ 违例 | 同上；含 `calloc/free/strtol` 等扩展集，差异化已发生（见 `compat/stdlib.h:69-79` 末尾重复声明）。 |
-| `kernel/include/compat/sys/cdefs.h` | 与 `libc/include/sys/cdefs.h` 同时存在 | ❌ 违例 | 内容基本一致（仅注释差异），但镜像存在本身违反 §2.4。 |
-| `kernel/include/compat/sys/types.h` | 与 `libc/include/sys/types.h` 同时存在 | ❌ 违例 | 同上。 |
+| `kernel/include/compat/list.h` | `libc/include/list.h` | ✅ 已修 (AAGU-4.3.1, PR #17) | kernel 镜像删除；kernel 与 user 共用 libc canonical `<list.h>`。x86_64 经 sysroot `-isystem`；aarch64 经 `-I$(CURDIR)/../libc/include`（aarch64 phase-1 无 sysroot，follow-up 待 Option B 提议）。Build 验证：x86_64 + aarch64 PASS。 |
+| `kernel/include/compat/rbtree.h` | `libc/include/rbtree.h` | ✅ 已修 (AAGU-4.3.2, PR #18) | kernel 镜像删除；x86_64 经 sysroot `-isystem`；aarch64 不编译 `sched/task.c` 故无 rbtree 符号引用（pre-check 验证）。Build 验证：x86_64 + aarch64 PASS。 |
+| `kernel/include/compat/string.h` | `libc/include/string.h` | ✅ 已修 (AAGU-4.3.5, PR #19) | kernel 镜像删除；x86_64 经 sysroot `-isystem`；aarch64 14 源 ZERO direct `strndup/strsignal/mempcpy` use。Build 验证：x86_64 + aarch64 PASS。 |
+| `kernel/include/compat/stdlib.h` | `libc/include/stdlib.h` | ✅ 已修 (AAGU-4.3.6, PR #20) | kernel 镜像删除；`git rm -r kernel/include/compat` 完成；kernel/Makefile 移除 `-I$(CURDIR)/include/compat`。aarch64 allocator 由 `kernel/arch/aarch64/libc_stub.c` 提供，ABI 与 libc canonical 一致（理由已文档化）。Build 验证：x86_64 + aarch64 PASS。 |
+| `kernel/include/compat/sys/cdefs.h` | `libc/include/sys/cdefs.h` | ✅ 已修 (AAGU-4.3.3, PR #15) | kernel 镜像删除；aarch64 经 `-I$(CURDIR)/../libc/include` 解析；x86_64 经 sysroot `-isystem`。Build 验证：x86_64 + aarch64 PASS。 |
+| `kernel/include/compat/sys/types.h` | `libc/include/sys/types.h` | ✅ 已修 (AAGU-4.3.4, PR #16) | kernel 镜像删除；完整 typedef 集合（ssize_t/pid_t/fd_set/mode_t/dev_t/...）由 libc canonical 提供。Build 验证：x86_64 + aarch64 PASS。 |
 
-**说明（context）**：上述 6 个镜像文件是 `2026-09-18` commit `23f916d`「aarch64 `-I libc/include` policy cleanup」Phase 2 #5 的产物（参见 `docs/superpowers/specs/2026-09-18-libc-include-policy-design.md`）。当时为了让 aarch64 kernel 摆脱 `-I libc/include`，选择**手抄镜像**作为过渡方案。该方案解决了「aarch64 不该 include libc 头」的**架构诉求**，但引入了「双份维护」的**镜像违例**。本规范的立场：手抄镜像**只是过渡态**；终极目标是§2.4 的「合并模式 / install 模式」。后续 issue（参见 §4）应把这 6 个文件收口。
+**说明（context）**：上述 6 个镜像文件原是 `2026-09-18` commit `23f916d`「aarch64 `-I libc/include` policy cleanup」Phase 2 #5 的产物（参见 `docs/superpowers/specs/2026-09-18-libc-include-policy-design.md`）。AAGU-4.3 (PR #15–#20) 已将 6 个镜像文件全部删除，改为 kernel 与 user 共用 libc canonical `<X.h>`。x86_64 经 sysroot `-isystem`；aarch64 经 `-I$(CURDIR)/../libc/include`（aarch64 phase-1 无 sysroot，**后续 follow-up**：让 aarch64 profile 走 sysroot publisher 即 Option B，可统一为 `-isystem $(SYSROOT)/usr/include`）。Build 验证（x86_64 + aarch64）全部 PASS。
 
 ### 3.5 libc 用户态 FILE 注册
 
@@ -191,6 +191,12 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
   - (b) **install 模式**：kernel 拥有单一 `kernel/include/freestanding/<name>.h`，由 build 步骤 install 到 libc sysroot
 - 删除 `kernel/include/compat/` 整个目录
 - 更新 aarch64 Makefile 不再 `-I include/compat`
+
+**Status: ✅ 已关闭 (PR #15–#20, 2026-09-22)**
+
+最终方案采用 (a) **合并模式** + (b) **install 模式** 的组合：kernel 不再持有 `kernel/include/freestanding/*`，而是直接 consume libc canonical 头（libc/include/X.h 作为 SOLE public ABI source）。x86_64 经 sysroot `-isystem` 解析，aarch64 经 `-I$(CURDIR)/../libc/include` 解析（aarch64 phase-1 无 sysroot，可作后续 follow-up 走 Option B 提议的 aarch64-local sysroot）。
+
+6 个 sub-issue 落地顺序：sys/cdefs.h (#15) → sys/types.h (#16) → list.h (#17) → rbtree.h (#18) → string.h (#19) → stdlib.h (#20, 同时 `git rm -r kernel/include/compat`)。Build 验证 x86_64 + aarch64 全部 PASS。
 
 ### 4.4 P3 — builtin 统一
 
