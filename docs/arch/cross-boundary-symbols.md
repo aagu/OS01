@@ -217,12 +217,28 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 ## 6. 验收对照（issue AAGU-4 验收条目）
 
 - [x] 规范文档草稿已写完，4 类边界规则清晰无歧义（§2）
-- [x] 现状对照清单覆盖 AAGU-1 两轮评审找到的所有违例 + Explore agent 抓出的额外违例（stat.h 镜像、softirq.c ifdef、atexit 死链）；合计：8 ❌ 违例 + 3 🟡 部分 + 4 ✅ 修
+- [x] 现状对照清单覆盖 AAGU-1 两轮评审找到的所有违例 + Explore agent 抓出的额外违例（stat.h 镜像、softirq.c ifdef、atexit 死链）+ reviewer round 3 抓出的精确数（kernel 6 vs libc 9 DT_*，auxv delta 实为 8）；合计：**10 ❌ 违例 + 4 🟡 部分 + 9 ✅ 修 = 23 行状态表**（reviewer round 3 抓出 §6 之前写「8 ❌ + 3 🟡 + 4 ✅」是错的，已 recount 修正）
 - [x] 规范文档 review 过 `AGENTS.md`「Directory organization」段 + `docs/arch.md` 现有概览，不重复造轮子（§1）
 - [x] 文档放在 `docs/arch/` 下，纳入 AGENTS.md「Documentation」索引（本 PR 同步）
 
+**recount 来源**（spec §3 表逐行核算）：
+- §3.1（compiler runtime）：`__stack_chk_guard` 🟡 1；`__udivti3` ✅ + `__divti3`等 ✅ 2
+- §3.2（UAPI）：auxv 常量 ❌ + stat.h DT_* ❌ 2；syscall 号 🟡 1；共享结构体 ✅ + 其他 UAPI 头 ✅ 2
+- §3.3（arch value）：AT_PLATFORM/`arch_cpu_pause`/`arch_irq_*`/`arch_kernel_thread_entry`/`arch_register_subsys` ✅ 5；softirq.c ifdef ❌ 1；x86-only 驱动 ifdef 🟡 1
+- §3.4（compat 镜像）：`compat/{list,rbtree,string,stdlib,sys/cdefs,sys/types}.h` ❌ 6
+- §3.5（stdio）：open_files[] ❌ + atexit 死链 🟡 2
+
+**recount 合计**：10 ❌ + 4 🟡 + 9 ✅ = 23
+
 **说明（Explore agent findings, 2026-09-22 补）**：
 - auxv 常量 delta 实测为 8 个（`AT_NOTELF/UID/EUID/GID/EGID/SECURE/HWCAP2/EXECFN`），AAGU-4 issue body 写 7 个；本 spec §3.2 已修正为 8 个。
-- `kernel/include/uapi/stat.h` vs `libc/include/sys/stat.h` 是**第二对 UAPI 镜像**（`AT_FDCWD` + `AT_SYMLINK_NOFOLLOW` + `DT_*` 8 个），AAGU-4 issue body 未提及；§3.2 已加行。
+- `kernel/include/uapi/stat.h` vs `libc/include/sys/stat.h` 是**第二对 UAPI 镜像**（`AT_FDCWD` + `AT_SYMLINK_NOFOLLOW` + 9 个 `DT_*`），AAGU-4 issue body 未提及；§3.2 已加行。**修正**：kernel 有 6 个 `DT_*`，libc 有 9 个 `DT_*`（差 3 个：`DT_FIFO (1)`、`DT_SOCK (12)`、`DT_WHT (14)`），不是「差 8 个」也不是「8 个常量集」。
 - `kernel/intr/softirq.c`（**真 arch-neutral TU**，在 aarch64 whitelist）有 `#ifdef __x86_64__`，违反 §2.3；§3.3 已加行。`kernel/intr/pic/8259A.c` 等 x86-only 驱动也有 ifdef，但严格说不是 §2.3 违例（目录错位问题），标 🟡。
 - `__call_atexit_handlers` 定义但全 repo 0 caller；与 §3.5 同一 issue 链一并修。
+
+**reviewer round 3 修正记录**：
+- plan Task 2 Step 3 sysroot.mk 装配方案：kernel 只 stage `<uapi/>`，libc 提供 `<sys/>` forwarding，避免 duplicate destination
+- plan Task 2 各处数字「22」「7 个」「DT_* 8」全部修正为「23」「8 个」「DT_* 9」
+- plan Task 3 string.h/stdlib.h 分类修正（pure function kernel-owned vs libc-stateful allocator）；`libc_stub.h` 不存在改用 `kernel/arch/aarch64/libc_stub.c` 直接引用；include typo 修正；Step 4/5 重复删除
+- plan Task 5 AArch64 LR/SC 实现修正：status 寄存器独立（`uint32_t status` 单独约束），不再误用 new_val 寄存器；附 memory-order 语义说明（`ldaxr` acquire + `stxr` release = seq_cst RMW）
+- plan Task 1 hosttest 改用 OS01 hosttests/ 框架（host clang + LIBC_OBJS），删 `--target=x86_64-elf --sysroot=$SYSROOT -nostdlib` 模式；0xDEADBEEF 用 SIGSEGV catcher 处理；atexit test 改用显式 oracle + `ASSERT_EQ(teardown_flag, 1)`，**不**依赖 destructor（OS01 libc 无 `.init_array`）
