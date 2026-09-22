@@ -23,7 +23,7 @@ _Static_assert(offsetof(struct boot_context, memory) == 56,
                "memory offset");
 _Static_assert(offsetof(struct boot_context, firmware) == 80,
                "firmware offset");
-_Static_assert(sizeof(struct boot_context) == 104, "boot context ABI");
+_Static_assert(sizeof(struct boot_context) == 136, "boot context ABI");
 
 int main(void)
 {

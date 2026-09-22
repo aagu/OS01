@@ -602,8 +602,23 @@ image: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(DISK_IMG))
 # the earlier modes — targets in particular, whose `-n` kernel artifact recipe
 # executes and resolves the sysroot generation — need that build dir intact.
 .PHONY: test-build-contract-x86
+# `targets` mode dry-runs `make -n PROFILE=aarch64-clang aarch64-uefi` — make
+# fails with "No rule to make target .../uefi-runtime.stamp" when the aarch64
+# build directory doesn't exist yet. The aarch64-clang job builds it in its
+# own workspace, not the contract job's, so the contract test needs to
+# build it too via a sub-make with PROFILE=aarch64-clang.
 test-build-contract-x86: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),disk.img)
 	$(call require_capability,rootfs)
+	# Build aarch64-uefi in a sub-make with PROFILE=aarch64-clang so the
+	# `targets` contract mode's dry-run finds the uefi-runtime.stamp.
+	+env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
+	  $(MAKE) MAKEOVERRIDES= \
+	  PROFILE=aarch64-clang aarch64-uefi
+	# host-test contract mode asserts $BUILD_DIR/host-test/test_poll_requested.elf
+	# exists; `make disk.img` does NOT produce it (only `make test` does, and
+	# the CI contract job starts with an empty workspace). Build the host
+	# tests first via the standard sub-make helper.
+	$(call os01_submake,hosttests,all)
 	sh qemutests/build_contract.sh x86_64-clang legacy-components
 	sh qemutests/build_contract.sh x86_64-clang legacy
 	sh qemutests/build_contract.sh x86_64-clang x86

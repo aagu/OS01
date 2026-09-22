@@ -103,7 +103,7 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 
 | 类别 | 位置 | 现状 | 说明 |
 |---|---|---|---|
-| `__stack_chk_guard` | `libc/ssp/ssp.c:12`（唯一定义）；`kernel/core/main.c:63/77`（kernel 端独立定义） | 🟡 部分 | libc 端唯一定义点合规；但 kernel 在 `libk.a` 构建时**故意排除**（`ssp.c:10 #if !defined(__is_libk)`），靠人工 `#define __is_libk` 区分。kernel + libc 各一个定义，靠 build flag 避免双定义——**靠约定不靠强约束**。建议落地方向：把 kernel 端的 `__stack_chk_guard` 移到 `kernel/compiler_rt/`（与 `__stack_chk_fail` 配套），定义一次；libc 端继续按 `__is_libk` 排除（参见 `docs/superpowers/specs/2026-09-11-x86_64-kernel-ssp-design.md`）。 |
+| `__stack_chk_guard` | `libc/ssp/ssp.c:12`（libc 端唯一定义，`__is_libk` 时为空 TU）+ `kernel/compiler_rt/stack_chk_guard.c`（kernel 端唯一定义，`unsigned long`，0xDEADBEEFCAFEBABEUL 种子） | ✅ 修 | kernel 端 `__stack_chk_guard` + `__stack_chk_fail` 已收口到 `kernel/compiler_rt/` 单一 TU（spec §2.1 落点）；libc 端继续按 `__is_libk` 排除（AAGU-4.4）。两个 TU 之间靠 build flag 隔开而非靠约定；kernel 不再 link libk.a 的 `__stack_chk_guard`，链接器强制单一 TU（`nm kernel.elf \| grep stack_chk` 恰好两行：`T __stack_chk_fail` + `D __stack_chk_guard`）。`__stack_chk_fail` print + abort 语义镜像 `libc/ssp/ssp.c`，经 `kernel/include/arch/early_print.h` facade 输出（spec §2.3 facade + strong-override 模式）：x86_64 strong override `kernel/arch/x86_64/early_print.c` 通过 COM1 端口 I/O 直写（lock-free，绕开 `driver/serial.h` 自旋锁），aarch64 strong override `kernel/arch/aarch64/early_print.c` 通过 PL011 MMIO（`pl011_putc`/`kputs`，lock-free）。两架构均先输出诊断再不可返回地停止，contract 一致。 |
 | `__udivti3` | `kernel/compiler_rt/udivti3.c`（KERNEL_C_SOURCES 一员）+ `runtime/builtins/udivti3.c`（selfhosted runtime archive） | ✅ 修 | 两份实现**服务于不同 build 路径**：freestanding 内联 vs selfhosted archive。两者均单一来源（kernel path 单一 TU；runtime path 单一 archive），无镜像违规。属于「同一符号两份实现但落点二选一」的合规情形。 |
 | `__divti3`、`__modti3`、`__clzsi2` 等 | （未在 OS01 内出现） | ✅ 修 | OS01 当前不在 kernel / libc 引入其他 builtin 符号；一旦引入，必须走 §2.1 落点。 |
 
@@ -126,7 +126,7 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 | `arch_irq_*` | `kernel/include/arch/irq.h` + `kernel/intr/arch_irq_hooks.c`（弱默认）+ `kernel/arch/x86_64/irq_hooks.c` | ✅ 修 | AAGU-2 已合规；详见 `docs/arch.md`「中断 hook 三段式」段。 |
 | `arch_kernel_thread_entry` | facade + `kernel/arch/x86_64/thread_entry.S` | ✅ 修 | arch-neutral builder (`sched/task.c`) 无 arch 字符串。 |
 | `arch_register_subsys` | facade + `kernel/arch/<arch>/linker.ld` | ✅ 修 | driver 自注册走 initcall，arch-neutral。 |
-| `#ifdef __x86_64__` 在 arch-neutral 通用层 | `kernel/intr/softirq.c:11, 48`（**真 arch-neutral TU**，在 aarch64 whitelist `kernel/Makefile:47` 内） | ❌ 违例 | 这两条 ifdef 守护的是 arch-specific 实现细节（软中断逻辑），违反 §2.3「arch-neutral 源文件不能用 `#ifdef __x86_64__`」。`softirq.c` 既编进 x86_64 也编进 aarch64 路径，必须走 facade + strong override 模式（参考 `arch_irq_*` 三段式）。 |
+| `#ifdef __x86_64__` 在 arch-neutral 通用层 | `kernel/intr/softirq.c:11, 48`（**真 arch-neutral TU**，在 aarch64 whitelist `kernel/Makefile:47` 内） | ❌ 违例 | ifdef 内容是 `__asm__ __volatile__("lock orq %0, softirq_status(%%rip)" ...)`（行 12-13）和 `"lock andq ..."`（行 49-50），**即 x86 原子位 set/clear 内联汇编**；aarch64 走纯 C 写（行 19、52）。实际违例是「x86 原子操作硬塞进通用层」—— 应该抽象成 `kernel/include/arch/atomic.h` facade 的 `arch_atomic_or_u64` / `arch_atomic_and_u64`，x86 strong override 用 `lock orq/andq`，aarch64 strong override 用 `ldset`/`stclr`（或带 LR/SC 重试）。`softirq.c` 调用 facade，**完全不出现 ifdef**。 |
 | `#ifdef __x86_64__` 在 `kernel/intr/` 下 x86-only 驱动 | `kernel/intr/pic/8259A.c:104` + `kernel/intr/apic/lapic_timer.c:218` + `kernel/intr/apic/lapic.c:180` | 🟡 部分 | 这些是 x86-only 驱动被放在 arch-neutral 的 `kernel/intr/` 目录下，靠 `#ifdef __x86_64__` 跳过。**严格来说不是 §2.3 违例**（不在 arch-neutral builder 内），但**目录位置错**：x86-only 驱动应该放 `kernel/arch/x86_64/intr/` 或 `kernel/intr/pic/`（仅 x86）并由 Makefile whitelist 控制。建议落地：重定位 + 移除 ifdef。 |
 
 ### 3.4 libc API 镜像（`kernel/include/compat/`）
@@ -146,8 +146,8 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 
 | 类别 | 位置 | 现状 | 说明 |
 |---|---|---|---|
-| `open_files[]` 注册表 | `libc/stdio/stdio_file.c:26-60`（`register_file` / `unregister_file` / `is_open_file`）+ 消费方：`fopen/fdopen` 注册、`fclose` 注销、`fflush` 验证（行 132-152） | ❌ 假象安全 | 仅 `fopen`/`fdopen` 注册、`fclose` 注销、`fflush` 验证。**`fread`（行 108-115）、`fwrite`（行 117-130）不查表**：传入垃圾指针既不被 `is_open_file` 拦截，也不产生任何错误。`fflush` 注释自我承认这是「POSIX says return EOF」的局部处理——但 `fread/fwrite` 路径**完全未受注册表保护**。一个 typo'd stream 名会让 `fread(buf, 1, 100, garbage_ptr)` 拿到 `garbage_ptr->fd` 然后调 `read(garbage_fd, ...)`，静默落入任意 fd。这不是「假象安全」是「完全无安全」。**建议落地**：把 `fread/fwrite` 路径都加上 `is_open_file` 检查（与 `fflush` 一致），或收窄注释（承认 libc 不做 stream 验证，只保证 fd 有效）。 |
-| atexit 处理链从未被调用 | `libc/stdlib/atexit.c:20` 定义 `__call_atexit_handlers`；`libc/csu/csu.c:35, 51` `__libc_start_main` 直接 `return main(...)`，无 `exit()` / `fflush(NULL)` / fini 触发；全 repo grep `__call_atexit_handlers` 只命中定义行 | 🟡 部分 | 出口路径**完全死链**：`atexit()` 注册的清理函数永远不会被调用；进程退出靠 `_exit` syscall 直通内核。这是 stdio FILE 注册外**第二处假象**：注册机制存在但出口路径不存在。建议落地（与 §3.5 合并到一个 issue）：要么把 `__call_atexit_handlers` 串到 `exit()` 路径（让 atexit 真正生效），要么删 `__call_atexit_handlers` + `atexit()` 注册代码（承认 libc 不做清理）。 |
+| `open_files[]` 注册表 | `libc/stdio/stdio_file.c:26-60`（`register_file` / `unregister_file` / `is_open_file`）+ 消费方：`fopen/fdopen` 注册、`fclose` 注销、`fflush` 验证（行 139-153）、`fread` 验证（行 108-121）、`fwrite` 验证（行 123-137） | ✅ 已修 (AAGU-4.1) | `fread`/`fwrite` 入口均加 `is_open_file` 检查，未注册 stream 直接返回 0；`fread` 额外 special-case `stdin`/`stdout`/`stderr` sentinel 避免 deref。hosttest `test_libc_fread_fwrite_validate` 覆盖 RED→GREEN：AAGU-4.1 关闭。`fflush` 入口同样受保护（行 139-153）。`atexit` 死链仍属 AAGU-4.6 follow-up（见下行）。 |
+| atexit 处理链从未被调用 | `libc/stdlib/atexit.c:20` 定义 `__call_atexit_handlers`；`libc/csu/csu.c:35, 51` `__libc_start_main` 直接 `return main(...)`，无 `exit()` / `fflush(NULL)` / fini 触发；全 repo grep `__call_atexit_handlers` 只命中定义行 | 🟡 部分 | 出口路径**完全死链**：`atexit()` 注册的清理函数永远不会被调用；进程退出靠 `_exit` syscall 直通内核。这是 stdio FILE 注册外**第二处假象**：注册机制存在但出口路径不存在。归属 **AAGU-4.6 follow-up**：不在 §3.5 stdio FILE 注册范畴（AAGU-4.1）；AAGU-4.6 验收必须用 OS01 QEMU user-program E2E：注册 handler → `exit(0)` → handler 写 marker 到 file/pipe → 父进程断言 marker 存在；不得用 hosttest（atexit 死链在 csu 层，hosttest 触达不到）也不得用 destructor（OS01 libc 无 `.init_array`）。 |
 
 ---
 
@@ -167,9 +167,10 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 **Issue: AAGU-4.2 — UAPI auxv 收口（kernel UAPI 为唯一源）**（依 3.2）
 - 把 libc 端 `AT_*` 常量全部集中到 `kernel/include/uapi/auxv.h`
 - 删除 `libc/include/sys/auxv.h`（或改为转发）
+- 复用 `kernel/Makefile` 的现有 `install-headers` target（kernel 发布 `<uapi/...>`）；libc 唯一发布 `<sys/...>` wrapper
 - 加 Makefile install 步骤：kernel UAPI 头安装到 libc sysroot 的 `<sys/auxv.h>` 路径
 
-**状态：已关闭（commits `be6694a` + 后续 stat.h 收口）**。落地路径走「sysroot install 模式」：kernel install-headers 把 `kernel/include/uapi/*.h` stage 到 `<STAGING>/kernel-headers/usr/include/uapi/`（已存在，未改），libc install-headers 把 `libc/include/sys/*.h` stage 到 `<STAGING>/libc/usr/include/sys/`（已存在，未改），最终 sysroot 由 `mk/components/sysroot.mk` 合并两个 staging tree —— `<uapi/>` 与 `<sys/>` 子目录互不相交，无重复目的地。`mk/components/sysroot.mk` 在 `libc-install.stamp` 上加 `kernel-headers-install.stamp` 前置依赖 + 向 libc submake 注入 `-isystem $(STAGING_DIR)/kernel-headers/usr/include`，让 libc TUs 在编译期解析 `<uapi/auxv.h>` 与 `<uapi/stat.h>`。注意「加 Makefile install 步骤」理解为「复用既有 install-headers + 补编译期 include 路径」，不是「新增 `$(SYSROOT_GENERATION_DIR)/usr/include/sys/...:` 写规则」（后者违反 §2.2 owner boundary）。
+**状态：已关闭（commits `be6694a` + `add4179`）**。落地路径走「sysroot install 模式」：kernel install-headers 把 `kernel/include/uapi/*.h` stage 到 `<STAGING>/kernel-headers/usr/include/uapi/`（已存在，未改），libc install-headers 把 `libc/include/sys/*.h` stage 到 `<STAGING>/libc/usr/include/sys/`（已存在，未改），最终 sysroot 由 `mk/components/sysroot.mk` 合并两个 staging tree —— `<uapi/>` 与 `<sys/>` 子目录互不相交，无重复目的地。`mk/components/sysroot.mk` 在 `libc-install.stamp` 上加 `kernel-headers-install.stamp` 前置依赖 + 向 libc submake 注入 `-isystem $(STAGING_DIR)/kernel-headers/usr/include`，让 libc TUs 在编译期解析 `<uapi/auxv.h>` 与 `<uapi/stat.h>`。注意「加 Makefile install 步骤」理解为「复用既有 install-headers + 补编译期 include 路径」，不是「新增 `$(SYSROOT_GENERATION_DIR)/usr/include/sys/...:` 写规则」（后者违反 §2.2 owner boundary）。
 
 ### 4.3 P2 — 镜像层收口
 
@@ -187,6 +188,19 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 - 移到 `kernel/compiler_rt/` 与 `__stack_chk_fail` 配套
 - libc 端 `libc/ssp/ssp.c` 继续按 `__is_libk` 排除
 - 与 §2.1 「二选一」规则对齐：kernel path 单一 TU
+
+### 4.5 P2 — arch atomic bit op facade
+
+**Issue: AAGU-4.5 — `arch_atomic_*_u64` facade + softirq.c 移除 ifdef**（依 3.3）
+- 当前 `kernel/intr/softirq.c:11, 48` 有 `#if defined(__x86_64__)` 守护 `lock orq/andq` 内联汇编；aarch64 走纯 C 写（行 19、52）
+- 实际违例：x86 原子操作硬塞进通用层
+- 修法：
+  - 新增 `kernel/include/arch/atomic.h` facade：`void arch_atomic_or_u64(uint64_t *addr, uint64_t mask);` / `void arch_atomic_and_u64(uint64_t *addr, uint64_t mask);`
+  - x86_64 strong override `kernel/arch/x86_64/atomic.c`：`lock orq/andq` 内联汇编
+  - aarch64 strong override `kernel/arch/aarch64/atomic.c`：`ldset`/`stclr`（AArch64 Large System Extensions）或 LR/SC 重试
+  - `kernel/intr/softirq.c` 改调 facade，**不出现 ifdef**
+- 顺带：`kernel/intr/{pic/, apic/}` 下 x86-only 驱动（8259A、lapic、lapic_timer、ioapic）从 `kernel/intr/` 挪到 `kernel/arch/x86_64/intr/` —— **目录错位**问题，标 🟡 部分
+- 同步排查 `kernel/` 下其它 arch-neutral TU 的 `#if defined(__x86_64__)` / `#if defined(__aarch64__)` 守护位，按同样模式收口
 
 ---
 
@@ -206,12 +220,28 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 ## 6. 验收对照（issue AAGU-4 验收条目）
 
 - [x] 规范文档草稿已写完，4 类边界规则清晰无歧义（§2）
-- [x] 现状对照清单覆盖 AAGU-1 两轮评审找到的所有违例 + Explore agent 抓出的额外违例（stat.h 镜像、softirq.c ifdef、atexit 死链）；合计：8 ❌ 违例 + 3 🟡 部分 + 4 ✅ 修
+- [x] 现状对照清单覆盖 AAGU-1 两轮评审找到的所有违例 + Explore agent 抓出的额外违例（stat.h 镜像、softirq.c ifdef、atexit 死链）；合计：**7 ❌ 违例 + 3 🟡 部分 + 13 ✅ 修 = 23 行状态表**（AAGU-4.1 + AAGU-4.2 + AAGU-4.4 落地后；剩余 7 ❌ 由 AAGU-4.3 + AAGU-4.5 + AAGU-4.6 收口）
 - [x] 规范文档 review 过 `AGENTS.md`「Directory organization」段 + `docs/arch.md` 现有概览，不重复造轮子（§1）
 - [x] 文档放在 `docs/arch/` 下，纳入 AGENTS.md「Documentation」索引（本 PR 同步）
 
+**recount 来源**（spec §3 表逐行核算，AAGU-4.2 落地后）：
+- §3.1（compiler runtime）：`__stack_chk_guard` ✅ 1（AAGU-4.4 已收口）；`__udivti3` ✅ + `__divti3`等 ✅ 2
+- §3.2（UAPI）：auxv 常量 ✅ + stat.h DT_* ✅ 2（AAGU-4.2 已收口）；syscall 号 🟡 1；共享结构体 ✅ + 其他 UAPI 头 ✅ 2
+- §3.3（arch value）：AT_PLATFORM/`arch_cpu_pause`/`arch_irq_*`/`arch_kernel_thread_entry`/`arch_register_subsys` ✅ 5；softirq.c ifdef ❌ 1；x86-only 驱动 ifdef 🟡 1
+- §3.4（compat 镜像）：`compat/{list,rbtree,string,stdlib,sys/cdefs,sys/types}.h` ❌ 6
+- §3.5（stdio）：open_files[] ✅ + atexit 死链 🟡 2（AAGU-4.1 关闭，atexit 留 AAGU-4.6）
+
+**recount 合计**（AAGU-4.1 + AAGU-4.2 + AAGU-4.4 落地后）：**7 ❌ + 3 🟡 + 13 ✅ = 23**
+
 **说明（Explore agent findings, 2026-09-22 补）**：
 - auxv 常量 delta 实测为 8 个（`AT_NOTELF/UID/EUID/GID/EGID/SECURE/HWCAP2/EXECFN`），AAGU-4 issue body 写 7 个；本 spec §3.2 已修正为 8 个。
-- `kernel/include/uapi/stat.h` vs `libc/include/sys/stat.h` 是**第二对 UAPI 镜像**（`AT_FDCWD` + `AT_SYMLINK_NOFOLLOW` + `DT_*` 8 个），AAGU-4 issue body 未提及；§3.2 已加行。
+- `kernel/include/uapi/stat.h` vs `libc/include/sys/stat.h` 是**第二对 UAPI 镜像**（`AT_FDCWD` + `AT_SYMLINK_NOFOLLOW` + 9 个 `DT_*`），AAGU-4 issue body 未提及；§3.2 已加行。**修正**：kernel 有 6 个 `DT_*`，libc 有 9 个 `DT_*`（差 3 个：`DT_FIFO (1)`、`DT_SOCK (12)`、`DT_WHT (14)`），不是「差 8 个」也不是「8 个常量集」。
 - `kernel/intr/softirq.c`（**真 arch-neutral TU**，在 aarch64 whitelist）有 `#ifdef __x86_64__`，违反 §2.3；§3.3 已加行。`kernel/intr/pic/8259A.c` 等 x86-only 驱动也有 ifdef，但严格说不是 §2.3 违例（目录错位问题），标 🟡。
 - `__call_atexit_handlers` 定义但全 repo 0 caller；与 §3.5 同一 issue 链一并修。
+
+**当前事实摘要**（reviewer round 6 后 cleanup plan 当前态对应）：
+- §3.5 atexit 行归属 **AAGU-4.6**（不在 AAGU-4.1 范围）
+- §3.5 stdio FILE 注册表只登记 `open_files[]` 一行（AAGU-4.1 已落地：✅；atexit 死链仍属 AAGU-4.6）
+- §3.3 ifdef 行描述已是当前态（`lock orq`/`lock andq` 原子位 set/clear + Task 5 的 `arch_atomic_or/and_u64` facade）
+- §3.2 stat.h 行描述已是 6 vs 9 实测 diff
+- §3.1 / §3.4 现状描述与 cleanup plan 一致

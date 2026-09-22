@@ -2,12 +2,16 @@
 #
 # Issue AAGU-7: enable GitHub CI, run tests before/after PR merge,
 # and produce x86_64 + aarch64 disk images on master.
+# Issue AAGU-8: switch the ci surface to the ghcr.io/aagu/os01-ci image
+# so clang-22 + qemu-11.1.1 (matching the homeserver dev box) replaces
+# the ubuntu-24.04 runner's clang-18 + qemu-8.2.2 defaults.
 #
-# Each job installs clang-18 / lld-18 / llvm-18 / qemu-8.2.2 (the
-# ubuntu-24.04 runner defaults — clang-18 emits R_X86_64_64 for
-# cross-section references, qemu-8.2.2 supports -machine dumpdtb=)
-# inline. No container image dependency, so PR #6 can merge without
-# waiting on the image.yml workflow to publish a tag.
+# Every job runs inside the published image; the per-job apt-get
+# install steps that earlier revisions carried are gone — the image
+# already provides clang, llvm-ar, ld.lld, qemu-system-{x86_64,aarch64},
+# libc6-dev (glibc bits headers for the aarch64 UEFI bootloader's
+# `-I/usr/include`), dosfstools, mtools, e2fsprogs, dtc, ripgrep,
+# python3, wget, git. Image workflow: .github/workflows/image.yml.
 #
 # Jobs:
 #   x86-checks     — non-destructive x86_64 test surface on every PR/push
@@ -34,7 +38,13 @@ concurrency:
 
 permissions:
   contents: read
+  # Pull the published CI image from ghcr.io. For same-repo PRs and
+  # pushes the default GITHUB_TOKEN already has read access to the
+  # repo's packages; declaring it here makes the dependency explicit.
+  packages: read
 
+# All jobs run inside the published os01-ci image. See ci/Dockerfile +
+# ci/README.md for what's inside.
 jobs:
   # ── x86_64 test surface (PR + push) ───────────────────────────
   # Builds disk.img then runs every non-destructive x86_64 test entry
@@ -43,6 +53,8 @@ jobs:
   x86-checks:
     name: x86_64 checks
     runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/aagu/os01-ci:latest
     timeout-minutes: 90
     steps:
       - name: Checkout
@@ -50,53 +62,66 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install dependencies
+      # Some recipe steps invoke `git` (e.g. posix-uefi's rev-parse HEAD
+      # digest check in uefi.mk, the firmware contract test's fixture
+      # cleanup). On the ubuntu-24.04 runner the workspace is owned by
+      # the runner user (uid 1001) but the container's git sees the
+      # bind-mounted workspace as owned by a different uid, triggering
+      # "fatal: detected dubious ownership in repository". Marking the
+      # workspace + every submodule as safe makes those calls succeed.
+      - name: Mark workspace + submodules as git-safe
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            clang-18 lld-18 llvm-18 lld llvm \
-            qemu-system-x86 \
-            dosfstools mtools e2fsprogs libc6-dev \
-            python3 \
-            wget
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git submodule foreach --recursive --quiet 'git config --global --add safe.directory "$sm_path"'
+
+      # Transitional: install gnu-efi here so this PR's CI runs against
+      # the currently-published :latest image (which doesn't yet include
+      # gnu-efi) can build the x86_64 EFI bootloader. After this PR
+      # merges, image.yml rebuilds :latest with gnu-efi baked in; this
+      # step becomes a no-op (apt-get install is idempotent).
+      - name: Install transitional apt packages
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends gnu-efi
 
       - name: Verify toolchain
         run: |
-          clang-18 --version | head -1
-          llvm-ar-18 --version | head -1
+          clang --version | head -1
+          llvm-ar --version | head -1
           qemu-system-x86_64 --version | head -1
           python3 --version
 
       - name: Build disk.img
-        run: make -j"$(nproc)" CLANG=clang-18 LLVM_AR=llvm-ar-18 disk.img
+        run: make -j"$(nproc)" disk.img
 
       - name: Host unit tests
-        run: make CLANG=clang-18 LLVM_AR=llvm-ar-18 test
+        run: make test
 
       - name: Runtime validation
-        run: make CLANG=clang-18 LLVM_AR=llvm-ar-18 test-runtime
+        run: make test-runtime
 
       - name: Kernel layout
-        run: make CLANG=clang-18 LLVM_AR=llvm-ar-18 test-kernel-layout
+        run: make test-kernel-layout
 
       - name: User canary
-        run: make CLANG=clang-18 LLVM_AR=llvm-ar-18 test-user-canary
+        run: make test-user-canary
 
       - name: Kernel selftest (QEMU)
-        run: make CLANG=clang-18 LLVM_AR=llvm-ar-18 KERNEL_SELFTEST=1 KERNEL_SELFTEST_SMP=8 test-kernel-selftest
+        run: make KERNEL_SELFTEST=1 KERNEL_SELFTEST_SMP=8 test-kernel-selftest
 
       - name: Syscall E2E (QEMU)
-        run: make CLANG=clang-18 LLVM_AR=llvm-ar-18 OS01_SYSTEST=1 test-syscall
+        run: make OS01_SYSTEST=1 test-syscall
 
   # ── aarch64 test surface (PR + push) ──────────────────────────
   # Builds the aarch64 UEFI bring-up image. The SMP acceptance harness
   # is deferred (see closure report) — ubuntu-24.04's qemu 8.2.2
   # rejects 'qemu-system-aarch64 -machine dumpdtb=' and the firmware
-  # image workflow that ships qemu 11.1.1 lives on master (PR #7 + #8).
+  # image workflow that ships qemu 11.1.1 lives on master.
   aarch64-checks:
     name: aarch64 checks
     runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/aagu/os01-ci:latest
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -104,26 +129,40 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install dependencies
+      # Some recipe steps invoke `git` (e.g. posix-uefi's rev-parse HEAD
+      # digest check in uefi.mk, the firmware contract test's fixture
+      # cleanup). On the ubuntu-24.04 runner the workspace is owned by
+      # the runner user (uid 1001) but the container's git sees the
+      # bind-mounted workspace as owned by a different uid, triggering
+      # "fatal: detected dubious ownership in repository". Marking the
+      # workspace + every submodule as safe makes those calls succeed.
+      - name: Mark workspace + submodules as git-safe
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            clang-18 lld-18 llvm-18 lld llvm \
-            qemu-system-arm \
-            dosfstools mtools e2fsprogs libc6-dev \
-            device-tree-compiler \
-            python3 \
-            wget
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git submodule foreach --recursive --quiet 'git config --global --add safe.directory "$sm_path"'
+
+      # Transitional: install gnu-efi and pull the upstream aarch64
+      # EFI headers until image.yml publishes an :latest that already
+      # contains them. Same rationale as the x86-checks step above.
+      - name: Install transitional apt packages + aarch64 EFI headers
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends gnu-efi
+          # Ubuntu's gnu-efi package ships only x86_64 + ia32 EFI headers;
+          # pull the aarch64 subarch from the upstream source (matches
+          # the recipe ci/Dockerfile uses for the published image).
+          cd /tmp && git clone --depth 1 https://git.code.sf.net/p/gnu-efi/code gnu-efi
+          mkdir -p /usr/include/efi/aarch64
+          cp -r gnu-efi/inc/. /usr/include/efi/
 
       - name: Verify toolchain
         run: |
-          clang-18 --version | head -1
+          clang --version | head -1
           qemu-system-aarch64 --version | head -1
           dtc --version
 
       - name: Build aarch64 UEFI image
-        run: make -j"$(nproc)" CC="clang-18 -target aarch64-none-elf" LD="ld.lld-18 -m aarch64elf" AR=llvm-ar-18 PROFILE=aarch64-clang aarch64-uefi
+        run: make -j"$(nproc)" CC="clang -target aarch64-none-elf" LD="ld.lld -m aarch64elf" AR=llvm-ar PROFILE=aarch64-clang aarch64-uefi
 
   # ── Build-system contract suite (PR + push) ──────────────────
   # These tests deliberately `make clean` at the end — they assert the
@@ -133,6 +172,8 @@ jobs:
   contract:
     name: build contract
     runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/aagu/os01-ci:latest
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -140,21 +181,20 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install dependencies
+      # Some recipe steps invoke `git` (e.g. posix-uefi's rev-parse HEAD
+      # digest check in uefi.mk, the firmware contract test's fixture
+      # cleanup). On the ubuntu-24.04 runner the workspace is owned by
+      # the runner user (uid 1001) but the container's git sees the
+      # bind-mounted workspace as owned by a different uid, triggering
+      # "fatal: detected dubious ownership in repository". Marking the
+      # workspace + every submodule as safe makes those calls succeed.
+      - name: Mark workspace + submodules as git-safe
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            clang-18 lld-18 llvm-18 lld llvm \
-            qemu-system-x86 qemu-system-arm \
-            dosfstools mtools e2fsprogs libc6-dev \
-            device-tree-compiler \
-            python3 \
-            wget \
-            ripgrep
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git submodule foreach --recursive --quiet 'git config --global --add safe.directory "$sm_path"'
 
       - name: x86_64 build contract
-        run: make CLANG=clang-18 LLVM_AR=llvm-ar-18 test-build-contract-x86
+        run: make test-build-contract-x86
 
       # aarch64 build contract: skipped — its 'targets' mode triggers a
       # destructive rm -rf build/x86_64-clang/ via the '+'-prefixed
@@ -170,6 +210,8 @@ jobs:
     needs: [x86-checks, aarch64-checks, contract]
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/aagu/os01-ci:latest
     timeout-minutes: 90
     steps:
       - name: Checkout
@@ -177,23 +219,23 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install dependencies
+      # Some recipe steps invoke `git` (e.g. posix-uefi's rev-parse HEAD
+      # digest check in uefi.mk, the firmware contract test's fixture
+      # cleanup). On the ubuntu-24.04 runner the workspace is owned by
+      # the runner user (uid 1001) but the container's git sees the
+      # bind-mounted workspace as owned by a different uid, triggering
+      # "fatal: detected dubious ownership in repository". Marking the
+      # workspace + every submodule as safe makes those calls succeed.
+      - name: Mark workspace + submodules as git-safe
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            clang-18 lld-18 llvm-18 lld llvm \
-            qemu-system-x86 qemu-system-arm \
-            dosfstools mtools e2fsprogs libc6-dev \
-            device-tree-compiler \
-            python3 \
-            wget
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git submodule foreach --recursive --quiet 'git config --global --add safe.directory "$sm_path"'
 
       - name: Build x86_64 disk.img
-        run: make -j"$(nproc)" CLANG=clang-18 LLVM_AR=llvm-ar-18 disk.img
+        run: make -j"$(nproc)" disk.img
 
       - name: Build aarch64 UEFI image
-        run: make -j"$(nproc)" CC="clang-18 -target aarch64-none-elf" LD="ld.lld-18 -m aarch64elf" AR=llvm-ar-18 PROFILE=aarch64-clang aarch64-uefi
+        run: make -j"$(nproc)" CC="clang -target aarch64-none-elf" LD="ld.lld -m aarch64elf" AR=llvm-ar PROFILE=aarch64-clang aarch64-uefi
 
       - name: Verify images exist
         run: |
