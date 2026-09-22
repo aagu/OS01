@@ -115,7 +115,7 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 | syscall 号 | `kernel/include/uapi/syscall.h`（74 号）+ `libc/include/sys/syscall.h`（用户态通过 `__NR_*` 宏） | 🟡 部分 | kernel 端单一来源；libc 端通过 sysroot 安装（参见 `kernel/Makefile:106` x86_64 sysroot 路径）；不构成镜像违规。但 `__NR_*` 宏列表需定期与 `syscall.h` 同步，靠人工——建议把 syscall 号表生成由 build 步骤完成（参见 AAGU-6 cleanup batch）。 |
 | 共享结构体（`struct boot_context`、`sigaction`、`timespec` 等） | 主要在 `kernel/include/uapi/`；用户态通过 sysroot 包含 | ✅ 修 | 不存在镜像违规。 |
 | 其他 UAPI 头（`futex.h`、`sockaddr.h`、`time.h`） | 全部位于 `kernel/include/uapi/` | ✅ 修 | 未在 `libc/include/` 发现同名镜像。 |
-| `stat.h` 中的 `AT_FDCWD` / `AT_SYMLINK_NOFOLLOW` / `DT_*` 常量 | `kernel/include/uapi/stat.h:102-111`（AT_FDCWD/AT_SYMLINK_NOFOLLOW/DT_*）+ `libc/include/sys/stat.h:100-115`（镜像） | ❌ 违例 | **第二对 UAPI 镜像**（AAGU-1 评审未提及，是 Explore agent 抓出的）。`AT_FDCWD=-100` / `AT_SYMLINK_NOFOLLOW=0x100` 在两处定义；`DT_*`（dirent 类型）8 个常量也在两处定义。常量集目前一致，但**镜像存在本身**违反 §2.2。建议落地：合并到 `kernel/include/uapi/stat.h` 一处，libc sysroot install 步骤覆盖。 |
+| `stat.h` 中的 `AT_FDCWD` / `AT_SYMLINK_NOFOLLOW` / `DT_*` 常量 | `kernel/include/uapi/stat.h:102-111`（6 个 `DT_*`）+ `libc/include/sys/stat.h:100-115`（9 个 `DT_*`） | ❌ 违例 | **第二对 UAPI 镜像**，且**常量集已不一致**。<br>实测 diff：<br>kernel 有 `DT_UNKNOWN/REG/DIR/CHR/BLK/LNK`（6 个）<br>libc 有 `DT_UNKNOWN/FIFO/CHR/DIR/BLK/REG/LNK/SOCK/WHT`（9 个）<br>libc 多 `DT_FIFO (1)`、`DT_SOCK (12)`、`DT_WHT (14)` —— 是 POSIX 完整集合。<br>kernel 没追上 = 镜像 + 不一致双重违例 §2.2。<br>`AT_FDCWD=-100` / `AT_SYMLINK_NOFOLLOW=0x100` 两处定义一致，但镜像本身违规。<br>建议落地：合并到 `kernel/include/uapi/stat.h`，补全 9 个 `DT_*`（POSIX 完整集合），libc 转发；install owner = `mk/components/sysroot.mk` 单一 writer（见 cleanup plan Task 2 修正）。 |
 
 ### 3.3 arch value（facade + strong override）
 
@@ -126,7 +126,7 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 | `arch_irq_*` | `kernel/include/arch/irq.h` + `kernel/intr/arch_irq_hooks.c`（弱默认）+ `kernel/arch/x86_64/irq_hooks.c` | ✅ 修 | AAGU-2 已合规；详见 `docs/arch.md`「中断 hook 三段式」段。 |
 | `arch_kernel_thread_entry` | facade + `kernel/arch/x86_64/thread_entry.S` | ✅ 修 | arch-neutral builder (`sched/task.c`) 无 arch 字符串。 |
 | `arch_register_subsys` | facade + `kernel/arch/<arch>/linker.ld` | ✅ 修 | driver 自注册走 initcall，arch-neutral。 |
-| `#ifdef __x86_64__` 在 arch-neutral 通用层 | `kernel/intr/softirq.c:11, 48`（**真 arch-neutral TU**，在 aarch64 whitelist `kernel/Makefile:47` 内） | ❌ 违例 | 这两条 ifdef 守护的是 arch-specific 实现细节（软中断逻辑），违反 §2.3「arch-neutral 源文件不能用 `#ifdef __x86_64__`」。`softirq.c` 既编进 x86_64 也编进 aarch64 路径，必须走 facade + strong override 模式（参考 `arch_irq_*` 三段式）。 |
+| `#ifdef __x86_64__` 在 arch-neutral 通用层 | `kernel/intr/softirq.c:11, 48`（**真 arch-neutral TU**，在 aarch64 whitelist `kernel/Makefile:47` 内） | ❌ 违例 | ifdef 内容是 `__asm__ __volatile__("lock orq %0, softirq_status(%%rip)" ...)`（行 12-13）和 `"lock andq ..."`（行 49-50），**即 x86 原子位 set/clear 内联汇编**；aarch64 走纯 C 写（行 19、52）。实际违例是「x86 原子操作硬塞进通用层」—— 应该抽象成 `kernel/include/arch/atomic.h` facade 的 `arch_atomic_or_u64` / `arch_atomic_and_u64`，x86 strong override 用 `lock orq/andq`，aarch64 strong override 用 `ldset`/`stclr`（或带 LR/SC 重试）。`softirq.c` 调用 facade，**完全不出现 ifdef**。 |
 | `#ifdef __x86_64__` 在 `kernel/intr/` 下 x86-only 驱动 | `kernel/intr/pic/8259A.c:104` + `kernel/intr/apic/lapic_timer.c:218` + `kernel/intr/apic/lapic.c:180` | 🟡 部分 | 这些是 x86-only 驱动被放在 arch-neutral 的 `kernel/intr/` 目录下，靠 `#ifdef __x86_64__` 跳过。**严格来说不是 §2.3 违例**（不在 arch-neutral builder 内），但**目录位置错**：x86-only 驱动应该放 `kernel/arch/x86_64/intr/` 或 `kernel/intr/pic/`（仅 x86）并由 Makefile whitelist 控制。建议落地：重定位 + 移除 ifdef。 |
 
 ### 3.4 libc API 镜像（`kernel/include/compat/`）
@@ -185,6 +185,19 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 - 移到 `kernel/compiler_rt/` 与 `__stack_chk_fail` 配套
 - libc 端 `libc/ssp/ssp.c` 继续按 `__is_libk` 排除
 - 与 §2.1 「二选一」规则对齐：kernel path 单一 TU
+
+### 4.5 P2 — arch atomic bit op facade
+
+**Issue: AAGU-4.5 — `arch_atomic_*_u64` facade + softirq.c 移除 ifdef**（依 3.3）
+- 当前 `kernel/intr/softirq.c:11, 48` 有 `#if defined(__x86_64__)` 守护 `lock orq/andq` 内联汇编；aarch64 走纯 C 写（行 19、52）
+- 实际违例：x86 原子操作硬塞进通用层
+- 修法：
+  - 新增 `kernel/include/arch/atomic.h` facade：`void arch_atomic_or_u64(uint64_t *addr, uint64_t mask);` / `void arch_atomic_and_u64(uint64_t *addr, uint64_t mask);`
+  - x86_64 strong override `kernel/arch/x86_64/atomic.c`：`lock orq/andq` 内联汇编
+  - aarch64 strong override `kernel/arch/aarch64/atomic.c`：`ldset`/`stclr`（AArch64 Large System Extensions）或 LR/SC 重试
+  - `kernel/intr/softirq.c` 改调 facade，**不出现 ifdef**
+- 顺带：`kernel/intr/{pic/, apic/}` 下 x86-only 驱动（8259A、lapic、lapic_timer、ioapic）从 `kernel/intr/` 挪到 `kernel/arch/x86_64/intr/` —— **目录错位**问题，标 🟡 部分
+- 同步排查 `kernel/` 下其它 arch-neutral TU 的 `#if defined(__x86_64__)` / `#if defined(__aarch64__)` 守护位，按同样模式收口
 
 ---
 
