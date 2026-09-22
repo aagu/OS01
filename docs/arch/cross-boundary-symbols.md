@@ -167,7 +167,7 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 **Issue: AAGU-4.2 — UAPI auxv 收口（kernel UAPI 为唯一源）**（依 3.2）
 - 把 libc 端 `AT_*` 常量全部集中到 `kernel/include/uapi/auxv.h`
 - 删除 `libc/include/sys/auxv.h`（或改为转发）
-- 加 Makefile install 步骤：kernel UAPI 头安装到 libc sysroot 的 `<sys/auxv.h>` 路径
+- 复用 `kernel/Makefile` 的现有 `install-headers` target（kernel 发布 `<uapi/...>`）；libc 唯一发布 `<sys/...>` wrapper
 
 ### 4.3 P2 — 镜像层收口
 
@@ -242,3 +242,17 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 - plan Task 3 string.h/stdlib.h 分类修正（pure function kernel-owned vs libc-stateful allocator）；`libc_stub.h` 不存在改用 `kernel/arch/aarch64/libc_stub.c` 直接引用；include typo 修正；Step 4/5 重复删除
 - plan Task 5 AArch64 LR/SC 实现修正：status 寄存器独立（`uint32_t status` 单独约束），不再误用 new_val 寄存器；附 memory-order 语义说明（`ldaxr` acquire + `stxr` release = seq_cst RMW）
 - plan Task 1 hosttest 改用 OS01 hosttests/ 框架（host clang + LIBC_OBJS），删 `--target=x86_64-elf --sysroot=$SYSROOT -nostdlib` 模式；0xDEADBEEF 用 SIGSEGV catcher 处理；atexit test 改用显式 oracle + `ASSERT_EQ(teardown_flag, 1)`，**不**依赖 destructor（OS01 libc 无 `.init_array`）
+
+**reviewer round 4 修正记录**（已**全部否定**，仅留为历史快照，下文为**当前实际方案**）：
+- ~~SIGSEGV catcher / 0xDEADBEEF 野指针 + ``__attribute__((destructor))` atexit oracle~~ → 改 pipe-based fake `mini_file_t`（reviewer round 5 进一步简化到 2 个 TEST_FUNC）
+- ~~kernel/Makefile 新加 install-headers recipe + DESTDIR~~ → 不动 `kernel/Makefile:412-425`，kernel 唯一 stage `<uapi/>`，libc 唯一 stage `<sys/>` forwarding
+- ~~kernel/include/freestanding/allocator.h + libc include/string.h|stdlib.h 转发~~ → Task 3 仅边界规则 4 列表，parent plan **不**预写 header 落地路径
+- ~~`stxr` + seq_cst memory order~~ → 改 `stlxr` + acq_rel（`ldaxr + stlxr + memory clobber` = acq_rel RMW）
+- ~~plan 4-task / spec 4-task 不一致~~ → 全部统一 5 task + AAGU-4.6 follow-up
+
+**当前实际方案（reviewer round 5 后）**：
+- §3.5 atexit 行归属 **AAGU-4.6**（不在 AAGU-4.1 范围）
+- §3.5 stdio FILE 注册表只登记 `open_files[]` ❌ 一行（fix 由 AAGU-4.1 落地）
+- §3.3 ifdef 行描述已是当前态（`lock orq`/`lock andq` 原子位 set/clear + Task 5 的 `arch_atomic_or/and_u64` facade）
+- §3.2 stat.h 行描述已是 6 vs 9 实测 diff
+- §3.1 / §3.4 现状描述与 cleanup plan 一致

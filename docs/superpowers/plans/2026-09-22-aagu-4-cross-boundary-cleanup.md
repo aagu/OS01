@@ -45,18 +45,19 @@
 
 - [ ] **Step 1: 写 hosttest 覆盖 `fread/fwrite` 验证路径 — pipe-based fake mini_file_t + 真实 `TEST_FUNC` 模式**
 
-**reviewer round 4 修正**：
+**reviewer round 5 最小化**：
+- 删除 `#include "stdio_internal.h"`：该目录不在 test include path；`mini_file_t` 已由 OS01 `<stdio.h>` 公开
+- 删除 `test_fread_on_stdout_returns_zero`：修前把 stdout sentinel 当地址解引用 → 整个 hosttest 崩溃，不能作为 RED case
+- `fwrite` 测试**不**在调用前 `close(pipefd[0])` —— 修前 `write` 会触发 SIGPIPE；保留 read end，调用后再同时 close 两端
+- 仅保留两个 pipe + 未注册 `mini_file_t` 测试；修前都稳定得到 `n == 1`、修后得到 `n == 0`
+- 不引入 `signal` / `setjmp` / `destructor`
+
+**reviewer round 4 修正**（前置）：
 - 删除 `0xDEADBEEF` 野指针 + SIGSEGV catcher 方案（崩溃路径不可控）
 - 删除 `__attribute__((destructor))` + 显式 oracle 方案（OS01 libc 无 `.init_array`）
 - 删除 `--target=x86_64-elf --sysroot=$SYSROOT` + QEMU user-binary 方案（不是 hosttest 模式）
 - 改为：**fake `mini_file_t` + 真实 pipe fd** —— 已分配 `mini_file_t`，但用 `is_open_file` 未注册路径触发
 - 复制 `hosttests/cases/test_libc_fflush.c` 的真实 pattern（`TEST_FUNC` / `assert_eq` / `TEST_LIST_BEGIN/END` / `TEST_ENTRY` / `__test_table` / `__test_stats`），不用不存在的 `TEST_CASE` / `ASSERT_EQ`
-
-**reviewer #3 round 3 修正**：原计划用 `--target=x86_64-elf --sysroot=$SYSROOT -nostdlib` 编译 OS01 user-binary 然后 QEMU 跑 —— **错路**。OS01 hosttest 的实际工作模式是：
-- `hosttests/Makefile` 用 host 原生 clang 编译（无 `--target`、无 `--sysroot`）
-- 链 OS01 libc 真源作为 `LIBC_OBJS`（参见 `hosttests/Makefile:55-72`）
-- 在 host 上跑（不 QEMU）
-- mock kernel（`hosttests/mock/`）覆盖 kernel-only 符号
 
 文件：`hosttests/cases/test_libc_fread_fwrite_validate.c`（NEW）
 
@@ -76,11 +77,8 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
-#include "stdio_internal.h"   /* for mini_file_t layout */
 
-/* mini_file_t is defined in libc/stdio/stdio_internal.h as
- *   typedef struct { int fd; int mode; } mini_file_t;
- * Exposed here so the test can build a fake without going through fopen. */
+/* mini_file_t is exposed via OS01's <stdio.h>; no extra header. */
 
 TEST_FUNC(test_fread_unregistered_stream_returns_zero) {
     /* Pre-fix: fread dereferences fake->fd, reads 1 byte from pipe, returns 1.
@@ -104,31 +102,23 @@ TEST_FUNC(test_fread_unregistered_stream_returns_zero) {
 
 TEST_FUNC(test_fwrite_unregistered_stream_returns_zero) {
     /* Pre-fix: fwrite writes 1 byte to fake->fd (the pipe write-end).
-     * Post-fix: fwrite checks is_open_file, returns 0. */
+     * Post-fix: fwrite checks is_open_file, returns 0.
+     * KEEP read-end open so pre-fix fwrite doesn't SIGPIPE; close both ends after. */
     int pipefd[2];
     int rc = pipe(pipefd);
     assert_eq(rc, 0);
-    close(pipefd[0]);   /* reader side not used */
 
     mini_file_t fake = { .fd = pipefd[1], .mode = 1 };
     size_t n = fwrite("x", 1, 1, &fake);
     assert_eq(n, 0);    /* post-fix: not registered */
 
+    close(pipefd[0]);
     close(pipefd[1]);
-}
-
-TEST_FUNC(test_fread_on_stdout_returns_zero) {
-    /* stdout sentinel (fd 1) — fread must short-circuit per POSIX
-     * (stdout not open for reading). */
-    char buf[4] = {0};
-    size_t n = fread(buf, 1, sizeof buf, stdout);
-    assert_eq(n, 0);
 }
 
 TEST_LIST_BEGIN
     TEST_ENTRY(test_fread_unregistered_stream_returns_zero),
     TEST_ENTRY(test_fwrite_unregistered_stream_returns_zero),
-    TEST_ENTRY(test_fread_on_stdout_returns_zero),
 TEST_LIST_END
 
 int main(void) {
@@ -162,7 +152,7 @@ int main(void) {
 仿照已有的 `$(TEST_BLD)/test_libc_fflush.elf` + `$(TEST_BLD)/test_libc_fflush.o` + 链接行 pattern。新增：
 
 ```make
-# fread/fwrite stream validation test
+# fread/fwrite stream validation test — added to TEST_BINS (line 62-86) and to .PHONY list
 $(TEST_BLD)/test_libc_fread_fwrite_validate.o: $(TEST_CASES)/test_libc_fread_fwrite_validate.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
@@ -175,7 +165,29 @@ $(TEST_BLD)/test_libc_fread_fwrite_validate.elf: \
 	    -o $@ $< $(TEST_BLD)/libc_stdio_file.o
 ```
 
-并在 `hosttests/Makefile` 的 `test_bins`（或等价 ALL_BINS 列表）添加 `$(TEST_BLD)/test_libc_fread_fwrite_validate.elf`。`libc_stdio_file.o` 已有编译规则（不需要新增）。
+并在 `hosttests/Makefile` 同时注册：
+
+a) **TEST_BINS 列表追加**（line 62 附近的 `TEST_BINS :=` 块）：
+   ```make
+   TEST_BINS := \
+       ... \
+       $(TEST_BLD)/test_libc_fread_fwrite_validate.elf \
+       ...
+   ```
+   （reviewer round 5 明确要求，不是 `+=`，是直接 append 到 `TEST_BINS :=` 块）
+
+b) **`.PHONY` 列表追加**（line 88 附近的 `.PHONY` 行）：
+   ```make
+   .PHONY: ... test-libc-fread-fwrite-validate
+   ```
+
+c) **新增 phony target**（追加在 `all:` 之后）：
+   ```make
+   test-libc-fread-fwrite-validate: $(TEST_BLD)/test_libc_fread_fwrite_validate.elf
+   	$<   # 执行 ELF（host 原生）
+   ```
+
+`libc_stdio_file.o` 已有编译规则（line ~80 附近，`$(TEST_BLD)/libc_stdio_file.o: $(LIBC_SRC)/stdio/stdio_file.c`），不需要新增。
 
 **b. 跑测试（RED 状态）：**
 
@@ -184,10 +196,9 @@ cd /home/aagu/OS01
 make PROFILE=x86_64-clang test-libc-fread-fwrite-validate
 ```
 
-Expected（修前 RED）：三个 `TEST_FUNC` **失败**，因为当前 `fread`/`fwrite` 没有 `is_open_file` 检查，`fake` 的 `pipefd` 是合法 fd，会被 deref + 真正读到 / 写到数据。失败模式：
+Expected（修前 RED）：两个 `TEST_FUNC` **失败**，因为当前 `fread`/`fwrite` 没有 `is_open_file` 检查，`fake` 的 `pipefd` 是合法 fd，会被 deref + 真正读到 / 写到数据。失败模式：
 - `test_fread_unregistered_stream_returns_zero`：实际 `n == 1`（修后期望 `0`），assert 失败
-- `test_fwrite_unregistered_stream_returns_zero`：实际 `n == 1`（修后期望 `0`），assert 失败；同时 pipe 读端会收到 `'x'`，但本 test 不检查这一项（避免依赖 pipe 内容验证）
-- `test_fread_on_stdout_returns_zero`：当前 `fread` 对 stdout 不特殊处理；本 test 可能已经 PASS（取决于现状 fread 是否已 check stdout）；如果 RED 不出，**保留 GREEN** 即可
+- `test_fwrite_unregistered_stream_returns_zero`：实际 `n == 1`（修后期望 `0`），assert 失败
 
 - [ ] **Step 3: 改 `fread` 加 `is_open_file` 检查**
 
@@ -266,17 +277,6 @@ git add hosttests/cases/test_libc_fread_fwrite_validate.c \
 git commit -m "fix(libc/stdio): validate stream in fread/fwrite (close AAGU-4.1)"
 ```
 
-- [ ] **Step 8: AAGU-4.6 follow-up（reviewer round 4 拆出）**
-
-**reviewer round 4 决议**：atexit 死链整改**不属于 AAGU-4.1 stdio FILE 注册范围**，拆为独立 issue AAGU-4.6：
-- 当前 `__call_atexit_handlers`（`libc/stdlib/atexit.c:20`）定义但全 repo 0 caller；`__libc_start_main`（`libc/csu/csu.c:35, 51`）直接 `return main(...)`
-- AAGU-4.6 验收必须用 OS01 QEMU user-program E2E：注册 handler → `exit(0)` → handler 写 marker 到 file/pipe → 父进程断言 marker 存在
-- **不得**用 hosttest 替代（hosttest 链 OS01 libc，atexit 死链问题在 csu 层，hosttest 触达不到）
-- **不得**用 `__attribute__((destructor))`（OS01 libc 无 `.init_array` runtime support）
-- AAGU-4.6 启动前，先在 `libc/stdlib.h` 添加 `void exit(int status);` 声明（当前缺声明）
-
-本 Task 1 不实现 atexit；spec §3.4 atexit 描述保持**事实陈述**（不修，不 claim 关闭）。
-
 ---
 
 ## Task 2: UAPI auxv 单一源收口（AAGU-4.2，P1）
@@ -284,7 +284,7 @@ git commit -m "fix(libc/stdio): validate stream in fread/fwrite (close AAGU-4.1)
 **Files:**
 - Modify: `kernel/include/uapi/auxv.h`（添加 libc 端额外常量）
 - Modify OR Delete: `libc/include/sys/auxv.h`（转发或删除）
-- Modify: `kernel/Makefile`（加 install 步骤：uapi/auxv.h → libc sysroot `usr/include/sys/auxv.h`）
+- (none, 复用 `kernel/Makefile` 现有 `install-headers` target)
 
 **Spec ref:** `docs/arch/cross-boundary-symbols.md` §2.2 + §3.2
 
@@ -471,39 +471,13 @@ git commit -m "feat(uapi): single source for stat.h AT_*/DT_* (close AAGU-4.2 st
 
 **落地 issue 模板**：AAGU-4.3.1（list）、AAGU-4.3.2（rbtree）、AAGU-4.3.3（sys/cdefs）、AAGU-4.3.4（sys/types）、AAGU-4.3.5（string）、AAGU-4.3.6（stdlib）—— 每个对应一个独立 issue，启动前 post comment 在 AAGU-4 issue 上贴出该头的 4 列表等 reviewer 确认。
 
-**plan 本身的实施步骤**（**仅**用于把 #6 文件 dir 删掉 + 让 doc 落地；**不**预写新 header 落地路径）：
-
-- [ ] **Step 1: 删除 `kernel/include/compat/` 整个目录**
-
-**前置条件**：6 个落地 issue（AAGU-4.3.1 ~ 4.3.6）已全部 merged 或 owner 决定已确认；删除时机 = 6 个 issue 全部 merged 之后。
-
-```sh
-git rm -r kernel/include/compat
-ls kernel/include/compat 2>&1   # 期望：No such file or directory
-```
-
-- [ ] **Step 2: 跑完整测试套件**
-
-```sh
-cd /home/aagu/OS01
-make PROFILE=x86_64-clang KERNEL_SELFTEST=1 kernel.bin
-make OS01_SYSTEST=1 test-syscall
-make PROFILE=aarch64-clang test-aarch64-uefi-smp
-```
-
-Expected: 全部 PASS（已知 GIC Phase 1 TIMEOUT 不计入）。
-
-- [ ] **Step 3: Commit**
-
-```sh
-git rm -r kernel/include/compat
-git commit -m "refactor(kernel): drop compat/ — each header migrated by AAGU-4.3.x sub-issues"
-```
-
-**禁止**（reviewer round 4 明确）：
+**禁止**（reviewer round 4 + round 5 明确）：
+- parent plan **不得**包含 `git rm -r kernel/include/compat`（reviewer round 5）—— 删除 compat/ 是 6 个 sub-issue 的**最后一个**做，且只在替代 include 路径全验证后才删
 - 在本 plan 预写 `libc/include/{string,stdlib,list,rbtree,sys/cdefs,sys/types}.h` 的删除 / 转发内容
 - 在本 plan 预写 `kernel/include/freestanding/allocator.h` 或任何 freestanding/ 头
 - 把 6 个落地 issue 合并成一个 PR（每个独立 owner 决策需独立 review）
+
+**parent plan 不写实施步骤**（仅边界规则 + 6 个 sub-issue 模板）；所有具体动手的 step / 任务 / commit message / test verification 都属于 6 个 sub-issue 各自的 plan。
 
 ---## Task 4: kernel 端 `__stack_chk_guard` 移到 `kernel/compiler_rt/`（AAGU-4.4，P3）
 
@@ -826,32 +800,34 @@ git commit -m "refactor(atomic): arch_atomic_or/and_u64 facade + softirq.c drop 
 
 ---
 
+## 后续 issue（reviewer round 5 拆出 — AAGU-4.6）
+
+**AAGU-4.6 — atexit 死链整改（reviewer round 4 拆出 + round 5 移到独立节）**
+
+- **范围**：解决 `__call_atexit_handlers`（`libc/stdlib/atexit.c:20`）定义但全 repo 0 caller 的问题
+- **验收**：用 OS01 QEMU user-program E2E —— 注册 handler → `exit(0)` → handler 写 marker 到 file/pipe → 父进程断言 marker 存在
+- **前置**：在 `libc/stdlib.h` 添加 `void exit(int status);` 声明（当前缺声明）
+- **禁止**：
+  - 用 hosttest 替代（atexit 死链问题在 csu 层，hosttest 触达不到）
+  - 用 `__attribute__((destructor))`（OS01 libc 无 `.init_array` runtime support）
+  - 拆到 AAGU-4.1 stdio FILE 注册 plan 内（不属于 stdio 范畴）
+- **owner 关系**：AAGU-4.6 由 spec §3.5 atexit 行归属（reviewer round 5 显式约束）；spec §3.5 该行保持 AAGU-4.6 归属声明
+- **优先级**：P3；估时 2 days
+
+---
+
 ## Self-Review（plan 完成前自检）
 
-1. **Spec coverage**：spec §3.5 行 → Task 1（含 Steps 9-13 atexit 死链）；spec §3.2 行 → Task 2（含 stat.h DT_* 收口）；spec §3.4 行 → Task 3（6 文件逐头 owner 决策）；spec §3.1 行 → Task 4；spec §3.3 softirq ifdef 行 → Task 5。每条违例都有 task。✅
+1. **Spec coverage**：spec §3.5 行 → Task 1；spec §3.2 行 → Task 2（含 stat.h DT_* 收口）；spec §3.4 行 → Task 3（6 文件逐头 owner 决策）；spec §3.1 行 → Task 4；spec §3.3 softirq ifdef 行 → Task 5；spec §3.5 atexit 行 → AAGU-4.6 follow-up。每条违例都有 task。✅
 2. **Placeholder scan**：no "TBD" / "TODO" / "implement later" / "add appropriate error handling"。Step 1–N 每步都是可执行代码或命令。✅
 3. **Type / name consistency**：所有 task 用 `is_open_file` / `arch_auxv_platform` / `arch_atomic_or_u64` / `arch_atomic_and_u64` / `__stack_chk_guard` 等真实符号名，与 spec 一致。✅
-4. **Task 右边界**：5 个 task 各自可独立 review / 独立 commit / 独立测试。✅
-5. **No 镜像层引入**：Task 3 走**逐头 owner 决策**（kernel-owned 走 freestanding/，libc-stateful 走 builtin/stub），**不是换目录保留镜像**。✅
-6. **reviewer 5 条 round 2 反馈全部消化**：
-   - reviewer #1（stat.h DT_* 不全）：Task 2 spec 表格已写 kernel 6 vs libc 9 准确 diff；plan 标 owner = sysroot.mk
-   - reviewer #2（sysroot.mk owner + 装配顺序）：Task 2 Step 3 明确 owner = `mk/components/sysroot.mk`，禁止直接写 `$(SYSROOT_GENERATION_DIR)`
-   - reviewer #3（install 模式换目录 = 镜像）：Task 3 改为逐头 owner 表，分 kernel-owned / libc-stateful 两组
-   - reviewer #4（softirq.c ifdef ≠ APIC/PIC dispatch）：Task 5 改为 `arch_atomic_or/and_u64` facade，x86 strong override 用 `lock orq/andq`，aarch64 strong override 用 LR/SC
-   - reviewer #5（hosttest 链 host libc + task 数不一致）：Task 1 hosttest 改用 `--sysroot=$(SYSROOT)` 交叉编译；spec §4.5 段已加入 plan 任务表；§4排期表 5 task 一致
-7. **SPEC §3.3 ifdef 行描述已修正**：从「APIC/PIC dispatch」改为「`lock orq`/`lock andq` 原子位 set/clear 内联汇编」。✅
-8. **reviewer 5 条 round 3 反馈全部消化**（c200ec4 二审）：
-   - reviewer #1（sysroot duplicate-destination）：Task 2 Step 3 改为 single-source 双路径编排 —— kernel 只 stage `<uapi/>`，libc 提供 `<sys/>` forwarding；每个 destination 一个 producer，无 duplicate
-   - reviewer #2（数字不一致：22/7/DT_* 8）：Task 2 全文 22→23、7→8、DT_* 8→9；spec §6「DT_* 8 个」→「9 个 libc-side」
-   - reviewer #3（Task 1 hosttest 不可执行）：Task 1 Step 1+2 改用 OS01 `hosttests/` 框架（host clang + LIBC_OBJS），删 `--target=x86_64-elf --sysroot=$SYSROOT -nostdlib` 模式；`0xDEADBEEF` 用 SIGSEGV catcher（修前 faulted，修后 returns 0）；atexit test 用显式 oracle `ASSERT_EQ(teardown_flag, 1)`，**不**依赖 destructor（OS01 libc 无 `.init_array` runtime support）
-   - reviewer #4（Task 3 自相矛盾）：string.h 分类改为 kernel-owned（pure function，非 libc-stateful）；stdlib.h 拆为 `kernel/include/freestanding/allocator.h`（calloc/malloc/free）+ libc pure function 部分；`libc_stub.h` 不存在改用 `kernel/arch/aarch64/libc_stub.c` 直接引用；include typo 修正；Step 4/5 重复删除
-   - reviewer #5（spec §6 总数错、Task 5 LR/SC status 寄存器误用）：spec §6 recount 修正为 10 ❌ + 4 🟡 + 9 ✅ = 23 行；Task 5 LR/SC 改为独立 `uint32_t status` 约束寄存器，附 memory-order 语义说明（`ldaxr` acquire + `stxr` release = seq_cst RMW）
-9. **reviewer 5 条 round 4 反馈全部消化**（f920e70 三审）：
-   - reviewer #1（Task 1 SIGSEGV/atexit 不可执行）：删除 `0xDEADBEEF` 野指针 + SIGSEGV catcher、删除 `__attribute__((destructor))` atexit oracle；改为**fake `mini_file_t` + pipe fd**（pipe 已分配、未注册走 `is_open_file`）；删除 Task 1 Steps 9-13 atexit，拆出 **AAGU-4.6 follow-up**（QEMU user-program E2E 验证）
-   - reviewer #2（Task 2 kernel header install 越权 + stat.h 不能删独有声明）：Task 2 Step 3 改为**不动 kernel/Makefile:412-425**（已用 `INSTALL_ROOT` + `cp -R include/.` 正确 stage），**不**再写新 `install-headers:` recipe；libc/include/sys/stat.h **保留**所有独有声明 / `struct stat` / fstat/mkdir 等，**只** in-place 替换 `AT_*`/`DT_*` 宏为 `#include <uapi/stat.h>`
-   - reviewer #3（Task 3 预写 freestanding/allocator.h 超规范范围）：删除 Task 3 整段预写 header 内容；Task 3 改为**仅边界规则**（4 列表：消费者清单 / 唯一 owner / 公开安装路径 / x86_64+aarch64 编译测试）；落地 issue 拆为 AAGU-4.3.1 ~ 4.3.6 六个独立 sub-issue，每个独立 owner 决策 + review；Task 3 plan 本身**只**做 `git rm -r kernel/include/compat`
-   - reviewer #4（Task 5 LR/SC memory order 错）：`stxr` 改为 `stlxr`（release 语义）；LD/AArch64 LR/SC 契约改为 **acquire-release RMW**，**不**是 seq_cst；接口注释同步改为「acq_rel」；明确「若未来需 seq_cst 需在该 task 另加 `dmb ish` 并给理由和测试」，**当前不引入**
-   - reviewer #5（plan 4-task / spec 4-task 不一致）：plan header + Self-Review 全部「4 个 task」改为 5 个；Task 1 估时表删除 atexit（已拆 AAGU-4.6）；spec §3.5 atexit 行仅保留**事实陈述**（不修，不 claim 关闭，由 AAGU-4.6 接手）
+4. **Task 右边界**：5 个 task + 1 follow-up（AAGU-4.6）各自可独立 review / 独立 commit / 独立测试。✅
+5. **No 镜像层引入**：Task 3 走**逐头 owner 决策**（4 列表），**不**预写 freestanding/allocator.h 等替换路径；删除 compat/ 是 6 个 sub-issue 的最后一个做。✅
+6. **Task 1 hosttest 现状**：2 个 TEST_FUNC（pipe-based fake mini_file_t，无 SIGSEGV / destructor / setjmp / `--sysroot`）；`hosttests/Makefile` 加 `TEST_BINS` + `.PHONY` + phony target 跑 ELF。✅
+7. **Task 2 sysroot 编排现状**：kernel `install-headers` 不动；kernel 唯一 stage `<uapi/>`，libc 唯一 stage `<sys/>` forwarding/wrapper；每个 destination 单一 producer。✅
+8. **Task 3 边界规则现状**：仅消费者清单 / 唯一 owner / 唯一公开安装路径 / x86_64+aarch64 编译测试 4 列表；落地 6 个 sub-issue；parent plan **不**预写 header 落地路径，**不**含 `git rm -r`。✅
+9. **Task 5 atomic 现状**：`kernel/include/arch/atomic.h` facade 注释标「acq_rel」；aarch64 strong override 用 `ldaxr + stlxr + memory clobber`（acquire-release RMW，**不** seq_cst）；3 个独立约束（`old/new_val/status`）；`stxr` 已统一改 `stlxr`。✅
+10. **文档自洽性**：plan header + spec ref + §4 排期表 + Self-Review + spec §6 全部以「5 task + AAGU-4.6 follow-up」一致呈现，无 4-task / 5-task 混合。✅
 
 ---
 
@@ -861,12 +837,12 @@ git commit -m "refactor(atomic): arch_atomic_or/and_u64 facade + softirq.c drop 
 |---|---|---|---|
 | Task 1 | AAGU-4.1 | 1.5 days（hosttest: pipe-based fake mini_file_t + Makefile target 注册 + GREEN 验证；不含 atexit） | P1 — 假象安全 |
 | Task 2（含 stat.h） | AAGU-4.2 | 3 days（kernel UAPI 补全 + libc sys/auxv.h + sys/stat.h 转发/补全 + install owner 接入 + x86_64/aarch64 双跑） | P1 |
-| Task 3 | AAGU-4.3 | 0.5 days（**仅删** kernel/include/compat/；6 文件落地路径在 AAGU-4.3.1 ~ 4.3.6 子 issue） | P2 |
+| Task 3 | AAGU-4.3 | parent plan **仅边界规则**（reviewer round 5 明确）；6 个 sub-issue 估时各自 ~ 1.5 days/header（落地步骤在各自 sub-issue plan） | P2 |
 | Task 4 | AAGU-4.4 | 1 day | P3 |
 | Task 5 | AAGU-4.5 | 4 days（arch_atomic_or/and_u64 facade + x86_64 + aarch64 strong override + softirq.c 移除 ifdef + x86-only 驱动重定位） | P2 |
 | follow-up | **AAGU-4.6**（reviewer round 4 拆出） | 2 days（atexit 死链整改：QEMU user-program E2E + csu/exit 重写；不含 hosttest） | P3 |
 
-落地 issue 创建顺序：AAGU-4.1 → AAGU-4.2 → AAGU-4.5 → AAGU-4.3 → AAGU-4.4 → AAGU-4.6（每个 issue 的子任务清单 = 本 plan 对应 Task 的 Steps）。
+落地 issue 创建顺序：AAGU-4.1 → AAGU-4.2 → AAGU-4.5 → AAGU-4.3.x（6 个 sub-issue 各自独立 owner + commit）→ AAGU-4.4 → AAGU-4.6。`git rm -r kernel/include/compat` 由 6 个 sub-issue 的**最后一个**做。
 
 ---
 
