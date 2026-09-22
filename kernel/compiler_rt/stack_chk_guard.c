@@ -8,16 +8,18 @@
 // pair lives in libc/ssp/ssp.c (gated by __is_libk so libk.a does NOT
 // bring a duplicate definition into the kernel link).
 //
-// __stack_chk_fail mirrors the libc/ssp/ssp.c print+abort contract:
-// disable interrupts, print a one-line diagnostic, then halt the CPU.
-// The diagnostic output deliberately bypasses the full driver/serial.h
-// stack (which transitively pulls in <tty/tty.h> + <termios.h>) so the
-// file builds on the freestanding aarch64 profile, and so the abort
-// path stays lock-free even when the stack around it is corrupt.
-// x86_64 emits the diagnostic to COM1 (0x3F8); aarch64 halts without
-// printing because the aarch64 whitelist does not yet pull in any TU
-// that uses -fstack-protector (aarch64 kernel builds without canary
-// instrumentation in phase 1, see mk/profiles/aarch64-clang.mk).
+// __stack_chk_fail mirrors the libc/ssp/ssp.c print+abort contract on
+// every supported arch: disable interrupts, write a one-line diagnostic,
+// halt the CPU.  The diagnostic goes through the arch_early_puts facade
+// (kernel/include/arch/early_print.h), whose per-arch strong overrides
+// live in kernel/arch/<arch>/early_print.c:
+//
+//   x86_64:    COM1 port I/O (inb 0x3FD / outb 0x3F8), lock-free.
+//   aarch64:   PL011 MMIO via pl011_putc() / kputs(), lock-free.
+//
+// Both overrides are lock-free and NORETURN-safe so the abort path
+// works even when the stack around it is corrupt.  No `#ifdef __arch__`
+// lives in this TU — the facade is the only arch-aware surface.
 //
 // Type note: the guard is declared `unsigned long` (LP64-sized on both
 // x86_64 and aarch64) so the type matches libc/ssp/ssp.c and
@@ -28,12 +30,9 @@
 // kernel/Makefile stdint.h injection comment).
 
 #include <stdint.h>
-#include <arch/cpu.h>       /* arch_cpu_halt(), arch_cpu_pause()       */
-#include <arch/irq.h>       /* arch_local_irq_disable()                 */
-
-#ifdef __x86_64__
-#include <arch/x86_64/hw.h>  /* inb(), outb() — port I/O                */
-#endif
+#include <arch/cpu.h>           /* arch_cpu_halt()                       */
+#include <arch/irq.h>           /* arch_local_irq_disable()              */
+#include <arch/early_print.h>   /* arch_early_puts()                     */
 
 /* Bootloader seed — non-zero for defense-in-depth (an all-zero guard
  * would let an attacker skip the canary check on a brand-new boot
@@ -41,31 +40,11 @@
  * its first statement (see kernel/core/main.c). */
 unsigned long __stack_chk_guard = 0xDEADBEEFCAFEBABEUL;
 
-/* Lock-free single-byte serial output.  Deliberately does NOT call
- * write_serial() (which acquires serial_lock): the canary fail path
- * is allowed to fire from a stack-smashing context where locks may
- * be in inconsistent states, and the diagnostic has to ship whatever
- * the UART can take right now. */
-static void stack_chk_putc(char c)
-{
-#ifdef __x86_64__
-    /* Wait for COM1 transmitter holding register empty (LSR bit 5). */
-    while ((inb(0x3FD) & 0x20) == 0)
-        arch_cpu_pause();
-    outb((uint16_t)0x3F8, (uint8_t)c);
-#else
-    (void)c;  /* aarch64 phase-1 has no canary users; see file header. */
-#endif
-}
-
 __attribute__((noreturn, no_stack_protector, cold))
 void __stack_chk_fail(void)
 {
     arch_local_irq_disable();
-    {
-        const char *p = "\n*** Kernel stack smashing detected ***\n";
-        for (; *p; p++) stack_chk_putc(*p);
-    }
+    arch_early_puts("\n*** Kernel stack smashing detected ***\n");
     while (1) arch_cpu_halt();
     __builtin_unreachable();
 }
