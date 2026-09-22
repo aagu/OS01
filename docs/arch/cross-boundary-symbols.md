@@ -111,11 +111,11 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 
 | 类别 | 位置 | 现状 | 说明 |
 |---|---|---|---|
-| auxv 常量 | `kernel/include/uapi/auxv.h:11-25`（15 个）+ `libc/include/sys/auxv.h:9-31`（23 个） | ❌ 违例 | **常量集已不一致**：libc 多出 **8 个**（`AT_NOTELF/UID/EUID/GID/EGID/SECURE/HWCAP2/EXECFN`），kernel UAPI 缺失。`kernel/include/uapi/auxv.h` 自身注释明确写「Kernel-side mirror of `libc/include/sys/auxv.h`. Both headers list the same AT_* constants」，但实际已不是同一份。违反 §2.2（常量集不一致）。建议落地：删除 `libc/include/sys/auxv.h`（或改为 `#include <uapi/auxv.h>` 转发），把全部 AT_* 常量集中在 `kernel/include/uapi/auxv.h`，由 build 步骤 install 到 libc sysroot。 |
+| auxv 常量 | `kernel/include/uapi/auxv.h`（23 个 `AT_*`）+ `libc/include/sys/auxv.h`（forwarding，仅 `#include <uapi/auxv.h>` + `getauxval` 声明） | ✅ 修 | AAGU-4.2 已落地（commit `be6694a`）。kernel UAPI 拥有全部 23 个 `AT_*`（含 `AT_NOTELF/UID/EUID/GID/EGID/SECURE/HWCAP2/EXECFN`）；libc/sys/auxv.h 注释更新为「Single source: kernel/include/uapi/auxv.h (installed to libc sysroot)」。`mk/components/sysroot.mk` 在 libc-install.stamp 上加 `kernel-headers-install.stamp` 前置依赖 + 向 libc submake 注入 `-isystem $(STAGING_DIR)/kernel-headers/usr/include`，让 libc TUs 在编译期解析 `<uapi/auxv.h>`；libc install-headers 自身未动，仍只复制 `libc/include/`，sysroot 里 `usr/include/uapi/` 与 `usr/include/sys/` 由两个 component 各自负责，无重复目的地。 |
 | syscall 号 | `kernel/include/uapi/syscall.h`（74 号）+ `libc/include/sys/syscall.h`（用户态通过 `__NR_*` 宏） | 🟡 部分 | kernel 端单一来源；libc 端通过 sysroot 安装（参见 `kernel/Makefile:106` x86_64 sysroot 路径）；不构成镜像违规。但 `__NR_*` 宏列表需定期与 `syscall.h` 同步，靠人工——建议把 syscall 号表生成由 build 步骤完成（参见 AAGU-6 cleanup batch）。 |
 | 共享结构体（`struct boot_context`、`sigaction`、`timespec` 等） | 主要在 `kernel/include/uapi/`；用户态通过 sysroot 包含 | ✅ 修 | 不存在镜像违规。 |
 | 其他 UAPI 头（`futex.h`、`sockaddr.h`、`time.h`） | 全部位于 `kernel/include/uapi/` | ✅ 修 | 未在 `libc/include/` 发现同名镜像。 |
-| `stat.h` 中的 `AT_FDCWD` / `AT_SYMLINK_NOFOLLOW` / `DT_*` 常量 | `kernel/include/uapi/stat.h:102-111`（AT_FDCWD/AT_SYMLINK_NOFOLLOW/DT_*）+ `libc/include/sys/stat.h:100-115`（镜像） | ❌ 违例 | **第二对 UAPI 镜像**（AAGU-1 评审未提及，是 Explore agent 抓出的）。`AT_FDCWD=-100` / `AT_SYMLINK_NOFOLLOW=0x100` 在两处定义；`DT_*`（dirent 类型）8 个常量也在两处定义。常量集目前一致，但**镜像存在本身**违反 §2.2。建议落地：合并到 `kernel/include/uapi/stat.h` 一处，libc sysroot install 步骤覆盖。 |
+| `stat.h` 中的 `AT_FDCWD` / `AT_SYMLINK_NOFOLLOW` / `DT_*` 常量 | `kernel/include/uapi/stat.h`（2 AT_* + 9 DT_* POSIX 完整集合）+ `libc/include/sys/stat.h`（forwarding `#include <uapi/stat.h>` + libc 独有 S_IFSOCK / S_ISUID / S_ISGID / S_ISVTX / per-group & per-other 权限位 / FD_CLOEXEC / O_CLOEXEC / S_IRWXUGO 等 + 函数原型） | ✅ 修 | AAGU-4.2 已落地。kernel UAPI 拥有 2 个 AT_* + 9 个 DT_*（补齐 `DT_FIFO (1)` / `DT_SOCK (12)` / `DT_WHT (14)`，POSIX 完整集合）；libc/sys/stat.h 改为单 `#include <uapi/stat.h>` + libc-unique 声明（`S_IFSOCK` / `S_ISUID` / `S_ISGID` / `S_ISVTX` / per-group & per-other 权限位 / `FD_CLOEXEC` / `O_CLOEXEC` / `S_IRWXUGO` 等掩码 / `S_ISFIFO` / `S_ISSOCK` 谓词 / `stat` / `lstat` / `fstat` / `fstatat` / `lseek` / `fcntl` / `ioctl` / `getdents64` / `access` 原型）。`struct stat` / `struct winsize` 由 kernel/UAPI 提供（libc/sys/stat.h 内副本已删除，否则 clang 在结构体字面完全一致时仍报错 — 这是 `in-place 替换` 路径下唯一可能的偏差，与「保留独有声明」原则一致：`struct stat` 在两边 layout 完全相同，不属于「独有」）。 |
 
 ### 3.3 arch value（facade + strong override）
 
@@ -168,6 +168,8 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 - 把 libc 端 `AT_*` 常量全部集中到 `kernel/include/uapi/auxv.h`
 - 删除 `libc/include/sys/auxv.h`（或改为转发）
 - 加 Makefile install 步骤：kernel UAPI 头安装到 libc sysroot 的 `<sys/auxv.h>` 路径
+
+**状态：已关闭（commits `be6694a` + 后续 stat.h 收口）**。落地路径走「sysroot install 模式」：kernel install-headers 把 `kernel/include/uapi/*.h` stage 到 `<STAGING>/kernel-headers/usr/include/uapi/`（已存在，未改），libc install-headers 把 `libc/include/sys/*.h` stage 到 `<STAGING>/libc/usr/include/sys/`（已存在，未改），最终 sysroot 由 `mk/components/sysroot.mk` 合并两个 staging tree —— `<uapi/>` 与 `<sys/>` 子目录互不相交，无重复目的地。`mk/components/sysroot.mk` 在 `libc-install.stamp` 上加 `kernel-headers-install.stamp` 前置依赖 + 向 libc submake 注入 `-isystem $(STAGING_DIR)/kernel-headers/usr/include`，让 libc TUs 在编译期解析 `<uapi/auxv.h>` 与 `<uapi/stat.h>`。注意「加 Makefile install 步骤」理解为「复用既有 install-headers + 补编译期 include 路径」，不是「新增 `$(SYSROOT_GENERATION_DIR)/usr/include/sys/...:` 写规则」（后者违反 §2.2 owner boundary）。
 
 ### 4.3 P2 — 镜像层收口
 
