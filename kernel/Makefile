@@ -44,7 +44,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c \
                    percpu/percpu.c \
                    time/clocksource.c time/tick.c time/timer.c \
                    intr/softirq.c \
-                   compiler_rt/udivti3.c arch/aarch64/subsys.c \
+                   $(wildcard compiler_rt/*.c) arch/aarch64/subsys.c \
                    arch/aarch64/serial_printk.c arch/aarch64/strcmp.c \
                    subsys/subsys.c \
                    arch/aarch64/idle_resume_stub.c \
@@ -66,7 +66,8 @@ KERNEL_C_SOURCES := \
     $(wildcard time/*.c) \
     $(wildcard percpu/*.c) \
     $(wildcard selftest/*.c) \
-    $(wildcard subsys/*.c)
+    $(wildcard subsys/*.c) \
+    $(wildcard compiler_rt/*.c)
 
 # Platform devices are selected by arch/<arch>/make.config.  Keep x86-only
 # APIC/PIC/PIT/RTC code out of architecture-neutral source discovery.

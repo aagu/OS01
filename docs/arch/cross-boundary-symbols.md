@@ -103,7 +103,7 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 
 | 类别 | 位置 | 现状 | 说明 |
 |---|---|---|---|
-| `__stack_chk_guard` | `libc/ssp/ssp.c:12`（唯一定义）；`kernel/core/main.c:63/77`（kernel 端独立定义） | 🟡 部分 | libc 端唯一定义点合规；但 kernel 在 `libk.a` 构建时**故意排除**（`ssp.c:10 #if !defined(__is_libk)`），靠人工 `#define __is_libk` 区分。kernel + libc 各一个定义，靠 build flag 避免双定义——**靠约定不靠强约束**。建议落地方向：把 kernel 端的 `__stack_chk_guard` 移到 `kernel/compiler_rt/`（与 `__stack_chk_fail` 配套），定义一次；libc 端继续按 `__is_libk` 排除（参见 `docs/superpowers/specs/2026-09-11-x86_64-kernel-ssp-design.md`）。 |
+| `__stack_chk_guard` | `libc/ssp/ssp.c:12`（libc 端唯一定义，`__is_libk` 时为空 TU）+ `kernel/compiler_rt/stack_chk_guard.c`（kernel 端唯一定义，`unsigned long`，0xDEADBEEFCAFEBABEUL 种子） | ✅ 修 | kernel 端 `__stack_chk_guard` + `__stack_chk_fail` 已收口到 `kernel/compiler_rt/` 单一 TU（spec §2.1 落点）；libc 端继续按 `__is_libk` 排除（AAGU-4.4，commit 由 Task 4 plan 实施）。两个 TU 之间靠 build flag 隔开而非靠约定；kernel 不再 link libk.a 的 `__stack_chk_guard`，链接器强制单一 TU（`nm kernel.elf \| grep stack_chk` 恰好一行 `__stack_chk_guard`）。`__stack_chk_fail` print + abort 语义镜像 `libc/ssp/ssp.c`，x86_64 通过 COM1 直写端口（无 `driver/serial.h` 依赖），aarch64 直接 halt（aarch64 phase-1 无 canary 使用者）。 |
 | `__udivti3` | `kernel/compiler_rt/udivti3.c`（KERNEL_C_SOURCES 一员）+ `runtime/builtins/udivti3.c`（selfhosted runtime archive） | ✅ 修 | 两份实现**服务于不同 build 路径**：freestanding 内联 vs selfhosted archive。两者均单一来源（kernel path 单一 TU；runtime path 单一 archive），无镜像违规。属于「同一符号两份实现但落点二选一」的合规情形。 |
 | `__divti3`、`__modti3`、`__clzsi2` 等 | （未在 OS01 内出现） | ✅ 修 | OS01 当前不在 kernel / libc 引入其他 builtin 符号；一旦引入，必须走 §2.1 落点。 |
 

@@ -136,6 +136,7 @@ int deep_copy_argv_selftest_overcap(void);
 int at_random_selftest_layout(void);
 int at_random_selftest_layout_even(void);
 int at_random_selftest_entropy(void);
+int test_canary_single_source(void);
 #endif
 
 // ── Test runner ────────────────────────────────────────────
@@ -170,6 +171,7 @@ int selftest_run_all(void)
     selftest_register("at_random_layout",       at_random_selftest_layout);
     selftest_register("at_random_layout_even",  at_random_selftest_layout_even);
     selftest_register("at_random_entropy",      at_random_selftest_entropy);
+    selftest_register("canary_single_source",   test_canary_single_source);
 #endif
 
     int passed = 0, failed = 0;
