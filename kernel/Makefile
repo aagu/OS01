@@ -113,16 +113,19 @@ ALL_CFLAGS += -ffile-prefix-map=$(CURDIR)=.
 endif
 ifeq ($(ARCH),aarch64)
 # The aarch64 phase-1 profile does NOT build a libc sysroot (no
-# userspace at all in phase 1), but the arch-neutral
-# kernel/time/clocksource.c (Timer Task 2.2 GREEN) pulls in
-# <list.h>, <sys/types.h>, <rbtree.h> transitively via
-# <time/clocksource.h> -> <time/timer.h> and <percpu/percpu.h>
-# -> <sched/task.h>. These are libc headers used by kernel TUs
-# because the x86_64 kernel traditionally gets them via the libc
-# sysroot's -isystem path (see the x86_64 block above). On aarch64
-# we instead expose the libc include dir directly via -I so the
-# include chain succeeds. This is x86_64-inert (guarded by ARCH)
-# and does NOT introduce a kernel-side copy of these headers.
+# userspace at all in phase 1), so the x86_64 libc-sysroot -isystem
+# block above is gated off for aarch64. Per AAGU-4 cross-boundary
+# spec §2.4, the libc canonical header is the SOLE public ABI source
+# for both kernel and user — kernel and user include the SAME
+# `<X.h>` file (libc/include/X.h). x86_64 reaches libc headers via
+# the immutable sysroot generation's -isystem; aarch64 reaches the
+# same canonical headers via direct -I on the libc source tree.
+#
+# The compat/ path is retained for the still-pending AAGU-4.3.x
+# migrations (list.h / rbtree.h / sys/types.h / string.h / stdlib.h)
+# which will follow this commit. Once those land, the compat/
+# -I line is removed by AAGU-4.3.6 (the last sub-issue).
+ALL_CFLAGS += -I$(CURDIR)/../libc/include
 ALL_CFLAGS += -I$(CURDIR)/include/compat
 endif
 ALL_ASMFLAGS := $(ASFLAGS) $(ARCH_ASMFLAGS)
