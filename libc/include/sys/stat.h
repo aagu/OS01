@@ -8,19 +8,27 @@
 extern "C" {
 #endif
 
-/* ── Filesystem stat (spec 2026-09-17 §6.4) ────────────────────────────────
- * Canonical struct stat / struct winsize / struct linux_dirent64 / AT_*
- * lookup flags / DT_* dirent types / S_IFMT+ / SEEK_* / F_* fcntl cmds /
- * F_OK access bits / TC* ioctl codes all live in kernel/include/uapi/stat.h
- * (spec §2.2 + §3.2 — single source). This header pulls them in once.
- *
- * libc-unique declarations kept here: S_IFSOCK / S_ISUID / S_ISGID /
- * S_ISVTX, per-group & per-other permission bits, FD_CLOEXEC, O_CLOEXEC,
- * S_IRWXUGO / S_IALLUGO / S_IRUGO / S_IWUGO / S_IXUGO masks, S_ISFIFO /
- * S_ISSOCK predicates, and the user-mode syscall prototypes (stat /
- * lstat / fstat / fstatat / lseek / fcntl / ioctl / getdents64 / access).
- */
-#include <uapi/stat.h>
+/* Linux x86_64 stat structure (matches glibc layout) */
+struct stat {
+    uint64_t st_dev;         /* 0: device */
+    uint64_t st_ino;         /* 8: inode */
+    uint64_t st_nlink;       /* 16: number of hard links */
+    uint32_t st_mode;        /* 24: file mode */
+    uint32_t st_uid;         /* 28: user ID */
+    uint32_t st_gid;         /* 32: group ID */
+    uint32_t __pad0;         /* 36: padding */
+    uint64_t st_rdev;        /* 40: device ID (if special file) */
+    int64_t  st_size;        /* 48: total size in bytes */
+    int64_t  st_blksize;     /* 56: blocksize for I/O */
+    int64_t  st_blocks;      /* 64: number of 512B blocks allocated */
+    uint64_t st_atime;       /* 72: time of last access */
+    uint64_t st_atime_nsec;  /* 80: nanosecond of last access */
+    uint64_t st_mtime;       /* 88: time of last modification */
+    uint64_t st_mtime_nsec;  /* 96: nanosecond of last modification */
+    uint64_t st_ctime;       /* 104: time of last status change */
+    uint64_t st_ctime_nsec;  /* 112: nanosecond of last status change */
+    uint64_t __unused[3];    /* 120-143: reserved */
+};
 
 /* File type macros */
 #define S_IFMT   00170000
@@ -88,20 +96,34 @@ extern "C" {
 #define W_OK  2
 #define X_OK  1
 
-/* at-style lookup flags (used by *at() syscalls) and dirent types
- * (DT_*) live in the canonical kernel/include/uapi/stat.h — see
- * spec §2.2 + §3.2. libc keeps its own struct stat, struct winsize,
- * struct linux_dirent64, S_IFSOCK / S_ISUID / S_ISGID / S_ISVTX / per-
- * group & per-other permission bits / FD_CLOEXEC / O_CLOEXEC, and the
- * function declarations below. */
-#include <uapi/stat.h>
+/* at-style lookup flags (used by *at() syscalls) */
+#define AT_FDCWD              -100
+#define AT_SYMLINK_NOFOLLOW   0x100
 
-/* ioctl request codes (libc keeps its own copies — uapi also defines a wider set) */
+/* dirent types */
+#define DT_UNKNOWN  0
+#define DT_FIFO     1
+#define DT_CHR      2
+#define DT_DIR      4
+#define DT_BLK      6
+#define DT_REG      8
+#define DT_LNK      10
+#define DT_SOCK     12
+#define DT_WHT      14
+
+/* ioctl request codes */
 #define TCGETS      0x5401
 #define TCSETS      0x5402
 #define TIOCGWINSZ  0x5413
 #define TIOCSPGRP   0x5410
 #define TIOCGPGRP   0x540F
+
+struct winsize {
+    unsigned short ws_row;
+    unsigned short ws_col;
+    unsigned short ws_xpixel;
+    unsigned short ws_ypixel;
+};
 
 /* linux_dirent64 for getdents64 */
 #ifndef __LINUX_DIRENT64_DEFINED
