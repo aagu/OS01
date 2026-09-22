@@ -48,9 +48,17 @@ $(STAMPS_DIR)/kernel-headers-install.stamp: FORCE
 	$(call os01_submake,kernel,install-headers INSTALL_ROOT=$(STAGING_DIR)/kernel-headers ARCH=x86_64 $(OS01_SUBMAKE_ARGS))
 	$(call stamp_check,$(STAGING_DIR)/kernel-headers)
 
-$(STAMPS_DIR)/libc-install.stamp: FORCE
+$(STAMPS_DIR)/libc-install.stamp: $(STAMPS_DIR)/kernel-headers-install.stamp FORCE
 	@mkdir -p $(dir $@)
-	$(call os01_submake,libc,install INSTALL_ROOT=$(STAGING_DIR)/libc $(OS01_SUBMAKE_ARGS))
+	# AAGU-4.2: libc/include/sys/auxv.h + libc/include/sys/stat.h are
+	# forwarding headers that `#include <uapi/auxv.h>` / `<uapi/stat.h>`.
+	# libc/Makefile has -Iinclude only, so without this injection the libc
+	# submake cannot resolve <uapi/...> at compile time. Injecting
+	# -isystem into CFLAGS exposes the kernel-headers staging tree (which
+	# the kernel-headers stamp already produced on its prerequisite edge)
+	# without violating spec §2.2 — libc's install-headers still copies
+	# only libc/include/, so the libc staging tree never owns uapi/*.
+	$(call os01_submake,libc,install INSTALL_ROOT=$(STAGING_DIR)/libc CFLAGS="-isystem $(STAGING_DIR)/kernel-headers/usr/include" $(OS01_SUBMAKE_ARGS))
 	$(call stamp_check,$(STAGING_DIR)/libc)
 
 # ── mbedTLS adapter (R7) ──────────────────────────────────────────
