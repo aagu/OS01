@@ -17,7 +17,7 @@
 #include <fs/vfs.h>
 #include <fs/elf.h>
 #include <random/random.h>
-#include <uapi/auxv.h>
+#include <sys/auxv.h>
 #include <arch/auxv.h>      /* arch_auxv_platform / arch_auxv_payload_size */
 
 #include <string.h>

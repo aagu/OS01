@@ -7,7 +7,7 @@
 #include <core/printk.h>
 #include <random/random.h>   /* random_is_ready */
 #include <sched/task.h>       /* USER_STACK_BASE/TOP + task_selftest_auxv_probe */
-#include <uapi/auxv.h>
+#include <sys/auxv.h>
 #include <string.h>
 #include <stdint.h>
 

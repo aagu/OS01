@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <sched/task.h>
+#include <sys/ioctl.h>
 
 // ── Forward declarations for ops tables ─────────────────────────
 static int ptmx_open(const char *name, file_t **out_file);

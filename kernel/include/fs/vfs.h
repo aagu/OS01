@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>   // size_t
 #include <block/blockdev.h>
-#include <uapi/stat.h>
+#include <sys/stat.h>
 
 typedef enum {
     VFS_FILE    = 1,

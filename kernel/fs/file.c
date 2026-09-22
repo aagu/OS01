@@ -11,7 +11,7 @@
 #include <fs/poll.h>
 #include <tty/pty.h>
 #include <fs/devfs.h>
-#include <uapi/stat.h>
+#include <sys/stat.h>
 #include <memory/uaccess.h>
 
 // ── Forward declarations ─────────────────────────────────────

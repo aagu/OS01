@@ -73,33 +73,6 @@ endif
 lib: $(if $(filter userland,$(PROFILE_CAPABILITIES)),$(SYSROOT_STAMP))
 	$(call require_capability,userland)
 
-# ── Cross-boundary ABI consistency check (AAGU-4.2) ───────────
-# libc/sys/auxv.h + libc/sys/stat.h own their own copies of the AT_*/DT_*
-# /AT_FDCWD/AT_SYMLINK_NOFOLLOW constants (libc must not depend on
-# kernel headers at compile time, per the kernel→libc dependency
-# direction). The two sides must stay byte-identical for ABI semantics
-# to remain single-source in spirit; this check runs `rg | sort | diff`
-# against kernel/UAPI/{auxv,stat}.h. Failure here means the two
-# sides drifted apart and need to be re-synced.
-.PHONY: check-uapi-consistency
-check-uapi-consistency:
-	@ok=1; \
-	for pair in \
-	    "kernel/include/uapi/auxv.h|libc/include/sys/auxv.h|AT_" \
-	    "kernel/include/uapi/stat.h|libc/include/sys/stat.h|DT_" \
-	    "kernel/include/uapi/stat.h|libc/include/sys/stat.h|AT_(FDCWD|SYMLINK_NOFOLLOW)"; do \
-	  IFS='|' read -r k l pat <<< "$$pair"; \
-	  kd=$$(rg "^#define $$pat" "$$k" | sort); \
-	  ld=$$(rg "^#define $$pat" "$$l" | sort); \
-	  if [ "$$kd" != "$$ld" ]; then \
-	    echo "ERROR: $$k vs $$l diverge on $$pat"; \
-	    diff <(echo "$$kd") <(echo "$$ld"); \
-	    ok=0; \
-	  fi; \
-	done; \
-	if [ $$ok -eq 1 ]; then echo "  [uapi-consistency] OK"; fi; \
-	exit $$((1 - ok))
-
 # ── Editor support: project-root sysroot for clangd ─────
 # .clangd still resolves its include paths through the legacy project-root
 # sysroot/ directory. The refactor publishes immutable sysroot generations

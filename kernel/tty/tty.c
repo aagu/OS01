@@ -13,7 +13,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <termios.h>
-#include <uapi/stat.h>
+#include <sys/stat.h>
+#include <sys/ioctl.h>
 
 // Local: NOT yet in libc/include/termios.h. 0 == "special char disabled".
 #define _POSIX_VDISABLE 0

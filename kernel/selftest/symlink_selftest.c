@@ -28,7 +28,7 @@
 #include <core/printk.h>
 #include <fs/vfs.h>
 #include <fs/ext2.h>
-#include <uapi/stat.h>       // AT_FDCWD
+#include <sys/stat.h>        // AT_FDCWD
 #include <string.h>
 #include <errno.h>
 
