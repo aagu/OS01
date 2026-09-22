@@ -8,7 +8,7 @@
 
 **Tech Stack:** OS01 kernel + libc + runtime（C11、clang、freestanding kernel）；Makefile + mk/components/*.mk；sysroot install 步骤（kernel UAPI → libc sysroot `<sys/auxv.h>` 等）。
 
-**Spec:** [`docs/arch/cross-boundary-symbols.md`](../../arch/cross-boundary-symbols.md) — 本 plan 的 5 个任务一一对应 spec §4 后续 issue 切分（含 AAGU-4.6 atexit follow-up，由 reviewer round 4 拆出）。
+**Spec:** [`docs/arch/cross-boundary-symbols.md`](../../arch/cross-boundary-symbols.md) — 本 plan 的 5 个任务一一对应 spec §4 后续 issue 切分（含 AAGU-4.6 atexit follow-up）。
 
 **前置条件：** AAGU-4 规范已落地（spec 文档 + AGENTS.md 索引更新，commit 待 PR）。本 plan 不写 AAGU-4 的 PR——只规划 follow-up 落地。
 
@@ -45,19 +45,12 @@
 
 - [ ] **Step 1: 写 hosttest 覆盖 `fread/fwrite` 验证路径 — pipe-based fake mini_file_t + 真实 `TEST_FUNC` 模式**
 
-**reviewer round 5 最小化**：
 - 删除 `#include "stdio_internal.h"`：该目录不在 test include path；`mini_file_t` 已由 OS01 `<stdio.h>` 公开
 - 删除 `test_fread_on_stdout_returns_zero`：修前把 stdout sentinel 当地址解引用 → 整个 hosttest 崩溃，不能作为 RED case
 - `fwrite` 测试**不**在调用前 `close(pipefd[0])` —— 修前 `write` 会触发 SIGPIPE；保留 read end，调用后再同时 close 两端
 - 仅保留两个 pipe + 未注册 `mini_file_t` 测试；修前都稳定得到 `n == 1`、修后得到 `n == 0`
 - 不引入 `signal` / `setjmp` / `destructor`
-
-**reviewer round 4 修正**（前置）：
-- 删除 `0xDEADBEEF` 野指针 + SIGSEGV catcher 方案（崩溃路径不可控）
-- 删除 `__attribute__((destructor))` + 显式 oracle 方案（OS01 libc 无 `.init_array`）
-- 删除 `--target=x86_64-elf --sysroot=$SYSROOT` + QEMU user-binary 方案（不是 hosttest 模式）
-- 改为：**fake `mini_file_t` + 真实 pipe fd** —— 已分配 `mini_file_t`，但用 `is_open_file` 未注册路径触发
-- 复制 `hosttests/cases/test_libc_fflush.c` 的真实 pattern（`TEST_FUNC` / `assert_eq` / `TEST_LIST_BEGIN/END` / `TEST_ENTRY` / `__test_table` / `__test_stats`），不用不存在的 `TEST_CASE` / `ASSERT_EQ`
+- 复制 `hosttests/cases/test_libc_fflush.c` 的真实 pattern（`TEST_FUNC` / `assert_eq` / `TEST_LIST_BEGIN/END` / `TEST_ENTRY` / `__test_table` / `__test_stats`）
 
 文件：`hosttests/cases/test_libc_fread_fwrite_validate.c`（NEW）
 
@@ -140,11 +133,9 @@ int main(void) {
 }
 ```
 
-- [ ] **Step 2: 把测试 bin 加进 `hosttests/Makefile` + 跑 hosttest 验证 RED（reviewer round 4：必须用真实 make target，不能假设 `test-libc-stream-validation` 已存在）**
+- [ ] **Step 2: 把测试 bin 加进 `hosttests/Makefile` + 跑 hosttest 验证 RED**
 
-**reviewer round 4 修正**：
-- 原 Step 1 / Step 2 假设 `make PROFILE=x86_64-clang test-libc-stream-validation` 存在 —— **不存在**，必须按现有 `test_libc_fflush.elf` 的注册 pattern 加进 `hosttests/Makefile`
-- 删除 SIGSEGV catcher / 野指针方案
+- 必须按现有 `test_libc_fflush.elf` 的注册 pattern 加进 `hosttests/Makefile`（`test-libc-stream-validation` target 不存在）
 - 复用 `hosttests/Makefile` 已有的 `libc_stdio_file.o` 编译规则（已存在）+ 加新 `.o` + 加新 `.elf` target
 
 **a. 把新 test 文件加进 `hosttests/Makefile`：**
@@ -174,7 +165,7 @@ a) **TEST_BINS 列表追加**（line 62 附近的 `TEST_BINS :=` 块）：
        $(TEST_BLD)/test_libc_fread_fwrite_validate.elf \
        ...
    ```
-   （reviewer round 5 明确要求，不是 `+=`，是直接 append 到 `TEST_BINS :=` 块）
+   （直接 append 到 `TEST_BINS :=` 块，不是 `+=`）
 
 b) **`.PHONY` 列表追加**（line 88 附近的 `.PHONY` 行）：
    ```make
@@ -184,7 +175,7 @@ b) **`.PHONY` 列表追加**（line 88 附近的 `.PHONY` 行）：
 c) **新增 phony target**（追加在 `all:` 之后）：
    ```make
    test-libc-fread-fwrite-validate: $(TEST_BLD)/test_libc_fread_fwrite_validate.elf
-   	$<   # 执行 ELF（host 原生）
+	$<   # 执行 ELF（host 原生）
    ```
 
 `libc_stdio_file.o` 已有编译规则（line ~80 附近，`$(TEST_BLD)/libc_stdio_file.o: $(LIBC_SRC)/stdio/stdio_file.c`），不需要新增。
@@ -241,21 +232,20 @@ size_t fwrite(const void *p, size_t s, size_t n, void *f)
 }
 ```
 
-- [ ] **Step 5: 跑 hosttest 验证 RED → GREEN（reviewer round 4：用真实 makefile target）**
+- [ ] **Step 5: 跑 hosttest 验证 RED → GREEN（用真实 makefile target）**
 
 ```sh
 cd /home/aagu/OS01
 make PROFILE=x86_64-clang test-libc-fread-fwrite-validate
 ```
 
-Expected（修后 GREEN）：3 个 `TEST_FUNC` 全 PASS。
+Expected（修后 GREEN）：2 个 `TEST_FUNC` 全 PASS。
 - `test_fread_unregistered_stream_returns_zero`：fake.fd 是 pipe，**post-fix** `fread` 在 `is_open_file` 检查失败后 return 0，pipe 没被 deref
 - `test_fwrite_unregistered_stream_returns_zero`：post-fix `fwrite` return 0，pipe 写端不会被写到
-- `test_fread_on_stdout_returns_zero`：post-fix `fread(stdout)` return 0（POSIX）
 
 **禁止**：`clang ... -L build/x86_64-clang/runtime -lk`（host toolchain，不可执行 OS01 代码）。
 
-**禁止**：`make test-libc-stream-validation`（target 不存在，已被 reviewer round 4 明确指出；用 `test-libc-fread-fwrite-validate`）。
+**禁止**：`make test-libc-stream-validation`（target 不存在）；用 `test-libc-fread-fwrite-validate`。
 
 - [ ] **Step 6: 跑完整测试套件**
 
@@ -294,7 +284,7 @@ git commit -m "fix(libc/stdio): validate stream in fread/fwrite (close AAGU-4.1)
 
 - [ ] **Step 1: 在 `kernel/include/uapi/auxv.h` 补齐 8 个缺失常量**
 
-`kernel/include/uapi/auxv.h:11` 后插入（按 Linux `<sys/auxv.h>` 标准值，reviewer #2 round 3 修正 — 实为 8 个不是 7 个）：
+`kernel/include/uapi/auxv.h:11` 后插入（按 Linux `<sys/auxv.h>` 标准值，实为 8 个不是 7 个）：
 
 ```c
 #define AT_NOTELF        10   /* program is not ELF */
@@ -328,9 +318,9 @@ unsigned long getauxval(unsigned long type);
 
 这样 libc 编译期仍能找到 `AT_*`，但不重复定义。
 
-- [ ] **Step 3: 加 Makefile install 步骤 — single-source 双路径编排（reviewer #1 round 3 修正：duplicate-destination 解决）**
+- [ ] **Step 3: 加 Makefile install 步骤 — single-source 双路径编排**
 
-**关键问题**（reviewer #1 round 3）：
+**关键问题**（避免 sysroot 装配 duplicate destination）：
 - 旧 Step 3 让 kernel install-headers 同时 stage `usr/include/uapi/auxv.h` + `usr/include/sys/auxv.h`，libc install 又 stage `usr/include/sys/auxv.h`（libc 的 forwarding 头）—— **同一 destination 来自两个 component**，sysroot.mk merge 时会按 manifest duplicate-destination 失败。
 - 旧 Step 3 还让 kernel install-headers 把 uapi/* 拷到 sys/*（kernel 一侧写 `usr/include/sys/`，绕过 owner 边界）
 
@@ -350,13 +340,13 @@ unsigned long getauxval(unsigned long type);
 
 **a. `kernel/Makefile` install-headers（已存在 — 不修改）**
 
-**reviewer round 4 修正**：`kernel/Makefile:412-425` 现有 install-headers recipe 用 `INSTALL_ROOT` + `cp -R --preserve=timestamps include/. $(INSTALL_ROOT)/usr/include/.` 已经正确 stage `kernel/include/uapi/*.h` 到 sysroot。**本任务不改 kernel header-install recipe**，删除 plan 里所有 `DESTDIR` / 重复 `install-headers:` recipe / 「其他头同理」。
+**kernel/Makefile install-headers 现状**：`kernel/Makefile:412-425` 现有 install-headers recipe 用 `INSTALL_ROOT` + `cp -R --preserve=timestamps include/. $(INSTALL_ROOT)/usr/include/.` 已经正确 stage `kernel/include/uapi/*.h` 到 sysroot。**本任务不改 kernel header-install recipe**，不写新 DESTDIR / 重复 install-headers: recipe / 「其他头同理」。
 
 唯一可能需要 kernel 端做的：**如果某条新 UAPI 头不在 `kernel/include/uapi/` 下而是别处**，把它移到 `kernel/include/uapi/`。否则本任务不动 kernel/Makefile。
 
 **b. `libc/include/sys/auxv.h`（改动内容 — 文件已存在，**不是**新建）**
 
-**reviewer round 4 修正**：保留 include guard 与 `getauxval` 声明，仅：
+**b. `libc/include/sys/auxv.h` 现状**：保留 include guard 与 `getauxval` 声明，仅：
 - 加入 `#include <uapi/auxv.h>`（forwarding）
 - 删除所有 `AT_*` 宏定义（**23 个**全部移到 kernel/include/uapi/auxv.h）
 
@@ -379,7 +369,7 @@ unsigned long getauxval(unsigned long type);
 
 **c. `libc/include/sys/stat.h`（改动内容 — 文件已存在，**不是**替换）**
 
-**reviewer round 4 修正**：**不得替换为只有 2 个 getdents 声明的短文件**。保留其独有声明 / 结构 / 函数：
+**c. `libc/include/sys/stat.h` 现状**：**不得替换为只有 2 个 getdents 声明的短文件**。保留其独有声明 / 结构 / 函数：
 - 保留 `struct stat` 定义（libc 端独立版本）
 - 保留 `fstat` / `stat` / `lstat` / `umask` / `chmod` / `mkdir` 等独有声明
 - 保留 `#include <sys/types.h>` 等已有 includes
@@ -441,9 +431,9 @@ git add kernel/include/uapi/auxv.h \
 git commit -m "feat(uapi): single source for AT_* (close AAGU-4.2)"
 ```
 
-- [ ] **Step 8: 同时收口 `stat.h` 第二对 UAPI 镜像（reviewer #2 round 3 修正）**
+- [ ] **Step 8: 同时收口 `stat.h` 第二对 UAPI 镜像**
 
-`kernel/include/uapi/stat.h:102-111` 有 6 个 `DT_*`（`DT_UNKNOWN/REG/DIR/CHR/BLK/LNK`），`libc/include/sys/stat.h:104-112` 有 9 个 `DT_*`（多 `DT_FIFO (1)`、`DT_SOCK (12)`、`DT_WHT (14)` —— POSIX 完整集合）。**不是 8 个**——reviewer #2 round 3 抓出 spec §6 「DT_* 8 个」与 §3.2 「6/9」矛盾。
+`kernel/include/uapi/stat.h:102-111` 有 6 个 `DT_*`（`DT_UNKNOWN/REG/DIR/CHR/BLK/LNK`），`libc/include/sys/stat.h:104-112` 有 9 个 `DT_*`（多 `DT_FIFO (1)`、`DT_SOCK (12)`、`DT_WHT (14)` —— POSIX 完整集合）。kernel 这边不是 8 个 —— 实际差 3 个，需补全。
 
 合并到 `kernel/include/uapi/stat.h` 一处（补全 9 个 `DT_*` POSIX 完整集合 + 原有 `AT_FDCWD`/`AT_SYMLINK_NOFOLLOW`）；`libc/include/sys/stat.h` 改为转发 `#include <uapi/stat.h>` + 保留 libc 用户态扩展（`getdents/getdents64` 等）；Makefile install 步骤（Step 3b/3c）覆盖 `<sys/stat.h>` 路径。
 
@@ -460,7 +450,7 @@ git commit -m "feat(uapi): single source for stat.h AT_*/DT_* (close AAGU-4.2 st
 
 ## Task 3: `kernel/include/compat/*` 6 文件收口（AAGU-4.3，P2）
 
-**reviewer round 4 决议**：本 task 是**边界规则**，**不是实施 recipe**。每头 owner 决策 + 实际迁移在独立落地 issue 提交。plan 不预写 `libc/include/{string,stdlib,...}` 的删除 / 转发内容，不预写 `kernel/include/freestanding/allocator.h` 或任何 freestanding/ 头 —— 这些是落地 issue 才决定的 ABI / owner 选择。
+本 task 是**边界规则**，**不是实施 recipe**。每头 owner 决策 + 实际迁移在独立落地 issue 提交。plan 不预写 `libc/include/{string,stdlib,...}` 的删除 / 转发内容，不预写 `kernel/include/freestanding/allocator.h` 或任何 freestanding/ 头 —— 这些是落地 issue 才决定的 ABI / owner 选择。
 
 **规范内容（边界规则）**：每个 compat 头（list.h / rbtree.h / sys/cdefs.h / sys/types.h / string.h / stdlib.h）必须满足以下 4 列表才允许 commit：
 
@@ -471,8 +461,8 @@ git commit -m "feat(uapi): single source for stat.h AT_*/DT_* (close AAGU-4.2 st
 
 **落地 issue 模板**：AAGU-4.3.1（list）、AAGU-4.3.2（rbtree）、AAGU-4.3.3（sys/cdefs）、AAGU-4.3.4（sys/types）、AAGU-4.3.5（string）、AAGU-4.3.6（stdlib）—— 每个对应一个独立 issue，启动前 post comment 在 AAGU-4 issue 上贴出该头的 4 列表等 reviewer 确认。
 
-**禁止**（reviewer round 4 + round 5 明确）：
-- parent plan **不得**包含 `git rm -r kernel/include/compat`（reviewer round 5）—— 删除 compat/ 是 6 个 sub-issue 的**最后一个**做，且只在替代 include 路径全验证后才删
+**禁止**：
+- parent plan **不得**包含 `git rm -r kernel/include/compat` —— 删除 compat/ 是 6 个 sub-issue 的**最后一个**做，且只在替代 include 路径全验证后才删
 - 在本 plan 预写 `libc/include/{string,stdlib,list,rbtree,sys/cdefs,sys/types}.h` 的删除 / 转发内容
 - 在本 plan 预写 `kernel/include/freestanding/allocator.h` 或任何 freestanding/ 头
 - 把 6 个落地 issue 合并成一个 PR（每个独立 owner 决策需独立 review）
@@ -717,13 +707,13 @@ void arch_atomic_and_u64(uint64_t *addr, uint64_t mask) {
 }
 ```
 
-**reviewer round 4 修正**：
-- `stxr` 改为 `stlxr`（release 语义）
-- `ldaxr + stlxr + "memory"` 的准确契约是 **acquire-release RMW**，**不**是 seq_cst；接口注释同步改为「acq_rel」
+**aarch64 strong override contract**：
+- `stxr` 用 `stlxr`（release 语义）
+- `ldaxr + stlxr + "memory"` 的准确契约是 **acquire-release RMW**，**不**是 seq_cst；接口注释同步标「acq_rel」
 - 三个独立约束（`old/new_val/status`）保留
 - 若未来确需 seq_cst（要求 RMW 之间的 total order），需在该 task 另加 `dmb ish` 并给出理由 + 测试；**当前不引入**
 
-**reviewer #5 round 3 修正**：
+**当前实施注意事项**（atomic 实现细节）：
 - 旧版本 `tmp` 寄存器同时被 `orr` 当 64-bit new_val 用、被 `stxr %w1` 当 32-bit status 用 —— **status 必须独立**，因为 `stxr %w1, %1, ...` 会把 `%1` 的低 32 位当 status，新 value 会被覆盖
 - 现版本：`[old]`, `[new_val]`, `[status]` 三个独立约束寄存器；`stlxr %w[status]` 写 32-bit status 寄存器（GCC/clang `w` prefix 把 64-bit reg 取低 32 位），不影响 new_val
 - retry 条件 `cbnz %w[status], 1b` 用 status 寄存器
@@ -800,9 +790,9 @@ git commit -m "refactor(atomic): arch_atomic_or/and_u64 facade + softirq.c drop 
 
 ---
 
-## 后续 issue（reviewer round 5 拆出 — AAGU-4.6）
+## 后续 issue — AAGU-4.6
 
-**AAGU-4.6 — atexit 死链整改（reviewer round 4 拆出 + round 5 移到独立节）**
+**AAGU-4.6 — atexit 死链整改**
 
 - **范围**：解决 `__call_atexit_handlers`（`libc/stdlib/atexit.c:20`）定义但全 repo 0 caller 的问题
 - **验收**：用 OS01 QEMU user-program E2E —— 注册 handler → `exit(0)` → handler 写 marker 到 file/pipe → 父进程断言 marker 存在
@@ -811,7 +801,7 @@ git commit -m "refactor(atomic): arch_atomic_or/and_u64 facade + softirq.c drop 
   - 用 hosttest 替代（atexit 死链问题在 csu 层，hosttest 触达不到）
   - 用 `__attribute__((destructor))`（OS01 libc 无 `.init_array` runtime support）
   - 拆到 AAGU-4.1 stdio FILE 注册 plan 内（不属于 stdio 范畴）
-- **owner 关系**：AAGU-4.6 由 spec §3.5 atexit 行归属（reviewer round 5 显式约束）；spec §3.5 该行保持 AAGU-4.6 归属声明
+- **owner 关系**：AAGU-4.6 由 spec §3.5 atexit 行归属；spec §3.5 该行保持 AAGU-4.6 归属声明
 - **优先级**：P3；估时 2 days
 
 ---
@@ -823,7 +813,7 @@ git commit -m "refactor(atomic): arch_atomic_or/and_u64 facade + softirq.c drop 
 3. **Type / name consistency**：所有 task 用 `is_open_file` / `arch_auxv_platform` / `arch_atomic_or_u64` / `arch_atomic_and_u64` / `__stack_chk_guard` 等真实符号名，与 spec 一致。✅
 4. **Task 右边界**：5 个 task + 1 follow-up（AAGU-4.6）各自可独立 review / 独立 commit / 独立测试。✅
 5. **No 镜像层引入**：Task 3 走**逐头 owner 决策**（4 列表），**不**预写 freestanding/allocator.h 等替换路径；删除 compat/ 是 6 个 sub-issue 的最后一个做。✅
-6. **Task 1 hosttest 现状**：2 个 TEST_FUNC（pipe-based fake mini_file_t，无 SIGSEGV / destructor / setjmp / `--sysroot`）；`hosttests/Makefile` 加 `TEST_BINS` + `.PHONY` + phony target 跑 ELF。✅
+6. **Task 1 hosttest 现状**：2 个 TEST_FUNC（pipe-based fake mini_file_t）；`hosttests/Makefile` 加 `TEST_BINS` + `.PHONY` + phony target 跑 ELF。✅
 7. **Task 2 sysroot 编排现状**：kernel `install-headers` 不动；kernel 唯一 stage `<uapi/>`，libc 唯一 stage `<sys/>` forwarding/wrapper；每个 destination 单一 producer。✅
 8. **Task 3 边界规则现状**：仅消费者清单 / 唯一 owner / 唯一公开安装路径 / x86_64+aarch64 编译测试 4 列表；落地 6 个 sub-issue；parent plan **不**预写 header 落地路径，**不**含 `git rm -r`。✅
 9. **Task 5 atomic 现状**：`kernel/include/arch/atomic.h` facade 注释标「acq_rel」；aarch64 strong override 用 `ldaxr + stlxr + memory clobber`（acquire-release RMW，**不** seq_cst）；3 个独立约束（`old/new_val/status`）；`stxr` 已统一改 `stlxr`。✅
@@ -840,7 +830,7 @@ git commit -m "refactor(atomic): arch_atomic_or/and_u64 facade + softirq.c drop 
 | Task 3 | AAGU-4.3 | parent plan **仅边界规则**（reviewer round 5 明确）；6 个 sub-issue 估时各自 ~ 1.5 days/header（落地步骤在各自 sub-issue plan） | P2 |
 | Task 4 | AAGU-4.4 | 1 day | P3 |
 | Task 5 | AAGU-4.5 | 4 days（arch_atomic_or/and_u64 facade + x86_64 + aarch64 strong override + softirq.c 移除 ifdef + x86-only 驱动重定位） | P2 |
-| follow-up | **AAGU-4.6**（reviewer round 4 拆出） | 2 days（atexit 死链整改：QEMU user-program E2E + csu/exit 重写；不含 hosttest） | P3 |
+| follow-up | **AAGU-4.6**（atexit 死链整改） | 2 days（QEMU user-program E2E + csu/exit 重写；不含 hosttest） | P3 |
 
 落地 issue 创建顺序：AAGU-4.1 → AAGU-4.2 → AAGU-4.5 → AAGU-4.3.x（6 个 sub-issue 各自独立 owner + commit）→ AAGU-4.4 → AAGU-4.6。`git rm -r kernel/include/compat` 由 6 个 sub-issue 的**最后一个**做。
 
