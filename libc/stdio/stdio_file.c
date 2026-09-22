@@ -108,6 +108,12 @@ int fclose(void *f)
 size_t fread(void *ptr, size_t size, size_t nmemb, void *f)
 {
     if (!f || !ptr) return 0;
+    /* stdout/stderr/stdin are sentinels (fd 1/2/0), not mini_file_t —
+     * POSIX: stdout/stderr are not open for reading; stdin is not
+     * readable via fread in this unbuffered libc. Return 0 rather than
+     * dereferencing the sentinel as a struct address. */
+    if (f == stdout || f == stderr || f == stdin) return 0;
+    if (!is_open_file(f)) return 0;       /* not a stream we own */
     mini_file_t *mf = (mini_file_t *)f;
     int64_t n = read(mf->fd, ptr, size * nmemb);
     if (n < 0) return 0;
@@ -123,6 +129,7 @@ size_t fwrite(const void *p, size_t s, size_t n, void *f)
         int64_t written = write(fd, p, s * n);
         return (written < 0) ? 0 : (size_t)(written / s);
     }
+    if (!is_open_file(f)) return 0;       /* not a stream we own */
     mini_file_t *mf = (mini_file_t *)f;
     int64_t written = write(mf->fd, p, s * n);
     if (written < 0) return 0;
