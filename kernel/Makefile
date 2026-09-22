@@ -121,12 +121,9 @@ ifeq ($(ARCH),aarch64)
 # the immutable sysroot generation's -isystem; aarch64 reaches the
 # same canonical headers via direct -I on the libc source tree.
 #
-# The compat/ path is retained for the still-pending AAGU-4.3.x
-# migrations (list.h / rbtree.h / sys/types.h / string.h / stdlib.h)
-# which will follow this commit. Once those land, the compat/
-# -I line is removed by AAGU-4.3.6 (the last sub-issue).
+# AAGU-4.3 closes the kernel/include/compat/* mirror (6 sub-issues
+# landed). The compat/ path is no longer needed.
 ALL_CFLAGS += -I$(CURDIR)/../libc/include
-ALL_CFLAGS += -I$(CURDIR)/include/compat
 endif
 ALL_ASMFLAGS := $(ASFLAGS) $(ARCH_ASMFLAGS)
 ifeq ($(ARCH),x86_64)
