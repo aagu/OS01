@@ -1,45 +1,25 @@
-// kernel/random/random.c — ChaCha20 CSPRNG pool + RDRAND/RDSEED reseed.
+// kernel/random/random.c — ChaCha20 CSPRNG pool + arch-neutral facade 接入。
 //
-// Stateless algorithm lives in libc (chacha20.c, linked via libk.a); this
-// file owns the secret state: the 32-byte key, a 64-bit block index, and
-// the pool spinlock.  RDRAND/RDSEED are used ONLY for initial seeding and
-// periodic reseed (every 1 MiB of output) — never per-call — because RDRAND
-// throughput is bounded and per-call rekeying would turn a CSPRNG back into
-// a hardware dependency without adding security.
+// 旧 mix_hw_entropy()（内联 asm + cycle-counter fallback）已删除（AAGU-5）。
+// 新的熵获取走 kernel/include/arch/random.h 的 facade：
+//   - arch_random_get_entropy(buf, &q) 一次性 32B + 质量标签
+//   - q ∈ { NONE, WEAK, STRONG }  在 kernel/include/arch/random.h 定义（spec §2）
 //
-// Entropy contract (issue AAGU-2 §1, P0-1):
-//   - mix_hw_entropy() returns true iff at least one of the four 64-bit
-//     words came from RDRAND/RDSEED. When none did (QEMU default CPU
-//     without RDRAND/RDSEED, aarch64 RNDR not yet wired), every word is
-//     cycle-counter ^ jiffies — low-entropy, attacker-recoverable.
-//   - random_init() only sets random_ready=true when mix_hw_entropy()
-//     returns true. Otherwise the pool stays not-ready, the boot log
-//     carries a one-line reason, and get_random_bytes() fail-closes by
-//     memsetting the request buffer to 0 — letting security-sensitive
-//     callers (AT_RANDOM payload, __stack_chk_guard via getrandom,
-//     userland key derivation) detect the all-zero state and abort
-//     instead of silently trusting deterministic output.
+// random_init() 对 q 做显式三分支 switch（spec §5.1），不再用 facade bool
+// 返回值决定 ready — q 才是控制流输入。
 //
-// Reseed contract (issue AAGU-2 §1, P0-1 follow-up):
-//   - reseed() is generate-then-rekey: feed (old_key || fresh_hw) through
-//     ChaCha20, take the first 32 bytes as the new key. The old XOR-only
-//     reseed leaked the prior key if the new entropy was recoverable;
-//     the new path keeps an attacker from rolling back to a known key.
-//   - If HW entropy is unavailable during reseed, the permutation is
-//     over a weak input — drop to not-ready and log. Don't pretend the
-//     pool is healthy.
+// 状态转移（AAGU-2 衔接对照见 docs/arch/entropy-source-facade.md §5.2）：
+//   - UEFI GetRNG 早返回    → ready=true (STRONG, boot_entropy)
+//   - facade q==STRONG      → ready=true
+//   - facade q==WEAK        → ready=true （AAGU-5 父契约 §交付物 2 授权）
+//   - facade q==NONE/false  → ready=false (fail-closed)
 //
-// /dev/random write contract (issue AAGU-2 §1, P0-1 follow-up):
-//   - random_add_entropy() folds the caller buffer into pool_key (XOR
-//     into a 32-byte accumulator) under pool_lock. No-op until
-//     random_init() succeeds — userland can't inject entropy we haven't
-//     earned from hardware yet. Called by kernel/fs/devfs.c::random_write.
+// AAGU-2 fail-closed 在通用 ready 决策上保持不变；AT_RANDOM 走
+// arch_random_get_strong() 单独 STRONG-only（spec §6）— task.c 改动见 Task 5。
 #include <random/random.h>
 #include <arch/random.h>
-#include <arch/cpu.h>        // arch_cycle_counter()
 #include <arch/spinlock.h>
 #include <log/log.h>
-#include <time/timer.h>            // jiffies
 #include <core/bootinfo.h>         // boot_context, BOOT_CONTEXT_HAS_BOOT_ENTROPY
 #include <chacha20.h>
 #include <string.h>
@@ -48,87 +28,93 @@
 #define RESEED_INTERVAL (1u << 20)   // 1 MiB of output between reseeds
 
 static uint8_t  pool_key[32];
-static uint64_t pool_blk;            // 64-bit block index (see below)
+static uint64_t pool_blk;
 static uint64_t pool_bytes_since_reseed;
 static spinlock_T pool_lock = { .lock = 1L };
 static bool random_ready;
 
-// Mix 32 bytes of hardware entropy.  Returns true iff at least one of
-// the four 64-bit words came from RDRAND/RDSEED — i.e. the buffer
-// contains real hardware entropy.  When all RDRAND/RDSEED calls fail
-// (QEMU default CPU without RDRAND/RDSEED, aarch64 stub), every word
-// is filled from cycle-counter ^ jiffies (low-entropy, attacker-
-// recoverable), and we return false so the caller can keep
-// random_ready=false instead of silently seeding deterministic state.
-static bool mix_hw_entropy(uint8_t out[32])
-{
-    uint64_t w[4];
-    int had_hw = 0;
-    for (int i = 0; i < 4; i++) {
-        if (rdseed64(&w[i]) || rdrand64(&w[i])) {
-            had_hw++;
-        } else {
-            w[i] = arch_cycle_counter() ^ jiffies;
-        }
-    }
-    memcpy(out, w, 32);
-    /* Wipe w so the partial RDRAND/RDSEED value doesn't sit on the stack
-     * longer than necessary. */
-    memset(w, 0, sizeof(w));
-    return had_hw > 0;
-}
+/* v8: C 预处理器 stringify 宏（spec §3.1 32B 契约 / spec §5.1 ready 决策外的
+ * 辅助宏）。双层结构是 C99 标准 — 内层 #x 不展开参数，外层强制先展开再 stringify。 */
+#define OS01_STRINGIFY_(x) #x
+#define OS01_STRINGIFY(x) OS01_STRINGIFY_(x)
 
 void random_init(const struct boot_context *bootctx)
 {
     pool_blk = 0;
     pool_bytes_since_reseed = 0;
 
-    /* UEFI GetRNG path (preferred): the bootloader fetched 32 bytes
-     * via EFI_RNG_PROTOCOL (QEMU + virtio-rng, real hw with TPM/RNG).
-     * Mark the pool ready immediately — this is audited entropy, no
-     * need to also try RDRAND/RDSEED. */
+    /* v8: variant log 在 random_init 入口处打印 — 用 C 预处理器 stringify 把
+     * -DKERNEL_VARIANT_NAME=weak-selftest token 转成字符串字面量 "weak-selftest"，
+     * 避免 Makefile/shell/clang 三层引号转义的脆弱性。OS01_STRINGIFY 是 C99
+     * 标准 idiom（双层宏防 #x 不展开参数）。 */
+#ifdef KERNEL_VARIANT_NAME
+    log_info("CSPRNG: kernel build variant=%s\n", OS01_STRINGIFY(KERNEL_VARIANT_NAME));
+#else
+    log_info("CSPRNG: kernel build variant=default\n");
+#endif
+
+    /* UEFI GetRNG 路径（独立于 facade；AAGU-2 已落地）— spec §5.1。
+     * 父契约 §交付物 2 标 STRONG；与 spec §2.1 UEFI 行对齐。 */
     if (bootctx && (bootctx->flags & BOOT_CONTEXT_HAS_BOOT_ENTROPY)) {
         memcpy(pool_key, bootctx->boot_entropy, 32);
         random_ready = true;
-        log_info("CSPRNG: pool seeded from UEFI GetRNG (boot_entropy)\n");
+        log_info("CSPRNG: pool seeded STRONG from UEFI GetRNG (boot_entropy)\n");
         return;
     }
 
-    /* RDRAND/RDSEED path (real hardware with the CPUID feature): only
-     * if at least one 64-bit word came from the instruction do we trust
-     * the buffer. QEMU default CPU has neither, aarch64 has no stub,
-     * so this path silently returning false is the common dev case. */
-    if (!mix_hw_entropy(pool_key)) {
-        log_warn("CSPRNG: no hardware entropy source "
-                 "(no UEFI GetRNG, no RDRAND/RDSEED) — pool not ready, "
-                 "get_random_bytes will fail-closed\n");
+    /* 通用 facade 路径 — spec §5.1。必须对 q 显式三分支 switch。 */
+    arch_entropy_source_t q = ARCH_ENTROPY_NONE;
+    uint8_t buf[32];
+    bool facade_ok = arch_random_get_entropy(buf, &q);
+
+    if (facade_ok) {
+        switch (q) {
+        case ARCH_ENTROPY_STRONG:
+            memcpy(pool_key, buf, 32);
+            random_ready = true;
+            log_info("CSPRNG: pool seeded STRONG (RDSEED/RNDRRS)\n");
+            break;
+        case ARCH_ENTROPY_WEAK:
+            memcpy(pool_key, buf, 32);
+            random_ready = true;   /* spec §5.2 AAGU-5 父契约 §交付物 2 授权 */
+            log_warn("CSPRNG: pool seeded WEAK (RDRAND/RNDR DRBG); "
+                     "AT_RANDOM will fail-closed via arch_random_get_strong\n");
+            break;
+        case ARCH_ENTROPY_NONE:
+            /* facade return true 但 q==NONE 不应发生 — 防御性处理。 */
+            memset(buf, 0, 32);
+            random_ready = false;
+            log_warn("CSPRNG: facade returned true with NONE quality\n");
+            break;
+        }
+    } else {
+        /* facade return false ⇒ q 已是 NONE，buf 已 memset 0。 */
         random_ready = false;
-        return;
+        log_warn("CSPRNG: no hardware entropy source "
+                 "(no UEFI GetRNG, no STRONG/WEAK via facade); "
+                 "pool not ready, get_random_bytes fail-closed\n");
     }
-    random_ready = true;
-    log_info("CSPRNG: pool seeded from RDRAND/RDSEED\n");
+    memset(buf, 0, 32);   // wipe stack buffer
 }
 
-// Periodic reseed: derive a brand-new key from (old key || fresh hw
-// entropy) via ChaCha20 — never XOR the new entropy into the old key
-// (XOR would let an attacker who recovers the new entropy roll back
-// to a known key). The 64-byte ChaCha20 block yields 32 bytes of
-// fresh key material; intermediate buffers are zeroed so they don't
-// sit on the stack.
-//
-// Note: a reseed with weak hw entropy (QEMU default CPU, no RDRAND/
-// RDSEED) still produces a fresh key — ChaCha20 mixes the input
-// nonlinearly, so an attacker who knows the cycle-counter bytes still
-// needs the prior 32-byte key to compute the new one. We do NOT drop
-// random_ready on weak hw; the pool remains secure as long as the
-// initial seed (random_init) was strong (boot_entropy from UEFI
-// GetRNG, or RDRAND/RDSEED on real hw). The warning is logged for
-// observability — operators should care when reseed stops mixing in
-// new hw, but it is not a fail-closed trigger.
 static void reseed(void)
 {
+    arch_entropy_source_t q = ARCH_ENTROPY_NONE;
     uint8_t hw[32];
-    bool hw_ok = mix_hw_entropy(hw);
+    bool hw_ok = arch_random_get_entropy(hw, &q);
+
+    if (!hw_ok || q == ARCH_ENTROPY_NONE) {
+        /* NONE 重置 — 与 AAGU-2 差异（spec §7.3）：
+         * 旧行为混 cycle-counter 字节（低熵但非零），保持 ready=true；
+         * 新行为显式 NONE ⇒ 零新熵 ⇒ drop ready=false，
+         * 让下一个 get_random_bytes 走 fail-closed。 */
+        memset(pool_key, 0, 32);
+        random_ready = false;
+        log_err("CSPRNG: reseed got NONE; pool dropped to not-ready\n");
+        pool_bytes_since_reseed = 0;
+        return;
+    }
+
     uint8_t seed[64];
     uint8_t block[64];
     uint8_t nonce[12] = {0};
@@ -138,18 +124,16 @@ static void reseed(void)
     chacha20_block(seed, 0, nonce, block);
     memcpy(pool_key, block, 32);
 
-    /* Wipe intermediates so a later stack dump can't recover the
-     * material we just consumed. */
     memset(block, 0, sizeof(block));
     memset(seed,  0, sizeof(seed));
     memset(hw,    0, sizeof(hw));
 
     pool_bytes_since_reseed = 0;
 
-    if (!hw_ok) {
-        log_warn("CSPRNG: reseed mixed weak entropy (no RDRAND/RDSEED) — "
-                 "pool stays ready but operator should consider UEFI GetRNG\n");
+    if (q == ARCH_ENTROPY_WEAK) {
+        log_warn("CSPRNG: reseed mixed WEAK entropy; pool stays ready\n");
     }
+    /* STRONG reseed 不打日志（常规路径）。 */
 }
 
 void get_random_bytes(void *buf, size_t len)
