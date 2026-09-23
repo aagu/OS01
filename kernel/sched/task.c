@@ -19,6 +19,7 @@
 #include <random/random.h>
 #include <sys/auxv.h>
 #include <arch/auxv.h>      /* arch_auxv_platform / arch_auxv_payload_size */
+#include <arch/random.h>    /* arch_random_get_strong for AT_RANDOM (spec §6) */
 
 #include <string.h>
 #include <stdlib.h>
@@ -1219,12 +1220,15 @@ static int setup_user_stack_check_capacity(char *const argv[], char *const envp[
  * argv/envp may be NULL (empty). argc/envc come from startup_args_count
  * (already capped by STARTUP_STR_MAX); callers MUST also have passed
  * setup_user_stack_check_capacity() for the per-string + total-byte +
- * stack-fit contract (P1-4). With those preconditions, this function
- * cannot fail — the ASSERTs document the contract for future readers. */
-static void setup_user_stack(uint8_t *kstack, char *const argv[], char *const envp[],
-                             int s_argc, int s_envc,
-                             uint64_t *out_argv_ptr, uint64_t *out_envp_ptr,
-                             uint64_t *out_rsp)
+ * stack-fit contract (P1-4).
+ *
+ * Returns 0 on success, -1 if AT_RANDOM STRONG-only entropy is
+ * unavailable (rejects WEAK/NONE per spec §6, AAGU-5 §交付物 3).
+ * Stack layout itself stays infallible — -1 sources ONLY from AT_RANDOM. */
+static int setup_user_stack(uint8_t *kstack, char *const argv[], char *const envp[],
+                            int s_argc, int s_envc,
+                            uint64_t *out_argv_ptr, uint64_t *out_envp_ptr,
+                            uint64_t *out_rsp)
 {
 #define KSTACK(va) (kstack + ((va) - USER_STACK_BASE))
     ASSERT(s_argc + s_envc <= STARTUP_STR_MAX);
@@ -1259,10 +1263,20 @@ static void setup_user_stack(uint8_t *kstack, char *const argv[], char *const en
      * (issue AAGU-2 §3 — no #ifdef __x86_64__ in setup_user_stack.) */
     const char *platform_str   = arch_auxv_platform();
     const size_t platform_size = arch_auxv_payload_size();
-    /* AT_RANDOM payload：16B 内核 CSPRNG，16 字节对齐不跨字
-     * （spec 2026-09-17 §6.3）。 */
+    /* AT_RANDOM payload：16B 内核 STRONG-only（spec §6）。
+     * 旧实现走 get_random_bytes()，WEAK-only pool 下也会成功 — AAGU-5
+     * 父契约 §交付物 3 要求 AT_RANDOM 仅 STRONG，否则 fail-closed。
+     * arch_random_get_strong() 写入 32B（facade 契约 — spec §3.1），
+     * 取前 16B 写到 KSTACK；剩余 16B 立即 memset 0 不残留栈。
+     * 失败时 WEAK/NONE 环境整个 setup_user_stack() 返 -1。 */
+    uint8_t at_random_buf[32];
+    if (!arch_random_get_strong(at_random_buf)) {
+        memset(at_random_buf, 0, 32);
+        return -1;
+    }
     rsp = (rsp - 16) & ~15ULL;
-    get_random_bytes(KSTACK(rsp), 16);
+    memcpy(KSTACK(rsp), at_random_buf, 16);
+    memset(at_random_buf, 0, 32);
     uint64_t at_random_addr = rsp;
     /* AT_PLATFORM payload（arch-neutral, NUL-terminated by facade） */
     rsp -= platform_size;
@@ -1316,6 +1330,7 @@ static void setup_user_stack(uint8_t *kstack, char *const argv[], char *const en
     *out_envp_ptr = envp_arr;
     *out_rsp = rsp;
 #undef KSTACK
+    return 0;
 }
 
 // ── spawn_user_task(path) ──────────────────────────────────
@@ -1449,8 +1464,29 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     uint8_t *kstack = (uint8_t *)Phy_To_Virt(stack_page->phy_address);
     uint64_t user_rsp = 0, user_arg_ptr = 0, user_env_ptr = 0;
 
-    setup_user_stack(kstack, (char *const *)argv, NULL, s_argc, s_envc,
-                     &user_arg_ptr, &user_env_ptr, &user_rsp);
+    if (setup_user_stack(kstack, (char *const *)argv, NULL, s_argc, s_envc,
+                         &user_arg_ptr, &user_env_ptr, &user_rsp) != 0) {
+        /* AT_RANDOM STRONG-only 失败 — 清理已分配资源后返回 -EAGAIN。
+         * 顺序与现有 elf_load 失败路径（kernel/sched/task.c:1316-1322）一致，
+         * **外加** task_list_lock 释放后再调 files_unpin（`kernel/include/fs/file.h:140-142`
+         * 明确：files_unpin/files_put_file 不得在 task_list_lock / fs->lock / rq lock 持锁下调用，
+         * 其 drop-to-zero 路径可能同步 files_free/file_free）。 */
+        uint64_t tl_flags2 = spin_lock_irqsave(&task_list_lock);
+        list_del(&tsk->list);
+        spin_unlock_irqrestore(&task_list_lock, tl_flags2);
+        /* 现在 task_list_lock 已释放，可安全调 files_unpin。 */
+        if (tsk->files) {
+            files_unpin(tsk->files);
+            tsk->files = NULL;
+        }
+        if (tsk->fpu_save) kfree(tsk->fpu_save);
+        free_pages(stack_page, 1);
+        vmm_free_user_map(user_pgd);
+        kfree(mm);
+        kfree(thd);
+        kfree(raw_alloc);
+        return -EAGAIN;
+    }
 
     // 7. Set up pt_regs for iretq to ring 3
     pt_regs_t *regs = (pt_regs_t *)((uint64_t)tsk + STACK_SIZE - sizeof(pt_regs_t));
@@ -1585,8 +1621,16 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     uint8_t *kstack = (uint8_t *)Phy_To_Virt(stack_page->phy_address);
     uint64_t user_rsp = 0, user_arg_ptr = 0, user_env_ptr = 0;
 
-    setup_user_stack(kstack, (char *const *)argv, (char *const *)envp,
-                     s_argc, s_envc, &user_arg_ptr, &user_env_ptr, &user_rsp);
+    if (setup_user_stack(kstack, (char *const *)argv, (char *const *)envp,
+                         s_argc, s_envc, &user_arg_ptr, &user_env_ptr, &user_rsp) != 0) {
+        /* AT_RANDOM STRONG-only 失败 — 清理已分配资源后返回 -EAGAIN。
+         * sys_exec 路径（与 spawn_user_task 不同）：node 已在 step 1 vfs_node_put；
+         * 只需释放 stack_page + new_pgd + new_mm。 */
+        free_pages(stack_page, 1);
+        vmm_free_user_map(new_pgd);
+        kfree(new_mm);
+        return -EAGAIN;
+    }
 
     // 7. Commit the new address space before releasing the old one.
     // All fallible preparation and user argument copies are complete.
@@ -2395,8 +2439,10 @@ int task_selftest_auxv_probe(char *const argv[], char *const envp[],
 
     uint64_t argp, envpp, rsp;
     memset(task_selftest_stack_img, 0, sizeof(task_selftest_stack_img));
-    setup_user_stack(task_selftest_stack_img, argv, envp, argc, envc,
-                     &argp, &envpp, &rsp);
+    if (setup_user_stack(task_selftest_stack_img, argv, envp, argc, envc,
+                         &argp, &envpp, &rsp) != 0) {
+        return -1;   /* selftest 中 AT_RANDOM 失败 → probe 失败 */
+    }
 
     /* auxv 紧跟 envp[] 终结 NULL 之后（csu.c walk 契约） */
     const uint64_t *auxv_k = (const uint64_t *)(task_selftest_stack_img
