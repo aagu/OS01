@@ -1,6 +1,7 @@
 // test_fork_mmap — fork + mmap isolation test
 #include <sys/mman.h>
 #include <stdio.h>
+#include <stdlib.h>      /* exit(3) — POSIX atexit-aware exit (AAGU-4.6) */
 #include <unistd.h>
 
 int main(void)
