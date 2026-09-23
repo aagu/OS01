@@ -32,7 +32,7 @@ int __libc_start_main(int (*main)(int, char **, char **),
         /* envp missing its terminator (kernel layout bug): drop auxv,
          * keep the process alive so tests can report (spec §4.3). */
         __libc_auxv = NULL;
-        return main(argc, argv, environ);
+        exit(main(argc, argv, environ));
     }
 
     uint64_t *av = (uint64_t *)(ep + env_i + 1);
@@ -60,5 +60,5 @@ found:
         }
     }
 #endif
-    return main(argc, argv, environ);
+    exit(main(argc, argv, environ));
 }

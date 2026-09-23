@@ -149,7 +149,7 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 | 类别 | 位置 | 现状 | 说明 |
 |---|---|---|---|
 | `open_files[]` 注册表 | `libc/stdio/stdio_file.c:26-60`（`register_file` / `unregister_file` / `is_open_file`）+ 消费方：`fopen/fdopen` 注册、`fclose` 注销、`fflush` 验证（行 139-153）、`fread` 验证（行 108-121）、`fwrite` 验证（行 123-137） | ✅ 已修 (AAGU-4.1) | `fread`/`fwrite` 入口均加 `is_open_file` 检查，未注册 stream 直接返回 0；`fread` 额外 special-case `stdin`/`stdout`/`stderr` sentinel 避免 deref。hosttest `test_libc_fread_fwrite_validate` 覆盖 RED→GREEN：AAGU-4.1 关闭。`fflush` 入口同样受保护（行 139-153）。`atexit` 死链仍属 AAGU-4.6 follow-up（见下行）。 |
-| atexit 处理链从未被调用 | `libc/stdlib/atexit.c:20` 定义 `__call_atexit_handlers`；`libc/csu/csu.c:35, 51` `__libc_start_main` 直接 `return main(...)`，无 `exit()` / `fflush(NULL)` / fini 触发；全 repo grep `__call_atexit_handlers` 只命中定义行 | 🟡 部分 | 出口路径**完全死链**：`atexit()` 注册的清理函数永远不会被调用；进程退出靠 `_exit` syscall 直通内核。这是 stdio FILE 注册外**第二处假象**：注册机制存在但出口路径不存在。归属 **AAGU-4.6 follow-up**：不在 §3.5 stdio FILE 注册范畴（AAGU-4.1）；AAGU-4.6 验收必须用 OS01 QEMU user-program E2E：注册 handler → `exit(0)` → handler 写 marker 到 file/pipe → 父进程断言 marker 存在；不得用 hosttest（atexit 死链在 csu 层，hosttest 触达不到）也不得用 destructor（OS01 libc 无 `.init_array`）。 |
+| atexit 处理链从未被调用 | `libc/stdlib/atexit.c:20` 定义 `__call_atexit_handlers`；`libc/csu/csu.c:35, 51` `__libc_start_main` 直接 `return main(...)`，无 `exit()` / `fflush(NULL)` / fini 触发；全 repo grep `__call_atexit_handlers` 只命中定义行 | ✅ 已修 (AAGU-4.6) | 出口路径已接通：`libc/stdlib/exit.c` 新增 POSIX `exit(3)` 实现，依次调用 `__call_atexit_handlers()`（LIFO 顺序）→ `_exit(status)`；`libc/include/stdlib.h` 新增 `void exit(int status) __attribute__((noreturn));` 声明；`libc/csu/csu.c` 两处 `return main(...)` 改为 `exit(main(...))`（auxv 缺失分支与正常分支）；同时 `<sys/syscall.h>` 内置的 `static inline exit()` raw-syscall 包装删除（它会 shadow `<stdlib.h>` 的 `exit(3)`，重现 AAGU-4.6 死链）。E2E 验证：`systest.elf` 第 48 例 `48_atexit_lifecycle`——子进程 `atexit(h1/h2/h3)` → `exit(0)` → 三个 handler 写 byte 到 pipe → 父进程断言 3 bytes 呈 POSIX LIFO 顺序（"321"）；`test-syscall` 通过：`[SYS TEST] RESULT: 285 passed, 0 failed`。 |
 
 ---
 
@@ -240,9 +240,9 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 - §3.2（UAPI）：auxv 常量 ✅ + stat.h DT_* ✅ 2（**AAGU-4.2 已收口，方案 B**：单源在 libc，kernel 反向 include）；syscall 号 🟡 1；共享结构体 ✅ + 其他 UAPI 头 ✅ 2
 - §3.3（arch value）：AT_PLATFORM/`arch_cpu_pause`/`arch_irq_*`/`arch_kernel_thread_entry`/`arch_register_subsys` ✅ 5；softirq.c ifdef ❌ 1；x86-only 驱动 ifdef 🟡 1
 - §3.4（compat 镜像）：`compat/{list,rbtree,string,stdlib,sys/cdefs,sys/types}.h` ❌ 6
-- §3.5（stdio）：open_files[] ✅ + atexit 死链 🟡 2（AAGU-4.1 关闭，atexit 留 AAGU-4.6）
+- §3.5（stdio）：open_files[] ✅ + atexit 死链 ✅ 2（AAGU-4.1 + AAGU-4.6 关闭）
 
-**recount 合计**（AAGU-4.1 + AAGU-4.2 + AAGU-4.4 落地后）：**7 ❌ + 3 🟡 + 13 ✅ = 23**
+**recount 合计**（AAGU-4.1 + AAGU-4.2 + AAGU-4.4 + AAGU-4.6 落地后）：**7 ❌ + 3 🟡 + 14 ✅ = 24**
 
 **说明（Explore agent findings, 2026-09-22 补）**：
 - auxv 常量 delta 实测为 8 个（`AT_NOTELF/UID/EUID/GID/EGID/SECURE/HWCAP2/EXECFN`），AAGU-4 issue body 写 7 个；本 spec §3.2 已修正为 8 个。
@@ -251,8 +251,8 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 - `__call_atexit_handlers` 定义但全 repo 0 caller；与 §3.5 同一 issue 链一并修。
 
 **当前事实摘要**（reviewer round 6 后 cleanup plan 当前态对应）：
-- §3.5 atexit 行归属 **AAGU-4.6**（不在 AAGU-4.1 范围）
-- §3.5 stdio FILE 注册表只登记 `open_files[]` 一行（AAGU-4.1 已落地：✅；atexit 死链仍属 AAGU-4.6）
+- §3.5 atexit 行归属 **AAGU-4.6**（已落地 ✅：libc/stdlib/exit.c + csu.c exit() wiring + test 48 E2E）
+- §3.5 stdio FILE 注册表只登记 `open_files[]` 一行（AAGU-4.1 ✅；atexit 死链 AAGU-4.6 ✅）
 - §3.3 ifdef 行描述已是当前态（`lock orq`/`lock andq` 原子位 set/clear + Task 5 的 `arch_atomic_or/and_u64` facade）
 - §3.2 stat.h 行描述已是 6 vs 9 实测 diff
 - §3.1 / §3.4 现状描述与 cleanup plan 一致

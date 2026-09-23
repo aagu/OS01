@@ -43,6 +43,9 @@ void *bsearch(const void *key, const void *base, size_t nmemb, size_t size,
 // ── Exit handlers ────────────────────────────────────────────
 int atexit(void (*function)(void));
 
+__attribute__((__noreturn__))
+void exit(int status);
+
 // ── Environment ────────────────────────────────────────────
 
 extern char **environ;

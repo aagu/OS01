@@ -8,6 +8,7 @@
 
 #include <stdio.h>
 #include <unistd.h>
+#include <stdlib.h>      /* exit(3) — POSIX atexit-aware exit (AAGU-4.6) */
 #include <stdint.h>
 #include <string.h>
 
