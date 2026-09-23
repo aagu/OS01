@@ -24,7 +24,9 @@ ifneq ($(filter 1,$(KERNEL_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST)),)
 $(error KERNEL_CANARY_SELFTEST=1 cannot be combined with KERNEL_SELFTEST=1, OS01_SYSTEST=1, or OS01_NETTEST=1)
 endif
 endif
-ifneq ($(filter 1,$(KERNEL_SELFTEST)),)
+ifneq ($(filter 1,$(KERNEL_TEST_FORCE_NO_RNDRRS)),)
+KERNEL_VARIANT := weak-selftest
+else ifneq ($(filter 1,$(KERNEL_SELFTEST)),)
 KERNEL_VARIANT := selftest
 else ifneq ($(filter 1,$(KERNEL_CANARY_SELFTEST)),)
 KERNEL_VARIANT := canary-selftest
