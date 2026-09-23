@@ -5,7 +5,7 @@
  */
 
 #include <arch/cpu.h>                  /* NR_CPUS */
-#include "aarch64_percpu.h"
+#include <arch/aarch64/aarch64_percpu.h>
 
 __attribute__((section(".boot.bss"), aligned(8)))
 aarch64_boot_percpu_t aarch64_boot_percpu[NR_CPUS];

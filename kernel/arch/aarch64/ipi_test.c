@@ -26,7 +26,7 @@
 #include <arch/aarch64/gic.h>
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/boot_log.h>
-#include "aarch64_percpu.h"
+#include <arch/aarch64/aarch64_percpu.h>
 
 #define IPI_SGI_ID       0u
 #define IPI_REPLY_SGI    1u
