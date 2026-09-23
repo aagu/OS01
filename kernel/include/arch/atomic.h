@@ -136,4 +136,3 @@ static inline uint64_t arch_atomic_xchg(volatile uint64_t *ptr, uint64_t val)
 #endif
 
 #endif
-
