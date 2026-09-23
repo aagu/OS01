@@ -215,7 +215,6 @@ void lapic_timer_init(void)
     // Start is deferred to caller — GS base must be set first.
 }
 
-#ifdef __x86_64__
 #include <subsys/subsys.h>
 // Register this driver into the platform's subsystem table. The
 // _register function is collected by arch_register_subsys() at boot via
@@ -224,6 +223,9 @@ void lapic_timer_init(void)
 // (register vs init) ensures each driver's init runs ONCE — at the
 // right phase — and never during the .subsys_init pass (which would
 // race init order with sibling drivers).
+// This file lives under kernel/arch/x86_64/intr/ so it is x86_64-only by
+// directory placement; the previous #ifdef __x86_64__ guard is now dead
+// and was removed when the file was relocated (AAGU-4.5).
 static int _lapic_timer_init_wrapper(void)
 {
     lapic_timer_init();
@@ -236,4 +238,3 @@ static int _lapic_timer_register(void)
     return 0;
 }
 SUBSYS_INITCALL(_lapic_timer_register);
-#endif

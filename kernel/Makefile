@@ -48,7 +48,9 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c \
                    arch/aarch64/serial_printk.c arch/aarch64/strcmp.c \
                    subsys/subsys.c \
                    arch/aarch64/idle_resume_stub.c \
-                   arch/aarch64/libc_stub.c
+                   arch/aarch64/libc_stub.c \
+                   arch/aarch64/atomic.c \
+                   selftest/test_arch_atomic_u64.c
 else
 KERNEL_C_SOURCES := \
     $(wildcard core/*.c) \

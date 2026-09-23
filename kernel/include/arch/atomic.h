@@ -3,6 +3,13 @@
 
 #include <stdint.h>
 
+/* AAGU-4.5: arch-neutral bit-op facade. See spec §2.3 + §3.3.
+ * Per-arch strong overrides live in kernel/arch/<arch>/atomic.c.
+ * x86_64: lock orq / lock andq.  aarch64: ldaxr + stlxr + cbnz retry.
+ * Memory order: acquire-release (not seq_cst). */
+void arch_atomic_or_u64(uint64_t *addr, uint64_t mask);
+void arch_atomic_and_u64(uint64_t *addr, uint64_t mask);
+
 #ifdef __x86_64__
 
 static inline uint64_t arch_atomic_fetch_add(volatile uint64_t *ptr, uint64_t val) {
