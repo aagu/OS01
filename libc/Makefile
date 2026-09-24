@@ -1,5 +1,13 @@
 # ── Architecture ────────────────────────────────────────────
-HOSTARCH  := x86_64
+# Cross-compile default: when invoked from a profile component rule
+# (e.g. mk/components/image.mk building an aarch64 libk.a), the caller
+# passes ARCH=<arch> on the make command line; that overrides the
+# HOSTARCH ?= default. x86_64 stays the default so the libc/install
+# sysroot path (userland profiles only) keeps working unchanged.
+HOSTARCH  ?= x86_64
+ifeq ($(origin ARCH),command line)
+HOSTARCH := $(ARCH)
+endif
 ARCHDIR   := arch/$(HOSTARCH)
 LOCAL_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
 
@@ -24,6 +32,27 @@ CFLAGS := $(CFLAGS) -ffreestanding -Wall -Wextra -D__is_libc -Iinclude -fstack-p
 LIBK_CFLAGS := $(CFLAGS) -D__is_libk -mno-red-zone -I../kernel/include -fno-stack-protector
 
 # ── Source discovery (wildcard — no manual lists!) ──────────
+# x86_64 builds the full userland libc (libc.a + libk.a are both installed
+# to the immutable sysroot generation for kernel/user linking). aarch64
+# only needs libk.a — kernel-link only, no userland. The aarch64 subset
+# is intentionally narrower: no network/unistd/socket/signal/syscall/sys/stat
+# wrappers because those source files depend on libc/include/sys/syscall.h
+# which uses x86_64 inline asm (`int $0x80` with `=a` constraint). Including
+# them in a libk.a cross-compile would break under the aarch64 toolchain.
+# A libc source that needs adjustment to compile under __is_libk + aarch64
+# gets fixed at the source (see libc/stdlib/malloc.c: `<sys/syscall.h>` is
+# gated under `#ifndef __is_libk`); the kernel side uses slab, so the asm
+# path is unreachable when the libc mode is off.
+ifeq ($(HOSTARCH),aarch64)
+C_SOURCES := \
+    $(wildcard ctype/*.c) \
+    $(wildcard errno/*.c) \
+    $(wildcard list/*.c) \
+    $(wildcard rbtree/*.c) \
+    stdlib/calloc.c stdlib/malloc.c \
+    $(wildcard string/*.c) \
+    $(filter-out ssp/ssp.c, $(wildcard ssp/*.c))
+else
 C_SOURCES := \
     $(wildcard ctype/*.c) \
     $(wildcard errno/*.c) \
@@ -50,7 +79,8 @@ C_SOURCES := \
     $(wildcard libgen/*.c) \
     $(wildcard pthread/*.c) \
     $(wildcard random/*.c) \
-    $(wildcard ssp/*.c) \
+    $(wildcard ssp/*.c)
+endif
 
 # Remove duplicates: free.c conflicts with malloc.c (chown.c conflict gone — uid_stubs.c deleted)
 C_SOURCES := $(filter-out stdlib/free.c, $(C_SOURCES))
@@ -74,6 +104,14 @@ LIBK_ALL_OBJS := $(LIBK_OBJS) $(LIBK_ARCH_OBJS)
 # libc/ source tree.
 LIBC_ARCHIVE := $(LIBC_BUILD_DIR)/lib/libc.a
 LIBK_ARCHIVE := $(LIBC_BUILD_DIR)/lib/libk.a
+# aarch64 cross-compile: libc.a (libc mode, syscall-based) is not built.
+# The kernel-libk subset never makes it into userland, so there's no point
+# staging libc.a. Build only libk.a — saves compile time and avoids the
+# x86_64-only syscall.h pulls in malloc.c/abort.c/exit.c/setjmp.c under
+# -D__is_libc.
+ifeq ($(HOSTARCH),aarch64)
+LIBC_ARCHIVE :=
+endif
 # Archive tool: TARGET_AR comes from the profile (spec profile variable);
 # a command-line override wins.
 TARGET_AR ?= $(AR)

@@ -95,10 +95,25 @@ endif
 
 ifdef AARCH64_UEFI_DISK
 
+# ── aarch64 libk.a (AAGU-29) ─────────────────────────────────
+# The aarch64 kernel now links libk.a (kernel/arch/aarch64/make.config:
+# ARCH_LIBS = -nostdlib -lk). The aarch64-clang profile has no `userland`
+# capability (mk/profiles/aarch64-clang.mk), so mk/components/sysroot.mk's
+# libc staging + sysroot generation path doesn't run for this profile —
+# x86_64 reaches libk.a through the immutable sysroot generation, but
+# aarch64 needs its own directly. Sub-make into libc/ with ARCH=aarch64
+# overrides libc/Makefile's default HOSTARCH=x86_64; the build is
+# incremental (skips already-built *.o / *.libk.o).
+$(LIBC_BUILD_DIR)/lib/libk.a:
+	@mkdir -p $(dir $@)
+	@$(call os01_submake,libc,all ARCH=aarch64 $(OS01_SUBMAKE_ARGS))
+
 # ── aarch64 kernel artifact ─────────────────────────────────
-# No sysroot, no lease, no `lib` dependency: aarch64 does not consume the
-# sysroot. The sub-make is incremental; the artifact copy is content-guarded.
-$(BUILD_DIR)/artifacts/kernel.elf: FORCE
+# No sysroot, no lease: aarch64 does not consume the userland sysroot.
+# The sub-make is incremental; the artifact copy is content-guarded.
+# libk.a is built first via the rule above (AAGU-29 build-order prerequisite)
+# so the kernel link resolves -lk against $(LIBC_BUILD_DIR)/lib/libk.a.
+$(BUILD_DIR)/artifacts/kernel.elf: $(LIBC_BUILD_DIR)/lib/libk.a FORCE
 	@mkdir -p $(dir $@)
 	@$(call os01_submake,kernel,all ARCH=aarch64 $(OS01_SUBMAKE_ARGS))
 	@cmp -s $(KERNEL_BUILD_DIR)/kernel.elf $@ || cp $(KERNEL_BUILD_DIR)/kernel.elf $@
