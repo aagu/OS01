@@ -64,9 +64,11 @@ TEST_BINS := \
     $(TEST_BLD)/test_libc_list.elf \
     $(TEST_BLD)/test_libc_vsprintf.elf \
     $(TEST_BLD)/test_libc_fflush.elf \
-=======
     $(TEST_BLD)/test_libc_fread_fwrite_validate.elf \
     $(TEST_BLD)/test_libc_stdio_registry.elf \
+    $(TEST_BLD)/test_libc_fread_fwrite_validate.elf \
+    $(TEST_BLD)/test_libc_stdio_registry.elf \
+    $(TEST_BLD)/test_libc_getopt.elf \
     $(TEST_BLD)/test_vfs_basic.elf \
     $(TEST_BLD)/test_fat32_basic.elf \
     $(TEST_BLD)/test_pmm_basic.elf \
@@ -255,7 +257,7 @@ $(TEST_BLD)/test_libc_fflush.o: $(TEST_CASES)/test_libc_fflush.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
-=======
+# fread/fwrite stream-validation test — pipe-based fake mini_file_t, no shims.
 $(TEST_BLD)/test_libc_fread_fwrite_validate.o: $(TEST_CASES)/test_libc_fread_fwrite_validate.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
@@ -322,7 +324,6 @@ $(TEST_BLD)/test_libc_fflush.elf: $(TEST_BLD)/test_libc_fflush.o $(LIBC_OBJS) \
 		$(TEST_BLD)/libc_stdio_file.o $(TEST_BLD)/stdio_test_shims.o
 	$(HOST_CC) -o $@ $^
 
-=======
 $(TEST_BLD)/test_libc_fread_fwrite_validate.elf: \
 		$(TEST_BLD)/test_libc_fread_fwrite_validate.o \
 		$(TEST_BLD)/libc_vsprintf.o \

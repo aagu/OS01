@@ -178,9 +178,6 @@ int fclose(void *f)
 size_t fread(void *ptr, size_t size, size_t nmemb, void *f)
 {
     if (!f || !ptr) return 0;
-    /* P1-5 (review round 2): route through file_to_fd() so the
-     * registry check applies uniformly — sentinel / unknown / stale
-     * FILE* → 0; registered → fd. */
     int fd = file_to_fd(f);
     if (fd < 0) return 0;
     if (fd == 1 || fd == 2) return 0;     /* stdout/stderr: not readable */
@@ -192,9 +189,6 @@ size_t fread(void *ptr, size_t size, size_t nmemb, void *f)
 size_t fwrite(const void *p, size_t s, size_t n, void *f)
 {
     if (!f || !p) return 0;
-    /* P1-5 (review round 2): same routing — sentinel / unknown / stale
-     * FILE* → 0; stdin (fd 0) is silently dropped (not writable);
-     * registered → fd. */
     int fd = file_to_fd(f);
     if (fd < 0) return 0;
     if (fd == 0) return 0;                /* stdin: not writable */
