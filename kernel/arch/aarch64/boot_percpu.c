@@ -5,7 +5,7 @@
  */
 
 #include <arch/cpu.h>                  /* NR_CPUS */
-#include <arch/aarch64/aarch64_percpu.h>
+#include <arch/aarch_percpu.h>
 
 __attribute__((section(".boot.bss"), aligned(8)))
 aarch64_boot_percpu_t aarch64_boot_percpu[NR_CPUS];
@@ -25,7 +25,7 @@ uint64_t aarch64_dtb_slot;
  * critical-section contents of an exclusive acquire/release cycle).
  * `volatile` alone does NOT give cross-core release/acquire — the
  * boot_go_set / bench_done_set / bench_done_get helpers in
- * aarch64_percpu.h use stlr / ldar for that.
+ * arch/aarch_percpu.h use stlr / ldar for that.
  *
  * These variables live in NORMAL `.bss` (high half), NOT `.boot.bss`,
  * because they are only read/written by code running with MMU ON.  The

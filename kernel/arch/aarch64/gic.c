@@ -5,7 +5,7 @@
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/smp.h>
 #include <arch/aarch64/gic.h>
-#include <arch/aarch64/aarch64_percpu.h>
+#include <arch/aarch_percpu.h>
 #include <percpu/percpu.h>   /* Phase 2 #3: percpu_t for k_cpu_index cast */
 
 static struct gic_dev g_gic;

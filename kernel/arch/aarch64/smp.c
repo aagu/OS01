@@ -12,7 +12,7 @@
 #include <arch/aarch64/smp_boot_core.h>
 #include <arch/irq.h>
 #include <arch/aarch64/boot_log.h>
-#include <arch/aarch64/aarch64_percpu.h>
+#include <arch/aarch_percpu.h>
 #include <arch/aarch64/reg.h>
 
 static bool boot_published;

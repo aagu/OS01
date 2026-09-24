@@ -16,16 +16,25 @@
 //      memset in its own arch/<arch>/memset.S or .c — the linker picks
 //      the strong one if both are linked.
 //
-// Today the kernel uses this byte-fill unconditionally on aarch64
-// (because phase 1 has no libc sysroot) and ignores it on x86_64
-// (because x86_64 pulls memset from libk.a, which links against
-// libc/string/memset.c — a strong global that overrides the weak
-// fallback by standard ELF semantics). The link order is therefore
-// correct without any Makefile tweaks.
+// Why not just link libc/string/memset.c into the kernel?
+//   libc/string/memset.c implements the same byte-fill loop. On x86_64
+//   the kernel already gets a strong memset from libk.a
+//   (libc/string/memset.c compiled with -D__is_libk), and the weak
+//   symbol here loses by standard ELF resolution — dead code on that
+//   arch. On aarch64 phase 1 the build has no libc sysroot at all
+//   (kernel/arch/aarch64/make.config: -nostdlib, no libk.a), so we
+//   cannot reach libc/string/memset.c from the kernel side. Keeping
+//   the kernel-side byte-fill here means each arch links its own
+//   representation without a Makefile override:
+//     - aarch64 phase 1: weak fallback (this file) is the only
+//       definition → used.
+//     - x86_64: strong libk.a memset wins → this TU contributes nothing.
+//     - future arch: provide a strong memset in arch/<arch>/; link
+//       order does not matter for ELF weak-vs-strong resolution.
 //
-// For future arch ports: just provide `void *memset(void *, int,
-// size_t);` with a strong definition in arch/<arch>/ — link order
-// doesn't matter for ELF weak-vs-strong resolution.
+// When the aarch64 build gains a libc sysroot (issue AAGU-2 next phase),
+// this TU can be deleted entirely — the kernel will pick memset from
+// the libk.a link the same way x86_64 does today.
 
 #include <stddef.h>
 
