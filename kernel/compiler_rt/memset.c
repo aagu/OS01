@@ -32,9 +32,10 @@
 //     - future arch: provide a strong memset in arch/<arch>/; link
 //       order does not matter for ELF weak-vs-strong resolution.
 //
-// When the aarch64 build gains a libc sysroot (issue AAGU-2 next phase),
-// this TU can be deleted entirely — the kernel will pick memset from
-// the libk.a link the same way x86_64 does today.
+// When the aarch64 build gains a libk.a link (tracked in
+// issue AAGU-29 — aarch64 kernel 引入 libk.a 依赖), this TU can be
+// deleted entirely — the kernel will pick memset from the libk.a
+// link the same way x86_64 does today.
 
 #include <stddef.h>
 
