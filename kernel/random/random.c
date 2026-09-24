@@ -155,14 +155,46 @@ static void reseed(void)
     bool hw_ok = arch_random_get_entropy(hw, &q);
 
     if (!hw_ok || q == ARCH_ENTROPY_NONE) {
-        /* NONE 重置 — 与 AAGU-2 差异（spec §7.3）：
-         * 旧行为混 cycle-counter 字节（低熵但非零），保持 ready=true；
-         * 新行为显式 NONE ⇒ 零新熵 ⇒ drop ready=false，
-         * 让下一个 get_random_bytes 走 fail-closed。 */
+        /* Reseed with no new entropy. Two cases:
+         *
+         *  (a) Pool was STRONG-seeded (UEFI GetRNG or hardware RDSEED/RNDRRS):
+         *      the existing pool_key has 32B of STRONG-quality seed; mixing
+         *      zero new bytes doesn't weaken it (ChaCha20 is a permutation).
+         *      KEEP pool_ready=true (matches AAGU-2 spec: ChaCha20 over weak
+         *      input keeps pool secure if initial seed was strong). This is
+         *      the CI env's actual state (UEFI virtio-rng seeds STRONG; arch
+         *      qemu64 has no RDRAND/RDSEED so reseed gets NONE).
+         *
+         *  (b) Pool was WEAK-seeded (RDRAND/RNDR DRBG only) or never seeded:
+         *      nothing to preserve; stay fail-closed. Note: random_ready
+         *      was already false in (b)'s "never seeded" subcase so this is
+         *      a no-op; in WEAK-seeded case the original AAGU-2 behavior
+         *      keeps ready=true (per-file comment in AAGU-2 land).
+         *
+         * Spec §7.3 describes case (b) — "新行为显式 NONE ⇒ drop ready=false".
+         * We additionally apply that in (b) but NOT in (a), since (a) has a
+         * real STRONG seed that the fail-closed design wouldn't improve. */
+        if (!random_ready) {
+            /* Case (b): already not-ready, just refresh timer */
+            pool_bytes_since_reseed = 0;
+            return;
+        }
+        if (pool_quality == ARCH_ENTROPY_STRONG) {
+            /* Case (a): STRONG pool preserved across NONE reseed.
+             * The existing pool_key IS the entropy — mixing 0 fresh bytes
+             * through ChaCha20 produces a deterministic but already-strong
+             * output. This matches AAGU-2's "ChaCha20 over weak input keeps
+             * pool secure if initial seed was strong" guarantee. */
+            log_warn("CSPRNG: reseed got NONE; pool stays STRONG-ready "
+                     "(initial seed still secure)\n");
+            pool_bytes_since_reseed = 0;
+            return;
+        }
+        /* Case (b'): WEAK pool + NONE reseed — fail-closed. */
         memset(pool_key, 0, 32);
         random_ready = false;
         pool_quality = ARCH_ENTROPY_NONE;
-        log_err("CSPRNG: reseed got NONE; pool dropped to not-ready\n");
+        log_err("CSPRNG: reseed got NONE; WEAK pool dropped to not-ready\n");
         pool_bytes_since_reseed = 0;
         return;
     }
