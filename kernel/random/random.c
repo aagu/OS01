@@ -61,8 +61,14 @@ arch_entropy_source_t random_get_pool_quality(void) { return pool_quality; }
  *   - arch hardware provides STRONG (RDSEED/RNDRRS) when pool not STRONG-seeded
  *
  * Returns false for WEAK (pool or hardware), NONE, or any state where
- * neither path produces STRONG entropy. Caller must memset out on false. */
-bool kernel_random_get_strong(uint8_t out[32])
+ * neither path produces STRONG entropy. Caller must memset out on false.
+ *
+ * Marked __attribute__((weak)) so kernel/selftest/test_at_random_strong_only.c
+ * can provide a strong override (AAGU-5.7 — simulate STRONG/WEAK/NONE in one
+ * boot, asserting setup_user_stack contract). In production builds the weak
+ * default is the implementation; in KERNEL_SELFTEST=1 builds the test file's
+ * strong override wins at link time. */
+__attribute__((weak)) bool kernel_random_get_strong(uint8_t out[32])
 {
     if (!out)
         return false;
