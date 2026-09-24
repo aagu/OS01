@@ -1,4 +1,4 @@
-/* kernel/arch/aarch64/ram_core.h
+/* kernel/include/arch/aarch64/ram_core.h
  *
  * Internal contract layer for the AArch64 UEFI RAM map pipeline.
  *

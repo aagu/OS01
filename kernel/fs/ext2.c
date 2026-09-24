@@ -581,7 +581,16 @@ static __attribute__((noinline)) int ext2_vfs_read(struct vfs_node *node, uint64
     }
 
     if (offset >= inode.i_size) { spin_unlock(&fs->lock); return 0; }
-    if (offset + size > inode.i_size)
+    /* P2-7: avoid `offset + size` uint64_t overflow. The previous line
+     * guarantees offset < inode.i_size (i_size is uint32_t, offset is
+     * uint64_t — the comparison widens i_size and succeeds only when
+     * offset is strictly smaller), so `inode.i_size - offset` is safe
+     * and the comparison `size > inode.i_size - offset` is equivalent
+     * to the old `offset + size > inode.i_size` for all in-bounds
+     * offsets. For out-of-range offsets the old check could overflow
+     * into a "false in-range" verdict and read past i_size; the new
+     * check correctly rejects the read with a 0-byte result. */
+    if (size > inode.i_size - offset)
         size = inode.i_size - offset;
 
     uint8_t *out = (uint8_t *)buffer;

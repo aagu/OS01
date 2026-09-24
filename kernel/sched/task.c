@@ -17,8 +17,9 @@
 #include <fs/vfs.h>
 #include <fs/elf.h>
 #include <random/random.h>
-#include <uapi/auxv.h>
+#include <sys/auxv.h>
 #include <arch/auxv.h>      /* arch_auxv_platform / arch_auxv_payload_size */
+#include <arch/random.h>    /* arch_random_get_strong — fallback when pool not STRONG-seeded (spec §6) */
 
 #include <string.h>
 #include <stdlib.h>
@@ -1132,15 +1133,102 @@ static int startup_args_count(char *const argv[], char *const envp[],
     return 0;
 }
 
+/* P1-4: explicit builder-contract capacity check.
+ *
+ * Why this lives separately from setup_user_stack():
+ *   setup_user_stack() builds the layout byte-by-byte with no error
+ *   return (it relies on preconditions, not runtime checks). Without
+ *   this function, the byte-budget and stack-capacity limits were an
+ *   implicit assumption: kernel-side callers (spawn_user_task /
+ *   kernel_exec) routed user-space argv through deep_copy_argv()
+ *   FIRST, and deep_copy_argv happened to enforce MAX_ARG_STRLEN /
+ *   MAX_ARG_TOTAL. The startup builder inherited those limits by
+ *   transitive trust — not by its own contract.
+ *
+ *   Decoupling matters because:
+ *     1. The kernel self-test (test_deep_copy_argv) and the kernel-
+ *        side init path bypass deep_copy_argv entirely (they pass
+ *        already-validated argv into setup_user_stack directly).
+ *        They MUST observe the same caps as the syscall path, or
+ *        setup_user_stack can silently overrun the user stack.
+ *     2. Future builders (different auxv layouts, AT_EXECFN additions)
+ *        must re-check capacity at the same enforcement point — not
+ *        rediscover the implicit deep_copy_argv dependency.
+ *
+ * Caps (must match kernel/include/memory/uaccess.h):
+ *   - per-string length     ≤ MAX_ARG_STRLEN    (4 KiB incl. NUL)
+ *   - combined string bytes ≤ MAX_ARG_TOTAL     (64 KiB)
+ *   - element count         ≤ STARTUP_STR_MAX   (128, checked upstream)
+ *   - total builder output  ≤ USER_STACK_SIZE - 16 KiB headroom
+ *     (headroom reserves space below the stack top for ELF loader
+ *      brk/auxv expansion; setup_user_stack reserves the upper 16 B
+ *      via the USER_STACK_TOP - 16 anchor in <sched/task.h>.)
+ *
+ * Returns 0 on success, -E2BIG on any cap violation, -EFAULT if an
+ * element pointer is NULL mid-array (caller's bug — startup_args_count
+ * already NULL-terminated the array, so anything past the terminator
+ * is malformed).
+ */
+static int setup_user_stack_check_capacity(char *const argv[], char *const envp[],
+                                          int argc, int envc)
+{
+    size_t str_bytes = 0;
+
+    /* Per-string cap and combined byte cap. */
+    for (int i = 0; i < argc; i++) {
+        const char *s = argv[i];
+        if (!s) return -EFAULT;
+        size_t len = strlen(s) + 1;          /* incl. NUL */
+        if (len > MAX_ARG_STRLEN) return -E2BIG;
+        str_bytes += len;
+        if (str_bytes > MAX_ARG_TOTAL) return -E2BIG;
+    }
+    for (int i = 0; i < envc; i++) {
+        const char *s = envp[i];
+        if (!s) return -EFAULT;
+        size_t len = strlen(s) + 1;
+        if (len > MAX_ARG_STRLEN) return -E2BIG;
+        str_bytes += len;
+        if (str_bytes > MAX_ARG_TOTAL) return -E2BIG;
+    }
+
+    /* Stack-fit cap: total builder output = str_bytes + metadata
+     * (argv/envp pointer tables, auxv pairs, alignment pad, fixed
+     * 32 B for argc + AT_NULL terminator). The metadata is bounded
+     * by STARTUP_STR_MAX × 8 bytes for pointer tables + ~96 bytes
+     * for auxv, so we approximate it conservatively.
+     *
+     * USER_STACK_SIZE = 2 MiB (USER_STACK_TOP - USER_STACK_BASE,
+     * minus the 16-B anchor at the top). The constant is inlined
+     * here rather than #include'd because the matching header
+     * (kernel/include/sched/task.h) doesn't expose it — keeping the
+     * check adjacent to the stack-base / -top defines would require
+     * a new public macro, which is out of scope for this fix. */
+    const size_t user_stack_size = 0x200000UL - 16;
+    const size_t meta_overhead =
+        (size_t)(argc + envc + 3) * 8 +    /* argc + argv + envp ptrs */
+        96 +                                /* auxv (3 pairs) + AT_RANDOM + pad */
+        16;                                 /* USER_STACK_TOP - 16 anchor */
+    if (str_bytes + meta_overhead > user_stack_size) return -E2BIG;
+
+    return 0;
+}
+
 /* Build (low→high): argc | argv[]+NULL | envp[]+NULL | auxv{AT_NULL,0} |
  * align_pad. The envp terminator NULL is STRICTLY adjacent to the auxv
  * start; the align pad sits ABOVE auxv and is explicitly zeroed.
  * argv/envp may be NULL (empty). argc/envc come from startup_args_count
- * (already capped) — this function cannot fail. */
-static void setup_user_stack(uint8_t *kstack, char *const argv[], char *const envp[],
-                             int s_argc, int s_envc,
-                             uint64_t *out_argv_ptr, uint64_t *out_envp_ptr,
-                             uint64_t *out_rsp)
+ * (already capped by STARTUP_STR_MAX); callers MUST also have passed
+ * setup_user_stack_check_capacity() for the per-string + total-byte +
+ * stack-fit contract (P1-4).
+ *
+ * Returns 0 on success, -1 if AT_RANDOM STRONG-only entropy is
+ * unavailable (rejects WEAK/NONE per spec §6, AAGU-5 §交付物 3).
+ * Stack layout itself stays infallible — -1 sources ONLY from AT_RANDOM. */
+static int setup_user_stack(uint8_t *kstack, char *const argv[], char *const envp[],
+                            int s_argc, int s_envc,
+                            uint64_t *out_argv_ptr, uint64_t *out_envp_ptr,
+                            uint64_t *out_rsp)
 {
 #define KSTACK(va) (kstack + ((va) - USER_STACK_BASE))
     ASSERT(s_argc + s_envc <= STARTUP_STR_MAX);
@@ -1175,10 +1263,24 @@ static void setup_user_stack(uint8_t *kstack, char *const argv[], char *const en
      * (issue AAGU-2 §3 — no #ifdef __x86_64__ in setup_user_stack.) */
     const char *platform_str   = arch_auxv_platform();
     const size_t platform_size = arch_auxv_payload_size();
-    /* AT_RANDOM payload：16B 内核 CSPRNG，16 字节对齐不跨字
-     * （spec 2026-09-17 §6.3）。 */
+    /* AT_RANDOM payload：16B 内核 STRONG-only（spec §6）。
+     * 旧实现走 get_random_bytes()，WEAK-only pool 下也会成功 — AAGU-5
+     * 父契约 §交付物 3 要求 AT_RANDOM 仅 STRONG，否则 fail-closed。
+     * kernel_random_get_strong()（spec §6 + AAGU-5.6 fix）：先查 pool
+     * 是否 STRONG-seeded（UEFI GetRNG / RDSEED / RNDRRS），否则退到
+     * arch_random_get_strong()（纯硬件 RDSEED/RNDRRS 探测）。这样
+     * qemu64+virtio-rng CI 环境下 pool 由 UEFI 种子 STRONG 而 arch 硬件
+     * 无 RDSEED，AT_RANDOM 仍可工作（不误判 fail-closed）。
+     * 写入 32B（facade 契约 — spec §3.1），取前 16B 写到 KSTACK；
+     * 剩余 16B 立即 memset 0 不残留栈。失败时整个 setup_user_stack() 返 -1。 */
+    uint8_t at_random_buf[32];
+    if (!kernel_random_get_strong(at_random_buf)) {
+        memset(at_random_buf, 0, 32);
+        return -1;
+    }
     rsp = (rsp - 16) & ~15ULL;
-    get_random_bytes(KSTACK(rsp), 16);
+    memcpy(KSTACK(rsp), at_random_buf, 16);
+    memset(at_random_buf, 0, 32);
     uint64_t at_random_addr = rsp;
     /* AT_PLATFORM payload（arch-neutral, NUL-terminated by facade） */
     rsp -= platform_size;
@@ -1232,6 +1334,7 @@ static void setup_user_stack(uint8_t *kstack, char *const argv[], char *const en
     *out_envp_ptr = envp_arr;
     *out_rsp = rsp;
 #undef KSTACK
+    return 0;
 }
 
 // ── spawn_user_task(path) ──────────────────────────────────
@@ -1241,6 +1344,12 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
 {
     int s_argc = 0, s_envc = 0;
     if (startup_args_count((char *const *)argv, NULL, &s_argc, &s_envc) != 0)
+        return -E2BIG;
+    /* P1-4: argv is already a kernel-side array (callers in kernel/sched
+     * pass string literals from KERN init), but enforce the explicit
+     * contract anyway — keeps the spawn / exec / selftest paths uniform. */
+    if (setup_user_stack_check_capacity((char *const *)argv, NULL,
+                                        s_argc, s_envc) != 0)
         return -E2BIG;
 
     // 1. Open the ELF file via VFS
@@ -1359,8 +1468,29 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     uint8_t *kstack = (uint8_t *)Phy_To_Virt(stack_page->phy_address);
     uint64_t user_rsp = 0, user_arg_ptr = 0, user_env_ptr = 0;
 
-    setup_user_stack(kstack, (char *const *)argv, NULL, s_argc, s_envc,
-                     &user_arg_ptr, &user_env_ptr, &user_rsp);
+    if (setup_user_stack(kstack, (char *const *)argv, NULL, s_argc, s_envc,
+                         &user_arg_ptr, &user_env_ptr, &user_rsp) != 0) {
+        /* AT_RANDOM STRONG-only 失败 — 清理已分配资源后返回 -EAGAIN。
+         * 顺序与现有 elf_load 失败路径（kernel/sched/task.c:1316-1322）一致，
+         * **外加** task_list_lock 释放后再调 files_unpin（`kernel/include/fs/file.h:140-142`
+         * 明确：files_unpin/files_put_file 不得在 task_list_lock / fs->lock / rq lock 持锁下调用，
+         * 其 drop-to-zero 路径可能同步 files_free/file_free）。 */
+        uint64_t tl_flags2 = spin_lock_irqsave(&task_list_lock);
+        list_del(&tsk->list);
+        spin_unlock_irqrestore(&task_list_lock, tl_flags2);
+        /* 现在 task_list_lock 已释放，可安全调 files_unpin。 */
+        if (tsk->files) {
+            files_unpin(tsk->files);
+            tsk->files = NULL;
+        }
+        if (tsk->fpu_save) kfree(tsk->fpu_save);
+        free_pages(stack_page, 1);
+        vmm_free_user_map(user_pgd);
+        kfree(mm);
+        kfree(thd);
+        kfree(raw_alloc);
+        return -EAGAIN;
+    }
 
     // 7. Set up pt_regs for iretq to ring 3
     pt_regs_t *regs = (pt_regs_t *)((uint64_t)tsk + STACK_SIZE - sizeof(pt_regs_t));
@@ -1413,8 +1543,9 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
 // setup_user_stack() always builds a full minimal SysV layout
 // (argc=0, argv[0]=NULL, envp terminator) when given no strings.
 // An over-cap argv/envp is rejected up front by startup_args_count()
-// with -E2BIG. The child's _start reads argc from (rsp) and argv
-// from 8(rsp) — that contract lives in user/crt0.S.
+// + setup_user_stack_check_capacity() with -E2BIG. The child's _start
+// reads argc from (rsp) and argv from 8(rsp) — that contract lives in
+// user/crt0.S.
 int64_t sys_exec(const char *path, pt_regs_t *regs,
                  const char *const *argv, const char *const *envp)
 {
@@ -1422,6 +1553,15 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     int s_argc = 0, s_envc = 0;
     if (startup_args_count((char *const *)argv, (char *const *)envp,
                            &s_argc, &s_envc) != 0)
+        return -E2BIG;
+    /* P1-4: enforce byte budget + stack-fit preconditions on the kernel-
+     * side argv/envp that sys_exec will hand to setup_user_stack().
+     * deep_copy_argv() in the syscall path already bounded each string
+     * and the total, but the explicit check makes setup_user_stack's
+     * contract self-contained (no transitive trust in callers). */
+    if (setup_user_stack_check_capacity((char *const *)argv,
+                                        (char *const *)envp,
+                                        s_argc, s_envc) != 0)
         return -E2BIG;
 
     // 1. Look up the ELF file (support relative paths)
@@ -1485,8 +1625,16 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     uint8_t *kstack = (uint8_t *)Phy_To_Virt(stack_page->phy_address);
     uint64_t user_rsp = 0, user_arg_ptr = 0, user_env_ptr = 0;
 
-    setup_user_stack(kstack, (char *const *)argv, (char *const *)envp,
-                     s_argc, s_envc, &user_arg_ptr, &user_env_ptr, &user_rsp);
+    if (setup_user_stack(kstack, (char *const *)argv, (char *const *)envp,
+                         s_argc, s_envc, &user_arg_ptr, &user_env_ptr, &user_rsp) != 0) {
+        /* AT_RANDOM STRONG-only 失败 — 清理已分配资源后返回 -EAGAIN。
+         * sys_exec 路径（与 spawn_user_task 不同）：node 已在 step 1 vfs_node_put；
+         * 只需释放 stack_page + new_pgd + new_mm。 */
+        free_pages(stack_page, 1);
+        vmm_free_user_map(new_pgd);
+        kfree(new_mm);
+        return -EAGAIN;
+    }
 
     // 7. Commit the new address space before releasing the old one.
     // All fallible preparation and user argument copies are complete.
@@ -2290,11 +2438,15 @@ int task_selftest_auxv_probe(char *const argv[], char *const envp[],
     while (argv && argv[argc]) argc++;
     while (envp && envp[envc]) envc++;
     if (argc + envc > STARTUP_STR_MAX) return -1;
+    if (setup_user_stack_check_capacity(argv, envp, argc, envc) != 0)
+        return -1;
 
     uint64_t argp, envpp, rsp;
     memset(task_selftest_stack_img, 0, sizeof(task_selftest_stack_img));
-    setup_user_stack(task_selftest_stack_img, argv, envp, argc, envc,
-                     &argp, &envpp, &rsp);
+    if (setup_user_stack(task_selftest_stack_img, argv, envp, argc, envc,
+                         &argp, &envpp, &rsp) != 0) {
+        return -1;   /* selftest 中 AT_RANDOM 失败 → probe 失败 */
+    }
 
     /* auxv 紧跟 envp[] 终结 NULL 之后（csu.c walk 契约） */
     const uint64_t *auxv_k = (const uint64_t *)(task_selftest_stack_img

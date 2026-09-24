@@ -101,7 +101,6 @@ hw_int_controller_t *get_pic_controller(void)
     return &pic_controller;
 }
 
-#ifdef __x86_64__
 #include <subsys/subsys.h>
 // Register this driver into the platform's subsystem table. The
 // _register function is collected by arch_register_subsys() at boot via
@@ -110,6 +109,9 @@ hw_int_controller_t *get_pic_controller(void)
 // (register vs init) ensures each driver's init runs ONCE — at the
 // right phase — and never during the .subsys_init pass (which would
 // race init order with sibling drivers).
+// This file lives under kernel/arch/x86_64/intr/ so it is x86_64-only by
+// directory placement; the previous #ifdef __x86_64__ guard is now dead
+// and was removed when the file was relocated (AAGU-4.5).
 static int _pic_init_wrapper(void)
 {
     pic_init();
@@ -122,4 +124,3 @@ static int _pic_register(void)
     return 0;
 }
 SUBSYS_INITCALL(_pic_register);
-#endif

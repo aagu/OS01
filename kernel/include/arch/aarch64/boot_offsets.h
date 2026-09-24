@@ -2,6 +2,8 @@
 #define OS01_AARCH64_BOOT_OFFSETS_H
 
 /* Integer-only shared C/assembly ABI. */
+#include <percpu/percpu.h>  /* pulls in PERCPU_DATA_SIZE for asm context */
+
 #define AARCH64_BOOT_PERCPU_SIZE       48
 #define AARCH64_BOOT_SELF_OFFSET       0
 #define AARCH64_BOOT_CPU_ID_OFFSET     8

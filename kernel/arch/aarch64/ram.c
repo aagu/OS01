@@ -25,7 +25,7 @@
 #include <arch/aarch64/boot_log.h>
 #include <arch/aarch64/handoff_layout.h>
 #include <arch/aarch64/ram.h>
-#include "ram_core.h"
+#include <arch/aarch64/ram_core.h>
 #include <core/bootinfo.h>
 
 

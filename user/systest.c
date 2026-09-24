@@ -415,6 +415,104 @@ static void test_unlink(void)
     else PASS("unlink", "still present (FAT32 ok)");
 }
 
+// ── 48: atexit lifecycle (AAGU-4.6) ────────────────────────
+// Verifies that libc/stdlib/exit.c actually wires atexit handlers into
+// the process exit path. The chain was previously dead: __call_atexit_handlers
+// was defined but had zero callers (spec §3.5 atexit row).
+//
+// Strategy: pipe(2) gives an atomically-appendable byte stream, sidestepping
+// the OS01 kernel's missing-O_APPEND-on-open gap (current vfs_write writes at
+// f->offset, so a fresh O_WRONLY|O_APPEND fd each time overwrites offset 0).
+// Parent forks a pipe; child registers three atexit handlers, each writes
+// one byte to the pipe, then calls exit(0) — not _exit(0) — so the handlers
+// actually run. Parent reads the pipe, asserts 3 bytes in LIFO order
+// ('3','2','1') matching POSIX's reverse-registration rule.
+//   - empty pipe → handlers never ran (dead chain bug)
+//   - FIFO order  → handlers ran in registration order (wrong)
+//   - LIFO 321    → exit() wires atexit correctly (PASS)
+static int atexit_pipe_w = -1;     /* child-only: write end, set by parent fork */
+
+static void atexit_h1(void) {
+    if (atexit_pipe_w >= 0) { write(atexit_pipe_w, "1", 1); }
+}
+static void atexit_h2(void) {
+    if (atexit_pipe_w >= 0) { write(atexit_pipe_w, "2", 1); }
+}
+static void atexit_h3(void) {
+    if (atexit_pipe_w >= 0) { write(atexit_pipe_w, "3", 1); }
+}
+
+static void test_atexit_lifecycle(void)
+{
+    int pfd[2] = {-1, -1};
+    if (pipe(pfd) < 0) {
+        printf("[FAIL] atexit: pipe() failed\n");
+        fail_count++;
+        return;
+    }
+
+    int64_t pid = fork();
+    if (pid < 0) {
+        close(pfd[0]); close(pfd[1]);
+        printf("[FAIL] atexit: fork failed\n");
+        fail_count++;
+        return;
+    }
+    if (pid == 0) {
+        // Child: close read end, point handlers at write end, register, exit.
+        // exit() (NOT _exit()) is the key call — exit() routes through
+        // __call_atexit_handlers before the SYS_exit syscall.
+        close(pfd[0]);
+        atexit_pipe_w = pfd[1];
+        int r1 = atexit(atexit_h1);
+        int r2 = atexit(atexit_h2);
+        int r3 = atexit(atexit_h3);
+        if (r1 || r2 || r3) { _exit(50); }
+        exit(0);
+        // unreachable
+    }
+
+    // Parent: close write end (handler writes still flush before _exit
+    // closes them), reap the child, drain the pipe, assert LIFO order.
+    close(pfd[1]);
+
+    int status = 0;
+    int64_t w = waitpid(pid, &status, 0);
+    if (w != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        close(pfd[0]);
+        printf("[FAIL] atexit: child did not exit cleanly (status=%#x w=%lld)\n",
+               status, (long long)w);
+        fail_count++;
+        return;
+    }
+
+    char buf[8] = {0};
+    ssize_t n = read(pfd[0], buf, sizeof(buf) - 1);
+    close(pfd[0]);
+
+    if (n == 0) {
+        printf("[FAIL] atexit: pipe empty — handlers never ran (dead chain)\n");
+        fail_count++;
+        return;
+    }
+    if (n != 3) {
+        printf("[FAIL] atexit: got %d bytes (expected 3) — partial handlers\n", (int)n);
+        fail_count++;
+        return;
+    }
+    if (buf[0] == '3' && buf[1] == '2' && buf[2] == '1') {
+        printf("[PASS] atexit: 3 handlers ran in POSIX LIFO order\n");
+        pass_count++;
+    } else if (buf[0] == '1' && buf[1] == '2' && buf[2] == '3') {
+        printf("[FAIL] atexit: handlers ran FIFO (%c%c%c) — POSIX requires LIFO\n",
+               buf[0], buf[1], buf[2]);
+        fail_count++;
+    } else {
+        printf("[FAIL] atexit: unexpected marker=%c%c%c\n", buf[0], buf[1], buf[2]);
+        fail_count++;
+    }
+}
+
 // ── readlink: libc stub ────────────────────────────────────
 static void test_readlink(void)
 {
@@ -3362,6 +3460,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"45_ssp_trip_sigabrt_exec",  test_ssp_trip_sigabrt_exec},
     {"46_ssp_trip_sigabrt_fork",  test_ssp_trip_sigabrt_fork},
     {"47_ssp_no_false_trip",      test_ssp_no_false_trip},
+    {"48_atexit_lifecycle",       test_atexit_lifecycle},
 };
 
 int main(int argc, char **argv, char **envp)

@@ -136,12 +136,11 @@ static inline int64_t fork(void)
     return syscall(SYS_fork, 0, 0, 0);
 }
 
-static inline void exit(int code)
-{
-    syscall(SYS_exit, (uint64_t)code, 0, 0);
-    __builtin_unreachable();
-}
-
+// NOTE: exit() lives in <stdlib.h>, not here. <stdlib.h> declares the
+// POSIX exit(3) which routes through atexit handlers before the SYS_exit
+// syscall; a raw syscall-only wrapper in this header would shadow that
+// definition and recreate the AAGU-4.6 dead-chain bug. Use _exit() from
+// <unistd.h> when you genuinely want the syscall without atexit.
 static inline int sync(void)
 {
     return (int)syscall(SYS_sync, 0, 0, 0);

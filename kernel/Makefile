@@ -44,10 +44,17 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c \
                    percpu/percpu.c \
                    time/clocksource.c time/tick.c time/timer.c \
                    intr/softirq.c \
-                   compiler_rt/udivti3.c arch/aarch64/subsys.c \
-                   arch/aarch64/subsys_stub.c \
+                   $(wildcard compiler_rt/*.c) arch/aarch64/subsys.c \
+                   arch/aarch64/serial_printk.c arch/aarch64/strcmp.c \
+                   subsys/subsys.c \
                    arch/aarch64/idle_resume_stub.c \
-                   arch/aarch64/libc_stub.c
+                   arch/aarch64/libc_stub.c \
+                   arch/aarch64/atomic.c \
+                   random/random.c \
+                   arch/aarch64/random.c \
+                   ../libc/random/chacha20.c \
+                   selftest/test_arch_atomic_u64.c \
+                   selftest/test_aarch64_rndr_encoding.c
 else
 KERNEL_C_SOURCES := \
     $(wildcard core/*.c) \
@@ -65,7 +72,8 @@ KERNEL_C_SOURCES := \
     $(wildcard time/*.c) \
     $(wildcard percpu/*.c) \
     $(wildcard selftest/*.c) \
-    $(wildcard subsys/*.c)
+    $(wildcard subsys/*.c) \
+    $(wildcard compiler_rt/*.c)
 
 # Platform devices are selected by arch/<arch>/make.config.  Keep x86-only
 # APIC/PIC/PIT/RTC code out of architecture-neutral source discovery.
@@ -111,17 +119,17 @@ ALL_CFLAGS += -ffile-prefix-map=$(CURDIR)=.
 endif
 ifeq ($(ARCH),aarch64)
 # The aarch64 phase-1 profile does NOT build a libc sysroot (no
-# userspace at all in phase 1), but the arch-neutral
-# kernel/time/clocksource.c (Timer Task 2.2 GREEN) pulls in
-# <list.h>, <sys/types.h>, <rbtree.h> transitively via
-# <time/clocksource.h> -> <time/timer.h> and <percpu/percpu.h>
-# -> <sched/task.h>. These are libc headers used by kernel TUs
-# because the x86_64 kernel traditionally gets them via the libc
-# sysroot's -isystem path (see the x86_64 block above). On aarch64
-# we instead expose the libc include dir directly via -I so the
-# include chain succeeds. This is x86_64-inert (guarded by ARCH)
-# and does NOT introduce a kernel-side copy of these headers.
-ALL_CFLAGS += -I$(CURDIR)/include/compat
+# userspace at all in phase 1), so the x86_64 libc-sysroot -isystem
+# block above is gated off for aarch64. Per AAGU-4 cross-boundary
+# spec §2.4, the libc canonical header is the SOLE public ABI source
+# for both kernel and user — kernel and user include the SAME
+# `<X.h>` file (libc/include/X.h). x86_64 reaches libc headers via
+# the immutable sysroot generation's -isystem; aarch64 reaches the
+# same canonical headers via direct -I on the libc source tree.
+#
+# AAGU-4.3 closes the kernel/include/compat/* mirror (6 sub-issues
+# landed). The compat/ path is no longer needed.
+ALL_CFLAGS += -I$(CURDIR)/../libc/include
 endif
 ALL_ASMFLAGS := $(ASFLAGS) $(ARCH_ASMFLAGS)
 ifeq ($(ARCH),x86_64)
@@ -212,6 +220,24 @@ endif
 # ── Built-in selftests (make KERNEL_SELFTEST=1) ────────────────
 ifdef KERNEL_SELFTEST
 ALL_CFLAGS += -DOS01_SELFTEST=1
+endif
+
+# AAGU-5.6: test-only entropy facade override — force RNDRRS detection
+# off so the WEAK-only (RNDR) path is exercised end-to-end on
+# QEMU -cpu max (which exposes both RNDR and RNDRRS). Only routes
+# through whitelisted env var KERNEL_TEST_FORCE_NO_RNDRRS, so
+# untrusted CFLAGS cannot smuggle it in.
+ifdef KERNEL_TEST_FORCE_NO_RNDRRS
+ALL_CFLAGS += -DKERNEL_TEST_FORCE_NO_RNDRRS=1
+endif
+
+# AAGU-5.6: kernel build variant token (no Makefile-side quoting).
+# Makefile injects `-DKERNEL_VARIANT_NAME=weak-selftest`; the kernel's
+# OS01_STRINGIFY() double-macro turns that token into a C string literal
+# "weak-selftest" without shell/Makefile quoting games. Mirrors the
+# KERNEL_SELFTEST pattern at the bottom of this section.
+ifdef KERNEL_VARIANT
+ALL_CFLAGS += -DKERNEL_VARIANT_NAME=$(KERNEL_VARIANT)
 endif
 
 # ── Log output target (serial | fb | both) ────────────────
