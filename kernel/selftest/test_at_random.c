@@ -6,10 +6,19 @@
 #include <core/selftest.h>
 #include <core/printk.h>
 #include <random/random.h>   /* random_is_ready */
+#include <arch/random.h>     /* ARCH_ENTROPY_STRONG + kernel_random_mock_set/reset */
 #include <sched/task.h>       /* USER_STACK_BASE/TOP + task_selftest_auxv_probe */
 #include <sys/auxv.h>
 #include <string.h>
 #include <stdint.h>
+
+/* AAGU-5.7: AT_RANDOM 路径 STRONG-only 后，setup_user_stack 在 WEAK/NONE
+ * 环境下返 -1。本文件测的是 auxv LAYOUT（与 entropy 质量无关），需要
+ * 强制 STRONG 让 setup_user_stack 走通；测试结束 reset 防污染后续。
+ * 强覆盖在 kernel/selftest/test_at_random_strong_only.c（KERNEL_SELFTEST=1
+ * 编译时链接）。 */
+extern void kernel_random_mock_set(arch_entropy_source_t q);
+extern void kernel_random_mock_reset(void);
 
 /* R11 MAJOR 修正: probe_argv / probe_envp 仍是奇数(2 argv + 1 envp)用;
  * even probe 必须用独立 3 元素数组,不能复用(否则偶数 case 越界读写)。 */
@@ -82,8 +91,13 @@ static int at_random_selftest_walk(uint64_t rsp, uint64_t auxv,
 /* 布局用例(奇数分支,argv=2 envp=1 → argc+envc=3 → meta=48 → pad=8): 调 probe + walk */
 int at_random_selftest_layout(void)
 {
+    /* AAGU-5.7: 强制 STRONG 让 setup_user_stack 走通；test 关注 layout
+     * 而非 entropy 质量。Reset 防污染后续 test。 */
+    kernel_random_mock_set(ARCH_ENTROPY_STRONG);
     uint64_t rsp, auxv, rnd, plat;
-    if (probe_build(odd_argv, odd_envp, &rsp, &auxv, &rnd, &plat) != 0) {
+    int rc = probe_build(odd_argv, odd_envp, &rsp, &auxv, &rnd, &plat);
+    kernel_random_mock_reset();
+    if (rc != 0) {
         serial_printk("[selftest] at_random: probe build failed\n");
         return -1;
     }
@@ -99,8 +113,12 @@ int at_random_selftest_layout(void)
  * 直接调 probe + walk,不修改共享全局。 */
 int at_random_selftest_layout_even(void)
 {
+    /* 同上 — mock STRONG → 测 layout → reset */
+    kernel_random_mock_set(ARCH_ENTROPY_STRONG);
     uint64_t rsp, auxv, rnd, plat;
-    if (probe_build(even_argv, even_envp, &rsp, &auxv, &rnd, &plat) != 0) {
+    int rc = probe_build(even_argv, even_envp, &rsp, &auxv, &rnd, &plat);
+    kernel_random_mock_reset();
+    if (rc != 0) {
         serial_printk("[selftest] at_random_layout_even: probe build failed\n");
         return -1;
     }
