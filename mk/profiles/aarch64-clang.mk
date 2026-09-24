@@ -15,8 +15,20 @@ BUILD_DIR := $(OS01_ROOT)/build/$(PROFILE)
 SYSROOT := $(BUILD_DIR)/sysroot
 TARGET_INCLUDEDIR := $(SYSROOT)/usr/include
 TARGET_LIBDIR := $(SYSROOT)/usr/lib
-KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel
 LIBC_BUILD_DIR := $(BUILD_DIR)/libc
+
+# Compile-affecting variant — mirror x86_64 profile's KERNEL_VARIANT block
+# so weak-selftest build produces an isolated kernel/weak-selftest/ dir.
+ifneq ($(filter 1,$(KERNEL_TEST_FORCE_NO_RNDRRS)),)
+KERNEL_VARIANT := weak-selftest
+else ifneq ($(filter 1,$(KERNEL_SELFTEST)),)
+KERNEL_VARIANT := selftest
+else ifneq ($(filter 1,$(KERNEL_CANARY_SELFTEST)),)
+KERNEL_VARIANT := canary-selftest
+else
+KERNEL_VARIANT :=
+endif
+KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel$(if $(KERNEL_VARIANT),/$(KERNEL_VARIANT))
 # Compile-affecting variant (only OS01_SYSTEST re-keys the user dirs).
 # project.mk sets USER_VARIANT before including this profile; the ?= default
 # lets component sub-makes that include ONLY the profile resolve it from

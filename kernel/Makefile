@@ -49,7 +49,11 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c \
                    subsys/subsys.c \
                    arch/aarch64/idle_resume_stub.c \
                    arch/aarch64/atomic.c \
-                   selftest/test_arch_atomic_u64.c
+                   random/random.c \
+                   arch/aarch64/random.c \
+                   ../libc/random/chacha20.c \
+                   selftest/test_arch_atomic_u64.c \
+                   selftest/test_aarch64_rndr_encoding.c
 else
 KERNEL_C_SOURCES := \
     $(wildcard core/*.c) \
@@ -215,6 +219,24 @@ endif
 # ── Built-in selftests (make KERNEL_SELFTEST=1) ────────────────
 ifdef KERNEL_SELFTEST
 ALL_CFLAGS += -DOS01_SELFTEST=1
+endif
+
+# AAGU-5.6: test-only entropy facade override — force RNDRRS detection
+# off so the WEAK-only (RNDR) path is exercised end-to-end on
+# QEMU -cpu max (which exposes both RNDR and RNDRRS). Only routes
+# through whitelisted env var KERNEL_TEST_FORCE_NO_RNDRRS, so
+# untrusted CFLAGS cannot smuggle it in.
+ifdef KERNEL_TEST_FORCE_NO_RNDRRS
+ALL_CFLAGS += -DKERNEL_TEST_FORCE_NO_RNDRRS=1
+endif
+
+# AAGU-5.6: kernel build variant token (no Makefile-side quoting).
+# Makefile injects `-DKERNEL_VARIANT_NAME=weak-selftest`; the kernel's
+# OS01_STRINGIFY() double-macro turns that token into a C string literal
+# "weak-selftest" without shell/Makefile quoting games. Mirrors the
+# KERNEL_SELFTEST pattern at the bottom of this section.
+ifdef KERNEL_VARIANT
+ALL_CFLAGS += -DKERNEL_VARIANT_NAME=$(KERNEL_VARIANT)
 endif
 
 # ── Log output target (serial | fb | both) ────────────────

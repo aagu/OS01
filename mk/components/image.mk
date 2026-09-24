@@ -166,7 +166,10 @@ build/$(PROFILE)/firmware/QEMU_EFI.fd: $(AARCH64_UEFI_FIRMWARE)
 endif
 
 # ── aarch64 UEFI bring-up image (64 MiB FAT) ────────────────
-$(BUILD_DIR)/image/aarch64-uefi.img: $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI \
+# AAGU-5.6: target path uses $(AARCH64_UEFI_DISK) so variant builds
+# (weak-selftest, selftest) get isolated image dirs and never clobber
+# each other. Recipe body unchanged — $@ expands to the variant-aware path.
+$(AARCH64_UEFI_DISK): $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI \
 		$(BUILD_DIR)/artifacts/kernel.elf $(AARCH64_UEFI_FIRMWARE)
 	@mkdir -p $(dir $@)
 	@rm -f $@

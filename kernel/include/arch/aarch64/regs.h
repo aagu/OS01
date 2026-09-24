@@ -66,4 +66,15 @@ _Static_assert(sizeof(pt_regs_t) == 34 * 8,
 #define PT_REGS_SPSR_EL1   (33 * 8)
 #define PT_REGS_SIZE       (34 * 8)
 
+/* ID_AA64ISAR0_EL1.RNDR 字段（bits[63:60]）：
+ *   0b0000 = 不支持 RNDR/RNDRRS
+ *   0b0001 = 支持 RNDR + RNDRRS
+ *   0b0010 = 支持 RNDR（IMPL_DEF RNDRRS 处理）
+ *   ≥0b0011 = 保留
+ * 实施者用：((mrs ID_AA64ISAR0_EL1) >> 60) & 0xF
+ */
+#define ID_AA64ISAR0_EL1_RNDR_SHIFT  60
+#define ID_AA64ISAR0_EL1_RNDR_MASK   (0xFUL << ID_AA64ISAR0_EL1_RNDR_SHIFT)
+#define ID_AA64ISAR0_EL1_RNDR_RNDRRS (1UL << ID_AA64ISAR0_EL1_RNDR_SHIFT)
+
 #endif /* _KERNEL_ARCH_AARCH64_REGS_H */
