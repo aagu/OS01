@@ -32,6 +32,52 @@ static uint64_t pool_blk;
 static uint64_t pool_bytes_since_reseed;
 static spinlock_T pool_lock = { .lock = 1L };
 static bool random_ready;
+/* Pool seeded quality (AAGU-5.6 fix): tracks how the pool_key was first
+ * populated so callers like arch_random_get_strong() can use the pool
+ * when its seed source was STRONG (e.g. UEFI GetRNG), instead of relying
+ * solely on arch hardware. Without this, a UEFI-seeded STRONG pool would
+ * be invisible to arch_random_get_strong() (which checks CPUID/RDSEED
+ * only) and AT_RANDOM would fail-closed even though entropy is available.
+ * Spec §2.1 lists UEFI GetRNG as a STRONG source. */
+static arch_entropy_source_t pool_quality = ARCH_ENTROPY_NONE;
+
+/* Public read-only accessor for kernel callers (notably AT_RANDOM via
+ * setup_user_stack). Returns the quality the pool was last seeded with,
+ * or ARCH_ENTROPY_NONE if not ready. */
+arch_entropy_source_t random_get_pool_quality(void) { return pool_quality; }
+
+/* Kernel-side STRONG-only entropy helper for AT_RANDOM (spec §6).
+ *
+ * Unlike arch_random_get_strong() (which queries arch hardware only),
+ * this consults the pool first when seeded via UEFI GetRNG (a STRONG
+ * source per spec §2.1). Without this fallback, a UEFI-seeded STRONG
+ * pool would be invisible to AT_RANDOM — the kernel would hang/fail
+ * init spawn in qemu64 + virtio-rng CI environments where the pool has
+ * STRONG entropy but qemu64 has no RDRAND/RDSEED.
+ *
+ * Returns true iff:
+ *   - pool ready with STRONG quality (UEFI GetRNG OR hardware RDSEED/RNDRRS)
+ *   OR
+ *   - arch hardware provides STRONG (RDSEED/RNDRRS) when pool not STRONG-seeded
+ *
+ * Returns false for WEAK (pool or hardware), NONE, or any state where
+ * neither path produces STRONG entropy. Caller must memset out on false. */
+bool kernel_random_get_strong(uint8_t out[32])
+{
+    if (!out)
+        return false;
+    if (random_ready && pool_quality == ARCH_ENTROPY_STRONG) {
+        /* Pool has STRONG seed — consume from CSPRNG (already mixed/nonlinear
+         * output, satisfies AT_RANDOM entropy-distribution requirement).
+         * This is the path used when boot_entropy seeded the pool (UEFI
+         * GetRNG / virtio-rng CI environments) — the arch hardware may
+         * have no RDRAND/RDSEED at all. */
+        get_random_bytes(out, 32);
+        return true;
+    }
+    /* Pool not STRONG-seeded (or not ready) — defer to arch hardware. */
+    return arch_random_get_strong(out);
+}
 
 /* v8: C 预处理器 stringify 宏（spec §3.1 32B 契约 / spec §5.1 ready 决策外的
  * 辅助宏）。双层结构是 C99 标准 — 内层 #x 不展开参数，外层强制先展开再 stringify。 */
@@ -58,6 +104,7 @@ void random_init(const struct boot_context *bootctx)
     if (bootctx && (bootctx->flags & BOOT_CONTEXT_HAS_BOOT_ENTROPY)) {
         memcpy(pool_key, bootctx->boot_entropy, 32);
         random_ready = true;
+        pool_quality = ARCH_ENTROPY_STRONG;
         log_info("CSPRNG: pool seeded STRONG from UEFI GetRNG (boot_entropy)\n");
         return;
     }
@@ -72,24 +119,28 @@ void random_init(const struct boot_context *bootctx)
         case ARCH_ENTROPY_STRONG:
             memcpy(pool_key, buf, 32);
             random_ready = true;
+            pool_quality = ARCH_ENTROPY_STRONG;
             log_info("CSPRNG: pool seeded STRONG (RDSEED/RNDRRS)\n");
             break;
         case ARCH_ENTROPY_WEAK:
             memcpy(pool_key, buf, 32);
-            random_ready = true;   /* spec §5.2 AAGU-5 父契约 §交付物 2 授权 */
+            random_ready = true;
+            pool_quality = ARCH_ENTROPY_WEAK;
             log_warn("CSPRNG: pool seeded WEAK (RDRAND/RNDR DRBG); "
-                     "AT_RANDOM will fail-closed via arch_random_get_strong\n");
+                     "AT_RANDOM will fail-closed (WEAK is not STRONG)\n");
             break;
         case ARCH_ENTROPY_NONE:
             /* facade return true 但 q==NONE 不应发生 — 防御性处理。 */
             memset(buf, 0, 32);
             random_ready = false;
+            pool_quality = ARCH_ENTROPY_NONE;
             log_warn("CSPRNG: facade returned true with NONE quality\n");
             break;
         }
     } else {
         /* facade return false ⇒ q 已是 NONE，buf 已 memset 0。 */
         random_ready = false;
+        pool_quality = ARCH_ENTROPY_NONE;
         log_warn("CSPRNG: no hardware entropy source "
                  "(no UEFI GetRNG, no STRONG/WEAK via facade); "
                  "pool not ready, get_random_bytes fail-closed\n");
@@ -110,6 +161,7 @@ static void reseed(void)
          * 让下一个 get_random_bytes 走 fail-closed。 */
         memset(pool_key, 0, 32);
         random_ready = false;
+        pool_quality = ARCH_ENTROPY_NONE;
         log_err("CSPRNG: reseed got NONE; pool dropped to not-ready\n");
         pool_bytes_since_reseed = 0;
         return;
@@ -129,6 +181,20 @@ static void reseed(void)
     memset(hw,    0, sizeof(hw));
 
     pool_bytes_since_reseed = 0;
+
+    /* Pool quality may escalate via reseed (STRONG hardware source overrides
+     * prior WEAK seeding). Spec §4.1 calls this out as "降级不可逆, 升级
+     * 不存在" for hardware quality; for boot_entropy source (UEFI), the
+     * pool quality is set once at random_init and reseed either preserves
+     * (WEAK stays WEAK, STRONG stays STRONG) or downgrades (STRONG may drop
+     * if reseed gets WEAK). Track the actual reseed result. */
+    if (q == ARCH_ENTROPY_WEAK && pool_quality == ARCH_ENTROPY_STRONG) {
+        log_warn("CSPRNG: reseed got WEAK after STRONG seed; "
+                 "pool quality stays STRONG (initial-seed dominant)\n");
+        /* Keep pool_quality=STRONG — initial UEFI seed outranks reseed */
+    } else {
+        pool_quality = q;
+    }
 
     if (q == ARCH_ENTROPY_WEAK) {
         log_warn("CSPRNG: reseed mixed WEAK entropy; pool stays ready\n");

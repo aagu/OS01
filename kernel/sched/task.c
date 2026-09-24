@@ -19,7 +19,7 @@
 #include <random/random.h>
 #include <sys/auxv.h>
 #include <arch/auxv.h>      /* arch_auxv_platform / arch_auxv_payload_size */
-#include <arch/random.h>    /* arch_random_get_strong for AT_RANDOM (spec §6) */
+#include <arch/random.h>    /* arch_random_get_strong — fallback when pool not STRONG-seeded (spec §6) */
 
 #include <string.h>
 #include <stdlib.h>
@@ -1266,11 +1266,15 @@ static int setup_user_stack(uint8_t *kstack, char *const argv[], char *const env
     /* AT_RANDOM payload：16B 内核 STRONG-only（spec §6）。
      * 旧实现走 get_random_bytes()，WEAK-only pool 下也会成功 — AAGU-5
      * 父契约 §交付物 3 要求 AT_RANDOM 仅 STRONG，否则 fail-closed。
-     * arch_random_get_strong() 写入 32B（facade 契约 — spec §3.1），
-     * 取前 16B 写到 KSTACK；剩余 16B 立即 memset 0 不残留栈。
-     * 失败时 WEAK/NONE 环境整个 setup_user_stack() 返 -1。 */
+     * kernel_random_get_strong()（spec §6 + AAGU-5.6 fix）：先查 pool
+     * 是否 STRONG-seeded（UEFI GetRNG / RDSEED / RNDRRS），否则退到
+     * arch_random_get_strong()（纯硬件 RDSEED/RNDRRS 探测）。这样
+     * qemu64+virtio-rng CI 环境下 pool 由 UEFI 种子 STRONG 而 arch 硬件
+     * 无 RDSEED，AT_RANDOM 仍可工作（不误判 fail-closed）。
+     * 写入 32B（facade 契约 — spec §3.1），取前 16B 写到 KSTACK；
+     * 剩余 16B 立即 memset 0 不残留栈。失败时整个 setup_user_stack() 返 -1。 */
     uint8_t at_random_buf[32];
-    if (!arch_random_get_strong(at_random_buf)) {
+    if (!kernel_random_get_strong(at_random_buf)) {
         memset(at_random_buf, 0, 32);
         return -1;
     }

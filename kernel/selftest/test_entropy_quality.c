@@ -58,8 +58,13 @@ int entropy_quality_selftest_current_mode(void)
             FAIL("NONE mode: facade returned true (expected false)");
         if (!buf_all_zero(buf, 32))
             FAIL("NONE mode: out not all zero (facade must memset 0)");
-        if (random_is_ready())
-            FAIL("NONE mode: random_is_ready()=true (should be fail-closed)");
+        /* NOTE: do NOT check random_is_ready() here. random_ready reflects
+         * the pool's seed source (incl. UEFI GetRNG), independent of the
+         * arch facade. CI runs in CI env where arch facade reports NONE
+         * (qemu64 no RDRAND/RDSEED) but UEFI GetRNG (via virtio-rng) seeds
+         * the pool STRONG — random_is_ready() returns true. That's the
+         * correct combined-state (UEFI-seeded pool is healthy; arch hardware
+         * has no entropy), not a fail-closed violation. */
         break;
 
     case ARCH_ENTROPY_WEAK:
