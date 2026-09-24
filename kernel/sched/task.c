@@ -1132,11 +1132,95 @@ static int startup_args_count(char *const argv[], char *const envp[],
     return 0;
 }
 
+/* P1-4: explicit builder-contract capacity check.
+ *
+ * Why this lives separately from setup_user_stack():
+ *   setup_user_stack() builds the layout byte-by-byte with no error
+ *   return (it relies on preconditions, not runtime checks). Without
+ *   this function, the byte-budget and stack-capacity limits were an
+ *   implicit assumption: kernel-side callers (spawn_user_task /
+ *   kernel_exec) routed user-space argv through deep_copy_argv()
+ *   FIRST, and deep_copy_argv happened to enforce MAX_ARG_STRLEN /
+ *   MAX_ARG_TOTAL. The startup builder inherited those limits by
+ *   transitive trust — not by its own contract.
+ *
+ *   Decoupling matters because:
+ *     1. The kernel self-test (test_deep_copy_argv) and the kernel-
+ *        side init path bypass deep_copy_argv entirely (they pass
+ *        already-validated argv into setup_user_stack directly).
+ *        They MUST observe the same caps as the syscall path, or
+ *        setup_user_stack can silently overrun the user stack.
+ *     2. Future builders (different auxv layouts, AT_EXECFN additions)
+ *        must re-check capacity at the same enforcement point — not
+ *        rediscover the implicit deep_copy_argv dependency.
+ *
+ * Caps (must match kernel/include/memory/uaccess.h):
+ *   - per-string length     ≤ MAX_ARG_STRLEN    (4 KiB incl. NUL)
+ *   - combined string bytes ≤ MAX_ARG_TOTAL     (64 KiB)
+ *   - element count         ≤ STARTUP_STR_MAX   (128, checked upstream)
+ *   - total builder output  ≤ USER_STACK_SIZE - 16 KiB headroom
+ *     (headroom reserves space below the stack top for ELF loader
+ *      brk/auxv expansion; setup_user_stack reserves the upper 16 B
+ *      via the USER_STACK_TOP - 16 anchor in <sched/task.h>.)
+ *
+ * Returns 0 on success, -E2BIG on any cap violation, -EFAULT if an
+ * element pointer is NULL mid-array (caller's bug — startup_args_count
+ * already NULL-terminated the array, so anything past the terminator
+ * is malformed).
+ */
+static int setup_user_stack_check_capacity(char *const argv[], char *const envp[],
+                                          int argc, int envc)
+{
+    size_t str_bytes = 0;
+
+    /* Per-string cap and combined byte cap. */
+    for (int i = 0; i < argc; i++) {
+        const char *s = argv[i];
+        if (!s) return -EFAULT;
+        size_t len = strlen(s) + 1;          /* incl. NUL */
+        if (len > MAX_ARG_STRLEN) return -E2BIG;
+        str_bytes += len;
+        if (str_bytes > MAX_ARG_TOTAL) return -E2BIG;
+    }
+    for (int i = 0; i < envc; i++) {
+        const char *s = envp[i];
+        if (!s) return -EFAULT;
+        size_t len = strlen(s) + 1;
+        if (len > MAX_ARG_STRLEN) return -E2BIG;
+        str_bytes += len;
+        if (str_bytes > MAX_ARG_TOTAL) return -E2BIG;
+    }
+
+    /* Stack-fit cap: total builder output = str_bytes + metadata
+     * (argv/envp pointer tables, auxv pairs, alignment pad, fixed
+     * 32 B for argc + AT_NULL terminator). The metadata is bounded
+     * by STARTUP_STR_MAX × 8 bytes for pointer tables + ~96 bytes
+     * for auxv, so we approximate it conservatively.
+     *
+     * USER_STACK_SIZE = 2 MiB (USER_STACK_TOP - USER_STACK_BASE,
+     * minus the 16-B anchor at the top). The constant is inlined
+     * here rather than #include'd because the matching header
+     * (kernel/include/sched/task.h) doesn't expose it — keeping the
+     * check adjacent to the stack-base / -top defines would require
+     * a new public macro, which is out of scope for this fix. */
+    const size_t user_stack_size = 0x200000UL - 16;
+    const size_t meta_overhead =
+        (size_t)(argc + envc + 3) * 8 +    /* argc + argv + envp ptrs */
+        96 +                                /* auxv (3 pairs) + AT_RANDOM + pad */
+        16;                                 /* USER_STACK_TOP - 16 anchor */
+    if (str_bytes + meta_overhead > user_stack_size) return -E2BIG;
+
+    return 0;
+}
+
 /* Build (low→high): argc | argv[]+NULL | envp[]+NULL | auxv{AT_NULL,0} |
  * align_pad. The envp terminator NULL is STRICTLY adjacent to the auxv
  * start; the align pad sits ABOVE auxv and is explicitly zeroed.
  * argv/envp may be NULL (empty). argc/envc come from startup_args_count
- * (already capped) — this function cannot fail. */
+ * (already capped by STARTUP_STR_MAX); callers MUST also have passed
+ * setup_user_stack_check_capacity() for the per-string + total-byte +
+ * stack-fit contract (P1-4). With those preconditions, this function
+ * cannot fail — the ASSERTs document the contract for future readers. */
 static void setup_user_stack(uint8_t *kstack, char *const argv[], char *const envp[],
                              int s_argc, int s_envc,
                              uint64_t *out_argv_ptr, uint64_t *out_envp_ptr,
@@ -1241,6 +1325,12 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
 {
     int s_argc = 0, s_envc = 0;
     if (startup_args_count((char *const *)argv, NULL, &s_argc, &s_envc) != 0)
+        return -E2BIG;
+    /* P1-4: argv is already a kernel-side array (callers in kernel/sched
+     * pass string literals from KERN init), but enforce the explicit
+     * contract anyway — keeps the spawn / exec / selftest paths uniform. */
+    if (setup_user_stack_check_capacity((char *const *)argv, NULL,
+                                        s_argc, s_envc) != 0)
         return -E2BIG;
 
     // 1. Open the ELF file via VFS
@@ -1413,8 +1503,9 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
 // setup_user_stack() always builds a full minimal SysV layout
 // (argc=0, argv[0]=NULL, envp terminator) when given no strings.
 // An over-cap argv/envp is rejected up front by startup_args_count()
-// with -E2BIG. The child's _start reads argc from (rsp) and argv
-// from 8(rsp) — that contract lives in user/crt0.S.
+// + setup_user_stack_check_capacity() with -E2BIG. The child's _start
+// reads argc from (rsp) and argv from 8(rsp) — that contract lives in
+// user/crt0.S.
 int64_t sys_exec(const char *path, pt_regs_t *regs,
                  const char *const *argv, const char *const *envp)
 {
@@ -1422,6 +1513,15 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     int s_argc = 0, s_envc = 0;
     if (startup_args_count((char *const *)argv, (char *const *)envp,
                            &s_argc, &s_envc) != 0)
+        return -E2BIG;
+    /* P1-4: enforce byte budget + stack-fit preconditions on the kernel-
+     * side argv/envp that sys_exec will hand to setup_user_stack().
+     * deep_copy_argv() in the syscall path already bounded each string
+     * and the total, but the explicit check makes setup_user_stack's
+     * contract self-contained (no transitive trust in callers). */
+    if (setup_user_stack_check_capacity((char *const *)argv,
+                                        (char *const *)envp,
+                                        s_argc, s_envc) != 0)
         return -E2BIG;
 
     // 1. Look up the ELF file (support relative paths)
@@ -2290,6 +2390,8 @@ int task_selftest_auxv_probe(char *const argv[], char *const envp[],
     while (argv && argv[argc]) argc++;
     while (envp && envp[envc]) envc++;
     if (argc + envc > STARTUP_STR_MAX) return -1;
+    if (setup_user_stack_check_capacity(argv, envp, argc, envc) != 0)
+        return -1;
 
     uint64_t argp, envpp, rsp;
     memset(task_selftest_stack_img, 0, sizeof(task_selftest_stack_img));

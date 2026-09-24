@@ -1,6 +1,6 @@
 /* GICv2 driver core — 纯逻辑, 无 UART/DTB/asm 依赖（hosttest 可编译, spec §4.1）。
- * 寄存器偏移沿用 kernel/arch/aarch64/reg.h 的值, 此处自带同值定义
- * （reg.h 的 inline 访问器是 target 专用）。 */
+ * 寄存器偏移沿用 kernel/include/arch/aarch64/reg.h 的值, 此处自带同值定义
+ * （<arch/aarch64/reg.h> 的 inline 访问器是 target 专用）。 */
 #include <stdint.h>
 #include <stdbool.h>
 #include <arch/aarch64/gic.h>

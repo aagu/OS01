@@ -57,7 +57,7 @@
  * relative to this file (matching the style of boot_percpu.c, smp.c,
  * and the other aarch64 C files). The header itself pulls in
  * kernel/include/arch/aarch64/ram.h. */
-#include "ram_core.h"
+#include <arch/aarch64/ram_core.h>
 
 /* ── Constants local to this TU ──────────────────────────────── */
 #define RAM_PAGE_BYTES      UINT64_C(4096)

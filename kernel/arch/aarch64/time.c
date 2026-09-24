@@ -32,7 +32,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <arch/regs.h>
-#include "reg.h"
+#include <arch/aarch64/reg.h>
 #include <arch/aarch64/gic.h>
 #include <arch/aarch64/dtb.h>
 #include <time/clockevent.h>   /* tick_handler() */

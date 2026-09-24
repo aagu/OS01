@@ -6,8 +6,8 @@
 #include <arch/aarch64/spinlock.h>
 #include <arch/aarch64/boot_log.h>
 #include <arch/aarch64/smp.h>
-#include "aarch64_percpu.h"
-#include "reg.h"
+#include <arch/aarch_percpu.h>
+#include <arch/aarch64/reg.h>
 
 #define ITERATIONS_PER_CORE 1000000U
 

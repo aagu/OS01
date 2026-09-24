@@ -1,6 +1,6 @@
 /* SGI/IPI 跨核测试（spec §7.5）。
  *
- * 内存序契约（R1-6 + R3-1，与 aarch64_percpu.h:93-113 的 boot_online/bench_done
+ * 内存序契约（R1-6 + R3-1，与 arch/aarch_percpu.h:93-113 的 boot_online/bench_done
  * 完全同模式）：
  *   AP  : arch_atomic_fetch_add(&ipi_received[cpu], 1)   ← ldxr/stxr 原子计数
  *         ipi_flag_release(&ipi_done[cpu], 1)            ← stlr (RELEASE store)：
@@ -26,7 +26,7 @@
 #include <arch/aarch64/gic.h>
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/boot_log.h>
-#include "aarch64_percpu.h"
+#include <arch/aarch_percpu.h>
 
 #define IPI_SGI_ID       0u
 #define IPI_REPLY_SGI    1u

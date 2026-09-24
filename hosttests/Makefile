@@ -64,7 +64,9 @@ TEST_BINS := \
     $(TEST_BLD)/test_libc_list.elf \
     $(TEST_BLD)/test_libc_vsprintf.elf \
     $(TEST_BLD)/test_libc_fflush.elf \
+    $(TEST_BLD)/test_libc_stdio_registry.elf \
     $(TEST_BLD)/test_libc_fread_fwrite_validate.elf \
+    $(TEST_BLD)/test_libc_stdio_registry.elf \
     $(TEST_BLD)/test_libc_getopt.elf \
     $(TEST_BLD)/test_vfs_basic.elf \
     $(TEST_BLD)/test_fat32_basic.elf \
@@ -86,7 +88,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_gic_probe.elf \
     $(TEST_BLD)/test_clocksource.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry
 
 all: $(TEST_BINS)
 
@@ -211,6 +213,17 @@ $(TEST_BLD)/libc_stdio_file.o: $(LIBC_SRC)/stdio/stdio_file.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
+# P1-5 review round 2: stdio_extras.c is the second half of the FILE
+# registry's truth source — fileno_unlocked / getc_unlocked /
+# putc_unlocked / fgets_unlocked live here. The hosttest must link
+# this object so the OS01 implementations (routed through file_to_fd())
+# are exercised, NOT the host glibc's. Without this, the linker
+# silently resolves the symbols to glibc and the test passes even if
+# the OS01 implementations regress to the pre-fix bare-cast behaviour.
+$(TEST_BLD)/libc_stdio_extras.o: $(LIBC_SRC)/stdio/stdio_extras.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
 # printf/vasprintf/write_all test shim — overrides host write() with a scriptable,
 # capturing, real-stdout-forwarding stub.
 $(TEST_BLD)/stdio_test_shims.o: $(TEST_MOCK)/stdio_test_shims.c
@@ -243,6 +256,13 @@ $(TEST_BLD)/test_libc_fflush.o: $(TEST_CASES)/test_libc_fflush.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
+# P2-8: stdio-registry cap / fdopen / slot-reuse tests — needs the mock
+# shim header for shim_write_count() (currently unused but kept for
+# symmetry with test_libc_fflush, which exercises the same code paths).
+$(TEST_BLD)/test_libc_stdio_registry.o: $(TEST_CASES)/test_libc_stdio_registry.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
 # fread/fwrite stream-validation test — pipe-based fake mini_file_t, no shims.
 $(TEST_BLD)/test_libc_fread_fwrite_validate.o: $(TEST_CASES)/test_libc_fread_fwrite_validate.c
 	@mkdir -p $(TEST_BLD)
@@ -250,7 +270,6 @@ $(TEST_BLD)/test_libc_fread_fwrite_validate.o: $(TEST_CASES)/test_libc_fread_fwr
 
 # Focused poll test compiles and links the real production paths.
 $(TEST_BLD)/test_poll_requested.o: $(TEST_CASES)/test_poll_requested.c
-	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/poll_production.o: $(TESTS_DIR)/kernel/fs/poll.c
@@ -315,6 +334,18 @@ $(TEST_BLD)/test_libc_fread_fwrite_validate.elf: \
 
 test-libc-fread-fwrite-validate: $(TEST_BLD)/test_libc_fread_fwrite_validate.elf
 	$<
+
+# P2-8: registry-cap / fdopen / slot-reuse / unregistered-stream
+# contract tests for the libc FILE layer (AAGU-6 batch).
+$(TEST_BLD)/test_libc_stdio_registry.elf: \
+		$(TEST_BLD)/test_libc_stdio_registry.o \
+		$(TEST_BLD)/libc_stdio_file.o \
+		$(TEST_BLD)/libc_stdio_extras.o \
+		$(TEST_BLD)/libc_vsprintf.o \
+		$(TEST_BLD)/libc_printf.o \
+		$(TEST_BLD)/libc_floatconv.o \
+		$(TEST_BLD)/stdio_test_shims.o
+	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/test_libc_getopt.elf: $(TEST_BLD)/test_libc_getopt.o $(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^
