@@ -61,14 +61,8 @@ arch_entropy_source_t random_get_pool_quality(void) { return pool_quality; }
  *   - arch hardware provides STRONG (RDSEED/RNDRRS) when pool not STRONG-seeded
  *
  * Returns false for WEAK (pool or hardware), NONE, or any state where
- * neither path produces STRONG entropy. Caller must memset out on false.
- *
- * Marked __attribute__((weak)) so kernel/selftest/test_at_random_strong_only.c
- * can provide a strong override (AAGU-5.7 — simulate STRONG/WEAK/NONE in one
- * boot, asserting setup_user_stack contract). In production builds the weak
- * default is the implementation; in KERNEL_SELFTEST=1 builds the test file's
- * strong override wins at link time. */
-__attribute__((weak)) bool kernel_random_get_strong(uint8_t out[32])
+ * neither path produces STRONG entropy. Caller must memset out on false. */
+bool kernel_random_get_strong(uint8_t out[32])
 {
     if (!out)
         return false;
@@ -84,6 +78,20 @@ __attribute__((weak)) bool kernel_random_get_strong(uint8_t out[32])
     /* Pool not STRONG-seeded (or not ready) — defer to arch hardware. */
     return arch_random_get_strong(out);
 }
+
+#ifdef OS01_SELFTEST
+/* AAGU-5.7 test hook: let KERNEL_SELFTEST=1 selftests simulate pool state
+ * without depending on real entropy sources. Sets `pool_quality` and
+ * `random_ready` so callers (production kernel_random_get_strong) see the
+ * requested quality — exercising the actual production STRONG-only contract
+ * rather than mocking it. Production builds (no OS01_SELFTEST) don't link
+ * this symbol. */
+void kernel_random_test_set_pool_quality(arch_entropy_source_t q, bool ready)
+{
+    pool_quality = q;
+    random_ready = ready;
+}
+#endif
 
 /* v8: C 预处理器 stringify 宏（spec §3.1 32B 契约 / spec §5.1 ready 决策外的
  * 辅助宏）。双层结构是 C99 标准 — 内层 #x 不展开参数，外层强制先展开再 stringify。 */

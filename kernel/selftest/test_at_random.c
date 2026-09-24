@@ -5,20 +5,19 @@
 
 #include <core/selftest.h>
 #include <core/printk.h>
-#include <random/random.h>   /* random_is_ready */
-#include <arch/random.h>     /* ARCH_ENTROPY_STRONG + kernel_random_mock_set/reset */
+#include <random/random.h>   /* random_is_ready / kernel_random_get_strong /
+                              * kernel_random_test_set_pool_quality */
+#include <arch/random.h>     /* ARCH_ENTROPY_STRONG + arch_entropy_source_t */
 #include <sched/task.h>       /* USER_STACK_BASE/TOP + task_selftest_auxv_probe */
 #include <sys/auxv.h>
 #include <string.h>
 #include <stdint.h>
 
 /* AAGU-5.7: AT_RANDOM 路径 STRONG-only 后，setup_user_stack 在 WEAK/NONE
- * 环境下返 -1。本文件测的是 auxv LAYOUT（与 entropy 质量无关），需要
- * 强制 STRONG 让 setup_user_stack 走通；测试结束 reset 防污染后续。
- * 强覆盖在 kernel/selftest/test_at_random_strong_only.c（KERNEL_SELFTEST=1
- * 编译时链接）。 */
-extern void kernel_random_mock_set(arch_entropy_source_t q);
-extern void kernel_random_mock_reset(void);
+ * 环境下返 -1。本文件测的是 auxv LAYOUT（与 entropy 质量无关）需要强制
+ * STRONG 让 setup_user_stack 走通；同时 at_random_entropy 的 skip 条件
+ * 改为"STRONG 可用"而非"pool ready"。两处都用 kernel_random_test_set_pool_quality
+ * （random.c 在 OS01_SELFTEST 下导出）。 */
 
 /* R11 MAJOR 修正: probe_argv / probe_envp 仍是奇数(2 argv + 1 envp)用;
  * even probe 必须用独立 3 元素数组,不能复用(否则偶数 case 越界读写)。 */
@@ -92,11 +91,14 @@ static int at_random_selftest_walk(uint64_t rsp, uint64_t auxv,
 int at_random_selftest_layout(void)
 {
     /* AAGU-5.7: 强制 STRONG 让 setup_user_stack 走通；test 关注 layout
-     * 而非 entropy 质量。Reset 防污染后续 test。 */
-    kernel_random_mock_set(ARCH_ENTROPY_STRONG);
+     * 而非 entropy 质量。Save/restore 避免污染后续 test (at_random_entropy
+     * 的 STRONG-availability 探测 — 见下)。 */
+    arch_entropy_source_t saved_q = random_get_pool_quality();
+    bool saved_ready = random_is_ready();
+    kernel_random_test_set_pool_quality(ARCH_ENTROPY_STRONG, true);
     uint64_t rsp, auxv, rnd, plat;
     int rc = probe_build(odd_argv, odd_envp, &rsp, &auxv, &rnd, &plat);
-    kernel_random_mock_reset();
+    kernel_random_test_set_pool_quality(saved_q, saved_ready);
     if (rc != 0) {
         serial_printk("[selftest] at_random: probe build failed\n");
         return -1;
@@ -113,11 +115,13 @@ int at_random_selftest_layout(void)
  * 直接调 probe + walk,不修改共享全局。 */
 int at_random_selftest_layout_even(void)
 {
-    /* 同上 — mock STRONG → 测 layout → reset */
-    kernel_random_mock_set(ARCH_ENTROPY_STRONG);
+    /* 同上 — STRONG pool → 测 layout → save/restore */
+    arch_entropy_source_t saved_q = random_get_pool_quality();
+    bool saved_ready = random_is_ready();
+    kernel_random_test_set_pool_quality(ARCH_ENTROPY_STRONG, true);
     uint64_t rsp, auxv, rnd, plat;
     int rc = probe_build(even_argv, even_envp, &rsp, &auxv, &rnd, &plat);
-    kernel_random_mock_reset();
+    kernel_random_test_set_pool_quality(saved_q, saved_ready);
     if (rc != 0) {
         serial_printk("[selftest] at_random_layout_even: probe build failed\n");
         return -1;
@@ -128,15 +132,25 @@ int at_random_selftest_layout_even(void)
 /* 熵用例：同一 argv 构建两次，16B payload 必须不同（CSPRNG）。
  * 缓冲是同一块静态数组——先拷贝第一次再重建。
  *
- * Issue AAGU-2 §1: when the CSPRNG pool is not ready (QEMU default CPU
- * without RDRAND/RDSEED, aarch64 stub), AT_RANDOM is fail-closed zeroed
- * — the canary derived from it is also zeroed and libc aborts. That is
- * the CORRECT secure behavior; this selftest only proves the ready path
- * produces distinct keystream blocks. */
+ * Issue AAGU-2 §1 + AAGU-5.7: AT_RANDOM 路径 STRONG-only。当 pool 未 STRONG-seeded
+ * （NONE）或只 WEAK-seeded 且 arch 无 STRONG（默认 QEMU），kernel_random_get_strong
+ * 返 false → setup_user_stack 返 -1。这是预期 fail-closed 行为；本测试只
+ * 关心 STRONG-available 路径产生不同 keystream blocks。
+ *
+ * AAGU-5.7 reviewer 反馈：原 skip 条件只看 `random_is_ready()`（WEAK pool
+ * 也算 ready）→ WEAK 模式下不 skip 但 probe 返 -1 → 测试错报"no AT_RANDOM pair"。
+ * 改为直接探 `kernel_random_get_strong()` 是否能给出 STRONG（pool 或 arch 任一）。
+ */
 int at_random_selftest_entropy(void)
 {
-    if (!random_is_ready()) {
-        serial_printk("[selftest] at_random_entropy: pool not ready (fail-closed) — skipped\n");
+    /* 探一下 pool 真实能否提供 STRONG entropy（不消耗）：实际 probe_build
+     * 之后会再调一次 setup_user_stack；这次探查只确认"STRONG-available"语义。 */
+    uint8_t strong_probe[32];
+    bool strong_avail = kernel_random_get_strong(strong_probe);
+    memset(strong_probe, 0, 32);
+    if (!strong_avail) {
+        serial_printk("[selftest] at_random_entropy: STRONG not available "
+                      "(pool WEAK or NONE + no arch STRONG, fail-closed) — skipped\n");
         return 0;   /* not a regression; secure behavior */
     }
     static uint8_t first[16];
