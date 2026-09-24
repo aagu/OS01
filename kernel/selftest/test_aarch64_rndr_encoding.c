@@ -1,23 +1,35 @@
 // kernel/selftest/test_aarch64_rndr_encoding.c —
-// Compile-time + objdump-time verification of RNDR/RNDRRS assembly encoding.
+// aarch64-only compile-time + objdump-time verification of RNDR/RNDRRS
+// assembly encoding.
 //
-// PR #25 review (0f67ead1) found two bugs in the original aarch64 random.c:
-//   (1) RNDR / RNDRRS S3_3_C2_C4_n op2 swapped (RNDR is op2=0, RNDRRS op2=1)
-//   (2) `cset ... eq` inverted success/failure (success has Z=0 ⇒ use `ne`)
+// PR #25 reviewer (0f67ead1, follow-up) found that the original
+// un-guarded version broke x86_64 builds (kernel/Makefile uses
+// $(wildcard selftest/*.c) on x86_64 too, so this file's aarch64
+// inline asm (`mrs`, `cset`) hit "invalid instruction mnemonic"
+// on x86_64).
 //
-// This selftest reproduces the corrected inline asm verbatim and runs only
-// at selftest-build time. It is excluded from runtime selftest dispatch
-// (selftest.c doesn't register it) but lives in the source tree so the
-// compilation contract is checked on every `make KERNEL_SELFTEST=1` and
-// CI's `aarch64 checks` job verifies objdump contains the expected
-// `mrs Xn, S3_3_C2_C4_0` and `mrs Xn, S3_3_C2_C4_1` instructions.
+// Fix: wrap the asm + helper in #ifdef __aarch64__. On x86_64 the file
+// becomes a no-op (just the include guard), so it compiles cleanly
+// alongside the rest of selftest/. The asm helper below mirrors
+// kernel/arch/aarch64/random.c rndr_one()/rndrrs_one() — any drift
+// between them is caught at KERNEL_SELFTEST=1 build time (CI's
+// `aarch64 checks` job already runs llvm-objdump on the rebuilt
+// arch/aarch64/random.o and verifies `mrs RNDR` / `mrs RNDRRS`
+// instructions are emitted).
 //
 // Runtime verification (RNDR/RNDRRS actually returning entropy on
-// QEMU -cpu max) is gated by CI's `aarch64 checks` job which boots the
-// UEFI image — see tests/scripts/qemu_entropy_modes.sh aarch64 STRONG
-// mode for the full path exercise.
+// QEMU -cpu max) is gated by CI's aarch64 boot path — see
+// tests/scripts/qemu_entropy_modes.sh aarch64 STRONG mode for the
+// full path exercise.
 
 #ifdef OS01_SELFTEST
+
+#include <stdint.h>   /* uint64_t for the aarch64 asm helper below */
+
+/* On x86_64 the asm below uses aarch64-only instructions and cannot
+ * compile. Stub out the entire asm block on non-aarch64 arches so
+ * $(wildcard selftest/*.c) stays happy on every profile. */
+#if defined(__aarch64__)
 
 // Mirror of kernel/arch/aarch64/random.c rndr_one() — kept in sync to
 // catch regressions if either side drifts.
@@ -50,16 +62,21 @@ static int selftest_rndrrs_asm_ok(uint64_t *out)
     return 0;
 }
 
+#endif /* __aarch64__ */
+
 /* Compile-time-only check: this function exists so the asm snippets are
- * emitted by the compiler. The actual mrs encoding is verified at CI's
- * `aarch64 checks` job via objdump | grep S3_3_C2_C4 (see tests/scripts/
- * qemu_entropy_modes.sh aarch64 STRONG assertions). */
+ * emitted by the compiler on aarch64. On x86_64 the helpers are not
+ * defined (see #ifdef above) so this is a no-op. The actual mrs
+ * encoding is verified at CI's `aarch64 checks` job via objdump |
+ * grep S3_3_C2_C4 (see tests/scripts/qemu_entropy_modes.sh aarch64
+ * STRONG assertions). */
 int aarch64_rndr_encoding_selftest(void)
 {
-    /* Force the compiler to emit the asm by referencing the helpers. */
+#if defined(__aarch64__)
     uint64_t v1 = 0, v2 = 0;
     (void)selftest_rndr_asm_ok(&v1);
     (void)selftest_rndrrs_asm_ok(&v2);
+#endif
     return 0;
 }
 

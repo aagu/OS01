@@ -53,7 +53,8 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c \
                    random/random.c \
                    arch/aarch64/random.c \
                    ../libc/random/chacha20.c \
-                   selftest/test_arch_atomic_u64.c
+                   selftest/test_arch_atomic_u64.c \
+                   selftest/test_aarch64_rndr_encoding.c
 else
 KERNEL_C_SOURCES := \
     $(wildcard core/*.c) \
