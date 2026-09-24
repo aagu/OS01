@@ -88,7 +88,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_gic_probe.elf \
     $(TEST_BLD)/test_clocksource.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry
 
 all: $(TEST_BINS)
 
@@ -351,6 +351,7 @@ $(TEST_BLD)/test_libc_getopt.elf: $(TEST_BLD)/test_libc_getopt.o $(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/test_vfs_basic.elf: $(TEST_BLD)/test_vfs_basic.o $(LIBC_OBJS) $(MOCK_OBJS)
+	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/test_fat32_basic.elf: $(TEST_BLD)/test_fat32_basic.o $(LIBC_OBJS) $(MOCK_OBJS)
 	$(HOST_CC) -o $@ $^
