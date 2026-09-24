@@ -31,7 +31,11 @@ Implementation therefore expanded scope from 4 to 6 headers (verbatim copies of 
 
 ## Goal achieved
 
-aarch64 kernel no longer depends on `libc/include/` headers. After this commit, aarch64 kernel is fully freestanding with respect to libc-style headers. The kernel can migrate to a real libc later (e.g., musl) without breaking aarch64 kernel builds.
+aarch64 kernel no longer depends on `libc/include/` headers at compile time (the `kernel/include/compat/*.h` mirror headers satisfied the sym-include forms). After this commit, aarch64 kernel was fully freestanding with respect to libc-style headers.
+
+## Update 2026-09-24 — AAGU-29 changes the freestanding story
+
+The "fully freestanding" assumption from AAGU-6/#24 was lifted in AAGU-29 (closure `docs/aarch64-libk-aarch64-closure-2026-09-24.md`). aarch64 kernel now links `libk.a` from the libc source tree (cross-compiled to aarch64 via the new `libc/arch/aarch64/make.config` + arch-gated `libc/Makefile` `C_SOURCES` subset). The kernel still consumes headers via `kernel/include/compat/*.h`, **but** the `kernel/compiler_rt/memset.c` weak fallback (Phase 2 #5 / AAGU-6) and `kernel/arch/aarch64/libc_stub.c` shims were both removed: their bodies now live in `libk.a` strong symbols (memcpy/memset/memmove/calloc/free/malloc/strlen/strcmp/...). `kernel/include/compat/*` mirror headers are now removable in a small follow-up — see AAGU-29 closure §Open follow-ups.
 
 ## Verification matrix
 

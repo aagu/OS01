@@ -1,11 +1,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <sys/syscall.h>
 #include <stdint.h>
 
 #if defined(__is_libk)
 #include <memory/slab.h>
+#else
+// libc mode: heap management via SYS_brk. The header is x86_64 asm-only,
+// so we only pull it in outside the kernel side (kernel side uses slab).
+#include <sys/syscall.h>
 #endif
 
 // ── Freelist allocator ───────────────────────────────────────
@@ -30,6 +33,7 @@ typedef struct free_block {
 static free_block_t *freelist = NULL;
 static int heap_initialized = 0;
 
+#ifndef __is_libk
 // Query or set the program break
 static uint64_t get_brk(void)
 {
@@ -94,6 +98,7 @@ static void __attribute__((unused)) try_coalesce(free_block_t *block)
         }
     }
 }
+#endif /* __is_libk */
 
 void *malloc(size_t size)
 {

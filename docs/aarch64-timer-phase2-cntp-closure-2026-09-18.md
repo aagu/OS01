@@ -77,8 +77,11 @@ R3.4: 1 NEW (tick_start `irq_mask`/`irq_unmask` x86-only) — tick_start body ga
 3. **`-I libc/include` policy cleanup** — Phase 2 follow-up #5.
 4. **Replacing `subsys_stub.c` with real `kernel/subsys/subsys.c`** — depends on `serial_printk`/`strcmp`/`num_cpus`/`idle_resume` becoming available on aarch64.
 5. **Replacing `idle_resume_stub.c` with real aarch64 idle loop** — depends on scheduler landing (Phase 2 #3).
-6. **Replacing `libc_stub.c` with real libc** — depends on libc sysroot for aarch64 (Phase 2 #5).
-7. **`tick_handler()` removal of `#if`-gated poll-scan block** — when aarch64 has its own poll.c (currently dead code on aarch64 phase 2).
+6. **`tick_handler()` removal of `#if`-gated poll-scan block** — when aarch64 has its own poll.c (currently dead code on aarch64 phase 2).
+
+## Update 2026-09-24 — AAGU-29 closes item 6
+
+`kernel/arch/aarch64/libc_stub.c` was removed in AAGU-29 once aarch64 kernel started linking `libk.a` (kernel/arch/aarch64/make.config: `ARCH_LIBS = -nostdlib -lk`). `calloc`/`free` (now `kmalloc`/`kfree` via slab) and `memset` come from `libk.a` (`libc/stdlib/{calloc,malloc}.c` + `libc/string/memset.c` cross-compiled to aarch64). The Phase 2 #5 libc sysroot path never fired for aarch64 (aarch64-clang profile is `kernel uefi`, no `userland`), so the substitution is **kernel-side libk.a** instead of a full libc sysroot. Closure: `docs/aarch64-libk-aarch64-closure-2026-09-24.md`. Open follow-up remaining from Phase 2 #5: `kernel/include/compat/*` mirror headers (also tracked as a separate sub-issue — see closure).
 
 ## Connection to roadmap P2
 
