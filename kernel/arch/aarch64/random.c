@@ -17,20 +17,28 @@
 
 #define RNDR_RETRY_MAX 10   // ARM ARM D17.1.5
 
-/* RNDRRS / RNDR 系统寄存器编码（S3_3_C2_C4_0 / S3_3_C2_C4_1）。
- * NZCV 全 0 表示成功。 */
+/* RNDR / RNDRRS 系统寄存器编码（ARM ARM D17.1.5 / D17.1.6）：
+ *   RNDR   = S3_3_C2_C4_0  (op0=3, op1=3, CRn=2, CRm=4, op2=0)
+ *   RNDRRS = S3_3_C2_C4_1  (op0=3, op1=3, CRn=2, CRm=4, op2=1)
+ * 之前实现写反 (RNDR=s3_3_c2_c4_1, RNDRRS=s3_3_c2_c4_0),由 PR #25 评审发现。
+ *
+ * 成功/失败判定（ARM ARM D17.1.5 RNDR pseudocode）：
+ *   成功: NZCV = 0b0000 (N=0, Z=0, C=0, V=0) — Z flag = 0
+ *   失败: NZCV = 0b0100 (N=0, Z=1, C=0, V=0) — Z flag = 1
+ * `cset %w1, eq` 设 Z==1 时为 1,即"失败"被当作 success,反之亦然 — 这是
+ * 另一个之前的 bug。正确写法 `cset %w1, ne`: Z==0 (成功) 时为 1。 */
 static inline bool rndr_one(uint64_t *out)
 {
     for (int i = 0; i < RNDR_RETRY_MAX; i++) {
         uint64_t v;
-        uint64_t flags;
+        uint64_t success;
         __asm__ __volatile__(
-            "mrs %0, s3_3_c2_c4_1\n\t"   /* RNDR */
-            "cset %w1, eq"              /* flags == 0 ⇒ success */
-            : "=r"(v), "=r"(flags)
+            "mrs %0, s3_3_c2_c4_0\n\t"   /* RNDR (op2=0) */
+            "cset %w1, ne"              /* Z==0 (success) ⇒ 1 */
+            : "=r"(v), "=r"(success)
             :
             : "cc");
-        if (flags) { *out = v; return true; }
+        if (success) { *out = v; return true; }
     }
     return false;
 }
@@ -39,14 +47,14 @@ static inline bool rndrrs_one(uint64_t *out)
 {
     for (int i = 0; i < RNDR_RETRY_MAX; i++) {
         uint64_t v;
-        uint64_t flags;
+        uint64_t success;
         __asm__ __volatile__(
-            "mrs %0, s3_3_c2_c4_0\n\t"   /* RNDRRS */
-            "cset %w1, eq"
-            : "=r"(v), "=r"(flags)
+            "mrs %0, s3_3_c2_c4_1\n\t"   /* RNDRRS (op2=1) */
+            "cset %w1, ne"              /* Z==0 (success) ⇒ 1 */
+            : "=r"(v), "=r"(success)
             :
             : "cc");
-        if (flags) { *out = v; return true; }
+        if (success) { *out = v; return true; }
     }
     return false;
 }
