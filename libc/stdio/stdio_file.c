@@ -76,10 +76,12 @@ static int is_open_file(void *f)
 }
 
 /* P1-5: single entry point for "FILE* → fd" — used by every FILE
- * consumer below (vfprintf, fflush, fread, fwrite, fclose). Centralises
- * the sentinel short-circuit (stdin/stdout/stderr are owned by libc,
- * not registered) and the registry check (returns -1 for unknown
- * pointers instead of dereferencing them as a struct).
+ * consumer in stdio_file.c (vfprintf, fflush, fread, fwrite, fclose)
+ * AND every consumer in stdio_extras.c (fileno_unlocked,
+ * getc_unlocked, putc_unlocked, fgets_unlocked, fputc, fputs).
+ * Centralises the sentinel short-circuit (stdin/stdout/stderr are
+ * owned by libc, not registered) and the registry check (returns -1
+ * for unknown pointers instead of dereferencing them as a struct).
  *
  * Returns:
  *   - stdin/stdout/stderr sentinel  → 0/1/2 respectively
@@ -89,8 +91,22 @@ static int is_open_file(void *f)
  * Callers that need to distinguish "unknown pointer" from "real EOF"
  * must check for -1 themselves (vfprintf returns -1; fread/fwrite
  * return 0).
+ *
+ * Exported via stdio_internal.h so stdio_extras.c can call it
+ * without re-implementing the sentinel/registry logic. Re-implementing
+ * it (the pre-fix state) is exactly what allowed FILE* consumers in
+ * stdio_extras.c to bypass the registry — the bug that the reviewer
+ * flagged for the P1-5 cleanup batch.
+ *
+ * Single-threaded by design: OS01's userspace runs one thread per
+ * process. The kernel is SMP, but the libc's registry is only touched
+ * from the single userspace thread, so no locking is required. The
+ * (single-threaded) interleaving test in test_libc_stdio_registry
+ * exercises the slot-reuse / scan-on-register paths under rapid
+ * sequential fopen→fclose cycles — the pattern that would surface
+ * any algorithmic bug in the registry's bookkeeping.
  */
-static int file_to_fd(void *f)
+int file_to_fd(void *f)
 {
     if (f == stdin)  return 0;
     if (f == stdout) return 1;
@@ -267,16 +283,27 @@ int fprintf(void *f, const char *fmt, ...) {
 	return ret;
 }
 int putchar_unlocked(int c) { return putchar(c); }
+/* P1-5 (review round 2): fputc / fputs used to call fileno_unlocked()
+ * (defined in stdio_extras.c), which in turn bypassed the registry and
+ * dereferenced any non-sentinel pointer as a mini_file_t. After round 2
+ * both layers route through file_to_fd(), so the entire chain
+ * (fputc → file_to_fd → is_open_file → mini_file_t->fd) is gated by the
+ * registry check. Unknown / stale FILE* returns -1, the syscall arg is
+ * -1, and the kernel rejects it cleanly instead of writing to an
+ * arbitrary fd. */
 int fputc(int c, void *f)
 {
-    int fd = fileno_unlocked((FILE *)f);
+    int fd = file_to_fd(f);
+    if (fd < 0) return EOF;
     unsigned char ch = (unsigned char)c;
     syscall(SYS_write, fd, (uint64_t)&ch, 1);
     return c;
 }
 int fputs(const char *s, void *f)
 {
-    int fd = fileno_unlocked((FILE *)f);
+    if (!s) return EOF;
+    int fd = file_to_fd(f);
+    if (fd < 0) return EOF;
     size_t len = 0;
     while (s[len]) len++;
     syscall(SYS_write, fd, (uint64_t)s, (uint64_t)len);
