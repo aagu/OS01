@@ -271,34 +271,66 @@ test:
 test-pmm-boot-reservation:
 	python3 qemutests/pmm_boot_reservation_test.py
 
-.PHONY: test-phase-0
-test-phase-0: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
-	$(call require_capability,rootfs)
-	OVMF_FIRMWARE="$(OVMF_FIRMWARE)" python3 qemutests/run_test.py phase-0 --disk $(NORMAL_IMAGE)
+# Per-SUITE lookups, used by test-qemu to pick the right variant build
+# flavor and the right image path. These are Make variables so they
+# resolve at parse time and survive across recipe lines.
+TEST_QEMU_FLAVOR_phase-0       =
+TEST_QEMU_FLAVOR_systest       = OS01_SYSTEST=1
+TEST_QEMU_FLAVOR_inittab-phase = INITTAB_FILE=config/inittab.test
+TEST_QEMU_FLAVOR_network       = OS01_NETTEST=1
+TEST_QEMU_IMG_phase-0       = $(NORMAL_IMAGE)
+TEST_QEMU_IMG_systest       = $(TEST_SYSTEST_IMAGE)
+TEST_QEMU_IMG_inittab-phase = $(TEST_INITTAB_IMAGE)
+TEST_QEMU_IMG_network       = $(TEST_NETTEST_IMAGE)
 
-.PHONY: test-syscall
-# KERNEL_SELFTEST starts kernel threads at boot and can perturb the syscall
-# suite's fork/exec/wait sequencing.  Reject the combination while Make is
-# parsing the requested goals, before firmware/image prerequisites or the
-# normal-image hash sandwich can run.
+.PHONY: test-qemu test-phase-0 test-syscall test-inittab test-network
+# Use the per-SUITE Make variables from Step 1. The image path is
+# informational — it is NOT used as a prerequisite, because the
+# variant image path has no direct build rule (the chain is `image` (phony)
+# → `$(DISK_IMG)` (variable) → rule in mk/components/image.mk). Listing
+# the raw image path as a prereq fails with "No rule to make target"
+# (verified: `make -n test-qemu SUITE=systest` errors with the systest
+# variant path). The variant build is triggered by a `$(MAKE) ... image`
+# sub-make inside the recipe.
+# Preserve the old syscall/selftest exclusion at parse time for both
+# invocation forms. This check must run before any prerequisites are built.
 ifneq ($(filter test-syscall,$(MAKECMDGOALS)),)
-ifeq ($(filter 1,$(KERNEL_SELFTEST)),1)
-$(error ERROR: test-syscall must not be combined with KERNEL_SELFTEST=1; run test-kernel-selftest separately)
+ifeq ($(KERNEL_SELFTEST),1)
+$(error ERROR: syscall E2E must not be combined with KERNEL_SELFTEST=1)
 endif
 endif
-test-syscall: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
+ifneq ($(filter test-qemu,$(MAKECMDGOALS)),)
+ifeq ($(SUITE),systest)
+ifeq ($(KERNEL_SELFTEST),1)
+$(error ERROR: syscall E2E must not be combined with KERNEL_SELFTEST=1)
+endif
+endif
+endif
+
+test-qemu: SUITE ?= phase-0
+test-qemu: SUITE := $(SUITE)
+# Firmware remains a prerequisite for every suite. No image-path prereq:
+# the variant image is built by the recursive make below.
+test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
-	@set -e; \
-	if [ -f "$(NORMAL_IMAGE)" ]; then \
+	@case "$(SUITE)" in \
+	  phase-0|systest|inittab-phase|network) ;; \
+	  *) echo "SUITE must be phase-0|systest|inittab-phase|network, got '$(SUITE)'" >&2; exit 1;; \
+	esac
+	@echo "  [test-qemu] SUITE=$(SUITE) flavor=$(TEST_QEMU_FLAVOR_$(SUITE)) img=$(TEST_QEMU_IMG_$(SUITE))"
+	@if [ "$(SUITE)" != "phase-0" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.before"; \
 	fi
-	$(MAKE) OS01_SYSTEST=1 image
-	@set -e; \
-	if [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
+	$(MAKE) $(TEST_QEMU_FLAVOR_$(SUITE)) image
+	@if [ "$(SUITE)" != "phase-0" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	fi
-	DISK_IMG="$(TEST_SYSTEST_IMAGE)" OVMF_FIRMWARE="$(OVMF_FIRMWARE)" python3 qemutests/run_test.py systest
+	DISK_IMG="$(TEST_QEMU_IMG_$(SUITE))" \
+	OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \
+	python3 qemutests/run_test.py $(SUITE)
+test-phase-0:    ; @$(MAKE) test-qemu SUITE=phase-0
+test-syscall:    ; @$(MAKE) test-qemu SUITE=systest
 
 # Exercise repeated exec/exit through the normal terminal and ash path.
 .PHONY: test-syscall-repeat
@@ -311,36 +343,8 @@ test-syscall-repeat: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAG
 	$(call require_capability,rootfs)
 	python3 qemutests/x86_64_systest_repeat.py --disk "$(NORMAL_IMAGE)" \
 	  --firmware "$(OVMF_FIRMWARE)" --smp "$(SMP)"
-
-.PHONY: test-inittab
-test-inittab: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
-	$(call require_capability,rootfs)
-	@set -e; \
-	if [ -f "$(NORMAL_IMAGE)" ]; then \
-	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.before"; \
-	fi
-	$(MAKE) INITTAB_FILE=config/inittab.test image
-	@set -e; \
-	if [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
-	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after"; \
-	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after"; \
-	fi
-	DISK_IMG="$(TEST_INITTAB_IMAGE)" OVMF_FIRMWARE="$(OVMF_FIRMWARE)" python3 qemutests/run_test.py inittab-phase
-
-.PHONY: test-network
-test-network: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
-	$(call require_capability,rootfs)
-	@set -e; \
-	if [ -f "$(NORMAL_IMAGE)" ]; then \
-	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.before"; \
-	fi
-	$(MAKE) OS01_NETTEST=1 image
-	@set -e; \
-	if [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
-	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after"; \
-	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after"; \
-	fi
-	DISK_IMG="$(TEST_NETTEST_IMAGE)" OVMF_FIRMWARE="$(OVMF_FIRMWARE)" python3 qemutests/run_test.py network
+test-inittab:    ; @$(MAKE) test-qemu SUITE=inittab-phase
+test-network:    ; @$(MAKE) test-qemu SUITE=network
 
 # Runtime validation is deliberately rooted in a real, profile-resolved
 # kernel artifact.  The host-suite's link-order fixture is supplementary: it
