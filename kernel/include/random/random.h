@@ -21,6 +21,15 @@ arch_entropy_source_t random_get_pool_quality(void);
  * the pool when it was seeded with STRONG quality (e.g. via UEFI GetRNG
  * or hardware RDSEED/RNDRRS), otherwise falls back to arch hardware. */
 bool kernel_random_get_strong(uint8_t out[32]);
+
+/* AAGU-5.7: KERNEL_SELFTEST-only hook — let selftests simulate pool state
+ * (quality + ready flag) without depending on real entropy sources.
+ * Production builds (no OS01_SELFTEST) do not link this symbol.
+ * Lets kernel_random_get_strong run unmodified production code, so tests
+ * exercise the actual STRONG-only contract rather than mocking it. */
+#ifdef OS01_SELFTEST
+void kernel_random_test_set_pool_quality(arch_entropy_source_t q, bool ready);
+#endif
 /* Pool mix entry point — feeds userland /dev/random writes into the
  * pool. Called with the caller's data buffer + length. No-op until
  * random_init() succeeds; concurrent callers serialize on pool_lock. */
