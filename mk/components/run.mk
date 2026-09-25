@@ -508,7 +508,7 @@ help:
 	@printf '  %-22s %-13s %s\n' 'TARGET' 'CAPABILITY' 'PURPOSE'
 	@echo '  --------------------- ------------- ------------------------------'
 	@printf '  %-22s %-13s %s\n' \
-		 'all / disk.img'    '(rootfs)'     'Build the normal disk image (default goal)';
+		 'disk.img'          '(rootfs)'     'Build the normal disk image (default goal)';
 	@printf '  %-22s %-13s %s\n' \
 		 'kernel.bin'        '(rootfs)'     'Project-root kernel copy (cmp-guarded)';
 	@printf '  %-22s %-13s %s\n' \

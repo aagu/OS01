@@ -52,7 +52,6 @@ include $(base)/mk/components/run.mk
 # Bare `make` builds the default profile's disk image (the project-root
 # disk.img compat copy of build/<profile>/image/disk.img).
 .DEFAULT_GOAL := disk.img
-all: disk.img
 
 # Non-rootfs profiles (e.g. aarch64-clang) cannot build a disk image — give
 # the clean capability error instead of "No rule to make target 'disk.img'".
