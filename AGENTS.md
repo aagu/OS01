@@ -5,13 +5,18 @@ Hobby OS. UEFI → Higher Half Kernel (`0xffff800000000000`). **Multicore SMP** 
 ## Quick start
 
 ```bash
-make run                   # Build + run
-make debug                 # Build + QEMU paused, GDB :1234
-make clean                 # MANDATORY after struct changes (no header deps!)
-make test                  # Run all tests
-make OS01_SYSTEST=1 test-syscall  # QEMU syscall E2E; top-level flag is mandatory
-make kernel.bin            # Build kernel only
+make run                 # Build + run
+make debug               # Build + QEMU paused, GDB :1234
+make clean               # MANDATORY after struct changes (no header deps!)
+make test-qemu SUITE=phase-0    # QEMU E2E boot (also: systest, inittab-phase, network)
+make test-host           # Host-side hosttests + PMM boot reservation
+make test-static         # Static audits: runtime, layout, canary, link-order
+make OS01_SYSTEST=1 test-qemu SUITE=systest   # 228-test syscall suite
+make KERNEL_SELFTEST=1 test-kernel-selftest    # Built-in kernel selftests
 ```
+
+See [`docs/build-system-harness.md`](docs/build-system-harness.md) for the full
+target taxonomy and flag conventions.
 
 **Build flags** (set on `make` command line):
 - `DEBUG_CHANNELS=sched,vfs,mm` — enable debug per-subsystem

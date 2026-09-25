@@ -39,10 +39,26 @@ make user             默认 profile 的用户 ELF 与 BusyBox
 make run              默认 profile 启动 QEMU（-display gtk；无显示环境用 run_test.py 的方式串口验证）
 make run-aarch64-uefi aarch64-clang profile 启动 QEMU（-display none -serial stdio）
 make print-run-paths   默认 profile 打印 firmware=/image= 绝对路径（手动 QEMU 用，见下文）
-make test             默认 profile 的宿主测试（hosttests/Makefile）
 make validate         内核 ELF / EFI 产物验证 + profile 信息打印
 make clean            清理指定 profile（默认 profile 还删除项目根兼容文件）
 ```
+
+**Test entry points** — six buckets (3 with flags, 3 fixed):
+
+| Bucket | Purpose | Default |
+| --- | --- | --- |
+| `make test-qemu SUITE=phase-0\|systest\|inittab-phase\|network` | QEMU E2E against the matching variant image | `phase-0` |
+| `make test-host` | hosttests + PMM boot reservation | — |
+| `make test-static` | runtime / layout / canary / link-order audits (8 audits) | — |
+| `make test-aarch64 MODE=smp\|no-ack\|gic-spi` | AArch64 PSCI / GIC harness | `smp` |
+| `make test-contract PROFILE=x86_64-clang\|aarch64-clang` | CI build-contract check | `x86_64-clang` |
+| `make test-kernel-selftest` | Boot selftest image + parse `[selftest]` markers | — |
+
+Standalone (not bucketed): `test-syscall-repeat` (own harness),
+`test-user-canary` (subset of test-static, distinct prereqs),
+`test-pmm-boot-reservation` (subset of test-host). See
+[`docs/build-system-harness.md`](build-system-harness.md) §3 for the full
+bucket model.
 
 ## 必要的依赖项
 
@@ -125,14 +141,14 @@ make image           # 磁盘镜像（产物路径，不是项目根副本）
 ### 4. 运行测试
 
 ```bash
-make test             # 宿主测试（hosttests/Makefile）
-make test-phase-0     # QEMU 启动 + shell 提示符（用普通镜像）
-make test-syscall     # systest variant 镜像 + QEMU syscall E2E
-make test-inittab     # inittab.test variant 镜像 + 相位派发验证
-make test-network     # nettest variant 镜像 + 网络回归
+make test-host                    # 宿主测试（hosttests/Makefile）+ PMM boot reservation
+make test-qemu SUITE=phase-0      # QEMU 启动 + shell 提示符（用普通镜像）
+make OS01_SYSTEST=1 test-qemu SUITE=systest       # systest variant 镜像 + QEMU syscall E2E
+make INITTAB_FILE=config/inittab.test test-qemu SUITE=inittab-phase  # inittab.test variant 镜像 + 相位派发验证
+make OS01_NETTEST=1 test-qemu SUITE=network        # nettest variant 镜像 + 网络回归
 ```
 
-测试镜像采用 **variant 隔离**：`test-syscall`/`test-network`/`test-inittab` 各自构建独立的变体镜像到 `build/x86_64-clang/image/<variant>/disk.img`，**绝不删除或覆盖普通 `disk.img`**，并记录/比对普通镜像的 sha256 以证明未被触碰。详见 [`docs/build-run-debug.md`](build-run-debug.md)。
+测试镜像采用 **variant 隔离**：systest/network/inittab-phase 各自构建独立的变体镜像到 `build/x86_64-clang/image/<variant>/disk.img`，**绝不删除或覆盖普通 `disk.img`**，并记录/比对普通镜像的 sha256 以证明未被触碰。详见 [`docs/build-run-debug.md`](build-run-debug.md)。
 
 ### 5. 固件与手动 QEMU（print-run-paths）
 

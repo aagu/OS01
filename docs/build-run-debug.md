@@ -164,10 +164,12 @@ signatures on serial: `aarch64 uefi handoff ok`, then `phase1 boot ok`.
 ### Host tests
 
 ```bash
-make test
+make test-host
+# `make test` is an alias of `make test-host`
 ```
 
-Runs the host-side test suites in `hosttests/` (`Suites: 16 | Failed: 0`).
+Runs the host-side test suites in `hosttests/` (`Suites: 16 | Failed: 0`)
+plus the PMM boot reservation harness.
 
 ### QEMU E2E tests (variant-isolated images)
 
@@ -181,10 +183,10 @@ normal image fails loudly.
 
 | Target | Variant image | Suite |
 |--------|---------------|-------|
-| `make test-phase-0` | normal `build/<profile>/image/disk.img` | boot + shell prompt |
-| `make test-syscall` | `build/<profile>/image/systest/disk.img` | syscall E2E (`OS01_SYSTEST=1`) |
-| `make test-inittab` | `build/<profile>/image/inittab-test/disk.img` | inittab phase dispatch (`INITTAB_FILE=config/inittab.test`) |
-| `make test-network` | `build/<profile>/image/nettest/disk.img` | network regression (`OS01_NETTEST=1`) |
+| `make test-qemu SUITE=phase-0` | normal `build/<profile>/image/disk.img` | boot + shell prompt |
+| `make OS01_SYSTEST=1 test-qemu SUITE=systest` | `build/<profile>/image/systest/disk.img` | syscall E2E (`OS01_SYSTEST=1`) |
+| `make INITTAB_FILE=config/inittab.test test-qemu SUITE=inittab-phase` | `build/<profile>/image/inittab-test/disk.img` | inittab phase dispatch (`INITTAB_FILE=config/inittab.test`) |
+| `make OS01_NETTEST=1 test-qemu SUITE=network` | `build/<profile>/image/nettest/disk.img` | network regression (`OS01_NETTEST=1`) |
 
 The systest variant is **compile-affecting**: `OS01_SYSTEST=1` adds
 `-DOS01_SYSTEST` to the user CFLAGS, so the variant's user programs build
