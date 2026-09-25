@@ -89,7 +89,7 @@ static void boot_go_set(uint32_t id, uint32_t command)
     commands[id] = command;
     smp_bench_iter(id, 1000000);
 }
-#include "kernel/arch/aarch64/test_spinlock.c"
+#include "kernel/arch/aarch64/smp/test_spinlock.c"
 static void reset(uint32_t active)
 {
     memset(done, 0, sizeof(done)); memset(commands, 0, sizeof(commands));
@@ -392,7 +392,7 @@ int main(void)
     executable = tmp / "boot_runner"
     subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra",
                     "-Werror", "-Ikernel/include",
-                    "kernel/arch/aarch64/smp_boot_core.c", str(runner),
+                    "kernel/arch/aarch64/smp/smp_boot_core.c", str(runner),
                     "-o", str(executable)], cwd=ROOT, check=True)
     subprocess.run([str(executable)], check=True)
 

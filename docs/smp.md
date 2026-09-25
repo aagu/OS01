@@ -9,12 +9,12 @@ OS01 supports up to `NR_CPUS=8` CPUs (compile-time limit in `kernel/include/sche
 ```
 Phase 0: per-CPU data (GS base)               kernel/include/percpu/percpu.h
 Phase 1: AP enumeration (MADT LAPIC/x2APIC)    kernel/intr/apic/acpi.c
-Phase 2: AP trampoline + INIT-SIPI-SIPI        kernel/arch/x86_64/trampoline.S, kernel/arch/x86_64/smp.c
-Phase 3: interrupt controllers (APIC, PIC)     kernel/arch/x86_64/subsys.c (subsys phase 3)
-Phase 4: timers (timer, PIT, LAPIC timer)      kernel/arch/x86_64/subsys.c (subsys phase 4)
-Phase 5: device IRQs (keyboard, serial)         kernel/arch/x86_64/subsys.c (subsys phase 5)
-Phase 6: storage (AHCI)                        kernel/arch/x86_64/subsys.c (subsys phase 6)
-Phase 7: CPU affinity + per-CPU idle           kernel/sched/task.c, kernel/arch/x86_64/smp.c
+Phase 2: AP trampoline + INIT-SIPI-SIPI        kernel/arch/x86_64/trampoline.S, kernel/arch/x86_64/smp/smp.c
+Phase 3: interrupt controllers (APIC, PIC)     kernel/arch/x86_64/platform/subsys.c (subsys phase 3)
+Phase 4: timers (timer, PIT, LAPIC timer)      kernel/arch/x86_64/platform/subsys.c (subsys phase 4)
+Phase 5: device IRQs (keyboard, serial)         kernel/arch/x86_64/platform/subsys.c (subsys phase 5)
+Phase 6: storage (AHCI)                        kernel/arch/x86_64/platform/subsys.c (subsys phase 6)
+Phase 7: CPU affinity + per-CPU idle           kernel/sched/task.c, kernel/arch/x86_64/smp/smp.c
 Phase 8: TSC sync and warp check               cpu.h rdtsc(), smp.c comparison
 
 ## Per-CPU data
@@ -272,7 +272,7 @@ Called by `schedule()` **before** `pick_eevdf()` on the local CPU:
 - `rdtsc()` — reads full 64-bit TSC
 - `rdtscp_serialized()` — CPUID serialisation + RDTSC
 
-`kernel/arch/x86_64/smp.c`:
+`kernel/arch/x86_64/smp/smp.c`:
 - AP samples `tsc_boot = rdtsc()` in `ap_entry()` after marking online
 - BSP compares: `bsp_tsc = rdtsc()`, `diff = bsp_tsc - ap_tsc`
 - Flags `WARP` if `|diff| > 5,000,000` (~2ms at 2.4GHz)
@@ -319,7 +319,7 @@ The Makefile does NOT track header dependencies. After changing any struct defin
 | **修改** | `kernel/time/timer.c` | timer_lock + do_timer 解锁回调模式 |
 | **修改** | `kernel/intr/apic/lapic_timer.c` | AP TIMER_SIRQ + softirq.h include |
 | **修改** | `kernel/arch/x86_64/trampoline.S` | wrmsr EDX:EAX + CR4 SSE bits |
-| **修改** | `kernel/arch/x86_64/trap.c` | kill_current_user_task RSP switch |
+| **修改** | `kernel/arch/x86_64/intr/trap.c` | kill_current_user_task RSP switch |
 | **新增** | `libc/rbtree/rbtree.c` | rbtree_last、rbtree_prev |
 | **新增** | `user/smp_stress.c` | CPU-bound 多进程负载均衡验证 |
 

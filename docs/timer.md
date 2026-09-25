@@ -152,7 +152,7 @@ uint64_t jiffies_to_sec(uint64_t jif) { return jif / 100; }
 
 精粒度纳秒（clocksource）直接 `ns / 1e9 = sec`，`ns % 1e9 = nsec`。
 
-## 子系统注册（kernel/arch/x86_64/subsys.c）
+## 子系统注册（kernel/arch/x86_64/platform/subsys.c）
 
 ```
 Phase 4:
@@ -210,7 +210,7 @@ add_timer(t);                                  // 到期自动删除（一次性
 
 ### 背景（tetris 开发中实证发现）
 
-`SYS_nanosleep`（kernel/arch/x86_64/trap.c）睡眠实现无唤醒源：
+`SYS_nanosleep`（kernel/arch/x86_64/intr/trap.c）睡眠实现无唤醒源：
 
 ```c
 uint64_t target = jiffies + ticks;

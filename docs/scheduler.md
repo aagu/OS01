@@ -8,7 +8,7 @@
 
 1. **PIT hardirq** (`driver/pit.c` — `pit_handler`): fires at 100Hz, increments `jiffies`, sets `this_cpu()->need_resched = 1`
 2. **LAPIC timer IRQ** (APs only): fires at 100Hz, sets `this_cpu()->need_resched = 1`
-3. **Interrupt return** (`arch/x86_64/entry.S` — `ret_from_intr`): reads `%gs:8` (percpu `need_resched`), calls `schedule()` if set
+3. **Interrupt return** (`arch/x86_64/intr/entry.S` — `ret_from_intr`): reads `%gs:8` (percpu `need_resched`), calls `schedule()` if set
 4. **`schedule()`**: acquires per-CPU `rq_lock` with `spin_lock_irqsave`, runs `update_curr`/`dequeue_task`/zombie reaper/`sched_balance`/`pick_eevdf`/`switch_to`
 
 ## Key structures
@@ -207,8 +207,8 @@ Tasks register a blocking condition instead of busy-waiting:
 |------|---------|
 | `kernel/sched/task.c` | EEVDF core, fork/exec/exit, zombie reaper, sched_balance, blocker framework |
 | `kernel/sched/deferred_free.c` | Async deferred-free kthread for remote-CPU task teardown |
-| `kernel/arch/x86_64/smp.c` | `ap_entry()`, `smp_boot_aps()` — AP bringup and idle loop |
-| `kernel/arch/x86_64/entry.S` | `ret_from_intr` → need_resched check → schedule() |
+| `kernel/arch/x86_64/smp/smp.c` | `ap_entry()`, `smp_boot_aps()` — AP bringup and idle loop |
+| `kernel/arch/x86_64/intr/entry.S` | `ret_from_intr` → need_resched check → schedule() |
 | `kernel/include/sched/task.h` | `task_t` definition with EEVDF fields |
 | `kernel/include/percpu/percpu.h` | `percpu_t` with `run_queue`, `rq_lock`, `nr_running` |
 

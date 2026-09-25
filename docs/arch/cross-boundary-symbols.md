@@ -121,10 +121,10 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 
 | 类别 | 位置 | 现状 | 说明 |
 |---|---|---|---|
-| `AT_PLATFORM` payload | facade `kernel/include/arch/auxv.h:6-17` + `kernel/arch/aarch64/auxv.c` + `kernel/arch/x86_64/auxv.c`；消费方 `kernel/sched/task.c:1173-1210` | ✅ 修 | AAGU-2 已落地（commit `8931cab`）。`setup_user_stack()` 走 `arch_auxv_platform()` facade，无 `#ifdef __x86_64__` 分支、无硬编码字符串。 |
+| `AT_PLATFORM` payload | facade `kernel/include/arch/auxv.h:6-17` + `kernel/arch/aarch64/cpu/auxv.c` + `kernel/arch/x86_64/cpu/auxv.c`；消费方 `kernel/sched/task.c:1173-1210` | ✅ 修 | AAGU-2 已落地（commit `8931cab`）。`setup_user_stack()` 走 `arch_auxv_platform()` facade，无 `#ifdef __x86_64__` 分支、无硬编码字符串。 |
 | `arch_cpu_pause()` | `kernel/include/arch/regs.h` + `kernel/arch/<arch>/regs.h` | ✅ 修 | weak-default + strong-override 模式合规。 |
-| `arch_irq_*` | `kernel/include/arch/irq.h` + `kernel/intr/arch_irq_hooks.c`（弱默认）+ `kernel/arch/x86_64/irq_hooks.c` | ✅ 修 | AAGU-2 已合规；详见 `docs/arch.md`「中断 hook 三段式」段。 |
-| `arch_kernel_thread_entry` | facade + `kernel/arch/x86_64/thread_entry.S` | ✅ 修 | arch-neutral builder (`sched/task.c`) 无 arch 字符串。 |
+| `arch_irq_*` | `kernel/include/arch/irq.h` + `kernel/intr/arch_irq_hooks.c`（弱默认）+ `kernel/arch/x86_64/intr/irq_hooks.c` | ✅ 修 | AAGU-2 已合规；详见 `docs/arch.md`「中断 hook 三段式」段。 |
+| `arch_kernel_thread_entry` | facade + `kernel/arch/x86_64/cpu/thread_entry.S` | ✅ 修 | arch-neutral builder (`sched/task.c`) 无 arch 字符串。 |
 | `arch_register_subsys` | facade + `kernel/arch/<arch>/linker.ld` | ✅ 修 | driver 自注册走 initcall，arch-neutral。 |
 | `#ifdef __x86_64__` 在 arch-neutral 通用层 | `kernel/intr/softirq.c:11, 48`（**真 arch-neutral TU**，在 aarch64 whitelist `kernel/Makefile:47` 内） | ❌ 违例 | 这两条 ifdef 守护的是 arch-specific 实现细节（软中断逻辑），违反 §2.3「arch-neutral 源文件不能用 `#ifdef __x86_64__`」。`softirq.c` 既编进 x86_64 也编进 aarch64 路径，必须走 facade + strong override 模式（参考 `arch_irq_*` 三段式）。 |
 | `#ifdef __x86_64__` 在 `kernel/intr/` 下 x86-only 驱动 | `kernel/intr/pic/8259A.c:104` + `kernel/intr/apic/lapic_timer.c:218` + `kernel/intr/apic/lapic.c:180` | 🟡 部分 | 这些是 x86-only 驱动被放在 arch-neutral 的 `kernel/intr/` 目录下，靠 `#ifdef __x86_64__` 跳过。**严格来说不是 §2.3 违例**（不在 arch-neutral builder 内），但**目录位置错**：x86-only 驱动应该放 `kernel/arch/x86_64/intr/` 或 `kernel/intr/pic/`（仅 x86）并由 Makefile whitelist 控制。建议落地：重定位 + 移除 ifdef。 |

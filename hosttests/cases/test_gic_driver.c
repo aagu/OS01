@@ -1,6 +1,6 @@
 /* hosttests/cases/test_gic_driver.c — GICv2 driver 单元测试（spec §4.1/G1）。
  *
- * 编译【真实生产文件】kernel/arch/aarch64/gic_driver.c（host clang，无修改），
+ * 编译【真实生产文件】kernel/arch/aarch64/intr/gic_driver.c（host clang，无修改），
  * MMIO 是两个 mock 数组。覆盖: init(TYPER/IIDR)、分类、enable/disable、
  * priority/targets、handler 注册表、unexpected 回调、SGIR 编码、
  * set/clear pending、IAR/EOIR 往返(含 CPUID 位)、dispatch 三分支

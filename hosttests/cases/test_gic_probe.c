@@ -1,6 +1,6 @@
 /* hosttests/cases/test_gic_probe.c — gic_clobber_probe encoding contract (RED).
  *
- * Bug: kernel/arch/aarch64/irq_probe.c's inline-asm SGIR write computed
+ * Bug: kernel/arch/aarch64/intr/irq_probe.c's inline-asm SGIR write computed
  *      0x0002_0200 instead of 0x0200_0002 — MOVZ #0x200 + MOVK #0x0002 lsl #16
  *      swaps the half-words (immediate values for SGI number and SELF filter
  *      are interchanged). The GIC ignores the malformed value, no SGI is
@@ -117,7 +117,7 @@ static void suite_irq_probe_asm_produces_target(void)
 {
     TEST_SUITE("irq_probe.c asm SGIR value == 0x02000002");
     char path[1024];
-    snprintf(path, sizeof(path), "%s/kernel/arch/aarch64/irq_probe.c",
+    snprintf(path, sizeof(path), "%s/kernel/arch/aarch64/intr/irq_probe.c",
              OS01_KERNEL_SRC);
     char *src = NULL;
     int rc = slurp_file(path, &src);

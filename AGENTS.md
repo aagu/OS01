@@ -113,10 +113,10 @@ IMG=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^image=//p')
 |------|---------|
 | `kernel/core/main.c` | Init sequence (subsys → VFS → SMP → futex_init → task_init) |
 | `kernel/arch/x86_64/head.S` | Entry, page tables, GDT, IDT, TSS |
-| `kernel/arch/x86_64/entry.S` | Exception/intr/syscall entry/exit, ret_from_intr |
-| `kernel/arch/x86_64/trap.c` | Exception handlers + do_system_call + do_signal_delivery |
+| `kernel/arch/x86_64/intr/entry.S` | Exception/intr/syscall entry/exit, ret_from_intr |
+| `kernel/arch/x86_64/intr/trap.c` | Exception handlers + do_system_call + do_signal_delivery |
 | `kernel/arch/x86_64/trampoline.S` | AP startup (16→32→64 bit) |
-| `kernel/arch/x86_64/smp.c` | smp_boot_aps() + ap_entry() — INIT-SIPI-SIPI + AP idle loop |
+| `kernel/arch/x86_64/smp/smp.c` | smp_boot_aps() + ap_entry() — INIT-SIPI-SIPI + AP idle loop |
 | `kernel/memory/` | pmm.c, slab.c, vmm.c, vma.c, tlb.c — full memory stack |
 | `kernel/intr/apic/` | acpi.c, lapic.c, lapic_timer.c, ioapic.c, ipi.c |
 | `kernel/sched/` | task.c (EEVDF scheduler, COW fork, schedule, spawn, sched_balance), deferred_free.c (async reaper kthread) |

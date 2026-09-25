@@ -107,7 +107,7 @@ Higher-level libc functions (`read()`, `exec()`, etc.) call these wrappers.
 
 ## Kernel-side dispatch
 
-`kernel/arch/x86_64/trap.c` — `do_system_call()`:
+`kernel/arch/x86_64/intr/trap.c` — `do_system_call()`:
 - Entry via `entry.S:system_call` → `error_code:` path → `do_system_call(regs, 0)`
 - Dispatches on `regs->rax` (syscall number)
 - Arguments from `regs->rdi`, `regs->rsi`, `regs->rdx`, `regs->r10`, `regs->r8`, `regs->r9`
@@ -167,7 +167,7 @@ The fault-tolerant primitives **never return short counts** — either they copy
 
 ### Kernel-mode fault recovery
 
-`kernel/arch/x86_64/trap.c` `do_page_fault` — when a kernel-mode #PF occurs (`!(regs->cs & 3)`) at a user-range address (`cr2 < current->addr_limit`) and `current->fault_jmp` is armed (by a `copy_*_ft` in flight), the handler `__builtin_longjmp`s to the primitive instead of printing `PF-KRN` and panicking. Task 0 verified `current == task_from_tss()` (eq=1 on kernel-mode #PF because the IST 0 stack matches the task's kernel stack).
+`kernel/arch/x86_64/intr/trap.c` `do_page_fault` — when a kernel-mode #PF occurs (`!(regs->cs & 3)`) at a user-range address (`cr2 < current->addr_limit`) and `current->fault_jmp` is armed (by a `copy_*_ft` in flight), the handler `__builtin_longjmp`s to the primitive instead of printing `PF-KRN` and panicking. Task 0 verified `current == task_from_tss()` (eq=1 on kernel-mode #PF because the IST 0 stack matches the task's kernel stack).
 
 This recover path only fires for **kernel-mode #PF** at a user-range address. **User-mode #PF** (e.g. `nl`'s libc NULL deref at `RIP=0x41CE98`) goes to the existing `kill_current_user_task` path — the audit does NOT touch user-mode fault handling, so user-mode libc bugs are still killed by the kernel. See `docs/applet-verification.md` §💥 for the applet user-fault review.
 

@@ -27,7 +27,7 @@ PTY: terminal.c 把 pty.c 主从两端接到 framebuffer + busybox ash
 
 **第 1 遍·中断骨架**（先理解"事件怎么到内核"）：
 1. `irq.c` 注册路径：register_irq(gsi) / unregister_irq(uint32_t gsi)（9 月从 vector 改 gsi，与 arch_irq hooks 对齐）
-2. `arch_irq_hooks.c` 弱默认 vs `arch/x86_64/irq_hooks.c` 强覆盖（APIC→PIC ladder + 0x20+gsi 翻译 + do_IRQ）——weak default / strong override 模式最典型的实例
+2. `arch_irq_hooks.c` 弱默认 vs `arch/x86_64/intr/irq_hooks.c` 强覆盖（APIC→PIC ladder + 0x20+gsi 翻译 + do_IRQ）——weak default / strong override 模式最典型的实例
 3. `dispatch.c` + softirq.c：硬中断上下文最小化，软中断做重活
 4. entry.S `ENTRY(ret_from_intr)` (L64)：iretq 前 `get_current_task()` 查 need_resched → schedule()。**这是理解"抢占在哪发生"的关键 40 行**
 

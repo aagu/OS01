@@ -50,7 +50,7 @@
 | **修改** | `kernel/fs/poll.c` | +60/−25 | 提取 do_poll_core() + 包装器重构 |
 | **新增** | `kernel/include/fs/select.h` | 73 | kernel_fd_set、sigset_t、pselect6_sigmask、原型 |
 | **新增** | `kernel/fs/select.c` | 423 | do_select、do_pselect6、do_select_common、do_select_nofds |
-| **修改** | `kernel/arch/x86_64/trap.c` | +15 | SYS_select + SYS_pselect6 dispatch + 移除 sigset_t |
+| **修改** | `kernel/arch/x86_64/intr/trap.c` | +15 | SYS_select + SYS_pselect6 dispatch + 移除 sigset_t |
 | **修改** | `kernel/include/uapi/syscall.h` | +1 | SYS_pselect6=51 |
 | **新增** | hosttests 镜像 `include/fs/select.h`（P5 随影子头清理已删除） | 73 | 镜像 |
 | **修改** | hosttests 镜像 `include/fs/poll.h`（P5 随影子头清理已删除） | 镜像 | 同步动态化 |

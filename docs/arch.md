@@ -13,12 +13,12 @@ OS01 同时支持 **x86_64** 和 **aarch64**（后者仅 UEFI 启动路径）。
 | Facade 头（arch-neutral） | 弱默认实现 | x86_64 强覆盖 | aarch64 强覆盖 | 用途 |
 |---|---|---|---|---|
 | `arch/include/regs.h` | — | `arch/x86_64/regs.h` | `arch/aarch64/regs.h` | `pt_regs_t` 跨 arch 定义；`arch_cpu_pause()` 共享 helper（替换 rwlock 本地 `#if` switch） |
-| `arch/include/irq.h` | `intr/arch_irq_hooks.c`（FATAL/identity/no-op） | `arch/x86_64/irq_hooks.c`（APIC→PIC ladder + 0x20+gsi 翻译 + do_IRQ） | — | 中断 controller selection / gsi↔vector / dispatch 三段 hook；do_IRQ 从 `intr/pic/8259A.c` 移出 |
-| `arch/include/rtc.h` | `driver/rtc.c` core（走 `arch_rtc_read/write` hook） | `arch/x86_64/rtc_cmos.c` + `rtc_pie.c`（CMOS port I/O + BCD + UIP regA bit7 + BIN regB bit2；PIE/LAPIC/TSC 校准） | — | 实时时钟 + PIE |
+| `arch/include/irq.h` | `intr/arch_irq_hooks.c`（FATAL/identity/no-op） | `arch/x86_64/intr/irq_hooks.c`（APIC→PIC ladder + 0x20+gsi 翻译 + do_IRQ） | — | 中断 controller selection / gsi↔vector / dispatch 三段 hook；do_IRQ 从 `intr/pic/8259A.c` 移出 |
+| `arch/include/rtc.h` | `driver/rtc.c` core（走 `arch_rtc_read/write` hook） | `arch/x86_64/platform/rtc_cmos.c` + `rtc_pie.c`（CMOS port I/O + BCD + UIP regA bit7 + BIN regB bit2；PIE/LAPIC/TSC 校准） | — | 实时时钟 + PIE |
 | `arch/include/subsys.h` | — | `arch/x86_64/linker.ld` 收集 `.subsys_init` | — | 10 driver 自注册（apic/pic/pit/lapic-timer/timer/serial/keyboard/ahci/pci/net）；`arch_register_subsys()` 缩到 7 行 loop |
-| `arch/sched/...` `kernel_thread_entry` | `sched/arch_kernel_thread_entry.c`（panic-on-call） | `arch/x86_64/thread_entry.S` | — | arch-neutral 调度器线程入口；`task.c` 不再 include per-arch 头 |
-| `memory/pmm.h` `pmm_init(boot_context*)` | `memory/pmm_arch.c`（弱默认 `pmm_arch_normalize`/`pmm_arch_zone_split`） | `arch/x86_64/pmm_arch.c`（E820 + kernel-LMA/handoff/trampoline excludes + 2 MiB granule + sort/merge） | `arch/aarch64/pmm_arch.c`（读 `aarch64_ram_map_get()`） | 物理内存 arch-neutral 入口；`MEMORY_RANGE[]` 中介；RAM-relative indexing（`pages_struct + ((start - lowest_ram) >> 21)`） |
-| `log/log.h` `_log_*_impl` 宏 | `log/log.c` core（gate-wrapped） | `core/log.c` 走 `_log_writev` + vsnprintf + serial | `arch/aarch64/log_impl.c` 走 `kputs(fmt)` 忽略 variadic | 跨 arch 日志；aarch64 `-nostdlib` 无 vsnprintf |
+| `arch/sched/...` `kernel_thread_entry` | `sched/arch_kernel_thread_entry.c`（panic-on-call） | `arch/x86_64/cpu/thread_entry.S` | — | arch-neutral 调度器线程入口；`task.c` 不再 include per-arch 头 |
+| `memory/pmm.h` `pmm_init(boot_context*)` | `memory/pmm_arch.c`（弱默认 `pmm_arch_normalize`/`pmm_arch_zone_split`） | `arch/x86_64/memory/pmm_arch.c`（E820 + kernel-LMA/handoff/trampoline excludes + 2 MiB granule + sort/merge） | `arch/aarch64/memory/pmm_arch.c`（读 `aarch64_ram_map_get()`） | 物理内存 arch-neutral 入口；`MEMORY_RANGE[]` 中介；RAM-relative indexing（`pages_struct + ((start - lowest_ram) >> 21)`） |
+| `log/log.h` `_log_*_impl` 宏 | `log/log.c` core（gate-wrapped） | `core/log.c` 走 `_log_writev` + vsnprintf + serial | `arch/aarch64/runtime/log_impl.c` 走 `kputs(fmt)` 忽略 variadic | 跨 arch 日志；aarch64 `-nostdlib` 无 vsnprintf |
 
 **共同模式**：所有 facade 都满足「weak default 提供无操作/panic/FATAL/identity 默认行为，strong override 提供真实现，per-arch 通过头文件位于 `kernel/include/arch/<arch>/` 镜像」。链接器强覆盖优先解析同名符号。**没有运行时分派**：编译期决定。
 
@@ -49,7 +49,7 @@ OS01 同时支持 **x86_64** 和 **aarch64**（后者仅 UEFI 启动路径）。
 
 ~150 站点 rename（vmm.c / sched COW fork / elf loader / vma/uaccess/fb/futex / `test_uaccess.c`）。保留 x86_64 `head.S` 的 `__PML4E`/`__PDPTE` 硬件 label（asm 段不可改）+ `kernel/include/memory/vmm.h` 的 PTE bit-position 常量（标为 x86_64 PTE 格式专属）。
 
-**Bit-position 仍 per-arch**（PGD/PUD/PMD 是层级名，PTE bit 字段 ISA-specific）。aarch64 PTE bit 与 x86_64 不同，由 `kernel/arch/aarch64/page_table.c` 自管。
+**Bit-position 仍 per-arch**（PGD/PUD/PMD 是层级名，PTE bit 字段 ISA-specific）。aarch64 PTE bit 与 x86_64 不同，由 `kernel/arch/aarch64/memory/page_table.c` 自管。
 
 ---
 
@@ -64,7 +64,7 @@ OS01 同时支持 **x86_64** 和 **aarch64**（后者仅 UEFI 启动路径）。
 ## 调度器 arch-neutral 入口
 
 - `arch_kernel_thread_entry` 在 `sched/arch_kernel_thread_entry.c`（弱默认 panic-on-call）
-- x86_64 强覆盖在 `arch/x86_64/thread_entry.S`
+- x86_64 强覆盖在 `arch/x86_64/cpu/thread_entry.S`
 - `task.c` 不再 include per-arch 头
 - v25 同批把 `kernel/.stage1` + `kernel/.stage2` 加进 `.gitignore`（避免每 make 重生成的中间产物污染 git status）
 
@@ -91,7 +91,7 @@ void arch_irq_dispatch(pt_regs_t *regs, uint32_t hwirq); // 实际 dispatch
 ```
 
 弱默认：`kernel/intr/arch_irq_hooks.c`（select FATAL-halt；vector↔gsi identity；dispatch silent no-op）
-x86_64 强覆盖：`kernel/arch/x86_64/irq_hooks.c`（APIC→PIC ladder + 0x20+gsi 翻译 + 移动过来的 do_IRQ 体 + `nr & 0x80` spurious 检查）
+x86_64 强覆盖：`kernel/arch/x86_64/intr/irq_hooks.c`（APIC→PIC ladder + 0x20+gsi 翻译 + 移动过来的 do_IRQ 体 + `nr & 0x80` spurious 检查）
 
 `unregister_irq(uint64_t nr)` → `unregister_irq(uint32_t gsi)`，跟 `register_irq` 对齐（消除 `2026-08-17-timer-clocksource-clockevent.md:20` 文档的 off-by-vector footgun）。
 
@@ -101,7 +101,7 @@ x86_64 强覆盖：`kernel/arch/x86_64/irq_hooks.c`（APIC→PIC ladder + 0x20+g
 
 - `kernel/include/driver/rtc.h` — 只剩 `datetime_t` + `rtc_read/write_datetime`
 - `kernel/driver/rtc.c` — 走 `arch_rtc_read/write` hook 的 core（KERNEL_C_SOURCES 跨 arch 编译）
-- x86_64 强覆盖 `kernel/arch/x86_64/rtc_cmos.c`（CMOS port I/O + BCD + UIP regA bit7 + BIN regB bit2 全本地化）+ `kernel/arch/x86_64/rtc_pie.c`（PIE/LAPIC/TSC 校准 verbatim move）
+- x86_64 强覆盖 `kernel/arch/x86_64/platform/rtc_cmos.c`（CMOS port I/O + BCD + UIP regA bit7 + BIN regB bit2 全本地化）+ `kernel/arch/x86_64/platform/rtc_pie.c`（PIE/LAPIC/TSC 校准 verbatim move）
 
 ---
 

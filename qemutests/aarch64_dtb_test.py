@@ -187,7 +187,7 @@ def main():
         runner_c.write_text(RUNNER)
         runner = tmp / 'runner'
         subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',
-                        '-Ikernel/include', 'kernel/arch/aarch64/dtb_parse.c', str(runner_c),
+                        '-Ikernel/include', 'kernel/arch/aarch64/platform/dtb_parse.c', str(runner_c),
                         '-o', str(runner)], cwd=ROOT, check=True)
         for name, data, bsp, expected_rc, expected_ids in encoded:
             path = tmp / (name + '.dtb')

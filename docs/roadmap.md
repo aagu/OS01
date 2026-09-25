@@ -74,7 +74,7 @@
 
 #### ✅ P2.a GICv2 Phase 1 收尾 fix（2026-09-18，commit `2481e1f`）
 
-`kernel/arch/aarch64/irq_probe.c:103-105` MOVZ/MOVK immediate 错位（`mov x10,#0x200` + `movk x10,#0x0002,lsl #16` → `0x0002_0200`，应得 `0x0200_0002` = SGI 2 + filter SELF）。QEMU `test-aarch64-uefi-smp` 9/9 PASS。详见 `docs/changelog.md` 2026-09-18。
+`kernel/arch/aarch64/intr/irq_probe.c:103-105` MOVZ/MOVK immediate 错位（`mov x10,#0x200` + `movk x10,#0x0002,lsl #16` → `0x0002_0200`，应得 `0x0200_0002` = SGI 2 + filter SELF）。QEMU `test-aarch64-uefi-smp` 9/9 PASS。详见 `docs/changelog.md` 2026-09-18。
 
 **永远无法统一的（ISA/HW 差异）**：`head.S`/`entry.S` 指令集差异；MMU 页表格式（PTE bit-position）；中断控制器驱动；SoC 外设（UART/timer/GPIO 等）。靠 arch 抽象层封装，统一接口、不统一实现。
 

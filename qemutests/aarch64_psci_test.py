@@ -82,7 +82,7 @@ def main():
         runner = tmp / 'runner'
         subprocess.run([
             os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',
-            '-Ikernel/include', 'kernel/arch/aarch64/psci.c', str(runner_c),
+            '-Ikernel/include', 'kernel/arch/aarch64/smp/psci.c', str(runner_c),
             '-o', str(runner),
         ], cwd=ROOT, check=True)
         subprocess.run([str(runner)], check=True)

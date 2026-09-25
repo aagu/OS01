@@ -50,7 +50,7 @@ Special handler values: `SIG_DFL` (NULL) applies the default action; `SIG_IGN` (
 
 ## Signal syscalls
 
-All dispatched from `do_system_call` in `kernel/arch/x86_64/trap.c`:
+All dispatched from `do_system_call` in `kernel/arch/x86_64/intr/trap.c`:
 
 - **SYS_signal (39)** — `rdi=signum, rsi=act, rdx=oldact`. Installs a new `struct sigaction` for the given signal (or returns the old one). SIGKILL and SIGSTOP cannot be caught or ignored.
 - **SYS_sigprocmask (42)** — `rdi=how, rsi=set, rdx=oldset`. `SIG_BLOCK=0`, `SIG_UNBLOCK=1`, `SIG_SETMASK=2`. Modifies `task_t.blocked`.
@@ -59,7 +59,7 @@ All dispatched from `do_system_call` in `kernel/arch/x86_64/trap.c`:
 
 ## Signal delivery
 
-`do_signal_delivery()` in `kernel/arch/x86_64/trap.c:645` runs at two points:
+`do_signal_delivery()` in `kernel/arch/x86_64/intr/trap.c:645` runs at two points:
 
 1. **After every syscall** that returns to ring 3 (tail of `do_system_call`)
 2. **After every interrupt** that returns to ring 3 (via `ret_from_intr`)
@@ -118,7 +118,7 @@ This sets SIGINT pending on the foreground task. On the next return-to-userspace
 |------|---------|
 | `kernel/include/uapi/time.h` | `struct sigaction`, `struct sigframe`, signal number definitions |
 | `kernel/include/sched/task.h` | `task_t` signal/blocked fields, `sighand[]` array |
-| `kernel/arch/x86_64/trap.c` | `do_signal_delivery`, `kill_current_user_task`, syscall dispatch |
+| `kernel/arch/x86_64/intr/trap.c` | `do_signal_delivery`, `kill_current_user_task`, syscall dispatch |
 | `libc/include/signal.h` | Userspace signal API, `sigset_t` macros |
 | `libc/signal/signal.c` | `signal()` — BSD-style wrapper |
 | `libc/signal/sigaction.c` | `sigaction()` wrapper, sets `sa_restorer` |
