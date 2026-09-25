@@ -72,7 +72,7 @@ Called from `do_fork()`.  Creates child page tables and populates them:
 5. **TLB flush** — parent's in‑memory PTEs were modified, a local flush is
    sufficient since only the current CPU runs the parent.
 
-### COW fault resolution: `do_page_fault()` in `kernel/arch/x86_64/trap.c:400`
+### COW fault resolution: `do_page_fault()` in `kernel/arch/x86_64/intr/trap.c:400`
 
 When a user‑mode write hits a COW page (`#PF` with error code `0x03` = present +
 write), the handler at `trap.c:449` checks `PAGE_COW`:
@@ -253,7 +253,7 @@ writable entries, which would bypass COW protection.
 | `kernel/memory/vma.c` | `do_mmap`, `do_munmap`, `do_mprotect`, `vma_insert/remove/free_all`, `fork_vma_copy` |
 | `kernel/memory/vmm.c` | `vmm_unmap_4k_page` (COW‑aware), `vmm_map_4k_page`, `vmm_pt_walk`, `vmm_alloc_map` |
 | `kernel/sched/task.c` | `fork_mm_copy` (page table walk + COW install), `do_fork` |
-| `kernel/arch/x86_64/trap.c` | `do_page_fault` COW resolution, `do_system_call` dispatch for `SYS_mmap/mprotect/munmap` |
+| `kernel/arch/x86_64/intr/trap.c` | `do_page_fault` COW resolution, `do_system_call` dispatch for `SYS_mmap/mprotect/munmap` |
 | `kernel/include/memory/vmm.h` | `PAGE_COW`, `PAGE_PROTNONE`, page table flag constants |
 | `kernel/include/sched/task.h` | `mm_t` (VMA list, `mmap_base`), `task_t` |
 | `kernel/include/uapi/syscall.h` | `SYS_mmap` (44), `SYS_mprotect` (45), `SYS_munmap` (46) |

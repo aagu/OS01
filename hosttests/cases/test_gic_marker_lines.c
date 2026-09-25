@@ -5,7 +5,7 @@
  * submodule 空目录阻断（Task 1.1/1.2 报告记录），无法在 host 端运行真实
  * kernel 来观察 marker 行。本 hosttest 退而求其次：源码级 RED——
  *
- *   1. 把 kernel/arch/aarch64/gic.c / main.c 整文件读进内存
+ *   1. 把 kernel/arch/aarch64/intr/gic.c / main.c 整文件读进内存
  *   2. 断言每个 kernel 端会发出的 marker 字符串（gic.c kputs 模板 + 拼接
  *      后的子串）字面量都能在源文件中被找到
  *
@@ -52,22 +52,22 @@ typedef struct {
 static const marker_check_t kChecks[] = {
     {
         "marker: [gic] GICv2 driver: intids=",
-        "kernel/arch/aarch64/gic.c",
+        "kernel/arch/aarch64/intr/gic.c",
         "[gic] GICv2 driver: intids=",
     },
     {
         "marker: [gic] dispatch ready  (Task 2.2 will emit from main.c)",
-        "kernel/arch/aarch64/main.c",
+        "kernel/arch/aarch64/boot/main.c",
         "[gic] dispatch ready",
     },
     {
         "marker: [gic-probe] save-restore OK  (Task 2.2 will emit from irq_probe.c — file may not exist yet)",
-        "kernel/arch/aarch64/irq_probe.c",
+        "kernel/arch/aarch64/intr/irq_probe.c",
         "[gic-probe] save-restore OK",
     },
     {
         "marker: [gic-probe] unexpected intid=40 survived  (Task 2.2 will emit from irq_probe.c)",
-        "kernel/arch/aarch64/irq_probe.c",
+        "kernel/arch/aarch64/intr/irq_probe.c",
         "[gic-probe] unexpected intid=40 survived",
     },
 };

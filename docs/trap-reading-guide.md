@@ -1,6 +1,6 @@
 # trap.c 源码导读（3065 行，最大单文件，读不懂时从这里进）
 
-> `docs/interrupt.md` + `docs/syscall.md` 是参考手册；本文件是 `kernel/arch/x86_64/trap.c` 的**阅读路线**。
+> `docs/interrupt.md` + `docs/syscall.md` 是参考手册；本文件是 `kernel/arch/x86_64/intr/trap.c` 的**阅读路线**。
 
 ## trap.c 全景
 

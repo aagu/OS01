@@ -33,7 +33,7 @@ override of ``X86_64_HANDOFF_BASE/END`` in the stub TU. Both
 were no-ops: the GNU ld linker silently ignores all but the
 first ``--defsym`` for a given symbol, and C preprocessor
 defines are file-scoped (the kernel TU
-``kernel/arch/x86_64/pmm_arch.c`` includes
+``kernel/arch/x86_64/memory/pmm_arch.c`` includes
 ``handoff_layout.h`` directly and always sees the production
 values 0x60000 / 0x64000). The host smoke test is robust to
 both of those quirks by design.
@@ -129,7 +129,7 @@ def _build_x86_64(tmp, cc, runner_c):
         "-I", "kernel/include",
         "-Wl,--defsym=_text=0x200000",
         str(ROOT / "kernel" / "memory" / "pmm_arch.c"),
-        str(ROOT / "kernel" / "arch" / "x86_64" / "pmm_arch.c"),
+        str(ROOT / "kernel" / "arch" / "x86_64" / "memory" / "pmm_arch.c"),
         str(stub_c),
         str(runner_c),
         "-o", str(executable),

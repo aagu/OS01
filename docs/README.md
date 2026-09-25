@@ -26,9 +26,9 @@
 |------|------|-----------|
 | 内存 | [memory.md](memory.md) + [cow-mmap.md](cow-mmap.md)，源码导读见 [vfs-memory-reading-guide.md](vfs-memory-reading-guide.md) | `kernel/memory/`（pmm.c, vmm.c, slab.c, vma.c） |
 | 中断 | [interrupt.md](interrupt.md)，源码导读见 [tty-intr-reading-guide.md](tty-intr-reading-guide.md) | `kernel/intr/`（irq.c, dispatch.c, apic/, pic/） |
-| SMP | [smp.md](smp.md) | `kernel/arch/x86_64/smp.c`, trampoline.S |
+| SMP | [smp.md](smp.md) | `kernel/arch/x86_64/smp/smp.c`, trampoline.S |
 | 调度 | [scheduler.md](scheduler.md) + [scheduler-complexity.md](scheduler-complexity.md)，源码导读见 [scheduler-reading-guide.md](scheduler-reading-guide.md) | `kernel/sched/task.c`（EEVDF） |
-| 系统调用 | [syscall.md](syscall.md)，源码导读见 [trap-reading-guide.md](trap-reading-guide.md) | `kernel/include/uapi/syscall.h`, `kernel/arch/x86_64/trap.c` |
+| 系统调用 | [syscall.md](syscall.md)，源码导读见 [trap-reading-guide.md](trap-reading-guide.md) | `kernel/include/uapi/syscall.h`, `kernel/arch/x86_64/intr/trap.c` |
 | 信号 | [signal.md](signal.md) | trap.c do_signal_delivery, libc sigreturn |
 | 定时器 | [timer.md](timer.md) | `kernel/time/`（clocksource, tick, timer） |
 | TTY | 源码导读见 [tty-intr-reading-guide.md](tty-intr-reading-guide.md) | `kernel/tty/`（tty.c, canon.c, console.c, pty.c） |

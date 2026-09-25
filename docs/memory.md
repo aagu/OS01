@@ -322,8 +322,8 @@ vmm_unmap_page(kernel_map, virtual_address);
 单一入口：`pmm_init(const struct boot_context *ctx)`。
 
 - 弱默认 `pmm_arch_normalize` / `pmm_arch_zone_split` 在 `kernel/memory/pmm_arch.c`
-- x86_64 强覆盖在 `kernel/arch/x86_64/pmm_arch.c`：E820 + kernel-LMA/handoff/trampoline excludes + 2 MiB granule + sort/merge
-- aarch64 强覆盖在 `kernel/arch/aarch64/pmm_arch.c`：读 `aarch64_ram_map_get()`
+- x86_64 强覆盖在 `kernel/arch/x86_64/memory/pmm_arch.c`：E820 + kernel-LMA/handoff/trampoline excludes + 2 MiB granule + sort/merge
+- aarch64 强覆盖在 `kernel/arch/aarch64/memory/pmm_arch.c`：读 `aarch64_ram_map_get()`
 - 中介层 `MEMORY_RANGE[]`：x86_64 E820 / aarch64 DTB 统一归一化输出
 - `pmm.c` body 用 **RAM-relative indexing**（`pages_struct + ((start - lowest_ram) >> 21)`），Step 7 clamp 防 aarch64 unsigned-underflow
 

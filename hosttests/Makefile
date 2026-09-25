@@ -481,13 +481,13 @@ test_lwip_rand: $(TEST_BLD)/test_lwip_rand.elf
 	$<
 
 # GICv2 driver hosttest: host-compile the PRODUCTION
-# kernel/arch/aarch64/gic_driver.c against mock-MMIO arrays (spec §4.1).
+# kernel/arch/aarch64/intr/gic_driver.c against mock-MMIO arrays (spec §4.1).
 # gic_driver.c is dependency-free (no arch asm, no UART logging); the
 # pt_regs type is forward-declared in <arch/aarch64/gic.h> and the test
 # never defines a pt_regs object (R1-4: dispatch cases pass NULL).
 GIC_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC)
 
-$(TEST_BLD)/gic_driver_production.o: $(TESTS_DIR)/kernel/arch/aarch64/gic_driver.c \
+$(TEST_BLD)/gic_driver_production.o: $(TESTS_DIR)/kernel/arch/aarch64/intr/gic_driver.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/gic.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(GIC_HOST_CFLAGS) -c $< -o $@
@@ -514,8 +514,8 @@ GIC_MARKER_CFLAGS := $(HOST_CFLAGS) -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
                      -I$(TEST_INC) -include $(TEST_MOCK)/test_platform.h
 
 $(TEST_BLD)/test_gic_marker_lines.o: $(TEST_CASES)/test_gic_marker_lines.c \
-		$(TESTS_DIR)/kernel/arch/aarch64/gic.c \
-		$(TESTS_DIR)/kernel/arch/aarch64/main.c
+		$(TESTS_DIR)/kernel/arch/aarch64/intr/gic.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/boot/main.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(GIC_MARKER_CFLAGS) $(LIBC_INC) -c $< -o $@
 
@@ -531,7 +531,7 @@ test_gic_marker_lines: $(TEST_BLD)/test_gic_marker_lines.elf
 # production gic_driver.c (mock MMIO) AND the asm source is scanned for the
 # known-buggy immediate literal.
 $(TEST_BLD)/test_gic_probe.o: $(TEST_CASES)/test_gic_probe.c \
-		$(TESTS_DIR)/kernel/arch/aarch64/irq_probe.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/intr/irq_probe.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/gic.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(GIC_HOST_CFLAGS) $(GIC_MARKER_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@

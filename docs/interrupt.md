@@ -30,7 +30,7 @@
 
 #### 处理器异常处理
 
-位于 `kernel/arch/x86_64/trap.c` 中，处理各种处理器异常：
+位于 `kernel/arch/x86_64/intr/trap.c` 中，处理各种处理器异常：
 
 * `do_divide_error` - 除零错误
 * `do_debug` - 调试异常
@@ -177,6 +177,6 @@ register_irq(IRQ0, NULL, timer_irq_handler, 0, &pic_controller, "timer");
 
 * `kernel/intr/irq.c` - 外部中断处理
 * `kernel/intr/softirq.c` - 软中断处理
-* `kernel/arch/x86_64/trap.c` - 处理器异常处理
+* `kernel/arch/x86_64/intr/trap.c` - 处理器异常处理
 * `kernel/include/intr/interrupt.h` - 中断相关头文件
 * `kernel/include/arch/x86_64/trap.h` - x86_64 架构陷阱相关头文件

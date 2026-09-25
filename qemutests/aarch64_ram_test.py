@@ -2,7 +2,7 @@
 """Behavioural coverage for the AArch64 UEFI RAM map normalizer.
 
 The runner is a small C program that compiles against the production
-`kernel/arch/aarch64/ram_core.c`. Each test case synthesises UEFI
+`kernel/arch/aarch64/memory/ram_core.c`. Each test case synthesises UEFI
 descriptor bytes via bytewise little-endian helpers (no struct
 casts) and asserts both the negative-error path and the success-path
 invariants — alignment, sortedness, disjointness, and "outside all
@@ -24,9 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNNER = r'''
 #include <core/bootinfo.h>
 #include <arch/aarch64/ram.h>
-/* ram_core.h lives in kernel/arch/aarch64/ (source dir, not the include
- * dir), so use the relative form that -I. resolves from cwd=ROOT. */
-#include <kernel/arch/aarch64/ram_core.h>
+/* Public RAM normalization contract. */
+#include <arch/aarch64/ram_core.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -700,7 +699,7 @@ def build(tmp):
     cmd = [
         os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',
         '-I.', '-Ikernel/include',
-        str(ROOT / 'kernel' / 'arch' / 'aarch64' / 'ram_core.c'),
+        str(ROOT / 'kernel' / 'arch' / 'aarch64' / 'memory' / 'ram_core.c'),
         str(runner_c),
         '-o', str(executable),
     ]

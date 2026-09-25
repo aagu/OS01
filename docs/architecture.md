@@ -111,7 +111,7 @@ GDT layout:
 
 ## Interrupt system
 
-### Exception entry (`kernel/arch/x86_64/entry.S`)
+### Exception entry (`kernel/arch/x86_64/intr/entry.S`)
 `error_code`: saves all regs including DS/ES. Exceptions return via `ret_from_exception` (no softirq/resched check — IST stacks).
 
 ### `ret_from_intr`
@@ -120,7 +120,7 @@ Checks softirq_status, then per-CPU `need_resched` via `%gs:8`. Calls `do_softir
 ### External IRQs (`kernel/intr/irq.c`)
 `register_irq` with dispatch through `do_IRQ` + `Build_IRQ` assembly stubs. Vector range `0x20`–`0x37`, IST=0.
 
-### System call (`kernel/arch/x86_64/trap.c` + entry.S)
+### System call (`kernel/arch/x86_64/intr/trap.c` + entry.S)
 `int $0x80` (DPL=3) → `system_call` → `do_system_call`. Dispatch on `regs->rax` (nr) with args `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9` (up to 6 args). 52 syscalls (0=SYS_putchar..51=SYS_pselect6).
 
 ### Softirqs (`kernel/intr/softirq.c`)

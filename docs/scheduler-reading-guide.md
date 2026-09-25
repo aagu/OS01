@@ -23,7 +23,7 @@
 **第 1 遍·控制流**（只看主路径，跳过所有错误分支）：
 1. `schedule()`（L531）— 整个调度器唯一的"总调度室"：拿锁 → update_curr → dequeue → reap zombie → `sched_balance()` → `pick_eevdf()` → `switch_to`
 2. `pick_eevdf()`（L181）— 红黑树怎么选：eligible（vruntime ≥ 左子树最小）里 deadline 最早者
-3. `ret_from_intr`（arch/x86_64/entry.S）— 抢衬怎么触发：硬 irq 返回前查 `%gs:8`（need_resched）
+3. `ret_from_intr`（arch/x86_64/intr/entry.S）— 抢衬怎么触发：硬 irq 返回前查 `%gs:8`（need_resched）
 
 读完这 3 个点，你就能回答"两个任务怎么切换的"。
 

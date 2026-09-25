@@ -34,23 +34,16 @@ KERNEL_HEADERS := include
 # ── Source discovery via wildcard (no manual lists!) ───────
 # All paths are relative to kernel/ (CWD after make -C kernel)
 #
-# Arch gate: aarch64 phase 1 starts from an empty whitelist (linker pulls
-# in arch/aarch64/*.c via ARCH_C_SOURCES below). x86_64 keeps the full
-# legacy wildcard set. Sources are added back to the aarch64 whitelist
-# incrementally as the port grows (e.g. arch-neutral helpers), gated by
-# "what the linker complains about".
+# Arch gate: aarch64 selects only these architecture-neutral sources.
+# Architecture implementation files are collected once via ARCH_C_SOURCES.
 ifeq ($(ARCH),aarch64)
 KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c \
                    percpu/percpu.c \
                    time/clocksource.c time/tick.c time/timer.c \
                    intr/softirq.c \
-                   $(wildcard compiler_rt/*.c) arch/aarch64/subsys.c \
-                   arch/aarch64/serial_printk.c arch/aarch64/strcmp.c \
+                   $(wildcard compiler_rt/*.c) \
                    subsys/subsys.c \
-                   arch/aarch64/idle_resume_stub.c \
-                   arch/aarch64/atomic.c \
                    random/random.c \
-                   arch/aarch64/random.c \
                    ../libc/random/chacha20.c \
                    selftest/test_arch_atomic_u64.c \
                    selftest/test_aarch64_rndr_encoding.c
@@ -80,9 +73,15 @@ KERNEL_C_SOURCES := $(filter-out driver/pit.c,$(KERNEL_C_SOURCES))
 KERNEL_C_SOURCES += $(ARCH_PLATFORM_C_SOURCES)
 endif
 
-# Architecture C sources and asm sources
-ARCH_C_SOURCES  := $(wildcard $(ARCHDIR)/*.c)
-ARCH_ASM_SOURCES := $(wildcard $(ARCHDIR)/*.S)
+# Architecture C and asm sources: explicit, one-level responsibility groups.
+ARCH_SOURCE_DIRS := boot intr memory smp cpu platform runtime
+ifeq ($(ARCH),x86_64)
+ARCH_SOURCE_DIRS := intr memory smp cpu platform
+endif
+ARCH_C_SOURCES := $(wildcard $(ARCHDIR)/*.c) \
+    $(foreach dir,$(ARCH_SOURCE_DIRS),$(wildcard $(ARCHDIR)/$(dir)/*.c))
+ARCH_ASM_SOURCES := $(wildcard $(ARCHDIR)/*.S) \
+    $(foreach dir,$(ARCH_SOURCE_DIRS),$(wildcard $(ARCHDIR)/$(dir)/*.S))
 # Exclude trampoline.S from normal compilation (special handling below)
 ARCH_ASM_SOURCES := $(filter-out $(ARCHDIR)/trampoline.S, $(ARCH_ASM_SOURCES))
 
@@ -94,7 +93,7 @@ ALL_S_SOURCES   := $(ARCH_ASM_SOURCES)
 # ── Object files (under BUILD_DIR) ─────────────────────────
 # Path mapping:  kernel/main.c    → build/x86_64/kernel/main.o
 #                memory/pmm.c     → build/x86_64/memory/pmm.o
-#                arch/x86_64/trap.c → build/x86_64/arch/x86_64/trap.o
+#                arch/x86_64/intr/trap.c → build/x86_64/arch/x86_64/intr/trap.o
 C_OBJECTS       := $(patsubst %.c,$(BUILD_DIR)/%.o,$(ALL_C_SOURCES))
 ASM_OBJECTS     := $(patsubst %.S,$(BUILD_DIR)/%.o,$(ALL_S_SOURCES))
 
