@@ -23,6 +23,7 @@ make kernel.bin            # Build kernel only
 **Deps**: clang, llvm, lld, make, dosfstools, mtools, qemu-system-x86_64, edk2-ovmf.
 **Toolchain overrides** (`CLANG=clang-N`, `LLVM_NM=`, `UEFI_CLANG=`, etc.): see [`docs/build/toolchain.md`](docs/build/toolchain.md).
 **BusyBox**: `git submodule update --init` (built and included in disk.img automatically).
+For the authoritative catalog of every `make` target, capability gate, test bucket, and alias policy, see [Build System Harness](docs/build-system-harness.md).
 
 ## Architecture
 

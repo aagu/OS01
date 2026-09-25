@@ -594,14 +594,6 @@ help:
 		 'aarch64-uefi-kernel'    '(uefi)' 'Build aarch64 kernel.elf only';
 	@printf '  %-22s %-13s %s\n' \
 		 'run-aarch64-uefi'       '(uefi)' 'QEMU virt + cortex-a53 + virtio-blk (override SMP with SMP=N; AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0 to skip auto DTB)';
-	@printf '  %-22s %-13s %s\n' \
-		 'test-aarch64-uefi-smp'  '(uefi)' 'QEMU 1/2/4 PSCI SMP ×3 with PASS/DEGRADED evidence';
-	@printf '  %-22s %-13s %s\n' \
-		 'test-aarch64-uefi-smp-no-ack' '(uefi)' 'Consumes prebuilt AARCH64_SMP_TEST_NO_ACK_CPU=1 image for DEGRADED recovery';
-	@echo ''
-	@echo 'aarch64 subsystem tests (uefi):'
-	@printf '  %-22s %-13s %s\n' \
-		 'test-aarch64-gic-spi'  '(uefi)'     'PL011 RX → GIC SPI injection (qemutests/aarch64_gic_spi.py)';
 	@echo ''
 	@echo 'Validation (x86 rootfs):'
 	@printf '  %-22s %-13s %s\n' \
@@ -617,37 +609,35 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'print-run-paths'   '(rootfs)'     'Print absolute firmware + active image path';
 	@echo ''
-	@echo 'Test (x86, rootfs):'
+	@echo 'Test (6 canonical buckets; varied capability):'
 	@printf '  %-22s %-13s %s\n' \
-		 'test'              '(rootfs)'     'Recursive make run (alias)';
+		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network>)';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-phase-0'      '(rootfs)'     'QEMU phase-0 E2E against the normal image';
+		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-runtime'      '(rootfs)'     'Audit actual kernel runtime links + link-order fixture';
+		 'test-static'         '(rootfs)'     'All 8 static audits (runtime, stack-canary, validate-kernel, link-order, kernel-layout, kernel-canary-contract, test-user-canary)';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-kernel-selftest' '(rootfs)'   'QEMU built-in selftests (isolated selftest image)';
+		 'test-kernel-selftest' '(rootfs)'   'QEMU built-in selftests (isolated selftest image, KERNEL_SELFTEST=1)';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-syscall'      '(rootfs)'     'QEMU syscall E2E (OS01_SYSTEST=1, 228 tests)';
+		 'test-aarch64'        '(uefi)'       'aarch64 UEFI test (MODE=<smp|no-ack|gic-spi>)';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-inittab'      '(rootfs)'     'inittab variant E2E (INITTAB_FILE=config/inittab.test)';
+		 'test-contract'       '(rootfs|uefi)' 'Full build contract (PROFILE=<x86_64-clang|aarch64-clang>)';
+	@echo ''
+	@echo 'Standalone test targets (distinct harness / image variant):'
 	@printf '  %-22s %-13s %s\n' \
-		 'test-network'      '(rootfs)'     'QEMU network E2E (OS01_NETTEST=1, 6 tests)';
+		 'test-syscall-repeat'   '(rootfs)'   'QEMU exec/exit stability through normal terminal (x86_64_systest_repeat.py)';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-syscall-repeat'  '(rootfs)'   'QEMU exec/exit stability through normal terminal (x86_64_systest_repeat.py)';
+		 'test-user-canary'      '(rootfs)'   '7-step SSP / crt0 user-stack canary audit (spec 2026-09-17)';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-user-canary'     '(rootfs)'   '7-step SSP / crt0 user-stack canary audit (spec 2026-09-17)';
+		 'test-pmm-boot-reservation' '(rootfs)' 'PMM boot-time memory reservation guard (host-only)';
+	@echo ''
+	@echo 'Focused compatibility checks (one release cycle; see docs/build-system-harness.md §4):'
 	@printf '  %-22s %-13s %s\n' \
-		 'test-kernel-layout'   '(rootfs)'   'x86_64 kernel.elf layout audit (post-_end reserved)';
+		 'test-kernel-layout'    '(rootfs)'   'x86_64 kernel.elf layout audit (post-_end reserved)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-kernel-canary-contract' '(rootfs)' 'Kernel canary compile-flag contract';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-pmm-boot-reservation'    '(rootfs)' 'PMM boot-time memory reservation guard';
-	@echo ''
-	@echo 'Build contract (CI):'
-	@printf '  %-22s %-13s %s\n' \
-		 'test-build-contract-x86'      '(rootfs)'      'x86_64-clang full contract (7 modes)';
-	@printf '  %-22s %-13s %s\n' \
-		 'test-build-contract-aarch64'  '(uefi)' 'aarch64-clang full contract';
+		 'test-aarch64-gic-spi'  '(uefi)'     'PL011 RX → GIC SPI injection (qemutests/aarch64_gic_spi.py)';
 	@echo ''
 	@echo 'Maintenance:'
 	@printf '  %-22s %-13s %s\n' \
@@ -659,6 +649,7 @@ help:
 	@echo '              OS01_NETTEST=1, INITTAB_FILE=<path>, KERNEL_SELFTEST=1,'
 	@echo '              NDEBUG=1, LOG_TARGET=serial|both.'
 	@echo 'See AGENTS.md Quick start and docs/build-run-debug.md for recipes.'
+	@echo 'Legacy test-* aliases remain callable for one release cycle; see docs/build-system-harness.md §4.'
 
 # ── Image alias ─────────────────────────────────────────────
 # `make image` builds the current profile's disk image — variant-resolved

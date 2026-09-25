@@ -6,6 +6,10 @@ project. The build is profile-based since the 2026-09-02 GNU Make refactor:
 UEFI bring-up profile. See [`docs/build.md`](build.md) for the profile
 contract and output layout.
 
+For the authoritative catalog of every `make` target (capability gates, the
+6 test buckets, the standalone and focused compatibility checks, and the
+alias policy), see [Build System Harness](build-system-harness.md).
+
 ## Environment setup
 
 ### Required dependencies
