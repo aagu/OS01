@@ -669,44 +669,50 @@ image: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(DISK_IMG))
 	$(call require_capability,rootfs)
 
 # ── Build contract checks ───────────────────────────────────
-# Ordered behind the profile's artifacts so `make -j2 ... test-build-contract-*`
-# cannot race the build they inspect; capability-gated like every other alias.
-# host-test runs LAST: it ends with `make clean`, which destroys the profile
-# build dir (its purpose is to assert clean removes the profile outputs), and
-# the earlier modes — targets in particular, whose `-n` kernel artifact recipe
-# executes and resolves the sysroot generation — need that build dir intact.
-.PHONY: test-build-contract-x86
-# `targets` mode dry-runs `make -n PROFILE=aarch64-clang aarch64-uefi` — make
-# fails with "No rule to make target .../uefi-runtime.stamp" when the aarch64
-# build directory doesn't exist yet. The aarch64-clang job builds it in its
-# own workspace, not the contract job's, so the contract test needs to
-# build it too via a sub-make with PROFILE=aarch64-clang.
-test-build-contract-x86: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),disk.img)
-	$(call require_capability,rootfs)
-	# Build aarch64-uefi in a sub-make with PROFILE=aarch64-clang so the
-	# `targets` contract mode's dry-run finds the uefi-runtime.stamp.
-	+env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
-	  $(MAKE) MAKEOVERRIDES= \
-	  PROFILE=aarch64-clang aarch64-uefi
-	# host-test contract mode asserts $BUILD_DIR/host-test/test_poll_requested.elf
-	# exists; `make disk.img` does NOT produce it (only `make test` does, and
-	# the CI contract job starts with an empty workspace). Build the host
-	# tests first via the standard sub-make helper.
-	$(call os01_submake,hosttests,all)
-	sh qemutests/build_contract.sh x86_64-clang legacy-components
-	sh qemutests/build_contract.sh x86_64-clang legacy
-	sh qemutests/build_contract.sh x86_64-clang x86
-	sh qemutests/build_contract.sh x86_64-clang sysroot
-	sh qemutests/build_contract.sh x86_64-clang firmware
-	sh qemutests/build_contract.sh x86_64-clang targets
-	sh qemutests/build_contract.sh x86_64-clang host-test
+.PHONY: test-contract test-build-contract-x86 test-build-contract-aarch64
+# CI's contract job runs against a clean workspace; the bucket must still
+# pre-build the artifacts it inspects. x86 contract needs disk.img;
+# aarch64 contract needs aarch64-uefi. (Both were dropped in the v1
+# plan; this restored version matches the original line 610 / 631.)
+X86_CONTRACT_MODES := legacy-components legacy x86 sysroot firmware targets host-test
+AARCH64_CONTRACT_MODES := aarch64 targets
 
-.PHONY: test-build-contract-aarch64
-test-build-contract-aarch64: aarch64-uefi
-	$(call require_aarch64_uefi)
-	$(call require_capability,uefi)
-	sh qemutests/build_contract.sh aarch64-clang aarch64
-	sh qemutests/build_contract.sh aarch64-clang targets
+# Pre-build helpers are split per PROFILE so the `+env` recipe prefix
+# sits at Make's recipe-line position (not inside a shell `case` branch
+# where `+env` would become a command name and fail with "+env: not
+# found"). The cross-profile sub-make also gets `$(MAKE)` on its own
+# recipe line so `-n` honors the standard recursive-make contract.
+.PHONY: _test-contract-prep-x86 _test-contract-prep-aarch64
+_test-contract-prep-x86:
+	@echo "  [test-contract] x86: build hosttests via sub-make"
+	$(call os01_submake,hosttests,all)
+	@echo "  [test-contract] x86: pre-build aarch64-uefi in its own workspace"
+	+env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
+	  $(MAKE) MAKEOVERRIDES= PROFILE=aarch64-clang aarch64-uefi
+_test-contract-prep-aarch64:
+	@true
+
+# test-contract: the umbrella. Each PROFILE gets its own prereq and
+# capability gate. The pre-build dispatch and the per-mode shell loop
+# are on separate recipe lines.
+test-contract: PROFILE ?= $(DEFAULT_PROFILE)
+test-contract: PROFILE := $(PROFILE)
+test-contract: $(if $(filter x86_64-clang,$(PROFILE)),disk.img,aarch64-uefi)
+	$(call require_capability,$(if $(filter x86_64-clang,$(PROFILE)),rootfs,uefi))
+	$(MAKE) --no-print-directory _test-contract-prep-$(if $(filter x86_64-clang,$(PROFILE)),x86,aarch64)
+	@set -e; \
+	case "$(PROFILE)" in \
+	  x86_64-clang)    modes="$(X86_CONTRACT_MODES)";; \
+	  aarch64-clang)   modes="$(AARCH64_CONTRACT_MODES)";; \
+	  *) echo "PROFILE must be x86_64-clang or aarch64-clang, got '$(PROFILE)'" >&2; exit 1;; \
+	esac; \
+	for m in $$modes; do \
+	  echo "  [test-contract] $(PROFILE)/$$m"; \
+	  sh qemutests/build_contract.sh $(PROFILE) $$m; \
+	done
+
+test-build-contract-x86:      ; @$(MAKE) --no-print-directory test-contract PROFILE=x86_64-clang
+test-build-contract-aarch64:  ; @$(MAKE) --no-print-directory test-contract PROFILE=aarch64-clang
 
 # ── Clean ───────────────────────────────────────────────────
 # Only the default profile owns the project-root kernel.bin / disk.img compat
