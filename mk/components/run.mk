@@ -345,10 +345,39 @@ test-syscall-repeat: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAG
 test-inittab:    ; @$(MAKE) test-qemu SUITE=inittab-phase
 test-network:    ; @$(MAKE) test-qemu SUITE=network
 
-# Runtime validation is deliberately rooted in a real, profile-resolved
-# kernel artifact.  The host-suite's link-order fixture is supplementary: it
-# must never substitute for auditing the two links that produced kernel.elf.
-.PHONY: test-runtime
+# test-static = the umbrella: runs every static audit in one shot.
+# Each alias below reproduces the recipe of the corresponding legacy target
+# so that `make test-runtime` continues to run only the runtime-audit subset.
+.PHONY: test-static test-runtime test-kernel-layout test-kernel-canary-contract test-user-canary
+
+# ── test-static: all 8 audits ─────────────────────────────────
+test-static: $(KERNEL_ARTIFACT)
+	$(call require_capability,rootfs)
+	python3 qemutests/runtime_audit.py \
+	  --stage1 "$(KERNEL_BUILD_DIR)/kernel.elf.stage1" \
+	  --final "$(KERNEL_ELF)" \
+	  --link-receipt "$(KERNEL_RUNTIME_LINK_RECEIPT)" \
+	  --runtime-input "$(KERNEL_RUNTIME_INPUTS)" \
+	  --llvm-nm "$(LLVM_NM)" \
+	  --llvm-readobj "$(LLVM_READOBJ)"
+	python3 qemutests/stack_canary_audit.py \
+	  --object "$(KERNEL_BUILD_DIR)/sched/task.o" \
+	  --elf "$(KERNEL_ELF)" \
+	  --llvm-readelf "$(LLVM_READELF)" \
+	  --llvm-objdump "$(LLVM_OBJDUMP)"
+	@$(MAKE) --no-print-directory validate-kernel
+	python3 qemutests/runtime_link_order_test.py
+	python3 qemutests/kernel_runtime_link_test.py \
+	  --source-receipt "$(KERNEL_RUNTIME_LINK_RECEIPT)" \
+	  --sysroot "$(SYSROOT)" \
+	  --profile-file "$(OS01_PROFILE_FILE)" \
+	  --profile "$(PROFILE)"
+	python3 qemutests/x86_64_kernel_layout_test.py "$(KERNEL_BUILD_DIR)/kernel.elf" \
+	  --llvm-nm "$(LLVM_NM)" --llvm-readelf "$(LLVM_READELF)"
+	python3 qemutests/kernel_canary_contract_test.py
+	@$(MAKE) --no-print-directory test-user-canary
+
+# ── test-runtime: original recipe (lines 364-385 of run.mk) ──
 test-runtime: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(KERNEL_ARTIFACT))
 	$(call require_capability,rootfs)
 	python3 qemutests/runtime_audit.py \
@@ -363,7 +392,7 @@ test-runtime: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(KERNEL_ARTIFACT))
 	  --elf "$(KERNEL_ELF)" \
 	  --llvm-readelf "$(LLVM_READELF)" \
 	  --llvm-objdump "$(LLVM_OBJDUMP)"
-	@$(MAKE) validate-kernel
+	@$(MAKE) --no-print-directory validate-kernel
 	python3 qemutests/runtime_link_order_test.py
 	python3 qemutests/kernel_runtime_link_test.py \
 	  --source-receipt "$(KERNEL_RUNTIME_LINK_RECEIPT)" \
@@ -371,13 +400,16 @@ test-runtime: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(KERNEL_ARTIFACT))
 	  --profile-file "$(OS01_PROFILE_FILE)" \
 	  --profile "$(PROFILE)"
 
-# ── User-stack-canary build-time audit (spec 2026-09-17 §7 Layer 1) ──
-# Static facts about produced binaries: SSP symbols in libc.a (and NOT in
-# libk.a), SSP resolved into linked user/busybox ELFs, SSP flags in all
-# three compile switches, probe programs staged in the rootfs manifest,
-# and the crt0 overlay byte-identity invariant. Commit 3 appends steps
-# 8/9 (lwIP symbol + macro) here.
-.PHONY: test-user-canary
+# ── test-kernel-layout: original recipe (line 485-488) ──────
+test-kernel-layout: kernel.bin
+	python3 qemutests/x86_64_kernel_layout_test.py "$(KERNEL_BUILD_DIR)/kernel.elf" \
+	  --llvm-nm "$(LLVM_NM)" --llvm-readelf "$(LLVM_READELF)"
+
+# ── test-kernel-canary-contract: original recipe (line 490-492) ─
+test-kernel-canary-contract:
+	python3 qemutests/kernel_canary_contract_test.py
+
+# ── test-user-canary: original recipe (lines 393-431) ───────
 test-user-canary: $(if $(filter userland,$(PROFILE_CAPABILITIES)),$(USER_ARTIFACTS) $(USER_ARTIFACT_DIR)/busybox.elf $(ROOTFS_MANIFEST))
 	$(call require_capability,rootfs)
 	@set -e; \
@@ -467,16 +499,6 @@ print-run-paths:
 	$(call require_capability,rootfs)
 	@echo firmware=$(abspath $(OVMF_FIRMWARE))
 	@echo image=$(abspath $(DISK_IMG))
-
-# Verify the actual linked x86 image before PMM can reuse memory at _end.
-.PHONY: test-kernel-layout
-test-kernel-layout: kernel.bin
-	python3 qemutests/x86_64_kernel_layout_test.py "$(KERNEL_BUILD_DIR)/kernel.elf" \
-	  --llvm-nm "$(LLVM_NM)" --llvm-readelf "$(LLVM_READELF)"
-
-.PHONY: test-kernel-canary-contract
-test-kernel-canary-contract:
-	python3 qemutests/kernel_canary_contract_test.py
 
 # ── Help ─────────────────────────────────────────────────────
 # Lists the root Makefile's user-facing targets, grouped by category, with the
