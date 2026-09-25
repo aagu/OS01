@@ -6,12 +6,12 @@
 // link fails with a duplicate-symbol error and the kernel never boots.
 // This selftest simply touches the symbol so the compiler emits a
 // reference (not optimized away) and so a runtime read of the canary
-// happens once during boot — both to prove the compiler_rt/ copy is
-// the one the kernel resolved.
+// happens once during boot — both to prove the kernel/core/stack_chk.c
+// copy is the one the kernel resolved.
 //
 // Single-source guarantee is enforced by the spec at
-// docs/arch/cross-boundary-symbols.md §2.1 ("kernel/compiler_rt/ 与
-// libc/ 同时存在同名的 builtin 实现 = 违例"); the selftest here is a
+// docs/arch/cross-boundary-symbols.md §2.1 ("kernel 与 libc 同时存在
+// 同名的 builtin 实现 = 违例"); the selftest here is a
 // belt-and-suspenders runtime probe, not the primary check.
 
 #ifdef OS01_SELFTEST
@@ -20,7 +20,7 @@
 #include <core/printk.h>
 #include <stdint.h>
 
-/* These come from kernel/compiler_rt/stack_chk_guard.c.  Declaring
+/* These come from kernel/core/stack_chk.c.  Declaring
  * them `extern` here means this TU only references them; if any
  * other TU accidentally defines the same symbol, the link fails. */
 extern unsigned long __stack_chk_guard;

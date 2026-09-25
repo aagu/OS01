@@ -1,12 +1,16 @@
-// kernel/compiler_rt/stack_chk_guard.c — kernel-side __stack_chk_guard
-// single source (AAGU-4.4).
+// kernel/core/stack_chk.c — kernel-side __stack_chk_guard single
+// source (AAGU-4.4; moved from kernel/compiler_rt/, which no longer
+// exists).
 //
-// Why this lives in compiler_rt/: the spec at
+// Why this lives in core/: the spec at
 // docs/arch/cross-boundary-symbols.md §2.1 mandates "唯一定义点选择:
-// kernel/compiler_rt/<name>.c 或 libc/<libname>/<name>.c，二选一".
-// The kernel-side guard/fail pair is the kernel's choice; the user-space
-// pair lives in libc/ssp/ssp.c (gated by __is_libk so libk.a does NOT
-// bring a duplicate definition into the kernel link).
+// kernel 侧单一 TU 或 libc/<libname>/<name>.c，二选一".
+// The kernel-side guard/fail pair is core kernel runtime — it must work
+// from the earliest C code with a possibly corrupt stack, so it lives
+// beside kernel/core/main.c (which reseeds the guard as its first
+// statement).  The user-space pair lives in libc/ssp/ssp.c (gated by
+// __is_libk so libk.a does NOT bring a duplicate definition into the
+// kernel link).
 //
 // __stack_chk_fail mirrors the libc/ssp/ssp.c print+abort contract on
 // every supported arch: disable interrupts, write a one-line diagnostic,

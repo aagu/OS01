@@ -4,7 +4,7 @@
 // ── Architecture output facade ─────────────────────────────
 //
 // Lock-free single-character / NUL-string output, intended for fault
-// paths (e.g. compiler_rt/stack_chk_guard.c::__stack_chk_fail) where the
+// paths (e.g. core/stack_chk.c::__stack_chk_fail) where the
 // regular serial driver stack might deadlock on a corrupt lock.
 //
 // Strong overrides live in kernel/arch/<arch>/early_print.c and are

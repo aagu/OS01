@@ -174,8 +174,8 @@ test-aarch64-uefi-smp:
 	python3 qemutests/aarch64_uefi_smp.py \
 	  --cpus 1 2 4 --repeat 3 --timeout 90 --expect-selftest --expect-gic --expect-clk \
 	  $(if $(filter 0,$(AARCH64_UEFI_SMP_DIAGNOSTIC_DTB)),,--diagnostic-dtb=auto) \
-	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
-	  --image "$(AARCH64_UEFI_DISK)" \
+	  --firmware "$(AARCH64_UEFI_SELFTEST_FIRMWARE)" \
+	  --image "$(AARCH64_UEFI_SELFTEST_DISK)" \
 	  --qemu "$(AARCH64_QEMU)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-uefi-smp/$$(date -u +%Y%m%dT%H%M%S)-normal-$$$$"
 
@@ -213,8 +213,8 @@ test-aarch64-gic-spi:
 	$(MAKE) KERNEL_SELFTEST=1 aarch64-uefi
 	python3 qemutests/aarch64_gic_spi.py \
 	  --diagnostic-dtb=auto \
-	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
-	  --image "$(AARCH64_UEFI_DISK)" \
+	  --firmware "$(AARCH64_UEFI_SELFTEST_FIRMWARE)" \
+	  --image "$(AARCH64_UEFI_SELFTEST_DISK)" \
 	  --qemu "$(AARCH64_QEMU)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-gic-spi/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 

@@ -41,10 +41,11 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c \
                    percpu/percpu.c \
                    time/clocksource.c time/tick.c time/timer.c \
                    intr/softirq.c \
-                   $(wildcard compiler_rt/*.c) \
+                   core/stack_chk.c \
                    subsys/subsys.c \
                    random/random.c \
                    ../libc/random/chacha20.c \
+                   ../runtime/builtins/udivti3.c \
                    selftest/test_arch_atomic_u64.c \
                    selftest/test_aarch64_rndr_encoding.c
 else
@@ -65,7 +66,7 @@ KERNEL_C_SOURCES := \
     $(wildcard percpu/*.c) \
     $(wildcard selftest/*.c) \
     $(wildcard subsys/*.c) \
-    $(wildcard compiler_rt/*.c)
+    ../runtime/builtins/udivti3.c
 
 # Platform devices are selected by arch/<arch>/make.config.  Keep x86-only
 # APIC/PIC/PIT/RTC code out of architecture-neutral source discovery.
@@ -129,6 +130,10 @@ ifeq ($(ARCH),aarch64)
 # landed). The compat/ path is no longer needed.
 ALL_CFLAGS += -I$(CURDIR)/../libc/include
 endif
+# ../runtime/builtins/udivti3.c (single-source __udivti3, see
+# docs/arch/cross-boundary-symbols.md §2.1) includes <os01/compiler_rt.h>
+# from the runtime component's own include tree.
+ALL_CFLAGS += -I$(CURDIR)/../runtime/include
 ALL_ASMFLAGS := $(ASFLAGS) $(ARCH_ASMFLAGS)
 ifeq ($(ARCH),x86_64)
 # The kernel links -lk against the immutable sysroot generation.

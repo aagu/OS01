@@ -31,20 +31,20 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 ### 2.1 builtin / compiler runtime 符号（`__udivti3`、`__stack_chk_guard`、`__divti3`、`__clzsi2` 等）
 
 **规则**：
-- 唯一定义点选择：`kernel/compiler_rt/<name>.c` 或 `libc/<libname>/<name>.c`，**二选一**。
+- 唯一定义点选择：kernel 侧单一 TU 或 `libc/<libname>/<name>.c`，**二选一**。
 - 落点决策依据：
-  - kernel freestanding 路径 → `kernel/compiler_rt/`（**单一 TU，由 `KERNEL_C_SOURCES` 编进 `kernel.bin`**）
-  - selfhosted runtime archive 路径 → `runtime/builtins/<name>.c`（编进 `runtime/udivti3.o` 之类 archive，与 kernel 链接时作为外部输入）
+  - 纯编译器 builtin（`__udivti3` 这类编译器隐式调用、无 OS 语义）→ **`runtime/builtins/<name>.c` 单一来源**：kernel 两侧 ARCH 的 `KERNEL_C_SOURCES` 直接编译该文件（`../runtime/builtins/<name>.c`，include 走 `-I../runtime/include`），selfhosted runtime archive 同源构建——不存在第二份实现
+  - 带_kernel fatal 语义的 runtime 配对（`__stack_chk_guard`/`__stack_chk_fail`，lock-free、关中断、halt）→ `kernel/core/stack_chk.c`（单一 TU，由 `KERNEL_C_SOURCES` 编进 `kernel.bin`）
   - libc 用户态 → `libc/<libname>/<name>.c`
 - 禁止：
   - 散落到 `kernel/arch/<arch>/` 下当作 arch 差异
-  - 散落到 kernel 通用层（`kernel/<subsys>/*.c`）
-  - 在 `libc/` 与 `kernel/compiler_rt/` 同时存在同一符号定义（即便 ABI 一致，也是违例）
+  - 在 kernel 侧（任意目录）与 `libc/` 同时存在同一符号的定义（即便 ABI 一致，也是违例）
+  - 在 `runtime/builtins/` 之外再放一份纯编译器 builtin 实现（曾出现的 `kernel/compiler_rt/` 双源已删除）
 
 **判定标准**（违反 = 满足任一条）：
-- `kernel/compiler_rt/` 与 `libc/` 同时存在同名的 builtin 实现
+- kernel 侧与 `libc/` 同时存在同名的 builtin 实现
 - `kernel/arch/<arch>/` 下出现 builtin 类符号定义（编译器隐式调用、不是 arch API）
-- `kernel/<subsys>/*.c` 出现 builtin 符号定义
+- `kernel/<subsys>/*.c` 出现 builtin 符号定义（`kernel/core/stack_chk.c` 这类 spec 指定的 fatal-runtime 配对除外）
 
 ### 2.2 跨用户 ABI（UAPI：auxv 常量、syscall 号、共享结构体）
 
@@ -103,8 +103,8 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 
 | 类别 | 位置 | 现状 | 说明 |
 |---|---|---|---|
-| `__stack_chk_guard` | `libc/ssp/ssp.c:12`（唯一定义）；`kernel/core/main.c:63/77`（kernel 端独立定义） | 🟡 部分 | libc 端唯一定义点合规；但 kernel 在 `libk.a` 构建时**故意排除**（`ssp.c:10 #if !defined(__is_libk)`），靠人工 `#define __is_libk` 区分。kernel + libc 各一个定义，靠 build flag 避免双定义——**靠约定不靠强约束**。建议落地方向：把 kernel 端的 `__stack_chk_guard` 移到 `kernel/compiler_rt/`（与 `__stack_chk_fail` 配套），定义一次；libc 端继续按 `__is_libk` 排除（参见 `docs/superpowers/specs/2026-09-11-x86_64-kernel-ssp-design.md`）。 |
-| `__udivti3` | `kernel/compiler_rt/udivti3.c`（KERNEL_C_SOURCES 一员）+ `runtime/builtins/udivti3.c`（selfhosted runtime archive） | ✅ 修 | 两份实现**服务于不同 build 路径**：freestanding 内联 vs selfhosted archive。两者均单一来源（kernel path 单一 TU；runtime path 单一 archive），无镜像违规。属于「同一符号两份实现但落点二选一」的合规情形。 |
+| `__stack_chk_guard` | `libc/ssp/ssp.c:12`（用户态唯一定义）；`kernel/core/stack_chk.c`（kernel 端唯一定义，guard+fail 配对） | ✅ 修 | kernel 端已按 AAGU-4.4 集中为单一 TU（先落 `kernel/compiler_rt/`，2026-09-25 目录裁撤后迁至 `kernel/core/stack_chk.c`）；libc 端继续按 `ssp.c:10 #if !defined(__is_libk)` 排除，libk.a 不带第二份。kernel 与用户态各一份、互不可见——两个 fatal 语义（halt vs raise(SIGABRT)）本就不同（参见 `docs/superpowers/specs/2026-09-11-x86_64-kernel-ssp-design.md`）。 |
+| `__udivti3` | `runtime/builtins/udivti3.c`（**单一来源**；两侧 ARCH 的 `KERNEL_C_SOURCES` 直接编译它，selfhosted runtime archive 同源） | ✅ 修 | 曾有 `kernel/compiler_rt/udivti3.c` + `runtime/builtins/udivti3.c` 两份**已漂移**的实现；2026-09-25 收敛为单一来源，kernel 侧不再有第二份（archive 成员因符号已定义不会被拉入）。 |
 | `__divti3`、`__modti3`、`__clzsi2` 等 | （未在 OS01 内出现） | ✅ 修 | OS01 当前不在 kernel / libc 引入其他 builtin 符号；一旦引入，必须走 §2.1 落点。 |
 
 ### 3.2 跨用户 ABI（UAPI）
@@ -180,11 +180,12 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 
 ### 4.4 P3 — builtin 统一
 
-**Issue: AAGU-4.4 — kernel 端 `__stack_chk_guard` 移到 `kernel/compiler_rt/`**（依 3.1）
+**Issue: AAGU-4.4 — kernel 端 `__stack_chk_guard` 移到 `kernel/compiler_rt/`**（依 3.1）✅ 已落地
 - 当前 `kernel/core/main.c:63/77` 独立定义 kernel 端 canary
 - 移到 `kernel/compiler_rt/` 与 `__stack_chk_fail` 配套
 - libc 端 `libc/ssp/ssp.c` 继续按 `__is_libk` 排除
 - 与 §2.1 「二选一」规则对齐：kernel path 单一 TU
+- **2026-09-25 修订**：`kernel/compiler_rt/` 目录裁撤（名字与实际作用不符）——`__stack_chk_*` 配对迁至 `kernel/core/stack_chk.c`；`__udivti3` 收敛到 `runtime/builtins/` 单一来源（见 §2.1、§3.1）
 
 ---
 
