@@ -222,15 +222,16 @@ test-aarch64-gic-spi:
 # validate keeps the x86 kernel + UEFI artifact checks (kernel ELF has no
 # undefined symbols / INTERP / DYNAMIC, is EM_X86_64, exports _start /
 # kernel_main / _text; the EFI app has a parseable COFF export table) and
-# prints the selected profile's identity. x86-only: gated on the `uefi`
-# capability (x86_64-clang has it; aarch64-clang has uefi) so an
-# incapable profile gets the clean capability error instead of cryptic
+# prints the selected profile's identity. x86-only: gated on the `rootfs`
+# capability (the recipes inspect the x86 kernel.bin artifact and x86 kernel
+# symbols, which aarch64-clang does not produce even though it has `uefi`)
+# so an incapable profile gets the clean capability error instead of cryptic
 # empty-LLVM_* failures.
 .PHONY: validate validate-kernel validate-uefi validate-profile
-validate: $(if $(filter uefi,$(PROFILE_CAPABILITIES)),validate-kernel validate-uefi validate-profile)
-	$(call require_capability,uefi)
-validate-kernel: $(if $(filter uefi,$(PROFILE_CAPABILITIES)),kernel.bin)
-	$(call require_capability,uefi)
+validate: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),validate-kernel validate-uefi validate-profile)
+	$(call require_capability,rootfs)
+validate-kernel: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),kernel.bin)
+	$(call require_capability,rootfs)
 	@echo "  [validate] kernel.elf has no undefined symbols"
 	@test -z "$$($(LLVM_NM) --undefined-only $(KERNEL_ELF))"
 	@echo "  [validate] kernel.elf has no INTERP/DYNAMIC program headers"
@@ -243,8 +244,8 @@ validate-kernel: $(if $(filter uefi,$(PROFILE_CAPABILITIES)),kernel.bin)
 	@$(LLVM_READELF) -Ws $(KERNEL_ELF) | grep -E 'GLOBAL.*\bkernel_main\b'
 	@echo "  [validate] GLOBAL _text present"
 	@$(LLVM_READELF) -Ws $(KERNEL_ELF) | grep -E 'GLOBAL.*\b_text\b'
-validate-uefi: $(if $(filter uefi,$(PROFILE_CAPABILITIES)),$(UEFI_EFI))
-	$(call require_capability,uefi)
+validate-uefi: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(UEFI_EFI))
+	$(call require_capability,rootfs)
 	@echo "  [validate] $(notdir $(UEFI_EFI)) coff-exports"
 	@$(LLVM_READOBJ) --coff-exports $(UEFI_EFI) >/dev/null
 validate-profile:
@@ -528,8 +529,6 @@ help:
 		 'run-virtio'        '(rootfs)'     'QEMU with virtio-net-pci (instead of e1000e)';
 	@printf '  %-22s %-13s %s\n' \
 		 'debug'             '(rootfs)'     'QEMU paused, GDB :1234 (-S -s)';
-	@printf '  %-22s %-13s %s\n' \
-		 'print-run-paths'   '(rootfs)'     'Print absolute firmware + image paths';
 	@echo ''
 	@echo 'aarch64 UEFI bring-up (uefi):'
 	@printf '  %-22s %-13s %s\n' \
@@ -543,7 +542,11 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'test-aarch64-uefi-smp-no-ack' '(uefi)' 'Consumes prebuilt AARCH64_SMP_TEST_NO_ACK_CPU=1 image for DEGRADED recovery';
 	@echo ''
-	@echo 'Validation (x86 uefi):'
+	@echo 'aarch64 subsystem tests (uefi):'
+	@printf '  %-22s %-13s %s\n' \
+		 'test-aarch64-gic-spi'  '(uefi)'     'PL011 RX → GIC SPI injection (qemutests/aarch64_gic_spi.py)';
+	@echo ''
+	@echo 'Validation (x86 rootfs):'
 	@printf '  %-22s %-13s %s\n' \
 		 'validate'          '(rootfs)'     'kernel ELF + UEFI COFF + profile info';
 	@printf '  %-22s %-13s %s\n' \
@@ -552,6 +555,10 @@ help:
 		 'validate-uefi'     '(rootfs)'     'EFI app COFF exports parseable';
 	@printf '  %-22s %-13s %s\n' \
 		 'validate-profile'  '(always)'     'Print profile / triple / sysroot / capabilities';
+	@echo ''
+	@echo 'Inspection:'
+	@printf '  %-22s %-13s %s\n' \
+		 'print-run-paths'   '(rootfs)'     'Print absolute firmware + active image path';
 	@echo ''
 	@echo 'Test (x86, rootfs):'
 	@printf '  %-22s %-13s %s\n' \
@@ -568,6 +575,16 @@ help:
 		 'test-inittab'      '(rootfs)'     'inittab variant E2E (INITTAB_FILE=config/inittab.test)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-network'      '(rootfs)'     'QEMU network E2E (OS01_NETTEST=1, 6 tests)';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-syscall-repeat'  '(rootfs)'   'QEMU exec/exit stability through normal terminal (x86_64_systest_repeat.py)';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-user-canary'     '(rootfs)'   '7-step SSP / crt0 user-stack canary audit (spec 2026-09-17)';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-kernel-layout'   '(rootfs)'   'x86_64 kernel.elf layout audit (post-_end reserved)';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-kernel-canary-contract' '(rootfs)' 'Kernel canary compile-flag contract';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-pmm-boot-reservation'    '(rootfs)' 'PMM boot-time memory reservation guard';
 	@echo ''
 	@echo 'Build contract (CI):'
 	@printf '  %-22s %-13s %s\n' \
