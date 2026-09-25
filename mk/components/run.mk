@@ -149,19 +149,7 @@ run-aarch64-uefi: aarch64-uefi
 # accepts --diagnostic-dtb=auto to materialize a packed QEMU-generated DTB
 # per case and pass it via `-dtb` (with `acpi=off`). Set
 # AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0 to require the production firmware path.
-.PHONY: test-aarch64-uefi-smp
-test-aarch64-uefi-smp:
-	$(call require_aarch64_uefi)
-	$(call require_capability,uefi)
-	$(MAKE) KERNEL_SELFTEST=1 aarch64-uefi
-	python3 qemutests/aarch64_uefi_smp.py \
-	  --cpus 1 2 4 --repeat 3 --timeout 90 --expect-selftest --expect-gic --expect-clk \
-	  $(if $(filter 0,$(AARCH64_UEFI_SMP_DIAGNOSTIC_DTB)),,--diagnostic-dtb=auto) \
-	  --firmware "$(AARCH64_UEFI_SELFTEST_FIRMWARE)" \
-	  --image "$(AARCH64_UEFI_SELFTEST_DISK)" \
-	  --qemu "$(AARCH64_QEMU)" \
-	  --log-dir "$(OS01_ROOT)/test-results/aarch64-uefi-smp/$$(date -u +%Y%m%dT%H%M%S)-normal-$$$$"
-
+#
 # This target only consumes an already injected image. Switching the
 # compiled value requires the following profile-clean sequence:
 # make PROFILE=aarch64-clang clean
@@ -170,36 +158,97 @@ test-aarch64-uefi-smp:
 # make PROFILE=aarch64-clang clean
 # make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
 # Then run a normal two-core recovery case with the rebuilt image paths.
-.PHONY: test-aarch64-uefi-smp-no-ack
-test-aarch64-uefi-smp-no-ack:
-	$(call require_aarch64_uefi)
-	$(call require_capability,uefi)
-	$(if $(and $(filter 1,$(words $(AARCH64_SMP_TEST_NO_ACK_CPU))),$(filter 1,$(AARCH64_SMP_TEST_NO_ACK_CPU))),,$(error AARCH64_SMP_TEST_NO_ACK_CPU must be 1; clean and build the injected image first))
-	@test "$(AARCH64_SMP_TEST_NO_ACK_CPU)" = 1
-	@test -f "$(AARCH64_UEFI_DISK)" -a -f "$(AARCH64_UEFI_FIRMWARE)" || { echo 'Build the injected aarch64-uefi image first' >&2; exit 1; }
-	python3 qemutests/aarch64_uefi_smp.py \
-	  --cpus 2 --repeat 1 --timeout 90 --expect-no-ack 1 \
-	  $(if $(filter 0,$(AARCH64_UEFI_SMP_DIAGNOSTIC_DTB)),,--diagnostic-dtb=auto) \
-	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
-	  --image "$(AARCH64_UEFI_DISK)" \
-	  --qemu "$(AARCH64_QEMU)" \
-	  --log-dir "$(OS01_ROOT)/test-results/aarch64-uefi-smp/$$(date -u +%Y%m%dT%H%M%S)-no-ack-$$$$"
-
+#
 # PL011 RX -> GIC SPI injection test (spec §7.4, Task 2.3b). Reuses the
 # SMP suite's firmware / image / DTB mechanism; harness injects one byte
 # into the PL011 socket and expects the kernel-side "handled count=1"
 # marker once the RX handler fires.
-.PHONY: test-aarch64-gic-spi
-test-aarch64-gic-spi:
-	$(call require_aarch64_uefi)
-	$(call require_capability,uefi)
+.PHONY: test-aarch64 test-aarch64-uefi-smp test-aarch64-uefi-smp-no-ack test-aarch64-gic-spi
+# The contract harness expects invalid no-ack injection to fail even under
+# `make -n`. Keep this as a parse-time check for both invocation forms.
+ifneq ($(filter test-aarch64-uefi-smp-no-ack,$(MAKECMDGOALS)),)
+ifneq ($(AARCH64_SMP_TEST_NO_ACK_CPU),1)
+$(error AARCH64_SMP_TEST_NO_ACK_CPU must be 1; clean and build the injected image first)
+endif
+endif
+ifneq ($(filter test-aarch64,$(MAKECMDGOALS)),)
+ifeq ($(MODE),no-ack)
+ifneq ($(AARCH64_SMP_TEST_NO_ACK_CPU),1)
+$(error AARCH64_SMP_TEST_NO_ACK_CPU must be 1; clean and build the injected image first)
+endif
+endif
+endif
+# Per-MODE lookups. The "extra" DTB flag is a Make variable (NOT a shell
+# variable) so it survives across recipe lines — a shell variable set
+# in one `@`-prefixed recipe line is empty in the next (each `@` line is
+# a fresh /bin/sh invocation, verified).
+TEST_AARCH64_EXTRA_smp     := $(if $(filter 0,$(AARCH64_UEFI_SMP_DIAGNOSTIC_DTB)),,--diagnostic-dtb=auto)
+TEST_AARCH64_EXTRA_no-ack  := $(if $(filter 0,$(AARCH64_UEFI_SMP_DIAGNOSTIC_DTB)),,--diagnostic-dtb=auto)
+TEST_AARCH64_EXTRA_gic-spi := --diagnostic-dtb=auto
+
+# Pre-build helpers (one per MODE) put the $(MAKE) sub-invocation on its
+# own recipe line so `make -n` honors the dry-run contract. A single
+# multi-branch recipe (the v2 approach with `if [ "$(MODE)" = ... ]`)
+# put $(MAKE) inside an `if/fi` block on one recipe line and would
+# execute under -n.
+.PHONY: _test-aarch64-prep-smp _test-aarch64-prep-no-ack _test-aarch64-prep-gic-spi
+_test-aarch64-prep-smp:
 	$(MAKE) KERNEL_SELFTEST=1 aarch64-uefi
+_test-aarch64-prep-no-ack:
+	@test "$(AARCH64_SMP_TEST_NO_ACK_CPU)" = 1 \
+	  || { echo "AARCH64_SMP_TEST_NO_ACK_CPU must be 1; clean and rebuild" >&2; exit 1; }
+	@test -f "$(AARCH64_UEFI_DISK)" -a -f "$(AARCH64_UEFI_FIRMWARE)" \
+	  || { echo "Build the injected aarch64-uefi image first" >&2; exit 1; }
+_test-aarch64-prep-gic-spi:
+	$(MAKE) KERNEL_SELFTEST=1 aarch64-uefi
+
+# Run helpers (one per MODE) keep the python harness on its own recipe
+# line, after the pre-build. The python call therefore is NOT executed
+# under `-n` (per the dry-run contract).
+.PHONY: _test-aarch64-run-smp _test-aarch64-run-no-ack _test-aarch64-run-gic-spi
+_test-aarch64-run-smp:
+	python3 qemutests/aarch64_uefi_smp.py \
+	  --cpus 1 2 4 --repeat 3 --timeout 90 --expect-selftest --expect-gic --expect-clk \
+	  $(TEST_AARCH64_EXTRA_smp) \
+	  --firmware "$(AARCH64_UEFI_SELFTEST_FIRMWARE)" \
+	  --image "$(AARCH64_UEFI_SELFTEST_DISK)" \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --log-dir "$(OS01_ROOT)/test-results/aarch64-uefi-smp/$$(date -u +%Y%m%dT%H%M%S)-normal-$$$$"
+_test-aarch64-run-no-ack:
+	python3 qemutests/aarch64_uefi_smp.py \
+	  --cpus 2 --repeat 1 --timeout 90 --expect-no-ack 1 \
+	  $(TEST_AARCH64_EXTRA_no-ack) \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+	  --image "$(AARCH64_UEFI_DISK)" \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --log-dir "$(OS01_ROOT)/test-results/aarch64-uefi-smp/$$(date -u +%Y%m%dT%H%M%S)-no-ack-$$$$"
+_test-aarch64-run-gic-spi:
 	python3 qemutests/aarch64_gic_spi.py \
 	  --diagnostic-dtb=auto \
 	  --firmware "$(AARCH64_UEFI_SELFTEST_FIRMWARE)" \
 	  --image "$(AARCH64_UEFI_SELFTEST_DISK)" \
 	  --qemu "$(AARCH64_QEMU)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-gic-spi/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+
+# test-aarch64: the umbrella. Dispatches to the per-MODE prep + run helpers.
+test-aarch64: MODE ?= smp
+test-aarch64: MODE := $(MODE)
+# No image prerequisites: smp/gic-spi build the selftest variant in their
+# prep helper, while no-ack must only consume an already injected image.
+test-aarch64:
+	$(call require_aarch64_uefi)
+	$(call require_capability,uefi)
+	@case "$(MODE)" in \
+	  smp|no-ack|gic-spi) ;; \
+	  *) echo "MODE must be smp|no-ack|gic-spi, got '$(MODE)'" >&2; exit 1;; \
+	esac
+	@echo "  [test-aarch64] MODE=$(MODE) extra=$(TEST_AARCH64_EXTRA_$(MODE))"
+	$(MAKE) --no-print-directory _test-aarch64-prep-$(MODE)
+	$(MAKE) --no-print-directory _test-aarch64-run-$(MODE)
+
+test-aarch64-uefi-smp:        ; @$(MAKE) --no-print-directory test-aarch64 MODE=smp
+test-aarch64-uefi-smp-no-ack: ; @$(MAKE) --no-print-directory test-aarch64 MODE=no-ack
+test-aarch64-gic-spi:         ; @$(MAKE) --no-print-directory test-aarch64 MODE=gic-spi
 
 # ── Validation ─────────────────────────────────────────────
 # validate keeps the x86 kernel + UEFI artifact checks (kernel ELF has no
