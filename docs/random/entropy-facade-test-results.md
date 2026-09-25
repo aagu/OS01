@@ -1,7 +1,7 @@
 # OS01 entropy facade 三档测试结果（AAGU-5.8）
 
 > **For agentic workers:** 本文件是 AAGU-5 子任务 8 三档环境测试的实测结果记录。
-> 每一档引用 `scripts/test_entropy_facade*.sh` 启动命令、QEMU 启动参数、boot log 关键片段，
+> 每一档引用 `qemutests/test_entropy_facade*.sh` 启动命令、QEMU 启动参数、boot log 关键片段，
 > 并对每一档按 `docs/arch/entropy-source-facade.md` §2 的 STRONG/WEAK/NONE 三级契约断言结果。
 
 | 字段 | 值 |
@@ -9,7 +9,7 @@
 | Spec ID | `entropy-facade-test-results` |
 | Issue | AAGU-5.8 |
 | 基线 commit | `feat/aagu-5-7-at-random-strong-only` SHA `21f0bc7`（含 AAGU-5.6 facade 实施 + AAGU-5.7 AT_RANDOM 联调） |
-| 测试脚本 | `scripts/test_entropy_facade.sh`、`scripts/test_entropy_facade_aarch64.sh` |
+| 测试脚本 | `qemutests/test_entropy_facade.sh`、`qemutests/test_entropy_facade_aarch64.sh` |
 | 测试日期 | 2026-09-25 |
 | 测试环境 | homeserver `homeserver`（x86_64 主机：`AMD Ryzen 9 7845HX`） |
 | 提交 | `feat/aagu-5-8-entropy-facade-tests` SHA `d9289a2`+`fix-probe-NB` round-3（reviewer §1/§2/§3/§4 三轮反馈后）；详见 §7 |
@@ -154,7 +154,7 @@ PASS tier3-host-no-virtio: STRONG via UEFI GetRNG + init spawned + /dev/random �
 ### 2.5 x86_64 总览（脚本汇总）
 
 ```text
-$ scripts/test_entropy_facade.sh
+$ qemutests/test_entropy_facade.sh
 
 ── TIER: tier1-default-no-virtio ──    PASS: NONE + init fail-closed（AAGU-5.7 契约）
 ── TIER: tier1-default-virtio ──       PASS: STRONG-via-GetRNG + init spawned + /dev/random 非零
@@ -261,7 +261,7 @@ FAIL tier3-real-hardware: 无 aarch64 物理硬件可测（homeserver 是 x86_64
 ### 3.6 aarch64 总览（脚本汇总）
 
 ```text
-$ scripts/test_entropy_facade_aarch64.sh
+$ qemutests/test_entropy_facade_aarch64.sh
 
 ── TIER: tier1-default-no-virtio ──     PASS: boot 通过 phase1 boot ok
 ── TIER: tier1-default-virtio ──        PASS: boot 通过 phase1 boot ok
@@ -334,13 +334,13 @@ AAGU-5 父 issue 验收项：
 
 ```bash
 # x86_64 三档
-scripts/test_entropy_facade.sh
+qemutests/test_entropy_facade.sh
 
 # 指定 tier
-scripts/test_entropy_facade.sh tier1-default tier2-ivy tier3-host
+qemutests/test_entropy_facade.sh tier1-default tier2-ivy tier3-host
 
 # aarch64 三档
-scripts/test_entropy_facade_aarch64.sh
+qemutests/test_entropy_facade_aarch64.sh
 ```
 
 ### 6.2 环境要求
