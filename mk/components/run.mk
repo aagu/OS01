@@ -59,55 +59,38 @@ endif
 # All x86 QEMU entry points consume the profile's NORMAL_IMAGE and
 # OVMF_FIRMWARE directly — never the project-root disk.img compat copy and
 # never the source-tree boot/uefi/OVMF.fd.
-.PHONY: run
-run: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
-	$(call require_capability,rootfs)
-	$(QEMU_BIN) -M q35 -smp $(SMP) \
-	  -drive if=pflash,format=raw,readonly=on,file=$(OVMF_FIRMWARE) \
-	  -netdev user,id=net0 -device e1000e,netdev=net0 \
-	  -drive file=$(NORMAL_IMAGE),format=raw,if=none,id=disk \
-	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
-	  -object rng-random,filename=/dev/urandom,id=rng0 \
-	  -device virtio-rng-pci,rng=rng0 \
-	  -m $(MEMORY) -display $(DISPLAY) -serial stdio -no-reboot
 
-.PHONY: run-kvm
-run-kvm: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
-	$(call require_capability,rootfs)
-	$(QEMU_BIN) -M q35 -smp $(SMP) \
-	  -drive if=pflash,format=raw,readonly=on,file=$(OVMF_FIRMWARE) \
-	  -accel kvm \
-	  -netdev user,id=net0 -device e1000e,netdev=net0 \
-	  -drive file=$(NORMAL_IMAGE),format=raw,if=none,id=disk \
-	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
-	  -object rng-random,filename=/dev/urandom,id=rng0 \
-	  -device virtio-rng-pci,rng=rng0 \
-	  -m $(MEMORY) -display $(DISPLAY) -serial stdio -no-reboot
+# Shared QEMU argument groups. Variant flags are inserted between these
+# groups so the final argument order matches each original recipe.
+RUN_QEMU_BASE = $(QEMU_BIN) -M q35 -smp $(SMP) \
+  -drive if=pflash,format=raw,readonly=on,file=$(OVMF_FIRMWARE)
+RUN_QEMU_DISK = -drive file=$(NORMAL_IMAGE),format=raw,if=none,id=disk \
+  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
+  -object rng-random,filename=/dev/urandom,id=rng0 \
+  -device virtio-rng-pci,rng=rng0 \
+  -m $(MEMORY) -display $(DISPLAY) -serial stdio
 
-.PHONY: run-virtio
+.PHONY: run run-kvm run-virtio debug
+# Flags before the common network/disk section, followed by the original
+# final reboot flag only on run and run-kvm.
+RUN_QEMU_FLAGS_run-kvm    = -accel kvm
+RUN_QEMU_FLAGS_debug      = -S -s
+
+# Capability-gated prerequisites reproduce the original
+# `$(if $(filter rootfs,...),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))` pattern
+# so a clean workspace still gets the disk image + firmware built first.
+run:        $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
+	$(call require_capability,rootfs)
+	$(RUN_QEMU_BASE) -netdev user,id=net0 -device e1000e,netdev=net0 $(RUN_QEMU_DISK) -no-reboot
+run-kvm:    $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
+	$(call require_capability,rootfs)
+	$(RUN_QEMU_BASE) $(RUN_QEMU_FLAGS_run-kvm) -netdev user,id=net0 -device e1000e,netdev=net0 $(RUN_QEMU_DISK) -no-reboot
 run-virtio: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
-	$(QEMU_BIN) -M q35 -smp $(SMP) \
-	  -drive if=pflash,format=raw,readonly=on,file=$(OVMF_FIRMWARE) \
-	  -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
-	  -drive file=$(NORMAL_IMAGE),format=raw,if=none,id=disk \
-	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
-	  -object rng-random,filename=/dev/urandom,id=rng0 \
-	  -device virtio-rng-pci,rng=rng0 \
-	  -m $(MEMORY) -display $(DISPLAY) -serial stdio
-
-.PHONY: debug
-debug: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
+	$(RUN_QEMU_BASE) -netdev user,id=net0 -device virtio-net-pci,netdev=net0 $(RUN_QEMU_DISK)
+debug:      $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
-	$(QEMU_BIN) -M q35 -smp $(SMP) \
-	  -drive if=pflash,format=raw,readonly=on,file=$(OVMF_FIRMWARE) \
-	  -S -s \
-	  -netdev user,id=net0 -device e1000e,netdev=net0 \
-	  -drive file=$(NORMAL_IMAGE),format=raw,if=none,id=disk \
-	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
-	  -object rng-random,filename=/dev/urandom,id=rng0 \
-	  -device virtio-rng-pci,rng=rng0 \
-	  -m $(MEMORY) -display $(DISPLAY) -serial stdio
+	$(RUN_QEMU_BASE) $(RUN_QEMU_FLAGS_debug) -netdev user,id=net0 -device e1000e,netdev=net0 $(RUN_QEMU_DISK)
 
 # ── aarch64 UEFI bring-up (uefi capability) ────────────
 # Targets are always defined so `make aarch64-uefi` under the default x86
