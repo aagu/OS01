@@ -261,13 +261,12 @@ TEST_SELFTEST_IMAGE := $(BUILD_DIR)/image/selftest/disk.img
 # overridable.
 KERNEL_SELFTEST_SMP ?= 4
 
-.PHONY: test
-test:
+.PHONY: test-host test test-pmm-boot-reservation
+test-host:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,run $(OS01_SUBMAKE_ARGS))
 	python3 qemutests/pmm_boot_reservation_test.py
-
-.PHONY: test-pmm-boot-reservation
+test: test-host
 test-pmm-boot-reservation:
 	python3 qemutests/pmm_boot_reservation_test.py
 
