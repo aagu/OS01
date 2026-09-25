@@ -43,10 +43,10 @@ extern char _edata;
 extern char _erodata;
 extern char _end;
 
-// ── Stack canary (single source: kernel/compiler_rt/stack_chk_guard.c) ──
+// ── Stack canary (single source: kernel/core/stack_chk.c) ──
 // kernel_main() replaces __stack_chk_guard with arch_cycle_counter() as
 // its first statement (canary fail-closed if CSPRNG is not yet seeded).
-// __stack_chk_fail itself lives in compiler_rt/ per AAGU-4 spec §2.1.
+// __stack_chk_fail itself lives in stack_chk.c per AAGU-4 spec §2.1.
 extern unsigned long __stack_chk_guard;
 
 #ifdef OS01_CANARY_SELFTEST

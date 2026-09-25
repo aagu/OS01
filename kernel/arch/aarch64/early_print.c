@@ -7,7 +7,7 @@
 // any output is emitted — aarch64 phase 1 invokes it from
 // kernel/arch/aarch64/main.c well before user code can trip the
 // canary, so the precondition holds for the only call site today
-// (compiler_rt/stack_chk_guard.c::__stack_chk_fail).
+// (core/stack_chk.c::__stack_chk_fail).
 //
 // pl011_putc() is itself lock-free: it polls PL011_FR.TXFF and writes
 // one byte at a time.  That matches the contract documented in
