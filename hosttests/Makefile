@@ -573,6 +573,7 @@ $(TEST_BLD)/clocksource_test_stubs.o: $(TEST_MOCK)/clocksource_test_stubs.c \
 
 $(TEST_BLD)/test_clocksource.o: $(TEST_CASES)/test_clocksource.c \
 		$(TESTS_DIR)/kernel/include/time/clocksource.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/clocksource.h \
 		$(TESTS_DIR)/kernel/include/time/clocksource_internal.h \
 		$(TEST_MOCK)/clocksource_test_runtime.h
 	@mkdir -p $(TEST_BLD)

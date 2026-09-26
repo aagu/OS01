@@ -47,7 +47,6 @@ void clocksource_init(void)
 uint64_t clocksource_freq_hz(void) { return clocksource_freq; }
 uint64_t clocksource_cycles(void)  { return arch_cycle_counter(); }
 
-#if defined(__x86_64__) || defined(__aarch64__)
 #include <subsys/subsys.h>
 // Register this driver into the platform's subsystem table. The
 // _register function is collected by arch_register_subsys() at boot via
@@ -68,4 +67,3 @@ static int _clocksource_register(void)
     return 0;
 }
 SUBSYS_INITCALL(_clocksource_register);
-#endif

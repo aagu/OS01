@@ -1,11 +1,85 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-09-18）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-09-26）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
 
+## 2026-09-26
+
+- refactor: **AAGU-4 残留清理 — close §3.3 ❌ + 🟡** —— branch `docs/roadmap-slim-v30`（commit 链路 `099b060`（spec）→ `4e1d33b`（plan）→ 4 task commits）：
+  - **Task 1**（`b994d8f`）：softirq 原子操作实现从 `kernel/arch/<arch>/cpu/atomic.c` 外部函数迁移到 `kernel/include/arch/<arch>/atomic_bitops.h` static inline + `__attribute__((always_inline))`；`kernel/intr/softirq.c` 删除 2 个 `#if defined(__x86_64__)/#elif defined(__aarch64__)/#else #error` 块
+  - **Task 2**（`3ababa8`）：`kernel/time/tick.c` poll-timeout scan + PIT/LAPIC handoff 拆分：weak 默认 `poll_timeout_tick()` 在 `kernel/time/tick.c`（aarch64 phase 1 路径），strong 实现在 `kernel/fs/poll.c`（x86_64）；PIT/LAPIC handoff 合并到 `kernel/arch/x86_64/platform/time.c::arch_tick_start()`；`tick.c` 删除 2 个 `#if defined(__x86_64__)` 块
+  - **Task 3**（`29996e9`）：`kernel/include/time/clocksource.h` 2 个 `#if defined(__x86_64__)` 块（percpu include + `clocksource_read_ns()` inline）迁至新建 `kernel/include/arch/x86_64/clocksource.h`；`kernel/time/clocksource.c` + `kernel/time/timer.c` SUBSYS_INITCALL ifdef 删除；`timer.c` spin hint 接 `arch_cpu_pause()`
+  - **Task 4**（`e91d0b9`）：`kernel/driver/{ahci,keyboard,pit,serial}.c` + `kernel/net/net.c` 共 5 个 TU 删除冗余 `#ifdef __x86_64__` SUBSYS_INITCALL 守护（TU 已在 x86-only 路径，Makefile 已 gate）
+  - 文档同步：`docs/arch/cross-boundary-symbols.md` §3.3 ❌/🟡 状态全改 ✅，§6 验收清单增条目
+- fix(aarch64): **IPI cpus≥2 FAIL 根因修复（TPIDR_EL1 误读）** —— commit `d695020`（worktree `fix/aarch64-ipi-fail`，当前 HEAD）：`kernel/arch/aarch64/intr/ipi_test.c::ipi_cpu_id()` 从 `TPIDR_EL1` 取指针后误解释为 `aarch64_boot_percpu_t *`（实际 `percpu_t`），跨字段偏移导致 cpu≠self 时 `id` 计算错位（`cpu=1 received=3`、`cpu=2/3 received=0`）。两个「暖机」SGI 掩盖真问题：`cpu=0` 暖机时 IPI handler 调 `gic_send_sgi(self,2,0,FILTER_SELF)` 写 `0x02000002`，触发 SGI 2 self-trigger，handler 重入将 `received[cpu]` 加 1 —— 看似通过；删暖机后 `cpu=1..N-1 received == 0`。修：去掉类型转换，改用运行期 `cpu_id()`（`mrs x0, TPIDR_EL1` → `percpu_current()`），删除两个暖机 SGI；`SGI_TEST_ACK_COUNT == N-1`（`cpu=0` 不应收到自给 SGI）+ `GICC_IAR == 0x401`（sgi_int_id=2，CPU targets=1）严格断言。QEMU `make PROFILE=aarch64-clang test-aarch64-uefi-smp` 1/2/4 ×3 共 9/9 PASS（0 TIMEOUT / 0 FAIL）。完整根因 + 修复记录见 `docs/aarch64-ipi-fail-handoff-2026-09-26.md`
+- ci: **bucket test targets 迁移** —— commit `36e6230`：CI workflow 从旧的 forwarding `test-*` aliases 切到 6 个 bucket 目标（`test-qemu` / `test-host` / `test-static` / `test-aarch64` / `test-contract` / `test-kernel-selftest`）
+- refactor(harness): **删 forwarding `test-*` aliases** —— commit `ce258a1`（worktree `feat/build-system-harness-consolidation` 收尾）：删 09-25 引入的临时 forwarding `test-*` aliases，仅保留 6 个 bucket 目标作为权威入口。follow-up 见 `9f13465`（track followup）
+
+## 2026-09-25
+
+- refactor: **build system harness consolidation**（worktree `feat/build-system-harness-consolidation`，12 commits `70daaea..ce258a1`）：统一 6 个 bucket test 目标（`test-qemu` / `test-host` / `test-static` / `test-aarch64` / `test-contract` / `test-kernel-selftest`），target taxonomy / capability gate / alias policy 收敛到 `docs/build-system-harness.md` 作为权威 reference：
+  - `70daaea` plan (v3, 12 tasks) → `64dd4ac` gate x86 validation + 公开隐藏 test target → `5c43897` drop unused `all` alias → `452bbf1` DRY QEMU command lines（`RUN_QEMU_BASE` / `_FLAGS_<target>`）
+  - `f2652a7` consolidate 4 QEMU E2E 目标 → `test-qemu SUITE=<name>`（保留旧名为 aliases）→ `58a6ef9` canonical `test-host` + 拆分 pmm helper → `64e3207` `test-static` umbrella + 4 subset aliases
+  - `c28e67a` consolidate 3 aarch64 tests → `test-aarch64 MODE=<smp|no-ack|gic-spi>` → `7350c61` consolidate 2 contract tests → `test-contract PROFILE=<name>`
+  - `782e964` `docs/build-system-harness.md` 新建（target taxonomy 权威 reference）→ `30f3508` update Quick start / 用户入口 / test recipes
+- refactor: **arch source groups**（commit `c3412da` + `18a4cff`，merge `79ccffb`，spec `2026-09-25-arch-source-groups-design.md`）：kernel 源按 `kernel/arch/<arch>/<topic>/` 职责分组（如 `kernel/arch/x86_64/intr/{8259A,lapic,lapic_timer}.c`、`kernel/arch/x86_64/sched/{task,switch}.c`、`kernel/arch/aarch64/intr/{gic_driver,gic,irq_probe,ipi_test,entry.S}` 等），更新所有架构引用路径 + 文档架构图
+- refactor: **compiler_rt 目录裁撤**（commit `1c5816b`，merge `ca72145`）：`kernel/compiler_rt/` 整个目录裁撤，符号落点各归其位——`__stack_chk_*` 迁至 `kernel/core/stack_chk.c`；`__udivti3` 走 `runtime/builtins/`；elf-loader 保留 `runtime/builtins/`。消除「目录名与实际职责不符」的违例
+- fix(run): commit `1fbca71` aarch64 QEMU harness 改用 selftest 变体镜像
+- feat: **AAGU-5.8 三档环境测试 + 验收清单** —— commit `a05d975`（PR #28，worktree `feat/aagu-5-entropy-facade`）：QEMU 默认 / `+rdrand,+rdseed` / 真硬件 三档测试 + 验收清单。spec `docs/arch/entropy-source-facade.md`
+- feat: **AAGU-5.7 STRONG-only pool + selftest NONE-mode + spawn/exec 策略** —— commit `587a894`（PR #27，6 commits `c97a8f5` / `3721e93` / `001528e` / `e9ae356` / `21f0bc7` / `587a894`）：STRONG-only pool + selftest NONE-mode 修正 + AT_RANDOM STRONG-only 控制流 + B3 WEAK-pool e2e 测试 + spawn/exec 决策
+
+## 2026-09-24
+
+- feat(aarch64): **AAGU-5.6 arch entropy facade + strong overrides + kernel/random refactor** —— merge #25（commits `4ab3370` / `f41e4e6` / `1c5bf17`）：spec `docs/arch/entropy-source-facade.md` + `arch_random_get_entropy()` + `arch_random_get_strong()` 双接口 + `kernel/random` refactor。x86_64 strong override：`RDSEED` = STRONG / `RDRAND` = WEAK；aarch64 strong override：`RNDRRS` = STRONG / `RNDR` = WEAK
+- feat(aarch64): **AAGU-29 aarch64 libk.a link**（commit `bee8da5`，merge #26 `bec4a4c`，worktree `fix/aagu-29-libk-aarch64`）：aarch64 kernel 现在 link `libk.a`（`kernel/arch/aarch64/make.config`: `ARCH_LIBS = -nostdlib -lk`）→ `memcpy/memset/memmove/calloc/free/malloc/strlen/strcmp` 走 libc 单一来源。删 `kernel/compiler_rt/memset.c` weak fallback + `kernel/arch/aarch64/libc_stub.c` calloc/free shim。完整闭项见 `docs/aarch64-libk-aarch64-closure-2026-09-24.md`
+- feat: **AAGU-6 P2 风格/头/测试 cleanup batch** —— commit `b580432`（PR #24，worktree `feat/aagu-6-p2-cleanup`）：统一 kernel `__stack_chk_guard` + 移除 `kernel/arch/aarch64/memset.c` weak stub + `idle_resume`/calloc shim 等清理
+
+## 2026-09-23
+
+- feat(libc): **AAGU-4.6 libc atexit 串入 exit 路径** —— commit `c4a93fe`（PR #23）：libc atexit 串入 exit 路径，关闭 AAGU-4.6
+- refactor(atomic): **AAGU-4.5 arch_atomic_or/and_u64 facade + softirq.c drop ifdef** —— commit `7828d7d`（PR #22）：新增 `arch_atomic_or/and_u64` arch-neutral facade + `softirq.c` 内 `#ifdef __x86_64__` 移除，关闭 AAGU-4.5
+- feat(kernel): **AAGU-4.3.6 kernel/include/compat/stdlib.h → libc 单一来源** —— commit `bfb314d`（PR #20）：删除 `kernel/include/compat/stdlib.h` 文件，改走 libc 单一来源（`git rm compat/`，目录裁撤的早期收口）。至此 AAGU-4.3.1~6 全套（`list/rbtree/string/stdlib/sys-cdefs/sys-types` 6 mirror 头）落地
+- feat(kernel): **AAGU-4.3.5 kernel/include/compat/string.h → libc 单一来源** —— commit `93c5403`（PR #19）
+- feat(kernel): **AAGU-4.3.2 kernel/include/compat/rbtree.h → libc 单一来源** —— commit `0ddbfa7`（PR #18）
+- feat(kernel): **AAGU-4.3.1 kernel/include/compat/list.h → libc 单一来源** —— commit `f976a1b`（PR #17）
+- feat(kernel): **AAGU-4.3.4 kernel/include/compat/sys/types.h → libc 单一来源** —— commit `bdb1630`（PR #16）
+- feat(kernel): **AAGU-4.3.3 kernel/include/compat/sys/cdefs.h → libc 单一来源** —— commit `06777a2`（PR #15）
+
+## 2026-09-22
+
+- feat: **AAGU-4.2 UAPI auxv + stat.h 单一源收口** —— commit `8937932`（PR #14）：kernel UAPI 为唯一源，libc 端 sysroot 安装
+- refactor(compiler_rt): **AAGU-4.4 kernel `__stack_chk_guard` 单一来源** —— commit `5b4f736`（PR #13）：`kernel/compiler_rt/` 内 `__stack_chk_guard` 单一来源（2026-09-25 目录裁撤后迁至 `kernel/core/stack_chk.c`）
+- fix(libc/stdio): **AAGU-4.1 libc stdio `fread/fwrite` stream 验证** —— commit `baaa3e9`（PR #12）：`fread/fwrite` 入口加 `is_open_file` stream 验证，关闭 AAGU-4.1
+- spec: **AAGU-4 跨边界符号/ABI 边界规范** —— commit `35ed5e3`（PR #11）+ `180b14e`（Explore agent 二次复核）：spec `docs/arch/cross-boundary-symbols.md`（R1 完成）。规则分 4 类：
+  - **builtin 类**（kernel 唯一来源，禁止 libc 镜像）—— 落地于 AAGU-4.3 / 4.4
+  - **UAPI 类**（kernel UAPI 为唯一源，libc 端 sysroot 安装）—— 落地于 AAGU-4.2
+  - **arch-value 类**（arch-neutral facade + strong override）—— 落地于 AAGU-4.5
+  - **libc 镜像类**（libc 单一来源，kernel include 仅引用声明）—— 落地于 AAGU-4.6
+- feat(aarch64): **AAGU-3 subsys_stub convergence + BSP-exclusive CNTP** —— commit `0345ca8`（PR #10，worktree `feat/aagu-3-subsys-stub`）：`kernel/arch/aarch64/subsys_stub.c` 收敛为 API-parity 占位 + BSP 独占 CNTP 控制（APs 跳过 timer init）。替换条件已记录：AAGU-29 落地后只剩 ~10 行 drop-in
+- fix(ci): **AAGU-8 CI 跑在 `ghcr.io/aagu/os01-ci` 镜像内** —— commit `a062a67`（PR #9）：CI 改跑在 published `ghcr.io/aagu/os01-ci` 镜像内
+
+## 2026-09-20
+
+- ci: **AAGU-7 GitHub Actions CI 启用** —— commit `c5e730b`（PR #6）：GitHub Actions CI 启用，初始 workflow
+
+## 2026-09-19
+
+- fix(ci): commit `424e25f`（PR #8）retain LLVM 和 QEMU runtime libraries —— 修复 CI 镜像 missing `.so` 问题
+- ci: **AAGU-7.1 ship clang-22 + qemu-11.1.1 CI image** —— commit `2396622`（PR #7）：CI 镜像发布 clang-22 + qemu-11.1.1
+- feat: **AAGU-1 / AAGU-2 [P0] CSPRNG entropy fail-closed + UEFI GetRNG + aarch64 log variadic + AT_PLATFORM facade** —— commit `8931cab`（PR #5）：CSPRNG entropy fail-closed + UEFI `EFI_RNG_PROTOCOL` GetRNG + aarch64 log variadic 适配 + `AT_PLATFORM` facade
+
 ## 2026-09-18
+- feat(aarch64): **Generic Timer Phase 1 + Phase 2 全套闭环（5/5 follow-ups）** —— 6 merges `b2b81fc` / `e115d79` / `10fd3d2` / `3037df3` / `5edf79a` / `a110ab9`（worktrees `feat/aarch64-timer-phase1` 等）：
+  - **Phase 1** CNTP + CNTVCT + clocksource 框架（merge `b2b81fc`，`aarch64_timer.c` 133 行 + `clocksource_register`）
+  - **Phase 2 #1** SUBSYS_INITCALL plumbing（merge `e115d79`）
+  - **Phase 2 #2** `cntp_tick_handler` → `tick_handler` 集成（merge `10fd3d2`）
+  - **Phase 2 #3** per-CPU timer / SMP timer（merge `3037df3`）
+  - **Phase 2 #4** `__udivti3` hoist 至 `runtime/builtins/`（merge `5edf79a`，commit 详见 `docs/aarch64-udivti3-hoist-closure-2026-09-18.md`）
+  - **Phase 2 #5** `-I libc/include` 清理：6 mirror 头（`list/rbtree/string/stdlib/sys-cdefs/sys-types`）改走 `kernel/include/compat/`，由 libc 单一来源提供（merge `a110ab9`，详见 `docs/aarch64-libc-include-policy-closure-2026-09-18.md`）
+  - **Phase 2 P2 follow-ups 5/5 全闭环**
+
 - fix(aarch64): **GIC clobber-probe TIMEOUT 修复** —— commit `2481e1f`（worktree `fix/gic-probe-timeout`）：`kernel/arch/aarch64/irq_probe.c:103-105` asm `mov x10,#0x200` + `movk x10,#0x0002,lsl #16` 两个 immediate 错位，实际算出 `0x0002_0200`（SGI 512, filter=LIST）而非 `0x0200_0002`（SGI 2 + filter SELF）；GICv2 静默丢弃 out-of-range SGI → 2 秒 ldar 轮询命中 deadline → `[gic-probe] save-restore TIMEOUT`。修正为 `mov x10,#2` + `movk x10,#0x200,lsl #16`，`x10 == 0x02000002 == gic_send_sgi(dev,2,0,FILTER_SELF)`（C wrapper 编码 `filter<<24 | targets<<16 | sgi&0xf`）。配套 RED→GREEN hosttest `hosttests/cases/test_gic_probe.c`（180 行 + Makefile wiring）：suite 1 用 production gic_driver.c + mock MMIO 断言 C wrapper 写 `0x02000002`；suite 2 静态扫描 irq_probe.c 源码禁止已知 buggy literal pair。QEMU E2E 矩阵 `make test-aarch64-uefi-smp --cpus 1 2 4 --repeat 3` = 9/9 PASS（0 TIMEOUT / 0 FAIL）；hosttests 23/23（x86_64-clang + aarch64-clang）；aarch64 uefi KERNEL_SELFTEST=1 build PASS。`docs/superpowers/specs/.../phase1` §7.3 clobber-probe 设计 + plan §2.2 评审均提及 SGI 2 self-trigger，但 plan:1078 原写法 `movk x10,#2,lsl #24` 本身是 assembler error（lsl #24 非法），实现层的 bug 制造了 *silent* TIMEOUT，plan 的 bug 只会产生 *obvious* 编译失败——一并记入 follow-up
 
 ## 2026-09-17

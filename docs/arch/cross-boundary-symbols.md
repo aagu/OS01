@@ -126,8 +126,8 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 | `arch_irq_*` | `kernel/include/arch/irq.h` + `kernel/intr/arch_irq_hooks.c`（弱默认）+ `kernel/arch/x86_64/intr/irq_hooks.c` | ✅ 修 | AAGU-2 已合规；详见 `docs/arch.md`「中断 hook 三段式」段。 |
 | `arch_kernel_thread_entry` | facade + `kernel/arch/x86_64/cpu/thread_entry.S` | ✅ 修 | arch-neutral builder (`sched/task.c`) 无 arch 字符串。 |
 | `arch_register_subsys` | facade + `kernel/arch/<arch>/linker.ld` | ✅ 修 | driver 自注册走 initcall，arch-neutral。 |
-| `#ifdef __x86_64__` 在 arch-neutral 通用层 | `kernel/intr/softirq.c:11, 48`（**真 arch-neutral TU**，在 aarch64 whitelist `kernel/Makefile:47` 内） | ❌ 违例 | 这两条 ifdef 守护的是 arch-specific 实现细节（软中断逻辑），违反 §2.3「arch-neutral 源文件不能用 `#ifdef __x86_64__`」。`softirq.c` 既编进 x86_64 也编进 aarch64 路径，必须走 facade + strong override 模式（参考 `arch_irq_*` 三段式）。 |
-| `#ifdef __x86_64__` 在 `kernel/intr/` 下 x86-only 驱动 | `kernel/intr/pic/8259A.c:104` + `kernel/intr/apic/lapic_timer.c:218` + `kernel/intr/apic/lapic.c:180` | 🟡 部分 | 这些是 x86-only 驱动被放在 arch-neutral 的 `kernel/intr/` 目录下，靠 `#ifdef __x86_64__` 跳过。**严格来说不是 §2.3 违例**（不在 arch-neutral builder 内），但**目录位置错**：x86-only 驱动应该放 `kernel/arch/x86_64/intr/` 或 `kernel/intr/pic/`（仅 x86）并由 Makefile whitelist 控制。建议落地：重定位 + 移除 ifdef。 |
+| `#ifdef __x86_64__` 在 arch-neutral 通用层 | `kernel/intr/softirq.c:11, 48`（**真 arch-neutral TU**，在 aarch64 whitelist `kernel/Makefile:47` 内） | ✅ 修 | Task 1 落地（commit `b994d8f`）：`arch_atomic_or/and_u64` 从 `kernel/arch/<arch>/cpu/atomic.c` 外部函数迁至 `kernel/include/arch/<arch>/atomic_bitops.h` `static inline __attribute__((always_inline))`；`kernel/include/arch/atomic.h` 按 `__x86_64__` / `__aarch64__` 选 include；`softirq.c` 直接调 `arch_atomic_or/and_u64`，两条 `#if defined(__x86_64__)/#elif defined(__aarch64__)/#else #error` 块删除。 |
+| `#ifdef __x86_64__` 在 x86-only TU（drivers / net） | `kernel/driver/{ahci,keyboard,pit,serial}.c` + `kernel/net/net.c`（5 个 TU 均非 aarch64 whitelist，wildcard-collected 仅在 x86_64 build 分支） | ✅ 修 | Task 4 落地（commit `e91d0b9`）：5 个 TU 内冗余 `#ifdef __x86_64__` SUBSYS_INITCALL 守护已删除——TU 已在 x86-only 路径，Makefile 已 gate 收集，守护永远为真即冗余。原 §3.3 🟡 行提及的 `kernel/intr/{pic/8259A,apic/lapic_timer,apic/lapic}.c` 等纯 x86 驱动已由 commit `c3412da`（arch source groups）迁至 `kernel/arch/x86_64/intr/`，目录位置正确，无 ifdef 守护需要。 |
 
 ### 3.4 libc API 镜像（`kernel/include/compat/`）
 
@@ -208,6 +208,7 @@ OS01 现有 `docs/arch.md` 已经定义了**多 arch 抽象层**的总体模式�
 - [x] 现状对照清单覆盖 AAGU-1 两轮评审找到的所有违例 + Explore agent 抓出的额外违例（stat.h 镜像、softirq.c ifdef、atexit 死链）；合计：8 ❌ 违例 + 3 🟡 部分 + 4 ✅ 修
 - [x] 规范文档 review 过 `AGENTS.md`「Directory organization」段 + `docs/arch.md` 现有概览，不重复造轮子（§1）
 - [x] 文档放在 `docs/arch/` 下，纳入 AGENTS.md「Documentation」索引（本 PR 同步）
+- [x] §3.3 ❌ (kernel/intr/softirq.c + time/{clocksource,tick,timer}.c + clocksource.h) + §3.3 🟡 (driver/{ahci,keyboard,pit,serial}.c + net/net.c) 全闭环
 
 **说明（Explore agent findings, 2026-09-22 补）**：
 - auxv 常量 delta 实测为 8 个（`AT_NOTELF/UID/EUID/GID/EGID/SECURE/HWCAP2/EXECFN`），AAGU-4 issue body 写 7 个；本 spec §3.2 已修正为 8 个。

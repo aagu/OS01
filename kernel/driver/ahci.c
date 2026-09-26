@@ -608,7 +608,6 @@ uint64_t ahci_port_sector_count(int port_num)
     return ahci_ports[port_num].sector_count;
 }
 
-#ifdef __x86_64__
 #include <subsys/subsys.h>
 // Register this driver into the platform's subsystem table. The
 // _register function is collected by arch_register_subsys() at boot via
@@ -629,4 +628,3 @@ static int _ahci_register(void)
     return 0;
 }
 SUBSYS_INITCALL(_ahci_register);
-#endif

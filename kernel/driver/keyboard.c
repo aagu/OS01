@@ -417,7 +417,6 @@ void keyboard_init(void)
     register_irq(1, NULL, &keyboard_handler, 0, IRQF_TRIGGER_EDGE, "keyboard");
 }
 
-#ifdef __x86_64__
 #include <subsys/subsys.h>
 // Register this driver into the platform's subsystem table. The
 // _register function is collected by arch_register_subsys() at boot via
@@ -438,4 +437,3 @@ static int _keyboard_register(void)
     return 0;
 }
 SUBSYS_INITCALL(_keyboard_register);
-#endif
