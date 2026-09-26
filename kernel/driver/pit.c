@@ -30,7 +30,6 @@ void set_frequency(uint16_t hz)
     arch_outb(PIT_DATA, (divisor >> 8) & 0xff);
 }
 
-#ifdef __x86_64__
 #include <subsys/subsys.h>
 // Register this driver into the platform's subsystem table. The
 // _register function is collected by arch_register_subsys() at boot via
@@ -51,4 +50,3 @@ static int _pit_register(void)
     return 0;
 }
 SUBSYS_INITCALL(_pit_register);
-#endif
