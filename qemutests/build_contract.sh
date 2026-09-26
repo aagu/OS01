@@ -214,6 +214,51 @@ EOF
         test -z "$(git -C thirdpart/posix-uefi status --porcelain)"
         rm -f "$fixture_adapter" "$fixture_wrapper"
         ;;
+    flags-cache)
+        # CFLAGS-only cache invalidation (roadmap Parked item): make tracks
+        # file timestamps, not compile commands. A flag-only change must
+        # still recompile the kernel objects (the $(BUILD_DIR)/.cflags stamp
+        # is the invalidation carrier); an identical rebuild must recompile
+        # nothing. kernel/runtime/ is excluded everywhere: the runtime
+        # builtins archive compiles with its own RUNTIME_CFLAGS_kernel, not
+        # the kernel's ALL_CFLAGS, so it legitimately neither participates
+        # in the stamp nor stays timestamp-frozen across sub-makes.
+        stamp="$base/kernel/.cflags"
+        marker=$(mktemp)
+        src_before=$(git status --porcelain | sort)
+        trap 'rm -f "$marker"' EXIT
+
+        make PROFILE="$profile" kernel.bin >/dev/null
+        before=$(cat "$stamp" 2>/dev/null || true)
+        test -n "$before" || { echo "flags-cache: .cflags stamp missing after a normal kernel build" >&2; exit 1; }
+
+        # Identical rebuild: nothing may recompile.
+        touch "$marker"
+        make PROFILE="$profile" kernel.bin >/dev/null
+        if find "$base/kernel" -name '*.o' -not -path '*/runtime/*' -newer "$marker" | grep -q .; then
+            echo "flags-cache: identical rebuild recompiled kernel objects" >&2
+            exit 1
+        fi
+
+        # Flag-only change: stamp must move and objects must recompile.
+        touch "$marker"
+        make PROFILE="$profile" KERNEL_EXTRA_CFLAGS=-DOS01_FLAGS_CACHE_PROBE kernel.bin >/dev/null
+        after=$(cat "$stamp")
+        test "$after" != "$before" || { echo "flags-cache: stamp did not move on flag change" >&2; exit 1; }
+        n=$(find "$base/kernel" -name '*.o' -not -path '*/runtime/*' -newer "$marker" | wc -l)
+        test "$n" -gt 0 || { echo "flags-cache: flag-only change recompiled nothing ($stamp moved, objects stale)" >&2; exit 1; }
+
+        # Flip back: stamp must move again and objects must recompile again.
+        touch "$marker"
+        make PROFILE="$profile" kernel.bin >/dev/null
+        test "$(cat "$stamp")" != "$after" || { echo "flags-cache: stamp did not move on flag revert" >&2; exit 1; }
+        n=$(find "$base/kernel" -name '*.o' -not -path '*/runtime/*' -newer "$marker" | wc -l)
+        test "$n" -gt 0 || { echo "flags-cache: flag revert recompiled nothing" >&2; exit 1; }
+
+        # The mode must not touch any tracked source file.
+        test "$(git status --porcelain | sort)" = "$src_before"
+        echo "  [flags-cache] CFLAGS-only invalidation contract holds"
+        ;;
     host-test)
         # The focused poll-test binary lives under the profile's
         # host-test dir, not under hosttests/build or root-level build/.
