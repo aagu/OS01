@@ -17,7 +17,7 @@
 #include <fs/vfs.h>
 #include <percpu/percpu.h>
 #include <tty/pty.h>
-#include <time/clocksource.h>   // clocksource_read_ns()
+#include <arch/x86_64/clocksource.h>  // clocksource_read_ns()
 #include <net/socket.h>     // SOCK_CONNECTED, SOCK_LISTENING
 #include <string.h>          // memset
 #include <stddef.h>

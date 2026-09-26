@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <sched/task.h>
 #include <arch/spinlock.h>
+#include <arch/cpu.h>           // arch_cpu_pause()
 
 uint64_t volatile jiffies;
 timer_t timer_list_head;
@@ -124,12 +125,10 @@ void destroy_timer(timer_t *timer)
         /* x86_64 `pause` instruction: power-saving + inter-thread
          * politeness hint in spin loops. aarch64 maps to `yield`
          * (a v8.0-A hint; same semantic family — give up the
-         * current execution slice in a spin). */
-#if defined(__x86_64__)
-        __asm__ volatile("pause");
-#else
-        __asm__ volatile("yield");
-#endif
+         * current execution slice in a spin). arch_cpu_pause() is
+         * declared in <arch/cpu.h> with the right asm hint per
+         * architecture (see kernel/include/arch/cpu.h). */
+        arch_cpu_pause();
     }
     free(timer);
 }
@@ -141,7 +140,6 @@ int timer_has_expired(uint64_t now)
     return first->expire_jiffies <= now;
 }
 
-#if defined(__x86_64__) || defined(__aarch64__)
 #include <subsys/subsys.h>
 // Register this driver into the platform's subsystem table. The
 // _register function is collected by arch_register_subsys() at boot via
@@ -162,4 +160,3 @@ static int _timer_register(void)
     return 0;
 }
 SUBSYS_INITCALL(_timer_register);
-#endif

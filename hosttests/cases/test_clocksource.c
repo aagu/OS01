@@ -41,7 +41,7 @@
 /* clocksource_test_runtime.h is -included by the Makefile rule, BEFORE
  * any kernel header, so it can short-circuit `_ARCH_CPU_H` etc. Pull
  * the production API surface here. */
-#include <time/clocksource.h>
+#include <arch/x86_64/clocksource.h>
 #include <time/clocksource_internal.h>
 
 /* ──────────────────────────────────────────────────────────────
