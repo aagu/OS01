@@ -1,6 +1,6 @@
 # OS01 优化路线图
 
-> **基准**: `c7bdeed`（当前 HEAD，2026-09-26）
+> **基准**: `6b84fb1`（本次修订前的 master HEAD，2026-09-26）
 > **日期**: 2026-09-26
 
 roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `docs/changelog.md`（最新 2026-09-26；本版本相较前一版新增 09-19 ~ 09-26 这一周 ~50 个 commit：AAGU-1/2/3/4 全套 + 5.6/5.7/5.8 + 6/7/7.1/8/29 + arch source groups + compiler_rt 目录裁撤 + build harness consolidation + Generic Timer Phase 1/2 全栈 + aarch64 IPI fix + AAGU-4 残留清理（compat/ 裁撤 + softirq/tick/clocksource/driver-net ifdef 清扫））。
@@ -21,14 +21,17 @@ roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `
 
 ### 🔒 P1 安全加固
 
-前置链（已完成，详见 `docs/changelog.md`）：`getrandom` → 统一用户态启动方式 → 用户栈 canary + `AT_RANDOM` → AAGU-5 arch entropy facade（STRONG-only 控制流）。
+前置链（已完成，详见 `docs/changelog.md`）：`getrandom` → 统一用户态启动方式 → 用户栈 canary + `AT_RANDOM` → AAGU-5 arch entropy facade（STRONG-only 控制流）。ASLR 的随机种子须由内核 STRONG-only 接口提供；`AT_RANDOM` 已就绪，但不是 mmap 选址函数的直接输入。
 
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
-| ASLR | mmap 基址随机化 + ET_DYN/PIE 加载随机化 | getrandom ✅, AT_RANDOM ✅ | |
+| ASLR-A：mmap 基址 | 先限 x86_64 用户态：每次新地址空间建立时随机化 mmap 搜索基址；fork 继承现有布局；保留 MAP_FIXED 语义，并验证地址窗口、冲突与溢出 | STRONG-only `kernel_random_get_strong()` ✅；需先定熵不可用时的失败语义与用户 VA 窗口 | |
+| ASLR-B：ET_DYN/PIE | 单独实施可重定位 ELF 的加载偏移、静态 PIE 重定位及用户程序构建迁移（含 BusyBox） | ASLR-A 验收；当前 ELF loader 仅支持 ET_EXEC、用户构建使用 `-fno-pie -no-pie`；需设计重定位、linker script、启动 ABI/auxv 与回退测试 | |
 | UBSan + KASan | 内核编译期 instrument | 独立 | ArvernOS |
 | 堆加固 | malloc double-free/溢出检测 | 独立 | |
 | NX 页 | 栈/堆不可执行 + mmap `PROT_EXEC` 审计 | 独立 | |
+
+ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 `USER_STACK_BASE=0x800000`；栈随机化另列后续范围，完成 A/B 后也不能称为完整用户态 ASLR。aarch64 phase 1 尚无用户态，本项先不扩大到 aarch64。
 
 ### 🏗 P2 aarch64 适配
 
@@ -101,7 +104,7 @@ roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `
 |----|------|------|
 | sysroot 头文件级增量重编 | **仍开放** | `mk/components/kernel.mk` 仍是 genid 变化即 `-B` 全量重编；refinement：generation 内 .d 路径相对化/软链引用 |
 | `kernel/arch/aarch64/subsys_stub.c` / `idle_resume_stub.c` 替换 | **仍开放**（AAGU-3 / Phase 2 #3 deferred） | 替换条件：aarch64 port 提供 `serial_printk`/`strcmp`/`num_cpus`/scheduler `idle_resume`；预计 ~10 行 drop-in。详见 `docs/aarch64-timer-phase2-closure-2026-09-18.md` §"Scope NOT done in Phase 2" #1 |
-| CFLAGS-only build cache 失效 | **仍开放**（Phase 2 build-cache bug） | `KERNEL_SELFTEST=1` 不触发 `.o` 重编，影响任何 QEMU regression workflow；需 `make clean` 绕开 |
+| 同一变体的编译参数缓存失效 | **仍开放，建议下一项先验证并修复** | `KERNEL_SELFTEST=1` 现已使用独立 `KERNEL_VARIANT=selftest` 目录，不再作为复现例；但 `DEBUG=1`、`LOG_TARGET` 等同一变体内的参数变化尚无命令/参数指纹依赖，需验证旧 `.o` 是否被复用，再增加最小失效机制及切换参数的回归测试 |
 | `kernel/include/compat/` 整个目录裁撤 | **已完成**（AAGU-4 残留清理） | AAGU-4.3.6 commit `bfb314d` 已 `git rm` 整个 `kernel/include/compat/` 目录；Makefile:129 注释确认「AAGU-4.3 closes the kernel/include/compat/* mirror (6 sub-issues landed). The compat/ path is no longer needed.」AAGU-29 libk.a link 落地后进一步消除依赖 |
 | x86-only 驱动目录重定位 | **已完成**（AAGU-4 §3.3 🟡） | arch source groups commit `c3412da` 已搬 `pic/8259A.c`、`apic/lapic*.c` 至 `kernel/arch/x86_64/intr/`，原 ifdef 已移除；AAGU-4 残留清理 Task 4 再清掉 `kernel/driver/*.c` + `kernel/net/net.c` 的 5 处冗余 `#ifdef __x86_64__` SUBSYS_INITCALL 守护 |
 | `kernel/intr/softirq.c` `#ifdef __x86_64__` 残留 | **已完成**（AAGU-4 §3.3 ❌） | AAGU-4 残留清理 Task 1：原子操作实现从 `kernel/arch/<arch>/cpu/atomic.c` 外部函数迁移到 `kernel/include/arch/<arch>/atomic_bitops.h` `static inline + always_inline`；softirq.c 直接调 `arch_atomic_or_u64()` / `arch_atomic_and_u64()`，无 ifdef |
