@@ -44,7 +44,11 @@ runtime-receipt: $(RUNTIME_ARCHIVE)
 	    '$(RUNTIME_PROVIDER)' '$(CLANG_ID)' '$(CLANG_RESOURCE_DIR)' \
 	    '$(RUNTIME_CFLAGS_NORMALIZED)' '$(RUNTIME_SOURCE_DIGEST)' "$$archive_sha"; \
 	} > "$$tmp"; \
-	mv "$$tmp" "$(RUNTIME_RECEIPT)"
+	if [ -f "$(RUNTIME_RECEIPT)" ] && cmp -s "$$tmp" "$(RUNTIME_RECEIPT)"; then \
+	  rm -f "$$tmp"; \
+	else \
+	  mv "$$tmp" "$(RUNTIME_RECEIPT)"; \
+	fi
 
 $(RUNTIME_OBJ): $(RUNTIME_SOURCE) $(RUNTIME_HEADER) $(RUNTIME_MAKEFILE)
 	@mkdir -p $(dir $@)

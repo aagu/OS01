@@ -105,12 +105,16 @@ KERNEL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_EXTRA_OBJECTS)
 # ── Flags ──────────────────────────────────────────────────
 ALL_CFLAGS   := $(CFLAGS) $(ARCH_CFLAGS)   -I$(KERNEL_HEADERS)
 ifeq ($(ARCH),x86_64)
-# The kernel consumes libc headers (<string.h>, <stdlib.h>, ...) from
-# the immutable sysroot generation it is compiled against. SYSROOT_GENERATION_DIR
-# is passed by the root artifact rule (mk/components/kernel.mk) under the
-# generation lease. Guarded by ARCH so aarch64 profile mode never gets an
-# empty -isystem.
-ALL_CFLAGS += -isystem $(SYSROOT_GENERATION_DIR)/usr/include
+# The kernel consumes libc headers (<string.h>, <stdlib.h>, ...) through
+# the STABLE $(SYSROOT) symlink, not a resolved generation path: -isystem
+# lands in .d dependency files and the .cflags fingerprint stamp, so a
+# generation-relative path would go stale on every republish and defeat
+# header-level incremental rebuilds (roadmap Parked refinement). Header
+# changes reach the compile as ordinary timestamp deps through the
+# re-pointed symlink; the publisher waits out active generation leases so
+# a republish cannot swap headers mid-build. Guarded by ARCH so aarch64
+# profile mode never gets an empty -isystem.
+ALL_CFLAGS += -isystem $(SYSROOT)/usr/include
 # Map the absolute build prefix in __FILE__ etc. to a relative path so that
 # source-directory renames (see the 2026-09-12 kernel/ layout restructure) do not change
 # the compiled image byte-for-byte.
@@ -136,8 +140,9 @@ endif
 ALL_CFLAGS += -I$(CURDIR)/../runtime/include
 ALL_ASMFLAGS := $(ASFLAGS) $(ARCH_ASMFLAGS)
 ifeq ($(ARCH),x86_64)
-# The kernel links -lk against the immutable sysroot generation.
-ALL_LDFLAGS  := $(LDFLAGS) $(ARCH_LDFLAGS) -L$(SYSROOT_GENERATION_DIR)/usr/lib
+# The kernel links -lk through the stable $(SYSROOT) symlink (same reason
+# as the -isystem above: flags and .d paths must survive a republish).
+ALL_LDFLAGS  := $(LDFLAGS) $(ARCH_LDFLAGS) -L$(SYSROOT)/usr/lib
 else
 ALL_LDFLAGS  := $(LDFLAGS) $(ARCH_LDFLAGS) -L$(SYSROOT)/usr/lib
 endif
@@ -206,9 +211,9 @@ endif
 # typedefs and would choke on libc's stdint.h.
 ALL_CFLAGS     += -I$(LWIP_SRC_DIR)/include -I../kernel/include/net
 ifeq ($(ARCH),x86_64)
-# Kernel-profile stdint injection, resolved against the immutable generation
+# Kernel-profile stdint injection through the stable $(SYSROOT) symlink
 # (profile's KERNEL_STDINT_FLAGS). Guarded by ARCH so aarch64 profile mode
-# makes no SYSROOT_GENERATION_DIR reference.
+# never references the sysroot.
 ALL_C_ONLY_FLAGS := $(KERNEL_STDINT_FLAGS)
 endif
 ALL_LDFLAGS    +=
@@ -275,7 +280,7 @@ FLAGS_STAMP := $(BUILD_DIR)/.cflags
 FLAGS_STAMP_FORCE:
 $(FLAGS_STAMP): FLAGS_STAMP_FORCE
 	@mkdir -p $(dir $@)
-	@printf '%s\n' '$(strip $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS))' > $@.new
+	@printf '%s\n' 'deps=system-headers $(strip $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS))' > $@.new
 	@cmp -s $@.new $@ || mv -f $@.new $@
 
 # ── Targets ────────────────────────────────────────────────
@@ -293,18 +298,18 @@ all: $(BUILD_DIR)/kernel.bin
 # can't parse a C typedef.
 $(BUILD_DIR)/%.o: %.c $(FLAGS_STAMP)
 	@mkdir -p $(dir $@)
-	$(EFFECTIVE_CC) $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS) -MMD -MP -c $< -o $@
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS) -MD -MP -c $< -o $@
 
 # .S → .o + .d
 $(BUILD_DIR)/%.o: %.S $(FLAGS_STAMP)
 	@mkdir -p $(dir $@)
-	$(EFFECTIVE_CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -MD -MP -c $< -o $@
 
 # ── lwIP compilation ──────────────────────────────────────────
 # lwIP sources live outside kernel/ under thirdpart/lwip/src
 $(BUILD_DIR)/lwip/%.o: $(LWIP_SRC_DIR)/%.c $(FLAGS_STAMP)
 	@mkdir -p $(dir $@)
-	$(EFFECTIVE_CC) $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS) -MMD -MP -c $< -o $@
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS) -MD -MP -c $< -o $@
 
 # ── Special objects ────────────────────────────────────────
 # PSF font → .o
@@ -323,7 +328,7 @@ $(BUILD_DIR)/kernel/font.o: driver/font.psf
 # Trampoline: assemble → link at 0x8000 → binary → embed
 $(BUILD_DIR)/$(ARCHDIR)/trampoline.o: $(ARCHDIR)/trampoline.S
 	@mkdir -p $(dir $@)
-	$(EFFECTIVE_CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -MD -MP -c $< -o $@
 
 $(BUILD_DIR)/$(ARCHDIR)/trampoline.elf: $(BUILD_DIR)/$(ARCHDIR)/trampoline.o $(ARCHDIR)/trampoline.ld
 	$(TARGET_LD) $(RAW_LD_EMULATION) -T $(ARCHDIR)/trampoline.ld $< -o $@
@@ -346,7 +351,7 @@ endif
 # ── Temporary: irq.o avoids .bss section issue ─────────────
 $(BUILD_DIR)/intr/irq.o: intr/irq.c
 	@mkdir -p $(dir $@)
-	$(EFFECTIVE_CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -MD -MP -c $< -o $@
 
 # ── Kallsyms (two-pass link) ───────────────────────────────
 # Host build tools for the kallsyms two-pass link (host-only; no target flags).

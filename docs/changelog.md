@@ -7,6 +7,12 @@
 
 ## 2026-09-26
 
+- refactor(aarch64,build): **最后两个 Parked 项闭环（idle 正名 + sysroot 头文件级增量重编）** —— worktree `parked-two-closures`：
+  - **idle 正名**：`kernel/arch/aarch64/cpu/idle_resume_stub.c` → `cpu/idle.c`。`subsys_stub.c` 此前已由 AAGU-3 闭环删除（`serial_printk`/`strcmp`/`num_cpus` 均有真实实现）；wfi 永循环对无调度器的 aarch64 是正确的 idle 行为而非占位符，per-CPU need_resched 再入归 §P2 上下文切换统一
+  - **增量重编**：genid→`-B` 全量重编移除。kernel 编译/链接（`-isystem`、`-include stdint.h`、`ALL_LDFLAGS -L`、`KERNEL_RAW_LIBDIR`）全部切稳定 `$(SYSROOT)` symlink；publisher `cp -p` 保 mtime + publish 等 lease（防中途换 header）；`mk/components/kernel.mk` 删 `.sysroot-generation` stamp
+  - **顺带修复三个预先存在的缺陷**：① `-MMD` 跳过 system header → kernel `.d` 从未记录 `-isystem` 引入的 libc 头，改 `-MD`（`.cflags` fingerprint 加 `deps=system-headers` 前缀使现存 build 目录一次性自动重建）；② runtime grouped rule receipt 无条件重写 + archive 永不更新 → 每次 kernel 构建都 relink（stage1+kallsyms 两遍），receipt 写入改 cmp 内容门控；③ aarch64 下 `KERNEL_RAW_LIBDIR` 空 `-L/usr/lib`（宿主路径）风险随 symlink 切换消除
+  - 回归：`test-contract` 新 mode `sysroot-headers`（单头编辑只重编依赖者 / `.cflags` stamp 不动 / 还原一致 / 零污染）。验证：x86 contract 9 modes `>>> ALL TESTS PASSED <<<`；aarch64 构建 + SMP 9/9 PASS
+
 - fix(build): **CFLAGS-only build cache 失效闭环（Parked 项）** —— `kernel/Makefile` 新增 `$(BUILD_DIR)/.cflags` fingerprint stamp（编译 pattern rule 前置依赖；`ALL_CFLAGS`+`ALL_C_ONLY_FLAGS` 内容变化才改写 → 全量重编；recipe-time 展开规避 `make -n` 破坏性，本地 `FLAGS_STAMP_FORCE` phony 替代 root-only 的 `FORCE`）。新增 `KERNEL_EXTRA_CFLAGS` 旋钮并入 `OS01_SUBMAKE_ALLOWED`。`test-contract` 新增 `flags-cache` mode（TDD：先 RED「stamp missing」后 GREEN，4 门禁：stamp 存在 / identical 重建零重编 / flag 变化 stamp+重编 / flag 还原重编；排除 `kernel/runtime/`——runtime builtins 用独立 `RUNTIME_CFLAGS_kernel`，不参与 kernel CFLAGS）。根因核查：原始 `KERNEL_SELFTEST=1` 症状已被 AAGU-5.6 variant 目录顺带修复（复现实测 169 个 .o 全落 `kernel/selftest/`，normal 命名空间仅共享 runtime builtins 被动重建）；本次闭合通用面——实测注入 `-D` 探针后 0 个 `.o` 重编。`make test-contract`（x86 8 modes + aarch64）PASS；`aarch64-uefi-kernel` 构建正常。**预先存在的独立问题**（未修）：aarch64 contract `targets` mode 依赖 x86 build 目录存在——`make -n PROFILE=x86_64-clang kernel.bin` 的 `+` 前缀 artifact recipe 在 `-n` 下也执行，host-test mode 末尾的 `make clean` 删掉 x86 目录后 aarch64 contract 即失败（clean workspace 上跑 aarch64 contract 同样触发）
 
 - refactor: **AAGU-4 残留清理 — close §3.3 ❌ + 🟡** —— branch `docs/roadmap-slim-v30`（commit 链路 `099b060`（spec）→ `4e1d33b`（plan）→ 4 task commits）：

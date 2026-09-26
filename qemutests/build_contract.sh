@@ -214,6 +214,40 @@ EOF
         test -z "$(git -C thirdpart/posix-uefi status --porcelain)"
         rm -f "$fixture_adapter" "$fixture_wrapper"
         ;;
+    sysroot-headers)
+        # Header-level incremental rebuild (roadmap Parked refinement):
+        # kernel compiles reference libc headers through the STABLE
+        # $(SYSROOT) symlink, so a republish over a one-header edit must
+        # rebuild exactly the dependents — ordinary timestamp deps, not
+        # the old generation-id -B hammer — and the .cflags fingerprint
+        # stamp must stay put (compile flags go through the symlink too).
+        # stdlib.h: enough kernel dependents to prove propagation, far
+        # from all objects to prove incrementality.
+        stamp="$base/kernel/.cflags"
+        hdr=libc/include/stdlib.h
+        marker=$(mktemp)
+        src_before=$(git status --porcelain | sort)
+        trap 'rm -f "$marker"; git checkout -- '"$hdr"'' EXIT
+
+        make PROFILE="$profile" kernel.bin >/dev/null
+        stamp_before=$(cat "$stamp" 2>/dev/null || true)
+        total=$(find "$base/kernel" -name '*.o' -not -path '*/runtime/*' | wc -l)
+        test "$total" -gt 0 || { echo "sysroot-headers: no kernel objects after warm build" >&2; exit 1; }
+
+        touch "$marker"
+        printf '\n/* sysroot-headers contract probe */\n' >> "$hdr"
+        make PROFILE="$profile" kernel.bin >/dev/null
+        n=$(find "$base/kernel" -name '*.o' -not -path '*/runtime/*' -newer "$marker" | wc -l)
+        test "$n" -gt 0 || { echo "sysroot-headers: header edit rebuilt nothing" >&2; exit 1; }
+        test "$n" -lt "$total" || { echo "sysroot-headers: header edit rebuilt everything ($n/$total) — genid -B hammer still active" >&2; exit 1; }
+        test "$(cat "$stamp")" = "$stamp_before" || { echo "sysroot-headers: .cflags stamp moved on republish — flags must go through the stable symlink" >&2; exit 1; }
+
+        # Restore the header; the rebuild leaves the tree consistent again.
+        git checkout -- "$hdr"
+        make PROFILE="$profile" kernel.bin >/dev/null
+        test "$(git status --porcelain | sort)" = "$src_before"
+        echo "  [sysroot-headers] header-level incremental rebuild contract holds"
+        ;;
     flags-cache)
         # CFLAGS-only cache invalidation (roadmap Parked item): make tracks
         # file timestamps, not compile commands. A flag-only change must

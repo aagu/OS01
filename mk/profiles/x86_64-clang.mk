@@ -68,11 +68,12 @@ KERNEL_ARTIFACT := $(if $(KERNEL_VARIANT),$(BUILD_DIR)/artifacts/kernel/$(KERNEL
 USER_ARTIFACT_DIR := $(BUILD_DIR)/artifacts/user$(if $(USER_VARIANT),/$(USER_VARIANT))
 
 # Explicit kernel-profile flag for the stdint.h injection (spec: kernel
-# profile flags), resolved against the immutable sysroot generation the
-# kernel is compiled against. SYSROOT_GENERATION_DIR is passed to the kernel
-# sub-make by the root artifact rule (mk/components/kernel.mk) under the
-# generation lease; recursive so it resolves inside that sub-make.
-KERNEL_STDINT_FLAGS = -D__CLANG_STDINT_H -include $(SYSROOT_GENERATION_DIR)/usr/include/stdint.h
+# profile flags). Goes through the STABLE $(SYSROOT) symlink — the flag
+# lands in ALL_CFLAGS / the .cflags fingerprint stamp and in .d files, so
+# a generation-relative path would go stale on every republish and defeat
+# header-level incremental rebuilds. Recursive so it resolves inside the
+# kernel sub-make.
+KERNEL_STDINT_FLAGS = -D__CLANG_STDINT_H -include $(SYSROOT)/usr/include/stdint.h
 
 # Artifacts consumed by the root validation recipes. UEFI_EFI is the EFI app
 # artifact (spec artifact-path table); uefi.mk owns the rule that produces it
