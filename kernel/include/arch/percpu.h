@@ -3,7 +3,10 @@
 
 #include <stdint.h>
 
-// Returns the raw per-CPU data pointer for the current CPU.
+// Returns the current CPU's runtime per-CPU pointer. On AArch64 this reads
+// TPIDR_EL1, which points to percpu_data[] and must never be cast to a
+// boot-slot type. The pointer may be installed before percpu_init() fills
+// the struct; callers must not read its fields until initialization finishes.
 // Caller (percpu.h's this_cpu()) casts to percpu_t *.
 // Returns void * to avoid circular dependency with percpu_t definition.
 #ifdef __x86_64__

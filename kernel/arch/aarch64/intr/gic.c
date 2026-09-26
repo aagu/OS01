@@ -5,8 +5,7 @@
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/smp.h>
 #include <arch/aarch64/gic.h>
-#include <arch/aarch_percpu.h>
-#include <percpu/percpu.h>   /* Phase 2 #3: percpu_t for k_cpu_index cast */
+#include <percpu/percpu.h>
 
 static struct gic_dev g_gic;
 struct gic_dev *gic_dev_current(void) { return &g_gic; }
@@ -18,11 +17,9 @@ static void log_unexpected(uint32_t intid)            /* driver 回调 → PL011
     kputs("\n");
 }
 
-static uint32_t k_cpu_index(void)                      /* Phase 2 #3: TPIDR_EL1 → percpu_data[cpu] */
+static uint32_t k_cpu_index(void)                      /* Runtime per-CPU state via arch accessor. */
 {
-    uint64_t slot;
-    __asm__ __volatile__("mrs %0, tpidr_el1" : "=r"(slot));
-    return ((volatile percpu_t *)(uintptr_t)slot)->cpu_id;
+    return cpu_id();
 }
 
 void gic_cpu_init(void)                                /* 每核各跑一次（banked） */

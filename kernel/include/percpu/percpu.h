@@ -101,16 +101,19 @@ extern uint32_t num_cpus;
 
 // ── Per-CPU accessors ──────────────────────────────
 
-// Return a pointer to the current CPU's percpu struct.
-// Reads the self-pointer at GS:0 — GS base must already
-// be installed via percpu_install_gs().
+// Return the current CPU's runtime percpu_t. The architecture accessor
+// reads GS:0 on x86_64 or TPIDR_EL1 on AArch64; on AArch64 that register
+// points to percpu_data[], not the separate aarch64_boot_percpu[] slots.
+// The pointer may be installed before percpu_init() initializes this entry;
+// do not read its fields until percpu_init() has completed on this core.
 static inline percpu_t *this_cpu(void)
 {
     return (percpu_t *)arch_this_cpu_ptr();
 }
 
-// Convenience: logical CPU ID of the executing core.
-// Returns 0 if GS base is not yet set up.
+// Convenience: logical CPU ID of the executing core. Valid only after
+// percpu_init() has completed for this core and its runtime pointer is
+// installed; an unset architecture pointer is not a supported BSP check.
 static inline uint32_t cpu_id(void)
 {
     percpu_t *cpu = this_cpu();
@@ -120,11 +123,12 @@ static inline uint32_t cpu_id(void)
 // ── Initialisation ─────────────────────────────────
 
 // Set up percpu_data[cpu] with the given APIC ID.
-// Does NOT install GS base — call percpu_install_gs() for that.
+// Does not install the runtime per-CPU pointer; call percpu_install_gs().
 void percpu_init(uint32_t cpu, uint32_t apic_id);
 
-// Write IA32_GS_BASE MSR to point GS at this CPU's percpu struct.
-// After this call, this_cpu() / cpu_id() work on this core.
+// Install this CPU's runtime per-CPU pointer (GS base on x86_64,
+// TPIDR_EL1 on AArch64). This makes this_cpu() point at the entry; callers
+// may read per-CPU fields only after percpu_init() completes on this core.
 void percpu_install_gs(uint32_t cpu);
 
 #endif /* __ASSEMBLER__ */

@@ -1,4 +1,6 @@
-/* Minimal AArch64 boot per-CPU ABI, independent of scheduler state.
+/* Minimal AArch64 boot per-CPU ABI, independent of runtime percpu_t and
+ * scheduler state. These 48-byte slots are boot/SMP coordination records;
+ * they are not the runtime percpu_data[] array installed in TPIDR_EL1.
  * The low .boot.bss slots are readable before MMU-on and retain their
  * identity VA afterward. Benchmark state lives in high-half .bss and
  * is only accessed after MMU-on.
@@ -48,7 +50,8 @@ _Static_assert(AARCH64_BOOT_AFFINITY_MASK == AARCH64_MPIDR_AFFINITY_MASK,
 _Static_assert(AARCH64_BOOT_STACK_SIZE == (1U << AARCH64_BOOT_STACK_SHIFT),
                "boot stack stride mismatch");
 
-/* Low identity addresses: use these in high-half C without a VA alias. */
+/* Low identity addresses for the boot slots: use in high-half C without a
+ * VA alias. This address is not the runtime TPIDR_EL1 per-CPU pointer. */
 uint64_t aarch64_percpu_slot_addr(uint32_t cpu_id);
 uint64_t aarch64_boot_stack_top_addr(uint32_t cpu_id);
 uint64_t aarch64_dtb_mpidr_table_addr(void);
@@ -59,7 +62,8 @@ uint64_t secondary_start_addr(void);
 
 /* BSP-only, once, after shared test initialization and before any CPU_ON.
  * Returns -1 for invalid input or repeated publication; neither writes
- * metadata. No slot/stack reinitialization or full-range clean afterward. */
+ * metadata. No slot/stack reinitialization or full-range clean afterward.
+ * This publishes boot slots, not runtime percpu_t state. */
 int aarch64_smp_publish_boot(const struct aarch64_topology *topology);
 
 extern aarch64_boot_percpu_t aarch64_boot_percpu[NR_CPUS];
@@ -87,6 +91,9 @@ extern volatile uint32_t benchmark_total;          /* non-atomic counter */
 
 /* Release-store / acquire-load helpers (spec §2.1: must NOT be plain
  * volatile writes; need stlr / ldar for cross-core memory ordering). */
+/* Boot/SMP protocol access only. The returned low-identity pointer addresses
+ * aarch64_boot_percpu_t, never the runtime percpu_t selected by TPIDR_EL1.
+ * Keep accesses phase-appropriate; install/use this_cpu() for runtime state. */
 static inline aarch64_boot_percpu_t *boot_slot(uint32_t cpu_id) {
     return (aarch64_boot_percpu_t *)(uintptr_t)aarch64_percpu_slot_addr(cpu_id);
 }

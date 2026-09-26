@@ -18,7 +18,6 @@
  * CPUID 真实穿越 ack 路径。 */
 #if OS01_SELFTEST
 #include <stdint.h>
-#include <stdbool.h>
 #include <arch/aarch64/gic_pub.h>  /* R3-1/R4-1: arch_publish_handler_table() */
 #include <arch/irq.h>
 #include <arch/atomic.h>
@@ -27,6 +26,7 @@
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/boot_log.h>
 #include <arch/aarch_percpu.h>
+#include <percpu/percpu.h>
 
 #define IPI_SGI_ID       0u
 #define IPI_REPLY_SGI    1u
@@ -50,9 +50,8 @@ static inline uint32_t ipi_flag_acquire(const volatile uint32_t *p)
 
 static uint32_t ipi_cpu_id(void)
 {
-    uint64_t slot;
-    __asm__ __volatile__("mrs %0, tpidr_el1" : "=r"(slot));
-    return ((volatile aarch64_boot_percpu_t *)(uintptr_t)slot)->cpu_id;
+    /* TPIDR_EL1 points at percpu_data[] after percpu_install_gs(). */
+    return cpu_id();
 }
 
 static void ipi_handler(uint32_t intid, uint64_t param, struct pt_regs *regs)
