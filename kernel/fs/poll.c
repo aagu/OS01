@@ -359,6 +359,21 @@ static void poll_tmo_unregister(poll_table_t *pt)
     spin_unlock_irqrestore(&poll_timeout_lock, flags);
 }
 
+// Per-tick scan of registered poll timeouts. Called from
+// kernel/time/tick.c::tick_handler(). Walks the linked list, wakes
+// any wait queue whose deadline has expired. Strong override of the
+// weak default in kernel/time/tick.c (which is what aarch64 phase 1
+// uses — no fs/poll.c compiled there).
+void poll_timeout_tick(void)
+{
+    if (!poll_timeout_head) return;
+    uint64_t flags = spin_lock_irqsave(&poll_timeout_lock);
+    for (poll_timeout_node_t *n = poll_timeout_head; n; n = n->next)
+        if (clocksource_read_ns() >= n->deadline)
+            wait_queue_wake_all(n->wq);
+    spin_unlock_irqrestore(&poll_timeout_lock, flags);
+}
+
 static int poll_scan(struct pollfd *kfds, uint64_t nfds, poll_table_t *pt)
 {
     int ready_count = 0;

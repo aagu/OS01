@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <arch/x86_64/cpuid.h>   // cpuid()
 #include <intr/apic.h>                 // lapic_timer_start / lapic_timer_set_premeasured
+#include <intr/interrupt.h>     // irq_mask / irq_unmask (PIT/LAPIC handoff)
 #include <arch/x86_64/rtc.h>     // rtc_pie_calibrate (x86_64 platform glue)
 
 // 三级回落：CPUID 15h → RTC PIE（Task 2 接入）→ 0。
@@ -22,7 +23,14 @@ uint64_t arch_cycle_freq(void)
 }
 
 // 启动 x86 tick 源：LAPIC 周期模式。返回是否启动成功。
+// PIT/LAPIC handoff: mask PIT, try LAPIC; if LAPIC fails, restore PIT.
 bool arch_tick_start(void)
 {
-    return lapic_timer_start(100);
+    irq_mask(0);
+    if (lapic_timer_start(100)) {
+        // LAPIC 接管成功，PIT 保持掩蔽。
+        return true;
+    }
+    irq_unmask(0);
+    return false;
 }

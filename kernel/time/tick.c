@@ -5,31 +5,20 @@
 #include <percpu/percpu.h>        // this_cpu()
 #include <arch/cpu.h>      // arch_tick_start()
 #include <intr/interrupt.h>     // irq_mask / irq_unmask
-#include <fs/poll.h>          // poll_timeout_node_t, poll_timeout_head/lock
 #include <sync/wait.h>          // wait_queue_wake_all
 #include <sched/task.h>          // current
 #include <kernel.h>               // container_of
 
-// 从 pit_handler 迁来的 poll 超时注册表（定义在 kernel/fs/poll.c）。
-extern poll_timeout_node_t *poll_timeout_head;
-extern spinlock_T poll_timeout_lock;
+// Per-tick poll-timeout scan. Strong definition lives in kernel/fs/poll.c
+// (x86_64 path); the weak default below is what aarch64 phase 1 builds
+// (no fs/poll.c compiled).
+__attribute__((weak)) void poll_timeout_tick(void);
 
 void tick_handler(void)
 {
     jiffies++;
 
-#if defined(__x86_64__)
-    // x86_64-only poll-timeout scan. aarch64 phase 1 has no userland
-    // processes (no init_thread, no scheduler, no /dev/poll); the
-    // poll-timeout scan is dead code on aarch64.
-    if (poll_timeout_head) {
-        uint64_t flags = spin_lock_irqsave(&poll_timeout_lock);
-        for (poll_timeout_node_t *n = poll_timeout_head; n; n = n->next)
-            if (clocksource_read_ns() >= n->deadline)
-                wait_queue_wake_all(n->wq);
-        spin_unlock_irqrestore(&poll_timeout_lock, flags);
-    }
-#endif
+    poll_timeout_tick();
 
     this_cpu()->need_resched = 1;
     this_cpu()->watchdog_counter++;
@@ -40,17 +29,16 @@ void tick_handler(void)
 
 void tick_start(void)
 {
-#if defined(__x86_64__)
-    // x86_64-only PIT/LAPIC handoff ceremony. aarch64 phase 1 has
-    // no PIT, no LAPIC; kernel/arch/aarch64/main.c:334 calls
-    // arch_tick_start() directly without going through tick_start().
-    // tick_start() is dead code on aarch64.
-    irq_mask(0);
-    if (arch_tick_start()) {
-        // LAPIC 接管成功，PIT 保持掩蔽。
-    } else {
-        // LAPIC 未校准/失败：回退 PIT。
-        irq_unmask(0);
-    }
-#endif
+    arch_tick_start();
+}
+
+// Weak default for poll_timeout_tick(). Strong override is in
+// kernel/fs/poll.c (compiled only on x86_64). aarch64 phase 1 has no
+// userland processes, no /dev/poll, no fs/poll.c — the weak default
+// is the only definition and is a no-op.
+__attribute__((weak)) void poll_timeout_tick(void)
+{
+    /* Default no-op. Strong override lives in kernel/fs/poll.c
+     * (x86_64 path). aarch64 phase 1 does not compile fs/poll.c;
+     * the weak default is the only definition. */
 }
