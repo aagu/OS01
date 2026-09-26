@@ -7,8 +7,13 @@
  * Per-arch strong overrides live in kernel/arch/<arch>/atomic.c.
  * x86_64: lock orq / lock andq.  aarch64: ldaxr + stlxr + cbnz retry.
  * Memory order: acquire-release (not seq_cst). */
-void arch_atomic_or_u64(uint64_t *addr, uint64_t mask);
-void arch_atomic_and_u64(uint64_t *addr, uint64_t mask);
+#ifdef __x86_64__
+#include <arch/x86_64/atomic_bitops.h>
+#elif defined(__aarch64__)
+#include <arch/aarch64/atomic_bitops.h>
+#else
+#error "Unsupported architecture"
+#endif
 
 #ifdef __x86_64__
 
