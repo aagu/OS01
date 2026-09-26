@@ -154,7 +154,7 @@ run-aarch64-uefi: aarch64-uefi
 # compiled value requires the following profile-clean sequence:
 # make PROFILE=aarch64-clang clean
 # make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=1 aarch64-uefi
-# make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=1 test-aarch64-uefi-smp-no-ack
+# make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=1 test-aarch64 MODE=no-ack
 # make PROFILE=aarch64-clang clean
 # make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
 # Then run a normal two-core recovery case with the rebuilt image paths.
@@ -163,14 +163,9 @@ run-aarch64-uefi: aarch64-uefi
 # SMP suite's firmware / image / DTB mechanism; harness injects one byte
 # into the PL011 socket and expects the kernel-side "handled count=1"
 # marker once the RX handler fires.
-.PHONY: test-aarch64 test-aarch64-uefi-smp test-aarch64-uefi-smp-no-ack test-aarch64-gic-spi
+.PHONY: test-aarch64
 # The contract harness expects invalid no-ack injection to fail even under
-# `make -n`. Keep this as a parse-time check for both invocation forms.
-ifneq ($(filter test-aarch64-uefi-smp-no-ack,$(MAKECMDGOALS)),)
-ifneq ($(AARCH64_SMP_TEST_NO_ACK_CPU),1)
-$(error AARCH64_SMP_TEST_NO_ACK_CPU must be 1; clean and build the injected image first)
-endif
-endif
+# `make -n`. Keep this as a parse-time check.
 ifneq ($(filter test-aarch64,$(MAKECMDGOALS)),)
 ifeq ($(MODE),no-ack)
 ifneq ($(AARCH64_SMP_TEST_NO_ACK_CPU),1)
@@ -246,10 +241,6 @@ test-aarch64:
 	$(MAKE) --no-print-directory _test-aarch64-prep-$(MODE)
 	$(MAKE) --no-print-directory _test-aarch64-run-$(MODE)
 
-test-aarch64-uefi-smp:        ; @$(MAKE) --no-print-directory test-aarch64 MODE=smp
-test-aarch64-uefi-smp-no-ack: ; @$(MAKE) --no-print-directory test-aarch64 MODE=no-ack
-test-aarch64-gic-spi:         ; @$(MAKE) --no-print-directory test-aarch64 MODE=gic-spi
-
 # ── Validation ─────────────────────────────────────────────
 # validate keeps the x86 kernel + UEFI artifact checks (kernel ELF has no
 # undefined symbols / INTERP / DYNAMIC, is EM_X86_64, exports _start /
@@ -310,12 +301,11 @@ TEST_SELFTEST_IMAGE := $(BUILD_DIR)/image/selftest/disk.img
 # overridable.
 KERNEL_SELFTEST_SMP ?= 4
 
-.PHONY: test-host test test-pmm-boot-reservation
+.PHONY: test-host test-pmm-boot-reservation
 test-host:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,run $(OS01_SUBMAKE_ARGS))
 	python3 qemutests/pmm_boot_reservation_test.py
-test: test-host
 test-pmm-boot-reservation:
 	python3 qemutests/pmm_boot_reservation_test.py
 
@@ -331,7 +321,7 @@ TEST_QEMU_IMG_systest       = $(TEST_SYSTEST_IMAGE)
 TEST_QEMU_IMG_inittab-phase = $(TEST_INITTAB_IMAGE)
 TEST_QEMU_IMG_network       = $(TEST_NETTEST_IMAGE)
 
-.PHONY: test-qemu test-phase-0 test-syscall test-inittab test-network
+.PHONY: test-qemu
 # Use the per-SUITE Make variables from Step 1. The image path is
 # informational — it is NOT used as a prerequisite, because the
 # variant image path has no direct build rule (the chain is `image` (phony)
@@ -340,13 +330,9 @@ TEST_QEMU_IMG_network       = $(TEST_NETTEST_IMAGE)
 # (verified: `make -n test-qemu SUITE=systest` errors with the systest
 # variant path). The variant build is triggered by a `$(MAKE) ... image`
 # sub-make inside the recipe.
-# Preserve the old syscall/selftest exclusion at parse time for both
-# invocation forms. This check must run before any prerequisites are built.
-ifneq ($(filter test-syscall,$(MAKECMDGOALS)),)
-ifeq ($(KERNEL_SELFTEST),1)
-$(error ERROR: syscall E2E must not be combined with KERNEL_SELFTEST=1)
-endif
-endif
+# Reject syscall E2E combined with kernel-selftest at parse time so it
+# aborts before any build. This check must run before any prerequisites
+# are built.
 ifneq ($(filter test-qemu,$(MAKECMDGOALS)),)
 ifeq ($(SUITE),systest)
 ifeq ($(KERNEL_SELFTEST),1)
@@ -377,8 +363,8 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	DISK_IMG="$(TEST_QEMU_IMG_$(SUITE))" \
 	OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \
 	python3 qemutests/run_test.py $(SUITE)
-test-phase-0:    ; @$(MAKE) test-qemu SUITE=phase-0
-test-syscall:    ; @$(MAKE) test-qemu SUITE=systest
+
+# Exercise repeated exec/exit through the normal terminal and ash path.
 
 # Exercise repeated exec/exit through the normal terminal and ash path.
 .PHONY: test-syscall-repeat
@@ -391,8 +377,6 @@ test-syscall-repeat: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAG
 	$(call require_capability,rootfs)
 	python3 qemutests/x86_64_systest_repeat.py --disk "$(NORMAL_IMAGE)" \
 	  --firmware "$(OVMF_FIRMWARE)" --smp "$(SMP)"
-test-inittab:    ; @$(MAKE) test-qemu SUITE=inittab-phase
-test-network:    ; @$(MAKE) test-qemu SUITE=network
 
 # test-static = the umbrella: runs every static audit in one shot.
 # Delegates the 4 runtime-audit checks + validate-kernel to test-runtime
@@ -488,7 +472,7 @@ test-user-canary: $(if $(filter userland,$(PROFILE_CAPABILITIES)),$(USER_ARTIFAC
 test-kernel-selftest: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@if [ "$(OS01_SYSTEST)" = "1" ]; then \
-	  echo "ERROR: test-kernel-selftest must not be combined with OS01_SYSTEST=1; run test-syscall separately" >&2; \
+	  echo "ERROR: test-kernel-selftest must not be combined with OS01_SYSTEST=1; run make OS01_SYSTEST=1 test-qemu SUITE=systest separately" >&2; \
 	  exit 1; \
 	fi
 	$(MAKE) KERNEL_SELFTEST=1 image
@@ -614,13 +598,11 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'test-pmm-boot-reservation' '(rootfs)' 'PMM boot-time memory reservation guard (host-only)';
 	@echo ''
-	@echo 'Focused compatibility checks (one release cycle; see docs/build-system-harness.md §4):'
+	@echo 'Focused compatibility checks (retained; see docs/build-system-harness.md §4):'
 	@printf '  %-22s %-13s %s\n' \
 		 'test-kernel-layout'    '(rootfs)'   'x86_64 kernel.elf layout audit (post-_end reserved)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-kernel-canary-contract' '(rootfs)' 'Kernel canary compile-flag contract';
-	@printf '  %-22s %-13s %s\n' \
-		 'test-aarch64-gic-spi'  '(uefi)'     'PL011 RX → GIC SPI injection (qemutests/aarch64_gic_spi.py)';
 	@echo ''
 	@echo 'Maintenance:'
 	@printf '  %-22s %-13s %s\n' \
@@ -632,7 +614,7 @@ help:
 	@echo '              OS01_NETTEST=1, INITTAB_FILE=<path>, KERNEL_SELFTEST=1,'
 	@echo '              NDEBUG=1, LOG_TARGET=serial|both.'
 	@echo 'See AGENTS.md Quick start and docs/build-run-debug.md for recipes.'
-	@echo 'Legacy test-* aliases remain callable for one release cycle; see docs/build-system-harness.md §4.'
+	@echo 'See docs/build-system-harness.md §4 for the retained focused checks (test-runtime, test-kernel-layout, test-kernel-canary-contract, test-user-canary, test-pmm-boot-reservation).'
 
 # ── Image alias ─────────────────────────────────────────────
 # `make image` builds the current profile's disk image — variant-resolved
@@ -643,7 +625,7 @@ image: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(DISK_IMG))
 	$(call require_capability,rootfs)
 
 # ── Build contract checks ───────────────────────────────────
-.PHONY: test-contract test-build-contract-x86 test-build-contract-aarch64
+.PHONY: test-contract
 # CI's contract job runs against a clean workspace; the bucket must still
 # pre-build the artifacts it inspects. x86 contract needs disk.img;
 # aarch64 contract needs aarch64-uefi. (Both were dropped in the v1
@@ -684,9 +666,6 @@ test-contract: $(if $(filter x86_64-clang,$(PROFILE)),disk.img,aarch64-uefi)
 	  echo "  [test-contract] $(PROFILE)/$$m"; \
 	  sh qemutests/build_contract.sh $(PROFILE) $$m; \
 	done
-
-test-build-contract-x86:      ; @$(MAKE) --no-print-directory test-contract PROFILE=x86_64-clang
-test-build-contract-aarch64:  ; @$(MAKE) --no-print-directory test-contract PROFILE=aarch64-clang
 
 # ── Clean ───────────────────────────────────────────────────
 # Only the default profile owns the project-root kernel.bin / disk.img compat

@@ -61,39 +61,27 @@ alias window, with their original narrow behavior:
 
 ## 4. Alias policy
 
-Bucket targets are the canonical names. The legacy fine-grained names
-(`test`, `test-syscall`, `test-runtime`, `test-aarch64-uefi-smp`,
-`test-build-contract-x86`, etc.) remain callable during the compatibility
-cycle. Parameterized aliases forward to a bucket with the right flag.
-Subset compatibility targets (`test-runtime`, `test-kernel-layout`,
-`test-kernel-canary-contract`, `test-user-canary`) retain their original
-recipes; they never call the broader `test-static`
-(or any other bucket) wholesale, because CI relies on the narrower
-scope of the original target. Aliases exist for one release cycle after
-the bucket is introduced; deletion is tracked in a followup plan, not
-in the bucket-introduction plan itself.
+Bucket targets are the canonical names. **No forwarding aliases remain.**
+All forwarding aliases (`test`, `test-phase-0`, `test-syscall`,
+`test-inittab`, `test-network`, `test-aarch64-uefi-smp`,
+`test-aarch64-uefi-smp-no-ack`, `test-aarch64-gic-spi`,
+`test-build-contract-x86`, `test-build-contract-aarch64`) were deleted
+in the 2026-09-26 cleanup; CI and all callers must use the bucket
+target directly.
 
-Adding a new alias is **not** a substitute for using the bucket target
-in new code or CI. Aliases are compatibility shims.
+**Retained focused checks:** some `test-*` names keep their own
+original recipes (standalone targeted checks, not forwarding aliases
+to a bucket). They are retained permanently for debugging:
 
-**Note on `test` specifically:** the bare `test` alias (forwarding to
-`test-host`) is the most-frequently-used legacy name and is classified
-as a one-release-cycle alias just like every other `test-*` legacy
-name. CI and any new code must use `test-host` instead.
+- `test-runtime` — runtime audit subset (5 python calls + validate-kernel).
+- `test-kernel-layout` — kernel.elf post-`_end` reserved layout audit.
+- `test-kernel-canary-contract` — kernel canary compile-flag contract.
+- `test-user-canary` — 7-step SSP/crt0 user-stack canary audit.
+- `test-pmm-boot-reservation` — PMM boot-time memory reservation guard.
 
-**Focused compatibility checks — retention split:** some `test-*`
-names listed under §3's "Focused compatibility checks" keep their own
-original recipes (they are standalone targeted checks, not forwarding
-aliases). Those names are **retained permanently** because they serve a
-debugging/standalone purpose even after the alias window closes. Other
-names in that section are pure forwarding aliases and are **deleted at
-the end of the cycle** alongside the rest of the forwarding aliases:
-
-- Retain permanently: `test-kernel-layout`, `test-kernel-canary-contract`,
-  `test-user-canary` (each has its own original recipe, not a forwarding
-  alias to a bucket).
-- Delete at cycle end: `test-aarch64-gic-spi` (pure forwarding alias to
-  `test-aarch64 MODE=gic-spi`).
+Adding a new forwarding alias is **not** a substitute for using the
+bucket target in new code or CI. Aliases were a one-release-cycle
+compatibility shim and have now been removed.
 
 ## 5. Adding a new target
 
