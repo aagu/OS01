@@ -113,7 +113,7 @@ $(STAMPS_DIR)/mbedtls-install.stamp: $(STAMPS_DIR)/libc-install.stamp FORCE
 	  echo "  [mbedtls] $$ok compiled, $$fail failed"; \
 	  mkdir -p $(MBEDTLS_STAGING)/usr/lib $(MBEDTLS_STAGING)/usr/include; \
 	  $(LLVM_AR) rcs $(MBEDTLS_STAGING)/usr/lib/libmbedtls.a $(MBEDTLS_BUILD_DIR)/*.o; \
-	  cp -R $(MBEDTLS_PRIVATE)/include/mbedtls $(MBEDTLS_STAGING)/usr/include/; \
+	  cp -R --preserve=timestamps $(MBEDTLS_PRIVATE)/include/mbedtls $(MBEDTLS_STAGING)/usr/include/; \
 	  find $(MBEDTLS_STAGING) -type f ! -name manifest | sed 's|^$(MBEDTLS_STAGING)/||' | sort > $(MBEDTLS_STAGING)/manifest; \
 	  printf '%s\n' "$$digest" > "$@.receipt"; \
 	  touch "$@"; \
@@ -153,6 +153,17 @@ $(STAMPS_DIR)/compat-libs-install.stamp: FORCE
 # tree into an empty generation dir (failing on duplicate destinations),
 # verify every manifest path landed, then atomically re-point the $(SYSROOT)
 # symlink and touch the stamp. A shell trap releases the lock in every path.
+#
+# Two contract points the header-level incremental rebuild (roadmap Parked
+# refinement) depends on:
+# 1. `cp -p` — generation files inherit the staging trees' (source-tree)
+#    mtimes. Compiles reference headers through the $(SYSROOT) symlink, so
+#    a republish whose content is unchanged must NOT look newer to make,
+#    and a changed header must look exactly as new as its source edit.
+# 2. Lease wait — the kernel/user artifact recipes compile through the
+#    symlink under a generation read lease; while any lease is active the
+#    publish waits (bounded, same 60 s budget as the lock) instead of
+#    swapping headers mid-build.
 $(SYSROOT_STAMP): $(STAMPS_DIR)/kernel-headers-install.stamp \
                   $(STAMPS_DIR)/libc-install.stamp \
                   $(STAMPS_DIR)/mbedtls-install.stamp \
@@ -172,6 +183,16 @@ $(SYSROOT_STAMP): $(STAMPS_DIR)/kernel-headers-install.stamp \
 	done; \
 	trap 'rm -f "$(LOCK_DIR)/owner"; rmdir "$(LOCK_DIR)" 2>/dev/null || true' EXIT; \
 	echo "$$$$ $(MAKECMDGOALS) $$(date +%s)" > "$(LOCK_DIR)/owner"; \
+	j=0; \
+	while [ -n "$$(ls -1 "$(LEASES_DIR)" 2>/dev/null | head -1)" ]; do \
+	  j=$$((j+1)); \
+	  if [ $$j -ge 600 ]; then \
+	    echo "ERROR: sysroot generation leases still held after 60s:"; \
+	    ls -1 "$(LEASES_DIR)" 2>/dev/null; \
+	    exit 1; \
+	  fi; \
+	  sleep 0.1; \
+	done; \
 	id=$$(cat "$(SYSROOT_GENERATIONS_DIR)/next-generation" 2>/dev/null || echo 0); \
 	next=$$((id+1)); \
 	printf '%s\n' "$$next" > "$(SYSROOT_GENERATIONS_DIR)/next-generation.tmp"; \
@@ -186,7 +207,7 @@ $(SYSROOT_STAMP): $(STAMPS_DIR)/kernel-headers-install.stamp \
 	    dest="$$gen/$$rel"; \
 	    if [ -e "$$dest" ]; then echo "ERROR: duplicate destination in generation: $$rel"; exit 1; fi; \
 	    mkdir -p "$$(dirname "$$dest")"; \
-	    cp "$(STAGING_DIR)/$$comp/$$rel" "$$dest"; \
+	    cp -p "$(STAGING_DIR)/$$comp/$$rel" "$$dest"; \
 	  done < "$$mf"; \
 	  while IFS= read -r rel; do \
 	    [ -n "$$rel" ] || continue; \

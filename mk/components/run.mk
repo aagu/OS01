@@ -630,7 +630,7 @@ image: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(DISK_IMG))
 # pre-build the artifacts it inspects. x86 contract needs disk.img;
 # aarch64 contract needs aarch64-uefi. (Both were dropped in the v1
 # plan; this restored version matches the original line 610 / 631.)
-X86_CONTRACT_MODES := legacy-components legacy x86 sysroot firmware targets flags-cache host-test
+X86_CONTRACT_MODES := legacy-components legacy x86 sysroot firmware targets sysroot-headers flags-cache host-test
 AARCH64_CONTRACT_MODES := aarch64 targets
 
 # Pre-build helpers are split per PROFILE so the `+env` recipe prefix
