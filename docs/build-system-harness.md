@@ -62,7 +62,7 @@ alias window, with their original narrow behavior:
 ## 4. Alias policy
 
 Bucket targets are the canonical names. The legacy fine-grained names
-(`test-syscall`, `test-runtime`, `test-aarch64-uefi-smp`,
+(`test`, `test-syscall`, `test-runtime`, `test-aarch64-uefi-smp`,
 `test-build-contract-x86`, etc.) remain callable during the compatibility
 cycle. Parameterized aliases forward to a bucket with the right flag.
 Subset compatibility targets (`test-runtime`, `test-kernel-layout`,
@@ -75,6 +75,25 @@ in the bucket-introduction plan itself.
 
 Adding a new alias is **not** a substitute for using the bucket target
 in new code or CI. Aliases are compatibility shims.
+
+**Note on `test` specifically:** the bare `test` alias (forwarding to
+`test-host`) is the most-frequently-used legacy name and is classified
+as a one-release-cycle alias just like every other `test-*` legacy
+name. CI and any new code must use `test-host` instead.
+
+**Focused compatibility checks — retention split:** some `test-*`
+names listed under §3's "Focused compatibility checks" keep their own
+original recipes (they are standalone targeted checks, not forwarding
+aliases). Those names are **retained permanently** because they serve a
+debugging/standalone purpose even after the alias window closes. Other
+names in that section are pure forwarding aliases and are **deleted at
+the end of the cycle** alongside the rest of the forwarding aliases:
+
+- Retain permanently: `test-kernel-layout`, `test-kernel-canary-contract`,
+  `test-user-canary` (each has its own original recipe, not a forwarding
+  alias to a bucket).
+- Delete at cycle end: `test-aarch64-gic-spi` (pure forwarding alias to
+  `test-aarch64 MODE=gic-spi`).
 
 ## 5. Adding a new target
 

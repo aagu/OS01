@@ -12,8 +12,14 @@
 > has been updated to require the bucket names directly.
 
 > **Tasks:**
-> 1. Use `rg -n 'test-(phase-0|syscall|inittab|network|runtime|kernel-layout|kernel-canary-contract|aarch64-uefi-smp|aarch64-gic-spi|build-contract-)' .github scripts tools mk qemutests docs AGENTS.md` to inventory uses; preserve references in historical reports.
+> 1. Use `rg -n '\bmake test\b|\bmake test-(phase-0|syscall|inittab|network|runtime|kernel-layout|kernel-canary-contract|aarch64-uefi-smp|aarch64-gic-spi|build-contract-)' .github scripts tools mk qemutests docs AGENTS.md` to inventory uses; preserve references in historical reports. The bare `\bmake test\b` token is required because the legacy alias has no suffix and the original regex would miss it.
 > 2. Migrate executable CI and shell references to buckets with explicit `SUITE`, `MODE`, or `PROFILE`, then run their affected CI commands.
 > 3. Update `qemutests/build_contract.sh` target checks to require the bucket names and retain the invalid-profile and invalid-no-ack assertions.
-> 4. Delete only the forwarding alias lines from `mk/components/run.mk`; retain the focused standalone checks used for debugging.
+> 4. Delete only the forwarding alias lines from `mk/components/run.mk`. The retention split for the §3 "Focused compatibility checks" is:
+>    - **Retain permanently** (they have their own original recipes, not forwarding aliases to a bucket):
+>      - `test-kernel-layout`
+>      - `test-kernel-canary-contract`
+>      - `test-user-canary`
+>    - **Delete at cycle end** (pure forwarding aliases):
+>      - `test-aarch64-gic-spi` (forwards to `test-aarch64 MODE=gic-spi`; delete alongside the rest of the forwarding aliases).
 > 5. Update `docs/build-system-harness.md` §4 and run `make help`, `make -n test-qemu SUITE=systest`, `make -n PROFILE=aarch64-clang test-aarch64 MODE=smp`, and both build-contract modes.

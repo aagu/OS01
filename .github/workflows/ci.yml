@@ -95,7 +95,7 @@ jobs:
         run: make -j"$(nproc)" disk.img
 
       - name: Host unit tests
-        run: make test
+        run: make test-host
 
       - name: Runtime validation
         run: make test-runtime
