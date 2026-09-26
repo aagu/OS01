@@ -12,6 +12,11 @@ PROFILE ?= x86_64-clang
 DEFAULT_PROFILE ?= x86_64-clang
 KERNEL_SELFTEST ?=
 KERNEL_CANARY_SELFTEST ?=
+# Extra kernel compile flags (test/debug knob; also the flags-cache contract
+# test's handle). Whitelisted below so it crosses the controlled sub-make
+# boundary, and folded into ALL_CFLAGS by kernel/Makefile so the CFLAGS
+# fingerprint stamp sees it.
+KERNEL_EXTRA_CFLAGS ?=
 
 # ── Variant slugs (BEFORE the profile include!) ───────────────
 # IMAGE_VARIANT — the image/manifest dirs' variant suffix, derived from the
@@ -75,7 +80,7 @@ endef
 # tasks can rely on them without rework. OS01_SUBMAKE_ARGS is recursive so it
 # is evaluated at recipe-expansion time — after the root Makefile has applied
 # its LOG_TARGET / INITTAB_FILE / ... defaults.
-OS01_SUBMAKE_ALLOWED := CLANG UEFI_CLANG LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_OBJDUMP LLVM_READOBJ LLVM_READELF TARGET_LD RUNTIME_PROVIDER LOG_TARGET KERNEL_SELFTEST KERNEL_CANARY_SELFTEST KERNEL_TEST_FORCE_NO_RNDRRS OS01_SYSTEST OS01_NETTEST INITTAB_FILE AARCH64_QEMU SMP AARCH64_SMP_TEST_NO_ACK_CPU AARCH64_UEFI_FIRMWARE_SOURCE QEMU_BIN DEBUG DEBUG_CHANNELS
+OS01_SUBMAKE_ALLOWED := CLANG UEFI_CLANG LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_OBJDUMP LLVM_READOBJ LLVM_READELF TARGET_LD RUNTIME_PROVIDER LOG_TARGET KERNEL_SELFTEST KERNEL_CANARY_SELFTEST KERNEL_TEST_FORCE_NO_RNDRRS KERNEL_EXTRA_CFLAGS OS01_SYSTEST OS01_NETTEST INITTAB_FILE AARCH64_QEMU SMP AARCH64_SMP_TEST_NO_ACK_CPU AARCH64_UEFI_FIRMWARE_SOURCE QEMU_BIN DEBUG DEBUG_CHANNELS
 OS01_SUBMAKE_ARGS = $(foreach v,$(OS01_SUBMAKE_ALLOWED),$(if $($(v)),$(v)=$($(v))))
 
 # ── Sysroot generation protocol (spec: sysroot single-writer) ──

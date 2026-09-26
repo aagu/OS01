@@ -251,6 +251,33 @@ LOG_TARGET ?= serial
 ALL_CFLAGS += -DLOG_TARGET_SERIAL=$(call bool,$(filter serial both,$(LOG_TARGET)))
 ALL_CFLAGS += -DLOG_TARGET_FB=$(call bool,$(filter fb both,$(LOG_TARGET)))
 
+# Caller-supplied extra flags (via OS01_SUBMAKE_ALLOWED). Test/debug knob —
+# also the contract-test handle for the CFLAGS-stamp invalidation below.
+KERNEL_EXTRA_CFLAGS ?=
+ALL_CFLAGS += $(KERNEL_EXTRA_CFLAGS)
+
+# ── CFLAGS fingerprint stamp ───────────────────────────────
+# make tracks file timestamps, not compile commands: a CFLAGS-only change
+# (DEBUG channels, LOG_TARGET, KERNEL_EXTRA_CFLAGS probes, the sysroot
+# generation -isystem path, ...) would otherwise reuse stale .o silently.
+# The stamp is a prerequisite of the compile rules below; its recipe
+# rewrites it only when the resolved flags differ, so identical rebuilds
+# stay no-ops and any flag change rebuilds every object (same coarse
+# policy as the sysroot-generation -B full rebuild). The recipe expands at
+# recipe time, so it sees the fully assembled ALL_CFLAGS regardless of the
+# += order above. LDFLAGS-only changes are out of scope: they trigger a
+# relink only when an object rebuilt, which the parked-item scope accepts.
+FLAGS_STAMP := $(BUILD_DIR)/.cflags
+# Local always-out-of-date prereq: project.mk's FORCE is root-only, the
+# kernel sub-make never sees it (naming mirrors FORCE_KERNEL_RUNTIME_RELINK
+# below).
+.PHONY: FLAGS_STAMP_FORCE
+FLAGS_STAMP_FORCE:
+$(FLAGS_STAMP): FLAGS_STAMP_FORCE
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(strip $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS))' > $@.new
+	@cmp -s $@.new $@ || mv -f $@.new $@
+
 # ── Targets ────────────────────────────────────────────────
 .PHONY: all clean install-headers
 
@@ -264,18 +291,18 @@ all: $(BUILD_DIR)/kernel.bin
 # C-only flags carry the stdint.h injection (see CFLAGS comment above);
 # ASM files (.S) get ALL_CFLAGS only since the assembler preprocessor
 # can't parse a C typedef.
-$(BUILD_DIR)/%.o: %.c
+$(BUILD_DIR)/%.o: %.c $(FLAGS_STAMP)
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS) -MMD -MP -c $< -o $@
 
 # .S → .o + .d
-$(BUILD_DIR)/%.o: %.S
+$(BUILD_DIR)/%.o: %.S $(FLAGS_STAMP)
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
 
 # ── lwIP compilation ──────────────────────────────────────────
 # lwIP sources live outside kernel/ under thirdpart/lwip/src
-$(BUILD_DIR)/lwip/%.o: $(LWIP_SRC_DIR)/%.c
+$(BUILD_DIR)/lwip/%.o: $(LWIP_SRC_DIR)/%.c $(FLAGS_STAMP)
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS) -MMD -MP -c $< -o $@
 
