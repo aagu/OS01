@@ -1,9 +1,9 @@
 # OS01 优化路线图
 
-> **基准**: `d695020`（当前 HEAD，2026-09-26）
+> **基准**: `c7bdeed`（当前 HEAD，2026-09-26）
 > **日期**: 2026-09-26
 
-roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `docs/changelog.md`（最新 2026-09-26；本版本相较前一版新增 09-19 ~ 09-26 这一周 ~50 个 commit：AAGU-1/2/3/4 全套 + 5.6/5.7/5.8 + 6/7/7.1/8/29 + arch source groups + compiler_rt 目录裁撤 + build harness consolidation + Generic Timer Phase 1/2 全栈 + aarch64 IPI fix）。
+roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `docs/changelog.md`（最新 2026-09-26；本版本相较前一版新增 09-19 ~ 09-26 这一周 ~50 个 commit：AAGU-1/2/3/4 全套 + 5.6/5.7/5.8 + 6/7/7.1/8/29 + arch source groups + compiler_rt 目录裁撤 + build harness consolidation + Generic Timer Phase 1/2 全栈 + aarch64 IPI fix + AAGU-4 残留清理（compat/ 裁撤 + softirq/tick/clocksource/driver-net ifdef 清扫））。
 
 ## 当前状态（一句话）
 
@@ -38,7 +38,7 @@ roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `
 |----|------|------|------|
 | head.S + MMU 剩余 | user 页表 / uaccess facade（`mmu.h::arch_user_range_accessible` aarch64 仍 fail-closed stub）；boot 2MiB block 与 4K 原语合并（`boot_fixup.c` 自述 future work）；page_table 原语 host 测试为零 | 页表原语 ✅ | ArvernOS |
 | 统一 kernel_main | 单 `kernel_main` 按固定顺序调 `arch_early_init()` / `arch_late_init()` / `scheduler_init()`；aarch64 必须先 dtb 才能用 DTB 信息；init 顺序契约需明确。**Spec A 中断 dispatch / Spec B SMP+timer / Spec C kernel_main 单一入口** | PMM ✅, SMP ✅, 调度器 core, arch_irq ✅, rtc ✅, pt_regs_t ✅, head.S ✅, GIC ✅, Timer ✅, UEFI 链 ✅ | 长项 spec |
-| 中断/异常 dispatch 统一 | `arch_intr_dispatch(vector, pt_regs*)` 单入口抽象；x86_64 IDT vs aarch64 VBAR_EL1 vector tables 各自封装；x86_64 IST stack vs aarch64 SP_EL1 切换。**最大代码量减少**：`x86_64/trap.c` 3078 行大部分是 x86 register decode；aarch64 `trap.c` 20 行（占位）。`arch_irq_dispatch` 已落地，剩余是 trap.c 内部 x86 register decode 的 arch 剥离 | arch_irq ✅, head.S ✅, GIC ✅ | Linux do_IRQ |
+| 中断/异常 dispatch 统一 | `arch_intr_dispatch(vector, pt_regs*)` 单入口抽象；x86_64 IDT vs aarch64 VBAR_EL1 vector tables 各自封装；x86_64 IST stack vs aarch64 SP_EL1 切换。**最大代码量减少**：`x86_64/trap.c` 3078 行大部分是 x86 register decode；aarch64 `intr/trap.c` 31 行（IRQ 已接 GIC dispatch，sync 异常仍 `b .` 占位）。`arch_irq_dispatch` 已落地，剩余是 trap.c 内部 x86 register decode 的 arch 剥离 | arch_irq ✅, head.S ✅, GIC ✅ | Linux do_IRQ |
 | SMP 启动统一 | `arch_smp_boot_aps(cpu_count, entry, per_cpu_data)` 单入口；内部 aarch64 PSCI CPU_ON / x86_64 INIT-SIPI + trampoline 各自实现 | GIC ✅, 启动链 ✅ | opuntiaOS |
 | 上下文切换统一 | `arch_task_switch(prev, next)` + `arch_thread_entry()`；aarch64 ret 到 user vs x86_64 sysret/iret | SMP 启动统一 | Tilck |
 | CPU 特性探测 | `arch_cpu_features()` 返回统一位图（has_fpu / has_virt / has_cache_coherency）；x86 CPUID vs aarch64 ID_AA64* 各实现一份 | 独立 | Linux cpufeature |
