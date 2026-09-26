@@ -33,7 +33,7 @@ HOST_CFLAGS := -g -O0 -Wall -Wextra -Wno-unused-parameter \
                -Wno-non-literal-null-conversion -Wno-incompatible-library-redeclaration
 
 POLL_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
-    -Wno-unused-function -D__SPINLOCK_H__ \
+    -Wno-unused-function -D__SPINLOCK_H__ -DOS01_HOST_TEST \
     -include $(TEST_MOCK)/poll_test_runtime.h \
     -I$(TEST_MOCK)/include $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
 

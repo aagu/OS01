@@ -29,7 +29,9 @@ bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable)
     return len == 0 || addr != 0;
 }
 
-ssize_t copy_to_user_ft_res(void *dst, const void *src, size_t n,
+/* weak so test cases (e.g. test_poll_requested.c) can override
+ * copy_to_user_ft_res with a tracking/instrumented version. */
+__attribute__((weak)) ssize_t copy_to_user_ft_res(void *dst, const void *src, size_t n,
                             void (*on_fault)(void *), void *arg)
 {
     (void)on_fault;
@@ -38,7 +40,7 @@ ssize_t copy_to_user_ft_res(void *dst, const void *src, size_t n,
     return (ssize_t)n;
 }
 
-ssize_t copy_from_user_ft_res(void *dst, const void *src, size_t n,
+__attribute__((weak)) ssize_t copy_from_user_ft_res(void *dst, const void *src, size_t n,
                               void (*on_fault)(void *), void *arg)
 {
     (void)on_fault;

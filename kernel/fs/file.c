@@ -653,10 +653,20 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
     switch (f->type) {
     case FD_VFS:
     case FD_DEV: {
+#ifndef OS01_HOST_TEST
         if (!f->node || !f->node->ops ||
             (uint64_t)f->node->ops < 0xffff800000000000ULL ||
             !f->node->ops->read)
             return -1;
+#else
+        /* OS01_HOST_TEST: production's kernel-half ops-pointer guard
+         * cannot be satisfied by host-heap ops (all < 0xffff800000000000ULL
+         * on Linux x86_64).  The read-pointer check alone is enough for
+         * the host harness; the guard is preserved in every non-host
+         * build below. */
+        if (!f->node || !f->node->ops || !f->node->ops->read)
+            return -1;
+#endif
         // Check access mode (low 2 bits) — ignore O_CREAT etc.
         int acc = f->flags & 3;
         if (!(acc == O_RDONLY || acc == O_RDWR))
@@ -666,11 +676,19 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
         // never sees a user pointer (writes into kbuf); _ft copies
         // to user; offset advances ONLY after a successful _ft copy.
         // submitted==0 → -EFAULT (block never made it past user).
+        //
+        // Task 2 (PS/2 mouse plan): when vfs_read returns a negative
+        // errno (e.g. -EAGAIN, -EINVAL) and NO bytes have been
+        // committed to the user yet, propagate the original errno to
+        // the caller.  Once any bytes are committed, the existing
+        // "return short count" path is preserved — a partial read
+        // must never be discarded in favour of a later error
+        // (POSIX: a successful short read is final for that syscall).
         void *kbuf = kmalloc(UACCESS_BOUNCE_SIZE);
         if (!kbuf) return -1;
 
         uint64_t committed = 0;
-        int read_err = 0;
+        int64_t last_err = 0;
         for (;;) {
             uint64_t remaining = size - committed;
             if (remaining == 0) break;
@@ -678,7 +696,7 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
                              ? remaining : UACCESS_BOUNCE_SIZE;
 
             int64_t n = vfs_read(f->node, f->offset, chunk, kbuf);
-            if (n < 0) { read_err = 1; break; }   // I/O error
+            if (n < 0) { last_err = n; break; }   // I/O error (preserved)
             if (n == 0) break;                    // EOF
 
             ssize_t rc = copy_to_user_ft(
@@ -697,11 +715,17 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
             if ((uint64_t)n < chunk) break;   // short read (EOF)
         }
         kfree(kbuf);
-        /* EOF (vfs_read returned 0, no bytes committed) must return 0,
-         * not -1: the old "committed==0 → -1" made a clean read-at-EOF
-         * look like an I/O error (libc mapped it to EPERM), which broke
-         * busybox tail's read-to-EOF loops. */
-        if (committed == 0 && read_err) return -1;
+        /* Task 2: when no bytes were committed and vfs_read returned a
+         * negative errno, propagate that errno verbatim so userspace
+         * (e.g. libc fdread / PS/2 mouse non-blocking read) can
+         * distinguish -EAGAIN from -EINVAL.  The legacy "-1 on
+         * committed==0 + error" behaviour is gone.
+         *
+         * EOF (vfs_read returned 0, no bytes committed) still returns
+         * 0: a clean read-at-EOF must not look like an I/O error
+         * (libc maps -1 to EPERM), which broke busybox tail's
+         * read-to-EOF loops. */
+        if (committed == 0 && last_err != 0) return last_err;
         return (int64_t)committed;
     }
     case FD_PIPE:
@@ -925,10 +949,16 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
     switch (f->type) {
     case FD_VFS:
     case FD_DEV: {
+#ifndef OS01_HOST_TEST
         if (!f->node || !f->node->ops ||
             (uint64_t)f->node->ops < 0xffff800000000000ULL ||
             !f->node->ops->write)
             return -1;
+#else
+        /* OS01_HOST_TEST: see fd_read above; same guard-neuter rationale. */
+        if (!f->node || !f->node->ops || !f->node->ops->write)
+            return -1;
+#endif
         // Check access mode (low 2 bits) — ignore O_CREAT etc.
         int acc = f->flags & 3;
         if (!(acc == O_WRONLY || acc == O_RDWR))
