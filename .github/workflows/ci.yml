@@ -110,7 +110,7 @@ jobs:
         run: make KERNEL_SELFTEST=1 KERNEL_SELFTEST_SMP=8 test-kernel-selftest
 
       - name: Syscall E2E (QEMU)
-        run: make OS01_SYSTEST=1 test-syscall
+        run: make OS01_SYSTEST=1 test-qemu SUITE=systest
 
   # ── aarch64 test surface (PR + push) ──────────────────────────
   # Builds the aarch64 UEFI bring-up image. The SMP acceptance harness
@@ -194,7 +194,7 @@ jobs:
           git submodule foreach --recursive --quiet 'git config --global --add safe.directory "$sm_path"'
 
       - name: x86_64 build contract
-        run: make test-build-contract-x86
+        run: make test-contract
 
       # aarch64 build contract: skipped — its 'targets' mode triggers a
       # destructive rm -rf build/x86_64-clang/ via the '+'-prefixed
