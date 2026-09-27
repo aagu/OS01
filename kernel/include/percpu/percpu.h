@@ -95,8 +95,10 @@ _Static_assert(sizeof(percpu_t) == PERCPU_DATA_SIZE,
 extern percpu_t percpu_data[NR_CPUS];
 
 // Number of CPUs actually discovered from MADT (≤ NR_CPUS).
-// Set by main.c after percpu_init loop.  All runtime loops
-// should iterate over num_cpus, not NR_CPUS.
+// Published by x86_64_boot_percpu() (kernel/arch/x86_64/smp/boot.c)
+// AFTER percpu_install_gs(0) on the BSP, so num_cpus != 0 doubles as
+// the BSP GS-readiness gate used by kernel/driver/keyboard.c.  All
+// runtime loops should iterate over num_cpus, not NR_CPUS.
 extern uint32_t num_cpus;
 
 // ── Per-CPU accessors ──────────────────────────────

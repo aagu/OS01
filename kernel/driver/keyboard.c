@@ -328,11 +328,13 @@ static void keyboard_wake_pollers(void)
     spin_unlock_irqrestore(&kbd_poll_lock, flags);
 
     // this_cpu() reads the GS base, which is NOT installed on the BSP
-    // until percpu_install_gs(0) in kernel_main — and the phase-5
-    // keyboard init (IRQ1 registered) runs earlier, so a keypress can
-    // arrive pre-GS.  kernel_main stores num_cpus only AFTER
-    // percpu_install_gs(0), and APs install GS before enabling local
-    // IRQs, so num_cpus != 0 implies this CPU's GS base is loaded.
+    // until percpu_install_gs(0) — that runs inside
+    // x86_64_boot_percpu() (kernel/arch/x86_64/smp/boot.c), not in
+    // kernel_main.  The phase-5 keyboard init (IRQ1 registered) runs
+    // earlier via x86_64_boot_subsystems(), so a keypress can arrive
+    // pre-GS.  num_cpus is published only AFTER percpu_install_gs(0)
+    // on the BSP, and APs install GS before enabling local IRQs, so
+    // num_cpus != 0 implies this CPU's GS base is loaded.
     if (num_cpus != 0)
         this_cpu()->need_resched = 1;
 }

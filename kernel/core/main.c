@@ -1,41 +1,19 @@
-#include <string.h>
-#include <core/printk.h>
-#include <log/log.h>
+#include <core/printk.h>      // serial_printk (still printed from kernel_main)
+#include <core/bootinfo.h>    // struct boot_context (used by signature)
 #include <memory/memory.h>
-#include <memory/pmm.h>
-#include <arch/gate.h>
-#include <arch/spinlock.h>
-#include <arch/cpu.h>
-#include <arch/irq.h>
-#include <intr/interrupt.h>
-#include <sched/task.h>
-#include <percpu/percpu.h>
-#include <core/smp.h>
-#include <tty/tty.h>
-#include <intr/apic.h>
-#include <driver/serial.h>
-#include <driver/keyboard.h>
-#include <driver/mouse.h>
-#include <block/blockdev.h>
-#include <fs/vfs.h>
-#include <fs/fat.h>
-#include <fs/gpt.h>
-#include <fs/ext2.h>
-#include <fs/devfs.h>
-#include <fs/procfs.h>
-#include <fs/tmpfs.h>
-#include <core/selftest.h>
-#include <sync/futex.h>
-#include <stdlib.h>
-#include <subsys/subsys.h>
-#include <arch/subsys.h>
-#include <tty/console.h>
-#include <driver/logo.h>
-#include <driver/fb.h>
-#include <tty/pty.h>
-#include <time/clockevent.h>
-#include <net/net.h>
-#include <random/random.h>
+#include <arch/cpu.h>         // arch_cycle_counter, arch_cpu_halt
+#include <sched/task.h>       // task_init
+#include <driver/serial.h>    // write_serial
+#include <fs/boot.h>          // fs_boot_prepare / _mounts / _probe_devfs
+#include <tty/boot.h>         // tty_boot_init
+#include <arch/x86_64/boot.h> // x86_64_boot_early/_memory/_subsystems/_device_nodes
+#include <arch/x86_64/smp_boot.h> // x86_64_boot_percpu / _aps
+#include <core/selftest.h>    // selftest_run_all
+#include <sync/futex.h>       // futex_init
+#include <tty/console.h>      // console_init
+#include <tty/pty.h>          // pty_init
+#include <net/net.h>          // net_lwip_init
+#include <random/random.h>    // random_init
 
 // ── Kernel symbols ─────────────────────────────────────────
 
@@ -96,42 +74,10 @@ int kernel_main(const struct boot_context *bootctx)
     }
 
     // ═══ 1. CPU + interrupt infrastructure ═══════════════════
-    Pos.Phy_addr = (uint32_t *)bootctx->graphics.FrameBufferBase;
-    Pos.FB_length = bootctx->graphics.FrameBufferSize;
-    Pos.XResolution = bootctx->graphics.HorizontalResolution;
-    Pos.YResolution = bootctx->graphics.VerticalResolution;
-    spin_init(&Pos.lock);
-
-    arch_task_init_early();
-
-    sys_vector_install();      // syscall + exception IDT entries
-    irq_install();             // IRQ 0x20–0x37 IDT entries
-
-    // Serial: hardware init only (IER=0, no IRQ yet).
-    init_serial();             // baud/line/FIFO — for serial_printk
-    serial_printk("serial port init succeed\n");
-
-    // EFER NXE — enable No-eXecute for user-space page tables
-    arch_cpu_enable_nx();
-    serial_printk("EFER: NXE enabled\n");
+    x86_64_boot_early(bootctx);
 
     // ═══ 2. Memory subsystem ═════════════════════════════════
-    PMMngr.start_code  = (uint64_t)&_text;
-    PMMngr.end_code    = (uint64_t)&_etext;
-    PMMngr.end_data    = (uint64_t)&_edata;
-    PMMngr.end_rodata  = (uint64_t)&_erodata;
-    PMMngr.start_brk   = (uint64_t)&_end;
-
-    frame_buffer_early_init();
-    boot_logo_show();                 // OS01 boot logo
-
-    pmm_init(bootctx);                       // physical page allocator
-    vmm_init();                          // virtual memory (page tables)
-    frame_buffer_init();                 // remap FB at VIRT_FRAMEBUFFER_OFFSET
-    color_printk(GREEN, BLACK, "frame buffer remap succeed\n");
-
-    // ═══ RSDP: 传递给 arch 子系统 ═══
-    arch_boot_rsdp = bootctx->firmware.acpi_rsdp;
+    x86_64_boot_memory(bootctx);
 
     // ═══ 3-6. Subsystem framework ══════════════════════════════════
     // arch_register_subsys() + subsys_init_all() dispatches:
@@ -139,147 +85,60 @@ int kernel_main(const struct boot_context *bootctx)
     //   Phase 4: timers (timer, pit, lapic-timer)
     //   Phase 5: device IRQs (keyboard, serial)
     //   Phase 6: storage (ahci)
-    arch_register_subsys();
-    subsys_init_all();
+    x86_64_boot_subsystems(bootctx);
+
+    // ═══ 8a. BSP per-CPU registration (Task 6) ═════════════════
+    // x86_64_boot_percpu() owns MADT traversal, percpu_init(), BSP
+    // TSS/GS/online, and num_cpus publication; it runs BEFORE the
+    // filesystem phase so device/FS code sees a valid this_cpu().
+    // Audit summary: num_cpus has exactly one writer (boot.c), GS is
+    // installed before online=1, tlb_shootdown/ipi_broadcast only
+    // target online CPUs (APs are offline until x86_64_boot_aps()),
+    // and the slab lock is statically initialized.  See the Task 6
+    // report in .superpowers/sdd/ for the full audit.
+    x86_64_boot_percpu();
 
     random_init(bootctx);               // seed the CSPRNG pool (BSP, once)
 
-    vfs_init();                         // init mount table BEFORE any mount calls
-
-    devfs_init();                   // mount /dev + register chrdev
-                                    // ★ MUST be before any devfs_register_* call
+    // ── FS bring-up + x86 device node registration (Task 2 split) ──
+    // Order matters: devfs must exist before any devfs_register_*() call;
+    // PTY must exist before keyboard_set_tty() (later in tty_boot_init())
+    // can route input through the master fd; the x86 device nodes
+    // (keyboard/mouse/fb) are registered after PTY so pty_init has a
+    // clean view of devfs; the partition-mount + tmpfs + procfs come
+    // last so user-space can see /boot, /, /tmp, /proc by the time
+    // init.elf spawns.  TTY wiring and the /dev smoke probe are now
+    // owned by tty_boot_init() and fs_boot_probe_devfs() (Task 3).
+    fs_boot_prepare();
 
     pty_init();                     // init PTY table + register /dev/ptmx
 
-    static const struct devfs_ops keyboard_ops = {
-        .read = keyboard_devfs_read,
-        .poll = keyboard_poll_dev,
-    };
-    static const struct devfs_ops mouse_ops = {
-        .read = mouse_devfs_read,
-        .poll = mouse_poll_dev,
-    };
-    extern const struct devfs_ops fb_ops;
-    devfs_register_chrdev("keyboard", NULL, &keyboard_ops);
-    if (subsys_status("mouse") == 1 &&
-        devfs_register_chrdev("mouse", NULL, &mouse_ops) != 0)
-        log_err("mouse: failed to register /dev/mouse\n");
-    devfs_register_chrdev("fb", NULL, &fb_ops);
+    x86_64_boot_device_nodes();     // register keyboard/mouse/fb chrdevs
 
-    // Register physical disks in /dev
-    for (int i = 0; i < block_device_count(); i++) {
-        block_device_t *dev = block_device_get(i);
-        devfs_register_blkdev(dev->name, dev);
-    }
+    fs_boot_mounts();               // block-device devfs + GPT/FAT32/ext2 mounts + tmpfs/procfs
 
-    // Try GPT partition table scan
-    gpt_info_t *gpt = (block_device_count() > 0)
-                      ? gpt_scan(block_device_get(0)) : NULL;
-
-    if (!gpt) {
-        // Fallback: old single-FAT32 layout
-        if (block_device_count() > 0) {
-            block_device_t *dev = block_device_get(0);
-            fat32_fs_t *fs = NULL;
-            if (0 == fat32_init(dev, &fs))
-                vfs_mount("/", dev, &fat_vfs_ops, fs);
-        }
-    } else {
-        // Dual-partition layout:
-        //   gpt->partitions[0] = hda1 (FAT32 ESP) → /boot
-        //   gpt->partitions[1] = hda2 (ext2)      → /
-        if (gpt->count >= 2) {
-            ext2_fs_t *ext2_fs = NULL;
-            fat32_fs_t *fat_fs = NULL;
-
-            if (0 == ext2_init(gpt->partitions[1].dev, &ext2_fs))
-                vfs_mount("/", gpt->partitions[1].dev, &ext2_vfs_ops, ext2_fs);
-            else
-                serial_printk("EXT2: mount failed — / not available\n");
-
-            if (0 == fat32_init(gpt->partitions[0].dev, &fat_fs))
-                vfs_mount("/boot", gpt->partitions[0].dev, &fat_vfs_ops, fat_fs);
-            else
-                serial_printk("FAT32: /boot mount failed\n");
-        }
-    }
-
-    // /tmp → tmpfs (independent of disk)
-    tmpfs_init();
-
-    procfs_init();                  // /proc
-
-    // ═══ 7. Console TTY ═════════════════════════════════════
-    // console_putchar as output — routes all user-space writes
-    // through the VT100 CSI terminal emulator.
-    tty_t *console = tty_alloc(console_putchar, NULL);
-    if (console) {
-        serial_set_tty(console);         // serial IRQ → TTY
-        keyboard_set_tty(console);       // keyboard IRQ → TTY
-        tty_set_dev_tty(console);        // /dev/tty read/write → TTY
-        serial_printk("tty: console TTY created\n");
-    }
-
-    // Register /dev/tty (magic → controlling terminal) and /dev/tty0
-    // (direct physical console) AFTER keyboard_set_tty so that
-    // keyboard_get_tty() returns the correct pointer for private_data.
-    devfs_register_chrdev("tty",  keyboard_get_tty(), &tty_magic_ops);
-    devfs_register_chrdev("tty0", keyboard_get_tty(), &tty_phys_ops);
-
-    vfs_debug_list("/dev");
-
-    // Quick smoke test: /dev/null
-    vfs_node_t *nul = vfs_lookup("/dev/null");
-    if (nul) {
-        char c;
-        int r = vfs_read(nul, 0, 1, &c);
-        int w = vfs_write(nul, 0, 4, "test");
-        serial_printk("devfs: /dev/null read=%d write=%d\n", r, w);
-        vfs_node_put(nul);
-    }
+    // ═══ 7. Console TTY + /dev smoke probe (Task 3 split) ═════
+    // tty_boot_init() allocates the console TTY, wires serial/keyboard/
+    // dev_tty to it (preserving the if(console) scope verbatim), then
+    // registers /dev/tty and /dev/tty0.  fs_boot_probe_devfs() lists
+    // /dev and runs the /dev/null read/write smoke test.  The split
+    // mirrors the Task-2 partition between FS mount work and probe
+    // work; the brief forbids calling fs_boot_probe_devfs() from
+    // fs_boot_mounts().
+    tty_boot_init();
+    fs_boot_probe_devfs();
 
     // ═══ 8. Per-CPU + SMP ═══════════════════════════════════
-    {
-        uint32_t cpu_idx = 0;
-        for (uint32_t i = 0; i < apic_info.lapic_count; i++) {
-            if (!(apic_info.lapics[i].flags & 1))
-                continue;
-
-            if (cpu_idx >= NR_CPUS) {
-                serial_printk("percpu: APIC id=%u DROPPED (NR_CPUS=%u)\n",
-                              apic_info.lapics[i].apic_id, (unsigned)NR_CPUS);
-                continue;
-            }
-
-            percpu_init(cpu_idx, apic_info.lapics[i].apic_id);
-
-            if (cpu_idx == 0) {
-                percpu_data[0].tss = &init_tss[0];
-                percpu_data[0].tss_hw = arch_task_boot_state();
-                percpu_install_gs(0);
-                percpu_data[0].online = 1;
-                serial_printk("percpu: BSP  (cpu=%u, apic_id=%u) online\n",
-                              cpu_idx, apic_info.lapics[i].apic_id);
-            } else {
-                serial_printk("percpu: AP   (cpu=%u, apic_id=%u) registered\n",
-                              cpu_idx, apic_info.lapics[i].apic_id);
-            }
-            cpu_idx++;
-        }
-        serial_printk("percpu: %u CPU(s) registered (%u in MADT)\n",
-                      cpu_idx, apic_info.lapic_count);
-        num_cpus = cpu_idx;
-    }
-
-    // 显式启动 tick 源：GS base 已装（main.c percpu_install_gs(0)），
-    // this_cpu() 可用。tick_start 先掩 PIT 再启 LAPIC，失败回退 PIT。
-    tick_start();
-
-    smp_boot_aps();
-
-    // per-CPU 子系统二次 init
-    arch_register_subsys_percpu();
-    subsys_init_percpu();
+    // x86_64_boot_percpu() owns MADT traversal, percpu_init(), BSP
+    // TSS/GS/online, and num_cpus publication.  x86_64_boot_aps()
+    // owns tick_start() → smp_boot_aps() → per-CPU subsystem
+    // dispatch.  Both helpers live in kernel/arch/x86_64/smp/boot.c;
+    // see <arch/x86_64/smp_boot.h> for the interface.
+    //
+    // Task 6 moved x86_64_boot_percpu() to just after
+    // x86_64_boot_subsystems() (before random_init) — see the audit
+    // note there.  x86_64_boot_aps() stays in place here.
+    x86_64_boot_aps();
 
 #ifdef OS01_SELFTEST
     serial_printk("[selftest] running built-in tests...\n");
