@@ -88,42 +88,10 @@ int kernel_main(const struct boot_context *bootctx)
     }
 
     // ═══ 1. CPU + interrupt infrastructure ═══════════════════
-    Pos.Phy_addr = (uint32_t *)bootctx->graphics.FrameBufferBase;
-    Pos.FB_length = bootctx->graphics.FrameBufferSize;
-    Pos.XResolution = bootctx->graphics.HorizontalResolution;
-    Pos.YResolution = bootctx->graphics.VerticalResolution;
-    spin_init(&Pos.lock);
-
-    arch_task_init_early();
-
-    sys_vector_install();      // syscall + exception IDT entries
-    irq_install();             // IRQ 0x20–0x37 IDT entries
-
-    // Serial: hardware init only (IER=0, no IRQ yet).
-    init_serial();             // baud/line/FIFO — for serial_printk
-    serial_printk("serial port init succeed\n");
-
-    // EFER NXE — enable No-eXecute for user-space page tables
-    arch_cpu_enable_nx();
-    serial_printk("EFER: NXE enabled\n");
+    x86_64_boot_early(bootctx);
 
     // ═══ 2. Memory subsystem ═════════════════════════════════
-    PMMngr.start_code  = (uint64_t)&_text;
-    PMMngr.end_code    = (uint64_t)&_etext;
-    PMMngr.end_data    = (uint64_t)&_edata;
-    PMMngr.end_rodata  = (uint64_t)&_erodata;
-    PMMngr.start_brk   = (uint64_t)&_end;
-
-    frame_buffer_early_init();
-    boot_logo_show();                 // OS01 boot logo
-
-    pmm_init(bootctx);                       // physical page allocator
-    vmm_init();                          // virtual memory (page tables)
-    frame_buffer_init();                 // remap FB at VIRT_FRAMEBUFFER_OFFSET
-    color_printk(GREEN, BLACK, "frame buffer remap succeed\n");
-
-    // ═══ RSDP: 传递给 arch 子系统 ═══
-    arch_boot_rsdp = bootctx->firmware.acpi_rsdp;
+    x86_64_boot_memory(bootctx);
 
     // ═══ 3-6. Subsystem framework ══════════════════════════════════
     // arch_register_subsys() + subsys_init_all() dispatches:
@@ -131,8 +99,7 @@ int kernel_main(const struct boot_context *bootctx)
     //   Phase 4: timers (timer, pit, lapic-timer)
     //   Phase 5: device IRQs (keyboard, serial)
     //   Phase 6: storage (ahci)
-    arch_register_subsys();
-    subsys_init_all();
+    x86_64_boot_subsystems(bootctx);
 
     random_init(bootctx);               // seed the CSPRNG pool (BSP, once)
 
