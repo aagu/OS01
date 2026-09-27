@@ -1,5 +1,6 @@
 #include <string.h>
 #include <core/printk.h>
+#include <log/log.h>
 #include <memory/memory.h>
 #include <memory/pmm.h>
 #include <arch/gate.h>
@@ -14,6 +15,7 @@
 #include <intr/apic.h>
 #include <driver/serial.h>
 #include <driver/keyboard.h>
+#include <driver/mouse.h>
 #include <block/blockdev.h>
 #include <fs/vfs.h>
 #include <fs/fat.h>
@@ -153,8 +155,15 @@ int kernel_main(const struct boot_context *bootctx)
         .read = keyboard_devfs_read,
         .poll = keyboard_poll_dev,
     };
+    static const struct devfs_ops mouse_ops = {
+        .read = mouse_devfs_read,
+        .poll = mouse_poll_dev,
+    };
     extern const struct devfs_ops fb_ops;
     devfs_register_chrdev("keyboard", NULL, &keyboard_ops);
+    if (subsys_status("mouse") == 1 &&
+        devfs_register_chrdev("mouse", NULL, &mouse_ops) != 0)
+        log_err("mouse: failed to register /dev/mouse\n");
     devfs_register_chrdev("fb", NULL, &fb_ops);
 
     // Register physical disks in /dev

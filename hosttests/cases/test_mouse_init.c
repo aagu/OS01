@@ -4,6 +4,10 @@
 #include "test_framework.h"
 #include <driver/i8042.h>
 #include <driver/mouse_proto.h>
+#include <driver/mouse.h>
+#include <fs/poll.h>
+#include <percpu/percpu.h>
+#include <errno.h>
 #include <intr/interrupt.h>
 
 extern int mouse_init(void);
@@ -23,6 +27,20 @@ static int force_f4_deadline;
 static uint64_t f4_timeout_cycle;
 static uint64_t f5_write_cost, rollback_write_cost;
 static int wrong_source_pending, keyboard_ack_count;
+uint32_t num_cpus;
+int i8042_mock_lock_depth;
+int kbd_mock_this_cpu_calls;
+static percpu_t mock_cpu;
+percpu_t *this_cpu(void) { kbd_mock_this_cpu_calls++; return &mock_cpu; }
+static poll_wait_entry_t poll_entries[12];
+static int poll_n;
+void poll_wait(poll_table_t *pt, list_t *list, spinlock_T *lock)
+{ assert_true(i8042_mock_lock_depth > 0);
+  poll_wait_entry_t *e = &poll_entries[poll_n++];
+  e->poll_wq = &pt->wq; e->fd_lock = lock;
+  list_init(&e->node); list_add_to_before(list, &e->node); }
+void wait_queue_wake_all(wait_queue_t *wq)
+{ assert_true(i8042_mock_lock_depth > 0); wq->mock++; }
 static i8042_consumer_t keyboard_consumer;
 static int last_wheel_mode, first_command_write;
 static void (*irq_handler)(uint64_t, uint64_t, pt_regs_t *);
@@ -95,9 +113,11 @@ int i8042_write_aux_byte(uint8_t b)
     return 0;
 }
 int mouse_proto_feed(mouse_proto_state_t *s, uint8_t b, mouse_event_t *ev)
-{ (void)s; (void)ev;
+{ (void)b;
   if (packet_events < (int)sizeof(packet_bytes)) packet_bytes[packet_events] = b;
-  packet_events++; return 0; }
+  packet_events++;
+  if (++s->count == 3) { s->count = 0; memset(ev, 0, sizeof(*ev)); ev->dx = packet_events / 3; return 1; }
+  return 0; }
 void mouse_proto_reset(mouse_proto_state_t *s, bool wheel)
 { s->count = 0; s->wheel_mode = wheel; last_wheel_mode = wheel; }
 
@@ -116,6 +136,36 @@ static void reset_case(uint8_t cb)
   i8042_set_kbd_consumer(keyboard_ack);
   consumer = 0; pending_n = pending_pos = 0;
   irq_registered = irq_unregistered = 0; }
+static void inject_event(void)
+{ assert_not_null(consumer); consumer(0x08); consumer(0); consumer(0); }
+static void test_event_io_and_poll(void)
+{
+  mouse_event_t events[3];
+  reset_case(0x41); wheel_id = 0; assert_eq(0, mouse_init());
+  assert_eq(-EAGAIN, mouse_devfs_read(0, 0, sizeof(events), events));
+  assert_eq(-EINVAL, mouse_devfs_read(0, 0, 7, events));
+  poll_table_t pts[10] = {0}; poll_n = 0;
+  for (int i = 0; i < 10; i++)
+      assert_eq(0, mouse_poll_dev(0, POLLIN, &pts[i]));
+  num_cpus = 0; kbd_mock_this_cpu_calls = 0;
+  inject_event();
+  for (int i = 0; i < 10; i++) assert_eq(1, pts[i].wq.mock);
+  assert_eq(0, kbd_mock_this_cpu_calls);
+  assert_eq(POLLIN | POLLRDNORM, mouse_poll_dev(0, POLLIN, &pts[0]));
+  assert_eq(8, mouse_devfs_read(0, 0, 15, events));
+  assert_eq(1, events[0].dx);
+  assert_eq(-EAGAIN, mouse_devfs_read(0, 0, 8, events));
+  num_cpus = 1; inject_event(); inject_event();
+  assert_eq(2, kbd_mock_this_cpu_calls);
+  assert_eq(16, mouse_devfs_read(0, 0, 24, events));
+  assert_eq(2, events[0].dx); assert_eq(3, events[1].dx);
+  assert_eq(-EAGAIN, mouse_devfs_read(0, 0, 8, events));
+  reset_case(0x41); wheel_id = 0; assert_eq(0, mouse_init());
+  for (int i = 0; i < 66; i++) inject_event();
+  assert_eq(2, mouse_dropped_events());
+  assert_eq(24, mouse_devfs_read(0, 0, sizeof(events), events));
+  assert_eq(3, events[0].dx); assert_eq(4, events[1].dx);
+}
 static void check_rollback(void)
 { assert_eq(0, mouse_ready()); assert_eq(0, consumer_active);
   assert_eq(0, command_byte & 2);
@@ -199,7 +249,7 @@ static void test_command_byte_write_failures(void)
   }
 }
 int main(void)
-{ TEST_SUITE("mouse initialization"); test_success(0x41); test_success(0x63);
+{ TEST_SUITE("mouse initialization"); test_event_io_and_poll(); test_success(0x41); test_success(0x63);
   test_payload_values_not_filtered();
   test_stale_drain_must_succeed();
   test_f4_timeout_still_sends_f5();

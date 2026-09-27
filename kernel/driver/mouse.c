@@ -5,13 +5,87 @@
 #include <driver/mouse_proto.h>
 #include <intr/interrupt.h>
 #include <subsys/subsys.h>
+#include <percpu/percpu.h>
+#include <errno.h>
+#include <kernel.h>
 /* Raw cycles avoid clocksource_read_ns(), which needs GS before phase 7. */
 extern uint64_t clocksource_cycles(void);
 extern uint64_t clocksource_freq_hz(void);
 
-/* The i8042 callback runs under the controller lock. It only appends to the
- * bounded reply FIFO or feeds the pure packet parser; no port I/O, sleep or
- * second lock is permitted here. Task 8 will attach an event sink. */
+/* The i8042 callback runs under the controller lock. It performs no port
+ * I/O or sleep, and only takes the event lock after the i8042 lock.
+ * Neither event read nor poll acquires the i8042 lock. */
+#define MOUSE_RING_CAPACITY 64
+static mouse_event_t events[MOUSE_RING_CAPACITY];
+static unsigned event_head, event_count;
+static uint64_t dropped_events;
+static spinlock_T event_lock;
+static list_t event_poll;
+
+static void publish_event(const mouse_event_t *event)
+{
+    uint64_t flags = spin_lock_irqsave(&event_lock);
+    if (event_count == MOUSE_RING_CAPACITY) {
+        event_head = (event_head + 1) % MOUSE_RING_CAPACITY;
+        event_count--;
+        dropped_events++;
+    }
+    events[(event_head + event_count) % MOUSE_RING_CAPACITY] = *event;
+    event_count++;
+    /* Removing each entry under its fd_lock is the poll cleanup protocol.
+     * Wake before releasing it so the poll table cannot be freed in between. */
+    while (!list_is_empty(&event_poll)) {
+        list_t *node = event_poll.next;
+        list_del_init(node);
+        poll_wait_entry_t *entry = container_of(node, poll_wait_entry_t, node);
+        wait_queue_wake_all(entry->poll_wq);
+    }
+    spin_unlock_irqrestore(&event_lock, flags);
+    if (num_cpus != 0)
+        this_cpu()->need_resched = 1;
+}
+
+int mouse_devfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
+{
+    (void)node; (void)offset;
+    if (size < sizeof(mouse_event_t))
+        return -EINVAL;
+    uint64_t flags = spin_lock_irqsave(&event_lock);
+    if (!event_count) {
+        spin_unlock_irqrestore(&event_lock, flags);
+        return -EAGAIN;
+    }
+    uint64_t requested = size / sizeof(mouse_event_t);
+    unsigned n = requested > event_count ? event_count : (unsigned)requested;
+    for (unsigned i = 0; i < n; i++) {
+        ((mouse_event_t *)buffer)[i] = events[event_head];
+        event_head = (event_head + 1) % MOUSE_RING_CAPACITY;
+    }
+    event_count -= n;
+    spin_unlock_irqrestore(&event_lock, flags);
+    return (int)(n * sizeof(mouse_event_t));
+}
+
+uint32_t mouse_poll_dev(void *priv, uint32_t requested, poll_table_t *pt)
+{
+    (void)priv;
+    uint64_t flags = spin_lock_irqsave(&event_lock);
+    uint32_t mask = 0;
+    if (event_count)
+        mask = POLLIN | POLLRDNORM;
+    else if (poll_requested_read(requested) && pt && !pt->triggered)
+        poll_wait(pt, &event_poll, &event_lock);
+    spin_unlock_irqrestore(&event_lock, flags);
+    return mask;
+}
+
+uint64_t mouse_dropped_events(void)
+{
+    uint64_t flags = spin_lock_irqsave(&event_lock);
+    uint64_t count = dropped_events;
+    spin_unlock_irqrestore(&event_lock, flags);
+    return count;
+}
 static mouse_proto_state_t packet;
 static volatile bool ready;
 static volatile bool command_mode;
@@ -53,7 +127,8 @@ static void consume_aux(uint8_t byte)
      * FE and AA are legal in displacement/wheel slots; only command_mode
      * interprets those values as replies. */
     mouse_event_t event;
-    (void)mouse_proto_feed(&packet, byte, &event);
+    if (mouse_proto_feed(&packet, byte, &event) == 1)
+        publish_event(&event);
 }
 
 static int wait_reply(uint8_t *out, uint64_t deadline)
@@ -120,6 +195,10 @@ int mouse_init(void)
     bool wheel = false;
     int rc;
 
+    spin_init(&event_lock);
+    list_init(&event_poll);
+    event_head = event_count = 0;
+    dropped_events = 0;
     ready = false;
     command_mode = true;
     stream_after_ack = false;
