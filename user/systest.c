@@ -1046,6 +1046,42 @@ static void test_ext2_write(void)
     unlink(fname);
 }
 
+// ── /boot FAT32 mount probe (boot FAT32 ESP) ────────────
+// The QEMU disk image built by tools/mkdisk.c is a dual-partition GPT
+// layout: partition 1 (hda1) is the FAT32 ESP containing `kernel.bin`
+// at the ESP root, partition 2 (hda2) is the ext2 root containing
+// `/kernel.bin` (NOT `/boot/...`). So a successful `open("/boot/kernel.bin")`
+// proves the FAT32 `/boot` mount actually succeeded; if the mount had
+// silently failed (or never run), the open would ENOENT because the ext2
+// root has no `/boot` directory. fstat + read of the first byte
+// confirms we're not just opening a zero-byte stub — the FAT32 read
+// path is functional end-to-end.
+static void test_boot_fat_mount(void)
+{
+    const char *path = "/boot/kernel.bin";
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        FAIL("boot_fat_mount: open %s returned %d errno=%d", path, fd, errno);
+        return;
+    }
+
+    struct stat st;
+    int ret = fstat(fd, &st);
+    if (ret != 0) {
+        FAIL("boot_fat_mount: fstat ret=%d errno=%d", ret, errno);
+        close(fd);
+        return;
+    }
+    CHECK3(st.st_size > 0, "boot_fat_mount", "fstat size > 0");
+
+    uint8_t first = 0;
+    int64_t r = read(fd, &first, 1);
+    CHECK3(r == 1, "boot_fat_mount", "read returned 1 byte");
+
+    close(fd);
+}
+
 // ── select/pselect tests ──────────────────────────────
 
 static int64_t time_ms(void)
@@ -3415,6 +3451,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"sync",              test_sync},
     {"sigprocmask",       test_sigprocmask},
     {"ext2_write",        test_ext2_write},
+    {"boot_fat_mount",    test_boot_fat_mount},
     // {"pipe+dup2",         test_pipe_dup2_inherit},
     {"reboot",            test_reboot_skip},
     {"select_basic",        test_select_basic},
