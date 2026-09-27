@@ -48,6 +48,7 @@ static int out_n;
 
 static int      in60_reads;             /* arch_inb(0x60) invocations */
 static int      ibf_block;              /* force status bit1 stuck on */
+static int      obf_stuck;              /* force status bit0 stuck on */
 static uint64_t mock_cycles;            /* virtual cycle counter */
 static uint64_t mock_step = 1000;       /* cycles per port access */
 static uint64_t mock_freq = 1000000;    /* 1 MHz => 1 cycle = 1 us */
@@ -87,16 +88,16 @@ uint8_t arch_inb(uint16_t port)
     mock_cycles += mock_step;
     if (port == 0x64) {
         uint8_t st = 0;
-        if (obf_head != obf_tail) {
+        if (obf_stuck || obf_head != obf_tail) {
             st |= 0x01;                              /* OBF */
-            if (obf_q[obf_head].aux) st |= 0x20;     /* AUX source */
+            if (!obf_stuck && obf_q[obf_head].aux) st |= 0x20; /* AUX source */
         }
         if (ibf_block) st |= 0x02;                   /* IBF never empties */
         return st;
     }
     if (port == 0x60) {
+        in60_reads++;                   /* counted even for stuck-OBF reads */
         if (obf_head == obf_tail) return 0xFF;       /* unpaired read */
-        in60_reads++;
         uint8_t b = obf_q[obf_head].byte;
         obf_head++;
         return b;
@@ -157,6 +158,7 @@ static void fixture_reset(void)
     out_n = 0;
     in60_reads = 0;
     ibf_block = 0;
+    obf_stuck = 0;
     mock_cycles = 0;
     mock_step = 1000;
     mock_freq = 1000000;
@@ -358,6 +360,24 @@ static void test_write_aux_byte_sequence(void)
     assert_out_seq(exp, 2);
 }
 
+/* Fault injection: OBF stuck on (bad status line) => pump must RETURN
+ * (bounded drain) instead of spinning forever in-lock with IRQs off. */
+static void test_pump_stuck_obf_returns(void)
+{
+    fixture_reset();
+    i8042_set_kbd_consumer(kbd_consume);
+    i8042_set_aux_consumer(aux_consume);
+    obf_stuck = 1;
+
+    assert_eq(I8042_ERR_TIMEOUT, i8042_pump());
+
+    /* hit the per-call cap (32 paired reads), then gave up */
+    assert_eq(32, in60_reads);
+    assert_eq(32, kbd_count);          /* garbage bytes, kbd source */
+    /* lock released on the failure path */
+    assert_eq(0, i8042_mock_lock_depth);
+}
+
 /* Uncalibrated clocksource => every transaction fails immediately,
  * without touching the ports. */
 static void test_zero_freq_fails_transactions(void)
@@ -380,6 +400,7 @@ TEST_LIST_BEGIN
 TEST_ENTRY(test_pump_interleaved_kbd_aux),
 TEST_ENTRY(test_pump_obf_empty_no_0x60_read),
 TEST_ENTRY(test_pump_drops_aux_without_consumer),
+TEST_ENTRY(test_pump_stuck_obf_returns),
 TEST_ENTRY(test_read_command_byte_drains_preexisting),
 TEST_ENTRY(test_read_command_byte_response_not_dispatched),
 TEST_ENTRY(test_ibf_timeout_returns_negative),

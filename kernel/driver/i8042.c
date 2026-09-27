@@ -152,13 +152,28 @@ void i8042_set_aux_consumer(i8042_consumer_t consumer)
     aux_consumer = consumer;
 }
 
+// Upper bound on bytes drained by one i8042_pump() call. A healthy
+// controller presents at most a handful of bytes per IRQ; a stuck OBF
+// status line (faulty hardware) must not spin forever while holding the
+// lock with local IRQs off.
+#define I8042_PUMP_MAX_BYTES 32
+
 int i8042_pump(void)
 {
+    int rc = I8042_OK;
+
     uint64_t flags = spin_lock_irqsave(&i8042_lock);
-    while (i8042_read_and_dispatch() != I8042_SRC_NONE)
-        ;
+    for (int drained = 0; drained < I8042_PUMP_MAX_BYTES; drained++) {
+        if (i8042_read_and_dispatch() == I8042_SRC_NONE)
+            goto out;                   /* output buffer drained empty */
+    }
+    /* OBF still asserted after the cap: give up and report it instead of
+     * spinning forever in-lock with IRQs off. */
+    rc = I8042_ERR_TIMEOUT;
+
+out:
     spin_unlock_irqrestore(&i8042_lock, flags);
-    return I8042_OK;
+    return rc;
 }
 
 int i8042_write_controller_cmd(uint8_t cmd)

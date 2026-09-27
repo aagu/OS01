@@ -40,7 +40,10 @@ void i8042_set_aux_consumer(i8042_consumer_t consumer);
  * inside one spin_lock_irqsave(i8042_lock) critical section and dispatch
  * by the AUX bit (bit 5). Never reads 0x60 when OBF (bit 0) is clear.
  * The IRQ line that triggered the call is only a wake-up hint — actual
- * ownership is decided per byte by the status register. Returns 0. */
+ * ownership is decided per byte by the status register.
+ * Returns I8042_OK when the buffer drained empty, or I8042_ERR_TIMEOUT
+ * if a per-call byte cap (32) was reached with OBF still asserted — a
+ * stuck status line must never spin forever in-lock with IRQs off. */
 int i8042_pump(void);
 
 /* Write a controller command to 0x64, waiting (bounded) for IBF empty. */
