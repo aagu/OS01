@@ -16,7 +16,10 @@ static uint8_t command_byte, original_command_byte;
 static int cmd_writes, aux_writes, fail_aux_at, resend_at, resend_left;
 static int bad_source_at, bad_bat, bad_id, probe_reject, wheel_id = 3;
 static int reporting, consumer_active, packet_events;
+static uint8_t packet_bytes[64];
 static int immediate_packet;
+static int fail_stale_drain, fail_cmd_write_at, fail_cmd_write_from;
+static int force_f4_deadline;
 static int wrong_source_pending, keyboard_ack_count;
 static i8042_consumer_t keyboard_consumer;
 static int last_wheel_mode, first_command_write;
@@ -44,6 +47,8 @@ void i8042_set_kbd_consumer(i8042_consumer_t cb) { keyboard_consumer = cb; }
 static void keyboard_ack(uint8_t b) { if (b == 0xFA) keyboard_ack_count++; }
 int i8042_pump(void)
 { now += pump_step;
+  if (fail_stale_drain && cmd_writes == 2 && aux_writes == 9)
+      return I8042_ERR_TIMEOUT;
   if (wrong_source_pending) {
       wrong_source_pending = 0;
       if (keyboard_consumer) keyboard_consumer(0xFA);
@@ -54,12 +59,19 @@ int i8042_write_controller_cmd(uint8_t b) { (void)b; now += 100; return 0; }
 int i8042_read_command_byte(uint8_t *out) { *out = command_byte; now += 100; return 0; }
 int i8042_write_command_byte(uint8_t b)
 { if (!cmd_writes) first_command_write = b;
-  command_byte = b; cmd_writes++; now += 100; return 0; }
+  cmd_writes++; now += 100;
+  if (cmd_writes == fail_cmd_write_at ||
+      (fail_cmd_write_from && cmd_writes >= fail_cmd_write_from))
+      return I8042_ERR_TIMEOUT;
+  command_byte = b; return 0; }
 int i8042_write_aux_byte(uint8_t b)
 {
     aux_writes++; now += 100;
     if (aux_writes == fail_aux_at) return -1;
     pending_n = pending_pos = 0;
+    if (b == 0xF4 && force_f4_deadline) {
+        now = 400000; reporting = 1; return 0;
+    }
     if (aux_writes == bad_source_at) {
         wrong_source_pending = 1; return 0;
     }
@@ -79,7 +91,9 @@ int i8042_write_aux_byte(uint8_t b)
     return 0;
 }
 int mouse_proto_feed(mouse_proto_state_t *s, uint8_t b, mouse_event_t *ev)
-{ (void)s; (void)b; (void)ev; packet_events++; return 0; }
+{ (void)s; (void)ev;
+  if (packet_events < (int)sizeof(packet_bytes)) packet_bytes[packet_events] = b;
+  packet_events++; return 0; }
 void mouse_proto_reset(mouse_proto_state_t *s, bool wheel)
 { s->count = 0; s->wheel_mode = wheel; last_wheel_mode = wheel; }
 
@@ -88,7 +102,9 @@ static void reset_case(uint8_t cb)
   original_command_byte = command_byte = cb; cmd_writes = aux_writes = 0;
   fail_aux_at = resend_at = resend_left = bad_source_at = bad_bat = bad_id = probe_reject = 0;
   wheel_id = 3; reporting = consumer_active = packet_events = 0;
+  memset(packet_bytes, 0, sizeof(packet_bytes));
   immediate_packet = 0;
+  fail_stale_drain = fail_cmd_write_at = fail_cmd_write_from = force_f4_deadline = 0;
   last_wheel_mode = first_command_write = 0; irq_handler = 0;
   wrong_source_pending = keyboard_ack_count = 0;
   i8042_set_kbd_consumer(keyboard_ack);
@@ -128,8 +144,50 @@ static void test_failures(uint8_t cb)
   check_rollback(); assert_eq(11, aux_writes); /* F5 bounded attempt */
   reset_case(cb); bad_source_at = 10; assert_true(mouse_init() != 0);
   check_rollback(); assert_eq(11, aux_writes); }
+static void test_payload_values_not_filtered(void)
+{
+  reset_case(0x41); assert_eq(0, mouse_init());
+  const uint8_t packet[] = {0x08, 0xFA, 0xFE, 0x08, 0xAA, 0x01};
+  memcpy(pending, packet, sizeof(packet)); pending_n = sizeof(packet);
+  irq_handler(0, 0, 0);
+  assert_eq(sizeof(packet), packet_events);
+  assert_mem_eq(packet, packet_bytes, sizeof(packet));
+}
+static void test_stale_drain_must_succeed(void)
+{
+  reset_case(0x41); fail_stale_drain = 1;
+  assert_true(mouse_init() != 0); check_rollback();
+  assert_eq(0, reporting); assert_eq(9, aux_writes);
+}
+static void test_f4_timeout_still_sends_f5(void)
+{
+  reset_case(0x41); force_f4_deadline = 1;
+  assert_true(mouse_init() != 0); check_rollback();
+  assert_eq(11, aux_writes); assert_eq(0, reporting);
+}
+static void test_rollback_write_failure_keeps_irq(void)
+{
+  reset_case(0x41); fail_aux_at = 10; fail_cmd_write_from = 3;
+  assert_true(mouse_init() != 0);
+  assert_eq(2, command_byte & 2);
+  assert_eq(1, irq_registered); assert_eq(0, irq_unregistered);
+  assert_eq(0, consumer_active); assert_eq(0, mouse_ready());
+}
+static void test_command_byte_write_failures(void)
+{
+  for (int write = 1; write <= 2; write++) {
+      reset_case(0x63); fail_cmd_write_at = write;
+      assert_true(mouse_init() != 0); check_rollback();
+      assert_true(cmd_writes >= write + 1);
+  }
+}
 int main(void)
 { TEST_SUITE("mouse initialization"); test_success(0x41); test_success(0x63);
+  test_payload_values_not_filtered();
+  test_stale_drain_must_succeed();
+  test_f4_timeout_still_sends_f5();
+  test_rollback_write_failure_keeps_irq();
+  test_command_byte_write_failures();
   reset_case(0x41); wheel_id = 0; assert_eq(0, mouse_init()); assert_eq(0, last_wheel_mode);
   reset_case(0x41); probe_reject = 1; assert_eq(0, mouse_init()); assert_eq(0, last_wheel_mode);
   reset_case(0x41); immediate_packet = 1; assert_eq(0, mouse_init());

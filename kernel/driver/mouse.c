@@ -18,18 +18,18 @@ static volatile bool command_mode;
 static volatile bool stream_after_ack;
 static volatile uint8_t reply[8];
 static volatile unsigned reply_head, reply_tail;
-static uint64_t freq_hz, probe_deadline;
+static uint64_t freq_hz, probe_deadline, cleanup_deadline;
 
 static bool expired(uint64_t deadline)
 {
     return (int64_t)(clocksource_cycles() - deadline) >= 0;
 }
 
-static uint64_t deadline_ms(unsigned ms)
+static uint64_t deadline_ms(unsigned ms, uint64_t cap)
 {
     uint64_t delta = freq_hz / 1000 * ms;
     uint64_t d = clocksource_cycles() + delta;
-    return (int64_t)(d - probe_deadline) > 0 ? probe_deadline : d;
+    return (int64_t)(d - cap) > 0 ? cap : d;
 }
 
 static void consume_aux(uint8_t byte)
@@ -49,17 +49,16 @@ static void consume_aux(uint8_t byte)
     }
     if (!ready)
         return;
-    /* ACK/BAT/ID are control traffic, never packet headers. A late reply
-     * after a failed probe is isolated by removal of this consumer. */
-    if (byte == 0xFA || byte == 0xFE || byte == 0xAA)
-        return;
+    /* Once reporting starts, every byte is packet data. The values FA,
+     * FE and AA are legal in displacement/wheel slots; only command_mode
+     * interprets those values as replies. */
     mouse_event_t event;
     (void)mouse_proto_feed(&packet, byte, &event);
 }
 
 static int wait_reply(uint8_t *out, uint64_t deadline)
 {
-    while (!expired(deadline) && !expired(probe_deadline)) {
+    while (!expired(deadline)) {
         if (reply_head != reply_tail) {
             *out = reply[reply_head++ % sizeof(reply)];
             return 0;
@@ -74,9 +73,9 @@ static int wait_reply(uint8_t *out, uint64_t deadline)
 
 /* 0 success; -2 explicit device refusal (wheel negotiation may fall back);
  * -1 timeout/other failure. A byte has at most two RESEND retries. */
-static int send_byte(uint8_t byte)
+static int send_byte_with_cap(uint8_t byte, uint64_t cap)
 {
-    uint64_t deadline = deadline_ms(60);
+    uint64_t deadline = deadline_ms(60, cap);
     for (unsigned attempt = 0; attempt < 3; attempt++) {
         uint8_t answer;
         if (expired(deadline) || i8042_write_aux_byte(byte) != I8042_OK)
@@ -93,10 +92,15 @@ static int send_byte(uint8_t byte)
     return -1;
 }
 
+static int send_byte(uint8_t byte)
+{
+    return send_byte_with_cap(byte, probe_deadline);
+}
+
 static int expect_byte(uint8_t expected)
 {
     uint8_t answer;
-    if (wait_reply(&answer, deadline_ms(60)) != 0)
+    if (wait_reply(&answer, deadline_ms(60, probe_deadline)) != 0)
         return -1;
     return answer == expected ? 0 : -1;
 }
@@ -128,7 +132,9 @@ int mouse_init(void)
         goto fail;
     /* Reserve 100 ms of the 500 ms startup ceiling for a final bounded
      * controller write and cleanup, even when the last reply times out. */
-    probe_deadline = clocksource_cycles() + freq_hz * 400 / 1000;
+    uint64_t start = clocksource_cycles();
+    probe_deadline = start + freq_hz * 400 / 1000;
+    cleanup_deadline = start + freq_hz * 500 / 1000;
     if (i8042_write_controller_cmd(0xA8) != I8042_OK || expired(probe_deadline))
         goto fail;
     if (i8042_read_command_byte(&original) != I8042_OK || expired(probe_deadline))
@@ -162,7 +168,7 @@ int mouse_init(void)
     }
     {
         uint8_t id;
-        if (wait_reply(&id, deadline_ms(60)))
+        if (wait_reply(&id, deadline_ms(60, probe_deadline)))
             goto fail;
         if (id != 0x00 && id != 0x03)
             goto fail;
@@ -178,7 +184,8 @@ base_mouse:
         goto fail;
     /* Drain residual AUX replies while still in command mode, then reset
      * packet alignment before enabling reporting. */
-    (void)i8042_pump();
+    if (i8042_pump() != I8042_OK)
+        goto fail;
     reply_head = reply_tail = 0;
     mouse_proto_reset(&packet, wheel);
     f4_sent = true;
@@ -191,15 +198,17 @@ base_mouse:
 fail:
     ready = false;
     stream_after_ack = false;
-    if (f4_sent && freq_hz && !expired(probe_deadline)) {
+    if (f4_sent && freq_hz && !expired(cleanup_deadline)) {
         /* Best effort only: an unresponsive device cannot confirm F5. */
         reply_head = reply_tail = 0;
-        (void)send_byte(0xF5);
+        command_mode = true;
+        (void)send_byte_with_cap(0xF5, cleanup_deadline);
     }
     /* Clear bit 1 before unregister_irq, regardless of firmware's bit 1. */
+    bool irq_disabled = !have_original;
     if (have_original)
-        (void)i8042_write_command_byte(original & (uint8_t)~0x02);
-    if (irq_installed)
+        irq_disabled = i8042_write_command_byte(original & (uint8_t)~0x02) == I8042_OK;
+    if (irq_installed && irq_disabled)
         (void)unregister_irq(12);
     i8042_set_aux_consumer(0);
     command_mode = false;
