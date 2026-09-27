@@ -1,12 +1,11 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <driver/keyboard.h>
-#include <intr/apic.h>
+#include <driver/i8042.h>
 #include <intr/interrupt.h>
 #include <core/debug.h>
 #include <tty/tty.h>
 #include <arch/io.h>
-#include <arch/cpu.h>
 #include <arch/spinlock.h>
 #include <fs/vfs.h>
 #include <fs/poll.h>
@@ -226,14 +225,17 @@ static void translate_and_push(uint8_t sc, bool ext)
 }
 
 // ═══════════════════════════════════════════════════════════
-//  IRQ handler — port 0x60 → ring buffer + TTY
+//  Byte consumer — dispatched by the i8042 demux layer
 // ═══════════════════════════════════════════════════════════
 
-void keyboard_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attribute__((unused)),
-                      pt_regs_t *regs __attribute__((unused)))
+// Called by i8042_pump() with the i8042 lock HELD and local IRQs
+// disabled: must not touch the i8042 ports, re-take the i8042 lock,
+// sleep, or copy user memory.  Lock order: i8042 → kbd_poll_lock.
+// This is the single scancode-ingest path for both IRQ1 and task
+// context (keyboard_poll), so the E0-prefix state lives here once —
+// no dual-static racing between handler and poller.
+static void kbd_consume(uint8_t sc)
 {
-    uint8_t sc = arch_inb(0x60);
-
     // Push raw scancode to ring buffer (for /dev/keyboard)
     if (!ring_full()) {
         scancode_ring[ring_head] = sc;
@@ -254,7 +256,7 @@ void keyboard_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __
         translate_and_push(sc, e0_prefix);
         e0_prefix = false;
     } else {
-        // One-shot: keyboard IRQ fired before TTY was set up.
+        // One-shot: keyboard byte arrived before the TTY was set up.
         // Write a lock-free debug marker to serial.
         static int warned = 0;
         if (!warned) {
@@ -262,6 +264,18 @@ void keyboard_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __
             arch_outb(0x3F8, '!');  // single byte — visible in serial output
         }
     }
+}
+
+// ── IRQ1 handler ──────────────────────────────────────────────
+// The IRQ line is only a wake-up hint: the shared i8042 layer owns
+// the bytes and decides per byte (status bit 5) whether it is a
+// keyboard or aux (mouse) byte.  pump()'s negative return (bounded
+// drain gave up on a stuck status line) is benign here — the next
+// IRQ retries.
+static void keyboard_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attribute__((unused)),
+                      pt_regs_t *regs __attribute__((unused)))
+{
+    (void)i8042_pump();
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -279,37 +293,13 @@ tty_t *keyboard_get_tty(void)
     return kbd_tty;
 }
 
-// Poll the 8042 keyboard controller for available scancodes.
-// Reads all pending bytes from port 0x60, translates them,
-// and pushes ASCII characters to the given TTY.
-// Must be called from task context (uses the same static
-// e0_prefix as the IRQ handler — safe because IRQ handler
-// runs atomically with respect to us).
+// Drain the 8042 output buffer through the shared demux layer.
+// Must be called from task context (shares the consumer's static
+// e0_prefix state with the IRQ handler — safe because both run
+// under the i8042 lock while ingesting).
 void keyboard_poll(void)
 {
-    if (!kbd_tty) return;
-
-    static bool poll_e0 = false;
-
-    while (arch_inb(0x64) & 1) {           // 8042 status: output buffer full
-        uint8_t sc = arch_inb(0x60);
-
-        // Also push raw scancode to ring buffer
-        if (!ring_full()) {
-            scancode_ring[ring_head] = sc;
-            __sync_synchronize();
-            ring_head = (ring_head + 1) % RING_SIZE;
-        }
-        keyboard_wake_pollers();
-
-        if (sc == 0xE0) {
-            poll_e0 = true;
-            continue;
-        }
-
-        translate_and_push(sc, poll_e0);
-        poll_e0 = false;
-    }
+    (void)i8042_pump();
 }
 
 int keyboard_read_scancodes(uint8_t *buffer, int size)
@@ -337,7 +327,14 @@ static void keyboard_wake_pollers(void)
     }
     spin_unlock_irqrestore(&kbd_poll_lock, flags);
 
-    this_cpu()->need_resched = 1;
+    // this_cpu() reads the GS base, which is NOT installed on the BSP
+    // until percpu_install_gs(0) in kernel_main — and the phase-5
+    // keyboard init (IRQ1 registered) runs earlier, so a keypress can
+    // arrive pre-GS.  kernel_main stores num_cpus only AFTER
+    // percpu_install_gs(0), and APs install GS before enabling local
+    // IRQs, so num_cpus != 0 implies this CPU's GS base is loaded.
+    if (num_cpus != 0)
+        this_cpu()->need_resched = 1;
 }
 
 uint32_t keyboard_poll_dev(void *priv, uint32_t requested, poll_table_t *pt)
@@ -370,14 +367,13 @@ int keyboard_devfs_read(vfs_node_t *node, uint64_t offset,
 // Enable keyboard IRQ generation at the PS/2 controller level.
 // The controller's command byte bit 0 (keyboard interrupt enable)
 // may be 0 after UEFI boot — without it, IRQ1 never fires.
-static void keyboard_enable_irq(void)
+// Runs the read-modify-write as two i8042 transactions; returns 0 on
+// success, negative when the controller failed to answer.
+static int keyboard_enable_irq(void)
 {
-    // Write command 0x20 ("read command byte") to port 0x64
-    while (arch_inb(0x64) & 2) arch_cpu_pause();  // wait for input buffer empty
-    arch_outb(0x64, 0x20);
-    // Read response from port 0x60
-    while (!(arch_inb(0x64) & 1)) arch_cpu_pause();  // wait for output buffer full
-    uint8_t cmd = arch_inb(0x60);
+    uint8_t cmd;
+    if (i8042_read_command_byte(&cmd) != I8042_OK)
+        return -1;
 
     debug_irq("kbd: PS/2 command byte was %#x", cmd);
 
@@ -388,17 +384,14 @@ static void keyboard_enable_irq(void)
     cmd |= 0x04;   // set system flag
     cmd &= ~0x08;  // ensure keyboard is enabled
 
-    // Write command 0x60 ("write command byte") to port 0x64
-    while (arch_inb(0x64) & 2) arch_cpu_pause();
-    arch_outb(0x64, 0x60);
-    // Write the byte to port 0x60
-    while (arch_inb(0x64) & 2) arch_cpu_pause();
-    arch_outb(0x60, cmd);
+    if (i8042_write_command_byte(cmd) != I8042_OK)
+        return -1;
 
     debug_irq(" → %#x\n", cmd);
+    return 0;
 }
 
-void keyboard_init(void)
+int keyboard_init(void)
 {
     ring_head = 0;
     ring_tail = 0;
@@ -412,9 +405,29 @@ void keyboard_init(void)
     kbd_ralt   = false;
     kbd_caps_lock = false;
 
-    keyboard_enable_irq();
+    // Shared controller layer first, then claim the keyboard bytes.
+    i8042_init();
+    i8042_set_kbd_consumer(kbd_consume);
 
-    register_irq(1, NULL, &keyboard_handler, 0, IRQF_TRIGGER_EDGE, "keyboard");
+    if (keyboard_enable_irq() != 0)
+        goto fail;
+
+    if (register_irq(1, NULL, &keyboard_handler, 0, IRQF_TRIGGER_EDGE, "keyboard") != 1) {
+        // Best-effort rollback: drop the IRQ-enable bit again so an
+        // enabled but unhandled IRQ1 cannot storm the CPU.
+        uint8_t cmd;
+        if (i8042_read_command_byte(&cmd) == I8042_OK)
+            i8042_write_command_byte(cmd & ~(uint8_t)0x01);
+        goto fail;
+    }
+
+    return 0;
+
+fail:
+    // Leave no half-installed consumer behind: bytes pumped after a
+    // failed init must go nowhere (no ring, no TTY, no poller wakes).
+    i8042_set_kbd_consumer(NULL);
+    return -1;
 }
 
 #include <subsys/subsys.h>
@@ -427,8 +440,9 @@ void keyboard_init(void)
 // race init order with sibling drivers).
 static int _keyboard_init_wrapper(void)
 {
-    keyboard_init();
-    return 0;
+    // Propagate the real status: subsys_init_phase maps ret != 0 to
+    // initialized = -1, so subsys_status("keyboard") becomes != 1.
+    return keyboard_init();
 }
 static int _keyboard_register(void)
 {

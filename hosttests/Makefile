@@ -615,20 +615,53 @@ I8042_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC) \
     -D_ARCH_IO_H -D_ARCH_SPINLOCK_H -D_ARCH_CPU_H \
     -include $(TEST_MOCK)/i8042_test_runtime.h
 
+# Keyboard-over-i8042 (PS/2 mouse Task 5): the REAL kernel/driver/keyboard.c
+# joins the same binary.  mock/kbd_include shadows <tty/tty.h>, <fs/vfs.h>,
+# <fs/poll.h>, <intr/interrupt.h>, <intr/apic.h>, <core/debug.h>,
+# <percpu/percpu.h> and <subsys/subsys.h> (placed BEFORE kernel/include on
+# the path), so the production source compiles unmodified for the host; the
+# mock port model above.  NOTE: the shadow dir must come BEFORE
+# $(KERNEL_INC) so <percpu/percpu.h> etc. resolve to the mocks.
+KBD_SHADOW_INC := -I$(TEST_MOCK)/kbd_include
+KBD_HOST_CFLAGS := $(HOST_CFLAGS) $(KBD_SHADOW_INC) $(KERNEL_INC) \
+    $(LIBC_INC) -I$(TEST_INC) \
+    -D_ARCH_IO_H -D_ARCH_SPINLOCK_H -D_ARCH_CPU_H \
+    -include $(TEST_MOCK)/i8042_test_runtime.h
+
 $(TEST_BLD)/i8042_production.o: $(TESTS_DIR)/kernel/driver/i8042.c \
 		$(TESTS_DIR)/kernel/include/driver/i8042.h \
 		$(TEST_MOCK)/i8042_test_runtime.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(I8042_HOST_CFLAGS) -c $< -o $@
 
+$(TEST_BLD)/keyboard_production.o: $(TESTS_DIR)/kernel/driver/keyboard.c \
+		$(TESTS_DIR)/kernel/include/driver/keyboard.h \
+		$(TESTS_DIR)/kernel/include/driver/i8042.h \
+		$(TEST_MOCK)/i8042_test_runtime.h \
+		$(TEST_MOCK)/kbd_include/tty/tty.h \
+		$(TEST_MOCK)/kbd_include/fs/vfs.h \
+		$(TEST_MOCK)/kbd_include/fs/poll.h \
+		$(TEST_MOCK)/kbd_include/intr/interrupt.h \
+		$(TEST_MOCK)/kbd_include/core/debug.h \
+		$(TEST_MOCK)/kbd_include/percpu/percpu.h \
+		$(TEST_MOCK)/kbd_include/subsys/subsys.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(KBD_HOST_CFLAGS) -c $< -o $@
+
 $(TEST_BLD)/test_i8042_demux.o: $(TEST_CASES)/test_i8042_demux.c \
 		$(TESTS_DIR)/kernel/include/driver/i8042.h \
-		$(TEST_MOCK)/i8042_test_runtime.h
+		$(TESTS_DIR)/kernel/include/driver/keyboard.h \
+		$(TEST_MOCK)/i8042_test_runtime.h \
+		$(TEST_MOCK)/kbd_include/tty/tty.h \
+		$(TEST_MOCK)/kbd_include/fs/poll.h \
+		$(TEST_MOCK)/kbd_include/percpu/percpu.h \
+		$(TEST_MOCK)/kbd_include/subsys/subsys.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(I8042_HOST_CFLAGS) -c $< -o $@
+	$(HOST_CC) $(KBD_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/test_i8042_demux.elf: $(TEST_BLD)/test_i8042_demux.o \
-		$(TEST_BLD)/i8042_production.o
+		$(TEST_BLD)/i8042_production.o \
+		$(TEST_BLD)/keyboard_production.o
 	$(HOST_CC) -o $@ $^
 
 test_i8042_demux: $(TEST_BLD)/test_i8042_demux.elf

@@ -394,6 +394,315 @@ static void test_zero_freq_fails_transactions(void)
     assert_eq(0, out_n);
 }
 
+/* ═══════════════════════════════════════════════════════════
+ *  Keyboard-over-i8042 section (PS/2 mouse Task 5)
+ *
+ *  Links the REAL kernel/driver/keyboard.o into this binary.  The
+ *  mock runtime below satisfies everything keyboard.c references
+ *  beyond the i8042 API: TTY push (recorded), poll wait-list linkage
+ *  (real list_t nodes on the driver-internal kbd_poll list),
+ *  wait_queue_wake_all (counted), a counting this_cpu() with a
+ *  settable num_cpus GS-gate, a scriptable register_irq, and a
+ *  constructor-driven SUBSYS_INITCALL recorder.
+ * ═══════════════════════════════════════════════════════════ */
+
+#include <intr/interrupt.h>
+#include <tty/tty.h>
+#include <fs/poll.h>
+#include <percpu/percpu.h>
+#include <subsys/subsys.h>
+#include <driver/keyboard.h>
+
+/* ── percpu / GS gate ───────────────────────────────────────── */
+uint32_t num_cpus;
+int kbd_mock_this_cpu_calls;
+static percpu_t kbd_mock_percpu;
+
+percpu_t *this_cpu(void)
+{
+    kbd_mock_this_cpu_calls++;
+    return &kbd_mock_percpu;
+}
+
+/* ── TTY sink ────────────────────────────────────────────────── */
+static tty_t kbd_mock_tty = { .mock_id = 1 };
+static char  kbd_tty_chars[256];
+static int   kbd_tty_n;
+
+void tty_push_input(tty_t *tty, char c)
+{
+    if (tty == &kbd_mock_tty && kbd_tty_n < (int)sizeof(kbd_tty_chars))
+        kbd_tty_chars[kbd_tty_n++] = c;
+}
+
+/* ── poll wait-list / wake cascade ──────────────────────────── */
+static int              kbd_wake_all_calls;
+static wait_queue_t     kbd_mock_wq;
+static poll_wait_entry_t kbd_pt_entries[4];
+static int              kbd_pt_n;
+
+void wait_queue_wake_all(wait_queue_t *wq)
+{
+    (void)wq;
+    kbd_wake_all_calls++;
+}
+
+/* Mock poll_wait(): hang a real entry on the driver-internal poll
+ * list, exactly like the production fs/poll.c does. */
+void poll_wait(poll_table_t *pt, list_t *poll_list, spinlock_T *fd_lock)
+{
+    (void)pt;
+    if (kbd_pt_n >= 4) return;
+    poll_wait_entry_t *e = &kbd_pt_entries[kbd_pt_n++];
+    e->poll_wq = &kbd_mock_wq;
+    e->fd_lock = fd_lock;
+    list_add_to_before(poll_list, &e->node);
+}
+
+/* ── register_irq ───────────────────────────────────────────── */
+static int32_t  kbd_register_irq_rc;         /* scriptable result */
+static uint32_t kbd_reg_gsi[8];
+static int      kbd_reg_n;
+static const char *kbd_reg_last_name;
+static void   (*kbd_reg_handler)(uint64_t, uint64_t, pt_regs_t *);
+
+int32_t register_irq(uint32_t gsi, void *arg,
+        void (*handler)(uint64_t nr, uint64_t parameter, pt_regs_t *regs),
+        uint64_t parameter, uint32_t flags, const char *irq_name)
+{
+    (void)arg; (void)parameter; (void)flags;
+    if (kbd_reg_n < 8) kbd_reg_gsi[kbd_reg_n] = gsi;
+    kbd_reg_handler = handler;
+    kbd_reg_last_name = irq_name;
+    kbd_reg_n++;
+    return kbd_register_irq_rc;
+}
+
+/* ── subsys registration recorder ───────────────────────────── */
+static struct {
+    const char *name;
+    int       (*init)(void);
+    int         phase;
+    uint32_t    flags;
+} kbd_subsys[8];
+static int kbd_subsys_n;                     /* NOT reset: filled by ctor */
+
+static subsys_initcall_t kbd_initcalls[8];
+static int kbd_initcalls_n;                  /* NOT reset: filled by ctor */
+
+int register_subsys(const char *name, int (*init)(void),
+                    int phase, uint32_t flags)
+{
+    if (kbd_subsys_n < 8) {
+        kbd_subsys[kbd_subsys_n].name  = name;
+        kbd_subsys[kbd_subsys_n].init  = init;
+        kbd_subsys[kbd_subsys_n].phase = phase;
+        kbd_subsys[kbd_subsys_n].flags = flags;
+    }
+    kbd_subsys_n++;
+    return 0;
+}
+
+void kbd_mock_subsys_register_initcall(int (*fn)(void))
+{
+    if (kbd_initcalls_n < 8) kbd_initcalls[kbd_initcalls_n] = fn;
+    kbd_initcalls_n++;
+}
+
+static int kbd_subsys_index(const char *name)
+{
+    for (int i = 0; i < kbd_subsys_n && i < 8; i++)
+        if (strcmp(kbd_subsys[i].name, name) == 0)
+            return i;
+    return -1;
+}
+
+/* ── keyboard fixture ───────────────────────────────────────── */
+
+static void kbd_fixture_reset(void)
+{
+    fixture_reset();
+    resp_armed = 1;                 /* controller answers 0x20 */
+    resp_byte  = 0x61;              /* arbitrary command byte  */
+    num_cpus = 1;                   /* GS "installed" by default */
+    kbd_mock_this_cpu_calls = 0;
+    kbd_mock_percpu.need_resched = 0;
+    memset(kbd_tty_chars, 0, sizeof(kbd_tty_chars));
+    kbd_tty_n = 0;
+    kbd_wake_all_calls = 0;
+    memset(kbd_pt_entries, 0, sizeof(kbd_pt_entries));
+    kbd_pt_n = 0;
+    kbd_register_irq_rc = 1;
+    kbd_reg_n = 0;
+    kbd_reg_last_name = NULL;
+    kbd_reg_handler = NULL;
+    keyboard_set_tty(NULL);
+    assert_eq(0, keyboard_init());
+}
+
+/* Keyboard/AUX interleaving: aux bytes never reach the TTY or the raw
+ * scancode ring; the E0 prefix survives an intervening aux byte; raw
+ * kbd bytes keep FIFO order.  Delivery goes through the registered
+ * IRQ1 handler (i.e. through i8042_pump). */
+static void test_kbd_aux_interleave_no_tty_pollution(void)
+{
+    kbd_fixture_reset();
+    keyboard_set_tty(&kbd_mock_tty);
+
+    obf_push(0x1E, 0);   /* 'a' */
+    obf_push(0xE0, 0);   /* E0 prefix ... */
+    obf_push(0xFA, 1);   /* ... aux ACK lands between E0 and its key */
+    obf_push(0x48, 0);   /* E0 48 = UP arrow */
+
+    kbd_reg_handler(0x21, 0, NULL);   /* IRQ1 vector → pump */
+
+    /* TTY: 'a' then ESC [ A — the aux byte produced nothing */
+    assert_eq(4, kbd_tty_n);
+    assert_eq('a',   kbd_tty_chars[0]);
+    assert_eq(0x1b,  kbd_tty_chars[1]);
+    assert_eq('[',   kbd_tty_chars[2]);
+    assert_eq('A',   kbd_tty_chars[3]);
+
+    /* Raw ring: keyboard bytes only, in arrival order */
+    uint8_t buf[16];
+    int n = keyboard_read_scancodes(buf, sizeof(buf));
+    assert_eq(3, n);
+    assert_eq(0x1E, buf[0]);
+    assert_eq(0xE0, buf[1]);
+    assert_eq(0x48, buf[2]);
+}
+
+/* Early polling still drains AUX traffic when the TTY has not been
+ * installed. A queued AUX byte must not block a following keyboard byte. */
+static void test_keyboard_poll_without_tty_drains_aux(void)
+{
+    kbd_fixture_reset();
+    i8042_set_aux_consumer(aux_consume);
+    obf_push(0xFA, 1);
+    obf_push(0x1E, 0);
+
+    keyboard_poll();
+
+    assert_eq(0, obf_len());
+    assert_eq(1, aux_count);
+    assert_eq(0xFA, aux_bytes[0]);
+    uint8_t buf[2];
+    assert_eq(1, keyboard_read_scancodes(buf, sizeof(buf)));
+    assert_eq(0x1E, buf[0]);
+    assert_eq(0, kbd_tty_n);
+}
+
+/* Pre-GS wake: with num_cpus == 0 (BSP GS base not yet installed) a
+ * scancode still wakes poll(2) waiters, but this_cpu() is NEVER
+ * read.  Once num_cpus != 0, need_resched is set again. */
+static void test_kbd_wake_before_gs_installed(void)
+{
+    kbd_fixture_reset();            /* tty stays NULL */
+    num_cpus = 0;
+
+    poll_table_t pt = { .triggered = false };
+    assert_eq(0, keyboard_poll_dev(NULL, POLLIN, &pt));  /* registered */
+
+    obf_push(0x1E, 0);
+    assert_eq(0, i8042_pump());
+
+    assert_eq(1, kbd_wake_all_calls);       /* waiter woken anyway */
+    assert_eq(0, kbd_mock_this_cpu_calls);  /* GS never touched */
+
+    num_cpus = 1;                           /* GS now installed */
+    obf_push(0x1F, 0);
+    assert_eq(0, i8042_pump());
+    assert_eq(1, kbd_mock_this_cpu_calls);
+    assert_eq(1, kbd_mock_percpu.need_resched);
+}
+
+/* Controller transaction failure (stuck IBF) → keyboard_init() != 0,
+ * no IRQ registered, consumer not left installed (bytes go nowhere). */
+static void test_keyboard_init_fails_on_controller_timeout(void)
+{
+    fixture_reset();
+    kbd_reg_n = 0;
+    kbd_tty_n = 0;
+    keyboard_set_tty(&kbd_mock_tty);
+    ibf_block = 1;                  /* every transaction times out */
+
+    assert_true(keyboard_init() != 0);
+    assert_eq(0, kbd_reg_n);        /* register_irq never reached */
+
+    obf_push(0x1E, 0);              /* stray byte after failed init */
+    assert_eq(0, i8042_pump());
+    assert_eq(0, kbd_tty_n);        /* not dispatched to any sink */
+    uint8_t b;
+    assert_eq(0, keyboard_read_scancodes(&b, 1));
+
+    /* subsys wrapper propagates the failure (subsys_init_phase maps
+     * ret != 0 to initialized = -1, so subsys_status != 1). */
+    int idx = kbd_subsys_index("keyboard");
+    assert_true(idx >= 0);
+    assert_true(kbd_subsys[idx].init() != 0);
+}
+
+/* register_irq(1) failure → keyboard_init() != 0, and the IRQ-enable
+ * bit is rolled back in the command byte (no unhandled-IRQ1 storm).
+ * The subsys wrapper propagates status both ways. */
+static void test_keyboard_init_fails_on_register_irq(void)
+{
+    fixture_reset();
+    resp_armed = 1;
+    resp_byte  = 0x61;
+    keyboard_set_tty(NULL);
+    kbd_register_irq_rc = 0;
+
+    assert_true(keyboard_init() != 0);
+    assert_eq(1, kbd_reg_n);
+    assert_eq(1, kbd_reg_gsi[0]);
+
+    /* enable wrote (0x61|0x05)&~0x08 = 0x65; rollback cleared bit0 */
+    int last_val_idx = -1;
+    int reads_0x20 = 0;
+    for (int i = 0; i < out_n; i++) {
+        if (out_w[i].port == 0x64 && out_w[i].val == 0x20) reads_0x20++;
+        if (out_w[i].port == 0x60) last_val_idx = i;
+    }
+    assert_eq(2, reads_0x20);               /* enable read + rollback read */
+    assert_true(last_val_idx >= 0);
+    assert_eq(0x60, out_w[last_val_idx].val); /* bit0 cleared */
+
+    /* registration happened at phase 5, optional; wrapper propagates */
+    int idx = kbd_subsys_index("keyboard");
+    assert_true(idx >= 0);
+    assert_eq(SUBSYS_PHASE_5, kbd_subsys[idx].phase);
+    assert_true(kbd_subsys[idx].flags & SUBSYS_FLAG_OPTIONAL);
+    assert_true(kbd_subsys[idx].init() != 0);   /* still failing */
+
+    kbd_register_irq_rc = 1;
+    assert_eq(0, kbd_subsys[idx].init());       /* propagates success */
+}
+
+/* Success path: IRQ1 registered under the "keyboard" name and the
+ * command byte write carries the enable bits. */
+static void test_keyboard_init_success(void)
+{
+    fixture_reset();
+    resp_armed = 1;
+    resp_byte  = 0x61;
+    keyboard_set_tty(NULL);
+    kbd_register_irq_rc = 1;
+    kbd_reg_n = 0;
+
+    assert_eq(0, keyboard_init());
+    assert_eq(1, kbd_reg_n);
+    assert_eq(1, kbd_reg_gsi[0]);
+    assert_true(kbd_reg_last_name != NULL);
+    assert_eq(0, strcmp(kbd_reg_last_name, "keyboard"));
+
+    int found = 0;
+    for (int i = 0; i < out_n; i++)
+        if (out_w[i].port == 0x60 && out_w[i].val == 0x65)
+            found = 1;
+    assert_eq(1, found);
+}
+
 /* ═══════════════════════════════════════════════════════════ */
 
 TEST_LIST_BEGIN
@@ -409,10 +718,24 @@ TEST_ENTRY(test_write_controller_cmd_sequence),
 TEST_ENTRY(test_write_command_byte_sequence),
 TEST_ENTRY(test_write_aux_byte_sequence),
 TEST_ENTRY(test_zero_freq_fails_transactions),
+TEST_ENTRY(test_kbd_aux_interleave_no_tty_pollution),
+TEST_ENTRY(test_keyboard_poll_without_tty_drains_aux),
+TEST_ENTRY(test_kbd_wake_before_gs_installed),
+TEST_ENTRY(test_keyboard_init_fails_on_controller_timeout),
+TEST_ENTRY(test_keyboard_init_fails_on_register_irq),
+TEST_ENTRY(test_keyboard_init_success),
 TEST_LIST_END
 
 int main(void)
 {
-    RUN_ALL_TESTS();
-    return (__test_stats.failed > 0) ? 1 : 0;
+    for (int i = 0; i < kbd_initcalls_n; i++)
+        kbd_initcalls[i]();
+    printf("=== Test Runner ===\n");
+    for (int i = 0; i < __test_table_size; i++) {
+        printf("\n--- %s ---\n", __test_table[i].name);
+        __test_table[i].fn();
+    }
+    int failed = __test_stats.failed;
+    TEST_RESULTS();
+    return failed ? 1 : 0;
 }

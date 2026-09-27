@@ -69,8 +69,9 @@ KERNEL_C_SOURCES := \
     ../runtime/builtins/udivti3.c
 
 # Platform devices are selected by arch/<arch>/make.config.  Keep x86-only
-# APIC/PIC/PIT/RTC code out of architecture-neutral source discovery.
-KERNEL_C_SOURCES := $(filter-out driver/pit.c,$(KERNEL_C_SOURCES))
+# APIC/PIC/PIT/RTC code and the x86-only PS/2 pair (i8042 controller +
+# keyboard, port-I/O based) out of architecture-neutral source discovery.
+KERNEL_C_SOURCES := $(filter-out driver/pit.c driver/i8042.c driver/keyboard.c,$(KERNEL_C_SOURCES))
 KERNEL_C_SOURCES += $(ARCH_PLATFORM_C_SOURCES)
 endif
 

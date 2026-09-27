@@ -5,7 +5,12 @@
 #include <fs/vfs.h>
 #include <tty/tty.h>
 
-void keyboard_init(void);
+// Initialize the keyboard driver: brings up the shared i8042 layer,
+// installs the keyboard byte consumer, enables IRQ1 in the PS/2
+// command byte and registers the IRQ1 handler.  Returns 0 on success,
+// negative when a controller transaction or register_irq(1) failed
+// (propagated to subsys_status("keyboard") != 1).
+int keyboard_init(void);
 
 // Set the TTY that receives translated ASCII input.
 void keyboard_set_tty(tty_t *tty);
@@ -26,6 +31,7 @@ int keyboard_devfs_read(vfs_node_t *node, uint64_t offset,
 // DevFS poll handler for /dev/keyboard — POLLIN when the scancode
 // ring is non-empty, otherwise registers on the scancode wait list
 // (cascade-woken from IRQ context when a scancode arrives).
+struct poll_table;
 uint32_t keyboard_poll_dev(void *priv, uint32_t requested,
                            struct poll_table *pt);
 
