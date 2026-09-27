@@ -1,34 +1,24 @@
 #include <string.h>
-#include <core/printk.h>
+#include <core/printk.h>      // serial_printk (still printed from kernel_main)
 #include <log/log.h>
 #include <memory/memory.h>
-#include <memory/pmm.h>
-#include <arch/gate.h>
-#include <arch/spinlock.h>
-#include <arch/cpu.h>
+#include <arch/cpu.h>         // arch_cycle_counter, arch_cpu_halt
 #include <arch/irq.h>
-#include <intr/interrupt.h>
-#include <sched/task.h>
+#include <sched/task.h>       // task_init
 #include <percpu/percpu.h>
 #include <core/smp.h>
-#include <intr/apic.h>
-#include <driver/serial.h>
-#include <fs/boot.h>
-#include <tty/boot.h>
-#include <arch/x86_64/boot.h>
-#include <arch/x86_64/smp_boot.h>
-#include <core/selftest.h>
-#include <sync/futex.h>
+#include <driver/serial.h>    // write_serial
+#include <fs/boot.h>          // fs_boot_prepare / _mounts / _probe_devfs
+#include <tty/boot.h>         // tty_boot_init
+#include <arch/x86_64/boot.h> // x86_64_boot_early/_memory/_subsystems/_device_nodes
+#include <arch/x86_64/smp_boot.h> // x86_64_boot_percpu / _aps
+#include <core/selftest.h>    // selftest_run_all
+#include <sync/futex.h>       // futex_init
 #include <stdlib.h>
-#include <subsys/subsys.h>
-#include <arch/subsys.h>
-#include <tty/console.h>
-#include <driver/logo.h>
-#include <driver/fb.h>
-#include <tty/pty.h>
-#include <time/clockevent.h>
-#include <net/net.h>
-#include <random/random.h>
+#include <tty/console.h>      // console_init
+#include <tty/pty.h>          // pty_init
+#include <net/net.h>          // net_lwip_init
+#include <random/random.h>    // random_init
 
 // ── Kernel symbols ─────────────────────────────────────────
 

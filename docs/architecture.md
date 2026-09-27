@@ -134,16 +134,26 @@ Deferred processing; `TIMER_SIRQ` set by timer hardirq.
 
 ## Subsystem framework (`kernel/subsys/`)
 
-Init phases ordered by dependency. Phases 1-2 (CPU/memory) and 7-9 (TTY/SMP/scheduler) are hardcoded in `kernel_main`. Phases 3-6 use the subsys framework:
+Init phases ordered by dependency. After the kernel-main refactor (Tasks 4-6) x86_64's `kernel_main` is a thin orchestrator: phases 1-2 are dispatched through `x86_64_boot_early()` + `x86_64_boot_memory()` (see `kernel/arch/x86_64/platform/boot.c`), phases 3-6 through `x86_64_boot_subsystems()` (which itself drives the subsys framework), phase 7 (VFS/TTY/devfs smoke) is split across `fs_boot_*` + `tty_boot_init()` helpers, and BSP per-CPU + AP bring-up live in `x86_64_boot_percpu()` + `x86_64_boot_aps()` (see `kernel/arch/x86_64/smp/boot.c`). The subsys framework still owns the actual phase 3-6 dispatch — the helpers above just wire up the calls.
 
-| Phase | Subsystems |
-|-------|------------|
-| 3 | Interrupt controllers (APIC, PIC) |
-| 4 | Timers (PIT, LAPIC timer) |
-| 5 | Device IRQs (keyboard, serial IRQ) |
-| 6 | Storage (AHCI) |
+| Phase | Subsystems | Dispatched by |
+|-------|------------|---------------|
+| 1 | CPU infrastructure (framebuffer Pos, IDT, serial, EFER NXE) | `x86_64_boot_early()` |
+| 2 | Memory (PMM, VMM, FB remap, early logo) | `x86_64_boot_memory()` |
+| 3 | Interrupt controllers (APIC, PIC) | subsys framework via `x86_64_boot_subsystems()` |
+| 4 | Timers (PIT, LAPIC timer) | subsys framework |
+| 5 | Device IRQs (keyboard, serial IRQ) | subsys framework |
+| 6 | Storage (AHCI) | subsys framework |
+| 7 | VFS / devfs / mounts / TTY / `/dev` smoke | `fs_boot_*()` + `tty_boot_init()` helpers in `kernel_main` |
+| 8 | BSP per-CPU registration (brought forward — see below) | `x86_64_boot_percpu()` |
+| 9 | AP bring-up + per-CPU subsystem dispatch | `x86_64_boot_aps()` |
+| 10 | Scheduler + user-space init | `task_init()` in `kernel_main` |
 
-AP init also has per-CPU subsystem init via `subsys_init_percpu()`.
+The order of these stages is preserved verbatim by `kernel_main` — see `kernel/arch/x86_64/boot.h` for the helper signatures and `kernel/arch/x86_64/smp_boot.h` for the per-CPU/AP helpers.
+
+**SMP can be brought forward as far as phase 8.** As of Task 6 the BSP `percpu_init` + `percpu_install_gs(0)` + `num_cpus` publication run *before* `random_init()` (which calls into the CSPRNG), the filesystem mounts, and the TTY wiring. This is required because the CSPRNG and the FS code both call into `this_cpu()`-aware paths, and `tlb_shootdown`/`ipi_broadcast` now target only `online` CPUs — i.e., BSP-only until `x86_64_boot_aps()` marks APs online. The APs themselves are started by `x86_64_boot_aps()` *after* the devfs smoke probe (`fs_boot_probe_devfs()`), preserving the original "percpu marker follows /dev/null in the boot log" ordering.
+
+AP init also has per-CPU subsystem init via `subsys_init_percpu()` (last step of `x86_64_boot_aps()`).
 
 ## Log system (`kernel/log/`)
 
@@ -151,13 +161,18 @@ Four levels: `LOG_ERR`, `LOG_WARN`, `LOG_INFO`, `LOG_DEBUG`. Compile-time `LOG_T
 
 ## Init sequence (`kernel_main()`)
 
-1. Stack canary (rdtsc seed)
-2. FB init + TSS + sys_vector_install + irq_install + init_serial
-3. EFER NXE enable
-4. PMM init + VMM init + FB remap
-5. `arch_register_subsys()` + `subsys_init_all()` → APIC/PIC/timer/PIT/LAPIC-timer/keyboard/AHCI
-6. VFS init + devfs init + GPT partition scan + filesystem mounts (ext2 `/`, FAT32 `/boot`, tmpfs, procfs)
-7. Console TTY (serial + keyboard IRQ → TTY, devfs `/dev/tty`) + console_init (VT100 CSI terminal, cursor)
-8. Per-CPU init + SMP boot + `arch_register_subsys_percpu()` + `subsys_init_percpu()`
-9. Selftest + futex_init + task_init (spawns `/bin/init` as PID 1 → parses `/etc/inittab` → 4-phase boot → supervision loop → idle loop)
-10. EEVDF scheduler active: per-CPU rbtree runqueues + `sched_balance()` work stealing + vruntime/deadline fair scheduling
+`kernel_main()` is a thin orchestrator. Each phase below is a single helper call (or short block) — see `kernel/arch/x86_64/boot.h` and `kernel/arch/x86_64/smp_boot.h` for the helper contracts.
+
+1. Stack canary seed (`arch_cycle_counter() ^ 0xDEADBEEFCAFEBABE`).
+2. `x86_64_boot_early(bootctx)` — framebuffer Pos, IDT (`sys_vector_install` + `irq_install`), serial, EFER NXE.
+3. `x86_64_boot_memory(bootctx)` — PMM, VMM, FB remap, early logo.
+4. `x86_64_boot_subsystems(bootctx)` — `arch_boot_rsdp` + `arch_register_subsys()` + `subsys_init_all()` → APIC/PIC/timer/PIT/LAPIC-timer/keyboard/AHCI (phases 3-6).
+5. `x86_64_boot_percpu()` — MADT traversal, BSP `percpu_init` + `percpu_install_gs(0)` + `num_cpus` publication (Task 6 — brought forward so the CSPRNG and FS code see a valid `this_cpu()`).
+6. `random_init(bootctx)` — CSPRNG seed (BSP, once).
+7. `fs_boot_prepare()` → `pty_init()` → `x86_64_boot_device_nodes()` → `fs_boot_mounts()` → `tty_boot_init()` → `fs_boot_probe_devfs()` — VFS / devfs / x86 chrdevs / mounts / console TTY / `/dev/null` smoke probe.
+8. `x86_64_boot_aps()` — `tick_start()` → `smp_boot_aps()` → per-CPU subsystem dispatch (`arch_register_subsys_percpu()` + `subsys_init_percpu()`).
+9. `#ifdef OS01_SELFTEST` — `selftest_run_all()`.
+10. `net_lwip_init()` (lwIP creates `tcpip_thread`; post-SMP, pre-scheduler).
+11. `futex_init()` — init futex hash buckets.
+12. `console_init()` — initialise the software terminal cursor.
+13. `task_init()` — spawns `/init.elf` as PID 1, then enters the idle loop. EEVDF scheduler active: per-CPU rbtree runqueues + `sched_balance()` work stealing + vruntime/deadline fair scheduling.

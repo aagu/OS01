@@ -51,16 +51,16 @@ typedef struct {
 
 ## Phase Numbering
 
-Phases 1-2 and 7-9 are hardcoded in `kernel_main`. The subsystem framework manages phases 3-6:
+Phases 1-2 and 7-9 are dispatched through `kernel_main` via the `x86_64_boot_*` helpers (see `kernel/arch/x86_64/boot.h`, `kernel/arch/x86_64/smp_boot.h`); `kernel_main` itself is a thin orchestrator and never calls `subsys_init_all()` directly. The subsystem framework manages phases 3-6 (still `subsys_init_all()`, but invoked from `x86_64_boot_subsystems()`):
 
-| Phase | Constant         | Subsystems                        |
-|-------|------------------|-----------------------------------|
-| 1-2   | — (hardcoded)    | CPU infrastructure, memory        |
-| 3     | `SUBSYS_PHASE_3` | Interrupt controllers (APIC, PIC) |
-| 4     | `SUBSYS_PHASE_4` | Timers (PIT, LAPIC timer)         |
-| 5     | `SUBSYS_PHASE_5` | Device IRQs (keyboard, serial)    |
-| 6     | `SUBSYS_PHASE_6` | Storage (AHCI, VirtIO-BLK)        |
-| 7-9   | — (hardcoded)    | TTY, SMP, scheduler               |
+| Phase | Constant         | Subsystems                        | Dispatch site                              |
+|-------|------------------|-----------------------------------|--------------------------------------------|
+| 1-2   | — (helper)       | CPU infrastructure, memory        | `x86_64_boot_early()` + `x86_64_boot_memory()` |
+| 3     | `SUBSYS_PHASE_3` | Interrupt controllers (APIC, PIC) | `x86_64_boot_subsystems()` → `subsys_init_all()` |
+| 4     | `SUBSYS_PHASE_4` | Timers (PIT, LAPIC timer)         | subsys framework                           |
+| 5     | `SUBSYS_PHASE_5` | Device IRQs (keyboard, serial)    | subsys framework                           |
+| 6     | `SUBSYS_PHASE_6` | Storage (AHCI, VirtIO-BLK)        | subsys framework                           |
+| 7-9   | — (helper)       | TTY, SMP, scheduler               | `tty_boot_init()` + `x86_64_boot_percpu()` + `x86_64_boot_aps()` |
 
 ---
 
@@ -128,36 +128,52 @@ void arch_register_subsys(void);          // iterate .subsys_init table
 void arch_register_subsys_percpu(void);   // iterate .subsys_init_percpu table
 ```
 
-The RSDP address (`arch_boot_rsdp`) is set by `kernel_main` before calling `arch_register_subsys()` and consumed by `apic_init()`.
+The RSDP address (`arch_boot_rsdp`) is set inside `x86_64_boot_subsystems()` (in `kernel/arch/x86_64/platform/boot.c`) before it calls `arch_register_subsys()`, and consumed by `apic_init()` from the phase-3 dispatch. `kernel_main` no longer touches RSDP directly.
 
 ---
 
 ## Init Flow in kernel_main (`kernel/core/main.c`)
 
+`kernel_main` is a thin orchestrator — each block below is a single helper call (or short sequence). See `kernel/arch/x86_64/boot.h` and `kernel/arch/x86_64/smp_boot.h` for the helper contracts.
+
 ```c
-// Phases 1-2: hardcoded
-sys_vector_install();          // exceptions, syscalls
-irq_install();                 // IRQ 0x20-0x37
-pmm_init();                    // physical memory
-vmm_init();                    // virtual memory
+// Phases 1-2: helper dispatch
+x86_64_boot_early(bootctx);     // framebuffer Pos, IDT, serial, EFER NXE
+x86_64_boot_memory(bootctx);    // PMM, VMM, FB remap, early logo
 
-// Phases 3-6: subsystem framework
-arch_register_subsys();        // register all arch subsystems
-subsys_init_all();             // run phases 3-6 in order
+// Phases 3-6: subsystem framework (driven by the helper)
+x86_64_boot_subsystems(bootctx); // arch_boot_rsdp + arch_register_subsys()
+                                // + subsys_init_all()
 
-// VFS, devfs, filesystems, TTY (phase 7 equivalent — hardcoded)
-vfs_init();
-devfs_init();
-// ... mounts ...
+// Phase 7 prep: BSP per-CPU registration (Task 6 — brought forward)
+x86_64_boot_percpu();           // MADT traversal, BSP percpu_init + GS +
+                                // num_cpus publication
 
-// SMP bringup (phase 8 — hardcoded)
-smp_boot_aps();
+// CSPRNG seed (BSP, once)
+random_init(bootctx);
 
-// Per-CPU init
-arch_register_subsys_percpu();
-subsys_init_percpu();          // lapic-timer-start on every CPU
+// FS / TTY wiring (phase 7 equivalent — each its own helper)
+fs_boot_prepare();
+pty_init();
+x86_64_boot_device_nodes();     // keyboard/mouse/fb chrdevs
+fs_boot_mounts();               // GPT/FAT32/ext2/tmpfs/procfs mounts
+tty_boot_init();
+fs_boot_probe_devfs();
 
-// Scheduler + user-space (phase 9 — hardcoded)
+// Phase 8: AP bringup + per-CPU subsystem dispatch
+x86_64_boot_aps();              // tick_start + smp_boot_aps +
+                                // arch_register_subsys_percpu +
+                                // subsys_init_percpu
+
+#ifdef OS01_SELFTEST
+selftest_run_all();
+#endif
+
+net_lwip_init();                // post-SMP, pre-scheduler
+futex_init();
+console_init();
+
+// Phase 9: scheduler + user-space
 task_init();
 ```
 
@@ -173,4 +189,4 @@ task_init();
 | `kernel/arch/<arch>/subsys.c` | arch-specific `arch_register_subsys()` 7-line loop iterating the table |
 | `kernel/driver/*.c` | Each driver `.c` has its own `SUBSYS_INITCALL()` line (10 drivers on x86_64) |
 | `kernel/include/arch/subsys.h` | Arch API header: `arch_register_subsys()` / `arch_register_subsys_percpu()` declarations |
-| `kernel/core/main.c` | Init sequence: calls `arch_register_subsys()`, `subsys_init_all()`, `arch_register_subsys_percpu()`, `subsys_init_percpu()` |
+| `kernel/core/main.c` | Thin orchestrator: invokes `x86_64_boot_subsystems()` (which calls `arch_register_subsys()` + `subsys_init_all()`) and `x86_64_boot_aps()` (which calls `arch_register_subsys_percpu()` + `subsys_init_percpu()`). |

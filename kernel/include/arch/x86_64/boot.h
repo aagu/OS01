@@ -19,8 +19,9 @@ struct boot_context;
 //
 // Call order in kernel_main:  fs_boot_prepare(); pty_init();
 //                             x86_64_boot_device_nodes(); fs_boot_mounts();
-// TTY + /dev probe + devfs smoke test follow in main.c (Task 3 moves
-// them into fs_boot_probe_devfs()).
+//                             tty_boot_init(); fs_boot_probe_devfs();
+// TTY wiring + /dev probe + devfs smoke test live in tty_boot_init()
+// + fs_boot_probe_devfs() (Task 3).
 void x86_64_boot_device_nodes(void);
 
 // ── Boot-stage helpers (Task 4) ────────────────────────────────

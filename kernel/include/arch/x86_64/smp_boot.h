@@ -18,14 +18,25 @@
 //                          subsys_init_percpu().  Owns the BSP→AP
 //                          bring-up and the per-CPU subsystem dispatch.
 //
-// Call order in kernel_main (preserved verbatim from pre-Task-5):
+// Call order in kernel_main (post-Task-6):
+//     x86_64_boot_subsystems(bootctx);
+//     x86_64_boot_percpu();           // BSP registration (Task 6: brought
+//                                     // forward — see below)
+//     random_init(bootctx);
+//     fs_boot_prepare();
+//     pty_init();
+//     x86_64_boot_device_nodes();
+//     fs_boot_mounts();
+//     tty_boot_init();
 //     fs_boot_probe_devfs();
-//     x86_64_boot_percpu();
-//     x86_64_boot_aps();
-// The position is significant: percpu registration must follow the
-// devfs smoke probe so that the percpu marker still appears AFTER
-// /dev/null in the boot log.  Future work (Task 6) may evaluate
-// moving x86_64_boot_percpu() earlier; that move is NOT this task.
+//     x86_64_boot_aps();              // AP bringup (still after the devfs
+//                                     // smoke probe)
+//
+// BSP per-CPU registration moved forward in Task 6 so the CSPRNG, FS,
+// and TTY code paths see a valid this_cpu() (num_cpus != 0 doubles as
+// the BSP GS-readiness gate used by kernel/driver/keyboard.c).  AP
+// bringup stays after fs_boot_probe_devfs() so the percpu marker in
+// the boot log still appears after /dev/null.
 
 void x86_64_boot_percpu(void);
 void x86_64_boot_aps(void);
