@@ -89,7 +89,8 @@ host mock 测试覆盖（可控端口流模拟无响应设备，见
 #### /dev/mouse 事件 ABI
 
 事件固定 8 字节（`mouse_event_t`，`_Static_assert(sizeof == 8)`），一次读
-必须是 8 的倍数且 ≥8，否则 `EINVAL`；无事件时返回 `EAGAIN`：
+`size < 8` 返回 `EINVAL`；`size ≥ 8` 时只返回整数个完整事件（非 8 倍数按
+整事件截断）；无事件时返回 `EAGAIN`：
 
 | 字段 | 类型 | 含义 |
 |------|------|------|

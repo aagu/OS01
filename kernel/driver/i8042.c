@@ -2,6 +2,10 @@
 //
 // This is the ONLY file in the kernel allowed to touch ports 0x64/0x60
 // (spec: docs/superpowers/specs/2026-09-26-ps2-mouse-driver-design.md §4).
+// Known, accepted exception: the panic path in
+// kernel/arch/x86_64/intr/trap.c writes 0x64 <- 0xFE directly (pulse reset)
+// to reboot the machine — the system has already panicked and is about to
+// reset, so not taking the lock there is expected.
 // keyboard.c and mouse.c receive already-demultiplexed bytes through the
 // consumer callbacks installed here.
 //
