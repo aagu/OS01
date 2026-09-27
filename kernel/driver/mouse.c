@@ -18,7 +18,7 @@ static volatile bool command_mode;
 static volatile bool stream_after_ack;
 static volatile uint8_t reply[8];
 static volatile unsigned reply_head, reply_tail;
-static uint64_t freq_hz, probe_deadline, cleanup_deadline;
+static uint64_t freq_hz, probe_deadline, f5_deadline;
 
 static bool expired(uint64_t deadline)
 {
@@ -130,11 +130,12 @@ int mouse_init(void)
     freq_hz = clocksource_freq_hz();
     if (!freq_hz)
         goto fail;
-    /* Reserve 100 ms of the 500 ms startup ceiling for a final bounded
-     * controller write and cleanup, even when the last reply times out. */
+    /* The active probe has 400 ms. F5 may run until 460 ms, reserving
+     * 20 ms for a controller write begun just before that deadline and
+     * another 20 ms for the rollback command-byte write. */
     uint64_t start = clocksource_cycles();
     probe_deadline = start + freq_hz * 400 / 1000;
-    cleanup_deadline = start + freq_hz * 500 / 1000;
+    f5_deadline = start + freq_hz * 460 / 1000;
     if (i8042_write_controller_cmd(0xA8) != I8042_OK || expired(probe_deadline))
         goto fail;
     if (i8042_read_command_byte(&original) != I8042_OK || expired(probe_deadline))
@@ -198,11 +199,11 @@ base_mouse:
 fail:
     ready = false;
     stream_after_ack = false;
-    if (f4_sent && freq_hz && !expired(cleanup_deadline)) {
+    if (f4_sent && freq_hz && !expired(f5_deadline)) {
         /* Best effort only: an unresponsive device cannot confirm F5. */
         reply_head = reply_tail = 0;
         command_mode = true;
-        (void)send_byte_with_cap(0xF5, cleanup_deadline);
+        (void)send_byte_with_cap(0xF5, f5_deadline);
     }
     /* Clear bit 1 before unregister_irq, regardless of firmware's bit 1. */
     bool irq_disabled = !have_original;

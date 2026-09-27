@@ -20,6 +20,8 @@ static uint8_t packet_bytes[64];
 static int immediate_packet;
 static int fail_stale_drain, fail_cmd_write_at, fail_cmd_write_from;
 static int force_f4_deadline;
+static uint64_t f4_timeout_cycle;
+static uint64_t f5_write_cost, rollback_write_cost;
 static int wrong_source_pending, keyboard_ack_count;
 static i8042_consumer_t keyboard_consumer;
 static int last_wheel_mode, first_command_write;
@@ -60,6 +62,7 @@ int i8042_read_command_byte(uint8_t *out) { *out = command_byte; now += 100; ret
 int i8042_write_command_byte(uint8_t b)
 { if (!cmd_writes) first_command_write = b;
   cmd_writes++; now += 100;
+  if (cmd_writes >= 3) now += rollback_write_cost;
   if (cmd_writes == fail_cmd_write_at ||
       (fail_cmd_write_from && cmd_writes >= fail_cmd_write_from))
       return I8042_ERR_TIMEOUT;
@@ -67,10 +70,11 @@ int i8042_write_command_byte(uint8_t b)
 int i8042_write_aux_byte(uint8_t b)
 {
     aux_writes++; now += 100;
+    if (b == 0xF5) now += f5_write_cost;
     if (aux_writes == fail_aux_at) return -1;
     pending_n = pending_pos = 0;
     if (b == 0xF4 && force_f4_deadline) {
-        now = 400000; reporting = 1; return 0;
+        now = f4_timeout_cycle; reporting = 1; return 0;
     }
     if (aux_writes == bad_source_at) {
         wrong_source_pending = 1; return 0;
@@ -105,6 +109,8 @@ static void reset_case(uint8_t cb)
   memset(packet_bytes, 0, sizeof(packet_bytes));
   immediate_packet = 0;
   fail_stale_drain = fail_cmd_write_at = fail_cmd_write_from = force_f4_deadline = 0;
+  f4_timeout_cycle = 400000;
+  f5_write_cost = rollback_write_cost = 0;
   last_wheel_mode = first_command_write = 0; irq_handler = 0;
   wrong_source_pending = keyboard_ack_count = 0;
   i8042_set_kbd_consumer(keyboard_ack);
@@ -165,6 +171,17 @@ static void test_f4_timeout_still_sends_f5(void)
   assert_true(mouse_init() != 0); check_rollback();
   assert_eq(11, aux_writes); assert_eq(0, reporting);
 }
+static void test_f5_and_rollback_fit_total_deadline(void)
+{
+  reset_case(0x41);
+  force_f4_deadline = 1; bad_source_at = 11; /* F5 has no AUX ACK */
+  f4_timeout_cycle = 420000; /* F4 write finishes after active deadline */
+  f5_write_cost = rollback_write_cost = 20000;
+  assert_true(mouse_init() != 0);
+  assert_eq(11, aux_writes);
+  assert_eq(1, irq_unregistered);
+  assert_true(now <= 500000);
+}
 static void test_rollback_write_failure_keeps_irq(void)
 {
   reset_case(0x41); fail_aux_at = 10; fail_cmd_write_from = 3;
@@ -186,6 +203,7 @@ int main(void)
   test_payload_values_not_filtered();
   test_stale_drain_must_succeed();
   test_f4_timeout_still_sends_f5();
+  test_f5_and_rollback_fit_total_deadline();
   test_rollback_write_failure_keeps_irq();
   test_command_byte_write_failures();
   reset_case(0x41); wheel_id = 0; assert_eq(0, mouse_init()); assert_eq(0, last_wheel_mode);
