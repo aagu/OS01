@@ -157,7 +157,7 @@ ALL_CFLAGS += -DNDEBUG
 ALL_CFLAGS += -O2     # Release: shrink stack frames significantly
 else
 ALL_CFLAGS += -DDEBUG=1
-ALL_CFLAGS += -O0     # Debug: easy GDB single-stepping
+ALL_CFLAGS += -O0 -g  # Debug: source symbols and easy GDB single-stepping
 endif
 
 ifneq ($(filter 1,$(KERNEL_CANARY_SELFTEST)),)

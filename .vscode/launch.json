@@ -3,25 +3,22 @@
     // 悬停以查看现有属性的描述。
     // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
     //
-    // 注意: 现有的 x86_64 GDB 配置 (Launch with GDB) 引用
-    // ${workspaceFolder}/toolchain/cross/bin/x86_64-elf-gdb 这个路径在仓库中
-    // 并不实际存在 (toolchain/cross/bin/ 下只有 qemu-* 二进制)。沿用历史
-    // 配置不动它; aarch64 GDB 配置则使用真实存在的 /usr/bin/gdb。
+    // x86_64 调试任务使用 KERNEL_SELFTEST=1，符号文件在 selftest 构建目录。
     "version": "0.2.0",
     "configurations": [
         {
             "name": "Launch with GDB",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/kernel/kernel.elf",
+            "program": "${workspaceFolder}/build/x86_64-clang/kernel/selftest/kernel.elf",
             "args": [],
-            "targetArchitecture": "x86",
+            "targetArchitecture": "x64",
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],
             "externalConsole": false,
             "MIMode": "gdb",
-            "miDebuggerPath": "${workspaceFolder}/toolchain/cross/bin/x86_64-elf-gdb",
+            "miDebuggerPath": "/usr/bin/gdb",
             "customLaunchSetupCommands": [
                 {
                     "text": "target remote localhost:1234",
@@ -30,13 +27,13 @@
             ],
             "setupCommands": [
                 {
+                    "text": "directory ${workspaceFolder}/kernel",
+                    "description": "Find kernel sources"
+                },
+                {
                     "description": "Enable pretty-printing for gdb",
                     "text": "-enable-pretty-printing",
                     "ignoreFailures": true
-                },
-                {
-                    "text": "file ${workspaceFolder}/build/x86_64/kernel/kernel.elf",
-                    "description": "Load binary"
                 }
             ],
             "preLaunchTask": "Launch QEMU"
@@ -45,9 +42,10 @@
             "name": "Launch with LLDB",
             "type": "lldb-dap",
             "request": "attach",
-            "program": "${workspaceFolder}/build/x86_64/kernel/kernel.elf",
+            "program": "${workspaceFolder}/build/x86_64-clang/kernel/selftest/kernel.elf",
             "targetCreateCommands": [
-                "target create ${workspaceFolder}/build/x86_64/kernel/kernel.elf"
+                "target create ${workspaceFolder}/build/x86_64-clang/kernel/selftest/kernel.elf",
+                "settings set target.source-map . ${workspaceFolder}/kernel"
             ],
             "attachCommands": [
                 "gdb-remote 1234"

@@ -64,7 +64,8 @@ endif
 # groups so the final argument order matches each original recipe.
 RUN_QEMU_BASE = $(QEMU_BIN) -M q35 -smp $(SMP) \
   -drive if=pflash,format=raw,readonly=on,file=$(OVMF_FIRMWARE)
-RUN_QEMU_DISK = -drive file=$(NORMAL_IMAGE),format=raw,if=none,id=disk \
+QEMU_IMAGE ?= $(NORMAL_IMAGE)
+RUN_QEMU_DISK = -drive file=$(QEMU_IMAGE),format=raw,if=none,id=disk \
   -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
   -object rng-random,filename=/dev/urandom,id=rng0 \
   -device virtio-rng-pci,rng=rng0 \
@@ -88,7 +89,8 @@ run-kvm:    $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF
 run-virtio: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	$(RUN_QEMU_BASE) -netdev user,id=net0 -device virtio-net-pci,netdev=net0 $(RUN_QEMU_DISK)
-debug:      $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
+debug: QEMU_IMAGE = $(DISK_IMG)
+debug:      $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(DISK_IMG) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	$(RUN_QEMU_BASE) $(RUN_QEMU_FLAGS_debug) -netdev user,id=net0 -device e1000e,netdev=net0 $(RUN_QEMU_DISK)
 

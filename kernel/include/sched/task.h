@@ -312,6 +312,8 @@ inline task_t* __attribute__((always_inline)) get_current_task()
 
 #define switch_to(prev, next) \
     do { \
+        task_t *__switch_prev = (prev); \
+        task_t *__switch_next = (next); \
         __asm__ __volatile__(                \
             "pushq %%rbp \n\t"       \
             "pushq %%rax \n\t"       \
@@ -319,18 +321,18 @@ inline task_t* __attribute__((always_inline)) get_current_task()
             "movq %%rsp, %0 \n\t"    /* save prev->rsp */ \
             "leaq 1f(%%rip), %%rax \n\t" \
             "movq %%rax, %1 \n\t"    /* save prev->rip = resume label */ \
-            "movq %2, %%rsp \n\t"    /* load next->rsp */ \
-            "pushq %3 \n\t"          /* push next->rip */ \
             "movq %4, %%rdi \n\t"    /* 1st arg: prev (SysV) */ \
             "movq %5, %%rsi \n\t"    /* 2nd arg: next (SysV) */ \
+            "movq %2, %%rsp \n\t"    /* load next->rsp */ \
+            "pushq %3 \n\t"          /* push next->rip */ \
             "jmp __switch_to \n\t"   \
             "1: \n\t"                \
             /* IRQ state restored by schedule() after switch */ \
             "popq %%rax \n\t"        \
             "popq %%rbp \n\t"        \
-            : "=m"((prev)->thread->rsp), "=m"((prev)->thread->rip) \
-            : "m"((next)->thread->rsp), "m"((next)->thread->rip), \
-              "r"((uint64_t)(prev)), "r"((uint64_t)(next)) \
+            : "=m"(__switch_prev->thread->rsp), "=m"(__switch_prev->thread->rip) \
+            : "m"(__switch_next->thread->rsp), "m"(__switch_next->thread->rip), \
+              "m"(__switch_prev), "m"(__switch_next) \
             : "memory", "rax", "rcx", "rdx", "rdi", "rsi", \
               "r8", "r9", "r10", "r11", "cc" \
         ); \

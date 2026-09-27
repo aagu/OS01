@@ -42,13 +42,14 @@ void ioapic_dump_entries(void)
                       i, ioapic->mmio_base, ioapic->gsi_base, ioapic->max_redir);
         for (uint32_t n = 0; n <= ioapic->max_redir; n++) {
             uint32_t low  = ioapic_read_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(n));
-            debug_irq("  [%2u] %#018lx", n,
-                      ((uint64_t)ioapic_read_reg(ioapic->mmio_base,
-                                                 IOAPIC_REG_REDTBL(n) + 1) << 32) | low);
-            if (!(low & IOAPIC_RED_MASK))
-                debug_irq(" (enabled vec=%#x dest=%u)",
+            if (OS01_DEBUG_irq) {
+                uint32_t high = ioapic_read_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(n) + 1);
+                debug_irq("  [%2u] %#018lx", n, ((uint64_t)high << 32) | low);
+                if (!(low & IOAPIC_RED_MASK))
+                    debug_irq(" (enabled vec=%#x dest=%u)",
                               low & 0xFF, (high >> 24) & 0xFF);
-            debug_irq("\n");
+                debug_irq("\n");
+            }
         }
     }
 }

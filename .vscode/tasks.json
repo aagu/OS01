@@ -8,7 +8,7 @@
             "type": "shell",
             "isBackground": true,
             "linux": {
-                "command": "DEBUG=1 make debug DEBUG_CHANNELS=sched,tty,vfs,mm,fs,net,ipc,drivers,init,syscall OS01_SELFTEST=1"
+                "command": "bash .vscode/launch-qemu.sh"
             },
             "problemMatcher": {
                 "owner": "cpp",
@@ -26,7 +26,8 @@
                 },
                 "background": {
                     "activeOnStart": true,
-                    "beginsPattern": "^.*OVMF\\.fd.*probing guessed raw"
+                    "beginsPattern": "^OS01_QEMU_STARTING$",
+                    "endsPattern": "^OS01_QEMU_GDB_READY$"
                 }
             }
         },
