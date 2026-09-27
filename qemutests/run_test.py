@@ -24,6 +24,14 @@ OVMF_FIRMWARE = os.environ.get("OVMF_FIRMWARE")
 if not OVMF_FIRMWARE or not os.path.isfile(OVMF_FIRMWARE):
     raise SystemExit("OVMF_FIRMWARE must name a readable firmware file")
 
+# Number of guest CPUs passed to QEMU -smp (default: single CPU, the
+# historical behavior). Validated at module load — before any QEMU
+# process can start.
+QEMU_SMP = os.environ.get("QEMU_SMP", "1")
+if not QEMU_SMP.isdigit() or int(QEMU_SMP) < 1:
+    raise SystemExit(
+        f"QEMU_SMP must be a positive integer, got {QEMU_SMP!r}")
+
 class TestRunner:
     def __init__(self, disk_img, timeout=TIMEOUT):
         self.disk_img = disk_img
@@ -54,7 +62,7 @@ class TestRunner:
             "-object", "rng-random,filename=/dev/urandom,id=rng0",
             "-device", "virtio-rng-pci,rng=rng0",
             "-m", "512",
-            "-smp", "1",
+            "-smp", QEMU_SMP,
             "-serial", f"file:{self.serial_path}",
             "-display", "none",
             "-no-reboot",
@@ -153,14 +161,37 @@ class TestRunner:
 
 
 def test_boot(tester):
-    """Phase 0 test: verify kernel boots and shell runs."""
+    """Phase 0 test: verify kernel boots, boot-log markers appear in
+    order, and the shell runs."""
     tester.start_qemu()
 
-    # Wait for evidence of boot — init banner
+    # Wait for evidence of boot — init banner. read_until() returns the
+    # whole buffer, so the ordered boot-marker assertion below runs on
+    # everything printed up to (and including) the banner.
     booted = tester.read_until("OS01 Init v1.0", timeout=25)
     if not booted:
         print("FAIL: Kernel did not boot")
         return False
+
+    # Boot-log markers, in serial-output order: TTY creation, the
+    # /dev/null smoke probe, then the init banner. (The percpu line's
+    # position relative to TTY is deliberately not pinned here.)
+    markers = (
+        r"tty: console TTY created"
+        r".*devfs: /dev/null read=0 write=4"
+        r".*OS01 Init v1\.0"
+    )
+    if not re.search(markers, booted, re.DOTALL):
+        print("FAIL: boot-log markers missing or out of order")
+        return False
+
+    # Multi-CPU boot: the kernel must have registered the configured
+    # CPU count (line format: "percpu: %u CPU(s) registered (%u in MADT)").
+    if int(QEMU_SMP) > 1:
+        percpu = f"percpu: {QEMU_SMP} CPU(s) registered"
+        if percpu not in booted:
+            print(f"FAIL: missing {percpu!r} in boot log")
+            return False
 
     # Wait for shell prompt
     prompt = tester.read_until("# ", timeout=15)
@@ -168,7 +199,7 @@ def test_boot(tester):
         print("FAIL: No shell prompt")
         return False
 
-    print("PASS: Kernel booted and shell prompt appeared")
+    print("PASS: Kernel booted, boot markers verified, shell prompt appeared")
     return True
 
 
