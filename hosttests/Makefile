@@ -87,7 +87,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_gic_driver.elf \
     $(TEST_BLD)/test_gic_marker_lines.elf \
     $(TEST_BLD)/test_gic_probe.elf \
-    $(TEST_BLD)/test_clocksource.elf
+    $(TEST_BLD)/test_clocksource.elf \
+    $(TEST_BLD)/test_i8042_demux.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry
 
@@ -602,6 +603,35 @@ $(TEST_BLD)/test_clocksource.elf: $(TEST_BLD)/test_clocksource.o \
 	$(HOST_CC) -o $@ $^
 
 test_clocksource: $(TEST_BLD)/test_clocksource.elf
+	$<
+
+# i8042 demux/transaction hosttest (PS/2 mouse Task 4): host-compiles the
+# REAL kernel/driver/i8042.c against a mock port model defined in the test
+# TU (OBF FIFO with AUX flags, test-settable IBF, recorded writes, virtual
+# cycle clock). i8042_test_runtime.h is force-included and shadows
+# <arch/io.h>, <arch/spinlock.h> and <arch/cpu.h> via their include guards,
+# so the production source compiles unmodified for the host.
+I8042_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC) \
+    -D_ARCH_IO_H -D_ARCH_SPINLOCK_H -D_ARCH_CPU_H \
+    -include $(TEST_MOCK)/i8042_test_runtime.h
+
+$(TEST_BLD)/i8042_production.o: $(TESTS_DIR)/kernel/driver/i8042.c \
+		$(TESTS_DIR)/kernel/include/driver/i8042.h \
+		$(TEST_MOCK)/i8042_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(I8042_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_i8042_demux.o: $(TEST_CASES)/test_i8042_demux.c \
+		$(TESTS_DIR)/kernel/include/driver/i8042.h \
+		$(TEST_MOCK)/i8042_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(I8042_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_i8042_demux.elf: $(TEST_BLD)/test_i8042_demux.o \
+		$(TEST_BLD)/i8042_production.o
+	$(HOST_CC) -o $@ $^
+
+test_i8042_demux: $(TEST_BLD)/test_i8042_demux.elf
 	$<
 
 clean:
