@@ -1,66 +1,82 @@
 #include <driver/logo.h>
 #include <core/printk.h>
+#include <driver/font.h>
 
-// ── OS01 boot logo (7 rows x 31 cols ASCII art) ──────────────
-// O S 0 1, drawn with putchar_at at character-cell granularity.
-// Each letter is a 7x7 block; shapes VERIFIED by rendering (see
-// docs/boot-logo-design.md / design script): O=RED, S=YELLOW,
-// 0=GREEN, 1=INDIGO. Tagline + dividers use WHITE / LIGHT_GRAY.
+extern psf2_t *font;
 
-#define LOGO_ROWS 7
-#define LOGO_COLS 31
+// A small, resolution-aware wordmark for the early 32-bit framebuffer.
+// Each five-column glyph is drawn as solid geometry, without font assets.
+#define LOGO_GLYPHS 4
+#define GLYPH_ROWS 7
+#define GLYPH_COLS 5
 
-static const char *logo_lines[LOGO_ROWS] = {
-    " #####   ######  #####     #   ",
-    "#     # #     # #     #   ##   ",
-    "#     # #       #   ###    #   ",
-    "#     #  #####  #  #  #    #   ",
-    "#     #       # ###   #    #   ",
-    "#     # #     # #     #    #   ",
-    " #####   ######  #####   ##### ",
+#define LOGO_INK    0x00e8f0f7
+#define LOGO_ACCENT 0x003bd6c6
+#define LOGO_MUTED  0x00687886
+
+static const unsigned char glyphs[LOGO_GLYPHS][GLYPH_ROWS] = {
+    { 0x0e, 0x1b, 0x11, 0x11, 0x11, 0x1b, 0x0e }, // O
+    { 0x0f, 0x18, 0x10, 0x0e, 0x01, 0x03, 0x1e }, // S
+    { 0x0e, 0x1b, 0x13, 0x15, 0x19, 0x1b, 0x0e }, // slashed 0
+    { 0x04, 0x0c, 0x04, 0x04, 0x04, 0x04, 0x0e }, // 1
 };
 
-// Letter column boundaries within a 31-char row (7 cols each + 1 gap):
-//   O: 0-6   S: 8-14   0: 16-22   1: 24-30
-static unsigned int logo_color_for_col(int col)
+static void fill_rect(int x, int y, int width, int height, unsigned int color)
 {
-    if (col < 7)        return RED;
-    if (col < 15)       return YELLOW;
-    if (col < 23)       return GREEN;
-    return INDIGO;                      // col 23..30 -> '1' region + padding
+    int right = x + width;
+    int bottom = y + height;
+
+    if (x >= Pos.XResolution || y >= Pos.YResolution ||
+        right <= 0 || bottom <= 0)
+        return;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (right > Pos.XResolution) right = Pos.XResolution;
+    if (bottom > Pos.YResolution) bottom = Pos.YResolution;
+
+    for (int py = y; py < bottom; py++) {
+        uint32_t *pixel = Pos.FB_addr + py * Pos.XResolution + x;
+        for (int px = x; px < right; px++)
+            *pixel++ = color;
+    }
 }
 
 void boot_logo_show(void)
 {
-    int row, col;
+    int scale = Pos.XResolution >= 800 ? 14 :
+                Pos.XResolution >= 480 ? 11 : 8;
+    if (Pos.YResolution < 300)
+        scale = 7;
 
-    // Block 1: the OS01 letters.
-    for (row = 0; row < LOGO_ROWS; row++) {
-        for (col = 0; col < LOGO_COLS; col++) {
-            char c = logo_lines[row][col];
-            if (c == ' ')
-                continue;               // leave background as-is
-            putchar_at(col, row, logo_color_for_col(col), BLACK,
-                       (unsigned char)c);
+    int left = Pos.XResolution >= 400 ? 32 : 16;
+    int top = 24;
+    int advance = 7 * scale;
+    int width = (LOGO_GLYPHS - 1) * advance + GLYPH_COLS * scale;
+
+    for (int letter = 0; letter < LOGO_GLYPHS; letter++) {
+        unsigned int color = letter < 2 ? LOGO_INK : LOGO_ACCENT;
+        for (int row = 0; row < GLYPH_ROWS; row++) {
+            for (int col = 0; col < GLYPH_COLS; col++) {
+                if (glyphs[letter][row] & (1u << (GLYPH_COLS - col - 1)))
+                    fill_rect(left + letter * advance + col * scale,
+                              top + row * scale, scale, scale, color);
+            }
         }
     }
 
-    // Block 2: divider.
-    for (col = 0; col < LOGO_COLS; col++)
-        putchar_at(col, LOGO_ROWS + 1, LIGHT_GRAY, BLACK, '=');
+    int line_y = top + GLYPH_ROWS * scale + 14;
+    fill_rect(left, line_y, 3 * scale, 2, LOGO_ACCENT);
+    fill_rect(left + 3 * scale + 8, line_y,
+              width - 3 * scale - 8, 1, LOGO_MUTED);
 
-    // Block 3: tagline.
-    const char *tag = "OS01 | x86-64 kernel";
-    int t = 0;
-    for (t = 0; tag[t] != '\0'; t++)
-        putchar_at(t, LOGO_ROWS + 2, WHITE, BLACK, (unsigned char)tag[t]);
+    const char *label = "x86_64  /  KERNEL";
+    int label_row = (line_y + 12 + (int)font->height - 1) / (int)font->height;
+    int label_col = left / (int)font->width;
+    for (int i = 0; label[i]; i++)
+        putchar_at(label_col + i, label_row, LOGO_MUTED, BLACK,
+                   (unsigned char)label[i]);
 
-    // Block 4: bottom divider.
-    for (col = 0; col < LOGO_COLS; col++)
-        putchar_at(col, LOGO_ROWS + 3, LIGHT_GRAY, BLACK, '=');
-
-    // Advance the software cursor below the logo so kernel log
-    // output (color_printk) continues beneath the tagline.
-    Pos.YPosition = LOGO_ROWS + 4;
+    // Leave a blank character row between the wordmark and boot messages.
+    Pos.YPosition = label_row + 2;
     Pos.XPosition = 0;
 }
