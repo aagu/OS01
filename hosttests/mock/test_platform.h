@@ -71,10 +71,16 @@ extern uint32_t num_cpus;
 
 /* Spinlock stub */
 typedef struct { unsigned long lock; } spinlock_T;
+/* Optional host-test observation point for fd-lock lifetime tests. */
+void poll_test_spinlock_acquire(spinlock_T *lock) __attribute__((weak));
 static inline void spin_init(spinlock_T *l) { l->lock = 1; }
 static inline void spin_lock(spinlock_T *l) { (void)l; }
 static inline void spin_unlock(spinlock_T *l) { (void)l; }
-static inline uint64_t spin_lock_irqsave(spinlock_T *l) { (void)l; return 0; }
+static inline uint64_t spin_lock_irqsave(spinlock_T *l)
+{
+    if (poll_test_spinlock_acquire) poll_test_spinlock_acquire(l);
+    return 0;
+}
 static inline void spin_unlock_irqrestore(spinlock_T *l, uint64_t f) { (void)l; (void)f; }
 
 /* I/O port stubs */

@@ -18,6 +18,14 @@ task_t *poll_test_current = &test_task;
 static size_t allocation_sizes[8];
 static int allocation_count;
 static int poll_wake_count;
+static spinlock_T *producer_fd_lock;
+static int producer_in_wake;
+
+void poll_test_spinlock_acquire(spinlock_T *lock)
+{
+    if (producer_in_wake && lock == producer_fd_lock)
+        producer_in_wake = 0; /* the fd lock serialized cleanup after wake */
+}
 
 void *kmalloc(size_t size)
 {
@@ -30,6 +38,8 @@ void *kmalloc(size_t size)
 
 size_t kfree(void *ptr)
 {
+    if (producer_fd_lock)
+        assert_false(producer_in_wake); /* cannot free a live poll_wq/entry */
     free(ptr);
     return 0;
 }
@@ -284,6 +294,28 @@ TEST_FUNC(test_real_pty_two_direction_registration_wake_and_cleanup)
     assert_true(list_is_empty(&slave_to_master.read_poll));
     assert_true(list_is_empty(&master_to_slave.write_poll));
     poll_table_destroy(&pt);
+}
+
+TEST_FUNC(test_cleanup_waits_for_detached_entry_wake)
+{
+    reset_runtime();
+    poll_table_t pt = {0};
+    list_t fd_poll;
+    spinlock_T fd_lock;
+    list_init(&fd_poll);
+    spin_init(&fd_lock);
+    assert_eq(0, poll_table_setup(&pt, 1));
+    poll_table_init(&pt);
+    poll_wait(&pt, &fd_poll, &fd_lock);
+    assert_eq(1, pt.nent);
+    /* Model the producer after list_del_init, before it finishes using
+     * entry->poll_wq. Cleanup must still synchronize on fd_lock. */
+    list_del_init(&pt.entries[0].node);
+    producer_fd_lock = &fd_lock;
+    producer_in_wake = 1;
+    poll_table_destroy(&pt);
+    assert_false(producer_in_wake);
+    producer_fd_lock = NULL;
 }
 
 TEST_FUNC(test_real_tty_and_default_devfs_paths)
@@ -567,6 +599,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_direction_policy),
     TEST_ENTRY(test_requested_registration_policy),
     TEST_ENTRY(test_real_pty_two_direction_registration_wake_and_cleanup),
+    TEST_ENTRY(test_cleanup_waits_for_detached_entry_wake),
     TEST_ENTRY(test_real_tty_and_default_devfs_paths),
     TEST_ENTRY(test_poll_table_allocation_bounds),
     TEST_ENTRY(test_real_poll_and_select_allocate_two_slots_per_fd),

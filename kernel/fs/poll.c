@@ -97,14 +97,15 @@ void poll_wait(poll_table_t *pt, list_t *poll_list, spinlock_T *fd_lock)
 }
 
 // ── poll_table_cleanup — remove all entries from fd lists ──
-// Safe against concurrent fd wake: takes each entry's fd_lock,
-// re-checks list_is_empty (fd wake may have already removed it).
+// Always acquire each registered entry's fd_lock. A producer may have
+// detached the node but still be using poll_wq until it releases that lock.
+// The lock also protects removal of entries still on an fd list.
 
 void poll_table_cleanup(poll_table_t *pt)
 {
     for (int i = 0; i < pt->nent; i++) {
         poll_wait_entry_t *e = &pt->entries[i];
-        if (!list_is_empty(&e->node) && e->fd_lock) {
+        if (e->fd_lock) {
             uint64_t flags = spin_lock_irqsave(e->fd_lock);
             if (!list_is_empty(&e->node))
                 list_del_init(&e->node);

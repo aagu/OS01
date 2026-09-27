@@ -160,6 +160,12 @@ static void test_event_io_and_poll(void)
   assert_eq(16, mouse_devfs_read(0, 0, 24, events));
   assert_eq(2, events[0].dx); assert_eq(3, events[1].dx);
   assert_eq(-EAGAIN, mouse_devfs_read(0, 0, 8, events));
+  inject_event(); inject_event();
+  mouse_event_t reader_a, reader_b;
+  assert_eq(8, mouse_devfs_read(0, 0, 8, &reader_a));
+  assert_eq(8, mouse_devfs_read(0, 0, 8, &reader_b));
+  assert_eq(4, reader_a.dx); assert_eq(5, reader_b.dx);
+  assert_eq(-EAGAIN, mouse_devfs_read(0, 0, 8, events));
   reset_case(0x41); wheel_id = 0; assert_eq(0, mouse_init());
   for (int i = 0; i < 66; i++) inject_event();
   assert_eq(2, mouse_dropped_events());

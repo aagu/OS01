@@ -27,3 +27,16 @@ Used the profile's `print-run-paths` firmware/image with q35, AHCI, 512 MiB, SMP
 ## Self-review
 
 No fixed waiter cap or unlocked saved waiter pointers. Poll entry removal and wake share the event lock with `poll_table_cleanup`; no sleep or user copy occurs under it. Lock order is i8042 then event then poll wait queue in the IRQ producer, while read and poll never acquire i8042. The host test uses a parser double for event production, so QEMU userspace behavior remains the principal unverified integration point.
+
+## Review fix round 1 — poll entry lifetime
+
+Review exposed a lifetime race in generic `poll_table_cleanup`: it tested an entry's list linkage before taking `fd_lock`. A producer can detach an entry then still use `entry->poll_wq` for wake; cleanup could skip the lock and free the table. Cleanup now takes every registered entry's `fd_lock` unconditionally, checks linkage under it, and releases it before `poll_table_destroy` frees entries. The cleanup path holds no other fd lock, so the existing fd-lock → wait-queue lock producer order is unchanged.
+
+- RED: built and ran production-object `test_poll_requested.elf` with a deterministic detached-but-still-waking entry. Before the fix it exited 1: `test_cleanup_waits_for_detached_entry_wake` reported two failures (`kfree` while producer active and active after cleanup), total 84 assertions with 82 passed.
+- GREEN: the same binary after fixing `kernel/fs/poll.c` exited 0, `Total: 84 | Passed: 84 | Failed: 0`. The test's lock hook models the producer finishing only after cleanup acquires the fd lock; it catches deletion of that synchronization even though the host test is single-threaded.
+- Added explicit separate 8-byte reads into two reader buffers and verified sequential, unique event values.
+- Focused `test_mouse_init`: 384/384 passed; generic `test_poll_waitqueue_handshake`: 75/75 passed.
+- Full `make PROFILE=x86_64-clang test-host`: 31 suites, 0 failed, including poll and mouse cases; PMM boot reservation passed.
+- `make PROFILE=x86_64-clang kernel.bin`: exit 0; `git diff --check`: exit 0.
+
+The earlier bounded QEMU observation remains the only runtime observation; no new QEMU claim is made for this lock fix.
