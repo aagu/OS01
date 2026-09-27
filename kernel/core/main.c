@@ -11,13 +11,10 @@
 #include <sched/task.h>
 #include <percpu/percpu.h>
 #include <core/smp.h>
-#include <tty/tty.h>
 #include <intr/apic.h>
 #include <driver/serial.h>
-#include <driver/keyboard.h>
-#include <fs/vfs.h>
-#include <fs/devfs.h>
 #include <fs/boot.h>
+#include <tty/boot.h>
 #include <arch/x86_64/boot.h>
 #include <core/selftest.h>
 #include <sync/futex.h>
@@ -141,13 +138,13 @@ int kernel_main(const struct boot_context *bootctx)
 
     // ── FS bring-up + x86 device node registration (Task 2 split) ──
     // Order matters: devfs must exist before any devfs_register_*() call;
-    // PTY must exist before keyboard_set_tty() (later in this function)
+    // PTY must exist before keyboard_set_tty() (later in tty_boot_init())
     // can route input through the master fd; the x86 device nodes
     // (keyboard/mouse/fb) are registered after PTY so pty_init has a
     // clean view of devfs; the partition-mount + tmpfs + procfs come
     // last so user-space can see /boot, /, /tmp, /proc by the time
-    // init.elf spawns.  TTY wiring and the /dev smoke probe below stay
-    // in main.c for now — Task 3 owns the move to fs_boot_probe_devfs().
+    // init.elf spawns.  TTY wiring and the /dev smoke probe are now
+    // owned by tty_boot_init() and fs_boot_probe_devfs() (Task 3).
     fs_boot_prepare();
 
     pty_init();                     // init PTY table + register /dev/ptmx
@@ -156,34 +153,16 @@ int kernel_main(const struct boot_context *bootctx)
 
     fs_boot_mounts();               // block-device devfs + GPT/FAT32/ext2 mounts + tmpfs/procfs
 
-    // ═══ 7. Console TTY ═════════════════════════════════════
-    // console_putchar as output — routes all user-space writes
-    // through the VT100 CSI terminal emulator.
-    tty_t *console = tty_alloc(console_putchar, NULL);
-    if (console) {
-        serial_set_tty(console);         // serial IRQ → TTY
-        keyboard_set_tty(console);       // keyboard IRQ → TTY
-        tty_set_dev_tty(console);        // /dev/tty read/write → TTY
-        serial_printk("tty: console TTY created\n");
-    }
-
-    // Register /dev/tty (magic → controlling terminal) and /dev/tty0
-    // (direct physical console) AFTER keyboard_set_tty so that
-    // keyboard_get_tty() returns the correct pointer for private_data.
-    devfs_register_chrdev("tty",  keyboard_get_tty(), &tty_magic_ops);
-    devfs_register_chrdev("tty0", keyboard_get_tty(), &tty_phys_ops);
-
-    vfs_debug_list("/dev");
-
-    // Quick smoke test: /dev/null
-    vfs_node_t *nul = vfs_lookup("/dev/null");
-    if (nul) {
-        char c;
-        int r = vfs_read(nul, 0, 1, &c);
-        int w = vfs_write(nul, 0, 4, "test");
-        serial_printk("devfs: /dev/null read=%d write=%d\n", r, w);
-        vfs_node_put(nul);
-    }
+    // ═══ 7. Console TTY + /dev smoke probe (Task 3 split) ═════
+    // tty_boot_init() allocates the console TTY, wires serial/keyboard/
+    // dev_tty to it (preserving the if(console) scope verbatim), then
+    // registers /dev/tty and /dev/tty0.  fs_boot_probe_devfs() lists
+    // /dev and runs the /dev/null read/write smoke test.  The split
+    // mirrors the Task-2 partition between FS mount work and probe
+    // work; the brief forbids calling fs_boot_probe_devfs() from
+    // fs_boot_mounts().
+    tty_boot_init();
+    fs_boot_probe_devfs();
 
     // ═══ 8. Per-CPU + SMP ═══════════════════════════════════
     {

@@ -104,3 +104,26 @@ void fs_boot_mounts(void)
 
     procfs_init();                  // /proc
 }
+
+// ── fs_boot_probe_devfs ──────────────────────────────────────
+// After tty_boot_init() registers /dev/tty and /dev/tty0, list the
+// /dev directory and run a /dev/null smoke probe.  Implementation
+// mirrors kernel/core/main.c:176-186 (f500458 baseline) verbatim:
+// same vfs_debug_list() call, same read/write smoke test, same
+// log format.  MUST run AFTER tty_boot_init() so the listing shows
+// the tty and tty0 nodes.  MUST NOT be called from fs_boot_mounts()
+// (the brief is explicit).
+void fs_boot_probe_devfs(void)
+{
+    vfs_debug_list("/dev");
+
+    // Quick smoke test: /dev/null
+    vfs_node_t *nul = vfs_lookup("/dev/null");
+    if (nul) {
+        char c;
+        int r = vfs_read(nul, 0, 1, &c);
+        int w = vfs_write(nul, 0, 4, "test");
+        serial_printk("devfs: /dev/null read=%d write=%d\n", r, w);
+        vfs_node_put(nul);
+    }
+}
