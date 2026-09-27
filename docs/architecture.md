@@ -140,12 +140,9 @@ Init phases ordered by dependency. After the kernel-main refactor (Tasks 4-6) x8
 |-------|------------|---------------|
 | 1 | CPU infrastructure (framebuffer Pos, IDT, serial, EFER NXE) | `x86_64_boot_early()` |
 | 2 | Memory (PMM, VMM, FB remap, early logo) | `x86_64_boot_memory()` |
-| 3 | Interrupt controllers (APIC, PIC) | subsys framework via `x86_64_boot_subsystems()` |
-| 4 | Timers (PIT, LAPIC timer) | subsys framework |
-| 5 | Device IRQs (keyboard, serial IRQ) | subsys framework |
-| 6 | Storage (AHCI) | subsys framework |
-| 7 | VFS / devfs / mounts / TTY / `/dev` smoke | `fs_boot_*()` + `tty_boot_init()` helpers in `kernel_main` |
+| 3-6 | Interrupt controllers, timers, device IRQs, storage (subsys framework drives APIC/PIC/PIT/LAPIC-timer/keyboard/AHCI) | subsys framework via `x86_64_boot_subsystems()` |
 | 8 | BSP per-CPU registration (brought forward — see below) | `x86_64_boot_percpu()` |
+| 7 | VFS / devfs / mounts / TTY / `/dev` smoke | `fs_boot_*()` + `tty_boot_init()` helpers in `kernel_main` |
 | 9 | AP bring-up + per-CPU subsystem dispatch | `x86_64_boot_aps()` |
 | 10 | Scheduler + user-space init | `task_init()` in `kernel_main` |
 

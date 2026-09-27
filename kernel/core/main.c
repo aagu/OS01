@@ -1,12 +1,8 @@
-#include <string.h>
 #include <core/printk.h>      // serial_printk (still printed from kernel_main)
-#include <log/log.h>
+#include <core/bootinfo.h>    // struct boot_context (used by signature)
 #include <memory/memory.h>
 #include <arch/cpu.h>         // arch_cycle_counter, arch_cpu_halt
-#include <arch/irq.h>
 #include <sched/task.h>       // task_init
-#include <percpu/percpu.h>
-#include <core/smp.h>
 #include <driver/serial.h>    // write_serial
 #include <fs/boot.h>          // fs_boot_prepare / _mounts / _probe_devfs
 #include <tty/boot.h>         // tty_boot_init
@@ -14,7 +10,6 @@
 #include <arch/x86_64/smp_boot.h> // x86_64_boot_percpu / _aps
 #include <core/selftest.h>    // selftest_run_all
 #include <sync/futex.h>       // futex_init
-#include <stdlib.h>
 #include <tty/console.h>      // console_init
 #include <tty/pty.h>          // pty_init
 #include <net/net.h>          // net_lwip_init

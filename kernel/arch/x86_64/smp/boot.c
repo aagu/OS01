@@ -33,9 +33,7 @@
 #include <subsys/subsys.h>
 #include <arch/subsys.h>
 #include <arch/cpu.h>
-
-// Forward declaration — smp_boot_aps() lives in smp.c (same dir).
-void smp_boot_aps(void);
+#include <core/smp.h>         // smp_boot_aps
 
 void x86_64_boot_percpu(void)
 {

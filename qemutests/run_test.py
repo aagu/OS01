@@ -175,15 +175,12 @@ def test_boot(tester):
 
     # Boot-log markers, in serial-output order.
     #
-    # Single CPU: TTY creation, the /dev/null smoke probe, then the init
-    # banner (Task 1 order).  The percpu line's position relative to TTY
-    # is not pinned because x86_64_boot_percpu() still runs in place
-    # after fs_boot_probe_devfs() there.
-    #
-    # Multi-CPU (Task 6): BSP per-CPU registration runs BEFORE the
-    # filesystem/TTY phase, so the "percpu: N CPU(s) registered" marker
-    # must precede TTY creation, which precedes the /dev/null probe,
-    # which precedes the init banner.
+    # Post-Task 6: BSP per-CPU registration runs BEFORE the
+    # filesystem/TTY phase at every SMP count, so the "percpu: N
+    # CPU(s) registered" marker always precedes TTY creation, which
+    # precedes the /dev/null probe, which precedes the init banner.
+    # Both single- and multi-CPU branches enforce this ordering —
+    # BSP percpu runs even at SMP=1 (num_cpus=1 after the BSP loop).
     if int(QEMU_SMP) > 1:
         markers = (
             rf"percpu: {int(QEMU_SMP)} CPU\(s\) registered"
@@ -193,7 +190,8 @@ def test_boot(tester):
         )
     else:
         markers = (
-            r"tty: console TTY created"
+            rf"percpu: {int(QEMU_SMP)} CPU\(s\) registered"
+            r".*tty: console TTY created"
             r".*devfs: /dev/null read=0 write=4"
             r".*OS01 Init v1\.0"
         )
