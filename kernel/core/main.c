@@ -16,6 +16,7 @@
 #include <fs/boot.h>
 #include <tty/boot.h>
 #include <arch/x86_64/boot.h>
+#include <arch/x86_64/smp_boot.h>
 #include <core/selftest.h>
 #include <sync/futex.h>
 #include <stdlib.h>
@@ -132,47 +133,19 @@ int kernel_main(const struct boot_context *bootctx)
     fs_boot_probe_devfs();
 
     // ═══ 8. Per-CPU + SMP ═══════════════════════════════════
-    {
-        uint32_t cpu_idx = 0;
-        for (uint32_t i = 0; i < apic_info.lapic_count; i++) {
-            if (!(apic_info.lapics[i].flags & 1))
-                continue;
-
-            if (cpu_idx >= NR_CPUS) {
-                serial_printk("percpu: APIC id=%u DROPPED (NR_CPUS=%u)\n",
-                              apic_info.lapics[i].apic_id, (unsigned)NR_CPUS);
-                continue;
-            }
-
-            percpu_init(cpu_idx, apic_info.lapics[i].apic_id);
-
-            if (cpu_idx == 0) {
-                percpu_data[0].tss = &init_tss[0];
-                percpu_data[0].tss_hw = arch_task_boot_state();
-                percpu_install_gs(0);
-                percpu_data[0].online = 1;
-                serial_printk("percpu: BSP  (cpu=%u, apic_id=%u) online\n",
-                              cpu_idx, apic_info.lapics[i].apic_id);
-            } else {
-                serial_printk("percpu: AP   (cpu=%u, apic_id=%u) registered\n",
-                              cpu_idx, apic_info.lapics[i].apic_id);
-            }
-            cpu_idx++;
-        }
-        serial_printk("percpu: %u CPU(s) registered (%u in MADT)\n",
-                      cpu_idx, apic_info.lapic_count);
-        num_cpus = cpu_idx;
-    }
-
-    // 显式启动 tick 源：GS base 已装（main.c percpu_install_gs(0)），
-    // this_cpu() 可用。tick_start 先掩 PIT 再启 LAPIC，失败回退 PIT。
-    tick_start();
-
-    smp_boot_aps();
-
-    // per-CPU 子系统二次 init
-    arch_register_subsys_percpu();
-    subsys_init_percpu();
+    // x86_64_boot_percpu() owns MADT traversal, percpu_init(), BSP
+    // TSS/GS/online, and num_cpus publication.  x86_64_boot_aps()
+    // owns tick_start() → smp_boot_aps() → per-CPU subsystem
+    // dispatch.  Both helpers live in kernel/arch/x86_64/smp/boot.c;
+    // see <arch/x86_64/smp_boot.h> for the interface.
+    //
+    // Position relative to fs_boot_probe_devfs() is preserved
+    // verbatim (Task 5 is a pure in-place extraction): the percpu
+    // marker still appears AFTER the /dev/null probe in the boot
+    // log.  Task 6 will independently evaluate whether moving
+    // x86_64_boot_percpu() earlier is safe.
+    x86_64_boot_percpu();
+    x86_64_boot_aps();
 
 #ifdef OS01_SELFTEST
     serial_printk("[selftest] running built-in tests...\n");
