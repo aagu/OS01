@@ -173,16 +173,33 @@ def test_boot(tester):
         print("FAIL: Kernel did not boot")
         return False
 
-    # Boot-log markers, in serial-output order: TTY creation, the
-    # /dev/null smoke probe, then the init banner. (The percpu line's
-    # position relative to TTY is deliberately not pinned here.)
-    markers = (
-        r"tty: console TTY created"
-        r".*devfs: /dev/null read=0 write=4"
-        r".*OS01 Init v1\.0"
-    )
+    # Boot-log markers, in serial-output order.
+    #
+    # Single CPU: TTY creation, the /dev/null smoke probe, then the init
+    # banner (Task 1 order).  The percpu line's position relative to TTY
+    # is not pinned because x86_64_boot_percpu() still runs in place
+    # after fs_boot_probe_devfs() there.
+    #
+    # Multi-CPU (Task 6): BSP per-CPU registration runs BEFORE the
+    # filesystem/TTY phase, so the "percpu: N CPU(s) registered" marker
+    # must precede TTY creation, which precedes the /dev/null probe,
+    # which precedes the init banner.
+    if int(QEMU_SMP) > 1:
+        markers = (
+            rf"percpu: {int(QEMU_SMP)} CPU\(s\) registered"
+            r".*tty: console TTY created"
+            r".*devfs: /dev/null read=0 write=4"
+            r".*OS01 Init v1\.0"
+        )
+    else:
+        markers = (
+            r"tty: console TTY created"
+            r".*devfs: /dev/null read=0 write=4"
+            r".*OS01 Init v1\.0"
+        )
     if not re.search(markers, booted, re.DOTALL):
-        print("FAIL: boot-log markers missing or out of order")
+        print("FAIL: boot-log markers missing or out of order "
+              f"(QEMU_SMP={QEMU_SMP})")
         return False
 
     # Multi-CPU boot: the kernel must have registered the configured

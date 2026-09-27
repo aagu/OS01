@@ -102,6 +102,17 @@ int kernel_main(const struct boot_context *bootctx)
     //   Phase 6: storage (ahci)
     x86_64_boot_subsystems(bootctx);
 
+    // ═══ 8a. BSP per-CPU registration (Task 6) ═════════════════
+    // x86_64_boot_percpu() owns MADT traversal, percpu_init(), BSP
+    // TSS/GS/online, and num_cpus publication; it runs BEFORE the
+    // filesystem phase so device/FS code sees a valid this_cpu().
+    // Audit summary: num_cpus has exactly one writer (boot.c), GS is
+    // installed before online=1, tlb_shootdown/ipi_broadcast only
+    // target online CPUs (APs are offline until x86_64_boot_aps()),
+    // and the slab lock is statically initialized.  See the Task 6
+    // report in .superpowers/sdd/ for the full audit.
+    x86_64_boot_percpu();
+
     random_init(bootctx);               // seed the CSPRNG pool (BSP, once)
 
     // ── FS bring-up + x86 device node registration (Task 2 split) ──
@@ -139,12 +150,9 @@ int kernel_main(const struct boot_context *bootctx)
     // dispatch.  Both helpers live in kernel/arch/x86_64/smp/boot.c;
     // see <arch/x86_64/smp_boot.h> for the interface.
     //
-    // Position relative to fs_boot_probe_devfs() is preserved
-    // verbatim (Task 5 is a pure in-place extraction): the percpu
-    // marker still appears AFTER the /dev/null probe in the boot
-    // log.  Task 6 will independently evaluate whether moving
-    // x86_64_boot_percpu() earlier is safe.
-    x86_64_boot_percpu();
+    // Task 6 moved x86_64_boot_percpu() to just after
+    // x86_64_boot_subsystems() (before random_init) — see the audit
+    // note there.  x86_64_boot_aps() stays in place here.
     x86_64_boot_aps();
 
 #ifdef OS01_SELFTEST
