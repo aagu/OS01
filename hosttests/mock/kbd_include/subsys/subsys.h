@@ -11,12 +11,14 @@
 #include <stdint.h>
 
 #define SUBSYS_PHASE_5        5
+#define SUBSYS_PHASE_6        6
 #define SUBSYS_FLAG_OPTIONAL  (1 << 0)
 
 typedef int (*subsys_initcall_t)(void);
 
 int register_subsys(const char *name, int (*init)(void),
                     int phase, uint32_t flags);
+int subsys_status(const char *name);
 
 /* Host-test hook: receives each SUBSYS_INITCALL function pointer. */
 void kbd_mock_subsys_register_initcall(int (*fn)(void));

@@ -16,5 +16,6 @@ typedef struct pt_regs pt_regs_t;
 int32_t register_irq(uint32_t gsi, void *arg,
         void (*handler)(uint64_t nr, uint64_t parameter, pt_regs_t *regs),
         uint64_t parameter, uint32_t flags, const char *irq_name);
+uint32_t unregister_irq(uint32_t gsi);
 
 #endif /* _KERNEL_INTERRUPT_H */

@@ -89,6 +89,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_gic_probe.elf \
     $(TEST_BLD)/test_clocksource.elf \
     $(TEST_BLD)/test_i8042_demux.elf \
+    $(TEST_BLD)/test_mouse_init.elf \
     $(TEST_BLD)/test_mouse_proto.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry
@@ -673,6 +674,18 @@ $(TEST_BLD)/test_mouse_proto.elf: $(TEST_CASES)/test_mouse_proto.c $(TESTS_DIR)/
 	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -I$(TEST_INC) $< $(TESTS_DIR)/kernel/driver/mouse_proto.c -o $@
 
 test_mouse_proto: $(TEST_BLD)/test_mouse_proto.elf
+	$<
+
+# Links the real phase-6 mouse driver against scriptable i8042 and IRQ
+# transactions; the test observes command-byte and consumer state.
+$(TEST_BLD)/test_mouse_init.elf: $(TEST_CASES)/test_mouse_init.c \
+		$(TESTS_DIR)/kernel/driver/mouse.c \
+		$(TESTS_DIR)/kernel/include/driver/mouse.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(KBD_HOST_CFLAGS) $< \
+		$(TESTS_DIR)/kernel/driver/mouse.c -o $@
+
+test_mouse_init: $(TEST_BLD)/test_mouse_init.elf
 	$<
 
 clean:
