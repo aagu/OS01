@@ -49,6 +49,27 @@ __attribute__((weak)) ssize_t copy_from_user_ft_res(void *dst, const void *src, 
     return (ssize_t)n;
 }
 
+/* wait_queue_arm / wait_queue_disarm — real-semantics defaults so
+ * the production do_poll_core compiles into any host test binary
+ * that links POLL_PRODUCTION_OBJS without do_poll_core regressing
+ * on the wait_queue_* API.  Marked weak so a test TU that wants
+ * instrumentation (e.g. test_poll_waitqueue_handshake.c) can
+ * override with its own definition without a linker collision. */
+__attribute__((weak)) void wait_queue_arm(wait_queue_t *wq)
+{
+    uint64_t flags = spin_lock_irqsave(&wq->lock);
+    list_add_to_before(&wq->head, &current->io_wait_node);
+    current->state = TASK_INTERRUPTIBLE;
+    spin_unlock_irqrestore(&wq->lock, flags);
+}
+
+__attribute__((weak)) void wait_queue_disarm(void)
+{
+    if (!list_is_empty(&current->io_wait_node))
+        list_del_init(&current->io_wait_node);
+    current->state = TASK_RUNNING;
+}
+
 bool     clocksource_active = false;
 uint32_t clocksource_mult   = 0;
 uint32_t clocksource_shift  = 0;

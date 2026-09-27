@@ -23,6 +23,22 @@ void wait_queue_init(wait_queue_t *wq);
 // already be consumed by another waiter.
 void wait_queue_sleep(wait_queue_t *wq);
 
+// Enqueue current on wq under wq->lock and set state to
+// TASK_INTERRUPTIBLE.  Does NOT call schedule(); the caller is
+// responsible for invoking schedule() and wait_queue_disarm() after
+// wake up.  Used by callers (e.g. do_poll_core) that need the
+// arm-then-recheck-then-schedule handshake to avoid lost wake-ups
+// where a producer wakes pt.wq between an fd scan and our entry
+// being enqueued (which would silently drop the wake on an empty
+// queue).
+void wait_queue_arm(wait_queue_t *wq);
+
+// Remove current from any wait queue it is on (via io_wait_node)
+// and restore state to TASK_RUNNING.  Safe to call when current is
+// not on any wq (idempotent no-op).  Pair with wait_queue_arm, or
+// with wait_queue_sleep (which already disarms on return).
+void wait_queue_disarm(void);
+
 // Wake one waiter from wq (FIFO).  Safe from IRQ context.
 void wait_queue_wake_one(wait_queue_t *wq);
 

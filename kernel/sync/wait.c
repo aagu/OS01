@@ -9,6 +9,24 @@ void wait_queue_init(wait_queue_t *wq)
     spin_init(&wq->lock);
 }
 
+// Shared core for wait_queue_sleep.  Lifts the
+// "enqueue-under-lock + state=INTERRUPTIBLE" so it can be paired
+// with an explicit schedule() and disarm by callers (like
+// do_poll_core) that need an arm-then-recheck-then-schedule
+// handshake.  No public API change for wait_queue_sleep's callers.
+static inline void wait_queue_lock_and_enqueue(wait_queue_t *wq)
+{
+    uint64_t flags = spin_lock_irqsave(&wq->lock);
+    list_add_to_before(&wq->head, &current->io_wait_node);
+    current->state = TASK_INTERRUPTIBLE;  // set before unlock (SMP: prevents lost-wakeup)
+    spin_unlock_irqrestore(&wq->lock, flags);
+}
+
+void wait_queue_arm(wait_queue_t *wq)
+{
+    wait_queue_lock_and_enqueue(wq);
+}
+
 void wait_queue_sleep(wait_queue_t *wq)
 {
     // Enqueue + re-check pattern: grab lock, add self,
@@ -16,10 +34,7 @@ void wait_queue_sleep(wait_queue_t *wq)
     // The double-check of the caller's condition happens
     // OUTSIDE this function (same as tty_read does after
     // schedule() returns).
-    uint64_t flags = spin_lock_irqsave(&wq->lock);
-    list_add_to_before(&wq->head, &current->io_wait_node);
-    current->state = TASK_INTERRUPTIBLE;  // set before unlock (SMP: prevents lost-wakeup)
-    spin_unlock_irqrestore(&wq->lock, flags);
+    wait_queue_lock_and_enqueue(wq);
 
     schedule();
     arch_local_irq_enable();
@@ -27,6 +42,11 @@ void wait_queue_sleep(wait_queue_t *wq)
     // Clean up if we were woken by something other than
     // wait_queue_wake_one (signal, etc.).  The normal path
     // already did list_del_init on our node.
+    wait_queue_disarm();
+}
+
+void wait_queue_disarm(void)
+{
     if (!list_is_empty(&current->io_wait_node))
         list_del_init(&current->io_wait_node);
     current->state = TASK_RUNNING;

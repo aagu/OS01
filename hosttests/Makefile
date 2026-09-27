@@ -80,6 +80,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_tetris_logic.elf \
     $(TEST_BLD)/test_sync_primitives.elf \
     $(TEST_BLD)/test_poll_requested.elf \
+    $(TEST_BLD)/test_poll_waitqueue_handshake.elf \
     $(TEST_BLD)/test_bootinfo_abi.elf \
     $(TEST_BLD)/test_runtime_udivti3.elf \
     $(TEST_BLD)/test_lwip_rand.elf \
@@ -462,6 +463,21 @@ POLL_PRODUCTION_OBJS := \
     $(TEST_BLD)/poll_clocksource_stub.o
 
 $(TEST_BLD)/test_poll_requested.elf: $(TEST_BLD)/test_poll_requested.o $(POLL_PRODUCTION_OBJS)
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+# Poll waitqueue handshake RED/GREEN test (Task 3): exercises the
+# new arm-重查-schedule handshake in do_poll_core with real-semantics
+# wait_queue_* (enqueue/dequeue + state transitions) and a mock
+# FD_PIPE whose readiness flips via a producer hook fired from the
+# test-local wait_queue_arm (the single-threaded vantage point over
+# the scan1→ARM→schedule handshake).  Race windows covered: wake
+# between scan1 and ARM (lost on empty queue — old code's bug) and
+# wake between ARM and schedule (must not re-sleep).
+$(TEST_BLD)/test_poll_waitqueue_handshake.o: $(TEST_CASES)/test_poll_waitqueue_handshake.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_poll_waitqueue_handshake.elf: $(TEST_BLD)/test_poll_waitqueue_handshake.o $(POLL_PRODUCTION_OBJS)
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 # LWIP_RAND white-box fixture: host-compile the PRODUCTION

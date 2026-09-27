@@ -403,16 +403,39 @@ static int poll_scan(struct pollfd *kfds, uint64_t nfds, poll_table_t *pt)
 }
 
 // ── do_poll_core — core polling loop (no user memory access) ──
+//
 // Caller provides kfds and pt (already setup via poll_table_setup).
 // Caller is responsible for poll_table_destroy.
-// Returns: ready count (>=0), or -EINTR.
+//
+// Handshake — fixes the lost-wake-up window the old
+// scan-→wait_queue_sleep order had:
+//
+//   1. Scan + register fd wait chains  (entries hung on fd poll lists,
+//      pointing at pt.wq)
+//   2. ARM current to pt.wq           (closes the window: any wake
+//      from here on dequeues us instead of being silently dropped
+//      on an empty queue)
+//   3. Re-scan with pt=NULL           (catches the producer that
+//      raced in between steps 1 and 2 — the wake was lost but
+//      the data IS visible to fd_poll now)
+//   4. If ready / signal / deadline reached: disarm + cleanup +
+//      unregister timeout + return
+//   5. Otherwise: schedule() (state may already be RUNNING if a
+//      wake fired between steps 2 and 4 — schedule is then a
+//      no-op for us), then disarm + cleanup fd chain + rescan/loop
+//
+// Every finite-timeout return path MUST call poll_tmo_unregister,
+// including the post-ARM re-scan that returns ready before
+// scheduling.
+//
+// Returns: ready count (>=0), 0 (timeout), -EINTR.
 
 int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, poll_table_t *pt)
 {
     // ── Timeout setup ──────────────────────────────────────
     // Register a tick-timeout registry node.  It stays registered until this
     // poll RETURNS (not until first wake) so the deadline keeps
-    // firing every tick — no lost-wakeup window.
+    // firing every tick — no lost-wakeup window in the timeout path.
     uint64_t deadline = 0;
     bool timed = (timeout_val > 0);
     if (timed) {
@@ -421,62 +444,93 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
         poll_tmo_register(pt, deadline);
     }
 
-    int ready_count = 0;
+    int64_t ready_count = 0;
 
     for (;;) {
         poll_table_init(pt);  // reset nent=0, triggered=false
 
-        // ── Scan all fds ──────────────────────────────────
+        // ── Scan 1: register fd chains + check ready ─────────
         ready_count = poll_scan(kfds, nfds, pt);
 
-        // ── Ready? Return ─────────────────────────────────
+        // ── Immediate ready: return ────────────────────────────
         if (ready_count > 0) {
             poll_table_cleanup(pt);
             if (timed) poll_tmo_unregister(pt);
             break;
         }
 
-        // ── Non-blocking? ─────────────────────────────────
+        // ── Non-blocking ───────────────────────────────────────
         if (timeout_val == 0) {
             poll_table_cleanup(pt);
+            if (timed) poll_tmo_unregister(pt);
             break;
         }
 
-        // ── Pre-sleep signal check ────────────────────────
+        // ── ARM: enqueue self on pt.wq under wq->lock ──────────
+        // After this, any wake on pt.wq will dequeue us (instead
+        // of being lost on an empty queue).  The fd-side entries
+        // registered in Scan 1 still have poll_wq = &pt.wq, so
+        // wait_queue_wake_all on each entry cascades to pt.wq and
+        // finds us here.
+        wait_queue_arm(&pt->wq);
+
+        // ── Scan 2: re-check with pt=NULL (no new entries) ─────
+        // Catches wakes that landed between Scan 1 and ARM
+        // (those wakes found pt.wq empty, but the producer's
+        // data is now visible to fd_poll).  Also runs the
+        // pre-sleep deadline / signal guards cheaply.
+        ready_count = poll_scan(kfds, nfds, NULL);
+
+        // ── Ready after re-check: disarm + cleanup + return ───
+        if (ready_count > 0) {
+            wait_queue_disarm();
+            poll_table_cleanup(pt);
+            if (timed) poll_tmo_unregister(pt);
+            return ready_count;
+        }
+
+        // ── Signal pending before sleep: disarm + EINTR ─────
         if (current->signal & ~current->blocked) {
+            wait_queue_disarm();
             poll_table_cleanup(pt);
             if (timed) poll_tmo_unregister(pt);
             return -EINTR;
         }
 
-        // ── Block on pt.wq ────────────────────────────────
-        // The LAPIC tick registry keeps waking this wq every tick past the
-        // deadline, so no lost-wakeup window exists here.  The
-        // pre-sleep deadline check below is a cheap extra guard.
+        // ── Deadline already reached before sleep: 0 ─────────
         if (timed && clocksource_read_ns() >= deadline) {
+            wait_queue_disarm();
             poll_table_cleanup(pt);
             if (timed) poll_tmo_unregister(pt);
             return 0;
         }
-        wait_queue_sleep(&pt->wq);
+
+        // ── Sleep ──────────────────────────────────────────────
+        // A wake firing here (post-ARM, pre-schedule) has
+        // already set state=RUNNING and dequeued us, so
+        // schedule() does not actually sleep us.
+        schedule();
+
+        // ── DISARM after wake ──────────────────────────────────
+        wait_queue_disarm();
 
         // Woken up — remove entries from fd poll lists.
         // The timeout node STAYS registered (only removed on return)
-        // so the PIT keeps waking us on subsequent ticks.
+        // so the LAPIC tick keeps waking us on subsequent ticks.
         poll_table_cleanup(pt);
 
-        // ── Timeout check ─────────────────────────────────
+        // ── Timeout check (post-sleep) ──────────────────────────
         if (timed && clocksource_read_ns() >= deadline) {
-            poll_tmo_unregister(pt);
+            if (timed) poll_tmo_unregister(pt);
             return poll_scan(kfds, nfds, NULL);
         }
 
-        // ── Post-sleep signal check ───────────────────────
+        // ── Post-sleep signal check (POSIX: data wins) ─────────
         // A signal (e.g. SIGCHLD from a fork child that wrote then
         // exited) can be pending by the time we wake.  Rescan first:
         // ready data takes priority over -EINTR (POSIX — a wake from
-        // the fd and a signal delivery can land in the same window, and
-        // the data must not be lost to a spurious EINTR).
+        // the fd and a signal delivery can land in the same window,
+        // and the data must not be lost to a spurious EINTR).
         if (current->signal & ~current->blocked) {
             int rc = poll_scan(kfds, nfds, NULL);
             if (timed) poll_tmo_unregister(pt);
@@ -484,7 +538,6 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
                 return rc;
             return -EINTR;
         }
-
     }
 
     return ready_count;
