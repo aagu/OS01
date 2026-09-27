@@ -26,7 +26,10 @@ def main():
     with tempfile.TemporaryDirectory(prefix='os01-repeat-', dir='/tmp') as td:
         disk = Path(td) / 'disk.img'
         shutil.copyfile(args.disk, disk)
+        # virtio-rng-pci: gives OVMF a UEFI GetRNG source; without it AAGU-5
+        # STRONG-only AT_RANDOM fails closed and exec/init never comes up.
         cmd = ['qemu-system-x86_64', '-M', 'q35', '-m', '512M', '-smp', str(args.smp),
+               '-device', 'virtio-rng-pci',
                '-drive', f'if=pflash,format=raw,readonly=on,file={args.firmware}',
                '-drive', f'file={disk},format=raw,if=none,id=disk',
                '-device', 'ahci,id=ahci', '-device', 'ide-hd,drive=disk,bus=ahci.0',
