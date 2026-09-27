@@ -53,11 +53,10 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 ### 🖥 P3 GUI
 
-基座（已完成）：fb、fb mmap、terminal 双缓冲 + alt-screen、键盘扫描码。Tetris 游戏已落地（见 `docs/gui.md`）。
+基座（已完成）：fb、fb mmap、terminal 双缓冲 + alt-screen、键盘扫描码、PS/2 鼠标驱动（i8042 共享控制器层 + `/dev/mouse` 8 字节事件 ABI + 500 ms 有界探测，2026-09-27 落地，见 `docs/driver.md`）。Tetris 游戏已落地（见 `docs/gui.md`）。
 
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
-| PS/2 鼠标驱动 | `/dev/mouse`，扩展 keyboard.c 的 PS/2 协议处理 | 独立 | |
 | 2D 图形 API | fb 之上画线/矩形/位图 blit | 独立 | |
 | 可缩放字体渲染器 | 矢量/位图缩放 | 2D API | HackOS |
 | Window Server + compositor | 多窗口管理 + 合成 | 字体/2D/鼠标 | opuntiaOS + HackOS |

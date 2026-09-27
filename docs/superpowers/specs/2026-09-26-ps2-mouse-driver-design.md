@@ -1,7 +1,7 @@
 # PS/2 鼠标驱动设计（/dev/mouse）
 
 日期：2026-09-26
-状态：待评审
+状态：已实现（2026-09-27，`docs/driver.md` 含实现记录；§8.2/§8.3 验收方法按实际环境修订）
 路线图位置：P3 GUI 第一项（`docs/roadmap.md`）
 
 ## 1. 背景与目标
@@ -187,13 +187,26 @@ main.c:157 注册），不做 devfs.c 内建注册。`mouse_init` 在 devfs 挂�
    9 位位移边界、Y 取反、溢出、失步及部分包重置。可控端口流模拟
    覆盖键盘/aux 交错、ACK 来源、RESEND、超时与失败回滚；验证 AUX
    字节不进入 TTY。覆盖多读者读队列与 `poll` 唤醒交错。
-2. **mousetest（QEMU 手动 E2E）**：`user/mousetest.c` 从共享 UAPI
+2. **mousetest（QEMU E2E）**：`user/mousetest.c` 从共享 UAPI
    头读取固定事件，验证空读 `EAGAIN`、小缓冲区 `EINVAL`、poll 等待、
-   读后清空，再在可见 QEMU 窗口验证移动、三键、滚轮和 Y 方向。
-   加入 `USER_PROGRAMS` 与 `ROOTFS_FILES`，安装为 `/bin/mousetest`。
-3. **回归及无设备**：运行键盘输入测试与 `systest-repeat`。用明确
-   禁用 PS/2 鼠标的 QEMU 配置验证总探测时间、`/dev/mouse` 缺席和
-   `/dev/keyboard` 正常；记录 QEMU 参数、启动时间和日志。
+   读后清空，再验证移动、三键、滚轮和 Y 方向。加入 `USER_PROGRAMS`
+   与 `ROOTFS_FILES`，安装为 `/bin/mousetest`。
+   *实施修订（2026-09-27）*：移动方向、Y 方向与三键可通过 QEMU monitor
+   的 `mouse_move`/`mouse_button` 命令在 headless 串口会话中注入并从
+   `/bin/mousetest` 输出验证；滚轮无对应的 HMP 注入命令，保留为可见
+   QEMU 窗口的人工验证项。
+3. **回归及无设备**：运行键盘输入测试与 `systest-repeat`。
+   *实施修订（2026-09-27）*：本机 QEMU 的 q35 机型没有"仅禁用 PS/2
+   鼠标、保留键盘"的开关（`-M q35,i8042=off` 同时禁用两者），故
+   验收方法改为：
+   - 无响应鼠标在 500 ms 内放弃、IRQ12 与 command-byte 回滚且不注册
+     节点 — 由可控 host mock 测试证明（见
+     `.superpowers/sdd/2026-09-27-ps2-mouse-driver/task-7-report.md`）；
+   - 键盘保留证据由正常 QEMU 回归承担（monitor `sendkey` 注入 +
+     `/dev/keyboard` 可读 + TTY 出字）；
+   - `-M q35,i8042=off` 作为控制器缺席的补充启动检查：启动不挂、
+     `subsys: init  mouse ... SKIP (optional, ret=-1)` 日志、
+     `/dev/mouse` 不存在。
 4. **poll 竞态**：用可控同步点确定性地触发“设备 wake 位于
    `poll_scan` 与任务入 `pt->wq` 之间”及“入队后、`schedule()` 前
    wake”两种交错，确认 `poll(-1)` 均不挂死，有限 timeout 仍正确。

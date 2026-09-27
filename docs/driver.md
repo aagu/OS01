@@ -1,6 +1,6 @@
 # 驱动程序系统
 
-本系统实现了多种硬件驱动程序，包括键盘、串口、定时器和实时时钟等。
+本系统实现了多种硬件驱动程序，包括键盘、PS/2 鼠标、串口、定时器和实时时钟等。
 
 ## 驱动程序架构
 
@@ -32,6 +32,76 @@
 * `translate_and_push` — 扫描码转 ASCII 并推入 TTY；raw mode 展开 VT100 序列，canonical mode 丢弃
 * `keyboard_handler` — IRQ1 中断处理
 * `keyboard_poll` — task context 轮询（DevFS read 路径）
+
+### i8042 共享控制器层
+
+位于 `kernel/driver/i8042.c`。键盘（0x60/0x64 第一口）与 PS/2 鼠标（aux 口）
+共用一个 8042 控制器，所有 `0x64` status 与 `0x60` data 读取必须发生在同一个
+`spin_lock_irqsave(&i8042_lock)` 临界区内成对完成，按 status bit5（AUX）判定
+字节归属，避免字节被错误的设备消费：
+
+* `i8042_init` — 初始化控制器锁与命令字（keyboard.c/mouse.c 之前调用）
+* `i8042_set_kbd_consumer` / `i8042_set_aux_consumer` — 注册两个字节消费者
+  （在持锁的回调中执行，不得再访问 i8042 端口或睡眠）
+* `i8042_pump` — 排空 output buffer 并按来源分发（IRQ1/IRQ12 handler 与
+  task-context poll 共用的唯一入口）；有界排空，卡死的 status line 会放弃
+  并交由下次 IRQ 重试
+* `i8042_write_controller_cmd` / `i8042_read_command_byte` /
+  `i8042_write_command_byte` — 控制器命令字事务（0xD4 前后保持端口访问串行化）
+* `i8042_write_aux_byte` — 向 aux 口（鼠标）写命令字节，应答由 mouse 驱动
+  通过 `i8042_pump()` 轮询收取
+
+命令事务期间 aux 字节送入鼠标应答状态机，非 aux 字节照常送键盘，因此
+键盘输入不会打断鼠标探测，鼠标应答也不会泄漏进 TTY。
+
+### PS/2 鼠标驱动（/dev/mouse）
+
+#### 功能
+
+* 探测 aux 口鼠标并协商滚轮模式（magic knock：`0xF3 200/100/50` + `0xF2` 取 ID）
+* IRQ12 数据流 → 3/4 字节包解析 → 归一化事件发布
+* `/dev/mouse` 暴露固定 8 字节事件流，支持非阻塞读（`EAGAIN`）与 `poll`
+
+#### 实现
+
+* `kernel/driver/mouse.c` — 驱动主体（探测状态机、事件 ring、devfs read/poll）
+* `kernel/driver/mouse_proto.c` — 纯 C 包解析器（含 9 位位移边界、Y 取反、
+  溢出位、失步重新对齐；对 host 测试开放）
+* `kernel/include/uapi/mouse.h` — 用户态事件 ABI（内核与用户程序共用）
+
+#### 探测时序上限（`mouse_init`）
+
+`mouse_init` 在 subsys Phase 6 以 OPTIONAL 注册，失败仅打 SKIP 日志、不注册
+`/dev/mouse`。整个探测有硬性时间上限，保证无设备/无响应鼠标不拖慢启动：
+
+| 阶段 | 预算 |
+|------|------|
+| 主动探测（0xFF 复位 → 0xAA/0x00 → 0xF6 → 滚轮协商 → 0xF4） | 400 ms |
+| F5（disable reporting）有界回收尝试 | 最迟 460 ms |
+| 回滚控制器写（command byte）与命令字恢复预留 | 各 20 ms |
+| **总上限** | **500 ms** |
+
+失败路径回滚顺序：清 command byte bit1（禁 aux IRQ）→ `unregister_irq(12)` →
+摘除 aux consumer → 复位包解析状态机；不注册任何 devfs 节点。该路径由
+host mock 测试覆盖（可控端口流模拟无响应设备，见
+`.superpowers/sdd/2026-09-27-ps2-mouse-driver/task-7-report.md`）。
+
+#### /dev/mouse 事件 ABI
+
+事件固定 8 字节（`mouse_event_t`，`_Static_assert(sizeof == 8)`），一次读
+必须是 8 的倍数且 ≥8，否则 `EINVAL`；无事件时返回 `EAGAIN`：
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `buttons` | `uint8_t` | bit0=左键 bit1=右键 bit2=中键，其余位为 0 |
+| `wheel` | `int8_t` | 滚轮增量（基础鼠标恒为 0） |
+| `dx` | `int16_t` | 相对位移，正值向右 |
+| `dy` | `int16_t` | 相对位移，正值向下 |
+| `reserved` | `uint16_t` | 写 0，用户态忽略 |
+
+内核侧事件 ring 容量 64，满时覆盖最旧事件并累计 `dropped_events` 计数。
+`poll(POLLIN)` 空队列时挂入事件锁保护的等待链，发布事件时在锁内摘链唤醒。
+用户态测试程序：`user/mousetest.c`（安装为 `/bin/mousetest`）。
 
 ### 串口驱动
 
@@ -223,6 +293,17 @@ devfs_register_chrdev("keyboard", NULL, keyboard_devfs_read, NULL);
 
 `keyboard_devfs_read` 允许用户空间程序直接从 `/dev/keyboard` 读取键盘扫描码。
 
+### 鼠标 devfs 注册
+
+鼠标驱动同样在 `kernel/core/main.c` 中注册，但仅在探测成功时：
+
+```c
+if (subsys_status("mouse") == 1)
+    devfs_register_chrdev("mouse", NULL, &mouse_ops);
+```
+
+`mouse_ops` 提供 `read`（8 字节事件流）与 `poll`（事件 ring 非空即 `POLLIN`）。
+
 ## 中断控制器
 
 系统使用 `hw_int_controller_t` 结构体表示硬件中断控制器，为驱动程序提供统一的中断控制接口：
@@ -278,6 +359,7 @@ typedef struct hw_int_type {
 | 5 | 键盘 | `keyboard_init()` | 可选 |
 | 5 | 串口 IRQ | `init_serial_irq()` | 是 |
 | 6 | AHCI | `ahci_init()` | 可选 |
+| 6 | PS/2 鼠标 | `mouse_init()` | 可选（探测 500 ms 内放弃）|
 
 ### Phase 7-9（硬编码在 kernel_main 中）
 
@@ -291,6 +373,9 @@ typedef struct hw_int_type {
 ### 驱动程序文件
 
 * `kernel/driver/keyboard.c` - 键盘驱动
+* `kernel/driver/i8042.c` - i8042 共享控制器层（键盘/鼠标字节分流）
+* `kernel/driver/mouse.c` - PS/2 鼠标驱动
+* `kernel/driver/mouse_proto.c` - PS/2 鼠标包解析器
 * `kernel/driver/serial.c` - 串口驱动
 * `kernel/driver/pit.c` - PIT 定时器驱动
 * `kernel/driver/rtc.c` - RTC 实时时钟驱动
@@ -300,6 +385,10 @@ typedef struct hw_int_type {
 ### 驱动程序头文件
 
 * `kernel/include/driver/keyboard.h` - 键盘驱动头文件
+* `kernel/include/driver/i8042.h` - i8042 控制器层头文件
+* `kernel/include/driver/mouse.h` - PS/2 鼠标驱动头文件
+* `kernel/include/driver/mouse_proto.h` - PS/2 包解析器头文件
+* `kernel/include/uapi/mouse.h` - `/dev/mouse` 用户态事件 ABI（8 字节）
 * `kernel/include/driver/serial.h` - 串口驱动头文件
 * `kernel/include/driver/pit.h` - PIT 定时器驱动头文件
 * `kernel/include/driver/rtc.h` - RTC 实时时钟驱动头文件
