@@ -1,0 +1,106 @@
+// kernel/fs/boot.c — Boot-time filesystem wiring, extracted from
+// kernel/core/main.c as part of the kernel-main refactor (Task 2).
+//
+// Owns fs_boot_prepare() and fs_boot_mounts(); see kernel/include/fs/boot.h
+// for the contract.  Implementation mirrors the original 64 lines
+// (kernel/core/main.c:147-210 in the d0e0fda baseline) verbatim in call
+// order, edge-case handling, and log strings.  Any intentional change
+// belongs in a follow-up task with its own test/RED-first cycle; silent
+// behavior changes are out of scope here.
+
+#include <fs/boot.h>
+#include <fs/vfs.h>
+#include <fs/devfs.h>
+#include <fs/fat.h>
+#include <fs/ext2.h>
+#include <fs/gpt.h>
+#include <fs/tmpfs.h>
+#include <fs/procfs.h>
+#include <block/blockdev.h>
+#include <core/printk.h>      // serial_printk for GPT/ext2/FAT32 fallback logs
+
+// ── fs_boot_prepare ───────────────────────────────────────────
+// Init the VFS mount table, then mount devfs at /dev.  devfs_init()
+// also registers the built-in chrdevs (null, zero, random, urandom,
+// serial).  After this returns, devfs_register_chrdev() /
+// devfs_register_blkdev() calls are valid.
+//
+// MUST run before any vfs_mount() and before any devfs_register_*() call.
+void fs_boot_prepare(void)
+{
+    vfs_init();
+    devfs_init();
+}
+
+// ── Static helpers for fs_boot_mounts ─────────────────────────
+// Splitting the mount logic into focused helpers keeps the public
+// function short without changing the call order or the failure log
+// strings, both of which are load-bearing for the test_boot phase-0
+// ordered-marker assertion.
+
+// Register every block device enumerated by the storage subsystem
+// (AHCI, virtio-blk, etc.) under /dev as a block device.
+static void register_block_devices(void)
+{
+    int n = block_device_count();
+    for (int i = 0; i < n; i++) {
+        block_device_t *dev = block_device_get(i);
+        devfs_register_blkdev(dev->name, dev);
+    }
+}
+
+// Scan the GPT on the first block device, then mount the dual-partition
+// layout (FAT32 ESP → /boot, ext2 → /).  Falls back to single-FAT32 on
+// the whole disk if the GPT is missing or has fewer than two partitions.
+// Preserves the original log strings:
+//   "EXT2: mount failed — / not available\n"
+//   "FAT32: /boot mount failed\n"
+static void mount_partitioned_disk(void)
+{
+    if (block_device_count() == 0) return;
+
+    gpt_info_t *gpt = gpt_scan(block_device_get(0));
+    if (!gpt) {
+        // Fallback: old single-FAT32 layout (whole disk is FAT32).
+        block_device_t *dev = block_device_get(0);
+        fat32_fs_t *fs = NULL;
+        if (0 == fat32_init(dev, &fs))
+            vfs_mount("/", dev, &fat_vfs_ops, fs);
+        return;
+    }
+
+    // Dual-partition layout:
+    //   gpt->partitions[0] = hda1 (FAT32 ESP) → /boot
+    //   gpt->partitions[1] = hda2 (ext2)      → /
+    if (gpt->count < 2) return;
+
+    ext2_fs_t *ext2_fs = NULL;
+    fat32_fs_t *fat_fs = NULL;
+
+    if (0 == ext2_init(gpt->partitions[1].dev, &ext2_fs))
+        vfs_mount("/", gpt->partitions[1].dev, &ext2_vfs_ops, ext2_fs);
+    else
+        serial_printk("EXT2: mount failed — / not available\n");
+
+    if (0 == fat32_init(gpt->partitions[0].dev, &fat_fs))
+        vfs_mount("/boot", gpt->partitions[0].dev, &fat_vfs_ops, fat_fs);
+    else
+        serial_printk("FAT32: /boot mount failed\n");
+}
+
+// ── fs_boot_mounts ────────────────────────────────────────────
+// Order matters: block-device registration must precede the GPT scan
+// (gpt_scan targets block_device_get(0)); mount_partitioned_disk must
+// precede tmpfs_init/procfs_init because tmpfs/procfs layer on top of
+// the mount table.  tmpfs and procfs are independent of the disk
+// layout so they run after every disk-mount branch.
+void fs_boot_mounts(void)
+{
+    register_block_devices();
+    mount_partitioned_disk();
+
+    // /tmp → tmpfs (independent of disk)
+    tmpfs_init();
+
+    procfs_init();                  // /proc
+}

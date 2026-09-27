@@ -15,15 +15,10 @@
 #include <intr/apic.h>
 #include <driver/serial.h>
 #include <driver/keyboard.h>
-#include <driver/mouse.h>
-#include <block/blockdev.h>
 #include <fs/vfs.h>
-#include <fs/fat.h>
-#include <fs/gpt.h>
-#include <fs/ext2.h>
 #include <fs/devfs.h>
-#include <fs/procfs.h>
-#include <fs/tmpfs.h>
+#include <fs/boot.h>
+#include <arch/x86_64/boot.h>
 #include <core/selftest.h>
 #include <sync/futex.h>
 #include <stdlib.h>
@@ -144,70 +139,22 @@ int kernel_main(const struct boot_context *bootctx)
 
     random_init(bootctx);               // seed the CSPRNG pool (BSP, once)
 
-    vfs_init();                         // init mount table BEFORE any mount calls
-
-    devfs_init();                   // mount /dev + register chrdev
-                                    // ★ MUST be before any devfs_register_* call
+    // ── FS bring-up + x86 device node registration (Task 2 split) ──
+    // Order matters: devfs must exist before any devfs_register_*() call;
+    // PTY must exist before keyboard_set_tty() (later in this function)
+    // can route input through the master fd; the x86 device nodes
+    // (keyboard/mouse/fb) are registered after PTY so pty_init has a
+    // clean view of devfs; the partition-mount + tmpfs + procfs come
+    // last so user-space can see /boot, /, /tmp, /proc by the time
+    // init.elf spawns.  TTY wiring and the /dev smoke probe below stay
+    // in main.c for now — Task 3 owns the move to fs_boot_probe_devfs().
+    fs_boot_prepare();
 
     pty_init();                     // init PTY table + register /dev/ptmx
 
-    static const struct devfs_ops keyboard_ops = {
-        .read = keyboard_devfs_read,
-        .poll = keyboard_poll_dev,
-    };
-    static const struct devfs_ops mouse_ops = {
-        .read = mouse_devfs_read,
-        .poll = mouse_poll_dev,
-    };
-    extern const struct devfs_ops fb_ops;
-    devfs_register_chrdev("keyboard", NULL, &keyboard_ops);
-    if (subsys_status("mouse") == 1 &&
-        devfs_register_chrdev("mouse", NULL, &mouse_ops) != 0)
-        log_err("mouse: failed to register /dev/mouse\n");
-    devfs_register_chrdev("fb", NULL, &fb_ops);
+    x86_64_boot_device_nodes();     // register keyboard/mouse/fb chrdevs
 
-    // Register physical disks in /dev
-    for (int i = 0; i < block_device_count(); i++) {
-        block_device_t *dev = block_device_get(i);
-        devfs_register_blkdev(dev->name, dev);
-    }
-
-    // Try GPT partition table scan
-    gpt_info_t *gpt = (block_device_count() > 0)
-                      ? gpt_scan(block_device_get(0)) : NULL;
-
-    if (!gpt) {
-        // Fallback: old single-FAT32 layout
-        if (block_device_count() > 0) {
-            block_device_t *dev = block_device_get(0);
-            fat32_fs_t *fs = NULL;
-            if (0 == fat32_init(dev, &fs))
-                vfs_mount("/", dev, &fat_vfs_ops, fs);
-        }
-    } else {
-        // Dual-partition layout:
-        //   gpt->partitions[0] = hda1 (FAT32 ESP) → /boot
-        //   gpt->partitions[1] = hda2 (ext2)      → /
-        if (gpt->count >= 2) {
-            ext2_fs_t *ext2_fs = NULL;
-            fat32_fs_t *fat_fs = NULL;
-
-            if (0 == ext2_init(gpt->partitions[1].dev, &ext2_fs))
-                vfs_mount("/", gpt->partitions[1].dev, &ext2_vfs_ops, ext2_fs);
-            else
-                serial_printk("EXT2: mount failed — / not available\n");
-
-            if (0 == fat32_init(gpt->partitions[0].dev, &fat_fs))
-                vfs_mount("/boot", gpt->partitions[0].dev, &fat_vfs_ops, fat_fs);
-            else
-                serial_printk("FAT32: /boot mount failed\n");
-        }
-    }
-
-    // /tmp → tmpfs (independent of disk)
-    tmpfs_init();
-
-    procfs_init();                  // /proc
+    fs_boot_mounts();               // block-device devfs + GPT/FAT32/ext2 mounts + tmpfs/procfs
 
     // ═══ 7. Console TTY ═════════════════════════════════════
     // console_putchar as output — routes all user-space writes
