@@ -62,9 +62,15 @@ exception_vectors:
 .balign 0x80
 4:  b   .
 
-/* ───── Synchronous exception, current SP_ELx ───── */
+/* ───── Synchronous exception, current SP_ELx ─────
+ *
+ * Each slot must be ≤0x80 bytes (the architecture enforces 128-byte
+ * stride between entries).  This slot therefore only branches; the
+ * full save + diagnostic call happens in `el1_sync_entry` declared
+ * below the table (mirrors the IRQ-slot pattern). */
 .balign 0x80
-5:  b   .
+5:
+    b   el1_sync_entry
 
 /* ───── IRQ, current SP_ELx (this is what kernel uses at EL1h) ─────
  *
@@ -173,3 +179,55 @@ el1_irq_entry:
     ldp     x0, x1,   [sp, #PT_REGS_X0]
     add     sp, sp, #PT_REGS_SIZE
     eret
+
+/* ──────────────────────────────────────────────────────────────
+ * el1_sync_entry — EL1h sync 异常诊断入口（spec §3, Task 1）
+ *
+ * 现场保存序与 el1_irq_entry 一致：pt_regs_t 字段序 = 入栈序 =
+ * regs.h PT_REGS_* 偏移。全量保存 31 GPR 后才快照 SPSR_EL1/ELR_EL1/
+ * SP_EL0/ESR_EL1/FAR_EL1，避免后续 MRS 覆盖原始 x0–x30。
+ *
+ * AAPCS64 参数：(x0=sp → &regs, x1=esr, x2=far)。ESR_EL1/FAR_EL1 在
+ * 调用 C 前用 caller-saved 通用寄存器暂存，再分别送入 x1/x2。
+ *
+ * aarch64_el1_sync_fatal 是 noreturn；汇编后置不可返回的 WFI 兜底，
+ * 防止编译器/ABI 失误意外 `eret`。
+ * ────────────────────────────────────────────────────────────── */
+.balign 0x80
+.globl el1_sync_entry
+el1_sync_entry:
+    sub     sp, sp, #PT_REGS_SIZE
+    stp     x0, x1,   [sp, #PT_REGS_X0]
+    stp     x2, x3,   [sp, #PT_REGS_X2]
+    stp     x4, x5,   [sp, #PT_REGS_X4]
+    stp     x6, x7,   [sp, #PT_REGS_X6]
+    stp     x8, x9,   [sp, #PT_REGS_X8]
+    stp     x10, x11, [sp, #PT_REGS_X10]
+    stp     x12, x13, [sp, #PT_REGS_X12]
+    stp     x14, x15, [sp, #PT_REGS_X14]
+    stp     x16, x17, [sp, #PT_REGS_X16]
+    stp     x18, x19, [sp, #PT_REGS_X18]
+    stp     x20, x21, [sp, #PT_REGS_X20]
+    stp     x22, x23, [sp, #PT_REGS_X22]
+    stp     x24, x25, [sp, #PT_REGS_X24]
+    stp     x26, x27, [sp, #PT_REGS_X26]
+    stp     x28, x29, [sp, #PT_REGS_X28]
+    str     x30,      [sp, #PT_REGS_X30]
+    /* Snapshot 系统寄存器到 PT_REGS_* 槽位。x3 是 caller-saved；此
+     * 时 x0-x30 已压栈，临时覆盖 x3 不影响异常现场。 */
+    mrs     x3, spsr_el1
+    str     x3,       [sp, #PT_REGS_SPSR_EL1]
+    mrs     x3, elr_el1
+    str     x3,       [sp, #PT_REGS_ELR_EL1]
+    mrs     x3, sp_el0
+    str     x3,       [sp, #PT_REGS_SP_EL0]
+    /* 再次读取 ESR/FAR 到 caller-saved x1/x2 直接做参数；
+     * 已有 PT_REGS 现场保留 SPSR/ELR/SP_EL0 三个槽供 C 解码。 */
+    mrs     x1, esr_el1
+    mrs     x2, far_el1
+    mov     x0, sp                       /* x0 = &regs */
+    bl      aarch64_el1_sync_fatal
+    /* noreturn fallback：禁用中断 + 永久 WFI，杜绝 eret。 */
+0:  msr     daifset, #0xf
+    wfi
+    b       0b
