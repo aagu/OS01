@@ -380,10 +380,12 @@ TEST_QEMU_FLAVOR_phase-0       =
 TEST_QEMU_FLAVOR_systest       = OS01_SYSTEST=1
 TEST_QEMU_FLAVOR_inittab-phase = INITTAB_FILE=config/inittab.test
 TEST_QEMU_FLAVOR_network       = OS01_NETTEST=1
+TEST_QEMU_FLAVOR_gfx           =
 TEST_QEMU_IMG_phase-0       = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_systest       = $(TEST_SYSTEST_IMAGE)
 TEST_QEMU_IMG_inittab-phase = $(TEST_INITTAB_IMAGE)
 TEST_QEMU_IMG_network       = $(TEST_NETTEST_IMAGE)
+TEST_QEMU_IMG_gfx           = $(NORMAL_IMAGE)
 
 .PHONY: test-qemu
 # Use the per-SUITE Make variables from Step 1. The image path is
@@ -412,15 +414,21 @@ test-qemu: SUITE := $(SUITE)
 test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@case "$(SUITE)" in \
-	  phase-0|systest|inittab-phase|network) ;; \
-	  *) echo "SUITE must be phase-0|systest|inittab-phase|network, got '$(SUITE)'" >&2; exit 1;; \
+	  phase-0|systest|inittab-phase|network|gfx) ;; \
+	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx, got '$(SUITE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-qemu] SUITE=$(SUITE) flavor=$(TEST_QEMU_FLAVOR_$(SUITE)) img=$(TEST_QEMU_IMG_$(SUITE))"
-	@if [ "$(SUITE)" != "phase-0" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
+	# The normal-image hash guard skips BOTH ``phase-0`` (the historical
+	# no-variant path) AND ``gfx`` (the new ring-3 graphics suite, which
+	# uses the normal image directly per spec §6 — a gfx rebuild that
+	# touches the normal image must not be reported as a hash drift).
+	# Every other suite runs against an isolated variant build and
+	# must therefore not modify the normal image.
+	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.before"; \
 	fi
 	$(MAKE) $(TEST_QEMU_FLAVOR_$(SUITE)) image
-	@if [ "$(SUITE)" != "phase-0" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
+	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	fi
@@ -642,7 +650,7 @@ help:
 	@echo ''
 	@echo 'Test (6 canonical buckets; varied capability):'
 	@printf '  %-22s %-13s %s\n' \
-		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network>)';
+		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx>)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \
