@@ -35,6 +35,7 @@ KERNEL_VARIANT :=
 endif
 KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel$(if $(KERNEL_VARIANT),/$(KERNEL_VARIANT))
 LIBC_BUILD_DIR := $(BUILD_DIR)/libc
+LIBGFX_BUILD_DIR := $(BUILD_DIR)/libgfx
 # Compile-affecting variant (only OS01_SYSTEST re-keys the user dirs).
 # project.mk sets USER_VARIANT before including this profile; the ?= default
 # lets component sub-makes that include ONLY the profile (via

@@ -303,7 +303,7 @@ TEST_SELFTEST_IMAGE := $(BUILD_DIR)/image/selftest/disk.img
 # overridable.
 KERNEL_SELFTEST_SMP ?= 4
 
-.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-device
+.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-device test-gfx-client
 test-host:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,run $(OS01_SUBMAKE_ARGS))
@@ -338,6 +338,26 @@ test-gfx-file-lifecycle:
 test-gfx-device:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-gfx-device $(OS01_SUBMAKE_ARGS))
+# Focused hosttest for the gfx 2D API plan Task 3 — libgfx client
+# lifecycle.  Runs test_gfx_client.elf which host-compiles the REAL
+# libgfx/gfx.c (open/close/get_info/set_clip/present) with HOST_CC
+# and links it through -Wl,--wrap=open,--wrap=close,--wrap=ioctl,
+# --wrap=malloc,--wrap=free so the test TU observes libgfx's libc
+# call pattern.  Asserts the spec §3+§4+§5 contract: call order in
+# gfx_open (open → CREATE_VIEW → GET_INFO → 2x malloc), ENOENT
+# normalized to ENODEV, cleanup at every failure point (handle
+# allocated before CREATE_VIEW is freed on CREATE_VIEW failure,
+# GET_INFO failure, and pixel-alloc failure), gfx_get_info(NULL)
+# returns zero with errno=EINVAL, gfx_set_clip never issues an
+# ioctl (clip is library-local state per spec §4), gfx_present
+# issues exactly one ioctl and propagates the ioctl wrapper's
+# errno.  gfx_present's request struct carries the buffer pointer
+# from the handle and the configured stride.  Kernel-side mocks
+# (gfx_test_runtime.h) are NOT in scope here — libgfx has no
+# kernel dependencies.
+test-gfx-client:
+	$(call require_capability,rootfs)
+	@$(call os01_submake,hosttests,test-gfx-client $(OS01_SUBMAKE_ARGS))
 
 # Per-SUITE lookups, used by test-qemu to pick the right variant build
 # flavor and the right image path. These are Make variables so they

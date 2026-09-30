@@ -120,6 +120,20 @@ $(BUILD_DIR)/tetris.elf: $(OBJ_DIR)/tetris.o $(OBJ_DIR)/tetris_logic.o $(CRT0_OB
 	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/tetris.o $(OBJ_DIR)/tetris_logic.o -lc
 	$(OBJ_CPY) --strip-debug $@
 
+# ══════════════════════════════════════════════════════════════
+#  test_gfx.elf — libgfx client smoke (Task 3)
+#  Links libgfx.a explicitly with -lgfx -lc AFTER the using
+#  object so the static archive order resolves gfx_open /
+#  gfx_close / gfx_get_info / gfx_set_clip / gfx_present (the
+#  library's only out-of-line wrapper file at this stage; Task 4
+#  will add the primitives).  tetris.elf follows the same pattern
+#  in Task 5.
+# ══════════════════════════════════════════════════════════════
+$(BUILD_DIR)/test_gfx.elf: $(OBJ_DIR)/test_gfx.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/test_gfx.o -lgfx -lc
+	$(OBJ_CPY) --strip-debug $@
+
 # ── Clean ──────────────────────────────────────────────────
 clean:
 	rm -rf $(BUILD_DIR)
