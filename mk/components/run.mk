@@ -303,7 +303,7 @@ TEST_SELFTEST_IMAGE := $(BUILD_DIR)/image/selftest/disk.img
 # overridable.
 KERNEL_SELFTEST_SMP ?= 4
 
-.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-device test-gfx-client
+.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-device test-gfx-client test-gfx-primitives
 test-host:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,run $(OS01_SUBMAKE_ARGS))
@@ -358,6 +358,20 @@ test-gfx-device:
 test-gfx-client:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-gfx-client $(OS01_SUBMAKE_ARGS))
+# Focused hosttest for the gfx 2D API plan Task 4 — libgfx 2D
+# primitives (pixel / line / rect / sprite).  Runs
+# test_gfx_primitives.elf which host-compiles the REAL libgfx/line.c
+# + libgfx/sprite.c and asserts spec §4: pixel/line/rect colour
+# correctness, clipping at every boundary (negative / oversized /
+# partial / fully-outside / library-local clip rectangle), Bresenham
+# in all 8 octants with both endpoints, INT32_MIN/MAX endpoints
+# that must not overflow or loop, sprite opaque / color-key=0
+# (black also transparent) / mask MSB-first / padded source and
+# mask stride.  libgfx/gfx.c is NOT compiled (the primitives test
+# exercises in-memory drawing only — no fd, no syscall).
+test-gfx-primitives:
+	$(call require_capability,rootfs)
+	@$(call os01_submake,hosttests,test-gfx-primitives $(OS01_SUBMAKE_ARGS))
 
 # Per-SUITE lookups, used by test-qemu to pick the right variant build
 # flavor and the right image path. These are Make variables so they

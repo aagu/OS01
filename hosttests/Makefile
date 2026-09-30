@@ -93,9 +93,10 @@ TEST_BINS := \
     $(TEST_BLD)/test_mouse_proto.elf \
     $(TEST_BLD)/test_gfx_file_lifecycle.elf \
     $(TEST_BLD)/test_gfx_device.elf \
-    $(TEST_BLD)/test_gfx_client.elf
+    $(TEST_BLD)/test_gfx_client.elf \
+    $(TEST_BLD)/test_gfx_primitives.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
 all: $(TEST_BINS)
 
@@ -832,6 +833,58 @@ $(TEST_BLD)/test_gfx_client.elf: $(TEST_BLD)/test_gfx_client.o \
 	$(HOST_CC) -Wl,--wrap=open,--wrap=close,--wrap=ioctl,--wrap=malloc,--wrap=calloc,--wrap=free -o $@ $^
 
 test-gfx-client: $(TEST_BLD)/test_gfx_client.elf
+	$<
+
+# Gfx primitives test (Task 4, 2D graphics API plan): host-compiles
+# the REAL libgfx/line.c + libgfx/sprite.c (the archive functions
+# the spec §4 designates for Bresenham and sprite blits) and links
+# them through the in-tree libgfx/internal.h so the test can read
+# the opaque handle layout directly.  libgfx/gfx.c is NOT compiled
+# here (it would drag open/ioctl/close; the primitives test is
+# pure in-memory drawing — no fd, no syscall).
+#
+# The test exercises every primitive spec §4 contract: pixel /
+# hline / vline / rect / fill_rect colour correctness, full
+# clipping matrix (negative coords, oversized coords, partial
+# overlap, complete outside, clip rectangle), Bresenham in all 8
+# octants with both endpoints, INT32_MIN/MAX endpoints that must
+# not overflow or loop, sprite opaque / color-key=0 (black also
+# transparent) / mask MSB-first bit order / padded source and mask
+# stride.  Sentinel pixel 0xDEADBEEF wraps the 7x5 grid so any
+# out-of-bounds write shows up in an assert.
+$(TEST_BLD)/libgfx_line_production.o: $(TESTS_DIR)/libgfx/line.c \
+		$(TESTS_DIR)/libgfx/gfx.h \
+		$(TESTS_DIR)/libgfx/internal.h \
+		$(TESTS_DIR)/kernel/include/uapi/gfx.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GFX_CLIENT_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/libgfx_sprite_production.o: $(TESTS_DIR)/libgfx/sprite.c \
+		$(TESTS_DIR)/libgfx/gfx.h \
+		$(TESTS_DIR)/libgfx/internal.h \
+		$(TESTS_DIR)/kernel/include/uapi/gfx.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GFX_CLIENT_PROD_CFLAGS) -c $< -o $@
+
+# Test TU: include path adds the in-tree libgfx/ for internal.h
+# (internal.h is NEVER installed to the sysroot; tests reach it
+# directly so they can read the handle layout, which is the same
+# layout libgfx/gfx.c, libgfx/line.c and libgfx/sprite.c use).
+$(TEST_BLD)/test_gfx_primitives.o: $(TEST_CASES)/test_gfx_primitives.c \
+		$(TESTS_DIR)/libgfx/gfx.h \
+		$(TESTS_DIR)/libgfx/internal.h \
+		$(TESTS_DIR)/kernel/include/uapi/gfx.h \
+		$(TEST_INC)/test_framework.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GFX_CLIENT_TEST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_gfx_primitives.elf: $(TEST_BLD)/test_gfx_primitives.o \
+		$(TEST_BLD)/libgfx_gfx_production.o \
+		$(TEST_BLD)/libgfx_line_production.o \
+		$(TEST_BLD)/libgfx_sprite_production.o
+	$(HOST_CC) -o $@ $^
+
+test-gfx-primitives: $(TEST_BLD)/test_gfx_primitives.elf
 	$<
 
 clean:
