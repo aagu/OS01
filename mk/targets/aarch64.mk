@@ -15,5 +15,13 @@ AARCH64_UEFI_FIRMWARE := $(BUILD_DIR)/image$(if $(KERNEL_VARIANT),/$(KERNEL_VARI
 # explicitly; keep in sync with the profile's KERNEL_VARIANT block.
 AARCH64_UEFI_SELFTEST_DISK     := $(BUILD_DIR)/image/selftest/aarch64-uefi.img
 AARCH64_UEFI_SELFTEST_FIRMWARE := $(BUILD_DIR)/image/selftest/QEMU_EFI.fd
+# Spec §5: the sync-fault variant must produce its own kernel/image/firmware
+# tree — never reuse selftest/ for the destructive EL1h sync fault probe
+# (the fault build deliberately injects an UNMAPped ldr and is not safe to
+# run as part of the selftest image).  Mirror AARCH64_UEFI_SELFTEST_*'s
+# hard-coded spelling so the harness sees the resolved paths even when the
+# outer KERNEL_VARIANT is empty.
+AARCH64_UEFI_SYNC_FAULT_DISK     := $(BUILD_DIR)/image/sync-fault/aarch64-uefi.img
+AARCH64_UEFI_SYNC_FAULT_FIRMWARE := $(BUILD_DIR)/image/sync-fault/QEMU_EFI.fd
 AARCH64_KERNEL_ELF    := $(KERNEL_BUILD_DIR)/kernel.elf
 AARCH64_HEAD_OBJECT   := $(KERNEL_BUILD_DIR)/arch/aarch64/head.o

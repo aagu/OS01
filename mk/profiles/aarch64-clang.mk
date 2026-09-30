@@ -19,8 +19,20 @@ LIBC_BUILD_DIR := $(BUILD_DIR)/libc
 
 # Compile-affecting variant — mirror x86_64 profile's KERNEL_VARIANT block
 # so weak-selftest build produces an isolated kernel/weak-selftest/ dir.
+# sync-fault must take precedence over selftest so the dedicated fault
+# variant's kernel/image/firmware paths never collide with the ordinary
+# selftest build (spec §5). The flag is only meaningful together with
+# KERNEL_SELFTEST=1 (sync-fault is a selftest variant, not a free-standing
+# mode); flagging it alone is rejected at parse time below.
+ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
+ifeq ($(filter 1,$(KERNEL_SELFTEST)),)
+$(error AARCH64_SYNC_FAULT_TEST=1 requires KERNEL_SELFTEST=1)
+endif
+endif
 ifneq ($(filter 1,$(KERNEL_TEST_FORCE_NO_RNDRRS)),)
 KERNEL_VARIANT := weak-selftest
+else ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
+KERNEL_VARIANT := sync-fault
 else ifneq ($(filter 1,$(KERNEL_SELFTEST)),)
 KERNEL_VARIANT := selftest
 else ifneq ($(filter 1,$(KERNEL_CANARY_SELFTEST)),)

@@ -231,6 +231,19 @@ ifdef KERNEL_SELFTEST
 ALL_CFLAGS += -DOS01_SELFTEST=1
 endif
 
+# AAGU-EL1-sync (spec §5): the dedicated sync-fault variant gates an
+# EL1h data-abort probe at runtime. The injection flag is whitelisted
+# through OS01_SUBMAKE_ALLOWED so it crosses the controlled sub-make
+# boundary, and is only meaningful on aarch64 — x86_64 must never see
+# it. The dedicated KERNEL_VARIANT=sync-fault (selected by
+# mk/profiles/aarch64-clang.mk) isolates its kernel/image/firmware
+# paths so production builds and selftest images stay fault-free.
+ifeq ($(ARCH),aarch64)
+ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
+ALL_CFLAGS += -DAARCH64_SYNC_FAULT_TEST=1
+endif
+endif
+
 # AAGU-5.6: test-only entropy facade override — force RNDRRS detection
 # off so the WEAK-only (RNDR) path is exercised end-to-end on
 # QEMU -cpu max (which exposes both RNDR and RNDRRS). Only routes

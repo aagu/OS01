@@ -317,7 +317,35 @@ EOF
              # aarch64 targets must not pull BusyBox/sysroot into ARM builds.
              dry_aarch64=$(make -n PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=1 aarch64-uefi-kernel)
              ! echo "$dry_aarch64" | grep -q busybox
-             ! echo "$dry_aarch64" | grep -q sysroot-generations ;;
+             ! echo "$dry_aarch64" | grep -q sysroot-generations
+             # ── aarch64 EL1 sync fault isolation (spec §5) ───────
+             # test-aarch64 MODE=sync-fault must select the dedicated
+             # variant (kernel/image under sync-fault/, not selftest/)
+             # and propagate the fault injection flag through the
+             # controlled sub-make boundary into the kernel compile.
+             # `|| true` swallows make's exit-2 (the umbrella's
+             # _test-aarch64-run-sync-fault target is Task 3's harness
+             # and intentionally absent here — only its build prep
+             # matters for the contract).
+             drain_sf=$(make -n PROFILE=aarch64-clang test-aarch64 MODE=sync-fault 2>&1 || true)
+             echo "$drain_sf" | grep -qF "KERNEL_SELFTEST=1 " \
+               && echo "$drain_sf" | grep -qF "AARCH64_SYNC_FAULT_TEST=1 " \
+               && echo "$drain_sf" | grep -qF "aarch64-uefi" \
+               || { echo "targets: sync-fault prep did not select KERNEL_SELFTEST=1+AARCH64_SYNC_FAULT_TEST=1+aarch64-uefi" >&2; exit 1; }
+             echo "$drain_sf" | grep -F "kernel/sync-fault/" >/dev/null \
+               || { echo "targets: sync-fault did not isolate kernel build dir" >&2; exit 1; }
+             echo "$drain_sf" | grep -F "image/sync-fault/" >/dev/null \
+               || { echo "targets: sync-fault did not isolate image build dir" >&2; exit 1; }
+             echo "$drain_sf" | grep -F "image/selftest/aarch64-uefi.img" >/dev/null \
+               && { echo "targets: sync-fault must NOT reuse the selftest image path" >&2; exit 1; }
+             # x86 profile must reject the MODE: no aarch64-sync-test is
+             # ever built for x86_64, so the umbrella gate must fail it
+             # cleanly (parse-time error inside test-aarch64).
+             ! make -n PROFILE=x86_64-clang test-aarch64 MODE=sync-fault
+             # Normal smp mode must not include the fault injection flag.
+             drain_smp=$(make -n PROFILE=aarch64-clang test-aarch64 MODE=smp)
+             ! echo "$drain_smp" | grep -q AARCH64_SYNC_FAULT_TEST=1
+             ;;
     *) exit 64 ;;
     esac
     ;;

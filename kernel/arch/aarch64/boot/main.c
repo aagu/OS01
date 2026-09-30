@@ -265,6 +265,69 @@ void aarch64_main(const struct boot_context *handoff)
     aarch64_pt_smoke_test();
 #endif
 
+#if AARCH64_SYNC_FAULT_TEST
+    /* AAGU-EL1-sync (spec §5): a controlled EL1h sync fault probe.
+     * Runs on the BSP after the PMM/page-table selftests have torn
+     * down their temporary mapping and BEFORE DTB/GIC/SMP setup, so
+     * the only side effect is the expected data abort. We:
+     *   1. Derive the active TTBR root the way aarch64_pt_smoke_test()
+     *      does (validate the raw TTBR0_EL1 and convert to a
+     *      direct-map pointer); any malformed TTBR halts here.
+     *   2. Require AARCH64_PT_SELFTEST_VA to be absent (the smoke
+     *      test unmap leaves it ENOENT). Anything else is fatal.
+     *   3. Print `[aarch64-sync-test] armed` exactly once.
+     *   4. Perform a volatile inline-asm `ldr` from that VA with a
+     *      register output (must not be optimized away).
+     *   5. Print `[aarch64-sync-test] returned` directly after.
+     * The `returned` marker MUST be unreachable — the data abort
+     * fires on the inline ldr and Task 1's fatal path halts the CPU
+     * before any later instruction can run. If the harness ever sees
+     * `returned`, the fault did not fire and the test fails.
+     *
+     * This block is gated by AARCH64_SYNC_FAULT_TEST (set only on
+     * the dedicated sync-fault variant); production and ordinary
+     * selftest images never see it. */
+    {
+        uint64_t ttbr_raw = (uint64_t)(uintptr_t)arch_get_page_table();
+        if ((ttbr_raw & ~AARCH64_TTBR_ALLOWED_MASK) != 0) {
+            kputs("[aarch64-sync-test] precondition FAIL: ttbr_raw has disallowed bits\n");
+            for (;;) arch_cpu_halt();
+        }
+        uint64_t ttbr_pa = ttbr_raw & AARCH64_TTBR_BASE_MASK;
+        if (ttbr_pa == 0
+            || (ttbr_pa & (PAGE_4K_SIZE - 1)) != 0
+            || ttbr_pa >= (UINT64_C(1) << 40)) {
+            kputs("[aarch64-sync-test] precondition FAIL: ttbr_pa invalid\n");
+            for (;;) arch_cpu_halt();
+        }
+        uint64_t *root = (uint64_t *)(uintptr_t)(ttbr_pa + ARCH_PAGE_OFFSET);
+        uint64_t pa_q = 0;
+        uint32_t perm_q = 0;
+        int rc = aarch64_pt_query_4k(root, AARCH64_PT_SELFTEST_VA,
+                                     &pa_q, &perm_q);
+        if (rc != AARCH64_PT_ENOENT) {
+            kputs("[aarch64-sync-test] precondition FAIL: VA not absent\n");
+            for (;;) arch_cpu_halt();
+        }
+        kputs("[aarch64-sync-test] armed\n");
+        /* Volatile inline-asm ldr from the absent VA. The fault is
+         * expected to fire on this instruction; the compiler must NOT
+         * reorder or elide the load, and the register output forces
+         * the assembler to emit the read. */
+        uint64_t probed;
+        __asm__ __volatile__(
+            "ldr %0, [%2]\n\t"
+            : "=r"(probed)
+            : "m"(*(volatile uint64_t *)(uintptr_t)AARCH64_PT_SELFTEST_VA),
+              "r"((uint64_t)(uintptr_t)AARCH64_PT_SELFTEST_VA)
+            : "memory");
+        /* Unreachable in the passing test path. */
+        kputs("[aarch64-sync-test] returned\n");
+        (void)probed;
+        for (;;) arch_cpu_halt();
+    }
+#endif
+
     /* Invalid or missing platform information is FATAL here, before any
      * GIC or PSCI access. Only valid platforms can degrade and keep ticks. */
     dtb_init(handoff);
