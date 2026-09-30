@@ -90,7 +90,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_clocksource.elf \
     $(TEST_BLD)/test_i8042_demux.elf \
     $(TEST_BLD)/test_mouse_init.elf \
-    $(TEST_BLD)/test_mouse_proto.elf
+    $(TEST_BLD)/test_mouse_proto.elf \
+    $(TEST_BLD)/test_gfx_file_lifecycle.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry
 
@@ -686,6 +687,43 @@ $(TEST_BLD)/test_mouse_init.elf: $(TEST_CASES)/test_mouse_init.c \
 		$(TESTS_DIR)/kernel/driver/mouse.c -o $@
 
 test_mouse_init: $(TEST_BLD)/test_mouse_init.elf
+	$<
+
+# Gfx file-lifecycle test (Task 1): host-compiles the REAL
+# kernel/fs/devfs.c + kernel/fs/file.c against gfx_test_runtime.h,
+# which shadows the heavyweight kernel headers (sched/task.h,
+# tty/tty.h, tty/pty.h, driver/serial.h, ...) so the production
+# sources compile unmodified.  The test TU provides the stub
+# surface the production sources reference (kmalloc/kfree, current,
+# schedule, get_dev_tty, ...).  Tested production symbols:
+# devfs_register_chrdev, devfs_open_node, devfs_ioctl_file,
+# devfs_release_file, file_alloc, file_get, file_put, fd_ioctl.
+GFX_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
+    -Wno-unused-function -D__SPINLOCK_H__ -DOS01_HOST_TEST \
+    -include $(TEST_MOCK)/gfx_test_runtime.h \
+    -I$(TEST_MOCK)/include $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+
+$(TEST_BLD)/gfx_devfs_production.o: $(TESTS_DIR)/kernel/fs/devfs.c \
+		$(TEST_MOCK)/gfx_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GFX_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/gfx_file_production.o: $(TESTS_DIR)/kernel/fs/file.c \
+		$(TEST_MOCK)/gfx_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GFX_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_gfx_file_lifecycle.o: $(TEST_CASES)/test_gfx_file_lifecycle.c \
+		$(TEST_MOCK)/gfx_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GFX_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_gfx_file_lifecycle.elf: $(TEST_BLD)/test_gfx_file_lifecycle.o \
+		$(TEST_BLD)/gfx_devfs_production.o \
+		$(TEST_BLD)/gfx_file_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+test-gfx-file-lifecycle: $(TEST_BLD)/test_gfx_file_lifecycle.elf
 	$<
 
 clean:

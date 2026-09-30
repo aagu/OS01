@@ -102,6 +102,11 @@ typedef struct file {
     socket_t       *sock;
     // spec §4.1.1: 标记此 fd 指向控制台 TTY（仅由两个控制台 TTY open 路径设置）
     struct tty_struct *tty;
+    // 设备打开时由 devfs_open_node 或 device open 回调分配；release_file
+    // 通过此指针回收 gfx_view / 其他私有状态。节点 ref 通过 file_free
+    // 末尾的 vfs_node_put 单独释放，顺序固定为：devfs_release_file →
+    // vfs_node_put。NULL 表示设备 open 不需要 per-file 状态。
+    void           *dev_private;
 } file_t;
 
 // ── Per-process file descriptor table ──────────────────────

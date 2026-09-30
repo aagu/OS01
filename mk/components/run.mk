@@ -303,13 +303,24 @@ TEST_SELFTEST_IMAGE := $(BUILD_DIR)/image/selftest/disk.img
 # overridable.
 KERNEL_SELFTEST_SMP ?= 4
 
-.PHONY: test-host test-pmm-boot-reservation
+.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle
 test-host:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,run $(OS01_SUBMAKE_ARGS))
 	python3 qemutests/pmm_boot_reservation_test.py
 test-pmm-boot-reservation:
 	python3 qemutests/pmm_boot_reservation_test.py
+# Focused hosttest for the gfx 2D API plan Task 1 — per-file device
+# ioctl/release lifecycle.  Runs the single TEST_BINS entry
+# (test_gfx_file_lifecycle.elf) and asserts the contract spelled out
+# in spec §3 (devfs_open_node attaches a node ref, devfs_ioctl_file
+# prefers ioctl_file and falls through to ioctl on -ENOTTY,
+# devfs_release_file fires release_file exactly once on the last
+# file_put, and the legacy node-only ioctl / no-op release paths
+# still work for devices without file callbacks).
+test-gfx-file-lifecycle:
+	$(call require_capability,rootfs)
+	@$(call os01_submake,hosttests,test-gfx-file-lifecycle $(OS01_SUBMAKE_ARGS))
 
 # Per-SUITE lookups, used by test-qemu to pick the right variant build
 # flavor and the right image path. These are Make variables so they

@@ -1936,12 +1936,21 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
 			    int request = (int)regs->rsi;
 			    void *arg = (void *)regs->rdx;
 
-			    if (fd < 0 || fd >= NOFILE || !current->files ||
-			        !current->files->fd[fd]) {
+			    // Spec §3: pin the file via files_get_file so a concurrent
+			    // close on another fd table (e.g. dup'd sibling dropped
+			    // to zero) cannot release the file_t and its dev_private
+			    // out from under the ioctl dispatch.  Always file_put
+			    // after fd_ioctl — including on negative return — so the
+			    // refcount stays balanced.  fd_ioctl takes no fd-table
+			    // lock of its own, so pinning once around the call is
+			    // sufficient.
+			    file_t *f = (current->files)
+			        ? files_get_file(current->files, fd)
+			        : NULL;
+			    if (!f) {
 			        regs->rax = -EBADF;
 			        break;
 			    }
-			    file_t *f = current->files->fd[fd];
 
 			    // Cat B: per-request bounce happens inside the
 			    // ioctl handler (e.g. tty_phys_ioctl in tty.c).
@@ -1950,6 +1959,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
 			    // semantics; arg may be NULL.
 
 			    regs->rax = fd_ioctl(f, request, arg);
+			    file_put(f);
 			    break;
 			}
     case SYS_getdents64: {
