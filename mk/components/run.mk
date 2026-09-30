@@ -303,7 +303,7 @@ TEST_SELFTEST_IMAGE := $(BUILD_DIR)/image/selftest/disk.img
 # overridable.
 KERNEL_SELFTEST_SMP ?= 4
 
-.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle
+.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-device
 test-host:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,run $(OS01_SUBMAKE_ARGS))
@@ -321,6 +321,23 @@ test-pmm-boot-reservation:
 test-gfx-file-lifecycle:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-gfx-file-lifecycle $(OS01_SUBMAKE_ARGS))
+# Focused hosttest for the gfx 2D API plan Task 2 — bounded /dev/gfx0
+# framebuffer present device.  Runs test_gfx_device.elf which
+# host-compiles the REAL kernel/driver/gfx.c against the same
+# gfx_test_runtime the lifecycle test uses, and asserts the spec §3+§4
+# contract: GFX_CREATE_VIEW size/overflow validation, reconfigure
+# rejection, 16-slot limit, GFX_GET_INFO local dims, independent
+# views, release/reopen, GFX_PRESENT happy path + sentinels outside
+# the view + row padding + overlapping views + invalid stride/reserved
+# + kernel-range pointer + missing-range-check detection + mid-fault
+# partial visibility, unconfigured-view rejection, and unknown-cmd
+# ENOTTY.  fb_get_info / fb_write_row are mocked in the test TU
+# (kernel/driver/fb.c's heavy VMA/VMM/scheduler chain is out of
+# scope for this test; the helpers are tested by the QEMU suite
+# as part of the integration tests).
+test-gfx-device:
+	$(call require_capability,rootfs)
+	@$(call os01_submake,hosttests,test-gfx-device $(OS01_SUBMAKE_ARGS))
 
 # Per-SUITE lookups, used by test-qemu to pick the right variant build
 # flavor and the right image path. These are Make variables so they

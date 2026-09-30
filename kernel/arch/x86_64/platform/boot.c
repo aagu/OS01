@@ -60,6 +60,7 @@
 #include <driver/keyboard.h>
 #include <driver/mouse.h>
 #include <driver/fb.h>
+#include <driver/gfx.h>
 #include <fs/devfs.h>
 #include <log/log.h>
 
@@ -136,4 +137,13 @@ void x86_64_boot_device_nodes(void)
     // (it's only consumed from this boot path).
     extern const struct devfs_ops fb_ops;
     devfs_register_chrdev("fb", NULL, &fb_ops);
+
+    // /dev/gfx0 — bounded 2D present device (gfx 2D API plan, Task 2).
+    // gfx_init spins up the 16-entry view table; gfx_ops provides
+    // the open/ioctl_file/release_file callbacks.  Registered LAST
+    // so the gfx0 slot index never shifts the other devices'
+    // indices (subsys-gated mouse, fb, keyboard).
+    gfx_init();
+    if (devfs_register_chrdev("gfx0", NULL, &gfx_ops) != 0)
+        log_err("gfx0: failed to register /dev/gfx0\n");
 }

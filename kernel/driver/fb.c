@@ -148,3 +148,63 @@ const struct devfs_ops fb_ops = {
     .ioctl = fb_ioctl,
 };
 #define mmap uint64_t*
+
+// ── fb_get_info: snapshot live framebuffer metadata ─────────
+// Used by /dev/gfx0 (kernel/driver/gfx.c) to validate view
+// dimensions against the real framebuffer before allocating a
+// view slot.  Reads Pos.*; does NOT acquire Pos.lock — that lock
+// guards the cursor position / print state, not the fb metadata
+// (which is set once at boot and never mutated afterwards).
+int fb_get_info(struct fb_info *out)
+{
+    if (!out) return -EINVAL;
+    out->width  = (uint32_t)Pos.XResolution;
+    out->height = (uint32_t)Pos.YResolution;
+    out->stride = (uint32_t)Pos.XResolution * 4u;
+    out->bpp    = 32;
+    // GFX_FORMAT_RGB32 == 0 (kernel/include/uapi/gfx.h); fb.c does
+    // NOT depend on the UAPI header so we use the literal here and
+    // keep this file's includes unchanged.
+    out->format = 0u;
+    return 0;
+}
+
+// ── fb_write_row: copy row_bytes from a kernel pointer into the fb ──
+// Kernel-only helper for /dev/gfx0's per-row blit.  Validates the
+// destination rectangle against the live framebuffer (XResolution,
+// YResolution, FB_length) using overflow-safe subtraction, then
+// memcpy's row_bytes of pixel data into Pos.FB_addr at the matching
+// (x, y) offset.  No fault-tolerant copy: the caller (gfx.c) has
+// already staged the row into kernel RAM via copy_from_user_ft.
+//
+// Returns 0 on success, -EINVAL on a NULL pixels or out-of-range
+// rectangle.  Does NOT acquire Pos.lock — the caller serializes
+// present per-view (the gfx device's per-row contract is one writer
+// at a time per view) and the fb is MMIO without Volatile semantics
+// for our use case.
+int fb_write_row(uint32_t x, uint32_t y, const void *pixels,
+                 uint32_t row_bytes)
+{
+    if (!pixels) return -EINVAL;
+    if (!Pos.FB_addr) return -EINVAL;
+
+    uint32_t fb_w = (uint32_t)Pos.XResolution;
+    uint32_t fb_h = (uint32_t)Pos.YResolution;
+    if (fb_w == 0 || fb_h == 0) return -EINVAL;
+
+    // Overflow-safe rectangle checks (subtraction form, same
+    // discipline as gfx_ioctl_create_view):
+    //   x <= fb_w && row_bytes/4 <= fb_w - x
+    //   y <  fb_h
+    //   byte_offset + row_bytes <= Pos.FB_length
+    if (x > fb_w) return -EINVAL;
+    if (row_bytes / 4u > fb_w - x) return -EINVAL;
+    if (y >= fb_h) return -EINVAL;
+    uint64_t byte_offset = (uint64_t)y * (uint64_t)fb_w * 4u
+                           + (uint64_t)x * 4u;
+    if (byte_offset + (uint64_t)row_bytes > Pos.FB_length) return -EINVAL;
+
+    uint8_t *dst = (uint8_t *)Pos.FB_addr + byte_offset;
+    memcpy(dst, pixels, row_bytes);
+    return 0;
+}

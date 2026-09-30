@@ -125,4 +125,14 @@ void wait_queue_sleep(wait_queue_t *wq);
 void wait_queue_wake_one(wait_queue_t *wq);
 void wait_queue_wake_all(wait_queue_t *wq);
 
+/* ── printk stub (live kernel printk references serial/console state
+ *  we don't bring up in the host harness; route to host stderr/printf
+ *  via the existing test-platform printf).  Declared by
+ *  kernel/core/printk.h, which is included by the production sources
+ *  we host-compile.  Test TUs can override if needed. */
+int  color_printk(unsigned int fr, unsigned int bk, const char *fmt, ...);
+void serial_printk(const char *fmt, ...);
+void frame_buffer_init(void);
+void frame_buffer_early_init(void);
+
 #endif

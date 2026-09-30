@@ -91,7 +91,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_i8042_demux.elf \
     $(TEST_BLD)/test_mouse_init.elf \
     $(TEST_BLD)/test_mouse_proto.elf \
-    $(TEST_BLD)/test_gfx_file_lifecycle.elf
+    $(TEST_BLD)/test_gfx_file_lifecycle.elf \
+    $(TEST_BLD)/test_gfx_device.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry
 
@@ -724,6 +725,38 @@ $(TEST_BLD)/test_gfx_file_lifecycle.elf: $(TEST_BLD)/test_gfx_file_lifecycle.o \
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 test-gfx-file-lifecycle: $(TEST_BLD)/test_gfx_file_lifecycle.elf
+	$<
+
+# Gfx device test (Task 2): host-compiles the REAL
+# kernel/driver/gfx.c against gfx_test_runtime.h, which provides the
+# heavy stubs the lifecycle test already declares (kmalloc/kfree,
+# current, schedule, vfs_node_get/put, lwip, ...).  kernel/driver/fb.c
+# is NOT compiled (VMA/VMM/scheduler headers are out of scope for
+# this test); the test TU mocks fb_get_info and fb_write_row against
+# a host-heap fb buffer so the gfx device's present contract is
+# observed end-to-end.  Tested production symbols: gfx_ops (open,
+# ioctl_file, release_file).
+$(TEST_BLD)/gfx_gfx_production.o: $(TESTS_DIR)/kernel/driver/gfx.c \
+		$(TESTS_DIR)/kernel/include/driver/gfx.h \
+		$(TESTS_DIR)/kernel/include/uapi/gfx.h \
+		$(TEST_MOCK)/gfx_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GFX_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_gfx_device.o: $(TEST_CASES)/test_gfx_device.c \
+		$(TESTS_DIR)/kernel/include/driver/gfx.h \
+		$(TESTS_DIR)/kernel/include/uapi/gfx.h \
+		$(TEST_MOCK)/gfx_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GFX_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_gfx_device.elf: $(TEST_BLD)/test_gfx_device.o \
+		$(TEST_BLD)/gfx_gfx_production.o \
+		$(TEST_BLD)/gfx_devfs_production.o \
+		$(TEST_BLD)/gfx_file_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+test-gfx-device: $(TEST_BLD)/test_gfx_device.elf
 	$<
 
 clean:
