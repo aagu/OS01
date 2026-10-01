@@ -70,4 +70,32 @@ void        vfs_node_put(vfs_node_t *node);
 bool     page_cow_put(uint64_t phys);
 uint16_t page_cow_refs(uint64_t phys);
 
+/* ── Test page table for the stack-page single-free assertion ──
+ *
+ * Brief Step 1: "Assert stack-page failure has exactly one free."
+ * This is a count assertion about the runtime release chain
+ * (NOT a source-text invariant), so the host harness must drive
+ * the cleanup path and observe the page-pool counter.
+ *
+ * We give the test a minimal fake user page table:
+ *   test_user_pgd[0]  → test_user_pud_page[0]  → test_user_pmd_page[0]
+ *
+ * The PMD entry at index 0 covers VA [0, 2 MiB); USER_STACK_BASE =
+ * 0x1400000 sits in [2 MiB, 4 MiB) → PMD index 1 (covered by a
+ * second PMD page, see test_user_pmd_stack[]).
+ *
+ * The test sets test_user_pmd_stack[0] = phys | PAGE_USER_PMD |
+ * PAGE_VALID before calling vmm_free_user_map; the stub walks the
+ * structure and calls free_4k_page(phys) exactly once. */
+#define LIFECYCLE_PGD_SIZE   512
+#define LIFECYCLE_PUD_SIZE   512
+#define LIFECYCLE_PMD_SIZE   512
+
+/* Allocated 4 KiB-aligned via posix_memalign (see lifecycle_stubs.c)
+ * so PAGE_4K_MASK in the walker preserves the pointer value. */
+extern uint64_t *test_user_pgd;
+extern uint64_t *test_user_pud_page;
+extern uint64_t *test_user_pmd_lo;
+extern uint64_t *test_user_pmd_stack;
+
 #endif /* OS01_LIFECYCLE_STUBS_H */

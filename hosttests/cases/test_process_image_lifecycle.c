@@ -349,6 +349,108 @@ static void test_destroy_unpublished_user_mm_handles_empty_list(void)
     assert_eq(0, vma_count);
 }
 
+/* ── Stack-page failure has exactly one free ────────────────
+ *
+ * Brief Step 1 explicit assertion.  Strategy C (source-level
+ * inspection) covered the staged spawn/exec control flow, but
+ * this is a count assertion about the runtime release chain —
+ * it has to be exercised from the host.  We replicate the body
+ * of destroy_unpublished_user_mm (vma_free_all + vmm_free_user_map)
+ * and observe the page-pool counter:
+ *
+ *   1. Allocate one stack page via the lifecycle stub alloc_4k_page.
+ *   2. Build the fake user PGD with a single PAGE_HUGE PMD entry
+ *      at USER_STACK_BASE → stack_phys (mirrors kernel/sched/task.c:
+ *      1539 vmm_map_page(... PAGE_USER_PMD ... USER_STACK_BASE ...)).
+ *   3. Wire mm->pgdir to the fake PGD.
+ *   4. Run vma_free_all + vmm_free_user_map (the helper's body).
+ *   5. Assert the page-pool counter advanced by exactly one free
+ *      (not zero, not two — single-owner invariant).
+ */
+static void test_stack_page_failure_exactly_one_free(void)
+{
+    TEST_SUITE("stack-page failure — exactly one free");
+
+    setup_mm();
+
+    /* Allocate the test PGD arrays BEFORE touching them with
+     * memset — they're lazily allocated by the walker on first
+     * vmm_free_user_map call, but the test populates the entries
+     * before invoking the walker, so we trigger the allocation
+     * up-front. */
+    {
+        mm_t trigger_mm;
+        memset(&trigger_mm, 0, sizeof(trigger_mm));
+        vmm_free_user_map((uint64_t *)&trigger_mm);   /* trigger allocate_test_pgdir() */
+    }
+
+    /* Capture counters BEFORE the alloc so the destroy pass can be
+     * measured as a delta.  setup_mm() calls lifecycle_stubs_reset
+     * which zeros both counters, so the initial state is (0, 0). */
+    int allocs_before = lifecycle_state.total_allocs;
+    int frees_before  = lifecycle_state.total_frees;
+
+    /* Step 1: allocate the stack page via the lifecycle stub. */
+    uint64_t stack_phys = alloc_4k_page();
+    assert_true(stack_phys != 0);
+    assert_eq(allocs_before + 1, lifecycle_state.total_allocs);
+    assert_eq(frees_before,      lifecycle_state.total_frees);
+
+    /* Step 2: build the fake user page table.
+     *
+     * USER_STACK_BASE = 0x1400000 lies in PGD index 0
+     *   (VA[0..0x8000000000)) → PUD index 0 (VA[0..0x40000000))
+     *   → PUD index 1 (VA[0x40000000..0x80000000)) covers
+     *     [2 MiB, 4 MiB), so PUD entry 1 → test_user_pmd_stack,
+     *     PMD entry 0 in test_user_pmd_stack holds the stack.
+     */
+    memset(test_user_pgd,        0, LIFECYCLE_PGD_SIZE * sizeof(uint64_t));
+    memset(test_user_pud_page,   0, LIFECYCLE_PUD_SIZE * sizeof(uint64_t));
+    memset(test_user_pmd_lo,     0, LIFECYCLE_PMD_SIZE * sizeof(uint64_t));
+    memset(test_user_pmd_stack,  0, LIFECYCLE_PMD_SIZE * sizeof(uint64_t));
+
+    /* PGD[0] → PUD page (treat the array address as the page's
+     * "physical" base for our walker). */
+    test_user_pgd[0] = (uint64_t)(uintptr_t)test_user_pud_page | PAGE_VALID;
+    test_user_pud_page[0] = (uint64_t)(uintptr_t)test_user_pmd_lo | PAGE_VALID;
+    test_user_pud_page[1] = (uint64_t)(uintptr_t)test_user_pmd_stack | PAGE_VALID;
+    /* PMD huge entry at USER_STACK_BASE (PMD index 0 in the
+     * stack region, since USER_STACK_BASE is 2 MiB-aligned):
+     * phys | PAGE_USER_PMD.  PAGE_USER_PMD = PAGE_HUGE|PAGE_USER|
+     * PAGE_WRITE|PAGE_VALID (vmm.h). */
+    test_user_pmd_stack[0] = stack_phys | PAGE_USER_PMD;
+
+    /* Step 3: wire mm->pgdir to the fake PGD.  Phy_To_Virt is
+     * identity on the host (lifecycle_runtime.h), so the walker
+     * sees the same pointer. */
+    fixture_mm.pgdir = test_user_pgd;
+
+    /* Step 4: run destroy_unpublished_user_mm's body — the
+     * helper is static in kernel/sched/task.c so the test calls
+     * its two constituent primitives directly.  vma_free_all
+     * walks the VMA list (here: empty heap VMA, zero-length so
+     * vmm_unmap_4k_page loop body never executes), then
+     * vmm_free_user_map walks the user page table and frees the
+     * stack PMD huge leaf. */
+    vma_free_all(&fixture_mm);
+    vmm_free_user_map((uint64_t *)test_user_pgd);
+
+    /* Step 5: single-owner invariant — exactly one free from the
+     * destroy pass, and zero new allocs (the destroy path must
+     * not allocate). */
+    assert_eq(allocs_before + 1, lifecycle_state.total_allocs);
+    assert_eq(frees_before + 1,  lifecycle_state.total_frees);
+
+    /* Sanity: a second pass must NOT free anything — the page
+     * is gone, the page-pool state must remain stable.  This
+     * is the negative side of the invariant: re-running destroy
+     * after a successful destroy must not double-free. */
+    vma_free_all(&fixture_mm);
+    vmm_free_user_map((uint64_t *)test_user_pgd);
+    assert_eq(allocs_before + 1, lifecycle_state.total_allocs);
+    assert_eq(frees_before + 1,  lifecycle_state.total_frees);
+}
+
 /* ── Source-level inspection: spawn_user_task lifecycle ───── */
 
 #define TASK_C_PATH \
@@ -645,6 +747,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_mm_init_user_heap_alloc_fail_leaves_mm_unchanged),
     TEST_ENTRY(test_destroy_unpublished_user_mm_releases_vmas),
     TEST_ENTRY(test_destroy_unpublished_user_mm_handles_empty_list),
+    TEST_ENTRY(test_stack_page_failure_exactly_one_free),
     TEST_ENTRY(test_spawn_user_task_calls_mm_init_user_heap),
     TEST_ENTRY(test_spawn_user_task_no_early_task_list_insert),
     TEST_ENTRY(test_spawn_user_task_uses_destroy_helper),

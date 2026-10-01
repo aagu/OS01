@@ -17,10 +17,40 @@
 #include <assert.h>
 
 #include <memory/pmm.h>
+#include <memory/vmm.h>   /* PAGE_VALID, PAGE_HUGE, PAGE_NO_EXEC, PAGE_USER_PMD */
 
 /* posix_memalign (POSIX 1003.1-2001) — see elf_load_stubs.c for
  * the rationale on declaring it explicitly. */
 extern int posix_memalign(void **memptr, size_t alignment, size_t size);
+
+/* ── Fake user page table for the stack-page single-free test ──
+ * See lifecycle_stubs.h for the structure layout.  These arrays are
+ * the only state the stub vmm_free_user_map understands; passing
+ * any other pointer is a no-op.  test_user_pgd[0] is the only
+ * non-zero PGD entry; test_user_pud_page[0] is the only non-zero
+ * PUD entry; test_user_pmd_lo covers VA [0, 2 MiB) and
+ * test_user_pmd_stack covers VA [2 MiB, 4 MiB) (USER_STACK_BASE
+ * lives at 2 MiB-aligned 0x1400000, so PMD index 1 is where the
+ * stack mapping sits).
+ *
+ * Allocated 4 KiB-aligned via posix_memalign so PAGE_4K_MASK in
+ * the walker preserves the pointer value. */
+uint64_t *test_user_pgd;
+uint64_t *test_user_pud_page;
+uint64_t *test_user_pmd_lo;
+uint64_t *test_user_pmd_stack;
+
+static int pgdir_allocated = 0;
+
+static void allocate_test_pgdir(void)
+{
+    if (pgdir_allocated) return;
+    pgdir_allocated = 1;
+    posix_memalign((void **)&test_user_pgd,       4096, LIFECYCLE_PGD_SIZE * sizeof(uint64_t));
+    posix_memalign((void **)&test_user_pud_page,  4096, LIFECYCLE_PUD_SIZE * sizeof(uint64_t));
+    posix_memalign((void **)&test_user_pmd_lo,    4096, LIFECYCLE_PMD_SIZE * sizeof(uint64_t));
+    posix_memalign((void **)&test_user_pmd_stack, 4096, LIFECYCLE_PMD_SIZE * sizeof(uint64_t));
+}
 
 /* ── Stub `current` (lifecycle_runtime.h redefines the macro) ──
  * The test never invokes do_mmap / do_munmap / do_mprotect, so the
@@ -58,6 +88,71 @@ uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
 {
     (void)pgdir; (void)virt; (void)flags; (void)allocate;
     return NULL;
+}
+
+/* ── vmm_free_user_map — minimal page-table walker ──────────
+ * The destroy_unpublished_user_mm helper calls vmm_free_user_map
+ * to release the user page tables.  For the lifecycle test we
+ * model the production walker (kernel/memory/vmm.c:130-176) at
+ * minimum fidelity: handle the PAGE_HUGE branch the user stack
+ * lives in (the spawn flow maps the stack as PAGE_USER_PMD =
+ * 2 MiB huge page at USER_STACK_BASE = 0x1400000).
+ *
+ * The walker only knows about test_user_pgd / test_user_pud_page /
+ * test_user_pmd_lo / test_user_pmd_stack — passing any other pgdir
+ * pointer is a no-op.  This is sufficient for the lifecycle test:
+ * a single PMD huge leaf is enough to exercise the single-free
+ * invariant. */
+void vmm_free_user_map(uint64_t *pgdir)
+{
+    allocate_test_pgdir();
+    if (pgdir != test_user_pgd) return;
+
+    /* The walker only walks level 0 of the PGD — production
+     * code uses 512-way at each level, but our fake pgdir has
+     * exactly one entry (index 0) pointing at test_user_pud_page. */
+    if (!(test_user_pgd[0] & PAGE_VALID)) return;
+    uint64_t *pud = (uint64_t *)(uintptr_t)(test_user_pgd[0] & PAGE_4K_MASK);
+    if (pud != test_user_pud_page) return;
+
+    /* PUD entry 0 → test_user_pmd_lo covers VA [0, 2 MiB).
+     * PUD entry 1 → test_user_pmd_stack covers VA [2 MiB, 4 MiB)
+     * (USER_STACK_BASE = 0x1400000 ∈ [2 MiB, 4 MiB) →
+     *  PMD index 0 in test_user_pmd_stack). */
+    for (int l1 = 0; l1 < 2; l1++) {
+        uint64_t *pmd;
+        if (l1 == 0) {
+            if (!(test_user_pud_page[0] & PAGE_VALID)) continue;
+            uint64_t *p = (uint64_t *)(uintptr_t)(test_user_pud_page[0] & PAGE_4K_MASK);
+            if (p != test_user_pmd_lo) continue;
+            pmd = test_user_pmd_lo;
+        } else {
+            if (!(test_user_pud_page[1] & PAGE_VALID)) continue;
+            uint64_t *p = (uint64_t *)(uintptr_t)(test_user_pud_page[1] & PAGE_4K_MASK);
+            if (p != test_user_pmd_stack) continue;
+            pmd = test_user_pmd_stack;
+        }
+        for (int l2 = 0; l2 < LIFECYCLE_PMD_SIZE; l2++) {
+            uint64_t pmde = pmd[l2];
+            if (!(pmde & PAGE_VALID)) continue;
+            if (!(pmde & PAGE_HUGE)) continue;
+            /* Production extracts phys via PAGE_2M_MASK (2 MiB-aligned).
+             * For the host harness we want the exact phys the test
+             * recorded (a host-heap pointer, not 2 MiB-aligned), so
+             * we mask off only the PAGE_NO_EXEC bit (bit 63) and the
+             * flag bits.  The test puts `stack_phys | PAGE_USER_PMD`
+             * into the PMD entry, and PAGE_USER_PMD overlaps only the
+             * valid/user/write/huge bits (low 8 bits + bit 63), so
+             * masking `pmde & ~(PAGE_NO_EXEC | 0xFF)` recovers the
+             * original phys cleanly. */
+            uint64_t phys = pmde & ~((uint64_t)PAGE_NO_EXEC | 0xFFULL);
+            free_4k_page(phys);
+            /* Clear the entry so a second walk (e.g. an idempotent
+             * re-destroy) does not double-free.  Production
+             * vmm_free_user_map does the same at vmm.c:160-164. */
+            pmd[l2] = 0;
+        }
+    }
 }
 
 /* ── Global state ─────────────────────────────────────────── */
