@@ -1962,28 +1962,56 @@ int64_t sys_fstatat(int dirfd, const char *path, struct stat *buf,
 }
 
 // ── fork_mm_copy — create private address space for fork child ─
-// Builds a new PGD with private copies of all user 2MB pages.
-// Uses inline rep movsb instead of memcpy because libk's memcpy
-// has a bug with 2MB copies (CR2=0x8).
+// Builds a new PGD with private copies of all user pages.
+//
+// Task 6 contract (docs/.../2026-10-01-user-heap-elf-isolation-
+// design.md §6):
+//   - Child 4 KiB ELF leaves and read-only non-VM_IO leaves
+//     receive PRIVATE physical pages (alloc + memcpy).
+//   - Writable VMA leaves use COW (parent PTE → R/O+COW; both
+//     parent and child hold a ref on the shared phys).
+//   - The stack (USER_STACK_BASE 2 MiB huge page) retains its
+//     eager huge-page copy.
+//   - All child page-table and leaf-phys allocations are STAGED
+//     BEFORE any parent PTE mutation.  Parent mutations happen
+//     in a bounded no-failure phase (pass 2).  If staging
+//     fails, roll back and return NULL — do NOT mutate parent.
+//   - On success, tlb_shootdown() flushes affected TLBs.
+//
+// The placeholder convention is used to mark writable leaves
+// pending pass-2 mutation: child_pte = PAGE_VALID (= 1) means
+// "writable leaf, mutating parent + adding COW refs in pass 2".
+// A real RO leaf has phys bits set; a VM_IO shared leaf has the
+// parent's full PTE (with the MMIO phys); a fork-of-fork COW
+// leaf has the parent's full PTE.  Only the placeholder is
+// == PAGE_VALID, so pass 2 walks the child pgd, finds these
+// placeholders, and mutates the corresponding parent PTE +
+// bumps the COW refcount.
 static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
 {
     mm_t *child_mm = mm_alloc();
     uint64_t *child_pgd = (uint64_t *)vmm_alloc_map();
-    if (!child_mm || !child_pgd)
-        goto fail;
+    if (!child_mm || !child_pgd) {
+        if (child_mm) kfree(child_mm);
+        if (child_pgd) kfree(child_pgd);
+        if (cr3_out) *cr3_out = 0;
+        return NULL;
+    }
 
     uint64_t *parent_pgd = (uint64_t *)Phy_To_Virt((uint64_t)parent_mm->pgdir);
     uint64_t *kernel_pgd = (uint64_t *)Phy_To_Virt((uint64_t)init_mm.pgdir);
 
     memcpy(&child_pgd[256], &kernel_pgd[256], 256 * sizeof(uint64_t));
 
+    /* ── Pass 1 (fail-able): stage child page tables, leaf phys
+     * for RO leaves, and huge copies.  No parent PTE mutation. */
     for (int l4 = 0; l4 < 256; l4++) {
         uint64_t pgde = parent_pgd[l4];
         if (!(pgde & PAGE_VALID)) continue;
 
         uint64_t *parent_pud = (uint64_t *)Phy_To_Virt(pgde & PAGE_4K_MASK);
         uint64_t *child_pud  = (uint64_t *)calloc(1, PAGE_4K_SIZE);
-        if (!child_pud) continue;
+        if (!child_pud) goto fail;
         child_pgd[l4] = Virt_To_Phy((uint64_t)child_pud) | PAGE_USER_PGD;
 
         for (int l3 = 0; l3 < 512; l3++) {
@@ -1992,77 +2020,19 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
 
             uint64_t *parent_pmd = (uint64_t *)Phy_To_Virt(pude & PAGE_4K_MASK);
             uint64_t *child_pmd  = (uint64_t *)calloc(1, PAGE_4K_SIZE);
-            if (!child_pmd) continue;
+            if (!child_pmd) goto fail;
             child_pud[l3] = Virt_To_Phy((uint64_t)child_pmd) | PAGE_USER_PUD;
 
             for (int l2 = 0; l2 < 512; l2++) {
                 uint64_t pmde = parent_pmd[l2];
                 if (!(pmde & PAGE_VALID)) continue;
 
-                // Eager copy: allocate a private 2MB page and copy
-                // using rep movsb.  Inline asm is used instead of
-                // memcpy because the kernel's libk memcpy has a bug
-                // with 2MB copies (CR2=0x8).
-                // Only 2MB huge pages (PAGE_HUGE) are eagerly copied.
-                // Non-2MB entries (4KB page table pointers, etc.) are
-                // shared -- the child inherits the parent's mapping.
-                // 4KB PTE table: share pages via COW.
-                // Check PAGE_COW before PAGE_WRITE — a COW page has R/W=0
-                // and must not be misclassified as plain read-only.
-                if (!(pmde & PAGE_HUGE)) {
-                    if (!(pmde & PAGE_VALID)) {
-                        child_pmd[l2] = 0;
-                        continue;
-                    }
-                    uint64_t *parent_pte =
-                        (uint64_t *)Phy_To_Virt(pmde & PAGE_4K_MASK);
-                    uint64_t *child_pte =
-                        (uint64_t *)calloc(1, PAGE_4K_SIZE);
-                    if (!child_pte) {
-                        child_pmd[l2] = pmde;  // OOM: share PDE
-                        continue;
-                    }
-                    child_pmd[l2] = Virt_To_Phy((uint64_t)child_pte)
-                                   | (pmde & 0xfff);
-                    for (int l1 = 0; l1 < 512; l1++) {
-                        uint64_t pte = parent_pte[l1];
-                        if (!(pte & (PAGE_VALID | PAGE_PROTNONE)))
-                            continue;
-
-                        // Compute VA from page table indices
-                        uint64_t vaddr = ((uint64_t)l4 << 39)
-                                       | ((uint64_t)l3 << 30)
-                                       | ((uint64_t)l2 << 21)
-                                       | ((uint64_t)l1 << 12);
-                        vma_t *vma = vma_find(parent_mm, vaddr);
-                        if (vma && (vma->vm_flags & VM_IO)) {
-                            child_pte[l1] = pte;  // share MMIO PTE, no COW
-                            continue;
-                        }
-
-                        if (pte & PAGE_COW) {
-                            // Already COW-shared (fork-of-fork)
-                            page_cow_get(pte & PAGE_4K_MASK);
-                            child_pte[l1] = pte;
-                        } else if (pte & PAGE_WRITE) {
-                            // Path A: writable -> COW on BOTH parent and child.
-                            // page_cow_get TWICE: parent PTE (R/W->R/O+COW) +1,
-                            // child PTE (new COW) +1 -> cow_count grows by 2.
-                            parent_pte[l1] &= ~PAGE_WRITE;
-                            parent_pte[l1] |= PAGE_COW;
-                            page_cow_get(pte & PAGE_4K_MASK);
-                            page_cow_get(pte & PAGE_4K_MASK);
-                            child_pte[l1] = parent_pte[l1];
-                        } else {
-                            // Path B: plain read-only -> share directly
-                            child_pte[l1] = pte;
-                        }
-                    }
-                    continue;
-                }
-                uint64_t phys = pmde & PAGE_2M_MASK;
-                // VM_IO guard: skip MMIO huge pages, share directly
-                {
+                if (pmde & PAGE_HUGE) {
+                    /* Huge page: eager 2 MiB copy.  Inline asm is
+                     * used instead of memcpy because the kernel's
+                     * libk memcpy has a bug with 2MB copies
+                     * (CR2=0x8).  VM_IO huge pages are shared
+                     * directly (no copy). */
                     uint64_t vaddr_2m = ((uint64_t)l4 << 39)
                                        | ((uint64_t)l3 << 30)
                                        | ((uint64_t)l2 << 21);
@@ -2071,11 +2041,15 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                         child_pmd[l2] = pmde;
                         continue;
                     }
-                }
-                struct Page *s = alloc_pages(ZONE_NORMAL, 1, 0);
-                if (s) {
+                    struct Page *s = alloc_pages(ZONE_NORMAL, 1, 0);
+                    if (!s) goto fail;
                     uint64_t dst = (uint64_t)Phy_To_Virt(s->phy_address);
-                    uint64_t src = (uint64_t)Phy_To_Virt(phys & ~PAGE_NO_EXEC);
+                    /* Strip PAGE_NO_EXEC (bit 63) before Phy_To_Virt —
+                     * PAGE_NO_EXEC lives in the high bit and PAGE_2M_MASK
+                     * preserves it, which would corrupt the kernel VA
+                     * (non-canonical addr → GP on rep movsb). */
+                    uint64_t src = (uint64_t)Phy_To_Virt(
+                        (pmde & PAGE_2M_MASK) & ~PAGE_NO_EXEC);
                     uint64_t sz  = PAGE_2M_SIZE;
                     __asm__ __volatile__(
                         "cld\n\t"
@@ -2086,28 +2060,143 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                     );
                     child_pmd[l2] = s->phy_address
                                    | (pmde & ~PAGE_2M_MASK);
-                } else {
-                    child_pmd[l2] = pmde; // OOM fallback: share
+                    continue;
+                }
+
+                /* 4 KiB PTE table path. */
+                uint64_t *parent_pte =
+                    (uint64_t *)Phy_To_Virt(pmde & PAGE_4K_MASK);
+                uint64_t *child_pte =
+                    (uint64_t *)calloc(1, PAGE_4K_SIZE);
+                if (!child_pte) goto fail;
+                child_pmd[l2] = Virt_To_Phy((uint64_t)child_pte)
+                               | (pmde & 0xfff);
+
+                for (int l1 = 0; l1 < 512; l1++) {
+                    uint64_t pte = parent_pte[l1];
+                    if (!(pte & (PAGE_VALID | PAGE_PROTNONE)))
+                        continue;
+
+                    uint64_t vaddr = ((uint64_t)l4 << 39)
+                                   | ((uint64_t)l3 << 30)
+                                   | ((uint64_t)l2 << 21)
+                                   | ((uint64_t)l1 << 12);
+                    vma_t *vma = vma_find(parent_mm, vaddr);
+                    if (vma && (vma->vm_flags & VM_IO)) {
+                        /* MMIO: share parent's phys (no COW, no
+                         * copy).  Pass 2 must not touch this leaf. */
+                        child_pte[l1] = pte;
+                        continue;
+                    }
+
+                    /* Check PAGE_COW before PAGE_WRITE — a COW
+                     * page has R/W=0 and must not be misclassified
+                     * as plain read-only. */
+                    if (pte & PAGE_COW) {
+                        /* Already COW-shared (fork-of-fork):
+                         * add a ref for the child, share the PTE. */
+                        page_cow_get(pte & PAGE_4K_MASK);
+                        child_pte[l1] = pte;
+                    } else if (pte & PAGE_WRITE) {
+                        /* Writable: stage COW; commit in pass 2.
+                         * The placeholder (PAGE_VALID only) is
+                         * unique to writable leaves awaiting
+                         * pass-2 mutation — pass 2 finds it and
+                         * bumps the parent's refcount. */
+                        child_pte[l1] = PAGE_VALID;
+                    } else {
+                        /* Plain read-only / PROT_NONE (incl. ELF
+                         * envelope, code segment, R/O data):
+                         * alloc a fresh 4 KiB leaf and copy the
+                         * parent's contents.  No COW ref — the
+                         * child owns its phys outright. */
+                        uint64_t new_phys = alloc_4k_page();
+                        if (!new_phys) goto fail;
+                        memcpy((void *)Phy_To_Virt(new_phys),
+                               (void *)Phy_To_Virt(pte & PAGE_4K_MASK),
+                               PAGE_4K_SIZE);
+                        /* Preserve flags except PAGE_COW (the
+                         * new phys has no COW reference). */
+                        child_pte[l1] = new_phys | (pte & 0xfff & ~PAGE_COW);
+                    }
+                }
+            }
+        }
+    }
+
+    /* ── Pass 2 (no-fail): commit parent PTE changes for
+     * writable leaves.  Bounded: no allocation, no copy. */
+    for (int l4 = 0; l4 < 256; l4++) {
+        uint64_t cpgde = child_pgd[l4];
+        if (!(cpgde & PAGE_VALID)) continue;
+        uint64_t *child_pud = (uint64_t *)Phy_To_Virt(cpgde & PAGE_4K_MASK);
+        uint64_t *parent_pud =
+            (uint64_t *)Phy_To_Virt(parent_pgd[l4] & PAGE_4K_MASK);
+
+        for (int l3 = 0; l3 < 512; l3++) {
+            uint64_t cpude = child_pud[l3];
+            if (!(cpude & PAGE_VALID)) continue;
+            uint64_t *child_pmd = (uint64_t *)Phy_To_Virt(cpude & PAGE_4K_MASK);
+            uint64_t *parent_pmd =
+                (uint64_t *)Phy_To_Virt(parent_pud[l3] & PAGE_4K_MASK);
+
+            for (int l2 = 0; l2 < 512; l2++) {
+                uint64_t cpmde = child_pmd[l2];
+                if (!(cpmde & PAGE_VALID)) continue;
+                if (cpmde & PAGE_HUGE) continue;
+
+                uint64_t *child_pte =
+                    (uint64_t *)Phy_To_Virt(cpmde & PAGE_4K_MASK);
+                uint64_t *parent_pte =
+                    (uint64_t *)Phy_To_Virt(parent_pmd[l2] & PAGE_4K_MASK);
+
+                for (int l1 = 0; l1 < 512; l1++) {
+                    /* Placeholder = PAGE_VALID only.  Any other
+                     * PTE (real RO/COW/VMIO fork-of-fork) is
+                     * already settled by pass 1. */
+                    if (child_pte[l1] != PAGE_VALID) continue;
+                    uint64_t ppte = parent_pte[l1];
+                    uint64_t paddr = ppte & PAGE_4K_MASK;
+                    /* Bump refcount twice: parent keeps one ref
+                     * (its PTE still owns the phys) and child
+                     * gets one ref (its PTE will own it too). */
+                    page_cow_get(paddr);
+                    page_cow_get(paddr);
+                    ppte &= ~PAGE_WRITE;
+                    ppte |= PAGE_COW;
+                    parent_pte[l1] = ppte;
+                    child_pte[l1] = ppte;
                 }
             }
         }
     }
 
     memcpy(child_mm, parent_mm, sizeof(mm_t));
-    // vma_list must NOT be shared — fork_vma_copy will fill child's own
+    /* vma_list must NOT be shared — fork_vma_copy fills the
+     * child's own list (called by do_fork). */
     list_init(&child_mm->vma_list);
-    spin_init(&child_mm->lock);   // memcpy copied parent's lock value — reset
+    spin_init(&child_mm->lock);   /* memcpy copied parent's lock value */
     child_mm->pgdir = (uint64_t *)Virt_To_Phy((uint64_t)child_pgd);
     *cr3_out = (uint64_t)child_mm->pgdir;
 
-    // TLB shootdown: parent's in-memory PTEs were modified (R/W → R/O+COW).
-    // With SMP load balancing the parent may run on any CPU — must
-    // invalidate ALL cores' TLBs, not just the local one.
+    /* TLB shootdown: parent's in-memory PTEs were modified (R/W →
+     * R/O+COW).  With SMP load balancing the parent may run on any
+     * CPU — must invalidate ALL cores' TLBs, not just the local
+     * one.  Called from the END so the parent's commit phase is
+     * fully visible before any CPU re-tlbs. */
     tlb_shootdown();
 
     return child_mm;
 
 fail:
+    /* Roll back.  Walk the partial child pgd and free every
+     * allocation we made in pass 1:
+     *   - 4 KiB child PTE tables (calloc'd)  → kfree
+     *   - 4 KiB child leaves (alloc_4k_page'd) → free_4k_page
+     *   - 2 MiB child huge copies (alloc_pages'd) → free_pages
+     * Skip VM_IO shared leaves (parent's MMIO phys — not ours).
+     * Skip placeholders (PAGE_VALID only — no phys).  No parent
+     * PTE was mutated, so nothing to undo there. */
     if (child_pgd) {
         for (int l4 = 0; l4 < 256; l4++) {
             uint64_t pgde = child_pgd[l4];
@@ -2120,9 +2209,33 @@ fail:
                 for (int l2 = 0; l2 < 512; l2++) {
                     uint64_t pmde = pmd[l2];
                     if (!(pmde & PAGE_VALID)) continue;
-                    if (!(pmde & PAGE_HUGE)) {
-                        uint64_t *pte = (uint64_t *)Phy_To_Virt(pmde & PAGE_4K_MASK);
-                        kfree(pte);
+                    if (pmde & PAGE_HUGE) {
+                        uint64_t phys = pmde & PAGE_2M_MASK;
+                        struct Page *p = Phy_to_2M_Page(phys);
+                        free_pages(p, 1);
+                    } else {
+                        uint64_t *pt = (uint64_t *)Phy_To_Virt(pmde & PAGE_4K_MASK);
+                        for (int l1 = 0; l1 < 512; l1++) {
+                            uint64_t pte = pt[l1];
+                            uint64_t vaddr = ((uint64_t)l4 << 39)
+                                           | ((uint64_t)l3 << 30)
+                                           | ((uint64_t)l2 << 21)
+                                           | ((uint64_t)l1 << 12);
+                            vma_t *vma = vma_find(parent_mm, vaddr);
+                            int is_vmio = (vma &&
+                                           (vma->vm_flags & VM_IO));
+                            /* Free only what we allocated in
+                             * pass 1: a fresh 4 KiB phys (phys
+                             * bits set, not the placeholder, not
+                             * VMIO shared). */
+                            if ((pte & PAGE_VALID) &&
+                                (pte & PAGE_4K_MASK) &&
+                                pte != PAGE_VALID &&
+                                !is_vmio) {
+                                free_4k_page(pte & PAGE_4K_MASK);
+                            }
+                        }
+                        kfree(pt);
                     }
                 }
                 kfree(pmd);
@@ -2131,8 +2244,8 @@ fail:
         }
         kfree(child_pgd);
     }
-    if (child_mm)   kfree(child_mm);
-    if (cr3_out)    *cr3_out = 0;
+    if (child_mm) kfree(child_mm);
+    if (cr3_out)  *cr3_out = 0;
     return NULL;
 }
 
@@ -2232,10 +2345,48 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags __attribute__((unused)),
         if (current->mm && current->mm->pgdir) {
             tsk->mm = fork_mm_copy(current->mm, &thd->cr3);
             if (!tsk->mm) {
-                debug_task("fork: pid=%d fork_mm_copy FAILED, falling back to shared mm\n",
+                /* Task 6: hard OOM.  The pre-existing
+                 *   tsk->mm = current->mm; thd->cr3 = current->thread->cr3;
+                 * fallback used to "share the parent's mm" on
+                 * fork_mm_copy failure — that exposed the parent's
+                 * pgdir to the child (and the child's COW refs
+                 * would silently leak into the parent).  Brief:
+                 * "remove the fork: ... falling back to shared mm
+                 *  fallback in do_fork" + "do_fork releases task
+                 *  resources on fork_mm_copy failure and returns
+                 *  -ENOMEM".
+                 *
+                 * Release every unpublished resource this function
+                 * allocated (raw_alloc + thd + fpu_save + files +
+                 * the not-yet-runnable task list link) and return
+                 * -ENOMEM to the caller.  The child is never
+                 * published, so init's waitpid loop never sees it. */
+                debug_task("fork: pid=%d fork_mm_copy OOM, releasing task\n",
                     (int)current->pid);
-                tsk->mm = current->mm;
-                thd->cr3 = current->thread->cr3;
+
+                /* Remove the not-yet-runnable child from the
+                 * global task list so init's waitpid loop cannot
+                 * reach it. */
+                {
+                    uint64_t tl_flags2 =
+                        spin_lock_irqsave(&task_list_lock);
+                    list_del(&tsk->list);
+                    spin_unlock_irqrestore(&task_list_lock, tl_flags2);
+                }
+                /* Files table reference (if any). */
+                if (tsk->files) {
+                    files_unpin(tsk->files);
+                    tsk->files = NULL;
+                }
+                /* FPU save area. */
+                if (tsk->fpu_save) {
+                    kfree(tsk->fpu_save);
+                    tsk->fpu_save = NULL;
+                }
+                /* Thread struct + kernel stack / task union. */
+                kfree(thd);
+                kfree(tsk->stack_alloc_base);
+                return -ENOMEM;
             }
             if (tsk->mm)
                 fork_vma_copy(tsk->mm, current->mm);

@@ -3620,6 +3620,163 @@ static void test_protected_ranges(void)
            "/proc/self/maps lists image at 0x400000 + [heap]");
 }
 
+// ── 51: fork brk-grown page isolation (Task 6) ───────────────
+// Parent grows brk by 2 pages, writes its own magic bytes to each,
+// forks.  Child writes DIFFERENT bytes to the SAME addresses (which
+// must COW-privatize), then writes back the parent bytes via a
+// pipe and exits.  Parent reads the pipe and verifies its OWN bytes
+// were unchanged (no shared phys between parent and child after
+// the COW write).  Asserts:
+//   - Parent's heap bytes are unchanged after child COW writes
+//   - Child sees a different heap (writes don't leak into parent)
+//   - The two processes have independent mappings
+static void test_fork_brk_isolation(void)
+{
+    /* Stage 1: grow brk by 2 pages and put parent-magic bytes in them. */
+    int64_t cur_brk = syscall(SYS_brk, 0, 0, 0);
+    if (cur_brk <= 0) {
+        FAIL("fork_brk_isolation", "brk query failed rc=%ld", (long)cur_brk);
+        return;
+    }
+    uint64_t base = ((uint64_t)cur_brk + 0xFFF) & ~(uint64_t)0xFFF;
+    int64_t grown = syscall(SYS_brk, base + 0x2000, 0, 0);
+    if (grown != (int64_t)(base + 0x2000)) {
+        FAIL("fork_brk_isolation", "brk grow failed rc=%ld", (long)grown);
+        return;
+    }
+    volatile unsigned char *p0 = (volatile unsigned char *)(uintptr_t)base;
+    volatile unsigned char *p1 = (volatile unsigned char *)(uintptr_t)(base + 0x1000);
+    p0[0] = 0xA0; p0[1] = 0xA1; p0[0xFF] = 0xAF;
+    p1[0] = 0xB0; p1[1] = 0xB1; p1[0xFF] = 0xBF;
+
+    /* Stage 2: a pipe so the child can signal its COW-write result
+     * back to the parent without the child needing to printk. */
+    int pipefd[2];
+    if (pipe(pipefd) < 0) {
+        FAIL("fork_brk_isolation", "pipe failed errno=%d", errno);
+        syscall(SYS_brk, cur_brk, 0, 0);
+        return;
+    }
+
+    int64_t pid = fork();
+    if (pid < 0) {
+        FAIL("fork_brk_isolation", "fork failed");
+        close(pipefd[0]); close(pipefd[1]);
+        syscall(SYS_brk, cur_brk, 0, 0);
+        return;
+    }
+
+    if (pid == 0) {
+        /* Child: close read end, write the COW-privatized bytes
+         * (must be ours now — child wrote its own magic), and exit. */
+        close(pipefd[0]);
+        /* COW writes — these must trigger the COW fault on VMA-present
+         * writable pages.  Brief: "writable VMA leaves use COW as today"
+         * — the child's write must NOT corrupt the parent's bytes. */
+        p0[0] = 0xC0; p0[0xFF] = 0xCF;
+        p1[0] = 0xD0; p1[0xFF] = 0xDF;
+        /* Sanity: child sees its own writes. */
+        unsigned char csig[4];
+        csig[0] = p0[0]; csig[1] = p0[0xFF];
+        csig[2] = p1[0]; csig[3] = p1[0xFF];
+        write(pipefd[1], csig, 4);
+        close(pipefd[1]);
+        _exit(0);
+    }
+
+    /* Parent: read the child's 4 signature bytes. */
+    close(pipefd[1]);
+    unsigned char csig[4] = {0, 0, 0, 0};
+    int64_t got_n = read(pipefd[0], csig, 4);
+    close(pipefd[0]);
+    int status = 0;
+    int64_t w = waitpid(pid, &status, 0);
+
+    int ok_child = (w == pid) && (status == 0) && (got_n == 4)
+                && (csig[0] == 0xC0) && (csig[1] == 0xCF)
+                && (csig[2] == 0xD0) && (csig[3] == 0xDF);
+    int ok_parent = (p0[0] == 0xA0) && (p0[1] == 0xA1) && (p0[0xFF] == 0xAF)
+                 && (p1[0] == 0xB0) && (p1[1] == 0xB1) && (p1[0xFF] == 0xBF);
+    CHECK3(ok_child, "fork_brk_child_writes",
+           "child's COW writes produced its own bytes");
+    CHECK3(ok_parent, "fork_brk_parent_unchanged",
+           "parent's heap bytes intact after child COW writes");
+
+    syscall(SYS_brk, cur_brk, 0, 0);
+}
+
+// ── 52: fork of writable mmaps preserves COW isolation (Task 6) ─
+// Parent mmaps two writable pages, writes its own bytes, forks.
+// Child COW-writes its own bytes.  Parent's bytes must be unchanged
+// after the child exits.  Validates the "writable VMA leaves use
+// COW" contract on the mmap path (not just the heap path).
+static void test_fork_mmap_cow_isolation(void)
+{
+    /* Stage 1: two writable mmaps. */
+    void *m0 = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE,
+                    MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    void *m1 = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE,
+                    MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (m0 == MAP_FAILED || m1 == MAP_FAILED) {
+        FAIL("fork_mmap_cow", "mmap failed");
+        if (m0 != MAP_FAILED) munmap(m0, 0x1000);
+        if (m1 != MAP_FAILED) munmap(m1, 0x1000);
+        return;
+    }
+    volatile unsigned char *p0 = (volatile unsigned char *)m0;
+    volatile unsigned char *p1 = (volatile unsigned char *)m1;
+    p0[0] = 0x10; p0[0xFF] = 0x1F;
+    p1[0] = 0x20; p1[0xFF] = 0x2F;
+
+    int pipefd[2];
+    if (pipe(pipefd) < 0) {
+        FAIL("fork_mmap_cow", "pipe failed errno=%d", errno);
+        munmap(m0, 0x1000); munmap(m1, 0x1000);
+        return;
+    }
+
+    int64_t pid = fork();
+    if (pid < 0) {
+        FAIL("fork_mmap_cow", "fork failed");
+        close(pipefd[0]); close(pipefd[1]);
+        munmap(m0, 0x1000); munmap(m1, 0x1000);
+        return;
+    }
+
+    if (pid == 0) {
+        close(pipefd[0]);
+        /* COW-privatize via write. */
+        p0[0] = 0x30; p0[0xFF] = 0x3F;
+        p1[0] = 0x40; p1[0xFF] = 0x4F;
+        unsigned char csig[4];
+        csig[0] = p0[0]; csig[1] = p0[0xFF];
+        csig[2] = p1[0]; csig[3] = p1[0xFF];
+        write(pipefd[1], csig, 4);
+        close(pipefd[1]);
+        _exit(0);
+    }
+
+    close(pipefd[1]);
+    unsigned char csig[4] = {0, 0, 0, 0};
+    int64_t got_n = read(pipefd[0], csig, 4);
+    close(pipefd[0]);
+    int status = 0;
+    int64_t w = waitpid(pid, &status, 0);
+
+    int ok_child = (w == pid) && (status == 0) && (got_n == 4)
+                && (csig[0] == 0x30) && (csig[1] == 0x3F)
+                && (csig[2] == 0x40) && (csig[3] == 0x4F);
+    int ok_parent = (p0[0] == 0x10) && (p0[0xFF] == 0x1F)
+                 && (p1[0] == 0x20) && (p1[0xFF] == 0x2F);
+    CHECK3(ok_child, "fork_mmap_child_writes",
+           "child's COW writes on mmap pages produced its own bytes");
+    CHECK3(ok_parent, "fork_mmap_parent_unchanged",
+           "parent's mmap bytes intact after child COW writes");
+
+    munmap(m0, 0x1000);
+    munmap(m1, 0x1000);
+}
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
@@ -3716,6 +3873,8 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"48_atexit_lifecycle",       test_atexit_lifecycle},
     {"49_brk_read_fresh_page",    test_brk_read_fresh_page},
     {"50_protected_ranges",       test_protected_ranges},
+    {"51_fork_brk_isolation",     test_fork_brk_isolation},
+    {"52_fork_mmap_cow_isolation",test_fork_mmap_cow_isolation},
 };
 
 int main(int argc, char **argv, char **envp)

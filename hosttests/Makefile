@@ -100,7 +100,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_elf_load_4k.elf \
     $(TEST_BLD)/test_process_image_lifecycle.elf \
     $(TEST_BLD)/test_brk_pages.elf \
-    $(TEST_BLD)/test_user_protected_ranges.elf
+    $(TEST_BLD)/test_user_protected_ranges.elf \
+    $(TEST_BLD)/test_fork_user_map.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -582,6 +583,42 @@ $(TEST_BLD)/test_user_protected_ranges.o: $(TEST_CASES)/test_user_protected_rang
 $(TEST_BLD)/test_user_protected_ranges.elf: $(TEST_BLD)/test_user_protected_ranges.o \
 		$(TEST_BLD)/vma_pranges_production.o \
 		$(TEST_BLD)/pranges_stubs.o
+	$(HOST_CC) -o $@ $^
+
+# Fork / teardown 4 KiB ownership test (Task 6, user heap/ELF
+# isolation plan): compiles the REAL kernel/memory/vma.c against
+# the fork_user_map host harness (flat indexed PTE table, 4 KiB
+# page pool, COW refcounts, vfs_node refcounts) and exercises the
+# production fork_vma_copy / vma_free_all / mm_init_user_heap.  Source-
+# level inspection of kernel/sched/task.c covers the fork_mm_copy
+# staged ordering and the do_fork teardown (task.c is too heavy to
+# host-link).
+FORK_USER_MAP_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
+                              -I$(TESTS_DIR)/kernel/include \
+                              -include $(TEST_MOCK)/fork_user_map/fork_user_map_runtime.h \
+                              -I$(TEST_MOCK) -I$(TEST_INC) \
+                              -I$(TEST_MOCK)/fork_user_map
+
+$(TEST_BLD)/vma_fork_user_map_production.o: $(TESTS_DIR)/kernel/memory/vma.c \
+		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TEST_MOCK)/fork_user_map/fork_user_map_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FORK_USER_MAP_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/fork_user_map_stubs.o: $(TEST_MOCK)/fork_user_map/fork_user_map_stubs.c \
+		$(TEST_MOCK)/fork_user_map/fork_user_map_stubs.h \
+		$(TEST_MOCK)/fork_user_map/fork_user_map_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FORK_USER_MAP_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_fork_user_map.o: $(TEST_CASES)/test_fork_user_map.c \
+		$(TEST_MOCK)/fork_user_map/fork_user_map_stubs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FORK_USER_MAP_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_fork_user_map.elf: $(TEST_BLD)/test_fork_user_map.o \
+		$(TEST_BLD)/vma_fork_user_map_production.o \
+		$(TEST_BLD)/fork_user_map_stubs.o
 	$(HOST_CC) -o $@ $^
 
 # standalone test (no kernel/libc deps)
