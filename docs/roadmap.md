@@ -54,15 +54,15 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 ### 🖥 P3 GUI
 
-基座（已完成）：fb、fb mmap、terminal 双缓冲 + alt-screen、键盘扫描码、PS/2 鼠标驱动（i8042 共享控制器层 + `/dev/mouse` 8 字节事件 ABI + 500 ms 有界探测，2026-09-27 落地，见 `docs/driver.md`）。
+基座（已完成）：fb、fb mmap、terminal 双缓冲 + alt-screen、键盘扫描码、PS/2 鼠标驱动（i8042 共享控制器层 + `/dev/mouse` 8 字节事件 ABI + 500 ms 有界探测，2026-09-27 落地，见 `docs/driver/driver.md`）。
 
-**2026-09-30 完成**：`libgfx.a` 静态库 + `/dev/gfx0` 受限 present 设备 + Tetris 迁移（spec/plan §6，task-1..6 全部闭环；USER_PAGE_SIZE 从 2 MiB 升到 16 MiB 以容纳 1440×900 RGB32 像素缓冲；sys_exec/spawn_user_task 现在为新 MM 插入 heap VMA 让 brk 扩展能命中 demand-paging 路径）。细节见 `docs/gui.md`、`docs/driver.md` gfx0 章节。
+**2026-09-30 完成**：`libgfx.a` 静态库 + `/dev/gfx0` 受限 present 设备 + Tetris 迁移（spec/plan §6，task-1..6 全部闭环；USER_PAGE_SIZE 从 2 MiB 升到 16 MiB 以容纳 1440×900 RGB32 像素缓冲；sys_exec/spawn_user_task 现在为新 MM 插入 heap VMA 让 brk 扩展能命中 demand-paging 路径）。细节见 `docs/gui/gui.md`、`docs/driver/driver.md` gfx0 章节。
 
 **后续内存边界工作**：当前 heap VMA 覆盖到 16 MiB 上限，`SYS_brk` 只更新 `end_brk`；ELF 仍以可写 2 MiB 大页装载。严格隔离未申请的堆页列入 P1「用户堆与 ELF 映射隔离（方案三）」，作为独立任务，不计入上述 2D API 闭环。
 
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
-| 2D 图形 API | ✅ **2026-09-30 闭环**：`libgfx` 像素缓冲 + `/dev/gfx0` 受限 present（详见 `docs/gui.md`） | | |
+| 2D 图形 API | ✅ **2026-09-30 闭环**：`libgfx` 像素缓冲 + `/dev/gfx0` 受限 present（详见 `docs/gui/gui.md`） | | |
 | 可缩放字体渲染器 | 矢量/位图缩放 | 2D API ✅ | HackOS |
 | Window Server + compositor | 多窗口管理 + 合成 | 字体/2D/鼠标 | opuntiaOS + HackOS |
 
@@ -124,23 +124,23 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 |------|------|
 | `docs/README.md` | 文档索引（按 0-4 层组织，按阅读顺序排列） |
 | `docs/architecture.md` | 启动链、内存布局、初始化序列（全局骨架图） |
-| `docs/boot.md` | UEFI 引导 + `boot_context` v2 ABI + v25 E820 拆分 |
+| `docs/boot/boot.md` | UEFI 引导 + `boot_context` v2 ABI + v25 E820 拆分 |
 | `docs/arch.md` | arch-neutral facade + per-arch 强覆盖模式（weak default / strong override）+ v25 arch-cleanup 系列 7 子系统矩阵 |
 | `docs/arch/cross-boundary-symbols.md` | **跨边界符号/ABI 边界规范（AAGU-4）** —— builtin、UAPI、arch-value、libc 镜像 4 类规则 + 现状对照表 + 后续 issue 切分 |
 | `docs/arch/entropy-source-facade.md` | **arch-neutral entropy facade spec（AAGU-5.3 / .5）** —— STRONG/WEAK/NONE 三档质量标签 + 控制流决策 + 禁止条款 |
 | `docs/memory.md` + `docs/cow-mmap.md` | 物理/虚拟内存管理 + COW fork/mmap + v25 PMM arch-neutral + 页表层级统一 |
 | `docs/interrupt.md` | 中断处理（do_IRQ、register_irq、IDT） |
 | `docs/smp.md` | SMP 架构 + 负载均衡实施总结 |
-| `docs/scheduler.md` + `docs/scheduler-complexity.md` | EEVDF 调度器设计与复杂度评估 |
+| `docs/sched/scheduler.md` + `docs/sched/scheduler-complexity.md` | EEVDF 调度器设计与复杂度评估 |
 | `docs/syscall.md` | 71+ syscall 表 + 用户指针边界语义 + syscall 边界审计触达清单 |
 | `docs/signal.md` | 信号投递、handler、sigreturn、Ctrl-C→SIGINT |
 | `docs/timer.md` | Timer 重构架构 + nanosleep 修复 + 重构实施总结 |
-| `docs/gui.md` | Tetris 游戏实施总结 + P3 GUI 路线图 |
+| `docs/gui/gui.md` | Tetris 游戏实施总结 + P3 GUI 路线图 |
 | `docs/io-multiplexing.md` | select/pselect 实施总结 |
 | `docs/network.md` + `docs/lwip-debugging-experience.md` | lwIP 网络栈 + 正确性加固 |
 | `docs/filesystem.md` | VFS, FAT32, ext2, devfs, procfs, tmpfs, GPT, block device |
-| `docs/driver.md` | 驱动子系统（keyboard, serial, ahci, pci, e1000, virtio-net, fb） |
-| `docs/subsys.md` | 子系统注册框架（`SUBSYS_INITCALL()` + phase 顺序） |
+| `docs/driver/driver.md` | 驱动子系统（keyboard, serial, ahci, pci, e1000, virtio-net, fb） |
+| `docs/subsys/subsys.md` | 子系统注册框架（`SUBSYS_INITCALL()` + phase 顺序） |
 | `docs/log.md` | 日志级别、DEBUG_CHANNELS、LOG_TARGET、NDEBUG |
 | `docs/build.md` | GNU Make profile 化构建体系 + v25 UEFI 残留排除 |
 | `docs/build-run-debug.md` | 端到端构建运行调试 |

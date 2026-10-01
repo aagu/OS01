@@ -15,7 +15,7 @@ make OS01_SYSTEST=1 test-qemu SUITE=systest   # 228-test syscall suite
 make KERNEL_SELFTEST=1 test-kernel-selftest    # Built-in kernel selftests
 ```
 
-See [`docs/build-system-harness.md`](docs/build-system-harness.md) for the full
+See [`docs/build/build.md`](docs/build/build.md) for the full
 target taxonomy and flag conventions.
 
 **Build flags** (set on `make` command line):
@@ -28,7 +28,7 @@ target taxonomy and flag conventions.
 **Deps**: clang, llvm, lld, make, dosfstools, mtools, qemu-system-x86_64, edk2-ovmf.
 **Toolchain overrides** (`CLANG=clang-N`, `LLVM_NM=`, `UEFI_CLANG=`, etc.): see [`docs/build/toolchain.md`](docs/build/toolchain.md).
 **BusyBox**: `git submodule update --init` (built and included in disk.img automatically).
-For the authoritative catalog of every `make` target, capability gate, test bucket, and alias policy, see [Build System Harness](docs/build-system-harness.md).
+For the authoritative catalog of every `make` target, capability gate, test bucket, and alias policy, see [Build System Harness](docs/build/build.md).
 
 ## Architecture
 
@@ -65,8 +65,8 @@ Init:    head.S → kernel_main → subsys → VFS/FS → TTY → percpu → SMP
 - **`set_tss64` writes global TSS64_Table**. Per-CPU `init_tss[NR_CPUS]` exists but GDT slot still needs per-CPU update for SMP.
 - **Signal delivery must check CPL**: `do_signal_delivery` only valid when `regs->cs == USER_CS`. Calling it with kernel regs corrupts state.
 - **COW page teardown**: check `PAGE_COW` **before** clearing PTE in `vmm_unmap_4k_page` — phys addr must still be valid for `page_cow_put()`.
-- **New code**: use `log_err`/`log_warn`/`log_info`/`log_debug` (not `serial_printk`). Debug: `debug_<channel>()`. See `docs/log.md`.
-- **New hardware**: register via `register_subsys()` in `kernel/subsys/` — don't hardcode in `kernel_main`. See `docs/subsys.md`.
+- **New code**: use `log_err`/`log_warn`/`log_info`/`log_debug` (not `serial_printk`). Debug: `debug_<channel>()`. See `docs/log/log.md`.
+- **New hardware**: register via `register_subsys()` in `kernel/subsys/` — don't hardcode in `kernel_main`. See `docs/subsys/subsys.md`.
 - **`make test-syscall` must NOT set `KERNEL_SELFTEST=1`**: the in-kernel selftests spawn kthreads at boot which interfere with systest's fork+exec+waitpid test, producing a spurious "fork hang" (looks like a regression; it isn't). Run the two suites separately: systest via `make OS01_SYSTEST=1 test-syscall`, kernel selftests via `make KERNEL_SELFTEST=1`.
 
 ## Interactive shell / headless E2E debugging
@@ -144,12 +144,12 @@ IMG=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^image=//p')
 | [docs/architecture.md](docs/architecture.md) | Boot chain, memory layout, interrupt system, init sequence |
 | [docs/arch.md](docs/arch.md) | Multi-arch weak-default + strong-override overview (facade/override matrix, page-table hierarchy, bootinfo ABI, driver initcall, IRQ hook 3-segment, RTC split, distance to single `kernel_main`) |
 | [docs/arch/cross-boundary-symbols.md](docs/arch/cross-boundary-symbols.md) | **跨边界符号/ABI 边界规范**（AAGU-4）：compiler runtime / UAPI / arch-value / libc API 镜像 4 类规则 + 现状对照表 + 后续 issue 切分 |
-| [docs/smp.md](docs/smp.md) | 8-phase SMP bringup, per-CPU, IPI, TLB shootdown, load balancing, EEVDF rbtree runqueues |
-| [docs/scheduler.md](docs/scheduler.md) | Task system, EEVDF scheduler, context switch, spawn/fork/exec/exit, blocker framework |
-| [docs/scheduler-complexity.md](docs/scheduler-complexity.md) | Scheduler complexity assessment, feature-impact risk map, refactor triggers |
-| [docs/syscall.md](docs/syscall.md) | Syscall table (75 syscalls), dispatch, invocation |
-| [docs/filesystem.md](docs/filesystem.md) | VFS, FAT32, ext2, devfs, procfs, tmpfs, GPT, block device |
-| [docs/cow-mmap.md](docs/cow-mmap.md) | COW fork, VMA, mmap/mprotect/munmap, 4KB page pool |
-| [docs/signal.md](docs/signal.md) | Signal delivery, handler, sigreturn, Ctrl-C→SIGINT |
-| [docs/log.md](docs/log.md) | Log levels, DEBUG_CHANNELS, LOG_TARGET, NDEBUG |
-| [docs/subsys.md](docs/subsys.md) | Subsystem registration framework |
+| [docs/smp/smp.md](docs/smp/smp.md) | 8-phase SMP bringup, per-CPU, IPI, TLB shootdown, load balancing, EEVDF rbtree runqueues |
+| [docs/sched/scheduler.md](docs/sched/scheduler.md) | Task system, EEVDF scheduler, context switch, spawn/fork/exec/exit, blocker framework |
+| [docs/sched/scheduler-complexity.md](docs/sched/scheduler-complexity.md) | Scheduler complexity assessment, feature-impact risk map, refactor triggers |
+| [docs/syscall/syscall.md](docs/syscall/syscall.md) | Syscall table (75 syscalls), dispatch, invocation |
+| [docs/fs/filesystem.md](docs/fs/filesystem.md) | VFS, FAT32, ext2, devfs, procfs, tmpfs, GPT, block device |
+| [docs/memory/cow-mmap.md](docs/memory/cow-mmap.md) | COW fork, VMA, mmap/mprotect/munmap, 4KB page pool |
+| [docs/signal/signal.md](docs/signal/signal.md) | Signal delivery, handler, sigreturn, Ctrl-C→SIGINT |
+| [docs/log/log.md](docs/log/log.md) | Log levels, DEBUG_CHANNELS, LOG_TARGET, NDEBUG |
+| [docs/subsys/subsys.md](docs/subsys/subsys.md) | Subsystem registration framework |

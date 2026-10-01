@@ -2,7 +2,7 @@
 
 OS01 supports up to `NR_CPUS=8` CPUs (compile-time limit in `kernel/include/sched/task.h`). The runtime count `num_cpus` is discovered from the MADT. Default QEMU invocation is `-smp 2` (see root `Makefile`).
 
-**Scheduling**: EEVDF O(log n) per-CPU rbtree runqueues + `sched_balance()` work stealing. See [docs/scheduler.md](scheduler.md) and [docs/scheduler-complexity.md](scheduler-complexity.md).
+**Scheduling**: EEVDF O(log n) per-CPU rbtree runqueues + `sched_balance()` work stealing. See [docs/sched/scheduler.md](../sched/scheduler.md) and [docs/sched/scheduler-complexity.md](../sched/scheduler-complexity.md).
 
 ## Architecture overview
 

@@ -551,6 +551,5 @@ make PROFILE=x86_64-clang validate UEFI_CLANG=clang-22 TARGET_LD=/opt/llvm-22/bi
    §7 aarch64 proof, §8 validation)
 - Plan: [`docs/superpowers/plans/2026-08-31-toolchain-refactor-plan.md`](../../superpowers/plans/2026-08-31-toolchain-refactor-plan.md)
   (Commit M: lines 78-84; matrix S1-S17)
-- Build (Chinese): [`docs/build.md`](../build.md)
-- Build/run/debug (English): [`docs/build-run-debug.md`](../build-run-debug.md)
+- Build (Chinese + 合并指南): [`docs/build/build.md`](build.md)
 - AGENTS quick reference: [`AGENTS.md`](../../AGENTS.md)

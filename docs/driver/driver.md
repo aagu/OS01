@@ -283,7 +283,7 @@ rtc_write_datetime(&new_dt);
 - 视图表固定 16 项（超出需动态扩表）
 - 关闭 path 不支持（仅 `file_put` 触发 release）
 
-详见 `docs/gui.md` 第 2 节、`.superpowers/sdd/2026-09-30-2d-graphics-api/`。
+详见 `docs/gui/gui.md` 第 2 节、`.superpowers/sdd/2026-09-30-2d-graphics-api/`。
 
 ### TTY 驱动
 

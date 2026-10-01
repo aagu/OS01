@@ -43,7 +43,7 @@
 
 宿主单测也属于 OS01 构建：profile 定义 `HOST_TEST_BUILD_DIR := $(BUILD_DIR)/host-test`（以及按需的 host compiler contract）；`test/Makefile` include profile 后仅以该目录作为对象和二进制输出。根 `test` target 在 capability gate 后通过 `os01_submake` 调用它，不能直写 `make -C test run`。因此 profile clean 删除 host tests，且 `make -C test` 在解析期失败；host-test 不使用 target triple 或 sysroot，但同样服从 profile 输出隔离。
 
-`toolchain.mk` 删除；其中仍需要的 Clang/LLVM 检测只保留于 `mk/toolchains/clang.mk`，并由 profile include。迁移面向用户的 [`docs/build/toolchain.md`](../../build/toolchain.md)、[`docs/build.md`](../../build.md)、[`docs/build-run-debug.md`](../../build-run-debug.md)、[`docs/boot.md`](../../boot.md) 和仓库 [`AGENTS.md`](../../../AGENTS.md) 中的现行操作说明：删除 standalone `toolchain.mk`、`make -C boot/uefi` / `make -C kernel` 和 source-tree `boot/uefi/OVMF.fd` 的用法。所有现行构建示例使用 `make PROFILE=<name> <target>`；手动 QEMU 示例使用由 profile build 目录解析出的 firmware/image 路径。历史 specs/plans/report 不作追溯性改写。
+`toolchain.mk` 删除；其中仍需要的 Clang/LLVM 检测只保留于 `mk/toolchains/clang.mk`，并由 profile include。迁移面向用户的 [`docs/build/toolchain.md`](../../build/toolchain.md)、[`docs/build/build.md`](../../build/build.md)、[`docs/build/build.md`](../../build/build.md)、[`docs/boot/boot.md`](../../boot/boot.md) 和仓库 [`AGENTS.md`](../../../AGENTS.md) 中的现行操作说明：删除 standalone `toolchain.mk`、`make -C boot/uefi` / `make -C kernel` 和 source-tree `boot/uefi/OVMF.fd` 的用法。所有现行构建示例使用 `make PROFILE=<name> <target>`；手动 QEMU 示例使用由 profile build 目录解析出的 firmware/image 路径。历史 specs/plans/report 不作追溯性改写。
 
 ## 保留的 int8 兼容 patch
 

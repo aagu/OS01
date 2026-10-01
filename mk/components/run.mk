@@ -696,7 +696,7 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'test-pmm-boot-reservation' '(rootfs)' 'PMM boot-time memory reservation guard (host-only)';
 	@echo ''
-	@echo 'Focused compatibility checks (retained; see docs/build-system-harness.md §4):'
+	@echo 'Focused compatibility checks (retained; see docs/build/build.md §3 alias policy):'
 	@printf '  %-22s %-13s %s\n' \
 		 'test-kernel-layout'    '(rootfs)'   'x86_64 kernel.elf layout audit (post-_end reserved)';
 	@printf '  %-22s %-13s %s\n' \
@@ -711,8 +711,8 @@ help:
 	@echo 'Common flags: PROFILE=<name>, DEBUG_CHANNELS=<a,b>, OS01_SYSTEST=1,'
 	@echo '              OS01_NETTEST=1, INITTAB_FILE=<path>, KERNEL_SELFTEST=1,'
 	@echo '              NDEBUG=1, LOG_TARGET=serial|both.'
-	@echo 'See AGENTS.md Quick start and docs/build-run-debug.md for recipes.'
-	@echo 'See docs/build-system-harness.md §4 for the retained focused checks (test-runtime, test-kernel-layout, test-kernel-canary-contract, test-user-canary, test-pmm-boot-reservation).'
+	@echo 'See AGENTS.md Quick start and docs/build/build.md for recipes.'
+	@echo 'See docs/build/build.md §3 alias policy for the retained focused checks (test-runtime, test-kernel-layout, test-kernel-canary-contract, test-user-canary, test-pmm-boot-reservation).'
 
 # ── Image alias ─────────────────────────────────────────────
 # `make image` builds the current profile's disk image — variant-resolved

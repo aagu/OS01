@@ -23,7 +23,7 @@
 | 25 | SMP 窃取方向 | rbtree 尾部（最大 deadline） | CPU-bound 任务高 vruntime→自然迁移到空闲核；交互式任务留在源核 |
 | 26 | SMP 振荡防护 | 门控 `src > local + 1` + count = `(diff)/2` | O(log N) 收敛，无 2:1↔1:2 ping-pong |
 | 27 | SMP 前置条件 | 6 项全局无锁代码加固 | slab/PMM/softirq/timer/fork_mm_copy/task_wake — AP 运行用户程序前必须 SMP 安全 |
-| 30 | 任务回收机制（**候选，暂缓**） | wait 驱动回收：do_waitpid 直接收割，删 schedule() 内 zombie reaper 扫描 + deferred_free | 贴 Linux 语义；当前 reaper 是 double-book 竞态温床；触发条件：频繁改任务退出/父子语义或加 exit_group 时实施。详见 `docs/scheduler-complexity.md` §3 🔴 |
+| 30 | 任务回收机制（**候选，暂缓**） | wait 驱动回收：do_waitpid 直接收割，删 schedule() 内 zombie reaper 扫描 + deferred_free | 贴 Linux 语义；当前 reaper 是 double-book 竞态温床；触发条件：频繁改任务退出/父子语义或加 exit_group 时实施。详见 `docs/sched/scheduler-complexity.md` §3 🔴 |
 
 ## 网络与文件系统
 
@@ -85,3 +85,18 @@
 | 35 | 游戏启动 | 手工 `exec /bin/tetris` | 不进 inittab |
 | 36 | serial 渲染后端 | ❌ 不并入 | 38400 baud 增量重绘可行但投入产出比低；收敛范围 |
 | 37 | nanosleep 修复 | B 事件驱动（wakeup_jiffies + PIT 扫描）优先；A 最小可用 fallback | 睡眠无唤醒源（tetris 卡死实证）；连带排查 signal 假醒（sleep 1 不睡） |
+
+---
+
+## 开源 OS 项目借鉴（references）
+
+> 记录从其他教学/Hobby OS 项目借鉴的思路与可继续拿来的部分。详细分析见 [`roadmap.md`](roadmap.md)。
+
+| 项目 | 已经用到的 | 还可以拿来的 |
+|------|----------|-------------|
+| **Tilck** | EEVDF 调度思路、3 层测试、hang detector | EEVDF 代码结构、load balancing、GDB helper |
+| **cavOS** | lwIP、socket syscall、E1000、动态链接与 Alpine apk 路线参考 | 动态链接器加载流程、用户态包兼容 |
+| **Aquila** | **ext2 R/W 核心 (~221 行)**: inode/block alloc+free | — |
+| **ArvernOS** | 多架构抽象思路、aarch64 dispatch 桩模式 | 分层日志系统、UBSan、aarch64 head.S/GIC/Generic Timer |
+| **opuntiaOS** | devman 子系统注册框架 | GICv2 驱动、Generic Timer（clocksource/clockevent 接口已预留）、Window Server GUI |
+| **HackOS** | — | 可缩放字体渲染器、VESA 图形模式 |

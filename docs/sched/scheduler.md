@@ -225,5 +225,5 @@ Tasks register a blocking condition instead of busy-waiting:
 ## Related
 
 - [docs/scheduler-complexity.md](scheduler-complexity.md) — 复杂度评估、风险地图、重构触发条件
-- [docs/smp.md](smp.md) — SMP bringup, IPI, percpu, load balancing details
-- [docs/signal.md](signal.md) — 信号投递机制（与调度器在 ret_from_intr 交汇）
+- [docs/smp/smp.md](../smp/smp.md) — SMP bringup, IPI, percpu, load balancing details
+- [docs/signal/signal.md](../signal/signal.md) — 信号投递机制（与调度器在 ret_from_intr 交汇）

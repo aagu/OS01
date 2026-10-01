@@ -76,7 +76,7 @@ OS01 同时支持 **x86_64** 和 **aarch64**（后者仅 UEFI 启动路径）。
 
 OS01 libc-free 无 `.init_array` runtime support，故采用 Linux initcall 同款 trick（不用 `__attribute__((constructor))`，否则指针落在没人迭代的 section）。
 
-详见 `docs/subsys.md`。
+详见 `docs/subsys/subsys.md`。
 
 ---
 
@@ -124,4 +124,4 @@ x86_64 强覆盖：`kernel/arch/x86_64/intr/irq_hooks.c`（APIC→PIC ladder + 0
 - 详细 spec：`docs/superpowers/specs/2026-09-09-pmm-arch-neutral-design.md`（13 轮 subagent review 通过）
 - 实施 plan：`docs/superpowers/plans/2026-09-09-pmm-arch-neutral.md`（3 轮 subagent review + 16 task + final fix）
 - v25 arch-cleanup 系列 10 commits `67132e2..3ab4ef1`：roadmap v24 doc；bootinfo(arch) E820 → `bootinfo_x86.h`；arch(neutral) `arch/regs.h` pt_regs_t facade + `rwlock_relax()` 走 `arch_cpu_pause()`；intr(arch) `arch_irq` hooks 拆分；rtc(arch) core + per-arch impl 拆分；mm(arch) PGD/PUD/PMD/PTE 层级统一 + bit-constant rename；arch(subsys) `SUBSYS_INITCALL()` + `.subsys_init` section；arch(sched) `arch_kernel_thread_entry`；build(uefi) digest + staged copy 排除 `*.o/*.a/*.lib`；merge
-- x86_64 启动细节：见 `docs/architecture.md` + `docs/boot.md`
+- x86_64 启动细节：见 `docs/architecture.md` + `docs/boot/boot.md`
