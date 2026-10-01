@@ -256,6 +256,35 @@ rtc_write_datetime(&new_dt);
 * `frame_buffer_init` - 将帧缓冲重映射到 `VIRT_FRAMEBUFFER_OFFSET`
 * 在 devfs 中注册为 `/dev/fb`（`devfs_register_chrdev("fb", ...)`）
 
+### gfx0 设备（`/dev/gfx0`，2026-09-30）
+
+受限 present 设备，提供用户态 2D 图形 API（libgfx）的内核后端。文件位于 `kernel/driver/gfx.c`，ABI 定义在 `kernel/include/uapi/gfx.h`。
+
+**职责**：
+
+- 维护最多 16 项视图表（`g_gfx_table.slot[GFX_MAX_VIEWS=16]`），spinlock 保护分配 / 配置 / 释放
+- `GFX_CREATE_VIEW`：校验矩形（减法形式溢出 `x ≤ fb_w && w ≤ fb_w - x`），分配视图槽
+- `GFX_GET_INFO`：返回视图的 `width / height / stride / format`
+- `GFX_PRESENT`：快照视图矩形 → 释放锁 → 逐行 `syscall_check_user_range` + `copy_from_user_ft` → `fb_write_row`；中途中断返回 `-EFAULT`，前面行可能已更新（spec §4）
+- `release_file`：`file_put` 引用为 0 时清槽并释放视图结构
+- **不提供 mmap 回调**：用户像素缓冲始终由用户提供，不通过 mmap 映射
+
+**并发模型**：
+
+- 视图表锁只覆盖分配 / 配置 / 释放；**不能跨 `syscall_check_user_range` 或 fault-tolerant copy 持有**（后者可能 longjmp，spinlock 持锁 longjmp 会泄漏）
+- `copy_*_ft` 在 fault 时 longjmp 到调用方；调用方确保 spinlock 已释放
+- `dup` / `fork` 共享 `file_t` 引用计数，最后 `file_put` 触发 release
+
+**限制（spec §2 / §4 明示）**：
+
+- 没有 owner / 委托 / compositor：任何进程可继续打开 `/dev/fb`，重叠视图按 present 顺序覆盖
+- 无 vsync / page-flip / 硬件双缓冲
+- 仅 RGB32 host-endian，无 alpha blend
+- 视图表固定 16 项（超出需动态扩表）
+- 关闭 path 不支持（仅 `file_put` 触发 release）
+
+详见 `docs/gui.md` 第 2 节、`.superpowers/sdd/2026-09-30-2d-graphics-api/`。
+
 ### TTY 驱动
 
 位于 `kernel/tty/tty.c` + `kernel/tty/console.c`，头文件 `kernel/include/tty/tty.h` + `kernel/include/tty/console.h`：

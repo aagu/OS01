@@ -156,9 +156,21 @@
 * `test_mmap.c`, `test_fork_mmap.c`, `test_cow.c` - 内存映射测试
 * `smp_stress.c` - SMP 多核负载均衡压力测试
 * `terminal.c` + `terminal_core.c/h` - 交互终端（PTY + framebuffer + busybox ash）
-* `sh.c` - 简单 shell；`tetris.c` + `tetris_logic.c/h` - 俄罗斯方块（自托管演示）
+* `sh.c` - 简单 shell；`tetris.c` + `tetris_logic.c/h` - 俄罗斯方块（自托管演示，Task 6 迁移到 libgfx）
+* `test_gfx.c` - libgfx 2D API ring-3 QEMU E2E 测试；`tetris_dump.c` - 调试用 fb 像素采样
 * 网络测试：`nettest.c`、`socktest.c`、`udptest.c`、`ipaddr.c`（lwIP E2E）
 * `crt0.S`、`linker.ld`、`sigreturn_trampoline.S` - 用户态启动/链接/信号 trampoline
+
+### libgfx 目录（2026-09-30）
+* `libgfx/gfx.h` - 公有 ABI（gfx_open / gfx_close / gfx_present + pixel/hline/vline/rect/fill_rect/line/sprite_blit/...）
+* `libgfx/gfx.c` - 客户端生命周期：open/close/get_info/set_clip/present（ioctl 调用 + heap 上的私有像素缓冲）
+* `libgfx/line.c` - clipped 2D primitives（pixel/hline/vline/rect/fill_rect + 整数 Bresenham line）
+* `libgfx/sprite.c` - RGB32 sprite blit + 1-bpp mask blit
+* `libgfx/internal.h` - 库私有 header（struct gfx_handle 布局 + clip state）— 不发布到 sysroot
+* `libgfx/Makefile` - 静态库构建（profile TARGET_CC；install 到 `STAGING_DIR/libgfx/usr/{include,lib}`）
+* 内核对应：`kernel/include/uapi/gfx.h`（UABI，唯一源）+ `kernel/driver/gfx.c`（`/dev/gfx0` 实现）
+* 构建入口：`make lib`（仅 libgfx.a）/ `make user`（链 `-lgfx -lc` 的 tetris、test_gfx）
+* 测试入口：`make test-qemu SUITE=gfx`（ring-3 全屏 256×256 视图 E2E）
 
 ### tools 目录
 * `mkdisk.c` - GPT 双分区磁盘镜像创建工具（FAT32 ESP + ext2 rootfs）

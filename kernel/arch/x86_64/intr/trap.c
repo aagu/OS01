@@ -782,7 +782,13 @@ void do_virtualization_exception(pt_regs_t * regs, uint64_t error_code)
 }
 
 #define USER_CODE_ADDR 0x400000UL
-#define USER_PAGE_SIZE 0x200000UL  // 2MB
+// User VA range: [USER_CODE_ADDR, USER_CODE_ADDR + USER_PAGE_SIZE).
+// Bumped from 2 MiB → 16 MiB by the 2D graphics API plan (Task 6:
+// libgfx user pixels buffer for Tetris).  A 1440×900 32-bpp view is
+// 5.18 MiB of zeroed pixels — does not fit in the previous 1.5 MiB
+// effective heap ceiling.  The user stack page is relocated above
+// this region in kernel/include/sched/task.h (USER_STACK_BASE).
+#define USER_PAGE_SIZE 0x1000000UL  // 16 MiB
 
 // ── Signal delivery ──────────────────────────────────────────
 // Dispatch pending signals for current.  Called from:

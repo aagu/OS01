@@ -53,12 +53,14 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 ### 🖥 P3 GUI
 
-基座（已完成）：fb、fb mmap、terminal 双缓冲 + alt-screen、键盘扫描码、PS/2 鼠标驱动（i8042 共享控制器层 + `/dev/mouse` 8 字节事件 ABI + 500 ms 有界探测，2026-09-27 落地，见 `docs/driver.md`）。Tetris 游戏已落地（见 `docs/gui.md`）。
+基座（已完成）：fb、fb mmap、terminal 双缓冲 + alt-screen、键盘扫描码、PS/2 鼠标驱动（i8042 共享控制器层 + `/dev/mouse` 8 字节事件 ABI + 500 ms 有界探测，2026-09-27 落地，见 `docs/driver.md`）。
+
+**2026-09-30 完成**：`libgfx.a` 静态库 + `/dev/gfx0` 受限 present 设备 + Tetris 迁移（spec/plan §6，task-1..6 全部闭环；USER_PAGE_SIZE 从 2 MiB 升到 16 MiB 以容纳 1440×900 RGB32 像素缓冲；sys_exec/spawn_user_task 现在为新 MM 插入 heap VMA 让 brk 扩展能命中 demand-paging 路径）。细节见 `docs/gui.md`、`docs/driver.md` gfx0 章节。
 
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
-| 2D 图形 API | fb 之上画线/矩形/位图 blit | 独立 | |
-| 可缩放字体渲染器 | 矢量/位图缩放 | 2D API | HackOS |
+| 2D 图形 API | ✅ **2026-09-30 闭环**：`libgfx` 像素缓冲 + `/dev/gfx0` 受限 present（详见 `docs/gui.md`） | | |
+| 可缩放字体渲染器 | 矢量/位图缩放 | 2D API ✅ | HackOS |
 | Window Server + compositor | 多窗口管理 + 合成 | 字体/2D/鼠标 | opuntiaOS + HackOS |
 
 ### 🔧 P4 硬件适配

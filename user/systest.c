@@ -1564,13 +1564,17 @@ static void test_proc_maps(void)
 
         if (strstr(line, "[stack]")) {
             has_stack = 1;
-            // Positive: stack at [0x800000, 0xa00000)
-            if (start == 0x800000UL && end == 0xa00000UL)
+            // Positive: stack at [USER_STACK_BASE, USER_STACK_BASE + 2 MiB).
+            // USER_STACK_BASE = 0x1400000 (bumped from 0x800000 when
+            // USER_PAGE_SIZE grew from 2 MiB to 16 MiB for libgfx).
+            if (start == 0x1400000UL && end == 0x1600000UL)
                 stack_at_right_addr = 1;
-            // Negative: must NOT include guard page 0x600000
+            // Negative: must NOT include 0x600000 (legacy guard, kept
+            // for backward compatibility even though the stack no
+            // longer sits there).
             if (start <= 0x600000UL && 0x600000UL < end) {
                 FAIL("%s: %s", "proc_maps guard",
-                     "stack line includes 0x600000 guard page");
+                     "stack line includes 0x600000 legacy guard page");
                 fail_guard = 1;
             }
         }
