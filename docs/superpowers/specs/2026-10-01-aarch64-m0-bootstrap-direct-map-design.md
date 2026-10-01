@@ -56,7 +56,7 @@ related: [docs/roadmap.md P2 M0, 2026-09-11-aarch64-page-table-primitives-design
 ## 6. 验证与失败证据
 
 1. **描述符验证**：在现有 aarch64 selftest 的 PMM smoke 之后、4 KiB 页表 smoke 之前，读取活动页表中的 `PMD_low1[0..511]`，逐项核对物理基址、`0x705` 低位属性、block 类型及 PXN/UXN；明确断言 bit 52 为零。再核对 `PMD_low0` 的一个 Normal 属性 block 和一个 MMIO Device block 的 no-execute 位及 AttrIndx。验证应使用实际页表内容，而非重复调用构造描述符的 helper；第一个、最后一个及中间任意槽均在全表遍历中。失败输出独立的 M0 FATAL marker，并在 GIC/SMP 前停机。`aarch64_pt_query_4k()` 遇 L2 block 返回 `ECONFLICT`，不能把它用作本项的 block 验证器。
-2. **实际访问**：保留现有 `alloc_4k_page()` + 4 KiB map/query/unmap smoke，证明从新子页池取得的物理页可经直映地址读写。记录/断言该测试使用的物理页落在已验证的启动窗口中，避免将未来超出窗口的内存误判为 M0 已覆盖。
+2. **实际访问**：保留现有 `alloc_4k_page()` + 4 KiB map/query/unmap smoke，证明从新子页池取得的物理页可经直映地址读写。断言取得的物理页满足 `0x40200000 <= PA < 0x80000000`，确保实际读写至少经过一个由 M0 新填的 `PMD_low1[1..511]` block；若分配器返回窗口外的页，本项验收失败，不能把它误判为 M0 已覆盖。
 3. **QEMU 回归**：构建并运行普通 `aarch64-uefi` 镜像，复用 `qemutests/aarch64_uefi_smp.py` 的非 selftest 模式核对正常完成；运行 `make PROFILE=aarch64-clang test-aarch64 MODE=smp`（1/2/4 CPU）和 `MODE=gic-spi`。测试不得仅因 QEMU 超时、UEFI banner 或单个页表 marker 就算通过。
 4. **边界/隔离**：检查 `boot_fixup.c` 已不在任何 aarch64 构建输入中；普通镜像不依赖 `OS01_SELFTEST` 才获得 `PMD_low1[1..511]`。确认 `AARCH64_PT_SELFTEST_VA` 初始仍未映射，sync-fault 独立变体仍能触发预期 data abort；x86_64 的 head/PMM/VMM 构建输入不变。
 
