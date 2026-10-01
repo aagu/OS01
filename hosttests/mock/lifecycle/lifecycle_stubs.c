@@ -73,15 +73,24 @@ task_t *current_task_for_host_test(void) { return &stub_current_task; }
 void *kmalloc(size_t size)        { return malloc(size); }
 size_t kfree(void *ptr)           { free(ptr); return 1; }
 
-/* ── vmm_unmap_4k_page / vmm_pt_walk ────────────────────────
+/* ── vmm_unmap_4k_page / vmm_pt_walk / vmm_map_4k_page ─────
  * Stubs so vma.c's link succeeds.  The lifecycle test does not
  * invoke do_mmap / do_munmap / do_mprotect — only mm_init_user_heap
  * and vma_free_all.  vma_free_all calls vmm_unmap_4k_page once per
  * 4 KiB page in each VMA range; the heap VMA is zero-length so the
- * loop body never runs.  Provide a no-op anyway. */
+ * loop body never runs.  Provide no-ops anyway.  vmm_map_4k_page and
+ * tlb_shootdown are referenced by mm_set_brk (Task 4); the lifecycle
+ * test never calls mm_set_brk, but the production vma.c still needs
+ * the symbols at link time. */
 void     vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt)
 {
     (void)pgdir; (void)virt;
+}
+int      vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
+                         uint64_t virt, uint64_t flags)
+{
+    (void)pgdir; (void)phys; (void)virt; (void)flags;
+    return 0;
 }
 uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
                       uint64_t flags, int allocate)
@@ -89,6 +98,10 @@ uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
     (void)pgdir; (void)virt; (void)flags; (void)allocate;
     return NULL;
 }
+
+/* mm_set_brk (Task 4) references tlb_shootdown; the lifecycle test
+ * never calls mm_set_brk, but the link needs the symbol. */
+void tlb_shootdown(void) { (void)0; }
 
 /* ── vmm_free_user_map — minimal page-table walker ──────────
  * The destroy_unpublished_user_mm helper calls vmm_free_user_map

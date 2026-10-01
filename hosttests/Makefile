@@ -98,7 +98,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_aarch64_sync_fault.elf \
     $(TEST_BLD)/test_elf_layout.elf \
     $(TEST_BLD)/test_elf_load_4k.elf \
-    $(TEST_BLD)/test_process_image_lifecycle.elf
+    $(TEST_BLD)/test_process_image_lifecycle.elf \
+    $(TEST_BLD)/test_brk_pages.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -510,6 +511,41 @@ $(TEST_BLD)/test_process_image_lifecycle.o: $(TEST_CASES)/test_process_image_lif
 $(TEST_BLD)/test_process_image_lifecycle.elf: $(TEST_BLD)/test_process_image_lifecycle.o \
 		$(TEST_BLD)/vma_production.o \
 		$(TEST_BLD)/lifecycle_stubs.o
+	$(HOST_CC) -Wl,--wrap=kmalloc,--wrap=kfree -o $@ $^
+
+# brk-page ownership test (Task 4, user heap/ELF isolation plan):
+# compiles the REAL kernel/memory/vma.c against the brk host harness
+# so mm_set_brk is exercised against observable state (flat indexed
+# PTE table with PAGE_COW support, per-phys COW refcounting, TLB
+# flush counter, alloc/free OOM injection).  Source-level inspection
+# of kernel/arch/x86_64/intr/trap.c covers the SYS_brk delegation
+# and the heap-fault path (trap.c is too heavy to host-link).
+BRK_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
+                   -I$(TESTS_DIR)/kernel/include \
+                   -include $(TEST_MOCK)/brk/brk_runtime.h \
+                   -I$(TEST_MOCK) -I$(TEST_INC) \
+                   -I$(TEST_MOCK)/brk
+
+$(TEST_BLD)/vma_brk_production.o: $(TESTS_DIR)/kernel/memory/vma.c \
+		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TEST_MOCK)/brk/brk_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BRK_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/brk_stubs.o: $(TEST_MOCK)/brk/brk_stubs.c \
+		$(TEST_MOCK)/brk/brk_stubs.h \
+		$(TEST_MOCK)/brk/brk_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BRK_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_brk_pages.o: $(TEST_CASES)/test_brk_pages.c \
+		$(TEST_MOCK)/brk/brk_stubs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BRK_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_brk_pages.elf: $(TEST_BLD)/test_brk_pages.o \
+		$(TEST_BLD)/vma_brk_production.o \
+		$(TEST_BLD)/brk_stubs.o
 	$(HOST_CC) -Wl,--wrap=kmalloc,--wrap=kfree -o $@ $^
 
 # standalone test (no kernel/libc deps)

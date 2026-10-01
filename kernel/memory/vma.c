@@ -12,6 +12,15 @@
 #include <stdlib.h>                 // calloc (used by mm_alloc)
 #include <errno.h>
 
+// User-VA layout (must mirror kernel/arch/x86_64/intr/trap.c
+// USER_CODE_ADDR/USER_PAGE_SIZE and kernel/include/sched/task.h
+// USER_STACK_BASE).  HEAP_LIMIT keeps the heap one page below the
+// user stack area so mm_brk() cannot grow into the stack window.
+#define USER_CODE_ADDR  0x400000UL
+#define USER_PAGE_SIZE  0x1000000UL
+#define USER_STACK_BASE 0x1400000UL
+#define HEAP_LIMIT      (USER_CODE_ADDR + USER_PAGE_SIZE - 0x1000UL)
+
 // Find the VMA containing addr, or NULL
 vma_t *vma_find(mm_t *mm, uint64_t addr)
 {
@@ -171,6 +180,244 @@ int mm_init_user_heap(mm_t *mm, uint64_t elf_end)
     mm->start_brk = heap_base;
     mm->end_brk   = heap_base;
     vma_insert(mm, hv);
+    return 0;
+}
+
+// ── mm_set_brk — program-break owner (Task 4) ─────────────
+//
+// Sets the program break end_brk and the matching heap VMA endpoint.
+// All committed 4 KiB leaves are owned by this call: each new leaf
+// is staged (alloc_4k_page + memset 0 + vmm_map_4k_page) BEFORE the
+// break/VMA endpoint is published, so any OOM leaves old break, old
+// heap VMA end, and old PTEs intact.
+//
+// On shrink across a page boundary, the retained tail is
+// privatized if COW with refs > 1 (alloc new phys, copy, replace
+// PTE, drop cow_ref), then zeroed, then the released leaves are
+// unmapped through the COW-aware vmm_unmap_4k_page path.  SMP
+// TLBs are synchronized via tlb_shootdown().  On any failure
+// during grow, only this call's leaves (and any empty intermediate
+// tables) are rolled back; the old state is restored.
+//
+// Caller must NOT hold mm->lock; mm_set_brk takes it.
+int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
+{
+    if (!mm) return -EINVAL;
+
+    /* Query path: requested == 0.  Per the brief, return 0 with
+     * *result set to the current end_brk.  result may be NULL. */
+    if (requested == 0) {
+        if (result) *result = mm->end_brk;
+        return 0;
+    }
+
+    /* Bounds check — preserved error codes from the original
+     * SYS_brk: -EINVAL for below start_brk, -ENOMEM for above
+     * heap_limit. */
+    uint64_t start_brk = mm->start_brk;
+    uint64_t end_brk   = mm->end_brk;
+    if (start_brk == 0)               return -ENOMEM;
+    if (requested < start_brk)        return -EINVAL;
+    if (requested > HEAP_LIMIT)       return -ENOMEM;
+
+    /* Fast path: requested == current end_brk.  No change. */
+    if (requested == end_brk) {
+        if (result) *result = end_brk;
+        return 0;
+    }
+
+    spin_lock(&mm->lock);
+
+    /* Re-read the live fields under the lock (another CPU may
+     * have mutated them between the unlocked check and the lock).
+     * A concurrent mm_set_brk on the same mm would now serialize
+     * via the lock and produce the same outcome. */
+    start_brk = mm->start_brk;
+    end_brk   = mm->end_brk;
+
+    /* The heap VMA tracks [start_brk, ALIGN_UP(end_brk, 4096)) —
+     * locate it for the commit step.  There is exactly one
+     * VM_HEAP VMA, inserted by mm_init_user_heap; its length
+     * matches the page-aligned portion of end_brk. */
+    vma_t *heap_vma = NULL;
+    {
+        list_t *pos;
+        for (pos = mm->vma_list.next; pos != &mm->vma_list; pos = pos->next) {
+            vma_t *v = container_of(pos, vma_t, list);
+            if ((v->vm_flags & VM_HEAP) && v->vm_start == start_brk) {
+                heap_vma = v;
+                break;
+            }
+        }
+    }
+    if (!heap_vma) {
+        spin_unlock(&mm->lock);
+        return -ENOMEM;
+    }
+
+    /* Heap VMA's leaf-prot flags (user R/W present). */
+    uint64_t page_prot = heap_vma->vm_page_prot;
+    uint64_t *pgd      = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
+
+    int64_t rc = 0;
+
+    if (requested > end_brk) {
+        /* ── GROW ──────────────────────────────────────── */
+        /* Brief §5.2: stage and map new zeroed 4 KiB leaves
+         * across [ALIGN_UP(end_brk), ALIGN_UP(requested)); same-
+         * page grow needs no new leaf.  vmm_pt_walk with
+         * allocate=0 is used to skip pages that are already
+         * committed (no overwrite — would lose the phys). */
+        uint64_t aligned_old = (end_brk + (PAGE_4K_SIZE - 1)) & PAGE_4K_MASK;
+        uint64_t aligned_new = (requested + (PAGE_4K_SIZE - 1)) & PAGE_4K_MASK;
+        if (aligned_new > HEAP_LIMIT) aligned_new = HEAP_LIMIT;
+
+        if (aligned_new <= aligned_old) {
+            /* No new page needed (grow stays within the same
+             * page).  Commit the new end_brk only. */
+            mm->end_brk   = requested;
+            heap_vma->vm_end = requested;
+            if (result) *result = requested;
+            spin_unlock(&mm->lock);
+            return 0;
+        }
+
+        /* Stage and map each new 4 KiB leaf.  If any stage
+         * fails, roll back every leaf staged in THIS call. */
+        /* The staging table is heap-allocated (kmalloc), not a
+         * fixed stack array: a single brk() grow may span up to
+         * (HEAP_LIMIT - start_brk) / 4 KiB ≈ 4096 leaves, and a
+         * fixed cap here would wrongly fail legitimate grows with
+         * -ENOMEM (e.g. one large malloc).  Entries are recorded
+         * only after vmm_map_4k_page succeeds, so every recorded
+         * leaf is ours to roll back. */
+        uint64_t grow_pages = (aligned_new - aligned_old) / PAGE_4K_SIZE;
+        uint64_t *staged_va =
+            (uint64_t *)kmalloc(grow_pages * sizeof(uint64_t));
+        uint64_t *staged_phys =
+            (uint64_t *)kmalloc(grow_pages * sizeof(uint64_t));
+        int staged_count = 0;
+        if (!staged_va || !staged_phys) {
+            if (staged_phys) kfree(staged_phys);
+            if (staged_va) kfree(staged_va);
+            spin_unlock(&mm->lock);
+            return -ENOMEM;
+        }
+
+        for (uint64_t va = aligned_old; va < aligned_new; va += PAGE_4K_SIZE) {
+            /* Skip if a PTE is already committed (grow within an
+             * already-mapped region). */
+            uint64_t *existing = vmm_pt_walk(pgd, va, 0, 0);
+            if (existing && (*existing & PAGE_VALID)) {
+                /* This page is already committed from an earlier
+                 * grow; do not remap (would overwrite a valid
+                 * PTE and lose the previous phys). */
+                continue;
+            }
+            uint64_t phys = alloc_4k_page();
+            if (!phys) { rc = -ENOMEM; break; }
+            /* Zero the leaf (production alloc_4k_page from the
+             * subpage allocator returns zeroed pages; this memset
+             * is defensive for paths that swap in a non-subpage
+             * phys in tests). */
+            memset((void *)Phy_To_Virt(phys), 0, PAGE_4K_SIZE);
+            int map_rc = vmm_map_4k_page(pgd, phys, va, page_prot);
+            if (map_rc != 0) {
+                /* Map failed (intermediate-table OOM).  Free the
+                 * phys we just allocated and roll back everything
+                 * we staged so far. */
+                free_4k_page(phys);
+                rc = -ENOMEM;
+                break;
+            }
+            staged_va[staged_count]   = va;
+            staged_phys[staged_count] = phys;
+            staged_count++;
+        }
+
+        if (rc != 0) {
+            /* Roll back only THIS call's leaves.  vmm_unmap_4k_page
+             * frees the phys (it does not own the COW reference
+             * since we never set PAGE_COW here). */
+            for (int i = 0; i < staged_count; i++)
+                vmm_unmap_4k_page(pgd, staged_va[i]);
+            kfree(staged_va);
+            kfree(staged_phys);
+            /* *result unchanged on failure (caller's contract). */
+            spin_unlock(&mm->lock);
+            return rc;
+        }
+        kfree(staged_va);
+        kfree(staged_phys);
+
+        /* Commit the new break + heap VMA end. */
+        mm->end_brk       = requested;
+        heap_vma->vm_end  = requested;
+        /* Synchronize SMP TLBs (the brief requires this even
+         * though the user page table is per-process — future
+         * schedulers may run the same process on multiple CPUs). */
+        tlb_shootdown();
+        if (result) *result = requested;
+        spin_unlock(&mm->lock);
+        return 0;
+    }
+
+    /* ── SHRINK (requested < end_brk) ─────────────────────── */
+    /* The page containing `requested` is retained (we may zero
+     * its tail).  The pages strictly above its aligned-up
+     * address are released. */
+    uint64_t aligned_new = (requested + (PAGE_4K_SIZE - 1)) & PAGE_4K_MASK;
+    uint64_t aligned_old = (end_brk   + (PAGE_4K_SIZE - 1)) & PAGE_4K_MASK;
+
+    /* 1. Retained tail within [requested, aligned_new).  If
+     *    requested is page-aligned, there is no retained tail. */
+    if (requested < aligned_new) {
+        /* The page containing 'requested' is the aligned_new page
+         * (which lies at start_brk + k*PAGE_4K_SIZE for some k).
+         * We must (a) privatize if the page is COW with refs > 1,
+         * (b) zero the retained tail bytes. */
+        uint64_t tail_va = aligned_new - PAGE_4K_SIZE;
+        uint64_t *pte = vmm_pt_walk(pgd, tail_va, 0, 0);
+        if (pte && (*pte & PAGE_VALID)) {
+            uint64_t old_phys = *pte & PAGE_4K_MASK;
+            if (*pte & PAGE_COW) {
+                if (page_cow_refs(old_phys) > 1) {
+                    uint64_t new_phys = alloc_4k_page();
+                    if (!new_phys) {
+                        spin_unlock(&mm->lock);
+                        return -ENOMEM;
+                    }
+                    memcpy((void *)Phy_To_Virt(new_phys),
+                           (void *)Phy_To_Virt(old_phys),
+                           PAGE_4K_SIZE);
+                    *pte = new_phys | page_prot;
+                    (void)page_cow_put(old_phys);
+                    old_phys = new_phys;
+                } else {
+                    (void)page_cow_put(old_phys);
+                    *pte = old_phys | page_prot;
+                }
+            }
+            /* Zero the retained-tail range [requested - tail_va,
+             * PAGE_4K_SIZE).  The fresh phys is already zeroed
+             * (from alloc_4k_page); only the partial-tail bytes
+             * need explicit zeroing. */
+            size_t off = (size_t)(requested - tail_va);
+            memset((char *)Phy_To_Virt(old_phys) + off, 0,
+                   PAGE_4K_SIZE - off);
+        }
+    }
+
+    /* 2. Unmap released leaves [aligned_new, aligned_old). */
+    for (uint64_t va = aligned_new; va < aligned_old; va += PAGE_4K_SIZE)
+        vmm_unmap_4k_page(pgd, va);
+
+    /* 3. Commit the smaller break + heap VMA end. */
+    mm->end_brk       = requested;
+    heap_vma->vm_end  = requested;
+    tlb_shootdown();
+    if (result) *result = requested;
+    spin_unlock(&mm->lock);
     return 0;
 }
 

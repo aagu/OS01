@@ -72,6 +72,25 @@ mm_t     *mm_alloc(void);   // allocate + init an mm_t (lock = unlocked)
 // isolation-design.md §4 (zero-length heap invariant).
 int       mm_init_user_heap(mm_t *mm, uint64_t elf_end);
 
+// ── mm_set_brk — program-break owner (Task 4) ─────────────
+//
+// Sets the program break:
+//   requested == 0   → query current (returns 0 with *result = current end_brk)
+//   requested < start_brk → -EINVAL, *result unchanged
+//   requested > heap_limit → -ENOMEM, *result unchanged
+//   [start_brk, heap_limit] → grow or shrink to requested.
+//     * On grow: stage and map new 4 KiB leaves; any OOM → -ENOMEM
+//       with no commit (old break, old VMA end, old PTEs all unchanged).
+//     * On shrink across a page boundary: privatize the retained
+//       COW tail (if COW and refs > 1) before zeroing, then unmap
+//       released leaves via the COW-aware VMM path; flush SMP TLBs.
+//       *result = requested on success; -ENOMEM on any failure (old
+//       state restored).
+//   *result is set to the new end_brk on success.
+//
+// Caller must NOT hold mm->lock; mm_set_brk takes it.
+int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result);
+
 // ── Syscall implementations (called from trap.c) ───────────
 int64_t   do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
                   uint64_t flags, uint64_t fd, uint64_t offset);

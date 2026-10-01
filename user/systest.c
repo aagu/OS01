@@ -89,6 +89,83 @@ static void test_brk(void)
     CHECK3(cur == cur2, "brk", "idempotent query");
 }
 
+// ── 49: brk → read into freshly-committed page (Task 4) ────
+// Brief step 4 (user/systest): grow break by one 4 KiB page, then
+// pass that page directly as the destination buffer of a read()
+// syscall into a file with known content.  Validates the spec §5.2
+// contract: "newly committed page is immediately usable as a
+// kernel-write target".  Under the OLD brk semantics, the page
+// is unmapped until first touch (demand-mapped by the read's
+// PF path).  Under the NEW brk semantics (Task 4), the page is
+// pre-mapped before the new end_brk is published.
+//
+// Either way, the read should return the expected bytes — this
+// case is a regression test for the new contract, not a strict
+// RED mechanism.  The strict RED for the spec contract lives
+// in hosttests/cases/test_brk_pages.c (production-linked against
+// the real vma.c + observable PTE state).
+static void test_brk_read_fresh_page(void)
+{
+    /* Step 1: create a file with known content on a writable FS. */
+    const char *path = "/tmp/t_brk_read";
+    const char *want = "OS01_BRKBUF_PAYLOAD_2026";   /* 25 bytes */
+    int n_want = 0;
+    for (int i = 0; want[i]; i++) n_want++;
+
+    unlink(path);
+    int fd = open(path, O_CREAT | O_WRONLY, 0644);
+    if (fd < 0) { FAIL("brk_read_fresh_page", "create file failed"); return; }
+    int64_t wn = write(fd, want, n_want);
+    int werr = (wn < 0) ? errno : 0;
+    close(fd);
+    if (wn != n_want) {
+        FAIL("brk_read_fresh_page", "write file failed rc=%ld errno=%d",
+             (long)wn, werr);
+        unlink(path);
+        return;
+    }
+
+    /* Step 2: grow break by exactly one 4 KiB page. */
+    int64_t cur = syscall(SYS_brk, 0, 0, 0);
+    if (cur <= 0) {
+        FAIL("brk_read_fresh_page", "brk query failed rc=%ld", (long)cur);
+        unlink(path);
+        return;
+    }
+    uint64_t base = ((uint64_t)cur + 0xFFF) & ~(uint64_t)0xFFF;
+    int64_t newbrk = syscall(SYS_brk, base + 0x1000, 0, 0);
+    if (newbrk < (int64_t)(base + 0x1000)) {
+        FAIL("brk_read_fresh_page", "brk grow failed rc=%ld", (long)newbrk);
+        unlink(path);
+        return;
+    }
+
+    /* Step 3: read the file into the freshly-committed heap page.
+     * Do NOT touch the page first (the test is only valid if the
+     * page is committed by brk alone, not by a pre-read mapping). */
+    char *buf = (char *)(uintptr_t)base;
+    fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        FAIL("brk_read_fresh_page", "re-open file failed errno=%d", errno);
+        unlink(path);
+        return;
+    }
+    int64_t rn = read(fd, buf, n_want);
+    int rerr = (rn < 0) ? errno : 0;
+    close(fd);
+    unlink(path);
+
+    CHECK3(rn == n_want, "brk_read_fresh_page",
+           "read returned n_want bytes");
+    if (rn == n_want) {
+        CHECK3(memcmp(buf, want, n_want) == 0, "brk_read_fresh_page",
+               "freshly-committed page holds file content");
+    } else {
+        FAIL("brk_read_fresh_page", "read failed rc=%ld errno=%d",
+             (long)rn, rerr);
+    }
+}
+
 // ── 4, 36: getpid, getppid ─────────────────────────────────
 static void test_getpid_getppid(void)
 {
@@ -3502,6 +3579,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"46_ssp_trip_sigabrt_fork",  test_ssp_trip_sigabrt_fork},
     {"47_ssp_no_false_trip",      test_ssp_no_false_trip},
     {"48_atexit_lifecycle",       test_atexit_lifecycle},
+    {"49_brk_read_fresh_page",    test_brk_read_fresh_page},
 };
 
 int main(int argc, char **argv, char **envp)

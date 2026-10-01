@@ -568,6 +568,51 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 
 		vma_t *vma = vma_find(t->mm, cr2);
 		if (!vma) {
+			// Forked-image COW write: the ELF loader installs
+			// page-table entries for the image but NO VMA for
+			// them (no demand paging for the image), so
+			// vma_find() legitimately returns NULL here.  When
+			// such a process is forked, the parent's writable
+			// image PTEs become R/O + PAGE_COW — a write fault
+			// (P=1, W=1) on that PTE must privatize the page,
+			// exactly like the VMA-covered COW path below, not
+			// SIGSEGV.  Anything else (no COW PTE, or a
+			// non-write fault) is a genuine segfault.
+			if ((error_code & 0x03) == 0x03) {
+				uint64_t *upte = vmm_pt_walk(
+				    (uint64_t *)Phy_To_Virt(
+				        (uint64_t)t->mm->pgdir),
+				    cr2, 0, 0);
+				if (upte && (*upte & PAGE_VALID) &&
+				    (*upte & PAGE_COW)) {
+					uint64_t old_phys =
+					    *upte & PAGE_4K_MASK;
+					uint64_t new_flags =
+					    (*upte & ~PAGE_4K_MASK) |
+					    PAGE_WRITE;
+					new_flags &= ~(uint64_t)PAGE_COW;
+					if (page_cow_refs(old_phys) > 1) {
+						uint64_t nphys =
+						    alloc_4k_page();
+						if (!nphys) {
+							kill_current_user_task(
+							    regs);
+							return;
+						}
+						memcpy(
+						    (void *)Phy_To_Virt(nphys),
+						    (void *)Phy_To_Virt(old_phys),
+						    PAGE_4K_SIZE);
+						*upte = nphys | new_flags;
+						page_cow_put(old_phys);
+					} else {
+						(void)page_cow_put(old_phys);
+						*upte = old_phys | new_flags;
+					}
+					flush_tlb();
+					return;
+				}
+			}
 			log_debug("PF: pid=%d cr2=%p no vma\n", t->pid, cr2);
 			kill_current_user_task(regs);
 			return;
@@ -597,15 +642,47 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 			return;
 		}
 		// -- COW resolution (P=1, W=1, VM_WRITE is set) --
+		// For the heap VMA, take mm->lock IRQ-safely, re-check
+		// the fault address is within the COMMITTED heap range
+		// (start_brk ≤ ALIGN_UP(end_brk, 4 KiB)), then privatize
+		// under the lock and drop it before returning.  For
+		// other VMAs the lock is not held (do_mprotect et al.
+		// only block concurrent PTEs during a full PTE walk).
 		if ((error_code & 0x03) == 0x03) {
 			uint64_t *user_pgd =
 			    (uint64_t *)Phy_To_Virt((uint64_t)t->mm->pgdir);
 			uint64_t *pte = vmm_pt_walk(user_pgd, cr2, 0, 0);
 			if (pte && (*pte & PAGE_COW)) {
+				int heap_vma = !!(vma->vm_flags & VM_HEAP);
+				uint64_t lock_flags = 0;
+				if (heap_vma) {
+					lock_flags = spin_lock_irqsave(&t->mm->lock);
+					uint64_t committed_top =
+					    (t->mm->end_brk +
+					     (PAGE_4K_SIZE - 1)) & PAGE_4K_MASK;
+					if (cr2 >= t->mm->start_brk &&
+					    cr2 < committed_top) {
+						/* still in committed
+						 * heap — fall through
+						 * to the COW resolve */
+					} else {
+						spin_unlock_irqrestore(
+						    &t->mm->lock, lock_flags);
+						kill_current_user_task(regs);
+						return;
+					}
+				}
+
 				uint64_t old_phys = *pte & PAGE_4K_MASK;
+				uint64_t new_phys = 0;
+				int resolved = 0;
 				if (page_cow_refs(old_phys) > 1) {
-					uint64_t new_phys = alloc_4k_page();
+					new_phys = alloc_4k_page();
 					if (!new_phys) {
+						if (heap_vma)
+							spin_unlock_irqrestore(
+							    &t->mm->lock,
+							    lock_flags);
 						kill_current_user_task(regs);
 						return;
 					}
@@ -614,17 +691,47 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 					       PAGE_4K_SIZE);
 					*pte = new_phys | vma->vm_page_prot;
 					page_cow_put(old_phys);
+					resolved = 1;
 				} else {
 					(void)page_cow_put(old_phys);
 					*pte = old_phys | vma->vm_page_prot;
+					resolved = 1;
 				}
-				flush_tlb();
+
+				if (heap_vma)
+					spin_unlock_irqrestore(
+					    &t->mm->lock, lock_flags);
+				if (resolved)
+					flush_tlb();
 				return;
 			}
 		}
 
 		// -- Page not present (P=0) - demand allocation --
+		//
+		// The HEAP VMA is special: every 4 KiB leaf in the
+		// committed range is pre-mapped by mm_set_brk, and the
+		// user process MUST NOT be able to lazily add a new heap
+		// leaf via a #PF (kernel-side demand paging is gone for
+		// the heap).  An absent-leaf fault in the heap range is
+		// always -EFAULT — the user will receive SIGSEGV via
+		// kill_current_user_task.  This closes the latent hole
+		// where a stale VM_HEAP VMA or a leftover 2 MiB huge
+		// leaf could re-expose unmapped heap as writable.
 		if (!(error_code & 0x01)) {
+			/* Heap VMA absent-leaf guard: mm_set_brk pre-maps
+			 * every committed leaf before publishing end_brk,
+			 * so a P=0 fault inside the heap VMA can only be a
+			 * stale/foreign access — never demand-map it (the
+			 * kernel has no kernel-side demand paging for the
+			 * heap; see isolation-design.md §5.2). */
+			if (vma->vm_flags & VM_HEAP) {
+				log_debug("PF: pid=%d cr2=%p heap absent-leaf -> EFAULT\n",
+				          t->pid, cr2);
+				kill_current_user_task(regs);
+				return;
+			}
+
 			uint64_t *user_pgd =
 			    (uint64_t *)Phy_To_Virt((uint64_t)t->mm->pgdir);
 
@@ -1328,29 +1435,26 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         // unreachable — do_exit calls schedule() which never returns
     }
     case SYS_brk: {
-        // brk(void *addr) — set program break, return new break
+        // brk(void *addr) — set program break, return new break.
+        // Delegated to mm_set_brk (kernel/memory/vma.c, Task 4) so
+        // the syscall stays in lockstep with the page-owner logic:
+        // query returns 0/*result=current, bounds errors return
+        // -EINVAL/-ENOMEM with *result unchanged, grow/shrink only
+        // commit on success, and any OOM leaves old break/VMA/PTEs
+        // intact.  See docs/.../user-heap-elf-isolation-design.md §5.2.
         uint64_t addr = regs->rdi;
         mm_t *mm = current->mm;
-        if (mm == NULL || mm->start_brk == 0) {
+        if (mm == NULL) {
             regs->rax = -ENOMEM;
             break;
         }
-        if (addr == 0) {
-            // Query current break
-            regs->rax = mm->end_brk;
+        uint64_t result = 0;
+        int brk_rc = mm_set_brk(mm, addr, &result);
+        if (brk_rc < 0) {
+            regs->rax = (uint64_t)(int64_t)brk_rc;
             break;
         }
-        if (addr < mm->start_brk) {
-            regs->rax = -EINVAL;
-            break;
-        }
-        // Safety: keep heap below the stack area within the user page
-        if (addr > (USER_CODE_ADDR + USER_PAGE_SIZE - 0x1000)) {
-            regs->rax = -ENOMEM;
-            break;
-        }
-        mm->end_brk = addr;
-        regs->rax = addr;
+        regs->rax = result;
         break;
     }
     case SYS_getpid: {
