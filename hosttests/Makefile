@@ -99,7 +99,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_elf_layout.elf \
     $(TEST_BLD)/test_elf_load_4k.elf \
     $(TEST_BLD)/test_process_image_lifecycle.elf \
-    $(TEST_BLD)/test_brk_pages.elf
+    $(TEST_BLD)/test_brk_pages.elf \
+    $(TEST_BLD)/test_user_protected_ranges.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -547,6 +548,41 @@ $(TEST_BLD)/test_brk_pages.elf: $(TEST_BLD)/test_brk_pages.o \
 		$(TEST_BLD)/vma_brk_production.o \
 		$(TEST_BLD)/brk_stubs.o
 	$(HOST_CC) -Wl,--wrap=kmalloc,--wrap=kfree -o $@ $^
+
+# Protected-ranges test (Task 5, user heap/ELF isolation plan):
+# compiles the REAL kernel/memory/vma.c against the pranges host
+# harness and DRIVES do_mmap / do_munmap / do_mprotect through the
+# stub `current` (flat indexed PTE table, 4 KiB page pool, counter-
+# backed arch_flush_tlb_all).  mm_user_range_protected has a weak
+# RED fallback (always false) in pranges_stubs.c so the suite links
+# and fails cleanly before the production predicate lands.
+PRANGES_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
+                       -I$(TESTS_DIR)/kernel/include \
+                       -include $(TEST_MOCK)/pranges/pranges_runtime.h \
+                       -I$(TEST_MOCK) -I$(TEST_INC) \
+                       -I$(TEST_MOCK)/pranges
+
+$(TEST_BLD)/vma_pranges_production.o: $(TESTS_DIR)/kernel/memory/vma.c \
+		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TEST_MOCK)/pranges/pranges_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PRANGES_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/pranges_stubs.o: $(TEST_MOCK)/pranges/pranges_stubs.c \
+		$(TEST_MOCK)/pranges/pranges_stubs.h \
+		$(TEST_MOCK)/pranges/pranges_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PRANGES_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_user_protected_ranges.o: $(TEST_CASES)/test_user_protected_ranges.c \
+		$(TEST_MOCK)/pranges/pranges_stubs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PRANGES_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_user_protected_ranges.elf: $(TEST_BLD)/test_user_protected_ranges.o \
+		$(TEST_BLD)/vma_pranges_production.o \
+		$(TEST_BLD)/pranges_stubs.o
+	$(HOST_CC) -o $@ $^
 
 # standalone test (no kernel/libc deps)
 $(TEST_BLD)/test_wait_basic.elf: $(TEST_BLD)/test_wait_basic.o

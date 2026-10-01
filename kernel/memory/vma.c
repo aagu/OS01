@@ -183,6 +183,45 @@ int mm_init_user_heap(mm_t *mm, uint64_t elf_end)
     return 0;
 }
 
+// ── mm_user_range_protected — reserved-window predicate (Task 5) ──
+//
+// Returns true iff [start, end) intersects any of:
+//   [0x400000,        mm->start_brk)               ELF reserve envelope
+//   [mm->start_brk,   HEAP_LIMIT (0x13ff000))      heap reserve
+//   [HEAP_LIMIT,      USER_STACK_BASE)             guard page
+//   [USER_STACK_BASE, USER_STACK_BASE + 0x200000)  user stack
+//
+// See the full contract in kernel/include/memory/vma.h.  Summary:
+// takes no lock; the caller validates page alignment / overflow /
+// user bounds first; on true the caller must reject with -EINVAL
+// and perform NO mutation (no PTE change, no VMA split, no
+// do_munmap_locked, no device mmap callback).
+bool mm_user_range_protected(const mm_t *mm, uint64_t start, uint64_t end)
+{
+    if (!mm || mm->start_brk == 0)
+        return false;
+    if (end <= start)
+        return false;
+
+    const uint64_t stack_end = USER_STACK_BASE + 0x200000UL;
+
+    // ELF reserve envelope (image + inter-segment gaps).
+    if (start < mm->start_brk && USER_CODE_ADDR < end)
+        return true;
+    // Heap reserve — the whole brk window, committed or not.  The
+    // upper bound is HEAP_LIMIT, NOT end_brk (end_brk is Task 4's
+    // committed-boundary bookkeeping).
+    if (start < HEAP_LIMIT && mm->start_brk < end)
+        return true;
+    // Guard page between heap and stack.
+    if (start < USER_STACK_BASE && HEAP_LIMIT < end)
+        return true;
+    // User stack (2 MiB).
+    if (start < stack_end && USER_STACK_BASE < end)
+        return true;
+    return false;
+}
+
 // ── mm_set_brk — program-break owner (Task 4) ─────────────
 //
 // Sets the program break end_brk and the matching heap VMA endpoint.
@@ -475,6 +514,14 @@ static int64_t do_munmap_locked(uint64_t addr, uint64_t length)
         return -EINVAL;
 
     uint64_t end = addr + length;
+
+    // Task 5: reject any unmap that touches the reserved window
+    // (ELF envelope / heap reserve / guard / stack) BEFORE any PTE
+    // unmap or VMA split happens — a rejected request must leave
+    // every existing mapping untouched.
+    if (mm_user_range_protected(current->mm, addr, end))
+        return -EINVAL;
+
     uint64_t *user_pgd = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pgdir);
 
     list_t *pos = current->mm->vma_list.next;
@@ -576,6 +623,18 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
             return -ENOMEM;
     }
 
+    // ── 1b. Reserved-window check (Task 5) ──────────────
+    // A MAP_FIXED request that touches the ELF envelope, the heap
+    // reserve, the guard page or the user stack is rejected BEFORE
+    // any do_munmap_locked / VMA split / PTE change / device mmap
+    // callback, so a rejected request leaves every existing
+    // mapping byte-for-byte intact.  (Overflow and user bounds
+    // were validated above, per the predicate's contract.)
+    // The non-fixed path re-checks its computed candidate below.
+    if ((flags & MAP_FIXED) &&
+        mm_user_range_protected(current->mm, addr, end))
+        return -EINVAL;
+
     // ── 2. Address computation ──────────────────────────
     length = PAGE_4K_ALIGN(length);
     if (!length) return -EINVAL;
@@ -583,9 +642,15 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     uint64_t search = current->mm->mmap_base;
     vma_t *prev = NULL;
     list_t *pos = current->mm->vma_list.next;
-    addr = 0;
 
+    // NOTE (Task 5): `addr` must keep its parameter value on the
+    // MAP_FIXED path — the old unconditional `addr = 0;` here
+    // clobbered the fixed address, so MAP_FIXED silently mapped at
+    // 0 and ran do_munmap_locked over [0, length).  Zeroing now
+    // happens only on the auto-search path, where 0 means "no
+    // candidate found yet".
     if (!(flags & MAP_FIXED)) {
+        addr = 0;
         while (pos != &current->mm->vma_list) {
             vma_t *v = container_of(pos, vma_t, list);
             uint64_t gap_start = prev ? prev->vm_end : search;
@@ -599,6 +664,13 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
         }
         if (!addr) addr = prev ? prev->vm_end : search;
         if (addr < search) addr = search;
+
+        // Task 5: the auto-search must never return a candidate
+        // inside the reserved window.  mmap_base (0x40000000) is
+        // already far above it, so this is a defensive skip: jump
+        // the candidate past the ENTIRE window.
+        if (mm_user_range_protected(current->mm, addr, addr + length))
+            addr = USER_STACK_BASE + 0x200000UL;
     } else {
         spin_lock(&current->mm->lock);
         do_munmap_locked(addr, length);
@@ -641,6 +713,15 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
         if (_dev_mmap) {
             if (!(flags & MAP_SHARED))
                 { vfs_node_put(file_node); return -EINVAL; }
+
+            // Task 5: never hand a protected range to a device mmap
+            // handler — the handler fills PTEs eagerly, so the check
+            // MUST precede the callback (defence in depth on top of
+            // the §1b / post-search checks above).
+            if (mm_user_range_protected(current->mm, addr, addr + length)) {
+                vfs_node_put(file_node);
+                return -EINVAL;
+            }
 
             // Pre-allocate VMA for the device handler to fill PTEs
             vma_t *vma = (vma_t *)kmalloc(sizeof(vma_t));
@@ -699,6 +780,12 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
         return -EINVAL;
 
     uint64_t end = addr + length;
+
+    // Task 5: reject before any VMA flag / prot / PTE change —
+    // mprotect must never be able to strip protections from the
+    // ELF envelope, heap reserve, guard page or user stack.
+    if (mm_user_range_protected(current->mm, addr, end))
+        return -EINVAL;
 
     uint64_t new_page_prot, new_vm_flags;
     int rc = prot_to_page_flags((int)prot, &new_page_prot, &new_vm_flags);

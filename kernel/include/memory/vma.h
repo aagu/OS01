@@ -2,6 +2,7 @@
 #define _KERNEL_VMA_H
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <list.h>
 #include <memory/vmm.h>
 #include <fs/vfs.h>
@@ -90,6 +91,45 @@ int       mm_init_user_heap(mm_t *mm, uint64_t elf_end);
 //
 // Caller must NOT hold mm->lock; mm_set_brk takes it.
 int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result);
+
+// ── mm_user_range_protected — reserved-window predicate (Task 5) ──
+//
+// Returns true iff the HALF-OPEN page range [start, end) intersects
+// ANY of the four reserved user ranges:
+//
+//   [0x400000,        mm->start_brk)   ELF reserve envelope — the
+//                                     loaded image INCLUDING the
+//                                     inter-segment gaps; not every
+//                                     page in the envelope is mapped,
+//                                     but the whole envelope is
+//                                     protected.
+//   [mm->start_brk,   0x13ff000)       heap reserve — the entire
+//                                     brk window, not just the
+//                                     committed pages; covers the
+//                                     zero-length VM_HEAP VMA's
+//                                     range too.  The upper bound is
+//                                     FIXED at 0x13ff000 — it does
+//                                     NOT track end_brk.
+//   [0x13ff000,       0x1400000)       heap→stack guard page.
+//   [USER_STACK_BASE, +0x200000)       the 2 MiB user stack.
+//
+// Caller MUST:
+//   - Pass a page-aligned interval (4 KiB boundaries, half-open).
+//   - Validate overflow and the user-bounds check (e.g.
+//     addr < current->addr_limit) BEFORE this call.
+//   - When this returns true, reject the whole operation with
+//     -EINVAL and perform NO mutation: no PTE change, no VMA
+//     split/insert/remove, no do_munmap_locked, no device mmap
+//     callback.
+//
+// The predicate takes NO lock: it only reads mm->start_brk, so
+// callers may hold mm->lock around it (fixed-path) or call it
+// unlocked and then take the lock (auto-search path) — both
+// patterns are valid.
+//
+// mm == NULL or mm->start_brk == 0 (no user image installed —
+// init_mm, kthreads) protects nothing.
+bool mm_user_range_protected(const mm_t *mm, uint64_t start, uint64_t end);
 
 // ── Syscall implementations (called from trap.c) ───────────
 int64_t   do_mmap(uint64_t addr, uint64_t length, uint64_t prot,

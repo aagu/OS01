@@ -3485,6 +3485,141 @@ static void test_startup_execvp(void)
     rmdir("/pathtest");
 }
 
+// ── 50: protected ranges (Task 5, heap/ELF isolation plan) ─
+// The kernel reserves [0x400000, 0x1600000) for the ELF image
+// (envelope incl. segment gaps), the heap (committed + reserve),
+// the 0x13ff000 guard page and the 2 MiB user stack.  No mapping
+// API may hand out or mutate any part of that window:
+//   * MAP_FIXED into the envelope / heap reserve / guard → -EINVAL,
+//     and a preexisting mapping must survive untouched;
+//   * munmap / mprotect on the guard → -EINVAL;
+//   * plain mmap must return an address outside the window;
+//   * after all the rejections the heap VMA (brk still grows) and
+//     the ELF envelope (/proc/self/maps still lists the image) are
+//     intact.
+static void test_protected_ranges(void)
+{
+    /* 1. A preexisting mapping that must survive every rejection. */
+    void *keep = mmap(NULL, 0x2000, PROT_READ | PROT_WRITE,
+                      MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (keep == MAP_FAILED) {
+        FAIL("prot_ranges", "setup mmap failed");
+        return;
+    }
+    volatile unsigned char *kp = (volatile unsigned char *)keep;
+    kp[0] = 0x5A;
+    kp[0x1fff] = 0xA5;
+
+    /* 2. MAP_FIXED into the guard page, partly reaching into the
+     * heap reserve and the stack — rejected, existing mapping
+     * untouched. */
+    errno = 0;
+    void *bad = mmap((void *)0x13fe000UL, 0x2000,
+                     PROT_READ | PROT_WRITE,
+                     MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
+    int ok_guard = (bad == MAP_FAILED) && (errno == EINVAL);
+
+    /* 3. MAP_FIXED into the heap reserve (uncommitted part). */
+    errno = 0;
+    bad = mmap((void *)0x500000UL, 0x1000, PROT_READ | PROT_WRITE,
+               MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
+    int ok_heap = (bad == MAP_FAILED) && (errno == EINVAL);
+
+    /* 4. MAP_FIXED into the ELF envelope (image base page). */
+    errno = 0;
+    bad = mmap((void *)0x400000UL, 0x1000, PROT_READ | PROT_WRITE,
+               MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
+    int ok_elf = (bad == MAP_FAILED) && (errno == EINVAL);
+
+    /* 5. The preexisting mapping kept its bytes and is still
+     * writable (no munmap, no PTE change happened). */
+    int ok_keep = (kp[0] == 0x5A) && (kp[0x1fff] == 0xA5);
+    kp[0] = 0x33;
+    ok_keep = ok_keep && (kp[0] == 0x33);
+    kp[0] = 0x5A;
+
+    CHECK3(ok_guard, "map_fixed_guard_rejected",
+           "MAP_FIXED [13fe000,1400000) → -EINVAL");
+    CHECK3(ok_heap, "map_fixed_heap_rejected",
+           "MAP_FIXED into heap reserve → -EINVAL");
+    CHECK3(ok_elf, "map_fixed_elf_rejected",
+           "MAP_FIXED into ELF envelope → -EINVAL");
+    CHECK3(ok_keep, "map_fixed_reject_keeps_mapping",
+           "preexisting mapping intact after rejects");
+
+    /* 6. munmap / mprotect on the guard page rejected. */
+    errno = 0;
+    int r = munmap((void *)0x13ff000UL, 0x1000);
+    int ok_mun = (r == -1) && (errno == EINVAL);
+    errno = 0;
+    r = mprotect((void *)0x13ff000UL, 0x1000, PROT_READ);
+    int ok_mprot = (r == -1) && (errno == EINVAL);
+    CHECK3(ok_mun, "munmap_guard_rejected",
+           "munmap guard page → -EINVAL");
+    CHECK3(ok_mprot, "mprotect_guard_rejected",
+           "mprotect guard page → -EINVAL");
+
+    /* 7. Plain mmap (no hint) must stay outside the whole
+     * reserved window [0x400000, 0x1600000). */
+    void *p = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE,
+                   MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    int ok_auto = (p != MAP_FAILED) &&
+                  ((uint64_t)p >= 0x1600000UL) &&
+                  ((uint64_t)p < 0xffff800000000000UL);
+    CHECK3(ok_auto, "auto_mmap_outside_reserve",
+           ok_auto ? "regular mmap landed above the reserve"
+                   : "regular mmap inside reserve or failed");
+
+    /* 8. Heap VMA still intact: brk grows, the new page is
+     * writable, and it shrinks back. */
+    int64_t cur = syscall(SYS_brk, 0, 0, 0);
+    uint64_t base = ((uint64_t)cur + 0xFFF) & ~(uint64_t)0xFFF;
+    int64_t grown = syscall(SYS_brk, base + 0x1000, 0, 0);
+    int ok_heapvma = (grown == (int64_t)(base + 0x1000));
+    if (ok_heapvma) {
+        volatile unsigned char *hp = (volatile unsigned char *)base;
+        hp[0x100] = 0xC3;
+        ok_heapvma = (hp[0x100] == 0xC3);
+    }
+    syscall(SYS_brk, cur, 0, 0);
+    CHECK3(ok_heapvma, "heap_vma_intact",
+           "brk grow/write/read/shrink after rejected mmaps");
+
+    /* 9. ELF envelope still intact: /proc/self/maps still lists
+     * the image at 0x400000 and (with brk grown) a [heap] row. */
+    int64_t cur2 = syscall(SYS_brk, 0, 0, 0);
+    uint64_t base2 = ((uint64_t)cur2 + 0xFFF) & ~(uint64_t)0xFFF;
+    syscall(SYS_brk, base2 + 0x1000, 0, 0);
+
+    char buf[4096];
+    int fd = open("/proc/self/maps", O_RDONLY);
+    int ok_maps = 0;
+    if (fd >= 0) {
+        int n = (int)read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n > 0) {
+            buf[n] = '\0';
+            int has_image = 0, has_heap = 0;
+            char *q = buf;
+            while (*q) {
+                char *line = q;
+                char *nl = strchr(q, '\n');
+                if (nl) { *nl = '\0'; q = nl + 1; }
+                else    { q = line + strlen(line); }
+                unsigned int s32, e32;
+                if (sscanf(line, "%x-%x", &s32, &e32) >= 1) {
+                    if (s32 == 0x400000UL) has_image = 1;
+                }
+                if (strstr(line, "[heap]")) has_heap = 1;
+            }
+            ok_maps = has_image && has_heap;
+        }
+    }
+    syscall(SYS_brk, cur2, 0, 0);
+    CHECK3(ok_maps, "envelope_and_heap_in_maps",
+           "/proc/self/maps lists image at 0x400000 + [heap]");
+}
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
@@ -3580,6 +3715,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"47_ssp_no_false_trip",      test_ssp_no_false_trip},
     {"48_atexit_lifecycle",       test_atexit_lifecycle},
     {"49_brk_read_fresh_page",    test_brk_read_fresh_page},
+    {"50_protected_ranges",       test_protected_ranges},
 };
 
 int main(int argc, char **argv, char **envp)
