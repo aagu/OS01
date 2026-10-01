@@ -869,6 +869,187 @@ static void test_do_fork_releases_task_on_oom(void)
 }
 
 /* ────────────────────────────────────────────────────────────────
+ *  Suite 4: fork_mm_copy rollback invariants (Task 6 review)
+ *
+ *  The `fail:` rollback in fork_mm_copy must:
+ *    - Bug A1: NOT free huge-page phys when the entry was a
+ *      VM_IO share (parent's MMIO PMD; pass 1 set
+ *      child_pmd[l2] = pmde without alloc).
+ *    - Bug A2: NOT free 4 KiB phys for an already-COW PTE
+ *      (fork-of-fork shape); must instead balance the pass-1
+ *      page_cow_get with page_cow_put so the shared phys
+ *      stays alive for parent + any siblings.
+ *
+ *  Verified via source-level inspection of kernel/sched/task.c
+ *  (same Strategy C as the rest of the fork_mm_copy tests —
+ *  fork_mm_copy is `static`, and its rollback references
+ *  Phy_to_2M_Page / free_pages which the host can't link).
+ * ──────────────────────────────────────────────────────────────── */
+
+static void test_fork_mm_copy_fail_keeps_vmio_huge_intact(void)
+{
+    TEST_SUITE("fork_mm_copy rollback — VM_IO huge PMD is not freed (Bug A1)");
+
+    size_t len;
+    char *src = slurp_task_c(&len);
+    assert_not_null(src);
+    const char *end = src + len;
+
+    /* The rollback lives inside the `fail:` block of
+     * fork_mm_copy.  Locate it by the unique "fail:" label
+     * that follows the staging pass 2. */
+    const char *fn = strstr(src,
+        "static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)");
+    assert_not_null(fn);
+    const char *fn_end = strstr(fn, "\n}\n");
+    assert_not_null(fn_end);
+    /* The `fail:` label appears after the staged success
+     * path; locate it directly to bound the rollback walk. */
+    const char *fail_label = strstr(fn, "\nfail:");
+    assert_not_null(fail_label);
+    const char *fail_block_end = fn_end;
+    /* Sub-region: from fail_label to fn_end. */
+
+    /* Bug A1: the rollback's huge-page branch must consult
+     * the parent's VMA flags for the 2 MiB VA and SKIP the
+     * free_pages call when the region is VM_IO.  Pass 1's
+     * huge-page branch shares the parent's MMIO PMD with
+     * child_pmd[l2] = pmde — no allocation.  The rollback
+     * must not free that phys.
+     *
+     * Concrete check (textual, in the rollback's huge-page
+     * branch): vma_find must be called, and the VM_IO check
+     * must appear BEFORE the free_pages call. */
+    const char *huge = find_from(fail_label, fail_block_end,
+        "if (pmde & PAGE_HUGE) {");
+    assert_not_null(huge);
+    const char *free_pages_call = find_from(huge, fail_block_end,
+        "free_pages(p, 1)");
+    assert_not_null(free_pages_call);
+    /* vma_find must appear inside the huge-page branch and
+     * BEFORE the free_pages call. */
+    const char *vm_find = find_from(huge, free_pages_call,
+        "vma_find(parent_mm, vaddr_2m)");
+    assert_not_null(vm_find);
+    /* VM_IO must be checked BEFORE the free_pages call too. */
+    const char *vm_io_check = find_from(huge, free_pages_call,
+        "vm_flags & VM_IO");
+    assert_not_null(vm_io_check);
+    /* And vm_find must be checked before free_pages. */
+    assert_true(vm_find < free_pages_call);
+    assert_true(vm_io_check < free_pages_call);
+
+    /* Defence-in-depth: the rollback must NOT have an
+     * unconditional `free_pages(p, 1)` directly under
+     * `if (pmde & PAGE_HUGE)` without a VM_IO guard.  We
+     * verify by looking for the exact pattern that would be
+     * a regression — if VMIO wasn't special-cased, the huge
+     * branch would look like:
+     *     if (pmde & PAGE_HUGE) {
+     *         free_pages(p, 1);    <-- this is OK only when guarded
+     *     }
+     * We accept the call as long as the vma_find + VM_IO check
+     * precede it (already checked above). */
+
+    /* Also: the parent's 2 MiB VA computation
+     * `vaddr_2m = ((uint64_t)l4 << 39) | ((uint64_t)l3 << 30) |
+     * ((uint64_t)l2 << 21)` must appear inside the huge-page
+     * branch so the vma_find lookup targets the right VA. */
+    const char *vaddr_calc = find_from(huge, free_pages_call,
+        "vaddr_2m = ((uint64_t)l4 << 39)");
+    assert_not_null(vaddr_calc);
+
+    free(src);
+    (void)end;
+}
+
+static void test_fork_mm_copy_fail_keeps_cow_share_intact(void)
+{
+    TEST_SUITE("fork_mm_copy rollback — already-COW 4 KiB leaf: page_cow_put (Bug A2)");
+
+    size_t len;
+    char *src = slurp_task_c(&len);
+    assert_not_null(src);
+    const char *end = src + len;
+
+    /* Locate the rollback block. */
+    const char *fn = strstr(src,
+        "static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)");
+    assert_not_null(fn);
+    const char *fn_end = strstr(fn, "\n}\n");
+    assert_not_null(fn_end);
+    const char *fail_label = strstr(fn, "\nfail:");
+    assert_not_null(fail_label);
+    const char *fail_block_end = fn_end;
+
+    /* Bug A2: the rollback's 4 KiB leaf branch (else of the
+     * huge-page if) must check PAGE_COW BEFORE the
+     * free_4k_page call.  For an already-COW PTE (fork-of-fork
+     * shape), pass 1 added one ref via page_cow_get; the
+     * rollback must balance that with page_cow_put and skip
+     * the free (the shared phys stays alive for parent +
+     * siblings).  Without the PAGE_COW check, the rollback
+     * frees the shared phys out from under every other
+     * reference holder and leaves the refcount unbalanced.
+     *
+     * Concrete check (textual): inside the `else` branch
+     * (4 KiB PTE table path), the `page_cow_put` call must
+     * appear, AND the
+     *   `if ((pte & PAGE_VALID) && ... && !is_vmio)`
+     * guard must include a `is_cow` (PAGE_COW) branch that
+     * routes to page_cow_put instead of free_4k_page. */
+    const char *non_huge = find_from(fail_label, fail_block_end,
+        "} else {");
+    assert_not_null(non_huge);
+    /* The first `} else {` after fail_label is the inner
+     * 4 KiB branch (the huge/else at the PMD level). */
+    const char *inner_else = non_huge;
+    /* The PAGE_COW check must appear inside the 4 KiB
+     * branch BEFORE any free_4k_page. */
+    const char *cow_check = find_from(inner_else, fail_block_end,
+        "PAGE_COW");
+    assert_not_null(cow_check);
+    /* page_cow_put must appear inside the 4 KiB branch. */
+    const char *cow_put = find_from(inner_else, fail_block_end,
+        "page_cow_put");
+    assert_not_null(cow_put);
+    /* The structure: the rollback branches on PAGE_COW to
+     * either page_cow_put (balance the ref) or free_4k_page
+     * (genuinely private copy).  The branching pattern must
+     * be: PAGE_COW < page_cow_put (so the COW branch uses
+     * page_cow_put) and PAGE_COW < free_4k_page (so the
+     * non-COW branch uses free_4k_page).  The current order
+     * also has the PAGE_COW check before the free. */
+    const char *free_4k = find_from(inner_else, fail_block_end,
+        "free_4k_page(");
+    assert_not_null(free_4k);
+    assert_true(cow_check < cow_put);
+    assert_true(cow_check < free_4k);
+
+    /* Defence-in-depth: free_4k_page MUST be inside an
+     * `else` (or equivalent) of the PAGE_COW branch so the
+     * COW case can never hit it.  The simplest check:
+     * between cow_check and free_4k the string "if (is_cow)"
+     * (or equivalent) must appear. */
+    const char *is_cow_branch = find_from(cow_check, free_4k,
+                                        "is_cow");
+    assert_not_null(is_cow_branch);
+
+    /* Also: the placeholder (pte == PAGE_VALID) and VM_IO
+     * guards are still in place from the original Task 6
+     * rollback — keep them pinned too. */
+    const char *placeholder_check = find_from(inner_else, fail_block_end,
+        "is_placeholder");
+    assert_not_null(placeholder_check);
+    const char *vmio_check = find_from(inner_else, fail_block_end,
+        "is_vmio");
+    assert_not_null(vmio_check);
+
+    free(src);
+    (void)end;
+}
+
+/* ────────────────────────────────────────────────────────────────
  *  Test list
  * ──────────────────────────────────────────────────────────────── */
 
@@ -887,6 +1068,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_fork_mm_copy_writable_leaf_uses_cow),
     TEST_ENTRY(test_fork_mm_copy_stack_eager_huge),
     TEST_ENTRY(test_fork_mm_copy_staged_ordering),
+    TEST_ENTRY(test_fork_mm_copy_fail_keeps_vmio_huge_intact),
+    TEST_ENTRY(test_fork_mm_copy_fail_keeps_cow_share_intact),
     TEST_ENTRY(test_do_fork_no_whole_mm_share_fallback),
     TEST_ENTRY(test_do_fork_releases_task_on_oom),
 TEST_LIST_END

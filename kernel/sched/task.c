@@ -2210,9 +2210,26 @@ fail:
                     uint64_t pmde = pmd[l2];
                     if (!(pmde & PAGE_VALID)) continue;
                     if (pmde & PAGE_HUGE) {
-                        uint64_t phys = pmde & PAGE_2M_MASK;
-                        struct Page *p = Phy_to_2M_Page(phys);
-                        free_pages(p, 1);
+                        /* Bug A1 fix: the huge-page branch may
+                         * share the parent's MMIO PMD for VM_IO
+                         * VAs (pass 1, task.c ~ line 2041) — in
+                         * that case child_pmd[l2] == parent's PMD
+                         * and the phys is the parent's MMIO phys,
+                         * never ours to free.  Check the parent's
+                         * 2 MiB VA against vma_find (same lookup
+                         * pattern pass 1 uses) and skip the
+                         * free_pages for VM_IO. */
+                        uint64_t vaddr_2m = ((uint64_t)l4 << 39)
+                                           | ((uint64_t)l3 << 30)
+                                           | ((uint64_t)l2 << 21);
+                        vma_t *vm = vma_find(parent_mm, vaddr_2m);
+                        if (vm && (vm->vm_flags & VM_IO)) {
+                            /* Shared MMIO PMD — not ours. */
+                        } else {
+                            uint64_t phys = pmde & PAGE_2M_MASK;
+                            struct Page *p = Phy_to_2M_Page(phys);
+                            free_pages(p, 1);
+                        }
                     } else {
                         uint64_t *pt = (uint64_t *)Phy_To_Virt(pmde & PAGE_4K_MASK);
                         for (int l1 = 0; l1 < 512; l1++) {
@@ -2224,15 +2241,31 @@ fail:
                             vma_t *vma = vma_find(parent_mm, vaddr);
                             int is_vmio = (vma &&
                                            (vma->vm_flags & VM_IO));
-                            /* Free only what we allocated in
-                             * pass 1: a fresh 4 KiB phys (phys
-                             * bits set, not the placeholder, not
-                             * VMIO shared). */
+                            int is_placeholder = (pte == PAGE_VALID);
+                            int is_cow = !!(pte & PAGE_COW);
+                            /* Free / put only what we touched in
+                             * pass 1:
+                             *   - RO leaves (privet): free_4k_page
+                             *     a fresh 4 KiB phys we allocated.
+                             *   - VMIO shared: skip — parent's
+                             *     MMIO phys, never ours.
+                             *   - Placeholder: skip — pass 2 has
+                             *     not run, no phys to free.
+                             *   - Bug A2 fix: COW (fork-of-fork
+                             *     already-shared) — pass 1 did
+                             *     page_cow_get to add a child
+                             *     ref; balance it with page_cow_put.
+                             *     The shared phys stays alive for
+                             *     parent + any other siblings. */
                             if ((pte & PAGE_VALID) &&
                                 (pte & PAGE_4K_MASK) &&
-                                pte != PAGE_VALID &&
+                                !is_placeholder &&
                                 !is_vmio) {
-                                free_4k_page(pte & PAGE_4K_MASK);
+                                if (is_cow) {
+                                    page_cow_put(pte & PAGE_4K_MASK);
+                                } else {
+                                    free_4k_page(pte & PAGE_4K_MASK);
+                                }
                             }
                         }
                         kfree(pt);
