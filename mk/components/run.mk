@@ -212,7 +212,7 @@ _test-aarch64-prep-sync-fault:
 # Run helpers (one per MODE) keep the python harness on its own recipe
 # line, after the pre-build. The python call therefore is NOT executed
 # under `-n` (per the dry-run contract).
-.PHONY: _test-aarch64-run-smp _test-aarch64-run-no-ack _test-aarch64-run-gic-spi
+.PHONY: _test-aarch64-run-smp _test-aarch64-run-no-ack _test-aarch64-run-gic-spi _test-aarch64-run-sync-fault
 _test-aarch64-run-smp:
 	python3 qemutests/aarch64_uefi_smp.py \
 	  --cpus 1 2 4 --repeat 3 --timeout 90 --expect-selftest --expect-gic --expect-clk \
@@ -236,6 +236,19 @@ _test-aarch64-run-gic-spi:
 	  --image "$(AARCH64_UEFI_SELFTEST_DISK)" \
 	  --qemu "$(AARCH64_QEMU)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-gic-spi/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+# AAGU-EL1-sync Task 3: drives the dedicated sync-fault QEMU image
+# (KERNEL_VARIANT=sync-fault, AARCH64_UEFI_SYNC_FAULT_{DISK,FIRMWARE}) in 1-CPU
+# mode and asserts the EL1h sync fatal diagnostic via
+# qemutests/aarch64_sync_fault.py. The harness parser is the only
+# success criterion: timeouts do NOT count, and the run target only
+# consumes the dedicated sync-fault paths (never the selftest image).
+_test-aarch64-run-sync-fault:
+	python3 qemutests/aarch64_sync_fault.py \
+	  --timeout 60 \
+	  --firmware "$(AARCH64_UEFI_SYNC_FAULT_FIRMWARE)" \
+	  --image "$(AARCH64_UEFI_SYNC_FAULT_DISK)" \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sync-fault/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 
 # test-aarch64: the umbrella. Dispatches to the per-MODE prep + run helpers.
 test-aarch64: MODE ?= smp
@@ -601,7 +614,7 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'test-kernel-selftest' '(rootfs)'   'QEMU built-in selftests (isolated selftest image, KERNEL_SELFTEST=1)';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-aarch64'        '(uefi)'       'aarch64 UEFI test (MODE=<smp|no-ack|gic-spi>)';
+		 'test-aarch64'        '(uefi)'       'aarch64 UEFI test (MODE=<smp|no-ack|gic-spi|sync-fault>)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-contract'       '(rootfs|uefi)' 'Full build contract (PROFILE=<x86_64-clang|aarch64-clang>)';
 	@echo ''

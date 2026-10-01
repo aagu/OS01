@@ -35,7 +35,7 @@ There are **6 test bucket targets** — 3 with flags and 3 without:
 | Bucket | Flag | Values | What it runs |
 | --- | --- | --- | --- |
 | `test-qemu` | `SUITE=` | `phase-0`, `systest`, `inittab-phase`, `network` | `qemutests/run_test.py <SUITE>` against the matching variant image |
-| `test-aarch64` | `MODE=` | `smp`, `no-ack`, `gic-spi` | One of `qemutests/aarch64_*.py` |
+| `test-aarch64` | `MODE=` | `smp`, `no-ack`, `gic-spi`, `sync-fault` | One of `qemutests/aarch64_*.py` |
 | `test-contract` | `PROFILE=` | `x86_64-clang`, `aarch64-clang` | `qemutests/build_contract.sh <PROFILE> <mode>` per profile mode list |
 | `test-host` | — | — | `os01_submake hosttests` + `pmm_boot_reservation_test.py` |
 | `test-static` | — | — | All 8 static audits (runtime_audit, stack_canary_audit, validate-kernel, runtime_link_order, kernel_runtime_link, kernel_layout, kernel_canary_contract, test-user-canary) |
@@ -111,3 +111,32 @@ compatibility shim and have now been removed.
 | `_test-contract-prep-x86` / `_test-contract-prep-aarch64` (private) | `mk/components/run.mk` | per-PROFILE pre-build steps (split so `+env` sits at recipe-line position) |
 | `TEST_AARCH64_EXTRA_<mode>` | `mk/components/run.mk` | `test-aarch64` per-MODE DTB flag |
 | `_test-aarch64-prep-<mode>` / `_test-aarch64-run-<mode>` (private) | `mk/components/run.mk` | per-MODE pre-build + python invocation (split so `$(MAKE)` and python sit on separate recipe lines) |
+
+## 7. `MODE=sync-fault` (aarch64 EL1h sync diagnostics)
+
+`test-aarch64 MODE=sync-fault` builds the dedicated `KERNEL_VARIANT=sync-fault`
+image (under `build/<profile>/{kernel,image}/sync-fault/`, never reusing the
+selftest variant) and runs the controlled EL1h sync fault probe in QEMU
+`virt,gic-version=2` with one `cortex-a53`. The acceptance surface is
+`qemutests/aarch64_sync_fault.py::sync_fault_evidence` — the run is a PASS only
+when the parser sees exactly one `[aarch64-sync-test] armed` marker followed
+by one `[aarch64-sync] FATAL ...` line with the spec §4 field shape
+(`mpidr`/`esr`/`elr`/`spsr` all 16 lowercase hex digits, `ec=0x<2 hex>`, ESR
+EC bits matching `ec=`, `far=0x<16 hex>`), and no post-diagnostic continuation
+(`returned` / `[tick]` / `[selftest]` / `[smp]` / `OS01 aarch64 phase1 boot ok`
+must not appear anywhere). Timeouts never count as success: if the FATAL
+line never appears, the harness exits non-zero even when QEMU terminates
+cleanly.
+
+Required invocation:
+
+```sh
+make PROFILE=aarch64-clang test-aarch64 MODE=sync-fault
+```
+
+Artifacts land under `test-results/aarch64-sync-fault/<UTC-timestamp>-<pid>/`
+(`sync-fault-run.stdout.log`, `sync-fault-run.stderr.log`,
+`sync-fault-run.metadata.json`). The x86_64 profile rejects the MODE at the
+`test-aarch64` parse-time gate; the `MODE=smp` / `MODE=gic-spi` paths never
+see the `AARCH64_SYNC_FAULT_TEST=1` define and never reuse the dedicated
+sync-fault paths.
