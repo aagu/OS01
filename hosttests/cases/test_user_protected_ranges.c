@@ -107,6 +107,17 @@ static int64_t fixed_mmap(uint64_t addr, uint64_t len)
                    (uint64_t)-1, 0);
 }
 
+/* Find the VMA whose [vm_start, vm_end) contains addr, or NULL. */
+static vma_t *find_vma(uint64_t addr)
+{
+    for (list_t *p = fixture_mm.vma_list.next;
+         p != &fixture_mm.vma_list; p = p->next) {
+        vma_t *v = container_of(p, vma_t, list);
+        if (addr >= v->vm_start && addr < v->vm_end) return v;
+    }
+    return NULL;
+}
+
 /* Auto-address mmap shorthand. */
 static int64_t auto_mmap(uint64_t len)
 {
@@ -373,6 +384,116 @@ static void test_mmap_fixed_partial_overlap_preserves_mapping(void)
     assert_eq(vmas_before,   vma_count());
 }
 
+/* ── Focus #4 exact scenario: rejected MAP_FIXED that PARTLY
+ * OVERLAPS a managed range must leave that mapping untouched ── */
+
+static void test_mmap_fixed_partial_overlap_managed_stack_top(void)
+{
+    TEST_SUITE("MAP_FIXED — request overlapping a managed VMA at the stack-top boundary");
+
+    setup_mm(USER_CODE_ADDR + 0x1000);
+
+    /* A LEGITIMATE managed mapping just above the window end:
+     * [0x1600000, 0x1602000). */
+    int64_t keep = fixed_mmap(USER_STACK_END, 0x2000);
+    assert_eq((int64_t)USER_STACK_END, keep);
+    if (fill_pte(USER_STACK_END, 0x21) != 0 ||
+        fill_pte(USER_STACK_END + 0x1000, 0x22) != 0) {
+        assert_true(!"harness fill_pte failed");
+        return;
+    }
+    vma_t *kv = find_vma(USER_STACK_END);
+    assert_not_null(kv);
+    assert_eq((int64_t)USER_STACK_END, (int64_t)kv->vm_start);
+    assert_eq((int64_t)(USER_STACK_END + 0x2000), (int64_t)kv->vm_end);
+
+    int vmas_before   = vma_count();
+    int unmaps_before = pr_state.total_unmaps;
+    int flushes_before = (int)pr_arch_tlb_flushes;
+    uint64_t pte_keep = pr_find_mapping(USER_STACK_END)->pte;
+    assert_true(pte_keep != 0);
+
+    /* Rejected request [0x15ff000, 0x1601000): its first page hits
+     * the stack clause, its second page is the FIRST page of the
+     * managed mapping.  A do_munmap_locked call here would truncate
+     * keep's left side to [0x1601000, 0x1602000). */
+    int64_t rc = fixed_mmap(USER_STACK_END - 0x1000, 0x2000);
+    assert_eq(-EINVAL, (int)rc);
+
+    /* keep untouched: original bounds (NOT truncated), same PTE,
+     * same dirty byte, no VMA inserted or split, no unmap, no
+     * flush. */
+    assert_eq((int64_t)USER_STACK_END, (int64_t)kv->vm_start);
+    assert_eq((int64_t)(USER_STACK_END + 0x2000), (int64_t)kv->vm_end);
+    assert_eq((int64_t)pte_keep, (int64_t)pr_find_mapping(USER_STACK_END)->pte);
+    assert_eq(0x21, (int)((unsigned char *)
+                  pr_find_page(pte_keep & PAGE_4K_MASK)->backing)[0]);
+    assert_eq(vmas_before,   vma_count());
+    assert_eq(unmaps_before, pr_state.total_unmaps);
+    assert_eq(flushes_before, (int)pr_arch_tlb_flushes);
+}
+
+static void test_mmap_fixed_partial_overlap_managed_guard_straddle(void)
+{
+    TEST_SUITE("MAP_FIXED — request strictly inside a managed VMA straddling the guard page");
+
+    setup_mm(USER_CODE_ADDR + 0x1000);
+
+    /* Simulate the managed range a pre-Task-5 world could hold: a
+     * VMA straddling heap→guard→stack at [0x13fe000, 0x1401000),
+     * inserted through the production vma_insert + hand-filled
+     * PTEs.  Post-Task-5 the mapping APIs can no longer create
+     * this shape — the test proves they cannot DESTROY it either. */
+    vma_t *sv = (vma_t *)kmalloc(sizeof(vma_t));
+    assert_not_null(sv);
+    list_init(&sv->list);
+    sv->vm_start     = 0x13fe000;
+    sv->vm_end       = 0x1401000;
+    sv->vm_flags     = VM_READ | VM_WRITE | VM_ANON;
+    sv->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
+    sv->vm_pgoff     = 0;
+    sv->vm_file      = NULL;
+    assert_eq(0, vma_insert(&fixture_mm, sv));
+    if (fill_pte(0x13fe000, 0x31) != 0 ||
+        fill_pte(0x13ff000, 0x32) != 0 ||
+        fill_pte(0x1400000, 0x33) != 0) {
+        assert_true(!"harness fill_pte failed");
+        return;
+    }
+
+    int vmas_before   = vma_count();   /* heap VMA + sv = 2 */
+    int unmaps_before = pr_state.total_unmaps;
+    int flushes_before = (int)pr_arch_tlb_flushes;
+    uint64_t pte_head = pr_find_mapping(0x13fe000)->pte;
+    uint64_t pte_mid  = pr_find_mapping(0x13ff000)->pte;
+    uint64_t pte_tail = pr_find_mapping(0x1400000)->pte;
+
+    /* Guard-exact request [0x13ff000, 0x1400000) lies STRICTLY
+     * INSIDE sv — a do_munmap_locked call would split it into
+     * [0x13fe000, 0x13ff000) + [0x1400000, 0x1401000) and unmap
+     * the guard page. */
+    int64_t rc = fixed_mmap(0x13ff000, 0x1000);
+    assert_eq(-EINVAL, (int)rc);
+
+    /* No split, no truncation: sv is still ONE VMA with the
+     * original bounds, all three PTEs and their dirty bytes
+     * intact, counters unchanged. */
+    assert_eq(0x13fe000, sv->vm_start);
+    assert_eq(0x1401000, sv->vm_end);
+    assert_eq(vmas_before,   vma_count());
+    assert_eq((int64_t)pte_head, (int64_t)pr_find_mapping(0x13fe000)->pte);
+    assert_eq((int64_t)pte_mid,  (int64_t)pr_find_mapping(0x13ff000)->pte);
+    assert_eq((int64_t)pte_tail, (int64_t)pr_find_mapping(0x1400000)->pte);
+    assert_eq(0x31, (int)((unsigned char *)
+                  pr_find_page(pte_head & PAGE_4K_MASK)->backing)[0]);
+    assert_eq(0x32, (int)((unsigned char *)
+                  pr_find_page(pte_mid & PAGE_4K_MASK)->backing)[0]);
+    assert_eq(0x33, (int)((unsigned char *)
+                  pr_find_page(pte_tail & PAGE_4K_MASK)->backing)[0]);
+    assert_eq(unmaps_before,  pr_state.total_unmaps);
+    assert_eq(flushes_before, (int)pr_arch_tlb_flushes);
+}
+
 static void test_mmap_auto_and_hint_avoid_reserve(void)
 {
     TEST_SUITE("do_mmap — auto + hinted (non-fixed) never land in the reserve");
@@ -634,6 +755,20 @@ static void test_wiring_order_in_vma_c(void)
     chk = find_from(fn, dev_call, "mm_user_range_protected(");
     assert_not_null(chk);
 
+    /* Device branch, stronger: the predicate check must sit at the
+     * TOP of the `if (_dev_mmap)` block — before the VMA
+     * pre-allocation the handler fills PTEs through (i.e. before
+     * ANY work in that branch, not just before the call itself). */
+    const char *dev_branch = find_from(fn, end, "if (_dev_mmap) {");
+    assert_not_null(dev_branch);
+    const char *dev_alloc = find_from(dev_branch, end, "kmalloc(sizeof(vma_t))");
+    assert_not_null(dev_alloc);
+    chk = find_from(dev_branch, dev_alloc, "mm_user_range_protected(");
+    assert_not_null(chk);
+    /* ...and before the callback invocation too. */
+    chk = find_from(dev_branch, dev_call, "mm_user_range_protected(");
+    assert_not_null(chk);
+
     /* do_mprotect: predicate before the first VMA-flag write. */
     fn = strstr(src, "int64_t do_mprotect(uint64_t addr");
     assert_not_null(fn);
@@ -666,6 +801,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_predicate_degenerate_inputs),
     TEST_ENTRY(test_mmap_fixed_rejects_protected_ranges),
     TEST_ENTRY(test_mmap_fixed_partial_overlap_preserves_mapping),
+    TEST_ENTRY(test_mmap_fixed_partial_overlap_managed_stack_top),
+    TEST_ENTRY(test_mmap_fixed_partial_overlap_managed_guard_straddle),
     TEST_ENTRY(test_mmap_auto_and_hint_avoid_reserve),
     TEST_ENTRY(test_mmap_overflow_and_above_limit_no_mutation),
     TEST_ENTRY(test_munmap_rejects_protected_ranges),
