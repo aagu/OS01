@@ -140,6 +140,9 @@ def self_test() -> None:
         valid_log + "[aarch64-sync] FATAL malformed\n"), \
         "second FATAL (malformed) must fail"
     assert not sync_fault_evidence(
+        valid_log + "[aarch64-sync] FATAL\n"), \
+        "second FATAL (truncated after marker) must fail"
+    assert not sync_fault_evidence(
         valid_log + "[aarch64-sync] FATAL mpidr=0x0000000000000000\n"), \
         "second FATAL (incomplete fields) must fail"
     assert not sync_fault_evidence(
@@ -180,7 +183,7 @@ _FATAL_LINE_RE = re.compile(
 # full spec format. spec §5.3 requires "exactly one FATAL"; a malformed
 # second FATAL still counts (the kernel printing a corrupt second record is
 # itself a defect), so we anchor on the prefix instead of the full regex.
-_ANY_FATAL_PREFIX_RE = re.compile(r"^\[aarch64-sync\] FATAL ", re.MULTILINE)
+_ANY_FATAL_PREFIX_RE = re.compile(r"^\[aarch64-sync\] FATAL(?:[ \t]|$)", re.MULTILINE)
 _ARMED_RE = re.compile(r"^\[aarch64-sync-test\] armed$", re.MULTILINE)
 _RETURNED_RE = re.compile(r"\[aarch64-sync-test\] returned")
 _PRECONDITION_FAIL_RE = re.compile(r"\[aarch64-sync-test\] precondition FAIL")
