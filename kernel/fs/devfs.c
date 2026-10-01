@@ -260,6 +260,62 @@ int devfs_ioctl_node(vfs_node_t *node, int cmd, void *arg)
     return -ENOTTY;
 }
 
+// ── devfs_ioctl_file — file-aware ioctl dispatch ────────────
+// Spec §3: prefer the file callback (it sees f->dev_private), and
+// fall through to the legacy node callback when the file callback
+// returns -ENOTTY.  Devices that have not registered a file
+// callback keep working — the node callback still runs.
+//
+// The host-half kernel ops-pointer guard from devfs_read/write is
+// dropped here on purpose: devfs_ioctl_file is called from fd_ioctl
+// AFTER the caller's fd table lock has already been released, so a
+// rogue node cannot be swapped in mid-dispatch.  A registered
+// ops->ioctl_file is the safe path; a missing one explicitly returns
+// -ENOTTY so the fallback to ops->ioctl is observable from userspace.
+int devfs_ioctl_file(file_t *f, int cmd, void *arg)
+{
+    if (!f || !f->node) return -ENOTTY;
+    if (f->type != FD_DEV || f->node->type != VFS_CHRDEV)
+        return -ENOTTY;
+    int idx = (int)(uintptr_t)f->node->fs_data;
+    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+        return -ENODEV;
+
+    const struct devfs_ops *ops = devices[idx].ops;
+    if (ops && ops->ioctl_file) {
+        int rc = ops->ioctl_file(f, cmd, arg);
+        // -ENOTTY from the file callback is the explicit "I do not
+        // handle this command" signal — fall through to the node
+        // callback for legacy compatibility.  Any other negative
+        // return is final (the device made a decision).
+        if (rc != -ENOTTY) return rc;
+    }
+    if (ops && ops->ioctl) return ops->ioctl(f->node, cmd, arg);
+    return -ENOTTY;
+}
+
+// ── devfs_release_file — per-file final-close hook ───────────
+// Called from file_free while the node reference is still live so
+// the device can reach f->dev_private through either path.  No-op
+// when no release_file callback is registered — this preserves the
+// behaviour of /dev/fb, /dev/tty, /dev/pty*, /dev/random, /dev/serial,
+// /dev/null, /dev/zero (none of which need per-file cleanup today).
+//
+// Idempotency: file_free already runs this exactly once on the
+// drop-to-zero transition.  Defensive guards: NULL f, NULL node,
+// out-of-range index, unregistered device, or missing callback all
+// return without side effects.
+void devfs_release_file(file_t *f)
+{
+    if (!f || !f->node) return;
+    if (f->type != FD_DEV || f->node->type != VFS_CHRDEV) return;
+    int idx = (int)(uintptr_t)f->node->fs_data;
+    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+        return;
+    const struct devfs_ops *ops = devices[idx].ops;
+    if (ops && ops->release_file) ops->release_file(f);
+}
+
 // ── readdir: enumerate registered devices ───────────────────
 
 static int devfs_readdir(vfs_node_t *node, uint64_t index, vfs_dirent_t *entry)
@@ -314,9 +370,27 @@ int devfs_open_node(vfs_node_t *node, const char *path, int flags, file_t **out)
     if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
         return -ENODEV;
 
-    if (devices[idx].ops && (uint64_t)devices[idx].ops >= 0xffff800000000000ULL && devices[idx].ops->open) {
+    if (
+#ifndef OS01_HOST_TEST
+        devices[idx].ops && (uint64_t)devices[idx].ops >= 0xffff800000000000ULL &&
+#endif
+        devices[idx].ops && devices[idx].ops->open) {
         int rc = devices[idx].ops->open(path, out);
         if (rc == 0 && *out) {
+            // Spec §3: the custom-open file is a real FD_DEV; its
+            // node ref must travel with it so file_free's existing
+            // vfs_node_put balances the lookup that brought us
+            // here.  Callbacks that already attached a node (the
+            // legacy tty_magic_open does, with a freshly calloc'd
+            // node) set *out->node themselves — don't double-get.
+            // Same for the FD_PTY_SLAVE branch of tty_magic_open:
+            // it sets f->type = FD_PTY_SLAVE explicitly and would
+            // be wrongly downgraded to FD_DEV by an unconditional
+            // assignment.  Only stamp defaults when the callback
+            // left them unset (file_alloc zeros the struct, so
+            // FD_NONE == "callback did not pick a type").
+            if ((*out)->type == FD_NONE) (*out)->type = FD_DEV;
+            if (!(*out)->node) (*out)->node = vfs_node_get(node);
             (*out)->flags = flags;
             return 0;
         }

@@ -1,4 +1,4 @@
-/* tetris.elf — OS01 Tetris (framebuffer + /dev/keyboard raw scancodes)
+/* tetris.elf — OS01 Tetris (libgfx + /dev/keyboard raw scancodes)
  *
  * Enter:   \e[?1049h (terminal switches to alt screen)
  * Input:   /dev/keyboard — PS/2 Set 1 + E0 prefix scancodes
@@ -6,6 +6,17 @@
  * Exit:    \e[?1049l (terminal restores main screen)
  *
  * Pure game logic lives in tetris_logic.c (host-tested).
+ *
+ * Rendering uses the libgfx 2D API (Task 6 of the 2D graphics API
+ * plan — spec docs/superpowers/specs/2026-09-30-2d-graphics-api-design.md
+ * §6 + plan Task 6): open /dev/fb once for the width/height metadata,
+ * close it, then call gfx_open(0,0,fb_info.width,fb_info.height).
+ * All drawing goes to libgfx's private buffer via gfx_fill_rect;
+ * gfx_present is invoked exactly once per visual event (after each
+ * render, and after each clear-line flash) so the kernel does at
+ * most one GFX_PRESENT ioctl per visual update.  The kernel-side
+ * FBIOSURRENDER ioctl is still issued on /dev/fb so the kernel
+ * console yields the framebuffer before gfx writes go out.
  */
 
 #include <stdint.h>
@@ -16,9 +27,9 @@
 #include <errno.h>
 #include <poll.h>
 #include <fcntl.h>
-#include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <time.h>
+#include <gfx.h>
 #include "tetris_logic.h"
 
 // ── fb_info (must match kernel definition) ──────────────────
@@ -31,7 +42,7 @@ struct fb_info {
 // ── Actions from scancodes ──────────────────────────────────
 enum { A_NONE = 0, A_LEFT, A_RIGHT, A_DOWN, A_ROTATE, A_DROP, A_QUIT };
 
-static uint32_t *fb;
+static gfx_handle_t *gfx;
 static struct fb_info fb_info;
 static int cell;             // board cell size in px
 static int ox, oy;           // board origin (top-left) in fb px
@@ -47,21 +58,26 @@ static uint8_t prev_view[TETRIS_H][TETRIS_W];
 
 static void draw_cell(int col, int row, uint32_t color)
 {
-    for (int y = 0; y < cell; y++) {
-        uint32_t *line = fb + (oy + row * cell + y) * (fb_info.stride / 4)
-                         + (ox + col * cell);
-        for (int x = 0; x < cell; x++)
-            line[x] = color;
-    }
+    gfx_fill_rect(gfx,
+                  (int32_t)(ox + col * cell),
+                  (int32_t)(oy + row * cell),
+                  (uint32_t)cell, (uint32_t)cell,
+                  color);
 }
 
 static void draw_rect(int x0, int y0, int w, int h, uint32_t color)
 {
-    for (int y = 0; y < h; y++) {
-        uint32_t *line = fb + (y0 + y) * (fb_info.stride / 4) + x0;
-        for (int x = 0; x < w; x++)
-            line[x] = color;
-    }
+    gfx_fill_rect(gfx, (int32_t)x0, (int32_t)y0,
+                  (uint32_t)w, (uint32_t)h, color);
+}
+
+// One GFX_PRESENT ioctl per visual event (spec §6: at most one
+// present per frame).  Used after each render() and after each
+// clear-line flash so the user sees the updated framebuffer in
+// step with the game state.
+static void present(void)
+{
+    gfx_present(gfx);
 }
 
 // Render board + falling piece, diffing against prev_view.
@@ -124,7 +140,7 @@ static int parse_scancodes(const uint8_t *buf, int n)
 
 static void clear_screen(void)
 {
-    draw_rect(0, 0, fb_info.width, fb_info.height, 0x000000);
+    draw_rect(0, 0, (int)fb_info.width, (int)fb_info.height, 0x000000);
     // border around board
     draw_rect(ox - 2, oy - 2, TETRIS_W * cell + 4, 2, 0x444444);
     draw_rect(ox - 2, oy + TETRIS_H * cell, TETRIS_W * cell + 4, 2, 0x444444);
@@ -137,15 +153,28 @@ int main(int argc, char **argv)
     (void)argc;
     bool fast = (argc > 1 && argv[1] && strcmp(argv[1], "fast") == 0);
 
-    // ── Framebuffer ──────────────────────────────────────
+    // ── Framebuffer metadata ──────────────────────────────
+    // /dev/fb is opened only to read its struct fb_info (width,
+    // height).  The kernel-side fb mmap path is no longer used
+    // here; libgfx owns the pixels buffer that gfx_present ships
+    // to /dev/gfx0 each frame.
     int fb_fd = open("/dev/fb", O_RDWR);
     if (fb_fd < 0) return 1;
-    read(fb_fd, &fb_info, sizeof(fb_info));
-    fb = mmap(NULL, fb_info.height * fb_info.stride,
-              PROT_READ | PROT_WRITE, MAP_SHARED, fb_fd, 0);
-    if (fb_info.width == 0 || (int64_t)(intptr_t)fb < 0)
-        return 1;
+    ssize_t r = read(fb_fd, &fb_info, sizeof(fb_info));
+    /* Ask the kernel console to step aside before we present.
+     * Mirrors the pre-migration behaviour so the kernel console
+     * doesn't trample our pixels between presents. */
     ioctl(fb_fd, FBIOSURRENDER, NULL);
+    close(fb_fd);
+    if (r != (ssize_t)sizeof(fb_info) ||
+        fb_info.width == 0 || fb_info.height == 0)
+        return 1;
+
+    /* Open the full-screen gfx view.  gfx_open allocates a
+     * zeroed pixels buffer of width*height*4 bytes and configures
+     * a single bounded rectangle in /dev/gfx0's view table. */
+    gfx = gfx_open(0, 0, fb_info.width, fb_info.height);
+    if (!gfx) return 1;
 
     cell = fb_info.height / (TETRIS_H + 4);
     if (cell > 48) cell = 48;
@@ -158,7 +187,11 @@ int main(int argc, char **argv)
 
     // ── Keyboard ─────────────────────────────────────────
     int kbd = open("/dev/keyboard", O_RDONLY);
-    if (kbd < 0) { write(1, "\x1b[?1049l", 8); return 1; }
+    if (kbd < 0) {
+        write(1, "\x1b[?1049l", 8);
+        gfx_close(gfx);
+        return 1;
+    }
 
     // ── Game loop ────────────────────────────────────────
     tetris_board_t board;
@@ -216,11 +249,13 @@ lock_piece:
                     tick_ms = 800 - (lines / 10) * 40;
                     if (tick_ms < 150) tick_ms = 150;
                 }
-                // Flash completed rows white, pause briefly, then redraw
+                // Flash completed rows white, present once, pause briefly
                 // (poll timeout as delay — nanosleep is broken in this kernel).
                 for (int i = 0; i < nfull; i++)
                     for (int c = 0; c < TETRIS_W; c++)
                         draw_cell(c, full_rows[i], 0xFFFFFF);
+                /* One present per visual event: flash now visible. */
+                present();
                 struct pollfd pf = { .fd = kbd, .events = POLLIN };
                 poll(&pf, 1, fast ? 50 : 200);
                 // Force redraw of the cleared rows: prev_view must DIFFER
@@ -235,6 +270,8 @@ lock_piece:
         }
 
         render(&board, &piece);
+        /* One present per visual event: the render diff. */
+        present();
     }
 
     // Leave the alt screen immediately (nanosleep is known-broken in
@@ -242,7 +279,6 @@ lock_piece:
 done:
     write(1, "\x1b[?1049l", 8);
     close(kbd);
-    munmap(fb, fb_info.height * fb_info.stride);
-    close(fb_fd);
+    gfx_close(gfx);
     return 0;
 }

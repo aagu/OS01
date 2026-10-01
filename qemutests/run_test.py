@@ -39,13 +39,42 @@ class TestRunner:
         self.proc = None
         self.serial_log = None
         self.serial_path = None
+        self._serial_stdout_fp = None  # serial-stdio mode writes via this
 
-    def start_qemu(self, network=False):
-        """Launch QEMU with serial output to a temp file."""
+    def start_qemu(self, network=False, serial_stdio=False):
+        """Launch QEMU.
+
+        With ``serial_stdio=False`` (default) the historical
+        file-serial contract is preserved: serial output is captured
+        to a temp file via ``-serial file:<path>`` and stdin is
+        ``DEVNULL`` (the suite never types into QEMU).
+
+        With ``serial_stdio=True`` the runner uses ``-serial stdio``
+        so its own stdin/stdout ARE the serial port: the runner can
+        type shell commands at the BusyBox prompt.  Serial output is
+        also tee'd to a temp file (via ``tee``) so the existing
+        log-reading helpers still work — but the primary transport
+        for the gfx suite is the writable stdin pipe below.
+        """
         self.serial_log = tempfile.NamedTemporaryFile(
             prefix="os01_serial_", suffix=".log", delete=False)
         self.serial_path = self.serial_log.name
         self.serial_log.close()  # QEMU will write to it; we open separately for reading
+
+        if serial_stdio:
+            # The shell needs a writable stdin, so QEMU's stdin is a
+            # PIPE; the serial READ side is captured to the log file
+            # via a direct stdout redirect.  We open the log file in
+            # append+line-buffered mode so the existing
+            # ``_read_available()`` polling loop keeps working
+            # unchanged.  No ``tee`` wrapper — that would deadlock on
+            # the pipe because tee's stdout side fills up while no
+            # Python reader drains it.
+            serial_arg = "stdio"
+            stdin_target = subprocess.PIPE
+        else:
+            serial_arg = f"file:{self.serial_path}"
+            stdin_target = subprocess.DEVNULL
 
         args = [
             QEMU,
@@ -63,7 +92,7 @@ class TestRunner:
             "-device", "virtio-rng-pci,rng=rng0",
             "-m", "512",
             "-smp", QEMU_SMP,
-            "-serial", f"file:{self.serial_path}",
+            "-serial", serial_arg,
             "-display", "none",
             "-no-reboot",
             "-no-shutdown",
@@ -71,12 +100,28 @@ class TestRunner:
         if network:
             args += ["-netdev", "user,id=net0,dhcpstart=10.0.2.20",
                      "-device", "e1000e,netdev=net0"]
-        self.proc = subprocess.Popen(
-            args,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        if serial_stdio:
+            # Redirect QEMU's stdout (the serial READ side under
+            # -serial stdio) into the log file directly — line-buffered
+            # so the polling reader sees data promptly.  Stderr is
+            # dropped: nothing in QEMU's stderr matters for this suite.
+            # We keep the handle on ``self`` so cleanup() can close it
+            # before unlinking the path on Windows (and to release the
+            # inode on Linux too).
+            self._serial_stdout_fp = open(self.serial_path, "ab", buffering=0)
+            self.proc = subprocess.Popen(
+                args,
+                stdin=subprocess.PIPE,
+                stdout=self._serial_stdout_fp,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            self.proc = subprocess.Popen(
+                args,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
 
     def _read_available(self):
         """Read any new data from the serial log file."""
@@ -136,11 +181,26 @@ class TestRunner:
         return None
 
     def send(self, text):
-        """Not supported with file-based serial (systest is fully automated)."""
-        pass
+        """Send a raw string to the QEMU stdin pipe (serial-stdio mode).
+
+        Raises if QEMU was started in file-serial mode (no writable
+        stdin).  The bytes are flushed before returning so a
+        subsequent wait_for_prompt() can rely on QEMU having
+        received them.
+        """
+        if not self.proc or not self.proc.stdin or self.proc.stdin is subprocess.DEVNULL:
+            raise RuntimeError(
+                "send() requires serial_stdio=True (stdin pipe is closed in file-serial mode)")
+        self.proc.stdin.write(text.encode("utf-8"))
+        self.proc.stdin.flush()
 
     def send_line(self, text):
-        pass
+        """Send a command line (text + ``\\n``) and flush.
+
+        Used by the gfx suite to invoke ``/bin/test_gfx`` after the
+        shell prompt is observed.  Other suites never call this.
+        """
+        self.send(text + "\n")
 
     def wait_for_prompt(self, timeout=None):
         """Wait for the shell prompt."""
@@ -153,6 +213,12 @@ class TestRunner:
                 self.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+        if self._serial_stdout_fp is not None:
+            try:
+                self._serial_stdout_fp.close()
+            except OSError:
+                pass
+            self._serial_stdout_fp = None
         if self.serial_path and os.path.exists(self.serial_path):
             try:
                 os.unlink(self.serial_path)
@@ -414,6 +480,70 @@ def test_network(tester):
         services.close()
 
 
+def test_gfx(tester):
+    """Ring-3 gfx E2E (Task 5 of the 2D graphics API plan).
+
+    The caller (``main()`` -> ``test_gfx`` dispatch) is responsible
+    for invoking ``tester.start_qemu(serial_stdio=True)`` BEFORE this
+    function runs (the gfx suite uses the same ``TestRunner`` instance
+    as the other suites, and ``main()`` does not pre-start QEMU).
+    This function is the shell-side flow: wait for the BusyBox ``#``
+    prompt, invoke ``/bin/test_gfx`` and wait for the compact
+    ``[GFX TEST] PASS`` marker.
+
+    The test program runs the substantive assertion logic (left-red/
+    right-green/white diagonal in a full-screen view, central small
+    view with surrounding sentinels, negative cases).  This runner
+    is just the transport + marker gate, by design.
+
+    On success, the binary prints exactly one PASS line; on any
+    failure it prints ``[GFX TEST] FAIL: <reason>`` with the same
+    prefix and exits non-zero.  We treat any non-PASS outcome as
+    failure (including timeouts).
+    """
+    # If the caller forgot to start QEMU, we start it here too — but
+    # only if no proc exists.  Calling start_qemu twice would clobber
+    # the serial log file the first invocation already opened.
+    if not tester.proc:
+        tester.start_qemu(serial_stdio=True)
+
+    # Wait for the BusyBox ash prompt.  read_until() matches on the
+    # serial log file (the tee side of the stdio pipe), so a normal
+    # boot + login + ash start all complete before this returns.
+    # The TestRunner already owns the timeout budget; we honour it
+    # for both the prompt and the marker so the runner's deadline is
+    # visible to the test (and so unit tests can shorten it).
+    prompt = tester.read_until("# ", timeout=tester.timeout)
+    if not prompt:
+        print("FAIL: gfx runner never saw the shell prompt")
+        return False
+
+    # Type the test command.  send_line() flushes immediately.
+    tester.send_line("/bin/test_gfx")
+
+    # Wait for the PASS marker.  The test binary writes a single
+    # ``[GFX TEST] PASS\\n`` to stdout; under -serial stdio the
+    # shell's stdout is QEMU's serial port, so the marker appears on
+    # the log file.
+    passed = tester.read_until("[GFX TEST] PASS", timeout=tester.timeout)
+    if passed is None:
+        # Drain a moment so a slow FAIL line still makes it into the
+        # log before we report the cause.
+        time.sleep(1)
+        log = tester._read_available().decode('utf-8', errors='replace')
+        # Surface whatever marker the test wrote (PASS, FAIL, or
+        # something else) so a human reading the runner output can
+        # see why we said "FAIL".
+        marker_re = re.compile(r"\[GFX TEST\][^\n]*")
+        m = marker_re.search(log)
+        print(f"FAIL: /bin/test_gfx did not produce PASS marker "
+              f"(last test marker: {m.group(0) if m else '<none>'!r})")
+        return False
+
+    print("PASS: [GFX TEST] PASS marker observed")
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description="OS01 test runner")
     parser.add_argument("--disk", default=DISK_IMG, help="Disk image to test")
@@ -432,6 +562,8 @@ def main():
             result = test_inittab_phase(tester)
         elif args.test_name == "network":
             result = test_network(tester)
+        elif args.test_name == "gfx":
+            result = test_gfx(tester)
         else:
             print(f"Unknown test: {args.test_name}")
             result = False

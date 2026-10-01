@@ -113,11 +113,30 @@ $(TERMINAL_FONT_OBJ): terminal_font.psf
 	$(OBJ_CPY) -B i386 -I binary -O elf64-x86-64 terminal_font.psf $@
 
 # ══════════════════════════════════════════════════════════════
-#  tetris.elf — needs tetris_logic.o (override pattern rule)
+#  tetris.elf — needs tetris_logic.o + libgfx (Task 6 migration)
 # ══════════════════════════════════════════════════════════════
+# Task 6 migrated the renderer from direct /dev/fb mmap to libgfx:
+# gfx_open / gfx_fill_rect / gfx_present / gfx_close live in
+# libgfx.a.  The archive is linked explicitly with -lgfx AFTER the
+# using object so the static-archive linker pass picks the symbols
+# up; -lc follows the same convention used by test_gfx.elf.
 $(BUILD_DIR)/tetris.elf: $(OBJ_DIR)/tetris.o $(OBJ_DIR)/tetris_logic.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
 	@mkdir -p $(dir $@)
-	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/tetris.o $(OBJ_DIR)/tetris_logic.o -lc
+	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/tetris.o $(OBJ_DIR)/tetris_logic.o -lgfx -lc
+	$(OBJ_CPY) --strip-debug $@
+
+# ══════════════════════════════════════════════════════════════
+#  test_gfx.elf — libgfx client smoke (Task 3)
+#  Links libgfx.a explicitly with -lgfx -lc AFTER the using
+#  object so the static archive order resolves gfx_open /
+#  gfx_close / gfx_get_info / gfx_set_clip / gfx_present (the
+#  library's only out-of-line wrapper file at this stage; Task 4
+#  will add the primitives).  tetris.elf follows the same pattern
+#  in Task 5.
+# ══════════════════════════════════════════════════════════════
+$(BUILD_DIR)/test_gfx.elf: $(OBJ_DIR)/test_gfx.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/test_gfx.o -lgfx -lc
 	$(OBJ_CPY) --strip-debug $@
 
 # ── Clean ──────────────────────────────────────────────────

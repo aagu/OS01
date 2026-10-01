@@ -29,9 +29,10 @@ roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `
 | ASLR-B：ET_DYN/PIE | 单独实施可重定位 ELF 的加载偏移、静态 PIE 重定位及用户程序构建迁移（含 BusyBox） | ASLR-A 验收；当前 ELF loader 仅支持 ET_EXEC、用户构建使用 `-fno-pie -no-pie`；需设计重定位、linker script、启动 ABI/auxv 与回退测试 | |
 | UBSan + KASan | 内核编译期 instrument | 独立 | ArvernOS |
 | 堆加固 | malloc double-free/溢出检测 | 独立 | |
+| 用户堆与 ELF 映射隔离（方案三） | **待实施**：将 ELF 尾页与用户堆分成独立的 4 KiB 映射（不相交的 ELF 大页可保留）；堆 VMA 随 `brk` 增长/收缩，收缩时解除页映射，未申请的堆地址不可因缺页而获得可写页。同步核查 `exec`、fork/COW、退出回收，以及 `munmap`/`MAP_FIXED` 与堆范围的冲突；用 host 与 QEMU 用例验证边界和现有程序启动。 | 2D 图形 API 的 16 MiB 用户堆扩展 ✅；先完成独立 spec/plan | |
 | NX 页 | 栈/堆不可执行 + mmap `PROT_EXEC` 审计 | 独立 | |
 
-ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 `USER_STACK_BASE=0x800000`；栈随机化另列后续范围，完成 A/B 后也不能称为完整用户态 ASLR。aarch64 phase 1 尚无用户态，本项先不扩大到 aarch64。
+ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 `USER_STACK_BASE=0x1400000`；栈随机化另列后续范围，完成 A/B 后也不能称为完整用户态 ASLR。aarch64 phase 1 尚无用户态，本项先不扩大到 aarch64。
 
 ### 🏗 P2 aarch64 适配
 
@@ -53,12 +54,16 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 ### 🖥 P3 GUI
 
-基座（已完成）：fb、fb mmap、terminal 双缓冲 + alt-screen、键盘扫描码、PS/2 鼠标驱动（i8042 共享控制器层 + `/dev/mouse` 8 字节事件 ABI + 500 ms 有界探测，2026-09-27 落地，见 `docs/driver.md`）。Tetris 游戏已落地（见 `docs/gui.md`）。
+基座（已完成）：fb、fb mmap、terminal 双缓冲 + alt-screen、键盘扫描码、PS/2 鼠标驱动（i8042 共享控制器层 + `/dev/mouse` 8 字节事件 ABI + 500 ms 有界探测，2026-09-27 落地，见 `docs/driver.md`）。
+
+**2026-09-30 完成**：`libgfx.a` 静态库 + `/dev/gfx0` 受限 present 设备 + Tetris 迁移（spec/plan §6，task-1..6 全部闭环；USER_PAGE_SIZE 从 2 MiB 升到 16 MiB 以容纳 1440×900 RGB32 像素缓冲；sys_exec/spawn_user_task 现在为新 MM 插入 heap VMA 让 brk 扩展能命中 demand-paging 路径）。细节见 `docs/gui.md`、`docs/driver.md` gfx0 章节。
+
+**后续内存边界工作**：当前 heap VMA 覆盖到 16 MiB 上限，`SYS_brk` 只更新 `end_brk`；ELF 仍以可写 2 MiB 大页装载。严格隔离未申请的堆页列入 P1「用户堆与 ELF 映射隔离（方案三）」，作为独立任务，不计入上述 2D API 闭环。
 
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
-| 2D 图形 API | fb 之上画线/矩形/位图 blit | 独立 | |
-| 可缩放字体渲染器 | 矢量/位图缩放 | 2D API | HackOS |
+| 2D 图形 API | ✅ **2026-09-30 闭环**：`libgfx` 像素缓冲 + `/dev/gfx0` 受限 present（详见 `docs/gui.md`） | | |
+| 可缩放字体渲染器 | 矢量/位图缩放 | 2D API ✅ | HackOS |
 | Window Server + compositor | 多窗口管理 + 合成 | 字体/2D/鼠标 | opuntiaOS + HackOS |
 
 ### 🔧 P4 硬件适配

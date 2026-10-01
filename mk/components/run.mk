@@ -303,13 +303,75 @@ TEST_SELFTEST_IMAGE := $(BUILD_DIR)/image/selftest/disk.img
 # overridable.
 KERNEL_SELFTEST_SMP ?= 4
 
-.PHONY: test-host test-pmm-boot-reservation
+.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-device test-gfx-client test-gfx-primitives
 test-host:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,run $(OS01_SUBMAKE_ARGS))
 	python3 qemutests/pmm_boot_reservation_test.py
 test-pmm-boot-reservation:
 	python3 qemutests/pmm_boot_reservation_test.py
+# Focused hosttest for the gfx 2D API plan Task 1 — per-file device
+# ioctl/release lifecycle.  Runs the single TEST_BINS entry
+# (test_gfx_file_lifecycle.elf) and asserts the contract spelled out
+# in spec §3 (devfs_open_node attaches a node ref, devfs_ioctl_file
+# prefers ioctl_file and falls through to ioctl on -ENOTTY,
+# devfs_release_file fires release_file exactly once on the last
+# file_put, and the legacy node-only ioctl / no-op release paths
+# still work for devices without file callbacks).
+test-gfx-file-lifecycle:
+	$(call require_capability,rootfs)
+	@$(call os01_submake,hosttests,test-gfx-file-lifecycle $(OS01_SUBMAKE_ARGS))
+# Focused hosttest for the gfx 2D API plan Task 2 — bounded /dev/gfx0
+# framebuffer present device.  Runs test_gfx_device.elf which
+# host-compiles the REAL kernel/driver/gfx.c against the same
+# gfx_test_runtime the lifecycle test uses, and asserts the spec §3+§4
+# contract: GFX_CREATE_VIEW size/overflow validation, reconfigure
+# rejection, 16-slot limit, GFX_GET_INFO local dims, independent
+# views, release/reopen, GFX_PRESENT happy path + sentinels outside
+# the view + row padding + overlapping views + invalid stride/reserved
+# + kernel-range pointer + missing-range-check detection + mid-fault
+# partial visibility, unconfigured-view rejection, and unknown-cmd
+# ENOTTY.  fb_get_info / fb_write_row are mocked in the test TU
+# (kernel/driver/fb.c's heavy VMA/VMM/scheduler chain is out of
+# scope for this test; the helpers are tested by the QEMU suite
+# as part of the integration tests).
+test-gfx-device:
+	$(call require_capability,rootfs)
+	@$(call os01_submake,hosttests,test-gfx-device $(OS01_SUBMAKE_ARGS))
+# Focused hosttest for the gfx 2D API plan Task 3 — libgfx client
+# lifecycle.  Runs test_gfx_client.elf which host-compiles the REAL
+# libgfx/gfx.c (open/close/get_info/set_clip/present) with HOST_CC
+# and links it through -Wl,--wrap=open,--wrap=close,--wrap=ioctl,
+# --wrap=malloc,--wrap=free so the test TU observes libgfx's libc
+# call pattern.  Asserts the spec §3+§4+§5 contract: call order in
+# gfx_open (open → CREATE_VIEW → GET_INFO → 2x malloc), ENOENT
+# normalized to ENODEV, cleanup at every failure point (handle
+# allocated before CREATE_VIEW is freed on CREATE_VIEW failure,
+# GET_INFO failure, and pixel-alloc failure), gfx_get_info(NULL)
+# returns zero with errno=EINVAL, gfx_set_clip never issues an
+# ioctl (clip is library-local state per spec §4), gfx_present
+# issues exactly one ioctl and propagates the ioctl wrapper's
+# errno.  gfx_present's request struct carries the buffer pointer
+# from the handle and the configured stride.  Kernel-side mocks
+# (gfx_test_runtime.h) are NOT in scope here — libgfx has no
+# kernel dependencies.
+test-gfx-client:
+	$(call require_capability,rootfs)
+	@$(call os01_submake,hosttests,test-gfx-client $(OS01_SUBMAKE_ARGS))
+# Focused hosttest for the gfx 2D API plan Task 4 — libgfx 2D
+# primitives (pixel / line / rect / sprite).  Runs
+# test_gfx_primitives.elf which host-compiles the REAL libgfx/line.c
+# + libgfx/sprite.c and asserts spec §4: pixel/line/rect colour
+# correctness, clipping at every boundary (negative / oversized /
+# partial / fully-outside / library-local clip rectangle), Bresenham
+# in all 8 octants with both endpoints, INT32_MIN/MAX endpoints
+# that must not overflow or loop, sprite opaque / color-key=0
+# (black also transparent) / mask MSB-first / padded source and
+# mask stride.  libgfx/gfx.c is NOT compiled (the primitives test
+# exercises in-memory drawing only — no fd, no syscall).
+test-gfx-primitives:
+	$(call require_capability,rootfs)
+	@$(call os01_submake,hosttests,test-gfx-primitives $(OS01_SUBMAKE_ARGS))
 
 # Per-SUITE lookups, used by test-qemu to pick the right variant build
 # flavor and the right image path. These are Make variables so they
@@ -318,10 +380,12 @@ TEST_QEMU_FLAVOR_phase-0       =
 TEST_QEMU_FLAVOR_systest       = OS01_SYSTEST=1
 TEST_QEMU_FLAVOR_inittab-phase = INITTAB_FILE=config/inittab.test
 TEST_QEMU_FLAVOR_network       = OS01_NETTEST=1
+TEST_QEMU_FLAVOR_gfx           =
 TEST_QEMU_IMG_phase-0       = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_systest       = $(TEST_SYSTEST_IMAGE)
 TEST_QEMU_IMG_inittab-phase = $(TEST_INITTAB_IMAGE)
 TEST_QEMU_IMG_network       = $(TEST_NETTEST_IMAGE)
+TEST_QEMU_IMG_gfx           = $(NORMAL_IMAGE)
 
 .PHONY: test-qemu
 # Use the per-SUITE Make variables from Step 1. The image path is
@@ -350,15 +414,21 @@ test-qemu: SUITE := $(SUITE)
 test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@case "$(SUITE)" in \
-	  phase-0|systest|inittab-phase|network) ;; \
-	  *) echo "SUITE must be phase-0|systest|inittab-phase|network, got '$(SUITE)'" >&2; exit 1;; \
+	  phase-0|systest|inittab-phase|network|gfx) ;; \
+	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx, got '$(SUITE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-qemu] SUITE=$(SUITE) flavor=$(TEST_QEMU_FLAVOR_$(SUITE)) img=$(TEST_QEMU_IMG_$(SUITE))"
-	@if [ "$(SUITE)" != "phase-0" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
+	# The normal-image hash guard skips BOTH ``phase-0`` (the historical
+	# no-variant path) AND ``gfx`` (the new ring-3 graphics suite, which
+	# uses the normal image directly per spec §6 — a gfx rebuild that
+	# touches the normal image must not be reported as a hash drift).
+	# Every other suite runs against an isolated variant build and
+	# must therefore not modify the normal image.
+	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.before"; \
 	fi
 	$(MAKE) $(TEST_QEMU_FLAVOR_$(SUITE)) image
-	@if [ "$(SUITE)" != "phase-0" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
+	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	fi
@@ -580,7 +650,7 @@ help:
 	@echo ''
 	@echo 'Test (6 canonical buckets; varied capability):'
 	@printf '  %-22s %-13s %s\n' \
-		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network>)';
+		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx>)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \

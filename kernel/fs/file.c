@@ -125,10 +125,20 @@ void file_free(file_t *f)
         f->pty = NULL;
     }
 
+    // Spec §3: per-file device release fires BEFORE the node ref is
+    // released, so the release callback can reach f->dev_private
+    // (and through the live node ref, the device's private_data)
+    // while the device state is still coherent.  devfs_release_file
+    // is a no-op when no release_file callback is registered —
+    // /dev/fb, tty, pty, random, serial, null, zero are unaffected.
+    // Also wipe f->dev_private so a buggy re-entry path can't see a
+    // dangling pointer; release_file has already freed it.
     if (f->node) {
+        devfs_release_file(f);
         vfs_node_put(f->node);
         f->node = NULL;
     }
+    f->dev_private = NULL;
     if (f->type == FD_SOCKET && f->sock) {
         if (f->sock->conn)
             netconn_delete((struct netconn *)f->sock->conn);
@@ -1071,8 +1081,14 @@ int64_t fd_ioctl(file_t *f, int cmd, void *arg)
     switch (f->type) {
     case FD_VFS:
     case FD_DEV: {
+        // Spec §3: prefer the file-aware dispatch (reaches
+        // f->dev_private); devfs_ioctl_file falls through to the
+        // legacy node callback when ioctl_file returns -ENOTTY.
+        // Preserves /dev/fb, tty, pty, random, serial, null, zero
+        // behaviour — none of them set ioctl_file, so the legacy
+        // node callback fires as before.
         if (!f->node) return -ENOTTY;
-        return devfs_ioctl_node(f->node, cmd, arg);
+        return devfs_ioctl_file(f, cmd, arg);
     }
     case FD_PTY_MASTER: {
         pty_t *pty = f->pty;

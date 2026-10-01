@@ -1094,6 +1094,9 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
 extern void arch_kernel_thread_entry(void);
 
 #define USER_CODE_ADDR   0x400000UL
+// Matches kernel/arch/x86_64/intr/trap.c — the user VA range is
+// [USER_CODE_ADDR, USER_CODE_ADDR + USER_PAGE_SIZE).
+#define USER_PAGE_SIZE   0x1000000UL  // 16 MiB (Task 6, libgfx)
 
 // ── FPU helper ──────────────────────────────────────────────
 // Alloc a 512+15 byte buffer for FXSAVE/FXRSTOR.  The returned
@@ -1453,6 +1456,26 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     mm->start_brk = PAGE_4K_ALIGN(mm->end_code);
     mm->end_brk   = mm->start_brk;
 
+    // Insert a heap VMA covering [start_brk, USER_CODE_ADDR + USER_PAGE_SIZE).
+    // The demand-paging fault handler (do_page_fault) requires a vma_t to
+    // resolve a page fault inside this range; without it, brk-extended
+    // heap accesses fault-and-die.  The cap matches the brk syscall's
+    // own check at USER_CODE_ADDR + USER_PAGE_SIZE - 0x1000 (a 4 KiB
+    // safety margin past the top of the user VA region).
+    {
+        vma_t *hv = (vma_t *)kmalloc(sizeof(vma_t));
+        if (hv) {
+            list_init(&hv->list);
+            hv->vm_start     = mm->start_brk;
+            hv->vm_end       = USER_CODE_ADDR + USER_PAGE_SIZE;
+            hv->vm_flags     = VM_READ | VM_WRITE | VM_ANON;
+            hv->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
+            hv->vm_pgoff     = 0;
+            hv->vm_file      = NULL;
+            vma_insert(mm, hv);
+        }
+    }
+
     // 6. Map the user stack page (separate 2MB page at 0x600000)
     struct Page *stack_page = alloc_pages(ZONE_NORMAL, 1, 0);
     if (!stack_page) {
@@ -1609,6 +1632,22 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     // Set heap just after the loaded ELF segments
     new_mm->start_brk = PAGE_4K_ALIGN(new_mm->end_code);
     new_mm->end_brk   = new_mm->start_brk;
+
+    // Insert a heap VMA covering [start_brk, USER_CODE_ADDR + USER_PAGE_SIZE).
+    // Mirrors the setup in spawn_user_task() — see that comment for why.
+    {
+        vma_t *hv = (vma_t *)kmalloc(sizeof(vma_t));
+        if (hv) {
+            list_init(&hv->list);
+            hv->vm_start     = new_mm->start_brk;
+            hv->vm_end       = USER_CODE_ADDR + USER_PAGE_SIZE;
+            hv->vm_flags     = VM_READ | VM_WRITE | VM_ANON;
+            hv->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
+            hv->vm_pgoff     = 0;
+            hv->vm_file      = NULL;
+            vma_insert(new_mm, hv);
+        }
+    }
 
     // 6. Map the user stack page
     struct Page *stack_page = alloc_pages(ZONE_NORMAL, 1, 0);
