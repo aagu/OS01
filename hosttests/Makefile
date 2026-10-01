@@ -94,7 +94,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_gfx_file_lifecycle.elf \
     $(TEST_BLD)/test_gfx_device.elf \
     $(TEST_BLD)/test_gfx_client.elf \
-    $(TEST_BLD)/test_gfx_primitives.elf
+    $(TEST_BLD)/test_gfx_primitives.elf \
+    $(TEST_BLD)/test_aarch64_sync_fault.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -406,6 +407,18 @@ $(TEST_BLD)/test_elf_validate.elf: $(TEST_BLD)/test_elf_validate.o $(LIBC_OBJS) 
 
 # standalone test (no kernel/libc deps)
 $(TEST_BLD)/test_wait_basic.elf: $(TEST_BLD)/test_wait_basic.o
+	$(HOST_CC) -o $@ $<
+
+# aarch64 EL1h sync diagnostic helper (Task 1).
+# Compiles the REAL header kernel/include/arch/aarch64/sync_fault.h against
+# host clang; the helper is a static inline so the test exercises the same
+# truth table the kernel's trap.c will.
+$(TEST_BLD)/test_aarch64_sync_fault.o: $(TEST_CASES)/test_aarch64_sync_fault.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/sync_fault.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(KERNEL_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_sync_fault.elf: $(TEST_BLD)/test_aarch64_sync_fault.o
 	$(HOST_CC) -o $@ $<
 
 # Sync primitive test — compiles the real rwlock/seqlock implementations.

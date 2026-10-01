@@ -179,16 +179,18 @@ endif
 # variable) so it survives across recipe lines — a shell variable set
 # in one `@`-prefixed recipe line is empty in the next (each `@` line is
 # a fresh /bin/sh invocation, verified).
-TEST_AARCH64_EXTRA_smp     := $(if $(filter 0,$(AARCH64_UEFI_SMP_DIAGNOSTIC_DTB)),,--diagnostic-dtb=auto)
-TEST_AARCH64_EXTRA_no-ack  := $(if $(filter 0,$(AARCH64_UEFI_SMP_DIAGNOSTIC_DTB)),,--diagnostic-dtb=auto)
-TEST_AARCH64_EXTRA_gic-spi := --diagnostic-dtb=auto
+TEST_AARCH64_EXTRA_smp        := $(if $(filter 0,$(AARCH64_UEFI_SMP_DIAGNOSTIC_DTB)),,--diagnostic-dtb=auto)
+TEST_AARCH64_EXTRA_no-ack     := $(if $(filter 0,$(AARCH64_UEFI_SMP_DIAGNOSTIC_DTB)),,--diagnostic-dtb=auto)
+TEST_AARCH64_EXTRA_gic-spi    := --diagnostic-dtb=auto
+# sync-fault has no DTB-mode knob — it runs the EL1h sync fault probe on
+# the existing UEFI/DTB mechanism but with an isolated image/firmware tree.
 
 # Pre-build helpers (one per MODE) put the $(MAKE) sub-invocation on its
 # own recipe line so `make -n` honors the dry-run contract. A single
 # multi-branch recipe (the v2 approach with `if [ "$(MODE)" = ... ]`)
 # put $(MAKE) inside an `if/fi` block on one recipe line and would
 # execute under -n.
-.PHONY: _test-aarch64-prep-smp _test-aarch64-prep-no-ack _test-aarch64-prep-gic-spi
+.PHONY: _test-aarch64-prep-smp _test-aarch64-prep-no-ack _test-aarch64-prep-gic-spi _test-aarch64-prep-sync-fault
 _test-aarch64-prep-smp:
 	$(MAKE) KERNEL_SELFTEST=1 aarch64-uefi
 _test-aarch64-prep-no-ack:
@@ -198,11 +200,19 @@ _test-aarch64-prep-no-ack:
 	  || { echo "Build the injected aarch64-uefi image first" >&2; exit 1; }
 _test-aarch64-prep-gic-spi:
 	$(MAKE) KERNEL_SELFTEST=1 aarch64-uefi
+# AAGU-EL1-sync (spec §5): the sync-fault variant builds the dedicated
+# kernel/image/firmware tree (KERNEL_VARIANT=sync-fault) and propagates
+# the fault injection flag through the controlled sub-make boundary. The
+# recipe mirrors _test-aarch64-prep-smp so the dry-run contract still
+# honours `make -n`; Task 3's harness target consumes the produced
+# image/firmware from AARCH64_UEFI_SYNC_FAULT_{DISK,FIRMWARE}.
+_test-aarch64-prep-sync-fault:
+	$(MAKE) KERNEL_SELFTEST=1 AARCH64_SYNC_FAULT_TEST=1 aarch64-uefi
 
 # Run helpers (one per MODE) keep the python harness on its own recipe
 # line, after the pre-build. The python call therefore is NOT executed
 # under `-n` (per the dry-run contract).
-.PHONY: _test-aarch64-run-smp _test-aarch64-run-no-ack _test-aarch64-run-gic-spi
+.PHONY: _test-aarch64-run-smp _test-aarch64-run-no-ack _test-aarch64-run-gic-spi _test-aarch64-run-sync-fault
 _test-aarch64-run-smp:
 	python3 qemutests/aarch64_uefi_smp.py \
 	  --cpus 1 2 4 --repeat 3 --timeout 90 --expect-selftest --expect-gic --expect-clk \
@@ -226,18 +236,34 @@ _test-aarch64-run-gic-spi:
 	  --image "$(AARCH64_UEFI_SELFTEST_DISK)" \
 	  --qemu "$(AARCH64_QEMU)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-gic-spi/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+# AAGU-EL1-sync Task 3: drives the dedicated sync-fault QEMU image
+# (KERNEL_VARIANT=sync-fault, AARCH64_UEFI_SYNC_FAULT_{DISK,FIRMWARE}) in 1-CPU
+# mode and asserts the EL1h sync fatal diagnostic via
+# qemutests/aarch64_sync_fault.py. The harness parser is the only
+# success criterion: timeouts do NOT count, and the run target only
+# consumes the dedicated sync-fault paths (never the selftest image).
+_test-aarch64-run-sync-fault:
+	python3 qemutests/aarch64_sync_fault.py \
+	  --timeout 60 \
+	  --firmware "$(AARCH64_UEFI_SYNC_FAULT_FIRMWARE)" \
+	  --image "$(AARCH64_UEFI_SYNC_FAULT_DISK)" \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sync-fault/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 
 # test-aarch64: the umbrella. Dispatches to the per-MODE prep + run helpers.
 test-aarch64: MODE ?= smp
 test-aarch64: MODE := $(MODE)
 # No image prerequisites: smp/gic-spi build the selftest variant in their
 # prep helper, while no-ack must only consume an already injected image.
+# sync-fault is added to the gate in line with the dedicated _test-aarch64-
+# prep-sync-fault / _test-aarch64-run-sync-fault pair (Task 3 wires the
+# run target and harness parser; this umbrella already accepts the mode).
 test-aarch64:
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
 	@case "$(MODE)" in \
-	  smp|no-ack|gic-spi) ;; \
-	  *) echo "MODE must be smp|no-ack|gic-spi, got '$(MODE)'" >&2; exit 1;; \
+	  smp|no-ack|gic-spi|sync-fault) ;; \
+	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault, got '$(MODE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-aarch64] MODE=$(MODE) extra=$(TEST_AARCH64_EXTRA_$(MODE))"
 	$(MAKE) --no-print-directory _test-aarch64-prep-$(MODE)
@@ -658,7 +684,7 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'test-kernel-selftest' '(rootfs)'   'QEMU built-in selftests (isolated selftest image, KERNEL_SELFTEST=1)';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-aarch64'        '(uefi)'       'aarch64 UEFI test (MODE=<smp|no-ack|gic-spi>)';
+		 'test-aarch64'        '(uefi)'       'aarch64 UEFI test (MODE=<smp|no-ack|gic-spi|sync-fault>)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-contract'       '(rootfs|uefi)' 'Full build contract (PROFILE=<x86_64-clang|aarch64-clang>)';
 	@echo ''

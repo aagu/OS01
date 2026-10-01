@@ -465,6 +465,146 @@ def check_elf(path):
         ranges.append((start, end))
     assert symbols["_kernel_lma_end"][0] <= HANDOFF
 
+    # AArch64 vector ABI: EL1h sync slot (+0x200) → el1_sync_entry, IRQ slot
+    # (+0x280) → el1_irq_entry.  Decode the 32-bit A64 unconditional B
+    # instruction at each offset using the same PT_LOAD file offset used to
+    # read instructions, not an objdump string match.
+    check_vector_branches(path, symbols["exception_vectors"][0], symbols)
+    # Source-order check: stores for x0-x30 at PT_REGS_* offsets must precede
+    # any reuse of x0-x2 for ESR/FAR/ELR/SPSR/sysreg snapshot or a `bl` into C.
+    check_sync_entry_source_order(ROOT / "kernel/arch/aarch64/intr/entry.S")
+
+
+def _decode_aarch64_b32(insn):
+    # Top 6 bits = 0b000101 → unconditional branch immediate.  imm26 is
+    # bits [25:0]; PC-relative offset is sign-extended imm26 << 2.
+    if (insn >> 26) != 0b000101:
+        return None
+    imm26 = insn & 0x3FFFFFF
+    if imm26 & (1 << 25):
+        imm26 -= (1 << 26)
+    return imm26 << 2
+
+
+def check_vector_branches(path, vectors_va, symbols):
+    data = path.read_bytes()
+    header = struct.unpack_from("<16sHHIQQQIHHHHHH", data)
+    loads = []
+    for i in range(header[10]):
+        ph = struct.unpack_from("<IIQQQQQQ", data, header[5] + i * header[9])
+        if ph[0] == 1:
+            loads.append(dict(flags=ph[1], va=ph[3], pa=ph[4],
+                              filesz=ph[5], memsz=ph[6], off=ph[2]))
+    for off, want_label in ((0x200, "el1_sync_entry"),
+                            (0x280, "el1_irq_entry")):
+        slot_va = vectors_va + off
+        seg = next(s for s in loads
+                   if s["va"] <= slot_va < s["va"] + s["filesz"])
+        file_off = seg["off"] + (slot_va - seg["va"])
+        insn = struct.unpack_from("<I", data, file_off)[0]
+        delta = _decode_aarch64_b32(insn)
+        assert delta is not None, (
+            "vector slot +0x%x does not contain an A64 unconditional B" % off)
+        target_va = slot_va + delta
+        assert want_label in symbols, (
+            "%s not exported by kernel ELF (Task 1 must define the symbol)"
+            % want_label)
+        target_sym_va = symbols[want_label][0]
+        assert target_va == target_sym_va, (
+            "vector slot +0x%x branches to 0x%x, expected %s @ 0x%x"
+            % (off, target_va, want_label, target_sym_va))
+
+
+def check_sync_entry_source_order(entry_path):
+    """Verify that stores to PT_REGS_X0..PT_REGS_X30 in el1_sync_entry come
+    before the first reuse of x0-x2 for the C-ABI parameter passing (any
+    `mrs ... esr_el1/far_el1/sp_el0/elr_el1/spsr_el1` or `bl <C symbol>`
+    that consumes x0-x2 for AAPCS64 params).
+
+    This guards the source-level invariant: aarch64 EL1h sync must capture
+    the FULL 31-GPR pt_regs frame before any of those registers are
+    clobbered for the fatal-diagnostic parameter passing.
+    """
+    import re
+    text = entry_path.read_text()
+    lines = text.splitlines()
+    # Locate el1_sync_entry: label and the next label (or end of file).
+    start = None
+    end = len(lines)
+    label_re = re.compile(r"^\s*\.?globl\s+(\w+)\s*$|^\s*(\w+)\s*:\s*$")
+    for i, line in enumerate(lines):
+        m = label_re.match(line)
+        if not m:
+            continue
+        name = m.group(1) or m.group(2)
+        if start is None and name == "el1_sync_entry":
+            start = i
+            continue
+        if start is not None and name not in ("el1_sync_entry",) and ":" in line:
+            end = i
+            break
+    assert start is not None, "el1_sync_entry label missing in entry.S"
+    block = lines[start:end]
+
+    # Identify line indices for each required PT_REGS_* store for x0..x30.
+    # x0/x1 are stored as a pair via "stp x0, x1" but the offset constant is
+    # PT_REGS_X0. Match either "stp ..., x0, x1" or "stp x0, x1" anchored
+    # to a "#PT_REGS_X0" operand in the same line.
+    pt_offset_re = re.compile(r"#\s*PT_REGS_X(\d+)\b")
+    stp_re = re.compile(r"\bstp\s+")
+    str_re = re.compile(r"^\s*str\s+")
+    store_lines = {}  # even-indexed PT_REGS_X{n} → first line index in block
+    for idx, line in enumerate(block):
+        if "PT_REGS_" not in line:
+            continue
+        if not (stp_re.search(line) or str_re.match(line)):
+            continue
+        for m in pt_offset_re.finditer(line):
+            n = int(m.group(1))
+            if n % 2 == 0 and n not in store_lines and n < 31:
+                store_lines[n] = idx
+
+    missing = [n for n in (0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20,
+                           22, 24, 26, 28) if n not in store_lines]
+    assert not missing, (
+        "el1_sync_entry missing PT_REGS store(s) for x-pair starting at: "
+        + ", ".join("PT_REGS_X%d" % n for n in missing))
+    # x30 is stored as a separate str (not part of an STP pair).
+    x30_line = next((idx for idx, line in enumerate(block)
+                     if "PT_REGS_X30" in line
+                     and (str_re.match(line) or stp_re.search(line))), None)
+    assert x30_line is not None, "el1_sync_entry missing PT_REGS_X30 store"
+
+    # The earliest reuse of x0-x2 for C-ABI parameter passing is the first
+    # `mrs ... esr_el1/far_el1/sp_el0/elr_el1/spsr_el1` (clobbers x1 then
+    # possibly x0) OR any `bl <symbol>` other than a known trampoline.
+    def is_reuse(idx, line):
+        s = line.strip()
+        if s.startswith("mrs "):
+            for reg in ("esr_el1", "far_el1", "sp_el0",
+                        "elr_el1", "spsr_el1"):
+                if reg in s:
+                    return True
+        if s.startswith("bl ") and "el1_irq_entry" not in s:
+            return True
+        return False
+
+    first_reuse = None
+    for idx, line in enumerate(block):
+        if is_reuse(idx, line):
+            first_reuse = idx
+            break
+    assert first_reuse is not None, (
+        "el1_sync_entry never reads ESR/ELR/SPSR/FAR or `bl`s into C — "
+        "Task 1 must snapshot sysregs before calling aarch64_el1_sync_fatal")
+    for n, ln in sorted(store_lines.items()):
+        assert ln < first_reuse, (
+            "PT_REGS_X%d store on line %d runs AFTER first x0-x2 reuse on "
+            "line %d — regs would be clobbered before being saved"
+            % (n, ln + 1, first_reuse + 1))
+    assert x30_line < first_reuse, (
+        "PT_REGS_X30 store runs AFTER first x0-x2 reuse")
+
 
 def check_layout_compile(tmp, clang):
     # Literal expectations describe the assembly/C boundary independently of
