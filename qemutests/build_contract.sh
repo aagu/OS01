@@ -338,6 +338,18 @@ EOF
                || { echo "targets: sync-fault did not isolate image build dir" >&2; exit 1; }
              echo "$drain_sf" | grep -F "image/selftest/aarch64-uefi.img" >/dev/null \
                && { echo "targets: sync-fault must NOT reuse the selftest image path" >&2; exit 1; }
+             # sync-fault must win the variant chain even when
+             # KERNEL_TEST_FORCE_NO_RNDRRS=1 is also set; otherwise the
+             # build would drop the image under image/weak-selftest/
+             # while the harness reads image/sync-fault/ (P2 of the
+             # AAGU-39 review).
+             drain_sf_rnd=$(make -n PROFILE=aarch64-clang KERNEL_SELFTEST=1 \
+               AARCH64_SYNC_FAULT_TEST=1 KERNEL_TEST_FORCE_NO_RNDRRS=1 \
+               aarch64-uefi 2>&1 || true)
+             echo "$drain_sf_rnd" | grep -F "kernel/sync-fault/" >/dev/null \
+               || { echo "targets: sync-fault+NO_RNDRRS must still select sync-fault variant" >&2; exit 1; }
+             echo "$drain_sf_rnd" | grep -F "kernel/weak-selftest/" >/dev/null \
+               && { echo "targets: sync-fault+NO_RNDRRS must not drop into weak-selftest/" >&2; exit 1; }
              # x86 profile must reject the MODE: no aarch64-sync-test is
              # ever built for x86_64, so the umbrella gate must fail it
              # cleanly (parse-time error inside test-aarch64).

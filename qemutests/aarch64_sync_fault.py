@@ -29,6 +29,13 @@ from pathlib import Path
 # A typical live QEMU run starts with a small amount of UEFI banner text
 # before the kernel probe path runs. The valid synthetic log mirrors that
 # shape so the parser is exercised against the same window it sees live.
+#
+# Spec §5.1 pins the controlled-probe diagnostic values: EC=0x25
+# (data abort, same EL — the ldr from AARCH64_PT_SELFTEST_VA) and
+# FAR=0xffff800000000000 (= AARCH64_PT_SELFTEST_VA). Any other EC or
+# FAR in the line means the kernel reported something other than the
+# expected data abort from the probe — that is "weak evidence" (spec
+# §5.3) and must reject.
 valid_log = """\
 UEFI: booting OS01
 UEFI-A64: RAM ranges=3 pages2m=236 bytes=494927872
@@ -38,13 +45,12 @@ UEFI-A64: pt map smoke OK
 [aarch64-sync] FATAL mpidr=0x0000000000000000 ec=0x25 esr=0x0000000096000245 elr=0xffff800008000abc spsr=0x0000000060000000 far=0xffff800000000000
 """
 
-# A fatal EC different from 0x25 is fine for the parser (it is a synthetic
-# unit-test input) — the QEMU run produces the real value. Used here to
-# assert that the parser accepts the contracted line shape regardless of
-# which EC bit happens to be set, as long as EC bits and `ec=` agree.
-alt_ec_valid_log = """\
+# EC=0x25 + FAR=0xffff800000000000 is the spec contract. A second
+# positive fixture exercising different MPIDR/ELR/SPSR values proves
+# the parser is not anchored on a single line.
+valid_log_alt_regs = """\
 [aarch64-sync-test] armed
-[aarch64-sync] FATAL mpidr=0x0000000000000000 ec=0x21 esr=0x0000000084000021 elr=0xffff800008000abc spsr=0x0000000060000000 far=0xffff800000000000
+[aarch64-sync] FATAL mpidr=0x0000000080000000 ec=0x25 esr=0x0000000096000007 elr=0xffff000040093ce4 spsr=0x00000000600003c5 far=0xffff800000000000
 """
 
 
@@ -53,8 +59,8 @@ def self_test() -> None:
     assert sync_fault_evidence(valid_log), "valid synthetic log must pass"
     assert sync_fault_evidence(valid_log.replace("\n", "\n\r")), \
         "valid log with PL011's LF+CR must pass"
-    assert sync_fault_evidence(alt_ec_valid_log), \
-        "valid log with EC=0x21 must pass (only field-shape matters)"
+    assert sync_fault_evidence(valid_log_alt_regs), \
+        "valid log with different MPIDR/ELR/SPSR (real QEMU values) must pass"
 
     # Negative — markers must be exactly once each, in order
     assert not sync_fault_evidence(""), "empty log must fail"
@@ -70,15 +76,18 @@ def self_test() -> None:
         "[aarch64-sync] FATAL ", "[SYNC] FATAL ")), \
         "missing `[aarch64-sync]` prefix must fail"
 
-    # FAR: required to be 0x... (not 'n/a') for EC=0x25 because bit 10 (FnV)
-    # is clear — the kernel will always print the address.
+    # FAR: required to be exactly 0xffff800000000000 — the spec §5.1
+    # contract for the controlled probe. Any other value means the
+    # kernel reported a fault at the wrong VA or with the wrong width.
     assert not sync_fault_evidence(valid_log.replace(
         "far=0xffff800000000000", "far=n/a")), \
         "far=n/a for data abort (FnV clear) must fail"
-
-    # FAR: must be 16 lowercase hex digits preceded by 0x — width
-    # is part of the contract. An 8-digit FAR or one in uppercase
-    # is structural noise.
+    assert not sync_fault_evidence(valid_log.replace(
+        "far=0xffff800000000000", "far=0x0000000000000000")), \
+        "FAR=0x0 (probe did not target AARCH64_PT_SELFTEST_VA) must fail"
+    assert not sync_fault_evidence(valid_log.replace(
+        "far=0xffff800000000000", "far=0xdeadbeefdeadbeef")), \
+        "wrong FAR value must fail"
     assert not sync_fault_evidence(valid_log.replace(
         "far=0xffff800000000000", "far=0xffff80000000000")), \
         "15-digit FAR must fail"
@@ -89,15 +98,21 @@ def self_test() -> None:
         "far=0xffff800000000000", "far=0xffff8000_00000000")), \
         "FAR with non-hex char must fail"
 
-    # EC field
+    # EC field: spec §5.1 pins EC=0x25 for the data abort from the
+    # controlled probe. Any other EC means the kernel reported a
+    # different exception class than expected.
     assert not sync_fault_evidence(valid_log.replace("ec=0x25", "ec=0x24")), \
-        "wrong `ec=` field must fail"
-    # ESR EC bits disagree with `ec=` field — parser must catch the mismatch
-    # even though each field alone parses correctly. EC bits of the
-    # replacement are 0x24 (data abort, lower EL) while `ec=` stays 0x25.
+        "wrong `ec=` field (lower-EL data abort) must fail"
+    assert not sync_fault_evidence(valid_log.replace("ec=0x25", "ec=0x21")), \
+        "wrong `ec=` field (same-EL instruction abort) must fail"
+    assert not sync_fault_evidence(valid_log.replace("ec=0x25", "ec=0x3c")), \
+        "wrong `ec=` field (BRK) must fail"
+    # ESR EC bits disagree with `ec=0x25` — the regex already pins
+    # `ec=0x25` but a buggy kernel could emit ESR with different EC
+    # bits. The parser's runtime check catches that.
     assert not sync_fault_evidence(valid_log.replace(
         "esr=0x0000000096000245", "esr=0x0000000090000024")), \
-        "ESR EC bits inconsistent with `ec=` must fail"
+        "ESR EC bits inconsistent with ec=0x25 must fail"
 
     # Width and case
     assert not sync_fault_evidence(valid_log.replace(
@@ -145,10 +160,10 @@ def self_test() -> None:
 
 _FATAL_LINE_RE = re.compile(
     r"^\[aarch64-sync\] FATAL "
-    r"mpidr=0x([0-9a-f]{16}) ec=0x([0-9a-f]{2}) "
+    r"mpidr=0x([0-9a-f]{16}) ec=0x25 "   # spec §5.1: data abort, same EL
     r"esr=0x([0-9a-f]{16}) elr=0x([0-9a-f]{16}) "
     r"spsr=0x([0-9a-f]{16}) "
-    r"far=0x([0-9a-f]{16})$",
+    r"far=0xffff800000000000$",            # spec §5.1: AARCH64_PT_SELFTEST_VA
     re.MULTILINE,
 )
 _ARMED_RE = re.compile(r"^\[aarch64-sync-test\] armed$", re.MULTILINE)
@@ -205,12 +220,14 @@ def sync_fault_evidence(text: str) -> bool:
     if armed_matches[0].start() >= fatal_matches[0].start():
         return False
 
-    # ESR EC bits (bits 26..31) must agree with the `ec=` field.
-    mpidr_hex, ec_hex, esr_hex, elr_hex, spsr_hex, far_hex = fatal_matches[0].groups()
-    ec_int = int(ec_hex, 16)
+    # ESR EC bits (bits 26..31) must agree with `ec=0x25` — the parser
+    # already locked `ec=` and FAR to the spec values in the regex, but
+    # a kernel bug could still emit an ESR whose EC bits disagree.
+    # Catching that here keeps the diagnostic consistent.
+    mpidr_hex, esr_hex, elr_hex, spsr_hex = fatal_matches[0].groups()
     esr_int = int(esr_hex, 16)
     esr_ec = (esr_int >> 26) & 0x3F
-    if esr_ec != ec_int:
+    if esr_ec != 0x25:
         return False
     return True
 

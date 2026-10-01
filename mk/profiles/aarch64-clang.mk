@@ -24,15 +24,23 @@ LIBC_BUILD_DIR := $(BUILD_DIR)/libc
 # selftest build (spec §5). The flag is only meaningful together with
 # KERNEL_SELFTEST=1 (sync-fault is a selftest variant, not a free-standing
 # mode); flagging it alone is rejected at parse time below.
+#
+# Order matters: sync-fault wins over weak-selftest when both
+# KERNEL_TEST_FORCE_NO_RNDRRS=1 and AARCH64_SYNC_FAULT_TEST=1 are set,
+# so the dedicated image/firmware paths (`image/sync-fault/`) match the
+# harness's hardcoded AARCH64_UEFI_SYNC_FAULT_{DISK,FIRMWARE}. A
+# weak-selftest build would otherwise drop the image under
+# `image/weak-selftest/` while the harness reads the empty/stale
+# `image/sync-fault/` paths and run the wrong (or no) image.
 ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
 ifeq ($(filter 1,$(KERNEL_SELFTEST)),)
 $(error AARCH64_SYNC_FAULT_TEST=1 requires KERNEL_SELFTEST=1)
 endif
 endif
-ifneq ($(filter 1,$(KERNEL_TEST_FORCE_NO_RNDRRS)),)
-KERNEL_VARIANT := weak-selftest
-else ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
+ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
 KERNEL_VARIANT := sync-fault
+else ifneq ($(filter 1,$(KERNEL_TEST_FORCE_NO_RNDRRS)),)
+KERNEL_VARIANT := weak-selftest
 else ifneq ($(filter 1,$(KERNEL_SELFTEST)),)
 KERNEL_VARIANT := selftest
 else ifneq ($(filter 1,$(KERNEL_CANARY_SELFTEST)),)
