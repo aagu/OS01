@@ -132,6 +132,16 @@ def self_test() -> None:
     # Probe-side rejections
     assert not sync_fault_evidence("[aarch64-sync-test] precondition FAIL\n"), \
         "bare precondition FAIL must fail"
+    # Duplicate FATAL — even a malformed second FATAL counts as a
+    # duplicate (spec §5.3 "exactly one FATAL"). The full spec regex
+    # already rejects malformed FATALs, but a 2nd `[aarch64-sync] FATAL`
+    # line (any shape) must also fail.
+    assert not sync_fault_evidence(
+        valid_log + "[aarch64-sync] FATAL malformed\n"), \
+        "second FATAL (malformed) must fail"
+    assert not sync_fault_evidence(
+        valid_log + "[aarch64-sync] FATAL mpidr=0x0000000000000000\n"), \
+        "second FATAL (incomplete fields) must fail"
     assert not sync_fault_evidence(
         valid_log + "[aarch64-sync-test] precondition FAIL\n"), \
         "precondition FAIL appended must fail"
@@ -166,6 +176,11 @@ _FATAL_LINE_RE = re.compile(
     r"far=0xffff800000000000$",            # spec §5.1: AARCH64_PT_SELFTEST_VA
     re.MULTILINE,
 )
+# Any `[aarch64-sync] FATAL ...` line, regardless of whether it matches the
+# full spec format. spec §5.3 requires "exactly one FATAL"; a malformed
+# second FATAL still counts (the kernel printing a corrupt second record is
+# itself a defect), so we anchor on the prefix instead of the full regex.
+_ANY_FATAL_PREFIX_RE = re.compile(r"^\[aarch64-sync\] FATAL ", re.MULTILINE)
 _ARMED_RE = re.compile(r"^\[aarch64-sync-test\] armed$", re.MULTILINE)
 _RETURNED_RE = re.compile(r"\[aarch64-sync-test\] returned")
 _PRECONDITION_FAIL_RE = re.compile(r"\[aarch64-sync-test\] precondition FAIL")
@@ -208,9 +223,16 @@ def sync_fault_evidence(text: str) -> bool:
     if _PHASE1_OK_RE.search(text):
         return False
 
-    # Exactly one armed marker, exactly one FATAL line.
+    # Exactly one armed marker, exactly one FATAL line. spec §5.3 demands
+    # "exactly one FATAL" — a malformed second FATAL still counts as a
+    # duplicate, because a kernel printing a corrupt extra record is itself
+    # a defect. Anchor on the prefix, not the full spec regex, so a line
+    # like `[aarch64-sync] FATAL malformed` cannot slip past.
     armed_matches = list(_ARMED_RE.finditer(text))
     if len(armed_matches) != 1:
+        return False
+    any_fatal_matches = list(_ANY_FATAL_PREFIX_RE.finditer(text))
+    if len(any_fatal_matches) != 1:
         return False
     fatal_matches = list(_FATAL_LINE_RE.finditer(text))
     if len(fatal_matches) != 1:
@@ -333,12 +355,23 @@ def run_case(args: argparse.Namespace) -> bool:
 
     text = (stdout + stderr).decode("utf-8", errors="replace")
     accepted = sync_fault_evidence(text)
-    result = accepted and not timed_out
+    # spec §5.2: success requires the harness to actively terminate QEMU
+    # after observing the FATAL. A QEMU that self-exits before the
+    # harness gets a chance to terminate it (e.g. it shut down cleanly
+    # on its own) is weak evidence — the diagnostic may have been
+    # printed by something other than the kernel under test.
+    qemu_self_exited = (
+        fatal_observed_at is not None
+        and returncode is not None
+        and not timed_out
+    )
+    result = accepted and not timed_out and not qemu_self_exited
     metadata.update({
         "elapsed_seconds": time.monotonic() - (
             fatal_observed_at if fatal_observed_at else deadline),
         "timeout": timed_out, "returncode": returncode,
         "fatal_observed": fatal_observed_at is not None,
+        "qemu_self_exited": qemu_self_exited,
         "result": "PASS" if result else "FAIL",
     })
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
@@ -346,6 +379,7 @@ def run_case(args: argparse.Namespace) -> bool:
         "event": "case", "result": "PASS" if result else "FAIL",
         "timeout": timed_out, "returncode": returncode,
         "fatal_observed": fatal_observed_at is not None,
+        "qemu_self_exited": qemu_self_exited,
         "stdout": str(stdout_path), "stderr": str(stderr_path),
     }))
     return result
