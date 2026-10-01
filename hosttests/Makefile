@@ -101,7 +101,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_process_image_lifecycle.elf \
     $(TEST_BLD)/test_brk_pages.elf \
     $(TEST_BLD)/test_user_protected_ranges.elf \
-    $(TEST_BLD)/test_fork_user_map.elf
+    $(TEST_BLD)/test_fork_user_map.elf \
+    $(TEST_BLD)/test_user_write_cow.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -619,6 +620,45 @@ $(TEST_BLD)/test_fork_user_map.o: $(TEST_CASES)/test_fork_user_map.c \
 $(TEST_BLD)/test_fork_user_map.elf: $(TEST_BLD)/test_fork_user_map.o \
 		$(TEST_BLD)/vma_fork_user_map_production.o \
 		$(TEST_BLD)/fork_user_map_stubs.o
+	$(HOST_CC) -o $@ $^
+
+# User-write COW privatization test (Task 7, user heap/ELF
+# isolation plan): compiles the REAL kernel/memory/uaccess.c +
+# vma.c against the uwrite_cow host harness and exercises
+# prepare_user_write_range(_locked) + copy_to_user_ft_res.
+UWRITE_COW_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
+                              -I$(TESTS_DIR)/kernel/include \
+                              -include $(TEST_MOCK)/uwrite_cow/uwrite_cow_runtime.h \
+                              -I$(TEST_MOCK) -I$(TEST_INC) \
+                              -I$(TEST_MOCK)/uwrite_cow
+
+$(TEST_BLD)/uaccess_uwrite_cow_production.o: $(TESTS_DIR)/kernel/memory/uaccess.c \
+		$(TESTS_DIR)/kernel/include/memory/uaccess.h \
+		$(TEST_MOCK)/uwrite_cow/uwrite_cow_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(UWRITE_COW_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/vma_uwrite_cow_production.o: $(TESTS_DIR)/kernel/memory/vma.c \
+		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TEST_MOCK)/uwrite_cow/uwrite_cow_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(UWRITE_COW_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/uwrite_cow_stubs.o: $(TEST_MOCK)/uwrite_cow/uwrite_cow_stubs.c \
+		$(TEST_MOCK)/uwrite_cow/uwrite_cow_stubs.h \
+		$(TEST_MOCK)/uwrite_cow/uwrite_cow_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(UWRITE_COW_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_user_write_cow.o: $(TEST_CASES)/test_user_write_cow.c \
+		$(TEST_MOCK)/uwrite_cow/uwrite_cow_stubs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(UWRITE_COW_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_user_write_cow.elf: $(TEST_BLD)/test_user_write_cow.o \
+		$(TEST_BLD)/uaccess_uwrite_cow_production.o \
+		$(TEST_BLD)/vma_uwrite_cow_production.o \
+		$(TEST_BLD)/uwrite_cow_stubs.o
 	$(HOST_CC) -o $@ $^
 
 # standalone test (no kernel/libc deps)

@@ -1868,7 +1868,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         }
         if (len > size) { regs->rax = -ERANGE; break; }
         ssize_t r = copy_to_user_ft(buf, current->files->cwd, len);
-        if (r < 0) { regs->rax = -EFAULT; break; }
+        if (r < 0) { regs->rax = r; break; }
         regs->rax = (int64_t)(uint64_t)buf;
         break;
     }
@@ -1908,7 +1908,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         vfs_node_put(node);
         if (ret != 0) { regs->rax = -EIO; break; }
         ssize_t r = copy_to_user_ft(buf, &kstat, sizeof(kstat));
-        if (r < 0) { regs->rax = -EFAULT; break; }
+        if (r < 0) { regs->rax = r; break; }
         regs->rax = 0;
         break;
     }
@@ -1940,7 +1940,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
                 kstat.st_mode = S_IFIFO | 0600;
             else { regs->rax = -ENOENT; break; }
             ssize_t r = copy_to_user_ft(buf, &kstat, sizeof(kstat));
-            if (r < 0) { regs->rax = -EFAULT; break; }
+            if (r < 0) { regs->rax = r; break; }
             regs->rax = 0;
             break;
         }
@@ -1950,7 +1950,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             break;
         }
         ssize_t r = copy_to_user_ft(buf, &kstat, sizeof(kstat));
-        if (r < 0) { regs->rax = -EFAULT; break; }
+        if (r < 0) { regs->rax = r; break; }
         regs->rax = 0;
         break;
     }
@@ -2366,7 +2366,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         if (tloc) {
             uint64_t zero = 0;
             ssize_t r = copy_to_user_ft(tloc, &zero, sizeof(zero));
-            if (r < 0) { regs->rax = -EFAULT; break; }
+            if (r < 0) { regs->rax = r; break; }
         }
         regs->rax = 0;
         break;
@@ -2379,12 +2379,12 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         if (tv) {
             struct timeval ktv = { 0, 0 };
             ssize_t r = copy_to_user_ft(tv, &ktv, sizeof(ktv));
-            if (r < 0) { regs->rax = -EFAULT; break; }
+            if (r < 0) { regs->rax = r; break; }
         }
         if (tz) {
             struct timezone ktz = { 0, 0 };
             ssize_t r = copy_to_user_ft(tz, &ktz, sizeof(ktz));
-            if (r < 0) { regs->rax = -EFAULT; break; }
+            if (r < 0) { regs->rax = r; break; }
         }
         regs->rax = 0;
         break;
@@ -2410,7 +2410,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
             .tv_nsec = ns % 1000000000ULL,
         };
         ssize_t r = copy_to_user_ft(tp, &kts, sizeof(kts));
-        if (r < 0) { regs->rax = -EFAULT; break; }
+        if (r < 0) { regs->rax = r; break; }
         regs->rax = 0;
         break;
     }
@@ -2599,7 +2599,7 @@ case SYS_fstatat: {
                     .tv_nsec = remain_ns % 1000000000ULL,
                 };
                 ssize_t wr = copy_to_user_ft(rem, &krem, sizeof(krem));
-                if (wr < 0) { regs->rax = -EFAULT; break; }
+                if (wr < 0) { regs->rax = wr; break; }
             }
             regs->rax = -EINTR;
         } else {
@@ -2625,7 +2625,7 @@ case SYS_fstatat: {
             struct tms kbuf;
             memset(&kbuf, 0, sizeof(kbuf));
             ssize_t r = copy_to_user_ft(buf, &kbuf, sizeof(kbuf));
-            if (r < 0) { regs->rax = -EFAULT; break; }
+            if (r < 0) { regs->rax = r; break; }
         }
         regs->rax = 0;
         break;
@@ -2647,7 +2647,7 @@ case SYS_fstatat: {
         strcpy(kuts.version, "0.1.0");
         strcpy(kuts.machine, "x86_64");
         ssize_t r = copy_to_user_ft(buf, &kuts, sizeof(kuts));
-        if (r < 0) { regs->rax = -EFAULT; break; }
+        if (r < 0) { regs->rax = r; break; }
         regs->rax = 0;
         break;
     }
@@ -2746,9 +2746,12 @@ case SYS_fstatat: {
                 .sa_restorer = current->sighand[signum].sa_restorer,
                 .sa_mask     = current->sighand[signum].sa_mask,
             };
-            if (copy_to_user_ft(oldact, &kold, sizeof(kold)) < 0) {
-                regs->rax = -EFAULT;
-                break;
+            {
+                ssize_t user_copy_rc = copy_to_user_ft(oldact, &kold, sizeof(kold));
+                if (user_copy_rc < 0) {
+                    regs->rax = user_copy_rc;
+                    break;
+                }
             }
         }
 
@@ -2783,9 +2786,12 @@ case SYS_fstatat: {
                 break;
             }
             sigset_t kold = (sigset_t)current->blocked;
-            if (copy_to_user_ft(oldset, &kold, sizeof(kold)) < 0) {
-                regs->rax = -EFAULT;
-                break;
+            {
+                ssize_t user_copy_rc = copy_to_user_ft(oldset, &kold, sizeof(kold));
+                if (user_copy_rc < 0) {
+                    regs->rax = user_copy_rc;
+                    break;
+                }
             }
         }
 
@@ -3039,13 +3045,19 @@ case SYS_fstatat: {
             src.sin_family = AF_INET;
             src.sin_port = os01_htons(port);
             src.sin_addr = ip;
-            if (copy_to_user_ft((void *)addr_ptr, &src, sizeof(src)) < 0) {
-                regs->rax = -EFAULT; break;
+            {
+                ssize_t user_copy_rc = copy_to_user_ft((void *)addr_ptr, &src, sizeof(src));
+                if (user_copy_rc < 0) {
+                    regs->rax = user_copy_rc; break;
+                }
             }
             uint32_t new_addrlen = sizeof(src);
-            if (copy_to_user_ft((void *)addrlen_ptr, &new_addrlen,
-                                sizeof(new_addrlen)) < 0) {
-                regs->rax = -EFAULT; break;
+            {
+                ssize_t user_copy_rc = copy_to_user_ft((void *)addrlen_ptr, &new_addrlen,
+                                sizeof(new_addrlen));
+                if (user_copy_rc < 0) {
+                    regs->rax = user_copy_rc; break;
+                }
             }
         }
         regs->rax = ret;
@@ -3107,10 +3119,9 @@ case SYS_fstatat: {
         uint32_t klen = sizeof(kaddr);
         int64_t ret = do_getsockname((int)regs->rdi, &kaddr, &klen);
         if (ret < 0) { regs->rax = ret; break; }
-        if (copy_to_user_ft((void *)regs->rsi, &kaddr, sizeof(kaddr)) < 0 ||
-            copy_to_user_ft((void *)regs->rdx, &klen, sizeof(klen)) < 0) {
-            regs->rax = -EFAULT; break;
-        }
+        ssize_t wr = copy_to_user_ft((void *)regs->rsi, &kaddr, sizeof(kaddr));
+        if (wr >= 0) wr = copy_to_user_ft((void *)regs->rdx, &klen, sizeof(klen));
+        if (wr < 0) { regs->rax = wr; break; }
         regs->rax = ret;
         break;
     }
@@ -3143,7 +3154,7 @@ case SYS_fstatat: {
         ssize_t wr = copy_to_user_ft((void *)regs->r10, kopt, klen);
         ssize_t wlr = copy_to_user_ft((void *)regs->r8, &klen, sizeof(klen));
         kfree(kopt);
-        if (wr < 0 || wlr < 0) { regs->rax = -EFAULT; break; }
+        if (wr < 0 || wlr < 0) { regs->rax = wr < 0 ? wr : wlr; break; }
         regs->rax = ret;
         break;
     }

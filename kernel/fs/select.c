@@ -90,7 +90,7 @@ static int64_t do_select_common(int nfds,
     }
 
     // ── Write back to user space (NULL → skip) ──────────────
-    // Cat B: each set → _ft.  On any failure, return -EFAULT so the
+    // Cat B: each set → _ft.  On any failure, preserve the copy error so the
     // caller knows the write-back was incomplete.
     if (ur) {
         if (!syscall_check_user_range((uint64_t)ur,
@@ -99,10 +99,13 @@ static int64_t do_select_common(int nfds,
             poll_table_destroy(pt);
             return -EFAULT;
         }
-        if (copy_to_user_ft(ur, kr, sizeof(kernel_fd_set)) < 0) {
-            kfree(pfds);
-            poll_table_destroy(pt);
-            return -EFAULT;
+        {
+            ssize_t user_copy_rc = copy_to_user_ft(ur, kr, sizeof(kernel_fd_set));
+            if (user_copy_rc < 0) {
+                kfree(pfds);
+                poll_table_destroy(pt);
+                return user_copy_rc;
+            }
         }
     }
     if (uw) {
@@ -112,10 +115,13 @@ static int64_t do_select_common(int nfds,
             poll_table_destroy(pt);
             return -EFAULT;
         }
-        if (copy_to_user_ft(uw, kw, sizeof(kernel_fd_set)) < 0) {
-            kfree(pfds);
-            poll_table_destroy(pt);
-            return -EFAULT;
+        {
+            ssize_t user_copy_rc = copy_to_user_ft(uw, kw, sizeof(kernel_fd_set));
+            if (user_copy_rc < 0) {
+                kfree(pfds);
+                poll_table_destroy(pt);
+                return user_copy_rc;
+            }
         }
     }
     if (ue) {
@@ -125,10 +131,13 @@ static int64_t do_select_common(int nfds,
             poll_table_destroy(pt);
             return -EFAULT;
         }
-        if (copy_to_user_ft(ue, ke, sizeof(kernel_fd_set)) < 0) {
-            kfree(pfds);
-            poll_table_destroy(pt);
-            return -EFAULT;
+        {
+            ssize_t user_copy_rc = copy_to_user_ft(ue, ke, sizeof(kernel_fd_set));
+            if (user_copy_rc < 0) {
+                kfree(pfds);
+                poll_table_destroy(pt);
+                return user_copy_rc;
+            }
         }
     }
 

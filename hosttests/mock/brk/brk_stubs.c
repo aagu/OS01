@@ -107,6 +107,19 @@ __attribute__((weak)) int mm_set_brk(mm_t *mm, uint64_t requested,
     return -ENOSYS;
 }
 
+/* ── prepare_user_write_range_locked — WEAK fallback ──────────
+ * Task 7: vma.c's user_write_range_begin delegates to
+ * prepare_user_write_range_locked.  The brk test never drives
+ * user_write_range_begin, so the production symbol is never
+ * called from this build.  The weak fallback exists only so the
+ * link succeeds. */
+__attribute__((weak)) int prepare_user_write_range_locked(mm_t *mm, uint64_t addr,
+                                                          size_t len)
+{
+    (void)mm; (void)addr; (void)len;
+    return -EFAULT;
+}
+
 /* ── tlb_shootdown — SMP TLB flush counter ────────────────
  * Production tlb_shootdown() lives in kernel/memory/tlb.c (not
  * compiled for the host).  mm_set_brk calls this after leaf-map

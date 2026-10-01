@@ -1050,7 +1050,7 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
 
             debug_task("waitpid: pid=%d reaped child %d (exit=%d)\n",
                           (int)current->pid, (int)child_pid, (int)exit_code);
-            return (status_rc < 0) ? -EFAULT : child_pid;
+            return (status_rc < 0) ? status_rc : child_pid;
         }
 
         // No reapable child — check existence for -ECHILD / WNOHANG.
@@ -1880,8 +1880,10 @@ int64_t sys_readlink(const char *path, char *buf, size_t bufsize,
 
     if ((size_t)tlen > bufsize)
         tlen = (int)bufsize;
-    if (copy_to_user_ft(buf, kbuf, (size_t)tlen) < 0)
-        return -EFAULT;
+    {
+        ssize_t user_copy_rc = copy_to_user_ft(buf, kbuf, (size_t)tlen);
+        if (user_copy_rc < 0) return user_copy_rc;
+    }
     return tlen;
 }
 
@@ -1915,8 +1917,10 @@ int64_t sys_lstat(const char *path, struct stat *buf, pt_regs_t *regs)
     if (rc < 0)
         return rc;
 
-    if (copy_to_user_ft(buf, &kstat, sizeof(kstat)) < 0)
-        return -EFAULT;
+    {
+        ssize_t user_copy_rc = copy_to_user_ft(buf, &kstat, sizeof(kstat));
+        if (user_copy_rc < 0) return user_copy_rc;
+    }
     return 0;
 }
 
@@ -1956,8 +1960,10 @@ int64_t sys_fstatat(int dirfd, const char *path, struct stat *buf,
     if (rc < 0)
         return rc;
 
-    if (copy_to_user_ft(buf, &kstat, sizeof(kstat)) < 0)
-        return -EFAULT;
+    {
+        ssize_t user_copy_rc = copy_to_user_ft(buf, &kstat, sizeof(kstat));
+        if (user_copy_rc < 0) return user_copy_rc;
+    }
     return 0;
 }
 
@@ -2092,21 +2098,22 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                     /* Check PAGE_COW before PAGE_WRITE — a COW
                      * page has R/W=0 and must not be misclassified
                      * as plain read-only. */
-                    if (pte & PAGE_COW) {
+                    if (vma && (pte & PAGE_COW)) {
                         /* Already COW-shared (fork-of-fork):
                          * add a ref for the child, share the PTE. */
                         page_cow_get(pte & PAGE_4K_MASK);
                         child_pte[l1] = pte;
-                    } else if (pte & PAGE_WRITE) {
-                        /* Writable: stage COW; commit in pass 2.
+                    } else if (vma && (vma->vm_flags & VM_WRITE) &&
+                               (pte & PAGE_WRITE)) {
+                        /* Writable VMA: stage COW; commit in pass 2.
                          * The placeholder (PAGE_VALID only) is
                          * unique to writable leaves awaiting
                          * pass-2 mutation — pass 2 finds it and
                          * bumps the parent's refcount. */
                         child_pte[l1] = PAGE_VALID;
                     } else {
-                        /* Plain read-only / PROT_NONE (incl. ELF
-                         * envelope, code segment, R/O data):
+                        /* All non-VMA ELF leaves, plus read-only /
+                         * PROT_NONE VMA leaves:
                          * alloc a fresh 4 KiB leaf and copy the
                          * parent's contents.  No COW ref — the
                          * child owns its phys outright. */

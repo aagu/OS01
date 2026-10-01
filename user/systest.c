@@ -3777,6 +3777,88 @@ static void test_fork_mmap_cow_isolation(void)
     munmap(m1, 0x1000);
 }
 
+static unsigned char cow_elf_output[4096] __attribute__((aligned(4096)));
+
+// Kernel output must be the first write to the child's shared COW buffer.
+// Cover heap, anonymous/file mmap and ELF globals through all output paths.
+static void test_cow_kernel_outputs(void)
+{
+    const unsigned char payload[4] = {'C', 'O', 'W', '!'};
+    const unsigned char elf_magic[4] = {0x7f, 'E', 'L', 'F'};
+    for (int region = 0; region < 4; ++region) {
+        for (int path = 0; path < 4; ++path) {
+            int fd = -1, mapfd = -1, pipes[2] = {-1, -1};
+            unsigned char *buf = NULL;
+            if (region == 0) buf = malloc(4096);
+            else if (region == 3) buf = cow_elf_output;
+            else {
+                if (region == 2) mapfd = open("/bin/spin", O_RDONLY);
+                buf = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | (region == 1 ? MAP_ANONYMOUS : 0),
+                           mapfd, 0);
+                if (buf == MAP_FAILED) buf = NULL;
+            }
+            if (!buf) { FAIL("cow_output", "buffer allocation failed"); return; }
+            memset(buf, 0x55, 64); // populate the page before fork
+            if (path == 0) fd = open("/bin/spin", O_RDONLY);
+            if (path == 1) {
+                if (pipe(pipes) == 0 && write(pipes[1], payload, 4) == 4)
+                    fd = pipes[0];
+            }
+            if (path == 2) {
+                fd = open("/dev/tty0", O_RDONLY);
+                struct termios raw = {0};
+                raw.c_lflag = ISIG;
+                if (fd >= 0 && ioctl(fd, TCSETS, &raw) < 0) {
+                    close(fd); fd = -1;
+                }
+            }
+            int64_t pid = (path == 3 || fd >= 0) ? fork() : -1;
+            if (pid == 0) {
+                ssize_t n;
+                if (path == 3) n = getrandom(buf, 64, 0);
+                else {
+                    if (path == 2) {
+                        char ready[40];
+                        int len = snprintf(ready, sizeof(ready),
+                                           "[COW TTY READY %d]\n", region);
+                        write(1, ready, (size_t)len);
+                    }
+                    n = read(fd, buf, 4);
+                }
+                if (n != (path == 3 ? 64 : 4)) {
+                    printf("[COW OUTPUT] region=%d path=%d read=%ld errno=%d\n",
+                           region, path, (long)n, errno);
+                    _exit(2);
+                }
+                if (path != 3 && memcmp(buf, path == 0 ? elf_magic : payload, 4))
+                    _exit(3);
+                if (path == 3) {
+                    int changed = 0;
+                    for (int i = 0; i < 64; ++i) changed |= buf[i] != 0x55;
+                    if (!changed) _exit(4);
+                }
+                _exit(0);
+            }
+            int status = -1;
+            int64_t waited = pid > 0 ? waitpid(pid, &status, 0) : -1;
+            int intact = 1;
+            for (int i = 0; i < 64; ++i) intact &= buf[i] == 0x55;
+            char name[64];
+            snprintf(name, sizeof(name), "cow_output_r%d_p%d_child", region, path);
+            CHECK3(pid > 0 && waited == pid && status == 0, name,
+                   "kernel output privatized child's untouched COW buffer");
+            snprintf(name, sizeof(name), "cow_output_r%d_p%d_parent", region, path);
+            CHECK3(intact, name, "parent's entire buffer remains unchanged");
+            if (pipes[0] >= 0) { close(pipes[0]); close(pipes[1]); }
+            else if (fd >= 0) close(fd);
+            if (mapfd >= 0) close(mapfd);
+            if (region == 0) free(buf);
+            else if (region != 3) munmap(buf, 4096);
+        }
+    }
+}
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
@@ -3875,6 +3957,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"50_protected_ranges",       test_protected_ranges},
     {"51_fork_brk_isolation",     test_fork_brk_isolation},
     {"52_fork_mmap_cow_isolation",test_fork_mmap_cow_isolation},
+    {"53_cow_kernel_outputs", test_cow_kernel_outputs},
 };
 
 int main(int argc, char **argv, char **envp)

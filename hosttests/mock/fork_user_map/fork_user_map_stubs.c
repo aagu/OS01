@@ -246,3 +246,16 @@ void vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt)
     rec->flags = 0;
     fk_state.total_unmaps++;
 }
+
+/* ── prepare_user_write_range_locked — WEAK fallback ──────────
+ * Task 7: vma.c's user_write_range_begin delegates to
+ * prepare_user_write_range_locked.  The fork_user_map test never
+ * drives user_write_range_begin (it tests fork_vma_copy / vma_free_all
+ * via observable state), so the production symbol is never called.
+ * Weak fallback so the link succeeds. */
+__attribute__((weak)) int prepare_user_write_range_locked(mm_t *mm, uint64_t addr,
+                                                          size_t len)
+{
+    (void)mm; (void)addr; (void)len;
+    return -EFAULT;
+}

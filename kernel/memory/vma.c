@@ -876,60 +876,23 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
 // tear down or narrow a page mid-write (which would fault into the
 // do_page_fault hlt hang — there is no kernel-side demand paging).
 //
-// On success returns 0 with mm->lock HELD; on any failure returns -EFAULT
+// On success returns 0 with mm->lock HELD; failure returns -EFAULT/-ENOMEM
 // and the lock is NOT held.  current->mm == NULL (kthread reading
 // /dev/urandom) skips the check/lock entirely — its buffer is a trusted
 // kernel buffer.
 //
-// Permission check is delegated to arch_user_range_accessible (mmu.h) so
-// that upper-level PGD/PDP/PD entries are ANDed into the effective
-// permissions — a leaf PTE marked user+RW above a supervisor-only PGDE
-// is still inaccessible from ring-3.  COW (PAGE_COW, RW=0) is rejected
-// here, consistent with the design choice that the lock-and-write path
-// never allocates a private copy.
-static uint64_t *user_leaf_pte(uint64_t *pgd, uint64_t va)
-{
-    size_t l4 = (size_t)(va >> 39) & 0x1ff;
-    size_t l3 = (size_t)(va >> 30) & 0x1ff;
-    size_t l2 = (size_t)(va >> 21) & 0x1ff;
-    size_t l1 = (size_t)(va >> 12) & 0x1ff;
-
-    if (l4 >= 256) return NULL;                       // kernel half — out of scope
-
-    if (!(pgd[l4] & PAGE_VALID)) return NULL;
-    uint64_t *pud = (uint64_t *)Phy_To_Virt(pgd[l4] & PAGE_4K_MASK);
-
-    if (!(pud[l3] & PAGE_VALID)) return NULL;
-    if (pud[l3] & PAGE_HUGE) return NULL;   // 1GB huge page: unsupported here (same gap as vmm_pt_walk)
-    uint64_t *pmd = (uint64_t *)Phy_To_Virt(pud[l3] & PAGE_4K_MASK);
-
-    if (!(pmd[l2] & PAGE_VALID)) return NULL;
-
-    if (pmd[l2] & PAGE_HUGE)                            // 2MB huge page: PDE is the leaf
-        return &pmd[l2];
-
-    uint64_t *pte_table = (uint64_t *)Phy_To_Virt(pmd[l2] & PAGE_4K_MASK);
-    return &pte_table[l1];
-}
-
+// COW preparation happens while holding mm->lock; after a successful begin,
+// callers perform only nonblocking writes and then call user_write_range_end.
 int user_write_range_begin(uint64_t addr, size_t len)
 {
     if (current->mm == NULL)
         return 0;
 
-    // USER_MIN_ADDR rejects NULL and any address below 0x400000 — together
-    // with the existing >= addr_limit check this covers the whole low half.
-    if (addr < USER_MIN_ADDR ||
-        addr >= current->addr_limit ||
-        len > current->addr_limit - addr)
-        return -EFAULT;
-
     spin_lock(&current->mm->lock);
-
-    uint64_t *user_pgd = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pgdir);
-    if (!arch_user_range_accessible(user_pgd, addr, len, true)) {
+    int rc = prepare_user_write_range_locked(current->mm, addr, len);
+    if (rc != 0) {
         spin_unlock(&current->mm->lock);
-        return -EFAULT;
+        return rc;
     }
     return 0;   // lock held
 }

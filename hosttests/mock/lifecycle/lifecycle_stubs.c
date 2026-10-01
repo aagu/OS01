@@ -258,3 +258,17 @@ void        vfs_node_put(vfs_node_t *node) { (void)node; }
  * so the link succeeds; the test never invokes them. */
 bool     page_cow_put(uint64_t phys)   { (void)phys; return true; }
 uint16_t page_cow_refs(uint64_t phys)  { (void)phys; return 1; }
+
+/* ── prepare_user_write_range_locked — WEAK fallback ──────────
+ * Task 7: vma.c's user_write_range_begin now delegates to
+ * prepare_user_write_range_locked.  The lifecycle test never
+ * drives user_write_range_begin (it tests spawn/exec image
+ * lifecycle via source-level inspection of task.c), so the
+ * production symbol is never called from this build.  The weak
+ * fallback exists only so the link succeeds. */
+__attribute__((weak)) int prepare_user_write_range_locked(mm_t *mm, uint64_t addr,
+                                                          size_t len)
+{
+    (void)mm; (void)addr; (void)len;
+    return -EFAULT;
+}

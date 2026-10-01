@@ -73,6 +73,22 @@
 // 0x500000 has no mapping (no chain sets l2=2) — used for the
 // unmapped-VA test.
 
+// Bind the live test page tables to a temporary mm so user-copy validation
+// exercises the same address-space contract as a real syscall.
+static ssize_t uaccess_probe(void *dst, const void *src, size_t n,
+                      void (*on_fault)(void *), void *arg)
+{
+    mm_t probe = {0};
+    probe.pgdir = arch_get_page_table();
+    list_init(&probe.vma_list);
+    spin_init(&probe.lock);
+    mm_t *saved = current->mm;
+    current->mm = &probe;
+    ssize_t rc = copy_to_user_ft_res(dst, src, n, on_fault, arg);
+    current->mm = saved;
+    return rc;
+}
+
 static uint64_t *g_pgd;
 static struct Page *g_pgd_page;
 
@@ -232,6 +248,7 @@ static uint64_t *ensure_pt(uint64_t *pgd, uint64_t va, struct test_map_ctx *ctx)
         pgd[l4] = Virt_To_Phy((uint64_t)ctx->new_l3) | PAGE_USER_PGD;
         ctx->created_l3 = 1;
     }
+    pgd[l4] |= PAGE_USER | PAGE_WRITE;
     uint64_t *pud = (uint64_t *)Phy_To_Virt(pgd[l4] & PAGE_4K_MASK);
 
     // ── l3 ──────────────────────────────────────────────────────
@@ -242,6 +259,7 @@ static uint64_t *ensure_pt(uint64_t *pgd, uint64_t va, struct test_map_ctx *ctx)
         pud[l3] = Virt_To_Phy((uint64_t)ctx->new_l2) | PAGE_USER_PUD;
         ctx->created_l2 = 1;
     }
+    pud[l3] |= PAGE_USER | PAGE_WRITE;
     uint64_t *pmd = (uint64_t *)Phy_To_Virt(pud[l3] & PAGE_4K_MASK);
 
     // ── l2: split 2MB huge or create table ──────────────────────
@@ -276,6 +294,7 @@ static uint64_t *ensure_pt(uint64_t *pgd, uint64_t va, struct test_map_ctx *ctx)
         pmd[l2] = Virt_To_Phy((uint64_t)ctx->new_pte) | PAGE_USER_PUD;
         ctx->created_pte = 1;
     }
+    pmd[l2] |= PAGE_USER | PAGE_WRITE;
     uint64_t *pte = (uint64_t *)Phy_To_Virt(pmd[l2] & PAGE_4K_MASK);
 
     ctx->leaf_slot = &pte[l1];
@@ -288,58 +307,25 @@ static uint64_t *ensure_pt(uint64_t *pgd, uint64_t va, struct test_map_ctx *ctx)
 // the parent slots back to their original values.
 static void restore_pt(struct test_map_ctx *ctx)
 {
-    if (!ctx || ctx->va == 0) return;
-    uint64_t l4 = (ctx->va >> 39) & 0x1FF;
-    uint64_t l3 = (ctx->va >> 30) & 0x1FF;
-    uint64_t l2 = (ctx->va >> 21) & 0x1FF;
-
-    // Re-derive the l4 entry — we always modify pgd[0] (l4=0) for
-    // the 0x600000/0x601000 range.
+    if (!ctx || !ctx->va) return;
+    uint64_t l4 = (ctx->va >> 39) & 0x1ff;
+    uint64_t l3 = (ctx->va >> 30) & 0x1ff;
+    uint64_t l2 = (ctx->va >> 21) & 0x1ff;
     uint64_t *pgd = (uint64_t *)Phy_To_Virt((uint64_t)arch_get_page_table());
-
-    if (ctx->split_2m) {
-        // Restore the original 2MB PDE
+    if (pgd[l4] & PAGE_VALID) {
         uint64_t *pud = (uint64_t *)Phy_To_Virt(pgd[l4] & PAGE_4K_MASK);
-        uint64_t *pmd = (uint64_t *)Phy_To_Virt(pud[l3] & PAGE_4K_MASK);
-        pmd[l2] = ctx->saved_pmd;
-        // Free the test-only pte we created during split.  alloc_pgtbl_page_zeroed
-        // used alloc_pages(ZONE_NORMAL, 1, ...) which returns a 2 MB block;
-        // free_4k_page() only handles subpage_pool 4 KB slots, so we must
-        // use free_pages(pg, 1) to release the underlying 2 MB block.
-        if (ctx->new_pte_page) free_pages(ctx->new_pte_page, 1);
-        ctx->new_pte = (uint64_t *)0;
-        ctx->new_pte_page = (struct Page *)0;
-        ctx->split_2m = 0;
-    } else if (ctx->created_pte) {
-        // We created a fresh pte with nothing in it.  Free it (2 MB block).
-        if (ctx->new_pte_page) free_pages(ctx->new_pte_page, 1);
-        ctx->new_pte = (uint64_t *)0;
-        ctx->new_pte_page = (struct Page *)0;
-        ctx->created_pte = 0;
-    }
-
-    // Restore l3 slot if we created the l2 table it points to.
-    if (ctx->created_l2) {
-        uint64_t *pud = (uint64_t *)Phy_To_Virt(pgd[l4] & PAGE_4K_MASK);
+        if (pud[l3] & PAGE_VALID) {
+            uint64_t *pmd = (uint64_t *)Phy_To_Virt(pud[l3] & PAGE_4K_MASK);
+            pmd[l2] = ctx->saved_l2;
+        }
         pud[l3] = ctx->saved_l3;
-        if (ctx->new_l2_page) free_pages(ctx->new_l2_page, 1);
-        ctx->new_l2 = (uint64_t *)0;
-        ctx->new_l2_page = (struct Page *)0;
-        ctx->created_l2 = 0;
     }
-
-    // Restore l4 slot if we created the l3 table it points to.
-    if (ctx->created_l3) {
-        pgd[l4] = ctx->saved_l4;
-        if (ctx->new_l3_page) free_pages(ctx->new_l3_page, 1);
-        ctx->new_l3 = (uint64_t *)0;
-        ctx->new_l3_page = (struct Page *)0;
-        ctx->created_l3 = 0;
-    }
-
-    // Flush TLB for the VA range we may have touched.
-    arch_flush_tlb_page(ctx->va);
-    arch_flush_tlb_page(ctx->va + 0x1000);
+    pgd[l4] = ctx->saved_l4;
+    arch_flush_tlb_all();
+    if (ctx->new_pte_page) free_pages(ctx->new_pte_page, 1);
+    if (ctx->new_l2_page) free_pages(ctx->new_l2_page, 1);
+    if (ctx->new_l3_page) free_pages(ctx->new_l3_page, 1);
+    memset(ctx, 0, sizeof(*ctx));
 }
 
 // ── selftest entry point ──────────────────────────────────────
@@ -381,6 +367,16 @@ int selftest_uaccess(void)
     SELFTEST_ASSERT(!arch_user_range_accessible(g_pgd, 0x400000, 4096, true));
 
     // 2MB huge at 0x800000 (chain_2m)
+    // COW eligibility never overrides a read-only upper-level entry.
+    chain_ro_pte[0] |= PAGE_COW;
+    use_chain(chain_ro_pud);
+    SELFTEST_ASSERT(arch_user_range_accessible(g_pgd, 0x400000, 4096, true));
+    chain_ro_pte[0] &= ~PAGE_COW;
+    chain_rw0_pte[0] |= PAGE_COW;
+    use_chain(chain_rw0_pud);
+    SELFTEST_ASSERT(!arch_user_range_accessible(g_pgd, 0x400000, 4096, true));
+    chain_rw0_pte[0] &= ~PAGE_COW;
+
     use_chain(chain_2m_pud);
     SELFTEST_ASSERT(arch_user_range_accessible(g_pgd, 0x800000, 4096, false));
     SELFTEST_ASSERT(arch_user_range_accessible(g_pgd, 0x800000, 4096, true));
@@ -428,10 +424,10 @@ int selftest_uaccess(void)
     current->addr_limit = 0x00007FFFFFFFFFFFULL;
     char ksrc[32] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,
                      17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32};
-    ssize_t rc = copy_to_user_ft((void *)0x40000000, ksrc, 16);  // unmapped -> #PF -> longjmp
+    ssize_t rc = uaccess_probe((void *)0x40000000, ksrc, 16, NULL, NULL);  // unmapped -> preparation rejects
     current->addr_limit = saved_limit;
     SELFTEST_ASSERT(rc == -EFAULT);
-    serial_printk("[selftest] uaccess: longjmp OK\n");
+    serial_printk("[selftest] uaccess: unmapped output rejected\n");
 
     // ── Step 4: live-CR3 hierarchy-probing + cross-page + _ft_res ─
     // The boot context's pgd is the kernel pgd (CR3).  NEVER use
@@ -492,12 +488,11 @@ int selftest_uaccess(void)
     // current value for restoration).
     *slot_a = pa | PAGE_USER_PTE;
     arch_flush_tlb_page(0x600000);
-    uint64_t saved_b_for_fault = *slot_b;   // may be a 4KB PTE if split happened
     *slot_b = 0;                            // genuinely unmap page B
     arch_flush_tlb_page(0x601000);
 
     current->addr_limit = 0x00007FFFFFFFFFFFULL;
-    rc = copy_to_user_ft((void *)0x600ff0, ksrc, 32);   // spans into page B
+    rc = uaccess_probe((void *)0x600ff0, ksrc, 32, NULL, NULL);   // spans into page B
     current->addr_limit = saved_limit;
     SELFTEST_ASSERT(rc == -EFAULT);
 
@@ -510,7 +505,7 @@ int selftest_uaccess(void)
     memset(kB, 0xBB, 4096);
 
     current->addr_limit = 0x00007FFFFFFFFFFFULL;
-    ssize_t n = copy_to_user_ft((void *)0x600ff0, ksrc, 32);
+    ssize_t n = uaccess_probe((void *)0x600ff0, ksrc, 32, NULL, NULL);
     current->addr_limit = saved_limit;
     SELFTEST_ASSERT(n == 32);
     SELFTEST_ASSERT(memcmp(kA + 0xff0, ksrc, 16) == 0);    // first 16B in page A
@@ -523,14 +518,14 @@ int selftest_uaccess(void)
     cleanup_ran = 0;
 
     current->addr_limit = 0x00007FFFFFFFFFFFULL;
-    rc = copy_to_user_ft_res((void *)0x40000000, ksrc, 16, cb_cleanup, NULL);
+    rc = uaccess_probe((void *)0x40000000, ksrc, 16, cb_cleanup, NULL);
     current->addr_limit = saved_limit;
     SELFTEST_ASSERT(rc == -EFAULT);
     SELFTEST_ASSERT(cleanup_ran == 1);                    // cleanup ran on fault
 
     cleanup_ran = 0;
     current->addr_limit = 0x00007FFFFFFFFFFFULL;
-    rc = copy_to_user_ft_res((void *)0x600000, ksrc, 16, cb_cleanup, NULL);
+    rc = uaccess_probe((void *)0x600000, ksrc, 16, cb_cleanup, NULL);
     current->addr_limit = saved_limit;
     SELFTEST_ASSERT(rc == 16);
     SELFTEST_ASSERT(cleanup_ran == 0);                    // success: no cleanup

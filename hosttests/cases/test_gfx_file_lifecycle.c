@@ -86,11 +86,16 @@ struct vfs_node *vfs_lookup(const char *p)
 { (void)p; return NULL; }
 struct vfs_node *vfs_lookup_from(const char *p, const char *c)
 { (void)p; (void)c; return NULL; }
+int vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
+{ return node->ops->read(node, offset, size, buffer); }
+
+static int injected_copy_error;
 
 /* Uaccess stubs — never invoked (no FD_VFS read/write in this test). */
 ssize_t copy_to_user_ft_res(void *dst, const void *src, size_t n,
                             void (*cb)(void *), void *arg)
-{ (void)cb; (void)arg; memcpy(dst, src, n); return (ssize_t)n; }
+{ if (injected_copy_error) { if (cb) cb(arg); return injected_copy_error; }
+  memcpy(dst, src, n); return (ssize_t)n; }
 ssize_t copy_from_user_ft_res(void *dst, const void *src, size_t n,
                               void (*cb)(void *), void *arg)
 { (void)cb; (void)arg; memcpy(dst, src, n); return (ssize_t)n; }
@@ -477,7 +482,52 @@ TEST_FUNC(test_abi_struct_sizes) {
     assert_eq((unsigned)0u, (unsigned)GFX_FORMAT_RGB32);
 }
 
+static int fake_read(vfs_node_t *node, uint64_t off, uint64_t size, void *buf)
+{
+    (void)node; (void)off;
+    memset(buf, 0x7f, size);
+    return (int)size;
+}
+
+static void test_read_preserves_cow_allocation_error(void)
+{
+    vfs_ops_t ops = {.read = fake_read};
+    vfs_node_t node = {.ops = &ops};
+    file_t file = {.type = FD_VFS, .flags = O_RDONLY, .node = &node};
+    unsigned char buf = 0x55;
+    injected_copy_error = -ENOMEM;
+    assert_eq(-ENOMEM, fd_read(&file, &buf, 1));
+    assert_eq(0, file.offset);
+    assert_eq(0x55, buf);
+    injected_copy_error = -EFAULT;
+    assert_eq(-EFAULT, fd_read(&file, &buf, 1));
+    assert_eq(0, file.offset);
+    injected_copy_error = 0;
+}
+
+static void test_pipe_preserves_cow_allocation_error(void)
+{
+    pipe_t *p = pipe_alloc();
+    p->buf[0] = 0x7f;
+    p->head = 1;
+    p->writers = 1;
+    file_t file = {.type = FD_PIPE, .flags = O_RDONLY, .pipe = p};
+    unsigned char buf = 0x55;
+    injected_copy_error = -ENOMEM;
+    assert_eq(-ENOMEM, fd_read(&file, &buf, 1));
+    assert_eq(0, p->tail);
+    assert_eq(0, p->read_busy);
+    assert_eq(0x55, buf);
+    injected_copy_error = 0;
+    assert_eq(1, fd_read(&file, &buf, 1));
+    assert_eq(0x7f, buf);
+    assert_eq(1, p->tail);
+    pipe_free(p);
+}
+
 TEST_LIST_BEGIN
+    TEST_ENTRY(test_read_preserves_cow_allocation_error),
+    TEST_ENTRY(test_pipe_preserves_cow_allocation_error),
     TEST_ENTRY(test_devfs_open_attaches_node_ref),
     TEST_ENTRY(test_devfs_ioctl_file_dispatch),
     TEST_ENTRY(test_release_fires_once_on_final_drop),
@@ -488,6 +538,8 @@ TEST_LIST_BEGIN
 TEST_LIST_END
 
 int main(void) {
-    RUN_ALL_TESTS();
-    return __test_stats.failed > 0 ? 1 : 0;
+    for (int i = 0; i < __test_table_size; i++) __test_table[i].fn();
+    int failed = __test_stats.failed;
+    TEST_RESULTS();
+    return failed != 0;
 }

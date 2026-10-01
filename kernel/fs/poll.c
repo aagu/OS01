@@ -607,11 +607,14 @@ int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val)
     // some entries copied; the caller's retry will pick them up.
     if (ret >= 0 && nfds > 0) {
         for (uint32_t i = 0; i < nfds; i++) {
-            if (copy_to_user_ft(&user_fds[i].revents,
+            {
+                ssize_t user_copy_rc = copy_to_user_ft(&user_fds[i].revents,
                                 &kfds[i].revents,
-                                sizeof(kfds[i].revents)) < 0) {
-                ret = -EFAULT;
-                break;
+                                sizeof(kfds[i].revents));
+                if (user_copy_rc < 0) {
+                    ret = user_copy_rc;
+                    break;
+                }
             }
         }
     }

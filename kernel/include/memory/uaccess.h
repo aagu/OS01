@@ -16,12 +16,13 @@
 #include <arch/mmu.h>   // arch_user_range_accessible (cross-level walker)
 #include <fs/vfs.h>            // VFS_NAME_MAX
 
+// Forward declarations (avoid circular task.h ↔ vma.h)
+struct mm_struct;
+typedef struct mm_struct mm_t;
+
 // ── User address-layout constants ──────────────────────────
-// Lowest legitimate user address.  USER_CODE_ADDR = 0x400000 (task.c:1048,
-// trap.c:765).  The user stack lives at 0x800000 (task.h:352) with a
-// 0x600000 guard left unmapped; nothing legitimate lives below 0x400000.
-// do_mmap enforces this so the invariant "nothing below 0x400000 mapped"
-// holds for every user task — see kernel/memory/vma.c.
+// Lowest legitimate user address; the current user stack starts at 0x1400000.
+// do_mmap preserves the unmapped range below USER_CODE_ADDR.
 #define USER_MIN_ADDR     0x400000UL
 
 // ── Bounce-buffer block size for Cat C syscalls (read/write/sendto/
@@ -50,7 +51,8 @@ typedef void *os01_jmp_buf[8];
 //
 // All four return ssize_t for consistency with the size_t n argument:
 //   >= 0: bytes copied (== n on success; never short-counted)
-//   <  0: -EFAULT on fault (the _ft primitives never return partial counts)
+//   <  0: -EFAULT on fault; kernel-to-user may also return -ENOMEM during
+//         COW preparation (the _ft primitives never return partial counts)
 //
 // The _res variants take an explicit cleanup callback (Task 2 wires these
 // to release mm->lock / wait-queue refs that the longjmp would otherwise
@@ -94,6 +96,20 @@ int strnlen_user(const void *user_addr, size_t max);
 //   2. addr >= USER_MIN_ADDR
 //   3. addr < addr_limit && len <= addr_limit - addr (overflow-safe)
 //   4. arch_user_range_accessible(mm->pgdir, addr, len, writable)
+//
+// Writable prechecks accept COW only when its VMA permits writing and is
+// not VM_IO. They do not allocate or change PTEs; actual output must use
+// copy_to_user_ft or the user_write_range_begin/end pair.
 bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable);
+
+// Prepare kernel output to user memory. The locked form requires mm->lock
+// and leaves ownership of that lock with the caller on every return. The
+// self-locking form releases its lock before returning on every path.
+// Writable ordinary leaves (including ELF/stack) need no VMA. COW leaves
+// require a writable, non-VM_IO VMA. All allocations precede PTE/refcount
+// changes; failure leaves the entire range unchanged.
+// Returns 0, -EFAULT (invalid range/permissions) or -ENOMEM (allocation).
+int prepare_user_write_range(mm_t *mm, uint64_t addr, size_t len);
+int prepare_user_write_range_locked(mm_t *mm, uint64_t addr, size_t len);
 
 #endif // _KERNEL_UACCESS_H

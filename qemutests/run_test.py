@@ -285,26 +285,32 @@ def test_boot(tester):
 
 
 def test_systest(tester):
-    """System test: runs systest.elf in QEMU, parses results."""
-    tester.start_qemu()
-
-    # Wait for the test summary, but ALSO race against a wrong-mode boot.
-    # If the disk was built without OS01_SYSTEST (init spawns /bin/terminal
-    # and a BusyBox prompt appears) there will never be a "[SYS TEST] RESULT:"
-    # line — without this the runner spins the full 60s timeout, which reads
-    # as a "hang" to a user.  Match either outcome so we return as soon as
-    # one happens.  read_until() returns the re.Match for a regex pattern;
-    # use the matched group to tell which outcome fired.
-    pat = re.compile(
-        r'(\[SYS TEST\] RESULT:|\'/bin/terminal|BusyBox v)')
-    m = tester.read_until(pat, timeout=60)
+    """Run systest, supplying deterministic serial input for COW TTY reads."""
+    tester.start_qemu(serial_stdio=True)
+    deadline = time.monotonic() + 60
+    # Each region's child signals only after fork, immediately before read.
+    # Exact markers prevent replaying input for a previously handled region.
+    result_pattern = r"(\[SYS TEST\] RESULT:|'/bin/terminal|BusyBox v)"
+    m = None
+    for region in range(4):
+        pattern = re.compile(rf"\[COW TTY READY {region}\]|{result_pattern}")
+        m = tester.read_until(pattern, timeout=max(0, deadline - time.monotonic()))
+        if not m:
+            print("FAIL: systest did not complete")
+            return False
+        if "COW TTY READY" not in m.group(0):
+            break
+        tester.send("COW!")
+    if m and "COW TTY READY" in m.group(0):
+        m = tester.read_until(re.compile(result_pattern),
+                              timeout=max(0, deadline - time.monotonic()))
     if not m:
         print("FAIL: systest did not complete")
         return False
     matched = m.group(0)
     if "'/bin/terminal" in matched or "BusyBox v" in matched:
         print("FAIL: disk.img is not a systest build (booted /bin/terminal "
-              "instead of /bin/systest). Rebuild with: make OS01_SYSTEST=1 test-syscall")
+              "instead of /bin/systest). Rebuild with: make OS01_SYSTEST=1 test-qemu SUITE=systest")
         return False
 
     # RESULT line matched — drain whatever remains so the parse regex has a
