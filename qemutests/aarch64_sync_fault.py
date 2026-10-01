@@ -293,6 +293,7 @@ def run_case(args: argparse.Namespace) -> bool:
     stderr = bytearray()
     timed_out = False
     returncode = None
+    harness_terminated = False
     post_fatal_drain = 0.5
     fatal_observed_at = None
     try:
@@ -342,7 +343,14 @@ def run_case(args: argparse.Namespace) -> bool:
                 break
     finally:
         selector.close()
-        if process.poll() is None:
+        # Capture whether the harness actively terminated QEMU. If poll
+        # is None when finally runs, the kernel/probe is still alive and
+        # we have to terminate it ourselves; that satisfies spec §5.2.
+        # If poll is already non-None, QEMU self-exited — the harness
+        # never got the chance to terminate it, which is the weak
+        # evidence case the user flagged.
+        harness_terminated = process.poll() is None
+        if harness_terminated:
             process.terminate()
             try:
                 process.wait(timeout=2)
@@ -360,9 +368,14 @@ def run_case(args: argparse.Namespace) -> bool:
     # harness gets a chance to terminate it (e.g. it shut down cleanly
     # on its own) is weak evidence — the diagnostic may have been
     # printed by something other than the kernel under test.
+    #
+    # `harness_terminated` is set in the finally block above. If it is
+    # False, QEMU had already exited when the loop ended and the
+    # harness did NOT get to terminate it — fail unless the fatal was
+    # never observed (in which case it is a different failure mode).
     qemu_self_exited = (
         fatal_observed_at is not None
-        and returncode is not None
+        and not harness_terminated
         and not timed_out
     )
     result = accepted and not timed_out and not qemu_self_exited
@@ -370,6 +383,7 @@ def run_case(args: argparse.Namespace) -> bool:
         "elapsed_seconds": time.monotonic() - (
             fatal_observed_at if fatal_observed_at else deadline),
         "timeout": timed_out, "returncode": returncode,
+        "harness_terminated": harness_terminated,
         "fatal_observed": fatal_observed_at is not None,
         "qemu_self_exited": qemu_self_exited,
         "result": "PASS" if result else "FAIL",
