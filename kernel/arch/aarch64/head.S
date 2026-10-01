@@ -54,9 +54,9 @@
 .equ PT_AP_EL1_RW,         (0 << 6)      /* AP field is bits[7:6] */
 .equ PT_AF,                (1 << 10)
 
-/* High bits — always combined via register-OR (out of immediate range). */
+/* High bits — single-bit masks, encodable as logical immediates. */
 .equ PT_PXN_MASK,          (1 << 53)
-.equ PT_UXN_MASK,          (1 << 52)
+.equ PT_UXN_MASK,          (1 << 54)
 
 /* SCTLR value: M=1, C=1, I=1 plus RES1 base 0x300C00. */
 .equ SCTLR_VALUE, ((1 << 0) | (1 << 2) | (1 << 12) | 0x300C00)
@@ -376,9 +376,9 @@ build_pagetables:
     stp     x29, x30, [sp, #-16]!
     mov     x29, sp
 
-    /* x20 = mask for "no-execute" high bits (PXN | UXN = 0x30 << 52). */
+    /* x20 = mask for "no-execute" high bits (PXN | UXN = 0x3 << 53). */
     mov     x20, #0x3
-    lsl     x20, x20, #52
+    lsl     x20, x20, #53
 
     /* Page-table bases (physical, MMU is off). */
     ldr     x10, =boot_page_tables
@@ -500,7 +500,9 @@ zp_all:
     mov     x0, #0x40000000                   /* x0 = PA                 */
     mov     x1, x22                           /* x1 = flags              */
     bl      make_2m                           /* x0 = block descriptor   */
-    /* Clear PXN so the kernel code in this 2 MiB block can execute. */
+    /* UXN first (no EL0 exec), then clear ONLY PXN so the kernel
+     * code in this 2 MiB block can execute at EL1. */
+    orr     x0, x0, #PT_UXN_MASK
     bic     x0, x0, #PT_PXN_MASK
     mov     x1, x0                            /* x1 = descriptor         */
     mov     x0, x13                           /* x0 = PMD_low1 base      */
