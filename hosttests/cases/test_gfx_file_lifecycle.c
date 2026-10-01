@@ -442,6 +442,29 @@ TEST_FUNC(test_ioctl_reaches_file_via_fdioctl) {
     assert_eq(0, node_ref_balance);
 }
 
+TEST_FUNC(test_regular_file_cannot_dispatch_device_callbacks) {
+    reset_test_state();
+    struct vfs_node *registered_node;
+    int idx = register_fake_gfx(&registered_node);
+    assert_true(idx >= 0);
+    /* A filesystem node may use a small integer as its own fs_data.
+     * This must not be interpreted as a devfs registration index. */
+    struct vfs_node *regular_node = test_node_with_idx(idx);
+    regular_node->type = VFS_FILE;
+    file_t *f = file_alloc();
+    assert_not_null(f);
+    vfs_node_get(regular_node);
+    f->type = FD_VFS;
+    f->node = regular_node;
+    int rc = fd_ioctl(f, GFX_CREATE_VIEW, NULL);
+    assert_eq(-ENOTTY, rc);
+    assert_eq(0, test_devices[idx].ioctl_file_count);
+    file_put(f);
+    assert_eq(0, test_devices[idx].release_count);
+    assert_eq(0, node_ref_balance);
+    free(registered_node);
+}
+
 TEST_FUNC(test_abi_struct_sizes) {
     /* The _Static_asserts in uapi/gfx.h catch this at compile
      * time; this is the runtime smoke test. */
@@ -460,6 +483,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_release_fires_once_on_final_drop),
     TEST_ENTRY(test_legacy_node_ioctl_when_no_file_callback),
     TEST_ENTRY(test_ioctl_reaches_file_via_fdioctl),
+    TEST_ENTRY(test_regular_file_cannot_dispatch_device_callbacks),
     TEST_ENTRY(test_abi_struct_sizes),
 TEST_LIST_END
 

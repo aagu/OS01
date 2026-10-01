@@ -578,6 +578,58 @@ TEST_FUNC(test_sprite_opaque_with_stride_padding)
     free(h);
 }
 
+TEST_FUNC(test_sprite_opaque_with_byte_stride)
+{
+    TEST_SUITE("sprite: byte stride need not be pixel aligned");
+    reset_state();
+    gfx_handle_t *h = open_test_handle();
+    _Alignas(4) uint8_t bytes[26] = {0};
+    const uint32_t values[6] = {
+        0x11111111u, 0x22222222u, 0x33333333u,
+        0x44444444u, 0x55555555u, 0x66666666u,
+    };
+    for (size_t col = 0; col < 3; ++col) {
+        memcpy(bytes + col * 4, &values[col], 4);
+        memcpy(bytes + 13 + col * 4, &values[3 + col], 4);
+    }
+    gfx_sprite_blit(h, 1, 1, (const uint32_t *)bytes, 13, 3, 2,
+                    false, 0u);
+    for (int32_t row = 0; row < 2; ++row) {
+        for (int32_t col = 0; col < 3; ++col) {
+            assert_eq(values[row * 3 + col], *view_at(1 + row, 1 + col));
+        }
+    }
+    assert_true(sentinels_intact());
+    free(h);
+}
+
+TEST_FUNC(test_sprite_mask_with_byte_stride)
+{
+    TEST_SUITE("sprite: mask blit honors byte stride");
+    reset_state();
+    gfx_handle_t *h = open_test_handle();
+    _Alignas(4) uint8_t bytes[26] = {0};
+    const uint32_t values[6] = {
+        0x11111111u, 0x22222222u, 0x33333333u,
+        0x44444444u, 0x55555555u, 0x66666666u,
+    };
+    for (size_t col = 0; col < 3; ++col) {
+        memcpy(bytes + col * 4, &values[col], 4);
+        memcpy(bytes + 13 + col * 4, &values[3 + col], 4);
+    }
+    const uint8_t mask[2] = {0xA0u, 0x60u};
+    gfx_sprite_blit_mask(h, 1, 1, (const uint32_t *)bytes, 13,
+                         mask, 1, 3, 2);
+    assert_eq(values[0], *view_at(1, 1));
+    assert_eq(0u, *view_at(1, 2));
+    assert_eq(values[2], *view_at(1, 3));
+    assert_eq(0u, *view_at(2, 1));
+    assert_eq(values[4], *view_at(2, 2));
+    assert_eq(values[5], *view_at(2, 3));
+    assert_true(sentinels_intact());
+    free(h);
+}
+
 TEST_FUNC(test_sprite_color_key_black_transparent)
 {
     TEST_SUITE("sprite: color_key=0 is transparent (key includes black)");
@@ -777,6 +829,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_line_extreme_endpoints_no_overflow),
     TEST_ENTRY(test_line_extreme_clip_partial),
     TEST_ENTRY(test_sprite_opaque_with_stride_padding),
+    TEST_ENTRY(test_sprite_opaque_with_byte_stride),
+    TEST_ENTRY(test_sprite_mask_with_byte_stride),
     TEST_ENTRY(test_sprite_color_key_black_transparent),
     TEST_ENTRY(test_sprite_color_key_nonzero),
     TEST_ENTRY(test_sprite_color_key_disabled),

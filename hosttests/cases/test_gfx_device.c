@@ -163,6 +163,7 @@ int signal_pgrp(pid_t t, int s) { (void)t; (void)s; return -1; }
 #define TEST_FB_SIZE    (TEST_FB_WIDTH * TEST_FB_HEIGHT * TEST_FB_BPP)
 
 static uint32_t *test_fb_buf;          // Pos.FB_addr points here
+static uint32_t test_fb_width_override;
 position Pos;                          // host-test fake (defined here)
 
 /* ── User-pointer simulator ──
@@ -228,7 +229,8 @@ int strnlen_user(const void *p, size_t m) { (void)p; (void)m; return 0; }
 int fb_get_info(struct fb_info *out)
 {
     if (!out) return -EINVAL;
-    out->width  = (uint32_t)TEST_FB_WIDTH;
+    out->width  = test_fb_width_override ? test_fb_width_override
+                                         : (uint32_t)TEST_FB_WIDTH;
     out->height = (uint32_t)TEST_FB_HEIGHT;
     out->stride = TEST_FB_STRIDE;
     out->bpp    = 32;
@@ -255,6 +257,7 @@ int fb_write_row(uint32_t x, uint32_t y, const void *pixels,
 
 static void reset_test_state(void)
 {
+    test_fb_width_override = 0;
     memset(&test_task, 0, sizeof(test_task));
     memset(&test_files, 0, sizeof(test_files));
     test_task.addr_limit = UINT64_MAX;
@@ -385,6 +388,17 @@ TEST_FUNC(test_create_view_rejects_uint32_max_overflow) {
     gfx_view_desc_t yplus_h_overflow = { 0, 1, 1, UINT32_MAX };
     assert_eq(-EINVAL, do_create_view(f, &yplus_h_overflow));
 
+    file_put(f);
+}
+
+TEST_FUNC(test_create_view_rejects_stride_overflow) {
+    reset_test_state();
+    test_fb_width_override = UINT32_MAX;
+    file_t *f = open_gfx0();
+    assert_not_null(f);
+    gfx_view_desc_t too_wide = { 0, 0, UINT32_MAX / 4u + 1u, 1 };
+    int rc = do_create_view(f, &too_wide);
+    assert_eq(-EINVAL, rc);
     file_put(f);
 }
 
@@ -876,6 +890,7 @@ TEST_FUNC(test_present_unknown_cmd_returns_enotty) {
 TEST_LIST_BEGIN
     TEST_ENTRY(test_create_view_rejects_zero_size),
     TEST_ENTRY(test_create_view_rejects_uint32_max_overflow),
+    TEST_ENTRY(test_create_view_rejects_stride_overflow),
     TEST_ENTRY(test_create_view_exact_fit_right_edge),
     TEST_ENTRY(test_create_view_exact_fit_bottom_edge),
     TEST_ENTRY(test_create_view_rejects_reconfigure),

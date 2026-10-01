@@ -260,15 +260,15 @@ TEST_FUNC(test_open_enoint_normalized_to_enodev)
     assert_eq(0, mock_free_count);
 }
 
-TEST_FUNC(test_open_other_open_errors_also_enodev)
+TEST_FUNC(test_open_enfile_is_preserved)
 {
-    TEST_SUITE("open: other errors -> ENODEV");
+    TEST_SUITE("open: fd table full preserves ENFILE");
     reset_mocks();
-    mock_open_errno = EACCES;   /* any open failure → ENODEV per spec §5 */
+    mock_open_errno = ENFILE;
     errno = 0;
     gfx_handle_t *h = gfx_open(0, 0, 4, 4);
     assert_null(h);
-    assert_eq(ENODEV, errno);
+    assert_eq(ENFILE, errno);
     assert_eq(0, mock_ioctl_count);
     assert_eq(0, mock_alloc_count);
 }
@@ -473,7 +473,7 @@ TEST_FUNC(test_present_req_pixel_pointer_is_buffer)
 TEST_LIST_BEGIN
     TEST_ENTRY(test_open_happy_path),
     TEST_ENTRY(test_open_enoint_normalized_to_enodev),
-    TEST_ENTRY(test_open_other_open_errors_also_enodev),
+    TEST_ENTRY(test_open_enfile_is_preserved),
     TEST_ENTRY(test_open_create_view_failure_cleanup),
     TEST_ENTRY(test_open_get_info_failure_cleanup),
     TEST_ENTRY(test_open_pixel_alloc_failure_cleanup),

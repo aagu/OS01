@@ -158,6 +158,7 @@ static int gfx_ioctl_create_view(file_t *f, const gfx_view_desc_t *kdesc)
     // Spec §3 — w, h non-zero.  Spec §4 — overflow-safe subtraction
     // form so UINT32_MAX w / h is rejected even when x or y is 0.
     if (kdesc->w == 0 || kdesc->h == 0) return -EINVAL;
+    if (kdesc->w > UINT32_MAX / 4u)    return -EINVAL;
     if (kdesc->x > fb_w)              return -EINVAL;
     if (kdesc->w > fb_w - kdesc->x)   return -EINVAL;
     if (kdesc->y > fb_h)              return -EINVAL;

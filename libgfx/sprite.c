@@ -30,6 +30,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 /* Forward-declare the local rect intersection helper.  We do NOT
  * share the helper with line.c because libgfx/line.c is its own
@@ -85,7 +86,7 @@ void gfx_sprite_blit(gfx_handle_t *h, int32_t dx, int32_t dy,
     if (!h || !h->pixels || !src) return;
     if (src_w == 0u || src_h == 0u) return;
     /* spec §4: src_stride is bytes and must be >= src_w*4. */
-    if (src_stride < src_w * 4u) return;
+    if (src_w > UINT32_MAX / 4u || src_stride < src_w * 4u) return;
     if (h->info.width == 0u || h->info.height == 0u) return;
 
     /* Compute the destination visible rect = clip ∩ view.  We
@@ -114,19 +115,20 @@ void gfx_sprite_blit(gfx_handle_t *h, int32_t dx, int32_t dy,
      * coordinates.  The sprite starts at (dx, dy) in the
      * destination, so a visible destination pixel (fx + i, fy + j)
      * corresponds to source pixel (fx - dx + i, fy - dy + j).  The
-     * source row stride is in bytes; convert to pixels. */
-    uint32_t src_stride_px = src_stride / 4u;
+     * Source rows begin at byte offsets; padding need not be a
+     * multiple of a pixel, so read RGB32 values with memcpy. */
     size_t width = (size_t)h->info.width;
 
-    int32_t sx0 = fx - dx;  /* source pixel column offset for fx */
-    int32_t sy0 = fy - dy;  /* source pixel row    offset for fy */
+    size_t sx0 = (size_t)((int64_t)fx - (int64_t)dx);
+    size_t sy0 = (size_t)((int64_t)fy - (int64_t)dy);
     for (uint32_t row = 0; row < fh; ++row) {
-        const uint32_t *src_row =
-            src + (size_t)(sy0 + (int32_t)row) * (size_t)src_stride_px;
+        const uint8_t *src_row =
+            (const uint8_t *)src + (sy0 + (size_t)row) * (size_t)src_stride;
         uint32_t *dst_row =
             h->pixels + ((size_t)fy + (size_t)row) * width + (size_t)fx;
         for (uint32_t col = 0; col < fw; ++col) {
-            uint32_t px = src_row[sx0 + (int32_t)col];
+            uint32_t px;
+            memcpy(&px, src_row + (sx0 + (size_t)col) * 4u, sizeof(px));
             if (use_color_key && px == color_key) {
                 continue;
             }
@@ -143,9 +145,9 @@ void gfx_sprite_blit_mask(gfx_handle_t *h, int32_t dx, int32_t dy,
 {
     if (!h || !h->pixels || !src || !mask) return;
     if (src_w == 0u || src_h == 0u) return;
-    if (src_stride < src_w * 4u) return;
+    if (src_w > UINT32_MAX / 4u || src_stride < src_w * 4u) return;
     /* spec §4: mask_stride >= ceil(src_w / 8). */
-    uint32_t mask_row_bytes = (src_w + 7u) / 8u;
+    uint32_t mask_row_bytes = src_w / 8u + ((src_w & 7u) != 0u);
     if (mask_stride < mask_row_bytes) return;
     if (h->info.width == 0u || h->info.height == 0u) return;
 
@@ -166,27 +168,27 @@ void gfx_sprite_blit_mask(gfx_handle_t *h, int32_t dx, int32_t dy,
                    &fx, &fy, &fw, &fh);
     if (fw == 0u || fh == 0u) return;
 
-    uint32_t src_stride_px = src_stride / 4u;
     size_t width = (size_t)h->info.width;
 
-    int32_t sx0 = fx - dx;
-    int32_t sy0 = fy - dy;
+    size_t sx0 = (size_t)((int64_t)fx - (int64_t)dx);
+    size_t sy0 = (size_t)((int64_t)fy - (int64_t)dy);
     for (uint32_t row = 0; row < fh; ++row) {
-        const uint32_t *src_row =
-            src + (size_t)(sy0 + (int32_t)row) * (size_t)src_stride_px;
+        const uint8_t *src_row =
+            (const uint8_t *)src + (sy0 + (size_t)row) * (size_t)src_stride;
         const uint8_t *mask_row =
-            mask + (size_t)(sy0 + (int32_t)row) * (size_t)mask_stride;
+            mask + (sy0 + (size_t)row) * (size_t)mask_stride;
         uint32_t *dst_row =
             h->pixels + ((size_t)fy + (size_t)row) * width + (size_t)fx;
         for (uint32_t col = 0; col < fw; ++col) {
-            int32_t src_col = sx0 + (int32_t)col;
+            size_t src_col = sx0 + (size_t)col;
             /* Mask bit: bit 7 of mask_row[src_col / 8] is the
              * leftmost (src_col == 0); bit 0 is the rightmost.
              * 1 = copy, 0 = skip. */
             uint8_t mb = mask_row[src_col >> 3];
             uint8_t bit = (uint8_t)(1u << (7u - (src_col & 7)));
             if ((mb & bit) == 0u) continue;
-            dst_row[col] = src_row[src_col];
+            memcpy(&dst_row[col], src_row + src_col * 4u,
+                   sizeof(dst_row[col]));
         }
     }
 }

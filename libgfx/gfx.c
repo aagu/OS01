@@ -31,13 +31,11 @@
 /* ── gfx_open ─────────────────────────────────────────────────── */
 gfx_handle_t *gfx_open(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 {
-    /* Spec §5: any open() failure is normalised to ENODEV — the
-     * device simply does not exist from the caller's perspective.
-     * ENOENT (path missing), EACCES, ENXIO all collapse to the same
-     * "no /dev/gfx0 here" contract. */
+    /* Spec §5: only a missing device path maps to ENODEV.
+     * Preserve resource and permission errors from open(). */
     int fd = open(GFX_DEVICE_PATH, O_RDWR);
     if (fd < 0) {
-        errno = ENODEV;
+        if (errno == ENOENT) errno = ENODEV;
         return NULL;
     }
 

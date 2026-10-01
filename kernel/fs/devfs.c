@@ -275,6 +275,8 @@ int devfs_ioctl_node(vfs_node_t *node, int cmd, void *arg)
 int devfs_ioctl_file(file_t *f, int cmd, void *arg)
 {
     if (!f || !f->node) return -ENOTTY;
+    if (f->type != FD_DEV || f->node->type != VFS_CHRDEV)
+        return -ENOTTY;
     int idx = (int)(uintptr_t)f->node->fs_data;
     if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
         return -ENODEV;
@@ -306,6 +308,7 @@ int devfs_ioctl_file(file_t *f, int cmd, void *arg)
 void devfs_release_file(file_t *f)
 {
     if (!f || !f->node) return;
+    if (f->type != FD_DEV || f->node->type != VFS_CHRDEV) return;
     int idx = (int)(uintptr_t)f->node->fs_data;
     if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
         return;
