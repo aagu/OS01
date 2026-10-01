@@ -96,7 +96,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_gfx_client.elf \
     $(TEST_BLD)/test_gfx_primitives.elf \
     $(TEST_BLD)/test_aarch64_sync_fault.elf \
-    $(TEST_BLD)/test_elf_layout.elf
+    $(TEST_BLD)/test_elf_layout.elf \
+    $(TEST_BLD)/test_elf_load_4k.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -429,6 +430,44 @@ $(TEST_BLD)/test_elf_layout.o: $(TEST_CASES)/test_elf_layout.c \
 	$(HOST_CC) $(ELF_LAYOUT_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/test_elf_layout.elf: $(TEST_BLD)/test_elf_layout.o $(TEST_BLD)/elf_layout.o
+	$(HOST_CC) -o $@ $^
+
+# Per-4 KiB ELF loader test (Task 2, user heap/ELF isolation plan):
+# compiles the REAL kernel/fs/elf.c against the host harness.  The
+# host stubs VFS / PMM / VMM under hosttests/mock/elf_load/ and the
+# production elf_load is exercised end-to-end against a real PTE
+# state machine (flat user-VA table with present-bit / flags / phys
+# per slot — no PAGE_HUGE leaves possible).  Failure injection
+# (alloc/read/map) lets the test verify that the loader's single
+# rollback owner frees each created leaf exactly once.
+ELF_LOAD_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
+                        -I$(TESTS_DIR)/kernel/include \
+                        -include $(TEST_MOCK)/elf_load/elf_load_runtime.h \
+                        -I$(TEST_MOCK) -I$(TEST_INC) \
+                        -I$(TEST_MOCK)/elf_load
+
+$(TEST_BLD)/elf_load_production.o: $(TESTS_DIR)/kernel/fs/elf.c \
+		$(TESTS_DIR)/kernel/include/fs/elf.h \
+		$(TESTS_DIR)/kernel/include/fs/elf_layout.h \
+		$(TEST_MOCK)/elf_load/elf_load_stubs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ELF_LOAD_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/elf_load_stubs.o: $(TEST_MOCK)/elf_load/elf_load_stubs.c \
+		$(TEST_MOCK)/elf_load/elf_load_stubs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ELF_LOAD_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_elf_load_4k.o: $(TEST_CASES)/test_elf_load_4k.c \
+		$(TEST_MOCK)/elf_load/elf_load_stubs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ELF_LOAD_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_elf_load_4k.elf: $(TEST_BLD)/test_elf_load_4k.o \
+		$(TEST_BLD)/elf_load_production.o \
+		$(TEST_BLD)/elf_load_stubs.o \
+		$(TEST_BLD)/elf_layout.o \
+		$(MOCK_OBJS)
 	$(HOST_CC) -o $@ $^
 
 # standalone test (no kernel/libc deps)
