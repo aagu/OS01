@@ -97,7 +97,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_gfx_primitives.elf \
     $(TEST_BLD)/test_aarch64_sync_fault.elf \
     $(TEST_BLD)/test_elf_layout.elf \
-    $(TEST_BLD)/test_elf_load_4k.elf
+    $(TEST_BLD)/test_elf_load_4k.elf \
+    $(TEST_BLD)/test_process_image_lifecycle.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -469,6 +470,47 @@ $(TEST_BLD)/test_elf_load_4k.elf: $(TEST_BLD)/test_elf_load_4k.o \
 		$(TEST_BLD)/elf_layout.o \
 		$(MOCK_OBJS)
 	$(HOST_CC) -o $@ $^
+
+# Process-image lifecycle test (Task 3, user heap/ELF isolation plan):
+# compiles the REAL kernel/memory/vma.c against the host harness so
+# mm_init_user_heap / vma_insert / vma_find / vma_free_all / mm_alloc
+# are exercised against observable state.  Failure injection on
+# kmalloc (-Wl,--wrap=kmalloc) proves mm_init_user_heap returns
+# -ENOMEM and leaves mm unchanged when its VMA allocation fails.
+#
+# Source-level inspection of kernel/sched/task.c covers the staged
+# spawn/exec lifecycle invariants (the task.c dependency tree —
+# percpu, ipi, fpu, irq, ...) is too heavy to compile in a host
+# harness; the actual end-to-end behavior is covered by
+# `make OS01_SYSTEST=1 test-qemu SUITE=systest`).
+LIFECYCLE_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
+                         -I$(TESTS_DIR)/kernel/include \
+                         -include $(TEST_MOCK)/lifecycle/lifecycle_runtime.h \
+                         -I$(TEST_MOCK) -I$(TEST_INC) \
+                         -I$(TEST_MOCK)/lifecycle
+
+$(TEST_BLD)/vma_production.o: $(TESTS_DIR)/kernel/memory/vma.c \
+		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TESTS_DIR)/kernel/include/sched/task.h \
+		$(TEST_MOCK)/lifecycle/lifecycle_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(LIFECYCLE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/lifecycle_stubs.o: $(TEST_MOCK)/lifecycle/lifecycle_stubs.c \
+		$(TEST_MOCK)/lifecycle/lifecycle_stubs.h \
+		$(TEST_MOCK)/lifecycle/lifecycle_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(LIFECYCLE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_process_image_lifecycle.o: $(TEST_CASES)/test_process_image_lifecycle.c \
+		$(TEST_MOCK)/lifecycle/lifecycle_stubs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(LIFECYCLE_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_process_image_lifecycle.elf: $(TEST_BLD)/test_process_image_lifecycle.o \
+		$(TEST_BLD)/vma_production.o \
+		$(TEST_BLD)/lifecycle_stubs.o
+	$(HOST_CC) -Wl,--wrap=kmalloc,--wrap=kfree -o $@ $^
 
 # standalone test (no kernel/libc deps)
 $(TEST_BLD)/test_wait_basic.elf: $(TEST_BLD)/test_wait_basic.o

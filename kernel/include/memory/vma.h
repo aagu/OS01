@@ -19,6 +19,8 @@ typedef struct mm_struct mm_t;
 #define VM_ANON      0x20   // anonymous mapping (no backing file)
 #define VM_GROWSDOWN 0x40   // reserved, not implemented
 #define VM_IO        0x80   // MMIO region (no COW, no file-backed demand paging)
+#define VM_HEAP      0x100  // the unique heap VMA — zero-length, tracks
+                            // [start_brk, ALIGN_UP(end_brk, 4096))
 
 // ── PROT_* constants (kernel-accessible copy of libc mman.h) ─
 #define PROT_NONE  0x0
@@ -50,6 +52,25 @@ void      vma_remove(mm_t *mm, vma_t *vma);
 void      vma_free_all(mm_t *mm);
 vma_t    *fork_vma_copy(mm_t *child_mm, mm_t *parent_mm);
 mm_t     *mm_alloc(void);   // allocate + init an mm_t (lock = unlocked)
+
+// ── mm_init_user_heap — heap-VMA initializer ────────────────
+// Must be called after a successful elf_load() on the new mm.
+// Sets mm->start_brk = mm->end_brk = ALIGN_UP(elf_end, 4096).
+// Inserts ONE zero-length heap VMA [start_brk, start_brk) with
+//   vm_flags     = VM_READ | VM_WRITE | VM_ANON | VM_HEAP,
+//   vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID.
+// Returns 0 on success, -ENOMEM if the VMA allocation fails.
+// On failure: mm is unchanged (caller owns it; will destroy via
+// destroy_unpublished_user_mm from kernel/sched/task.c).
+//
+// The zero-length VMA survives VMA traversal — vma_find() does
+// NOT match it (vma_find checks `addr < vm_end`, which is always
+// false for an empty range).  The heap VMA exists so brk-grown
+// 4 KiB pages can be inserted by the brk syscall with a known
+// owning VMA, and so fork() can reproduce the heap range via the
+// fork_vma_copy path.  See docs/.../2026-10-01-user-heap-elf-
+// isolation-design.md §4 (zero-length heap invariant).
+int       mm_init_user_heap(mm_t *mm, uint64_t elf_end);
 
 // ── Syscall implementations (called from trap.c) ───────────
 int64_t   do_mmap(uint64_t addr, uint64_t length, uint64_t prot,

@@ -1340,9 +1340,66 @@ static int setup_user_stack(uint8_t *kstack, char *const argv[], char *const env
     return 0;
 }
 
+// ── destroy_unpublished_user_mm ─────────────────────────────
+// Releases every resource owned by an UNPUBLISHED mm (a freshly
+// allocated mm that has not been attached to a running task).
+// Used by spawn_user_task / sys_exec on the staged-failure path:
+// at the failure point the new mm is private to this CPU and no
+// other CPU can have a pointer to it, so vma_free_all + free the
+// user page tables is sufficient.
+//
+// Order matters: vma_free_all walks the VMA list and unmaps the
+// 4 KiB pages tracked by each VMA.  The user stack page was
+// mapped via vmm_map_page (PMD entry, separate 2 MiB page) and
+// is NOT covered by any VMA — but vmm_free_user_map walks the
+// entire user page table and releases every leaf it finds,
+// including the stack page.  So we deliberately do NOT call
+// free_pages(stack_page) separately: vmm_free_user_map owns that
+// path.  Calling it twice would double-free the struct Page and
+// trip the PMM bitmap integrity check.
+//
+// The caller owns the heap VMA, the stack page, and the mm itself;
+// destroy_unpublished_user_mm handles VMAs + page tables.  Caller
+// is responsible for kfree(mm) afterward.
+//
+// Does NOT take task_list_lock / rq_lock / mm->lock — caller is
+// the sole owner of the mm and the resources.
+static void destroy_unpublished_user_mm(mm_t *mm)
+{
+    if (!mm) return;
+    vma_free_all(mm);
+    if (mm->pgdir) {
+        uint64_t *user_pgd = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
+        vmm_free_user_map(user_pgd);
+    }
+}
+
 // ── spawn_user_task(path) ──────────────────────────────────
 // Loads an ELF from the filesystem, creates a new user task,
 // and adds it to the scheduler. Returns the new task's PID or -1 on error.
+//
+// Task 3 lifecycle (docs/.../2026-10-01-user-heap-elf-isolation-
+// design.md §5.1): every fallible preparation runs PRIVATELY before
+// the new task becomes visible.  The single publication point —
+// task_list insert + enqueue + IPI — happens AFTER setup_user_stack
+// succeeds, so a partial task never enters the scheduler /
+// waitpid-watched task list.  Each staged failure runs
+// destroy_unpublished_user_mm + the appropriate release-one-of-each
+// cleanup, matching the existing setup_user_stack_check_capacity +
+// fpu + files + thread + task-stack cleanup pattern.
+//
+// Cleanup ownership (each release is a SINGLE owner):
+//   - files:        tsk->files owns one ref; release via files_unpin
+//                   (must NOT be called under task_list_lock / rq_lock —
+//                   see kernel/include/fs/file.h:140-142)
+//   - fpu_save:     tsk->fpu_save owns one malloc; release via kfree
+//   - stack_page:   mapped via vmm_map_page (PMD); released by
+//                   vmm_free_user_map walking the user page table.
+//                   destroy_unpublished_user_mm owns this path — do
+//                   NOT also free_pages(stack_page).
+//   - mm:           caller (this function) kfree's the struct mm
+//   - thread:       kfree(thd)
+//   - task stack:   kfree(raw_alloc)
 int64_t spawn_user_task(const char *path, const char *const *argv)
 {
     int s_argc = 0, s_envc = 0;
@@ -1410,16 +1467,10 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
 
     list_init(&tsk->wait_list);
     list_init(&tsk->io_wait_node);
+    list_init(&tsk->list);
     tsk->exit_code = 0;
     if (current->files)
         tsk->files = files_dup(current->files);
-
-    list_init(&tsk->list);
-    {
-        uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
-        list_add_to_before(&init_task_union.task.list, &tsk->list);
-        spin_unlock_irqrestore(&task_list_lock, tl_flags);
-    }
     tsk->thread = thd;
 
     // FPU save area — user tasks may use float/SSE
@@ -1428,7 +1479,11 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     // 4. Create per-process page table
     uint64_t *user_pgd = (uint64_t *)vmm_alloc_map();  // 4KB zeroed PGD
     if (!user_pgd) {
-        kfree(raw_alloc); kfree(thd); kfree(mm);
+        if (tsk->files) { files_unpin(tsk->files); tsk->files = NULL; }
+        if (tsk->fpu_save) kfree(tsk->fpu_save);
+        kfree(raw_alloc);
+        kfree(thd);
+        kfree(mm);
         vfs_node_put(node);
         return -1;
     }
@@ -1443,7 +1498,9 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     uint64_t entry_point;
     if (elf_load(node, mm, &entry_point) != 0) {
         debug_task("spawn: ELF load failed for '%s'\n", path);
-        vmm_free_user_map(user_pgd);
+        if (tsk->files) { files_unpin(tsk->files); tsk->files = NULL; }
+        if (tsk->fpu_save) kfree(tsk->fpu_save);
+        destroy_unpublished_user_mm(mm);
         kfree(mm);
         kfree(thd);
         kfree(raw_alloc);
@@ -1452,35 +1509,31 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     }
     vfs_node_put(node);
 
-    // Set heap just after the loaded ELF segments
-    mm->start_brk = PAGE_4K_ALIGN(mm->end_code);
-    mm->end_brk   = mm->start_brk;
-
-    // Insert a heap VMA covering [start_brk, USER_CODE_ADDR + USER_PAGE_SIZE).
-    // The demand-paging fault handler (do_page_fault) requires a vma_t to
-    // resolve a page fault inside this range; without it, brk-extended
-    // heap accesses fault-and-die.  The cap matches the brk syscall's
-    // own check at USER_CODE_ADDR + USER_PAGE_SIZE - 0x1000 (a 4 KiB
-    // safety margin past the top of the user VA region).
-    {
-        vma_t *hv = (vma_t *)kmalloc(sizeof(vma_t));
-        if (hv) {
-            list_init(&hv->list);
-            hv->vm_start     = mm->start_brk;
-            hv->vm_end       = USER_CODE_ADDR + USER_PAGE_SIZE;
-            hv->vm_flags     = VM_READ | VM_WRITE | VM_ANON;
-            hv->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
-            hv->vm_pgoff     = 0;
-            hv->vm_file      = NULL;
-            vma_insert(mm, hv);
-        }
+    // Set up heap.  mm_init_user_heap installs the unique zero-length
+    // VM_HEAP VMA and sets start_brk = end_brk = ALIGN_UP(end_code,
+    // 4096).  A -ENOMEM return means the VMA allocation failed; mm is
+    // unchanged in that case, so destroy_unpublished_user_mm walks an
+    // empty VMA list and frees the ELF pages via vmm_free_user_map.
+    if (mm_init_user_heap(mm, mm->end_code) != 0) {
+        debug_task("spawn: heap VMA alloc failed for '%s'\n", path);
+        if (tsk->files) { files_unpin(tsk->files); tsk->files = NULL; }
+        if (tsk->fpu_save) kfree(tsk->fpu_save);
+        destroy_unpublished_user_mm(mm);
+        kfree(mm);
+        kfree(thd);
+        kfree(raw_alloc);
+        return -1;
     }
 
     // 6. Map the user stack page (separate 2MB page at 0x600000)
     struct Page *stack_page = alloc_pages(ZONE_NORMAL, 1, 0);
     if (!stack_page) {
-        vmm_free_user_map(user_pgd);
-        kfree(mm); kfree(thd); kfree(raw_alloc);
+        if (tsk->files) { files_unpin(tsk->files); tsk->files = NULL; }
+        if (tsk->fpu_save) kfree(tsk->fpu_save);
+        destroy_unpublished_user_mm(mm);
+        kfree(mm);
+        kfree(thd);
+        kfree(raw_alloc);
         return -1;
     }
     vmm_map_page(user_pgd, stack_page->phy_address,
@@ -1494,21 +1547,16 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     if (setup_user_stack(kstack, (char *const *)argv, NULL, s_argc, s_envc,
                          &user_arg_ptr, &user_env_ptr, &user_rsp) != 0) {
         /* AT_RANDOM STRONG-only 失败 — 清理已分配资源后返回 -EAGAIN。
-         * 顺序与现有 elf_load 失败路径（kernel/sched/task.c:1316-1322）一致，
-         * **外加** task_list_lock 释放后再调 files_unpin（`kernel/include/fs/file.h:140-142`
-         * 明确：files_unpin/files_put_file 不得在 task_list_lock / fs->lock / rq lock 持锁下调用，
-         * 其 drop-to-zero 路径可能同步 files_free/file_free）。 */
-        uint64_t tl_flags2 = spin_lock_irqsave(&task_list_lock);
-        list_del(&tsk->list);
-        spin_unlock_irqrestore(&task_list_lock, tl_flags2);
-        /* 现在 task_list_lock 已释放，可安全调 files_unpin。 */
-        if (tsk->files) {
-            files_unpin(tsk->files);
-            tsk->files = NULL;
-        }
+         * 顺序与现有 elf_load 失败路径一致，**外加** task_list_lock
+         * 已不再持锁（我们采用 staged 生命周期，task_list_insert
+         * 推迟到这里之后），所以 files_unpin/files_put_file 直接
+         * 调用即可——见 `kernel/include/fs/file.h:140-142`。 */
+        if (tsk->files) { files_unpin(tsk->files); tsk->files = NULL; }
         if (tsk->fpu_save) kfree(tsk->fpu_save);
-        free_pages(stack_page, 1);
-        vmm_free_user_map(user_pgd);
+        /* destroy_unpublished_user_mm frees the stack page via
+         * vmm_free_user_map — do NOT call free_pages(stack_page)
+         * separately (single-owner release). */
+        destroy_unpublished_user_mm(mm);
         kfree(mm);
         kfree(thd);
         kfree(raw_alloc);
@@ -1536,7 +1584,17 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     thd->gs   = KERNEL_DS;
     thd->rip  = (uint64_t)ret_from_intr;   // first entry via RESTORE_ALL → iretq
 
+    // ── PUBLISH (single release point, spec §5.1) ────────────
+    // Every fallible preparation has succeeded; only now do we
+    // make tsk visible to other CPUs.  Once listed, the task is
+    // discoverable by schedule() / waitpid() / signal_pgrp() and
+    // cannot be unpublished — only do_exit / reap can retire it.
     tsk->state = TASK_RUNNING;
+    {
+        uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
+        list_add_to_before(&init_task_union.task.list, &tsk->list);
+        spin_unlock_irqrestore(&task_list_lock, tl_flags);
+    }
     {
         uint64_t flags = spin_lock_irqsave(&percpu_data[tsk->cpu].rq_lock);
         enqueue_task(tsk, &percpu_data[tsk->cpu]);
@@ -1569,6 +1627,13 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
 // + setup_user_stack_check_capacity() with -E2BIG. The child's _start
 // reads argc from (rsp) and argv from 8(rsp) — that contract lives in
 // user/crt0.S.
+//
+// Task 3 lifecycle (spec §5.1): keep the old image live until the
+// new image is fully prepared.  Every fallible step runs against
+// new_mm only; if any step fails, we destroy_unpublished_user_mm
+// and return — the old mm + CR3 stay active.  Only when setup_user_stack
+// succeeds do we commit: switch mm + CR3 in a single IRQ-disabled
+// window, then clean up the old image.
 int64_t sys_exec(const char *path, pt_regs_t *regs,
                  const char *const *argv, const char *const *envp)
 {
@@ -1614,7 +1679,7 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     // 4. Create new mm_struct
     mm_t *new_mm = mm_alloc();
     if (!new_mm) {
-        kfree(new_pgd);
+        vmm_free_user_map(new_pgd);
         vfs_node_put(node);
         return -ENOMEM;
     }
@@ -1622,37 +1687,29 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     // 5. Load ELF segments into the new address space
     uint64_t entry_point;
     if (elf_load(node, new_mm, &entry_point) != 0) {
-        vmm_free_user_map(new_pgd);
+        destroy_unpublished_user_mm(new_mm);
         kfree(new_mm);
         vfs_node_put(node);
         return -ENOEXEC;
     }
     vfs_node_put(node);
 
-    // Set heap just after the loaded ELF segments
-    new_mm->start_brk = PAGE_4K_ALIGN(new_mm->end_code);
-    new_mm->end_brk   = new_mm->start_brk;
-
-    // Insert a heap VMA covering [start_brk, USER_CODE_ADDR + USER_PAGE_SIZE).
-    // Mirrors the setup in spawn_user_task() — see that comment for why.
-    {
-        vma_t *hv = (vma_t *)kmalloc(sizeof(vma_t));
-        if (hv) {
-            list_init(&hv->list);
-            hv->vm_start     = new_mm->start_brk;
-            hv->vm_end       = USER_CODE_ADDR + USER_PAGE_SIZE;
-            hv->vm_flags     = VM_READ | VM_WRITE | VM_ANON;
-            hv->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
-            hv->vm_pgoff     = 0;
-            hv->vm_file      = NULL;
-            vma_insert(new_mm, hv);
-        }
+    // Set up the heap.  mm_init_user_heap installs the unique
+    // zero-length VM_HEAP VMA and sets start_brk = end_brk =
+    // ALIGN_UP(end_code, 4096).  -ENOMEM means the VMA alloc
+    // failed; mm is unchanged so destroy_unpublished_user_mm
+    // walks an empty list and frees the ELF pages via
+    // vmm_free_user_map.
+    if (mm_init_user_heap(new_mm, new_mm->end_code) != 0) {
+        destroy_unpublished_user_mm(new_mm);
+        kfree(new_mm);
+        return -ENOMEM;
     }
 
     // 6. Map the user stack page
     struct Page *stack_page = alloc_pages(ZONE_NORMAL, 1, 0);
     if (!stack_page) {
-        vmm_free_user_map(new_pgd);
+        destroy_unpublished_user_mm(new_mm);
         kfree(new_mm);
         return -ENOMEM;
     }
@@ -1666,18 +1723,22 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
 
     if (setup_user_stack(kstack, (char *const *)argv, (char *const *)envp,
                          s_argc, s_envc, &user_arg_ptr, &user_env_ptr, &user_rsp) != 0) {
-        /* AT_RANDOM STRONG-only 失败 — 清理已分配资源后返回 -EAGAIN。
-         * sys_exec 路径（与 spawn_user_task 不同）：node 已在 step 1 vfs_node_put；
-         * 只需释放 stack_page + new_pgd + new_mm。 */
-        free_pages(stack_page, 1);
-        vmm_free_user_map(new_pgd);
+        /* AT_RANDOM STRONG-only 失败 — 走 staged 失败路径：
+         * destroy_unpublished_user_mm 释放 stack_page + new_pgd；
+         * 我们不需要单独 free_pages(stack_page)（single-owner
+         * release，vmm_free_user_map 已经走那条路）。 */
+        destroy_unpublished_user_mm(new_mm);
         kfree(new_mm);
         return -EAGAIN;
     }
 
     // 7. Commit the new address space before releasing the old one.
     // All fallible preparation and user argument copies are complete.
-    // Publish mm + saved CR3 + hardware CR3 without a scheduling window.
+    // Capture the old_mm/CR3 reference NOW (still pointing at the
+    // live old image), then switch the current task's mm + CR3 in a
+    // single IRQ-disabled window.  After this point, any failure is
+    // fatal — but no fallible step remains, so this is the spec's
+    // single commit point.
     mm_t *old_mm = current->mm;
     arch_irq_state_t irq_flags = arch_local_irq_save();
     current->mm = new_mm;

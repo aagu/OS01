@@ -129,6 +129,51 @@ mm_t *mm_alloc(void)
     return mm;
 }
 
+// mm_init_user_heap — install the unique heap VMA and set mm's break
+// fields.  Must be called after a successful elf_load() so the new
+// mm already has start_code/end_code set; elf_end is the high-water
+// mark of the loaded image (== end_code aligned by elf_layout).
+//
+// Contract (docs/.../2026-10-01-user-heap-elf-isolation-design.md §4):
+//   - mm->start_brk = mm->end_brk = ALIGN_UP(elf_end, 4096)
+//   - ONE heap VMA inserted at [start_brk, start_brk) — zero-length
+//   - vm_flags     = VM_READ | VM_WRITE | VM_ANON | VM_HEAP
+//   - vm_page_prot = PAGE_USER  | PAGE_WRITE | PAGE_VALID
+//   - vma_find() does NOT match this VMA (zero-length invariant)
+//
+// Failure handling: if the VMA allocation fails, mm is left
+// unchanged.  The caller (spawn_user_task / sys_exec) destroys the
+// unpublished mm via destroy_unpublished_user_mm — see
+// kernel/sched/task.c — which calls vma_free_all() then
+// vmm_free_user_map().  Nothing has been added to mm yet, so on the
+// failure path vma_free_all() walks an empty list and the user-page
+// tables are torn down as usual.
+int mm_init_user_heap(mm_t *mm, uint64_t elf_end)
+{
+    if (!mm) return -EINVAL;
+
+    uint64_t heap_base = (elf_end + (PAGE_4K_SIZE - 1)) & ~(PAGE_4K_SIZE - 1);
+
+    vma_t *hv = (vma_t *)kmalloc(sizeof(vma_t));
+    if (!hv) return -ENOMEM;
+
+    list_init(&hv->list);
+    hv->vm_start     = heap_base;
+    hv->vm_end       = heap_base;          /* zero-length on purpose */
+    hv->vm_flags     = VM_READ | VM_WRITE | VM_ANON | VM_HEAP;
+    hv->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
+    hv->vm_pgoff     = 0;
+    hv->vm_file      = NULL;
+
+    /* Commit the break fields only AFTER the VMA alloc succeeds —
+     * a -ENOMEM return leaves mm unchanged (start_brk/end_brk
+     * untouched, VMA list untouched). */
+    mm->start_brk = heap_base;
+    mm->end_brk   = heap_base;
+    vma_insert(mm, hv);
+    return 0;
+}
+
 // ── Helper: convert prot/flags to vm_page_prot flags ──────────
 static int prot_to_page_flags(int prot, uint64_t *page_prot, uint64_t *vm_flags)
 {
