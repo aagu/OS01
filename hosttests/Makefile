@@ -95,7 +95,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_gfx_device.elf \
     $(TEST_BLD)/test_gfx_client.elf \
     $(TEST_BLD)/test_gfx_primitives.elf \
-    $(TEST_BLD)/test_aarch64_sync_fault.elf
+    $(TEST_BLD)/test_aarch64_sync_fault.elf \
+    $(TEST_BLD)/test_elf_layout.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -403,6 +404,31 @@ $(TEST_BLD)/test_slab_basic.elf: $(TEST_BLD)/test_slab_basic.o $(LIBC_OBJS) $(MO
 	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/test_elf_validate.elf: $(TEST_BLD)/test_elf_validate.o $(LIBC_OBJS) $(MOCK_OBJS)
+	$(HOST_CC) -o $@ $^
+
+# ELF layout validator (Task 1, user heap/ELF isolation plan): compiles
+# the REAL kernel/fs/elf_layout.c so the test exercises the production
+# validation contract (not a duplicate formula).  The test TU consumes
+# <fs/elf.h> for the type/macro surface and <fs/elf_layout.h> for the
+# validator interface; both headers are deliberately light after the
+# 2026-10-01 fs/elf.h refactor (heavy types forward-declared) so this
+# build needs no shadow-include machinery.
+ELF_LAYOUT_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
+                          -I$(TESTS_DIR)/kernel/include
+
+$(TEST_BLD)/elf_layout.o: $(TESTS_DIR)/kernel/fs/elf_layout.c \
+		$(TESTS_DIR)/kernel/include/fs/elf.h \
+		$(TESTS_DIR)/kernel/include/fs/elf_layout.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ELF_LAYOUT_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_elf_layout.o: $(TEST_CASES)/test_elf_layout.c \
+		$(TESTS_DIR)/kernel/include/fs/elf.h \
+		$(TESTS_DIR)/kernel/include/fs/elf_layout.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ELF_LAYOUT_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_elf_layout.elf: $(TEST_BLD)/test_elf_layout.o $(TEST_BLD)/elf_layout.o
 	$(HOST_CC) -o $@ $^
 
 # standalone test (no kernel/libc deps)

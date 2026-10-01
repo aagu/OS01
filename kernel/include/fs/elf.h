@@ -2,10 +2,24 @@
 #define _FS_ELF_H
 
 #include <stdint.h>
-#include <fs/vfs.h>
-#include <sched/task.h>
+
+/* Note: this header intentionally avoids pulling in <fs/vfs.h> and
+ * <sched/task.h> so the ELF type/macro surface stays usable from the
+ * hosttest harness (and from any future pure-data ELF consumer). The
+ * function prototypes below only need opaque pointers to vfs_node_t
+ * and mm_t; their full definitions are required only by the actual
+ * implementations in kernel/fs/elf.c, which include the heavy
+ * headers themselves. */
 
 #define EI_NIDENT 16
+
+/* Forward declarations — opaque to anything that doesn't dereference
+ * the pointee.  The actual struct definitions live in <fs/vfs.h> and
+ * <sched/task.h> respectively. */
+struct vfs_node;
+typedef struct vfs_node vfs_node_t;
+struct mm_struct;
+typedef struct mm_struct mm_t;
 
 typedef struct {
     unsigned char e_ident[EI_NIDENT];

@@ -1,4 +1,6 @@
 #include <fs/elf.h>
+#include <fs/vfs.h>      /* vfs_node_t definition, vfs_read */
+#include <sched/task.h>  /* mm_t definition (dereferenced as mm->pgdir) */
 #include <memory/memory.h>
 #include <memory/vmm.h>
 #include <memory/pmm.h>
