@@ -9,7 +9,7 @@ roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `
 
 - **Phase 1-9**：全部就绪（COW/mmap、调度/信号/SMP、文件系统、设备驱动、用户态、poll/select、网络、时间系统）
 - **工程治理**：AAGU-1/2/3/4/5.6/5.7/5.8/6/7/7.1/8/29 + arch source groups + compiler_rt 目录裁撤 + build system harness consolidation 全部就绪
-- **aarch64 适配**：Generic Timer 全栈 + GICv2 Phase 1 + IPI fix 已闭环；统一 kernel_main / arch dispatch 统一仍在路上
+- **aarch64 适配**：Generic Timer 全栈 + GICv2 Phase 1 + IPI fix 已闭环；PMM 已共用，运行期直映/VMM、Slab、VMA 与统一 kernel_main 仍待接入
 
 详细背景、commit 记录、经验教训见 `docs/changelog.md` + 各专题 closure 文档（`docs/aarch64-*-closure-*.md` / `docs/aarch64-ipi-fail-handoff-2026-09-26.md`）+ 主题 docs。
 
@@ -38,11 +38,26 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 已完成：v25 arch-cleanup / PMM arch-neutral / 页表原语 / Generic Timer Phase 1 + Phase 2 #1~#5 / GICv2 Phase 1 + GIC probe fix / AAGU-3 subsys_stub convergence / AAGU-29 libk.a link / IPI TPIDR_EL1 fix（详见 `docs/changelog.md` + `docs/aarch64-*-closure-2026-09-18.md` + `docs/aarch64-libk-aarch64-closure-2026-09-24.md` + `docs/aarch64-ipi-fail-handoff-2026-09-26.md`）。
 
+#### 内存管理：按 x86_64 的两阶段映射推进（2026-10-01 核查）
+
+x86_64 的 `head.S` 只预置低地址与高半区共享的前 32 MiB 映射；`x86_64_boot_memory()` 随后执行 `pmm_init()` → `vmm_init()`，后者按 PMM 的 zone/page 描述符扩展 2 MiB 直映。aarch64 的 `aarch64_main()` 已调用同一份 `pmm_init()`，但没有运行期 `vmm_init()`：`head.S` 映射 0..1 GiB 与 `0x40000000..0x40200000`，`0x40200000..0x80000000` 由 `boot_fixup.c` 补齐，且当前调用被 `OS01_SELFTEST` 包住。aarch64 的 `ARCH_PAGE_OFFSET` 为 `0xffff000000000000`，不能照搬 x86_64 的页表描述符或固定页表地址。
+
+以下是**实施顺序**，每项单独设计与验收；启动页表修复只解决当前直映缺口，不等于完成运行期 VMM。RAM 范围以 UEFI 归一化结果为准，固定映射到 `0x80000000` 不能代替任意内存容量及稀疏范围的处理。
+
+| 阶段 | 任务与完成条件 | 前置 |
+|------|----------------|------|
+| M0 启动映射契约 | 明确从打开 MMU 到运行期映射建立前，内核映像、PMM 元数据及首批页表页可访问的最小范围；消除 `aarch64_extend_direct_map()` 仅在 selftest 执行的差异。可将必需的早期 block 填充移入 `head.S`，或改为普通启动也执行的早期补图，但须验证首次 `alloc_4k_page()` 不会触及未映射物理页。保留内核可执行 block 与普通 RAM 的 PXN/UXN 区别。普通镜像、自测镜像及 SMP QEMU 启动均验收。 | 现有 boot 页表、PMM ✅ |
+| M1 运行期直映 | 在 BSP、AP 启动前，依据 `aarch64_ram_map_get()` / PMM zones 补齐可分配 RAM 的高半区映射；区分 RAM 与设备内存属性，覆盖超过当前固定窗口和稀疏区间。建表本身不能依赖尚未可用的 Slab 或会落在未映射页的 `alloc_4k_page()`；定义早期页表页来源、空间不足的失败路径和 TLBI/屏障规则。用多 RAM 大小及首尾物理页的访问测试证明映射与 PMM 可分配范围一致。 | M0；RAM 归一化、PMM ✅ |
+| M2 Slab 实装与初始化顺序 | aarch64 目前编译 `runtime/slab_stub.c`：`slab_init()` 无操作，`kmalloc()` 返回 `NULL`。移除占位实现并移植/共用真实 Slab；处理 `slab.c` 中 x86 专属 `pushfq`/`cli`/`sti` 锁路径。`pmm_init()` 当前在末尾调用 `slab_init()`，因此先明确早期映射是否足以覆盖 Slab 元数据与预留页；若需等 M1，则拆分初始化顺序为 PMM 元数据 → 运行期直映 → Slab，同时保持 x86_64 的预留语义。验证跨缓存大小的分配/释放和 QEMU 启动。 | M1；PMM ✅ |
+| M3 内核 VMM 接口 | 以 `arch/aarch64/memory/page_table.c` 的 4 KiB 原语为基础，补运行期内核映射/解除映射、2 MiB block 与 4 KiB table 共存及必要的拆分、权限/属性、页表页生命周期和 SMP TLB 失效；给通用调用方提供架构中立接口。现有 `memory/vmm.c` 使用 x86 页表 flag 和 `kernel_map=Phy_To_Virt(0x101000)`，不能直接列入 aarch64 源清单。为页表原语补 host 边界测试，并用 QEMU 验证真实映射。 | M1、M2；4 KiB 页表原语 ✅ |
+| M4 用户地址空间与 VMA | 建立 aarch64 用户页表根、EL0 权限和地址空间切换/回收，再使 VMA/mmap/ELF、缺页分配、COW 与 `munmap` 使用 M3 接口；把 `arch_user_range_accessible()` 的 aarch64 fail-closed 实现替换为真实跨页权限检查，并接通 uaccess 故障恢复。现有 `memory/vma.c` 和 x86_64 `do_page_fault()` 直接使用 x86 PTE flag，需先剥离架构语义；EL1 sync 目前只有致命诊断，EL0 sync 入口仍未接入。以隔离、权限、COW、回收和用户态 QEMU 用例验收。 | M3；Slab、调度/上下文切换、EL0 异常路径 |
+
+**当前已具备的部分**：aarch64 的 RAM 归一化及共用 `PMMngr`/`alloc_pages()`/`alloc_4k_page()`；BSP 启动期 4 KiB map/query/unmap smoke。`aarch64_pt_range_accessible()` 已存在于页表原语，但 `arch/mmu.h::arch_user_range_accessible()` 仍返回 `false`，不能视为 uaccess 已接通。M0 是下一项独立任务；M1–M4 不能随 M0 标记完成。
+
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
-| head.S + MMU 剩余 | user 页表 / uaccess facade（`mmu.h::arch_user_range_accessible` aarch64 仍 fail-closed stub）；boot 2MiB block 与 4K 原语合并（`boot_fixup.c` 自述 future work）；page_table 原语 host 测试为零 | 页表原语 ✅ | ArvernOS |
-| 统一 kernel_main | 单 `kernel_main` 按固定顺序调 `arch_early_init()` / `arch_late_init()` / `scheduler_init()`；aarch64 必须先 dtb 才能用 DTB 信息；init 顺序契约需明确。**Spec A 中断 dispatch / Spec B SMP+timer / Spec C kernel_main 单一入口** | PMM ✅, SMP ✅, 调度器 core, arch_irq ✅, rtc ✅, pt_regs_t ✅, head.S ✅, GIC ✅, Timer ✅, UEFI 链 ✅ | 长项 spec |
-| 中断/异常 dispatch 统一 | `arch_intr_dispatch(vector, pt_regs*)` 单入口抽象；x86_64 IDT vs aarch64 VBAR_EL1 vector tables 各自封装；x86_64 IST stack vs aarch64 SP_EL1 切换。**最大代码量减少**：`x86_64/trap.c` 3078 行大部分是 x86 register decode；aarch64 `intr/trap.c` 31 行（IRQ 已接 GIC dispatch，sync 异常仍 `b .` 占位）。`arch_irq_dispatch` 已落地，剩余是 trap.c 内部 x86 register decode 的 arch 剥离 | arch_irq ✅, head.S ✅, GIC ✅ | Linux do_IRQ |
+| 统一 kernel_main | 单 `kernel_main` 按固定顺序调 `arch_early_init()` / `arch_late_init()` / `scheduler_init()`；aarch64 必须先 dtb 才能用 DTB 信息；内存阶段须满足 M0→PMM→M1→M2/M3 的资源可用顺序。**Spec A 中断 dispatch / Spec B SMP+timer / Spec C kernel_main 单一入口** | M1–M3 的顺序契约；SMP ✅, arch_irq ✅, GIC ✅, Timer ✅, UEFI 链 ✅ | 长项 spec |
+| 中断/异常 dispatch 统一 | `arch_intr_dispatch(vector, pt_regs*)` 单入口抽象；x86_64 IDT vs aarch64 VBAR_EL1 vector tables 各自封装；x86_64 IST stack vs aarch64 SP_EL1 切换。aarch64 EL1h IRQ 已接 GIC，EL1h sync 已有致命诊断；EL0 sync/IRQ、可恢复缺页和通用 dispatch 仍未接入。先明确 M4 所需的 fault/return 契约，再剥离 `x86_64/trap.c` 内的架构寄存器解码 | arch_irq ✅, head.S ✅, GIC ✅；M4 用户态路径 | Linux do_IRQ |
 | SMP 启动统一 | `arch_smp_boot_aps(cpu_count, entry, per_cpu_data)` 单入口；内部 aarch64 PSCI CPU_ON / x86_64 INIT-SIPI + trampoline 各自实现 | GIC ✅, 启动链 ✅ | opuntiaOS |
 | 上下文切换统一 | `arch_task_switch(prev, next)` + `arch_thread_entry()`；aarch64 ret 到 user vs x86_64 sysret/iret | SMP 启动统一 | Tilck |
 | CPU 特性探测 | `arch_cpu_features()` 返回统一位图（has_fpu / has_virt / has_cache_coherency）；x86 CPUID vs aarch64 ID_AA64* 各实现一份 | 独立 | Linux cpufeature |
