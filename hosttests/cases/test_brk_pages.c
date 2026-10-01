@@ -588,8 +588,43 @@ static void test_brk_result_set_on_success(void)
  * for the syscall delegation; the end-to-end behavior is
  * covered by `make OS01_SYSTEST=1 test-qemu SUITE=systest`.
  */
-#define TRAP_C_PATH \
-    "/home/aagu/OS01/.worktrees/heap-elf-isolation/kernel/arch/x86_64/intr/trap.c"
+
+/* Locate kernel/arch/x86_64/intr/trap.c relative to THIS test file
+ * (__FILE__), never a hardcoded absolute path: the suite must pass in
+ * any checkout/worktree/CI.  __FILE__ is derived from how the Makefile
+ * compiles this TU (TEST_CASES is $(realpath ..)/hosttests/cases, so
+ * it is absolute and contains "/hosttests/").  Fallbacks cover a
+ * relative __FILE__ (resolve via getcwd()) and a cwd inside the
+ * hosttests directory.  Returns NULL if the layout is unrecognized. */
+static const char *trap_c_path(void)
+{
+    static char buf[1024];
+    char full[1024];
+    const char *f = __FILE__;
+    const char *marker;
+
+    if (f[0] == '/') {
+        snprintf(full, sizeof(full), "%s", f);
+    } else {
+        char cwd[512];
+        if (getcwd(cwd, sizeof(cwd)) == NULL) cwd[0] = '\0';
+        snprintf(full, sizeof(full), "%s/%s", cwd, f);
+    }
+
+    marker = strstr(full, "/hosttests/");
+    if (marker) {
+        snprintf(buf, sizeof(buf),
+                 "%.*s/kernel/arch/x86_64/intr/trap.c",
+                 (int)(marker - full), full);
+        return buf;
+    }
+    /* Relative __FILE__ ("hosttests/cases/...") with cwd == repo root:
+     * the repo root is the current directory. */
+    if (strncmp(full, "hosttests/", 10) == 0)
+        return "kernel/arch/x86_64/intr/trap.c";
+    return NULL;
+}
+
 #define TRAP_C_BUDGET (8 * 1024)
 
 static char *slurp_file(const char *path, size_t *out_len)
@@ -637,24 +672,61 @@ static int source_contains_in_case(char *haystack, size_t haystack_len,
     return source_contains(p, (size_t)(scan_limit - p), needle);
 }
 
+/* Bounded forward search: first occurrence of `needle` at or after
+ * `start`, no further than `max_off` bytes away.  NULL if absent. */
+static char *find_within(const char *start, size_t max_off,
+                         const char *needle)
+{
+    size_t n = strlen(needle);
+    const char *end = start + max_off;
+    for (const char *p = start; p + n <= end; p++) {
+        if (memcmp(p, needle, n) == 0) return (char *)p;
+    }
+    return NULL;
+}
+
+/* True if the source line containing `at` is ACTIVE code, i.e. not a
+ * preprocessor line and not a comment line (leading non-space
+ * characters are checked against the comment introducers). */
+static int line_is_active_code(const char *src, const char *at)
+{
+    const char *line = at;
+    while (line > src && line[-1] != '\n') line--;
+    const char *p = line;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '#' || *p == '/' || *p == '*') return 0;
+    return 1;
+}
+
 static void test_sys_brk_calls_mm_set_brk(void)
 {
-    TEST_SUITE("SYS_brk — calls mm_set_brk");
+    TEST_SUITE("SYS_brk — delegates to mm_set_brk (old direct writeback absent)");
 
     size_t len;
-    char *src = slurp_file(TRAP_C_PATH, &len);
+    char *src = slurp_file(trap_c_path(), &len);
     assert_not_null(src);
 
+    /* Bound the case body by the next case label so the checks cannot
+     * be satisfied by code elsewhere in the dispatcher. */
+    char *brk_case = strstr(src, "case SYS_brk: {");
+    assert_not_null(brk_case);
+    char *brk_end = strstr(brk_case, "case SYS_getpid");
+    assert_not_null(brk_end);
+    size_t body_len = (size_t)(brk_end - brk_case);
+
     /* The SYS_brk case body must call mm_set_brk(mm, addr, &result). */
-    int has_call = source_contains_in_case(
-        src, len,
-        "case SYS_brk: {",
-        "mm_set_brk(");
-    assert_true(has_call);
+    assert_true(source_contains(brk_case, body_len, "mm_set_brk("));
+
+    /* Smoking gun for the old (pre-Task-4) handler: the direct
+     * `mm->end_brk = addr` writeback.  Delegation must have replaced
+     * it entirely. */
+    assert_true(!source_contains(brk_case, body_len, "mm->end_brk = addr"));
+
+    /* Success returns *result, not the raw requested address. */
+    assert_true(source_contains(brk_case, body_len, "regs->rax = result"));
 
     /* Must include <memory/vma.h> so the prototype is visible. */
-    int has_include = source_contains(src, len, "#include <memory/vma.h>");
-    assert_true(has_include);
+    assert_true(source_contains(src, len, "#include <memory/vma.h>"));
 
     free(src);
 }
@@ -664,7 +736,7 @@ static void test_sys_brk_returns_result_on_success(void)
     TEST_SUITE("SYS_brk — returns *result on success");
 
     size_t len;
-    char *src = slurp_file(TRAP_C_PATH, &len);
+    char *src = slurp_file(trap_c_path(), &len);
     assert_not_null(src);
 
     /* SYS_brk must store the result value (not raw end_brk) so
@@ -682,43 +754,40 @@ static void test_sys_brk_returns_result_on_success(void)
 
 static void test_heap_fault_does_not_demand_map(void)
 {
-    TEST_SUITE("do_page_fault — heap VMA absent-leaf → no demand mapping");
+    TEST_SUITE("do_page_fault — heap absent-leaf guard ACTIVE, precedes demand mapping");
 
     size_t len;
-    char *src = slurp_file(TRAP_C_PATH, &len);
+    char *src = slurp_file(trap_c_path(), &len);
     assert_not_null(src);
 
-    /* Find the do_page_fault function body. */
+    /* Locate the P=0 demand-allocation block inside do_page_fault. */
     char *fn = strstr(src, "void do_page_fault(pt_regs_t *");
     assert_not_null(fn);
+    char *demand = strstr(fn, "if (!(error_code & 0x01)) {");
+    assert_not_null(demand);
 
-    /* Walk forward looking for the demand-mapping VM_ANON block.
-     * It must include a guard that skips when the VMA has VM_HEAP
-     * set, OR the heap-VMA absent-leaf path must explicitly return
-     * -EFAULT before reaching the VM_ANON block. */
-    char *demand_block = strstr(fn, "if (vma->vm_flags & VM_ANON) {");
-    assert_not_null(demand_block);
+    size_t tail = (size_t)(src + len - demand);
+    char *first_map = find_within(demand, tail, "alloc_4k_page");
+    assert_not_null(first_map);   /* the demand block does map pages */
 
-    /* Search within a budget for any of: VM_HEAP guard, EFAULT
-     * branch, or "kill_current_user_task" returns in the heap
-     * fault path.  We accept any of three: explicit VM_HEAP guard
-     * around the VM_ANON block, or an EFAULT-handling branch. */
-    char *budget_end = fn + 16 * 1024;
-    if (budget_end > src + len) budget_end = src + len;
-    size_t span = (size_t)(budget_end - fn);
+    /* Contract 1: an explicit VM_HEAP guard sits between the start of
+     * the demand block and the first demand-mapping attempt. */
+    char *guard = find_within(demand, (size_t)(first_map - demand), "VM_HEAP");
+    assert_not_null(guard);
 
-    int has_vmheap_guard = 0;
-    int has_eheap_branch = 0;
-    (void)has_eheap_branch;
-    for (size_t i = 0; i + 6 <= span; i++) {
-        if (!has_vmheap_guard &&
-            memcmp(fn + i, "VM_HEAP", 7) == 0) has_vmheap_guard = 1;
-    }
-    /* The heap fault path returns -EFAULT via kill_current_user_task
-     * on an absent leaf — verify the function references VM_HEAP
-     * somewhere in its body.  If has_vmheap_guard is set, the
-     * code path is implemented. */
-    assert_true(has_vmheap_guard);
+    /* Contract 2: the guard is ACTIVE code — the in-flight regression
+     * was `#if 0`-disabling this exact block, whose text still
+     * matched plain string searches. */
+    assert_true(find_within(demand, (size_t)(guard - demand), "#if 0") == NULL);
+    assert_true(line_is_active_code(src, guard));
+
+    /* Contract 3: the guard kills before it can fall through —
+     * kill_current_user_task then return, both ahead of first_map. */
+    char *kill = find_within(guard, (size_t)(first_map - guard),
+                             "kill_current_user_task");
+    assert_not_null(kill);
+    char *ret = find_within(kill, (size_t)(first_map - kill), "return");
+    assert_not_null(ret);
 
     free(src);
 }
@@ -728,7 +797,7 @@ static void test_heap_fault_resolves_cow_for_committed_range(void)
     TEST_SUITE("do_page_fault — heap VMA COW leaf resolves under mm->lock");
 
     size_t len;
-    char *src = slurp_file(TRAP_C_PATH, &len);
+    char *src = slurp_file(trap_c_path(), &len);
     assert_not_null(src);
 
     /* The COW resolution path (PAGE_COW check) must still be
