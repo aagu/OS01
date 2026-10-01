@@ -120,8 +120,11 @@ int elf_layout_validate(const elf64_ehdr_t *ehdr,
 
     /* Track the high-water mark of PT_LOAD intervals to check overlap
      * in O(n) rather than O(n^2).  intervals[] holds the start of each
-     * non-empty PT_LOAD (sorted as inserted) and end_max[] the matching
-     * end.  We cap at 32 PT_LOADs — well above any realistic ELF. */
+     * non-empty PT_LOAD and its memsz; the right endpoint is computed
+     * on demand during overlap checks.  We cap at 32 PT_LOADs — well
+     * above any realistic ELF — and reject any image that exceeds the
+     * cap rather than silently truncating the preflight (see the
+     * `interval_count` check below). */
     struct {
         uint64_t vaddr;
         uint64_t memsz;
@@ -133,6 +136,15 @@ int elf_layout_validate(const elf64_ehdr_t *ehdr,
 
         if (ph->p_type != PT_LOAD)
             continue;
+
+        /* Refuse to track this PT_LOAD if we've already hit the cap —
+         * silently dropping it would create a preflight hole where a
+         * later PT_LOAD could overlap with a dropped one and never be
+         * detected (spec §4 "complete preflight of all pairs of PT_LOAD
+         * byte intervals"). */
+        if (interval_count >= (int)(sizeof(intervals) /
+                                    sizeof(intervals[0])))
+            return -ENOEXEC;
 
         /* Zero-sized PT_LOAD (and therefore zero-length-only images)
          * are rejected up-front (spec §4 "无可装载段"). */
@@ -194,12 +206,11 @@ int elf_layout_validate(const elf64_ehdr_t *ehdr,
                 return -ENOEXEC;
             }
         }
-        if (interval_count < (int)(sizeof(intervals) /
-                                  sizeof(intervals[0]))) {
-            intervals[interval_count].vaddr = ph->p_vaddr;
-            intervals[interval_count].memsz = ph->p_memsz;
-            interval_count++;
-        }
+        /* The cap was enforced at the top of the loop, so this
+         * insertion is unconditional. */
+        intervals[interval_count].vaddr = ph->p_vaddr;
+        intervals[interval_count].memsz = ph->p_memsz;
+        interval_count++;
     }
 
     /* No PT_LOAD → empty image → reject. */

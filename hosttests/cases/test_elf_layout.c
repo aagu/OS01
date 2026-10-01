@@ -528,6 +528,35 @@ TEST_FUNC(test_invalid_entry_above_executable_range) {
     assert_eq(-ENOEXEC, elf_layout_validate(&ehdr, phdrs, fs, &out));
 }
 
+/* ── INVALID: preflight cap ──────────────────────────────── */
+
+TEST_FUNC(test_invalid_too_many_pt_loads) {
+    /* The validator caps the PT_LOAD preflight at 32 segments.  An
+     * ELF with more than 32 PT_LOADs is rejected up-front rather than
+     * silently truncating the preflight — the spec mandates "complete
+     * preflight of all pairs of PT_LOAD byte intervals".  Build 33
+     * disjoint non-overlapping PT_LOADs to exercise the cap. */
+    enum { N = 33 };
+    elf64_ehdr_t ehdr;
+    build_min_ehdr(&ehdr, N, 0x400010);   /* entry inside segment 0 */
+
+    elf64_phdr_t phdrs[N];
+    /* 33 disjoint 4 KiB pages starting at USER_CODE_ADDR. */
+    for (int i = 0; i < N; i++) {
+        build_phdr(&phdrs[i], PT_LOAD, PF_R | PF_X,
+                   0x40 + (uint64_t)i * 0x1000,
+                   USER_CODE_ADDR + (uint64_t)i * 0x1000,
+                   0x100, 0x1000);
+    }
+
+    elf_layout_t out;
+    /* file_size only needs to cover the header bytes; the
+     * cap check fires before any file-range work. */
+    uint64_t fs = sizeof(elf64_ehdr_t) + N * sizeof(elf64_phdr_t) +
+                  N * 0x1000;
+    assert_eq(-ENOEXEC, elf_layout_validate(&ehdr, phdrs, fs, &out));
+}
+
 /* ── INVALID: zero-length ────────────────────────────────── */
 
 TEST_FUNC(test_invalid_zero_sized_ptload) {
@@ -593,6 +622,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_invalid_entry_outside_executable_ptload),
     TEST_ENTRY(test_invalid_entry_above_executable_range),
     /* invalid: zero-length */
+    TEST_ENTRY(test_invalid_too_many_pt_loads),
     TEST_ENTRY(test_invalid_zero_sized_ptload),
     TEST_ENTRY(test_invalid_zero_length_only_image),
 TEST_LIST_END
