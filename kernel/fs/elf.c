@@ -161,9 +161,24 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
     uint64_t *pgd = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
 
     /* ── 5. Rollback owner (this call's newly mapped leaves) ── */
-    uint64_t rollback_vaddr[MAX_LOAD_LEAVES];
-    uint64_t rollback_phys [MAX_LOAD_LEAVES];
+    /* These two arrays live on the HEAP, not the stack: at
+     * MAX_LOAD_LEAVES=8192 the stack frame was 2*64 KiB ≈ 128 KiB —
+     * 4x the 32 KiB kernel stack — so every exec silently overflowed
+     * the loader's kernel stack and corrupted adjacent memory
+     * (surfacing as a delayed "Kernel stack smashing detected" in a
+     * later schedule() epilogue).  kmalloc's 64 KiB size class holds
+     * each array. */
+    uint64_t *rollback_vaddr =
+        (uint64_t *)kmalloc(MAX_LOAD_LEAVES * sizeof(uint64_t));
+    uint64_t *rollback_phys =
+        (uint64_t *)kmalloc(MAX_LOAD_LEAVES * sizeof(uint64_t));
     int      rollback_count = 0;
+    if (!rollback_vaddr || !rollback_phys) {
+        if (rollback_phys) kfree(rollback_phys);
+        if (rollback_vaddr) kfree(rollback_vaddr);
+        kfree(phdrs);
+        return -ENOMEM;
+    }
 
     /* ── 6. mm code bounds — start at sentinel-high so the
      *    first segment writes a real value. */
@@ -281,6 +296,8 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
     mm->end_code   = end_code;
     *entry_point   = ehdr.e_entry;
 
+    kfree(rollback_vaddr);
+    kfree(rollback_phys);
     kfree(phdrs);
     return 0;
 
@@ -295,6 +312,8 @@ rollback:
         vmm_unmap_4k_page(pgd, rollback_vaddr[j]);
         free_4k_page(rollback_phys[j]);
     }
+    kfree(rollback_vaddr);
+    kfree(rollback_phys);
     kfree(phdrs);
     return rc;
 }
