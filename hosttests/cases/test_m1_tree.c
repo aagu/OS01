@@ -39,7 +39,7 @@
  * build, so a stale bit set during a partial build surfaces in the
  * validator as an unexpected descriptor.
  */
-#include "test_framework.h"
+#include "m1_test_runner.h"
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -390,6 +390,14 @@ TEST_FUNC(test_happy_512_mib_low_window)
     exp_pages = count_expected_pages(ram, 1);
     r = do_build(ram, 1, &arena, &pool);
     assert_eq(0, r.rc);
+    /* Independent hardware bit positions, not production encoder output. */
+    uint64_t *l0=fake_resolve(&pool,r.tree.root_pa);
+    uint64_t *l1=fake_resolve(&pool,l0[0] & UINT64_C(0x000000fffffff000));
+    uint64_t *low=fake_resolve(&pool,l1[0] & UINT64_C(0x000000fffffff000));
+    uint64_t *dram=fake_resolve(&pool,l1[1] & UINT64_C(0x000000fffffff000));
+    assert_eq(UINT64_C(0x0060000040200705),dram[1]);
+    assert_eq(UINT64_C(0x0040000040000705),dram[0]);
+    assert_eq(UINT64_C(0x0060000008000401),low[64]);
     /* page_count must match the computed L0 + PUDs + PMDs. */
     assert_eq(exp_pages, r.tree.page_count);
     assert_eq(0, do_validate(ram, 1, &arena, &pool, &r.tree));
@@ -1057,6 +1065,6 @@ TEST_LIST_END
 int main(void)
 {
     printf("=== M1 tree test starting ===\n");
-    RUN_ALL_TESTS();
-    return __test_stats.failed ? 1 : 0;
+    int failed = M1_RUN_ALL_TESTS();
+    return failed;
 }

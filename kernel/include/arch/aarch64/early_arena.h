@@ -82,7 +82,7 @@ struct aarch64_m1_arena {
 
     /* PMM metadata layout for the arena: aarch64_m1_plan() always
      * computes this with pmm_layout_calculate(base_va = base_pa +
-     * ARCH_PAGE_OFFSET, span_pages = arena span in 2 MiB units) so
+     * ARCH_PAGE_OFFSET, span_pages = RAM min/max span in 2 MiB units) so
      * the production math and the arena selection agree. */
     struct pmm_layout layout;
 };

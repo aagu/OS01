@@ -38,7 +38,7 @@
  *   - layout(base = arena base + OFFSET) consistent with pure
  *     pmm_layout_calculate sizing.
  */
-#include "test_framework.h"
+#include "m1_test_runner.h"
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -154,7 +154,7 @@ TEST_FUNC(test_happy_512_mib_low_window)
     assert_eq(pages, got.table_pages);
     /* layout(base = arena base + OFFSET) matches pure calculator */
     struct pmm_layout ref;
-    reference_layout(got.base_pa, got.end_pa, &ref);
+    reference_layout(ram[0].phys_start, ram[0].phys_end, &ref);
     assert_layout_eq("512 MiB / sram", &got, &ref);
 }
 
@@ -170,7 +170,7 @@ TEST_FUNC(test_happy_4_gib_low_window)
     assert_true((got.base_pa & ((1ULL << 21) - 1)) == 0);
     assert_true((got.end_pa   & ((1ULL << 21) - 1)) == 0);
     struct pmm_layout ref;
-    reference_layout(got.base_pa, got.end_pa, &ref);
+    reference_layout(ram[0].phys_start, ram[0].phys_end, &ref);
     assert_layout_eq("4 GiB / sram", &got, &ref);
 }
 
@@ -470,7 +470,7 @@ TEST_FUNC(test_layout_sizing_consistency)
     struct aarch64_m1_arena got;
     int rc = aarch64_m1_plan(ram, 1, &got);
     assert_eq(0, rc);
-    uint64_t span_pages = (got.end_pa - got.base_pa) >> 21;
+    uint64_t span_pages = (ram[0].phys_end - ram[0].phys_start) >> 21;
     if (span_pages == 0) span_pages = 1;
     uint64_t brk = (got.base_pa + ARCH_PAGE_OFFSET + 0xFFFULL) & ~0xFFFULL;
     struct pmm_layout pure;
@@ -518,6 +518,6 @@ TEST_LIST_END
 
 int main(void)
 {
-    RUN_ALL_TESTS();
-    return __test_stats.failed ? 1 : 0;
+    int failed = M1_RUN_ALL_TESTS();
+    return failed;
 }

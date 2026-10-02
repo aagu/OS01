@@ -70,10 +70,7 @@ static inline void zero_layout(struct pmm_layout *out)
 int pmm_layout_calculate(uint64_t base_va, uint64_t span_pages,
                          struct pmm_layout *out)
 {
-    /* base_va is informational; the production code aligns start_brk
-     * to 4 KiB before passing it. The calculator's offsets are
-     * independent of base_va value (and base_va alignment). */
-    (void)base_va;
+    /* Offsets are independent of base; the absolute allocation must fit. */
 
     /* Brief contract: NULL returns -EINVAL with no out write; all
      * other failures zero out and return a negative errno. */
@@ -139,6 +136,7 @@ int pmm_layout_calculate(uint64_t base_va, uint64_t span_pages,
     if (err) return -EOVERFLOW;
 
     /* Commit the layout. */
+    if (add_overflows(base_va, total_bytes)) return -EOVERFLOW;
     out->bits_map_off      = bits_map_off;
     out->bits_length       = bits_length;
     out->pages_struct_off  = pages_struct_off;

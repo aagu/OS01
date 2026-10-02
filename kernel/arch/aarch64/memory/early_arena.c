@@ -280,11 +280,8 @@ int aarch64_m1_plan(const struct MEMORY_RANGE *ram, size_t count,
     }
     if (i == count) return -ENOSPC;
 
-    /* Recompute metadata for the chosen arena base+rawc so the
-     * embedded layout matches `pmm_layout_calculate(base+OFFSET,
-     * arena_span_pages)` byte-for-byte. */
-    span_pages = (cand_end - cand_base) >> 21;
-    if (span_pages == 0u) span_pages = 1u;
+    /* Placement changes the base, never the RAM descriptor span.
+     * pmm_init describes lowest-to-highest RAM, including all holes. */
     if (!checked_add(cand_base, (uint64_t)ARCH_PAGE_OFFSET, &brk))
         return -EINVAL;
     if (!checked_align_up(brk, PAGE_4K, &brk))
@@ -355,16 +352,16 @@ static void log_failure_diagnostic(const struct MEMORY_RANGE *ram, size_t count,
         }
     }
     log_err("[smp] FATAL: aarch64 M1 arena preflight failed\n");
-    log_err("[smp] FATAL: arena need=%llu MiB (metadata + table pool, 2 MiB-aligned)\n",
-            (unsigned long long)(need_bytes / (1024u * 1024u)));
+    log_err("[smp] FATAL: arena need=%lu MiB (metadata + table pool, 2 MiB-aligned)\n",
+            (unsigned long)(need_bytes / (1024u * 1024u)));
     if (largest_sz > 0u) {
-        log_err("[smp] FATAL: largest available intersection in [0x%x, 0x%x) = %llu MiB in [0x%llx, 0x%llx)\n",
-                (unsigned)AARCH64_M1_ARENA_LOW, (unsigned)AARCH64_M1_ARENA_HI,
-                (unsigned long long)(largest_sz / (1024u * 1024u)),
-                (unsigned long long)largest_lo, (unsigned long long)largest_hi);
+        log_err("[smp] FATAL: largest available intersection in [%lx, %lx) = %lu MiB in [%lx, %lx)\n",
+                (unsigned long)AARCH64_M1_ARENA_LOW, (unsigned long)AARCH64_M1_ARENA_HI,
+                (unsigned long)(largest_sz / (1024u * 1024u)),
+                (unsigned long)largest_lo, (unsigned long)largest_hi);
     } else {
         log_err("[smp] FATAL: no RAM in [0x%x, 0x%x) window\n",
-                (unsigned)AARCH64_M1_ARENA_LOW, (unsigned)AARCH64_M1_ARENA_HI);
+                (unsigned long)AARCH64_M1_ARENA_LOW, (unsigned long)AARCH64_M1_ARENA_HI);
     }
 }
 
@@ -416,6 +413,13 @@ int aarch64_m1_prepare(const struct MEMORY_RANGE *ram, size_t count)
         return rc;
     }
 
+#if AARCH64_M1_ARENA_EXHAUST
+    /* Real required size checked against an isolated test capacity of zero. */
+    if(candidate_arena.end_pa>candidate_arena.base_pa) {
+        log_err("M1 FATAL reason=arena-exhaust\n");
+        return -ENOSPC;
+    }
+#endif
     /* Side-effecting PMM publish. The preflight writes to PMMngr only
      * here; pmm_init() will read it to place bits_map at the high
      * alias. */

@@ -36,7 +36,7 @@
  * Bitmap / counter / attribute / refcount assertions verify both the
  * happy paths and the "reserved → reserved" idempotence invariant.
  */
-#include "test_framework.h"
+#include "m1_test_runner.h"
 #include <errno.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -524,6 +524,6 @@ TEST_LIST_END
 
 int main(void)
 {
-    RUN_ALL_TESTS();
-    return __test_stats.failed ? 1 : 0;
+    int failed = M1_RUN_ALL_TESTS();
+    return failed;
 }

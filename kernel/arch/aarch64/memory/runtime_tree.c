@@ -74,14 +74,17 @@
 #define RT_DESC_ATTR_DEVICE UINT64_C(0x000)
 
 /* Execute-never bits. */
-#define RT_DESC_PXN     UINT64_C(0x02000000000000)  /* bit 53 */
-#define RT_DESC_UXN     UINT64_C(0x04000000000000)  /* bit 54 */
+#define RT_DESC_PXN     UINT64_C(0x20000000000000)  /* bit 53 */
+#define RT_DESC_UXN     UINT64_C(0x40000000000000)  /* bit 54 */
+
+_Static_assert(RT_DESC_PXN == (UINT64_C(1)<<53), "PXN bit");
+_Static_assert(RT_DESC_UXN == (UINT64_C(1)<<54), "UXN bit");
 
 /* L2 block PA mask: bits [39:21] = output block address. */
-#define RT_DESC_L2_PA_MASK  UINT64_C(0xffffffe00000)
+#define RT_DESC_L2_PA_MASK  UINT64_C(0x000000ffffe00000)
 
 /* Intermediate (table) PA mask: bits [39:12]. */
-#define RT_DESC_L_PA_MASK   UINT64_C(0xffffffffff000)
+#define RT_DESC_L_PA_MASK   UINT64_C(0x000000fffffff000)
 
 /* Spec constant sets (B kernel+handoff; D Device window). */
 #define RT_B_BASE  UINT64_C(0x40000000)
@@ -237,12 +240,8 @@ typedef struct rt_builder {
      * indices 0 and 1 are ever touched. */
     uint64_t pud_pa[2];
     uint64_t *pud_va[2];
-    /* PMD pages, indexed by (l0_idx * 512 + l1_idx). Each
-     * (l0_idx, l1_idx) pair identifies the unique PMD page that
-     * covers the 1 GiB bucket (l1_idx * 1 GiB) inside L0[l0_idx].
-     * Max 2 * 512 = 1024 PMD pages. */
-    uint64_t pmd_pa[1024];
-    uint64_t *pmd_va[1024];
+    /* Resolve PMDs through their installed PUD entries. A 1024-entry
+     * PA/VA cache would exceed the 4 KiB BSP boot stack. */
     /* Bookkeeping. */
     uint64_t first_pa;
     uint64_t last_pa;
@@ -304,14 +303,12 @@ static int rt_find_pud(const rt_builder_t *b, uint64_t l0_idx,
 static int rt_find_pmd(const rt_builder_t *b, uint64_t l0_idx,
                        uint64_t l1_idx, uint64_t *out_pa, uint64_t **out_va)
 {
-    size_t idx;
-    if (l0_idx >= 2u) return 0;
-    if (l1_idx >= 512u) return 0;
-    idx = (size_t)l0_idx * 512u + (size_t)l1_idx;
-    if (b->pmd_pa[idx] == 0u) return 0;
-    *out_pa = b->pmd_pa[idx];
-    *out_va = b->pmd_va[idx];
-    return 1;
+    if (l0_idx >= 2u || l1_idx >= 512u || !b->pud_va[l0_idx]) return 0;
+    uint64_t desc = b->pud_va[l0_idx][l1_idx];
+    if (!desc) return 0;
+    *out_pa = desc & RT_DESC_L_PA_MASK;
+    *out_va = b->ops->resolve(b->ops->ctx, *out_pa);
+    return *out_va ? 1 : -EINVAL;
 }
 
 /* Allocate a fresh PUD page for L0 entry l0_idx. Stores it in the
@@ -336,7 +333,6 @@ static int rt_install_pud(rt_builder_t *b, uint64_t l0_idx)
  * builder's L2 map and writes PUD[l1_idx] = table desc → PMD. */
 static int rt_install_pmd(rt_builder_t *b, uint64_t l0_idx, uint64_t l1_idx)
 {
-    size_t idx;
     uint64_t pud_pa;
     uint64_t *pud_va;
     uint64_t pa = 0;
@@ -350,9 +346,6 @@ static int rt_install_pmd(rt_builder_t *b, uint64_t l0_idx, uint64_t l1_idx)
     if (rc == 0) return -EINVAL;
     rc = rt_alloc_one(b, &pa, &va);
     if (rc != 0) return rc;
-    idx = (size_t)l0_idx * 512u + (size_t)l1_idx;
-    b->pmd_pa[idx] = pa;
-    b->pmd_va[idx] = va;
     pud_va[l1_idx] = rt_encode_table_desc(pa);
     return 0;
 }
@@ -382,11 +375,12 @@ static int rt_install_block(rt_builder_t *b, uint64_t pa, uint32_t perm)
     }
 
     have_pmd = rt_find_pmd(b, l0_idx, l1_idx, &pmd_pa, &pmd_va);
+    if (have_pmd < 0) return have_pmd;
     if (!have_pmd) {
         rc = rt_install_pmd(b, l0_idx, l1_idx);
         if (rc != 0) return rc;
         rc = rt_find_pmd(b, l0_idx, l1_idx, &pmd_pa, &pmd_va);
-        if (rc == 0) return -EINVAL;
+        if (rc <= 0) return -EINVAL;
     }
 
     if (pmd_va[l2_idx] != 0u) {

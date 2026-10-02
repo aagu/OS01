@@ -33,7 +33,7 @@
  * a small RAM total but wide PA span still produce a Page array sized
  * for the span.
  */
-#include "test_framework.h"
+#include "m1_test_runner.h"
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -170,26 +170,17 @@ TEST_FUNC(test_unaligned_base_does_not_change_offsets)
     assert_layout_eq("base=0xFFFF",   &got_c, &ref);
 }
 
-/* ── Near-UINT64_MAX base ──────────────────────────────────── */
-/* Near-max base must not overflow offset arithmetic — the calculator
- * only adds offsets that are well below UINT64_MAX, so even at near-max
- * base the addition still fits (offsets are tiny relative to base_va).
- * But: any internal addition that would push past UINT64_MAX MUST error. */
+/* Offset sizing remains independent of base, but its absolute end must fit. */
 TEST_FUNC(test_near_uint64_max_base)
 {
-    struct pmm_layout got = {0};
-    /* Calculator does not validate base + total_bytes — the offsets
-     * themselves are tiny (well below 64 MiB at 256 pages). So a
-     * near-max base with reasonable span_pages should succeed and
-     * return the same offsets as base = 0. */
-    uint64_t near_max = 0xFFFFFFFFFFFFF000ULL;
-    assert_eq(0, pmm_layout_calculate(near_max, 256, &got));
-    assert_true(got.bits_map_off == 0);
-    /* offsets are unchanged — base alignment doesn't enter the math */
     struct pmm_layout ref;
     reference_layout(256, &ref);
-    assert_true(got.pages_struct_off == ref.pages_struct_off);
-    assert_true(got.total_bytes      == ref.total_bytes);
+    struct pmm_layout got = { .total_bytes = 123 };
+    assert_eq(-EOVERFLOW, pmm_layout_calculate(UINT64_MAX - ref.total_bytes + 1, 256, &got));
+    assert_eq(0, got.total_bytes);
+    assert_eq(0, got.pages_struct_off);
+    assert_eq(0, pmm_layout_calculate(UINT64_MAX - ref.total_bytes, 256, &got));
+    assert_layout_eq("largest fitting base", &got, &ref);
 }
 
 /* ── NULL out pointer ──────────────────────────────────────── */
@@ -355,6 +346,6 @@ TEST_LIST_END
 
 int main(void)
 {
-    RUN_ALL_TESTS();
-    return __test_stats.failed ? 1 : 0;
+    int failed = M1_RUN_ALL_TESTS();
+    return failed;
 }
