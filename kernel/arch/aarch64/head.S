@@ -494,6 +494,13 @@ zp_all:
      *    need per-page permissions within this 2 MiB block; all of it
      *    is uniformly EL1 RW + exec + UXN.
      *
+     *    PMD_low1[1..511] = 2 MiB Normal blocks covering the fixed
+     *    bootstrap direct-map window 0x40200000..0x80000000. These are
+     *    filled here, before the MMU is enabled, so both the ordinary
+     *    and selftest images have the mapping from the first instruction.
+     *    Each carries the same Normal low flags as PMD_low0 (x22=0x705)
+     *    plus PXN|UXN (x20): EL1 RW, no EL1/EL0 exec.
+     *
      *    PMD_low1 is the PMD table for PUD[1] (which covers 1..2GB), so
      *    PMD index 0 within PMD_low1 corresponds to PA 0x40000000.
      */
@@ -508,6 +515,31 @@ zp_all:
     mov     x0, x13                           /* x0 = PMD_low1 base      */
     mov     x2, #0                            /* PMD index 0             */
     bl      write_slot
+
+    /* ── 3b. PMD_low1[1..511]: fill the fixed bootstrap direct-map
+     * window 0x40200000..0x80000000 with 2 MiB Normal blocks.
+     * x24 = slot index, x25 = running PA, x26 = slots remaining.
+     * Reuses x22 (Normal low flags) and x20 (PXN|UXN); x13 is the
+     * PMD_low1 base. make_2m/write_slot only clobber x0/x1/x2/x3,
+     * which are re-initialised each iteration. */
+    mov     x24, #1                           /* PMD index 1..511        */
+    mov     x25, #0x40200000                   /* block PA for index 1    */
+    mov     x26, #511                          /* slots remaining         */
+.Lpmd1_fill:
+    cbz     x26, .Lpmd1_fill_done
+    mov     x0, x25
+    mov     x1, x22
+    bl      make_2m
+    orr     x0, x0, x20                       /* PXN | UXN               */
+    mov     x1, x0                            /* x1 = descriptor         */
+    mov     x0, x13                           /* x0 = PMD_low1 base      */
+    mov     x2, x24                           /* x2 = slot index         */
+    bl      write_slot
+    add     x25, x25, #0x200000
+    add     x24, x24, #1
+    sub     x26, x26, #1
+    b       .Lpmd1_fill
+.Lpmd1_fill_done:
 
     ldp     x29, x30, [sp], #16
     ret

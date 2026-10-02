@@ -17,7 +17,6 @@
                               * transitively; does NOT pull in <arch/subsys.h>. */
 
 void pl011_init(void);
-void aarch64_extend_direct_map(void);
 extern char exception_vectors[];
 
 /* Forward declarations for boot_log helpers + GIC dispatch probes
@@ -102,6 +101,16 @@ static void aarch64_pt_smoke_test(void)
         goto fail;
     }
     data_owned = true;
+    /* Spec §6.2: the allocated page must lie inside the fixed bootstrap
+     * direct-map window so the read/write below exercises a
+     * PMD_low1[1..511] block that head.S filled before the MMU was
+     * enabled. An allocator handing out a 2 MiB block below 0x40200000
+     * is a real PMM finding, not a test problem — report it, don't
+     * weaken the bound. */
+    if (data_pa < UINT64_C(0x40200000) || data_pa >= UINT64_C(0x80000000)) {
+        fail_reason = "data_pa outside 0x40200000..0x80000000";
+        goto fail;
+    }
     int map_rc = aarch64_pt_map_4k(root, AARCH64_PT_SELFTEST_VA, data_pa,
                                    AARCH64_PT_KERNEL_RW);
     if (map_rc != AARCH64_PT_OK) {
@@ -202,11 +211,11 @@ fail:
     for (;;) arch_cpu_halt();
 }
 
-/* ── Boot-map selftest (M0 Task 1) ────────────────────────────────
+/* ── Boot-map selftest (M0) ────────────────────────────────────────
  * Validates the descriptors head.S installed in the active TTBR0
- * root BEFORE the C-side direct-map fixup runs, so a wrong
- * construction in build_pagetables() is caught here instead of
- * being silently papered over by aarch64_extend_direct_map().
+ * root. head.S fills all 512 PMD_low1 slots before the MMU is
+ * enabled; this walk proves the installed descriptors match the
+ * spec contract (block type, PA, low flags, PXN/UXN, bit 52).
  *
  * The walk reads the ACTUAL installed entries — not a constructor's
  * return value: PGD[0] → PUD[0] → PMD_low0 and PUD[1] → PMD_low1,
@@ -215,11 +224,13 @@ fail:
  *
  * Leaf checks are field-wise (block type, PA, low flags, PXN, UXN,
  * bit 52) so the failure reason names the exact mismatch and so the
- * same helper can be reused for a full 512-slot PMD_low1 walk.
+ * same helper can be reused for the full 512-slot PMD_low1 walk.
  * Expected full descriptors after the head.S fix:
  *   PMD_low0[0]    = 0x60000000000705  (PA=0,          Normal 0x705, PXN|UXN)
  *   PMD_low0[0x40] = 0x60000008000401  (PA=0x08000000, Device 0x401, PXN|UXN)
  *   PMD_low1[0]    = 0x40004000000705  (PA=0x40000000, Normal 0x705, UXN only)
+ *   PMD_low1[i]    = 0x60000000000705 | (0x40000000 + i*0x200000)
+ *                    for i=1..511        (Normal 0x705, PXN|UXN)
  * ──────────────────────────────────────────────────────────────── */
 
 /* Descriptor field masks. */
@@ -231,6 +242,31 @@ fail:
 #define BOOT_MAP_PXN_BIT        UINT64_C(0x20000000000000)    /* bit 53                  */
 #define BOOT_MAP_UXN_BIT        UINT64_C(0x40000000000000)    /* bit 54                  */
 #define BOOT_MAP_CONTIG_BIT     UINT64_C(0x10000000000000)    /* bit 52: Contiguous hint */
+
+/* Format a uint64 as decimal into buf. The aarch64 libk subset has no
+ * snprintf, so the PMD_low1 walk uses this to build a per-slot `what`
+ * prefix ("PMD_low1[123]") in a caller-owned buffer — boot_map_check_block
+ * writes its reason into its OWN static buffer, so the prefix must not
+ * live there. */
+static void boot_map_fmt_u64(char *buf, uint64_t v)
+{
+    char tmp[24];
+    int n = 0;
+    int i = 0;
+    if (v == 0) {
+        buf[0] = '0';
+        buf[1] = '\0';
+        return;
+    }
+    while (v != 0) {
+        tmp[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    while (n > 0) {
+        buf[i++] = tmp[--n];
+    }
+    buf[i] = '\0';
+}
 
 /* Validate one intermediate table descriptor (a PGD/PUD link).
  * Requires bits[1:0]=11 (table) and a nonzero, 4 KiB-aligned
@@ -265,10 +301,11 @@ static const char *boot_map_check_table(const char *what, uint64_t desc,
  * expected_pa, low flags (bits [10:0]) equal to expected_low, bit 52
  * clear, and the PXN/UXN bits matching expected_exec. On success
  * returns NULL; on failure returns a static-buffer reason string
- * prefixed with `what`. */
+ * prefixed with `what`. expected_pa is a MASKED PA field (bits
+ * [47:21]), not an address — mask before passing. */
 static const char *boot_map_check_block(const char *what, uint64_t desc,
                                         uint64_t expected_pa,
-                                        uint32_t expected_low,
+                                        uint64_t expected_low,
                                         uint64_t expected_exec)
 {
     static char reason[96];
@@ -307,11 +344,9 @@ static const char *boot_map_check_block(const char *what, uint64_t desc,
 }
 
 /* Pre-SMP validation of the installed boot page tables. Runs after
- * the PMM alloc/free smoke and before aarch64_extend_direct_map():
- * the fixup would otherwise mask a wrong head.S construction by
- * rewriting the very slots under test. On any malformed table link
- * or descriptor mismatch it logs the FATAL marker and halts before
- * GIC/SMP bring-up. */
+ * the PMM alloc/free smoke and before the 4 KiB page-table smoke.
+ * On any malformed table link or descriptor mismatch it logs the
+ * FATAL marker and halts before GIC/SMP bring-up. */
 static void aarch64_boot_map_selftest(void)
 {
     const char *fail_reason = NULL;
@@ -386,14 +421,36 @@ static void aarch64_boot_map_selftest(void)
     }
 
     /* Step 4: PMD_low1[0] — the kernel-image block. Executable at
-     * EL1 (PXN=0) but not at EL0 (UXN=1). Loop-friendly: a later
-     * task expands this same helper to slots 1..511 (PXN|UXN). */
+     * EL1 (PXN=0) but not at EL0 (UXN=1). */
     r = boot_map_check_block("PMD_low1[0]", pmd_low1[0],
                              UINT64_C(0x40000000), 0x705,
                              BOOT_MAP_UXN_BIT);
     if (r != NULL) {
         fail_reason = r;
         goto fail;
+    }
+
+    /* Step 5: PMD_low1[1..511] — the fixed bootstrap direct-map window
+     * head.S fills before the MMU is enabled. Each slot must be a 2 MiB
+     * Normal block at PA 0x40000000 + i*0x200000 with low flags 0x705,
+     * PXN|UXN set and bit 52 clear. This checks PA, type, Normal
+     * attributes, PXN/UXN and bit 52 in one assertion per slot. The
+     * `what` prefix is formatted into a local buffer because
+     * boot_map_check_block writes its reason into its own static buffer. */
+    for (uint64_t i = 1; i < 512; ++i) {
+        char what[32];
+        strcpy(what, "PMD_low1[");
+        boot_map_fmt_u64(what + strlen(what), i);
+        strcat(what, "]");
+        uint64_t expected_pa =
+            (UINT64_C(0x40000000) + i * UINT64_C(0x200000))
+            & BOOT_MAP_BLOCK_PA_MASK;
+        r = boot_map_check_block(what, pmd_low1[i], expected_pa, 0x705,
+                                 BOOT_MAP_PXN_BIT | BOOT_MAP_UXN_BIT);
+        if (r != NULL) {
+            fail_reason = r;
+            goto fail;
+        }
     }
 
     log_info("UEFI-A64: boot map selftest OK\n");
@@ -456,19 +513,11 @@ void aarch64_main(const struct boot_context *handoff)
         if (p) { free_pages(p, 1); log_info("UEFI-A64: pmm alloc smoke OK\n"); }
         else   { log_err("UEFI-A64: pmm alloc smoke FAIL\n"); }
     }
-    /* Validate the descriptors head.S actually installed in the
-     * active TTBR0 root before the fixup below rewrites any slots:
-     * a wrong construction must be caught here, not papered over. */
+    /* Validate the descriptors head.S installed in the active TTBR0
+     * root. head.S fills all 512 PMD_low1 slots before the MMU is
+     * enabled; this proves the installed descriptors match the spec
+     * contract before the 4 KiB smoke runs. */
     aarch64_boot_map_selftest();
-    /* head.S build_pagetables only writes PMD_low1[0]; slots 1..511
-     * are left zero, so physical 0x40200000..0x80000000 has no
-     * direct-map alias. Without this fixup the first runtime
-     * alloc_4k_page() whose PA lies above 0x40200000 faults in
-     * pmm.c when it writes the subpage_pool header. The fixup walks
-     * the installed PGD → PUD → PMD_low1 and fills the missing slots
-     * with 2 MiB Normal kernel-RW non-exec block descriptors. Pre-SMP
-     * single-threaded; mutates the active root. */
-    aarch64_extend_direct_map();
     aarch64_pt_smoke_test();
 #endif
 
