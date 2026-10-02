@@ -52,6 +52,14 @@ struct pmm_layout {
     uint64_t zones_length;
     uint64_t end_of_struct_off;
     uint64_t total_bytes;
+    uint64_t metadata_end_pa;   /* PA of end_of_struct; populated by
+                                 * pmm_init after pmm_layout_calculate
+                                 * (the calculator itself does not compute
+                                 * it: Virt_To_Phy is arch-specific and
+                                 * belongs to the caller). The default
+                                 * pmm_arch_boot_reservations reads this
+                                 * field to build the legacy prefix
+                                 * [0, ceil2M(metadata_end_pa)). */
 };
 
 int pmm_layout_calculate(uint64_t base_va, uint64_t span_pages,

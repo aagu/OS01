@@ -61,6 +61,10 @@ static inline void zero_layout(struct pmm_layout *out)
     out->zones_length       = 0;
     out->end_of_struct_off  = 0;
     out->total_bytes        = 0;
+    out->metadata_end_pa    = 0;   /* populated by pmm_init after this
+                                    * function returns; left at 0 by the
+                                    * calculator since Virt_To_Phy is
+                                    * arch-specific. */
 }
 
 int pmm_layout_calculate(uint64_t base_va, uint64_t span_pages,

@@ -352,11 +352,14 @@ test-pmm-boot-reservation:
 # which only parses as a Make recipe prefix when the call sits at the
 # start of its OWN recipe line. We therefore give each M1 case its own
 # .PHONY runner and let test-m1-host select among them via CASE.
-.PHONY: test-m1-host _test-m1-host-run-m1-layout
-M1_CASES := m1-layout
+.PHONY: test-m1-host _test-m1-host-run-m1-layout _test-m1-host-run-m1-reservation
+M1_CASES := m1-layout m1-reservation
 _test-m1-host-run-m1-layout:
 	@echo "  [test-m1-host] m1-layout"
 	$(call os01_submake,hosttests,test-m1-layout $(OS01_SUBMAKE_ARGS))
+_test-m1-host-run-m1-reservation:
+	@echo "  [test-m1-host] m1-reservation"
+	$(call os01_submake,hosttests,test-m1-reservation $(OS01_SUBMAKE_ARGS))
 test-m1-host: CASE ?=
 test-m1-host: CASE := $(CASE)
 # Umbrella: with empty CASE, depend on every per-case runner; otherwise
@@ -366,7 +369,8 @@ test-m1-host: $(if $(CASE),_test-m1-host-run-$(CASE),$(foreach c,$(M1_CASES),_te
 	$(call require_capability,rootfs)
 	@case "$(CASE)" in \
 	    "") echo "  [test-m1-host] full M1 group: $(M1_CASES)";; \
-	    $(M1_CASES)) echo "  [test-m1-host] CASE=$(CASE)";; \
+	    m1-layout) echo "  [test-m1-host] CASE=$(CASE)";; \
+	    m1-reservation) echo "  [test-m1-host] CASE=$(CASE)";; \
 	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(M1_CASES)" >&2; exit 1;; \
 	  esac
 # Focused hosttest for the gfx 2D API plan Task 1 — per-file device

@@ -103,7 +103,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_user_protected_ranges.elf \
     $(TEST_BLD)/test_fork_user_map.elf \
     $(TEST_BLD)/test_user_write_cow.elf \
-    $(TEST_BLD)/test_m1_layout.elf
+    $(TEST_BLD)/test_m1_layout.elf \
+    $(TEST_BLD)/test_m1_reservation.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -711,6 +712,36 @@ $(TEST_BLD)/test_m1_layout.elf: $(TEST_BLD)/test_m1_layout.o \
 # via the focused dispatch in run.mk.
 .PHONY: test-m1-layout
 test-m1-layout: $(TEST_BLD)/test_m1_layout.elf
+	$<
+
+# aarch64 M1 plan Task 2: range-based boot reservations +
+# single-frame exact claim. Links the REAL pmm.c (PMM_SHADOW_INC so
+# the production spinlock / arch_cpu_halt resolve to no-op host
+# stubs), the REAL pmm_arch.c (weak-default strategy), and the REAL
+# pmm_boot.c (layout calculator). The test TU itself does not pull
+# in the spinlock header, so it only needs KERNEL_INC + TEST_INC.
+#
+# `make test-m1-host CASE=m1-reservation` (root run.mk) reaches this
+# rule via the focused dispatch in run.mk.
+PMM_RESERVATION_TEST_CFLAGS := $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) \
+                               -I$(TEST_INC) $(FRAMEWORK_INC) $(LIBC_INC)
+
+$(TEST_BLD)/test_m1_reservation.o: $(TEST_CASES)/test_m1_reservation.c \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm_arch.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm_boot.h \
+		$(TESTS_DIR)/kernel/include/memory/memory_map.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PMM_RESERVATION_TEST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_m1_reservation.elf: $(TEST_BLD)/test_m1_reservation.o \
+		$(TEST_BLD)/pmm_production.o \
+		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_boot_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-m1-reservation
+test-m1-reservation: $(TEST_BLD)/test_m1_reservation.elf
 	$<
 
 # Sync primitive test — compiles the real rwlock/seqlock implementations.
