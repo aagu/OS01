@@ -329,7 +329,7 @@ TEST_SELFTEST_IMAGE := $(BUILD_DIR)/image/selftest/disk.img
 # overridable.
 KERNEL_SELFTEST_SMP ?= 4
 
-.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-device test-gfx-client test-gfx-primitives
+.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-device test-gfx-client test-gfx-primitives test-m1-host
 test-host:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,run $(OS01_SUBMAKE_ARGS))
@@ -337,6 +337,38 @@ test-host:
 	python3 qemutests/test_kernel_selftest_result.py
 test-pmm-boot-reservation:
 	python3 qemutests/pmm_boot_reservation_test.py
+
+# Focused M1 host tests (aarch64 M1 plan). Each CASE runs the matching
+# focused TEST_BINS entry under hosttests/.  Unknown non-empty CASE
+# aborts non-zero. With CASE omitted the umbrella runs the full M1
+# group (currently: layout). The target builds only the focused
+# TEST_BINS entry, not the entire hosttest build, so `make ... CASE=...`
+# is cheap when iterating on a single calculator.
+#
+# The x86_64-clang profile forwards to hosttests; aarch64-clang also
+# routes through hosttests (the M1 host tests are arch-neutral C).
+#
+# Implementation note: os01_submake expands to a `+env -i ...` line,
+# which only parses as a Make recipe prefix when the call sits at the
+# start of its OWN recipe line. We therefore give each M1 case its own
+# .PHONY runner and let test-m1-host select among them via CASE.
+.PHONY: test-m1-host _test-m1-host-run-m1-layout
+M1_CASES := m1-layout
+_test-m1-host-run-m1-layout:
+	@echo "  [test-m1-host] m1-layout"
+	$(call os01_submake,hosttests,test-m1-layout $(OS01_SUBMAKE_ARGS))
+test-m1-host: CASE ?=
+test-m1-host: CASE := $(CASE)
+# Umbrella: with empty CASE, depend on every per-case runner; otherwise
+# depend on the single matching one. The dispatch is purely structural
+# so make schedules the right os01_submake invocations.
+test-m1-host: $(if $(CASE),_test-m1-host-run-$(CASE),$(foreach c,$(M1_CASES),_test-m1-host-run-$(c)))
+	$(call require_capability,rootfs)
+	@case "$(CASE)" in \
+	    "") echo "  [test-m1-host] full M1 group: $(M1_CASES)";; \
+	    $(M1_CASES)) echo "  [test-m1-host] CASE=$(CASE)";; \
+	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(M1_CASES)" >&2; exit 1;; \
+	  esac
 # Focused hosttest for the gfx 2D API plan Task 1 — per-file device
 # ioctl/release lifecycle.  Runs the single TEST_BINS entry
 # (test_gfx_file_lifecycle.elf) and asserts the contract spelled out

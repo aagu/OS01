@@ -16,11 +16,13 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <errno.h>
 #include <core/bootinfo.h>
 #include <log/log.h>
 #include <arch/cpu.h>     /* arch_cpu_halt — required for fatal paths */
 #include <memory/memory_map.h>
 #include <memory/pmm.h>
+#include <memory/pmm_boot.h>      /* checked PMM metadata layout (Task 1) */
 #include <memory/memory.h>       /* Virt_To_Phy, Phy_To_Virt */
 #include <core/printk.h>       /* color_printk (public surface) */
 #include <core/debug.h>        /* debug_mm (existing call sites) */
@@ -194,19 +196,32 @@ void pmm_init(const struct boot_context *ctx)
     if (ram_span_pages == 0) ram_span_pages = 1;   /* floor 1 */
 
     /* Step 3: allocate bits_map, pages_struct, zones_struct from start_brk.
-     * Mirror the existing pmm.c sizing math (PMMngr.start_brk + 0xFFF &
-     * ~0xFFF), but with the new ram_span_pages. */
-    PMMngr.bits_map = (uint64_t *)((PMMngr.start_brk + 0xFFFUL) & ~0xFFFUL);
-    PMMngr.bits_size  = ram_span_pages;
-    PMMngr.bits_length = ((ram_span_pages + 63) & ~63UL) / 8;
+     * Use the shared checked calculator (kernel/memory/pmm_boot.c) for
+     * every offset, length and trailing tail. The calculator's offsets
+     * are relative to the caller-aligned base_va; production pmm.c
+     * aligns start_brk up to 4 KiB before assigning bits_map. */
+    uint64_t brk = (PMMngr.start_brk + 0xFFFUL) & ~0xFFFUL;
+    struct pmm_layout layout;
+    int rc = pmm_layout_calculate(brk, ram_span_pages, &layout);
+    if (rc != 0) {
+        log_err("[smp] FATAL: pmm_layout_calculate failed (rc=%d)\n", rc);
+        arch_cpu_halt();
+    }
+    if (layout.total_bytes == 0) {
+        log_err("[smp] FATAL: pmm_layout_calculate returned zero total_bytes\n");
+        arch_cpu_halt();
+    }
+    PMMngr.bits_map      = (uint64_t *)(brk + layout.bits_map_off);
+    PMMngr.bits_size     = ram_span_pages;
+    PMMngr.bits_length   = layout.bits_length;
     memset(PMMngr.bits_map, 0xff, PMMngr.bits_length);
-    PMMngr.pages_struct = (struct Page *)(((uint64_t)PMMngr.bits_map + PMMngr.bits_length + 0xFFFUL) & ~0xFFFUL);
-    PMMngr.pages_size  = ram_span_pages;
-    PMMngr.pages_length = ((ram_span_pages * sizeof(struct Page) + sizeof(long) - 1) & ~(sizeof(long) - 1));
+    PMMngr.pages_struct  = (struct Page *)(brk + layout.pages_struct_off);
+    PMMngr.pages_size    = ram_span_pages;
+    PMMngr.pages_length  = layout.pages_length;
     memset(PMMngr.pages_struct, 0, PMMngr.pages_length);
-    PMMngr.zones_struct = (struct Zone *)(((uint64_t)PMMngr.pages_struct + PMMngr.pages_length + 0xFFFUL) & ~0xFFFUL);
-    PMMngr.zones_size = 0;
-    PMMngr.zones_length = ((MEMORY_RANGE_MAX * sizeof(struct Zone) + sizeof(long) - 1) & ~(sizeof(long) - 1));
+    PMMngr.zones_struct  = (struct Zone *)(brk + layout.zones_struct_off);
+    PMMngr.zones_size    = 0;
+    PMMngr.zones_length  = layout.zones_length;
     memset(PMMngr.zones_struct, 0, PMMngr.zones_length);
 
     /* Step 4: walk RAM ranges, create zones. RAM-relative indexing:
@@ -247,11 +262,10 @@ void pmm_init(const struct boot_context *ctx)
     }
 
     /* end_of_struct must be assigned BEFORE Step 7, because Step 7
-     * computes the kernel-image walk bound from it. Mirror the existing
-     * pmm.c:240 computation exactly. */
-    PMMngr.end_of_struct =
-        ((uint64_t)PMMngr.zones_struct + PMMngr.zones_length + sizeof(long) * 32)
-        & ~(sizeof(long) - 1);
+     * computes the kernel-image walk bound from it. The shared
+     * calculator already produced end_of_struct_off (the relative
+     * offset from aligned brk); convert to an absolute pointer. */
+    PMMngr.end_of_struct = brk + layout.end_of_struct_off;
 
     /* Reserve every represented RAM frame overlapping the kernel image
      * and early metadata. Slot zero is the first RAM frame, not necessarily

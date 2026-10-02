@@ -102,7 +102,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_brk_pages.elf \
     $(TEST_BLD)/test_user_protected_ranges.elf \
     $(TEST_BLD)/test_fork_user_map.elf \
-    $(TEST_BLD)/test_user_write_cow.elf
+    $(TEST_BLD)/test_user_write_cow.elf \
+    $(TEST_BLD)/test_m1_layout.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -402,8 +403,12 @@ $(TEST_BLD)/test_pmm_ram_rel_index.o: $(TEST_CASES)/test_pmm_ram_rel_index.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -I$(TEST_INC) -c $< -o $@
 
+# pmm.c (production) calls pmm_layout_calculate (kernel/memory/pmm_boot.c).
+# Link the calculator object alongside pmm.o so the new layout helper
+# resolves; the calculator is also exercised by test_m1_layout.
 $(TEST_BLD)/test_pmm_ram_rel_index.elf: $(TEST_BLD)/test_pmm_ram_rel_index.o \
-		$(TEST_BLD)/pmm_production.o $(TEST_BLD)/pmm_arch_default.o
+		$(TEST_BLD)/pmm_production.o $(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_boot_production.o
 	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/test_slab_basic.elf: $(TEST_BLD)/test_slab_basic.o $(LIBC_OBJS) $(MOCK_OBJS)
@@ -676,6 +681,37 @@ $(TEST_BLD)/test_aarch64_sync_fault.o: $(TEST_CASES)/test_aarch64_sync_fault.c \
 
 $(TEST_BLD)/test_aarch64_sync_fault.elf: $(TEST_BLD)/test_aarch64_sync_fault.o
 	$(HOST_CC) -o $@ $<
+
+# aarch64 M1 plan Task 1: checked PMM metadata layout calculator.
+# Links the REAL kernel/memory/pmm_boot.c against the host TU. The
+# production file has no kernel deps beyond <memory/pmm.h> (for the
+# Page / Zone struct sizes) and <memory/pmm_boot.h>; both are in
+# KERNEL_INC. test_m1_layout.c itself only uses <errno.h> from libc,
+# <test_framework.h> from TEST_INC, and the production headers above.
+PMM_BOOT_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) -I$(TEST_INC) \
+                        -include $(TEST_MOCK)/test_platform.h
+
+$(TEST_BLD)/pmm_boot_production.o: $(TESTS_DIR)/kernel/memory/pmm_boot.c \
+		$(TESTS_DIR)/kernel/include/memory/pmm_boot.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/memory_map.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PMM_BOOT_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_m1_layout.o: $(TEST_CASES)/test_m1_layout.c \
+		$(TESTS_DIR)/kernel/include/memory/pmm_boot.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PMM_BOOT_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_m1_layout.elf: $(TEST_BLD)/test_m1_layout.o \
+		$(TEST_BLD)/pmm_boot_production.o
+	$(HOST_CC) -o $@ $^
+
+# `make test-m1-host CASE=m1-layout` (root run.mk) reaches this rule
+# via the focused dispatch in run.mk.
+.PHONY: test-m1-layout
+test-m1-layout: $(TEST_BLD)/test_m1_layout.elf
+	$<
 
 # Sync primitive test — compiles the real rwlock/seqlock implementations.
 $(TEST_BLD)/test_sync_primitives.o: $(TEST_CASES)/test_sync_primitives.c
