@@ -300,4 +300,3 @@ bool uw_arch_range_accessible(uint64_t addr, uint64_t len, bool writable)
     }
     return true;
 }
-
