@@ -453,8 +453,15 @@ static void test_stack_page_failure_exactly_one_free(void)
 
 /* ── Source-level inspection: spawn_user_task lifecycle ───── */
 
-#define TASK_C_PATH \
-    "/home/aagu/OS01/.worktrees/heap-elf-isolation/kernel/sched/task.c"
+static const char *task_c_path(void)
+{
+    static char path[1024];
+    const char *marker = strstr(__FILE__, "/hosttests/");
+    if (!marker) return "../kernel/sched/task.c";
+    snprintf(path, sizeof(path), "%.*s/kernel/sched/task.c",
+             (int)(marker - __FILE__), __FILE__);
+    return path;
+}
 
 static char *slurp_file(const char *path, size_t *out_len)
 {
@@ -517,8 +524,9 @@ static void test_spawn_user_task_calls_mm_init_user_heap(void)
     TEST_SUITE("spawn_user_task — uses mm_init_user_heap");
 
     size_t len;
-    char *src = slurp_file(TASK_C_PATH, &len);
+    char *src = slurp_file(task_c_path(), &len);
     assert_not_null(src);
+    if (!src) return;
 
     int has_call = source_contains_in_function(
         src, len,
@@ -544,8 +552,9 @@ static void test_spawn_user_task_no_early_task_list_insert(void)
     TEST_SUITE("spawn_user_task — task_list_lock acquired AFTER all resource prep");
 
     size_t len;
-    char *src = slurp_file(TASK_C_PATH, &len);
+    char *src = slurp_file(task_c_path(), &len);
     assert_not_null(src);
+    if (!src) return;
 
     /* Find the spawn_user_task function body.  We assert that the
      * first occurrence of `spin_lock_irqsave(&task_list_lock)` lies
@@ -606,8 +615,9 @@ static void test_spawn_user_task_uses_destroy_helper(void)
     TEST_SUITE("spawn_user_task — destroy_unpublished_user_mm defined + used");
 
     size_t len;
-    char *src = slurp_file(TASK_C_PATH, &len);
+    char *src = slurp_file(task_c_path(), &len);
     assert_not_null(src);
+    if (!src) return;
 
     /* Helper definition must exist. */
     int has_def = (strstr(src, "static void destroy_unpublished_user_mm(") != NULL);
@@ -628,8 +638,9 @@ static void test_sys_exec_calls_mm_init_user_heap(void)
     TEST_SUITE("sys_exec — uses mm_init_user_heap");
 
     size_t len;
-    char *src = slurp_file(TASK_C_PATH, &len);
+    char *src = slurp_file(task_c_path(), &len);
     assert_not_null(src);
+    if (!src) return;
 
     int has_call = source_contains_in_function(
         src, len,
@@ -653,8 +664,9 @@ static void test_sys_exec_old_mm_retained_until_switch(void)
     TEST_SUITE("sys_exec — old mm + CR3 retained until new image is ready");
 
     size_t len;
-    char *src = slurp_file(TASK_C_PATH, &len);
+    char *src = slurp_file(task_c_path(), &len);
     assert_not_null(src);
+    if (!src) return;
 
     /* Find the sys_exec body. */
     char *fn = strstr(src, "int64_t sys_exec(const char *path");
@@ -717,8 +729,9 @@ static void test_sys_exec_uses_destroy_helper(void)
     TEST_SUITE("sys_exec — destroy_unpublished_user_mm on failure");
 
     size_t len;
-    char *src = slurp_file(TASK_C_PATH, &len);
+    char *src = slurp_file(task_c_path(), &len);
     assert_not_null(src);
+    if (!src) return;
 
     /* sys_exec failure paths (after new mm is built, before switch)
      * must use destroy_unpublished_user_mm to release the new image
@@ -758,6 +771,9 @@ TEST_LIST_END
 
 int main(void)
 {
-    RUN_ALL_TESTS();
-    return __test_stats.failed == 0 ? 0 : 1;
+    for (int i = 0; i < __test_table_size; ++i)
+        __test_table[i].fn();
+    int failed = __test_stats.failed;
+    TEST_RESULTS();
+    return failed ? 1 : 0;
 }

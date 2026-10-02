@@ -2692,6 +2692,7 @@ void task_init()
         extern void test_tty_vintr(void);
         test_tty_vintr();
     }
+    serial_printk("[selftest] task tests done\n");
 #endif
 
     // ── Idle loop ────────────────────────────────────────────

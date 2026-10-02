@@ -334,6 +334,7 @@ test-host:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,run $(OS01_SUBMAKE_ARGS))
 	python3 qemutests/pmm_boot_reservation_test.py
+	python3 qemutests/test_kernel_selftest_result.py
 test-pmm-boot-reservation:
 	python3 qemutests/pmm_boot_reservation_test.py
 # Focused hosttest for the gfx 2D API plan Task 1 — per-file device
@@ -596,10 +597,7 @@ test-kernel-selftest: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMW
 	grep -aF '[selftest] running built-in tests...' "$$log"; \
 	grep -aE '\[selftest\] [1-9][0-9]* total: [1-9][0-9]* passed, 0 failed' "$$log"; \
 	grep -aF '[selftest] done' "$$log"; \
-	if grep -aE '\[selftest\].*[[:space:]][1-9][0-9]* failed' "$$log" || grep -aF 'FAIL' "$$log"; then \
-	  echo "ERROR: kernel selftest reported a failure; log: $$log" >&2; \
-	  exit 1; \
-	fi; \
+	python3 qemutests/check_kernel_selftest.py "$$log"; \
 	if [ "$$rc" -eq 124 ]; then \
 	  echo "  [selftest] QEMU timed out after complete passing markers (expected)"; \
 	fi

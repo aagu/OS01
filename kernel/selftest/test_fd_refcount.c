@@ -54,6 +54,10 @@ static int      r3_reader_cpu_mask;   // bitmask of CPUs the reader ran on
 static int      r3_writer_cpu_mask;   // bitmask of CPUs the writer ran on
 static int      r3_writer_err;
 static int      r3_saw_present;       // reader got a non-NULL file ref
+static int      r3_first_published;
+static int      r3_reader_sampled;
+static int      r3_first_detached;
+static int      r3_reader_detached_sampled;
 static int      r3_saw_absent;        // reader saw slot empty (writer detached)
 
 static uint64_t race_reader(uint64_t arg)
@@ -62,6 +66,18 @@ static uint64_t race_reader(uint64_t arg)
     wait_flag(&r3_start);
     if (__atomic_load_n(&r3_abort, __ATOMIC_ACQUIRE))
         goto out;                       // partial-create: exit without racing
+    // Prove both slot states before the stress loop. Neither observation
+    // depends on the scheduler choosing a particular interleaving.
+    wait_flag(&r3_first_published);
+    __atomic_fetch_or(&r3_reader_cpu_mask, 1U << cpu_id(), __ATOMIC_RELAXED);
+    file_t *first = files_get_file(race_fs, 0);
+    if (first) { r3_saw_present = 1; files_put_file(first); }
+    __atomic_store_n(&r3_reader_sampled, 1, __ATOMIC_RELEASE);
+    wait_flag(&r3_first_detached);
+    first = files_get_file(race_fs, 0);
+    if (!first) r3_saw_absent = 1;
+    else files_put_file(first);
+    __atomic_store_n(&r3_reader_detached_sampled, 1, __ATOMIC_RELEASE);
     for (int i = 0; i < FD_RACE_ITERS; i++) {
         __atomic_fetch_or(&r3_reader_cpu_mask, 1U << cpu_id(), __ATOMIC_RELAXED);
         file_t *g = files_get_file(race_fs, 0);
@@ -84,6 +100,18 @@ static uint64_t race_writer(uint64_t arg)
     wait_flag(&r3_start);
     if (__atomic_load_n(&r3_abort, __ATOMIC_ACQUIRE))
         goto out;
+    __atomic_fetch_or(&r3_writer_cpu_mask, 1U << cpu_id(), __ATOMIC_RELAXED);
+    file_t *first = file_alloc();
+    int first_fd = first ? fd_alloc(race_fs, first) : -1;
+    if (first_fd < 0) {
+        if (first) file_put(first);
+        r3_writer_err++;
+    }
+    __atomic_store_n(&r3_first_published, 1, __ATOMIC_RELEASE);
+    wait_flag(&r3_reader_sampled);
+    if (first_fd >= 0) fd_close(race_fs, first_fd);
+    __atomic_store_n(&r3_first_detached, 1, __ATOMIC_RELEASE);
+    wait_flag(&r3_reader_detached_sampled);
     for (int i = 0; i < FD_RACE_ITERS; i++) {
         __atomic_fetch_or(&r3_writer_cpu_mask, 1U << cpu_id(), __ATOMIC_RELAXED);
         file_t *f = file_alloc();
@@ -110,6 +138,7 @@ static void run_get_detach_race(void)
     r3_start = 0; r3_abort = 0; r3_reader_done = 0; r3_writer_done = 0;
     r3_reader_cpu_mask = 0; r3_writer_cpu_mask = 0;
     r3_writer_err = 0; r3_saw_present = 0; r3_saw_absent = 0;
+    r3_first_published = 0; r3_reader_sampled = 0; r3_first_detached = 0; r3_reader_detached_sampled = 0;
 
     // Pin a worker ref ONLY when kernel_thread() returns a pid >= 0
     // (authoritative: pid < 0 means the task was NOT created).
