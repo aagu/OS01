@@ -57,11 +57,26 @@ static inline uintptr_t arch_virt_to_phys(void *pgtbl, uintptr_t va) {
 }
 
 // Cross-level effective-permission walk: returns true iff every page in
-// [addr, addr+len) is valid + user-accessible + (writable ? RW set),
+// [addr, addr+len) is valid + user-accessible + (writable ? RW or COW set),
 // ANDing perms across pgd→pud→pmd→pte (x86 semantics: any level
-// USER=0 → supervisor page, any level WRITE=0 → read-only).  Handles
-// 4KB + 2MB pages (OS01 creates no 1GB pages, defensive false on 1GB
+// USER=0 → supervisor page, any level WRITE=0 → read-only, COW bit
+// 10 (x86_64 ignored) counts as a writable-eligible marker — see below).
+// Handles 4KB + 2MB pages (OS01 creates no 1GB pages, defensive false on 1GB
 // PUD entry).
+//
+// COW-eligibility (Task 7): when writable=true, a PTE that has
+// PAGE_VALID + PAGE_USER + PAGE_COW (bit 10) passes the check.  This is
+// the "pure syscall_check_user_range accepts eligible COW without
+// changing PTEs" contract — a kernel caller may fast-check the range,
+// and any actual write goes through prepare_user_write_range(_locked)
+// to privatize the COW leaf atomically.  CALLERS WHO ONLY WANT TO
+// VERIFY "is this range fully writable" SHOULD FOLLOW UP WITH
+// prepare_user_write_range (the FT path); this check is a snapshot,
+// not a pin — munmap can race the gap.
+//
+// 2MB huge pages do not carry PAGE_COW (huge pages are private from
+// allocation; fork copies them eagerly — see kernel/sched/task.c), so
+// the huge branch keeps its strict RW requirement.
 //
 // addr+len overflow is self-guarded here -- callers may legitimately pass
 // (addr=2, len=UINT64_MAX) for hostile-input filtering, so we cannot rely
@@ -103,8 +118,13 @@ static inline bool arch_user_range_accessible(void *pgtbl, uint64_t addr,
         uint64_t l3 = (va >> 12) & 0x1FF;
         if (!(pte[l3] & 1)) return false;
         user = user && !!(pte[l3] & 4);
+        bool upper_rw = rw;
         rw   = rw   && !!(pte[l3] & 2);
-        if (!user || (writable && !rw)) return false;
+        // PAGE_COW (bit 10) counts as writable-eligible: the kernel
+        // path that ACTUALLY writes to user memory must privatize the
+        // leaf via prepare_user_write_range first.
+        bool cow = !!(pte[l3] & (1UL << 10));
+        if (!user || (writable && !rw && !(upper_rw && cow))) return false;
         va += 0x1000ULL;
     }
     return true;

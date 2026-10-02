@@ -95,7 +95,14 @@ TEST_BINS := \
     $(TEST_BLD)/test_gfx_device.elf \
     $(TEST_BLD)/test_gfx_client.elf \
     $(TEST_BLD)/test_gfx_primitives.elf \
-    $(TEST_BLD)/test_aarch64_sync_fault.elf
+    $(TEST_BLD)/test_aarch64_sync_fault.elf \
+    $(TEST_BLD)/test_elf_layout.elf \
+    $(TEST_BLD)/test_elf_load_4k.elf \
+    $(TEST_BLD)/test_process_image_lifecycle.elf \
+    $(TEST_BLD)/test_brk_pages.elf \
+    $(TEST_BLD)/test_user_protected_ranges.elf \
+    $(TEST_BLD)/test_fork_user_map.elf \
+    $(TEST_BLD)/test_user_write_cow.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -403,6 +410,255 @@ $(TEST_BLD)/test_slab_basic.elf: $(TEST_BLD)/test_slab_basic.o $(LIBC_OBJS) $(MO
 	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/test_elf_validate.elf: $(TEST_BLD)/test_elf_validate.o $(LIBC_OBJS) $(MOCK_OBJS)
+	$(HOST_CC) -o $@ $^
+
+# ELF layout validator (Task 1, user heap/ELF isolation plan): compiles
+# the REAL kernel/fs/elf_layout.c so the test exercises the production
+# validation contract (not a duplicate formula).  The test TU consumes
+# <fs/elf.h> for the type/macro surface and <fs/elf_layout.h> for the
+# validator interface; both headers are deliberately light after the
+# 2026-10-01 fs/elf.h refactor (heavy types forward-declared) so this
+# build needs no shadow-include machinery.
+ELF_LAYOUT_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
+                          -I$(TESTS_DIR)/kernel/include
+
+$(TEST_BLD)/elf_layout.o: $(TESTS_DIR)/kernel/fs/elf_layout.c \
+		$(TESTS_DIR)/kernel/include/fs/elf.h \
+		$(TESTS_DIR)/kernel/include/fs/elf_layout.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ELF_LAYOUT_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_elf_layout.o: $(TEST_CASES)/test_elf_layout.c \
+		$(TESTS_DIR)/kernel/include/fs/elf.h \
+		$(TESTS_DIR)/kernel/include/fs/elf_layout.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ELF_LAYOUT_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_elf_layout.elf: $(TEST_BLD)/test_elf_layout.o $(TEST_BLD)/elf_layout.o
+	$(HOST_CC) -o $@ $^
+
+# Per-4 KiB ELF loader test (Task 2, user heap/ELF isolation plan):
+# compiles the REAL kernel/fs/elf.c against the host harness.  The
+# host stubs VFS / PMM / VMM under hosttests/mock/elf_load/ and the
+# production elf_load is exercised end-to-end against a real PTE
+# state machine (flat user-VA table with present-bit / flags / phys
+# per slot — no PAGE_HUGE leaves possible).  Failure injection
+# (alloc/read/map) lets the test verify that the loader's single
+# rollback owner frees each created leaf exactly once.
+ELF_LOAD_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
+                        -I$(TESTS_DIR)/kernel/include \
+                        -include $(TEST_MOCK)/elf_load/elf_load_runtime.h \
+                        -I$(TEST_MOCK) -I$(TEST_INC) \
+                        -I$(TEST_MOCK)/elf_load
+
+$(TEST_BLD)/elf_load_production.o: $(TESTS_DIR)/kernel/fs/elf.c \
+		$(TESTS_DIR)/kernel/include/fs/elf.h \
+		$(TESTS_DIR)/kernel/include/fs/elf_layout.h \
+		$(TEST_MOCK)/elf_load/elf_load_stubs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ELF_LOAD_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/elf_load_stubs.o: $(TEST_MOCK)/elf_load/elf_load_stubs.c \
+		$(TEST_MOCK)/elf_load/elf_load_stubs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ELF_LOAD_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_elf_load_4k.o: $(TEST_CASES)/test_elf_load_4k.c \
+		$(TEST_MOCK)/elf_load/elf_load_stubs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ELF_LOAD_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_elf_load_4k.elf: $(TEST_BLD)/test_elf_load_4k.o \
+		$(TEST_BLD)/elf_load_production.o \
+		$(TEST_BLD)/elf_load_stubs.o \
+		$(TEST_BLD)/elf_layout.o \
+		$(MOCK_OBJS)
+	$(HOST_CC) -o $@ $^
+
+# Process-image lifecycle test (Task 3, user heap/ELF isolation plan):
+# compiles the REAL kernel/memory/vma.c against the host harness so
+# mm_init_user_heap / vma_insert / vma_find / vma_free_all / mm_alloc
+# are exercised against observable state.  Failure injection on
+# kmalloc (-Wl,--wrap=kmalloc) proves mm_init_user_heap returns
+# -ENOMEM and leaves mm unchanged when its VMA allocation fails.
+#
+# Source-level inspection of kernel/sched/task.c covers the staged
+# spawn/exec lifecycle invariants (the task.c dependency tree —
+# percpu, ipi, fpu, irq, ...) is too heavy to compile in a host
+# harness; the actual end-to-end behavior is covered by
+# `make OS01_SYSTEST=1 test-qemu SUITE=systest`).
+LIFECYCLE_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
+                         -I$(TESTS_DIR)/kernel/include \
+                         -include $(TEST_MOCK)/lifecycle/lifecycle_runtime.h \
+                         -I$(TEST_MOCK) -I$(TEST_INC) \
+                         -I$(TEST_MOCK)/lifecycle
+
+$(TEST_BLD)/vma_production.o: $(TESTS_DIR)/kernel/memory/vma.c \
+		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TESTS_DIR)/kernel/include/sched/task.h \
+		$(TEST_MOCK)/lifecycle/lifecycle_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(LIFECYCLE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/lifecycle_stubs.o: $(TEST_MOCK)/lifecycle/lifecycle_stubs.c \
+		$(TEST_MOCK)/lifecycle/lifecycle_stubs.h \
+		$(TEST_MOCK)/lifecycle/lifecycle_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(LIFECYCLE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_process_image_lifecycle.o: $(TEST_CASES)/test_process_image_lifecycle.c \
+		$(TEST_MOCK)/lifecycle/lifecycle_stubs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(LIFECYCLE_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_process_image_lifecycle.elf: $(TEST_BLD)/test_process_image_lifecycle.o \
+		$(TEST_BLD)/vma_production.o \
+		$(TEST_BLD)/lifecycle_stubs.o
+	$(HOST_CC) -Wl,--wrap=kmalloc,--wrap=kfree -o $@ $^
+
+# brk-page ownership test (Task 4, user heap/ELF isolation plan):
+# compiles the REAL kernel/memory/vma.c against the brk host harness
+# so mm_set_brk is exercised against observable state (flat indexed
+# PTE table with PAGE_COW support, per-phys COW refcounting, TLB
+# flush counter, alloc/free OOM injection).  Source-level inspection
+# of kernel/arch/x86_64/intr/trap.c covers the SYS_brk delegation
+# and the heap-fault path (trap.c is too heavy to host-link).
+BRK_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
+                   -I$(TESTS_DIR)/kernel/include \
+                   -include $(TEST_MOCK)/brk/brk_runtime.h \
+                   -I$(TEST_MOCK) -I$(TEST_INC) \
+                   -I$(TEST_MOCK)/brk
+
+$(TEST_BLD)/vma_brk_production.o: $(TESTS_DIR)/kernel/memory/vma.c \
+		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TEST_MOCK)/brk/brk_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BRK_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/brk_stubs.o: $(TEST_MOCK)/brk/brk_stubs.c \
+		$(TEST_MOCK)/brk/brk_stubs.h \
+		$(TEST_MOCK)/brk/brk_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BRK_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_brk_pages.o: $(TEST_CASES)/test_brk_pages.c \
+		$(TEST_MOCK)/brk/brk_stubs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BRK_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_brk_pages.elf: $(TEST_BLD)/test_brk_pages.o \
+		$(TEST_BLD)/vma_brk_production.o \
+		$(TEST_BLD)/brk_stubs.o
+	$(HOST_CC) -Wl,--wrap=kmalloc,--wrap=kfree -o $@ $^
+
+# Protected-ranges test (Task 5, user heap/ELF isolation plan):
+# compiles the REAL kernel/memory/vma.c against the pranges host
+# harness and DRIVES do_mmap / do_munmap / do_mprotect through the
+# stub `current` (flat indexed PTE table, 4 KiB page pool, counter-
+# backed arch_flush_tlb_all).  mm_user_range_protected has a weak
+# RED fallback (always false) in pranges_stubs.c so the suite links
+# and fails cleanly before the production predicate lands.
+PRANGES_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
+                       -I$(TESTS_DIR)/kernel/include \
+                       -include $(TEST_MOCK)/pranges/pranges_runtime.h \
+                       -I$(TEST_MOCK) -I$(TEST_INC) \
+                       -I$(TEST_MOCK)/pranges
+
+$(TEST_BLD)/vma_pranges_production.o: $(TESTS_DIR)/kernel/memory/vma.c \
+		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TEST_MOCK)/pranges/pranges_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PRANGES_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/pranges_stubs.o: $(TEST_MOCK)/pranges/pranges_stubs.c \
+		$(TEST_MOCK)/pranges/pranges_stubs.h \
+		$(TEST_MOCK)/pranges/pranges_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PRANGES_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_user_protected_ranges.o: $(TEST_CASES)/test_user_protected_ranges.c \
+		$(TEST_MOCK)/pranges/pranges_stubs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PRANGES_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_user_protected_ranges.elf: $(TEST_BLD)/test_user_protected_ranges.o \
+		$(TEST_BLD)/vma_pranges_production.o \
+		$(TEST_BLD)/pranges_stubs.o
+	$(HOST_CC) -o $@ $^
+
+# Fork / teardown 4 KiB ownership test (Task 6, user heap/ELF
+# isolation plan): compiles the REAL kernel/memory/vma.c against
+# the fork_user_map host harness (flat indexed PTE table, 4 KiB
+# page pool, COW refcounts, vfs_node refcounts) and exercises the
+# production fork_vma_copy / vma_free_all / mm_init_user_heap.  Source-
+# level inspection of kernel/sched/task.c covers the fork_mm_copy
+# staged ordering and the do_fork teardown (task.c is too heavy to
+# host-link).
+FORK_USER_MAP_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
+                              -I$(TESTS_DIR)/kernel/include \
+                              -include $(TEST_MOCK)/fork_user_map/fork_user_map_runtime.h \
+                              -I$(TEST_MOCK) -I$(TEST_INC) \
+                              -I$(TEST_MOCK)/fork_user_map
+
+$(TEST_BLD)/vma_fork_user_map_production.o: $(TESTS_DIR)/kernel/memory/vma.c \
+		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TEST_MOCK)/fork_user_map/fork_user_map_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FORK_USER_MAP_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/fork_user_map_stubs.o: $(TEST_MOCK)/fork_user_map/fork_user_map_stubs.c \
+		$(TEST_MOCK)/fork_user_map/fork_user_map_stubs.h \
+		$(TEST_MOCK)/fork_user_map/fork_user_map_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FORK_USER_MAP_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_fork_user_map.o: $(TEST_CASES)/test_fork_user_map.c \
+		$(TEST_MOCK)/fork_user_map/fork_user_map_stubs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FORK_USER_MAP_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_fork_user_map.elf: $(TEST_BLD)/test_fork_user_map.o \
+		$(TEST_BLD)/vma_fork_user_map_production.o \
+		$(TEST_BLD)/fork_user_map_stubs.o
+	$(HOST_CC) -o $@ $^
+
+# User-write COW privatization test (Task 7, user heap/ELF
+# isolation plan): compiles the REAL kernel/memory/uaccess.c +
+# vma.c against the uwrite_cow host harness and exercises
+# prepare_user_write_range(_locked) + copy_to_user_ft_res.
+UWRITE_COW_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
+                              -I$(TESTS_DIR)/kernel/include \
+                              -include $(TEST_MOCK)/uwrite_cow/uwrite_cow_runtime.h \
+                              -I$(TEST_MOCK) -I$(TEST_INC) \
+                              -I$(TEST_MOCK)/uwrite_cow
+
+$(TEST_BLD)/uaccess_uwrite_cow_production.o: $(TESTS_DIR)/kernel/memory/uaccess.c \
+		$(TESTS_DIR)/kernel/include/memory/uaccess.h \
+		$(TEST_MOCK)/uwrite_cow/uwrite_cow_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(UWRITE_COW_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/vma_uwrite_cow_production.o: $(TESTS_DIR)/kernel/memory/vma.c \
+		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TEST_MOCK)/uwrite_cow/uwrite_cow_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(UWRITE_COW_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/uwrite_cow_stubs.o: $(TEST_MOCK)/uwrite_cow/uwrite_cow_stubs.c \
+		$(TEST_MOCK)/uwrite_cow/uwrite_cow_stubs.h \
+		$(TEST_MOCK)/uwrite_cow/uwrite_cow_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(UWRITE_COW_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_user_write_cow.o: $(TEST_CASES)/test_user_write_cow.c \
+		$(TEST_MOCK)/uwrite_cow/uwrite_cow_stubs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(UWRITE_COW_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_user_write_cow.elf: $(TEST_BLD)/test_user_write_cow.o \
+		$(TEST_BLD)/uaccess_uwrite_cow_production.o \
+		$(TEST_BLD)/vma_uwrite_cow_production.o \
+		$(TEST_BLD)/uwrite_cow_stubs.o
 	$(HOST_CC) -o $@ $^
 
 # standalone test (no kernel/libc deps)

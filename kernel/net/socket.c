@@ -272,7 +272,7 @@ int64_t do_recvfrom(int fd, void *buf, uint64_t len, int flags,
         ssize_t rc = copy_to_user_ft(buf, data, copy);
         if (rc < 0) {
             netbuf_delete(nb);
-            return -EFAULT;
+            return rc;
         }
     }
 

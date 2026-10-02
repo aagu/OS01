@@ -66,6 +66,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <gfx.h>
@@ -103,28 +104,43 @@ struct fb_info {
 } while (0)
 
 /* ── View sizes ───────────────────────────────────────────────
- * QEMU stdvga reports a framebuffer large enough (often 1440x900)
- * that a TRUE full-screen view's 32 bpp pixel buffer (~5 MB)
- * blows past the per-process heap ceiling enforced by SYS_brk
- * (kernel/arch/x86_64/intr/trap.c: USER_CODE_ADDR + USER_PAGE_SIZE
- * - 0x1000 = 0x5FF000, so the heap tops out near 1.5 MB).  Spec §6
- * requires a "full-screen view"; the practical interpretation that
- * still exercises every contract is a view as large as the heap
- * comfortably allows.  256x256 = 256 KiB per view leaves ample
- * headroom for the small view, handle allocations, libc arenas,
- * etc. — and a 256-pixel line still supports all the
- * diagonal / sample / sentinel checks below.  Two view slots open
- * at the same time (full + small), well below the kernel's 16
- * slot limit.
+ * Task 8 of the user-heap/ELF-isolation plan: the "full-screen"
+ * view is now the actual framebuffer width and height (QEMU
+ * stdvga reports 1440×900 — 5,184,000 bytes at 32 bpp).  The
+ * per-process heap ceiling is 0x13ff000 (USER_CODE_ADDR +
+ * USER_PAGE_SIZE - 0x1000 = 0x5FF000 was the old ceiling before
+ * the 16 MiB user VA bump landed; the 16 MiB window now covers
+ * the full-screen pixels buffer plus 64 KiB of program headroom).
  *
- * NOTE: a future bump of the per-process heap ceiling to 16 MB+
- * would let us go back to true full-screen; the constant is the
- * single switch.
+ * The full-screen view therefore equals the kernel-reported fb
+ * dimensions (discovered at runtime from /dev/fb's info struct).
+ * The "small central view" stays small — its purpose is to prove
+ * that a small present does not stomp the surrounding sentinels,
+ * and a tiny rectangle achieves that regardless of the surrounding
+ * full-screen view's actual size.  Two view slots open at the
+ * same time (full + small), well below the kernel's 16-slot limit.
  */
-#define VIEW_W  256u
-#define VIEW_H  256u
 #define SMALL_W 32u
 #define SMALL_H 32u
+
+/* Spec §6 + the Task 8 brief: the QEMU stdvga fb is 1440×900
+ * RGB32 = 5,184,000 bytes.  This is the smallest acceptable
+ * "full-screen view" allocation for the integration assertion. */
+#define MIN_FB_W       1440u
+#define MIN_FB_H       900u
+#define MIN_FB_BYTES   5184000u   /* 1440 * 900 * 4 */
+
+/* Heap headroom contract (Task 8 brief): after the libgfx pixels
+ * buffer is allocated by gfx_open, the program must still have at
+ * least 64 KiB of free heap above the current break for its own
+ * subsequent allocations (e.g. libc printf buffers, scratch).
+ *
+ * The check is performed BEFORE gfx_open — the brief asserts that
+ * the *pre-allocation* headroom accommodates (framebuffer_bytes
+ * + 64 KiB).  That guarantees the calloc inside gfx_open won't
+ * collide with the 0x13ff000 heap limit. */
+#define HEAP_LIMIT     0x13ff000ul
+#define HEAP_HEADROOM  65536u
 
 /* ── Helpers ─────────────────────────────────────────────────── */
 
@@ -166,21 +182,37 @@ static uint32_t fb_read(uint32_t *fb, uint32_t stride,
 
 /* ── Test 1: full-screen view — left red, right green, white diagonal */
 
-static void test_fullscreen_view(uint32_t *fb, const struct fb_info *info)
+static void test_fullscreen_view(uint32_t *fb, const struct fb_info *info,
+                                 uint32_t fw, uint32_t fh)
 {
-    /* The "full-screen" view is VIEW_W x VIEW_H — sized to fit the
-     * user heap (see VIEW_W / VIEW_H above).  We open at (0, 0)
-     * so the view's top-left corner is the framebuffer's top-left
-     * corner; every pixel we write goes to a known offset in fb. */
-    gfx_handle_t *h = gfx_open(0, 0, VIEW_W, VIEW_H);
+    /* Task 8: the "full-screen" view is now the actual framebuffer
+     * width × height (QEMU stdvga → 1440×900 RGB32 = 5,184,000
+     * bytes).  We open at (0, 0) so the view's top-left corner is
+     * the framebuffer's top-left corner; every pixel we write
+     * goes to a known offset in fb. */
+    gfx_handle_t *h = gfx_open(0, 0, fw, fh);
     if (!h)
         FAIL("gfx_open(0,0,%u,%u) returned NULL (errno=%d)",
-             VIEW_W, VIEW_H, errno);
+             fw, fh, errno);
 
     gfx_info_t gi = gfx_get_info(h);
-    if (gi.width != VIEW_W || gi.height != VIEW_H)
+    if (gi.width != fw || gi.height != fh)
         FAIL("gfx_get_info returned w=%u h=%u (expected %u %u)",
-             gi.width, gi.height, VIEW_W, VIEW_H);
+             gi.width, gi.height, fw, fh);
+
+    /* Spec §6 (Task 8 brief): the QEMU 1440×900 RGB32 case
+     * allocates a libgfx pixels buffer of at least 5,184,000
+     * bytes.  Confirm the kernel-driven calloc inside gfx_open
+     * actually returned a buffer of that size — the integration
+     * gate for "ELF + heap isolation supports a full-screen
+     * framebuffer". */
+    uint64_t pixels_bytes = (uint64_t)gi.width *
+                            (uint64_t)gi.height * 4ull;
+    if (pixels_bytes < MIN_FB_BYTES)
+        FAIL("gfx pixels buffer too small: %u×%u = %llu bytes, "
+             "need >= %u bytes (1440×900×4)",
+             gi.width, gi.height,
+             (unsigned long long)pixels_bytes, MIN_FB_BYTES);
 
     /* Paint the full buffer black first (gfx_present must be
      * idempotent — the kernel copies every row regardless of the
@@ -222,7 +254,7 @@ static void test_fullscreen_view(uint32_t *fb, const struct fb_info *info)
                                 (uint32_t)(dmax / 2),
                                 (uint32_t)(dmax / 2));
     uint32_t right_pt = fb_read(fb, info->stride,
-                                VIEW_W - 10u, VIEW_H - 11u);
+                                fw - 10u, fh - 11u);
 
     /* Spec §6 + Review Focus #5: the assertion is "white diagonal
      * covers red+green", NOT "exactly half red / half green".
@@ -246,18 +278,20 @@ static void test_fullscreen_view(uint32_t *fb, const struct fb_info *info)
 /* ── Test 2: small central view — surrounding sentinels must not change */
 
 static void test_small_central_view(uint32_t *fb,
-                                    const struct fb_info *info)
+                                    const struct fb_info *info,
+                                    uint32_t fw, uint32_t fh)
 {
-    /* Reserve a small view in the middle of the VIEW_W x VIEW_H
-     * "full-screen" view we used above (NOT the actual fb
-     * dimensions — that would put the small view outside the
-     * drawn rectangle, which then reads pre-kernel pixels). */
+    /* Task 8: the surrounding "full" view is now the actual fb
+     * dimensions; the small view stays 32×32 in the centre.  The
+     * sentinel prefill happens in a separate handle so the
+     * small-view present cannot accidentally include the
+     * sentinels in its output. */
     uint32_t cw = SMALL_W, ch = SMALL_H;
-    if (cw + 4 > VIEW_W || ch + 4 > VIEW_H)
+    if (cw + 4 > fw || ch + 4 > fh)
         FAIL("view too small for small-view test (w=%u h=%u)",
-             VIEW_W, VIEW_H);
-    uint32_t ox = (VIEW_W - cw) / 2;
-    uint32_t oy = (VIEW_H - ch) / 2;
+             fw, fh);
+    uint32_t ox = (fw - cw) / 2;
+    uint32_t oy = (fh - ch) / 2;
 
     /* Open the small view FIRST so its present runs after we
      * paint the surrounding frame of sentinels in a SECOND,
@@ -270,7 +304,7 @@ static void test_small_central_view(uint32_t *fb,
              ox, oy, cw, ch, errno);
 
     /* Full-view handle for the surrounding sentinel band. */
-    gfx_handle_t *full = gfx_open(0, 0, VIEW_W, VIEW_H);
+    gfx_handle_t *full = gfx_open(0, 0, fw, fh);
     if (!full)
         FAIL("full gfx_open NULL errno=%d", errno);
 
@@ -280,7 +314,7 @@ static void test_small_central_view(uint32_t *fb,
      * blue.  When the small view presents, the kernel must not
      * touch the yellow pixels around its rectangle; the
      * sentinels prove the present is bounded. */
-    gfx_fill_rect(full, 0, 0, VIEW_W, VIEW_H, COLOR_YELLOW);
+    gfx_fill_rect(full, 0, 0, fw, fh, COLOR_YELLOW);
     /* Clear the small-view rectangle in the full buffer so a
      * sentinel-vs-blue confusion is impossible. */
     gfx_fill_rect(full, (int32_t)ox, (int32_t)oy, cw, ch, COLOR_BLACK);
@@ -331,7 +365,7 @@ static void test_small_central_view(uint32_t *fb,
 
 /* ── Test 3: negative cases ──────────────────────────────────── */
 
-static void test_negative_cases(void)
+static void test_negative_cases(uint32_t fw, uint32_t fh)
 {
     /* Out-of-bounds: x is past the framebuffer's right edge.
      * The kernel validates ``x <= fb_w && w <= fb_w-x``; pick x =
@@ -348,6 +382,55 @@ static void test_negative_cases(void)
     }
     if (errno != EINVAL)
         FAIL("gfx_open(x=UINT32_MAX-2,w=4) errno=%d, expected EINVAL", errno);
+
+    /* Out-of-bounds: y is past the framebuffer's bottom edge.
+     * Same overflow-form rejection as above but on the y axis. */
+    gfx_handle_t *bad_y = gfx_open(0u, 0xFFFFFFFEu, 4u, 4u);
+    if (bad_y) {
+        gfx_close(bad_y);
+        FAIL("gfx_open(y=UINT32_MAX-2,h=4) returned non-NULL — expected EINVAL");
+    }
+    if (errno != EINVAL)
+        FAIL("gfx_open(y=UINT32_MAX-2,h=4) errno=%d, expected EINVAL", errno);
+
+    /* Out-of-bounds: w past fb's right edge (using the actual fb
+     * width discovered at runtime, so this catches a regression
+     * where the kernel stops validating). */
+    if (fw < 4u)
+        FAIL("framebuffer too narrow for negative-case w overflow (fw=%u)", fw);
+    gfx_handle_t *bad_w = gfx_open(0u, 0u, fw + 4u, 4u);
+    if (bad_w) {
+        gfx_close(bad_w);
+        FAIL("gfx_open(w=fb_w+4) returned non-NULL — expected EINVAL");
+    }
+    if (errno != EINVAL)
+        FAIL("gfx_open(w=fb_w+4) errno=%d, expected EINVAL", errno);
+
+    /* Out-of-bounds: h past fb's bottom edge (using the actual fb
+     * height discovered at runtime, paired with the w case above). */
+    if (fh < 4u)
+        FAIL("framebuffer too short for negative-case h overflow (fh=%u)", fh);
+    gfx_handle_t *bad_h = gfx_open(0u, 0u, 4u, fh + 4u);
+    if (bad_h) {
+        gfx_close(bad_h);
+        FAIL("gfx_open(h=fb_h+4) returned non-NULL — expected EINVAL");
+    }
+    if (errno != EINVAL)
+        FAIL("gfx_open(h=fb_h+4) errno=%d, expected EINVAL", errno);
+
+    /* Out-of-bounds: x+w wraps past fb's right edge.  Picks
+     * x = fb_w - 1, w = 4 so fb_w - x = 1, then w (4) > 1.
+     * Catches a kernel that lets the wrap subtraction pass. */
+    if (fw >= 4u) {
+        gfx_handle_t *bad_wrap = gfx_open(fw - 1u, 0u, 4u, 4u);
+        if (bad_wrap) {
+            gfx_close(bad_wrap);
+            FAIL("gfx_open(x=fb_w-1,w=4) returned non-NULL — "
+                 "expected EINVAL (x+w overflows fb)");
+        }
+        if (errno != EINVAL)
+            FAIL("gfx_open(x=fb_w-1,w=4) errno=%d, expected EINVAL", errno);
+    }
 
     /* NULL-handle negative paths — library-side contract from spec
      * §5.  None of these issue an ioctl. */
@@ -383,6 +466,38 @@ int main(void)
     if (fb_fd < 0)
         FAIL("fb_open_and_map failed");
 
+    /* Task 8 (user-heap/ELF-isolation plan): the program must
+     * demonstrate the heap can hold a full-screen RGB32 pixels
+     * buffer (>= 5,184,000 bytes for QEMU 1440×900) plus 64 KiB
+     * of program headroom.  Query brk(0) BEFORE gfx_open — the
+     * brief explicitly requires this to assert the pre-allocation
+     * contract; the actual libgfx pixels buffer is allocated by
+     * gfx_open, and Test 1 then confirms its size is at least
+     * MIN_FB_BYTES (5,184,000). */
+    int64_t cur_brk = syscall(SYS_brk, 0, 0, 0);
+    if (cur_brk <= 0)
+        FAIL("brk(0) query failed (rc=%ld, errno=%d)",
+             (long)cur_brk, errno);
+    uint64_t fb_bytes = (uint64_t)info.width *
+                        (uint64_t)info.height * 4ull;
+    /* Guard: the framebuffer must be at least 1440×900 for the
+     * full-screen integration assertion.  A future fb-resolution
+     * regression must surface here, not as an opaque kernel-side
+     * failure mid-test. */
+    if (info.width < MIN_FB_W || info.height < MIN_FB_H)
+        FAIL("framebuffer too small for full-screen E2E "
+             "(w=%u h=%u, need >= %u×%u)",
+             info.width, info.height, MIN_FB_W, MIN_FB_H);
+    uint64_t headroom_need = fb_bytes + (uint64_t)HEAP_HEADROOM;
+    uint64_t cur_brk_u = (uint64_t)cur_brk;
+    if (cur_brk_u + headroom_need > HEAP_LIMIT)
+        FAIL("heap headroom insufficient: brk=0x%llx, need=0x%llx "
+             "(fb_bytes=0x%llx + headroom=0x%x), limit=0x%lx",
+             (unsigned long long)cur_brk_u,
+             (unsigned long long)headroom_need,
+             (unsigned long long)fb_bytes,
+             HEAP_HEADROOM, HEAP_LIMIT);
+
     /* Tell the kernel we're surrendering the framebuffer so gfx0
      * presents can land without racing terminal.c's writes.  This
      * is the same ioctl terminal.c uses on its way in (see
@@ -390,9 +505,11 @@ int main(void)
     (void)ioctl(fb_fd, FBIOSURRENDER, NULL);
 
     /* Tests in spec order.  Each prints its own FAIL reason. */
-    test_negative_cases();           /* no QEMU drawing needed   */
-    test_fullscreen_view(fb, &info); /* uses /dev/fb readback    */
-    test_small_central_view(fb, &info);
+    test_negative_cases(info.width, info.height); /* no QEMU drawing needed   */
+    test_fullscreen_view(fb, &info,
+                         info.width, info.height); /* uses /dev/fb readback    */
+    test_small_central_view(fb, &info,
+                            info.width, info.height);
 
     /* Cleanup. */
     close(fb_fd);

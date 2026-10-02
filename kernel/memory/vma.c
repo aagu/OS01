@@ -12,6 +12,15 @@
 #include <stdlib.h>                 // calloc (used by mm_alloc)
 #include <errno.h>
 
+// User-VA layout (must mirror kernel/arch/x86_64/intr/trap.c
+// USER_CODE_ADDR/USER_PAGE_SIZE and kernel/include/sched/task.h
+// USER_STACK_BASE).  HEAP_LIMIT keeps the heap one page below the
+// user stack area so mm_brk() cannot grow into the stack window.
+#define USER_CODE_ADDR  0x400000UL
+#define USER_PAGE_SIZE  0x1000000UL
+#define USER_STACK_BASE 0x1400000UL
+#define HEAP_LIMIT      (USER_CODE_ADDR + USER_PAGE_SIZE - 0x1000UL)
+
 // Find the VMA containing addr, or NULL
 vma_t *vma_find(mm_t *mm, uint64_t addr)
 {
@@ -129,6 +138,328 @@ mm_t *mm_alloc(void)
     return mm;
 }
 
+// mm_init_user_heap — install the unique heap VMA and set mm's break
+// fields.  Must be called after a successful elf_load() so the new
+// mm already has start_code/end_code set; elf_end is the high-water
+// mark of the loaded image (== end_code aligned by elf_layout).
+//
+// Contract (docs/.../2026-10-01-user-heap-elf-isolation-design.md §4):
+//   - mm->start_brk = mm->end_brk = ALIGN_UP(elf_end, 4096)
+//   - ONE heap VMA inserted at [start_brk, start_brk) — zero-length
+//   - vm_flags     = VM_READ | VM_WRITE | VM_ANON | VM_HEAP
+//   - vm_page_prot = PAGE_USER  | PAGE_WRITE | PAGE_VALID
+//   - vma_find() does NOT match this VMA (zero-length invariant)
+//
+// Failure handling: if the VMA allocation fails, mm is left
+// unchanged.  The caller (spawn_user_task / sys_exec) destroys the
+// unpublished mm via destroy_unpublished_user_mm — see
+// kernel/sched/task.c — which calls vma_free_all() then
+// vmm_free_user_map().  Nothing has been added to mm yet, so on the
+// failure path vma_free_all() walks an empty list and the user-page
+// tables are torn down as usual.
+int mm_init_user_heap(mm_t *mm, uint64_t elf_end)
+{
+    if (!mm) return -EINVAL;
+
+    uint64_t heap_base = (elf_end + (PAGE_4K_SIZE - 1)) & ~(PAGE_4K_SIZE - 1);
+
+    vma_t *hv = (vma_t *)kmalloc(sizeof(vma_t));
+    if (!hv) return -ENOMEM;
+
+    list_init(&hv->list);
+    hv->vm_start     = heap_base;
+    hv->vm_end       = heap_base;          /* zero-length on purpose */
+    hv->vm_flags     = VM_READ | VM_WRITE | VM_ANON | VM_HEAP;
+    hv->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
+    hv->vm_pgoff     = 0;
+    hv->vm_file      = NULL;
+
+    /* Commit the break fields only AFTER the VMA alloc succeeds —
+     * a -ENOMEM return leaves mm unchanged (start_brk/end_brk
+     * untouched, VMA list untouched). */
+    mm->start_brk = heap_base;
+    mm->end_brk   = heap_base;
+    vma_insert(mm, hv);
+    return 0;
+}
+
+// ── mm_user_range_protected — reserved-window predicate (Task 5) ──
+//
+// Returns true iff [start, end) intersects any of:
+//   [0x400000,        mm->start_brk)               ELF reserve envelope
+//   [mm->start_brk,   HEAP_LIMIT (0x13ff000))      heap reserve
+//   [HEAP_LIMIT,      USER_STACK_BASE)             guard page
+//   [USER_STACK_BASE, USER_STACK_BASE + 0x200000)  user stack
+//
+// See the full contract in kernel/include/memory/vma.h.  Summary:
+// takes no lock; the caller validates page alignment / overflow /
+// user bounds first; on true the caller must reject with -EINVAL
+// and perform NO mutation (no PTE change, no VMA split, no
+// do_munmap_locked, no device mmap callback).
+bool mm_user_range_protected(const mm_t *mm, uint64_t start, uint64_t end)
+{
+    if (!mm || mm->start_brk == 0)
+        return false;
+    if (end <= start)
+        return false;
+
+    const uint64_t stack_end = USER_STACK_BASE + 0x200000UL;
+
+    // ELF reserve envelope (image + inter-segment gaps).
+    if (start < mm->start_brk && USER_CODE_ADDR < end)
+        return true;
+    // Heap reserve — the whole brk window, committed or not.  The
+    // upper bound is HEAP_LIMIT, NOT end_brk (end_brk is Task 4's
+    // committed-boundary bookkeeping).
+    if (start < HEAP_LIMIT && mm->start_brk < end)
+        return true;
+    // Guard page between heap and stack.
+    if (start < USER_STACK_BASE && HEAP_LIMIT < end)
+        return true;
+    // User stack (2 MiB).
+    if (start < stack_end && USER_STACK_BASE < end)
+        return true;
+    return false;
+}
+
+// ── mm_set_brk — program-break owner (Task 4) ─────────────
+//
+// Sets the program break end_brk and the matching heap VMA endpoint.
+// All committed 4 KiB leaves are owned by this call: each new leaf
+// is staged (alloc_4k_page + memset 0 + vmm_map_4k_page) BEFORE the
+// break/VMA endpoint is published, so any OOM leaves old break, old
+// heap VMA end, and old PTEs intact.
+//
+// On shrink across a page boundary, the retained tail is
+// privatized if COW with refs > 1 (alloc new phys, copy, replace
+// PTE, drop cow_ref), then zeroed, then the released leaves are
+// unmapped through the COW-aware vmm_unmap_4k_page path.  SMP
+// TLBs are synchronized via tlb_shootdown().  On any failure
+// during grow, only this call's leaves (and any empty intermediate
+// tables) are rolled back; the old state is restored.
+//
+// Caller must NOT hold mm->lock; mm_set_brk takes it.
+int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
+{
+    if (!mm) return -EINVAL;
+
+    /* Query path: requested == 0.  Per the brief, return 0 with
+     * *result set to the current end_brk.  result may be NULL. */
+    if (requested == 0) {
+        if (result) *result = mm->end_brk;
+        return 0;
+    }
+
+    /* Bounds check — preserved error codes from the original
+     * SYS_brk: -EINVAL for below start_brk, -ENOMEM for above
+     * heap_limit. */
+    uint64_t start_brk = mm->start_brk;
+    uint64_t end_brk   = mm->end_brk;
+    if (start_brk == 0)               return -ENOMEM;
+    if (requested < start_brk)        return -EINVAL;
+    if (requested > HEAP_LIMIT)       return -ENOMEM;
+
+    /* Fast path: requested == current end_brk.  No change. */
+    if (requested == end_brk) {
+        if (result) *result = end_brk;
+        return 0;
+    }
+
+    spin_lock(&mm->lock);
+
+    /* Re-read the live fields under the lock (another CPU may
+     * have mutated them between the unlocked check and the lock).
+     * A concurrent mm_set_brk on the same mm would now serialize
+     * via the lock and produce the same outcome. */
+    start_brk = mm->start_brk;
+    end_brk   = mm->end_brk;
+
+    /* The heap VMA tracks [start_brk, ALIGN_UP(end_brk, 4096)) —
+     * locate it for the commit step.  There is exactly one
+     * VM_HEAP VMA, inserted by mm_init_user_heap; its length
+     * matches the page-aligned portion of end_brk. */
+    vma_t *heap_vma = NULL;
+    {
+        list_t *pos;
+        for (pos = mm->vma_list.next; pos != &mm->vma_list; pos = pos->next) {
+            vma_t *v = container_of(pos, vma_t, list);
+            if ((v->vm_flags & VM_HEAP) && v->vm_start == start_brk) {
+                heap_vma = v;
+                break;
+            }
+        }
+    }
+    if (!heap_vma) {
+        spin_unlock(&mm->lock);
+        return -ENOMEM;
+    }
+
+    /* Heap VMA's leaf-prot flags (user R/W present). */
+    uint64_t page_prot = heap_vma->vm_page_prot;
+    uint64_t *pgd      = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
+
+    int64_t rc = 0;
+
+    if (requested > end_brk) {
+        /* ── GROW ──────────────────────────────────────── */
+        /* Brief §5.2: stage and map new zeroed 4 KiB leaves
+         * across [ALIGN_UP(end_brk), ALIGN_UP(requested)); same-
+         * page grow needs no new leaf.  vmm_pt_walk with
+         * allocate=0 is used to skip pages that are already
+         * committed (no overwrite — would lose the phys). */
+        uint64_t aligned_old = (end_brk + (PAGE_4K_SIZE - 1)) & PAGE_4K_MASK;
+        uint64_t aligned_new = (requested + (PAGE_4K_SIZE - 1)) & PAGE_4K_MASK;
+        if (aligned_new > HEAP_LIMIT) aligned_new = HEAP_LIMIT;
+
+        if (aligned_new <= aligned_old) {
+            /* No new page needed (grow stays within the same
+             * page).  Commit the new end_brk only. */
+            mm->end_brk   = requested;
+            heap_vma->vm_end = requested;
+            if (result) *result = requested;
+            spin_unlock(&mm->lock);
+            return 0;
+        }
+
+        /* Stage and map each new 4 KiB leaf.  If any stage
+         * fails, roll back every leaf staged in THIS call. */
+        /* The staging table is heap-allocated (kmalloc), not a
+         * fixed stack array: a single brk() grow may span up to
+         * (HEAP_LIMIT - start_brk) / 4 KiB ≈ 4096 leaves, and a
+         * fixed cap here would wrongly fail legitimate grows with
+         * -ENOMEM (e.g. one large malloc).  Entries are recorded
+         * only after vmm_map_4k_page succeeds, so every recorded
+         * leaf is ours to roll back. */
+        uint64_t grow_pages = (aligned_new - aligned_old) / PAGE_4K_SIZE;
+        uint64_t *staged_va =
+            (uint64_t *)kmalloc(grow_pages * sizeof(uint64_t));
+        uint64_t *staged_phys =
+            (uint64_t *)kmalloc(grow_pages * sizeof(uint64_t));
+        int staged_count = 0;
+        if (!staged_va || !staged_phys) {
+            if (staged_phys) kfree(staged_phys);
+            if (staged_va) kfree(staged_va);
+            spin_unlock(&mm->lock);
+            return -ENOMEM;
+        }
+
+        for (uint64_t va = aligned_old; va < aligned_new; va += PAGE_4K_SIZE) {
+            /* Skip if a PTE is already committed (grow within an
+             * already-mapped region). */
+            uint64_t *existing = vmm_pt_walk(pgd, va, 0, 0);
+            if (existing && (*existing & PAGE_VALID)) {
+                /* This page is already committed from an earlier
+                 * grow; do not remap (would overwrite a valid
+                 * PTE and lose the previous phys). */
+                continue;
+            }
+            uint64_t phys = alloc_4k_page();
+            if (!phys) { rc = -ENOMEM; break; }
+            /* Zero the leaf (production alloc_4k_page from the
+             * subpage allocator returns zeroed pages; this memset
+             * is defensive for paths that swap in a non-subpage
+             * phys in tests). */
+            memset((void *)Phy_To_Virt(phys), 0, PAGE_4K_SIZE);
+            int map_rc = vmm_map_4k_page(pgd, phys, va, page_prot);
+            if (map_rc != 0) {
+                /* Map failed (intermediate-table OOM).  Free the
+                 * phys we just allocated and roll back everything
+                 * we staged so far. */
+                free_4k_page(phys);
+                rc = -ENOMEM;
+                break;
+            }
+            staged_va[staged_count]   = va;
+            staged_phys[staged_count] = phys;
+            staged_count++;
+        }
+
+        if (rc != 0) {
+            /* Roll back only THIS call's leaves.  vmm_unmap_4k_page
+             * frees the phys (it does not own the COW reference
+             * since we never set PAGE_COW here). */
+            for (int i = 0; i < staged_count; i++)
+                vmm_unmap_4k_page(pgd, staged_va[i]);
+            kfree(staged_va);
+            kfree(staged_phys);
+            /* *result unchanged on failure (caller's contract). */
+            spin_unlock(&mm->lock);
+            return rc;
+        }
+        kfree(staged_va);
+        kfree(staged_phys);
+
+        /* Commit the new break + heap VMA end. */
+        mm->end_brk       = requested;
+        heap_vma->vm_end  = requested;
+        /* Synchronize SMP TLBs (the brief requires this even
+         * though the user page table is per-process — future
+         * schedulers may run the same process on multiple CPUs). */
+        tlb_shootdown();
+        if (result) *result = requested;
+        spin_unlock(&mm->lock);
+        return 0;
+    }
+
+    /* ── SHRINK (requested < end_brk) ─────────────────────── */
+    /* The page containing `requested` is retained (we may zero
+     * its tail).  The pages strictly above its aligned-up
+     * address are released. */
+    uint64_t aligned_new = (requested + (PAGE_4K_SIZE - 1)) & PAGE_4K_MASK;
+    uint64_t aligned_old = (end_brk   + (PAGE_4K_SIZE - 1)) & PAGE_4K_MASK;
+
+    /* 1. Retained tail within [requested, aligned_new).  If
+     *    requested is page-aligned, there is no retained tail. */
+    if (requested < aligned_new) {
+        /* The page containing 'requested' is the aligned_new page
+         * (which lies at start_brk + k*PAGE_4K_SIZE for some k).
+         * We must (a) privatize if the page is COW with refs > 1,
+         * (b) zero the retained tail bytes. */
+        uint64_t tail_va = aligned_new - PAGE_4K_SIZE;
+        uint64_t *pte = vmm_pt_walk(pgd, tail_va, 0, 0);
+        if (pte && (*pte & PAGE_VALID)) {
+            uint64_t old_phys = *pte & PAGE_4K_MASK;
+            if (*pte & PAGE_COW) {
+                if (page_cow_refs(old_phys) > 1) {
+                    uint64_t new_phys = alloc_4k_page();
+                    if (!new_phys) {
+                        spin_unlock(&mm->lock);
+                        return -ENOMEM;
+                    }
+                    memcpy((void *)Phy_To_Virt(new_phys),
+                           (void *)Phy_To_Virt(old_phys),
+                           PAGE_4K_SIZE);
+                    *pte = new_phys | page_prot;
+                    (void)page_cow_put(old_phys);
+                    old_phys = new_phys;
+                } else {
+                    (void)page_cow_put(old_phys);
+                    *pte = old_phys | page_prot;
+                }
+            }
+            /* Zero the retained-tail range [requested - tail_va,
+             * PAGE_4K_SIZE).  The fresh phys is already zeroed
+             * (from alloc_4k_page); only the partial-tail bytes
+             * need explicit zeroing. */
+            size_t off = (size_t)(requested - tail_va);
+            memset((char *)Phy_To_Virt(old_phys) + off, 0,
+                   PAGE_4K_SIZE - off);
+        }
+    }
+
+    /* 2. Unmap released leaves [aligned_new, aligned_old). */
+    for (uint64_t va = aligned_new; va < aligned_old; va += PAGE_4K_SIZE)
+        vmm_unmap_4k_page(pgd, va);
+
+    /* 3. Commit the smaller break + heap VMA end. */
+    mm->end_brk       = requested;
+    heap_vma->vm_end  = requested;
+    tlb_shootdown();
+    if (result) *result = requested;
+    spin_unlock(&mm->lock);
+    return 0;
+}
+
 // ── Helper: convert prot/flags to vm_page_prot flags ──────────
 static int prot_to_page_flags(int prot, uint64_t *page_prot, uint64_t *vm_flags)
 {
@@ -183,6 +514,14 @@ static int64_t do_munmap_locked(uint64_t addr, uint64_t length)
         return -EINVAL;
 
     uint64_t end = addr + length;
+
+    // Task 5: reject any unmap that touches the reserved window
+    // (ELF envelope / heap reserve / guard / stack) BEFORE any PTE
+    // unmap or VMA split happens — a rejected request must leave
+    // every existing mapping untouched.
+    if (mm_user_range_protected(current->mm, addr, end))
+        return -EINVAL;
+
     uint64_t *user_pgd = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pgdir);
 
     list_t *pos = current->mm->vma_list.next;
@@ -284,6 +623,18 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
             return -ENOMEM;
     }
 
+    // ── 1b. Reserved-window check (Task 5) ──────────────
+    // A MAP_FIXED request that touches the ELF envelope, the heap
+    // reserve, the guard page or the user stack is rejected BEFORE
+    // any do_munmap_locked / VMA split / PTE change / device mmap
+    // callback, so a rejected request leaves every existing
+    // mapping byte-for-byte intact.  (Overflow and user bounds
+    // were validated above, per the predicate's contract.)
+    // The non-fixed path re-checks its computed candidate below.
+    if ((flags & MAP_FIXED) &&
+        mm_user_range_protected(current->mm, addr, end))
+        return -EINVAL;
+
     // ── 2. Address computation ──────────────────────────
     length = PAGE_4K_ALIGN(length);
     if (!length) return -EINVAL;
@@ -291,9 +642,15 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     uint64_t search = current->mm->mmap_base;
     vma_t *prev = NULL;
     list_t *pos = current->mm->vma_list.next;
-    addr = 0;
 
+    // NOTE (Task 5): `addr` must keep its parameter value on the
+    // MAP_FIXED path — the old unconditional `addr = 0;` here
+    // clobbered the fixed address, so MAP_FIXED silently mapped at
+    // 0 and ran do_munmap_locked over [0, length).  Zeroing now
+    // happens only on the auto-search path, where 0 means "no
+    // candidate found yet".
     if (!(flags & MAP_FIXED)) {
+        addr = 0;
         while (pos != &current->mm->vma_list) {
             vma_t *v = container_of(pos, vma_t, list);
             uint64_t gap_start = prev ? prev->vm_end : search;
@@ -307,6 +664,13 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
         }
         if (!addr) addr = prev ? prev->vm_end : search;
         if (addr < search) addr = search;
+
+        // Task 5: the auto-search must never return a candidate
+        // inside the reserved window.  mmap_base (0x40000000) is
+        // already far above it, so this is a defensive skip: jump
+        // the candidate past the ENTIRE window.
+        if (mm_user_range_protected(current->mm, addr, addr + length))
+            addr = USER_STACK_BASE + 0x200000UL;
     } else {
         spin_lock(&current->mm->lock);
         do_munmap_locked(addr, length);
@@ -349,6 +713,15 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
         if (_dev_mmap) {
             if (!(flags & MAP_SHARED))
                 { vfs_node_put(file_node); return -EINVAL; }
+
+            // Task 5: never hand a protected range to a device mmap
+            // handler — the handler fills PTEs eagerly, so the check
+            // MUST precede the callback (defence in depth on top of
+            // the §1b / post-search checks above).
+            if (mm_user_range_protected(current->mm, addr, addr + length)) {
+                vfs_node_put(file_node);
+                return -EINVAL;
+            }
 
             // Pre-allocate VMA for the device handler to fill PTEs
             vma_t *vma = (vma_t *)kmalloc(sizeof(vma_t));
@@ -407,6 +780,12 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
         return -EINVAL;
 
     uint64_t end = addr + length;
+
+    // Task 5: reject before any VMA flag / prot / PTE change —
+    // mprotect must never be able to strip protections from the
+    // ELF envelope, heap reserve, guard page or user stack.
+    if (mm_user_range_protected(current->mm, addr, end))
+        return -EINVAL;
 
     uint64_t new_page_prot, new_vm_flags;
     int rc = prot_to_page_flags((int)prot, &new_page_prot, &new_vm_flags);
@@ -497,60 +876,23 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
 // tear down or narrow a page mid-write (which would fault into the
 // do_page_fault hlt hang — there is no kernel-side demand paging).
 //
-// On success returns 0 with mm->lock HELD; on any failure returns -EFAULT
+// On success returns 0 with mm->lock HELD; failure returns -EFAULT/-ENOMEM
 // and the lock is NOT held.  current->mm == NULL (kthread reading
 // /dev/urandom) skips the check/lock entirely — its buffer is a trusted
 // kernel buffer.
 //
-// Permission check is delegated to arch_user_range_accessible (mmu.h) so
-// that upper-level PGD/PDP/PD entries are ANDed into the effective
-// permissions — a leaf PTE marked user+RW above a supervisor-only PGDE
-// is still inaccessible from ring-3.  COW (PAGE_COW, RW=0) is rejected
-// here, consistent with the design choice that the lock-and-write path
-// never allocates a private copy.
-static uint64_t *user_leaf_pte(uint64_t *pgd, uint64_t va)
-{
-    size_t l4 = (size_t)(va >> 39) & 0x1ff;
-    size_t l3 = (size_t)(va >> 30) & 0x1ff;
-    size_t l2 = (size_t)(va >> 21) & 0x1ff;
-    size_t l1 = (size_t)(va >> 12) & 0x1ff;
-
-    if (l4 >= 256) return NULL;                       // kernel half — out of scope
-
-    if (!(pgd[l4] & PAGE_VALID)) return NULL;
-    uint64_t *pud = (uint64_t *)Phy_To_Virt(pgd[l4] & PAGE_4K_MASK);
-
-    if (!(pud[l3] & PAGE_VALID)) return NULL;
-    if (pud[l3] & PAGE_HUGE) return NULL;   // 1GB huge page: unsupported here (same gap as vmm_pt_walk)
-    uint64_t *pmd = (uint64_t *)Phy_To_Virt(pud[l3] & PAGE_4K_MASK);
-
-    if (!(pmd[l2] & PAGE_VALID)) return NULL;
-
-    if (pmd[l2] & PAGE_HUGE)                            // 2MB huge page: PDE is the leaf
-        return &pmd[l2];
-
-    uint64_t *pte_table = (uint64_t *)Phy_To_Virt(pmd[l2] & PAGE_4K_MASK);
-    return &pte_table[l1];
-}
-
+// COW preparation happens while holding mm->lock; after a successful begin,
+// callers perform only nonblocking writes and then call user_write_range_end.
 int user_write_range_begin(uint64_t addr, size_t len)
 {
     if (current->mm == NULL)
         return 0;
 
-    // USER_MIN_ADDR rejects NULL and any address below 0x400000 — together
-    // with the existing >= addr_limit check this covers the whole low half.
-    if (addr < USER_MIN_ADDR ||
-        addr >= current->addr_limit ||
-        len > current->addr_limit - addr)
-        return -EFAULT;
-
     spin_lock(&current->mm->lock);
-
-    uint64_t *user_pgd = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pgdir);
-    if (!arch_user_range_accessible(user_pgd, addr, len, true)) {
+    int rc = prepare_user_write_range_locked(current->mm, addr, len);
+    if (rc != 0) {
         spin_unlock(&current->mm->lock);
-        return -EFAULT;
+        return rc;
     }
     return 0;   // lock held
 }

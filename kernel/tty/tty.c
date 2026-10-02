@@ -188,17 +188,10 @@ void tty_push_input(tty_t *tty, char c)
 //  tty_read — blocking read from raw ring buffer
 // ═══════════════════════════════════════════════════════
 //
-//  Blocking protocol (prevents lost wakeup):
-//    1. Drain ring buffer into kernel bounce (NO tail/canon advance)
-//    2. copy_to_user_ft bounce→user buf
-//    3. On _ft success: advance tail/canon (commit)
-//    4. On _ft fault: return -1 (data still in ring/canon for retry)
-//    5. If drain returned 0 bytes and we should block: schedule()
-//    6. On wake: dequeue self, loop back to Step 1
-//
-//  Task 8 (Cat C): "post-block drain via _ft".  The user pointer is
-//  only ever touched by copy_to_user_ft (released lock, no spinlock
-//  held, no resource requiring _ft_res cleanup).
+//  DevFS passes a trusted kernel buffer; fd_read performs the user copy
+//  and COW preparation after this callback returns. Stage ring/canon
+//  bytes under the lock, copy to that kernel buffer, then commit the drain.
+//  Empty reads block on the wait queue and retry after wakeup.
 
 int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
 {
@@ -208,9 +201,7 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
     for (;;) {
         // ── Phase 1: drain ring/canon → kernel bounce (no commit) ─
         // We stage the bytes under ring_lock but do NOT advance
-        // tail / canon yet — that happens after copy_to_user_ft
-        // succeeds.  This is the "peek" half of the tty equivalent
-        // of pipe_read_internal's 3-phase.
+        // tail / canon yet — that happens after the kernel-buffer copy.
         char kbuf[TTY_BUF_SIZE];
         int n = 0;
         bool canonical = (tty->term.c_lflag & ICANON) != 0;
@@ -257,13 +248,8 @@ int tty_read(tty_t *tty, char *buf, int size, bool nonblock)
         }
 
         if (n > 0) {
-            // ── Phase 2: _ft copy kbuf→user ────────────────────
-            ssize_t rc = copy_to_user_ft(buf, kbuf, (size_t)n);
-            if (rc < 0) {
-                // Fault: do NOT advance ring tail / canon state.
-                // Data stays in tty buffer for retry on next call.
-                return -1;
-            }
+            // Phase 2: copy into the DevFS caller's kernel buffer.
+            memcpy(buf, kbuf, (size_t)n);
             // ── Phase 3: commit (advance ring tail / canon) ─────
             uint64_t flags = spin_lock_irqsave(&tty->ring_lock);
             if (canonical) {
@@ -380,7 +366,7 @@ int tty_phys_ioctl(struct vfs_node *node, int cmd, void *arg)
                                       sizeof(struct termios), true))
             return -EFAULT;
         ssize_t r = copy_to_user_ft(arg, &tty->term, sizeof(struct termios));
-        if (r < 0) return -EFAULT;
+        if (r < 0) return r;
         return 0;
     }
     case TCSETS:
@@ -404,8 +390,10 @@ int tty_phys_ioctl(struct vfs_node *node, int cmd, void *arg)
                                       sizeof(struct winsize), true))
             return -EFAULT;
         struct winsize kws = { .ws_row = 25, .ws_col = 80 };
-        if (copy_to_user_ft(arg, &kws, sizeof(kws)) < 0)
-            return -EFAULT;
+        {
+            ssize_t user_copy_rc = copy_to_user_ft(arg, &kws, sizeof(kws));
+            if (user_copy_rc < 0) return user_copy_rc;
+        }
         return 0;
     case TIOCGPGRP: {
         tty_t *tty = get_dev_tty();
@@ -417,8 +405,10 @@ int tty_phys_ioctl(struct vfs_node *node, int cmd, void *arg)
         uint64_t f = spin_lock_irqsave(&tty->fg_pgrp_lock);
         pid_t kp = tty->fg_pgrp;
         spin_unlock_irqrestore(&tty->fg_pgrp_lock, f);
-        if (copy_to_user_ft(p, &kp, sizeof(kp)) < 0)
-            return -EFAULT;
+        {
+            ssize_t user_copy_rc = copy_to_user_ft(p, &kp, sizeof(kp));
+            if (user_copy_rc < 0) return user_copy_rc;
+        }
         return 0;
     }
     case TIOCSPGRP: {
@@ -458,8 +448,10 @@ int tty_phys_ioctl(struct vfs_node *node, int cmd, void *arg)
         if (!syscall_check_user_range((uint64_t)arg, sizeof(int), true))
             return -EFAULT;
         int avail = tty ? (tty->head - tty->tail + TTY_BUF_SIZE) % TTY_BUF_SIZE : 0;
-        if (copy_to_user_ft(arg, &avail, sizeof(avail)) < 0)
-            return -EFAULT;
+        {
+            ssize_t user_copy_rc = copy_to_user_ft(arg, &avail, sizeof(avail));
+            if (user_copy_rc < 0) return user_copy_rc;
+        }
         return 0;
     }
     default: return -ENOTTY;

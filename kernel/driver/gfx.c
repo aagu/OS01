@@ -344,8 +344,10 @@ static int gfx_ioctl_file(file_t *f, int cmd, void *arg)
         gfx_info_t kinfo;
         int grc = gfx_ioctl_get_info(f, &kinfo);
         if (grc < 0) return grc;
-        if (copy_to_user_ft(arg, &kinfo, sizeof(kinfo)) < 0)
-            return -EFAULT;
+        {
+            ssize_t user_copy_rc = copy_to_user_ft(arg, &kinfo, sizeof(kinfo));
+            if (user_copy_rc < 0) return user_copy_rc;
+        }
         return 0;
     }
     case GFX_PRESENT: {

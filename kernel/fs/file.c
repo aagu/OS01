@@ -616,7 +616,7 @@ int64_t pipe_read_internal(pipe_t *p, void *buf, uint64_t size)
     if (rc < 0) {
         // Fault cb already set *released=1 AND called pipe_read_release
         // (idempotent: cleared read_busy if set).  Do NOT release again.
-        result = -EFAULT;
+        result = rc;
         goto out_release;
     }
 
@@ -716,7 +716,7 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
                 // committed bytes, return the short count; else -EFAULT.
                 if (committed == 0) {
                     kfree(kbuf);
-                    return -EFAULT;
+                    return rc;
                 }
                 break;
             }
@@ -765,7 +765,7 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
                 // rx_off only on _ft success.
                 ssize_t rc = copy_to_user_ft(
                     buf, (uint8_t *)data + s->rx_off, copy);
-                if (rc < 0) return -EFAULT;
+                if (rc < 0) return rc;
                 s->rx_off += (int)copy;
                 if (s->rx_off >= data_len) {
                     s->rx_off = 0;
@@ -792,7 +792,7 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
                     // here without state inflation).  POSIX recv on
                     // bad user ptr is a documented loss.
                     netbuf_delete(nb);
-                    return -EFAULT;
+                    return rc;
                 }
             }
             if (copy < data_len) {
@@ -993,7 +993,7 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
             if (rc < 0) {
                 if (committed == 0) {
                     kfree(kbuf);
-                    return -EFAULT;
+                    return rc;
                 }
                 break;          // short count
             }
@@ -1098,8 +1098,10 @@ int64_t fd_ioctl(file_t *f, int cmd, void *arg)
             if (!syscall_check_user_range((uint64_t)arg,
                                           sizeof(struct termios), true))
                 return -EFAULT;
-            if (copy_to_user_ft(arg, &pty->term, sizeof(struct termios)) < 0)
-                return -EFAULT;
+            {
+                ssize_t user_copy_rc = copy_to_user_ft(arg, &pty->term, sizeof(struct termios));
+                if (user_copy_rc < 0) return user_copy_rc;
+            }
             return 0;
         }
         return -ENOTTY;
@@ -1158,10 +1160,13 @@ int64_t do_pipe(int *user_fds)
     // triggers file_free → kfree(pipe->buf) → kfree(pipe).  After
     // rollback, the pipe is gone and both fds are gone — clean.
     int fds[2] = { rfd, wfd };
-    if (copy_to_user_ft(user_fds, fds, sizeof(fds)) < 0) {
-        fd_close(current->files, rfd);
-        fd_close(current->files, wfd);
-        return -EFAULT;
+    {
+        ssize_t user_copy_rc = copy_to_user_ft(user_fds, fds, sizeof(fds));
+        if (user_copy_rc < 0) {
+            fd_close(current->files, rfd);
+            fd_close(current->files, wfd);
+            return user_copy_rc;
+        }
     }
 
     debug_fs("pipe: pid=%d fds=[%d,%d]\n",

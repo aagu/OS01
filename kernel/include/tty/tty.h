@@ -68,6 +68,7 @@ void tty_push_input(tty_t *tty, char c);
 
 // Read up to `size` bytes from the TTY.  Blocks until data is available.
 // Returns number of bytes copied, or -EINTR if interrupted by a signal.
+// buf is a trusted kernel buffer; fd_read owns copying to user memory.
 int tty_read(tty_t *tty, char *buf, int size, bool nonblock);
 
 // Write `size` bytes to the TTY output.  Goes to both

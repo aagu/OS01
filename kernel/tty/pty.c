@@ -87,8 +87,10 @@ int pty_slave_ioctl(pty_t *pty, int cmd, void *arg)
         if (!syscall_check_user_range((uint64_t)arg,
                                       sizeof(struct termios), true))
             return -EFAULT;
-        if (copy_to_user_ft(arg, &pty->term, sizeof(struct termios)) < 0)
-            return -EFAULT;
+        {
+            ssize_t user_copy_rc = copy_to_user_ft(arg, &pty->term, sizeof(struct termios));
+            if (user_copy_rc < 0) return user_copy_rc;
+        }
         return 0;
     }
     case TCSETS:
@@ -111,8 +113,10 @@ int pty_slave_ioctl(pty_t *pty, int cmd, void *arg)
         struct winsize kws = {0};
         kws.ws_row = pty->ws_row;
         kws.ws_col = pty->ws_col;
-        if (copy_to_user_ft(arg, &kws, sizeof(kws)) < 0)
-            return -EFAULT;
+        {
+            ssize_t user_copy_rc = copy_to_user_ft(arg, &kws, sizeof(kws));
+            if (user_copy_rc < 0) return user_copy_rc;
+        }
         return 0;
     }
     case TIOCSWINSZ: {
@@ -132,8 +136,10 @@ int pty_slave_ioctl(pty_t *pty, int cmd, void *arg)
         if (!syscall_check_user_range((uint64_t)arg, sizeof(pid_t), true))
             return -EFAULT;
         pid_t kp = pty->pgrp;
-        if (copy_to_user_ft(arg, &kp, sizeof(kp)) < 0)
-            return -EFAULT;
+        {
+            ssize_t user_copy_rc = copy_to_user_ft(arg, &kp, sizeof(kp));
+            if (user_copy_rc < 0) return user_copy_rc;
+        }
         return 0;
     }
     case TIOCSPGRP: {
@@ -158,8 +164,10 @@ int pty_slave_ioctl(pty_t *pty, int cmd, void *arg)
         uint64_t fl = spin_lock_irqsave(&pty->master_to_slave->lock);
         int avail = (pty->master_to_slave->head - pty->master_to_slave->tail + PIPE_SIZE) % PIPE_SIZE;
         spin_unlock_irqrestore(&pty->master_to_slave->lock, fl);
-        if (copy_to_user_ft(arg, &avail, sizeof(avail)) < 0)
-            return -EFAULT;
+        {
+            ssize_t user_copy_rc = copy_to_user_ft(arg, &avail, sizeof(avail));
+            if (user_copy_rc < 0) return user_copy_rc;
+        }
         return 0;
     }
     default:

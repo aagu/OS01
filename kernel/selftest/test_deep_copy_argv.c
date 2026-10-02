@@ -67,9 +67,23 @@
 // Static in trap.c; exposed via OS01_SELFTEST for this test only.
 int64_t deep_copy_argv(const char *const *user_arr, char ***out_arr);
 
-// Free a deep_copy_argv result (kernel-side array+strings).
-// Mirrors trap.c::free_deep_argv — duplicated here so the test doesn't
-// depend on its static linkage.
+// Bind the live test page tables to a temporary mm so user-copy validation
+// exercises the same address-space contract as a real syscall.
+static ssize_t dca_probe(void *dst, const void *src, size_t n,
+                      void (*on_fault)(void *), void *arg)
+{
+    mm_t probe = {0};
+    probe.pgdir = arch_get_page_table();
+    list_init(&probe.vma_list);
+    spin_init(&probe.lock);
+    mm_t *saved = current->mm;
+    current->mm = &probe;
+    ssize_t rc = copy_to_user_ft_res(dst, src, n, on_fault, arg);
+    current->mm = saved;
+    return rc;
+}
+
+// Free a kernel-side deep_copy_argv result.
 static void dca_free(char **kargv)
 {
     if (!kargv) return;
@@ -123,6 +137,7 @@ static uint64_t *dca_ensure_pt(uint64_t *pgd, uint64_t va, struct dca_map_ctx *c
         ctx->new_l3_page = pg;
         ctx->created_l3 = 1;
     }
+    pgd[l4] |= PAGE_USER | PAGE_WRITE;
     uint64_t *pud = (uint64_t *)Phy_To_Virt(pgd[l4] & PAGE_4K_MASK);
 
     ctx->saved_l3 = pud[l3];
@@ -134,6 +149,7 @@ static uint64_t *dca_ensure_pt(uint64_t *pgd, uint64_t va, struct dca_map_ctx *c
         ctx->new_l2_page = pg;
         ctx->created_l2 = 1;
     }
+    pud[l3] |= PAGE_USER | PAGE_WRITE;
     uint64_t *pmd = (uint64_t *)Phy_To_Virt(pud[l3] & PAGE_4K_MASK);
 
     uint64_t l2val = pmd[l2];
@@ -163,6 +179,7 @@ static uint64_t *dca_ensure_pt(uint64_t *pgd, uint64_t va, struct dca_map_ctx *c
         ctx->new_pte_page = pg;
         ctx->created_pte = 1;
     }
+    pmd[l2] |= PAGE_USER | PAGE_WRITE;
     uint64_t *pte = (uint64_t *)Phy_To_Virt(pmd[l2] & PAGE_4K_MASK);
 
     ctx->leaf_slot = &pte[l1];
@@ -174,44 +191,25 @@ static uint64_t *dca_ensure_pt(uint64_t *pgd, uint64_t va, struct dca_map_ctx *c
 // original value).  Order: deepest first, then walk up.
 static void dca_restore_pt(struct dca_map_ctx *ctx)
 {
-    if (!ctx || ctx->va == 0) return;
-    uint64_t l4 = (ctx->va >> 39) & 0x1FF;
-    uint64_t l3 = (ctx->va >> 30) & 0x1FF;
-    uint64_t l2 = (ctx->va >> 21) & 0x1FF;
+    if (!ctx || !ctx->va) return;
+    uint64_t l4 = (ctx->va >> 39) & 0x1ff;
+    uint64_t l3 = (ctx->va >> 30) & 0x1ff;
+    uint64_t l2 = (ctx->va >> 21) & 0x1ff;
     uint64_t *pgd = (uint64_t *)Phy_To_Virt((uint64_t)arch_get_page_table());
-
-    if (ctx->split_2m) {
-        // Restore the original 2MB PDE
+    if (pgd[l4] & PAGE_VALID) {
         uint64_t *pud = (uint64_t *)Phy_To_Virt(pgd[l4] & PAGE_4K_MASK);
-        uint64_t *pmd = (uint64_t *)Phy_To_Virt(pud[l3] & PAGE_4K_MASK);
-        pmd[l2] = ctx->saved_pmd;
-        if (ctx->new_pte_page) free_pages(ctx->new_pte_page, 1);
-        ctx->new_pte_page = (struct Page *)0;
-        ctx->split_2m = 0;
-    } else if (ctx->created_pte) {
-        // We created a fresh pte with nothing in it.  Free it.
-        uint64_t *pud = (uint64_t *)Phy_To_Virt(pgd[l4] & PAGE_4K_MASK);
-        uint64_t *pmd = (uint64_t *)Phy_To_Virt(pud[l3] & PAGE_4K_MASK);
-        pmd[l2] = 0;  // unmap before freeing the page
-        if (ctx->new_pte_page) free_pages(ctx->new_pte_page, 1);
-        ctx->new_pte_page = (struct Page *)0;
-        ctx->created_pte = 0;
-    }
-
-    if (ctx->created_l2) {
-        uint64_t *pud = (uint64_t *)Phy_To_Virt(pgd[l4] & PAGE_4K_MASK);
+        if (pud[l3] & PAGE_VALID) {
+            uint64_t *pmd = (uint64_t *)Phy_To_Virt(pud[l3] & PAGE_4K_MASK);
+            pmd[l2] = ctx->saved_l2;
+        }
         pud[l3] = ctx->saved_l3;
-        if (ctx->new_l2_page) free_pages(ctx->new_l2_page, 1);
-        ctx->new_l2_page = (struct Page *)0;
-        ctx->created_l2 = 0;
     }
-
-    if (ctx->created_l3) {
-        pgd[l4] = ctx->saved_l4;
-        if (ctx->new_l3_page) free_pages(ctx->new_l3_page, 1);
-        ctx->new_l3_page = (struct Page *)0;
-        ctx->created_l3 = 0;
-    }
+    pgd[l4] = ctx->saved_l4;
+    arch_flush_tlb_all();
+    if (ctx->new_pte_page) free_pages(ctx->new_pte_page, 1);
+    if (ctx->new_l2_page) free_pages(ctx->new_l2_page, 1);
+    if (ctx->new_l3_page) free_pages(ctx->new_l3_page, 1);
+    memset(ctx, 0, sizeof(*ctx));
 }
 
 // ── The test ───────────────────────────────────────────────
@@ -246,7 +244,7 @@ int deep_copy_argv_selftest_empty(void)
     uint64_t saved_limit = current->addr_limit;
     current->addr_limit = 0x00007FFFFFFFFFFFULL;
     uint64_t empty_arr[1] = { 0 };   // {NULL}
-    ssize_t wrc = copy_to_user_ft((void *)0x600000, empty_arr, sizeof(empty_arr));
+    ssize_t wrc = dca_probe((void *)0x600000, empty_arr, sizeof(empty_arr), NULL, NULL);
     current->addr_limit = saved_limit;
     if (wrc != (ssize_t)sizeof(empty_arr)) {
         *slot = saved_leaf;
@@ -388,7 +386,7 @@ int deep_copy_argv_selftest_overcap(void)
     // stays small (1040+130 bytes would push the stack-protector
     // canary far from RSP and expose it to setjmp/longjmp interactions
     // during the deep_copy_argv call).
-    char *fill = (char *)kmalloc(130);
+    char *fill = (char *)kmalloc(258);
     uint64_t *ptrs = (uint64_t *)kmalloc(130 * 8);
     if (!fill || !ptrs) {
         if (fill) kfree(fill);
@@ -402,26 +400,26 @@ int deep_copy_argv_selftest_overcap(void)
         fill[i * 2] = 'a';
         fill[i * 2 + 1] = '\0';
     }
-    ssize_t swrc = copy_to_user_ft((void *)DCA_STR, fill, 130);
-    if (swrc != 130) {
+    ssize_t swrc = dca_probe((void *)DCA_STR, fill, 258, NULL, NULL);
+    if (swrc != 258) {
         current->addr_limit = saved_limit;
         kfree(fill); kfree(ptrs);
         *slot = saved_leaf; arch_flush_tlb_page(DCA_VA);
         dca_restore_pt(&cta); free_pages(pg, 1);
-        SELFTEST_FAIL_AT("copy_to_user_ft(strings) rc=%ld", (long)swrc);
+        SELFTEST_FAIL_AT("dca_probe(strings, NULL, NULL) rc=%ld", (long)swrc);
     }
 
     // argv at 0x1000000: 129 pointers (each to its own 'a\0' string at
     // 0x1000800+i) + NULL terminator at slot 129.
-    for (int i = 0; i < 129; i++) ptrs[i] = DCA_STR + (uint64_t)i;
+    for (int i = 0; i < 129; i++) ptrs[i] = DCA_STR + (uint64_t)i * 2;
     ptrs[129] = 0;
-    ssize_t pwrc = copy_to_user_ft((void *)DCA_VA, ptrs, 130 * 8);
+    ssize_t pwrc = dca_probe((void *)DCA_VA, ptrs, 130 * 8, NULL, NULL);
     if (pwrc != 130 * 8) {
         current->addr_limit = saved_limit;
         kfree(fill); kfree(ptrs);
         *slot = saved_leaf; arch_flush_tlb_page(DCA_VA);
         dca_restore_pt(&cta); free_pages(pg, 1);
-        SELFTEST_FAIL_AT("copy_to_user_ft(argv) rc=%ld (expected %d)",
+        SELFTEST_FAIL_AT("dca_probe(argv, NULL, NULL) rc=%ld (expected %d)",
                          (long)pwrc, 130 * 8);
     }
 

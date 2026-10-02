@@ -1050,7 +1050,7 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
 
             debug_task("waitpid: pid=%d reaped child %d (exit=%d)\n",
                           (int)current->pid, (int)child_pid, (int)exit_code);
-            return (status_rc < 0) ? -EFAULT : child_pid;
+            return (status_rc < 0) ? status_rc : child_pid;
         }
 
         // No reapable child — check existence for -ECHILD / WNOHANG.
@@ -1340,9 +1340,66 @@ static int setup_user_stack(uint8_t *kstack, char *const argv[], char *const env
     return 0;
 }
 
+// ── destroy_unpublished_user_mm ─────────────────────────────
+// Releases every resource owned by an UNPUBLISHED mm (a freshly
+// allocated mm that has not been attached to a running task).
+// Used by spawn_user_task / sys_exec on the staged-failure path:
+// at the failure point the new mm is private to this CPU and no
+// other CPU can have a pointer to it, so vma_free_all + free the
+// user page tables is sufficient.
+//
+// Order matters: vma_free_all walks the VMA list and unmaps the
+// 4 KiB pages tracked by each VMA.  The user stack page was
+// mapped via vmm_map_page (PMD entry, separate 2 MiB page) and
+// is NOT covered by any VMA — but vmm_free_user_map walks the
+// entire user page table and releases every leaf it finds,
+// including the stack page.  So we deliberately do NOT call
+// free_pages(stack_page) separately: vmm_free_user_map owns that
+// path.  Calling it twice would double-free the struct Page and
+// trip the PMM bitmap integrity check.
+//
+// The caller owns the heap VMA, the stack page, and the mm itself;
+// destroy_unpublished_user_mm handles VMAs + page tables.  Caller
+// is responsible for kfree(mm) afterward.
+//
+// Does NOT take task_list_lock / rq_lock / mm->lock — caller is
+// the sole owner of the mm and the resources.
+static void destroy_unpublished_user_mm(mm_t *mm)
+{
+    if (!mm) return;
+    vma_free_all(mm);
+    if (mm->pgdir) {
+        uint64_t *user_pgd = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
+        vmm_free_user_map(user_pgd);
+    }
+}
+
 // ── spawn_user_task(path) ──────────────────────────────────
 // Loads an ELF from the filesystem, creates a new user task,
 // and adds it to the scheduler. Returns the new task's PID or -1 on error.
+//
+// Task 3 lifecycle (docs/.../2026-10-01-user-heap-elf-isolation-
+// design.md §5.1): every fallible preparation runs PRIVATELY before
+// the new task becomes visible.  The single publication point —
+// task_list insert + enqueue + IPI — happens AFTER setup_user_stack
+// succeeds, so a partial task never enters the scheduler /
+// waitpid-watched task list.  Each staged failure runs
+// destroy_unpublished_user_mm + the appropriate release-one-of-each
+// cleanup, matching the existing setup_user_stack_check_capacity +
+// fpu + files + thread + task-stack cleanup pattern.
+//
+// Cleanup ownership (each release is a SINGLE owner):
+//   - files:        tsk->files owns one ref; release via files_unpin
+//                   (must NOT be called under task_list_lock / rq_lock —
+//                   see kernel/include/fs/file.h:140-142)
+//   - fpu_save:     tsk->fpu_save owns one malloc; release via kfree
+//   - stack_page:   mapped via vmm_map_page (PMD); released by
+//                   vmm_free_user_map walking the user page table.
+//                   destroy_unpublished_user_mm owns this path — do
+//                   NOT also free_pages(stack_page).
+//   - mm:           caller (this function) kfree's the struct mm
+//   - thread:       kfree(thd)
+//   - task stack:   kfree(raw_alloc)
 int64_t spawn_user_task(const char *path, const char *const *argv)
 {
     int s_argc = 0, s_envc = 0;
@@ -1410,16 +1467,10 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
 
     list_init(&tsk->wait_list);
     list_init(&tsk->io_wait_node);
+    list_init(&tsk->list);
     tsk->exit_code = 0;
     if (current->files)
         tsk->files = files_dup(current->files);
-
-    list_init(&tsk->list);
-    {
-        uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
-        list_add_to_before(&init_task_union.task.list, &tsk->list);
-        spin_unlock_irqrestore(&task_list_lock, tl_flags);
-    }
     tsk->thread = thd;
 
     // FPU save area — user tasks may use float/SSE
@@ -1428,7 +1479,11 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     // 4. Create per-process page table
     uint64_t *user_pgd = (uint64_t *)vmm_alloc_map();  // 4KB zeroed PGD
     if (!user_pgd) {
-        kfree(raw_alloc); kfree(thd); kfree(mm);
+        if (tsk->files) { files_unpin(tsk->files); tsk->files = NULL; }
+        if (tsk->fpu_save) kfree(tsk->fpu_save);
+        kfree(raw_alloc);
+        kfree(thd);
+        kfree(mm);
         vfs_node_put(node);
         return -1;
     }
@@ -1443,7 +1498,9 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     uint64_t entry_point;
     if (elf_load(node, mm, &entry_point) != 0) {
         debug_task("spawn: ELF load failed for '%s'\n", path);
-        vmm_free_user_map(user_pgd);
+        if (tsk->files) { files_unpin(tsk->files); tsk->files = NULL; }
+        if (tsk->fpu_save) kfree(tsk->fpu_save);
+        destroy_unpublished_user_mm(mm);
         kfree(mm);
         kfree(thd);
         kfree(raw_alloc);
@@ -1452,35 +1509,31 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     }
     vfs_node_put(node);
 
-    // Set heap just after the loaded ELF segments
-    mm->start_brk = PAGE_4K_ALIGN(mm->end_code);
-    mm->end_brk   = mm->start_brk;
-
-    // Insert a heap VMA covering [start_brk, USER_CODE_ADDR + USER_PAGE_SIZE).
-    // The demand-paging fault handler (do_page_fault) requires a vma_t to
-    // resolve a page fault inside this range; without it, brk-extended
-    // heap accesses fault-and-die.  The cap matches the brk syscall's
-    // own check at USER_CODE_ADDR + USER_PAGE_SIZE - 0x1000 (a 4 KiB
-    // safety margin past the top of the user VA region).
-    {
-        vma_t *hv = (vma_t *)kmalloc(sizeof(vma_t));
-        if (hv) {
-            list_init(&hv->list);
-            hv->vm_start     = mm->start_brk;
-            hv->vm_end       = USER_CODE_ADDR + USER_PAGE_SIZE;
-            hv->vm_flags     = VM_READ | VM_WRITE | VM_ANON;
-            hv->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
-            hv->vm_pgoff     = 0;
-            hv->vm_file      = NULL;
-            vma_insert(mm, hv);
-        }
+    // Set up heap.  mm_init_user_heap installs the unique zero-length
+    // VM_HEAP VMA and sets start_brk = end_brk = ALIGN_UP(end_code,
+    // 4096).  A -ENOMEM return means the VMA allocation failed; mm is
+    // unchanged in that case, so destroy_unpublished_user_mm walks an
+    // empty VMA list and frees the ELF pages via vmm_free_user_map.
+    if (mm_init_user_heap(mm, mm->end_code) != 0) {
+        debug_task("spawn: heap VMA alloc failed for '%s'\n", path);
+        if (tsk->files) { files_unpin(tsk->files); tsk->files = NULL; }
+        if (tsk->fpu_save) kfree(tsk->fpu_save);
+        destroy_unpublished_user_mm(mm);
+        kfree(mm);
+        kfree(thd);
+        kfree(raw_alloc);
+        return -1;
     }
 
     // 6. Map the user stack page (separate 2MB page at 0x600000)
     struct Page *stack_page = alloc_pages(ZONE_NORMAL, 1, 0);
     if (!stack_page) {
-        vmm_free_user_map(user_pgd);
-        kfree(mm); kfree(thd); kfree(raw_alloc);
+        if (tsk->files) { files_unpin(tsk->files); tsk->files = NULL; }
+        if (tsk->fpu_save) kfree(tsk->fpu_save);
+        destroy_unpublished_user_mm(mm);
+        kfree(mm);
+        kfree(thd);
+        kfree(raw_alloc);
         return -1;
     }
     vmm_map_page(user_pgd, stack_page->phy_address,
@@ -1494,21 +1547,16 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     if (setup_user_stack(kstack, (char *const *)argv, NULL, s_argc, s_envc,
                          &user_arg_ptr, &user_env_ptr, &user_rsp) != 0) {
         /* AT_RANDOM STRONG-only 失败 — 清理已分配资源后返回 -EAGAIN。
-         * 顺序与现有 elf_load 失败路径（kernel/sched/task.c:1316-1322）一致，
-         * **外加** task_list_lock 释放后再调 files_unpin（`kernel/include/fs/file.h:140-142`
-         * 明确：files_unpin/files_put_file 不得在 task_list_lock / fs->lock / rq lock 持锁下调用，
-         * 其 drop-to-zero 路径可能同步 files_free/file_free）。 */
-        uint64_t tl_flags2 = spin_lock_irqsave(&task_list_lock);
-        list_del(&tsk->list);
-        spin_unlock_irqrestore(&task_list_lock, tl_flags2);
-        /* 现在 task_list_lock 已释放，可安全调 files_unpin。 */
-        if (tsk->files) {
-            files_unpin(tsk->files);
-            tsk->files = NULL;
-        }
+         * 顺序与现有 elf_load 失败路径一致，**外加** task_list_lock
+         * 已不再持锁（我们采用 staged 生命周期，task_list_insert
+         * 推迟到这里之后），所以 files_unpin/files_put_file 直接
+         * 调用即可——见 `kernel/include/fs/file.h:140-142`。 */
+        if (tsk->files) { files_unpin(tsk->files); tsk->files = NULL; }
         if (tsk->fpu_save) kfree(tsk->fpu_save);
-        free_pages(stack_page, 1);
-        vmm_free_user_map(user_pgd);
+        /* destroy_unpublished_user_mm frees the stack page via
+         * vmm_free_user_map — do NOT call free_pages(stack_page)
+         * separately (single-owner release). */
+        destroy_unpublished_user_mm(mm);
         kfree(mm);
         kfree(thd);
         kfree(raw_alloc);
@@ -1536,7 +1584,17 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     thd->gs   = KERNEL_DS;
     thd->rip  = (uint64_t)ret_from_intr;   // first entry via RESTORE_ALL → iretq
 
+    // ── PUBLISH (single release point, spec §5.1) ────────────
+    // Every fallible preparation has succeeded; only now do we
+    // make tsk visible to other CPUs.  Once listed, the task is
+    // discoverable by schedule() / waitpid() / signal_pgrp() and
+    // cannot be unpublished — only do_exit / reap can retire it.
     tsk->state = TASK_RUNNING;
+    {
+        uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
+        list_add_to_before(&init_task_union.task.list, &tsk->list);
+        spin_unlock_irqrestore(&task_list_lock, tl_flags);
+    }
     {
         uint64_t flags = spin_lock_irqsave(&percpu_data[tsk->cpu].rq_lock);
         enqueue_task(tsk, &percpu_data[tsk->cpu]);
@@ -1569,6 +1627,13 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
 // + setup_user_stack_check_capacity() with -E2BIG. The child's _start
 // reads argc from (rsp) and argv from 8(rsp) — that contract lives in
 // user/crt0.S.
+//
+// Task 3 lifecycle (spec §5.1): keep the old image live until the
+// new image is fully prepared.  Every fallible step runs against
+// new_mm only; if any step fails, we destroy_unpublished_user_mm
+// and return — the old mm + CR3 stay active.  Only when setup_user_stack
+// succeeds do we commit: switch mm + CR3 in a single IRQ-disabled
+// window, then clean up the old image.
 int64_t sys_exec(const char *path, pt_regs_t *regs,
                  const char *const *argv, const char *const *envp)
 {
@@ -1614,7 +1679,7 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     // 4. Create new mm_struct
     mm_t *new_mm = mm_alloc();
     if (!new_mm) {
-        kfree(new_pgd);
+        vmm_free_user_map(new_pgd);
         vfs_node_put(node);
         return -ENOMEM;
     }
@@ -1622,37 +1687,29 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     // 5. Load ELF segments into the new address space
     uint64_t entry_point;
     if (elf_load(node, new_mm, &entry_point) != 0) {
-        vmm_free_user_map(new_pgd);
+        destroy_unpublished_user_mm(new_mm);
         kfree(new_mm);
         vfs_node_put(node);
         return -ENOEXEC;
     }
     vfs_node_put(node);
 
-    // Set heap just after the loaded ELF segments
-    new_mm->start_brk = PAGE_4K_ALIGN(new_mm->end_code);
-    new_mm->end_brk   = new_mm->start_brk;
-
-    // Insert a heap VMA covering [start_brk, USER_CODE_ADDR + USER_PAGE_SIZE).
-    // Mirrors the setup in spawn_user_task() — see that comment for why.
-    {
-        vma_t *hv = (vma_t *)kmalloc(sizeof(vma_t));
-        if (hv) {
-            list_init(&hv->list);
-            hv->vm_start     = new_mm->start_brk;
-            hv->vm_end       = USER_CODE_ADDR + USER_PAGE_SIZE;
-            hv->vm_flags     = VM_READ | VM_WRITE | VM_ANON;
-            hv->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
-            hv->vm_pgoff     = 0;
-            hv->vm_file      = NULL;
-            vma_insert(new_mm, hv);
-        }
+    // Set up the heap.  mm_init_user_heap installs the unique
+    // zero-length VM_HEAP VMA and sets start_brk = end_brk =
+    // ALIGN_UP(end_code, 4096).  -ENOMEM means the VMA alloc
+    // failed; mm is unchanged so destroy_unpublished_user_mm
+    // walks an empty list and frees the ELF pages via
+    // vmm_free_user_map.
+    if (mm_init_user_heap(new_mm, new_mm->end_code) != 0) {
+        destroy_unpublished_user_mm(new_mm);
+        kfree(new_mm);
+        return -ENOMEM;
     }
 
     // 6. Map the user stack page
     struct Page *stack_page = alloc_pages(ZONE_NORMAL, 1, 0);
     if (!stack_page) {
-        vmm_free_user_map(new_pgd);
+        destroy_unpublished_user_mm(new_mm);
         kfree(new_mm);
         return -ENOMEM;
     }
@@ -1666,18 +1723,22 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
 
     if (setup_user_stack(kstack, (char *const *)argv, (char *const *)envp,
                          s_argc, s_envc, &user_arg_ptr, &user_env_ptr, &user_rsp) != 0) {
-        /* AT_RANDOM STRONG-only 失败 — 清理已分配资源后返回 -EAGAIN。
-         * sys_exec 路径（与 spawn_user_task 不同）：node 已在 step 1 vfs_node_put；
-         * 只需释放 stack_page + new_pgd + new_mm。 */
-        free_pages(stack_page, 1);
-        vmm_free_user_map(new_pgd);
+        /* AT_RANDOM STRONG-only 失败 — 走 staged 失败路径：
+         * destroy_unpublished_user_mm 释放 stack_page + new_pgd；
+         * 我们不需要单独 free_pages(stack_page)（single-owner
+         * release，vmm_free_user_map 已经走那条路）。 */
+        destroy_unpublished_user_mm(new_mm);
         kfree(new_mm);
         return -EAGAIN;
     }
 
     // 7. Commit the new address space before releasing the old one.
     // All fallible preparation and user argument copies are complete.
-    // Publish mm + saved CR3 + hardware CR3 without a scheduling window.
+    // Capture the old_mm/CR3 reference NOW (still pointing at the
+    // live old image), then switch the current task's mm + CR3 in a
+    // single IRQ-disabled window.  After this point, any failure is
+    // fatal — but no fallible step remains, so this is the spec's
+    // single commit point.
     mm_t *old_mm = current->mm;
     arch_irq_state_t irq_flags = arch_local_irq_save();
     current->mm = new_mm;
@@ -1819,8 +1880,10 @@ int64_t sys_readlink(const char *path, char *buf, size_t bufsize,
 
     if ((size_t)tlen > bufsize)
         tlen = (int)bufsize;
-    if (copy_to_user_ft(buf, kbuf, (size_t)tlen) < 0)
-        return -EFAULT;
+    {
+        ssize_t user_copy_rc = copy_to_user_ft(buf, kbuf, (size_t)tlen);
+        if (user_copy_rc < 0) return user_copy_rc;
+    }
     return tlen;
 }
 
@@ -1854,8 +1917,10 @@ int64_t sys_lstat(const char *path, struct stat *buf, pt_regs_t *regs)
     if (rc < 0)
         return rc;
 
-    if (copy_to_user_ft(buf, &kstat, sizeof(kstat)) < 0)
-        return -EFAULT;
+    {
+        ssize_t user_copy_rc = copy_to_user_ft(buf, &kstat, sizeof(kstat));
+        if (user_copy_rc < 0) return user_copy_rc;
+    }
     return 0;
 }
 
@@ -1895,34 +1960,64 @@ int64_t sys_fstatat(int dirfd, const char *path, struct stat *buf,
     if (rc < 0)
         return rc;
 
-    if (copy_to_user_ft(buf, &kstat, sizeof(kstat)) < 0)
-        return -EFAULT;
+    {
+        ssize_t user_copy_rc = copy_to_user_ft(buf, &kstat, sizeof(kstat));
+        if (user_copy_rc < 0) return user_copy_rc;
+    }
     return 0;
 }
 
 // ── fork_mm_copy — create private address space for fork child ─
-// Builds a new PGD with private copies of all user 2MB pages.
-// Uses inline rep movsb instead of memcpy because libk's memcpy
-// has a bug with 2MB copies (CR2=0x8).
+// Builds a new PGD with private copies of all user pages.
+//
+// Task 6 contract (docs/.../2026-10-01-user-heap-elf-isolation-
+// design.md §6):
+//   - Child 4 KiB ELF leaves and read-only non-VM_IO leaves
+//     receive PRIVATE physical pages (alloc + memcpy).
+//   - Writable VMA leaves use COW (parent PTE → R/O+COW; both
+//     parent and child hold a ref on the shared phys).
+//   - The stack (USER_STACK_BASE 2 MiB huge page) retains its
+//     eager huge-page copy.
+//   - All child page-table and leaf-phys allocations are STAGED
+//     BEFORE any parent PTE mutation.  Parent mutations happen
+//     in a bounded no-failure phase (pass 2).  If staging
+//     fails, roll back and return NULL — do NOT mutate parent.
+//   - On success, tlb_shootdown() flushes affected TLBs.
+//
+// The placeholder convention is used to mark writable leaves
+// pending pass-2 mutation: child_pte = PAGE_VALID (= 1) means
+// "writable leaf, mutating parent + adding COW refs in pass 2".
+// A real RO leaf has phys bits set; a VM_IO shared leaf has the
+// parent's full PTE (with the MMIO phys); a fork-of-fork COW
+// leaf has the parent's full PTE.  Only the placeholder is
+// == PAGE_VALID, so pass 2 walks the child pgd, finds these
+// placeholders, and mutates the corresponding parent PTE +
+// bumps the COW refcount.
 static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
 {
     mm_t *child_mm = mm_alloc();
     uint64_t *child_pgd = (uint64_t *)vmm_alloc_map();
-    if (!child_mm || !child_pgd)
-        goto fail;
+    if (!child_mm || !child_pgd) {
+        if (child_mm) kfree(child_mm);
+        if (child_pgd) kfree(child_pgd);
+        if (cr3_out) *cr3_out = 0;
+        return NULL;
+    }
 
     uint64_t *parent_pgd = (uint64_t *)Phy_To_Virt((uint64_t)parent_mm->pgdir);
     uint64_t *kernel_pgd = (uint64_t *)Phy_To_Virt((uint64_t)init_mm.pgdir);
 
     memcpy(&child_pgd[256], &kernel_pgd[256], 256 * sizeof(uint64_t));
 
+    /* ── Pass 1 (fail-able): stage child page tables, leaf phys
+     * for RO leaves, and huge copies.  No parent PTE mutation. */
     for (int l4 = 0; l4 < 256; l4++) {
         uint64_t pgde = parent_pgd[l4];
         if (!(pgde & PAGE_VALID)) continue;
 
         uint64_t *parent_pud = (uint64_t *)Phy_To_Virt(pgde & PAGE_4K_MASK);
         uint64_t *child_pud  = (uint64_t *)calloc(1, PAGE_4K_SIZE);
-        if (!child_pud) continue;
+        if (!child_pud) goto fail;
         child_pgd[l4] = Virt_To_Phy((uint64_t)child_pud) | PAGE_USER_PGD;
 
         for (int l3 = 0; l3 < 512; l3++) {
@@ -1931,77 +2026,19 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
 
             uint64_t *parent_pmd = (uint64_t *)Phy_To_Virt(pude & PAGE_4K_MASK);
             uint64_t *child_pmd  = (uint64_t *)calloc(1, PAGE_4K_SIZE);
-            if (!child_pmd) continue;
+            if (!child_pmd) goto fail;
             child_pud[l3] = Virt_To_Phy((uint64_t)child_pmd) | PAGE_USER_PUD;
 
             for (int l2 = 0; l2 < 512; l2++) {
                 uint64_t pmde = parent_pmd[l2];
                 if (!(pmde & PAGE_VALID)) continue;
 
-                // Eager copy: allocate a private 2MB page and copy
-                // using rep movsb.  Inline asm is used instead of
-                // memcpy because the kernel's libk memcpy has a bug
-                // with 2MB copies (CR2=0x8).
-                // Only 2MB huge pages (PAGE_HUGE) are eagerly copied.
-                // Non-2MB entries (4KB page table pointers, etc.) are
-                // shared -- the child inherits the parent's mapping.
-                // 4KB PTE table: share pages via COW.
-                // Check PAGE_COW before PAGE_WRITE — a COW page has R/W=0
-                // and must not be misclassified as plain read-only.
-                if (!(pmde & PAGE_HUGE)) {
-                    if (!(pmde & PAGE_VALID)) {
-                        child_pmd[l2] = 0;
-                        continue;
-                    }
-                    uint64_t *parent_pte =
-                        (uint64_t *)Phy_To_Virt(pmde & PAGE_4K_MASK);
-                    uint64_t *child_pte =
-                        (uint64_t *)calloc(1, PAGE_4K_SIZE);
-                    if (!child_pte) {
-                        child_pmd[l2] = pmde;  // OOM: share PDE
-                        continue;
-                    }
-                    child_pmd[l2] = Virt_To_Phy((uint64_t)child_pte)
-                                   | (pmde & 0xfff);
-                    for (int l1 = 0; l1 < 512; l1++) {
-                        uint64_t pte = parent_pte[l1];
-                        if (!(pte & (PAGE_VALID | PAGE_PROTNONE)))
-                            continue;
-
-                        // Compute VA from page table indices
-                        uint64_t vaddr = ((uint64_t)l4 << 39)
-                                       | ((uint64_t)l3 << 30)
-                                       | ((uint64_t)l2 << 21)
-                                       | ((uint64_t)l1 << 12);
-                        vma_t *vma = vma_find(parent_mm, vaddr);
-                        if (vma && (vma->vm_flags & VM_IO)) {
-                            child_pte[l1] = pte;  // share MMIO PTE, no COW
-                            continue;
-                        }
-
-                        if (pte & PAGE_COW) {
-                            // Already COW-shared (fork-of-fork)
-                            page_cow_get(pte & PAGE_4K_MASK);
-                            child_pte[l1] = pte;
-                        } else if (pte & PAGE_WRITE) {
-                            // Path A: writable -> COW on BOTH parent and child.
-                            // page_cow_get TWICE: parent PTE (R/W->R/O+COW) +1,
-                            // child PTE (new COW) +1 -> cow_count grows by 2.
-                            parent_pte[l1] &= ~PAGE_WRITE;
-                            parent_pte[l1] |= PAGE_COW;
-                            page_cow_get(pte & PAGE_4K_MASK);
-                            page_cow_get(pte & PAGE_4K_MASK);
-                            child_pte[l1] = parent_pte[l1];
-                        } else {
-                            // Path B: plain read-only -> share directly
-                            child_pte[l1] = pte;
-                        }
-                    }
-                    continue;
-                }
-                uint64_t phys = pmde & PAGE_2M_MASK;
-                // VM_IO guard: skip MMIO huge pages, share directly
-                {
+                if (pmde & PAGE_HUGE) {
+                    /* Huge page: eager 2 MiB copy.  Inline asm is
+                     * used instead of memcpy because the kernel's
+                     * libk memcpy has a bug with 2MB copies
+                     * (CR2=0x8).  VM_IO huge pages are shared
+                     * directly (no copy). */
                     uint64_t vaddr_2m = ((uint64_t)l4 << 39)
                                        | ((uint64_t)l3 << 30)
                                        | ((uint64_t)l2 << 21);
@@ -2010,11 +2047,15 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                         child_pmd[l2] = pmde;
                         continue;
                     }
-                }
-                struct Page *s = alloc_pages(ZONE_NORMAL, 1, 0);
-                if (s) {
+                    struct Page *s = alloc_pages(ZONE_NORMAL, 1, 0);
+                    if (!s) goto fail;
                     uint64_t dst = (uint64_t)Phy_To_Virt(s->phy_address);
-                    uint64_t src = (uint64_t)Phy_To_Virt(phys & ~PAGE_NO_EXEC);
+                    /* Strip PAGE_NO_EXEC (bit 63) before Phy_To_Virt —
+                     * PAGE_NO_EXEC lives in the high bit and PAGE_2M_MASK
+                     * preserves it, which would corrupt the kernel VA
+                     * (non-canonical addr → GP on rep movsb). */
+                    uint64_t src = (uint64_t)Phy_To_Virt(
+                        (pmde & PAGE_2M_MASK) & ~PAGE_NO_EXEC);
                     uint64_t sz  = PAGE_2M_SIZE;
                     __asm__ __volatile__(
                         "cld\n\t"
@@ -2025,28 +2066,144 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                     );
                     child_pmd[l2] = s->phy_address
                                    | (pmde & ~PAGE_2M_MASK);
-                } else {
-                    child_pmd[l2] = pmde; // OOM fallback: share
+                    continue;
+                }
+
+                /* 4 KiB PTE table path. */
+                uint64_t *parent_pte =
+                    (uint64_t *)Phy_To_Virt(pmde & PAGE_4K_MASK);
+                uint64_t *child_pte =
+                    (uint64_t *)calloc(1, PAGE_4K_SIZE);
+                if (!child_pte) goto fail;
+                child_pmd[l2] = Virt_To_Phy((uint64_t)child_pte)
+                               | (pmde & 0xfff);
+
+                for (int l1 = 0; l1 < 512; l1++) {
+                    uint64_t pte = parent_pte[l1];
+                    if (!(pte & (PAGE_VALID | PAGE_PROTNONE)))
+                        continue;
+
+                    uint64_t vaddr = ((uint64_t)l4 << 39)
+                                   | ((uint64_t)l3 << 30)
+                                   | ((uint64_t)l2 << 21)
+                                   | ((uint64_t)l1 << 12);
+                    vma_t *vma = vma_find(parent_mm, vaddr);
+                    if (vma && (vma->vm_flags & VM_IO)) {
+                        /* MMIO: share parent's phys (no COW, no
+                         * copy).  Pass 2 must not touch this leaf. */
+                        child_pte[l1] = pte;
+                        continue;
+                    }
+
+                    /* Check PAGE_COW before PAGE_WRITE — a COW
+                     * page has R/W=0 and must not be misclassified
+                     * as plain read-only. */
+                    if (vma && (pte & PAGE_COW)) {
+                        /* Already COW-shared (fork-of-fork):
+                         * add a ref for the child, share the PTE. */
+                        page_cow_get(pte & PAGE_4K_MASK);
+                        child_pte[l1] = pte;
+                    } else if (vma && (vma->vm_flags & VM_WRITE) &&
+                               (pte & PAGE_WRITE)) {
+                        /* Writable VMA: stage COW; commit in pass 2.
+                         * The placeholder (PAGE_VALID only) is
+                         * unique to writable leaves awaiting
+                         * pass-2 mutation — pass 2 finds it and
+                         * bumps the parent's refcount. */
+                        child_pte[l1] = PAGE_VALID;
+                    } else {
+                        /* All non-VMA ELF leaves, plus read-only /
+                         * PROT_NONE VMA leaves:
+                         * alloc a fresh 4 KiB leaf and copy the
+                         * parent's contents.  No COW ref — the
+                         * child owns its phys outright. */
+                        uint64_t new_phys = alloc_4k_page();
+                        if (!new_phys) goto fail;
+                        memcpy((void *)Phy_To_Virt(new_phys),
+                               (void *)Phy_To_Virt(pte & PAGE_4K_MASK),
+                               PAGE_4K_SIZE);
+                        /* Preserve flags except PAGE_COW (the
+                         * new phys has no COW reference). */
+                        child_pte[l1] = new_phys | (pte & 0xfff & ~PAGE_COW);
+                    }
+                }
+            }
+        }
+    }
+
+    /* ── Pass 2 (no-fail): commit parent PTE changes for
+     * writable leaves.  Bounded: no allocation, no copy. */
+    for (int l4 = 0; l4 < 256; l4++) {
+        uint64_t cpgde = child_pgd[l4];
+        if (!(cpgde & PAGE_VALID)) continue;
+        uint64_t *child_pud = (uint64_t *)Phy_To_Virt(cpgde & PAGE_4K_MASK);
+        uint64_t *parent_pud =
+            (uint64_t *)Phy_To_Virt(parent_pgd[l4] & PAGE_4K_MASK);
+
+        for (int l3 = 0; l3 < 512; l3++) {
+            uint64_t cpude = child_pud[l3];
+            if (!(cpude & PAGE_VALID)) continue;
+            uint64_t *child_pmd = (uint64_t *)Phy_To_Virt(cpude & PAGE_4K_MASK);
+            uint64_t *parent_pmd =
+                (uint64_t *)Phy_To_Virt(parent_pud[l3] & PAGE_4K_MASK);
+
+            for (int l2 = 0; l2 < 512; l2++) {
+                uint64_t cpmde = child_pmd[l2];
+                if (!(cpmde & PAGE_VALID)) continue;
+                if (cpmde & PAGE_HUGE) continue;
+
+                uint64_t *child_pte =
+                    (uint64_t *)Phy_To_Virt(cpmde & PAGE_4K_MASK);
+                uint64_t *parent_pte =
+                    (uint64_t *)Phy_To_Virt(parent_pmd[l2] & PAGE_4K_MASK);
+
+                for (int l1 = 0; l1 < 512; l1++) {
+                    /* Placeholder = PAGE_VALID only.  Any other
+                     * PTE (real RO/COW/VMIO fork-of-fork) is
+                     * already settled by pass 1. */
+                    if (child_pte[l1] != PAGE_VALID) continue;
+                    uint64_t ppte = parent_pte[l1];
+                    uint64_t paddr = ppte & PAGE_4K_MASK;
+                    /* Bump refcount twice: parent keeps one ref
+                     * (its PTE still owns the phys) and child
+                     * gets one ref (its PTE will own it too). */
+                    page_cow_get(paddr);
+                    page_cow_get(paddr);
+                    ppte &= ~PAGE_WRITE;
+                    ppte |= PAGE_COW;
+                    parent_pte[l1] = ppte;
+                    child_pte[l1] = ppte;
                 }
             }
         }
     }
 
     memcpy(child_mm, parent_mm, sizeof(mm_t));
-    // vma_list must NOT be shared — fork_vma_copy will fill child's own
+    /* vma_list must NOT be shared — fork_vma_copy fills the
+     * child's own list (called by do_fork). */
     list_init(&child_mm->vma_list);
-    spin_init(&child_mm->lock);   // memcpy copied parent's lock value — reset
+    spin_init(&child_mm->lock);   /* memcpy copied parent's lock value */
     child_mm->pgdir = (uint64_t *)Virt_To_Phy((uint64_t)child_pgd);
     *cr3_out = (uint64_t)child_mm->pgdir;
 
-    // TLB shootdown: parent's in-memory PTEs were modified (R/W → R/O+COW).
-    // With SMP load balancing the parent may run on any CPU — must
-    // invalidate ALL cores' TLBs, not just the local one.
+    /* TLB shootdown: parent's in-memory PTEs were modified (R/W →
+     * R/O+COW).  With SMP load balancing the parent may run on any
+     * CPU — must invalidate ALL cores' TLBs, not just the local
+     * one.  Called from the END so the parent's commit phase is
+     * fully visible before any CPU re-tlbs. */
     tlb_shootdown();
 
     return child_mm;
 
 fail:
+    /* Roll back.  Walk the partial child pgd and free every
+     * allocation we made in pass 1:
+     *   - 4 KiB child PTE tables (calloc'd)  → kfree
+     *   - 4 KiB child leaves (alloc_4k_page'd) → free_4k_page
+     *   - 2 MiB child huge copies (alloc_pages'd) → free_pages
+     * Skip VM_IO shared leaves (parent's MMIO phys — not ours).
+     * Skip placeholders (PAGE_VALID only — no phys).  No parent
+     * PTE was mutated, so nothing to undo there. */
     if (child_pgd) {
         for (int l4 = 0; l4 < 256; l4++) {
             uint64_t pgde = child_pgd[l4];
@@ -2059,9 +2216,66 @@ fail:
                 for (int l2 = 0; l2 < 512; l2++) {
                     uint64_t pmde = pmd[l2];
                     if (!(pmde & PAGE_VALID)) continue;
-                    if (!(pmde & PAGE_HUGE)) {
-                        uint64_t *pte = (uint64_t *)Phy_To_Virt(pmde & PAGE_4K_MASK);
-                        kfree(pte);
+                    if (pmde & PAGE_HUGE) {
+                        /* Bug A1 fix: the huge-page branch may
+                         * share the parent's MMIO PMD for VM_IO
+                         * VAs (pass 1, task.c ~ line 2041) — in
+                         * that case child_pmd[l2] == parent's PMD
+                         * and the phys is the parent's MMIO phys,
+                         * never ours to free.  Check the parent's
+                         * 2 MiB VA against vma_find (same lookup
+                         * pattern pass 1 uses) and skip the
+                         * free_pages for VM_IO. */
+                        uint64_t vaddr_2m = ((uint64_t)l4 << 39)
+                                           | ((uint64_t)l3 << 30)
+                                           | ((uint64_t)l2 << 21);
+                        vma_t *vm = vma_find(parent_mm, vaddr_2m);
+                        if (vm && (vm->vm_flags & VM_IO)) {
+                            /* Shared MMIO PMD — not ours. */
+                        } else {
+                            uint64_t phys = pmde & PAGE_2M_MASK;
+                            struct Page *p = Phy_to_2M_Page(phys);
+                            free_pages(p, 1);
+                        }
+                    } else {
+                        uint64_t *pt = (uint64_t *)Phy_To_Virt(pmde & PAGE_4K_MASK);
+                        for (int l1 = 0; l1 < 512; l1++) {
+                            uint64_t pte = pt[l1];
+                            uint64_t vaddr = ((uint64_t)l4 << 39)
+                                           | ((uint64_t)l3 << 30)
+                                           | ((uint64_t)l2 << 21)
+                                           | ((uint64_t)l1 << 12);
+                            vma_t *vma = vma_find(parent_mm, vaddr);
+                            int is_vmio = (vma &&
+                                           (vma->vm_flags & VM_IO));
+                            int is_placeholder = (pte == PAGE_VALID);
+                            int is_cow = !!(pte & PAGE_COW);
+                            /* Free / put only what we touched in
+                             * pass 1:
+                             *   - RO leaves (privet): free_4k_page
+                             *     a fresh 4 KiB phys we allocated.
+                             *   - VMIO shared: skip — parent's
+                             *     MMIO phys, never ours.
+                             *   - Placeholder: skip — pass 2 has
+                             *     not run, no phys to free.
+                             *   - Bug A2 fix: COW (fork-of-fork
+                             *     already-shared) — pass 1 did
+                             *     page_cow_get to add a child
+                             *     ref; balance it with page_cow_put.
+                             *     The shared phys stays alive for
+                             *     parent + any other siblings. */
+                            if ((pte & PAGE_VALID) &&
+                                (pte & PAGE_4K_MASK) &&
+                                !is_placeholder &&
+                                !is_vmio) {
+                                if (is_cow) {
+                                    page_cow_put(pte & PAGE_4K_MASK);
+                                } else {
+                                    free_4k_page(pte & PAGE_4K_MASK);
+                                }
+                            }
+                        }
+                        kfree(pt);
                     }
                 }
                 kfree(pmd);
@@ -2070,8 +2284,8 @@ fail:
         }
         kfree(child_pgd);
     }
-    if (child_mm)   kfree(child_mm);
-    if (cr3_out)    *cr3_out = 0;
+    if (child_mm) kfree(child_mm);
+    if (cr3_out)  *cr3_out = 0;
     return NULL;
 }
 
@@ -2171,10 +2385,48 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags __attribute__((unused)),
         if (current->mm && current->mm->pgdir) {
             tsk->mm = fork_mm_copy(current->mm, &thd->cr3);
             if (!tsk->mm) {
-                debug_task("fork: pid=%d fork_mm_copy FAILED, falling back to shared mm\n",
+                /* Task 6: hard OOM.  The pre-existing
+                 *   tsk->mm = current->mm; thd->cr3 = current->thread->cr3;
+                 * fallback used to "share the parent's mm" on
+                 * fork_mm_copy failure — that exposed the parent's
+                 * pgdir to the child (and the child's COW refs
+                 * would silently leak into the parent).  Brief:
+                 * "remove the fork: ... falling back to shared mm
+                 *  fallback in do_fork" + "do_fork releases task
+                 *  resources on fork_mm_copy failure and returns
+                 *  -ENOMEM".
+                 *
+                 * Release every unpublished resource this function
+                 * allocated (raw_alloc + thd + fpu_save + files +
+                 * the not-yet-runnable task list link) and return
+                 * -ENOMEM to the caller.  The child is never
+                 * published, so init's waitpid loop never sees it. */
+                debug_task("fork: pid=%d fork_mm_copy OOM, releasing task\n",
                     (int)current->pid);
-                tsk->mm = current->mm;
-                thd->cr3 = current->thread->cr3;
+
+                /* Remove the not-yet-runnable child from the
+                 * global task list so init's waitpid loop cannot
+                 * reach it. */
+                {
+                    uint64_t tl_flags2 =
+                        spin_lock_irqsave(&task_list_lock);
+                    list_del(&tsk->list);
+                    spin_unlock_irqrestore(&task_list_lock, tl_flags2);
+                }
+                /* Files table reference (if any). */
+                if (tsk->files) {
+                    files_unpin(tsk->files);
+                    tsk->files = NULL;
+                }
+                /* FPU save area. */
+                if (tsk->fpu_save) {
+                    kfree(tsk->fpu_save);
+                    tsk->fpu_save = NULL;
+                }
+                /* Thread struct + kernel stack / task union. */
+                kfree(thd);
+                kfree(tsk->stack_alloc_base);
+                return -ENOMEM;
             }
             if (tsk->mm)
                 fork_vma_copy(tsk->mm, current->mm);
