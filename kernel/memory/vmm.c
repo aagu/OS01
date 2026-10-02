@@ -14,6 +14,24 @@
 // kernel map
 mmap kernel_map;
 
+/* Allocate a fresh PGD/PUD/PMD table page. Returns 0 on success with
+ * *out_pa set to the physical address; returns -ENOMEM if calloc
+ * cannot satisfy the request. The intermediate table walker for the
+ * boot-time direct mapper (boot_direct_map.c) goes through this
+ * helper so an OOM anywhere in the PGD/PUD/PMD chain propagates
+ * cleanly back to the boot facade as -ENOMEM instead of constructing
+ * a NULL descriptor (PA=0).
+ *
+ * Runtime callers (vmm_pt_walk, vmm_map_page) keep their inline
+ * calloc pattern — this helper is only invoked from the boot path. */
+int vmm_boot_alloc_table(uint64_t *out_pa)
+{
+    void *va = calloc(1, PAGE_4K_SIZE);
+    if (va == NULL) return -ENOMEM;
+    *out_pa = Virt_To_Phy((uint64_t)va);
+    return 0;
+}
+
 // get next Level of map
 mmap get_next_level(uint64_t *current_level, size_t entry, uint64_t flags)
 {
@@ -23,6 +41,28 @@ mmap get_next_level(uint64_t *current_level, size_t entry, uint64_t flags)
         current_level[entry] |= flags;
     }
     return (uint64_t *)Phy_To_Virt((uint64_t)(current_level[entry] & PAGE_4K_MASK));
+}
+
+/* Get next Level of map — boot-initializer variant. Walks the same
+ * PGD/PUD/PMD hierarchy as get_next_level above, but uses
+ * vmm_boot_alloc_table for the intermediate-table allocation so an
+ * OOM propagates cleanly instead of constructing a NULL descriptor.
+ * Returns 0 on success, -ENOMEM on allocation failure. *out_pa is
+ * set to the PA of the next-level table on every successful return.
+ * Only the boot mapper (kernel/arch/x86_64/memory/boot_direct_map.c)
+ * and vmm_init use this — runtime callers keep the legacy
+ * get_next_level pattern. */
+int vmm_get_next_level_checked(uint64_t *current_level, size_t entry,
+                               uint64_t flags, uint64_t *out_pa)
+{
+    if (!(current_level[entry] & 1)) {
+        uint64_t pa;
+        int rc = vmm_boot_alloc_table(&pa);
+        if (rc != 0) return rc;
+        current_level[entry] = pa | flags;
+    }
+    if (out_pa) *out_pa = current_level[entry] & PAGE_4K_MASK;
+    return 0;
 }
 
 // map virtual page to physical address
@@ -72,7 +112,7 @@ uintptr_t vmm_unmap_page(uint64_t *pgdir, uintptr_t virtual_address)
     return phys;
 }
 
-void vmm_init()
+int vmm_init()
 {
     kernel_map = (uint64_t *)Phy_To_Virt(0x101000);
     uint64_t i, j;
@@ -98,11 +138,26 @@ void vmm_init()
 
         for (j = 0; j < z->pages_length; j++, p++)
         {
-            vmm_map_page(kernel_map, p->phy_address, (uintptr_t)Phy_To_Virt(p->phy_address), PAGE_KERNEL_PMD);
+            uint64_t pa;
+            /* Boot-initializer path: every intermediate-table
+             * allocation is checked; -ENOMEM propagates instead of
+             * constructing a NULL descriptor (PA=0). */
+            int rc = vmm_get_next_level_checked(kernel_map,
+                (size_t) ((uintptr_t)Phy_To_Virt(p->phy_address) >> PAGE_PGD_SHIFT) & 0x1ff,
+                PAGE_KERNEL_PGD, &pa);
+            if (rc != 0) return rc;
+            uint64_t *pud = (uint64_t *)Phy_To_Virt(pa);
+            rc = vmm_get_next_level_checked(pud,
+                (size_t) ((uintptr_t)Phy_To_Virt(p->phy_address) >> PAGE_1G_SHIFT) & 0x1ff,
+                PAGE_KERNEL_PUD, &pa);
+            if (rc != 0) return rc;
+            uint64_t *pmd = (uint64_t *)Phy_To_Virt(pa);
+            pmd[((size_t)((uintptr_t)Phy_To_Virt(p->phy_address) >> PAGE_2M_SHIFT)) & 0x1ff] =
+                (p->phy_address & PAGE_2M_MASK) | PAGE_KERNEL_PMD;
             #ifdef DEBUG
             if(j % 50 == 0)
             {
-                uint64_t *pgd, *pud, *pmd;
+                uint64_t *pgd, *pud_dbg, *pmd_dbg;
                 size_t pgd_idx, pud_idx, pmd_idx;
 
                 pgd_idx = (size_t) ((uintptr_t)Phy_To_Virt(p->phy_address) >> PAGE_PGD_SHIFT) & 0x1ff;
@@ -110,19 +165,20 @@ void vmm_init()
                 pmd_idx = (size_t) ((uintptr_t)Phy_To_Virt(p->phy_address) >> PAGE_2M_SHIFT)  & 0x1ff;
 
                 pgd = kernel_map;
-                pud = get_next_level(pgd, pgd_idx, PAGE_KERNEL_PGD);
-                pmd = get_next_level(pud, pud_idx, PAGE_KERNEL_PUD);
+                pud_dbg = get_next_level(pgd, pgd_idx, PAGE_KERNEL_PGD);
+                pmd_dbg = get_next_level(pud_dbg, pud_idx, PAGE_KERNEL_PUD);
 
                 // pmd[pmd_idx] = 0;
                 debug_mm("-----\t\n");
-                debug_mm("pud:%#018lx,%#018lx\t\n",(unsigned long)pud,pud[pud_idx]);
-                debug_mm("pmd:%#018lx,%#018lx\t\n",(unsigned long)pmd,pmd[pmd_idx]);
+                debug_mm("pud:%#018lx,%#018lx\t\n",(unsigned long)pud_dbg,pud_dbg[pud_idx]);
+                debug_mm("pmd:%#018lx,%#018lx\t\n",(unsigned long)pmd_dbg,pmd_dbg[pmd_idx]);
             }
             #endif
         }
     }
 
     tlb_shootdown();
+    return 0;
 }
 
 mmap vmm_alloc_map() {

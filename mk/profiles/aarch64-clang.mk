@@ -37,7 +37,18 @@ ifeq ($(filter 1,$(KERNEL_SELFTEST)),)
 $(error AARCH64_SYNC_FAULT_TEST=1 requires KERNEL_SELFTEST=1)
 endif
 endif
-ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
+ifneq ($(strip $(AARCH64_M1_TEST)),)
+ifeq ($(filter $(AARCH64_M1_TEST),sparse arena-exhaust table-exhaust ap-bad-root),)
+$(error invalid AARCH64_M1_TEST='$(AARCH64_M1_TEST)')
+endif
+ifneq ($(KERNEL_SELFTEST),1)
+$(error AARCH64_M1_TEST requires KERNEL_SELFTEST=1)
+endif
+ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST)),)
+$(error AARCH64_M1_TEST cannot be combined with sync-fault/weak-selftest/canary)
+endif
+KERNEL_VARIANT := m1-$(AARCH64_M1_TEST)
+else ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
 KERNEL_VARIANT := sync-fault
 else ifneq ($(filter 1,$(KERNEL_TEST_FORCE_NO_RNDRRS)),)
 KERNEL_VARIANT := weak-selftest

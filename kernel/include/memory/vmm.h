@@ -91,6 +91,29 @@ uintptr_t vmm_unmap_page(uint64_t *pgdir, uintptr_t virtual_address);
 mmap vmm_alloc_map(void);
 void vmm_free_user_map(mmap pgdir);
 
+/* ── Boot-initializer checked table allocation (aarch64 M1 plan
+ * Task 5) ─────────────────────────────────────────────────────
+ * vmm_init now returns int and walks the kernel_map with this
+ * checked helper instead of the legacy get_next_level. The runtime
+ * map API (vmm_map_page, vmm_pt_walk) is unchanged — it still uses
+ * the unchecked calloc-based get_next_level for compatibility.
+ *
+ * vmm_boot_alloc_table: allocate one 4 KiB PGD/PUD/PMD table page
+ * through the kernel's calloc. Returns 0 on success with *out_pa
+ * set to the new page's PA; returns -ENOMEM if the allocation
+ * fails (no descriptor is constructed — a NULL descriptor would be
+ * a PA=0 entry that the hardware reads as "not present" but the
+ * code would still try to use as a PUD/PMD pointer).
+ *
+ * vmm_get_next_level_checked: same semantics as get_next_level but
+ * goes through vmm_boot_alloc_table for the missing intermediate
+ * table, returning -ENOMEM instead of constructing a NULL entry.
+ * On success *out_pa (if non-NULL) is set to the resolved table
+ * page PA (whether the slot was filled or already present). */
+int  vmm_boot_alloc_table(uint64_t *out_pa);
+int  vmm_get_next_level_checked(uint64_t *current_level, size_t entry,
+                                uint64_t flags, uint64_t *out_pa);
+
 // ── TLB shootdown (SMP) ─────────────────────────────
 // When modifying shared kernel page tables (kernel_map), other CPUs
 // may have stale TLB entries.  Call this instead of flush_tlb() to

@@ -5,6 +5,7 @@
  * online/go fields belong to the release/acquire ACK/command protocol.
  */
 #include <stdint.h>
+#include <arch/aarch64/m1_selftest.h>
 #include <stdbool.h>
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/psci.h>
@@ -69,6 +70,7 @@ int aarch64_smp_publish_boot(const struct aarch64_topology *topology)
     clean_to_poc(slots_addr, slots_addr + NR_CPUS * sizeof(*slots), line_size);
     clean_to_poc(table_addr, table_addr + NR_CPUS * sizeof(*mpidrs), line_size);
     clean_to_poc(count_addr, count_addr + sizeof(uint32_t), line_size);
+    aarch64_m1_publish_ranges(clean_to_poc,line_size);
     __asm__ __volatile__("dsb sy" ::: "memory");
     boot_published = true;
     return 0;
@@ -198,6 +200,7 @@ uint32_t smp_boot_aps(void)
         }
         log_info("\n");
     }
+    aarch64_m1_probe_finish(result.requested==result.online);
     log_summary(result.requested, result.online);
     return result.online;
 }
@@ -235,6 +238,7 @@ void secondary_idle(uint32_t cpu_id)
      * 仅在 BSP 上跑, 由全局 jiffies 推进. Per-CPU 路径是后续工作. */
     /* Test-only loss of ACK: the AP still reaches C initialization and
      * observes the persistent idle command after the BSP times out. */
+    if (aarch64_m1_ap_verify(cpu_id))for(;;)arch_cpu_halt();
     if (cpu_id != AARCH64_SMP_TEST_NO_ACK_CPU)
         boot_online_set(cpu_id);
     uint32_t command;

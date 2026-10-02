@@ -528,6 +528,21 @@ uint16_t page_cow_refs(uint64_t phys)
     return refs;
 }
 
+bool pmm_4k_page_allocated(uint64_t phys)
+{
+    if (!phys || (phys & (PAGE_4K_SIZE-1))) return false;
+    uint64_t flags=spin_lock_irqsave(&subpage_lock);
+    struct subpage_pool *pool=find_pool_locked(phys);
+    bool allocated=false;
+    if (pool) {
+        uint32_t slot=(uint32_t)((phys-pool->base_phys)/PAGE_4K_SIZE);
+        allocated=slot>0 && slot<SUBPAGE_4K_COUNT &&
+            (pool->bitmap[slot/64] & (UINT64_C(1)<<(slot%64)));
+    }
+    spin_unlock_irqrestore(&subpage_lock,flags);
+    return allocated;
+}
+
 uint64_t alloc_4k_page(void)
 {
     // subpage_pools is initialized in pmm_init() — no lazy init needed.

@@ -21,6 +21,7 @@ import socket
 import subprocess
 import sys
 import time
+import tempfile
 from pathlib import Path
 
 ARMED_RE = re.compile(r"^\[gic\] spi-test armed intid=(\d+)$", re.MULTILINE)
@@ -165,7 +166,9 @@ def main() -> int:
     else:
         dtb = args.diagnostic_dtb
 
-    sock = os.path.join(args.log_dir, "pl011.sock")
+    # Worktree log paths can exceed Linux sockaddr_un.sun_path (108 bytes).
+    socket_dir = tempfile.TemporaryDirectory(prefix="os01-spi-")
+    sock = os.path.join(socket_dir.name, "pl011.sock")
     proc = subprocess.Popen(qemu_command(args, dtb, sock),
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     log = bytearray()
@@ -226,6 +229,9 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+        if client is not None:
+            client.close()
+        socket_dir.cleanup()
 
     serial_path = Path(args.log_dir) / "serial.log"
     log_text = log.decode("utf-8", "replace")

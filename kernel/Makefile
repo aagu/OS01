@@ -244,6 +244,15 @@ ALL_CFLAGS += -DAARCH64_SYNC_FAULT_TEST=1
 endif
 endif
 
+ifneq ($(strip $(AARCH64_M1_TEST)),)
+ifeq ($(ARCH),aarch64)
+ALL_CFLAGS += $(if $(filter sparse,$(AARCH64_M1_TEST)),-DAARCH64_M1_SPARSE=1)
+ALL_CFLAGS += $(if $(filter arena-exhaust,$(AARCH64_M1_TEST)),-DAARCH64_M1_ARENA_EXHAUST=1)
+ALL_CFLAGS += $(if $(filter table-exhaust,$(AARCH64_M1_TEST)),-DAARCH64_M1_TABLE_EXHAUST=1)
+ALL_CFLAGS += $(if $(filter ap-bad-root,$(AARCH64_M1_TEST)),-DAARCH64_M1_AP_BAD_ROOT=1)
+endif
+endif
+
 # AAGU-5.6: test-only entropy facade override — force RNDRRS detection
 # off so the WEAK-only (RNDR) path is exercised end-to-end on
 # QEMU -cpu max (which exposes both RNDR and RNDRRS). Only routes

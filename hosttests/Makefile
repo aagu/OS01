@@ -103,10 +103,14 @@ TEST_BINS := \
     $(TEST_BLD)/test_user_protected_ranges.elf \
     $(TEST_BLD)/test_fork_user_map.elf \
     $(TEST_BLD)/test_user_write_cow.elf \
+    $(TEST_BLD)/test_m1_runner.elf \
     $(TEST_BLD)/test_m1_layout.elf \
     $(TEST_BLD)/test_m1_reservation.elf \
     $(TEST_BLD)/test_m1_arena.elf \
-    $(TEST_BLD)/test_m1_tree.elf
+    $(TEST_BLD)/test_m1_tree.elf \
+    $(TEST_BLD)/test_m1_contract.elf $(TEST_BLD)/test_m1_vmm.elf \
+    $(TEST_BLD)/test_m1_install.elf $(TEST_BLD)/test_m1_cleanup.elf \
+    $(TEST_BLD)/test_m1_publish.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -816,7 +820,7 @@ $(TEST_BLD)/runtime_tree_production.o: \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
 		$(TESTS_DIR)/kernel/include/memory/memory_map.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(RUNTIME_TREE_HOST_CFLAGS) -c $< -o $@
+	$(HOST_CC) $(RUNTIME_TREE_HOST_CFLAGS) -Wframe-larger-than=1024 -Werror=frame-larger-than -c $< -o $@
 
 $(TEST_BLD)/test_m1_tree.o: $(TEST_CASES)/test_m1_tree.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/runtime_tree.h \
@@ -832,6 +836,51 @@ $(TEST_BLD)/test_m1_tree.elf: $(TEST_BLD)/test_m1_tree.o \
 .PHONY: test-m1-tree
 test-m1-tree: $(TEST_BLD)/test_m1_tree.elf
 	$<
+
+# aarch64 M1 plan Task 5: common boot direct-map contract
+# (`arch_boot_direct_map_init` / `_ready` / `_ranges` from
+# kernel/include/arch/boot_memory.h). Links the REAL
+# kernel/arch/x86_64/memory/boot_direct_map.c (the x86 backend) —
+# the test stubs vmm_init itself so we can inject OOM and validation
+# failures without exercising vmm.c's calloc chain. The TU pulls
+# <arch/boot_memory.h>, <memory/memory.h>, <memory/pmm.h>,
+# <memory/vmm.h>, <memory/memory_map.h> — all in KERNEL_INC. The
+# test TU adds FRAMEWORK_INC + LIBC_INC for <test_framework.h> and
+# <errno.h>.
+#
+# `make test-m1-host CASE=m1-contract-x86` (root run.mk) reaches
+# this rule via the focused dispatch in run.mk.
+M1_CONTRACT_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST -I$(TEST_MOCK)/m1_include $(KERNEL_INC) -I$(TEST_INC)
+
+$(TEST_BLD)/boot_direct_map_production.o: \
+		$(TESTS_DIR)/kernel/arch/x86_64/memory/boot_direct_map.c \
+		$(TESTS_DIR)/kernel/include/arch/boot_memory.h \
+		$(TESTS_DIR)/kernel/include/memory/memory.h \
+		$(TESTS_DIR)/kernel/include/memory/memory_map.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(M1_CONTRACT_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_m1_contract.o: $(TEST_CASES)/test_m1_contract.c \
+		$(TESTS_DIR)/kernel/include/arch/boot_memory.h \
+		$(TESTS_DIR)/kernel/include/memory/memory.h \
+		$(TESTS_DIR)/kernel/include/memory/memory_map.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(M1_CONTRACT_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_m1_contract.elf: $(TEST_BLD)/test_m1_contract.o \
+		$(TEST_BLD)/boot_direct_map_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-m1-contract-x86
+test-m1-contract-x86: $(TEST_BLD)/test_m1_contract.elf $(TEST_BLD)/test_m1_vmm.elf \
+    $(TEST_BLD)/test_m1_install.elf $(TEST_BLD)/test_m1_cleanup.elf \
+    $(TEST_BLD)/test_m1_publish.elf
+	$(TEST_BLD)/test_m1_contract.elf
+	$(TEST_BLD)/test_m1_vmm.elf
 
 # Sync primitive test — compiles the real rwlock/seqlock implementations.
 $(TEST_BLD)/test_sync_primitives.o: $(TEST_CASES)/test_sync_primitives.c
@@ -1314,3 +1363,57 @@ test-gfx-primitives: $(TEST_BLD)/test_gfx_primitives.elf
 
 clean:
 	rm -rf $(TEST_BLD)
+
+$(TEST_BLD)/m1_vmm_production.o: $(TESTS_DIR)/kernel/memory/vmm.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(M1_CONTRACT_HOST_CFLAGS) $(LIBC_INC) -ffunction-sections -fdata-sections -c $< -o $@
+$(TEST_BLD)/test_m1_vmm.o: $(TEST_CASES)/test_m1_vmm.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(M1_CONTRACT_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+$(TEST_BLD)/test_m1_vmm.elf: $(TEST_BLD)/test_m1_vmm.o $(TEST_BLD)/m1_vmm_production.o
+	$(HOST_CC) -Wl,--gc-sections -Wl,--wrap=calloc -o $@ $^
+
+M1_A64_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST -DOS01_SELFTEST=1 -I$(TEST_MOCK)/m1_a64_include -I$(TEST_MOCK)/m1_include $(KERNEL_INC)
+$(TEST_BLD)/m1_install_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/boot_direct_map.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(M1_A64_CFLAGS) -c $< -o $@
+$(TEST_BLD)/test_m1_install.o: $(TEST_CASES)/test_m1_install.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(M1_A64_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_m1_install.elf: $(TEST_BLD)/test_m1_install.o $(TEST_BLD)/m1_install_production.o $(TEST_BLD)/runtime_tree_production.o
+	$(HOST_CC) -o $@ $^
+.PHONY: test-m1-install
+test-m1-install: $(TEST_BLD)/test_m1_install.elf
+	$(TEST_BLD)/test_m1_install.elf
+	$(TEST_BLD)/test_m1_cleanup.elf
+
+$(TEST_BLD)/m1_smoke_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/m1_smoke.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(M1_A64_CFLAGS) -c $< -o $@
+$(TEST_BLD)/test_m1_cleanup.o: $(TEST_CASES)/test_m1_cleanup.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(M1_A64_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_m1_cleanup.elf: $(TEST_BLD)/test_m1_cleanup.o $(TEST_BLD)/m1_smoke_production.o
+	$(HOST_CC) -no-pie -o $@ $^
+test-m1-install: $(TEST_BLD)/test_m1_cleanup.elf
+
+$(TEST_BLD)/m1_selftest_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/m1_selftest.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -DOS01_HOST_TEST -DOS01_SELFTEST=1 $(PMM_SHADOW_INC) -I$(TEST_MOCK)/m1_a64_include -I$(TEST_MOCK)/m1_include $(KERNEL_INC) -ffunction-sections -fdata-sections -c $< -o $@
+$(TEST_BLD)/test_m1_publish.o: $(TEST_CASES)/test_m1_publish.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(M1_A64_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_m1_publish.elf: $(TEST_BLD)/test_m1_publish.o $(TEST_BLD)/m1_selftest_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+.PHONY: test-m1-publish
+test-m1-publish: $(TEST_BLD)/test_m1_publish.elf
+	$<
+
+# Every M1 test uses the failure-preserving runner.
+$(patsubst %.elf,%.o,$(filter $(TEST_BLD)/test_m1_%.elf,$(TEST_BINS))): $(TEST_INC)/m1_test_runner.h
+
+$(TEST_BLD)/test_m1_runner.elf: $(TEST_CASES)/test_m1_runner.c $(TEST_INC)/m1_test_runner.h $(TEST_INC)/test_framework.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $< -o $@
+test-m1-layout: $(TEST_BLD)/test_m1_runner.elf
+	$(TEST_BLD)/test_m1_runner.elf

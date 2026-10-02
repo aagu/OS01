@@ -1,6 +1,9 @@
 /* UEFI-only AArch64 BSP entry. APs enter secondary_idle independently. */
 #include <stdint.h>
-#include <string.h>         /* strcpy/strcat for the boot-map reason strings */
+#include <string.h>
+#include <arch/boot_memory.h>
+#include <arch/aarch64/boot_direct_map.h>
+#include <arch/aarch64/m1_selftest.h>
 #include <core/bootinfo.h>
 #include <log/log.h>      /* for log_err/log_info macros */
 #include <memory/memory.h>   /* for struct boot_context / Virt_To_Phy */
@@ -17,13 +20,6 @@
                               * for SUBSYS_INITCALL Task 2 R3-1 register+dispatch
                               * pair. Lightweight header — only <stdint.h>
                               * transitively; does NOT pull in <arch/subsys.h>. */
-
-/* Forward declaration for pmm_arch_normalize — the production
- * declaration lives in kernel/memory/pmm.c alongside the shared
- * reserve helper. main.c is the sole caller (it drives the M1
- * preflight, which must run before pmm_init). */
-size_t pmm_arch_normalize(const struct boot_context *ctx,
-                          struct MEMORY_RANGE *out);
 
 void pl011_init(void);
 extern char exception_vectors[];
@@ -51,175 +47,6 @@ void gic_ipi_test(uint32_t cpu_count);
 #endif
 
 #if OS01_SELFTEST
-/* Pre-SMP page-table round-trip against the active kernel root. The
- * helper validates the raw TTBR0_EL1 value, requires the self-test VA
- * to be initially absent, allocates one 4 KiB data page, maps it
- * kernel-RW + non-executable, exercises read/write through both the
- * self-test VA and the high-half direct-map alias, proves duplicate
- * map is EEXIST, then unmaps and confirms ENOENT. On any failure it
- * unmap/frees what it owns FIRST (per brief), then logs
- * `UEFI-A64: pt map smoke FAIL` and `[smp] FATAL: pt map selftest`,
- * and halts before hardware bring-up. No intermediate table
- * reclamation is attempted; only the unlinked data page and the
- * unlinked active leaf are torn down. */
-static void aarch64_pt_smoke_test(void)
-{
-    /* State tracked for cleanup on failure: `fail_reason` records the
-     * diagnostic suffix printed by the unified `fail` cleanup label.
-     * `data_owned` tracks whether the allocated data page still needs
-     * `free_4k_page`; `mapped` tracks whether the leaf is still live. */
-    const char *fail_reason = NULL;
-    uint64_t data_pa = 0;
-    bool data_owned = false;
-    bool mapped = false;
-    uint64_t *root = NULL;
-
-    /* Step 1: read raw TTBR0_EL1, reject bits outside
-     * AARCH64_TTBR_BASE_MASK | AARCH64_TTBR_ALLOWED_NONBASE. */
-    uint64_t ttbr_raw = (uint64_t)(uintptr_t)arch_get_page_table();
-    if ((ttbr_raw & ~AARCH64_TTBR_ALLOWED_MASK) != 0) {
-        fail_reason = "ttbr_raw has disallowed bits";
-        goto fail;
-    }
-
-    /* Step 2: derive ttbr_pa. Nonzero, 4 KiB-aligned, < 1 TiB (IPS=40). */
-    uint64_t ttbr_pa = ttbr_raw & AARCH64_TTBR_BASE_MASK;
-    if (ttbr_pa == 0
-        || (ttbr_pa & (PAGE_4K_SIZE - 1)) != 0
-        || ttbr_pa >= (UINT64_C(1) << 40)) {
-        fail_reason = "ttbr_pa invalid";
-        goto fail;
-    }
-
-    /* Step 3: convert only the validated base to a direct-map pointer. */
-    root = (uint64_t *)(uintptr_t)(ttbr_pa + ARCH_PAGE_OFFSET);
-
-    /* Step 4: require AARCH64_PT_SELFTEST_VA to be initially absent. */
-    uint64_t pa_q = 0;
-    uint32_t perm_q = 0;
-    int rc = aarch64_pt_query_4k(root, AARCH64_PT_SELFTEST_VA, &pa_q, &perm_q);
-    if (rc != AARCH64_PT_ENOENT) {
-        fail_reason = "initial query not ENOENT";
-        goto fail;
-    }
-
-    /* Step 5: allocate one 4 KiB page and map it kernel-RW, non-exec. */
-    data_pa = alloc_4k_page();
-    if (data_pa == 0) {
-        fail_reason = "alloc_4k_page returned 0";
-        goto fail;
-    }
-    data_owned = true;
-    /* Spec §6.2: the allocated page must lie inside the fixed bootstrap
-     * direct-map window so the read/write below exercises a
-     * PMD_low1[1..511] block that head.S filled before the MMU was
-     * enabled. An allocator handing out a 2 MiB block below 0x40200000
-     * is a real PMM finding, not a test problem — report it, don't
-     * weaken the bound. */
-    if (data_pa < UINT64_C(0x40200000) || data_pa >= UINT64_C(0x80000000)) {
-        fail_reason = "data_pa outside 0x40200000..0x80000000";
-        goto fail;
-    }
-    int map_rc = aarch64_pt_map_4k(root, AARCH64_PT_SELFTEST_VA, data_pa,
-                                   AARCH64_PT_KERNEL_RW);
-    if (map_rc != AARCH64_PT_OK) {
-        fail_reason = "map_4k failed";
-        goto fail;
-    }
-    mapped = true;
-
-    /* Step 6: write two distinct 64-bit sentinels through the VA and
-     * verify they read back through BOTH the self-test VA and the
-     * high-half direct-map alias of the same physical page. */
-    volatile uint64_t *selftest_va =
-        (volatile uint64_t *)(uintptr_t)AARCH64_PT_SELFTEST_VA;
-    volatile uint64_t *direct =
-        (volatile uint64_t *)(uintptr_t)(data_pa + ARCH_PAGE_OFFSET);
-    const uint64_t SENTINEL_A = UINT64_C(0xa5a5a5a55a5a5a5a);
-    const uint64_t SENTINEL_B = UINT64_C(0x5a5a5a5aa5a5a5a5);
-    *selftest_va = SENTINEL_A;
-    if (*selftest_va != SENTINEL_A || *direct != SENTINEL_A) {
-        fail_reason = "sentinel A roundtrip failed";
-        goto fail;
-    }
-    *selftest_va = SENTINEL_B;
-    if (*selftest_va != SENTINEL_B || *direct != SENTINEL_B) {
-        fail_reason = "sentinel B roundtrip failed";
-        goto fail;
-    }
-
-    /* Step 7a: query the same PA and KERNEL_RW/non-exec permission. */
-    uint64_t pa_q2 = 0;
-    uint32_t perm_q2 = 0;
-    int qrc = aarch64_pt_query_4k(root, AARCH64_PT_SELFTEST_VA,
-                                  &pa_q2, &perm_q2);
-    if (qrc != AARCH64_PT_OK
-        || pa_q2 != data_pa
-        || perm_q2 != AARCH64_PT_KERNEL_RW) {
-        fail_reason = "post-map query mismatch";
-        goto fail;
-    }
-
-    /* Step 7b: prove a second map returns EEXIST. */
-    int rc2 = aarch64_pt_map_4k(root, AARCH64_PT_SELFTEST_VA, data_pa,
-                                AARCH64_PT_KERNEL_RW);
-    if (rc2 != AARCH64_PT_EEXIST) {
-        fail_reason = "second map not EEXIST";
-        goto fail;
-    }
-
-    /* Step 7c: unmap, expect the prior PA and permission. */
-    uint64_t unmapped_pa = 0;
-    uint32_t unmapped_perm = 0;
-    int urc = aarch64_pt_unmap_4k(root, AARCH64_PT_SELFTEST_VA,
-                                  &unmapped_pa, &unmapped_perm);
-    if (urc != AARCH64_PT_OK
-        || unmapped_pa != data_pa
-        || unmapped_perm != AARCH64_PT_KERNEL_RW) {
-        fail_reason = "unmap_4k failed";
-        /* Best-effort retry: the brief asks us to free what's owned
-         * when possible; the unmap may have failed for the same
-         * reason the leaf is stuck, but a second attempt costs nothing
-         * and matches the brief's "unmap/free any resource currently
-         * owned" wording. */
-        if (mapped) {
-            (void)aarch64_pt_unmap_4k(root, AARCH64_PT_SELFTEST_VA, NULL, NULL);
-        }
-        goto fail;
-    }
-    mapped = false;
-
-    /* Step 7d: a later query must return ENOENT. */
-    int qrc2 = aarch64_pt_query_4k(root, AARCH64_PT_SELFTEST_VA,
-                                   &pa_q2, &perm_q2);
-    if (qrc2 != AARCH64_PT_ENOENT) {
-        fail_reason = "post-unmap query not ENOENT";
-        goto fail;
-    }
-
-    /* Step 8: free the data page and emit the success marker exactly. */
-    free_4k_page(data_pa);
-    log_info("UEFI-A64: pt map smoke OK\n");
-    return;
-
-fail:
-    /* Per brief: unmap/free any resource currently owned FIRST, then
-     * log the diagnostic markers, then halt. */
-    if (mapped && root != NULL) {
-        (void)aarch64_pt_unmap_4k(root, AARCH64_PT_SELFTEST_VA, NULL, NULL);
-    }
-    if (data_owned) {
-        free_4k_page(data_pa);
-    }
-    log_err("UEFI-A64: pt map smoke FAIL\n");
-    if (fail_reason != NULL) {
-        log_err("[smp] FATAL: pt map selftest: %s\n", fail_reason);
-    } else {
-        log_err("[smp] FATAL: pt map selftest\n");
-    }
-    for (;;) arch_cpu_halt();
-}
-
 /* ── Boot-map selftest (M0) ────────────────────────────────────────
  * Validates the descriptors head.S installed in the active TTBR0
  * root. head.S fills all 512 PMD_low1 slots before the MMU is
@@ -589,13 +416,17 @@ void aarch64_main(const struct boot_context *handoff)
         if (p) { free_pages(p, 1); log_info("UEFI-A64: pmm alloc smoke OK\n"); }
         else   { log_err("UEFI-A64: pmm alloc smoke FAIL\n"); }
     }
-    /* Validate the descriptors head.S installed in the active TTBR0
-     * root. head.S fills all 512 PMD_low1 slots before the MMU is
-     * enabled; this proves the installed descriptors match the spec
-     * contract before the 4 KiB smoke runs. */
     aarch64_boot_map_selftest();
-    aarch64_pt_smoke_test();
 #endif
+
+    if (arch_boot_direct_map_init()) {
+        log_err("M1 FATAL reason=runtime-init\n");
+        for (;;) arch_cpu_halt();
+    }
+    if (aarch64_m1_probe_prepare()) {
+        log_err("M1 FATAL reason=probe\n");
+        for (;;) arch_cpu_halt();
+    }
 
 #if AARCH64_SYNC_FAULT_TEST
     /* AAGU-EL1-sync (spec §5): a controlled EL1h sync fault probe.
@@ -620,7 +451,7 @@ void aarch64_main(const struct boot_context *handoff)
      * the dedicated sync-fault variant); production and ordinary
      * selftest images never see it. */
     {
-        uint64_t ttbr_raw = (uint64_t)(uintptr_t)arch_get_page_table();
+        uint64_t ttbr_raw = aarch64_read_ttbr1();
         if ((ttbr_raw & ~AARCH64_TTBR_ALLOWED_MASK) != 0) {
             kputs("[aarch64-sync-test] precondition FAIL: ttbr_raw has disallowed bits\n");
             for (;;) arch_cpu_halt();

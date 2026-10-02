@@ -98,4 +98,6 @@ void     page_cow_get(uint64_t phys);
 bool     page_cow_put(uint64_t phys);   // returns true when count reaches 0
 uint16_t page_cow_refs(uint64_t phys);
 
+bool pmm_4k_page_allocated(uint64_t phys);
+
 #endif

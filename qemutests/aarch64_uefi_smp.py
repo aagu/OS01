@@ -179,9 +179,11 @@ def self_test() -> None:
             f"{label}: bytes != pages2m * 2097152 must reject"
 
     command_args = argparse.Namespace(
-        qemu="qemu-system-aarch64", firmware="firmware.fd", image="disk.img"
+        qemu="qemu-system-aarch64", firmware="firmware.fd", image="disk.img", ram_mib=2048
     )
-    assert "if=none,file=disk.img,format=raw,readonly=on,id=disk" in qemu_command(command_args, 4, None)
+    command = qemu_command(command_args, 4, None)
+    assert "if=none,file=disk.img,format=raw,readonly=on,id=disk" in command
+    assert command[command.index("-m") + 1] == "2048"
 
     # expect_selftest: requires 'UEFI-A64: pmm alloc smoke OK' then
     # 'UEFI-A64: pt map smoke OK' between the RAM summary and the
@@ -582,6 +584,16 @@ def acceptance_evidence(args: argparse.Namespace, text: str, cpus: int) -> bool:
     expect_clk = getattr(args, "expect_clk", False)
     if args.expect_no_ack is not None:
         return degraded_passed(text, expect_selftest=expect_selftest)
+    if getattr(args, "expect_m1", False):
+        try:
+            from aarch64_m1_evidence import m1_evidence_ok
+        except ImportError:
+            from qemutests.aarch64_m1_evidence import m1_evidence_ok
+        return m1_evidence_ok(
+            text, cpus=cpus, selftest=expect_selftest,
+            ram_mib=getattr(args, "ram_mib", 512),
+            variant=getattr(args, "m1_variant", "normal"),
+        )
     return passed(text, cpus, expect_selftest=expect_selftest,
                   expect_gic=expect_gic, expect_clk=expect_clk)
 
@@ -590,7 +602,7 @@ def qemu_command(args: argparse.Namespace, cpus: int, diagnostic_dtb: str | None
     command = [
         args.qemu, "-M", "virt,gic-version=2" + (",acpi=off" if diagnostic_dtb else ""),
         "-cpu", "cortex-a53", "-smp", str(cpus),
-        "-m", "512", "-drive", f"if=pflash,format=raw,file={args.firmware}",
+        "-m", str(getattr(args, "ram_mib", 512)), "-drive", f"if=pflash,format=raw,file={args.firmware}",
         "-drive", f"if=none,file={args.image},format=raw,readonly=on,id=disk",
         "-device", "virtio-blk-device,drive=disk", "-serial", "stdio", "-display", "none",
         "-no-reboot", "-no-shutdown",
@@ -605,7 +617,7 @@ def file_sha256(path: str) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def generate_diagnostic_dtb(qemu: str, log_dir: str, cpus: int) -> str:
+def generate_diagnostic_dtb(qemu: str, log_dir: str, cpus: int, ram_mib: int = 512) -> str:
     """Materialize a packed QEMU-generated virt DTB into the run log dir.
 
     Some prebuilt UEFI firmwares do not expose the device tree through the EFI
@@ -622,13 +634,13 @@ def generate_diagnostic_dtb(qemu: str, log_dir: str, cpus: int) -> str:
     via `dtc` (its raw form is ~1 MiB of zero padding; a few KiB is what
     UEFI actually consumes).
     """
-    case_dir = os.path.join(log_dir, f"dtb-cpus-{cpus}")
+    case_dir = os.path.join(log_dir, f"dtb-ram-{ram_mib}-cpus-{cpus}")
     Path(case_dir).mkdir(parents=True, exist_ok=True)
     sparse = os.path.join(case_dir, "qemu-virt.dtb.sparse")
     packed = os.path.join(case_dir, "qemu-virt.dtb")
     completed = subprocess.run(
         [qemu, "-M", "virt,gic-version=2", "-cpu", "cortex-a53", "-smp", str(cpus),
-         "-machine", f"dumpdtb={sparse}", "-display", "none", "-m", "512"],
+         "-machine", f"dumpdtb={sparse}", "-display", "none", "-m", str(ram_mib)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
     )
     if completed.returncode != 0 or not os.path.exists(sparse):
@@ -645,7 +657,8 @@ def run_case(args: argparse.Namespace, cpus: int, iteration: int) -> bool:
     """Run one QEMU case with a monotonic deadline and non-blocking drains."""
     diagnostic_dtb = None
     if getattr(args, "diagnostic_dtb", None):
-        diagnostic_dtb = generate_diagnostic_dtb(args.qemu, args.log_dir, cpus)
+        diagnostic_dtb = generate_diagnostic_dtb(
+            args.qemu, args.log_dir, cpus, getattr(args, "ram_mib", 512))
     prefix = Path(args.log_dir) / f"cpus-{cpus}-run-{iteration}"
     stdout_path = prefix.with_suffix(".stdout.log")
     stderr_path = prefix.with_suffix(".stderr.log")
@@ -653,7 +666,8 @@ def run_case(args: argparse.Namespace, cpus: int, iteration: int) -> bool:
     started = time.monotonic()
     metadata_path = prefix.with_suffix(".metadata.json")
     metadata = {
-        "command": command, "cpus": cpus, "run": iteration,
+        "command": command, "cpus": cpus, "ram_mib": getattr(args, "ram_mib", 512),
+        "run": iteration,
         "expected_no_ack_cpu": args.expect_no_ack or 0,
         "firmware": str(Path(args.firmware).resolve()),
         "firmware_sha256": file_sha256(args.firmware),
@@ -744,6 +758,8 @@ def main() -> int:
     parser.add_argument("--cpus", nargs="+", type=int, default=[1, 2, 4])
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=90)
+    parser.add_argument("--ram-mib", type=int, default=512,
+                        help="QEMU RAM size in MiB (default: 512)")
     parser.add_argument("--firmware")
     parser.add_argument("--image")
     parser.add_argument("--qemu")
@@ -759,6 +775,10 @@ def main() -> int:
     parser.add_argument("--expect-clk", action="store_true",
                         help="Require clocksource markers: active=true, mult=..., "
                              "shift=...")
+    parser.add_argument("--expect-m1", action="store_true",
+                        help="Require strict M1 runtime direct-map evidence")
+    parser.add_argument("--m1-variant", choices=("normal", "sparse"), default="normal",
+                        help="M1 acceptance variant (default: normal)")
     parser.add_argument("--diagnostic-dtb", metavar="PATH_OR_AUTO",
                         help="firmware does not expose DTB via EFI config table: "
                              "use acpi=off and a QEMU-generated DTB. Pass an explicit "
@@ -771,8 +791,8 @@ def main() -> int:
         return 0
     if not all((args.firmware, args.image, args.qemu, args.log_dir)):
         parser.error("--firmware, --image, --qemu, and --log-dir are required outside --self-test")
-    if any(cpus < 1 for cpus in args.cpus) or args.repeat < 1 or args.timeout <= 0:
-        parser.error("--cpus and --repeat must be positive; --timeout must be greater than zero")
+    if any(cpus < 1 for cpus in args.cpus) or args.repeat < 1 or args.timeout <= 0 or args.ram_mib < 1:
+        parser.error("--cpus, --repeat, and --ram-mib must be positive; --timeout must be greater than zero")
     if args.expect_no_ack is not None and (args.cpus != [2] or args.repeat != 1 or args.expect_no_ack != 1):
         parser.error("--expect-no-ack only accepts CPU_ID=1 with --cpus 2 --repeat 1")
     if args.diagnostic_dtb and args.diagnostic_dtb != "auto" and len(args.cpus) != 1:

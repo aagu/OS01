@@ -696,7 +696,16 @@ secondary_start:
     msr     vbar_el1, x0
     isb
     dsb     sy
-    bl      write_tcr_mair_ttbr             /* reuse published BSP tables */
+    bl      write_tcr_mair_ttbr             /* TTBR0 remains boot root */
+    ldr     x0, =runtime_ttbr1_pa
+    ldr     x0, [x0]
+    cbz     x0, secondary_panic
+    tst     x0, #0xfff
+    b.ne    secondary_panic
+    lsr     x1, x0, #40
+    cbnz    x1, secondary_panic
+    msr     ttbr1_el1, x0
+    isb
     ldr     x0, =SCTLR_VALUE
     msr     sctlr_el1, x0
     isb
@@ -795,4 +804,17 @@ aarch64_boot_image_start_addr:
 .globl aarch64_kernel_lma_end_addr
 aarch64_kernel_lma_end_addr:
     ldr     x0, =_kernel_lma_end
+    ret
+
+.globl aarch64_runtime_root_address
+aarch64_runtime_root_address:
+    ldr x0, =runtime_ttbr1_pa
+    ret
+.globl aarch64_probe_pa_address
+aarch64_probe_pa_address:
+    ldr x0, =m1_probe_pa
+    ret
+.globl aarch64_probe_expected_address
+aarch64_probe_expected_address:
+    ldr x0, =m1_probe_expected
     ret
