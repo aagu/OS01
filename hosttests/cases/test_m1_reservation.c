@@ -456,10 +456,14 @@ TEST_FUNC(test_claim_skips_hole)
     assert_true(p->zone_struct == &fixture_zones[0]);
 }
 
-/* ── pmm_claim_free_frame: bitmap changes inside the lock ─
- * After claim returns, the corresponding bit is set and counters move.
- * Verifies the function is atomic w.r.t. the bitmap. */
-TEST_FUNC(test_claim_atomic_bitmap_update)
+/* ── pmm_claim_free_frame: bitmap + counter update under lock ─
+ * After claim returns, the corresponding bit is set and counters
+ * move. Verifies the function is atomic w.r.t. the bitmap.
+ * (Renamed from test_claim_atomic_bitmap_update per review M2 —
+ * "atomic" is misleading because the host shadow spinlock is a
+ * no-op; this test really exercises the bitmap + counter side
+ * effects of a single successful claim.) */
+TEST_FUNC(test_claim_updates_bitmap_and_counters)
 {
     setup_sparse(0);
     struct Page *p = pmm_claim_free_frame(fixture_lowest_pa,
@@ -513,7 +517,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_claim_arena_in_second_zone),
     TEST_ENTRY(test_claim_empty_or_occupied_returns_null),
     TEST_ENTRY(test_claim_skips_hole),
-    TEST_ENTRY(test_claim_atomic_bitmap_update),
+    TEST_ENTRY(test_claim_updates_bitmap_and_counters),
     TEST_ENTRY(test_claim_invalid_range),
     TEST_ENTRY(test_claim_nonzero_base),
 TEST_LIST_END

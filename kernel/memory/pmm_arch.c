@@ -36,7 +36,13 @@ uint64_t pmm_arch_zone_split(void)
 /* Default weak strategy: legacy x86_64 prefix reservation. The
  * aarch64 strong override (kernel/arch/aarch64/pmm_arch.c) will
  * return multiple ranges covering the low metadata prefix plus an
- * arena window in the representative zone. */
+ * arena window in the representative zone.
+ *
+ * NOTE: the returned range starts at absolute PA 0, not at the
+ * lowest represented RAM frame. On x86_64 lowest_ram is always 0
+ * (UEFI hands us the first RAM frame at PA 0) so the PA-absolute
+ * range collapses to the legacy walk; on aarch64 lowest_ram > 0
+ * and the strong override is required. */
 __attribute__((weak))
 int pmm_arch_boot_reservations(const struct pmm_layout *layout,
                                struct pmm_phys_range *out,
