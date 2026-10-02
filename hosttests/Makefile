@@ -105,7 +105,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_user_write_cow.elf \
     $(TEST_BLD)/test_m1_layout.elf \
     $(TEST_BLD)/test_m1_reservation.elf \
-    $(TEST_BLD)/test_m1_arena.elf
+    $(TEST_BLD)/test_m1_arena.elf \
+    $(TEST_BLD)/test_m1_tree.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -791,6 +792,45 @@ $(TEST_BLD)/test_m1_arena.elf: $(TEST_BLD)/test_m1_arena.o \
 
 .PHONY: test-m1-arena
 test-m1-arena: $(TEST_BLD)/test_m1_arena.elf
+	$<
+
+# aarch64 M1 plan Task 4: pure runtime page-table builder and strict
+# validator (`aarch64_runtime_tree_build` / `_validate`). Links the
+# REAL kernel/arch/aarch64/memory/runtime_tree.c against the host
+# TU. The production file only pulls <errno.h>, <stddef.h>,
+# <stdint.h>, <stdbool.h>, <arch/aarch64/runtime_tree.h>,
+# <arch/aarch64/early_arena.h>, <arch/aarch64/page_table.h>, and
+# <memory/memory_map.h> — all in KERNEL_INC. The test TU uses its
+# own fake-pool ops to provide monotonic-PA, host-alloc-backed page
+# resolution.
+#
+# `make test-m1-host CASE=m1-tree` (root run.mk) reaches this rule
+# via the focused dispatch in run.mk.
+RUNTIME_TREE_HOST_CFLAGS := $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) \
+                           -I$(TEST_INC)
+
+$(TEST_BLD)/runtime_tree_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/runtime_tree.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/runtime_tree.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/early_arena.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/memory/memory_map.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(RUNTIME_TREE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_m1_tree.o: $(TEST_CASES)/test_m1_tree.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/runtime_tree.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/early_arena.h \
+		$(TESTS_DIR)/kernel/include/memory/memory_map.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(RUNTIME_TREE_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_m1_tree.elf: $(TEST_BLD)/test_m1_tree.o \
+		$(TEST_BLD)/runtime_tree_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-m1-tree
+test-m1-tree: $(TEST_BLD)/test_m1_tree.elf
 	$<
 
 # Sync primitive test — compiles the real rwlock/seqlock implementations.
