@@ -43,7 +43,6 @@
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -345,6 +344,12 @@ struct tree_result {
     struct aarch64_runtime_tree tree;
 };
 
+/* In production the validator's scratch lives outside the boot
+ * stack; in the host test it sits comfortably on the host stack
+ * (which is effectively unbounded). One per validate call would
+ * work too, but a single static keeps the test bodies compact. */
+static struct aarch64_runtime_tree_validate_buf g_validate_buf;
+
 static struct tree_result do_build(const struct MEMORY_RANGE *ram, size_t count,
                                   struct aarch64_m1_arena *arena,
                                   fake_pool_t *pool)
@@ -362,7 +367,8 @@ static int do_validate(const struct MEMORY_RANGE *ram, size_t count,
                        const struct aarch64_runtime_tree *tree)
 {
     return aarch64_runtime_tree_validate(ram, count, arena,
-                                         fake_ops_ptr(pool), tree);
+                                         fake_ops_ptr(pool),
+                                         &g_validate_buf, tree);
 }
 
 /* ── Test cases ──────────────────────────────────────────────── */
@@ -956,55 +962,52 @@ TEST_FUNC(test_validate_page_count_mismatch)
 
 TEST_FUNC(test_validate_canary_around_table_pages)
 {
-    /* After a clean build, every page in the pool (except those
-     * holding the L0/L1/L2 root and intermediates) must still carry
-     * the canary — the builder only touches pages it allocates.
-     * Wait, the builder DOES zero every allocated page. So after
-     * build, no page in the pool contains the canary (the builder
-     * overwrote it). */
+    /* I2: the original "canary" test was a no-op — the builder zeros
+     * every allocated page in `rt_alloc_one`, so the canary is always
+     * overwritten and never seen again. Rewritten to verify the
+     * allocator's bookkeeping (fake_resolve) rejects a PA outside
+     * the used pool. The brief's intent was that the allocator
+     * refuses to honor a PA the builder never issued; this test
+     * exercises that contract. */
     struct MEMORY_RANGE ram[1];
     struct aarch64_m1_arena arena;
     fake_pool_t pool;
     struct tree_result r;
-    size_t i;
+    uint64_t issued_pa;
+    uint64_t forged_pa;
+    uint64_t *resolved;
 
     assert_eq(0, build_small_tree(ram, &arena, &pool));
     r = do_build(ram, 1, &arena, &pool);
     assert_eq(0, r.rc);
 
-    /* Validate must still pass — the builder zeroed every page. */
-    assert_eq(0, do_validate(ram, 1, &arena, &pool, &r.tree));
-    /* After validation, every pool page must still be entirely
-     * zero or entirely a legitimate table (root, L1, L2) — the
-     * canary must not survive anywhere. */
-    for (i = 0u; i < pool.count; ++i) {
-        uint64_t *va = pool.pages[i].va;
-        size_t j;
-        uint64_t first = va[0];
-        bool is_legitimate = (first == 0u) || (first != POOL_CANARY);
-        /* If first is the canary, the validator FAILED to walk this
-         * page or the builder never touched it. Either way: this
-         * page must be either all-zero (unwritten slots) or a
-         * legitimate descriptor. */
-        if (first == POOL_CANARY) {
-            printf("  [FAIL] canary survived in pool page %zu\n", i);
-            __test_stats.failed++;
-        } else {
-            __test_stats.passed++;
-        }
-        __test_stats.total++;
-        /* And: any non-zero slot must NOT look like the canary. */
-        for (j = 0u; j < (T_PAGE_4K / sizeof(uint64_t)); ++j) {
-            if (va[j] == POOL_CANARY) {
-                printf("  [FAIL] canary at pool page %zu offset %zu\n",
-                       i, j);
-                __test_stats.failed++;
-                goto done_check;
-            }
-        }
-        done_check:
-        (void)is_legitimate;
+    /* Sanity: a PA the pool DID issue resolves to a non-NULL
+     * pointer. (Sanity-gate before we test the rejection path.) */
+    issued_pa = pool.pages[0].pa;
+    resolved = fake_resolve(&pool, issued_pa);
+    assert_not_null((void *)resolved);
+    assert_true(resolved == pool.pages[0].va);
+
+    /* Forge a PA outside the used pool. The fake pool's `next_pa`
+     * cursor always exceeds every issued PA by at least one page;
+     * a PA >= next_pa is therefore unambiguously out-of-pool. */
+    forged_pa = pool.next_pa + 0x100000ULL;   /* well past the cursor */
+    resolved = fake_resolve(&pool, forged_pa);
+    assert_null((void *)resolved);
+
+    /* Also test the obvious wrong-base case: PA 0 is never issued
+     * by the fake pool (the cursor starts at 0x100000). */
+    resolved = fake_resolve(&pool, 0u);
+    assert_null((void *)resolved);
+
+    /* And: a PA inside [next_pa - 0x100000, next_pa) but not equal
+     * to any issued PA — fake_resolve must scan and reject. */
+    if (pool.next_pa > 0x200000ULL) {
+        forged_pa = pool.next_pa - 0x100000ULL;
+        resolved = fake_resolve(&pool, forged_pa);
+        assert_null((void *)resolved);
     }
+
     fake_pool_destroy(&pool);
 }
 

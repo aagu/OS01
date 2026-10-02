@@ -103,6 +103,28 @@ struct aarch64_runtime_tree {
     size_t page_count;
 };
 
+/* Caller-provided scratch storage for `aarch64_runtime_tree_validate`.
+ *
+ * The validator's tree iterator tracks every intermediate PA it
+ * descends into (`seen`) and every intermediate PA claimed as a
+ * child (`children`). Together these bound the validator's memory
+ * cost: 1 L0 + 2 PUDs + 1024 PMDs = 1027 intermediates at most, and
+ * 2 + 1024 = 1026 child claims at most. The two arrays must live
+ * OUTSIDE the validator's stack frame because the aarch64 BSP boot
+ * stack is only AARCH64_BOOT_STACK_SIZE (4 KiB); allocating ~16 KiB
+ * of bitmap on the boot stack would overflow. The caller passes a
+ * pointer to a `aarch64_runtime_tree_validate_buf` that the caller
+ * has placed in BSS, on the arena, or anywhere outside the boot
+ * stack. The host test simply declares it as a local on the host
+ * stack (which is effectively unbounded).
+ *
+ * Both arrays are mandatory and zeroed by the validator on entry.
+ * The buf may be reused across multiple validate calls. */
+struct aarch64_runtime_tree_validate_buf {
+    uint64_t seen[1u + 2u + 1024u];      /* 1027 PA slots ≈ 8216 bytes */
+    uint64_t children[2u + 1024u];      /* 1026 PA slots ≈ 8208 bytes */
+};
+
 /* Build the runtime tree. On success returns 0 and writes `*out`. On
  * failure returns a negative errno and leaves `*out` cleared.
  *
@@ -138,6 +160,13 @@ int aarch64_runtime_tree_build(const struct MEMORY_RANGE *ram, size_t count,
  * the host-identity map covers — both are only consulted for the
  * "no descriptor may exceed the pool bounds" check.
  *
+ * `vbuf` MUST be non-NULL and point at caller-provided storage
+ * (`struct aarch64_runtime_tree_validate_buf`) for the validator's
+ * uniqueness and ownership bitmaps. The caller MUST NOT place
+ * `vbuf` on the aarch64 BSP boot stack (4 KiB); the struct is ~16 KiB
+ * and would overflow the boot stack. The validator zero-initialises
+ * the bitmaps on entry, so a stale vbuf from a prior call is safe.
+ *
  * Returns 0 on success. Returns a negative errno on any contract
  * violation:
  *
@@ -154,6 +183,7 @@ int aarch64_runtime_tree_build(const struct MEMORY_RANGE *ram, size_t count,
 int aarch64_runtime_tree_validate(const struct MEMORY_RANGE *ram, size_t count,
                                   const struct aarch64_m1_arena *arena,
                                   const struct aarch64_tree_ops *ops,
+                                  struct aarch64_runtime_tree_validate_buf *vbuf,
                                   const struct aarch64_runtime_tree *tree);
 
 #endif /* OS01_AARCH64_RUNTIME_TREE_H */

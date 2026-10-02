@@ -477,7 +477,11 @@ int aarch64_runtime_tree_build(const struct MEMORY_RANGE *ram, size_t count,
  * The tree iterator uses a small explicit stack (max depth 3:
  * L0 → L1 → L2) and yields one block at a time. As it descends and
  * ascends, it accumulates bookkeeping for uniqueness / pool ownership
- * / SBZ-bit checks. No large heap allocation is required.
+ * / SBZ-bit checks. The two uniqueness bitmaps (seen/children,
+ * ~16 KiB) live in caller-provided storage (`struct
+ * aarch64_runtime_tree_validate_buf`) so the validator's stack frame
+ * fits on the aarch64 BSP boot stack (4 KiB). No large heap
+ * allocation is required.
  */
 
 #define RT_MAX_DEPTH 3u
@@ -498,15 +502,14 @@ typedef struct rt_level {
 typedef struct rt_tree_iter {
     const struct aarch64_tree_ops *ops;
     const struct aarch64_runtime_tree *tree;
+    /* Caller-provided scratch: the intermediate-uniqueness bitmaps
+     * live in `struct aarch64_runtime_tree_validate_buf` (a ~16 KiB
+     * struct that must NOT be on the BSP boot stack). The iterator
+     * itself is small enough to keep on the boot stack. */
+    struct aarch64_runtime_tree_validate_buf *vbuf;
     rt_level_t stack[RT_MAX_DEPTH];
     int sp;
-    /* Tracks every distinct intermediate PA we descended into.
-     * Bounded by 1 + 2 + 1024 = 1027 (max tree size). */
-    uint64_t seen[1u + 2u + 1024u];
     size_t seen_count;
-    /* Tracks every child PA claimed by an intermediate (for the
-     * "no shared child tables" check). Bounded by 2 + 1024 = 1026. */
-    uint64_t children[2u + 1024u];
     size_t children_count;
     /* Currently yielded values. */
     uint64_t cur_pa;
@@ -526,12 +529,12 @@ static int rt_iter_record_table(rt_tree_iter_t *it, uint64_t pa)
         return -EIO;
     }
     for (i = 0u; i < it->seen_count; ++i) {
-        if (it->seen[i] == pa) return -EIO;     /* cycle */
+        if (it->vbuf->seen[i] == pa) return -EIO;     /* cycle */
     }
     if (it->seen_count >=
-        (sizeof(it->seen) / sizeof(it->seen[0])))
+        (sizeof(it->vbuf->seen) / sizeof(it->vbuf->seen[0])))
         return -EIO;
-    it->seen[it->seen_count++] = pa;
+    it->vbuf->seen[it->seen_count++] = pa;
     return 0;
 }
 
@@ -545,12 +548,12 @@ static int rt_iter_record_child(rt_tree_iter_t *it, uint64_t pa)
         return -EIO;
     }
     for (i = 0u; i < it->children_count; ++i) {
-        if (it->children[i] == pa) return -EIO;     /* duplicate */
+        if (it->vbuf->children[i] == pa) return -EIO;     /* duplicate */
     }
     if (it->children_count >=
-        (sizeof(it->children) / sizeof(it->children[0])))
+        (sizeof(it->vbuf->children) / sizeof(it->vbuf->children[0])))
         return -EIO;
-    it->children[it->children_count++] = pa;
+    it->vbuf->children[it->children_count++] = pa;
     return 0;
 }
 
@@ -570,10 +573,12 @@ static int rt_iter_push(rt_tree_iter_t *it, uint64_t pa, uint64_t *va,
     return 0;
 }
 
-/* Initialize. */
+/* Initialize. The caller MUST have already zero-initialised vbuf's
+ * bitmaps (the validate function does this on entry). */
 static int rt_iter_init(rt_tree_iter_t *it,
                         const struct aarch64_tree_ops *ops,
-                        const struct aarch64_runtime_tree *tree)
+                        const struct aarch64_runtime_tree *tree,
+                        struct aarch64_runtime_tree_validate_buf *vbuf)
 {
     uint64_t *root_va;
 
@@ -584,6 +589,7 @@ static int rt_iter_init(rt_tree_iter_t *it,
     }
     it->ops = ops;
     it->tree = tree;
+    it->vbuf = vbuf;
 
     if (tree->root_pa < tree->table_base_pa ||
         tree->root_pa >= tree->table_used_end_pa) {
@@ -844,6 +850,7 @@ static int rt_exp_iter_take(rt_exp_iter_t *it, uint64_t *out_pa,
 int aarch64_runtime_tree_validate(const struct MEMORY_RANGE *ram, size_t count,
                                   const struct aarch64_m1_arena *arena,
                                   const struct aarch64_tree_ops *ops,
+                                  struct aarch64_runtime_tree_validate_buf *vbuf,
                                   const struct aarch64_runtime_tree *tree)
 {
     rt_tree_iter_t titer;
@@ -851,7 +858,7 @@ int aarch64_runtime_tree_validate(const struct MEMORY_RANGE *ram, size_t count,
     int rc;
     int err2;
 
-    if (ops == NULL || tree == NULL) return -EINVAL;
+    if (ops == NULL || tree == NULL || vbuf == NULL) return -EINVAL;
     if (ops->resolve == NULL) return -EINVAL;
     if (tree->root_pa == 0u) return -EIO;
     if ((tree->root_pa & (RT_PAGE_4K - 1u)) != 0u) return -EIO;
@@ -862,11 +869,19 @@ int aarch64_runtime_tree_validate(const struct MEMORY_RANGE *ram, size_t count,
     if ((tree->table_used_end_pa - tree->table_base_pa) !=
         (uint64_t)tree->page_count * RT_PAGE_4K) return -EIO;
 
+    /* Zero the caller-provided scratch on entry so a stale vbuf from
+     * a prior validate call does not leak state into the new run. */
+    {
+        uint8_t *p = (uint8_t *)vbuf;
+        size_t i;
+        for (i = 0u; i < sizeof(*vbuf); ++i) p[i] = 0u;
+    }
+
     err2 = 0;
     (void)rt_validate_ram(ram, count, &err2);
     if (err2 != 0) return err2;
 
-    rc = rt_iter_init(&titer, ops, tree);
+    rc = rt_iter_init(&titer, ops, tree, vbuf);
     if (rc != 0) return rc;
 
     rt_exp_iter_init(&eiter, ram, count);
@@ -904,7 +919,8 @@ int aarch64_runtime_tree_validate(const struct MEMORY_RANGE *ram, size_t count,
         for (i = 0u; i < titer.children_count; ++i) {
             int found = 0;
             for (j = 0u; j < titer.seen_count; ++j) {
-                if (titer.children[i] == titer.seen[j]) { found = 1; break; }
+                if (titer.vbuf->children[i] ==
+                    titer.vbuf->seen[j]) { found = 1; break; }
             }
             if (!found) return -EIO;
         }
