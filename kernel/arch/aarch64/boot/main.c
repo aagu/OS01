@@ -1,5 +1,6 @@
 /* UEFI-only AArch64 BSP entry. APs enter secondary_idle independently. */
 #include <stdint.h>
+#include <string.h>         /* strcpy/strcat for the boot-map reason strings */
 #include <core/bootinfo.h>
 #include <log/log.h>      /* for log_err/log_info macros */
 #include <memory/memory.h>   /* for struct boot_context / Virt_To_Phy */
@@ -16,7 +17,6 @@
                               * transitively; does NOT pull in <arch/subsys.h>. */
 
 void pl011_init(void);
-void aarch64_extend_direct_map(void);
 extern char exception_vectors[];
 
 /* Forward declarations for boot_log helpers + GIC dispatch probes
@@ -101,6 +101,16 @@ static void aarch64_pt_smoke_test(void)
         goto fail;
     }
     data_owned = true;
+    /* Spec §6.2: the allocated page must lie inside the fixed bootstrap
+     * direct-map window so the read/write below exercises a
+     * PMD_low1[1..511] block that head.S filled before the MMU was
+     * enabled. An allocator handing out a 2 MiB block below 0x40200000
+     * is a real PMM finding, not a test problem — report it, don't
+     * weaken the bound. */
+    if (data_pa < UINT64_C(0x40200000) || data_pa >= UINT64_C(0x80000000)) {
+        fail_reason = "data_pa outside 0x40200000..0x80000000";
+        goto fail;
+    }
     int map_rc = aarch64_pt_map_4k(root, AARCH64_PT_SELFTEST_VA, data_pa,
                                    AARCH64_PT_KERNEL_RW);
     if (map_rc != AARCH64_PT_OK) {
@@ -200,6 +210,300 @@ fail:
     }
     for (;;) arch_cpu_halt();
 }
+
+/* ── Boot-map selftest (M0) ────────────────────────────────────────
+ * Validates the descriptors head.S installed in the active TTBR0
+ * root. head.S fills all 512 PMD_low1 slots before the MMU is
+ * enabled; this walk proves the installed descriptors match the
+ * spec contract (complete descriptor encoding) for PMD_low1[1..511].
+ *
+ * The walk reads the ACTUAL installed entries — not a constructor's
+ * return value: PGD[0] → PUD[0] → PMD_low0 and PUD[1] → PMD_low1,
+ * each link checked for table-descriptor type (bits[1:0]=11) and a
+ * sane physical base before being followed through ARCH_PAGE_OFFSET.
+ *
+ * Special low-map leaves use field-wise checks for precise mismatch
+ * reasons; PMD_low1[1..511] use exact descriptor equality so no
+ * unexpected or reserved bit can pass unnoticed.
+ * Expected full descriptors after the head.S fix:
+ *   PMD_low0[0]    = 0x60000000000705  (PA=0,          Normal 0x705, PXN|UXN)
+ *   PMD_low0[0x40] = 0x60000008000401  (PA=0x08000000, Device 0x401, PXN|UXN)
+ *   PMD_low1[0]    = 0x40000040000705  (PA=0x40000000, Normal 0x705, UXN only)
+ *   PMD_low1[i]    = 0x60000000000705 | (0x40000000 + i*0x200000)
+ *                    for i=1..511        (Normal 0x705, PXN|UXN)
+ * ──────────────────────────────────────────────────────────────── */
+
+/* Descriptor field masks. */
+#define BOOT_MAP_TABLE_TYPE     UINT64_C(0x3)               /* bits[1:0]=11: table link  */
+#define BOOT_MAP_BLOCK_TYPE     UINT64_C(0x1)               /* bits[1:0]=01: 2 MiB block */
+#define BOOT_MAP_TABLE_PA_MASK  UINT64_C(0x000000FFFFFFF000) /* 40-bit PA bits [39:12] */
+#define BOOT_MAP_BLOCK_PA_MASK  UINT64_C(0x000000FFFFE00000) /* 40-bit PA bits [39:21] */
+#define BOOT_MAP_LOW_MASK       UINT64_C(0x7FF)              /* low flags bits [10:0];
+ * AttrIndx is encoded at bits [4:2] and is included in this check. */
+#define BOOT_MAP_PXN_BIT        UINT64_C(0x20000000000000)    /* bit 53                  */
+#define BOOT_MAP_UXN_BIT        UINT64_C(0x40000000000000)    /* bit 54                  */
+#define BOOT_MAP_CONTIG_BIT     UINT64_C(0x10000000000000)    /* bit 52: Contiguous hint */
+
+/* Format a uint64 as decimal into buf. The aarch64 libk subset has no
+ * snprintf, so the PMD_low1 walk uses this to build a per-slot `what`
+ * prefix ("PMD_low1[123]") in a caller-owned buffer — boot_map_check_block
+ * writes its reason into its OWN static buffer, so the prefix must not
+ * live there. */
+static void boot_map_fmt_u64(char *buf, uint64_t v)
+{
+    char tmp[24];
+    int n = 0;
+    int i = 0;
+    if (v == 0) {
+        buf[0] = '0';
+        buf[1] = '\0';
+        return;
+    }
+    while (v != 0) {
+        tmp[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    while (n > 0) {
+        buf[i++] = tmp[--n];
+    }
+    buf[i] = '\0';
+}
+
+/* Validate one intermediate table descriptor (a PGD/PUD link).
+ * Requires bits[1:0]=11 (table) and a nonzero, 4 KiB-aligned
+ * next-table PA below 1 TiB. On success stores the PA in *next_pa
+ * and returns NULL; on failure returns a static-buffer reason
+ * string prefixed with `what`. BSP pre-SMP single-threaded, so the
+ * static buffer is safe. */
+static const char *boot_map_check_table(const char *what, uint64_t desc,
+                                        uint64_t *next_pa)
+{
+    static char reason[96];
+
+    if ((desc & BOOT_MAP_TABLE_TYPE) != BOOT_MAP_TABLE_TYPE) {
+        strcpy(reason, what);
+        strcat(reason, ": not a table descriptor (bits[1:0] != 11)");
+        return reason;
+    }
+    uint64_t pa = desc & BOOT_MAP_TABLE_PA_MASK;
+    if (pa == 0
+        || (pa & (PAGE_4K_SIZE - 1)) != 0
+        || pa >= (UINT64_C(1) << 40)) {
+        strcpy(reason, what);
+        strcat(reason, ": next-table PA invalid");
+        return reason;
+    }
+    *next_pa = pa;
+    return NULL;
+}
+
+/* Validate one installed 2 MiB block descriptor (a PMD leaf).
+ * Requires bits[1:0]=01 (block), PA field (bits [39:21]) equal to
+ * expected_pa, low flags (bits [10:0]) equal to expected_low, bit 52
+ * clear, and the PXN/UXN bits matching expected_exec. On success
+ * returns NULL; on failure returns a static-buffer reason string
+ * prefixed with `what`. expected_pa is a MASKED PA field (bits
+ * [39:21]), not an address — mask before passing. */
+static const char *boot_map_check_block(const char *what, uint64_t desc,
+                                        uint64_t expected_pa,
+                                        uint64_t expected_low,
+                                        uint64_t expected_exec)
+{
+    static char reason[96];
+
+    if ((desc & UINT64_C(0x3)) != BOOT_MAP_BLOCK_TYPE) {
+        strcpy(reason, what);
+        strcat(reason, ": not a 2 MiB block descriptor (bits[1:0] != 01)");
+        return reason;
+    }
+    if ((desc & BOOT_MAP_BLOCK_PA_MASK) != expected_pa) {
+        strcpy(reason, what);
+        strcat(reason, ": PA field mismatch");
+        return reason;
+    }
+    if ((desc & BOOT_MAP_LOW_MASK) != expected_low) {
+        strcpy(reason, what);
+        strcat(reason, ": low flags mismatch");
+        return reason;
+    }
+    if ((desc & BOOT_MAP_CONTIG_BIT) != 0) {
+        strcpy(reason, what);
+        strcat(reason, ": bit 52 (Contiguous hint) set");
+        return reason;
+    }
+    if ((desc & BOOT_MAP_PXN_BIT) != (expected_exec & BOOT_MAP_PXN_BIT)) {
+        strcpy(reason, what);
+        strcat(reason, ": PXN mismatch");
+        return reason;
+    }
+    if ((desc & BOOT_MAP_UXN_BIT) != (expected_exec & BOOT_MAP_UXN_BIT)) {
+        strcpy(reason, what);
+        strcat(reason, ": UXN mismatch");
+        return reason;
+    }
+    return NULL;
+}
+
+/* Validate a block descriptor whose complete encoding is part of the
+ * bootstrap contract, including reserved or otherwise unexpected bits. */
+static const char *boot_map_check_exact_block(const char *what, uint64_t desc,
+                                              uint64_t expected_desc)
+{
+    static char reason[96];
+
+    if (desc != expected_desc) {
+        strcpy(reason, what);
+        strcat(reason, ": descriptor mismatch (unexpected bits or fields)");
+        return reason;
+    }
+    return NULL;
+}
+
+/* Scan entries beginning at first_slot, using the same descriptor
+ * validation path for both the live table and the synthetic regression
+ * descriptor. */
+static const char *boot_map_check_pmd_low1_range(const uint64_t *entries,
+                                                 uint64_t first_slot,
+                                                 uint64_t count)
+{
+    for (uint64_t offset = 0; offset < count; ++offset) {
+        uint64_t i = first_slot + offset;
+        char what[32];
+        strcpy(what, "PMD_low1[");
+        boot_map_fmt_u64(what + strlen(what), i);
+        strcat(what, "]");
+
+        uint64_t expected_desc = UINT64_C(0x60000000000705)
+                               + UINT64_C(0x40000000)
+                               + i * UINT64_C(0x200000);
+        const char *r = boot_map_check_exact_block(what, entries[offset],
+                                                   expected_desc);
+        if (r != NULL)
+            return r;
+    }
+    return NULL;
+}
+
+/* Pre-SMP validation of the installed boot page tables. Runs after
+ * the PMM alloc/free smoke and before the 4 KiB page-table smoke.
+ * On any malformed table link or descriptor mismatch it logs the
+ * FATAL marker and halts before GIC/SMP bring-up. */
+static void aarch64_boot_map_selftest(void)
+{
+    const char *fail_reason = NULL;
+    const char *r = NULL;
+    uint64_t ttbr_raw = 0;
+    uint64_t ttbr_pa = 0;
+    uint64_t pud_pa = 0;
+    uint64_t pmd_pa = 0;
+    uint64_t *root = NULL;
+    uint64_t *pud = NULL;
+    const uint64_t *pmd_low0 = NULL;
+    const uint64_t *pmd_low1 = NULL;
+
+    /* Step 1: read raw TTBR0_EL1 and validate it exactly the way
+     * aarch64_pt_smoke_test() does. */
+    ttbr_raw = (uint64_t)(uintptr_t)arch_get_page_table();
+    if ((ttbr_raw & ~AARCH64_TTBR_ALLOWED_MASK) != 0) {
+        fail_reason = "ttbr_raw has disallowed bits";
+        goto fail;
+    }
+    ttbr_pa = ttbr_raw & AARCH64_TTBR_BASE_MASK;
+    if (ttbr_pa == 0
+        || (ttbr_pa & (PAGE_4K_SIZE - 1)) != 0
+        || ttbr_pa >= (UINT64_C(1) << 40)) {
+        fail_reason = "ttbr_pa invalid";
+        goto fail;
+    }
+    root = (uint64_t *)(uintptr_t)(ttbr_pa + ARCH_PAGE_OFFSET);
+
+    /* Step 2: follow the ACTUAL installed table descriptors.
+     * PGD[0] is the shared TTBR0/TTBR1 root → PUD_low. */
+    r = boot_map_check_table("PGD[0]", root[0], &pud_pa);
+    if (r != NULL) {
+        fail_reason = r;
+        goto fail;
+    }
+    pud = (uint64_t *)(uintptr_t)(pud_pa + ARCH_PAGE_OFFSET);
+
+    /* PUD[0] → PMD_low0 (physical 0..1 GiB). */
+    r = boot_map_check_table("PUD[0]", pud[0], &pmd_pa);
+    if (r != NULL) {
+        fail_reason = r;
+        goto fail;
+    }
+    pmd_low0 = (const uint64_t *)(uintptr_t)(pmd_pa + ARCH_PAGE_OFFSET);
+
+    /* PUD[1] → PMD_low1 (physical 1..2 GiB). */
+    r = boot_map_check_table("PUD[1]", pud[1], &pmd_pa);
+    if (r != NULL) {
+        fail_reason = r;
+        goto fail;
+    }
+    pmd_low1 = (const uint64_t *)(uintptr_t)(pmd_pa + ARCH_PAGE_OFFSET);
+
+    /* Step 3: PMD_low0 — one Normal block (slot 0) and one MMIO
+     * Device block (slot 0x40). Kept separate from the PMD_low1
+     * walk: these cover the low identity region, not the kernel
+     * image direct map. Both must carry PXN|UXN. */
+    r = boot_map_check_block("PMD_low0[0]", pmd_low0[0],
+                             0, 0x705,
+                             BOOT_MAP_PXN_BIT | BOOT_MAP_UXN_BIT);
+    if (r != NULL) {
+        fail_reason = r;
+        goto fail;
+    }
+    r = boot_map_check_block("PMD_low0[0x40]", pmd_low0[0x40],
+                             UINT64_C(0x08000000), 0x401,
+                             BOOT_MAP_PXN_BIT | BOOT_MAP_UXN_BIT);
+    if (r != NULL) {
+        fail_reason = r;
+        goto fail;
+    }
+
+    /* Step 4: PMD_low1[0] — the kernel-image block. Executable at
+     * EL1 (PXN=0) but not at EL0 (UXN=1). */
+    r = boot_map_check_block("PMD_low1[0]", pmd_low1[0],
+                             UINT64_C(0x40000000), 0x705,
+                             BOOT_MAP_UXN_BIT);
+    if (r != NULL) {
+        fail_reason = r;
+        goto fail;
+    }
+
+    /* Check once that the exact-descriptor helper rejects a PA bit that
+     * lies above this 40-bit physical-address configuration. */
+    uint64_t probe_expected_desc = UINT64_C(0x60000000000705)
+                                 + UINT64_C(0x40000000)
+                                 + UINT64_C(0x200000);
+    const uint64_t probe_entry = probe_expected_desc | (UINT64_C(1) << 40);
+    r = boot_map_check_pmd_low1_range(&probe_entry, 1, 1);
+    if (r == NULL) {
+        fail_reason = "PA bit 40 mutation was accepted";
+        goto fail;
+    }
+
+    /* Step 5: PMD_low1[1..511] — the fixed bootstrap direct-map window
+     * head.S fills before the MMU is enabled. Each slot must be a 2 MiB
+     * Normal block at PA 0x40000000 + i*0x200000 with low flags 0x705,
+     * PXN|UXN set and bit 52 clear. This checks the complete descriptor,
+     * including reserved bits, in one assertion per slot. The
+     * `what` prefix is formatted into a local buffer because
+     * boot_map_check_exact_block writes its reason into its own static
+     * buffer. */
+    r = boot_map_check_pmd_low1_range(pmd_low1 + 1, 1, 511);
+    if (r != NULL) {
+        fail_reason = r;
+        goto fail;
+    }
+
+    log_info("UEFI-A64: boot map selftest OK\n");
+    return;
+
+fail:
+    log_err("[smp] FATAL: aarch64 boot map selftest: %s\n", fail_reason);
+    for (;;) arch_cpu_halt();
+}
 #endif
 
 void aarch64_main(const struct boot_context *handoff)
@@ -253,15 +557,11 @@ void aarch64_main(const struct boot_context *handoff)
         if (p) { free_pages(p, 1); log_info("UEFI-A64: pmm alloc smoke OK\n"); }
         else   { log_err("UEFI-A64: pmm alloc smoke FAIL\n"); }
     }
-    /* head.S build_pagetables only writes PMD_low1[0]; slots 1..511
-     * are left zero, so physical 0x40200000..0x80000000 has no
-     * direct-map alias. Without this fixup the first runtime
-     * alloc_4k_page() whose PA lies above 0x40200000 faults in
-     * pmm.c when it writes the subpage_pool header. The fixup walks
-     * the installed PGD → PUD → PMD_low1 and fills the missing slots
-     * with 2 MiB Normal kernel-RW non-exec block descriptors. Pre-SMP
-     * single-threaded; mutates the active root. */
-    aarch64_extend_direct_map();
+    /* Validate the descriptors head.S installed in the active TTBR0
+     * root. head.S fills all 512 PMD_low1 slots before the MMU is
+     * enabled; this proves the installed descriptors match the spec
+     * contract before the 4 KiB smoke runs. */
+    aarch64_boot_map_selftest();
     aarch64_pt_smoke_test();
 #endif
 

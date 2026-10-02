@@ -54,9 +54,9 @@
 .equ PT_AP_EL1_RW,         (0 << 6)      /* AP field is bits[7:6] */
 .equ PT_AF,                (1 << 10)
 
-/* High bits — always combined via register-OR (out of immediate range). */
+/* High bits — single-bit masks, encodable as logical immediates. */
 .equ PT_PXN_MASK,          (1 << 53)
-.equ PT_UXN_MASK,          (1 << 52)
+.equ PT_UXN_MASK,          (1 << 54)
 
 /* SCTLR value: M=1, C=1, I=1 plus RES1 base 0x300C00. */
 .equ SCTLR_VALUE, ((1 << 0) | (1 << 2) | (1 << 12) | 0x300C00)
@@ -376,9 +376,9 @@ build_pagetables:
     stp     x29, x30, [sp, #-16]!
     mov     x29, sp
 
-    /* x20 = mask for "no-execute" high bits (PXN | UXN = 0x30 << 52). */
+    /* x20 = mask for "no-execute" high bits (PXN | UXN = 0x3 << 53). */
     mov     x20, #0x3
-    lsl     x20, x20, #52
+    lsl     x20, x20, #53
 
     /* Page-table bases (physical, MMU is off). */
     ldr     x10, =boot_page_tables
@@ -494,18 +494,52 @@ zp_all:
      *    need per-page permissions within this 2 MiB block; all of it
      *    is uniformly EL1 RW + exec + UXN.
      *
+     *    PMD_low1[1..511] = 2 MiB Normal blocks covering the fixed
+     *    bootstrap direct-map window 0x40200000..0x80000000. These are
+     *    filled here, before the MMU is enabled, so both the ordinary
+     *    and selftest images have the mapping from the first instruction.
+     *    Each carries the same Normal low flags as PMD_low0 (x22=0x705)
+     *    plus PXN|UXN (x20): EL1 RW, no EL1/EL0 exec.
+     *
      *    PMD_low1 is the PMD table for PUD[1] (which covers 1..2GB), so
      *    PMD index 0 within PMD_low1 corresponds to PA 0x40000000.
      */
     mov     x0, #0x40000000                   /* x0 = PA                 */
     mov     x1, x22                           /* x1 = flags              */
     bl      make_2m                           /* x0 = block descriptor   */
-    /* Clear PXN so the kernel code in this 2 MiB block can execute. */
+    /* UXN first (no EL0 exec), then clear ONLY PXN so the kernel
+     * code in this 2 MiB block can execute at EL1. */
+    orr     x0, x0, #PT_UXN_MASK
     bic     x0, x0, #PT_PXN_MASK
     mov     x1, x0                            /* x1 = descriptor         */
     mov     x0, x13                           /* x0 = PMD_low1 base      */
     mov     x2, #0                            /* PMD index 0             */
     bl      write_slot
+
+    /* ── 3b. PMD_low1[1..511]: fill the fixed bootstrap direct-map
+     * window 0x40200000..0x80000000 with 2 MiB Normal blocks.
+     * x24 = slot index, x25 = running PA, x26 = slots remaining.
+     * Reuses x22 (Normal low flags) and x20 (PXN|UXN); x13 is the
+     * PMD_low1 base. make_2m/write_slot only clobber x0/x1/x2/x3,
+     * which are re-initialised each iteration. */
+    mov     x24, #1                           /* PMD index 1..511        */
+    mov     x25, #0x40200000                   /* block PA for index 1    */
+    mov     x26, #511                          /* slots remaining         */
+.Lpmd1_fill:
+    cbz     x26, .Lpmd1_fill_done
+    mov     x0, x25
+    mov     x1, x22
+    bl      make_2m
+    orr     x0, x0, x20                       /* PXN | UXN               */
+    mov     x1, x0                            /* x1 = descriptor         */
+    mov     x0, x13                           /* x0 = PMD_low1 base      */
+    mov     x2, x24                           /* x2 = slot index         */
+    bl      write_slot
+    add     x25, x25, #0x200000
+    add     x24, x24, #1
+    sub     x26, x26, #1
+    b       .Lpmd1_fill
+.Lpmd1_fill_done:
 
     ldp     x29, x30, [sp], #16
     ret
