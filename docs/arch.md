@@ -18,9 +18,10 @@ OS01 同时支持 **x86_64** 和 **aarch64**（后者仅 UEFI 启动路径）。
 | `arch/include/subsys.h` | — | `arch/x86_64/linker.ld` 收集 `.subsys_init` | — | 10 driver 自注册（apic/pic/pit/lapic-timer/timer/serial/keyboard/ahci/pci/net）；`arch_register_subsys()` 缩到 7 行 loop |
 | `arch/sched/...` `kernel_thread_entry` | `sched/arch_kernel_thread_entry.c`（panic-on-call） | `arch/x86_64/cpu/thread_entry.S` | — | arch-neutral 调度器线程入口；`task.c` 不再 include per-arch 头 |
 | `memory/pmm.h` `pmm_init(boot_context*)` | `memory/pmm_arch.c`（弱默认 `pmm_arch_normalize`/`pmm_arch_zone_split`） | `arch/x86_64/memory/pmm_arch.c`（E820 + kernel-LMA/handoff/trampoline excludes + 2 MiB granule + sort/merge） | `arch/aarch64/memory/pmm_arch.c`（读 `aarch64_ram_map_get()`） | 物理内存 arch-neutral 入口；`MEMORY_RANGE[]` 中介；RAM-relative indexing（`pages_struct + ((start - lowest_ram) >> 21)`） |
+| `arch/boot_memory.h` `arch_boot_direct_map_init/ready/ranges` | 无默认实现；每架构提供同名后端 | `arch/x86_64/memory/boot_direct_map.c`，checked `vmm_init()` + zone cutoff | `arch/aarch64/memory/boot_direct_map.c`，arena + strict TTBR1 + AP 验证 | 启动期共同契约；coverage 是映射 RAM，包含已占用页；动态 VMM 不在 M1 范围内 |
 | `log/log.h` `_log_*_impl` 宏 | `log/log.c` core（gate-wrapped） | `core/log.c` 走 `_log_writev` + vsnprintf + serial | `arch/aarch64/runtime/log_impl.c` 走 `kputs(fmt)` 忽略 variadic | 跨 arch 日志；aarch64 `-nostdlib` 无 vsnprintf |
 
-**共同模式**：所有 facade 都满足「weak default 提供无操作/panic/FATAL/identity 默认行为，strong override 提供真实现，per-arch 通过头文件位于 `kernel/include/arch/<arch>/` 镜像」。链接器强覆盖优先解析同名符号。**没有运行时分派**：编译期决定。
+**共同模式**：多数 facade 满足「weak default 提供无操作/panic/FATAL/identity 默认行为，strong override 提供真实现，per-arch 通过头文件位于 `kernel/include/arch/<arch>/` 镜像」。链接器强覆盖优先解析同名符号。**没有运行时分派**：编译期决定。
 
 ---
 

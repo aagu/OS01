@@ -38,21 +38,21 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 已完成：v25 arch-cleanup / PMM arch-neutral / 页表原语 / Generic Timer Phase 1 + Phase 2 #1~#5 / GICv2 Phase 1 + GIC probe fix / AAGU-3 subsys_stub convergence / AAGU-29 libk.a link / IPI TPIDR_EL1 fix（详见 `docs/changelog.md` + `docs/aarch64-*-closure-2026-09-18.md` + `docs/aarch64-libk-aarch64-closure-2026-09-24.md` + `docs/aarch64-ipi-fail-handoff-2026-09-26.md`）。
 
-#### 内存管理：按 x86_64 的两阶段映射推进（2026-10-01 核查）
+#### 内存管理：共同启动直映接口（2026-10-02）
 
-x86_64 的 `head.S` 只预置低地址与高半区共享的前 32 MiB 映射；`x86_64_boot_memory()` 随后执行 `pmm_init()` → `vmm_init()`，后者按 PMM 的 zone/page 描述符扩展 2 MiB 直映。aarch64 的 `aarch64_main()` 已调用同一份 `pmm_init()`，但没有运行期 `vmm_init()`：`head.S` 映射 0..1 GiB 与 `0x40000000..0x40200000`，`0x40200000..0x80000000` 由 `boot_fixup.c` 补齐，且当前调用被 `OS01_SELFTEST` 包住。aarch64 的 `ARCH_PAGE_OFFSET` 为 `0xffff000000000000`，不能照搬 x86_64 的页表描述符或固定页表地址。
+两种架构现在都在 PMM 初始化后调用 `arch_boot_direct_map_init()`，通过 `arch/boot_memory.h` 查询 readiness 与不可变、合并的 RAM coverage。x86_64 沿用 2 MiB `vmm_init()`，保留 `ZONE_UNMAPPED_INDEX` 非零时的覆盖截止语义，并传播中间页表分配失败。aarch64 的 M0 在 `head.S` 中提供普通/自测一致的 0..2 GiB 启动映射；M1 从低窗口 arena 建立独立 TTBR1，只映射真实 RAM、启动保留 block 和设备窗口，再启动 AP。两者的页表编码、偏移与 TLBI 留在架构实现内。
 
 以下是**实施顺序**，每项单独设计与验收；启动页表修复只解决当前直映缺口，不等于完成运行期 VMM。RAM 范围以 UEFI 归一化结果为准，固定映射到 `0x80000000` 不能代替任意内存容量及稀疏范围的处理。
 
 | 阶段 | 任务与完成条件 | 前置 |
 |------|----------------|------|
-| M0 启动映射契约 | 明确从打开 MMU 到运行期映射建立前，内核映像、PMM 元数据及首批页表页可访问的最小范围；消除 `aarch64_extend_direct_map()` 仅在 selftest 执行的差异。可将必需的早期 block 填充移入 `head.S`，或改为普通启动也执行的早期补图，但须验证首次 `alloc_4k_page()` 不会触及未映射物理页。保留内核可执行 block 与普通 RAM 的 PXN/UXN 区别。普通镜像、自测镜像及 SMP QEMU 启动均验收。 | 现有 boot 页表、PMM ✅ |
-| M1 运行期直映 | 在 BSP、AP 启动前，依据 `aarch64_ram_map_get()` / PMM zones 补齐可分配 RAM 的高半区映射；区分 RAM 与设备内存属性，覆盖超过当前固定窗口和稀疏区间。建表本身不能依赖尚未可用的 Slab 或会落在未映射页的 `alloc_4k_page()`；定义早期页表页来源、空间不足的失败路径和 TLBI/屏障规则。用多 RAM 大小及首尾物理页的访问测试证明映射与 PMM 可分配范围一致。 | M0；RAM 归一化、PMM ✅ |
+| M0 启动映射契约 ✅ | `head.S` 在 MMU 打开前建立 0..2 GiB boot map，内核 block 保持 EL1 可执行，其余 RAM PXN/UXN；普通/自测一致，已移除 C 补图差异。 | 现有 boot 页表、PMM ✅ |
+| M1 运行期直映 ✅ | 共同 `arch_boot_direct_map_*` 接口；aarch64 arena 建立独立 TTBR1，收紧非 RAM 映射并覆盖高 RAM/holes；BSP/AP root 与 probe 验证，16 组矩阵和稀疏/耗尽/坏 root 注入通过。 | M0；RAM 归一化、PMM ✅ |
 | M2 Slab 实装与初始化顺序 | aarch64 目前编译 `runtime/slab_stub.c`：`slab_init()` 无操作，`kmalloc()` 返回 `NULL`。移除占位实现并移植/共用真实 Slab；处理 `slab.c` 中 x86 专属 `pushfq`/`cli`/`sti` 锁路径。`pmm_init()` 当前在末尾调用 `slab_init()`，因此先明确早期映射是否足以覆盖 Slab 元数据与预留页；若需等 M1，则拆分初始化顺序为 PMM 元数据 → 运行期直映 → Slab，同时保持 x86_64 的预留语义。验证跨缓存大小的分配/释放和 QEMU 启动。 | M1；PMM ✅ |
 | M3 内核 VMM 接口 | 以 `arch/aarch64/memory/page_table.c` 的 4 KiB 原语为基础，补运行期内核映射/解除映射、2 MiB block 与 4 KiB table 共存及必要的拆分、权限/属性、页表页生命周期和 SMP TLB 失效；给通用调用方提供架构中立接口。现有 `memory/vmm.c` 使用 x86 页表 flag 和 `kernel_map=Phy_To_Virt(0x101000)`，不能直接列入 aarch64 源清单。为页表原语补 host 边界测试，并用 QEMU 验证真实映射。 | M1、M2；4 KiB 页表原语 ✅ |
 | M4 用户地址空间与 VMA | 建立 aarch64 用户页表根、EL0 权限和地址空间切换/回收，再使 VMA/mmap/ELF、缺页分配、COW 与 `munmap` 使用 M3 接口；把 `arch_user_range_accessible()` 的 aarch64 fail-closed 实现替换为真实跨页权限检查，并接通 uaccess 故障恢复。现有 `memory/vma.c` 和 x86_64 `do_page_fault()` 直接使用 x86 PTE flag，需先剥离架构语义；EL1 sync 目前只有致命诊断，EL0 sync 入口仍未接入。以隔离、权限、COW、回收和用户态 QEMU 用例验收。 | M3；Slab、调度/上下文切换、EL0 异常路径 |
 
-**当前已具备的部分**：aarch64 的 RAM 归一化及共用 `PMMngr`/`alloc_pages()`/`alloc_4k_page()`；BSP 启动期 4 KiB map/query/unmap smoke。`aarch64_pt_range_accessible()` 已存在于页表原语，但 `arch/mmu.h::arch_user_range_accessible()` 仍返回 `false`，不能视为 uaccess 已接通。M0 是下一项独立任务；M1–M4 不能随 M0 标记完成。
+**当前已具备的部分**：aarch64 的 RAM 归一化及共用 `PMMngr`/`alloc_pages()`/`alloc_4k_page()`；BSP 启动期 4 KiB map/query/unmap smoke。`aarch64_pt_range_accessible()` 已存在于页表原语，但 `arch/mmu.h::arch_user_range_accessible()` 仍返回 `false`，不能视为 uaccess 已接通。M0、M1 已独立验收；M2–M4 尚未完成。M1 的 16 组 RAM/CPU/镜像矩阵与稀疏、容量耗尽、AP 无效 root 注入记录见 `docs/memory/memory.md`。
 
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
