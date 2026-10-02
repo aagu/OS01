@@ -228,7 +228,7 @@ fail:
  * Expected full descriptors after the head.S fix:
  *   PMD_low0[0]    = 0x60000000000705  (PA=0,          Normal 0x705, PXN|UXN)
  *   PMD_low0[0x40] = 0x60000008000401  (PA=0x08000000, Device 0x401, PXN|UXN)
- *   PMD_low1[0]    = 0x40004000000705  (PA=0x40000000, Normal 0x705, UXN only)
+ *   PMD_low1[0]    = 0x40000040000705  (PA=0x40000000, Normal 0x705, UXN only)
  *   PMD_low1[i]    = 0x60000000000705 | (0x40000000 + i*0x200000)
  *                    for i=1..511        (Normal 0x705, PXN|UXN)
  * ──────────────────────────────────────────────────────────────── */
@@ -238,7 +238,10 @@ fail:
 #define BOOT_MAP_BLOCK_TYPE     UINT64_C(0x1)               /* bits[1:0]=01: 2 MiB block */
 #define BOOT_MAP_TABLE_PA_MASK  UINT64_C(0x000000FFFFFFF000) /* next-table PA [47:12]  */
 #define BOOT_MAP_BLOCK_PA_MASK  UINT64_C(0x000000FFFFE00000) /* block PA bits [47:21]  */
-#define BOOT_MAP_LOW_MASK       UINT64_C(0x7FF)              /* low flags bits [10:0]   */
+#define BOOT_MAP_LOW_MASK       UINT64_C(0x7FF)              /* low flags bits [10:0];
+ * AttrIndx sits at bits [4:2] inside this mask; if AttrIndx ever moves
+ * to the AArch64-standard bits [15:12] this selftest would otherwise
+ * silently stop checking memory type. */
 #define BOOT_MAP_PXN_BIT        UINT64_C(0x20000000000000)    /* bit 53                  */
 #define BOOT_MAP_UXN_BIT        UINT64_C(0x40000000000000)    /* bit 54                  */
 #define BOOT_MAP_CONTIG_BIT     UINT64_C(0x10000000000000)    /* bit 52: Contiguous hint */
