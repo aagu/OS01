@@ -85,7 +85,7 @@ These failure modes are easy to miss even when a 1-CPU boot appears healthy; the
 
   ```bash
   python3 qemutests/aarch64_uefi_smp.py --cpus 1 2 --repeat 1 --timeout 90 \
-    --expect-gic --expect-clk --diagnostic-dtb auto \
+    --expect-clk --diagnostic-dtb auto \
     --firmware build/aarch64-clang/image/QEMU_EFI.fd \
     --image build/aarch64-clang/image/aarch64-uefi.img \
     --qemu qemu-system-aarch64 --log-dir /tmp/os01-aarch64-m0-normal

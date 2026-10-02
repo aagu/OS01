@@ -215,16 +215,16 @@ fail:
  * Validates the descriptors head.S installed in the active TTBR0
  * root. head.S fills all 512 PMD_low1 slots before the MMU is
  * enabled; this walk proves the installed descriptors match the
- * spec contract (block type, PA, low flags, PXN/UXN, bit 52).
+ * spec contract (complete descriptor encoding) for PMD_low1[1..511].
  *
  * The walk reads the ACTUAL installed entries — not a constructor's
  * return value: PGD[0] → PUD[0] → PMD_low0 and PUD[1] → PMD_low1,
  * each link checked for table-descriptor type (bits[1:0]=11) and a
  * sane physical base before being followed through ARCH_PAGE_OFFSET.
  *
- * Leaf checks are field-wise (block type, PA, low flags, PXN, UXN,
- * bit 52) so the failure reason names the exact mismatch and so the
- * same helper can be reused for the full 512-slot PMD_low1 walk.
+ * Special low-map leaves use field-wise checks for precise mismatch
+ * reasons; PMD_low1[1..511] use exact descriptor equality so no
+ * unexpected or reserved bit can pass unnoticed.
  * Expected full descriptors after the head.S fix:
  *   PMD_low0[0]    = 0x60000000000705  (PA=0,          Normal 0x705, PXN|UXN)
  *   PMD_low0[0x40] = 0x60000008000401  (PA=0x08000000, Device 0x401, PXN|UXN)
@@ -236,12 +236,10 @@ fail:
 /* Descriptor field masks. */
 #define BOOT_MAP_TABLE_TYPE     UINT64_C(0x3)               /* bits[1:0]=11: table link  */
 #define BOOT_MAP_BLOCK_TYPE     UINT64_C(0x1)               /* bits[1:0]=01: 2 MiB block */
-#define BOOT_MAP_TABLE_PA_MASK  UINT64_C(0x000000FFFFFFF000) /* next-table PA [47:12]  */
-#define BOOT_MAP_BLOCK_PA_MASK  UINT64_C(0x000000FFFFE00000) /* block PA bits [47:21]  */
+#define BOOT_MAP_TABLE_PA_MASK  UINT64_C(0x000000FFFFFFF000) /* 40-bit PA bits [39:12] */
+#define BOOT_MAP_BLOCK_PA_MASK  UINT64_C(0x000000FFFFE00000) /* 40-bit PA bits [39:21] */
 #define BOOT_MAP_LOW_MASK       UINT64_C(0x7FF)              /* low flags bits [10:0];
- * AttrIndx sits at bits [4:2] inside this mask; if AttrIndx ever moves
- * to the AArch64-standard bits [15:12] this selftest would otherwise
- * silently stop checking memory type. */
+ * AttrIndx is encoded at bits [4:2] and is included in this check. */
 #define BOOT_MAP_PXN_BIT        UINT64_C(0x20000000000000)    /* bit 53                  */
 #define BOOT_MAP_UXN_BIT        UINT64_C(0x40000000000000)    /* bit 54                  */
 #define BOOT_MAP_CONTIG_BIT     UINT64_C(0x10000000000000)    /* bit 52: Contiguous hint */
@@ -300,12 +298,12 @@ static const char *boot_map_check_table(const char *what, uint64_t desc,
 }
 
 /* Validate one installed 2 MiB block descriptor (a PMD leaf).
- * Requires bits[1:0]=01 (block), PA field (bits [47:21]) equal to
+ * Requires bits[1:0]=01 (block), PA field (bits [39:21]) equal to
  * expected_pa, low flags (bits [10:0]) equal to expected_low, bit 52
  * clear, and the PXN/UXN bits matching expected_exec. On success
  * returns NULL; on failure returns a static-buffer reason string
  * prefixed with `what`. expected_pa is a MASKED PA field (bits
- * [47:21]), not an address — mask before passing. */
+ * [39:21]), not an address — mask before passing. */
 static const char *boot_map_check_block(const char *what, uint64_t desc,
                                         uint64_t expected_pa,
                                         uint64_t expected_low,
@@ -342,6 +340,46 @@ static const char *boot_map_check_block(const char *what, uint64_t desc,
         strcpy(reason, what);
         strcat(reason, ": UXN mismatch");
         return reason;
+    }
+    return NULL;
+}
+
+/* Validate a block descriptor whose complete encoding is part of the
+ * bootstrap contract, including reserved or otherwise unexpected bits. */
+static const char *boot_map_check_exact_block(const char *what, uint64_t desc,
+                                              uint64_t expected_desc)
+{
+    static char reason[96];
+
+    if (desc != expected_desc) {
+        strcpy(reason, what);
+        strcat(reason, ": descriptor mismatch (unexpected bits or fields)");
+        return reason;
+    }
+    return NULL;
+}
+
+/* Scan entries beginning at first_slot, using the same descriptor
+ * validation path for both the live table and the synthetic regression
+ * descriptor. */
+static const char *boot_map_check_pmd_low1_range(const uint64_t *entries,
+                                                 uint64_t first_slot,
+                                                 uint64_t count)
+{
+    for (uint64_t offset = 0; offset < count; ++offset) {
+        uint64_t i = first_slot + offset;
+        char what[32];
+        strcpy(what, "PMD_low1[");
+        boot_map_fmt_u64(what + strlen(what), i);
+        strcat(what, "]");
+
+        uint64_t expected_desc = UINT64_C(0x60000000000705)
+                               + UINT64_C(0x40000000)
+                               + i * UINT64_C(0x200000);
+        const char *r = boot_map_check_exact_block(what, entries[offset],
+                                                   expected_desc);
+        if (r != NULL)
+            return r;
     }
     return NULL;
 }
@@ -433,27 +471,30 @@ static void aarch64_boot_map_selftest(void)
         goto fail;
     }
 
+    /* Check once that the exact-descriptor helper rejects a PA bit that
+     * lies above this 40-bit physical-address configuration. */
+    uint64_t probe_expected_desc = UINT64_C(0x60000000000705)
+                                 + UINT64_C(0x40000000)
+                                 + UINT64_C(0x200000);
+    const uint64_t probe_entry = probe_expected_desc | (UINT64_C(1) << 40);
+    r = boot_map_check_pmd_low1_range(&probe_entry, 1, 1);
+    if (r == NULL) {
+        fail_reason = "PA bit 40 mutation was accepted";
+        goto fail;
+    }
+
     /* Step 5: PMD_low1[1..511] — the fixed bootstrap direct-map window
      * head.S fills before the MMU is enabled. Each slot must be a 2 MiB
      * Normal block at PA 0x40000000 + i*0x200000 with low flags 0x705,
-     * PXN|UXN set and bit 52 clear. This checks PA, type, Normal
-     * attributes, PXN/UXN and bit 52 in one assertion per slot. The
+     * PXN|UXN set and bit 52 clear. This checks the complete descriptor,
+     * including reserved bits, in one assertion per slot. The
      * `what` prefix is formatted into a local buffer because
-     * boot_map_check_block writes its reason into its own static buffer. */
-    for (uint64_t i = 1; i < 512; ++i) {
-        char what[32];
-        strcpy(what, "PMD_low1[");
-        boot_map_fmt_u64(what + strlen(what), i);
-        strcat(what, "]");
-        uint64_t expected_pa =
-            (UINT64_C(0x40000000) + i * UINT64_C(0x200000))
-            & BOOT_MAP_BLOCK_PA_MASK;
-        r = boot_map_check_block(what, pmd_low1[i], expected_pa, 0x705,
-                                 BOOT_MAP_PXN_BIT | BOOT_MAP_UXN_BIT);
-        if (r != NULL) {
-            fail_reason = r;
-            goto fail;
-        }
+     * boot_map_check_exact_block writes its reason into its own static
+     * buffer. */
+    r = boot_map_check_pmd_low1_range(pmd_low1 + 1, 1, 511);
+    if (r != NULL) {
+        fail_reason = r;
+        goto fail;
     }
 
     log_info("UEFI-A64: boot map selftest OK\n");
