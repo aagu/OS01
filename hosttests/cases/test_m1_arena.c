@@ -176,26 +176,30 @@ TEST_FUNC(test_happy_4_gib_low_window)
 
 TEST_FUNC(test_first_range_too_small_second_works)
 {
-    /* Range 0 is entirely above AARCH64_M1_ARENA_HI, so its
-     * intersection with [LOW, HI) is empty — effectively "too
-     * small" from the planner's vantage point. Range 1 sits inside
-     * [LOW, HI) and fits. The planner must skip range 0 and pick
-     * range 1. Ranges are listed in ascending PA order (range 0 at
-     * 0x50000000 inside [LOW, HI), range 1 above HI) — re-arrange:
-     * ascending start PA. */
+    /* Range 0 sits entirely below AARCH64_M1_ARENA_LOW — its
+     * intersection with the arena window [LOW, HI) is empty
+     * (effectively "too small" from the planner's vantage point,
+     * since arena_bytes >= 2 MiB and intersections are
+     * 2 MiB-aligned). Range 1 sits inside [LOW, HI) and is
+     * sufficient. The planner iterates ranges in ascending PA
+     * order and picks the first intersection large enough to
+     * hold the arena. */
     struct MEMORY_RANGE ram[2] = {
-        { .phys_start = 0x50000000ULL, .phys_end = 0x60000000ULL,
+        { .phys_start = 0x00000000ULL, .phys_end = 0x08000000ULL,  /* 128 MiB, below LOW */
           .type = MEMORY_TYPE_RAM },
-        { .phys_start = 0x80000000ULL, .phys_end = 0x80400000ULL,
+        { .phys_start = 0x40200000ULL, .phys_end = 0x60000000ULL,  /* 480 MiB, inside [LOW, HI) */
           .type = MEMORY_TYPE_RAM },
     };
     struct aarch64_m1_arena got;
     int rc = aarch64_m1_plan(ram, 2, &got);
     assert_eq(0, rc);
-    /* Range 0's intersection with [LOW, HI) starts at 0x50000000. */
-    assert_true(got.base_pa >= 0x50000000ULL);
-    assert_true(got.end_pa > got.base_pa);
+    /* The planner must have skipped range 0 (intersection = 0)
+     * and picked range 1: [0x40200000, 0x60000000). */
+    assert_true(got.base_pa >= 0x40200000ULL);
     assert_true(got.end_pa <= 0x60000000ULL);
+    /* Range 0's end is 0x08000000 — below LOW, so the selected
+     * base_pa must be at or above that boundary. */
+    assert_true(got.base_pa >= 0x08000000ULL);
 }
 
 TEST_FUNC(test_holes_between_ranges)

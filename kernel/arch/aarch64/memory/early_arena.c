@@ -44,6 +44,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <log/log.h>        /* log_err for the failure diagnostic
+                             * (brief: 失败打印需求/可用空间).  The
+                             * host-test build stubs _log_err_impl
+                             * via test_m1_arena.c, so calling
+                             * log_err from this TU is safe under
+                             * the test link. */
 #include <memory/memory_map.h>
 #include <memory/pmm.h>
 #include <memory/pmm_boot.h>
@@ -324,11 +330,78 @@ int aarch64_m1_plan(const struct MEMORY_RANGE *ram, size_t count,
  * pmm_init() places the PMM metadata at the high-half alias of the
  * arena base.
  *
- * Failure path: returns the planner's negative errno. The BSP
- * caller (kernel/arch/aarch64/boot/main.c) is responsible for
- * halting on negative rc and printing the diagnostic — keeping the
- * library function free of side effects lets host tests exercise
- * the negative branches without trapping via arch_cpu_halt(). */
+ * Failure path: per the brief ("失败打印需求/可用空间"), prints the
+ * need (arena_bytes, the size the RAM map could not provide) and the
+ * available space (largest intersection of any input RAM range with
+ * [AARCH64_M1_ARENA_LOW, AARCH64_M1_ARENA_HI)) so the BSP halts with
+ * an actionable diagnostic. PMMngr.start_brk is NOT touched on the
+ * failure path; the canary invariant is preserved (the canary is
+ * asserted by test_prepare_failure_preserves_start_brk in the host
+ * suite). */
+static void log_failure_diagnostic(const struct MEMORY_RANGE *ram, size_t count,
+                                   uint64_t need_bytes)
+{
+    uint64_t largest_lo = 0u, largest_hi = 0u, largest_sz = 0u;
+    size_t i;
+    for (i = 0u; i < count; ++i) {
+        uint64_t s = ram[i].phys_start;
+        uint64_t e = ram[i].phys_end;
+        uint64_t lo = s > AARCH64_M1_ARENA_LOW ? s : AARCH64_M1_ARENA_LOW;
+        uint64_t hi = e < AARCH64_M1_ARENA_HI  ? e : AARCH64_M1_ARENA_HI;
+        if (hi > lo && (hi - lo) > largest_sz) {
+            largest_sz = hi - lo;
+            largest_lo = lo;
+            largest_hi = hi;
+        }
+    }
+    log_err("[smp] FATAL: aarch64 M1 arena preflight failed\n");
+    log_err("[smp] FATAL: arena need=%llu MiB (metadata + table pool, 2 MiB-aligned)\n",
+            (unsigned long long)(need_bytes / (1024u * 1024u)));
+    if (largest_sz > 0u) {
+        log_err("[smp] FATAL: largest available intersection in [0x%x, 0x%x) = %llu MiB in [0x%llx, 0x%llx)\n",
+                (unsigned)AARCH64_M1_ARENA_LOW, (unsigned)AARCH64_M1_ARENA_HI,
+                (unsigned long long)(largest_sz / (1024u * 1024u)),
+                (unsigned long long)largest_lo, (unsigned long long)largest_hi);
+    } else {
+        log_err("[smp] FATAL: no RAM in [0x%x, 0x%x) window\n",
+                (unsigned)AARCH64_M1_ARENA_LOW, (unsigned)AARCH64_M1_ARENA_HI);
+    }
+}
+
+/* Re-derive the planner's first-iteration arena_bytes estimate so the
+ * failure diagnostic can print the exact requirement that no input
+ * range satisfied. Mirrors the first iteration of aarch64_m1_plan:
+ * (cand_end - ram[0].phys_start) span, computed metadata_bytes, plus
+ * table_pages * 4 KiB, rounded to 2 MiB. Returns 0 if the estimate
+ * itself fails (e.g., bad input). */
+static uint64_t estimate_need_bytes(const struct MEMORY_RANGE *ram, size_t count)
+{
+    size_t puds = 0u, pmds = 0u, table_pages;
+    uint64_t span_pages, metadata_bytes, metadata_aligned, pool_bytes, need_bytes;
+    uint64_t brk;
+    struct pmm_layout layout;
+    int rc;
+
+    if (ram == NULL || count == 0u) return 0u;
+    rc = count_buckets(ram, count, &puds, &pmds);
+    if (rc != 0) return 0u;
+    table_pages = 1u + puds + pmds;
+    span_pages = (ram[count - 1u].phys_end - ram[0].phys_start) >> 21;
+    if (span_pages == 0u) span_pages = 1u;
+    if (!checked_add(ram[0].phys_start, (uint64_t)ARCH_PAGE_OFFSET, &brk))
+        return 0u;
+    if (!checked_align_up(brk, PAGE_4K, &brk)) return 0u;
+    rc = pmm_layout_calculate(brk, span_pages, &layout);
+    if (rc != 0) return 0u;
+    metadata_bytes = layout.total_bytes;
+    if (!checked_align_up(metadata_bytes, PAGE_4K, &metadata_aligned))
+        return 0u;
+    if (!checked_add(metadata_aligned, table_pages * PAGE_4K, &pool_bytes))
+        return 0u;
+    if (!checked_align_up(pool_bytes, PAGE_2M, &need_bytes)) return 0u;
+    return need_bytes;
+}
+
 int aarch64_m1_prepare(const struct MEMORY_RANGE *ram, size_t count)
 {
     struct aarch64_m1_arena candidate_arena;
@@ -336,7 +409,12 @@ int aarch64_m1_prepare(const struct MEMORY_RANGE *ram, size_t count)
     if (arena_prepared) return -EALREADY;
 
     int rc = aarch64_m1_plan(ram, count, &candidate_arena);
-    if (rc != 0) return rc;   /* no side effects on failure */
+    if (rc != 0) {
+        /* Print need/available diagnostic (brief requirement). PMM
+         * state is not yet touched, so the canary invariant holds. */
+        log_failure_diagnostic(ram, count, estimate_need_bytes(ram, count));
+        return rc;
+    }
 
     /* Side-effecting PMM publish. The preflight writes to PMMngr only
      * here; pmm_init() will read it to place bits_map at the high
