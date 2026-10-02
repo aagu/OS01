@@ -55,9 +55,11 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 | `make test-qemu SUITE=phase-0\|systest\|inittab-phase\|network` | QEMU E2E against the matching variant image | `phase-0` |
 | `make test-host` | hosttests + PMM boot reservation | — |
 | `make test-static` | runtime / layout / canary / link-order audits (8 audits) | — |
-| `make test-aarch64 MODE=smp\|no-ack\|gic-spi\|sync-fault` | AArch64 PSCI / GIC / sync-fault harness | `smp` |
+| `make test-aarch64 MODE=smp\|no-ack\|gic-spi\|sync-fault\|m1-*` | AArch64 PSCI / GIC / sync-fault harness | `smp` |
 | `make test-contract PROFILE=x86_64-clang\|aarch64-clang` | CI build-contract check | `x86_64-clang` |
 | `make test-kernel-selftest` | Boot selftest image + parse `[selftest]` markers | — |
+
+AArch64 M1：`MODE=m1-ram` 分别构建 normal/selftest 独立镜像并跑 16 组 RAM/CPU 矩阵。其余 `m1-*` MODE 构建 `AARCH64_M1_TEST=sparse|arena-exhaust|table-exhaust|ap-bad-root` 对应的隔离 `image/m1-<case>/` / `kernel/m1-<case>/` 变体；该旗要求 `KERNEL_SELFTEST=1`，拒绝与 sync-fault、weak-selftest 或 canary 混用。稀疏 map 仅由编译旗改写，不从环境变量注入。`make PROFILE=x86_64-clang test-m1-host [CASE=m1-layout|m1-reservation|m1-arena|m1-tree|m1-contract-x86|m1-install|m1-publish]` 为原生 focused 测试入口，省略 CASE 跑整组。
 
 Standalone (not bucketed): `test-syscall-repeat` (own harness),
 `test-user-canary` (subset of test-static, distinct prereqs),
@@ -388,7 +390,7 @@ make INITTAB_FILE=config/inittab.test image   # → .../image/inittab-test/disk.
 | Bucket | Flag | 取值 | 运行内容 |
 | --- | --- | --- | --- |
 | `test-qemu` | `SUITE=` | `phase-0`、`systest`、`inittab-phase`、`network` | `qemutests/run_test.py <SUITE>` 对匹配的 variant 镜像 |
-| `test-aarch64` | `MODE=` | `smp`、`no-ack`、`gic-spi`、`sync-fault` | `qemutests/aarch64_*.py` 之一 |
+| `test-aarch64` | `MODE=` | `smp`、`no-ack`、`gic-spi`、`sync-fault`、`m1-ram`、`m1-sparse`、`m1-arena-exhaust`、`m1-table-exhaust`、`m1-ap-bad-root` | `qemutests/aarch64_*.py` 之一 |
 | `test-contract` | `PROFILE=` | `x86_64-clang`、`aarch64-clang` | `qemutests/build_contract.sh <PROFILE> <mode>` 按 profile mode 列表 |
 | `test-host` | — | — | `os01_submake hosttests` + `pmm_boot_reservation_test.py` |
 | `test-static` | — | — | 8 项静态审计（runtime_audit、stack_canary_audit、validate-kernel、runtime_link_order、kernel_runtime_link、kernel_layout、kernel_canary_contract、test-user-canary） |

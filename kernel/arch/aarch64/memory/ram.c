@@ -19,6 +19,7 @@
 
 
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <arch/cpu.h>
 #include <arch/mmu.h>
@@ -165,6 +166,24 @@ int aarch64_ram_init(const struct boot_context *handoff)
             ram_fatal("[smp] FATAL: normalizer rejected UEFI map\n");
     }
 
+#if AARCH64_M1_SPARSE
+    /* Remove real RAM only; require both neighboring frames in the same
+     * original interval before changing the one map PMM/M1 consume. */
+    bool removed=false;
+    for(size_t i=0;i<candidate.count;i++) {
+        if(candidate.ranges[i].start<=UINT64_C(0x4fe00000) &&
+           candidate.ranges[i].end>=UINT64_C(0x50400000)) {
+            if(candidate.count==AARCH64_RAM_MAX_RANGES)ram_fatal("M1 FATAL reason=sparse-capacity\n");
+            uint64_t end=candidate.ranges[i].end;
+            for(size_t j=candidate.count;j>i+1;j--)candidate.ranges[j]=candidate.ranges[j-1];
+            candidate.ranges[i].end=UINT64_C(0x50000000);
+            candidate.ranges[i+1].start=UINT64_C(0x50200000);candidate.ranges[i+1].end=end;
+            candidate.count++;removed=true;break;
+        }
+    }
+    if(!removed)ram_fatal("M1 FATAL reason=sparse-not-real-RAM\n");
+    log_info("M1 SPARSE INPUT start=0x50000000 end=0x50200000\n");
+#endif
     /* Publish the validated candidate. The publisher revalidates
      * the map; a non-zero return here would be a developer bug. */
     rc = aarch64_ram_publish_once(&candidate, &published_map,

@@ -35,6 +35,26 @@ OS01采用Higher Half Kernel内存布局，内核程序使用`0xffff800000000000
 1. **物理页面分配器**：分配和释放物理页面
 2. **Slab 分配器**：用于小内存分配
 
+## 双架构启动直映（M1）
+
+`arch/boot_memory.h` 是共同入口：PMM 初始化后、启动 AP 前只调用一次 `arch_boot_direct_map_init()`。成功才可查询 `arch_boot_direct_map_ready()`；重复初始化（包括首次失败）返回 `-EALREADY`。`arch_boot_direct_map_ranges()` 的 count 是输出值，返回不可变、合并的映射 RAM 区间，包含已占用 frame；不是可用页列表。未 ready 时有效输出先置 NULL/0，再返回 `-EAGAIN`；NULL 参数返回 `-EINVAL` 且不改其他输出。
+
+x86_64 保留现有初始页表和 2 MiB 直映实现。非零 `ZONE_UNMAPPED_INDEX` 仍截止映射 zone，coverage 反映实际覆盖范围；中间表分配失败会终止启动。aarch64 保留 M0 TTBR0，BSP 安装独立 TTBR1 并执行 DSB/ISB/TLBI。高半区只保留真实归一化 RAM（Normal WBWA、inner shareable、EL1 RW、PXN/UXN）、启动 block `[0x40000000,0x40200000)`（EL1 可执行）和 Device-nGnRnE 窗口 `[0x08000000,0x0a000000)`（不可执行）。收紧以 2 MiB 为粒度。
+
+AArch64 在 PMM 元数据写入前选择真实 RAM 与 `[0x40200000,0x80000000)` 的交集作为 arena。元数据按完整 RAM min/max 跨度（含 holes）计费，页表按唯一 512 GiB/1 GiB bucket 精确计费；整个 arena 向 2 MiB 对齐并预留。RAM 最多 16 段、PMM 最多 10 zones，PA 小于 1 TiB。低窗口容量不足、输入冲突或算术溢出会在元数据写入前失败。页表建造不依赖 Slab 或早期 4 KiB allocator。
+
+AP 使用发布在 `.boot.bss` 的低物理 root scalar，在打开 MMU 前检查非零、4 KiB 对齐和 PA40 范围。BSP 按 CTR_EL0 cache line 将实际表、root、启动元数据与自测 probe 清至 PoC，DSB SY 后才 CPU_ON；AP 在 ACK 前核对实际 TTBR1 和高半区 sentinel。所有请求 AP ACK 后释放 probe，降级路径保留 probe 供迟到 AP 使用。4 KiB smoke 从初始空 L0[256] 取得独占临时子树，验证所有权后先脱链/TLBI，再逐页释放；通用 unmap 不回收中间表。
+
+M1 不提供 AArch64 Slab（M2）或动态内核 VMM / block 拆分 / SMP shootdown（M3）。现有 Slab stub 仍保留，后续须按 PMM → M1 → Slab 的资源顺序接入。
+
+### 验证记录（2026-10-03）
+
+普通/自测镜像分别覆盖 `(RAM MiB, CPU)`：`(256,1),(512,1),(512,2),(512,4),(2048,1),(2048,2),(2048,4),(4096,1)`。16/16 通过。自测验证每 zone 首末 owned free frame 的首末 4 KiB、全部 represented frame 的实际页表、预热后裁掉旧 M0 非 RAM 映射、smoke 清理以及 AP 的高窗口 probe；2 GiB/4 GiB 情况 probe 优先在旧窗口之外。
+
+命令、镜像/firmware/DTB SHA256、RAM/CPU 和串口日志保存在 `test-results/m1-ram/` 各 case 目录的 metadata/stdout/stderr 文件。x86 `test-qemu SUITE=phase-0` 与独立 `OS01_SYSTEST=1 test-qemu SUITE=systest` 通过（334 syscall tests）。稀疏变体（`MODE=m1-sparse` 及补充 harness 运行：512 MiB/2 GiB，1/4 核）以及 `m1-arena-exhaust`、`m1-table-exhaust`、`m1-ap-bad-root` 均符合预期；原 `smp`、`gic-spi`、`sync-fault` 回归通过。no-ACK 注入单独构建并通过独立降级预期。原生 host 54 suites、PMM boot reservation 及 static audits 均通过。
+
+独立 whole-branch review 后补充了 preparation 失败诊断的非法输入回归、真实 planner 容量耗尽回归、负向日志变异回归及 AP 本地 TLBI 汇编顺序检查（`qemutests/aarch64_m1_ap_tlbi.py`，M1 矩阵入口自动执行）。所有重要问题经 RED→GREEN 修复后重跑验收。一个低优先级测试缺口保留：旧 `test_m1_tree` 的 canary 命名用例仅验证 PA resolver，没有 table buffer 外围 guard bytes；现有全树校验和编译期启动栈限制仍覆盖各自契约。
+
 ## 核心数据结构
 
 ### 物理内存管理器

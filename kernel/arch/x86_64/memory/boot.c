@@ -25,6 +25,9 @@
 #include <driver/logo.h>            /* boot_logo_show                     */
 #include <memory/memory.h>          /* pmm_init, vmm_init                 */
 #include <memory/pmm.h>             /* struct Physical_Memory_Manager     */
+#include <arch/boot_memory.h>
+#include <arch/cpu.h>
+#include <log/log.h>
 #include <sched/task.h>             /* _text / _etext / _edata / _erodata
                                        / _end externs                     */
 
@@ -47,7 +50,13 @@ void x86_64_boot_memory(const struct boot_context *bootctx)
     boot_logo_show();                 // OS01 boot logo
 
     pmm_init(bootctx);                       // physical page allocator
-    vmm_init();                          // virtual memory (page tables)
+
+    int rc = arch_boot_direct_map_init();
+    if (rc != 0) {
+        log_err("boot direct map failed: %d", rc);
+        for (;;) arch_cpu_halt();
+    }
+
     frame_buffer_init();                 // remap FB at VIRT_FRAMEBUFFER_OFFSET
     color_printk(GREEN, BLACK, "frame buffer remap succeed\n");
 }

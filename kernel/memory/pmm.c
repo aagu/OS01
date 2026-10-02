@@ -16,11 +16,17 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <errno.h>
 #include <core/bootinfo.h>
 #include <log/log.h>
 #include <arch/cpu.h>     /* arch_cpu_halt — required for fatal paths */
 #include <memory/memory_map.h>
 #include <memory/pmm.h>
+#include <memory/pmm_boot.h>      /* checked PMM metadata layout (Task 1) */
+#include <memory/pmm_arch.h>      /* range-based boot reservation + claim
+                                   * (Task 2): pmm_arch_boot_reservations,
+                                   * pmm_reserve_boot_ranges,
+                                   * pmm_claim_free_frame */
 #include <memory/memory.h>       /* Virt_To_Phy, Phy_To_Virt */
 #include <core/printk.h>       /* color_printk (public surface) */
 #include <core/debug.h>        /* debug_mm (existing call sites) */
@@ -194,19 +200,32 @@ void pmm_init(const struct boot_context *ctx)
     if (ram_span_pages == 0) ram_span_pages = 1;   /* floor 1 */
 
     /* Step 3: allocate bits_map, pages_struct, zones_struct from start_brk.
-     * Mirror the existing pmm.c sizing math (PMMngr.start_brk + 0xFFF &
-     * ~0xFFF), but with the new ram_span_pages. */
-    PMMngr.bits_map = (uint64_t *)((PMMngr.start_brk + 0xFFFUL) & ~0xFFFUL);
-    PMMngr.bits_size  = ram_span_pages;
-    PMMngr.bits_length = ((ram_span_pages + 63) & ~63UL) / 8;
+     * Use the shared checked calculator (kernel/memory/pmm_boot.c) for
+     * every offset, length and trailing tail. The calculator's offsets
+     * are relative to the caller-aligned base_va; production pmm.c
+     * aligns start_brk up to 4 KiB before assigning bits_map. */
+    uint64_t brk = (PMMngr.start_brk + 0xFFFUL) & ~0xFFFUL;
+    struct pmm_layout layout;
+    int rc = pmm_layout_calculate(brk, ram_span_pages, &layout);
+    if (rc != 0) {
+        log_err("[smp] FATAL: pmm_layout_calculate failed (rc=%d)\n", rc);
+        arch_cpu_halt();
+    }
+    if (layout.total_bytes == 0) {
+        log_err("[smp] FATAL: pmm_layout_calculate returned zero total_bytes\n");
+        arch_cpu_halt();
+    }
+    PMMngr.bits_map      = (uint64_t *)(brk + layout.bits_map_off);
+    PMMngr.bits_size     = ram_span_pages;
+    PMMngr.bits_length   = layout.bits_length;
     memset(PMMngr.bits_map, 0xff, PMMngr.bits_length);
-    PMMngr.pages_struct = (struct Page *)(((uint64_t)PMMngr.bits_map + PMMngr.bits_length + 0xFFFUL) & ~0xFFFUL);
-    PMMngr.pages_size  = ram_span_pages;
-    PMMngr.pages_length = ((ram_span_pages * sizeof(struct Page) + sizeof(long) - 1) & ~(sizeof(long) - 1));
+    PMMngr.pages_struct  = (struct Page *)(brk + layout.pages_struct_off);
+    PMMngr.pages_size    = ram_span_pages;
+    PMMngr.pages_length  = layout.pages_length;
     memset(PMMngr.pages_struct, 0, PMMngr.pages_length);
-    PMMngr.zones_struct = (struct Zone *)(((uint64_t)PMMngr.pages_struct + PMMngr.pages_length + 0xFFFUL) & ~0xFFFUL);
-    PMMngr.zones_size = 0;
-    PMMngr.zones_length = ((MEMORY_RANGE_MAX * sizeof(struct Zone) + sizeof(long) - 1) & ~(sizeof(long) - 1));
+    PMMngr.zones_struct  = (struct Zone *)(brk + layout.zones_struct_off);
+    PMMngr.zones_size    = 0;
+    PMMngr.zones_length  = layout.zones_length;
     memset(PMMngr.zones_struct, 0, PMMngr.zones_length);
 
     /* Step 4: walk RAM ranges, create zones. RAM-relative indexing:
@@ -247,28 +266,37 @@ void pmm_init(const struct boot_context *ctx)
     }
 
     /* end_of_struct must be assigned BEFORE Step 7, because Step 7
-     * computes the kernel-image walk bound from it. Mirror the existing
-     * pmm.c:240 computation exactly. */
-    PMMngr.end_of_struct =
-        ((uint64_t)PMMngr.zones_struct + PMMngr.zones_length + sizeof(long) * 32)
-        & ~(sizeof(long) - 1);
+     * computes the kernel-image walk bound from it. The shared
+     * calculator already produced end_of_struct_off (the relative
+     * offset from aligned brk); convert to an absolute pointer. */
+    PMMngr.end_of_struct = brk + layout.end_of_struct_off;
 
-    /* Reserve every represented RAM frame overlapping the kernel image
-     * and early metadata. Slot zero is the first RAM frame, not necessarily
-     * physical page zero (x86 UEFI commonly leaves lowest_ram == 2 MiB).
-     * The end address is exclusive; sparse non-RAM slots stay reserved. */
-    uint64_t end_phys = Virt_To_Phy(PMMngr.end_of_struct);
-    uint64_t walk_pages = (end_phys > lowest_ram)
-        ? ((end_phys - lowest_ram + PAGE_2M_SIZE - 1) >> PAGE_2M_SHIFT) : 0;
-    if (walk_pages > PMMngr.pages_size)
-        walk_pages = PMMngr.pages_size;
-    for (uint64_t j = 0; j < walk_pages; j++) {
-        struct Page *tmp = PMMngr.pages_struct + j;
-        if (!tmp->zone_struct) continue;
-        page_init(tmp, PG_PTable_Mapped | PG_Kernel_Init | PG_Kernel);
-        PMMngr.bits_map[j >> 6] |= 1UL << (j % 64);
-        tmp->zone_struct->page_using_count++;
-        tmp->zone_struct->page_free_count--;
+    /* Compute the absolute PA of end_of_struct for the boot-reservation
+     * strategy. pmm_layout_calculate does not populate this field
+     * (Virt_To_Phy is arch-specific) — the default pmm_arch_boot_reservations
+     * reads it to build the legacy prefix [0, ceil2M(metadata_end_pa)). */
+    layout.metadata_end_pa = Virt_To_Phy(PMMngr.end_of_struct);
+
+    /* Reserve every represented RAM frame the boot strategy requests.
+     * Default strategy returns the legacy prefix [0, ceil2M(metadata_end_pa));
+     * aarch64's strong override (Task 3) will append arena ranges
+     * inside its representative zone. The helper walks pages_struct
+     * once, skipping holes (NULL zone_struct), and idempotently flips
+     * bitmap + counters + page_init flags only on free→reserved
+     * transitions — second-call identical input is a no-op. */
+    struct pmm_phys_range boot_ranges[4];
+    size_t range_count = 0;
+    int brc = pmm_arch_boot_reservations(&layout, boot_ranges,
+                                         sizeof(boot_ranges) / sizeof(boot_ranges[0]),
+                                         &range_count);
+    if (brc != 0) {
+        log_err("[smp] FATAL: pmm_arch_boot_reservations failed (rc=%d)\n", brc);
+        arch_cpu_halt();
+    }
+    brc = pmm_reserve_boot_ranges(&PMMngr, boot_ranges, range_count);
+    if (brc != 0) {
+        log_err("[smp] FATAL: pmm_reserve_boot_ranges failed (rc=%d)\n", brc);
+        arch_cpu_halt();
     }
 
     /* Step 7: zone index computation. */
@@ -500,6 +528,21 @@ uint16_t page_cow_refs(uint64_t phys)
     return refs;
 }
 
+bool pmm_4k_page_allocated(uint64_t phys)
+{
+    if (!phys || (phys & (PAGE_4K_SIZE-1))) return false;
+    uint64_t flags=spin_lock_irqsave(&subpage_lock);
+    struct subpage_pool *pool=find_pool_locked(phys);
+    bool allocated=false;
+    if (pool) {
+        uint32_t slot=(uint32_t)((phys-pool->base_phys)/PAGE_4K_SIZE);
+        allocated=slot>0 && slot<SUBPAGE_4K_COUNT &&
+            (pool->bitmap[slot/64] & (UINT64_C(1)<<(slot%64)));
+    }
+    spin_unlock_irqrestore(&subpage_lock,flags);
+    return allocated;
+}
+
 uint64_t alloc_4k_page(void)
 {
     // subpage_pools is initialized in pmm_init() — no lazy init needed.
@@ -577,4 +620,124 @@ void free_4k_page(uint64_t phys)
     }
 
     spin_unlock_irqrestore(&subpage_lock, flags);
+}
+
+/* ── Range-based boot reservation + single-frame claim ──────────────
+ *
+ * Both helpers share the convention that frames are indexed RAM-
+ * relatively (pages_struct + (PA - lowest_ram)/2M, and the bitmap
+ * follows the same order). See pmm_init Step 4 and alloc_pages for
+ * the full derivation.
+ *
+ * pmm_reserve_boot_ranges is called from pmm_init (single-threaded)
+ * with the strategy's range list. We do NOT acquire pmm_lock — the
+ * PMM has no other readers during init, and the legacy prefix loop
+ * was lock-free too.
+ *
+ * pmm_claim_free_frame DOES acquire pmm_lock — it is the canonical
+ * "give me one free frame in this window" allocator that runtime
+ * code (aarch64 preflight, etc.) calls once init is over. */
+
+/* Returns the absolute PA covered by a Zone's free frames. The legacy
+ * loop computed `end_phys - lowest_ram`; we keep the same math but
+ * express it via pages_struct so the reservation logic doesn't have
+ * to know lowest_ram. */
+static int pa_in_ranges(uint64_t pa, const struct pmm_phys_range *ranges,
+                        size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (pa >= ranges[i].start && pa < ranges[i].end) return 1;
+    }
+    return 0;
+}
+
+int pmm_reserve_boot_ranges(struct Physical_Memory_Manager *pm,
+                            const struct pmm_phys_range *ranges,
+                            size_t count)
+{
+    if (!pm) return -EINVAL;
+    if (count > 0 && !ranges) return -EINVAL;
+    if (count == 0) return 0;
+
+    /* First pass: validate input shapes. Endpoints must be strictly
+     * increasing and 2 MiB-aligned (we flip bits in a 2 MiB-indexed
+     * bitmap — partial frames are not representable). */
+    for (size_t i = 0; i < count; i++) {
+        if (ranges[i].end <= ranges[i].start) return -EINVAL;
+        if ((ranges[i].start & (PAGE_2M_SIZE - 1)) != 0) return -EINVAL;
+        if ((ranges[i].end   & (PAGE_2M_SIZE - 1)) != 0) return -EINVAL;
+    }
+
+    /* Second pass: walk pages_struct once. For each represented frame
+     * whose PA falls in any range, mark it reserved. Frames already
+     * reserved (bit set) are skipped — this is what makes the helper
+     * idempotent. Frames outside represented RAM (NULL zone_struct,
+     * i.e. holes between sparse zones) are naturally skipped because
+     * pages_struct has no entries for them. */
+    for (uint64_t i = 0; i < pm->pages_size; i++) {
+        struct Page *p = pm->pages_struct + i;
+        if (!p->zone_struct) continue;       /* hole */
+        if (!pa_in_ranges(p->phy_address, ranges, count)) continue;
+        uint64_t rel_idx = i;                /* pages_struct is RAM-relative */
+        uint64_t word = rel_idx >> 6;
+        uint64_t mask = 1UL << (rel_idx % 64);
+        if (pm->bits_map[word] & mask) continue;  /* already reserved */
+        page_init(p, PG_PTable_Mapped | PG_Kernel_Init | PG_Kernel);
+        pm->bits_map[word] |= mask;
+        p->zone_struct->page_using_count++;
+        p->zone_struct->page_free_count--;
+    }
+    return 0;
+}
+
+struct Page *pmm_claim_free_frame(uint64_t start_pa, uint64_t end_pa,
+                                  bool from_end)
+{
+    if (end_pa <= start_pa) return NULL;
+
+    uint64_t flags = spin_lock_irqsave(&pmm_lock);
+    struct Page *result = NULL;
+
+    /* Match alloc_pages' bitmap convention: rel_idx = (page - pages_struct),
+     * word = rel_idx >> 6, mask = 1UL << (rel_idx % 64). Skip frames whose
+     * zone_struct is NULL — those are holes, NOT free RAM — so we never
+     * hand out a Page whose PA falls outside represented RAM. */
+    if (from_end) {
+        for (uint64_t i = PMMngr.pages_size; i > 0; i--) {
+            struct Page *p = PMMngr.pages_struct + (i - 1);
+            if (!p->zone_struct) continue;
+            uint64_t pa = p->phy_address;
+            if (pa < start_pa || pa >= end_pa) continue;
+            uint64_t rel_idx = i - 1;
+            uint64_t word = rel_idx >> 6;
+            uint64_t mask = 1UL << (rel_idx % 64);
+            if (PMMngr.bits_map[word] & mask) continue;  /* in use */
+            PMMngr.bits_map[word] |= mask;
+            p->zone_struct->page_using_count++;
+            p->zone_struct->page_free_count--;
+            p->attribute = PG_PTable_Mapped;
+            result = p;
+            break;
+        }
+    } else {
+        for (uint64_t i = 0; i < PMMngr.pages_size; i++) {
+            struct Page *p = PMMngr.pages_struct + i;
+            if (!p->zone_struct) continue;
+            uint64_t pa = p->phy_address;
+            if (pa < start_pa || pa >= end_pa) continue;
+            uint64_t rel_idx = i;
+            uint64_t word = rel_idx >> 6;
+            uint64_t mask = 1UL << (rel_idx % 64);
+            if (PMMngr.bits_map[word] & mask) continue;  /* in use */
+            PMMngr.bits_map[word] |= mask;
+            p->zone_struct->page_using_count++;
+            p->zone_struct->page_free_count--;
+            p->attribute = PG_PTable_Mapped;
+            result = p;
+            break;
+        }
+    }
+
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    return result;
 }

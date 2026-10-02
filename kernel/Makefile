@@ -37,7 +37,7 @@ KERNEL_HEADERS := include
 # Arch gate: aarch64 selects only these architecture-neutral sources.
 # Architecture implementation files are collected once via ARCH_C_SOURCES.
 ifeq ($(ARCH),aarch64)
-KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c \
+KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    percpu/percpu.c \
                    time/clocksource.c time/tick.c time/timer.c \
                    intr/softirq.c \
@@ -241,6 +241,15 @@ endif
 ifeq ($(ARCH),aarch64)
 ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
 ALL_CFLAGS += -DAARCH64_SYNC_FAULT_TEST=1
+endif
+endif
+
+ifneq ($(strip $(AARCH64_M1_TEST)),)
+ifeq ($(ARCH),aarch64)
+ALL_CFLAGS += $(if $(filter sparse,$(AARCH64_M1_TEST)),-DAARCH64_M1_SPARSE=1)
+ALL_CFLAGS += $(if $(filter arena-exhaust,$(AARCH64_M1_TEST)),-DAARCH64_M1_ARENA_EXHAUST=1)
+ALL_CFLAGS += $(if $(filter table-exhaust,$(AARCH64_M1_TEST)),-DAARCH64_M1_TABLE_EXHAUST=1)
+ALL_CFLAGS += $(if $(filter ap-bad-root,$(AARCH64_M1_TEST)),-DAARCH64_M1_AP_BAD_ROOT=1)
 endif
 endif
 

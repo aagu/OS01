@@ -19,6 +19,7 @@
 
 #include <arch/mmu.h>
 #include <arch/aarch64/page_table.h>
+#include <arch/aarch64/boot_direct_map.h>
 #include <memory/pmm.h>
 
 /* ── Constants private to this TU ──────────────────────────────── */
@@ -178,16 +179,14 @@ static int root_valid(const uint64_t *root)
  * base must be nonzero, 4 KiB-aligned, and < 1 TiB (IPS=40). */
 static int is_active_root(const uint64_t *root)
 {
-    uint64_t raw = (uint64_t)(uintptr_t)arch_get_page_table();
-    if ((raw & ~AARCH64_TTBR_ALLOWED_MASK) != 0) return 0;
-    uint64_t ttbr_pa = raw & AARCH64_TTBR_BASE_MASK;
-    if (ttbr_pa == 0) return 0;
-    if ((ttbr_pa & (PAGE_4K_SIZE - 1)) != 0) return 0;
-    if (ttbr_pa >= AARCH64_PT_PA_LIMIT) return 0;
-    /* ttbr_pa < 1 TiB and ARCH_PAGE_OFFSET = 0xffff000000000000, so
-     * ttbr_pa + ARCH_PAGE_OFFSET < ARCH_PAGE_OFFSET + 1 TiB (no overflow). */
-    uintptr_t active_root = (uintptr_t)ttbr_pa + (uintptr_t)ARCH_PAGE_OFFSET;
-    return active_root == (uintptr_t)root;
+    uint64_t roots[2]={(uint64_t)(uintptr_t)arch_get_page_table(),aarch64_read_ttbr1()};
+    for(size_t i=0;i<2;i++) {
+        uint64_t raw=roots[i];
+        if(raw & ~AARCH64_TTBR_ALLOWED_MASK)continue;
+        uint64_t pa=raw & AARCH64_TTBR_BASE_MASK;
+        if(pa && pa<AARCH64_PT_PA_LIMIT && pa+ARCH_PAGE_OFFSET==(uintptr_t)root)return 1;
+    }
+    return 0;
 }
 
 /* Local TLB invalidation for a single 4 KiB VA. Per ARM ARM the TLBI

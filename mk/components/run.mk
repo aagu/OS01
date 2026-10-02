@@ -262,8 +262,8 @@ test-aarch64:
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
 	@case "$(MODE)" in \
-	  smp|no-ack|gic-spi|sync-fault) ;; \
-	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault, got '$(MODE)'" >&2; exit 1;; \
+	  smp|no-ack|gic-spi|sync-fault|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root) ;; \
+	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root, got '$(MODE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-aarch64] MODE=$(MODE) extra=$(TEST_AARCH64_EXTRA_$(MODE))"
 	$(MAKE) --no-print-directory _test-aarch64-prep-$(MODE)
@@ -329,7 +329,7 @@ TEST_SELFTEST_IMAGE := $(BUILD_DIR)/image/selftest/disk.img
 # overridable.
 KERNEL_SELFTEST_SMP ?= 4
 
-.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-device test-gfx-client test-gfx-primitives
+.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-device test-gfx-client test-gfx-primitives test-m1-host
 test-host:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,run $(OS01_SUBMAKE_ARGS))
@@ -337,6 +337,60 @@ test-host:
 	python3 qemutests/test_kernel_selftest_result.py
 test-pmm-boot-reservation:
 	python3 qemutests/pmm_boot_reservation_test.py
+
+# Focused M1 host tests (aarch64 M1 plan). Each CASE runs the matching
+# focused TEST_BINS entry under hosttests/.  Unknown non-empty CASE
+# aborts non-zero. With CASE omitted the umbrella runs the full M1
+# group (currently: layout). The target builds only the focused
+# TEST_BINS entry, not the entire hosttest build, so `make ... CASE=...`
+# is cheap when iterating on a single calculator.
+#
+# The x86_64-clang profile forwards to hosttests; aarch64-clang also
+# routes through hosttests (the M1 host tests are arch-neutral C).
+#
+# Implementation note: os01_submake expands to a `+env -i ...` line,
+# which only parses as a Make recipe prefix when the call sits at the
+# start of its OWN recipe line. We therefore give each M1 case its own
+# .PHONY runner and let test-m1-host select among them via CASE.
+.PHONY: test-m1-host _test-m1-host-run-m1-layout _test-m1-host-run-m1-reservation _test-m1-host-run-m1-arena _test-m1-host-run-m1-tree _test-m1-host-run-m1-contract-x86
+M1_CASES := m1-layout m1-reservation m1-arena m1-tree m1-contract-x86 m1-install m1-publish
+_test-m1-host-run-m1-layout:
+	@echo "  [test-m1-host] m1-layout"
+	$(call os01_submake,hosttests,test-m1-layout $(OS01_SUBMAKE_ARGS))
+_test-m1-host-run-m1-reservation:
+	@echo "  [test-m1-host] m1-reservation"
+	$(call os01_submake,hosttests,test-m1-reservation $(OS01_SUBMAKE_ARGS))
+_test-m1-host-run-m1-arena:
+	@echo "  [test-m1-host] m1-arena"
+	$(call os01_submake,hosttests,test-m1-arena $(OS01_SUBMAKE_ARGS))
+_test-m1-host-run-m1-tree:
+	@echo "  [test-m1-host] m1-tree"
+	$(call os01_submake,hosttests,test-m1-tree $(OS01_SUBMAKE_ARGS))
+_test-m1-host-run-m1-contract-x86:
+	@echo "  [test-m1-host] m1-contract-x86"
+	$(call os01_submake,hosttests,test-m1-contract-x86 $(OS01_SUBMAKE_ARGS))
+_test-m1-host-run-m1-install:
+	$(call os01_submake,hosttests,test-m1-install $(OS01_SUBMAKE_ARGS))
+_test-m1-host-run-m1-publish:
+	$(call os01_submake,hosttests,test-m1-publish $(OS01_SUBMAKE_ARGS))
+test-m1-host: CASE ?=
+test-m1-host: CASE := $(CASE)
+# Umbrella: with empty CASE, depend on every per-case runner; otherwise
+# depend on the single matching one. The dispatch is purely structural
+# so make schedules the right os01_submake invocations.
+test-m1-host: $(if $(CASE),_test-m1-host-run-$(CASE),$(foreach c,$(M1_CASES),_test-m1-host-run-$(c)))
+	$(call require_capability,rootfs)
+	@case "$(CASE)" in \
+	    "") echo "  [test-m1-host] full M1 group: $(M1_CASES)";; \
+	    m1-layout) echo "  [test-m1-host] CASE=$(CASE)";; \
+	    m1-reservation) echo "  [test-m1-host] CASE=$(CASE)";; \
+	    m1-arena) echo "  [test-m1-host] CASE=$(CASE)";; \
+	    m1-tree) echo "  [test-m1-host] CASE=$(CASE)";; \
+	    m1-publish) echo "  [test-m1-host] CASE=$(CASE)";; \
+	    m1-install) echo "  [test-m1-host] CASE=$(CASE)";; \
+	    m1-contract-x86) echo "  [test-m1-host] CASE=$(CASE)";; \
+	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(M1_CASES)" >&2; exit 1;; \
+	  esac
 # Focused hosttest for the gfx 2D API plan Task 1 — per-file device
 # ioctl/release lifecycle.  Runs the single TEST_BINS entry
 # (test_gfx_file_lifecycle.elf) and asserts the contract spelled out
@@ -682,7 +736,7 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'test-kernel-selftest' '(rootfs)'   'QEMU built-in selftests (isolated selftest image, KERNEL_SELFTEST=1)';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-aarch64'        '(uefi)'       'aarch64 UEFI test (MODE=<smp|no-ack|gic-spi|sync-fault>)';
+		 'test-aarch64'        '(uefi)'       'aarch64 UEFI test (MODE=<smp|no-ack|gic-spi|sync-fault|m1-*>)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-contract'       '(rootfs|uefi)' 'Full build contract (PROFILE=<x86_64-clang|aarch64-clang>)';
 	@echo ''
@@ -832,3 +886,55 @@ unlock-profile:
 	else \
 	  echo "no lock held at $(LOCK_DIR)"; \
 	fi
+
+# M1 uses distinct immutable build/image variants; outer flags never choose
+# the matrix's normal/selftest artifact implicitly.
+.PHONY: _test-aarch64-prep-m1-ram _test-aarch64-run-m1-ram
+_test-aarch64-prep-m1-ram:
+	$(MAKE) KERNEL_SELFTEST= AARCH64_M1_TEST= AARCH64_SYNC_FAULT_TEST= AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
+	$(MAKE) KERNEL_SELFTEST=1 AARCH64_M1_TEST= AARCH64_SYNC_FAULT_TEST= AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
+_test-aarch64-run-m1-ram:
+	python3 qemutests/aarch64_m1_ap_tlbi.py --self-test \
+	  --llvm-objdump "$(or $(LLVM_OBJDUMP),llvm-objdump)" \
+	  --elf "$(BUILD_DIR)/kernel/kernel.elf" --elf "$(BUILD_DIR)/kernel/selftest/kernel.elf"
+	python3 qemutests/aarch64_m1_matrix.py \
+	  --normal-image "$(BUILD_DIR)/image/aarch64-uefi.img" \
+	  --selftest-image "$(AARCH64_UEFI_SELFTEST_DISK)" \
+	  --firmware "$(AARCH64_UEFI_SELFTEST_FIRMWARE)" --qemu "$(AARCH64_QEMU)" \
+	  --log-dir "$(OS01_ROOT)/test-results/m1-ram"
+
+.PHONY: _test-aarch64-prep-m1-sparse _test-aarch64-run-m1-sparse
+_test-aarch64-prep-m1-sparse:
+	$(MAKE) KERNEL_SELFTEST=1 AARCH64_M1_TEST=sparse AARCH64_SYNC_FAULT_TEST= AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
+_test-aarch64-run-m1-sparse:
+	python3 qemutests/aarch64_m1_matrix.py --variant sparse \
+	  --image "$(BUILD_DIR)/image/m1-sparse/aarch64-uefi.img" \
+	  --firmware "$(BUILD_DIR)/image/m1-sparse/QEMU_EFI.fd" --qemu "$(AARCH64_QEMU)" \
+	  --log-dir "$(OS01_ROOT)/test-results/m1-sparse"
+
+.PHONY: _test-aarch64-prep-m1-arena-exhaust _test-aarch64-run-m1-arena-exhaust
+_test-aarch64-prep-m1-arena-exhaust:
+	$(MAKE) KERNEL_SELFTEST=1 AARCH64_M1_TEST=arena-exhaust AARCH64_SYNC_FAULT_TEST= AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
+_test-aarch64-run-m1-arena-exhaust:
+	python3 qemutests/aarch64_m1_matrix.py --variant arena-exhaust \
+	  --image "$(BUILD_DIR)/image/m1-arena-exhaust/aarch64-uefi.img" \
+	  --firmware "$(BUILD_DIR)/image/m1-arena-exhaust/QEMU_EFI.fd" --qemu "$(AARCH64_QEMU)" \
+	  --log-dir "$(OS01_ROOT)/test-results/m1-arena-exhaust"
+
+.PHONY: _test-aarch64-prep-m1-table-exhaust _test-aarch64-run-m1-table-exhaust
+_test-aarch64-prep-m1-table-exhaust:
+	$(MAKE) KERNEL_SELFTEST=1 AARCH64_M1_TEST=table-exhaust AARCH64_SYNC_FAULT_TEST= AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
+_test-aarch64-run-m1-table-exhaust:
+	python3 qemutests/aarch64_m1_matrix.py --variant table-exhaust \
+	  --image "$(BUILD_DIR)/image/m1-table-exhaust/aarch64-uefi.img" \
+	  --firmware "$(BUILD_DIR)/image/m1-table-exhaust/QEMU_EFI.fd" --qemu "$(AARCH64_QEMU)" \
+	  --log-dir "$(OS01_ROOT)/test-results/m1-table-exhaust"
+
+.PHONY: _test-aarch64-prep-m1-ap-bad-root _test-aarch64-run-m1-ap-bad-root
+_test-aarch64-prep-m1-ap-bad-root:
+	$(MAKE) KERNEL_SELFTEST=1 AARCH64_M1_TEST=ap-bad-root AARCH64_SYNC_FAULT_TEST= AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
+_test-aarch64-run-m1-ap-bad-root:
+	python3 qemutests/aarch64_m1_matrix.py --variant ap-bad-root \
+	  --image "$(BUILD_DIR)/image/m1-ap-bad-root/aarch64-uefi.img" \
+	  --firmware "$(BUILD_DIR)/image/m1-ap-bad-root/QEMU_EFI.fd" --qemu "$(AARCH64_QEMU)" \
+	  --log-dir "$(OS01_ROOT)/test-results/m1-ap-bad-root"
