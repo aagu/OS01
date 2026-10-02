@@ -104,7 +104,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_fork_user_map.elf \
     $(TEST_BLD)/test_user_write_cow.elf \
     $(TEST_BLD)/test_m1_layout.elf \
-    $(TEST_BLD)/test_m1_reservation.elf
+    $(TEST_BLD)/test_m1_reservation.elf \
+    $(TEST_BLD)/test_m1_arena.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -742,6 +743,54 @@ $(TEST_BLD)/test_m1_reservation.elf: $(TEST_BLD)/test_m1_reservation.o \
 
 .PHONY: test-m1-reservation
 test-m1-reservation: $(TEST_BLD)/test_m1_reservation.elf
+	$<
+
+# aarch64 M1 plan Task 3: early arena preflight planner
+# (`aarch64_m1_plan` / `aarch64_m1_prepare`). Links the REAL
+# kernel/arch/aarch64/memory/early_arena.c against the production
+# pmm.c (PMM_SHADOW_INC), the weak-default pmm_arch.c (kept for
+# link), and the production pmm_boot.c (calculator). The test TU
+# asserts the pure planner: input validation, bucket counting,
+# arena selection, layout consistency with the checked
+# calculator, and the failure-no-side-effect canary.
+#
+# The production early_arena.c only pulls <errno.h>, <stddef.h>,
+# <stdint.h>, <memory/memory_map.h>, <memory/pmm.h>, and
+# <memory/pmm_boot.h>. It does NOT use the spinlock / arch_cpu_halt
+# symbols, but the PMM_SHADOW_INC is still applied for the test TU
+# and for the early_arena production object (the test TU touches
+# PMMngr.start_brk to assert the canary).
+#
+# `make test-m1-host CASE=m1-arena` (root run.mk) reaches this rule
+# via the focused dispatch in run.mk.
+EARLY_ARENA_HOST_CFLAGS := $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) \
+                           -I$(TEST_INC)
+
+$(TEST_BLD)/early_arena_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/early_arena.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/early_arena.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm_boot.h \
+		$(TESTS_DIR)/kernel/include/memory/memory_map.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_m1_arena.o: $(TEST_CASES)/test_m1_arena.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/early_arena.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm_boot.h \
+		$(TESTS_DIR)/kernel/include/memory/memory_map.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_m1_arena.elf: $(TEST_BLD)/test_m1_arena.o \
+		$(TEST_BLD)/early_arena_production.o \
+		$(TEST_BLD)/pmm_production.o \
+		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_boot_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-m1-arena
+test-m1-arena: $(TEST_BLD)/test_m1_arena.elf
 	$<
 
 # Sync primitive test — compiles the real rwlock/seqlock implementations.

@@ -5,9 +5,11 @@
 #include <log/log.h>      /* for log_err/log_info macros */
 #include <memory/memory.h>   /* for struct boot_context / Virt_To_Phy */
 #include <memory/pmm.h>      /* for PMMngr, struct Page, alloc_pages, free_pages, ZONE_NORMAL */
+#include <memory/pmm_arch.h> /* for pmm_arch_normalize (preflight caller) */
 #include <arch/cpu.h>
 #include <arch/irq.h>
 #include <arch/aarch64/dtb.h>
+#include <arch/aarch64/early_arena.h>
 #include <arch/aarch64/page_table.h>
 #include <arch/aarch64/ram.h>
 #include <arch/aarch64/smp.h>
@@ -15,6 +17,13 @@
                               * for SUBSYS_INITCALL Task 2 R3-1 register+dispatch
                               * pair. Lightweight header — only <stdint.h>
                               * transitively; does NOT pull in <arch/subsys.h>. */
+
+/* Forward declaration for pmm_arch_normalize — the production
+ * declaration lives in kernel/memory/pmm.c alongside the shared
+ * reserve helper. main.c is the sole caller (it drives the M1
+ * preflight, which must run before pmm_init). */
+size_t pmm_arch_normalize(const struct boot_context *ctx,
+                          struct MEMORY_RANGE *out);
 
 void pl011_init(void);
 extern char exception_vectors[];
@@ -548,6 +557,29 @@ void aarch64_main(const struct boot_context *handoff)
     PMMngr.end_data    = (uint64_t)&_data_end;
     PMMngr.end_rodata  = (uint64_t)&_rodata_end;
     PMMngr.start_brk   = (uint64_t)&_kernel_end;
+
+    /* M1 preflight: select and publish the early arena BEFORE pmm_init.
+     * aarch64_m1_prepare() drives aarch64_m1_plan() (pure input validation
+     * + checked metadata sizing + low-window arena selection) and, only
+     * after every check has passed, sets PMMngr.start_brk = OFFSET +
+     * base_pa so pmm_init() places the metadata segment at the high-half
+     * alias of the arena base. On any failure the function returns a
+     * negative errno; the BSP halts here with the need / available
+     * diagnostic. The function does NOT write to memory outside the
+     * PMM until the success path; a fatal here means no metadata was
+     * touched, so the BSP halts cleanly without corrupting RAM. */
+    {
+        struct MEMORY_RANGE scratch[MEMORY_RANGE_MAX];
+        size_t n = pmm_arch_normalize(handoff, scratch);
+        if (n == 0) {
+            log_err("[smp] FATAL: pmm_arch_normalize returned no ranges\n");
+            for (;;) arch_cpu_halt();
+        }
+        if (aarch64_m1_prepare(scratch, n) != 0) {
+            log_err("[smp] FATAL: aarch64 M1 arena preflight failed\n");
+            for (;;) arch_cpu_halt();
+        }
+    }
 
     pmm_init(handoff);
 
