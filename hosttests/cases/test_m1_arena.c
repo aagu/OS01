@@ -43,6 +43,12 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <sys/wait.h>
+/* Host libc timeout keeps malformed-diagnostic regression bounded. */
+extern unsigned int alarm(unsigned int seconds);
+extern int host_fork(void) __asm__("fork");
+extern int host_waitpid(int pid, int *status, int options) __asm__("waitpid");
+extern void host_exit(int status) __asm__("_exit");
 #include <string.h>
 
 #include <memory/memory_map.h>
@@ -396,6 +402,31 @@ TEST_FUNC(test_failure_zeros_out)
 }
 
 /* prepare() must NOT touch PMMngr.start_brk if planning fails. */
+TEST_FUNC(test_prepare_rejects_invalid_inputs_without_diagnostic_walk)
+{
+    extern struct Physical_Memory_Manager PMMngr;
+    int child = host_fork();
+    assert_true(child >= 0);
+    if (child < 0) return;
+    if (!child) {
+        alarm(2);
+        const uint64_t sentinel = UINT64_C(0xdeadbeef);
+        PMMngr.start_brk = sentinel;
+        struct MEMORY_RANGE huge = { .phys_start = 0x40200000,
+            .phys_end = UINT64_C(1) << 60, .type = MEMORY_TYPE_RAM };
+        /* Planner rejects immediately; diagnostics must also terminate. */
+        if (aarch64_m1_prepare(&huge, 1) != -ERANGE) host_exit(1);
+        if (aarch64_m1_prepare(NULL, 1) != -EINVAL) host_exit(1);
+        if (aarch64_m1_prepare(&huge, 0) != -EINVAL) host_exit(1);
+        if (aarch64_m1_prepare(&huge, MEMORY_RANGE_MAX + 1) != -EINVAL) host_exit(1);
+        host_exit(PMMngr.start_brk != sentinel || aarch64_m1_arena_get() != NULL);
+    }
+    int status = 0;
+    assert_eq(child, host_waitpid(child, &status, 0));
+    assert_true(WIFEXITED(status));
+    if (WIFEXITED(status)) assert_eq(0, WEXITSTATUS(status));
+}
+
 TEST_FUNC(test_prepare_failure_preserves_start_brk)
 {
     extern struct Physical_Memory_Manager PMMngr;
@@ -509,6 +540,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_empty_range),
     TEST_ENTRY(test_inverted_range),
     TEST_ENTRY(test_failure_zeros_out),
+    TEST_ENTRY(test_prepare_rejects_invalid_inputs_without_diagnostic_walk),
     TEST_ENTRY(test_prepare_failure_preserves_start_brk),
     TEST_ENTRY(test_prepare_success_sets_start_brk),
     TEST_ENTRY(test_arena_table_pool_inside_arena),

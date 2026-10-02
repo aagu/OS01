@@ -55,11 +55,13 @@ def _intervals_match(zones: list[tuple[int, int, int, int]],
 
 
 def _m1_evidence_ok(text: str, cpus: int, selftest: bool, ram_mib: int,
-                    variant: str = "normal") -> bool:
+                    variant: str = "normal", *, bsp_only: bool = False) -> bool:
     if cpus < 1 or ram_mib < 1 or variant not in ("normal", "sparse"):
         return False
     text = text.replace("\r", "")
-    if re.search(r"\b(?:FATAL|PANIC|DEGRADED|AP FAIL)\b|\b(?:QEMU )?TIMEOUT\b", text, re.I):
+    forbidden = (r"\b(?:FATAL|PANIC|AP FAIL)\b|QEMU TIMEOUT" if bsp_only else
+                 r"\b(?:FATAL|PANIC|DEGRADED|AP FAIL)\b|\b(?:QEMU )?TIMEOUT\b")
+    if re.search(forbidden, text, re.I):
         return False
 
     zones = _records(text, "M1 ZONE", _ZONE, (1, 2))
@@ -191,6 +193,8 @@ def _m1_evidence_ok(text: str, cpus: int, selftest: bool, ram_mib: int,
         return False
     if variant != "sparse" and (_lines(text, "M1 SPARSE INPUT") or _lines(text, "M1 SPARSE PASS")):
         return False
+    if bsp_only:
+        return not aps
     expected_ap_ids = list(range(1, cpus))
     if len(aps) != len(expected_ap_ids):
         return False
@@ -246,22 +250,61 @@ def m1_failure_evidence_ok(text: str, variant: str, cpus: int,
     ap_pass = re.findall(r"^M1 AP PASS cpu=(\d+)\b", text, re.M)
     ap_online = [int(cpu) for cpu in re.findall(
         r"^\[smp\] cpu=(\d+) online(?:\s.*)?$", text, re.M) if int(cpu) > 0]
+    lines = text.splitlines()
+    failure_pattern = re.compile(r"\b(?:FATAL|PANIC|FAIL|ERROR|TIMEOUT)\b", re.I)
     if variant in ("arena-exhaust", "table-exhaust"):
-        fatal = re.findall(r"^M1 FATAL reason=([a-z0-9-]+)$", text, re.M)
-        return (variant in fatal and not bsp and not ap_pass and not ap_online
-                and not re.search(r"^\[tick\] \d+$", text, re.M))
-    if variant == "ap-bad-root":
-        summaries = re.findall(
-            r"^\[smp\] (?:summary )?requested=(\d+) online=(\d+) status=DEGRADED$",
-            text, re.M)
-        if (len(bsp) != 1 or len(probe) != 1 or len(summaries) != 1
-                or tuple(map(int, summaries[0])) != (cpus, cpus - 1)
-                or ap_pass or ap_online):
+        fatal = _lines(text, "M1 FATAL")
+        expected = [f"M1 FATAL reason={variant}"]
+        if variant == "table-exhaust" and "M1 FATAL reason=runtime-init" in fatal:
+            expected.append("M1 FATAL reason=runtime-init")
+        if fatal != expected:
             return False
-        bsp_line = next(line for line in text.splitlines() if line.startswith("M1 BSP PASS"))
-        probe_line = next(line for line in text.splitlines() if line.startswith("M1 PROBE PASS"))
-        return (text.splitlines().index(probe_line) > text.splitlines().index(bsp_line)
-                and bool(re.search(r"online-timeout|DEGRADED", text)))
+        allowed_diagnostics = (
+            r"\[smp\] FATAL: arena need=\d+ MiB \(metadata \+ table pool, 2 MiB-aligned\)",
+            r"\[smp\] FATAL: largest available intersection in \[0x40200000, 0x80000000\) = \d+ MiB in \[0x[0-9a-f]+, 0x[0-9a-f]+\)",
+            r"\[smp\] FATAL: no RAM in \[0x40200000, 0x80000000\) window",
+            r"\[smp\] FATAL: aarch64 M1 arena preflight failed",
+        ) if variant == "arena-exhaust" else ()
+        for line in lines:
+            if failure_pattern.search(line) and line not in expected:
+                if not any(re.fullmatch(pattern, line) for pattern in allowed_diagnostics):
+                    return False
+            if line.startswith("M1 ") and line not in expected:
+                return False
+        return (not bsp and not ap_pass and not ap_online
+                and not re.search(r"^\[(?:tick|cntp|clocksource|IRQ)\]", text, re.M)
+                and not re.search(r"^\[smp\] (?:cpu=|requested=|topology |boot el=)", text, re.M))
+    if variant == "ap-bad-root":
+        if cpus < 2:
+            return False
+        # Reuse all normal BSP/coverage/selftest gates, then validate the
+        # deliberate no-ACK outcome separately. No success evidence is forged.
+        try:
+            if not _m1_evidence_ok(text, cpus, True, 512, bsp_only=True):
+                return False
+        except (IndexError, StopIteration, ValueError):
+            return False
+        summaries = re.findall(
+            r"^\[smp\] (?:summary )?requested=(\d+) online=(\d+) status=DEGRADED$", text, re.M)
+        timeouts = re.findall(r"^\[smp\] cpu=(\d+) reason=online-timeout$", text, re.M)
+        if (len(summaries) != 1 or tuple(map(int, summaries[0])) != (cpus, 1)
+                or sorted(map(int, timeouts)) != list(range(1, cpus))
+                or ap_pass or ap_online
+                or len(re.findall(r"^\[smp\] cpu=0 online(?:\s.*)?$", text, re.M)) != 1
+                or _lines(text, "[spinlock]") != ["[spinlock] status=SKIP"]):
+            return False
+        for line in lines:
+            if failure_pattern.search(line):
+                if re.fullmatch(r"\[smp\] cpu=\d+ reason=online-timeout", line):
+                    continue
+                if line == f"[ipi] summary targets={cpus - 1} received=0 status=FAIL":
+                    continue  # Deliberate missing APs cannot service the IPI.
+                return False
+        root = int(bsp[0][0], 16)
+        coverage = _records(text, "M1 COVERAGE", _COVERAGE, (1, 2))
+        return (0 < root < (1 << 40) and coverage is not None
+                and any(start <= root < end for _, start, end in coverage))
+
     return False
 
 
@@ -427,16 +470,38 @@ def self_test() -> None:
     assert not m1_failure_evidence_ok(
         "M1 FATAL reason=arena-exhaust\n", "table-exhaust", 1, True)
     assert not m1_failure_evidence_ok("UEFI: booting OS01\n", "arena-exhaust", 1, True)
-    no_ap_ack = ("M1 BSP PASS root=12345000 ranges=2\nM1 PROBE PASS pa=80000000\n"
+    no_ap_ack = ("\n".join(actual_m1) + "\n"
                  "[smp] cpu=0 online mpidr=0x0\n"
                  "[smp] cpu=1 reason=online-timeout\n"
-                 "[smp] requested=2 online=1 status=DEGRADED\n[tick] 1\n")
+                 "[smp] requested=2 online=1 status=DEGRADED\n"
+                 "[spinlock] status=SKIP\n[tick] 1\n")
     assert m1_failure_evidence_ok(no_ap_ack, "ap-bad-root", 2, True)
-    assert not m1_failure_evidence_ok(no_ap_ack + "[smp] cpu=1 online mpidr=0x1\n",
-                                      "ap-bad-root", 2, True)
-    assert not m1_failure_evidence_ok(no_ap_ack.replace("M1 PROBE PASS pa=80000000\n", ""),
-                                      "ap-bad-root", 2, True)
+    negative_mutations = [
+        no_ap_ack + "M1 FATAL reason=unexpected\n",
+        no_ap_ack + "PANIC: unrelated\n",
+        no_ap_ack + "[unrelated] status=FAIL\n",
+        no_ap_ack.replace("root=0x40206000", "root=0"),
+        no_ap_ack.replace("root=0x40206000", "root=0x40206001"),
+        no_ap_ack.replace("root=0x40206000", "root=0x10000000000"),
+        no_ap_ack.replace("pa=0x40600000", "pa=0"),
+        no_ap_ack.replace("pa=0x40600000", "pa=0x20000000"),
+        no_ap_ack.replace("cpu=1 reason=online-timeout", "cpu=2 reason=online-timeout"),
+        no_ap_ack.replace("[smp] cpu=1 reason=online-timeout\n", ""),
+        no_ap_ack + "[smp] cpu=1 online mpidr=0x1\n",
+        no_ap_ack + "M1 BSP PASS root=0x40206000 ranges=3\n",
+        no_ap_ack + "M1 PROBE PASS pa=0x40600000\n",
+    ]
+    for prefix in ("M1 ZONE", "M1 COVERAGE", "M1 SELFTEST", "M1 CLEANUP", "M1 PRUNE", "M1 EDGE", "M1 WALK"):
+        negative_mutations.append("\n".join(line for line in no_ap_ack.splitlines() if not line.startswith(prefix)))
+    for mutation in negative_mutations:
+        assert not m1_failure_evidence_ok(mutation, "ap-bad-root", 2, True), mutation
     assert not m1_failure_evidence_ok(no_ap_ack, "ap-bad-root", 2, False)
+    for variant in ("arena-exhaust", "table-exhaust"):
+        base = f"M1 FATAL reason={variant}\n"
+        for extra in ("M1 FATAL reason=unexpected\n", "PANIC: unrelated\n",
+                      "[smp] cpu=1 target_mpidr=0x1 rc=0\n", "[cntp] freq=1\n",
+                      "M1 SELFTEST PASS\n", "[unrelated] status=FAIL\n"):
+            assert not m1_failure_evidence_ok(base + extra, variant, 1, True)
 
 
 def main() -> int:

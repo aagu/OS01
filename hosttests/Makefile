@@ -106,7 +106,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_m1_runner.elf \
     $(TEST_BLD)/test_m1_layout.elf \
     $(TEST_BLD)/test_m1_reservation.elf \
-    $(TEST_BLD)/test_m1_arena.elf \
+    $(TEST_BLD)/test_m1_arena.elf $(TEST_BLD)/test_m1_arena_exhaust.elf \
     $(TEST_BLD)/test_m1_tree.elf \
     $(TEST_BLD)/test_m1_contract.elf $(TEST_BLD)/test_m1_vmm.elf \
     $(TEST_BLD)/test_m1_install.elf $(TEST_BLD)/test_m1_cleanup.elf \
@@ -717,8 +717,9 @@ $(TEST_BLD)/test_m1_layout.elf: $(TEST_BLD)/test_m1_layout.o \
 # `make test-m1-host CASE=m1-layout` (root run.mk) reaches this rule
 # via the focused dispatch in run.mk.
 .PHONY: test-m1-layout
-test-m1-layout: $(TEST_BLD)/test_m1_layout.elf
-	$<
+test-m1-layout: $(TEST_BLD)/test_m1_layout.elf $(TEST_BLD)/test_m1_runner.elf
+	$(TEST_BLD)/test_m1_layout.elf
+	$(TEST_BLD)/test_m1_runner.elf
 
 # aarch64 M1 plan Task 2: range-based boot reservations +
 # single-frame exact claim. Links the REAL pmm.c (PMM_SHADOW_INC so
@@ -795,8 +796,9 @@ $(TEST_BLD)/test_m1_arena.elf: $(TEST_BLD)/test_m1_arena.o \
 	$(HOST_CC) -o $@ $^
 
 .PHONY: test-m1-arena
-test-m1-arena: $(TEST_BLD)/test_m1_arena.elf
-	$<
+test-m1-arena: $(TEST_BLD)/test_m1_arena.elf $(TEST_BLD)/test_m1_arena_exhaust.elf
+	$(TEST_BLD)/test_m1_arena.elf
+	$(TEST_BLD)/test_m1_arena_exhaust.elf
 
 # aarch64 M1 plan Task 4: pure runtime page-table builder and strict
 # validator (`aarch64_runtime_tree_build` / `_validate`). Links the
@@ -1415,5 +1417,12 @@ $(patsubst %.elf,%.o,$(filter $(TEST_BLD)/test_m1_%.elf,$(TEST_BINS))): $(TEST_I
 $(TEST_BLD)/test_m1_runner.elf: $(TEST_CASES)/test_m1_runner.c $(TEST_INC)/m1_test_runner.h $(TEST_INC)/test_framework.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $< -o $@
-test-m1-layout: $(TEST_BLD)/test_m1_runner.elf
-	$(TEST_BLD)/test_m1_runner.elf
+
+$(TEST_BLD)/early_arena_exhaust_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/early_arena.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) -DAARCH64_M1_ARENA_EXHAUST=1 -c $< -o $@
+$(TEST_BLD)/test_m1_arena_exhaust.o: $(TEST_CASES)/test_m1_arena_exhaust.c $(TEST_INC)/m1_test_runner.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_m1_arena_exhaust.elf: $(TEST_BLD)/test_m1_arena_exhaust.o $(TEST_BLD)/early_arena_exhaust_production.o $(TEST_BLD)/pmm_boot_production.o
+	$(HOST_CC) -o $@ $^

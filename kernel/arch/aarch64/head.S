@@ -706,6 +706,12 @@ secondary_start:
     cbnz    x1, secondary_panic
     msr     ttbr1_el1, x0
     isb
+    /* CPU_ON may resume a PE with retained firmware translations.
+     * BSP TLBI is local; this AP must discard its own EL1 entries. */
+    dsb     sy
+    tlbi    vmalle1
+    dsb     sy
+    isb
     ldr     x0, =SCTLR_VALUE
     msr     sctlr_el1, x0
     isb

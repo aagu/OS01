@@ -894,6 +894,9 @@ _test-aarch64-prep-m1-ram:
 	$(MAKE) KERNEL_SELFTEST= AARCH64_M1_TEST= AARCH64_SYNC_FAULT_TEST= AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
 	$(MAKE) KERNEL_SELFTEST=1 AARCH64_M1_TEST= AARCH64_SYNC_FAULT_TEST= AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
 _test-aarch64-run-m1-ram:
+	python3 qemutests/aarch64_m1_ap_tlbi.py --self-test \
+	  --llvm-objdump "$(or $(LLVM_OBJDUMP),llvm-objdump)" \
+	  --elf "$(BUILD_DIR)/kernel/kernel.elf" --elf "$(BUILD_DIR)/kernel/selftest/kernel.elf"
 	python3 qemutests/aarch64_m1_matrix.py \
 	  --normal-image "$(BUILD_DIR)/image/aarch64-uefi.img" \
 	  --selftest-image "$(AARCH64_UEFI_SELFTEST_DISK)" \

@@ -47,11 +47,13 @@ AP 使用发布在 `.boot.bss` 的低物理 root scalar，在打开 MMU 前检�
 
 M1 不提供 AArch64 Slab（M2）或动态内核 VMM / block 拆分 / SMP shootdown（M3）。现有 Slab stub 仍保留，后续须按 PMM → M1 → Slab 的资源顺序接入。
 
-### 验证记录（2026-10-02）
+### 验证记录（2026-10-03）
 
 普通/自测镜像分别覆盖 `(RAM MiB, CPU)`：`(256,1),(512,1),(512,2),(512,4),(2048,1),(2048,2),(2048,4),(4096,1)`。16/16 通过。自测验证每 zone 首末 owned free frame 的首末 4 KiB、全部 represented frame 的实际页表、预热后裁掉旧 M0 非 RAM 映射、smoke 清理以及 AP 的高窗口 probe；2 GiB/4 GiB 情况 probe 优先在旧窗口之外。
 
-命令、镜像/firmware/DTB SHA256、RAM/CPU 和串口日志保存在 `test-results/m1-ram/` 各 case 目录的 metadata/stdout/stderr 文件。x86 `test-qemu SUITE=phase-0` 与独立 `OS01_SYSTEST=1 test-qemu SUITE=systest` 通过（334 syscall tests）。`MODE=m1-sparse`（512 MiB/2 GiB，1/4 核）以及 `m1-arena-exhaust`、`m1-table-exhaust`、`m1-ap-bad-root` 均符合预期；原 `smp`、`gic-spi`、`sync-fault` 回归通过。no-ACK 注入单独构建并通过独立降级预期。原生 host 53 suites、PMM boot reservation 及 static audits 均通过。
+命令、镜像/firmware/DTB SHA256、RAM/CPU 和串口日志保存在 `test-results/m1-ram/` 各 case 目录的 metadata/stdout/stderr 文件。x86 `test-qemu SUITE=phase-0` 与独立 `OS01_SYSTEST=1 test-qemu SUITE=systest` 通过（334 syscall tests）。稀疏变体（`MODE=m1-sparse` 及补充 harness 运行：512 MiB/2 GiB，1/4 核）以及 `m1-arena-exhaust`、`m1-table-exhaust`、`m1-ap-bad-root` 均符合预期；原 `smp`、`gic-spi`、`sync-fault` 回归通过。no-ACK 注入单独构建并通过独立降级预期。原生 host 54 suites、PMM boot reservation 及 static audits 均通过。
+
+独立 whole-branch review 后补充了 preparation 失败诊断的非法输入回归、真实 planner 容量耗尽回归、负向日志变异回归及 AP 本地 TLBI 汇编顺序检查（`qemutests/aarch64_m1_ap_tlbi.py`，M1 矩阵入口自动执行）。所有重要问题经 RED→GREEN 修复后重跑验收。一个低优先级测试缺口保留：旧 `test_m1_tree` 的 canary 命名用例仅验证 PA resolver，没有 table buffer 外围 guard bytes；现有全树校验和编译期启动栈限制仍覆盖各自契约。
 
 ## 核心数据结构
 

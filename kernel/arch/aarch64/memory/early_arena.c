@@ -208,6 +208,19 @@ static int count_buckets(const struct MEMORY_RANGE *ram, size_t count,
     return 0;
 }
 
+/* Isolated failure injection reduces real candidate capacity before the
+ * production no-space check; the published RAM map is unchanged. */
+static uint64_t candidate_window_end(uint64_t start, uint64_t end)
+{
+#if AARCH64_M1_ARENA_EXHAUST
+    (void)end;
+    return start;
+#else
+    (void)start;
+    return end;
+#endif
+}
+
 /* ── Pure planner ────────────────────────────────────────────── */
 int aarch64_m1_plan(const struct MEMORY_RANGE *ram, size_t count,
                     struct aarch64_m1_arena *out)
@@ -272,6 +285,7 @@ int aarch64_m1_plan(const struct MEMORY_RANGE *ram, size_t count,
         uint64_t e = ram[i].phys_end;
         uint64_t s_lo = s > AARCH64_M1_ARENA_LOW ? s : AARCH64_M1_ARENA_LOW;
         uint64_t e_hi = e < AARCH64_M1_ARENA_HI  ? e : AARCH64_M1_ARENA_HI;
+        e_hi = candidate_window_end(s_lo, e_hi);
         if (e_hi <= s_lo) continue;
         if (e_hi - s_lo < arena_bytes) continue;
         cand_base = s_lo;
@@ -345,6 +359,7 @@ static void log_failure_diagnostic(const struct MEMORY_RANGE *ram, size_t count,
         uint64_t e = ram[i].phys_end;
         uint64_t lo = s > AARCH64_M1_ARENA_LOW ? s : AARCH64_M1_ARENA_LOW;
         uint64_t hi = e < AARCH64_M1_ARENA_HI  ? e : AARCH64_M1_ARENA_HI;
+        hi = candidate_window_end(lo, hi);
         if (hi > lo && (hi - lo) > largest_sz) {
             largest_sz = hi - lo;
             largest_lo = lo;
@@ -360,7 +375,7 @@ static void log_failure_diagnostic(const struct MEMORY_RANGE *ram, size_t count,
                 (unsigned long)(largest_sz / (1024u * 1024u)),
                 (unsigned long)largest_lo, (unsigned long)largest_hi);
     } else {
-        log_err("[smp] FATAL: no RAM in [0x%x, 0x%x) window\n",
+        log_err("[smp] FATAL: no RAM in [%lx, %lx) window\n",
                 (unsigned long)AARCH64_M1_ARENA_LOW, (unsigned long)AARCH64_M1_ARENA_HI);
     }
 }
@@ -407,19 +422,20 @@ int aarch64_m1_prepare(const struct MEMORY_RANGE *ram, size_t count)
 
     int rc = aarch64_m1_plan(ram, count, &candidate_arena);
     if (rc != 0) {
+#if AARCH64_M1_ARENA_EXHAUST
+        if (rc == -ENOSPC) log_err("M1 FATAL reason=arena-exhaust\n");
+#endif
         /* Print need/available diagnostic (brief requirement). PMM
          * state is not yet touched, so the canary invariant holds. */
-        log_failure_diagnostic(ram, count, estimate_need_bytes(ram, count));
+        /* Detailed sizing only accepts validated PA40 ranges. Rewalking
+         * rejected input can hang on huge spans or dereference NULL. */
+        if (validate_ranges(ram, count) == 0)
+            log_failure_diagnostic(ram, count, estimate_need_bytes(ram, count));
+        else
+            log_err("[smp] FATAL: invalid arena input error=%lu\n", (unsigned long)(-rc));
         return rc;
     }
 
-#if AARCH64_M1_ARENA_EXHAUST
-    /* Real required size checked against an isolated test capacity of zero. */
-    if(candidate_arena.end_pa>candidate_arena.base_pa) {
-        log_err("M1 FATAL reason=arena-exhaust\n");
-        return -ENOSPC;
-    }
-#endif
     /* Side-effecting PMM publish. The preflight writes to PMMngr only
      * here; pmm_init() will read it to place bits_map at the high
      * alias. */
