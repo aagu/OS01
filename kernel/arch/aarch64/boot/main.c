@@ -505,7 +505,6 @@ void aarch64_main(const struct boot_context *handoff)
         log_warn("[spinlock] status=SKIP\n");
 
     /* BSP-only timer and IRQs begin after AP startup/testing has settled. */
-#if defined(__aarch64__)
     /* SUBSYS_INITCALL Task 2 — register+dispatch pair (R3-1 critical).
      * Mirror of x86_64 kernel/core/main.c:193-194. Without the second
      * call, no SUBSYS_INITCALL-registered initcall ever runs.
@@ -578,7 +577,6 @@ void aarch64_main(const struct boot_context *handoff)
     __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr_bsp));
     percpu_install_gs(0);
     percpu_init(0, mpidr_bsp);
-#endif
 
     if (!arch_tick_start()) {
         log_err("[smp] FATAL: BSP timer initialization failed\n");
