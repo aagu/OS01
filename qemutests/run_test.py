@@ -487,25 +487,25 @@ def test_network(tester):
 
 
 def test_gfx(tester):
-    """Ring-3 gfx E2E (Task 5 of the 2D graphics API plan).
+    """Ring-3 gfx E2E (Task 5 of the 2D graphics API plan + Task 8 acceptance).
 
     The caller (``main()`` -> ``test_gfx`` dispatch) is responsible
     for invoking ``tester.start_qemu(serial_stdio=True)`` BEFORE this
     function runs (the gfx suite uses the same ``TestRunner`` instance
     as the other suites, and ``main()`` does not pre-start QEMU).
     This function is the shell-side flow: wait for the BusyBox ``#``
-    prompt, invoke ``/bin/test_gfx`` and wait for the compact
-    ``[GFX TEST] PASS`` marker.
+    prompt, then run ``/bin/test_gfx`` (the full-screen view E2E)
+    AND ``/bin/tetris smoke`` (one-shot full-screen render+present).
+    Both must print their PASS markers; either failure aborts the
+    suite with FAIL.
 
-    The test program runs the substantive assertion logic (left-red/
-    right-green/white diagonal in a full-screen view, central small
-    view with surrounding sentinels, negative cases).  This runner
-    is just the transport + marker gate, by design.
+    The test programs run the substantive assertion logic.  This
+    runner is just the transport + marker gate, by design.
 
-    On success, the binary prints exactly one PASS line; on any
-    failure it prints ``[GFX TEST] FAIL: <reason>`` with the same
-    prefix and exits non-zero.  We treat any non-PASS outcome as
-    failure (including timeouts).
+    On success, each binary prints exactly one PASS line; on any
+    failure the binary prints a ``FAIL: <reason>`` line with the
+    same prefix and exits non-zero.  We treat any non-PASS outcome
+    as failure (including timeouts).
     """
     # If the caller forgot to start QEMU, we start it here too — but
     # only if no proc exists.  Calling start_qemu twice would clobber
@@ -524,29 +524,44 @@ def test_gfx(tester):
         print("FAIL: gfx runner never saw the shell prompt")
         return False
 
-    # Type the test command.  send_line() flushes immediately.
+    # ── Step A: /bin/test_gfx — full-screen view E2E ───────
+    # Task 5 of the 2D graphics API plan, extended by Task 8 to
+    # use the actual framebuffer dimensions and assert a >= 5.18
+    # MB pixels buffer + heap headroom.
     tester.send_line("/bin/test_gfx")
 
-    # Wait for the PASS marker.  The test binary writes a single
-    # ``[GFX TEST] PASS\\n`` to stdout; under -serial stdio the
-    # shell's stdout is QEMU's serial port, so the marker appears on
-    # the log file.
     passed = tester.read_until("[GFX TEST] PASS", timeout=tester.timeout)
     if passed is None:
         # Drain a moment so a slow FAIL line still makes it into the
         # log before we report the cause.
         time.sleep(1)
         log = tester._read_available().decode('utf-8', errors='replace')
-        # Surface whatever marker the test wrote (PASS, FAIL, or
-        # something else) so a human reading the runner output can
-        # see why we said "FAIL".
         marker_re = re.compile(r"\[GFX TEST\][^\n]*")
         m = marker_re.search(log)
         print(f"FAIL: /bin/test_gfx did not produce PASS marker "
               f"(last test marker: {m.group(0) if m else '<none>'!r})")
         return False
-
     print("PASS: [GFX TEST] PASS marker observed")
+
+    # ── Step B: /bin/tetris smoke — one-shot full-screen E2E ─
+    # Task 8 of the user-heap/ELF-isolation plan: a non-interactive
+    # tetris path that allocates the same full-screen pixels buffer,
+    # performs one real render and present, then prints
+    # ``[TETRIS] SMOKE PASS`` and exits cleanly.  The marker must
+    # reach stdout / the serial port unmodified, so the smoke path
+    # intentionally bypasses the alt-screen terminal mode.
+    tester.send_line("/bin/tetris smoke")
+
+    passed = tester.read_until("[TETRIS] SMOKE PASS", timeout=tester.timeout)
+    if passed is None:
+        time.sleep(1)
+        log = tester._read_available().decode('utf-8', errors='replace')
+        marker_re = re.compile(r"\[TETRIS\][^\n]*")
+        m = marker_re.search(log)
+        print(f"FAIL: /bin/tetris smoke did not produce SMOKE PASS marker "
+              f"(last test marker: {m.group(0) if m else '<none>'!r})")
+        return False
+    print("PASS: [TETRIS] SMOKE PASS marker observed")
     return True
 
 

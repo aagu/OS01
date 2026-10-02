@@ -152,6 +152,17 @@ int main(int argc, char **argv)
 {
     (void)argc;
     bool fast = (argc > 1 && argv[1] && strcmp(argv[1], "fast") == 0);
+    /* Task 8 of the user-heap/ELF-isolation plan: a non-interactive
+     * "smoke" path that runs ONE real gfx allocation, render and
+     * present, then prints a fixed marker line and exits.  The
+     * gfx QEMU runner executes ``/bin/tetris smoke`` after
+     * ``/bin/test_gfx`` and requires the marker — it proves the
+     * full-screen 1440×900 RGB32 pixels buffer (5.18 MiB) fits
+     * in the program's heap AND the kernel's gfx0 device can
+     * accept a real present, end-to-end, without entering the
+     * interactive game loop. */
+    bool smoke = (argc > 1 && argv[1] &&
+                  strcmp(argv[1], "smoke") == 0);
 
     // ── Framebuffer metadata ──────────────────────────────
     // /dev/fb is opened only to read its struct fb_info (width,
@@ -180,6 +191,56 @@ int main(int argc, char **argv)
     if (cell > 48) cell = 48;
     ox = (fb_info.width - TETRIS_W * cell) / 2;
     oy = (fb_info.height - TETRIS_H * cell) / 2;
+
+    /* ── Smoke path: one real render+present + marker + exit ───
+     * Bypass the alt-screen, keyboard polling and game loop —
+     * the runner only needs to prove the gfx stack still works
+     * after a full-screen allocation.  The board outline + a
+     * single T-piece render is enough to make the present
+     * non-trivial (covers >1 KiB of pixel writes).  We do NOT
+     * enter the alt screen on this path — the marker line must
+     * reach stdout / the serial line unmodified. */
+    if (smoke) {
+        gfx_fill_rect(gfx, 0, 0, fb_info.width, fb_info.height,
+                      0x00202020u);            /* dark grey bg */
+        /* Border around the board (matches the in-game look). */
+        gfx_fill_rect(gfx, ox - 4, oy - 4,
+                      TETRIS_W * cell + 8, 4, 0x00444444u);
+        gfx_fill_rect(gfx, ox - 4, oy + TETRIS_H * cell,
+                      TETRIS_W * cell + 8, 4, 0x00444444u);
+        gfx_fill_rect(gfx, ox - 4, oy - 4,
+                      4, TETRIS_H * cell + 8, 0x00444444u);
+        gfx_fill_rect(gfx, ox + TETRIS_W * cell, oy - 4,
+                      4, TETRIS_H * cell + 8, 0x00444444u);
+        /* A single T-piece (shape index 2 = T in tetris_logic) at
+         * the top-left of the board — 4 cells × cell^2 px = a
+         * non-trivial write that also exercises gfx_line / rect
+         * path coverage at the small scale. */
+        static const int t_cells[4][2] = {
+            { 0, 1 }, { 1, 1 }, { 2, 1 }, { 1, 0 }
+        };
+        for (int i = 0; i < 4; i++) {
+            gfx_fill_rect(gfx,
+                          (int32_t)(ox + t_cells[i][0] * cell),
+                          (int32_t)(oy + t_cells[i][1] * cell),
+                          (uint32_t)cell, (uint32_t)cell,
+                          0x00FF00FFu);          /* T = magenta */
+        }
+        /* One real gfx_present ships the buffer to the kernel. */
+        if (gfx_present(gfx) != 0) {
+            gfx_close(gfx);
+            return 1;
+        }
+        gfx_close(gfx);
+        /* The marker line — single line, no extra banners.  Goes
+         * to stdout (fd 1), which under -serial stdio is the QEMU
+         * serial port the runner reads. */
+        static const char msg[] = "[TETRIS] SMOKE PASS\n";
+        if (write(1, msg, sizeof(msg) - 1) !=
+            (ssize_t)(sizeof(msg) - 1))
+            return 1;
+        return 0;
+    }
 
     // ── Enter alt screen (terminal restores main on exit) ─
     write(1, "\x1b[?1049h", 8);
