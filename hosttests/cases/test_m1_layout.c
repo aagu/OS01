@@ -257,8 +257,11 @@ TEST_FUNC(test_bits_add_overflow)
     assert_true(got.total_bytes == 0);
 }
 
-/* ── Zones multiplication overflow (MEMORY_RANGE_MAX * sizeof(struct Zone)) */
-TEST_FUNC(test_zones_mul_overflow)
+/* ── Zones length lower bound (no overflow possible: MEMORY_RANGE_MAX is
+ * a small compile-time constant, so MEMORY_RANGE_MAX * sizeof(struct Zone)
+ * never overflows uint64_t). We instead pin zones_length to the
+ * arithmetic lower bound and confirm it is align-up'd to sizeof(long). */
+TEST_FUNC(test_zones_length_lower_bound)
 {
     /* MEMORY_RANGE_MAX is a small constant; force it via a custom sanity check
      * that does not depend on sizeof. The production formula uses a small
@@ -345,7 +348,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_zero_span_returns_einval_and_zeros_out),
     TEST_ENTRY(test_pages_mul_overflow),
     TEST_ENTRY(test_bits_add_overflow),
-    TEST_ENTRY(test_zones_mul_overflow),
+    TEST_ENTRY(test_zones_length_lower_bound),
     TEST_ENTRY(test_align_overflow),
     TEST_ENTRY(test_structural_invariants),
 TEST_LIST_END
