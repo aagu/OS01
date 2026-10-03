@@ -1,34 +1,36 @@
 ---
-title: OS01 aarch64 M2 Slab + M3 运行期 VMM 设计 (v2)
+title: OS01 aarch64 M2 Slab + M3 运行期 VMM 设计 (v3)
 created: 2026-10-03
 type: spec
 status: revised-for-review
 tags: [osdev, aarch64, memory, slab, vmm, tlb, ipi]
-supersedes: 93f8ae7 (v1)
+supersedes: 8626553 (v2), 93f8ae7 (v1)
 ---
 
-# aarch64 M2 Slab + M3 运行期 VMM (v2)
+# aarch64 M2 Slab + M3 运行期 VMM (v3)
 
-> v2 是 v1（commit `93f8ae7`）的用户评审修订版。14 项问题中 7 项阻塞级（1, 2, 3, 4, 5, 6, 7）+ 5 项重要（8, 9, 10, 11, 12）+ 2 项一般（13, 14）全部修复。本节先列 v2 关键修订摘要，再展开全文。
+> v3 修订 v2 评审的 16 项问题（9 阻塞 + 4 重要 + 3 文档/验收）。v2 修掉了 v1 的基线错误，但在三大契约——**slab 物理布局与记账**、**生产 SGI/shootdown**、**页表替换与页所有权**——上仍是不可实施的。v3 重做这三个契约，并修正接口与测试矩阵。
 
-## 0. v2 关键修订摘要
+## 0. v3 关键修订摘要
 
-| 项 | v1 错误 | v2 修正 |
-|----|----|----|
-| 1 | 假定「M1 → Slab」启动顺序 | 实测 `aarch64/boot/main.c:411` → `pmm.c:317` → `aarch64/boot/main.c:422`：顺序是 **PMM → Slab → M1**。真实 Slab 在 M0 直映（0..2 GiB TTBR0）下运行，必须确保 Slab 元数据与 8 个预分配 2 MiB 页落在 M0 覆盖范围内。 |
-| 2 | 假定 PMM 元数据就绪 = Slab 可用 | 实测 `slab_init` 在 `end_of_struct` 后写缓存元数据，并占用下一处 2 MiB 边界的 8 个预分配页。**这些 frame 必须由 M1 arena 显式预留**，否则会与 M1 表页池冲突或占用未保留 RAM。 |
-| 3 | 假定 `tlb_shootdown()` 与 `IPI_VECTOR_TLB` 可直接复用 | 实测 `kernel/memory/tlb.c` **未编入 aarch64 build**；`ipi_broadcast` 只有 x86 APIC 实现；`IPI_VECTOR_TLB = 0x40` 是 x86 vector 编号，不能直接当作 GICv2 SGI。M3 必须包含 aarch64 SGI 发送 + handler 注册 + `tlb_shootdown()` 编译接入，作为独立前置任务。 |
-| 4 | split 直接覆盖 block 描述符 | ARM ARM 要求 **break-before-make**：先使旧项无效 → dsb ishst → local tlbi → dsb ish → 跨核 tlb_shootdown → 写新项 → dsb ishst → local tlbi → dsb ish + isb。SMP 下需要 per-page-table 锁；当前 `aarch64/page_table.h:10` 限制活跃 root 仅 BSP pre-SMP 修改，M3 须明确解除该限制所需的同步方案。 |
-| 5 | 假定 vmm.h flag 重命名 + 旧 wrapper 可让 caller 跨架构 | 实测 `vma.c:819-849`、`uaccess.c:149/203/220-221`、`task.c:2016-2082` 直接读取、组合、写回原始 PTE，遍历 x86 格式上级描述符。**M3 不编入这些模块到 aarch64**（vma/uaccess 整体不进；task.c 仅 fork/clone 段不进），caller 范围严格限定。 |
-| 6 | `decode_perm` 补 bit 55/56 即可 round-trip PROT_NONE | 实测 `aarch64_pt_query_4k` 遇 `Valid=0` 直接返回 `ENOENT`；PROT_NONE 必须 `Valid=0` 但保留 PA。**需定义新返回码（如 `EPROT_NONE`）**，并让 `query_4k` / `unmap_4k` / `free_user_map` 处理"V=0 + bit 55"状态。 |
-| 7 | `arch_vmm_free_user_map` 遍历 L0[0..255] | aarch64 TTBR0 root 用完整 L0[0..511]。**`arch_vmm_free_user_map` 推迟到 M4**，M3 不实现。 |
-| 8 | `arch_vmm_map_4k` 单一接口 | 拆为 `arch_vmm_map_4k_new`（EEXIST 遇有效 PTE，不覆盖）+ `arch_vmm_update_4k`（替换，明确旧 PA 处理）。x86 wrapper 保持覆盖语义走 `arch_vmm_update_4k`。 |
-| 9 | `arch_vmm_unmap_2m` 缺契约 | 补齐：pmd 必须是 block；返回原 PA（bits [39:12]）；不释放物理页（caller 决定）；local TLBI + shootdown；L2 表保留。 |
-| 10 | R6 要求所有 backend 用 `alloc_4k_page` | 改为 per-backend 自决：x86 沿用 calloc/kfree；aarch64 用 alloc_4k_page/free_4k_page。 |
-| 11 | 软件位走 `encode_perm` 扩展 | `encode_perm` 当前拒绝未知位。**新增独立软件位参数**：扩展 `aarch64_pt_map_4k` 接受 `software_bits`（或把 VM_PROTNONE/VM_COW 纳入 perm 集合作为新软件位常量 `AARCH64_PT_SOFTWARE_*`）。 |
-| 12 | 验收要求 shell 提示符 + `aarch64 systest_repeat.py` | 当前 aarch64 boot 以 halt 收尾且无用户态。**M2/M3 验收改为 `KERNEL_SELFTEST=1` QEMU 启动到 main + selftest 全过**。x86 systest_repeat 维持。aarch64 systest 推迟到 M4+。 |
-| 13 | aarch64 `arch_flush_tlb_all` 假定为 weak default；指向不存在的 `kernel/arch/aarch64/Makefile` | 实测 `kernel/include/arch/mmu.h:144` 已有内联 `tlbi vmalle1 + dsb sy + isb` 实现；source gate 在 `kernel/Makefile:39` 一带（具体行号以 build profile 实际行号为准）。 |
-| 14 | 测试矩阵 8 种组合、`test_vmm_split_merge` 命名 | 修正为 **12 种合法组合**（USER/KERNEL × RO/RW × EXEC/NOEXEC × NORMAL/DEVICE，扣除 DEVICE\|EXEC）+ **4 种拒绝组合**（DEVICE\|EXEC × {RO,RW} × {USER,KERNEL} = 4 个 case）。`test_vmm_split_merge.c` 改名 `test_vmm_split.c`，仅测 split。 |
+| # | v2 错误 | v3 修正 | 落点 |
+|---|----|----|----|
+| 1 | slab 空间预估漏掉 16 个 color bitmap（合计 ≈16,416 B）；把 BSS 静态变量计入 arena；错称 8 页来自 8 次 `alloc_pages` | 布局从 `slab_init` 的**实际地址推进规则**推导（16 组 `sizeof(struct Slab)+10×long+color_length+10×long`，color_length 随 cache size 变化）；BSS 不计入；8 页是**按地址直接占用**（`slab_page_start = align2M(end_of_struct)` 后连续 8 个 2 MiB） | §3.2 |
+| 2 | §2 要求 slab 页"不与 arena 重叠"、§3.2 又要求"纳入 arena"；boot reservation 整体预留 + slab_init 无条件记账 = **双重计数** | 单一记账路径：boot reservation 标 **PMM 元数据段 + M1 表页池**，**排除 slab 段**（slab 元数据帧 + 8 个 slab 页由 `slab_init` 自己记账，保持 x86 字节级同行为）；arena 尺寸含 slab 段以保证区间互不重叠 | §3.2 |
+| 3 | M0 越界检查放在 `arch_boot_direct_map_init`（在 `pmm_init`/真实 slab_init **之后**），越界写已发生 | 全部检查（连续 RAM、M0 覆盖上界、区间不重叠、容量）移到 **arena preflight**（`pmm_init` 之前） | §3.2 |
+| 4 | TLB IPI 选 SGI 0，与 `ipi_test.c` 的 `IPI_SGI_ID=0`/`IPI_REPLY_SGI=1`/clobber SGI 2 冲突 | TLB 用 **SGI 3**；加入 `gic.c` 每核 banked 白名单；验收要求 IPI 自测与 TLB IPI 并存工作 | §6.2 |
+| 5 | 正式构建 AP 在 `secondary_idle` 中**保持 IRQ 屏蔽**（`#if OS01_SELFTEST` 才 enable），shootdown 的 ack 永远等不到 | M3 纳入**正式构建 AP IRQ 使能**（boot command 处理完后开 DAIF.I 进 SGI 待命循环）；验收必须含**非 selftest 镜像**的双核 shootdown | §6.2/§6.4 |
+| 6 | break-before-make 先清 block 后分配 L3，`alloc_4k_page` 失败留下 2 MiB 永久空洞 | **先分配并填好新 L3，再持锁 break/make**；每个失败点定义回滚 | §5.3 |
+| 7 | `update_4k` 有效 PTE 直接换 PA/权限无安全协议；只有 block↔table 有协议 | 4 KiB 更新协议：同 PA 改权限 = 原子 8 B store + dsb + TLBI + shootdown；换 PA = break-before-make（清→失效→写新）；纯软件位变更拆成独立 `arch_vmm_set_software_4k` | §4.4.3 |
+| 8 | 单个 `tlb_wanted/tlb_ack` 槽无法承受多 CPU 并发请求；超时后静默继续 | **发起方串行化**（shootdown 自旋锁）+ **代数式 ack**（per-CPU ack generation counter）；超时 = **FATAL panic**，不再当作已失效 | §6.4 |
+| 9 | unmap PROT_NONE 在后端内 `free_4k_page`，普通页/2 MiB 页却返回 PA 由 caller 释放——所有权规则自相矛盾 | **统一：unmap 只摘除映射**，返回 `phys_out` + `sw_out`，永不 free；释放/COW 引用计数由拥有该页的上层做 | §4.4.4 |
+| 10 | §4.2 与 §4.3 两套不兼容签名；`VM_PROTNONE` 同时是 vm_flags 位和独立 `vm_software_t` | **一套签名**：软件位就是 `vm_flags` 的位（`VM_PROTNONE`/`VM_COW`）；`VM_PRESENT=0 + VM_PROTNONE=1` 定义为合法"无效但持有 PA"状态；unmap 用 out 参数返回旧软件位 | §4.2/§4.3 |
+| 11 | "删除全部 PAGE_*" 与 x86 fork/fault/uaccess/VMA 直接操作硬件描述符的现实冲突；`arch_vmm_pt_walk` 返回裸 PTE 指针却放在公共头 | x86 硬件位**留在 x86 私有头**（`kernel/include/arch/x86_64/pte.h`）；公共 `vmm.h` 只放语义 API + `VM_*`；保留裸 PTE 访问的 x86 文件逐个列出（vma/uaccess/task.c fork 段/do_page_fault/boot_direct_map）；M3 不强制迁移 x86 内部代码 | §4.5 |
+| 12 | 试图按行号范围排除 `task.c`——构建系统只能整文件 | `task.c` **整个文件**保持不编入 aarch64（当前 `kernel/Makefile:39` 白名单本来就不含 `sched/`）；M4 若需其中功能先拆文件 | §4.5 |
+| 13 | `arch_vmm_init` 无生产调用点 | 明确：aarch64 `boot/main.c` 中 `arch_boot_direct_map_init()` 成功返回后立即调用；失败 FATAL 早停；测试断言 `kernel_map == 当前 TTBR1 root` | §7.2 |
+| 14 | 多核测试让 CPU B"直接读 VA"——AP 无执行该工作的机制；首次读也无法证明旧 TLB 被失效 | 跨核测试用 **boot command 工作项机制**（复用 `AARCH64_BOOT_GO_TEST`/`smp_bench_iter` 同款通道）：B 先在旧映射下读并记录 → A 替换/解除映射并等 ack → B 再读验证 → B 置结果标志 → A 检查；覆盖 -smp 2/4 | §8.2 |
+| 15 | 测试路径写不存在的 `test/hosttest/memory/`；`test_vmm_prot_none` 验证已推迟到 M4 的 `free_user_map` | 测试落在 **`hosttests/cases/`**（实际 harness）；M3 测试只验证本阶段承诺的 API | §8 |
+| 16 | R7 风险的"对策"与风险描述相同（就是现状流程） | 明确：`pt_lock` 以 `spin_lock_irqsave` 获取；IPI handler **不取任何 pt_lock**；持锁等待 ack 的 CPU 不会阻碍目标 CPU 执行 handler（IRQ 关只屏蔽本核中断，不影响他核）；双 CPU 竞争同一页表区域的测试验证 | §5.3/§9 R7 |
 
 ---
 
@@ -36,569 +38,391 @@ supersedes: 93f8ae7 (v1)
 
 依据 roadmap P2，M2 让 aarch64 kernel 从 `kmalloc()=NULL` 走到能在任意缓存大小上分配/释放；M3 让运行期既可映射/解除映射 4 KiB 也可创建/拆分 2 MiB block，并保留 x86_64 全部现行行为。M2+M3 是 M4 用户地址空间的前置；M4 不在本 spec。
 
-**基线**：master @ `dabc9f0`。前置依赖 M0 ✅ / M1 ✅ / Generic Timer ✅ / GICv2 Phase 1 ✅ / IPI fix ✅ / PMM arch-neutral ✅，均已 master。
+**基线**：master @ `dabc9f0`。前置依赖 M0 ✅ / M1 ✅ / Generic Timer ✅ / GICv2 Phase 1 ✅ / IPI fix ✅ / PMM arch-neutral ✅。
 
-### 1.1 aarch64 启动顺序实测（v2 修正）
+### 1.1 aarch64 启动顺序实测
 
-`kernel/arch/aarch64/boot/main.c` 实测启动序列（行号以当前代码为准）：
+`kernel/arch/aarch64/boot/main.c`：
 
-1. `arch_cpu_early_init()`：CPU 特性探测、栈/CPUs 准备。
-2. `aarch64_ram_init()` + `aarch64_early_arena_init()`（约 line 388-405）：M1 preflight、arena 选择与发布。
-3. **`pmm_init(handoff)`**（line 411）：**进入 PMM 初始化**。
-   - `pmm_init` 内部（`kernel/memory/pmm.c:317`）调 **`slab_init()`**——这是真实 Slab 被调用的最早时机。
-4. `arch_boot_direct_map_init()`（line 422）：M1 运行期直映**在 Slab 之后**建立。
+1. `aarch64_ram_init()` + M1 preflight / `aarch64_early_arena_init()`（≈:388-405，**在 `pmm_init` 之前**）。
+2. `pmm_init(handoff)`（:411）→ 内部调 `slab_init()`（`pmm.c:317`）。
+3. `arch_boot_direct_map_init()`（:422）：M1 直映安装，**在 Slab 之后**。
 
-**结论**：M2 实施时真实 Slab **在 M1 直映建立之前**运行，运行在 M0 直映（TTBR0 0..2 GiB）下。这意味着：
+即真实 Slab 运行在 **M0 直映（TTBR0，0..2 GiB）** 下。Slab 元数据与 8 个预分配 2 MiB 页的物理地址必须在 [0, 2 GiB) 且被正确记账（§3.2）。
 
-- Slab 的所有元数据 + 8 个预分配 2 MiB 页 **必须落在 M0 直映覆盖范围 [0, 2 GiB) 内**；
-- M1 arena 选择时 **必须把 Slab 占用的 frame 显式预留**，否则 PMM 会把它们当普通 RAM 分配掉。
-
-### 1.2 M2 完成标准（v2 修正）
+### 1.2 M2 完成标准
 
 - aarch64 build 编入 `kernel/memory/slab.c`，移除 `kernel/arch/aarch64/runtime/slab_stub.c`。
-- `slab.c` 的 `slab_lock_acquire/release` 改用 `arch_local_irq_save/restore`（现有 facade，`kernel/include/arch/irq.h`）；`slab.c` 内不再出现 `pushfq` / `cli` / `sti` / `popfq` 字面。
-- **M1 arena 扩展**：在 `aarch64_early_arena_init` 计算 arena 大小时，把真实 Slab 的需求（缓存元数据大小 + 8 × 2 MiB 预分配页）显式纳入预留范围并加入 boot reservation；启动日志输出预留量。
-- **边界检查**：Slab 的 `end_of_struct` 地址与 8 个预分配页起始地址必须在 M0 直映 [0, 2 GiB) 内；超出范围则 FATAL 早停（不进入 `pmm_init`）。
-- aarch64 kernel `KERNEL_SELFTEST=1` 启动到 main 不 panic；`slab_init` 返回非 0；selftest 跑跨 16 缓存大小 kmalloc/kfree pass。
-- x86_64 `test/hosttest/memory/` 全部 + `systest_repeat.py` 5 连 pass。
+- `slab.c` 锁路径换 `arch_local_irq_save/restore`；`slab.c` 内不再出现 `pushfq/cli/sti/popfq` 字面。
+- **布局与记账契约**（§3.2）：arena preflight 在 `pmm_init` 之前完成 slab 段的容量/M0 覆盖/互不重叠检查；slab 帧只被 `slab_init` 记账一次；启动后断言实际 `end_of_struct ≤ 预估上界`。
+- aarch64 `KERNEL_SELFTEST=1` QEMU 启动到 main 不 panic；selftest 跨 16 缓存大小 kmalloc/kfree pass。
+- x86_64 hosttests + `systest_repeat.py` 5 连 pass（slab 行为字节级不变）。
 
-### 1.3 M3 完成标准（v2 修正）
+### 1.3 M3 完成标准
 
-- **`kernel/memory/tlb.c` 接入 aarch64 build**：aarch64 编译单元包含 `tlb_shootdown()`；其内部 `flush_tlb()` 走 `arch_flush_tlb_all()`（`kernel/include/arch/mmu.h:144` 已实现 `tlbi vmalle1 + dsb sy + isb`，无需新增内联）。
-- **aarch64 IPI 发送**：GICv2 SGI 编号映射（`IPI_VECTOR_TLB=0x40` 翻译为某 SGI ID，例如 SGIn=0）+ `arch_ipi_broadcast()` 实现；aarch64 `ipi_broadcast()` 经此发送。
-- **aarch64 TLB handler 注册**：在 `IPI_VECTOR_TLB` 对应 SGI 上注册 handler，跑 `arch_flush_tlb_all()` + ack 协议。
-- **`kernel/include/memory/vmm.h`** 暴露 arch-neutral 语义 flag（`VM_PRESENT` / `VM_WRITE` / `VM_USER` / `VM_NO_EXEC` / `VM_HUGE` / `VM_NOCACHE` / `VM_PROTNONE` / `VM_COW`），位位置不再外泄。
-- **`kernel/include/arch/<arch>/vmm_backend.h`** + **`kernel/arch/<arch>/memory/vmm_backend.c`** per-arch 实现：
-  - `arch_vmm_init`、`arch_vmm_map_4k_new`、`arch_vmm_update_4k`、`arch_vmm_unmap_4k`、`arch_vmm_map_2m`、`arch_vmm_unmap_2m`、`arch_vmm_split_2m_to_4k`、`arch_vmm_pt_walk`。
-  - **`arch_vmm_free_user_map` 推迟到 M4**（M3 不实现）。
-- **aarch64 `aarch64_pt_*` 扩展**：
-  - 新增 `aarch64_pt_map_2m_block` / `aarch64_pt_unmap_2m_block`；
-  - 新增 `aarch64_pt_split_block_2m`；
-  - 扩展 `aarch64_pt_map_4k` / `aarch64_pt_query_4k` / `aarch64_pt_unmap_4k` 支持独立软件位参数 `software_bits`（见 §5.4），并新增返回值 `AARCH64_PT_EPROT_NONE`（V=0 + bit 55）。
-- **break-before-make 协议**：活跃 root 上 block ↔ table 替换走 §5.3 完整顺序；非活跃 root 维持 BSP-only 修改。
-- **caller 范围限制**：
-  - `kernel/memory/vma.c` **不编入 aarch64**；
-  - `kernel/memory/uaccess.c` **不编入 aarch64**；
-  - `kernel/sched/task.c` 中 fork/clone 的 PTE 拷贝段（约 line 1988-2082）**不编入 aarch64**；其余非 PTE 操作段保留；
-  - 后续 M4 引入 aarch64 兼容的 vma/uaccess/fork 接口时再恢复编入。
-- **aarch64 `arch_vmm_init` 把 M1 root 直接注册为 `kernel_map`**。
-- **host 边界测试**（12 合法权限组合 + 4 拒绝组合 + split 内容 + 软件位 round-trip，见 §8）。
-- **QEMU aarch64 `KERNEL_SELFTEST=1`** 启动到 main + selftest 全过 + 多核 TLB shootdown 自测通过。
+- **IPI/shootdown 契约**（§6）：aarch64 SGI 3 = TLB；正式构建 AP 使能 IRQ 并服务 SGI；`tlb_shootdown` 发起方串行化 + 代数 ack + 超时 FATAL；`kernel/memory/tlb.c` 编入 aarch64。
+- **vmm 语义层**（§4）：公共 `vmm.h` 只含 `VM_*` 语义位与语义 API；x86 硬件位迁至 x86 私有头；`vma.c`/`uaccess.c`/`task.c` 保持不编入 aarch64。
+- **替换协议**（§4.4.3/§5.3）：4 KiB 更新、block↔table 替换均有 break-before-make 或等价安全序列；split 失败不留空洞。
+- **所有权契约**（§4.4.4）：unmap 永不 free。
+- aarch64 `aarch64_pt_*` 扩展：block 编解码、split、软件位（`VM_PROTNONE`/`VM_COW` 进出原语）、`AARCH64_PT_EPROT_NONE`。
+- aarch64 `arch_vmm_init` 有生产调用点（§7.2）。
+- host 边界测试（12 合法 + 4 拒绝组合 + split + 软件位 + PROT_NONE）+ QEMU 单核/多核（含**非 selftest 镜像**）selftest。
 - x86_64 `systest_repeat.py` 5 连 pass。
 
-### 1.4 不属于本 spec（明确边界）
+### 1.4 不属于本 spec
 
-- M4 用户 PGD / EL0 切换 / uaccess 故障恢复（roadmap 已列）；
-- `arch_vmm_free_user_map` 实现（M3 推迟到 M4）；
-- `merge_4k_to_2m`（F1）；
-- `per-VA TLB shootdown`（F2）；
-- `vma.c` / `uaccess.c` 在 aarch64 的重写（M4 范围）；
-- Slab 算法优化（per-CPU cache / NUMA / page coloring）；
-- ASLR / 用户栈随机化。
+M4 用户地址空间（user PGD / EL0 切换 / uaccess 故障恢复 / `arch_vmm_free_user_map`）；`merge_4k_to_2m`（F1）；per-VA shootdown（F2）；`vma.c`/`uaccess.c`/`task.c` 的 aarch64 重写（M4）；Slab 算法优化；ASLR。
 
 ---
 
-## 2. 已核实的约束（v2 修正）
+## 2. 已核实的约束
 
-1. **`slab.c:36-55`** `slab_lock_acquire` 用 inline `pushfq; cli`，`slab_lock_release` 用 `sti`。`arch_local_irq_save/restore` 已存在（`kernel/include/arch/irq.h:55`），x86 用 pushfq+cli，aarch64 用 `mrs daif` + `msr daifset, #2`。可直接替换，无 API 变化。
-
-2. **`slab_stub.c`** 是 4 个空函数（`slab_init` / `kmalloc` / `kfree` / `kzalloc` / `ksize`），签名与 `kernel/memory/slab.c` 完全一致。
-
-3. **aarch64 启动顺序实测**：`aarch64/boot/main.c:411 pmm_init()` → `pmm.c:317 slab_init()` → `aarch64/boot/main.c:422 arch_boot_direct_map_init()`。Slab 在 M1 之前运行。
-
-4. **M0 直映范围**：`aarch64/head.S` 在 MMU 打开前建 0..2 GiB boot map（Normal/EL1 RW）；M1 在 [0x40000000, 0x40200000) 保留内核 block，其余 RAM 通过 M1 arena 走正常 RAM 直映。
-
-5. **`slab.c` 真实占用**：`slab_init` 在 `end_of_struct` 之后写缓存元数据（`kmalloc_cache_size[16]` + `slab_lock` + `slab_lock_depth[]`），并从下一处 2 MiB 边界占 8 个预分配页（按 `kmalloc_create` 内 `alloc_pages(ZONE_NORMAL,1,0)` 计）。这些 frame **必须**：
-   - 物理地址在 [0, 2 GiB) 内（M0 直映可达）；
-   - **不**与 M1 arena 重叠；
-   - **不**被 PMM 当普通 RAM 分配；
-   - 由 boot reservation 标记为 Kernel/Init。
-
-6. **`kernel/memory/vmm.c:115-117`** `vmm_init()` 把 `kernel_map = (uint64_t *)Phy_To_Virt(0x101000)`——x86_64 启动期 PML4 物理地址硬编码。aarch64 端无等价物；M1 root 必须从 `aarch64_read_ttbr1()` 拿。`vmm_init` 必须去 x86-ize。
-
-7. **`vmm.c:69-90` `vmm_map_page`** 假设 L2 永远是 2 MiB block；`vmm_pt_walk:289-291` 拒绝 `pmd[l2] & PAGE_HUGE`。M3 split 是 hook 点。
-
-8. **`vmm.h:33-39` 注释自承**位位置 x86 专属；这是 v2 flag 重命名的依据。
-
-9. **`aarch64_pt_map_4k:430`** 遇有效 PTE 返回 `EEXIST`；与 x86 `vmm_map_4k_page:313` 直接覆盖语义不一致。需拆为 `map_new` / `update` 两个接口（见 §4.4）。
-
-10. **`aarch64_pt_query_4k:454`** 遇 `Valid=0` 直接返回 `ENOENT`；PROT_NONE（Valid=0 + bit 55）无法 query 现有 PA。需新增 `AARCH64_PT_EPROT_NONE` 返回值 + `query_4k` 在 `V=0 + PROTNONE` 时返回此码。
-
-11. **`aarch64/encode_perm:240`** 拒绝 `AARCH64_PT_PERM_ALL_BITS` 之外的位（VM_PROTNONE/VM_COW 在此集合外）；`aarch64_pt_map_4k` 只接受此函数输出。需扩展原语支持独立软件位（见 §5.4）。
-
-12. **`arch_flush_tlb_all()` aarch64 实现已存在**：`kernel/include/arch/mmu.h:144-148` 提供 `tlbi vmalle1 + dsb sy + isb`。M3 不需新增 inline。
-
-13. **`tlb_shootdown()` 当前 x86-only**：`kernel/memory/tlb.c` 未编入 aarch64 build（待 `kernel/Makefile` 配置确认具体行号；v1 假设已编入是错的）。M3 须包含编译接入。
-
-14. **`ipi_broadcast()` 当前 x86-only**：`kernel/arch/x86_64/intr/` 下有 APIC 实现；aarch64 端当前仅有 `aarch64-ipi-fail-handoff-2026-09-26.md` 修复后的 GIC SGI 收发，但需新增 `arch_ipi_broadcast()` 通用入口或 aarch64-specific 函数供 `tlb_shootdown` 使用。`IPI_VECTOR_TLB=0x40` 是 x86 vector 编号，GICv2 SGI 编号 0..15，需做映射。
-
-15. **直接操作 PTE 的 caller**（v2 新发现）：
-   - `kernel/memory/vma.c:150,173,350,420,821-849` 直接读写 `PAGE_USER`/`PAGE_WRITE`/`PAGE_VALID`/`PAGE_PROTNONE`/`PAGE_COW`，构造 x86 格式 PTE；
-   - `kernel/memory/uaccess.c:149,203,220-221` 操作 `PAGE_COW`；
-   - `kernel/sched/task.c:1988-2082` fork 路径遍历 x86 格式 PGD/PUD/PMD/PTE 并复制；
-   - 这些代码段在 M3 **不编入 aarch64**。
-
-16. **`aarch64/page_table.h:10`** 注释限制活跃 root 仅 BSP pre-SMP 修改；M3 须明确解除该限制所需的锁/同步方案（见 §5.3）。
+1. `slab.c:36-55` 锁路径为 inline `pushfq; cli` / `sti`；`arch_local_irq_save/restore` 已存在（`kernel/include/arch/irq.h`）。
+2. `slab_init`（`slab.c:336-415`）实际行为：
+   - 在 `PMMngr.end_of_struct`（PMM 自己的元数据末尾）之后，为 16 个 cache 依次写入 `struct Slab` + `10×long` 填充 + `color_length` 字节的 color bitmap（32 B 缓存的 bitmap 为 `PAGE_2M/32/8 = 8 KiB`；16 组合计含对齐填充约 16.4 KiB），**BSS 中的 `kmalloc_cache_size[16]` 等静态变量不占 arena**；
+   - 元数据写完后，把覆盖到的所有 2 MiB 帧用 `bits_map |=`、`using_count++`、`free_count--`、`page_init(PG_PTable_Mapped|PG_Kernel_Init|PG_Kernel)` **无条件记账**；
+   - `slab_page_start = align_up(end_of_struct, 2 MiB)` 后**按地址直接占用**连续 8 个 2 MiB 帧（cache 0-7 预分配；cache 8-15 首次 kmalloc 时经 `alloc_pages` 取页），同样无条件记账。
+3. PMM boot reservation（`pmm.c:671` `pmm_reserve_boot_ranges`）：对范围内帧做幂等预留（已置位则跳过）。若把 slab 段也交给它预留，`slab_init` 随后的无条件 `using_count++/free_count--` 会**双重计数**。
+4. aarch64 启动顺序：`main.c:411 pmm_init` → `pmm.c:317 slab_init` → `main.c:422 arch_boot_direct_map_init`。
+5. M0 直映范围 [0, 2 GiB)（TTBR0，head.S）；M1 arena 逻辑（`early_arena.c`）目前只计入 PMM 元数据 + M1 表页。
+6. GIC 白名单（`gic.c:25-30`）：SGI 0（`ipi_test.c::IPI_SGI_ID`）+ SGI 1（`IPI_REPLY_SGI`）+ SGI 2（clobber 探针）+ CNTP PPI。**SGI 3 空闲**。
+7. `secondary_idle`（`smp.c:244-263`）：AP 处理完 boot command 后，**仅 `OS01_SELFTEST` 构建开 DAIF.I**，正式构建保持 IRQ 屏蔽并 `halt` 循环。
+8. `tlb_shootdown`（`tlb.c:22-65`）：单 `tlb_wanted`/`tlb_ack` 槽；ack 超时后 `debug_mm` 打印并**继续执行**（当作已失效）；未编入 aarch64 build。
+9. `IPI_VECTOR_TLB = 0x40` 是 x86 vector；GICv2 SGI ∈ [0,15]，需映射。
+10. `arch_flush_tlb_all` aarch64 实现已存在（`kernel/include/arch/mmu.h:144`，`tlbi vmalle1 + dsb sy + isb`）；`arch_flush_tlb_page` 同文件已有。
+11. `aarch64_pt_map_4k` 遇有效 PTE 返回 `EEXIST`（不覆盖）；x86 `vmm_map_4k_page` 直接覆盖。
+12. `aarch64_pt_query_4k` 遇 `Valid=0` 返回 `ENOENT`；PROT_NONE（V=0 + 软件位）取不到 PA。
+13. `encode_perm`（`page_table.c:238`）拒绝 `AARCH64_PT_PERM_ALL_BITS` 之外的位——软件位现在进不了原语。
+14. 直接操作 x86 硬件 PTE 的文件：`memory/vma.c`、`memory/uaccess.c`、`sched/task.c`（fork PTE 拷贝）、`arch/x86_64/memory/boot_direct_map.c`（经 checked helper）、x86 `do_page_fault` 路径。当前 aarch64 source gate（`kernel/Makefile:39-47`）为白名单式，**均未编入**。
+15. `aarch64/page_table.h:10` 限制活跃 root 仅 BSP pre-SMP 修改。
 
 ---
 
-## 3. M2 设计
+## 3. M2：slab 接入与物理布局/记账契约
 
-### 3.1 改动清单
+### 3.1 锁路径替换
 
-1. **`kernel/memory/slab.c`**：
-   - 顶部增加 `#include <arch/irq.h>`。
-   - `slab_lock_acquire`：返回类型由 `uint64_t` 改为 `arch_irq_state_t`；函数体第一句替换为 `arch_irq_state_t flags = arch_local_irq_save();`；末尾 `return flags;`。
-   - `slab_lock_release`：形参类型 `uint64_t flags` → `arch_irq_state_t flags`；函数体末尾 `if (flags & (1UL << 9)) __asm__ __volatile__("sti" ::: "memory");` → `arch_local_irq_restore(flags);`。
-2. **`kernel/arch/aarch64/runtime/slab_stub.c`**：删除整个文件。
-3. **aarch64 build profile**（`kernel/Makefile` 与 `kernel/arch/aarch64/` 下等价位置，参照 `docs/aarch64-libk-aarch64-closure-2026-09-24.md` 中 PMM/libk 接入的同款 source group 动作）：把 `kernel/memory/slab.c` 加入 aarch64 `kernel-y`；`slab_stub.c` 退出 aarch64 编译源。
-4. **`kernel/include/arch/irq.h` / per-arch 实现**：不动。
+同 v2 §3.1（`arch_irq_state_t` + `arch_local_irq_save/restore`），不重复。
 
-### 3.2 M1 arena 扩展（v2 新增）
+### 3.2 布局与记账契约（v3 重写）
 
-**目标**：在 `aarch64_early_arena_init`（`kernel/arch/aarch64/memory/early_arena.c`）计算 arena 大小与 boot reservation 时，把真实 Slab 的需求显式纳入。
-
-**改动**：
-
-1. 在 `aarch64_early_arena_init` 内调 `slab_estimate_size()`（新增 helper，见下）拿到：
-   - `slab_metadata_bytes`：缓存元数据总大小（`kmalloc_cache_size[16]` + `slab_lock` + `slab_lock_depth[NR_CPUS]` + 内部 metadata）；
-   - `slab_reserved_2m_pages`：8（与 `slab.c::kmalloc_create` 中 `alloc_pages(ZONE_NORMAL,1,0)` 调用次数一致——M2 实施时需精确核算，v2 给上界）。
-2. 把 `slab_metadata_bytes` 向上对齐到 2 MiB 计入 arena 元数据段。
-3. 把 `slab_reserved_2m_pages × 2 MiB` 计入 arena 后的预留范围，作为 boot reservation 注册到 PMM（属性 Kernel/Init，不进 `alloc_pages` 普通分配池）。
-4. 启动日志输出预留量；`arch_boot_direct_map_init` 验证这些 frame 在 M0 直映 [0, 2 GiB) 内，否则 FATAL。
-
-**`slab_estimate_size()` 定义**（新增于 `kernel/memory/slab.c` 或 `kernel/include/memory/slab.h`）：
+**单一事实来源**：新增共用布局计算函数，从 `slab_init` 的地址推进规则**精确推导**（不是估算常数）：
 
 ```c
-/* 返回 slab 初始化所需的元数据字节数与预分配 2 MiB 页数。
- * 由 aarch64 启动路径在 slab_init() 之前调；返回值为静态上界，
- * 用于 M1 arena 预留。slab_init() 实际使用量 ≤ 返回值。 */
-struct slab_estimate {
-    size_t metadata_bytes;
-    size_t reserved_2m_pages;
+/* kernel/include/memory/slab.h */
+struct slab_layout {
+    uint64_t meta_bytes;       /* 16 × (sizeof(struct Slab) + 10*long
+                                  + color_length(size) + 10*long, 对齐到 long) */
+    uint64_t reserved_2m_pages; /* 8（cache 0-7 预分配） */
 };
-struct slab_estimate slab_estimate_size(void);
+struct slab_layout slab_layout_compute(void);
+/* 纯函数：只读 kmalloc_cache_size[] 的 size 字段与类型布局，
+ * 不触碰任何内存。arena preflight 与 slab_init 共用。 */
 ```
 
-实现：`metadata_bytes = sizeof(kmalloc_cache_size) + sizeof(slab_lock) + sizeof(slab_lock_depth) + sizeof(struct Slab) * 16`（上界）；`reserved_2m_pages = 8`。
+**物理区间图**（arena 内，物理地址升序，互不重叠）：
 
-### 3.3 初始化顺序验证
+```
+[PMM 元数据段][slab 元数据][对齐填充][8 × 2 MiB slab 预分配页][M1 表页池]
+                                                ↑
+                        slab_page_start = align_up(PMM meta + slab meta, 2 MiB)
+```
 
-按实测顺序：**PMM 元数据 → M0 直映已就绪 → `slab_init()` 在 `pmm_init` 内调用 → M1 直映**。M2 接受此顺序；aarch64 启动日志增加 `slab_init: ok size=<bytes>` 作为隐式验证（slab 失败会 early printk 并 halt）。
+**记账规则（每帧恰好一条路径）**：
 
-### 3.4 M2 不动项
+| 区间 | 记账者 | 时机 |
+|----|----|----|
+| PMM 元数据段 | `pmm_init`（现状） | `pmm_init` 内 |
+| slab 元数据覆盖的 2 MiB 帧 | `slab_init`（现状无条件记账，保持 x86 字节级同行为） | `pmm_init` 内、紧随 PMM 元数据 |
+| 8 × 2 MiB slab 预分配页 | `slab_init`（现状） | 同上 |
+| M1 表页池 | boot reservation（`pmm_reserve_boot_ranges`，现状） | `pmm_init` 内 |
 
-- 不改 slab 算法本身（per-CPU cache / NUMA / page coloring）；
-- 不动 `kmalloc_create` 内 case 分支（只动锁）；
-- 不优化 `kmalloc_creating` 递归 flag（F4）。
+**关键修正**：boot reservation 的 range 列表**必须排除 slab 段**（slab 元数据帧 + 8 个预分配页）；arena 总尺寸**必须包含 slab 段**（保证 `slab_page_end ≤ arena_end`，且 slab 页不会被 M1 表页池或后续分配抢占——`slab_init` 在任何 `alloc_pages` 调用者之前运行，时序上无人能偷走，尺寸保证是防重叠的结构性约束）。
+
+**Preflight 检查（全部在 `pmm_init` 之前，`aarch64_early_arena_init` 内）**：
+
+1. arena 扩展后总长 = PMM 元数据 + slab 元数据 + 8×2 MiB + M1 表页池，仍落在连续 RAM 区间内（沿用现有连续性检查）；
+2. **整个 arena（含 slab 段）物理上界 < 2 GiB**（M0 直映覆盖）；越界 = FATAL，打印需求/可用，**在任何内存写入前停机**；
+3. slab_page_start + 8×2 MiB ≤ arena_end；
+4. 容量断言：`slab_layout_compute()` 的 `meta_bytes` 与预flight 常量一致（编译期 `_Static_assert` 无法做——size 是运行期数组，改运行期 assert）。
+
+**启动后验证**：`slab_init` 末尾断言 `实际 end_of_struct ≤ PMM_meta_end + layout.meta_bytes`；boot reservation 应用后断言 slab 段帧未被双重置位（抽查 slab 段首帧 `bits_map` 位在 reservation 后、slab_init 前为 0）。
+
+### 3.3 aarch64 build 接入
+
+`kernel/Makefile:39-47` aarch64 白名单加 `memory/slab.c`；删除 `kernel/arch/aarch64/runtime/slab_stub.c`。
+
+### 3.4 不动项
+
+同 v2 §3.4。
 
 ---
 
-## 4. vmm.h 抽象与 caller 迁移策略（v2 修正）
+## 4. vmm 语义层与接口（v3 重写）
 
-### 4.1 语义 flag 命名（caller 视角）
+### 4.1 两层分离
 
-同 v1 表。
+- **公共语义层**（`kernel/include/memory/vmm.h`）：`VM_*` 语义位 + 语义 API。任何 arch 的通用代码只 include 这一层。
+- **x86 硬件层**（`kernel/include/arch/x86_64/pte.h`，新建）：现有 `PAGE_*` 位定义 + `vmm_pt_walk`（返回裸 PTE 指针）+ `vmm_free_user_map` 迁入。**仅 x86-only 文件 include**。
 
-### 4.2 接口（arch-neutral，v2 修正）
-
-`kernel/include/memory/vmm.h`：
+### 4.2 语义位（唯一一套表示）
 
 ```c
-#include <arch/vmm_backend.h>   /* per-arch VM_* 定义 + arch_vmm_* 声明 */
+/* vmm.h —— 位位置由 arch/<arch>/vmm_backend.h 提供，caller 不感知 */
+#define VM_PRESENT   ...   /* 有效映射 */
+#define VM_WRITE     ...   /* 可写 */
+#define VM_USER      ...   /* EL0 可达 */
+#define VM_NO_EXEC   ...   /* 不可执行（缺省语义：不含此位 = 可执行） */
+#define VM_HUGE      ...   /* block 描述符 */
+#define VM_NOCACHE   ...   /* 设备/UC */
+#define VM_PROTNONE  ...   /* 软件位：无效但持有 PA（mprotect(PROT_NONE) 暂存） */
+#define VM_COW       ...   /* 软件位：COW 共享，写触发 fault */
 
-#define VM_KERNEL_RW    (VM_PRESENT | VM_WRITE)
-#define VM_KERNEL_RO    (VM_PRESENT)
-#define VM_USER_RW      (VM_PRESENT | VM_WRITE | VM_USER)
-#define VM_USER_RO      (VM_PRESENT | VM_USER)
-#define VM_DEVICE       (VM_PRESENT | VM_WRITE | VM_NOCACHE)
+#define VM_KERNEL_RW (VM_PRESENT | VM_WRITE)
+#define VM_KERNEL_RO (VM_PRESENT)
+#define VM_USER_RW   (VM_PRESENT | VM_WRITE | VM_USER)
+#define VM_USER_RO   (VM_PRESENT | VM_USER)
+#define VM_DEVICE    (VM_PRESENT | VM_WRITE | VM_NOCACHE)
+```
 
-extern uint64_t *kernel_map;
+**`VM_PRESENT=0 且 VM_PROTNONE=1`** 是合法状态："映射无效但 PA 归其所有"；backend 编码为 V=0 + 软件位；`query` 对它返回 `EPROT_NONE` + PA。
 
+### 4.3 语义 API（唯一一套签名）
+
+```c
 int   arch_vmm_init(void);
+/* 新建：遇任何已占用（含 PROT_NONE）返回 -EEXIST，不覆盖 */
 int   arch_vmm_map_4k_new(uint64_t *pgdir, uint64_t phys, uint64_t virt, uint32_t vm_flags);
+/* 替换：按 §4.4.3 协议安全替换；返回旧 PA 与旧软件位 */
 int   arch_vmm_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt, uint32_t vm_flags,
-                          uint64_t *old_phys_out);
-int   arch_vmm_unmap_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out);
+                         uint64_t *old_phys_out, uint32_t *old_vm_out);
+/* 摘除：只清映射，永不 free；返回 PA 与软件位（含 EPROT_NONE 状态） */
+int   arch_vmm_unmap_4k(uint64_t *pgdir, uint64_t virt,
+                        uint64_t *phys_out, uint32_t *old_vm_out);
+/* 纯软件位变更（PROT_NONE 暂存/恢复、COW 标记/清除），不动 PA 与硬件权限 */
+int   arch_vmm_set_software_4k(uint64_t *pgdir, uint64_t virt, uint32_t set, uint32_t clear);
+/* 查询：覆盖有效 / PROT_NONE / ENOENT 三态 */
+int   arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt,
+                        uint64_t *phys_out, uint32_t *vm_out);
+
 int   arch_vmm_map_2m(uint64_t *pgdir, uint64_t phys, uint64_t virt, uint32_t vm_flags);
 int   arch_vmm_unmap_2m(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out);
 int   arch_vmm_split_2m_to_4k(uint64_t *pgdir, uint64_t virt);
-uint64_t *arch_vmm_pt_walk(uint64_t *pgdir, uint64_t virt, uint32_t vm_flags, int allocate);
-/* arch_vmm_free_user_map 推迟到 M4。 */
-
-/* 旧符号保留 wrapper，调用对应 arch_vmm_*，仅 x86_64 build 链接。 */
-void      vmm_map_page(uint64_t *pgdir, uintptr_t pa, uintptr_t va, uint64_t flags);
-uintptr_t vmm_unmap_page(uint64_t *pgdir, uintptr_t va);
-mmap      vmm_alloc_map(void);
+/* arch_vmm_pt_walk / arch_vmm_free_user_map 不进公共层 —— 前者返回裸 PTE 指针，
+ * 迁入 x86 私有头；后者推迟 M4。 */
 ```
 
-旧 `PAGE_*` 名字不再保留 alias——所有 caller 一次性迁到 `VM_*`，避免误导 M4 caller 直接使用 x86 PTE bit（见 §4.5）。
+x86 旧符号（`vmm_map_page` 等）留在 x86 私有头或 wrapper，仅 x86 build 可见。
 
-### 4.3 软件位处理（v2 修正）
+### 4.4 后端行为契约
 
-VM_PROTNONE / VM_COW 是软件位，位位置随 arch 而变：
-- x86：bit 9 / bit 10（PTE 软件位，硬件忽略）；
-- aarch64：bit 55 / bit 56（descriptor 保留区，硬件忽略）。
+#### 4.4.1 aarch64：表页与原语
 
-**传递方式**（v2 新规）：
+- 表页一律 `alloc_4k_page()` / `free_4k_page()`（PMM 路径，不依赖 Slab）。
+- `aarch64_pt_map_4k / query_4k / unmap_4k` 扩展：签名增加软件位（进：`vm_flags` 直译为描述符 bit 55/56；出：`software_bits_out`）；新增返回值 `AARCH64_PT_EPROT_NONE`（V=0 + bit 55 + PA 有效，`query/unmap` 返回 PA）；`encode_perm` 之外的软件位由 backend 组合，不改 `AARCH64_PT_PERM_ALL_BITS` 语义。
+- 新增 `aarch64_pt_map_2m_block / unmap_2m_block / split_block_2m`（§5）。
 
-```c
-/* arch/<arch>/vmm_backend.h */
-#define VM_PROTNONE_BIT    (1UL << 0)   /* 软件位槽位 0：x86=bit 9, aarch64=bit 55 */
-#define VM_COW_BIT         (1UL << 1)   /* 软件位槽位 1：x86=bit 10, aarch64=bit 56 */
+#### 4.4.2 x86_64：表页与行为保持
 
-typedef uint32_t vm_software_t;   /* 软件位掩码，使用 VM_PROTNONE_BIT / VM_COW_BIT */
+- 表页保持 `calloc`/`kfree`；`vmm_init` PMM walk、`kernel_map = Phy_To_Virt(0x101000)`、覆盖语义 wrapper 全部不变，仅迁到 x86 backend/私有头。
 
-/* 公共 API 增加 software 参数 */
-int arch_vmm_map_4k_new(uint64_t *pgdir, uint64_t phys, uint64_t virt,
-                         uint32_t vm_flags, vm_software_t sw);
-int arch_vmm_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
-                        uint32_t vm_flags, vm_software_t sw,
-                        uint64_t *old_phys_out);
-int arch_vmm_unmap_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
-                       vm_software_t *sw_out);
-```
+#### 4.4.3 替换协议（`arch_vmm_update_4k`，v3 新写）
 
-软件位翻译在 `arch/<arch>/memory/vmm_backend.c::vm_to_software_bits()` 内做：
-- x86：`VM_PROTNONE_BIT → (1 << 9)`，`VM_COW_BIT → (1 << 10)`；
-- aarch64：`VM_PROTNONE_BIT → (1 << 55)`，`VM_COW_BIT → (1 << 56)`。
+设旧描述符 D_old（含 PA_old、权限、软件位），新请求 D_new：
 
-### 4.4 per-arch backend 行为契约（v2 修正）
+| 变化内容 | 协议 |
+|----|----|
+| 仅软件位 | 转走 `arch_vmm_set_software_4k`。注意置 `VM_PROTNONE` 语义上要求条目对硬件**不命中**（V=0），因此该 API 允许伴随翻转折符的 V 位——执行序列与下述"有效 ↔ PROT_NONE"行相同（break-before-make）；清除 `VM_PROTNONE` 则恢复原硬件权限。`VM_COW` 置/清只动 bit56 与 W 位，属同 PA 权限变，走原子 store + TLBI + shootdown |
+| 同 PA，权限/属性变 | 原子 8 B store 写 D_new → `dsb ishst` → local `tlbi vae1` → `dsb ish` → shootdown。有效→有效替换，无窗口 |
+| PA 变（重映射） | **break-before-make**：清 PTE → `dsb ishst` → local TLBI → `dsb ish` → shootdown → 写 D_new → `dsb ishst` → local TLBI → `dsb ish; isb`。持 `pt_lock` 期间执行 |
+| 有效 ↔ PROT_NONE | 同"PA 变"路径（描述符有效位翻转，中间必须无硬件可命中的错误翻译） |
 
-#### 4.4.1 aarch64 vmm_backend
+`update_4k` 返回 `old_phys_out` + `old_vm_out`；**释放旧 PA 由 caller 决定**。
 
-1. `arch_vmm_init()`：从 `aarch64_read_ttbr1()` 读 M1 直映根，赋给 `kernel_map`；返回 0（见 §7）。
-2. `arch_vmm_map_4k_new()`：
-   - 若目标 L2 是 2 MiB block：先 `arch_vmm_split_2m_to_4k(virt)`；
-   - 调 `aarch64_pt_map_4k(root, va, pa, vm_to_perm(vm_flags), vm_to_sw(sw))`（**`aarch64_pt_map_4k` 已扩展 software_bits 参数，见 §5.4**）；
-   - 遇有效 PTE：返回 `EEXIST`，**不覆盖**；
-   - 成功路径：`aarch64_pt_invalidate_local(va)` + `tlb_shootdown()`。
-3. `arch_vmm_update_4k()`：
-   - 走 `walk_to_l3`（create=false）；
-   - 若目标有效：保留旧 PA → `*old_phys_out`；读旧软件位（仅 backend 内部使用，不外传）；
-   - 写新描述符：`(phys & PA_MASK) | vm_to_perm(vm_flags) | vm_to_sw(sw)`；
-   - `dsb_ishst; aarch64_pt_invalidate_local(va); tlb_shootdown()`；
-   - **调用方负责释放 `*old_phys_out`（或保留，看语义）**。
-4. `arch_vmm_unmap_4k()`：
-   - 走 `walk_to_l3`；
-   - 若 `V=0 + PROTNONE`：返回 `*phys_out = desc & PA_MASK`；清条目；`free_4k_page(*phys_out)`；`tlb_shootdown`；
-   - 若 `V=0` 且无 PROTNONE：返回 `ENOENT`；
-   - 若 `V=1`：返回 `*phys_out = desc & PA_MASK`；读旧软件位（仅 backend 内部使用，不外传）；清条目；`tlb_shootdown`。
-5. `arch_vmm_map_2m()`：
-   - 校验 `va & (2 MiB - 1) == 0`、`pa & (2 MiB - 1) == 0`、`pa < 1 TiB`；
-   - `ensure_child_table` 拿 `pmd`；若 `pmd[l2]` 已占用（V=1）返回 `EEXIST`；
-   - 写 block 描述符；
-   - `aarch64_pt_invalidate_block_local(va)` + `tlb_shootdown()`。
-6. `arch_vmm_unmap_2m()`：
-   - `pmd[l2]` 必须是 block（V=1, bit 1 = 0）；否则 `EINVAL`；
-   - 返回 `*phys_out = pmd[l2] & BLOCK_PA_MASK`（即 bits [39:12]）；
-   - **不释放物理页**——caller 决定 `free_pages(Phy_to_2M_Page(phys), 1)`；
-   - 清条目；
-   - `aarch64_pt_invalidate_block_local(va)` + `tlb_shootdown()`；
-   - **L2 表页保留**——结构仍在，仅条目清除。
-7. `arch_vmm_split_2m_to_4k(virt)`：见 §5.3 break-before-make 协议。
-8. `arch_vmm_pt_walk()`：若 L2 是 block 则返回 NULL（caller 必须先 split）；同 `vmm_pt_walk:289-291` 语义。
+#### 4.4.4 所有权契约（v3 统一）
 
-**注**：aarch64 backend 所有"分配表页"操作走 `alloc_4k_page()`（PMM 路径，不依赖 Slab）。
+**后端永不释放数据页。** `unmap_4k` / `unmap_2m` / `update_4k` 只摘除/替换映射并返回旧 PA 与旧软件位。`free_4k_page` / `free_pages` / COW 引用计数（`page_cow_put`）由拥有该页的上层（M4 前仅 x86 的 vma/uaccess/fork 路径；aarch64 侧 M3 测试代码）执行。PROT_NONE 页同理：unmap 返回其 PA，caller 释放。
 
-#### 4.4.2 x86_64 vmm_backend
+#### 4.4.5 aarch64 `unmap_2m` 契约（v3 补全）
 
-从现有 `kernel/memory/vmm.c` 搬实现，按 `VM_*` 翻译原 `PAGE_*` flag。**关键差异**：
+- `pmd[l2]` 必须是 block（V=1, bit1=0）；遇 L3 table 描述符返回 `-EEXIST` 改为 `-EINVAL`（类型错误，非占用冲突）；遇无效返回 `-ENOENT`。
+- `*phys_out = desc & PA_MASK`；清条目；`dsb ishst` → block local TLBI → `dsb ish` → shootdown；不释放数据页；L2 表页保留。
 
-1. **保持 calloc/kfree**：x86 backend 的表页仍由 calloc 分配、kfree 释放，不强制迁到 `alloc_4k_page`/`free_4k_page`（避免引入无关的 slab/PMM 依赖耦合）。
-2. **保持覆盖语义**：原 `vmm_map_4k_page` 直接覆盖 PTE；x86 backend 把旧 wrapper 路由到 `arch_vmm_update_4k`，对应 caller 拿回旧 PA（如 caller 不需要就忽略）。
-3. **`vmm_init` 行为不变**：PMM walk + kernel_map = `Phy_To_Virt(0x101000)` + `tlb_shootdown`。
+### 4.5 caller 范围（v3 修正）
 
-### 4.5 caller 迁移策略（v2 新增）
+**M3 保持不编入 aarch64**（当前 `kernel/Makefile:39` 白名单已排除，零改动，仅写死契约）：
 
-**M3 不编入 aarch64 的模块**：
+- `kernel/memory/vma.c`（整文件）
+- `kernel/memory/uaccess.c`（整文件）
+- `kernel/sched/task.c`（整文件——构建系统只能整文件粒度；M4 需要非 fork 功能时先拆文件再选编）
+- 其余直接操作 x86 PTE 的文件（x86 `do_page_fault` 等）本就是 x86-only
 
-| 模块 | 行号范围 | 处理 |
-|----|----|----|
-| `kernel/memory/vma.c` | 全文 | aarch64 build 排除；M4 重写 |
-| `kernel/memory/uaccess.c` | 全文 | aarch64 build 排除；M4 重写 |
-| `kernel/sched/task.c` | 约 line 1988-2082（fork PTE 拷贝） | aarch64 build 排除该段；M4 重写 |
-
-**实施方式**：在 `kernel/Makefile` 或 source group 入口用 `ifneq ($(ARCH),aarch64)` 排除；M3 完成后跑 `aarch64 build` 必须不引用这些文件。
-
-**旧 PAGE_* alias 不保留**：避免误导后续 caller 直接使用 x86 PTE bit。caller 全部改用 `VM_*`。
-
-### 4.6 软件位与原语扩展（v2 修正）
-
-`aarch64_pt_map_4k` 当前签名 `int aarch64_pt_map_4k(uint64_t *root, uint64_t va, uint64_t pa, uint32_t perm)`，`encode_perm` 拒绝 VM_PROTNONE/VM_COW。
-
-**v2 扩展方案**：
-
-```c
-/* kernel/include/arch/aarch64/page_table.h 新增 */
-#define AARCH64_PT_SOFTWARE_PROTNONE  UINT64_C(0x0080000000000000)  /* bit 55 */
-#define AARCH64_PT_SOFTWARE_COW       UINT64_C(0x0100000000000000)  /* bit 56 */
-
-int aarch64_pt_map_4k(uint64_t *root, uint64_t va, uint64_t pa,
-                       uint32_t perm, uint64_t software_bits);
-int aarch64_pt_query_4k(const uint64_t *root, uint64_t va,
-                         uint64_t *pa_out, uint32_t *perm_out,
-                         uint64_t *software_bits_out);
-int aarch64_pt_unmap_4k(uint64_t *root, uint64_t va,
-                         uint64_t *pa_out, uint32_t *perm_out,
-                         uint64_t *software_bits_out);
-/* 新增返回值 */
-#define AARCH64_PT_EPROT_NONE  (-6)   /* V=0, PROTNONE set, PA valid */
-```
-
-`encode_perm` 接受 software_bits 作为额外参数（不入 perm 集合），由 caller 显式传入。`decode_perm` 输出 software_bits 给 caller。`walk_to_l3` 不感知软件位；PTE 写入由 caller 组合。
+**保留裸 PTE 访问的 x86 文件**（include `arch/x86_64/pte.h`）：`vma.c`、`uaccess.c`、`task.c`、x86 `do_page_fault` 路径、`arch/x86_64/memory/boot_direct_map.c`、`kernel/memory/vmm.c`（x86 部分）。M3 **不迁移**这些文件的内部实现，只迁头文件依赖。公共 `vmm.h` 中 `PAGE_*` 全部删除。
 
 ---
 
-## 5. aarch64 block + split（v2 修正）
+## 5. aarch64 block 与 split（v3 重写）
 
 ### 5.1 block 描述符编码
 
-同 v1 §5.1。
+同 v2 §5.1（bit1=0 区分 block；AP/SH/AttrIndx/PXN/UXN/AF 与 leaf 同编码；软件位 bit 55/56）。
 
-### 5.2 `aarch64_pt_map_2m_block` / `unmap_2m_block`（v2 新增）
+### 5.2 map/unmap 2 MiB block
 
-**map**：
+同 v2 §5.2，unmap 契约以 §4.4.5 为准。
 
-- 校验：`root_valid` / `va_canonical` / `va & (2 MiB - 1) == 0` / `pa & (2 MiB - 1) == 0` / `pa < 1 TiB`；
-- `ensure_child_table` 走 L0/L1 拿 `pmd`；
-- 若 `pmd[l2]` 已占用：返回 `EEXIST`；
-- `encode_block_desc` 生成描述符；
-- `dsb_ishst(); pmd[l2] = desc; dsb_ishst();`
-- `aarch64_pt_invalidate_block_local(va)` + `tlb_shootdown()`。
-
-**unmap**：
-
-- `pmd[l2]` 必须是 block（V=1, bit 1 = 0）；否则 `EINVAL`；
-- `*pa_out = pmd[l2] & BLOCK_PA_MASK`；
-- **不释放物理页**（caller 决定）；
-- 清 `pmd[l2]`；
-- `aarch64_pt_invalidate_block_local(va)` + `tlb_shootdown()`。
-
-### 5.3 break-before-make 协议（v2 新增，活跃 root block ↔ table 替换）
-
-活跃 root（即 `is_active_root(root) == true`）上做 block 描述符 → table 描述符替换时，必须遵循 ARM ARM 的 break-before-make 顺序：
+### 5.3 split 协议（v3 重写：先建后拆，失败无空洞）
 
 ```
-lock(pt_lock_for(root, va));        /* per-(root, l0_idx, l1_idx) spinlock */
-1. pmd[l2] = 0;                       /* 使旧 block 描述符无效 */
-2. dsb ishst;                          /* 确保步骤 1 写完 */
-3. tlbi vae1, va >> 12;               /* local TLB 失效（旧 block entry） */
-4. dsb ish;                            /* 确保 TLBI 完成 */
-5. tlb_shootdown();                    /* IPI 广播到其它 CPU 跑 TLBI + ack 协议 */
-6. alloc_4k_page() → l3_pa;            /* 分配 L3 table 页 */
-7. zero_page(l3_pa);
-8. for i in 0..511: pte[i] = inherit_from_block(old_block_desc, i); /* 软件位继承 */
-9. dsb ishst;
-10. pmd[l2] = l3_pa | encode_table_desc;  /* 写新 table 描述符 */
-11. dsb ishst;
-12. tlbi vae1, va >> 12;               /* local TLB 失效（新 table entries） */
-13. dsb ish; isb;
-unlock(pt_lock_for(root, va));
+ 0. l3_pa = alloc_4k_page();            /* 先分配 */
+    if (!l3_pa) return -ENOMEM;          /* 映射完好，无副作用 */
+ 1. zero_page(l3_pa);
+ 2. for i in 0..511:                     /* 先填好新表 */
+        pte[i] = inherit(block_desc, i); /* PA+i*4K、AP/SH/AttrIndx/AF/PXN/UXN、
+                                            软件 bit55/56 全继承 */
+ 3. dsb ishst;
+ 4. lock(pt_lock, irqsave);              /* §5.4 */
+ 5. pmd[l2] = 0;                          /* BREAK：旧 block 失效 */
+ 6. dsb ishst;
+ 7. tlbi vae1, va>>12; dsb ish;
+ 8. shootdown();                          /* 跨核失效旧 block 翻译 */
+ 9. pmd[l2] = l3_pa | table_desc;         /* MAKE：发布新表 */
+10. dsb ishst;
+11. tlbi vae1, va>>12; dsb ish; isb;
+12. unlock(pt_lock, irqrestore);
 ```
 
-**非活跃 root**（仅 BSP pre-SMP 修改活跃 root 时）：步骤 5 可省略；步骤 3 仍需（避免 BSP 自己命中旧 entry）。
+**失败点与回滚**：步骤 0-3 失败（分配/清零）→ 释放 l3_pa、返回错误，原映射未动。步骤 4 之后无分配，不再有失败路径。非活跃 root（构造中的树）：步骤 7/8 可省略（无人可能持有旧翻译）。
 
-**pt_lock 设计**：per-(root, l0_idx, l1_idx) spinlock，避免不同 L2 段替换相互阻塞；映射是 root 粒度的。`kernel/lock/pt_lock.c` 新增，`arch_vmm_split_2m_to_4k` 在 step 0 拿、step 14 释放。x86 backend 暂不强制使用（x86 CR3 重载 + invlpg 无需此锁），但接口预留。
+### 5.4 pt_lock 与死锁论证（v3 重写，修 #16）
 
-### 5.4 `aarch64_pt_split_block_2m(root, va)`
-
-走 §5.3 协议；步骤 8 中 `inherit_from_block` 把 block 的 AP/SH/AttrIndx/AF/PXN/UXN + bit 55/56 移植到每个 4 KiB PTE。返回 OK。
-
-### 5.5 merge 不纳入
-
-F1。L3 table page 由 `free_4k_page` 在 unmap 时回收（caller 责任）；split 后该 L3 page 一直存在直至 L2 段全空后单独回收（M4 引入合并时实现）。
+- `pt_lock`：per-(root, l0_idx, l1_idx) 自旋锁，`spin_lock_irqsave` 获取。
+- **IPI handler 不取任何 pt_lock**：TLB handler 只做 `tlbi vmalle1` + ack 写，无锁。
+- 死锁论证：CPU A 持 pt_lock 等 ack 时，目标 CPU B 只需执行 IPI handler 即可 ack——handler 无锁、无依赖，B 即使正自旋等同一把 pt_lock（在普通路径），其 IRQ 仍开（B 未持锁那侧），SGI 可抢占自旋并 ack。A 自己关 IRQ 不影响 B。
+- 验证测试：双 CPU 并发对**同一** 2 MiB 段做 split/update，双方都须完成（§8.2）。
 
 ---
 
-## 6. aarch64 TLB shootdown + IPI 接入（v2 修正）
+## 6. aarch64 生产 SGI / shootdown 契约（v3 重写）
 
-### 6.1 当前状态
+### 6.1 SGI 分配
 
-- `kernel/memory/tlb.c::tlb_shootdown()` 接口 arch-neutral，但**未编入 aarch64 build**（v1 误判）。
-- `arch_flush_tlb_all()` aarch64 实现已存在：`kernel/include/arch/mmu.h:144-148`，`tlbi vmalle1 + dsb sy + isb`。
-- `ipi_broadcast()` 当前仅有 x86 APIC 实现；aarch64 端 GIC SGI 收发路径已通（`docs/aarch64-ipi-fail-handoff-2026-09-26.md`），但缺 `arch_ipi_broadcast()` 通用入口。
-- `IPI_VECTOR_TLB = 0x40` 是 x86 vector 编号，GICv2 SGI 编号 0..15，需做映射。
+| SGI | 用途 | 状态 |
+|----|----|----|
+| 0 | `ipi_test` 主载荷 | 已占用 |
+| 1 | `ipi_test` 回发确认 | 已占用 |
+| 2 | `ipi_test` clobber 探针 | 已占用 |
+| **3** | **TLB shootdown** | **M3 新增** |
 
-### 6.2 aarch64 IPI 发送 / handler 接入
+`gic.c:25-30` 白名单加 SGI 3（每核 banked enable）。验收含 IPI 自测与 TLB IPI 并存。
 
-**新增内容**：
+### 6.2 正式构建 AP IRQ 使能（v3 新增，修 #5）
 
-1. **`kernel/include/intr/ipi.h`** 增加 arch-neutral 转换宏：
+`secondary_idle`（`smp.c`）改为：boot command 处理完后，**生产与 selftest 构建都**执行 `arch_local_irq_enable() + isb`，随后 halt 循环（wfi/halt 均可——SGI 会唤醒）。理由：M3 起 AP 承担 TLB shootdown 应答义务，永久关 IRQ 的 AP 会让任何多核映射修改挂死。此改动使 `#if OS01_SELFTEST` 门移除；ipi_test 行为不变（其假设"AP 开 DAIF.I 等 SGI"由特殊变特殊变普遍成立）。
 
-   ```c
-   #define IPI_SGI_TLB    0   /* GICv2 SGIn=0；x86 端不使用，IPI_VECTOR_TLB=0x40 走 LAPIC */
-   ```
+### 6.3 发送与 handler
 
-2. **`kernel/arch/aarch64/intr/ipi.c`** 实现 `arch_ipi_broadcast(vector, exclude_self)`：
+- `arch_ipi_broadcast(vector, exclude_self)`（`kernel/arch/aarch64/intr/ipi.c` 新增）：`vector == IPI_VECTOR_TLB` → `gic_send_sgi(gic_dev_current(), 3, 目标掩码, filter=all-but-self)`（filter/target 编码沿用 `gic_send_sgi` 现有常量，与 `ipi_test.c` 用法一致）；其他 vector 暂 panic。
+- TLB handler 注册到 SGI 3：`arch_local_irq_save` → `arch_flush_tlb_all()`（`arch/mmu.h:144` 已有）→ ack（§6.4）→ 清 wanted → restore。
+- `kernel/memory/tlb.c` 编入 aarch64 build（`kernel/Makefile` 白名单加 `memory/tlb.c`）。
 
-   - 若 `vector == IPI_VECTOR_TLB`：写入 `GICD_SGIR` 寄存器，SGI ID = `IPI_SGI_TLB`，target = all-but-self；
-   - 其他 vector：panic（未实现）；
-   - 复用现有 GIC 驱动（`kernel/arch/aarch64/intr/gic.c`）的 GICD 基址。
+### 6.4 shootdown 协议（v3 重写，修 #8）
 
-3. **`kernel/arch/aarch64/intr/tlb.c`**（或扩 `trap.c`）注册 `IPI_SGI_TLB` handler：
+现有单 `tlb_wanted/tlb_ack` 槽与静默超时不可用。M3 改为：
 
-   ```c
-   void aarch64_ipi_tlb_handler(void);
-   /* 在 aarch64 启动路径注册到 IPI vector table 的 SGI 0 slot。 */
-   ```
+1. **发起方串行化**：`tlb_shootdown` 全程持全局 `tlb_sd_lock`（`spin_lock_irqsave`）——同一时刻至多一个发起者，ack 槽无并发覆写。
+2. **代数式 ack**：per-CPU `tlb_ack_gen`（monotonic 计数）。发起者记录发起时 `target_gen = percpu[i].tlb_ack_gen + 1`，等待 `tlb_ack_gen >= target_gen`。handler 每次执行 `tlb_ack_gen++`。历史 ack 不会误判为本次。
+3. **超时 FATAL**：等待上限（如 5 s，经 jiffies/counter）未达成 → `panic("TLB shootdown: CPU%u ack timeout gen=%u")`。**不再静默继续**。
+4. x86 端同步迁移到该协议（x86 `tlb.c` 同文件改造；`ipi_broadcast` x86 实现已存在）。x86 `systest_repeat` 回归验证。
 
-   处理：
-   - `arch_local_irq_save()`；
-   - `arch_flush_tlb_all()`（已有实现）；
-   - `percpu_data[cpu].tlb_ack = 1`；
-   - 清 `tlb_wanted`；
-   - `arch_local_irq_restore()`。
-
-4. **`kernel/memory/tlb.c` 编入 aarch64 build**：`kernel/Makefile` 与 aarch64 source group 加入 `tlb.c`。
-
-5. **`kernel/arch/aarch64/boot/main.c`** 启动顺序增加：
-   - `aarch64_ipi_init()`：注册 SGI handler；
-   - 在 SMP online 之前完成（与现有 IPI init 同位置）。
-
-### 6.3 TLB shootdown 调用链
-
-caller 路径（`arch_vmm_*`）：
-```
-arch_vmm_* → 本地修改 PTE
-            → aarch64_pt_invalidate_local(va) 或 aarch64_pt_invalidate_block_local(va)
-            → tlb_shootdown()
-                → 若 num_cpus > 1：
-                    tlb_wanted/ack 协议 + arch_ipi_broadcast(IPI_VECTOR_TLB, 1)
-                → 否则 local_only: arch_flush_tlb_all()
-```
-
-IPI handler 路径：
-```
-arch_ipi_broadcast → GIC SGI
-                → aarch64_ipi_tlb_handler
-                    → arch_flush_tlb_all()
-                    → tlb_ack
-```
-
-### 6.4 死锁防护
-
-同 v1 §6.2 #5：IPI handler 顺序与 x86 一致；`pt_lock` 不在 IPI handler 内持有；发起方在 IPI 等待期间不持 `pt_lock` 等待自身 ack（per-CPU 协议天然避免）。
-
-### 6.5 性能策略
-
-同 v1 §6.3：全表失效；per-VA shootdown 属 F2。
+死锁论证：`tlb_sd_lock` 由发起者持有，handler 不取该锁（只写自己的 `tlb_ack_gen`）；发起者等 ack 期间目标 CPU 只需跑 handler。与 `pt_lock` 的交互：`pt_lock` 持有者内部调用 `shootdown`（取 `tlb_sd_lock`）；锁序固定 `pt_lock → tlb_sd_lock`，无反序路径（handler 两把都不取）。
 
 ---
 
-## 7. vmm_init 双后端
+## 7. vmm_init 双后端（v3 补调用点）
 
-### 7.1 x86_64 端
+### 7.1 x86_64
 
-原 `vmm_init()` 行为不变；x86 backend `arch_vmm_init()` 透传 + PMM walk + `tlb_shootdown()`。
+行为不变（PMM walk + kernel_map 硬编码 + shootdown），迁入 x86 backend。
 
-### 7.2 aarch64 端
+### 7.2 aarch64（v3 明确生产调用点）
+
+**调用点**：`kernel/arch/aarch64/boot/main.c` 中 `arch_boot_direct_map_init()` 成功返回后**立即**调用：
 
 ```c
-int arch_vmm_init(void)
-{
-    uint64_t ttbr1 = aarch64_read_ttbr1();
-    uint64_t pa = ttbr1 & AARCH64_TTBR_BASE_MASK;
-    if (pa == 0 || pa >= AARCH64_PT_PA_LIMIT)
-        return -EINVAL;
-    kernel_map = (uint64_t *)(pa + ARCH_PAGE_OFFSET);
-    return 0;
-}
+if (arch_boot_direct_map_init()) { /* 现有失败路径 */ }
+int rc = arch_vmm_init();          /* 新增 */
+if (rc) { log_err("FATAL: arch_vmm_init rc=%d\n", rc); arch_cpu_halt(); }
 ```
 
-`kernel_map` 即 M1 直映根；所有 RAM 已可经 `kernel_map + offset` 访问。
-
-### 7.3 `arch_vmm_free_user_map` 推迟到 M4
-
-理由：aarch64 user PGD 由 M4 引入；M3 不实现该接口；x86 backend 保留原 `vmm_free_user_map` 实现（仅 x86 链接）。
+`arch_vmm_init` 实现：读 `aarch64_read_ttbr1()`，校验 PA 非零/对齐/< 1 TiB，`kernel_map = pa + ARCH_PAGE_OFFSET`。启动 selftest 断言 `kernel_map == (ttbr1 & BASE_MASK) + ARCH_PAGE_OFFSET`（即指向当前活跃 root）。
 
 ---
 
-## 8. 测试与验收（v2 修正）
+## 8. 测试与验收（v3 修正）
 
-### 8.1 M2 测试矩阵
+测试落 **`hosttests/cases/`**（实际 harness 目录）；QEMU 用 `KERNEL_SELFTEST=1` 与**非 selftest 正式镜像**两种。
 
-| 阶段 | 测试 | 期望 | 文件 |
-|----|----|----|----|
-| RED | `test/hosttest/memory/test_slab_sizes.c`：16 size × 16 alloc/free pattern + free 后再 alloc 验复用 | 改动前 fail | 新增 |
-| GREEN | 同上 | x86_64 host pass | 同 |
-| BUILD | aarch64 build 编入 `slab.c`、移除 `slab_stub.c`、M1 arena 扩 Slab 预留 | build success | build profile 调整 |
-| QEMU | `KERNEL_SELFTEST=1 qemu-system-aarch64 -smp 2 -m 1G` 启动到 main | selftest 全过；启动日志含 `slab_init: ok size=<bytes>`；M0 范围校验不 FATAL | QEMU launch |
-| 回归 | x86_64 `test/hosttest/memory/` 全部 + `systest_repeat.py` 5 连 | 5/5 pass | 既有 |
+### 8.1 M2 矩阵
 
-### 8.2 M3 测试矩阵（v2 修正）
+| 阶段 | 测试 | 期望 |
+|----|----|----|
+| RED | `hosttests/cases/` slab 跨 16 size alloc/free/复用（新 case） | 改动前 fail |
+| GREEN | 同上 | x86_64 host pass |
+| PREFLIGHT | arena 含 slab 段后 preflight 检查（连续 RAM / < 2 GiB / 不重叠 / 容量）注入坏布局 | FATAL 路径命中 |
+| QEMU | `KERNEL_SELFTEST=1` aarch64 -smp 2 启动 | 到 main；`slab_init` 断言过；双重计数抽查位为 0 后被 slab_init 置 1 |
+| 回归 | x86 hosttests + `systest_repeat.py` 5 连 | 5/5 |
 
-| 阶段 | 测试 | 期望 | 文件 |
-|----|----|----|----|
-| RED | `test/hosttest/memory/test_vmm_roundtrip.c`：**12 合法权限组合**（USER/KERNEL × RO/RW × EXEC/NOEXEC × NORMAL/DEVICE，扣除 DEVICE\|EXEC）+ **4 拒绝组合**（DEVICE\|EXEC × {RO,RW} × {USER,KERNEL} = 4 个 case，应返回 EINVAL）+ 软件位（VM_PROTNONE / VM_COW）保留 | 改动前 fail | 新增 |
-| RED | `test/hosttest/memory/test_vmm_split.c`：构造 2 MiB block，split 后逐 PTE 验 PA + 权限 + 软件位；break-before-make 顺序断言（lock acquire 早于 step 1，release 晚于 step 13） | 改动前 fail | 新增 |
-| RED | `test/hosttest/memory/test_vmm_init.c`：调 `arch_vmm_init`，x86 验证 kernel_map 非空 + PMM walk 完成；aarch64 验证 kernel_map = M1 TTBR1 root | x86 通过，aarch64 fail | 新增 |
-| RED | `test/hosttest/memory/test_vmm_prot_none.c`：构造 Valid=0 + PROTNONE PTE，query 返回 `EPROT_NONE` 并给 PA；unmap 释放 PA；free 时正确处理 | 改动前 fail | 新增 |
-| GREEN | x86_64 + aarch64 host 全过 | 12+4+软件位+split+init+PROT_NONE 全过 | 同 |
-| QEMU 单核 | `KERNEL_SELFTEST=1 aarch64 -smp 1` selftest：`arch_vmm_map_4k_new` / `update_4k` / `unmap_4k` / `map_2m` / `unmap_2m` / `split_2m_to_4k` / `pt_walk` 单元路径 | 全过 | selftest 命令 |
-| QEMU 多核 | 跨 CPU 共享页测试：CPU A `arch_vmm_map_4k_new` 新页 → CPU B `*(volatile uint32_t *)va` 读到正确值；IPI 等待不死锁（双核超时 5s） | `aarch64 -smp 2/4` 全过 | selftest |
-| QEMU PT_NONE | selftest：构造 PROT_NONE 页 → query 拿到 PA → unmap 释放 → query ENOENT | 全过 | selftest |
-| 回归 | x86_64 `systest_repeat.py` 5 连 | 5/5 pass | 既有 |
-| 排除验证 | aarch64 build 不引用 `vma.c` / `uaccess.c` / `task.c` fork PTE 段 | build success + 符号检查 | make 验证 |
+### 8.2 M3 矩阵
 
-### 8.3 验收门槛（v2 修正）
+| 阶段 | 测试 | 期望 |
+|----|----|----|
+| RED | `hosttests`：12 合法组合 × leaf/block + 4 拒绝组合（`DEVICE\|EXEC` × {RO,RW} × {USER,KERNEL}）+ 软件位 round-trip | fail → GREEN |
+| RED | `hosttests`：split 后 512 PTE 逐条验 PA/权限/软件位；split 分配失败注入（mock `alloc_4k_page` 返回 0）验证**原映射完好** | fail → GREEN |
+| RED | `hosttests`：PROT_NONE 三态（query EPROT_NONE+PA / unmap 返回 PA 不 free / set_software 转换） | fail → GREEN |
+| RED | `hosttests`：`arch_vmm_init` 后 kernel_map == TTBR1 root | fail → GREEN |
+| QEMU 单核 selftest | map/update/unmap/query/set_software × 4k/2m + split 单元 | 全过 |
+| QEMU 多核 selftest | **boot command 工作项**跨核测试（§0 #14 流程：B 记录旧映射读数 → A 替换/解除并等 ack → B 复读验证 → B 置结果 → A 检查）；双 CPU 并发竞争同一 2 MiB 段 split；-smp 2 与 -smp 4 | 全过，无死锁，无超时 |
+| QEMU **正式镜像** | 非 selftest 构建 -smp 2：启动后触发一次运行期 map+shootdown（如通过既有调试通道或启动期自检调用），验证 AP ack | 完成不挂死 |
+| 回归 | x86 `systest_repeat.py` 5 连；M1 16 组矩阵不回归 | 5/5 |
 
-- **M2**：hosttest 全部 GREEN + aarch64 `KERNEL_SELFTEST=1` QEMU 启动成功 + 启动日志含 `slab_init: ok size=<bytes>` + M0 范围校验不 FATAL + x86_64 systest_repeat 5/5。
-- **M3**：hosttest 全部 GREEN（12+4+软件位+split+init+PROT_NONE）+ aarch64 QEMU 单核+多核 selftest 通过 + x86_64 systest_repeat 5/5。
-- **不要求**：aarch64 shell、aarch64 systest_repeat（M4+ 再做）。
-- 任意 hosttest RED 不得 merge；任意 QEMU 失败必须 fix 后再跑。
-- M1 验收（16 组 RAM/CPU/镜像矩阵、稀疏/容量耗尽/AP 无效 root 注入）维持不回归。
+### 8.3 验收门槛
+
+- **M2**：hosttest GREEN + preflight FATAL 路径验证 + aarch64 selftest QEMU 启动 + x86 5/5。
+- **M3**：hosttest 全 GREEN + aarch64 单核/多核 selftest + **正式镜像双核 shootdown** + x86 5/5。
+- 不要求：aarch64 shell / aarch64 systest_repeat（M4+）。
 
 ---
 
-## 9. 风险与遗留（v2 修正）
+## 9. 风险与遗留
 
-### 9.1 风险
+### 9.1 风险（v3 修 R7，删与现状相同的假对策）
 
-**R1**（v2 修正）：M1 arena 未扩 Slab 预留会与 M1 表页池冲突或 PMM 把 Slab 预留页分配出去。**对策**：§3.2 已纳入；host test 加 arena 大小边界检查。
+**R7（v3 重写）**：持 `pt_lock` 等待 shootdown ack 的死锁风险。**对策**：(a) `pt_lock` 一律 `spin_lock_irqsave`；(b) TLB IPI handler 不取任何锁；(c) 锁序 `pt_lock → tlb_sd_lock` 全序固定；(d) §8.2 双 CPU 竞争同段测试验证。
 
-**R2**：aarch64 全表 TLBI 性能。**对策**：M3 接受；F2 推迟。
+**R8**：SGI handler 与 GIC 中断嵌套。**对策**：handler 内 irqsave；GIC 优先级配置不动；多核测试覆盖。
 
-**R3**：split 后 L3 table page 不回收。**对策**：M3 不实现 merge；F1。
+**R9**：caller 排除执行不严。**对策**：aarch64 链接后 `nm` 检查无 `vma_*`/`uaccess_*`/fork 相关符号。
 
-**R4**：aarch64 VM 软件位 bit 55/56 真硬件兼容性。**对策**：M3 仅 QEMU 验证。
+**R10（v3 新增）**：AP 开 IRQ 后正式构建行为变化（原假设 AP 永久静默）。**对策**：正式镜像双核验收 + IPI 自测回归（ipi_test 假设仍成立）。
 
-**R5**：aarch64 `arch_vmm_init` 把 M1 root 作为 kernel_map 后行为分裂。**对策**：`vmm_init` 注释明示。
+其余 R1-R6 同 v2（布局/性能/L3 不回收/软件位真机/行为分裂注释）。
 
-**R6**（v2 修正）：`aarch64_pt_query_4k` 遇 Valid=0 返回 ENOENT，PROT_NONE 无法 query PA。**对策**：§4.6 已纳入；新增 `AARCH64_PT_EPROT_NONE` 返回值。
+### 9.2 Follow-up
 
-**R7**（v2 新增）：break-before-make 协议中，步骤 5 `tlb_shootdown()` 等待其它 CPU ack 时，`pt_lock` 仍持有。若其它 CPU 因同一锁死锁（IPI handler 不持此锁），不会直接 deadlock；但若 caller 在持锁期间等待其它 CPU ack 而其它 CPU 又在等同一锁（不在 IPI handler 而在普通执行路径），会真 deadlock。**对策**：`pt_lock` 设计为 per-(root, l0_idx, l1_idx)，同一锁的临界区不跨 tlb_shootdown ack 等待——`tlb_shootdown` 完成后才 unlock（当前协议已是如此）；host test 加 `pt_lock` 嵌套场景验证。
-
-**R8**（v2 新增）：aarch64 IPI handler 与 GIC 中断嵌套。SGI 处理期间可能嵌套更高优先级中断（如 GIC PPI）。**对策**：handler 内 `arch_local_irq_save/restore` 已屏蔽本地 IRQ；嵌套优先级由 GIC 配置保证；M3 验证 GIC priority 不被 SGI handler 破坏。
-
-**R9**（v2 新增）：caller 范围限制执行不严。`vma.c` / `uaccess.c` 在 aarch64 build 中残留（仅 ifdef 排除）可能在编译期未发现，链接期才发现。**对策**：`make` 引入 `aarch64_vma_excluded` stamp + `nm` 检查 `vma_*` 符号不在 aarch64 kernel image 中。
-
-### 9.2 Follow-up（不属本 spec）
-
-- **F1**：merge_4k_to_2m。
-- **F2**：per-VA TLB shootdown。
-- **F3**：旧 `PAGE_*` alias 删干净（v2 直接不保留 alias）。
-- **F4**：slab `kmalloc_creating` 递归检测。
-- **F5**：caller 库（`vma.c` / `uaccess.c` / `task.c` fork 段）在 aarch64 的重写 —— M4 范围。
-- **F6**：M4 用户地址空间（user PGD / EL0 切换 / uaccess 故障恢复 / `arch_user_range_accessible` 接通真实跨页权限检查）。
-- **F7**：aarch64 user PGD / `arch_vmm_free_user_map` —— M4 范围。
-- **F8**：x86_64 backend 是否迁到 `alloc_4k_page/free_4k_page` 表页 —— 与 slab/PMM 解耦后单独评估。
+F1 merge_4k_to_2m；F2 per-VA shootdown；F4 slab 递归 flag；F5 `vma.c`/`uaccess.c`/`task.c` aarch64 重写（M4）；F6 M4 用户地址空间；F7 `arch_vmm_free_user_map`（M4）；F8 x86 表页迁 `alloc_4k_page` 评估。
 
 ---
 
-## 10. 实施拆分（v2 修正）
+## 10. 实施拆分（v3 调序）
 
-M2 + M3 同一份 plan，9 个子任务（含 1 个新前置）。
+1. **M2.1**：slab 锁替换 + `slab_layout_compute()`；hosttest RED→GREEN。
+2. **M2.2**：arena preflight 扩 slab 段（容量/M0/重叠检查前置）+ boot reservation 排除 slab 段 + 双重计数断言；aarch64 编入 slab.c、删 stub；QEMU 验证。
+3. **M3.1**：SGI 3 白名单 + `arch_ipi_broadcast` + TLB handler + 正式构建 AP IRQ 使能 + `tlb.c` 编入 + shootdown 串行化/代数 ack/超时 FATAL（x86 同步迁移）；QEMU 多核（含**正式镜像**）IPI 验证。
+4. **M3.2**：公共 vmm.h 语义层 + x86 `pte.h` 私有层拆分（PAGE_* 迁移，x86-only 文件改 include）；x86 回归全过。
+5. **M3.3**：aarch64 原语扩展（软件位进/出 + EPROT_NONE + block 编解码）+ backend 4 KiB 全套（map_new/update/set_software/unmap/query）+ `pt_lock`；hosttest。
+6. **M3.4**：block map/unmap + split（先建后拆）；hosttest + 单核 QEMU。
+7. **M3.5**：`arch_vmm_init` 生产调用点 + 启动断言；多核跨核工作项测试；正式镜像双核验收。
+8. **M3.6**：总回归——x86 5/5、aarch64 单/多核、M1 矩阵、`nm` 符号检查。
 
-1. **PRE.0**：v2 spec 评审通过 + `aarch64_pt_map_4k/unmap_4k/query_4k` 扩展 `software_bits` 参数 + 新增 `AARCH64_PT_EPROT_NONE` 返回值（host test 加 RED）。**这是 M3 的真正起跑线**，未做则 M3.1 之后无法进展。
-2. **M2.1**：`slab.c` 锁路径替换；新增 `slab_estimate_size()`；host `test_slab_sizes.c` RED→GREEN。
-3. **M2.2**：M1 arena 扩展 Slab 预留；`aarch64_early_arena_init` 调用 `slab_estimate_size()` + boot reservation 注册 + M0 范围 FATAL 检查。aarch64 build 编入 `slab.c` + 删除 `slab_stub.c`。QEMU `KERNEL_SELFTEST=1` 启动验证。
-4. **M3.1**：vmm.h flag 重命名（删除旧 `PAGE_*`） + per-arch vmm_backend 接口骨架；x86_64 backend 搬实现 + 旧 wrapper 路由；caller 迁移（vma/uaccess/fork 段在 aarch64 build 排除）。host `test_vmm_roundtrip.c` RED→GREEN。
-5. **M3.2**：aarch64 IPI 接入 + `tlb.c` 编译接入 + aarch64 TLB handler 注册 + `arch_ipi_broadcast` 实现。QEMU 双核 IPI 通信自测。
-6. **M3.3**：aarch64 vmm_backend 4 KiB 路径（`map_4k_new` / `update_4k` / `unmap_4k` / `pt_walk`） + 软件位 round-trip。host `test_vmm_roundtrip.c` GREEN（aarch64 部分）+ `test_vmm_prot_none.c` RED→GREEN。
-7. **M3.4**：aarch64 `aarch64_pt_map_2m_block` / `unmap_2m_block` + `aarch64_pt_invalidate_block_local` + `arch_vmm_map_2m` / `unmap_2m`。host 边界测试。
-8. **M3.5**：aarch64 `aarch64_pt_split_block_2m` + `arch_vmm_split_2m_to_4k` + `pt_lock` + break-before-make 协议。host `test_vmm_split.c` RED→GREEN。
-9. **M3.6**：aarch64 `arch_vmm_init` 注册 M1 root + `test_vmm_init.c` RED→GREEN。
-10. **M3.7**：回归 — x86_64 systest_repeat 5 连 + aarch64 `KERNEL_SELFTEST=1` QEMU 单核+多核 selftest 全过 + caller 排除验证。
-
-每个子任务独立 RED→GREEN→REFACTOR；失败不进入下一个。
+每步独立 RED→GREEN；失败不进下一步。M3.1 提前到 M3.2 之前：shootdown 是后续所有映射操作的验收依赖。
