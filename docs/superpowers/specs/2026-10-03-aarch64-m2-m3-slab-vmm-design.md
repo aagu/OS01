@@ -1,31 +1,30 @@
 ---
-title: OS01 aarch64 M2 Slab + M3 运行期 VMM 设计 (v6)
+title: OS01 aarch64 M2 Slab + M3 运行期 VMM 设计 (v7)
 created: 2026-10-03
 type: spec
 status: revised-for-review
 tags: [osdev, aarch64, memory, slab, vmm, tlb, ipi]
-supersedes: 8636672 (v5), 9311ae9 (v4), 1879a43 (v3), 8626553 (v2), 93f8ae7 (v1)
+supersedes: f8d088c (v6), 8636672 (v5), 9311ae9 (v4), 1879a43 (v3), 8626553 (v2), 93f8ae7 (v1)
 ---
 
-# aarch64 M2 Slab + M3 运行期 VMM (v6)
+# aarch64 M2 Slab + M3 运行期 VMM (v7)
 
-> v6 修订 v5 评审的 8 项问题（3 P0 + 3 P1 + 2 P2）。最重要的设计收敛：**活跃 root 上的在线 split 退出 M3 交付**——v5 的"等效替换豁免 BBM"前提不成立（Arm 规则取决于 `ID_AA64MMFR2_EL1.BBM`：L0 必须 BBM、L1 需 nT 位，且发布后仍需跨核失效），M3 的 split 限定**非活跃 root**（无缓存翻译，无 BBM/TLBI 问题）；活跃 root split 返回 `-EPERM`，BBM 等级感知的实现列为 F10。v4/v5 建立的契约（整体预留+幂等记账、纯自旋锁+上下文契约、锁初始化、上级表锁、工作槽状态机）保留。本文自包含。
+> v7 修订 v6 评审的 8 项问题（2 P0 + 4 P1 + 1 P2 + 1 P3）。核心修正：**online 协议重做为双状态**（`online` = 锁生效，`ipi_ready` = SGI 可响应——v6 把两种语义压在一个字段且发布时机被 `percpu_init` 的 memset 清回 0）；**SGI 发送改显式目标列表**（all-but-self 会命中未上线 AP，延迟投递的旧 SGI 会污染代数 ack）；**BBM 表述纠正**（`ID_AA64MMFR2_EL1.BBM` 的 0/1/2 是 CPU 报告的支持等级，不是翻译表层级——v6 写错）。v6 建立的其余契约保留。本文自包含。
 
-## 0c. v6 修订摘要
+## 0d. v7 修订摘要
 
-| # | v5 错误 | v6 修正 | 落点 |
+| # | v6 错误 | v7 修正 | 落点 |
 |---|----|----|----|
-| 1 [P0] | 等效替换豁免 BBM 的前提不成立：Arm 规定 L0 描述符必须 BBM、L1 换类型需 nT 位、只有 L2 允许直接改块大小，且依赖 `ID_AA64MMFR2_EL1.BBM` 特性值——v5 未检测特性也未设 nT，cortex-a53 上 QEMU 通过不能替代架构前提 | **活跃 root 在线 split 退出 M3**：`split_block_2m` 对 `is_active_root()` 返回 `-EPERM`；非活跃 root（新建树）单次原子 store 发布——无 CPU 可能缓存其翻译，无 BBM/TLBI 顾虑；boot 时读 `ID_AA64MMFR2_EL1.BBM` 并记录到启动日志（为 F10 铺路）；活跃 root 的等级感知实现列 **F10 follow-up**（含 nT 处理与发布后跨核失效协议）。M3 无任何 caller 需要活跃 root split（探针 scratch VA 的 L2 slot 本为空） | §5.3 |
-| 2 [P0] | 即使免 BBM 成立，发布后也缺跨核失效：本核一次 `vae1` 清不掉其他核缓存的旧 block 项，可能产生 TLB conflict | 随 #1 消解：非活跃 root 无缓存翻译，发布后**无需任何失效**；活跃 root 路径不存在（-EPERM）；F10 设计中必须含"发布后全范围跨核失效 + 完成等待" | §5.3/F10 |
-| 3 [P0] | aarch64 从不发布 `num_cpus` 与 `percpu_data[i].online`（`num_cpus` 为 x86 SMP 专属写；`percpu_init` 清零结构；BSP `percpu_install_gs` 在 `pmm_init` **之后** `:574`）——通用 `tlb_shootdown()` 永远走 `num_cpus<=1` 本核分支；补了 CPU 数也会跳过 `online==0` 的 AP；`slab_lock` 同样永久跳锁 | 新增 **§6.2b CPU 在线状态发布协议**：BSP 在 `smp_boot_aps` 前写 `num_cpus`；BSP 在 `percpu_install_gs` 后 `store_release(percpu_data[0].online=1)`；AP 在 `arch_local_irq_enable()` **之后**、进工作循环前 `store_release(percpu_data[cpu].online=1)`（online 的 aarch64 语义 = "SGI 可响应"）；shootdown 目标 = online 集合；首次 shootdown 只能在目标 online 之后。测试断言 AP 出现在目标集并产生 ack | §6.2b |
-| 4 [P1] | `VM_NOCACHE` 无物理别名约束：RAM 已有 Normal direct map，同 PA 再映成 Device 形成属性不兼容别名，BBM 处理不了另一条别名 | `VM_NOCACHE` 的合法 PA 范围 = **未被 Normal direct map 覆盖的物理地址**（设备 MMIO 或空洞）；禁止对 RAM PA 建 NOCACHE 别名映射（caller 契约，backend 文档注释 + DEBUG 可查）；memtype-change 测试用 Device 窗口 PA（Device↔Device）或纯描述符级测试，不做 RAM PA 的 Normal↔Device live 测试 | §4.4.3 |
-| 5 [P1] | 新 2 MiB 映射的上级表创建路径未定义：新 VA 可能连 L0/L1 子表都没有；`pt_upper_lock` 未接入 `map_2m` | 新增 **§5.2b `walk_to_l2(create)` 契约**：锁序 `pt_lock → pt_upper_lock`；逐级 ensure（读空→alloc→zero→发布）；`-ENOMEM` 回滚：解锁返回，**先前已创建的空中间表保留**（无害、可复用，不泄漏功能）；测试在全新 L1 范围创建 block | §5.2b |
-| 6 [P1] | 探针要求"AP0/AP1"各读，但 `-smp 2` 只有 BSP+1 个 AP | 双核验收只向 **CPU1** 发工作项；多 AP 覆盖放 `-smp 4` selftest；探针判定：前置断言 online 数 == PSCI 请求数，**0 AP online 或部分 AP 未上线/未答对 = FAIL**（不是 skip） | §7.3/§8.2 |
-| 7 [P2] | 32 位 ack 代数在回绕点误判：`gen < target` 在旧值 `UINT32_MAX`、目标回绕 0 时立即"完成" | 等待条件改 **`gen != target`**（在 `tlb_sd_lock` 串行化 + 每 CPU 同时至多一个未完成请求的契约下正确）；回绕单测（hosttest 直接构造 `UINT32_MAX → 0`） | §6.4 |
-| 8 [P2] | §1.3 完成标准仍写"block↔table 替换 break-before-make"，与 §5.3 单次 store 矛盾 | §1.3 统一为：非活跃 root block↔table = 原子 store（无失效需求）；活跃 root = `-EPERM`（F10）；BBM 仅用于 translation 变化的 4 KiB 更新 | §1.3 |
+| 1 [P0] | BSP `online` 发布时机错误：`percpu_init(0)` 在 `percpu_install_gs(0)` **之后**执行且 memset 清零整个结构（main.c:578-580，percpu.c:15）——v6 放在 install_gs 后的置位会被清回 0；且 online 被赋予"锁生效"与"SGI 可响应"两种含义 | **双状态协议**：`online`（锁生效，x86 兼容语义）与 `ipi_ready`（SGI 可响应）拆开。BSP 把 `percpu_install_gs(0)+percpu_init(0)+store_release(online=1)` 整体**提前到 `smp_boot_aps()` 之前**（纯内存初始化无依赖；消灭"AP 已运行而 BSP 未 online"的跳锁窗口）；`slab_init` 在 `pmm_init(:411)` 内、此时仍 online=0 单核跳锁，正确。BSP 的 `ipi_ready=1` 在 BSP 自身 IRQ 使能后（GIC init 后的 "[IRQ] enabled" 处） | §6.2b |
+| 2 [P0] | SGI 用 `all-but-self` filter 发送会命中所有其他 CPU 接口（含未上线的 AP）；延迟投递的旧 SGI 触发 handler 后 `tlb_ack_gen` 虚增，可能污染后续代数判定 | **显式目标列表发送**：持 `tlb_sd_lock` 时取 `ipi_ready` 快照（load_acquire）→ `gic_send_sgi(..., filter=LIST, targets=快照掩码)`（与 ipi_test 的 `GICD_SGIR_FILTER_LIST` 用法同款）→ 只等快照内 CPU。未上线 AP 从不收 SGI → 无延迟旧 SGI。测试：一 AP 未 `ipi_ready` 时发起 shootdown——只等已就绪者、成功返回；该 AP 就绪后的下一次 shootdown 其 gen 才递增 | §6.3/§6.4 |
+| 3 [P1] | `online` 的读取无 acquire 语义；`num_cpus` 的发布方式未写 | `online`/`ipi_ready` 定义为原子字段：写 = `store_release`，读 = `load_acquire`（目标筛选、探针计数全部）；`num_cpus` 在 `smp_boot_aps()` 前 `store_release` 写入、此后不变，`tlb_shootdown` 用 `load_acquire` 读 | §6.2b/§6.4 |
+| 4 [P1] | `is_active_root()` 只读本核 TTBR，不能证明其他核没安装该 root，也拦不住检查后、发布前的安装 | M3 允许条件改写为 **root 生命周期契约**："split 仅允许作用于尚未在任何 CPU 安装、且 split 返回前不会安装的新建 root"——由 caller 独占持有保证；`is_active_root()` 降级为本核辅助检查（DEBUG 断言用）；root "已发布" 的定义（安装进 TTBR / 注册为 kernel_map）写入文档，M4 引入 `arch_switch_mm` 时接管 | §5.3 |
+| 5 [P1] | 探针立即断言 online 数 == PSCI 数——`smp_boot_aps()` 等的是更早的 boot_online_set，AP 之后还要处理 boot command、开 IRQ、发布 ipi_ready，正常竞态会被误判 FAIL | 探针改为**有界等待**：deadline（约 2 s，counter 计时）内 `load_acquire` 轮询 `ipi_ready` 计数 == PSCI 请求数；超时打印缺席 CPU 编号 → FAIL；达成后才继续 | §7.3 |
+| 6 [P1] | "内存类型变 [Device↔Device]"测试名不副实：语义位只有 Normal 与一种 NOCACHE，Device→Device 类型没变（测的是 PA/权限变）；对已有 Device direct map 的 PA 临时映 Normal 又违反别名约束 | 内存类型变更测试**限定纯描述符级**（构造描述符、断言协议序列与编码，无 live 访问）；矩阵中删除 "[Device↔Device]" 标签；live Normal↔Device 切换需要"无不兼容别名的物理区域 + 切换流程"设计，推迟并注明 | §8.2 |
+| 7 [P2] | BBM 表述把支持等级写成翻译表层级（"L0 必须 BBM、L1 需 nT、L2 可直接换"）——`ID_AA64MMFR2_EL1.BBM` 的 0/1/2 是 **CPU 报告的 BBM 支持等级**（要求放宽的程度），非表 L0/L1/L2；本次操作本身是"L2 block 描述符 → 指向 L3 table 的描述符" | §5.3/F10 表述改写为"按 BBM 字段返回的支持等级选择协议"；具体等级 ↔ 操作的映射在 F10 设计时以 Arm ARM 原文核对，不在本 spec 断言 | §5.3/F10 |
+| 8 [P3] | 无表体的 v4/v5 表头残留；R13 接口名 `split_block_2k` 应为 `split_block_2m` | 已删/已改 | — |
 
-| # | v4 错误 | v5 修正 | 落点 |
-> v4/v5 的修订明细见 git 历史（v5 = 8636672，v4 = 9311ae9）。
+> v6 及更早的修订明细见 git 历史（v6 = f8d088c）。
 
 ---
 
@@ -51,7 +50,7 @@ supersedes: 8636672 (v5), 9311ae9 (v4), 1879a43 (v3), 8626553 (v2), 93f8ae7 (v1)
 
 - **IPI/shootdown 契约**（§6）：SGI 3 = TLB；正式构建 AP 使能 IRQ 并持续服务工作项；`tlb_shootdown` 串行化 + 代数 ack + 超时 FATAL；`kernel/memory/tlb.c` 编入 aarch64。
 - **vmm 语义层**（§4）：公共 `vmm.h` 只含 `VM_*` 与语义 API；x86 硬件位迁 `arch/x86_64/pte.h` 私有头；`vma.c`/`uaccess.c`/`task.c` 保持不编入 aarch64（当前 gate 已排除，写死契约）。
-- **替换协议**（§4.4.3/§5.3）：4 KiB translation 变化的更新按类别分协议（BBM 或原子 store）；block↔table 替换仅支持**非活跃 root**（单次原子 store，无失效需求）；**活跃 root split 返回 `-EPERM`**（等级感知实现属 F10）；split 失败不留空洞。
+- **替换协议**（§4.4.3/§5.3）：4 KiB translation 变化的更新按类别分协议（BBM 或原子 store）；block↔table 替换仅支持**未发布 root**（单次原子 store，无失效需求）；**已发布 root split 返回 `-EPERM`**（等级感知实现属 F10）；split 失败不留空洞。
 - **所有权**（§4.4.4）：backend unmap 永不 free。
 - aarch64 `aarch64_pt_*` 受锁公开原语（§5）+ 软件位 + `AARCH64_PT_EPROT_NONE`。
 - `arch_vmm_init` 有生产调用点（§7.2）+ 生产 shootdown 探针（§7.3）。
@@ -228,7 +227,7 @@ int aarch64_pt_map_2m_block / unmap_2m_block / split_block_2m (…);        /* �
 | PA 变（重映射） | PTE 级 break-before-make |
 | 有效性翻转（↔PROTNONE） | PTE 级 break-before-make |
 
-PTE 级 BBM 序列（持 `pt_lock_for(root, l2)`）：`*pte = 0 → dsb ishst → tlbi vae1 → dsb ish → shootdown → *pte = D_new → dsb ishst → tlbi vae1 → dsb ish; isb`。**窗口内该 4 KiB 页不可翻译**——caller 必须拥有并静默该范围（M3 内仅探针 scratch 页满足；契约写入 `update_4k` 文档注释）。block↔table 替换不走此序列（§5.3：非活跃 root 原子 store / 活跃 root `-EPERM`）。
+PTE 级 BBM 序列（持 `pt_lock_for(root, l2)`）：`*pte = 0 → dsb ishst → tlbi vae1 → dsb ish → shootdown → *pte = D_new → dsb ishst → tlbi vae1 → dsb ish; isb`。**窗口内该 4 KiB 页不可翻译**——caller 必须拥有并静默该范围（M3 内仅探针 scratch 页满足；契约写入 `update_4k` 文档注释）。block↔table 替换不走此序列（§5.3：未发布 root 原子 store / 已发布 root `-EPERM`）。
 
 **内存类型别名约束（v6 新增）**：`VM_NOCACHE` 映射的合法 PA 范围 = **未被 Normal direct map 覆盖的物理地址**（设备 MMIO 窗口或 PA 空洞）。禁止对 RAM PA（已有 Normal direct map 别名）建 NOCACHE 映射——同一 PA 的 Normal/Device 别名是属性不兼容别名，BBM 只处理被更新的 VA，消除不了另一条别名（Arm 内存模型要求避免）。此为 caller 契约，写入 backend 文档注释；DEBUG 构建可加 PMM zone 交叉检查。测试：内存类型变更仅用 Device 窗口 PA（Device↔Device，无 Normal 别名）或纯描述符级（无 live 访问）；**不做 RAM PA 的 Normal↔Device live 测试**。
 
@@ -260,7 +259,7 @@ PTE 级 BBM 序列（持 `pt_lock_for(root, l2)`）：`*pte = 0 → dsb ishst �
 
 ### 5.2 map/unmap 2 MiB block
 
-**map**：校验 root/va/pa 对齐与 < 1 TiB；持 `pt_lock_for(root, l2)`；经 §5.2b `walk_to_l2(create)` 走到 `pmd`；`pmd[l2]` 已占用 → `-EEXIST`；写 block 描述符（`dsb ishst` 前后）；活跃 root 时 block local TLBI + shootdown；解锁。
+**map**：校验 root/va/pa 对齐与 < 1 TiB；持 `pt_lock_for(root, l2)`；经 §5.2b `walk_to_l2(create)` 走到 `pmd`；`pmd[l2]` 已占用 → `-EEXIST`；写 block 描述符（`dsb ishst` 前后）；root 已发布时 block local TLBI + shootdown；解锁。
 **unmap**：§4.4.5。
 
 ### 5.2b `walk_to_l2(create)` 契约（v6 新增：上级表创建路径）
@@ -270,20 +269,18 @@ PTE 级 BBM 序列（持 `pt_lock_for(root, l2)`）：`*pte = 0 → dsb ishst �
 1. **锁序**：先取 `pt_lock_for(root, l2)`（L2 slot 级操作），再取 `pt_upper_lock`（L0/L1 创建段）——与 §5.4 全序一致。
 2. **逐级 ensure**（`pt_upper_lock` 内）：读 slot → 若空：`alloc_4k_page()` → `zero_page()` → 发布最小表描述符（V|TYPE|PA）→ `dsb ishst`。L0 与 L1 两级均可能创建。
 3. **`-ENOMEM` 回滚**：任一级 alloc 失败 → 释放（若有）本次未发布页 → 解锁两锁 → 返回 `-ENOMEM`。**先前已创建并发布的空中间表保留**——它们无害（全零槽位）、可被后续调用复用，不构成功能泄漏（M3 无中间表回收，与 F1 同属一类已知代价）。
-4. **发布原子性**：每级单次 8 B store 发布；非活跃 root 无 TLBI；活跃 root 每级发布后 local TLBI（当前 M3 caller 的目标 VA 在空洞，实际不会走到活跃 root 创建路径，但契约按活跃语义写全）。
+4. **发布原子性**：每级单次 8 B store 发布；未发布 root 无 TLBI；已发布 root 每级发布后 local TLBI（当前 M3 caller 的目标 VA 在空洞，实际不会走到已发布 root 创建路径，但契约按完整语义写全）。
 5. **测试**：在全新 L1 范围（L0 slot 空）创建 block——L0/L1 两级 ensure 都触发，验证映射可 query、ENOMEM 注入时中间表保留且可重试成功。
 
-### 5.3 split 协议（v6：仅非活跃 root；活跃 root = -EPERM）
+### 5.3 split 协议（v7：未发布 root 原子 store；已发布 root = -EPERM）
 
-**范围收敛依据**（v5 等效替换方案作废）：Arm 对 block↔table 描述符互换的免 BBM 许可取决于 `ID_AA64MMFR2_EL1.BBM` 特性值与描述符层级——L0 必须 BBM、L1 需 nT 位过渡、仅 L2 允许直接改块大小，且**发布后仍需跨核失效**（其他核缓存的旧 block 项不会被本核 TLBI 清除，可能产生 TLB conflict）。cortex-a53 上 QEMU 测试通过不能替代架构前提。M3 无任何 caller 需要活跃 root split（探针 scratch VA 的 L2 slot 本为空），故：
+**范围收敛依据**（v5 等效替换方案作废）：Arm 对 block↔table 描述符互换的免 BBM 许可取决于 `ID_AA64MMFR2_EL1.BBM` 报告的**支持等级**（0/1/2 表示处理器对 BBM 要求的放宽程度——注意这是 CPU 特性等级，**不是**翻译表层级），且**发布后仍需跨核失效**（其他核缓存的旧 block 项不会被本核 TLBI 清除，可能产生 TLB conflict）。具体等级 ↔ 允许操作的映射在 F10 设计时以 Arm ARM 原文核对，本 spec 不断言。cortex-a53 上 QEMU 测试通过不能替代架构前提。M3 无任何 caller 需要已发布 root 的 split（探针 scratch VA 的 L2 slot 本为空），故：
 
-- **非活跃 root**（`!is_active_root(root)`，新建树）：单次原子 store 发布——无 CPU 可能缓存该树的翻译，无 BBM、无 TLBI 需求。
-- **活跃 root**：`split_block_2m` 返回 `-EPERM`。等级感知实现（BBM 特性检测 + L1 nT 处理 + 发布后全范围跨核失效与完成等待）列为 **F10 follow-up spec**，不在 M3。
-- boot 时读 `ID_AA64MMFR2_EL1.BBM` 并打印（为 F10 提供事实基础）。
+**root 生命周期契约（v7 重写允许条件）**：一个 root 处于"**未发布**"状态 = 尚未被安装进任何 CPU 的 TTBR、也未注册为 `kernel_map`。`split_block_2m` 仅允许作用于**未发布 root**，且 caller 必须独占持有该 root、保证 split 返回前不会发布它（M3 caller 均为内核内部新建 scratch 树，天然满足）。**"已发布"root 调 split 返回 `-EPERM`**。本核 `is_active_root()` 只读本核 TTBR，**不能**作为唯一安全判据——仅作 DEBUG 辅助断言（本核未安装 + caller 契约 = 完整条件）。root 的"发布"操作（TTBR 写入 / kernel_map 注册）在 M3 只有 `arch_vmm_init` 注册 kernel_map 一处；M4 引入 `arch_switch_mm` 时接管发布点并维持此契约。等级感知实现（BBM 等级检测 + 发布后全范围跨核失效与完成等待）列为 **F10**。
 
 ```
-/* 非活跃 root 的 split */
- 0. if (is_active_root(root)) return -EPERM;
+/* 未发布 root 的 split */
+ 0. if (root_is_published(root)) return -EPERM;   /* 生命周期契约 + 本核 is_active_root 辅助 */
  1. l3_pa = alloc_4k_page();  if (!l3_pa) return -ENOMEM;   /* 映射未动 */
  2. zero_page(l3_pa);
  3. lock(pt_lock_for(root, l2));
@@ -298,7 +295,7 @@ PTE 级 BBM 序列（持 `pt_lock_for(root, l2)`）：`*pte = 0 → dsb ishst �
  8. unlock(pt_lock);
 ```
 
-失败点仅在步骤 1（释放 l3_pa，原映射未动）与步骤 4（释放 l3_pa，无副作用）；步骤 5 后无分配。**测试**：hosttest 512 项 `inherit()` 全等断言（期望 leaf = `encode(block 属性, block_pa + i*4K)`）+ 活跃 root 调用返回 `-EPERM` 断言。v5 的"AP 持续读取待 split 区域"等价性测试随方案作废删除。
+未发布 root 无 CPU 可能缓存其翻译——无 BBM、无 TLBI 需求。失败点仅在步骤 1（释放 l3_pa，原映射未动）与步骤 4（释放 l3_pa，无副作用）；步骤 5 后无分配。**测试**：hosttest 512 项 `inherit()` 全等断言（期望 leaf = `encode(block 属性, block_pa + i*4K)`）+ 已发布 root 调用返回 `-EPERM` 断言。v5 的"AP 持续读取待 split 区域"等价性测试随方案作废删除。
 
 ### 5.4 锁设计（v5：初始化 + 上级表锁 + 审计门槛）
 
@@ -327,7 +324,7 @@ static spinlock_T tlb_sd_lock     = { .lock = 1UL };
 - 三锁均**普通 `spin_lock`**（不用 irqsave——aarch64 `spin_lock_irqsave` 先关 IRQ 再自旋，等待者无法响应 SGI）。等待者 IRQ 保持开。
 - **不变式 I1**：三锁永不从中断上下文获取（TLB IPI handler 无锁）。
 - **不变式 I2**：vmm 变更 API 入口断言本地 IRQ 开（DEBUG 构建 `BUG_ON(irqs_disabled())`）。
-- 论证：A 持 `pt_lock` 等 ack（仅 §4.4.3 BBM 类 update 需要；split 已限定非活跃 root，不涉 shootdown）；B 在同一 `pt_lock` 自旋——B IRQ 开（普通 spin_lock + I2）→ SGI 到达 → handler（无锁）ack → A 前进释放 → B 取锁。无环。
+- 论证：A 持 `pt_lock` 等 ack（仅 §4.4.3 BBM 类 update 需要；split 已限定未发布 root，不涉 shootdown）；B 在同一 `pt_lock` 自旋——B IRQ 开（普通 spin_lock + I2）→ SGI 到达 → handler（无锁）ack → A 前进释放 → B 取锁。无环。
 
 **审计门槛（v5 升格为 M3.1 完成门槛，不通过不得进 M3.2）**：枚举全部现存"在 irqsave 锁内调用 vmm 变更 API"的调用链（重点：`slab_lock` 持有路径上的 `vmm_map_page`/`tlb_shootdown`；x86 `pmm_lock` 路径），逐条消除（挪出临界区）或重构（锁拆分）。正式构建无 I2 断言，**审计是唯一防线**——此事实写入 §9 风险。审计清单与结论记录在 M3.1 的验收文档里。
 
@@ -374,41 +371,45 @@ struct ap_work {
 
 `ap_work[NR_CPUS]` 固定 per-CPU 数组（BSS，不需要 percpu_t 内嵌——避免再动 `PERCPU_DATA_SIZE`）。此改动移除 `#if OS01_SELFTEST` 门；ipi_test 假设由特殊变普遍，行为兼容。
 
-### 6.2b CPU 在线状态发布协议（v6 新增）
+### 6.2b CPU 在线状态发布协议（v7 重写：双状态）
 
-**现状缺口**：aarch64 从不写 `num_cpus`（x86 SMP 代码专属），`percpu_init()` 清零整个结构，BSP 的 `percpu_install_gs` 在 `pmm_init`（含 `slab_init`）**之后**（`main.c:574` vs `:411`）。后果：通用 `tlb_shootdown()` 永远走 `num_cpus ≤ 1` 本核分支；即使补上 CPU 数，`online == 0` 的 AP 也会被跳过；`slab_lock_acquire` 的 `percpu_data[0].online` 门同样使 aarch64 永久跳锁（SMP 后不安全）。
+**现状缺口**：aarch64 从不写 `num_cpus`（x86 SMP 代码专属）；`percpu_init()` memset 清零整个结构且**不设 online**（`percpu.c:15-25`；`main.c:572` 注释称其 populate online 是错的）；`percpu_install_gs(0)+percpu_init(0)` 在 `main.c:578-580`，**晚于** `smp_boot_aps()`（`:501`）；BSP IRQ 使能更晚（GIC init 之后）。后果：`tlb_shootdown()` 永远走 `num_cpus ≤ 1` 本核分支；`slab_lock` 的 `percpu_data[0].online` 门使 aarch64 永久跳锁。
 
-**发布协议**：
+**双状态设计（v7）**——`online` 与 `ipi_ready` 语义拆开，禁止一个字段两义：
 
-| 事件 | 动作 | 时机 |
-|----|----|----|
-| BSP | `num_cpus = PSCI/DTB 检出的 CPU 数` | `smp_boot_aps()` 之前 |
-| BSP | `store_release(percpu_data[0].online = 1)` | `percpu_install_gs(0)` 之后（`:574` 一带）。此前 BSP 单 CPU 运行，slab 跳锁路径正确；此后 `slab_lock` 真加锁 |
-| AP | `arch_local_irq_enable(); isb;` 然后 `store_release(percpu_data[cpu].online = 1)` | `secondary_idle` 中，**IRQ 使能之后、进工作循环之前**。online 的 aarch64 语义 = **"SGI 可响应"**——先开 IRQ 再标 online，保证发起者看到 online=1 的 AP 必能应答 SGI |
+| 字段 | 语义 | BSP | AP |
+|----|----|----|----|
+| `percpu_data[i].online` | percpu 状态已初始化、**锁生效**（x86 兼容：slab_lock 的 `percpu_data[0].online` 门） | `percpu_install_gs(0)+percpu_init(0)` **整体提前到 `smp_boot_aps()` 之前**执行（纯内存初始化无依赖；消灭"AP 已运行而 BSP 未 online"的跳锁窗口），随后 `store_release(online=1)` | `secondary_idle` 中 `percpu_init(cpu)` 后 `store_release(online=1)` |
+| `percpu_data[i].ipi_ready`（新字段） | 本核 **SGI 可响应**（IRQ 已开 + handler 已注册） | BSP 自身 IRQ 使能后（GIC init 完成处）`store_release(ipi_ready=1)` | `arch_local_irq_enable(); isb;` 之后、进工作循环前 `store_release(ipi_ready=1)` |
 
-**约束**：
+**原子性（v7 补全）**：两字段均为原子字段——写 `store_release`、读 `load_acquire`（目标筛选、探针计数全部）。`num_cpus` 在 `smp_boot_aps()` 前 `store_release` 写入、此后不变；`tlb_shootdown` 内 `load_acquire` 读。
 
-- shootdown 目标集合 = `{ i : percpu_data[i].online == 1, i != self }`；发起者自身必须已 online（BSP 的首次 shootdown 是探针，在 AP online 之后）。
-- AP 标 online 之前不得成为任何 IPI 目标——现有 `boot_online_set`/boot command 协议保证 AP 到达 `secondary_idle` 后由 BSP 控制，BSP 在探针前等待全部预期 AP 的 `percpu online`（新增等待点：探针启动断言 `online 数 == PSCI 请求数`，见 §7.3 判定）。
-- `num_cpus` 与 `online` 的写都是单次发布（无回退路径）；CPU 下线/hotplug 不在 M3。
+**时序不变式**：
 
-**测试**：探针/selftest 直接断言——AP1 出现在 shootdown 目标集（`num_cpus > 1` 且 `percpu_data[1].online == 1`）；AP 的 `tlb_ack_gen` 在 shootdown 后递增（ack 真的产生于 AP，不是本核）。
+- `slab_init`（`pmm_init:411` 内）早于 BSP percpu init → 全程 online=0 单核跳锁，正确（无 AP 运行）。
+- BSP online=1 早于 `smp_boot_aps()` → 任何 AP 开始执行时系统已进入"锁生效"状态，无跳锁窗口。
+- shootdown 目标 = `ipi_ready` 集合（不是 online）；AP 先开 IRQ 再标 ipi_ready，发起者看到 ipi_ready=1 的 AP 必能应答 SGI。
+- 两字段单次发布、无回退；CPU 下线不在 M3。
+- `percpu_t` 一次性增加 `ipi_ready` + `tlb_ack_gen` 两个字段，一次 `PERCPU_DATA_SIZE` bump + head.S stride 更新 + 全量重建。
+
+**测试**：① 探针/selftest 断言 AP1 在 shootdown 目标集（`ipi_ready`）且其 `tlb_ack_gen` 递增（ack 真产生于 AP）；② **一 AP 未 ipi_ready 时发起 shootdown**：只等已就绪者、成功返回、未就绪 AP 的 gen 不变；其就绪后的下一次 shootdown 才递增（无延迟旧 SGI 污染）。
 
 ### 6.3 发送与 handler
 
-- aarch64 在 `kernel/arch/aarch64/intr/ipi.c` 实现 **`ipi_broadcast(vector, exclude_self)`**（与 x86 同名同义，`tlb.c:38` 调用点零改动）：`vector == IPI_VECTOR_TLB` → `gic_send_sgi(dev, 3, 目标掩码, filter=all-but-self)`（filter/target 编码沿用 `gic_send_sgi` 现有常量）；其他 vector 暂 panic。
+- aarch64 在 `kernel/arch/aarch64/intr/ipi.c` 实现 **`ipi_broadcast(vector, mask)`**（x86 调用点 `tlb.c:38` 随协议迁移同步改造）：`vector == IPI_VECTOR_TLB` → **`gic_send_sgi(dev, 3, targets=mask, filter=LIST)`**（显式目标列表，与 ipi_test 的 `GICD_SGIR_FILTER_LIST` 用法同款；**不用 all-but-self filter**——它会命中所有其他 CPU 接口，包括尚未 `ipi_ready` 的 AP，延迟投递的旧 SGI 会触发 handler 使 `tlb_ack_gen` 虚增、污染代数判定）。mask 由 `tlb_shootdown` 在 `tlb_sd_lock` 内取快照后传入（§6.4）。其他 vector 暂 panic。
 - TLB handler 注册 SGI 3：`irqsave → arch_flush_tlb_all()（已有）→ ack（§6.4）→ restore`；**无锁**；在 AP online 前、首次 shootdown 前注册。
 - `kernel/Makefile` aarch64 白名单加 `memory/tlb.c`。
 
 ### 6.4 shootdown 协议（串行化 + 代数 ack + 超时 FATAL）
 
 1. 发起方全程持 `tlb_sd_lock`（**普通 spin_lock**，同 §5.4 契约：仅发起方上下文获取，等待者 IRQ 开）——同一时刻至多一个发起者。
-2. per-CPU `tlb_ack_gen`（原子 uint32，加入 `percpu_t` → **bump `PERCPU_DATA_SIZE` + 更新 head.S stride 站点 + 全量重建**，`percpu.h:75-85` 流程）。
-3. 顺序：
+2. **目标快照（v7，锁内取）**：`mask = { i : i != self, load_acquire(percpu_data[i].ipi_ready) }`；只向 mask 内 CPU 发送并等待。快照保证：mask 内 CPU 在快照时刻已可响应 SGI（`ipi_ready` 只置不清），未入 mask 的 CPU 从不收 SGI → 不产生延迟旧 SGI。
+3. per-CPU `tlb_ack_gen`（原子 uint32，与 `ipi_ready` 同批加入 `percpu_t` → **一次 `PERCPU_DATA_SIZE` bump + head.S stride 站点 + 全量重建**，`percpu.h:75-85` 流程）。
+4. 顺序：
    - handler：`tlbi vmalle1; dsb ish;` `atomic_store_release(&gen, atomic_load(&gen)+1)`。
-   - 发起者：本地 `arch_flush_tlb_all()` → 记 `target_i = load(gen_i)+1`（每个在线非自身 CPU）→ `ipi_broadcast(IPI_VECTOR_TLB, 1)` → 自旋 `while (atomic_load_acquire(&gen_i) != target_i) arch_cpu_pause();`（IRQ 保持开）。**等待条件用 `!=` 而非 `<`**：32 位代数在 `gen = UINT32_MAX`、target 回绕为 0 时 `<` 会立即误判完成；`!=` 在"`tlb_sd_lock` 串行化 + 每 CPU 同时至多一个未完成请求"契约下正确（每 CPU 的 gen 每 shootdown 恰好 +1，等待者追平即停）。回绕单测见 §8.2。
-4. 超时（上限如 5 s，经 counter）→ `panic`，**不再静默继续**。
-5. x86 同步迁移到同协议（x86 `tlb.c` 就地改造）；x86 `systest_repeat` 回归验证。
+   - 发起者：本地 `arch_flush_tlb_all()` → 锁内快照 mask → 记 `target_i = load(gen_i)+1`（每个 mask 内 CPU）→ `ipi_broadcast(IPI_VECTOR_TLB, mask)` → 自旋 `while (atomic_load_acquire(&gen_i) != target_i) arch_cpu_pause();`（IRQ 保持开）。**等待条件用 `!=` 而非 `<`**：32 位代数在 `gen = UINT32_MAX`、target 回绕为 0 时 `<` 会立即误判完成；`!=` 在"`tlb_sd_lock` 串行化 + 每 CPU 同时至多一个未完成请求"契约下正确（每 CPU 的 gen 每 shootdown 恰好 +1，等待者追平即停）。回绕单测见 §8.2。
+5. 超时（上限如 5 s，经 counter）→ `panic`，**不再静默继续**。
+6. x86 同步迁移到同协议（x86 `tlb.c` 就地改造；x86 的 APIC IPI 本就是显式目标发送，与快照协议天然一致）；x86 `systest_repeat` 回归验证。
 
 ### 6.5 跨核测试工作项
 
@@ -445,9 +446,9 @@ if (rc) {
 boot 流程在 `arch_vmm_init` 成功后、AP online（`ap_work` 循环运行且 `percpu online` 就绪，§6.2b）后执行：
 
 1. `kputs("M3-SHOOTDOWN-PROBE: START\n")`；
-2. 前置断言：`query_4k(SCRATCH_VA) == -ENOENT`；`percpu online 数 == PSCI 请求数`——**0 AP online = FAIL**（打印 `M3-SHOOTDOWN-PROBE: FAIL no-AP` 后 halt），部分 AP 失败同样 FAIL（M3 验收不含部分上线场景）；
+2. **有界等待 AP 就绪（v7）**：`smp_boot_aps()` 只等到更早的 `boot_online_set`——AP 之后还要处理 boot command、开 IRQ、发布 `ipi_ready`（§6.2b）。探针以 deadline（约 2 s，counter 计时）轮询 `load_acquire` 计数 `ipi_ready == PSCI 请求数`；达成后继续，**超时打印缺席 CPU 编号 → FAIL**（`M3-SHOOTDOWN-PROBE: FAIL ap-not-ready <ids>` 后 halt）。0 AP 就绪同样经此路径 FAIL；同时保留 `query_4k(SCRATCH_VA) == -ENOENT` 断言；
 3. `P1 = alloc_4k_page()`（写 pattern A）、`P2 = alloc_4k_page()`（写 pattern B）；
-4. BSP `arch_vmm_map_4k_new(kernel_map, P1, SCRATCH_VA, VM_KERNEL_RW)` → **向全部 online AP**（双核 = 仅 CPU1；四核 = CPU1-3）发 `WORK_READ64(seq=n)` → 校验全部 == A；
+4. BSP `arch_vmm_map_4k_new(kernel_map, P1, SCRATCH_VA, VM_KERNEL_RW)` → **向全部 `ipi_ready` AP**（双核 = 仅 CPU1；四核 = CPU1-3）发 `WORK_READ64(seq=n)` → 校验全部 == A；
 5. `arch_vmm_update_4k(SCRATCH_VA → P2)`（BBM 类，窗口内 BSP 独占该 VA）→ shootdown → `WORK_READ64(seq=n+1)` 复读 == B（任一 AP 陈旧 TLB → 读到 A → fail）；
 6. 清理与终态断言：`unmap_4k(SCRATCH_VA)` → `free_4k_page(P1)`、`free_4k_page(P2)` → `query_4k(SCRATCH_VA) == -ENOENT`（无遗留映射）；中间表页保留（F1 之前不回收，已文档化）；
 7. `kputs("M3-SHOOTDOWN-PROBE: OK\n")`。
@@ -475,9 +476,9 @@ harness：正式镜像 QEMU 命令（与现有 aarch64 运行脚本同款，`-sm
 | 阶段 | 测试 | 期望 |
 |----|----|----|
 | RED→GREEN | `hosttests`：12 合法组合 × leaf/block + 4 拒绝（`VM_NOCACHE` 无 `VM_NO_EXEC` × {RO,RW} × {USER,KERNEL}）+ 软件位 round-trip | pass |
-| RED→GREEN | `hosttests`：split 后 512 PTE 逐条验 PA/权限/软件位；alloc 失败注入（返回 0）验证**原映射完好**；**活跃 root 调 split 返回 `-EPERM`**；锁内重读的 `-EAGAIN` 并发路径（mock 两次调用交错） | pass |
+| RED→GREEN | `hosttests`：split 后 512 PTE 逐条验 PA/权限/软件位；alloc 失败注入（返回 0）验证**原映射完好**；**已发布 root 调 split 返回 `-EPERM`**；锁内重读的 `-EAGAIN` 并发路径（mock 两次调用交错） | pass |
 | RED→GREEN | `hosttests`：PROT_NONE 三态（query `-EPROT_NONE`+PA / unmap 返回 PA 不 free / update 暂存与恢复） | pass |
-| RED→GREEN | `hosttests`：§4.4.3 四类替换协议各一组（权限变 / 内存类型变[Device↔Device] / PA 变 / 有效性翻转），含描述符中间态断言；**全新 L1 范围创建 block**（两级 ensure 触发 + ENOMEM 注入中间表保留可重试）；**ack 代数回绕**（构造 `gen=UINT32_MAX` → target=0，`!=` 等待不误判） | pass |
+| RED→GREEN | `hosttests`：§4.4.3 四类替换协议各一组（权限变 / **内存类型变[纯描述符级，无 live 访问——语义位只有 Normal 与一种 NOCACHE，live Normal↔Device 切换需先设计无不兼容别名的物理区域，推迟并注明]** / PA 变 / 有效性翻转），含描述符中间态断言；**全新 L1 范围创建 block**（两级 ensure 触发 + ENOMEM 注入中间表保留可重试）；**ack 代数回绕**（构造 `gen=UINT32_MAX` → target=0，`!=` 等待不误判） | pass |
 | RED→GREEN | `hosttests`：`arch_vmm_init` 后 kernel_map == TTBR1 root | pass |
 | QEMU 单核 selftest | map/update/unmap/query × 4k/2m + split 单元 | 全过 |
 | QEMU 多核 selftest | ① 工作项流程（含 seq 协议与 **§6.2b 在线断言**：AP1 在目标集、其 `tlb_ack_gen` 递增——ack 确产生于 AP）：AP 读 P1（记录）→ BSP 换映 P2 + shootdown → AP 复读 == B（陈旧 TLB → 读到 A → fail）；② 双 CPU 交错竞争同一 pt_lock 且一方持锁做 BBM 类 update 等 ack；③ 并发创建共享同一 L1 条目的两个不同 L2 slot 映射，恰建一张 L1 表、无表页泄漏；-smp 2 与 4（多 AP 覆盖仅在 4） | 全过无死锁无超时 |
@@ -494,11 +495,11 @@ harness：正式镜像 QEMU 命令（与现有 aarch64 运行脚本同款，`-sm
 
 ## 9. 风险与遗留
 
-**R7（v5 重述）**：锁与 IPI 交互死锁。**对策**：§5.4 纯自旋 + I1/I2 不变式 + 全序锁序（`pt_lock → pt_upper_lock → tlb_sd_lock`）+ 交错测试。v6 后持锁等 ack 的场景只剩 §4.4.3 的 BBM 类 update（split 已限定非活跃 root）。残留风险：**正式构建无 I2 断言，审计是唯一防线**——M3.1 的审计门槛必须覆盖全部现存 irqsave→vmm 调用链，未来新增 caller 依赖 review 拦截。
+**R7（v5 重述）**：锁与 IPI 交互死锁。**对策**：§5.4 纯自旋 + I1/I2 不变式 + 全序锁序（`pt_lock → pt_upper_lock → tlb_sd_lock`）+ 交错测试。v6 后持锁等 ack 的场景只剩 §4.4.3 的 BBM 类 update（split 已限定未发布 root）。残留风险：**正式构建无 I2 断言，审计是唯一防线**——M3.1 的审计门槛必须覆盖全部现存 irqsave→vmm 调用链，未来新增 caller 依赖 review 拦截。
 
-**R13（v6 重写）**：活跃 root split 被移出 M3（`-EPERM`），但接口存在意味着未来 caller 可能拿到 `-EPERM` 才发现能力缺失；且 F10 的等级感知实现（BBM 检测 + nT + 发布后跨核失效）复杂度高。**对策**：M3 在 `split_block_2k` 文档注释与 `docs/memory.md` 显式标注范围；F10 有真实 caller（如内核 W^X 或 guard page）时才立项。
+**R13（v7 更新）**：已发布 root split 被移出 M3（`-EPERM`），但接口存在意味着未来 caller 可能拿到 `-EPERM` 才发现能力缺失；且 F10 的等级感知实现（BBM 检测 + nT + 发布后跨核失效）复杂度高。**对策**：M3 在 `split_block_2m` 文档注释与 `docs/memory.md` 显式标注范围；F10 有真实 caller（如内核 W^X 或 guard page）时才立项。
 
-**R14（v6 新增）**：CPU 在线状态发布（§6.2b）依赖 AP 在 `arch_local_irq_enable` 与 `online=1` 之间的窗口不被 IPI 命中——若 BSP 在此窗口发起 shootdown，AP 尚未标 online 故不在目标集（正确）；但若 AP 标 online 的 store 与 IRQ 使能顺序颠倒，则可能出现"标了 online 却关着 IRQ"的死等。**对策**：协议明文规定顺序（先 IRQ 后 online）；selftest 断言 ack 产生于 AP 的 `tlb_ack_gen` 递增（直接验证发布语义）。
+**R14（v7 重写）**：在线状态发布的顺序错误会造成两类故障——AP "标了 ipi_ready 却关着 IRQ"（死等）或 BSP online 窗口内 AP 跑 kmalloc（跳锁竞态）。**对策**：§6.2b 双状态协议明文规定顺序（BSP percpu init 提前到 `smp_boot_aps` 前 + online=1；AP 先开 IRQ 再标 ipi_ready）；显式目标列表发送使未就绪 AP 从不收 SGI；selftest 断言 ack 产生于 AP 的 `tlb_ack_gen` 递增 + "一 AP 未就绪时 shootdown"用例。
 
 **R15（v6 新增）**：`VM_NOCACHE` 别名约束是 caller 契约而非后端强校验——违规 caller 不会得到错误码，只会得到属性不兼容别名（静默）。**对策**：backend 文档注释 + DEBUG 构建 PMM zone 交叉检查（可后续）；测试只用 Device 窗口 PA。
 
@@ -514,7 +515,7 @@ harness：正式镜像 QEMU 命令（与现有 aarch64 运行脚本同款，`-sm
 
 其余同前：全表 TLBI 性能（F2）、L3 不回收（F1）、软件位真机 PBHA（仅 QEMU 验证）、x86/aarch64 vmm_init 行为分裂（注释明示）。
 
-**Follow-up**：F1 merge；F2 per-VA shootdown；F4 slab 递归 flag；F5/F6/F7 M4 用户地址空间与 vma/uaccess/task 重写；F8 x86 表页迁 `alloc_4k_page` 评估；**F10（v6 新增）活跃 root split 的等级感知实现**（`ID_AA64MMFR2_EL1.BBM` 检测 + L1 nT 位过渡 + L0 强制 BBM + 发布后全范围跨核失效与完成等待；有真实 caller 时立项）。（v4 的 F9 已升格为 M3.1 完成门槛。）
+**Follow-up**：F1 merge；F2 per-VA shootdown；F4 slab 递归 flag；F5/F6/F7 M4 用户地址空间与 vma/uaccess/task 重写；F8 x86 表页迁 `alloc_4k_page` 评估；**F10（v6 新增，v7 修正表述）已发布 root split 的等级感知实现**（读 `ID_AA64MMFR2_EL1.BBM` 报告的支持等级，按等级选择协议——等级与允许操作的映射以 Arm ARM 原文核对后再定；含发布后全范围跨核失效与完成等待；有真实 caller 时立项）。（v4 的 F9 已升格为 M3.1 完成门槛。）
 
 ---
 
@@ -522,10 +523,10 @@ harness：正式镜像 QEMU 命令（与现有 aarch64 运行脚本同款，`-sm
 
 1. **M2.1**：slab 锁替换 + `slab_layout_compute()` + slab_init 标记幂等化 + x86 计数回归 hosttest。
 2. **M2.2**：arena 公式链扩展（§3.2）+ preflight 前置检查 + §3.3 同步修改清单 + aarch64 编入 slab.c/删 stub + QEMU 验证。
-3. **M3.1**：SGI 3 白名单 + `ipi_broadcast` aarch64 实现 + TLB handler + `secondary_idle` 工作项循环（含 §6.2 状态机/seq 协议，生产开 IRQ）+ **§6.2b 在线状态发布协议（num_cpus / percpu online / BSP 侧 slab_lock 生效）** + `tlb.c` 编入 + `percpu_t` 加 `tlb_ack_gen`（PERCPU_DATA_SIZE/stride/重建）+ shootdown 串行化/代数 ack（`!=` 等待）/超时 FATAL（x86 同步）+ 锁静态初始化（pt_locks/pt_upper_lock/tlb_sd_lock）+ **§5.4 审计门槛：枚举并消除全部 irqsave 锁内调用 vmm 变更 API 的现存链，清单入验收文档**。QEMU 多核（含正式镜像）IPI 验证。**审计不通过不得进 M3.2。**
+3. **M3.1**：SGI 3 白名单 + `ipi_broadcast(mask)` aarch64 实现（显式目标列表）+ TLB handler + `secondary_idle` 工作项循环（含 §6.2 状态机/seq 协议，生产开 IRQ）+ **§6.2b 双状态发布协议（num_cpus / online / ipi_ready；BSP percpu init 提前到 smp_boot_aps 前）** + `tlb.c` 编入 + `percpu_t` 一次加 `ipi_ready`+`tlb_ack_gen`（PERCPU_DATA_SIZE/stride/重建）+ shootdown 串行化/目标快照/代数 ack（`!=` 等待）/超时 FATAL（x86 同步）+ 锁静态初始化（pt_locks/pt_upper_lock/tlb_sd_lock）+ **§5.4 审计门槛：枚举并消除全部 irqsave 锁内调用 vmm 变更 API 的现存链，清单入验收文档**。QEMU 多核（含正式镜像、含"一 AP 未就绪时 shootdown"用例）IPI 验证。**审计不通过不得进 M3.2。**
 4. **M3.2**：公共 vmm.h 语义层 + x86 `pte.h` 私有层拆分（`PAGE_*` 迁移、x86-only 文件改 include、wrapper 保留释放逻辑）；x86 回归全过。
 5. **M3.3**：page_table.c 受锁公开原语（软件位进出 + EPROT_NONE + block 编解码 + `pt_locks` 表 + `pt_upper_lock` + `walk_to_l2(create)` + I1/I2 断言）+ backend 4 KiB 全套；hosttest。
-6. **M3.4**：block map/unmap + split（§5.3：非活跃 root 原子 store；活跃 root `-EPERM`；boot 打印 `ID_AA64MMFR2_EL1.BBM`）；hosttest（含 512 项 `inherit()` 全等断言 + `-EPERM` 断言）+ 单核 QEMU。
+6. **M3.4**：block map/unmap + split（§5.3：未发布 root 原子 store；已发布 root `-EPERM`；boot 打印 `ID_AA64MMFR2_EL1.BBM`）；hosttest（含 512 项 `inherit()` 全等断言 + `-EPERM` 断言）+ 单核 QEMU。
 7. **M3.5**：`arch_vmm_init` 生产调用点 + §7.3 探针（含前置/终态断言、0-AP FAIL 判定）+ 多核工作项测试（含 §6.2b 在线断言、并发 L1 创建、ack 回绕）+ 正式镜像验收。
 8. **M3.6**：总回归——x86 5/5、aarch64 单/多核、M1 矩阵（更新期望）、ipi_test、`nm` 符号检查。
 
