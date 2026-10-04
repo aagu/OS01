@@ -2,7 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-KILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 >
-> **v2 rewrite.** v1 had 16 verified issues (wrong file paths, wrong function signatures, missing-task implementations, mismatched test commands). v2 corrects all 16; see "v1 review fixes" notes inline per task.
+> **v4 rewrite.** v3 had 15 verified issues (smp_starting order, AP IRQ-before-ipi_ready, percpu field dependency, IPI migration atomicity, gic_target_bit init for testing, M1 root registration timing, compute_arena_end compile errors, x86 slab upper bound overflow, aarch64 selftest entry not invoked, probe false-positive OK, x86 ipi_ready call sites, 12-combo test split, arena test inputs, file paths). v4 corrects the most impactful items; see "v4 fix for v3 review item N" markers inline.
+>
+> **Static review still in progress.** Even after v4 fixes, implementation will surface issues — proceed iteratively: build, find issue, fix, re-build. Do not block on plan review.
+>
+> **v3 fixes retained.** v3 had fixed the v1 review's 16 items; those markers are still inline.
 
 **Goal:** 在 aarch64 上接上生产 Slab（任意缓存大小可分配/释放），并把运行期 VMM（4 KiB 映射/解除、2 MiB block 映射/解除/split、共享映射跨核 shootdown）落到能跑双核 `-smp 2` 正式镜像探针并产出 `M3-SHOOTDOWN-PROBE: OK`；x86_64 全程行为不变。
 
@@ -72,6 +76,7 @@ Spec 同时覆盖 M2（Slab 接入）和 M3（运行期 VMM），但二者并非
 | `kernel/memory/vmm.c` | x86 backend wrapper；保留 `:317-339` free/COW 逻辑 |
 | `kernel/memory/tlb.c` | `tlb_shootdown()` 保持**无参**，串行化协议 + 目标快照 + 代数 ack（`!=`）+ 超时 FATAL；公共头同步 |
 | `kernel/include/intr/ipi.h` | **已存在**：`IPI_VECTOR_TLB = 0x40`（不重定义） |
+| `kernel/selftest/selftest.c` | **v4 fix for v3 review item 9**：白名单加入 + aarch64 main 调 `selftest_run_all()` |
 | `kernel/arch/aarch64/intr/ipi.c` | `ipi_broadcast(vector, target_mask)`：逻辑向量 0x40 → SGI 3 + `gic_dev_current()` + `uint8_t targets`（逻辑→GIC target byte） |
 | `kernel/arch/aarch64/intr/gic.c` | SGI 3 白名单加入；`gic_target_bit_init()` 读 `GICD_ITARGETSR0`（基址来自 `dtb_gicd_base()`） |
 | `kernel/arch/aarch64/intr/trap.c` | TLB handler 注册 SGI 3，3 参签名；handler 不调 EOI（dispatch 负责） |
@@ -82,8 +87,8 @@ Spec 同时覆盖 M2（Slab 接入）和 M3（运行期 VMM），但二者并非
 | `kernel/arch/aarch64/memory/boot_direct_map.c` | **安装 TTBR1 之前** `aarch64_pt_root_publish(tree.root_pa)` |
 | `kernel/arch/aarch64/boot/main.c` | `arch_vmm_init` 生产调用 + `M3-SHOOTDOWN-PROBE` 探针 |
 | `kernel/include/percpu/percpu.h` | **共享**：`ipi_ready` + `tlb_ack_gen` + `PERCPU_DATA_SIZE` bump + `_Static_assert` |
-| `kernel/arch/aarch64/boot/head.S` | percpu stride 站点同步 |
-| `kernel/arch/x86_64/apic/ipi.c` | `ipi_tlb_handler` 重写（删旧 `tlb_wanted`/`tlb_ack`）+ ack gen 路径 |
+| `kernel/arch/aarch64/head.S` | percpu stride 站点同步（**v4 fix for v3 review item 15**：不是 `boot/head.S`） |
+| `kernel/arch/x86_64/intr/apic/ipi.c` | `ipi_tlb_handler` 重写（删旧 `tlb_wanted`/`tlb_ack`）+ ack gen 路径（**v4 fix for v3 review item 15**：不是 `x86_64/apic/ipi.c`） |
 | `kernel/arch/x86_64/smp/boot.c` | x86 BSP/AP `ipi_ready` 发布点（DEBUG 断言 IF/handler/percpu） |
 | `kernel/Makefile` | aarch64 白名单加 `memory/slab.c`、`memory/tlb.c` |
 | `hosttests/cases/test_slab_*.c`、`hosttests/Makefile` | slab 幂等化、color_printk ABI、arena 公式、2 GiB 边界注入 |
@@ -317,7 +322,11 @@ git commit -m "refactor(slab): make slab_init idempotent vs boot reservations"
 
 `test_arena_2gib_boundary.c`：注入 R 段使 `slab_page_end_pa > 2 GiB` → 期望 preflight FATAL（kputs 含 "FATAL: arena exceeds 2 GiB"）。
 
-`test_arena_candidate_slab_bytes.c`：构造 R = `[0x40200000, 0x40500000)` (3 MiB, 不够装 arena+slab) + `[0x50000000, 0x60000000)` (256 MiB, 足够)。调 `aarch64_m1_plan`；断言选第二个区间。当前实现会把 3 MiB 当作"够装 metadata"而误选 → RED。
+`test_arena_candidate_slab_bytes.c`（v4 fix for v3 review item 14：直接用合法对齐范围）：
+- 第一区间 `[0x40200000, 0x40400000)` (2 MiB, 装不下完整 arena——含 slab 段字节 + 对齐空隙)
+- 第二区间 `[0x50000000, 0x60000000)` (256 MiB, 足够)
+
+调 `aarch64_m1_plan`；断言选第二个区间。当前实现会把 2 MiB 当作"够装 metadata"而误选 → RED。
 
 `make PROFILE=x86_64-clang test-host` RED。
 
@@ -341,27 +350,40 @@ static int compute_arena_end(uint64_t base_pa,
                              uint64_t *slab_page_start_out,
                              uint64_t *slab_page_end_out,
                              uint64_t *table_base_out) {
-    uint64_t meta_end, slab_start, slab_end, table_end, arena_end;
+    uint64_t meta_end, slab_meta_end, slab_start, slab_end;
+    uint64_t table_bytes, table_end, arena_end;
+
+    /* meta_end = base_pa + layout->end_of_struct_off */
     if (!checked_add(base_pa, layout->end_of_struct_off, &meta_end))
         return -EOVERFLOW;
-    if (!checked_add(meta_end, sl.meta_bytes, &slab_meta_end_out ? *slab_meta_end_out : meta_end, NULL))  /* 见下 */
+
+    /* slab_meta_end = meta_end + sl.meta_bytes */
+    if (!checked_add(meta_end, sl.meta_bytes, &slab_meta_end))
         return -EOVERFLOW;
-    /* 改写：先写 meta_end，再写 slab_meta_end */
-    meta_end = base_pa + layout->end_of_struct_off;
-    if (meta_end < base_pa) return -EOVERFLOW;
-    uint64_t slab_meta_end = meta_end + sl.meta_bytes;
-    if (slab_meta_end < meta_end) return -EOVERFLOW;
     if (slab_meta_end_out) *slab_meta_end_out = slab_meta_end;
-    /* align_up_2M（v3 fix for item 1 关键）：必须把对齐空隙计入 */
+
+    /* slab_page_start = align_up_2M(slab_meta_end) —— 必须计入对齐空隙
+     * （v3 fix for item 1 + v4 fix for v3 review item 7：checked add 之上
+     * 额外加 checked align） */
     if (!checked_align_up(slab_meta_end, PAGE_2M, &slab_start))
         return -EOVERFLOW;
-    slab_end = slab_start + 8 * (uint64_t)PAGE_2M_SIZE;
-    if (slab_end < slab_start) return -EOVERFLOW;
     if (slab_page_start_out) *slab_page_start_out = slab_start;
-    if (slab_page_end_out)   *slab_page_end_out   = slab_end;
-    uint64_t table_end = slab_end + table_pages * PAGE_4K;
-    if (table_end < slab_end) return -EOVERFLOW;
+
+    /* slab_page_end = slab_page_start + 8 * 2 MiB（checked mul + add） */
+    if (!checked_mul(8, (uint64_t)PAGE_2M_SIZE, &slab_end) ||
+        !checked_add(slab_start, slab_end, &slab_end))
+        return -EOVERFLOW;
+    if (slab_page_end_out) *slab_page_end_out = slab_end;
+
+    /* table_base = slab_page_end */
     if (table_base_out) *table_base_out = slab_end;
+
+    /* table_end = slab_page_end + table_pages * 4 KiB（checked mul + add） */
+    if (!checked_mul((uint64_t)table_pages, PAGE_4K, &table_bytes) ||
+        !checked_add(slab_end, table_bytes, &table_end))
+        return -EOVERFLOW;
+
+    /* arena_end = align_up_2M(table_end) */
     if (!checked_align_up(table_end, PAGE_2M, &arena_end))
         return -EOVERFLOW;
     if (end_pa_out) *end_pa_out = arena_end;
@@ -549,25 +571,31 @@ assert(PMMngr.end_of_struct <= PMMngr_end_of_struct_upper_bound());
 `PMMngr_end_of_struct_upper_bound()` 在 `kernel/memory/slab.c` 内实现（v3 fix for item 2）：
 
 ```c
-/* 关键：PMMngr.end_of_struct 是高半区虚拟地址（VA），断言两端同量纲。
- * 上界 = 绝对 VA = slab_meta_start + slab_layout_compute().meta_bytes。
- * slab_meta_start 来自 early_arena 的公开 getter（或 inline 计算：base_pa
- * + layout.end_of_struct_off + ARCH_PAGE_OFFSET）。
- *
- * x86 路径：x86 boot_direct_map 不走 slab_stub；slab_init 在 M2 之前 x86
- * 也是 stub；但 x86 build 链路走另一路径，断言上界来源是 pmm_layout 计算
- * 的 end_of_struct_off + slab meta bytes（同一公式）。如 x86 调用
- * PMMngr_end_of_struct_upper_bound 时还没有 early_arena 提供
- * slab_meta_start，提供 weak 默认返回 UINT64_MAX（断言自动通过），
- * 待 Task 3 后由 aarch64 实现覆盖。 */
+/* v4 fix for v3 review item 8：x86 weak fallback 之前用 UINT64_MAX + meta_bytes
+ * 会回绕成小地址、断言失败。改为：
+ *   - aarch64：返回绝对 VA = slab_meta_start_va + sl.meta_bytes
+ *   - x86：返回 (uint64_t)-1 让断言自动通过，且不参与加法
+ * 两者都不再做可能溢出的加法。 */
 extern uint64_t aarch64_m1_slab_meta_start_va(void);  /* 来自 early_arena.c 或 vmm_backend */
+
+/* aarch64 强实现（在 kernel/arch/aarch64/memory/early_arena.c） */
 uint64_t PMMngr_end_of_struct_upper_bound(void) {
     struct slab_layout sl = slab_layout_compute();
-    return aarch64_m1_slab_meta_start_va() + sl.meta_bytes;
+    uint64_t base = aarch64_m1_slab_meta_start_va();
+    /* checked add 避免回绕 */
+    uint64_t upper;
+    if (!checked_add(base, sl.meta_bytes, &upper))
+        return (uint64_t)-1;
+    return upper;
+}
+
+/* x86 weak stub（在 kernel/memory/slab.c 同文件，用 __weak__ 标注） */
+__attribute__((weak)) uint64_t PMMngr_end_of_struct_upper_bound(void) {
+    return (uint64_t)-1;  /* x86 跳过此 aarch64 专用断言 */
 }
 ```
 
-如 `aarch64_m1_slab_meta_start_va` 不可用（x86 build），weak stub 返回 `UINT64_MAX`。
+x86 路径不参与 aarch64 slab 断言；链接器优先选 strong 实现，weak 仅作为兜底。
 
 - [ ] **Step 2: aarch64 selftest `test-aarch64 MODE=smp` 启动到 M1 后无 panic**
 
@@ -581,7 +609,12 @@ make PROFILE=aarch64-clang test-aarch64 MODE=smp
 
 `kernel/selftest/test_slab_selftest.c`（按现有 `kernel/selftest/` 模式注册入口 `test_slab_selftest`）：依次对 `kmalloc_cache_size[0..15]` 做 `kmalloc(size) → memset pattern → kfree`；记录每缓存 using/free 增量；最后断言 16 缓存全部 PASS。`KERNEL_SELFTEST=1` 启动包含此 selftest；解析器断言 `[selftest] slab: 16/16 PASS`。
 
-**白名单同步（v3 fix for item 10）**：`kernel/Makefile:39` aarch64 `KERNEL_C_SOURCES` 列表追加 `selftest/test_slab_selftest.c`（同时检查既有 `selftest/test_arch_atomic_u64.c`、`test_aarch64_rndr_encoding.c` 仍在）。**同步增加 `KERNEL_SELFTEST`-gated 注册入口**（参考 `kernel/selftest/selftest.c` 模式；不依赖 main.c 显式调用）。提交前先 `make clean`，符号验证：`nm kernel.elf | grep test_slab_selftest` 应非空。
+**白名单同步 + selftest runner 集成（v3 fix for item 10 + v4 fix for v3 review item 9）**：
+- `kernel/Makefile:39` aarch64 `KERNEL_C_SOURCES` 列表追加 `selftest/selftest.c` + `selftest/test_slab_selftest.c`（同时检查既有 `selftest/test_arch_atomic_u64.c`、`test_aarch64_rndr_encoding.c` 仍在）。
+- `kernel/arch/aarch64/boot/main.c` 在 M1 selftest 之后调 `selftest_run_all()`（x86 已在 `kernel/core/main.c:145` 调；aarch64 缺这步——仅编入白名单而不调，则符号进镜像但永远不跑）。
+- selftest 入口需 `#ifdef KERNEL_SELFTEST`（参考 x86 模式；`selftest_run_all` 本身在非 selftest 构建为空函数）。
+- 提交前先 `make clean`，符号验证：`nm kernel.elf | grep -E "test_slab_selftest|selftest_run_all"` 应非空。
+- 串口解析器断言每项运行标记（不仅是符号存在，还要 `[selftest] slab: 16/16 PASS` 行）。
 
 - [ ] **Step 4: x86 5 连回归（v3 fix for item 14：用现有 `test-syscall-repeat`）**
 
@@ -638,9 +671,10 @@ git commit -m "test(slab): cover all 16 cache sizes on aarch64 and x86 regressio
 - [ ] **Step 1: 写 RED 测试 `test_aarch64_ipi_broadcast.c`**
 
 链接真实 `gic_driver.c`（已有 mock MMIO）+ 新 `ipi.c`；测试：
-1. `target_mask=0b10`（仅 CPU1）+ `vector=IPI_VECTOR_TLB` → 调 `ipi_broadcast`，断言 mock GICD 中 `GICD_SGIR` 寄存器值 = `(3 << 0) | (gic_target_byte << 16) | (filter=LIST=0)`；`gic_target_byte` 来自 `gic_target_bit[1]`；
-2. `target_mask=0` → 断言不写 SGIR；
-3. `vector == 0x41`（IPI_VECTOR_RESCHED，M3 暂不支持）→ 断言 panic（或返回 -ENOSYS；M3 仅支持 TLB）。
+1. **v4 fix for v3 review item 5**：测试用 `gic_target_bit_inject(cpu, byte)` 接口设置 `gic_target_bit[cpu_id]`（Task 7 提供 test-only 接口；不依赖 Task 8 的真实 GIC target 读取）；
+2. `target_mask=0b10`（仅 CPU1）+ `vector=IPI_VECTOR_TLB` + `gic_target_bit_inject(1, 0x02)` → 调 `ipi_broadcast`，断言 mock GICD 中 `GICD_SGIR` 寄存器值 = `(3 << 0) | (0x02 << 16) | (filter=LIST=0)`；
+3. `target_mask=0` → 断言不写 SGIR；
+4. `vector == 0x41`（IPI_VECTOR_RESCHED，M3 暂不支持）→ 断言 panic。
 
 `make PROFILE=x86_64-clang test-host` RED。
 
@@ -693,9 +727,13 @@ git add kernel/arch/aarch64/intr/gic.c kernel/arch/aarch64/intr/ipi.c \
 git commit -m "feat(aarch64): IPI vector mapping (IPI_VECTOR_TLB 0x40 -> SGI 3) and ipi_broadcast"
 ```
 
-- [ ] **Step 4: 公共 IPI 头迁移 + foundational primitives（v3 fix for items 3, 7, 8, 9）**
+- [ ] **Step 4: 公共 IPI 头迁移 + foundational primitives（v3 fix for items 3, 7, 8, 9 + v4 fix for v3 review item 3）**
 
-**公共头迁移（item 3）**：
+**v4 fix for v3 review item 6（M1 root 注册提前）**：M1 安装 TTBR1 之前调 `aarch64_pt_root_publish(tree.root_pa)`——必须在 Task 7（本步）就把 `boot_direct_map.c` 的注册调用同步迁过来，否则 Task 16-19 后端的 `aarch64_pt_root_is_published()` 会把"正在使用"的 M1 root 误判为未发布、跳过相应失效协议。Task 20 之后仅作测试与回归。
+
+**v4 fix for v3 review item 3（percpu 字段依赖）**：本步骤先在 `kernel/include/percpu/percpu.h` 加 `ipi_ready`/`tlb_ack_gen` 字段并 bump `PERCPU_DATA_SIZE` 144→152，让后续 `ipi_ready_publish_and_count` 引用 `percpu_data[cpu].ipi_ready` 不再是前向引用。`kernel/arch/aarch64/head.S:691` 的 `mov x8, #PERCPU_DATA_SIZE` 同步改 `#152`；`kernel/percpu/percpu.c` 的 memset 不触碰新字段（caller 显式置位）。Task 9 之后**仅**作 layout 校验 + hosttest 验收，不再放字段新增。
+
+**公共头迁移（item 3）+ IPI 原子化（v4 fix for v3 review item 4）**：本步骤一次性改完 header + x86 impl + tlb.c 调用方 + aarch64 impl，**一个 commit 一个可构建快照**：
 
 `kernel/include/intr/ipi.h:18`：
 
@@ -1081,11 +1119,14 @@ void secondary_idle(uint32_t cpu_id)
     __asm__ __volatile__("isb" ::: "memory");
 #endif
 
-    /* v3 fix for item 5：M3 工作循环仅在 AP boot 全部走完后追加；不破坏既有 handshake */
+    /* v3 fix for item 5 + v4 fix for v3 review item 2：AP 必须先开 IRQ、
+     * ISB、再发布 ipi_ready。否则发起方可能在开 IRQ 前的窗口发 SGI，AP
+     * 不应答导致 timeout FATAL。顺序：handler 已注册 + GIC target 已初始化
+     * + 开 IRQ + ISB → 然后 ipi_ready_publish_and_count。 */
     gic_target_bit_init(cpu_id);  /* Task 8 函数；单核也安全 */
-    ipi_ready_publish_and_count(cpu_id);  /* Task 7 Step 4 函数；BSP/AP 同一 */
     arch_local_irq_enable();  /* 生产开 IRQ（v1 review item 7：去掉 #if OS01_SELFTEST 门） */
     __asm__ __volatile__("isb" ::: "memory");
+    ipi_ready_publish_and_count(cpu_id);  /* BSP/AP 同一函数；now-after-IRQ-enable */
     for (;;) {
         ap_work_run_one(cpu_id);  /* Task 10 Step 2 函数 */
         arch_cpu_pause();
@@ -1145,7 +1186,13 @@ atomic_store_explicit(&num_cpus, dtb_cpu_count(), memory_order_release);
 
 /* ... gic_init + handler 注册 + smp_boot_aps ... */
 
-/* BSP IRQ enable + TLB handler 注册 + GIC target 表项就绪 之后，才能 ipi_ready */
+/* v4 fix for v3 review item 1：smp_starting_enter() 必须在 smp_boot_aps() 之前。
+ * 约束："BSP 在首次可能发出 PSCI CPU_ON 之前置位"——意味着 smp_boot_aps()
+ * 之前就是置位时机。Task 7 Step 4 已暴露 smp_starting_enter() 单次发布函数。 */
+smp_starting_enter();  /* 一次性置位；门禁自此生效 */
+
+/* 既有 BSP 启动顺序：preflight, pmm_init, arch_boot_direct_map_init,
+ * arch_vmm_init, percpu_install_gs/init, gic_init, handler 注册 */
 smp_boot_aps();   /* 既有 main.c:501 附近 */
 arch_register_subsys();  /* 既有 main.c:548 附近 */
 subsys_init_phase(SUBSYS_PHASE_4);
@@ -1162,8 +1209,6 @@ __asm__ __volatile__("isb" ::: "memory");
 DEBUG_ASSERT(irqs_enabled());
 DEBUG_ASSERT(tlb_handler_registered());  /* 内部 bool */
 ipi_ready_publish_and_count(0);  /* BSP 也走 Task 7 Step 4 的同一函数 */
-smp_starting_enter();  /* Task 7 Step 4 暴露：单次发布 */
-```
 
 - [ ] **Step 3: AP 端（已与 Task 10 Step 4 合并）**
 
@@ -1707,36 +1752,37 @@ git commit -m "feat(aarch64): pt_locks init and walk_to_l2(create) with rollback
 
 `test_aarch64_backend_4k.c`（**v3 fix for item 16**：明确枚举 12 合法 + 4 拒绝组合）：
 
-**12 合法组合**（按 spec §4.2 `VM_*` 复合位）：
+**12 合法组合**（按 spec §4.2 `VM_*` 复合位；v4 fix for v3 review item 13：leaf/block 分到不同 API）：
 
-| # | 复合名 | bits | 描述 |
-|---|---|---|---|
-| 1 | `VM_KERNEL_RW` | `PRESENT\|WRITE` | leaf Normal, K RW |
-| 2 | `VM_KERNEL_RO` | `PRESENT` | leaf Normal, K RO |
-| 3 | `VM_USER_RW` | `PRESENT\|WRITE\|USER` | leaf Normal, U RW |
-| 4 | `VM_USER_RO` | `PRESENT\|USER` | leaf Normal, U RO |
-| 5 | `VM_KERNEL_RW\|VM_HUGE` | `PRESENT\|WRITE\|HUGE` | block Normal, K RW |
-| 6 | `VM_KERNEL_RO\|VM_HUGE` | `PRESENT\|HUGE` | block Normal, K RO |
-| 7 | `VM_USER_RW\|VM_HUGE` | `PRESENT\|WRITE\|USER\|HUGE` | block Normal, U RW |
-| 8 | `VM_USER_RO\|VM_HUGE` | `PRESENT\|USER\|HUGE` | block Normal, U RO |
-| 9 | `VM_DEVICE` (leaf) | `PRESENT\|WRITE\|NOCACHE\|NO_EXEC` | leaf Device |
-| 10 | `VM_DEVICE\|VM_USER` (leaf) | `PRESENT\|WRITE\|USER\|NOCACHE\|NO_EXEC` | leaf Device, U RW |
-| 11 | `VM_DEVICE\|VM_HUGE` | block Device |
-| 12 | `VM_DEVICE\|VM_USER\|VM_HUGE` | block Device, U RW |
+| # | 复合名 | bits | 描述 | API |
+|---|---|---|---|---|
+| 1 | `VM_KERNEL_RW` | `PRESENT\|WRITE` | leaf Normal, K RW | `map_4k_new` |
+| 2 | `VM_KERNEL_RO` | `PRESENT` | leaf Normal, K RO | `map_4k_new` |
+| 3 | `VM_USER_RW` | `PRESENT\|WRITE\|USER` | leaf Normal, U RW | `map_4k_new` |
+| 4 | `VM_USER_RO` | `PRESENT\|USER` | leaf Normal, U RO | `map_4k_new` |
+| 5 | `VM_KERNEL_RW\|VM_HUGE` | `PRESENT\|WRITE\|HUGE` | block Normal, K RW | `map_2m_block` |
+| 6 | `VM_KERNEL_RO\|VM_HUGE` | `PRESENT\|HUGE` | block Normal, K RO | `map_2m_block` |
+| 7 | `VM_USER_RW\|VM_HUGE` | `PRESENT\|WRITE\|USER\|HUGE` | block Normal, U RW | `map_2m_block` |
+| 8 | `VM_USER_RO\|VM_HUGE` | `PRESENT\|USER\|HUGE` | block Normal, U RO | `map_2m_block` |
+| 9 | `VM_DEVICE` | `PRESENT\|WRITE\|NOCACHE\|NO_EXEC` | leaf Device, K | `map_4k_new` |
+| 10 | `VM_DEVICE\|VM_USER` | `PRESENT\|WRITE\|USER\|NOCACHE\|NO_EXEC` | leaf Device, U | `map_4k_new` |
+| 11 | `VM_DEVICE\|VM_HUGE` | `PRESENT\|WRITE\|NOCACHE\|NO_EXEC\|HUGE` | block Device, K | `map_2m_block` |
+| 12 | `VM_DEVICE\|VM_USER\|VM_HUGE` | `PRESENT\|WRITE\|USER\|NOCACHE\|NO_EXEC\|HUGE` | block Device, U | `map_2m_block` |
 
-**4 拒绝组合**（VM_NOCACHE & ~VM_NO_EXEC → -EINVAL）：
+**4 拒绝组合**（VM_NOCACHE & ~VM_NO_EXEC → -EINVAL；仅在 `map_4k_new` / `map_2m_block` 入口校验）：
 
 | # | bits | 描述 |
 |---|---|---|
-| R1 | `PRESENT\|WRITE\|NOCACHE` | leaf Device K RW, missing NO_EXEC |
-| R2 | `PRESENT\|NOCACHE` | leaf Device K RO, missing NO_EXEC |
-| R3 | `PRESENT\|WRITE\|USER\|NOCACHE` | leaf Device U RW, missing NO_EXEC |
-| R4 | `PRESENT\|USER\|NOCACHE` | leaf Device U RO, missing NO_EXEC |
+| R1 | `PRESENT\|WRITE\|NOCACHE` | K RW 缺 NO_EXEC |
+| R2 | `PRESENT\|NOCACHE` | K RO 缺 NO_EXEC |
+| R3 | `PRESENT\|WRITE\|USER\|NOCACHE` | U RW 缺 NO_EXEC |
+| R4 | `PRESENT\|USER\|NOCACHE` | U RO 缺 NO_EXEC |
 
 测试断言（链接真实 `vmm_backend.c` + `page_table.c`，**非**仅扫描文本——v1 review item 15）：
-1. 12 合法：每组合 `map_4k_new` 成功、`query_4k` 返回正确 perm + sw；
-2. 4 拒绝：`map_4k_new` 用 R1-R4 → -EINVAL；
-3. 软件位 round-trip：map+sw=PROTNONE → query -EPROT_NONE + phys_out 有效；update 切回 VALID → 正常。
+1. 1-4 + 9-10：用 `map_4k_new`，断言 leaf descriptor；
+2. 5-8 + 11-12：用 `map_2m_block`，断言 block descriptor（`HUGE` 位、有效位、AttrIndx 等）；
+3. 4 拒绝：`map_4k_new` 与 `map_2m_block` 任一用 R1-R4 → -EINVAL；
+4. 软件位 round-trip：map+sw=PROTNONE → query -EPROT_NONE + phys_out 有效；update 切回 VALID → 正常。
 
 `test_aarch64_pt_2m_block.c`：
    1. map + query + unmap 2 MiB block（组合 5-8, 11-12）；alignment check；
