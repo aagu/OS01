@@ -23,6 +23,7 @@
 #include <stddef.h>
 #include <rbtree.h>
 #include <sys/random.h>
+#include <sys/socket.h>
 #include <sys/mman.h>
 #include <sys/ssp.h>
 
@@ -68,6 +69,36 @@ static void test_putchar(void)
 {
     int64_t ret = syscall(SYS_putchar, (uint64_t)'X', 0, 0);
     CHECK3(ret >= 0, "putchar", "no crash");
+}
+
+// ── Network syscall boundary checks ─────────────────────────
+// Use the six-argument entry directly so sendto's destination and
+// addrlen arrive in arguments five and six at the common dispatcher.
+static void test_sendto_user_boundaries(void)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        FAIL("sendto user boundaries (UDP socket setup)");
+        return;
+    }
+
+    char payload = 'x';
+    int64_t bad_pointer = syscall6(SYS_sendto, (uint64_t)fd,
+                                   (uint64_t)&payload, sizeof(payload), 0,
+                                   1, sizeof(struct sockaddr_in));
+    CHECKF(bad_pointer == -EFAULT, "sendto invalid sockaddr pointer",
+           "%lld", "%lld", (long long)bad_pointer);
+
+    struct sockaddr_in destination = { 0 };
+    destination.sin_family = AF_INET;
+    int64_t short_length = syscall6(SYS_sendto, (uint64_t)fd,
+                                    (uint64_t)&payload, sizeof(payload), 0,
+                                    (uint64_t)&destination,
+                                    sizeof(destination) - 1);
+    CHECKF(short_length == -EFAULT, "sendto short sockaddr length",
+           "%lld", "%lld", (long long)short_length);
+
+    close(fd);
 }
 
 // ── 1: write ───────────────────────────────────────────────
@@ -3869,6 +3900,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"signal handler sync", test_signal_handler_sync},
     {"poll",               test_poll},
     {"putchar",           test_putchar},
+    {"sendto user boundaries", test_sendto_user_boundaries},
     {"write",             test_write},
     {"brk",               test_brk},
     {"getpid/getppid",    test_getpid_getppid},
