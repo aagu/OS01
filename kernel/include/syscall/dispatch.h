@@ -11,4 +11,5 @@ typedef struct syscall_ctx {
 typedef int64_t (*syscall_handler_t)(syscall_ctx_t *ctx);
 bool syscall_has_handler(uint64_t nr);
 int64_t syscall_dispatch(syscall_ctx_t *ctx);
+const char *syscall_name(uint64_t nr);
 #endif

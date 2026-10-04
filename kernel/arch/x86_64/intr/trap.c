@@ -21,52 +21,12 @@
 #include <errno.h>
 #include <uapi/syscall.h>
 #include <syscall/dispatch.h>
-#include <sys/stat.h>
 #include <string.h>
 typedef int pid_t;
-#include <termios.h>
-#include <tty/tty.h>
-#include <stdlib.h>
-#include <fs/vfs.h>
-#include <fs/devfs.h>
 #include <core/debug.h>
-#include <memory/uaccess.h>   // strnlen_user, copy_from_user_ft, VFS_NAME_MAX
-#include <fs/file.h>
-#include <fs/poll.h>     // struct pollfd, do_poll()
-#include <fs/select.h>   // sigset_t, do_select(), do_pselect6()
-#include <time/timer.h>
-#include <arch/x86_64/clocksource.h>  // clocksource_read_ns()
-#include <uapi/time.h>
+#include <memory/uaccess.h>
 #include <kernel.h>
 #include <memory/vma.h>
-#include <sys/random.h>   // GRND_NONBLOCK, GRND_RANDOM (for SYS_getrandom)
-#include <random/random.h>  // get_random_bytes(), RANDOM_MAX_LEN
-#include <uapi/futex.h>
-#include <sync/futex.h>
-// ── Local signal constants (kernel has its own signal.h) ──
-#ifndef SIG_BLOCK
-#define SIG_BLOCK    0
-#define SIG_UNBLOCK  1
-#define SIG_SETMASK  2
-#endif
-
-// ── User address translation ─────────────────────────────────
-// Walk the user page table to resolve a user-space virtual
-// address to its physical address.  Returns 0 on failure.
-// The caller passes Phy_To_Virt(result) to get a kernel pointer.
-uint64_t user_va_to_phys(uint64_t *pgd, uint64_t va)
-{
-    size_t l4 = (va >> PAGE_PGD_SHIFT) & 0x1ff;
-    size_t l3 = (va >> PAGE_1G_SHIFT) & 0x1ff;
-    size_t l2 = (va >> PAGE_2M_SHIFT) & 0x1ff;
-    if (!(pgd[l4] & PAGE_VALID)) return 0;
-    uint64_t *pud = (uint64_t *)Phy_To_Virt(pgd[l4] & PAGE_4K_MASK);
-    if (!(pud[l3] & PAGE_VALID)) return 0;
-    uint64_t *pmd = (uint64_t *)Phy_To_Virt(pud[l3] & PAGE_4K_MASK);
-    if (!(pmd[l2] & PAGE_VALID)) return 0;
-    return (pmd[l2] & PAGE_2M_MASK & ~PAGE_NO_EXEC) | (va & 0x1FFFFF);
-}
-
 // ── Helper: find the current task from TSS.rsp0 ──────────────
 // Safe to call from IST exception stacks where get_current_task()
 // (RSP masking) returns garbage.
@@ -1149,7 +1109,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         int8_t os = linux_to_os01[regs->rax];
         // `> 0` not `>= 0`: no Linux syscall in the table maps to OS01
         // putchar (0), so os == 0 always means "zero-filled unmapped entry"
-        // and must fall through untranslated -> switch default -> -EINVAL
+        // and must fall through untranslated -> dispatcher default -> -EINVAL
         // (the kernel's default for any unknown syscall; Linux's -ENOSYS
         // convention for the ABI path is a separate pre-existing gap);
         // os == -1 is the explicit unsupported sentinel (also falls through).
@@ -1162,95 +1122,15 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
                   regs->r10, regs->r8, regs->r9 },
         .arch_frame = regs,
     };
-    if (syscall_has_handler(syscall_ctx.nr)) {
-        int64_t result = syscall_dispatch(&syscall_ctx);
-        if (!syscall_ctx.suppress_writeback)
-            regs->rax = (uint64_t)result;
-    } else {
-    switch (regs->rax) {
-    // ── Syscall name table (for strace) ─────────────────────
-    static const char *syscall_names[75] = {
-        [0]  = "putchar",
-        [1]  = "write",
-        [2]  = "exit",
-        [3]  = "brk",
-        [4]  = "getpid",
-        [5]  = "exec",
-        [6]  = "read",
-        [7]  = "open",
-        [8]  = "close",
-        [9]  = "dup",
-        [10] = "dup2",
-        [11] = "fork",
-        [12] = "waitpid",
-        [13] = "signal",
-        [14] = "chdir",
-        [15] = "getcwd",
-        [16] = "stat",
-        [17] = "fstat",
-        [18] = "lseek",
-        [19] = "mkdir",
-        [20] = "ioctl",
-        [21] = "getdents64",
-        [22] = "access",
-        [23] = "unlink",
-        [24] = "mkdir",
-        [25] = "rmdir",
-        [26] = "readlink",
-        [27] = "rename",
-        [31] = "nanosleep",
-        [34] = "times",
-        [35] = "uname",
-        [36] = "getppid",
-        [38] = "kill",
-        [39] = "rt_sigaction",
-        [42] = "sigprocmask",
-        [43] = "sigreturn",
-        [45] = "poweroff",
-        [47] = "futex",
-        [48] = "poll",
-        [49] = "ppoll",
-        [50] = "select",
-        [51] = "pselect6",
-        [52] = "socket",
-        [53] = "bind",
-        [54] = "connect",
-        [55] = "listen",
-        [56] = "accept",
-        [57] = "sendto",
-        [58] = "recvfrom",
-        [59] = "setsockopt",
-        [60] = "getsockopt",
-        [61] = "getsockname",
-        [62] = "getpeername",
-        [63] = "getifaddr",
-        [64] = "shutdown",
-        [65] = "clock_gettime",
-        [66] = "getrandom",
-        [67] = "setpgid",
-        [68] = "getpgid",
-        [69] = "setsid",
-        [70] = "getsid",
-        [71] = "symlink",
-        [72] = "readlink",
-        [73] = "lstat",
-        [74] = "fstatat",
-    };
-    const char *sname = (regs->rax < 75 && syscall_names[regs->rax])
-                        ? syscall_names[regs->rax] : "?";
-    (void)sname;
+    const char *sname = syscall_name(syscall_ctx.nr);
     debug_syscall("[strace] pid=%d syscall(%s, arg1=%#lx, arg2=%#lx, arg3=%#lx)\n",
-                  (int)current->pid, sname,
+                  (int)current->pid, sname ? sname : "?",
                   (unsigned long)regs->rdi,
                   (unsigned long)regs->rsi,
                   (unsigned long)regs->rdx);
-    default:
-        log_err("syscall: unknown nr=%d from pid=%d\n",
-                (int)regs->rax, (int)current->pid);
-        regs->rax = -EINVAL;
-        break;
-    }
-    }
+    int64_t result = syscall_dispatch(&syscall_ctx);
+    if (!syscall_ctx.suppress_writeback)
+        regs->rax = (uint64_t)result;
 
     // ── Signal delivery ──────────────────────────────────────
     // Runs after every syscall that returns to user mode.

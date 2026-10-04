@@ -58,25 +58,29 @@ System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`
 | 49 | `SYS_ppoll` | rdi=fds, rsi=nfds, rdx=tsp, r10=sigmask | Poll with signal mask |
 | 50 | `SYS_select` | rdi=nfds, rsi=readfds, rdx=writefds, r10=exceptfds, r8=timeout | Synchronous I/O multiplexing |
 | 51 | `SYS_pselect6` | rdi=nfds, rsi=readfds, rdx=writefds, r10=exceptfds, r8=tsp, r9=sigmask | Select with signal mask |
-| 52 | `SYS_socket` | rdi=domain, rsi=type, rdx=protocol | Create socket（AF_INET; SOCK_STREAM/SOCK_DGRAM） |
-| 53 | `SYS_bind` | rdi=fd, rsi=sockaddr, rdx=addrlen | Bind socket to address（addrlen ≥ sizeof(sockaddr_in)） |
-| 54 | `SYS_connect` | rdi=fd, rsi=sockaddr, rdx=addrlen | Connect socket（sin_port 网络序→主机序） |
+| 52 | `SYS_socket` | rdi=domain, rsi=type, rdx=protocol | Create socket (AF_INET; SOCK_STREAM/SOCK_DGRAM) |
+| 53 | `SYS_bind` | rdi=fd, rsi=sockaddr, rdx=addrlen | Bind socket (addrlen ≥ sizeof(sockaddr_in)) |
+| 54 | `SYS_connect` | rdi=fd, rsi=sockaddr, rdx=addrlen | Connect socket (sin_port network byte order → host byte order) |
 | 55 | `SYS_listen` | rdi=fd, rsi=backlog | Listen for connections |
-| 56 | `SYS_accept` | rdi=fd | Accept connection（**简化版：不返回客户端地址**，内核传 NULL） |
-| 57 | `SYS_sendto` | rdi=fd, rsi=buf, rdx=len, r10=flags, r8=addr, r9=addrlen | Send UDP data（addr 可空=已连接套接字） |
-| 58 | `SYS_recvfrom` | rdi=fd, rsi=buf, rdx=len, r10=flags, r8=addr, r9=addrlen | Receive UDP data（回填源地址 + addrlen） |
+| 56 | `SYS_accept` | rdi=fd | Accept connection (simplified: does not return client address) |
+| 57 | `SYS_sendto` | rdi=fd, rsi=buf, rdx=len, r10=flags, r8=addr, r9=addrlen | Send UDP data (addr may be null for a connected socket) |
+| 58 | `SYS_recvfrom` | rdi=fd, rsi=buf, rdx=len, r10=flags, r8=addr, r9=addrlen | Receive UDP data (copies source address and addrlen out) |
 | 59 | `SYS_setsockopt` | rdi=fd, rsi=level, rdx=optname, r10=optval, r8=optlen | Set socket option |
 | 60 | `SYS_getsockopt` | rdi=fd, rsi=level, rdx=optname, r10=optval, r8=optlen(ptr) | Get socket option |
 | 61 | `SYS_getsockname` | rdi=fd, rsi=sockaddr, rdx=addrlen(ptr) | Get bound address |
-| 62 | `SYS_getpeername` | — | ⚠️ **已定义（NR=62）但未实现**：trap.c 无 dispatch case，kernel/net 无 do_getpeername |
-| 63 | `SYS_getifaddr` | — | **OS01 自定义扩展**：无参数，返回本机接口地址（lwIP netif IP） |
+| 62 | `SYS_getpeername` | — | Defined but unimplemented; returns `-EINVAL` |
+| 63 | `SYS_getifaddr` | — | OS01 extension: return the local interface address (lwIP netif IP) |
 | 64 | `SYS_shutdown` | rdi=fd, rsi=how | Shutdown socket |
-| 65 | `SYS_clock_gettime` | rdi=clk_id, rsi=timespec | 纳秒时间；仅支持 CLOCK_REALTIME/MONOTONIC，**两者同值**（无 RTC 墙钟，gettimeofday 返回 0） |
-| 66 | `SYS_getrandom` | rdi=buf, rsi=len, rdx=flags | 内核 ChaCha20 池；GRND_NONBLOCK/GRND_RANDOM 为语义 NOP；len>33554431 截断；未映射/只读 buffer → -EFAULT |
-| 67 | `SYS_setpgid` | rdi=pid, rsi=pgid | 设进程组；pid=0→当前，pgid=0→pgid=pid；pgid 需为 pid 自身或同 session 已存在 pgrp（v4 放宽）；caller 须为 target 或同 session；PID 1 不可改；成功且 fd0 指向控制台 TTY 时自动同步 dev_tty.fg_pgrp |
-| 68 | `SYS_getpgid` | rdi=pid | 读进程组；pid=0→当前；找不到 → -ESRCH |
-| 69 | `SYS_setsid` | — | 建新会话+进程组，caller 为 leader；已是 pgrp leader → -EBUSY；返回新 sid（= caller pid） |
-| 70 | `SYS_getsid` | rdi=pid | 返回会话 ID（当前仅返回 current->session，pid 参数暂忽略） |
+| 65 | `SYS_clock_gettime` | rdi=clk_id, rsi=timespec | Nanosecond time; supports CLOCK_REALTIME/MONOTONIC with the same value (no RTC wall clock; gettimeofday returns 0) |
+| 66 | `SYS_getrandom` | rdi=buf, rsi=len, rdx=flags | Kernel ChaCha20 pool; GRND_NONBLOCK/GRND_RANDOM are semantic no-ops; len>33554431 is truncated; unmapped/read-only buffer returns -EFAULT |
+| 67 | `SYS_setpgid` | rdi=pid, rsi=pgid | Set process group; pid=0 means current, pgid=0 means pid; caller must be target or in same session; PID 1 cannot change; successful calls synchronize the controlling TTY foreground group |
+| 68 | `SYS_getpgid` | rdi=pid | Get process group; pid=0 means current; missing PID returns -ESRCH |
+| 69 | `SYS_setsid` | — | Create a session and process group; an existing process-group leader gets -EBUSY; return new sid (= caller pid) |
+| 70 | `SYS_getsid` | rdi=pid | Return session ID (currently the pid argument is ignored) |
+| 71 | `SYS_symlink` | rdi=target, rsi=linkpath | Create symbolic link |
+| 72 | `SYS_readlink` | rdi=path, rsi=buf, rdx=bufsz | Read symbolic link contents |
+| 73 | `SYS_lstat` | rdi=path, rsi=buf | File status without following final symlink |
+| 74 | `SYS_fstatat` | rdi=dirfd, rsi=path, rdx=buf, r10=flags | File status relative to directory fd |
 
 ## Definitions
 
@@ -107,16 +111,11 @@ Higher-level libc functions (`read()`, `exec()`, etc.) call these wrappers.
 
 ## Kernel-side dispatch
 
-`kernel/arch/x86_64/intr/trap.c` — `do_system_call()`:
-- Entry via `entry.S:system_call` → `error_code:` path → `do_system_call(regs, 0)`
-- Dispatches on `regs->rax` (syscall number)
-- Arguments from `regs->rdi`, `regs->rsi`, `regs->rdx`, `regs->r10`, `regs->r8`, `regs->r9`
-- Sets `regs->rax` as return value
-- For `SYS_read` and `SYS_exec`: copies user-provided path strings to kernel heap (`strdup`) before VFS operations to prevent TOCTOU races
-- For `PF_LINUX_ABI` processes (busybox etc.): translates Linux x86_64 syscall numbers to OS01 via `linux_to_os01[320]` (expanded from `[256]`) before dispatch; Linux `getrandom` (318) → `SYS_getrandom` (66)
-- Return via `ret_from_exception` → `RESTORE_ALL` → `iretq`
+`kernel/arch/x86_64/intr/trap.c::do_system_call()` is the x86_64 entry adapter. It preserves the Linux x86_64 number translation for `PF_LINUX_ABI` processes, decodes `rax` plus `rdi/rsi/rdx/r10/r8/r9` into `syscall_ctx_t`, and calls the number-indexed table in `kernel/syscall/dispatch.c`. Each table entry keeps its handler and strace name together. `kernel/syscall/*.c` handlers consume the decoded context and stay independent of per-architecture register layouts.
 
-> ⚠️ **已定义未实现**：`SYS_getpeername`（62）在 syscall 名映射表存在但无 dispatch case（`do_getpeername` 不存在）。调用会落入默认分支返回 `-ENOSYS`。其余 70 个均有实现。
+The adapter writes the handler result to `rax` unless `sigreturn` successfully restored a saved frame and set `suppress_writeback`. After the syscall, it delivers pending signals only when the saved frame has user CPL=3. Return goes through `ret_from_exception` → `RESTORE_ALL` → `iretq`.
+
+Unimplemented and out-of-range numbers return `-EINVAL`, including defined-but-unimplemented `SYS_getpeername` (62). The UAPI table covers 0..74; 74 numbers have handlers. Changing the Linux ABI translation table, its signed 8-bit representation, or unknown-number conventions is deferred to ARCH-2.
 
 ## Known bug
 

@@ -13,7 +13,7 @@ int64_t sys_net_dispatch(syscall_ctx_t *ctx);
 int64_t sys_proc_dispatch(syscall_ctx_t *ctx);
 
 
-/* Handlers are added here as syscall families migrate out of trap.c. */
+/* The fixed UAPI number and trace name live beside their handler. */
 static const syscall_entry_t syscall_table[SYS_fstatat + 1] = {
     [SYS_write] = { sys_fs_dispatch, "write" },
     [SYS_read] = { sys_fs_dispatch, "read" },
@@ -95,6 +95,14 @@ bool syscall_has_handler(uint64_t nr)
     return nr < (uint64_t)(sizeof(syscall_table) / sizeof(syscall_table[0])) &&
            syscall_table[nr].handler != 0;
 }
+
+const char *syscall_name(uint64_t nr)
+{
+    return nr < (uint64_t)(sizeof(syscall_table) / sizeof(syscall_table[0]))
+               ? syscall_table[nr].name
+               : 0;
+}
+
 int64_t syscall_dispatch(syscall_ctx_t *ctx)
 {
     if (!ctx || !syscall_has_handler(ctx->nr))
