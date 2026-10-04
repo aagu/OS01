@@ -103,7 +103,7 @@ static void setup_mm(uint64_t elf_end)
     for (list_t *p = fixture_mm.vma_list.next;
          p != &fixture_mm.vma_list; p = p->next) {
         vma_t *v = container_of(p, vma_t, list);
-        if (v->vm_flags & VM_HEAP) { heap_vma = v; break; }
+        if (v->vm_flags & VMA_HEAP) { heap_vma = v; break; }
     }
     assert_not_null(heap_vma);
 }
@@ -771,9 +771,9 @@ static void test_heap_fault_does_not_demand_map(void)
     char *first_map = find_within(demand, tail, "alloc_4k_page");
     assert_not_null(first_map);   /* the demand block does map pages */
 
-    /* Contract 1: an explicit VM_HEAP guard sits between the start of
+    /* Contract 1: an explicit VMA_HEAP guard sits between the start of
      * the demand block and the first demand-mapping attempt. */
-    char *guard = find_within(demand, (size_t)(first_map - demand), "VM_HEAP");
+    char *guard = find_within(demand, (size_t)(first_map - demand), "VMA_HEAP");
     assert_not_null(guard);
 
     /* Contract 2: the guard is ACTIVE code — the in-flight regression

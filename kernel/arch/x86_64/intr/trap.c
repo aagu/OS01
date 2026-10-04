@@ -623,14 +623,14 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 		// error_code: bit 0=P, bit 1=W/R, bit 4=I/D
 
 		// PROT_NONE VMA -> any access is SIGSEGV
-		if (!(vma->vm_flags & (VM_READ | VM_WRITE | VM_EXEC))) {
+		if (!(vma->vm_flags & (VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC))) {
 			log_debug("PF: pid=%d cr2=%p PROTNONE\n", t->pid, cr2);
 			kill_current_user_task(regs);
 			return;
 		}
 
 		// Write protection violation (P=1, W=1)
-		if ((error_code & 0x03) == 0x03 && !(vma->vm_flags & VM_WRITE)) {
+		if ((error_code & 0x03) == 0x03 && !(vma->vm_flags & VMA_PROT_WRITE)) {
 			log_debug("PF: pid=%d cr2=%p write to RO page\n",
 			          t->pid, cr2);
 			kill_current_user_task(regs);
@@ -638,11 +638,11 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 		}
 
 		// Instruction fetch (I=1)
-		if ((error_code & 0x10) && !(vma->vm_flags & VM_EXEC)) {
+		if ((error_code & 0x10) && !(vma->vm_flags & VMA_PROT_EXEC)) {
 			kill_current_user_task(regs);
 			return;
 		}
-		// -- COW resolution (P=1, W=1, VM_WRITE is set) --
+		// -- COW resolution (P=1, W=1, VMA_PROT_WRITE is set) --
 		// For the heap VMA, take mm->lock IRQ-safely, re-check
 		// the fault address is within the COMMITTED heap range
 		// (start_brk ≤ ALIGN_UP(end_brk, 4 KiB)), then privatize
@@ -654,7 +654,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 			    (uint64_t *)Phy_To_Virt((uint64_t)t->mm->pgdir);
 			uint64_t *pte = vmm_pt_walk(user_pgd, cr2, 0, 0);
 			if (pte && (*pte & PAGE_COW)) {
-				int heap_vma = !!(vma->vm_flags & VM_HEAP);
+				int heap_vma = !!(vma->vm_flags & VMA_HEAP);
 				uint64_t lock_flags = 0;
 				if (heap_vma) {
 					lock_flags = spin_lock_irqsave(&t->mm->lock);
@@ -717,7 +717,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 		// the heap).  An absent-leaf fault in the heap range is
 		// always -EFAULT — the user will receive SIGSEGV via
 		// kill_current_user_task.  This closes the latent hole
-		// where a stale VM_HEAP VMA or a leftover 2 MiB huge
+		// where a stale VMA_HEAP VMA or a leftover 2 MiB huge
 		// leaf could re-expose unmapped heap as writable.
 		if (!(error_code & 0x01)) {
 			/* Heap VMA absent-leaf guard: mm_set_brk pre-maps
@@ -726,7 +726,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 			 * stale/foreign access — never demand-map it (the
 			 * kernel has no kernel-side demand paging for the
 			 * heap; see isolation-design.md §5.2). */
-			if (vma->vm_flags & VM_HEAP) {
+			if (vma->vm_flags & VMA_HEAP) {
 				log_debug("PF: pid=%d cr2=%p heap absent-leaf -> EFAULT\n",
 				          t->pid, cr2);
 				kill_current_user_task(regs);
@@ -736,7 +736,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 			uint64_t *user_pgd =
 			    (uint64_t *)Phy_To_Virt((uint64_t)t->mm->pgdir);
 
-			if (vma->vm_flags & VM_ANON) {
+			if (vma->vm_flags & VMA_ANON) {
 				uint64_t phys = alloc_4k_page();
 				if (!phys) {
 					log_debug("PF: pid=%d OOM\n", t->pid);
@@ -753,7 +753,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 				return;
 			}
 
-			if (vma->vm_file && !(vma->vm_flags & VM_IO)) {
+			if (vma->vm_file && !(vma->vm_flags & VMA_IO)) {
 				uint64_t phys = alloc_4k_page();
 				if (!phys) {
 					kill_current_user_task(regs);

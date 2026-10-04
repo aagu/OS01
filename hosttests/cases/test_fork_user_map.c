@@ -4,7 +4,7 @@
  * isolation plan).
  *
  * Coverage:
- *   - fork_vma_copy: deep-copies the unique VM_HEAP VMA (zero
+ *   - fork_vma_copy: deep-copies the unique VMA_HEAP VMA (zero
  *     length and grown) and file-backed VMAs (vfs_node_get).
  *   - vma_free_all: order check — clears owned leaf PTEs before
  *     vmm_free_user_map handles the rest (no double-free of
@@ -121,7 +121,7 @@ static vma_t *find_vma_at(mm_t *mm, uint64_t addr)
 
 static void test_fork_vma_copy_empty_heap_vma_survives(void)
 {
-    TEST_SUITE("fork_vma_copy — empty (zero-length) VM_HEAP survives");
+    TEST_SUITE("fork_vma_copy — empty (zero-length) VMA_HEAP survives");
 
     /* Parent: image of exactly one 4 KiB page → start_brk = 0x401000.
      * Heap VMA is zero-length [0x401000, 0x401000) per Task 3. */
@@ -129,7 +129,7 @@ static void test_fork_vma_copy_empty_heap_vma_survives(void)
     setup_child();
 
     /* Pre-condition: parent has ONE VMA — the zero-length heap VMA. */
-    vma_t *parent_heap = find_vma_with_flag(&parent_mm, VM_HEAP);
+    vma_t *parent_heap = find_vma_with_flag(&parent_mm, VMA_HEAP);
     assert_not_null(parent_heap);
     assert_eq(USER_CODE_ADDR + 0x1000, parent_heap->vm_start);
     assert_eq(USER_CODE_ADDR + 0x1000, parent_heap->vm_end);
@@ -144,7 +144,7 @@ static void test_fork_vma_copy_empty_heap_vma_survives(void)
     /* Child got exactly ONE new VMA — a deep copy of the heap VMA. */
     assert_eq(child_vmas_before + 1, vma_count_for(&child_mm));
 
-    vma_t *child_heap = find_vma_with_flag(&child_mm, VM_HEAP);
+    vma_t *child_heap = find_vma_with_flag(&child_mm, VMA_HEAP);
     assert_not_null(child_heap);
 
     /* Zero-length invariant survives: vm_start == vm_end == start_brk. */
@@ -175,7 +175,7 @@ static void test_fork_vma_copy_grown_heap_vma_survives(void)
      * Insert via vma_insert + open-coded growth to avoid pulling
      * in mm_set_brk (the heap VMA length grows with the parent's
      * end_brk in production). */
-    vma_t *parent_heap = find_vma_with_flag(&parent_mm, VM_HEAP);
+    vma_t *parent_heap = find_vma_with_flag(&parent_mm, VMA_HEAP);
     assert_not_null(parent_heap);
     parent_heap->vm_end = parent_heap->vm_start + 0x5000;  /* 5 pages */
     parent_mm.end_brk   = parent_heap->vm_end;
@@ -188,7 +188,7 @@ static void test_fork_vma_copy_grown_heap_vma_survives(void)
     fork_vma_copy(&child_mm, &parent_mm);
     assert_eq(before_vma + 1, vma_count_for(&child_mm));
 
-    vma_t *child_heap = find_vma_with_flag(&child_mm, VM_HEAP);
+    vma_t *child_heap = find_vma_with_flag(&child_mm, VMA_HEAP);
     assert_not_null(child_heap);
     assert_eq(parent_heap->vm_start, child_heap->vm_start);
     assert_eq(parent_heap->vm_end,   child_heap->vm_end);
@@ -217,7 +217,7 @@ static void test_fork_vma_copy_file_backed_vma_refs(void)
     fmv->vm_start     = 0x40000000UL;   /* auto-mmap region */
     fmv->vm_end       = 0x40001000UL;
     fmv->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
-    fmv->vm_flags     = VM_READ | VM_WRITE;
+    fmv->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE;
     fmv->vm_pgoff     = 0;
     fmv->vm_file      = &fake_node;
     vma_insert(&parent_mm, fmv);
@@ -275,7 +275,7 @@ static void test_vma_free_all_unmaps_vma_owned_pages(void)
      * vma_remove trick).  Hand-fill a PTE so vma_free_all has
      * something to unmap. */
     setup_parent(USER_CODE_ADDR + 0x1000);
-    vma_t *heap = find_vma_with_flag(&parent_mm, VM_HEAP);
+    vma_t *heap = find_vma_with_flag(&parent_mm, VMA_HEAP);
     heap->vm_end = heap->vm_start + 0x3000;   /* 3 pages */
 
     uint64_t phys1 = alloc_4k_page();
@@ -317,7 +317,7 @@ static void test_vma_free_all_cow_pages_ref(void)
     TEST_SUITE("vma_free_all — COW refcount honored (decremented to 0 → phys freed)");
 
     setup_parent(USER_CODE_ADDR + 0x1000);
-    vma_t *heap = find_vma_with_flag(&parent_mm, VM_HEAP);
+    vma_t *heap = find_vma_with_flag(&parent_mm, VMA_HEAP);
     heap->vm_end = heap->vm_start + 0x1000;
 
     uint64_t phys = alloc_4k_page();
@@ -347,11 +347,11 @@ static void test_vma_free_all_cow_pages_ref(void)
 
 static void test_vma_free_all_vmio_skips_unmap(void)
 {
-    TEST_SUITE("vma_free_all — VM_IO VMA skips unmap");
+    TEST_SUITE("vma_free_all — VMA_IO VMA skips unmap");
 
     setup_parent(USER_CODE_ADDR + 0x1000);
 
-    /* Insert a VM_IO VMA — production vma_free_all removes it
+    /* Insert a VMA_IO VMA — production vma_free_all removes it
      * without unmaping pages (the kernel-half heuristic). */
     vma_t *iov = (vma_t *)malloc(sizeof(vma_t));
     assert_not_null(iov);
@@ -359,7 +359,7 @@ static void test_vma_free_all_vmio_skips_unmap(void)
     iov->vm_start     = 0x40000000UL;
     iov->vm_end       = 0x40001000UL;
     iov->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
-    iov->vm_flags     = VM_READ | VM_WRITE | VM_IO;
+    iov->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_IO;
     iov->vm_file      = NULL;
     vma_insert(&parent_mm, iov);
 
@@ -368,7 +368,7 @@ static void test_vma_free_all_vmio_skips_unmap(void)
 
     vma_free_all(&parent_mm);
 
-    /* VM_IO VMA removed without a single PTE unmap (no phys was
+    /* VMA_IO VMA removed without a single PTE unmap (no phys was
      * ever committed to the test PTE table — there is nothing to
      * free).  vma_remove() calls vfs_node_put(vm_file=NULL),
      * which our harness counts as a no-op put.  Note: vma_free_all
@@ -393,7 +393,7 @@ static void test_vma_free_all_then_user_map_no_double_free(void)
      * unmaps + freems and verify it sees ZERO leaves that were
      * already cleared by vma_free_all. */
     setup_parent(USER_CODE_ADDR + 0x1000);
-    vma_t *heap = find_vma_with_flag(&parent_mm, VM_HEAP);
+    vma_t *heap = find_vma_with_flag(&parent_mm, VMA_HEAP);
     heap->vm_end = heap->vm_start + 0x2000;
 
     uint64_t phys1 = alloc_4k_page();
@@ -535,8 +535,8 @@ static void test_fork_mm_copy_no_pmd_share_fallback(void)
      *   child_pmd[l2] = pmde;  // OOM: share PDE
      * It must NOT appear inside fork_mm_copy anymore (brief:
      *   "remove the child_pmd[l2] = pmde; fallback").  The
-     * genuine VM_IO-huge-page share at line 2041 (no OOM
-     * context, just `if (vm && (vm->vm_flags & VM_IO))`) is
+     * genuine VMA_IO-huge-page share at line 2041 (no OOM
+     * context, just `if (vm && (vm->vm_flags & VMA_IO))`) is
      * correct and must remain — the search below keys on the
      * OOM-comment marker. */
     const char *hit = find_from(fn, fn_end,
@@ -544,8 +544,8 @@ static void test_fork_mm_copy_no_pmd_share_fallback(void)
     assert_null(hit);
     /* Defence-in-depth: a generic `child_pmd[l2] = pmde;` line
      * inside an `if (!child_pte)` block (the 4 KiB OOM context)
-     * must NOT appear.  The VM_IO huge-page branch is gated on
-     * VM_IO, not on !child_pte, so this discriminates correctly. */
+     * must NOT appear.  The VMA_IO huge-page branch is gated on
+     * VMA_IO, not on !child_pte, so this discriminates correctly. */
     const char *four_k_block = find_from(fn, fn_end, "if (!child_pte)");
     if (four_k_block) {
         assert_null(find_from(four_k_block, fn_end,
@@ -874,7 +874,7 @@ static void test_do_fork_releases_task_on_oom(void)
  *
  *  The `fail:` rollback in fork_mm_copy must:
  *    - Bug A1: NOT free huge-page phys when the entry was a
- *      VM_IO share (parent's MMIO PMD; pass 1 set
+ *      VMA_IO share (parent's MMIO PMD; pass 1 set
  *      child_pmd[l2] = pmde without alloc).
  *    - Bug A2: NOT free 4 KiB phys for an already-COW PTE
  *      (fork-of-fork shape); must instead balance the pass-1
@@ -889,7 +889,7 @@ static void test_do_fork_releases_task_on_oom(void)
 
 static void test_fork_mm_copy_fail_keeps_vmio_huge_intact(void)
 {
-    TEST_SUITE("fork_mm_copy rollback — VM_IO huge PMD is not freed (Bug A1)");
+    TEST_SUITE("fork_mm_copy rollback — VMA_IO huge PMD is not freed (Bug A1)");
 
     size_t len;
     char *src = slurp_task_c(&len);
@@ -913,13 +913,13 @@ static void test_fork_mm_copy_fail_keeps_vmio_huge_intact(void)
 
     /* Bug A1: the rollback's huge-page branch must consult
      * the parent's VMA flags for the 2 MiB VA and SKIP the
-     * free_pages call when the region is VM_IO.  Pass 1's
+     * free_pages call when the region is VMA_IO.  Pass 1's
      * huge-page branch shares the parent's MMIO PMD with
      * child_pmd[l2] = pmde — no allocation.  The rollback
      * must not free that phys.
      *
      * Concrete check (textual, in the rollback's huge-page
-     * branch): vma_find must be called, and the VM_IO check
+     * branch): vma_find must be called, and the VMA_IO check
      * must appear BEFORE the free_pages call. */
     const char *huge = find_from(fail_label, fail_block_end,
         "if (pmde & PAGE_HUGE) {");
@@ -932,9 +932,9 @@ static void test_fork_mm_copy_fail_keeps_vmio_huge_intact(void)
     const char *vm_find = find_from(huge, free_pages_call,
         "vma_find(parent_mm, vaddr_2m)");
     assert_not_null(vm_find);
-    /* VM_IO must be checked BEFORE the free_pages call too. */
+    /* VMA_IO must be checked BEFORE the free_pages call too. */
     const char *vm_io_check = find_from(huge, free_pages_call,
-        "vm_flags & VM_IO");
+        "vm_flags & VMA_IO");
     assert_not_null(vm_io_check);
     /* And vm_find must be checked before free_pages. */
     assert_true(vm_find < free_pages_call);
@@ -942,14 +942,14 @@ static void test_fork_mm_copy_fail_keeps_vmio_huge_intact(void)
 
     /* Defence-in-depth: the rollback must NOT have an
      * unconditional `free_pages(p, 1)` directly under
-     * `if (pmde & PAGE_HUGE)` without a VM_IO guard.  We
+     * `if (pmde & PAGE_HUGE)` without a VMA_IO guard.  We
      * verify by looking for the exact pattern that would be
      * a regression — if VMIO wasn't special-cased, the huge
      * branch would look like:
      *     if (pmde & PAGE_HUGE) {
      *         free_pages(p, 1);    <-- this is OK only when guarded
      *     }
-     * We accept the call as long as the vma_find + VM_IO check
+     * We accept the call as long as the vma_find + VMA_IO check
      * precede it (already checked above). */
 
     /* Also: the parent's 2 MiB VA computation
@@ -1036,7 +1036,7 @@ static void test_fork_mm_copy_fail_keeps_cow_share_intact(void)
                                         "is_cow");
     assert_not_null(is_cow_branch);
 
-    /* Also: the placeholder (pte == PAGE_VALID) and VM_IO
+    /* Also: the placeholder (pte == PAGE_VALID) and VMA_IO
      * guards are still in place from the original Task 6
      * rollback — keep them pinned too. */
     const char *placeholder_check = find_from(inner_else, fail_block_end,

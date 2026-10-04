@@ -450,7 +450,7 @@ static void test_mmap_fixed_partial_overlap_managed_guard_straddle(void)
     list_init(&sv->list);
     sv->vm_start     = 0x13fe000;
     sv->vm_end       = 0x1401000;
-    sv->vm_flags     = VM_READ | VM_WRITE | VM_ANON;
+    sv->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON;
     sv->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
     sv->vm_pgoff     = 0;
     sv->vm_file      = NULL;
@@ -655,8 +655,8 @@ static void test_mprotect_rejects_protected_ranges(void)
          p != &fixture_mm.vma_list; p = p->next) {
         vma_t *v = container_of(p, vma_t, list);
         if (v->vm_start == 0x40000000) {
-            assert_eq((uint64_t)PROT_READ & (VM_READ | VM_WRITE | VM_EXEC),
-                      v->vm_flags & (VM_READ | VM_WRITE | VM_EXEC));
+            assert_eq((uint64_t)PROT_READ & (VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC),
+                      v->vm_flags & (VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC));
         }
     }
 }

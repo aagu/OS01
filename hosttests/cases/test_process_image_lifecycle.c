@@ -138,11 +138,11 @@ static void test_heap_vma_vm_flags(void)
 
     vma_t *v = vma_list_get(&fixture_mm.vma_list, 0);
     assert_not_null(v);
-    uint64_t expected = VM_READ | VM_WRITE | VM_ANON | VM_HEAP;
+    uint64_t expected = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON | VMA_HEAP;
     assert_eq(expected, v->vm_flags);
-    /* VM_HEAP is distinct from every other flag bit. */
-    assert_true((v->vm_flags & VM_HEAP) != 0);
-    assert_eq(0x100UL, (uint64_t)VM_HEAP);
+    /* VMA_HEAP is distinct from every other flag bit. */
+    assert_true((v->vm_flags & VMA_HEAP) != 0);
+    assert_eq(0x100UL, (uint64_t)VMA_HEAP);
 }
 
 static void test_heap_vma_vm_page_prot(void)
@@ -219,7 +219,7 @@ static void test_vma_find_matches_other_vma_with_other_vm(void)
     list_init(&other->list);
     other->vm_start     = USER_CODE_ADDR + 0x1000;
     other->vm_end       = USER_CODE_ADDR + 0x2000;
-    other->vm_flags     = VM_READ | VM_WRITE | VM_ANON;
+    other->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON;
     other->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
     other->vm_pgoff     = 0;
     other->vm_file      = NULL;
@@ -239,7 +239,7 @@ static void test_vma_find_matches_other_vma_with_other_vm(void)
 
 static void test_exactly_one_heap_vma_in_list(void)
 {
-    TEST_SUITE("mm_init_user_heap — exactly one VM_HEAP VMA");
+    TEST_SUITE("mm_init_user_heap — exactly one VMA_HEAP VMA");
 
     setup_mm();
     /* Pre-populate with two non-heap VMAs. */
@@ -248,7 +248,7 @@ static void test_exactly_one_heap_vma_in_list(void)
         list_init(&v->list);
         v->vm_start     = USER_CODE_ADDR + 0x1000 + i * 0x1000;
         v->vm_end       = v->vm_start + 0x1000;
-        v->vm_flags     = VM_READ | VM_WRITE | VM_ANON;
+        v->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON;
         v->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
         v->vm_pgoff     = 0;
         v->vm_file      = NULL;
@@ -261,7 +261,7 @@ static void test_exactly_one_heap_vma_in_list(void)
     int total = vma_list_count(&fixture_mm.vma_list);
     for (int i = 0; i < total; i++) {
         vma_t *v = vma_list_get(&fixture_mm.vma_list, i);
-        if (v->vm_flags & VM_HEAP) heap_vma_count++;
+        if (v->vm_flags & VMA_HEAP) heap_vma_count++;
     }
     assert_eq(1, heap_vma_count);
 }
@@ -313,7 +313,7 @@ static void test_destroy_unpublished_user_mm_releases_vmas(void)
     list_init(&extra->list);
     extra->vm_start     = USER_CODE_ADDR + 0x3000;
     extra->vm_end       = USER_CODE_ADDR + 0x4000;
-    extra->vm_flags     = VM_READ | VM_WRITE | VM_ANON;
+    extra->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON;
     extra->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
     extra->vm_pgoff     = 0;
     extra->vm_file      = NULL;

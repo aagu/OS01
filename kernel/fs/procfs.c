@@ -262,10 +262,10 @@ static int gen_maps(task_t *t, char *buf, int bufsz)
         } else {
             // Emit vma_list row
             char perm[5];
-            perm[0] = (next_vma->vm_flags & VM_READ)   ? 'r' : '-';
-            perm[1] = (next_vma->vm_flags & VM_WRITE)  ? 'w' : '-';
-            perm[2] = (next_vma->vm_flags & VM_EXEC)   ? 'x' : '-';
-            perm[3] = (next_vma->vm_flags & VM_SHARED) ? 's' : 'p';
+            perm[0] = (next_vma->vm_flags & VMA_PROT_READ)   ? 'r' : '-';
+            perm[1] = (next_vma->vm_flags & VMA_PROT_WRITE)  ? 'w' : '-';
+            perm[2] = (next_vma->vm_flags & VMA_PROT_EXEC)   ? 'x' : '-';
+            perm[3] = (next_vma->vm_flags & VMA_SHARED) ? 's' : 'p';
             perm[4] = '\0';
 
             uint64_t pgoff = next_vma->vm_pgoff << 12;

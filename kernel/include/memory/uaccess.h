@@ -98,7 +98,7 @@ int strnlen_user(const void *user_addr, size_t max);
 //   4. arch_user_range_accessible(mm->pgdir, addr, len, writable)
 //
 // Writable prechecks accept COW only when its VMA permits writing and is
-// not VM_IO. They do not allocate or change PTEs; actual output must use
+// not VMA_IO. They do not allocate or change PTEs; actual output must use
 // copy_to_user_ft or the user_write_range_begin/end pair.
 bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable);
 
@@ -106,7 +106,7 @@ bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable);
 // and leaves ownership of that lock with the caller on every return. The
 // self-locking form releases its lock before returning on every path.
 // Writable ordinary leaves (including ELF/stack) need no VMA. COW leaves
-// require a writable, non-VM_IO VMA. All allocations precede PTE/refcount
+// require a writable, non-VMA_IO VMA. All allocations precede PTE/refcount
 // changes; failure leaves the entire range unchanged.
 // Returns 0, -EFAULT (invalid range/permissions) or -ENOMEM (allocation).
 int prepare_user_write_range(mm_t *mm, uint64_t addr, size_t len);

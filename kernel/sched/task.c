@@ -1511,7 +1511,7 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     vfs_node_put(node);
 
     // Set up heap.  mm_init_user_heap installs the unique zero-length
-    // VM_HEAP VMA and sets start_brk = end_brk = ALIGN_UP(end_code,
+    // VMA_HEAP VMA and sets start_brk = end_brk = ALIGN_UP(end_code,
     // 4096).  A -ENOMEM return means the VMA allocation failed; mm is
     // unchanged in that case, so destroy_unpublished_user_mm walks an
     // empty VMA list and frees the ELF pages via vmm_free_user_map.
@@ -1696,7 +1696,7 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     vfs_node_put(node);
 
     // Set up the heap.  mm_init_user_heap installs the unique
-    // zero-length VM_HEAP VMA and sets start_brk = end_brk =
+    // zero-length VMA_HEAP VMA and sets start_brk = end_brk =
     // ALIGN_UP(end_code, 4096).  -ENOMEM means the VMA alloc
     // failed; mm is unchanged so destroy_unpublished_user_mm
     // walks an empty list and frees the ELF pages via
@@ -1973,7 +1973,7 @@ int64_t sys_fstatat(int dirfd, const char *path, struct stat *buf,
 //
 // Task 6 contract (docs/.../2026-10-01-user-heap-elf-isolation-
 // design.md §6):
-//   - Child 4 KiB ELF leaves and read-only non-VM_IO leaves
+//   - Child 4 KiB ELF leaves and read-only non-VMA_IO leaves
 //     receive PRIVATE physical pages (alloc + memcpy).
 //   - Writable VMA leaves use COW (parent PTE → R/O+COW; both
 //     parent and child hold a ref on the shared phys).
@@ -1988,7 +1988,7 @@ int64_t sys_fstatat(int dirfd, const char *path, struct stat *buf,
 // The placeholder convention is used to mark writable leaves
 // pending pass-2 mutation: child_pte = PAGE_VALID (= 1) means
 // "writable leaf, mutating parent + adding COW refs in pass 2".
-// A real RO leaf has phys bits set; a VM_IO shared leaf has the
+// A real RO leaf has phys bits set; a VMA_IO shared leaf has the
 // parent's full PTE (with the MMIO phys); a fork-of-fork COW
 // leaf has the parent's full PTE.  Only the placeholder is
 // == PAGE_VALID, so pass 2 walks the child pgd, finds these
@@ -2038,13 +2038,13 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                     /* Huge page: eager 2 MiB copy.  Inline asm is
                      * used instead of memcpy because the kernel's
                      * libk memcpy has a bug with 2MB copies
-                     * (CR2=0x8).  VM_IO huge pages are shared
+                     * (CR2=0x8).  VMA_IO huge pages are shared
                      * directly (no copy). */
                     uint64_t vaddr_2m = ((uint64_t)l4 << 39)
                                        | ((uint64_t)l3 << 30)
                                        | ((uint64_t)l2 << 21);
                     vma_t *vm = vma_find(parent_mm, vaddr_2m);
-                    if (vm && (vm->vm_flags & VM_IO)) {
+                    if (vm && (vm->vm_flags & VMA_IO)) {
                         child_pmd[l2] = pmde;
                         continue;
                     }
@@ -2089,7 +2089,7 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                                    | ((uint64_t)l2 << 21)
                                    | ((uint64_t)l1 << 12);
                     vma_t *vma = vma_find(parent_mm, vaddr);
-                    if (vma && (vma->vm_flags & VM_IO)) {
+                    if (vma && (vma->vm_flags & VMA_IO)) {
                         /* MMIO: share parent's phys (no COW, no
                          * copy).  Pass 2 must not touch this leaf. */
                         child_pte[l1] = pte;
@@ -2104,7 +2104,7 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                          * add a ref for the child, share the PTE. */
                         page_cow_get(pte & PAGE_4K_MASK);
                         child_pte[l1] = pte;
-                    } else if (vma && (vma->vm_flags & VM_WRITE) &&
+                    } else if (vma && (vma->vm_flags & VMA_PROT_WRITE) &&
                                (pte & PAGE_WRITE)) {
                         /* Writable VMA: stage COW; commit in pass 2.
                          * The placeholder (PAGE_VALID only) is
@@ -2202,7 +2202,7 @@ fail:
      *   - 4 KiB child PTE tables (calloc'd)  → kfree
      *   - 4 KiB child leaves (alloc_4k_page'd) → free_4k_page
      *   - 2 MiB child huge copies (alloc_pages'd) → free_pages
-     * Skip VM_IO shared leaves (parent's MMIO phys — not ours).
+     * Skip VMA_IO shared leaves (parent's MMIO phys — not ours).
      * Skip placeholders (PAGE_VALID only — no phys).  No parent
      * PTE was mutated, so nothing to undo there. */
     if (child_pgd) {
@@ -2219,19 +2219,19 @@ fail:
                     if (!(pmde & PAGE_VALID)) continue;
                     if (pmde & PAGE_HUGE) {
                         /* Bug A1 fix: the huge-page branch may
-                         * share the parent's MMIO PMD for VM_IO
+                         * share the parent's MMIO PMD for VMA_IO
                          * VAs (pass 1, task.c ~ line 2041) — in
                          * that case child_pmd[l2] == parent's PMD
                          * and the phys is the parent's MMIO phys,
                          * never ours to free.  Check the parent's
                          * 2 MiB VA against vma_find (same lookup
                          * pattern pass 1 uses) and skip the
-                         * free_pages for VM_IO. */
+                         * free_pages for VMA_IO. */
                         uint64_t vaddr_2m = ((uint64_t)l4 << 39)
                                            | ((uint64_t)l3 << 30)
                                            | ((uint64_t)l2 << 21);
                         vma_t *vm = vma_find(parent_mm, vaddr_2m);
-                        if (vm && (vm->vm_flags & VM_IO)) {
+                        if (vm && (vm->vm_flags & VMA_IO)) {
                             /* Shared MMIO PMD — not ours. */
                         } else {
                             uint64_t phys = pmde & PAGE_2M_MASK;
@@ -2248,7 +2248,7 @@ fail:
                                            | ((uint64_t)l1 << 12);
                             vma_t *vma = vma_find(parent_mm, vaddr);
                             int is_vmio = (vma &&
-                                           (vma->vm_flags & VM_IO));
+                                           (vma->vm_flags & VMA_IO));
                             int is_placeholder = (pte == PAGE_VALID);
                             int is_cow = !!(pte & PAGE_COW);
                             /* Free / put only what we touched in
