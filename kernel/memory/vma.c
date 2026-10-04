@@ -13,13 +13,14 @@
 #include <errno.h>
 
 // User-VA layout (must mirror kernel/arch/x86_64/intr/trap.c
-// USER_CODE_ADDR/USER_PAGE_SIZE and kernel/include/sched/task.h
+// USER_CODE_ADDR/USER_ENVELOPE_SIZE and kernel/include/sched/task.h
 // USER_STACK_BASE).  HEAP_LIMIT keeps the heap one page below the
 // user stack area so mm_brk() cannot grow into the stack window.
-#define USER_CODE_ADDR  0x400000UL
-#define USER_PAGE_SIZE  0x1000000UL
-#define USER_STACK_BASE 0x1400000UL
-#define HEAP_LIMIT      (USER_CODE_ADDR + USER_PAGE_SIZE - 0x1000UL)
+#define USER_CODE_ADDR     0x400000UL
+#define USER_ENVELOPE_SIZE 0x20000000UL  // 512 MiB
+#define USER_PAGE_SIZE     USER_ENVELOPE_SIZE  // Compatibility alias
+#define USER_STACK_BASE    0x20400000UL
+#define HEAP_LIMIT         (USER_CODE_ADDR + USER_ENVELOPE_SIZE - 0x1000UL)
 
 // Find the VMA containing addr, or NULL
 vma_t *vma_find(mm_t *mm, uint64_t addr)

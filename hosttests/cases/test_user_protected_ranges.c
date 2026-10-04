@@ -53,11 +53,12 @@
 bool mm_user_range_protected(const mm_t *mm, uint64_t start, uint64_t end);
 
 /* ── Layout constants (mirror kernel/memory/vma.c) ─────────── */
-#define USER_CODE_ADDR   0x400000UL
-#define USER_PAGE_SIZE   0x1000000UL
-#define HEAP_LIMIT       (USER_CODE_ADDR + USER_PAGE_SIZE - 0x1000UL)
-#define USER_STACK_BASE  0x1400000UL
-#define USER_STACK_END   (USER_STACK_BASE + 0x200000UL)
+#define USER_CODE_ADDR     0x400000UL
+#define USER_ENVELOPE_SIZE 0x20000000UL
+#define USER_PAGE_SIZE     USER_ENVELOPE_SIZE
+#define USER_STACK_BASE    0x20400000UL
+#define HEAP_LIMIT         (USER_CODE_ADDR + USER_ENVELOPE_SIZE - 0x1000UL)
+#define USER_STACK_END     (USER_STACK_BASE + 0x200000UL)
 #define PROD_ADDR_LIMIT  0xffff800000000000UL
 
 #define PROT_RW (PROT_READ | PROT_WRITE)
@@ -177,21 +178,21 @@ static void test_predicate_elf_envelope(void)
     /* Envelope end edge: start at start_brk is the heap reserve,
      * not the envelope — still protected, via the heap clause. */
     assert_true(mm_user_range_protected(&fixture_mm,
-                                        0x405000, 0x13ff000));
+                                        0x405000, HEAP_LIMIT));
 }
 
 static void test_predicate_heap_reserve(void)
 {
-    TEST_SUITE("predicate — heap reserve [start_brk, 0x13ff000)");
+    TEST_SUITE("predicate — heap reserve [start_brk, HEAP_LIMIT)");
 
     /* Empty heap: start_brk == 0x401000, nothing committed. */
     setup_mm_no_current(USER_CODE_ADDR + 0x1000);
     assert_true(mm_user_range_protected(&fixture_mm,
                                         0x401000, 0x402000));     /* first page */
     assert_true(mm_user_range_protected(&fixture_mm,
-                                        0x13fe000, 0x13ff000));   /* last page */
+                                        HEAP_LIMIT - 0x1000, HEAP_LIMIT));   /* last page */
     assert_true(mm_user_range_protected(&fixture_mm,
-                                        0x401000, 0x13ff000));    /* whole window */
+                                        0x401000, HEAP_LIMIT));    /* whole window */
     /* Head-edge partial: one page straddling start_brk. */
     assert_true(mm_user_range_protected(&fixture_mm,
                                         0x400000, 0x402000));
@@ -203,13 +204,13 @@ static void test_predicate_heap_reserve(void)
                                         fixture_mm.start_brk + 0x1000));
 
     /* Grown heap: start_brk == 0x500000 — the reserve lower bound
-     * moves with start_brk; the upper bound stays 0x13ff000. */
+     * moves with start_brk; the upper bound stays HEAP_LIMIT. */
     setup_mm_no_current(USER_CODE_ADDR + 0x100000);
     assert_eq(USER_CODE_ADDR + 0x100000, fixture_mm.start_brk);
     assert_true(mm_user_range_protected(&fixture_mm,
                                         0x500000, 0x501000));
     assert_true(mm_user_range_protected(&fixture_mm,
-                                        0x13fe000, 0x13ff000));
+                                        HEAP_LIMIT - 0x1000, HEAP_LIMIT));
     /* Old (pre-growth) heap page is now inside the ENVELOPE —
      * still protected. */
     assert_true(mm_user_range_protected(&fixture_mm,
@@ -223,18 +224,18 @@ static void test_predicate_heap_reserve(void)
 
 static void test_predicate_guard_page(void)
 {
-    TEST_SUITE("predicate — guard page [0x13ff000, 0x1400000)");
+    TEST_SUITE("predicate — guard page [HEAP_LIMIT, USER_STACK_BASE)");
 
     setup_mm_no_current(USER_CODE_ADDR + 0x1000);
 
     assert_true(mm_user_range_protected(&fixture_mm,
-                                        0x13ff000, 0x1400000));   /* exact */
+                                        HEAP_LIMIT, USER_STACK_BASE));   /* exact */
     assert_true(mm_user_range_protected(&fixture_mm,
-                                        0x13fe000, 0x1400000));   /* head straddle */
+                                        HEAP_LIMIT - 0x1000, USER_STACK_BASE));   /* head straddle */
     assert_true(mm_user_range_protected(&fixture_mm,
-                                        0x13ff000, 0x1401000));   /* tail straddle */
+                                        HEAP_LIMIT, USER_STACK_BASE + 0x1000));   /* tail straddle */
     assert_true(mm_user_range_protected(&fixture_mm,
-                                        0x13fe000, 0x1401000));   /* both sides */
+                                        HEAP_LIMIT - 0x1000, USER_STACK_BASE + 0x1000));   /* both sides */
 
     /* Above the guard the stack clause takes over; below it the
      * heap clause does — the guard clause itself has no exposed
@@ -247,23 +248,23 @@ static void test_predicate_guard_page(void)
 
 static void test_predicate_user_stack(void)
 {
-    TEST_SUITE("predicate — user stack [0x1400000, 0x1600000)");
+    TEST_SUITE("predicate — user stack [USER_STACK_BASE, USER_STACK_END)");
 
     setup_mm_no_current(USER_CODE_ADDR + 0x1000);
 
     assert_true(mm_user_range_protected(&fixture_mm,
-                                        0x1400000, 0x1401000));   /* first page */
+                                        USER_STACK_BASE, USER_STACK_BASE + 0x1000));   /* first page */
     assert_true(mm_user_range_protected(&fixture_mm,
-                                        0x15ff000, 0x1600000));   /* last page */
+                                        USER_STACK_END - 0x1000, USER_STACK_END));   /* last page */
     assert_true(mm_user_range_protected(&fixture_mm,
-                                        0x1400000, 0x1600000));   /* whole 2 MiB */
+                                        USER_STACK_BASE, USER_STACK_END));   /* whole 2 MiB */
     assert_true(mm_user_range_protected(&fixture_mm,
-                                        0x13ff000, 0x1601000));   /* guard+stack+above */
+                                        HEAP_LIMIT, USER_STACK_END + 0x1000));   /* guard+stack+above */
 
     assert_false(mm_user_range_protected(&fixture_mm,
-                                         0x1600000, 0x1601000));  /* above stack */
+                                         USER_STACK_END, USER_STACK_END + 0x1000));  /* above stack */
     assert_false(mm_user_range_protected(&fixture_mm,
-                                         0x15ff000, 0x15ff000));  /* empty span */
+                                         USER_STACK_END - 0x1000, USER_STACK_END - 0x1000));  /* empty span */
 }
 
 static void test_predicate_degenerate_inputs(void)
@@ -274,7 +275,7 @@ static void test_predicate_degenerate_inputs(void)
     setup_mm_no_current(USER_CODE_ADDR + 0x1000);
     fixture_mm.start_brk = 0;
     assert_false(mm_user_range_protected(&fixture_mm,
-                                         0x400000, 0x1600000));
+                                         USER_CODE_ADDR, USER_STACK_END));
 
     /* NULL mm. */
     assert_false(mm_user_range_protected(NULL, 0x400000, 0x401000));
@@ -291,12 +292,12 @@ static void test_mmap_fixed_rejects_protected_ranges(void)
     TEST_SUITE("do_mmap MAP_FIXED — -EINVAL for every protected range");
 
     struct { uint64_t addr, len; const char *what; } cases[] = {
-        { 0x400000,  0x1000,    "ELF envelope exact" },
-        { 0x13fe000, 0x2000,    "heap tail + guard straddle" },
-        { 0x13ff000, 0x1000,    "guard exact" },
-        { 0x1400000, 0x1000,    "stack first page" },
-        { 0x15ff000, 0x1000,    "stack last page" },
-        { 0x400000,  0x1200000, "whole reserve in one request" },
+        { USER_CODE_ADDR,          0x1000, "ELF envelope exact" },
+        { HEAP_LIMIT - 0x1000,     0x2000, "heap tail + guard straddle" },
+        { HEAP_LIMIT,              0x1000, "guard exact" },
+        { USER_STACK_BASE,         0x1000, "stack first page" },
+        { USER_STACK_END - 0x1000, 0x1000, "stack last page" },
+        { USER_CODE_ADDR, USER_STACK_END - USER_CODE_ADDR, "whole reserve in one request" },
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -361,7 +362,7 @@ static void test_mmap_fixed_partial_overlap_preserves_mapping(void)
      * other end sits in the free heap reserve.  Must fail with no
      * call to do_munmap_locked (nothing else would be affected
      * anyway, but the counters prove zero side effects). */
-    int64_t rc = fixed_mmap(0x13fe000, 0x2000);
+    int64_t rc = fixed_mmap(HEAP_LIMIT - 0x1000, 0x2000);
     assert_eq(-EINVAL, (int)rc);
 
     /* Existing mapping byte-for-byte intact. */
@@ -376,7 +377,7 @@ static void test_mmap_fixed_partial_overlap_preserves_mapping(void)
 
     /* Second probe: request overlapping the STACK's first page —
      * same untouched contract. */
-    rc = fixed_mmap(0x13ff000, 0x2000);
+    rc = fixed_mmap(HEAP_LIMIT, 0x2000);
     assert_eq(-EINVAL, (int)rc);
     assert_eq(pte0, pr_find_mapping(0x40000000)->pte);
     assert_eq(pte1, pr_find_mapping(0x40001000)->pte);
@@ -440,23 +441,23 @@ static void test_mmap_fixed_partial_overlap_managed_guard_straddle(void)
     setup_mm(USER_CODE_ADDR + 0x1000);
 
     /* Simulate the managed range a pre-Task-5 world could hold: a
-     * VMA straddling heap→guard→stack at [0x13fe000, 0x1401000),
+     * VMA straddling heap→guard→stack at [HEAP_LIMIT - 0x1000, USER_STACK_BASE + 0x1000),
      * inserted through the production vma_insert + hand-filled
      * PTEs.  Post-Task-5 the mapping APIs can no longer create
      * this shape — the test proves they cannot DESTROY it either. */
     vma_t *sv = (vma_t *)kmalloc(sizeof(vma_t));
     assert_not_null(sv);
     list_init(&sv->list);
-    sv->vm_start     = 0x13fe000;
-    sv->vm_end       = 0x1401000;
+    sv->vm_start     = HEAP_LIMIT - 0x1000;
+    sv->vm_end       = USER_STACK_BASE + 0x1000;
     sv->vm_flags     = VM_READ | VM_WRITE | VM_ANON;
     sv->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
     sv->vm_pgoff     = 0;
     sv->vm_file      = NULL;
     assert_eq(0, vma_insert(&fixture_mm, sv));
-    if (fill_pte(0x13fe000, 0x31) != 0 ||
-        fill_pte(0x13ff000, 0x32) != 0 ||
-        fill_pte(0x1400000, 0x33) != 0) {
+    if (fill_pte(HEAP_LIMIT - 0x1000, 0x31) != 0 ||
+        fill_pte(HEAP_LIMIT, 0x32) != 0 ||
+        fill_pte(USER_STACK_BASE, 0x33) != 0) {
         assert_true(!"harness fill_pte failed");
         return;
     }
@@ -464,26 +465,26 @@ static void test_mmap_fixed_partial_overlap_managed_guard_straddle(void)
     int vmas_before   = vma_count();   /* heap VMA + sv = 2 */
     int unmaps_before = pr_state.total_unmaps;
     int flushes_before = (int)pr_arch_tlb_flushes;
-    uint64_t pte_head = pr_find_mapping(0x13fe000)->pte;
-    uint64_t pte_mid  = pr_find_mapping(0x13ff000)->pte;
-    uint64_t pte_tail = pr_find_mapping(0x1400000)->pte;
+    uint64_t pte_head = pr_find_mapping(HEAP_LIMIT - 0x1000)->pte;
+    uint64_t pte_mid  = pr_find_mapping(HEAP_LIMIT)->pte;
+    uint64_t pte_tail = pr_find_mapping(USER_STACK_BASE)->pte;
 
-    /* Guard-exact request [0x13ff000, 0x1400000) lies STRICTLY
+    /* Guard-exact request [HEAP_LIMIT, USER_STACK_BASE) lies STRICTLY
      * INSIDE sv — a do_munmap_locked call would split it into
-     * [0x13fe000, 0x13ff000) + [0x1400000, 0x1401000) and unmap
+     * [HEAP_LIMIT - 0x1000, HEAP_LIMIT) + [USER_STACK_BASE, USER_STACK_BASE + 0x1000) and unmap
      * the guard page. */
-    int64_t rc = fixed_mmap(0x13ff000, 0x1000);
+    int64_t rc = fixed_mmap(HEAP_LIMIT, 0x1000);
     assert_eq(-EINVAL, (int)rc);
 
     /* No split, no truncation: sv is still ONE VMA with the
      * original bounds, all three PTEs and their dirty bytes
      * intact, counters unchanged. */
-    assert_eq(0x13fe000, sv->vm_start);
-    assert_eq(0x1401000, sv->vm_end);
+    assert_eq(HEAP_LIMIT - 0x1000, sv->vm_start);
+    assert_eq(USER_STACK_BASE + 0x1000, sv->vm_end);
     assert_eq(vmas_before,   vma_count());
-    assert_eq((int64_t)pte_head, (int64_t)pr_find_mapping(0x13fe000)->pte);
-    assert_eq((int64_t)pte_mid,  (int64_t)pr_find_mapping(0x13ff000)->pte);
-    assert_eq((int64_t)pte_tail, (int64_t)pr_find_mapping(0x1400000)->pte);
+    assert_eq((int64_t)pte_head, (int64_t)pr_find_mapping(HEAP_LIMIT - 0x1000)->pte);
+    assert_eq((int64_t)pte_mid,  (int64_t)pr_find_mapping(HEAP_LIMIT)->pte);
+    assert_eq((int64_t)pte_tail, (int64_t)pr_find_mapping(USER_STACK_BASE)->pte);
     assert_eq(0x31, (int)((unsigned char *)
                   pr_find_page(pte_head & PAGE_4K_MASK)->backing)[0]);
     assert_eq(0x32, (int)((unsigned char *)
@@ -514,9 +515,9 @@ static void test_mmap_auto_and_hint_avoid_reserve(void)
     assert_true((uint64_t)b < PROD_ADDR_LIMIT);
 
     /* Hint on the guard page and on the stack base: same. */
-    int64_t c = hinted_mmap(0x13ff000, 0x1000);
+    int64_t c = hinted_mmap(HEAP_LIMIT, 0x1000);
     assert_true(c >= (int64_t)USER_STACK_END);
-    int64_t d = hinted_mmap(0x1400000, 0x1000);
+    int64_t d = hinted_mmap(USER_STACK_BASE, 0x1000);
     assert_true(d >= (int64_t)USER_STACK_END);
 
     /* All three landed outside the reserve and are distinct. */
@@ -560,7 +561,7 @@ static void test_mmap_overflow_and_above_limit_no_mutation(void)
      * and came back -ENOMEM, having already torn the heap VMA out
      * via do_munmap_locked — the vma_count assert below catches
      * exactly that side effect). */
-    rc = do_mmap(0x13ff000, 0xfffffffff0000000UL, PROT_RW,
+    rc = do_mmap(HEAP_LIMIT, 0xfffffffff0000000UL, PROT_RW,
                  ANON_PRIV | MAP_FIXED, (uint64_t)-1, 0);
     assert_eq(-EINVAL, (int)rc);
 
@@ -594,13 +595,13 @@ static void test_munmap_rejects_protected_ranges(void)
     int flushes_before = (int)pr_arch_tlb_flushes;
 
     /* Exact guard page. */
-    int64_t r1 = do_munmap(0x13ff000, 0x1000);
+    int64_t r1 = do_munmap(HEAP_LIMIT, 0x1000);
     assert_eq(-EINVAL, (int)r1);
     /* Straddle: heap tail + guard + stack head. */
-    r1 = do_munmap(0x13fe000, 0x3000);
+    r1 = do_munmap(HEAP_LIMIT - 0x1000, 0x3000);
     assert_eq(-EINVAL, (int)r1);
     /* Stack page. */
-    r1 = do_munmap(0x1400000, 0x1000);
+    r1 = do_munmap(USER_STACK_BASE, 0x1000);
     assert_eq(-EINVAL, (int)r1);
     /* ELF envelope page. */
     r1 = do_munmap(0x400000, 0x1000);
@@ -624,9 +625,9 @@ static void test_mprotect_rejects_protected_ranges(void)
     int flushes_before = (int)pr_arch_tlb_flushes;
 
     /* Exact guard page, PROT_NONE and PROT_READ variants. */
-    int64_t r = do_mprotect(0x13ff000, 0x1000, PROT_NONE);
+    int64_t r = do_mprotect(HEAP_LIMIT, 0x1000, PROT_NONE);
     assert_eq(-EINVAL, (int)r);
-    r = do_mprotect(0x13ff000, 0x1000, PROT_READ);
+    r = do_mprotect(HEAP_LIMIT, 0x1000, PROT_READ);
     assert_eq(-EINVAL, (int)r);
     /* Heap reserve page. */
     r = do_mprotect(0x401000, 0x1000, PROT_READ);
@@ -635,10 +636,10 @@ static void test_mprotect_rejects_protected_ranges(void)
     r = do_mprotect(0x400000, 0x1000, PROT_READ);
     assert_eq(-EINVAL, (int)r);
     /* Stack page. */
-    r = do_mprotect(0x1400000, 0x1000, PROT_READ);
+    r = do_mprotect(USER_STACK_BASE, 0x1000, PROT_READ);
     assert_eq(-EINVAL, (int)r);
     /* Straddle heap→guard→stack. */
-    r = do_mprotect(0x13fe000, 0x3000, PROT_READ);
+    r = do_mprotect(HEAP_LIMIT - 0x1000, 0x3000, PROT_READ);
     assert_eq(-EINVAL, (int)r);
 
     assert_eq(flushes_before, (int)pr_arch_tlb_flushes);

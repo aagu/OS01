@@ -21,7 +21,7 @@ struct mm_struct;
 typedef struct mm_struct mm_t;
 
 // ── User address-layout constants ──────────────────────────
-// Lowest legitimate user address; the current user stack starts at 0x1400000.
+// Lowest legitimate user address; the current user stack starts at 0x20400000.
 // do_mmap preserves the unmapped range below USER_CODE_ADDR.
 #define USER_MIN_ADDR     0x400000UL
 

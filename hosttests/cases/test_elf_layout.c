@@ -34,10 +34,11 @@
 #include <fs/elf_layout.h>
 
 /* ── User VA constraints (from isolation spec §4) ─────────────── */
-#define USER_CODE_ADDR  0x400000UL
-#define USER_PAGE_SIZE  0x1000000UL
-#define USER_STACK_BASE 0x1400000UL
-#define HEAP_LIMIT      (USER_CODE_ADDR + USER_PAGE_SIZE - 0x1000UL) /* 0x13ff000 */
+#define USER_CODE_ADDR     0x400000UL
+#define USER_ENVELOPE_SIZE 0x20000000UL
+#define USER_PAGE_SIZE     USER_ENVELOPE_SIZE
+#define USER_STACK_BASE    0x20400000UL
+#define HEAP_LIMIT         (USER_CODE_ADDR + USER_ENVELOPE_SIZE - 0x1000UL) /* 0x203ff000 */
 
 #define ALIGN_UP_4K(x) (((x) + 0xFFFUL) & ~0xFFFUL)
 

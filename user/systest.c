@@ -1642,9 +1642,8 @@ static void test_proc_maps(void)
         if (strstr(line, "[stack]")) {
             has_stack = 1;
             // Positive: stack at [USER_STACK_BASE, USER_STACK_BASE + 2 MiB).
-            // USER_STACK_BASE = 0x1400000 (bumped from 0x800000 when
-            // USER_PAGE_SIZE grew from 2 MiB to 16 MiB for libgfx).
-            if (start == 0x1400000UL && end == 0x1600000UL)
+            // USER_STACK_BASE = 0x20400000 (USER_ENVELOPE_SIZE = 512 MiB).
+            if (start == 0x20400000UL && end == 0x20600000UL)
                 stack_at_right_addr = 1;
             // Negative: must NOT include 0x600000 (legacy guard, kept
             // for backward compatibility even though the stack no
@@ -3486,9 +3485,9 @@ static void test_startup_execvp(void)
 }
 
 // ── 50: protected ranges (Task 5, heap/ELF isolation plan) ─
-// The kernel reserves [0x400000, 0x1600000) for the ELF image
+// The kernel reserves [0x400000, 0x20600000) for the ELF image
 // (envelope incl. segment gaps), the heap (committed + reserve),
-// the 0x13ff000 guard page and the 2 MiB user stack.  No mapping
+// the 0x203ff000 guard page and the 2 MiB user stack.  No mapping
 // API may hand out or mutate any part of that window:
 //   * MAP_FIXED into the envelope / heap reserve / guard → -EINVAL,
 //     and a preexisting mapping must survive untouched;
@@ -3514,7 +3513,7 @@ static void test_protected_ranges(void)
      * heap reserve and the stack — rejected, existing mapping
      * untouched. */
     errno = 0;
-    void *bad = mmap((void *)0x13fe000UL, 0x2000,
+    void *bad = mmap((void *)0x203fe000UL, 0x2000,
                      PROT_READ | PROT_WRITE,
                      MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
     int ok_guard = (bad == MAP_FAILED) && (errno == EINVAL);
@@ -3539,7 +3538,7 @@ static void test_protected_ranges(void)
     kp[0] = 0x5A;
 
     CHECK3(ok_guard, "map_fixed_guard_rejected",
-           "MAP_FIXED [13fe000,1400000) → -EINVAL");
+           "MAP_FIXED [203fe000,20400000) → -EINVAL");
     CHECK3(ok_heap, "map_fixed_heap_rejected",
            "MAP_FIXED into heap reserve → -EINVAL");
     CHECK3(ok_elf, "map_fixed_elf_rejected",
@@ -3549,10 +3548,10 @@ static void test_protected_ranges(void)
 
     /* 6. munmap / mprotect on the guard page rejected. */
     errno = 0;
-    int r = munmap((void *)0x13ff000UL, 0x1000);
+    int r = munmap((void *)0x203ff000UL, 0x1000);
     int ok_mun = (r == -1) && (errno == EINVAL);
     errno = 0;
-    r = mprotect((void *)0x13ff000UL, 0x1000, PROT_READ);
+    r = mprotect((void *)0x203ff000UL, 0x1000, PROT_READ);
     int ok_mprot = (r == -1) && (errno == EINVAL);
     CHECK3(ok_mun, "munmap_guard_rejected",
            "munmap guard page → -EINVAL");
@@ -3560,11 +3559,11 @@ static void test_protected_ranges(void)
            "mprotect guard page → -EINVAL");
 
     /* 7. Plain mmap (no hint) must stay outside the whole
-     * reserved window [0x400000, 0x1600000). */
+     * reserved window [0x400000, 0x20600000). */
     void *p = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE,
                    MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     int ok_auto = (p != MAP_FAILED) &&
-                  ((uint64_t)p >= 0x1600000UL) &&
+                  ((uint64_t)p >= 0x20600000UL) &&
                   ((uint64_t)p < 0xffff800000000000UL);
     CHECK3(ok_auto, "auto_mmap_outside_reserve",
            ok_auto ? "regular mmap landed above the reserve"

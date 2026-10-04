@@ -1094,9 +1094,10 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
 extern void arch_kernel_thread_entry(void);
 
 #define USER_CODE_ADDR   0x400000UL
-// Matches kernel/arch/x86_64/intr/trap.c — the user VA range is
-// [USER_CODE_ADDR, USER_CODE_ADDR + USER_PAGE_SIZE).
-#define USER_PAGE_SIZE   0x1000000UL  // 16 MiB (Task 6, libgfx)
+// Matches kernel/arch/x86_64/intr/trap.c — the user VA envelope is
+// [USER_CODE_ADDR, USER_CODE_ADDR + USER_ENVELOPE_SIZE).
+#define USER_ENVELOPE_SIZE 0x20000000UL  // 512 MiB
+#define USER_PAGE_SIZE     USER_ENVELOPE_SIZE  // Compatibility alias
 
 // ── FPU helper ──────────────────────────────────────────────
 // Alloc a 512+15 byte buffer for FXSAVE/FXRSTOR.  The returned

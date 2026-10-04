@@ -107,10 +107,9 @@ struct fb_info {
  * Task 8 of the user-heap/ELF-isolation plan: the "full-screen"
  * view is now the actual framebuffer width and height (QEMU
  * stdvga reports 1440×900 — 5,184,000 bytes at 32 bpp).  The
- * per-process heap ceiling is 0x13ff000 (USER_CODE_ADDR +
- * USER_PAGE_SIZE - 0x1000 = 0x5FF000 was the old ceiling before
- * the 16 MiB user VA bump landed; the 16 MiB window now covers
- * the full-screen pixels buffer plus 64 KiB of program headroom).
+ * per-process heap ceiling is 0x203ff000 (USER_CODE_ADDR +
+ * USER_ENVELOPE_SIZE - 0x1000 = 0x203FF000; the 512 MiB window
+ * covers the full-screen pixels buffer plus plenty of headroom).
  *
  * The full-screen view therefore equals the kernel-reported fb
  * dimensions (discovered at runtime from /dev/fb's info struct).
@@ -138,8 +137,8 @@ struct fb_info {
  * The check is performed BEFORE gfx_open — the brief asserts that
  * the *pre-allocation* headroom accommodates (framebuffer_bytes
  * + 64 KiB).  That guarantees the calloc inside gfx_open won't
- * collide with the 0x13ff000 heap limit. */
-#define HEAP_LIMIT     0x13ff000ul
+ * collide with the 0x203ff000 heap limit. */
+#define HEAP_LIMIT     0x203ff000ul
 #define HEAP_HEADROOM  65536u
 
 /* ── Helpers ─────────────────────────────────────────────────── */

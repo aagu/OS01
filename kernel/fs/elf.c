@@ -50,7 +50,7 @@
 
 /* Bound on the number of 4 KiB leaves a single elf_load call may
  * allocate and roll back.  Covers any ELF that fits the isolation
- * spec §4 address window: USER_PAGE_SIZE / 4 KiB = 4096.  We add
+ * spec §4 address window (up to MAX_LOAD_LEAVES 4 KiB pages).  We add
  * a generous margin for splits that cross extra pages when
  * adjacent segments overlap. */
 #define MAX_LOAD_LEAVES 8192

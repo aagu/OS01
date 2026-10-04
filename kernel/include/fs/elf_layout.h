@@ -28,7 +28,7 @@
  *   - program-header or file-range overflow (out of file_size)
  *   - virtual-range overflow (p_vaddr + p_memsz wraps)
  *   - any address below USER_CODE_ADDR (0x400000)
- *   - any segment end above HEAP_LIMIT (0x13ff000)
+ *   - any segment end above HEAP_LIMIT (0x203ff000)
  *   - heap_base > HEAP_LIMIT
  *   - two PT_LOAD byte intervals intersecting (incl. file/BSS)
  *   - e_entry not inside any nonempty executable PT_LOAD

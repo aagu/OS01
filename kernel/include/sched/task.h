@@ -366,13 +366,13 @@ int kernel_thread(uint64_t (*fn)(uint64_t), uint64_t arg, uint64_t flags);
  * overflow past the stack bottom triggers #PF instead of silent
  * corruption of code/data below. */
 // User stack lives ABOVE the user VA range defined by USER_CODE_ADDR +
-// USER_PAGE_SIZE (kernel/arch/x86_64/intr/trap.c) so that heap growth
+// USER_ENVELOPE_SIZE (kernel/arch/x86_64/intr/trap.c) so that heap growth
 // can never collide with the stack.  USER_STACK_BASE is 2 MiB-aligned
 // (required by vmm_map_page's PMD mapping) and immediately follows
 // the heap region; the implicit guard is the gap between
-// mm->end_brk ≤ 0x13FF000 and USER_STACK_BASE = 0x1400000 (heap
-// growth via SYS_brk is rejected past 0x13FF000).
-#define USER_STACK_BASE 0x1400000UL
+// mm->end_brk ≤ 0x203FF000 and USER_STACK_BASE = 0x20400000 (heap
+// growth via SYS_brk is rejected past 0x203FF000).
+#define USER_STACK_BASE 0x20400000UL
 #define USER_STACK_TOP  (USER_STACK_BASE + 0x200000UL - 16)
 
 /* ── EEVDF scheduler ─────────────────────────── */

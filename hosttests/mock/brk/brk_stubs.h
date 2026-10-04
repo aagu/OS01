@@ -51,7 +51,7 @@ brk_page_record_t *brk_find_page(uint64_t phys);
  * Index = (va - USER_CODE_ADDR) >> 12 (no PAGE_HUGE — brk never
  * creates huge leaves).  Heap PAGE_* are taken from production
  * <memory/vmm.h> via the runtime header. */
-#define BRK_PTE_TABLE_SIZE   4096          /* 16 MiB / 4 KiB */
+#define BRK_PTE_TABLE_SIZE   131072        /* 512 MiB / 4 KiB */
 #define BRK_PTE_USER_OFFSET  0x400000UL
 
 typedef struct {

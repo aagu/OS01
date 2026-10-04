@@ -63,7 +63,7 @@ extern page_pool_record_t elf_load_page_pool[ELF_LOAD_PAGE_POOL_SIZE];
  *
  * Index 0 = first user page at USER_CODE_ADDR (0x400000). */
 #define ELF_LOAD_PTE_USER_OFFSET  0x400000UL
-#define ELF_LOAD_PTE_TABLE_SIZE   4096         /* covers [0x400000, 0x1400000) */
+#define ELF_LOAD_PTE_TABLE_SIZE   131072        /* covers [0x400000, 0x20400000) */
 
 typedef struct {
     uint64_t pte;          /* phys | flags (PAGE_VALID set if present) */

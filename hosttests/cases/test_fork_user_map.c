@@ -46,9 +46,11 @@
 #include <memory/vmm.h>
 
 /* ── Layout constants (mirror kernel/memory/vma.c) ───────────── */
-#define USER_CODE_ADDR   0x400000UL
-#define HEAP_LIMIT       (USER_CODE_ADDR + 0x1000000UL - 0x1000UL)
-#define USER_STACK_BASE  0x1400000UL
+#define USER_CODE_ADDR     0x400000UL
+#define USER_ENVELOPE_SIZE 0x20000000UL
+#define USER_PAGE_SIZE     USER_ENVELOPE_SIZE
+#define USER_STACK_BASE    0x20400000UL
+#define HEAP_LIMIT         (USER_CODE_ADDR + USER_ENVELOPE_SIZE - 0x1000UL)
 
 #define PROT_RW (PROT_READ | PROT_WRITE)
 #define ANON_PRIV (MAP_ANONYMOUS | MAP_PRIVATE)

@@ -29,9 +29,9 @@
 /* ── User VA constraints (per isolation spec §4) ─────────────
  *
  * USER_CODE_ADDR = 0x400000   — lowest legitimate user address.
- * USER_PAGE_SIZE = 0x1000000  — user VA range = 16 MiB (Task 6, libgfx).
- * USER_STACK_BASE = 0x1400000 — stack region, 2 MiB above heap_limit.
- * HEAP_LIMIT = USER_CODE_ADDR + USER_PAGE_SIZE - 0x1000 = 0x13ff000
+ * USER_ENVELOPE_SIZE = 0x20000000 — user VA envelope = 512 MiB.
+ * USER_STACK_BASE = 0x20400000 — stack region, 2 MiB above heap_limit.
+ * HEAP_LIMIT = USER_CODE_ADDR + USER_ENVELOPE_SIZE - 0x1000 = 0x203ff000
  *                — 4 KiB guard page between heap and stack.
  *
  * Every PT_LOAD must fit inside [USER_CODE_ADDR, HEAP_LIMIT], and
@@ -42,9 +42,11 @@
  * validator must compile on the host where those headers drag in
  * arch-specific code.
  */
-#define USER_CODE_ADDR  0x400000UL
-#define USER_PAGE_SIZE  0x1000000UL
-#define HEAP_LIMIT      (USER_CODE_ADDR + USER_PAGE_SIZE - 0x1000UL)
+#define USER_CODE_ADDR     0x400000UL
+#define USER_ENVELOPE_SIZE 0x20000000UL  // 512 MiB
+#define USER_PAGE_SIZE     USER_ENVELOPE_SIZE  // Compatibility alias
+#define USER_STACK_BASE    0x20400000UL
+#define HEAP_LIMIT         (USER_CODE_ADDR + USER_ENVELOPE_SIZE - 0x1000UL)
 
 #define PAGE_4K_MASK    (~0xFFFUL)
 

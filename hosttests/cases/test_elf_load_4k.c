@@ -39,9 +39,10 @@
 
 /* ── Layout constants (mirror kernel/include/.../task.h and
  *    isolation spec §4) ─────────────────────────────────────── */
-#define USER_CODE_ADDR  0x400000UL
-#define USER_PAGE_SIZE  0x1000000UL
-#define HEAP_LIMIT      (USER_CODE_ADDR + USER_PAGE_SIZE - 0x1000UL)
+#define USER_CODE_ADDR     0x400000UL
+#define USER_ENVELOPE_SIZE 0x20000000UL
+#define USER_PAGE_SIZE     USER_ENVELOPE_SIZE
+#define HEAP_LIMIT         (USER_CODE_ADDR + USER_ENVELOPE_SIZE - 0x1000UL)
 
 #define PAGE_VALID_BIT  0x1UL
 #define PAGE_WRITE_BIT  0x2UL

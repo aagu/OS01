@@ -103,14 +103,14 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result);
 //                                     page in the envelope is mapped,
 //                                     but the whole envelope is
 //                                     protected.
-//   [mm->start_brk,   0x13ff000)       heap reserve — the entire
+//   [mm->start_brk,   HEAP_LIMIT (0x203ff000)) heap reserve — the entire
 //                                     brk window, not just the
 //                                     committed pages; covers the
 //                                     zero-length VM_HEAP VMA's
 //                                     range too.  The upper bound is
-//                                     FIXED at 0x13ff000 — it does
+//                                     FIXED at 0x203ff000 — it does
 //                                     NOT track end_brk.
-//   [0x13ff000,       0x1400000)       heap→stack guard page.
+//   [0x203ff000,      0x20400000)      heap→stack guard page.
 //   [USER_STACK_BASE, +0x200000)       the 2 MiB user stack.
 //
 // Caller MUST:
