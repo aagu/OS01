@@ -7,7 +7,20 @@
 
 #include <arch/spinlock.h>
 #include <arch/irq.h>
+#include <arch/cpu.h>
 #include <percpu/percpu.h>
+
+/* x86 weak fallback for the slab boot assertion bound (v4 fix for v3
+ * review item 8: a UINT64_MAX + meta_bytes computation here would wrap
+ * into a small address and fail the assert, so the fallback simply
+ * reports "no bound" and never participates in an addition). The
+ * aarch64 strong implementation lives in
+ * kernel/arch/aarch64/memory/early_arena.c and returns the absolute VA
+ * one past the slab metadata segment. */
+__attribute__((weak)) uint64_t PMMngr_end_of_struct_upper_bound(void)
+{
+    return (uint64_t)-1;  /* x86 skips this aarch64-specific assertion */
+}
 
 struct Slab_Cache kmalloc_cache_size[16] = 
 {
@@ -424,6 +437,24 @@ size_t slab_init()
 	debug_mm("3.PMMngr.bits_map:%#018lx\tzone_struct->page_using_count:%d\tzone_struct->page_free_count:%d\n",*PMMngr.bits_map,PMMngr.zones_struct->page_using_count,PMMngr.zones_struct->page_free_count);
 
 	debug_mm("start_code:%#018lx,end_code:%#018lx,end_data:%#018lx,end_brk:%#018lx,end_of_struct:%#018lx\n",PMMngr.start_code,PMMngr.end_code,PMMngr.end_data,PMMngr.start_brk, PMMngr.end_of_struct);
+
+	/* Boot-time invariant (M2 Task 6): the slab metadata written above
+	 * must fit inside the segment the arena planner reserved for it.
+	 * PMMngr_end_of_struct_upper_bound() is a strong aarch64 override
+	 * (early_arena.c) returning slab_meta_start_va + meta_bytes; the
+	 * x86 weak fallback returns (uint64_t)-1 so the assert self-skips
+	 * there. (uint64_t)-1 also means "no bound" on aarch64 pre-prepare
+	 * or checked-overflow, so the comparison can never false-fail. */
+	if (PMMngr.end_of_struct > PMMngr_end_of_struct_upper_bound()) {
+		color_printk(RED, BLACK,
+		             "slab_init() FATAL: end_of_struct=%#018lx exceeds slab_meta upper bound=%#018lx\n",
+		             PMMngr.end_of_struct,
+		             PMMngr_end_of_struct_upper_bound());
+		/* kpanic is not in the aarch64 kernel source whitelist; the
+		 * pmm.c fatal-path convention (color_printk + arch_cpu_halt)
+		 * is used instead. */
+		arch_cpu_halt();
+	}
 
 	return 1;
 }

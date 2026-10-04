@@ -47,6 +47,8 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    random/random.c \
                    ../libc/random/chacha20.c \
                    ../runtime/builtins/udivti3.c \
+                   selftest/selftest.c \
+                   selftest/test_slab_selftest.c \
                    selftest/test_arch_atomic_u64.c \
                    selftest/test_aarch64_rndr_encoding.c
 else

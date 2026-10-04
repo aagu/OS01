@@ -228,6 +228,20 @@ def self_test() -> None:
     assert degraded_passed(current_degraded_log, expect_selftest=True), \
         "degraded_passed ignores expect_selftest"
 
+    # expect_slab (M2 Task 6): requires exactly one
+    # '[selftest] slab: 16/16 PASS' marker anywhere in the log.
+    slab_log = current_log_for_2_cpus + "[selftest] slab: 16/16 PASS\n"
+    assert passed(slab_log, cpus=2, expect_slab=True), \
+        "exactly-one slab 16/16 PASS marker must pass with expect_slab=True"
+    assert passed(current_log_for_2_cpus, cpus=2, expect_slab=True) is False, \
+        "missing slab 16/16 PASS marker must reject when expect_slab=True"
+    slab_dup = current_log_for_2_cpus + "[selftest] slab: 16/16 PASS\n" \
+        + "[selftest] slab: 16/16 PASS\n"
+    assert passed(slab_dup, cpus=2, expect_slab=True) is False, \
+        "duplicate slab 16/16 PASS marker must reject (exactly-one enforced)"
+    assert passed(current_log_for_2_cpus, cpus=2), \
+        "expect_slab default-off preserves legacy behavior"
+
     # --expect-gic 断言（Task 2.1 + 3.1）：只用合成 log 测 gic_evidence_ok 解析
     # 行为。不再组合 GIC+IPI marker 调 passed(), 因为 kernel 现状不发 IPI marker
     # (Task 3.2 GREEN 才会发); 组合调用恒失败。每条 assertion 单独构造独立合成
@@ -455,7 +469,8 @@ def gic_evidence_ok(text: str, cpus: int) -> bool:
 
 
 def passed(text: str, cpus: int, expect_selftest: bool = False,
-           expect_gic: bool = False, expect_clk: bool = False) -> bool:
+           expect_gic: bool = False, expect_clk: bool = False,
+           expect_slab: bool = False) -> bool:
     """Recognize a complete normal-mode SMP run without QEMU dependencies."""
     # PL011 currently emits LF+CR. Match lines consistently for saved logs
     # and live serial drains, while retaining the original fixture format.
@@ -521,6 +536,17 @@ def passed(text: str, cpus: int, expect_selftest: bool = False,
         if re.search(r"^UEFI-A64: pt map smoke FAIL$", text, re.MULTILINE):
             print(f"FAIL: 'UEFI-A64: pt map smoke FAIL' present in log "
                   f"(text length {len(text)})")
+            return False
+    if expect_slab:
+        # M2 Task 6: the built-in selftest suite must actually run on the
+        # aarch64 kernel and cover all 16 kmalloc caches — require the
+        # exact final marker printed by kernel/selftest/test_slab_selftest.c
+        # exactly once (it runs once per boot on the BSP).
+        slab_lines = re.findall(r"^\[selftest\] slab: 16/16 PASS$",
+                                text.replace("\r", ""), re.MULTILINE)
+        if len(slab_lines) != 1:
+            print(f"FAIL: expected exactly one '[selftest] slab: 16/16 PASS' "
+                  f"in the log, found {len(slab_lines)}")
             return False
     topology = re.search(r"^\[smp\] topology\b[^\n]*\brequested=(\d+)\b[^\n]*\bdiscovered=(\d+)\b", text, re.MULTILINE)
     if topology:
@@ -595,7 +621,8 @@ def acceptance_evidence(args: argparse.Namespace, text: str, cpus: int) -> bool:
             variant=getattr(args, "m1_variant", "normal"),
         )
     return passed(text, cpus, expect_selftest=expect_selftest,
-                  expect_gic=expect_gic, expect_clk=expect_clk)
+                  expect_gic=expect_gic, expect_clk=expect_clk,
+                  expect_slab=getattr(args, "expect_slab_selftest", False))
 
 
 def qemu_command(args: argparse.Namespace, cpus: int, diagnostic_dtb: str | None) -> list[str]:
@@ -768,6 +795,10 @@ def main() -> int:
     parser.add_argument("--expect-selftest", action="store_true",
                         help="Require 'UEFI-A64: pmm alloc smoke OK' log line "
                              "between RAM summary and topology line")
+    parser.add_argument("--expect-slab-selftest", action="store_true",
+                        help="Require exactly one '[selftest] slab: 16/16 "
+                             "PASS' marker from the built-in kernel selftest "
+                             "suite (M2 Task 6)")
     parser.add_argument("--expect-gic", action="store_true",
                         help="Require GICv2 framework markers: driver init, "
                              "dispatch ready, save-restore probe OK, "

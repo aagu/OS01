@@ -57,6 +57,9 @@ static int test_slab_many_sizes(void)
     return 0;
 }
 
+#if !defined(__aarch64__)
+/* x86_64-only bodies: vfs_lookup/vfs_read live in fs/*.c, which is not
+ * in the aarch64 kernel source whitelist. */
 static int test_vfs_mount_root(void)
 {
     struct vfs_node *root = vfs_lookup("/");
@@ -92,6 +95,7 @@ static int test_procfs_read_meminfo(void)
     }
     return 0;
 }
+#endif /* !__aarch64__ */
 
 static int test_spinlock_basic(void)
 {
@@ -111,6 +115,7 @@ static int test_pipe_basic(void)
 
 int test_rwlock_basic(void);
 int test_seqlock_basic(void);
+int test_slab_16_caches(void);
 
 // ── External test functions (defined in subsystem .c files) ──
 // Forward-declared here instead of polluting public headers.
@@ -147,14 +152,28 @@ int selftest_run_all(void)
 {
     selftest_register("slab_alloc_free",   test_slab_alloc_free);
     selftest_register("slab_many_sizes",   test_slab_many_sizes);
+    /* M2 Task 6: all 16 kmalloc caches. Portable — kmalloc/kfree and
+     * the cache table exist on both aarch64 and x86_64. Prints the
+     * parser-asserted '[selftest] slab: 16/16 PASS' marker. */
+    selftest_register("slab_16_caches",    test_slab_16_caches);
+#if !defined(__aarch64__)
+    /* x86_64-only: these tests pull in subsystems (VFS, ext2, sync
+     * primitives, TSC timer, ...) that are not in the aarch64 kernel
+     * source whitelist, so registering them there would break the
+     * link. */
     selftest_register("vfs_mount_root",    test_vfs_mount_root);
     selftest_register("procfs_read_meminfo", test_procfs_read_meminfo);
+#endif /* !__aarch64__ */
     selftest_register("spinlock_basic",    test_spinlock_basic);
+#if !defined(__aarch64__)
+    /* Bodies in selftest/test_sync.c (not in the aarch64 whitelist). */
     selftest_register("rwlock_basic",      test_rwlock_basic);
     selftest_register("seqlock_basic",     test_seqlock_basic);
+#endif /* !__aarch64__ */
     selftest_register("pipe_basic",        test_pipe_basic);
 
 #ifdef OS01_SELFTEST
+#if !defined(__aarch64__)
     selftest_register("ext2_magic",        ext2_selftest_magic);
     selftest_register("ext2_struct_sizes", ext2_selftest_struct_sizes);
     selftest_register("ext2_block_alloc",      ext2_selftest_block_alloc);
@@ -179,6 +198,7 @@ int selftest_run_all(void)
     selftest_register("arch_atomic_u64_or_and", test_arch_atomic_u64_or_and);
     selftest_register("entropy_quality_selftest_current_mode",
                       entropy_quality_selftest_current_mode);
+#endif /* !__aarch64__ */
 #endif
 
     int passed = 0, failed = 0;

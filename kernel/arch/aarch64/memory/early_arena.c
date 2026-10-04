@@ -625,6 +625,49 @@ const struct aarch64_m1_arena *aarch64_m1_arena_get(void)
     return &published_arena;
 }
 
+/* Slab metadata placement accessor (spec §3.2). Returns the absolute
+ * VA at which slab_init's metadata begins: the arena base high alias
+ * plus the PMM metadata layout's align_down semantic end_of_struct_off.
+ * This is the single source of truth for where the slab segment starts,
+ * shared with slab.c's boot-time upper-bound assertion via
+ * PMMngr_end_of_struct_upper_bound() below.
+ *
+ * Before a successful aarch64_m1_prepare() — or if the derivation
+ * overflows — returns (uint64_t)-1 so the slab assertion self-skips
+ * instead of failing on a garbage bound. */
+uint64_t aarch64_m1_slab_meta_start_va(void)
+{
+    uint64_t base_va;
+    if (!arena_prepared) return (uint64_t)-1;
+    if (checked_add((uint64_t)ARCH_PAGE_OFFSET, published_arena.base_pa,
+                    &base_va))
+        return (uint64_t)-1;
+    if (checked_add(base_va, published_arena.layout.end_of_struct_off,
+                    &base_va))
+        return (uint64_t)-1;
+    return base_va;
+}
+
+/* Strong override of the slab boot assertion bound (weak fallback in
+ * kernel/memory/slab.c returns (uint64_t)-1, which self-skips the
+ * assert on x86_64 and on any pre-prepare aarch64 boot).
+ *
+ * Returns the absolute VA one past the slab metadata segment:
+ *   aarch64_m1_slab_meta_start_va() + slab_layout_compute().meta_bytes
+ * computed with checked add so no input can wrap into a small address
+ * (v4 fix for v3 review item 8 — the bound is never allowed to
+ * participate in a potentially-overflowing addition downstream). */
+uint64_t PMMngr_end_of_struct_upper_bound(void)
+{
+    struct slab_layout sl = slab_layout_compute();
+    uint64_t base = aarch64_m1_slab_meta_start_va();
+    uint64_t upper;
+    if (base == (uint64_t)-1) return (uint64_t)-1;
+    if (!checked_add(base, sl.meta_bytes, &upper))
+        return (uint64_t)-1;
+    return upper;
+}
+
 /* ── Strong override of pmm_arch_boot_reservations ─────────────
  * Returns the single arena range so pmm_init reserves the frames.
  * Without a successful aarch64_m1_prepare, returns -EINVAL so the

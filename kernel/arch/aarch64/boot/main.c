@@ -6,6 +6,8 @@
 #include <arch/aarch64/m1_selftest.h>
 #include <core/bootinfo.h>
 #include <log/log.h>      /* for log_err/log_info macros */
+#include <core/printk.h>  /* for serial_printk (selftest markers) */
+#include <core/selftest.h> /* for selftest_run_all (OS01_SELFTEST builds) */
 #include <memory/memory.h>   /* for struct boot_context / Virt_To_Phy */
 #include <memory/pmm.h>      /* for PMMngr, struct Page, alloc_pages, free_pages, ZONE_NORMAL */
 #include <memory/pmm_arch.h> /* for pmm_arch_normalize (preflight caller) */
@@ -427,6 +429,21 @@ void aarch64_main(const struct boot_context *handoff)
         log_err("M1 FATAL reason=probe\n");
         for (;;) arch_cpu_halt();
     }
+
+#if defined(OS01_SELFTEST)
+    /* M2 Task 6: run the built-in kernel selftests (selftest.c) on the
+     * BSP after PMM/slab are up — mirrors kernel/core/main.c on x86_64.
+     * The aarch64 registration set is portable-only (see the
+     * __aarch64__ guards in selftest.c); prints the harness-asserted
+     * '[selftest] slab: 16/16 PASS' marker among others. Placement:
+     * after M1 runtime init / probe prepare, before DTB/GIC/SMP setup,
+     * so the sync-fault probe block below stays the last pre-SMP
+     * activity. */
+    {
+        int failed = selftest_run_all();
+        serial_printk("[selftest] done (failed=%d)\n", failed);
+    }
+#endif
 
 #if AARCH64_SYNC_FAULT_TEST
     /* AAGU-EL1-sync (spec §5): a controlled EL1h sync fault probe.

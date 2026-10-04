@@ -171,4 +171,16 @@ int aarch64_m1_prepare(const struct MEMORY_RANGE *ram, size_t count);
  * read-only; callers must not retain the pointer past local edits. */
 const struct aarch64_m1_arena *aarch64_m1_arena_get(void);
 
+/* Absolute VA at which slab_init's metadata segment begins (spec §3.2:
+ * arena base high alias + layout.end_of_struct_off). Returns
+ * (uint64_t)-1 before a successful prepare or on checked-arith
+ * overflow — the slab.c boot assertion treats that as "no bound". */
+uint64_t aarch64_m1_slab_meta_start_va(void);
+
+/* Strong aarch64 override of the slab boot assertion bound:
+ * aarch64_m1_slab_meta_start_va() + slab_layout_compute().meta_bytes,
+ * checked add. The weak fallback in kernel/memory/slab.c returns
+ * (uint64_t)-1 so x86_64 (and un-prepared boots) skip the assert. */
+uint64_t PMMngr_end_of_struct_upper_bound(void);
+
 #endif /* OS01_AARCH64_EARLY_ARENA_H */
