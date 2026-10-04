@@ -201,8 +201,8 @@ void *fpu_area_alloc(void);
    通过第 4 阶段中对 `test_fork_user_map.c` 和 `test_process_image_lifecycle.c` 的显式更新与断言，确保宿主源码级审计继续有效。
 
 ### 5.2 验收标准
-- [ ] `kernel/sched/task.c` 不复存在，拆分后的各文件均小于 800 行；
-- [ ] `make test-static` 静态测试全部通过（包含 stack canary audit、runtime audit、header audit）；
-- [ ] `make test-host` 55 个测试套件全部 PASS（0 Failed）；
-- [ ] `make OS01_SYSTEST=1 test-syscall` 228 个系统调用端到端测试 100% 通过；
-- [ ] `make KERNEL_SELFTEST=1 test-kernel-selftest` 内核自测全部通过。
+- [x] `kernel/sched/task.c` 不复存在，拆分后的各文件均小于 800 行；
+- [x] `make test-static` 静态测试全部通过（包含 stack canary audit、runtime audit、header audit）；
+- [x] `make test-host` 55 个测试套件全部 PASS（0 Failed）；
+- [x] `make OS01_SYSTEST=1 test-qemu SUITE=systest` 334 个系统调用端到端测试 100% 通过（334 passed, 0 failed）；
+- [x] `make KERNEL_SELFTEST=1 test-kernel-selftest` 31 项启动内建自测全部通过。

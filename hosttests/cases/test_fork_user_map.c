@@ -451,12 +451,12 @@ static const char *task_c_path(void)
     marker = strstr(full, "/hosttests/");
     if (marker) {
         snprintf(buf, sizeof(buf),
-                 "%.*s/kernel/sched/task.c",
+                 "%.*s/kernel/sched/fork.c",
                  (int)(marker - full), full);
         return buf;
     }
     if (strncmp(full, "hosttests/", 10) == 0)
-        return "kernel/sched/task.c";
+        return "kernel/sched/fork.c";
     return NULL;
 }
 

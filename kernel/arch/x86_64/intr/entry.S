@@ -320,7 +320,11 @@ ENTRY(system_call)
 // pointer, and then leave+ret to unwind back to kernel_main.
 ENTRY(idle_resume)
 	sti               // re-enable IRQs (disabled by switch_to's cli)
-	popq	%rax      // undo first pushq %rax from the initial switch_to
+	popq	%r15
+	popq	%r14
+	popq	%r13
+	popq	%r12
+	popq	%rbx
 	popq	%rbp      // restore task_init's frame pointer
 	leave             // mov rsp, rbp; pop rbp — unwinds task_init's frame
 	ret               // return to kernel_main → while(1) hlt()
