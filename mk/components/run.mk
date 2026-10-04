@@ -534,13 +534,14 @@ test-syscall-repeat: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAG
 # test-static = the umbrella: runs every static audit in one shot.
 # Delegates the 4 runtime-audit checks + validate-kernel to test-runtime
 # (its prerequisite) so the recipe never drifts from the runtime target.
-# The remaining 3 audits (layout, canary-contract, user-canary) are
-# distinct in harness/prereqs and stay in this recipe.
+# The remaining audits (layout, canary-contract, user-canary, syscall
+# boundary) are distinct in harness/prereqs and stay in this recipe.
 .PHONY: test-static test-runtime test-kernel-layout test-kernel-canary-contract test-user-canary
 
-# ── test-static: 5 runtime audits via test-runtime + 3 standalone ──
+# ── test-static: 5 runtime audits via test-runtime + 4 standalone ──
 test-static: test-runtime
 	$(call require_capability,rootfs)
+	python3 qemutests/syscall_boundary_audit.py
 	python3 qemutests/x86_64_kernel_layout_test.py "$(KERNEL_BUILD_DIR)/kernel.elf" \
 	  --llvm-nm "$(LLVM_NM)" --llvm-readelf "$(LLVM_READELF)"
 	python3 qemutests/kernel_canary_contract_test.py
@@ -738,7 +739,7 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-static'         '(rootfs)'     'All 8 static audits (runtime, stack-canary, validate-kernel, link-order, kernel-layout, kernel-canary-contract, test-user-canary)';
+		 'test-static'         '(rootfs)'     'All 9 static audits (runtime, stack-canary, validate-kernel, link-order, kernel-layout, kernel-canary-contract, test-user-canary, syscall-boundary)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-kernel-selftest' '(rootfs)'   'QEMU built-in selftests (isolated selftest image, KERNEL_SELFTEST=1)';
 	@printf '  %-22s %-13s %s\n' \

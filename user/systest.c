@@ -23,6 +23,7 @@
 #include <stddef.h>
 #include <rbtree.h>
 #include <sys/random.h>
+#include <sys/socket.h>
 #include <sys/mman.h>
 #include <sys/ssp.h>
 
@@ -68,6 +69,36 @@ static void test_putchar(void)
 {
     int64_t ret = syscall(SYS_putchar, (uint64_t)'X', 0, 0);
     CHECK3(ret >= 0, "putchar", "no crash");
+}
+
+// ── Network syscall boundary checks ─────────────────────────
+// Use the six-argument entry directly so sendto's destination and
+// addrlen arrive in arguments five and six at the common dispatcher.
+static void test_sendto_user_boundaries(void)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        FAIL("sendto user boundaries (UDP socket setup)");
+        return;
+    }
+
+    char payload = 'x';
+    int64_t bad_pointer = syscall6(SYS_sendto, (uint64_t)fd,
+                                   (uint64_t)&payload, sizeof(payload), 0,
+                                   1, sizeof(struct sockaddr_in));
+    CHECKF(bad_pointer == -EFAULT, "sendto invalid sockaddr pointer",
+           "%lld", "%lld", (long long)bad_pointer);
+
+    struct sockaddr_in destination = { 0 };
+    destination.sin_family = AF_INET;
+    int64_t short_length = syscall6(SYS_sendto, (uint64_t)fd,
+                                    (uint64_t)&payload, sizeof(payload), 0,
+                                    (uint64_t)&destination,
+                                    sizeof(destination) - 1);
+    CHECKF(short_length == -EFAULT, "sendto short sockaddr length",
+           "%lld", "%lld", (long long)short_length);
+
+    close(fd);
 }
 
 // ── 1: write ───────────────────────────────────────────────
@@ -777,6 +808,47 @@ static void test_kill_signal_deliver(void)
 
     if (got) PASS("kill+deliver", "SIGUSR1 child parent handler ran");
     else PASS("kill", "SIGUSR1 sent (delivery framework present)");
+}
+
+// The x86 signal frame's saved rax is at byte 0x80. Change it in
+// the restorer so an unconditional syscall result writeback loses the
+// sentinel and fails the test. No C prologue may alter the frame RSP.
+static void __attribute__((naked)) restore_nonzero_rax(void)
+{
+    asm volatile("movq $0x13579bdf, 0x80(%rsp)\n\t"
+                 "mov $43, %rax\n\t"
+                 "int $0x80\n\t"
+                 "ud2");
+}
+
+static void test_sigreturn_saved_frame(void)
+{
+    struct sigaction act = {0}, old;
+    act.sa_handler = on_deliver;
+    act.sa_restorer = restore_nonzero_rax;
+    sigusr1_delivered = 0;
+    if (sigaction(SIGUSR1, &act, &old) != 0) {
+        FAIL("sigreturn saved rax: install handler");
+        return;
+    }
+    int64_t result = syscall(SYS_kill, (uint64_t)getpid(), SIGUSR1, 0);
+    CHECK3(result == 0x13579bdf && sigusr1_delivered == 1,
+           "sigreturn saved rax", "resumes with restored nonzero rax");
+    sigaction(SIGUSR1, &old, NULL);
+
+    // A readable frame with a kernel CS must fail validation and write
+    // -EINVAL into rax, while leaving the caller's other registers alone.
+    uint64_t bad_frame[25] = {0};
+    uint64_t saved_rsp;
+    asm volatile("mov %%rsp, %[saved]\n\t"
+                 "mov %[frame], %%rsp\n\t"
+                 "mov $43, %%rax\n\t"
+                 "int $0x80\n\t"
+                 "mov %[saved], %%rsp"
+                 : "=a"(result), [saved] "=&r"(saved_rsp)
+                 : [frame] "r"(bad_frame)
+                 : "memory", "cc");
+    CHECK3(result == -EINVAL, "sigreturn invalid CS", "validation error written to rax");
 }
 
 // ── 40: sync ───────────────────────────────────────────────
@@ -2222,6 +2294,24 @@ static void test_exec_hostile_argv(void) {
     argv_many[OVER] = NULL;
     int64_t r3 = exec("/bin/spin", (char *const *)argv_many, NULL);
     CHECK3(r3 < 0, "exec_hostile_argv", "MAX_ARGV+1 elements -> <0 (kernel survives)");
+}
+
+static void test_exec_hostile_envp(void)
+{
+    char *argv[] = { "/bin/spin", NULL };
+    char *bad_envp[] = { (char *)(uintptr_t)0x1000, NULL };
+    int64_t result = syscall(SYS_exec, (uint64_t)"/bin/spin",
+                             (uint64_t)argv, (uint64_t)bad_envp);
+    CHECK3(result == -EFAULT, "exec hostile envp", "bad element returns EFAULT");
+
+    char *many_argv[66], *many_envp[65];
+    for (int i = 0; i < 65; i++) many_argv[i] = "arg";
+    many_argv[65] = NULL;
+    for (int i = 0; i < 64; i++) many_envp[i] = "K=V";
+    many_envp[64] = NULL;
+    result = syscall(SYS_exec, (uint64_t)"/bin/spin",
+                     (uint64_t)many_argv, (uint64_t)many_envp);
+    CHECK3(result == -E2BIG, "exec combined limit", "65 argv + 64 envp rejected");
 }
 
 // ── 75: hostile-pointer E2E group (Tasks 1-8 regression) ─────
@@ -3869,11 +3959,13 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"signal handler sync", test_signal_handler_sync},
     {"poll",               test_poll},
     {"putchar",           test_putchar},
+    {"sendto user boundaries", test_sendto_user_boundaries},
     {"write",             test_write},
     {"brk",               test_brk},
     {"getpid/getppid",    test_getpid_getppid},
     {"fork+exec+waitpid", test_fork_exec_waitpid},
     {"exec_hostile_argv", test_exec_hostile_argv},
+    {"exec_hostile_envp", test_exec_hostile_envp},
     {"hostile", test_hostile},
     {"devfs_open_inherit", test_devfs_open_inherited_fg_pgrp},
     {"orphan_reparent",   test_orphan_reparent},
@@ -3904,6 +3996,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"kill+deliver",      test_kill_signal_deliver},
     {"sync",              test_sync},
     {"sigprocmask",       test_sigprocmask},
+    {"sigreturn_saved_frame", test_sigreturn_saved_frame},
     {"ext2_write",        test_ext2_write},
     {"boot_fat_mount",    test_boot_fat_mount},
     // {"pipe+dup2",         test_pipe_dup2_inherit},

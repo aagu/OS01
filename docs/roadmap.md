@@ -76,10 +76,10 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 | 项 | 问题 | 目标 / 完成条件 | 依赖 |
 |----|------|----------------|------|
-| ARCH-1 syscall 层脱离 arch | 74 个 syscall 以 ~2000 行 `switch` 写在 `kernel/arch/x86_64/intr/trap.c::do_system_call`，`SYS_open`/`SYS_chdir`/`SYS_stat` 等直接内联 VFS/路径逻辑；aarch64 `trap.c` 无 syscall 分发，接入用户态只能复制 | 新建 arch-neutral `kernel/syscall/`（+ `kernel/include/syscall/`）：`sys_call_table[]` 函数指针分发，按子系统拆 `sys_fs.c`/`sys_proc.c`/`sys_mm.c`…；arch 层只负责寄存器 ↔ 参数/返回值。x86_64 systest 全量回归 | 无；aarch64 M4 / 中断 dispatch 统一的前置 |
-| ARCH-2 Linux ABI 兼容层独立 | 自有 ABI 与 Linux 翻译表混在 `do_system_call` 热路径；`static const int8_t linux_to_os01[320]` 只能表示 ≤127 的 OS01 号，超出后**静默溢出**；新增 syscall 需同改编号、翻译表、`switch` 三处 | **保持 OS01 ABI 为标准**；Linux 翻译抽到独立兼容模块（如 `kernel/syscall/compat_linux.c`），表项类型改 `int16_t`/显式 `SYS_xxx` 枚举，`_Static_assert(SYS_MAX < 表项上限)`；兼容层负责参数/结构体语义差异（stat、sigaction 等），核心 syscall 只见 OS01 语义；未映射号统一 `-ENOSYS` | ARCH-1 |
+| ARCH-1 syscall 层脱离 arch（已完成） | 原 74 个 syscall 的业务 `switch` 位于 `kernel/arch/x86_64/intr/trap.c::do_system_call`；aarch64 用户态接入前需抽离 | 2026-10-04 完成：`kernel/syscall/` 分组处理 + 统一分发表，x86_64 只负责寄存器解码、Linux ABI 预翻译和信号返回；74 个 handler，62 号保留名称但未实现。host 56/56、静态审计、systest 340/340、网络 QEMU 与正常启动通过；内核自测间歇性超时另列 Parked | aarch64 M4 / 中断 dispatch 统一的前置 ✅ |
+| ARCH-2 Linux ABI 兼容层独立 | Linux 翻译表仍在 `do_system_call` 热路径；`static const int8_t linux_to_os01[320]` 只能表示 ≤127 的 OS01 号，超出后**静默溢出**；新增兼容映射仍需维护这张表 | **保持 OS01 ABI 为标准**；Linux 翻译抽到独立兼容模块（如 `kernel/syscall/compat_linux.c`），表项类型改 `int16_t`/显式 `SYS_xxx` 枚举，`_Static_assert(SYS_MAX < 表项上限)`；兼容层负责参数/结构体语义差异（stat、sigaction 等），核心 syscall 只见 OS01 语义；未映射号统一 `-ENOSYS` | ARCH-1 ✅ |
 | ARCH-3 头文件定义全局 + `-z muldefs`（已完成） | `sched/task.h` 直接定义 `init_task_union`/`init_task[]`/`init_mm`/`init_thread`/`init_tss[]`，被 37 个 TU 包含，每个 `.o` 都有强符号；靠 `kernel/arch/x86_64/make.config` 的 `-z muldefs` 链接通过，会吞掉所有真实重复定义；x86 `struct tss_struct` 与硬编码 IST 地址位于通用调度器头 | 头文件只留 `extern`；定义迁到 `sched/task.c` 与 `arch/x86_64/`；TSS 移到 `kernel/include/arch/x86_64/`；移除 `-z muldefs` 并清理由此暴露的重复符号；`test-static` 加“无 muldefs / 头文件无对象定义”审计（2026-10-04 完成，详见 changelog） | 无（正确性优先） |
-| ARCH-4 拆分 `sched/task.c` | 2764 行混合 EEVDF 调度/负载均衡、fork(COW)、exec + 用户栈/auxv、信号/进程组、kthread，以及 `sys_symlink`/`sys_readlink`/`sys_lstat`/`sys_fstatat` 等 FS syscall | 拆为 `sched/core.c`、`sched/fair.c`（EEVDF）、`sched/balance.c`、`kernel/fork.c`、`kernel/exec.c`、`kernel/signal.c`；FS syscall 迁 `fs/` 或 ARCH-1 的 `sys_fs.c`；纯搬迁不改语义，systest + selftest 回归 | ARCH-1（FS syscall 去向） |
+| ARCH-4 拆分 `sched/task.c` | 仍混合 EEVDF 调度/负载均衡、fork(COW)、exec + 用户栈/auxv、信号/进程组和 kthread；原 FS syscall 已随 ARCH-1 迁至 `kernel/syscall/sys_fs.c` | 按已完成的 ARCH-4 设计拆分调度、fork、exec 和 signal；纯搬迁不改语义，systest + selftest 回归 | ARCH-1 ✅ |
 | ARCH-5 VFS 抽象补强 | `vfs_ops` 无 `lookup`/`getattr`/`permission`，路径解析靠 `readdir` 线性扫描（O(n)、无 dentry cache）；`vfs_node` 缺 mode/uid/gid/时间戳/nlink；挂载按路径字符串前缀匹配；无 FS 类型注册表（`fat_vfs_ops`/`ext2_vfs_ops` 全局 extern） | 引入 `file_system_type` 注册 + mount by type；`inode_operations`/`file_operations` 分离并新增 `lookup`/`getattr`；`vfs_node` 补元数据；挂载点挂在 node 上；简单 dentry cache。分阶段 spec，每阶段 FS 回归 | 独立；完成后利好 P5 权限/FIFO/openat |
 | ARCH-6 FS 并发与块缓存 | `fat.c`、`tmpfs.c` 0 处加锁（`ext2.c` 19 处），默认 `-smp 2` 下 FAT 表/簇分配/tmpfs 目录存在数据竞争；全内核无 buffer/page cache，每次读直达 AHCI | 短期：每挂载点锁兜底 FAT/tmpfs；中期：blockdev 层按 (dev, blkno) 哈希的块缓存，ext2/FAT 共用，含写回与一致性；SMP 并发读写压力用例 | 独立（正确性优先）；块缓存与 ARCH-9 块层解耦协同 |
 | ARCH-7 移除 `#define mmap uint64_t*` | `memory/vmm.h:80`、`fs/vfs.h:77`、`fs/devfs.h:46` 三处定义类型宏，`vfs_ops` 用 `#undef`/恢复绕行；任何名为 `mmap` 的标识符都会被替换 | 改 `typedef uint64_t *pgd_t;`（或等价名）全仓替换，删除 save/restore 绕行 | 无；宜在 aarch64 M3 VMM 接口前完成 |
@@ -135,7 +135,9 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 ### Parked（未闭环 follow-on，随时可拾起）
 
-目前无挂起的 Parked 项。此前挂起的 follow-ons（sysroot 头文件级增量重编、idle 正名、CFLAGS 编译参数缓存失效、compat/ 目录裁撤、x86 驱动目录重定位、softirq ifdef 清除、LWIP_RAND 种子等）已全部闭环并归档至 `docs/changelog.md`。
+此前挂起的 follow-ons（sysroot 头文件级增量重编、idle 正名、CFLAGS 编译参数缓存失效、compat/ 目录裁撤、x86 驱动目录重定位、softirq ifdef 清除、LWIP_RAND 种子等）已全部闭环并归档至 `docs/changelog.md`。当前挂起：
+
+- **`test_tty_vintr` 间歇性超时（2026-10-04，ARCH-1 验证时发现）**：`make PROFILE=x86_64-clang KERNEL_SELFTEST=1 test-kernel-selftest` 偶尔在启动自测 31/31 通过后停于 `[selftest] test_tty_vintr...`，缺少 `[selftest] task tests done`；同一提交重跑也能通过，本地 master 合并验收再次复现超时。临时阶段诊断曾观察到 VINTR 注入后目标线程的 SIGINT 位已设置、状态为 RUNNING，但等待方未及时看到 `vintr_seen`。根因未确认，不能断言由 ARCH-1 引入或已修复；未改调度器/TTY 自测。后续需稳定复现并采集目标线程 `on_cpu`/`on_rq`、所属 CPU 与调度进展，单独修复后反复运行独立内核自测；syscall systest 不与它合跑。
 
 > **独立缺陷备忘**：aarch64 contract `targets` mode 依赖 x86 build 目录存在（`make -n PROFILE=x86_64-clang kernel.bin` 的 `+` 前缀 artifact recipe 在 `-n` 下也会执行，clean workspace 下跑 aarch64 contract 会触发）。
 

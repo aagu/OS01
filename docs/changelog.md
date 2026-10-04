@@ -7,6 +7,7 @@
 
 ## 2026-10-04
 
+- refactor(syscall): **ARCH-1 syscall 层脱离 arch** —— commits `2765103..74e3cfeb`：74 个已实现处理器迁至 `kernel/syscall/`，x86_64 入口保留寄存器解码、Linux ABI 预翻译和用户态信号返回；`SYS_getpeername`（62）保留 trace 名称但无 handler、返回 `-EINVAL`。新增分发表 hosttest 与静态边界审计；host 56/56、syscall systest 340/340、网络 QEMU、普通启动通过。独立内核自测在 `test_tty_vintr` 有通过和超时两种结果，本地 master 合并验收亦复现超时；根因未确认并列入 roadmap Parked。
 - refactor(arch): **ARCH-3 头文件定义全局 + 彻底移除 `-z muldefs`**：
   - 彻底移除 `kernel/arch/x86_64/make.config` 与 `kernel/arch/aarch64/make.config` 中的 `-z muldefs` / `-Wl,-z,muldefs` 链接参数，消除链接期对符号冲突的静默吞噬
   - 全局对象定义迁入 `.c`：`kernel/include/sched/task.h` 中的 `init_task_union`、`init_task[]`、`init_mm`、`init_thread` 迁入 `kernel/sched/task.c`；`kernel/include/intr/interrupt.h` 中的 `irq_table` 迁入 `kernel/intr/irq.c`

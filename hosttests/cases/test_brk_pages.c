@@ -590,14 +590,14 @@ static void test_brk_result_set_on_success(void)
  * covered by `make OS01_SYSTEST=1 test-qemu SUITE=systest`.
  */
 
-/* Locate kernel/arch/x86_64/intr/trap.c relative to THIS test file
+/* Locate a kernel source file relative to THIS test file
  * (__FILE__), never a hardcoded absolute path: the suite must pass in
  * any checkout/worktree/CI.  __FILE__ is derived from how the Makefile
  * compiles this TU (TEST_CASES is $(realpath ..)/hosttests/cases, so
  * it is absolute and contains "/hosttests/").  Fallbacks cover a
  * relative __FILE__ (resolve via getcwd()) and a cwd inside the
  * hosttests directory.  Returns NULL if the layout is unrecognized. */
-static const char *trap_c_path(void)
+static const char *kernel_source_path(const char *relative_path)
 {
     static char buf[1024];
     char full[1024];
@@ -615,14 +615,14 @@ static const char *trap_c_path(void)
     marker = strstr(full, "/hosttests/");
     if (marker) {
         snprintf(buf, sizeof(buf),
-                 "%.*s/kernel/arch/x86_64/intr/trap.c",
-                 (int)(marker - full), full);
+                 "%.*s/%s",
+                 (int)(marker - full), full, relative_path);
         return buf;
     }
     /* Relative __FILE__ ("hosttests/cases/...") with cwd == repo root:
      * the repo root is the current directory. */
     if (strncmp(full, "hosttests/", 10) == 0)
-        return "kernel/arch/x86_64/intr/trap.c";
+        return relative_path;
     return NULL;
 }
 
@@ -704,14 +704,14 @@ static void test_sys_brk_calls_mm_set_brk(void)
     TEST_SUITE("SYS_brk — delegates to mm_set_brk (old direct writeback absent)");
 
     size_t len;
-    char *src = slurp_file(trap_c_path(), &len);
+    char *src = slurp_file(kernel_source_path("kernel/syscall/sys_mm.c"), &len);
     assert_not_null(src);
 
     /* Bound the case body by the next case label so the checks cannot
      * be satisfied by code elsewhere in the dispatcher. */
     char *brk_case = strstr(src, "case SYS_brk: {");
     assert_not_null(brk_case);
-    char *brk_end = strstr(brk_case, "case SYS_getpid");
+    char *brk_end = strstr(brk_case, "case SYS_mmap");
     assert_not_null(brk_end);
     size_t body_len = (size_t)(brk_end - brk_case);
 
@@ -724,7 +724,7 @@ static void test_sys_brk_calls_mm_set_brk(void)
     assert_true(!source_contains(brk_case, body_len, "mm->end_brk = addr"));
 
     /* Success returns *result, not the raw requested address. */
-    assert_true(source_contains(brk_case, body_len, "regs->rax = result"));
+    assert_true(source_contains(brk_case, body_len, "syscall_result = result"));
 
     /* Must include <memory/vma.h> so the prototype is visible. */
     assert_true(source_contains(src, len, "#include <memory/vma.h>"));
@@ -737,17 +737,17 @@ static void test_sys_brk_returns_result_on_success(void)
     TEST_SUITE("SYS_brk — returns *result on success");
 
     size_t len;
-    char *src = slurp_file(trap_c_path(), &len);
+    char *src = slurp_file(kernel_source_path("kernel/syscall/sys_mm.c"), &len);
     assert_not_null(src);
 
     /* SYS_brk must store the result value (not raw end_brk) so
      * that the mm_set_brk contract — "on failure *result unchanged" —
-     * holds.  Pattern: regs->rax = result; (after a successful
+     * holds.  Pattern: syscall_result = result; (after a successful
      * mm_set_brk call). */
     int has_pattern = source_contains_in_case(
         src, len,
         "case SYS_brk: {",
-        "regs->rax = result;");
+        "syscall_result = result;");
     assert_true(has_pattern);
 
     free(src);
@@ -758,7 +758,7 @@ static void test_heap_fault_does_not_demand_map(void)
     TEST_SUITE("do_page_fault — heap absent-leaf guard ACTIVE, precedes demand mapping");
 
     size_t len;
-    char *src = slurp_file(trap_c_path(), &len);
+    char *src = slurp_file(kernel_source_path("kernel/arch/x86_64/intr/trap.c"), &len);
     assert_not_null(src);
 
     /* Locate the P=0 demand-allocation block inside do_page_fault. */
@@ -798,7 +798,7 @@ static void test_heap_fault_resolves_cow_for_committed_range(void)
     TEST_SUITE("do_page_fault — heap VMA COW leaf resolves under mm->lock");
 
     size_t len;
-    char *src = slurp_file(trap_c_path(), &len);
+    char *src = slurp_file(kernel_source_path("kernel/arch/x86_64/intr/trap.c"), &len);
     assert_not_null(src);
 
     /* The COW resolution path (PAGE_COW check) must still be
