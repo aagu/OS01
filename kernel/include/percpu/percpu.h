@@ -17,7 +17,7 @@
  * definition.
  *
  * Verified by `nm | grep percpu_data` (size = NR_CPUS × PERCPU_DATA_SIZE
- * = 8 × 144 = 1152 bytes on this build).
+ * = 8 × 152 = 1216 bytes on this build).
  */
 #define PERCPU_DATA_SIZE  152
 

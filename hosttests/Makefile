@@ -122,7 +122,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_m1_install.elf $(TEST_BLD)/test_m1_cleanup.elf \
     $(TEST_BLD)/test_m1_publish.elf \
     $(TEST_BLD)/test_slab_idempotent_reservation.elf \
-    $(TEST_BLD)/test_slab_basic_x86_count.elf
+    $(TEST_BLD)/test_slab_basic_x86_count.elf \
+    $(TEST_BLD)/test_percpu_layout.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -1213,6 +1214,27 @@ $(TEST_BLD)/test_aarch64_gic_target_probe.elf: \
 	$(HOST_CC) -o $@ $^
 
 test_aarch64_gic_target_probe: $(TEST_BLD)/test_aarch64_gic_target_probe.elf
+	$<
+
+# percpu_t layout pin hosttest (M3 Task 9): header-only TU that includes
+# the PRODUCTION kernel/include/percpu/percpu.h and repeats at runtime the
+# _Static_asserts that pin sizeof(percpu_t) == PERCPU_DATA_SIZE (the
+# literal head.S strides percpu_data[] with) and the ipi_ready/tlb_ack_gen
+# tail position that percpu_init()'s memset skips. No production objects —
+# the whole contract lives in the header's struct definition.
+# NOTE: deliberately NOT using $(FRAMEWORK_INC): its preinclude
+# mock/test_platform.h typedefs its own (stale, 144-byte-class) percpu_t,
+# which would shadow the real one this test exists to pin.
+$(TEST_BLD)/test_percpu_layout.o: $(TEST_CASES)/test_percpu_layout.c \
+		$(TESTS_DIR)/kernel/include/percpu/percpu.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_INC) $(KERNEL_INC) $(LIBC_INC) \
+		-c $< -o $@
+
+$(TEST_BLD)/test_percpu_layout.elf: $(TEST_BLD)/test_percpu_layout.o
+	$(HOST_CC) -o $@ $^
+
+test_percpu_layout: $(TEST_BLD)/test_percpu_layout.elf
 	$<
 
 # Foundational-primitives hosttest (M3 Task 7 Step 4): compiles the
