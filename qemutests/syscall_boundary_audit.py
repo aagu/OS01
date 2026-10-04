@@ -42,19 +42,29 @@ defined = {
     name: int(number)
     for name, number in re.findall(r"^\s*#\s*define\s+SYS_(\w+)\s+(\d+)\b", uapi, re.M)
 }
-entries = set(
-    re.findall(r"\[SYS_(\w+)\]\s*=\s*\{\s*\w+\s*,\s*\"[^\"]+\"\s*\}", dispatch)
-)
+entries = {
+    name: (handler, trace_name)
+    for name, handler, trace_name in re.findall(
+        r'\[SYS_(\w+)\]\s*=\s*\{\s*(NULL|0|\w+)\s*,\s*"([^"]+)"\s*\}',
+        dispatch,
+    )
+}
 if set(defined.values()) != set(range(75)):
     fail("kernel UAPI syscall definitions are not the complete 0..74 range")
-missing = sorted(set(defined) - entries)
-unexpected = sorted(entries - set(defined))
-if missing != ["getpeername"] or defined.get("getpeername") != 62:
-    fail(f"handler table coverage differs from UAPI; missing={missing}, expected only SYS_getpeername=62")
-if unexpected:
-    fail(f"handler table has non-UAPI entries: {unexpected}")
+missing = sorted(set(defined) - set(entries))
+unexpected = sorted(set(entries) - set(defined))
+if missing or unexpected:
+    fail(f"handler table keys differ from UAPI; missing={missing}, unexpected={unexpected}")
+wrong_names = sorted(name for name, (_, trace_name) in entries.items() if trace_name != name)
+if wrong_names:
+    fail(f"handler table trace names differ from SYS_* names: {wrong_names}")
+null_handlers = sorted(name for name, (handler, _) in entries.items() if handler in ("NULL", "0"))
+if null_handlers != ["getpeername"] or defined.get("getpeername") != 62:
+    fail(f"only SYS_getpeername=62 may have a null handler; found {null_handlers}")
 if len({defined[name] for name in entries}) != len(entries):
     fail("handler table maps multiple names to the same syscall number")
+if len(entries) - len(null_handlers) != 74:
+    fail(f"expected 74 implemented syscall handlers; found {len(entries) - len(null_handlers)}")
 
 documented = {
     name: int(number)
@@ -63,4 +73,4 @@ documented = {
 if documented != defined:
     fail("documentation syscall table does not exactly match UAPI names and numbers")
 
-print("syscall boundary audit: PASS (no legacy switch, generic handlers stay arch-neutral, docs/UAPI 0..74 aligned, absent 62)")
+print("syscall boundary audit: PASS (no legacy switch, generic handlers stay arch-neutral, docs/UAPI 0..74 aligned, 74 handlers, named absent 62)")

@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <stdio.h>
+#include <string.h>
 #include <syscall/dispatch.h>
 #include <uapi/syscall.h>
 
@@ -23,7 +24,9 @@ int main(void)
 {
     syscall_ctx_t ctx = { .nr = UINT64_MAX };
     if (syscall_has_handler(SYS_getpeername) || syscall_has_handler(62) ||
-        syscall_has_handler(UINT64_MAX))
+        syscall_has_handler(UINT64_MAX) ||
+        !syscall_name(SYS_getpeername) ||
+        strcmp(syscall_name(SYS_getpeername), "getpeername") != 0)
         return 1;
     ctx.nr = 62;
     if (syscall_dispatch(&ctx) != -EINVAL)

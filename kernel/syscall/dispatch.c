@@ -71,6 +71,7 @@ static const syscall_entry_t syscall_table[SYS_fstatat + 1] = {
     [SYS_accept] = { sys_net_dispatch, "accept" },
     [SYS_setsockopt] = { sys_net_dispatch, "setsockopt" },
     [SYS_getsockname] = { sys_net_dispatch, "getsockname" },
+    [SYS_getpeername] = { 0, "getpeername" },
     [SYS_getifaddr] = { sys_net_dispatch, "getifaddr" },
     [SYS_getsockopt] = { sys_net_dispatch, "getsockopt" },
     [SYS_shutdown] = { sys_net_dispatch, "shutdown" },
