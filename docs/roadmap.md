@@ -17,7 +17,7 @@ roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `
 
 ## 待实施路线图（按 5 优先级）
 
-> **P0 工程基础** ✅ → **P1 安全加固** → **P2 aarch64 适配** → **P3 GUI** → **P4 硬件适配** → **P5 ABI 扩展/兼容性**
+> **P0 工程基础** ✅ → **P1 安全加固** → **P2 aarch64 适配 + 架构治理/扩展性** → **P3 GUI** → **P4 硬件适配** → **P5 ABI 扩展/兼容性**
 
 ### 🔒 P1 安全加固
 
@@ -66,6 +66,25 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 **距离单一 kernel_main 还差多远（粗估，一个人全职）**：~4–8 周。详见 `docs/arch.md` 末段 3 个 spec/plan 增量推进。
 
 **永远无法统一的（ISA/HW 差异）**：`head.S`/`entry.S` 指令集差异；MMU 页表格式（PTE bit-position）；中断控制器驱动；SoC 外设（UART/timer/GPIO 等）。靠 arch 抽象层封装，统一接口、不统一实现。
+
+### 🧱 P2 架构治理 / 扩展性（2026-10-04 仓库扫描）
+
+来源：2026-10-04 全仓扫描（架构合理性 / 扩展性）确认的 10 项问题，与 aarch64 适配同属 P2。ARCH-1/2 是 aarch64 用户态（M4、中断/异常 dispatch 统一）的前置；ARCH-3、ARCH-6 属正确性风险，P2 内优先处理。
+
+**ABI 决策（2026-10-04）**：OS01 自有 syscall ABI（`kernel/include/uapi/syscall.h`）为**唯一标准**；Linux x86_64 ABI 仅作为兼容层（服务 BusyBox 等 `PF_LINUX_ABI` 二进制），不反向主导编号或语义。
+
+| 项 | 问题 | 目标 / 完成条件 | 依赖 |
+|----|------|----------------|------|
+| ARCH-1 syscall 层脱离 arch | 74 个 syscall 以 ~2000 行 `switch` 写在 `kernel/arch/x86_64/intr/trap.c::do_system_call`，`SYS_open`/`SYS_chdir`/`SYS_stat` 等直接内联 VFS/路径逻辑；aarch64 `trap.c` 无 syscall 分发，接入用户态只能复制 | 新建 arch-neutral `kernel/syscall/`（+ `kernel/include/syscall/`）：`sys_call_table[]` 函数指针分发，按子系统拆 `sys_fs.c`/`sys_proc.c`/`sys_mm.c`…；arch 层只负责寄存器 ↔ 参数/返回值。x86_64 systest 全量回归 | 无；aarch64 M4 / 中断 dispatch 统一的前置 |
+| ARCH-2 Linux ABI 兼容层独立 | 自有 ABI 与 Linux 翻译表混在 `do_system_call` 热路径；`static const int8_t linux_to_os01[320]` 只能表示 ≤127 的 OS01 号，超出后**静默溢出**；新增 syscall 需同改编号、翻译表、`switch` 三处 | **保持 OS01 ABI 为标准**；Linux 翻译抽到独立兼容模块（如 `kernel/syscall/compat_linux.c`），表项类型改 `int16_t`/显式 `SYS_xxx` 枚举，`_Static_assert(SYS_MAX < 表项上限)`；兼容层负责参数/结构体语义差异（stat、sigaction 等），核心 syscall 只见 OS01 语义；未映射号统一 `-ENOSYS` | ARCH-1 |
+| ARCH-3 头文件定义全局 + `-z muldefs` | `sched/task.h` 直接定义 `init_task_union`/`init_task[]`/`init_mm`/`init_thread`/`init_tss[]`，被 37 个 TU 包含，每个 `.o` 都有强符号；靠 `kernel/arch/x86_64/make.config` 的 `-z muldefs` 链接通过，会吞掉所有真实重复定义；x86 `struct tss_struct` 与硬编码 IST 地址位于通用调度器头 | 头文件只留 `extern`；定义迁到 `sched/task.c` 与 `arch/x86_64/`；TSS 移到 `kernel/include/arch/x86_64/`；移除 `-z muldefs` 并清理由此暴露的重复符号；`test-static` 加“无 muldefs / 头文件无对象定义”审计 | 无（正确性优先） |
+| ARCH-4 拆分 `sched/task.c` | 2764 行混合 EEVDF 调度/负载均衡、fork(COW)、exec + 用户栈/auxv、信号/进程组、kthread，以及 `sys_symlink`/`sys_readlink`/`sys_lstat`/`sys_fstatat` 等 FS syscall | 拆为 `sched/core.c`、`sched/fair.c`（EEVDF）、`sched/balance.c`、`kernel/fork.c`、`kernel/exec.c`、`kernel/signal.c`；FS syscall 迁 `fs/` 或 ARCH-1 的 `sys_fs.c`；纯搬迁不改语义，systest + selftest 回归 | ARCH-1（FS syscall 去向） |
+| ARCH-5 VFS 抽象补强 | `vfs_ops` 无 `lookup`/`getattr`/`permission`，路径解析靠 `readdir` 线性扫描（O(n)、无 dentry cache）；`vfs_node` 缺 mode/uid/gid/时间戳/nlink；挂载按路径字符串前缀匹配；无 FS 类型注册表（`fat_vfs_ops`/`ext2_vfs_ops` 全局 extern） | 引入 `file_system_type` 注册 + mount by type；`inode_operations`/`file_operations` 分离并新增 `lookup`/`getattr`；`vfs_node` 补元数据；挂载点挂在 node 上；简单 dentry cache。分阶段 spec，每阶段 FS 回归 | 独立；完成后利好 P5 权限/FIFO/openat |
+| ARCH-6 FS 并发与块缓存 | `fat.c`、`tmpfs.c` 0 处加锁（`ext2.c` 19 处），默认 `-smp 2` 下 FAT 表/簇分配/tmpfs 目录存在数据竞争；全内核无 buffer/page cache，每次读直达 AHCI | 短期：每挂载点锁兜底 FAT/tmpfs；中期：blockdev 层按 (dev, blkno) 哈希的块缓存，ext2/FAT 共用，含写回与一致性；SMP 并发读写压力用例 | 独立（正确性优先）；块缓存与 ARCH-9 块层解耦协同 |
+| ARCH-7 移除 `#define mmap uint64_t*` | `memory/vmm.h:80`、`fs/vfs.h:77`、`fs/devfs.h:46` 三处定义类型宏，`vfs_ops` 用 `#undef`/恢复绕行；任何名为 `mmap` 的标识符都会被替换 | 改 `typedef uint64_t *pgd_t;`（或等价名）全仓替换，删除 save/restore 绕行 | 无；宜在 aarch64 M3 VMM 接口前完成 |
+| ARCH-8 子系统框架补完 | phase 用魔数 3–6，Phase 1–2 / 7–9 仍硬编码于 `kernel_main`；同 phase 内顺序依赖链接顺序（需 link-order 审计兜底）；必需子系统失败只打印 `FAIL` 继续启动；固定表 `MAX_SUBSYS 64`/`MAX_SUBSYS_PERCPU 16`；框架自身用 `serial_printk` 违背日志规范 | 命名 phase 枚举并覆盖全部启动阶段；支持显式依赖（或 phase 内 order 字段）取代链接顺序；非 OPTIONAL 失败 `panic`；表改链接段驱动（容量随注册数）；日志改 `log_*` | 与“统一 kernel_main”协同 |
+| ARCH-9 驱动模型 / 总线抽象 | 驱动自行 `pci_find_device(class, subclass…)`，无 `pci_driver` + id_table / probe-remove；`net/net.c` 用全局 `is_virtio` 在 e1000/virtio-net 间 `if` 分支，无 `net_device` 抽象；通用 `block/blockdev.c` 内含 `default_ahci_read/write` | 引入 `pci_driver`（id_table 匹配 + probe）；`net_device` ops 抽象，多网卡可共存；块层去 AHCI 耦合，驱动注册自己的 `block_device_ops` | 独立；P4 NVMe/USB 的前置 |
+| ARCH-10 静态容量与工程卫生 | `NR_CPUS 8` 三处重复定义；`MAX_GSI 24` 仅够单 IOAPIC，与 `MAX_IOAPICS 4` 矛盾；`POLL_MAX_FDS 16` 栈数组硬拒；`BLOCKDEV_MAX 8`、`DEVFS_MAX_DEVICES 32` 固定表。`.gitignore` 忽略全部 `*.S`，新增汇编默认不入库，例外路径 `kernel/arch/x86_64/thread_entry.S` 已过时（实为 `cpu/thread_entry.S`）；AGENTS.md 仍称“Makefile 无头文件依赖”但 `kernel/Makefile` 已 `-MD -MP`；源码树残留 `kernel/fs/select.o`、`kernel/kernel.bin` | `NR_CPUS` 单点定义；GSI 上限按 IOAPIC 枚举动态计算；poll 改堆分配 + `RLIMIT_NOFILE` 上限；设备表改动态/链表；`.gitignore` 收窄 `*.S` 规则（只忽略生成物如 `kallsyms.S`）；同步 AGENTS.md 构建依赖描述；清理源码树构建产物 | 独立 |
 
 ### 🖥 P3 GUI
 
