@@ -88,6 +88,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_lwip_rand.elf \
     $(TEST_BLD)/test_gic_driver.elf \
     $(TEST_BLD)/test_aarch64_ipi_broadcast.elf \
+    $(TEST_BLD)/test_foundational_primitives.elf \
     $(TEST_BLD)/test_gic_marker_lines.elf \
     $(TEST_BLD)/test_gic_probe.elf \
     $(TEST_BLD)/test_clocksource.elf \
@@ -1190,6 +1191,44 @@ $(TEST_BLD)/test_aarch64_ipi_broadcast.elf: $(TEST_BLD)/test_aarch64_ipi_broadca
 test_aarch64_ipi_broadcast: $(TEST_BLD)/test_aarch64_ipi_broadcast.elf
 	$<
 
+# Foundational-primitives hosttest (M3 Task 7 Step 4): compiles the
+# PRODUCTION kernel/arch/aarch64/memory/vmm_gate.c (root registry,
+# smp_starting, ipi_ready_count, vmm gate). The preinclude
+# vmm_gate_test_runtime.h short-circuits percpu/spinlock; the test TU
+# supplies percpu_data[], a mock dtb_cpu_count() and overrides the weak
+# vmm_gate_violation() hook with a longjmp capture.
+VMM_GATE_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC)
+# Production TU only: preinclude the stub BEFORE any kernel header.
+VMM_GATE_PROD_CFLAGS := $(VMM_GATE_HOST_CFLAGS) \
+                        -include $(TEST_MOCK)/vmm_gate_test_runtime.h
+
+$(TEST_BLD)/vmm_gate_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/vmm_gate.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_gate.h \
+		$(TEST_MOCK)/vmm_gate_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VMM_GATE_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_foundational_primitives.o: $(TEST_CASES)/test_foundational_primitives.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_gate.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/dtb.h \
+		$(TEST_MOCK)/vmm_gate_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VMM_GATE_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_foundational_primitives.elf: $(TEST_BLD)/test_foundational_primitives.o \
+		$(TEST_BLD)/vmm_gate_production.o
+	$(HOST_CC) -o $@ $^
+
+# Link stubs for tests that pull production files calling into vmm_gate.c
+# (test_m1_install compiles boot_direct_map.c, which publishes the M1 root).
+$(TEST_BLD)/vmm_gate_test_stubs.o: $(TEST_MOCK)/vmm_gate_test_stubs.c \
+		$(TEST_MOCK)/vmm_gate_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VMM_GATE_HOST_CFLAGS) -I$(TEST_MOCK) -c $< -o $@
+
+test_foundational_primitives: $(TEST_BLD)/test_foundational_primitives.elf
+	$<
+
 # GICv2 marker lines: source-level RED check (Task 2.1). QEMU aarch64-uefi
 # is currently blocked by thirdpart/{posix-uefi,mbedtls,lwip} submodule
 # emptiness; the marker lines that the kernel would emit are checked at
@@ -1568,7 +1607,7 @@ $(TEST_BLD)/m1_install_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/boo
 $(TEST_BLD)/test_m1_install.o: $(TEST_CASES)/test_m1_install.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(M1_A64_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
-$(TEST_BLD)/test_m1_install.elf: $(TEST_BLD)/test_m1_install.o $(TEST_BLD)/m1_install_production.o $(TEST_BLD)/runtime_tree_production.o
+$(TEST_BLD)/test_m1_install.elf: $(TEST_BLD)/test_m1_install.o $(TEST_BLD)/m1_install_production.o $(TEST_BLD)/runtime_tree_production.o $(TEST_BLD)/vmm_gate_production.o $(TEST_BLD)/vmm_gate_test_stubs.o
 	$(HOST_CC) -o $@ $^
 .PHONY: test-m1-install
 test-m1-install: $(TEST_BLD)/test_m1_install.elf

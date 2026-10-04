@@ -19,6 +19,7 @@
 
 #include <arch/mmu.h>
 #include <arch/aarch64/page_table.h>
+#include <arch/aarch64/vmm_gate.h>
 #include <arch/aarch64/boot_direct_map.h>
 #include <memory/pmm.h>
 
@@ -411,6 +412,7 @@ static int walk_to_l3(uint64_t *root, uint64_t va, bool create,
 int aarch64_pt_map_4k(uint64_t *root, uint64_t va, uint64_t pa,
                       uint32_t perm)
 {
+    vmm_gate_check();
     int rv = root_valid(root);
     if (rv != AARCH64_PT_OK) return rv;
     if (!va_canonical(va)) return AARCH64_PT_EINVAL;
@@ -438,6 +440,7 @@ int aarch64_pt_map_4k(uint64_t *root, uint64_t va, uint64_t pa,
 int aarch64_pt_query_4k(const uint64_t *root, uint64_t va,
                         uint64_t *pa_out, uint32_t *perm_out)
 {
+    vmm_gate_check();
     int rv = root_valid(root);
     if (rv != AARCH64_PT_OK) return rv;
     if (!va_canonical(va)) return AARCH64_PT_EINVAL;
@@ -464,6 +467,7 @@ int aarch64_pt_query_4k(const uint64_t *root, uint64_t va,
 int aarch64_pt_unmap_4k(uint64_t *root, uint64_t va,
                         uint64_t *pa_out, uint32_t *perm_out)
 {
+    vmm_gate_check();
     int rv = root_valid(root);
     if (rv != AARCH64_PT_OK) return rv;
     if (!va_canonical(va)) return AARCH64_PT_EINVAL;
@@ -495,6 +499,7 @@ int aarch64_pt_unmap_4k(uint64_t *root, uint64_t va,
 bool aarch64_pt_range_accessible(const uint64_t *root, uint64_t va,
                                  uint64_t length, bool write, bool user)
 {
+    vmm_gate_check();
     if (length == 0) return true;
     if (va + length < va) return false;       /* overflow */
     if (root == NULL) return false;
