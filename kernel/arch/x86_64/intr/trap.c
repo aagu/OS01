@@ -22,6 +22,7 @@
 #include <errno.h>
 #include <uapi/syscall.h>
 #include <syscall/dispatch.h>
+#include <syscall/compat.h>
 #include <string.h>
 typedef int pid_t;
 #include <core/debug.h>
@@ -1043,93 +1044,26 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
     }
 #endif
 
-    // Linux x86_64 ABI translation (for busybox etc.)
-    if ((current->flags & PF_LINUX_ABI) && regs->rax < 320) {
-        static const int8_t linux_to_os01[320] = {
-            [0] = 6,   // read -> SYS_read
-            [1] = 1,   // write -> SYS_write (same)
-            [2] = 7,   // open -> SYS_open
-            [3] = 8,   // close -> SYS_close
-            [4] = 16,  // stat -> SYS_stat
-            [5] = 17,  // fstat -> SYS_fstat
-            [6]   = 73, // lstat      → SYS_lstat     (was -1 unsupported)
-            [8] = 18,  // lseek -> SYS_lseek
-            [9]  = 44,  // mmap
-            [10] = 45,  // mprotect
-            [11] = 46,  // munmap
-            [12] = 3,  // brk -> SYS_brk
-            [13] = 39, // rt_sigaction -> SYS_signal
-            [14] = 42, // sigprocmask -> SYS_sigprocmask
-            [16] = 20, // ioctl -> SYS_ioctl
-            [21] = 22, // access -> SYS_access
-            [25] = -1, // mremap -> unsupported
-            [32] = 9,  // dup -> SYS_dup
-            [33] = 10, // dup2 -> SYS_dup2
-            [35] = 31, // nanosleep -> SYS_nanosleep
-            [39] = 4,  // getpid -> SYS_getpid
-            [56] = 11, // clone -> SYS_fork
-            [57] = 11, // fork -> SYS_fork
-            [59] = 5,  // execve -> SYS_exec
-            [60] = 2,  // _exit/exit_group -> SYS_exit
-            [61] = 12, // wait4 -> SYS_waitpid
-            [62] = 38, // kill -> SYS_kill
-            [63] = 35, // uname -> SYS_uname
-            [79] = 15, // getcwd -> SYS_getcwd
-            [80] = 14, // chdir -> SYS_chdir
-            [83] = 23, // unlink -> SYS_unlink (Linux: 87)
-            [84] = 24, // mkdir -> SYS_mkdir (Linux: 83)
-            [85] = 23, // unlink -> SYS_unlink (Linux 85 = rmdir on some)
-            [86] = 25, // rmdir -> SYS_rmdir
-            [87] = 23, // unlink -> SYS_unlink
-            [88]  = 71, // symlink    → SYS_symlink   (was missing)
-            [89]  = 72, // readlink   → SYS_readlink  (was 26 = SYS_rename; pre-existing bug)
-            [102] = 36,// getppid -> SYS_getppid (Linux: 110? no, 102)
-            [110] = 36,// getppid -> SYS_getppid
-            [162] = 31,// nanosleep -> SYS_nanosleep
-            [201] = 34,// times -> SYS_times
-            [217] = 21,// getdents64 -> SYS_getdents64
-            [231] = 2, // exit_group -> SYS_exit
-            [262] = 74,// newfstatat → SYS_fstatat   (was missing)
-
-		// Socket syscalls (Phase 10 networking)
-		[41] = 52,	// socket	→ SYS_socket
-		[42] = 54,	// connect	→ SYS_connect
-		[43] = 56,	// accept	→ SYS_accept
-		[44] = 57,	// sendto	→ SYS_sendto
-		[45] = 58,	// recvfrom	→ SYS_recvfrom
-		[49] = 53,	// bind	→ SYS_bind
-		[50] = 55,	// listen	→ SYS_listen
-		[51] = 61,	// getsockname	→ SYS_getsockname
-		[54] = 59,	// setsockopt	→ SYS_setsockopt
-		[55] = 60,	// getsockopt	→ SYS_getsockopt
-		[48] = 64,	// shutdown	→ SYS_shutdown
-		[164] = 63,	// getifaddr	→ SYS_getifaddr
-		[228] = 65,	// clock_gettime	→ SYS_clock_gettime
-		[318] = 66,	// getrandom	→ SYS_getrandom
-        };
-        int8_t os = linux_to_os01[regs->rax];
-        // `> 0` not `>= 0`: no Linux syscall in the table maps to OS01
-        // putchar (0), so os == 0 always means "zero-filled unmapped entry"
-        // and must fall through untranslated -> dispatcher default -> -EINVAL
-        // (the kernel's default for any unknown syscall; Linux's -ENOSYS
-        // convention for the ABI path is a separate pre-existing gap);
-        // os == -1 is the explicit unsupported sentinel (also falls through).
-        if (os > 0)
-            regs->rax = os;
-    }
     syscall_ctx_t syscall_ctx = {
         .nr = regs->rax,
         .args = { regs->rdi, regs->rsi, regs->rdx,
                   regs->r10, regs->r8, regs->r9 },
         .arch_frame = regs,
+        .suppress_writeback = false,
     };
-    const char *sname = syscall_name(syscall_ctx.nr);
-    debug_syscall("[strace] pid=%d syscall(%s, arg1=%#lx, arg2=%#lx, arg3=%#lx)\n",
-                  (int)current->pid, sname ? sname : "?",
-                  (unsigned long)regs->rdi,
-                  (unsigned long)regs->rsi,
-                  (unsigned long)regs->rdx);
-    int64_t result = syscall_dispatch(&syscall_ctx);
+
+    int64_t result;
+    if (current->flags & PF_LINUX_ABI) {
+        result = compat_linux_dispatch(&syscall_ctx);
+    } else {
+        const char *sname = syscall_name(syscall_ctx.nr);
+        debug_syscall("[strace] pid=%d syscall(%s, arg1=%#lx, arg2=%#lx, arg3=%#lx)\n",
+                      (int)current->pid, sname ? sname : "?",
+                      (unsigned long)regs->rdi,
+                      (unsigned long)regs->rsi,
+                      (unsigned long)regs->rdx);
+        result = syscall_dispatch(&syscall_ctx);
+    }
     if (!syscall_ctx.suppress_writeback)
         regs->rax = (uint64_t)result;
 

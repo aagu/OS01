@@ -43,6 +43,10 @@
 #define _KERNEL_PERCPU_H
 #endif
 
+#ifndef PF_LINUX_ABI
+#define PF_LINUX_ABI (1 << 3)
+#endif
+
 /* list_t for mm_t.vma_list — provided by libc/include/list.h on
  * the include path.  We only need the forward type for sizeof;
  * the loader never dereferences vma_list. */

@@ -76,6 +76,17 @@ typedef struct {
 /* p_type values */
 #define PT_NULL    0
 #define PT_LOAD    1
+#define PT_NOTE    4
+
+/* Note types */
+#define NT_GNU_ABI_TAG 1
+#define ELF_NOTE_OS_LINUX 0
+
+typedef struct {
+    uint32_t n_namesz;
+    uint32_t n_descsz;
+    uint32_t n_type;
+} __attribute__((packed)) elf64_nhdr_t;
 
 /* p_flags values */
 #define PF_X       1
@@ -104,5 +115,12 @@ int elf_validate(vfs_node_t *node);
  * Returns 0 on success, -1 on error.
  */
 int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point);
+
+/**
+ * elf_detect_abi() — Inspect an ELF's PT_NOTE segments for Linux ABI tags.
+ * Strictly avoids inspecting PT_INTERP.
+ * Returns PF_LINUX_ABI (from sched/task.h) if Linux ABI tag is found, 0 otherwise.
+ */
+uint32_t elf_detect_abi(vfs_node_t *node);
 
 #endif /* _FS_ELF_H */

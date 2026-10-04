@@ -52,6 +52,7 @@ else
 KERNEL_C_SOURCES := \
     $(wildcard core/*.c) \
     $(wildcard syscall/*.c) \
+    $(wildcard syscall/compat/*.c) \
     $(wildcard random/*.c) \
     $(wildcard log/*.c) \
     $(wildcard net/*.c) \

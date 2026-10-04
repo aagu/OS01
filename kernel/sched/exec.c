@@ -443,6 +443,7 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
         vfs_node_put(node);
         return -1;
     }
+    tsk->flags = (tsk->flags & ~PF_LINUX_ABI) | elf_detect_abi(node);
     vfs_node_put(node);
 
     // Set up heap.  mm_init_user_heap installs the unique zero-length
@@ -628,6 +629,7 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
         vfs_node_put(node);
         return -ENOEXEC;
     }
+    uint32_t abi_flag = elf_detect_abi(node);
     vfs_node_put(node);
 
     // Set up the heap.  mm_init_user_heap installs the unique
@@ -704,6 +706,7 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     // shell-child-signal-inheritance problem.
     for (int sig = 1; sig < NSIG; sig++)
         current->sighand[sig].sa_handler = SIG_DFL;
+    current->flags = (current->flags & ~PF_LINUX_ABI) | abi_flag;
 
     // 8. Overwrite pt_regs for RESTORE_ALL → iretq to the new process
     regs->cs      = USER_CS;

@@ -3948,6 +3948,116 @@ static void test_cow_kernel_outputs(void)
     }
 }
 
+static void test_linux_abi_compat(void)
+{
+    static const uint8_t linux_probe_code[] = {
+        0x48, 0xc7, 0xc0, 0x27, 0x00, 0x00, 0x00,
+        0xcd, 0x80,
+        0x48, 0x85, 0xc0,
+        0x7e, 0x2b,
+        0x48, 0xc7, 0xc0, 0xe7, 0x03, 0x00, 0x00,
+        0xcd, 0x80,
+        0x48, 0x83, 0xf8, 0xda,
+        0x75, 0x2d,
+        0x48, 0xc7, 0xc0, 0x19, 0x00, 0x00, 0x00,
+        0xcd, 0x80,
+        0x48, 0x83, 0xf8, 0xda,
+        0x75, 0x2f,
+        0x48, 0xc7, 0xc0, 0x3c, 0x00, 0x00, 0x00,
+        0x48, 0x31, 0xff,
+        0xcd, 0x80,
+        0xf4,
+        0x48, 0xc7, 0xc0, 0x3c, 0x00, 0x00, 0x00,
+        0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,
+        0xcd, 0x80,
+        0xf4,
+        0x48, 0xc7, 0xc0, 0x3c, 0x00, 0x00, 0x00,
+        0x48, 0xc7, 0xc7, 0x02, 0x00, 0x00, 0x00,
+        0xcd, 0x80,
+        0xf4,
+        0x48, 0xc7, 0xc0, 0x3c, 0x00, 0x00, 0x00,
+        0x48, 0xc7, 0xc7, 0x03, 0x00, 0x00, 0x00,
+        0xcd, 0x80,
+        0xf4,
+    };
+
+    uint8_t elf_img[0x1000 + sizeof(linux_probe_code)];
+    memset(elf_img, 0, sizeof(elf_img));
+
+    uint8_t *p = elf_img;
+    p[0] = 0x7f; p[1] = 'E'; p[2] = 'L'; p[3] = 'F';
+    p[4] = 2; p[5] = 1; p[6] = 1;
+    *(uint16_t *)(p + 16) = 2;
+    *(uint16_t *)(p + 18) = 0x3e;
+    *(uint32_t *)(p + 20) = 1;
+    *(uint64_t *)(p + 24) = 0x400000;
+    *(uint64_t *)(p + 32) = 64;
+    *(uint16_t *)(p + 52) = 64;
+    *(uint16_t *)(p + 54) = 56;
+    *(uint16_t *)(p + 56) = 2;
+
+    uint8_t *ph0 = elf_img + 64;
+    *(uint32_t *)(ph0 + 0)  = 1;
+    *(uint32_t *)(ph0 + 4)  = 5;
+    *(uint64_t *)(ph0 + 8)  = 0x1000;
+    *(uint64_t *)(ph0 + 16) = 0x400000;
+    *(uint64_t *)(ph0 + 24) = 0x400000;
+    *(uint64_t *)(ph0 + 32) = sizeof(linux_probe_code);
+    *(uint64_t *)(ph0 + 40) = sizeof(linux_probe_code);
+    *(uint64_t *)(ph0 + 48) = 0x1000;
+
+    uint8_t *ph1 = elf_img + 120;
+    *(uint32_t *)(ph1 + 0)  = 4;
+    *(uint32_t *)(ph1 + 4)  = 4;
+    *(uint64_t *)(ph1 + 8)  = 0x200;
+    *(uint64_t *)(ph1 + 32) = 32;
+    *(uint64_t *)(ph1 + 40) = 32;
+    *(uint64_t *)(ph1 + 48) = 4;
+
+    uint8_t *note = elf_img + 0x200;
+    *(uint32_t *)(note + 0) = 4;
+    *(uint32_t *)(note + 4) = 16;
+    *(uint32_t *)(note + 8) = 1;
+    memcpy(note + 12, "GNU\0", 4);
+    *(uint32_t *)(note + 16) = 0;
+    *(uint32_t *)(note + 20) = 4;
+    *(uint32_t *)(note + 24) = 4;
+    *(uint32_t *)(note + 28) = 0;
+
+    memcpy(elf_img + 0x1000, linux_probe_code, sizeof(linux_probe_code));
+
+    const char *probe_path = "/tmp/linux_probe.elf";
+    int fd = open(probe_path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    if (fd < 0) {
+        FAIL("linux_abi_compat", "failed to create probe ELF");
+        return;
+    }
+    ssize_t written = write(fd, elf_img, sizeof(elf_img));
+    close(fd);
+    if (written != (ssize_t)sizeof(elf_img)) {
+        FAIL("linux_abi_compat", "failed to write probe ELF");
+        unlink(probe_path);
+        return;
+    }
+
+    int64_t pid = fork();
+    if (pid == 0) {
+        char *argv[] = { (char *)probe_path, NULL };
+        exec(probe_path, argv, NULL);
+        _exit(127);
+    }
+
+    int st = -1;
+    int64_t waited = waitpid(pid, &st, 0);
+    unlink(probe_path);
+
+    int exit_code = (st >= 0 && (st & 0x7f) == 0) ? ((st >> 8) & 0xff) : -1;
+    CHECKF(waited == pid && exit_code == 0,
+           "54_linux_abi_compat",
+           "status=%d (exit=%d)", "status=%d (exit=%d)",
+           st, exit_code);
+}
+
 // ── Runner ─────────────────────────────────────────────────
 
 typedef void (*test_fn)(void);
@@ -4050,6 +4160,7 @@ static struct { const char *name; test_fn fn; } tests[] = {
     {"51_fork_brk_isolation",     test_fork_brk_isolation},
     {"52_fork_mmap_cow_isolation",test_fork_mmap_cow_isolation},
     {"53_cow_kernel_outputs", test_cow_kernel_outputs},
+    {"54_linux_abi_compat", test_linux_abi_compat},
 };
 
 int main(int argc, char **argv, char **envp)

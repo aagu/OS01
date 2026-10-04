@@ -112,7 +112,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_m1_contract.elf $(TEST_BLD)/test_m1_vmm.elf \
     $(TEST_BLD)/test_m1_install.elf $(TEST_BLD)/test_m1_cleanup.elf \
     $(TEST_BLD)/test_m1_publish.elf \
-    $(TEST_BLD)/test_syscall_dispatch.elf
+    $(TEST_BLD)/test_syscall_dispatch.elf \
+    $(TEST_BLD)/test_compat_linux.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -176,6 +177,18 @@ $(TEST_BLD)/test_syscall_dispatch.elf: $(TEST_CASES)/test_syscall_dispatch.c $(T
 	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) $^ -o $@
 
 test-syscall-dispatch: $(TEST_BLD)/test_syscall_dispatch.elf
+	$<
+
+$(TEST_BLD)/test_compat_linux.elf: $(TEST_CASES)/test_compat_linux.c \
+    $(TESTS_DIR)/kernel/syscall/dispatch.c \
+    $(TESTS_DIR)/kernel/syscall/compat/dispatch.c \
+    $(TESTS_DIR)/kernel/syscall/compat/table_x86_64.c \
+    $(TESTS_DIR)/kernel/syscall/compat/proc.c \
+    $(TESTS_DIR)/kernel/syscall/compat/fs.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) $^ -o $@
+
+test-compat-linux: $(TEST_BLD)/test_compat_linux.elf
 	$<
 
 # libc compilation

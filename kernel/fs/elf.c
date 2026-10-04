@@ -317,3 +317,72 @@ rollback:
     kfree(phdrs);
     return rc;
 }
+
+uint32_t elf_detect_abi(vfs_node_t *node)
+{
+    if (!node)
+        return 0;
+
+    elf64_ehdr_t ehdr;
+    int ret = vfs_read(node, 0, sizeof(ehdr), &ehdr);
+    if (ret != (int)sizeof(ehdr))
+        return 0;
+
+    if (ehdr.e_ident[EI_MAG0] != ELFMAG0 || ehdr.e_ident[EI_MAG1] != ELFMAG1 ||
+        ehdr.e_ident[EI_MAG2] != ELFMAG2 || ehdr.e_ident[EI_MAG3] != ELFMAG3)
+        return 0;
+
+    if (ehdr.e_ident[EI_CLASS] != ELFCLASS64 || ehdr.e_ident[EI_DATA] != ELFDATA2LSB)
+        return 0;
+
+    if (ehdr.e_phentsize != sizeof(elf64_phdr_t) || ehdr.e_phnum == 0)
+        return 0;
+
+    uint32_t abi_flag = 0;
+    for (uint16_t i = 0; i < ehdr.e_phnum && !abi_flag; i++) {
+        elf64_phdr_t phdr;
+        ret = vfs_read(node, ehdr.e_phoff + (uint64_t)i * sizeof(elf64_phdr_t),
+                       sizeof(phdr), &phdr);
+        if (ret != (int)sizeof(phdr))
+            break;
+
+        /* Strictly avoid inspecting PT_INTERP */
+        if (phdr.p_type != PT_NOTE || phdr.p_filesz < sizeof(elf64_nhdr_t))
+            continue;
+
+        uint32_t read_sz = phdr.p_filesz > 1024 ? 1024 : (uint32_t)phdr.p_filesz;
+        char *buf = kmalloc(read_sz);
+        if (!buf)
+            break;
+
+        ret = vfs_read(node, phdr.p_offset, read_sz, buf);
+        if (ret >= (int)sizeof(elf64_nhdr_t)) {
+            uint32_t off = 0;
+            while (off + sizeof(elf64_nhdr_t) <= (uint32_t)ret) {
+                elf64_nhdr_t *nh = (elf64_nhdr_t *)(buf + off);
+                uint32_t name_sz = (nh->n_namesz + 3) & ~3U;
+                uint32_t desc_sz = (nh->n_descsz + 3) & ~3U;
+                uint32_t name_off = off + sizeof(elf64_nhdr_t);
+                uint32_t desc_off = name_off + name_sz;
+                uint32_t next_off = desc_off + desc_sz;
+
+                if (next_off > (uint32_t)ret || desc_off > next_off)
+                    break;
+
+                if (nh->n_type == NT_GNU_ABI_TAG && nh->n_namesz == 4 && nh->n_descsz >= 16) {
+                    const char *name = buf + name_off;
+                    if (name[0] == 'G' && name[1] == 'N' && name[2] == 'U' && name[3] == '\0') {
+                        uint32_t os = *(uint32_t *)(buf + desc_off);
+                        if (os == ELF_NOTE_OS_LINUX) {
+                            abi_flag = PF_LINUX_ABI;
+                            break;
+                        }
+                    }
+                }
+                off = next_off;
+            }
+        }
+        kfree(buf);
+    }
+    return abi_flag;
+}

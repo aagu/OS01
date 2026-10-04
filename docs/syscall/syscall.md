@@ -182,3 +182,19 @@ This recover path only fires for **kernel-mode #PF** at a user-range address. **
 | **kernel selftest** | `kernel/selftest/test_uaccess.c` (17 cases): synthetic pml4 walker, cross-page non-adjacent pages, longjmp path, no-short-count, `_ft_res` cleanup double | `f8e056c` `115594b` |
 
 The audit self-test (`KERNEL_SELFTEST=1`) runs all 17 cases during boot; the user-space systest (199 cases) remains the primary regression.
+
+## Linux ABI compatibility layer (`kernel/syscall/compat/`)
+
+OS01 provides an isolated compatibility layer for executing Linux x86_64 binaries (marked with `PF_LINUX_ABI` in `current->flags`).
+
+- **Single standard**: OS01 native syscall ABI (`kernel/include/uapi/syscall.h`) is the sole authoritative standard. Linux syscalls are dynamically remapped into OS01 syscalls.
+- **Safety**: Mapping table uses `int16_t` (`compat_syscall_nr_t`) with `_Static_assert` compile-time overflow protection.
+- **Unmapped / Unsupported**: Any out-of-range, unmapped or unsupported Linux syscall number strictly returns `-ENOSYS` (-38) rather than falling through to native handlers.
+- **ABI activation**: Triggered by `elf_detect_abi()` in `kernel/fs/elf.c` inspecting `PT_NOTE` (`NT_GNU_ABI_TAG`, OS=0). Strictly avoids inspecting `PT_INTERP` so that native dynamic linking is decoupled from Linux ABI compatibility.
+- **File structure**:
+  - `kernel/include/syscall/compat.h`: Public facade header.
+  - `kernel/syscall/compat/dispatch.c`: Dispatch router & `-ENOSYS` sentinels.
+  - `kernel/syscall/compat/table_x86_64.c`: 16-bit mapping table.
+  - `kernel/syscall/compat/proc.c`: Process & signal domain adapters (`rt_sigaction`, `wait4`).
+  - `kernel/syscall/compat/fs.c`: Filesystem domain adapters.
+

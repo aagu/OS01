@@ -643,6 +643,171 @@ TEST_FUNC(test_load_multi_page_with_bss) {
     teardown_fixture();
 }
 
+TEST_FUNC(test_detect_abi_native) {
+    uint8_t code[] = { 0x90, 0xc3 };
+    segment_spec_t segs[] = {
+        { PF_R | PF_X, 0x400000, sizeof(code), sizeof(code), code }
+    };
+    size_t file_size = build_elf_image(0x400000, segs, 1);
+    setup_fixture(file_size, 0x100000);
+
+    uint32_t abi = elf_detect_abi(&fixture_node);
+    assert_eq(0, (int)abi);
+    teardown_fixture();
+}
+
+TEST_FUNC(test_detect_abi_linux_note) {
+    memset(elf_buf, 0, ELF_MAX_BYTES);
+    elf64_ehdr_t *e = (elf64_ehdr_t *)elf_buf;
+    e->e_ident[EI_MAG0]    = ELFMAG0;
+    e->e_ident[EI_MAG1]    = ELFMAG1;
+    e->e_ident[EI_MAG2]    = ELFMAG2;
+    e->e_ident[EI_MAG3]    = ELFMAG3;
+    e->e_ident[EI_CLASS]   = ELFCLASS64;
+    e->e_ident[EI_DATA]    = ELFDATA2LSB;
+    e->e_ident[EI_VERSION] = 1;
+    e->e_type      = ET_EXEC;
+    e->e_machine   = EM_X86_64;
+    e->e_version   = 1;
+    e->e_entry     = 0x400000;
+    e->e_phoff     = sizeof(elf64_ehdr_t);
+    e->e_ehsize    = sizeof(elf64_ehdr_t);
+    e->e_phentsize = sizeof(elf64_phdr_t);
+    e->e_phnum     = 2;
+
+    elf64_phdr_t *ph = (elf64_phdr_t *)(elf_buf + sizeof(elf64_ehdr_t));
+    uint64_t data_off = sizeof(elf64_ehdr_t) + 2 * sizeof(elf64_phdr_t);
+
+    ph[0].p_type   = PT_LOAD;
+    ph[0].p_flags  = PF_R | PF_X;
+    ph[0].p_offset = data_off;
+    ph[0].p_vaddr  = 0x400000;
+    ph[0].p_filesz = 16;
+    ph[0].p_memsz  = 16;
+
+    uint64_t note_off = data_off + 16;
+    elf64_nhdr_t nh = {
+        .n_namesz = 4,
+        .n_descsz = 16,
+        .n_type = NT_GNU_ABI_TAG,
+    };
+    uint32_t desc[4] = { ELF_NOTE_OS_LINUX, 4, 4, 0 };
+    memcpy(elf_buf + note_off, &nh, sizeof(nh));
+    memcpy(elf_buf + note_off + sizeof(nh), "GNU", 4);
+    memcpy(elf_buf + note_off + sizeof(nh) + 4, desc, sizeof(desc));
+    uint64_t note_sz = sizeof(nh) + 4 + sizeof(desc);
+
+    ph[1].p_type   = PT_NOTE;
+    ph[1].p_flags  = PF_R;
+    ph[1].p_offset = note_off;
+    ph[1].p_filesz = note_sz;
+    ph[1].p_memsz  = note_sz;
+
+    setup_fixture(note_off + note_sz, 0x100000);
+    uint32_t abi = elf_detect_abi(&fixture_node);
+    assert_eq(PF_LINUX_ABI, (int)abi);
+    teardown_fixture();
+}
+
+TEST_FUNC(test_detect_abi_other_note) {
+    memset(elf_buf, 0, ELF_MAX_BYTES);
+    elf64_ehdr_t *e = (elf64_ehdr_t *)elf_buf;
+    e->e_ident[EI_MAG0]    = ELFMAG0;
+    e->e_ident[EI_MAG1]    = ELFMAG1;
+    e->e_ident[EI_MAG2]    = ELFMAG2;
+    e->e_ident[EI_MAG3]    = ELFMAG3;
+    e->e_ident[EI_CLASS]   = ELFCLASS64;
+    e->e_ident[EI_DATA]    = ELFDATA2LSB;
+    e->e_ident[EI_VERSION] = 1;
+    e->e_type      = ET_EXEC;
+    e->e_machine   = EM_X86_64;
+    e->e_version   = 1;
+    e->e_entry     = 0x400000;
+    e->e_phoff     = sizeof(elf64_ehdr_t);
+    e->e_ehsize    = sizeof(elf64_ehdr_t);
+    e->e_phentsize = sizeof(elf64_phdr_t);
+    e->e_phnum     = 2;
+
+    elf64_phdr_t *ph = (elf64_phdr_t *)(elf_buf + sizeof(elf64_ehdr_t));
+    uint64_t data_off = sizeof(elf64_ehdr_t) + 2 * sizeof(elf64_phdr_t);
+
+    ph[0].p_type   = PT_LOAD;
+    ph[0].p_flags  = PF_R | PF_X;
+    ph[0].p_offset = data_off;
+    ph[0].p_vaddr  = 0x400000;
+    ph[0].p_filesz = 16;
+    ph[0].p_memsz  = 16;
+
+    uint64_t note_off = data_off + 16;
+    elf64_nhdr_t nh = {
+        .n_namesz = 4,
+        .n_descsz = 4,
+        .n_type = 999,
+    };
+    uint32_t desc = 1;
+    memcpy(elf_buf + note_off, &nh, sizeof(nh));
+    memcpy(elf_buf + note_off + sizeof(nh), "XYZ", 4);
+    memcpy(elf_buf + note_off + sizeof(nh) + 4, &desc, sizeof(desc));
+    uint64_t note_sz = sizeof(nh) + 4 + sizeof(desc);
+
+    ph[1].p_type   = PT_NOTE;
+    ph[1].p_flags  = PF_R;
+    ph[1].p_offset = note_off;
+    ph[1].p_filesz = note_sz;
+    ph[1].p_memsz  = note_sz;
+
+    setup_fixture(note_off + note_sz, 0x100000);
+    uint32_t abi = elf_detect_abi(&fixture_node);
+    assert_eq(0, (int)abi);
+    teardown_fixture();
+}
+
+TEST_FUNC(test_detect_abi_interp_ignored) {
+    memset(elf_buf, 0, ELF_MAX_BYTES);
+    elf64_ehdr_t *e = (elf64_ehdr_t *)elf_buf;
+    e->e_ident[EI_MAG0]    = ELFMAG0;
+    e->e_ident[EI_MAG1]    = ELFMAG1;
+    e->e_ident[EI_MAG2]    = ELFMAG2;
+    e->e_ident[EI_MAG3]    = ELFMAG3;
+    e->e_ident[EI_CLASS]   = ELFCLASS64;
+    e->e_ident[EI_DATA]    = ELFDATA2LSB;
+    e->e_ident[EI_VERSION] = 1;
+    e->e_type      = ET_EXEC;
+    e->e_machine   = EM_X86_64;
+    e->e_version   = 1;
+    e->e_entry     = 0x400000;
+    e->e_phoff     = sizeof(elf64_ehdr_t);
+    e->e_ehsize    = sizeof(elf64_ehdr_t);
+    e->e_phentsize = sizeof(elf64_phdr_t);
+    e->e_phnum     = 2;
+
+    elf64_phdr_t *ph = (elf64_phdr_t *)(elf_buf + sizeof(elf64_ehdr_t));
+    uint64_t data_off = sizeof(elf64_ehdr_t) + 2 * sizeof(elf64_phdr_t);
+
+    ph[0].p_type   = PT_LOAD;
+    ph[0].p_flags  = PF_R | PF_X;
+    ph[0].p_offset = data_off;
+    ph[0].p_vaddr  = 0x400000;
+    ph[0].p_filesz = 16;
+    ph[0].p_memsz  = 16;
+
+    uint64_t interp_off = data_off + 16;
+    const char *interp_path = "/lib64/ld-linux-x86-64.so.2";
+    size_t interp_len = strlen(interp_path) + 1;
+    memcpy(elf_buf + interp_off, interp_path, interp_len);
+
+    ph[1].p_type   = 3; /* PT_INTERP */
+    ph[1].p_flags  = PF_R;
+    ph[1].p_offset = interp_off;
+    ph[1].p_filesz = interp_len;
+    ph[1].p_memsz  = interp_len;
+
+    setup_fixture(interp_off + interp_len, 0x100000);
+    uint32_t abi = elf_detect_abi(&fixture_node);
+    assert_eq(0, (int)abi);
+    teardown_fixture();
+}
+
 /* ── Test registration ──────────────────────────────────── */
 
 TEST_LIST_BEGIN
@@ -661,6 +826,10 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_load_rejects_zero_pt_loads),
     TEST_ENTRY(test_load_mm_code_bounds_from_layout),
     TEST_ENTRY(test_load_multi_page_with_bss),
+    TEST_ENTRY(test_detect_abi_native),
+    TEST_ENTRY(test_detect_abi_linux_note),
+    TEST_ENTRY(test_detect_abi_other_note),
+    TEST_ENTRY(test_detect_abi_interp_ignored),
 TEST_LIST_END
 
 int main(void) {

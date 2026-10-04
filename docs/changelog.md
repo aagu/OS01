@@ -5,6 +5,16 @@
 
 ---
 
+## 2026-10-05
+
+- refactor(syscall): **ARCH-2 Linux ABI 兼容层独立**：
+  - **保持 OS01 原生 ABI 为唯一标准**：Linux x86_64 系统调用仅作为兼容层映射转调原生分发器，杜绝兼容逻辑反向主导系统调用号与语义
+  - **兼容模块子目录化与防溢出保护**：拆分至独立子目录 `kernel/syscall/compat/{dispatch.c, table_x86_64.c, proc.c, fs.c}`，表项类型升级为 `int16_t`（`compat_syscall_nr_t`），附带编译期 `_Static_assert` 杜绝溢出隐患
+  - **未映射/不支持严格哨兵拦截**：未映射、越界或显式不支持（`COMPAT_UNSUPPORTED`）编号严格返回 `-ENOSYS` (-38)，不再透传至原生分发器
+  - **领域语义适配**：在 `compat/proc.c` 中承接 `rt_sigaction`（Linux 13，4 参数 `sigsetsize == 8` 校验）与 `wait4`（Linux 61，参数转发至 `SYS_waitpid`）
+  - **ELF 探测与 Linux ABI 激活解耦**：`elf_detect_abi()` 通过 `PT_NOTE` 段（`NT_GNU_ABI_TAG`，OS=Linux）检测外部静态 Linux 二进制并赋予 `PF_LINUX_ABI`；**严格不碰 `PT_INTERP`**，彻底解耦 Linux ABI 激活与未来动态链接机制
+  - **全量测试验证**：`test-static` 静态审计（含递归兼容目录扫描）、`test-host` 57/57 单元测试套件、`systest` 341/341 项端到端测试（新增 `54_linux_abi_compat`）、QEMU `phase-0`、`inittab-phase` 与 `network` 套件全量绿灯通过
+
 ## 2026-10-04
 
 - refactor(syscall): **ARCH-1 syscall 层脱离 arch** —— commits `2765103..74e3cfeb`：74 个已实现处理器迁至 `kernel/syscall/`，x86_64 入口保留寄存器解码、Linux ABI 预翻译和用户态信号返回；`SYS_getpeername`（62）保留 trace 名称但无 handler、返回 `-EINVAL`。新增分发表 hosttest 与静态边界审计；host 56/56、syscall systest 340/340、网络 QEMU、普通启动通过。独立内核自测在 `test_tty_vintr` 有通过和超时两种结果，本地 master 合并验收亦复现超时；根因未确认并列入 roadmap Parked。

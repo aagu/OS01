@@ -29,7 +29,7 @@ entry = trap[entry_start:entry_end]
 if re.search(r"\bswitch\s*\(", entry) or re.search(r"\bcase\s+SYS_", entry):
     fail("x86 syscall entry still contains a business switch or SYS_* case")
 
-for path in sorted((ROOT / "kernel/syscall").glob("*.c")):
+for path in sorted((ROOT / "kernel/syscall").glob("**/*.c")):
     source = path.read_text()
     if re.search(r"^\s*#\s*include\s*[<\"]arch/(?:x86_64|aarch64)/", source, re.M):
         fail(f"{path.relative_to(ROOT)} includes a per-architecture header")
