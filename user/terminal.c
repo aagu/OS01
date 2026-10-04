@@ -328,23 +328,41 @@ int main(void)
             }
         }
 
-        // 4. Process PTY master output
+        // 4. Process PTY master output (eager drain collapses burst writes)
         if (fds[1].revents & POLLIN) {
-            int n = read(pty_fd, buf, sizeof(buf));
-            if (n > 0) {
-                for (int i = 0; i < n; i++) {
-                    if (term_core_input(&core, buf[i])) dirty_pending = true;
+            int drain_count = 0;
+            const int MAX_DRAIN_CHUNKS = 32; // Drain up to 64 KB per frame to prevent starvation
+            bool shell_exited = false;
+
+            while (drain_count < MAX_DRAIN_CHUNKS) {
+                int n = read(pty_fd, buf, sizeof(buf));
+                if (n > 0) {
+                    for (int i = 0; i < n; i++) {
+                        if (term_core_input(&core, buf[i])) dirty_pending = true;
+                    }
+                    if (serial_fd >= 0) write(serial_fd, buf, (size_t)n);
+                    drain_count++;
+                } else if (n == 0) {
+                    // Shell died
+                    shell_exited = true;
+                    break;
+                } else if (errno == EINTR) {
+                    continue;
+                } else {
+                    shell_exited = true;
+                    break;
                 }
-                if (serial_fd >= 0) write(serial_fd, buf, (size_t)n);
-                if (term_render_cursor_update(&render)) dirty_pending = true;
-            } else if (n == 0) {
-                // Shell died
-                break;
-            } else if (errno == EINTR) {
-                continue;
-            } else {
-                break;
+
+                // Check if more data is immediately waiting without blocking
+                struct pollfd pfd = { .fd = pty_fd, .events = POLLIN };
+                int pr_pty = poll(&pfd, 1, 0);
+                if (pr_pty <= 0 || !(pfd.revents & POLLIN)) {
+                    break;
+                }
             }
+
+            if (term_render_cursor_update(&render)) dirty_pending = true;
+            if (shell_exited) break;
         }
     }
 

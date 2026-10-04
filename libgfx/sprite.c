@@ -211,6 +211,45 @@ void gfx_draw_glyph(gfx_handle_t *h, int32_t dx, int32_t dy,
     uint32_t vh = h->clip_h;
     if (vw == 0u || vh == 0u) return;
 
+    size_t width = (size_t)h->info.width;
+
+    // Fast-path: 8-pixel-wide glyph fully contained in view and clip
+    if (w == 8u &&
+        dx >= vx && (int64_t)dx + 8 <= (int64_t)vx + (int64_t)vw &&
+        dy >= vy && (int64_t)dy + (int64_t)h_ <= (int64_t)vy + (int64_t)vh &&
+        dx >= 0 && (int64_t)dx + 8 <= (int64_t)h->info.width &&
+        dy >= 0 && (int64_t)dy + (int64_t)h_ <= (int64_t)h->info.height) {
+
+        if (bg_opaque) {
+            for (uint32_t r = 0; r < h_; ++r) {
+                uint8_t mb = mask[(size_t)r * (size_t)mask_stride];
+                uint32_t *dst_row = h->pixels + ((size_t)dy + (size_t)r) * width + (size_t)dx;
+                dst_row[0] = (mb & 0x80u) ? fgc : bgc;
+                dst_row[1] = (mb & 0x40u) ? fgc : bgc;
+                dst_row[2] = (mb & 0x20u) ? fgc : bgc;
+                dst_row[3] = (mb & 0x10u) ? fgc : bgc;
+                dst_row[4] = (mb & 0x08u) ? fgc : bgc;
+                dst_row[5] = (mb & 0x04u) ? fgc : bgc;
+                dst_row[6] = (mb & 0x02u) ? fgc : bgc;
+                dst_row[7] = (mb & 0x01u) ? fgc : bgc;
+            }
+        } else {
+            for (uint32_t r = 0; r < h_; ++r) {
+                uint8_t mb = mask[(size_t)r * (size_t)mask_stride];
+                uint32_t *dst_row = h->pixels + ((size_t)dy + (size_t)r) * width + (size_t)dx;
+                if (mb & 0x80u) dst_row[0] = fgc;
+                if (mb & 0x40u) dst_row[1] = fgc;
+                if (mb & 0x20u) dst_row[2] = fgc;
+                if (mb & 0x10u) dst_row[3] = fgc;
+                if (mb & 0x08u) dst_row[4] = fgc;
+                if (mb & 0x04u) dst_row[5] = fgc;
+                if (mb & 0x02u) dst_row[6] = fgc;
+                if (mb & 0x01u) dst_row[7] = fgc;
+            }
+        }
+        return;
+    }
+
     int32_t fx, fy;
     uint32_t fw, fh;
     intersect_rect(dx, dy, w, h_,
@@ -222,7 +261,6 @@ void gfx_draw_glyph(gfx_handle_t *h, int32_t dx, int32_t dy,
                    &fx, &fy, &fw, &fh);
     if (fw == 0u || fh == 0u) return;
 
-    size_t width = (size_t)h->info.width;
     size_t sx0 = (size_t)((int64_t)fx - (int64_t)dx);
     size_t sy0 = (size_t)((int64_t)fy - (int64_t)dy);
 

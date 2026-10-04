@@ -460,6 +460,44 @@ TEST_FUNC(test_render_pixel_scroll_cursor_cleanup)
     free(gfx);
 }
 
+TEST_FUNC(test_glyph_8wide_fastpath)
+{
+    TEST_SUITE("libgfx: 8-wide glyph fast-path MSB-first bit unpacking");
+    gfx_handle_t *gfx = create_mock_handle();
+
+    /* 2 rows, mask_stride = 1 byte:
+     * row 0: 0xA5 = 10100101b
+     * row 1: 0x3C = 00111100b */
+    const uint8_t mask[2] = { 0xA5u, 0x3Cu };
+    uint32_t fg = 0xFFFFFFFFu;
+    uint32_t bg = 0x11223344u;
+
+    gfx_draw_glyph(gfx, 8, 4, mask, 1, 8, 2, fg, bg, true);
+
+    /* Row 0 at y=4, x=8..15 */
+    uint32_t expected_r0[8] = { fg, bg, fg, bg, bg, fg, bg, fg };
+    for (int i = 0; i < 8; i++) {
+        assert_eq(expected_r0[i], g_buf.pixels[4 * VIEW_W + 8 + i]);
+    }
+
+    /* Row 1 at y=5, x=8..15 */
+    uint32_t expected_r1[8] = { bg, bg, fg, fg, fg, fg, bg, bg };
+    for (int i = 0; i < 8; i++) {
+        assert_eq(expected_r1[i], g_buf.pixels[5 * VIEW_W + 8 + i]);
+    }
+
+    /* Test transparent background (bg_opaque = false) */
+    const uint8_t mask_trans[1] = { 0x81u }; /* 10000001b */
+    gfx_draw_glyph(gfx, 8, 4, mask_trans, 1, 8, 1, 0x77777777u, bg, false);
+
+    assert_eq(0x77777777u, g_buf.pixels[4 * VIEW_W + 8]); /* bit 7 set to new fg */
+    assert_eq(bg,          g_buf.pixels[4 * VIEW_W + 9]); /* bit 6 transparent -> keeps old bg */
+    assert_eq(0x77777777u, g_buf.pixels[4 * VIEW_W + 15]); /* bit 0 set to new fg */
+
+    assert_true(check_sentinels());
+    free(gfx);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_font_validation),
     TEST_ENTRY(test_render_high_bit_chars),
@@ -469,6 +507,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_render_fault_injection),
     TEST_ENTRY(test_render_pixel_scroll_single_line),
     TEST_ENTRY(test_render_pixel_scroll_cursor_cleanup),
+    TEST_ENTRY(test_glyph_8wide_fastpath),
 TEST_LIST_END
 
 int main(void)
