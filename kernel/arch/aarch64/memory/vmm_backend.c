@@ -146,6 +146,17 @@ static int check_vm_flags(uint32_t vm)
 static uint32_t perm_to_vm(uint32_t perm, uint64_t sw)
 {
     uint32_t vm = VM_PRESENT;
+    /* PROTNONE is the "invalid but holds PA" state — a stashed
+     * descriptor with VALID cleared.  For the VM_* representation
+     * VM_PRESENT and VM_PROTNONE are mutually exclusive (the
+     * PRESENT bit describes "is the translation valid", and a
+     * PROTNONE stash is invalid by definition).  arch_vmm_query_4k
+     * hardcodes *vm_out = VM_PROTNONE (no PRESENT) for this state,
+     * so the inverse direction here must clear PRESENT too —
+     * otherwise callers reconstructing VMA-prot save/restore see
+     * both bits set, which is semantically contradictory.  Task 19
+     * Fix round 1. */
+    if (sw & AARCH64_PT_SOFTWARE_PROTNONE) vm &= ~VM_PRESENT;
     if (perm & AARCH64_PT_USER_RO)   vm |= VM_USER;
     if (perm & AARCH64_PT_USER_RW)   vm |= VM_USER;
     if ((perm & AARCH64_PT_KERNEL_RW) || (perm & AARCH64_PT_USER_RW))
@@ -263,7 +274,17 @@ int arch_vmm_map_4k_new(uint64_t *pgdir, uint64_t phys, uint64_t virt,
     uint32_t perm = vm_to_perm(vm_flags);
     uint64_t sw   = vm_to_sw(vm_flags);
     if (perm == 0 && sw == 0) return -EINVAL;
-    return aarch64_pt_map_4k_ext(pgdir, virt, phys, perm, sw);
+    rc = aarch64_pt_map_4k_ext(pgdir, virt, phys, perm, sw);
+    /* Normalize the page-table layer's internal sentinel codes to
+     * Linux errno (spec §4.2/§4.3).  The AARCH64_PT_ enum uses
+     * sequential negative numbers that don't match Linux errno
+     * values (AARCH64_PT_EEXIST = -2 = -ENOENT in Linux).  Without
+     * this, callers cannot tell "slot occupied" from "slot absent"
+     * — and the user-facing arch_vmm_* contract mandates -EEXIST /
+     * -ENOENT specifically.  Task 19 Fix round 1. */
+    if (rc == AARCH64_PT_EEXIST) return -EEXIST;
+    if (rc == AARCH64_PT_ENOENT) return -ENOENT;
+    return rc;
 }
 
 int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
@@ -283,6 +304,10 @@ int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
         if (vm_out)   *vm_out   = VM_PROTNONE;
         return AARCH64_PT_EPROT_NONE;
     }
+    /* Normalize to Linux errno per spec §4.3 — the page-table layer
+     * uses AARCH64_PT_ENOENT = -3, but the backend contract mandates
+     * -ENOENT (-2).  Task 19 Fix round 1. */
+    if (rc == AARCH64_PT_ENOENT) return -ENOENT;
     if (rc != AARCH64_PT_OK) return rc;
     if (phys_out) *phys_out = pa;
     if (vm_out)   *vm_out   = perm_to_vm(perm, sw);
@@ -307,6 +332,8 @@ int arch_vmm_unmap_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
         if (old_vm_out) *old_vm_out = VM_PROTNONE;
         return AARCH64_PT_EPROT_NONE;
     }
+    /* Normalize AARCH64_PT_ENOENT → -ENOENT (spec §4.3). */
+    if (rc == AARCH64_PT_ENOENT) return -ENOENT;
     if (rc != AARCH64_PT_OK) return rc;
     if (phys_out)   *phys_out   = pa;
     if (old_vm_out) *old_vm_out = perm_to_vm(perm, sw);
@@ -339,6 +366,9 @@ int arch_vmm_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
     uint64_t old_sw = 0;
     rc = aarch64_pt_replace_4k(pgdir, virt, phys, perm, sw,
                                &old_pa, &old_perm, &old_sw);
+    /* Normalize: aarch64_pt_replace_4k can return -ENOENT when no
+     * leaf (valid OR PROTNONE-stashed) exists at VA. */
+    if (rc == AARCH64_PT_ENOENT) return -ENOENT;
     if (rc != AARCH64_PT_OK) return rc;
     if (old_phys_out) *old_phys_out = old_pa;
     if (old_vm_out)   *old_vm_out   = perm_to_vm(old_perm, old_sw);
@@ -370,7 +400,10 @@ int arch_vmm_map_2m(uint64_t *pgdir, uint64_t phys, uint64_t virt,
     if (phys >= (UINT64_C(1) << 40))      return -EINVAL;
     uint32_t perm = vm_to_perm(vm_flags);
     if (perm == 0) return -EINVAL;
-    return aarch64_pt_map_2m_block(pgdir, virt, phys, perm);
+    rc = aarch64_pt_map_2m_block(pgdir, virt, phys, perm);
+    /* Normalize AARCH64_PT_EEXIST → -EEXIST (spec §4.2). */
+    if (rc == AARCH64_PT_EEXIST) return -EEXIST;
+    return rc;
 }
 
 int arch_vmm_unmap_2m(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out)
@@ -384,6 +417,8 @@ int arch_vmm_unmap_2m(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out)
     uint64_t pa = 0;
     rc = aarch64_pt_unmap_2m_block(pgdir, virt, &pa);
     if (phys_out) *phys_out = pa;
+    /* Normalize AARCH64_PT_ENOENT → -ENOENT (spec §4.3). */
+    if (rc == AARCH64_PT_ENOENT) return -ENOENT;
     return rc;
 }
 

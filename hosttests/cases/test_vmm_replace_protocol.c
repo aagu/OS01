@@ -354,15 +354,15 @@ TEST_FUNC(test_backend_class4b_protnone_recovery_routes_to_bbm)
                             &old_pa, &old_vm);
     assert_eq(0, rc);
     assert_eq(data_pa, old_pa);
-    /* old_vm carries the VM_PROTNONE flag so the caller can detect
-     * "I just replaced a PROTNONE stash".  KNOWN GAP:
-     * vmm_backend.c's perm_to_vm unconditionally sets VM_PRESENT,
-     * so old_vm for a PROTNONE-prior update also carries
-     * VM_PRESENT (semantically contradictory: PROTNONE is the
-     * "invalid but holds PA" state — VM_PROTNONE without
-     * VM_PRESENT is what arch_vmm_query_4k returns for the same
-     * state).  Flagged in the Task 19 report for reviewer action. */
+    /* old_vm is the prior decoded perm: PROTNONE stash.  After
+     * Task 19 Fix round 1, perm_to_vm clears VM_PRESENT when the
+     * PROTNONE software bit is set, so old_vm here is
+     * VM_PROTNONE (no VM_PRESENT) — matching the spec-correct
+     * representation that arch_vmm_query_4k returns for the same
+     * slot.  This is the load-bearing half of the
+     * VMA-prot save/restore contract. */
     assert_true((old_vm & VM_PROTNONE) != 0);
+    assert_true((old_vm & VM_PRESENT) == 0);
 
     assert_eq(0, g_atomic_count);
     assert_eq(1, g_bbm_count);

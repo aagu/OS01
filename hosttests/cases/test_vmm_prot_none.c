@@ -165,11 +165,8 @@ TEST_FUNC(test_query_protnone_stash_returns_e_prot_none_with_phys)
  * stashed slots would break every VMA insert path that probes for
  * an existing mapping first.
  *
- * NOTE: spec §4.3 mandates `-ENOENT` (= Linux -2).  Production
- * vmm_backend.c passes AARCH64_PT_ENOENT (-3) through unchanged —
- * the three states are still distinct (0 / -3 / -1111), so the
- * semantic contract holds.  Pin the production sentinel here and
- * flag the deviation in the Task 19 report. */
+ * Spec §4.3 mandates `-ENOENT` (Linux -2).  After Task 19 Fix
+ * round 1, the backend normalizes AARCH64_PT_ENOENT → -ENOENT. */
 TEST_FUNC(test_query_empty_slot_returns_enoent_not_e_prot_none)
 {
     mock_pool_reset();
@@ -180,7 +177,7 @@ TEST_FUNC(test_query_empty_slot_returns_enoent_not_e_prot_none)
     uint64_t qpa = 0xdeadbeef;
     uint32_t qvm = 0xdeadbeef;
     int rc = arch_vmm_query_4k(root, TEST_VA_BASE_1, &qpa, &qvm);
-    assert_eq(AARCH64_PT_ENOENT, rc);
+    assert_eq(-ENOENT, rc);
     /* phys_out / vm_out untouched by the empty-slot path. */
     assert_eq((uint64_t)0xdeadbeef, qpa);
     assert_eq((uint32_t)0xdeadbeef, qvm);
@@ -212,7 +209,7 @@ TEST_FUNC(test_query_valid_returns_zero_with_phys_and_present)
 /* Operation 1: unmap a PROTNONE stash → -EPROT_NONE + phys via
  * phys_out, does NOT free the page (spec §4.4.4: backend owns no
  * data pages).  After unmap, the slot is genuinely empty (a follow-
- * up query returns AARCH64_PT_ENOENT, not -EPROT_NONE). */
+ * up query returns -ENOENT, not -EPROT_NONE). */
 TEST_FUNC(test_unmap_protnone_stash_returns_phys_and_does_not_free)
 {
     mock_pool_reset();
@@ -233,21 +230,21 @@ TEST_FUNC(test_unmap_protnone_stash_returns_phys_and_does_not_free)
      * invariant that lets VMA / fork / COW paths hold the page
      * reference until they explicitly drop it. */
     assert_eq(0, g_free_calls);
-    /* old_vm carries VM_PROTNONE so the caller can distinguish
-     * "I just removed a stash" from "I just removed a live VALID
-     * mapping".  KNOWN GAP: perm_to_vm unconditionally sets
-     * VM_PRESENT (semantically wrong for a PROTNONE-prior slot —
-     * the spec-correct representation is VM_PROTNONE without
-     * VM_PRESENT, and that is what arch_vmm_query_4k returns for
-     * the same state).  Documented in the Task 19 report. */
+    /* old_vm is VM_PROTNONE without VM_PRESENT (Fix round 1:
+     * perm_to_vm now clears VM_PRESENT when the PROTNONE software
+     * bit is set, matching arch_vmm_query_4k's hardcoded
+     * *vm_out = VM_PROTNONE). */
     assert_true((got_vm & VM_PROTNONE) != 0);
+    assert_true((got_vm & VM_PRESENT) == 0);
 
-    /* Follow-up query: slot is now empty → AARCH64_PT_ENOENT.
-     * Critical: a regression that returned -EPROT_NONE twice
-     * (i.e. unmap of a stashed slot left a phantom PROTNONE
-     * descriptor) would break every mmap retry on the same VA. */
+    /* Follow-up query: slot is now empty → -ENOENT (Linux sentinel
+     * per spec §4.3; backend normalizes AARCH64_PT_ENOENT → -ENOENT
+     * after Fix round 1).  Critical: a regression that returned
+     * -EPROT_NONE twice (i.e. unmap of a stashed slot left a
+     * phantom PROTNONE descriptor) would break every mmap retry on
+     * the same VA. */
     rc = arch_vmm_query_4k(root, TEST_VA_BASE_1, NULL, NULL);
-    assert_eq(AARCH64_PT_ENOENT, rc);
+    assert_eq(-ENOENT, rc);
 }
 
 /* Operation 2: update VALID → PROTNONE via arch_vmm_update_4k.
@@ -315,12 +312,14 @@ TEST_FUNC(test_update_protnone_back_to_valid_recovers_query)
                             &old_pa, &old_vm);
     assert_eq(0, rc);
     assert_eq(data_pa, old_pa);
-    /* old_vm is the prior PROTNONE stash — VM_PROTNONE set.
-     * KNOWN GAP: perm_to_vm unconditionally sets VM_PRESENT
-     * (spec-correct representation is VM_PROTNONE without
-     * VM_PRESENT — see test_unmap_protnone_stash above for
-     * details; flagged in Task 19 report). */
+    /* old_vm is the prior PROTNONE stash.  After Fix round 1,
+     * perm_to_vm clears VM_PRESENT when the PROTNONE software bit
+     * is set, so old_vm here is VM_PROTNONE (no VM_PRESENT) —
+     * the spec-correct representation that arch_vmm_query_4k
+     * returns for the same slot.  This is the load-bearing half
+     * of the VMA-prot save/restore contract. */
     assert_true((old_vm & VM_PROTNONE) != 0);
+    assert_true((old_vm & VM_PRESENT) == 0);
 
     uint64_t qpa = 0;
     uint32_t qvm = 0;
@@ -368,7 +367,7 @@ TEST_FUNC(test_three_state_cycle_valid_then_protnone_then_unmap)
     assert_eq(AARCH64_PT_EPROT_NONE, rc);
     assert_eq(data_pa, got_pa);
     rc = arch_vmm_query_4k(root, TEST_VA_BASE_1, NULL, NULL);
-    assert_eq(AARCH64_PT_ENOENT, rc);
+    assert_eq(-ENOENT, rc);
     /* Backend never freed the page across the cycle. */
     assert_eq(0, g_free_calls);
 }

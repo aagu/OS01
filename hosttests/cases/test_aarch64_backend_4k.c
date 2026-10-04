@@ -189,16 +189,17 @@ TEST_FUNC(test_backend_4k_kernel_rw_normal)
     assert_true((qvm & VM_NO_EXEC) == 0);   /* RW without NO_EXEC → executable */
 
     /* Duplicate map → -EEXIST (any occupied slot, per Task 16 contract).
-     * The backend returns the aarch64_pt_* result codes — use the
-     * AARCH64_PT_EEXIST sentinel, not Linux -EEXIST. */
+     * The backend normalizes AARCH64_PT_EEXIST → Linux -EEXIST per
+     * spec §4.2 (Task 19 Fix round 1). */
     rc = arch_vmm_map_4k_new(root, pa + 0x1000, TEST_VA_BASE, VM_KERNEL_RW);
-    assert_eq(AARCH64_PT_EEXIST, rc);
+    assert_eq(-EEXIST, rc);
 
-    /* Unmap and re-query → -ENOENT (AARCH64_PT_ENOENT sentinel). */
+    /* Unmap and re-query → -ENOENT (Linux sentinel per spec §4.3;
+     * backend normalizes AARCH64_PT_ENOENT → -ENOENT). */
     rc = arch_vmm_unmap_4k(root, TEST_VA_BASE, NULL, NULL);
     assert_eq(0, rc);
     rc = arch_vmm_query_4k(root, TEST_VA_BASE, &qpa, &qvm);
-    assert_eq(AARCH64_PT_ENOENT, rc);
+    assert_eq(-ENOENT, rc);
 }
 
 TEST_FUNC(test_backend_4k_kernel_ro_normal)
