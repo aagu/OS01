@@ -13,10 +13,10 @@
  * suite too, not just by whichever TU happens to include the header.
  *
  * RED history: before Task 7 landed the fields, this TU would not even
- * compile (__builtin_offsetof(percpu_t, ipi_ready) → no member), and
- * sizeof(percpu_t) was 144, so the `>= 152` / `== PERCPU_DATA_SIZE`
- * assertions were all failing. Task 7 landed the fields + the 152 bump;
- * this test is the GREEN regression pin.
+ * compile (__builtin_offsetof(percpu_t, ipi_ready) → no member). Task 7
+ * landed the fields + the 152 bump; M3 Task 12 later removed the legacy
+ * tlb_wanted/tlb_ack pair, shrinking the struct back to 144 — the
+ * `>= 152` assertion became stale and now pins == PERCPU_DATA_SIZE.
  */
 #include <test_framework.h>
 #include <stddef.h>
@@ -29,10 +29,11 @@
 void idle_resume(void) {}
 
 TEST_FUNC(test_percpu_t_size_bumped) {
-    /* Layout was frozen at 144 bytes; M3's ipi_ready + tlb_ack_gen tail
-     * grew it to 152. Any future field addition must bump
-     * PERCPU_DATA_SIZE (and re-check asm stride sites). */
-    assert_true(sizeof(percpu_t) >= 152);
+    /* M3 Task 12 removed the legacy tlb_wanted/tlb_ack pair, so the
+     * struct shrank back to 144 bytes (ipi_ready + tlb_ack_gen tail).
+     * Any future field addition must bump PERCPU_DATA_SIZE (and
+     * re-check asm stride sites). */
+    assert_true(sizeof(percpu_t) == PERCPU_DATA_SIZE);
 }
 
 TEST_FUNC(test_percpu_t_field_offsets_aligned) {

@@ -38,7 +38,7 @@ KERNEL_HEADERS := include
 # Architecture implementation files are collected once via ARCH_C_SOURCES.
 ifeq ($(ARCH),aarch64)
 KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
-                   memory/slab.c \
+                   memory/slab.c memory/tlb.c \
                    percpu/percpu.c \
                    time/clocksource.c time/tick.c time/timer.c \
                    intr/softirq.c \

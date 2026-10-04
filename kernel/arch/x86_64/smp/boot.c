@@ -26,6 +26,7 @@
 
 #include <percpu/percpu.h>
 #include <intr/apic.h>
+#include <intr/ipi.h>         /* IPI_VECTOR_TLB */
 #include <driver/serial.h>
 #include <core/printk.h>
 #include <arch/thread.h>
@@ -33,7 +34,43 @@
 #include <subsys/subsys.h>
 #include <arch/subsys.h>
 #include <arch/cpu.h>
+#include <arch/irq.h>
+#include <core/assert.h>
 #include <core/smp.h>         // smp_boot_aps
+
+// ── M3 Task 12: ipi_ready publication (x86 side) ─────────
+// Mirrors aarch64's ipi_ready_publish_and_count (vmm_gate.c): a CPU must
+// only be a TLB-shootdown target (ipi_ready ∧ online in
+// build_target_mask_excl_self) after its IDT carries the IPI handler and
+// its IRQs are unmasked — otherwise a broadcast IPI would arrive with
+// IF=0, never be acked, and the initiator would spin to its FATAL
+// timeout.  x86 has NO smp_starting gate: publication happens directly
+// at the two points below.
+
+static int x86_irqs_enabled(void)
+{
+    arch_irq_state_t flags = arch_local_irq_save();
+    arch_local_irq_restore(flags);
+    return (flags & (1UL << 9)) != 0;   /* RFLAGS.IF */
+}
+
+void ipi_ready_publish_bsp(void)
+{
+    /* Handler table entry for vector 0x40 is written by ipi_init()
+     * (smp_boot_aps) — publishing before that would ack nothing. */
+    ASSERT(intr_handler_table[IPI_VECTOR_TLB] != 0);
+    ASSERT(this_cpu() == &percpu_data[0]);
+    ASSERT(percpu_data[0].online == 1);
+    ASSERT(x86_irqs_enabled());
+    __atomic_store_n(&percpu_data[0].ipi_ready, 1, __ATOMIC_RELEASE);
+}
+
+void ipi_ready_publish_ap(uint32_t cpu)
+{
+    ASSERT(cpu < num_cpus);
+    ASSERT(x86_irqs_enabled());
+    __atomic_store_n(&percpu_data[cpu].ipi_ready, 1, __ATOMIC_RELEASE);
+}
 
 void x86_64_boot_percpu(void)
 {

@@ -125,7 +125,9 @@ TEST_BINS := \
     $(TEST_BLD)/test_m1_publish.elf \
     $(TEST_BLD)/test_slab_idempotent_reservation.elf \
     $(TEST_BLD)/test_slab_basic_x86_count.elf \
-    $(TEST_BLD)/test_percpu_layout.elf
+    $(TEST_BLD)/test_percpu_layout.elf \
+    $(TEST_BLD)/test_tlb_serial_protocol.elf \
+    $(TEST_BLD)/test_x86_ipi_ready_publish.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -1266,6 +1268,57 @@ $(TEST_BLD)/test_percpu_layout.elf: $(TEST_BLD)/test_percpu_layout.o
 	$(HOST_CC) -o $@ $^
 
 test_percpu_layout: $(TEST_BLD)/test_percpu_layout.elf
+	$<
+
+# TLB shootdown serial-protocol hosttest (M2/M3 Task 12 Step 1): compiles
+# the PRODUCTION kernel/memory/tlb.c against the host.  The preinclude
+# mock/tlb_test_runtime.h short-circuits percpu/spinlock/mmu/cpu/ipi
+# headers; the test TU supplies percpu_data[], num_cpus, the
+# ipi_broadcast mock and overrides the weak tlb_shootdown_panic() hook
+# with a longjmp capture (timeout → FATAL case).
+TLB_SD_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC)
+TLB_SD_PROD_CFLAGS := $(TLB_SD_HOST_CFLAGS) \
+                      -include $(TEST_MOCK)/tlb_test_runtime.h
+
+$(TEST_BLD)/tlb_production.o: $(TESTS_DIR)/kernel/memory/tlb.c \
+		$(TEST_MOCK)/tlb_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(TLB_SD_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_tlb_serial_protocol.o: \
+		$(TEST_CASES)/test_tlb_serial_protocol.c \
+		$(TEST_MOCK)/tlb_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(TLB_SD_HOST_CFLAGS) -I$(TEST_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_tlb_serial_protocol.elf: \
+		$(TEST_BLD)/test_tlb_serial_protocol.o \
+		$(TEST_BLD)/tlb_production.o
+	$(HOST_CC) -o $@ $^
+
+test_tlb_serial_protocol: $(TEST_BLD)/test_tlb_serial_protocol.elf
+	$<
+
+# x86 ipi_ready publish-point hosttest (M2/M3 Task 12 Step 4): pure
+# source-level scan (QEMU x86_64 regression is currently blocked by the
+# known infra stall, so the publish invariants are asserted against the
+# production source text — mirrors test_gic_marker_lines.c).
+X86_PUBLISH_CFLAGS := $(HOST_CFLAGS) -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+                      -I$(TEST_INC) -include $(TEST_MOCK)/test_platform.h
+
+$(TEST_BLD)/test_x86_ipi_ready_publish.o: \
+		$(TEST_CASES)/test_x86_ipi_ready_publish.c \
+		$(TESTS_DIR)/kernel/arch/x86_64/smp/boot.c \
+		$(TESTS_DIR)/kernel/arch/x86_64/smp/smp.c \
+		$(TESTS_DIR)/kernel/arch/x86_64/intr/apic/ipi.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(X86_PUBLISH_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_x86_ipi_ready_publish.elf: \
+		$(TEST_BLD)/test_x86_ipi_ready_publish.o
+	$(HOST_CC) -o $@ $^
+
+test_x86_ipi_ready_publish: $(TEST_BLD)/test_x86_ipi_ready_publish.elf
 	$<
 
 # Foundational-primitives hosttest (M3 Task 7 Step 4): compiles the

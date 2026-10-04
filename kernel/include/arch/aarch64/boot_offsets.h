@@ -25,7 +25,7 @@
  * because it pulls in C function prototypes and struct types).
  * Keep both copies in sync. */
 #ifndef PERCPU_DATA_SIZE
-#define PERCPU_DATA_SIZE  152
+#define PERCPU_DATA_SIZE  144
 #endif
 
 #endif

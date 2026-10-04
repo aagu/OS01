@@ -135,6 +135,10 @@ void ap_entry(void)
     }
 
     arch_local_irq_enable();
+    /* M3 Task 12: AP publishes ipi_ready after IDT/handler are live
+     * (lidt above) and IRQs are unmasked (arch_local_irq_enable above).
+     * No smp_starting gate on x86 (aarch64-only sequencing device). */
+    ipi_ready_publish_ap(cpu->cpu_id);
     debug_sched("SMP: AP %u online (idle pid=%d), entering idle\n",
                   cpu->cpu_id, cpu->idle->pid);
 
@@ -178,6 +182,10 @@ static task_t *create_idle_task(uint32_t cpu_num)
 void smp_boot_aps(void)
 {
     ipi_init();
+    /* M3 Task 12: BSP publishes ipi_ready only after the TLB IPI handler
+     * is registered (ipi_init above) and before any AP exists to target.
+     * See ipi_ready_publish_bsp() in smp/boot.c. */
+    ipi_ready_publish_bsp();
     uint64_t bsp_cr3 = (uint64_t)get_cr3();
 
     uintptr_t tramp_size = (uintptr_t)_binary_arch_x86_64_trampoline_bin_end

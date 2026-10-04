@@ -24,4 +24,12 @@ void ipi_broadcast(uint32_t vector, uint64_t target_mask);
 // Register IPI vectors in the IDT.  Called once during SMP init.
 void ipi_init(void);
 
+// ── M3 Task 12: per-CPU ipi_ready publication (x86_64) ───
+// BSP: after ipi_init() in smp_boot_aps(), before any AP is started.
+// AP: in ap_entry() after the kernel IDT is loaded and IRQs enabled.
+// aarch64 publishes through ipi_ready_publish_and_count() instead
+// (<arch/aarch64/vmm_gate.h>).
+void ipi_ready_publish_bsp(void);
+void ipi_ready_publish_ap(uint32_t cpu);
+
 #endif

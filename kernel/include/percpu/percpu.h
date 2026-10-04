@@ -17,9 +17,9 @@
  * definition.
  *
  * Verified by `nm | grep percpu_data` (size = NR_CPUS × PERCPU_DATA_SIZE
- * = 8 × 152 = 1216 bytes on this build).
+ * = 8 × 144 = 1152 bytes on this build).
  */
-#define PERCPU_DATA_SIZE  152
+#define PERCPU_DATA_SIZE  144
 
 #ifndef __ASSEMBLER__
 
@@ -58,8 +58,10 @@ typedef struct percpu {
     void *tss_hw;               // architecture task-state base (legacy TSS for BSP,
                                 // init_tss[cpu_id] for APs)
     // ── IPI / TLB shootdown ──
-    uint32_t tlb_wanted;        // atomic flag: TLB invalidate requested
-    uint32_t tlb_ack;           // atomic counter: shootdown ACK
+    // (the legacy shootdown flag+ack counter pair was REMOVED in M3
+    // Task 12 — superseded by the tlb_ack_gen generation counter in the
+    // struct tail)
+    // superseded by the tlb_ack_gen generation counter in the tail.)
     rbtree_root_t run_queue;
     struct task_struct *idle;
     uint64_t schedule_count;    // number of times schedule() ran
