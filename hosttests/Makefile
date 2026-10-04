@@ -134,9 +134,12 @@ TEST_BINS := \
     $(TEST_BLD)/test_aarch64_pt_software_bits.elf \
     $(TEST_BLD)/test_aarch64_pt_locks.elf \
     $(TEST_BLD)/test_aarch64_pt_2m_block.elf \
-    $(TEST_BLD)/test_aarch64_backend_4k.elf
+    $(TEST_BLD)/test_aarch64_backend_4k.elf \
+    $(TEST_BLD)/test_vmm_replace_protocol.elf \
+    $(TEST_BLD)/test_vmm_prot_none.elf \
+    $(TEST_BLD)/test_vmm_ack_wraparound.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound
 
 all: $(TEST_BINS)
 
@@ -1537,6 +1540,82 @@ $(TEST_BLD)/test_aarch64_backend_4k.elf: \
 	$(HOST_CC) -o $@ $^
 
 test_aarch64_backend_4k: $(TEST_BLD)/test_aarch64_backend_4k.elf
+	$<
+
+# aarch64 M3.3 Task 19: 4-class replace protocol matrix (spec §4.4.3)
+# with descriptor-level state assertions. Reuses the AARCH64_PT_SW
+# harness and adds a backend layer test (arch_vmm_update_4k routing)
+# + the memtype-flip (AttrIndx Normal↔Device) class that Task 16
+# deferred. The brief requires linking REAL page_table.c +
+# vmm_backend.c; the production objects are already built under
+# $(TEST_BLD) by the rules above and re-used here.
+$(TEST_BLD)/test_vmm_replace_protocol.o: $(TEST_CASES)/test_vmm_replace_protocol.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) \
+		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_vmm_replace_protocol.elf: \
+		$(TEST_BLD)/test_vmm_replace_protocol.o \
+		$(TEST_BLD)/aarch64_pt_production.o \
+		$(TEST_BLD)/vmm_backend_production.o
+	$(HOST_CC) -o $@ $^
+
+test_vmm_replace_protocol: $(TEST_BLD)/test_vmm_replace_protocol.elf
+	$<
+
+# aarch64 M3.3 Task 19: PROT_NONE three-state contract via the
+# *backend* layer (spec §4.3 / §4.4.4). The primitive layer is
+# already pinned by test_aarch64_pt_software_bits.c; this file
+# pins the same contract through arch_vmm_query_4k /
+# arch_vmm_unmap_4k / arch_vmm_update_4k so vmm_backend.c
+# regressions in vm_to_sw / perm_to_vm surface independently.
+# Same harness as test_vmm_replace_protocol.c (links the SAME
+# production objects).
+$(TEST_BLD)/test_vmm_prot_none.o: $(TEST_CASES)/test_vmm_prot_none.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) \
+		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_vmm_prot_none.elf: \
+		$(TEST_BLD)/test_vmm_prot_none.o \
+		$(TEST_BLD)/aarch64_pt_production.o \
+		$(TEST_BLD)/vmm_backend_production.o
+	$(HOST_CC) -o $@ $^
+
+test_vmm_prot_none: $(TEST_BLD)/test_vmm_prot_none.elf
+	$<
+
+# aarch64 M3.3 Task 19: ack generation algebraic wraparound contract
+# (spec §6.4 step 4 / §8.2). Phase A (gen=UINT32_MAX → 0, handler
+# fires → OK) is partially covered by test_tlb_serial_protocol.c
+# case_wraparound; this file pins BOTH phases on a fresh test root
+# so the wraparound guarantee is self-contained. Phase B (handler
+# stuck → FATAL) is the load-bearing half — a `<`-wait regression
+# would let Phase A and the generic timeout case pass while
+# silently mis-handling a real SMP shootdown against a CPU whose
+# gen is at UINT32_MAX. Uses the same harness as
+# test_tlb_serial_protocol.c (preinclude mock/tlb_test_runtime.h,
+# longjmp ping_test_override).
+$(TEST_BLD)/test_vmm_ack_wraparound.o: \
+		$(TEST_CASES)/test_vmm_ack_wraparound.c \
+		$(TEST_MOCK)/tlb_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(TLB_SD_HOST_CFLAGS) -I$(TEST_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_vmm_ack_wraparound.elf: \
+		$(TEST_BLD)/test_vmm_ack_wraparound.o \
+		$(TEST_BLD)/tlb_production.o
+	$(HOST_CC) -o $@ $^
+
+test_vmm_ack_wraparound: $(TEST_BLD)/test_vmm_ack_wraparound.elf
 	$<
 
 # Foundational-primitives hosttest (M3 Task 7 Step 4): compiles the
