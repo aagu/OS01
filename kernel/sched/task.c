@@ -1,4 +1,5 @@
 #include <sched/task.h>
+#include <sched/internal.h>
 #include <percpu/percpu.h>
 #include <intr/ipi.h>
 #include <kernel.h>
@@ -88,116 +89,8 @@ void task_list_add(task_t *tsk)
     spin_unlock_irqrestore(&task_list_lock, flags);
 }
 
-/* ── EEVDF scheduler constants ─────────────────────── */
-#define EEVDF_MIN_SLICE  10   // time slice = 10 ticks = 100ms
-#define EEVDF_LATENCY    40   // eligibility window = 40 ticks = 400ms
-
-/* ── Forward declarations for load balancing ─────────── */
-static void sched_balance(percpu_t *rq);
 __attribute__((noreturn)) static void idle_task_resume(void);
 
-/* ── sched_pick_cpu: choose CPU with fewest nr_running ────
- * Called from do_fork() and spawn_user_task() to place
- * new tasks on the least-loaded CPU.
- * Complexity: O(num_cpus).  Acceptable for NR_CPUS ≤ 8.
- */
-static uint32_t sched_pick_cpu(void)
-{
-    uint32_t me = cpu_id();
-    uint32_t best = me;
-    uint32_t min_nr = *(volatile uint32_t *)&percpu_data[me].nr_running;
-
-    for (uint32_t i = 0; i < num_cpus; i++) {
-        if (!percpu_data[i].online) continue;
-        uint32_t nr = *(volatile uint32_t *)&percpu_data[i].nr_running;
-        if (nr < min_nr) {
-            min_nr = nr;
-            best = i;
-        }
-    }
-    return best;
-}
-
-/* ── sched_notify_remote: wake remote CPU after enqueue ──
- * Sets need_resched and sends reschedule IPI so the remote
- * CPU discovers the task immediately, not up to 10 ms later.
- *
- * If ipi_send() times out (10K ICR poll), the IPI is silently
- * dropped.  need_resched=1 is the fallback: the remote CPU
- * picks it up on the next LAPIC timer tick (≤10 ms).
- *
- * Called from do_fork() and spawn_user_task() after enqueue.
- */
-static void sched_notify_remote(task_t *tsk)
-{
-    if ((int)tsk->cpu == (int)cpu_id())
-        return;
-    percpu_t *dst = &percpu_data[tsk->cpu];
-    dst->need_resched = 1;
-    __sync_synchronize();
-    ipi_send(dst->arch_processor_id, IPI_VECTOR_RESCHED);
-}
-
-/* ── update_curr: advance vruntime by 1 tick ──────── */
-static void update_curr(task_t *task)
-{
-    if (!task || task == this_cpu()->idle)
-        return;
-    task->vruntime += 1;
-    if (task->vruntime >= task->deadline)
-        this_cpu()->need_resched = 1;
-}
-
-/* ── rbtree comparator: order by deadline ─────────── */
-static int cmp_deadline(rbtree_node_t *a, rbtree_node_t *b)
-{
-    task_t *ta = container_of(a, task_t, rb_node);
-    task_t *tb = container_of(b, task_t, rb_node);
-    if (ta->deadline < tb->deadline) return -1;
-    if (ta->deadline > tb->deadline) return 1;
-    if (ta->pid < tb->pid) return -1;
-    if (ta->pid > tb->pid) return 1;
-    return (uintptr_t)a < (uintptr_t)b ? -1 : 1;
-}
-
-/* ── enqueue / dequeue ─────────────────────────────── */
-static void enqueue_task(task_t *task, percpu_t *rq)
-{
-    /*
-     * Idle tasks must never appear on a runqueue.  They are
-     * always RUNNING and selected only as a last resort when
-     * pick_eevdf() finds the rbtree empty.
-     */
-    ASSERT(task != rq->idle);
-
-    task->deadline = task->vruntime + EEVDF_MIN_SLICE;
-    // [FIX-atomic] RELEASE: paired with task_wake's ACQUIRE load
-    // (on_rq) so a concurrent wakeup never sees a stale false.
-    __atomic_store_n(&task->on_rq, 1, __ATOMIC_RELEASE);
-    rbtree_node_t *conflict = rbtree_insert(&rq->run_queue, &task->rb_node, cmp_deadline);
-    ASSERT(conflict == NULL);
-    rq->nr_running++;
-}
-
-static void dequeue_task(task_t *task, percpu_t *rq)
-{
-    rbtree_erase(&rq->run_queue, &task->rb_node);
-    // [FIX-atomic] RELEASE store (see enqueue_task).
-    __atomic_store_n(&task->on_rq, 0, __ATOMIC_RELEASE);
-    rq->nr_running--;
-}
-
-/* ── pick_eevdf: select next task O(log n) ─────────── */
-static task_t *pick_eevdf(percpu_t *rq)
-{
-    if (rbtree_empty(&rq->run_queue))
-        return rq->idle;
-    rbtree_node_t *node = rbtree_first(&rq->run_queue);
-    task_t *t = container_of(node, task_t, rb_node);
-    if (t->vruntime > rq->min_vruntime + EEVDF_LATENCY)
-        rq->min_vruntime = t->vruntime;
-    return t;
-}
 
 /* Called on the incoming stack, after the architecture has stopped using
  * prev. A wake between schedule's dequeue and this point observes on_cpu
@@ -281,11 +174,16 @@ retry:
 // race on different CPUs.
 static volatile uint64_t pid_counter = 1;
 
+pid_t alloc_pid(void)
+{
+    return (pid_t)atomic_fetch_add((volatile uint64_t *)&pid_counter, 1);
+}
+
 // ── User-space init task pointer ─────────────────────────
 // Set by spawn_user_task() the first time it creates a user task.
 // do_exit() uses this to reparent orphans and protect the init process.
-static task_t *user_init_task = NULL;
-static int64_t  user_init_pid = 0;
+task_t *user_init_task = NULL;
+int64_t  user_init_pid = 0;
 
 // Per-CPU scheduler guard — set to 1 by task_init() on each CPU.
 // schedule() returns immediately before this point (ticks before
@@ -423,120 +321,7 @@ int blocker_wait(blocker_check_t check, int type, bool signal_can_wake)
     return 0;
 }
 
-/* ── sched_balance: pull or steal tasks from busiest CPU ──
- *
- * Called from schedule() after zombie reaping, before pick_eevdf().
- *
- * Algorithm:
- *   1. Find busiest CPU (max nr_running, tiebreak max min_vruntime)
- *   2. Gate: proceed if local is idle OR gap >= 2 tasks
- *   3. Steal count = max(1, (src - local) / 2) from rbtree tail
- *   4. Double-lock rq_locks (address-ordered), single IRQ save
- *   5. For each task: dequeue from src, normalize vruntime, enqueue to local
- *   6. If src now empty: src.min_vruntime = 0
- *
- * Takes from the tail (largest deadline) — tasks that just used
- * their slice and won't be scheduled again soon.  Preserves source
- * CPU's hot-cache "about to run" tasks.
- */
-static void sched_balance(percpu_t *rq)
-{
-    /* 1. Find busiest online CPU */
-    int src_idx = -1;
-    uint32_t max_nr = 0;
-    uint64_t max_vr = 0;
 
-    for (uint32_t i = 0; i < num_cpus; i++) {
-        if (i == rq->cpu_id || !percpu_data[i].online)
-            continue;
-        uint32_t nr = *(volatile uint32_t *)&percpu_data[i].nr_running;
-        if (nr == 0)
-            continue;
-        uint64_t vr = *(volatile uint64_t *)&percpu_data[i].min_vruntime;
-        if (nr > max_nr || (nr == max_nr && vr > max_vr)) {
-            max_nr = nr;
-            max_vr = vr;
-            src_idx = (int)i;
-        }
-    }
-    if (src_idx < 0)
-        return;
-
-    /* 2. Gate */
-    if (rq->nr_running > 0) {
-        /* Non-idle: require >= 2 task gap to prevent oscillation */
-        if (max_nr <= rq->nr_running + 1)
-            return;
-    }
-    /* rq->nr_running == 0: idle steal — unconditional */
-
-    /* 3. Determine steal count */
-    int count = (int)(max_nr - rq->nr_running) / 2;
-    if (count < 1) count = 1;
-
-    percpu_t *src_rq = &percpu_data[src_idx];
-
-    /* 4. Double-lock, address-ordered, single IRQ save */
-    spinlock_T *lo, *hi;
-    if ((uintptr_t)&src_rq->rq_lock < (uintptr_t)&rq->rq_lock) {
-        lo = &src_rq->rq_lock; hi = &rq->rq_lock;
-    } else {
-        lo = &rq->rq_lock; hi = &src_rq->rq_lock;
-    }
-
-    uint64_t flags = arch_local_irq_save();
-    spin_lock(lo);
-    if (lo != hi) spin_lock(hi);
-
-    /* 5. Steal from tail */
-    rbtree_node_t *node = rbtree_last(&src_rq->run_queue);
-    int taken = 0;
-
-    while (node && taken < count) {
-        task_t *t = container_of(node, task_t, rb_node);
-
-        /* Advance BEFORE erase (rbtree_erase invalidates node's
-         * parent/left/right pointers used by rbtree_prev) */
-        rbtree_node_t *prev = rbtree_prev(node);
-
-        if (t != src_rq->idle) {
-            /* Never migrate the user-space init process (pid==1),
-             * and NEVER migrate a task that is on a CPU (running or
-             * committed by pick).  schedule() re-enqueues current
-             * (on_rq=true) while it still runs (on_cpu=1) for
-             * vruntime reordering; without the on_cpu check another
-             * CPU's balancer steals it and BOTH CPUs operate on the
-             * same task (double-book -> stack clobber, RIP=2/1). */
-            if (t->pid != user_init_pid &&
-                !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
-                dequeue_task(t, src_rq);
-                t->cpu = rq->cpu_id;
-
-                /* Normalize vruntime to target CPU's timeline */
-                if (t->vruntime < rq->min_vruntime)
-                    t->vruntime = rq->min_vruntime;
-
-                enqueue_task(t, rq);
-                taken++;
-            }
-        }
-        node = prev;
-    }
-
-    /* 6. Reset min_vruntime if source is now empty */
-    if (src_rq->nr_running == 0)
-        src_rq->min_vruntime = 0;
-
-    spin_unlock(hi);
-    if (lo != hi) spin_unlock(lo);
-    arch_local_irq_restore(flags);
-
-    if (taken > 0) {
-        debug_sched("balance: CPU%u <- %d tasks from CPU%d (src_nr=%u local_nr=%u)\n",
-                    rq->cpu_id, taken, src_idx,
-                    (unsigned)src_rq->nr_running, (unsigned)rq->nr_running);
-    }
-}
 
 void schedule(void)
 {
@@ -1111,7 +896,7 @@ extern void arch_kernel_thread_entry(void);
 // it to 16 bytes before passing to fxsave64/fxrstor64.
 // Sets FCW=0x037F (default x87 control word) and MXCSR=0x1F80
 // (default SSE control/status).
-static void *fpu_area_alloc(void)
+void *fpu_area_alloc(void)
 {
     char *raw = (char *)malloc(512 + 16);
     if (!raw) return NULL;
