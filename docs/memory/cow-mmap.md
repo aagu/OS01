@@ -132,9 +132,9 @@ memory still mapped by the parent.
 ### Data structures
 
 ```c
-// kernel/include/sched/task.h:68
+// kernel/include/sched/task.h:78
 typedef struct mm_struct {
-    uint64_t *pml4;
+    uint64_t *pgdir;        // physical address of top-level page table (PGD/TTBR0)
     uint64_t start_code, end_code;
     uint64_t start_data, end_data;
     uint64_t start_rodata, end_rodata;
@@ -142,6 +142,7 @@ typedef struct mm_struct {
     uint64_t start_stack;
     list_t   vma_list;      // sorted by vm_start
     uint64_t mmap_base;     // start search address for mmap
+    spinlock_T lock;        // guards munmap/MAP_FIXED/mprotect/brk
 } mm_t;
 
 // kernel/memory/vma.c (vma_t, defined locally)
@@ -245,17 +246,48 @@ writable entries, which would bypass COW protection.
 
 ---
 
+## User Address Space & Heap Isolation (2026-10-02)
+
+To isolate user heap allocations from the ELF image, prevent accidental over-mapping, and strictly govern permissions:
+
+### 1. 4KB ELF Segment Loading and Envelope
+
+- ELF segments are loaded strictly in 4KB pages via `elf_load_image()` in `kernel/fs/elf.c` (no 2MB huge PMD in user text/data).
+- The user address space envelope is `USER_ENVELOPE_SIZE` (512 MiB, from `USER_CODE_ADDR = 0x400000` to `0x20400000`).
+- Validated at load time via pure validator `elf_layout_validate()` (`kernel/fs/elf.c`).
+
+### 2. Heap VMA & Dynamic `brk` Management
+
+- **Initialization**: `mm_init_user_heap(mm, elf_end)` creates a zero-length `VM_HEAP` VMA at page-aligned `elf_end` during exec/spawn.
+- **Break management**: `mm_set_brk(mm, requested, &result)` (called by `SYS_brk` in `trap.c`):
+  - **Expansion**: allocates and maps 4KB anonymous pages under `mm->lock`.
+  - **Shrink**: unmaps and frees 4KB pages back to the subpage pool.
+- **Fault guard**: In `do_page_fault`, uncommitted heap addresses (between `mm->end_brk` and `vma->vm_end`) cannot fault in writable pages.
+
+### 3. Protected User Windows
+
+`mm_user_range_protected(mm, start, end)` guards reserved user windows against `mmap` / `munmap` / `mprotect` collisions:
+- ELF load envelope (`[0x400000, elf_end)`)
+- Heap reserve (`[start_brk, heap_limit)`)
+- Guard page (`[USER_STACK_BASE - PAGE_SIZE, USER_STACK_BASE)`)
+- User stack (`[USER_STACK_BASE, USER_STACK_TOP)`)
+
+---
+
 ## Key files
 
 | File | Role |
 |------|------|
 | `kernel/memory/pmm.c` | `subpage_pool`, `alloc_4k_page`, `free_4k_page`, `page_cow_get/put/refs` |
-| `kernel/memory/vma.c` | `do_mmap`, `do_munmap`, `do_mprotect`, `vma_insert/remove/free_all`, `fork_vma_copy` |
+| `kernel/memory/vma.c` | `do_mmap`, `do_munmap`, `do_mprotect`, `vma_insert/remove/free_all`, `mm_init_user_heap`, `mm_set_brk`, `mm_user_range_protected` |
 | `kernel/memory/vmm.c` | `vmm_unmap_4k_page` (COW‑aware), `vmm_map_4k_page`, `vmm_pt_walk`, `vmm_alloc_map` |
-| `kernel/sched/task.c` | `fork_mm_copy` (page table walk + COW install), `do_fork` |
-| `kernel/arch/x86_64/intr/trap.c` | `do_page_fault` COW resolution, `do_system_call` dispatch for `SYS_mmap/mprotect/munmap` |
+| `kernel/fs/elf.c` | 4KB per-page ELF image loader and `elf_layout_validate` |
+| `kernel/sched/task.c` | `fork_mm_copy` (page table walk + COW install), `do_fork`, staged spawn/exec image lifecycle |
+| `kernel/arch/x86_64/intr/trap.c` | `do_page_fault` COW resolution and heap guard, `do_system_call` dispatch for `SYS_mmap/mprotect/munmap/brk` |
 | `kernel/include/memory/vmm.h` | `PAGE_COW`, `PAGE_PROTNONE`, page table flag constants |
-| `kernel/include/sched/task.h` | `mm_t` (VMA list, `mmap_base`), `task_t` |
-| `kernel/include/uapi/syscall.h` | `SYS_mmap` (44), `SYS_mprotect` (45), `SYS_munmap` (46) |
+| `kernel/include/memory/vma.h` | `vma_t`, `mm_init_user_heap`, `mm_set_brk`, `mm_user_range_protected` |
+| `kernel/include/sched/task.h` | `mm_t` (VMA list, `mmap_base`, `pgdir`, `lock`), `task_t` |
+| `kernel/include/uapi/syscall.h` | `SYS_mmap` (44), `SYS_mprotect` (45), `SYS_munmap` (46), `SYS_brk` (12) |
 | `libc/unistd/mmap.c` | User‑space `mmap()`/`munmap()` wrappers using `syscall6`/`syscall` |
 | `libc/unistd/mprotect.c` | User‑space `mprotect()` wrapper |
+| `libc/unistd/brk.c` | User‑space `brk()`/`sbrk()` wrappers |

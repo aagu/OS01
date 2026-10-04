@@ -1,9 +1,78 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-09-26）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-10-04）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
+
+## 2026-10-04
+
+- feat(terminal): **terminal 迁移至 libgfx + 刷新与 I/O 优化** —— commits `52a77005` / `920b48a6` / `c9105090`：
+  - terminal 渲染路径切至 `libgfx.a` 静态库，支持离屏双缓冲与字形绘制加速（`gfx_draw_glyph`）
+  - 优化刷新算法：利用像素级区域滚动替代整屏重绘，批量合并串口 I/O 读写
+  - 增加 eager PTY 排空与 8 像素宽字体快速展开路径，显著降低高负载输出卡顿
+- feat(mm): **用户空间信封扩展至 512 MiB + 匿名 mmap 缓冲** —— commits `c53d7cde` / `8ad4d1a8`：
+  - `USER_PAGE_SIZE` 重命名为 `USER_ENVELOPE_SIZE`，上限由 16 MiB 提升至 512 MiB（`0x400000` 到 `0x20400000`），为大分辨率像素缓冲与后续应用预留充足空间
+  - `libgfx` 像素缓冲分配由堆（`malloc`/`brk`）迁移为匿名 `mmap`（`MAP_ANON`），彻底解耦图形缓冲与 brk 用户堆
+- docs(roadmap): **规划 P2 架构治理任务 ARCH-1..10 并清理过时项** —— commit `dd05877b` 及后续收尾：
+  - 确认 OS01 自有 syscall ABI 为唯一标准，Linux ABI 仅作兼容层
+  - 规划 ARCH-1（syscall 脱离 arch）、ARCH-2（Linux ABI 兼容层独立）、ARCH-3（消除 muldefs 与头定义全局变量）、ARCH-4（拆分 sched/task.c）等 10 项治理任务
+  - 清理 roadmap 中已在 master 闭环的规划项（用户堆与 ELF 映射隔离、2D 图形 API、PS/2 鼠标驱动、aarch64 M0/M1、增量重编等）
+
+## 2026-10-03
+
+- feat(mm): **aarch64 M1 运行期直映严式页表树合入** —— merge `e531167b`（commits `10826fef..f1df9444`）：
+  - 共同 `arch/boot_memory.h` 启动直映契约：PMM 之后、AP 启动前单点调用 `arch_boot_direct_map_init()`
+  - x86_64 适配器保留现有 2 MiB 启动直映，传播中间页表分配失败；`ZONE_UNMAPPED_INDEX` 覆盖截止语义保持
+  - aarch64 从低窗口 arena 建立独立 TTBR1，覆盖高 RAM 与 holes，收紧设备与保留 block；严格限制非 RAM 映射
+  - BSP/AP root 与 probe 全面验证，覆盖 16 组 RAM/CPU/镜像矩阵（256 MiB..4 GiB，1..4 核），通过稀疏、容量耗尽、AP 坏 root 注入测试
+- docs(spec,plan): **aarch64 M2 Slab + M3 内核 VMM 详细设计闭环** —— commits `93f8ae7f..9edc1cab`：
+  - spec v8 + plan v4：明确 frame 级记账、锁契约（BBM、inactive root 拆分）、SGI/SMP shootdown 协议与初始化顺序契约，就绪待实装
+
+## 2026-10-02
+
+- feat(mm,elf): **用户堆与 ELF 映射隔离全面闭环** —— merge `277b6315`（8-task plan，16 commits `fb6635a3..085f50e1`）：
+  - **Task 1**（`5cc047e6`）：纯 ELF64 加载布局校验器（`elf_layout_validate`）
+  - **Task 2**（`01d95d6c`）：4 KiB 分页 ELF 加载器与单回滚所有者（`elf.c` 重写，杜绝大页溢出）
+  - **Task 3**（`fa3fa45d`）：暂存 spawn/exec 镜像生命周期 + 零长度初始 `VM_HEAP` VMA + `mm_init_user_heap`
+  - **Task 4**（`76076b9d`）：`mm_set_brk` 拥有已提交 4 KiB 堆页，`SYS_brk` 委托处理；扩展按页分配，收缩时释放物理页并解除映射；缺页保护防止越界预写
+  - **Task 5**（`a6b9507d`）：`mm_user_range_protected` 保护 ELF envelope、堆保留区、guard 保护页与用户栈免受 `mmap`/`munmap`/`mprotect` 侵入
+  - **Task 6**（`95129e93`）：暂存两阶段 `fork_mm_copy` + 回滚修复（VMIO huge、fork-of-fork COW）
+  - **Task 7**（`81dc54a0`）：`prepare_user_write_range(_locked)` 用户写前 COW 私有化准备与 11+ 审计调用点接入
+  - **Task 8**（`284d846a`）：全屏 1440×900 + `brk(0)` headroom + Tetris smoke + E2E 验证；host 43/43 suites，systest 334/334 全绿
+- feat(aarch64): **aarch64 M0 启动直映契约合入** —— merge `2523a311`（commits `e829c377..8a9fa7e6`）：
+  - `head.S` 在 MMU 打开前建立 0..2 GiB boot map，内核 block 保持 EL1 可执行，其余 RAM PXN/UXN；普通镜像与自测镜像契约完全对齐，消除 C 代码补图差异
+
+## 2026-10-01
+
+- feat(aarch64): **aarch64 EL1 sync 致命异常诊断** —— merge `d6fbb22d`（commits `8734f1e5..cba5f578`）：
+  - 实现 ESR_EL1 / FAR_EL1 / ELR_EL1 致命诊断与寄存器解析
+  - 建立 sync-fault 独立探针镜像构建机制，配套 QEMU 自动化测试 harness
+- docs: **文档目录树状结构重构** —— commit `931393b9`：
+  - 将 `docs/` 下 50+ 扁平文件重组为与 `kernel/<subsys>/` 对称的树状子目录
+  - 历史 closure 报告与调试日志归档至 `docs/archive/`；合并构建相关手册为 `docs/build/build.md`
+
+## 2026-09-30
+
+- feat(gfx): **P3 2D 图形 API 闭环（libgfx + /dev/gfx0）** —— merge `8a0f4e7b`（commits `f81f092f..614e181c`，6-task plan）：
+  - `libgfx.a` 用户态静态库：点/线/矩形/填充矩形/位图 blit 与局部视口裁剪
+  - `/dev/gfx0` 受限 present 设备：per-file ioctl 视图生命周期、受控矩形呈现、坐标校验
+  - Tetris 游戏迁移：将直接 `/dev/fb` mmap 替换为受限视图呈現，游戏逻辑零改动平滑迁移
+  - QEMU ring-3 E2E 测试套件（`test-qemu SUITE=gfx`）与 host 单元测试全覆盖
+
+## 2026-09-28
+
+- refactor(kernel_main): **x86 引导阶段分步拆分** —— merge `9f911824`（commits `f5004588..8a43cea3`）：
+  - 拆分 BSP per-cpu 初始化、启动文件系统挂载、x86 设备节点注册、控制台 TTY 引导连接与 AP 引导辅助
+  - 提升引导模块内聚性，为 x86/aarch64 统一单 `kernel_main` 入口铺平路径
+
+## 2026-09-27
+
+- feat(driver): **PS/2 鼠标驱动落地（P3 首项闭环）** —— commits `116e57ec..0a68ae97`（10-task plan）：
+  - `i8042` 控制器共用层：互斥锁、键盘/鼠标来源分流、command byte 事务机制与 pump drain 上限保护
+  - `mouse_event_t` 8 字节事件 ABI（`kernel/include/uapi/mouse.h`）
+  - `/dev/mouse` 设备节点：event ring 环形缓冲、非阻塞/阻塞读取、`poll` 就绪通知
+  - 500 ms 有界硬件探测与 F5 safe cleanup，QEMU 与 host 单元测试全通过
 
 ## 2026-09-26
 
@@ -21,17 +90,17 @@
   - **Task 3**（`29996e9`）：`kernel/include/time/clocksource.h` 2 个 `#if defined(__x86_64__)` 块（percpu include + `clocksource_read_ns()` inline）迁至新建 `kernel/include/arch/x86_64/clocksource.h`；`kernel/time/clocksource.c` + `kernel/time/timer.c` SUBSYS_INITCALL ifdef 删除；`timer.c` spin hint 接 `arch_cpu_pause()`
   - **Task 4**（`e91d0b9`）：`kernel/driver/{ahci,keyboard,pit,serial}.c` + `kernel/net/net.c` 共 5 个 TU 删除冗余 `#ifdef __x86_64__` SUBSYS_INITCALL 守护（TU 已在 x86-only 路径，Makefile 已 gate）
   - 文档同步：`docs/arch/cross-boundary-symbols.md` §3.3 ❌/🟡 状态全改 ✅，§6 验收清单增条目
-- fix(aarch64): **IPI cpus≥2 FAIL 根因修复（TPIDR_EL1 误读）** —— commit `d695020`（worktree `fix/aarch64-ipi-fail`，当前 HEAD）：`kernel/arch/aarch64/intr/ipi_test.c::ipi_cpu_id()` 从 `TPIDR_EL1` 取指针后误解释为 `aarch64_boot_percpu_t *`（实际 `percpu_t`），跨字段偏移导致 cpu≠self 时 `id` 计算错位（`cpu=1 received=3`、`cpu=2/3 received=0`）。两个「暖机」SGI 掩盖真问题：`cpu=0` 暖机时 IPI handler 调 `gic_send_sgi(self,2,0,FILTER_SELF)` 写 `0x02000002`，触发 SGI 2 self-trigger，handler 重入将 `received[cpu]` 加 1 —— 看似通过；删暖机后 `cpu=1..N-1 received == 0`。修：去掉类型转换，改用运行期 `cpu_id()`（`mrs x0, TPIDR_EL1` → `percpu_current()`），删除两个暖机 SGI；`SGI_TEST_ACK_COUNT == N-1`（`cpu=0` 不应收到自给 SGI）+ `GICC_IAR == 0x401`（sgi_int_id=2，CPU targets=1）严格断言。QEMU `make PROFILE=aarch64-clang test-aarch64-uefi-smp` 1/2/4 ×3 共 9/9 PASS（0 TIMEOUT / 0 FAIL）。完整根因 + 修复记录见 `docs/aarch64-ipi-fail-handoff-2026-09-26.md`
+- fix(aarch64): **IPI cpus≥2 FAIL 根因修复（TPIDR_EL1 误读）** —— commit `d695020`（worktree `fix/aarch64-ipi-fail`，当前 HEAD）：`kernel/arch/aarch64/intr/ipi_test.c::ipi_cpu_id()` 从 `TPIDR_EL1` 取指针后误解释为 `aarch64_boot_percpu_t *`（实际 `percpu_t`），跨字段偏移导致 cpu≠self 时 `id` 计算错位（`cpu=1 received=3`、`cpu=2/3 received=0`）。两个「暖机」SGI 掩盖真问题：`cpu=0` 暖机时 IPI handler 调 `gic_send_sgi(self,2,0,FILTER_SELF)` 写 `0x02000002`，触发 SGI 2 self-trigger，handler 重入将 `received[cpu]` 加 1 —— 看似通过；删暖机后 `cpu=1..N-1 received == 0`。修：去掉类型转换，改用运行期 `cpu_id()`（`mrs x0, TPIDR_EL1` → `percpu_current()`），删除两个暖机 SGI；`SGI_TEST_ACK_COUNT == N-1`（`cpu=0` 不应收到自给 SGI）+ `GICC_IAR == 0x401`（sgi_int_id=2，CPU targets=1）严格断言。QEMU `make PROFILE=aarch64-clang test-aarch64-uefi-smp` 1/2/4 ×3 共 9/9 PASS（0 TIMEOUT / 0 FAIL）。完整根因 + 修复记录见 `docs/archive/aarch64/aarch64-ipi-fail-handoff-2026-09-26.md`
 - ci: **bucket test targets 迁移** —— commit `36e6230`：CI workflow 从旧的 forwarding `test-*` aliases 切到 6 个 bucket 目标（`test-qemu` / `test-host` / `test-static` / `test-aarch64` / `test-contract` / `test-kernel-selftest`）
 - refactor(harness): **删 forwarding `test-*` aliases** —— commit `ce258a1`（worktree `feat/build-system-harness-consolidation` 收尾）：删 09-25 引入的临时 forwarding `test-*` aliases，仅保留 6 个 bucket 目标作为权威入口。follow-up 见 `9f13465`（track followup）
 
 ## 2026-09-25
 
-- refactor: **build system harness consolidation**（worktree `feat/build-system-harness-consolidation`，12 commits `70daaea..ce258a1`）：统一 6 个 bucket test 目标（`test-qemu` / `test-host` / `test-static` / `test-aarch64` / `test-contract` / `test-kernel-selftest`），target taxonomy / capability gate / alias policy 收敛到 `docs/build-system-harness.md` 作为权威 reference：
+- refactor: **build system harness consolidation**（worktree `feat/build-system-harness-consolidation`，12 commits `70daaea..ce258a1`）：统一 6 个 bucket test 目标（`test-qemu` / `test-host` / `test-static` / `test-aarch64` / `test-contract` / `test-kernel-selftest`），target taxonomy / capability gate / alias policy 收敛到 `docs/build/build.md` 作为权威 reference：
   - `70daaea` plan (v3, 12 tasks) → `64dd4ac` gate x86 validation + 公开隐藏 test target → `5c43897` drop unused `all` alias → `452bbf1` DRY QEMU command lines（`RUN_QEMU_BASE` / `_FLAGS_<target>`）
   - `f2652a7` consolidate 4 QEMU E2E 目标 → `test-qemu SUITE=<name>`（保留旧名为 aliases）→ `58a6ef9` canonical `test-host` + 拆分 pmm helper → `64e3207` `test-static` umbrella + 4 subset aliases
   - `c28e67a` consolidate 3 aarch64 tests → `test-aarch64 MODE=<smp|no-ack|gic-spi>` → `7350c61` consolidate 2 contract tests → `test-contract PROFILE=<name>`
-  - `782e964` `docs/build-system-harness.md` 新建（target taxonomy 权威 reference）→ `30f3508` update Quick start / 用户入口 / test recipes
+  - `782e964` `docs/build/build.md` 新建（target taxonomy 权威 reference）→ `30f3508` update Quick start / 用户入口 / test recipes
 - refactor: **arch source groups**（commit `c3412da` + `18a4cff`，merge `79ccffb`，spec `2026-09-25-arch-source-groups-design.md`）：kernel 源按 `kernel/arch/<arch>/<topic>/` 职责分组（如 `kernel/arch/x86_64/intr/{8259A,lapic,lapic_timer}.c`、`kernel/arch/x86_64/sched/{task,switch}.c`、`kernel/arch/aarch64/intr/{gic_driver,gic,irq_probe,ipi_test,entry.S}` 等），更新所有架构引用路径 + 文档架构图
 - refactor: **compiler_rt 目录裁撤**（commit `1c5816b`，merge `ca72145`）：`kernel/compiler_rt/` 整个目录裁撤，符号落点各归其位——`__stack_chk_*` 迁至 `kernel/core/stack_chk.c`；`__udivti3` 走 `runtime/builtins/`；elf-loader 保留 `runtime/builtins/`。消除「目录名与实际职责不符」的违例
 - fix(run): commit `1fbca71` aarch64 QEMU harness 改用 selftest 变体镜像
@@ -41,7 +110,7 @@
 ## 2026-09-24
 
 - feat(aarch64): **AAGU-5.6 arch entropy facade + strong overrides + kernel/random refactor** —— merge #25（commits `4ab3370` / `f41e4e6` / `1c5bf17`）：spec `docs/arch/entropy-source-facade.md` + `arch_random_get_entropy()` + `arch_random_get_strong()` 双接口 + `kernel/random` refactor。x86_64 strong override：`RDSEED` = STRONG / `RDRAND` = WEAK；aarch64 strong override：`RNDRRS` = STRONG / `RNDR` = WEAK
-- feat(aarch64): **AAGU-29 aarch64 libk.a link**（commit `bee8da5`，merge #26 `bec4a4c`，worktree `fix/aagu-29-libk-aarch64`）：aarch64 kernel 现在 link `libk.a`（`kernel/arch/aarch64/make.config`: `ARCH_LIBS = -nostdlib -lk`）→ `memcpy/memset/memmove/calloc/free/malloc/strlen/strcmp` 走 libc 单一来源。删 `kernel/compiler_rt/memset.c` weak fallback + `kernel/arch/aarch64/libc_stub.c` calloc/free shim。完整闭项见 `docs/aarch64-libk-aarch64-closure-2026-09-24.md`
+- feat(aarch64): **AAGU-29 aarch64 libk.a link**（commit `bee8da5`，merge #26 `bec4a4c`，worktree `fix/aagu-29-libk-aarch64`）：aarch64 kernel 现在 link `libk.a`（`kernel/arch/aarch64/make.config`: `ARCH_LIBS = -nostdlib -lk`）→ `memcpy/memset/memmove/calloc/free/malloc/strlen/strcmp` 走 libc 单一来源。删 `kernel/compiler_rt/memset.c` weak fallback + `kernel/arch/aarch64/libc_stub.c` calloc/free shim。完整闭项见 `docs/archive/aarch64/aarch64-libk-aarch64-closure-2026-09-24.md`
 - feat: **AAGU-6 P2 风格/头/测试 cleanup batch** —— commit `b580432`（PR #24，worktree `feat/aagu-6-p2-cleanup`）：统一 kernel `__stack_chk_guard` + 移除 `kernel/arch/aarch64/memset.c` weak stub + `idle_resume`/calloc shim 等清理
 
 ## 2026-09-23
@@ -84,8 +153,8 @@
   - **Phase 2 #1** SUBSYS_INITCALL plumbing（merge `e115d79`）
   - **Phase 2 #2** `cntp_tick_handler` → `tick_handler` 集成（merge `10fd3d2`）
   - **Phase 2 #3** per-CPU timer / SMP timer（merge `3037df3`）
-  - **Phase 2 #4** `__udivti3` hoist 至 `runtime/builtins/`（merge `5edf79a`，commit 详见 `docs/aarch64-udivti3-hoist-closure-2026-09-18.md`）
-  - **Phase 2 #5** `-I libc/include` 清理：6 mirror 头（`list/rbtree/string/stdlib/sys-cdefs/sys-types`）改走 `kernel/include/compat/`，由 libc 单一来源提供（merge `a110ab9`，详见 `docs/aarch64-libc-include-policy-closure-2026-09-18.md`）
+  - **Phase 2 #4** `__udivti3` hoist 至 `runtime/builtins/`（merge `5edf79a`，commit 详见 `docs/archive/aarch64/aarch64-udivti3-hoist-closure-2026-09-18.md`）
+  - **Phase 2 #5** `-I libc/include` 清理：6 mirror 头（`list/rbtree/string/stdlib/sys-cdefs/sys-types`）改走 `kernel/include/compat/`，由 libc 单一来源提供（merge `a110ab9`，详见 `docs/archive/aarch64/aarch64-libc-include-policy-closure-2026-09-18.md`）
   - **Phase 2 P2 follow-ups 5/5 全闭环**
 
 - fix(aarch64): **GIC clobber-probe TIMEOUT 修复** —— commit `2481e1f`（worktree `fix/gic-probe-timeout`）：`kernel/arch/aarch64/irq_probe.c:103-105` asm `mov x10,#0x200` + `movk x10,#0x0002,lsl #16` 两个 immediate 错位，实际算出 `0x0002_0200`（SGI 512, filter=LIST）而非 `0x0200_0002`（SGI 2 + filter SELF）；GICv2 静默丢弃 out-of-range SGI → 2 秒 ldar 轮询命中 deadline → `[gic-probe] save-restore TIMEOUT`。修正为 `mov x10,#2` + `movk x10,#0x200,lsl #16`，`x10 == 0x02000002 == gic_send_sgi(dev,2,0,FILTER_SELF)`（C wrapper 编码 `filter<<24 | targets<<16 | sgi&0xf`）。配套 RED→GREEN hosttest `hosttests/cases/test_gic_probe.c`（180 行 + Makefile wiring）：suite 1 用 production gic_driver.c + mock MMIO 断言 C wrapper 写 `0x02000002`；suite 2 静态扫描 irq_probe.c 源码禁止已知 buggy literal pair。QEMU E2E 矩阵 `make test-aarch64-uefi-smp --cpus 1 2 4 --repeat 3` = 9/9 PASS（0 TIMEOUT / 0 FAIL）；hosttests 23/23（x86_64-clang + aarch64-clang）；aarch64 uefi KERNEL_SELFTEST=1 build PASS。`docs/superpowers/specs/.../phase1` §7.3 clobber-probe 设计 + plan §2.2 评审均提及 SGI 2 self-trigger，但 plan:1078 原写法 `movk x10,#2,lsl #24` 本身是 assembler error（lsl #24 非法），实现层的 bug 制造了 *silent* TIMEOUT，plan 的 bug 只会产生 *obvious* 编译失败——一并记入 follow-up
@@ -129,7 +198,7 @@
 
 | 项目 | 工作量 | 日期 |
 |------|--------|------|
-| **文档学习层**：`docs/README.md` 索引（按 0/1/2/3/4 层组织，全局认知→架构骨架→核心机制→I/O 子系统→构建调试）+ 4 份源码导读（调度器 / trap.c / vfs+memory / tty+intr），让新人按指定顺序读源码即可走通关键路径。`docs/README.md` + `docs/scheduler-reading-guide.md` + `docs/trap-reading-guide.md` + `docs/vfs-memory-reading-guide.md` + `docs/tty-intr-reading-guide.md` | 1 天 | 09-13 |
+| **文档学习层**：`docs/README.md` 索引（按 0/1/2/3/4 层组织，全局认知→架构骨架→核心机制→I/O 子系统→构建调试）+ 4 份源码导读（调度器 / trap.c / vfs+memory / tty+intr），让新人按指定顺序读源码即可走通关键路径。`docs/README.md` + `docs/sched/scheduler-reading-guide.md` + `docs/syscall/trap-reading-guide.md` + `docs/memory/vfs-memory-reading-guide.md` + `docs/interrupt/tty-intr-reading-guide.md` | 1 天 | 09-13 |
 
 ## 2026-09-12
 
@@ -159,7 +228,7 @@
 
 | 项目 | 工作量 | 日期 |
 |------|--------|------|
-| **自托管 compiler runtime**（多个 commits）：udivti3 实现 + provider-keyed selfhosted archive + provider 构建不变量硬化 + 内核链接 compiler runtime + kernel link publication 加固 + compiler-rt eligibility 验证 + kernel runtime validation targets + syscall/selftest suite 隔离 + variant link paths + root `make sysroot` 入口。详见 `runtime/` + `docs/build.md` | 3 天 | 09-04~09-05 |
+| **自托管 compiler runtime**（多个 commits）：udivti3 实现 + provider-keyed selfhosted archive + provider 构建不变量硬化 + 内核链接 compiler runtime + kernel link publication 加固 + compiler-rt eligibility 验证 + kernel runtime validation targets + syscall/selftest suite 隔离 + variant link paths + root `make sysroot` 入口。详见 `runtime/` + `docs/build/build.md` | 3 天 | 09-04~09-05 |
 | **aarch64 UEFI bootloader 统一**（commits `af166bc`..`06e6127`，merge `06e6127`）：x86_64 + aarch64 共享 `boot/uefi/main.c` + arch 分发 + `boot_context` handoff ABI + boot_context 头部偏移断言 | 1 天 | 09-03 |
 | **aarch64 UEFI 固件修复**：firmware 截断 64MiB 适配 QEMU pflash（`11aa6ed`）+ aarch64 UEFI 默认 URL 下载（`bad8825`）+ aarch64 也显式传 clang+lld 到 posix-uefi（`25872d1`） | 半天 | 09-03 |
 | **profile-only UEFI overlay 简化**：x86 UEFI 固件 per-profile（不再用运行时 overlay patch）+ host test 按 profile 隔离 + 所有组件强制声明 profile + profile-only UEFI cleanup contract | 半天 | 09-03 |
@@ -169,7 +238,7 @@
 
 | 项目 | 工作量 | 日期 |
 |------|--------|------|
-| **syscall 边界审计**（commits `a1ad1b9`..`80eab1a`，11 commits）：逐 syscall 检查 user-pointer 边界 + 可睡眠路径 + copy_{to,from}_user 失败处理 + ASLR/canary 未来兼容；详见 `docs/syscall.md` 末尾审计触达清单 | 半天 | 08-24~08-26 |
+| **syscall 边界审计**（commits `a1ad1b9`..`80eab1a`，11 commits）：逐 syscall 检查 user-pointer 边界 + 可睡眠路径 + copy_{to,from}_user 失败处理 + ASLR/canary 未来兼容；详见 `docs/syscall/syscall.md` 末尾审计触达清单 | 半天 | 08-24~08-26 |
 
 ## 2026-08-23
 

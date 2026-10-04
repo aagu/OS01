@@ -27,9 +27,9 @@
 | 6 | 呈现 | 每视图逐行拷贝 `w*h` 像素到 fb 对应矩形；不接受 partial present | QEMU stdvga 同步返回；不实现 vsync / page-flip / 硬件双缓冲 |
 | 7 | 隔离 | 每视图只允许写到内核保存的矩形；本阶段任何进程仍可打开 `/dev/fb` 或创建重叠视图 | 不提供跨进程图形权限隔离（spec §2 明示） |
 | 8 | 视图表 | 16 项全局表（`g_gfx_table`），spinlock 保护分配/释放；`dup`/`fork` 共享 `file_t` 引用计数 | 简单；超出需动态扩表 |
-| 9 | 用户堆上限 | `USER_PAGE_SIZE` 从 2 MiB 升到 16 MiB | 1440×900 RGB32 = 5.18 MiB 像素缓冲超过旧上限 |
-| 10 | heap VMA | `spawn_user_task` / `sys_exec` 现在为新 MM 插入 `[start_brk, USER_CODE_ADDR+USER_PAGE_SIZE)` 的 VM_ANON | 之前没有 heap VMA，brk 扩展遇到页缺失直接 SIGSEGV |
-| 11 | 用户栈位置 | `USER_STACK_BASE = 0x1400000`（2 MiB 对齐） | 紧贴 heap 上限之上；stack guard 隐含在 `end_brk ≤ 0x13FF000` 与 stack base 之间 |
+| 9 | 用户堆上限 | `USER_PAGE_SIZE` 从 2 MiB 升到 16 MiB（注：2026-10-02/04 进一步更名为 `USER_ENVELOPE_SIZE` 并扩至 512 MiB；像素缓冲分配已迁至匿名 mmap） | 1440×900 RGB32 = 5.18 MiB 像素缓冲超过旧上限 |
+| 10 | heap VMA | `spawn_user_task` / `sys_exec` 初始插入 heap VMA（注：2026-10-02 用户堆与 ELF 隔离落地后，改由 `mm_init_user_heap` 插入零长度 `VM_HEAP`，由 `mm_set_brk` 动态管理已提交 4KB 页） | 之前没有 heap VMA，brk 扩展遇到页缺失直接 SIGSEGV |
+| 11 | 用户栈位置 | `USER_STACK_BASE = 0x1400000`（受 `mm_user_range_protected` 保护） | 紧贴 heap 上限之上；stack guard 隐含在 `end_brk ≤ 0x13FF000` 与 stack base 之间 |
 | 12 | Tetris 输入 | `/dev/keyboard` 原始扫描码（沿用） | tty TCSETS 是 no-op，raw 模式改造不值 |
 | 13 | Tetris 渲染 | libgfx 全屏视图 `gfx_open(0,0,w,h)` + `gfx_fill_rect` + 每视觉事件一次 `gfx_present`（不按 cell 多次 present） | 与 spec §6 / plan §6 Task 6 契约一致；闪屏时只 present 一次 |
 | 14 | FBIOSURRENDER 保留 | Tetris 在 `gfx_open` 之前 issue | 与迁移前一致；保持 kernel console 不踩像素 |
@@ -214,7 +214,7 @@ Step 5 (集成验证) ──→ 所有 Step 完成后
 | poll 唤醒丢失 | 参照 tty_wake_waiters 双检模式 + `this_cpu()->need_resched=1` |
 | 主循环被信号中断 | poll/nanosleep EINTR 处理（`errno==EINTR → continue`） |
 | 脏矩形 diff 复杂度 | V1 每 tick 全量 diff（20×10 数组比较，~200 次 memcmp，开销可忽略） |
-| 像素缓冲超过用户堆上限 | Task 6 把 `USER_PAGE_SIZE` 从 2 MiB 升到 16 MiB；`spawn_user_task` / `sys_exec` 插入 heap VMA |
+| 像素缓冲超过用户堆上限 | 历史：Task 6 把 `USER_PAGE_SIZE` 升至 16 MiB；现行：`USER_ENVELOPE_SIZE` 扩至 512 MiB，`libgfx` 像素缓冲已切至匿名 `mmap`，与堆完全隔离 |
 
 ### 完成后（可选项，不阻塞）
 
