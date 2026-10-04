@@ -93,6 +93,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_foundational_primitives.elf \
     $(TEST_BLD)/test_gic_marker_lines.elf \
     $(TEST_BLD)/test_gic_probe.elf \
+    $(TEST_BLD)/test_double_state_publish.elf \
     $(TEST_BLD)/test_clocksource.elf \
     $(TEST_BLD)/test_i8042_demux.elf \
     $(TEST_BLD)/test_mouse_init.elf \
@@ -1323,6 +1324,23 @@ $(TEST_BLD)/test_gic_marker_lines.elf: $(TEST_BLD)/test_gic_marker_lines.o
 	$(HOST_CC) -o $@ $<
 
 test_gic_marker_lines: $(TEST_BLD)/test_gic_marker_lines.elf
+	$<
+
+# M3 Task 11: BSP double-state publish ordering (percpu_init / num_cpus /
+# smp_starting_enter before smp_boot_aps; ipi_ready published only after
+# IRQ unmask). Same source-scan pattern as test_gic_marker_lines: reads
+# main.c / smp.c at runtime via OS01_KERNEL_SRC and asserts order by
+# first-occurrence index.
+$(TEST_BLD)/test_double_state_publish.o: $(TEST_CASES)/test_double_state_publish.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/boot/main.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/smp/smp.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GIC_MARKER_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_double_state_publish.elf: $(TEST_BLD)/test_double_state_publish.o
+	$(HOST_CC) -o $@ $<
+
+test_double_state_publish: $(TEST_BLD)/test_double_state_publish.elf
 	$<
 
 # GIC clobber-probe encoding contract — host-side RED for the QEMU TIMEOUT bug.

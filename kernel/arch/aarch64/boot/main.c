@@ -18,6 +18,8 @@
 #include <arch/aarch64/page_table.h>
 #include <arch/aarch64/ram.h>
 #include <arch/aarch64/smp.h>
+#include <arch/aarch64/vmm_gate.h> /* smp_starting_enter / ipi_ready_publish_and_count (M3 Task 11) */
+#include <percpu/percpu.h>        /* percpu_data / num_cpus (M3 Task 11) */
 #include <subsys/subsys.h>   /* SUBSYS_PHASE_4 macro + subsys_init_phase() decl
                               * for SUBSYS_INITCALL Task 2 R3-1 register+dispatch
                               * pair. Lightweight header — only <stdint.h>
@@ -515,6 +517,29 @@ void aarch64_main(const struct boot_context *handoff)
     log_info("OS01 aarch64 phase1 boot ok\n");
     gic_init();
 
+    /* M3 (Task 11): publish BSP double-state BEFORE the first possible
+     * PSCI CPU_ON. percpu_install_gs/percpu_init are pure memory setup
+     * with no hardware dependency; doing them here closes the window
+     * where an AP is already running while the BSP has no runtime
+     * percpu_t and online==0. percpu_init deliberately leaves the
+     * ipi_ready tail (and online) alone, so set online explicitly with a
+     * release store. num_cpus gates the TLB shootdown IPI loop
+     * (kernel/memory/tlb.c), so it must also be visible before any AP
+     * can run. smp_starting_enter() latches the one-way SMP gate: from
+     * here on vmm_gate_check() refuses a VMM change until every DTB CPU
+     * has published ipi_ready. */
+    {
+        extern void percpu_install_gs(uint32_t cpu);
+        extern void percpu_init(uint32_t cpu, uint32_t apic_id);
+        uint32_t mpidr_bsp;
+        __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr_bsp));
+        percpu_install_gs(0);
+        percpu_init(0, mpidr_bsp);
+        __atomic_store_n(&percpu_data[0].online, 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&num_cpus, dtb_cpu_count(), __ATOMIC_RELEASE);
+        smp_starting_enter();
+    }
+
     uint32_t active = smp_boot_aps();
     if (active == dtb_cpu_count())
         (void)test_spinlock_smp(active);
@@ -582,18 +607,8 @@ void aarch64_main(const struct boot_context *handoff)
     extern void softirq_init(void);
     softirq_init();
 
-    /* Phase 2 #3: install real per-CPU data for BSP. head.S:323
-     * already set TPIDR_EL1 = &percpu_data[0]; percpu_install_gs
-     * re-confirms (idempotent) and percpu_init populates
-     * self/cpu_id/arch_processor_id/online/rq_lock. Inline asm
-     * 'mrs xN, mpidr_el1' (no helper function — does not exist
-     * in codebase, R3 NIT-2). */
-    extern void percpu_install_gs(uint32_t cpu);
-    extern void percpu_init(uint32_t cpu, uint32_t apic_id);
-    uint32_t mpidr_bsp;
-    __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr_bsp));
-    percpu_install_gs(0);
-    percpu_init(0, mpidr_bsp);
+    /* Phase 2 #3: BSP percpu data is now installed before smp_boot_aps()
+     * (M3 Task 11) — see the block above the SMP bring-up call. */
 
     if (!arch_tick_start()) {
         log_err("[smp] FATAL: BSP timer initialization failed\n");
@@ -607,6 +622,12 @@ void aarch64_main(const struct boot_context *handoff)
     log_info("[IRQ] enabled (DAIF.IRQ cleared)\n");
     arch_local_irq_enable();
     __asm__ __volatile__("isb" ::: "memory");
+    /* M3 (Task 11): publish BSP ipi_ready through the same one-shot
+     * function as the APs — only AFTER the tick handler is registered
+     * (arch_tick_start above), the TLB SGI handler is live (gic_init)
+     * and DAIF.I is unmasked. Publishing earlier would let a pending
+     * TLB SGI arrive with IRQs masked (no ack → initiator timeout). */
+    ipi_ready_publish_and_count(0);
 #if OS01_SELFTEST
     /* Task 2.2 — dispatch chain selftest probes.
      * VBAR is installed (line 188-189); handler table is populated
