@@ -22,17 +22,32 @@
 
 static char *slab_text = NULL;
 
+/* Slurp whole file into a malloc'd NUL-terminated buffer.
+ * Uses the fread-grow pattern (matches test_gic_marker_lines.c) because
+ * the OS01 libc/include/stdio.h shim doesn't expose fseek/ftell/SEEK_END/
+ * SEEK_SET — only fopen, fread, fclose, fseeko. */
 static int read_file(const char *path, char **out) {
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    *out = (char *)malloc(sz + 1);
-    if (!*out) { fclose(f); return -1; }
-    size_t n = fread(*out, 1, sz, f);
-    (*out)[n] = 0;
+    size_t cap = 4096;
+    size_t n = 0;
+    char *buf = (char *)malloc(cap);
+    if (!buf) { fclose(f); return -1; }
+    for (;;) {
+        if (n + 1024 > cap) {
+            size_t new_cap = cap * 2;
+            char *nb = (char *)realloc(buf, new_cap);
+            if (!nb) { free(buf); fclose(f); return -1; }
+            buf = nb;
+            cap = new_cap;
+        }
+        size_t got = fread(buf + n, 1, 1024, f);
+        n += got;
+        if (got < 1024) break;  /* EOF or error */
+    }
     fclose(f);
+    buf[n] = '\0';
+    *out = buf;
     return 0;
 }
 

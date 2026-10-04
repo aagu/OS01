@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include <arch/spinlock.h>
+#include <arch/irq.h>
 #include <percpu/percpu.h>
 
 struct Slab_Cache kmalloc_cache_size[16] = 
@@ -33,9 +34,8 @@ static bool kmalloc_creating = false;
 static spinlock_T slab_lock = { .lock = 1L };
 static uint32_t slab_lock_depth[NR_CPUS];
 
-static inline uint64_t slab_lock_acquire(void) {
-    uint64_t flags;
-    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+static inline arch_irq_state_t slab_lock_acquire(void) {
+    arch_irq_state_t flags = arch_local_irq_save();
     // Early boot: GS not installed yet, single-CPU, skip locking.
     if (percpu_data[0].online) {
         uint32_t cpu = cpu_id();
@@ -44,14 +44,13 @@ static inline uint64_t slab_lock_acquire(void) {
     }
     return flags;
 }
-static inline void slab_lock_release(uint64_t flags) {
+static inline void slab_lock_release(arch_irq_state_t flags) {
     if (percpu_data[0].online) {
         uint32_t cpu = cpu_id();
         if (--slab_lock_depth[cpu] == 0)
             spin_unlock(&slab_lock);
     }
-    if (flags & (1UL << 9))   // RFLAGS_IF
-        __asm__ __volatile__("sti" ::: "memory");
+    arch_local_irq_restore(flags);
 }
 
 struct Slab * kmalloc_create(uint64_t size)
