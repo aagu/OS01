@@ -23,9 +23,20 @@ related: [docs/roadmap.md ARCH-2, docs/syscall/syscall.md, docs/arch/cross-bound
 4. **确立 OS01 ABI 唯一标准**：严格遵守 2026-10-04 架构决策——**OS01 自有 syscall ABI（`kernel/include/uapi/syscall.h`）为全内核唯一核心标准**；Linux ABI 仅作为外围兼容层（服务于带有 `PF_LINUX_ABI` 标记的二进制与程序），不得反向主导内核编号或核心系统调用语义。
 5. **提供语义与参数适配机制**：为存在参数个数、标志位或结构体差异的调用（如 `rt_sigaction`、`wait4` 等）提供适配通道，确保核心系统调用处理函数（`sys_fs.c`、`sys_proc.c` 等）只面向 OS01 原生语义。
 
+### 核心约束与长期边界
+1. **Linux ABI 激活严禁解析 `PT_INTERP`**：
+   - **长期架构考量**：OS01 长期规划必须支持自有的动态链接；在标准 ELF 规范中，`PT_INTERP` 是通用可执行文件声明动态链接器的标准段。未来原生 OS01 动态二进制同样会包含 `PT_INTERP`（如指向 `/lib/ld-os01.so`），绝不能将 `PT_INTERP` 与 Linux ABI 混淆或等同。
+   - **分层解耦**：动态链接属于通用 ELF 加载器和用户态动态链接器的能力演进，属于后续独立里程碑。本次 ARCH-2 严禁在 Linux ABI 激活判定中去解析或绑定 `PT_INTERP`。
+2. **源码级移植（如 BusyBox）与二进制兼容的严格边界**：
+   - 当前在 OS01 sysroot 下构建的所有二进制（包括通过源码移植构建的 `busybox.elf`，以及 `init.elf`、`terminal.elf`、`systest.elf`）均通过 OS01 自研 `libc.a` 发出 OS01 原生系统调用，它们是纯粹的原生程序，运行时必须维持 `flags == 0`，严禁打上 `PF_LINUX_ABI`；
+   - Linux ABI（`PF_LINUX_ABI`）的激活机制严格限定为以下两条边界：
+     - **外部静态 Linux 二进制识别**：通过 `PT_NOTE` 段（检查 `.note.ABI-tag` 中是否明确声明了 Linux/GNU ABI）进行安全识别，不会误伤由 `user/linker.ld` 抛弃了所有 Note 段的 OS01 原生二进制；
+     - **显式测试/受控接口（Personality）**：为系统调用测试套件（`systest`）提供受控的标志设置途径，使回归套件能够显式验证 Linux ABI 分发与 `-ENOSYS` 返回语义。
+
 ### 非本项范围
 - 本项不改变 OS01 原生系统调用编号（0..74）或调用约定；
 - 本项不引入庞大的 Linux 系统调用完整模拟（如 300+ 个系统调用全量实现），仅重构并规范现有已支持的兼容调用映射；
+- 本项不实现动态链接（`PT_INTERP` 解析与共享库加载）；
 - aarch64 的 Linux 兼容（基于 generic unistd）留待 aarch64 用户态落地后扩展，本设计预留清晰的架构解耦接口。
 
 ---
