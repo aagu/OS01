@@ -88,6 +88,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_lwip_rand.elf \
     $(TEST_BLD)/test_gic_driver.elf \
     $(TEST_BLD)/test_aarch64_ipi_broadcast.elf \
+    $(TEST_BLD)/test_aarch64_gic_target_probe.elf \
     $(TEST_BLD)/test_foundational_primitives.elf \
     $(TEST_BLD)/test_gic_marker_lines.elf \
     $(TEST_BLD)/test_gic_probe.elf \
@@ -1174,7 +1175,8 @@ AARCH64_IPI_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC)
 
 $(TEST_BLD)/aarch64_ipi_production.o: $(TESTS_DIR)/kernel/arch/aarch64/intr/ipi.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/ipi.h \
-		$(TESTS_DIR)/kernel/include/intr/ipi.h
+		$(TESTS_DIR)/kernel/include/intr/ipi.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/dtb.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(AARCH64_IPI_HOST_CFLAGS) -c $< -o $@
 
@@ -1189,6 +1191,28 @@ $(TEST_BLD)/test_aarch64_ipi_broadcast.elf: $(TEST_BLD)/test_aarch64_ipi_broadca
 	$(HOST_CC) -o $@ $^
 
 test_aarch64_ipi_broadcast: $(TEST_BLD)/test_aarch64_ipi_broadcast.elf
+	$<
+
+# aarch64 gic_target_bit_init hosttest (M3 Task 8): compiles the PRODUCTION
+# kernel/arch/aarch64/intr/ipi.c plus the production gic_driver.c against
+# mock MMIO. The test TU mocks dtb_cpu_count()/dtb_gicd_base() (dtb.c is too
+# heavy for host) and overrides the weak FATAL / out-of-range hooks.
+$(TEST_BLD)/test_aarch64_gic_target_probe.o: \
+		$(TEST_CASES)/test_aarch64_gic_target_probe.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/ipi.h \
+		$(TESTS_DIR)/kernel/include/intr/ipi.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/dtb.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_IPI_HOST_CFLAGS) \
+		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_gic_target_probe.elf: \
+		$(TEST_BLD)/test_aarch64_gic_target_probe.o \
+		$(TEST_BLD)/aarch64_ipi_production.o $(TEST_BLD)/gic_driver_production.o
+	$(HOST_CC) -o $@ $^
+
+test_aarch64_gic_target_probe: $(TEST_BLD)/test_aarch64_gic_target_probe.elf
 	$<
 
 # Foundational-primitives hosttest (M3 Task 7 Step 4): compiles the

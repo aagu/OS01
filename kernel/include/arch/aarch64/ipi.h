@@ -34,4 +34,21 @@ void ipi_panic_unsupported_vector(uint32_t vector);
 void gic_target_bit_inject(uint32_t cpu, uint8_t byte);
 uint8_t gic_target_bit_get(uint32_t cpu);
 
+/* Probe this CPU's banked GICD_ITARGETSR0 and publish gic_target_bit[]
+ * (M3 Task 8). Call once per CPU BEFORE that CPU publishes ipi_ready /
+ * enters smp_starting_enter (M7.2 ordering contract). Single-core builds
+ * take the RAZ/WI exception (bit[cpu] = 1 without a hardware read);
+ * multi-core builds require ITARGETSR0 SGI byte 0 == 1u << cpu_id and
+ * otherwise FATAL via the weak ipi_fatal_itargets hook. Not yet called
+ * from boot — SMP bring-up (Task 11) owns the call site. */
+void gic_target_bit_init(uint32_t cpu_id);
+
+/* Weak hooks (defaults: spin forever / no-op; hosttests override):
+ *  - ipi_fatal_itargets: ITARGETSR0 byte was 0, multi-bit, or
+ *    non-identity (v1 review item 11 — FATAL, not WARN).
+ *  - ipi_warn_mask_bit_out_of_range: a broadcast mask had bits beyond
+ *    AARCH64_BOOT_MAX_CPUS, which are dropped (M7.3). */
+void ipi_fatal_itargets(uint32_t cpu_id, uint8_t byte);
+void ipi_warn_mask_bit_out_of_range(uint64_t mask);
+
 #endif /* _AARCH64_IPI_H */

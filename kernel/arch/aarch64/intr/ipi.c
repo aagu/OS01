@@ -35,8 +35,62 @@ __attribute__((weak)) void ipi_panic_unsupported_vector(uint32_t vector)
  * populates it (from GICD_ITARGETSR, Task 8) every entry is 0, which
  * makes logical_to_gic_targets() return 0 and ipi_broadcast() a no-op —
  * the safe pre-SMP behavior. Hosttests write entries via
- * gic_target_bit_inject() instead of depending on Task 8's hw read. */
+ * gic_target_bit_inject() instead of depending on Task 8's hw read.
+ *
+ * M7.2 ordering contract: a CPU must have its gic_target_bit[] entry
+ * published (gic_target_bit_init or gic_target_bit_inject) BEFORE it
+ * sets ipi_ready / enters smp_starting_enter. The plain stores here are
+ * ordered before the later release-store that publishes ipi_ready, so
+ * no other CPU can observe a broadcast-targeting this one while its
+ * entry is still zero. */
 static uint8_t gic_target_bit[AARCH64_BOOT_MAX_CPUS];
+
+/* FATAL path for gic_target_bit_init (M3 Task 8): the banked
+ * GICD_ITARGETSR0 byte did not match the required identity topology.
+ * Weak hook so the hosttest can capture it (kpanic is not in the
+ * aarch64 kernel source whitelist); the default spins forever. */
+__attribute__((weak)) void ipi_fatal_itargets(uint32_t cpu_id, uint8_t byte)
+{
+    (void)cpu_id; (void)byte;
+    for (;;)
+        ;
+}
+
+/* M7.3 violation hook: logical_to_gic_targets() received a mask bit
+ * beyond gic_target_bit[]'s capacity and must drop it. Weak, no-op by
+ * default (preserves Task 7's drop-silently behavior); the hosttest
+ * overrides it to observe the violation. */
+__attribute__((weak)) void ipi_warn_mask_bit_out_of_range(uint64_t mask)
+{
+    (void)mask;
+}
+
+void gic_target_bit_init(uint32_t cpu_id)
+{
+    if (dtb_cpu_count() == 1) {
+        /* Spec §6.3: on a single-core GICv2, GICD_ITARGETSR0 may be
+         * RAZ/WI — reading it back 0 proves nothing. Skip the check. */
+        gic_target_bit[cpu_id] = 1u;
+        return;
+    }
+    /* Multi-core: read this CPU's banked GICD_ITARGETSR0 (offset 0x800),
+     * SGI byte 0 (SGI INTIDs 0..3 share byte 0 of ITARGETSR0). The GICD
+     * base comes from the parsed DTB — never a fixed GIC_DIST_BASE
+     * constant. QEMU virt must give exactly one bit = 1u << cpu_id;
+     * anything else (0, multiple bits, or non-identity) is FATAL, not
+     * WARN (v1 review item 11): a wrong target byte silently drops IPIs,
+     * which we refuse to boot with. The store happens only after the
+     * byte is validated (see M7.2 above for the publish ordering). */
+    volatile uint8_t *itargets =
+        (volatile uint8_t *)((uintptr_t)dtb_gicd_base() + 0x800);
+    uint8_t sgi_byte = itargets[0];
+    if (sgi_byte == 0 || (sgi_byte & (sgi_byte - 1)) != 0 ||
+        sgi_byte != (1u << cpu_id)) {
+        ipi_fatal_itargets(cpu_id, sgi_byte);
+        return; /* unreachable: hook does not return */
+    }
+    gic_target_bit[cpu_id] = sgi_byte;
+}
 
 void gic_target_bit_inject(uint32_t cpu, uint8_t byte)
 {
@@ -60,11 +114,15 @@ static uint32_t ipi_vector_to_sgi(uint32_t vector)
 }
 
 /* Logical CPU bitmask → GIC target byte: OR of the cached per-CPU
- * target bytes. Bits beyond the table are ignored (same capacity as
- * NR_CPUS on every current build). */
+ * target bytes. Bits beyond the table are dropped (same capacity as
+ * NR_CPUS on every current build) and reported via the weak
+ * ipi_warn_mask_bit_out_of_range hook (M7.3). */
 static uint8_t logical_to_gic_targets(uint64_t mask)
 {
     uint8_t out = 0;
+    uint64_t out_of_range = mask & ~((UINT64_C(1) << AARCH64_BOOT_MAX_CPUS) - 1);
+    if (out_of_range)
+        ipi_warn_mask_bit_out_of_range(out_of_range);
     for (uint32_t cpu = 0; cpu < AARCH64_BOOT_MAX_CPUS; cpu++) {
         if (mask & (UINT64_C(1) << cpu))
             out |= gic_target_bit[cpu];

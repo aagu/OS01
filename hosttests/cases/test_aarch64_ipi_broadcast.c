@@ -33,6 +33,12 @@ static struct gic_dev dev;
 
 struct gic_dev *gic_dev_current(void) { return &dev; }
 
+/* Task 8 起生产 ipi.c 引用 dtb 访问器（gic_target_bit_init）；
+ * 本测试走 gic_target_bit_inject()，不走硬件探测 —— 给无害 mock 即可。 */
+#include <arch/aarch64/dtb.h>
+uint32_t dtb_cpu_count(void) { return 4; }
+uint64_t dtb_gicd_base(void) { return 0; }
+
 /* 覆盖 ipi.c 的 weak fatal hook：armed 时 longjmp 回测试点，
  * 否则 abort（不应到达）。 */
 static jmp_buf panic_jb;
