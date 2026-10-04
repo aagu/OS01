@@ -9,6 +9,7 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx);
 int64_t sys_mm_dispatch(syscall_ctx_t *ctx);
 int64_t sys_time_dispatch(syscall_ctx_t *ctx);
 int64_t sys_misc_dispatch(syscall_ctx_t *ctx);
+int64_t sys_net_dispatch(syscall_ctx_t *ctx);
 
 
 /* Handlers are added here as syscall families migrate out of trap.c. */
@@ -60,6 +61,18 @@ static const syscall_entry_t syscall_table[SYS_fstatat + 1] = {
     [SYS_sync] = { sys_misc_dispatch, "sync" },
     [SYS_reboot] = { sys_misc_dispatch, "reboot" },
     [SYS_uname] = { sys_misc_dispatch, "uname" },
+    [SYS_socket] = { sys_net_dispatch, "socket" },
+    [SYS_connect] = { sys_net_dispatch, "connect" },
+    [SYS_sendto] = { sys_net_dispatch, "sendto" },
+    [SYS_recvfrom] = { sys_net_dispatch, "recvfrom" },
+    [SYS_bind] = { sys_net_dispatch, "bind" },
+    [SYS_listen] = { sys_net_dispatch, "listen" },
+    [SYS_accept] = { sys_net_dispatch, "accept" },
+    [SYS_setsockopt] = { sys_net_dispatch, "setsockopt" },
+    [SYS_getsockname] = { sys_net_dispatch, "getsockname" },
+    [SYS_getifaddr] = { sys_net_dispatch, "getifaddr" },
+    [SYS_getsockopt] = { sys_net_dispatch, "getsockopt" },
+    [SYS_shutdown] = { sys_net_dispatch, "shutdown" },
 };
 bool syscall_has_handler(uint64_t nr)
 {
