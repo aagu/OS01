@@ -373,7 +373,15 @@ size_t slab_init()
         page = Phy_to_2M_Page(j << PAGE_2M_SHIFT);
         /* Reserve the descriptor's RAM-relative bit, not its physical PFN. */
         uint64_t page_index = (uint64_t)(page - PMMngr.pages_struct);
-        PMMngr.bits_map[page_index >> 6] |= 1UL << (page_index % 64);
+        uint64_t bm_word = page_index >> 6;
+        uint64_t bm_bit  = 1UL << (page_index & 63);
+        if (PMMngr.bits_map[bm_word] & bm_bit) {
+            /* Already reserved by boot (aarch64 arena / range
+             * reservation pre-marks these frames): skip ++/-- and
+             * page_init to avoid double-counting. */
+            continue;
+        }
+        PMMngr.bits_map[bm_word] |= bm_bit;
         page->zone_struct->page_using_count++;
         page->zone_struct->page_free_count--;
         page_init(page, PG_PTable_Mapped | PG_Kernel_Init | PG_Kernel);
@@ -394,7 +402,16 @@ size_t slab_init()
 
 		/* Reserve the descriptor's RAM-relative bit, not its physical PFN. */
         uint64_t page_index = (uint64_t)(page - PMMngr.pages_struct);
-        PMMngr.bits_map[page_index >> 6] |= 1UL << (page_index % 64);
+        uint64_t bm_word = page_index >> 6;
+        uint64_t bm_bit  = 1UL << (page_index & 63);
+        if (PMMngr.bits_map[bm_word] & bm_bit) {
+            /* Already boot-reserved (see j-loop above): keep the page,
+             * populate cache_pool->{page,address}, skip ++/--. */
+            kmalloc_cache_size[i].cache_pool->page = page;
+            kmalloc_cache_size[i].cache_pool->address = virtual;
+            continue;
+        }
+        PMMngr.bits_map[bm_word] |= bm_bit;
 		page->zone_struct->page_using_count++;
 		page->zone_struct->page_free_count--;
 

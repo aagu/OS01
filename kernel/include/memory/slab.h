@@ -38,8 +38,8 @@ extern struct Slab_Cache kmalloc_cache_size[16];
  * Per spec §3.2 the formula is:
  *   meta = Σ_{i=0..15} [ sizeof(struct Slab) + 10*sizeof(long)
  *                      + align8(PAGE_2M / size_i / 8) + 10*sizeof(long) ]
- * Implementation lives in kernel/memory/slab.c; declared here as inline
- * so hosttests can compile without dragging in slab.c's spinlock/irq deps.
+ * Defined here as `static inline` — slab.c's spinlock/irq/printk/percpu
+ * deps are not pulled in by hosttests that only need this formula.
  */
 struct slab_layout {
     uint64_t meta_bytes;

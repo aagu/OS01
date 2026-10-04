@@ -112,7 +112,9 @@ TEST_BINS := \
     $(TEST_BLD)/test_m1_tree.elf \
     $(TEST_BLD)/test_m1_contract.elf $(TEST_BLD)/test_m1_vmm.elf \
     $(TEST_BLD)/test_m1_install.elf $(TEST_BLD)/test_m1_cleanup.elf \
-    $(TEST_BLD)/test_m1_publish.elf
+    $(TEST_BLD)/test_m1_publish.elf \
+    $(TEST_BLD)/test_slab_idempotent_reservation.elf \
+    $(TEST_BLD)/test_slab_basic_x86_count.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -1454,4 +1456,68 @@ $(TEST_BLD)/test_m1_arena_exhaust.o: $(TEST_CASES)/test_m1_arena_exhaust.c $(TES
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
 $(TEST_BLD)/test_m1_arena_exhaust.elf: $(TEST_BLD)/test_m1_arena_exhaust.o $(TEST_BLD)/early_arena_exhaust_production.o $(TEST_BLD)/pmm_boot_production.o
+	$(HOST_CC) -o $@ $^
+
+# aarch64 M2/M3 plan Task 2: slab_init j-loop + 8-page loop
+# idempotence vs boot reservations. Links the REAL
+# kernel/memory/slab.c + pmm.c so the assertion observes the actual
+# ++/-- on each touched frame. Production <arch/spinlock.h> and
+# <arch/irq.h> carry privileged inline asm (lock decq / pushfq cli /
+# mrs daif), so both are routed through host shadows under
+# SLAB_SHADOW_INC; production <percpu/percpu.h> pulls in
+# <sched/task.h> + <arch/percpu.h> (both unreachable on host),
+# shadowed to a minimal surface. slab.c also pulls in
+# <memory/memory.h> / <core/printk.h> / <core/debug.h> / <kernel.h>
+# / <string.h> — all delivered by KERNEL_INC + LIBC_INC.
+SLAB_SHADOW_INC := -I$(TEST_MOCK)/slab_include
+
+$(TEST_BLD)/slab_production.o: $(TESTS_DIR)/kernel/memory/slab.c \
+		$(TESTS_DIR)/kernel/include/memory/slab.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TEST_MOCK)/slab_include/arch/spinlock.h \
+		$(TEST_MOCK)/slab_include/arch/irq.h \
+		$(TEST_MOCK)/slab_include/percpu/percpu.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(SLAB_SHADOW_INC) $(KERNEL_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_slab_idempotent_reservation.o: $(TEST_CASES)/test_slab_idempotent_reservation.c \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/slab.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(SLAB_SHADOW_INC) $(KERNEL_INC) \
+		-I$(TEST_INC) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/slab_color_stub.o: $(TEST_MOCK)/slab_color_stub.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_slab_idempotent_reservation.elf: $(TEST_BLD)/test_slab_idempotent_reservation.o \
+		$(TEST_BLD)/slab_production.o \
+		$(TEST_BLD)/slab_color_stub.o \
+		$(TEST_BLD)/pmm_production.o \
+		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_boot_production.o \
+		$(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+# Task 2 Step 3 — x86 baseline regression for slab_init frame arithmetic.
+# Compiles the REAL kernel/memory/slab.c (same shadow machinery as
+# test_slab_idempotent_reservation; shared slab_color_stub.o for the
+# color_printk symbol the slab.c error paths reference). Single-test
+# suite so the brief's "assert increment = 8 + j-loop hits" lands
+# literally without competing fixtures.
+$(TEST_BLD)/test_slab_basic_x86_count.o: $(TEST_CASES)/test_slab_basic_x86_count.c \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/slab.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(SLAB_SHADOW_INC) $(KERNEL_INC) \
+		-I$(TEST_INC) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_slab_basic_x86_count.elf: $(TEST_BLD)/test_slab_basic_x86_count.o \
+		$(TEST_BLD)/slab_production.o \
+		$(TEST_BLD)/slab_color_stub.o \
+		$(TEST_BLD)/pmm_production.o \
+		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_boot_production.o \
+		$(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^
