@@ -56,9 +56,9 @@
 
 ### Task 3: Memory, time, and remaining ordinary handlers
 
-**Files:** Create `kernel/syscall/sys_mm.c`, `sys_time.c`, `sys_misc.c`; modify `kernel/syscall/dispatch.c`, `kernel/arch/x86_64/intr/trap.c`; create `kernel/include/arch/syscall.h`, `kernel/arch/x86_64/intr/syscall_frame.c` for platform actions.
+**Files:** Create `kernel/syscall/sys_mm.c`, `sys_time.c`, `sys_misc.c`; modify `kernel/syscall/dispatch.c`, `kernel/arch/x86_64/intr/trap.c`; create `kernel/include/arch/syscall.h`, `kernel/arch/x86_64/intr/syscall_frame.c` for platform actions; create `kernel/include/arch/clocksource.h`, `kernel/arch/x86_64/platform/clocksource.c` for the existing x86 nanosecond reader.
 
-**Interfaces:** `sys_mm_dispatch(ctx)` handles `SYS_brk/mmap/mprotect/munmap/futex`; `sys_time_dispatch(ctx)` handles `SYS_time/gettimeofday/clock_gettime/nanosleep/times`; `sys_misc_dispatch(ctx)` handles `SYS_putchar/getrandom/sync/reboot/uname`. Each returns `int64_t`. `arch_syscall_putchar(uint64_t ch)` and `arch_syscall_reboot(int cmd)` preserve existing console/serial and ACPI/port behavior.
+**Interfaces:** `sys_mm_dispatch(ctx)` handles `SYS_brk/mmap/mprotect/munmap/futex`; `sys_time_dispatch(ctx)` handles `SYS_time/gettimeofday/clock_gettime/nanosleep/times`; `sys_misc_dispatch(ctx)` handles `SYS_putchar/getrandom/sync/reboot/uname`. Each returns `int64_t`. `int64_t arch_syscall_putchar(uint64_t ch)` and `noreturn void arch_syscall_reboot(int cmd)` preserve existing console/serial and ACPI/port behavior. `uint64_t arch_clocksource_read_ns(void)` exposes the current x86 `clocksource_read_ns()` result to the generic time handlers without a per-arch include.
 
 - [ ] Pin current `mmap` six-argument and `putchar/reboot` behavior in existing or targeted tests before moving cases.
 - [ ] Migrate brk/mmap/mprotect/munmap/futex, clock/time/sleep, getrandom, putchar, sync/reboot, and other ordinary cases into the matching groups.
