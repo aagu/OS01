@@ -67,6 +67,15 @@ __attribute__((weak)) void ipi_warn_mask_bit_out_of_range(uint64_t mask)
 
 void gic_target_bit_init(uint32_t cpu_id)
 {
+    /* Bounds guard (review fix round 1): same capacity check as
+     * gic_target_bit_inject/get. The multi-core path below already
+     * FATALs for cpu_id >= AARCH64_BOOT_MAX_CPUS only by coincidence
+     * (sgi_byte == 1u << cpu_id can never match); the single-core path
+     * would write out of bounds. Route to the fatal hook. */
+    if (cpu_id >= AARCH64_BOOT_MAX_CPUS) {
+        ipi_fatal_itargets(cpu_id, 0);
+        return; /* unreachable: hook does not return */
+    }
     if (dtb_cpu_count() == 1) {
         /* Spec §6.3: on a single-core GICv2, GICD_ITARGETSR0 may be
          * RAZ/WI — reading it back 0 proves nothing. Skip the check. */

@@ -140,6 +140,7 @@ static void suite_fatal_cases(void)
         assert_true(0);           /* 未 FATAL = 失败 */
     } else {
         assert_true(1);
+        assert_eq((uint8_t)0x00, gic_target_bit_get(0)); /* 未写入 cache */
     }
 
     /* byte0 = 0x05：多 bit，违反 QEMU virt 恒等拓扑 → FATAL（item 11） */
@@ -166,6 +167,35 @@ static void suite_fatal_cases(void)
     } else {
         assert_true(1);
         assert_eq((uint8_t)0x00, gic_target_bit_get(0));
+    }
+
+    /* cpu_id 越界（fix round 1）：单核路径不读硬件也必须拒绝 → FATAL */
+    mock_reset();
+    mock_cpu_count = 1;
+    if (setjmp(fatal_jb) == 0) {
+        fatal_armed = 1;
+        gic_target_bit_init(AARCH64_BOOT_MAX_CPUS);
+        fatal_armed = 0;
+        assert_true(0);
+    } else {
+        assert_true(1);
+        assert_eq((uint8_t)0x00,
+                  gic_target_bit_get(AARCH64_BOOT_MAX_CPUS));
+    }
+
+    /* cpu_id 越界：多核路径同样拒绝（不再靠 1u<<cpu 不匹配的巧合） */
+    mock_reset();
+    mock_cpu_count = 4;
+    set_itargetsr0_byte0(0x02);
+    if (setjmp(fatal_jb) == 0) {
+        fatal_armed = 1;
+        gic_target_bit_init(AARCH64_BOOT_MAX_CPUS + 1);
+        fatal_armed = 0;
+        assert_true(0);
+    } else {
+        assert_true(1);
+        assert_eq((uint8_t)0x00,
+                  gic_target_bit_get(AARCH64_BOOT_MAX_CPUS + 1));
     }
 }
 
