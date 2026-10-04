@@ -188,11 +188,17 @@ static void test_fullscreen_view(uint32_t *fb, const struct fb_info *info,
      * width × height (QEMU stdvga → 1440×900 RGB32 = 5,184,000
      * bytes).  We open at (0, 0) so the view's top-left corner is
      * the framebuffer's top-left corner; every pixel we write
-     * goes to a known offset in fb. */
+    /* Query brk before and after gfx_open to verify that the
+     * 5.18MB pixels buffer is allocated via anonymous mmap rather than heap brk. */
+    int64_t brk_before = syscall(SYS_brk, 0, 0, 0);
     gfx_handle_t *h = gfx_open(0, 0, fw, fh);
     if (!h)
         FAIL("gfx_open(0,0,%u,%u) returned NULL (errno=%d)",
              fw, fh, errno);
+    int64_t brk_after = syscall(SYS_brk, 0, 0, 0);
+    if (brk_after - brk_before >= (int64_t)MIN_FB_BYTES)
+        FAIL("gfx_open expanded brk by %ld bytes (expected mmap allocation)",
+             (long)(brk_after - brk_before));
 
     gfx_info_t gi = gfx_get_info(h);
     if (gi.width != fw || gi.height != fh)
@@ -201,10 +207,8 @@ static void test_fullscreen_view(uint32_t *fb, const struct fb_info *info,
 
     /* Spec §6 (Task 8 brief): the QEMU 1440×900 RGB32 case
      * allocates a libgfx pixels buffer of at least 5,184,000
-     * bytes.  Confirm the kernel-driven calloc inside gfx_open
-     * actually returned a buffer of that size — the integration
-     * gate for "ELF + heap isolation supports a full-screen
-     * framebuffer". */
+     * bytes via mmap.  Confirm the buffer dimensions match
+     * at least MIN_FB_BYTES (5,184,000). */
     uint64_t pixels_bytes = (uint64_t)gi.width *
                             (uint64_t)gi.height * 4ull;
     if (pixels_bytes < MIN_FB_BYTES)

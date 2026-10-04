@@ -41,6 +41,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 
 #include <gfx.h>
 #include <uapi/gfx.h>
@@ -52,14 +53,14 @@
 static int   mock_open_count;
 static int   mock_close_count;
 static int   mock_ioctl_count;
-/* mock_alloc_count covers BOTH __wrap_malloc and __wrap_calloc; the
- * two wraps share a counter so callers can reason about libgfx's
- * total allocation pressure at any point (1 = handle, 2 = handle+pixels
- * on the happy path).  Previously this counter only tracked malloc,
- * which made the happy-path assertion break after Task 3's gfx.c
- * switched to calloc() for the zeroed pixels buffer. */
+/* mock_alloc_count covers __wrap_malloc and __wrap_calloc (for handle).
+ * mock_mmap_count / mock_munmap_count cover anonymous mmap / munmap
+ * (for pixels buffer). */
 static int   mock_alloc_count;
 static int   mock_free_count;
+static int   mock_mmap_count;
+static int   mock_munmap_count;
+static int   mock_mmap_fail;
 
 /* Failure injection: 0 = never fail, N = fail on the Nth allocation
  * (counts both malloc and calloc).  Default 0 means the happy path
@@ -88,6 +89,9 @@ static void reset_mocks(void)
     mock_ioctl_count = 0;
     mock_alloc_count = 0;
     mock_free_count = 0;
+    mock_mmap_count = 0;
+    mock_munmap_count = 0;
+    mock_mmap_fail = 0;
     mock_alloc_fail_at = 0;
     mock_open_fd_to_return = 7;
     mock_open_errno = 0;
@@ -102,7 +106,7 @@ static void reset_mocks(void)
 }
 
 /* ── Wrapped libc functions (--wrap=open --wrap=close
- *    --wrap=ioctl --wrap=malloc --wrap=free).
+ *    --wrap=ioctl --wrap=malloc --wrap=free --wrap=mmap --wrap=munmap).
  *
  * Each stub records the call and returns its configured value.
  * __wrap_malloc / __wrap_free call through to __real_malloc /
@@ -118,13 +122,13 @@ static void reset_mocks(void)
 /* Forward-declarations for the linker-generated fallthrough symbols.
  * --wrap=malloc rewrites `malloc` calls inside libgfx to `__wrap_malloc`
  * and renames the libc malloc to `__real_malloc`; --wrap=free likewise.
- * --wrap=calloc does the same for calloc.  These externs must appear
- * BEFORE the wrap definitions to satisfy the prototype match (an
- * implicit declaration produces a conflicting type when the explicit
- * one follows). */
+ * --wrap=calloc does the same for calloc.  --wrap=mmap and --wrap=munmap
+ * intercept anonymous mmap/munmap for the pixels buffer. */
 extern void *__real_malloc(size_t);
 extern void *__real_calloc(size_t, size_t);
 extern void  __real_free(void *);
+extern void *__real_mmap(void *, size_t, int, int, int, off_t);
+extern int   __real_munmap(void *, size_t);
 
 int __wrap_open(const char *path, int flags, ...)
 {
@@ -217,6 +221,22 @@ void __wrap_free(void *ptr)
     __real_free(ptr);
 }
 
+void *__wrap_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
+{
+    mock_mmap_count++;
+    if (mock_mmap_fail) {
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
+    return __real_mmap(addr, length, prot, flags, fd, offset);
+}
+
+int __wrap_munmap(void *addr, size_t length)
+{
+    mock_munmap_count++;
+    return __real_munmap(addr, length);
+}
+
 /* ── Test cases ─────────────────────────────────────────────── */
 
 TEST_FUNC(test_open_happy_path)
@@ -232,15 +252,17 @@ TEST_FUNC(test_open_happy_path)
     /* open -> CREATE_VIEW -> GET_INFO */
     assert_eq((int)GFX_CREATE_VIEW, (int)mock_ioctl_log[0].cmd);
     assert_eq((int)GFX_GET_INFO,    (int)mock_ioctl_log[1].cmd);
-    /* 2 allocations: handle (malloc) + pixels (calloc) — both must
-     * be observed by the shared mock_alloc_count counter. */
-    assert_eq(2, mock_alloc_count);
+    /* 1 heap allocation for handle (malloc) + 1 anonymous mmap for pixels */
+    assert_eq(1, mock_alloc_count);
+    assert_eq(1, mock_mmap_count);
     assert_eq(0, mock_free_count);
+    assert_eq(0, mock_munmap_count);
     /* closing cleans up */
     gfx_close(h);
     assert_eq(1, mock_close_count);
-    assert_eq(2, mock_free_count);
-    assert_eq(2, mock_alloc_count);  /* no new allocs on close */
+    assert_eq(1, mock_free_count);
+    assert_eq(1, mock_munmap_count);
+    assert_eq(1, mock_alloc_count);  /* no new allocs on close */
 }
 
 TEST_FUNC(test_open_enoint_normalized_to_enodev)
@@ -307,27 +329,22 @@ TEST_FUNC(test_open_get_info_failure_cleanup)
 
 TEST_FUNC(test_open_pixel_alloc_failure_cleanup)
 {
-    TEST_SUITE("open: pixel buffer alloc failure");
+    TEST_SUITE("open: pixel buffer mmap failure");
     reset_mocks();
-    /* Force the 2nd allocation (the pixel-buffer calloc) to fail.  The
-     * 1st allocation is the handle malloc (succeeds), the 2nd is the
-     * pixels calloc (returns NULL with errno=ENOMEM).  We use the
-     * mock_alloc_fail_at injection knob rather than a 65536x65536
-     * overcommit probe: Linux's overcommit makes the 16 GiB
-     * allocation succeed silently, so the old test was passing-by-
-     * accident and never actually exercised the calloc-failure path. */
-    mock_alloc_fail_at = 2;
+    /* Force the pixel-buffer mmap to fail (returns MAP_FAILED with errno=ENOMEM). */
+    mock_mmap_fail = 1;
     errno = 0;
     gfx_handle_t *h = gfx_open(0, 0, 4, 4);
     assert_null(h);
     assert_eq(ENOMEM, errno);
-    /* Handle was allocated (count==1) and the pixel calloc was
-     * attempted (count==2, returned NULL).  Cleanup closes the fd
-     * and frees the handle (handle->pixels was never set, so gfx.c's
-     * free(h->pixels) is free(NULL) which is safe and does NOT
-     * increment mock_free_count). */
-    assert_eq(2, mock_alloc_count);
+    /* Handle was allocated (count==1) and the pixel mmap was
+     * attempted (count==1, returned MAP_FAILED).  Cleanup closes the fd
+     * and frees the handle (handle->pixels was never mapped, so
+     * munmap is not called). */
+    assert_eq(1, mock_alloc_count);
+    assert_eq(1, mock_mmap_count);
     assert_eq(1, mock_free_count);
+    assert_eq(0, mock_munmap_count);
     assert_eq(1, mock_close_count);
 }
 
@@ -447,6 +464,8 @@ TEST_FUNC(test_close_null_is_safe)
     assert_eq(0, mock_close_count);
     assert_eq(0, mock_alloc_count);
     assert_eq(0, mock_free_count);
+    assert_eq(0, mock_mmap_count);
+    assert_eq(0, mock_munmap_count);
     assert_eq(0, mock_ioctl_count);
 }
 

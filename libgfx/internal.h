@@ -17,11 +17,13 @@
 
 #include "gfx.h"
 #include <stdint.h>
+#include <stddef.h>
 
 struct gfx_handle {
     int         fd;          /* /dev/gfx0 */
     gfx_info_t  info;        /* GFX_GET_INFO snapshot from gfx_open */
     uint32_t   *pixels;      /* private buffer, width*height*4 bytes, zeroed */
+    size_t      pixels_bytes;/* byte length of mmap'd pixels buffer */
     int32_t     clip_x;      /* library-local clip (spec §4) */
     int32_t     clip_y;
     uint32_t    clip_w;

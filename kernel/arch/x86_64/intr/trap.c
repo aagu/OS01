@@ -742,6 +742,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 					kill_current_user_task(regs);
 					return;
 				}
+				memset((void *)Phy_To_Virt(phys), 0, PAGE_4K_SIZE);
 				int rc = vmm_map_4k_page(user_pgd, phys,
 							     cr2 & PAGE_4K_MASK, vma->vm_page_prot);
 				if (rc != 0) {

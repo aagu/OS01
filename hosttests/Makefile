@@ -1306,7 +1306,7 @@ $(TEST_BLD)/test_gfx_client.o: $(TEST_CASES)/test_gfx_client.c \
 # the wrapper compiles without an implicit-declaration warning.
 $(TEST_BLD)/test_gfx_client.elf: $(TEST_BLD)/test_gfx_client.o \
 		$(TEST_BLD)/libgfx_gfx_production.o
-	$(HOST_CC) -Wl,--wrap=open,--wrap=close,--wrap=ioctl,--wrap=malloc,--wrap=calloc,--wrap=free -o $@ $^
+	$(HOST_CC) -Wl,--wrap=open,--wrap=close,--wrap=ioctl,--wrap=malloc,--wrap=calloc,--wrap=free,--wrap=mmap,--wrap=munmap -o $@ $^
 
 test-gfx-client: $(TEST_BLD)/test_gfx_client.elf
 	$<

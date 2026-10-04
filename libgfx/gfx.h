@@ -50,7 +50,8 @@ typedef struct gfx_handle gfx_handle_t;
  * Open a view into /dev/gfx0 at full-screen rectangle (x,y,w,h),
  * where w and h are the configured view's LOCAL dimensions (the
  * kernel fills `info.width`/`info.height` from these).  Returns a
- * heap-allocated handle whose pixels buffer is zeroed.
+ * heap-allocated handle whose pixels buffer is allocated via
+ * anonymous mmap and zeroed.
  *
  * Errors:
  *   - /dev/gfx0 missing or open() failure → NULL, errno=ENODEV
@@ -58,13 +59,13 @@ typedef struct gfx_handle gfx_handle_t;
  *   - zero / out-of-range / overflowed view → NULL, errno=EINVAL
  *     (propagated from the kernel's GFX_CREATE_VIEW).
  *   - 16 view slots already in use → NULL, errno=EMFILE.
- *   - malloc/calloc failure → NULL, errno=ENOMEM.
+ *   - malloc/mmap failure → NULL, errno=ENOMEM.
  *
  * On any failure, every resource acquired so far (fd, handle,
  * pixels buffer) is released before returning. */
 gfx_handle_t *gfx_open(uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 
-/* Release the handle, free the pixels buffer, and close the fd.
+/* Release the handle, unmap the pixels buffer, and close the fd.
  * gfx_close(NULL) is a safe no-op. */
 void gfx_close(gfx_handle_t *h);
 

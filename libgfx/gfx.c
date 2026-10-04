@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 /* Device path — single source of truth for the client.  Spec §3. */
@@ -79,20 +80,21 @@ gfx_handle_t *gfx_open(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
     }
     handle->info = info;
 
-    /* Allocate the private pixels buffer.  Spec §4: width*height*4
-     * bytes, zeroed.  calloc guarantees the zeroing. */
+    /* Allocate the private pixels buffer via anonymous mmap.
+     * Spec §4: width*height*4 bytes, zeroed.  Anonymous mmap
+     * guarantees zeroed memory without consuming brk heap budget. */
     size_t bytes = (size_t)info.width * (size_t)info.height * 4u;
-    handle->pixels = (uint32_t *)calloc(1, bytes);
-    if (!handle->pixels) {
+    void *pixels = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (pixels == MAP_FAILED) {
         int saved = errno;
         close(fd);
         free(handle);
-        /* calloc already sets errno=ENOMEM on failure, but make it
-         * explicit so we are robust against a future libc that
-         * forgets. */
         errno = (saved != 0) ? saved : ENOMEM;
         return NULL;
     }
+    handle->pixels = (uint32_t *)pixels;
+    handle->pixels_bytes = bytes;
 
     /* Initial clip = the full view in local coordinates.  The clip
      * is library-local state; spec §4 says "越出视图的 clip 取交集"
@@ -110,7 +112,9 @@ gfx_handle_t *gfx_open(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 void gfx_close(gfx_handle_t *h)
 {
     if (!h) return;
-    free(h->pixels);
+    if (h->pixels && h->pixels != (void *)-1) {
+        munmap(h->pixels, h->pixels_bytes);
+    }
     close(h->fd);
     free(h);
 }
