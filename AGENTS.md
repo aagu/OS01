@@ -125,7 +125,7 @@ IMG=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^image=//p')
 | `kernel/arch/x86_64/smp/smp.c` | smp_boot_aps() + ap_entry() — INIT-SIPI-SIPI + AP idle loop |
 | `kernel/memory/` | pmm.c, slab.c, vmm.c, vma.c, tlb.c — full memory stack |
 | `kernel/intr/apic/` | acpi.c, lapic.c, lapic_timer.c, ioapic.c, ipi.c |
-| `kernel/sched/` | task.c (EEVDF scheduler, COW fork, schedule, spawn, sched_balance), deferred_free.c (async reaper kthread) |
+| `kernel/sched/` | core.c, fork.c, exec.c, exit.c, signal.c, fair.c, balance.c — EEVDF, fork/exec, lifecycle |
 | `kernel/fs/` | vfs.c, fat.c, ext2.c, devfs.c, procfs.c, tmpfs.c, elf.c, file.c, poll.c, select.c |
 | `kernel/tty/tty.c` | Console TTY: fg_pgrp field, VINTR/VQUIT line discipline (ISIG), TIOCSPGRP/TIOCGPGRP, cooked readline |
 | `kernel/tty/pty.c` | PTY master/slave (terminal.elf runs ash on a PTY slave); pty_slave_ioctl TIOCSPGRP |

@@ -239,12 +239,11 @@ extern task_t *init_task[NR_CPUS];
 }
 
 
-inline task_t* __attribute__((always_inline)) get_current_task()
+inline task_t* __attribute__((always_inline)) get_current_task(void)
 {
-    task_t *task = NULL;
-    // -(int64_t)STACK_SIZE = 0xFFFFFFFFFFFF8000 in 64-bit two's complement
-    __asm__ __volatile__("andq %%rsp, %0 \n\t" : "=r"(task) : "0"(-(int64_t)STACK_SIZE));
-    return task;
+    uint64_t sp;
+    __asm__ __volatile__("movq %%rsp, %0" : "=r"(sp));
+    return (task_t *)(sp & ~(STACK_SIZE - 1));
 }
 
 #define current get_current_task()
@@ -259,7 +258,11 @@ inline task_t* __attribute__((always_inline)) get_current_task()
         task_t *__switch_next = (next); \
         __asm__ __volatile__(                \
             "pushq %%rbp \n\t"       \
-            "pushq %%rax \n\t"       \
+            "pushq %%rbx \n\t"       \
+            "pushq %%r12 \n\t"       \
+            "pushq %%r13 \n\t"       \
+            "pushq %%r14 \n\t"       \
+            "pushq %%r15 \n\t"       \
             "cli \n\t"               /* disable IRQs during stack switch */ \
             "movq %%rsp, %0 \n\t"    /* save prev->rsp */ \
             "leaq 1f(%%rip), %%rax \n\t" \
@@ -271,7 +274,11 @@ inline task_t* __attribute__((always_inline)) get_current_task()
             "jmp __switch_to \n\t"   \
             "1: \n\t"                \
             /* IRQ state restored by schedule() after switch */ \
-            "popq %%rax \n\t"        \
+            "popq %%r15 \n\t"        \
+            "popq %%r14 \n\t"        \
+            "popq %%r13 \n\t"        \
+            "popq %%r12 \n\t"        \
+            "popq %%rbx \n\t"        \
             "popq %%rbp \n\t"        \
             : "=m"(__switch_prev->thread->rsp), "=m"(__switch_prev->thread->rip) \
             : "m"(__switch_next->thread->rsp), "m"(__switch_next->thread->rip), \

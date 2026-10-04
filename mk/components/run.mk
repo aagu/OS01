@@ -563,7 +563,7 @@ test-runtime: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(KERNEL_ARTIFACT))
 	  --llvm-nm "$(LLVM_NM)" \
 	  --llvm-readobj "$(LLVM_READOBJ)"
 	python3 qemutests/stack_canary_audit.py \
-	  --object "$(KERNEL_BUILD_DIR)/sched/task.o" \
+	  --object "$(KERNEL_BUILD_DIR)/sched/core.o" \
 	  --elf "$(KERNEL_ELF)" \
 	  --llvm-readelf "$(LLVM_READELF)" \
 	  --llvm-objdump "$(LLVM_OBJDUMP)"
