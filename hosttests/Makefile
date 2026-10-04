@@ -130,7 +130,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_x86_ipi_ready_publish.elf \
     $(TEST_BLD)/test_vmm_caller_audit.elf \
     $(TEST_BLD)/test_vmm_semantic_header.elf \
-    $(TEST_BLD)/test_x86_vmm_backend.elf
+    $(TEST_BLD)/test_x86_vmm_backend.elf \
+    $(TEST_BLD)/test_aarch64_pt_software_bits.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -1395,6 +1396,53 @@ $(TEST_BLD)/test_x86_vmm_backend.elf: \
 		$(TEST_BLD)/test_x86_vmm_backend.o \
 		$(TEST_BLD)/x86_vmm_backend_production.o
 	$(HOST_CC) -Wl,--gc-sections -Wl,--wrap=calloc -o $@ $^
+
+# aarch64 M3.3 Task 16: page_table.c software-bit + block-encoding
+# RED test. Compiles the REAL kernel/arch/aarch64/memory/page_table.c
+# against host mocks. page_table.c contains aarch64 inline asm
+# (tlbi vae1, dsb ish, isb) inside tlb_invalidate_local / dsb_ishst;
+# the production file guards those asm blocks with #ifdef __aarch64__
+# so it compiles cleanly on the x86 host. is_active_root() returns
+# false on host (mock aarch64_read_ttbr1() returns 0 and real CR3
+# never matches the test root pointer), so the guarded TLBI path
+# is never reached in the host harness.
+#
+# The arch_get_page_table() in <arch/mmu.h> is #elif-guarded for
+# __aarch64__ vs __x86_64__; on host it takes the x86 branch (mov
+# CR3) and returns the host CR3 — guaranteed not to match our test
+# root.
+#
+# vmm_gate_check() is stubbed in the test TU (page_table.c only
+# references it as a symbol; the production vmm_gate.c is not
+# linked here so we don't need percpu_data[] or dtb_cpu_count()).
+AARCH64_PT_SW_HOST_CFLAGS := $(HOST_CFLAGS) -I$(TEST_MOCK)/m1_a64_include \
+                              $(KERNEL_INC) $(LIBC_INC)
+
+$(TEST_BLD)/aarch64_pt_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/page_table.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_gate.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/boot_direct_map.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/arch/mmu.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_pt_software_bits.o: \
+		$(TEST_CASES)/test_aarch64_pt_software_bits.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_pt_software_bits.elf: \
+		$(TEST_BLD)/test_aarch64_pt_software_bits.o \
+		$(TEST_BLD)/aarch64_pt_production.o
+	$(HOST_CC) -o $@ $^
+
+test_aarch64_pt_software_bits: $(TEST_BLD)/test_aarch64_pt_software_bits.elf
+	$<
 
 # Foundational-primitives hosttest (M3 Task 7 Step 4): compiles the
 # PRODUCTION kernel/arch/aarch64/memory/vmm_gate.c (root registry,

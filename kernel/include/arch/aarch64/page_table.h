@@ -57,13 +57,17 @@ enum aarch64_pt_perm {
     AARCH64_PT_DEVICE    = 1u << 5,
 };
 
-/* Result codes. Negative values are errors; AARCH64_PT_OK is 0. */
+/* Result codes. Negative values are errors; AARCH64_PT_OK is 0.
+ * AARCH64_PT_EPROT_NONE is the three-state query sentinel for an
+ * "invalid but holds a PA" software stash (VM_PRESENT=0, VM_PROTNONE=1);
+ * identical code lives in <arch/aarch64/vmm_backend.h> as a `#define`
+ * (the backend includes both headers and uses the negative literal). */
 enum aarch64_pt_result {
-    AARCH64_PT_OK       =  0,
-    AARCH64_PT_EINVAL   = -1,
-    AARCH64_PT_EEXIST   = -2,
-    AARCH64_PT_ENOENT   = -3,
-    AARCH64_PT_ENOMEM   = -4,
+    AARCH64_PT_OK        =  0,
+    AARCH64_PT_EINVAL    = -1,
+    AARCH64_PT_EEXIST    = -2,
+    AARCH64_PT_ENOENT    = -3,
+    AARCH64_PT_ENOMEM    = -4,
     AARCH64_PT_ECONFLICT = -5,
 };
 
@@ -71,38 +75,93 @@ enum aarch64_pt_result {
  * must be 4 KiB aligned; `pa` must be < 1 TiB. Missing intermediate
  * tables are allocated via alloc_4k_page() and zeroed before linking.
  *
+ * Thin wrapper over aarch64_pt_map_4k_ext() with software_bits = 0;
+ * retained so the BSP pre-SMP selftest (kernel/arch/aarch64/memory/
+ * m1_selftest.c) keeps using its 4-arg form unchanged.  See the ext
+ * variant for the full return-value contract. */
+int aarch64_pt_map_4k(uint64_t *root, uint64_t va, uint64_t pa,
+                      uint32_t perm);
+
+/* M3.3 (Task 16) full 5-arg primitive with software-bit support.  Map
+ * a 4 KiB leaf with perm AND software_bits (PROTNONE | COW — both bits
+ * set is rejected with -EINVAL).
+ *
  * Returns:
  *   AARCH64_PT_OK        on success.
  *   AARCH64_PT_EINVAL    for null root, misaligned/uncanonical VA/PA,
- *                        PA >= 1 TiB, unknown permission bits, or
- *                        DEVICE | EXEC.
- *   AARCH64_PT_EEXIST    when a leaf is already present at VA.
+ *                        PA >= 1 TiB, unknown permission bits,
+ *                        DEVICE | EXEC, or software_bits with bits set
+ *                        outside {PROTNONE, COW}, or both bits set.
+ *   AARCH64_PT_EEXIST    when a leaf (valid OR PROTNONE-stashed) is
+ *                        already present at VA.
  *   AARCH64_PT_ECONFLICT when a valid non-table PUD/PMD descriptor
  *                        (block entry) is encountered.
  *   AARCH64_PT_ENOMEM    when a 4 KiB table page cannot be allocated.
  *
- * The root is a high-half direct-map pointer. Active-root callers may
- * invoke this only before smp_boot_aps() — see the BSP-pre-SMP note in
- * the file header. */
-int aarch64_pt_map_4k(uint64_t *root, uint64_t va, uint64_t pa,
-                      uint32_t perm);
+ * Active-root callers may invoke this only before smp_boot_aps(). */
+int aarch64_pt_map_4k_ext(uint64_t *root, uint64_t va, uint64_t pa,
+                          uint32_t perm, uint64_t software_bits);
 
-/* Walk the tree and report the leaf at VA without allocating. Returns
- * ENOENT for any absent level (PGD/PUD/PMD/PTE) and ECONFLICT for a
- * valid PUD/PMD block descriptor (this layer only owns 4 KiB leaves).
- * On OK, `*pa_out` and `*perm_out` receive the decoded physical base
- * (page-aligned) and permission word respectively.
+/* Walk the tree and report the leaf at VA without allocating.
+ * Three-state return (spec §4.3 query_4k):
+ *   AARCH64_PT_OK         — valid mapping; `*pa_out` / `*perm_out` /
+ *                           `*sw_out` receive decoded state.
+ *   AARCH64_PT_EPROT_NONE — PROTNONE-stashed: VALID cleared but the
+ *                           PROTNONE software bit set; `*pa_out` holds
+ *                           the stashed PA.  Distinct from -ENOENT.
+ *   AARCH64_PT_ENOENT     — slot genuinely empty.
  *
- * `root` is a high-half direct-map pointer. */
+ * Thin wrapper over aarch64_pt_query_4k_ext() that drops the sw out
+ * parameter.  Retained for the BSP pre-SMP selftest. */
 int aarch64_pt_query_4k(const uint64_t *root, uint64_t va,
                         uint64_t *pa_out, uint32_t *perm_out);
 
+/* Three-state query + software-bit out (see aarch64_pt_query_4k for the
+ * return-value contract).  `*sw_out` is populated with the raw software
+ * bits at the descriptor (PROTNONE / COW / neither). */
+int aarch64_pt_query_4k_ext(const uint64_t *root, uint64_t va,
+                            uint64_t *pa_out, uint32_t *perm_out,
+                            uint64_t *sw_out);
+
 /* Clear an existing 4 KiB leaf. Returns the prior physical address and
- * permission via `*pa_out` / `*perm_out` before the clear. Same error
- * contract as query_4k; never allocates. If the path is absent (ENOENT)
- * or blocked (ECONFLICT), the tree is not modified. */
+ * permission via `*pa_out` / `*perm_out` before the clear.  Same
+ * three-state return as aarch64_pt_query_4k_ext: PROTNONE stashes are
+ * cleared and reported as AARCH64_PT_EPROT_NONE.  Never allocates. */
 int aarch64_pt_unmap_4k(uint64_t *root, uint64_t va,
                         uint64_t *pa_out, uint32_t *perm_out);
+
+/* Three-state clear + software-bit out. */
+int aarch64_pt_unmap_4k_ext(uint64_t *root, uint64_t va,
+                            uint64_t *pa_out, uint32_t *perm_out,
+                            uint64_t *sw_out);
+
+/* Replace an existing 4 KiB leaf with a new perm + software_bits state
+ * (spec §4.4.3).  The prior physical address and software bits are
+ * returned via `*old_pa_out` / `*old_sw_out`.  Classification:
+ *
+ *   - AP / XN-only change (same PA, same memory type, same validity):
+ *     atomic 8 B store + dsb ishst + local TLBI.
+ *   - Memory-type change (AttrIndx / NOCACHE), PA change, or validity
+ *     flip (↔ PROTNONE): PTE-level BBM (clear, TLBI, set) under the
+ *     lock-free single-threaded assumption that Task 17 will replace
+ *     with pt_lock_for(root, l2) — see TODO.
+ *
+ * Returns AARCH64_PT_OK on success, -EINVAL for bad perm/sw, -ENOENT
+ * if no leaf (valid OR PROTNONE-stashed) exists at VA, -EEXIST if the
+ * caller tries to swap PA on a PROTNONE stash (the stash owns a fixed
+ * PA; use unmap + map_4k_ext to re-stash). */
+int aarch64_pt_replace_4k(uint64_t *root, uint64_t va, uint64_t pa,
+                          uint32_t perm, uint64_t software_bits,
+                          uint64_t *old_pa_out, uint64_t *old_sw_out);
+
+/* Build a 2 MiB block descriptor (spec §5.1).  Block = VALID | bit1=0;
+ * OA lives in bits [39:21] (L2 block format — IPS=40).  AP / SH /
+ * AttrIndx / XN bits mirror encode_perm's policy for the same perm
+ * word.  software_bits stashed into descriptor bits 55 / 56 (the
+ * reserved bits ignored by hardware).  Helper for the M3.3 / M3.4
+ * arch_vmm_map_2m backend; visible here so hosttest pins the contract. */
+uint64_t aarch64_pt_encode_block_desc(uint64_t pa, uint32_t perm,
+                                      uint64_t software_bits);
 
 /* Return true iff every page in [va, va + length) is mapped with the
  * requested access. length == 0 returns true. addr + length overflow
