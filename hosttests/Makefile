@@ -89,6 +89,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_gic_driver.elf \
     $(TEST_BLD)/test_aarch64_ipi_broadcast.elf \
     $(TEST_BLD)/test_aarch64_gic_target_probe.elf \
+    $(TEST_BLD)/test_ap_work_protocol.elf \
     $(TEST_BLD)/test_foundational_primitives.elf \
     $(TEST_BLD)/test_gic_marker_lines.elf \
     $(TEST_BLD)/test_gic_probe.elf \
@@ -1214,6 +1215,35 @@ $(TEST_BLD)/test_aarch64_gic_target_probe.elf: \
 	$(HOST_CC) -o $@ $^
 
 test_aarch64_gic_target_probe: $(TEST_BLD)/test_aarch64_gic_target_probe.elf
+	$<
+
+# ap_work protocol hosttest (M3 Task 10): compiles the PRODUCTION
+# kernel/arch/aarch64/smp/ap_work.c against the host. The preinclude
+# mock/ap_work_test_runtime.h short-circuits <arch/cpu.h> and
+# <arch/aarch64/boot_log.h>; the test TU supplies kputs/kputu (captured
+# into a buffer for the WORK-TIMEOUT FATAL line) and test-controlled
+# arch_cycle_counter/arch_cpu_halt (longjmp hook proves the halt path).
+AP_WORK_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC)
+AP_WORK_PROD_CFLAGS := $(AP_WORK_HOST_CFLAGS) \
+                        -include $(TEST_MOCK)/ap_work_test_runtime.h
+
+$(TEST_BLD)/ap_work_production.o: $(TESTS_DIR)/kernel/arch/aarch64/smp/ap_work.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/ap_work.h \
+		$(TEST_MOCK)/ap_work_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AP_WORK_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_ap_work_protocol.o: $(TEST_CASES)/test_ap_work_protocol.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/ap_work.h \
+		$(TEST_MOCK)/ap_work_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AP_WORK_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_ap_work_protocol.elf: $(TEST_BLD)/test_ap_work_protocol.o \
+		$(TEST_BLD)/ap_work_production.o
+	$(HOST_CC) -o $@ $^
+
+test_ap_work_protocol: $(TEST_BLD)/test_ap_work_protocol.elf
 	$<
 
 # percpu_t layout pin hosttest (M3 Task 9): header-only TU that includes

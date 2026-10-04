@@ -11,6 +11,9 @@
 #include <arch/aarch64/psci.h>
 #include <arch/aarch64/smp.h>
 #include <arch/aarch64/smp_boot_core.h>
+#include <arch/aarch64/ap_work.h>
+#include <arch/aarch64/ipi.h>     /* gic_target_bit_init (M3 Task 8) */
+#include <arch/aarch64/vmm_gate.h>/* ipi_ready_publish_and_count (Task 7) */
 #include <arch/irq.h>
 #include <arch/aarch64/boot_log.h>
 #include <arch/aarch_percpu.h>
@@ -256,5 +259,21 @@ void secondary_idle(uint32_t cpu_id)
     arch_local_irq_enable();
     __asm__ __volatile__("isb" ::: "memory");
 #endif
-    for (;;) arch_cpu_halt();
+
+    /* M3 (Task 10): AP must unmask IRQ + ISB BEFORE publishing ipi_ready.
+     * Otherwise the initiator could fire the SGI in the window before the
+     * unmask and the AP would not answer (timeout FATAL). Order: handler
+     * registered (gic_init) + GIC target bit validated + IRQ unmasked
+     * + ISB → then ipi_ready_publish_and_count (BSP/AP same function). */
+    gic_target_bit_init(cpu_id);          /* 单核也安全（RAZ/WI 例外） */
+    arch_local_irq_enable();              /* 生产也开 IRQ（M3 统一，去门控） */
+    __asm__ __volatile__("isb" ::: "memory");
+    ipi_ready_publish_and_count(cpu_id);
+    /* Work loop: run at most one ap_work item per iteration, then yield.
+     * Entered only after boot_online_set/boot_go_get above, so the boot
+     * handshake with the BSP is already complete. */
+    for (;;) {
+        ap_work_run_one(cpu_id);
+        arch_cpu_pause();
+    }
 }
