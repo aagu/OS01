@@ -109,6 +109,9 @@ TEST_BINS := \
     $(TEST_BLD)/test_m1_layout.elf \
     $(TEST_BLD)/test_m1_reservation.elf \
     $(TEST_BLD)/test_m1_arena.elf $(TEST_BLD)/test_m1_arena_exhaust.elf \
+    $(TEST_BLD)/test_arena_layout_chain.elf \
+    $(TEST_BLD)/test_arena_2gib_boundary.elf \
+    $(TEST_BLD)/test_arena_candidate_slab_bytes.elf \
     $(TEST_BLD)/test_m1_tree.elf \
     $(TEST_BLD)/test_m1_contract.elf $(TEST_BLD)/test_m1_vmm.elf \
     $(TEST_BLD)/test_m1_install.elf $(TEST_BLD)/test_m1_cleanup.elf \
@@ -801,7 +804,7 @@ test-m1-reservation: $(TEST_BLD)/test_m1_reservation.elf
 # `make test-m1-host CASE=m1-arena` (root run.mk) reaches this rule
 # via the focused dispatch in run.mk.
 EARLY_ARENA_HOST_CFLAGS := $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) \
-                           -I$(TEST_INC)
+                           -I$(TEST_INC) $(LIBC_INC)
 
 $(TEST_BLD)/early_arena_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/early_arena.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/early_arena.h \
@@ -827,9 +830,69 @@ $(TEST_BLD)/test_m1_arena.elf: $(TEST_BLD)/test_m1_arena.o \
 	$(HOST_CC) -o $@ $^
 
 .PHONY: test-m1-arena
-test-m1-arena: $(TEST_BLD)/test_m1_arena.elf $(TEST_BLD)/test_m1_arena_exhaust.elf
+test-m1-arena: $(TEST_BLD)/test_m1_arena.elf $(TEST_BLD)/test_m1_arena_exhaust.elf \
+    $(TEST_BLD)/test_arena_layout_chain.elf \
+    $(TEST_BLD)/test_arena_2gib_boundary.elf \
+    $(TEST_BLD)/test_arena_candidate_slab_bytes.elf
 	$(TEST_BLD)/test_m1_arena.elf
 	$(TEST_BLD)/test_m1_arena_exhaust.elf
+	$(TEST_BLD)/test_arena_layout_chain.elf
+	$(TEST_BLD)/test_arena_2gib_boundary.elf
+	$(TEST_BLD)/test_arena_candidate_slab_bytes.elf
+
+# aarch64 M2/M3 plan Task 3: arena layout-chain / 2 GiB boundary /
+# candidate-scan-includes-slab-bytes. Each new TU reuses the production
+# early_arena.o via the same EARLY_ARENA_HOST_CFLAGS / link line as the
+# existing test_m1_arena.elf. The stub surface (g_log_level,
+# _log_err_impl, color_printk, slab_init) lives in each TU — keeps the
+# rules self-contained and matches test_m1_arena.c / _exhaust.c.
+$(TEST_BLD)/test_arena_layout_chain.o: $(TEST_CASES)/test_arena_layout_chain.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/early_arena.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm_boot.h \
+		$(TESTS_DIR)/kernel/include/memory/memory_map.h \
+		$(TESTS_DIR)/kernel/include/memory/slab.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_arena_layout_chain.elf: $(TEST_BLD)/test_arena_layout_chain.o \
+		$(TEST_BLD)/early_arena_production.o \
+		$(TEST_BLD)/pmm_production.o \
+		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_boot_production.o
+	$(HOST_CC) -o $@ $^
+
+$(TEST_BLD)/test_arena_2gib_boundary.o: $(TEST_CASES)/test_arena_2gib_boundary.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/early_arena.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm_boot.h \
+		$(TESTS_DIR)/kernel/include/memory/memory_map.h \
+		$(TESTS_DIR)/kernel/include/memory/slab.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_arena_2gib_boundary.elf: $(TEST_BLD)/test_arena_2gib_boundary.o \
+		$(TEST_BLD)/early_arena_production.o \
+		$(TEST_BLD)/pmm_production.o \
+		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_boot_production.o
+	$(HOST_CC) -o $@ $^
+
+$(TEST_BLD)/test_arena_candidate_slab_bytes.o: $(TEST_CASES)/test_arena_candidate_slab_bytes.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/early_arena.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm_boot.h \
+		$(TESTS_DIR)/kernel/include/memory/memory_map.h \
+		$(TESTS_DIR)/kernel/include/memory/slab.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_arena_candidate_slab_bytes.elf: $(TEST_BLD)/test_arena_candidate_slab_bytes.o \
+		$(TEST_BLD)/early_arena_production.o \
+		$(TEST_BLD)/pmm_production.o \
+		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_boot_production.o
+	$(HOST_CC) -o $@ $^
 
 # aarch64 M1 plan Task 4: pure runtime page-table builder and strict
 # validator (`aarch64_runtime_tree_build` / `_validate`). Links the
@@ -1452,9 +1515,11 @@ $(TEST_BLD)/test_m1_runner.elf: $(TEST_CASES)/test_m1_runner.c $(TEST_INC)/m1_te
 $(TEST_BLD)/early_arena_exhaust_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/early_arena.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) -DAARCH64_M1_ARENA_EXHAUST=1 -c $< -o $@
-$(TEST_BLD)/test_m1_arena_exhaust.o: $(TEST_CASES)/test_m1_arena_exhaust.c $(TEST_INC)/m1_test_runner.h
+$(TEST_BLD)/test_m1_arena_exhaust.o: $(TEST_CASES)/test_m1_arena_exhaust.c \
+		$(TEST_INC)/m1_test_runner.h \
+		$(TESTS_DIR)/kernel/include/memory/slab.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 $(TEST_BLD)/test_m1_arena_exhaust.elf: $(TEST_BLD)/test_m1_arena_exhaust.o $(TEST_BLD)/early_arena_exhaust_production.o $(TEST_BLD)/pmm_boot_production.o
 	$(HOST_CC) -o $@ $^
 
