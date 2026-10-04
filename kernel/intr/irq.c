@@ -13,6 +13,8 @@
 // declared in kernel/include/arch/irq.h. This file knows
 // nothing about APIC / PIC / GIC.
 
+irq_desc_t irq_table[NR_IQRS] = {0};
+
 int32_t register_irq(uint32_t gsi, void * arg,
         void (*handler)(uint64_t nr, uint64_t parameter, pt_regs_t * regs),
         uint64_t parameter, uint32_t flags, const char * irq_name)

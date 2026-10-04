@@ -4,6 +4,7 @@
 #include <intr/ipi.h>
 #include <sched/task.h>
 #include <arch/cpu.h>
+#include <arch/x86_64/tss.h>
 #include <arch/irq.h>
 #include <arch/x86_64/gate.h>
 #include <arch/msr.h>

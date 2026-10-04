@@ -3,6 +3,7 @@
 #include <arch/spinlock.h>
 #include <arch/x86_64/gate.h>
 #include <arch/cpu.h>
+#include <arch/x86_64/tss.h>
 #include <core/printk.h>
 #include <memory/slab.h>   // kfree — for PF_SELF_REAP epilogue
 

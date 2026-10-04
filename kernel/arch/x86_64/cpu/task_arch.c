@@ -2,6 +2,9 @@
 #include <arch/mmu.h>
 #include <arch/x86_64/gate.h>
 #include <arch/thread.h>
+#include <arch/x86_64/tss.h>
+
+struct tss_struct init_tss[NR_CPUS] = { [0 ... NR_CPUS - 1] = INIT_TSS };
 
 void arch_task_init_early(void)
 {

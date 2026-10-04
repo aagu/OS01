@@ -36,7 +36,7 @@ typedef struct irq_desc
 
 #define NR_IQRS MAX_GSI
 
-irq_desc_t irq_table[NR_IQRS] = {0};
+extern irq_desc_t irq_table[NR_IQRS];
 
 // ── Register an IRQ handler for a given GSI ──────────────────
 // gsi:       Global System Interrupt number (0..MAX_GSI-1)

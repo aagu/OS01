@@ -544,6 +544,12 @@ test-static: test-runtime
 	python3 qemutests/x86_64_kernel_layout_test.py "$(KERNEL_BUILD_DIR)/kernel.elf" \
 	  --llvm-nm "$(LLVM_NM)" --llvm-readelf "$(LLVM_READELF)"
 	python3 qemutests/kernel_canary_contract_test.py
+	python3 qemutests/header_object_audit.py \
+	  --include-dir "kernel/include" \
+	  --sysroot "$(SYSROOT)" \
+	  --runtime-inc "runtime/include" \
+	  --llvm-nm "$(LLVM_NM)" \
+	  --clang "$(CLANG)"
 	@$(MAKE) --no-print-directory test-user-canary
 
 # ── test-runtime: original recipe (lines 364-385 of run.mk) ──
@@ -640,7 +646,7 @@ test-kernel-selftest: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMW
 	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
 	  -object rng-random,filename=/dev/urandom,id=rng0 \
 	  -device virtio-rng-pci,rng=rng0 \
-	  -m "$(MEMORY)" -display none -serial stdio -no-reboot -no-shutdown >"$$log" 2>&1; \
+	  -m "$(MEMORY)" -display none -serial stdio -no-reboot -no-shutdown < /dev/null >"$$log" 2>&1; \
 	rc=$$?; \
 	set -e; \
 	if [ "$$rc" -ne 0 ] && [ "$$rc" -ne 124 ]; then \

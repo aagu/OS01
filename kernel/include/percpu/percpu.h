@@ -44,6 +44,8 @@
 
 #define PERCPU_NEED_RESCHED_OFFSET  8
 
+struct tss_struct;
+
 typedef struct percpu {
     // ── Assembly-accessed fields ──
     uint64_t self;              // offset 0: self-pointer (GS:0 loads this)

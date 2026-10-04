@@ -48,6 +48,26 @@
 // Set by timer IRQ on every tick, cleared by schedule() after
 // a context switch.  entry.S reads it via %gs:8.
 
+// .lock = { .lock = 1L }: mm_t.lock is a spinlock_T whose own field is
+// `lock`.  1 = unlocked; leaving it 0 would deadlock the first task that
+// takes it (INIT_TASK points .mm at this struct).
+mm_t init_mm = { .lock = { .lock = 1L } };
+
+thread_t init_thread = {
+    .rsp0 = (uint64_t)(init_task_union.stack + STACK_SIZE),  // idle task kernel stack
+    .rip = (uint64_t)idle_resume,
+    .rsp = (uint64_t)(init_task_union.stack + STACK_SIZE),
+    .fs = KERNEL_DS,
+    .gs = KERNEL_DS,
+    .cr2 = 0,
+    .trap_nr = 0,
+    .error_code = 0,
+};
+
+union task_union init_task_union __attribute__((__section__(".data.init_task"))) = {INIT_TASK(init_task_union.task)};
+
+task_t *init_task[NR_CPUS] = {&init_task_union.task, 0};
+
 // ── Global task list lock (SMP) ──────────────────────────
 // Protects all traversals and modifications to
 // init_task_union.task.list.  schedule() paths use

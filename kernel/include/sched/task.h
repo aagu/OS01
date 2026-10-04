@@ -214,9 +214,10 @@ union task_union
     task_t task;
     char stack[STACK_SIZE];
 } __attribute__((aligned(8))); // 8 Byte aligned
-
-mm_t init_mm;
-thread_t init_thread;
+extern mm_t init_mm;
+extern thread_t init_thread;
+extern union task_union init_task_union;
+extern task_t *init_task[NR_CPUS];
 
 #define INIT_TASK(task)               \
 {                                     \
@@ -237,64 +238,6 @@ thread_t init_thread;
     .ctty = NULL,                     \
 }
 
-union task_union init_task_union __attribute__((__section__(".data.init_task"))) = {INIT_TASK(init_task_union.task)};
-
-task_t *init_task[NR_CPUS] = {&init_task_union.task,0};
-// .lock = { .lock = 1L }: mm_t.lock is a spinlock_T whose own field is
-// `lock`.  1 = unlocked; leaving it 0 would deadlock the first task that
-// takes it (INIT_TASK points .mm at this struct).
-mm_t init_mm = { .lock = { .lock = 1L } };
-thread_t init_thread =
-{
-    .rsp0 = (uint64_t)(init_task_union.stack + STACK_SIZE),  // idle task kernel stack
-    .rip = (uint64_t)idle_resume,
-    .rsp = (uint64_t)(init_task_union.stack + STACK_SIZE),
-    .fs = KERNEL_DS,
-    .gs = KERNEL_DS,
-    .cr2 = 0,
-    .trap_nr = 0,
-    .error_code = 0,
-};
-
-struct tss_struct
-{
-    uint32_t reserved0;
-    uint64_t rsp0;
-    uint64_t rsp1;
-    uint64_t rsp2;
-    uint64_t reserved1;
-    uint64_t ist1;
-    uint64_t ist2;
-    uint64_t ist3;
-    uint64_t ist4;
-    uint64_t ist5;
-    uint64_t ist6;
-    uint64_t ist7;
-    uint32_t reserved2;
-    uint16_t reserved3;
-    uint16_t iomapbaseaddr;
-} __attribute__((packed));
-
-#define INIT_TSS \
-{ \
-    .reserved0 = 0, \
-    .rsp0 = 0xffff800000007c00, \
-    .rsp1 = 0xffff800000007c00, \
-    .rsp2 = 0xffff800000007c00, \
-    .reserved1 = 0, \
-    .ist1 = 0xffff800000007c00, /* exception stack (4KB from 0x6c00) */ \
-    .ist2 = 0xffff800000006c00, /* IRQ stack (4KB from 0x5c00) */ \
-    .ist3 = 0xffff800000005c00, /* double fault stack (4KB from 0x4c00) */ \
-    .ist4 = 0, \
-    .ist5 = 0, \
-    .ist6 = 0, \
-    .ist7 = 0, \
-    .reserved2 = 0, \
-    .reserved3 = 0, \
-    .iomapbaseaddr = 0 \
-}
-
-struct tss_struct init_tss[NR_CPUS] = { [0 ... NR_CPUS - 1] = INIT_TSS };
 
 inline task_t* __attribute__((always_inline)) get_current_task()
 {

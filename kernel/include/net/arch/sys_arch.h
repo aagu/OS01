@@ -57,6 +57,7 @@ u32_t sys_now(void);
 void sys_init(void);
 
 // ── Sleep ─────────────────────────────────────────────────────
+#define sys_msleep sys_msleep
 void sys_msleep(u32_t ms);
 
 #endif // LWIP_ARCH_SYS_ARCH_H

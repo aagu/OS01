@@ -25,6 +25,7 @@
 #include <stdint.h>
 
 #include <percpu/percpu.h>
+#include <arch/x86_64/tss.h>
 #include <intr/apic.h>
 #include <driver/serial.h>
 #include <core/printk.h>

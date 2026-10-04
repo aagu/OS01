@@ -7,6 +7,13 @@
 
 ## 2026-10-04
 
+- refactor(arch): **ARCH-3 头文件定义全局 + 彻底移除 `-z muldefs`**：
+  - 彻底移除 `kernel/arch/x86_64/make.config` 与 `kernel/arch/aarch64/make.config` 中的 `-z muldefs` / `-Wl,-z,muldefs` 链接参数，消除链接期对符号冲突的静默吞噬
+  - 全局对象定义迁入 `.c`：`kernel/include/sched/task.h` 中的 `init_task_union`、`init_task[]`、`init_mm`、`init_thread` 迁入 `kernel/sched/task.c`；`kernel/include/intr/interrupt.h` 中的 `irq_table` 迁入 `kernel/intr/irq.c`
+  - x86_64 TSS 硬件结构解耦：新建 `kernel/include/arch/x86_64/tss.h`，`init_tss[]` 实体定义迁入 `kernel/arch/x86_64/cpu/task_arch.c`，通用调度器头文件 `task.h` 不再包含体系结构特定的 TSS 结构体与硬编码 IST 字段
+  - 清理暴露的重复符号：lwIP `sys_msleep` 宏覆盖与 `arch/x86_64/string.h` 中的 `memset` `static inline` 修饰
+  - 静态测试门禁闭环：`qemutests/runtime_audit.py` 增加禁止 `-z muldefs` 参数校验；新增 `qemutests/header_object_audit.py` 静态审计 149 个公开头文件，保障零强/弱对象定义
+  - 完善后台自测执行：`test-kernel-selftest` QEMU 增加 `< /dev/null` 重定向避免非交互终端挂起；放宽 `test_mutex.c` SMP 自测自旋上限
 - feat(terminal): **terminal 迁移至 libgfx + 刷新与 I/O 优化** —— commits `52a77005` / `920b48a6` / `c9105090`：
   - terminal 渲染路径切至 `libgfx.a` 静态库，支持离屏双缓冲与字形绘制加速（`gfx_draw_glyph`）
   - 优化刷新算法：利用像素级区域滚动替代整屏重绘，批量合并串口 I/O 读写

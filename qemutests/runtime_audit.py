@@ -22,6 +22,19 @@ def contains_gcc_runtime_reference(value: str) -> bool:
     )
 
 
+def has_muldefs_flag(argv: list[str]) -> bool:
+    for i, arg in enumerate(argv):
+        if arg in ("-Wl,-z,muldefs", "-z,muldefs"):
+            return True
+        if arg == "-z" and i + 1 < len(argv) and argv[i + 1] == "muldefs":
+            return True
+        if arg == "muldefs" and i > 0 and argv[i - 1] in ("-z", "-Wl,-z"):
+            return True
+        if arg.startswith("-Wl,") and "muldefs" in arg.split(","):
+            return True
+    return False
+
+
 def parse_receipt(path: Path) -> dict[str, str]:
     try:
         data = path.read_bytes()
@@ -113,6 +126,8 @@ def main() -> int:
             fail(f"{name} link must place the runtime input after -lk")
         if any(contains_gcc_runtime_reference(arg) for arg in argv):
             fail(f"{name} link contains a forbidden GCC runtime reference")
+        if has_muldefs_flag(argv):
+            fail(f"{name} link contains forbidden -z muldefs flag")
 
     audit_elf(args.stage1, args.llvm_nm, args.llvm_readobj)
     audit_elf(args.final, args.llvm_nm, args.llvm_readobj)

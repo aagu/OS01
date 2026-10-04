@@ -3,6 +3,7 @@
 #include <arch/x86_64/gate.h>
 #include <arch/x86_64/hw.h>
 #include <arch/segment.h>
+#include <arch/x86_64/tss.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>

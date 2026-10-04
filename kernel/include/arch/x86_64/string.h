@@ -3,8 +3,7 @@
 
 #include "linkage.h"
 
-// inline void * __attribute__((always_inline)) memset(void * dst, unsigned char c, long len)
-void * memset(void * dst, unsigned char c, long len)
+static inline void * __attribute__((always_inline)) memset(void * dst, unsigned char c, long len)
 {
    int d0, d1;
    unsigned long tmp = c * 0x0101010101010101UL;

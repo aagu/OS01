@@ -261,7 +261,7 @@ BusyBox config probe. All flags are prefixed with `-Wl,` because the
 Clang driver expects driver-syntax:
 
 ```
-KERNEL_DRIVER_LDFLAGS := -Wl,-m -Wl,elf_x86_64 -static -Wl,-z,muldefs \
+KERNEL_DRIVER_LDFLAGS := -Wl,-m -Wl,elf_x86_64 -static \
                          -Wl,-z,norelro -Wl,--no-relax
 ```
 
@@ -272,7 +272,7 @@ program final-link recipes (`user/Makefile:73,83,95`). The same flags, minus
 the `-Wl,` prefix because raw `ld.lld` does not understand driver syntax:
 
 ```
-KERNEL_RAW_LDFLAGS := -m elf_x86_64 -static -z muldefs -z norelro --no-relax
+KERNEL_RAW_LDFLAGS := -m elf_x86_64 -static -z norelro --no-relax
 KERNEL_RAW_LIBDIR := -L$(TARGET_LIBDIR)
 USER_RAW_LDFLAGS  := -m elf_x86_64 -static -no-pie -T linker.ld -L$(TARGET_LIBDIR)
 ```
@@ -283,7 +283,6 @@ Conversions are exact:
 |--------|-----|
 | `-Wl,-m -Wl,elf_x86_64` | `-m elf_x86_64` |
 | `-Wl,-z,norelro` | `-z norelro` |
-| `-Wl,-z,muldefs` | `-z muldefs` |
 | `-Wl,--no-relax` | `--no-relax` |
 
 `-nostdlib` is driver-only — it never reaches raw `ld.lld`. The font,

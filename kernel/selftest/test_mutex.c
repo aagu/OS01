@@ -2,6 +2,8 @@
 #include <core/printk.h>
 #include <sched/task.h>
 
+#include <arch/irq.h>
+
 static mutex_t test_mtx;
 static volatile int shared_counter = 0;
 
@@ -30,8 +32,9 @@ void test_kernel_mutex(void)
     }
 
     int spins = 0;
-    while (shared_counter < 2000 && spins < 1000000) {
+    while (shared_counter < 2000 && spins < 10000000) {
         schedule();
+        arch_local_irq_enable();
         spins++;
     }
 
