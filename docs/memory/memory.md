@@ -407,19 +407,43 @@ kernel.elf 中不得出现 `vma_*`/`uaccess_*`/`fork_*` 的 T/t 符号）共同�
 | `memory/uaccess.c:prepare_user_write_range_locked`（COW 写授权提交） | `mm->lock` (调用方 `prepare_user_write_range` 持锁) | 是 (`tlb_shootdown`) | OK — 见 R1 |
 | `sched/task.c:fork_mm_copy`（fork COW 防护提交） | 无（PTE 改动后、无锁尾部调用） | 是 (`tlb_shootdown`) | OK |
 | `core/printk.c:frame_buffer_init`（boot 期一次性映射） | 无 | 是 (`tlb_shootdown`) | OK（boot 期单 CPU） |
+| `arch/x86_64/intr/trap.c:659`（heap COW #PF 解析） | `mm->lock` (**irqsave**，仅 heap VMA COW 路径) | 否（锁内只改 PTE；`flush_tlb()` 在解锁**之后**） | OK（本行自身不违 I1）——但见下方 R1 例外与死锁场景 |
 
 ### 排序规则 R1（由上表归纳）
 
 x86 存在三条 `mm->lock`(plain spin) 持锁跨 `tlb_shootdown` 的链。
-允许成立的前提（均已验证成立，若破坏须消除该链）：
+允许成立的**修正后**前提（若破坏须消除该链）：
 
-1. `mm->lock` 永远不以 irqsave 方式获取（当前 vma.c/uaccess.c 均为
-   plain `spin_lock`，无 irqsave 变体）；
-2. `tlb_sd_lock` 为 plain spin，等待者开中断，TLB IPI handler 无锁
-   （I2），因此「目标 CPU 正自旋等 `mm->lock`」不阻碍其应答 shootdown；
+1. `mm->lock` **在 vma.c / uaccess.c 的 shootdown 调用方处以 plain
+   `spin_lock` 获取**（无 irqsave 变体）。
+   **例外（已知，Fix round 1 修正）**：`arch/x86_64/intr/trap.c:659`
+   在 heap VMA COW #PF 路径以 `spin_lock_irqsave(&t->mm->lock)` 取同一把
+   锁（重入/中断保护用途，语义未做完整分析）。该行自身**不在 irqsave 段内
+   调 vmm 变更 API**（不违 I1，见上表新增行），但它破坏了「mm->lock 永不
+   irqsave」的原前提，使前提 2 的保护出现漏洞（见下）。
+2. ~~「目标 CPU 正自旋等 `mm->lock`」不阻碍其应答 shootdown~~ —— 仅对
+   plain 自旋成立。**若目标 CPU 在 irqsave 下自旋等 `mm->lock`
+   （trap.c:659 路径），其本地中断被屏蔽，无法应答 TLB IPI。**
 3. 锁序固定为 `mm->lock` → `tlb_sd_lock`，任何反向获取都是 bug。
 
-M3.1 无需消除项；`mm->lock`-跨-shootdown 三链记入 R1 持续约束。
+#### R1 潜在死锁场景（记录为 x86 长期约束，本任务不改 x86 代码）
+
+- CPU A：在 `vma.c:mm_set_brk` / `uaccess.c:prepare_user_write_range_locked`
+  持 plain `mm->lock`（同一 mm），进入 `tlb_shootdown`，等待目标集合中
+  CPU B 的 ack（超时 = `tlb_shootdown_panic` FATAL）。
+- CPU B：同一时刻在同一 mm 的已提交 heap 页上触发 COW #PF，进入
+  `trap.c:659` 的 `spin_lock_irqsave(&mm->lock)` 自旋——本地中断被屏蔽，
+  **永远无法应答 A 的 TLB IPI** → A 的 ack 等待撑到超时 → FATAL panic。
+- 触发窗口需要「同一 mm、A 正在 brk/COW 提交 + shootdown、B 恰在 heap
+  COW #PF」三者并发，概率低但非零。
+- 历史背景：Task 12 之前的旧 tlb.c 超时路径**静默继续**（silently
+  continue），因此这一楔死此前就以更弱的形式存在（静默跳过 → 陈旧 TLB
+  条目存活）；Task 12 的 FATAL 化只是把它从「静默错误」变成「响亮 panic」，
+  不是引入新缺陷。
+- 约束：未来消除方向是把 trap.c 的 COW 解析改为 trylock + 重打 #PF，或
+  把 mm->lock 拆出 irqsave 需求；在任何此类改动落地前，**不得**再新增
+  「plain mm->lock 持锁跨 tlb_shootdown」或「irqsave 取 mm->lock」的
+  调用点。x86 行为稳定性是计划约束，本任务不改 trap.c / vma.c / uaccess.c。
 
 ### MODE=ipc-noready 的偏差说明
 

@@ -138,7 +138,7 @@ static void case_mask_excludes_unready_offline_self(void)
 
 /* M3.1 audit gate (Task 13; ipc-noready coverage as a hosttest — the
  * dedicated QEMU sub-mode was judged disproportionate, see
- * docs/memory.md "vmm 变更调用链审计（M3.1 验收）"): a CPU that is
+ * docs/memory/memory.md "vmm 变更调用链审计（M3.1 验收）"): a CPU that is
  * online but NOT yet ipi_ready is never targeted, so its ack generation
  * must be unchanged by the shootdown; once it publishes ipi_ready, the
  * NEXT shootdown targets it and bumps its gen exactly once. */

@@ -15,7 +15,7 @@
  *      kernel/memory/tlb.c.
  *      This is a static APPROXIMATION: it flags functions that both
  *      touch a lock and touch a vmm-change API anywhere in the body;
- *      the real call chains are tabulated in docs/memory.md
+ *      the real call chains are tabulated in docs/memory/memory.md
  *      ("vmm 变更调用链审计（M3.1 验收）").
  *
  *   2. kernel/memory/tlb.c: tlb_sd_lock is the ONLY lock — exactly one
@@ -35,7 +35,8 @@
  *
  * Mirrors the source-scan pattern of test_x86_ipi_ready_publish.c /
  * test_slab_lock_path.c (no exec from hosttests; the nm half lives in
- * the Makefile-guarded shell step in mk/components/run.mk).
+ * the Makefile-guarded shell step in mk/components/run.mk
+ * (target test-aarch64-audit).
  */
 #include "test_framework.h"
 #include <ctype.h>
