@@ -307,6 +307,28 @@ uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
 int vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
                     uint64_t virt, uint64_t flags)
 {
+    return x86_vmm_map_4k_page(pgdir, phys, virt, flags);
+}
+
+// Unmap a 4KB page at virt.  Frees the physical page via free_4k_page.
+// Safe to call on unmapped/never-faulted pages (no-op).
+// PTE table reclamation is deferred (V1: pages freed, tables remain).
+void vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt)
+{
+    (void)x86_vmm_unmap_4k_page_with_free(pgdir, virt);
+}
+
+/* x86 4KB PTE backend helpers (aarch64 M3.2 Task 15) — see
+ * arch/x86_64/pte.h for the public contract.  These own the
+ * PAGE_* hardware bit layout and the free/COW ownership semantics.
+ * The public vmm_map_4k_page / vmm_unmap_4k_page wrappers in vmm.c
+ * delegate here, so external API behavior is unchanged. */
+
+// x86 4KB map — allocates intermediate tables via vmm_pt_walk; returns
+// -ENOMEM if any table allocation fails.
+int x86_vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
+                        uint64_t virt, uint64_t flags)
+{
     uint64_t *pte = vmm_pt_walk(pgdir, virt, flags, 1);
     if (!pte)
         return -ENOMEM;
@@ -315,19 +337,25 @@ int vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
     return 0;
 }
 
-// Unmap a 4KB page at virt.  Frees the physical page via free_4k_page.
-// Safe to call on unmapped/never-faulted pages (no-op).
-// PTE table reclamation is deferred (V1: pages freed, tables remain).
-void vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt)
+// x86 4KB unmap with free/COW ownership.  Returns 0 on a real unmap
+// (PTE was present); -ENOENT if the PTE was missing/not-present (the
+// caller's "nothing to do" sentinel — historically silent on vmm.c's
+// void-returning vmm_unmap_4k_page).
+//
+// Free/COW logic (v1 review item 9: ONE free call per branch):
+//   - PAGE_COW + non-last ref (page_cow_put returns false): ZERO free
+//   - PAGE_COW + last ref     (page_cow_put returns true):  ONE free
+//   - non-COW:                                              ONE free
+int x86_vmm_unmap_4k_page_with_free(uint64_t *pgdir, uint64_t virt)
 {
     uint64_t *pte = vmm_pt_walk(pgdir, virt, 0, 0);
     if (!pte)
-        return;
+        return -ENOENT;
 
     // Must check both Valid and PROTNONE -- PROTNONE pages have
     // Valid=0 but valid phys that must be freed.
     if (!(*pte & (PAGE_VALID | PAGE_PROTNONE)))
-        return;
+        return -ENOENT;
 
     uint64_t phys = *pte & PAGE_4K_MASK;
 
@@ -336,7 +364,30 @@ void vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt)
         if (page_cow_put(phys))
             free_4k_page(phys);
     } else {
+        // Plain (non-COW) page: free unconditionally
         free_4k_page(phys);
     }
     *pte = 0;
+    return 0;
+}
+
+// x86 4KB query — read back phys + flags without modifying the PTE.
+// Returns 0 on success; -ENOENT if the slot is not present
+// (PAGE_VALID | PAGE_PROTNONE both clear). phys_out/flags_out may be
+// NULL if the caller only needs the presence check.
+int x86_vmm_query_4k_page(uint64_t *pgdir, uint64_t virt,
+                          uint64_t *phys_out, uint64_t *flags_out)
+{
+    uint64_t *pte = vmm_pt_walk(pgdir, virt, 0, 0);
+    if (!pte)
+        return -ENOENT;
+
+    if (!(*pte & (PAGE_VALID | PAGE_PROTNONE)))
+        return -ENOENT;
+
+    if (phys_out)
+        *phys_out = *pte & PAGE_4K_MASK;
+    if (flags_out)
+        *flags_out = *pte & ~PAGE_4K_MASK;
+    return 0;
 }

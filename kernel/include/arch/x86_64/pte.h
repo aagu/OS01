@@ -76,4 +76,19 @@ uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
                       uint64_t flags, int allocate);
 void vmm_free_user_map(uint64_t *pgdir);
 
+/* x86 4KB PTE backend helpers (aarch64 M3.2 Task 15).
+ *
+ * These are the x86-internal raw PTE-level primitives the public
+ * vmm_map_4k_page / vmm_unmap_4k_page wrappers in vmm.c delegate to.
+ * x86_vmm_unmap_4k_page_with_free owns the free/COW ownership logic:
+ *   - PAGE_COW: page_cow_put(phys) returns true ONLY on last ref →
+ *     free_4k_page(phys) called exactly once; ZERO free if non-last.
+ *   - non-COW: free_4k_page(phys) called exactly once.
+ * (v1 review item 9: single free per branch.) */
+int  x86_vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
+                         uint64_t virt, uint64_t flags);
+int  x86_vmm_unmap_4k_page_with_free(uint64_t *pgdir, uint64_t virt);
+int  x86_vmm_query_4k_page(uint64_t *pgdir, uint64_t virt,
+                           uint64_t *phys_out, uint64_t *flags_out);
+
 #endif

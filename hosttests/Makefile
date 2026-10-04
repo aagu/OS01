@@ -129,7 +129,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_tlb_serial_protocol.elf \
     $(TEST_BLD)/test_x86_ipi_ready_publish.elf \
     $(TEST_BLD)/test_vmm_caller_audit.elf \
-    $(TEST_BLD)/test_vmm_semantic_header.elf
+    $(TEST_BLD)/test_vmm_semantic_header.elf \
+    $(TEST_BLD)/test_x86_vmm_backend.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -1366,6 +1367,34 @@ $(TEST_BLD)/test_vmm_semantic_header.elf: $(TEST_BLD)/test_vmm_semantic_header.o
 
 test_vmm_semantic_header: $(TEST_BLD)/test_vmm_semantic_header.elf
 	$<
+
+# aarch64 M3.2 Task 15: x86 vmm.c backend wrapper + free/COW logic
+# preservation.  Links the REAL kernel/memory/vmm.c against the
+# x86_vmm_backend harness (flat pre-filled PTE chain,
+# counter-backed page_cow_put / free_4k_page mocks).  Asserts the
+# new x86_vmm_map_4k_page / x86_vmm_unmap_4k_page_with_free /
+# x86_vmm_query_4k_page API and the single-free-per-branch COW
+# invariant.  --wrap=calloc is unused by the unmap path (the chain
+# is pre-filled) but kept so vmm.c's calloc reference resolves at
+# link time.
+$(TEST_BLD)/x86_vmm_backend_production.o: $(TESTS_DIR)/kernel/memory/vmm.c \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/pte.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(M1_CONTRACT_HOST_CFLAGS) $(LIBC_INC) \
+		-ffunction-sections -fdata-sections -c $< -o $@
+
+$(TEST_BLD)/test_x86_vmm_backend.o: $(TEST_CASES)/test_x86_vmm_backend.c \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/pte.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(M1_CONTRACT_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
+		-c $< -o $@
+
+$(TEST_BLD)/test_x86_vmm_backend.elf: \
+		$(TEST_BLD)/test_x86_vmm_backend.o \
+		$(TEST_BLD)/x86_vmm_backend_production.o
+	$(HOST_CC) -Wl,--gc-sections -Wl,--wrap=calloc -o $@ $^
 
 # Foundational-primitives hosttest (M3 Task 7 Step 4): compiles the
 # PRODUCTION kernel/arch/aarch64/memory/vmm_gate.c (root registry,
