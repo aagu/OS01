@@ -170,6 +170,7 @@ bool term_core_input(term_core_t *t, uint8_t c)
             if (t->csi_qmark && t->csi_param == 1049) {
                 t->alt_active = true;
                 clear_screen(t);            // alt starts blank
+                term_core_mark_all_dirty(t); // full redraw of alt buffer
                 t->row = 0; t->col = 0;
                 changed = true;
             }

@@ -192,3 +192,54 @@ void gfx_sprite_blit_mask(gfx_handle_t *h, int32_t dx, int32_t dy,
         }
     }
 }
+
+/* ── 1-bpp glyph / mask drawing ──────────────────────────────── */
+void gfx_draw_glyph(gfx_handle_t *h, int32_t dx, int32_t dy,
+                    const uint8_t *mask, uint32_t mask_stride,
+                    uint32_t w, uint32_t h_,
+                    uint32_t fgc, uint32_t bgc, bool bg_opaque)
+{
+    if (!h || !h->pixels || !mask) return;
+    if (w == 0u || h_ == 0u) return;
+    uint32_t mask_row_bytes = w / 8u + ((w & 7u) != 0u);
+    if (mask_stride < mask_row_bytes) return;
+    if (h->info.width == 0u || h->info.height == 0u) return;
+
+    int32_t vx = h->clip_x;
+    int32_t vy = h->clip_y;
+    uint32_t vw = h->clip_w;
+    uint32_t vh = h->clip_h;
+    if (vw == 0u || vh == 0u) return;
+
+    int32_t fx, fy;
+    uint32_t fw, fh;
+    intersect_rect(dx, dy, w, h_,
+                   vx, vy, vw, vh,
+                   &fx, &fy, &fw, &fh);
+    if (fw == 0u || fh == 0u) return;
+    intersect_rect(fx, fy, fw, fh,
+                   0, 0, h->info.width, h->info.height,
+                   &fx, &fy, &fw, &fh);
+    if (fw == 0u || fh == 0u) return;
+
+    size_t width = (size_t)h->info.width;
+    size_t sx0 = (size_t)((int64_t)fx - (int64_t)dx);
+    size_t sy0 = (size_t)((int64_t)fy - (int64_t)dy);
+
+    for (uint32_t row = 0; row < fh; ++row) {
+        const uint8_t *mask_row =
+            mask + (sy0 + (size_t)row) * (size_t)mask_stride;
+        uint32_t *dst_row =
+            h->pixels + ((size_t)fy + (size_t)row) * width + (size_t)fx;
+        for (uint32_t col = 0; col < fw; ++col) {
+            size_t src_col = sx0 + (size_t)col;
+            uint8_t mb = mask_row[src_col >> 3];
+            uint8_t bit = (uint8_t)(1u << (7u - (src_col & 7)));
+            if (mb & bit) {
+                dst_row[col] = fgc;
+            } else if (bg_opaque) {
+                dst_row[col] = bgc;
+            }
+        }
+    }
+}

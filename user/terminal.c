@@ -1,13 +1,14 @@
-/* terminal.elf — OS01 userspace VT100 terminal emulator
+/* terminal.elf — OS01 userspace VT100 terminal emulator (libgfx backend)
  *
  * Keyboard path: open /dev/tty BEFORE ctty set → CTTY_NONE → phys TTY
  *   kbd IRQ → kbd_tty ring buffer → /dev/tty fd → terminal.elf → PTY master → ash
  *
- * Ash output path: ash → PTY slave → pipe → PTY master fd → terminal.elf → fb
+ * Ash output path: ash → PTY slave → pipe → PTY master fd → terminal.elf → libgfx
  */
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>     // environ
 #include <string.h>
@@ -15,11 +16,13 @@
 #include <errno.h>
 #include <poll.h>
 #include <fcntl.h>
-#include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>   // struct winsize (TIOCSWINSZ target)
 #include <termios.h>
+#include <time.h>
+#include <gfx.h>
 #include "terminal_core.h"
+#include "terminal_render.h"
 
 // ── fb_info (must match kernel definition) ──────────────────
 struct fb_info {
@@ -28,79 +31,22 @@ struct fb_info {
 
 #define FBIOSURRENDER  0x00004601
 
-// ── PSF2 font header (must match kernel font.h) ─────────────
-// 8 uint32 fields + glyphs byte + packed = 33 bytes
-typedef struct {
-    uint32_t magic, version, headersize, flags, numglyph, bytesperglyph, height, width;
-    uint8_t glyphs;
-} __attribute__((packed)) psf2_t;
+#define ASH_PATH "/bin/busybox"
+#define FRAME_INTERVAL_MS 33
+#define MAX_PRESENT_FAILURES 5
 
 // Embedded font data (from objcopy)
-// Input file: terminal_font.psf → symbol: _binary_terminal_font_psf_start
 extern char _binary_terminal_font_psf_start[];
+extern char _binary_terminal_font_psf_end[];
 
 // ── Terminal state ──────────────────────────────────────────
-static uint32_t *fb;
+static gfx_handle_t *gfx;
 static struct fb_info fb_info;
-static psf2_t *font;
+static const psf2_t *font;
 static int term_cols, term_rows;
 static uint32_t fg = 0xFFFFFFFF, bg = 0x00000000;
-static term_core_t core;   // VT100 screen model + parser (terminal_core.c)
-
-// ═══════════════════════════════════════════════════════════
-//  Renderer
-// ═══════════════════════════════════════════════════════════
-
-static void put_glyph(int col, int row, uint32_t fgc, uint32_t bgc, char c)
-{
-    if (col < 0 || col >= term_cols || row < 0 || row >= term_rows) return;
-    if (c <= 0 || c >= (int)font->numglyph) c = ' ';
-
-    unsigned char *glyph = (unsigned char *)font + font->headersize
-        + (unsigned int)c * font->bytesperglyph;
-
-    for (uint32_t y = 0; y < font->height; y++) {
-        uint32_t *line = fb + (row * font->height + y) * (fb_info.stride / 4)
-                         + col * font->width;
-        uint32_t test = 0x100;
-        for (uint32_t x = 0; x < font->width; x++) {
-            test >>= 1;
-            *line++ = (*glyph & test) ? fgc : bgc;
-        }
-        glyph++;
-    }
-}
-
-static void flush_screen(void)
-{
-    term_cell_t *screen = term_core_screen(&core);
-    if (!screen) return;
-    for (int r = 0; r < core.rows; r++)
-        for (int c = 0; c < core.cols; c++)
-            if (term_core_is_dirty(&core, r, c)) {
-                uint8_t g = screen[r * core.cols + c].glyph;
-                put_glyph(c, r, fg, bg, g ? (char)g : ' ');
-                term_core_clear_dirty(&core, r, c);
-            }
-}
-
-// ═══════════════════════════════════════════════════════════
-//  VT100 output parser
-// ═══════════════════════════════════════════════════════════
-
-static void output_char(char c)
-{
-    if (term_core_input(&core, c))
-        flush_screen();
-}
-
-static void handle_output(char *buf, int n, int serial_fd)
-{
-    for (int i = 0; i < n; i++) {
-        output_char(buf[i]);
-        if (serial_fd >= 0) write(serial_fd, &buf[i], 1);
-    }
-}
+static term_core_t core;
+static term_render_t render;
 
 // ═══════════════════════════════════════════════════════════
 //  Input handler (dual-mode: cooked / raw)
@@ -108,8 +54,6 @@ static void handle_output(char *buf, int n, int serial_fd)
 
 static void handle_input(char *buf, int n, int pty_fd, int ash_pid)
 {
-    // Raw passthrough: ash (FEATURE_EDITING=y) handles all line editing, echo, ^C.
-    // We just forward keyboard bytes to the PTY master and let ash do the rest.
     for (int i = 0; i < n; i++) {
         char c = buf[i];
         if (c == '\x03') {
@@ -124,70 +68,172 @@ static void handle_input(char *buf, int n, int pty_fd, int ash_pid)
 //  Main
 // ═══════════════════════════════════════════════════════════
 
-#include <poll.h>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/ioctl.h>
-#include <termios.h>
-#include <sys/syscall.h>  // SYS_putchar for early debug
-
-#define ASH_PATH "/bin/busybox"
-
 int main(void)
 {
     char *ash_argv[] = { "ash", NULL };
-
-    // The console TTY's VINTR line discipline broadcasts SIGINT to the
-    // whole foreground pgrp (pgrp 1 here — job control is disabled).  This
-    // process is the terminal emulator, not a job: it must survive ^C.
-    // It already handles ^C itself by forwarding SIGINT to ash
-    // (handle_input → kill(ash_pid, SIGINT)), so it ignores the broadcast.
-    // (init sets SIGINT=SIG_IGN, but exec() resets all handlers to SIG_DFL
-    // per kernel/sched/task.c:1452, so we must re-ignore here.)
     signal(SIGINT, SIG_IGN);
+
+    int serial_fd = open("/dev/serial", O_WRONLY);
 
     // 1. Open /dev/tty
     int tty_fd = open("/dev/tty", O_RDONLY);
-    if (tty_fd < 0) { exec(ASH_PATH, ash_argv, environ); return 1; }
+    if (tty_fd < 0) {
+        if (serial_fd >= 0) {
+            const char msg[] = "[terminal] ERROR: cannot open /dev/tty\r\n";
+            write(serial_fd, msg, sizeof(msg) - 1);
+        }
+        exec(ASH_PATH, ash_argv, environ);
+        return 1;
+    }
 
-    // 2. Try framebuffer
-    int fb_fd = open("/dev/fb", O_RDWR);
-    if (fb_fd < 0) { dup2(tty_fd, 0); close(tty_fd); exec(ASH_PATH, ash_argv, environ); return 1; }
-
-    read(fb_fd, &fb_info, sizeof(fb_info));
-    fb = mmap(NULL, fb_info.height * fb_info.stride,
-              PROT_READ | PROT_WRITE, MAP_SHARED, fb_fd, 0);
-    if (fb_info.width == 0 || (int64_t)(intptr_t)fb < 0) {
-        // No fb — run ash directly on TTY
-        if (fb_fd >= 0) close(fb_fd);
+    // 2. Validate embedded PSF2 font
+    size_t font_size = (size_t)(_binary_terminal_font_psf_end - _binary_terminal_font_psf_start);
+    if (!term_font_validate(_binary_terminal_font_psf_start, font_size, &font)) {
+        if (serial_fd >= 0) {
+            const char msg[] = "[terminal] ERROR: invalid embedded PSF2 font\r\n";
+            write(serial_fd, msg, sizeof(msg) - 1);
+        }
         dup2(tty_fd, 0); close(tty_fd);
         exec(ASH_PATH, ash_argv, environ);
         return 1;
     }
 
-    ioctl(fb_fd, FBIOSURRENDER, NULL);
-    font = (psf2_t *)_binary_terminal_font_psf_start;
-    term_cols = fb_info.width / font->width;
-    term_rows = fb_info.height / font->height;
+    // 3. Query framebuffer geometry
+    int fb_fd = open("/dev/fb", O_RDWR);
+    if (fb_fd < 0) {
+        if (serial_fd >= 0) {
+            const char msg[] = "[terminal] ERROR: cannot open /dev/fb\r\n";
+            write(serial_fd, msg, sizeof(msg) - 1);
+        }
+        dup2(tty_fd, 0); close(tty_fd);
+        exec(ASH_PATH, ash_argv, environ);
+        return 1;
+    }
+
+    if (read(fb_fd, &fb_info, sizeof(fb_info)) != (ssize_t)sizeof(fb_info) ||
+        fb_info.width == 0 || fb_info.height == 0) {
+        if (serial_fd >= 0) {
+            const char msg[] = "[terminal] ERROR: invalid /dev/fb metadata\r\n";
+            write(serial_fd, msg, sizeof(msg) - 1);
+        }
+        close(fb_fd);
+        dup2(tty_fd, 0); close(tty_fd);
+        exec(ASH_PATH, ash_argv, environ);
+        return 1;
+    }
+
+    term_cols = (int)(fb_info.width / font->width);
+    term_rows = (int)(fb_info.height / font->height);
+    if (term_cols <= 0 || term_rows <= 0) {
+        if (serial_fd >= 0) {
+            const char msg[] = "[terminal] ERROR: non-positive terminal geometry\r\n";
+            write(serial_fd, msg, sizeof(msg) - 1);
+        }
+        close(fb_fd);
+        dup2(tty_fd, 0); close(tty_fd);
+        exec(ASH_PATH, ash_argv, environ);
+        return 1;
+    }
+
+    // 4. Open 2D graphics view (/dev/gfx0)
+    gfx = gfx_open(0, 0, fb_info.width, fb_info.height);
+    if (!gfx) {
+        if (serial_fd >= 0) {
+            const char msg[] = "[terminal] ERROR: gfx_open failed\r\n";
+            write(serial_fd, msg, sizeof(msg) - 1);
+        }
+        close(fb_fd); // Do NOT surrender kernel console
+        dup2(tty_fd, 0); close(tty_fd);
+        exec(ASH_PATH, ash_argv, environ);
+        return 1;
+    }
+
+    // 5. Initialize terminal core and verify memory buffers
     term_core_init(&core, term_rows, term_cols);
-    // Paint a blank screen immediately: init may respawn us after the
-    // previous terminal (or a game) left stale framebuffer content.
+    if (!core.main_buf || !core.alt_buf || !core.dirty) {
+        if (serial_fd >= 0) {
+            const char msg[] = "[terminal] ERROR: buffer allocation failed\r\n";
+            write(serial_fd, msg, sizeof(msg) - 1);
+        }
+        term_core_free(&core);
+        gfx_close(gfx);
+        close(fb_fd);
+        dup2(tty_fd, 0); close(tty_fd);
+        exec(ASH_PATH, ash_argv, environ);
+        return 1;
+    }
+
+    term_render_init(&render, gfx, font, &core, fg, bg);
+    term_render_clear(&render);
     term_core_mark_all_dirty(&core);
-    flush_screen();
+    term_render_flush(&render);
 
-    // 3. Open serial for headless echo
-    int serial_fd = open("/dev/serial", O_WRONLY);
+    // 6. Verify initial gfx_present succeeds before taking over console
+    if (gfx_present(gfx) != 0) {
+        if (serial_fd >= 0) {
+            const char msg[] = "[terminal] ERROR: initial gfx_present failed\r\n";
+            write(serial_fd, msg, sizeof(msg) - 1);
+        }
+        term_core_free(&core);
+        gfx_close(gfx);
+        close(fb_fd);
+        dup2(tty_fd, 0); close(tty_fd);
+        exec(ASH_PATH, ash_argv, environ);
+        return 1;
+    }
 
-    // 4. PTY
+    // 7. Surrender kernel console and verify
+    if (ioctl(fb_fd, FBIOSURRENDER, NULL) < 0) {
+        if (serial_fd >= 0) {
+            const char msg[] = "[terminal] ERROR: FBIOSURRENDER ioctl failed\r\n";
+            write(serial_fd, msg, sizeof(msg) - 1);
+        }
+        term_core_free(&core);
+        gfx_close(gfx);
+        close(fb_fd);
+        dup2(tty_fd, 0); close(tty_fd);
+        exec(ASH_PATH, ash_argv, environ);
+        return 1;
+    }
+    close(fb_fd);
+
+    // 8. Post-surrender present: close any brief race window with kernel console
+    if (gfx_present(gfx) != 0) {
+        if (serial_fd >= 0) {
+            const char msg[] = "[terminal] ERROR: post-surrender gfx_present failed\r\n";
+            write(serial_fd, msg, sizeof(msg) - 1);
+        }
+        term_core_free(&core);
+        gfx_close(gfx);
+        dup2(tty_fd, 0); close(tty_fd);
+        exec(ASH_PATH, ash_argv, environ);
+        return 1;
+    }
+
+    // 9. Allocate PTY
     int pty_fd = open("/dev/ptmx", O_RDWR);
-    if (pty_fd < 0) { close(tty_fd); close(fb_fd); exec(ASH_PATH, ash_argv, environ); return 1; }
+    if (pty_fd < 0) {
+        if (serial_fd >= 0) {
+            const char msg[] = "[terminal] ERROR: open /dev/ptmx failed\r\n";
+            write(serial_fd, msg, sizeof(msg) - 1);
+        }
+        term_core_free(&core); gfx_close(gfx);
+        dup2(tty_fd, 0); close(tty_fd);
+        exec(ASH_PATH, ash_argv, environ);
+        return 1;
+    }
     int slave = open("/dev/pts0", O_RDWR);
-    if (slave < 0) { close(pty_fd); close(tty_fd); close(fb_fd); exec(ASH_PATH, ash_argv, environ); return 1; }
+    if (slave < 0) {
+        if (serial_fd >= 0) {
+            const char msg[] = "[terminal] ERROR: open /dev/pts0 failed\r\n";
+            write(serial_fd, msg, sizeof(msg) - 1);
+        }
+        close(pty_fd); term_core_free(&core); gfx_close(gfx);
+        dup2(tty_fd, 0); close(tty_fd);
+        exec(ASH_PATH, ash_argv, environ);
+        return 1;
+    }
 
-    // Tell the PTY (and thus ash) the real terminal size, so line editing
-    // and line-wrapping use the full framebuffer width instead of the 80x25
-    // default baked into pty_alloc().  Without this, ash wraps output at 80
-    // columns and the right side of the screen is never used.
     struct winsize ws = {
         .ws_row    = (unsigned short)term_rows,
         .ws_col    = (unsigned short)term_cols,
@@ -196,44 +242,121 @@ int main(void)
     };
     ioctl(slave, TIOCSWINSZ, &ws);
 
-    // 5. Fork ash
+    // 11. Fork ash
     int ash_pid = fork();
     if (ash_pid == 0) {
         dup2(slave, 0); dup2(slave, 1); dup2(slave, 2);
-        close(slave); close(pty_fd); close(tty_fd); close(fb_fd);
+        close(slave); close(pty_fd); close(tty_fd);
         exec(ASH_PATH, ash_argv, environ);
         exit(1);
     }
     close(slave);
 
-    // 6. Main loop — mirror fb output to serial for headless
-    struct pollfd fds[2] = {{.fd = tty_fd, .events = POLLIN}, {.fd = pty_fd, .events = POLLIN}};
+    // 12. Main event loop: starvation-free 30 FPS throttle + deep idle sleep
+    struct pollfd fds[2] = {
+        {.fd = tty_fd, .events = POLLIN},
+        {.fd = pty_fd, .events = POLLIN}
+    };
     char buf[256];
+    uint64_t last_present_ms = 0;
+    int present_failures = 0;
+    bool dirty_pending = false;
+    uint64_t last_cmd_submit_ms = 0;
+    bool fatal_exit = false;
+
+#define CMD_HOLD_MS        500
+
     while (1) {
-        if (poll(fds, 2, -1) < 0) { if (errno == EINTR) continue; break; }
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        uint64_t now_ms = (uint64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+        uint64_t elapsed = now_ms - last_present_ms;
+        bool hold_cmd = (now_ms - last_cmd_submit_ms < CMD_HOLD_MS);
+
+        // 1. Present immediately if interval elapsed and not holding for command startup
+        if (dirty_pending && elapsed >= FRAME_INTERVAL_MS && !hold_cmd) {
+            term_render_flush(&render);
+            if (gfx_present(gfx) == 0) {
+                last_present_ms = now_ms;
+                dirty_pending = false;
+                present_failures = 0;
+            } else {
+                last_present_ms = now_ms;
+                present_failures++;
+                if (present_failures >= MAX_PRESENT_FAILURES) {
+                    if (serial_fd >= 0) {
+                        const char msg[] = "\r\n[terminal] FATAL: graphics present failed repeatedly, aborting\r\n";
+                        write(serial_fd, msg, sizeof(msg) - 1);
+                    }
+                    fatal_exit = true;
+                    sleep(2);
+                    break;
+                }
+            }
+        }
+
+        // 2. Compute poll timeout
+        int timeout_ms = -1;
+        if (dirty_pending) {
+            uint64_t cur_elapsed = now_ms - last_present_ms;
+            int frame_wait = (cur_elapsed < FRAME_INTERVAL_MS) ?
+                             (int)(FRAME_INTERVAL_MS - cur_elapsed) : 0;
+            int cmd_wait = (now_ms - last_cmd_submit_ms < CMD_HOLD_MS) ?
+                           (int)(CMD_HOLD_MS - (now_ms - last_cmd_submit_ms)) : 0;
+            timeout_ms = (frame_wait > cmd_wait) ? frame_wait : cmd_wait;
+        } else {
+            timeout_ms = -1; // Idle -> deep sleep
+        }
+
+        int pr = poll(fds, 2, timeout_ms);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+
+        // 3. Process keyboard input
         if (fds[0].revents & POLLIN) {
             int n = read(tty_fd, buf, sizeof(buf));
-            if (n > 0) handle_input(buf, n, pty_fd, ash_pid);
+            if (n > 0) {
+                for (int i = 0; i < n; i++) {
+                    if (buf[i] == '\n' || buf[i] == '\r') {
+                        last_cmd_submit_ms = now_ms;
+                        break;
+                    }
+                }
+                handle_input(buf, n, pty_fd, ash_pid);
+            }
         }
+
+        // 4. Process PTY master output
         if (fds[1].revents & POLLIN) {
             int n = read(pty_fd, buf, sizeof(buf));
             if (n > 0) {
-                handle_output(buf, n, serial_fd);
+                for (int i = 0; i < n; i++) {
+                    if (term_core_input(&core, buf[i])) dirty_pending = true;
+                    if (serial_fd >= 0) write(serial_fd, &buf[i], 1);
+                }
+                if (term_render_cursor_update(&render)) dirty_pending = true;
             } else if (n == 0) {
-                // Shell died (e.g. `exec tetris` exited): clear the fb so
-                // init's respawn starts from a clean screen, not our
-                // stale game/terminal content.
-                output_char('\x1b'); output_char('[');
-                output_char('2'); output_char('J');
+                // Shell died
+                break;
+            } else if (errno == EINTR) {
+                continue;
+            } else {
                 break;
             }
-            else if (errno == EINTR) continue; else break;
         }
     }
 
+    // 13. Teardown
+    if (!fatal_exit) {
+        term_render_clear(&render);
+        gfx_present(gfx);
+    }
     waitpid(ash_pid, NULL, 0);
     term_core_free(&core);
-    munmap(fb, fb_info.height * fb_info.stride);
-    close(pty_fd); close(tty_fd); close(fb_fd);
+    gfx_close(gfx);
+    close(pty_fd); close(tty_fd);
+    if (serial_fd >= 0) close(serial_fd);
     return 0;
 }

@@ -807,6 +807,127 @@ TEST_FUNC(test_sprite_completely_outside)
     free(h);
 }
 
+/* ── glyph: opaque, transparent bg, clipping, padding ───────── */
+TEST_FUNC(test_glyph_opaque_fg_bg)
+{
+    TEST_SUITE("glyph: opaque writes fgc for 1 and bgc for 0");
+    reset_state();
+    gfx_handle_t *h = open_test_handle();
+    uint8_t mask[2] = { 0x90u, 0x60u }; /* row 0: 1001, row 1: 0110 */
+    uint32_t fgc = 0xFFFFFFFFu;
+    uint32_t bgc = 0x11223344u;
+
+    gfx_draw_glyph(h, 1, 1, mask, 1, 4, 2, fgc, bgc, true);
+
+    /* Row 1 */
+    assert_eq(fgc, *view_at(1, 1));
+    assert_eq(bgc, *view_at(1, 2));
+    assert_eq(bgc, *view_at(1, 3));
+    assert_eq(fgc, *view_at(1, 4));
+    /* Row 2 */
+    assert_eq(bgc, *view_at(2, 1));
+    assert_eq(fgc, *view_at(2, 2));
+    assert_eq(fgc, *view_at(2, 3));
+    assert_eq(bgc, *view_at(2, 4));
+
+    /* Untouched pixels */
+    assert_eq(0u, *view_at(0, 0));
+    assert_eq(0u, *view_at(3, 1));
+    assert_true(sentinels_intact());
+    free(h);
+}
+
+TEST_FUNC(test_glyph_transparent_bg)
+{
+    TEST_SUITE("glyph: transparent background preserves destination");
+    reset_state();
+    gfx_handle_t *h = open_test_handle();
+    gfx_fill_rect(h, 0, 0, BUF_W, BUF_H, 0x77777777u);
+    uint8_t mask[2] = { 0x90u, 0x60u };
+    uint32_t fgc = 0xAABBCCDDu;
+
+    gfx_draw_glyph(h, 1, 1, mask, 1, 4, 2, fgc, 0x00000000u, false);
+
+    /* Row 1: 1001 -> fgc, bg, bg, fgc */
+    assert_eq(fgc, *view_at(1, 1));
+    assert_eq(0x77777777u, *view_at(1, 2));
+    assert_eq(0x77777777u, *view_at(1, 3));
+    assert_eq(fgc, *view_at(1, 4));
+    /* Row 2: 0110 -> bg, fgc, fgc, bg */
+    assert_eq(0x77777777u, *view_at(2, 1));
+    assert_eq(fgc, *view_at(2, 2));
+    assert_eq(fgc, *view_at(2, 3));
+    assert_eq(0x77777777u, *view_at(2, 4));
+
+    assert_true(sentinels_intact());
+    free(h);
+}
+
+TEST_FUNC(test_glyph_clipped_partial)
+{
+    TEST_SUITE("glyph: clipped across boundaries");
+    reset_state();
+    gfx_handle_t *h = open_test_handle();
+    /* 4x2 glyph placed at (-2, -1):
+     * visible part is only rows y in [0..0], cols x in [0..1]
+     * which corresponds to src row 1, src cols 2..3 (mask row 1: 0x60 = 0110 -> 1, 0) */
+    uint8_t mask[2] = { 0x90u, 0x60u };
+    uint32_t fgc = 0xFF00FF00u;
+    uint32_t bgc = 0x00FF00FFu;
+
+    gfx_draw_glyph(h, -2, -1, mask, 1, 4, 2, fgc, bgc, true);
+
+    assert_eq(fgc, *view_at(0, 0)); /* src_col 2 = 1 */
+    assert_eq(bgc, *view_at(0, 1)); /* src_col 3 = 0 */
+    assert_eq(0u, *view_at(0, 2));
+    assert_eq(0u, *view_at(1, 0));
+    assert_true(sentinels_intact());
+    free(h);
+}
+
+TEST_FUNC(test_glyph_stride_padding)
+{
+    TEST_SUITE("glyph: stride padding bytes ignored");
+    reset_state();
+    gfx_handle_t *h = open_test_handle();
+    /* 4x1 glyph, mask_stride = 2 (1 extra padding byte) */
+    uint8_t mask[2] = { 0x80u, 0xFFu }; /* 1000 ..., padding 0xFF */
+    uint32_t fgc = 0x11111111u;
+    uint32_t bgc = 0x22222222u;
+
+    gfx_draw_glyph(h, 0, 0, mask, 2, 4, 1, fgc, bgc, true);
+
+    assert_eq(fgc, *view_at(0, 0));
+    assert_eq(bgc, *view_at(0, 1));
+    assert_eq(bgc, *view_at(0, 2));
+    assert_eq(bgc, *view_at(0, 3));
+    assert_eq(0u, *view_at(0, 4));
+    assert_true(sentinels_intact());
+    free(h);
+}
+
+TEST_FUNC(test_glyph_null_and_zero_safety)
+{
+    TEST_SUITE("glyph: NULL and zero size safe no-ops");
+    reset_state();
+    gfx_handle_t *h = open_test_handle();
+    uint8_t mask[1] = { 0x80u };
+
+    gfx_draw_glyph(NULL, 0, 0, mask, 1, 4, 1, 0xFFu, 0x00u, true);
+    gfx_draw_glyph(h, 0, 0, NULL, 1, 4, 1, 0xFFu, 0x00u, true);
+    gfx_draw_glyph(h, 0, 0, mask, 1, 0, 1, 0xFFu, 0x00u, true);
+    gfx_draw_glyph(h, 0, 0, mask, 1, 4, 0, 0xFFu, 0x00u, true);
+    gfx_draw_glyph(h, 0, 0, mask, 0, 4, 1, 0xFFu, 0x00u, true); /* stride < 1 */
+
+    for (int32_t y = 0; y < BUF_H; ++y) {
+        for (int32_t x = 0; x < BUF_W; ++x) {
+            assert_eq(0u, *view_at(y, x));
+        }
+    }
+    assert_true(sentinels_intact());
+    free(h);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_pixel_inside_view),
     TEST_ENTRY(test_pixel_outside_view_no_op),
@@ -838,6 +959,11 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_sprite_mask_bit_order),
     TEST_ENTRY(test_sprite_mask_padded_stride),
     TEST_ENTRY(test_sprite_completely_outside),
+    TEST_ENTRY(test_glyph_opaque_fg_bg),
+    TEST_ENTRY(test_glyph_transparent_bg),
+    TEST_ENTRY(test_glyph_clipped_partial),
+    TEST_ENTRY(test_glyph_stride_padding),
+    TEST_ENTRY(test_glyph_null_and_zero_safety),
 TEST_LIST_END
 
 int main(void)

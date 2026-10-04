@@ -77,6 +77,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_wait_basic.elf \
     $(TEST_BLD)/test_canon.elf \
     $(TEST_BLD)/test_terminal_core.elf \
+    $(TEST_BLD)/test_terminal_render.elf \
     $(TEST_BLD)/test_tetris_logic.elf \
     $(TEST_BLD)/test_sync_primitives.elf \
     $(TEST_BLD)/test_poll_requested.elf \
@@ -924,6 +925,26 @@ $(TEST_BLD)/test_terminal_core.o: $(TEST_CASES)/test_terminal_core.c
 
 $(TEST_BLD)/test_terminal_core.elf: $(TEST_BLD)/test_terminal_core.o $(TEST_BLD)/terminal_core.o
 	$(HOST_CC) -o $@ $^
+
+# Terminal render test — compiles REAL user/terminal_render.c + terminal_core.c + libgfx
+$(TEST_BLD)/terminal_render.o: $(TESTS_DIR)/user/terminal_render.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user -I$(TESTS_DIR)/libgfx -I$(TESTS_DIR)/kernel/include -c $< -o $@
+
+$(TEST_BLD)/test_terminal_render.o: $(TEST_CASES)/test_terminal_render.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user -I$(TESTS_DIR)/libgfx -I$(TESTS_DIR)/kernel/include -DREPO_ROOT=\"$(TESTS_DIR)\" -c $< -o $@
+
+$(TEST_BLD)/test_terminal_render.elf: $(TEST_BLD)/test_terminal_render.o \
+		$(TEST_BLD)/terminal_render.o \
+		$(TEST_BLD)/terminal_core.o \
+		$(TEST_BLD)/libgfx_gfx_production.o \
+		$(TEST_BLD)/libgfx_line_production.o \
+		$(TEST_BLD)/libgfx_sprite_production.o
+	$(HOST_CC) -o $@ $^
+
+test-terminal-render: $(TEST_BLD)/test_terminal_render.elf
+	$<
 
 # Tetris logic test — compiles REAL user/tetris_logic.c (pure C)
 $(TEST_BLD)/tetris_logic.o: $(TESTS_DIR)/user/tetris_logic.c

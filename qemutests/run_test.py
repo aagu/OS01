@@ -562,6 +562,20 @@ def test_gfx(tester):
               f"(last test marker: {m.group(0) if m else '<none>'!r})")
         return False
     print("PASS: [TETRIS] SMOKE PASS marker observed")
+
+    # ── Step C: /bin/test_terminal_screen — visual screen E2E ─
+    tester.send_line("/bin/test_terminal_screen")
+
+    passed = tester.read_until("[TERM SCREEN TEST] PASS", timeout=tester.timeout)
+    if passed is None:
+        time.sleep(1)
+        log = tester._read_available().decode('utf-8', errors='replace')
+        marker_re = re.compile(r"\[TERM SCREEN TEST\][^\n]*")
+        m = marker_re.search(log)
+        print(f"FAIL: /bin/test_terminal_screen did not produce PASS marker "
+              f"(last test marker: {m.group(0) if m else '<none>'!r})")
+        return False
+    print("PASS: [TERM SCREEN TEST] PASS marker observed")
     return True
 
 

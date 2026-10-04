@@ -95,6 +95,7 @@ gfx_handle_t *gfx_open(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
     }
     handle->pixels = (uint32_t *)pixels;
     handle->pixels_bytes = bytes;
+    memset(pixels, 0, bytes);
 
     /* Initial clip = the full view in local coordinates.  The clip
      * is library-local state; spec §4 says "越出视图的 clip 取交集"

@@ -153,6 +153,18 @@ void gfx_sprite_blit_mask(gfx_handle_t *h, int32_t dx, int32_t dy,
                           const uint8_t *mask, uint32_t mask_stride,
                           uint32_t src_w, uint32_t src_h);
 
+/* gfx_draw_glyph: 1-bpp bitmap / glyph drawing primitive (MSB-first).
+ * mask_stride is in BYTES (>= ceil(w/8)); bit 7 of mask_row[i] is
+ * the leftmost pixel of byte i (1 = fgc).
+ * If bg_opaque == true, bit 0 is written as bgc.
+ * If bg_opaque == false, bit 0 is skipped (transparent background).
+ * Coordinates dx, dy are view-local and clipped to the view AND
+ * the library-local clip rectangle. */
+void gfx_draw_glyph(gfx_handle_t *h, int32_t dx, int32_t dy,
+                    const uint8_t *mask, uint32_t mask_stride,
+                    uint32_t w, uint32_t h_,
+                    uint32_t fgc, uint32_t bgc, bool bg_opaque);
+
 /* ── Public `static inline` primitive wrappers (Task 4) ───────
  *
  * Each wrapper handles the caller's NULL-handle guard + the
