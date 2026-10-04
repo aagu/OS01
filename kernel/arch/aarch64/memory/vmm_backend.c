@@ -93,8 +93,8 @@ static uint32_t vm_to_perm(uint32_t vm)
     uint32_t perm;
     if (device) {
         perm = AARCH64_PT_DEVICE;  /* forces PXN | UXN in encode_perm */
-        if (write) perm |= AARCH64_PT_KERNEL_RW;
-        else       perm |= AARCH64_PT_KERNEL_RO;
+        if (write) perm |= user ? AARCH64_PT_USER_RW : AARCH64_PT_KERNEL_RW;
+        else       perm |= user ? AARCH64_PT_USER_RO : AARCH64_PT_KERNEL_RO;
     } else {
         perm = user
             ? (write ? AARCH64_PT_USER_RW : AARCH64_PT_USER_RO)
@@ -348,12 +348,10 @@ int arch_vmm_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
 /* ── 2 MiB block map / unmap / split ─────────────────────────────── */
 
 /* Full block + split land in Task 18 (aarch64 M3.3 split follow-up)
- * with the published-root registry + pt_lock_for.  Stubs here so the
- * arch-neutral API is at least declared and an honest -ENOSYS /
- * -EINVAL is returned for callers that race to the Task 16 commit.
- * map_2m / unmap_2m return -ENOSYS (capability simply not present);
- * split_2m_to_4k returns -EPERM because spec §5.3 mandates that exact
- * code for a published root. */
+ * with the published-root registry + pt_lock_for.  map_2m / unmap_2m
+ * now route through the new aarch64_pt_* block primitives; split
+ * remains -EPERM (Task 21 implements the un-published-root split
+ * with the published-root registry). */
 int arch_vmm_map_2m(uint64_t *pgdir, uint64_t phys, uint64_t virt,
                     uint32_t vm_flags)
 {
@@ -364,11 +362,15 @@ int arch_vmm_map_2m(uint64_t *pgdir, uint64_t phys, uint64_t virt,
     if (pgdir != kernel_map) return -EINVAL;
     rc = check_vm_flags(vm_flags);
     if (rc) return rc;
+    /* Block API requires VM_HUGE; leaf calls (no HUGE) belong in
+     * arch_vmm_map_4k_new. */
+    if (!(vm_flags & VM_HUGE)) return -EINVAL;
     if ((phys & (PAGE_2M_SIZE - 1)) != 0) return -EINVAL;
     if ((virt & (PAGE_2M_SIZE - 1)) != 0) return -EINVAL;
     if (phys >= (UINT64_C(1) << 40))      return -EINVAL;
-    (void)vm_flags;    /* Task 18 will consume */
-    return -ENOSYS;
+    uint32_t perm = vm_to_perm(vm_flags);
+    if (perm == 0) return -EINVAL;
+    return aarch64_pt_map_2m_block(pgdir, virt, phys, perm);
 }
 
 int arch_vmm_unmap_2m(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out)
@@ -379,8 +381,10 @@ int arch_vmm_unmap_2m(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out)
     if (rc) return rc;
     if (pgdir != kernel_map) return -EINVAL;
     if ((virt & (PAGE_2M_SIZE - 1)) != 0) return -EINVAL;
-    if (phys_out) *phys_out = 0;
-    return -ENOSYS;   /* Task 18 */
+    uint64_t pa = 0;
+    rc = aarch64_pt_unmap_2m_block(pgdir, virt, &pa);
+    if (phys_out) *phys_out = pa;
+    return rc;
 }
 
 int arch_vmm_split_2m_to_4k(uint64_t *pgdir, uint64_t virt)
@@ -393,6 +397,8 @@ int arch_vmm_split_2m_to_4k(uint64_t *pgdir, uint64_t virt)
     if ((virt & (PAGE_2M_SIZE - 1)) != 0) return -EINVAL;
     /* The M1 root IS published (boot_direct_map.c publishes it at
      * install time).  Spec §5.3: split on a published root → -EPERM
-     * until F10 designs the BBM-level + cross-core invalidation. */
-    return -EPERM;
+     * until F10 designs the BBM-level + cross-core invalidation.
+     * Route through the primitive so the stub stays consistent with
+     * the page-table layer. */
+    return aarch64_pt_split_block_2m(pgdir, virt);
 }

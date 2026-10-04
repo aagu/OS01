@@ -132,7 +132,9 @@ TEST_BINS := \
     $(TEST_BLD)/test_vmm_semantic_header.elf \
     $(TEST_BLD)/test_x86_vmm_backend.elf \
     $(TEST_BLD)/test_aarch64_pt_software_bits.elf \
-    $(TEST_BLD)/test_aarch64_pt_locks.elf
+    $(TEST_BLD)/test_aarch64_pt_locks.elf \
+    $(TEST_BLD)/test_aarch64_pt_2m_block.elf \
+    $(TEST_BLD)/test_aarch64_backend_4k.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -1467,6 +1469,74 @@ $(TEST_BLD)/test_aarch64_pt_locks.elf: \
 	$(HOST_CC) -o $@ $^
 
 test_aarch64_pt_locks: $(TEST_BLD)/test_aarch64_pt_locks.elf
+	$<
+
+# aarch64 M3.3 Task 18: 2 MiB block primitive contract (spec §5.2 /
+# §4.4.5). Compiles the REAL kernel/arch/aarch64/memory/page_table.c
+# against the same host harness as test_aarch64_pt_locks.c
+# (aarch64_read_ttbr1 returns 0, vmm_gate_check is a no-op, is_active_root
+# always false so the guarded TLBI path is unreachable, alloc/free
+# backed by a host-heap pool with a fail-counter for ENOMEM injection).
+# The new aarch64_pt_map_2m_block / aarch64_pt_unmap_2m_block /
+# aarch64_pt_read_l2_desc / aarch64_pt_split_block_2m primitives are
+# exercised directly (no vmm_backend.c link — this test pins the
+# primitive contract; the backend layer is covered separately by
+# test_aarch64_backend_4k.elf).
+$(TEST_BLD)/test_aarch64_pt_2m_block.o: $(TEST_CASES)/test_aarch64_pt_2m_block.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/arch/spinlock.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) \
+		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_pt_2m_block.elf: \
+		$(TEST_BLD)/test_aarch64_pt_2m_block.o \
+		$(TEST_BLD)/aarch64_pt_production.o
+	$(HOST_CC) -o $@ $^
+
+test_aarch64_pt_2m_block: $(TEST_BLD)/test_aarch64_pt_2m_block.elf
+	$<
+
+# aarch64 M3.3 Task 18: arch_vmm_* backend 12-legal + 4-reject combo
+# matrix (spec §4.2 / §4.4.4). Links the REAL page_table.c AND the
+# REAL vmm_backend.c against the host harness. kernel_map is set
+# directly by the test TU (it lives in vmm_backend.c as a global;
+# same shape test_x86_vmm_backend.c uses for its pinned pgdir).
+#
+# The test override for vmm_gate_violation (weak default in
+# vmm_gate.c spins forever) just bumps a counter — the host TU's
+# vmm_gate_check stub never invokes it on the happy paths, but
+# strays would surface as a counter increment rather than a hang.
+$(TEST_BLD)/vmm_backend_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/vmm_backend.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_gate.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/boot_direct_map.h \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/arch/mmu.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_backend_4k.o: $(TEST_CASES)/test_aarch64_backend_4k.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) \
+		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_backend_4k.elf: \
+		$(TEST_BLD)/test_aarch64_backend_4k.o \
+		$(TEST_BLD)/aarch64_pt_production.o \
+		$(TEST_BLD)/vmm_backend_production.o
+	$(HOST_CC) -o $@ $^
+
+test_aarch64_backend_4k: $(TEST_BLD)/test_aarch64_backend_4k.elf
 	$<
 
 # Foundational-primitives hosttest (M3 Task 7 Step 4): compiles the

@@ -71,6 +71,11 @@ enum aarch64_pt_result {
     AARCH64_PT_ENOENT    = -3,
     AARCH64_PT_ENOMEM    = -4,
     AARCH64_PT_ECONFLICT = -5,
+    /* Task 18: aarch64_pt_split_block_2m returns this when called
+     * on a published root (spec §5.3 — F10 implements the
+     * BBM-aware split path).  Matches the Linux-style -EPERM value
+     * so callers can write `if (rc == -EPERM)` uniformly. */
+    AARCH64_PT_EPERM     = -6,
 };
 
 /* Map a single 4 KiB page at the given VA in `root`. `va` and `pa`
@@ -83,6 +88,15 @@ enum aarch64_pt_result {
  * variant for the full return-value contract. */
 int aarch64_pt_map_4k(uint64_t *root, uint64_t va, uint64_t pa,
                       uint32_t perm);
+
+/* Task 18: brief-aligned name.  Identical contract to
+ * aarch64_pt_map_4k_ext — returns -EEXIST on ANY occupied slot (valid
+ * leaf OR PROTNONE-stashed).  Alias exposed so callers (and the
+ * hosttest matrix) can use the brief's `map_4k_new` name without
+ * dragging the `ext` suffix into every call site.  See
+ * aarch64_pt_map_4k_ext below for the full return-value contract. */
+int aarch64_pt_map_4k_new(uint64_t *root, uint64_t va, uint64_t pa,
+                          uint32_t perm, uint64_t software_bits);
 
 /* M3.3 (Task 16) full 5-arg primitive with software-bit support.  Map
  * a 4 KiB leaf with perm AND software_bits (PROTNONE | COW — both bits
@@ -164,6 +178,66 @@ int aarch64_pt_replace_4k(uint64_t *root, uint64_t va, uint64_t pa,
  * arch_vmm_map_2m backend; visible here so hosttest pins the contract. */
 uint64_t aarch64_pt_encode_block_desc(uint64_t pa, uint32_t perm,
                                       uint64_t software_bits);
+
+/* Map a 2 MiB block at `va` in `root` (Task 18 / spec §5.2).  `va`
+ * and `pa` must be 2 MiB aligned; `pa` must be < 1 TiB.  Walks
+ * L0 → L1 → L2 (allocating intermediates as needed) and writes a
+ * block descriptor at pmd[l2].  Holds pt_lock_for(root, l2) across
+ * the entire walk + pmd[l2] write per §5.4.
+ *
+ * Returns:
+ *   AARCH64_PT_OK        on success.
+ *   AARCH64_PT_EINVAL    for null root, misaligned/uncanonical VA/PA,
+ *                        PA >= 1 TiB, or unknown permission bits.
+ *   AARCH64_PT_EEXIST    when pmd[l2] is already occupied (valid
+ *                        block, valid table, OR PROTNONE stash).
+ *   AARCH64_PT_ENOMEM    when an intermediate 4 KiB table page cannot
+ *                        be allocated.
+ *
+ * Active-root callers may invoke this only before smp_boot_aps().
+ *
+ * split_block_2m is still -EPERM (Task 21 implements it). */
+int aarch64_pt_map_2m_block(uint64_t *root, uint64_t va, uint64_t pa,
+                            uint32_t perm);
+
+/* Unmap a 2 MiB block at `va` (spec §4.4.5 / §5.2).  Returns the
+ * prior physical address via `*pa_out` (NULL to discard) before
+ * clearing the descriptor.  Holds pt_lock_for(root, l2) across the
+ * walk + pmd[l2] read+write per §5.4.  Never frees the data page
+ * (spec §4.4.4: backend owns no data pages).
+ *
+ * Returns:
+ *   AARCH64_PT_OK        on success; `*pa_out` holds the prior PA.
+ *   AARCH64_PT_EINVAL    for null root, misaligned/uncanonical VA, or
+ *                        when pmd[l2] is a TABLE descriptor (caller
+ *                        used the wrong API — a 4 KiB leaf unmap is
+ *                        aarch64_pt_unmap_4k_ext).
+ *   AARCH64_PT_ENOENT    when pmd[l2] is invalid (no mapping). */
+int aarch64_pt_unmap_2m_block(uint64_t *root, uint64_t va,
+                              uint64_t *pa_out);
+
+/* Split a 2 MiB block into 512 4 KiB leaves (spec §5.3).  Returns
+ * -EPERM on any published root; un-published roots (caller owns the
+ * tree exclusively) get an atomic store rewrite per spec §5.3.
+ * Implementation lands in Task 21 — this stub is here so the API
+ * surface is consistent with the brief. */
+int aarch64_pt_split_block_2m(uint64_t *root, uint64_t va);
+
+/* Read the raw descriptor at pmd[l2] for `va`.  Walks L0 → L1 → L2
+ * without allocating; useful for tests and for block-vs-leaf
+ * introspection at the L2 slot (the only place the two can be
+ * distinguished).  Returns:
+ *   AARCH64_PT_OK        on success; `*desc_out` holds the raw L2
+ *                        descriptor (0 if the slot is empty).
+ *   AARCH64_PT_EINVAL    for null root or unaligned/uncanonical VA.
+ *   AARCH64_PT_ENOENT    when an intermediate L0/L1/L2 table is missing.
+ *
+ * Test helper — production callers should use arch_vmm_query_4k or the
+ * typed aarch64_pt_query_4k_ext instead.  Does NOT acquire pt_lock_for
+ * (single-threaded host harness; production callers wanting stable
+ * introspection should hold the lock externally). */
+int aarch64_pt_read_l2_desc(const uint64_t *root, uint64_t va,
+                            uint64_t *desc_out);
 
 /* Return true iff every page in [va, va + length) is mapped with the
  * requested access. length == 0 returns true. addr + length overflow

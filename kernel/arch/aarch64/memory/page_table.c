@@ -185,7 +185,10 @@ static int  parent_pa(uint64_t desc, uint64_t *pa_out);
 static uint64_t encode_table_desc(uint64_t pa);
 static int  walk_to_l3(uint64_t *root, uint64_t va, bool create,
                        uint64_t **pte_out, int *result_out);
-/* walk_to_l2 is exposed via page_table.h (Task 17 §5.2b contract). */
+/* walk_to_l2 is exposed via page_table.h (Task 17 §5.2b contract).
+ * aarch64_pt_map_2m_block / unmap_2m_block are implemented below in
+ * the "2 MiB block operations" section; their prototypes live in
+ * <arch/aarch64/page_table.h>. */
 
 /* ── Small helpers ──────────────────────────────────────────────── */
 
@@ -717,6 +720,17 @@ int aarch64_pt_map_4k(uint64_t *root, uint64_t va, uint64_t pa,
     return aarch64_pt_map_4k_ext(root, va, pa, perm, 0);
 }
 
+/* Brief-aligned alias for aarch64_pt_map_4k_ext.  The `ext` variant
+ * is the authoritative implementation; this alias exists so callers
+ * (and the hosttest 12-legal + 4-reject matrix) can use the brief's
+ * `map_4k_new` naming.  Contract identical — returns -EEXIST on ANY
+ * occupied slot (valid leaf OR PROTNONE-stashed). */
+int aarch64_pt_map_4k_new(uint64_t *root, uint64_t va, uint64_t pa,
+                          uint32_t perm, uint64_t software_bits)
+{
+    return aarch64_pt_map_4k_ext(root, va, pa, perm, software_bits);
+}
+
 int aarch64_pt_query_4k(const uint64_t *root, uint64_t va,
                         uint64_t *pa_out, uint32_t *perm_out)
 {
@@ -1004,6 +1018,168 @@ uint64_t aarch64_pt_encode_block_desc(uint64_t pa, uint32_t perm,
     desc |= (pa & AARCH64_PT_BLOCK_OA_MASK);
     desc |= sw;
     return desc;
+}
+
+/* ── 2 MiB block operations (Task 18 / spec §5.2 / §4.4.5) ─────────── */
+
+/* Map a 2 MiB block descriptor at pmd[l2].  L2-slot lock held across
+ * the walk + pmd[l2] write so a concurrent caller cannot race on the
+ * same slot.  Rejects:
+ *   - misaligned VA/PA, PA >= 1 TiB, unrecognised perm → -EINVAL
+ *   - any occupied pmd[l2] (valid table, valid block, OR PROTNONE
+ *     stash on the block format) → -EEXIST
+ *   - missing intermediate table page → -ENOMEM (kept-published
+ *     intermediates are harmless and reusable — spec §5.2b)
+ *
+ * Software bits are NOT supported on block descriptors in this
+ * commit (the brief's 12-legal combos don't include a PROTNONE-block
+ * path; a follow-up can extend the contract if a real caller needs
+ * it).  The perm validation goes through encode_perm so DEVICE |
+ * EXEC and bad RO/RW/kernel/user combos fail before any descriptor
+ * is written. */
+int aarch64_pt_map_2m_block(uint64_t *root, uint64_t va, uint64_t pa,
+                            uint32_t perm)
+{
+    vmm_gate_check();
+    int rv = root_valid(root);
+    if (rv != AARCH64_PT_OK) return rv;
+    if (!va_canonical(va)) return AARCH64_PT_EINVAL;
+    if ((va & (PAGE_2M_SIZE - 1)) != 0) return AARCH64_PT_EINVAL;
+    if ((pa & (PAGE_2M_SIZE - 1)) != 0) return AARCH64_PT_EINVAL;
+    if (pa >= AARCH64_PT_PA_LIMIT)       return AARCH64_PT_EINVAL;
+
+    /* Strict perm validation: encode_perm rejects bad combos.  The
+     * block desc encoder (encode_block_desc) silently falls back to
+     * a kernel-RO block on bad perm; we want a hard -EINVAL instead. */
+    uint64_t base;
+    rv = encode_perm(perm, &base);
+    if (rv != AARCH64_PT_OK) return rv;
+
+    /* Build the full descriptor.  No software bits for blocks yet. */
+    uint64_t desc = aarch64_pt_encode_block_desc(pa, perm, 0);
+
+    /* L2-slot lock around walk + pmd[l2] write (spec §5.2 / §5.4).
+     * Caller-held pattern — walk_to_l2 internally takes pt_upper_lock
+     * around L0/L1 ensure, releasing before returning; we hold
+     * pt_lock_for across the whole sequence. */
+    uint64_t l2_idx = (va >> AARCH64_PT_L2_SHIFT) & AARCH64_PT_IDX_MASK;
+    uint64_t root_pa = (uint64_t)((uintptr_t)root - (uintptr_t)ARCH_PAGE_OFFSET);
+    spinlock_T *pt_lock = pt_lock_for(root_pa, (uint32_t)l2_idx);
+    spin_lock(pt_lock);
+
+    uint64_t *pmd = NULL;
+    int wr = AARCH64_PT_OK;
+    int wrc = walk_to_l2(root, va, true, &pmd, &wr);
+    if (wrc != 0) { spin_unlock(pt_lock); return wr; }
+
+    uint64_t cur = pmd[l2_idx];
+    /* Spec §5.2: "pmd[l2] already occupied → -EEXIST".  Any valid
+     * desc (block or table) counts as occupied; the PROTNONE software
+     * stash on a block format is also occupied (the next unmap
+     * would need to clear it first). */
+    if ((cur & AARCH64_PT_DESC_VALID) != 0 ||
+        (cur & AARCH64_PT_SOFTWARE_PROTNONE) != 0) {
+        spin_unlock(pt_lock);
+        return AARCH64_PT_EEXIST;
+    }
+
+    pmd[l2_idx] = desc;
+    dsb_ishst();
+    if (is_active_root(root)) {
+        /* Per-VA TLBI is sufficient for a block — the TLB entry that
+         * caches the block contains the base VA, so vae1(base_va)
+         * invalidates the whole 2 MiB entry.  (Arm ARM TLBI VAE1
+         * invalidates by VA regardless of granule.) */
+        tlb_invalidate_local(va);
+    }
+    spin_unlock(pt_lock);
+    return AARCH64_PT_OK;
+}
+
+/* Unmap a 2 MiB block (spec §4.4.5).  Reads pmd[l2] and dispatches:
+ *   - block (V=1, bit1=0) → return PA via *pa_out, clear entry,
+ *                            local TLBI, return OK.
+ *   - table (V=1, bit1=1) → -EINVAL (type mismatch; caller used the
+ *                            wrong API — a 4 KiB leaf unmap is
+ *                            aarch64_pt_unmap_4k_ext).
+ *   - invalid (V=0)       → -ENOENT.
+ *
+ * L2-slot lock held across the read+write per spec §5.4.  Never
+ * frees the data page (backend owns no data pages — spec §4.4.4). */
+int aarch64_pt_unmap_2m_block(uint64_t *root, uint64_t va,
+                              uint64_t *pa_out)
+{
+    vmm_gate_check();
+    int rv = root_valid(root);
+    if (rv != AARCH64_PT_OK) return rv;
+    if (!va_canonical(va)) return AARCH64_PT_EINVAL;
+    if ((va & (PAGE_2M_SIZE - 1)) != 0) return AARCH64_PT_EINVAL;
+
+    uint64_t l2_idx = (va >> AARCH64_PT_L2_SHIFT) & AARCH64_PT_IDX_MASK;
+    uint64_t root_pa = (uint64_t)((uintptr_t)root - (uintptr_t)ARCH_PAGE_OFFSET);
+    spinlock_T *pt_lock = pt_lock_for(root_pa, (uint32_t)l2_idx);
+    spin_lock(pt_lock);
+
+    uint64_t *pmd = NULL;
+    int wr = AARCH64_PT_OK;
+    int wrc = walk_to_l2(root, va, false, &pmd, &wr);
+    if (wrc != 0) { spin_unlock(pt_lock); return wr; }
+
+    uint64_t desc = pmd[l2_idx];
+    if ((desc & AARCH64_PT_DESC_VALID) == 0) {
+        spin_unlock(pt_lock);
+        return AARCH64_PT_ENOENT;
+    }
+    if ((desc & AARCH64_PT_DESC_TABLE) != 0) {
+        spin_unlock(pt_lock);
+        return AARCH64_PT_EINVAL;
+    }
+
+    /* Block descriptor — extract PA bits [39:21] (L2 block format),
+     * clear the slot, dsb, and issue per-VA local TLBI if active. */
+    if (pa_out) *pa_out = desc & AARCH64_PT_BLOCK_OA_MASK;
+    pmd[l2_idx] = 0;
+    dsb_ishst();
+    if (is_active_root(root)) tlb_invalidate_local(va);
+    spin_unlock(pt_lock);
+    return AARCH64_PT_OK;
+}
+
+/* Split a 2 MiB block into 512 4 KiB leaves (spec §5.3).  Unpublished
+ * roots take an atomic store rewrite; published roots return -EPERM
+ * (F10 implements the BBM-aware + cross-core invalidation path).
+ * Task 21 lands the actual implementation; this stub exists so the
+ * API surface is consistent with the brief. */
+int aarch64_pt_split_block_2m(uint64_t *root, uint64_t va)
+{
+    vmm_gate_check();
+    int rv = root_valid(root);
+    if (rv != AARCH64_PT_OK) return rv;
+    (void)va;
+    return AARCH64_PT_EPERM;   /* Task 21 */
+}
+
+/* Read the raw descriptor at pmd[l2] for `va`.  Walks L0 → L1 → L2
+ * without allocating and returns pmd[l2_idx].  Test helper; see
+ * <arch/aarch64/page_table.h> for the full contract. */
+int aarch64_pt_read_l2_desc(const uint64_t *root, uint64_t va,
+                            uint64_t *desc_out)
+{
+    vmm_gate_check();
+    int rv = root_valid(root);
+    if (rv != AARCH64_PT_OK) return rv;
+    if (desc_out == NULL) return AARCH64_PT_EINVAL;
+    if (!va_canonical(va)) return AARCH64_PT_EINVAL;
+    if ((va & (PAGE_2M_SIZE - 1)) != 0) return AARCH64_PT_EINVAL;
+
+    uint64_t *pmd = NULL;
+    int wr = AARCH64_PT_OK;
+    int wrc = walk_to_l2((uint64_t *)root, va, false, &pmd, &wr);
+    if (wrc != 0) return wr;
+
+    uint64_t l2_idx = (va >> AARCH64_PT_L2_SHIFT) & AARCH64_PT_IDX_MASK;
+    *desc_out = pmd[l2_idx];
+    return AARCH64_PT_OK;
 }
 
 bool aarch64_pt_range_accessible(const uint64_t *root, uint64_t va,
