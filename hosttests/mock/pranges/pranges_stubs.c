@@ -16,7 +16,8 @@
 #include <string.h>
 #include <errno.h>
 
-#include <memory/vmm.h>   /* PAGE_VALID, PAGE_COW, PAGE_PROTNONE ... */
+#include <memory/vmm.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)   /* PAGE_VALID, PAGE_COW, PAGE_PROTNONE ... */
 
 /* posix_memalign (POSIX 1003.1-2001). */
 extern int posix_memalign(void **memptr, size_t alignment, size_t size);

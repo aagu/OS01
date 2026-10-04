@@ -28,7 +28,8 @@
 #include <string.h>
 #include <errno.h>
 
-#include <memory/vmm.h>   /* PAGE_VALID, PAGE_USER, PAGE_WRITE, PAGE_COW, PAGE_PROTNONE */
+#include <memory/vmm.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)   /* PAGE_VALID, PAGE_USER, PAGE_WRITE, PAGE_COW, PAGE_PROTNONE */
 
 /* kernel/memory/vmm.h shadows the libc mmap()/munmap() with a PTE-
  * type macro.  The harness needs the libc mmap() to back the user

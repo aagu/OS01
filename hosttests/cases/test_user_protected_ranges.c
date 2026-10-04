@@ -46,6 +46,7 @@
 #include <fs/vfs.h>
 #include <memory/vma.h>
 #include <memory/vmm.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
 
 /* Forward declaration — before Task 5 lands this lives only as the
  * weak RED fallback in pranges_stubs.c (returns false); afterwards

@@ -17,7 +17,8 @@
 #include <assert.h>
 
 #include <memory/pmm.h>
-#include <memory/vmm.h>   /* PAGE_VALID, PAGE_HUGE, PAGE_NO_EXEC, PAGE_USER_PMD */
+#include <memory/vmm.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)   /* PAGE_VALID, PAGE_HUGE, PAGE_NO_EXEC, PAGE_USER_PMD */
 
 /* posix_memalign (POSIX 1003.1-2001) — see elf_load_stubs.c for
  * the rationale on declaring it explicitly. */

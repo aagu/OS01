@@ -128,7 +128,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_percpu_layout.elf \
     $(TEST_BLD)/test_tlb_serial_protocol.elf \
     $(TEST_BLD)/test_x86_ipi_ready_publish.elf \
-    $(TEST_BLD)/test_vmm_caller_audit.elf
+    $(TEST_BLD)/test_vmm_caller_audit.elf \
+    $(TEST_BLD)/test_vmm_semantic_header.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -1347,6 +1348,23 @@ $(TEST_BLD)/test_vmm_caller_audit.elf: \
 	$(HOST_CC) -o $@ $^
 
 test_vmm_caller_audit: $(TEST_BLD)/test_vmm_caller_audit.elf
+	$<
+
+# Public-vmm-header contract hosttest (M3.2 Task 14 Step 1): header-only
+# TU pinning the semantic layer (VM_* + arch_vmm_* protos in
+# memory/vmm.h) and the x86-private PTE layer (arch/x86_64/pte.h).
+$(TEST_BLD)/test_vmm_semantic_header.o: \
+		$(TEST_CASES)/test_vmm_semantic_header.c \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/pte.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_INC) $(KERNEL_INC) \
+		-c $< -o $@
+
+$(TEST_BLD)/test_vmm_semantic_header.elf: $(TEST_BLD)/test_vmm_semantic_header.o
+	$(HOST_CC) -o $@ $^
+
+test_vmm_semantic_header: $(TEST_BLD)/test_vmm_semantic_header.elf
 	$<
 
 # Foundational-primitives hosttest (M3 Task 7 Step 4): compiles the

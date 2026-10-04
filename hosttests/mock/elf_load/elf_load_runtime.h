@@ -47,6 +47,7 @@
  * the include path.  We only need the forward type for sizeof;
  * the loader never dereferences vma_list. */
 #include <list.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
 
 /* ── Slab/kmalloc declarations ─────────────────────────────
  *

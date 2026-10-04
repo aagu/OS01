@@ -5,6 +5,7 @@
 #include <memory/slab.h>
 #include <fs/file.h>
 #include <memory/pmm.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
 #include <memory/memory.h>
 #include <memory/uaccess.h>          // USER_MIN_ADDR, arch_user_range_accessible
 #include <arch/spinlock.h>   // mm->lock: guards munmap/MAP_FIXED/mprotect

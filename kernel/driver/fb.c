@@ -10,7 +10,8 @@
 #include <driver/fb.h>
 #include <core/printk.h>      // Pos, frame_buffer
 #include <memory/vma.h>         // vma_t, VM_IO, VM_SHARED
-#include <memory/vmm.h>         // vmm_map_4k_page, flush_tlb, PAGE_4K_SIZE
+#include <memory/vmm.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)         // vmm_map_4k_page, flush_tlb, PAGE_4K_SIZE
 #include <sched/task.h>        // current
 #include <memory/pmm.h>         // Phy_To_Virt
 #include <memory/memory.h>      // PAGE_OFFSET, Virt_To_Phy, Phy_To_Virt

@@ -22,7 +22,8 @@
 
 #include <fs/vfs.h>
 #include <fs/elf.h>
-#include <memory/vmm.h>   /* PAGE_VALID, PAGE_USER, PAGE_WRITE, ... */
+#include <memory/vmm.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)   /* PAGE_VALID, PAGE_USER, PAGE_WRITE, ... */
 
 /* Forward-declare posix_memalign (POSIX 1003.1-2001) — the test
  * build's libc stdlib.h may not expose it under the default

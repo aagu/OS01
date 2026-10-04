@@ -13,6 +13,7 @@
 #include <sched/task.h>
 #include <memory/memory.h>
 #include <memory/vmm.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
 #include <memory/pmm.h>
 #include <percpu/percpu.h>
 #include <intr/apic.h>
