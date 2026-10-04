@@ -1076,16 +1076,6 @@ int arch_signal_pending_fatal(void)
 // socket option payloads (IP_PKTINFO, SO_LINGER, TCP_* etc.).
 #define SOCKOPT_MAX 4096
 
-// ── nanosleep blocker condition ────────────────────────────
-// Condition callback for blocker_wait(): true once the sleep deadline
-// (current->wakeup_ns) has been reached.  sched_unblock_blocked()
-// runs this from every schedule() (i.e. every tick) and wakes the
-// sleeping task when it returns true.
-static bool nanosleep_should_unblock(struct task_struct *waiter)
-{
-    return clocksource_read_ns() >= waiter->wakeup_ns;
-}
-
 // ── exec argv/envp bounded deep-copy (Task 5, Cat A') ───────
 // Allocates a kernel-heap copy of a user-space NULL-terminated array
 // of string pointers, including a kernel copy of every string.
@@ -1385,23 +1375,6 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
                   (unsigned long)regs->rdi,
                   (unsigned long)regs->rsi,
                   (unsigned long)regs->rdx);
-    case SYS_putchar: {
-        // putchar(int c) — write one char to framebuffer AND serial
-        char c = (char)regs->rdi;
-        color_printk(WHITE, BLACK, "%c", c);
-        {
-            // Hold serial_lock across the putchar so the byte is
-            // emitted atomically with respect to other writers.
-            // Use write_serial_unlocked to avoid re-locking deadlock
-            // (write_serial() now acquires serial_lock internally —
-            // see kernel/driver/serial.c).
-            uint64_t sf = spin_lock_irqsave(&serial_lock);
-            write_serial_unlocked(c);  // also echo to serial for interactive shell
-            spin_unlock_irqrestore(&serial_lock, sf);
-        }
-        regs->rax = (uint64_t)(unsigned char)c;
-        break;
-    }
     case SYS_exit: {
         // exit(int code) — terminate current process.
         // Encode as Linux does: exit code in the high byte (code<<8),
@@ -1411,29 +1384,6 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         current->exit_code = code << 8;
         do_exit(code << 8);
         // unreachable — do_exit calls schedule() which never returns
-    }
-    case SYS_brk: {
-        // brk(void *addr) — set program break, return new break.
-        // Delegated to mm_set_brk (kernel/memory/vma.c, Task 4) so
-        // the syscall stays in lockstep with the page-owner logic:
-        // query returns 0/*result=current, bounds errors return
-        // -EINVAL/-ENOMEM with *result unchanged, grow/shrink only
-        // commit on success, and any OOM leaves old break/VMA/PTEs
-        // intact.  See docs/.../user-heap-elf-isolation-design.md §5.2.
-        uint64_t addr = regs->rdi;
-        mm_t *mm = current->mm;
-        if (mm == NULL) {
-            regs->rax = -ENOMEM;
-            break;
-        }
-        uint64_t result = 0;
-        int brk_rc = mm_set_brk(mm, addr, &result);
-        if (brk_rc < 0) {
-            regs->rax = (uint64_t)(int64_t)brk_rc;
-            break;
-        }
-        regs->rax = result;
-        break;
     }
     case SYS_getpid: {
         regs->rax = current->pid;
@@ -1557,80 +1507,6 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         regs->rax = do_waitpid(pid, status, options);
         break;
     }
-    case SYS_time: {
-        // time(time_t *tloc) → 0 (Jan 1 1970 for MVP).
-        // NULL → skip; otherwise copy_to_user_ft writes 0 to tloc.
-        uint64_t *tloc = (uint64_t *)regs->rdi;
-        if (tloc) {
-            uint64_t zero = 0;
-            ssize_t r = copy_to_user_ft(tloc, &zero, sizeof(zero));
-            if (r < 0) { regs->rax = r; break; }
-        }
-        regs->rax = 0;
-        break;
-    }
-    case SYS_gettimeofday: {
-        // gettimeofday(struct timeval *tv, struct timezone *tz) → 0.
-        // Both pointers may be NULL (POSIX).
-        struct timeval *tv = (struct timeval *)regs->rdi;
-        struct timezone *tz = (struct timezone *)regs->rsi;
-        if (tv) {
-            struct timeval ktv = { 0, 0 };
-            ssize_t r = copy_to_user_ft(tv, &ktv, sizeof(ktv));
-            if (r < 0) { regs->rax = r; break; }
-        }
-        if (tz) {
-            struct timezone ktz = { 0, 0 };
-            ssize_t r = copy_to_user_ft(tz, &ktz, sizeof(ktz));
-            if (r < 0) { regs->rax = r; break; }
-        }
-        regs->rax = 0;
-        break;
-    }
-    case SYS_clock_gettime: {
-        // clock_gettime(clockid_t clk_id, struct timespec *tp)
-        // OS01 has no real RTC wall clock yet (gettimeofday returns 0),
-        // so both CLOCK_REALTIME and CLOCK_MONOTONIC report the same
-        // monotonic clocksource time (clocksource_read_ns, ns).
-        uint64_t clk_id = regs->rdi;
-        struct timespec *tp = (struct timespec *)regs->rsi;
-        if (clk_id != CLOCK_REALTIME && clk_id != CLOCK_MONOTONIC) {
-            regs->rax = -EINVAL;
-            break;
-        }
-        if (!tp) {
-            regs->rax = -EFAULT;
-            break;
-        }
-        uint64_t ns = clocksource_read_ns();
-        struct timespec kts = {
-            .tv_sec  = ns / 1000000000ULL,
-            .tv_nsec = ns % 1000000000ULL,
-        };
-        ssize_t r = copy_to_user_ft(tp, &kts, sizeof(kts));
-        if (r < 0) { regs->rax = r; break; }
-        regs->rax = 0;
-        break;
-    }
-    case SYS_getrandom: {
-        // getrandom(void *buf, size_t len, unsigned int flags)
-        uint64_t addr  = regs->rdi;
-        uint64_t len   = regs->rsi;
-        uint64_t flags = regs->rdx;
-
-        if (len == 0) { regs->rax = 0; break; }              // buf may be NULL
-        if (flags & ~(GRND_NONBLOCK | GRND_RANDOM)) {        // pool never blocks
-            regs->rax = -EINVAL; break;
-        }
-        if (len > RANDOM_MAX_LEN) len = RANDOM_MAX_LEN;      // truncate, not error
-
-        int rc = user_write_range_begin(addr, len);          // mm->lock + per-page PTE
-        if (rc < 0) { regs->rax = rc; break; }               // -EFAULT (lock released)
-        get_random_bytes((void *)addr, len);                 // chunked pool fill; mm->lock held
-        user_write_range_end();
-        regs->rax = len;                                     // actual bytes filled
-        break;
-    }
 case SYS_setpgid: {
     int pid = (int)(int64_t)regs->rdi;
     int pgid = (int)(int64_t)regs->rsi;
@@ -1722,91 +1598,6 @@ case SYS_getsid: {
     regs->rax = current->session;
     break;
 }
-    case SYS_nanosleep: {
-        // nanosleep(const struct timespec *req, struct timespec *rem).
-        // req → kernel copy; rem ← kernel copy on -EINTR (NULL legal).
-        const struct timespec *req = (const struct timespec *)regs->rdi;
-        struct timespec *rem = (struct timespec *)regs->rsi;
-        uint64_t ns = 0;
-        if (req) {
-            // entry fast reject: 16 B must be mapped readable
-            if (!syscall_check_user_range((uint64_t)req, sizeof(*req), false)) {
-                regs->rax = -EFAULT;
-                break;
-            }
-            struct timespec kreq;
-            if (copy_from_user_ft(&kreq, req, sizeof(kreq)) < 0) {
-                regs->rax = -EFAULT;
-                break;
-            }
-            ns = kreq.tv_sec * 1000000000ULL + kreq.tv_nsec;
-        }
-
-        uint64_t target_ns = clocksource_read_ns() + ns;
-        current->wakeup_ns = target_ns;
-
-        // Real sleep via the blocker framework: sched_unblock_blocked()
-        // (run from every schedule(), i.e. every tick) wakes us once
-        // clocksource reaches target_ns.  The loop absorbs spurious wakes.
-        int r;
-        do {
-            r = blocker_wait(nanosleep_should_unblock, BLOCKER_NANOSLEEP, true);
-        } while (r == 0 && clocksource_read_ns() < target_ns);
-        current->wakeup_ns = 0;
-
-        if (r == -EINTR) {
-            // Interrupted by a signal before the deadline: report the
-            // remaining time (guarded against unsigned underflow).
-            uint64_t now_ns = clocksource_read_ns();
-            uint64_t remain_ns = (now_ns < target_ns) ? (target_ns - now_ns) : 0;
-            if (rem) {
-                struct timespec krem = {
-                    .tv_sec  = remain_ns / 1000000000ULL,
-                    .tv_nsec = remain_ns % 1000000000ULL,
-                };
-                ssize_t wr = copy_to_user_ft(rem, &krem, sizeof(krem));
-                if (wr < 0) { regs->rax = wr; break; }
-            }
-            regs->rax = -EINTR;
-        } else {
-            regs->rax = 0;
-        }
-        break;
-    }
-    case SYS_times: {
-        // times(struct tms *buf) — stub: return 0.
-        // NULL → skip; otherwise zero-init user struct.
-        struct tms *buf = (struct tms *)regs->rdi;
-        if (buf) {
-            struct tms kbuf;
-            memset(&kbuf, 0, sizeof(kbuf));
-            ssize_t r = copy_to_user_ft(buf, &kbuf, sizeof(kbuf));
-            if (r < 0) { regs->rax = r; break; }
-        }
-        regs->rax = 0;
-        break;
-    }
-    case SYS_uname: {
-        // uname(struct utsname *buf) → 0 / -EFAULT.
-        // Build kernel struct first, then _ft write it.  This avoids
-        // bare field writes into user space (sa_handler/sa_mask path).
-        struct utsname *buf = (struct utsname *)regs->rdi;
-        if (!buf) {
-            regs->rax = -EFAULT;
-            break;
-        }
-        struct utsname kuts;
-        memset(&kuts, 0, sizeof(kuts));
-        strcpy(kuts.sysname, "OS01");
-        strcpy(kuts.nodename, "os01");
-        strcpy(kuts.release, "0.1.0");
-        strcpy(kuts.version, "0.1.0");
-        strcpy(kuts.machine, "x86_64");
-        ssize_t r = copy_to_user_ft(buf, &kuts, sizeof(kuts));
-        if (r < 0) { regs->rax = r; break; }
-        regs->rax = 0;
-        break;
-    }
     case SYS_getppid: {
         // getppid() → parent PID (or 0 for init)
         if (current->parent)
@@ -2019,81 +1810,6 @@ case SYS_getsid: {
         // will be delivered on the freshly-restored stack — matching
         // Linux behavior (sigreturn processes remaining signals before
         // the final iretq to userspace).
-        break;
-    }
-    case SYS_sync: {
-        // sync() — flush filesystem caches to disk
-        // For OS01 (FAT32 without write-back cache), this is a no-op.
-        // Future: flush AHCI/FAT buffers here.
-        regs->rax = 0;
-        break;
-    }
-    case SYS_reboot: {
-        int cmd = (int)(int64_t)regs->rdi;
-
-        log_info("syscall: reboot(cmd=%d) from pid=%d\n",
-                 cmd, (int)current->pid);
-
-        // ── ACPI power-off ─────────────────────────────────
-        if (cmd == RB_POWER_OFF && apic_info.pm1a_port) {
-            // SLP_EN (bit 13) toggles sleep.  SLP_TYPa=0 for
-            // S5 on QEMU q35 (the \_S5 object reports {0, 0}).
-            log_info("ACPI: powering off via PM1a=%#x\n",
-                     (unsigned)apic_info.pm1a_port);
-            outw(apic_info.pm1a_port, 0x2000);
-            // Block — platform powers off asynchronously.
-            while (1) __asm__ __volatile__("hlt");
-        }
-
-        // ── ACPI reboot / halt fallback ────────────────────
-        // Keyboard controller pulse-reset ($0xFE → port $0x64)
-        while ((inb(0x64) & 0x02) != 0) { /* wait */ }
-        outb(0xFE, 0x64);
-        while (1) __asm__ __volatile__("hlt");
-    }
-    case SYS_mmap: {
-        uint64_t addr   = regs->rdi;
-        uint64_t length = regs->rsi;
-        uint64_t prot   = regs->rdx;
-        uint64_t flags  = regs->r10;
-        uint64_t fd     = regs->r8;
-        uint64_t offset = regs->r9;
-        regs->rax = do_mmap(addr, length, prot, flags, fd, offset);
-        break;
-    }
-    case SYS_mprotect: {
-        uint64_t addr   = regs->rdi;
-        uint64_t length = regs->rsi;
-        uint64_t prot   = regs->rdx;
-        regs->rax = do_mprotect(addr, length, prot);
-        break;
-    }
-    case SYS_munmap: {
-        uint64_t addr   = regs->rdi;
-        uint64_t length = regs->rsi;
-        regs->rax = do_munmap(addr, length);
-        break;
-    }
-    case SYS_futex: {
-        int *uaddr = (int *)regs->rdi;
-        int op = (int)regs->rsi;
-        int val = (int)regs->rdx;
-
-        if ((uint64_t)uaddr >= current->addr_limit) {
-            regs->rax = -EFAULT;
-            break;
-        }
-
-        switch (op) {
-        case FUTEX_WAIT:
-            regs->rax = do_futex_wait(uaddr, val);
-            break;
-        case FUTEX_WAKE:
-            regs->rax = do_futex_wake(uaddr, val);
-            break;
-        default:
-            regs->rax = -EINVAL;
-        }
         break;
     }
     case SYS_socket: {

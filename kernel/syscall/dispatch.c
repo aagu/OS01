@@ -6,6 +6,10 @@ typedef struct syscall_entry {
     const char *name;
 } syscall_entry_t;
 int64_t sys_fs_dispatch(syscall_ctx_t *ctx);
+int64_t sys_mm_dispatch(syscall_ctx_t *ctx);
+int64_t sys_time_dispatch(syscall_ctx_t *ctx);
+int64_t sys_misc_dispatch(syscall_ctx_t *ctx);
+
 
 /* Handlers are added here as syscall families migrate out of trap.c. */
 static const syscall_entry_t syscall_table[SYS_fstatat + 1] = {
@@ -41,6 +45,21 @@ static const syscall_entry_t syscall_table[SYS_fstatat + 1] = {
     [SYS_readlink] = { sys_fs_dispatch, "readlink" },
     [SYS_lstat] = { sys_fs_dispatch, "lstat" },
     [SYS_fstatat] = { sys_fs_dispatch, "fstatat" },
+    [SYS_brk] = { sys_mm_dispatch, "brk" },
+    [SYS_mmap] = { sys_mm_dispatch, "mmap" },
+    [SYS_mprotect] = { sys_mm_dispatch, "mprotect" },
+    [SYS_munmap] = { sys_mm_dispatch, "munmap" },
+    [SYS_futex] = { sys_mm_dispatch, "futex" },
+    [SYS_time] = { sys_time_dispatch, "time" },
+    [SYS_gettimeofday] = { sys_time_dispatch, "gettimeofday" },
+    [SYS_clock_gettime] = { sys_time_dispatch, "clock_gettime" },
+    [SYS_nanosleep] = { sys_time_dispatch, "nanosleep" },
+    [SYS_times] = { sys_time_dispatch, "times" },
+    [SYS_putchar] = { sys_misc_dispatch, "putchar" },
+    [SYS_getrandom] = { sys_misc_dispatch, "getrandom" },
+    [SYS_sync] = { sys_misc_dispatch, "sync" },
+    [SYS_reboot] = { sys_misc_dispatch, "reboot" },
+    [SYS_uname] = { sys_misc_dispatch, "uname" },
 };
 bool syscall_has_handler(uint64_t nr)
 {
