@@ -73,6 +73,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_pmm_basic.elf \
     $(TEST_BLD)/test_pmm_ram_rel_index.elf \
     $(TEST_BLD)/test_slab_basic.elf \
+    $(TEST_BLD)/test_slab_layout_compute.elf \
+    $(TEST_BLD)/test_slab_lock_path.elf \
     $(TEST_BLD)/test_elf_validate.elf \
     $(TEST_BLD)/test_wait_basic.elf \
     $(TEST_BLD)/test_canon.elf \
@@ -419,6 +421,33 @@ $(TEST_BLD)/test_pmm_ram_rel_index.elf: $(TEST_BLD)/test_pmm_ram_rel_index.o \
 	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/test_slab_basic.elf: $(TEST_BLD)/test_slab_basic.o $(LIBC_OBJS) $(MOCK_OBJS)
+	$(HOST_CC) -o $@ $^
+
+# Task 1 Step 1: slab_layout_compute() pure-function test.
+# slab.h is now header-inline for the formula (no need to compile slab.c).
+# Test uses KERNEL_INC for slab.h's transitive includes (memory/pmm.h).
+$(TEST_BLD)/test_slab_layout_compute.o: $(TEST_CASES)/test_slab_layout_compute.c \
+		$(TESTS_DIR)/kernel/include/memory/slab.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -I$(TEST_INC) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/slab_test_stubs.o: $(TEST_MOCK)/slab_test_stubs.c \
+		$(TESTS_DIR)/kernel/include/memory/slab.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_slab_layout_compute.elf: $(TEST_BLD)/test_slab_layout_compute.o \
+		$(TEST_BLD)/slab_test_stubs.o \
+		$(LIBC_OBJS) $(MOCK_OBJS)
+	$(HOST_CC) -o $@ $^
+
+# Task 1 Step 2: source-scan lock path test (v4 fix for v3 review item 12).
+$(TEST_BLD)/test_slab_lock_path.o: $(TEST_CASES)/test_slab_lock_path.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" -I$(TEST_INC) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_slab_lock_path.elf: $(TEST_BLD)/test_slab_lock_path.o \
+		$(LIBC_OBJS) $(MOCK_OBJS)
 	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/test_elf_validate.elf: $(TEST_BLD)/test_elf_validate.o $(LIBC_OBJS) $(MOCK_OBJS)
