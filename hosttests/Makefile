@@ -87,6 +87,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_runtime_udivti3.elf \
     $(TEST_BLD)/test_lwip_rand.elf \
     $(TEST_BLD)/test_gic_driver.elf \
+    $(TEST_BLD)/test_aarch64_ipi_broadcast.elf \
     $(TEST_BLD)/test_gic_marker_lines.elf \
     $(TEST_BLD)/test_gic_probe.elf \
     $(TEST_BLD)/test_clocksource.elf \
@@ -1162,6 +1163,31 @@ $(TEST_BLD)/test_gic_driver.elf: $(TEST_BLD)/test_gic_driver.o $(TEST_BLD)/gic_d
 	$(HOST_CC) -o $@ $^
 
 test_gic_driver: $(TEST_BLD)/test_gic_driver.elf
+	$<
+
+# aarch64 ipi_broadcast hosttest (M3 Task 7): compiles the PRODUCTION
+# kernel/arch/aarch64/intr/ipi.c (logical vector -> SGI mapping) plus the
+# production gic_driver.c against mock MMIO. The test TU supplies
+# gic_dev_current() (gic.c is too heavy for host) and a longjmp kpanic hook.
+AARCH64_IPI_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC)
+
+$(TEST_BLD)/aarch64_ipi_production.o: $(TESTS_DIR)/kernel/arch/aarch64/intr/ipi.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/ipi.h \
+		$(TESTS_DIR)/kernel/include/intr/ipi.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_IPI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_ipi_broadcast.o: $(TEST_CASES)/test_aarch64_ipi_broadcast.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/ipi.h \
+		$(TESTS_DIR)/kernel/include/intr/ipi.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_IPI_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_ipi_broadcast.elf: $(TEST_BLD)/test_aarch64_ipi_broadcast.o \
+		$(TEST_BLD)/aarch64_ipi_production.o $(TEST_BLD)/gic_driver_production.o
+	$(HOST_CC) -o $@ $^
+
+test_aarch64_ipi_broadcast: $(TEST_BLD)/test_aarch64_ipi_broadcast.elf
 	$<
 
 # GICv2 marker lines: source-level RED check (Task 2.1). QEMU aarch64-uefi

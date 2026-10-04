@@ -35,8 +35,17 @@ void tlb_shootdown(void)
     }
     __sync_synchronize();
 
-    // 2. Send TLB shootdown IPI to all other online CPUs
-    ipi_broadcast(IPI_VECTOR_TLB, /*exclude_self=*/1);
+    // 2. Send TLB shootdown IPI to all other online CPUs.
+    //    Interim target-mask construction (Task 12 replaces this with
+    //    build_target_mask_excl_self()): bit i set for every online CPU
+    //    except self.
+    uint64_t target_mask = 0;
+    for (uint32_t i = 0; i < num_cpus; i++) {
+        if (i == me || !percpu_data[i].online)
+            continue;
+        target_mask |= (1UL << i);
+    }
+    ipi_broadcast(IPI_VECTOR_TLB, target_mask);
 
     // 3. Flush our own TLB
     flush_tlb();

@@ -67,14 +67,13 @@ void ipi_send(uint32_t dest_apic_id, uint8_t vector)
     lapic_write(LAPIC_ICR_LOW, (uint32_t)vector | ICR_DEST_PHYSICAL);
 }
 
-void ipi_broadcast(uint8_t vector, int exclude_self)
+void ipi_broadcast(uint32_t vector, uint64_t target_mask)
 {
-    uint32_t me = cpu_id();
     for (uint32_t i = 0; i < num_cpus; i++) {
+        if (!(target_mask & (1UL << i)))
+            continue;
         if (!percpu_data[i].online)
             continue;
-        if (exclude_self && i == me)
-            continue;
-        ipi_send(percpu_data[i].arch_processor_id, vector);
+        ipi_send(percpu_data[i].arch_processor_id, (uint8_t)vector);
     }
 }

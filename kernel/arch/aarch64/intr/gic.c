@@ -27,6 +27,8 @@ void gic_cpu_init(void)                                /* 每核各跑一次（b
     gic_dev_cpu_enable(&g_gic);
     /* banked SGI/PPI 白名单：SGI 0（IPI 主载荷）+ SGI 1（R1-9 回发确认）
      * + SGI 2（clobber 探针, R2-4）+ CNTP PPI（dtb）。
+     * SGI 3 reserved for IPI_VECTOR_TLB（M3 shootdown，ipi.c 映射
+     * 0x40 → SGI 3；enable 随 M3 shootdown 后端接线时加入）。
      * R5: 白名单外的 banked enable 位保持复位 0。 */
     (void)gic_irq_config(&g_gic, 0, true, 0x00, 0x00);
     (void)gic_irq_config(&g_gic, 1, true, 0x00, 0x00);
