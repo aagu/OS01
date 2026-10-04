@@ -112,6 +112,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_arena_layout_chain.elf \
     $(TEST_BLD)/test_arena_2gib_boundary.elf \
     $(TEST_BLD)/test_arena_candidate_slab_bytes.elf \
+    $(TEST_BLD)/test_arena_table_base_shift.elf \
     $(TEST_BLD)/test_m1_tree.elf \
     $(TEST_BLD)/test_m1_contract.elf $(TEST_BLD)/test_m1_vmm.elf \
     $(TEST_BLD)/test_m1_install.elf $(TEST_BLD)/test_m1_cleanup.elf \
@@ -833,12 +834,14 @@ $(TEST_BLD)/test_m1_arena.elf: $(TEST_BLD)/test_m1_arena.o \
 test-m1-arena: $(TEST_BLD)/test_m1_arena.elf $(TEST_BLD)/test_m1_arena_exhaust.elf \
     $(TEST_BLD)/test_arena_layout_chain.elf \
     $(TEST_BLD)/test_arena_2gib_boundary.elf \
-    $(TEST_BLD)/test_arena_candidate_slab_bytes.elf
+    $(TEST_BLD)/test_arena_candidate_slab_bytes.elf \
+    $(TEST_BLD)/test_arena_table_base_shift.elf
 	$(TEST_BLD)/test_m1_arena.elf
 	$(TEST_BLD)/test_m1_arena_exhaust.elf
 	$(TEST_BLD)/test_arena_layout_chain.elf
 	$(TEST_BLD)/test_arena_2gib_boundary.elf
 	$(TEST_BLD)/test_arena_candidate_slab_bytes.elf
+	$(TEST_BLD)/test_arena_table_base_shift.elf
 
 # aarch64 M2/M3 plan Task 3: arena layout-chain / 2 GiB boundary /
 # candidate-scan-includes-slab-bytes. Each new TU reuses the production
@@ -892,6 +895,31 @@ $(TEST_BLD)/test_arena_candidate_slab_bytes.elf: $(TEST_BLD)/test_arena_candidat
 		$(TEST_BLD)/pmm_production.o \
 		$(TEST_BLD)/pmm_arch_default.o \
 		$(TEST_BLD)/pmm_boot_production.o
+	$(HOST_CC) -o $@ $^
+
+# aarch64 M2/M3 plan Task 4: table_base_pa shifted past the slab pages.
+# Links the REAL early_arena.c (aarch64_m1_plan) AND the REAL
+# runtime_tree.c (aarch64_runtime_tree_build) — the builder half drives
+# aarch64_runtime_tree_build through injected fake pool ops whose PA
+# cursor starts at arena.table_base_pa, proving the builder consumes
+# pages only from [table_base_pa, table_end_pa) (zero-change across the
+# base shift). Stub surface identical to test_arena_layout_chain.c.
+$(TEST_BLD)/test_arena_table_base_shift.o: $(TEST_CASES)/test_arena_table_base_shift.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/early_arena.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/runtime_tree.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm_boot.h \
+		$(TESTS_DIR)/kernel/include/memory/memory_map.h \
+		$(TESTS_DIR)/kernel/include/memory/slab.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_arena_table_base_shift.elf: $(TEST_BLD)/test_arena_table_base_shift.o \
+		$(TEST_BLD)/early_arena_production.o \
+		$(TEST_BLD)/pmm_production.o \
+		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_boot_production.o \
+		$(TEST_BLD)/runtime_tree_production.o
 	$(HOST_CC) -o $@ $^
 
 # aarch64 M1 plan Task 4: pure runtime page-table builder and strict
