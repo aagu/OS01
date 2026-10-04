@@ -137,9 +137,10 @@ TEST_BINS := \
     $(TEST_BLD)/test_aarch64_backend_4k.elf \
     $(TEST_BLD)/test_vmm_replace_protocol.elf \
     $(TEST_BLD)/test_vmm_prot_none.elf \
-    $(TEST_BLD)/test_vmm_ack_wraparound.elf
+    $(TEST_BLD)/test_vmm_ack_wraparound.elf \
+    $(TEST_BLD)/test_aarch64_pt_root_publish.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish
 
 all: $(TEST_BINS)
 
@@ -2057,6 +2058,34 @@ $(TEST_BLD)/test_m1_install.elf: $(TEST_BLD)/test_m1_install.o $(TEST_BLD)/m1_in
 test-m1-install: $(TEST_BLD)/test_m1_install.elf
 	$(TEST_BLD)/test_m1_install.elf
 	$(TEST_BLD)/test_m1_cleanup.elf
+
+# aarch64 M3.4 Task 20: root publish registry split-protocol contract.
+# Reuses the M1_A64_CFLAGS / m1_install_production.o (REAL
+# boot_direct_map.c) + runtime_tree_production.o + vmm_gate_production.o
+# + vmm_gate_test_stubs.o link line so the runtime tests drive the
+# actual install path and observe the registry state (post-init
+# is_published for the M1 root; NOT-published for a scratch root).
+# Source-scan tests (read boot_direct_map.c via OS01_KERNEL_SRC) pin
+# the publish-before-install order and the publish-failure → goto fail
+# (no install_ttbr1 in the failure branch) contract. Cases 1–3
+# (registry semantics: idempotent / overflow / zero-PA) are pinned by
+# test_foundational_primitives.c (21/21) and NOT duplicated here.
+$(TEST_BLD)/test_aarch64_pt_root_publish.o: $(TEST_CASES)/test_aarch64_pt_root_publish.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/boot_direct_map.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(M1_A64_CFLAGS) -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_pt_root_publish.elf: $(TEST_BLD)/test_aarch64_pt_root_publish.o \
+		$(TEST_BLD)/m1_install_production.o \
+		$(TEST_BLD)/runtime_tree_production.o \
+		$(TEST_BLD)/vmm_gate_production.o \
+		$(TEST_BLD)/vmm_gate_test_stubs.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-aarch64-pt-root-publish
+test-aarch64-pt-root-publish: $(TEST_BLD)/test_aarch64_pt_root_publish.elf
+	$(TEST_BLD)/test_aarch64_pt_root_publish.elf
 
 $(TEST_BLD)/m1_smoke_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/m1_smoke.c
 	@mkdir -p $(TEST_BLD)
