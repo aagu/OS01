@@ -78,9 +78,14 @@ related: [docs/roadmap.md ARCH-2, docs/syscall/syscall.md, docs/arch/cross-bound
 
 ### 3.1 模块定位与目录分布
 
-按照源目录与头文件目录对称规范：
-- **头文件**：`kernel/include/syscall/compat_linux.h`
-- **通用兼容分发与适配实现**：`kernel/syscall/compat_linux.c`
+按照源目录与头文件目录对称规范及单文件 < 800 行防膨胀准则，兼容层不堆砌在单一 `compat_linux.c` 中，而是采用**子目录分文件**的架构：
+- **公共门面头**：`kernel/include/syscall/compat.h`（或 `compat_linux.h`）
+- **内部共享头**：`kernel/syscall/compat/internal.h`
+- **实现子目录**：`kernel/syscall/compat/`
+  - `dispatch.c`：兼容层总入口与路由分发（范围检测、`-ENOSYS` 哨兵拦截、各域适配器调度）
+  - `table_x86_64.c`：Linux x86_64 系统调用映射表定义、指定初始化与编译期断言安全网（未来 aarch64 可对等扩充 `table_aarch64.c`）
+  - `proc.c`：进程、线程与信号语义适配（`compat_sys_rt_sigaction` 4 参数校验、`compat_sys_wait4` 适配等）
+  - `fs.c`：文件系统差异适配（未来 `openat` 路径/标志位转换与 stat 兼容缓冲）
 - **测试套件**：
   - 宿主单元测试：`hosttests/cases/test_compat_linux.c`
   - 集成回归测试：`user/systest.c` 补充 `PF_LINUX_ABI` 专用测试用例
@@ -88,21 +93,26 @@ related: [docs/roadmap.md ARCH-2, docs/syscall/syscall.md, docs/arch/cross-bound
 ```
 kernel/
 ├── arch/x86_64/intr/
-│   └── trap.c              # 纯架构入口：解码 pt_regs，若 PF_LINUX_ABI 则调用 compat_linux_dispatch()
+│   └── trap.c                 # 纯架构入口：解码 pt_regs，若 PF_LINUX_ABI 则调用 compat_linux_dispatch()
 ├── include/syscall/
-│   ├── dispatch.h          # OS01 原生分发接口
-│   └── compat_linux.h      # Linux ABI 兼容层公共接口与常量
+│   ├── dispatch.h             # OS01 原生分发接口
+│   └── compat.h               # Linux ABI 兼容层公共门面接口与常量
 └── syscall/
-    ├── dispatch.c          # OS01 原生分发表（0..74）
-    ├── sys_*.c             # 原生模块处理函数
-    └── compat_linux.c      # Linux x86_64 翻译表、断言、语义适配器与独立分发
+    ├── dispatch.c             # OS01 原生分发表（0..74）
+    ├── sys_*.c                # 原生模块处理函数（sys_fs, sys_proc, sys_mm, ...）
+    └── compat/                # 兼容层子目录（领域划分，防止单文件膨胀）
+        ├── internal.h         # 内部声明与适配器函数原型
+        ├── dispatch.c         # compat_linux_dispatch() 主路由与 -ENOSYS 拦截
+        ├── table_x86_64.c     # Linux x86_64 映射表与 _Static_assert
+        ├── proc.c             # rt_sigaction / wait4 等进程/信号适配器
+        └── fs.c               # 文件系统适配器存根
 ```
 
-### 3.2 兼容层核心接口定义 (`kernel/include/syscall/compat_linux.h`)
+### 3.2 兼容层核心接口定义 (`kernel/include/syscall/compat.h`)
 
 ```c
-#ifndef _SYSCALL_COMPAT_LINUX_H
-#define _SYSCALL_COMPAT_LINUX_H
+#ifndef _SYSCALL_COMPAT_H
+#define _SYSCALL_COMPAT_H
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -142,12 +152,12 @@ int64_t compat_linux_dispatch(syscall_ctx_t *ctx);
  */
 compat_syscall_nr_t compat_linux_lookup_nr(uint64_t linux_nr);
 
-#endif /* _SYSCALL_COMPAT_LINUX_H */
+#endif /* _SYSCALL_COMPAT_H */
 ```
 
-### 3.3 强类型映射表与编译期断言安全网
+### 3.3 强类型映射表与编译期断言安全网 (`kernel/syscall/compat/table_x86_64.c`)
 
-在 `kernel/syscall/compat_linux.c` 中：
+在 `kernel/syscall/compat/table_x86_64.c` 中：
 1. **统一使用符号常量**：全部映射目标使用 `<uapi/syscall.h>` 定义的 `SYS_xxx` 宏。
 2. **显式类型与编译期断言**：
    ```c
@@ -157,7 +167,7 @@ compat_syscall_nr_t compat_linux_lookup_nr(uint64_t linux_nr);
    ```
 3. **映射表定义（Designated Initializers）**：
    ```c
-   static const compat_syscall_nr_t linux_x86_64_table[LINUX_X86_64_NR_MAX] = {
+   const compat_syscall_nr_t linux_x86_64_table[LINUX_X86_64_NR_MAX] = {
        [0]   = SYS_read,
        [1]   = SYS_write,
        [2]   = SYS_open,
@@ -218,9 +228,9 @@ compat_syscall_nr_t compat_linux_lookup_nr(uint64_t linux_nr);
    };
    ```
 
-### 3.4 语义差异与特殊适配器设计
+### 3.4 语义差异与领域适配器设计 (`kernel/syscall/compat/proc.c`, `fs.c`)
 
-在 `compat_linux.c` 中，针对具有 Linux 专属语义要求的调用设置轻量适配函数：
+在 `kernel/syscall/compat/proc.c` 中承接具有 Linux 专属语义要求的进程/信号调用适配：
 
 1. **`rt_sigaction` (Linux nr 13)**：
    - 原型差异：Linux `sys_rt_sigaction(int signum, const struct sigaction *act, struct sigaction *oldact, size_t sigsetsize)`。
@@ -229,30 +239,34 @@ compat_syscall_nr_t compat_linux_lookup_nr(uint64_t linux_nr);
 2. **`wait4` (Linux nr 61)**：
    - 原型差异：Linux `wait4(pid, status, options, rusage)`；OS01 `SYS_waitpid` 仅有 3 个参数。
    - 适配：直接忽略 `rusage`（或若非空但无需填充返回 0），把 `args[0..2]` 透传给 `SYS_waitpid`。
-3. **未映射与不支持号的拦截**：
-   ```c
-   int64_t compat_linux_dispatch(syscall_ctx_t *ctx)
-   {
-       uint64_t nr = ctx->nr;
-       if (nr >= LINUX_X86_64_NR_MAX) {
-           debug_syscall("[compat_linux] nr=%lu out of range -> -ENOSYS\n", nr);
-           return -ENOSYS;
-       }
-       compat_syscall_nr_t os_nr = linux_x86_64_table[nr];
-       if (os_nr == COMPAT_UNMAPPED || os_nr == COMPAT_UNSUPPORTED) {
-           debug_syscall("[compat_linux] nr=%lu (%s) -> -ENOSYS\n",
-                         nr, os_nr == COMPAT_UNSUPPORTED ? "unsupported" : "unmapped");
-           return -ENOSYS;
-       }
-       // 特殊调用语义适配
-       if (nr == 13) {
-           return compat_sys_rt_sigaction(ctx);
-       }
-       // 标准 1:1 映射
-       ctx->nr = (uint64_t)os_nr;
-       return syscall_dispatch(ctx);
-   }
-   ```
+
+在 `kernel/syscall/compat/dispatch.c` 中集中进行路由调度与 `-ENOSYS` 哨兵拦截：
+```c
+int64_t compat_linux_dispatch(syscall_ctx_t *ctx)
+{
+    uint64_t nr = ctx->nr;
+    if (nr >= LINUX_X86_64_NR_MAX) {
+        debug_syscall("[compat_linux] nr=%lu out of range -> -ENOSYS\n", nr);
+        return -ENOSYS;
+    }
+    compat_syscall_nr_t os_nr = linux_x86_64_table[nr];
+    if (os_nr == COMPAT_UNMAPPED || os_nr == COMPAT_UNSUPPORTED) {
+        debug_syscall("[compat_linux] nr=%lu (%s) -> -ENOSYS\n",
+                      nr, os_nr == COMPAT_UNSUPPORTED ? "unsupported" : "unmapped");
+        return -ENOSYS;
+    }
+    // 特殊调用语义适配分发
+    if (nr == 13) {
+        return compat_sys_rt_sigaction(ctx);
+    }
+    if (nr == 61) {
+        return compat_sys_wait4(ctx);
+    }
+    // 标准 1:1 映射
+    ctx->nr = (uint64_t)os_nr;
+    return syscall_dispatch(ctx);
+}
+```
 
 ### 3.5 架构入口与调用链解耦 (`kernel/arch/x86_64/intr/trap.c`)
 
@@ -307,10 +321,14 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
 
 | 文件 | 变更类型 | 核心职责 |
 |---|---|---|
-| `kernel/include/syscall/compat_linux.h` | **新增** | 定义 `compat_syscall_nr_t`、`LINUX_X86_64_NR_MAX`、`compat_linux_dispatch`、`compat_linux_lookup_nr` |
-| `kernel/syscall/compat_linux.c` | **新增** | 16 位映射表、`_Static_assert` 断言、特殊语义适配器、`-ENOSYS` 拦截与原生分发转调 |
+| `kernel/include/syscall/compat.h` | **新增** | 定义 `compat_syscall_nr_t`、`LINUX_X86_64_NR_MAX`、`compat_linux_dispatch`、`compat_linux_lookup_nr` 等门面声明 |
+| `kernel/syscall/compat/internal.h` | **新增** | 兼容层内部共享声明：映射表外部引用、`compat_sys_*` 适配器函数原型 |
+| `kernel/syscall/compat/dispatch.c` | **新增** | 总分发路由：边界检查、未映射/不支持 `-ENOSYS` 拦截、适配器调用与原生 `syscall_dispatch` 转发 |
+| `kernel/syscall/compat/table_x86_64.c` | **新增** | 16 位 Linux x86_64 映射表定义、指定初始化与 `_Static_assert` 编译期安全断言 |
+| `kernel/syscall/compat/proc.c` | **新增** | 进程/信号特定语义适配（`compat_sys_rt_sigaction`、`compat_sys_wait4`） |
+| `kernel/syscall/compat/fs.c` | **新增** | 文件系统相关适配器存根（预留后续 `openat` 等扩展） |
 | `kernel/arch/x86_64/intr/trap.c` | **修改** | 移除旧 `linux_to_os01` 数组与硬编码逻辑；若 `PF_LINUX_ABI` 则调 `compat_linux_dispatch()` |
-| `kernel/Makefile` | **验证** | `$(wildcard syscall/*.c)` 自动收录新增的 `compat_linux.c` |
+| `kernel/Makefile` | **修改** | `KERNEL_C_SOURCES` 加入 `$(wildcard syscall/compat/*.c)` |
 | `hosttests/cases/test_compat_linux.c` | **新增** | 宿主侧单元测试：测试表项完整性、符号范围、未映射/不支持返回 `-ENOSYS`、`rt_sigaction` 校验 |
 | `hosttests/Makefile` | **修改** | 加入 `test_compat_linux` 测试构建与运行 |
 | `user/systest.c` | **修改** | 增加 `PF_LINUX_ABI` 测试用例（验证 Linux syscall 实际调用及 unmapped 返回 `-ENOSYS`） |
@@ -320,9 +338,9 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
 
 ## 5. 迁移与验证方案（五阶段）
 
-### 阶段 1：构建独立兼容层与宿主测试 (Host Test First)
-1. 创建 `kernel/include/syscall/compat_linux.h` 与 `kernel/syscall/compat_linux.c`。
-2. 移植并标准化 Linux x86_64 映射表，设置 `_Static_assert`。
+### 阶段 1：构建独立兼容层子目录与宿主测试 (Host Test First)
+1. 创建 `kernel/include/syscall/compat.h` 与 `kernel/syscall/compat/{internal.h, dispatch.c, table_x86_64.c, proc.c, fs.c}`。
+2. 在 `kernel/Makefile` 中追加 `$(wildcard syscall/compat/*.c)`。
 3. 创建 `hosttests/cases/test_compat_linux.c`，编写测试：
    - 遍历 `linux_x86_64_table`，确保所有已映射编号对应的 OS01 编号在原生分发表中均有处理函数；
    - 验证越界编号（如 385、999）返回 `-ENOSYS`；
@@ -332,7 +350,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
    - 运行 `make test-host` 确保 100% 通过。
 
 ### 阶段 2：重构 `trap.c::do_system_call`
-1. 包含 `<syscall/compat_linux.h>`。
+1. 包含 `<syscall/compat.h>`。
 2. 彻底删除 `trap.c` 内部的 `static const int8_t linux_to_os01[320]` 和临时翻译分支。
 3. 接入 `compat_linux_dispatch(&syscall_ctx)`。
 4. 运行 `make clean && make test-static`，确保编译无告警、无重复定义，符号布局合规。
