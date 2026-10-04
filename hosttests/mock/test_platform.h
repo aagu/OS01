@@ -69,7 +69,16 @@ static inline percpu_t *this_cpu(void) { return NULL; }
 static inline uint32_t cpu_id(void) { return 0; }
 extern uint32_t num_cpus;
 
-/* Spinlock stub */
+/* Spinlock stub.  Guarded so other test shims (e.g.
+ * hosttests/mock/m1_a64_include/arch/spinlock.h, which provides the
+ * same surface for the aarch64 page_table host harness — see Task 17)
+ * can `#include <arch/spinlock.h>` without colliding with this
+ * force-included surface.  The shape is the canonical host-test
+ * spinlock_T — production code uses the same struct (with
+ * `__volatile__`), but here we don't need the volatile qualifier
+ * because the host test runner is single-threaded. */
+#ifndef OS01_HOST_SPINLOCK_T_PROVIDED
+#define OS01_HOST_SPINLOCK_T_PROVIDED
 typedef struct { unsigned long lock; } spinlock_T;
 /* Optional host-test observation point for fd-lock lifetime tests. */
 void poll_test_spinlock_acquire(spinlock_T *lock) __attribute__((weak));
@@ -82,6 +91,7 @@ static inline uint64_t spin_lock_irqsave(spinlock_T *l)
     return 0;
 }
 static inline void spin_unlock_irqrestore(spinlock_T *l, uint64_t f) { (void)l; (void)f; }
+#endif /* OS01_HOST_SPINLOCK_T_PROVIDED */
 
 /* I/O port stubs */
 static inline uint8_t inb(uint16_t p) { (void)p; return 0; }

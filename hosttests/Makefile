@@ -131,7 +131,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_vmm_caller_audit.elf \
     $(TEST_BLD)/test_vmm_semantic_header.elf \
     $(TEST_BLD)/test_x86_vmm_backend.elf \
-    $(TEST_BLD)/test_aarch64_pt_software_bits.elf
+    $(TEST_BLD)/test_aarch64_pt_software_bits.elf \
+    $(TEST_BLD)/test_aarch64_pt_locks.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -1442,6 +1443,30 @@ $(TEST_BLD)/test_aarch64_pt_software_bits.elf: \
 	$(HOST_CC) -o $@ $^
 
 test_aarch64_pt_software_bits: $(TEST_BLD)/test_aarch64_pt_software_bits.elf
+	$<
+
+# aarch64 M3.3 Task 17: pt_locks static initializers + walk_to_l2(create)
+# with ENOMEM rollback + source-scan lock-order check.  Compiles the
+# REAL kernel/arch/aarch64/memory/page_table.c against the same host
+# mocks as test_aarch64_pt_software_bits.c (vmm_gate_check stub,
+# arch_get_page_table returns NULL so is_active_root never fires,
+# alloc/free mocked with a heap-backed pool + a fail-count injection
+# for the ENOMEM rollback case).
+$(TEST_BLD)/test_aarch64_pt_locks.o: $(TEST_CASES)/test_aarch64_pt_locks.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/arch/spinlock.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) \
+		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_pt_locks.elf: \
+		$(TEST_BLD)/test_aarch64_pt_locks.o \
+		$(TEST_BLD)/aarch64_pt_production.o
+	$(HOST_CC) -o $@ $^
+
+test_aarch64_pt_locks: $(TEST_BLD)/test_aarch64_pt_locks.elf
 	$<
 
 # Foundational-primitives hosttest (M3 Task 7 Step 4): compiles the

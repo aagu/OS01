@@ -25,6 +25,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <arch/spinlock.h>        /* spinlock_T (Task 17 §5.4) */
+
 /* High-half kernel-self-test VA. Its lower-48-bit L0 slot is absent from
  * the boot tables at the time of the BSP self-test (TTBR0_EL1 == TTBR1_EL1
  * == boot_page_tables; the corresponding PGD[256] entry is invalid), so a
@@ -183,5 +185,49 @@ bool aarch64_pt_range_accessible(const uint64_t *root, uint64_t va,
  * vmm_gate_violation(). */
 void aarch64_pt_test_note_atomic_replace(void);
 void aarch64_pt_test_note_bbm_replace(void);
+
+/* ── Page-table locks (Task 17 / spec §5.4) ─────────────────────────
+ *
+ * Three plain spin_locks (NOT irqsave — aarch64 spin_lock_irqsave
+ * blocks SGI response and would deadlock the TLB ack wait):
+ *
+ *   pt_locks[64]        per-L2-slot hash locks
+ *   pt_upper_lock       global "creating L0/L1" lock
+ *   tlb_sd_lock         (Task 12, defined in kernel/memory/tlb.c)
+ *
+ * Total lock order: pt_lock → pt_upper_lock → tlb_sd_lock (no reverse
+ * paths; TLB IPI handler takes none).  See page_table.c for the
+ * storage and init_locks() / pt_lock_for() definitions; spec §5.4
+ * is the authoritative contract. */
+
+/* Idempotent re-init for pt_locks[64] + pt_upper_lock (writes 1UL to
+ * each lock->lock).  Called from arch_vmm_init() as a belt-and-braces
+ * double insurance against any future accidental zero-init. */
+int aarch64_pt_init_locks(void);
+
+/* Hash (root_pa, l2_idx) → one of 64 lock slots.  Same input always
+ * returns the same slot; distinct inputs may collide (no correctness
+ * loss, only contention).  root_pa is the translation root's PA (the
+ * caller subtracts ARCH_PAGE_OFFSET from the kernel-half pointer). */
+spinlock_T *pt_lock_for(uint64_t root_pa, uint32_t l2_idx);
+
+/* Walk L0 → L1 → L2 for `va` (no descent to L3).  Returns the L2
+ * (PMD) table's direct-map pointer via `*pmd_out`.  Lock order:
+ * pt_lock_for(root, l2) → pt_upper_lock, both released on return.
+ *
+ * ENOMEM contract (spec §5.2b item 3): if alloc fails at any level,
+ * the failing level's just-allocated page is freed (none — alloc
+ * returned 0 BEFORE we touched anything); previously-published empty
+ * intermediate tables are KEPT (reusable, harmless, M3 has no
+ * reclaim — same cost class as F1).  Returns -1 with `*result_out =
+ * AARCH64_PT_ENOMEM` on alloc failure, -1 with `*result_out =
+ * AARCH64_PT_ENOENT` for create=false with a missing level, and 0
+ * with `*result_out = AARCH64_PT_OK` on success.
+ *
+ * Used by the 2 MiB block path (Task 18 keeps the contract, lands the
+ * implementation).  Hosttest test_aarch64_pt_locks.c exercises this
+ * signature directly. */
+int walk_to_l2(uint64_t *root, uint64_t va, bool create,
+               uint64_t **pmd_out, int *result_out);
 
 #endif /* OS01_AARCH64_PAGE_TABLE_H */

@@ -284,11 +284,23 @@ static void audit_page_table_local_tlb_only(void)
     if (!src) return;
     strip_comments(src);
     /* The current aarch64 page_table surface invalidates LOCALLY
-     * (tlbi vae1) and probes the vmm gate; it never broadcasts and
-     * never takes a lock. */
+     * (tlbi vae1) and probes the vmm gate; it never broadcasts.
+     *
+     * Task 17 (M3.3) changed the lock discipline: page_table.c now
+     * takes the per-L2 pt_lock_for AND the global pt_upper_lock for
+     * its slot / upper-table ensure segments.  The audit's contract
+     * is updated to match — spin_lock count > 0 is required, but
+     * they must be PLAIN spin_lock (NOT spin_lock_irqsave, because
+     * aarch64 spin_lock_irqsave disables IRQs around the CAS and
+     * would deadlock the TLB IPI ack wait).  tlb_shootdown is still
+     * 0 here — the actual shootdown lives in kernel/memory/tlb.c
+     * and is invoked by the public primitives AFTER releasing the
+     * page-table locks (spec §5.4 "持锁 shootdown" rule). */
     assert_eq(count_token(src, "tlb_shootdown("), 0);
-    assert_eq(count_token(src, "spin_lock("), 0);
+    assert_true(count_token(src, "spin_lock(") > 0);
     assert_eq(count_token(src, "arch_local_irq_save("), 0);
+    assert_eq(count_token(src, "spin_lock_irqsave("), 0);
+    assert_eq(count_token(src, "spin_lock_irq("), 0);
     assert_true(contains(src, "tlbi vae1"));
     assert_true(contains(src, "vmm_gate_check()"));
     free(src);

@@ -32,6 +32,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <arch/spinlock.h>        /* spinlock_T, spin_init, spin_lock /
+                                     * spin_unlock (Task 17 §5.4) */
 #include <arch/mmu.h>
 #include <arch/aarch64/page_table.h>
 #include <arch/aarch64/vmm_backend.h>
@@ -120,6 +122,55 @@ _Static_assert(AARCH64_PT_AP_USER_RO == 0xC0,
 #define AARCH64_PT_SW_ALLOWED_MASK \
     (AARCH64_PT_SOFTWARE_PROTNONE | AARCH64_PT_SOFTWARE_COW)
 
+/* ── Page-table locks (Task 17 / spec §5.4) ─────────────────────────
+ *
+ * Storage + static initializers.  aarch64 spinlock_T uses 1 = unlocked
+ * (spinlock.h:44) — a static zero would make the first spin_lock()
+ * self-deadlock because the CAS expects 1 → 0.  The designated
+ * initializers {.lock = 1UL} bypass that; arch_vmm_init() also calls
+ * spin_init() on each as a belt-and-braces double insurance against
+ * a future zero-init gotcha.
+ *
+ * Lock order (spec §5.4, total order with no reverse paths):
+ *   pt_lock_for(root, l2) → pt_upper_lock → tlb_sd_lock
+ *   (the third lives in kernel/memory/tlb.c — not held by this TU;
+ *    the source-scan test in test_aarch64_pt_locks.c asserts no path
+ *    in page_table.c takes the kernel-internal shootdown lock while
+ *    both pt_lock + pt_upper_lock are held).
+ *
+ * (The phrase "tlb_sd_lock" above appears only in this comment; no
+ * symbol in this TU references it.  The test's `assert_null(strstr(...))`
+ * scan intentionally ignores the comment with a custom heuristic —
+ * see test_aarch64_pt_locks.c.)
+ *
+ * All three are PLAIN spin_lock (not irqsave) — aarch64's
+ * spin_lock_irqsave disables IRQs around the CAS spin, which would
+ * block the TLB IPI handler from running on the spinning CPU and
+ * deadlock the shootdown ack wait.  Waiters keep IRQs enabled. */
+static spinlock_T pt_locks[64]    = { [0 ... 63] = { .lock = 1UL } };
+static spinlock_T pt_upper_lock   = { .lock = 1UL };
+
+/* Idempotent re-init: spin_init() writes 1UL to lock->lock.  Called
+ * once from arch_vmm_init() so the locks are also unconditionally
+ * initialised in case some future change accidentally drops the
+ * static initializer. */
+int aarch64_pt_init_locks(void)
+{
+    for (int i = 0; i < 64; i++) spin_init(&pt_locks[i]);
+    spin_init(&pt_upper_lock);
+    return 0;
+}
+
+/* Hash (root_pa, l2_idx) → one of 64 lock slots.  XOR-mix with a
+ * 4 KiB-aligned PA so distinct L2 slots of the same root distribute;
+ * mask to 63 so the slot fits the static array.  Spec §5.4: collisions
+ * only hurt performance (no correctness loss — the per-slot lock is
+ * the unit of serialisation either way). */
+spinlock_T *pt_lock_for(uint64_t root_pa, uint32_t l2_idx)
+{
+    return &pt_locks[((root_pa >> 12) ^ (uint64_t)l2_idx) & 63UL];
+}
+
 /* ── Forward decls ──────────────────────────────────────────────── */
 
 static int  root_valid(const uint64_t *root);
@@ -134,8 +185,7 @@ static int  parent_pa(uint64_t desc, uint64_t *pa_out);
 static uint64_t encode_table_desc(uint64_t pa);
 static int  walk_to_l3(uint64_t *root, uint64_t va, bool create,
                        uint64_t **pte_out, int *result_out);
-static int  walk_to_l2(uint64_t *root, uint64_t va, bool create,
-                       uint64_t **pmd_out, int *result_out);
+/* walk_to_l2 is exposed via page_table.h (Task 17 §5.2b contract). */
 
 /* ── Small helpers ──────────────────────────────────────────────── */
 
@@ -435,7 +485,18 @@ static int ensure_child_table(uint64_t *root, uint64_t *parent,
  *
  * With create == true, allocates missing intermediate tables via
  * alloc_4k_page(). A failure after allocation but before linking
- * releases the just-allocated page with free_4k_page(). */
+ * releases the just-allocated page with free_4k_page().
+ *
+ * Lock discipline (Task 17 / spec §5.4): the call site (map_4k_ext /
+ * replace_4k / query_4k_ext / unmap_4k_ext) holds pt_lock_for(root, l2)
+ * AROUND the walk so the L2 slot (pmd[l2]) is stable for the
+ * subsequent PTE read/write.  Inside the walk we additionally take
+ * pt_upper_lock around the L0/L1 ensure segment — the global lock
+ * prevents concurrent creates on two different L2 slots from racing
+ * on a shared L0/L1 entry (which would either leak a table page or
+ * lose a mapping, per spec §5.4).  Both locks are released before
+ * returning; the call site still holds pt_lock_for (its scope is
+ * wider than the walk). */
 static int walk_to_l3(uint64_t *root, uint64_t va, bool create,
                       uint64_t **pte_out, int *result_out)
 {
@@ -447,10 +508,26 @@ static int walk_to_l3(uint64_t *root, uint64_t va, bool create,
     uint64_t *pud = NULL, *pmd = NULL, *pte = NULL;
     int rc;
 
+    /* Take pt_upper_lock around the L0/L1 ensure segment.  Lock order
+     * is preserved because the caller already holds pt_lock_for(root, l2).
+     * pt_upper_lock is released before we touch pmd[l2] / pte[l3] so
+     * the L2 ensure / PTE work runs with only the L2-slot lock held. */
+    spin_lock(&pt_upper_lock);
     if (ensure_child_table(root, root, l0, va, create, true,
-                           &pud, &rc) != 0) { *result_out = rc; return -1; }
+                           &pud, &rc) != 0) {
+        spin_unlock(&pt_upper_lock);
+        *result_out = rc;
+        return -1;
+    }
     if (ensure_child_table(root, pud, l1, va, create, false,
-                           &pmd, &rc) != 0) { *result_out = rc; return -1; }
+                           &pmd, &rc) != 0) {
+        spin_unlock(&pt_upper_lock);
+        *result_out = rc;
+        return -1;
+    }
+    spin_unlock(&pt_upper_lock);
+
+    /* L2 ensure + PTE access run under pt_lock_for (held by caller). */
     if (ensure_child_table(root, pmd, l2, va, create, false,
                            &pte, &rc) != 0) { *result_out = rc; return -1; }
 
@@ -472,25 +549,74 @@ static int walk_to_l3(uint64_t *root, uint64_t va, bool create,
 
 /* Walk L0 → L1 → L2 for `va` (don't descend to L3).  Returns the L2
  * (PMD) table's direct-map pointer via `*pmd_out`.  Used by the 2 MiB
- * block path (Task 16 keep-step; full split lives in Task 18).  With
- * create == false returns OK only when every level is present;
+ * block path (Task 17 §5.2b; full split lives in Task 18).
+ *
+ * Lock order (spec §5.4 total order): pt_lock_for(root, l2) → pt_upper_lock.
+ *   - pt_lock_for(root, l2) protects the L2 slot that map_2m will write
+ *     into (we don't write pmd[l2] here — the caller does — but holding
+ *     the lock around the walk guarantees the L2 slot stays stable for
+ *     the caller's subsequent pmd[l2] read/write).
+ *   - pt_upper_lock is held around the L0/L1 ensure segment only; two
+ *     different L2 slots may share the same L0/L1 entry, so the upper
+ *     lock prevents concurrent creates from allocating two table pages
+ *     and clobbering each other's publication.
+ *
+ * ENOMEM rollback (spec §5.2b item 3): if alloc fails at any level,
+ * the just-allocated (but unpublished) page would be leaked — but the
+ * alloc_4k_page() helper returns 0 on failure BEFORE we call
+ * zero_page() / write parent[index], so there's literally nothing to
+ * free at the failing level.  Previously-published intermediate tables
+ * (e.g. the L0 page already published when L1's alloc fails) are
+ * KEPT — they're harmless empty tables, reusable by future callers,
+ * and M3 has no intermediate-table reclaim (same cost class as F1).
+ *
+ * With create == false returns OK only when every level is present;
  * otherwise sets *result_out to ENOENT, EINVAL, or ECONFLICT and
  * returns -1.  Block descriptors at L2 are NOT rejected here — the
  * caller checks `pmd[l2]` to distinguish block vs table for split. */
-__attribute__((unused))
-static int walk_to_l2(uint64_t *root, uint64_t va, bool create,
-                      uint64_t **pmd_out, int *result_out)
+int walk_to_l2(uint64_t *root, uint64_t va, bool create,
+               uint64_t **pmd_out, int *result_out)
 {
     uint64_t l0 = (va >> AARCH64_PT_L0_SHIFT) & AARCH64_PT_IDX_MASK;
     uint64_t l1 = (va >> AARCH64_PT_L1_SHIFT) & AARCH64_PT_IDX_MASK;
+    uint64_t l2 = (va >> AARCH64_PT_L2_SHIFT) & AARCH64_PT_IDX_MASK;
+
+    /* Lock order: pt_lock_for(root, l2) FIRST so we always see the
+     * stable pt_lock → pt_upper_lock global order.  compute root_pa
+     * from the high-half direct-map pointer (the inverse of the
+     * encode_table_desc / direct_map arithmetic).  root is constrained
+     * by root_valid() to be in [ARCH_PAGE_OFFSET, ARCH_PAGE_OFFSET + 1 TiB)
+     * so the subtraction is in range. */
+    uint64_t root_pa = (uint64_t)((uintptr_t)root - (uintptr_t)ARCH_PAGE_OFFSET);
+    spinlock_T *pt_lock = pt_lock_for(root_pa, (uint32_t)l2);
+    spin_lock(pt_lock);
+    spin_lock(&pt_upper_lock);
 
     uint64_t *pud = NULL, *pmd = NULL;
     int rc;
 
     if (ensure_child_table(root, root, l0, va, create, true,
-                           &pud, &rc) != 0) { *result_out = rc; return -1; }
+                           &pud, &rc) != 0) {
+        spin_unlock(&pt_upper_lock);
+        spin_unlock(pt_lock);
+        *result_out = rc;
+        return -1;
+    }
     if (ensure_child_table(root, pud, l1, va, create, false,
-                           &pmd, &rc) != 0) { *result_out = rc; return -1; }
+                           &pmd, &rc) != 0) {
+        spin_unlock(&pt_upper_lock);
+        spin_unlock(pt_lock);
+        *result_out = rc;
+        return -1;
+    }
+
+    /* Per spec §5.2b item 4, after each published level we issue a
+     * local TLBI if the root is active.  walk_to_l2 only publishes
+     * when create=true; with create=false every level already existed
+     * so the walker didn't publish anything. */
+    spin_unlock(&pt_upper_lock);
+    spin_unlock(pt_lock);
+    (void)create;       /* future-proof: branch on `create` when root_is_active() check moves in */
 
     *pmd_out = pmd;
     *result_out = AARCH64_PT_OK;
@@ -605,18 +731,37 @@ int aarch64_pt_map_4k_ext(uint64_t *root, uint64_t va, uint64_t pa,
     rv = build_leaf_desc(pa, perm, software_bits, &desc);
     if (rv != AARCH64_PT_OK) return rv;
 
+    /* L2-slot lock (Task 17 / spec §5.4).  Held around the whole walk
+     * + PTE-store so the L2 slot stays stable and the slot's leaf
+     * read-then-write is atomic w.r.t. other CPUs touching the same
+     * 2 MiB region.  walk_to_l3 internally takes pt_upper_lock for
+     * the L0/L1 ensure segment — order pt_lock_for → pt_upper_lock
+     * is preserved. */
+    uint64_t l2_idx = (va >> AARCH64_PT_L2_SHIFT) & AARCH64_PT_IDX_MASK;
+    uint64_t root_pa = (uint64_t)((uintptr_t)root - (uintptr_t)ARCH_PAGE_OFFSET);
+    spinlock_T *pt_lock = pt_lock_for(root_pa, (uint32_t)l2_idx);
+    spin_lock(pt_lock);
+
     uint64_t *pte = NULL;
     int wr = AARCH64_PT_OK;
-    if (walk_to_l3(root, va, true, &pte, &wr) != 0) return wr;
+    int wrc = walk_to_l3(root, va, true, &pte, &wr);
+    if (wrc != 0) { spin_unlock(pt_lock); return wr; }
 
-    if ((*pte & AARCH64_PT_DESC_VALID) != 0) return AARCH64_PT_EEXIST;
+    if ((*pte & AARCH64_PT_DESC_VALID) != 0) {
+        spin_unlock(pt_lock);
+        return AARCH64_PT_EEXIST;
+    }
     /* PROTNONE stash (VALID clear but PROTNONE bit set) is also
      * "occupied" — caller must unmap first. */
-    if ((*pte & AARCH64_PT_SOFTWARE_PROTNONE) != 0) return AARCH64_PT_EEXIST;
+    if ((*pte & AARCH64_PT_SOFTWARE_PROTNONE) != 0) {
+        spin_unlock(pt_lock);
+        return AARCH64_PT_EEXIST;
+    }
 
     *pte = desc;
     dsb_ishst();
     if (is_active_root(root)) tlb_invalidate_local(va);
+    spin_unlock(pt_lock);
     return AARCH64_PT_OK;
 }
 
@@ -628,28 +773,42 @@ int aarch64_pt_query_4k_ext(const uint64_t *root, uint64_t va,
     int rv = root_valid(root);
     if (rv != AARCH64_PT_OK) return rv;
 
+    /* L2-slot lock held around the walk + leaf read so concurrent
+     * updates (map_4k_ext / replace_4k / unmap_4k_ext) can't change
+     * the descriptor between read_leaf and the decode step. */
+    uint64_t l2_idx = (va >> AARCH64_PT_L2_SHIFT) & AARCH64_PT_IDX_MASK;
+    uint64_t root_pa = (uint64_t)((uintptr_t)root - (uintptr_t)ARCH_PAGE_OFFSET);
+    spinlock_T *pt_lock = pt_lock_for(root_pa, (uint32_t)l2_idx);
+    spin_lock(pt_lock);
+
     uint64_t *r = (uint64_t *)root;
     uint64_t *pte = NULL;
     uint64_t desc = 0;
     int wr = AARCH64_PT_OK;
-    if (read_leaf(r, va, false, &pte, &desc, &wr) != 0) return wr;
+    int rc = read_leaf(r, va, false, &pte, &desc, &wr);
+    if (rc != 0) { spin_unlock(pt_lock); return wr; }
 
     if (wr == AARCH64_PT_EPROT_NONE) {
         if (pa_out)   *pa_out   = desc & AARCH64_PT_PA_MASK;
         if (perm_out) *perm_out = 0;
         if (sw_out)   *sw_out   = AARCH64_PT_SOFTWARE_PROTNONE;
+        spin_unlock(pt_lock);
         return AARCH64_PT_EPROT_NONE;
     }
-    if (wr == AARCH64_PT_ENOENT) return AARCH64_PT_ENOENT;
+    if (wr == AARCH64_PT_ENOENT) {
+        spin_unlock(pt_lock);
+        return AARCH64_PT_ENOENT;
+    }
 
     /* Valid leaf: decode perm + sw directly from the descriptor. */
     uint32_t perm;
     uint64_t sw;
     rv = decode_perm(desc, &perm, &sw);
-    if (rv != AARCH64_PT_OK) return rv;
+    if (rv != AARCH64_PT_OK) { spin_unlock(pt_lock); return rv; }
     if (pa_out)   *pa_out   = desc & AARCH64_PT_PA_MASK;
     if (perm_out) *perm_out = perm;
     if (sw_out)   *sw_out   = sw;
+    spin_unlock(pt_lock);
     return AARCH64_PT_OK;
 }
 
@@ -661,10 +820,17 @@ int aarch64_pt_unmap_4k_ext(uint64_t *root, uint64_t va,
     int rv = root_valid(root);
     if (rv != AARCH64_PT_OK) return rv;
 
+    /* L2-slot lock around the leaf read + clear. */
+    uint64_t l2_idx = (va >> AARCH64_PT_L2_SHIFT) & AARCH64_PT_IDX_MASK;
+    uint64_t root_pa = (uint64_t)((uintptr_t)root - (uintptr_t)ARCH_PAGE_OFFSET);
+    spinlock_T *pt_lock = pt_lock_for(root_pa, (uint32_t)l2_idx);
+    spin_lock(pt_lock);
+
     uint64_t *pte = NULL;
     uint64_t desc = 0;
     int wr = AARCH64_PT_OK;
-    if (read_leaf(root, va, false, &pte, &desc, &wr) != 0) return wr;
+    int rc = read_leaf(root, va, false, &pte, &desc, &wr);
+    if (rc != 0) { spin_unlock(pt_lock); return wr; }
 
     if (wr == AARCH64_PT_EPROT_NONE) {
         if (pa_out)   *pa_out   = desc & AARCH64_PT_PA_MASK;
@@ -675,14 +841,18 @@ int aarch64_pt_unmap_4k_ext(uint64_t *root, uint64_t va,
         *pte = 0;
         dsb_ishst();
         if (is_active_root(root)) tlb_invalidate_local(va);
+        spin_unlock(pt_lock);
         return AARCH64_PT_EPROT_NONE;
     }
-    if (wr == AARCH64_PT_ENOENT) return AARCH64_PT_ENOENT;
+    if (wr == AARCH64_PT_ENOENT) {
+        spin_unlock(pt_lock);
+        return AARCH64_PT_ENOENT;
+    }
 
     uint32_t perm;
     uint64_t sw;
     rv = decode_perm(desc, &perm, &sw);
-    if (rv != AARCH64_PT_OK) return rv;
+    if (rv != AARCH64_PT_OK) { spin_unlock(pt_lock); return rv; }
     if (pa_out)   *pa_out   = desc & AARCH64_PT_PA_MASK;
     if (perm_out) *perm_out = perm;
     if (sw_out)   *sw_out   = sw;
@@ -690,6 +860,7 @@ int aarch64_pt_unmap_4k_ext(uint64_t *root, uint64_t va,
     *pte = 0;
     dsb_ishst();
     if (is_active_root(root)) tlb_invalidate_local(va);
+    spin_unlock(pt_lock);
     return AARCH64_PT_OK;
 }
 
@@ -709,11 +880,23 @@ int aarch64_pt_replace_4k(uint64_t *root, uint64_t va, uint64_t pa,
     rv = build_leaf_desc(pa, perm, software_bits, &new_desc);
     if (rv != AARCH64_PT_OK) return rv;
 
+    /* L2-slot lock around the leaf read + descriptor rewrite.  Holds
+     * across the atomic-store / BBM branch so the slot stays stable
+     * and the read→classify→write is atomic w.r.t. other CPUs. */
+    uint64_t l2_idx = (va >> AARCH64_PT_L2_SHIFT) & AARCH64_PT_IDX_MASK;
+    uint64_t root_pa = (uint64_t)((uintptr_t)root - (uintptr_t)ARCH_PAGE_OFFSET);
+    spinlock_T *pt_lock = pt_lock_for(root_pa, (uint32_t)l2_idx);
+    spin_lock(pt_lock);
+
     uint64_t *pte = NULL;
     uint64_t old_desc = 0;
     int wr = AARCH64_PT_OK;
-    if (read_leaf(root, va, false, &pte, &old_desc, &wr) != 0) return wr;
-    if (wr == AARCH64_PT_ENOENT) return AARCH64_PT_ENOENT;
+    int rc = read_leaf(root, va, false, &pte, &old_desc, &wr);
+    if (rc != 0) { spin_unlock(pt_lock); return wr; }
+    if (wr == AARCH64_PT_ENOENT) {
+        spin_unlock(pt_lock);
+        return AARCH64_PT_ENOENT;
+    }
 
     /* Always report the prior state so callers can reconstruct
      * (VMA → COW, COW → VMA, etc.) regardless of the category.
@@ -730,7 +913,7 @@ int aarch64_pt_replace_4k(uint64_t *root, uint64_t va, uint64_t pa,
         was_valid = false;
     } else {
         rv = decode_perm(old_desc, &old_perm, &old_sw);
-        if (rv != AARCH64_PT_OK) return rv;
+        if (rv != AARCH64_PT_OK) { spin_unlock(pt_lock); return rv; }
         old_pa = old_desc & AARCH64_PT_PA_MASK;
         was_valid = true;
     }
@@ -754,11 +937,8 @@ int aarch64_pt_replace_4k(uint64_t *root, uint64_t va, uint64_t pa,
 
     /* Spec §4.4.3 row 1 (perm-only) → atomic store + dsb + local
      * TLBI. Rows 2-4 (memtype / PA / validity) → PTE-level BBM:
-     * clear → dsb → TLBI → set → dsb → TLBI.  Locking arrives in
-     * Task 17 (pt_lock_for); until then this primitive assumes
-     * boot-time single-threaded callers — vmm_gate_check + the M3.1
-     * audit cover the SMP-phase window.  Task 19's protocol-matrix
-     * tests pin all four classes. */
+     * clear → dsb → TLBI → set → dsb → TLBI.  Both branches run
+     * under pt_lock_for(root, l2) — see brief / spec §5.4. */
     if (perm_only) {
         __atomic_store_n(pte, new_desc, __ATOMIC_SEQ_CST);
         dsb_ishst();
@@ -779,6 +959,7 @@ int aarch64_pt_replace_4k(uint64_t *root, uint64_t va, uint64_t pa,
     if (old_pa_out)   *old_pa_out   = old_pa;
     if (old_perm_out) *old_perm_out = old_perm;
     if (old_sw_out)   *old_sw_out   = old_sw;
+    spin_unlock(pt_lock);
     return AARCH64_PT_OK;
 }
 

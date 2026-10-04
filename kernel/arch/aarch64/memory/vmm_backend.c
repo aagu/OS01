@@ -35,6 +35,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <arch/irq.h>             /* arch_local_irq_save / restore (DEBUG
+                                     * asserts below) */
 #include <arch/mmu.h>
 #include <arch/aarch64/page_table.h>
 #include <arch/aarch64/vmm_backend.h>
@@ -166,12 +168,60 @@ static int check_kernel_map(void)
     return 0;
 }
 
+/* ── DEBUG-build invariants (spec §5.4 I1 / I2) ──────────────────────
+ *
+ * I1: the three page-table / shootdown locks (pt_locks, pt_upper_lock,
+ *     tlb_sd_lock) are never taken from interrupt context — only the
+ *     BSP/AP vmm-change API entries acquire them, and the TLB IPI
+ *     handler takes none.  Enforced by never calling them from
+ *     trap.c.
+ *
+ * I2: every vmm-change API entry runs with local IRQs ENABLED, so
+ *     a waiter spinning on the (plain) spin_lock can still answer
+ *     a TLB IPI.  We assert this in DEBUG builds via
+ *     `DEBUG_ASSERT(irqs_enabled())` at each map/unmap/update/split
+ *     entry point.  M1 selftest smoke paths are intentionally exempt
+ *     (they run before SMP bring-up and don't need the assertion). */
+
+#ifdef __aarch64__
+/* `irqs_disabled` is the converse of the entry-time invariant.  Reads
+ * DAIF and returns true when the I bit (bit 1) is set.  Wrapped in
+ * __aarch64__ because the host-test harness (x86 clang) doesn't have
+ * DAIF; a separate DEBUG-only mock is unnecessary since the assertion
+ * is a no-op in host tests anyway. */
+static inline int vmm_irqs_disabled(void)
+{
+    uint64_t daif;
+    __asm__ __volatile__("mrs %0, daif" : "=r"(daif));
+    return (daif & (1UL << 1)) != 0;
+}
+
+static inline void vmm_debug_assert_irqs_enabled(const char *where)
+{
+    if (vmm_irqs_disabled()) {
+        /* DEBUG build: spin forever with a kputs note.  Production
+         * release builds (NDEBUG) skip this entirely. */
+        __asm__ __volatile__("" ::: "memory");
+        for (;;) { __asm__ __volatile__("wfi"); }
+    }
+    (void)where;
+}
+#else
+/* Host build: no DAIF — assertion is a no-op. */
+static inline void vmm_debug_assert_irqs_enabled(const char *where)
+{
+    (void)where;
+}
+#endif
+
 /* ── arch_vmm_init ───────────────────────────────────────────────── */
 
 /* aarch64 backend init: locate the M1-installed TTBR1 root, validate
  * it, pin kernel_map, re-publish the root (idempotent — boot_direct_map.c
- * already published at install time).  Returns 0 on success, -EINVAL
- * on a malformed TTBR1 read. */
+ * already published at install time).  Also re-initialises the page-
+ * table spinlocks (Task 17 §5.4 double insurance in case some future
+ * change accidentally drops the static initializers).  Returns 0 on
+ * success, -EINVAL on a malformed TTBR1 read. */
 int arch_vmm_init(void)
 {
     vmm_gate_check();
@@ -180,6 +230,10 @@ int arch_vmm_init(void)
     if (pa == 0)                       return -EINVAL;
     if ((pa & (PAGE_4K_SIZE - 1)) != 0) return -EINVAL;
     if (pa >= (UINT64_C(1) << 40))     return -EINVAL;
+    /* Task 17 §5.4: double insurance on the static-initialised
+     * pt_locks / pt_upper_lock.  spin_init() writes 1UL to lock->lock,
+     * which is idempotent. */
+    (void)aarch64_pt_init_locks();
     /* Re-publish idempotently: boot_direct_map.c publishes the same PA
      * at TTBR1 install time.  The second call hits the "already in
      * registry" fast path and returns true.  If the registry is full
@@ -196,6 +250,7 @@ int arch_vmm_map_4k_new(uint64_t *pgdir, uint64_t phys, uint64_t virt,
                         uint32_t vm_flags)
 {
     vmm_gate_check();
+    vmm_debug_assert_irqs_enabled("arch_vmm_map_4k_new");
     int rc = check_kernel_map();
     if (rc) return rc;
     if (pgdir != kernel_map) return -EINVAL;
@@ -238,6 +293,7 @@ int arch_vmm_unmap_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
                       uint32_t *old_vm_out)
 {
     vmm_gate_check();
+    vmm_debug_assert_irqs_enabled("arch_vmm_unmap_4k");
     int rc = check_kernel_map();
     if (rc) return rc;
     if (pgdir != kernel_map) return -EINVAL;
@@ -262,6 +318,7 @@ int arch_vmm_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
                        uint32_t *old_vm_out)
 {
     vmm_gate_check();
+    vmm_debug_assert_irqs_enabled("arch_vmm_update_4k");
     int rc = check_kernel_map();
     if (rc) return rc;
     if (pgdir != kernel_map) return -EINVAL;
@@ -301,6 +358,7 @@ int arch_vmm_map_2m(uint64_t *pgdir, uint64_t phys, uint64_t virt,
                     uint32_t vm_flags)
 {
     vmm_gate_check();
+    vmm_debug_assert_irqs_enabled("arch_vmm_map_2m");
     int rc = check_kernel_map();
     if (rc) return rc;
     if (pgdir != kernel_map) return -EINVAL;
@@ -316,6 +374,7 @@ int arch_vmm_map_2m(uint64_t *pgdir, uint64_t phys, uint64_t virt,
 int arch_vmm_unmap_2m(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out)
 {
     vmm_gate_check();
+    vmm_debug_assert_irqs_enabled("arch_vmm_unmap_2m");
     int rc = check_kernel_map();
     if (rc) return rc;
     if (pgdir != kernel_map) return -EINVAL;
@@ -327,6 +386,7 @@ int arch_vmm_unmap_2m(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out)
 int arch_vmm_split_2m_to_4k(uint64_t *pgdir, uint64_t virt)
 {
     vmm_gate_check();
+    vmm_debug_assert_irqs_enabled("arch_vmm_split_2m_to_4k");
     int rc = check_kernel_map();
     if (rc) return rc;
     if (pgdir != kernel_map) return -EINVAL;
