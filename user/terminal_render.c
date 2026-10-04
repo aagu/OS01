@@ -80,10 +80,37 @@ void term_render_flush(term_render_t *r)
     if (core->alt_active != r->last_alt_active) {
         term_render_clear(r);
         r->last_alt_active = core->alt_active;
+        core->scroll_lines_pending = 0;
     }
 
     term_cell_t *screen = term_core_screen(core);
     if (!screen) return;
+
+    // Handle pending pixel scrolling
+    if (core->scroll_lines_pending > 0) {
+        int k = core->scroll_lines_pending;
+        core->scroll_lines_pending = 0;
+        if (k >= core->rows) {
+            term_render_clear(r);
+            term_core_mark_all_dirty(core);
+            r->last_cursor_row = -1;
+            r->last_cursor_visible = false;
+        } else {
+            int32_t shift_px = -(int32_t)(k * (int)font->height);
+            gfx_scroll(r->gfx, 0, shift_px, r->bg);
+
+            if (r->last_cursor_visible && r->last_cursor_row >= 0) {
+                int shifted_cursor_row = r->last_cursor_row - k;
+                if (shifted_cursor_row >= 0 && shifted_cursor_row < core->rows &&
+                    r->last_cursor_col >= 0 && r->last_cursor_col < core->cols &&
+                    core->dirty) {
+                    core->dirty[shifted_cursor_row * core->cols + r->last_cursor_col] = true;
+                }
+                r->last_cursor_row = -1;
+                r->last_cursor_visible = false;
+            }
+        }
+    }
 
     uint32_t mask_stride = (font->width + 7u) / 8u;
 

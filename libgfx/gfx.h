@@ -165,6 +165,14 @@ void gfx_draw_glyph(gfx_handle_t *h, int32_t dx, int32_t dy,
                     uint32_t w, uint32_t h_,
                     uint32_t fgc, uint32_t bgc, bool bg_opaque);
 
+/* gfx_scroll: shifts pixels within the view/clip by (dx, dy) and fills
+ * newly exposed areas with fill_color.
+ * dx > 0 shifts right, dx < 0 shifts left.
+ * dy > 0 shifts down, dy < 0 shifts up.
+ * Coordinates are view-local and clipped to the view AND the library-local clip.
+ * If |dx| >= clip_w or |dy| >= clip_h, the entire visible area is filled. */
+void gfx_scroll(gfx_handle_t *h, int32_t dx, int32_t dy, uint32_t fill_color);
+
 /* ── Public `static inline` primitive wrappers (Task 4) ───────
  *
  * Each wrapper handles the caller's NULL-handle guard + the

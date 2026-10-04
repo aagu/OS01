@@ -32,6 +32,9 @@ typedef struct {
     int  csi_state;                     // 0=normal 1=esc 2=csi
     int  csi_param;
     bool csi_qmark;
+
+    // Scrolling state
+    int  scroll_lines_pending;          // lines scrolled since last render flush
 } term_core_t;
 
 // Initialize the core for a rows × cols screen.  Allocates the internal

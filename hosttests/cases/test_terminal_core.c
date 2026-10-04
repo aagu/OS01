@@ -103,6 +103,8 @@ TEST_FUNC(test_scroll) {
     assert_eq('X', cell(core.main_buf, R - 2, 0)->glyph);   /* X shifted up one */
     assert_eq(0, cell(core.main_buf, R - 1, 0)->glyph);     /* new bottom blank */
     assert_eq(R - 1, core.row);                              /* cursor on bottom */
+    assert_eq(1, core.scroll_lines_pending);
+    assert_true(term_core_is_dirty(&core, R - 1, 0));
 }
 
 TEST_FUNC(test_alt_screen_protocol) {

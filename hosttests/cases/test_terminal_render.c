@@ -379,6 +379,87 @@ TEST_FUNC(test_render_fault_injection)
     assert_false(term_render_cursor_update(&r));
 }
 
+/* ── Test 7: Pixel-Level Translation Scrolling ───────────────── */
+TEST_FUNC(test_render_pixel_scroll_single_line)
+{
+    TEST_SUITE("terminal_render: pixel translation scroll single line");
+    load_font_once();
+
+    gfx_handle_t *gfx = create_mock_handle();
+    term_core_init(&g_core, TEST_ROWS, TEST_COLS);
+    g_core.cursor_visible = false; /* Disable cursor underline so full row snapshot matches */
+    term_render_init(&g_render, gfx, g_font, &g_core, 0xFFFFFFFFu, 0x00000000u);
+
+    /* Write 'A' at row 0 and 'B' at row 3 (bottom row of 4-row screen) */
+    term_core_input(&g_core, 'A');
+    term_core_input(&g_core, '\n'); /* row 1 */
+    term_core_input(&g_core, '\n'); /* row 2 */
+    term_core_input(&g_core, '\n'); /* row 3 */
+    term_core_input(&g_core, 'B');
+
+    term_render_flush(&g_render);
+
+    /* Snapshot row 3 pixels containing 'B' */
+    uint32_t row3_snapshot[FONT_H * VIEW_W];
+    memcpy(row3_snapshot, &g_buf.pixels[3 * FONT_H * VIEW_W], sizeof(row3_snapshot));
+
+    /* Next newline triggers scroll_active: row 3 shifts to row 2 */
+    term_core_input(&g_core, '\n');
+    assert_eq(1, g_core.scroll_lines_pending);
+    term_core_input(&g_core, 'C');
+
+    term_render_flush(&g_render);
+    assert_eq(0, g_core.scroll_lines_pending);
+
+    /* Row 2 pixels must now match the snapshot of 'B' from row 3 */
+    assert_eq(0, memcmp(&g_buf.pixels[2 * FONT_H * VIEW_W], row3_snapshot, sizeof(row3_snapshot)));
+
+    assert_true(check_sentinels());
+    term_core_free(&g_core);
+    free(gfx);
+}
+
+TEST_FUNC(test_render_pixel_scroll_cursor_cleanup)
+{
+    TEST_SUITE("terminal_render: pixel scroll cleans up shifted cursor underline");
+    load_font_once();
+
+    gfx_handle_t *gfx = create_mock_handle();
+    term_core_init(&g_core, TEST_ROWS, TEST_COLS);
+    term_render_init(&g_render, gfx, g_font, &g_core, 0xFFFFFFFFu, 0x00000000u);
+
+    /* Move cursor to bottom row (row 3, col 2) and render cursor underline */
+    term_core_input(&g_core, '\n');
+    term_core_input(&g_core, '\n');
+    term_core_input(&g_core, '\n');
+    term_core_input(&g_core, 'X');
+    term_core_input(&g_core, 'Y');
+    term_render_cursor_update(&g_render);
+    term_render_flush(&g_render);
+
+    /* Cursor underline is drawn at (core.row+1)*font_h - 1, which is y=63 */
+    uint32_t baseline_y = 4 * FONT_H - 1; /* y=63 */
+    assert_eq(0xFFFFFFFFu, g_buf.pixels[baseline_y * VIEW_W + 2 * FONT_W]);
+
+    /* Now scroll up by 1 row without cursor at col 2: cursor moves to row 3, col 0 */
+    term_core_input(&g_core, '\n');
+    term_render_cursor_update(&g_render);
+    term_render_flush(&g_render);
+
+    /* The old underline was shifted up to y = 63 - 16 = 47.
+     * Because term_render_flush dirties the shifted cursor cell,
+     * cell (row 2, col 2) was redrawn with its glyph, clearing the shifted underline at y=47! */
+    uint32_t shifted_baseline_y = 3 * FONT_H - 1; /* y=47 */
+    assert_eq(0x00000000u, g_buf.pixels[shifted_baseline_y * VIEW_W + 2 * FONT_W]);
+
+    /* And new cursor underline is at bottom row col 0 (y=63) */
+    assert_eq(0xFFFFFFFFu, g_buf.pixels[baseline_y * VIEW_W + 0]);
+
+    assert_true(check_sentinels());
+    term_core_free(&g_core);
+    free(gfx);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_font_validation),
     TEST_ENTRY(test_render_high_bit_chars),
@@ -386,6 +467,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_render_cursor_hide_and_clear),
     TEST_ENTRY(test_render_alt_screen_pixel_restoration),
     TEST_ENTRY(test_render_fault_injection),
+    TEST_ENTRY(test_render_pixel_scroll_single_line),
+    TEST_ENTRY(test_render_pixel_scroll_cursor_cleanup),
 TEST_LIST_END
 
 int main(void)

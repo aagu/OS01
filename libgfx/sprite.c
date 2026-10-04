@@ -243,3 +243,101 @@ void gfx_draw_glyph(gfx_handle_t *h, int32_t dx, int32_t dy,
         }
     }
 }
+
+/* ── Pixel-level translation scrolling ───────────────────────── */
+void gfx_scroll(gfx_handle_t *h, int32_t dx, int32_t dy, uint32_t fill_color)
+{
+    if (!h || !h->pixels) return;
+    if (h->info.width == 0u || h->info.height == 0u) return;
+    if (dx == 0 && dy == 0) return;
+
+    int32_t vx, vy;
+    uint32_t vw, vh;
+    intersect_rect(h->clip_x, h->clip_y, h->clip_w, h->clip_h,
+                   0, 0, h->info.width, h->info.height,
+                   &vx, &vy, &vw, &vh);
+    if (vw == 0u || vh == 0u) return;
+
+    // If shift magnitude covers the entire visible area, clear everything
+    if (dx >= (int32_t)vw || dx <= -(int32_t)vw ||
+        dy >= (int32_t)vh || dy <= -(int32_t)vh) {
+        gfx_fill_rect(h, vx, vy, vw, vh, fill_color);
+        return;
+    }
+
+    size_t stride = (size_t)h->info.width;
+
+    // Fast-path: Full-width vertical scroll (the dominant terminal workload)
+    if (dx == 0 && vx == 0 && vw == h->info.width) {
+        if (dy < 0) {
+            uint32_t abs_dy = (uint32_t)(-dy);
+            size_t copy_lines = (size_t)vh - abs_dy;
+            uint32_t *dst = h->pixels + (size_t)vy * stride;
+            const uint32_t *src = h->pixels + ((size_t)vy + abs_dy) * stride;
+            memmove(dst, src, copy_lines * stride * sizeof(uint32_t));
+            gfx_fill_rect(h, 0, (int32_t)(vy + copy_lines), h->info.width, abs_dy, fill_color);
+        } else {
+            uint32_t abs_dy = (uint32_t)dy;
+            size_t copy_lines = (size_t)vh - abs_dy;
+            uint32_t *dst = h->pixels + ((size_t)vy + abs_dy) * stride;
+            const uint32_t *src = h->pixels + (size_t)vy * stride;
+            memmove(dst, src, copy_lines * stride * sizeof(uint32_t));
+            gfx_fill_rect(h, 0, vy, h->info.width, abs_dy, fill_color);
+        }
+        return;
+    }
+
+    // General path: Arbitrary sub-rect or horizontal/diagonal shifts
+    if (dy <= 0) {
+        uint32_t abs_dy = (uint32_t)(-dy);
+        uint32_t copy_lines = vh - abs_dy;
+        for (uint32_t r = 0; r < copy_lines; ++r) {
+            uint32_t y_dst = (uint32_t)vy + r;
+            uint32_t y_src = (uint32_t)vy + r + abs_dy;
+            uint32_t *dst_row = h->pixels + (size_t)y_dst * stride + (size_t)vx;
+            const uint32_t *src_row = h->pixels + (size_t)y_src * stride + (size_t)vx;
+            if (dx < 0) {
+                uint32_t abs_dx = (uint32_t)(-dx);
+                uint32_t copy_cols = vw - abs_dx;
+                memmove(dst_row, src_row + abs_dx, (size_t)copy_cols * sizeof(uint32_t));
+                for (uint32_t c = copy_cols; c < vw; ++c) dst_row[c] = fill_color;
+            } else if (dx > 0) {
+                uint32_t abs_dx = (uint32_t)dx;
+                uint32_t copy_cols = vw - abs_dx;
+                memmove(dst_row + abs_dx, src_row, (size_t)copy_cols * sizeof(uint32_t));
+                for (uint32_t c = 0; c < abs_dx; ++c) dst_row[c] = fill_color;
+            } else {
+                memmove(dst_row, src_row, (size_t)vw * sizeof(uint32_t));
+            }
+        }
+        if (abs_dy > 0u) {
+            gfx_fill_rect(h, vx, (int32_t)(vy + copy_lines), vw, abs_dy, fill_color);
+        }
+    } else {
+        uint32_t abs_dy = (uint32_t)dy;
+        uint32_t copy_lines = vh - abs_dy;
+        for (uint32_t i = copy_lines; i > 0; --i) {
+            uint32_t r = i - 1;
+            uint32_t y_dst = (uint32_t)vy + r + abs_dy;
+            uint32_t y_src = (uint32_t)vy + r;
+            uint32_t *dst_row = h->pixels + (size_t)y_dst * stride + (size_t)vx;
+            const uint32_t *src_row = h->pixels + (size_t)y_src * stride + (size_t)vx;
+            if (dx < 0) {
+                uint32_t abs_dx = (uint32_t)(-dx);
+                uint32_t copy_cols = vw - abs_dx;
+                memmove(dst_row, src_row + abs_dx, (size_t)copy_cols * sizeof(uint32_t));
+                for (uint32_t c = copy_cols; c < vw; ++c) dst_row[c] = fill_color;
+            } else if (dx > 0) {
+                uint32_t abs_dx = (uint32_t)dx;
+                uint32_t copy_cols = vw - abs_dx;
+                memmove(dst_row + abs_dx, src_row, (size_t)copy_cols * sizeof(uint32_t));
+                for (uint32_t c = 0; c < abs_dx; ++c) dst_row[c] = fill_color;
+            } else {
+                memmove(dst_row, src_row, (size_t)vw * sizeof(uint32_t));
+            }
+        }
+        if (abs_dy > 0u) {
+            gfx_fill_rect(h, vx, vy, vw, abs_dy, fill_color);
+        }
+    }
+}

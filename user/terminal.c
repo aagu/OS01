@@ -257,7 +257,7 @@ int main(void)
         {.fd = tty_fd, .events = POLLIN},
         {.fd = pty_fd, .events = POLLIN}
     };
-    char buf[256];
+    char buf[2048];
     uint64_t last_present_ms = 0;
     int present_failures = 0;
     bool dirty_pending = false;
@@ -334,8 +334,8 @@ int main(void)
             if (n > 0) {
                 for (int i = 0; i < n; i++) {
                     if (term_core_input(&core, buf[i])) dirty_pending = true;
-                    if (serial_fd >= 0) write(serial_fd, &buf[i], 1);
                 }
+                if (serial_fd >= 0) write(serial_fd, buf, (size_t)n);
                 if (term_render_cursor_update(&render)) dirty_pending = true;
             } else if (n == 0) {
                 // Shell died

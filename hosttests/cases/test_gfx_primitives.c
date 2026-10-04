@@ -928,6 +928,158 @@ TEST_FUNC(test_glyph_null_and_zero_safety)
     free(h);
 }
 
+TEST_FUNC(test_scroll_full_view_up)
+{
+    TEST_SUITE("scroll: full view shift up");
+    reset_state();
+    gfx_handle_t *h = open_test_handle();
+
+    for (int32_t y = 0; y < BUF_H; ++y) {
+        for (int32_t x = 0; x < BUF_W; ++x) {
+            *view_at(y, x) = (uint32_t)((y + 1) * 0x10);
+        }
+    }
+
+    gfx_scroll(h, 0, -2, 0x99u);
+
+    for (int32_t x = 0; x < BUF_W; ++x) {
+        assert_eq(0x30u, *view_at(0, x));
+        assert_eq(0x40u, *view_at(1, x));
+        assert_eq(0x50u, *view_at(2, x));
+        assert_eq(0x99u, *view_at(3, x));
+        assert_eq(0x99u, *view_at(4, x));
+    }
+    assert_true(sentinels_intact());
+    free(h);
+}
+
+TEST_FUNC(test_scroll_full_view_down)
+{
+    TEST_SUITE("scroll: full view shift down");
+    reset_state();
+    gfx_handle_t *h = open_test_handle();
+
+    for (int32_t y = 0; y < BUF_H; ++y) {
+        for (int32_t x = 0; x < BUF_W; ++x) {
+            *view_at(y, x) = (uint32_t)((y + 1) * 0x10);
+        }
+    }
+
+    gfx_scroll(h, 0, 2, 0x88u);
+
+    for (int32_t x = 0; x < BUF_W; ++x) {
+        assert_eq(0x88u, *view_at(0, x));
+        assert_eq(0x88u, *view_at(1, x));
+        assert_eq(0x10u, *view_at(2, x));
+        assert_eq(0x20u, *view_at(3, x));
+        assert_eq(0x30u, *view_at(4, x));
+    }
+    assert_true(sentinels_intact());
+    free(h);
+}
+
+TEST_FUNC(test_scroll_horizontal)
+{
+    TEST_SUITE("scroll: horizontal shift left");
+    reset_state();
+    gfx_handle_t *h = open_test_handle();
+
+    for (int32_t y = 0; y < BUF_H; ++y) {
+        for (int32_t x = 0; x < BUF_W; ++x) {
+            *view_at(y, x) = (uint32_t)(x + 1);
+        }
+    }
+
+    gfx_scroll(h, -2, 0, 0xEEu);
+
+    for (int32_t y = 0; y < BUF_H; ++y) {
+        assert_eq(3u, *view_at(y, 0));
+        assert_eq(4u, *view_at(y, 1));
+        assert_eq(5u, *view_at(y, 2));
+        assert_eq(6u, *view_at(y, 3));
+        assert_eq(7u, *view_at(y, 4));
+        assert_eq(0xEEu, *view_at(y, 5));
+        assert_eq(0xEEu, *view_at(y, 6));
+    }
+    assert_true(sentinels_intact());
+    free(h);
+}
+
+TEST_FUNC(test_scroll_exceeds_bounds)
+{
+    TEST_SUITE("scroll: shift >= dimension fills view");
+    reset_state();
+    gfx_handle_t *h = open_test_handle();
+
+    for (int32_t y = 0; y < BUF_H; ++y) {
+        for (int32_t x = 0; x < BUF_W; ++x) {
+            *view_at(y, x) = 0x11u;
+        }
+    }
+
+    gfx_scroll(h, 0, -10, 0x77u);
+
+    for (int32_t y = 0; y < BUF_H; ++y) {
+        for (int32_t x = 0; x < BUF_W; ++x) {
+            assert_eq(0x77u, *view_at(y, x));
+        }
+    }
+    assert_true(sentinels_intact());
+    free(h);
+}
+
+TEST_FUNC(test_scroll_clipped)
+{
+    TEST_SUITE("scroll: inside clipped rect");
+    reset_state();
+    gfx_handle_t *h = open_test_handle();
+
+    for (int32_t y = 0; y < BUF_H; ++y) {
+        for (int32_t x = 0; x < BUF_W; ++x) {
+            *view_at(y, x) = (uint32_t)((y + 1) * 0x10 + x);
+        }
+    }
+
+    /* Clip to x in [1..4], y in [1..3] -> w=4, h=3 */
+    gfx_set_clip(h, 1, 1, 4, 3);
+    gfx_scroll(h, 0, -1, 0x55u);
+
+    /* Pixels outside clip rectangle remain untouched */
+    for (int32_t x = 0; x < BUF_W; ++x) {
+        assert_eq((uint32_t)(0x10 + x), *view_at(0, x)); /* y=0 untouched */
+        assert_eq((uint32_t)(0x50 + x), *view_at(4, x)); /* y=4 untouched */
+    }
+    for (int32_t y = 1; y <= 3; ++y) {
+        assert_eq((uint32_t)((y + 1) * 0x10), *view_at(y, 0)); /* x=0 untouched */
+        assert_eq((uint32_t)((y + 1) * 0x10 + 5), *view_at(y, 5)); /* x=5 untouched */
+        assert_eq((uint32_t)((y + 1) * 0x10 + 6), *view_at(y, 6)); /* x=6 untouched */
+    }
+
+    /* Inside clip: y=1 gets old y=2, y=2 gets old y=3, y=3 gets fill 0x55 */
+    for (int32_t x = 1; x <= 4; ++x) {
+        assert_eq((uint32_t)(0x30 + x), *view_at(1, x));
+        assert_eq((uint32_t)(0x40 + x), *view_at(2, x));
+        assert_eq(0x55u, *view_at(3, x));
+    }
+    assert_true(sentinels_intact());
+    free(h);
+}
+
+TEST_FUNC(test_scroll_null_and_zero_safety)
+{
+    TEST_SUITE("scroll: NULL and zero delta safety");
+    reset_state();
+    gfx_handle_t *h = open_test_handle();
+
+    *view_at(0, 0) = 0xAAu;
+    gfx_scroll(NULL, 0, -1, 0xFFu);
+    gfx_scroll(h, 0, 0, 0xFFu);
+
+    assert_eq(0xAAu, *view_at(0, 0));
+    assert_true(sentinels_intact());
+    free(h);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_pixel_inside_view),
     TEST_ENTRY(test_pixel_outside_view_no_op),
@@ -964,6 +1116,12 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_glyph_clipped_partial),
     TEST_ENTRY(test_glyph_stride_padding),
     TEST_ENTRY(test_glyph_null_and_zero_safety),
+    TEST_ENTRY(test_scroll_full_view_up),
+    TEST_ENTRY(test_scroll_full_view_down),
+    TEST_ENTRY(test_scroll_horizontal),
+    TEST_ENTRY(test_scroll_exceeds_bounds),
+    TEST_ENTRY(test_scroll_clipped),
+    TEST_ENTRY(test_scroll_null_and_zero_safety),
 TEST_LIST_END
 
 int main(void)

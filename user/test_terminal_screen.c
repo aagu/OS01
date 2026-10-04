@@ -220,5 +220,24 @@ int main(void)
         FAIL("continuous PTY streaming starved graphics presentation (no intermediate frame observed)");
     }
 
+    /* ── Test 5: Rapid multi-line scrolling and pixel shift test ── */
+    printf("\x1b[2J\x1b[H");
+    fflush(stdout);
+
+    int term_rows = (int)(info.height / 16);
+    /* Print term_rows + 5 lines so screen scrolls up by 5 lines */
+    for (int i = 0; i < term_rows + 5; i++) {
+        printf("T_LINE_%03d\n", i);
+    }
+    fflush(stdout);
+
+    /* Row term_rows - 2 contains "T_LINE_..." with col 0 being 'T'.
+     * Verify foreground pixel of 'T' at (3, check_row * 16 + 2) is white. */
+    int check_row = term_rows - 2;
+    int check_y = check_row * 16 + 2;
+    if (wait_for_pixel(fb, stride_pixels, 3, check_y, 0xFFFFFFFFu, 2000) != 0) {
+        FAIL("scrolled line 'T' not rendered at row %d (y=%d)", check_row, check_y);
+    }
+
     PASS();
 }

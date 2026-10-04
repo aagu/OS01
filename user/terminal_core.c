@@ -60,9 +60,15 @@ static void scroll_active(term_core_t *t)
                 (size_t)(t->rows - 1) * row_elems * sizeof(term_cell_t));
         for (int c = 0; c < t->cols; c++)
             buf[cell_idx(t, t->rows - 1, c)].glyph = 0;
-        // Whole screen is now different — mark dirty.
-        for (int i = 0; i < t->rows * t->cols; i++)
-            t->dirty[i] = true;
+
+        // Shift dirty flags up by one row as well
+        memmove(t->dirty, t->dirty + row_elems,
+                (size_t)(t->rows - 1) * row_elems * sizeof(bool));
+        // Newly exposed bottom row is blank and must be drawn
+        for (int c = 0; c < t->cols; c++)
+            t->dirty[cell_idx(t, t->rows - 1, c)] = true;
+
+        t->scroll_lines_pending++;
     }
     t->row = t->rows - 1;
 }
@@ -113,6 +119,7 @@ void term_core_mark_all_dirty(term_core_t *t)
     if (!has_buffers(t)) return;
     for (int i = 0; i < t->rows * t->cols; i++)
         t->dirty[i] = true;
+    t->scroll_lines_pending = 0;
 }
 
 static void clear_line(term_core_t *t, int from, int to)
@@ -127,6 +134,7 @@ static void clear_screen(term_core_t *t)
     for (int r = 0; r < t->rows; r++)
         for (int c = 0; c < t->cols; c++)
             blank_cell(t, buf, r, c);
+    t->scroll_lines_pending = 0;
 }
 
 bool term_core_input(term_core_t *t, uint8_t c)
