@@ -51,6 +51,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
 else
 KERNEL_C_SOURCES := \
     $(wildcard core/*.c) \
+    $(wildcard syscall/*.c) \
     $(wildcard random/*.c) \
     $(wildcard log/*.c) \
     $(wildcard net/*.c) \

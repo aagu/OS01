@@ -111,7 +111,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_m1_tree.elf \
     $(TEST_BLD)/test_m1_contract.elf $(TEST_BLD)/test_m1_vmm.elf \
     $(TEST_BLD)/test_m1_install.elf $(TEST_BLD)/test_m1_cleanup.elf \
-    $(TEST_BLD)/test_m1_publish.elf
+    $(TEST_BLD)/test_m1_publish.elf \
+    $(TEST_BLD)/test_syscall_dispatch.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -167,6 +168,14 @@ $(TEST_BLD)/test_runtime_udivti3.elf: $(TEST_BLD)/test_runtime_udivti3.o $(TEST_
 	$(HOST_CC) -o $@ $^
 
 test-runtime-udivti3: $(TEST_BLD)/test_runtime_udivti3.elf
+	$<
+
+# Focused boundary test links the production dispatcher.
+$(TEST_BLD)/test_syscall_dispatch.elf: $(TEST_CASES)/test_syscall_dispatch.c $(TESTS_DIR)/kernel/syscall/dispatch.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) $^ -o $@
+
+test-syscall-dispatch: $(TEST_BLD)/test_syscall_dispatch.elf
 	$<
 
 # libc compilation

@@ -20,6 +20,7 @@
 #include <driver/serial.h>
 #include <errno.h>
 #include <uapi/syscall.h>
+#include <syscall/dispatch.h>
 #include <sys/stat.h>
 #include <string.h>
 typedef int pid_t;
@@ -1309,6 +1310,15 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
         if (os > 0)
             regs->rax = os;
     }
+    syscall_ctx_t syscall_ctx = {
+        .nr = regs->rax,
+        .args = { regs->rdi, regs->rsi, regs->rdx,
+                  regs->r10, regs->r8, regs->r9 },
+        .arch_frame = regs,
+    };
+    if (syscall_has_handler(syscall_ctx.nr)) {
+        regs->rax = (uint64_t)syscall_dispatch(&syscall_ctx);
+    } else {
     switch (regs->rax) {
     // ── Syscall name table (for strace) ─────────────────────
     static const char *syscall_names[75] = {
@@ -3166,6 +3176,7 @@ case SYS_fstatat: {
                 (int)regs->rax, (int)current->pid);
         regs->rax = -EINVAL;
         break;
+    }
     }
 
     // ── Signal delivery ──────────────────────────────────────
