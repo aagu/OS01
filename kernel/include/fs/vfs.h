@@ -203,4 +203,12 @@ const char *vfs_split_parent(const char *path, const char *cwd,
 // Truncate a file node to a new size.  Returns 0 or -errno.
 int vfs_truncate(vfs_node_t *node, uint64_t new_size);
 
+// ── Syscall handlers (FS) ──────────────────────────────────
+struct pt_regs;
+int64_t sys_symlink(const char *target, const char *linkpath, struct pt_regs *regs);
+int64_t sys_readlink(const char *path, char *buf, size_t bufsize, struct pt_regs *regs);
+int64_t sys_lstat(const char *path, struct stat *buf, struct pt_regs *regs);
+int64_t sys_fstatat(int dirfd, const char *path, struct stat *buf,
+                    int flags, struct pt_regs *regs);
+
 #endif // _FS_VFS_H
