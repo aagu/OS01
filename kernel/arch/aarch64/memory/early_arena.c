@@ -454,8 +454,16 @@ int aarch64_m1_plan(const struct MEMORY_RANGE *ram, size_t count,
  * failure path; the canary invariant is preserved (the canary is
  * asserted by test_prepare_failure_preserves_start_brk in the host
  * suite). */
+struct need_estimate {
+    uint64_t bytes;
+    struct pmm_layout layout;
+    size_t table_pages;
+    struct slab_layout sl;
+};
+
 static void log_failure_diagnostic(const struct MEMORY_RANGE *ram, size_t count,
-                                   uint64_t need_bytes)
+                                   uint64_t need_bytes,
+                                   const struct need_estimate *est)
 {
     uint64_t largest_lo = 0u, largest_hi = 0u, largest_sz = 0u;
     size_t i;
@@ -474,14 +482,33 @@ static void log_failure_diagnostic(const struct MEMORY_RANGE *ram, size_t count,
     log_err("[smp] FATAL: aarch64 M1 arena preflight failed\n");
     /* If the need_bytes equals or exceeds the entire LOW..HI window,
      * the failure is fundamental — no input could satisfy the slab
-     * segment + table pool without breaching the 2 GiB M0 cap. Print
-     * the specific 2 GiB diagnostic so the BSP halt reason is clear. */
+     * segment + table pool without breaching the 2 GiB M0 cap. Also
+     * flag the (common) case where the best candidate window is big
+     * enough on bytes yet its slab_page_end / arena end derived from
+     * the SAME compute_arena_end formula chain would cross the 2 GiB
+     * identity-map cap — that is the actual refusal cause then, and
+     * the mandated "FATAL: arena exceeds 2 GiB" text must be printed
+     * regardless of how small need_bytes is. */
     if (need_bytes >= AARCH64_M1_ARENA_HI - AARCH64_M1_ARENA_LOW) {
         log_err("[smp] FATAL: arena exceeds 2 GiB cap "
                 "(need=%lu MiB >= window=%lu MiB)\n",
                 (unsigned long)(need_bytes / (1024u * 1024u)),
                 (unsigned long)((AARCH64_M1_ARENA_HI - AARCH64_M1_ARENA_LOW)
                                 / (1024u * 1024u)));
+    } else if (est != NULL && largest_sz > 0u) {
+        uint64_t cand_end = 0u, cand_slab_end = 0u;
+        if (compute_arena_end(largest_lo, &est->layout, est->table_pages,
+                              est->sl, &cand_end, NULL, NULL,
+                              &cand_slab_end, NULL) == 0
+            && (cand_slab_end > AARCH64_M1_ARENA_HI
+                || cand_end > AARCH64_M1_ARENA_HI)) {
+            log_err("[smp] FATAL: arena exceeds 2 GiB "
+                    "(need=%lu available=%lu slab_page_end=%lx end=%lx cap=%lx)\n",
+                    (unsigned long)(need_bytes / (1024u * 1024u)),
+                    (unsigned long)(largest_sz / (1024u * 1024u)),
+                    (unsigned long)cand_slab_end, (unsigned long)cand_end,
+                    (unsigned long)AARCH64_M1_ARENA_HI);
+        }
     }
     log_err("[smp] FATAL: arena need=%lu MiB (metadata + slab_meta + 8 * 2 MiB + table pool, 2 MiB-aligned)\n",
             (unsigned long)(need_bytes / (1024u * 1024u)));
@@ -503,7 +530,8 @@ static void log_failure_diagnostic(const struct MEMORY_RANGE *ram, size_t count,
  * base_pa=0, the function returns an absolute size from which the
  * need_bytes is read directly. Returns 0 if the estimate itself
  * fails (e.g., bad input). */
-static uint64_t estimate_need_bytes(const struct MEMORY_RANGE *ram, size_t count)
+static uint64_t estimate_need_bytes(const struct MEMORY_RANGE *ram, size_t count,
+                                    struct need_estimate *out)
 {
     size_t puds = 0u, pmds = 0u, table_pages;
     uint64_t span_pages, brk, need_bytes;
@@ -526,6 +554,12 @@ static uint64_t estimate_need_bytes(const struct MEMORY_RANGE *ram, size_t count
     rc = compute_arena_end(0u, &layout, table_pages, sl,
                            &need_bytes, NULL, NULL, NULL, NULL);
     if (rc != 0) return 0u;
+    if (out != NULL) {
+        out->bytes = need_bytes;
+        out->layout = layout;
+        out->table_pages = table_pages;
+        out->sl = sl;
+    }
     return need_bytes;
 }
 
@@ -544,8 +578,11 @@ int aarch64_m1_prepare(const struct MEMORY_RANGE *ram, size_t count)
          * state is not yet touched, so the canary invariant holds. */
         /* Detailed sizing only accepts validated PA40 ranges. Rewalking
          * rejected input can hang on huge spans or dereference NULL. */
-        if (validate_ranges(ram, count) == 0)
-            log_failure_diagnostic(ram, count, estimate_need_bytes(ram, count));
+        if (validate_ranges(ram, count) == 0) {
+            struct need_estimate est;
+            uint64_t need = estimate_need_bytes(ram, count, &est);
+            log_failure_diagnostic(ram, count, need, need ? &est : NULL);
+        }
         else
             log_err("[smp] FATAL: invalid arena input error=%lu\n", (unsigned long)(-rc));
         return rc;

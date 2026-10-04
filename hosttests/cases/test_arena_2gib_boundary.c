@@ -38,6 +38,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <string.h>
 
 #include <memory/memory_map.h>
@@ -47,9 +48,38 @@
 #include <arch/aarch64/early_arena.h>
 #include <arch/mmu.h>
 
-/* Production early_arena.c calls log_err — host stub mirrors test_m1_arena.c. */
+/* Production early_arena.c calls log_err — host stub mirrors test_m1_arena.c
+ * but also CAPTURES the formatted output so tests can assert the mandated
+ * diagnostic text (kernel vsnprintf is linked into the hosttest build). */
 int g_log_level = 3;
-void _log_err_impl(const char *fmt, ...) { (void)fmt; }
+static char g_log_capture[8192];
+static size_t g_log_capture_len = 0;
+extern int vsnprintf(char *buf, unsigned long size, const char *fmt, va_list args);
+void _log_err_impl(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    if (g_log_capture_len < sizeof(g_log_capture)) {
+        g_log_capture_len += (size_t)vsnprintf(
+            g_log_capture + g_log_capture_len,
+            sizeof(g_log_capture) - g_log_capture_len, fmt, ap);
+    }
+    va_end(ap);
+}
+static void log_capture_reset(void) { g_log_capture_len = 0; g_log_capture[0] = '\0'; }
+static int log_capture_contains(const char *needle)
+{
+    size_t n = 0;
+    while (needle[n] != '\0') ++n;
+    if (g_log_capture_len < n) return 0;
+    for (size_t i = 0u; i + n <= g_log_capture_len; ++i) {
+        size_t j;
+        for (j = 0u; j < n; ++j)
+            if (g_log_capture[i + j] != needle[j]) break;
+        if (j == n) return 1;
+    }
+    return 0;
+}
 int color_printk(unsigned int FRcolor, unsigned int BKcolor,
                  const char *fmt, ...)
 {
@@ -116,12 +146,16 @@ TEST_FUNC(test_prepare_at_2gib_keeps_start_brk_canary)
     extern struct Physical_Memory_Manager PMMngr;
     const uint64_t canary = UINT64_C(0xfeedf00ddeadbeef);
     PMMngr.start_brk = canary;
+    log_capture_reset();
     struct MEMORY_RANGE ram[1] = {
         { .phys_start = 0x7F000000ULL, .phys_end = 0x80200000ULL,
           .type = MEMORY_TYPE_RAM },
     };
     int rc = aarch64_m1_prepare(ram, 1);
     assert_true(rc < 0);
+    /* The mandated diagnostic text must be present even though the
+     * refusal happens in the candidate scan (need ~20 MiB << window). */
+    assert_true(log_capture_contains("FATAL: arena exceeds 2 GiB"));
     /* The canary survives a refused prepare. */
     assert_eq(canary, PMMngr.start_brk);
     /* The arena was never published (getter returns NULL). */
