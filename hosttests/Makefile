@@ -113,6 +113,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_arena_2gib_boundary.elf \
     $(TEST_BLD)/test_arena_candidate_slab_bytes.elf \
     $(TEST_BLD)/test_arena_table_base_shift.elf \
+    $(TEST_BLD)/test_aarch64_color_printk_abi.elf \
     $(TEST_BLD)/test_m1_tree.elf \
     $(TEST_BLD)/test_m1_contract.elf $(TEST_BLD)/test_m1_vmm.elf \
     $(TEST_BLD)/test_m1_install.elf $(TEST_BLD)/test_m1_cleanup.elf \
@@ -842,6 +843,43 @@ test-m1-arena: $(TEST_BLD)/test_m1_arena.elf $(TEST_BLD)/test_m1_arena_exhaust.e
 	$(TEST_BLD)/test_arena_2gib_boundary.elf
 	$(TEST_BLD)/test_arena_candidate_slab_bytes.elf
 	$(TEST_BLD)/test_arena_table_base_shift.elf
+
+.PHONY: test-aarch64-color-printk-abi
+test-aarch64-color-printk-abi: $(TEST_BLD)/test_aarch64_color_printk_abi.elf
+	$(TEST_BLD)/test_aarch64_color_printk_abi.elf
+
+# aarch64 M2/M3 plan Task 5: color_printk ABI contract. Links the REAL
+# kernel/arch/aarch64/runtime/printk_stub.c against a kputs capture
+# mock. The test TU includes the public <core/printk.h> so a signature
+# mismatch (the old `void color_printk(const char *fmt, ...)` stub) is
+# a compile error; the shadow <arch/aarch64/boot_log.h> lives in
+# $(TEST_MOCK)/aarch64_color_printk and comes BEFORE $(KERNEL_INC).
+AARCH64_PRINTK_STUB_CFLAGS := $(HOST_CFLAGS) -I$(TESTS_DIR)/kernel/include
+
+$(TEST_BLD)/test_aarch64_color_printk_abi.o: $(TEST_CASES)/test_aarch64_color_printk_abi.c \
+		$(TESTS_DIR)/kernel/include/core/printk.h \
+		$(TEST_MOCK)/aarch64_color_printk/arch/aarch64/boot_log.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) \
+		-I$(TEST_MOCK)/aarch64_color_printk $(KERNEL_INC) -c $< -o $@
+
+$(TEST_BLD)/aarch64_printk_stub_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/runtime/printk_stub.c \
+		$(TESTS_DIR)/kernel/include/core/printk.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/boot_log.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PRINTK_STUB_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/kputs_mock.o: $(TEST_MOCK)/aarch64_color_printk/kputs_mock.c \
+		$(TEST_MOCK)/aarch64_color_printk/arch/aarch64/boot_log.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK)/aarch64_color_printk -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_color_printk_abi.elf: \
+		$(TEST_BLD)/test_aarch64_color_printk_abi.o \
+		$(TEST_BLD)/aarch64_printk_stub_production.o \
+		$(TEST_BLD)/kputs_mock.o
+	$(HOST_CC) -o $@ $^
 
 # aarch64 M2/M3 plan Task 3: arena layout-chain / 2 GiB boundary /
 # candidate-scan-includes-slab-bytes. Each new TU reuses the production
