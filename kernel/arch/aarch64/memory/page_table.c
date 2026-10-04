@@ -549,17 +549,32 @@ static int walk_to_l3(uint64_t *root, uint64_t va, bool create,
 
 /* Walk L0 → L1 → L2 for `va` (don't descend to L3).  Returns the L2
  * (PMD) table's direct-map pointer via `*pmd_out`.  Used by the 2 MiB
- * block path (Task 17 §5.2b; full split lives in Task 18).
+ * block path (Task 18 keeps the implementation; Task 17 introduces the
+ * function + lock contract here).
  *
- * Lock order (spec §5.4 total order): pt_lock_for(root, l2) → pt_upper_lock.
- *   - pt_lock_for(root, l2) protects the L2 slot that map_2m will write
- *     into (we don't write pmd[l2] here — the caller does — but holding
- *     the lock around the walk guarantees the L2 slot stays stable for
- *     the caller's subsequent pmd[l2] read/write).
- *   - pt_upper_lock is held around the L0/L1 ensure segment only; two
- *     different L2 slots may share the same L0/L1 entry, so the upper
- *     lock prevents concurrent creates from allocating two table pages
- *     and clobbering each other's publication.
+ * Lock contract — caller-held (matches walk_to_l3, spec §5.4):
+ *   - The CALLER must hold pt_lock_for(root, l2_idx) for the L2 slot
+ *     BEFORE calling walk_to_l2, and release it AFTER the caller's
+ *     subsequent pmd[l2] read/write.  This guarantees the L2 slot
+ *     stays stable for the caller's block-descriptor write and prevents
+ *     a second caller from racing on the same slot during the walk.
+ *   - walk_to_l2 internally takes ONLY pt_upper_lock around the L0/L1
+ *     ensure segment — the global lock prevents two different L2
+ *     slots from racing on the same L0/L1 entry (which would either
+ *     leak a table page or lose a mapping, per spec §5.4).  pt_upper_lock
+ *     is released before the function returns; pt_lock_for stays with
+ *     the caller.
+ *   - Lock order preserved: pt_lock_for (held by caller) →
+ *     pt_upper_lock (taken second, released first).  This matches
+ *     walk_to_l3 and the global §5.4 order pt_lock → pt_upper_lock →
+ *     tlb_sd_lock.
+ *
+ * Earlier (Task 17 v1) walk_to_l2 acquired + released pt_lock_for
+ * internally, which broke map_2m: the function had to take pt_lock_for
+ * itself to write pmd[l2] but walk_to_l2 had already released it,
+ * giving either (a) a self-deadlock if map_2m also tried to take it
+ * after the walk, or (b) post-release slot instability if it didn't.
+ * The caller-held contract here eliminates both failure modes.
  *
  * ENOMEM rollback (spec §5.2b item 3): if alloc fails at any level,
  * the just-allocated (but unpublished) page would be leaked — but the
@@ -569,27 +584,36 @@ static int walk_to_l3(uint64_t *root, uint64_t va, bool create,
  * (e.g. the L0 page already published when L1's alloc fails) are
  * KEPT — they're harmless empty tables, reusable by future callers,
  * and M3 has no intermediate-table reclaim (same cost class as F1).
+ * The caller retains pt_lock_for across the ENOMEM return so its own
+ * rollback (if any) is consistent.
  *
  * With create == false returns OK only when every level is present;
  * otherwise sets *result_out to ENOENT, EINVAL, or ECONFLICT and
  * returns -1.  Block descriptors at L2 are NOT rejected here — the
- * caller checks `pmd[l2]` to distinguish block vs table for split. */
+ * caller checks `pmd[l2]` to distinguish block vs table for split.
+ *
+ * TODO(Task 18): the spec §5.2b item 4 "每级发布后 local TLBI" branch
+ * (TLBI per-level publication when root is active) is currently a
+ * no-op because the only callers under M3.3 are pre-published-root
+ * (M1 selftest, M3.3 selftest) — none take the published-root code
+ * path.  Task 18 (map_2m on the published root) will branch on
+ * `create && is_active_root(root)` and issue a per-level local TLBI
+ * here.  Until then, no TLBI leaves walk_to_l2 with create=true. */
 int walk_to_l2(uint64_t *root, uint64_t va, bool create,
                uint64_t **pmd_out, int *result_out)
 {
     uint64_t l0 = (va >> AARCH64_PT_L0_SHIFT) & AARCH64_PT_IDX_MASK;
     uint64_t l1 = (va >> AARCH64_PT_L1_SHIFT) & AARCH64_PT_IDX_MASK;
     uint64_t l2 = (va >> AARCH64_PT_L2_SHIFT) & AARCH64_PT_IDX_MASK;
+    /* `create` is consulted by ensure_child_table (per-level alloc);
+     * suppress the unused warning in this TU — Task 18 will add an
+     * is_active_root() branch on top. */
+    (void)l2;  /* used by ensure_child_table via the parent pointer */
+    (void)create;       /* TODO(Task 18): branch on `create` for TLBI */
 
-    /* Lock order: pt_lock_for(root, l2) FIRST so we always see the
-     * stable pt_lock → pt_upper_lock global order.  compute root_pa
-     * from the high-half direct-map pointer (the inverse of the
-     * encode_table_desc / direct_map arithmetic).  root is constrained
-     * by root_valid() to be in [ARCH_PAGE_OFFSET, ARCH_PAGE_OFFSET + 1 TiB)
-     * so the subtraction is in range. */
-    uint64_t root_pa = (uint64_t)((uintptr_t)root - (uintptr_t)ARCH_PAGE_OFFSET);
-    spinlock_T *pt_lock = pt_lock_for(root_pa, (uint32_t)l2);
-    spin_lock(pt_lock);
+    /* Lock order: caller already holds pt_lock_for(root, l2).  We
+     * take only pt_upper_lock around the L0/L1 ensure segment —
+     * matching walk_to_l3's caller-held pt_lock pattern. */
     spin_lock(&pt_upper_lock);
 
     uint64_t *pud = NULL, *pmd = NULL;
@@ -598,25 +622,17 @@ int walk_to_l2(uint64_t *root, uint64_t va, bool create,
     if (ensure_child_table(root, root, l0, va, create, true,
                            &pud, &rc) != 0) {
         spin_unlock(&pt_upper_lock);
-        spin_unlock(pt_lock);
         *result_out = rc;
         return -1;
     }
     if (ensure_child_table(root, pud, l1, va, create, false,
                            &pmd, &rc) != 0) {
         spin_unlock(&pt_upper_lock);
-        spin_unlock(pt_lock);
         *result_out = rc;
         return -1;
     }
 
-    /* Per spec §5.2b item 4, after each published level we issue a
-     * local TLBI if the root is active.  walk_to_l2 only publishes
-     * when create=true; with create=false every level already existed
-     * so the walker didn't publish anything. */
     spin_unlock(&pt_upper_lock);
-    spin_unlock(pt_lock);
-    (void)create;       /* future-proof: branch on `create` when root_is_active() check moves in */
 
     *pmd_out = pmd;
     *result_out = AARCH64_PT_OK;

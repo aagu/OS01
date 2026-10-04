@@ -35,8 +35,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <arch/irq.h>             /* arch_local_irq_save / restore (DEBUG
-                                     * asserts below) */
+/* No <arch/irq.h> — the DEBUG invariant below reads DAIF directly
+ * via a local `mrs` asm; arch_local_irq_save/restore are not used. */
 #include <arch/mmu.h>
 #include <arch/aarch64/page_table.h>
 #include <arch/aarch64/vmm_backend.h>

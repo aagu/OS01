@@ -225,6 +225,17 @@ TEST_FUNC(test_walk_to_l2_create_publishes_l0_and_l1)
     uint64_t *root = fresh_root_va(&root_pa);
     assert_not_null(root);
 
+    /* Caller-held pt_lock_for(root, l2) — matches the walk_to_l3
+     * contract (spec §5.4).  walk_to_l2 no longer acquires this
+     * lock internally (Fix round 1; map_2m in Task 18 needs to hold
+     * it across its pmd[l2] write).  The lock is no-op in the host
+     * harness (test_platform.h's spin_lock/spin_unlock are
+     * single-threaded stubs), so this is just exercising the
+     * contract — no actual contention. */
+    uint64_t l2_idx = (TEST_VA_BASE >> 21) & 0x1ff;
+    spinlock_T *pt_lock = pt_lock_for(root_pa, (uint32_t)l2_idx);
+    spin_lock(pt_lock);
+
     /* Walk alloc sequence:
      *   g_pool_pa[0]  = root (from fresh_root_va's alloc_4k_page)
      *   g_pool_pa[1]  = L0 table page (walk's first alloc)
@@ -234,6 +245,8 @@ TEST_FUNC(test_walk_to_l2_create_publishes_l0_and_l1)
     uint64_t *pmd = NULL;
     int alloc_before = g_next_alloc_idx;
     int walk_rc = walk_to_l2(root, TEST_VA_BASE, true, &pmd, &rc);
+    spin_unlock(pt_lock);
+
     assert_eq(0, walk_rc);
     assert_eq(0, rc);
 
@@ -285,15 +298,24 @@ TEST_FUNC(test_walk_to_l2_enomem_keeps_l0_and_retry_succeeds)
     uint64_t *root = fresh_root_va(&root_pa);
     assert_not_null(root);
 
+    /* Caller-held pt_lock_for(root, l2) for both phases of this test
+     * (matches walk_to_l3 / walk_to_l2 caller-held contract — Fix
+     * round 1).  Host harness's spin_lock / spin_unlock are no-ops,
+     * so this just satisfies the contract. */
+    uint64_t l2_idx = (TEST_VA_BASE >> 21) & 0x1ff;
+    spinlock_T *pt_lock = pt_lock_for(root_pa, (uint32_t)l2_idx);
+
     /* Phase A: First alloc = root (already done above — counts as 1).
      * Walk's L0 alloc = 2nd call (succeeds).  Walk's L1 alloc = 3rd
      * call (must fail).  Set fail_after = 2 → first 2 calls succeed,
      * 3rd onward fail. */
     g_alloc_fail_after = 2;
 
+    spin_lock(pt_lock);
     uint64_t *pmd_a = NULL;
     int rc_a = 0;
     int walk_rc = walk_to_l2(root, TEST_VA_BASE, true, &pmd_a, &rc_a);
+    spin_unlock(pt_lock);
     assert_eq(-1, walk_rc);
     assert_eq(-4 /* AARCH64_PT_ENOMEM */, rc_a);
     assert_null((void *)pmd_a);
@@ -313,9 +335,11 @@ TEST_FUNC(test_walk_to_l2_enomem_keeps_l0_and_retry_succeeds)
     g_alloc_fail_after = 0x7fffffff;  /* restore "always succeed" */
     int alloc_before_b = g_next_alloc_idx;
 
+    spin_lock(pt_lock);
     uint64_t *pmd_b = NULL;
     int rc_b = 0;
     walk_rc = walk_to_l2(root, TEST_VA_BASE, true, &pmd_b, &rc_b);
+    spin_unlock(pt_lock);
     assert_eq(0, walk_rc);
     assert_eq(0, rc_b);
 

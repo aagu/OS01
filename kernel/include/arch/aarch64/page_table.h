@@ -212,8 +212,17 @@ int aarch64_pt_init_locks(void);
 spinlock_T *pt_lock_for(uint64_t root_pa, uint32_t l2_idx);
 
 /* Walk L0 → L1 → L2 for `va` (no descent to L3).  Returns the L2
- * (PMD) table's direct-map pointer via `*pmd_out`.  Lock order:
- * pt_lock_for(root, l2) → pt_upper_lock, both released on return.
+ * (PMD) table's direct-map pointer via `*pmd_out`.
+ *
+ * LOCK CONTRACT — caller-held (matches walk_to_l3, spec §5.4):
+ *   The CALLER must hold pt_lock_for(root, l2_idx) for the L2 slot
+ *   BEFORE calling walk_to_l2 and release it AFTER the caller's
+ *   subsequent pmd[l2] read/write.  walk_to_l2 internally takes only
+ *   pt_upper_lock around the L0/L1 ensure segment — same pattern as
+ *   walk_to_l3 — guaranteeing the global pt_lock → pt_upper_lock →
+ *   tlb_sd_lock order.  This is the shape that Task 18's map_2m
+ *   requires: it needs pt_lock_for held across its pmd[l2] block
+ *   write so a second caller cannot race on the slot during the walk.
  *
  * ENOMEM contract (spec §5.2b item 3): if alloc fails at any level,
  * the failing level's just-allocated page is freed (none — alloc
@@ -222,11 +231,14 @@ spinlock_T *pt_lock_for(uint64_t root_pa, uint32_t l2_idx);
  * reclaim — same cost class as F1).  Returns -1 with `*result_out =
  * AARCH64_PT_ENOMEM` on alloc failure, -1 with `*result_out =
  * AARCH64_PT_ENOENT` for create=false with a missing level, and 0
- * with `*result_out = AARCH64_PT_OK` on success.
+ * with `*result_out = AARCH64_PT_OK` on success.  The caller's
+ * pt_lock_for remains held across the ENOMEM return so its own
+ * rollback (if any) is consistent.
  *
  * Used by the 2 MiB block path (Task 18 keeps the contract, lands the
- * implementation).  Hosttest test_aarch64_pt_locks.c exercises this
- * signature directly. */
+ * implementation).  Hosttest test_aarch64_pt_locks.c acquires
+ * pt_lock_for externally before calling walk_to_l2 to exercise the
+ * contract directly. */
 int walk_to_l2(uint64_t *root, uint64_t va, bool create,
                uint64_t **pmd_out, int *result_out);
 
