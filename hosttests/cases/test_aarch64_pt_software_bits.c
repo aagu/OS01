@@ -53,10 +53,15 @@ static uint64_t g_pool_pa[MOCK_POOL_SIZE];
 static uint64_t g_next_alloc_idx;
 static int      g_free_calls;
 
+/* Forward declaration — mock_pool_reset (above) and individual tests
+ * both call reset_branch_counters. */
+static void reset_branch_counters(void);
+
 static void mock_pool_reset(void)
 {
     g_next_alloc_idx = 0;
     g_free_calls = 0;
+    reset_branch_counters();
     for (int i = 0; i < MOCK_POOL_SIZE; i++) g_pool_pa[i] = 0;
 }
 
@@ -99,6 +104,20 @@ static uint64_t *fresh_root_va(uint64_t *out_pa)
     memset(va, 0, MOCK_PA_STRIDE);
     if (out_pa) *out_pa = pa;
     return va;
+}
+
+/* ── Branch-instrumentation overrides (weak default no-ops in
+ * page_table.c).  Counters let each test start fresh and assert
+ * exactly which branch fired for which classification. */
+static int g_atomic_count;
+static int g_bbm_count;
+void aarch64_pt_test_note_atomic_replace(void) { g_atomic_count++; }
+void aarch64_pt_test_note_bbm_replace(void)   { g_bbm_count++; }
+
+static void reset_branch_counters(void)
+{
+    g_atomic_count = 0;
+    g_bbm_count = 0;
 }
 
 /* ── Tests ────────────────────────────────────────────────────────── */
@@ -324,7 +343,12 @@ TEST_FUNC(test_replace_returns_correct_old_perm_for_perm_only_update)
     /* Case 7 (review round 1 — Finding A): replace_4k must report the
      * PRIOR decoded perm via `*old_perm_out`, not the NEW perm.  The
      * arch_vmm_update_4k backend derives old_vm_out from this value;
-     * a regression here silently breaks VMA-prot save/restore. */
+     * a regression here silently breaks VMA-prot save/restore.
+     *
+     * Review round 2: also pin the branch selection.  Spec §4.4.3
+     * row 1 (perm-only) must take the atomic-store fast path; rows
+     * 2-4 (memtype / PA / validity) take BBM.  The branch-instrument
+     * hooks let us assert WHICH branch fired for which category. */
     mock_pool_reset();
     uint64_t root_pa;
     uint64_t *root = fresh_root_va(&root_pa);
@@ -332,7 +356,11 @@ TEST_FUNC(test_replace_returns_correct_old_perm_for_perm_only_update)
 
     uint64_t data_pa = 0xa000ULL;
     /* Map KERNEL_RW → then downgrade to KERNEL_RO.  Same PA, same
-     * memory type, same validity → perm-only fast path. */
+     * memory type, same validity → perm-only fast path.  Round-1
+     * bug masked AP[2:1] differences, so this used to route to BBM
+     * (and silently break VMA-prot restore downstream).  The new
+     * classification lets AP/PXN/UXN bits differ, so this lands
+     * in the atomic-store branch. */
     int rc = aarch64_pt_map_4k_ext(root, TEST_VA_BASE, data_pa,
                                    AARCH64_PT_KERNEL_RW, 0);
     assert_eq(0, rc);
@@ -347,9 +375,12 @@ TEST_FUNC(test_replace_returns_correct_old_perm_for_perm_only_update)
     assert_eq(data_pa, old_pa);
     assert_eq((uint32_t)AARCH64_PT_KERNEL_RW, old_perm);
     assert_eq((uint64_t)0, old_sw);
+    /* Round-2 pin: perm-only atomic path taken, no BBM. */
+    assert_eq(1, g_atomic_count);
+    assert_eq(0, g_bbm_count);
 
-    /* Reverse direction: RO → RW.  old_perm must be the previously-
-     * stored KERNEL_RO, not the NEW KERNEL_RW. */
+    /* Reverse direction: RO → RW.  AP[2:1] still differs → atomic. */
+    reset_branch_counters();
     old_pa = 0;
     old_perm = 0xdeadbeef;
     old_sw = 0xdeadbeef;
@@ -358,6 +389,8 @@ TEST_FUNC(test_replace_returns_correct_old_perm_for_perm_only_update)
                                &old_pa, &old_perm, &old_sw);
     assert_eq(0, rc);
     assert_eq((uint32_t)AARCH64_PT_KERNEL_RO, old_perm);
+    assert_eq(1, g_atomic_count);
+    assert_eq(0, g_bbm_count);
 
     /* After both updates the slot is queryable as the latest state. */
     uint64_t qpa = 0;
@@ -370,6 +403,73 @@ TEST_FUNC(test_replace_returns_correct_old_perm_for_perm_only_update)
     assert_eq((uint64_t)0, qsw);
 }
 
+TEST_FUNC(test_replace_classifies_pa_change_and_protnone_flip_as_bbm)
+{
+    /* Case 8 (review round 2): rows 2-4 (memtype / PA / validity-flip)
+     * of spec §4.4.3 must take the PTE-level BBM branch, NOT the
+     * atomic-store fast path.  Pin each category separately, each on
+     * a fresh root so the prior slot state is unambiguous. */
+    uint64_t data_pa = 0xb000ULL;
+    uint64_t old_pa = 0; uint32_t old_perm_unused = 0; uint64_t old_sw_unused = 0;
+
+    /* (a) PA change → row 3 → BBM.  Start from a KERNEL_RW map at
+     * data_pa; flip the PA.  same_pa = false → BBM. */
+    {
+        mock_pool_reset();
+        uint64_t root_pa; uint64_t *root = fresh_root_va(&root_pa);
+        assert_not_null(root);
+        int rc = aarch64_pt_map_4k_ext(root, TEST_VA_BASE, data_pa,
+                                       AARCH64_PT_KERNEL_RW, 0);
+        assert_eq(0, rc);
+        reset_branch_counters();
+        rc = aarch64_pt_replace_4k(root, TEST_VA_BASE,
+                                   data_pa + 0x1000,        /* new PA */
+                                   AARCH64_PT_KERNEL_RW, 0,
+                                   &old_pa, &old_perm_unused, &old_sw_unused);
+        assert_eq(0, rc);
+        assert_eq(0, g_atomic_count);
+        assert_eq(1, g_bbm_count);
+    }
+
+    /* (b) PROTNONE-stash flip from VALID → row 4 → BBM.  same_valid
+     * transitions from true to false. */
+    {
+        mock_pool_reset();
+        uint64_t root_pa; uint64_t *root = fresh_root_va(&root_pa);
+        assert_not_null(root);
+        int rc = aarch64_pt_map_4k_ext(root, TEST_VA_BASE, data_pa,
+                                       AARCH64_PT_KERNEL_RW, 0);
+        assert_eq(0, rc);
+        reset_branch_counters();
+        rc = aarch64_pt_replace_4k(root, TEST_VA_BASE, data_pa,
+                                   AARCH64_PT_KERNEL_RW,
+                                   AARCH64_PT_SOFTWARE_PROTNONE,
+                                   &old_pa, &old_perm_unused, &old_sw_unused);
+        assert_eq(0, rc);
+        assert_eq(0, g_atomic_count);
+        assert_eq(1, g_bbm_count);
+    }
+
+    /* (c) PROTNONE recovery → row 4 → BBM.  Start from a PROTNONE
+     * stash; replace back to VALID.  same_valid flips the other way. */
+    {
+        mock_pool_reset();
+        uint64_t root_pa; uint64_t *root = fresh_root_va(&root_pa);
+        assert_not_null(root);
+        int rc = aarch64_pt_map_4k_ext(root, TEST_VA_BASE, data_pa,
+                                       AARCH64_PT_KERNEL_RW,
+                                       AARCH64_PT_SOFTWARE_PROTNONE);
+        assert_eq(0, rc);
+        reset_branch_counters();
+        rc = aarch64_pt_replace_4k(root, TEST_VA_BASE, data_pa,
+                                   AARCH64_PT_KERNEL_RW, 0,
+                                   &old_pa, &old_perm_unused, &old_sw_unused);
+        assert_eq(0, rc);
+        assert_eq(0, g_atomic_count);
+        assert_eq(1, g_bbm_count);
+    }
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_map_protnone_query_returns_e_prot_none_with_pa),
     TEST_ENTRY(test_unmap_protnone_returns_pa_does_not_free),
@@ -378,6 +478,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_map_rejects_protnone_and_cow_combination),
     TEST_ENTRY(test_encode_block_desc_produces_correct_bit_layout),
     TEST_ENTRY(test_replace_returns_correct_old_perm_for_perm_only_update),
+    TEST_ENTRY(test_replace_classifies_pa_change_and_protnone_flip_as_bbm),
 TEST_LIST_END
 
 int main(void)

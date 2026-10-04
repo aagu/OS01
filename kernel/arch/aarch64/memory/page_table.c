@@ -497,6 +497,18 @@ static int walk_to_l2(uint64_t *root, uint64_t va, bool create,
     return 0;
 }
 
+/* ── Test-observation hooks (weak defaults; hosttests override) ──
+ *
+ * Spec §4.4.3 row 1 (perm-only) takes an atomic 8 B store; rows 2-4
+ * (memtype / PA / validity-flip) take the PTE-level BBM sequence.
+ * The branch is the contract — hosttests need to observe which
+ * branch fired without reading the descriptor (the result is the
+ * same in both cases).  The weak-hook pattern matches vmm_gate.c's
+ * vmm_gate_violation(): production code links the default no-op,
+ * hosttests override with counters. */
+__attribute__((weak)) void aarch64_pt_test_note_atomic_replace(void) {}
+__attribute__((weak)) void aarch64_pt_test_note_bbm_replace(void)   {}
+
 /* ── Internal helpers for the ext entry points ────────────────── */
 
 /* Read the current L3 slot for `va` and report its disposition via
@@ -723,19 +735,22 @@ int aarch64_pt_replace_4k(uint64_t *root, uint64_t va, uint64_t pa,
         was_valid = true;
     }
 
-    /* Spec §4.4.3 classification.  Mask off PA + sw bits so the
-     * "rest" of the descriptor (AP[2:1] / SH / AttrIndx / AF / XN)
-     * is what we compare for the perm-only fast path. */
-    const uint64_t non_pa_non_sw_mask =
-        ~(AARCH64_PT_PA_MASK | AARCH64_PT_SW_ALLOWED_MASK);
+    /* Spec §4.4.3 classification: perm-only is "same PA, same memory
+     * type, same validity" — AP[2:1] / PXN / UXN are the ONLY bits
+     * permitted to differ (they are the "perm bits" the row names).
+     * The previous round's `same_rest` comparison demanded every
+     * non-PA-non-sw bit be identical, which made perm_only=false for
+     * any actual perm change (RW→RO → AP bits differ → BBM path) and
+     * the atomic-store fast path unreachable except for no-op writes.
+     * Drop same_rest entirely: PA + AttrIndx + validity equality is
+     * the precise row-1 contract.  PROTNONE↔VALID flips are caught by
+     * same_valid and fall through to the BBM branch (row 4). */
     bool same_pa      = (old_pa == pa);
     bool same_attr    = ((old_desc & (UINT64_C(0x7) << 2)) ==
                          (new_desc & (UINT64_C(0x7) << 2)));
     bool same_valid   = (was_valid ==
                          ((software_bits & AARCH64_PT_SOFTWARE_PROTNONE) == 0));
-    bool same_rest    = ((old_desc & non_pa_non_sw_mask) ==
-                         (new_desc & non_pa_non_sw_mask));
-    bool perm_only    = same_pa && same_attr && same_valid && same_rest;
+    bool perm_only    = same_pa && same_attr && same_valid;
 
     /* Spec §4.4.3 row 1 (perm-only) → atomic store + dsb + local
      * TLBI. Rows 2-4 (memtype / PA / validity) → PTE-level BBM:
@@ -748,6 +763,7 @@ int aarch64_pt_replace_4k(uint64_t *root, uint64_t va, uint64_t pa,
         __atomic_store_n(pte, new_desc, __ATOMIC_SEQ_CST);
         dsb_ishst();
         tlb_invalidate_local(va);
+        aarch64_pt_test_note_atomic_replace();
     } else {
         /* PTE-level BBM. */
         *pte = 0;
@@ -757,6 +773,7 @@ int aarch64_pt_replace_4k(uint64_t *root, uint64_t va, uint64_t pa,
         *pte = new_desc;
         dsb_ishst();
         tlb_invalidate_local(va);
+        aarch64_pt_test_note_bbm_replace();
     }
 
     if (old_pa_out)   *old_pa_out   = old_pa;

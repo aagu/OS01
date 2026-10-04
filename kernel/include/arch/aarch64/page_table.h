@@ -173,4 +173,15 @@ uint64_t aarch64_pt_encode_block_desc(uint64_t pa, uint32_t perm,
 bool aarch64_pt_range_accessible(const uint64_t *root, uint64_t va,
                                 uint64_t length, bool write, bool user);
 
+/* Test-observation hooks for replace_4k branch selection (spec
+ * §4.4.3 row 1 = perm-only atomic-store; rows 2-4 = BBM).  Defined
+ * here so hosttests can override them with counters and pin the
+ * classification logic; production builds link the default weak
+ * no-op stubs in page_table.c, which cost nothing at -O2.  The
+ * M3.1 audit-criterion pattern (weak default spin, hosttest
+ * override) is the same shape vmm_gate.c uses for
+ * vmm_gate_violation(). */
+void aarch64_pt_test_note_atomic_replace(void);
+void aarch64_pt_test_note_bbm_replace(void);
+
 #endif /* OS01_AARCH64_PAGE_TABLE_H */
