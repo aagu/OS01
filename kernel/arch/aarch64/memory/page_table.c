@@ -56,34 +56,20 @@
 #define AARCH64_PT_L2_SHIFT    21
 #define AARCH64_PT_L3_SHIFT    12
 
-/* Descriptor field bits. */
-#define AARCH64_PT_DESC_VALID  UINT64_C(0x001)            /* bit 0 */
-#define AARCH64_PT_DESC_TABLE  UINT64_C(0x002)            /* bit 1: L0/L1/L2 table, L3 page */
-#define AARCH64_PT_DESC_AF     UINT64_C(0x400)            /* bit 10 */
+/* Descriptor field bits. The base AArch64 descriptor constants
+ * (VALID / TABLE / AF / ATTR_NORMAL / ATTR_DEVICE / PXN / UXN) come
+ * from <arch/aarch64/vmm_backend.h> — single source of truth for the
+ * backend family.  Page-table-private additions (SH encoding, AP
+ * decomposition, block OA mask, software-bit grouping) stay here. */
 #define AARCH64_PT_DESC_SH_IS  UINT64_C(0x300)            /* bits [9:8] inner-shareable */
 #define AARCH64_PT_DESC_SH_NS  UINT64_C(0x000)            /* bits [9:8] non-shareable */
 
-/* AttrIndx: bits [4:2] of the descriptor. Matches the boot-table
- * encoding in head.S:
- *   PT_ATTR_DEV    = 0<<2 = 0x0  (AttrIdx 0 = Device-nGnRnE in MAIR_EL1[7:0])
- *   PT_ATTR_NORMAL = 1<<2 = 0x4  (AttrIdx 1 = Normal WBWA in MAIR_EL1[15:8])
- * The AttrIdx arithmetic is bit-N = 1<<N, so AttrIdx 1 = bit 2 = 0x4 —
- * NOT 0x8 (which would be AttrIdx 2 = MAIR slot 2 = 0x00, silently
- * downgrading to Device-nGnRnE). If MAIR_EL1 is rebuilt, these MUST be
- * updated to track the new AttrIdx slot assignments. */
-#define AARCH64_PT_ATTR_NORMAL UINT64_C(0x004)
-#define AARCH64_PT_ATTR_DEVICE UINT64_C(0x000)
 /* Compile-time guard so any regression that confuses bit positions is
  * caught at build time instead of via silent memory-type drift. */
 _Static_assert(AARCH64_PT_ATTR_NORMAL == 0x4,
                "AttrIndx 1 must be bit 2 = 0x4, not 0x8");
 _Static_assert(AARCH64_PT_ATTR_DEVICE == 0x0,
                "AttrIndx 0 must be 0x0");
-
-/* Execute-never bits. UXN clears for an executable user mapping;
- * PXN clears for an executable kernel mapping. */
-#define AARCH64_PT_DESC_PXN    UINT64_C(0x20000000000000)  /* bit 53 */
-#define AARCH64_PT_DESC_UXN    UINT64_C(0x40000000000000)  /* bit 54 */
 
 /* AP[2:1] encoding for stage 1 (ARM ARM D4-1506), occupying descriptor
  * bits [7:6]:
@@ -697,7 +683,8 @@ int aarch64_pt_unmap_4k_ext(uint64_t *root, uint64_t va,
 
 int aarch64_pt_replace_4k(uint64_t *root, uint64_t va, uint64_t pa,
                           uint32_t perm, uint64_t software_bits,
-                          uint64_t *old_pa_out, uint64_t *old_sw_out)
+                          uint64_t *old_pa_out, uint32_t *old_perm_out,
+                          uint64_t *old_sw_out)
 {
     vmm_gate_check();
     int rv = root_valid(root);
@@ -717,17 +704,20 @@ int aarch64_pt_replace_4k(uint64_t *root, uint64_t va, uint64_t pa,
     if (wr == AARCH64_PT_ENOENT) return AARCH64_PT_ENOENT;
 
     /* Always report the prior state so callers can reconstruct
-     * (VMA → COW, COW → VMA, etc.) regardless of the category. */
+     * (VMA → COW, COW → VMA, etc.) regardless of the category.
+     * old_perm is 0 when the prior slot was a PROTNONE stash (the
+     * stash carries no live permission). */
     uint64_t old_pa;
     uint64_t old_sw;
+    uint32_t old_perm;
     bool was_valid;
     if (wr == AARCH64_PT_EPROT_NONE) {
-        old_pa = old_desc & AARCH64_PT_PA_MASK;
-        old_sw = AARCH64_PT_SOFTWARE_PROTNONE;
+        old_pa   = old_desc & AARCH64_PT_PA_MASK;
+        old_sw   = AARCH64_PT_SOFTWARE_PROTNONE;
+        old_perm = 0;
         was_valid = false;
     } else {
-        uint32_t old_perm_unused;
-        rv = decode_perm(old_desc, &old_perm_unused, &old_sw);
+        rv = decode_perm(old_desc, &old_perm, &old_sw);
         if (rv != AARCH64_PT_OK) return rv;
         old_pa = old_desc & AARCH64_PT_PA_MASK;
         was_valid = true;
@@ -747,34 +737,31 @@ int aarch64_pt_replace_4k(uint64_t *root, uint64_t va, uint64_t pa,
                          (new_desc & non_pa_non_sw_mask));
     bool perm_only    = same_pa && same_attr && same_valid && same_rest;
 
-    /* TODO(Task 17): acquire pt_lock_for(root, l2) around the
-     * descriptor write.  M3 callers are single-threaded boot-time
-     * (vmm_gate_check covers the SMP phase); Task 17 replaces this
-     * implicit assumption with the explicit lock. */
-    (void)perm_only;
+    /* Spec §4.4.3 row 1 (perm-only) → atomic store + dsb + local
+     * TLBI. Rows 2-4 (memtype / PA / validity) → PTE-level BBM:
+     * clear → dsb → TLBI → set → dsb → TLBI.  Locking arrives in
+     * Task 17 (pt_lock_for); until then this primitive assumes
+     * boot-time single-threaded callers — vmm_gate_check + the M3.1
+     * audit cover the SMP-phase window.  Task 19's protocol-matrix
+     * tests pin all four classes. */
+    if (perm_only) {
+        __atomic_store_n(pte, new_desc, __ATOMIC_SEQ_CST);
+        dsb_ishst();
+        tlb_invalidate_local(va);
+    } else {
+        /* PTE-level BBM. */
+        *pte = 0;
+        dsb_ishst();
+        tlb_invalidate_local(va);
 
-    /* PTE-level break-before-make (spec §4.4.3): clear → dsb → TLBI
-     * → dsb → [shootdown caller-owned] → set → dsb → TLBI → dsb; isb.
-     * We always do BBM — the perm-only fast path is noted but
-     * consolidated into the same store sequence here for now; the
-     * distinction matters only when the caller passes a perm-only
-     * change AND the active root is shared with another CPU, which
-     * the gate covers by waiting for ipi_ready before any post-SMP
-     * update.  shootdown remains caller-owned. */
-    *pte = 0;
-    dsb_ishst();
-    tlb_invalidate_local(va);
-    dsb_ishst();
+        *pte = new_desc;
+        dsb_ishst();
+        tlb_invalidate_local(va);
+    }
 
-    *pte = new_desc;
-    dsb_ishst();
-    tlb_invalidate_local(va);
-#ifdef __aarch64__
-    __asm__ __volatile__("isb" ::: "memory");
-#endif
-
-    if (old_pa_out) *old_pa_out = old_pa;
-    if (old_sw_out) *old_sw_out = old_sw;
+    if (old_pa_out)   *old_pa_out   = old_pa;
+    if (old_perm_out) *old_perm_out = old_perm;
+    if (old_sw_out)   *old_sw_out   = old_sw;
     return AARCH64_PT_OK;
 }
 

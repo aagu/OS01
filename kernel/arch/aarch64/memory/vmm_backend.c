@@ -174,6 +174,7 @@ static int check_kernel_map(void)
  * on a malformed TTBR1 read. */
 int arch_vmm_init(void)
 {
+    vmm_gate_check();
     uint64_t raw = aarch64_read_ttbr1();
     uint64_t pa  = raw & AARCH64_TTBR_BASE_MASK;
     if (pa == 0)                       return -EINVAL;
@@ -273,32 +274,17 @@ int arch_vmm_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
     uint64_t sw   = vm_to_sw(vm_flags);
     if (perm == 0 && sw == 0) return -EINVAL;
 
+    /* aarch64_pt_replace_4k hands back the prior decoded perm + sw
+     * (taken BEFORE the descriptor is rewritten), so the caller can
+     * reconstruct the prior VM_* state precisely. */
     uint64_t old_pa = 0;
+    uint32_t old_perm = 0;
     uint64_t old_sw = 0;
     rc = aarch64_pt_replace_4k(pgdir, virt, phys, perm, sw,
-                               &old_pa, &old_sw);
+                               &old_pa, &old_perm, &old_sw);
     if (rc != AARCH64_PT_OK) return rc;
     if (old_phys_out) *old_phys_out = old_pa;
-    if (old_vm_out) {
-        /* Re-derive the old vm_flags.  Without a perm decode here we
-         * re-query the slot — cheaper than re-decoding and gives the
-         * caller the same VM_* shape arch_vmm_query_4k would produce.
-         * (The descriptor was just rewritten, but the *prior* state
-         * lives in old_sw; the perm is the one we just stored, so we
-         * ask the leaf again.) */
-        uint32_t new_perm = 0, new_sw32 = 0;
-        uint64_t new_sw64 = 0;
-        (void)aarch64_pt_query_4k_ext(pgdir, virt, NULL, &new_perm,
-                                      &new_sw64);
-        (void)new_sw32;        /* suppress unused-var warning */
-        (void)new_sw64;
-        /* old perm must be reconstructed from old_sw: the prior
-         * descriptor had VM_PRESENT=0 iff old_sw had PROTNONE set,
-         * otherwise the same perm we just stored (since we don't have
-         * the prior perm locally).  Best effort: hand back the
-         * current perm + old sw state. */
-        *old_vm_out = perm_to_vm(perm, old_sw);
-    }
+    if (old_vm_out)   *old_vm_out   = perm_to_vm(old_perm, old_sw);
     return AARCH64_PT_OK;
 }
 
@@ -306,8 +292,11 @@ int arch_vmm_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
 
 /* Full block + split land in Task 18 (aarch64 M3.3 split follow-up)
  * with the published-root registry + pt_lock_for.  Stubs here so the
- * arch-neutral API is at least declared and an honest -EPERM /
- * -EINVAL is returned for callers that race to the Task 16 commit. */
+ * arch-neutral API is at least declared and an honest -ENOSYS /
+ * -EINVAL is returned for callers that race to the Task 16 commit.
+ * map_2m / unmap_2m return -ENOSYS (capability simply not present);
+ * split_2m_to_4k returns -EPERM because spec §5.3 mandates that exact
+ * code for a published root. */
 int arch_vmm_map_2m(uint64_t *pgdir, uint64_t phys, uint64_t virt,
                     uint32_t vm_flags)
 {
@@ -320,11 +309,8 @@ int arch_vmm_map_2m(uint64_t *pgdir, uint64_t phys, uint64_t virt,
     if ((phys & (PAGE_2M_SIZE - 1)) != 0) return -EINVAL;
     if ((virt & (PAGE_2M_SIZE - 1)) != 0) return -EINVAL;
     if (phys >= (UINT64_C(1) << 40))      return -EINVAL;
-    /* The M1 root is published at install time; until Task 18's
-     * unpublished-root split path is wired, refuse the whole block
-     * API so callers see the missing capability rather than a
-     * silently-wrong split. */
-    return -EPERM;
+    (void)vm_flags;    /* Task 18 will consume */
+    return -ENOSYS;
 }
 
 int arch_vmm_unmap_2m(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out)
@@ -335,7 +321,7 @@ int arch_vmm_unmap_2m(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out)
     if (pgdir != kernel_map) return -EINVAL;
     if ((virt & (PAGE_2M_SIZE - 1)) != 0) return -EINVAL;
     if (phys_out) *phys_out = 0;
-    return -EPERM;   /* Task 18 */
+    return -ENOSYS;   /* Task 18 */
 }
 
 int arch_vmm_split_2m_to_4k(uint64_t *pgdir, uint64_t virt)

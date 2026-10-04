@@ -176,12 +176,13 @@ TEST_FUNC(test_update_to_valid_recovers_query)
     assert_eq(0, rc);
 
     uint64_t old_pa = 0;
+    uint32_t old_perm_unused = 0;
     uint64_t old_sw = 0;
     rc = aarch64_pt_replace_4k(root, TEST_VA_BASE, data_pa,
                                AARCH64_PT_KERNEL_RW,
                                /* new sw: zero = drop PROTNONE */
                                0,
-                               &old_pa, &old_sw);
+                               &old_pa, &old_perm_unused, &old_sw);
     assert_eq(0, rc);
     assert_eq(data_pa, old_pa);
     assert_true((old_sw & AARCH64_PT_SOFTWARE_PROTNONE) != 0);
@@ -212,6 +213,7 @@ TEST_FUNC(test_update_to_protnone_keeps_pa_query_e_prot_none)
     assert_eq(0, rc);
 
     uint64_t old_pa = 0;
+    uint32_t old_perm_unused = 0;
     uint64_t old_sw = 0;
     rc = aarch64_pt_replace_4k(root, TEST_VA_BASE, data_pa,
                                /* perm out param unused; PROTNONE swap keeps the perm
@@ -220,7 +222,7 @@ TEST_FUNC(test_update_to_protnone_keeps_pa_query_e_prot_none)
                                 * PROTNONE stash directly from new sw bits. */
                                AARCH64_PT_KERNEL_RW,
                                AARCH64_PT_SOFTWARE_PROTNONE,
-                               &old_pa, &old_sw);
+                               &old_pa, &old_perm_unused, &old_sw);
     assert_eq(0, rc);
     assert_eq(data_pa, old_pa);
     assert_eq(0, old_sw);
@@ -252,12 +254,14 @@ TEST_FUNC(test_map_rejects_protnone_and_cow_combination)
     assert_eq(AARCH64_PT_EINVAL, rc);
 
     /* replace_4k should likewise reject */
-    uint64_t old_pa = 0, old_sw = 0;
+    uint64_t old_pa = 0;
+    uint32_t old_perm_unused = 0;
+    uint64_t old_sw = 0;
     rc = aarch64_pt_replace_4k(root, TEST_VA_BASE, 0x9000,
                                AARCH64_PT_KERNEL_RW,
                                AARCH64_PT_SOFTWARE_PROTNONE |
                                AARCH64_PT_SOFTWARE_COW,
-                               &old_pa, &old_sw);
+                               &old_pa, &old_perm_unused, &old_sw);
     assert_eq(AARCH64_PT_EINVAL, rc);
 }
 
@@ -315,6 +319,57 @@ TEST_FUNC(test_encode_block_desc_produces_correct_bit_layout)
     assert_eq(block_pa, desc_sw & UINT64_C(0xffffffe00000));
 }
 
+TEST_FUNC(test_replace_returns_correct_old_perm_for_perm_only_update)
+{
+    /* Case 7 (review round 1 — Finding A): replace_4k must report the
+     * PRIOR decoded perm via `*old_perm_out`, not the NEW perm.  The
+     * arch_vmm_update_4k backend derives old_vm_out from this value;
+     * a regression here silently breaks VMA-prot save/restore. */
+    mock_pool_reset();
+    uint64_t root_pa;
+    uint64_t *root = fresh_root_va(&root_pa);
+    assert_not_null(root);
+
+    uint64_t data_pa = 0xa000ULL;
+    /* Map KERNEL_RW → then downgrade to KERNEL_RO.  Same PA, same
+     * memory type, same validity → perm-only fast path. */
+    int rc = aarch64_pt_map_4k_ext(root, TEST_VA_BASE, data_pa,
+                                   AARCH64_PT_KERNEL_RW, 0);
+    assert_eq(0, rc);
+
+    uint64_t old_pa = 0;
+    uint32_t old_perm = 0xdeadbeef;
+    uint64_t old_sw = 0xdeadbeef;
+    rc = aarch64_pt_replace_4k(root, TEST_VA_BASE, data_pa,
+                               AARCH64_PT_KERNEL_RO, 0,
+                               &old_pa, &old_perm, &old_sw);
+    assert_eq(0, rc);
+    assert_eq(data_pa, old_pa);
+    assert_eq((uint32_t)AARCH64_PT_KERNEL_RW, old_perm);
+    assert_eq((uint64_t)0, old_sw);
+
+    /* Reverse direction: RO → RW.  old_perm must be the previously-
+     * stored KERNEL_RO, not the NEW KERNEL_RW. */
+    old_pa = 0;
+    old_perm = 0xdeadbeef;
+    old_sw = 0xdeadbeef;
+    rc = aarch64_pt_replace_4k(root, TEST_VA_BASE, data_pa,
+                               AARCH64_PT_KERNEL_RW, 0,
+                               &old_pa, &old_perm, &old_sw);
+    assert_eq(0, rc);
+    assert_eq((uint32_t)AARCH64_PT_KERNEL_RO, old_perm);
+
+    /* After both updates the slot is queryable as the latest state. */
+    uint64_t qpa = 0;
+    uint32_t qperm = 0;
+    uint64_t qsw = 0;
+    rc = aarch64_pt_query_4k_ext(root, TEST_VA_BASE, &qpa, &qperm, &qsw);
+    assert_eq(0, rc);
+    assert_eq(data_pa, qpa);
+    assert_eq((uint32_t)AARCH64_PT_KERNEL_RW, qperm);
+    assert_eq((uint64_t)0, qsw);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_map_protnone_query_returns_e_prot_none_with_pa),
     TEST_ENTRY(test_unmap_protnone_returns_pa_does_not_free),
@@ -322,6 +377,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_update_to_protnone_keeps_pa_query_e_prot_none),
     TEST_ENTRY(test_map_rejects_protnone_and_cow_combination),
     TEST_ENTRY(test_encode_block_desc_produces_correct_bit_layout),
+    TEST_ENTRY(test_replace_returns_correct_old_perm_for_perm_only_update),
 TEST_LIST_END
 
 int main(void)

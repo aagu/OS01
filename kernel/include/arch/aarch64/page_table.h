@@ -136,8 +136,9 @@ int aarch64_pt_unmap_4k_ext(uint64_t *root, uint64_t va,
                             uint64_t *sw_out);
 
 /* Replace an existing 4 KiB leaf with a new perm + software_bits state
- * (spec §4.4.3).  The prior physical address and software bits are
- * returned via `*old_pa_out` / `*old_sw_out`.  Classification:
+ * (spec §4.4.3).  The prior physical address, decoded permission
+ * word, and software bits are returned via `*old_pa_out` /
+ * `*old_perm_out` / `*old_sw_out` (all may be NULL).  Classification:
  *
  *   - AP / XN-only change (same PA, same memory type, same validity):
  *     atomic 8 B store + dsb ishst + local TLBI.
@@ -147,12 +148,11 @@ int aarch64_pt_unmap_4k_ext(uint64_t *root, uint64_t va,
  *     with pt_lock_for(root, l2) — see TODO.
  *
  * Returns AARCH64_PT_OK on success, -EINVAL for bad perm/sw, -ENOENT
- * if no leaf (valid OR PROTNONE-stashed) exists at VA, -EEXIST if the
- * caller tries to swap PA on a PROTNONE stash (the stash owns a fixed
- * PA; use unmap + map_4k_ext to re-stash). */
+ * if no leaf (valid OR PROTNONE-stashed) exists at VA. */
 int aarch64_pt_replace_4k(uint64_t *root, uint64_t va, uint64_t pa,
                           uint32_t perm, uint64_t software_bits,
-                          uint64_t *old_pa_out, uint64_t *old_sw_out);
+                          uint64_t *old_pa_out, uint32_t *old_perm_out,
+                          uint64_t *old_sw_out);
 
 /* Build a 2 MiB block descriptor (spec §5.1).  Block = VALID | bit1=0;
  * OA lives in bits [39:21] (L2 block format — IPS=40).  AP / SH /
