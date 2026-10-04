@@ -10,6 +10,7 @@ int64_t sys_mm_dispatch(syscall_ctx_t *ctx);
 int64_t sys_time_dispatch(syscall_ctx_t *ctx);
 int64_t sys_misc_dispatch(syscall_ctx_t *ctx);
 int64_t sys_net_dispatch(syscall_ctx_t *ctx);
+int64_t sys_proc_dispatch(syscall_ctx_t *ctx);
 
 
 /* Handlers are added here as syscall families migrate out of trap.c. */
@@ -73,6 +74,21 @@ static const syscall_entry_t syscall_table[SYS_fstatat + 1] = {
     [SYS_getifaddr] = { sys_net_dispatch, "getifaddr" },
     [SYS_getsockopt] = { sys_net_dispatch, "getsockopt" },
     [SYS_shutdown] = { sys_net_dispatch, "shutdown" },
+    [SYS_exit] = { sys_proc_dispatch, "exit" },
+    [SYS_getpid] = { sys_proc_dispatch, "getpid" },
+    [SYS_exec] = { sys_proc_dispatch, "exec" },
+    [SYS_fork] = { sys_proc_dispatch, "fork" },
+    [SYS_waitpid] = { sys_proc_dispatch, "waitpid" },
+    [SYS_getppid] = { sys_proc_dispatch, "getppid" },
+    [SYS_umask] = { sys_proc_dispatch, "umask" },
+    [SYS_kill] = { sys_proc_dispatch, "kill" },
+    [SYS_signal] = { sys_proc_dispatch, "signal" },
+    [SYS_sigprocmask] = { sys_proc_dispatch, "sigprocmask" },
+    [SYS_sigreturn] = { sys_proc_dispatch, "sigreturn" },
+    [SYS_setpgid] = { sys_proc_dispatch, "setpgid" },
+    [SYS_getpgid] = { sys_proc_dispatch, "getpgid" },
+    [SYS_setsid] = { sys_proc_dispatch, "setsid" },
+    [SYS_getsid] = { sys_proc_dispatch, "getsid" },
 };
 bool syscall_has_handler(uint64_t nr)
 {

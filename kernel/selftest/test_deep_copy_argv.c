@@ -1,5 +1,5 @@
 // kernel/selftest/test_deep_copy_argv.c — regression test for
-// kernel/arch/x86_64/trap.c::deep_copy_argv (Task 4.5, startup
+// kernel/syscall/sys_proc.c::deep_copy_argv (Task 4.5, startup
 // unification).
 //
 // Bug under test (pre-fix): deep_copy_argv() rejected an explicit

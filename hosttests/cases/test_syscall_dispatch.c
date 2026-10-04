@@ -17,6 +17,7 @@ int64_t sys_mm_dispatch(syscall_ctx_t *ctx) { received = ctx; return -EBADF; }
 int64_t sys_time_dispatch(syscall_ctx_t *ctx) { received = ctx; return -EBADF; }
 int64_t sys_misc_dispatch(syscall_ctx_t *ctx) { received = ctx; return -EBADF; }
 int64_t sys_net_dispatch(syscall_ctx_t *ctx) { received = ctx; return -EBADF; }
+int64_t sys_proc_dispatch(syscall_ctx_t *ctx) { received = ctx; return -EBADF; }
 
 int main(void)
 {
@@ -43,6 +44,9 @@ int main(void)
         SYS_socket, SYS_connect, SYS_sendto, SYS_recvfrom, SYS_bind,
         SYS_listen, SYS_accept, SYS_setsockopt, SYS_getsockname,
         SYS_getifaddr, SYS_getsockopt, SYS_shutdown,
+        SYS_exit, SYS_getpid, SYS_exec, SYS_fork, SYS_waitpid, SYS_getppid,
+        SYS_umask, SYS_kill, SYS_signal, SYS_sigprocmask, SYS_sigreturn,
+        SYS_setpgid, SYS_getpgid, SYS_setsid, SYS_getsid,
     };
     for (unsigned i = 0; i < sizeof(calls) / sizeof(calls[0]); i++) {
         ctx = (syscall_ctx_t){ .nr = calls[i],
