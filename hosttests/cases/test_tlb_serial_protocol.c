@@ -136,6 +136,39 @@ static void case_mask_excludes_unready_offline_self(void)
     assert_eq(percpu_data[3].tlb_ack_gen, 1);
 }
 
+/* M3.1 audit gate (Task 13; ipc-noready coverage as a hosttest — the
+ * dedicated QEMU sub-mode was judged disproportionate, see
+ * docs/memory.md "vmm 变更调用链审计（M3.1 验收）"): a CPU that is
+ * online but NOT yet ipi_ready is never targeted, so its ack generation
+ * must be unchanged by the shootdown; once it publishes ipi_ready, the
+ * NEXT shootdown targets it and bumps its gen exactly once. */
+static void case_unready_gen_defers_until_ready(void)
+{
+    TEST_SUITE("tlb_shootdown: unready CPU gen defers until ready");
+    reset_mock(2);
+    percpu_data[1].online = 1; percpu_data[1].ipi_ready = 0; /* AP, not ready */
+    ack_on_broadcast = 1;
+
+    tlb_shootdown();
+
+    /* Shootdown only waited on ready CPUs; the unready AP is untouched. */
+    assert_eq(mock_ipi_mask, 0);                 /* no ready target: no IPI */
+    assert_eq(percpu_data[1].tlb_ack_gen, 0);    /* gen unchanged */
+    assert_false(panic_armed);
+
+    /* AP publishes its IPI channel; the next shootdown must target it. */
+    percpu_data[1].ipi_ready = 1;
+    tlb_shootdown();
+    assert_eq(mock_ipi_mask, 1UL << 1);
+    assert_eq(percpu_data[1].tlb_ack_gen, 1);    /* first bump */
+    assert_false(panic_armed);
+
+    /* And a further shootdown bumps it again (gen+1 per shootdown). */
+    tlb_shootdown();
+    assert_eq(percpu_data[1].tlb_ack_gen, 2);
+    assert_false(panic_armed);
+}
+
 static void case_single_cpu_no_broadcast(void)
 {
     TEST_SUITE("tlb_shootdown: single CPU");
@@ -181,6 +214,7 @@ int main(void)
 {
     case_ok_two_targets();
     case_mask_excludes_unready_offline_self();
+    case_unready_gen_defers_until_ready();
     case_single_cpu_no_broadcast();
     case_wraparound();
     case_timeout_fatal();

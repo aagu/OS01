@@ -127,7 +127,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_slab_basic_x86_count.elf \
     $(TEST_BLD)/test_percpu_layout.elf \
     $(TEST_BLD)/test_tlb_serial_protocol.elf \
-    $(TEST_BLD)/test_x86_ipi_ready_publish.elf
+    $(TEST_BLD)/test_x86_ipi_ready_publish.elf \
+    $(TEST_BLD)/test_vmm_caller_audit.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
 
@@ -1319,6 +1320,33 @@ $(TEST_BLD)/test_x86_ipi_ready_publish.elf: \
 	$(HOST_CC) -o $@ $^
 
 test_x86_ipi_ready_publish: $(TEST_BLD)/test_x86_ipi_ready_publish.elf
+	$<
+
+# M3.1 audit gate (Task 13): source-scan half. Static assertion that no
+# audited function both holds a lock and calls a vmm-change API, plus
+# whitelist checks (tlb.c single non-nested lock, ipi.c lock-free,
+# kernel/Makefile aarch64 source list). The nm half lives in
+# mk/components/run.mk (test-aarch64-audit) — hosttests never exec.
+VMM_AUDIT_CFLAGS := $(HOST_CFLAGS) -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+                    -I$(TEST_INC) -include $(TEST_MOCK)/test_platform.h
+
+$(TEST_BLD)/test_vmm_caller_audit.o: \
+		$(TEST_CASES)/test_vmm_caller_audit.c \
+		$(TESTS_DIR)/kernel/memory/slab.c \
+		$(TESTS_DIR)/kernel/memory/vmm.c \
+		$(TESTS_DIR)/kernel/memory/tlb.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/early_arena.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/page_table.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/intr/ipi.c \
+		$(TESTS_DIR)/kernel/Makefile
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VMM_AUDIT_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_vmm_caller_audit.elf: \
+		$(TEST_BLD)/test_vmm_caller_audit.o
+	$(HOST_CC) -o $@ $^
+
+test_vmm_caller_audit: $(TEST_BLD)/test_vmm_caller_audit.elf
 	$<
 
 # Foundational-primitives hosttest (M3 Task 7 Step 4): compiles the

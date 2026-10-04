@@ -115,6 +115,27 @@ aarch64-uefi-kernel: $(BUILD_DIR)/artifacts/kernel.elf
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
 
+# M3.1 audit gate (Task 13): nm half. The compiled aarch64 kernel must
+# carry NO x86-only VMM symbols — no T/t symbol named vma_* / uaccess_* /
+# fork_* (vmm_* / arch_vmm_* are deliberately excluded: aarch64 has its
+# own page_table/vmm_gate surface). The source-scan twin of this gate is
+# hosttests/cases/test_vmm_caller_audit.c; the full chain-by-chain table
+# lives in docs/memory.md ("vmm 变更调用链审计（M3.1 验收）").
+# llvm-nm host tool (same LLVM install that provides this profile's
+# llvm-ar / llvm-objcopy; the aarch64 profile does not define LLVM_NM,
+# which belongs to the x86 clang toolchain discovery).
+AARCH64_NM     ?= llvm-nm
+.PHONY: test-aarch64-audit
+test-aarch64-audit: $(BUILD_DIR)/artifacts/kernel.elf
+	$(call require_aarch64_uefi)
+	$(call require_capability,uefi)
+	@echo "  [audit] aarch64 kernel.elf: no vma_*/uaccess_*/fork_* T/t symbols"
+	@bad="$$($(AARCH64_NM) $(BUILD_DIR)/artifacts/kernel.elf | awk '$$2 == "T" || $$2 == "t" { print $$3 }' | grep -E '^(vma_|uaccess_|fork_)')"; \
+	  if [ -n "$$bad" ]; then \
+	    echo "AUDIT GATE FAIL: forbidden symbols in aarch64 kernel.elf:" $$bad >&2; exit 1; \
+	  fi
+	@echo "  [audit] OK"
+
 .PHONY: run-aarch64-uefi
 run-aarch64-uefi: aarch64-uefi
 	$(call require_aarch64_uefi)
