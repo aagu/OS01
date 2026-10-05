@@ -1,4 +1,5 @@
 #include <driver/pci.h>
+#include <arch/pci.h>
 #include <arch/io.h>
 #include <core/debug.h>
 #include <memory/memory.h>   // Phy_To_Virt
@@ -6,62 +7,74 @@
 #include <memory/vmm.h>      // vmm_map_page, PAGE_KERNEL_PMD_NOCACHE
 #include <stdint.h>
 
-// ── Legacy PCI config space access via 0xCF8 / 0xCFC ─────
-
-#define PCI_CONFIG_ADDR  0xCF8
-#define PCI_CONFIG_DATA  0xCFC
-
-// Configuration address format:
-//   bit 31    = enable (must be 1)
-//   bits 30-24= reserved (0)
-//   bits 23-16= bus number
-//   bits 15-11= device number
-//   bits 10-8 = function number
-//   bits 7-2  = register offset (dword aligned)
-//   bits 1-0  = 0
-static uint32_t pci_make_addr(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset)
-{
-    return 0x80000000U
-         | ((bus  & 0xFF) << 16)
-         | ((dev  & 0x1F) << 11)
-         | ((func & 0x07) << 8)
-         | (offset & 0xFC);
-}
+// ── Legacy PCI config space access forwarded to arch_pci_backend ───
 
 uint32_t pci_config_read(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset)
 {
-    arch_outd(PCI_CONFIG_ADDR, pci_make_addr(bus, dev, func, offset));
-    return arch_ind(PCI_CONFIG_DATA);
+    const struct pci_backend *backend = arch_pci_backend();
+    if (!backend || !backend->read32) {
+        return 0xFFFFFFFFU;
+    }
+    enum pci_error_scope scope = PCI_ERROR_FUNCTION;
+    uint32_t val = 0;
+    if (backend->read32(0, (uint8_t)bus, (uint8_t)dev, (uint8_t)func, (uint16_t)(offset & ~3), &val, &scope) != 0) {
+        return 0xFFFFFFFFU;
+    }
+    return val;
 }
 
 void pci_config_write(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset, uint32_t value)
 {
-    arch_outd(PCI_CONFIG_ADDR, pci_make_addr(bus, dev, func, offset));
-    arch_outd(PCI_CONFIG_DATA, value);
+    const struct pci_backend *backend = arch_pci_backend();
+    if (!backend || !backend->write32) {
+        return;
+    }
+    enum pci_error_scope scope = PCI_ERROR_FUNCTION;
+    backend->write32(0, (uint8_t)bus, (uint8_t)dev, (uint8_t)func, (uint16_t)(offset & ~3), value, &scope);
 }
 
 void pci_config_writeb(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset, uint8_t value)
 {
-    arch_outd(PCI_CONFIG_ADDR, pci_make_addr(bus, dev, func, offset));
-    arch_outb(value, PCI_CONFIG_DATA + (offset & 3));
+    const struct pci_backend *backend = arch_pci_backend();
+    if (!backend || !backend->read32 || !backend->write32) {
+        return;
+    }
+    enum pci_error_scope scope = PCI_ERROR_FUNCTION;
+    uint32_t dword = 0;
+    if (backend->read32(0, (uint8_t)bus, (uint8_t)dev, (uint8_t)func, (uint16_t)(offset & ~3), &dword, &scope) == 0) {
+        uint32_t shift = (offset & 3) * 8;
+        dword = (dword & ~(0xFFU << shift)) | ((uint32_t)value << shift);
+        backend->write32(0, (uint8_t)bus, (uint8_t)dev, (uint8_t)func, (uint16_t)(offset & ~3), dword, &scope);
+    }
 }
 
-// 16-bit config access.  PCI capability structures are byte-addressed
-// (e.g. MSI-X Message Control sits at cap_ptr + 2), so a 32-bit access
-// through pci_make_addr (which forces dword alignment via offset & 0xFC)
-// would read/write the wrong dword and the MSI-X enable bit would never
-// be set — QEMU then treats the device as non-MSI-X and never raises an
-// interrupt.  Use the data-port byte lanes for true 16-bit accesses.
 uint16_t pci_config_readw(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset)
 {
-    arch_outd(PCI_CONFIG_ADDR, pci_make_addr(bus, dev, func, offset));
-    return arch_inw(PCI_CONFIG_DATA + (offset & 2));
+    const struct pci_backend *backend = arch_pci_backend();
+    if (!backend || !backend->read32) {
+        return 0xFFFFU;
+    }
+    enum pci_error_scope scope = PCI_ERROR_FUNCTION;
+    uint32_t dword = 0;
+    if (backend->read32(0, (uint8_t)bus, (uint8_t)dev, (uint8_t)func, (uint16_t)(offset & ~3), &dword, &scope) != 0) {
+        return 0xFFFFU;
+    }
+    return (uint16_t)((dword >> ((offset & 2) * 8)) & 0xFFFFU);
 }
 
 void pci_config_writew(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset, uint16_t value)
 {
-    arch_outd(PCI_CONFIG_ADDR, pci_make_addr(bus, dev, func, offset));
-    arch_outw(value, PCI_CONFIG_DATA + (offset & 2));
+    const struct pci_backend *backend = arch_pci_backend();
+    if (!backend || !backend->read32 || !backend->write32) {
+        return;
+    }
+    enum pci_error_scope scope = PCI_ERROR_FUNCTION;
+    uint32_t dword = 0;
+    if (backend->read32(0, (uint8_t)bus, (uint8_t)dev, (uint8_t)func, (uint16_t)(offset & ~3), &dword, &scope) == 0) {
+        uint32_t shift = (offset & 2) * 8;
+        dword = (dword & ~(0xFFFFU << shift)) | ((uint32_t)value << shift);
+        backend->write32(0, (uint8_t)bus, (uint8_t)dev, (uint8_t)func, (uint16_t)(offset & ~3), dword, &scope);
+    }
 }
 
 // ── Device discovery ──────────────────────────────────────

@@ -1,6 +1,9 @@
-/* hosttests/mock/arch9/pci_runtime.h — mock environment for PCI driver model tests */
 #ifndef ARCH9_PCI_RUNTIME_H
 #define ARCH9_PCI_RUNTIME_H
+
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
 
 #include "test_platform.h"
 #include <errno.h>

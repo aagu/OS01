@@ -82,7 +82,7 @@ endif
 # Architecture C and asm sources: explicit, one-level responsibility groups.
 ARCH_SOURCE_DIRS := boot intr memory smp cpu platform runtime
 ifeq ($(ARCH),x86_64)
-ARCH_SOURCE_DIRS := intr memory smp cpu platform
+ARCH_SOURCE_DIRS := intr memory smp cpu platform bus
 endif
 ARCH_C_SOURCES := $(wildcard $(ARCHDIR)/*.c) \
     $(foreach dir,$(ARCH_SOURCE_DIRS),$(wildcard $(ARCHDIR)/$(dir)/*.c))

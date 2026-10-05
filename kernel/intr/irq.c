@@ -24,6 +24,12 @@ int32_t register_irq(uint32_t gsi, void * arg,
         return 0;
     }
 
+    irq_desc_t *p = &irq_table[gsi];
+    if (p->handler != NULL || p->controller != NULL) {
+        debug_irq("IRQ: GSI %u already occupied\n", gsi);
+        return 0;
+    }
+
     hw_int_controller_t *controller = arch_irq_select_controller(gsi);
     if (controller == NULL) {
         debug_irq("IRQ: no controller available for GSI %u\n", gsi);
@@ -31,8 +37,6 @@ int32_t register_irq(uint32_t gsi, void * arg,
     }
 
     uint64_t vector = arch_irq_gsi_to_vector(gsi);
-
-    irq_desc_t *p = &irq_table[gsi];
 
     p->controller = controller;
     strcpy(p->irq_name, irq_name);

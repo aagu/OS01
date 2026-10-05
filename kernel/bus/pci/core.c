@@ -515,6 +515,323 @@ struct pci_device *pci_device_lookup(uint16_t domain, uint8_t bus, uint8_t slot,
     return NULL;
 }
 
+int pci_bar_window(const struct pci_device *pdev, unsigned int index, enum pci_bar_kind required,
+                   uint64_t offset, uint64_t length, uint64_t *physical)
+{
+    if (!pdev || !physical || length == 0) {
+        return -EINVAL;
+    }
+    if (index >= 6) {
+        return -EINVAL;
+    }
+    if (required == PCI_BAR_NONE || required == PCI_BAR_UPPER) {
+        return -EINVAL;
+    }
+
+    const struct pci_bar *bar = &pdev->bars[index];
+    if (!bar->valid || bar->kind == PCI_BAR_NONE || bar->kind == PCI_BAR_UPPER) {
+        return -EINVAL;
+    }
+
+    /* I/O and MMIO cannot be mixed */
+    if (required == PCI_BAR_IO) {
+        if (bar->kind != PCI_BAR_IO) {
+            return -EINVAL;
+        }
+    } else if (required == PCI_BAR_MMIO32) {
+        if (bar->kind != PCI_BAR_MMIO32 && bar->kind != PCI_BAR_MMIO64) {
+            return -EINVAL;
+        }
+    } else if (required == PCI_BAR_MMIO64) {
+        if (bar->kind != PCI_BAR_MMIO64 && bar->kind != PCI_BAR_MMIO32) {
+            return -EINVAL;
+        }
+    } else {
+        return -EINVAL;
+    }
+
+    /* Check integer overflow for offset + length */
+    if (offset + length < offset) {
+        return -EINVAL;
+    }
+
+    /* Check integer overflow for bar->address + offset + length */
+    if (bar->address + offset + length < bar->address) {
+        return -EINVAL;
+    }
+
+    if (required == PCI_BAR_MMIO32) {
+        if (bar->address + offset + length > 0x100000000ULL) {
+            return -EOVERFLOW;
+        }
+    }
+
+    *physical = bar->address + offset;
+    return 0;
+}
+
+int pci_config_read32(struct pci_device *pdev, uint16_t offset, uint32_t *out)
+{
+    if (!pdev || !out || (offset & 3) != 0 || offset > 252) {
+        return -EINVAL;
+    }
+    const struct pci_backend *backend = arch_pci_backend();
+    if (!backend || !backend->read32) {
+        return BUS_UNAVAILABLE;
+    }
+    enum pci_error_scope scope = PCI_ERROR_FUNCTION;
+    return backend->read32(pdev->domain, pdev->bus, pdev->slot, pdev->fn, offset, out, &scope);
+}
+
+int pci_config_write32(struct pci_device *pdev, uint16_t offset, uint32_t value)
+{
+    if (!pdev || (offset & 3) != 0 || offset > 252) {
+        return -EINVAL;
+    }
+    const struct pci_backend *backend = arch_pci_backend();
+    if (!backend || !backend->write32) {
+        return BUS_UNAVAILABLE;
+    }
+    enum pci_error_scope scope = PCI_ERROR_FUNCTION;
+    return backend->write32(pdev->domain, pdev->bus, pdev->slot, pdev->fn, offset, value, &scope);
+}
+
+int pci_set_bus_master(struct pci_device *pdev, bool enabled)
+{
+    if (!pdev) {
+        return -EINVAL;
+    }
+    uint32_t reg = 0;
+    int rc = pci_config_read32(pdev, 0x04, &reg);
+    if (rc != 0) {
+        return rc;
+    }
+    if (enabled) {
+        reg |= (1U << 2);
+    } else {
+        reg &= ~(1U << 2);
+    }
+    return pci_config_write32(pdev, 0x04, reg);
+}
+
+int pci_set_decode(struct pci_device *pdev, bool io, bool mmio)
+{
+    if (!pdev) {
+        return -EINVAL;
+    }
+    uint32_t reg = 0;
+    int rc = pci_config_read32(pdev, 0x04, &reg);
+    if (rc != 0) {
+        return rc;
+    }
+    if (io) {
+        reg |= (1U << 0);
+    } else {
+        reg &= ~(1U << 0);
+    }
+    if (mmio) {
+        reg |= (1U << 1);
+    } else {
+        reg &= ~(1U << 1);
+    }
+    return pci_config_write32(pdev, 0x04, reg);
+}
+
+int pci_set_intx(struct pci_device *pdev, bool enabled)
+{
+    if (!pdev) {
+        return -EINVAL;
+    }
+    uint32_t reg = 0;
+    int rc = pci_config_read32(pdev, 0x04, &reg);
+    if (rc != 0) {
+        return rc;
+    }
+    if (enabled) {
+        reg &= ~(1U << 10);
+    } else {
+        reg |= (1U << 10);
+    }
+    return pci_config_write32(pdev, 0x04, reg);
+}
+
+int pci_route_gsi(struct pci_device *pdev, uint32_t *out)
+{
+    if (!pdev || !out) {
+        return -EINVAL;
+    }
+    const struct pci_backend *backend = arch_pci_backend();
+    if (!backend || !backend->route_gsi) {
+        return BUS_UNAVAILABLE;
+    }
+    return backend->route_gsi(pdev, out);
+}
+
+int pci_msix_enable(struct pci_device *pdev, uint8_t vector)
+{
+    if (!pdev) {
+        return -EINVAL;
+    }
+
+    uint32_t cmd_status = 0;
+    int rc = pci_config_read32(pdev, 0x04, &cmd_status);
+    if (rc != 0) {
+        return rc;
+    }
+    if (!(cmd_status & (1U << 20))) {
+        return -ENOTSUP;
+    }
+
+    uint32_t cap_ptr_reg = 0;
+    rc = pci_config_read32(pdev, 0x34, &cap_ptr_reg);
+    if (rc != 0) {
+        return rc;
+    }
+    uint8_t cap_ptr = (uint8_t)(cap_ptr_reg & 0xFF);
+
+    bool visited[256] = {0};
+    unsigned int steps = 0;
+    uint8_t msix_cap_ptr = 0;
+    uint32_t msix_dword = 0;
+
+    while (cap_ptr != 0) {
+        if (cap_ptr < 0x40 || (cap_ptr & 3) != 0 || cap_ptr > 0xFC) {
+            return -EINVAL;
+        }
+        if (visited[cap_ptr]) {
+            return -ELOOP;
+        }
+        visited[cap_ptr] = true;
+        if (++steps > 48) {
+            return -ELOOP;
+        }
+
+        uint32_t dword = 0;
+        rc = pci_config_read32(pdev, cap_ptr, &dword);
+        if (rc != 0) {
+            return rc;
+        }
+
+        uint8_t cap_id = (uint8_t)(dword & 0xFF);
+        if (cap_id == 0x11) {
+            msix_cap_ptr = cap_ptr;
+            msix_dword = dword;
+            break;
+        }
+        cap_ptr = (uint8_t)((dword >> 8) & 0xFF);
+    }
+
+    if (msix_cap_ptr == 0) {
+        return -ENOTSUP;
+    }
+
+    uint32_t table_reg = 0;
+    rc = pci_config_read32(pdev, msix_cap_ptr + 4, &table_reg);
+    if (rc != 0) {
+        return rc;
+    }
+
+    uint8_t bir = (uint8_t)(table_reg & 0x07);
+    uint32_t tbl_off = table_reg & ~0x07U;
+
+    if (bir >= 6) {
+        return -EINVAL;
+    }
+
+    uint64_t table_phys = 0;
+    rc = pci_bar_window(pdev, bir, pdev->bars[bir].kind, tbl_off, 16, &table_phys);
+    if (rc != 0) {
+        return rc;
+    }
+    if (pdev->bars[bir].kind != PCI_BAR_MMIO32 && pdev->bars[bir].kind != PCI_BAR_MMIO64) {
+        return -EINVAL;
+    }
+
+    void *table_virt = NULL;
+    rc = arch_pci_msix_map(pdev, table_phys, &table_virt);
+    if (rc != 0 || !table_virt) {
+        return (rc != 0) ? rc : -ENOMEM;
+    }
+
+    volatile uint32_t *entry = (volatile uint32_t *)table_virt;
+    uint32_t msi_addr = arch_pci_msi_address(pdev);
+    entry[0] = msi_addr;
+    entry[1] = 0;
+    entry[2] = (uint32_t)vector;
+    entry[3] = 0;
+
+    arch_pci_msix_unmap(pdev, table_virt);
+
+    msix_dword |= 0x80000000U;
+    return pci_config_write32(pdev, msix_cap_ptr, msix_dword);
+}
+
+int pci_interrupts_disable(struct pci_device *pdev)
+{
+    if (!pdev) {
+        return -EINVAL;
+    }
+
+    uint32_t cmd_status = 0;
+    int rc = pci_config_read32(pdev, 0x04, &cmd_status);
+    if (rc != 0) {
+        return rc;
+    }
+
+    if (cmd_status & (1U << 20)) {
+        uint32_t cap_ptr_reg = 0;
+        rc = pci_config_read32(pdev, 0x34, &cap_ptr_reg);
+        if (rc != 0) {
+            return rc;
+        }
+        uint8_t cap_ptr = (uint8_t)(cap_ptr_reg & 0xFF);
+
+        bool visited[256] = {0};
+        unsigned int steps = 0;
+
+        while (cap_ptr != 0) {
+            if (cap_ptr < 0x40 || (cap_ptr & 3) != 0 || cap_ptr > 0xFC) {
+                return -EINVAL;
+            }
+            if (visited[cap_ptr]) {
+                return -ELOOP;
+            }
+            visited[cap_ptr] = true;
+            if (++steps > 48) {
+                return -ELOOP;
+            }
+
+            uint32_t dword = 0;
+            rc = pci_config_read32(pdev, cap_ptr, &dword);
+            if (rc != 0) {
+                return rc;
+            }
+
+            uint8_t cap_id = (uint8_t)(dword & 0xFF);
+            if (cap_id == 0x05) {
+                if (dword & (1U << 16)) {
+                    dword &= ~(1U << 16);
+                    rc = pci_config_write32(pdev, cap_ptr, dword);
+                    if (rc != 0) {
+                        return rc;
+                    }
+                }
+            } else if (cap_id == 0x11) {
+                if (dword & (1U << 31)) {
+                    dword &= ~(1U << 31);
+                    rc = pci_config_write32(pdev, cap_ptr, dword);
+                    if (rc != 0) {
+                        return rc;
+                    }
+                }
+            }
+            cap_ptr = (uint8_t)((dword >> 8) & 0xFF);
+        }
+    }
+
+    return pci_set_intx(pdev, false);
+}
+
 #ifdef OS01_HOST_TEST
 void pci_core_reset_for_test(void)
 {
