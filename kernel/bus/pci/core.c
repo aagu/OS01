@@ -112,7 +112,9 @@ static int pci_scan_function(const struct pci_backend *backend, uint16_t domain,
         pdev->dev.state = DEV_FAILED;
         pdev->dev.last_error = rc;
         pdev->enum_error = true;
-        insert_device_sorted(pdev);
+        if (insert_device_sorted(pdev) != 0) {
+            kfree(pdev);
+        }
         if (out_present) {
             *out_present = true;
         }
@@ -154,7 +156,9 @@ static int pci_scan_function(const struct pci_backend *backend, uint16_t domain,
         pdev->dev.state = DEV_FAILED;
         pdev->dev.last_error = rc;
         pdev->enum_error = true;
-        insert_device_sorted(pdev);
+        if (insert_device_sorted(pdev) != 0) {
+            kfree(pdev);
+        }
         return 0;
     }
     uint32_t class_code = (class_reg >> 8) & 0xFFFFFF;
@@ -183,7 +187,9 @@ static int pci_scan_function(const struct pci_backend *backend, uint16_t domain,
         pdev->dev.state = DEV_FAILED;
         pdev->dev.last_error = rc;
         pdev->enum_error = true;
-        insert_device_sorted(pdev);
+        if (insert_device_sorted(pdev) != 0) {
+            kfree(pdev);
+        }
         return 0;
     }
     uint8_t header_type = (hdr_reg >> 16) & 0xFF;
@@ -283,14 +289,22 @@ static int pci_scan_function(const struct pci_backend *backend, uint16_t domain,
     } else if (hdr_layout == 1) {
         /* PCI-to-PCI Bridge */
         uint32_t bus_reg = 0;
-        if (backend->read32(domain, bus, slot, fn, 0x18, &bus_reg, &scope) == 0) {
+        if (backend->read32(domain, bus, slot, fn, 0x18, &bus_reg, &scope) != 0) {
+            pdev->enum_error = true;
+            pdev->dev.state = DEV_FAILED;
+            pdev->dev.last_error = -EIO;
+        } else {
             uint8_t secondary = (bus_reg >> 8) & 0xFF;
             uint8_t subordinate = (bus_reg >> 16) & 0xFF;
             if (secondary == 0 || secondary == bus || secondary > subordinate) {
                 /* Invalid bridge, isolate branch */
                 pdev->enum_error = true;
             } else {
-                insert_device_sorted(pdev);
+                int ins_rc = insert_device_sorted(pdev);
+                if (ins_rc != 0) {
+                    kfree(pdev);
+                    return ins_rc;
+                }
                 for (uint16_t b = secondary; b <= subordinate; b++) {
                     if (!bus_is_visited(domain, (uint8_t)b)) {
                         bus_mark_visited(domain, (uint8_t)b);
@@ -305,7 +319,11 @@ static int pci_scan_function(const struct pci_backend *backend, uint16_t domain,
         }
     }
 
-    insert_device_sorted(pdev);
+    int ins_rc = insert_device_sorted(pdev);
+    if (ins_rc != 0) {
+        kfree(pdev);
+        return ins_rc;
+    }
     return 0;
 }
 
@@ -400,10 +418,14 @@ int pci_register_driver(const struct pci_driver *driver)
 
 int pci_bind_all(void)
 {
+    if (!s_pci_enumerated) {
+        return -EIO;
+    }
+
     int fatal_result = 0;
 
     for (struct pci_device *pdev = s_pci_devices_head; pdev; pdev = pdev->next) {
-        if (pdev->dev.state == DEV_FAILED || pdev->enum_error) {
+        if (pdev->dev.state == DEV_BOUND || pdev->dev.state == DEV_FAILED || pdev->enum_error) {
             continue;
         }
 

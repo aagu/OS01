@@ -772,6 +772,55 @@ TEST_FUNC(test_null_backend_and_device_unsafe)
     assert_eq(retained, pdev->dev.retained_owner);
 }
 
+/* ── Test 10: Binding guards and DEV_BOUND idempotency ──────────── */
+TEST_FUNC(test_bind_guards_and_idempotency)
+{
+    fake_reset();
+
+    /* pci_bind_all without successful enumeration must return -EIO */
+    assert_eq(-EIO, pci_bind_all());
+
+    /* Enumerate 1 device and bind */
+    fake_add_root(0, 0);
+    s_fake_backend.root_count = s_fake_root_count;
+    fake_add_device(0, 0, 1, 0, 0x1234, 0x5678, 0x010601, 0);
+
+    t1_probe_calls = 0;
+    assert_eq(0, pci_register_driver(&t1_driver));
+    assert_eq(0, pci_enumerate());
+    assert_eq(1, pci_device_count());
+
+    assert_eq(0, pci_bind_all());
+    assert_eq(1, t1_probe_calls);
+    assert_eq(DEV_BOUND, pci_device_get(0)->dev.state);
+
+    /* Second pci_bind_all must skip DEV_BOUND and NOT call probe again */
+    assert_eq(0, pci_bind_all());
+    assert_eq(1, t1_probe_calls);
+}
+
+/* ── Test 11: Bridge config read failure ─────────────────────────── */
+TEST_FUNC(test_bridge_read_error)
+{
+    fake_reset();
+    fake_add_root(0, 0);
+    s_fake_backend.root_count = s_fake_root_count;
+
+    struct fake_device_desc *b = fake_add_device(0, 0, 1, 0, 0x8086, 0x1234, 0x060400, 0x01);
+    b->fail_read_offset = 0x18; /* offset 0x18 bus registers read fails */
+    b->fail_scope = PCI_ERROR_FUNCTION;
+    b->fail_errno = -EIO;
+
+    assert_eq(0, pci_enumerate());
+    assert_eq(1, pci_device_count());
+
+    struct pci_device *pdev = pci_device_get(0);
+    assert_true(pdev != NULL);
+    assert_true(pdev->enum_error);
+    assert_eq(DEV_FAILED, pdev->dev.state);
+    assert_eq(-EIO, pdev->dev.last_error);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_class_mask_wildcard_first_entry),
     TEST_ENTRY(test_enodev_unbound),
@@ -782,6 +831,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_probe_cleanup_contract),
     TEST_ENTRY(test_registry_oom_and_duplicates),
     TEST_ENTRY(test_null_backend_and_device_unsafe),
+    TEST_ENTRY(test_bind_guards_and_idempotency),
+    TEST_ENTRY(test_bridge_read_error),
 TEST_LIST_END
 
 int main(void)
