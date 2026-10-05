@@ -94,7 +94,7 @@ void remove(struct pci_device *pdev);
 登记只登记描述符，不扫描、不初始化硬件。枚举后按 domain/BDF 顺序绑定；重复驱动名、重复 BDF、重复登记要拒绝。多个驱动匹配同设备时：精确 vendor/device 条目优先于 class 条目；同等级跨驱动冲突记为 FAILED，不能依赖链接顺序选赢家。单个驱动多个条目按显式表顺序选首条。probe 失败后不自动交给其他驱动。
 
 - AHCI 只匹配 class/subclass/prog_if = `01/06/01`，删除“任何 SATA 控制器”fallback。
-- e1000 首期仅登记当前明确支持并纳入测试的设备 ID（现有 QEMU 0x8086:0x100e）；额外型号逐个验证后加入。
+- e1000 首期仅登记当前明确支持并纳入测试的设备 ID（QEMU e1000 为 0x8086:0x100e；现有 run/network 的 e1000e 为 0x8086:0x10d3，按实现计划迁移默认设备为 e1000，不扩大首期 ID）；额外型号逐个验证后加入。
 - virtio-net 首期只登记支持的 transitional/legacy ID `0x1af4:0x1000`，并验证 I/O BAR/transport。modern-only `0x1041` 留为 UNBOUND；vendor 相同不代表 transport 受支持。
 
 BAR 的空间类型、索引、地址与已验证范围由 PCI 层提供；驱动验证自身所需区域。首期不重新分配 BAR，不为获得 size 对运行中设备做破坏性 sizing。已知固定寄存器窗口可作为驱动所需映射长度，并检查类型、地址有效性及算术溢出。config 访问必须串行化，避免 CF8/CFC 配对被其他 CPU 打断。
