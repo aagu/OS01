@@ -12,6 +12,7 @@
 #include <block/blockdev.h>
 #include <string.h>
 #include <stdint.h>
+#include <errno.h>
 
 // ── Constants ─────────────────────────────────────────────
 
@@ -175,9 +176,38 @@ void ahci_init(void)
     debug_block("AHCI: initialization complete\n");
 }
 
+// ── Block device operations for AHCI ─────────────────────
+
+static int ahci_bdev_read(block_device_t *dev, uint64_t lba, uint32_t count, void *buf)
+{
+    ahci_port_t *ap = (ahci_port_t *)dev->private_data;
+    if (!ap) return -EINVAL;
+    return ahci_read_sectors(ap->port_num, lba, count, buf);
+}
+
+static int ahci_bdev_write(block_device_t *dev, uint64_t lba, uint32_t count, const void *buf)
+{
+    ahci_port_t *ap = (ahci_port_t *)dev->private_data;
+    if (!ap) return -EINVAL;
+    return ahci_write_sectors(ap->port_num, lba, count, buf);
+}
+
+static int ahci_bdev_flush(block_device_t *dev)
+{
+    (void)dev;
+    return 0;
+}
+
+static const struct block_device_ops ahci_bdev_ops = {
+    .read = ahci_bdev_read,
+    .write = ahci_bdev_write,
+    .flush = ahci_bdev_flush,
+};
+
 // ── Port initialization ───────────────────────────────────
 
 static void ahci_port_init(HBA_MEM *hba, int port_num)
+
 {
     HBA_PORT *port = port_regs(hba, port_num);
     ahci_port_t *ap = &ahci_ports[port_num];
@@ -261,8 +291,19 @@ static void ahci_port_init(HBA_MEM *hba, int port_num)
                        ap->lba48 ? " (LBA48)" : "");
 
         // Register as a block device (e.g., "hda", "hdb")
-        char name[4] = { 'h', 'd', (char)('a' + port_num), '\0' };
-        block_device_register(name, port_num, ap->sector_count);
+        char name[BLOCKDEV_NAME_MAX] = { 'h', 'd', (char)('a' + port_num), '\0' };
+        struct block_device_desc desc = {
+            .name = name,
+            .sector_count = ap->sector_count,
+            .sector_size = 512,
+            .ops = &ahci_bdev_ops,
+            .private_data = ap,
+            .parent = NULL,
+            .kind = BLOCK_DISK,
+        };
+        block_device_t *bdev = NULL;
+        block_device_register(&desc, &bdev);
+
     } else {
         debug_block("AHCI: port %d: IDENTIFY failed\n", port_num);
     }

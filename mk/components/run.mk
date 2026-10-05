@@ -329,7 +329,7 @@ TEST_SELFTEST_IMAGE := $(BUILD_DIR)/image/selftest/disk.img
 # overridable.
 KERNEL_SELFTEST_SMP ?= 4
 
-.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-device test-gfx-client test-gfx-primitives test-m1-host
+.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-device test-gfx-client test-gfx-primitives test-m1-host test-arch9-host
 test-host:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,run $(OS01_SUBMAKE_ARGS))
@@ -391,6 +391,23 @@ test-m1-host: $(if $(CASE),_test-m1-host-run-$(CASE),$(foreach c,$(M1_CASES),_te
 	    m1-contract-x86) echo "  [test-m1-host] CASE=$(CASE)";; \
 	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(M1_CASES)" >&2; exit 1;; \
 	  esac
+
+# ARCH-9 driver model host tests.
+.PHONY: test-arch9-host _test-arch9-host-run-block
+ARCH9_CASES := block
+_test-arch9-host-run-block:
+	@echo "  [test-arch9-host] block"
+	$(call os01_submake,hosttests,test-block $(OS01_SUBMAKE_ARGS))
+test-arch9-host: CASE ?=
+test-arch9-host: CASE := $(CASE)
+test-arch9-host: $(if $(CASE),_test-arch9-host-run-$(CASE),$(foreach c,$(ARCH9_CASES),_test-arch9-host-run-$(c)))
+	$(call require_capability,rootfs)
+	@case "$(CASE)" in \
+	    "") echo "  [test-arch9-host] full ARCH-9 group: $(ARCH9_CASES)";; \
+	    block) echo "  [test-arch9-host] CASE=$(CASE)";; \
+	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(ARCH9_CASES)" >&2; exit 1;; \
+	  esac
+
 # Focused hosttest for the gfx 2D API plan Task 1 — per-file device
 # ioctl/release lifecycle.  Runs the single TEST_BINS entry
 # (test_gfx_file_lifecycle.elf) and asserts the contract spelled out

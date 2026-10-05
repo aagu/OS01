@@ -113,9 +113,10 @@ TEST_BINS := \
     $(TEST_BLD)/test_m1_install.elf $(TEST_BLD)/test_m1_cleanup.elf \
     $(TEST_BLD)/test_m1_publish.elf \
     $(TEST_BLD)/test_syscall_dispatch.elf \
-    $(TEST_BLD)/test_compat_linux.elf
+    $(TEST_BLD)/test_compat_linux.elf \
+    $(TEST_BLD)/test_block_device_ops.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test-block
 
 all: $(TEST_BINS)
 
@@ -1469,3 +1470,23 @@ $(TEST_BLD)/test_m1_arena_exhaust.o: $(TEST_CASES)/test_m1_arena_exhaust.c $(TES
 	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
 $(TEST_BLD)/test_m1_arena_exhaust.elf: $(TEST_BLD)/test_m1_arena_exhaust.o $(TEST_BLD)/early_arena_exhaust_production.o $(TEST_BLD)/pmm_boot_production.o
 	$(HOST_CC) -o $@ $^
+
+# ARCH-9 Phase A: Block device ops & partition wrapping
+BLOCK_HOST_CFLAGS := $(HOST_CFLAGS) -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
+    -include $(TEST_MOCK)/arch9/block_runtime.h -DOS01_HOST_TEST
+
+
+$(TEST_BLD)/blockdev_production.o: $(TESTS_DIR)/kernel/block/blockdev.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BLOCK_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_block_device_ops.o: $(TEST_CASES)/test_block_device_ops.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BLOCK_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_block_device_ops.elf: $(TEST_BLD)/test_block_device_ops.o $(TEST_BLD)/blockdev_production.o $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+test-block: $(TEST_BLD)/test_block_device_ops.elf
+	$<
+

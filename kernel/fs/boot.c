@@ -55,19 +55,31 @@ static void register_block_devices(void)
 // Preserves the original log strings:
 //   "EXT2: mount failed — / not available\n"
 //   "FAT32: /boot mount failed\n"
+static block_device_t *find_first_disk(void)
+{
+    int n = block_device_count();
+    for (int i = 0; i < n; i++) {
+        block_device_t *dev = block_device_get(i);
+        if (dev && dev->kind == BLOCK_DISK)
+            return dev;
+    }
+    return NULL;
+}
+
 static void mount_partitioned_disk(void)
 {
-    if (block_device_count() == 0) return;
+    block_device_t *disk = find_first_disk();
+    if (!disk) return;
 
-    gpt_info_t *gpt = gpt_scan(block_device_get(0));
+    gpt_info_t *gpt = gpt_scan(disk);
     if (!gpt) {
         // Fallback: old single-FAT32 layout (whole disk is FAT32).
-        block_device_t *dev = block_device_get(0);
         fat32_fs_t *fs = NULL;
-        if (0 == fat32_init(dev, &fs))
-            vfs_mount("/", dev, &fat_vfs_ops, fs);
+        if (0 == fat32_init(disk, &fs))
+            vfs_mount("/", disk, &fat_vfs_ops, fs);
         return;
     }
+
 
     // Dual-partition layout:
     //   gpt->partitions[0] = hda1 (FAT32 ESP) → /boot

@@ -19,6 +19,8 @@ static uint32_t gpt_crc32(const uint8_t *data, size_t len)
     return crc ^ 0xFFFFFFFF;
 }
 
+#include <errno.h>
+
 // ── Partition block device wrapper ──────────────────────
 typedef struct partition_ctx {
     block_device_t *parent;
@@ -30,29 +32,48 @@ static int partition_read(block_device_t *dev, uint64_t lba,
                           uint32_t count, void *buf)
 {
     partition_ctx_t *ctx = (partition_ctx_t *)dev->private_data;
-    if (lba + count > ctx->length) {
+    if (!ctx || !ctx->parent) return -EINVAL;
+    if (lba + count < lba || lba + count > ctx->length) {
         debug_block("gpt: read past end of partition\n");
-        return -1;
+        return -EINVAL;
     }
-    return ctx->parent->read(ctx->parent, ctx->offset_lba + lba, count, buf);
+    return block_device_read(ctx->parent, ctx->offset_lba + lba, count, buf);
 }
 
 static int partition_write(block_device_t *dev, uint64_t lba,
                            uint32_t count, const void *buf)
 {
     partition_ctx_t *ctx = (partition_ctx_t *)dev->private_data;
-    if (lba + count > ctx->length) {
+    if (!ctx || !ctx->parent) return -EINVAL;
+    if (lba + count < lba || lba + count > ctx->length) {
         debug_block("gpt: write past end of partition\n");
-        return -1;
+        return -EINVAL;
     }
-    return ctx->parent->write(ctx->parent, ctx->offset_lba + lba, count, buf);
+    return block_device_write(ctx->parent, ctx->offset_lba + lba, count, buf);
 }
+
+static int partition_flush(block_device_t *dev)
+{
+    partition_ctx_t *ctx = (partition_ctx_t *)dev->private_data;
+    if (!ctx || !ctx->parent) return -EINVAL;
+    return block_device_flush(ctx->parent);
+}
+
+static const struct block_device_ops partition_ops = {
+    .read  = partition_read,
+    .write = partition_write,
+    .flush = partition_flush,
+};
 
 // Create a partition wrapper block device.
 // Name: parent name + partition index (1-based), e.g. "hda1", "hda2".
 static block_device_t *block_device_create_partition(
     block_device_t *parent, uint64_t offset_lba, uint64_t length, int part_idx)
 {
+    if (!parent || parent->sector_size != 512) return NULL;
+    if (offset_lba + length < offset_lba || offset_lba + length > parent->sector_count)
+        return NULL;
+
     partition_ctx_t *ctx = kmalloc(sizeof(partition_ctx_t));
     if (!ctx) return NULL;
     ctx->parent     = parent;
@@ -60,7 +81,7 @@ static block_device_t *block_device_create_partition(
     ctx->length     = length;
 
     // Build name: parent->name + partition index (1-based)
-    char name[16];
+    char name[BLOCKDEV_NAME_MAX];
     int nlen = strlen(parent->name);
     memcpy(name, parent->name, nlen);
     int digit_start = nlen;
@@ -68,17 +89,29 @@ static block_device_t *block_device_create_partition(
     // Convert part_idx to string
     char tmp[8]; int ti = 0;
     do { tmp[ti++] = '0' + (p % 10); p /= 10; } while (p > 0);
-    while (ti > 0) name[digit_start++] = tmp[--ti];
+    while (ti > 0 && digit_start < BLOCKDEV_NAME_MAX - 1) name[digit_start++] = tmp[--ti];
     name[digit_start] = '\0';
 
-    block_device_t *dev = block_device_register_raw(name, length, ctx);
-    if (!dev) { kfree(ctx); return NULL; }
+    struct block_device_desc desc = {
+        .name = name,
+        .sector_count = length,
+        .sector_size = 512,
+        .ops = &partition_ops,
+        .private_data = ctx,
+        .parent = parent,
+        .kind = BLOCK_PARTITION,
+    };
 
-    // Set custom hooks AFTER register_raw (which does not overwrite)
-    dev->read  = partition_read;
-    dev->write = partition_write;
+    block_device_t *dev = NULL;
+    int rc = block_device_register(&desc, &dev);
+    if (rc != 0 || !dev) {
+        kfree(ctx);
+        return NULL;
+    }
+
     return dev;
 }
+
 
 // ── GPT helpers ──────────────────────────────────────────
 static int guid_is_zero(const uint8_t *guid)
@@ -106,7 +139,7 @@ static void gpt_extract_name(const uint8_t *entry, int entry_size,
 // ── gpt_scan — main entry point ──────────────────────────
 gpt_info_t *gpt_scan(block_device_t *disk)
 {
-    if (!disk || !disk->present) return NULL;
+    if (!disk || !disk->present || disk->sector_size != 512) return NULL;
 
     // Phase 1: Read GPT header (LBA 1)
     uint8_t *hdr = kmalloc(512);
@@ -191,7 +224,7 @@ gpt_info_t *gpt_scan(block_device_t *disk)
 
         uint64_t start_lba = *(uint64_t *)(entry + 32);
         uint64_t end_lba   = *(uint64_t *)(entry + 40);
-        if (end_lba < start_lba) continue;
+        if (end_lba < start_lba || end_lba >= disk->sector_count) continue;
 
         uint64_t length = end_lba - start_lba + 1;
         gpt_partition_t *part = &info->partitions[info->count];
