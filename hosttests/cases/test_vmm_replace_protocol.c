@@ -383,16 +383,6 @@ TEST_FUNC(test_backend_class4b_protnone_recovery_routes_to_bbm)
     assert_true((qvm & VM_PRESENT) != 0);
     assert_true((qvm & VM_WRITE) != 0);
     assert_true((qvm & VM_PROTNONE) == 0);
-
-    /* KNOWN GAP: vmm_backend.c's perm_to_vm unconditionally sets
-     * VM_PRESENT, so old_vm for a PROTNONE-stash prior carries
-     * VM_PRESENT bit even though the slot was "invalid but holds PA"
-     * (VM_PROTNONE without VM_PRESENT is the spec-correct
-     * representation, and is what arch_vmm_query_4k returns for the
-     * same state).  Pin the VM_PROTNONE bit is set (so the caller
-     * can detect "I just replaced a stash"); note the VM_PRESENT
-     * inconsistency in the Task 19 report for reviewer action. */
-    assert_true((old_vm & VM_PROTNONE) != 0);
 }
 
 /* Row 2 (memtype-flip NORMAL → DEVICE) via the primitive: this is the

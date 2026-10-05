@@ -151,7 +151,12 @@ static void scratch_root_free(uint64_t *root, const uint64_t *data_pas,
         if ((l1e & 3) == 3) {
             uint64_t l1e_pa = l1e & M3_DESC_PA_MASK;
             uint64_t *l2 = (uint64_t *)Phy_To_Virt(l1e_pa);
-            for (unsigned j = 0; j < 2; j++) {
+            /* Walk the full L2: any section may have populated any
+             * PMD slot, and a split_block_2m installs an L3 table at
+             * the split slot. Unused entries are 0 and skipped, so
+             * the full 512-entry sweep is safe (Task 22 follow-up:
+             * the old j < 2 bound only covered PMD[0..1]). */
+            for (unsigned j = 0; j < 512u; j++) {
                 uint64_t l2e = l2[j];
                 if ((l2e & 3) == 3)
                     free_4k_page(l2e & M3_DESC_PA_MASK);

@@ -213,7 +213,7 @@ TEST_FUNC(test_pa_zero_raw_zero_returns_einval)
 }
 
 /* Case 2b: raw TTBR1 has non-base bits but masked PA == 0.
- * AARCH64_TTBR_BASE_MASK = 0x000000fffffff000; only bits [47:12]
+ * AARCH64_TTBR_BASE_MASK = 0x0000fffffffff000; only bits [47:12]
  * survive. A raw value with bits outside the mask but no base bits
  * yields PA = 0 → -EINVAL. We use 0x0000_0000_0000_0FFF (only
  * low non-base bits set, masked PA = 0). */
@@ -229,10 +229,10 @@ TEST_FUNC(test_pa_zero_mask_only_nonbase_returns_einval)
 
 /* Case 4: PA exactly at the 1 TiB limit (>= 1 TiB) → -EINVAL.
  * The spec's bound is "PA < 1 TiB" (PA_LIMIT = 0x10000000000); PA
- * == 1 TiB is rejected. The current AARCH64_TTBR_BASE_MASK drops
- * bit 40 (see file header note), so the masked base is 0 and the
- * pa == 0 check rejects it via a different code path; the
- * observable contract is still -EINVAL + kernel_map untouched. */
+ * == 1 TiB is rejected. The widened AARCH64_TTBR_BASE_MASK
+ * (0x0000fffffffff000, bits [47:12]) keeps bit 40, so the masked
+ * base is exactly PA_LIMIT and the PA >= 1 TiB bound check rejects
+ * it; the observable contract is -EINVAL + kernel_map untouched. */
 TEST_FUNC(test_pa_at_1tib_boundary_returns_einval)
 {
     g_violation_count = 0;
@@ -243,12 +243,12 @@ TEST_FUNC(test_pa_at_1tib_boundary_returns_einval)
     ASSERT_EQ_TRACKED(NULL, kernel_map);
 }
 
-/* Case 5: PA above 1 TiB with the low 4 KiB bit set, so the
- * current (buggy) AARCH64_TTBR_BASE_MASK leaves a non-zero base
- * after masking. This pins the PA < 1 TiB invariant end-to-end.
- * On the current (buggy) mask this case RED's — the kernel mask
- * needs widening to bits [47:12] (9 f's) for this assertion to
- * pass. */
+/* Case 5: PA above 1 TiB with the low 4 KiB bit set. This pins the
+ * PA < 1 TiB invariant end-to-end: the widened AARCH64_TTBR_BASE_MASK
+ * (0x0000fffffffff000, bits [47:12] — Task 24) preserves both bit 40
+ * and bit 12, so the masked base is non-zero and above PA_LIMIT and
+ * the bound check rejects it. (The pre-Task-24 7-f's mask cleared
+ * bit 40 and let this value slip through as pa = 0x1000.) */
 TEST_FUNC(test_pa_above_1tib_returns_einval)
 {
     g_violation_count = 0;

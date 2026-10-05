@@ -40,7 +40,9 @@ typedef struct vm_area_struct {
     list_t      list;
     uint64_t    vm_start;     // start VA (4KB aligned)
     uint64_t    vm_end;       // end VA (4KB aligned, exclusive)
-    uint64_t    vm_flags;     // VM_*
+    uint64_t    vm_flags;     // VMA_* flags (VMA_PROT_READ/WRITE/EXEC,
+                              // VMA_SHARED/ANON/... — see VMA_* above;
+                              // NOT the vmm.h VM_* PTE-bit family)
     uint64_t    vm_page_prot; // PAGE_* flags for PTE
     uint64_t    vm_pgoff;     // file offset in 4KB pages
     vfs_node_t *vm_file;      // NULL = anonymous
