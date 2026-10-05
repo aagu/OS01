@@ -577,7 +577,10 @@ static void test_quarantine_on_stop_failure(void)
     /* When stop times out, DMA must NOT be freed! */
     assert_eq(0, fake_free_pages_count);
     assert_true(fix.pdev.dev.quarantined);
+    assert_true(fix.pdev.driver_data != NULL);
+    assert_eq(fix.pdev.dev.retained_owner, (void *)port);
 
+    free(ctrl);
     teardown_fixture(&fix);
 }
 

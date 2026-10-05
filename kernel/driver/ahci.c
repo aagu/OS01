@@ -128,6 +128,7 @@ int ahci_port_stop_engine(struct ahci_port *port, bool boot_phase)
 void ahci_port_teardown_dma(struct ahci_port *port, bool boot_phase)
 {
     if (!port) return;
+    if (port->quarantined) return;
     int err = ahci_port_stop_engine(port, boot_phase);
     if (err != 0) {
         // Safe DMA quarantine: do not free pages if engine cannot be proven stopped
@@ -635,6 +636,7 @@ int ahci_probe(struct pci_device *pdev, const struct pci_device_id *id)
         ret = 0;
     }
     if (ret != 0) {
+        pci_set_decode(pdev, false, false);
         pci_set_bus_master(pdev, false);
         pdev->driver_data = NULL;
         kfree(ctrl);
@@ -730,8 +732,10 @@ void ahci_remove(struct pci_device *pdev)
     pci_set_bus_master(pdev, false);
 
     // 4. Private free
-    pdev->driver_data = NULL;
-    kfree(ctrl);
+    if (!pdev->dev.quarantined) {
+        pdev->driver_data = NULL;
+        kfree(ctrl);
+    }
 }
 
 // ── Transitional ahci_init() ──────────────────────────────
