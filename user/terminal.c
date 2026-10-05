@@ -257,7 +257,8 @@ int main(void)
         {.fd = tty_fd, .events = POLLIN},
         {.fd = pty_fd, .events = POLLIN}
     };
-    char buf[2048];
+    char *buf = (char *)malloc(2048);
+    if (!buf) exit(1);
     uint64_t last_present_ms = 0;
     int present_failures = 0;
     bool dirty_pending = false;
@@ -316,7 +317,7 @@ int main(void)
 
         // 3. Process keyboard input
         if (fds[0].revents & POLLIN) {
-            int n = read(tty_fd, buf, sizeof(buf));
+            int n = read(tty_fd, buf, 2048);
             if (n > 0) {
                 for (int i = 0; i < n; i++) {
                     if (buf[i] == '\n' || buf[i] == '\r') {
@@ -335,7 +336,7 @@ int main(void)
             bool shell_exited = false;
 
             while (drain_count < MAX_DRAIN_CHUNKS) {
-                int n = read(pty_fd, buf, sizeof(buf));
+                int n = read(pty_fd, buf, 2048);
                 if (n > 0) {
                     for (int i = 0; i < n; i++) {
                         if (term_core_input(&core, buf[i])) dirty_pending = true;
@@ -376,5 +377,6 @@ int main(void)
     gfx_close(gfx);
     close(pty_fd); close(tty_fd);
     if (serial_fd >= 0) close(serial_fd);
+    free(buf);
     return 0;
 }

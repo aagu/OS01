@@ -37,18 +37,20 @@ int main(void) {
     write(1, "request sent\n", 13);
 
     /* 5. recv response */
-    char buf[4096];
+    char *buf = (char *)malloc(4096);
+    if (!buf) { close(fd); exit(1); }
     for (int i = 0; i < 5; i++) {
         struct pollfd pfd = { .fd = fd, .events = POLLIN };
         int ready = poll(&pfd, 1, 5000);
         if (ready <= 0 || !(pfd.revents & (POLLIN | POLLHUP))) break;
-        int64_t n = read(fd, buf, sizeof(buf) - 1);
+        int64_t n = read(fd, buf, 4096 - 1);
         if (n <= 0) break;
         buf[n] = 0;
         write(1, buf, (uint64_t)n);
     }
     write(1, "\n--- done ---\n", 14);
 
+    free(buf);
     close(fd);
     exit(0);
 }

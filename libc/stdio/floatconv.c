@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include "stdio_internal.h"
 #include "floatconv.h"
 #include <stdint.h>
@@ -162,15 +163,25 @@ static void bi_divmod(const bigint *a, const bigint *b, bigint *q, bigint *r)
     }
 }
 
+struct round_ctx {
+    bigint a;
+    bigint q;
+    bigint num;
+    bigint den;
+    bigint r;
+    bigint half;
+};
+
 /* convert bigint to decimal ASCII (most-significant first) into buf; returns len */
-static int bi_to_dec(const bigint *a, char *buf, size_t cap)
+static int bi_to_dec(const bigint *a, char *buf, size_t cap, bigint *work)
 {
-    bigint t = *a;
+    bigint *t = work;
+    *t = *a;
     char tmp[128];
     int n = 0;
     int nonzero = 0;
     for (int i = 0; i < BIGINT_WORDS; i++)
-        if (t.w[i]) { nonzero = 1; break; }
+        if (t->w[i]) { nonzero = 1; break; }
     if (!nonzero) {
         if (cap > 0) buf[0] = '0';
         return 1;
@@ -178,14 +189,14 @@ static int bi_to_dec(const bigint *a, char *buf, size_t cap)
     while (nonzero) {
         uint64_t rem = 0;
         for (int i = BIGINT_WORDS - 1; i >= 0; i--) {
-            uint64_t cur = ((uint64_t)t.w[i]) + (rem << 32);
-            t.w[i] = (uint32_t)(cur / 10);
+            uint64_t cur = ((uint64_t)t->w[i]) + (rem << 32);
+            t->w[i] = (uint32_t)(cur / 10);
             rem = cur % 10;
         }
         if (n < (int)sizeof(tmp)) tmp[n++] = (char)('0' + rem);
         nonzero = 0;
         for (int i = 0; i < BIGINT_WORDS; i++)
-            if (t.w[i]) { nonzero = 1; break; }
+            if (t->w[i]) { nonzero = 1; break; }
     }
     int len = 0;
     for (int i = 0; i < n; i++)
@@ -201,45 +212,51 @@ static int bi_to_dec(const bigint *a, char *buf, size_t cap)
  */
 static int round_to_int(uint64_t mant, int exp2, int unit, bigint *out)
 {
-    bigint a;
+    struct round_ctx *ctx = (struct round_ctx *)malloc(sizeof(struct round_ctx));
+    if (!ctx) return 1;
+
     if (unit >= 0) {
-        bi_set_u64(&a, mant);
-        bi_mul_5pow(&a, unit);
+        bi_set_u64(&ctx->a, mant);
+        bi_mul_5pow(&ctx->a, unit);
         int shift = exp2 + unit;
         if (shift >= 0) {
-            bi_shl(&a, shift);
-            *out = a;
+            bi_shl(&ctx->a, shift);
+            *out = ctx->a;
+            free(ctx);
             return 0;
         } else {
             int k = -shift;
-            bigint q;
-            bi_shr(&a, k, &q);
+            bi_shr(&ctx->a, k, &ctx->q);
             /* ties-to-even rounding at the half = 2^(k-1) bit of the
              * original value `a`. Inspect bits directly (works for any k). */
             if (k > 0) {
                 int half_pos = k - 1;
-                int half_bit = (a.w[half_pos >> 5] >> (half_pos & 31)) & 1;
+                int half_bit = (ctx->a.w[half_pos >> 5] >> (half_pos & 31)) & 1;
                 if (half_bit) {
                     int lower_set = 0;
                     for (int i = 0; i <= (half_pos >> 5); i++) {
                         uint32_t mask = (i == (half_pos >> 5))
                             ? ((1u << (half_pos & 31)) - 1)
                             : 0xFFFFFFFFu;
-                        if (a.w[i] & mask) { lower_set = 1; break; }
+                        if (ctx->a.w[i] & mask) { lower_set = 1; break; }
                     }
-                    if (lower_set || (q.w[0] & 1)) {
+                    if (lower_set || (ctx->q.w[0] & 1)) {
                         uint32_t c = 1;
                         for (int i = 0; i < BIGINT_WORDS; i++) {
-                            uint32_t cur = q.w[i] + c;
-                            if (cur >= q.w[i]) c = 0; else c = 1;
-                            q.w[i] = cur;
+                            uint32_t cur = ctx->q.w[i] + c;
+                            if (cur >= ctx->q.w[i]) c = 0; else c = 1;
+                            ctx->q.w[i] = cur;
                             if (!c) break;
                         }
-                        if (c) return 1;
+                        if (c) {
+                            free(ctx);
+                            return 1;
+                        }
                     }
                 }
             }
-            *out = q;
+            *out = ctx->q;
+            free(ctx);
             return 0;
         }
     } else {
@@ -248,24 +265,22 @@ static int round_to_int(uint64_t mant, int exp2, int unit, bigint *out)
          * Cancel the 2^Q with 2^exp2: num = mant * 2^(exp2-Q) (left-shift if
          * exp2>=Q, else shift the 5^Q denominator by the remainder), den = 5^Q.
          * Result q is the true integer target (no residual scale). */
-        bigint num, den;
-        bi_set_u64(&num, mant);
-        bi_set_u64(&den, 1);
-        bi_mul_5pow(&den, Q);
+        bi_set_u64(&ctx->num, mant);
+        bi_set_u64(&ctx->den, 1);
+        bi_mul_5pow(&ctx->den, Q);
         int diff = exp2 - Q;
-        if (diff >= 0) bi_shl(&num, diff);
-        else           bi_shl(&den, -diff);
-        bigint q, r;
-        bi_divmod(&num, &den, &q, &r);
-        bigint half;
-        bi_shr(&den, 1, &half);
-        int c = bi_cmp(&r, &half);
+        if (diff >= 0) bi_shl(&ctx->num, diff);
+        else           bi_shl(&ctx->den, -diff);
+        bi_divmod(&ctx->num, &ctx->den, &ctx->q, &ctx->r);
+        bi_shr(&ctx->den, 1, &ctx->half);
+        int c = bi_cmp(&ctx->r, &ctx->half);
         if (c > 0) {
-            bi_inc(&q);
-        } else if (c == 0 && (q.w[0] & 1)) {
-            bi_inc(&q);
+            bi_inc(&ctx->q);
+        } else if (c == 0 && (ctx->q.w[0] & 1)) {
+            bi_inc(&ctx->q);
         }
-        *out = q;
+        *out = ctx->q;
+        free(ctx);
         return 0;
     }
 }
@@ -323,30 +338,37 @@ static int build_ff(char *out, const char *ds, int D, int nfrac, int fl)
     return len;
 }
 
+struct floatconv_ctx {
+    bigint r;
+    bigint lhs;
+    bigint rhs;
+    bigint t;
+    char ds[512];
+};
+
 /* Returns 1 if mant*2^exp2 >= 10^E, else 0. Only ever calls bi_pow10 with a
  * non-negative exponent (so no negative bigint shifts occur). */
-static int value_ge_pow10(uint64_t mant, int exp2, int E)
+static int value_ge_pow10(uint64_t mant, int exp2, int E, bigint *lhs, bigint *rhs)
 {
-    bigint lhs, rhs;
     if (E >= 0) {
         /* mant*2^exp2 >= 10^E  =>  compare (mant<<max(0,exp2)) vs (10^E<<max(0,-exp2)) */
-        bi_set_u64(&lhs, mant);
-        bi_pow10(&rhs, E);
-        if (exp2 >= 0) bi_shl(&lhs, exp2);
-        else           bi_shl(&rhs, -exp2);
+        bi_set_u64(lhs, mant);
+        bi_pow10(rhs, E);
+        if (exp2 >= 0) bi_shl(lhs, exp2);
+        else           bi_shl(rhs, -exp2);
     } else {
         int P = -E;
         /* mant*2^exp2 >= 10^-P  <=>  mant*10^P*2^exp2 >= 1.
          * Scale so both sides are integers: lhs = mant*10^P (shifted by exp2 if >=0),
          * rhs = 1 (shifted by |exp2| if exp2<0). */
-        bi_set_u64(&lhs, mant);
-        bi_mul_5pow(&lhs, P);
-        bi_shl(&lhs, P);            /* lhs = mant*10^P */
-        bi_set_u64(&rhs, 1);
-        if (exp2 >= 0) bi_shl(&lhs, exp2);
-        else           bi_shl(&rhs, -exp2);
+        bi_set_u64(lhs, mant);
+        bi_mul_5pow(lhs, P);
+        bi_shl(lhs, P);            /* lhs = mant*10^P */
+        bi_set_u64(rhs, 1);
+        if (exp2 >= 0) bi_shl(lhs, exp2);
+        else           bi_shl(rhs, -exp2);
     }
-    return bi_cmp(&lhs, &rhs) >= 0;
+    return bi_cmp(lhs, rhs) >= 0;
 }
 
 size_t floatconv_render(char *scratch, size_t scap, double d,
@@ -383,6 +405,9 @@ size_t floatconv_render(char *scratch, size_t scap, double d,
         return (size_t)l;
     }
 
+    struct floatconv_ctx *ctx = (struct floatconv_ctx *)malloc(sizeof(struct floatconv_ctx));
+    if (!ctx) return SIZE_MAX;
+
     int N;
     if (conv == 'g' || conv == 'G') {
         N = (p < 0) ? 6 : p;
@@ -405,7 +430,6 @@ size_t floatconv_render(char *scratch, size_t scap, double d,
     }
 
     /* decimal exponent E for %e/%g: largest E with value >= 10^E. */
-    bigint r;
     int E;
     if (is_zero) {
         E = 0;
@@ -416,46 +440,47 @@ size_t floatconv_render(char *scratch, size_t scap, double d,
         if (E > 300) E = 300;
         if (E < -300) E = -300;
         for (int guard = 0; guard < 700; guard++) {
-            int ge  = value_ge_pow10(mant, exp2, E);
-            int ge1 = value_ge_pow10(mant, exp2, E + 1);
+            int ge  = value_ge_pow10(mant, exp2, E, &ctx->lhs, &ctx->rhs);
+            int ge1 = value_ge_pow10(mant, exp2, E + 1, &ctx->lhs, &ctx->rhs);
             if (ge && !ge1) break;
             if (ge) E++; else E--;
         }
     }
 
-    char ds[512];
     int D;
     int res;
     int len = 0;
     char eletter = ((conv == 'E') || (conv == 'G')) ? 'E' : 'e';
 
     if (conv == 'f' || conv == 'F') {
-        res = round_to_int(mant, exp2, pfrac, &r);
-        if (res) return SIZE_MAX;
-        D = bi_to_dec(&r, ds, sizeof(ds));
+        res = round_to_int(mant, exp2, pfrac, &ctx->r);
+        if (res) { free(ctx); return SIZE_MAX; }
+        D = bi_to_dec(&ctx->r, ctx->ds, sizeof(ctx->ds), &ctx->t);
         if (D < 1) D = 1;
-        len = build_ff(scratch, ds, D, pfrac, fl);
-        if ((size_t)len > scap) return SIZE_MAX;
+        len = build_ff(scratch, ctx->ds, D, pfrac, fl);
+        if ((size_t)len > scap) { free(ctx); return SIZE_MAX; }
         *sign_out = neg ? '-' : (fl & PLUS ? '+' : (fl & SPACE ? ' ' : 0));
+        free(ctx);
         return (size_t)len;
     }
 
     if (conv == 'e' || conv == 'E') {
         int unit = pfrac - E;
-        res = round_to_int(mant, exp2, unit, &r);
-        if (res) return SIZE_MAX;
-        D = bi_to_dec(&r, ds, sizeof(ds));
+        res = round_to_int(mant, exp2, unit, &ctx->r);
+        if (res) { free(ctx); return SIZE_MAX; }
+        D = bi_to_dec(&ctx->r, ctx->ds, sizeof(ctx->ds), &ctx->t);
         if (D < 1) D = 1;
         if (D > pfrac + 1) { D = pfrac + 1; E++; }
-        scratch[len++] = ds[0];
+        scratch[len++] = ctx->ds[0];
         scratch[len++] = '.';
-        for (int i = 1; i < D; i++) scratch[len++] = ds[i];
+        for (int i = 1; i < D; i++) scratch[len++] = ctx->ds[i];
         scratch[len++] = eletter;
         scratch[len++] = (E >= 0) ? '+' : '-';
         int ae = E < 0 ? -E : E;
         len += emit_int(scratch + len, (uint64_t)ae, 2);
-        if (len > (int)scap) return SIZE_MAX;
+        if (len > (int)scap) { free(ctx); return SIZE_MAX; }
         *sign_out = neg ? '-' : (fl & PLUS ? '+' : (fl & SPACE ? ' ' : 0));
+        free(ctx);
         return (size_t)len;
     }
 
@@ -465,22 +490,22 @@ size_t floatconv_render(char *scratch, size_t scap, double d,
         if (!use_e) {
             int nfrac = N - 1 - E;
             if (nfrac < 0) nfrac = 0;
-            res = round_to_int(mant, exp2, nfrac, &r);
-            if (res) return SIZE_MAX;
-            D = bi_to_dec(&r, ds, sizeof(ds));
+            res = round_to_int(mant, exp2, nfrac, &ctx->r);
+            if (res) { free(ctx); return SIZE_MAX; }
+            D = bi_to_dec(&ctx->r, ctx->ds, sizeof(ctx->ds), &ctx->t);
             if (D < 1) D = 1;
-            len = build_ff(scratch, ds, D, nfrac, fl);
+            len = build_ff(scratch, ctx->ds, D, nfrac, fl);
             len = strip_zeros(scratch, len, fl);
         } else {
             int unit = (N - 1) - E;
-            res = round_to_int(mant, exp2, unit, &r);
-            if (res) return SIZE_MAX;
-            D = bi_to_dec(&r, ds, sizeof(ds));
+            res = round_to_int(mant, exp2, unit, &ctx->r);
+            if (res) { free(ctx); return SIZE_MAX; }
+            D = bi_to_dec(&ctx->r, ctx->ds, sizeof(ctx->ds), &ctx->t);
             if (D < 1) D = 1;
             if (D > N) { D = N; E++; }
-            scratch[len++] = ds[0];
+            scratch[len++] = ctx->ds[0];
             scratch[len++] = '.';
-            for (int i = 1; i < D; i++) scratch[len++] = ds[i];
+            for (int i = 1; i < D; i++) scratch[len++] = ctx->ds[i];
             scratch[len++] = eletter;
             scratch[len++] = (E >= 0) ? '+' : '-';
             int ae = E < 0 ? -E : E;
@@ -493,8 +518,9 @@ size_t floatconv_render(char *scratch, size_t scap, double d,
             scratch[len++] = '.';
             for (int i = 0; i < N - 1; i++) scratch[len++] = '0';
         }
-        if ((size_t)len > scap) return SIZE_MAX;
+        if ((size_t)len > scap) { free(ctx); return SIZE_MAX; }
         *sign_out = neg ? '-' : (fl & PLUS ? '+' : (fl & SPACE ? ' ' : 0));
+        free(ctx);
         return (size_t)len;
     }
 }

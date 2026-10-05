@@ -516,6 +516,7 @@ int64_t pipe_read_internal(pipe_t *p, void *buf, uint64_t size)
     pipe_read_reserve(p);
 
     int64_t result = 0;
+    uint8_t *bounce = NULL;
 
     for (;;) {
         // ── Phase 2: wait for data ──────────────────────────
@@ -591,7 +592,11 @@ int64_t pipe_read_internal(pipe_t *p, void *buf, uint64_t size)
     }
 
     // ── Phase 3: peek — copy ring→bounce WITHOUT advancing tail ──
-    uint8_t bounce[PIPE_SIZE];
+    bounce = kmalloc(PIPE_SIZE);
+    if (!bounce) {
+        result = -ENOMEM;
+        goto out_release;
+    }
     size_t avail;
     {
         uint64_t flags = spin_lock_irqsave(&p->lock);
@@ -630,6 +635,7 @@ int64_t pipe_read_internal(pipe_t *p, void *buf, uint64_t size)
     result = (int64_t)avail;
 
 out_release:
+    kfree(bounce);
     if (!released) {
         pipe_read_release(p);
     }
@@ -838,7 +844,11 @@ int64_t pipe_write_internal(pipe_t *p, const void *buf, uint64_t size)
     if (!p) return -1;
     if (!buf || size == 0) return -1;
 
+    uint8_t *bounce = kmalloc(PIPE_SIZE);
+    if (!bounce) return -ENOMEM;
+
     uint64_t total = 0;
+    int64_t ret = 0;
 
     for (;;) {
         // ── Stage: copy user→kernel bounce BEFORE taking p->lock ──
@@ -849,7 +859,6 @@ int64_t pipe_write_internal(pipe_t *p, const void *buf, uint64_t size)
         uint64_t remaining = size - total;
         uint64_t want = remaining < PIPE_SIZE ? remaining : PIPE_SIZE;
 
-        uint8_t bounce[PIPE_SIZE];
         ssize_t rc = copy_from_user_ft(bounce,
                                        (const uint8_t *)buf + total,
                                        (size_t)want);
@@ -857,8 +866,8 @@ int64_t pipe_write_internal(pipe_t *p, const void *buf, uint64_t size)
             // Fault on the user source.  Whatever we already wrote
             // in earlier iterations stays in the pipe; return the
             // short count (or -EFAULT if nothing was written yet).
-            if (total == 0) return -EFAULT;
-            return (int64_t)total;
+            ret = (total == 0) ? -EFAULT : (int64_t)total;
+            goto out;
         }
         uint64_t staged = want;
 
@@ -877,14 +886,18 @@ int64_t pipe_write_internal(pipe_t *p, const void *buf, uint64_t size)
             // Wrote some data — wake blocked readers, return or loop
             pipe_wake_readers(p);
             spin_unlock_irqrestore(&p->lock, flags);
-            if (total == size) return (int64_t)total;   // all consumed
+            if (total == size) {
+                ret = (int64_t)total;   // all consumed
+                goto out;
+            }
             continue;
         }
 
         // Pipe is full (written == 0).  Check if any reader still exists.
         if (p->readers == 0) {
             spin_unlock_irqrestore(&p->lock, flags);
-            return -EPIPE;
+            ret = -EPIPE;
+            goto out;
         }
 
         spin_unlock_irqrestore(&p->lock, flags);
@@ -914,7 +927,8 @@ int64_t pipe_write_internal(pipe_t *p, const void *buf, uint64_t size)
 
             if (do_epipe) {
                 spin_unlock_irqrestore(&wq->lock, wq_flags);
-                return -EPIPE;
+                ret = -EPIPE;
+                goto out;
             }
 
             current->state = TASK_INTERRUPTIBLE;
@@ -932,9 +946,15 @@ int64_t pipe_write_internal(pipe_t *p, const void *buf, uint64_t size)
             }
         }
 
-        if (arch_signal_pending_fatal())
-            return -EINTR;
+        if (arch_signal_pending_fatal()) {
+            ret = -EINTR;
+            goto out;
+        }
     }
+
+out:
+    kfree(bounce);
+    return ret;
 }
 
 // ── Write through a file descriptor ─────────────────────────
@@ -1032,33 +1052,41 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
         // ballooning kernel memory.  netconn_write_partly blocks
         // internally on its own mbox; we loop until the user
         // buffer is exhausted or a fatal error occurs.
+        uint8_t *kbuf = kmalloc(16 * 1024);
+        if (!kbuf) return -ENOMEM;
+
         uint64_t committed = 0;
+        int64_t ret = 0;
         while (committed < size) {
             uint64_t remaining = size - committed;
             uint64_t chunk = remaining < (16 * 1024)
                              ? remaining : (16 * 1024);
-            uint8_t kbuf[16 * 1024];
 
             ssize_t rc = copy_from_user_ft(
                 kbuf, (const uint8_t *)buf + committed, (size_t)chunk);
             if (rc < 0) {
-                if (committed == 0) return -EFAULT;
-                return (int64_t)committed;     // short count
+                if (committed == 0) ret = -EFAULT;
+                else ret = (int64_t)committed;     // short count
+                break;
             }
 
             err_t err = netconn_write_partly(
                 (struct netconn *)s->conn, kbuf, (size_t)chunk,
                 NETCONN_COPY, NULL);
             if (err != ERR_OK) {
-                if (committed == 0) return -EIO;
-                return (int64_t)committed;     // short count
+                if (committed == 0) ret = -EIO;
+                else ret = (int64_t)committed;     // short count
+                break;
             }
             committed += chunk;
             f->offset += chunk;
             if (arch_signal_pending_fatal()) {
-                return (committed == 0) ? -EINTR : (int64_t)committed;
+                ret = (committed == 0) ? -EINTR : (int64_t)committed;
+                break;
             }
         }
+        kfree(kbuf);
+        if (ret < 0) return ret;
         return (int64_t)committed;
     }
     default:

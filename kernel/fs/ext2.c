@@ -1394,16 +1394,20 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
                                   &exist_ino, &exist_type,
                                   &exist_block, &exist_off);
 
+    ext2_inode_t *inobuf = kmalloc(2 * sizeof(ext2_inode_t));
+    if (!inobuf) { spin_unlock(&fs->lock); return -ENOMEM; }
+    ext2_inode_t *ino_a = &inobuf[0];
+    ext2_inode_t *ino_b = &inobuf[1];
+
     if (exists == 0) {
         // POSIX: cannot overwrite non-empty directory
         if (exist_type == 2 /* EXT2_FT_DIR */) {
-            ext2_inode_t exist_inode;
-            ext2_read_inode(fs, exist_ino, &exist_inode);
+            ext2_read_inode(fs, exist_ino, ino_a);
             // Check if non-empty (same pattern as rmdir)
             uint8_t *bd = kmalloc(4096);
-            if (!bd) { spin_unlock(&fs->lock); return -ENOMEM; }
+            if (!bd) { kfree(inobuf); spin_unlock(&fs->lock); return -ENOMEM; }
             for (uint32_t bi = 0; ; bi++) {
-                uint32_t p = ext2_bmap(fs, &exist_inode, bi);
+                uint32_t p = ext2_bmap(fs, ino_a, bi);
                 if (p == 0) break;
                 ext2_read_block(fs, p, bd);
                 uint32_t o2 = 0;
@@ -1411,7 +1415,7 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
                     ext2_dirent_t *de = (ext2_dirent_t *)(bd + o2);
                     if (de->rec_len == 0) break;
                     if (de->inode != 0 && de->inode != exist_ino && de->inode != new_ino_dir) {
-                        kfree(bd); spin_unlock(&fs->lock); return -ENOTEMPTY;
+                        kfree(bd); kfree(inobuf); spin_unlock(&fs->lock); return -ENOTEMPTY;
                     }
                     o2 += de->rec_len;
                 }
@@ -1422,21 +1426,20 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
             dirent_del(fs, new_ino_dir, newname);
 
             // Free all data blocks before freeing the inode
-            ext2_inode_t exist_inode2;
-            ext2_read_inode(fs, exist_ino, &exist_inode2);
+            ext2_read_inode(fs, exist_ino, ino_a);
             for (int i = 0; i < 12; i++) {
-                if (exist_inode2.i_block[i]) free_block(fs, exist_inode2.i_block[i]);
+                if (ino_a->i_block[i]) free_block(fs, ino_a->i_block[i]);
             }
-            if (exist_inode2.i_block[12]) {
+            if (ino_a->i_block[12]) {
                 uint32_t *indirect = kmalloc(4096);
-                if (!indirect) { spin_unlock(&fs->lock); return -ENOMEM; }
+                if (!indirect) { kfree(inobuf); spin_unlock(&fs->lock); return -ENOMEM; }
                 uint32_t pps = fs->block_size / sizeof(uint32_t);
-                if (ext2_read_block(fs, exist_inode2.i_block[12], indirect) != 0) {
-                    kfree(indirect); spin_unlock(&fs->lock); return -EIO;
+                if (ext2_read_block(fs, ino_a->i_block[12], indirect) != 0) {
+                    kfree(indirect); kfree(inobuf); spin_unlock(&fs->lock); return -EIO;
                 }
                 for (uint32_t k = 0; k < pps; k++)
                     if (indirect[k]) free_block(fs, indirect[k]);
-                free_block(fs, exist_inode2.i_block[12]);
+                free_block(fs, ino_a->i_block[12]);
                 kfree(indirect);
             }
             free_inode(fs, exist_ino);
@@ -1445,30 +1448,29 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
             // Write ordering (spec §6.1): dirent → inode → bitmap → sb → data
             dirent_del(fs, new_ino_dir, newname);
 
-            ext2_inode_t exist_inode;
-            ext2_read_inode(fs, exist_ino, &exist_inode);
-            exist_inode.i_links_count--;
-            if (exist_inode.i_links_count == 0) {
-                ext2_write_inode(fs, exist_ino, &exist_inode);
+            ext2_read_inode(fs, exist_ino, ino_a);
+            ino_a->i_links_count--;
+            if (ino_a->i_links_count == 0) {
+                ext2_write_inode(fs, exist_ino, ino_a);
                 free_inode(fs, exist_ino);
                 // Now free data blocks (after inode is gone from bitmap)
                 for (int i = 0; i < 12; i++) {
-                    if (exist_inode.i_block[i]) free_block(fs, exist_inode.i_block[i]);
+                    if (ino_a->i_block[i]) free_block(fs, ino_a->i_block[i]);
                 }
-                if (exist_inode.i_block[12]) {
+                if (ino_a->i_block[12]) {
                     uint32_t *indirect = kmalloc(4096);
-                    if (!indirect) { spin_unlock(&fs->lock); return -ENOMEM; }
+                    if (!indirect) { kfree(inobuf); spin_unlock(&fs->lock); return -ENOMEM; }
                     uint32_t pps = fs->block_size / sizeof(uint32_t);
-                    if (ext2_read_block(fs, exist_inode.i_block[12], indirect) != 0) {
-                        kfree(indirect); spin_unlock(&fs->lock); return -EIO;
+                    if (ext2_read_block(fs, ino_a->i_block[12], indirect) != 0) {
+                        kfree(indirect); kfree(inobuf); spin_unlock(&fs->lock); return -EIO;
                     }
                     for (uint32_t k = 0; k < pps; k++)
                         if (indirect[k]) free_block(fs, indirect[k]);
-                    free_block(fs, exist_inode.i_block[12]);
+                    free_block(fs, ino_a->i_block[12]);
                     kfree(indirect);
                 }
             } else {
-                ext2_write_inode(fs, exist_ino, &exist_inode);
+                ext2_write_inode(fs, exist_ino, ino_a);
             }
         }
     }
@@ -1477,31 +1479,31 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
     int del_ret = dirent_del(fs, old_ino, oldname);
     if (del_ret != 0) {
         log_err("ext2_rename: dirent_del(%s) failed ret=%d\n", oldname, del_ret);
+        kfree(inobuf);
         spin_unlock(&fs->lock);
         return del_ret;
     }
     int add_ret = dirent_add(fs, new_ino_dir, newname, target_ino, file_type);
     if (add_ret != 0) {
         log_err("ext2_rename: dirent_add(%s) failed ret=%d\n", newname, add_ret);
+        kfree(inobuf);
         spin_unlock(&fs->lock);
         return add_ret;
     }
 
     // Update ctime
-    ext2_inode_t target_inode;
-    if (ext2_read_inode(fs, target_ino, &target_inode) == 0) {
-        target_inode.i_ctime = 0;
-        ext2_write_inode(fs, target_ino, &target_inode);
+    if (ext2_read_inode(fs, target_ino, ino_a) == 0) {
+        ino_a->i_ctime = 0;
+        ext2_write_inode(fs, target_ino, ino_a);
     }
 
     // Cross-directory directory move: adjust ".." and link counts
     if (file_type == 2 /* EXT2_FT_DIR */ && old_ino != new_ino_dir) {
         // Update ".." in moved directory
-        ext2_inode_t moved_inode;
-        ext2_read_inode(fs, target_ino, &moved_inode);
-        uint32_t first_block = moved_inode.i_block[0];
+        ext2_read_inode(fs, target_ino, ino_a);
+        uint32_t first_block = ino_a->i_block[0];
         uint8_t *dir_data = kmalloc(4096);
-        if (!dir_data) { spin_unlock(&fs->lock); return -ENOMEM; }
+        if (!dir_data) { kfree(inobuf); spin_unlock(&fs->lock); return -ENOMEM; }
         ext2_read_block(fs, first_block, dir_data);
 
         ext2_dirent_t *dotdot = (ext2_dirent_t *)(dir_data + 12);
@@ -1510,14 +1512,13 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
         kfree(dir_data);
 
         // Adjust link counts
-        ext2_inode_t old_inode, new_inode;
-        ext2_read_inode(fs, old_ino, &old_inode);
-        old_inode.i_links_count--;
-        ext2_write_inode(fs, old_ino, &old_inode);
+        ext2_read_inode(fs, old_ino, ino_a);
+        ino_a->i_links_count--;
+        ext2_write_inode(fs, old_ino, ino_a);
 
-        ext2_read_inode(fs, new_ino_dir, &new_inode);
-        new_inode.i_links_count++;
-        ext2_write_inode(fs, new_ino_dir, &new_inode);
+        ext2_read_inode(fs, new_ino_dir, ino_b);
+        ino_b->i_links_count++;
+        ext2_write_inode(fs, new_ino_dir, ino_b);
 
         // Adjust used_dirs_count per group
         uint32_t old_group = (old_ino - 1) / fs->inodes_per_group;
@@ -1527,6 +1528,7 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
         ext2_write_superblock(fs);
     }
 
+    kfree(inobuf);
     spin_unlock(&fs->lock);
     return 0;
 }

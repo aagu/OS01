@@ -21,13 +21,15 @@
 // strnlen_user semantics (kernel/memory/uaccess.c:91-105): returns [0, max]
 // where _l==max means the string had no NUL within `max` bytes (over-long),
 // or -EFAULT on fault.
-#define COPY_USER_STR(kbuf, uptr, max) ({                          \
-    long _l = strnlen_user((uptr), (max));                         \
-    if (_l < 0) return -EFAULT;                                   \
-    if (_l >= (long)(max)) return -ENAMETOOLONG;                  \
-    if (copy_from_user_ft((kbuf), (uptr), (size_t)_l + 1) < 0)    \
-        return -EFAULT;                                           \
-    _l; })
+static inline int64_t copy_user_path(char *kbuf, const char *uptr, size_t max)
+{
+    long l = strnlen_user(uptr, max);
+    if (l < 0) return -EFAULT;
+    if (l >= (long)max) return -ENAMETOOLONG;
+    if (copy_from_user_ft(kbuf, uptr, (size_t)l + 1) < 0)
+        return -EFAULT;
+    return l;
+}
 
 // ── SYS_symlink(71): symlink(target, linkpath) ──────────────
 // Create a symbolic link at linkpath whose target is the string `target`.
@@ -40,45 +42,57 @@
 //     name="file", and "file" (no slash) → parent=cwd name="file".
 //   - parent->type != VFS_DIR -> -ENOTDIR
 //   - !parent->ops || !parent->ops->symlink -> -EOPNOTSUPP (v2 fix)
-static int64_t sys_symlink(const char *target, const char *linkpath)
+static __attribute__((noinline)) int64_t sys_symlink(const char *target, const char *linkpath)
 {
+    char *paths = kmalloc(3 * VFS_NAME_MAX);
+    if (!paths) return -ENOMEM;
+    char *target_copy = paths;
+    char *linkpath_copy = paths + VFS_NAME_MAX;
+    char *parent_path = paths + 2 * VFS_NAME_MAX;
 
-    char target_copy[VFS_NAME_MAX];
-    long tlen = COPY_USER_STR(target_copy, target, VFS_NAME_MAX);
-    if (tlen == 0)
-        return -ENOENT;                       // reject empty target
+    int64_t ret = 0;
+    long tlen = copy_user_path(target_copy, target, VFS_NAME_MAX);
+    if (tlen < 0) { ret = tlen; goto out; }
+    if (tlen == 0) { ret = -ENOENT; goto out; }
 
-    char linkpath_copy[VFS_NAME_MAX];
-    COPY_USER_STR(linkpath_copy, linkpath, VFS_NAME_MAX);
+    long llen = copy_user_path(linkpath_copy, linkpath, VFS_NAME_MAX);
+    if (llen < 0) { ret = llen; goto out; }
 
     // v5 fix: linkpath is exactly "/" → would mean replacing the mount root
     // with a symlink.  EEXIST is more informative than EINVAL here.
-    if (linkpath_copy[0] == '/' && linkpath_copy[1] == '\0')
-        return -EEXIST;
+    if (linkpath_copy[0] == '/' && linkpath_copy[1] == '\0') {
+        ret = -EEXIST;
+        goto out;
+    }
 
     const char *cwd = current->files ? current->files->cwd : "/";
-    char parent_path[VFS_NAME_MAX];
     const char *name = vfs_split_parent(linkpath_copy, cwd, parent_path);
-    if (!name || *name == '\0')
-        return -EINVAL;                       // reject empty basename
+    if (!name || *name == '\0') {
+        ret = -EINVAL;
+        goto out;
+    }
 
     vfs_node_t *parent = NULL;
     int rc = vfs_lookup_at(AT_FDCWD, parent_path, LOOKUP_FOLLOW, &parent);
-    if (rc < 0)
-        return rc;
+    if (rc < 0) { ret = rc; goto out; }
     if (parent->type != VFS_DIR) {
         vfs_node_put(parent);
-        return -ENOTDIR;
+        ret = -ENOTDIR;
+        goto out;
     }
     // v2 fix: refuse NULL ops deref on FS without .symlink (devfs, tmpfs)
     if (!parent->ops || !parent->ops->symlink) {
         vfs_node_put(parent);
-        return -EOPNOTSUPP;
+        ret = -EOPNOTSUPP;
+        goto out;
     }
 
-    rc = parent->ops->symlink(parent, name, target_copy);
+    ret = parent->ops->symlink(parent, name, target_copy);
     vfs_node_put(parent);
-    return rc;
+
+out:
+    kfree(paths);
+    return ret;
 }
 
 // ── SYS_readlink(72): readlink(path, buf, bufsize) ──────────
@@ -90,40 +104,49 @@ static int64_t sys_symlink(const char *target, const char *linkpath)
 //   - node->type != VFS_SYMLINK -> -EINVAL
 //   - !node->ops || !node->ops->readlink -> -EOPNOTSUPP
 //   - Truncate output to caller's bufsize; copy via copy_to_user_ft.
-static int64_t sys_readlink(const char *path, char *buf, size_t bufsize)
+static __attribute__((noinline)) int64_t sys_readlink(const char *path, char *buf, size_t bufsize)
 {
     if (!buf || bufsize == 0)
         return -EINVAL;
 
-    char path_copy[VFS_NAME_MAX];
-    COPY_USER_STR(path_copy, path, VFS_NAME_MAX);
+    char *paths = kmalloc(2 * VFS_NAME_MAX);
+    if (!paths) return -ENOMEM;
+    char *path_copy = paths;
+    char *kbuf = paths + VFS_NAME_MAX;
+
+    int64_t ret = 0;
+    long plen = copy_user_path(path_copy, path, VFS_NAME_MAX);
+    if (plen < 0) { ret = plen; goto out; }
 
     vfs_node_t *node = NULL;
     int rc = vfs_lookup_at(AT_FDCWD, path_copy, LOOKUP_NOFOLLOW, &node);
-    if (rc < 0)
-        return rc;
+    if (rc < 0) { ret = rc; goto out; }
     if (node->type != VFS_SYMLINK) {
         vfs_node_put(node);
-        return -EINVAL;
+        ret = -EINVAL;
+        goto out;
     }
     if (!node->ops || !node->ops->readlink) {
         vfs_node_put(node);
-        return -EOPNOTSUPP;
+        ret = -EOPNOTSUPP;
+        goto out;
     }
 
-    char kbuf[VFS_NAME_MAX];
     int tlen = node->ops->readlink(node, kbuf, VFS_NAME_MAX - 1);
     vfs_node_put(node);
-    if (tlen < 0)
-        return tlen;
+    if (tlen < 0) { ret = tlen; goto out; }
 
     if ((size_t)tlen > bufsize)
         tlen = (int)bufsize;
     {
         ssize_t user_copy_rc = copy_to_user_ft(buf, kbuf, (size_t)tlen);
-        if (user_copy_rc < 0) return user_copy_rc;
+        if (user_copy_rc < 0) { ret = user_copy_rc; goto out; }
     }
-    return tlen;
+    ret = tlen;
+
+out:
+    kfree(paths);
+    return ret;
 }
 
 // ── SYS_lstat(73): lstat(path, buf) — NOFOLLOW ──────────────
@@ -136,30 +159,37 @@ static int64_t sys_readlink(const char *path, char *buf, size_t bufsize)
 //   - v2 fix: build kernel-local kstat, then copy_to_user_ft — never
 //     write user buf directly (a memset into a bad user pointer would
 //     fault mid-handler).
-static int64_t sys_lstat(const char *path, struct stat *buf)
+static __attribute__((noinline)) int64_t sys_lstat(const char *path, struct stat *buf)
 {
     if (!buf)
         return -EFAULT;
 
-    char path_copy[VFS_NAME_MAX];
-    COPY_USER_STR(path_copy, path, VFS_NAME_MAX);
+    char *path_copy = kmalloc(VFS_NAME_MAX);
+    if (!path_copy)
+        return -ENOMEM;
+
+    int64_t ret = 0;
+    long plen = copy_user_path(path_copy, path, VFS_NAME_MAX);
+    if (plen < 0) { ret = plen; goto out; }
 
     vfs_node_t *node = NULL;
     int rc = vfs_lookup_at(AT_FDCWD, path_copy, LOOKUP_NOFOLLOW, &node);
-    if (rc < 0)
-        return rc;
+    if (rc < 0) { ret = rc; goto out; }
 
     struct stat kstat;
     rc = vfs_stat(node, &kstat);
     vfs_node_put(node);
-    if (rc < 0)
-        return rc;
+    if (rc < 0) { ret = rc; goto out; }
 
     {
         ssize_t user_copy_rc = copy_to_user_ft(buf, &kstat, sizeof(kstat));
-        if (user_copy_rc < 0) return user_copy_rc;
+        if (user_copy_rc < 0) { ret = user_copy_rc; goto out; }
     }
-    return 0;
+    ret = 0;
+
+out:
+    kfree(path_copy);
+    return ret;
 }
 
 // ── SYS_fstatat(74): fstatat(dirfd, path, buf, flags) ──────
@@ -172,7 +202,7 @@ static int64_t sys_lstat(const char *path, struct stat *buf)
 // Spec §5.3, task-7 brief.
 #define FSTATAT_SUPPORTED_FLAGS (AT_SYMLINK_NOFOLLOW)
 
-static int64_t sys_fstatat(int dirfd, const char *path, struct stat *buf,
+static __attribute__((noinline)) int64_t sys_fstatat(int dirfd, const char *path, struct stat *buf,
                     int flags)
 {
     if (!buf)
@@ -180,28 +210,35 @@ static int64_t sys_fstatat(int dirfd, const char *path, struct stat *buf,
     if (flags & ~FSTATAT_SUPPORTED_FLAGS)
         return -EINVAL;                       // v3: reject unknown flags
 
-    char path_copy[VFS_NAME_MAX];
-    COPY_USER_STR(path_copy, path, VFS_NAME_MAX);
+    char *path_copy = kmalloc(VFS_NAME_MAX);
+    if (!path_copy)
+        return -ENOMEM;
+
+    int64_t ret = 0;
+    long plen = copy_user_path(path_copy, path, VFS_NAME_MAX);
+    if (plen < 0) { ret = plen; goto out; }
 
     lookup_flags_t lflags =
         (flags & AT_SYMLINK_NOFOLLOW) ? LOOKUP_NOFOLLOW : LOOKUP_FOLLOW;
 
     vfs_node_t *node = NULL;
     int rc = vfs_lookup_at(dirfd, path_copy, lflags, &node);
-    if (rc < 0)
-        return rc;
+    if (rc < 0) { ret = rc; goto out; }
 
     struct stat kstat;
     rc = vfs_stat(node, &kstat);
     vfs_node_put(node);
-    if (rc < 0)
-        return rc;
+    if (rc < 0) { ret = rc; goto out; }
 
     {
         ssize_t user_copy_rc = copy_to_user_ft(buf, &kstat, sizeof(kstat));
-        if (user_copy_rc < 0) return user_copy_rc;
+        if (user_copy_rc < 0) { ret = user_copy_rc; goto out; }
     }
-    return 0;
+    ret = 0;
+
+out:
+    kfree(path_copy);
+    return ret;
 }
 
 int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
@@ -253,6 +290,7 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
         const char *path = (const char *)ctx->args[0];
         int flags = (int)ctx->args[1];
         char *path_copy = NULL;
+        char *parent_path = NULL;
         vfs_node_t *parent = NULL;
         file_t *f = NULL;
         vfs_node_t *node = NULL;
@@ -291,7 +329,8 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
         // O_CREAT: create file if it doesn't exist
         if (lookup_rc == -ENOENT && (flags & O_CREAT)) {
             // Find parent directory — parse path_copy to extract parent
-            char parent_path[VFS_NAME_MAX];
+            parent_path = kmalloc(VFS_NAME_MAX);
+            if (!parent_path) { syscall_result = -ENOMEM; goto out_open; }
             const char *name = NULL;
 
             // path_copy is the kernel-side copy; plen is its strlen.
@@ -391,6 +430,7 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
         if (parent) vfs_node_put(parent);
         if (node) vfs_node_put(node);
         if (f) file_free(f);
+        if (parent_path) kfree(parent_path);
         if (path_copy) kfree(path_copy);
         break;
     }

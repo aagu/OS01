@@ -72,27 +72,38 @@ static int64_t deep_copy_argv(const char *const *user_arr, char ***out_arr)
     *out_arr = NULL;
     if (user_arr == NULL) return 0;
 
+    struct argv_scan {
+        const char *ptrs[MAX_ARGV + 1];
+        size_t lens[MAX_ARGV];
+    };
+    struct argv_scan *scan = (struct argv_scan *)kmalloc(sizeof(struct argv_scan));
+    if (!scan) return -ENOMEM;
+
     // Phase 1: scan the array (fault-tolerant per pointer) to count
     // entries and validate every element pointer.  Bound the loop by
     // MAX_ARGV so a hostile unbounded array cannot loop forever.
-    const char *ptrs[MAX_ARGV + 1];
     size_t count = 0;
     bool null_found = false;
     uint64_t addr_limit = current->addr_limit;
+    int64_t ret = 0;
 
     for (size_t i = 0; i <= MAX_ARGV; i++) {
         uint64_t p = 0;
-        if (copy_from_user_ft(&p, &user_arr[i], sizeof(p)) < 0)
-            return -EFAULT;
+        if (copy_from_user_ft(&p, &user_arr[i], sizeof(p)) < 0) {
+            ret = -EFAULT;
+            goto out;
+        }
         if (p == 0) {                       // NULL terminator
             count = i;
             null_found = true;
             break;
         }
         // Bad element pointer: kernel address or below USER_MIN_ADDR.
-        if (p < USER_MIN_ADDR || p >= addr_limit)
-            return -EFAULT;
-        ptrs[i] = (const char *)p;
+        if (p < USER_MIN_ADDR || p >= addr_limit) {
+            ret = -EFAULT;
+            goto out;
+        }
+        scan->ptrs[i] = (const char *)p;
     }
     // If the loop ran to MAX_ARGV+1 without seeing NULL, either the
     // array has more than MAX_ARGV entries (over cap) or it's not
@@ -104,42 +115,50 @@ static int64_t deep_copy_argv(const char *const *user_arr, char ***out_arr)
     // naturally: zero strnlen iterations, kmalloc(8) for the array,
     // zero copies, arr[0]=NULL terminator.  setup_user_stack (task.c)
     // accepts both argv=NULL and argv={NULL}.
-    if (!null_found) return -E2BIG;
+    if (!null_found) {
+        ret = -E2BIG;
+        goto out;
+    }
 
     // Phase 2: for each element, strnlen + bounded total accumulator.
     size_t total = 0;
-    size_t lens[MAX_ARGV];
     for (size_t i = 0; i < count; i++) {
-        int n = strnlen_user(ptrs[i], MAX_ARG_STRLEN);
-        if (n < 0) return -EFAULT;
-        if (n >= MAX_ARG_STRLEN) return -E2BIG;     // no NUL within cap
-        lens[i] = (size_t)n + 1;                    // incl. NUL
-        total += lens[i];
-        if (total > MAX_ARG_TOTAL) return -E2BIG;
+        int n = strnlen_user(scan->ptrs[i], MAX_ARG_STRLEN);
+        if (n < 0) { ret = -EFAULT; goto out; }
+        if (n >= MAX_ARG_STRLEN) { ret = -E2BIG; goto out; }     // no NUL within cap
+        scan->lens[i] = (size_t)n + 1;                    // incl. NUL
+        total += scan->lens[i];
+        if (total > MAX_ARG_TOTAL) { ret = -E2BIG; goto out; }
     }
 
     // Phase 3: allocate the kernel array (NULL-terminated) and copy
     // every string.  Any failure mid-way frees everything we already
     // allocated.
     char **arr = (char **)kmalloc((count + 1) * sizeof(char *));
-    if (!arr) return -ENOMEM;
+    if (!arr) { ret = -ENOMEM; goto out; }
     size_t filled = 0;
     for (size_t i = 0; i < count; i++) {
-        char *kstr = (char *)kmalloc(lens[i]);
+        char *kstr = (char *)kmalloc(scan->lens[i]);
         if (!kstr) {
             free_partial_argv(arr, filled);
-            return -ENOMEM;
+            ret = -ENOMEM;
+            goto out;
         }
-        if (copy_from_user_ft(kstr, ptrs[i], lens[i]) < 0) {
+        if (copy_from_user_ft(kstr, scan->ptrs[i], scan->lens[i]) < 0) {
             kfree(kstr);
             free_partial_argv(arr, filled);
-            return -EFAULT;
+            ret = -EFAULT;
+            goto out;
         }
         arr[filled++] = kstr;
     }
     arr[count] = NULL;
     *out_arr = arr;
-    return 0;
+    ret = 0;
+
+out:
+    kfree(scan);
+    return ret;
 }
 
 int64_t sys_proc_dispatch(syscall_ctx_t *ctx)

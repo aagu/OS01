@@ -109,18 +109,23 @@ gpt_info_t *gpt_scan(block_device_t *disk)
     if (!disk || !disk->present) return NULL;
 
     // Phase 1: Read GPT header (LBA 1)
-    uint8_t hdr[512];
+    uint8_t *hdr = kmalloc(512);
+    if (!hdr) return NULL;
+
     if (block_device_read(disk, 1, 1, hdr) != 0) {
         debug_block("gpt: failed to read header\n");
+        kfree(hdr);
         return NULL;
     }
     if (memcmp(hdr, "EFI PART", 8) != 0) {
         debug_block("gpt: no EFI PART signature\n");
+        kfree(hdr);
         return NULL;
     }
     uint32_t revision = *(uint32_t *)(hdr + 8);
     if (revision != 0x00010000) {
         debug_block("gpt: unsupported revision %#x\n", revision);
+        kfree(hdr);
         return NULL;
     }
 
@@ -133,11 +138,13 @@ gpt_info_t *gpt_scan(block_device_t *disk)
 
     if (header_size < 92 || entry_size < 128) {
         debug_block("gpt: bad header/entry size\n");
+        kfree(hdr);
         return NULL;
     }
     uint64_t array_size = (uint64_t)num_entries * entry_size;
     if (array_size > 1024 * 1024) {  // sanity: reject > 1MB partition table
         debug_block("gpt: partition table too large\n");
+        kfree(hdr);
         return NULL;
     }
 
@@ -147,18 +154,26 @@ gpt_info_t *gpt_scan(block_device_t *disk)
     uint32_t crc_computed = gpt_crc32(hdr, header_size);
     if (crc_computed != crc_saved) {
         debug_block("gpt: header CRC mismatch\n");
+        kfree(hdr);
         return NULL;
     }
 
     // Phase 4: Read + validate partition entry array
     uint32_t array_sectors = (uint32_t)((array_size + 511) / 512);
     uint8_t *entries = kmalloc(array_sectors * 512);
-    if (!entries) return NULL;
+    if (!entries) {
+        kfree(hdr);
+        return NULL;
+    }
     if (block_device_read(disk, entry_lba, array_sectors, entries) != 0) {
         debug_block("gpt: failed to read partition entries\n");
-        kfree(entries); return NULL;
+        kfree(entries);
+        kfree(hdr);
+        return NULL;
     }
     uint32_t entries_crc_stored = *(uint32_t *)(hdr + 88);
+    kfree(hdr);
+
     uint32_t entries_crc_computed = gpt_crc32(entries, (uint32_t)array_size);
     if (entries_crc_computed != entries_crc_stored) {
         debug_block("gpt: partition entries CRC mismatch\n");

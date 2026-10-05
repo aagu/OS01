@@ -171,7 +171,8 @@ static int setup_user_stack(uint8_t *kstack, char *const argv[], char *const env
 {
 #define KSTACK(va) (kstack + ((va) - USER_STACK_BASE))
     ASSERT(s_argc + s_envc <= STARTUP_STR_MAX);
-    uint64_t str_offset[STARTUP_STR_MAX];
+    uint64_t *str_offset = (uint64_t *)kmalloc(STARTUP_STR_MAX * sizeof(uint64_t));
+    if (!str_offset) return -1;
     int si = 0;
     uint64_t rsp = USER_STACK_TOP;
 
@@ -215,6 +216,7 @@ static int setup_user_stack(uint8_t *kstack, char *const argv[], char *const env
     uint8_t at_random_buf[32];
     if (!kernel_random_get_strong(at_random_buf)) {
         memset(at_random_buf, 0, 32);
+        kfree(str_offset);
         return -1;
     }
     rsp = (rsp - 16) & ~15ULL;
@@ -273,6 +275,7 @@ static int setup_user_stack(uint8_t *kstack, char *const argv[], char *const env
     *out_envp_ptr = envp_arr;
     *out_rsp = rsp;
 #undef KSTACK
+    kfree(str_offset);
     return 0;
 }
 

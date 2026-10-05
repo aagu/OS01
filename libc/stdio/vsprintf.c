@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
 #include <stdint.h>
@@ -84,6 +85,103 @@ static void vf_number(vf_state_t *st, char sign, unsigned long long num, int bas
 		vf_out(st, ' ');
 }
 
+static __attribute__((noinline)) void vf_string(vf_state_t *st, const char *s, int field_width,
+                                                int precision, int flags)
+{
+	if (!s) s = "";
+	int len = (int)strlen(s);
+	if (precision < 0)
+		precision = len;
+	else if (len > precision)
+		len = precision;
+	if (!(flags & LEFT))
+		while (len < field_width--)
+			vf_out(st, ' ');
+	for (int i = 0; i < len; i++)
+		vf_out(st, *s++);
+	while (len < field_width--)
+		vf_out(st, ' ');
+}
+
+static __attribute__((noinline)) void vf_int(vf_state_t *st, va_list ap, int is_ll, int qualifier,
+                                             int field_width, int precision, int flags, char fmt_char)
+{
+	if (fmt_char == 'd' || fmt_char == 'i' || fmt_char == 'u') {
+		int is_signed = (flags & SIGN);
+		char sign = 0;
+		unsigned long long mag;
+		if (is_signed) {
+			long long sval;
+			if (is_ll || qualifier == 'L' || qualifier == 'Z')
+				sval = va_arg(ap, long long);
+			else if (qualifier == 'l')
+				sval = va_arg(ap, long);
+			else
+				sval = va_arg(ap, int);
+			if (sval < 0) {
+				sign = '-';
+				mag = 0 - (unsigned long long)sval;
+			} else {
+				sign = (flags & PLUS) ? '+' : ((flags & SPACE) ? ' ' : 0);
+				mag = (unsigned long long)sval;
+			}
+		} else {
+			if (is_ll || qualifier == 'L' || qualifier == 'Z')
+				mag = va_arg(ap, unsigned long long);
+			else if (qualifier == 'l')
+				mag = va_arg(ap, unsigned long);
+			else
+				mag = va_arg(ap, unsigned int);
+		}
+		vf_number(st, sign, mag, 10, field_width, precision, flags);
+	} else {
+		/* 'o', 'x', 'X' */
+		unsigned long long uval;
+		if (is_ll || qualifier == 'L' || qualifier == 'Z')
+			uval = va_arg(ap, unsigned long long);
+		else if (qualifier == 'l')
+			uval = va_arg(ap, unsigned long);
+		else
+			uval = va_arg(ap, unsigned int);
+		vf_number(st, 0, uval, (fmt_char == 'o') ? 8 : 16,
+		          field_width, precision, flags);
+	}
+}
+
+static __attribute__((noinline)) void vf_float(vf_state_t *st, double d, int field_width, int precision,
+                                                int flags, char conv)
+{
+	char *fbuf = (char *)malloc(768);
+	if (!fbuf) return;
+	char sign = 0;
+	size_t flen = floatconv_render(fbuf, 768, d,
+					field_width, precision, flags,
+					conv, &sign);
+	if (flen == SIZE_MAX) {
+		free(fbuf);
+		return;
+	}
+	int left = (flags & LEFT) != 0;
+	int zeropad = (flags & ZEROPAD) != 0;
+	size_t i, written = 0;
+	if (sign) {
+		vf_out(st, sign);
+		written++;
+	}
+	if (!left && (int)(written + flen) < field_width) {
+		char pad = zeropad ? '0' : ' ';
+		for (i = written + flen; i < (size_t)field_width; i++)
+			vf_out(st, pad);
+	}
+	for (i = 0; i < flen; i++)
+		vf_out(st, fbuf[i]);
+	if (left) {
+		for (i = written + flen; i < (size_t)field_width; i++)
+			vf_out(st, ' ');
+	}
+	free(fbuf);
+}
+
 size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perform_assign)
 {
 	vf_state_t st;
@@ -95,7 +193,6 @@ size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perfor
 	int flags;
 	int field_width;
 	int precision;
-	int i;
 
 	int qualifier;          /* 'h','l','L','Z' or -1 */
 	int is_ll;              /* 'll' (two l) or 'L' -> long long */
@@ -170,26 +267,14 @@ size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perfor
 
 			case 's': {
 				const char *s = va_arg(ap, char *);
-				if (!s)
-					s = "";
-				int len = (int)strlen(s);
-				if (precision < 0)
-					precision = len;
-				else if (len > precision)
-					len = precision;
-				if (!(flags & LEFT))
-					while (len < field_width--)
-						vf_out(&st, ' ');
-				for (i = 0; i < len; i++)
-					vf_out(&st, *s++);
-				while (len < field_width--)
-					vf_out(&st, ' ');
+				vf_string(&st, s, field_width, precision, flags);
 				break;
 			}
 
 			case 'o':
 				flags &= ~SMALL;
-				goto do_unsigned;
+				vf_int(&st, ap, is_ll, qualifier, field_width, precision, flags, 'o');
+				break;
 
 			case 'p': {
 				if (field_width == -1) {
@@ -206,19 +291,7 @@ size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perfor
 				flags |= SMALL;
 				/* fall through */
 			case 'X':
-			do_unsigned:
-				{
-					unsigned long long uval;
-					if (is_ll || qualifier == 'L' || qualifier == 'Z')
-						uval = va_arg(ap, unsigned long long);
-					else if (qualifier == 'l')
-						uval = va_arg(ap, unsigned long);
-					else
-						uval = va_arg(ap, unsigned int);
-					vf_number(&st, 0, uval,
-					          (*fmt == 'o') ? 8 : 16,
-					          field_width, precision, flags);
-				}
+				vf_int(&st, ap, is_ll, qualifier, field_width, precision, flags, 'x');
 				break;
 
 			case 'd':
@@ -226,35 +299,7 @@ size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perfor
 				flags |= SIGN;
 				/* fall through */
 			case 'u':
-				{
-					int is_signed = (flags & SIGN);
-					char sign = 0;
-					unsigned long long mag;
-					if (is_signed) {
-						long long sval;
-						if (is_ll || qualifier == 'L' || qualifier == 'Z')
-							sval = va_arg(ap, long long);
-						else if (qualifier == 'l')
-							sval = va_arg(ap, long);
-						else
-							sval = va_arg(ap, int);
-						if (sval < 0) {
-							sign = '-';
-							mag = 0 - (unsigned long long)sval;
-						} else {
-							sign = (flags & PLUS) ? '+' : ((flags & SPACE) ? ' ' : 0);
-							mag = (unsigned long long)sval;
-						}
-					} else {
-						if (is_ll || qualifier == 'L' || qualifier == 'Z')
-							mag = va_arg(ap, unsigned long long);
-						else if (qualifier == 'l')
-							mag = va_arg(ap, unsigned long);
-						else
-							mag = va_arg(ap, unsigned int);
-					}
-					vf_number(&st, sign, mag, 10, field_width, precision, flags);
-				}
+				vf_int(&st, ap, is_ll, qualifier, field_width, precision, flags, 'd');
 				break;
 
 			case 'n': {
@@ -286,31 +331,8 @@ size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perfor
 					vf_out(&st, conv);
 					break;
 				}
-			double d = va_arg(ap, double);
-			char fbuf[768];
-				char sign = 0;
-			size_t flen = floatconv_render(fbuf, sizeof(fbuf), d,
-							field_width, precision, flags,
-							conv, &sign);
-			if (flen == SIZE_MAX) break;
-			int left = (flags & LEFT) != 0;
-				int zeropad = (flags & ZEROPAD) != 0;
-				size_t i, written = 0;
-				if (sign) {
-					vf_out(&st, sign);
-					written++;
-				}
-				if (!left && (int)(written + flen) < field_width) {
-					char pad = zeropad ? '0' : ' ';
-					for (i = written + flen; i < (size_t)field_width; i++)
-						vf_out(&st, pad);
-				}
-				for (i = 0; i < flen; i++)
-					vf_out(&st, fbuf[i]);
-				if (left) {
-					for (i = written + flen; i < (size_t)field_width; i++)
-						vf_out(&st, ' ');
-				}
+				double d = va_arg(ap, double);
+				vf_float(&st, d, field_width, precision, flags, conv);
 				break;
 			}
 

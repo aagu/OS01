@@ -107,7 +107,15 @@ int getaddrinfo(const char *node, const char *service,
     if (inet_aton(node, &ip))
         return make_result(ip.s_addr, service_port, hints, res);
 
-    uint8_t query[DNS_PACKET_SIZE] = {0};
+    struct dns_buffers {
+        uint8_t query[DNS_PACKET_SIZE];
+        uint8_t reply[DNS_PACKET_SIZE];
+    };
+    struct dns_buffers *bufs = (struct dns_buffers *)calloc(1, sizeof(*bufs));
+    if (!bufs) return EAI_MEMORY;
+    uint8_t *query = bufs->query;
+    uint8_t *reply = bufs->reply;
+
     query[0] = 0x00; query[1] = 0x01;  // TXID=1
     query[2] = 0x01; query[3] = 0x00;  // flags: RD=1
     query[5] = 0x01;                    // QDCOUNT=1
@@ -119,8 +127,10 @@ int getaddrinfo(const char *node, const char *service,
         size_t label_len = dot ? (size_t)(dot - p) : strlen(p);
         // Reserve the root label and QTYPE/QCLASS as well as this label.
         if (label_len == 0 || label_len > 63 ||
-            label_len > DNS_PACKET_SIZE - qi - 6)
+            label_len > DNS_PACKET_SIZE - qi - 6) {
+            free(bufs);
             return EAI_NONAME;
+        }
         query[qi++] = (uint8_t)label_len;
         memcpy(&query[qi], p, label_len);
         qi += label_len;
@@ -131,7 +141,10 @@ int getaddrinfo(const char *node, const char *service,
     query[qi++] = 0; query[qi++] = 1;   // QCLASS=IN
 
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) return EAI_SYSTEM;
+    if (fd < 0) {
+        free(bufs);
+        return EAI_SYSTEM;
+    }
 
     struct sockaddr_in dns = {0};
     dns.sin_family = AF_INET;
@@ -140,6 +153,7 @@ int getaddrinfo(const char *node, const char *service,
 
     if (sendto(fd, query, qi, 0, (struct sockaddr *)&dns, sizeof(dns)) < 0) {
         close(fd);
+        free(bufs);
         return EAI_SYSTEM;
     }
 
@@ -147,49 +161,67 @@ int getaddrinfo(const char *node, const char *service,
     int ready = poll(&pfd, 1, DNS_TIMEOUT_MS);
     if (ready <= 0) {
         close(fd);
+        free(bufs);
         return ready == 0 ? EAI_AGAIN : EAI_SYSTEM;
     }
 
-    uint8_t reply[DNS_PACKET_SIZE];
-    int64_t nread = recvfrom(fd, reply, sizeof(reply), 0, NULL, NULL);
+    int64_t nread = recvfrom(fd, reply, DNS_PACKET_SIZE, 0, NULL, NULL);
     close(fd);
-    if (nread < 12) return EAI_FAIL;
+    if (nread < 12) {
+        free(bufs);
+        return EAI_FAIL;
+    }
     size_t n = (size_t)nread;
 
     uint16_t flags = dns_u16(&reply[2]);
     uint16_t qdcount = dns_u16(&reply[4]);
     uint16_t ancount = dns_u16(&reply[6]);
-    if (dns_u16(reply) != 1 || !(flags & 0x8000)) return EAI_FAIL;
+    if (dns_u16(reply) != 1 || !(flags & 0x8000)) {
+        free(bufs);
+        return EAI_FAIL;
+    }
     switch (flags & 0x000f) {
     case 0: break;
-    case 2: return EAI_AGAIN;   // SERVFAIL
-    case 3: return EAI_NONAME;  // NXDOMAIN
-    default: return EAI_FAIL;
+    case 2: free(bufs); return EAI_AGAIN;   // SERVFAIL
+    case 3: free(bufs); return EAI_NONAME;  // NXDOMAIN
+    default: free(bufs); return EAI_FAIL;
     }
-    if (qdcount == 0 || ancount == 0) return EAI_NONAME;
+    if (qdcount == 0 || ancount == 0) {
+        free(bufs);
+        return EAI_NONAME;
+    }
 
     size_t off = 12;
     for (uint16_t i = 0; i < qdcount; i++) {
-        if (dns_skip_name(reply, n, &off) < 0 || off > n || n - off < 4)
+        if (dns_skip_name(reply, n, &off) < 0 || off > n || n - off < 4) {
+            free(bufs);
             return EAI_FAIL;
+        }
         off += 4;
     }
 
     for (uint16_t i = 0; i < ancount; i++) {
-        if (dns_skip_name(reply, n, &off) < 0 || off > n || n - off < 10)
+        if (dns_skip_name(reply, n, &off) < 0 || off > n || n - off < 10) {
+            free(bufs);
             return EAI_FAIL;
+        }
         uint16_t type = dns_u16(&reply[off]);
         uint16_t class = dns_u16(&reply[off + 2]);
         uint16_t rdlength = dns_u16(&reply[off + 8]);
         off += 10;
-        if (rdlength > n - off) return EAI_FAIL;
+        if (rdlength > n - off) {
+            free(bufs);
+            return EAI_FAIL;
+        }
         if (type == 1 && class == 1 && rdlength == 4) {
             uint32_t result_ip;
             memcpy(&result_ip, &reply[off], sizeof(result_ip));
+            free(bufs);
             return make_result(result_ip, service_port, hints, res);
         }
         off += rdlength;
     }
+    free(bufs);
     return EAI_NONAME;
 }
 

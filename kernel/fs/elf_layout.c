@@ -26,6 +26,16 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#if defined(TEST_PLATFORM_H) || defined(OS01_HOST_TEST) || (defined(__STDC_HOSTED__) && __STDC_HOSTED__ == 1)
+#include <stdlib.h>
+#define elf_alloc(sz) malloc(sz)
+#define elf_free(p)   free(p)
+#else
+#include <memory/slab.h>
+#define elf_alloc(sz) kmalloc(sz)
+#define elf_free(p)   kfree(p)
+#endif
+
 /* ── User VA constraints (per isolation spec §4) ─────────────
  *
  * USER_CODE_ADDR = 0x400000   — lowest legitimate user address.
@@ -127,11 +137,16 @@ int elf_layout_validate(const elf64_ehdr_t *ehdr,
      * above any realistic ELF — and reject any image that exceeds the
      * cap rather than silently truncating the preflight (see the
      * `interval_count` check below). */
-    struct {
+    struct elf_interval {
         uint64_t vaddr;
         uint64_t memsz;
-    } intervals[32];
+    };
+    enum { MAX_INTERVALS = 32 };
+    struct elf_interval *intervals = (struct elf_interval *)elf_alloc(MAX_INTERVALS * sizeof(struct elf_interval));
+    if (!intervals)
+        return -ENOMEM;
     int interval_count = 0;
+    int ret = -ENOEXEC;
 
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
         const elf64_phdr_t *ph = &phdrs[i];
@@ -144,40 +159,39 @@ int elf_layout_validate(const elf64_ehdr_t *ehdr,
          * later PT_LOAD could overlap with a dropped one and never be
          * detected (spec §4 "complete preflight of all pairs of PT_LOAD
          * byte intervals"). */
-        if (interval_count >= (int)(sizeof(intervals) /
-                                    sizeof(intervals[0])))
-            return -ENOEXEC;
+        if (interval_count >= MAX_INTERVALS)
+            goto out;
 
         /* Zero-sized PT_LOAD (and therefore zero-length-only images)
          * are rejected up-front (spec §4 "无可装载段"). */
         if (ph->p_memsz == 0)
-            return -ENOEXEC;
+            goto out;
 
         if (ph->p_filesz > ph->p_memsz)
-            return -ENOEXEC;
+            goto out;
 
         /* Vaddr below user lower bound. */
         if (ph->p_vaddr < USER_CODE_ADDR)
-            return -ENOEXEC;
+            goto out;
 
         /* Virtual interval end — checked overflow. */
         uint64_t vaddr_end;
         if (add_overflows(ph->p_vaddr, ph->p_memsz, &vaddr_end))
-            return -ENOEXEC;
+            goto out;
 
         /* Segment must end within or at HEAP_LIMIT — anything
          * beyond would put the segment into the stack region. */
         if (vaddr_end > HEAP_LIMIT)
-            return -ENOEXEC;
+            goto out;
 
         /* File interval (only when filesz > 0) — checked overflow
          * and bounded by file_size. */
         if (ph->p_filesz > 0) {
             uint64_t file_end;
             if (add_overflows(ph->p_offset, ph->p_filesz, &file_end))
-                return -ENOEXEC;
+                goto out;
             if (file_end > file_size)
-                return -ENOEXEC;
+                goto out;
         }
 
         /* Track max end for elf_end / heap_base. */
@@ -205,7 +219,7 @@ int elf_layout_validate(const elf64_ehdr_t *ehdr,
                                     intervals[j].vaddr,
                                     intervals[j].vaddr +
                                         intervals[j].memsz)) {
-                return -ENOEXEC;
+                goto out;
             }
         }
         /* The cap was enforced at the top of the loop, so this
@@ -217,19 +231,23 @@ int elf_layout_validate(const elf64_ehdr_t *ehdr,
 
     /* No PT_LOAD → empty image → reject. */
     if (!found_load)
-        return -ENOEXEC;
+        goto out;
 
     /* ── 4. heap_base alignment + ceiling ────────────────────── */
     uint64_t heap_base = align_up_4k(elf_end);
     if (heap_base > HEAP_LIMIT)
-        return -ENOEXEC;
+        goto out;
 
     /* ── 5. Entry must be inside an executable PT_LOAD ───────── */
     if (!entry_in_exex)
-        return -ENOEXEC;
+        goto out;
 
     /* ── 6. Populate output ──────────────────────────────────── */
     out->elf_end   = elf_end;
     out->heap_base = heap_base;
-    return 0;
+    ret = 0;
+
+out:
+    elf_free(intervals);
+    return ret;
 }

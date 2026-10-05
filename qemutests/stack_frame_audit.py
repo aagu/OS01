@@ -17,58 +17,13 @@ import sys
 
 # Baseline allowlist of known existing functions pending heap migration,
 # with their maximum permitted stack frame size (in bytes).
-# When a function is migrated to the heap, reduce its ceiling or remove it.
+# Scheme 5 (early boot physical memory init pre-heap) functions are strictly
+# retained as stack allocations on the boot stack.
 BASELINE_EXCEPTIONS: dict[str, int] = {
-    # Network / socket bounce buffers (16 KiB)
-    "do_sendto": 16472,
-    "fd_write": 16472,
-    # ProcFS format buffer (4 KiB)
-    "procfs_read": 4168,
-    # Libk float conversion & formatting (libc/stdio)
-    "round_to_int": 2328,
-    "vformatter": 1480,
-    "floatconv_render": 1128,
-    "value_ge_pow10": 664,
-    "bi_to_dec": 552,
-    # Syscall & process exec paths
-    "deep_copy_argv": 2136,
-    "setup_user_stack": 1176,
-    "sys_fs_dispatch": 856,
-    "elf_layout_validate": 600,
-    "do_pselect6": 600,
-    "do_select": 536,
-    # Early memory init (boot stack, pre-heap)
+    # Early memory init (boot stack, pre-heap: scheme 5)
     "pmm_init": 1752,
     "pmm_arch_normalize": 536,
-    # VFS / Filesystems
-    "vfs_lookup_resolved": 1672,
-    "vfs_rename": 584,
-    "ext2_vfs_rename": 600,
-    "gpt_scan": 648,
-    "pipe_read_internal": 616,
-    "pipe_write_internal": 584,
-    # FAT32 filesystem (512-byte sector buffers)
-    "fat_rename": 712,
-    "fat_mkdir": 680,
-    "fat_write": 680,
-    "fat32_read_data": 648,
-    "fat32_find_by_name": 648,
-    "fat32_create_entry": 632,
-    "fat_rmdir": 632,
-    "fat_unlink": 616,
-    "fat32_update_entry": 616,
-    "fat32_read_entry": 600,
-    "fat32_find_free_slot": 600,
-    "fat32_locate_entry": 600,
-    "fat_truncate": 600,
-    "fat32_free_cluster_chain": 584,
-    "fat32_alloc_cluster": 584,
-    "fat32_write_fat_entry": 568,
-    "fat32_write_entry_at": 568,
-    "fat32_init": 568,
-    "fat32_next_cluster": 552,
-    "fat32_read_entry_at": 552,
-    "fat32_read_fat_entry": 552,
+    "aarch64_main": 1024,
 }
 
 

@@ -25,7 +25,8 @@ int main(void) {
     dns.sin_addr = ia;
 
     // Build DNS query: example.com A
-    uint8_t q[512] = {0};
+    uint8_t *q = (uint8_t *)calloc(1, 512);
+    if (!q) { close(fd); return 1; }
     q[0] = 0x12; q[1] = 0x34;         // TXID
     q[2] = 0x01; q[3] = 0x00;         // RD
     q[5] = 0x01;                       // QDCOUNT=1
@@ -47,6 +48,8 @@ int main(void) {
     int sr = sendto(fd, q, qi, 0, (struct sockaddr *)&dns, sizeof(dns));
     if (sr < 0) {
         write(1, "udptest: sendto FAIL\n", 21);
+        free(q);
+        close(fd);
         return 1;
     }
     char msg[64];
@@ -57,10 +60,18 @@ int main(void) {
     // recvfrom may block forever if the DNS response never arrives.
 
     write(1, "udptest: recvfrom()...\n", 23);
-    uint8_t reply[512];
-    int r = recvfrom(fd, reply, sizeof(reply), 0, NULL, 0);
+    uint8_t *reply = (uint8_t *)malloc(512);
+    if (!reply) {
+        free(q);
+        close(fd);
+        return 1;
+    }
+    int r = recvfrom(fd, reply, 512, 0, NULL, 0);
     if (r < 0) {
         write(1, "udptest: recvfrom FAIL/blocked\n", 30);
+        free(q);
+        free(reply);
+        close(fd);
         return 2;
     }
     n = snprintf(msg, sizeof(msg), "udptest: got %d bytes\n", r);
@@ -68,5 +79,8 @@ int main(void) {
     if (r >= 12) {
         write(1, "udptest: DNS response OK\n", 25);
     }
+    free(q);
+    free(reply);
+    close(fd);
     return 0;
 }

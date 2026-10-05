@@ -6,6 +6,7 @@
 #include <percpu/percpu.h>
 #include <memory/pmm.h>
 #include <memory/memory.h>
+#include <memory/slab.h>
 #include <kernel.h>
 #include <fs/file.h>   // file_t / files_t full definition
 #include <tty/pty.h>    // pty_struct full definition (file.h only fwd-declares)
@@ -339,60 +340,58 @@ static int procfs_read(vfs_node_t *node, uint64_t offset,
         return 0;
 
     // ── Generate content ──────────────────────────────────
-    char  local[4096];
-    int   len = 0;
+    char *local = kmalloc(4096);
+    if (!local) return 0;
+    int len = 0;
+    int ret = 0;
 
     switch (type) {
     case PROCFS_TYPE_STATUS: {
         task_t *t = find_task_by_pid((int)pid);
-        if (!t) return 0;
-        len = gen_status(t, local, sizeof(local));
+        if (t) len = gen_status(t, local, 4096);
         break;
     }
     case PROCFS_TYPE_MEMINFO:
-        len = gen_meminfo(local, sizeof(local));
+        len = gen_meminfo(local, 4096);
         break;
     case PROCFS_TYPE_MAPS: {
         task_t *t = find_task_by_pid((int)pid);
-        if (!t) return 0;
-        len = gen_maps(t, local, sizeof(local));
+        if (t) len = gen_maps(t, local, 4096);
         break;
     }
     case PROCFS_TYPE_FD_ENTRY: {
         uint32_t p = pid;
-        if (p == PROCFS_PID_SELF) { if (!current) return 0; p = (uint32_t)current->pid; }
+        if (p == PROCFS_PID_SELF) { if (!current) break; p = (uint32_t)current->pid; }
         int fd = parse_fd(node->name);
-        if (fd < 0) return 0;
+        if (fd < 0) break;
 
         files_t *fs = task_files_pin_by_pid((int)p);
-        if (!fs) return 0;
+        if (!fs) break;
         file_t *f = files_get_file(fs, fd);
         files_unpin(fs);                 // drop table ref early
-        if (!f) return 0;
+        if (!f) break;
 
-        len = gen_fd_target(f, local, sizeof(local));
+        len = gen_fd_target(f, local, 4096);
         files_put_file(f);
         break;
     }
     default:
-        return 0;
+        break;
     }
 
     // ── Return the requested slice ────────────────────────
-    if ((uint64_t)len <= offset)
-        return 0;  // EOF
+    if (len > 0 && offset < (uint64_t)len && offset < 4096) {
+        uint64_t remain = (uint64_t)len - offset;
+        uint64_t n = remain < size ? remain : size;
+        uint64_t avail = 4096 - offset;
+        if (n > avail)
+            n = avail;
+        memcpy(buffer, local + offset, n);
+        ret = (int)n;
+    }
 
-    // Guard: offset past buffer is EOF (pre-empts unsigned underflow
-    // in sizeof(local) - offset when len exceeds buffer size).
-    if (offset >= (uint64_t)sizeof(local))
-        return 0;
-    uint64_t remain = (uint64_t)len - offset;
-    uint64_t n = remain < size ? remain : size;
-    uint64_t avail = (uint64_t)sizeof(local) - offset;
-    if (n > avail)
-        n = avail;
-    memcpy(buffer, local + offset, n);
-    return (int)n;
+    kfree(local);
+    return ret;
 }
 
 // ── procfs_readdir: enumerate files/dirs ─────────────────────

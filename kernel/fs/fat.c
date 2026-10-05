@@ -5,6 +5,15 @@
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <memory/slab.h>
+
+static inline uint8_t *fat_alloc_sector(void) {
+    return (uint8_t *)kmalloc(512);
+}
+
+static inline void fat_free_sector(uint8_t *s) {
+    if (s) kfree(s);
+}
 
 // ── Read a FAT entry ────────────────────────────────────
 // Returns the next cluster in the chain, or >= FAT32_EOC_MIN if end.
@@ -20,13 +29,16 @@ uint32_t fat32_next_cluster(fat32_fs_t *fs, uint32_t current)
     uint32_t entry_off  = fat_offset % fs->bytes_per_sector;
 
     // Read the FAT sector containing this entry
-    uint8_t sector[512];
+    uint8_t *sector = fat_alloc_sector();
+    if (!sector) return FAT32_EOC_MIN;
     if (block_device_read(fs->dev, sector_lba, 1, sector) != 0) {
         debug_fs("FAT: error reading FAT sector %lu\n", sector_lba);
+        fat_free_sector(sector);
         return FAT32_EOC_MIN;
     }
 
     uint32_t next = *(uint32_t *)(sector + entry_off) & FAT32_CLUSTER_MASK;
+    fat_free_sector(sector);
     return next;
 }
 
@@ -79,29 +91,33 @@ int fat32_read_entry(fat32_fs_t *fs, uint32_t dir_cluster,
             uint64_t sector_lba = fat32_cluster_to_sector(fs, current_cluster) + sector_in_cluster;
 
             // Read the sector
-            uint8_t sector[512];
-            if (block_device_read(fs->dev, sector_lba, 1, sector) != 0)
+            uint8_t *sector = fat_alloc_sector();
+            if (!sector) return -1;
+            if (block_device_read(fs->dev, sector_lba, 1, sector) != 0) {
+                fat_free_sector(sector);
                 return -1;
+            }
 
             FAT32_DIRENT *dirent = (FAT32_DIRENT *)(sector + offset_in_sector);
 
             // Check for end of directory
             if (dirent->name[0] == 0x00) {
                 entry->name[0] = '\0';
+                fat_free_sector(sector);
                 return 0;
             }
 
             // Skip deleted entries
-            if (dirent->name[0] == 0xE5)
-                goto skip;
+            if (dirent->name[0] == 0xE5) {
+                fat_free_sector(sector);
+                return -1;
+            }
 
             // Check for LFN — skip LFN entries (we use short names only for now)
-            if (dirent->attr == FAT_ATTR_LFN)
-                goto skip;
-
-            // Skip volume label
-            if (dirent->attr & FAT_ATTR_VOLUME_ID)
-                goto skip;
+            if (dirent->attr == FAT_ATTR_LFN || (dirent->attr & FAT_ATTR_VOLUME_ID)) {
+                fat_free_sector(sector);
+                return -1;
+            }
 
             // ── Parse the short (8.3) name ──────────
             uint8_t *name8 = dirent->name;
@@ -134,6 +150,7 @@ int fat32_read_entry(fat32_fs_t *fs, uint32_t dir_cluster,
             else
                 entry->type = VFS_FILE;
 
+            fat_free_sector(sector);
             return 0;
         }
 
@@ -144,10 +161,6 @@ int fat32_read_entry(fat32_fs_t *fs, uint32_t dir_cluster,
     // Past end of directory
     entry->name[0] = '\0';
     return 0;
-
-skip:
-    // Caller should try the next index (entry is LFN, deleted, or volume label)
-    return -1;
 }
 
 // ── Read data from a cluster chain ───────────────────────
@@ -159,6 +172,9 @@ int fat32_read_data(fat32_fs_t *fs, uint32_t first_cluster,
 {
     if (size == 0) return 0;
     if (first_cluster < 2) return -1;
+
+    uint8_t *temp = fat_alloc_sector();
+    if (!temp) return -1;
 
     uint32_t cluster_size = fs->sectors_per_cluster * fs->bytes_per_sector;
     uint8_t *buf = (uint8_t *)buffer;
@@ -184,9 +200,10 @@ int fat32_read_data(fat32_fs_t *fs, uint32_t first_cluster,
                                                / fs->bytes_per_sector);
 
             for (uint32_t s = 0; s < sector_count; s++) {
-                uint8_t temp[512];
-                if (block_device_read(fs->dev, cluster_lba + start_sector + s, 1, temp) != 0)
+                if (block_device_read(fs->dev, cluster_lba + start_sector + s, 1, temp) != 0) {
+                    fat_free_sector(temp);
                     return -1;
+                }
 
                 uint32_t copy_start = (s == 0) ? (cluster_offset % fs->bytes_per_sector) : 0;
                 uint32_t copy_size = fs->bytes_per_sector - copy_start;
@@ -213,6 +230,7 @@ int fat32_read_data(fat32_fs_t *fs, uint32_t first_cluster,
         cluster = fat32_next_cluster(fs, cluster);
     }
 
+    fat_free_sector(temp);
     return (bytes_remaining == 0) ? (int)(size) : -1;
 }
 
@@ -227,21 +245,26 @@ static int fat32_write_fat_entry(fat32_fs_t *fs, uint32_t cluster, uint32_t valu
     uint64_t sector_lba = fs->fat_start_sector + (fat_offset / fs->bytes_per_sector);
     uint32_t entry_off  = fat_offset % fs->bytes_per_sector;
 
-    uint8_t sector[512];
+    uint8_t *sector = fat_alloc_sector();
+    if (!sector) return -1;
 
+    int ret = -1;
     // Write FAT1
     if (block_device_read(fs->dev, sector_lba, 1, sector) != 0)
-        return -1;
+        goto out;
     *(uint32_t *)(sector + entry_off) = value & FAT32_CLUSTER_MASK;
     if (block_device_write(fs->dev, sector_lba, 1, sector) != 0)
-        return -1;
+        goto out;
 
     // Write FAT2 (second copy for redundancy)
     uint64_t fat2_lba = sector_lba + (uint64_t)fs->bpb.sectors_per_fat_32;
     if (block_device_write(fs->dev, fat2_lba, 1, sector) != 0)
-        return -1;
+        goto out;
 
-    return 0;
+    ret = 0;
+out:
+    fat_free_sector(sector);
+    return ret;
 }
 
 // ── Read a single FAT entry ───────────────────────────────
@@ -254,11 +277,15 @@ static uint32_t fat32_read_fat_entry(fat32_fs_t *fs, uint32_t cluster)
     uint64_t sector_lba = fs->fat_start_sector + (fat_offset / fs->bytes_per_sector);
     uint32_t entry_off  = fat_offset % fs->bytes_per_sector;
 
-    uint8_t sector[512];
-    if (block_device_read(fs->dev, sector_lba, 1, sector) != 0)
-        return FAT32_EOC_MIN;
+    uint8_t *sector = fat_alloc_sector();
+    if (!sector) return FAT32_EOC_MIN;
 
-    return *(uint32_t *)(sector + entry_off) & FAT32_CLUSTER_MASK;
+    uint32_t val = FAT32_EOC_MIN;
+    if (block_device_read(fs->dev, sector_lba, 1, sector) == 0)
+        val = *(uint32_t *)(sector + entry_off) & FAT32_CLUSTER_MASK;
+
+    fat_free_sector(sector);
+    return val;
 }
 
 // ── Free a cluster chain ─────────────────────────────────────
@@ -284,45 +311,60 @@ static int fat32_free_cluster_chain(fat32_fs_t *fs, uint32_t first_cluster)
 // Writes zeroes to every sector in the cluster.
 static int fat32_zero_cluster(fat32_fs_t *fs, uint32_t cluster)
 {
-    uint8_t zero[512];
+    uint8_t *zero = fat_alloc_sector();
+    if (!zero) return -1;
     memset(zero, 0, 512);
 
     uint64_t lba = fat32_cluster_to_sector(fs, cluster);
+    int ret = 0;
     for (uint32_t s = 0; s < fs->sectors_per_cluster; s++) {
-        if (block_device_write(fs->dev, lba + s, 1, zero) != 0)
-            return -1;
+        if (block_device_write(fs->dev, lba + s, 1, zero) != 0) {
+            ret = -1;
+            break;
+        }
     }
-    return 0;
+    fat_free_sector(zero);
+    return ret;
 }
 
 // ── Find a free cluster ───────────────────────────────────
 // Scans the FAT starting from cluster 2.
 static uint32_t fat32_find_free_cluster(fat32_fs_t *fs)
 {
+    uint8_t *sector = fat_alloc_sector();
+    if (!sector) return 0;
+
+    uint32_t found_cl = 0;
     for (uint32_t cl = 2; cl < 0x0FFFFFF0; cl++) {
         uint32_t val = fat32_read_fat_entry(fs, cl);
-        if (val == FAT32_CLUSTER_FREE)
-            return cl;
+        if (val == FAT32_CLUSTER_FREE) {
+            found_cl = cl;
+            break;
+        }
         // Avoid reading every entry individually — batch by sectors
         if ((cl & 0x7F) == 0x7F) {
             // Check next sector's range
             uint64_t fat_offset = (uint64_t)(cl + 1) * 4;
             uint64_t sector_lba = fs->fat_start_sector + (fat_offset / fs->bytes_per_sector);
             // Read this sector and scan it
-            uint8_t sector[512];
             if (block_device_read(fs->dev, sector_lba, 1, sector) != 0)
-                return 0;
+                break;
             for (int j = 0; j < 128; j++) {
                 uint32_t check_cl = cl + 1 + (uint32_t)j;
                 if (check_cl >= 0x0FFFFFF0) break;
                 uint32_t v = *(uint32_t *)(sector + j * 4) & FAT32_CLUSTER_MASK;
-                if (v == FAT32_CLUSTER_FREE)
-                    return check_cl;
+                if (v == FAT32_CLUSTER_FREE) {
+                    found_cl = check_cl;
+                    goto out;
+                }
             }
             cl += 127; // skip past scanned range
         }
     }
-    return 0; // no free clusters
+
+out:
+    fat_free_sector(sector);
+    return found_cl;
 }
 
 // ── Allocate a new cluster at end of chain ────────────────
@@ -361,6 +403,9 @@ static int fat32_write_data(fat32_fs_t *fs, uint32_t first_cluster,
     if (size == 0) return 0;
     if (first_cluster < 2) return -1;
 
+    uint8_t *temp = (uint8_t *)fat_alloc_sector();
+    if (!temp) return -1;
+
     uint32_t cluster_size = fs->sectors_per_cluster * fs->bytes_per_sector;
     const uint8_t *src = (const uint8_t *)buffer;
     uint64_t bytes_remaining = size;
@@ -396,12 +441,13 @@ static int fat32_write_data(fat32_fs_t *fs, uint32_t first_cluster,
         uint64_t written_in_cluster = 0;
 
         for (uint32_t s = start_sector; s < end_sector; s++) {
-            uint8_t temp[512];
             uint64_t sector_lba = cluster_lba + s;
 
             // Read-modify-write
-            if (block_device_read(fs->dev, sector_lba, 1, temp) != 0)
+            if (block_device_read(fs->dev, sector_lba, 1, temp) != 0) {
+                fat_free_sector(temp);
                 return -1;
+            }
 
             uint32_t copy_start = (s == start_sector) ? (uint32_t)(cluster_offset % fs->bytes_per_sector) : 0;
             uint32_t copy_size = fs->bytes_per_sector - copy_start;
@@ -409,8 +455,10 @@ static int fat32_write_data(fat32_fs_t *fs, uint32_t first_cluster,
                 copy_size = (uint32_t)(to_write - written_in_cluster);
 
             memcpy(temp + copy_start, src, copy_size);
-            if (block_device_write(fs->dev, sector_lba, 1, temp) != 0)
+            if (block_device_write(fs->dev, sector_lba, 1, temp) != 0) {
+                fat_free_sector(temp);
                 return -1;
+            }
 
             src += copy_size;
             written_in_cluster += copy_size;
@@ -423,6 +471,7 @@ static int fat32_write_data(fat32_fs_t *fs, uint32_t first_cluster,
         cluster = fat32_read_fat_entry(fs, cluster);
     }
 
+    fat_free_sector(temp);
     return (int)(size - bytes_remaining);
 }
 
@@ -464,6 +513,9 @@ static int64_t fat32_find_free_slot(fat32_fs_t *fs, uint32_t dir_cluster)
     uint32_t entries_per_cluster = (fs->sectors_per_cluster * fs->bytes_per_sector) / 32;
     uint64_t index = 0;
     uint32_t cluster = dir_cluster;
+    uint8_t *sector = (uint8_t *)fat_alloc_sector();
+    if (!sector) return -1;
+    int64_t res = -1;
 
     while (cluster < FAT32_EOC_MIN) {
         for (uint64_t local = 0; local < entries_per_cluster; local++) {
@@ -472,19 +524,22 @@ static int64_t fat32_find_free_slot(fat32_fs_t *fs, uint32_t dir_cluster)
             uint32_t offset_in_sector  = offset_in_cluster % fs->bytes_per_sector;
 
             uint64_t sector_lba = fat32_cluster_to_sector(fs, cluster) + sector_in_cluster;
-            uint8_t sector[512];
             if (block_device_read(fs->dev, sector_lba, 1, sector) != 0)
-                return -1;
+                goto out;
 
             uint8_t first_byte = sector[offset_in_sector];
-            if (first_byte == 0x00 || first_byte == 0xE5)
-                return (int64_t)index;
+            if (first_byte == 0x00 || first_byte == 0xE5) {
+                res = (int64_t)index;
+                goto out;
+            }
 
             index++;
         }
         cluster = fat32_read_fat_entry(fs, cluster);
     }
-    return -1;
+out:
+    fat_free_sector(sector);
+    return res;
 }
 
 // ── Generate an 8.3 name from a user-supplied filename ────
@@ -531,21 +586,45 @@ static void fat32_make_83_name(const char *name, uint8_t out[11])
 static int fat32_write_entry_at(fat32_fs_t *fs, uint64_t lba, uint32_t off,
                                 const FAT32_DIRENT *dirent)
 {
-    uint8_t sector[512];
-    if (block_device_read(fs->dev, lba, 1, sector) != 0)
+    uint8_t *sector = (uint8_t *)fat_alloc_sector();
+    if (!sector) return -1;
+    if (block_device_read(fs->dev, lba, 1, sector) != 0) {
+        fat_free_sector(sector);
         return -1;
+    }
     memcpy(sector + off, dirent, sizeof(FAT32_DIRENT));
-    return block_device_write(fs->dev, lba, 1, sector);
+    int ret = block_device_write(fs->dev, lba, 1, sector);
+    fat_free_sector(sector);
+    return ret;
+}
+
+// ── Mark a directory entry as deleted (0xE5) ───────────────
+static int fat32_mark_entry_deleted(fat32_fs_t *fs, uint64_t lba, uint32_t off)
+{
+    uint8_t *sector = (uint8_t *)fat_alloc_sector();
+    if (!sector) return -ENOMEM;
+    if (block_device_read(fs->dev, lba, 1, sector) != 0) {
+        fat_free_sector(sector);
+        return -EIO;
+    }
+    sector[off] = 0xE5;
+    int ret = block_device_write(fs->dev, lba, 1, sector);
+    fat_free_sector(sector);
+    return (ret != 0) ? -EIO : 0;
 }
 
 // ── Read a directory entry at a specific location ─────────
 static int fat32_read_entry_at(fat32_fs_t *fs, uint64_t lba, uint32_t off,
                                FAT32_DIRENT *dirent)
 {
-    uint8_t sector[512];
-    if (block_device_read(fs->dev, lba, 1, sector) != 0)
+    uint8_t *sector = (uint8_t *)fat_alloc_sector();
+    if (!sector) return -1;
+    if (block_device_read(fs->dev, lba, 1, sector) != 0) {
+        fat_free_sector(sector);
         return -1;
+    }
     memcpy(dirent, sector + off, sizeof(FAT32_DIRENT));
+    fat_free_sector(sector);
     return 0;
 }
 
@@ -562,6 +641,9 @@ static int64_t fat32_find_by_name(fat32_fs_t *fs, uint32_t dir_cluster,
     uint32_t entries_per_cluster = (fs->sectors_per_cluster * fs->bytes_per_sector) / 32;
     uint64_t index = 0;
     uint32_t cluster = dir_cluster;
+    uint8_t *sector = (uint8_t *)fat_alloc_sector();
+    if (!sector) return -1;
+    int64_t result = -1;
 
     while (cluster < FAT32_EOC_MIN) {
         for (uint64_t local = 0; local < entries_per_cluster; local++) {
@@ -570,12 +652,11 @@ static int64_t fat32_find_by_name(fat32_fs_t *fs, uint32_t dir_cluster,
             uint32_t offset_in_sector  = offset_in_cluster % fs->bytes_per_sector;
 
             uint64_t sector_lba = fat32_cluster_to_sector(fs, cluster) + sector_in_cluster;
-            uint8_t sector[512];
             if (block_device_read(fs->dev, sector_lba, 1, sector) != 0)
-                return -1;
+                goto out;
 
             uint8_t first_byte = sector[offset_in_sector];
-            if (first_byte == 0x00) break; // end of directory
+            if (first_byte == 0x00) goto out; // end of directory
             if (first_byte == 0xE5) { index++; continue; } // deleted
 
             if (sector[offset_in_sector + 0x0B] == FAT_ATTR_LFN) {
@@ -587,13 +668,16 @@ static int64_t fat32_find_by_name(fat32_fs_t *fs, uint32_t dir_cluster,
             if (memcmp(sector + offset_in_sector, target, 11) == 0) {
                 if (out_lba) *out_lba = sector_lba;
                 if (out_off) *out_off = offset_in_sector;
-                return (int64_t)index;
+                result = (int64_t)index;
+                goto out;
             }
             index++;
         }
         cluster = fat32_read_fat_entry(fs, cluster);
     }
-    return -1;
+out:
+    fat_free_sector(sector);
+    return result;
 }
 
 // ── Create a new directory entry ──────────────────────────
@@ -761,12 +845,8 @@ int fat_unlink(vfs_node_t *dir, const char *name)
     }
 
     // Mark the entry as deleted
-    uint8_t sector[512];
-    if (block_device_read(fs->dev, lba, 1, sector) != 0)
-        return -EIO;
-    sector[off] = 0xE5;
-    if (block_device_write(fs->dev, lba, 1, sector) != 0)
-        return -EIO;
+    int ret = fat32_mark_entry_deleted(fs, lba, off);
+    if (ret != 0) return ret;
 
     debug_fs("FAT: unlink '%s' ok\n", name);
     return 0;
@@ -937,12 +1017,8 @@ int fat_rmdir(vfs_node_t *dir, const char *name)
     }
 
     // Mark the entry as deleted
-    uint8_t sector[512];
-    if (block_device_read(fs->dev, ent_lba, 1, sector) != 0)
-        return -EIO;
-    sector[ent_off] = 0xE5;
-    if (block_device_write(fs->dev, ent_lba, 1, sector) != 0)
-        return -EIO;
+    int ret = fat32_mark_entry_deleted(fs, ent_lba, ent_off);
+    if (ret != 0) return ret;
 
     // Free the cluster chain
     if (target_cl >= 2 && target_cl < FAT32_EOC_MIN) {
@@ -1036,14 +1112,10 @@ int fat_rename(vfs_node_t *olddir, const char *oldname,
         }
 
         // Mark target entry as deleted
-        uint8_t sector[512];
         uint64_t dst_lba2;
         uint32_t dst_off2;
         if (fat32_find_by_name(fs, dst_dir_cl, newname, &dst_lba2, &dst_off2) >= 0) {
-            if (block_device_read(fs->dev, dst_lba2, 1, sector) == 0) {
-                sector[dst_off2] = 0xE5;
-                block_device_write(fs->dev, dst_lba2, 1, sector);
-            }
+            fat32_mark_entry_deleted(fs, dst_lba2, dst_off2);
         }
     }
 
@@ -1075,11 +1147,7 @@ int fat_rename(vfs_node_t *olddir, const char *oldname,
             return -EIO;
 
         // Mark source entry as deleted
-        uint8_t sector[512];
-        if (block_device_read(fs->dev, src_lba, 1, sector) != 0)
-            return -EIO;
-        sector[src_off] = 0xE5;
-        if (block_device_write(fs->dev, src_lba, 1, sector) != 0)
+        if (fat32_mark_entry_deleted(fs, src_lba, src_off) != 0)
             return -EIO;
     }
 
@@ -1206,9 +1274,11 @@ int fat32_init(block_device_t *dev, fat32_fs_t **out_fs)
     if (!dev) return -1;
 
     // Read sector 0 (BPB)
-    uint8_t sector[512];
+    uint8_t *sector = (uint8_t *)fat_alloc_sector();
+    if (!sector) return -1;
     if (block_device_read(dev, 0, 1, sector) != 0) {
         debug_fs("FAT: failed to read boot sector\n");
+        fat_free_sector(sector);
         return -1;
     }
 
@@ -1218,6 +1288,7 @@ int fat32_init(block_device_t *dev, fat32_fs_t **out_fs)
     if (sector[510] != 0x55 || sector[511] != 0xAA) {
         debug_fs("FAT: boot sector signature missing (%02x %02x)\n",
                        sector[510], sector[511]);
+        fat_free_sector(sector);
         return -1;
     }
 
@@ -1228,19 +1299,25 @@ int fat32_init(block_device_t *dev, fat32_fs_t **out_fs)
                  bpb->sectors_per_fat_16,
                  (bpb->total_sectors_16 != 0)
                      ? bpb->total_sectors_16 : bpb->total_sectors_32);
+        fat_free_sector(sector);
         return -1;
     }
 
     if (bpb->sectors_per_fat_32 == 0) {
         debug_fs("FAT: invalid FAT32: sectors_per_fat=0\n");
+        fat_free_sector(sector);
         return -1;
     }
 
     // Allocate private data
     fat32_fs_t *fs = (fat32_fs_t *)calloc(1, sizeof(fat32_fs_t));
-    if (!fs) return -1;
+    if (!fs) {
+        fat_free_sector(sector);
+        return -1;
+    }
 
     memcpy(&fs->bpb, bpb, sizeof(FAT32_BPB));
+    fat_free_sector(sector);
     fs->dev = dev;
     fs->bytes_per_sector = bpb->bytes_per_sector;
     fs->sectors_per_cluster = bpb->sectors_per_cluster;

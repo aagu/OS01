@@ -147,107 +147,46 @@ out:
     return (ret < 0) ? ret : count;
 }
 
-// ── do_select — select(2) syscall implementation ─────────────
-//
-// Linux ABI: int select(int nfds, fd_set *readfds, fd_set *writefds,
-//                       fd_set *exceptfds, struct timeval *timeout);
-// Returns: ready count, 0 = timeout, -1 = -errno (via trap.c).
-//
-// Timeout: NULL → block indefinitely; {0,0} → non-blocking;
-//          >0 → milliseconds (rounded up from timeval).
-
-int64_t do_select(int nfds, void *readfds, void *writefds,
-                  void *exceptfds, void *timeout_tv)
+// ── do_select_fds — shared core for nfds > 0 ─────────────────
+static __attribute__((noinline)) int64_t do_select_fds(int nfds,
+    void *readfds, void *writefds, void *exceptfds,
+    poll_table_t *pt, int64_t ms)
 {
-    // ── nfds validation ──────────────────────────────────────
-    if (nfds < 0 || nfds > FD_SETSIZE)
-        return -EINVAL;
+    kernel_fd_set kr;
+    kernel_fd_set kw;
+    kernel_fd_set ke;
+    memset(&kr, 0, sizeof(kr));
+    memset(&kw, 0, sizeof(kw));
+    memset(&ke, 0, sizeof(ke));
 
-    // ── nfds==0 path (before any allocation) ─────────────────
-    if (nfds == 0) {
-        if (!timeout_tv)
-            return -ENOSYS;
-
-        struct timeval ktv;
-        if (!syscall_check_user_range((uint64_t)timeout_tv, sizeof(ktv), false))
-            return -EFAULT;
-        if (copy_from_user_ft(&ktv, timeout_tv, sizeof(ktv)) < 0)
-            return -EFAULT;
-        if (ktv.tv_sec > INT32_MAX / 1000)
-            return -EINVAL;
-        if (ktv.tv_usec >= 1000000)
-            return -EINVAL;
-        if (ktv.tv_sec == 0 && ktv.tv_usec == 0)
-            return 0;
-
-        int64_t ms = (int64_t)(ktv.tv_sec * 1000
-                               + (ktv.tv_usec + 999) / 1000);
-        return do_select_nofds(ms);
-    }
-
-    // ── Signal check (before poll_table allocation) ──────────
-    if (current->signal & ~current->blocked)
-        return -EINTR;
-
-    // ── Zero-init kernel fd_sets ─────────────────────────────
-    // Prevents random stack bits from leaking into events when
-    // a pointer is NULL (the set stays zeroed).
-    kernel_fd_set kr = {0}, kw = {0}, ke = {0};
-
-    // ── Copy fd_sets from user space (NULL → skip) ──────────
     if (readfds) {
-        if (!syscall_check_user_range((uint64_t)readfds,
-                                      sizeof(kernel_fd_set), false))
+        if (!syscall_check_user_range((uint64_t)readfds, sizeof(kernel_fd_set), false))
             return -EFAULT;
         if (copy_from_user_ft(&kr, readfds, sizeof(kernel_fd_set)) < 0)
             return -EFAULT;
     }
     if (writefds) {
-        if (!syscall_check_user_range((uint64_t)writefds,
-                                      sizeof(kernel_fd_set), false))
+        if (!syscall_check_user_range((uint64_t)writefds, sizeof(kernel_fd_set), false))
             return -EFAULT;
         if (copy_from_user_ft(&kw, writefds, sizeof(kernel_fd_set)) < 0)
             return -EFAULT;
     }
     if (exceptfds) {
-        if (!syscall_check_user_range((uint64_t)exceptfds,
-                                      sizeof(kernel_fd_set), false))
+        if (!syscall_check_user_range((uint64_t)exceptfds, sizeof(kernel_fd_set), false))
             return -EFAULT;
         if (copy_from_user_ft(&ke, exceptfds, sizeof(kernel_fd_set)) < 0)
             return -EFAULT;
     }
 
-    // ── Parse timeout ────────────────────────────────────────
-    int64_t ms;
-    if (!timeout_tv) {
-        ms = -1;   // block indefinitely
-    } else {
-        struct timeval ktv;
-        if (!syscall_check_user_range((uint64_t)timeout_tv,
-                                      sizeof(ktv), false))
-            return -EFAULT;
-        if (copy_from_user_ft(&ktv, timeout_tv, sizeof(ktv)) < 0)
-            return -EFAULT;
-        if (ktv.tv_sec > INT32_MAX / 1000)
-            return -EINVAL;
-        if (ktv.tv_usec >= 1000000)
-            return -EINVAL;
-        ms = (int64_t)(ktv.tv_sec * 1000
-                       + (ktv.tv_usec + 999) / 1000);
-    }
-
-    // ── Allocate pollfd array ────────────────────────────────
     struct pollfd *pfds = kmalloc(nfds * sizeof(struct pollfd));
     if (!pfds)
         return -ENOMEM;
 
-    // ── Convert fd_set → pollfd ──────────────────────────────
     for (int i = 0; i < nfds; i++) {
         pfds[i].fd      = (int)i;
         pfds[i].events  = 0;
         pfds[i].revents = 0;
 
-        // fd past end of fd table → mark invalid
         if ((uint32_t)i >= NOFILE) {
             pfds[i].fd = -1;
             continue;
@@ -261,18 +200,67 @@ int64_t do_select(int nfds, void *readfds, void *writefds,
             pfds[i].events |= POLLPRI;
     }
 
-    // ── Setup poll table ─────────────────────────────────────
-    poll_table_t pt;
     int pollable_fds = nfds < NOFILE ? nfds : NOFILE;
     int max_entries = pollable_fds * POLL_WAIT_SLOTS_PER_FD;
-    if (poll_table_setup(&pt, max_entries) != 0) {
+    if (poll_table_setup(pt, max_entries) != 0) {
         kfree(pfds);
         return -ENOMEM;
     }
 
-    // ── Common path (kfree + poll_table_destroy happen inside) ─
-    return do_select_common(nfds, &kr, &kw, &ke, pfds, &pt, ms,
+    return do_select_common(nfds, &kr, &kw, &ke, pfds, pt, ms,
                             readfds, writefds, exceptfds);
+}
+
+// ── do_select — select(2) syscall implementation ─────────────
+//
+// Linux ABI: int select(int nfds, fd_set *readfds, fd_set *writefds,
+//                       fd_set *exceptfds, struct timeval *timeout);
+// Returns: ready count, 0 = timeout, -1 = -errno (via trap.c).
+//
+// Timeout: NULL → block indefinitely; {0,0} → non-blocking;
+//          >0 → milliseconds (rounded up from timeval).
+
+int64_t do_select(int nfds, void *readfds, void *writefds,
+                  void *exceptfds, void *timeout_tv)
+{
+    if (nfds < 0 || nfds > FD_SETSIZE)
+        return -EINVAL;
+
+    if (nfds == 0) {
+        if (!timeout_tv)
+            return -ENOSYS;
+
+        struct timeval ktv;
+        if (!syscall_check_user_range((uint64_t)timeout_tv, sizeof(ktv), false))
+            return -EFAULT;
+        if (copy_from_user_ft(&ktv, timeout_tv, sizeof(ktv)) < 0)
+            return -EFAULT;
+        if (ktv.tv_sec > INT32_MAX / 1000 || ktv.tv_usec >= 1000000)
+            return -EINVAL;
+        if (ktv.tv_sec == 0 && ktv.tv_usec == 0)
+            return 0;
+
+        int64_t ms = (int64_t)(ktv.tv_sec * 1000 + (ktv.tv_usec + 999) / 1000);
+        return do_select_nofds(ms);
+    }
+
+    if (current->signal & ~current->blocked)
+        return -EINTR;
+
+    int64_t ms = -1;
+    if (timeout_tv) {
+        struct timeval ktv;
+        if (!syscall_check_user_range((uint64_t)timeout_tv, sizeof(ktv), false))
+            return -EFAULT;
+        if (copy_from_user_ft(&ktv, timeout_tv, sizeof(ktv)) < 0)
+            return -EFAULT;
+        if (ktv.tv_sec > INT32_MAX / 1000 || ktv.tv_usec >= 1000000)
+            return -EINVAL;
+        ms = (int64_t)(ktv.tv_sec * 1000 + (ktv.tv_usec + 999) / 1000);
+    }
+
+    poll_table_t pt;
+    return do_select_fds(nfds, readfds, writefds, exceptfds, &pt, ms);
 }
 
 // ── do_pselect6 — pselect6(2) syscall implementation ────────
@@ -293,49 +281,39 @@ int64_t do_pselect6(int nfds, void *readfds, void *writefds,
                     void *exceptfds, void *timeout_ts,
                     const void *sigmask_packed)
 {
-    // ── nfds validation (before sigmask swap) ────────────────
     if (nfds < 0 || nfds > FD_SETSIZE)
         return -EINVAL;
 
-    // ── nfds==0 path (sigmask swap still needed for atomicity) ──
     if (nfds == 0) {
         if (!timeout_ts)
             return -ENOSYS;
 
         struct timespec kts;
-        if (!syscall_check_user_range((uint64_t)timeout_ts,
-                                      sizeof(kts), false))
+        if (!syscall_check_user_range((uint64_t)timeout_ts, sizeof(kts), false))
             return -EFAULT;
         if (copy_from_user_ft(&kts, timeout_ts, sizeof(kts)) < 0)
             return -EFAULT;
-        if (kts.tv_sec > INT32_MAX / 1000)
-            return -EINVAL;
-        if (kts.tv_nsec >= 1000000000)
+        if (kts.tv_sec > INT32_MAX / 1000 || kts.tv_nsec >= 1000000000)
             return -EINVAL;
         if (kts.tv_sec == 0 && kts.tv_nsec == 0)
             return 0;
 
-        int64_t ms = (int64_t)(kts.tv_sec * 1000
-                               + (kts.tv_nsec + 999999) / 1000000);
+        int64_t ms = (int64_t)(kts.tv_sec * 1000 + (kts.tv_nsec + 999999) / 1000000);
 
-        // Unpack + swap signal mask for nfds==0 path
         struct pselect6_sigmask sm;
         sigset_t sigmask_kern_n0 = 0;
         sigset_t *sigmask_ptr_n0 = NULL;
         if (sigmask_packed) {
-            if (!syscall_check_user_range((uint64_t)sigmask_packed,
-                                          sizeof(sm), false))
+            if (!syscall_check_user_range((uint64_t)sigmask_packed, sizeof(sm), false))
                 return -EFAULT;
             if (copy_from_user_ft(&sm, sigmask_packed, sizeof(sm)) < 0)
                 return -EFAULT;
             if (sm.ss_len != sizeof(sigset_t))
                 return -EINVAL;
             if (sm.ss) {
-                if (!syscall_check_user_range((uint64_t)sm.ss,
-                                              sizeof(sigset_t), false))
+                if (!syscall_check_user_range((uint64_t)sm.ss, sizeof(sigset_t), false))
                     return -EFAULT;
-                if (copy_from_user_ft(&sigmask_kern_n0, sm.ss,
-                                      sizeof(sigset_t)) < 0)
+                if (copy_from_user_ft(&sigmask_kern_n0, sm.ss, sizeof(sigset_t)) < 0)
                     return -EFAULT;
                 sigmask_ptr_n0 = &sigmask_kern_n0;
             }
@@ -356,37 +334,29 @@ int64_t do_pselect6(int nfds, void *readfds, void *writefds,
         return ret;
     }
 
-    // ── Unpack sigmask_packed ────────────────────────────────
     struct pselect6_sigmask sm;
     sigset_t sigmask_kern = 0;
     sigset_t *sigmask_ptr = NULL;
 
     if (sigmask_packed) {
-        if (!syscall_check_user_range((uint64_t)sigmask_packed,
-                                      sizeof(sm), false))
+        if (!syscall_check_user_range((uint64_t)sigmask_packed, sizeof(sm), false))
             return -EFAULT;
         if (copy_from_user_ft(&sm, sigmask_packed, sizeof(sm)) < 0)
             return -EFAULT;
         if (sm.ss_len != sizeof(sigset_t))
             return -EINVAL;
         if (sm.ss) {
-            if (!syscall_check_user_range((uint64_t)sm.ss,
-                                          sizeof(sigset_t), false))
+            if (!syscall_check_user_range((uint64_t)sm.ss, sizeof(sigset_t), false))
                 return -EFAULT;
-            if (copy_from_user_ft(&sigmask_kern, sm.ss,
-                                  sizeof(sigset_t)) < 0)
+            if (copy_from_user_ft(&sigmask_kern, sm.ss, sizeof(sigset_t)) < 0)
                 return -EFAULT;
             sigmask_ptr = &sigmask_kern;
         }
     }
 
-    // ── Sigmask swap + goto-out pattern ──────────────────────
-    // ALL code paths after this point must go through "out:" to
-    // guarantee blocked mask restoration.
     uint64_t old_blocked = 0;
     bool     mask_swapped = false;
     int64_t  ret = 0;
-    kernel_fd_set kr = {0}, kw = {0}, ke = {0};
 
     if (sigmask_ptr) {
         old_blocked = current->blocked;
@@ -394,116 +364,31 @@ int64_t do_pselect6(int nfds, void *readfds, void *writefds,
         mask_swapped = true;
     }
 
-    // ── Signal check (uses new blocked mask) ─────────────────
     if (current->signal & ~current->blocked) {
         ret = -EINTR;
         goto out;
     }
 
-    // ── Parse timeout (NULL → infinite) ──────────────────────
-    int64_t ms;
-    if (!timeout_ts) {
-        ms = -1;
-        goto after_timeout;
-    }
-
-    struct timespec kts;
-    if (!syscall_check_user_range((uint64_t)timeout_ts,
-                                  sizeof(kts), false)) {
-        ret = -EFAULT;
-        goto out;
-    }
-    if (copy_from_user_ft(&kts, timeout_ts, sizeof(kts)) < 0) {
-        ret = -EFAULT;
-        goto out;
-    }
-    if (kts.tv_sec > INT32_MAX / 1000) {
-        ret = -EINVAL;
-        goto out;
-    }
-    if (kts.tv_nsec >= 1000000000) {
-        ret = -EINVAL;
-        goto out;
-    }
-    ms = (int64_t)(kts.tv_sec * 1000
-                   + (kts.tv_nsec + 999999) / 1000000);
-
-after_timeout:
-    // ── Copy fd_sets from user space (NULL → skip) ──────────
-
-    if (readfds) {
-        if (!syscall_check_user_range((uint64_t)readfds,
-                                      sizeof(kernel_fd_set), false)) {
+    int64_t ms = -1;
+    if (timeout_ts) {
+        struct timespec kts;
+        if (!syscall_check_user_range((uint64_t)timeout_ts, sizeof(kts), false)) {
             ret = -EFAULT;
             goto out;
         }
-        if (copy_from_user_ft(&kr, readfds, sizeof(kernel_fd_set)) < 0) {
+        if (copy_from_user_ft(&kts, timeout_ts, sizeof(kts)) < 0) {
             ret = -EFAULT;
             goto out;
         }
-    }
-    if (writefds) {
-        if (!syscall_check_user_range((uint64_t)writefds,
-                                      sizeof(kernel_fd_set), false)) {
-            ret = -EFAULT;
+        if (kts.tv_sec > INT32_MAX / 1000 || kts.tv_nsec >= 1000000000) {
+            ret = -EINVAL;
             goto out;
         }
-        if (copy_from_user_ft(&kw, writefds, sizeof(kernel_fd_set)) < 0) {
-            ret = -EFAULT;
-            goto out;
-        }
-    }
-    if (exceptfds) {
-        if (!syscall_check_user_range((uint64_t)exceptfds,
-                                      sizeof(kernel_fd_set), false)) {
-            ret = -EFAULT;
-            goto out;
-        }
-        if (copy_from_user_ft(&ke, exceptfds, sizeof(kernel_fd_set)) < 0) {
-            ret = -EFAULT;
-            goto out;
-        }
+        ms = (int64_t)(kts.tv_sec * 1000 + (kts.tv_nsec + 999999) / 1000000);
     }
 
-    // ── Allocate and fill pollfd array ───────────────────────
-    struct pollfd *pfds = kmalloc(nfds * sizeof(struct pollfd));
-    if (!pfds) {
-        ret = -ENOMEM;
-        goto out;
-    }
-
-    for (int i = 0; i < nfds; i++) {
-        pfds[i].fd      = (int)i;
-        pfds[i].events  = 0;
-        pfds[i].revents = 0;
-
-        // fd past end of fd table → mark invalid
-        if ((uint32_t)i >= NOFILE) {
-            pfds[i].fd = -1;
-            continue;
-        }
-
-        if (kern_fd_isset(i, &kr))
-            pfds[i].events |= POLLIN | POLLRDNORM;
-        if (kern_fd_isset(i, &kw))
-            pfds[i].events |= POLLOUT | POLLWRNORM;
-        if (kern_fd_isset(i, &ke))
-            pfds[i].events |= POLLPRI;
-    }
-
-    // ── Setup poll table ─────────────────────────────────────
     poll_table_t pt;
-    int pollable_fds = nfds < NOFILE ? nfds : NOFILE;
-    int max_entries = pollable_fds * POLL_WAIT_SLOTS_PER_FD;
-    if (poll_table_setup(&pt, max_entries) != 0) {
-        kfree(pfds);
-        ret = -ENOMEM;
-        goto out;
-    }
-
-    // ── Common path (cleanup inside do_select_common) ────────
-    ret = do_select_common(nfds, &kr, &kw, &ke, pfds, &pt, ms,
-                           readfds, writefds, exceptfds);
+    ret = do_select_fds(nfds, readfds, writefds, exceptfds, &pt, ms);
 
 out:
     if (mask_swapped)

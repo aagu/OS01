@@ -174,31 +174,39 @@ int64_t do_sendto(int fd, const void *buf, uint64_t len, int flags,
         (void)ip; (void)port;
         if (arch_signal_pending_fatal()) return -EINTR;
 
+        uint8_t *kbuf = kmalloc(16 * 1024);
+        if (!kbuf) return -ENOMEM;
+
         uint64_t committed = 0;
+        int64_t ret = 0;
         while (committed < len) {
             uint64_t remaining = len - committed;
             uint64_t chunk = remaining < (16 * 1024)
                              ? remaining : (16 * 1024);
-            uint8_t kbuf[16 * 1024];
 
             ssize_t rc = copy_from_user_ft(
                 kbuf, (const uint8_t *)buf + committed, (size_t)chunk);
             if (rc < 0) {
-                if (committed == 0) return -EFAULT;
-                return (int64_t)committed;
+                if (committed == 0) ret = -EFAULT;
+                else ret = (int64_t)committed;
+                break;
             }
             err_t err = netconn_write_partly(
                 (struct netconn *)s->conn, kbuf, (size_t)chunk,
                 NETCONN_COPY, NULL);
             if (err != ERR_OK) {
-                if (committed == 0) return -EIO;
-                return (int64_t)committed;
+                if (committed == 0) ret = -EIO;
+                else ret = (int64_t)committed;
+                break;
             }
             committed += chunk;
             if (arch_signal_pending_fatal()) {
-                return (committed == 0) ? -EINTR : (int64_t)committed;
+                ret = (committed == 0) ? -EINTR : (int64_t)committed;
+                break;
             }
         }
+        kfree(kbuf);
+        if (ret < 0) return ret;
         return (int64_t)committed;
     } else {
         // UDP: stage user→kernel, build netbuf, hand to lwIP.

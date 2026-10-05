@@ -365,11 +365,17 @@ static void parse_inittab(void)
     }
 
     // Inittab is a small build-time file (<1KB); single read() is sufficient.
-    char buf[4096];
-    int64_t n = read(fd, buf, sizeof(buf) - 1);
-    close(fd);
-    if (n <= 0)
+    char *buf = (char *)malloc(4096);
+    if (!buf) {
+        close(fd);
         return;
+    }
+    int64_t n = read(fd, buf, 4096 - 1);
+    close(fd);
+    if (n <= 0) {
+        free(buf);
+        return;
+    }
     buf[n] = '\0';
 
     char *p = buf;
@@ -468,6 +474,7 @@ static void parse_inittab(void)
         if (p < end)
             p++; // skip '\n'
     }
+    free(buf);
 }
 
 // ── Set up hardcoded fallback actions ───────────────────────
