@@ -31,6 +31,12 @@ uint32_t fake_alloc_pages_count = 0;
 uint32_t fake_alloc_4k_count = 0;
 uint32_t fake_modern_device_io_writes = 0;
 uint32_t fake_other_instance_queue_mutations = 0;
+uint32_t fake_sys_mbox_wake_count = 0;
+
+void sys_mbox_wake(void)
+{
+    fake_sys_mbox_wake_count++;
+}
 
 bool s_inject_alloc_pages_fail = false;
 int s_inject_alloc_4k_fail_after = -1;
@@ -778,6 +784,72 @@ static void test_budget_and_ownership(void)
     virtio_net_remove(&fix.pdev);
 }
 
+/* ── Test 8: test_handler_ack_wake_without_ring_consumption ────────── */
+static void test_handler_ack_wake_without_ring_consumption(void)
+{
+    TEST_CASE("virtio-net: IRQ handler only acks/wakes, never consumes the ring");
+    reset_test_environment();
+
+    uint8_t mac[6] = {0x52, 0x54, 0x00, 0x12, 0x34, 0x88};
+    struct fake_virtio_fixture fix;
+    setup_virtio_fixture(&fix, 0, 0xC000, 1, mac);
+
+    assert_eq(0, virtio_net_probe(&fix.pdev, &virtio_net_pci_driver.id_table[0]));
+    struct virtio_net_instance *inst = (struct virtio_net_instance *)fix.pdev.driver_data;
+    assert_true(inst != NULL);
+
+    /* Stage an RX packet in the used ring */
+    uint32_t di = 0;
+    uint8_t *buf = (uint8_t *)inst->rx_bufs[di];
+    memset(buf, 0xAB, 10 + 64);
+    inst->rx_vq.used->ring[0].id = di;
+    inst->rx_vq.used->ring[0].len = 10 + 64;
+    inst->rx_vq.used->idx = 1;
+
+    /* Set ISR to indicate queue interrupt */
+    fix.hw->isr = VIRTIO_ISR_QUEUE_INTR;
+    fake_sys_mbox_wake_count = 0;
+
+    /* Fire interrupt handler */
+    assert_true(irq_table[inst->gsi].handler != NULL);
+    irq_table[inst->gsi].handler(0x30, (uint64_t)(uintptr_t)inst, NULL);
+
+    /* Verify handler acknowledged ISR and called sys_mbox_wake, but DID NOT consume RX ring */
+    assert_eq(1, fake_sys_mbox_wake_count);
+    assert_eq(0, fix.hw->isr);
+    assert_eq(0, inst->rx_vq.last_used_idx);
+
+    /* Now invoke poll_rx in thread context: consumes descriptor and replenishes */
+    uint16_t notify_before = fix.hw->q_notify[VIRTIO_NET_RX_QUEUE];
+    unsigned consumed = inst->ndev->ops->poll_rx(inst->ndev, 64);
+    assert_eq(1, consumed);
+    assert_eq(1, inst->rx_vq.last_used_idx);
+    assert_true(fix.hw->q_notify[VIRTIO_NET_RX_QUEUE] > notify_before);
+
+    /* Verify TX completion reclamation under virtio_instance_xmit */
+    struct pbuf fake_p;
+    memset(&fake_p, 0, sizeof(fake_p));
+    char payload[32] = "hello";
+    fake_p.payload = payload;
+    fake_p.len = 5;
+    fake_p.tot_len = 5;
+
+    /* Transmit a packet */
+    assert_eq(0, inst->ndev->ops->xmit(inst->ndev, &fake_p));
+    assert_eq(0, inst->tx_desc_tail);
+    assert_eq(1, inst->tx_desc_head);
+
+    /* Simulate device completing the TX descriptor */
+    inst->tx_vq.used->idx = 1;
+
+    /* Next transmit should reclaim completed TX descriptors before enqueue */
+    assert_eq(0, inst->ndev->ops->xmit(inst->ndev, &fake_p));
+    assert_eq(1, inst->tx_desc_tail);
+    assert_eq(2, inst->tx_desc_head);
+
+    virtio_net_remove(&fix.pdev);
+}
+
 /* ── Main Runner ─────────────────────────────────────────────────── */
 int main(void)
 {
@@ -790,7 +862,9 @@ int main(void)
     test_queue_feature_failure();
     test_reset_unconfirmed_quarantines();
     test_budget_and_ownership();
+    test_handler_ack_wake_without_ring_consumption();
 
     printf("\nAll virtio-net tests passed successfully!\n\n");
     return 0;
 }
+

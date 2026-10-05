@@ -172,12 +172,28 @@ static int virtio_net_setup_hw(struct virtio_net_instance *inst)
 }
 
 // ── Transmit implementation ───────────────────────────────────────────
+static void virtio_net_reclaim_tx_locked(struct virtio_net_instance *inst)
+{
+    virtq_t *tvq = &inst->tx_vq;
+    while (inst->tx_desc_tail != tvq->used->idx) {
+        uint16_t t_di = inst->tx_desc_tail % inst->tx_qsize;
+        if (inst->tx_buf_phys[t_di]) {
+            free_4k_page(inst->tx_buf_phys[t_di]);
+            inst->tx_buf_phys[t_di] = 0;
+        }
+        inst->tx_desc_tail++;
+    }
+}
+
 static int virtio_instance_xmit(struct virtio_net_instance *inst, struct pbuf *p)
 {
     if (!inst || !p) return -EINVAL;
 
     virtq_t *vq = &inst->tx_vq;
     uint64_t flags = spin_lock_irqsave(&inst->tx_lock);
+
+    // Reclaim used TX descriptors under tx_lock before checking queue capacity
+    virtio_net_reclaim_tx_locked(inst);
 
     uint16_t next_head = (inst->tx_desc_head + 1) % inst->tx_qsize;
     if (next_head == inst->tx_desc_tail) {
@@ -259,16 +275,14 @@ static unsigned virtio_net_ndev_poll_rx(struct net_device *dev, unsigned budget)
         count++;
     }
 
-    // Drain TX completions
-    virtq_t *tvq = &inst->tx_vq;
-    while (inst->tx_desc_tail != tvq->used->idx) {
-        uint16_t t_di = inst->tx_desc_tail % inst->tx_qsize;
-        if (inst->tx_buf_phys[t_di]) {
-            free_4k_page(inst->tx_buf_phys[t_di]);
-            inst->tx_buf_phys[t_di] = 0;
-        }
-        inst->tx_desc_tail++;
+    if (count > 0) {
+        vio_out16(inst->io_base + VIRTIO_LEGACY_QUEUE_NOTIFY, VIRTIO_NET_RX_QUEUE);
     }
+
+    // Drain TX completions under tx_lock
+    uint64_t tx_flags = spin_lock_irqsave(&inst->tx_lock);
+    virtio_net_reclaim_tx_locked(inst);
+    spin_unlock_irqrestore(&inst->tx_lock, tx_flags);
 
     return count;
 }
@@ -323,11 +337,8 @@ void virtio_net_handler(uint64_t nr, uint64_t param, pt_regs_t *regs)
 
     uint8_t isr = vio_in8(inst->io_base + VIRTIO_LEGACY_ISR_STATUS);
     if (isr & VIRTIO_ISR_QUEUE_INTR) {
-        if (inst->legacy_mode) {
-            virtio_net_poll_rx();
-        } else if (inst->ndev) {
-            virtio_net_ndev_poll_rx(inst->ndev, 64);
-        }
+        extern void sys_mbox_wake(void);
+        sys_mbox_wake();
     }
 }
 
@@ -568,6 +579,7 @@ void virtio_net_poll_rx(void)
     if (!s_legacy_instance || !s_legacy_instance->initialized) return;
     struct virtio_net_instance *inst = s_legacy_instance;
 
+    unsigned count = 0;
     virtq_t *vq = &inst->rx_vq;
     while (vq->last_used_idx != vq->used->idx) {
         virtq_used_elem_t *ue = &vq->used->ring[vq->last_used_idx % inst->rx_qsize];
@@ -590,17 +602,16 @@ void virtio_net_poll_rx(void)
         arch_wmb();
         vq->avail->idx = ai + 1;
         vq->last_used_idx++;
+        count++;
     }
 
-    virtq_t *tvq = &inst->tx_vq;
-    while (inst->tx_desc_tail != tvq->used->idx) {
-        uint16_t t_di = inst->tx_desc_tail % inst->tx_qsize;
-        if (inst->tx_buf_phys[t_di]) {
-            free_4k_page(inst->tx_buf_phys[t_di]);
-            inst->tx_buf_phys[t_di] = 0;
-        }
-        inst->tx_desc_tail++;
+    if (count > 0) {
+        vio_out16(inst->io_base + VIRTIO_LEGACY_QUEUE_NOTIFY, VIRTIO_NET_RX_QUEUE);
     }
+
+    uint64_t tx_flags = spin_lock_irqsave(&inst->tx_lock);
+    virtio_net_reclaim_tx_locked(inst);
+    spin_unlock_irqrestore(&inst->tx_lock, tx_flags);
 }
 
 static err_t virtio_legacy_xmit(struct netif *netif, struct pbuf *p)
