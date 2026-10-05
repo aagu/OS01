@@ -1145,18 +1145,144 @@ int aarch64_pt_unmap_2m_block(uint64_t *root, uint64_t va,
     return AARCH64_PT_OK;
 }
 
-/* Split a 2 MiB block into 512 4 KiB leaves (spec §5.3).  Unpublished
- * roots take an atomic store rewrite; published roots return -EPERM
- * (F10 implements the BBM-aware + cross-core invalidation path).
- * Task 21 lands the actual implementation; this stub exists so the
- * API surface is consistent with the brief. */
+/* Split a 2 MiB block into 512 4 KiB leaves (spec §5.3).
+ *
+ * Unpublished roots (caller owns the tree exclusively) take a single
+ * atomic 8 B store rewrite: build the L3 page in place and replace
+ * the block desc at pmd[l2] with a table desc. No TLBI needed — no
+ * other CPU can have cached the translation of an unpublished root.
+ *
+ * Published roots return -EPERM (F10 implements the BBM-aware split
+ * path with per-CPU TLBI invalidation; the block↔table swap on a live
+ * root depends on ID_AA64MMFR2_EL1.BBM support level and requires
+ * cross-core invalidation after publication).
+ *
+ * Lock contract (matches walk_to_l2 / map_2m_block / unmap_2m_block):
+ *   - Caller-held pt_lock_for(root, l2_idx) across walk + pmd[l2]
+ *     write — same pattern §5.4 mandates for the rest of the block
+ *     path.
+ *   - pt_upper_lock is taken internally by walk_to_l2 around the
+ *     L0/L1 ensure segment; released before walk_to_l2 returns.
+ *
+ * Failure contract (spec §5.3):
+ *   - Step 0 (registry check, outside pt_lock): published → -EPERM.
+ *     Caller hasn't allocated anything yet; original block is intact.
+ *   - Step 1 (l3_pa alloc): 0 → -ENOMEM; original block untouched.
+ *   - Step 4 (lock + re-read pmd[l2]):
+ *     !VALID              → unlock + free l3_pa + -ENOENT.
+ *     TYPE_TABLE (V=1, b1=1) → unlock + free l3_pa + -EAGAIN
+ *                               (concurrent split caller won; retry).
+ *   - Steps 5–8 succeed unconditionally; no allocation happens after
+ *     step 5 so there are no later failure paths.
+ */
 int aarch64_pt_split_block_2m(uint64_t *root, uint64_t va)
 {
     vmm_gate_check();
     int rv = root_valid(root);
     if (rv != AARCH64_PT_OK) return rv;
-    (void)va;
-    return AARCH64_PT_EPERM;   /* Task 21 */
+    if (!va_canonical(va)) return AARCH64_PT_EINVAL;
+    if ((va & (PAGE_2M_SIZE - 1)) != 0) return AARCH64_PT_EINVAL;
+
+    uint64_t l2_idx = (va >> AARCH64_PT_L2_SHIFT) & AARCH64_PT_IDX_MASK;
+    uint64_t root_pa = (uint64_t)((uintptr_t)root - (uintptr_t)ARCH_PAGE_OFFSET);
+
+    /* Step 0: root lifecycle check.  Outside pt_lock — the registry
+     * has its own lock, and registration only happens at install /
+     * arch_switch_mm paths (no contention with split).  The registry
+     * takes a pointer to the PA (not to the page itself) — see
+     * <arch/aarch64/vmm_gate.h> for the contract; passing `root`
+     * here would dereference PGD[0] instead of the PA. */
+    if (aarch64_pt_root_is_published(&root_pa)) return AARCH64_PT_EPERM;
+
+    spinlock_T *pt_lock = pt_lock_for(root_pa, (uint32_t)l2_idx);
+
+    /* Step 1: allocate the L3 page BEFORE locking.  alloc_4k_page()
+     * returns 0 on failure BEFORE we touch anything, so a -ENOMEM
+     * here leaves the original block mapping completely intact. */
+    uint64_t l3_pa = alloc_4k_page();
+    if (l3_pa == 0) return AARCH64_PT_ENOMEM;
+
+    /* Step 2: zero the L3 page so the uninitialised PTEs can't leak
+     * stale bits to a future reader. */
+    zero_page(l3_pa);
+
+    /* Step 3: lock pt_lock_for(root, l2).  Caller-held pattern —
+     * walk_to_l2 internally takes pt_upper_lock around the L0/L1
+     * ensure, releasing before returning.  We hold pt_lock_for
+     * across the walk + pmd[l2] write so no other caller can race
+     * on the slot. */
+    spin_lock(pt_lock);
+
+    uint64_t *pmd = NULL;
+    int wr = AARCH64_PT_OK;
+    int wrc = walk_to_l2(root, va, false, &pmd, &wr);
+    if (wrc != 0) {
+        /* walk_to_l2 failed (e.g. an intermediate table was missing
+         * because create=false and a higher-level page was never
+         * allocated).  Free the L3 page we just allocated and
+         * release the lock. */
+        spin_unlock(pt_lock);
+        free_4k_page(l3_pa);
+        return wr;
+    }
+
+    /* Step 4: re-read pmd[l2] under the lock and dispatch. */
+    uint64_t d = pmd[l2_idx];
+    if ((d & AARCH64_PT_DESC_VALID) == 0) {
+        spin_unlock(pt_lock);
+        free_4k_page(l3_pa);
+        return AARCH64_PT_ENOENT;
+    }
+    if ((d & AARCH64_PT_DESC_TABLE) != 0) {
+        /* Slot is already a valid TABLE descriptor — a concurrent
+         * split caller won the race.  Per spec the caller retries. */
+        spin_unlock(pt_lock);
+        free_4k_page(l3_pa);
+        return AARCH64_PT_EAGAIN;
+    }
+
+    /* Step 5: build the 512 leaves in the freshly-zeroed L3 page.
+     *
+     * The block descriptor holds:
+     *   - V=1, bit1=0 (block type)
+     *   - PA bits [39:21]  (block OA field)
+     *   - AP[2:1] bits [7:6], SH bits [9:8], AttrIndx bits [4:2],
+     *     AF bit 10, PXN bit 53, UXN bit 54
+     *   - software bits bit55/56 (PROTNONE / COW)
+     *
+     * Each leaf must carry the SAME attribute bits (AP/SH/AttrIndx/
+     * AF/PXN/UXN/SW) but with V=1, bit1=1 (leaf type) and PA bits
+     * [39:12] = block_pa + i*PAGE_4K_SIZE.
+     *
+     * The cleanest transform is bit-level: take the block desc,
+     * OR in the TABLE bit (so leaf type replaces block type), and
+     * replace the PA field with the per-leaf PA.  V=1 is already
+     * set in d (the source block is by definition valid). */
+    uint64_t block_pa = d & AARCH64_PT_BLOCK_OA_MASK;
+    uint64_t leaf_base = (d | AARCH64_PT_DESC_TABLE) & ~AARCH64_PT_PA_MASK;
+    volatile uint64_t *pte = (volatile uint64_t *)(l3_pa + ARCH_PAGE_OFFSET);
+    for (uint32_t i = 0; i < 512; i++) {
+        uint64_t leaf_pa = (block_pa + (uint64_t)i * PAGE_4K_SIZE) &
+                            AARCH64_PT_PA_MASK;
+        pte[i] = leaf_base | leaf_pa;
+    }
+    dsb_ishst();
+
+    /* Step 6: the single atomic 8 B store — pmd[l2] becomes a valid
+     * table descriptor pointing to the new L3 page.  Replaces the
+     * block desc without any intermediate state visible to readers
+     * (the L3 page was already populated before this store). */
+    pmd[l2_idx] = encode_table_desc(l3_pa);
+
+    /* Step 7: dsb ishst so the L3 stores are ordered before the pmd[l2]
+     * store is observable to other agents.  No TLBI: unpublished
+     * root means no other CPU can have cached the old block desc. */
+    dsb_ishst();
+
+    /* Step 8: unlock. */
+    spin_unlock(pt_lock);
+
+    return AARCH64_PT_OK;
 }
 
 /* Read the raw descriptor at pmd[l2] for `va`.  Walks L0 → L1 → L2

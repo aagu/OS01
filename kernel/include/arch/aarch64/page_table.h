@@ -76,6 +76,10 @@ enum aarch64_pt_result {
      * BBM-aware split path).  Matches the Linux-style -EPERM value
      * so callers can write `if (rc == -EPERM)` uniformly. */
     AARCH64_PT_EPERM     = -6,
+    /* Task 21: aarch64_pt_split_block_2m returns this when the L2
+     * slot already holds a valid TABLE descriptor (concurrent split
+     * caller won the race; the spec's "caller retries" branch). */
+    AARCH64_PT_EAGAIN    = -7,
 };
 
 /* Map a single 4 KiB page at the given VA in `root`. `va` and `pa`

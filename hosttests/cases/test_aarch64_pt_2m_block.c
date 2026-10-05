@@ -77,6 +77,14 @@ uint64_t aarch64_read_ttbr1(void) { return 0; }    /* not active */
 
 /* page_table.c calls vmm_gate_check() on every public entry. */
 void vmm_gate_check(void) { (void)0; }
+/* page_table.c calls aarch64_pt_root_is_published() inside the new
+ * split_block_2m path (Task 21).  These tests do NOT link the REAL
+ * vmm_gate.c (it would pull in percpu_data[] / dtb_cpu_count() mocks
+ * they do not need), so we stub it directly.  Returning false means
+ * split always proceeds to the unpublished-root branch — same
+ * behaviour the production code has on a freshly-allocated scratch
+ * root. */
+bool aarch64_pt_root_is_published(const uint64_t *root) { (void)root; return false; }
 
 uint64_t alloc_4k_page(void)
 {
@@ -535,8 +543,12 @@ TEST_FUNC(test_map_block_reuse_after_unmap)
     assert_eq(0x800000ULL, desc & TEST_BLOCK_OA_MASK);
 }
 
-/* Case 7: split_block_2m stub returns -EPERM (Task 21 implements). */
-TEST_FUNC(test_split_block_2m_stub_returns_eperm)
+/* Case 7 (Task 21 implementation): split_block_2m on an empty slot
+ * returns -ENOENT (the L2 slot is invalid; nothing to split).  The
+ * previous stub returned -EPERM unconditionally; Task 21 narrowed
+ * that to "only when the root is in the publish registry" and
+ * re-routed the empty-slot case here. */
+TEST_FUNC(test_split_block_2m_on_empty_slot_returns_enoent)
 {
     mock_pool_reset();
     uint64_t root_pa;
@@ -544,7 +556,7 @@ TEST_FUNC(test_split_block_2m_stub_returns_eperm)
     assert_not_null(root);
 
     int rc = aarch64_pt_split_block_2m(root, TEST_VA_BASE);
-    assert_eq(AARCH64_PT_EPERM, rc);
+    assert_eq(AARCH64_PT_ENOENT, rc);
 }
 
 /* Case 8: read_l2_desc on a VA whose L0 slot is empty → -ENOENT
@@ -577,7 +589,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_unmap_block_on_leaf_slot_returns_einval),
     TEST_ENTRY(test_unmap_block_on_empty_slot_returns_enoent),
     TEST_ENTRY(test_map_block_reuse_after_unmap),
-    TEST_ENTRY(test_split_block_2m_stub_returns_eperm),
+    TEST_ENTRY(test_split_block_2m_on_empty_slot_returns_enoent),
     TEST_ENTRY(test_read_l2_desc_missing_intermediate_returns_enoent),
 TEST_LIST_END
 

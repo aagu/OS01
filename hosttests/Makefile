@@ -138,9 +138,10 @@ TEST_BINS := \
     $(TEST_BLD)/test_vmm_replace_protocol.elf \
     $(TEST_BLD)/test_vmm_prot_none.elf \
     $(TEST_BLD)/test_vmm_ack_wraparound.elf \
-    $(TEST_BLD)/test_aarch64_pt_root_publish.elf
+    $(TEST_BLD)/test_aarch64_pt_root_publish.elf \
+    $(TEST_BLD)/test_aarch64_pt_split.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split
 
 all: $(TEST_BINS)
 
@@ -2086,6 +2087,32 @@ $(TEST_BLD)/test_aarch64_pt_root_publish.elf: $(TEST_BLD)/test_aarch64_pt_root_p
 .PHONY: test-aarch64-pt-root-publish
 test-aarch64-pt-root-publish: $(TEST_BLD)/test_aarch64_pt_root_publish.elf
 	$(TEST_BLD)/test_aarch64_pt_root_publish.elf
+
+# aarch64 M3.4 Task 21: split_block_2m protocol (spec §5.3).
+# Reuses the same link line as test_aarch64_pt_root_publish — REAL
+# page_table.c (split primitive) + REAL vmm_gate.c (root publish
+# registry, so the published-root test can drive the real is_published
+# check). The mock surface is the same AARCH64_PT_SW host harness
+# (aarch64_read_ttbr1=0 / vmm_gate_check no-op / mock PMM pool).
+$(TEST_BLD)/test_aarch64_pt_split.o: $(TEST_CASES)/test_aarch64_pt_split.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_gate.h \
+		$(TESTS_DIR)/kernel/include/arch/spinlock.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) \
+		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_pt_split.elf: $(TEST_BLD)/test_aarch64_pt_split.o \
+		$(TEST_BLD)/aarch64_pt_production.o \
+		$(TEST_BLD)/vmm_gate_production.o \
+		$(TEST_BLD)/vmm_gate_test_stubs.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-aarch64-pt-split
+test-aarch64-pt-split: $(TEST_BLD)/test_aarch64_pt_split.elf
+	$(TEST_BLD)/test_aarch64_pt_split.elf
 
 $(TEST_BLD)/m1_smoke_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/m1_smoke.c
 	@mkdir -p $(TEST_BLD)

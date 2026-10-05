@@ -81,6 +81,14 @@ uint64_t aarch64_read_ttbr1(void) { return 0; }
 
 /* vmm_gate_check stub — production vmm_gate.c not linked here. */
 void vmm_gate_check(void) { (void)0; }
+/* page_table.c calls aarch64_pt_root_is_published() inside the new
+ * split_block_2m path (Task 21).  These tests do NOT link the REAL
+ * vmm_gate.c (it would pull in percpu_data[] / dtb_cpu_count() mocks
+ * they do not need), so we stub it directly.  Returning false means
+ * split always proceeds to the unpublished-root branch — same
+ * behaviour the production code has on a freshly-allocated scratch
+ * root. */
+bool aarch64_pt_root_is_published(const uint64_t *root) { (void)root; return false; }
 
 static int g_violation_count;
 void vmm_gate_violation(const char *reason)

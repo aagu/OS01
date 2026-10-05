@@ -628,6 +628,28 @@ void aarch64_main(const struct boot_context *handoff)
      * and DAIF.I is unmasked. Publishing earlier would let a pending
      * TLB SGI arrive with IRQs masked (no ack → initiator timeout). */
     ipi_ready_publish_and_count(0);
+
+    /* M3.4 Task 21: ID_AA64MMFR2_EL1.BBM (Break-before-Make levels).
+     *
+     * The split_block_2m path on a PUBLISHED root depends on the BBM
+     * support level reported here — levels 0/1/2 describe how much
+     * BBM flexibility the CPU provides for block↔table descriptor
+     * replacement.  M3.4 returns -EPERM for published-root splits
+     * because the spec scopes the real implementation to F10; this
+     * print lets F10 cite the actual level when it lands.
+     *
+     * IMPORTANT (F10 caveat): cortex-a53 / QEMU passing this print
+     * does NOT replace the architectural prerequisite — the F10
+     * design must reconcile the value against Arm ARM (and against
+     * each real target silicon) before relying on BBM. */
+    {
+        uint64_t mmfr2 = 0;
+        __asm__ __volatile__("mrs %0, ID_AA64MMFR2_EL1" : "=r"(mmfr2));
+        kputs("[aarch64] ID_AA64MMFR2_EL1.BBM = ");
+        kputu((mmfr2 >> 20) & 0xFUL);
+        kputs("\n");
+    }
+
 #if OS01_SELFTEST
     /* Task 2.2 — dispatch chain selftest probes.
      * VBAR is installed (line 188-189); handler table is populated
