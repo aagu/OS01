@@ -139,6 +139,14 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 - **`test_tty_vintr` 间歇性超时（2026-10-04，ARCH-1 验证时发现）**：`make PROFILE=x86_64-clang KERNEL_SELFTEST=1 test-kernel-selftest` 偶尔在启动自测 31/31 通过后停于 `[selftest] test_tty_vintr...`，缺少 `[selftest] task tests done`；同一提交重跑也能通过，本地 master 合并验收再次复现超时。临时阶段诊断曾观察到 VINTR 注入后目标线程的 SIGINT 位已设置、状态为 RUNNING，但等待方未及时看到 `vintr_seen`。根因未确认，不能断言由 ARCH-1 引入或已修复；未改调度器/TTY 自测。后续需稳定复现并采集目标线程 `on_cpu`/`on_rq`、所属 CPU 与调度进展，单独修复后反复运行独立内核自测；syscall systest 不与它合跑。
 
+- **aarch64 并发 replace phantom `-ENOENT`（2026-10-05，M3 总回归 Task 26 发现）**：第二个 CPU 仅存活（idle 服务 SGI）时，BSP 在未发布 scratch root 上循环 `map_4k_ext → replace_4k(RW→RO 原子路径) → unmap_4k_ext` 会间歇返回 `-ENOENT` 且观察到 leaf 被 VALID-cleared；所有隔离变体（AP 跑循环 / BSP 独跑 / 不同 L2 slot / 不同 root / RW→RW / PMM 并发分配风暴）200/200 通过。候选根因：page_table.c 原子路径 ordering bug 或 QEMU TCG MTTCG TLBI artifact（jiffies-2x 先例）。**M4 约束：根因未钉死前不得引入并发 `arch_vmm_*` updater**；复现配方在 `kernel/selftest/test_m3_multicore.c` §8.2⑤ design-note。follow-up 必须同时给出根因 + 钉死测试。
+
+- **x86 `test-syscall-repeat` stage 0 停滞（M2/M3 期间豁免的门禁）**：`[COW TTY READY 0]` 后 `dhcp_coarse_tmr()` 刷屏停住；主仓 baseline 对照镜像 4 次复现（与 ARCH-1 时期 stage=-1 卡点同类）。M2/M3 的 x86 运行时回归门禁（spec §8.3 "x86 5/5"）因此被豁免，由 89 套 hosttest 承接。需先单独修复 DHCP/stage0 stall 才能恢复该门禁；届时应补跑一次以闭合 M3 的 x86 运行时验收。
+
+- **hosttests 框架 `__test_stats` 复位 bug（pre-existing）**：`hosttests/include/test_framework.h:111` 在 `TEST_RESULTS()` 内把 `failed` 清零后才被 `main` 的返回值读取，导致失败套件 exit code 恒 0、Makefile 的 rc 检查失效；各套件只能靠自报 `Suites: N | Failed: M` 行核对。修一行即可让失败真正传导到 make。
+
+- **M2/M3 杂项 cosmetic 遗留（不阻塞，清单见 merge 评审）**：`ap_work.h` 死枚举 `WORK_PT_STRESS/WORK_PT_ALLOC`；`head.S:689` 过时 "152" 注释（实际 144）；`mock/test_platform.h` 旧 144B percpu_t 陷阱 + legacy `tlb_wanted/tlb_ack` 字段；`serial_printk` aarch64 逐字打印导致多个 selftest 的 `%d` 格式串原样出现（marker 解析不受影响）；内部错误码 `AARCH64_PT_EINVAL/ENOMEM/EPERM` 未归一化为 Linux errno；`read_l2_desc` 无 test-only 守卫；`§5.2b` per-level TLBI TODO（无已发布 root 创建路径 caller）。
+
 > **独立缺陷备忘**：aarch64 contract `targets` mode 依赖 x86 build 目录存在（`make -n PROFILE=x86_64-clang kernel.bin` 的 `+` 前缀 artifact recipe 在 `-n` 下也会执行，clean workspace 下跑 aarch64 contract 会触发）。
 
 ---
