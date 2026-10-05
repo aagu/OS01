@@ -51,4 +51,27 @@ int tetris_lock(tetris_board_t *b, const tetris_piece_t *p);
 // Clear full rows (used by tetris_lock); returns count.
 int tetris_clear_rows(tetris_board_t *b);
 
+// ── Actions from input ──────────────────────────────────────
+enum {
+    A_NONE = 0,
+    A_LEFT,
+    A_RIGHT,
+    A_DOWN,
+    A_ROTATE,
+    A_DROP,
+    A_QUIT
+};
+
+typedef struct {
+    int state; // 0: normal, 1: esc, 2: csi
+} tetris_input_t;
+
+void tetris_input_init(tetris_input_t *inp);
+
+// Parses next action from buffer starting at *offset.
+// Advances *offset past consumed bytes.
+// Returns action (A_NONE if no complete action yet).
+int tetris_input_parse(tetris_input_t *inp, const uint8_t *buf, int len, int *offset);
+
 #endif
+

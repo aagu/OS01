@@ -1,7 +1,7 @@
-/* tetris.elf — OS01 Tetris (libgfx + /dev/keyboard raw scancodes)
+/* tetris.elf — OS01 Tetris (libgfx + stdin ANSI/VT100 escape sequences)
  *
  * Enter:   \e[?1049h (terminal switches to alt screen)
- * Input:   /dev/keyboard — PS/2 Set 1 + E0 prefix scancodes
+ * Input:   stdin (fd 0) — ANSI / VT100 navigation keys + ASCII
  *          ← →  move, ↓ soft-drop, ↑ rotate, SPACE hard-drop, q quit
  * Exit:    \e[?1049l (terminal restores main screen)
  *
@@ -28,6 +28,7 @@
 #include <poll.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <termios.h>
 #include <time.h>
 #include <gfx.h>
 #include "tetris_logic.h"
@@ -39,10 +40,8 @@ struct fb_info {
 
 #define FBIOSURRENDER  0x00004601
 
-// ── Actions from scancodes ──────────────────────────────────
-enum { A_NONE = 0, A_LEFT, A_RIGHT, A_DOWN, A_ROTATE, A_DROP, A_QUIT };
-
 static gfx_handle_t *gfx;
+
 static struct fb_info fb_info;
 static int cell;             // board cell size in px
 static int ox, oy;           // board origin (top-left) in fb px
@@ -106,39 +105,8 @@ static void render(const tetris_board_t *b, const tetris_piece_t *p)
             }
 }
 
-// PS/2 Set 1 + E0 prefix parser → action (key-up ignored).
-static int parse_scancodes(const uint8_t *buf, int n)
-{
-    static bool e0 = false;
-    for (int i = 0; i < n; i++) {
-        uint8_t sc = buf[i];
-        if (sc == 0xE0) { e0 = true; continue; }
-        if (sc & 0x80) { e0 = false; continue; }   // key release — ignore
-        int a = A_NONE;
-        if (e0) {
-            switch (sc) {
-            case 0x4B: a = A_LEFT;  break;
-            case 0x4D: a = A_RIGHT; break;
-            case 0x50: a = A_DOWN;  break;
-            case 0x48: a = A_ROTATE; break;
-            }
-            e0 = false;
-        } else {
-            switch (sc) {
-            case 0x39: a = A_DROP; break;   // SPACE
-            case 0x10: a = A_QUIT; break;   // Q
-            case 0x1E: a = A_LEFT;  break;  // A
-            case 0x20: a = A_RIGHT; break;  // D
-            case 0x1F: a = A_DOWN;  break;  // S
-            }
-        }
-        if (a != A_NONE)
-            return a;
-    }
-    return A_NONE;
-}
-
 static void clear_screen(void)
+
 {
     draw_rect(0, 0, (int)fb_info.width, (int)fb_info.height, 0x000000);
     // border around board
@@ -242,17 +210,18 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    // ── Save termios and enter raw mode on stdin ─────────
+    struct termios orig_term;
+    bool has_term = (tcgetattr(STDIN_FILENO, &orig_term) == 0);
+    if (has_term) {
+        struct termios raw = orig_term;
+        raw.c_lflag &= ~(ICANON | ECHO | ISIG);
+        tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+    }
+
     // ── Enter alt screen (terminal restores main on exit) ─
     write(1, "\x1b[?1049h", 8);
     write(1, "\x1b[2J", 4);
-
-    // ── Keyboard ─────────────────────────────────────────
-    int kbd = open("/dev/keyboard", O_RDONLY);
-    if (kbd < 0) {
-        write(1, "\x1b[?1049l", 8);
-        gfx_close(gfx);
-        return 1;
-    }
 
     // ── Game loop ────────────────────────────────────────
     tetris_board_t board;
@@ -273,26 +242,31 @@ int main(int argc, char **argv)
     if (tetris_spawn(&board, &piece, 0) != 0)
         game_over = true;
 
-    uint8_t buf[16];
+    tetris_input_t input;
+    tetris_input_init(&input);
+    uint8_t buf[64];
 
     while (!game_over) {
-        struct pollfd pfd = { .fd = kbd, .events = POLLIN, .revents = 0 };
+        struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN, .revents = 0 };
         int pr = poll(&pfd, 1, tick_ms);
 
         if (pr > 0 && (pfd.revents & POLLIN)) {
-            int n = read(kbd, buf, sizeof(buf));
+            int n = read(STDIN_FILENO, buf, sizeof(buf));
             if (n > 0) {
-                int a = parse_scancodes(buf, n);
-                switch (a) {
-                case A_LEFT:  tetris_move(&board, &piece, -1, 0); break;
-                case A_RIGHT: tetris_move(&board, &piece,  1, 0); break;
-                case A_DOWN:  tetris_move(&board, &piece,  0, 1); break;
-                case A_ROTATE: tetris_rotate(&board, &piece); break;
-                case A_DROP:
-                    while (tetris_move(&board, &piece, 0, 1) == 0) {}
-                    goto lock_piece;
-                case A_QUIT: goto done;
-                default: break;
+                int off = 0;
+                while (off < n) {
+                    int a = tetris_input_parse(&input, buf, n, &off);
+                    switch (a) {
+                    case A_LEFT:  tetris_move(&board, &piece, -1, 0); break;
+                    case A_RIGHT: tetris_move(&board, &piece,  1, 0); break;
+                    case A_DOWN:  tetris_move(&board, &piece,  0, 1); break;
+                    case A_ROTATE: tetris_rotate(&board, &piece); break;
+                    case A_DROP:
+                        while (tetris_move(&board, &piece, 0, 1) == 0) {}
+                        goto lock_piece;
+                    case A_QUIT: goto done;
+                    default: break;
+                    }
                 }
             }
         }
@@ -317,7 +291,7 @@ lock_piece:
                         draw_cell(c, full_rows[i], 0xFFFFFF);
                 /* One present per visual event: flash now visible. */
                 present();
-                struct pollfd pf = { .fd = kbd, .events = POLLIN };
+                struct pollfd pf = { .fd = STDIN_FILENO, .events = POLLIN, .revents = 0 };
                 poll(&pf, 1, fast ? 50 : 200);
                 // Force redraw of the cleared rows: prev_view must DIFFER
                 // from the cleared board cells (0), or render()'s diff
@@ -339,7 +313,10 @@ lock_piece:
     // this kernel — see plan doc; tetris doesn't need it).
 done:
     write(1, "\x1b[?1049l", 8);
-    close(kbd);
+    if (has_term) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &orig_term);
+    }
     gfx_close(gfx);
     return 0;
 }
+

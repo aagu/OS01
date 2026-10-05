@@ -170,3 +170,65 @@ int tetris_lock(tetris_board_t *b, const tetris_piece_t *p)
             }
     return tetris_clear_rows(b);
 }
+
+void tetris_input_init(tetris_input_t *inp)
+{
+    if (inp) inp->state = 0;
+}
+
+int tetris_input_parse(tetris_input_t *inp, const uint8_t *buf, int len, int *offset)
+{
+    if (!inp || !buf || !offset) return A_NONE;
+
+    while (*offset < len) {
+        uint8_t c = buf[(*offset)++];
+        if (inp->state == 0) {
+            if (c == 0x1b) {
+                inp->state = 1;
+            } else if (c == ' ') {
+                return A_DROP;
+            } else if (c == 'q' || c == 'Q' || c == 0x03) {
+                return A_QUIT;
+            } else if (c == 'a' || c == 'A') {
+                return A_LEFT;
+            } else if (c == 'd' || c == 'D') {
+                return A_RIGHT;
+            } else if (c == 's' || c == 'S') {
+                return A_DOWN;
+            } else if (c == 'w' || c == 'W') {
+                return A_ROTATE;
+            }
+        } else if (inp->state == 1) {
+            if (c == '[') {
+                inp->state = 2;
+            } else if (c == 0x1b) {
+                inp->state = 1;
+            } else {
+                inp->state = 0;
+            }
+        } else if (inp->state == 2) {
+            if (c == 'A') {
+                inp->state = 0;
+                return A_ROTATE;
+            } else if (c == 'B') {
+                inp->state = 0;
+                return A_DOWN;
+            } else if (c == 'C') {
+                inp->state = 0;
+                return A_RIGHT;
+            } else if (c == 'D') {
+                inp->state = 0;
+                return A_LEFT;
+            } else if (c >= 0x40 && c <= 0x7E) {
+                // Final character of unknown CSI sequence
+                inp->state = 0;
+            } else if (c >= 0x20 && c <= 0x3F) {
+                // Parameter or intermediate bytes (e.g. \e[1;5A)
+                continue;
+            } else {
+                inp->state = 0;
+            }
+        }
+    }
+    return A_NONE;
+}

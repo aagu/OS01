@@ -191,6 +191,77 @@ TEST_FUNC(test_preview_multi_rows) {
     assert_eq(19, rows[2]);
 }
 
+TEST_FUNC(test_input_arrows) {
+    tetris_input_t inp;
+    tetris_input_init(&inp);
+    const uint8_t seq[] = "\x1b[A\x1b[B\x1b[C\x1b[D";
+    int off = 0;
+    assert_eq(A_ROTATE, tetris_input_parse(&inp, seq, sizeof(seq) - 1, &off));
+    assert_eq(3, off);
+    assert_eq(A_DOWN, tetris_input_parse(&inp, seq, sizeof(seq) - 1, &off));
+    assert_eq(6, off);
+    assert_eq(A_RIGHT, tetris_input_parse(&inp, seq, sizeof(seq) - 1, &off));
+    assert_eq(9, off);
+    assert_eq(A_LEFT, tetris_input_parse(&inp, seq, sizeof(seq) - 1, &off));
+    assert_eq(12, off);
+    assert_eq(A_NONE, tetris_input_parse(&inp, seq, sizeof(seq) - 1, &off));
+}
+
+TEST_FUNC(test_input_wasd) {
+    tetris_input_t inp;
+    tetris_input_init(&inp);
+    const uint8_t seq[] = "wasdWASD";
+    int off = 0;
+    assert_eq(A_ROTATE, tetris_input_parse(&inp, seq, sizeof(seq) - 1, &off));
+    assert_eq(A_LEFT, tetris_input_parse(&inp, seq, sizeof(seq) - 1, &off));
+    assert_eq(A_DOWN, tetris_input_parse(&inp, seq, sizeof(seq) - 1, &off));
+    assert_eq(A_RIGHT, tetris_input_parse(&inp, seq, sizeof(seq) - 1, &off));
+    assert_eq(A_ROTATE, tetris_input_parse(&inp, seq, sizeof(seq) - 1, &off));
+    assert_eq(A_LEFT, tetris_input_parse(&inp, seq, sizeof(seq) - 1, &off));
+    assert_eq(A_DOWN, tetris_input_parse(&inp, seq, sizeof(seq) - 1, &off));
+    assert_eq(A_RIGHT, tetris_input_parse(&inp, seq, sizeof(seq) - 1, &off));
+    assert_eq(A_NONE, tetris_input_parse(&inp, seq, sizeof(seq) - 1, &off));
+}
+
+TEST_FUNC(test_input_space_quit_ctrlc) {
+    tetris_input_t inp;
+    tetris_input_init(&inp);
+    const uint8_t seq[] = " qQ\x03";
+    int off = 0;
+    assert_eq(A_DROP, tetris_input_parse(&inp, seq, sizeof(seq) - 1, &off));
+    assert_eq(A_QUIT, tetris_input_parse(&inp, seq, sizeof(seq) - 1, &off));
+    assert_eq(A_QUIT, tetris_input_parse(&inp, seq, sizeof(seq) - 1, &off));
+    assert_eq(A_QUIT, tetris_input_parse(&inp, seq, sizeof(seq) - 1, &off));
+    assert_eq(A_NONE, tetris_input_parse(&inp, seq, sizeof(seq) - 1, &off));
+}
+
+TEST_FUNC(test_input_chunked_csi) {
+    tetris_input_t inp;
+    tetris_input_init(&inp);
+    const uint8_t c1[] = "\x1b";
+    const uint8_t c2[] = "[";
+    const uint8_t c3[] = "C";
+    int off = 0;
+    assert_eq(A_NONE, tetris_input_parse(&inp, c1, 1, &off));
+    assert_eq(1, off);
+    off = 0;
+    assert_eq(A_NONE, tetris_input_parse(&inp, c2, 1, &off));
+    assert_eq(1, off);
+    off = 0;
+    assert_eq(A_RIGHT, tetris_input_parse(&inp, c3, 1, &off));
+    assert_eq(1, off);
+}
+
+TEST_FUNC(test_input_unknown_csi) {
+    tetris_input_t inp;
+    tetris_input_init(&inp);
+    const uint8_t seq[] = "\x1b[12;34H ";
+    int off = 0;
+    // \x1b[12;34H should be discarded, then ' ' should return A_DROP
+    assert_eq(A_DROP, tetris_input_parse(&inp, seq, sizeof(seq) - 1, &off));
+    assert_eq(sizeof(seq) - 1, (size_t)off);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_spawn_ok),
     TEST_ENTRY(test_wall_left_blocked),
@@ -208,9 +279,15 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_preview_no_full_rows),
     TEST_ENTRY(test_preview_completed_row),
     TEST_ENTRY(test_preview_multi_rows),
+    TEST_ENTRY(test_input_arrows),
+    TEST_ENTRY(test_input_wasd),
+    TEST_ENTRY(test_input_space_quit_ctrlc),
+    TEST_ENTRY(test_input_chunked_csi),
+    TEST_ENTRY(test_input_unknown_csi),
 TEST_LIST_END
 
 int main() {
     RUN_ALL_TESTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }
+
