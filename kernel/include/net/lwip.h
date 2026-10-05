@@ -15,7 +15,7 @@ enum net_service_state {
 /* Stack readiness: true only when tcpip core is confirmed and >=1 adapter is bound */
 bool net_service_ready(void);
 
-/* Default interface IPv4 address in host order (0 if not ready or no interface) */
+/* Default interface IPv4 address in network byte order (0 if not ready or no interface) */
 uint32_t net_default_ipv4(void);
 
 /* Post-SMP network stack bring-up */

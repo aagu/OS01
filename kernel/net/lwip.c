@@ -59,11 +59,14 @@ static err_t net_adapter_init(struct netif *netif)
 
 static void net_check_and_publish_online(void)
 {
-    if (s_net_service_state == NET_STARTING) {
-        if (s_tcpip_core_ready && s_adapters_finished) {
-            if (s_active_adapters > 0) {
+    if (__atomic_load_n(&s_net_service_state, __ATOMIC_RELAXED) == NET_STARTING) {
+        bool core_ready = __atomic_load_n(&s_tcpip_core_ready, __ATOMIC_ACQUIRE);
+        bool adapters_done = __atomic_load_n(&s_adapters_finished, __ATOMIC_ACQUIRE);
+        if (core_ready && adapters_done) {
+            unsigned active = __atomic_load_n(&s_active_adapters, __ATOMIC_ACQUIRE);
+            if (active > 0) {
                 __atomic_store_n(&s_net_service_state, NET_ONLINE, __ATOMIC_RELEASE);
-                log_info("net: stack online with %u active adapter(s)\n", s_active_adapters);
+                log_info("net: stack online with %u active adapter(s)\n", active);
             } else {
                 __atomic_store_n(&s_net_service_state, NET_FAILED, __ATOMIC_RELEASE);
                 log_warn("net: all adapters failed, stack entering FAILED state\n");
@@ -75,7 +78,7 @@ static void net_check_and_publish_online(void)
 static void tcpip_init_done_cb(void *arg)
 {
     (void)arg;
-    s_tcpip_core_ready = true;
+    __atomic_store_n(&s_tcpip_core_ready, true, __ATOMIC_RELEASE);
     net_check_and_publish_online();
 }
 
@@ -167,24 +170,17 @@ void net_lwip_start(void)
 
         netif_set_up(nif);
 
-        if (i == 0) {
-            netif_set_addr(nif, &ip, &mask, &gw);
-            if (ndev->link_up) {
-                netif_set_link_up(nif);
-            }
-        } else {
-            if (ndev->link_up) {
-                netif_set_link_up(nif);
-            }
+        if (ndev->link_up) {
+            netif_set_link_up(nif);
         }
 
         dhcp_start(nif);
 
         ndev->adapter = nif;
         adapter->active = true;
-        s_active_adapters++;
+        __atomic_fetch_add(&s_active_adapters, 1, __ATOMIC_RELEASE);
     }
 
-    s_adapters_finished = true;
+    __atomic_store_n(&s_adapters_finished, true, __ATOMIC_RELEASE);
     net_check_and_publish_online();
 }
