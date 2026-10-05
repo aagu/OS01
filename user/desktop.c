@@ -1,15 +1,18 @@
-/* user/desktop.c — GUI Desktop for OS01
+/* user/desktop.c — Material Design Graphical Desktop for OS01 (High-Clarity M3)
  *
  * Demonstrates:
  *   - Framebuffer metadata query via /dev/fb + FBIOSURRENDER
  *   - 2D accelerated presentation via libgfx (/dev/gfx0)
- *   - Classic Windows 98 desktop:
- *       * Neutral grey desktop background (0x00808080)
- *       * Desktop icons (My Computer, Network, Recycle Bin, Internet, Readme)
- *       * Bottom taskbar with 3D bevels, active window button, system tray & clock
- *       * Windows 98 4-color Start button & pop-up Start Menu with OS01 98 banner
- *       * Welcome window with gradient title bar, 3D controls & system info
- *       * Interactive mouse cursor & keyboard control (toggle Start menu, exit)
+ *   - Google Material Design aesthetics with pixel-perfect clarity:
+ *       * High-contrast Slate canvas with Google 4-color accent top strip
+ *       * Elevated Material Cards with crisp 1px structural outline & clean 2px drop shadow
+ *       * Rounded squircle app icons with sharp contours & high-contrast vector glyphs
+ *       * Material Bottom Navigation Bar with crisp divider & pill launcher
+ *       * Google 4-color identity dots with dark borders
+ *       * Material Card Welcome Window with primary header, feature tiles & action buttons
+ *       * Elevated App Drawer with search bar & Material app list
+ *       * Sleek status tray with battery/speaker indicators & dynamic clock
+ *       * Smooth mouse cursor & keyboard navigation ('S' drawer, 'Q' exit)
  */
 
 #include <stdio.h>
@@ -37,92 +40,51 @@ struct fb_info {
     uint32_t stride;
 };
 
-/* ── Classic Windows 98 Palette ─────────────────────────────── */
-#define CLR_DESKTOP        0x00808080u   /* Classic neutral grey */
-#define CLR_FACE           0x00C0C0C0u   /* Standard 3D button/window face */
-#define CLR_LIGHT          0x00FFFFFFu   /* 3D highlight (white) */
-#define CLR_LIGHT_SHADOW   0x00DFDFDFu   /* 3D soft light */
-#define CLR_DARK_SHADOW    0x00808080u   /* 3D shadow (dark grey) */
-#define CLR_BLACK          0x00000000u   /* 3D outer dark shadow / border */
-#define CLR_TITLE_ACTIVE_L 0x00000080u   /* Active title bar gradient left (dark blue) */
-#define CLR_TITLE_ACTIVE_R 0x001084D0u   /* Active title bar gradient right (cyan blue) */
-#define CLR_TEXT           0x00000000u   /* Text black */
-#define CLR_TEXT_WHITE     0x00FFFFFFu   /* Text white */
-#define CLR_MENU_SEL       0x00000080u   /* Menu item selection blue */
-#define CLR_WINDOW_BG      0x00FFFFFFu   /* Window client area background (white) */
+/* ── Material Design Color Palette (M3 High-Clarity Edition) ── */
+#define CLR_WALLPAPER          0x00CBD5E1u  /* Slate 300 — high-contrast clean canvas */
+#define CLR_CARD_SURFACE       0x00FFFFFFu  /* Pure White Surface */
+#define CLR_CARD_BORDER        0x00334155u  /* Slate 700 — crisp 1px structural outline */
+#define CLR_CARD_BORDER_SUBTLE 0x0094A3B8u  /* Slate 400 — clean secondary stroke */
+#define CLR_SHADOW_CRISP       0x00475569u  /* Slate 600 — clean 2px solid elevation shadow */
 
-/* Windows Logo / Accent Colors */
-#define CLR_WIN_RED        0x00EE3322u
-#define CLR_WIN_GREEN      0x0000B050u
-#define CLR_WIN_BLUE       0x000070C0u
-#define CLR_WIN_YELLOW     0x00FFC000u
+#define CLR_PRIMARY            0x001A73E8u  /* Google Blue 600 */
+#define CLR_PRIMARY_DARK       0x001557B0u  /* Google Blue 800 */
+#define CLR_PRIMARY_CONTAINER  0x00E8F0FEu  /* Selected tab / container bg */
+#define CLR_SURFACE_VARIANT    0x00F1F5F9u  /* Slate 100 — high-legibility chip / card bg */
+
+#define CLR_TEXT_HIGH          0x00000000u  /* 100% Solid Black for maximum bitmap clarity */
+#define CLR_TEXT_MED           0x00334155u  /* Slate 700 (sharp secondary text) */
+#define CLR_TEXT_WHITE         0x00FFFFFFu  /* Pure White on dark/primary */
+#define CLR_DIVIDER            0x00CBD5E1u  /* Crisp divider rule */
+
+/* Google 4-Color Identity */
+#define CLR_G_BLUE             0x001A73E8u
+#define CLR_G_RED              0x00EA4335u
+#define CLR_G_YELLOW           0x00FBBC05u
+#define CLR_G_GREEN            0x0034A853u
+
+/* App Squircle Colors */
+#define CLR_APP_FILES          0x00F59E0Bu  /* Amber 500 */
+#define CLR_APP_FILES_DARK     0x0078350Fu  /* Amber 900 border */
+#define CLR_APP_NET            0x000284C7u  /* Sky Blue 600 */
+#define CLR_APP_NET_DARK       0x00075985u  /* Sky Blue 800 border */
+#define CLR_APP_TERM           0x001E293Bu  /* Slate 800 */
+#define CLR_APP_TERM_DARK      0x000F172Au  /* Slate 900 border */
+#define CLR_APP_SETTINGS       0x007C3AEDu  /* Violet 600 */
+#define CLR_APP_SETTINGS_DARK  0x004C1D95u  /* Violet 900 border */
+#define CLR_APP_TRASH          0x00DC2626u  /* Red 600 */
+#define CLR_APP_TRASH_DARK     0x00991B1Bu  /* Red 800 border */
 
 /* ── Global State ───────────────────────────────────────────── */
 static gfx_handle_t *gfx = NULL;
 static uint32_t screen_w = 0;
 static uint32_t screen_h = 0;
 
-static bool start_menu_open = false;
+static bool drawer_open = false;
 static bool window_open = true;
 static int mouse_x = 100;
 static int mouse_y = 100;
 static bool has_mouse = false;
-
-/* ── 3D Bevel Drawing Helpers ───────────────────────────────── */
-
-/* Raised 3D box (Button, Window border, Menu border) */
-static void draw_raised_box(int32_t x, int32_t y, uint32_t w, uint32_t h, bool fill)
-{
-    if (fill) gfx_fill_rect(gfx, x, y, w, h, CLR_FACE);
-
-    /* Outer bevel: Top & Left = White, Bottom & Right = Black */
-    gfx_hline(gfx, x, y, w - 1, CLR_LIGHT);
-    gfx_vline(gfx, x, y, h - 1, CLR_LIGHT);
-    gfx_hline(gfx, x, y + (int32_t)h - 1, w, CLR_BLACK);
-    gfx_vline(gfx, x + (int32_t)w - 1, y, h, CLR_BLACK);
-
-    /* Inner bevel: Top & Left = Light grey, Bottom & Right = Dark grey */
-    if (w > 2 && h > 2) {
-        gfx_hline(gfx, x + 1, y + 1, w - 3, CLR_LIGHT_SHADOW);
-        gfx_vline(gfx, x + 1, y + 1, h - 3, CLR_LIGHT_SHADOW);
-        gfx_hline(gfx, x + 1, y + (int32_t)h - 2, w - 2, CLR_DARK_SHADOW);
-        gfx_vline(gfx, x + (int32_t)w - 2, y + 1, h - 2, CLR_DARK_SHADOW);
-    }
-}
-
-/* Sunken 3D box (Taskbar Tray, Text box, Pressed button) */
-static void draw_sunken_box(int32_t x, int32_t y, uint32_t w, uint32_t h,
-                            uint32_t fill_color, bool fill)
-{
-    if (fill) gfx_fill_rect(gfx, x, y, w, h, fill_color);
-
-    /* Outer bevel: Top & Left = Dark grey, Bottom & Right = White */
-    gfx_hline(gfx, x, y, w - 1, CLR_DARK_SHADOW);
-    gfx_vline(gfx, x, y, h - 1, CLR_DARK_SHADOW);
-    gfx_hline(gfx, x, y + (int32_t)h - 1, w, CLR_LIGHT);
-    gfx_vline(gfx, x + (int32_t)w - 1, y, h, CLR_LIGHT);
-
-    /* Inner bevel: Top & Left = Black, Bottom & Right = Light grey */
-    if (w > 2 && h > 2) {
-        gfx_hline(gfx, x + 1, y + 1, w - 3, CLR_BLACK);
-        gfx_vline(gfx, x + 1, y + 1, h - 3, CLR_BLACK);
-        gfx_hline(gfx, x + 1, y + (int32_t)h - 2, w - 2, CLR_LIGHT_SHADOW);
-        gfx_vline(gfx, x + (int32_t)w - 2, y + 1, h - 2, CLR_LIGHT_SHADOW);
-    }
-}
-
-/* Title bar color gradient */
-static void draw_gradient_titlebar(int32_t x, int32_t y, uint32_t w, uint32_t h)
-{
-    if (w == 0 || h == 0) return;
-    for (uint32_t i = 0; i < w; i++) {
-        uint32_t r = 0 + (16 * i) / w;
-        uint32_t g = 0 + (132 * i) / w;
-        uint32_t b = 128 + ((208 - 128) * i) / w;
-        uint32_t color = (r << 16) | (g << 8) | b;
-        gfx_vline(gfx, x + (int32_t)i, y, h, color);
-    }
-}
 
 /* ── Text Drawing Helper ────────────────────────────────────── */
 static void draw_string(int32_t x, int32_t y, const char *str,
@@ -137,273 +99,399 @@ static void draw_string(int32_t x, int32_t y, const char *str,
     }
 }
 
-/* ── Windows 98 4-Color Flag Logo ───────────────────────────── */
-static void draw_windows_flag(int32_t x, int32_t y)
+/* ── Material Elevation & Card Helpers ──────────────────────── */
+
+/* Draw an elevated Material card with crisp 1px border & 2px elevation shadow */
+static void draw_elevated_card(int32_t x, int32_t y, uint32_t w, uint32_t h,
+                               uint32_t bg_color, bool outline)
 {
-    /* 4 colored squares separated by 1px spacing */
-    gfx_fill_rect(gfx, x,     y,     6, 6, CLR_WIN_RED);
-    gfx_fill_rect(gfx, x + 7, y,     6, 6, CLR_WIN_GREEN);
-    gfx_fill_rect(gfx, x,     y + 7, 6, 6, CLR_WIN_BLUE);
-    gfx_fill_rect(gfx, x + 7, y + 7, 6, 6, CLR_WIN_YELLOW);
+    /* Clean 2px solid elevation shadow (bottom & right) */
+    gfx_fill_rect(gfx, x + 2, y + (int32_t)h, w, 2, CLR_SHADOW_CRISP);
+    gfx_fill_rect(gfx, x + (int32_t)w, y + 2, 2, h, CLR_SHADOW_CRISP);
+
+    /* Card background */
+    gfx_fill_rect(gfx, x, y, w, h, bg_color);
+
+    /* Crisp structural outline */
+    if (outline) {
+        gfx_rect(gfx, x, y, w, h, CLR_CARD_BORDER);
+    }
 }
 
-/* ── Desktop Icons ──────────────────────────────────────────── */
-
-/* "My Computer" icon */
-static void draw_icon_my_computer(int32_t x, int32_t y)
+/* Draw a pill / rounded button */
+static void draw_pill_button(int32_t x, int32_t y, uint32_t w, uint32_t h,
+                             uint32_t bg_color, uint32_t border_color)
 {
-    /* Monitor frame */
-    gfx_fill_rect(gfx, x + 2, y, 28, 20, 0x00E0E0E0u);
-    gfx_rect(gfx, x + 2, y, 28, 20, CLR_BLACK);
-    /* Screen */
-    gfx_fill_rect(gfx, x + 5, y + 3, 22, 14, 0x00008080u);
-    /* Mini window on screen */
-    gfx_fill_rect(gfx, x + 7, y + 5, 10, 2, CLR_LIGHT);
-    gfx_fill_rect(gfx, x + 7, y + 7, 10, 6, CLR_FACE);
-    /* Monitor stand */
-    gfx_fill_rect(gfx, x + 13, y + 20, 6, 4, 0x00B0B0B0u);
-    gfx_rect(gfx, x + 13, y + 20, 6, 4, CLR_BLACK);
-    /* Monitor base */
-    gfx_fill_rect(gfx, x + 8, y + 24, 16, 3, 0x00E0E0E0u);
-    gfx_rect(gfx, x + 8, y + 24, 16, 3, CLR_BLACK);
+    if (w < 4 || h < 4) return;
+
+    /* Main rectangular core */
+    gfx_fill_rect(gfx, x + 2, y, w - 4, h, bg_color);
+    gfx_fill_rect(gfx, x, y + 2, w, h - 4, bg_color);
+
+    /* Corner fill pixels */
+    gfx_pixel(gfx, x + 1, y + 1, bg_color);
+    gfx_pixel(gfx, x + (int32_t)w - 2, y + 1, bg_color);
+    gfx_pixel(gfx, x + 1, y + (int32_t)h - 2, bg_color);
+    gfx_pixel(gfx, x + (int32_t)w - 2, y + (int32_t)h - 2, bg_color);
+
+    /* Border outline if different */
+    if (border_color != bg_color) {
+        gfx_hline(gfx, x + 2, y, w - 4, border_color);
+        gfx_hline(gfx, x + 2, y + (int32_t)h - 1, w - 4, border_color);
+        gfx_vline(gfx, x, y + 2, h - 4, border_color);
+        gfx_vline(gfx, x + (int32_t)w - 1, y + 2, h - 4, border_color);
+        gfx_pixel(gfx, x + 1, y + 1, border_color);
+        gfx_pixel(gfx, x + (int32_t)w - 2, y + 1, border_color);
+        gfx_pixel(gfx, x + 1, y + (int32_t)h - 2, border_color);
+        gfx_pixel(gfx, x + (int32_t)w - 2, y + (int32_t)h - 2, border_color);
+    }
 }
 
-/* "Network" icon */
+/* ── Google 4-Color Dots Indicator ──────────────────────────── */
+static void draw_google_dots(int32_t x, int32_t y)
+{
+    /* 4 neat circular/square dots in Google identity colors */
+    gfx_fill_rect(gfx, x,      y, 5, 5, CLR_G_BLUE);
+    gfx_rect(gfx,      x,      y, 5, 5, 0x000F172Au);
+    gfx_fill_rect(gfx, x + 7,  y, 5, 5, CLR_G_RED);
+    gfx_rect(gfx,      x + 7,  y, 5, 5, 0x000F172Au);
+    gfx_fill_rect(gfx, x + 14, y, 5, 5, CLR_G_YELLOW);
+    gfx_rect(gfx,      x + 14, y, 5, 5, 0x000F172Au);
+    gfx_fill_rect(gfx, x + 21, y, 5, 5, CLR_G_GREEN);
+    gfx_rect(gfx,      x + 21, y, 5, 5, 0x000F172Au);
+}
+
+/* ── Material Squircle App Icons ────────────────────────────── */
+
+/* Base squircle tile (36x36) with crisp outline & elevation */
+static void draw_app_squircle(int32_t x, int32_t y, uint32_t bg_color, uint32_t border_color)
+{
+    /* 1px crisp solid drop shadow (bottom & right) */
+    gfx_fill_rect(gfx, x + 3, y + 36, 31, 2, CLR_SHADOW_CRISP);
+    gfx_fill_rect(gfx, x + 36, y + 3, 2, 31, CLR_SHADOW_CRISP);
+
+    /* Main body fill */
+    gfx_fill_rect(gfx, x + 2, y + 1, 32, 34, bg_color);
+    gfx_fill_rect(gfx, x + 1, y + 2, 34, 32, bg_color);
+
+    /* Crisp 1px perimeter border */
+    gfx_hline(gfx, x + 3, y, 30, border_color);
+    gfx_hline(gfx, x + 3, y + 35, 30, border_color);
+    gfx_vline(gfx, x, y + 3, 30, border_color);
+    gfx_vline(gfx, x + 35, y + 3, 30, border_color);
+
+    /* Corner bevels for clean roundness without jagged corners */
+    gfx_pixel(gfx, x + 1, y + 1, border_color);
+    gfx_pixel(gfx, x + 2, y, border_color);
+    gfx_pixel(gfx, x, y + 2, border_color);
+
+    gfx_pixel(gfx, x + 34, y + 1, border_color);
+    gfx_pixel(gfx, x + 33, y, border_color);
+    gfx_pixel(gfx, x + 35, y + 2, border_color);
+
+    gfx_pixel(gfx, x + 1, y + 34, border_color);
+    gfx_pixel(gfx, x + 2, y + 35, border_color);
+    gfx_pixel(gfx, x, y + 33, border_color);
+
+    gfx_pixel(gfx, x + 34, y + 34, border_color);
+    gfx_pixel(gfx, x + 33, y + 35, border_color);
+    gfx_pixel(gfx, x + 35, y + 33, border_color);
+}
+
+/* Icon 1: Files / Storage */
+static void draw_icon_files(int32_t x, int32_t y)
+{
+    draw_app_squircle(x, y, CLR_APP_FILES, CLR_APP_FILES_DARK);
+
+    /* Back flap & tab */
+    gfx_fill_rect(gfx, x + 8, y + 9, 8, 4, CLR_CARD_SURFACE);
+    gfx_rect(gfx, x + 8, y + 9, 8, 4, 0x001E293Bu);
+
+    /* White document paper inside */
+    gfx_fill_rect(gfx, x + 11, y + 10, 14, 4, CLR_CARD_SURFACE);
+    gfx_rect(gfx, x + 11, y + 10, 14, 4, 0x001E293Bu);
+
+    /* Front folder body */
+    gfx_fill_rect(gfx, x + 7, y + 13, 22, 13, 0x00FFFBEBu);
+    gfx_rect(gfx, x + 7, y + 13, 22, 13, 0x001E293Bu);
+
+    /* Folder crease line */
+    gfx_hline(gfx, x + 9, y + 16, 18, 0x00F59E0Bu);
+}
+
+/* Icon 2: Network / Cloud */
 static void draw_icon_network(int32_t x, int32_t y)
 {
-    /* Left PC */
-    gfx_fill_rect(gfx, x, y + 2, 16, 12, 0x00D0D0D0u);
-    gfx_rect(gfx, x, y + 2, 16, 12, CLR_BLACK);
-    gfx_fill_rect(gfx, x + 2, y + 4, 12, 8, 0x00000080u);
+    draw_app_squircle(x, y, CLR_APP_NET, CLR_APP_NET_DARK);
 
-    /* Right PC */
-    gfx_fill_rect(gfx, x + 14, y + 10, 16, 12, 0x00D0D0D0u);
-    gfx_rect(gfx, x + 14, y + 10, 16, 12, CLR_BLACK);
-    gfx_fill_rect(gfx, x + 16, y + 12, 12, 8, 0x00000080u);
+    /* Crisp cloud graphic */
+    gfx_fill_rect(gfx, x + 11, y + 10, 14, 15, CLR_CARD_SURFACE);
+    gfx_fill_rect(gfx, x + 7,  y + 14, 22, 11, CLR_CARD_SURFACE);
+    gfx_rect(gfx,      x + 7,  y + 14, 22, 11, 0x001E293Bu);
+    gfx_rect(gfx,      x + 11, y + 10, 14, 15, 0x001E293Bu);
 
-    /* Connecting cable */
-    gfx_hline(gfx, x + 8, y + 25, 16, CLR_BLACK);
-    gfx_vline(gfx, x + 8, y + 14, 11, CLR_BLACK);
-    gfx_vline(gfx, x + 22, y + 22, 3, CLR_BLACK);
+    /* Inner signal wave */
+    gfx_fill_rect(gfx, x + 16, y + 17, 4, 4, 0x000284C7u);
+    gfx_hline(gfx, x + 10, y + 20, 16, 0x000284C7u);
 }
 
-/* "Recycle Bin" icon */
-static void draw_icon_recycle_bin(int32_t x, int32_t y)
+/* Icon 3: Terminal */
+static void draw_icon_terminal(int32_t x, int32_t y)
 {
-    /* Wastebasket rim */
-    gfx_fill_rect(gfx, x + 4, y + 2, 24, 4, 0x00E0E0E0u);
-    gfx_rect(gfx, x + 4, y + 2, 24, 4, CLR_BLACK);
+    draw_app_squircle(x, y, CLR_APP_TERM, CLR_APP_TERM_DARK);
+
+    /* Mini terminal frame */
+    gfx_fill_rect(gfx, x + 6, y + 8, 24, 20, 0x00000000u);
+    gfx_rect(gfx,      x + 6, y + 8, 24, 20, 0x0064748Bu);
+
+    /* Title bar with dots */
+    gfx_fill_rect(gfx, x + 7, y + 9, 22, 3, 0x00334155u);
+    gfx_pixel(gfx, x + 8,  y + 10, CLR_G_RED);
+    gfx_pixel(gfx, x + 11, y + 10, CLR_G_YELLOW);
+    gfx_pixel(gfx, x + 14, y + 10, CLR_G_GREEN);
+
+    /* Bold green prompt `>` */
+    gfx_line(gfx, x + 9,  y + 15, x + 13, y + 18, CLR_G_GREEN);
+    gfx_line(gfx, x + 9,  y + 16, x + 13, y + 19, CLR_G_GREEN);
+    gfx_line(gfx, x + 13, y + 18, x + 9,  y + 21, CLR_G_GREEN);
+    gfx_line(gfx, x + 13, y + 19, x + 9,  y + 22, CLR_G_GREEN);
+
+    /* White cursor `_` */
+    gfx_fill_rect(gfx, x + 16, y + 21, 6, 2, CLR_CARD_SURFACE);
+}
+
+/* Icon 4: Settings */
+static void draw_icon_settings(int32_t x, int32_t y)
+{
+    draw_app_squircle(x, y, CLR_APP_SETTINGS, CLR_APP_SETTINGS_DARK);
+
+    /* Slider 1 track & knob */
+    gfx_fill_rect(gfx, x + 8,  y + 13, 20, 2, 0x00312E81u);
+    gfx_fill_rect(gfx, x + 11, y + 10, 6,  8, CLR_CARD_SURFACE);
+    gfx_rect(gfx,      x + 11, y + 10, 6,  8, 0x001E293Bu);
+    gfx_vline(gfx,     x + 13, y + 12, 4, 0x007C3AEDu);
+
+    /* Slider 2 track & knob */
+    gfx_fill_rect(gfx, x + 8,  y + 22, 20, 2, 0x00312E81u);
+    gfx_fill_rect(gfx, x + 19, y + 19, 6,  8, CLR_CARD_SURFACE);
+    gfx_rect(gfx,      x + 19, y + 19, 6,  8, 0x001E293Bu);
+    gfx_vline(gfx,     x + 21, y + 21, 4, 0x007C3AEDu);
+}
+
+/* Icon 5: Trash */
+static void draw_icon_trash(int32_t x, int32_t y)
+{
+    draw_app_squircle(x, y, CLR_APP_TRASH, CLR_APP_TRASH_DARK);
+
+    /* Lid handle */
+    gfx_fill_rect(gfx, x + 16, y + 8, 4, 2, CLR_CARD_SURFACE);
+    gfx_rect(gfx,      x + 16, y + 8, 4, 2, 0x001E293Bu);
+
+    /* Lid */
+    gfx_fill_rect(gfx, x + 9,  y + 10, 18, 3, CLR_CARD_SURFACE);
+    gfx_rect(gfx,      x + 9,  y + 10, 18, 3, 0x001E293Bu);
+
     /* Bin body */
-    gfx_fill_rect(gfx, x + 6, y + 6, 20, 20, 0x00D0D0D0u);
-    gfx_rect(gfx, x + 6, y + 6, 20, 20, CLR_BLACK);
-    /* Vertical slats / ribs */
-    gfx_vline(gfx, x + 10, y + 7, 18, 0x00808080u);
-    gfx_vline(gfx, x + 15, y + 7, 18, 0x00808080u);
-    gfx_vline(gfx, x + 20, y + 7, 18, 0x00808080u);
-    /* Green recycle symbol dot */
-    gfx_fill_rect(gfx, x + 13, y + 13, 6, 6, CLR_WIN_GREEN);
-}
+    gfx_fill_rect(gfx, x + 11, y + 13, 14, 14, CLR_CARD_SURFACE);
+    gfx_rect(gfx,      x + 11, y + 13, 14, 14, 0x001E293Bu);
 
-/* "Internet Explorer" icon */
-static void draw_icon_internet(int32_t x, int32_t y)
-{
-    /* Blue 'e' */
-    gfx_fill_rect(gfx, x + 6, y + 4, 20, 20, 0x000066CCu);
-    gfx_fill_rect(gfx, x + 10, y + 8, 12, 4, CLR_LIGHT);
-    gfx_fill_rect(gfx, x + 10, y + 16, 16, 4, CLR_DESKTOP);
-    /* Gold orbital swoosh */
-    gfx_line(gfx, x + 2, y + 20, x + 28, y + 6, CLR_WIN_YELLOW);
-    gfx_line(gfx, x + 2, y + 21, x + 28, y + 7, CLR_WIN_YELLOW);
-}
-
-/* "Readme" text document icon */
-static void draw_icon_readme(int32_t x, int32_t y)
-{
-    /* White sheet */
-    gfx_fill_rect(gfx, x + 6, y + 2, 20, 26, CLR_LIGHT);
-    gfx_rect(gfx, x + 6, y + 2, 20, 26, CLR_BLACK);
-    /* Folded corner */
-    gfx_fill_rect(gfx, x + 20, y + 2, 6, 6, CLR_FACE);
-    gfx_line(gfx, x + 20, y + 2, x + 26, y + 8, CLR_BLACK);
-    /* Text lines */
-    gfx_hline(gfx, x + 9,  y + 10, 11, 0x00000080u);
-    gfx_hline(gfx, x + 9,  y + 14, 14, 0x00808080u);
-    gfx_hline(gfx, x + 9,  y + 18, 14, 0x00808080u);
-    gfx_hline(gfx, x + 9,  y + 22, 10, 0x00808080u);
+    /* Slats */
+    gfx_fill_rect(gfx, x + 14, y + 16, 2, 8, 0x00DC2626u);
+    gfx_fill_rect(gfx, x + 20, y + 16, 2, 8, 0x00DC2626u);
 }
 
 static void draw_desktop_icons(void)
 {
-    int32_t start_x = 20;
-    int32_t start_y = 20;
-    int32_t spacing_y = 68;
+    int32_t start_x = 24;
+    int32_t start_y = 28;
+    int32_t spacing_y = 74;
 
-    /* 1. My Computer */
-    draw_icon_my_computer(start_x + 12, start_y);
-    draw_string(start_x, start_y + 32, "My Computer", CLR_TEXT_WHITE, 0, false);
+    /* 1. Files */
+    draw_icon_files(start_x, start_y);
+    draw_string(start_x - 2, start_y + 42, "Files", CLR_TEXT_HIGH, 0, false);
 
-    /* 2. Network Neighborhood */
-    draw_icon_network(start_x + 12, start_y + spacing_y);
-    draw_string(start_x + 12, start_y + spacing_y + 32, "Network", CLR_TEXT_WHITE, 0, false);
+    /* 2. Network */
+    draw_icon_network(start_x, start_y + spacing_y);
+    draw_string(start_x - 10, start_y + spacing_y + 42, "Network", CLR_TEXT_HIGH, 0, false);
 
-    /* 3. Recycle Bin */
-    draw_icon_recycle_bin(start_x + 12, start_y + spacing_y * 2);
-    draw_string(start_x + 4, start_y + spacing_y * 2 + 32, "Recycle Bin", CLR_TEXT_WHITE, 0, false);
+    /* 3. Terminal */
+    draw_icon_terminal(start_x, start_y + spacing_y * 2);
+    draw_string(start_x - 14, start_y + spacing_y * 2 + 42, "Terminal", CLR_TEXT_HIGH, 0, false);
 
-    /* 4. Internet Explorer */
-    draw_icon_internet(start_x + 12, start_y + spacing_y * 3);
-    draw_string(start_x + 8, start_y + spacing_y * 3 + 32, "Internet", CLR_TEXT_WHITE, 0, false);
+    /* 4. Settings */
+    draw_icon_settings(start_x, start_y + spacing_y * 3);
+    draw_string(start_x - 14, start_y + spacing_y * 3 + 42, "Settings", CLR_TEXT_HIGH, 0, false);
 
-    /* 5. Readme.txt */
-    draw_icon_readme(start_x + 12, start_y + spacing_y * 4);
-    draw_string(start_x + 4, start_y + spacing_y * 4 + 32, "Readme.txt", CLR_TEXT_WHITE, 0, false);
+    /* 5. Trash */
+    draw_icon_trash(start_x, start_y + spacing_y * 4);
+    draw_string(start_x - 2, start_y + spacing_y * 4 + 42, "Trash", CLR_TEXT_HIGH, 0, false);
 }
 
-/* ── Welcome Window ─────────────────────────────────────────── */
+/* ── Material Wallpaper Artwork ─────────────────────────────── */
+static void draw_wallpaper(void)
+{
+    /* Clean base canvas in modern Slate 300 — high-contrast & zero smudges */
+    gfx_fill_rect(gfx, 0, 0, screen_w, screen_h, CLR_WALLPAPER);
+
+    /* Clean Google Material 4-Color Accent Strip at the very top (3px) */
+    if (screen_w > 0) {
+        uint32_t seg = screen_w / 4;
+        gfx_fill_rect(gfx, 0,           0, seg,                3, CLR_G_BLUE);
+        gfx_fill_rect(gfx, seg,         0, seg,                3, CLR_G_RED);
+        gfx_fill_rect(gfx, seg * 2,     0, seg,                3, CLR_G_YELLOW);
+        gfx_fill_rect(gfx, seg * 3,     0, screen_w - seg * 3, 3, CLR_G_GREEN);
+    }
+}
+
+/* ── Welcome Window (Material Card Design) ───────────────────── */
 static void draw_welcome_window(int32_t wx, int32_t wy, uint32_t ww, uint32_t wh)
 {
-    /* Window frame */
-    draw_raised_box(wx, wy, ww, wh, true);
+    /* Elevated surface card with clean 1px border and crisp 2px elevation shadow */
+    draw_elevated_card(wx, wy, ww, wh, CLR_CARD_SURFACE, true);
 
-    /* Title bar */
-    int32_t tx = wx + 3;
-    int32_t ty = wy + 3;
-    uint32_t tw = ww - 6;
-    uint32_t th = 18;
-    draw_gradient_titlebar(tx, ty, tw, th);
+    /* 1. App Bar Header: Google Blue */
+    uint32_t bar_h = 38;
+    gfx_fill_rect(gfx, wx + 1, wy + 1, ww - 2, bar_h - 1, CLR_PRIMARY);
+    gfx_hline(gfx, wx, wy + bar_h, ww, CLR_CARD_BORDER);
 
-    /* Title bar icon & text */
-    draw_windows_flag(tx + 3, ty + 3);
-    draw_string(tx + 22, ty + 1, "Welcome to OS01", CLR_TEXT_WHITE, 0, false);
+    /* Google 4-color dots logo + Title */
+    draw_google_dots(wx + 12, wy + 17);
+    draw_string(wx + 44, wy + 11, "Welcome to OS01", CLR_TEXT_WHITE, 0, false);
 
-    /* Title bar control buttons: [_] [口] [X] */
-    int32_t btn_y = ty + 2;
-    int32_t btn_w = 16;
-    int32_t btn_h = 14;
+    /* Header Window Controls: [ — ] [ □ ] [ ✕ ] */
+    int32_t cx = wx + (int32_t)ww - 28;
+    int32_t cy = wy + 11;
 
-    /* Close button [X] */
-    int32_t cx = tx + (int32_t)tw - 18;
-    draw_raised_box(cx, btn_y, btn_w, btn_h, true);
-    draw_string(cx + 4, btn_y - 1, "x", CLR_TEXT, 0, false);
+    /* Close (✕) */
+    draw_string(cx, cy, "x", CLR_TEXT_WHITE, 0, false);
 
-    /* Maximize button [口] */
-    int32_t mx = cx - 18;
-    draw_raised_box(mx, btn_y, btn_w, btn_h, true);
-    gfx_rect(gfx, mx + 3, btn_y + 3, 9, 8, CLR_BLACK);
-    gfx_hline(gfx, mx + 3, btn_y + 4, 9, CLR_BLACK);
+    /* Maximize (□) */
+    int32_t mx = cx - 24;
+    gfx_rect(gfx, mx, cy + 3, 10, 10, CLR_TEXT_WHITE);
+    gfx_hline(gfx, mx, cy + 4, 10, CLR_TEXT_WHITE);
 
-    /* Minimize button [_] */
-    int32_t lx = mx - 18;
-    draw_raised_box(lx, btn_y, btn_w, btn_h, true);
-    gfx_hline(gfx, lx + 4, btn_y + 9, 7, CLR_BLACK);
-    gfx_hline(gfx, lx + 4, btn_y + 10, 7, CLR_BLACK);
+    /* Minimize (—) */
+    int32_t lx = mx - 24;
+    gfx_fill_rect(gfx, lx, cy + 8, 10, 2, CLR_TEXT_WHITE);
 
-    /* Menu bar: File  Edit  View  Help */
-    int32_t my = wy + 23;
-    gfx_fill_rect(gfx, wx + 3, my, ww - 6, 18, CLR_FACE);
-    draw_string(wx + 8,  my + 1, "File", CLR_TEXT, 0, false);
-    draw_string(wx + 52, my + 1, "Edit", CLR_TEXT, 0, false);
-    draw_string(wx + 96, my + 1, "View", CLR_TEXT, 0, false);
-    draw_string(wx + 140, my + 1, "Help", CLR_TEXT, 0, false);
+    /* 2. Card Content Area */
+    int32_t cx_body = wx + 20;
+    int32_t cy_body = wy + 52;
 
-    /* Client area (sunken white box) */
-    int32_t cw_x = wx + 6;
-    int32_t cw_y = wy + 43;
-    uint32_t cw_w = ww - 12;
-    uint32_t cw_h = wh - 72;
-    draw_sunken_box(cw_x, cw_y, cw_w, cw_h, CLR_WINDOW_BG, true);
+    /* Material Chip: [ MATERIAL DESIGN ] */
+    draw_pill_button(cx_body, cy_body, 148, 22, CLR_PRIMARY_CONTAINER, CLR_PRIMARY);
+    draw_string(cx_body + 10, cy_body + 3, "MATERIAL DESIGN", CLR_PRIMARY, 0, false);
 
-    /* Client content */
-    int32_t px = cw_x + 16;
-    int32_t py = cw_y + 12;
+    /* Title & subtitle */
+    draw_string(cx_body, cy_body + 30, "Next-Gen 2D Desktop for OS01", CLR_TEXT_HIGH, 0, false);
+    draw_string(cx_body, cy_body + 48, "Clean elevation, cards & responsive blitter", CLR_TEXT_MED, 0, false);
 
-    /* Header banner */
-    draw_windows_flag(px, py + 2);
-    draw_string(px + 20, py, "Microsoft Windows 98", CLR_TITLE_ACTIVE_L, 0, false);
-    draw_string(px + 20, py + 16, "for OS01 Multicore Operating System", CLR_DARK_SHADOW, 0, false);
+    /* Divider */
+    gfx_hline(gfx, cx_body, cy_body + 68, ww - 40, CLR_DIVIDER);
 
-    /* Horizontal divider */
-    gfx_hline(gfx, px, py + 36, cw_w - 32, CLR_DARK_SHADOW);
-    gfx_hline(gfx, px, py + 37, cw_w - 32, CLR_LIGHT);
+    /* 3. System Specs Tiles (Material Sub-Cards) */
+    int32_t tile_y = cy_body + 78;
+    int32_t tile_w = (int32_t)ww - 40;
 
-    /* System Features list */
-    int32_t ly = py + 46;
-    draw_string(px, ly,      "> OS Kernel: x86_64 Higher-Half SMP (smp=2)", CLR_TEXT, 0, false);
-    draw_string(px, ly + 18, "> Graphics : UEFI GOP -> /dev/gfx0 2D Engine", CLR_TEXT, 0, false);
-    draw_string(px, ly + 36, "> Memory   : 4KB / 2MB Huge Paging + EEVDF", CLR_TEXT, 0, false);
-    draw_string(px, ly + 54, "> Userland : BusyBox 1.36.1 & PTY Terminal", CLR_TEXT, 0, false);
+    /* Feature Row 1: Kernel (Blue) */
+    draw_pill_button(cx_body, tile_y, tile_w, 24, CLR_SURFACE_VARIANT, CLR_CARD_BORDER_SUBTLE);
+    gfx_fill_rect(gfx, cx_body + 4, tile_y + 4, 4, 16, CLR_G_BLUE);
+    draw_string(cx_body + 14, tile_y + 4, "Kernel   : x86_64 Multi-Core SMP (smp=2)", CLR_TEXT_HIGH, 0, false);
 
-    /* Hint box */
-    draw_sunken_box(px, ly + 78, cw_w - 32, 28, 0x00F8F8F8u, true);
-    draw_string(px + 6, ly + 84, "Press 'S' for Start Menu, 'Q' or ESC to exit", 0x00800000u, 0, false);
+    /* Feature Row 2: Display (Green) */
+    tile_y += 28;
+    draw_pill_button(cx_body, tile_y, tile_w, 24, CLR_SURFACE_VARIANT, CLR_CARD_BORDER_SUBTLE);
+    gfx_fill_rect(gfx, cx_body + 4, tile_y + 4, 4, 16, CLR_G_GREEN);
+    draw_string(cx_body + 14, tile_y + 4, "Graphics : UEFI GOP -> /dev/gfx0 2D Engine", CLR_TEXT_HIGH, 0, false);
 
-    /* Bottom window status / buttons */
-    /* Checkbox: [X] Show on startup */
-    int32_t bty = wy + (int32_t)wh - 25;
-    draw_sunken_box(wx + 10, bty + 2, 12, 12, CLR_LIGHT, true);
-    draw_string(wx + 12, bty - 1, "x", CLR_TEXT, 0, false);
-    draw_string(wx + 26, bty, "Show this screen at startup", CLR_TEXT, 0, false);
+    /* Feature Row 3: Memory (Yellow/Amber) */
+    tile_y += 28;
+    draw_pill_button(cx_body, tile_y, tile_w, 24, CLR_SURFACE_VARIANT, CLR_CARD_BORDER_SUBTLE);
+    gfx_fill_rect(gfx, cx_body + 4, tile_y + 4, 4, 16, CLR_G_YELLOW);
+    draw_string(cx_body + 14, tile_y + 4, "Memory   : 4KB / 2MB Huge Paging + EEVDF", CLR_TEXT_HIGH, 0, false);
 
-    /* [ Close ] button */
-    int32_t cl_btn_x = wx + (int32_t)ww - 80;
-    int32_t cl_btn_y = bty - 2;
-    draw_raised_box(cl_btn_x, cl_btn_y, 70, 22, true);
-    draw_string(cl_btn_x + 14, cl_btn_y + 3, "Close", CLR_TEXT, 0, false);
+    /* Feature Row 4: Userland (Red) */
+    tile_y += 28;
+    draw_pill_button(cx_body, tile_y, tile_w, 24, CLR_SURFACE_VARIANT, CLR_CARD_BORDER_SUBTLE);
+    gfx_fill_rect(gfx, cx_body + 4, tile_y + 4, 4, 16, CLR_G_RED);
+    draw_string(cx_body + 14, tile_y + 4, "Userland : BusyBox 1.36.1 & PTY Terminal", CLR_TEXT_HIGH, 0, false);
+
+    /* 4. Action Row (Hint + Filled Primary Button) */
+    int32_t act_y = wy + (int32_t)wh - 38;
+    draw_string(cx_body, act_y + 5, "Press 'S' for Apps, 'Q' or ESC to exit", CLR_TEXT_MED, 0, false);
+
+    /* Filled Primary Button: [ CLOSE ] */
+    int32_t btn_w = 84;
+    int32_t btn_h = 28;
+    int32_t btn_x = wx + (int32_t)ww - btn_w - 20;
+    int32_t btn_y = act_y;
+    draw_pill_button(btn_x, btn_y, btn_w, btn_h, CLR_PRIMARY, CLR_PRIMARY_DARK);
+    draw_string(btn_x + 22, btn_y + 6, "CLOSE", CLR_TEXT_WHITE, 0, false);
 }
 
-/* ── Taskbar and Start Button ───────────────────────────────── */
+/* ── Material Bottom Navigation Bar / Dock ──────────────────── */
 static void draw_taskbar(void)
 {
-    int32_t ty = (int32_t)screen_h - 28;
+    uint32_t bar_h = 42;
+    int32_t ty = (int32_t)screen_h - (int32_t)bar_h;
 
-    /* Taskbar background */
-    gfx_fill_rect(gfx, 0, ty, screen_w, 28, CLR_FACE);
+    /* Crisp top structural border */
+    gfx_hline(gfx, 0, ty - 1, screen_w, CLR_CARD_BORDER);
 
-    /* Top 3D highlight */
-    gfx_hline(gfx, 0, ty, screen_w, CLR_LIGHT);
-    gfx_hline(gfx, 0, ty + 1, screen_w, CLR_LIGHT_SHADOW);
+    /* Pure White Dock Surface */
+    gfx_fill_rect(gfx, 0, ty, screen_w, bar_h, CLR_CARD_SURFACE);
 
-    /* Start Button: x=2, y=ty+2, w=58, h=22 */
-    int32_t sb_x = 2;
-    int32_t sb_y = ty + 3;
-    uint32_t sb_w = 60;
-    uint32_t sb_h = 22;
+    /* 1. Material App Drawer / Launcher Button (Pill FAB) */
+    int32_t btn_x = 12;
+    int32_t btn_y = ty + 6;
+    uint32_t btn_w = 96;
+    uint32_t btn_h = 30;
 
-    if (start_menu_open) {
-        draw_sunken_box(sb_x, sb_y, sb_w, sb_h, CLR_FACE, true);
-        draw_windows_flag(sb_x + 6, sb_y + 5);
-        draw_string(sb_x + 22, sb_y + 4, "Start", CLR_TEXT, 0, false);
+    if (drawer_open) {
+        /* Open state: filled primary */
+        draw_pill_button(btn_x, btn_y, btn_w, btn_h, CLR_PRIMARY, CLR_PRIMARY_DARK);
+        draw_google_dots(btn_x + 8, btn_y + 12);
+        draw_string(btn_x + 40, btn_y + 7, "Apps", CLR_TEXT_WHITE, 0, false);
     } else {
-        draw_raised_box(sb_x, sb_y, sb_w, sb_h, true);
-        draw_windows_flag(sb_x + 5, sb_y + 4);
-        draw_string(sb_x + 21, sb_y + 3, "Start", CLR_TEXT, 0, false);
+        /* Idle state: crisp surface container */
+        draw_pill_button(btn_x, btn_y, btn_w, btn_h, CLR_SURFACE_VARIANT, CLR_CARD_BORDER_SUBTLE);
+        draw_google_dots(btn_x + 8, btn_y + 12);
+        draw_string(btn_x + 40, btn_y + 7, "Apps", CLR_TEXT_HIGH, 0, false);
     }
 
-    /* Vertical divider after Start button */
-    gfx_vline(gfx, sb_x + (int32_t)sb_w + 4, ty + 4, 20, CLR_DARK_SHADOW);
-    gfx_vline(gfx, sb_x + (int32_t)sb_w + 5, ty + 4, 20, CLR_LIGHT);
-
-    /* Window task on taskbar */
+    /* 2. Active Window Chip on Dock */
     if (window_open) {
-        int32_t tb_win_x = sb_x + (int32_t)sb_w + 10;
-        int32_t tb_win_w = 160;
-        draw_sunken_box(tb_win_x, sb_y, tb_win_w, sb_h, CLR_LIGHT_SHADOW, true);
-        draw_windows_flag(tb_win_x + 6, sb_y + 5);
-        draw_string(tb_win_x + 22, sb_y + 4, "Welcome to OS01", CLR_TEXT, 0, false);
+        int32_t chip_x = btn_x + (int32_t)btn_w + 12;
+        uint32_t chip_w = 180;
+        draw_pill_button(chip_x, btn_y, chip_w, btn_h, CLR_PRIMARY_CONTAINER, CLR_PRIMARY);
+
+        /* Blue indicator dot + Window title */
+        gfx_fill_rect(gfx, chip_x + 10, btn_y + 12, 6, 6, CLR_PRIMARY);
+        gfx_rect(gfx, chip_x + 10, btn_y + 12, 6, 6, CLR_PRIMARY_DARK);
+        draw_string(chip_x + 22, btn_y + 7, "Welcome to OS01", CLR_PRIMARY, 0, false);
+
+        /* Bottom active underline indicator */
+        gfx_fill_rect(gfx, chip_x + 16, btn_y + (int32_t)btn_h - 3, chip_w - 32, 2, CLR_PRIMARY);
     }
 
-    /* System Tray (clock + speaker icon at bottom right) */
-    uint32_t tray_w = 80;
-    uint32_t tray_h = 22;
-    int32_t tray_x = (int32_t)screen_w - (int32_t)tray_w - 4;
-    int32_t tray_y = ty + 3;
-    draw_sunken_box(tray_x, tray_y, tray_w, tray_h, CLR_FACE, true);
+    /* 3. System Status Tray (Pill Chip at Bottom Right) */
+    uint32_t tray_w = 114;
+    uint32_t tray_h = 30;
+    int32_t tray_x = (int32_t)screen_w - (int32_t)tray_w - 12;
+    int32_t tray_y = ty + 6;
 
-    /* Small speaker icon */
-    gfx_fill_rect(gfx, tray_x + 6, tray_y + 6, 3, 8, CLR_BLACK);
-    gfx_line(gfx, tray_x + 9, tray_y + 6, tray_x + 13, tray_y + 2, CLR_BLACK);
-    gfx_line(gfx, tray_x + 9, tray_y + 13, tray_x + 13, tray_y + 17, CLR_BLACK);
-    gfx_vline(gfx, tray_x + 13, tray_y + 2, 16, CLR_BLACK);
+    draw_pill_button(tray_x, tray_y, tray_w, tray_h, CLR_SURFACE_VARIANT, CLR_CARD_BORDER_SUBTLE);
+
+    /* Speaker Icon */
+    gfx_fill_rect(gfx, tray_x + 10, tray_y + 10, 3, 10, CLR_TEXT_HIGH);
+    gfx_line(gfx, tray_x + 13, tray_y + 10, tray_x + 17, tray_y + 6, CLR_TEXT_HIGH);
+    gfx_line(gfx, tray_x + 13, tray_y + 19, tray_x + 17, tray_y + 23, CLR_TEXT_HIGH);
+    gfx_vline(gfx, tray_x + 17, tray_y + 6, 18, CLR_TEXT_HIGH);
+
+    /* Battery / Power bar */
+    gfx_rect(gfx, tray_x + 24, tray_y + 10, 14, 10, CLR_TEXT_HIGH);
+    gfx_fill_rect(gfx, tray_x + 26, tray_y + 12, 8, 6, CLR_G_GREEN);
+    gfx_vline(gfx, tray_x + 38, tray_y + 12, 6, CLR_TEXT_HIGH);
 
     /* Clock text (HH:MM) */
     time_t now = time(NULL);
@@ -415,97 +503,71 @@ static void draw_taskbar(void)
     } else {
         snprintf(time_str, sizeof(time_str), "12:00");
     }
-    draw_string(tray_x + 26, tray_y + 3, time_str, CLR_TEXT, 0, false);
+    draw_string(tray_x + 50, tray_y + 7, time_str, CLR_TEXT_HIGH, 0, false);
 }
 
-/* ── Start Menu ─────────────────────────────────────────────── */
-static void draw_start_menu(void)
+/* ── Material App Drawer (Elevated Floating Card) ────────────── */
+static void draw_app_drawer(void)
 {
-    if (!start_menu_open) return;
+    if (!drawer_open) return;
 
-    int32_t menu_w = 168;
-    int32_t menu_h = 220;
-    int32_t menu_x = 2;
-    int32_t menu_y = (int32_t)screen_h - 28 - menu_h;
+    uint32_t dw_w = 230;
+    uint32_t dw_h = 270;
+    int32_t dw_x = 12;
+    int32_t dw_y = (int32_t)screen_h - 42 - (int32_t)dw_h - 8;
 
-    /* Outer raised frame */
-    draw_raised_box(menu_x, menu_y, menu_w, menu_h, true);
+    /* Elevated surface card with clean 1px border and crisp 2px elevation shadow */
+    draw_elevated_card(dw_x, dw_y, dw_w, dw_h, CLR_CARD_SURFACE, true);
 
-    /* Left banner: vertical blue gradient */
-    int32_t ban_x = menu_x + 3;
-    int32_t ban_y = menu_y + 3;
-    uint32_t ban_w = 22;
-    uint32_t ban_h = menu_h - 6;
+    /* 1. Search Bar / Header */
+    int32_t sx = dw_x + 12;
+    int32_t sy = dw_y + 12;
+    uint32_t sw = dw_w - 24;
+    draw_pill_button(sx, sy, sw, 30, CLR_SURFACE_VARIANT, CLR_CARD_BORDER_SUBTLE);
+    draw_string(sx + 12, sy + 7, "Search apps...", CLR_TEXT_MED, 0, false);
 
-    for (uint32_t i = 0; i < ban_h; i++) {
-        uint32_t r = 0;
-        uint32_t g = (128 * i) / ban_h;
-        uint32_t b = 128 + ((220 - 128) * i) / ban_h;
-        uint32_t c = (r << 16) | (g << 8) | b;
-        gfx_hline(gfx, ban_x, ban_y + (int32_t)i, ban_w, c);
-    }
-
-    /* Vertical text "OS01 98" in the left banner */
-    const char *vtext = "OS01 98";
-    int32_t vy = ban_y + (int32_t)ban_h - 18;
-    for (int i = (int)strlen(vtext) - 1; i >= 0; i--) {
-        char s[2] = { vtext[i], '\0' };
-        draw_string(ban_x + 7, vy, s, CLR_TEXT_WHITE, 0, false);
-        vy -= 14;
-    }
-
-    /* Menu items list */
+    /* 2. App Items */
     struct {
         const char *name;
-        bool has_arrow;
+        uint32_t color;
         bool is_sep;
-    } items[] = {
-        { "Programs",       true,  false },
-        { "Favorites",      true,  false },
-        { "Documents",      true,  false },
-        { "Settings",       true,  false },
-        { "Find",           true,  false },
-        { "Help",           false, false },
-        { "Run...",         false, false },
-        { NULL,             false, true  },
-        { "Log Off OS01...",false, false },
-        { "Shut Down...",   false, false },
+    } apps[] = {
+        { "Files & Storage", CLR_APP_FILES,    false },
+        { "Terminal",        CLR_APP_TERM,     false },
+        { "Network Manager", CLR_APP_NET,      false },
+        { "System Settings", CLR_APP_SETTINGS, false },
+        { NULL,              0,                true  },
+        { "Power Off...",    CLR_G_RED,        false },
     };
 
-    int32_t ix = ban_x + (int32_t)ban_w + 6;
-    int32_t iy = menu_y + 6;
-    int item_count = (int)(sizeof(items) / sizeof(items[0]));
+    int32_t item_y = sy + 40;
+    int count = (int)(sizeof(apps) / sizeof(apps[0]));
 
-    for (int i = 0; i < item_count; i++) {
-        if (items[i].is_sep) {
-            gfx_hline(gfx, ix, iy + 4, menu_w - (ix - menu_x) - 6, CLR_DARK_SHADOW);
-            gfx_hline(gfx, ix, iy + 5, menu_w - (ix - menu_x) - 6, CLR_LIGHT);
-            iy += 8;
+    for (int i = 0; i < count; i++) {
+        if (apps[i].is_sep) {
+            gfx_hline(gfx, sx, item_y + 4, sw, CLR_DIVIDER);
+            item_y += 10;
             continue;
         }
 
-        /* Draw item icon (small colored square or flag) */
-        if (i == 0) draw_windows_flag(ix, iy + 2);
-        else if (i == 9) gfx_fill_rect(gfx, ix, iy + 2, 12, 12, CLR_WIN_RED);
-        else gfx_fill_rect(gfx, ix, iy + 2, 12, 12, CLR_WIN_BLUE);
+        /* App icon dot with crisp outline */
+        gfx_fill_rect(gfx, sx + 4, item_y + 3, 10, 10, apps[i].color);
+        gfx_rect(gfx,      sx + 4, item_y + 3, 10, 10, 0x001E293Bu);
 
-        /* Draw item text */
-        draw_string(ix + 18, iy, items[i].name, CLR_TEXT, 0, false);
-
-        /* Submenu arrow '>' */
-        if (items[i].has_arrow) {
-            draw_string(menu_x + menu_w - 18, iy, ">", CLR_DARK_SHADOW, 0, false);
-        }
-
-        iy += 20;
+        /* App name in solid black */
+        draw_string(sx + 24, item_y, apps[i].name, CLR_TEXT_HIGH, 0, false);
+        item_y += 24;
     }
+
+    /* 3. Bottom Brand Footer */
+    draw_google_dots(dw_x + 14, dw_y + (int32_t)dw_h - 18);
+    draw_string(dw_x + 44, dw_y + (int32_t)dw_h - 23, "OS01 Material 3", CLR_TEXT_MED, 0, false);
 }
 
-/* ── Mouse Cursor Drawing ───────────────────────────────────── */
+/* ── Minimalist Material Mouse Cursor ───────────────────────── */
 static void draw_mouse_cursor(int32_t mx, int32_t my)
 {
-    /* Classic Windows 98 12x19 arrow cursor bitmap:
-     * 'X' = black border, 'W' = white fill, '.' = transparent */
+    /* Clean, modern Material cursor bitmap (12x19) */
     static const char *cursor[19] = {
         "X...........",
         "XX..........",
@@ -532,9 +594,9 @@ static void draw_mouse_cursor(int32_t mx, int32_t my)
         for (int c = 0; c < 12; c++) {
             char p = cursor[r][c];
             if (p == 'X') {
-                gfx_pixel(gfx, mx + c, my + r, CLR_BLACK);
+                gfx_pixel(gfx, mx + c, my + r, CLR_TEXT_HIGH);
             } else if (p == 'W') {
-                gfx_pixel(gfx, mx + c, my + r, CLR_LIGHT);
+                gfx_pixel(gfx, mx + c, my + r, CLR_CARD_SURFACE);
             }
         }
     }
@@ -543,28 +605,28 @@ static void draw_mouse_cursor(int32_t mx, int32_t my)
 /* ── Full Desktop Redraw ────────────────────────────────────── */
 static void render_desktop(void)
 {
-    /* 1. Desktop background: Windows 98 Grey */
-    gfx_fill_rect(gfx, 0, 0, screen_w, screen_h, CLR_DESKTOP);
+    /* 1. Wallpaper */
+    draw_wallpaper();
 
     /* 2. Desktop icons */
     draw_desktop_icons();
 
-    /* 3. Welcome Window (centered) */
+    /* 3. Welcome Window (Material Card) */
     if (window_open) {
-        uint32_t ww = 440;
-        uint32_t wh = 280;
+        uint32_t ww = 460;
+        uint32_t wh = 290;
         if (ww > screen_w - 40) ww = screen_w - 40;
         if (wh > screen_h - 60) wh = screen_h - 60;
         int32_t wx = (int32_t)(screen_w - ww) / 2;
-        int32_t wy = (int32_t)(screen_h - wh - 28) / 2;
+        int32_t wy = (int32_t)(screen_h - wh - 42) / 2;
         draw_welcome_window(wx, wy, ww, wh);
     }
 
-    /* 4. Taskbar & Start Button */
+    /* 4. Material Bottom Bar / Dock */
     draw_taskbar();
 
-    /* 5. Start Menu (if open) */
-    draw_start_menu();
+    /* 5. App Drawer (if open) */
+    draw_app_drawer();
 
     /* 6. Mouse Cursor */
     if (has_mouse) {
@@ -680,8 +742,8 @@ int main(int argc, char **argv)
                         running = false;
                         break;
                     } else if (ch == 's' || ch == 'S' || ch == ' ') {
-                        /* Toggle Start Menu */
-                        start_menu_open = !start_menu_open;
+                        /* Toggle App Drawer */
+                        drawer_open = !drawer_open;
                         need_redraw = true;
                     } else if (ch == 'w' || ch == 'W') {
                         /* Toggle Welcome Window */
@@ -705,14 +767,14 @@ int main(int argc, char **argv)
 
                     /* Left click */
                     if (mev.buttons & 1) {
-                        int32_t ty = (int32_t)screen_h - 28;
-                        /* Check Start Button: x=2..62, y=ty+2..ty+24 */
-                        if (mouse_x >= 2 && mouse_x <= 62 &&
-                            mouse_y >= ty + 2 && mouse_y <= ty + 24) {
-                            start_menu_open = !start_menu_open;
-                        } else if (start_menu_open) {
-                            /* Clicked outside Start menu: close it */
-                            start_menu_open = false;
+                        int32_t ty = (int32_t)screen_h - 42;
+                        /* Check Apps button: x=12..108, y=ty+6..ty+36 */
+                        if (mouse_x >= 12 && mouse_x <= 108 &&
+                            mouse_y >= ty + 6 && mouse_y <= ty + 36) {
+                            drawer_open = !drawer_open;
+                        } else if (drawer_open) {
+                            /* Click outside drawer closes it */
+                            drawer_open = false;
                         }
                     }
                 }
