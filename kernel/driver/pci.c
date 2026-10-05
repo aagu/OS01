@@ -3,7 +3,8 @@
 #include <core/debug.h>
 #include <memory/memory.h>   // Phy_To_Virt
 #include <memory/pmm.h>      // PAGE_2M_MASK
-#include <memory/vmm.h>      // vmm_map_page, PAGE_KERNEL_PMD_NOCACHE
+#include <memory/vmm.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)      // vmm_map_page, PAGE_KERNEL_PMD_NOCACHE
 #include <stdint.h>
 
 // ── Legacy PCI config space access via 0xCF8 / 0xCFC ─────

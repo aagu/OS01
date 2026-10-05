@@ -2,6 +2,7 @@
 #include <string.h>
 #include <arch/boot_memory.h>
 #include <arch/aarch64/boot_direct_map.h>
+#include <arch/aarch64/vmm_gate.h>
 #include <arch/aarch64/early_arena.h>
 #include <arch/aarch64/m1_selftest.h>
 #include <memory/memory.h>
@@ -82,6 +83,15 @@ int arch_boot_direct_map_init(void)
 #if OS01_SELFTEST
     aarch64_m1_prune_warm();
 #endif
+    /* M3 (Task 7): publish the M1 root BEFORE installing TTBR1 so later
+     * shootdown backends' aarch64_pt_root_is_published() never sees the
+     * in-use root as unpublished. Failure keeps the old root installed
+     * (defensive -ENOSPC path: registry overflow is a violation, so this
+     * branch is unreachable today). */
+    if (!aarch64_pt_root_publish(tree.root_pa)) {
+        rc = -ENOSPC;
+        goto fail;
+    }
     aarch64_m1_install_ttbr1(tree.root_pa);
     installed_root = tree.root_pa;
     ZONE_NORMAL_INDEX = (uint32_t)(PMMngr.zones_size - 1);

@@ -38,6 +38,7 @@ KERNEL_HEADERS := include
 # Architecture implementation files are collected once via ARCH_C_SOURCES.
 ifeq ($(ARCH),aarch64)
 KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
+                   memory/slab.c memory/tlb.c \
                    percpu/percpu.c \
                    time/clocksource.c time/tick.c time/timer.c \
                    intr/softirq.c \
@@ -46,8 +47,14 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    random/random.c \
                    ../libc/random/chacha20.c \
                    ../runtime/builtins/udivti3.c \
+                   selftest/selftest.c \
+                   selftest/test_slab_selftest.c \
                    selftest/test_arch_atomic_u64.c \
-                   selftest/test_aarch64_rndr_encoding.c
+                   selftest/test_aarch64_rndr_encoding.c \
+                   selftest/test_m3_selftest.c \
+                   selftest/test_m3_multicore.c
+# NOTE: boot/m3_probe.c (M3.5 Task 25) is picked up by the
+# ARCH_C_SOURCES wildcard of arch/aarch64/boot/ below.
 else
 KERNEL_C_SOURCES := \
     $(wildcard core/*.c) \

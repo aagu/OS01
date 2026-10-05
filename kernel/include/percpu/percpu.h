@@ -24,6 +24,7 @@
 #ifndef __ASSEMBLER__
 
 #include <stdint.h>
+#include <stddef.h>
 #include <arch/spinlock.h>
 #include <sched/task.h>
 #include <arch/percpu.h>
@@ -59,8 +60,10 @@ typedef struct percpu {
     void *tss_hw;               // architecture task-state base (legacy TSS for BSP,
                                 // init_tss[cpu_id] for APs)
     // ── IPI / TLB shootdown ──
-    uint32_t tlb_wanted;        // atomic flag: TLB invalidate requested
-    uint32_t tlb_ack;           // atomic counter: shootdown ACK
+    // (the legacy shootdown flag+ack counter pair was REMOVED in M3
+    // Task 12 — superseded by the tlb_ack_gen generation counter in the
+    // struct tail)
+    // superseded by the tlb_ack_gen generation counter in the tail.)
     rbtree_root_t run_queue;
     struct task_struct *idle;
     uint64_t schedule_count;    // number of times schedule() ran
@@ -72,7 +75,21 @@ typedef struct percpu {
     uint64_t tsc_sync_go;       // BSP→AP：发起 TSC 握手采样
     uint64_t tsc_sampled;       // AP→BSP：采样完成
     int64_t  tsc_offset;        // bsp_tsc - ap_tsc（BSP=0），clocksource_read_ns 用
+    // ── M3 shootdown foundations（Task 7）──
+    // 这两个字段是结构体尾部：percpu_init() 的 memset 刻意不覆盖它们
+    // （ipi_ready 的单次发布语义 — caller 经
+    // ipi_ready_publish_and_count() 显式置位），见 percpu.c 的
+    // _Static_assert。
+    uint32_t ipi_ready;         // 一次发布：本核 IPI 通道就绪（Task 16+ 消费）
+    uint32_t tlb_ack_gen;       // TLB shootdown 代计数器（Task 16+ 消费）
 } percpu_t;
+
+/* Pin the M3 tail fields: percpu.c's memset wipes only
+ * sizeof(percpu_t) - 8 bytes, so these must be the last 8 bytes. */
+_Static_assert(offsetof(percpu_t, ipi_ready) == sizeof(percpu_t) - 8,
+               "ipi_ready/tlb_ack_gen must be the percpu_t tail (memset skip)");
+_Static_assert(offsetof(percpu_t, tlb_ack_gen) == sizeof(percpu_t) - 4,
+               "tlb_ack_gen must follow ipi_ready");
 
 /* P0-3: pin percpu_t byte size to PERCPU_DATA_SIZE so head.S and other
  * asm consumers stay in sync with the C struct. If a field is added

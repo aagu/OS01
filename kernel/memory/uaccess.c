@@ -25,8 +25,9 @@
 #include <memory/uaccess.h>
 #include <sched/task.h>       // current, fault_jmp, fault_cleanup, fault_cleanup_arg, addr_limit
 #include <memory/memory.h>     // Phy_To_Virt
-#include <memory/vma.h>        // vma_find, VM_WRITE / VM_IO / VM_HEAP / VM_ANON / VM_READ
-#include <memory/vmm.h>        // vmm_pt_walk, PAGE_VALID, PAGE_USER, PAGE_WRITE,
+#include <memory/vma.h>        // vma_find, VMA_PROT_WRITE / VMA_IO / VMA_HEAP / VMA_ANON / VMA_PROT_READ
+#include <memory/vmm.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)        // vmm_pt_walk, PAGE_VALID, PAGE_USER, PAGE_WRITE,
                                // PAGE_COW, PAGE_4K_SIZE, PAGE_4K_MASK
 #include <memory/pmm.h>        // alloc_4k_page, free_4k_page, page_cow_put, tlb_shootdown
 #include <memory/slab.h>       // kmalloc, kfree
@@ -148,8 +149,8 @@ static bool user_write_range_valid(mm_t *mm, uint64_t addr, size_t len,
         }
         if (*pte & PAGE_COW) {
             vma_t *vma = vma_find(mm, va);
-            if (!vma || !(vma->vm_flags & VM_WRITE) ||
-                (vma->vm_flags & VM_IO)) return false;
+            if (!vma || !(vma->vm_flags & VMA_PROT_WRITE) ||
+                (vma->vm_flags & VMA_IO)) return false;
             ++*cow_count;
         }
         va += PAGE_4K_SIZE;

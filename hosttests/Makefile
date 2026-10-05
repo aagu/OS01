@@ -73,6 +73,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_pmm_basic.elf \
     $(TEST_BLD)/test_pmm_ram_rel_index.elf \
     $(TEST_BLD)/test_slab_basic.elf \
+    $(TEST_BLD)/test_slab_layout_compute.elf \
+    $(TEST_BLD)/test_slab_lock_path.elf \
     $(TEST_BLD)/test_elf_validate.elf \
     $(TEST_BLD)/test_wait_basic.elf \
     $(TEST_BLD)/test_canon.elf \
@@ -86,8 +88,13 @@ TEST_BINS := \
     $(TEST_BLD)/test_runtime_udivti3.elf \
     $(TEST_BLD)/test_lwip_rand.elf \
     $(TEST_BLD)/test_gic_driver.elf \
+    $(TEST_BLD)/test_aarch64_ipi_broadcast.elf \
+    $(TEST_BLD)/test_aarch64_gic_target_probe.elf \
+    $(TEST_BLD)/test_ap_work_protocol.elf \
+    $(TEST_BLD)/test_foundational_primitives.elf \
     $(TEST_BLD)/test_gic_marker_lines.elf \
     $(TEST_BLD)/test_gic_probe.elf \
+    $(TEST_BLD)/test_double_state_publish.elf \
     $(TEST_BLD)/test_clocksource.elf \
     $(TEST_BLD)/test_i8042_demux.elf \
     $(TEST_BLD)/test_mouse_init.elf \
@@ -108,14 +115,39 @@ TEST_BINS := \
     $(TEST_BLD)/test_m1_layout.elf \
     $(TEST_BLD)/test_m1_reservation.elf \
     $(TEST_BLD)/test_m1_arena.elf $(TEST_BLD)/test_m1_arena_exhaust.elf \
+    $(TEST_BLD)/test_arena_layout_chain.elf \
+    $(TEST_BLD)/test_arena_2gib_boundary.elf \
+    $(TEST_BLD)/test_arena_candidate_slab_bytes.elf \
+    $(TEST_BLD)/test_arena_table_base_shift.elf \
+    $(TEST_BLD)/test_aarch64_color_printk_abi.elf \
     $(TEST_BLD)/test_m1_tree.elf \
     $(TEST_BLD)/test_m1_contract.elf $(TEST_BLD)/test_m1_vmm.elf \
     $(TEST_BLD)/test_m1_install.elf $(TEST_BLD)/test_m1_cleanup.elf \
     $(TEST_BLD)/test_m1_publish.elf \
     $(TEST_BLD)/test_syscall_dispatch.elf \
-    $(TEST_BLD)/test_compat_linux.elf
+    $(TEST_BLD)/test_compat_linux.elf \
+    $(TEST_BLD)/test_slab_idempotent_reservation.elf \
+    $(TEST_BLD)/test_slab_basic_x86_count.elf \
+    $(TEST_BLD)/test_percpu_layout.elf \
+    $(TEST_BLD)/test_tlb_serial_protocol.elf \
+    $(TEST_BLD)/test_x86_ipi_ready_publish.elf \
+    $(TEST_BLD)/test_vmm_caller_audit.elf \
+    $(TEST_BLD)/test_vmm_semantic_header.elf \
+    $(TEST_BLD)/test_x86_vmm_backend.elf \
+    $(TEST_BLD)/test_aarch64_pt_software_bits.elf \
+    $(TEST_BLD)/test_aarch64_pt_locks.elf \
+    $(TEST_BLD)/test_aarch64_pt_2m_block.elf \
+    $(TEST_BLD)/test_aarch64_backend_4k.elf \
+    $(TEST_BLD)/test_vmm_replace_protocol.elf \
+    $(TEST_BLD)/test_vmm_prot_none.elf \
+    $(TEST_BLD)/test_vmm_ack_wraparound.elf \
+    $(TEST_BLD)/test_aarch64_pt_root_publish.elf \
+    $(TEST_BLD)/test_aarch64_pt_split.elf \
+    $(TEST_BLD)/test_smp_starting_gate.elf \
+    $(TEST_BLD)/test_aarch64_arch_vmm_init.elf \
+    $(TEST_BLD)/test_aarch64_scratch_probe_logic.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init
 
 all: $(TEST_BINS)
 
@@ -442,6 +474,33 @@ $(TEST_BLD)/test_pmm_ram_rel_index.elf: $(TEST_BLD)/test_pmm_ram_rel_index.o \
 	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/test_slab_basic.elf: $(TEST_BLD)/test_slab_basic.o $(LIBC_OBJS) $(MOCK_OBJS)
+	$(HOST_CC) -o $@ $^
+
+# Task 1 Step 1: slab_layout_compute() pure-function test.
+# slab.h is now header-inline for the formula (no need to compile slab.c).
+# Test uses KERNEL_INC for slab.h's transitive includes (memory/pmm.h).
+$(TEST_BLD)/test_slab_layout_compute.o: $(TEST_CASES)/test_slab_layout_compute.c \
+		$(TESTS_DIR)/kernel/include/memory/slab.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -I$(TEST_INC) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/slab_test_stubs.o: $(TEST_MOCK)/slab_test_stubs.c \
+		$(TESTS_DIR)/kernel/include/memory/slab.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_slab_layout_compute.elf: $(TEST_BLD)/test_slab_layout_compute.o \
+		$(TEST_BLD)/slab_test_stubs.o \
+		$(LIBC_OBJS) $(MOCK_OBJS)
+	$(HOST_CC) -o $@ $^
+
+# Task 1 Step 2: source-scan lock path test (v4 fix for v3 review item 12).
+$(TEST_BLD)/test_slab_lock_path.o: $(TEST_CASES)/test_slab_lock_path.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" -I$(TEST_INC) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_slab_lock_path.elf: $(TEST_BLD)/test_slab_lock_path.o \
+		$(LIBC_OBJS) $(MOCK_OBJS)
 	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/test_elf_validate.elf: $(TEST_BLD)/test_elf_validate.o $(LIBC_OBJS) $(MOCK_OBJS)
@@ -793,7 +852,7 @@ test-m1-reservation: $(TEST_BLD)/test_m1_reservation.elf
 # `make test-m1-host CASE=m1-arena` (root run.mk) reaches this rule
 # via the focused dispatch in run.mk.
 EARLY_ARENA_HOST_CFLAGS := $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) \
-                           -I$(TEST_INC)
+                           -I$(TEST_INC) $(LIBC_INC)
 
 $(TEST_BLD)/early_arena_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/early_arena.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/early_arena.h \
@@ -819,9 +878,133 @@ $(TEST_BLD)/test_m1_arena.elf: $(TEST_BLD)/test_m1_arena.o \
 	$(HOST_CC) -o $@ $^
 
 .PHONY: test-m1-arena
-test-m1-arena: $(TEST_BLD)/test_m1_arena.elf $(TEST_BLD)/test_m1_arena_exhaust.elf
+test-m1-arena: $(TEST_BLD)/test_m1_arena.elf $(TEST_BLD)/test_m1_arena_exhaust.elf \
+    $(TEST_BLD)/test_arena_layout_chain.elf \
+    $(TEST_BLD)/test_arena_2gib_boundary.elf \
+    $(TEST_BLD)/test_arena_candidate_slab_bytes.elf \
+    $(TEST_BLD)/test_arena_table_base_shift.elf
 	$(TEST_BLD)/test_m1_arena.elf
 	$(TEST_BLD)/test_m1_arena_exhaust.elf
+	$(TEST_BLD)/test_arena_layout_chain.elf
+	$(TEST_BLD)/test_arena_2gib_boundary.elf
+	$(TEST_BLD)/test_arena_candidate_slab_bytes.elf
+	$(TEST_BLD)/test_arena_table_base_shift.elf
+
+.PHONY: test-aarch64-color-printk-abi
+test-aarch64-color-printk-abi: $(TEST_BLD)/test_aarch64_color_printk_abi.elf
+	$(TEST_BLD)/test_aarch64_color_printk_abi.elf
+
+# aarch64 M2/M3 plan Task 5: color_printk ABI contract. Links the REAL
+# kernel/arch/aarch64/runtime/printk_stub.c against a kputs capture
+# mock. The test TU includes the public <core/printk.h> so a signature
+# mismatch (the old `void color_printk(const char *fmt, ...)` stub) is
+# a compile error; the shadow <arch/aarch64/boot_log.h> lives in
+# $(TEST_MOCK)/aarch64_color_printk and comes BEFORE $(KERNEL_INC).
+AARCH64_PRINTK_STUB_CFLAGS := $(HOST_CFLAGS) -I$(TESTS_DIR)/kernel/include
+
+$(TEST_BLD)/test_aarch64_color_printk_abi.o: $(TEST_CASES)/test_aarch64_color_printk_abi.c \
+		$(TESTS_DIR)/kernel/include/core/printk.h \
+		$(TEST_MOCK)/aarch64_color_printk/arch/aarch64/boot_log.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) \
+		-I$(TEST_MOCK)/aarch64_color_printk $(KERNEL_INC) -c $< -o $@
+
+$(TEST_BLD)/aarch64_printk_stub_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/runtime/printk_stub.c \
+		$(TESTS_DIR)/kernel/include/core/printk.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/boot_log.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PRINTK_STUB_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/kputs_mock.o: $(TEST_MOCK)/aarch64_color_printk/kputs_mock.c \
+		$(TEST_MOCK)/aarch64_color_printk/arch/aarch64/boot_log.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK)/aarch64_color_printk -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_color_printk_abi.elf: \
+		$(TEST_BLD)/test_aarch64_color_printk_abi.o \
+		$(TEST_BLD)/aarch64_printk_stub_production.o \
+		$(TEST_BLD)/kputs_mock.o
+	$(HOST_CC) -o $@ $^
+
+# aarch64 M2/M3 plan Task 3: arena layout-chain / 2 GiB boundary /
+# candidate-scan-includes-slab-bytes. Each new TU reuses the production
+# early_arena.o via the same EARLY_ARENA_HOST_CFLAGS / link line as the
+# existing test_m1_arena.elf. The stub surface (g_log_level,
+# _log_err_impl, color_printk, slab_init) lives in each TU — keeps the
+# rules self-contained and matches test_m1_arena.c / _exhaust.c.
+$(TEST_BLD)/test_arena_layout_chain.o: $(TEST_CASES)/test_arena_layout_chain.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/early_arena.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm_boot.h \
+		$(TESTS_DIR)/kernel/include/memory/memory_map.h \
+		$(TESTS_DIR)/kernel/include/memory/slab.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_arena_layout_chain.elf: $(TEST_BLD)/test_arena_layout_chain.o \
+		$(TEST_BLD)/early_arena_production.o \
+		$(TEST_BLD)/pmm_production.o \
+		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_boot_production.o
+	$(HOST_CC) -o $@ $^
+
+$(TEST_BLD)/test_arena_2gib_boundary.o: $(TEST_CASES)/test_arena_2gib_boundary.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/early_arena.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm_boot.h \
+		$(TESTS_DIR)/kernel/include/memory/memory_map.h \
+		$(TESTS_DIR)/kernel/include/memory/slab.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_arena_2gib_boundary.elf: $(TEST_BLD)/test_arena_2gib_boundary.o \
+		$(TEST_BLD)/early_arena_production.o \
+		$(TEST_BLD)/pmm_production.o \
+		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_boot_production.o
+	$(HOST_CC) -o $@ $^
+
+$(TEST_BLD)/test_arena_candidate_slab_bytes.o: $(TEST_CASES)/test_arena_candidate_slab_bytes.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/early_arena.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm_boot.h \
+		$(TESTS_DIR)/kernel/include/memory/memory_map.h \
+		$(TESTS_DIR)/kernel/include/memory/slab.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_arena_candidate_slab_bytes.elf: $(TEST_BLD)/test_arena_candidate_slab_bytes.o \
+		$(TEST_BLD)/early_arena_production.o \
+		$(TEST_BLD)/pmm_production.o \
+		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_boot_production.o
+	$(HOST_CC) -o $@ $^
+
+# aarch64 M2/M3 plan Task 4: table_base_pa shifted past the slab pages.
+# Links the REAL early_arena.c (aarch64_m1_plan) AND the REAL
+# runtime_tree.c (aarch64_runtime_tree_build) — the builder half drives
+# aarch64_runtime_tree_build through injected fake pool ops whose PA
+# cursor starts at arena.table_base_pa, proving the builder consumes
+# pages only from [table_base_pa, table_end_pa) (zero-change across the
+# base shift). Stub surface identical to test_arena_layout_chain.c.
+$(TEST_BLD)/test_arena_table_base_shift.o: $(TEST_CASES)/test_arena_table_base_shift.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/early_arena.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/runtime_tree.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm_boot.h \
+		$(TESTS_DIR)/kernel/include/memory/memory_map.h \
+		$(TESTS_DIR)/kernel/include/memory/slab.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_arena_table_base_shift.elf: $(TEST_BLD)/test_arena_table_base_shift.o \
+		$(TEST_BLD)/early_arena_production.o \
+		$(TEST_BLD)/pmm_production.o \
+		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_boot_production.o \
+		$(TEST_BLD)/runtime_tree_production.o
+	$(HOST_CC) -o $@ $^
 
 # aarch64 M1 plan Task 4: pure runtime page-table builder and strict
 # validator (`aarch64_runtime_tree_build` / `_validate`). Links the
@@ -1047,6 +1230,561 @@ $(TEST_BLD)/test_gic_driver.elf: $(TEST_BLD)/test_gic_driver.o $(TEST_BLD)/gic_d
 test_gic_driver: $(TEST_BLD)/test_gic_driver.elf
 	$<
 
+# aarch64 ipi_broadcast hosttest (M3 Task 7): compiles the PRODUCTION
+# kernel/arch/aarch64/intr/ipi.c (logical vector -> SGI mapping) plus the
+# production gic_driver.c against mock MMIO. The test TU supplies
+# gic_dev_current() (gic.c is too heavy for host) and a longjmp kpanic hook.
+AARCH64_IPI_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC)
+
+$(TEST_BLD)/aarch64_ipi_production.o: $(TESTS_DIR)/kernel/arch/aarch64/intr/ipi.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/ipi.h \
+		$(TESTS_DIR)/kernel/include/intr/ipi.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/dtb.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_IPI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_ipi_broadcast.o: $(TEST_CASES)/test_aarch64_ipi_broadcast.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/ipi.h \
+		$(TESTS_DIR)/kernel/include/intr/ipi.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_IPI_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_ipi_broadcast.elf: $(TEST_BLD)/test_aarch64_ipi_broadcast.o \
+		$(TEST_BLD)/aarch64_ipi_production.o $(TEST_BLD)/gic_driver_production.o
+	$(HOST_CC) -o $@ $^
+
+test_aarch64_ipi_broadcast: $(TEST_BLD)/test_aarch64_ipi_broadcast.elf
+	$<
+
+# aarch64 gic_target_bit_init hosttest (M3 Task 8): compiles the PRODUCTION
+# kernel/arch/aarch64/intr/ipi.c plus the production gic_driver.c against
+# mock MMIO. The test TU mocks dtb_cpu_count()/dtb_gicd_base() (dtb.c is too
+# heavy for host) and overrides the weak FATAL / out-of-range hooks.
+$(TEST_BLD)/test_aarch64_gic_target_probe.o: \
+		$(TEST_CASES)/test_aarch64_gic_target_probe.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/ipi.h \
+		$(TESTS_DIR)/kernel/include/intr/ipi.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/dtb.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_IPI_HOST_CFLAGS) \
+		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_gic_target_probe.elf: \
+		$(TEST_BLD)/test_aarch64_gic_target_probe.o \
+		$(TEST_BLD)/aarch64_ipi_production.o $(TEST_BLD)/gic_driver_production.o
+	$(HOST_CC) -o $@ $^
+
+test_aarch64_gic_target_probe: $(TEST_BLD)/test_aarch64_gic_target_probe.elf
+	$<
+
+# ap_work protocol hosttest (M3 Task 10): compiles the PRODUCTION
+# kernel/arch/aarch64/smp/ap_work.c against the host. The preinclude
+# mock/ap_work_test_runtime.h short-circuits <arch/cpu.h> and
+# <arch/aarch64/boot_log.h>; the test TU supplies kputs/kputu (captured
+# into a buffer for the WORK-TIMEOUT FATAL line) and test-controlled
+# arch_cycle_counter/arch_cpu_halt (longjmp hook proves the halt path).
+AP_WORK_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC)
+AP_WORK_PROD_CFLAGS := $(AP_WORK_HOST_CFLAGS) \
+                        -include $(TEST_MOCK)/ap_work_test_runtime.h
+
+$(TEST_BLD)/ap_work_production.o: $(TESTS_DIR)/kernel/arch/aarch64/smp/ap_work.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/ap_work.h \
+		$(TEST_MOCK)/ap_work_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AP_WORK_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_ap_work_protocol.o: $(TEST_CASES)/test_ap_work_protocol.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/ap_work.h \
+		$(TEST_MOCK)/ap_work_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AP_WORK_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_ap_work_protocol.elf: $(TEST_BLD)/test_ap_work_protocol.o \
+		$(TEST_BLD)/ap_work_production.o
+	$(HOST_CC) -o $@ $^
+
+test_ap_work_protocol: $(TEST_BLD)/test_ap_work_protocol.elf
+	$<
+
+# percpu_t layout pin hosttest (M3 Task 9): header-only TU that includes
+# the PRODUCTION kernel/include/percpu/percpu.h and repeats at runtime the
+# _Static_asserts that pin sizeof(percpu_t) == PERCPU_DATA_SIZE (the
+# literal head.S strides percpu_data[] with) and the ipi_ready/tlb_ack_gen
+# tail position that percpu_init()'s memset skips. No production objects —
+# the whole contract lives in the header's struct definition.
+# NOTE: deliberately NOT using $(FRAMEWORK_INC): its preinclude
+# mock/test_platform.h typedefs its own (stale, 144-byte-class) percpu_t,
+# which would shadow the real one this test exists to pin.
+$(TEST_BLD)/test_percpu_layout.o: $(TEST_CASES)/test_percpu_layout.c \
+		$(TESTS_DIR)/kernel/include/percpu/percpu.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_INC) $(KERNEL_INC) $(LIBC_INC) \
+		-c $< -o $@
+
+$(TEST_BLD)/test_percpu_layout.elf: $(TEST_BLD)/test_percpu_layout.o
+	$(HOST_CC) -o $@ $^
+
+test_percpu_layout: $(TEST_BLD)/test_percpu_layout.elf
+	$<
+
+# TLB shootdown serial-protocol hosttest (M2/M3 Task 12 Step 1): compiles
+# the PRODUCTION kernel/memory/tlb.c against the host.  The preinclude
+# mock/tlb_test_runtime.h short-circuits percpu/spinlock/mmu/cpu/ipi
+# headers; the test TU supplies percpu_data[], num_cpus, the
+# ipi_broadcast mock and overrides the weak tlb_shootdown_panic() hook
+# with a longjmp capture (timeout → FATAL case).
+TLB_SD_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC)
+TLB_SD_PROD_CFLAGS := $(TLB_SD_HOST_CFLAGS) \
+                      -include $(TEST_MOCK)/tlb_test_runtime.h
+
+$(TEST_BLD)/tlb_production.o: $(TESTS_DIR)/kernel/memory/tlb.c \
+		$(TEST_MOCK)/tlb_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(TLB_SD_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_tlb_serial_protocol.o: \
+		$(TEST_CASES)/test_tlb_serial_protocol.c \
+		$(TEST_MOCK)/tlb_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(TLB_SD_HOST_CFLAGS) -I$(TEST_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_tlb_serial_protocol.elf: \
+		$(TEST_BLD)/test_tlb_serial_protocol.o \
+		$(TEST_BLD)/tlb_production.o
+	$(HOST_CC) -o $@ $^
+
+test_tlb_serial_protocol: $(TEST_BLD)/test_tlb_serial_protocol.elf
+	$<
+
+# x86 ipi_ready publish-point hosttest (M2/M3 Task 12 Step 4): pure
+# source-level scan (QEMU x86_64 regression is currently blocked by the
+# known infra stall, so the publish invariants are asserted against the
+# production source text — mirrors test_gic_marker_lines.c).
+X86_PUBLISH_CFLAGS := $(HOST_CFLAGS) -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+                      -I$(TEST_INC) -include $(TEST_MOCK)/test_platform.h
+
+$(TEST_BLD)/test_x86_ipi_ready_publish.o: \
+		$(TEST_CASES)/test_x86_ipi_ready_publish.c \
+		$(TESTS_DIR)/kernel/arch/x86_64/smp/boot.c \
+		$(TESTS_DIR)/kernel/arch/x86_64/smp/smp.c \
+		$(TESTS_DIR)/kernel/arch/x86_64/intr/apic/ipi.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(X86_PUBLISH_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_x86_ipi_ready_publish.elf: \
+		$(TEST_BLD)/test_x86_ipi_ready_publish.o
+	$(HOST_CC) -o $@ $^
+
+test_x86_ipi_ready_publish: $(TEST_BLD)/test_x86_ipi_ready_publish.elf
+	$<
+
+# M3.1 audit gate (Task 13): source-scan half. Static assertion that no
+# audited function both holds a lock and calls a vmm-change API, plus
+# whitelist checks (tlb.c single non-nested lock, ipi.c lock-free,
+# kernel/Makefile aarch64 source list). The nm half lives in
+# mk/components/run.mk (test-aarch64-audit) — hosttests never exec.
+VMM_AUDIT_CFLAGS := $(HOST_CFLAGS) -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+                    -I$(TEST_INC) -include $(TEST_MOCK)/test_platform.h
+
+$(TEST_BLD)/test_vmm_caller_audit.o: \
+		$(TEST_CASES)/test_vmm_caller_audit.c \
+		$(TESTS_DIR)/kernel/memory/slab.c \
+		$(TESTS_DIR)/kernel/memory/vmm.c \
+		$(TESTS_DIR)/kernel/memory/tlb.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/early_arena.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/page_table.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/intr/ipi.c \
+		$(TESTS_DIR)/kernel/Makefile
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VMM_AUDIT_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_vmm_caller_audit.elf: \
+		$(TEST_BLD)/test_vmm_caller_audit.o
+	$(HOST_CC) -o $@ $^
+
+test_vmm_caller_audit: $(TEST_BLD)/test_vmm_caller_audit.elf
+	$<
+
+# Public-vmm-header contract hosttest (M3.2 Task 14 Step 1): header-only
+# TU pinning the semantic layer (VM_* + arch_vmm_* protos in
+# memory/vmm.h) and the x86-private PTE layer (arch/x86_64/pte.h).
+$(TEST_BLD)/test_vmm_semantic_header.o: \
+		$(TEST_CASES)/test_vmm_semantic_header.c \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/pte.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_INC) $(KERNEL_INC) \
+		-c $< -o $@
+
+$(TEST_BLD)/test_vmm_semantic_header.elf: $(TEST_BLD)/test_vmm_semantic_header.o
+	$(HOST_CC) -o $@ $^
+
+test_vmm_semantic_header: $(TEST_BLD)/test_vmm_semantic_header.elf
+	$<
+
+# aarch64 M3.2 Task 15: x86 vmm.c backend wrapper + free/COW logic
+# preservation.  Links the REAL kernel/memory/vmm.c against the
+# x86_vmm_backend harness (flat pre-filled PTE chain,
+# counter-backed page_cow_put / free_4k_page mocks).  Asserts the
+# new x86_vmm_map_4k_page / x86_vmm_unmap_4k_page_with_free /
+# x86_vmm_query_4k_page API and the single-free-per-branch COW
+# invariant.  --wrap=calloc is unused by the unmap path (the chain
+# is pre-filled) but kept so vmm.c's calloc reference resolves at
+# link time.
+$(TEST_BLD)/x86_vmm_backend_production.o: $(TESTS_DIR)/kernel/memory/vmm.c \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/pte.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(M1_CONTRACT_HOST_CFLAGS) $(LIBC_INC) \
+		-ffunction-sections -fdata-sections -c $< -o $@
+
+$(TEST_BLD)/test_x86_vmm_backend.o: $(TEST_CASES)/test_x86_vmm_backend.c \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/pte.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(M1_CONTRACT_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
+		-c $< -o $@
+
+$(TEST_BLD)/test_x86_vmm_backend.elf: \
+		$(TEST_BLD)/test_x86_vmm_backend.o \
+		$(TEST_BLD)/x86_vmm_backend_production.o
+	$(HOST_CC) -Wl,--gc-sections -Wl,--wrap=calloc -o $@ $^
+
+# aarch64 M3.3 Task 16: page_table.c software-bit + block-encoding
+# RED test. Compiles the REAL kernel/arch/aarch64/memory/page_table.c
+# against host mocks. page_table.c contains aarch64 inline asm
+# (tlbi vae1, dsb ish, isb) inside tlb_invalidate_local / dsb_ishst;
+# the production file guards those asm blocks with #ifdef __aarch64__
+# so it compiles cleanly on the x86 host. is_active_root() returns
+# false on host (mock aarch64_read_ttbr1() returns 0 and real CR3
+# never matches the test root pointer), so the guarded TLBI path
+# is never reached in the host harness.
+#
+# The arch_get_page_table() in <arch/mmu.h> is #elif-guarded for
+# __aarch64__ vs __x86_64__; on host it takes the x86 branch (mov
+# CR3) and returns the host CR3 — guaranteed not to match our test
+# root.
+#
+# vmm_gate_check() is stubbed in the test TU (page_table.c only
+# references it as a symbol; the production vmm_gate.c is not
+# linked here so we don't need percpu_data[] or dtb_cpu_count()).
+AARCH64_PT_SW_HOST_CFLAGS := $(HOST_CFLAGS) -I$(TEST_MOCK)/m1_a64_include \
+                              $(KERNEL_INC) $(LIBC_INC)
+
+$(TEST_BLD)/aarch64_pt_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/page_table.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_gate.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/boot_direct_map.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/arch/mmu.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_pt_software_bits.o: \
+		$(TEST_CASES)/test_aarch64_pt_software_bits.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_pt_software_bits.elf: \
+		$(TEST_BLD)/test_aarch64_pt_software_bits.o \
+		$(TEST_BLD)/aarch64_pt_production.o
+	$(HOST_CC) -o $@ $^
+
+test_aarch64_pt_software_bits: $(TEST_BLD)/test_aarch64_pt_software_bits.elf
+	$<
+
+# aarch64 M3.3 Task 17: pt_locks static initializers + walk_to_l2(create)
+# with ENOMEM rollback + source-scan lock-order check.  Compiles the
+# REAL kernel/arch/aarch64/memory/page_table.c against the same host
+# mocks as test_aarch64_pt_software_bits.c (vmm_gate_check stub,
+# arch_get_page_table returns NULL so is_active_root never fires,
+# alloc/free mocked with a heap-backed pool + a fail-count injection
+# for the ENOMEM rollback case).
+$(TEST_BLD)/test_aarch64_pt_locks.o: $(TEST_CASES)/test_aarch64_pt_locks.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/arch/spinlock.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) \
+		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_pt_locks.elf: \
+		$(TEST_BLD)/test_aarch64_pt_locks.o \
+		$(TEST_BLD)/aarch64_pt_production.o
+	$(HOST_CC) -o $@ $^
+
+test_aarch64_pt_locks: $(TEST_BLD)/test_aarch64_pt_locks.elf
+	$<
+
+# aarch64 M3.3 Task 18: 2 MiB block primitive contract (spec §5.2 /
+# §4.4.5). Compiles the REAL kernel/arch/aarch64/memory/page_table.c
+# against the same host harness as test_aarch64_pt_locks.c
+# (aarch64_read_ttbr1 returns 0, vmm_gate_check is a no-op, is_active_root
+# always false so the guarded TLBI path is unreachable, alloc/free
+# backed by a host-heap pool with a fail-counter for ENOMEM injection).
+# The new aarch64_pt_map_2m_block / aarch64_pt_unmap_2m_block /
+# aarch64_pt_read_l2_desc / aarch64_pt_split_block_2m primitives are
+# exercised directly (no vmm_backend.c link — this test pins the
+# primitive contract; the backend layer is covered separately by
+# test_aarch64_backend_4k.elf).
+$(TEST_BLD)/test_aarch64_pt_2m_block.o: $(TEST_CASES)/test_aarch64_pt_2m_block.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/arch/spinlock.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) \
+		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_pt_2m_block.elf: \
+		$(TEST_BLD)/test_aarch64_pt_2m_block.o \
+		$(TEST_BLD)/aarch64_pt_production.o
+	$(HOST_CC) -o $@ $^
+
+test_aarch64_pt_2m_block: $(TEST_BLD)/test_aarch64_pt_2m_block.elf
+	$<
+
+# aarch64 M3.3 Task 18: arch_vmm_* backend 12-legal + 4-reject combo
+# matrix (spec §4.2 / §4.4.4). Links the REAL page_table.c AND the
+# REAL vmm_backend.c against the host harness. kernel_map is set
+# directly by the test TU (it lives in vmm_backend.c as a global;
+# same shape test_x86_vmm_backend.c uses for its pinned pgdir).
+#
+# The test override for vmm_gate_violation (weak default in
+# vmm_gate.c spins forever) just bumps a counter — the host TU's
+# vmm_gate_check stub never invokes it on the happy paths, but
+# strays would surface as a counter increment rather than a hang.
+$(TEST_BLD)/vmm_backend_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/vmm_backend.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_gate.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/boot_direct_map.h \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/arch/mmu.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_backend_4k.o: $(TEST_CASES)/test_aarch64_backend_4k.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) \
+		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_backend_4k.elf: \
+		$(TEST_BLD)/test_aarch64_backend_4k.o \
+		$(TEST_BLD)/aarch64_pt_production.o \
+		$(TEST_BLD)/vmm_backend_production.o
+	$(HOST_CC) -o $@ $^
+
+test_aarch64_backend_4k: $(TEST_BLD)/test_aarch64_backend_4k.elf
+	$<
+
+# aarch64 M3.3 Task 19: 4-class replace protocol matrix (spec §4.4.3)
+# with descriptor-level state assertions. Reuses the AARCH64_PT_SW
+# harness and adds a backend layer test (arch_vmm_update_4k routing)
+# + the memtype-flip (AttrIndx Normal↔Device) class that Task 16
+# deferred. The brief requires linking REAL page_table.c +
+# vmm_backend.c; the production objects are already built under
+# $(TEST_BLD) by the rules above and re-used here.
+$(TEST_BLD)/test_vmm_replace_protocol.o: $(TEST_CASES)/test_vmm_replace_protocol.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) \
+		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_vmm_replace_protocol.elf: \
+		$(TEST_BLD)/test_vmm_replace_protocol.o \
+		$(TEST_BLD)/aarch64_pt_production.o \
+		$(TEST_BLD)/vmm_backend_production.o
+	$(HOST_CC) -o $@ $^
+
+test_vmm_replace_protocol: $(TEST_BLD)/test_vmm_replace_protocol.elf
+	$<
+
+# aarch64 M3.3 Task 19: PROT_NONE three-state contract via the
+# *backend* layer (spec §4.3 / §4.4.4). The primitive layer is
+# already pinned by test_aarch64_pt_software_bits.c; this file
+# pins the same contract through arch_vmm_query_4k /
+# arch_vmm_unmap_4k / arch_vmm_update_4k so vmm_backend.c
+# regressions in vm_to_sw / perm_to_vm surface independently.
+# Same harness as test_vmm_replace_protocol.c (links the SAME
+# production objects).
+$(TEST_BLD)/test_vmm_prot_none.o: $(TEST_CASES)/test_vmm_prot_none.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) \
+		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_vmm_prot_none.elf: \
+		$(TEST_BLD)/test_vmm_prot_none.o \
+		$(TEST_BLD)/aarch64_pt_production.o \
+		$(TEST_BLD)/vmm_backend_production.o
+	$(HOST_CC) -o $@ $^
+
+test_vmm_prot_none: $(TEST_BLD)/test_vmm_prot_none.elf
+	$<
+
+# aarch64 M3.3 Task 19: ack generation algebraic wraparound contract
+# (spec §6.4 step 4 / §8.2). Phase A (gen=UINT32_MAX → 0, handler
+# fires → OK) is partially covered by test_tlb_serial_protocol.c
+# case_wraparound; this file pins BOTH phases on a fresh test root
+# so the wraparound guarantee is self-contained. Phase B (handler
+# stuck → FATAL) is the load-bearing half — a `<`-wait regression
+# would let Phase A and the generic timeout case pass while
+# silently mis-handling a real SMP shootdown against a CPU whose
+# gen is at UINT32_MAX. Uses the same harness as
+# test_tlb_serial_protocol.c (preinclude mock/tlb_test_runtime.h,
+# longjmp ping_test_override).
+$(TEST_BLD)/test_vmm_ack_wraparound.o: \
+		$(TEST_CASES)/test_vmm_ack_wraparound.c \
+		$(TEST_MOCK)/tlb_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(TLB_SD_HOST_CFLAGS) -I$(TEST_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_vmm_ack_wraparound.elf: \
+		$(TEST_BLD)/test_vmm_ack_wraparound.o \
+		$(TEST_BLD)/tlb_production.o
+	$(HOST_CC) -o $@ $^
+
+test_vmm_ack_wraparound: $(TEST_BLD)/test_vmm_ack_wraparound.elf
+	$<
+
+# Foundational-primitives hosttest (M3 Task 7 Step 4): compiles the
+# PRODUCTION kernel/arch/aarch64/memory/vmm_gate.c (root registry,
+# smp_starting, ipi_ready_count, vmm gate). The preinclude
+# vmm_gate_test_runtime.h short-circuits percpu/spinlock; the test TU
+# supplies percpu_data[], a mock dtb_cpu_count() and overrides the weak
+# vmm_gate_violation() hook with a longjmp capture.
+VMM_GATE_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC)
+# Production TU only: preinclude the stub BEFORE any kernel header.
+VMM_GATE_PROD_CFLAGS := $(VMM_GATE_HOST_CFLAGS) \
+                        -include $(TEST_MOCK)/vmm_gate_test_runtime.h
+
+$(TEST_BLD)/vmm_gate_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/vmm_gate.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_gate.h \
+		$(TEST_MOCK)/vmm_gate_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VMM_GATE_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_foundational_primitives.o: $(TEST_CASES)/test_foundational_primitives.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_gate.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/dtb.h \
+		$(TEST_MOCK)/vmm_gate_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VMM_GATE_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_foundational_primitives.elf: $(TEST_BLD)/test_foundational_primitives.o \
+		$(TEST_BLD)/vmm_gate_production.o
+	$(HOST_CC) -o $@ $^
+
+# Link stubs for tests that pull production files calling into vmm_gate.c
+# (test_m1_install compiles boot_direct_map.c, which publishes the M1 root).
+$(TEST_BLD)/vmm_gate_test_stubs.o: $(TEST_MOCK)/vmm_gate_test_stubs.c \
+		$(TEST_MOCK)/vmm_gate_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VMM_GATE_HOST_CFLAGS) -I$(TEST_MOCK) -c $< -o $@
+
+test_foundational_primitives: $(TEST_BLD)/test_foundational_primitives.elf
+	$<
+
+# M3.5 Task 23: smp_starting gate + ipi_ready_publish_and_count integration
+# (BSP + AP both publish through the SAME one-shot function). Links the
+# REAL kernel/arch/aarch64/memory/vmm_gate.c (smp_starting, ipi_ready_count,
+# vmm_gate_check) and source-scans kernel/arch/aarch64/memory/{page_table,
+# vmm_backend}.c to confirm every public aarch64_pt_*/arch_vmm_* entry has
+# vmm_gate_check() as the first meaningful statement (or is a documented
+# exception: init, encoder, or _ext delegator wrapper). The atomic per-
+# primitive semantics are pinned by test_foundational_primitives.c (21/21);
+# the BSP/AP publish order is pinned by test_double_state_publish.c — this
+# file extends both into the BSP+AP end-to-end flow and pins the gate-first
+# contract on the VMM surface.
+$(TEST_BLD)/test_smp_starting_gate.o: $(TEST_CASES)/test_smp_starting_gate.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_gate.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/dtb.h \
+		$(TEST_MOCK)/vmm_gate_test_runtime.h \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/page_table.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/vmm_backend.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VMM_GATE_HOST_CFLAGS) -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_smp_starting_gate.elf: $(TEST_BLD)/test_smp_starting_gate.o \
+		$(TEST_BLD)/vmm_gate_production.o
+	$(HOST_CC) -o $@ $^
+
+test_smp_starting_gate: $(TEST_BLD)/test_smp_starting_gate.elf
+	$<
+
+# M3.5 Task 24: arch_vmm_init production entry contract. Links the REAL
+# page_table.c + REAL vmm_backend.c against a configurable
+# aarch64_read_ttbr1 mock (g_mock_ttbr1). The test asserts the 5
+# documented paths: valid → rc 0 + kernel_map pinned; pa=0 (raw or
+# post-mask), unaligned, at-1TiB, above-1TiB → rc -EINVAL + kernel_map
+# untouched. Reuses the AARCH64_PT_SW harness
+# (m1_a64_include/arch/mmu.h,spinlock.h stubs).
+$(TEST_BLD)/test_aarch64_arch_vmm_init.o: \
+		$(TEST_CASES)/test_aarch64_arch_vmm_init.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) \
+		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_arch_vmm_init.elf: \
+		$(TEST_BLD)/test_aarch64_arch_vmm_init.o \
+		$(TEST_BLD)/aarch64_pt_production.o \
+		$(TEST_BLD)/vmm_backend_production.o
+	$(HOST_CC) -o $@ $^
+
+test_aarch64_arch_vmm_init: $(TEST_BLD)/test_aarch64_arch_vmm_init.elf
+	$<
+
+# M3.5 Task 25: M3-SHOOTDOWN-PROBE 7-step body harness (spec §7.3).
+# The probe body lives as static inline in
+# kernel/arch/aarch64/boot/m3_probe.h — one source of truth shared
+# between the production TU (kernel/arch/aarch64/boot/m3_probe.c,
+# which only provides the ops binding + the public entry point) and
+# this hosttest TU. We do NOT link the production .c (it pulls in
+# arch_vmm_*, percpu_data[], tlb_shootdown, etc. that the host has no
+# surface of). The test compiles the same body via #include <arch/
+# aarch64/boot/m3_probe.h>; we still need arch/mmu.h for the static
+# header's ARCH_PAGE_OFFSET use.
+M3_PROBE_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) \
+                        -I$(TEST_MOCK)/m1_a64_include \
+                        -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\"
+
+$(TEST_BLD)/test_aarch64_scratch_probe_logic.o: \
+		$(TEST_CASES)/test_aarch64_scratch_probe_logic.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/boot/m3_probe.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(M3_PROBE_HOST_CFLAGS) -I$(TEST_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_scratch_probe_logic.elf: \
+		$(TEST_BLD)/test_aarch64_scratch_probe_logic.o
+	$(HOST_CC) -o $@ $^
+
+test_aarch64_scratch_probe_logic: $(TEST_BLD)/test_aarch64_scratch_probe_logic.elf
+	$<
+
 # GICv2 marker lines: source-level RED check (Task 2.1). QEMU aarch64-uefi
 # is currently blocked by thirdpart/{posix-uefi,mbedtls,lwip} submodule
 # emptiness; the marker lines that the kernel would emit are checked at
@@ -1065,6 +1803,23 @@ $(TEST_BLD)/test_gic_marker_lines.elf: $(TEST_BLD)/test_gic_marker_lines.o
 	$(HOST_CC) -o $@ $<
 
 test_gic_marker_lines: $(TEST_BLD)/test_gic_marker_lines.elf
+	$<
+
+# M3 Task 11: BSP double-state publish ordering (percpu_init / num_cpus /
+# smp_starting_enter before smp_boot_aps; ipi_ready published only after
+# IRQ unmask). Same source-scan pattern as test_gic_marker_lines: reads
+# main.c / smp.c at runtime via OS01_KERNEL_SRC and asserts order by
+# first-occurrence index.
+$(TEST_BLD)/test_double_state_publish.o: $(TEST_CASES)/test_double_state_publish.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/boot/main.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/smp/smp.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GIC_MARKER_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_double_state_publish.elf: $(TEST_BLD)/test_double_state_publish.o
+	$(HOST_CC) -o $@ $<
+
+test_double_state_publish: $(TEST_BLD)/test_double_state_publish.elf
 	$<
 
 # GIC clobber-probe encoding contract — host-side RED for the QEMU TIMEOUT bug.
@@ -1425,12 +2180,66 @@ $(TEST_BLD)/m1_install_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/boo
 $(TEST_BLD)/test_m1_install.o: $(TEST_CASES)/test_m1_install.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(M1_A64_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
-$(TEST_BLD)/test_m1_install.elf: $(TEST_BLD)/test_m1_install.o $(TEST_BLD)/m1_install_production.o $(TEST_BLD)/runtime_tree_production.o
+$(TEST_BLD)/test_m1_install.elf: $(TEST_BLD)/test_m1_install.o $(TEST_BLD)/m1_install_production.o $(TEST_BLD)/runtime_tree_production.o $(TEST_BLD)/vmm_gate_production.o $(TEST_BLD)/vmm_gate_test_stubs.o
 	$(HOST_CC) -o $@ $^
 .PHONY: test-m1-install
 test-m1-install: $(TEST_BLD)/test_m1_install.elf
 	$(TEST_BLD)/test_m1_install.elf
 	$(TEST_BLD)/test_m1_cleanup.elf
+
+# aarch64 M3.4 Task 20: root publish registry split-protocol contract.
+# Reuses the M1_A64_CFLAGS / m1_install_production.o (REAL
+# boot_direct_map.c) + runtime_tree_production.o + vmm_gate_production.o
+# + vmm_gate_test_stubs.o link line so the runtime tests drive the
+# actual install path and observe the registry state (post-init
+# is_published for the M1 root; NOT-published for a scratch root).
+# Source-scan tests (read boot_direct_map.c via OS01_KERNEL_SRC) pin
+# the publish-before-install order and the publish-failure → goto fail
+# (no install_ttbr1 in the failure branch) contract. Cases 1–3
+# (registry semantics: idempotent / overflow / zero-PA) are pinned by
+# test_foundational_primitives.c (21/21) and NOT duplicated here.
+$(TEST_BLD)/test_aarch64_pt_root_publish.o: $(TEST_CASES)/test_aarch64_pt_root_publish.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/boot_direct_map.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(M1_A64_CFLAGS) -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_pt_root_publish.elf: $(TEST_BLD)/test_aarch64_pt_root_publish.o \
+		$(TEST_BLD)/m1_install_production.o \
+		$(TEST_BLD)/runtime_tree_production.o \
+		$(TEST_BLD)/vmm_gate_production.o \
+		$(TEST_BLD)/vmm_gate_test_stubs.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-aarch64-pt-root-publish
+test-aarch64-pt-root-publish: $(TEST_BLD)/test_aarch64_pt_root_publish.elf
+	$(TEST_BLD)/test_aarch64_pt_root_publish.elf
+
+# aarch64 M3.4 Task 21: split_block_2m protocol (spec §5.3).
+# Reuses the same link line as test_aarch64_pt_root_publish — REAL
+# page_table.c (split primitive) + REAL vmm_gate.c (root publish
+# registry, so the published-root test can drive the real is_published
+# check). The mock surface is the same AARCH64_PT_SW host harness
+# (aarch64_read_ttbr1=0 / vmm_gate_check no-op / mock PMM pool).
+$(TEST_BLD)/test_aarch64_pt_split.o: $(TEST_CASES)/test_aarch64_pt_split.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_gate.h \
+		$(TESTS_DIR)/kernel/include/arch/spinlock.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) \
+		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_pt_split.elf: $(TEST_BLD)/test_aarch64_pt_split.o \
+		$(TEST_BLD)/aarch64_pt_production.o \
+		$(TEST_BLD)/vmm_gate_production.o \
+		$(TEST_BLD)/vmm_gate_test_stubs.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-aarch64-pt-split
+test-aarch64-pt-split: $(TEST_BLD)/test_aarch64_pt_split.elf
+	$(TEST_BLD)/test_aarch64_pt_split.elf
 
 $(TEST_BLD)/m1_smoke_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/m1_smoke.c
 	@mkdir -p $(TEST_BLD)
@@ -1464,8 +2273,74 @@ $(TEST_BLD)/test_m1_runner.elf: $(TEST_CASES)/test_m1_runner.c $(TEST_INC)/m1_te
 $(TEST_BLD)/early_arena_exhaust_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/early_arena.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) -DAARCH64_M1_ARENA_EXHAUST=1 -c $< -o $@
-$(TEST_BLD)/test_m1_arena_exhaust.o: $(TEST_CASES)/test_m1_arena_exhaust.c $(TEST_INC)/m1_test_runner.h
+$(TEST_BLD)/test_m1_arena_exhaust.o: $(TEST_CASES)/test_m1_arena_exhaust.c \
+		$(TEST_INC)/m1_test_runner.h \
+		$(TESTS_DIR)/kernel/include/memory/slab.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 $(TEST_BLD)/test_m1_arena_exhaust.elf: $(TEST_BLD)/test_m1_arena_exhaust.o $(TEST_BLD)/early_arena_exhaust_production.o $(TEST_BLD)/pmm_boot_production.o
+	$(HOST_CC) -o $@ $^
+
+# aarch64 M2/M3 plan Task 2: slab_init j-loop + 8-page loop
+# idempotence vs boot reservations. Links the REAL
+# kernel/memory/slab.c + pmm.c so the assertion observes the actual
+# ++/-- on each touched frame. Production <arch/spinlock.h> and
+# <arch/irq.h> carry privileged inline asm (lock decq / pushfq cli /
+# mrs daif), so both are routed through host shadows under
+# SLAB_SHADOW_INC; production <percpu/percpu.h> pulls in
+# <sched/task.h> + <arch/percpu.h> (both unreachable on host),
+# shadowed to a minimal surface. slab.c also pulls in
+# <memory/memory.h> / <core/printk.h> / <core/debug.h> / <kernel.h>
+# / <string.h> — all delivered by KERNEL_INC + LIBC_INC.
+SLAB_SHADOW_INC := -I$(TEST_MOCK)/slab_include
+
+$(TEST_BLD)/slab_production.o: $(TESTS_DIR)/kernel/memory/slab.c \
+		$(TESTS_DIR)/kernel/include/memory/slab.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TEST_MOCK)/slab_include/arch/spinlock.h \
+		$(TEST_MOCK)/slab_include/arch/irq.h \
+		$(TEST_MOCK)/slab_include/percpu/percpu.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(SLAB_SHADOW_INC) $(KERNEL_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_slab_idempotent_reservation.o: $(TEST_CASES)/test_slab_idempotent_reservation.c \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/slab.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(SLAB_SHADOW_INC) $(KERNEL_INC) \
+		-I$(TEST_INC) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/slab_color_stub.o: $(TEST_MOCK)/slab_color_stub.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_slab_idempotent_reservation.elf: $(TEST_BLD)/test_slab_idempotent_reservation.o \
+		$(TEST_BLD)/slab_production.o \
+		$(TEST_BLD)/slab_color_stub.o \
+		$(TEST_BLD)/pmm_production.o \
+		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_boot_production.o \
+		$(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+# Task 2 Step 3 — x86 baseline regression for slab_init frame arithmetic.
+# Compiles the REAL kernel/memory/slab.c (same shadow machinery as
+# test_slab_idempotent_reservation; shared slab_color_stub.o for the
+# color_printk symbol the slab.c error paths reference). Single-test
+# suite so the brief's "assert increment = 8 + j-loop hits" lands
+# literally without competing fixtures.
+$(TEST_BLD)/test_slab_basic_x86_count.o: $(TEST_CASES)/test_slab_basic_x86_count.c \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/slab.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(SLAB_SHADOW_INC) $(KERNEL_INC) \
+		-I$(TEST_INC) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_slab_basic_x86_count.elf: $(TEST_BLD)/test_slab_basic_x86_count.o \
+		$(TEST_BLD)/slab_production.o \
+		$(TEST_BLD)/slab_color_stub.o \
+		$(TEST_BLD)/pmm_production.o \
+		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_boot_production.o \
+		$(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^

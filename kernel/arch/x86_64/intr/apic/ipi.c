@@ -22,12 +22,16 @@ static void ipi_tlb_handler(uint64_t nr __attribute__((unused)),
                             pt_regs_t *regs __attribute__((unused)))
 {
     percpu_t *cpu = this_cpu();
-    if (cpu->tlb_wanted) {
-        flush_tlb();
-        __sync_synchronize();
-        cpu->tlb_ack++;
-        cpu->tlb_wanted = 0;
-    }
+    /* M3 Task 12: the legacy shootdown flag protocol was replaced by
+     * the serialized generation protocol (kernel/memory/tlb.c): the
+     * handler unconditionally invalidates and bumps this CPU's
+     * generation counter (release) so the initiator's equality wait on
+     * tlb_ack_gen observes completion.  lapic_eoi() stays here —
+     * generic_intr_dispatch (kernel/intr/dispatch.c) invokes the handler
+     * only and never EOIs itself. */
+    flush_tlb();
+    __sync_synchronize();
+    __atomic_fetch_add(&cpu->tlb_ack_gen, 1, __ATOMIC_RELEASE);
     lapic_eoi();
 }
 
@@ -67,14 +71,13 @@ void ipi_send(uint32_t dest_apic_id, uint8_t vector)
     lapic_write(LAPIC_ICR_LOW, (uint32_t)vector | ICR_DEST_PHYSICAL);
 }
 
-void ipi_broadcast(uint8_t vector, int exclude_self)
+void ipi_broadcast(uint32_t vector, uint64_t target_mask)
 {
-    uint32_t me = cpu_id();
     for (uint32_t i = 0; i < num_cpus; i++) {
+        if (!(target_mask & (1UL << i)))
+            continue;
         if (!percpu_data[i].online)
             continue;
-        if (exclude_self && i == me)
-            continue;
-        ipi_send(percpu_data[i].arch_processor_id, vector);
+        ipi_send(percpu_data[i].arch_processor_id, (uint8_t)vector);
     }
 }

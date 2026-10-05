@@ -26,11 +26,14 @@ void gic_cpu_init(void)                                /* 每核各跑一次（b
 {
     gic_dev_cpu_enable(&g_gic);
     /* banked SGI/PPI 白名单：SGI 0（IPI 主载荷）+ SGI 1（R1-9 回发确认）
-     * + SGI 2（clobber 探针, R2-4）+ CNTP PPI（dtb）。
+     * + SGI 2（clobber 探针, R2-4）+ SGI 3（IPI_VECTOR_TLB shootdown，
+     * M3 Task 10：handler 已在 gic_init 注册，per-CPU enable 就绪）
+     * + CNTP PPI（dtb）。
      * R5: 白名单外的 banked enable 位保持复位 0。 */
     (void)gic_irq_config(&g_gic, 0, true, 0x00, 0x00);
     (void)gic_irq_config(&g_gic, 1, true, 0x00, 0x00);
     (void)gic_irq_config(&g_gic, 2, true, 0x00, 0x00);
+    (void)gic_irq_config(&g_gic, 3, true, 0x00, 0x00);
     uint32_t cntp = dtb_cntp_ppi();
     (void)gic_irq_config(&g_gic, cntp, true, 0x00, 0x00);
     __asm__ __volatile__("dsb sy\n\tisb" ::: "memory");   /* 屏障在 wrapper (hw 层零依赖) */
@@ -47,6 +50,13 @@ void gic_init(void)
     gic_driver_set_cpu_index(k_cpu_index);            /* R2-6: per-CPU IAR trace */
     gic_dev_dist_enable(&g_gic);
     gic_cpu_init();
+    /* M3 (Task 10): SGI 3 = TLB shootdown handler. Handler 表是全局的，
+     * BSP 注册一次即覆盖所有 CPU（AP 只跑 gic_cpu_init 的 banked enable）。 */
+    if (gic_register_handler(3, aarch64_tlb_sgi_handler, 0,
+                             "tlb-shootdown") != 0) {
+        log_err("[gic] FATAL: register SGI 3 (tlb-shootdown)\n");
+        for (;;) __asm__ __volatile__("wfi" ::: "memory");
+    }
     /* R2-3: intids marker 独占一行（harness 的 --expect-gic 全行 regex
      * 要求 `^\[gic\] GICv2 driver: intids=\d+$`），CPU interface 另起一行。 */
     kputs("[gic] GICv2 driver: intids=");

@@ -37,6 +37,7 @@
 #include <memory/uaccess.h>
 #include <memory/memory.h>
 #include <memory/vmm.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
 #include <memory/pmm.h>
 #include <memory/slab.h>   // kfree
 #include <sched/task.h>

@@ -4,13 +4,14 @@
 // read for metadata query, write for raw data (with surrender support),
 // and ioctl for framebuffer surrender to userspace.
 //
-// VM_IO guards in fork_mm_copy, do_page_fault, and vma_free_all protect
+// VMA_IO guards in fork_mm_copy, do_page_fault, and vma_free_all protect
 // the MMIO pages from COW, demand paging, and premature freeing.
 
 #include <driver/fb.h>
 #include <core/printk.h>      // Pos, frame_buffer
-#include <memory/vma.h>         // vma_t, VM_IO, VM_SHARED
-#include <memory/vmm.h>         // vmm_map_4k_page, flush_tlb, PAGE_4K_SIZE
+#include <memory/vma.h>         // vma_t, VMA_IO, VMA_SHARED
+#include <memory/vmm.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)         // vmm_map_4k_page, flush_tlb, PAGE_4K_SIZE
 #include <sched/task.h>        // current
 #include <memory/pmm.h>         // Phy_To_Virt
 #include <memory/memory.h>      // PAGE_OFFSET, Virt_To_Phy, Phy_To_Virt
@@ -74,7 +75,7 @@ static int fb_write(struct vfs_node *node, uint64_t offset,
 // with uncacheable MMIO mappings.  Clears vma->vm_file to prevent
 // do_page_fault from attempting demand paging on MMIO pages.
 //
-// After this call, fork_mm_copy (VM_IO guard) will skip PTEs
+// After this call, fork_mm_copy (VMA_IO guard) will skip PTEs
 // for this VMA, preserving direct MMIO access across fork.
 static int fb_mmap(struct vfs_node *node, struct vma *vma_)
 {
@@ -82,7 +83,7 @@ static int fb_mmap(struct vfs_node *node, struct vma *vma_)
     vma_t *vma = (vma_t *)vma_;
 
     // Must be SHARED
-    if (!(vma->vm_flags & VM_SHARED))
+    if (!(vma->vm_flags & VMA_SHARED))
         return -EINVAL;
 
     // Must not exceed framebuffer size
@@ -110,7 +111,7 @@ static int fb_mmap(struct vfs_node *node, struct vma *vma_)
     flush_tlb();
 
     // Safety: clear vm_file to prevent do_page_fault from calling
-    // vfs_read on this VMA.  Fork will skip these PTEs (VM_IO guard),
+    // vfs_read on this VMA.  Fork will skip these PTEs (VMA_IO guard),
     // so page fault on an MMIO page should never happen.
     if (vma->vm_file) {
         vfs_node_put(vma->vm_file);

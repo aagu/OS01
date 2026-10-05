@@ -33,6 +33,34 @@ struct Slab_Cache
 
 extern struct Slab_Cache kmalloc_cache_size[16];
 
+/* slab_layout_compute() is a pure function: it reads kmalloc_cache_size[].size
+ * and reports the metadata byte total plus the 8 reserved 2 MiB pages.
+ * Per spec §3.2 the formula is:
+ *   meta = Σ_{i=0..15} [ sizeof(struct Slab) + 10*sizeof(long)
+ *                      + align8(PAGE_2M / size_i / 8) + 10*sizeof(long) ]
+ * Defined here as `static inline` — slab.c's spinlock/irq/printk/percpu
+ * deps are not pulled in by hosttests that only need this formula.
+ */
+struct slab_layout {
+    uint64_t meta_bytes;
+    uint64_t reserved_2m_pages;
+};
+
+static inline struct slab_layout slab_layout_compute(void) {
+    struct slab_layout l;
+    uint64_t meta = 0;
+    for (int i = 0; i < 16; i++) {
+        uint64_t entries = (uint64_t)PAGE_2M_SIZE / kmalloc_cache_size[i].size;
+        /* align8: (entries/8 + 7) / 8 * 8 */
+        uint64_t bm = ((entries / 8 + 7) / 8) * 8;
+        meta += sizeof(struct Slab) + 10 * sizeof(long)
+              + bm + 10 * sizeof(long);
+    }
+    l.meta_bytes = meta;
+    l.reserved_2m_pages = 8;
+    return l;
+}
+
 void * kmalloc(size_t size);
 void * kzalloc(size_t size);
 size_t ksize(void * address);

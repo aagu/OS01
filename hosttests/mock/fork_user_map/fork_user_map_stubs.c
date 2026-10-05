@@ -20,7 +20,8 @@
 #include <errno.h>
 #include <assert.h>
 
-#include <memory/vmm.h>   /* PAGE_VALID, PAGE_USER, PAGE_WRITE, PAGE_COW, PAGE_PROTNONE */
+#include <memory/vmm.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)   /* PAGE_VALID, PAGE_USER, PAGE_WRITE, PAGE_COW, PAGE_PROTNONE */
 
 /* posix_memalign (POSIX 1003.1-2001) — declared explicitly so we
  * can use posix_memalign without dragging in <stdlib.h>'s deps. */

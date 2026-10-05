@@ -228,6 +228,69 @@ def self_test() -> None:
     assert degraded_passed(current_degraded_log, expect_selftest=True), \
         "degraded_passed ignores expect_selftest"
 
+    # expect_slab (M2 Task 6): requires exactly one
+    # '[selftest] slab: 16/16 PASS' marker anywhere in the log.
+    slab_log = current_log_for_2_cpus + "[selftest] slab: 16/16 PASS\n"
+    assert passed(slab_log, cpus=2, expect_slab=True), \
+        "exactly-one slab 16/16 PASS marker must pass with expect_slab=True"
+    assert passed(current_log_for_2_cpus, cpus=2, expect_slab=True) is False, \
+        "missing slab 16/16 PASS marker must reject when expect_slab=True"
+    slab_dup = current_log_for_2_cpus + "[selftest] slab: 16/16 PASS\n" \
+        + "[selftest] slab: 16/16 PASS\n"
+    assert passed(slab_dup, cpus=2, expect_slab=True) is False, \
+        "duplicate slab 16/16 PASS marker must reject (exactly-one enforced)"
+    assert passed(current_log_for_2_cpus, cpus=2), \
+        "expect_slab default-off preserves legacy behavior"
+
+    # expect_m3_selftest (M3.4 Task 22): requires exactly one
+    # '[selftest] m3: N/N PASS' marker (parser captures the digit pair).
+    # The kernel prints "[selftest] m3: 4/4 PASS" for the 4-section
+    # M3 VMM coverage; the parser gates on the exact marker shape so
+    # a partial run (e.g. "2/4 PASS (failed=2)") cannot slip through.
+    m3_log = current_log_for_2_cpus + "[selftest] m3: 4/4 PASS\n"
+    assert passed(m3_log, cpus=2, expect_m3_selftest=True), \
+        "exactly-one m3 N/N PASS marker must pass with expect_m3_selftest=True"
+    assert passed(current_log_for_2_cpus, cpus=2, expect_m3_selftest=True) is False, \
+        "missing m3 PASS marker must reject when expect_m3_selftest=True"
+    m3_dup = current_log_for_2_cpus + "[selftest] m3: 4/4 PASS\n" \
+        + "[selftest] m3: 4/4 PASS\n"
+    assert passed(m3_dup, cpus=2, expect_m3_selftest=True) is False, \
+        "duplicate m3 PASS marker must reject (exactly-one enforced)"
+    # Partial run (failed > 0) must reject — the kernel prints a
+    # different shape ("4/4 PASS (failed=N)") when any section fails.
+    m3_partial = current_log_for_2_cpus + "[selftest] m3: 3/4 PASS (failed=1)\n"
+    assert passed(m3_partial, cpus=2, expect_m3_selftest=True) is False, \
+        "partial-run 'N/M PASS (failed=...)' must reject (full-marker contract)"
+    assert passed(current_log_for_2_cpus, cpus=2), \
+        "expect_m3_selftest default-off preserves legacy behavior"
+
+    # expect_m3mc_selftest (M3.6 Task 26): -smp 1 requires exactly one
+    # SKIP line; -smp >= 2 requires exactly one full N/N PASS marker.
+    mc_skip_log = single + "[selftest] m3mc: SKIP (single-CPU boot)\n"
+    assert passed(mc_skip_log, cpus=1, expect_m3mc_selftest=True), \
+        "exactly-one m3mc SKIP line must pass at cpus=1"
+    assert passed(single, cpus=1, expect_m3mc_selftest=True) is False, \
+        "missing m3mc SKIP line must reject at cpus=1"
+    mc_skip = current_log_for_2_cpus + "[selftest] m3mc: SKIP (single-CPU boot)\n"
+    assert passed(mc_skip, cpus=2, expect_m3mc_selftest=True) is False, \
+        "m3mc SKIP line must reject at cpus>=2"
+    mc_log = current_log_for_2_cpus + "[selftest] m3mc: 4/4 PASS\n"
+    assert passed(mc_log, cpus=2, expect_m3mc_selftest=True), \
+        "exactly-one m3mc N/N PASS marker must pass with expect_m3mc_selftest=True"
+    assert passed(current_log_for_2_cpus, cpus=2, expect_m3mc_selftest=True) is False, \
+        "missing m3mc marker must reject at cpus>=2"
+    mc_dup = mc_log + "[selftest] m3mc: 4/4 PASS\n"
+    assert passed(mc_dup, cpus=2, expect_m3mc_selftest=True) is False, \
+        "duplicate m3mc PASS marker must reject (exactly-one enforced)"
+    mc_partial = current_log_for_2_cpus + "[selftest] m3mc: 3/4 PASS\n"
+    assert passed(mc_partial, cpus=2, expect_m3mc_selftest=True) is False, \
+        "partial m3mc marker must reject when expect_m3mc_selftest=True"
+    mc_skip_then_pass = mc_skip + "[selftest] m3mc: 4/4 PASS\n"
+    assert passed(mc_skip_then_pass, cpus=2, expect_m3mc_selftest=True) is False, \
+        "SKIP + PASS combination must reject (single occurrence enforced)"
+    assert passed(current_log_for_2_cpus, cpus=2), \
+        "expect_m3mc_selftest default-off preserves legacy behavior"
+
     # --expect-gic 断言（Task 2.1 + 3.1）：只用合成 log 测 gic_evidence_ok 解析
     # 行为。不再组合 GIC+IPI marker 调 passed(), 因为 kernel 现状不发 IPI marker
     # (Task 3.2 GREEN 才会发); 组合调用恒失败。每条 assertion 单独构造独立合成
@@ -455,7 +518,10 @@ def gic_evidence_ok(text: str, cpus: int) -> bool:
 
 
 def passed(text: str, cpus: int, expect_selftest: bool = False,
-           expect_gic: bool = False, expect_clk: bool = False) -> bool:
+           expect_gic: bool = False, expect_clk: bool = False,
+           expect_slab: bool = False,
+           expect_m3_selftest: bool = False,
+           expect_m3mc_selftest: bool = False) -> bool:
     """Recognize a complete normal-mode SMP run without QEMU dependencies."""
     # PL011 currently emits LF+CR. Match lines consistently for saved logs
     # and live serial drains, while retaining the original fixture format.
@@ -522,6 +588,68 @@ def passed(text: str, cpus: int, expect_selftest: bool = False,
             print(f"FAIL: 'UEFI-A64: pt map smoke FAIL' present in log "
                   f"(text length {len(text)})")
             return False
+    if expect_slab:
+        # M2 Task 6: the built-in selftest suite must actually run on the
+        # aarch64 kernel and cover all 16 kmalloc caches — require the
+        # exact final marker printed by kernel/selftest/test_slab_selftest.c
+        # exactly once (it runs once per boot on the BSP).
+        slab_lines = re.findall(r"^\[selftest\] slab: 16/16 PASS$",
+                                text.replace("\r", ""), re.MULTILINE)
+        if len(slab_lines) != 1:
+            print(f"FAIL: expected exactly one '[selftest] slab: 16/16 PASS' "
+                  f"in the log, found {len(slab_lines)}")
+            return False
+    if expect_m3_selftest:
+        # M3.4 Task 22: the M3 VMM change primitive coverage on a
+        # kernel-internal SCRATCH root must pass — require exactly one
+        # '[selftest] m3: N/N PASS' marker (no '(failed=...)' suffix;
+        # the partial-run shape is rejected by the line-end anchor).
+        full_markers = re.findall(
+            r"^\[selftest\] m3: (\d+)/(\d+) PASS$",
+            text.replace("\r", ""), re.MULTILINE)
+        if len(full_markers) != 1:
+            print(f"FAIL: expected exactly one '[selftest] m3: N/N PASS' "
+                  f"in the log, found {len(full_markers)}")
+            return False
+        # And the single full marker must report N == N (no failures).
+        passed_count, total_count = full_markers[0]
+        if passed_count != total_count:
+            print(f"FAIL: m3 marker has passed != total: "
+                  f"{passed_count}/{total_count}")
+            return False
+    if expect_m3mc_selftest:
+        # M3.6 Task 26: the multi-core selftest must report. At -smp 1
+        # there is no AP, so exactly one SKIP line is required; at
+        # -smp >= 2 exactly one full '[selftest] m3mc: N/N PASS'
+        # marker with N == N (partial/failed shapes are rejected by
+        # the line-end anchor + the N == N check).
+        text = text.replace("\r", "")
+        skip_lines = re.findall(
+            r"^\[selftest\] m3mc: SKIP \(single-CPU boot\)$",
+            text, re.MULTILINE)
+        full_markers = re.findall(
+            r"^\[selftest\] m3mc: (\d+)/(\d+) PASS$",
+            text, re.MULTILINE)
+        if cpus < 2:
+            if len(skip_lines) != 1 or full_markers:
+                print(f"FAIL: -smp 1 must print exactly one m3mc SKIP "
+                      f"line and no PASS marker (found {len(skip_lines)} "
+                      f"SKIP, {len(full_markers)} PASS)")
+                return False
+        else:
+            if skip_lines:
+                print(f"FAIL: m3mc SKIP line must not appear at "
+                      f"-smp >= 2 (found {len(skip_lines)})")
+                return False
+            if len(full_markers) != 1:
+                print(f"FAIL: expected exactly one '[selftest] m3mc: "
+                      f"N/N PASS' marker, found {len(full_markers)}")
+                return False
+            passed_count, total_count = full_markers[0]
+            if passed_count != total_count or passed_count == "0":
+                print(f"FAIL: m3mc marker has passed != total or zero "
+                      f"sections: {passed_count}/{total_count}")
+                return False
     topology = re.search(r"^\[smp\] topology\b[^\n]*\brequested=(\d+)\b[^\n]*\bdiscovered=(\d+)\b", text, re.MULTILINE)
     if topology:
         if tuple(map(int, topology.groups())) != (cpus, cpus):
@@ -595,7 +723,10 @@ def acceptance_evidence(args: argparse.Namespace, text: str, cpus: int) -> bool:
             variant=getattr(args, "m1_variant", "normal"),
         )
     return passed(text, cpus, expect_selftest=expect_selftest,
-                  expect_gic=expect_gic, expect_clk=expect_clk)
+                  expect_gic=expect_gic, expect_clk=expect_clk,
+                  expect_slab=getattr(args, "expect_slab_selftest", False),
+                  expect_m3_selftest=getattr(args, "expect_m3_selftest", False),
+                  expect_m3mc_selftest=getattr(args, "expect_m3mc_selftest", False))
 
 
 def qemu_command(args: argparse.Namespace, cpus: int, diagnostic_dtb: str | None) -> list[str]:
@@ -768,6 +899,19 @@ def main() -> int:
     parser.add_argument("--expect-selftest", action="store_true",
                         help="Require 'UEFI-A64: pmm alloc smoke OK' log line "
                              "between RAM summary and topology line")
+    parser.add_argument("--expect-slab-selftest", action="store_true",
+                        help="Require exactly one '[selftest] slab: 16/16 "
+                             "PASS' marker from the built-in kernel selftest "
+                             "suite (M2 Task 6)")
+    parser.add_argument("--expect-m3-selftest", action="store_true",
+                        help="Require exactly one '[selftest] m3: N/N PASS' "
+                             "marker from the aarch64 M3 VMM coverage "
+                             "selftest (M3.4 Task 22)")
+    parser.add_argument("--expect-m3mc-selftest", action="store_true",
+                        help="Require the '[selftest] m3mc' marker from the "
+                             "aarch64 multi-core M3 selftest (M3.6 Task 26): "
+                             "exactly one SKIP line at -smp 1, exactly one "
+                             "N/N PASS marker at -smp >= 2")
     parser.add_argument("--expect-gic", action="store_true",
                         help="Require GICv2 framework markers: driver init, "
                              "dispatch ready, save-restore probe OK, "

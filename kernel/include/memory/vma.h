@@ -12,15 +12,15 @@ struct mm_struct;
 typedef struct mm_struct mm_t;
 
 // ── VMA flags ──────────────────────────────────────────────
-#define VM_READ      0x01
-#define VM_WRITE     0x02
-#define VM_EXEC      0x04
-#define VM_SHARED    0x08
-#define VM_MAYSHARE  0x10
-#define VM_ANON      0x20   // anonymous mapping (no backing file)
-#define VM_GROWSDOWN 0x40   // reserved, not implemented
-#define VM_IO        0x80   // MMIO region (no COW, no file-backed demand paging)
-#define VM_HEAP      0x100  // the unique heap VMA — zero-length, tracks
+#define VMA_PROT_READ      0x01
+#define VMA_PROT_WRITE     0x02
+#define VMA_PROT_EXEC      0x04
+#define VMA_SHARED    0x08
+#define VMA_MAYSHARE  0x10
+#define VMA_ANON      0x20   // anonymous mapping (no backing file)
+#define VMA_GROWSDOWN 0x40   // reserved, not implemented
+#define VMA_IO        0x80   // MMIO region (no COW, no file-backed demand paging)
+#define VMA_HEAP      0x100  // the unique heap VMA — zero-length, tracks
                             // [start_brk, ALIGN_UP(end_brk, 4096))
 
 // ── PROT_* constants (kernel-accessible copy of libc mman.h) ─
@@ -40,7 +40,9 @@ typedef struct vm_area_struct {
     list_t      list;
     uint64_t    vm_start;     // start VA (4KB aligned)
     uint64_t    vm_end;       // end VA (4KB aligned, exclusive)
-    uint64_t    vm_flags;     // VM_*
+    uint64_t    vm_flags;     // VMA_* flags (VMA_PROT_READ/WRITE/EXEC,
+                              // VMA_SHARED/ANON/... — see VMA_* above;
+                              // NOT the vmm.h VM_* PTE-bit family)
     uint64_t    vm_page_prot; // PAGE_* flags for PTE
     uint64_t    vm_pgoff;     // file offset in 4KB pages
     vfs_node_t *vm_file;      // NULL = anonymous
@@ -58,7 +60,7 @@ mm_t     *mm_alloc(void);   // allocate + init an mm_t (lock = unlocked)
 // Must be called after a successful elf_load() on the new mm.
 // Sets mm->start_brk = mm->end_brk = ALIGN_UP(elf_end, 4096).
 // Inserts ONE zero-length heap VMA [start_brk, start_brk) with
-//   vm_flags     = VM_READ | VM_WRITE | VM_ANON | VM_HEAP,
+//   vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON | VMA_HEAP,
 //   vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID.
 // Returns 0 on success, -ENOMEM if the VMA allocation fails.
 // On failure: mm is unchanged (caller owns it; will destroy via
@@ -106,7 +108,7 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result);
 //   [mm->start_brk,   HEAP_LIMIT (0x203ff000)) heap reserve — the entire
 //                                     brk window, not just the
 //                                     committed pages; covers the
-//                                     zero-length VM_HEAP VMA's
+//                                     zero-length VMA_HEAP VMA's
 //                                     range too.  The upper bound is
 //                                     FIXED at 0x203ff000 — it does
 //                                     NOT track end_brk.

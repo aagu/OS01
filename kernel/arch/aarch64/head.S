@@ -686,7 +686,7 @@ secondary_start:
      * (verified above via [x6, #AARCH64_BOOT_CPU_ID_OFFSET]).
      * PERCPU_DATA_SIZE is a numeric literal in
      * kernel/include/percpu/percpu.h (assembly context cannot use
-     * sizeof(percpu_t)). 144 (0x90) fits a 16-bit mov immediate. */
+     * sizeof(percpu_t)). 152 (0x98) fits a 16-bit mov immediate. */
     ldr     x7, =percpu_data
     mov     x8, #PERCPU_DATA_SIZE
     madd    x7, x19, x8, x7

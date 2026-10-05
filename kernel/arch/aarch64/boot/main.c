@@ -6,16 +6,22 @@
 #include <arch/aarch64/m1_selftest.h>
 #include <core/bootinfo.h>
 #include <log/log.h>      /* for log_err/log_info macros */
+#include <core/printk.h>  /* for serial_printk (selftest markers) */
+#include <core/selftest.h> /* for selftest_run_all (OS01_SELFTEST builds) */
 #include <memory/memory.h>   /* for struct boot_context / Virt_To_Phy */
 #include <memory/pmm.h>      /* for PMMngr, struct Page, alloc_pages, free_pages, ZONE_NORMAL */
 #include <memory/pmm_arch.h> /* for pmm_arch_normalize (preflight caller) */
+#include <memory/vmm.h>      /* for arch_vmm_init (M3.5 Task 24 production call) */
 #include <arch/cpu.h>
 #include <arch/irq.h>
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/early_arena.h>
+#include <arch/aarch64/boot/m3_probe.h>    /* aarch64_m3_shootdown_probe (M3.5 Task 25) */
 #include <arch/aarch64/page_table.h>
 #include <arch/aarch64/ram.h>
 #include <arch/aarch64/smp.h>
+#include <arch/aarch64/vmm_gate.h> /* smp_starting_enter / ipi_ready_publish_and_count (M3 Task 11) */
+#include <percpu/percpu.h>        /* percpu_data / num_cpus (M3 Task 11) */
 #include <subsys/subsys.h>   /* SUBSYS_PHASE_4 macro + subsys_init_phase() decl
                               * for SUBSYS_INITCALL Task 2 R3-1 register+dispatch
                               * pair. Lightweight header — only <stdint.h>
@@ -423,10 +429,52 @@ void aarch64_main(const struct boot_context *handoff)
         log_err("M1 FATAL reason=runtime-init\n");
         for (;;) arch_cpu_halt();
     }
+    /* M3.5 Task 24: pin kernel_map = (mmap)(pa + ARCH_PAGE_OFFSET)
+     * where pa = aarch64_read_ttbr1() & AARCH64_TTBR_BASE_MASK.
+     * arch_boot_direct_map_init() above configured the runtime page
+     * tables and (via aarch64_m1_install_ttbr1()) installed the M1
+     * root into TTBR1_EL1; arch_vmm_init reads TTBR1 back, validates
+     * the masked PA (nonzero, 4 KiB aligned, < 1 TiB), and publishes
+     * the same kernel_map pointer every downstream arch_vmm_* entry
+     * expects. The M1 root remains live until the next translation
+     * table change; arch_vmm_init just locates and re-publishes it.
+     *
+     * The call runs BEFORE aarch64_m1_probe_prepare() and BEFORE the
+     * selftest_run_all() block below so the kernel_map assertion in
+     * the M3 selftest sees the live state.
+     *
+     * Any non-zero rc is fatal — the BSP halts here with a numeric
+     * reason; v1 review item 16 forbids returning to the caller
+     * because every subsequent page-table-touching path assumes
+     * kernel_map is pinned. */
+    {
+        int rc = arch_vmm_init();
+        if (rc) {
+            kputs("FATAL: arch_vmm_init rc=-");
+            kputu((uint64_t)(-(int64_t)rc));
+            kputs("\n");
+            for (;;) arch_cpu_halt();
+        }
+    }
     if (aarch64_m1_probe_prepare()) {
         log_err("M1 FATAL reason=probe\n");
         for (;;) arch_cpu_halt();
     }
+
+#if defined(OS01_SELFTEST)
+    /* M2 Task 6: run the built-in kernel selftests (selftest.c) on the
+     * BSP after PMM/slab are up — mirrors kernel/core/main.c on x86_64.
+     * The aarch64 registration set is portable-only (see the
+     * __aarch64__ guards in selftest.c); prints the harness-asserted
+     * '[selftest] slab: 16/16 PASS' marker among others. Placement:
+     * after M1 runtime init / probe prepare, before DTB/GIC/SMP setup,
+     * so the sync-fault probe block below stays the last pre-SMP
+     * activity. */
+    {
+        int failed = selftest_run_all();
+        serial_printk("[selftest] done (failed=%d)\n", failed);
+    }
+#endif
 
 #if AARCH64_SYNC_FAULT_TEST
     /* AAGU-EL1-sync (spec §5): a controlled EL1h sync fault probe.
@@ -498,6 +546,30 @@ void aarch64_main(const struct boot_context *handoff)
     log_info("OS01 aarch64 phase1 boot ok\n");
     gic_init();
 
+    /* M3 (Task 11): publish BSP double-state BEFORE the first possible
+     * PSCI CPU_ON. percpu_install_gs/percpu_init are pure memory setup
+     * with no hardware dependency; doing them here closes the window
+     * where an AP is already running while the BSP has no runtime
+     * percpu_t and online==0. percpu_init now also sets online with a
+     * release store (M3.5 Task 25 fix); this BSP store is redundant
+     * but kept as belt-and-braces for the pre-AP window. num_cpus
+     * gates the TLB shootdown IPI loop
+     * (kernel/memory/tlb.c), so it must also be visible before any AP
+     * can run. smp_starting_enter() latches the one-way SMP gate: from
+     * here on vmm_gate_check() refuses a VMM change until every DTB CPU
+     * has published ipi_ready. */
+    {
+        extern void percpu_install_gs(uint32_t cpu);
+        extern void percpu_init(uint32_t cpu, uint32_t apic_id);
+        uint32_t mpidr_bsp;
+        __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr_bsp));
+        percpu_install_gs(0);
+        percpu_init(0, mpidr_bsp);
+        __atomic_store_n(&percpu_data[0].online, 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&num_cpus, dtb_cpu_count(), __ATOMIC_RELEASE);
+        smp_starting_enter();
+    }
+
     uint32_t active = smp_boot_aps();
     if (active == dtb_cpu_count())
         (void)test_spinlock_smp(active);
@@ -565,18 +637,8 @@ void aarch64_main(const struct boot_context *handoff)
     extern void softirq_init(void);
     softirq_init();
 
-    /* Phase 2 #3: install real per-CPU data for BSP. head.S:323
-     * already set TPIDR_EL1 = &percpu_data[0]; percpu_install_gs
-     * re-confirms (idempotent) and percpu_init populates
-     * self/cpu_id/arch_processor_id/online/rq_lock. Inline asm
-     * 'mrs xN, mpidr_el1' (no helper function — does not exist
-     * in codebase, R3 NIT-2). */
-    extern void percpu_install_gs(uint32_t cpu);
-    extern void percpu_init(uint32_t cpu, uint32_t apic_id);
-    uint32_t mpidr_bsp;
-    __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr_bsp));
-    percpu_install_gs(0);
-    percpu_init(0, mpidr_bsp);
+    /* Phase 2 #3: BSP percpu data is now installed before smp_boot_aps()
+     * (M3 Task 11) — see the block above the SMP bring-up call. */
 
     if (!arch_tick_start()) {
         log_err("[smp] FATAL: BSP timer initialization failed\n");
@@ -590,6 +652,70 @@ void aarch64_main(const struct boot_context *handoff)
     log_info("[IRQ] enabled (DAIF.IRQ cleared)\n");
     arch_local_irq_enable();
     __asm__ __volatile__("isb" ::: "memory");
+    /* M3 (Task 11): publish BSP ipi_ready through the same one-shot
+     * function as the APs — only AFTER the tick handler is registered
+     * (arch_tick_start above), the TLB SGI handler is live (gic_init)
+     * and DAIF.I is unmasked. Publishing earlier would let a pending
+     * TLB SGI arrive with IRQs masked (no ack → initiator timeout). */
+    ipi_ready_publish_and_count(0);
+
+    /* M3.5 Task 25: production shootdown probe (spec §7.3).
+     *
+     * Runs AFTER BSP ipi_ready is published and AFTER smp_boot_aps()
+     * has returned (all APs gone through the boot handshake and into
+     * secondary_idle). The probe waits inside for ipi_ready_count
+     * to reach dtb_cpu_count() — APs publish ipi_ready only AFTER
+     * opening IRQs + ISB (secondary_idle tail, Task 10 Step 4), so a
+     * poll is required.
+     *
+     * The probe runs in production AND selftest builds. Single-CPU
+     * boots (-smp 1) skip it via the dtb_cpu_count() >= 2 gate —
+     * the probe body's `requires-at-least-one-AP` FAIL path would
+     * otherwise halt the system on every -smp 1 selftest run,
+     * breaking MODE=smp 1/2/4. The body itself still owns the
+     * FAIL contract (hosttest pins the 0-AP path); production and
+     * selftest images at -smp >= 2 reach the full 7-step sequence
+     * and either print "M3-SHOOTDOWN-PROBE: OK" or halt. */
+    if (dtb_cpu_count() >= 2) {
+        aarch64_m3_shootdown_probe();
+    } else {
+        kputs("M3-SHOOTDOWN-PROBE: SKIP (single-CPU boot)\n");
+    }
+
+#if OS01_SELFTEST
+    /* M3.6 Task 26: multi-core selftest (spec §8.2 ①②⑤⑥) — real-core
+     * shootdown target-set/gen, partial-mask SGI, same-pt_lock
+     * interleave and concurrent shared-L1 creation. MUST run post-SMP
+     * (APs in secondary_idle + ipi_ready), i.e. NOT through the
+     * pre-SMP selftest_run_all() table. Prints the harness-asserted
+     * '[selftest] m3mc: N/N PASS' marker (SKIP line at -smp 1). */
+    {
+        extern int test_m3_multicore_run(void);
+        (void)test_m3_multicore_run();
+    }
+#endif
+
+    /* M3.4 Task 21: ID_AA64MMFR2_EL1.BBM (Break-before-Make levels).
+     *
+     * The split_block_2m path on a PUBLISHED root depends on the BBM
+     * support level reported here — levels 0/1/2 describe how much
+     * BBM flexibility the CPU provides for block↔table descriptor
+     * replacement.  M3.4 returns -EPERM for published-root splits
+     * because the spec scopes the real implementation to F10; this
+     * print lets F10 cite the actual level when it lands.
+     *
+     * IMPORTANT (F10 caveat): cortex-a53 / QEMU passing this print
+     * does NOT replace the architectural prerequisite — the F10
+     * design must reconcile the value against Arm ARM (and against
+     * each real target silicon) before relying on BBM. */
+    {
+        uint64_t mmfr2 = 0;
+        __asm__ __volatile__("mrs %0, ID_AA64MMFR2_EL1" : "=r"(mmfr2));
+        kputs("[aarch64] ID_AA64MMFR2_EL1.BBM = ");
+        kputu((mmfr2 >> 20) & 0xFUL);
+        kputs("\n");
+    }
+
 #if OS01_SELFTEST
     /* Task 2.2 — dispatch chain selftest probes.
      * VBAR is installed (line 188-189); handler table is populated

@@ -1,7 +1,8 @@
 // kernel/driver/e1000.c — Intel 82540EM (e1000) NIC driver
 #include <driver/e1000.h>
 #include <driver/pci.h>
-#include <memory/vmm.h>       // vmm_map_page, kernel_map, PAGE_KERNEL_PMD_NOCACHE
+#include <memory/vmm.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)       // vmm_map_page, kernel_map, PAGE_KERNEL_PMD_NOCACHE
 #include <memory/pmm.h>       // PAGE_2M_MASK, alloc_pages, alloc_4k_page
 #include <memory/memory.h>    // Phy_To_Virt
 #include <intr/interrupt.h> // register_irq

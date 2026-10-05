@@ -5,6 +5,7 @@
 #include <memory/slab.h>
 #include <fs/file.h>
 #include <memory/pmm.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
 #include <memory/memory.h>
 #include <memory/uaccess.h>          // USER_MIN_ADDR, arch_user_range_accessible
 #include <arch/spinlock.h>   // mm->lock: guards munmap/MAP_FIXED/mprotect
@@ -83,7 +84,7 @@ void vma_free_all(mm_t *mm)
     while (mm->vma_list.next != &mm->vma_list) {
         vma_t *v = container_of(mm->vma_list.next, vma_t, list);
 
-        if (v->vm_flags & VM_IO) {
+        if (v->vm_flags & VMA_IO) {
             vma_remove(mm, v);
             continue;
         }
@@ -147,7 +148,7 @@ mm_t *mm_alloc(void)
 // Contract (docs/.../2026-10-01-user-heap-elf-isolation-design.md §4):
 //   - mm->start_brk = mm->end_brk = ALIGN_UP(elf_end, 4096)
 //   - ONE heap VMA inserted at [start_brk, start_brk) — zero-length
-//   - vm_flags     = VM_READ | VM_WRITE | VM_ANON | VM_HEAP
+//   - vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON | VMA_HEAP
 //   - vm_page_prot = PAGE_USER  | PAGE_WRITE | PAGE_VALID
 //   - vma_find() does NOT match this VMA (zero-length invariant)
 //
@@ -170,7 +171,7 @@ int mm_init_user_heap(mm_t *mm, uint64_t elf_end)
     list_init(&hv->list);
     hv->vm_start     = heap_base;
     hv->vm_end       = heap_base;          /* zero-length on purpose */
-    hv->vm_flags     = VM_READ | VM_WRITE | VM_ANON | VM_HEAP;
+    hv->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON | VMA_HEAP;
     hv->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
     hv->vm_pgoff     = 0;
     hv->vm_file      = NULL;
@@ -277,14 +278,14 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
 
     /* The heap VMA tracks [start_brk, ALIGN_UP(end_brk, 4096)) —
      * locate it for the commit step.  There is exactly one
-     * VM_HEAP VMA, inserted by mm_init_user_heap; its length
+     * VMA_HEAP VMA, inserted by mm_init_user_heap; its length
      * matches the page-aligned portion of end_brk. */
     vma_t *heap_vma = NULL;
     {
         list_t *pos;
         for (pos = mm->vma_list.next; pos != &mm->vma_list; pos = pos->next) {
             vma_t *v = container_of(pos, vma_t, list);
-            if ((v->vm_flags & VM_HEAP) && v->vm_start == start_brk) {
+            if ((v->vm_flags & VMA_HEAP) && v->vm_start == start_brk) {
                 heap_vma = v;
                 break;
             }
@@ -482,15 +483,15 @@ static int prot_to_page_flags(int prot, uint64_t *page_prot, uint64_t *vm_flags)
         *vm_flags = 0;
     } else if (prot == PROT_READ) {
         *page_prot = PAGE_USER_PTE_RO;
-        *vm_flags = VM_READ;
+        *vm_flags = VMA_PROT_READ;
     } else if (prot == (PROT_READ | PROT_WRITE)) {
         *page_prot = PAGE_USER_PTE;
-        *vm_flags = VM_READ | VM_WRITE;
+        *vm_flags = VMA_PROT_READ | VMA_PROT_WRITE;
     } else if (prot == (PROT_READ | PROT_EXEC) ||
                prot == (PROT_READ | PROT_WRITE | PROT_EXEC)) {
         *page_prot = PAGE_USER_PTE;  // no NX support yet
-        *vm_flags = VM_READ | VM_EXEC
-                  | ((prot & PROT_WRITE) ? VM_WRITE : 0);
+        *vm_flags = VMA_PROT_READ | VMA_PROT_EXEC
+                  | ((prot & PROT_WRITE) ? VMA_PROT_WRITE : 0);
     } else {
         return -EINVAL;
     }
@@ -500,8 +501,8 @@ static int prot_to_page_flags(int prot, uint64_t *page_prot, uint64_t *vm_flags)
 // ── Helper: convert mmap flags to vm_flags ────────────────────
 static void map_flags_to_vm(int flags, uint64_t *vm_flags)
 {
-    if (flags & MAP_SHARED)  *vm_flags |= VM_SHARED;
-    if (flags & MAP_ANONYMOUS) *vm_flags |= VM_ANON;
+    if (flags & MAP_SHARED)  *vm_flags |= VMA_SHARED;
+    if (flags & MAP_ANONYMOUS) *vm_flags |= VMA_ANON;
 }
 
 // ── do_munmap ─────────────────────────────────────────────────
@@ -730,7 +731,7 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
             list_init(&vma->list);
             vma->vm_start     = addr;
             vma->vm_end       = addr + length;
-            vma->vm_flags     = vm_flags_base | VM_IO;
+            vma->vm_flags     = vm_flags_base | VMA_IO;
             vma->vm_page_prot = page_prot;
             vma->vm_pgoff     = offset >> PAGE_4K_SHIFT;
             vma->vm_file      = file_node;  // handler may clear this
@@ -809,7 +810,7 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
         }
 
         // Update VMA
-        v->vm_flags     &= ~(VM_READ | VM_WRITE | VM_EXEC);
+        v->vm_flags     &= ~(VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC);
         v->vm_flags     |= new_vm_flags;
         v->vm_page_prot  = new_page_prot;
 

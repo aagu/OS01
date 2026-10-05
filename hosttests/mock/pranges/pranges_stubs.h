@@ -28,6 +28,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
 
 /* ── Page-pool record (test assertion visibility) ───────────── */
 #define PR_PAGE_POOL_SIZE 64

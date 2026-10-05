@@ -16,7 +16,7 @@
  *   - anonymous mmap and file mmap buffers through file
  *   - TTY and pipe reads via copy_to_user_ft_res
  *   - two-page preparation OOM on page two (Plan Review Focus #5)
- *   - invalid or VM_IO destination
+ *   - invalid or VMA_IO destination
  *   - pure syscall_check_user_range(writable=true) accepts eligible
  *     COW without changing PTEs
  *   - _ft_res callback exactly once on preparation failure and no
@@ -38,6 +38,7 @@
 #include <fs/vfs.h>
 #include <memory/vma.h>
 #include <memory/vmm.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
 #include <memory/uaccess.h>
 
 /* ── Layout constants (mirror kernel/memory/vma.c) ─────────── */
@@ -69,7 +70,7 @@ static vma_t *build_anon_vma(uint64_t start, uint64_t end)
     list_init(&v->list);
     v->vm_start     = start;
     v->vm_end       = end;
-    v->vm_flags     = VM_READ | VM_WRITE | VM_ANON;
+    v->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON;
     v->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
     v->vm_pgoff     = 0;
     v->vm_file      = NULL;
@@ -79,7 +80,7 @@ static vma_t *build_anon_vma(uint64_t start, uint64_t end)
 
 /* Build a file mmap VMA [start, end) backed by a fake node. */
 
-/* Build a VM_IO VMA — task: must be rejected by prepare. */
+/* Build a VMA_IO VMA — task: must be rejected by prepare. */
 static vma_t *build_vmio_vma(uint64_t start, uint64_t end)
 {
     static vfs_node_t fake_io_node;
@@ -90,7 +91,7 @@ static vma_t *build_vmio_vma(uint64_t start, uint64_t end)
     list_init(&v->list);
     v->vm_start     = start;
     v->vm_end       = end;
-    v->vm_flags     = VM_READ | VM_WRITE | VM_IO;
+    v->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_IO;
     v->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
     v->vm_pgoff     = 0;
     v->vm_file      = &fake_io_node;
@@ -360,7 +361,7 @@ static void test_prepare_oom_on_page_two_rolls_back(void)
 
 static void test_prepare_rejects_vmio(void)
 {
-    TEST_SUITE("prepare_user_write_range — VM_IO destination → -EFAULT");
+    TEST_SUITE("prepare_user_write_range — VMA_IO destination → -EFAULT");
 
     uw_stubs_reset();
     memset(&fixture_mm, 0, sizeof(fixture_mm));
@@ -789,9 +790,9 @@ static void test_cow_requires_writable_vma(void)
     assert_false(syscall_check_user_range(0x400000, 32, true));
     assert_eq(-EFAULT, prepare_user_write_range(&fixture_mm, 0x400000, 32));
     vma_t *v = build_anon_vma(0x400000, 0x401000);
-    v->vm_flags &= ~VM_WRITE;
+    v->vm_flags &= ~VMA_PROT_WRITE;
     assert_false(syscall_check_user_range(0x400000, 32, true));
-    v->vm_flags |= VM_WRITE | VM_IO;
+    v->vm_flags |= VMA_PROT_WRITE | VMA_IO;
     assert_false(syscall_check_user_range(0x400000, 32, true));
     assert_eq(2, uw_find_page(0x400000)->cow_refs);
 }

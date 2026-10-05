@@ -79,6 +79,7 @@ static inline void spin_unlock_irqrestore(spinlock_T *l, uint64_t f) { (void)f; 
 /* Don't block _FS_VFS_H — vma.c needs the production typedef. */
 
 #include <list.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
 
 /* ── arch/mmu.h replacements (counter-backed, no privileged asm) ──
  * The test does NOT exercise arch_flush_tlb / arch_switch_mm,

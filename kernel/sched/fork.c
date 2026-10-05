@@ -13,6 +13,7 @@
 #include <memory/pmm.h>
 #include <memory/vma.h>
 #include <memory/vmm.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
 #include <memory/slab.h>
 #include <fs/file.h>
 #include <string.h>

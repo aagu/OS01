@@ -25,6 +25,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <arch/spinlock.h>        /* spinlock_T (Task 17 §5.4) */
+
 /* High-half kernel-self-test VA. Its lower-48-bit L0 slot is absent from
  * the boot tables at the time of the BSP self-test (TTBR0_EL1 == TTBR1_EL1
  * == boot_page_tables; the corresponding PGD[256] entry is invalid), so a
@@ -37,8 +39,16 @@
  * permitted non-base bits are the ASID (bits [63:48]) and the CnP bit
  * (bit 0). All other bits must read as zero on the live TTBR. Exposed
  * here so the BSP pre-SMP self-test can validate the active root's
- * raw TTBR0_EL1 value before converting to a direct-map pointer. */
-#define AARCH64_TTBR_BASE_MASK       UINT64_C(0x000000fffffff000)
+ * raw TTBR0_EL1 value before converting to a direct-map pointer.
+ *
+ * Width: the mask MUST span the full documented [47:12] window so a
+ * PA ≥ 1 TiB is not silently truncated by the mask and slipped past
+ * the explicit `pa >= (1ULL << 40)` guard in arch_vmm_init. With
+ * IPS=40 the upper 8 bits [47:40] are RES0 on the live TTBR (real
+ * hardware reports 0 there), so widening the mask does not change
+ * any observed value in current production runs — it only catches
+ * a misformed test value that the previous narrower mask accepted. */
+#define AARCH64_TTBR_BASE_MASK       UINT64_C(0x0000fffffffff000)
 #define AARCH64_TTBR_ALLOWED_NONBASE (UINT64_C(0xffff000000000000) | \
                                       UINT64_C(1))
 #define AARCH64_TTBR_ALLOWED_MASK    (AARCH64_TTBR_BASE_MASK | \
@@ -57,52 +67,189 @@ enum aarch64_pt_perm {
     AARCH64_PT_DEVICE    = 1u << 5,
 };
 
-/* Result codes. Negative values are errors; AARCH64_PT_OK is 0. */
+/* Result codes. Negative values are errors; AARCH64_PT_OK is 0.
+ * AARCH64_PT_EPROT_NONE is the three-state query sentinel for an
+ * "invalid but holds a PA" software stash (VM_PRESENT=0, VM_PROTNONE=1);
+ * identical code lives in <arch/aarch64/vmm_backend.h> as a `#define`
+ * (the backend includes both headers and uses the negative literal). */
 enum aarch64_pt_result {
-    AARCH64_PT_OK       =  0,
-    AARCH64_PT_EINVAL   = -1,
-    AARCH64_PT_EEXIST   = -2,
-    AARCH64_PT_ENOENT   = -3,
-    AARCH64_PT_ENOMEM   = -4,
+    AARCH64_PT_OK        =  0,
+    AARCH64_PT_EINVAL    = -1,
+    AARCH64_PT_EEXIST    = -2,
+    AARCH64_PT_ENOENT    = -3,
+    AARCH64_PT_ENOMEM    = -4,
     AARCH64_PT_ECONFLICT = -5,
+    /* Task 18: aarch64_pt_split_block_2m returns this when called
+     * on a published root (spec §5.3 — F10 implements the
+     * BBM-aware split path).  Matches the Linux-style -EPERM value
+     * so callers can write `if (rc == -EPERM)` uniformly. */
+    AARCH64_PT_EPERM     = -6,
+    /* Task 21: aarch64_pt_split_block_2m returns this when the L2
+     * slot already holds a valid TABLE descriptor (concurrent split
+     * caller won the race; the spec's "caller retries" branch). */
+    AARCH64_PT_EAGAIN    = -7,
 };
 
 /* Map a single 4 KiB page at the given VA in `root`. `va` and `pa`
  * must be 4 KiB aligned; `pa` must be < 1 TiB. Missing intermediate
  * tables are allocated via alloc_4k_page() and zeroed before linking.
  *
+ * Thin wrapper over aarch64_pt_map_4k_ext() with software_bits = 0;
+ * retained so the BSP pre-SMP selftest (kernel/arch/aarch64/memory/
+ * m1_selftest.c) keeps using its 4-arg form unchanged.  See the ext
+ * variant for the full return-value contract. */
+int aarch64_pt_map_4k(uint64_t *root, uint64_t va, uint64_t pa,
+                      uint32_t perm);
+
+/* Task 18: brief-aligned name.  Identical contract to
+ * aarch64_pt_map_4k_ext — returns -EEXIST on ANY occupied slot (valid
+ * leaf OR PROTNONE-stashed).  Alias exposed so callers (and the
+ * hosttest matrix) can use the brief's `map_4k_new` name without
+ * dragging the `ext` suffix into every call site.  See
+ * aarch64_pt_map_4k_ext below for the full return-value contract. */
+int aarch64_pt_map_4k_new(uint64_t *root, uint64_t va, uint64_t pa,
+                          uint32_t perm, uint64_t software_bits);
+
+/* M3.3 (Task 16) full 5-arg primitive with software-bit support.  Map
+ * a 4 KiB leaf with perm AND software_bits (PROTNONE | COW — both bits
+ * set is rejected with -EINVAL).
+ *
  * Returns:
  *   AARCH64_PT_OK        on success.
  *   AARCH64_PT_EINVAL    for null root, misaligned/uncanonical VA/PA,
- *                        PA >= 1 TiB, unknown permission bits, or
- *                        DEVICE | EXEC.
- *   AARCH64_PT_EEXIST    when a leaf is already present at VA.
+ *                        PA >= 1 TiB, unknown permission bits,
+ *                        DEVICE | EXEC, or software_bits with bits set
+ *                        outside {PROTNONE, COW}, or both bits set.
+ *   AARCH64_PT_EEXIST    when a leaf (valid OR PROTNONE-stashed) is
+ *                        already present at VA.
  *   AARCH64_PT_ECONFLICT when a valid non-table PUD/PMD descriptor
  *                        (block entry) is encountered.
  *   AARCH64_PT_ENOMEM    when a 4 KiB table page cannot be allocated.
  *
- * The root is a high-half direct-map pointer. Active-root callers may
- * invoke this only before smp_boot_aps() — see the BSP-pre-SMP note in
- * the file header. */
-int aarch64_pt_map_4k(uint64_t *root, uint64_t va, uint64_t pa,
-                      uint32_t perm);
+ * Active-root callers may invoke this only before smp_boot_aps(). */
+int aarch64_pt_map_4k_ext(uint64_t *root, uint64_t va, uint64_t pa,
+                          uint32_t perm, uint64_t software_bits);
 
-/* Walk the tree and report the leaf at VA without allocating. Returns
- * ENOENT for any absent level (PGD/PUD/PMD/PTE) and ECONFLICT for a
- * valid PUD/PMD block descriptor (this layer only owns 4 KiB leaves).
- * On OK, `*pa_out` and `*perm_out` receive the decoded physical base
- * (page-aligned) and permission word respectively.
+/* Walk the tree and report the leaf at VA without allocating.
+ * Three-state return (spec §4.3 query_4k):
+ *   AARCH64_PT_OK         — valid mapping; `*pa_out` / `*perm_out` /
+ *                           `*sw_out` receive decoded state.
+ *   AARCH64_PT_EPROT_NONE — PROTNONE-stashed: VALID cleared but the
+ *                           PROTNONE software bit set; `*pa_out` holds
+ *                           the stashed PA.  Distinct from -ENOENT.
+ *   AARCH64_PT_ENOENT     — slot genuinely empty.
  *
- * `root` is a high-half direct-map pointer. */
+ * Thin wrapper over aarch64_pt_query_4k_ext() that drops the sw out
+ * parameter.  Retained for the BSP pre-SMP selftest. */
 int aarch64_pt_query_4k(const uint64_t *root, uint64_t va,
                         uint64_t *pa_out, uint32_t *perm_out);
 
+/* Three-state query + software-bit out (see aarch64_pt_query_4k for the
+ * return-value contract).  `*sw_out` is populated with the raw software
+ * bits at the descriptor (PROTNONE / COW / neither). */
+int aarch64_pt_query_4k_ext(const uint64_t *root, uint64_t va,
+                            uint64_t *pa_out, uint32_t *perm_out,
+                            uint64_t *sw_out);
+
 /* Clear an existing 4 KiB leaf. Returns the prior physical address and
- * permission via `*pa_out` / `*perm_out` before the clear. Same error
- * contract as query_4k; never allocates. If the path is absent (ENOENT)
- * or blocked (ECONFLICT), the tree is not modified. */
+ * permission via `*pa_out` / `*perm_out` before the clear.  Same
+ * three-state return as aarch64_pt_query_4k_ext: PROTNONE stashes are
+ * cleared and reported as AARCH64_PT_EPROT_NONE.  Never allocates. */
 int aarch64_pt_unmap_4k(uint64_t *root, uint64_t va,
                         uint64_t *pa_out, uint32_t *perm_out);
+
+/* Three-state clear + software-bit out. */
+int aarch64_pt_unmap_4k_ext(uint64_t *root, uint64_t va,
+                            uint64_t *pa_out, uint32_t *perm_out,
+                            uint64_t *sw_out);
+
+/* Replace an existing 4 KiB leaf with a new perm + software_bits state
+ * (spec §4.4.3).  The prior physical address, decoded permission
+ * word, and software bits are returned via `*old_pa_out` /
+ * `*old_perm_out` / `*old_sw_out` (all may be NULL).  Classification:
+ *
+ *   - AP / XN-only change (same PA, same memory type, same validity):
+ *     atomic 8 B store + dsb ishst + local TLBI.
+ *   - Memory-type change (AttrIndx / NOCACHE), PA change, or validity
+ *     flip (↔ PROTNONE): PTE-level BBM (clear, TLBI, set) under the
+ *     lock-free single-threaded assumption that Task 17 will replace
+ *     with pt_lock_for(root, l2) — see TODO.
+ *
+ * Returns AARCH64_PT_OK on success, -EINVAL for bad perm/sw, -ENOENT
+ * if no leaf (valid OR PROTNONE-stashed) exists at VA. */
+int aarch64_pt_replace_4k(uint64_t *root, uint64_t va, uint64_t pa,
+                          uint32_t perm, uint64_t software_bits,
+                          uint64_t *old_pa_out, uint32_t *old_perm_out,
+                          uint64_t *old_sw_out);
+
+/* Build a 2 MiB block descriptor (spec §5.1).  Block = VALID | bit1=0;
+ * OA lives in bits [39:21] (L2 block format — IPS=40).  AP / SH /
+ * AttrIndx / XN bits mirror encode_perm's policy for the same perm
+ * word.  software_bits stashed into descriptor bits 55 / 56 (the
+ * reserved bits ignored by hardware).  Helper for the M3.3 / M3.4
+ * arch_vmm_map_2m backend; visible here so hosttest pins the contract. */
+uint64_t aarch64_pt_encode_block_desc(uint64_t pa, uint32_t perm,
+                                      uint64_t software_bits);
+
+/* Map a 2 MiB block at `va` in `root` (Task 18 / spec §5.2).  `va`
+ * and `pa` must be 2 MiB aligned; `pa` must be < 1 TiB.  Walks
+ * L0 → L1 → L2 (allocating intermediates as needed) and writes a
+ * block descriptor at pmd[l2].  Holds pt_lock_for(root, l2) across
+ * the entire walk + pmd[l2] write per §5.4.
+ *
+ * Returns:
+ *   AARCH64_PT_OK        on success.
+ *   AARCH64_PT_EINVAL    for null root, misaligned/uncanonical VA/PA,
+ *                        PA >= 1 TiB, or unknown permission bits.
+ *   AARCH64_PT_EEXIST    when pmd[l2] is already occupied (valid
+ *                        block, valid table, OR PROTNONE stash).
+ *   AARCH64_PT_ENOMEM    when an intermediate 4 KiB table page cannot
+ *                        be allocated.
+ *
+ * Active-root callers may invoke this only before smp_boot_aps().
+ *
+ * split_block_2m is still -EPERM (Task 21 implements it). */
+int aarch64_pt_map_2m_block(uint64_t *root, uint64_t va, uint64_t pa,
+                            uint32_t perm);
+
+/* Unmap a 2 MiB block at `va` (spec §4.4.5 / §5.2).  Returns the
+ * prior physical address via `*pa_out` (NULL to discard) before
+ * clearing the descriptor.  Holds pt_lock_for(root, l2) across the
+ * walk + pmd[l2] read+write per §5.4.  Never frees the data page
+ * (spec §4.4.4: backend owns no data pages).
+ *
+ * Returns:
+ *   AARCH64_PT_OK        on success; `*pa_out` holds the prior PA.
+ *   AARCH64_PT_EINVAL    for null root, misaligned/uncanonical VA, or
+ *                        when pmd[l2] is a TABLE descriptor (caller
+ *                        used the wrong API — a 4 KiB leaf unmap is
+ *                        aarch64_pt_unmap_4k_ext).
+ *   AARCH64_PT_ENOENT    when pmd[l2] is invalid (no mapping). */
+int aarch64_pt_unmap_2m_block(uint64_t *root, uint64_t va,
+                              uint64_t *pa_out);
+
+/* Split a 2 MiB block into 512 4 KiB leaves (spec §5.3).  Returns
+ * -EPERM on any published root; un-published roots (caller owns the
+ * tree exclusively) get an atomic store rewrite per spec §5.3.
+ * Implementation lands in Task 21 — this stub is here so the API
+ * surface is consistent with the brief. */
+int aarch64_pt_split_block_2m(uint64_t *root, uint64_t va);
+
+/* Read the raw descriptor at pmd[l2] for `va`.  Walks L0 → L1 → L2
+ * without allocating; useful for tests and for block-vs-leaf
+ * introspection at the L2 slot (the only place the two can be
+ * distinguished).  Returns:
+ *   AARCH64_PT_OK        on success; `*desc_out` holds the raw L2
+ *                        descriptor (0 if the slot is empty).
+ *   AARCH64_PT_EINVAL    for null root or unaligned/uncanonical VA.
+ *   AARCH64_PT_ENOENT    when an intermediate L0/L1/L2 table is missing.
+ *
+ * Test helper — production callers should use arch_vmm_query_4k or the
+ * typed aarch64_pt_query_4k_ext instead.  Does NOT acquire pt_lock_for
+ * (single-threaded host harness; production callers wanting stable
+ * introspection should hold the lock externally). */
+int aarch64_pt_read_l2_desc(const uint64_t *root, uint64_t va,
+                            uint64_t *desc_out);
 
 /* Return true iff every page in [va, va + length) is mapped with the
  * requested access. length == 0 returns true. addr + length overflow
@@ -113,5 +260,72 @@ int aarch64_pt_unmap_4k(uint64_t *root, uint64_t va,
  * block entry seen on the path returns false (conservative). */
 bool aarch64_pt_range_accessible(const uint64_t *root, uint64_t va,
                                 uint64_t length, bool write, bool user);
+
+/* Test-observation hooks for replace_4k branch selection (spec
+ * §4.4.3 row 1 = perm-only atomic-store; rows 2-4 = BBM).  Defined
+ * here so hosttests can override them with counters and pin the
+ * classification logic; production builds link the default weak
+ * no-op stubs in page_table.c, which cost nothing at -O2.  The
+ * M3.1 audit-criterion pattern (weak default spin, hosttest
+ * override) is the same shape vmm_gate.c uses for
+ * vmm_gate_violation(). */
+void aarch64_pt_test_note_atomic_replace(void);
+void aarch64_pt_test_note_bbm_replace(void);
+
+/* ── Page-table locks (Task 17 / spec §5.4) ─────────────────────────
+ *
+ * Three plain spin_locks (NOT irqsave — aarch64 spin_lock_irqsave
+ * blocks SGI response and would deadlock the TLB ack wait):
+ *
+ *   pt_locks[64]        per-L2-slot hash locks
+ *   pt_upper_lock       global "creating L0/L1" lock
+ *   tlb_sd_lock         (Task 12, defined in kernel/memory/tlb.c)
+ *
+ * Total lock order: pt_lock → pt_upper_lock → tlb_sd_lock (no reverse
+ * paths; TLB IPI handler takes none).  See page_table.c for the
+ * storage and init_locks() / pt_lock_for() definitions; spec §5.4
+ * is the authoritative contract. */
+
+/* Idempotent re-init for pt_locks[64] + pt_upper_lock (writes 1UL to
+ * each lock->lock).  Called from arch_vmm_init() as a belt-and-braces
+ * double insurance against any future accidental zero-init. */
+int aarch64_pt_init_locks(void);
+
+/* Hash (root_pa, l2_idx) → one of 64 lock slots.  Same input always
+ * returns the same slot; distinct inputs may collide (no correctness
+ * loss, only contention).  root_pa is the translation root's PA (the
+ * caller subtracts ARCH_PAGE_OFFSET from the kernel-half pointer). */
+spinlock_T *pt_lock_for(uint64_t root_pa, uint32_t l2_idx);
+
+/* Walk L0 → L1 → L2 for `va` (no descent to L3).  Returns the L2
+ * (PMD) table's direct-map pointer via `*pmd_out`.
+ *
+ * LOCK CONTRACT — caller-held (matches walk_to_l3, spec §5.4):
+ *   The CALLER must hold pt_lock_for(root, l2_idx) for the L2 slot
+ *   BEFORE calling walk_to_l2 and release it AFTER the caller's
+ *   subsequent pmd[l2] read/write.  walk_to_l2 internally takes only
+ *   pt_upper_lock around the L0/L1 ensure segment — same pattern as
+ *   walk_to_l3 — guaranteeing the global pt_lock → pt_upper_lock →
+ *   tlb_sd_lock order.  This is the shape that Task 18's map_2m
+ *   requires: it needs pt_lock_for held across its pmd[l2] block
+ *   write so a second caller cannot race on the slot during the walk.
+ *
+ * ENOMEM contract (spec §5.2b item 3): if alloc fails at any level,
+ * the failing level's just-allocated page is freed (none — alloc
+ * returned 0 BEFORE we touched anything); previously-published empty
+ * intermediate tables are KEPT (reusable, harmless, M3 has no
+ * reclaim — same cost class as F1).  Returns -1 with `*result_out =
+ * AARCH64_PT_ENOMEM` on alloc failure, -1 with `*result_out =
+ * AARCH64_PT_ENOENT` for create=false with a missing level, and 0
+ * with `*result_out = AARCH64_PT_OK` on success.  The caller's
+ * pt_lock_for remains held across the ENOMEM return so its own
+ * rollback (if any) is consistent.
+ *
+ * Used by the 2 MiB block path (Task 18 keeps the contract, lands the
+ * implementation).  Hosttest test_aarch64_pt_locks.c acquires
+ * pt_lock_for externally before calling walk_to_l2 to exercise the
+ * contract directly. */
+int walk_to_l2(uint64_t *root, uint64_t va, bool create,
+               uint64_t **pmd_out, int *result_out);
 
 #endif /* OS01_AARCH64_PAGE_TABLE_H */

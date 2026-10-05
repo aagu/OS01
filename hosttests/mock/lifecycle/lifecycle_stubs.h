@@ -23,6 +23,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
 
 /* Forward-declared vfs_node_t so we don't pull in the heavy
  * production <fs/vfs.h> from this header (the host harness only

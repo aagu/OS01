@@ -70,4 +70,10 @@ void gic_clear_pending_irq(uint32_t intid);        /* 探针拆除 wrapper (R1-2
 uint32_t gic_dbg_last_iar(void);                   /* R1-9: handler 上下文读取无竞态 */
 void gic_init(void);
 void gic_cpu_init(void);
+
+/* M3 (Task 10): SGI 3 = TLB shootdown (intr/ipi.c maps IPI_VECTOR_TLB
+ * → SGI 3). Handler defined in intr/trap.c, registered once by
+ * gic_init(); the banked enable happens per-CPU in gic_cpu_init(). */
+void aarch64_tlb_sgi_handler(uint32_t intid, uint64_t param,
+                             struct pt_regs *regs);
 #endif

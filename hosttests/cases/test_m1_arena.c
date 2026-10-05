@@ -54,6 +54,7 @@ extern void host_exit(int status) __asm__("_exit");
 #include <memory/memory_map.h>
 #include <memory/pmm.h>
 #include <memory/pmm_boot.h>
+#include <memory/slab.h>
 #include <arch/aarch64/early_arena.h>
 #include <arch/mmu.h>
 
@@ -68,6 +69,30 @@ int color_printk(unsigned int FRcolor, unsigned int BKcolor,
     return 0;
 }
 size_t slab_init(void) { return 0; }
+
+/* aarch64 M2 plan Task 3: early_arena.c now calls slab_layout_compute()
+ * (single source of truth for slab_meta_bytes). It reads
+ * kmalloc_cache_size[].size — provide a host stub with the same
+ * production sizes so compute_arena_end's formula chain agrees with
+ * production slab_init. The other fields stay zero. */
+struct Slab_Cache kmalloc_cache_size[16] = {
+    {32,      0, 0, NULL, NULL, NULL, NULL},
+    {64,      0, 0, NULL, NULL, NULL, NULL},
+    {128,     0, 0, NULL, NULL, NULL, NULL},
+    {256,     0, 0, NULL, NULL, NULL, NULL},
+    {512,     0, 0, NULL, NULL, NULL, NULL},
+    {1024,    0, 0, NULL, NULL, NULL, NULL},
+    {2048,    0, 0, NULL, NULL, NULL, NULL},
+    {4096,    0, 0, NULL, NULL, NULL, NULL},
+    {8192,    0, 0, NULL, NULL, NULL, NULL},
+    {16384,   0, 0, NULL, NULL, NULL, NULL},
+    {32768,   0, 0, NULL, NULL, NULL, NULL},
+    {65536,   0, 0, NULL, NULL, NULL, NULL},
+    {131072,  0, 0, NULL, NULL, NULL, NULL},
+    {262144,  0, 0, NULL, NULL, NULL, NULL},
+    {524288,  0, 0, NULL, NULL, NULL, NULL},
+    {1048576, 0, 0, NULL, NULL, NULL, NULL},
+};
 
 /* ── Reference builders ──────────────────────────────────────
  * Hand-mirror the planner's expected output using the production
@@ -471,26 +496,41 @@ TEST_FUNC(test_arena_table_pool_inside_arena)
         + at least 1 PMD). */
     assert_true(got.table_pages >= 3);
     assert_true(got.table_end_pa <= got.end_pa);
-    /* The metadata section before table_base_pa is the calculator's
-        `total_bytes`. table_base_pa = base_pa + align_up_4K(total). */
-    uint64_t metadata_end_off =
-        (got.layout.total_bytes + 0xFFFULL) & ~0xFFFULL;
-    assert_eq(got.base_pa + metadata_end_off, got.table_base_pa);
+    /* Per spec §3.2 (Task 3): table_base_pa follows the slab segment,
+     * NOT the metadata end. The chain is:
+     *   base + end_of_struct_off + slab_meta_bytes
+     *     → align_up_2M → +8*2MiB → table_base_pa. */
+    uint64_t sl_meta = got.base_pa + got.layout.end_of_struct_off
+                     + got.slab_meta_bytes;
+    uint64_t want_slab_start = (sl_meta + 0x1FFFFFULL) & ~0x1FFFFFULL;
+    uint64_t want_slab_end = want_slab_start + 8ULL * (1ULL << 21);
+    assert_eq(want_slab_end, got.slab_page_end_pa);
+    assert_eq(got.slab_page_end_pa, got.table_base_pa);
 }
 
-TEST_FUNC(test_arena_size_matches_metadata_plus_tables)
+TEST_FUNC(test_arena_size_matches_full_formula_chain)
 {
+    /* Updated for Task 3: the arena total now includes the slab
+     * segment (slab_meta_bytes + 8 * 2 MiB + alignment gap) between
+     * the PMM metadata and the page-table pool. The end-to-end chain
+     * is exercised end-to-end via compute_arena_end's single source
+     * of truth — see test_arena_layout_chain.c for the per-step
+     * invariants. */
     struct MEMORY_RANGE ram[1];
     build_single(0x40200000ULL, 0x40200000ULL + 4ULL * 1024 * 1024 * 1024, ram);
     struct aarch64_m1_arena got;
     int rc = aarch64_m1_plan(ram, 1, &got);
     assert_eq(0, rc);
-    uint64_t metadata_4k =
-        (got.layout.total_bytes + 0xFFFULL) & ~0xFFFULL;
-    uint64_t pool_bytes = got.table_pages * 0x1000ULL;
-    uint64_t wanted_2m =
-        ((metadata_4k + pool_bytes + (1ULL << 21) - 1ULL) & ~((1ULL << 21) - 1ULL));
-    assert_eq(got.end_pa - got.base_pa, wanted_2m);
+    /* Compute the chain end-to-end from base_pa: meta_end →
+     * slab_meta_end → align_up_2M → slab_page_end → table_end →
+     * align_up_2M = end_pa. */
+    uint64_t meta_end = got.base_pa + got.layout.end_of_struct_off;
+    uint64_t slab_meta_end = meta_end + got.slab_meta_bytes;
+    uint64_t slab_page_start = (slab_meta_end + 0x1FFFFFULL) & ~0x1FFFFFULL;
+    uint64_t slab_page_end = slab_page_start + 8ULL * (1ULL << 21);
+    uint64_t table_end = slab_page_end + (uint64_t)got.table_pages * 0x1000ULL;
+    uint64_t want_end = (table_end + 0x1FFFFFULL) & ~0x1FFFFFULL;
+    assert_eq(want_end, got.end_pa);
 }
 
 /* ── Sizing consistency ────────────────────────────────────── */
@@ -544,7 +584,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_prepare_failure_preserves_start_brk),
     TEST_ENTRY(test_prepare_success_sets_start_brk),
     TEST_ENTRY(test_arena_table_pool_inside_arena),
-    TEST_ENTRY(test_arena_size_matches_metadata_plus_tables),
+    TEST_ENTRY(test_arena_size_matches_full_formula_chain),
     TEST_ENTRY(test_layout_sizing_consistency),
 TEST_LIST_END
 

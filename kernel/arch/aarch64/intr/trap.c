@@ -26,15 +26,41 @@
 #include <arch/regs.h>
 #include <arch/aarch64/sync_fault.h>
 #include <arch/aarch64/gic.h>
+#include <arch/mmu.h>
 #include <arch/atomic.h>
 #include <arch/cpu.h>
 #include <arch/early_print.h>
 #include <arch/irq.h>
+#include <percpu/percpu.h>
 
 /* entry.S el1_irq_entry 的 C 落点：全量保存的 pt_regs + driver dispatch。 */
 void el1_irq(struct pt_regs *regs)
 {
     gic_dev_dispatch(gic_dev_current(), regs);
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  M3 (Task 10): SGI 3 = IPI_VECTOR_TLB shootdown handler.
+ *  Registered once by gic_init() (the handler table is global, so the
+ *  registration covers BSP and APs alike); gic_cpu_init() enables the
+ *  banked SGI 3 line on every CPU.
+ *
+ *  3-arg signature (kernel/include/arch/aarch64/gic.h:15); the handler
+ *  must NOT EOI — gic_dev_dispatch (kernel/arch/aarch64/intr/gic_driver.c)
+ *  writes back the full IAR to EOIR after the handler returns.
+ * ────────────────────────────────────────────────────────────── */
+void aarch64_tlb_sgi_handler(uint32_t intid, uint64_t param,
+                             struct pt_regs *regs)
+{
+    (void)intid; (void)param; (void)regs;
+    /* vmalle1 + dsb sy + isb */
+    arch_flush_tlb_all();
+    /* ACK: bump this CPU's generation counter so the initiator's
+     * tlb_ack_gen wait observes completion. Handler context is
+     * serialized per-CPU and IRQ-masked; cpu_id() is valid here
+     * (IRQs are only unmasked after percpu_install_gs/percpu_init). */
+    __atomic_fetch_add(&percpu_data[cpu_id()].tlb_ack_gen, 1,
+                       __ATOMIC_RELEASE);
 }
 
 void arch_install_exception_vectors(void)

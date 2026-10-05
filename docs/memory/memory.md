@@ -363,3 +363,96 @@ Linux/ARM 命名替换 x86_64 PML4/PDPT/PDE。详见 `docs/arch.md`「页表层�
 - `b68e1b1` 6 例 PMM host 测试（boot/slab RAM-relative 预留）
 
 SMP=1/2/4 + systest-repeat 7 连 268/268 验证。详见 `docs/superpowers/specs/2026-09-09-pmm-arch-neutral-design.md`（13 轮 review）+ `plans/2026-09-09-pmm-arch-neutral.md`（16 task）。
+
+## vmm 变更调用链审计（M3.1 验收）
+
+M3.1 audit gate（Task 13）：审计每条调用 vmm 变更 API（`tlb_shootdown` /
+`arch_vmm_*` / `vmm_*` 变更类）的调用链，确认 **irqsave 持锁段内不出现
+vmm 变更调用**，且 `tlb_sd_lock` 临界区内不嵌套其他锁。
+
+不变量（spec §5.4）：
+
+- I1: 任何 `spin_lock_irqsave` / irqsave 持锁段内禁止调用
+  `tlb_shootdown` / `arch_vmm_*` / vmm 变更 API（shootdown 的 ack 等待
+  需要本 CPU 保持开中断应答 TLB IPI）。
+- I2: `tlb_sd_lock` 必须是 plain `spin_lock`（等待者保持开中断）；
+  TLB IPI handler 自身不取任何锁。
+- I3: shootdown 目标集 = online ∧ `ipi_ready` ∧ ¬self（acquire 读
+  `ipi_ready`）；未就绪 CPU 永不被瞄准，其 `tlb_ack_gen` 不变，就绪后
+  下一次 shootdown 才递增。
+
+静态扫描由 `hosttests/cases/test_vmm_caller_audit.c`（源码扫描半）+
+`make PROFILE=aarch64-clang test-aarch64-audit`（nm 半：aarch64
+kernel.elf 中不得出现 `vma_*`/`uaccess_*`/`fork_*` 的 T/t 符号）共同把守。
+
+### aarch64（审计结论：全部 OK，无消除项）
+
+| 调用点 | 持锁 | 调 vmm 变更? | 结论 |
+|---|---|---|---|
+| `memory/slab.c` 全部持锁段（`slab_lock_acquire`，irqsave） | `slab_lock` (irqsave, 可重入计数) | 否（slab.c 无任何 vmm/tlb 调用） | OK |
+| `arch/aarch64/memory/early_arena.c` 全文件 | 无锁 | 否 | OK |
+| `arch/aarch64/memory/page_table.c` `aarch64_pt_*` 入口 | 无锁 | 否（仅 `vmm_gate_check()` 门探测 + 本地 `tlbi vae1`） | OK |
+| `arch/aarch64/memory/vmm_gate.c` 注册表操作 | `published_roots_lock` (plain spin) | 否 | OK |
+| `memory/tlb.c:tlb_shootdown` | `tlb_sd_lock` (plain spin, I2) | 否（临界区内只 flush 本地 + 读 gen + `ipi_broadcast`） | OK（无嵌套锁：恰 1 次 `spin_lock`，2 次 `spin_unlock`——超时 FATAL 早退 + 正常退出） |
+| `arch/aarch64/intr/ipi.c:ipi_broadcast` | 无锁（lock-free SGI 发送） | 否 | OK |
+
+### x86_64（现状记录；不在 aarch64 kernel 白名单内，x86 现状不变）
+
+| 调用点 | 持锁 | 调 vmm 变更? | 结论 |
+|---|---|---|---|
+| `memory/vmm.c:vmm_map_page`（kernel_map 共享 PMD 路径） | 无 | 是 (`tlb_shootdown`) | OK |
+| `memory/vmm.c:vmm_unmap_page` | 无 | 是 (`tlb_shootdown`) | OK |
+| `memory/vma.c:mm_set_brk`（grow 提交） | `mm->lock` (plain spin, 非 irqsave) | 是 (`tlb_shootdown`) | OK — 见排序规则 R1 |
+| `memory/vma.c:mm_set_brk`（shrink 提交） | `mm->lock` (plain spin) | 是 (`tlb_shootdown` + `vmm_unmap_4k_page`) | OK — 见 R1 |
+| `memory/uaccess.c:prepare_user_write_range_locked`（COW 写授权提交） | `mm->lock` (调用方 `prepare_user_write_range` 持锁) | 是 (`tlb_shootdown`) | OK — 见 R1 |
+| `sched/task.c:fork_mm_copy`（fork COW 防护提交） | 无（PTE 改动后、无锁尾部调用） | 是 (`tlb_shootdown`) | OK |
+| `core/printk.c:frame_buffer_init`（boot 期一次性映射） | 无 | 是 (`tlb_shootdown`) | OK（boot 期单 CPU） |
+| `arch/x86_64/intr/trap.c:659`（heap COW #PF 解析） | `mm->lock` (**irqsave**，仅 heap VMA COW 路径) | 否（锁内只改 PTE；`flush_tlb()` 在解锁**之后**） | OK（本行自身不违 I1）——但见下方 R1 例外与死锁场景 |
+
+### 排序规则 R1（由上表归纳）
+
+x86 存在三条 `mm->lock`(plain spin) 持锁跨 `tlb_shootdown` 的链。
+允许成立的**修正后**前提（若破坏须消除该链）：
+
+1. `mm->lock` **在 vma.c / uaccess.c 的 shootdown 调用方处以 plain
+   `spin_lock` 获取**（无 irqsave 变体）。
+   **例外（已知，Fix round 1 修正）**：`arch/x86_64/intr/trap.c:659`
+   在 heap VMA COW #PF 路径以 `spin_lock_irqsave(&t->mm->lock)` 取同一把
+   锁（重入/中断保护用途，语义未做完整分析）。该行自身**不在 irqsave 段内
+   调 vmm 变更 API**（不违 I1，见上表新增行），但它破坏了「mm->lock 永不
+   irqsave」的原前提，使前提 2 的保护出现漏洞（见下）。
+2. ~~「目标 CPU 正自旋等 `mm->lock`」不阻碍其应答 shootdown~~ —— 仅对
+   plain 自旋成立。**若目标 CPU 在 irqsave 下自旋等 `mm->lock`
+   （trap.c:659 路径），其本地中断被屏蔽，无法应答 TLB IPI。**
+3. 锁序固定为 `mm->lock` → `tlb_sd_lock`，任何反向获取都是 bug。
+
+#### R1 潜在死锁场景（记录为 x86 长期约束，本任务不改 x86 代码）
+
+- CPU A：在 `vma.c:mm_set_brk` / `uaccess.c:prepare_user_write_range_locked`
+  持 plain `mm->lock`（同一 mm），进入 `tlb_shootdown`，等待目标集合中
+  CPU B 的 ack（超时 = `tlb_shootdown_panic` FATAL）。
+- CPU B：同一时刻在同一 mm 的已提交 heap 页上触发 COW #PF，进入
+  `trap.c:659` 的 `spin_lock_irqsave(&mm->lock)` 自旋——本地中断被屏蔽，
+  **永远无法应答 A 的 TLB IPI** → A 的 ack 等待撑到超时 → FATAL panic。
+- 触发窗口需要「同一 mm、A 正在 brk/COW 提交 + shootdown、B 恰在 heap
+  COW #PF」三者并发，概率低但非零。
+- 历史背景：Task 12 之前的旧 tlb.c 超时路径**静默继续**（silently
+  continue），因此这一楔死此前就以更弱的形式存在（静默跳过 → 陈旧 TLB
+  条目存活）；Task 12 的 FATAL 化只是把它从「静默错误」变成「响亮 panic」，
+  不是引入新缺陷。
+- 约束：未来消除方向是把 trap.c 的 COW 解析改为 trylock + 重打 #PF，或
+  把 mm->lock 拆出 irqsave 需求；在任何此类改动落地前，**不得**再新增
+  「plain mm->lock 持锁跨 tlb_shootdown」或「irqsave 取 mm->lock」的
+  调用点。x86 行为稳定性是计划约束，本任务不改 trap.c / vma.c / uaccess.c。
+
+### MODE=ipc-noready 的偏差说明
+
+Brief Step 3 要求新增 QEMU 子模式 `MODE=ipc-noready` 验证「shootdown 只等
+就绪者、未就绪 AP 的 gen 不变」。经评估 `mk/components/run.mk` 新增模式的
+改版成本（prep/run helper 对 + image 变体 + harness parser）与收益不成
+比例——该行为本质是 `tlb_shootdown` 的目标集过滤逻辑，已在 hosttest 层
+覆盖：`test_tlb_serial_protocol.c` 新增
+`case_unready_gen_defers_until_ready`（online 但 `ipi_ready=0` 的 AP
+gen 不变 → 发布 ready → 下一次 shootdown gen 恰 +1 → 再一次再 +1），
+连同既有的 `case_mask_excludes_unready_offline_self`。QEMU 侧由
+`MODE=smp` 的 IPI 自测 + TLB 并存运行兜底（无死锁/超时）。

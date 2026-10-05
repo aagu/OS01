@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <memory/vmm.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
 static uint64_t tables[2][512] __attribute__((aligned(4096)));
 static int allocations, fail_at;
 void *__wrap_calloc(size_t n, size_t size)

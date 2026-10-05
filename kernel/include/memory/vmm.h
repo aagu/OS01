@@ -1,70 +1,63 @@
 #ifndef _KERNEL_VMM_H
 #define _KERNEL_VMM_H
 
+/*
+ * Public, arch-neutral VMM semantic layer (aarch64 M3.2 Task 14).
+ *
+ * This header exposes ONLY:
+ *   - the VM_* semantic bits and their composite values,
+ *   - the arch_vmm_* semantic API declarations,
+ *   - the shared mmap type / kernel_map and TLB helpers.
+ *
+ * It must NOT define any x86 PAGE_* hardware PTE bits; those live in
+ * the x86-private <arch/x86_64/pte.h>, which only x86-only files
+ * include.  Per-arch descriptor bit encodings and software-bit
+ * positions live in <arch/<arch>/vmm_backend.h>.
+ */
+
 #include <stdint.h>
 #include <stddef.h>
 #include <arch/mmu.h>
 
-//page table attribute
+// ── Arch-neutral semantic page-permission bits (spec §4.2) ──
+#define VM_PRESENT      (1UL << 0)   // translation is valid
+#define VM_WRITE        (1UL << 1)   // writable
+#define VM_USER         (1UL << 2)   // user-accessible
+#define VM_NO_EXEC      (1UL << 3)   // execute-never
+#define VM_HUGE         (1UL << 4)   // block descriptor (2 MiB on x86_64/aarch64 L2)
+#define VM_NOCACHE      (1UL << 5)   // device / uncacheable memory type
+#define VM_PROTNONE     (1UL << 6)   // software: PROT_NONE stash (phys kept)
+#define VM_COW          (1UL << 7)   // software: COW-shared, write faults
 
-//bit 63 Execution Disable:
-#define PAGE_NO_EXEC       (1UL << 63)
-//bit 12 Page Attribute Table:
-#define PAGE_PAT      (1UL << 12)
-//bit 8 Global Page:1,global;0,part
-#define PAGE_GLOBAL   (1UL << 8)
-//bit 7 Page Size:1,big page;0,small page — "this entry is a leaf"
-#define PAGE_HUGE     (1UL << 7)
-//bit 6 Dirty:1,dirty;0,clean
-#define PAGE_DIRTY    (1UL << 6)
-//bit 5 Accessed:1,visited;0,unvisited
-#define PAGE_ACCESSED (1UL << 5)
-//bit 4 Page Level Cache Disable
-#define PAGE_CACHE_DISABLE   (1UL << 4)
-//bit 3 Page Level Write Through
-#define PAGE_WRITE_THROUGH   (1UL << 3)
-//bit 2 User Supervisor:1,user and supervisor;0,supervisor
-#define PAGE_USER     (1UL << 2)
-//bit 1 Read Write:1,read and write;0,read
-#define PAGE_WRITE    (1UL << 1)
-//bit 0 Present:1,present;0,not present
-#define PAGE_VALID    (1UL << 0)
+// Composite values (spec §4.2 12-legal-combination table)
+#define VM_KERNEL_RW    (VM_PRESENT | VM_WRITE)
+#define VM_KERNEL_RO    (VM_PRESENT)
+#define VM_USER_RW      (VM_PRESENT | VM_USER | VM_WRITE)
+#define VM_USER_RO      (VM_PRESENT | VM_USER)
+// Device memory: RW, uncacheable, execute-never.  OR in VM_USER and/or
+// VM_HUGE for the user/device and block/device combinations.
+#define VM_DEVICE       (VM_PRESENT | VM_WRITE | VM_NOCACHE | VM_NO_EXEC)
 
-// Hierarchy wrappers. Naming uses the Linux / ARM PGD-PUD-PMD-PTE
-// convention (matches aarch64's native nomenclature; the x86_64
-// hardware registers are PML4 / PDPT / PDE / PTE -- the two naming
-// schemes are equivalent). The bit positions above are still
-// x86_64 PTE-format-specific; an aarch64 port will need to redefine
-// these constants in an arch/<arch>/page.h header and re-route
-// vmm.c through that.
-#define PAGE_KERNEL_PGD     (PAGE_WRITE     | PAGE_VALID)
-#define PAGE_KERNEL_PUD     (PAGE_WRITE     | PAGE_VALID)
-#define PAGE_KERNEL_PMD     (PAGE_HUGE      | PAGE_WRITE     | PAGE_VALID)
-// MMIO (uncacheable): PCD=1, PWT=1 for Strong Uncacheable (UC)
-#define PAGE_KERNEL_PMD_NOCACHE  (PAGE_HUGE | PAGE_WRITE | PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH | PAGE_VALID)
-#define PAGE_USER_PGD       (PAGE_USER      | PAGE_WRITE     | PAGE_VALID)
-#define PAGE_USER_PUD       (PAGE_USER      | PAGE_WRITE     | PAGE_VALID)
-#define PAGE_USER_PMD       (PAGE_HUGE      | PAGE_USER      | PAGE_WRITE     | PAGE_VALID)
-
-// 4KB page table entry flags (no PAGE_HUGE — hardware recognizes as 4KB)
-#define PAGE_USER_PTE       (PAGE_USER  | PAGE_WRITE     | PAGE_VALID)   // user R/W 4KB
-#define PAGE_USER_PTE_RO    (PAGE_USER  | PAGE_VALID)                    // user read-only 4KB
-#define PAGE_KERNEL_PTE     (PAGE_WRITE | PAGE_VALID)                    // kernel 4KB
-#define PAGE_PROTNONE       (1UL << 9)   // software bit: PROT_NONE stash marker
-// bit 9 is x86_64 PTE ignored. mprotect(PROT_NONE) sets this, clears Valid
-// but keeps phys.  mprotect(PROT_READ) walks PTEs to restore Valid + clear this.
-// do_munmap/vma_free_all check this bit to know phys is valid for free_4k_page.
-
-#define PAGE_COW            (1UL << 10)  // software bit: COW-shared, write triggers fault
-// bit 10 is x86_64 PTE ignored.  Fork sets this on writable PTEs, clears PAGE_WRITE.
-// COW fault handler checks this bit; if set with V=1,W=1, resolves COW.
-
-// 4KB PTE functions
-int      vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
-                         uint64_t virt, uint64_t flags);
-void     vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt);
-uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
-                      uint64_t flags, int allocate);
+// ── Arch-neutral semantic API (backends: Task 15 aarch64, Task 16) ──
+// All functions take the address-space root as a raw pointer (mmap).
+// vm_flags are VM_* combinations; invalid combinations return -EINVAL
+// (e.g. VM_NOCACHE without VM_NO_EXEC).  None of these ever free a
+// data page — free/COW ownership stays with the caller-side logic.
+int arch_vmm_init(void);
+int arch_vmm_map_4k_new(uint64_t *pgdir, uint64_t phys, uint64_t virt,
+                        uint32_t vm_flags);
+int arch_vmm_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
+                       uint32_t vm_flags, uint64_t *old_phys_out,
+                       uint32_t *old_vm_out);
+int arch_vmm_unmap_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
+                      uint32_t *old_vm_out);
+/* Three-state query: 0 mapped / AARCH64_PT_EPROT_NONE stashed / -ENOENT. */
+int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
+                      uint32_t *vm_out);
+int arch_vmm_map_2m(uint64_t *pgdir, uint64_t phys, uint64_t virt,
+                    uint32_t vm_flags);
+int arch_vmm_unmap_2m(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out);
+int arch_vmm_split_2m_to_4k(uint64_t *pgdir, uint64_t virt);
 
 // Validate-and-lock a user write range before the kernel writes into it
 // (getrandom / devfs random read).  Returns 0 with current->mm->pgdir_lock HELD
@@ -89,7 +82,11 @@ void vmm_map_page(uint64_t *pgdir, uintptr_t physical_address,
                   uintptr_t virtual_address, uint64_t flags);
 uintptr_t vmm_unmap_page(uint64_t *pgdir, uintptr_t virtual_address);
 mmap vmm_alloc_map(void);
-void vmm_free_user_map(mmap pgdir);
+
+// 4KB PTE-level map helpers (x86 backend; raw pgdir)
+int      vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
+                         uint64_t virt, uint64_t flags);
+void     vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt);
 
 /* ── Boot-initializer checked table allocation (aarch64 M1 plan
  * Task 5) ─────────────────────────────────────────────────────

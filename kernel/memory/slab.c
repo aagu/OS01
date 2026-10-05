@@ -6,7 +6,21 @@
 #include <string.h>
 
 #include <arch/spinlock.h>
+#include <arch/irq.h>
+#include <arch/cpu.h>
 #include <percpu/percpu.h>
+
+/* x86 weak fallback for the slab boot assertion bound (v4 fix for v3
+ * review item 8: a UINT64_MAX + meta_bytes computation here would wrap
+ * into a small address and fail the assert, so the fallback simply
+ * reports "no bound" and never participates in an addition). The
+ * aarch64 strong implementation lives in
+ * kernel/arch/aarch64/memory/early_arena.c and returns the absolute VA
+ * one past the slab metadata segment. */
+__attribute__((weak)) uint64_t PMMngr_end_of_struct_upper_bound(void)
+{
+    return (uint64_t)-1;  /* x86 skips this aarch64-specific assertion */
+}
 
 struct Slab_Cache kmalloc_cache_size[16] = 
 {
@@ -33,9 +47,8 @@ static bool kmalloc_creating = false;
 static spinlock_T slab_lock = { .lock = 1L };
 static uint32_t slab_lock_depth[NR_CPUS];
 
-static inline uint64_t slab_lock_acquire(void) {
-    uint64_t flags;
-    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+static inline arch_irq_state_t slab_lock_acquire(void) {
+    arch_irq_state_t flags = arch_local_irq_save();
     // Early boot: GS not installed yet, single-CPU, skip locking.
     if (percpu_data[0].online) {
         uint32_t cpu = cpu_id();
@@ -44,14 +57,13 @@ static inline uint64_t slab_lock_acquire(void) {
     }
     return flags;
 }
-static inline void slab_lock_release(uint64_t flags) {
+static inline void slab_lock_release(arch_irq_state_t flags) {
     if (percpu_data[0].online) {
         uint32_t cpu = cpu_id();
         if (--slab_lock_depth[cpu] == 0)
             spin_unlock(&slab_lock);
     }
-    if (flags & (1UL << 9))   // RFLAGS_IF
-        __asm__ __volatile__("sti" ::: "memory");
+    arch_local_irq_restore(flags);
 }
 
 struct Slab * kmalloc_create(uint64_t size)
@@ -374,7 +386,15 @@ size_t slab_init()
         page = Phy_to_2M_Page(j << PAGE_2M_SHIFT);
         /* Reserve the descriptor's RAM-relative bit, not its physical PFN. */
         uint64_t page_index = (uint64_t)(page - PMMngr.pages_struct);
-        PMMngr.bits_map[page_index >> 6] |= 1UL << (page_index % 64);
+        uint64_t bm_word = page_index >> 6;
+        uint64_t bm_bit  = 1UL << (page_index & 63);
+        if (PMMngr.bits_map[bm_word] & bm_bit) {
+            /* Already reserved by boot (aarch64 arena / range
+             * reservation pre-marks these frames): skip ++/-- and
+             * page_init to avoid double-counting. */
+            continue;
+        }
+        PMMngr.bits_map[bm_word] |= bm_bit;
         page->zone_struct->page_using_count++;
         page->zone_struct->page_free_count--;
         page_init(page, PG_PTable_Mapped | PG_Kernel_Init | PG_Kernel);
@@ -395,7 +415,16 @@ size_t slab_init()
 
 		/* Reserve the descriptor's RAM-relative bit, not its physical PFN. */
         uint64_t page_index = (uint64_t)(page - PMMngr.pages_struct);
-        PMMngr.bits_map[page_index >> 6] |= 1UL << (page_index % 64);
+        uint64_t bm_word = page_index >> 6;
+        uint64_t bm_bit  = 1UL << (page_index & 63);
+        if (PMMngr.bits_map[bm_word] & bm_bit) {
+            /* Already boot-reserved (see j-loop above): keep the page,
+             * populate cache_pool->{page,address}, skip ++/--. */
+            kmalloc_cache_size[i].cache_pool->page = page;
+            kmalloc_cache_size[i].cache_pool->address = virtual;
+            continue;
+        }
+        PMMngr.bits_map[bm_word] |= bm_bit;
 		page->zone_struct->page_using_count++;
 		page->zone_struct->page_free_count--;
 
@@ -408,6 +437,24 @@ size_t slab_init()
 	debug_mm("3.PMMngr.bits_map:%#018lx\tzone_struct->page_using_count:%d\tzone_struct->page_free_count:%d\n",*PMMngr.bits_map,PMMngr.zones_struct->page_using_count,PMMngr.zones_struct->page_free_count);
 
 	debug_mm("start_code:%#018lx,end_code:%#018lx,end_data:%#018lx,end_brk:%#018lx,end_of_struct:%#018lx\n",PMMngr.start_code,PMMngr.end_code,PMMngr.end_data,PMMngr.start_brk, PMMngr.end_of_struct);
+
+	/* Boot-time invariant (M2 Task 6): the slab metadata written above
+	 * must fit inside the segment the arena planner reserved for it.
+	 * PMMngr_end_of_struct_upper_bound() is a strong aarch64 override
+	 * (early_arena.c) returning slab_meta_start_va + meta_bytes; the
+	 * x86 weak fallback returns (uint64_t)-1 so the assert self-skips
+	 * there. (uint64_t)-1 also means "no bound" on aarch64 pre-prepare
+	 * or checked-overflow, so the comparison can never false-fail. */
+	if (PMMngr.end_of_struct > PMMngr_end_of_struct_upper_bound()) {
+		color_printk(RED, BLACK,
+		             "slab_init() FATAL: end_of_struct=%#018lx exceeds slab_meta upper bound=%#018lx\n",
+		             PMMngr.end_of_struct,
+		             PMMngr_end_of_struct_upper_bound());
+		/* kpanic is not in the aarch64 kernel source whitelist; the
+		 * pmm.c fatal-path convention (color_printk + arch_cpu_halt)
+		 * is used instead. */
+		arch_cpu_halt();
+	}
 
 	return 1;
 }
