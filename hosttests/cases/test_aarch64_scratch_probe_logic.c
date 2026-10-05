@@ -101,6 +101,15 @@ static void mock_kputs(const char *s)
 
 static uint32_t mock_dtb_cpu_count(void) { return g_dtb_cpu_count; }
 static uint32_t mock_ipi_ready_count_get(void) { return g_ipi_ready_count; }
+
+static void mock_kputu(uint64_t v)
+{
+    char tmp[24];
+    int i = 0;
+    if (v == 0) { mock_kputs("0"); return; }
+    while (v > 0) { tmp[i++] = (char)('0' + (v % 10)); v /= 10; }
+    while (i > 0) { char c[2] = { tmp[--i], 0 }; mock_kputs(c); }
+}
 static uint64_t mock_cycle_counter(void)
 {
     uint64_t cur = g_cycle_counter;
@@ -236,6 +245,7 @@ static struct aarch64_m3_probe_ops build_mock_ops(void)
     ops.ap_work_submit      = mock_ap_work_submit;
     ops.ap_work_wait        = mock_ap_work_wait;
     ops.kputs               = mock_kputs;
+    ops.kputu               = mock_kputu;
     ops.halt                = mock_halt;
     return ops;
 }
@@ -257,8 +267,8 @@ static void mock_reset(void)
     g_alloc_data_p1_calls = g_alloc_data_p2_calls = 0;
     g_free_data_p1_calls = g_free_data_p2_calls = 0;
     g_map_rc = g_update_rc = g_unmap_rc = 0;
-    g_query_at_start_rc = -2 /* -ENOENT */;
-    g_query_at_end_rc = -2 /* -ENOENT */;
+    g_query_at_start_rc = -ENOENT;
+    g_query_at_end_rc = -ENOENT;
     g_query_scratch_pa = 0;
     g_query_scratch_vm = 0;
     memset(g_submit_count_per_cpu, 0, sizeof(g_submit_count_per_cpu));
@@ -316,7 +326,32 @@ static void test_zero_ap_ready_fails(void)
     }
     assert_true(strstr(mock_log,
         "M3-SHOOTDOWN-PROBE: FAIL ap-not-ready") != NULL);
+    /* v1 review item 14: the absent CPU ids must be named. cpu 1 is
+     * the only AP and never published. */
+    assert_true(strstr(mock_log, "FAIL ap-not-ready 1") != NULL);
     assert_true(strstr(mock_log, "M3-SHOOTDOWN-PROBE: OK") == NULL);
+}
+
+static void test_ap_not_ready_names_multiple_absent_ids(void)
+{
+    TEST_SUITE("timeout with 2 absent APs → FAIL ap-not-ready 1,2");
+    mock_reset();
+    g_dtb_cpu_count = 4;
+    g_ipi_ready_count = 2;          /* BSP + cpu1 only */
+    g_per_cpu_ipi_ready[0] = true;
+    g_per_cpu_ipi_ready[1] = true;
+    g_cycle_step = M3_PROBE_DEADLINE_CYCLES + 1;
+    struct aarch64_m3_probe_ops ops = build_mock_ops();
+
+    if (setjmp(halt_jb) == 0) {
+        halt_armed = 1;
+        aarch64_m3_shootdown_probe_body(&ops);
+        assert_true(0 && "probe must halt when APs 2,3 never publish");
+    }
+    assert_true(strstr(mock_log,
+        "M3-SHOOTDOWN-PROBE: FAIL ap-not-ready 2,3") != NULL);
+    /* Published cpu1 must NOT be listed. */
+    assert_true(strstr(mock_log, "ap-not-ready 2,3\n") != NULL);
 }
 
 static void test_requires_at_least_one_AP_fails(void)
@@ -421,6 +456,31 @@ static void test_alloc_data_fail(void)
         "M3-SHOOTDOWN-PROBE: FAIL alloc-data-P1") != NULL);
 }
 
+static void test_ap_read_B_stale_fails(void)
+{
+    TEST_SUITE("second broadcast still returns A (stale read) → FAIL ap-read-B");
+    mock_reset();
+    g_dtb_cpu_count = 2;
+    g_ipi_ready_count = 2;
+    g_per_cpu_ipi_ready[0] = true;
+    g_per_cpu_ipi_ready[1] = true;
+    /* g_pattern_switch_enabled stays false: the AP's second
+     * WORK_READ64 returns the SAME pattern as the first — the shape a
+     * stale (un-shot-down) TLB entry produces on real hardware. */
+    struct aarch64_m3_probe_ops ops = build_mock_ops();
+
+    if (setjmp(halt_jb) == 0) {
+        halt_armed = 1;
+        aarch64_m3_shootdown_probe_body(&ops);
+        assert_true(0 && "probe must halt on stale ap-read-B");
+    }
+    assert_true(strstr(mock_log,
+        "M3-SHOOTDOWN-PROBE: FAIL ap-read-B") != NULL);
+    /* The shootdown itself completed before the read was judged. */
+    assert_eq(1, g_tlb_shootdown_calls);
+    assert_eq(2, g_ap_work_submit_calls);
+}
+
 /* ── Source-scan: main.c wires the call under the dtb >= 2 gate ── */
 
 static char *slurp(const char *path)
@@ -470,6 +530,8 @@ static void test_main_calls_probe_after_ipi_ready_under_dtb_cpu_gate(void)
 TEST_LIST_BEGIN
     TEST_ENTRY(test_happy_path_two_cpus),
     TEST_ENTRY(test_zero_ap_ready_fails),
+    TEST_ENTRY(test_ap_not_ready_names_multiple_absent_ids),
+    TEST_ENTRY(test_ap_read_B_stale_fails),
     TEST_ENTRY(test_requires_at_least_one_AP_fails),
     TEST_ENTRY(test_scratch_non_empty_fails),
     TEST_ENTRY(test_ap_read_A_fails),

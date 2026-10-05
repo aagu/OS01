@@ -28,11 +28,13 @@ void percpu_init(uint32_t cpu, uint32_t apic_id)
      * tlb_shootdown()'s target snapshot (online ∧ ipi_ready ∧ ¬self,
      * memory/tlb.c) was always EMPTY on aarch64 — shootdowns degraded
      * to a local flush and APs kept stale TLB entries, which the
-     * production shootdown probe caught as `FAIL ap-read-B`. Setting
-     * it here (before ipi_ready publication) is safe: tlb_shootdown
-     * additionally requires ipi_ready, which is published only after
-     * the AP has IRQs open. */
-    percpu_data[cpu].online = 1;
+     * production shootdown probe caught as `FAIL ap-read-B`. Release
+     * store per the §6.2b dual-state protocol (the consuming BSP
+     * acquire-syncs on ipi_ready_count). Setting it here (before
+     * ipi_ready publication) is safe: tlb_shootdown additionally
+     * requires ipi_ready, which is published only after the AP has
+     * IRQs open. */
+    __atomic_store_n(&percpu_data[cpu].online, 1, __ATOMIC_RELEASE);
     // Store self-pointer as the first qword so GS:0 yields &percpu_data[cpu]
     percpu_data[cpu].self = (uint64_t)&percpu_data[cpu];
     rbtree_init(&percpu_data[cpu].run_queue);

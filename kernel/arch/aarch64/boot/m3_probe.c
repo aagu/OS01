@@ -138,6 +138,7 @@ static const struct aarch64_m3_probe_ops g_real_ops = {
     .ap_work_wait        = ap_work_wait,
 
     .kputs               = kputs,
+    .kputu               = kputu,
     .halt                = prod_halt,
 };
 

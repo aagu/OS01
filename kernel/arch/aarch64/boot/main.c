@@ -550,9 +550,10 @@ void aarch64_main(const struct boot_context *handoff)
      * PSCI CPU_ON. percpu_install_gs/percpu_init are pure memory setup
      * with no hardware dependency; doing them here closes the window
      * where an AP is already running while the BSP has no runtime
-     * percpu_t and online==0. percpu_init deliberately leaves the
-     * ipi_ready tail (and online) alone, so set online explicitly with a
-     * release store. num_cpus gates the TLB shootdown IPI loop
+     * percpu_t and online==0. percpu_init now also sets online with a
+     * release store (M3.5 Task 25 fix); this BSP store is redundant
+     * but kept as belt-and-braces for the pre-AP window. num_cpus
+     * gates the TLB shootdown IPI loop
      * (kernel/memory/tlb.c), so it must also be visible before any AP
      * can run. smp_starting_enter() latches the one-way SMP gate: from
      * here on vmm_gate_check() refuses a VMM change until every DTB CPU

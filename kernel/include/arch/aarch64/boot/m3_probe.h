@@ -44,7 +44,9 @@
  *     dtb_cpu_count() < 2 (probe invoked on -smp 1).
  *   - FAIL ap-not-ready
  *     ipi_ready_count_get() does not reach dtb_cpu_count() before
- *     the probe's deadline (~2 s of arch_cycle_counter).
+ *     the probe's deadline (~2 s of arch_cycle_counter). The FAIL
+ *     line names the absent logical CPU ids (comma-separated,
+ *     spec §7.3 "FAIL ap-not-ready <ids>").
  *   - FAIL scratch-non-empty
  *     arch_vmm_query_4k(SCRATCH_VA) returns something other than
  *     -ENOENT before any map_4k_new.
@@ -133,6 +135,7 @@ struct aarch64_m3_probe_ops {
 
     /* Output + terminal. */
     void (*kputs)(const char *s);  /* may be NULL — body skips logging */
+    void (*kputu)(uint64_t v);     /* may be NULL — body skips digits */
     void (*halt)(void);            /* MUST NOT return on production */
 };
 
@@ -142,6 +145,14 @@ static inline void
 aarch64_m3_probe_cputs(const struct aarch64_m3_probe_ops *ops, const char *s)
 {
     if (ops && ops->kputs) ops->kputs(s);
+}
+
+/* Unsigned decimal output through the ops surface (skipped when the
+ * hook is NULL — mirrors aarch64_m3_probe_cputs). */
+static inline void
+aarch64_m3_probe_cputu(const struct aarch64_m3_probe_ops *ops, uint64_t v)
+{
+    if (ops && ops->kputu) ops->kputu(v);
 }
 
 /* FAIL prints "M3-SHOOTDOWN-PROBE: FAIL <reason>\n" and invokes
@@ -239,8 +250,27 @@ aarch64_m3_shootdown_probe_body(const struct aarch64_m3_probe_ops *ops)
      * smp_boot_aps() returns earlier so a poll here is necessary. */
     uint64_t start = ops->cycle_counter();
     while (ops->ipi_ready_count_get() < cpu_count) {
-        if (ops->cycle_counter() - start > M3_PROBE_DEADLINE_CYCLES)
-            AARCH64_M3_PROBE_FAIL(ops, "ap-not-ready");
+        if (ops->cycle_counter() - start > M3_PROBE_DEADLINE_CYCLES) {
+            /* v1 review item 14: name the absent CPUs. Snapshot the
+             * per-CPU ipi_ready flags at timeout and print the logical
+             * ids of every AP that never published (BSP = cpu 0 is
+             * always published by the time the probe runs; it is not
+             * listed). Format: "M3-SHOOTDOWN-PROBE: FAIL ap-not-ready
+             * <ids>" with ids comma-separated ("1", "1,2", ...). */
+            aarch64_m3_probe_cputs(ops,
+                "M3-SHOOTDOWN-PROBE: FAIL ap-not-ready ");
+            bool first = true;
+            for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
+                if (ops->ipi_ready_check(cpu))
+                    continue;
+                if (!first)
+                    aarch64_m3_probe_cputs(ops, ",");
+                first = false;
+                aarch64_m3_probe_cputu(ops, cpu);
+            }
+            aarch64_m3_probe_cputs(ops, "\n");
+            ops->halt();
+        }
     }
 
     /* Step 3: scratch VA must be absent before any map_4k_new.
