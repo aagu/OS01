@@ -576,6 +576,20 @@ def test_gfx(tester):
               f"(last test marker: {m.group(0) if m else '<none>'!r})")
         return False
     print("PASS: [TERM SCREEN TEST] PASS marker observed")
+
+    # ── Step D: /bin/desktop smoke — GUI desktop smoke E2E ─
+    tester.send_line("/bin/desktop smoke")
+
+    passed = tester.read_until("[DESKTOP] SMOKE PASS", timeout=tester.timeout)
+    if passed is None:
+        time.sleep(1)
+        log = tester._read_available().decode('utf-8', errors='replace')
+        marker_re = re.compile(r"\[DESKTOP\][^\n]*")
+        m = marker_re.search(log)
+        print(f"FAIL: /bin/desktop smoke did not produce PASS marker "
+              f"(last test marker: {m.group(0) if m else '<none>'!r})")
+        return False
+    print("PASS: [DESKTOP] SMOKE PASS marker observed")
     return True
 
 
