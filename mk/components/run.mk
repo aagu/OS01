@@ -551,6 +551,10 @@ test-static: test-runtime
 	  --runtime-inc "runtime/include" \
 	  --llvm-nm "$(LLVM_NM)" \
 	  --clang "$(CLANG)"
+	python3 qemutests/stack_frame_audit.py \
+	  --elf "$(KERNEL_BUILD_DIR)/kernel.elf" \
+	  --llvm-objdump "$(LLVM_OBJDUMP)" \
+	  --limit 512
 	@$(MAKE) --no-print-directory test-user-canary
 
 # ── test-runtime: original recipe (lines 364-385 of run.mk) ──
@@ -739,7 +743,7 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-static'         '(rootfs)'     'All 9 static audits (runtime, stack-canary, validate-kernel, link-order, kernel-layout, kernel-canary-contract, test-user-canary, syscall-boundary)';
+		 'test-static'         '(rootfs)'     'All 10 static audits (runtime, stack-canary, validate-kernel, link-order, kernel-layout, kernel-canary-contract, test-user-canary, syscall-boundary, header-object, stack-frame)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-kernel-selftest' '(rootfs)'   'QEMU built-in selftests (isolated selftest image, KERNEL_SELFTEST=1)';
 	@printf '  %-22s %-13s %s\n' \
