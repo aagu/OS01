@@ -13,16 +13,24 @@
  * Cases per the brief:
  *   1. valid ttbr1 (nonzero, 4 KiB aligned, < 1 TiB) → rc = 0,
  *      kernel_map == (mmap)(pa + ARCH_PAGE_OFFSET).
- *   2. pa == 0  (raw == 0) → -EINVAL, kernel_map untouched.
+ *   2. pa == 0  (raw == 0) → -EINVAL via the `pa == 0` guard,
+ *      kernel_map untouched.
  *   3. pa == 0  via permitted non-base bits only (masked base = 0)
- *      → -EINVAL, kernel_map untouched.
- *   4. PA at 1 TiB boundary (raw value's bit 40 set) — the
- *      AARCH64_TTBR_BASE_MASK strips bit 40, so the masked base is 0
- *      and the existing pa == 0 check rejects it. The contract
- *      observable here is -EINVAL + kernel_map untouched.
- *   5. PA above 1 TiB with the same bit 12 set so the mask still
- *      leaves a non-zero base — exposes whether the PA < 1 TiB
- *      check actually triggers. (See note below on the mask width.)
+ *      → -EINVAL via the `pa == 0` guard, kernel_map untouched.
+ *   4. PA at 1 TiB boundary (raw = 1<<40, no low bits) → masked PA
+ *      = 1<<40, fails the `pa >= 1 TiB` guard → -EINVAL. The
+ *      rejection here MUST come from the PA-boundary guard, not the
+ *      pa == 0 guard — the wider AARCH64_TTBR_BASE_MASK
+ *      (bits [47:12]) preserves bit 40 so PA = 0x10000000000 survives
+ *      the mask. If a future change ever silently truncates the mask
+ *      again, this case's PA value would route through the wrong
+ *      code path; the assertion `rc == -EINVAL` still holds either
+ *      way, but the test name + comment pair documents the intended
+ *      path. (See NOTE on the mask width below.)
+ *   5. PA above 1 TiB with bit 12 also set (raw = 1<<40 + 1<<12) →
+ *      masked PA = 0x10000001000, fails the `pa >= 1 TiB` guard
+ *      → -EINVAL. Without the wider mask, the masked PA would be
+ *      0x1000 and slip through as a valid 4 KiB-aligned PA below 1 TiB.
  *
  * NOTE on the unaligned-PA case: AARCH64_TTBR_BASE_MASK clears bits
  * [11:0] of the raw value, so any masked base is automatically 4 KiB
@@ -32,17 +40,14 @@
  * cannot be triggered through the documented entry contract.
  *
  * NOTE on case 5 and the AARCH64_TTBR_BASE_MASK width: the literal
- * in kernel/include/arch/aarch64/page_table.h is
- * `UINT64_C(0x000000fffffff000)` — only 7 f's (bits 12-39, 28 bits
- * wide), NOT the [47:12] window the header comment claims. The
- * production mask therefore drops bit 40 (the top of the 40-bit PA
- * space), so a raw value with bits 40 and 12 set becomes PA = 0x1000
- * after masking — nonzero, 4 KiB aligned, < 1 TiB — and arch_vmm_init
- * accepts it. Case 5's assertion `rc == -EINVAL` therefore RED's on
- * the current code: the kernel mask needs widening to bits [47:12]
- * (literal `UINT64_C(0x0000fffffffff000)`). This test pins the bug
- * so the next increment can land the fix; without case 5 the PA <
- * 1 TiB invariant has no host-side coverage.
+ * in kernel/include/arch/aarch64/page_table.h is now
+ * `UINT64_C(0x0000fffffffff000)` — 9 f's (bits 12-47, 36 bits wide),
+ * matching the header comment. Fix round 1 widened it from the
+ * pre-existing 7-f's literal `0x000000fffffff000` (bits 12-39), which
+ * dropped bit 40 and let a PA ≥ 1 TiB slip through the mask as a
+ * smaller PA. Cases 4 and 5 are the load-bearing coverage for the
+ * PA < 1 TiB invariant — together they pin that the mask is the full
+ * [47:12] window.
  *
  * Link strategy: real page_table.c + real vmm_backend.c, mocks for
  * aarch64_read_ttbr1 (configurable via g_mock_ttbr1), vmm_gate_check

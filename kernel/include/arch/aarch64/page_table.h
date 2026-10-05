@@ -39,8 +39,16 @@
  * permitted non-base bits are the ASID (bits [63:48]) and the CnP bit
  * (bit 0). All other bits must read as zero on the live TTBR. Exposed
  * here so the BSP pre-SMP self-test can validate the active root's
- * raw TTBR0_EL1 value before converting to a direct-map pointer. */
-#define AARCH64_TTBR_BASE_MASK       UINT64_C(0x000000fffffff000)
+ * raw TTBR0_EL1 value before converting to a direct-map pointer.
+ *
+ * Width: the mask MUST span the full documented [47:12] window so a
+ * PA ≥ 1 TiB is not silently truncated by the mask and slipped past
+ * the explicit `pa >= (1ULL << 40)` guard in arch_vmm_init. With
+ * IPS=40 the upper 8 bits [47:40] are RES0 on the live TTBR (real
+ * hardware reports 0 there), so widening the mask does not change
+ * any observed value in current production runs — it only catches
+ * a misformed test value that the previous narrower mask accepted. */
+#define AARCH64_TTBR_BASE_MASK       UINT64_C(0x0000fffffffff000)
 #define AARCH64_TTBR_ALLOWED_NONBASE (UINT64_C(0xffff000000000000) | \
                                       UINT64_C(1))
 #define AARCH64_TTBR_ALLOWED_MASK    (AARCH64_TTBR_BASE_MASK | \

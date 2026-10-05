@@ -430,10 +430,13 @@ void aarch64_main(const struct boot_context *handoff)
     }
     /* M3.5 Task 24: pin kernel_map = (mmap)(pa + ARCH_PAGE_OFFSET)
      * where pa = aarch64_read_ttbr1() & AARCH64_TTBR_BASE_MASK.
-     * boot_direct_map_init above already installed the M1 root into
-     * TTBR1_EL1; arch_vmm_init locates it, validates the masked PA
-     * (nonzero, 4 KiB aligned, < 1 TiB), and publishes the same
-     * kernel_map pointer every downstream arch_vmm_* entry expects.
+     * arch_boot_direct_map_init() above configured the runtime page
+     * tables and (via aarch64_m1_install_ttbr1()) installed the M1
+     * root into TTBR1_EL1; arch_vmm_init reads TTBR1 back, validates
+     * the masked PA (nonzero, 4 KiB aligned, < 1 TiB), and publishes
+     * the same kernel_map pointer every downstream arch_vmm_* entry
+     * expects. The M1 root remains live until the next translation
+     * table change; arch_vmm_init just locates and re-publishes it.
      *
      * The call runs BEFORE aarch64_m1_probe_prepare() and BEFORE the
      * selftest_run_all() block below so the kernel_map assertion in
