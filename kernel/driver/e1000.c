@@ -235,6 +235,7 @@ static int e1000_instance_xmit(struct e1000_instance *inst, struct pbuf *p)
     inst->tx_descs[inst->tx_head].status = 0;
 
     inst->tx_head = next;
+    arch_wmb();
     e1000_write(inst, E1000_REG_TDT, inst->tx_head);
 
     spin_unlock_irqrestore(&inst->tx_lock, flags);
@@ -293,7 +294,9 @@ static unsigned e1000_ndev_poll_rx(struct net_device *dev, unsigned budget)
             struct pbuf *p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
             if (p) {
                 pbuf_take(p, inst->rx_bufs[i], len);
-                net_receive(dev, p);
+                if (net_receive(dev, p) != 0) {
+                    pbuf_free(p);
+                }
             }
         }
 
@@ -336,6 +339,9 @@ static const struct net_device_ops e1000_net_ops = {
 int e1000_probe(struct pci_device *pdev, const struct pci_device_id *id)
 {
     if (!pdev) return -EINVAL;
+
+    if (pdev->vendor != 0x8086 || pdev->device != 0x100e)
+        return -ENODEV;
 
     if (id) {
         if (id->vendor != 0x8086 || id->device != 0x100e)
@@ -408,6 +414,11 @@ int e1000_probe(struct pci_device *pdev, const struct pci_device_id *id)
             inst->irq_mode = NIC_MSIX;
             inst->gsi = 16;
             inst->irq_owned = true;
+        } else {
+            // MSI-X enable succeeded on PCI device but GSI 16 is occupied;
+            // disable MSI-X and restore INTx before falling back.
+            pci_interrupts_disable(pdev);
+            pci_set_intx(pdev, true);
         }
     }
 
@@ -450,11 +461,8 @@ int e1000_probe(struct pci_device *pdev, const struct pci_device_id *id)
     // Register net_device
     struct net_device *ndev = kmalloc(sizeof(struct net_device));
     if (!ndev) {
-        if (inst->irq_owned) unregister_irq(inst->gsi);
-        e1000_free_dma(inst);
-        pdev->driver_data = NULL;
-        kfree(inst);
-        return -ENOMEM;
+        rc = -ENOMEM;
+        goto err_unwind_irq;
     }
     memset(ndev, 0, sizeof(*ndev));
     snprintf(ndev->name, sizeof(ndev->name), "eth%u", net_device_count());
@@ -468,16 +476,28 @@ int e1000_probe(struct pci_device *pdev, const struct pci_device_id *id)
     rc = net_device_register(ndev);
     if (rc != 0) {
         kfree(ndev);
-        if (inst->irq_owned) unregister_irq(inst->gsi);
-        e1000_free_dma(inst);
-        pdev->driver_data = NULL;
-        kfree(inst);
-        return rc;
+        goto err_unwind_irq;
     }
 
     inst->ndev = ndev;
     inst->initialized = 1;
     return 0;
+
+err_unwind_irq:
+    e1000_write(inst, E1000_REG_IMC, 0xFFFFFFFF);
+    e1000_write(inst, E1000_REG_RCTL, 0);
+    e1000_write(inst, E1000_REG_TCTL, 0);
+    pci_interrupts_disable(pdev);
+    if (inst->irq_owned) {
+        unregister_irq(inst->gsi);
+        inst->irq_owned = false;
+    }
+    pci_set_bus_master(pdev, false);
+    pci_set_decode(pdev, false, false);
+    e1000_free_dma(inst);
+    pdev->driver_data = NULL;
+    kfree(inst);
+    return rc;
 }
 
 // ── Driver remove ─────────────────────────────────────────────
@@ -517,11 +537,11 @@ void e1000_remove(struct pci_device *pdev)
         }
     }
 
-    // 4. Free DMA buffers and descriptor rings
-    e1000_free_dma(inst);
-
-    // 5. Disable bus master
+    // 4. Disable bus master before freeing DMA memory
     pci_set_bus_master(pdev, false);
+
+    // 5. Free DMA buffers and descriptor rings
+    e1000_free_dma(inst);
 
     // 6. Free private instance if not quarantined
     if (!pdev->dev.quarantined) {

@@ -524,6 +524,15 @@ static void test_probe_failure_unwinds(void)
     assert_eq(NULL, fix.pdev.driver_data);
     s_inject_alloc_4k_fail_after = -1;
 
+    // 4. Net device registration failure
+    s_inject_net_register_fail = true;
+    rc = e1000_probe(&fix.pdev, &e1000_pci_driver.id_table[0]);
+    assert_true(rc != 0);
+    assert_eq(NULL, fix.pdev.driver_data);
+    assert_eq(NULL, irq_table[16].handler);
+    assert_eq(0xFFFFFFFF, *(volatile uint32_t *)(fix.mmio_space + E1000_REG_IMC));
+    s_inject_net_register_fail = false;
+
     teardown_fixture(&fix);
 }
 

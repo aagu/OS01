@@ -35,6 +35,13 @@ int net_device_register(struct net_device *dev)
         return -EINVAL;
     }
 
+#ifdef OS01_HOST_TEST
+    extern bool s_inject_net_register_fail __attribute__((weak));
+    if (&s_inject_net_register_fail && s_inject_net_register_fail) {
+        return -ENOMEM;
+    }
+#endif
+
     /* Validate MAC: must not be all zeros */
     uint8_t zero_mac[6] = {0, 0, 0, 0, 0, 0};
     if (memcmp(dev->mac, zero_mac, 6) == 0) {
