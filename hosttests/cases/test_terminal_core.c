@@ -91,6 +91,109 @@ TEST_FUNC(test_clear_screen) {
     assert_eq(0, core.col);
 }
 
+TEST_FUNC(test_clear_display_from_cursor) {
+    reset();
+    /* Write 'a', 'b', 'c' on row 0, then 'd' on row 1 */
+    term_core_input(&core, 'a');
+    term_core_input(&core, 'b');
+    term_core_input(&core, 'c');
+    term_core_input(&core, '\n');
+    term_core_input(&core, 'd');
+
+    /* Move cursor to row 0, col 1 (over 'b') */
+    core.row = 0;
+    core.col = 1;
+
+    /* \e[J clears from cursor to end of screen */
+    term_core_input(&core, 0x1b); term_core_input(&core, '[');
+    term_core_input(&core, 'J');
+
+    assert_eq('a', cell(core.main_buf, 0, 0)->glyph); /* before cursor kept */
+    assert_eq(0, cell(core.main_buf, 0, 1)->glyph);   /* cursor position cleared */
+    assert_eq(0, cell(core.main_buf, 0, 2)->glyph);   /* after cursor on row 0 cleared */
+    assert_eq(0, cell(core.main_buf, 1, 0)->glyph);   /* subsequent row cleared */
+    assert_eq(0, core.row);                            /* cursor position preserved */
+    assert_eq(1, core.col);
+}
+
+TEST_FUNC(test_backspace_erase) {
+    reset();
+    /* User types "abc" */
+    term_core_input(&core, 'a');
+    term_core_input(&core, 'b');
+    term_core_input(&core, 'c');
+    assert_eq(3, core.col);
+
+    /* Backspace: ash moves cursor left (\b) then clears till end of screen (\e[J) */
+    term_core_input(&core, '\b');
+    assert_eq(2, core.col);
+    term_core_input(&core, 0x1b); term_core_input(&core, '[');
+    term_core_input(&core, 'J');
+
+    assert_eq('a', cell(core.main_buf, 0, 0)->glyph);
+    assert_eq('b', cell(core.main_buf, 0, 1)->glyph);
+    assert_eq(0, cell(core.main_buf, 0, 2)->glyph);   /* 'c' must be erased */
+    assert_eq(2, core.col);
+}
+
+TEST_FUNC(test_clear_display_to_cursor) {
+    reset();
+    /* Write 'a', 'b', 'c' on row 0, then 'd', 'e' on row 1 */
+    term_core_input(&core, 'a');
+    term_core_input(&core, 'b');
+    term_core_input(&core, 'c');
+    term_core_input(&core, '\n');
+    term_core_input(&core, 'd');
+    term_core_input(&core, 'e');
+
+    /* Move cursor to row 1, col 0 (over 'd') */
+    core.row = 1;
+    core.col = 0;
+
+    /* \e[1J clears from start of screen to cursor */
+    term_core_input(&core, 0x1b); term_core_input(&core, '[');
+    term_core_input(&core, '1'); term_core_input(&core, 'J');
+
+    assert_eq(0, cell(core.main_buf, 0, 0)->glyph);   /* earlier row cleared */
+    assert_eq(0, cell(core.main_buf, 0, 1)->glyph);
+    assert_eq(0, cell(core.main_buf, 0, 2)->glyph);
+    assert_eq(0, cell(core.main_buf, 1, 0)->glyph);   /* cursor position cleared */
+    assert_eq('e', cell(core.main_buf, 1, 1)->glyph); /* after cursor kept */
+    assert_eq(1, core.row);
+    assert_eq(0, core.col);
+}
+
+TEST_FUNC(test_busybox_clear_command) {
+    reset();
+    /* Write multi-line text across several rows */
+    term_core_input(&core, 'A');
+    term_core_input(&core, '\n');
+    term_core_input(&core, 'B');
+    term_core_input(&core, '\n');
+    term_core_input(&core, 'C');
+
+    assert_eq('A', cell(core.main_buf, 0, 0)->glyph);
+    assert_eq('B', cell(core.main_buf, 1, 0)->glyph);
+    assert_eq('C', cell(core.main_buf, 2, 0)->glyph);
+
+    /* BusyBox clear applet outputs: \e[H\e[J */
+    term_core_input(&core, 0x1b); term_core_input(&core, '[');
+    term_core_input(&core, 'H');
+    term_core_input(&core, 0x1b); term_core_input(&core, '[');
+    term_core_input(&core, 'J');
+
+    /* Cursor returned to top-left (0, 0) */
+    assert_eq(0, core.row);
+    assert_eq(0, core.col);
+
+    /* All rows must be cleared */
+    for (int r = 0; r < 3; r++) {
+        for (int c = 0; c < core.cols; c++) {
+            assert_eq(0, cell(core.main_buf, r, c)->glyph);
+        }
+    }
+}
+
 TEST_FUNC(test_scroll) {
     reset();
     /* write R-1 full lines (cursor on bottom row, no scroll yet) */
@@ -173,6 +276,10 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_csi_cursor_move),
     TEST_ENTRY(test_clear_line),
     TEST_ENTRY(test_clear_screen),
+    TEST_ENTRY(test_clear_display_from_cursor),
+    TEST_ENTRY(test_backspace_erase),
+    TEST_ENTRY(test_clear_display_to_cursor),
+    TEST_ENTRY(test_busybox_clear_command),
     TEST_ENTRY(test_scroll),
     TEST_ENTRY(test_alt_screen_protocol),
     TEST_ENTRY(test_large_resolution_no_clamp),
@@ -180,7 +287,14 @@ TEST_LIST_BEGIN
 TEST_LIST_END
 
 int main() {
-    RUN_ALL_TESTS();
+    printf("=== Test Runner ===\n");
+    int __table_size = sizeof(__test_table) / sizeof(__test_table[0]);
+    for (int __i = 0; __i < __table_size; __i++) {
+        printf("\n--- %s ---\n", __test_table[__i].name);
+        __test_table[__i].fn();
+    }
+    int failed = __test_stats.failed;
+    TEST_RESULTS();
     term_core_free(&core);
-    return __test_stats.failed > 0 ? 1 : 0;
+    return failed > 0 ? 1 : 0;
 }

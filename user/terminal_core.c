@@ -29,6 +29,7 @@ static inline bool has_buffers(const term_core_t *t)
 
 static void blank_cell(term_core_t *t, term_cell_t *buf, int r, int c)
 {
+    if (r < 0 || r >= t->rows || c < 0 || c >= t->cols) return;
     if (!has_buffers(t)) return;
     int i = cell_idx(t, r, c);
     if (buf[i].glyph != 0) {
@@ -166,7 +167,25 @@ bool term_core_input(term_core_t *t, uint8_t c)
             changed = true;
             break;
         case 'J':
-            if (t->csi_param == 2) {
+            if (t->csi_param == 0) {
+                term_cell_t *buf = term_core_screen(t);
+                clear_line(t, t->col, t->cols);
+                for (int r = t->row + 1; r < t->rows; r++) {
+                    for (int x = 0; x < t->cols; x++)
+                        blank_cell(t, buf, r, x);
+                }
+                if (t->row == 0 && t->col == 0)
+                    t->scroll_lines_pending = 0;
+                changed = true;
+            } else if (t->csi_param == 1) {
+                term_cell_t *buf = term_core_screen(t);
+                for (int r = 0; r < t->row; r++) {
+                    for (int x = 0; x < t->cols; x++)
+                        blank_cell(t, buf, r, x);
+                }
+                clear_line(t, 0, t->col + 1);
+                changed = true;
+            } else if (t->csi_param == 2) {
                 clear_screen(t);
                 t->row = 0; t->col = 0;
                 changed = true;
