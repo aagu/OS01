@@ -50,7 +50,8 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    selftest/selftest.c \
                    selftest/test_slab_selftest.c \
                    selftest/test_arch_atomic_u64.c \
-                   selftest/test_aarch64_rndr_encoding.c
+                   selftest/test_aarch64_rndr_encoding.c \
+                   selftest/test_m3_selftest.c
 else
 KERNEL_C_SOURCES := \
     $(wildcard core/*.c) \

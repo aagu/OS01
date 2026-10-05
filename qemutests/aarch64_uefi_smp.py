@@ -242,6 +242,28 @@ def self_test() -> None:
     assert passed(current_log_for_2_cpus, cpus=2), \
         "expect_slab default-off preserves legacy behavior"
 
+    # expect_m3_selftest (M3.4 Task 22): requires exactly one
+    # '[selftest] m3: N/N PASS' marker (parser captures the digit pair).
+    # The kernel prints "[selftest] m3: 4/4 PASS" for the 4-section
+    # M3 VMM coverage; the parser gates on the exact marker shape so
+    # a partial run (e.g. "2/4 PASS (failed=2)") cannot slip through.
+    m3_log = current_log_for_2_cpus + "[selftest] m3: 4/4 PASS\n"
+    assert passed(m3_log, cpus=2, expect_m3_selftest=True), \
+        "exactly-one m3 N/N PASS marker must pass with expect_m3_selftest=True"
+    assert passed(current_log_for_2_cpus, cpus=2, expect_m3_selftest=True) is False, \
+        "missing m3 PASS marker must reject when expect_m3_selftest=True"
+    m3_dup = current_log_for_2_cpus + "[selftest] m3: 4/4 PASS\n" \
+        + "[selftest] m3: 4/4 PASS\n"
+    assert passed(m3_dup, cpus=2, expect_m3_selftest=True) is False, \
+        "duplicate m3 PASS marker must reject (exactly-one enforced)"
+    # Partial run (failed > 0) must reject — the kernel prints a
+    # different shape ("4/4 PASS (failed=N)") when any section fails.
+    m3_partial = current_log_for_2_cpus + "[selftest] m3: 3/4 PASS (failed=1)\n"
+    assert passed(m3_partial, cpus=2, expect_m3_selftest=True) is False, \
+        "partial-run 'N/M PASS (failed=...)' must reject (full-marker contract)"
+    assert passed(current_log_for_2_cpus, cpus=2), \
+        "expect_m3_selftest default-off preserves legacy behavior"
+
     # --expect-gic 断言（Task 2.1 + 3.1）：只用合成 log 测 gic_evidence_ok 解析
     # 行为。不再组合 GIC+IPI marker 调 passed(), 因为 kernel 现状不发 IPI marker
     # (Task 3.2 GREEN 才会发); 组合调用恒失败。每条 assertion 单独构造独立合成
@@ -470,7 +492,8 @@ def gic_evidence_ok(text: str, cpus: int) -> bool:
 
 def passed(text: str, cpus: int, expect_selftest: bool = False,
            expect_gic: bool = False, expect_clk: bool = False,
-           expect_slab: bool = False) -> bool:
+           expect_slab: bool = False,
+           expect_m3_selftest: bool = False) -> bool:
     """Recognize a complete normal-mode SMP run without QEMU dependencies."""
     # PL011 currently emits LF+CR. Match lines consistently for saved logs
     # and live serial drains, while retaining the original fixture format.
@@ -548,6 +571,24 @@ def passed(text: str, cpus: int, expect_selftest: bool = False,
             print(f"FAIL: expected exactly one '[selftest] slab: 16/16 PASS' "
                   f"in the log, found {len(slab_lines)}")
             return False
+    if expect_m3_selftest:
+        # M3.4 Task 22: the M3 VMM change primitive coverage on a
+        # kernel-internal SCRATCH root must pass — require exactly one
+        # '[selftest] m3: N/N PASS' marker (no '(failed=...)' suffix;
+        # the partial-run shape is rejected by the line-end anchor).
+        full_markers = re.findall(
+            r"^\[selftest\] m3: (\d+)/(\d+) PASS$",
+            text.replace("\r", ""), re.MULTILINE)
+        if len(full_markers) != 1:
+            print(f"FAIL: expected exactly one '[selftest] m3: N/N PASS' "
+                  f"in the log, found {len(full_markers)}")
+            return False
+        # And the single full marker must report N == N (no failures).
+        passed_count, total_count = full_markers[0]
+        if passed_count != total_count:
+            print(f"FAIL: m3 marker has passed != total: "
+                  f"{passed_count}/{total_count}")
+            return False
     topology = re.search(r"^\[smp\] topology\b[^\n]*\brequested=(\d+)\b[^\n]*\bdiscovered=(\d+)\b", text, re.MULTILINE)
     if topology:
         if tuple(map(int, topology.groups())) != (cpus, cpus):
@@ -622,7 +663,8 @@ def acceptance_evidence(args: argparse.Namespace, text: str, cpus: int) -> bool:
         )
     return passed(text, cpus, expect_selftest=expect_selftest,
                   expect_gic=expect_gic, expect_clk=expect_clk,
-                  expect_slab=getattr(args, "expect_slab_selftest", False))
+                  expect_slab=getattr(args, "expect_slab_selftest", False),
+                  expect_m3_selftest=getattr(args, "expect_m3_selftest", False))
 
 
 def qemu_command(args: argparse.Namespace, cpus: int, diagnostic_dtb: str | None) -> list[str]:
@@ -799,6 +841,10 @@ def main() -> int:
                         help="Require exactly one '[selftest] slab: 16/16 "
                              "PASS' marker from the built-in kernel selftest "
                              "suite (M2 Task 6)")
+    parser.add_argument("--expect-m3-selftest", action="store_true",
+                        help="Require exactly one '[selftest] m3: N/N PASS' "
+                             "marker from the aarch64 M3 VMM coverage "
+                             "selftest (M3.4 Task 22)")
     parser.add_argument("--expect-gic", action="store_true",
                         help="Require GICv2 framework markers: driver init, "
                              "dispatch ready, save-restore probe OK, "

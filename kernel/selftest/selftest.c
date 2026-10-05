@@ -116,6 +116,7 @@ static int test_pipe_basic(void)
 int test_rwlock_basic(void);
 int test_seqlock_basic(void);
 int test_slab_16_caches(void);
+int test_m3_selftest(void);
 
 // ── External test functions (defined in subsystem .c files) ──
 // Forward-declared here instead of polluting public headers.
@@ -156,6 +157,16 @@ int selftest_run_all(void)
      * the cache table exist on both aarch64 and x86_64. Prints the
      * parser-asserted '[selftest] slab: 16/16 PASS' marker. */
     selftest_register("slab_16_caches",    test_slab_16_caches);
+#if defined(__aarch64__)
+    /* M3.4 Task 22: aarch64 VMM change primitive coverage on a
+     * kernel-internal SCRATCH root. Exercises gic_target_bit
+     * cache, map/update/unmap/query 4K, map/unmap 2M block, and
+     * split_block_2m (the unpublished-root path). Prints the
+     * parser-asserted '[selftest] m3: 4/4 PASS' marker; on
+     * x86_64 the body is a no-op stub so registration stays
+     * portable. */
+    selftest_register("m3_vmm",            test_m3_selftest);
+#endif /* __aarch64__ */
 #if !defined(__aarch64__)
     /* x86_64-only: these tests pull in subsystems (VFS, ext2, sync
      * primitives, TSC timer, ...) that are not in the aarch64 kernel
