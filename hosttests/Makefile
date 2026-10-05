@@ -118,9 +118,11 @@ TEST_BINS := \
     $(TEST_BLD)/test_pci_driver_model.elf \
     $(TEST_BLD)/test_pci_backend_irq.elf \
     $(TEST_BLD)/test_ahci_lifecycle.elf \
-    $(TEST_BLD)/test_device_boot.elf
+    $(TEST_BLD)/test_device_boot.elf \
+    $(TEST_BLD)/test_net_device.elf \
+    $(TEST_BLD)/test_net_lwip.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test-block test-pci test-backend test-ahci test-device-boot
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip
 
 all: $(TEST_BINS)
 
@@ -1618,5 +1620,40 @@ $(TEST_BLD)/test_device_boot.elf: $(TEST_BLD)/test_device_boot.o \
 test-device-boot: $(TEST_BLD)/test_device_boot.elf
 	$<
 
+# ARCH-9 Phase C: net_device registry and lwIP adapter
+NET_HOST_CFLAGS := $(HOST_CFLAGS) -D_GNU_SOURCE -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
+    -include $(TEST_MOCK)/arch9/net_runtime.h -DOS01_HOST_TEST
 
+$(TEST_BLD)/net_device_production.o: $(TESTS_DIR)/kernel/net/device.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(NET_HOST_CFLAGS) -c $< -o $@
 
+$(TEST_BLD)/net_lwip_production.o: $(TESTS_DIR)/kernel/net/lwip.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(NET_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_net_device.o: $(TEST_CASES)/test_net_device.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(NET_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_net_device.elf: $(TEST_BLD)/test_net_device.o \
+    $(TEST_BLD)/net_device_production.o \
+    $(TEST_BLD)/net_lwip_production.o \
+    $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+test-net: $(TEST_BLD)/test_net_device.elf
+	$<
+
+$(TEST_BLD)/test_net_lwip.o: $(TEST_CASES)/test_net_lwip.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(NET_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_net_lwip.elf: $(TEST_BLD)/test_net_lwip.o \
+    $(TEST_BLD)/net_device_production.o \
+    $(TEST_BLD)/net_lwip_production.o \
+    $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+test-lwip: $(TEST_BLD)/test_net_lwip.elf
+	$<

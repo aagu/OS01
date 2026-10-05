@@ -393,8 +393,8 @@ test-m1-host: $(if $(CASE),_test-m1-host-run-$(CASE),$(foreach c,$(M1_CASES),_te
 	  esac
 
 # ARCH-9 driver model host tests.
-.PHONY: test-arch9-host _test-arch9-host-run-block _test-arch9-host-run-pci _test-arch9-host-run-backend _test-arch9-host-run-ahci _test-arch9-host-run-device-boot
-ARCH9_CASES := block pci backend ahci device-boot
+.PHONY: test-arch9-host _test-arch9-host-run-block _test-arch9-host-run-pci _test-arch9-host-run-backend _test-arch9-host-run-ahci _test-arch9-host-run-device-boot _test-arch9-host-run-net _test-arch9-host-run-lwip
+ARCH9_CASES := block pci backend ahci device-boot net lwip
 _test-arch9-host-run-block:
 	@echo "  [test-arch9-host] block"
 	$(call os01_submake,hosttests,test-block $(OS01_SUBMAKE_ARGS))
@@ -410,6 +410,12 @@ _test-arch9-host-run-ahci:
 _test-arch9-host-run-device-boot:
 	@echo "  [test-arch9-host] device-boot"
 	$(call os01_submake,hosttests,test-device-boot $(OS01_SUBMAKE_ARGS))
+_test-arch9-host-run-net:
+	@echo "  [test-arch9-host] net"
+	$(call os01_submake,hosttests,test-net $(OS01_SUBMAKE_ARGS))
+_test-arch9-host-run-lwip:
+	@echo "  [test-arch9-host] lwip"
+	$(call os01_submake,hosttests,test-lwip $(OS01_SUBMAKE_ARGS))
 test-arch9-host: CASE ?=
 test-arch9-host: CASE := $(CASE)
 test-arch9-host: $(if $(CASE),_test-arch9-host-run-$(CASE),$(foreach c,$(ARCH9_CASES),_test-arch9-host-run-$(c)))
@@ -421,6 +427,8 @@ test-arch9-host: $(if $(CASE),_test-arch9-host-run-$(CASE),$(foreach c,$(ARCH9_C
 	    backend) echo "  [test-arch9-host] CASE=$(CASE)";; \
 	    ahci) echo "  [test-arch9-host] CASE=$(CASE)";; \
 	    device-boot) echo "  [test-arch9-host] CASE=$(CASE)";; \
+	    net) echo "  [test-arch9-host] CASE=$(CASE)";; \
+	    lwip) echo "  [test-arch9-host] CASE=$(CASE)";; \
 	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(ARCH9_CASES)" >&2; exit 1;; \
 	  esac
 
