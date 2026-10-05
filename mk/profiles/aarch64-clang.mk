@@ -24,6 +24,15 @@ LIBC_BUILD_DIR := $(BUILD_DIR)/libc
 # selftest build (spec §5). The flag is only meaningful together with
 # KERNEL_SELFTEST=1 (sync-fault is a selftest variant, not a free-standing
 # mode); flagging it alone is rejected at parse time below.
+
+# ARCH9_FAULT is x86-only: the driver model matrix harness drives PCI NIC
+# / AHCI faults that aarch64 does not implement. Reject non-none here so
+# the matrix never silently degrades to a passing aarch64 variant.
+ifneq ($(filter none,$(ARCH9_FAULT)),)
+# pass — none is the canonical build for aarch64 too
+else
+$(error ARCH9_FAULT=$(ARCH9_FAULT) is x86-only; aarch64 profile must keep ARCH9_FAULT=none)
+endif
 #
 # Order matters: sync-fault wins over weak-selftest when both
 # KERNEL_TEST_FORCE_NO_RNDRRS=1 and AARCH64_SYNC_FAULT_TEST=1 are set,

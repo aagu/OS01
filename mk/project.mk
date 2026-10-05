@@ -18,6 +18,30 @@ KERNEL_CANARY_SELFTEST ?=
 # fingerprint stamp sees it.
 KERNEL_EXTRA_CFLAGS ?=
 
+# ── ARCH9_FAULT — driver model matrix fault fixture ──────────────
+# Each non-none value enables a kernel-internal fault injection that the
+# matrix harness drives per-case.  The enum lives here so both the
+# profile (kernel build dir) and the matrix harness (path slugs) reject
+# unknown values at parse time.  Non-none + OS01_SYSTEST / OS01_NETTEST
+# / KERNEL_SELFTEST / KERNEL_CANARY_SELFTEST / KERNEL_TEST_FORCE_NO_RNDRRS
+# / non-default INITTAB_FILE is refused — the matrix runs against the
+# normal inittab only.
+ARCH9_FAULT ?= none
+ARCH9_FAULTS_VALID := none observe bad-nic-bar adapter-fail ahci-empty irq-conflict
+ifeq ($(filter $(ARCH9_FAULT),$(ARCH9_FAULTS_VALID)),)
+$(error ARCH9_FAULT='$(ARCH9_FAULT)' is not one of: $(ARCH9_FAULTS_VALID))
+endif
+ifneq ($(filter none,$(ARCH9_FAULT)),)
+# ARCH9_FAULT=none is the canonical build; no extra rejection needed.
+else
+ifneq ($(filter 1,$(KERNEL_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST) $(KERNEL_CANARY_SELFTEST) $(KERNEL_TEST_FORCE_NO_RNDRRS)),)
+$(error ARCH9_FAULT=$(ARCH9_FAULT) cannot be combined with KERNEL_SELFTEST/OS01_SYSTEST/OS01_NETTEST/KERNEL_CANARY_SELFTEST/KERNEL_TEST_FORCE_NO_RNDRRS)
+endif
+ifneq ($(filter config/inittab.test,$(INITTAB_FILE)),)
+$(error ARCH9_FAULT=$(ARCH9_FAULT) cannot be combined with INITTAB_FILE=config/inittab.test)
+endif
+endif
+
 # ── Variant slugs (BEFORE the profile include!) ───────────────
 # IMAGE_VARIANT — the image/manifest dirs' variant suffix, derived from the
 # explicit switch variables. The root Makefile applies OS01_SYSTEST /
@@ -37,7 +61,7 @@ ifneq ($(filter 1,$(KERNEL_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST)),)
 $(error KERNEL_CANARY_SELFTEST=1 cannot be combined with KERNEL_SELFTEST=1, OS01_SYSTEST=1, or OS01_NETTEST=1)
 endif
 endif
-IMAGE_VARIANT := $(strip $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test)$(if $(filter 1,$(KERNEL_SELFTEST)),selftest)$(if $(filter 1,$(KERNEL_CANARY_SELFTEST)),canary-selftest))
+IMAGE_VARIANT := $(strip $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test)$(if $(filter 1,$(KERNEL_SELFTEST)),selftest)$(if $(filter 1,$(KERNEL_CANARY_SELFTEST)),canary-selftest)$(if $(filter none,$(ARCH9_FAULT)),,driver-model-$(ARCH9_FAULT)))
 USER_VARIANT  := $(if $(filter 1,$(OS01_SYSTEST)),systest)
 
 OS01_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
@@ -80,7 +104,7 @@ endef
 # tasks can rely on them without rework. OS01_SUBMAKE_ARGS is recursive so it
 # is evaluated at recipe-expansion time — after the root Makefile has applied
 # its LOG_TARGET / INITTAB_FILE / ... defaults.
-OS01_SUBMAKE_ALLOWED := CLANG UEFI_CLANG LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_OBJDUMP LLVM_READOBJ LLVM_READELF TARGET_LD RUNTIME_PROVIDER LOG_TARGET KERNEL_SELFTEST KERNEL_CANARY_SELFTEST KERNEL_TEST_FORCE_NO_RNDRRS KERNEL_EXTRA_CFLAGS OS01_SYSTEST OS01_NETTEST INITTAB_FILE AARCH64_QEMU SMP AARCH64_SMP_TEST_NO_ACK_CPU AARCH64_SYNC_FAULT_TEST AARCH64_M1_TEST AARCH64_UEFI_FIRMWARE_SOURCE QEMU_BIN DEBUG DEBUG_CHANNELS
+OS01_SUBMAKE_ALLOWED := CLANG UEFI_CLANG LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_OBJDUMP LLVM_READOBJ LLVM_READELF TARGET_LD RUNTIME_PROVIDER LOG_TARGET KERNEL_SELFTEST KERNEL_CANARY_SELFTEST KERNEL_TEST_FORCE_NO_RNDRRS KERNEL_EXTRA_CFLAGS OS01_SYSTEST OS01_NETTEST INITTAB_FILE AARCH64_QEMU SMP AARCH64_SMP_TEST_NO_ACK_CPU AARCH64_SYNC_FAULT_TEST AARCH64_M1_TEST AARCH64_UEFI_FIRMWARE_SOURCE QEMU_BIN DEBUG DEBUG_CHANNELS ARCH9_FAULT
 OS01_SUBMAKE_ARGS = $(foreach v,$(OS01_SUBMAKE_ALLOWED),$(if $($(v)),$(v)=$($(v))))
 
 # ── Sysroot generation protocol (spec: sysroot single-writer) ──

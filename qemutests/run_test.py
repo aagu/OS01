@@ -33,15 +33,19 @@ if not QEMU_SMP.isdigit() or int(QEMU_SMP) < 1:
         f"QEMU_SMP must be a positive integer, got {QEMU_SMP!r}")
 
 class TestRunner:
-    def __init__(self, disk_img, timeout=TIMEOUT):
+    def __init__(self, disk_img, timeout=TIMEOUT,
+                 extra_qemu_args=None, snapshot=False):
         self.disk_img = disk_img
         self.timeout = timeout
+        self.extra_qemu_args = list(extra_qemu_args) if extra_qemu_args else []
+        self.snapshot = snapshot
         self.proc = None
         self.serial_log = None
         self.serial_path = None
         self._serial_stdout_fp = None  # serial-stdio mode writes via this
 
-    def start_qemu(self, network=False, serial_stdio=False):
+    def start_qemu(self, network=False, serial_stdio=False,
+                   extra_qemu_args=None, snapshot=False):
         """Launch QEMU.
 
         With ``serial_stdio=False`` (default) the historical
@@ -55,7 +59,20 @@ class TestRunner:
         also tee'd to a temp file (via ``tee``) so the existing
         log-reading helpers still work — but the primary transport
         for the gfx suite is the writable stdin pipe below.
+
+        ``extra_qemu_args`` is a list of argv tokens appended to the
+        default QEMU invocation (e.g., second -netdev, alternate
+        -machine, or extra -device).  ``snapshot=True`` appends
+        ``-snapshot`` so writes to disk are discarded on shutdown.
         """
+        # Merge instance-level extra args with per-call overrides.
+        all_extra = list(self.extra_qemu_args)
+        if extra_qemu_args:
+            all_extra += list(extra_qemu_args)
+        if snapshot or self.snapshot:
+            if "-snapshot" not in all_extra:
+                all_extra.append("-snapshot")
+
         self.serial_log = tempfile.NamedTemporaryFile(
             prefix="os01_serial_", suffix=".log", delete=False)
         self.serial_path = self.serial_log.name
@@ -97,11 +114,56 @@ class TestRunner:
             "-no-reboot",
             "-no-shutdown",
         ]
+        # -machine pc drops the on-board SATA function so the
+        # ``no-ahci`` case can boot virtio-blk-pci as the root disk.
+        # The matrix harness detects ``-machine pc`` in
+        # extra_qemu_args and rebuilds the disk spec; for legacy
+        # callers the default q35 + ahci is preserved.
+        has_pc = any(a == "pc" for a in all_extra)
+        if has_pc:
+            # Strip -machine pc out of extras; we'll insert it next.
+            cleaned = []
+            skip = 0
+            for i, a in enumerate(all_extra):
+                if skip:
+                    skip -= 1
+                    continue
+                if a == "-machine" and i + 1 < len(all_extra) and \
+                        all_extra[i+1] == "pc":
+                    skip = 1
+                    continue
+                cleaned.append(a)
+            # Replace the q35 with pc, drop the default ahci/ide-hd
+            # pair (we'll re-add virtio-blk-pci at the end).
+            args = [a for a in args if a != "q35" and
+                    a != "-device" and
+                    not (a.startswith("ahci") or
+                         a.startswith("ide-hd") or
+                         a.startswith("virtio-rng"))]
+            # Drop the pflash + first -drive to rebuild cleanly.
+            args = [
+                QEMU,
+                "-M", "pc",
+                "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF_FIRMWARE}",
+                "-drive", f"file={self.disk_img},format=raw,if=none,id=disk",
+                "-device", "virtio-blk-pci,drive=disk",
+                "-m", "512",
+                "-smp", QEMU_SMP,
+                "-serial", serial_arg,
+                "-display", "none",
+                "-no-reboot",
+                "-no-shutdown",
+            ]
+            all_extra = cleaned
         if network:
             nic = os.environ.get("NETWORK_NIC", "e1000")
             nic_dev = "virtio-net-pci,netdev=net0,disable-modern=on" if nic == "virtio" else "e1000,netdev=net0"
             args += ["-netdev", "user,id=net0,dhcpstart=10.0.2.20",
                      "-device", nic_dev]
+        # Append any caller-supplied tokens LAST (so the matrix harness
+        # can override machine, add NICs, etc.).
+        if all_extra:
+            args += all_extra
         if serial_stdio:
             # Redirect QEMU's stdout (the serial READ side under
             # -serial stdio) into the log file directly — line-buffered

@@ -36,6 +36,25 @@ KERNEL_HEADERS := include
 #
 # Arch gate: aarch64 selects only these architecture-neutral sources.
 # Architecture implementation files are collected once via ARCH_C_SOURCES.
+
+# ARCH9_FAULT — driver-model matrix fault fixture (Task 11).
+# project.mk validates ARCH9_FAULT and rejects conflict combinations.
+# Pass the value to C as a string token so test_fault.h can switch on it.
+# `none` is the canonical build and excludes device/test_fault.c from
+# the source list so a normal kernel build is byte-identical to one
+# without ARCH9_FAULT (matches the brief's normal-before/after hash
+# invariant).  KERNEL_TEST_FAULT_C_SOURCES is defined here so the
+# wildcard collection below picks up test_fault.c when ARCH9_FAULT is
+# non-none.  The ALL_CFLAGS additions are appended AFTER ALL_CFLAGS is
+# defined below (see ARCH9_FAULT_FLAGS block after ALL_CFLAGS).
+ifneq ($(filter none,$(ARCH9_FAULT)),)
+KERNEL_TEST_FAULT_C_SOURCES :=
+ARCH9_FAULT_FLAGS := -UOS01_TEST_FAULT
+else
+ARCH9_FAULT_FLAGS := -DOS01_TEST_FAULT=1 '-DARCH9_FAULT_NAME="$(ARCH9_FAULT)"'
+KERNEL_TEST_FAULT_C_SOURCES := device/test_fault.c
+endif
+
 ifeq ($(ARCH),aarch64)
 KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    percpu/percpu.c \
@@ -69,8 +88,9 @@ KERNEL_C_SOURCES := \
     $(wildcard percpu/*.c) \
     $(wildcard selftest/*.c) \
     $(wildcard subsys/*.c) \
-    $(wildcard device/*.c) \
+    $(filter-out device/test_fault.c,$(wildcard device/*.c)) \
     $(wildcard bus/pci/*.c) \
+    $(KERNEL_TEST_FAULT_C_SOURCES) \
     ../runtime/builtins/udivti3.c
 
 # Platform devices are selected by arch/<arch>/make.config.  Keep x86-only
@@ -178,6 +198,12 @@ print-canary-contract:
 	  'LLVM_OBJDUMP=$(LLVM_OBJDUMP)' \
 	  'KERNEL_BUILD_DIR=$(KERNEL_BUILD_DIR)' \
 	  '$(if $(findstring -DOS01_CANARY_SELFTEST,$(ALL_CFLAGS)),OS01_CANARY_SELFTEST=1,OS01_CANARY_SELFTEST=0)'
+
+# ── ARCH9_FAULT fixture (Task 11) ──────────────────────────
+# Append the fault-fixture flags to ALL_CFLAGS AFTER the variable is
+# defined above (KERNEL_TEST_FAULT_C_SOURCES was already wired into
+# KERNEL_C_SOURCES by the source-discovery block).
+ALL_CFLAGS += $(ARCH9_FAULT_FLAGS)
 
 # ── lwIP networking stack ────────────────────────────────────
 LWIP_SRC_DIR  := ../thirdpart/lwip/src

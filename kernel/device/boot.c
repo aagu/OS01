@@ -1,6 +1,7 @@
 /* kernel/device/boot.c — Phase 6 device coordinator and root check */
 #include <device/boot.h>
 #include <device/device.h>
+#include <device/test_fault.h>
 #include <block/blockdev.h>
 #include <bus/pci/pci.h>
 #include <bus/pci/driver.h>
@@ -77,6 +78,8 @@ int device_boot_init(void)
 
     /* 2. Register all declared PCI drivers */
     if (PCI_DRIVERS_START && PCI_DRIVERS_END) {
+        unsigned n = (unsigned)(PCI_DRIVERS_END - PCI_DRIVERS_START);
+        arch9_fault_on_pci_enumerate_begin(n);
         for (const struct pci_driver **p = PCI_DRIVERS_START; p < PCI_DRIVERS_END; p++) {
             if (*p) {
                 int r = pci_register_driver(*p);

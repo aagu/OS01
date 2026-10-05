@@ -507,19 +507,53 @@ test-gfx-primitives:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-gfx-primitives $(OS01_SUBMAKE_ARGS))
 
+# driver-model matrix support — see Task 11.  The python harness
+# (qemutests/driver_matrix_run.py) drives each (case, SMP) pair; the
+# build contract test (qemutests/test_arch9_build_contract.py) only
+# needs the Makefile as the build contract.  Both run from the repository
+# root via subprocess; the recipes below are entry points.
+TEST_DRIVER_MATRIX_CASES := all e1000 virtio mixed two-e1000 two-virtio no-nic no-ahci empty-ahci poll-busy bad-nic adapter-fail unsupported modern-only net-block-smp
+DRIVER_MATRIX_DRIVER_CASE ?=
+DRIVER_MODEL_LOG_DIR := $(OS01_ROOT)/test-results/driver-model
+.PHONY: _test-driver-model-prep _test-driver-model-run
+# _test-driver-model-prep builds the canonical (non-fault) disk image
+# which the matrix harness needs for all the no-fault cases.  Fault
+# cases build their own variant images via `make ARCH9_FAULT=<fault>`.
+_test-driver-model-prep:
+	@mkdir -p $(DRIVER_MODEL_LOG_DIR)
+	$(MAKE) --no-print-directory disk.img
+_test-driver-model-run:
+	@mkdir -p $(DRIVER_MODEL_LOG_DIR)
+	DRIVER_MODEL_LOG_DIR="$(DRIVER_MODEL_LOG_DIR)" \
+	  python3 qemutests/driver_matrix_run.py \
+	  $(if $(DRIVER_MODEL_DRIVER_CASE),--case $(DRIVER_MODEL_DRIVER_CASE),--case all)
+
+# driver-model matrix dispatch target.  `make test-qemu SUITE=driver-model`
+# builds the canonical image then runs every matrix case; the
+# optional DRIVER_MODEL_DRIVER_CASE narrows to a single case (mirrors
+# the per-MODE pattern used by test-aarch64).
+test-qemu-driver-model: _test-driver-model-prep _test-driver-model-run
+	@true
+
 # Per-SUITE lookups, used by test-qemu to pick the right variant build
 # flavor and the right image path. These are Make variables so they
 # resolve at parse time and survive across recipe lines.
-TEST_QEMU_FLAVOR_phase-0       =
-TEST_QEMU_FLAVOR_systest       = OS01_SYSTEST=1
-TEST_QEMU_FLAVOR_inittab-phase = INITTAB_FILE=config/inittab.test
-TEST_QEMU_FLAVOR_network       = OS01_NETTEST=1
-TEST_QEMU_FLAVOR_gfx           =
+TEST_QEMU_FLAVOR_phase-0        =
+TEST_QEMU_FLAVOR_systest        = OS01_SYSTEST=1
+TEST_QEMU_FLAVOR_inittab-phase  = INITTAB_FILE=config/inittab.test
+TEST_QEMU_FLAVOR_network        = OS01_NETTEST=1
+TEST_QEMU_FLAVOR_gfx            =
+# driver-model reuses the normal image path (matrix harness rebuilds
+# variant images itself); the build contract test and the matrix
+# python harness both produce fault variant images via
+# `make ARCH9_FAULT=<fault>`.
+TEST_QEMU_FLAVOR_driver-model   =
 TEST_QEMU_IMG_phase-0       = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_systest       = $(TEST_SYSTEST_IMAGE)
 TEST_QEMU_IMG_inittab-phase = $(TEST_INITTAB_IMAGE)
 TEST_QEMU_IMG_network       = $(TEST_NETTEST_IMAGE)
 TEST_QEMU_IMG_gfx           = $(NORMAL_IMAGE)
+TEST_QEMU_IMG_driver-model  = $(NORMAL_IMAGE)
 
 .PHONY: test-qemu
 # Use the per-SUITE Make variables from Step 1. The image path is
@@ -548,8 +582,8 @@ test-qemu: SUITE := $(SUITE)
 test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@case "$(SUITE)" in \
-	  phase-0|systest|inittab-phase|network|gfx) ;; \
-	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx, got '$(SUITE)'" >&2; exit 1;; \
+	  phase-0|systest|inittab-phase|network|gfx|driver-model) ;; \
+	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|driver-model, got '$(SUITE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-qemu] SUITE=$(SUITE) flavor=$(TEST_QEMU_FLAVOR_$(SUITE)) img=$(TEST_QEMU_IMG_$(SUITE))"
 	# The normal-image hash guard skips BOTH ``phase-0`` (the historical
@@ -558,18 +592,26 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	# touches the normal image must not be reported as a hash drift).
 	# Every other suite runs against an isolated variant build and
 	# must therefore not modify the normal image.
-	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
+	# driver-model runs against the canonical (no-fault) image so the
+	# normal-image hash guard is skipped too; fault variant builds land
+	# under image/driver-model-<fault>/ (Task 11).
+	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "driver-model" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.before"; \
 	fi
-	$(MAKE) $(TEST_QEMU_FLAVOR_$(SUITE)) image
-	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
-	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after"; \
-	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after"; \
+	@if [ "$(SUITE)" = "driver-model" ]; then \
+	  DRIVER_MODEL_DRIVER_CASE="$(DRIVER_MODEL_DRIVER_CASE)" \
+	  $(MAKE) --no-print-directory test-qemu-driver-model; \
+	else \
+	  $(MAKE) $(TEST_QEMU_FLAVOR_$(SUITE)) image; \
+	  if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
+	    sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after"; \
+	    cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after"; \
+	  fi; \
+	  DISK_IMG="$(TEST_QEMU_IMG_$(SUITE))" \
+	  OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \
+	  NETWORK_NIC="$(NETWORK_NIC)" \
+	  python3 qemutests/run_test.py $(SUITE); \
 	fi
-	DISK_IMG="$(TEST_QEMU_IMG_$(SUITE))" \
-	OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \
-	NETWORK_NIC="$(NETWORK_NIC)" \
-	python3 qemutests/run_test.py $(SUITE)
 
 # Exercise repeated exec/exit through the normal terminal and ash path.
 
@@ -951,6 +993,32 @@ unlock-profile:
 	else \
 	  echo "no lock held at $(LOCK_DIR)"; \
 	fi
+
+# ARCH-9 driver model matrix fault-fixture cleanup (Task 11).
+# Removes ONLY the derived kernel/image artifacts for the given fault
+# (kernel/driver-model-<fault>/ + artifacts/kernel/driver-model-<fault>/
+# + image/driver-model-<fault>/); never touches libc, user, firmware,
+# or normal artifacts.  Used between fault runs so the matrix harness
+# can switch faults without `make clean` of the whole profile.
+.PHONY: clean-arch9-fixture
+# Parse-time validation: ARCH9_FAULT must be a known non-none slug.
+# project.mk's enum gate covers all values; this target refuses empty,
+# "none", or any non-driver-model variant (defence in depth).
+ifneq ($(filter $(ARCH9_FAULT),none),)
+clean-arch9-fixture:
+	@echo "ERROR: clean-arch9-fixture requires ARCH9_FAULT=<non-none slug>" >&2; \
+	exit 1
+else ifeq ($(filter $(ARCH9_FAULT),observe bad-nic-bar adapter-fail ahci-empty irq-conflict),)
+clean-arch9-fixture:
+	@echo "ERROR: ARCH9_FAULT='$(ARCH9_FAULT)' is not a known driver-model fault slug" >&2; \
+	exit 1
+else
+clean-arch9-fixture:
+	@echo "  [clean-arch9-fixture] ARCH9_FAULT=$(ARCH9_FAULT)"
+	rm -rf "$(BUILD_DIR)/kernel/driver-model-$(ARCH9_FAULT)"
+	rm -rf "$(BUILD_DIR)/artifacts/kernel/driver-model-$(ARCH9_FAULT)"
+	rm -rf "$(BUILD_DIR)/image/driver-model-$(ARCH9_FAULT)"
+endif
 
 # M1 uses distinct immutable build/image variants; outer flags never choose
 # the matrix's normal/selftest artifact implicitly.

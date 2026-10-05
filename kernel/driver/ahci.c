@@ -3,6 +3,7 @@
 #include <bus/pci/pci.h>
 #include <bus/pci/driver.h>
 #include <block/blockdev.h>
+#include <device/test_fault.h>
 #include <core/debug.h>
 #include <memory/memory.h>
 #include <memory/pmm.h>
@@ -452,6 +453,14 @@ static void ahci_port_init(struct ahci_controller *ctrl, int port_num)
             .kind = BLOCK_DISK,
         };
 
+        if (arch9_fault_should_inject_ahci_empty()) {
+            debug_block("AHCI: port %d: ahci-empty fault, suppressing media "
+                          "publication (no block_device_register)\n",
+                          port_num);
+            ap->bdev = NULL;
+            ahci_port_teardown_dma(ap, true);
+            return;
+        }
         int bret = block_device_register(&desc, &ap->bdev);
         if (bret != 0) {
             debug_block("AHCI: port %d: block_device_register failed: %d\n", port_num, bret);
@@ -459,6 +468,7 @@ static void ahci_port_init(struct ahci_controller *ctrl, int port_num)
             ahci_port_teardown_dma(ap, true);
             return;
         }
+        arch9_fault_on_ahci_port_publish();
         ap->state = AHCI_PORT_STATE_ACTIVE;
     } else {
         debug_block("AHCI: port %d: IDENTIFY failed, tearing down\n", port_num);

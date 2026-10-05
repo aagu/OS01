@@ -6,6 +6,7 @@
 #include <bus/pci/pci.h>
 #include <bus/pci/driver.h>
 #include <net/device.h>
+#include <device/test_fault.h>
 #include <ipc/mbox.h>
 #include <intr/interrupt.h>
 #include <arch/spinlock.h>
@@ -347,16 +348,24 @@ int virtio_net_probe(struct pci_device *pdev, const struct pci_device_id *id)
 {
     if (!pdev) return -EINVAL;
 
+    arch9_fault_on_probe_begin("virtio-net");
+
     // Validate device identity: reject modern-only or different vendor/device
-    if (pdev->vendor != 0x1af4 || pdev->device != 0x1000)
+    if (pdev->vendor != 0x1af4 || pdev->device != 0x1000) {
+        arch9_fault_on_probe_unbound_after_id();
         return -ENODEV;
+    }
 
     if (id) {
-        if (id->vendor != 0x1af4 || id->device != 0x1000)
+        if (id->vendor != 0x1af4 || id->device != 0x1000) {
+            arch9_fault_on_probe_unbound_after_id();
             return -ENODEV;
+        }
     } else {
-        if (pci_match_id(&virtio_net_pci_driver, pdev) == NULL)
+        if (pci_match_id(&virtio_net_pci_driver, pdev) == NULL) {
+            arch9_fault_on_probe_unbound_after_id();
             return -ENODEV;
+        }
     }
 
     // Validate BAR0 kind: must be PCI_BAR_IO

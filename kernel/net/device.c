@@ -1,5 +1,6 @@
 /* kernel/net/device.c — Network device registration, polling, and reception */
 #include <net/device.h>
+#include <device/test_fault.h>
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
@@ -32,6 +33,11 @@ int net_device_register(struct net_device *dev)
     }
 
     if (!dev->ops->xmit || !dev->ops->poll_rx || !dev->ops->get_link || !dev->ops->stop) {
+        return -EINVAL;
+    }
+
+    /* adapter-fail fault: reject every adapter registration. */
+    if (arch9_fault_should_inject_adapter_fail()) {
         return -EINVAL;
     }
 
@@ -92,6 +98,7 @@ int net_device_register(struct net_device *dev)
              dev->mac[0], dev->mac[1], dev->mac[2],
              dev->mac[3], dev->mac[4], dev->mac[5],
              dev->link_up ? "up" : "down");
+    arch9_fault_on_adapter_register();
     return 0;
 }
 

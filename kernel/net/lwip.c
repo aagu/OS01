@@ -1,6 +1,7 @@
 /* kernel/net/lwip.c — Unified lwIP stack adapter and readiness tracker */
 #include <net/device.h>
 #include <net/lwip.h>
+#include <device/test_fault.h>
 #include <core/debug.h>
 #include <log/log.h>
 #include <errno.h>
@@ -234,6 +235,7 @@ void net_lwip_start(void)
             s_test_default_ipv4 = ip.addr;
 #endif
         }
+        arch9_fault_on_adapter_publish();
 
         netif_set_up(nif);
 

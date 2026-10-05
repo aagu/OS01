@@ -3,6 +3,7 @@
 #include <bus/pci/pci.h>
 #include <bus/pci/driver.h>
 #include <net/device.h>
+#include <device/test_fault.h>
 #include <ipc/mbox.h>
 #include <memory/vmm.h>       // vmm_map_page, kernel_map, PAGE_KERNEL_PMD_NOCACHE
 #include <memory/pmm.h>       // PAGE_2M_MASK, alloc_pages, alloc_4k_page, free_pages, free_4k_page
@@ -339,15 +340,46 @@ int e1000_probe(struct pci_device *pdev, const struct pci_device_id *id)
 {
     if (!pdev) return -EINVAL;
 
-    if (pdev->vendor != 0x8086 || pdev->device != 0x100e)
+    if (pdev->vendor != 0x8086 || pdev->device != 0x100e) {
+        arch9_fault_on_probe_unbound_after_id();
         return -ENODEV;
+    }
+
+    arch9_fault_on_probe_begin("e1000");
 
     if (id) {
-        if (id->vendor != 0x8086 || id->device != 0x100e)
+        if (id->vendor != 0x8086 || id->device != 0x100e) {
+            arch9_fault_on_probe_unbound_after_id();
             return -ENODEV;
+        }
     } else {
-        if (pci_match_id(&e1000_pci_driver, pdev) == NULL)
+        if (pci_match_id(&e1000_pci_driver, pdev) == NULL) {
+            arch9_fault_on_probe_unbound_after_id();
             return -ENODEV;
+        }
+    }
+
+    /* bad-nic-bar fault: corrupt the first NIC's BAR window after
+     * id-match but before any hardware modification. The probe
+     * returns -ENODEV; the kernel's ahci driver still brings up the
+     * root disk.  Counted as bar_writes because the write happens
+     * via the same pci_config_write8 that real hw probing would
+     * touch. */
+    static unsigned s_e1000_probe_index = 0;
+    unsigned my_index = s_e1000_probe_index++;
+    if (arch9_fault_should_inject_bad_nic_bar(my_index)) {
+        log_warn("e1000: bad-nic-bar fault: corrupting BAR0 "
+                  "for probe #%u\n", my_index);
+        /* A single byte-write to BAR0 registers as a "bar_write"
+         * under the observation counter; the next probe() aborts
+         * because the BAR window is now unusable. */
+        uint32_t val = 0;
+        if (pci_config_read32(pdev, 0x10, &val) == 0) {
+            arch9_fault_on_bar_write();
+            (void)pci_config_write32(pdev, 0x10, 0xFFFFFFFFu);
+        }
+        arch9_fault_on_probe_unbound_no_match();
+        return -ENODEV;
     }
 
     int rc = pci_set_bus_master(pdev, true);
