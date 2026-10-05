@@ -26,15 +26,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#if defined(TEST_PLATFORM_H) || defined(OS01_HOST_TEST) || (defined(__STDC_HOSTED__) && __STDC_HOSTED__ == 1)
-#include <stdlib.h>
-#define elf_alloc(sz) malloc(sz)
-#define elf_free(p)   free(p)
-#else
-#include <memory/slab.h>
-#define elf_alloc(sz) kmalloc(sz)
-#define elf_free(p)   kfree(p)
-#endif
 
 /* ── User VA constraints (per isolation spec §4) ─────────────
  *
@@ -130,23 +121,12 @@ int elf_layout_validate(const elf64_ehdr_t *ehdr,
     bool entry_in_exex   = false;
     uint64_t elf_end     = 0;
 
-    /* Track the high-water mark of PT_LOAD intervals to check overlap
-     * in O(n) rather than O(n^2).  intervals[] holds the start of each
-     * non-empty PT_LOAD and its memsz; the right endpoint is computed
-     * on demand during overlap checks.  We cap at 32 PT_LOADs — well
-     * above any realistic ELF — and reject any image that exceeds the
-     * cap rather than silently truncating the preflight (see the
-     * `interval_count` check below). */
-    struct elf_interval {
-        uint64_t vaddr;
-        uint64_t memsz;
-    };
-    enum { MAX_INTERVALS = 32 };
-    struct elf_interval *intervals = (struct elf_interval *)elf_alloc(MAX_INTERVALS * sizeof(struct elf_interval));
-    if (!intervals)
-        return -ENOMEM;
-    int interval_count = 0;
-    int ret = -ENOEXEC;
+    /* Track the count of non-empty PT_LOAD segments.
+     * We cap at 32 PT_LOADs — well above any realistic ELF — and reject
+     * any image that exceeds the cap rather than silently truncating the
+     * preflight. */
+    enum { MAX_LOAD_SEGMENTS = 32 };
+    int load_count = 0;
 
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
         const elf64_phdr_t *ph = &phdrs[i];
@@ -159,39 +139,39 @@ int elf_layout_validate(const elf64_ehdr_t *ehdr,
          * later PT_LOAD could overlap with a dropped one and never be
          * detected (spec §4 "complete preflight of all pairs of PT_LOAD
          * byte intervals"). */
-        if (interval_count >= MAX_INTERVALS)
-            goto out;
+        if (load_count >= MAX_LOAD_SEGMENTS)
+            return -ENOEXEC;
 
         /* Zero-sized PT_LOAD (and therefore zero-length-only images)
          * are rejected up-front (spec §4 "无可装载段"). */
         if (ph->p_memsz == 0)
-            goto out;
+            return -ENOEXEC;
 
         if (ph->p_filesz > ph->p_memsz)
-            goto out;
+            return -ENOEXEC;
 
         /* Vaddr below user lower bound. */
         if (ph->p_vaddr < USER_CODE_ADDR)
-            goto out;
+            return -ENOEXEC;
 
         /* Virtual interval end — checked overflow. */
         uint64_t vaddr_end;
         if (add_overflows(ph->p_vaddr, ph->p_memsz, &vaddr_end))
-            goto out;
+            return -ENOEXEC;
 
         /* Segment must end within or at HEAP_LIMIT — anything
          * beyond would put the segment into the stack region. */
         if (vaddr_end > HEAP_LIMIT)
-            goto out;
+            return -ENOEXEC;
 
         /* File interval (only when filesz > 0) — checked overflow
          * and bounded by file_size. */
         if (ph->p_filesz > 0) {
             uint64_t file_end;
             if (add_overflows(ph->p_offset, ph->p_filesz, &file_end))
-                goto out;
+                return -ENOEXEC;
             if (file_end > file_size)
-                goto out;
+                return -ENOEXEC;
         }
 
         /* Track max end for elf_end / heap_base. */
@@ -207,47 +187,41 @@ int elf_layout_validate(const elf64_ehdr_t *ehdr,
             entry_in_exex = true;
         }
 
-        /* Byte-level overlap against every previously seen PT_LOAD.
+        /* Byte-level overlap against every previously validated PT_LOAD.
          * Empty intervals were rejected above, so a memsz > 0
          * interval cannot equal another empty interval.  Note: we
          * intentionally include BSS bytes (memsz) — a data PT_LOAD's
          * BSS tail intersecting a code PT_LOAD's virtual range is
          * also forbidden (spec §4 "字节级交集（包括文件与 BSS 的
          * 重叠）"). */
-        for (int j = 0; j < interval_count; j++) {
+        for (uint16_t j = 0; j < i; j++) {
+            const elf64_phdr_t *prev = &phdrs[j];
+            if (prev->p_type != PT_LOAD || prev->p_memsz == 0)
+                continue;
             if (intervals_intersect(ph->p_vaddr, vaddr_end,
-                                    intervals[j].vaddr,
-                                    intervals[j].vaddr +
-                                        intervals[j].memsz)) {
-                goto out;
+                                    prev->p_vaddr,
+                                    prev->p_vaddr + prev->p_memsz)) {
+                return -ENOEXEC;
             }
         }
-        /* The cap was enforced at the top of the loop, so this
-         * insertion is unconditional. */
-        intervals[interval_count].vaddr = ph->p_vaddr;
-        intervals[interval_count].memsz = ph->p_memsz;
-        interval_count++;
+        load_count++;
     }
 
     /* No PT_LOAD → empty image → reject. */
     if (!found_load)
-        goto out;
+        return -ENOEXEC;
 
     /* ── 4. heap_base alignment + ceiling ────────────────────── */
     uint64_t heap_base = align_up_4k(elf_end);
     if (heap_base > HEAP_LIMIT)
-        goto out;
+        return -ENOEXEC;
 
     /* ── 5. Entry must be inside an executable PT_LOAD ───────── */
     if (!entry_in_exex)
-        goto out;
+        return -ENOEXEC;
 
     /* ── 6. Populate output ──────────────────────────────────── */
     out->elf_end   = elf_end;
     out->heap_base = heap_base;
-    ret = 0;
-
-out:
-    elf_free(intervals);
-    return ret;
+    return 0;
 }
