@@ -60,6 +60,19 @@ bool ap_work_wait(uint32_t cpu, uint32_t seq, uint64_t *out,
 }
 
 /* AP side: called from the secondary_idle work loop. */
+
+/* M3.6 Task 26: weak extension dispatcher. The kernel selftest
+ * (test_m3_multicore.c) overrides this with a strong definition that
+ * consumes WORK_PT_STRESS / WORK_PT_MAP. The weak default declines
+ * every command, preserving the legacy "unknown cmd leaves the item
+ * pending" behavior in production builds. */
+__attribute__((weak)) bool ap_work_ext_run(uint32_t cmd, uint64_t arg0,
+                                           uint64_t arg1, uint64_t *out)
+{
+    (void)cmd; (void)arg0; (void)arg1; (void)out;
+    return false;
+}
+
 void ap_work_run_one(uint32_t cpu)
 {
     struct ap_work *slot = &ap_work[cpu];
@@ -77,7 +90,13 @@ void ap_work_run_one(uint32_t cpu)
     case WORK_BARRIER:
         break; /* synchronization barrier only */
     default:
-        return; /* unknown cmd: leave READY, do not advance the seq */
+        /* Extension commands (M3.6 Task 26): the hook decides. A false
+         * return leaves the item READY without advancing the seq —
+         * identical to the legacy unknown-cmd behavior. */
+        if (!ap_work_ext_run(slot->cmd, slot->arg0, slot->arg1,
+                             &slot->out))
+            return;
+        break;
     }
     last_consumed_seq[cpu] = slot->seq;
     __atomic_store_n(&slot->state, AP_WORK_DONE, __ATOMIC_RELEASE);

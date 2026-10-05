@@ -32,6 +32,20 @@
 enum ap_work_state { AP_WORK_IDLE = 0, AP_WORK_READY, AP_WORK_DONE };
 enum ap_work_cmd { WORK_READ64 = 1, WORK_BARRIER = 2 };
 
+/* M3.6 Task 26 extension commands. These are consumed by the weak
+ * ap_work_ext_run() hook below — the production ap_work.c body does
+ * not know their payloads; only the kernel selftest
+ * (kernel/selftest/test_m3_multicore.c) overrides the hook. Unknown
+ * commands without an override are ignored exactly like before
+ * (state stays READY, seq does not advance). */
+enum ap_work_cmd_ext { WORK_PT_STRESS = 3, WORK_PT_MAP = 4, WORK_PT_ALLOC = 5 };
+
+/* Weak extension dispatcher (M3.6 Task 26): return true when `cmd`
+ * was consumed and *out holds the result; false to leave the item
+ * pending (legacy behavior for unknown commands). */
+bool ap_work_ext_run(uint32_t cmd, uint64_t arg0, uint64_t arg1,
+                     uint64_t *out);
+
 struct ap_work {
     /* Plain field, accessed only through the __atomic builtins. This
      * toolchain's __atomic builtins REJECT _Atomic-qualified pointers

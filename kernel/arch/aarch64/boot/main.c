@@ -682,6 +682,19 @@ void aarch64_main(const struct boot_context *handoff)
         kputs("M3-SHOOTDOWN-PROBE: SKIP (single-CPU boot)\n");
     }
 
+#if OS01_SELFTEST
+    /* M3.6 Task 26: multi-core selftest (spec §8.2 ①②⑤⑥) — real-core
+     * shootdown target-set/gen, partial-mask SGI, same-pt_lock
+     * interleave and concurrent shared-L1 creation. MUST run post-SMP
+     * (APs in secondary_idle + ipi_ready), i.e. NOT through the
+     * pre-SMP selftest_run_all() table. Prints the harness-asserted
+     * '[selftest] m3mc: N/N PASS' marker (SKIP line at -smp 1). */
+    {
+        extern int test_m3_multicore_run(void);
+        (void)test_m3_multicore_run();
+    }
+#endif
+
     /* M3.4 Task 21: ID_AA64MMFR2_EL1.BBM (Break-before-Make levels).
      *
      * The split_block_2m path on a PUBLISHED root depends on the BBM

@@ -51,7 +51,8 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    selftest/test_slab_selftest.c \
                    selftest/test_arch_atomic_u64.c \
                    selftest/test_aarch64_rndr_encoding.c \
-                   selftest/test_m3_selftest.c
+                   selftest/test_m3_selftest.c \
+                   selftest/test_m3_multicore.c
 # NOTE: boot/m3_probe.c (M3.5 Task 25) is picked up by the
 # ARCH_C_SOURCES wildcard of arch/aarch64/boot/ below.
 else
