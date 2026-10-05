@@ -139,7 +139,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_vmm_prot_none.elf \
     $(TEST_BLD)/test_vmm_ack_wraparound.elf \
     $(TEST_BLD)/test_aarch64_pt_root_publish.elf \
-    $(TEST_BLD)/test_aarch64_pt_split.elf
+    $(TEST_BLD)/test_aarch64_pt_split.elf \
+    $(TEST_BLD)/test_smp_starting_gate.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split
 
@@ -1656,6 +1657,34 @@ $(TEST_BLD)/vmm_gate_test_stubs.o: $(TEST_MOCK)/vmm_gate_test_stubs.c \
 	$(HOST_CC) $(VMM_GATE_HOST_CFLAGS) -I$(TEST_MOCK) -c $< -o $@
 
 test_foundational_primitives: $(TEST_BLD)/test_foundational_primitives.elf
+	$<
+
+# M3.5 Task 23: smp_starting gate + ipi_ready_publish_and_count integration
+# (BSP + AP both publish through the SAME one-shot function). Links the
+# REAL kernel/arch/aarch64/memory/vmm_gate.c (smp_starting, ipi_ready_count,
+# vmm_gate_check) and source-scans kernel/arch/aarch64/memory/{page_table,
+# vmm_backend}.c to confirm every public aarch64_pt_*/arch_vmm_* entry has
+# vmm_gate_check() as the first meaningful statement (or is a documented
+# exception: init, encoder, or _ext delegator wrapper). The atomic per-
+# primitive semantics are pinned by test_foundational_primitives.c (21/21);
+# the BSP/AP publish order is pinned by test_double_state_publish.c — this
+# file extends both into the BSP+AP end-to-end flow and pins the gate-first
+# contract on the VMM surface.
+$(TEST_BLD)/test_smp_starting_gate.o: $(TEST_CASES)/test_smp_starting_gate.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_gate.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/dtb.h \
+		$(TEST_MOCK)/vmm_gate_test_runtime.h \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/page_table.c \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/vmm_backend.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VMM_GATE_HOST_CFLAGS) -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_smp_starting_gate.elf: $(TEST_BLD)/test_smp_starting_gate.o \
+		$(TEST_BLD)/vmm_gate_production.o
+	$(HOST_CC) -o $@ $^
+
+test_smp_starting_gate: $(TEST_BLD)/test_smp_starting_gate.elf
 	$<
 
 # GICv2 marker lines: source-level RED check (Task 2.1). QEMU aarch64-uefi
