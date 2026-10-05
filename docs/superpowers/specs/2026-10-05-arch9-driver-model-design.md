@@ -2,7 +2,7 @@
 
 日期：2026-10-05
 
-状态：子 agent 三轮评审后 APPROVE，待用户评审；本文不表示实现已完成。
+状态：子 agent 三轮评审后 APPROVE，用户于 2026-10-05 确认；本文不表示实现已完成。
 
 ## 1. 目标与范围
 
@@ -257,4 +257,4 @@ test-static 补边界审计：通用 block 无 AHCI 符号；net adapter 无 e10
 | 2 | REQUEST_CHANGES | 明确 clocksource 不可用时拒绝 probe、隔离资源的回收例外、ONLINE 前接口查询规则 |
 | 3 | APPROVE | Critical / Important 均为零，无新增 Minor；前两轮意见全部解决 |
 
-主 agent 接受评审者列出的首期范围排除：热插拔/运行期卸载、动态 vector/shared INTx、aarch64 PCI/NIC 功能、NVMe/USB/缓存/异步 I/O，以及独立的现有 FS 并发和 syscall 用户指针问题。评审针对设计可执行性，未验证尚未实现的功能。用户评审通过后才进入 writing-plans；本次不编写实现计划或修改产品代码。
+主 agent 接受评审者列出的首期范围排除：热插拔/运行期卸载、动态 vector/shared INTx、aarch64 PCI/NIC 功能、NVMe/USB/缓存/异步 I/O，以及独立的现有 FS 并发和 syscall 用户指针问题。评审针对设计可执行性，未验证尚未实现的功能。用户于 2026-10-05 确认后进入 writing-plans；实现计划见 [ARCH-9 implementation plan](../plans/2026-10-05-arch9-driver-model.md)。尚未开始修改产品代码。
