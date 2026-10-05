@@ -121,9 +121,10 @@ TEST_BINS := \
     $(TEST_BLD)/test_device_boot.elf \
     $(TEST_BLD)/test_net_device.elf \
     $(TEST_BLD)/test_net_lwip.elf \
-    $(TEST_BLD)/test_e1000_instances.elf
+    $(TEST_BLD)/test_e1000_instances.elf \
+    $(TEST_BLD)/test_virtio_net_instances.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio
 
 all: $(TEST_BINS)
 
@@ -1683,4 +1684,30 @@ $(TEST_BLD)/test_e1000_instances.elf: $(TEST_BLD)/test_e1000_instances.o \
 	$(HOST_CC) -o $@ $^
 
 test-e1000: $(TEST_BLD)/test_e1000_instances.elf
+	$<
+
+# ARCH-9 Phase C: virtio-net private instance and polling mode
+VIRTIO_HOST_CFLAGS := $(HOST_CFLAGS) -D_GNU_SOURCE -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
+    -include $(TEST_MOCK)/arch9/virtio_runtime.h -DOS01_HOST_TEST
+
+$(TEST_BLD)/virtio_production.o: $(TESTS_DIR)/kernel/driver/virtio-net.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VIRTIO_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_virtio_net_instances.o: $(TEST_CASES)/test_virtio_net_instances.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VIRTIO_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_virtio_net_instances.elf: $(TEST_BLD)/test_virtio_net_instances.o \
+    $(TEST_BLD)/virtio_production.o \
+    $(TEST_BLD)/net_device_production.o \
+    $(TEST_BLD)/device_core_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(TEST_BLD)/irq_production.o \
+    $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+test-virtio: $(TEST_BLD)/test_virtio_net_instances.elf
 	$<

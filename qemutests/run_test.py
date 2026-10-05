@@ -98,8 +98,10 @@ class TestRunner:
             "-no-shutdown",
         ]
         if network:
+            nic = os.environ.get("NETWORK_NIC", "e1000")
+            nic_dev = "virtio-net-pci,netdev=net0,disable-modern=on" if nic == "virtio" else "e1000,netdev=net0"
             args += ["-netdev", "user,id=net0,dhcpstart=10.0.2.20",
-                     "-device", "e1000,netdev=net0"]
+                     "-device", nic_dev]
         if serial_stdio:
             # Redirect QEMU's stdout (the serial READ side under
             # -serial stdio) into the log file directly — line-buffered

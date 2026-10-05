@@ -393,8 +393,8 @@ test-m1-host: $(if $(CASE),_test-m1-host-run-$(CASE),$(foreach c,$(M1_CASES),_te
 	  esac
 
 # ARCH-9 driver model host tests.
-.PHONY: test-arch9-host _test-arch9-host-run-block _test-arch9-host-run-pci _test-arch9-host-run-backend _test-arch9-host-run-ahci _test-arch9-host-run-device-boot _test-arch9-host-run-net _test-arch9-host-run-lwip _test-arch9-host-run-e1000
-ARCH9_CASES := block pci backend ahci device-boot net lwip e1000
+.PHONY: test-arch9-host _test-arch9-host-run-block _test-arch9-host-run-pci _test-arch9-host-run-backend _test-arch9-host-run-ahci _test-arch9-host-run-device-boot _test-arch9-host-run-net _test-arch9-host-run-lwip _test-arch9-host-run-e1000 _test-arch9-host-run-virtio
+ARCH9_CASES := block pci backend ahci device-boot net lwip e1000 virtio
 _test-arch9-host-run-block:
 	@echo "  [test-arch9-host] block"
 	$(call os01_submake,hosttests,test-block $(OS01_SUBMAKE_ARGS))
@@ -419,6 +419,9 @@ _test-arch9-host-run-lwip:
 _test-arch9-host-run-e1000:
 	@echo "  [test-arch9-host] e1000"
 	$(call os01_submake,hosttests,test-e1000 $(OS01_SUBMAKE_ARGS))
+_test-arch9-host-run-virtio:
+	@echo "  [test-arch9-host] virtio"
+	$(call os01_submake,hosttests,test-virtio $(OS01_SUBMAKE_ARGS))
 test-arch9-host: CASE ?=
 test-arch9-host: CASE := $(CASE)
 test-arch9-host: $(if $(CASE),_test-arch9-host-run-$(CASE),$(foreach c,$(ARCH9_CASES),_test-arch9-host-run-$(c)))
@@ -433,6 +436,7 @@ test-arch9-host: $(if $(CASE),_test-arch9-host-run-$(CASE),$(foreach c,$(ARCH9_C
 	    net) echo "  [test-arch9-host] CASE=$(CASE)";; \
 	    lwip) echo "  [test-arch9-host] CASE=$(CASE)";; \
 	    e1000) echo "  [test-arch9-host] CASE=$(CASE)";; \
+	    virtio) echo "  [test-arch9-host] CASE=$(CASE)";; \
 	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(ARCH9_CASES)" >&2; exit 1;; \
 	  esac
 
@@ -560,6 +564,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	fi
 	DISK_IMG="$(TEST_QEMU_IMG_$(SUITE))" \
 	OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \
+	NETWORK_NIC="$(NETWORK_NIC)" \
 	python3 qemutests/run_test.py $(SUITE)
 
 # Exercise repeated exec/exit through the normal terminal and ash path.

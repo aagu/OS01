@@ -63,11 +63,15 @@ int net_hw_init(void)
     nic_func = func;
 
     if (vendor == VIRTIO_PCI_VENDOR_ID) {
-        // VirtIO-net (0x1AF4:0x1000 or 0x1041)
+        // VirtIO-net (0x1AF4:0x1000)
         is_virtio = 1;
         log_info("net: VirtIO-net NIC found (vendor=0x%x device=0x%x)\n",
                  vendor, device);
-        if (virtio_net_init(nic_bar, bus, dev, func, nic_gsi) != 0) {
+        uint32_t cmd = pci_config_read(bus, dev, func, PCI_COMMAND);
+        cmd |= (1 << 0) | (1 << 2);
+        pci_config_write(bus, dev, func, PCI_COMMAND, cmd);
+        struct pci_device *pdev = pci_device_lookup(0, nic_bus, nic_dev, nic_func);
+        if (virtio_net_legacy_init(pdev, nic_bar, nic_gsi) != 0) {
             debug_block("net: virtio-net init failed\n");
             return -EIO;
         }
