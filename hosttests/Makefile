@@ -114,9 +114,10 @@ TEST_BINS := \
     $(TEST_BLD)/test_m1_publish.elf \
     $(TEST_BLD)/test_syscall_dispatch.elf \
     $(TEST_BLD)/test_compat_linux.elf \
-    $(TEST_BLD)/test_block_device_ops.elf
+    $(TEST_BLD)/test_block_device_ops.elf \
+    $(TEST_BLD)/test_pci_driver_model.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test-block
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test-block test-pci
 
 all: $(TEST_BINS)
 
@@ -1489,4 +1490,40 @@ $(TEST_BLD)/test_block_device_ops.elf: $(TEST_BLD)/test_block_device_ops.o $(TES
 
 test-block: $(TEST_BLD)/test_block_device_ops.elf
 	$<
+
+# ARCH-9 Phase B: PCI driver model & enumeration
+PCI_HOST_CFLAGS := $(HOST_CFLAGS) -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
+    -include $(TEST_MOCK)/arch9/pci_runtime.h -DOS01_HOST_TEST
+
+$(TEST_BLD)/device_core_production.o: $(TESTS_DIR)/kernel/device/core.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PCI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/pci_core_production.o: $(TESTS_DIR)/kernel/bus/pci/core.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PCI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/pci_match_production.o: $(TESTS_DIR)/kernel/bus/pci/match.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PCI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/pci_platform_production.o: $(TESTS_DIR)/kernel/bus/pci/platform.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PCI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_pci_driver_model.o: $(TEST_CASES)/test_pci_driver_model.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PCI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_pci_driver_model.elf: $(TEST_BLD)/test_pci_driver_model.o \
+    $(TEST_BLD)/device_core_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+test-pci: $(TEST_BLD)/test_pci_driver_model.elf
+	$<
+
 

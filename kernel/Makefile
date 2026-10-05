@@ -68,6 +68,8 @@ KERNEL_C_SOURCES := \
     $(wildcard percpu/*.c) \
     $(wildcard selftest/*.c) \
     $(wildcard subsys/*.c) \
+    $(wildcard device/*.c) \
+    $(wildcard bus/pci/*.c) \
     ../runtime/builtins/udivti3.c
 
 # Platform devices are selected by arch/<arch>/make.config.  Keep x86-only
