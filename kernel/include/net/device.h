@@ -10,6 +10,12 @@
 #define NET_DEVICE_MAX 8
 #define NET_DEVICE_POLL_BUDGET 64
 
+enum nic_irq_mode {
+    NIC_MSIX,
+    NIC_INTX,
+    NIC_POLL,
+};
+
 struct net_device;
 struct pbuf;
 struct device;

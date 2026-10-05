@@ -120,9 +120,10 @@ TEST_BINS := \
     $(TEST_BLD)/test_ahci_lifecycle.elf \
     $(TEST_BLD)/test_device_boot.elf \
     $(TEST_BLD)/test_net_device.elf \
-    $(TEST_BLD)/test_net_lwip.elf
+    $(TEST_BLD)/test_net_lwip.elf \
+    $(TEST_BLD)/test_e1000_instances.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000
 
 all: $(TEST_BINS)
 
@@ -1656,4 +1657,30 @@ $(TEST_BLD)/test_net_lwip.elf: $(TEST_BLD)/test_net_lwip.o \
 	$(HOST_CC) -o $@ $^
 
 test-lwip: $(TEST_BLD)/test_net_lwip.elf
+	$<
+
+# ARCH-9 Phase C: e1000 private instance and IRQ modes
+E1000_HOST_CFLAGS := $(HOST_CFLAGS) -D_GNU_SOURCE -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
+    -include $(TEST_MOCK)/arch9/e1000_runtime.h -DOS01_HOST_TEST
+
+$(TEST_BLD)/e1000_production.o: $(TESTS_DIR)/kernel/driver/e1000.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(E1000_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_e1000_instances.o: $(TEST_CASES)/test_e1000_instances.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(E1000_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_e1000_instances.elf: $(TEST_BLD)/test_e1000_instances.o \
+    $(TEST_BLD)/e1000_production.o \
+    $(TEST_BLD)/net_device_production.o \
+    $(TEST_BLD)/device_core_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(TEST_BLD)/irq_production.o \
+    $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+test-e1000: $(TEST_BLD)/test_e1000_instances.elf
 	$<

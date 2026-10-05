@@ -10,6 +10,7 @@
 #include <driver/e1000.h>
 #include <driver/virtio-net.h>
 #include <driver/pci.h>
+#include <bus/pci/pci.h>
 #include <subsys/subsys.h>
 #include <core/debug.h>
 #include <memory/memory.h>  // Phy_To_Virt
@@ -75,9 +76,10 @@ int net_hw_init(void)
         is_virtio = 0;
         // Try MSI-X first (vector 0x30) — Q35+TCG IOAPIC INTx never
         // fires, so MSI-X is the only working interrupt path.
-        // e1000_init() falls back to INTx GSI if use_msi is 0.
+        // e1000_legacy_init() falls back to INTx GSI if use_msi is 0.
+        struct pci_device *pdev = pci_device_lookup(0, nic_bus, nic_dev, nic_func);
         int msi_ok = (pci_enable_msix(nic_bus, nic_dev, nic_func, 0x30) == 0);
-        if (e1000_init(nic_bar, nic_gsi, msi_ok ? 1 : 0) != 0) {
+        if (e1000_legacy_init(pdev, nic_bar, nic_gsi, msi_ok ? 1 : 0) != 0) {
             debug_block("net: e1000 init failed\n");
             return -EIO;
         }

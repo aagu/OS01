@@ -127,14 +127,84 @@ typedef struct {
 #define E1000_TXD_CMD_RS   (1 << 3)   // Report Status
 #define E1000_TXD_STAT_DD  (1 << 0)   // Descriptor Done
 
-// ── Driver API ─────────────────────────────────────────────────
-#include "lwip/netif.h"  // for struct netif, struct pbuf, err_t
+#include <stdbool.h>
+#include <arch/spinlock.h>
+#include <net/device.h>
+#include <bus/pci/pci.h>
+#include <bus/pci/driver.h>
 
+#ifndef OS01_HOST_TEST
+#include "lwip/netif.h"  // for struct netif, struct pbuf, err_t
+#endif
+
+struct Page;
+
+#define E1000_RXQ_DEPTH  64
+
+typedef struct {
+    uint8_t  *buf[E1000_RXQ_DEPTH];
+    uint16_t  len[E1000_RXQ_DEPTH];
+    int       head;   // next slot to fill
+    int       tail;   // next slot to drain
+} e1000_rxq_t;
+
+struct e1000_instance {
+    struct pci_device *pdev;
+    uint64_t           mmio_phys;
+    volatile uint8_t  *mmio;           // kernel-virtual MMIO base
+    uint8_t            mac[6];
+
+    // Net device abstraction
+    struct net_device *ndev;
+
+    // Interrupt & mode
+    enum nic_irq_mode  irq_mode;
+    uint32_t           gsi;
+    bool               irq_owned;
+    bool               legacy_mode;
+
+    // Descriptors and DMA
+    e1000_rx_desc_t   *rx_descs;
+    e1000_tx_desc_t   *tx_descs;
+    uint64_t           rx_phys;
+    uint64_t           tx_phys;
+    struct Page       *rx_page;
+    struct Page       *tx_page;
+
+    // DMA packet buffers
+    uint64_t           rx_buf_phys[E1000_NUM_RX_DESC];
+    uint64_t           tx_buf_phys[E1000_NUM_TX_DESC];
+    uint8_t           *rx_bufs[E1000_NUM_RX_DESC];
+    uint8_t           *tx_bufs[E1000_NUM_TX_DESC];
+
+    // TX state
+    uint32_t           tx_head;       // next descriptor to send
+    uint32_t           tx_tail;       // next free slot (post-completion)
+    spinlock_T         tx_lock;
+
+    // RX state
+    uint32_t           rx_tail;       // next descriptor to check
+    e1000_rxq_t        rxq;
+
+    // Legacy support
+    struct netif      *netif_ptr;
+
+    int                initialized;
+    bool               stopped;
+};
+
+// ── Driver API ─────────────────────────────────────────────────
+int   e1000_probe(struct pci_device *pdev, const struct pci_device_id *id);
+void  e1000_remove(struct pci_device *pdev);
+extern const struct pci_driver e1000_pci_driver;
+
+int   e1000_legacy_init(struct pci_device *pdev, uint64_t bar, uint8_t gsi, int use_msi);
 int   e1000_init(uint64_t bar_phys, uint8_t gsi, int use_msi);
 int   e1000_link_up(void);
 err_t e1000_xmit(struct netif *netif, struct pbuf *p);
 err_t e1000_netif_init(struct netif *netif);
 
 void e1000_poll_rx(void);
+void e1000_process_rx(void);
 
 #endif // _DRIVER_E1000_H
