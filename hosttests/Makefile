@@ -140,9 +140,10 @@ TEST_BINS := \
     $(TEST_BLD)/test_vmm_ack_wraparound.elf \
     $(TEST_BLD)/test_aarch64_pt_root_publish.elf \
     $(TEST_BLD)/test_aarch64_pt_split.elf \
-    $(TEST_BLD)/test_smp_starting_gate.elf
+    $(TEST_BLD)/test_smp_starting_gate.elf \
+    $(TEST_BLD)/test_aarch64_arch_vmm_init.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init
 
 all: $(TEST_BINS)
 
@@ -1685,6 +1686,32 @@ $(TEST_BLD)/test_smp_starting_gate.elf: $(TEST_BLD)/test_smp_starting_gate.o \
 	$(HOST_CC) -o $@ $^
 
 test_smp_starting_gate: $(TEST_BLD)/test_smp_starting_gate.elf
+	$<
+
+# M3.5 Task 24: arch_vmm_init production entry contract. Links the REAL
+# page_table.c + REAL vmm_backend.c against a configurable
+# aarch64_read_ttbr1 mock (g_mock_ttbr1). The test asserts the 5
+# documented paths: valid → rc 0 + kernel_map pinned; pa=0 (raw or
+# post-mask), unaligned, at-1TiB, above-1TiB → rc -EINVAL + kernel_map
+# untouched. Reuses the AARCH64_PT_SW harness
+# (m1_a64_include/arch/mmu.h,spinlock.h stubs).
+$(TEST_BLD)/test_aarch64_arch_vmm_init.o: \
+		$(TEST_CASES)/test_aarch64_arch_vmm_init.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) \
+		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_arch_vmm_init.elf: \
+		$(TEST_BLD)/test_aarch64_arch_vmm_init.o \
+		$(TEST_BLD)/aarch64_pt_production.o \
+		$(TEST_BLD)/vmm_backend_production.o
+	$(HOST_CC) -o $@ $^
+
+test_aarch64_arch_vmm_init: $(TEST_BLD)/test_aarch64_arch_vmm_init.elf
 	$<
 
 # GICv2 marker lines: source-level RED check (Task 2.1). QEMU aarch64-uefi

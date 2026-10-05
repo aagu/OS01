@@ -63,6 +63,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include <arch/aarch64/boot_direct_map.h>  /* aarch64_read_ttbr1 (M3.5 Task 24) */
 #include <arch/aarch64/boot_log.h>
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/ipi.h>
@@ -71,6 +72,7 @@
 #include <core/printk.h>
 #include <memory/memory.h>
 #include <memory/pmm.h>
+#include <memory/vmm.h>                    /* kernel_map + mmap type (M3.5 Task 24) */
 
 #ifdef OS01_SELFTEST
 
@@ -412,7 +414,59 @@ static int section_split_2m(uint64_t *root)
     return 0;
 }
 
-/* ── Top-level: 4 sections, each owns its own scratch root ─────── */
+/* ── Section 5: kernel_map pinned to TTBR1's direct-map pointer ──
+ *
+ * Spec §4.5: arch_vmm_init() pins kernel_map =
+ *     (mmap)(uintptr_t)((aarch64_read_ttbr1() & AARCH64_TTBR_BASE_MASK)
+ *                       + ARCH_PAGE_OFFSET)
+ *
+ * This section is the on-target companion to hosttests/cases/
+ * test_aarch64_arch_vmm_init.c. The production call site
+ * (kernel/arch/aarch64/boot/main.c) invokes arch_vmm_init() between
+ * arch_boot_direct_map_init() and aarch64_m1_probe_prepare(), so the
+ * live TTBR1 already holds the M1 root PA when this section runs.
+ *
+ * Reads the live TTBR1, masks with AARCH64_TTBR_BASE_MASK, forms the
+ * expected direct-map pointer, and asserts the kernel_map global
+ * matches. A drift means either arch_vmm_init produced the wrong
+ * pointer or the BSP has changed TTBR1_EL1 between the production
+ * call and this selftest — both are fatal at this point in the boot
+ * (the GIC and TLB paths depend on the pinned root).
+ *
+ * Pre-SMP gate is implicitly satisfied (BSP-only, no IPI yet). */
+static int section_kernel_map_pinned(void)
+{
+    uint64_t raw = aarch64_read_ttbr1();
+    uint64_t ttbr_pa = raw & AARCH64_TTBR_BASE_MASK;
+    /* Defensive pre-checks: same edge cases the production call site
+     * validated before pinning kernel_map. A drift here would mean
+     * somebody flipped TTBR1_EL1 between arch_vmm_init() and this
+     * section — halt with a reason rather than papering over with
+     * -EIO. */
+    if (ttbr_pa == 0
+        || (ttbr_pa & (PAGE_4K_SIZE - 1)) != 0
+        || ttbr_pa >= (UINT64_C(1) << 40)) {
+        kputs("[selftest] m3: kernel_map_pinned FAIL raw=");
+        kputu(raw);
+        kputs(" pa=");
+        kputu(ttbr_pa);
+        kputs("\n");
+        return -EIO;
+    }
+    uint64_t *expected = (uint64_t *)(uintptr_t)(ttbr_pa + ARCH_PAGE_OFFSET);
+    if (kernel_map != expected) {
+        kputs("[selftest] m3: kernel_map_pinned FAIL got=");
+        kputu((uint64_t)(uintptr_t)kernel_map);
+        kputs(" want=");
+        kputu((uint64_t)(uintptr_t)expected);
+        kputs("\n");
+        return -EIO;
+    }
+    kputs("[selftest] m3: kernel_map_pinned PASS\n");
+    return 0;
+}
+
+/* ── Top-level: 5 sections, each owns its own scratch root ─────── */
 int test_m3_selftest(void)
 {
     int passed = 0;
@@ -476,10 +530,17 @@ int test_m3_selftest(void)
         }
     }
 
+    /* Section 5: kernel_map pinned to TTBR1's direct-map pointer.
+     * No scratch root — reads the live TTBR1 + kernel_map and
+     * compares. Runs after the arch_vmm_init() production call in
+     * main.c, so a pass here proves the call site pinned the
+     * expected pointer. */
+    if (section_kernel_map_pinned() == 0) passed++; else failed++;
+
     /* Parser-asserted final marker: "[selftest] m3: N/N PASS".
-     * 4 sections (gic_target_bit, 4k_round, 2m_block, split_2m).
-     * Use kputs + kputu so the marker is parseable (serial_printk
-     * is verbatim on aarch64). */
+     * 5 sections (gic_target_bit, 4k_round, 2m_block, split_2m,
+     * kernel_map_pinned). Use kputs + kputu so the marker is
+     * parseable (serial_printk is verbatim on aarch64). */
     if (failed == 0) {
         kputs("[selftest] m3: ");
         kputu((uint64_t)passed);

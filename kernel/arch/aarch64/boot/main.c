@@ -11,6 +11,7 @@
 #include <memory/memory.h>   /* for struct boot_context / Virt_To_Phy */
 #include <memory/pmm.h>      /* for PMMngr, struct Page, alloc_pages, free_pages, ZONE_NORMAL */
 #include <memory/pmm_arch.h> /* for pmm_arch_normalize (preflight caller) */
+#include <memory/vmm.h>      /* for arch_vmm_init (M3.5 Task 24 production call) */
 #include <arch/cpu.h>
 #include <arch/irq.h>
 #include <arch/aarch64/dtb.h>
@@ -426,6 +427,30 @@ void aarch64_main(const struct boot_context *handoff)
     if (arch_boot_direct_map_init()) {
         log_err("M1 FATAL reason=runtime-init\n");
         for (;;) arch_cpu_halt();
+    }
+    /* M3.5 Task 24: pin kernel_map = (mmap)(pa + ARCH_PAGE_OFFSET)
+     * where pa = aarch64_read_ttbr1() & AARCH64_TTBR_BASE_MASK.
+     * boot_direct_map_init above already installed the M1 root into
+     * TTBR1_EL1; arch_vmm_init locates it, validates the masked PA
+     * (nonzero, 4 KiB aligned, < 1 TiB), and publishes the same
+     * kernel_map pointer every downstream arch_vmm_* entry expects.
+     *
+     * The call runs BEFORE aarch64_m1_probe_prepare() and BEFORE the
+     * selftest_run_all() block below so the kernel_map assertion in
+     * the M3 selftest sees the live state.
+     *
+     * Any non-zero rc is fatal — the BSP halts here with a numeric
+     * reason; v1 review item 16 forbids returning to the caller
+     * because every subsequent page-table-touching path assumes
+     * kernel_map is pinned. */
+    {
+        int rc = arch_vmm_init();
+        if (rc) {
+            kputs("FATAL: arch_vmm_init rc=-");
+            kputu((uint64_t)(-(int64_t)rc));
+            kputs("\n");
+            for (;;) arch_cpu_halt();
+        }
     }
     if (aarch64_m1_probe_prepare()) {
         log_err("M1 FATAL reason=probe\n");
