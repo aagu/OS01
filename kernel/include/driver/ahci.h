@@ -219,7 +219,72 @@ typedef volatile struct {
 #define ATA_IDENT_LBA28_SECTORS   60     // words 60-61, 28-bit LBA
 #define ATA_IDENT_LBA48_SECTORS   100    // words 100-103, 48-bit LBA
 
+#include <driver/ahci_lifecycle.h>
+#include <block/blockdev.h>
+#include <bus/pci/pci.h>
+#include <arch/spinlock.h>
+
+#define AHCI_MAX_PORTS 32
+#define AHCI_MAX_XFER_SECTORS ((2 * 1024 * 1024 - 0x4000) / 512) /* 4064 */
+
+#ifndef ahci_write32
+#define ahci_write32(reg, val) do { *(reg) = (val); } while (0)
+#endif
+#ifndef ahci_record_dma_start
+#define ahci_record_dma_start() do {} while (0)
+#endif
+#ifndef ahci_record_bounce_write
+#define ahci_record_bounce_write() do {} while (0)
+#endif
+
+enum ahci_port_state {
+    AHCI_PORT_STATE_INITIAL = 0,
+    AHCI_PORT_STATE_ACTIVE,
+    AHCI_PORT_STATE_FAILED,
+    AHCI_PORT_STATE_QUARANTINED,
+};
+
+struct Page;
+struct ahci_controller;
+
+struct ahci_port {
+    struct ahci_controller *ctrl;
+    uint32_t port_num;
+    int present;
+    struct Page *dma_page;
+    uint64_t dma_phys;
+    void *dma_virt;
+    uint16_t identify[256];
+    char model[41];
+    char serial[21];
+    uint64_t sector_count;
+    int lba48;
+    bool busy;
+    enum ahci_port_state state;
+    spinlock_T lock;
+    block_device_t *bdev;
+    int last_error;
+    bool quarantined;
+};
+
+struct ahci_controller {
+    struct pci_device *pdev;
+    HBA_MEM *hba;
+    uint64_t abar_phys;
+    uint32_t nports;
+    uint32_t pi;
+    uint32_t irq;
+    bool irq_registered;
+    struct ahci_port ports[AHCI_MAX_PORTS];
+};
+
 // ── Driver API ───────────────────────────────────────────
+
+int  ahci_probe(struct pci_device *pdev, const struct pci_device_id *id);
+void ahci_remove(struct pci_device *pdev);
+
+int  ahci_port_read(struct ahci_port *port, uint64_t lba, uint32_t count, void *buffer);
+int  ahci_port_write(struct ahci_port *port, uint64_t lba, uint32_t count, const void *buffer);
 
 void ahci_init(void);
 

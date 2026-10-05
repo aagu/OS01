@@ -393,8 +393,8 @@ test-m1-host: $(if $(CASE),_test-m1-host-run-$(CASE),$(foreach c,$(M1_CASES),_te
 	  esac
 
 # ARCH-9 driver model host tests.
-.PHONY: test-arch9-host _test-arch9-host-run-block _test-arch9-host-run-pci _test-arch9-host-run-backend
-ARCH9_CASES := block pci backend
+.PHONY: test-arch9-host _test-arch9-host-run-block _test-arch9-host-run-pci _test-arch9-host-run-backend _test-arch9-host-run-ahci
+ARCH9_CASES := block pci backend ahci
 _test-arch9-host-run-block:
 	@echo "  [test-arch9-host] block"
 	$(call os01_submake,hosttests,test-block $(OS01_SUBMAKE_ARGS))
@@ -404,6 +404,9 @@ _test-arch9-host-run-pci:
 _test-arch9-host-run-backend:
 	@echo "  [test-arch9-host] backend"
 	$(call os01_submake,hosttests,test-backend $(OS01_SUBMAKE_ARGS))
+_test-arch9-host-run-ahci:
+	@echo "  [test-arch9-host] ahci"
+	$(call os01_submake,hosttests,test-ahci $(OS01_SUBMAKE_ARGS))
 test-arch9-host: CASE ?=
 test-arch9-host: CASE := $(CASE)
 test-arch9-host: $(if $(CASE),_test-arch9-host-run-$(CASE),$(foreach c,$(ARCH9_CASES),_test-arch9-host-run-$(c)))
@@ -413,6 +416,7 @@ test-arch9-host: $(if $(CASE),_test-arch9-host-run-$(CASE),$(foreach c,$(ARCH9_C
 	    block) echo "  [test-arch9-host] CASE=$(CASE)";; \
 	    pci) echo "  [test-arch9-host] CASE=$(CASE)";; \
 	    backend) echo "  [test-arch9-host] CASE=$(CASE)";; \
+	    ahci) echo "  [test-arch9-host] CASE=$(CASE)";; \
 	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(ARCH9_CASES)" >&2; exit 1;; \
 	  esac
 

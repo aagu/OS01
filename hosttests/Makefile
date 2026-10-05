@@ -116,9 +116,10 @@ TEST_BINS := \
     $(TEST_BLD)/test_compat_linux.elf \
     $(TEST_BLD)/test_block_device_ops.elf \
     $(TEST_BLD)/test_pci_driver_model.elf \
-    $(TEST_BLD)/test_pci_backend_irq.elf
+    $(TEST_BLD)/test_pci_backend_irq.elf \
+    $(TEST_BLD)/test_ahci_lifecycle.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test-block test-pci test-backend
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test-block test-pci test-backend test-ahci
 
 all: $(TEST_BINS)
 
@@ -1554,6 +1555,36 @@ $(TEST_BLD)/test_pci_backend_irq.elf: $(TEST_BLD)/test_pci_backend_irq.o \
 	$(HOST_CC) -lpthread -o $@ $^
 
 test-backend: $(TEST_BLD)/test_pci_backend_irq.elf
+	$<
+
+# ARCH-9 Phase B: AHCI lifecycle & driver model
+AHCI_HOST_CFLAGS := $(HOST_CFLAGS) -D_GNU_SOURCE -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
+    -include $(TEST_MOCK)/arch9/ahci_runtime.h -DOS01_HOST_TEST
+
+$(TEST_BLD)/ahci_lifecycle_production.o: $(TESTS_DIR)/kernel/driver/ahci_lifecycle.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AHCI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/ahci_production.o: $(TESTS_DIR)/kernel/driver/ahci.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AHCI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_ahci_lifecycle.o: $(TEST_CASES)/test_ahci_lifecycle.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AHCI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_ahci_lifecycle.elf: $(TEST_BLD)/test_ahci_lifecycle.o \
+    $(TEST_BLD)/ahci_production.o \
+    $(TEST_BLD)/ahci_lifecycle_production.o \
+    $(TEST_BLD)/blockdev_production.o \
+    $(TEST_BLD)/device_core_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+test-ahci: $(TEST_BLD)/test_ahci_lifecycle.elf
 	$<
 
 
