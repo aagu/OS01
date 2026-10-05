@@ -451,7 +451,7 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     vfs_node_put(node);
 
     // Set up heap.  mm_init_user_heap installs the unique zero-length
-    // VM_HEAP VMA and sets start_brk = end_brk = ALIGN_UP(end_code,
+    // VMA_HEAP VMA and sets start_brk = end_brk = ALIGN_UP(end_code,
     // 4096).  A -ENOMEM return means the VMA allocation failed; mm is
     // unchanged in that case, so destroy_unpublished_user_mm walks an
     // empty VMA list and frees the ELF pages via vmm_free_user_map.
@@ -637,7 +637,7 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     vfs_node_put(node);
 
     // Set up the heap.  mm_init_user_heap installs the unique
-    // zero-length VM_HEAP VMA and sets start_brk = end_brk =
+    // zero-length VMA_HEAP VMA and sets start_brk = end_brk =
     // ALIGN_UP(end_code, 4096).  -ENOMEM means the VMA alloc
     // failed; mm is unchanged so destroy_unpublished_user_mm
     // walks an empty list and frees the ELF pages via
