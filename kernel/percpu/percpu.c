@@ -23,6 +23,16 @@ void percpu_init(uint32_t cpu, uint32_t apic_id)
     memset(&percpu_data[cpu], 0, sizeof(percpu_t) - 8);
     percpu_data[cpu].cpu_id  = cpu;
     percpu_data[cpu].arch_processor_id = apic_id;
+    /* M3.5 Task 25 fix: mark this CPU online. aarch64 never set this
+     * (x86 set only percpu_data[0].online from its own boot path), so
+     * tlb_shootdown()'s target snapshot (online ∧ ipi_ready ∧ ¬self,
+     * memory/tlb.c) was always EMPTY on aarch64 — shootdowns degraded
+     * to a local flush and APs kept stale TLB entries, which the
+     * production shootdown probe caught as `FAIL ap-read-B`. Setting
+     * it here (before ipi_ready publication) is safe: tlb_shootdown
+     * additionally requires ipi_ready, which is published only after
+     * the AP has IRQs open. */
+    percpu_data[cpu].online = 1;
     // Store self-pointer as the first qword so GS:0 yields &percpu_data[cpu]
     percpu_data[cpu].self = (uint64_t)&percpu_data[cpu];
     rbtree_init(&percpu_data[cpu].run_queue);

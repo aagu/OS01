@@ -277,6 +277,25 @@ _test-aarch64-run-sync-fault:
 	  --qemu "$(AARCH64_QEMU)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sync-fault/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 
+# M3.5 Task 25: production shootdown probe (spec §7.3). Builds the
+# PRODUCTION image (no KERNEL_SELFTEST=1) and runs it at -smp 2; the
+# harness greps for the exact `M3-SHOOTDOWN-PROBE: START` → `OK`
+# sequence and fails on any FAIL / SKIP line or timeout. -smp 1 is
+# intentionally NOT covered here: main.c gates the probe call on
+# dtb_cpu_count() >= 2 so single-CPU boots skip it (the 0-AP FAIL
+# contract is pinned by the hosttest instead).
+.PHONY: _test-aarch64-prep-m3-probe _test-aarch64-run-m3-probe
+_test-aarch64-prep-m3-probe:
+	$(MAKE) aarch64-uefi
+_test-aarch64-run-m3-probe:
+	python3 qemutests/aarch64_m3_probe.py \
+	  --diagnostic-dtb=auto \
+	  --timeout 90 \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+	  --image "$(AARCH64_UEFI_DISK)" \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --log-dir "$(OS01_ROOT)/test-results/aarch64-m3-probe/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+
 # test-aarch64: the umbrella. Dispatches to the per-MODE prep + run helpers.
 test-aarch64: MODE ?= smp
 test-aarch64: MODE := $(MODE)
@@ -289,12 +308,18 @@ test-aarch64:
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
 	@case "$(MODE)" in \
-	  smp|no-ack|gic-spi|sync-fault|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root) ;; \
-	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root, got '$(MODE)'" >&2; exit 1;; \
+	  smp|no-ack|gic-spi|sync-fault|m3-probe|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root) ;; \
+	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|m3-probe|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root, got '$(MODE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-aarch64] MODE=$(MODE) extra=$(TEST_AARCH64_EXTRA_$(MODE))"
 	$(MAKE) --no-print-directory _test-aarch64-prep-$(MODE)
 	$(MAKE) --no-print-directory _test-aarch64-run-$(MODE)
+
+# Convenience alias: `make PROFILE=aarch64-clang test-aarch64-m3-probe`
+# == `make PROFILE=aarch64-clang test-aarch64 MODE=m3-probe`.
+.PHONY: test-aarch64-m3-probe
+test-aarch64-m3-probe:
+	$(MAKE) --no-print-directory test-aarch64 MODE=m3-probe
 
 # ── Validation ─────────────────────────────────────────────
 # validate keeps the x86 kernel + UEFI artifact checks (kernel ELF has no

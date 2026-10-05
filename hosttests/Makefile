@@ -141,7 +141,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_aarch64_pt_root_publish.elf \
     $(TEST_BLD)/test_aarch64_pt_split.elf \
     $(TEST_BLD)/test_smp_starting_gate.elf \
-    $(TEST_BLD)/test_aarch64_arch_vmm_init.elf
+    $(TEST_BLD)/test_aarch64_arch_vmm_init.elf \
+    $(TEST_BLD)/test_aarch64_scratch_probe_logic.elf
 
 .PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init
 
@@ -1712,6 +1713,33 @@ $(TEST_BLD)/test_aarch64_arch_vmm_init.elf: \
 	$(HOST_CC) -o $@ $^
 
 test_aarch64_arch_vmm_init: $(TEST_BLD)/test_aarch64_arch_vmm_init.elf
+	$<
+
+# M3.5 Task 25: M3-SHOOTDOWN-PROBE 7-step body harness (spec §7.3).
+# The probe body lives as static inline in
+# kernel/arch/aarch64/boot/m3_probe.h — one source of truth shared
+# between the production TU (kernel/arch/aarch64/boot/m3_probe.c,
+# which only provides the ops binding + the public entry point) and
+# this hosttest TU. We do NOT link the production .c (it pulls in
+# arch_vmm_*, percpu_data[], tlb_shootdown, etc. that the host has no
+# surface of). The test compiles the same body via #include <arch/
+# aarch64/boot/m3_probe.h>; we still need arch/mmu.h for the static
+# header's ARCH_PAGE_OFFSET use.
+M3_PROBE_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) \
+                        -I$(TEST_MOCK)/m1_a64_include \
+                        -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\"
+
+$(TEST_BLD)/test_aarch64_scratch_probe_logic.o: \
+		$(TEST_CASES)/test_aarch64_scratch_probe_logic.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/boot/m3_probe.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(M3_PROBE_HOST_CFLAGS) -I$(TEST_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_scratch_probe_logic.elf: \
+		$(TEST_BLD)/test_aarch64_scratch_probe_logic.o
+	$(HOST_CC) -o $@ $^
+
+test_aarch64_scratch_probe_logic: $(TEST_BLD)/test_aarch64_scratch_probe_logic.elf
 	$<
 
 # GICv2 marker lines: source-level RED check (Task 2.1). QEMU aarch64-uefi

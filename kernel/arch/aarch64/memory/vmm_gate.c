@@ -100,6 +100,14 @@ void ipi_ready_publish_and_count(uint32_t cpu)
     __atomic_fetch_add(&ipi_ready_count, 1, __ATOMIC_RELEASE);
 }
 
+uint32_t ipi_ready_count_get(void)
+{
+    /* Acquire-load mirrors the release-store in ipi_ready_publish_and_count
+     * so a caller that observes count >= expected also observes the
+     * percpu_data[cpu].ipi_ready stores that contributed to it. */
+    return __atomic_load_n(&ipi_ready_count, __ATOMIC_ACQUIRE);
+}
+
 void vmm_gate_check(void)
 {
     if (__atomic_load_n(&smp_starting, __ATOMIC_ACQUIRE) == 0)

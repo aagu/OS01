@@ -16,6 +16,7 @@
 #include <arch/irq.h>
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/early_arena.h>
+#include <arch/aarch64/boot/m3_probe.h>    /* aarch64_m3_shootdown_probe (M3.5 Task 25) */
 #include <arch/aarch64/page_table.h>
 #include <arch/aarch64/ram.h>
 #include <arch/aarch64/smp.h>
@@ -656,6 +657,29 @@ void aarch64_main(const struct boot_context *handoff)
      * and DAIF.I is unmasked. Publishing earlier would let a pending
      * TLB SGI arrive with IRQs masked (no ack → initiator timeout). */
     ipi_ready_publish_and_count(0);
+
+    /* M3.5 Task 25: production shootdown probe (spec §7.3).
+     *
+     * Runs AFTER BSP ipi_ready is published and AFTER smp_boot_aps()
+     * has returned (all APs gone through the boot handshake and into
+     * secondary_idle). The probe waits inside for ipi_ready_count
+     * to reach dtb_cpu_count() — APs publish ipi_ready only AFTER
+     * opening IRQs + ISB (secondary_idle tail, Task 10 Step 4), so a
+     * poll is required.
+     *
+     * The probe runs in production AND selftest builds. Single-CPU
+     * boots (-smp 1) skip it via the dtb_cpu_count() >= 2 gate —
+     * the probe body's `requires-at-least-one-AP` FAIL path would
+     * otherwise halt the system on every -smp 1 selftest run,
+     * breaking MODE=smp 1/2/4. The body itself still owns the
+     * FAIL contract (hosttest pins the 0-AP path); production and
+     * selftest images at -smp >= 2 reach the full 7-step sequence
+     * and either print "M3-SHOOTDOWN-PROBE: OK" or halt. */
+    if (dtb_cpu_count() >= 2) {
+        aarch64_m3_shootdown_probe();
+    } else {
+        kputs("M3-SHOOTDOWN-PROBE: SKIP (single-CPU boot)\n");
+    }
 
     /* M3.4 Task 21: ID_AA64MMFR2_EL1.BBM (Break-before-Make levels).
      *

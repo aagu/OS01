@@ -50,6 +50,14 @@ void smp_starting_enter(void);
  * a violation. */
 void ipi_ready_publish_and_count(uint32_t cpu);
 
+/* Acquire-load the global ipi_ready counter (M3.5 Task 25 shootdown probe).
+ * Counted via ipi_ready_publish_and_count(); the BSP starts at 1 once it
+ * publishes its own ipi_ready after arch_local_irq_enable() (Task 11 Step 2
+ * ordering) and APs add themselves from secondary_idle (Task 10 Step 4).
+ * Returns 0 before any CPU has published. The probe waits for this to
+ * reach dtb_cpu_count() — counting the BSP itself — before starting work. */
+uint32_t ipi_ready_count_get(void);
+
 /* Entry gate for arch_vmm_* / aarch64_pt_* public primitives. */
 void vmm_gate_check(void);
 
