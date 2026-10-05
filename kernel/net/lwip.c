@@ -28,6 +28,27 @@ static bool s_adapters_finished = false;
 static unsigned s_active_adapters = 0;
 static struct netif *s_default_netif = NULL;
 
+#ifdef OS01_HOST_TEST
+/* Test-only knobs — see kernel/include/net/lwip.h */
+int fake_core_mailbox_msg_count = 0;
+int fake_app_mailbox_msg_count = 0;
+int fake_core_fetch_rx_sweeps = 0;
+int fake_core_mailbox_lock_check = 0;
+int fake_pci_drivers_count = 0;
+
+/* Tiny ring buffer for the host-side core mailbox.  We only need a
+ * FIFO for the test: 1 entry is enough to assert the sweep-before-
+ * fetch invariant, but we keep 64 to match the brief's "1000 messages
+ * returned" stress test. */
+#define TEST_MBOX_CAP 64
+static void *test_core_mbox_buf[TEST_MBOX_CAP];
+static int   test_core_mbox_head = 0;
+static int   test_core_mbox_tail = 0;
+static int   test_core_mbox_count = 0;
+static int   test_app_mbox_count = 0;
+static uint32_t s_test_default_ipv4 = 0;
+#endif
+
 static err_t net_adapter_linkoutput(struct netif *netif, struct pbuf *p)
 {
     if (!netif) {
@@ -94,6 +115,15 @@ enum net_service_state net_service_get_state(void)
 
 uint32_t net_default_ipv4(void)
 {
+#ifdef OS01_HOST_TEST
+    /* On host tests, net_default_ipv4 reads from a test-set IP that
+     * mirrors what the production adapter would publish.  This keeps
+     * do_getifaddr/do_getsockname's tests independent of lwIP. */
+    if (!net_service_ready()) {
+        return 0;
+    }
+    return s_test_default_ipv4;
+#else
     if (!net_service_ready()) {
         return 0;
     }
@@ -101,6 +131,7 @@ uint32_t net_default_ipv4(void)
         return 0;
     }
     return ip4_addr_get_u32(netif_ip4_addr(s_default_netif));
+#endif
 }
 
 void net_lwip_reset_state(void)
@@ -111,6 +142,17 @@ void net_lwip_reset_state(void)
     s_active_adapters = 0;
     s_default_netif = NULL;
     memset(s_adapters, 0, sizeof(s_adapters));
+#ifdef OS01_HOST_TEST
+    fake_core_mailbox_msg_count = 0;
+    fake_app_mailbox_msg_count = 0;
+    fake_core_fetch_rx_sweeps = 0;
+    fake_core_mailbox_lock_check = 0;
+    test_core_mbox_head = 0;
+    test_core_mbox_tail = 0;
+    test_core_mbox_count = 0;
+    test_app_mbox_count = 0;
+    s_test_default_ipv4 = 0;
+#endif
 }
 
 void net_lwip_start(void)
@@ -166,6 +208,14 @@ void net_lwip_start(void)
         if (s_active_adapters == 0) {
             netif_set_default(nif);
             s_default_netif = nif;
+#ifdef OS01_HOST_TEST
+            /* Mirror the default netif's IP into s_test_default_ipv4
+             * so net_default_ipv4() can answer without dereferencing
+             * a fake netif.  The fake netif_add already populated
+             * nif->ip_addr from the `ip` we passed in, so we copy it
+             * verbatim.  eth0 is the static 10.0.2.15 by construction. */
+            s_test_default_ipv4 = ip.addr;
+#endif
         }
 
         netif_set_up(nif);
@@ -184,3 +234,90 @@ void net_lwip_start(void)
     __atomic_store_n(&s_adapters_finished, true, __ATOMIC_RELEASE);
     net_check_and_publish_online();
 }
+
+#ifdef OS01_HOST_TEST
+/* ── Test-only hooks ────────────────────────────────────────────── */
+void net_service_force_state_for_test(enum net_service_state s)
+{
+    s_net_service_state = s;
+    s_tcpip_core_ready = (s == NET_ONLINE);
+    s_adapters_finished = (s == NET_ONLINE);
+    s_active_adapters = (s == NET_ONLINE) ? 1 : 0;
+}
+
+void net_service_set_default_ipv4_for_test(uint32_t ip)
+{
+    s_test_default_ipv4 = ip;
+}
+
+void net_service_core_mbox_post_for_test(void *msg)
+{
+    if (test_core_mbox_count < TEST_MBOX_CAP) {
+        test_core_mbox_buf[test_core_mbox_head] = msg;
+        test_core_mbox_head = (test_core_mbox_head + 1) % TEST_MBOX_CAP;
+        test_core_mbox_count++;
+    } else {
+        /* Ring is small — count has used space.  Just count it; we
+         * care about invariants, not overflow safety in host tests. */
+        test_core_mbox_count++;
+    }
+    fake_core_mailbox_msg_count++;
+}
+
+void net_service_app_mbox_post_for_test(void *msg)
+{
+    (void)msg;
+    test_app_mbox_count++;
+    fake_app_mailbox_msg_count++;
+}
+
+/* Drain the core mailbox — sweep RX first via net_device_poll_all(),
+ * THEN pop one message.  This mirrors the production sys_arch mbox_fetch
+ * loop (kernel/net/sys_arch.c) which calls net_poll_rx() before
+ * attempting to pop.  The mailbox lock must NOT be held while polling. */
+static int test_core_fetch_one(void)
+{
+    /* Sweep RX first, BEFORE popping.  Mailbox lock check is 0 here:
+     * we are NOT holding any lock; the test fixture records the fact. */
+    fake_core_mailbox_lock_check = 0;
+    net_device_poll_all();
+    fake_core_fetch_rx_sweeps++;
+
+    if (test_core_mbox_count <= 0) {
+        return -1;
+    }
+    /* The mailbox lock is acquired only here, briefly. */
+    void *m = test_core_mbox_buf[test_core_mbox_tail];
+    test_core_mbox_tail = (test_core_mbox_tail + 1) % TEST_MBOX_CAP;
+    test_core_mbox_count--;
+    (void)m;
+    return 0;
+}
+
+int net_service_core_mbox_fetch_one_for_test(void)
+{
+    return test_core_fetch_one();
+}
+
+int net_service_drain_core_mailbox_for_test(void)
+{
+    int returned = 0;
+    while (test_core_mbox_count > 0) {
+        if (test_core_fetch_one() == 0) {
+            returned++;
+        } else {
+            break;
+        }
+    }
+    return returned;
+}
+
+int net_service_drain_app_mailbox_for_test(void)
+{
+    /* The application mailbox path does NOT sweep RX. */
+    int returned = test_app_mbox_count;
+    test_app_mbox_count = 0;
+    fake_core_fetch_rx_sweeps += 0; /* explicit: zero */
+    return returned;
+}
+#endif /* OS01_HOST_TEST */

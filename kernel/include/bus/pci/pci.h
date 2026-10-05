@@ -11,6 +11,20 @@
 #define PCI_ID_ANY UINT32_MAX
 #define BUS_UNAVAILABLE (-ENODEV)
 
+/* ── Standard PCI class / subclass / prog_if codes ────────────────
+ * Used by the AHCI / NIC descriptors' id_table class_value fields
+ * and by host tests verifying class matching.  These were previously
+ * declared in <driver/pci.h> (the legacy BDF/port-IO header removed
+ * in ARCH-9 Task 9).  Keep them in the canonical bus/pci header so
+ * arch-neutral drivers can match on class without depending on x86
+ * port I/O types. */
+#define PCI_CLASS_MASS_STORAGE   0x01
+#define PCI_SUBCLASS_SATA        0x06
+#define PCI_PROGIF_AHCI          0x01
+
+#define PCI_CLASS_NETWORK          0x02
+#define PCI_SUBCLASS_ETHERNET      0x00
+
 enum pci_bar_kind {
     PCI_BAR_NONE = 0,
     PCI_BAR_IO,

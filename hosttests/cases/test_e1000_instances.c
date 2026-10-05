@@ -7,7 +7,6 @@
 #include <driver/e1000.h>
 #include <intr/interrupt.h>
 #include <arch/pci.h>
-#include <driver/pci.h>
 #include <errno.h>
 #include <string.h>
 #include <stdint.h>

@@ -2,7 +2,6 @@
 #include <driver/ahci_lifecycle.h>
 #include <bus/pci/pci.h>
 #include <bus/pci/driver.h>
-#include <driver/pci.h>
 #include <block/blockdev.h>
 #include <core/debug.h>
 #include <memory/memory.h>

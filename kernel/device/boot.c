@@ -5,6 +5,7 @@
 #include <bus/pci/pci.h>
 #include <bus/pci/driver.h>
 #include <net/net.h>
+#include <net/device.h>
 #include <core/debug.h>
 #include <core/panic.h>
 #include <errno.h>
@@ -35,12 +36,6 @@ void device_boot_reset_for_test(void)
 #define PCI_DRIVERS_START __pci_drivers_start
 #define PCI_DRIVERS_END   __pci_drivers_end
 #endif
-
-/* Weak default for transitional net_hw_init */
-int __attribute__((weak)) net_hw_init(void)
-{
-    return 0;
-}
 
 void device_fail_unsafe(struct device *dev, const char *reason)
 {
@@ -94,7 +89,15 @@ int device_boot_init(void)
         }
     }
 
-    /* 3. Enumerate PCI devices */
+    /* 3. ARCH-9 Task 9: bring up the unified net_device registry BEFORE
+     * the PCI probe loop so that NIC probe() callbacks can register
+     * their net_device instances into a ready registry.  This replaces
+     * the legacy net_hw_init() PCI scan / single-instance initcall path
+     * that the coordinator used to call after binding (see git history:
+     * that path is gone — drivers self-register via .pci_drivers). */
+    net_device_init();
+
+    /* 4. Enumerate PCI devices */
     ret = pci_enumerate();
     if (ret != 0 && ret != BUS_UNAVAILABLE) {
         s_device_boot_result = ret;
@@ -102,7 +105,7 @@ int device_boot_init(void)
         return ret;
     }
 
-    /* 4. Bind drivers to devices */
+    /* 5. Bind drivers to devices */
     if (ret == 0) {
         int bind_rc = pci_bind_all();
         if (bind_rc == DEVICE_UNSAFE) {
@@ -116,7 +119,7 @@ int device_boot_init(void)
             return bind_rc;
         }
 
-        /* 5. Tally summary statistics */
+        /* 6. Tally summary statistics */
         unsigned dev_count = pci_device_count();
         s_summary.total_devices = dev_count;
         for (unsigned i = 0; i < dev_count; i++) {
@@ -150,12 +153,6 @@ int device_boot_init(void)
                 }
             }
         }
-    }
-
-    /* 6. Transitional net_hw_init (optional / non-fatal) */
-    int net_rc = net_hw_init();
-    if (net_rc != 0) {
-        debug_block("device-boot: net_hw_init returned %d (optional)\n", net_rc);
     }
 
     s_device_boot_result = 0;

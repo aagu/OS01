@@ -854,4 +854,31 @@ void pci_core_reset_for_test(void)
     s_pci_enumerated = false;
     s_visited_domain_count = 0;
 }
+
+/* ── Test-only hooks (Task 9) ──────────────────────────────────── */
+/* Weak definition of the observation counter — kernel/net/lwip.c
+ * provides a strong definition when that translation unit is linked
+ * (lwIP stack tests).  Bare PCI tests link only pci_core.o and pick
+ * up this weak symbol, so the link succeeds without dragging in
+ * kernel/net/lwip.c's lwIP dependency graph. */
+__attribute__((weak)) int fake_pci_drivers_count = 0;
+
+/* Count entries currently registered in the runtime driver list
+ * (s_pci_drivers_head).  Reflects how many drivers pci_register_driver()
+ * has accepted — i.e. how many NICs the boot coordinator would bind.
+ * For the .pci_drivers-section counting invariant (compile-time
+ * "exactly two drivers emit PCI_DRIVER_DECLARE"), the production
+ * linker script is the canonical source; host tests instead verify
+ * the registry path by calling pci_register_driver() directly. */
+int fake_pci_drivers_count_for_test(void)
+{
+    int n = 0;
+    struct pci_driver_entry *e = s_pci_drivers_head;
+    while (e) {
+        n++;
+        e = e->next;
+    }
+    fake_pci_drivers_count = n;
+    return n;
+}
 #endif

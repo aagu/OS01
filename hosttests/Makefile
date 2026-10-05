@@ -1654,10 +1654,35 @@ $(TEST_BLD)/test_net_lwip.o: $(TEST_CASES)/test_net_lwip.c
 $(TEST_BLD)/test_net_lwip.elf: $(TEST_BLD)/test_net_lwip.o \
     $(TEST_BLD)/net_device_production.o \
     $(TEST_BLD)/net_lwip_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
     $(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^
 
 test-lwip: $(TEST_BLD)/test_net_lwip.elf
+	$<
+
+# ARCH-9 Phase C Task 10: socket readiness and default-iface queries
+SOCKET_HOST_CFLAGS := $(POLL_HOST_CFLAGS) -I$(TEST_MOCK) $(KERNEL_INC) $(LIBC_INC) \
+    -include $(TEST_MOCK)/arch9/socket_runtime.h -DOS01_HOST_TEST
+
+$(TEST_BLD)/net_socket_production.o: $(TESTS_DIR)/kernel/net/socket.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SOCKET_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_socket_net_readiness.o: $(TEST_CASES)/test_socket_net_readiness.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SOCKET_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_socket_net_readiness.elf: $(TEST_BLD)/test_socket_net_readiness.o \
+    $(TEST_BLD)/net_socket_production.o \
+    $(TEST_BLD)/net_lwip_production.o \
+    $(TEST_BLD)/net_device_production.o \
+    $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+test-socket: $(TEST_BLD)/test_socket_net_readiness.elf
 	$<
 
 # ARCH-9 Phase C: e1000 private instance and IRQ modes

@@ -144,14 +144,24 @@ int vfs_read(struct vfs_node *node, uint64_t offset, uint64_t size, void *buf) {
 int vfs_write(struct vfs_node *node, uint64_t offset, uint64_t size, void *buf) { (void)node; (void)offset; (void)size; (void)buf; return 0; }
 void vfs_node_put(struct vfs_node *node) { (void)node; }
 
-/* ── Transitional net_hw_init stub ──────────────────────────────── */
-static int s_mock_net_hw_ret = 0;
-static int s_net_hw_calls = 0;
+/* ── ARCH-9 Task 9: net_device_init / net_lwip_start observation ──
+ * The coordinator's transitional net_hw_init() call is removed; NICs
+ * register via .pci_drivers and net_device_init() prepares the registry
+ * before pci_enumerate().  Expose counters so tests can verify the
+ * coordinator called the new helper.
+ *
+ * The test does NOT link net_device.c — it supplies its own stub of
+ * net_device_init() so the test can observe the calls without pulling
+ * in the lwIP dependency graph that net_device.c would drag into a
+ * host build (net_receive → ethernet_input from lwIP).  Weakly-defined
+ * here so if a future test links net_device_production.o the strong
+ * production definition wins. */
+static int s_net_device_init_calls = 0;
 
-int net_hw_init(void)
+__attribute__((weak)) int net_device_init(void)
 {
-    s_net_hw_calls++;
-    return s_mock_net_hw_ret;
+    s_net_device_init_calls++;
+    return 0;
 }
 
 /* ── Fake PCI Backend Infrastructure ────────────────────────────── */
@@ -285,8 +295,7 @@ static void reset_test_state(void)
     s_tmpfs_init_called = false;
     s_procfs_init_called = false;
 
-    s_mock_net_hw_ret = 0;
-    s_net_hw_calls = 0;
+    s_net_device_init_calls = 0;
 
     device_boot_reset_for_test();
     pci_core_reset_for_test();
@@ -337,7 +346,7 @@ static void test_optional_absent_continues(void)
     assert_eq(0, rc);
     assert_eq(0, absent_ahci_probe_calls);
     assert_eq(0, device_boot_result());
-    assert_true(s_net_hw_calls > 0);
+    assert_true(s_net_device_init_calls > 0);
 
     const struct device_boot_summary *sum = device_boot_get_summary();
     assert_not_null(sum);

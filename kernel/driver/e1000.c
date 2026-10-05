@@ -1,9 +1,9 @@
 // kernel/driver/e1000.c — Intel 82540EM (e1000) NIC driver
 #include <driver/e1000.h>
-#include <driver/pci.h>
 #include <bus/pci/pci.h>
 #include <bus/pci/driver.h>
 #include <net/device.h>
+#include <ipc/mbox.h>
 #include <memory/vmm.h>       // vmm_map_page, kernel_map, PAGE_KERNEL_PMD_NOCACHE
 #include <memory/pmm.h>       // PAGE_2M_MASK, alloc_pages, alloc_4k_page, free_pages, free_4k_page
 #include <memory/memory.h>    // Phy_To_Virt
@@ -254,7 +254,6 @@ void e1000_handler(uint64_t nr, uint64_t param, pt_regs_t *regs)
 
     // RX: descriptor done — ack and wake only, sole consumer is poll_rx
     if (icr & (E1000_ICR_RXQ0 | E1000_ICR_RXT0 | E1000_ICR_RXDMT0)) {
-        extern void sys_mbox_wake(void);
         sys_mbox_wake();
     }
 
@@ -473,6 +472,13 @@ int e1000_probe(struct pci_device *pdev, const struct pci_device_id *id)
     ndev->ops = &e1000_net_ops;
     ndev->priv = inst;
 
+    /* ARCH-9 Task 9: mark initialized BEFORE net_device_register so
+     * that get_link() observes `initialized == true` during the
+     * register-time link query.  Previously this flag was set after
+     * register, which caused net_device_register's get_link() to
+     * return false (link down) and lwIP's DHCP to never start. */
+    inst->initialized = 1;
+
     rc = net_device_register(ndev);
     if (rc != 0) {
         kfree(ndev);
@@ -480,7 +486,6 @@ int e1000_probe(struct pci_device *pdev, const struct pci_device_id *id)
     }
 
     inst->ndev = ndev;
-    inst->initialized = 1;
     return 0;
 
 err_unwind_irq:
@@ -569,6 +574,8 @@ const struct pci_driver e1000_pci_driver = {
     .probe = e1000_probe,
     .remove = e1000_remove,
 };
+
+PCI_DRIVER_DECLARE(e1000_pci_driver);
 
 // ── Legacy transitional APIs ──────────────────────────────────
 int e1000_legacy_init(struct pci_device *pdev, uint64_t bar, uint8_t gsi, int use_msi)

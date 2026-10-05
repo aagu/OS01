@@ -6,6 +6,7 @@
 #include <bus/pci/pci.h>
 #include <bus/pci/driver.h>
 #include <net/device.h>
+#include <ipc/mbox.h>
 #include <intr/interrupt.h>
 #include <arch/spinlock.h>
 #include <arch/barrier.h>
@@ -337,7 +338,6 @@ void virtio_net_handler(uint64_t nr, uint64_t param, pt_regs_t *regs)
 
     uint8_t isr = vio_in8(inst->io_base + VIRTIO_LEGACY_ISR_STATUS);
     if (isr & VIRTIO_ISR_QUEUE_INTR) {
-        extern void sys_mbox_wake(void);
         sys_mbox_wake();
     }
 }
@@ -437,6 +437,12 @@ int virtio_net_probe(struct pci_device *pdev, const struct pci_device_id *id)
     ndev->ops = &virtio_net_ops;
     ndev->priv = inst;
 
+    /* ARCH-9 Task 9: mark initialized BEFORE net_device_register so
+     * that get_link() observes `initialized == true` during the
+     * register-time link query.  Mirrors the e1000 change so DHCP
+     * starts at boot. */
+    inst->initialized = 1;
+
     rc = net_device_register(ndev);
     if (rc != 0) {
         kfree(ndev);
@@ -444,7 +450,6 @@ int virtio_net_probe(struct pci_device *pdev, const struct pci_device_id *id)
     }
 
     inst->ndev = ndev;
-    inst->initialized = 1;
     return 0;
 
 err_unwind:
@@ -521,6 +526,8 @@ const struct pci_driver virtio_net_pci_driver = {
     .probe = virtio_net_probe,
     .remove = virtio_net_remove,
 };
+
+PCI_DRIVER_DECLARE(virtio_net_pci_driver);
 
 // ── Legacy Transitional APIs ───────────────────────────────────────────
 int virtio_net_legacy_init(struct pci_device *pdev, uint64_t bar, uint8_t gsi)

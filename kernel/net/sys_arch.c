@@ -19,6 +19,7 @@
 #include <memory/slab.h>      // kmalloc, kfree
 #include <time/timer.h>     // jiffies
 #include <string.h>           // strdup
+#include <ipc/mbox.h>         // sys_mbox_wake prototype
 #include <errno.h>            // for errno extern
 
 // Kernel-side errno — the kernel doesn't have per-thread errno but
@@ -292,6 +293,29 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
                        MBOX_IDLE_WAKEUP_JIFFIES);
             add_timer(idle_timer);
         }
+
+        // ARCH-9 Task 9: core mailbox fair polling.
+        //
+        // Sweep RX on every registered NIC BEFORE attempting to pop a
+        // mailbox message.  This ensures that when both an RX path
+        // (enqueuing via tcpip_input → mbox_post) and an API message
+        // (lwIP API) are pending, neither starves the other: every
+        // fetch gives the NIC ring one chance to drain (NET_DEVICE_POLL_BUDGET
+        // packets per card, see kernel/net/device.c).  The sweep runs
+        // with NO mailbox lock held so net_device_poll_all may safely
+        // call into each driver and, transitively, into
+        // net_receive→ethernet_input→tcpip_input on a busy ring.
+        //
+        // Non-core mailboxes (lwIP netconn/socket waits) do NOT sweep
+        // here — the g_tcpip_mbox guard keeps polling confined to the
+        // tcpip thread.  An application netconn fetching an empty
+        // mbox must not invoke NIC RX paths; those belong exclusively
+        // to the tcpip thread's polling loop.
+        if (mb == g_tcpip_mbox) {
+            extern void net_poll_rx(void);
+            net_poll_rx();
+        }
+
         uint64_t flags = spin_lock_irqsave(&mb->lock);
         if (mb->count > 0) {
             void *m = mb->queue[mb->tail];
@@ -305,15 +329,6 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
             return 0;
         }
         spin_unlock_irqrestore(&mb->lock, flags);
-
-        if (mb == g_tcpip_mbox) {
-            extern void net_poll_rx(void);
-            net_poll_rx();
-        }
-        // Double-check: poll may have posted to this same mailbox
-        { uint64_t _f2 = spin_lock_irqsave(&mb->lock);
-          if (mb->count > 0) { spin_unlock_irqrestore(&mb->lock, _f2); continue; }
-          spin_unlock_irqrestore(&mb->lock, _f2); }
 
         if (timeout > 0 && jiffies >= deadline_jiffies) {
             destroy_timer(idle_timer);

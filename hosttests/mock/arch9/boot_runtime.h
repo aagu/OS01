@@ -58,4 +58,18 @@ extern int fake_pre_gs_cpu_id_calls;
 #define cpu_id() (fake_pre_gs_cpu_id_calls++, 0)
 #define smp_processor_id() (fake_pre_gs_cpu_id_calls++, 0)
 
+/* net_device_init() (called from kernel/device/boot.c) ultimately
+ * reaches ethernet_input via net_receive; the boot test only needs
+ * the symbol to link.  Pull in the mock from net_runtime.h, then
+ * provide a weak ethernet_input definition so either test_device_boot.o
+ * or device_boot_production.o (both force-include this header) can
+ * satisfy the link without producing a multiple-definition error. */
+#include "net_runtime.h"
+
+__attribute__((weak)) err_t ethernet_input(struct pbuf *p, struct netif *netif)
+{
+    (void)p; (void)netif;
+    return ERR_OK;
+}
+
 #endif /* ARCH9_BOOT_RUNTIME_H */

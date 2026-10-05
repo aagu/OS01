@@ -68,6 +68,7 @@ typedef struct ip4_addr {
                      ((uint32_t)((d) & 0xff) << 24))
 
 #define ip4_addr_set_zero(ipaddr) ((ipaddr)->addr = 0)
+#define ip4_addr_set_u32(ipaddr, val) ((ipaddr)->addr = (uint32_t)(val))
 #define ip4_addr_get_u32(ipaddr) ((ipaddr)->addr)
 #define netif_ip4_addr(netif) (&((netif)->ip_addr))
 
@@ -134,6 +135,13 @@ extern int fake_tcpip_input_calls;
 extern int fake_etharp_output_calls;
 
 extern int fake_pbuf_free_calls;
+
+/* Task 9: core mailbox / sweep observation counters */
+extern int fake_core_mailbox_msg_count;
+extern int fake_app_mailbox_msg_count;
+extern int fake_core_fetch_rx_sweeps;
+extern int fake_core_mailbox_lock_check;
+extern int fake_pci_drivers_count;
 
 /* Mock functions matching lwIP signatures */
 static inline void tcpip_init(tcpip_init_done_fn initfunc, void *arg)

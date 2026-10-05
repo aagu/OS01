@@ -170,7 +170,9 @@ static inline uint16_t pbuf_copy_partial(const struct pbuf *p, void *dataptr, ui
 extern uint32_t fake_modern_device_io_writes;
 extern uint32_t fake_other_instance_queue_mutations;
 extern uint32_t fake_sys_mbox_wake_count;
-void sys_mbox_wake(void);
+/* sys_mbox_wake prototype now lives in kernel/include/ipc/mbox.h —
+ * the host test pulls it in via the kernel include path below. */
+#include <ipc/mbox.h>
 
 uint32_t vio_in32(uint16_t port);
 void vio_out32(uint16_t port, uint32_t v);

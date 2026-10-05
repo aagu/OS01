@@ -1,143 +1,40 @@
-// kernel/net/net.c — network subsystem initialization
+// kernel/net/net.c — Thin shim over the unified ARCH-9 net layer.
 //
-// Two-stage init:
-//   Stage A (Phase 6 subsys): hardware init (e1000 or virtio-net)
-//   Stage B (post-SMP, pre-task_init): lwIP stack + tcpip_thread
+// Pre-ARCH-9 this file owned:
+//   - net_hw_init(): PCI scan, vendor match, single-instance init of
+//     e1000 or virtio-net into one global `struct netif os01_netif`.
+//   - net_poll_rx(): dispatch the single instance's RX into the
+//     single netif (tcpip-thread context).
+//   - net_lwip_init(): tcpip_init + netif_add with the single legacy
+//     netif_init callback, then a static 10.0.2.15 fallback.
 //
-// Supports: Intel e1000 and VirtIO-net (preferred).
+// ARCH-9 collapses all of the above into the device/lwip core
+// (kernel/net/{device,lwip}.c).  The PCI drivers (kernel/driver/
+// {e1000,virtio-net}.c) register their own `struct net_device`
+// instances through the coordinator in kernel/device/boot.c, and the
+// unified lwIP adapter publishes ONLINE state via net_service_ready().
+//
+// This file now exists as a translation-unit shim so existing call
+// sites (kernel/core/main.c) keep their original symbol names.  The
+// bodies are one-liners that forward to the new core APIs.
 
 #include <net/net.h>
-#include <driver/e1000.h>
-#include <driver/virtio-net.h>
-#include <driver/pci.h>
-#include <bus/pci/pci.h>
-#include <subsys/subsys.h>
-#include <core/debug.h>
-#include <memory/memory.h>  // Phy_To_Virt
-#include <memory/slab.h>    // kmalloc, kfree
-#include <string.h>
-#include <errno.h>
-#include "lwip/init.h"
-#include "lwip/tcpip.h"
-#include "lwip/netif.h"
-#include "lwip/dhcp.h"
+#include <net/device.h>
+#include <net/lwip.h>
 
-// ── Static state ───────────────────────────────────────────────
-int   net_hw_ok = 0;
-int   is_virtio = 0;       // 1 = virtio-net, 0 = e1000
-static uint8_t  nic_gsi = 0;
-static uint64_t nic_bar = 0;
-// Forward declaration
-extern void e1000_process_rx(void);
-static uint8_t  nic_bus = 0;      // for virtio init
-static uint8_t  nic_dev = 0;
-static uint8_t  nic_func = 0;
-
-// The single OS01 network interface
-struct netif os01_netif;
-
-// ── Stage A: Hardware init (Phase 6 subsys, no scheduler) ────
-
-int net_hw_init(void)
-{
-    uint8_t bus, dev, func;
-
-    if (pci_find_device(PCI_CLASS_NETWORK, PCI_SUBCLASS_ETHERNET, 0x00,
-                        &bus, &dev, &func) != 0) {
-        debug_block("net: no network NIC found\n");
-        return -1;
-    }
-
-    // Read vendor/device to determine NIC type
-    uint32_t vendor_dev = pci_config_read(bus, dev, func, 0);
-    uint32_t vendor = vendor_dev & 0xFFFF;
-    uint32_t device = (vendor_dev >> 16) & 0xFFFF;
-
-    int is_mmio, is_64bit;
-    nic_bar = pci_read_bar(bus, dev, func, 0, &is_mmio, &is_64bit);
-    pci_enable_bus_mastering(bus, dev, func);
-    pci_enable_mmio(bus, dev, func);
-    nic_gsi = pci_get_gsi(bus, dev, func);
-    nic_bus = bus;
-    nic_dev = dev;
-    nic_func = func;
-
-    if (vendor == VIRTIO_PCI_VENDOR_ID) {
-        // VirtIO-net (0x1AF4:0x1000)
-        is_virtio = 1;
-        log_info("net: VirtIO-net NIC found (vendor=0x%x device=0x%x)\n",
-                 vendor, device);
-        uint32_t cmd = pci_config_read(bus, dev, func, PCI_COMMAND);
-        cmd |= (1 << 0) | (1 << 2);
-        pci_config_write(bus, dev, func, PCI_COMMAND, cmd);
-        struct pci_device *pdev = pci_device_lookup(0, nic_bus, nic_dev, nic_func);
-        if (virtio_net_legacy_init(pdev, nic_bar, nic_gsi) != 0) {
-            debug_block("net: virtio-net init failed\n");
-            return -EIO;
-        }
-    } else {
-        // Assume e1000 (0x8086:0x100E or similar)
-        is_virtio = 0;
-        // Try MSI-X first (vector 0x30) — Q35+TCG IOAPIC INTx never
-        // fires, so MSI-X is the only working interrupt path.
-        // e1000_legacy_init() falls back to INTx GSI if use_msi is 0.
-        struct pci_device *pdev = pci_device_lookup(0, nic_bus, nic_dev, nic_func);
-        int msi_ok = (pci_enable_msix(nic_bus, nic_dev, nic_func, 0x30) == 0);
-        if (e1000_legacy_init(pdev, nic_bar, nic_gsi, msi_ok ? 1 : 0) != 0) {
-            debug_block("net: e1000 init failed\n");
-            return -EIO;
-        }
-    }
-
-    net_hw_ok = 1;
-    return 0;
-}
-
-// ── RX poll dispatcher (used by sys_arch mbox_fetch polling) ─
+/* RX dispatch called from the tcpip thread (see kernel/net/sys_arch.c
+ * sys_arch_mbox_fetch).  Sweeps every registered card with the agreed
+ * 64-packet budget.  Replaces the legacy is_virtio / e1000_poll_rx
+ * dispatch. */
 void net_poll_rx(void)
 {
-    if (!net_hw_ok) return;
-    if (is_virtio)
-        virtio_net_poll_rx();
-    else {
-        e1000_poll_rx();    // tcpip thread: sole E1000 hardware-ring consumer
-        e1000_process_rx(); // tcpip thread: deliver the buffered packets to lwIP
-    }
+    net_device_poll_all();
 }
 
-// ── Stage B: lwIP stack init (post-SMP, pre-task_init) ────────
-
+/* Bring up the unified lwIP stack.  Replaces the legacy
+ * tcpip_init + netif_add + DHCP sequence; the unified adapter code
+ * in kernel/net/lwip.c handles every registered net_device. */
 void net_lwip_init(void)
 {
-    if (!net_hw_ok) return;
-
-    tcpip_init(NULL, NULL);
-
-    // Choose the right netif_init callback
-    netif_init_fn init_fn = is_virtio ? virtio_netif_init : e1000_netif_init;
-
-    struct netif *nif = &os01_netif;
-    if (!netif_add(nif, NULL, NULL, NULL, NULL, init_fn, tcpip_input)) {
-        log_info("net: netif_add failed\n");
-        return;
-    }
-
-    netif_set_default(nif);
-    netif_set_up(nif);
-
-    // Static IP for QEMU user-mode: 10.0.2.15/24 gw 10.0.2.2
-    {
-        ip4_addr_t ip, mask, gw;
-        IP4_ADDR(&ip,  10, 0, 2, 15);
-        IP4_ADDR(&mask, 255, 255, 255, 0);
-        IP4_ADDR(&gw,  10, 0, 2, 2);
-        netif_set_addr(&os01_netif, &ip, &mask, &gw);
-        netif_set_link_up(&os01_netif);
-        log_info("net: static IP 10.0.2.15/24\n");
-    }
-    // Also try DHCP (works over virtio-net when everything is connected)
-    dhcp_start(nif);
-
-    log_info("net: lwIP stack initialized, DHCP started\n");
+    net_lwip_start();
 }
-

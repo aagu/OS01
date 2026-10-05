@@ -6,7 +6,6 @@
 #include <block/blockdev.h>
 #include <driver/ahci.h>
 #include <driver/ahci_lifecycle.h>
-#include <driver/pci.h>
 #include <arch/pci.h>
 #include <errno.h>
 #include <string.h>
