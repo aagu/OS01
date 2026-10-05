@@ -54,6 +54,16 @@ VALID_FAULTS = (
 # ── Case catalog ──────────────────────────────────────────────────
 # Each case maps to a QEMU argv shape, a fault slug, and a guest
 # probe mode.  net-block-smp is fixed SMP=2 (its brief).
+#
+# Fields:
+#   - expected_cards: list of "ethN" names that the guest probe
+#       must publish evidence for.  The matrix runner fails the
+#       case when fewer cards are observed (single-card-only is not
+#       sufficient for multi-NIC cases).
+#   - observation_assertions: dict of kernel counter -> comparator
+#       used by the matrix runner.  Comparators are: ">0", "==0",
+#       ">=N".  Only consulted for observe variant and the cases
+#       with fault=observe.
 CASES = (
     {
         "name": "all",
@@ -62,6 +72,7 @@ CASES = (
         "nic1": None,
         "probe": "udp 10.0.2.2 10001",
         "smp": (1, 2),
+        "expected_cards": ("eth0",),
     },
     {
         "name": "e1000",
@@ -70,6 +81,7 @@ CASES = (
         "nic1": None,
         "probe": "udp 10.0.2.2 10001",
         "smp": (1, 2),
+        "expected_cards": ("eth0",),
     },
     {
         "name": "virtio",
@@ -79,6 +91,7 @@ CASES = (
         "nic1": None,
         "probe": "udp 10.0.2.2 10001",
         "smp": (1, 2),
+        "expected_cards": ("eth0",),
     },
     {
         "name": "mixed",
@@ -86,16 +99,18 @@ CASES = (
         "nic0": ("e1000", "user,id=net0,dhcpstart=10.0.2.20"),
         "nic1": ("virtio-net-pci,disable-modern=on",
                  "user,id=net1,net=10.0.3.0/24,dhcpstart=10.0.3.20,host=10.0.3.1"),
-        "probe": "udp 10.0.2.2 10001",
+        "probe": "udp 10.0.2.2 10001 10.0.3.1 10002",
         "smp": (1, 2),
+        "expected_cards": ("eth0", "eth1"),
     },
     {
         "name": "two-e1000",
         "fault": "none",
         "nic0": ("e1000", "user,id=net0,dhcpstart=10.0.2.20"),
         "nic1": ("e1000", "user,id=net1,net=10.0.3.0/24,dhcpstart=10.0.3.20,host=10.0.3.1"),
-        "probe": "udp 10.0.2.2 10001",
+        "probe": "udp 10.0.2.2 10001 10.0.3.1 10002",
         "smp": (1, 2),
+        "expected_cards": ("eth0", "eth1"),
     },
     {
         "name": "two-virtio",
@@ -104,8 +119,9 @@ CASES = (
                  "user,id=net0,dhcpstart=10.0.2.20"),
         "nic1": ("virtio-net-pci,disable-modern=on",
                  "user,id=net1,net=10.0.3.0/24,dhcpstart=10.0.3.20,host=10.0.3.1"),
-        "probe": "udp 10.0.2.2 10001",
+        "probe": "udp 10.0.2.2 10001 10.0.3.1 10002",
         "smp": (1, 2),
+        "expected_cards": ("eth0", "eth1"),
     },
     {
         "name": "no-nic",
@@ -114,6 +130,7 @@ CASES = (
         "nic1": None,
         "probe": "no-nic",
         "smp": (1, 2),
+        "expected_cards": (),
     },
     {
         "name": "no-ahci",
@@ -127,6 +144,7 @@ CASES = (
         "smp": (1, 2),
         # Must boot — virtio-blk-pci provides the rootfs.
         "expect_boot_failure": True,
+        "expected_cards": ("eth0",),
     },
     {
         "name": "empty-ahci",
@@ -136,6 +154,7 @@ CASES = (
         "probe": "udp 10.0.2.2 10001",
         "smp": (1, 2),
         "expect_boot_failure": True,
+        "expected_cards": ("eth0",),
     },
     {
         "name": "poll-busy",
@@ -144,6 +163,7 @@ CASES = (
         "nic1": ("e1000", "user,id=net1,net=10.0.3.0/24,dhcpstart=10.0.3.20,host=10.0.3.1"),
         "probe": "poll-busy",
         "smp": (1, 2),
+        "expected_cards": ("eth0", "eth1"),
     },
     {
         "name": "bad-nic",
@@ -157,6 +177,9 @@ CASES = (
         # timeout when NIC 0 is broken).
         "probe": "ifaces",
         "smp": (1, 2),
+        # The first card's BAR is corrupted by the bad-nic-bar fault;
+        # only the second card is ONLINE.
+        "expected_cards": ("eth1",),
     },
     {
         "name": "adapter-fail",
@@ -167,6 +190,7 @@ CASES = (
         # is reachable: the probe asserts the no-nic contract.
         "probe": "no-nic",
         "smp": (1, 2),
+        "expected_cards": (),
     },
     {
         "name": "unsupported",
@@ -177,6 +201,19 @@ CASES = (
         "nic1": None,
         "probe": "udp 10.0.2.2 10001",
         "smp": (1, 2),
+        # Healthy e1000 must produce evidence; e1000e must NOT be
+        # bound.  The e1000e device never reaches probe() because
+        # pci_match_id() rejects it before the per-driver probe
+        # hook fires (kernel/bus/pci/core.c:pci_bind_all), so
+        # probe_calls only counts the e1000 match.  Brief §Step 3:
+        # matrix校验UNBOUND、不写BAR (aggregate, since the
+        # observation counters do not currently distinguish the
+        # matched vs unmatched device).
+        "expected_cards": ("eth0",),
+        "observation_assertions": {
+            "probe_calls": ">0",
+            "adapter_registrations": ">=1",
+        },
     },
     {
         "name": "modern-only",
@@ -184,16 +221,46 @@ CASES = (
         "nic0": ("virtio-net-pci,disable-legacy=on,disable-modern=off",
                  "user,id=net0,dhcpstart=10.0.2.20"),
         "nic1": None,
-        "probe": "udp 10.0.2.2 10001",
+        "probe": "no-nic",
         "smp": (1, 2),
+        # Modern-only virtio-net (1af4:1041) does NOT match the
+        # OS01 driver (1af4:1000).  pci_match_id rejects it
+        # before probe() fires, so no probe_calls increment and
+        # no adapter is registered.  Brief §Step 3: matrix校验
+        # UNBOUND、不写BAR.
+        "expected_cards": (),
+        "observation_assertions": {
+            "bar_writes": "==0",
+            "adapter_registrations": "==0",
+        },
+    },
+    {
+        "name": "irq-conflict",
+        "fault": "irq-conflict",
+        # mixed topology: e1000 (NIC 0) + virtio-net (NIC 1).  The
+        # first card to probe claims its GSI; the second card's
+        # candidate GSI collides with the first (per the kernel-side
+        # arch9_fault_should_force_irq_conflict() hook) and falls
+        # back to NIC_POLL without register_irq.  Matrix must verify
+        # NIC 0 ONLINE + NIC 1 POLL fallback.
+        "nic0": ("e1000", "user,id=net0,dhcpstart=10.0.2.20"),
+        "nic1": ("virtio-net-pci,disable-modern=on",
+                 "user,id=net1,net=10.0.3.0/24,dhcpstart=10.0.3.20,host=10.0.3.1"),
+        "probe": "ifaces",
+        "smp": (1, 2),
+        "expected_cards": ("eth0", "eth1"),
     },
     {
         "name": "net-block-smp",
         "fault": "none",
         "nic0": ("e1000", "user,id=net0,dhcpstart=10.0.2.20"),
         "nic1": None,
-        "probe": "file-stress /.arch9-stress 0xA5 256",
+        # Brief §Step 10: file-stress writes /.arch9-stress-<nonce>
+        # (NOT in /tmp).  Brief §Step 3: 同时另一个进程逐卡UDP echo
+        # 并校验nonce.  net-block-smp combined wrapper forks both.
+        "probe": "net-block-smp 12345 0xA5 32",
         "smp": (2,),  # fixed SMP=2 per task brief
+        "expected_cards": ("eth0",),
     },
 )
 
@@ -441,6 +508,86 @@ def assert_normal_image_hash_unchanged(before_sha256, after_sha256):
             f"{before_sha256[:8]} -> {after_sha256[:8]}"
         )
     return True
+
+
+class ObservationAssertionFailed(HarnessError):
+    """Kernel observation counters did not match the case contract."""
+
+
+# Regex matched against the kernel's `arch9-fault:` dump line.  The
+# kernel emits counters in this exact format:
+#   arch9-fault: active=<id> drivers=<n> probe=<n> unbound_no_match=<n>
+#       unbound_after_id=<n> bar_writes=<n> adapters=<n> publishes=<n>
+#       ahci_ports=<n>
+OBSERVATION_DUMP_RE = re.compile(
+    r"arch9-fault:\s+active=(?P<active>\d+)"
+    r"\s+drivers=(?P<pci_drivers_exposed>\d+)"
+    r"\s+probe=(?P<probe_calls>\d+)"
+    r"\s+unbound_no_match=(?P<probe_unbound_no_match>\d+)"
+    r"\s+unbound_after_id=(?P<probe_unbound_after_id>\d+)"
+    r"\s+bar_writes=(?P<bar_writes>\d+)"
+    r"\s+adapters=(?P<adapter_registrations>\d+)"
+    r"\s+publishes=(?P<adapter_publishes>\d+)"
+    r"\s+ahci_ports=(?P<ahci_port_publications>\d+)"
+)
+
+
+def parse_observation_dump(log):
+    """Return a dict of observation counters from the kernel's
+    arch9-fault dump line, or {} if no dump line was found."""
+    if not isinstance(log, str):
+        log = log.decode("utf-8", errors="replace")
+    m = OBSERVATION_DUMP_RE.search(log)
+    if not m:
+        return {}
+    return {k: int(v) for k, v in m.groupdict().items()}
+
+
+def assert_observation_counters(log, assertions):
+    """Raise ObservationAssertionFailed when any counter in `assertions`
+    does not satisfy its comparator.
+
+    `assertions` is a dict of counter_name -> comparator.  Comparators
+    supported: "==N", ">N", ">=N", "<N", "<=N", where N is a
+    non-negative integer."""
+    if not assertions:
+        return
+    counters = parse_observation_dump(log)
+    if not counters:
+        raise ObservationAssertionFailed(
+            "no arch9-fault dump line found; cannot assert counters"
+        )
+    for name, comparator in assertions.items():
+        if name not in counters:
+            raise ObservationAssertionFailed(
+                f"counter {name!r} missing from observation dump"
+            )
+        got = counters[name]
+        if not _comparator_matches(comparator, got):
+            raise ObservationAssertionFailed(
+                f"counter {name!r}={got} fails assertion {comparator!r}"
+            )
+
+
+_COMPARATOR_RE = re.compile(r"^(==|>=|<=|>|<)(\d+)$")
+
+
+def _comparator_matches(comparator, value):
+    m = _COMPARATOR_RE.match(comparator)
+    if not m:
+        raise ValueError(f"invalid comparator {comparator!r}")
+    op, ref = m.group(1), int(m.group(2))
+    if op == "==":
+        return value == ref
+    if op == ">":
+        return value > ref
+    if op == ">=":
+        return value >= ref
+    if op == "<":
+        return value < ref
+    if op == "<=":
+        return value <= ref
+    raise AssertionError(f"unreachable comparator op {op!r}")
 
 
 # ── Internal helpers ──────────────────────────────────────────────

@@ -413,13 +413,27 @@ int virtio_net_probe(struct pci_device *pdev, const struct pci_device_id *id)
     uint32_t gsi = 0;
     int route_rc = pci_route_gsi(pdev, &gsi);
     if (route_rc == 0) {
-        int irq_res = register_irq(gsi, NULL, &virtio_net_handler,
+        uint32_t gsi_to_register = gsi;
+        /* ARCH-9 Task 11: irq-conflict fault.  Redirect the second
+         * NIC's candidate GSI to the first card's already-held slot
+         * so the natural register_irq "already occupied" rejection
+         * path runs.  register_irq returns 0 → the existing failure
+         * path falls back to NIC_POLL.  Brief Step 4:
+         * "走真实已占槽拒绝路径，然后POLL". */
+        if (arch9_fault_should_force_irq_conflict() &&
+            arch9_fault_get_nic_probe_count() >= 1) {
+            gsi_to_register = arch9_fault_get_first_card_gsi();
+            log_info("virtio-net: irq-conflict fault: redirecting GSI %u to first-card slot %u\n",
+                      gsi, gsi_to_register);
+        }
+        int irq_res = register_irq(gsi_to_register, NULL, &virtio_net_handler,
                                    (uint64_t)(uintptr_t)inst,
                                    IRQF_TRIGGER_LEVEL, "virtio-net");
         if (irq_res == 1) {
             inst->irq_mode = NIC_INTX;
-            inst->gsi = gsi;
+            inst->gsi = gsi_to_register;
             inst->irq_owned = true;
+            arch9_fault_record_card_gsi(gsi_to_register);
         } else {
             // Conflict: fall back to NIC_POLL without stealing or modifying the GSI
             inst->irq_mode = NIC_POLL;

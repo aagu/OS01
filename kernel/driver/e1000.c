@@ -439,12 +439,27 @@ int e1000_probe(struct pci_device *pdev, const struct pci_device_id *id)
     // 1. Try MSI-X on vector 0x30 / GSI 16
     bool msix_ok = (pci_msix_enable(pdev, 0x30) == 0);
     if (msix_ok) {
-        int irq_res = register_irq(16, NULL, &e1000_handler, (uint64_t)(uintptr_t)inst,
+        uint32_t gsi_to_register = 16;
+        /* ARCH-9 Task 11: irq-conflict fault.  When this is the
+         * SECOND NIC probe, redirect its candidate GSI to the
+         * first card's already-held slot so the natural
+         * register_irq "already occupied" rejection path runs.
+         * register_irq returns 0 in that case; the existing
+         * failure path falls through to INTx / POLL. */
+        if (arch9_fault_should_force_irq_conflict() &&
+            arch9_fault_get_nic_probe_count() >= 1) {
+            gsi_to_register = arch9_fault_get_first_card_gsi();
+            log_info("e1000: irq-conflict fault: redirecting GSI %u to first-card slot %u\n",
+                      16, gsi_to_register);
+        }
+        int irq_res = register_irq(gsi_to_register, NULL, &e1000_handler,
+                                   (uint64_t)(uintptr_t)inst,
                                    IRQF_TRIGGER_LEVEL, "e1000");
         if (irq_res == 1) {
             inst->irq_mode = NIC_MSIX;
-            inst->gsi = 16;
+            inst->gsi = gsi_to_register;
             inst->irq_owned = true;
+            arch9_fault_record_card_gsi(gsi_to_register);
         } else {
             // MSI-X enable succeeded on PCI device but GSI 16 is occupied;
             // disable MSI-X and restore INTx before falling back.
@@ -457,12 +472,28 @@ int e1000_probe(struct pci_device *pdev, const struct pci_device_id *id)
     if (!inst->irq_owned) {
         uint32_t intx_gsi = 0;
         if (pci_route_gsi(pdev, &intx_gsi) == 0) {
-            int irq_res = register_irq(intx_gsi, NULL, &e1000_handler, (uint64_t)(uintptr_t)inst,
+            uint32_t gsi_to_register = intx_gsi;
+            /* IRQ-conflict fault: same redirect for the INTx
+             * fallback.  The fault check runs unconditionally so
+             * mixed-topology (e1000 + virtio-net) — where the
+             * natural pci_route_gsi would return a *different*
+             * GSI than the first card's — still triggers the
+             * "already owned" rejection path that the brief
+             * mandates ("走真实已占槽拒绝路径"). */
+            if (arch9_fault_should_force_irq_conflict() &&
+                arch9_fault_get_nic_probe_count() >= 1) {
+                gsi_to_register = arch9_fault_get_first_card_gsi();
+                log_info("e1000: irq-conflict fault: redirecting INTX GSI %u to first-card slot %u\n",
+                          intx_gsi, gsi_to_register);
+            }
+            int irq_res = register_irq(gsi_to_register, NULL, &e1000_handler,
+                                       (uint64_t)(uintptr_t)inst,
                                        IRQF_TRIGGER_LEVEL, "e1000");
             if (irq_res == 1) {
                 inst->irq_mode = NIC_INTX;
-                inst->gsi = intx_gsi;
+                inst->gsi = gsi_to_register;
                 inst->irq_owned = true;
+                arch9_fault_record_card_gsi(gsi_to_register);
             }
         }
     }

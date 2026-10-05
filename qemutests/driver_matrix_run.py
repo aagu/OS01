@@ -151,14 +151,14 @@ class UdpEchoHost:
         import threading
         self._sock = self._socket_mod.socket(self._socket_mod.AF_INET,
                                               self._socket_mod.SOCK_DGRAM)
-        # SO_REUSEADDR + SO_REUSEPORT let multiple bind()'s succeed
-        # on the same port so QEMU's hostfwd (which also binds the
-        # host port) doesn't conflict with this echo server.
+        # SO_REUSEADDR lets a restarted server bind quickly.  We
+        # deliberately do NOT use SO_REUSEPORT here: slirp's NAT
+        # reply path relies on the kernel delivering the reply
+        # to the slirp-owned NAT socket, and SO_REUSEPORT would
+        # hash-load-balance between the slirp socket and our
+        # echo server, breaking the round-trip.
         self._sock.setsockopt(self._socket_mod.SOL_SOCKET,
                                 self._socket_mod.SO_REUSEADDR, 1)
-        if hasattr(self._socket_mod, "SO_REUSEPORT"):
-            self._sock.setsockopt(self._socket_mod.SOL_SOCKET,
-                                    self._socket_mod.SO_REUSEPORT, 1)
         # Bind to host's lo0 (which is what 10.0.2.2 maps to inside
         # slirp).  NIC 0 uses port 10001, NIC 1 uses port 10002.
         self._sock.bind(("127.0.0.1", self.port))
@@ -235,7 +235,12 @@ def _run_case(case, smp, timeout=DEFAULT_TIMEOUT):
     udp_port_base = 10000
 
     udp_list = []
-    if mode.startswith("udp "):
+    needs_udp_echo = (
+        mode.startswith("udp ")
+        or mode == "poll-busy"
+        or mode.startswith("net-block-smp")
+    )
+    if needs_udp_echo:
         n_udp = sum(1 for n in (c.get("nic0"), c.get("nic1")) if n)
         n_udp = max(n_udp, 1)
         # NIC 0 -> host UDP server on port 10001 (slirp host 10.0.2.2).
@@ -295,6 +300,8 @@ def _run_case(case, smp, timeout=DEFAULT_TIMEOUT):
         deadline = time.monotonic() + timeout
         sent_cmd = False
         log_bytes_seen = 0
+        result_passed = False
+        result_failed = False
         try:
             while time.monotonic() < deadline:
                 time.sleep(0.5)
@@ -330,11 +337,11 @@ def _run_case(case, smp, timeout=DEFAULT_TIMEOUT):
                         pass
                 # Did we get the RESULT line?
                 if "[netmodeltest] RESULT: PASS" in log_text:
-                    return True, log_text, {"case": case, "smp": smp,
-                                              "log_path": str(log_path)}
+                    result_passed = True
+                    break
                 if "[netmodeltest] RESULT: FAIL" in log_text:
-                    return False, log_text, {"case": case, "smp": smp,
-                                              "log_path": str(log_path)}
+                    result_failed = True
+                    break
         finally:
             if proc and proc.poll() is None:
                 try:
@@ -351,6 +358,69 @@ def _run_case(case, smp, timeout=DEFAULT_TIMEOUT):
                 log_text = f.read()
         except OSError:
             log_text = ""
+
+        # Expect-boot-failure cases (no-ahci, empty-ahci) deliberately
+        # produce a kernel panic because the kernel has no virtio-blk
+        # driver / the AHCI fault suppresses media publication.  The
+        # brief mandates that these cases PASS when the boot markers
+        # appear (UEFI loaded + kernel initialized) but the root
+        # filesystem / media is missing.  Detect the kernel-panic
+        # line and convert it into a PASS-equivalent outcome.
+        if c.get("expect_boot_failure"):
+            boot_markers_present = (
+                "OS01 Init v1.0" in log_text or "percpu:" in log_text
+            )
+            panic_present = (
+                "[kernel panic]" in log_text or "FATAL" in log_text
+            )
+            if boot_markers_present and panic_present:
+                return True, log_text, {
+                    "case": case, "smp": smp,
+                    "log_path": str(log_path),
+                    "note": "expected boot failure (root filesystem / media missing)",
+                }
+            # Without a panic, this is a real failure.
+            if not result_passed:
+                return False, log_text, {
+                    "case": case, "smp": smp,
+                    "log_path": str(log_path),
+                    "error": "no-ahci/empty-ahci without expected panic",
+                }
+
+        # Per-card evidence gate: every expected card must produce
+        # an `iface=ethN` line in the guest probe.  brief Step 1:
+        # "test_each_card_evidence_required只eth0成功拒绝".
+        expected = c.get("expected_cards", ())
+        if expected and result_passed:
+            try:
+                DMM.assert_each_card_has_evidence(log_text, expected)
+            except DMM.CardEvidenceMissing as e:
+                return False, log_text, {
+                    "case": case, "smp": smp,
+                    "log_path": str(log_path),
+                    "error": f"card evidence missing: {e}",
+                }
+
+        # Observation counters gate (brief Step 3): for observe +
+        # unsupported/modern-only, the kernel-side counters must
+        # match the case's contract.
+        observations = c.get("observation_assertions", {})
+        if observations:
+            try:
+                DMM.assert_observation_counters(log_text, observations)
+            except DMM.ObservationAssertionFailed as e:
+                return False, log_text, {
+                    "case": case, "smp": smp,
+                    "log_path": str(log_path),
+                    "error": f"observation counter failure: {e}",
+                }
+
+        if result_passed:
+            return True, log_text, {"case": case, "smp": smp,
+                                      "log_path": str(log_path)}
+        if result_failed:
+            return False, log_text, {"case": case, "smp": smp,
+                                      "log_path": str(log_path)}
         return False, log_text, {"case": case, "smp": smp,
                                   "log_path": str(log_path),
                                   "error": "timeout"}

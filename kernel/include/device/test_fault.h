@@ -130,6 +130,38 @@ static inline void arch9_fault_on_ahci_port_publish(void) {
 #endif
 }
 
+/* ── Cross-driver IRQ-conflict helpers ────────────────────────────
+ * Used by e1000.c / virtio-net.c to track the first card's GSI so
+ * the second probe can detect a candidate GSI collision and fall to
+ * POLL (ir-conflict fault).  All hooks are no-ops when ARCH9_FAULT
+ * is none. */
+static inline uint32_t arch9_fault_get_first_card_gsi(void) {
+#ifdef OS01_TEST_FAULT
+    extern uint32_t arch9_fault_first_card_gsi(void);
+    return arch9_fault_first_card_gsi();
+#else
+    return 0;
+#endif
+}
+
+static inline unsigned arch9_fault_get_nic_probe_count(void) {
+#ifdef OS01_TEST_FAULT
+    extern unsigned arch9_fault_nic_probe_count(void);
+    return arch9_fault_nic_probe_count();
+#else
+    return 0;
+#endif
+}
+
+static inline void arch9_fault_record_card_gsi(uint32_t gsi) {
+#ifdef OS01_TEST_FAULT
+    extern void arch9_fault_set_card_gsi(uint32_t gsi);
+    arch9_fault_set_card_gsi(gsi);
+#else
+    (void)gsi;
+#endif
+}
+
 /* ── Fault-injection predicates ────────────────────────────────────
  * Each returns true if the matching symptom must fire in this build
  * variant.  For OS01=none the answer is always false (the runtime

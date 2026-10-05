@@ -26,10 +26,36 @@ struct arch9_obs g_arch9_obs;
  * counters and fault predicates via the header inline hooks. */
 static int s_active_for_test = OS01_TEST_FAULT_NONE;
 int arch9_fault_get_active(void) { return s_active_for_test; }
+
+/* IRQ-conflict tracking (host-test) — explicit storage so the
+ * header inlines can read/write.  Production builds own this state
+ * via the host-test branch below. */
+static uint32_t s_first_card_gsi = 0;
+static unsigned s_nic_probe_count = 0;
+uint32_t arch9_fault_first_card_gsi(void) { return s_first_card_gsi; }
+unsigned arch9_fault_nic_probe_count(void) { return s_nic_probe_count; }
+void arch9_fault_set_card_gsi(uint32_t gsi) {
+    if (s_nic_probe_count == 0 && gsi != 0) {
+        s_first_card_gsi = gsi;
+    }
+    s_nic_probe_count++;
+}
 #else
 /* ARCH9_FAULT_NAME is injected as -DARCH9_FAULT_NAME=<slug> from
  * kernel/Makefile.  Convert the slug to the enum value at boot. */
 static int s_active_fault = OS01_TEST_FAULT_NONE;
+
+/* IRQ-conflict tracking (production) — see header docstring. */
+static uint32_t s_first_card_gsi = 0;
+static unsigned s_nic_probe_count = 0;
+uint32_t arch9_fault_first_card_gsi(void) { return s_first_card_gsi; }
+unsigned arch9_fault_nic_probe_count(void) { return s_nic_probe_count; }
+void arch9_fault_set_card_gsi(uint32_t gsi) {
+    if (s_nic_probe_count == 0 && gsi != 0) {
+        s_first_card_gsi = gsi;
+    }
+    s_nic_probe_count++;
+}
 
 static int resolve_slug(const char *slug)
 {
