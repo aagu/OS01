@@ -82,17 +82,17 @@ RUN_QEMU_FLAGS_debug      = -S -s
 # so a clean workspace still gets the disk image + firmware built first.
 run:        $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
-	$(RUN_QEMU_BASE) -netdev user,id=net0 -device e1000e,netdev=net0 $(RUN_QEMU_DISK) -no-reboot
+	$(RUN_QEMU_BASE) -netdev user,id=net0 -device e1000,netdev=net0 $(RUN_QEMU_DISK) -no-reboot
 run-kvm:    $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
-	$(RUN_QEMU_BASE) $(RUN_QEMU_FLAGS_run-kvm) -netdev user,id=net0 -device e1000e,netdev=net0 $(RUN_QEMU_DISK) -no-reboot
+	$(RUN_QEMU_BASE) $(RUN_QEMU_FLAGS_run-kvm) -netdev user,id=net0 -device e1000,netdev=net0 $(RUN_QEMU_DISK) -no-reboot
 run-virtio: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
-	$(RUN_QEMU_BASE) -netdev user,id=net0 -device virtio-net-pci,netdev=net0 $(RUN_QEMU_DISK)
+	$(RUN_QEMU_BASE) -netdev user,id=net0 -device virtio-net-pci,disable-modern=on,netdev=net0 $(RUN_QEMU_DISK)
 debug: QEMU_IMAGE = $(DISK_IMG)
 debug:      $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(DISK_IMG) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
-	$(RUN_QEMU_BASE) $(RUN_QEMU_FLAGS_debug) -netdev user,id=net0 -device e1000e,netdev=net0 $(RUN_QEMU_DISK)
+	$(RUN_QEMU_BASE) $(RUN_QEMU_FLAGS_debug) -netdev user,id=net0 -device e1000,netdev=net0 $(RUN_QEMU_DISK)
 
 # ── aarch64 UEFI bring-up (uefi capability) ────────────
 # Targets are always defined so `make aarch64-uefi` under the default x86
@@ -393,8 +393,8 @@ test-m1-host: $(if $(CASE),_test-m1-host-run-$(CASE),$(foreach c,$(M1_CASES),_te
 	  esac
 
 # ARCH-9 driver model host tests.
-.PHONY: test-arch9-host _test-arch9-host-run-block _test-arch9-host-run-pci _test-arch9-host-run-backend _test-arch9-host-run-ahci
-ARCH9_CASES := block pci backend ahci
+.PHONY: test-arch9-host _test-arch9-host-run-block _test-arch9-host-run-pci _test-arch9-host-run-backend _test-arch9-host-run-ahci _test-arch9-host-run-device-boot
+ARCH9_CASES := block pci backend ahci device-boot
 _test-arch9-host-run-block:
 	@echo "  [test-arch9-host] block"
 	$(call os01_submake,hosttests,test-block $(OS01_SUBMAKE_ARGS))
@@ -407,6 +407,9 @@ _test-arch9-host-run-backend:
 _test-arch9-host-run-ahci:
 	@echo "  [test-arch9-host] ahci"
 	$(call os01_submake,hosttests,test-ahci $(OS01_SUBMAKE_ARGS))
+_test-arch9-host-run-device-boot:
+	@echo "  [test-arch9-host] device-boot"
+	$(call os01_submake,hosttests,test-device-boot $(OS01_SUBMAKE_ARGS))
 test-arch9-host: CASE ?=
 test-arch9-host: CASE := $(CASE)
 test-arch9-host: $(if $(CASE),_test-arch9-host-run-$(CASE),$(foreach c,$(ARCH9_CASES),_test-arch9-host-run-$(c)))
@@ -417,6 +420,7 @@ test-arch9-host: $(if $(CASE),_test-arch9-host-run-$(CASE),$(foreach c,$(ARCH9_C
 	    pci) echo "  [test-arch9-host] CASE=$(CASE)";; \
 	    backend) echo "  [test-arch9-host] CASE=$(CASE)";; \
 	    ahci) echo "  [test-arch9-host] CASE=$(CASE)";; \
+	    device-boot) echo "  [test-arch9-host] CASE=$(CASE)";; \
 	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(ARCH9_CASES)" >&2; exit 1;; \
 	  esac
 
@@ -736,11 +740,11 @@ help:
 	@echo ''
 	@echo 'Run / Debug (x86, rootfs):'
 	@printf '  %-22s %-13s %s\n' \
-		 'run'               '(rootfs)'     'QEMU q35 + e1000e + serial stdio';
+		 'run'               '(rootfs)'     'QEMU q35 + e1000 + serial stdio';
 	@printf '  %-22s %-13s %s\n' \
 		 'run-kvm'           '(rootfs)'     'QEMU with KVM acceleration';
 	@printf '  %-22s %-13s %s\n' \
-		 'run-virtio'        '(rootfs)'     'QEMU with virtio-net-pci (instead of e1000e)';
+		 'run-virtio'        '(rootfs)'     'QEMU with virtio-net-pci (instead of e1000)';
 	@printf '  %-22s %-13s %s\n' \
 		 'debug'             '(rootfs)'     'QEMU paused, GDB :1234 (-S -s)';
 	@echo ''

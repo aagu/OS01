@@ -32,8 +32,19 @@ SECTIONS
 	{
 		_rodata = .;
 		*(.rodata .rodata.* .lrodata .lrodata.*)
-		_erodata = .;
 	} :text
+
+	/* PCI driver registration table. Drivers place static pointers here
+	 * via PCI_DRIVER_DECLARE(); device_boot_init() iterates this range. */
+	.pci_drivers :
+	{
+		. = ALIGN(8);
+		PROVIDE(__pci_drivers_start = .);
+		KEEP(*(.pci_drivers))
+		PROVIDE(__pci_drivers_end = .);
+	} :text
+
+	_erodata = .;
 
 	. = ALIGN(8);
 

@@ -15,4 +15,11 @@ struct pci_driver {
 
 int pci_register_driver(const struct pci_driver *driver);
 
+#define PCI_DRIVER_DECLARE(driver) \
+    static const struct pci_driver *const __pci_driver_ptr_##driver \
+        __attribute__((used, section(".pci_drivers"), aligned(sizeof(void *)))) = &(driver)
+
+extern const struct pci_driver *__pci_drivers_start[];
+extern const struct pci_driver *__pci_drivers_end[];
+
 #endif /* _BUS_PCI_DRIVER_H */

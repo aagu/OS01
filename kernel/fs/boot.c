@@ -18,6 +18,8 @@
 #include <fs/procfs.h>
 #include <block/blockdev.h>
 #include <core/printk.h>      // serial_printk for GPT/ext2/FAT32 fallback logs
+#include <core/panic.h>
+#include <stdbool.h>
 
 // ── fs_boot_prepare ───────────────────────────────────────────
 // Init the VFS mount table, then mount devfs at /dev.  devfs_init()
@@ -66,38 +68,44 @@ static block_device_t *find_first_disk(void)
     return NULL;
 }
 
-static void mount_partitioned_disk(void)
+static bool mount_partitioned_disk(void)
 {
     block_device_t *disk = find_first_disk();
-    if (!disk) return;
+    if (!disk) return false;
 
     gpt_info_t *gpt = gpt_scan(disk);
     if (!gpt) {
         // Fallback: old single-FAT32 layout (whole disk is FAT32).
         fat32_fs_t *fs = NULL;
-        if (0 == fat32_init(disk, &fs))
+        if (0 == fat32_init(disk, &fs)) {
             vfs_mount("/", disk, &fat_vfs_ops, fs);
-        return;
+            return true;
+        }
+        return false;
     }
-
 
     // Dual-partition layout:
     //   gpt->partitions[0] = hda1 (FAT32 ESP) → /boot
     //   gpt->partitions[1] = hda2 (ext2)      → /
-    if (gpt->count < 2) return;
+    if (gpt->count < 2) return false;
 
     ext2_fs_t *ext2_fs = NULL;
     fat32_fs_t *fat_fs = NULL;
+    bool root_ok = false;
 
-    if (0 == ext2_init(gpt->partitions[1].dev, &ext2_fs))
+    if (0 == ext2_init(gpt->partitions[1].dev, &ext2_fs)) {
         vfs_mount("/", gpt->partitions[1].dev, &ext2_vfs_ops, ext2_fs);
-    else
+        root_ok = true;
+    } else {
         serial_printk("EXT2: mount failed — / not available\n");
+    }
 
     if (0 == fat32_init(gpt->partitions[0].dev, &fat_fs))
         vfs_mount("/boot", gpt->partitions[0].dev, &fat_vfs_ops, fat_fs);
     else
         serial_printk("FAT32: /boot mount failed\n");
+
+    return root_ok;
 }
 
 // ── fs_boot_mounts ────────────────────────────────────────────
@@ -109,13 +117,17 @@ static void mount_partitioned_disk(void)
 void fs_boot_mounts(void)
 {
     register_block_devices();
-    mount_partitioned_disk();
+    bool root_ok = mount_partitioned_disk();
+    if (!root_ok) {
+        kpanic("root filesystem unavailable\n");
+    }
 
     // /tmp → tmpfs (independent of disk)
     tmpfs_init();
 
     procfs_init();                  // /proc
 }
+
 
 // ── fs_boot_probe_devfs ──────────────────────────────────────
 // After tty_boot_init() registers /dev/tty and /dev/tty0, list the

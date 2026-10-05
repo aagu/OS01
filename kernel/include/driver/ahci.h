@@ -286,7 +286,8 @@ void ahci_remove(struct pci_device *pdev);
 int  ahci_port_read(struct ahci_port *port, uint64_t lba, uint32_t count, void *buffer);
 int  ahci_port_write(struct ahci_port *port, uint64_t lba, uint32_t count, const void *buffer);
 
-void ahci_init(void);
+struct pci_driver;
+extern const struct pci_driver ahci_pci_driver;
 
 // Block read/write — returns 0 on success, -1 on error
 int ahci_read_sectors(int port_num, uint64_t lba, uint32_t count, void *buffer);

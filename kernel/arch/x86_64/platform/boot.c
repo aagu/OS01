@@ -56,6 +56,8 @@
 #include <arch/x86_64/spinlock.h>   /* spin_init                          */
 #include <arch/subsys.h>           /* arch_boot_rsdp, arch_register_subsys*/
 #include <subsys/subsys.h>         /* subsys_init_all                    */
+#include <device/boot.h>
+#include <core/panic.h>
 
 #include <driver/keyboard.h>
 #include <driver/mouse.h>
@@ -110,7 +112,13 @@ void x86_64_boot_subsystems(const struct boot_context *bootctx)
 
     arch_register_subsys();
     subsys_init_all();
+
+    int dev_res = device_boot_result();
+    if (dev_res != 0) {
+        kpanic("device boot failed: %d\n", dev_res);
+    }
 }
+
 
 // ── Task-2 helper: chrdev registration through devfs ─────────
 static const struct devfs_ops keyboard_ops = {

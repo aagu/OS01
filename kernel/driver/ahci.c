@@ -738,66 +738,35 @@ void ahci_remove(struct pci_device *pdev)
     }
 }
 
-// ── Transitional ahci_init() ──────────────────────────────
-void ahci_init(void)
-{
-    device_core_init();
-    int ret = pci_enumerate();
-    if (ret != 0 && ret != BUS_UNAVAILABLE) {
-        debug_block("AHCI: pci_enumerate failed: %d\n", ret);
-        return;
-    }
+// ── AHCI PCI Driver Declaration ───────────────────────────
+static const struct pci_device_id ahci_ids[] = {
+    {
+        .vendor = PCI_ID_ANY,
+        .device = PCI_ID_ANY,
+        .subvendor = PCI_ID_ANY,
+        .subdevice = PCI_ID_ANY,
+        .class_value = (PCI_CLASS_MASS_STORAGE << 16) | (PCI_SUBCLASS_SATA << 8) | PCI_PROGIF_AHCI,
+        .class_mask = 0xFFFFFF,
+    },
+    {
+        .vendor = PCI_ID_ANY,
+        .device = PCI_ID_ANY,
+        .subvendor = PCI_ID_ANY,
+        .subdevice = PCI_ID_ANY,
+        .class_value = (PCI_CLASS_MASS_STORAGE << 16) | (PCI_SUBCLASS_SATA << 8) | 0x00,
+        .class_mask = 0xFFFF00,
+    },
+};
 
-    static const struct pci_device_id ahci_ids[2] = {
-        {
-            .vendor = PCI_ID_ANY,
-            .device = PCI_ID_ANY,
-            .subvendor = PCI_ID_ANY,
-            .subdevice = PCI_ID_ANY,
-            .class_value = (PCI_CLASS_MASS_STORAGE << 16) | (PCI_SUBCLASS_SATA << 8) | PCI_PROGIF_AHCI,
-            .class_mask = 0xFFFFFF,
-        },
-        {
-            .vendor = PCI_ID_ANY,
-            .device = PCI_ID_ANY,
-            .subvendor = PCI_ID_ANY,
-            .subdevice = PCI_ID_ANY,
-            .class_value = (PCI_CLASS_MASS_STORAGE << 16) | (PCI_SUBCLASS_SATA << 8) | 0x00,
-            .class_mask = 0xFFFF00,
-        },
-    };
+const struct pci_driver ahci_pci_driver = {
+    .name = "ahci",
+    .id_table = ahci_ids,
+    .id_count = sizeof(ahci_ids) / sizeof(ahci_ids[0]),
+    .probe = ahci_probe,
+    .remove = ahci_remove,
+};
 
-    static const struct pci_driver ahci_driver = {
-        .name = "ahci",
-        .id_table = ahci_ids,
-        .id_count = sizeof(ahci_ids) / sizeof(ahci_ids[0]),
-        .probe = ahci_probe,
-        .remove = ahci_remove,
-    };
-
-    unsigned count = pci_device_count();
-    for (unsigned i = 0; i < count; i++) {
-        struct pci_device *pdev = pci_device_get(i);
-        if (!pdev) continue;
-        const struct pci_device_id *matched = pci_match_id(&ahci_driver, pdev);
-        if (matched) {
-            debug_block("AHCI: found device at %02x:%02x.%d, probing...\n",
-                        pdev->bus, pdev->slot, pdev->fn);
-            pdev->driver = &ahci_driver;
-            int pr = ahci_probe(pdev, matched);
-            if (pr == 0) {
-                pdev->dev.state = DEV_BOUND;
-                debug_block("AHCI: successfully bound controller\n");
-            } else {
-                pdev->dev.state = DEV_FAILED;
-                pdev->dev.last_error = pr;
-                pdev->driver = NULL;
-                debug_block("AHCI: probe failed: %d\n", pr);
-            }
-            break;
-        }
-    }
-}
+PCI_DRIVER_DECLARE(ahci_pci_driver);
 
 // ── Legacy public APIs ────────────────────────────────────
 int ahci_read_sectors(int port_num, uint64_t lba, uint32_t count, void *buffer)
@@ -830,18 +799,3 @@ uint64_t ahci_port_sector_count(int port_num)
     return g_first_controller->ports[port_num].sector_count;
 }
 
-#ifndef OS01_HOST_TEST
-#include <subsys/subsys.h>
-static int _ahci_init_wrapper(void)
-{
-    ahci_init();
-    return 0;
-}
-static int _ahci_register(void)
-{
-    register_subsys("ahci", _ahci_init_wrapper,
-                    SUBSYS_PHASE_6, SUBSYS_FLAG_OPTIONAL);
-    return 0;
-}
-SUBSYS_INITCALL(_ahci_register);
-#endif

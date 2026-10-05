@@ -99,7 +99,7 @@ class TestRunner:
         ]
         if network:
             args += ["-netdev", "user,id=net0,dhcpstart=10.0.2.20",
-                     "-device", "e1000e,netdev=net0"]
+                     "-device", "e1000,netdev=net0"]
         if serial_stdio:
             # Redirect QEMU's stdout (the serial READ side under
             # -serial stdio) into the log file directly — line-buffered
