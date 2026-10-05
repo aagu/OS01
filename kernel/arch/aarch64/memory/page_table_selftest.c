@@ -2,7 +2,7 @@
 #include <arch/boot_memory.h>
 #include <arch/aarch64/boot_direct_map.h>
 #include <arch/aarch64/early_arena.h>
-#include <arch/aarch64/m1_selftest.h>
+#include <arch/aarch64/page_table_selftest.h>
 #include <arch/aarch64/page_table.h>
 #include <arch/spinlock.h>
 #include <arch/cpu.h>
@@ -24,9 +24,9 @@ static volatile uint64_t *scalar(uint64_t address)
 
 #if OS01_SELFTEST
 
-void aarch64_m1_prune_warm(void)
+void aarch64_page_table_prune_warm(void)
 {
-    if (aarch64_m1_translation(ARCH_PAGE_OFFSET + UINT64_C(0x00200000)) & 1) {
+    if (aarch64_at_translation(ARCH_PAGE_OFFSET + UINT64_C(0x00200000)) & 1) {
         log_err("M1 FATAL reason=prune-precondition\n");
         for (;;)
             arch_cpu_halt();
@@ -94,7 +94,7 @@ static int smoke(uint64_t root_pa)
         }
     }
     /* Even partial map allocation owns a partial chain under slot256. */
-    int cleanup = aarch64_m1_smoke_cleanup(root, data);
+    int cleanup = aarch64_page_table_smoke_cleanup(root, data);
     if (cleanup) {
         log_err("M1 smoke cleanup error=%lu\n", (unsigned long)(-cleanup));
         return cleanup;
@@ -109,11 +109,11 @@ static int smoke(uint64_t root_pa)
     log_info("M1 CLEANUP PASS slot=256\n");
     return 0;
 }
-int aarch64_m1_selftest(uint64_t root_pa)
+int aarch64_page_table_selftest(uint64_t root_pa)
 {
-    if (!(aarch64_m1_translation(ARCH_PAGE_OFFSET + UINT64_C(0x00200000)) & 1))
+    if (!(aarch64_at_translation(ARCH_PAGE_OFFSET + UINT64_C(0x00200000)) & 1))
         return -EIO;
-    if (aarch64_m1_translation(ARCH_PAGE_OFFSET + UINT64_C(0x08000000)) & 1)
+    if (aarch64_at_translation(ARCH_PAGE_OFFSET + UINT64_C(0x08000000)) & 1)
         return -EIO;
     log_info("M1 PRUNE PASS pa=0x00200000 before=valid after=fault\n");
     int rc = smoke(root_pa);
@@ -175,15 +175,15 @@ int aarch64_m1_selftest(uint64_t root_pa)
     return 0;
 }
 #else
-void aarch64_m1_prune_warm(void) {}
-int aarch64_m1_selftest(uint64_t root_pa)
+void aarch64_page_table_prune_warm(void) {}
+int aarch64_page_table_selftest(uint64_t root_pa)
 {
     (void)root_pa;
     return 0;
 }
 #endif
 
-int aarch64_m1_probe_prepare(void)
+int aarch64_page_table_probe_prepare(void)
 {
     spin_init(&marker_lock);
 #if OS01_SELFTEST
@@ -210,7 +210,7 @@ int aarch64_m1_probe_prepare(void)
 #endif
     return 0;
 }
-int aarch64_m1_ap_verify(unsigned int cpu)
+int aarch64_page_table_ap_verify(unsigned int cpu)
 {
     uint64_t root = *scalar(aarch64_runtime_root_address());
     bool ok = root && aarch64_read_ttbr1() == root;
@@ -232,7 +232,7 @@ int aarch64_m1_ap_verify(unsigned int cpu)
     spin_unlock_irqrestore(&marker_lock, flags);
     return ok ? 0 : -EIO;
 }
-void aarch64_m1_probe_finish(bool all_requested_acked)
+void aarch64_page_table_probe_finish(bool all_requested_acked)
 {
     if (!probe_finished && all_requested_acked) {
         probe_finished = true;
@@ -242,9 +242,9 @@ void aarch64_m1_probe_finish(bool all_requested_acked)
         }
     }
 }
-void aarch64_m1_publish_ranges(void (*clean)(uint64_t, uint64_t, uint64_t), uint64_t line_size)
+void aarch64_publish_cache_ranges(void (*clean)(uint64_t, uint64_t, uint64_t), uint64_t line_size)
 {
-    const struct aarch64_runtime_tree *tree = aarch64_m1_tree_get();
+    const struct aarch64_runtime_tree *tree = aarch64_runtime_tree_get();
     if (!tree) {
         log_err("M1 FATAL reason=publish-before-ready\n");
         for (;;)

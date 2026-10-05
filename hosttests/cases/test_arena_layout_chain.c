@@ -17,10 +17,10 @@
  * (align_down semantic, NOT `total_bytes` which adds a 4 KiB slack).
  * Computing it from `end_of_struct_off` is the canonical chain.
  *
- * RED state (pre-Task-3): struct aarch64_m1_arena has no slab_* fields;
+ * RED state (pre-Task-3): struct aarch64_early_arena has no slab_* fields;
  * the test fails to compile / link. After Task 3 lands, GREEN.
  */
-#include "m1_test_runner.h"
+#include "page_table_test_runner.h"
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -34,7 +34,7 @@
 #include <arch/aarch64/early_arena.h>
 #include <arch/mmu.h>
 
-/* Same host-stub surface as test_m1_arena.c — the production
+/* Same host-stub surface as test_early_arena.c — the production
  * early_arena.c uses log_err() which our test TU mocks. */
 int g_log_level = 3;
 void _log_err_impl(const char *fmt, ...) { (void)fmt; }
@@ -103,8 +103,8 @@ TEST_FUNC(test_layout_chain_slab_meta_bytes)
      * + a small table pool. */
     struct MEMORY_RANGE ram[1];
     build_single(0x40200000ULL, 0x40200000ULL + 64ULL * 1024 * 1024, ram);
-    struct aarch64_m1_arena got;
-    int rc = aarch64_m1_plan(ram, 1, &got);
+    struct aarch64_early_arena got;
+    int rc = aarch64_early_arena_plan(ram, 1, &got);
     assert_eq(0, rc);
     /* slab_meta_bytes == slab_layout_compute().meta_bytes (single source of truth). */
     struct slab_layout sl = slab_layout_compute();
@@ -116,8 +116,8 @@ TEST_FUNC(test_layout_chain_slab_page_start_end)
 {
     struct MEMORY_RANGE ram[1];
     build_single(0x40200000ULL, 0x40200000ULL + 64ULL * 1024 * 1024, ram);
-    struct aarch64_m1_arena got;
-    int rc = aarch64_m1_plan(ram, 1, &got);
+    struct aarch64_early_arena got;
+    int rc = aarch64_early_arena_plan(ram, 1, &got);
     assert_eq(0, rc);
     uint64_t sl_meta = meta_end_pa(got.base_pa, &got.layout)
                      + got.slab_meta_bytes;
@@ -134,8 +134,8 @@ TEST_FUNC(test_layout_chain_table_base_after_slab_end)
 {
     struct MEMORY_RANGE ram[1];
     build_single(0x40200000ULL, 0x40200000ULL + 64ULL * 1024 * 1024, ram);
-    struct aarch64_m1_arena got;
-    int rc = aarch64_m1_plan(ram, 1, &got);
+    struct aarch64_early_arena got;
+    int rc = aarch64_early_arena_plan(ram, 1, &got);
     assert_eq(0, rc);
     /* table_base_pa MUST equal slab_page_end_pa (already 2M aligned,
      * so no extra padding needed between slab pages and table pool). */
@@ -148,8 +148,8 @@ TEST_FUNC(test_layout_chain_arena_end_aligns_2m)
 {
     struct MEMORY_RANGE ram[1];
     build_single(0x40200000ULL, 0x40200000ULL + 64ULL * 1024 * 1024, ram);
-    struct aarch64_m1_arena got;
-    int rc = aarch64_m1_plan(ram, 1, &got);
+    struct aarch64_early_arena got;
+    int rc = aarch64_early_arena_plan(ram, 1, &got);
     assert_eq(0, rc);
     /* table_end_pa = table_base_pa + table_pages * 4 KiB. */
     uint64_t want_table_end = got.table_base_pa
@@ -170,8 +170,8 @@ TEST_FUNC(test_layout_chain_full_formula_match)
      * formula. */
     struct MEMORY_RANGE ram[1];
     build_single(0x40200000ULL, 0x40200000ULL + 64ULL * 1024 * 1024, ram);
-    struct aarch64_m1_arena got;
-    int rc = aarch64_m1_plan(ram, 1, &got);
+    struct aarch64_early_arena got;
+    int rc = aarch64_early_arena_plan(ram, 1, &got);
     assert_eq(0, rc);
     uint64_t want_end = expected_arena_end(got.base_pa, &got.layout,
                                            got.table_pages);
@@ -183,8 +183,8 @@ TEST_FUNC(test_layout_chain_arena_inside_input_range)
     /* Sanity: arena must be fully inside the input range. */
     struct MEMORY_RANGE ram[1];
     build_single(0x40200000ULL, 0x40200000ULL + 64ULL * 1024 * 1024, ram);
-    struct aarch64_m1_arena got;
-    int rc = aarch64_m1_plan(ram, 1, &got);
+    struct aarch64_early_arena got;
+    int rc = aarch64_early_arena_plan(ram, 1, &got);
     assert_eq(0, rc);
     assert_true(got.base_pa >= ram[0].phys_start);
     assert_true(got.end_pa <= ram[0].phys_end);
@@ -201,6 +201,6 @@ TEST_LIST_END
 
 int main(void)
 {
-    int failed = M1_RUN_ALL_TESTS();
+    int failed = PAGE_TABLE_RUN_ALL_TESTS();
     return failed;
 }

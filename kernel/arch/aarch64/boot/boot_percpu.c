@@ -56,6 +56,6 @@ uint32_t aarch64_dtb_cpu_count;
 __attribute__((section(".boot.bss"), aligned(8)))
 uint64_t runtime_ttbr1_pa;
 __attribute__((section(".boot.bss"), aligned(8)))
-uint64_t m1_probe_pa;
+uint64_t pt_probe_pa;
 __attribute__((section(".boot.bss"), aligned(8)))
-uint64_t m1_probe_expected;
+uint64_t pt_probe_expected;

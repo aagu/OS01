@@ -1,4 +1,4 @@
-/* kernel/arch/aarch64/boot/m3_probe.h — M3.5 Task 25 shootdown probe
+/* kernel/arch/aarch64/boot/shootdown_probe.h — M3.5 Task 25 shootdown probe
  * (spec §7.3).
  *
  * The probe is the aarch64 M3 production-image verification that
@@ -9,7 +9,7 @@
  * double-state publish (online + ipi_ready).
  *
  * The probe has 7 steps (spec §7.3):
- *   1. kputs("M3-SHOOTDOWN-PROBE: START\n")
+ *   1. kputs("SHOOTDOWN-PROBE: START\n")
  *   2. bounded wait for ipi_ready_count >= dtb_cpu_count()
  *   3. assert arch_vmm_query_4k(SCRATCH_VA) == -ENOENT
  *   4. alloc P1 (pattern A) and P2 (pattern B)
@@ -18,9 +18,9 @@
  *   6. arch_vmm_update_4k(SCRATCH_VA → P2) [BBM class]
  *      → tlb_shootdown() → WORK_READ64 → expect B
  *   7. arch_vmm_unmap_4k(SCRATCH_VA) → free P1/P2
- *      → assert query == -ENOENT → kputs("M3-SHOOTDOWN-PROBE: OK\n")
+ *      → assert query == -ENOENT → kputs("SHOOTDOWN-PROBE: OK\n")
  *
- * Any FAIL prints "M3-SHOOTDOWN-PROBE: FAIL <reason>\n" and
+ * Any FAIL prints "SHOOTDOWN-PROBE: FAIL <reason>\n" and
  * for(;;) arch_cpu_halt() — the probe MUST NOT return on failure
  * (the production build is meant to halt, not crash).
  *
@@ -59,12 +59,12 @@
  *   - FAIL scratch-still-mapped
  *     Final query != -ENOENT (unmap left a residue).
  *
- * Spec reference: kernel/arch/aarch64/boot/m3_probe.c for the
+ * Spec reference: kernel/arch/aarch64/boot/shootdown_probe.c for the
  * production call site and hosttest/cases/test_aarch64_scratch_probe_logic.c
  * for the testable body contract.
  */
-#ifndef OS01_AARCH64_M3_PROBE_H
-#define OS01_AARCH64_M3_PROBE_H
+#ifndef OS01_AARCH64_SHOOTDOWN_PROBE_H
+#define OS01_AARCH64_SHOOTDOWN_PROBE_H
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -76,24 +76,24 @@
  * v5). Lives at PGD[0] (kernel-high half at 0xffff_0000_0000_0000,
  * PGD index = 0) so the production image's TTBR1 root has the L1/L2
  * slots guaranteed empty for this VA. */
-#define M3_PROBE_SCRATCH_VA  (ARCH_PAGE_OFFSET + 0x10000000UL)
+#define AARCH64_SHOOTDOWN_PROBE_SCRATCH_VA  (ARCH_PAGE_OFFSET + 0x10000000UL)
 
 /* Distinct 64-bit patterns written to the two scratch pages before
  * mapping them at SCRATCH_VA. Both fit comfortably in a 64-bit word
  * and read back exactly via volatile uint64_t load. */
-#define M3_PROBE_PATTERN_A   UINT64_C(0xA5A5A5A5A5A5A5A5)
-#define M3_PROBE_PATTERN_B   UINT64_C(0x5A5A5A5A5A5A5A5A)
+#define AARCH64_SHOOTDOWN_PROBE_PATTERN_A   UINT64_C(0xA5A5A5A5A5A5A5A5)
+#define AARCH64_SHOOTDOWN_PROBE_PATTERN_B   UINT64_C(0x5A5A5A5A5A5A5A5A)
 
 /* Probe deadline for the ipi_ready wait + each ap_work_wait. ~2 s of
  * arch_cycle_counter() at QEMU's nominal counter rate; a live AP
  * ack arrives in microseconds, only a wedged CPU hits this. */
-#define M3_PROBE_DEADLINE_CYCLES  UINT64_C(2000000000)
+#define AARCH64_SHOOTDOWN_PROBE_DEADLINE_CYCLES  UINT64_C(2000000000)
 
 /* Function-pointer ops surface. Each member maps 1:1 to a real
  * kernel symbol the production wrapper binds; the hosttest binds the
  * same names to mocks. Member types mirror the real signatures so
  * mis-typed hooks surface as compile errors, not runtime surprises. */
-struct aarch64_m3_probe_ops {
+struct aarch64_shootdown_probe_ops {
     /* Hardware / SMP state. */
     uint32_t (*dtb_cpu_count)(void);
     uint32_t (*ipi_ready_count_get)(void);
@@ -142,39 +142,39 @@ struct aarch64_m3_probe_ops {
 /* ── Internal helpers (used by both production body and hosttest) ── */
 
 static inline void
-aarch64_m3_probe_cputs(const struct aarch64_m3_probe_ops *ops, const char *s)
+aarch64_shootdown_probe_cputs(const struct aarch64_shootdown_probe_ops *ops, const char *s)
 {
     if (ops && ops->kputs) ops->kputs(s);
 }
 
 /* Unsigned decimal output through the ops surface (skipped when the
- * hook is NULL — mirrors aarch64_m3_probe_cputs). */
+ * hook is NULL — mirrors aarch64_shootdown_probe_cputs). */
 static inline void
-aarch64_m3_probe_cputu(const struct aarch64_m3_probe_ops *ops, uint64_t v)
+aarch64_shootdown_probe_cputu(const struct aarch64_shootdown_probe_ops *ops, uint64_t v)
 {
     if (ops && ops->kputu) ops->kputu(v);
 }
 
-/* FAIL prints "M3-SHOOTDOWN-PROBE: FAIL <reason>\n" and invokes
+/* FAIL prints "SHOOTDOWN-PROBE: FAIL <reason>\n" and invokes
  * ops->halt(). Helper is a function (not a macro) so the reason
  * can be a runtime const char * — the production body passes
  * string literals, but the broadcast_read helper forwards a
  * const char * parameter; using a macro would force string-literal
  * concatenation which only works for two literals. */
 static inline void
-aarch64_m3_probe_fail(const struct aarch64_m3_probe_ops *ops,
+aarch64_shootdown_probe_fail(const struct aarch64_shootdown_probe_ops *ops,
                       const char *reason)
 {
-    aarch64_m3_probe_cputs(ops, "M3-SHOOTDOWN-PROBE: FAIL ");
-    aarch64_m3_probe_cputs(ops, reason);
-    aarch64_m3_probe_cputs(ops, "\n");
+    aarch64_shootdown_probe_cputs(ops, "SHOOTDOWN-PROBE: FAIL ");
+    aarch64_shootdown_probe_cputs(ops, reason);
+    aarch64_shootdown_probe_cputs(ops, "\n");
     ops->halt();
 }
 
 /* Back-compat macros for any call site that prefers the macro form. */
-#define AARCH64_M3_PROBE_CPUTS(ops, s) aarch64_m3_probe_cputs((ops), (s))
-#define AARCH64_M3_PROBE_FAIL(ops, reason) \
-        aarch64_m3_probe_fail((ops), (reason))
+#define AARCH64_SHOOTDOWN_PROBE_CPUTS(ops, s) aarch64_shootdown_probe_cputs((ops), (s))
+#define AARCH64_SHOOTDOWN_PROBE_FAIL(ops, reason) \
+        aarch64_shootdown_probe_fail((ops), (reason))
 
 /* Submission + wait helper. Submits a WORK_READ64 to one ipi_ready
  * AP and waits up to deadline_cycles for the result. Captures the
@@ -182,7 +182,7 @@ aarch64_m3_probe_fail(const struct aarch64_m3_probe_ops *ops,
  * (should be unreachable in the probe flow — ap_work_wait would have
  * hit the timeout FATAL first). */
 static inline bool
-aarch64_m3_probe_submit_and_wait(const struct aarch64_m3_probe_ops *ops,
+aarch64_shootdown_probe_submit_and_wait(const struct aarch64_shootdown_probe_ops *ops,
                                  uint32_t cpu, uint32_t seq,
                                  uint64_t va, uint64_t *out,
                                  uint64_t deadline)
@@ -196,7 +196,7 @@ aarch64_m3_probe_submit_and_wait(const struct aarch64_m3_probe_ops *ops,
  * starts at `seq_base` and increments per CPU so each AP sees a
  * distinct request even if multiple CPUs ack simultaneously. */
 static inline void
-aarch64_m3_probe_broadcast_read(const struct aarch64_m3_probe_ops *ops,
+aarch64_shootdown_probe_broadcast_read(const struct aarch64_shootdown_probe_ops *ops,
                                 uint64_t va, uint64_t expected,
                                 uint32_t seq_base,
                                 const char *fail_tag)
@@ -206,21 +206,21 @@ aarch64_m3_probe_broadcast_read(const struct aarch64_m3_probe_ops *ops,
         if (!ops->ipi_ready_check(cpu))
             continue;
         uint64_t got = 0;
-        if (!aarch64_m3_probe_submit_and_wait(ops, cpu, seq_base + cpu,
+        if (!aarch64_shootdown_probe_submit_and_wait(ops, cpu, seq_base + cpu,
                                               va, &got,
-                                              M3_PROBE_DEADLINE_CYCLES))
-            AARCH64_M3_PROBE_FAIL(ops, fail_tag);
+                                              AARCH64_SHOOTDOWN_PROBE_DEADLINE_CYCLES))
+            AARCH64_SHOOTDOWN_PROBE_FAIL(ops, fail_tag);
         if (got != expected)
-            AARCH64_M3_PROBE_FAIL(ops, fail_tag);
+            AARCH64_SHOOTDOWN_PROBE_FAIL(ops, fail_tag);
     }
 }
 
 /* Testable probe body. Walks the 7 spec §7.3 steps using ops only —
  * no direct kernel-symbol references beyond the ops. Production
- * wrapper aarch64_m3_shootdown_probe() calls this with the real
+ * wrapper aarch64_shootdown_probe() calls this with the real
  * ops; the hosttest calls it with mocks.
 
- * On any failure prints "M3-SHOOTDOWN-PROBE: FAIL <reason>\n"
+ * On any failure prints "SHOOTDOWN-PROBE: FAIL <reason>\n"
  * (when ops->kputs is non-NULL) and invokes ops->halt() — never
  * returns. Returns only on full success.
 
@@ -230,10 +230,10 @@ aarch64_m3_probe_broadcast_read(const struct aarch64_m3_probe_ops *ops,
  * file contributes only the production ops binding + entry point
  * — the body is one-source-of-truth between the two contexts. */
 static inline void
-aarch64_m3_shootdown_probe_body(const struct aarch64_m3_probe_ops *ops)
+aarch64_shootdown_probe_body(const struct aarch64_shootdown_probe_ops *ops)
 {
     /* Step 1: announce. */
-    AARCH64_M3_PROBE_CPUTS(ops, "M3-SHOOTDOWN-PROBE: START\n");
+    AARCH64_SHOOTDOWN_PROBE_CPUTS(ops, "SHOOTDOWN-PROBE: START\n");
 
     /* Step 2a: requires at least one AP. On -smp 1 the probe refuses
      * to run: dtb_cpu_count() == 1 → expected APs == 0 → FAIL.
@@ -242,7 +242,7 @@ aarch64_m3_shootdown_probe_body(const struct aarch64_m3_probe_ops *ops)
      * to satisfy the spec's "0 AP 就绪必须 FAIL" invariant. */
     uint32_t cpu_count = ops->dtb_cpu_count();
     if (cpu_count < 2)
-        AARCH64_M3_PROBE_FAIL(ops, "requires-at-least-one-AP");
+        AARCH64_SHOOTDOWN_PROBE_FAIL(ops, "requires-at-least-one-AP");
 
     /* Step 2b: bounded wait for every CPU (BSP + APs) to publish
      * ipi_ready. APs reach this AFTER boot_online_set and AFTER
@@ -250,25 +250,25 @@ aarch64_m3_shootdown_probe_body(const struct aarch64_m3_probe_ops *ops)
      * smp_boot_aps() returns earlier so a poll here is necessary. */
     uint64_t start = ops->cycle_counter();
     while (ops->ipi_ready_count_get() < cpu_count) {
-        if (ops->cycle_counter() - start > M3_PROBE_DEADLINE_CYCLES) {
+        if (ops->cycle_counter() - start > AARCH64_SHOOTDOWN_PROBE_DEADLINE_CYCLES) {
             /* v1 review item 14: name the absent CPUs. Snapshot the
              * per-CPU ipi_ready flags at timeout and print the logical
              * ids of every AP that never published (BSP = cpu 0 is
              * always published by the time the probe runs; it is not
-             * listed). Format: "M3-SHOOTDOWN-PROBE: FAIL ap-not-ready
+             * listed). Format: "SHOOTDOWN-PROBE: FAIL ap-not-ready
              * <ids>" with ids comma-separated ("1", "1,2", ...). */
-            aarch64_m3_probe_cputs(ops,
-                "M3-SHOOTDOWN-PROBE: FAIL ap-not-ready ");
+            aarch64_shootdown_probe_cputs(ops,
+                "SHOOTDOWN-PROBE: FAIL ap-not-ready ");
             bool first = true;
             for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
                 if (ops->ipi_ready_check(cpu))
                     continue;
                 if (!first)
-                    aarch64_m3_probe_cputs(ops, ",");
+                    aarch64_shootdown_probe_cputs(ops, ",");
                 first = false;
-                aarch64_m3_probe_cputu(ops, cpu);
+                aarch64_shootdown_probe_cputu(ops, cpu);
             }
-            aarch64_m3_probe_cputs(ops, "\n");
+            aarch64_shootdown_probe_cputs(ops, "\n");
             ops->halt();
         }
     }
@@ -281,10 +281,10 @@ aarch64_m3_shootdown_probe_body(const struct aarch64_m3_probe_ops *ops)
     {
         uint64_t phys_q = 0;
         uint32_t vm_q = 0;
-        int rc = ops->query_4k(pgdir, M3_PROBE_SCRATCH_VA,
+        int rc = ops->query_4k(pgdir, AARCH64_SHOOTDOWN_PROBE_SCRATCH_VA,
                                &phys_q, &vm_q);
         if (rc != -ENOENT)
-            AARCH64_M3_PROBE_FAIL(ops, "scratch-non-empty");
+            AARCH64_SHOOTDOWN_PROBE_FAIL(ops, "scratch-non-empty");
     }
 
     /* Step 4: alloc two scratch data pages and stamp them with
@@ -292,20 +292,20 @@ aarch64_m3_shootdown_probe_body(const struct aarch64_m3_probe_ops *ops)
      * bytes are physically written before any mapping is installed. */
     uint64_t p1 = 0, p2 = 0;
     if (ops->alloc_4k_page(&p1) != 0 || p1 == 0)
-        AARCH64_M3_PROBE_FAIL(ops, "alloc-data-P1");
+        AARCH64_SHOOTDOWN_PROBE_FAIL(ops, "alloc-data-P1");
     if (ops->alloc_4k_page(&p2) != 0 || p2 == 0)
-        AARCH64_M3_PROBE_FAIL(ops, "alloc-data-P2");
-    ops->write64(p1, M3_PROBE_PATTERN_A);
-    ops->write64(p2, M3_PROBE_PATTERN_B);
+        AARCH64_SHOOTDOWN_PROBE_FAIL(ops, "alloc-data-P2");
+    ops->write64(p1, AARCH64_SHOOTDOWN_PROBE_PATTERN_A);
+    ops->write64(p2, AARCH64_SHOOTDOWN_PROBE_PATTERN_B);
 
     /* Step 5: map P1 → SCRATCH_VA and broadcast WORK_READ64 to
      * every ipi_ready AP. Each AP dereferences SCRATCH_VA through
      * its own translation tables + TLB; the read must yield A. */
-    if (ops->map_4k_new(pgdir, p1, M3_PROBE_SCRATCH_VA,
+    if (ops->map_4k_new(pgdir, p1, AARCH64_SHOOTDOWN_PROBE_SCRATCH_VA,
                         VM_KERNEL_RW) != 0)
-        AARCH64_M3_PROBE_FAIL(ops, "map");
-    aarch64_m3_probe_broadcast_read(ops, M3_PROBE_SCRATCH_VA,
-                                    M3_PROBE_PATTERN_A, /*seq=*/1,
+        AARCH64_SHOOTDOWN_PROBE_FAIL(ops, "map");
+    aarch64_shootdown_probe_broadcast_read(ops, AARCH64_SHOOTDOWN_PROBE_SCRATCH_VA,
+                                    AARCH64_SHOOTDOWN_PROBE_PATTERN_A, /*seq=*/1,
                                     "ap-read-A");
 
     /* Step 6: rewrite SCRATCH_VA to P2 [BBM class — PA changes], then
@@ -313,44 +313,44 @@ aarch64_m3_shootdown_probe_body(const struct aarch64_m3_probe_ops *ops)
      * SCRATCH_VA is gone, so the next WORK_READ64 walks the page
      * table and observes P2 = pattern B. A stale TLB would have
      * returned A instead. */
-    if (ops->update_4k(pgdir, p2, M3_PROBE_SCRATCH_VA,
+    if (ops->update_4k(pgdir, p2, AARCH64_SHOOTDOWN_PROBE_SCRATCH_VA,
                        VM_KERNEL_RW) != 0)
-        AARCH64_M3_PROBE_FAIL(ops, "update");
+        AARCH64_SHOOTDOWN_PROBE_FAIL(ops, "update");
     ops->tlb_shootdown();
-    aarch64_m3_probe_broadcast_read(ops, M3_PROBE_SCRATCH_VA,
-                                    M3_PROBE_PATTERN_B, /*seq=*/100,
+    aarch64_shootdown_probe_broadcast_read(ops, AARCH64_SHOOTDOWN_PROBE_SCRATCH_VA,
+                                    AARCH64_SHOOTDOWN_PROBE_PATTERN_B, /*seq=*/100,
                                     "ap-read-B");
 
     /* Step 7: clean up. Unmap SCRATCH_VA, free both data pages, and
      * assert the L2 slot is empty again. Intermediate table pages
      * are intentionally not reclaimed (F1 follow-up scope). */
-    if (ops->unmap_4k(pgdir, M3_PROBE_SCRATCH_VA) != 0)
-        AARCH64_M3_PROBE_FAIL(ops, "unmap");
+    if (ops->unmap_4k(pgdir, AARCH64_SHOOTDOWN_PROBE_SCRATCH_VA) != 0)
+        AARCH64_SHOOTDOWN_PROBE_FAIL(ops, "unmap");
     ops->free_4k_page(p1);
     ops->free_4k_page(p2);
     {
         uint64_t phys_q = 0;
         uint32_t vm_q = 0;
-        int rc = ops->query_4k(pgdir, M3_PROBE_SCRATCH_VA,
+        int rc = ops->query_4k(pgdir, AARCH64_SHOOTDOWN_PROBE_SCRATCH_VA,
                                &phys_q, &vm_q);
         if (rc != -ENOENT)
-            AARCH64_M3_PROBE_FAIL(ops, "scratch-still-mapped");
+            AARCH64_SHOOTDOWN_PROBE_FAIL(ops, "scratch-still-mapped");
     }
 
     /* Success. The body returns; the production wrapper keeps
      * main.c in its for(;;) arch_cpu_halt() loop. The OK marker is
      * the harness-grep'd line. */
-    AARCH64_M3_PROBE_CPUTS(ops, "M3-SHOOTDOWN-PROBE: OK\n");
+    AARCH64_SHOOTDOWN_PROBE_CPUTS(ops, "SHOOTDOWN-PROBE: OK\n");
 }
 
 /* Production ops binding accessor. Defined in
- * kernel/arch/aarch64/boot/m3_probe.c. */
-const struct aarch64_m3_probe_ops *aarch64_m3_probe_default_ops(void);
+ * kernel/arch/aarch64/boot/shootdown_probe.c. */
+const struct aarch64_shootdown_probe_ops *aarch64_shootdown_probe_default_ops(void);
 
 /* Production entry — main.c calls this once after smp_boot_aps
  * returns and the BSP has published its own ipi_ready (Task 11
  * ordering). Gating on dtb_cpu_count() >= 2 is the caller's job;
  * the body itself still owns the FAIL paths. */
-void aarch64_m3_shootdown_probe(void);
+void aarch64_shootdown_probe(void);
 
-#endif /* OS01_AARCH64_M3_PROBE_H */
+#endif /* OS01_AARCH64_SHOOTDOWN_PROBE_H */

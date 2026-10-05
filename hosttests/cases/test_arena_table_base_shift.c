@@ -13,10 +13,10 @@
  *      the builder only depends on the base/end fields and stays
  *      correct across the base shift (zero-change verification).
  *
- * Links the REAL early_arena.c (aarch64_m1_plan) and the REAL
+ * Links the REAL early_arena.c (aarch64_early_arena_plan) and the REAL
  * runtime_tree.c (aarch64_runtime_tree_build) against this host TU.
  */
-#include "m1_test_runner.h"
+#include "page_table_test_runner.h"
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -78,18 +78,18 @@ static void build_single(uint64_t base, uint64_t end,
     out[0].type       = MEMORY_TYPE_RAM;
 }
 
-static int plan_32m(struct aarch64_m1_arena *out)
+static int plan_32m(struct aarch64_early_arena *out)
 {
     struct MEMORY_RANGE ram[1];
     build_single(T_ARENA_BASE, T_ARENA_BASE + T_ARENA_SPAN, ram);
-    return aarch64_m1_plan(ram, 1, out);
+    return aarch64_early_arena_plan(ram, 1, out);
 }
 
 /* ── Step 1: table_base_pa shifted past the slab pages ──────── */
 
 TEST_FUNC(test_shift_table_base_equals_slab_page_end)
 {
-    struct aarch64_m1_arena a;
+    struct aarch64_early_arena a;
     int rc = plan_32m(&a);
     assert_eq(0, rc);
     /* The pool starts where the 8 reserved 2 MiB slab pages end —
@@ -103,7 +103,7 @@ TEST_FUNC(test_shift_table_base_equals_slab_page_end)
 
 TEST_FUNC(test_shift_table_end_inside_arena)
 {
-    struct aarch64_m1_arena a;
+    struct aarch64_early_arena a;
     int rc = plan_32m(&a);
     assert_eq(0, rc);
     assert_true(a.table_end_pa > a.table_base_pa);
@@ -154,7 +154,7 @@ static uint64_t *shift_resolve(void *ctx, uint64_t pa)
 
 TEST_FUNC(test_shift_builder_consumes_table_window)
 {
-    struct aarch64_m1_arena a;
+    struct aarch64_early_arena a;
     struct MEMORY_RANGE ram[1];
     struct aarch64_runtime_tree tree;
     struct aarch64_tree_ops ops;
@@ -192,7 +192,7 @@ TEST_FUNC(test_shift_builder_consumes_table_window)
 
 TEST_FUNC(test_shift_builder_exhausts_at_table_end)
 {
-    struct aarch64_m1_arena a;
+    struct aarch64_early_arena a;
     struct MEMORY_RANGE ram[1];
     struct aarch64_runtime_tree tree;
     struct aarch64_tree_ops ops;
@@ -227,6 +227,6 @@ TEST_LIST_END
 
 int main(void)
 {
-    int failed = M1_RUN_ALL_TESTS();
+    int failed = PAGE_TABLE_RUN_ALL_TESTS();
     return failed;
 }

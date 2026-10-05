@@ -1,16 +1,16 @@
-/* kernel/arch/aarch64/boot/m3_probe.c — M3.5 Task 25 shootdown probe
+/* kernel/arch/aarch64/boot/shootdown_probe.c — M3.5 Task 25 shootdown probe
  * (spec §7.3) production wrapper.
  *
- * The 7-step probe BODY lives in m3_probe.h as `static inline` —
+ * The 7-step probe BODY lives in shootdown_probe.h as `static inline` —
  * defined once and shared between this production .c and the
  * hosttest TU. This file's job is narrow:
  *
  *   1. Define the real ops struct (g_real_ops) that binds every
  *      ops member to a real kernel symbol (arch_vmm_*, tlb_shootdown,
  *      ap_work_*, kputs, arch_cpu_halt).
- *   2. Expose aarch64_m3_probe_default_ops() returning a pointer
+ *   2. Expose aarch64_shootdown_probe_default_ops() returning a pointer
  *      to that struct.
- *   3. Expose aarch64_m3_shootdown_probe() — the production entry
+ *   3. Expose aarch64_shootdown_probe() — the production entry
  *      main.c calls after smp_boot_aps + BSP ipi_ready publish.
  *
  * Why a thin .c file: the body depends only on the ops surface
@@ -32,7 +32,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#include <arch/aarch64/boot/m3_probe.h>
+#include <arch/aarch64/boot/shootdown_probe.h>
 #include <arch/aarch64/boot_log.h>      /* kputs */
 #include <arch/aarch64/dtb.h>           /* dtb_cpu_count */
 #include <arch/aarch64/vmm_gate.h>      /* ipi_ready_count_get */
@@ -117,7 +117,7 @@ static void prod_halt(void)
 }
 
 /* The single, static, read-only production ops instance. */
-static const struct aarch64_m3_probe_ops g_real_ops = {
+static const struct aarch64_shootdown_probe_ops g_real_ops = {
     .dtb_cpu_count       = dtb_cpu_count,
     .ipi_ready_count_get = ipi_ready_count_get,
     .cycle_counter       = arch_cycle_counter,
@@ -142,7 +142,7 @@ static const struct aarch64_m3_probe_ops g_real_ops = {
     .halt                = prod_halt,
 };
 
-const struct aarch64_m3_probe_ops *aarch64_m3_probe_default_ops(void)
+const struct aarch64_shootdown_probe_ops *aarch64_shootdown_probe_default_ops(void)
 {
     return &g_real_ops;
 }
@@ -151,7 +151,7 @@ const struct aarch64_m3_probe_ops *aarch64_m3_probe_default_ops(void)
  * returns and the BSP has published its own ipi_ready (Task 11
  * ordering). Gating on dtb_cpu_count() >= 2 is the caller's job;
  * the body itself still owns the FAIL paths. */
-void aarch64_m3_shootdown_probe(void)
+void aarch64_shootdown_probe(void)
 {
-    aarch64_m3_shootdown_probe_body(aarch64_m3_probe_default_ops());
+    aarch64_shootdown_probe_body(aarch64_shootdown_probe_default_ops());
 }

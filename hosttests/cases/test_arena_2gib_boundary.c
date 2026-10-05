@@ -33,7 +33,7 @@
  * accepted (no FATAL). After Task 3 lands, the planner refuses with
  * "FATAL: arena exceeds 2 GiB" and PMMngr.start_brk stays intact.
  */
-#include "m1_test_runner.h"
+#include "page_table_test_runner.h"
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -48,7 +48,7 @@
 #include <arch/aarch64/early_arena.h>
 #include <arch/mmu.h>
 
-/* Production early_arena.c calls log_err — host stub mirrors test_m1_arena.c
+/* Production early_arena.c calls log_err — host stub mirrors test_early_arena.c
  * but also CAPTURES the formatted output so tests can assert the mandated
  * diagnostic text (kernel vsnprintf is linked into the hosttest build). */
 int g_log_level = 3;
@@ -127,8 +127,8 @@ TEST_FUNC(test_slab_page_end_past_2gib_fails)
         { .phys_start = 0x7F000000ULL, .phys_end = 0x80200000ULL,
           .type = MEMORY_TYPE_RAM },
     };
-    struct aarch64_m1_arena out;
-    int rc = aarch64_m1_plan(ram, 1, &out);
+    struct aarch64_early_arena out;
+    int rc = aarch64_early_arena_plan(ram, 1, &out);
     /* The planner must refuse — the candidate scan can't find any
      * range whose intersection holds the full arena chain. */
     assert_true(rc < 0);
@@ -151,7 +151,7 @@ TEST_FUNC(test_prepare_at_2gib_keeps_start_brk_canary)
         { .phys_start = 0x7F000000ULL, .phys_end = 0x80200000ULL,
           .type = MEMORY_TYPE_RAM },
     };
-    int rc = aarch64_m1_prepare(ram, 1);
+    int rc = aarch64_early_arena_prepare(ram, 1);
     assert_true(rc < 0);
     /* The mandated diagnostic text must be present even though the
      * refusal happens in the candidate scan (need ~20 MiB << window). */
@@ -159,7 +159,7 @@ TEST_FUNC(test_prepare_at_2gib_keeps_start_brk_canary)
     /* The canary survives a refused prepare. */
     assert_eq(canary, PMMngr.start_brk);
     /* The arena was never published (getter returns NULL). */
-    assert_null((void *)aarch64_m1_arena_get());
+    assert_null((void *)aarch64_early_arena_get());
 }
 
 TEST_FUNC(test_arena_just_under_2gib_succeeds)
@@ -171,8 +171,8 @@ TEST_FUNC(test_arena_just_under_2gib_succeeds)
         { .phys_start = 0x40200000ULL, .phys_end = 0x7C000000ULL,
           .type = MEMORY_TYPE_RAM },
     };
-    struct aarch64_m1_arena got;
-    int rc = aarch64_m1_plan(ram, 1, &got);
+    struct aarch64_early_arena got;
+    int rc = aarch64_early_arena_plan(ram, 1, &got);
     assert_eq(0, rc);
     assert_true(got.slab_page_end_pa <= 0x80000000ULL);
     assert_true(got.end_pa <= 0x80000000ULL);
@@ -186,6 +186,6 @@ TEST_LIST_END
 
 int main(void)
 {
-    int failed = M1_RUN_ALL_TESTS();
+    int failed = PAGE_TABLE_RUN_ALL_TESTS();
     return failed;
 }

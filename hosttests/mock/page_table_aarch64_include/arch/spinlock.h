@@ -1,7 +1,7 @@
-/* hosttests/mock/m1_a64_include/arch/spinlock.h
+/* hosttests/mock/page_table_aarch64_include/arch/spinlock.h
  *
  * Shadow <arch/spinlock.h> for the aarch64 host-test suite
- * (m1_a64_include).  The production aarch64 header
+ * (page_table_aarch64_include).  The production aarch64 header
  * (kernel/include/arch/aarch64/spinlock.h) carries inline asm
  * (LDAXR / STLXR) that won't compile on the x86 host; the facade
  * (kernel/include/arch/spinlock.h) routes via <arch/x86_64/spinlock.h>

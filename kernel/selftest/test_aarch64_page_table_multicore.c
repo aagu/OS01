@@ -1,7 +1,7 @@
-// kernel/selftest/test_m3_multicore.c —
+// kernel/selftest/test_aarch64_page_table_multicore.c —
 // aarch64 M3.6 multi-core selftest (Task 26, spec §8.2 items ①②⑤⑥).
 //
-// Unlike test_m3_selftest.c (which runs PRE-SMP on the BSP), this file
+// Unlike test_aarch64_page_table_selftest.c (which runs PRE-SMP on the BSP), this file
 // runs POST-SMP: it is invoked from boot/main.c after smp_boot_aps(),
 // the BSP ipi_ready publish and the M3.5 production shootdown probe.
 // All sections run on REAL cores — APs execute work items through the
@@ -43,7 +43,7 @@
 //     mappings must be queryable with the right PA afterwards.
 //
 // Scratch-VA layout: same PGD[511] → PUD[0] window as
-// test_m3_selftest.c (BASE = 0xffff_ffff_0000_0000). The m3 selftest
+// test_aarch64_page_table_selftest.c (BASE = 0xffff_ffff_0000_0000). The m3 selftest
 // frees its roots before SMP starts, so there is no collision; and
 // every root here is a fresh private allocation anyway (never
 // installed into TTBR1 — the hardware never walks it).
@@ -69,7 +69,7 @@
 //
 // x86_64 / non-selftest builds: whole body behind
 // #if defined(__aarch64__) && OS01_SELFTEST, mirroring
-// test_m3_selftest.c.
+// test_aarch64_page_table_selftest.c.
 
 #include <errno.h>
 #include <stdbool.h>
@@ -504,7 +504,7 @@ static int section_shared_l1(uint64_t *root, uint64_t data_ap,
 }
 
 /* ── Entry point — called from boot/main.c AFTER the m3 probe ───── */
-int test_m3_multicore_run(void)
+int test_aarch64_page_table_multicore_run(void)
 {
     uint32_t cpus = dtb_cpu_count();
     if (cpus < 2) {
@@ -561,7 +561,7 @@ int test_m3_multicore_run(void)
 
 #else /* !__aarch64__ || !OS01_SELFTEST */
 
-int test_m3_multicore_run(void)
+int test_aarch64_page_table_multicore_run(void)
 {
     /* Not an aarch64 selftest build: no-op (the x86 kernel never
      * references this; the symbol only exists defensively). */

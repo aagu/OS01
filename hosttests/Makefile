@@ -111,19 +111,19 @@ TEST_BINS := \
     $(TEST_BLD)/test_user_protected_ranges.elf \
     $(TEST_BLD)/test_fork_user_map.elf \
     $(TEST_BLD)/test_user_write_cow.elf \
-    $(TEST_BLD)/test_m1_runner.elf \
-    $(TEST_BLD)/test_m1_layout.elf \
-    $(TEST_BLD)/test_m1_reservation.elf \
-    $(TEST_BLD)/test_m1_arena.elf $(TEST_BLD)/test_m1_arena_exhaust.elf \
+    $(TEST_BLD)/test_page_table_runner.elf \
+    $(TEST_BLD)/test_page_table_layout.elf \
+    $(TEST_BLD)/test_page_table_reservation.elf \
+    $(TEST_BLD)/test_early_arena.elf $(TEST_BLD)/test_early_arena_exhaust.elf \
     $(TEST_BLD)/test_arena_layout_chain.elf \
     $(TEST_BLD)/test_arena_2gib_boundary.elf \
     $(TEST_BLD)/test_arena_candidate_slab_bytes.elf \
     $(TEST_BLD)/test_arena_table_base_shift.elf \
     $(TEST_BLD)/test_aarch64_color_printk_abi.elf \
-    $(TEST_BLD)/test_m1_tree.elf \
-    $(TEST_BLD)/test_m1_contract.elf $(TEST_BLD)/test_m1_vmm.elf \
-    $(TEST_BLD)/test_m1_install.elf $(TEST_BLD)/test_m1_cleanup.elf \
-    $(TEST_BLD)/test_m1_publish.elf \
+    $(TEST_BLD)/test_page_table_tree.elf \
+    $(TEST_BLD)/test_page_table_contract.elf $(TEST_BLD)/test_page_table_vmm.elf \
+    $(TEST_BLD)/test_page_table_install.elf $(TEST_BLD)/test_page_table_cleanup.elf \
+    $(TEST_BLD)/test_page_table_publish.elf \
     $(TEST_BLD)/test_syscall_dispatch.elf \
     $(TEST_BLD)/test_compat_linux.elf \
     $(TEST_BLD)/test_slab_idempotent_reservation.elf \
@@ -775,7 +775,7 @@ $(TEST_BLD)/test_aarch64_sync_fault.elf: $(TEST_BLD)/test_aarch64_sync_fault.o
 # Links the REAL kernel/memory/pmm_boot.c against the host TU. The
 # production file has no kernel deps beyond <memory/pmm.h> (for the
 # Page / Zone struct sizes) and <memory/pmm_boot.h>; both are in
-# KERNEL_INC. test_m1_layout.c itself only uses <errno.h> from libc,
+# KERNEL_INC. test_page_table_layout.c itself only uses <errno.h> from libc,
 # <test_framework.h> from TEST_INC, and the production headers above.
 PMM_BOOT_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) -I$(TEST_INC) \
                         -include $(TEST_MOCK)/test_platform.h
@@ -787,21 +787,21 @@ $(TEST_BLD)/pmm_boot_production.o: $(TESTS_DIR)/kernel/memory/pmm_boot.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(PMM_BOOT_HOST_CFLAGS) -c $< -o $@
 
-$(TEST_BLD)/test_m1_layout.o: $(TEST_CASES)/test_m1_layout.c \
+$(TEST_BLD)/test_page_table_layout.o: $(TEST_CASES)/test_page_table_layout.c \
 		$(TESTS_DIR)/kernel/include/memory/pmm_boot.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(PMM_BOOT_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
-$(TEST_BLD)/test_m1_layout.elf: $(TEST_BLD)/test_m1_layout.o \
+$(TEST_BLD)/test_page_table_layout.elf: $(TEST_BLD)/test_page_table_layout.o \
 		$(TEST_BLD)/pmm_boot_production.o
 	$(HOST_CC) -o $@ $^
 
-# `make test-m1-host CASE=m1-layout` (root run.mk) reaches this rule
+# `make test-page-table-host CASE=page-table-layout` (root run.mk) reaches this rule
 # via the focused dispatch in run.mk.
-.PHONY: test-m1-layout
-test-m1-layout: $(TEST_BLD)/test_m1_layout.elf $(TEST_BLD)/test_m1_runner.elf
-	$(TEST_BLD)/test_m1_layout.elf
-	$(TEST_BLD)/test_m1_runner.elf
+.PHONY: test-page-table-layout
+test-page-table-layout: $(TEST_BLD)/test_page_table_layout.elf $(TEST_BLD)/test_page_table_runner.elf
+	$(TEST_BLD)/test_page_table_layout.elf
+	$(TEST_BLD)/test_page_table_runner.elf
 
 # aarch64 M1 plan Task 2: range-based boot reservations +
 # single-frame exact claim. Links the REAL pmm.c (PMM_SHADOW_INC so
@@ -810,12 +810,12 @@ test-m1-layout: $(TEST_BLD)/test_m1_layout.elf $(TEST_BLD)/test_m1_runner.elf
 # pmm_boot.c (layout calculator). The test TU itself does not pull
 # in the spinlock header, so it only needs KERNEL_INC + TEST_INC.
 #
-# `make test-m1-host CASE=m1-reservation` (root run.mk) reaches this
+# `make test-page-table-host CASE=page-table-reservation` (root run.mk) reaches this
 # rule via the focused dispatch in run.mk.
 PMM_RESERVATION_TEST_CFLAGS := $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) \
                                -I$(TEST_INC) $(FRAMEWORK_INC) $(LIBC_INC)
 
-$(TEST_BLD)/test_m1_reservation.o: $(TEST_CASES)/test_m1_reservation.c \
+$(TEST_BLD)/test_page_table_reservation.o: $(TEST_CASES)/test_page_table_reservation.c \
 		$(TESTS_DIR)/kernel/include/memory/pmm.h \
 		$(TESTS_DIR)/kernel/include/memory/pmm_arch.h \
 		$(TESTS_DIR)/kernel/include/memory/pmm_boot.h \
@@ -823,18 +823,18 @@ $(TEST_BLD)/test_m1_reservation.o: $(TEST_CASES)/test_m1_reservation.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(PMM_RESERVATION_TEST_CFLAGS) -c $< -o $@
 
-$(TEST_BLD)/test_m1_reservation.elf: $(TEST_BLD)/test_m1_reservation.o \
+$(TEST_BLD)/test_page_table_reservation.elf: $(TEST_BLD)/test_page_table_reservation.o \
 		$(TEST_BLD)/pmm_production.o \
 		$(TEST_BLD)/pmm_arch_default.o \
 		$(TEST_BLD)/pmm_boot_production.o
 	$(HOST_CC) -o $@ $^
 
-.PHONY: test-m1-reservation
-test-m1-reservation: $(TEST_BLD)/test_m1_reservation.elf
+.PHONY: test-page-table-reservation
+test-page-table-reservation: $(TEST_BLD)/test_page_table_reservation.elf
 	$<
 
 # aarch64 M1 plan Task 3: early arena preflight planner
-# (`aarch64_m1_plan` / `aarch64_m1_prepare`). Links the REAL
+# (`aarch64_early_arena_plan` / `aarch64_early_arena_prepare`). Links the REAL
 # kernel/arch/aarch64/memory/early_arena.c against the production
 # pmm.c (PMM_SHADOW_INC), the weak-default pmm_arch.c (kept for
 # link), and the production pmm_boot.c (calculator). The test TU
@@ -849,7 +849,7 @@ test-m1-reservation: $(TEST_BLD)/test_m1_reservation.elf
 # and for the early_arena production object (the test TU touches
 # PMMngr.start_brk to assert the canary).
 #
-# `make test-m1-host CASE=m1-arena` (root run.mk) reaches this rule
+# `make test-page-table-host CASE=early-arena` (root run.mk) reaches this rule
 # via the focused dispatch in run.mk.
 EARLY_ARENA_HOST_CFLAGS := $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) \
                            -I$(TEST_INC) $(LIBC_INC)
@@ -862,7 +862,7 @@ $(TEST_BLD)/early_arena_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/ea
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) -c $< -o $@
 
-$(TEST_BLD)/test_m1_arena.o: $(TEST_CASES)/test_m1_arena.c \
+$(TEST_BLD)/test_early_arena.o: $(TEST_CASES)/test_early_arena.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/early_arena.h \
 		$(TESTS_DIR)/kernel/include/memory/pmm.h \
 		$(TESTS_DIR)/kernel/include/memory/pmm_boot.h \
@@ -870,21 +870,21 @@ $(TEST_BLD)/test_m1_arena.o: $(TEST_CASES)/test_m1_arena.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
-$(TEST_BLD)/test_m1_arena.elf: $(TEST_BLD)/test_m1_arena.o \
+$(TEST_BLD)/test_early_arena.elf: $(TEST_BLD)/test_early_arena.o \
 		$(TEST_BLD)/early_arena_production.o \
 		$(TEST_BLD)/pmm_production.o \
 		$(TEST_BLD)/pmm_arch_default.o \
 		$(TEST_BLD)/pmm_boot_production.o
 	$(HOST_CC) -o $@ $^
 
-.PHONY: test-m1-arena
-test-m1-arena: $(TEST_BLD)/test_m1_arena.elf $(TEST_BLD)/test_m1_arena_exhaust.elf \
+.PHONY: test-early-arena
+test-early-arena: $(TEST_BLD)/test_early_arena.elf $(TEST_BLD)/test_early_arena_exhaust.elf \
     $(TEST_BLD)/test_arena_layout_chain.elf \
     $(TEST_BLD)/test_arena_2gib_boundary.elf \
     $(TEST_BLD)/test_arena_candidate_slab_bytes.elf \
     $(TEST_BLD)/test_arena_table_base_shift.elf
-	$(TEST_BLD)/test_m1_arena.elf
-	$(TEST_BLD)/test_m1_arena_exhaust.elf
+	$(TEST_BLD)/test_early_arena.elf
+	$(TEST_BLD)/test_early_arena_exhaust.elf
 	$(TEST_BLD)/test_arena_layout_chain.elf
 	$(TEST_BLD)/test_arena_2gib_boundary.elf
 	$(TEST_BLD)/test_arena_candidate_slab_bytes.elf
@@ -930,9 +930,9 @@ $(TEST_BLD)/test_aarch64_color_printk_abi.elf: \
 # aarch64 M2/M3 plan Task 3: arena layout-chain / 2 GiB boundary /
 # candidate-scan-includes-slab-bytes. Each new TU reuses the production
 # early_arena.o via the same EARLY_ARENA_HOST_CFLAGS / link line as the
-# existing test_m1_arena.elf. The stub surface (g_log_level,
+# existing test_early_arena.elf. The stub surface (g_log_level,
 # _log_err_impl, color_printk, slab_init) lives in each TU — keeps the
-# rules self-contained and matches test_m1_arena.c / _exhaust.c.
+# rules self-contained and matches test_early_arena.c / _exhaust.c.
 $(TEST_BLD)/test_arena_layout_chain.o: $(TEST_CASES)/test_arena_layout_chain.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/early_arena.h \
 		$(TESTS_DIR)/kernel/include/memory/pmm.h \
@@ -982,7 +982,7 @@ $(TEST_BLD)/test_arena_candidate_slab_bytes.elf: $(TEST_BLD)/test_arena_candidat
 	$(HOST_CC) -o $@ $^
 
 # aarch64 M2/M3 plan Task 4: table_base_pa shifted past the slab pages.
-# Links the REAL early_arena.c (aarch64_m1_plan) AND the REAL
+# Links the REAL early_arena.c (aarch64_early_arena_plan) AND the REAL
 # runtime_tree.c (aarch64_runtime_tree_build) — the builder half drives
 # aarch64_runtime_tree_build through injected fake pool ops whose PA
 # cursor starts at arena.table_base_pa, proving the builder consumes
@@ -1016,7 +1016,7 @@ $(TEST_BLD)/test_arena_table_base_shift.elf: $(TEST_BLD)/test_arena_table_base_s
 # own fake-pool ops to provide monotonic-PA, host-alloc-backed page
 # resolution.
 #
-# `make test-m1-host CASE=m1-tree` (root run.mk) reaches this rule
+# `make test-page-table-host CASE=page-table-tree` (root run.mk) reaches this rule
 # via the focused dispatch in run.mk.
 RUNTIME_TREE_HOST_CFLAGS := $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) \
                            -I$(TEST_INC)
@@ -1030,19 +1030,19 @@ $(TEST_BLD)/runtime_tree_production.o: \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(RUNTIME_TREE_HOST_CFLAGS) -Wframe-larger-than=1024 -Werror=frame-larger-than -c $< -o $@
 
-$(TEST_BLD)/test_m1_tree.o: $(TEST_CASES)/test_m1_tree.c \
+$(TEST_BLD)/test_page_table_tree.o: $(TEST_CASES)/test_page_table_tree.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/runtime_tree.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/early_arena.h \
 		$(TESTS_DIR)/kernel/include/memory/memory_map.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(RUNTIME_TREE_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
-$(TEST_BLD)/test_m1_tree.elf: $(TEST_BLD)/test_m1_tree.o \
+$(TEST_BLD)/test_page_table_tree.elf: $(TEST_BLD)/test_page_table_tree.o \
 		$(TEST_BLD)/runtime_tree_production.o
 	$(HOST_CC) -o $@ $^
 
-.PHONY: test-m1-tree
-test-m1-tree: $(TEST_BLD)/test_m1_tree.elf
+.PHONY: test-page-table-tree
+test-page-table-tree: $(TEST_BLD)/test_page_table_tree.elf
 	$<
 
 # aarch64 M1 plan Task 5: common boot direct-map contract
@@ -1056,9 +1056,9 @@ test-m1-tree: $(TEST_BLD)/test_m1_tree.elf
 # test TU adds FRAMEWORK_INC + LIBC_INC for <test_framework.h> and
 # <errno.h>.
 #
-# `make test-m1-host CASE=m1-contract-x86` (root run.mk) reaches
+# `make test-page-table-host CASE=page-table-contract-x86` (root run.mk) reaches
 # this rule via the focused dispatch in run.mk.
-M1_CONTRACT_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST -I$(TEST_MOCK)/m1_include $(KERNEL_INC) -I$(TEST_INC)
+PT_CONTRACT_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST -I$(TEST_MOCK)/page_table_include $(KERNEL_INC) -I$(TEST_INC)
 
 $(TEST_BLD)/boot_direct_map_production.o: \
 		$(TESTS_DIR)/kernel/arch/x86_64/memory/boot_direct_map.c \
@@ -1068,27 +1068,27 @@ $(TEST_BLD)/boot_direct_map_production.o: \
 		$(TESTS_DIR)/kernel/include/memory/pmm.h \
 		$(TESTS_DIR)/kernel/include/memory/vmm.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(M1_CONTRACT_HOST_CFLAGS) -c $< -o $@
+	$(HOST_CC) $(PT_CONTRACT_HOST_CFLAGS) -c $< -o $@
 
-$(TEST_BLD)/test_m1_contract.o: $(TEST_CASES)/test_m1_contract.c \
+$(TEST_BLD)/test_page_table_contract.o: $(TEST_CASES)/test_page_table_contract.c \
 		$(TESTS_DIR)/kernel/include/arch/boot_memory.h \
 		$(TESTS_DIR)/kernel/include/memory/memory.h \
 		$(TESTS_DIR)/kernel/include/memory/memory_map.h \
 		$(TESTS_DIR)/kernel/include/memory/pmm.h \
 		$(TESTS_DIR)/kernel/include/memory/vmm.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(M1_CONTRACT_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+	$(HOST_CC) $(PT_CONTRACT_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
-$(TEST_BLD)/test_m1_contract.elf: $(TEST_BLD)/test_m1_contract.o \
+$(TEST_BLD)/test_page_table_contract.elf: $(TEST_BLD)/test_page_table_contract.o \
 		$(TEST_BLD)/boot_direct_map_production.o
 	$(HOST_CC) -o $@ $^
 
-.PHONY: test-m1-contract-x86
-test-m1-contract-x86: $(TEST_BLD)/test_m1_contract.elf $(TEST_BLD)/test_m1_vmm.elf \
-    $(TEST_BLD)/test_m1_install.elf $(TEST_BLD)/test_m1_cleanup.elf \
-    $(TEST_BLD)/test_m1_publish.elf
-	$(TEST_BLD)/test_m1_contract.elf
-	$(TEST_BLD)/test_m1_vmm.elf
+.PHONY: test-page-table-contract-x86
+test-page-table-contract-x86: $(TEST_BLD)/test_page_table_contract.elf $(TEST_BLD)/test_page_table_vmm.elf \
+    $(TEST_BLD)/test_page_table_install.elf $(TEST_BLD)/test_page_table_cleanup.elf \
+    $(TEST_BLD)/test_page_table_publish.elf
+	$(TEST_BLD)/test_page_table_contract.elf
+	$(TEST_BLD)/test_page_table_vmm.elf
 
 # Sync primitive test — compiles the real rwlock/seqlock implementations.
 $(TEST_BLD)/test_sync_primitives.o: $(TEST_CASES)/test_sync_primitives.c
@@ -1436,14 +1436,14 @@ $(TEST_BLD)/x86_vmm_backend_production.o: $(TESTS_DIR)/kernel/memory/vmm.c \
 		$(TESTS_DIR)/kernel/include/memory/vmm.h \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/pte.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(M1_CONTRACT_HOST_CFLAGS) $(LIBC_INC) \
+	$(HOST_CC) $(PT_CONTRACT_HOST_CFLAGS) $(LIBC_INC) \
 		-ffunction-sections -fdata-sections -c $< -o $@
 
 $(TEST_BLD)/test_x86_vmm_backend.o: $(TEST_CASES)/test_x86_vmm_backend.c \
 		$(TESTS_DIR)/kernel/include/memory/vmm.h \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/pte.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(M1_CONTRACT_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
+	$(HOST_CC) $(PT_CONTRACT_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
 		-c $< -o $@
 
 $(TEST_BLD)/test_x86_vmm_backend.elf: \
@@ -1469,7 +1469,7 @@ $(TEST_BLD)/test_x86_vmm_backend.elf: \
 # vmm_gate_check() is stubbed in the test TU (page_table.c only
 # references it as a symbol; the production vmm_gate.c is not
 # linked here so we don't need percpu_data[] or dtb_cpu_count()).
-AARCH64_PT_SW_HOST_CFLAGS := $(HOST_CFLAGS) -I$(TEST_MOCK)/m1_a64_include \
+AARCH64_PT_SW_HOST_CFLAGS := $(HOST_CFLAGS) -I$(TEST_MOCK)/page_table_aarch64_include \
                               $(KERNEL_INC) $(LIBC_INC)
 
 $(TEST_BLD)/aarch64_pt_production.o: \
@@ -1738,7 +1738,7 @@ test_smp_starting_gate: $(TEST_BLD)/test_smp_starting_gate.elf
 # documented paths: valid → rc 0 + kernel_map pinned; pa=0 (raw or
 # post-mask), unaligned, at-1TiB, above-1TiB → rc -EINVAL + kernel_map
 # untouched. Reuses the AARCH64_PT_SW harness
-# (m1_a64_include/arch/mmu.h,spinlock.h stubs).
+# (page_table_aarch64_include/arch/mmu.h,spinlock.h stubs).
 $(TEST_BLD)/test_aarch64_arch_vmm_init.o: \
 		$(TEST_CASES)/test_aarch64_arch_vmm_init.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
@@ -1760,23 +1760,23 @@ test_aarch64_arch_vmm_init: $(TEST_BLD)/test_aarch64_arch_vmm_init.elf
 
 # M3.5 Task 25: M3-SHOOTDOWN-PROBE 7-step body harness (spec §7.3).
 # The probe body lives as static inline in
-# kernel/arch/aarch64/boot/m3_probe.h — one source of truth shared
-# between the production TU (kernel/arch/aarch64/boot/m3_probe.c,
+# kernel/arch/aarch64/boot/shootdown_probe.h — one source of truth shared
+# between the production TU (kernel/arch/aarch64/boot/shootdown_probe.c,
 # which only provides the ops binding + the public entry point) and
 # this hosttest TU. We do NOT link the production .c (it pulls in
 # arch_vmm_*, percpu_data[], tlb_shootdown, etc. that the host has no
 # surface of). The test compiles the same body via #include <arch/
-# aarch64/boot/m3_probe.h>; we still need arch/mmu.h for the static
+# aarch64/boot/shootdown_probe.h>; we still need arch/mmu.h for the static
 # header's ARCH_PAGE_OFFSET use.
-M3_PROBE_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) \
-                        -I$(TEST_MOCK)/m1_a64_include \
+SHOOTDOWN_PROBE_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) \
+                        -I$(TEST_MOCK)/page_table_aarch64_include \
                         -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\"
 
 $(TEST_BLD)/test_aarch64_scratch_probe_logic.o: \
 		$(TEST_CASES)/test_aarch64_scratch_probe_logic.c \
-		$(TESTS_DIR)/kernel/include/arch/aarch64/boot/m3_probe.h
+		$(TESTS_DIR)/kernel/include/arch/aarch64/boot/shootdown_probe.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(M3_PROBE_HOST_CFLAGS) -I$(TEST_INC) $(LIBC_INC) -c $< -o $@
+	$(HOST_CC) $(SHOOTDOWN_PROBE_HOST_CFLAGS) -I$(TEST_INC) $(LIBC_INC) -c $< -o $@
 
 $(TEST_BLD)/test_aarch64_scratch_probe_logic.elf: \
 		$(TEST_BLD)/test_aarch64_scratch_probe_logic.o
@@ -2164,31 +2164,31 @@ test-gfx-primitives: $(TEST_BLD)/test_gfx_primitives.elf
 clean:
 	rm -rf $(TEST_BLD)
 
-$(TEST_BLD)/m1_vmm_production.o: $(TESTS_DIR)/kernel/memory/vmm.c
+$(TEST_BLD)/page_table_vmm_production.o: $(TESTS_DIR)/kernel/memory/vmm.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(M1_CONTRACT_HOST_CFLAGS) $(LIBC_INC) -ffunction-sections -fdata-sections -c $< -o $@
-$(TEST_BLD)/test_m1_vmm.o: $(TEST_CASES)/test_m1_vmm.c
+	$(HOST_CC) $(PT_CONTRACT_HOST_CFLAGS) $(LIBC_INC) -ffunction-sections -fdata-sections -c $< -o $@
+$(TEST_BLD)/test_page_table_vmm.o: $(TEST_CASES)/test_page_table_vmm.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(M1_CONTRACT_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-$(TEST_BLD)/test_m1_vmm.elf: $(TEST_BLD)/test_m1_vmm.o $(TEST_BLD)/m1_vmm_production.o
+	$(HOST_CC) $(PT_CONTRACT_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+$(TEST_BLD)/test_page_table_vmm.elf: $(TEST_BLD)/test_page_table_vmm.o $(TEST_BLD)/page_table_vmm_production.o
 	$(HOST_CC) -Wl,--gc-sections -Wl,--wrap=calloc -o $@ $^
 
-M1_A64_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST -DOS01_SELFTEST=1 -I$(TEST_MOCK)/m1_a64_include -I$(TEST_MOCK)/m1_include $(KERNEL_INC)
-$(TEST_BLD)/m1_install_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/boot_direct_map.c
+PT_A64_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST -DOS01_SELFTEST=1 -I$(TEST_MOCK)/page_table_aarch64_include -I$(TEST_MOCK)/page_table_include $(KERNEL_INC)
+$(TEST_BLD)/page_table_install_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/boot_direct_map.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(M1_A64_CFLAGS) -c $< -o $@
-$(TEST_BLD)/test_m1_install.o: $(TEST_CASES)/test_m1_install.c
+	$(HOST_CC) $(PT_A64_CFLAGS) -c $< -o $@
+$(TEST_BLD)/test_page_table_install.o: $(TEST_CASES)/test_page_table_install.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(M1_A64_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
-$(TEST_BLD)/test_m1_install.elf: $(TEST_BLD)/test_m1_install.o $(TEST_BLD)/m1_install_production.o $(TEST_BLD)/runtime_tree_production.o $(TEST_BLD)/vmm_gate_production.o $(TEST_BLD)/vmm_gate_test_stubs.o
+	$(HOST_CC) $(PT_A64_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_page_table_install.elf: $(TEST_BLD)/test_page_table_install.o $(TEST_BLD)/page_table_install_production.o $(TEST_BLD)/runtime_tree_production.o $(TEST_BLD)/vmm_gate_production.o $(TEST_BLD)/vmm_gate_test_stubs.o
 	$(HOST_CC) -o $@ $^
-.PHONY: test-m1-install
-test-m1-install: $(TEST_BLD)/test_m1_install.elf
-	$(TEST_BLD)/test_m1_install.elf
-	$(TEST_BLD)/test_m1_cleanup.elf
+.PHONY: test-page-table-install
+test-page-table-install: $(TEST_BLD)/test_page_table_install.elf
+	$(TEST_BLD)/test_page_table_install.elf
+	$(TEST_BLD)/test_page_table_cleanup.elf
 
 # aarch64 M3.4 Task 20: root publish registry split-protocol contract.
-# Reuses the M1_A64_CFLAGS / m1_install_production.o (REAL
+# Reuses the PT_A64_CFLAGS / page_table_install_production.o (REAL
 # boot_direct_map.c) + runtime_tree_production.o + vmm_gate_production.o
 # + vmm_gate_test_stubs.o link line so the runtime tests drive the
 # actual install path and observe the registry state (post-init
@@ -2201,11 +2201,11 @@ test-m1-install: $(TEST_BLD)/test_m1_install.elf
 $(TEST_BLD)/test_aarch64_pt_root_publish.o: $(TEST_CASES)/test_aarch64_pt_root_publish.c \
 		$(TESTS_DIR)/kernel/arch/aarch64/memory/boot_direct_map.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(M1_A64_CFLAGS) -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+	$(HOST_CC) $(PT_A64_CFLAGS) -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
 		$(FRAMEWORK_INC) -c $< -o $@
 
 $(TEST_BLD)/test_aarch64_pt_root_publish.elf: $(TEST_BLD)/test_aarch64_pt_root_publish.o \
-		$(TEST_BLD)/m1_install_production.o \
+		$(TEST_BLD)/page_table_install_production.o \
 		$(TEST_BLD)/runtime_tree_production.o \
 		$(TEST_BLD)/vmm_gate_production.o \
 		$(TEST_BLD)/vmm_gate_test_stubs.o
@@ -2241,44 +2241,44 @@ $(TEST_BLD)/test_aarch64_pt_split.elf: $(TEST_BLD)/test_aarch64_pt_split.o \
 test-aarch64-pt-split: $(TEST_BLD)/test_aarch64_pt_split.elf
 	$(TEST_BLD)/test_aarch64_pt_split.elf
 
-$(TEST_BLD)/m1_smoke_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/m1_smoke.c
+$(TEST_BLD)/page_table_smoke_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/page_table_smoke.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(M1_A64_CFLAGS) -c $< -o $@
-$(TEST_BLD)/test_m1_cleanup.o: $(TEST_CASES)/test_m1_cleanup.c
+	$(HOST_CC) $(PT_A64_CFLAGS) -c $< -o $@
+$(TEST_BLD)/test_page_table_cleanup.o: $(TEST_CASES)/test_page_table_cleanup.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(M1_A64_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
-$(TEST_BLD)/test_m1_cleanup.elf: $(TEST_BLD)/test_m1_cleanup.o $(TEST_BLD)/m1_smoke_production.o
+	$(HOST_CC) $(PT_A64_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_page_table_cleanup.elf: $(TEST_BLD)/test_page_table_cleanup.o $(TEST_BLD)/page_table_smoke_production.o
 	$(HOST_CC) -no-pie -o $@ $^
-test-m1-install: $(TEST_BLD)/test_m1_cleanup.elf
+test-page-table-install: $(TEST_BLD)/test_page_table_cleanup.elf
 
-$(TEST_BLD)/m1_selftest_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/m1_selftest.c
+$(TEST_BLD)/page_table_selftest_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/page_table_selftest.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) -DOS01_HOST_TEST -DOS01_SELFTEST=1 $(PMM_SHADOW_INC) -I$(TEST_MOCK)/m1_a64_include -I$(TEST_MOCK)/m1_include $(KERNEL_INC) -ffunction-sections -fdata-sections -c $< -o $@
-$(TEST_BLD)/test_m1_publish.o: $(TEST_CASES)/test_m1_publish.c
+	$(HOST_CC) $(HOST_CFLAGS) -DOS01_HOST_TEST -DOS01_SELFTEST=1 $(PMM_SHADOW_INC) -I$(TEST_MOCK)/page_table_aarch64_include -I$(TEST_MOCK)/page_table_include $(KERNEL_INC) -ffunction-sections -fdata-sections -c $< -o $@
+$(TEST_BLD)/test_page_table_publish.o: $(TEST_CASES)/test_page_table_publish.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(M1_A64_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
-$(TEST_BLD)/test_m1_publish.elf: $(TEST_BLD)/test_m1_publish.o $(TEST_BLD)/m1_selftest_production.o
+	$(HOST_CC) $(PT_A64_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_page_table_publish.elf: $(TEST_BLD)/test_page_table_publish.o $(TEST_BLD)/page_table_selftest_production.o
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
-.PHONY: test-m1-publish
-test-m1-publish: $(TEST_BLD)/test_m1_publish.elf
+.PHONY: test-page-table-publish
+test-page-table-publish: $(TEST_BLD)/test_page_table_publish.elf
 	$<
 
 # Every M1 test uses the failure-preserving runner.
-$(patsubst %.elf,%.o,$(filter $(TEST_BLD)/test_m1_%.elf,$(TEST_BINS))): $(TEST_INC)/m1_test_runner.h
+$(patsubst %.elf,%.o,$(filter $(TEST_BLD)/test_page_table_%.elf,$(TEST_BINS))): $(TEST_INC)/page_table_test_runner.h
 
-$(TEST_BLD)/test_m1_runner.elf: $(TEST_CASES)/test_m1_runner.c $(TEST_INC)/m1_test_runner.h $(TEST_INC)/test_framework.h
+$(TEST_BLD)/test_page_table_runner.elf: $(TEST_CASES)/test_page_table_runner.c $(TEST_INC)/page_table_test_runner.h $(TEST_INC)/test_framework.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $< -o $@
 
 $(TEST_BLD)/early_arena_exhaust_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/early_arena.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) -DAARCH64_M1_ARENA_EXHAUST=1 -c $< -o $@
-$(TEST_BLD)/test_m1_arena_exhaust.o: $(TEST_CASES)/test_m1_arena_exhaust.c \
-		$(TEST_INC)/m1_test_runner.h \
+	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) -DAARCH64_EARLY_ARENA_EXHAUST=1 -c $< -o $@
+$(TEST_BLD)/test_early_arena_exhaust.o: $(TEST_CASES)/test_early_arena_exhaust.c \
+		$(TEST_INC)/page_table_test_runner.h \
 		$(TESTS_DIR)/kernel/include/memory/slab.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-$(TEST_BLD)/test_m1_arena_exhaust.elf: $(TEST_BLD)/test_m1_arena_exhaust.o $(TEST_BLD)/early_arena_exhaust_production.o $(TEST_BLD)/pmm_boot_production.o
+$(TEST_BLD)/test_early_arena_exhaust.elf: $(TEST_BLD)/test_early_arena_exhaust.o $(TEST_BLD)/early_arena_exhaust_production.o $(TEST_BLD)/pmm_boot_production.o
 	$(HOST_CC) -o $@ $^
 
 # aarch64 M2/M3 plan Task 2: slab_init j-loop + 8-page loop

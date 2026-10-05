@@ -4,7 +4,7 @@
 #include <arch/aarch64/boot_direct_map.h>
 #include <arch/aarch64/vmm_gate.h>
 #include <arch/aarch64/early_arena.h>
-#include <arch/aarch64/m1_selftest.h>
+#include <arch/aarch64/page_table_selftest.h>
 #include <memory/memory.h>
 #include <memory/pmm.h>
 #include <memory/pmm_arch.h>
@@ -16,7 +16,7 @@ static size_t ram_count;
 static struct aarch64_runtime_tree tree;
 static struct aarch64_runtime_tree_validate_buf vbuf;
 static uint64_t pool_cursor, pool_end, installed_root;
-static const struct aarch64_m1_arena *arena;
+static const struct aarch64_early_arena *arena;
 
 static int alloc_table(void *ctx, uint64_t *pa, uint64_t **va)
 {
@@ -55,7 +55,7 @@ int arch_boot_direct_map_init(void)
         return -EALREADY;
     state = INITIALIZING;
     int rc = -EINVAL;
-    arena = aarch64_m1_arena_get();
+    arena = aarch64_early_arena_get();
     if (!arena)
         goto fail;
     ram_count = pmm_arch_normalize(NULL, ram);
@@ -81,7 +81,7 @@ int arch_boot_direct_map_init(void)
     if (rc)
         goto fail;
 #if OS01_SELFTEST
-    aarch64_m1_prune_warm();
+    aarch64_page_table_prune_warm();
 #endif
     /* M3 (Task 7): publish the M1 root BEFORE installing TTBR1 so later
      * shootdown backends' aarch64_pt_root_is_published() never sees the
@@ -92,7 +92,7 @@ int arch_boot_direct_map_init(void)
         rc = -ENOSPC;
         goto fail;
     }
-    aarch64_m1_install_ttbr1(tree.root_pa);
+    aarch64_install_ttbr1(tree.root_pa);
     installed_root = tree.root_pa;
     ZONE_NORMAL_INDEX = (uint32_t)(PMMngr.zones_size - 1);
     ZONE_UNMAPPED_INDEX = 0;
@@ -101,7 +101,7 @@ int arch_boot_direct_map_init(void)
         goto fail;
     }
 #if OS01_SELFTEST
-    rc = aarch64_m1_selftest(installed_root);
+    rc = aarch64_page_table_selftest(installed_root);
     if (rc)
         goto fail;
 #endif
@@ -148,8 +148,8 @@ int arch_boot_direct_map_ranges(const struct MEMORY_RANGE **out, size_t *count)
     *count = ram_count;
     return 0;
 }
-uint64_t aarch64_m1_installed_root(void) { return installed_root; }
-const struct aarch64_runtime_tree *aarch64_m1_tree_get(void)
+uint64_t aarch64_installed_root(void) { return installed_root; }
+const struct aarch64_runtime_tree *aarch64_runtime_tree_get(void)
 {
     return state == READY ? &tree : NULL;
 }

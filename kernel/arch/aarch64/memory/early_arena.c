@@ -11,14 +11,14 @@
  * can reach its base through the existing M0 direct-map alias.
  *
  * Architecture:
- *   - The pure planner `aarch64_m1_plan` is the only place where the
+ *   - The pure planner `aarch64_early_arena_plan` is the only place where the
  *     arena is selected. It validates the input ranges, sums the
  *     checked layout calculator (kernel/memory/pmm_boot.c) to size
  *     the PMM metadata, counts unique 512 GiB and 1 GiB buckets
  *     across B ∪ D ∪ R (max 1027 pages), and picks the first R[i]
  *     ∩ [LOW, HI) whose span is >= the computed arena size.
  *
- *   - `aarch64_m1_prepare` calls the planner and, only on success,
+ *   - `aarch64_early_arena_prepare` calls the planner and, only on success,
  *     sets `PMMngr.start_brk = ARCH_PAGE_OFFSET + base_pa` so the
  *     production pmm_init() places the metadata segment at the high
  *     alias of the arena base. The state after a successful prepare
@@ -35,7 +35,7 @@
  * Failure paths return negative errno; the BSP caller
  * (kernel/arch/aarch64/boot/main.c) is responsible for halting
  * with a diagnostic after a negative return from
- * aarch64_m1_prepare(). Keeping the library function free of side
+ * aarch64_early_arena_prepare(). Keeping the library function free of side
  * effects lets host tests exercise the negative branches without
  * trapping via arch_cpu_halt().
  */
@@ -47,7 +47,7 @@
 #include <log/log.h>        /* log_err for the failure diagnostic
                              * (brief: 失败打印需求/可用空间).  The
                              * host-test build stubs _log_err_impl
-                             * via test_m1_arena.c, so calling
+                             * via test_early_arena.c, so calling
                              * log_err from this TU is safe under
                              * the test link. */
 #include <memory/memory_map.h>
@@ -65,7 +65,7 @@
  * (specifically start_brk, the brk for pmm_init()'s aligned
  * metadata placement). pmm_init reads start_brk to assign bits_map
  * etc.; the planner writes into it only on the success path of
- * aarch64_m1_prepare(). */
+ * aarch64_early_arena_prepare(). */
 extern struct Physical_Memory_Manager PMMngr;
 
 /* ── Spec constants local to this TU ────────────────────────── */
@@ -77,12 +77,12 @@ extern struct Physical_Memory_Manager PMMngr;
 #define PAGE_4K            UINT64_C(0x1000)
 
 /* ── Frozen arena state ─────────────────────────────────────── */
-static struct aarch64_m1_arena published_arena;
+static struct aarch64_early_arena published_arena;
 static int arena_prepared = 0;
 
 /* ── Tiny zero/fatal helpers ─────────────────────────────────── */
 
-static void zero_arena(struct aarch64_m1_arena *out)
+static void zero_arena(struct aarch64_early_arena *out)
 {
     uint8_t *cursor = (uint8_t *)out;
     size_t i;
@@ -221,7 +221,7 @@ static int count_buckets(const struct MEMORY_RANGE *ram, size_t count,
  * production no-space check; the published RAM map is unchanged. */
 static uint64_t candidate_window_end(uint64_t start, uint64_t end)
 {
-#if AARCH64_M1_ARENA_EXHAUST
+#if AARCH64_EARLY_ARENA_EXHAUST
     (void)end;
     return start;
 #else
@@ -296,8 +296,8 @@ static int compute_arena_end(uint64_t base_pa,
 }
 
 /* ── Pure planner ────────────────────────────────────────────── */
-int aarch64_m1_plan(const struct MEMORY_RANGE *ram, size_t count,
-                    struct aarch64_m1_arena *out)
+int aarch64_early_arena_plan(const struct MEMORY_RANGE *ram, size_t count,
+                    struct aarch64_early_arena *out)
 {
     int rc;
     size_t puds, pmds, table_pages;
@@ -441,7 +441,7 @@ int aarch64_m1_plan(const struct MEMORY_RANGE *ram, size_t count,
 }
 
 /* ── Side-effecting installer ─────────────────────────────────
- * Side-effecting installer: calls aarch64_m1_plan() and, only on
+ * Side-effecting installer: calls aarch64_early_arena_plan() and, only on
  * success, sets `PMMngr.start_brk = ARCH_PAGE_OFFSET + base_pa` so
  * pmm_init() places the PMM metadata at the high-half alias of the
  * arena base.
@@ -563,15 +563,15 @@ static uint64_t estimate_need_bytes(const struct MEMORY_RANGE *ram, size_t count
     return need_bytes;
 }
 
-int aarch64_m1_prepare(const struct MEMORY_RANGE *ram, size_t count)
+int aarch64_early_arena_prepare(const struct MEMORY_RANGE *ram, size_t count)
 {
-    struct aarch64_m1_arena candidate_arena;
+    struct aarch64_early_arena candidate_arena;
 
     if (arena_prepared) return -EALREADY;
 
-    int rc = aarch64_m1_plan(ram, count, &candidate_arena);
+    int rc = aarch64_early_arena_plan(ram, count, &candidate_arena);
     if (rc != 0) {
-#if AARCH64_M1_ARENA_EXHAUST
+#if AARCH64_EARLY_ARENA_EXHAUST
         if (rc == -ENOSPC) log_err("M1 FATAL reason=arena-exhaust\n");
 #endif
         /* Print need/available diagnostic (brief requirement). PMM
@@ -619,7 +619,7 @@ int aarch64_m1_prepare(const struct MEMORY_RANGE *ram, size_t count)
     return 0;
 }
 
-const struct aarch64_m1_arena *aarch64_m1_arena_get(void)
+const struct aarch64_early_arena *aarch64_early_arena_get(void)
 {
     if (!arena_prepared) return NULL;
     return &published_arena;
@@ -632,10 +632,10 @@ const struct aarch64_m1_arena *aarch64_m1_arena_get(void)
  * shared with slab.c's boot-time upper-bound assertion via
  * PMMngr_end_of_struct_upper_bound() below.
  *
- * Before a successful aarch64_m1_prepare() — or if the derivation
+ * Before a successful aarch64_early_arena_prepare() — or if the derivation
  * overflows — returns (uint64_t)-1 so the slab assertion self-skips
  * instead of failing on a garbage bound. */
-uint64_t aarch64_m1_slab_meta_start_va(void)
+uint64_t aarch64_early_arena_slab_meta_start_va(void)
 {
     uint64_t base_va;
     if (!arena_prepared) return (uint64_t)-1;
@@ -653,14 +653,14 @@ uint64_t aarch64_m1_slab_meta_start_va(void)
  * assert on x86_64 and on any pre-prepare aarch64 boot).
  *
  * Returns the absolute VA one past the slab metadata segment:
- *   aarch64_m1_slab_meta_start_va() + slab_layout_compute().meta_bytes
+ *   aarch64_early_arena_slab_meta_start_va() + slab_layout_compute().meta_bytes
  * computed with checked add so no input can wrap into a small address
  * (v4 fix for v3 review item 8 — the bound is never allowed to
  * participate in a potentially-overflowing addition downstream). */
 uint64_t PMMngr_end_of_struct_upper_bound(void)
 {
     struct slab_layout sl = slab_layout_compute();
-    uint64_t base = aarch64_m1_slab_meta_start_va();
+    uint64_t base = aarch64_early_arena_slab_meta_start_va();
     uint64_t upper;
     if (base == (uint64_t)-1) return (uint64_t)-1;
     if (!checked_add(base, sl.meta_bytes, &upper))
@@ -670,7 +670,7 @@ uint64_t PMMngr_end_of_struct_upper_bound(void)
 
 /* ── Strong override of pmm_arch_boot_reservations ─────────────
  * Returns the single arena range so pmm_init reserves the frames.
- * Without a successful aarch64_m1_prepare, returns -EINVAL so the
+ * Without a successful aarch64_early_arena_prepare, returns -EINVAL so the
  * caller halts: the legacy weak default would reserve PA-absolute
  * [0, ceil2M(metadata_end_pa)) and silently skip the low-RAM
  * arena on aarch64. */

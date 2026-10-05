@@ -1,5 +1,5 @@
-#ifndef M1_HOST_MEMORY_H
-#define M1_HOST_MEMORY_H
+#ifndef HOST_MEMORY_H
+#define HOST_MEMORY_H
 #include_next <memory/memory.h>
 #undef Phy_To_Virt
 #undef Virt_To_Phy

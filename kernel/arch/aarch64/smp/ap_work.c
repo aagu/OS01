@@ -44,7 +44,7 @@ bool ap_work_wait(uint32_t cpu, uint32_t seq, uint64_t *out,
             kputu(cpu);
             kputs(" seq=");
             kputu(seq);
-            kputs("\nM3-SHOOTDOWN-PROBE: FAIL work-timeout\n");
+            kputs("\nSHOOTDOWN-PROBE: FAIL work-timeout\n");
             for (;;)
                 arch_cpu_halt();
         }
@@ -62,7 +62,7 @@ bool ap_work_wait(uint32_t cpu, uint32_t seq, uint64_t *out,
 /* AP side: called from the secondary_idle work loop. */
 
 /* M3.6 Task 26: weak extension dispatcher. The kernel selftest
- * (test_m3_multicore.c) overrides this with a strong definition that
+ * (test_aarch64_page_table_multicore.c) overrides this with a strong definition that
  * consumes WORK_PT_STRESS / WORK_PT_MAP. The weak default declines
  * every command, preserving the legacy "unknown cmd leaves the item
  * pending" behavior in production builds. */

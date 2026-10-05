@@ -1,9 +1,9 @@
 /*
- * hosttests/cases/test_m1_reservation.c — range-based boot reservations +
+ * hosttests/cases/test_page_table_reservation.c — range-based boot reservations +
  *                                            single-frame exact claim
  *                                            (aarch64 M1 plan Task 2).
  *
- * Companion to test_m1_layout.c. Task 1 extracted the PMM metadata
+ * Companion to test_page_table_layout.c. Task 1 extracted the PMM metadata
  * layout calculator; Task 2 replaces the legacy "walk page indices from
  * 0 up to walk_pages" reservation loop with a strategy-driven range
  * approach (pmm_arch_boot_reservations → pmm_reserve_boot_ranges) and
@@ -36,7 +36,7 @@
  * Bitmap / counter / attribute / refcount assertions verify both the
  * happy paths and the "reserved → reserved" idempotence invariant.
  */
-#include "m1_test_runner.h"
+#include "page_table_test_runner.h"
 #include <errno.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -524,6 +524,6 @@ TEST_LIST_END
 
 int main(void)
 {
-    int failed = M1_RUN_ALL_TESTS();
+    int failed = PAGE_TABLE_RUN_ALL_TESTS();
     return failed;
 }

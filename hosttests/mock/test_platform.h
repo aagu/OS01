@@ -70,7 +70,7 @@ static inline uint32_t cpu_id(void) { return 0; }
 extern uint32_t num_cpus;
 
 /* Spinlock stub.  Guarded so other test shims (e.g.
- * hosttests/mock/m1_a64_include/arch/spinlock.h, which provides the
+ * hosttests/mock/page_table_aarch64_include/arch/spinlock.h, which provides the
  * same surface for the aarch64 page_table host harness — see Task 17)
  * can `#include <arch/spinlock.h>` without colliding with this
  * force-included surface.  The shape is the canonical host-test

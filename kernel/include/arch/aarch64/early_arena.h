@@ -25,7 +25,7 @@
  * slab_meta_bytes and slab_page_end_pa must fit under the M0 2 GiB
  * identity-map cap (PA < 0x80000000) — preflight refuses otherwise.
  *
- * The planner (`aarch64_m1_plan`) is pure: it validates the input
+ * The planner (`aarch64_early_arena_plan`) is pure: it validates the input
  * range list, computes the metadata layout with the shared checked
  * calculator (kernel/memory/pmm_boot.c), counts unique 512 GiB/1 GiB
  * buckets across the union B ∪ D ∪ R, and uses the spec §3.2 formula
@@ -37,14 +37,14 @@
  * written into `*out`. On failure `*out` is cleared and a negative
  * errno is returned.
  *
- * The installer (`aarch64_m1_prepare`) wraps the planner: it freezes
+ * The installer (`aarch64_early_arena_prepare`) wraps the planner: it freezes
  * the result and, only after every check has passed (2 GiB guard
  * for arena_end_pa and slab_page_end_pa, overflow checks at every
  * step of the formula chain), sets PMMngr.start_brk = OFFSET +
  * base_pa so pmm_init() places metadata at the high-half alias of
  * the arena base. Once prepared, the arena layout is immutable
  * until boot; a second prepare returns -EALREADY. The getter
- * `aarch64_m1_arena_get()` returns NULL until prepare has run.
+ * `aarch64_early_arena_get()` returns NULL until prepare has run.
  *
  * `pmm_arch_boot_reservations` is provided as a strong override that
  * returns the single arena range (and reports -EINVAL if prepare has
@@ -74,7 +74,7 @@
  * (PMDs) = 1027. The planner never allocates more than this. */
 #define AARCH64_M1_TABLE_PAGES_MAX 1027u
 
-struct aarch64_m1_arena {
+struct aarch64_early_arena {
     /* Selected arena window in the low PA window AND in the input
      * RAM map. Both endpoints are 2 MiB-aligned; [base_pa, end_pa) is
      * non-empty. base_pa is also the input to metadata_end_pa
@@ -112,7 +112,7 @@ struct aarch64_m1_arena {
      * at AARCH64_M1_TABLE_PAGES_MAX. */
     size_t table_pages;
 
-    /* PMM metadata layout for the arena: aarch64_m1_plan() always
+    /* PMM metadata layout for the arena: aarch64_early_arena_plan() always
      * computes this with pmm_layout_calculate(base_va = base_pa +
      * ARCH_PAGE_OFFSET, span_pages = RAM min/max span in 2 MiB units) so
      * the production math and the arena selection agree. */
@@ -146,13 +146,13 @@ struct aarch64_m1_arena {
  *               AND arena_end_pa under 2 GiB. The first failure
  *               leaves *out zeroed; the planner prints the
  *               requirement and the available span only when invoked
- *               from aarch64_m1_prepare (the pure planner never logs).
+ *               from aarch64_early_arena_prepare (the pure planner never logs).
  *   -ERANGE   : an input PA lies outside [0, AARCH64_M1_PA_LIMIT).
  */
-int aarch64_m1_plan(const struct MEMORY_RANGE *ram, size_t count,
-                    struct aarch64_m1_arena *out);
+int aarch64_early_arena_plan(const struct MEMORY_RANGE *ram, size_t count,
+                    struct aarch64_early_arena *out);
 
-/* Side-effecting installer: calls aarch64_m1_plan() and, only on
+/* Side-effecting installer: calls aarch64_early_arena_plan() and, only on
  * success, sets `PMMngr.start_brk = ARCH_PAGE_OFFSET + base_pa` so
  * pmm_init() places the PMM metadata at the high-half alias of the
  * arena base. The arena's PMM layout (PMMngr.bits_map etc.) is NOT
@@ -164,21 +164,21 @@ int aarch64_m1_plan(const struct MEMORY_RANGE *ram, size_t count,
  *
  * Repeated calls return -EALREADY without re-running; the state
  * after the first successful call is immutable until boot. */
-int aarch64_m1_prepare(const struct MEMORY_RANGE *ram, size_t count);
+int aarch64_early_arena_prepare(const struct MEMORY_RANGE *ram, size_t count);
 
 /* Returns the frozen arena after a successful prepare, or NULL if
  * prepare has not run (or has failed). The pointed-to struct is
  * read-only; callers must not retain the pointer past local edits. */
-const struct aarch64_m1_arena *aarch64_m1_arena_get(void);
+const struct aarch64_early_arena *aarch64_early_arena_get(void);
 
 /* Absolute VA at which slab_init's metadata segment begins (spec §3.2:
  * arena base high alias + layout.end_of_struct_off). Returns
  * (uint64_t)-1 before a successful prepare or on checked-arith
  * overflow — the slab.c boot assertion treats that as "no bound". */
-uint64_t aarch64_m1_slab_meta_start_va(void);
+uint64_t aarch64_early_arena_slab_meta_start_va(void);
 
 /* Strong aarch64 override of the slab boot assertion bound:
- * aarch64_m1_slab_meta_start_va() + slab_layout_compute().meta_bytes,
+ * aarch64_early_arena_slab_meta_start_va() + slab_layout_compute().meta_bytes,
  * checked add. The weak fallback in kernel/memory/slab.c returns
  * (uint64_t)-1 so x86_64 (and un-prepared boots) skip the assert. */
 uint64_t PMMngr_end_of_struct_upper_bound(void);

@@ -1,5 +1,5 @@
-#ifndef M1_A64_HOST_MMU_H
-#define M1_A64_HOST_MMU_H
+#ifndef AARCH64_HOST_MMU_H
+#define AARCH64_HOST_MMU_H
 #include <stdint.h>
 #include <stddef.h>
 /* Use a host-userspace-friendly address for the "direct map" base so

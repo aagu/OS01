@@ -1,5 +1,5 @@
 /*
- * hosttests/cases/test_m1_arena.c — aarch64 M1 early arena planner
+ * hosttests/cases/test_early_arena.c — aarch64 M1 early arena planner
  *                                          (aarch64 M1 plan Task 3).
  *
  * Task 1 produced the checked PMM metadata layout calculator
@@ -20,7 +20,7 @@
  *     table_pages * 4096, then rounded up to 2 MiB.
  *
  * The suite is pure: it does NOT exercise pmm_init, the PMM, or
- * any boot-time side effects. The planner (`aarch64_m1_plan`) must
+ * any boot-time side effects. The planner (`aarch64_early_arena_plan`) must
  * not touch PMMngr.start_brk or any other global state on failure;
  * the tests prove that with a canary snapshot.
  *
@@ -38,7 +38,7 @@
  *   - layout(base = arena base + OFFSET) consistent with pure
  *     pmm_layout_calculate sizing.
  */
-#include "m1_test_runner.h"
+#include "page_table_test_runner.h"
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -59,7 +59,7 @@ extern void host_exit(int status) __asm__("_exit");
 #include <arch/mmu.h>
 
 /* pmm.c external references — host stubs. Mirror what
- * test_m1_reservation.c provides so the production pmm.o links. */
+ * test_page_table_reservation.c provides so the production pmm.o links. */
 int g_log_level = 3;
 void _log_err_impl(const char *fmt, ...) { (void)fmt; }
 int color_printk(unsigned int FRcolor, unsigned int BKcolor,
@@ -127,7 +127,7 @@ static void reference_layout(uint64_t arena_base_pa, uint64_t arena_end_pa,
 } while (0)
 
 static void assert_layout_eq(const char *label,
-                             const struct aarch64_m1_arena *got,
+                             const struct aarch64_early_arena *got,
                              const struct pmm_layout *ref)
 {
     LAYOUT_EQ(label, got->layout, *ref, bits_map_off);
@@ -158,7 +158,7 @@ static void build_single(uint64_t base, uint64_t end,
     the suite — guards the rest.) */
 TEST_FUNC(test_getter_returns_null_before_prepare)
 {
-    const struct aarch64_m1_arena *a = aarch64_m1_arena_get();
+    const struct aarch64_early_arena *a = aarch64_early_arena_get();
     assert_null((void *)a);
 }
 
@@ -168,8 +168,8 @@ TEST_FUNC(test_happy_512_mib_low_window)
 {
     struct MEMORY_RANGE ram[1];
     build_single(0x40200000ULL, 0x40200000ULL + 512ULL * 1024 * 1024, ram);
-    struct aarch64_m1_arena got;
-    int rc = aarch64_m1_plan(ram, 1, &got);
+    struct aarch64_early_arena got;
+    int rc = aarch64_early_arena_plan(ram, 1, &got);
     assert_eq(0, rc);
     /* arena is fully inside the input range */
     assert_true(got.base_pa >= 0x40200000ULL);
@@ -193,8 +193,8 @@ TEST_FUNC(test_happy_4_gib_low_window)
 {
     struct MEMORY_RANGE ram[1];
     build_single(0x40200000ULL, 0x40200000ULL + 4ULL * 1024 * 1024 * 1024, ram);
-    struct aarch64_m1_arena got;
-    int rc = aarch64_m1_plan(ram, 1, &got);
+    struct aarch64_early_arena got;
+    int rc = aarch64_early_arena_plan(ram, 1, &got);
     assert_eq(0, rc);
     assert_true(got.base_pa == 0x40200000ULL);
     assert_true(got.end_pa >= got.base_pa);
@@ -221,8 +221,8 @@ TEST_FUNC(test_first_range_too_small_second_works)
         { .phys_start = 0x40200000ULL, .phys_end = 0x60000000ULL,  /* 480 MiB, inside [LOW, HI) */
           .type = MEMORY_TYPE_RAM },
     };
-    struct aarch64_m1_arena got;
-    int rc = aarch64_m1_plan(ram, 2, &got);
+    struct aarch64_early_arena got;
+    int rc = aarch64_early_arena_plan(ram, 2, &got);
     assert_eq(0, rc);
     /* The planner must have skipped range 0 (intersection = 0)
      * and picked range 1: [0x40200000, 0x60000000). */
@@ -240,8 +240,8 @@ TEST_FUNC(test_holes_between_ranges)
         /* Hole [0x80100000, 0xC0000000) */
         { .phys_start = 0xC0000000ULL, .phys_end = 0xC0000000ULL + 512ULL * 1024 * 1024, .type = MEMORY_TYPE_RAM },
     };
-    struct aarch64_m1_arena got;
-    int rc = aarch64_m1_plan(ram, 2, &got);
+    struct aarch64_early_arena got;
+    int rc = aarch64_early_arena_plan(ram, 2, &got);
     assert_eq(0, rc);
     assert_true(got.base_pa >= 0x40200000ULL);
     assert_true((got.base_pa & ((1ULL << 21) - 1)) == 0);
@@ -258,8 +258,8 @@ TEST_FUNC(test_kernel_handoff_exclusion)
     struct MEMORY_RANGE ram[1];
     /* Touches B from below — strictly illegal */
     build_single(0x40100000ULL, 0x40300000ULL, ram);
-    struct aarch64_m1_arena out;
-    int rc = aarch64_m1_plan(ram, 1, &out);
+    struct aarch64_early_arena out;
+    int rc = aarch64_early_arena_plan(ram, 1, &out);
     assert_true(rc < 0);
 }
 
@@ -267,8 +267,8 @@ TEST_FUNC(test_only_high_window_ram)
 {
     struct MEMORY_RANGE ram[1];
     build_single(0x80000000ULL, 0x80000000ULL + 512ULL * 1024 * 1024, ram);
-    struct aarch64_m1_arena out;
-    int rc = aarch64_m1_plan(ram, 1, &out);
+    struct aarch64_early_arena out;
+    int rc = aarch64_early_arena_plan(ram, 1, &out);
     assert_eq(-ENOSPC, rc);
 }
 
@@ -282,8 +282,8 @@ TEST_FUNC(test_zone_count_overflow)
         ram[i].phys_end   = base + 0x10000000ULL;  /* 256 MiB */
         ram[i].type       = MEMORY_TYPE_RAM;
     }
-    struct aarch64_m1_arena out;
-    int rc = aarch64_m1_plan(ram, 11, &out);
+    struct aarch64_early_arena out;
+    int rc = aarch64_early_arena_plan(ram, 11, &out);
     assert_true(rc < 0);
 }
 
@@ -295,8 +295,8 @@ TEST_FUNC(test_unaligned_start)
     ram[0].phys_start = 0x40200123ULL;
     ram[0].phys_end   = 0x41200000ULL;
     ram[0].type       = MEMORY_TYPE_RAM;
-    struct aarch64_m1_arena out;
-    int rc = aarch64_m1_plan(ram, 1, &out);
+    struct aarch64_early_arena out;
+    int rc = aarch64_early_arena_plan(ram, 1, &out);
     assert_eq(-EINVAL, rc);
 }
 
@@ -306,8 +306,8 @@ TEST_FUNC(test_unaligned_end)
     ram[0].phys_start = 0x40200000ULL;
     ram[0].phys_end   = 0x41200000ULL + 0x800ULL;
     ram[0].type       = MEMORY_TYPE_RAM;
-    struct aarch64_m1_arena out;
-    int rc = aarch64_m1_plan(ram, 1, &out);
+    struct aarch64_early_arena out;
+    int rc = aarch64_early_arena_plan(ram, 1, &out);
     assert_eq(-EINVAL, rc);
 }
 
@@ -317,8 +317,8 @@ TEST_FUNC(test_unsorted)
         { .phys_start = 0x50000000ULL, .phys_end = 0x60000000ULL, .type = MEMORY_TYPE_RAM },
         { .phys_start = 0x40200000ULL, .phys_end = 0x50000000ULL, .type = MEMORY_TYPE_RAM },
     };
-    struct aarch64_m1_arena out;
-    int rc = aarch64_m1_plan(ram, 2, &out);
+    struct aarch64_early_arena out;
+    int rc = aarch64_early_arena_plan(ram, 2, &out);
     assert_eq(-EINVAL, rc);
 }
 
@@ -328,8 +328,8 @@ TEST_FUNC(test_overlapping)
         { .phys_start = 0x40200000ULL, .phys_end = 0x50000000ULL, .type = MEMORY_TYPE_RAM },
         { .phys_start = 0x4F000000ULL, .phys_end = 0x60000000ULL, .type = MEMORY_TYPE_RAM },
     };
-    struct aarch64_m1_arena out;
-    int rc = aarch64_m1_plan(ram, 2, &out);
+    struct aarch64_early_arena out;
+    int rc = aarch64_early_arena_plan(ram, 2, &out);
     assert_eq(-EINVAL, rc);
 }
 
@@ -339,8 +339,8 @@ TEST_FUNC(test_pa_at_pa_limit)
     ram[0].phys_start = AARCH64_M1_PA_LIMIT - 0x10000000ULL;
     ram[0].phys_end   = AARCH64_M1_PA_LIMIT + 0x10000000ULL;
     ram[0].type       = MEMORY_TYPE_RAM;
-    struct aarch64_m1_arena out;
-    int rc = aarch64_m1_plan(ram, 1, &out);
+    struct aarch64_early_arena out;
+    int rc = aarch64_early_arena_plan(ram, 1, &out);
     assert_true(rc < 0);
 }
 
@@ -350,8 +350,8 @@ TEST_FUNC(test_ram_d_conflict)
     ram[0].phys_start = 0x08000000ULL;
     ram[0].phys_end   = 0x0a000000ULL + 0x10000000ULL;
     ram[0].type       = MEMORY_TYPE_RAM;
-    struct aarch64_m1_arena out;
-    int rc = aarch64_m1_plan(ram, 1, &out);
+    struct aarch64_early_arena out;
+    int rc = aarch64_early_arena_plan(ram, 1, &out);
     assert_true(rc < 0);
 }
 
@@ -361,29 +361,29 @@ TEST_FUNC(test_non_ram_type)
     ram[0].phys_start = 0x40200000ULL;
     ram[0].phys_end   = 0x41200000ULL;
     ram[0].type       = MEMORY_TYPE_RESERVED;
-    struct aarch64_m1_arena out;
-    int rc = aarch64_m1_plan(ram, 1, &out);
+    struct aarch64_early_arena out;
+    int rc = aarch64_early_arena_plan(ram, 1, &out);
     assert_eq(-EINVAL, rc);
 }
 
 TEST_FUNC(test_zero_count)
 {
-    struct aarch64_m1_arena out;
-    int rc = aarch64_m1_plan(NULL, 0, &out);
+    struct aarch64_early_arena out;
+    int rc = aarch64_early_arena_plan(NULL, 0, &out);
     assert_eq(-EINVAL, rc);
 }
 
 TEST_FUNC(test_count_over_cap)
 {
-    struct aarch64_m1_arena out;
-    int rc = aarch64_m1_plan(NULL, MEMORY_RANGE_MAX + 1, &out);
+    struct aarch64_early_arena out;
+    int rc = aarch64_early_arena_plan(NULL, MEMORY_RANGE_MAX + 1, &out);
     assert_eq(-EINVAL, rc);
 }
 
 TEST_FUNC(test_null_ram)
 {
-    struct aarch64_m1_arena out;
-    int rc = aarch64_m1_plan(NULL, 1, &out);
+    struct aarch64_early_arena out;
+    int rc = aarch64_early_arena_plan(NULL, 1, &out);
     assert_eq(-EINVAL, rc);
 }
 
@@ -393,8 +393,8 @@ TEST_FUNC(test_empty_range)
     ram[0].phys_start = 0x40200000ULL;
     ram[0].phys_end   = 0x40200000ULL;
     ram[0].type       = MEMORY_TYPE_RAM;
-    struct aarch64_m1_arena out;
-    int rc = aarch64_m1_plan(ram, 1, &out);
+    struct aarch64_early_arena out;
+    int rc = aarch64_early_arena_plan(ram, 1, &out);
     assert_eq(-EINVAL, rc);
 }
 
@@ -404,8 +404,8 @@ TEST_FUNC(test_inverted_range)
     ram[0].phys_start = 0x41200000ULL;
     ram[0].phys_end   = 0x40200000ULL;
     ram[0].type       = MEMORY_TYPE_RAM;
-    struct aarch64_m1_arena out;
-    int rc = aarch64_m1_plan(ram, 1, &out);
+    struct aarch64_early_arena out;
+    int rc = aarch64_early_arena_plan(ram, 1, &out);
     assert_eq(-EINVAL, rc);
 }
 
@@ -414,9 +414,9 @@ TEST_FUNC(test_failure_zeros_out)
 {
     struct MEMORY_RANGE ram[1];
     build_single(0x08000000ULL, 0x0a000000ULL, ram);  /* D conflict */
-    struct aarch64_m1_arena out;
+    struct aarch64_early_arena out;
     memset(&out, 0xCC, sizeof(out));
-    int rc = aarch64_m1_plan(ram, 1, &out);
+    int rc = aarch64_early_arena_plan(ram, 1, &out);
     assert_true(rc < 0);
     assert_true(out.base_pa == 0);
     assert_true(out.end_pa == 0);
@@ -440,11 +440,11 @@ TEST_FUNC(test_prepare_rejects_invalid_inputs_without_diagnostic_walk)
         struct MEMORY_RANGE huge = { .phys_start = 0x40200000,
             .phys_end = UINT64_C(1) << 60, .type = MEMORY_TYPE_RAM };
         /* Planner rejects immediately; diagnostics must also terminate. */
-        if (aarch64_m1_prepare(&huge, 1) != -ERANGE) host_exit(1);
-        if (aarch64_m1_prepare(NULL, 1) != -EINVAL) host_exit(1);
-        if (aarch64_m1_prepare(&huge, 0) != -EINVAL) host_exit(1);
-        if (aarch64_m1_prepare(&huge, MEMORY_RANGE_MAX + 1) != -EINVAL) host_exit(1);
-        host_exit(PMMngr.start_brk != sentinel || aarch64_m1_arena_get() != NULL);
+        if (aarch64_early_arena_prepare(&huge, 1) != -ERANGE) host_exit(1);
+        if (aarch64_early_arena_prepare(NULL, 1) != -EINVAL) host_exit(1);
+        if (aarch64_early_arena_prepare(&huge, 0) != -EINVAL) host_exit(1);
+        if (aarch64_early_arena_prepare(&huge, MEMORY_RANGE_MAX + 1) != -EINVAL) host_exit(1);
+        host_exit(PMMngr.start_brk != sentinel || aarch64_early_arena_get() != NULL);
     }
     int status = 0;
     assert_eq(child, host_waitpid(child, &status, 0));
@@ -460,7 +460,7 @@ TEST_FUNC(test_prepare_failure_preserves_start_brk)
 
     struct MEMORY_RANGE ram[1];
     build_single(0x08000000ULL, 0x0a000000ULL, ram);  /* D conflict */
-    int rc = aarch64_m1_prepare(ram, 1);
+    int rc = aarch64_early_arena_prepare(ram, 1);
     assert_true(rc < 0);
     assert_eq(canary, PMMngr.start_brk);
     PMMngr.start_brk = 0;
@@ -473,9 +473,9 @@ TEST_FUNC(test_prepare_success_sets_start_brk)
 
     struct MEMORY_RANGE ram[1];
     build_single(0x40200000ULL, 0x40200000ULL + 512ULL * 1024 * 1024, ram);
-    int rc = aarch64_m1_prepare(ram, 1);
+    int rc = aarch64_early_arena_prepare(ram, 1);
     assert_eq(0, rc);
-    const struct aarch64_m1_arena *a = aarch64_m1_arena_get();
+    const struct aarch64_early_arena *a = aarch64_early_arena_get();
     assert_not_null((void *)a);
     if (a != NULL) {
         assert_eq((uint64_t)(ARCH_PAGE_OFFSET + a->base_pa),
@@ -489,8 +489,8 @@ TEST_FUNC(test_arena_table_pool_inside_arena)
 {
     struct MEMORY_RANGE ram[1];
     build_single(0x40200000ULL, 0x40200000ULL + 4ULL * 1024 * 1024 * 1024, ram);
-    struct aarch64_m1_arena got;
-    int rc = aarch64_m1_plan(ram, 1, &got);
+    struct aarch64_early_arena got;
+    int rc = aarch64_early_arena_plan(ram, 1, &got);
     assert_eq(0, rc);
     /* For a low-window-only map, table_pages >= 3 (1 L0 + 1 PUD[0]
         + at least 1 PMD). */
@@ -518,8 +518,8 @@ TEST_FUNC(test_arena_size_matches_full_formula_chain)
      * invariants. */
     struct MEMORY_RANGE ram[1];
     build_single(0x40200000ULL, 0x40200000ULL + 4ULL * 1024 * 1024 * 1024, ram);
-    struct aarch64_m1_arena got;
-    int rc = aarch64_m1_plan(ram, 1, &got);
+    struct aarch64_early_arena got;
+    int rc = aarch64_early_arena_plan(ram, 1, &got);
     assert_eq(0, rc);
     /* Compute the chain end-to-end from base_pa: meta_end →
      * slab_meta_end → align_up_2M → slab_page_end → table_end →
@@ -538,8 +538,8 @@ TEST_FUNC(test_layout_sizing_consistency)
 {
     struct MEMORY_RANGE ram[1];
     build_single(0x40200000ULL, 0x40200000ULL + 4ULL * 1024 * 1024 * 1024, ram);
-    struct aarch64_m1_arena got;
-    int rc = aarch64_m1_plan(ram, 1, &got);
+    struct aarch64_early_arena got;
+    int rc = aarch64_early_arena_plan(ram, 1, &got);
     assert_eq(0, rc);
     uint64_t span_pages = (ram[0].phys_end - ram[0].phys_start) >> 21;
     if (span_pages == 0) span_pages = 1;
@@ -590,6 +590,6 @@ TEST_LIST_END
 
 int main(void)
 {
-    int failed = M1_RUN_ALL_TESTS();
+    int failed = PAGE_TABLE_RUN_ALL_TESTS();
     return failed;
 }

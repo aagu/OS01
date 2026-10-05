@@ -96,7 +96,7 @@ enum aarch64_pt_result {
  *
  * Thin wrapper over aarch64_pt_map_4k_ext() with software_bits = 0;
  * retained so the BSP pre-SMP selftest (kernel/arch/aarch64/memory/
- * m1_selftest.c) keeps using its 4-arg form unchanged.  See the ext
+ * page_table_selftest.c) keeps using its 4-arg form unchanged.  See the ext
  * variant for the full return-value contract. */
 int aarch64_pt_map_4k(uint64_t *root, uint64_t va, uint64_t pa,
                       uint32_t perm);

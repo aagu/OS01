@@ -116,7 +116,7 @@ static int test_pipe_basic(void)
 int test_rwlock_basic(void);
 int test_seqlock_basic(void);
 int test_slab_16_caches(void);
-int test_m3_selftest(void);
+int test_aarch64_page_table_selftest(void);
 
 // ── External test functions (defined in subsystem .c files) ──
 // Forward-declared here instead of polluting public headers.
@@ -165,7 +165,7 @@ int selftest_run_all(void)
      * parser-asserted '[selftest] m3: 4/4 PASS' marker; on
      * x86_64 the body is a no-op stub so registration stays
      * portable. */
-    selftest_register("m3_vmm",            test_m3_selftest);
+    selftest_register("aarch64_pt_vmm",            test_aarch64_page_table_selftest);
 #endif /* __aarch64__ */
 #if !defined(__aarch64__)
     /* x86_64-only: these tests pull in subsystems (VFS, ext2, sync

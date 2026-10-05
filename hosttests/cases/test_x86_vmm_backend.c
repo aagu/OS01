@@ -13,7 +13,7 @@
  * free_4k_page(phys) directly — MUST be preserved exactly (v1 review
  * item 9, the single-free-per-branch invariant).
  *
- * Strategy (mirrors test_m1_vmm.c):
+ * Strategy (mirrors test_page_table_vmm.c):
  *   - Link the REAL kernel/memory/vmm.c (no shadow vmm.c).
  *   - --wrap=calloc so the host TU controls the table-chain alloc.
  *   - Pre-fill pgd→pud→pmd→pt so vmm_pt_walk hits a pre-baked PTE at

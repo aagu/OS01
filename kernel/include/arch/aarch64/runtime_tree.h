@@ -58,8 +58,8 @@
 
 /* Forward declaration so this header doesn't pull in early_arena.h —
  * the host test fixture and any production caller that already holds
- * an `aarch64_m1_arena *` will include the full header themselves. */
-struct aarch64_m1_arena;
+ * an `aarch64_early_arena *` will include the full header themselves. */
+struct aarch64_early_arena;
 
 /* Page-table pool accessor callbacks. Both are mandatory; the builder
  * returns -EINVAL if either pointer is NULL. The `alloc` callback is
@@ -147,7 +147,7 @@ struct aarch64_runtime_tree_validate_buf {
  * either released back to the PMM or, for the in-process arena pool,
  * frozen as part of the prepared arena). */
 int aarch64_runtime_tree_build(const struct MEMORY_RANGE *ram, size_t count,
-                               const struct aarch64_m1_arena *arena,
+                               const struct aarch64_early_arena *arena,
                                const struct aarch64_tree_ops *ops,
                                struct aarch64_runtime_tree *out);
 
@@ -181,7 +181,7 @@ int aarch64_runtime_tree_build(const struct MEMORY_RANGE *ram, size_t count,
  * pointers). For production the resolve callback returns
  * PA + ARCH_PAGE_OFFSET (the M0 identity map), same as the builder. */
 int aarch64_runtime_tree_validate(const struct MEMORY_RANGE *ram, size_t count,
-                                  const struct aarch64_m1_arena *arena,
+                                  const struct aarch64_early_arena *arena,
                                   const struct aarch64_tree_ops *ops,
                                   struct aarch64_runtime_tree_validate_buf *vbuf,
                                   const struct aarch64_runtime_tree *tree);

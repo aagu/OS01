@@ -32,11 +32,11 @@ TEST_FUNC(test_color_printk_signature_matches_printk_h) {
 TEST_FUNC(test_color_printk_does_not_deref_colors) {
     /* Inject garbage fg/bg — must be ignored, not dereferenced. */
     mock_kputs_clear();
-    int rc = color_printk(0xdeadbeefu, 0xcafebabeu, "M2-SLAB-ERR: ok\n");
+    int rc = color_printk(0xdeadbeefu, 0xcafebabeu, "SLAB-ERR: ok\n");
     /* kputs returns void; color_printk must return the fmt byte length. */
-    assert_eq(rc, (int)strlen("M2-SLAB-ERR: ok\n"));
+    assert_eq(rc, (int)strlen("SLAB-ERR: ok\n"));
     /* The mock received the literal fmt. */
-    assert_true(strcmp(mock_kputs_last(), "M2-SLAB-ERR: ok\n") == 0);
+    assert_true(strcmp(mock_kputs_last(), "SLAB-ERR: ok\n") == 0);
 }
 
 TEST_FUNC(test_color_printk_varargs_ignored) {

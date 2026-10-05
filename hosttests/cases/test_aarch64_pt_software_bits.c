@@ -494,7 +494,7 @@ int main(void)
     /* mmap the kernel half window so PA + ARCH_PAGE_OFFSET resolves.
      * The pool lives here too — every "physical" page is just an
      * offset within this region.  ARCH_PAGE_OFFSET for the host
-     * test is mocked to a low user-space address (mock/m1_a64_include/
+     * test is mocked to a low user-space address (mock/page_table_aarch64_include/
      * arch/mmu.h) so MAP_FIXED succeeds on x86_64 Linux. */
     void *base = mmap((void *)(uintptr_t)ARCH_PAGE_OFFSET,
                       0x100000ULL,                          /* 1 MiB window */

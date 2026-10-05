@@ -1,4 +1,4 @@
-#include "m1_test_runner.h"
+#include "page_table_test_runner.h"
 #include <errno.h>
 #include <memory/pmm.h>
 #include <memory/slab.h>
@@ -7,7 +7,7 @@ struct Physical_Memory_Manager PMMngr;
 int g_log_level = 3;
 void _log_err_impl(const char *fmt, ...) { (void)fmt; }
 /* Task 3: early_arena.c now reads kmalloc_cache_size[].size via
- * slab_layout_compute(). Same stub as test_m1_arena.c. */
+ * slab_layout_compute(). Same stub as test_early_arena.c. */
 struct Slab_Cache kmalloc_cache_size[16] = {
     {32,      0, 0, NULL, NULL, NULL, NULL},
     {64,      0, 0, NULL, NULL, NULL, NULL},
@@ -30,16 +30,16 @@ TEST_FUNC(test_reduced_capacity_reaches_planner_no_space)
 {
     const struct MEMORY_RANGE ram = {
         .phys_start = 0x40200000, .phys_end = 0x60000000, .type = MEMORY_TYPE_RAM};
-    struct aarch64_m1_arena out;
-    assert_eq(-ENOSPC, aarch64_m1_plan(&ram, 1, &out));
+    struct aarch64_early_arena out;
+    assert_eq(-ENOSPC, aarch64_early_arena_plan(&ram, 1, &out));
     assert_eq(0, out.base_pa);
     PMMngr.start_brk = 0xdeadbeef;
-    assert_eq(-ENOSPC, aarch64_m1_prepare(&ram, 1));
+    assert_eq(-ENOSPC, aarch64_early_arena_prepare(&ram, 1));
     assert_eq(0xdeadbeef, PMMngr.start_brk);
-    assert_null(aarch64_m1_arena_get());
+    assert_null(aarch64_early_arena_get());
 }
 TEST_LIST_BEGIN
 TEST_ENTRY(test_reduced_capacity_reaches_planner_no_space), TEST_LIST_END int main(void)
 {
-    return M1_RUN_ALL_TESTS();
+    return PAGE_TABLE_RUN_ALL_TESTS();
 }

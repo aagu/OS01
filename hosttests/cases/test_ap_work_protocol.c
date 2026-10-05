@@ -13,7 +13,7 @@
  *      （对同一 seq 重复 run_one 是 no-op；seq 不匹配的 wait 返回 false）；
  *   3. 超时：AP 不写 DONE → ap_work_wait 打印
  *      "WORK-TIMEOUT cpu=%u seq=%u" +
- *      "M3-SHOOTDOWN-PROBE: FAIL work-timeout" 并 for(;;) arch_cpu_halt()
+ *      "SHOOTDOWN-PROBE: FAIL work-timeout" 并 for(;;) arch_cpu_halt()
  *      （host 用 longjmp hook 证明到达 halt 路径）；
  *   4. seq 首项 = 1：AP "最后已消费 seq" 初值 = 0，因此 seq=0 的 READY
  *      请求被忽略（防止 last_consumed 初值 0 吃掉合法请求）。
@@ -190,7 +190,7 @@ static void test_timeout_fatal(void)
     kputs("");
     assert_true(strstr(log_buf, "WORK-TIMEOUT cpu=1 seq=5") != NULL);
     assert_true(strstr(log_buf,
-                       "M3-SHOOTDOWN-PROBE: FAIL work-timeout") != NULL);
+                       "SHOOTDOWN-PROBE: FAIL work-timeout") != NULL);
     /* 超时终态不复用槽：state 保持 READY，不被置回 IDLE */
     assert_eq(AP_WORK_READY, state_of(1));
 }

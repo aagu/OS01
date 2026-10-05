@@ -51,9 +51,9 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    selftest/test_slab_selftest.c \
                    selftest/test_arch_atomic_u64.c \
                    selftest/test_aarch64_rndr_encoding.c \
-                   selftest/test_m3_selftest.c \
-                   selftest/test_m3_multicore.c
-# NOTE: boot/m3_probe.c (M3.5 Task 25) is picked up by the
+                   selftest/test_aarch64_page_table_selftest.c \
+                   selftest/test_aarch64_page_table_multicore.c
+# NOTE: boot/shootdown_probe.c (M3.5 Task 25) is picked up by the
 # ARCH_C_SOURCES wildcard of arch/aarch64/boot/ below.
 else
 KERNEL_C_SOURCES := \
@@ -256,7 +256,7 @@ endif
 ifneq ($(strip $(AARCH64_M1_TEST)),)
 ifeq ($(ARCH),aarch64)
 ALL_CFLAGS += $(if $(filter sparse,$(AARCH64_M1_TEST)),-DAARCH64_M1_SPARSE=1)
-ALL_CFLAGS += $(if $(filter arena-exhaust,$(AARCH64_M1_TEST)),-DAARCH64_M1_ARENA_EXHAUST=1)
+ALL_CFLAGS += $(if $(filter arena-exhaust,$(AARCH64_M1_TEST)),-DAARCH64_EARLY_ARENA_EXHAUST=1)
 ALL_CFLAGS += $(if $(filter table-exhaust,$(AARCH64_M1_TEST)),-DAARCH64_M1_TABLE_EXHAUST=1)
 ALL_CFLAGS += $(if $(filter ap-bad-root,$(AARCH64_M1_TEST)),-DAARCH64_M1_AP_BAD_ROOT=1)
 endif

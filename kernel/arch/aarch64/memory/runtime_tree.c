@@ -411,7 +411,7 @@ static void rt_zero_tree_out(struct aarch64_runtime_tree *out)
 }
 
 int aarch64_runtime_tree_build(const struct MEMORY_RANGE *ram, size_t count,
-                               const struct aarch64_m1_arena *arena,
+                               const struct aarch64_early_arena *arena,
                                const struct aarch64_tree_ops *ops,
                                struct aarch64_runtime_tree *out)
 {
@@ -842,7 +842,7 @@ static int rt_exp_iter_take(rt_exp_iter_t *it, uint64_t *out_pa,
 }
 
 int aarch64_runtime_tree_validate(const struct MEMORY_RANGE *ram, size_t count,
-                                  const struct aarch64_m1_arena *arena,
+                                  const struct aarch64_early_arena *arena,
                                   const struct aarch64_tree_ops *ops,
                                   struct aarch64_runtime_tree_validate_buf *vbuf,
                                   const struct aarch64_runtime_tree *tree)

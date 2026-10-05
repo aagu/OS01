@@ -1,17 +1,17 @@
 #include <errno.h>
 #include <arch/aarch64/boot_direct_map.h>
 #include <arch/aarch64/early_arena.h>
-#include <arch/aarch64/m1_selftest.h>
+#include <arch/aarch64/page_table_selftest.h>
 #include <arch/aarch64/page_table.h>
 #include <memory/memory.h>
 #include <memory/pmm.h>
 /* BSP owns this initially empty slot. No unrelated allocator/tree writer runs
  * during the smoke. Validate the whole partial subtree before detaching it. */
-int aarch64_m1_smoke_cleanup(uint64_t *root, uint64_t data_pa)
+int aarch64_page_table_smoke_cleanup(uint64_t *root, uint64_t data_pa)
 {
     uint64_t owned[3];
     size_t count = 0;
-    const struct aarch64_m1_arena *a = aarch64_m1_arena_get();
+    const struct aarch64_early_arena *a = aarch64_early_arena_get();
     uint64_t d = root[256];
     for (size_t level = 0; level < 3 && d; level++) {
         if ((d & 3) != 3 || (d & ~UINT64_C(0x000000fffffff003)))
@@ -35,7 +35,7 @@ int aarch64_m1_smoke_cleanup(uint64_t *root, uint64_t data_pa)
     if (data_pa && !pmm_4k_page_allocated(data_pa))
         return -EIO;
     root[256] = 0;
-    aarch64_m1_flush_all();
+    aarch64_tlb_flush_all();
     if (data_pa)
         free_4k_page(data_pa);
     for (size_t i = 0; i < count; i++)

@@ -1,7 +1,7 @@
-#include "m1_test_runner.h"
+#include "page_table_test_runner.h"
 #include <errno.h>
 #include <sys/mman.h>
-#include <arch/aarch64/m1_selftest.h>
+#include <arch/aarch64/page_table_selftest.h>
 #include <arch/aarch64/runtime_tree.h>
 #include <memory/pmm.h>
 struct Physical_Memory_Manager PMMngr;
@@ -20,7 +20,7 @@ uint64_t aarch64_runtime_root_address(void) { return (uintptr_t)&root; }
 uint64_t aarch64_probe_pa_address(void) { return (uintptr_t)&pa; }
 uint64_t aarch64_probe_expected_address(void) { return (uintptr_t)&expected; }
 uint64_t aarch64_read_ttbr1(void) { return root; }
-const struct aarch64_runtime_tree *aarch64_m1_tree_get(void) { return &tree; }
+const struct aarch64_runtime_tree *aarch64_runtime_tree_get(void) { return &tree; }
 struct Page *pmm_claim_free_frame(uint64_t start, uint64_t end, bool reverse)
 {
     (void)end;
@@ -48,24 +48,24 @@ TEST_FUNC(test_outside_preferred_no_fallback_and_timeout_retains)
     PMMngr.zones_struct = &zone;
     PMMngr.zones_size = 1;
     claim_allowed = false;
-    assert_eq(-ENOMEM, aarch64_m1_probe_prepare());
+    assert_eq(-ENOMEM, aarch64_page_table_probe_prepare());
     assert_eq(0x80000000, claim_start);
     claim_allowed = true;
-    assert_eq(0, aarch64_m1_probe_prepare());
-    assert_eq(0, aarch64_m1_ap_verify(1));
-    aarch64_m1_probe_finish(false);
+    assert_eq(0, aarch64_page_table_probe_prepare());
+    assert_eq(0, aarch64_page_table_ap_verify(1));
+    aarch64_page_table_probe_finish(false);
     assert_eq(0, releases);
-    assert_eq(0, aarch64_m1_ap_verify(2));
+    assert_eq(0, aarch64_page_table_ap_verify(2));
     for (uint64_t line = 32; line <= 128; line *= 2) {
         nr = 0;
-        aarch64_m1_publish_ranges(clean, line);
+        aarch64_publish_cache_ranges(clean, line);
         assert_eq(5, nr);
         assert_eq(0x6000, ends[0] - starts[0]);
         assert_eq(4096, ends[4] - starts[4]);
     }
-    aarch64_m1_probe_finish(true);
+    aarch64_page_table_probe_finish(true);
     assert_eq(1, releases);
-    aarch64_m1_probe_finish(true);
+    aarch64_page_table_probe_finish(true);
     assert_eq(1, releases);
 }
 TEST_LIST_BEGIN
@@ -75,6 +75,6 @@ TEST_ENTRY(test_outside_preferred_no_fallback_and_timeout_retains), TEST_LIST_EN
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
     if (p == MAP_FAILED)
         return 2;
-    int failed = M1_RUN_ALL_TESTS();
+    int failed = PAGE_TABLE_RUN_ALL_TESTS();
     return failed;
 }

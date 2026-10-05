@@ -1,4 +1,4 @@
-#include "m1_test_runner.h"
+#include "page_table_test_runner.h"
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
@@ -32,6 +32,6 @@ TEST_FUNC(test_each_intermediate_oom_leaves_descriptor_invalid)
 TEST_LIST_BEGIN
 TEST_ENTRY(test_each_intermediate_oom_leaves_descriptor_invalid), TEST_LIST_END int main(void)
 {
-    int failed = M1_RUN_ALL_TESTS();
+    int failed = PAGE_TABLE_RUN_ALL_TESTS();
     return failed;
 }

@@ -25,7 +25,7 @@
  *   FAIL alloc-data-P1: alloc_4k_page returns 0 → halt at step 4.
  *
  * Plus a source-scan: kernel/arch/aarch64/boot/main.c calls
- * aarch64_m3_shootdown_probe() under a dtb_cpu_count() >= 2 gate
+ * aarch64_shootdown_probe() under a dtb_cpu_count() >= 2 gate
  * and AFTER ipi_ready_publish_and_count(0), with a SKIP marker for
  * the -smp 1 case.
  *
@@ -44,7 +44,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <arch/aarch64/boot/m3_probe.h>
+#include <arch/aarch64/boot/shootdown_probe.h>
 
 #ifndef OS01_KERNEL_SRC
 #error "OS01_KERNEL_SRC must be defined to the kernel source root"
@@ -200,7 +200,7 @@ static void mock_ap_work_submit(uint32_t cpu, uint32_t seq, uint32_t cmd,
     if (g_pattern_switch_enabled) {
         g_submit_count_per_cpu[cpu]++;
         if (g_submit_count_per_cpu[cpu] >= 2)
-            g_ap_read_pattern[cpu] = M3_PROBE_PATTERN_B;
+            g_ap_read_pattern[cpu] = AARCH64_SHOOTDOWN_PROBE_PATTERN_B;
     }
 }
 
@@ -225,9 +225,9 @@ static void mock_halt(void)
 
 /* ── ops struct + reset ────────────────────────────────────────── */
 
-static struct aarch64_m3_probe_ops build_mock_ops(void)
+static struct aarch64_shootdown_probe_ops build_mock_ops(void)
 {
-    struct aarch64_m3_probe_ops ops;
+    struct aarch64_shootdown_probe_ops ops;
     memset(&ops, 0, sizeof(ops));
     ops.dtb_cpu_count       = mock_dtb_cpu_count;
     ops.ipi_ready_count_get = mock_ipi_ready_count_get;
@@ -274,7 +274,7 @@ static void mock_reset(void)
     memset(g_submit_count_per_cpu, 0, sizeof(g_submit_count_per_cpu));
     g_pattern_switch_enabled = false;
     for (uint32_t i = 0; i < 16; i++)
-        g_ap_read_pattern[i] = M3_PROBE_PATTERN_A;
+        g_ap_read_pattern[i] = AARCH64_SHOOTDOWN_PROBE_PATTERN_A;
     g_tlb_shootdown_calls = 0;
     g_ap_work_submit_calls = 0;
     g_ap_work_wait_calls = 0;
@@ -294,14 +294,14 @@ static void test_happy_path_two_cpus(void)
     /* Enable pattern-switching on submit count >= 2 so the
      * second broadcast sees pattern B. */
     g_pattern_switch_enabled = true;
-    g_ap_read_pattern[1] = M3_PROBE_PATTERN_A;
+    g_ap_read_pattern[1] = AARCH64_SHOOTDOWN_PROBE_PATTERN_A;
 
-    struct aarch64_m3_probe_ops ops = build_mock_ops();
-    aarch64_m3_shootdown_probe_body(&ops);
+    struct aarch64_shootdown_probe_ops ops = build_mock_ops();
+    aarch64_shootdown_probe_body(&ops);
     /* Body returns normally on success. */
-    assert_true(strstr(mock_log, "M3-SHOOTDOWN-PROBE: START") != NULL);
-    assert_true(strstr(mock_log, "M3-SHOOTDOWN-PROBE: OK") != NULL);
-    assert_true(strstr(mock_log, "M3-SHOOTDOWN-PROBE: FAIL") == NULL);
+    assert_true(strstr(mock_log, "SHOOTDOWN-PROBE: START") != NULL);
+    assert_true(strstr(mock_log, "SHOOTDOWN-PROBE: OK") != NULL);
+    assert_true(strstr(mock_log, "SHOOTDOWN-PROBE: FAIL") == NULL);
     assert_eq(1, g_tlb_shootdown_calls);
     assert_eq(2, g_ap_work_submit_calls);
     assert_eq(2, g_ap_work_wait_calls);
@@ -316,20 +316,20 @@ static void test_zero_ap_ready_fails(void)
     mock_reset();
     g_dtb_cpu_count = 2;
     g_ipi_ready_count = 0;          /* never publish */
-    g_cycle_step = M3_PROBE_DEADLINE_CYCLES + 1;
-    struct aarch64_m3_probe_ops ops = build_mock_ops();
+    g_cycle_step = AARCH64_SHOOTDOWN_PROBE_DEADLINE_CYCLES + 1;
+    struct aarch64_shootdown_probe_ops ops = build_mock_ops();
 
     if (setjmp(halt_jb) == 0) {
         halt_armed = 1;
-        aarch64_m3_shootdown_probe_body(&ops);
+        aarch64_shootdown_probe_body(&ops);
         assert_true(0 && "probe must halt on 0-AP-ready");
     }
     assert_true(strstr(mock_log,
-        "M3-SHOOTDOWN-PROBE: FAIL ap-not-ready") != NULL);
+        "SHOOTDOWN-PROBE: FAIL ap-not-ready") != NULL);
     /* v1 review item 14: the absent CPU ids must be named. cpu 1 is
      * the only AP and never published. */
     assert_true(strstr(mock_log, "FAIL ap-not-ready 1") != NULL);
-    assert_true(strstr(mock_log, "M3-SHOOTDOWN-PROBE: OK") == NULL);
+    assert_true(strstr(mock_log, "SHOOTDOWN-PROBE: OK") == NULL);
 }
 
 static void test_ap_not_ready_names_multiple_absent_ids(void)
@@ -340,16 +340,16 @@ static void test_ap_not_ready_names_multiple_absent_ids(void)
     g_ipi_ready_count = 2;          /* BSP + cpu1 only */
     g_per_cpu_ipi_ready[0] = true;
     g_per_cpu_ipi_ready[1] = true;
-    g_cycle_step = M3_PROBE_DEADLINE_CYCLES + 1;
-    struct aarch64_m3_probe_ops ops = build_mock_ops();
+    g_cycle_step = AARCH64_SHOOTDOWN_PROBE_DEADLINE_CYCLES + 1;
+    struct aarch64_shootdown_probe_ops ops = build_mock_ops();
 
     if (setjmp(halt_jb) == 0) {
         halt_armed = 1;
-        aarch64_m3_shootdown_probe_body(&ops);
+        aarch64_shootdown_probe_body(&ops);
         assert_true(0 && "probe must halt when APs 2,3 never publish");
     }
     assert_true(strstr(mock_log,
-        "M3-SHOOTDOWN-PROBE: FAIL ap-not-ready 2,3") != NULL);
+        "SHOOTDOWN-PROBE: FAIL ap-not-ready 2,3") != NULL);
     /* Published cpu1 must NOT be listed. */
     assert_true(strstr(mock_log, "ap-not-ready 2,3\n") != NULL);
 }
@@ -361,15 +361,15 @@ static void test_requires_at_least_one_AP_fails(void)
     g_dtb_cpu_count = 1;
     g_ipi_ready_count = 1;
     g_per_cpu_ipi_ready[0] = true;
-    struct aarch64_m3_probe_ops ops = build_mock_ops();
+    struct aarch64_shootdown_probe_ops ops = build_mock_ops();
 
     if (setjmp(halt_jb) == 0) {
         halt_armed = 1;
-        aarch64_m3_shootdown_probe_body(&ops);
+        aarch64_shootdown_probe_body(&ops);
         assert_true(0 && "probe must halt on -smp 1");
     }
     assert_true(strstr(mock_log,
-        "M3-SHOOTDOWN-PROBE: FAIL requires-at-least-one-AP") != NULL);
+        "SHOOTDOWN-PROBE: FAIL requires-at-least-one-AP") != NULL);
 }
 
 static void test_scratch_non_empty_fails(void)
@@ -381,15 +381,15 @@ static void test_scratch_non_empty_fails(void)
     g_per_cpu_ipi_ready[0] = true;
     g_per_cpu_ipi_ready[1] = true;
     g_query_at_start_rc = 0; /* mapped, not -ENOENT */
-    struct aarch64_m3_probe_ops ops = build_mock_ops();
+    struct aarch64_shootdown_probe_ops ops = build_mock_ops();
 
     if (setjmp(halt_jb) == 0) {
         halt_armed = 1;
-        aarch64_m3_shootdown_probe_body(&ops);
+        aarch64_shootdown_probe_body(&ops);
         assert_true(0 && "probe must halt on non-empty scratch");
     }
     assert_true(strstr(mock_log,
-        "M3-SHOOTDOWN-PROBE: FAIL scratch-non-empty") != NULL);
+        "SHOOTDOWN-PROBE: FAIL scratch-non-empty") != NULL);
 }
 
 static void test_ap_read_A_fails(void)
@@ -402,15 +402,15 @@ static void test_ap_read_A_fails(void)
     g_per_cpu_ipi_ready[1] = true;
     /* CPU 1 reads 0xDEAD on first broadcast — expected A. */
     g_ap_read_pattern[1] = 0xDEADBEEFULL;
-    struct aarch64_m3_probe_ops ops = build_mock_ops();
+    struct aarch64_shootdown_probe_ops ops = build_mock_ops();
 
     if (setjmp(halt_jb) == 0) {
         halt_armed = 1;
-        aarch64_m3_shootdown_probe_body(&ops);
+        aarch64_shootdown_probe_body(&ops);
         assert_true(0 && "probe must halt on ap-read-A mismatch");
     }
     assert_true(strstr(mock_log,
-        "M3-SHOOTDOWN-PROBE: FAIL ap-read-A") != NULL);
+        "SHOOTDOWN-PROBE: FAIL ap-read-A") != NULL);
     /* Map succeeded; shootdown never reached. */
     assert_eq(0, g_tlb_shootdown_calls);
 }
@@ -425,15 +425,15 @@ static void test_scratch_still_mapped_fails(void)
     g_per_cpu_ipi_ready[1] = true;
     g_pattern_switch_enabled = true;   /* second broadcast must see B */
     g_query_at_end_rc = 0;
-    struct aarch64_m3_probe_ops ops = build_mock_ops();
+    struct aarch64_shootdown_probe_ops ops = build_mock_ops();
 
     if (setjmp(halt_jb) == 0) {
         halt_armed = 1;
-        aarch64_m3_shootdown_probe_body(&ops);
+        aarch64_shootdown_probe_body(&ops);
         assert_true(0 && "probe must halt on residual mapping");
     }
     assert_true(strstr(mock_log,
-        "M3-SHOOTDOWN-PROBE: FAIL scratch-still-mapped") != NULL);
+        "SHOOTDOWN-PROBE: FAIL scratch-still-mapped") != NULL);
 }
 
 static void test_alloc_data_fail(void)
@@ -445,15 +445,15 @@ static void test_alloc_data_fail(void)
     g_per_cpu_ipi_ready[0] = true;
     g_per_cpu_ipi_ready[1] = true;
     g_alloc_p1_fail = true;
-    struct aarch64_m3_probe_ops ops = build_mock_ops();
+    struct aarch64_shootdown_probe_ops ops = build_mock_ops();
 
     if (setjmp(halt_jb) == 0) {
         halt_armed = 1;
-        aarch64_m3_shootdown_probe_body(&ops);
+        aarch64_shootdown_probe_body(&ops);
         assert_true(0 && "probe must halt on alloc-P1 fail");
     }
     assert_true(strstr(mock_log,
-        "M3-SHOOTDOWN-PROBE: FAIL alloc-data-P1") != NULL);
+        "SHOOTDOWN-PROBE: FAIL alloc-data-P1") != NULL);
 }
 
 static void test_ap_read_B_stale_fails(void)
@@ -467,15 +467,15 @@ static void test_ap_read_B_stale_fails(void)
     /* g_pattern_switch_enabled stays false: the AP's second
      * WORK_READ64 returns the SAME pattern as the first — the shape a
      * stale (un-shot-down) TLB entry produces on real hardware. */
-    struct aarch64_m3_probe_ops ops = build_mock_ops();
+    struct aarch64_shootdown_probe_ops ops = build_mock_ops();
 
     if (setjmp(halt_jb) == 0) {
         halt_armed = 1;
-        aarch64_m3_shootdown_probe_body(&ops);
+        aarch64_shootdown_probe_body(&ops);
         assert_true(0 && "probe must halt on stale ap-read-B");
     }
     assert_true(strstr(mock_log,
-        "M3-SHOOTDOWN-PROBE: FAIL ap-read-B") != NULL);
+        "SHOOTDOWN-PROBE: FAIL ap-read-B") != NULL);
     /* The shootdown itself completed before the read was judged. */
     assert_eq(1, g_tlb_shootdown_calls);
     assert_eq(2, g_ap_work_submit_calls);
@@ -516,14 +516,14 @@ static void test_main_calls_probe_after_ipi_ready_under_dtb_cpu_gate(void)
     if (!buf) return;
 
     assert_true(strstr(buf, "dtb_cpu_count() >= 2") != NULL);
-    assert_true(strstr(buf, "aarch64_m3_shootdown_probe()") != NULL);
+    assert_true(strstr(buf, "aarch64_shootdown_probe()") != NULL);
     char *ipi = strstr(buf, "ipi_ready_publish_and_count(0);");
-    char *probe = strstr(buf, "aarch64_m3_shootdown_probe();");
+    char *probe = strstr(buf, "aarch64_shootdown_probe();");
     assert_not_null(ipi);
     assert_not_null(probe);
     assert_true(ipi < probe);
     assert_true(strstr(buf,
-        "M3-SHOOTDOWN-PROBE: SKIP (single-CPU boot)") != NULL);
+        "SHOOTDOWN-PROBE: SKIP (single-CPU boot)") != NULL);
     free(buf);
 }
 

@@ -1,5 +1,5 @@
 /*
- * hosttests/cases/test_m1_layout.c — checked PMM metadata layout calculator
+ * hosttests/cases/test_page_table_layout.c — checked PMM metadata layout calculator
  *                                     (aarch64 M1 plan Task 1).
  *
  * The production kernel/memory/pmm.c sizes the bits_map, pages_struct
@@ -33,7 +33,7 @@
  * a small RAM total but wide PA span still produce a Page array sized
  * for the span.
  */
-#include "m1_test_runner.h"
+#include "page_table_test_runner.h"
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -346,6 +346,6 @@ TEST_LIST_END
 
 int main(void)
 {
-    int failed = M1_RUN_ALL_TESTS();
+    int failed = PAGE_TABLE_RUN_ALL_TESTS();
     return failed;
 }

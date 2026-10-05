@@ -1,4 +1,4 @@
-// kernel/selftest/test_m3_selftest.c —
+// kernel/selftest/test_aarch64_page_table_selftest.c —
 // aarch64 M3 selftest (aarch64 M3.4, Task 22).
 //
 // Exercises the four aarch64_pt_* primitives the M3.3/M3.4 backend
@@ -43,17 +43,17 @@
 // in the test lives under PGD[511] → PUD[0]. The L2 (PMD) index
 // separates 4K VAs (PMD[0]) from the 2M VA (PMD[1]).
 //
-//   M3_SCRATCH_VA_4K     = 0xffff_ffff_0000_0000  (PMD[0], PTE[0])
-//   M3_SCRATCH_VA_4K_2   = 0xffff_ffff_0000_1000  (PMD[0], PTE[1])
-//   M3_SCRATCH_VA_4K_3   = 0xffff_ffff_0000_2000  (PMD[0], PTE[2])
-//   M3_SCRATCH_VA_2M     = 0xffff_ffff_0020_0000  (PMD[1])
+//   AARCH64_PT_SCRATCH_VA_4K     = 0xffff_ffff_0000_0000  (PMD[0], PTE[0])
+//   AARCH64_PT_SCRATCH_VA_4K_2   = 0xffff_ffff_0000_1000  (PMD[0], PTE[1])
+//   AARCH64_PT_SCRATCH_VA_4K_3   = 0xffff_ffff_0000_2000  (PMD[0], PTE[2])
+//   AARCH64_PT_SCRATCH_VA_2M     = 0xffff_ffff_0020_0000  (PMD[1])
 //
 // Since the SCRATCH root is private (never installed into TTBR),
 // these VAs are arbitrary well-formed values — the hardware never
 // translates through the scratch tree.
 //
 // Whitelist: kernel/Makefile aarch64 KERNEL_C_SOURCES
-// (kernel/selftest/test_m3_selftest.c). nm kernel.elf | grep
+// (kernel/selftest/test_aarch64_page_table_selftest.c). nm kernel.elf | grep
 // test_m3 must be non-empty before commit.
 //
 // x86_64: the entire body is wrapped in #ifdef __aarch64__ +
@@ -81,16 +81,16 @@
 /* ── Scratch VA / PA constants ──────────────────────────────────── */
 /* All scratch VAs land at PGD[511] → PUD[0]. PMD index separates
  * 4K leaves (PMD[0]) from the 2M block (PMD[1]). */
-#define M3_SCRATCH_BASE_VA   UINT64_C(0xffffffff00000000)
-#define M3_SCRATCH_VA_4K     (M3_SCRATCH_BASE_VA + UINT64_C(0x00000000))
-#define M3_SCRATCH_VA_4K_2   (M3_SCRATCH_BASE_VA + UINT64_C(0x00001000))
-#define M3_SCRATCH_VA_4K_3   (M3_SCRATCH_BASE_VA + UINT64_C(0x00002000))
-#define M3_SCRATCH_VA_2M     (M3_SCRATCH_BASE_VA + UINT64_C(0x00200000))
-#define M3_PGD_IDX           511u
-#define M3_PUD_IDX           0u
-#define M3_PMD_IDX_4K        0u
-#define M3_PMD_IDX_2M        1u
-#define M3_DESC_PA_MASK      UINT64_C(0x000000fffffff000)
+#define AARCH64_PT_SCRATCH_BASE_VA   UINT64_C(0xffffffff00000000)
+#define AARCH64_PT_SCRATCH_VA_4K     (AARCH64_PT_SCRATCH_BASE_VA + UINT64_C(0x00000000))
+#define AARCH64_PT_SCRATCH_VA_4K_2   (AARCH64_PT_SCRATCH_BASE_VA + UINT64_C(0x00001000))
+#define AARCH64_PT_SCRATCH_VA_4K_3   (AARCH64_PT_SCRATCH_BASE_VA + UINT64_C(0x00002000))
+#define AARCH64_PT_SCRATCH_VA_2M     (AARCH64_PT_SCRATCH_BASE_VA + UINT64_C(0x00200000))
+#define AARCH64_PT_PGD_IDX           511u
+#define AARCH64_PT_PUD_IDX           0u
+#define AARCH64_PT_PMD_IDX_4K        0u
+#define AARCH64_PT_PMD_IDX_2M        1u
+#define AARCH64_PT_DESC_PA_MASK      UINT64_C(0x000000fffffff000)
 
 /* Print a section-FAIL line and return the negative errno. serial_printk
  * on aarch64 is verbatim (no format substitution — see
@@ -143,13 +143,13 @@ static void scratch_root_free(uint64_t *root, const uint64_t *data_pas,
                               unsigned data_count)
 {
     if (root == NULL) return;
-    uint64_t l0 = root[M3_PGD_IDX];
+    uint64_t l0 = root[AARCH64_PT_PGD_IDX];
     if ((l0 & 3) == 3) {
-        uint64_t l0_pa = l0 & M3_DESC_PA_MASK;
+        uint64_t l0_pa = l0 & AARCH64_PT_DESC_PA_MASK;
         uint64_t *l1 = (uint64_t *)Phy_To_Virt(l0_pa);
-        uint64_t l1e = l1[M3_PUD_IDX];
+        uint64_t l1e = l1[AARCH64_PT_PUD_IDX];
         if ((l1e & 3) == 3) {
-            uint64_t l1e_pa = l1e & M3_DESC_PA_MASK;
+            uint64_t l1e_pa = l1e & AARCH64_PT_DESC_PA_MASK;
             uint64_t *l2 = (uint64_t *)Phy_To_Virt(l1e_pa);
             /* Walk the full L2: any section may have populated any
              * PMD slot, and a split_block_2m installs an L3 table at
@@ -159,13 +159,13 @@ static void scratch_root_free(uint64_t *root, const uint64_t *data_pas,
             for (unsigned j = 0; j < 512u; j++) {
                 uint64_t l2e = l2[j];
                 if ((l2e & 3) == 3)
-                    free_4k_page(l2e & M3_DESC_PA_MASK);
+                    free_4k_page(l2e & AARCH64_PT_DESC_PA_MASK);
             }
             free_4k_page(l1e_pa);
         }
         free_4k_page(l0_pa);
     }
-    root[M3_PGD_IDX] = 0;
+    root[AARCH64_PT_PGD_IDX] = 0;
     free_4k_page((uint64_t)((uintptr_t)root - ARCH_PAGE_OFFSET));
     for (unsigned k = 0; k < data_count; k++)
         free_4k_page(data_pas[k]);
@@ -206,7 +206,7 @@ static int section_4k_round(uint64_t *root)
     uint64_t data_pas[1] = { data };
 
     /* (a) map_4k_new: empty scratch root, fresh 4K install. */
-    int rc = aarch64_pt_map_4k_ext(root, M3_SCRATCH_VA_4K, data,
+    int rc = aarch64_pt_map_4k_ext(root, AARCH64_PT_SCRATCH_VA_4K, data,
                                    AARCH64_PT_KERNEL_RW, 0);
     if (rc != AARCH64_PT_OK) {
         scratch_root_free(root, data_pas, 1);
@@ -217,7 +217,7 @@ static int section_4k_round(uint64_t *root)
     uint64_t qpa = 0;
     uint32_t qperm = 0;
     uint64_t qsw = 0;
-    rc = aarch64_pt_query_4k_ext(root, M3_SCRATCH_VA_4K,
+    rc = aarch64_pt_query_4k_ext(root, AARCH64_PT_SCRATCH_VA_4K,
                                  &qpa, &qperm, &qsw);
     if (rc != AARCH64_PT_OK || qpa != data ||
         qperm != AARCH64_PT_KERNEL_RW || qsw != 0) {
@@ -229,7 +229,7 @@ static int section_4k_round(uint64_t *root)
     uint64_t old_pa = 0;
     uint32_t old_perm = 0;
     uint64_t old_sw = 0;
-    rc = aarch64_pt_replace_4k(root, M3_SCRATCH_VA_4K, data,
+    rc = aarch64_pt_replace_4k(root, AARCH64_PT_SCRATCH_VA_4K, data,
                                AARCH64_PT_KERNEL_RO, 0,
                                &old_pa, &old_perm, &old_sw);
     if (rc != AARCH64_PT_OK || old_pa != data ||
@@ -239,7 +239,7 @@ static int section_4k_round(uint64_t *root)
     }
     /* Re-read after update: must be RO now. */
     qpa = qperm = qsw = 0;
-    rc = aarch64_pt_query_4k_ext(root, M3_SCRATCH_VA_4K,
+    rc = aarch64_pt_query_4k_ext(root, AARCH64_PT_SCRATCH_VA_4K,
                                  &qpa, &qperm, &qsw);
     if (rc != AARCH64_PT_OK || qpa != data ||
         qperm != AARCH64_PT_KERNEL_RO) {
@@ -251,7 +251,7 @@ static int section_4k_round(uint64_t *root)
     uint64_t u_pa = 0;
     uint32_t u_perm = 0;
     uint64_t u_sw = 0;
-    rc = aarch64_pt_unmap_4k_ext(root, M3_SCRATCH_VA_4K,
+    rc = aarch64_pt_unmap_4k_ext(root, AARCH64_PT_SCRATCH_VA_4K,
                                  &u_pa, &u_perm, &u_sw);
     if (rc != AARCH64_PT_OK || u_pa != data ||
         u_perm != AARCH64_PT_KERNEL_RO || u_sw != 0) {
@@ -260,7 +260,7 @@ static int section_4k_round(uint64_t *root)
     }
     /* Re-query: must be absent now. */
     qpa = qperm = qsw = 0;
-    rc = aarch64_pt_query_4k_ext(root, M3_SCRATCH_VA_4K,
+    rc = aarch64_pt_query_4k_ext(root, AARCH64_PT_SCRATCH_VA_4K,
                                  &qpa, &qperm, &qsw);
     if (rc != AARCH64_PT_ENOENT) {
         scratch_root_free(root, data_pas, 1);
@@ -270,20 +270,20 @@ static int section_4k_round(uint64_t *root)
 
     /* (e) EEXIST contract: re-map succeeds, then second map fails
      * with -EEXIST (slot now occupied). */
-    rc = aarch64_pt_map_4k_ext(root, M3_SCRATCH_VA_4K, data,
+    rc = aarch64_pt_map_4k_ext(root, AARCH64_PT_SCRATCH_VA_4K, data,
                                AARCH64_PT_KERNEL_RW, 0);
     if (rc != AARCH64_PT_OK) {
         scratch_root_free(root, data_pas, 1);
         return section_fail("4k:remap_new", rc);
     }
-    rc = aarch64_pt_map_4k_ext(root, M3_SCRATCH_VA_4K, data,
+    rc = aarch64_pt_map_4k_ext(root, AARCH64_PT_SCRATCH_VA_4K, data,
                                AARCH64_PT_KERNEL_RW, 0);
     if (rc != AARCH64_PT_EEXIST) {
         scratch_root_free(root, data_pas, 1);
         return section_fail("4k:eexist", rc ? rc : -EIO);
     }
     /* Clean up: unmap before the next section. */
-    rc = aarch64_pt_unmap_4k_ext(root, M3_SCRATCH_VA_4K,
+    rc = aarch64_pt_unmap_4k_ext(root, AARCH64_PT_SCRATCH_VA_4K,
                                  &u_pa, &u_perm, &u_sw);
     if (rc != AARCH64_PT_OK) {
         scratch_root_free(root, data_pas, 1);
@@ -311,27 +311,27 @@ static int section_2m_block(uint64_t *root)
 
     uint64_t data_pas[1] = { block_pa };
 
-    int rc = aarch64_pt_map_2m_block(root, M3_SCRATCH_VA_2M,
+    int rc = aarch64_pt_map_2m_block(root, AARCH64_PT_SCRATCH_VA_2M,
                                     block_pa, AARCH64_PT_KERNEL_RW);
     if (rc != AARCH64_PT_OK) {
         scratch_root_free(root, data_pas, 1);
         return section_fail("2m:map", rc);
     }
     /* EEXIST: a second install on the same VA must fail. */
-    rc = aarch64_pt_map_2m_block(root, M3_SCRATCH_VA_2M,
+    rc = aarch64_pt_map_2m_block(root, AARCH64_PT_SCRATCH_VA_2M,
                                 block_pa, AARCH64_PT_KERNEL_RW);
     if (rc != AARCH64_PT_EEXIST) {
         scratch_root_free(root, data_pas, 1);
         return section_fail("2m:eexist", rc ? rc : -EIO);
     }
     uint64_t u_pa = 0;
-    rc = aarch64_pt_unmap_2m_block(root, M3_SCRATCH_VA_2M, &u_pa);
+    rc = aarch64_pt_unmap_2m_block(root, AARCH64_PT_SCRATCH_VA_2M, &u_pa);
     if (rc != AARCH64_PT_OK || u_pa != block_pa) {
         scratch_root_free(root, data_pas, 1);
         return section_fail("2m:unmap", rc ? rc : -EIO);
     }
     /* ENOENT: a second unmap must fail. */
-    rc = aarch64_pt_unmap_2m_block(root, M3_SCRATCH_VA_2M, &u_pa);
+    rc = aarch64_pt_unmap_2m_block(root, AARCH64_PT_SCRATCH_VA_2M, &u_pa);
     if (rc != AARCH64_PT_ENOENT) {
         scratch_root_free(root, data_pas, 1);
         return section_fail("2m:enoent", rc ? rc : -EIO);
@@ -355,7 +355,7 @@ static int section_split_2m(uint64_t *root)
     }
 
     /* Install a 2 MiB block, then split it into 512 4 KiB leaves. */
-    int rc = aarch64_pt_map_2m_block(root, M3_SCRATCH_VA_2M,
+    int rc = aarch64_pt_map_2m_block(root, AARCH64_PT_SCRATCH_VA_2M,
                                     block_pa, AARCH64_PT_KERNEL_RW);
     if (rc != AARCH64_PT_OK) {
         free_pages(pg, 1);
@@ -365,7 +365,7 @@ static int section_split_2m(uint64_t *root)
     /* The scratch root is unpublished (we never published it via
      * aarch64_pt_root_publish) — the split path MUST succeed and
      * MUST NOT return -EPERM. */
-    rc = aarch64_pt_split_block_2m(root, M3_SCRATCH_VA_2M);
+    rc = aarch64_pt_split_block_2m(root, AARCH64_PT_SCRATCH_VA_2M);
     if (rc != AARCH64_PT_OK) {
         free_pages(pg, 1);
         scratch_root_free(root, NULL, 0);
@@ -373,15 +373,15 @@ static int section_split_2m(uint64_t *root)
     }
     /* After the split, the L2 slot is a table descriptor pointing
      * at the freshly-allocated L3 page. Query a leaf that lives
-     * INSIDE the just-split block (L2 index = 1 = M3_PMD_IDX_2M),
+     * INSIDE the just-split block (L2 index = 1 = AARCH64_PT_PMD_IDX_2M),
      * at the first 4 KiB page of the block. The split wrote leaf
      * (block_pa + 0*PAGE_4K_SIZE) at L3[0]; querying VA
-     * M3_SCRATCH_VA_2M (= SCRATCH_VA_2M_BASE + 0) lands at L3[0]
+     * AARCH64_PT_SCRATCH_VA_2M (= SCRATCH_VA_2M_BASE + 0) lands at L3[0]
      * and must report block_pa + 0 as the PA. */
     uint64_t qpa = 0;
     uint32_t qperm = 0;
     uint64_t qsw = 0;
-    rc = aarch64_pt_query_4k_ext(root, M3_SCRATCH_VA_2M,
+    rc = aarch64_pt_query_4k_ext(root, AARCH64_PT_SCRATCH_VA_2M,
                                  &qpa, &qperm, &qsw);
     if (rc != AARCH64_PT_OK || qpa != block_pa ||
         qperm != AARCH64_PT_KERNEL_RW) {
@@ -392,7 +392,7 @@ static int section_split_2m(uint64_t *root)
     }
     /* A leaf one page into the block must report block_pa + 4K. */
     qpa = qperm = qsw = 0;
-    rc = aarch64_pt_query_4k_ext(root, M3_SCRATCH_VA_2M + PAGE_4K_SIZE,
+    rc = aarch64_pt_query_4k_ext(root, AARCH64_PT_SCRATCH_VA_2M + PAGE_4K_SIZE,
                                  &qpa, &qperm, &qsw);
     if (rc != AARCH64_PT_OK || qpa != block_pa + PAGE_4K_SIZE ||
         qperm != AARCH64_PT_KERNEL_RW) {
@@ -404,7 +404,7 @@ static int section_split_2m(uint64_t *root)
     /* And the third 4 KiB leaf in the block. */
     qpa = qperm = qsw = 0;
     rc = aarch64_pt_query_4k_ext(root,
-                                 M3_SCRATCH_VA_2M + 2 * PAGE_4K_SIZE,
+                                 AARCH64_PT_SCRATCH_VA_2M + 2 * PAGE_4K_SIZE,
                                  &qpa, &qperm, &qsw);
     if (rc != AARCH64_PT_OK || qpa != block_pa + 2 * PAGE_4K_SIZE) {
         free_pages(pg, 1);
@@ -428,7 +428,7 @@ static int section_split_2m(uint64_t *root)
  * This section is the on-target companion to hosttests/cases/
  * test_aarch64_arch_vmm_init.c. The production call site
  * (kernel/arch/aarch64/boot/main.c) invokes arch_vmm_init() between
- * arch_boot_direct_map_init() and aarch64_m1_probe_prepare(), so the
+ * arch_boot_direct_map_init() and aarch64_page_table_probe_prepare(), so the
  * live TTBR1 already holds the M1 root PA when this section runs.
  *
  * Reads the live TTBR1, masks with AARCH64_TTBR_BASE_MASK, forms the
@@ -472,7 +472,7 @@ static int section_kernel_map_pinned(void)
 }
 
 /* ── Top-level: 5 sections, each owns its own scratch root ─────── */
-int test_m3_selftest(void)
+int test_aarch64_page_table_selftest(void)
 {
     int passed = 0;
     int failed = 0;
@@ -567,7 +567,7 @@ int test_m3_selftest(void)
 
 #else /* !__aarch64__ */
 
-int test_m3_selftest(void)
+int test_aarch64_page_table_selftest(void)
 {
     /* x86_64 stub: the file is on the aarch64 whitelist only
      * (kernel/Makefile explicitly enumerates KERNEL_C_SOURCES for
@@ -583,7 +583,7 @@ int test_m3_selftest(void)
 
 #else /* !OS01_SELFTEST */
 
-int test_m3_selftest(void)
+int test_aarch64_page_table_selftest(void)
 {
     /* Non-selftest build: no-op so the symbol exists if some
      * production code accidentally references it. */

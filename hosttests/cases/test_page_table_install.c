@@ -1,4 +1,4 @@
-#include "m1_test_runner.h"
+#include "page_table_test_runner.h"
 #include <sys/mman.h>
 #include <errno.h>
 #include <string.h>
@@ -6,7 +6,7 @@
 #include <arch/aarch64/early_arena.h>
 #include <arch/aarch64/boot_direct_map.h>
 #include <memory/pmm.h>
-static struct aarch64_m1_arena arena;
+static struct aarch64_early_arena arena;
 static struct MEMORY_RANGE ram = {
     .phys_start = 0x40200000, .phys_end = 0x41000000, .type = MEMORY_TYPE_RAM};
 struct Physical_Memory_Manager PMMngr;
@@ -22,16 +22,16 @@ size_t pmm_arch_normalize(const void *ctx, struct MEMORY_RANGE *out)
     *out = ram;
     return 1;
 }
-const struct aarch64_m1_arena *aarch64_m1_arena_get(void) { return &arena; }
+const struct aarch64_early_arena *aarch64_early_arena_get(void) { return &arena; }
 uint64_t aarch64_read_ttbr1(void) { return installed; }
-void aarch64_m1_install_ttbr1(uint64_t pa)
+void aarch64_install_ttbr1(uint64_t pa)
 {
     installed = pa;
     install_calls++;
 }
 uint64_t aarch64_runtime_root_address(void) { return (uintptr_t)&published; }
-void aarch64_m1_prune_warm(void) {}
-int aarch64_m1_selftest(uint64_t pa)
+void aarch64_page_table_prune_warm(void) {}
+int aarch64_page_table_selftest(uint64_t pa)
 {
     assert_eq(pa, installed);
     assert_false(arch_boot_direct_map_ready());
@@ -44,7 +44,7 @@ static void reset(void)
     arch_boot_direct_map__test_reset();
     installed = published = 0;
     smoke_rc = install_calls = 0;
-    arena = (struct aarch64_m1_arena){.base_pa = 0x40200000,
+    arena = (struct aarch64_early_arena){.base_pa = 0x40200000,
                                       .end_pa = 0x40400000,
                                       .table_base_pa = 0x40210000,
                                       .table_end_pa = 0x40214000,
@@ -97,7 +97,7 @@ TEST_ENTRY(test_ready_after_install_cleanup_and_validation),
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
     if (p == MAP_FAILED)
         return 2;
-    int failed = M1_RUN_ALL_TESTS();
+    int failed = PAGE_TABLE_RUN_ALL_TESTS();
     munmap(p, 0x200000);
     return failed;
 }

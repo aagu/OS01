@@ -1,5 +1,5 @@
 /*
- * hosttests/cases/test_m1_contract.c — common boot direct-map contract
+ * hosttests/cases/test_page_table_contract.c — common boot direct-map contract
  *                                            (aarch64 M1 plan Task 5).
  *
  * Task 5 introduces a shared facade (kernel/include/arch/boot_memory.h)
@@ -41,7 +41,7 @@
  * consumes vmm_init's return value plus the resulting kernel_map;
  * stubbing is therefore sufficient to exercise every contract branch.
  */
-#include "m1_test_runner.h"
+#include "page_table_test_runner.h"
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -550,6 +550,6 @@ TEST_LIST_END
 
 int main(void)
 {
-    int failed = M1_RUN_ALL_TESTS();
+    int failed = PAGE_TABLE_RUN_ALL_TESTS();
     return failed;
 }

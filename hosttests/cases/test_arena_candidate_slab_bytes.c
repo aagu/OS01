@@ -20,7 +20,7 @@
  * rejects range 0 (slab segment + alignment slack overflow) and
  * picks range 1.
  */
-#include "m1_test_runner.h"
+#include "page_table_test_runner.h"
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -78,8 +78,8 @@ TEST_FUNC(test_candidate_scan_includes_slab_bytes)
         { .phys_start = 0x50000000ULL, .phys_end = 0x60000000ULL,
           .type = MEMORY_TYPE_RAM },
     };
-    struct aarch64_m1_arena got;
-    int rc = aarch64_m1_plan(ram, 2, &got);
+    struct aarch64_early_arena got;
+    int rc = aarch64_early_arena_plan(ram, 2, &got);
     assert_eq(0, rc);
     /* The candidate MUST be inside range 1, not range 0. */
     assert_true(got.base_pa >= 0x50000000ULL);
@@ -101,7 +101,7 @@ TEST_FUNC(test_first_range_2mib_rejected)
         { .phys_start = 0x40200000ULL, .phys_end = 0x40400000ULL,
           .type = MEMORY_TYPE_RAM },
     };
-    int rc = aarch64_m1_prepare(ram, 1);
+    int rc = aarch64_early_arena_prepare(ram, 1);
     assert_true(rc < 0);
     assert_eq(canary, PMMngr.start_brk);
 }
@@ -118,8 +118,8 @@ TEST_FUNC(test_candidate_with_full_room_succeeds)
         { .phys_start = 0x70000000ULL, .phys_end = 0x80000000ULL,
           .type = MEMORY_TYPE_RAM },
     };
-    struct aarch64_m1_arena got;
-    int rc = aarch64_m1_plan(ram, 2, &got);
+    struct aarch64_early_arena got;
+    int rc = aarch64_early_arena_plan(ram, 2, &got);
     assert_eq(0, rc);
     assert_true(got.base_pa >= 0x40200000ULL);
     assert_true(got.end_pa   <= 0x60000000ULL);
@@ -133,6 +133,6 @@ TEST_LIST_END
 
 int main(void)
 {
-    int failed = M1_RUN_ALL_TESTS();
+    int failed = PAGE_TABLE_RUN_ALL_TESTS();
     return failed;
 }

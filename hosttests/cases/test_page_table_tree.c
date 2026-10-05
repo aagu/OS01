@@ -1,5 +1,5 @@
 /*
- * hosttests/cases/test_m1_tree.c — runtime page-table builder and
+ * hosttests/cases/test_page_table_tree.c — runtime page-table builder and
  *                                    strict validator (aarch64 M1 plan
  *                                    Task 4).
  *
@@ -39,7 +39,7 @@
  * build, so a stale bit set during a partial build surfaces in the
  * validator as an unexpected descriptor.
  */
-#include "m1_test_runner.h"
+#include "page_table_test_runner.h"
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -229,14 +229,14 @@ static const struct aarch64_tree_ops *fake_ops_ptr(fake_pool_t *p)
  * the upper-bound check). The builder consumes `table_base_pa` (to
  * detect NULL), `table_pages` (for the upper bound), and the layout
  * (never — we don't preflight the metadata here). For the tests we
- * pass a fully-built `aarch64_m1_arena` populated by hand.
+ * pass a fully-built `aarch64_early_arena` populated by hand.
  *
  * Important: the validator walks `tree->page_count` against
  * `arena->table_pages` only as an upper-bound; the runtime
  * validation logic does NOT compare against `arena->table_base_pa`
  * directly. We set the table_base_pa to a non-zero value so the
  * builder's check passes. */
-static void setup_arena(struct aarch64_m1_arena *a, size_t table_pages)
+static void setup_arena(struct aarch64_early_arena *a, size_t table_pages)
 {
     memset(a, 0, sizeof(*a));
     a->base_pa = T_B_BASE;
@@ -351,7 +351,7 @@ struct tree_result {
 static struct aarch64_runtime_tree_validate_buf g_validate_buf;
 
 static struct tree_result do_build(const struct MEMORY_RANGE *ram, size_t count,
-                                  struct aarch64_m1_arena *arena,
+                                  struct aarch64_early_arena *arena,
                                   fake_pool_t *pool)
 {
     struct tree_result r;
@@ -362,7 +362,7 @@ static struct tree_result do_build(const struct MEMORY_RANGE *ram, size_t count,
 }
 
 static int do_validate(const struct MEMORY_RANGE *ram, size_t count,
-                       struct aarch64_m1_arena *arena,
+                       struct aarch64_early_arena *arena,
                        fake_pool_t *pool,
                        const struct aarch64_runtime_tree *tree)
 {
@@ -378,7 +378,7 @@ static int do_validate(const struct MEMORY_RANGE *ram, size_t count,
 TEST_FUNC(test_happy_512_mib_low_window)
 {
     struct MEMORY_RANGE ram[1];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
     size_t exp_blocks, exp_pages;
@@ -411,7 +411,7 @@ TEST_FUNC(test_happy_4_gib_with_b_d_accounting)
     /* 4 GiB at [0x40200000, 0x140200000). Compute the exact expected
      * block AND page count from R + B + D; do NOT hardcode either. */
     struct MEMORY_RANGE ram[1];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
     size_t exp_blocks, r_blocks, exp_pages;
@@ -447,7 +447,7 @@ TEST_FUNC(test_happy_cross_1_gib_boundary)
      * the 1 GiB / 2 GiB boundary — needs TWO L2 tables (one for
      * bucket 0x3FF, one for 0x400). */
     struct MEMORY_RANGE ram[1];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
     size_t exp_pages;
@@ -468,7 +468,7 @@ TEST_FUNC(test_happy_512_gib_range)
     /* 2 GiB at PA=2 GiB ([0x80000000, 0x100000000)) — exercises
      * multiple PMD buckets within PUD[0]. */
     struct MEMORY_RANGE ram[1];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
     size_t exp_pages;
@@ -493,7 +493,7 @@ TEST_FUNC(test_happy_near_1_tib)
      * 0x1FF) are needed. Plus B in PUD[0] and D in PUD[0] add more
      * PMDs. Compute via helper. */
     struct MEMORY_RANGE ram[1];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
     size_t exp_pages;
@@ -516,7 +516,7 @@ TEST_FUNC(test_happy_sparse_holes)
     /* Two non-adjacent ranges. Forces the builder to keep separate
      * PMD tables for the two ranges. */
     struct MEMORY_RANGE ram[2];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
     size_t exp_pages;
@@ -544,7 +544,7 @@ TEST_FUNC(test_input_over_limit)
     /* count > MEMORY_RANGE_MAX → -EINVAL. We use a fake arena with
      * enough pages and a fake pool. The build never gets to alloc
      * because the count check fires first. */
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     size_t big = MEMORY_RANGE_MAX + 1u;
     struct MEMORY_RANGE *ram;
@@ -566,7 +566,7 @@ TEST_FUNC(test_input_r_d_conflict)
 {
     /* A RAM range that overlaps D must be rejected. */
     struct MEMORY_RANGE ram[1];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
 
@@ -583,7 +583,7 @@ TEST_FUNC(test_input_r_d_conflict)
 TEST_FUNC(test_input_r_b_conflict)
 {
     struct MEMORY_RANGE ram[1];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
 
@@ -600,7 +600,7 @@ TEST_FUNC(test_input_r_b_conflict)
 TEST_FUNC(test_input_non_ram_type)
 {
     struct MEMORY_RANGE ram[1];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
 
@@ -617,7 +617,7 @@ TEST_FUNC(test_input_non_ram_type)
 TEST_FUNC(test_input_unaligned_start)
 {
     struct MEMORY_RANGE ram[1];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
 
@@ -634,7 +634,7 @@ TEST_FUNC(test_input_unaligned_start)
 TEST_FUNC(test_input_unaligned_end)
 {
     struct MEMORY_RANGE ram[1];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
 
@@ -651,7 +651,7 @@ TEST_FUNC(test_input_unaligned_end)
 TEST_FUNC(test_input_pa_out_of_range)
 {
     struct MEMORY_RANGE ram[1];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
 
@@ -667,7 +667,7 @@ TEST_FUNC(test_input_pa_out_of_range)
 
 TEST_FUNC(test_null_inputs)
 {
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct aarch64_runtime_tree tree;
 
@@ -703,7 +703,7 @@ TEST_FUNC(test_missing_one_page_from_pool)
      * partial tree (validate on the cleared out returns -EINVAL or
      * similar). */
     struct MEMORY_RANGE ram[1];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
 
@@ -739,7 +739,7 @@ TEST_FUNC(test_missing_one_page_from_pool)
 
 /* Helper: build a small valid tree with B + D + R. */
 static int build_small_tree(struct MEMORY_RANGE ram[1],
-                            struct aarch64_m1_arena *arena,
+                            struct aarch64_early_arena *arena,
                             fake_pool_t *pool)
 {
     struct tree_result r;
@@ -755,7 +755,7 @@ TEST_FUNC(test_validate_illegal_table_descriptor_sbz)
     /* Mutate one PUD slot to have a non-zero SBZ bit (bit 11, the
      * first SBZ bit per ARM ARM). The validator MUST reject this. */
     struct MEMORY_RANGE ram[1];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
     uint64_t *root_va;
@@ -786,7 +786,7 @@ TEST_FUNC(test_validate_block_at_l1_is_rejected)
      * The validator must reject: block descriptors are only valid
      * at L2. */
     struct MEMORY_RANGE ram[1];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
     uint64_t *root_va;
@@ -814,7 +814,7 @@ TEST_FUNC(test_validate_unexpected_l3_leaf_in_l2)
     /* The tree only has L0/L1/L2 — TYPE=1 at L2 means "L3 leaf" per
      * AR, which is a violation since this tree has no L3 tables. */
     struct MEMORY_RANGE ram[1];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
     uint64_t *l2_va;
@@ -851,7 +851,7 @@ TEST_FUNC(test_validate_unexpected_block_pa)
     /* Mutate an L2 slot to claim a PA NOT in any expected set. The
      * validator must reject. */
     struct MEMORY_RANGE ram[1];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
     uint64_t *l2_va;
@@ -888,7 +888,7 @@ TEST_FUNC(test_validate_cycles)
 {
     /* Force a cycle: make the L0 root point to itself. */
     struct MEMORY_RANGE ram[1];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
     uint64_t *root_va;
@@ -915,7 +915,7 @@ TEST_FUNC(test_validate_duplicate_intermediate)
     /* Make TWO PUD slots point at the SAME L2 table — duplicate
      * intermediate, no cycle. The validator must reject. */
     struct MEMORY_RANGE ram[1];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
     uint64_t *root_va;
@@ -955,7 +955,7 @@ TEST_FUNC(test_validate_page_count_mismatch)
     /* Truncate the table_used_end_pa so page_count arithmetic fails.
      * The validator must reject. */
     struct MEMORY_RANGE ram[1];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
 
@@ -978,7 +978,7 @@ TEST_FUNC(test_validate_canary_around_table_pages)
      * refuses to honor a PA the builder never issued; this test
      * exercises that contract. */
     struct MEMORY_RANGE ram[1];
-    struct aarch64_m1_arena arena;
+    struct aarch64_early_arena arena;
     fake_pool_t pool;
     struct tree_result r;
     uint64_t issued_pa;
@@ -1065,6 +1065,6 @@ TEST_LIST_END
 int main(void)
 {
     printf("=== M1 tree test starting ===\n");
-    int failed = M1_RUN_ALL_TESTS();
+    int failed = PAGE_TABLE_RUN_ALL_TESTS();
     return failed;
 }

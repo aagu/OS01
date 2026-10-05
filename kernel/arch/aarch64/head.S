@@ -818,9 +818,9 @@ aarch64_runtime_root_address:
     ret
 .globl aarch64_probe_pa_address
 aarch64_probe_pa_address:
-    ldr x0, =m1_probe_pa
+    ldr x0, =pt_probe_pa
     ret
 .globl aarch64_probe_expected_address
 aarch64_probe_expected_address:
-    ldr x0, =m1_probe_expected
+    ldr x0, =pt_probe_expected
     ret

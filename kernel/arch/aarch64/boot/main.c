@@ -3,7 +3,7 @@
 #include <string.h>
 #include <arch/boot_memory.h>
 #include <arch/aarch64/boot_direct_map.h>
-#include <arch/aarch64/m1_selftest.h>
+#include <arch/aarch64/page_table_selftest.h>
 #include <core/bootinfo.h>
 #include <log/log.h>      /* for log_err/log_info macros */
 #include <core/printk.h>  /* for serial_printk (selftest markers) */
@@ -16,7 +16,7 @@
 #include <arch/irq.h>
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/early_arena.h>
-#include <arch/aarch64/boot/m3_probe.h>    /* aarch64_m3_shootdown_probe (M3.5 Task 25) */
+#include <arch/aarch64/boot/shootdown_probe.h>    /* aarch64_shootdown_probe (M3.5 Task 25) */
 #include <arch/aarch64/page_table.h>
 #include <arch/aarch64/ram.h>
 #include <arch/aarch64/smp.h>
@@ -392,7 +392,7 @@ void aarch64_main(const struct boot_context *handoff)
     PMMngr.start_brk   = (uint64_t)&_kernel_end;
 
     /* M1 preflight: select and publish the early arena BEFORE pmm_init.
-     * aarch64_m1_prepare() drives aarch64_m1_plan() (pure input validation
+     * aarch64_early_arena_prepare() drives aarch64_early_arena_plan() (pure input validation
      * + checked metadata sizing + low-window arena selection) and, only
      * after every check has passed, sets PMMngr.start_brk = OFFSET +
      * base_pa so pmm_init() places the metadata segment at the high-half
@@ -408,7 +408,7 @@ void aarch64_main(const struct boot_context *handoff)
             log_err("[smp] FATAL: pmm_arch_normalize returned no ranges\n");
             for (;;) arch_cpu_halt();
         }
-        if (aarch64_m1_prepare(scratch, n) != 0) {
+        if (aarch64_early_arena_prepare(scratch, n) != 0) {
             log_err("[smp] FATAL: aarch64 M1 arena preflight failed\n");
             for (;;) arch_cpu_halt();
         }
@@ -432,14 +432,14 @@ void aarch64_main(const struct boot_context *handoff)
     /* M3.5 Task 24: pin kernel_map = (mmap)(pa + ARCH_PAGE_OFFSET)
      * where pa = aarch64_read_ttbr1() & AARCH64_TTBR_BASE_MASK.
      * arch_boot_direct_map_init() above configured the runtime page
-     * tables and (via aarch64_m1_install_ttbr1()) installed the M1
+     * tables and (via aarch64_install_ttbr1()) installed the M1
      * root into TTBR1_EL1; arch_vmm_init reads TTBR1 back, validates
      * the masked PA (nonzero, 4 KiB aligned, < 1 TiB), and publishes
      * the same kernel_map pointer every downstream arch_vmm_* entry
      * expects. The M1 root remains live until the next translation
      * table change; arch_vmm_init just locates and re-publishes it.
      *
-     * The call runs BEFORE aarch64_m1_probe_prepare() and BEFORE the
+     * The call runs BEFORE aarch64_page_table_probe_prepare() and BEFORE the
      * selftest_run_all() block below so the kernel_map assertion in
      * the M3 selftest sees the live state.
      *
@@ -456,7 +456,7 @@ void aarch64_main(const struct boot_context *handoff)
             for (;;) arch_cpu_halt();
         }
     }
-    if (aarch64_m1_probe_prepare()) {
+    if (aarch64_page_table_probe_prepare()) {
         log_err("M1 FATAL reason=probe\n");
         for (;;) arch_cpu_halt();
     }
@@ -675,11 +675,11 @@ void aarch64_main(const struct boot_context *handoff)
      * breaking MODE=smp 1/2/4. The body itself still owns the
      * FAIL contract (hosttest pins the 0-AP path); production and
      * selftest images at -smp >= 2 reach the full 7-step sequence
-     * and either print "M3-SHOOTDOWN-PROBE: OK" or halt. */
+     * and either print "SHOOTDOWN-PROBE: OK" or halt. */
     if (dtb_cpu_count() >= 2) {
-        aarch64_m3_shootdown_probe();
+        aarch64_shootdown_probe();
     } else {
-        kputs("M3-SHOOTDOWN-PROBE: SKIP (single-CPU boot)\n");
+        kputs("SHOOTDOWN-PROBE: SKIP (single-CPU boot)\n");
     }
 
 #if OS01_SELFTEST
@@ -690,8 +690,8 @@ void aarch64_main(const struct boot_context *handoff)
      * pre-SMP selftest_run_all() table. Prints the harness-asserted
      * '[selftest] m3mc: N/N PASS' marker (SKIP line at -smp 1). */
     {
-        extern int test_m3_multicore_run(void);
-        (void)test_m3_multicore_run();
+        extern int test_aarch64_page_table_multicore_run(void);
+        (void)test_aarch64_page_table_multicore_run();
     }
 #endif
 
