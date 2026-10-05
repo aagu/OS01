@@ -7,6 +7,17 @@
 #endif
 
 #include "test_platform.h"
+
+/* Guard arch/spinlock.h so kernel code that does
+ * `#include <arch/spinlock.h>` (in OS01_HOST_TEST builds) does NOT
+ * pull in the x86_64 asm-based spin_lock / spin_lock_irqsave
+ * definitions that test_platform.h already replaced with host stubs. */
+#ifndef _ARCH_SPINLOCK_H
+#define _ARCH_SPINLOCK_H 1
+#endif
+#ifndef _ARCH_X86_64_SPINLOCK_H
+#define _ARCH_X86_64_SPINLOCK_H 1
+#endif
 #include <errno.h>
 #include <string.h>
 #include <stdint.h>
@@ -143,6 +154,42 @@ extern int fake_core_fetch_rx_sweeps;
 extern int fake_core_mailbox_lock_check;
 extern int fake_pci_drivers_count;
 
+/* Task 9: mailbox lock-held observation.  The fixture's
+ * test_core_fetch_one (kernel/net/lwip.c, OS01_HOST_TEST) acquires
+ * the test_core_mbox_lock only around the pop step, matching the
+ * production sys_arch_mbox_fetch's mb->lock discipline.  We
+ * redefine spin_lock_irqsave / spin_unlock_irqrestore below so
+ * that ANY holder of any spinlock_T via these macros flips
+ * fake_mailbox_lock_held — but the brief's invariant is verified
+ * by the production fixture's own discipline, not by which lock
+ * is being held.  A holder of THIS lock (test_core_mbox_lock)
+ * during the sweep would set the counter to 1 and fail
+ * test_bounded_rx_and_no_lock's assertion.
+ *
+ * Other host test fixtures (e1000/virtio_runtime.h) redefine
+ * spin_lock_irqsave AFTER including net_runtime.h, so their
+ * overrides take effect for their own test cases — they do not
+ * care about fake_mailbox_lock_held. */
+extern int fake_mailbox_lock_held;
+
+static inline uint64_t net_test_spin_lock_irqsave(spinlock_T *l)
+{
+    (void)l;
+    fake_mailbox_lock_held = 1;
+    return 0;
+}
+
+static inline void net_test_spin_unlock_irqrestore(spinlock_T *l, uint64_t f)
+{
+    (void)l; (void)f;
+    fake_mailbox_lock_held = 0;
+}
+
+#undef spin_lock_irqsave
+#undef spin_unlock_irqrestore
+#define spin_lock_irqsave(l)    net_test_spin_lock_irqsave(l)
+#define spin_unlock_irqrestore(l, f) net_test_spin_unlock_irqrestore(l, f)
+
 /* Mock functions matching lwIP signatures */
 static inline void tcpip_init(tcpip_init_done_fn initfunc, void *arg)
 {
@@ -256,6 +303,7 @@ static inline void fake_net_runtime_reset(void)
     fake_tcpip_input_calls = 0;
     fake_etharp_output_calls = 0;
     fake_pbuf_free_calls = 0;
+    fake_mailbox_lock_held = 0;
 }
 
 #endif /* ARCH9_NET_RUNTIME_H */

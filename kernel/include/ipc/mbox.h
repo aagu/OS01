@@ -4,7 +4,7 @@
  * redeclarations that used to live inside kernel/driver/virtio-net.c
  * and kernel/driver/e1000.c's IRQ handlers.  Centralising the prototype
  * in kernel/include/ipc/mbox.h follows the AGENTS.md source/header
- * symmetry rule (kernel/ipc/mbox.h ↔ kernel/net/sys_arch.c) and lets
+ * symmetry rule (kernel/include/ipc/mbox.h ↔ kernel/ipc/mbox.c) and lets
  * any driver or subsystem wake the tcpip-thread mbox without copying
  * the extern into its own translation unit.
  *
@@ -14,9 +14,10 @@
  * returns promptly even if no API message is pending — the tcpip
  * thread then sweeps RX via net_poll_rx() before re-checking the mbox.
  *
- * Implementation lives in kernel/net/sys_arch.c next to the rest of
- * the lwIP OS-adaptation surface (sys_arch_protect, sys_mbox_post,
- * etc.).  A duplicate definition here would cause a link error.
+ * Implementation lives in kernel/ipc/mbox.c.  The actual lock/flag
+ * dance runs in kernel/net/sys_arch.c (where the mailbox state lives)
+ * via sys_arch_mbox_set_idle_and_wake(); the ipc source owns the
+ * public symbol and delegates the state access to sys_arch.c.
  */
 #ifndef _KERNEL_IPC_MBOX_H
 #define _KERNEL_IPC_MBOX_H

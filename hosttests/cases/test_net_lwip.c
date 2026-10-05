@@ -29,6 +29,12 @@ int fake_tcpip_input_calls = 0;
 int fake_etharp_output_calls = 0;
 int fake_pbuf_free_calls = 0;
 
+/* Mailbox lock-held observation (Task 9 brief: "lock-free during
+ * sweep" invariant).  Set by the host test's redefined
+ * spin_lock_irqsave / spin_unlock_irqrestore (see net_runtime.h).
+ * Recorded here at the moment the sweep reaches ops->poll_rx. */
+int fake_mailbox_lock_held = 0;
+
 err_t ethernet_input(struct pbuf *p, struct netif *netif)
 {
     fake_ethernet_input_calls++;
@@ -70,6 +76,13 @@ static unsigned fake_poll_rx(struct net_device *dev, unsigned budget)
 {
     (void)dev;
     fake_poll_budget = budget;
+    /* Record whether the mailbox lock was held during the sweep.
+     * The fixture's test_core_fetch_one (kernel/net/lwip.c, OS01_HOST_TEST)
+     * takes the mbox lock only around the pop step — if the
+     * fixture were bugged and held the lock during the sweep,
+     * fake_mailbox_lock_held would be 1 here.  Test assertion in
+     * test_bounded_rx_and_no_lock catches that. */
+    fake_core_mailbox_lock_check = fake_mailbox_lock_held;
     return 0;
 }
 

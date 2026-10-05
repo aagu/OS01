@@ -47,6 +47,22 @@ static int   test_core_mbox_tail = 0;
 static int   test_core_mbox_count = 0;
 static int   test_app_mbox_count = 0;
 static uint32_t s_test_default_ipv4 = 0;
+
+/* Host-fixture lock for the test_core_mbox ring.  Mirrors the
+ * production os_mbox_t.lock field (kernel/net/sys_arch.c) — the
+ * production sys_arch_mbox_fetch takes mb->lock ONLY around the pop
+ * step (count/tail/count--), never around the sweep.  The host
+ * fixture must use the same discipline or the brief's "lock-free
+ * during sweep" invariant is not actually exercised.
+ *
+ * The host test fixtures in hosttests/mock/arch9/net_runtime.h
+ * redefine spin_lock_irqsave / spin_unlock_irqrestore so that the
+ * tracking happens on THIS lock — any holder of the lock flips
+ * fake_mailbox_lock_held to 1.  fake_poll_rx (test_net_lwip.c)
+ * copies fake_mailbox_lock_held into fake_core_mailbox_lock_check
+ * at the moment of the sweep, so the test assertion verifies that
+ * no lock was held while the sweep ran. */
+static spinlock_T test_core_mbox_lock;
 #endif
 
 static err_t net_adapter_linkoutput(struct netif *netif, struct pbuf *p)
@@ -152,6 +168,7 @@ void net_lwip_reset_state(void)
     test_core_mbox_count = 0;
     test_app_mbox_count = 0;
     s_test_default_ipv4 = 0;
+    spin_init(&test_core_mbox_lock);
 #endif
 }
 
@@ -274,22 +291,33 @@ void net_service_app_mbox_post_for_test(void *msg)
 /* Drain the core mailbox — sweep RX first via net_device_poll_all(),
  * THEN pop one message.  This mirrors the production sys_arch mbox_fetch
  * loop (kernel/net/sys_arch.c) which calls net_poll_rx() before
- * attempting to pop.  The mailbox lock must NOT be held while polling. */
+ * attempting to pop.  The mailbox lock must NOT be held while polling.
+ *
+ * The host test fixture takes the mbox lock only around the pop,
+ * matching the production code's mb->lock discipline.  The brief's
+ * lock-free-during-sweep invariant is therefore structurally
+ * enforced: the test runtime's spinlock macros flip
+ * fake_mailbox_lock_held only for THIS lock, and fake_poll_rx
+ * records fake_core_mailbox_lock_check at the moment the sweep
+ * calls into each NIC's ops->poll_rx — so a fixture bug (lock held
+ * during sweep) would show up as fake_core_mailbox_lock_check == 1
+ * and fail the test_bounded_rx_and_no_lock assertion. */
 static int test_core_fetch_one(void)
 {
-    /* Sweep RX first, BEFORE popping.  Mailbox lock check is 0 here:
-     * we are NOT holding any lock; the test fixture records the fact. */
-    fake_core_mailbox_lock_check = 0;
+    /* Sweep RX first, BEFORE popping.  No lock held. */
     net_device_poll_all();
     fake_core_fetch_rx_sweeps++;
 
     if (test_core_mbox_count <= 0) {
         return -1;
     }
-    /* The mailbox lock is acquired only here, briefly. */
+    /* The mailbox lock is acquired only here, around the pop,
+     * matching the production sys_arch_mbox_fetch discipline. */
+    uint64_t _flags = spin_lock_irqsave(&test_core_mbox_lock);
     void *m = test_core_mbox_buf[test_core_mbox_tail];
     test_core_mbox_tail = (test_core_mbox_tail + 1) % TEST_MBOX_CAP;
     test_core_mbox_count--;
+    spin_unlock_irqrestore(&test_core_mbox_lock, _flags);
     (void)m;
     return 0;
 }

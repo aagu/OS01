@@ -39,6 +39,10 @@ struct netif *fake_last_rx_netif = NULL;
 int  fake_tcpip_input_calls = 0;
 int  fake_etharp_output_calls = 0;
 int  fake_pbuf_free_calls = 0;
+/* Mailbox lock-held observation (Task 9).  Referenced by
+ * fake_net_runtime_reset() — only the test that drives the core
+ * mailbox actually uses it (test_net_lwip.c). */
+int fake_mailbox_lock_held = 0;
 unsigned fake_poll_budget = 0;
 int fake_tcpip_init_calls = 0;
 tcpip_init_done_fn fake_tcpip_done_cb = NULL;

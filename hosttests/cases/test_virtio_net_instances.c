@@ -61,6 +61,10 @@ struct netif *fake_last_rx_netif = NULL;
 int fake_tcpip_input_calls = 0;
 int fake_etharp_output_calls = 0;
 int fake_pbuf_free_calls = 0;
+/* Mailbox lock-held observation (Task 9).  Referenced by
+ * fake_net_runtime_reset() — only test_net_lwip.c actually uses
+ * it; this definition just satisfies the linker. */
+int fake_mailbox_lock_held = 0;
 
 err_t ethernet_input(struct pbuf *p, struct netif *netif)
 {

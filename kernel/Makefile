@@ -61,6 +61,7 @@ KERNEL_C_SOURCES := \
     $(wildcard sched/*.c) \
     $(wildcard sync/*.c) \
     $(wildcard driver/*.c) \
+    $(wildcard ipc/*.c) \
     $(wildcard tty/*.c) \
     $(wildcard intr/*.c) \
     $(wildcard block/*.c) \

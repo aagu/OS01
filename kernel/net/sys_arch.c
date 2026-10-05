@@ -145,7 +145,14 @@ typedef struct {
  */
 static os_mbox_t *g_tcpip_mbox = NULL;
 
-void sys_mbox_wake(void)
+/* Delegate target for kernel/ipc/mbox.c::sys_mbox_wake().  The actual
+ * implementation lives here because g_tcpip_mbox and os_mbox_t are
+ * private to this translation unit (ARCH-9 Task 9 plan: source/header
+ * symmetry keeps ipc/mbox.h ↔ kernel/ipc/mbox.c, but the lwIP OS-layer
+ * mailbox struct stays encapsulated in sys_arch.c).  The delegation is
+ * one-way: kernel/ipc/mbox.c calls this; sys_arch.c does not call
+ * back into ipc/. */
+void sys_arch_mbox_set_idle_and_wake(void)
 {
     os_mbox_t *mb = g_tcpip_mbox;
     if (!mb) return;
