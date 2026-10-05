@@ -24,6 +24,7 @@ typedef struct {
     term_cell_t *alt_buf;    // [rows * cols]
     bool *dirty;             // [rows * cols] — needs redraw
     int  col, row;
+    int  saved_col, saved_row;           // saved cursor position (\e7/\e8, \e[s/\e[u, \e[?1049h/l)
     bool alt_active;                    // \e[?1049h/l
     bool cursor_visible;                // \e[?25h/l
     int  rows, cols;                    // usable dimensions

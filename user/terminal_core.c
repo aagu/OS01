@@ -148,6 +148,22 @@ bool term_core_input(term_core_t *t, uint8_t c)
     }
     if (t->csi_state == CS_ESC) {
         if (c == '[') { t->csi_state = CS_CSI; t->csi_param = 0; t->csi_qmark = false; return false; }
+        if (c == '7') { // DECSC: Save Cursor
+            t->saved_row = t->row;
+            t->saved_col = t->col;
+            t->csi_state = CS_NORMAL;
+            return false;
+        }
+        if (c == '8') { // DECRC: Restore Cursor
+            t->row = t->saved_row;
+            t->col = t->saved_col;
+            if (t->row < 0) t->row = 0;
+            if (t->row >= t->rows) t->row = t->rows - 1;
+            if (t->col < 0) t->col = 0;
+            if (t->col >= t->cols) t->col = t->cols - 1;
+            t->csi_state = CS_NORMAL;
+            return true;
+        }
         t->csi_state = CS_NORMAL;
         return false;
     }
@@ -160,6 +176,19 @@ bool term_core_input(term_core_t *t, uint8_t c)
         case 'B': t->row += p; if (t->row >= t->rows) t->row = t->rows - 1; break;
         case 'C': t->col += p; if (t->col >= t->cols) t->col = t->cols - 1; break;
         case 'D': t->col -= p; if (t->col < 0) t->col = 0; break;
+        case 's': // ANSI.SYS: Save Cursor
+            t->saved_row = t->row;
+            t->saved_col = t->col;
+            break;
+        case 'u': // ANSI.SYS: Restore Cursor
+            t->row = t->saved_row;
+            t->col = t->saved_col;
+            if (t->row < 0) t->row = 0;
+            if (t->row >= t->rows) t->row = t->rows - 1;
+            if (t->col < 0) t->col = 0;
+            if (t->col >= t->cols) t->col = t->cols - 1;
+            changed = true;
+            break;
         case 'K':
             if (t->csi_param == 0)      clear_line(t, t->col, t->cols);
             else if (t->csi_param == 1) clear_line(t, 0, t->col + 1);
@@ -195,6 +224,8 @@ bool term_core_input(term_core_t *t, uint8_t c)
         case 'h':
             if (t->csi_qmark && t->csi_param == 25) t->cursor_visible = true;
             if (t->csi_qmark && t->csi_param == 1049) {
+                t->saved_row = t->row;
+                t->saved_col = t->col;
                 t->alt_active = true;
                 clear_screen(t);            // alt starts blank
                 term_core_mark_all_dirty(t); // full redraw of alt buffer
@@ -207,7 +238,12 @@ bool term_core_input(term_core_t *t, uint8_t c)
             if (t->csi_qmark && t->csi_param == 1049) {
                 t->alt_active = false;      // back to main buffer
                 term_core_mark_all_dirty(t); // full redraw of main
-                t->row = 0; t->col = 0;
+                t->row = t->saved_row;
+                t->col = t->saved_col;
+                if (t->row < 0) t->row = 0;
+                if (t->row >= t->rows) t->row = t->rows - 1;
+                if (t->col < 0) t->col = 0;
+                if (t->col >= t->cols) t->col = t->cols - 1;
                 changed = true;
             }
             break;
@@ -215,6 +251,7 @@ bool term_core_input(term_core_t *t, uint8_t c)
         t->csi_state = CS_NORMAL;
         return changed;
     }
+
 
     // Normal character
     switch (c) {

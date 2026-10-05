@@ -213,22 +213,34 @@ TEST_FUNC(test_scroll) {
 TEST_FUNC(test_alt_screen_protocol) {
     reset();
     term_core_input(&core, 'A');
+    term_core_input(&core, '\n');
+    term_core_input(&core, 'X');
+    term_core_input(&core, 'Y');
     assert_eq('A', cell(core.main_buf, 0, 0)->glyph);
+    assert_eq('X', cell(core.main_buf, 1, 0)->glyph);
+    assert_eq('Y', cell(core.main_buf, 1, 1)->glyph);
+    assert_eq(1, core.row);
+    assert_eq(2, core.col);
 
-    /* enter alt screen: \e[?1049h — blank, main preserved */
+    /* enter alt screen: \e[?1049h — blank, main preserved, cursor saved */
     term_core_input(&core, 0x1b); term_core_input(&core, '[');
     term_core_input(&core, '?'); term_core_input(&core, '1');
     term_core_input(&core, '0'); term_core_input(&core, '4');
     term_core_input(&core, '9'); term_core_input(&core, 'h');
     assert_true(core.alt_active);
+    assert_eq(0, core.row);
+    assert_eq(0, core.col);
     assert_eq('A', cell(core.main_buf, 0, 0)->glyph);        /* main untouched */
 
     /* draw in alt */
     term_core_input(&core, 'B');
+    term_core_input(&core, '\n');
     assert_eq('B', cell(core.alt_buf, 0, 0)->glyph);
     assert_eq('A', cell(core.main_buf, 0, 0)->glyph);
+    assert_eq(1, core.row);
+    assert_eq(0, core.col);
 
-    /* exit alt: \e[?1049l — main restored (marked dirty for redraw) */
+    /* exit alt: \e[?1049l — main restored and cursor restored to (1, 2) */
     term_core_input(&core, 0x1b); term_core_input(&core, '[');
     term_core_input(&core, '?'); term_core_input(&core, '1');
     term_core_input(&core, '0'); term_core_input(&core, '4');
@@ -237,6 +249,44 @@ TEST_FUNC(test_alt_screen_protocol) {
     assert_eq('A', cell(core.main_buf, 0, 0)->glyph);
     assert_true(term_core_is_dirty(&core, 0, 0));   /* full redraw queued */
     assert_eq('B', cell(core.alt_buf, 0, 0)->glyph); /* alt keeps B */
+    assert_eq(1, core.row);                          /* cursor preserved! */
+    assert_eq(2, core.col);                          /* cursor preserved! */
+}
+
+TEST_FUNC(test_cursor_save_restore_dec) {
+    reset();
+    core.row = 5;
+    core.col = 12;
+    /* \e7 (DECSC: Save Cursor) */
+    term_core_input(&core, 0x1b);
+    term_core_input(&core, '7');
+
+    /* Move cursor away */
+    core.row = 1;
+    core.col = 0;
+
+    /* \e8 (DECRC: Restore Cursor) */
+    term_core_input(&core, 0x1b);
+    term_core_input(&core, '8');
+    assert_eq(5, core.row);
+    assert_eq(12, core.col);
+
+    /* \e[s (ANSI.SYS Save Cursor) */
+    core.row = 8;
+    core.col = 20;
+    term_core_input(&core, 0x1b);
+    term_core_input(&core, '[');
+    term_core_input(&core, 's');
+
+    core.row = 0;
+    core.col = 0;
+
+    /* \e[u (ANSI.SYS Restore Cursor) */
+    term_core_input(&core, 0x1b);
+    term_core_input(&core, '[');
+    term_core_input(&core, 'u');
+    assert_eq(8, core.row);
+    assert_eq(20, core.col);
 }
 
 TEST_FUNC(test_large_resolution_no_clamp) {
@@ -282,6 +332,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_busybox_clear_command),
     TEST_ENTRY(test_scroll),
     TEST_ENTRY(test_alt_screen_protocol),
+    TEST_ENTRY(test_cursor_save_restore_dec),
     TEST_ENTRY(test_large_resolution_no_clamp),
     TEST_ENTRY(test_reinit_resizes),
 TEST_LIST_END
