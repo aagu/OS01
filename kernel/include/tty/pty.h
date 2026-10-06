@@ -16,9 +16,14 @@ typedef struct pty_struct {
     bool        allocated;
     pipe_t     *master_to_slave;   // master writes, slave reads
     pipe_t     *slave_to_master;   // slave writes, master reads
+    spinlock_T  state_lock;
     struct termios term;
     uint16_t    ws_row, ws_col;
-    pid_t       pgrp;              // foreground process group
+    uint16_t    ws_xpixel, ws_ypixel;
+    union {
+        pid_t   pgrp;              // foreground process group
+        pid_t   fg_pgrp;
+    };
 } pty_t;
 
 extern pty_t pty_table[PTY_MAX];
@@ -29,6 +34,8 @@ void pty_init(void);
 pty_t *pty_alloc(void);
 
 // Called by fd_ioctl (weak stub in file.c overridden by real impl in pty.c)
+int pty_ioctl(pty_t *pty, int cmd, void *arg);
 int pty_slave_ioctl(pty_t *pty, int cmd, void *arg);
+int pty_master_ioctl(pty_t *pty, int cmd, void *arg);
 
 #endif // _KERNEL_PTY_H

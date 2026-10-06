@@ -74,6 +74,7 @@ struct stat {
 #define TIOCSPGRP   0x5410
 #define TIOCNOTTY   0x5422
 #define TIOCGWINSZ  0x5413
+#define TIOCSWINSZ  0x5414
 
 struct winsize {
     unsigned short ws_row;

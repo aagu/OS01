@@ -160,9 +160,10 @@ $(TEST_BLD)/test_slab_idempotent_reservation.elf \
     $(TEST_BLD)/test_fb_writers.elf \
     $(TEST_BLD)/test_bga_resolution.elf \
     $(TEST_BLD)/test_bga_non_x86.elf \
-    $(TEST_BLD)/test_fb_resolution_ioctl.elf
+    $(TEST_BLD)/test_fb_resolution_ioctl.elf \
+    $(TEST_BLD)/test_pty_winsize.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-pty-winsize
 
 all: $(TEST_BINS)
 
@@ -2715,6 +2716,35 @@ $(TEST_BLD)/test_fb_resolution_ioctl.elf: $(TEST_BLD)/test_fb_resolution_ioctl.o
 	$(HOST_CC) -lpthread -o $@ $^
 
 test-fb-ioctl: $(TEST_BLD)/test_fb_resolution_ioctl.elf
+	$<
+
+# PTY master window resize notifications (QEMU resolution switcher Task 6)
+PTY_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
+    -Wno-unused-function -D__SPINLOCK_H__ -DOS01_HOST_TEST \
+    -include $(TEST_MOCK)/pty_test_runtime.h \
+    -I$(TEST_MOCK)/include $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+
+$(TEST_BLD)/pty_production.o: $(TESTS_DIR)/kernel/tty/pty.c \
+		$(TEST_MOCK)/pty_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PTY_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/pty_file_production.o: $(TESTS_DIR)/kernel/fs/file.c \
+		$(TEST_MOCK)/pty_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PTY_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_pty_winsize.o: $(TEST_CASES)/test_pty_winsize.c \
+		$(TEST_MOCK)/pty_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PTY_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_pty_winsize.elf: $(TEST_BLD)/test_pty_winsize.o \
+		$(TEST_BLD)/pty_production.o \
+		$(TEST_BLD)/pty_file_production.o
+	$(HOST_CC) -Wl,--gc-sections -lpthread -o $@ $^
+
+test-pty-winsize: $(TEST_BLD)/test_pty_winsize.elf
 	$<
 
 

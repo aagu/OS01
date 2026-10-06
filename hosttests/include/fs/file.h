@@ -22,6 +22,8 @@
 // ── Forward declarations ───────────────────────────────────
 
 struct vfs_node;
+struct pty_struct;
+typedef struct pty_struct pty_t;
 
 // ── File types ─────────────────────────────────────────────
 
@@ -30,6 +32,9 @@ enum file_type {
     FD_VFS,          // regular file via VFS
     FD_PIPE,         // pipe
     FD_DEV,          // device (uses vfs_node, same ops as FD_VFS)
+    FD_PTY_MASTER,   // PTY master
+    FD_PTY_SLAVE,    // PTY slave (blocking I/O via pipe directly)
+    FD_SOCKET,       // network socket
 };
 
 // ── Pipe ───────────────────────────────────────────────────
@@ -58,6 +63,8 @@ typedef struct file {
     struct vfs_node *node;
     // FD_PIPE
     pipe_t         *pipe;
+    // FD_PTY_MASTER / FD_PTY_SLAVE
+    pty_t          *pty;
 } file_t;
 
 // ── Per-process file descriptor table ──────────────────────
@@ -91,6 +98,12 @@ void         fd_close(files_t *fs, int fd);
 // Read / write through fd (may sleep for pipes)
 int64_t      fd_read(file_t *f, void *buf, uint64_t size);
 int64_t      fd_write(file_t *f, const void *buf, uint64_t size);
+
+// ioctl through fd — dispatches by file type
+int64_t      fd_ioctl(file_t *f, int cmd, void *arg);
+int          pty_ioctl(pty_t *pty, int cmd, void *arg);
+int          pty_slave_ioctl(pty_t *pty, int cmd, void *arg);
+int          pty_master_ioctl(pty_t *pty, int cmd, void *arg);
 
 // Create a pipe — fills fds[0] (read end), fds[1] (write end)
 int64_t       do_pipe(int *user_fds);

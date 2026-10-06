@@ -101,7 +101,9 @@ void file_free(file_t *f)
                 need_rd_b = (pty->slave_to_master->writers == 0);
                 spin_unlock_irqrestore(&pty->slave_to_master->lock, fl);
             }
+            uint64_t sl_fl = spin_lock_irqsave(&pty->state_lock);
             pty->pgrp = 0;  // reset on slave close
+            spin_unlock_irqrestore(&pty->state_lock, sl_fl);
         }
 
         // Wake blocked sides
@@ -1094,11 +1096,34 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
     }
 }
 
-// ── Weak stub for pty_slave_ioctl (real impl in pty.c, Task 7) ─
+// ── Weak stubs for pty ioctls (real impl in pty.c) ─
+__attribute__((weak)) int pty_ioctl(pty_t *pty, int cmd, void *arg)
+{
+    (void)pty; (void)cmd; (void)arg;
+    return -ENOTTY;
+}
+
 __attribute__((weak)) int pty_slave_ioctl(pty_t *pty, int cmd, void *arg)
 {
     (void)pty; (void)cmd; (void)arg;
     return -ENOTTY;
+}
+
+__attribute__((weak)) int pty_master_ioctl(pty_t *pty, int cmd, void *arg)
+{
+    if (!pty) return -ENOTTY;
+    if (cmd == TCGETS) {
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg,
+                                      sizeof(struct termios), true))
+            return -EFAULT;
+        {
+            ssize_t user_copy_rc = copy_to_user_ft(arg, &pty->term, sizeof(struct termios));
+            if (user_copy_rc < 0) return user_copy_rc;
+        }
+        return 0;
+    }
+    return pty_ioctl(pty, cmd, arg);
 }
 
 // ── ioctl through a file descriptor ───────────────────────
@@ -1121,18 +1146,7 @@ int64_t fd_ioctl(file_t *f, int cmd, void *arg)
     case FD_PTY_MASTER: {
         pty_t *pty = f->pty;
         if (!pty) return -ENOTTY;
-        if (cmd == TCGETS) {
-            if (!arg) return -EFAULT;
-            if (!syscall_check_user_range((uint64_t)arg,
-                                          sizeof(struct termios), true))
-                return -EFAULT;
-            {
-                ssize_t user_copy_rc = copy_to_user_ft(arg, &pty->term, sizeof(struct termios));
-                if (user_copy_rc < 0) return user_copy_rc;
-            }
-            return 0;
-        }
-        return -ENOTTY;
+        return pty_master_ioctl(pty, cmd, arg);
     }
     case FD_PTY_SLAVE: {
         pty_t *pty = f->pty;

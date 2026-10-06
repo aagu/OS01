@@ -20,6 +20,8 @@
 #include <sched/task.h>
 #include <sys/ioctl.h>
 
+#include <uapi/time.h>
+
 // ── Forward declarations for ops tables ─────────────────────────
 static int ptmx_open(const char *name, file_t **out_file);
 static int ptsN_open(const char *name, file_t **out_file);
@@ -39,6 +41,7 @@ pty_t *pty_alloc(void)
         if (!pty_table[i].allocated) {
             pty_t *pty = &pty_table[i];
             memset(pty, 0, sizeof(*pty));
+            spin_init(&pty->state_lock);
             pty->index = i;
             pty->allocated = true;
             pty->master_to_slave = pipe_alloc();
@@ -65,6 +68,8 @@ pty_t *pty_alloc(void)
             pty->term.c_cc[VTIME] = 0;
             pty->ws_row = 25;
             pty->ws_col = 80;
+            pty->ws_xpixel = 0;
+            pty->ws_ypixel = 0;
             pty->pgrp = 0;
             spin_unlock_irqrestore(&pty_lock, fl);
             return pty;
@@ -75,6 +80,111 @@ pty_t *pty_alloc(void)
 }
 
 // ═══════════════════════════════════════════════════════════════
+//  pty_ioctl — common ioctl handler for both master and slave
+// ═══════════════════════════════════════════════════════════════
+
+int pty_ioctl(pty_t *pty, int cmd, void *arg)
+{
+    if (!pty) return -ENODEV;
+    switch (cmd) {
+    case TIOCGWINSZ: {
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg,
+                                      sizeof(struct winsize), true))
+            return -EFAULT;
+        struct winsize kws;
+        uint64_t fl = spin_lock_irqsave(&pty->state_lock);
+        kws.ws_row = pty->ws_row;
+        kws.ws_col = pty->ws_col;
+        kws.ws_xpixel = pty->ws_xpixel;
+        kws.ws_ypixel = pty->ws_ypixel;
+        spin_unlock_irqrestore(&pty->state_lock, fl);
+
+        ssize_t user_copy_rc = copy_to_user_ft(arg, &kws, sizeof(kws));
+        if (user_copy_rc < 0) return user_copy_rc;
+        return 0;
+    }
+    case TIOCSWINSZ: {
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg,
+                                      sizeof(struct winsize), false))
+            return -EFAULT;
+        struct winsize kws;
+        if (copy_from_user_ft(&kws, arg, sizeof(kws)) < 0)
+            return -EFAULT;
+
+        bool changed = false;
+        pid_t pgrp = 0;
+        uint64_t fl = spin_lock_irqsave(&pty->state_lock);
+        if (pty->ws_row != kws.ws_row ||
+            pty->ws_col != kws.ws_col ||
+            pty->ws_xpixel != kws.ws_xpixel ||
+            pty->ws_ypixel != kws.ws_ypixel) {
+            changed = true;
+            pty->ws_row = kws.ws_row;
+            pty->ws_col = kws.ws_col;
+            pty->ws_xpixel = kws.ws_xpixel;
+            pty->ws_ypixel = kws.ws_ypixel;
+        }
+        pgrp = pty->pgrp;
+        spin_unlock_irqrestore(&pty->state_lock, fl);
+
+        if (changed && pgrp > 0) {
+            signal_pgrp(pgrp, SIGWINCH);
+        }
+        return 0;
+    }
+    case TIOCGPGRP: {
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg, sizeof(pid_t), true))
+            return -EFAULT;
+        pid_t kp;
+        uint64_t fl = spin_lock_irqsave(&pty->state_lock);
+        kp = pty->pgrp;
+        spin_unlock_irqrestore(&pty->state_lock, fl);
+
+        ssize_t user_copy_rc = copy_to_user_ft(arg, &kp, sizeof(kp));
+        if (user_copy_rc < 0) return user_copy_rc;
+        return 0;
+    }
+    case TIOCSPGRP: {
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg, sizeof(pid_t), false))
+            return -EFAULT;
+        pid_t new_pg;
+        if (copy_from_user_ft(&new_pg, arg, sizeof(new_pg)) < 0)
+            return -EFAULT;
+
+        uint64_t fl = spin_lock_irqsave(&pty->state_lock);
+        pty->pgrp = new_pg;
+        spin_unlock_irqrestore(&pty->state_lock, fl);
+        return 0;
+    }
+    default:
+        return -ENOTTY;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  pty_master_ioctl — public, called for FD_PTY_MASTER
+// ═══════════════════════════════════════════════════════════════
+
+int pty_master_ioctl(pty_t *pty, int cmd, void *arg)
+{
+    if (!pty) return -ENODEV;
+    if (cmd == TCGETS) {
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg,
+                                      sizeof(struct termios), true))
+            return -EFAULT;
+        ssize_t user_copy_rc = copy_to_user_ft(arg, &pty->term, sizeof(struct termios));
+        if (user_copy_rc < 0) return user_copy_rc;
+        return 0;
+    }
+    return pty_ioctl(pty, cmd, arg);
+}
+
+// ═══════════════════════════════════════════════════════════════
 //  pty_slave_ioctl — public, overrides the weak stub in file.c
 // ═══════════════════════════════════════════════════════════════
 
@@ -82,6 +192,11 @@ int pty_slave_ioctl(pty_t *pty, int cmd, void *arg)
 {
     if (!pty) return -ENODEV;
     switch (cmd) {
+    case TIOCGWINSZ:
+    case TIOCSWINSZ:
+    case TIOCGPGRP:
+    case TIOCSPGRP:
+        return pty_ioctl(pty, cmd, arg);
     case TCGETS: {
         if (!arg) return -EFAULT;
         if (!syscall_check_user_range((uint64_t)arg,
@@ -103,53 +218,6 @@ int pty_slave_ioctl(pty_t *pty, int cmd, void *arg)
         if (copy_from_user_ft(&kterm, arg, sizeof(kterm)) < 0)
             return -EFAULT;
         pty->term = kterm;
-        return 0;
-    }
-    case TIOCGWINSZ: {
-        if (!arg) return -EFAULT;
-        if (!syscall_check_user_range((uint64_t)arg,
-                                      sizeof(struct winsize), true))
-            return -EFAULT;
-        struct winsize kws = {0};
-        kws.ws_row = pty->ws_row;
-        kws.ws_col = pty->ws_col;
-        {
-            ssize_t user_copy_rc = copy_to_user_ft(arg, &kws, sizeof(kws));
-            if (user_copy_rc < 0) return user_copy_rc;
-        }
-        return 0;
-    }
-    case TIOCSWINSZ: {
-        if (!arg) return -EFAULT;
-        if (!syscall_check_user_range((uint64_t)arg,
-                                      sizeof(struct winsize), false))
-            return -EFAULT;
-        struct winsize kws;
-        if (copy_from_user_ft(&kws, arg, sizeof(kws)) < 0)
-            return -EFAULT;
-        pty->ws_row = kws.ws_row;
-        pty->ws_col = kws.ws_col;
-        return 0;
-    }
-    case TIOCGPGRP: {
-        if (!arg) return -EFAULT;
-        if (!syscall_check_user_range((uint64_t)arg, sizeof(pid_t), true))
-            return -EFAULT;
-        pid_t kp = pty->pgrp;
-        {
-            ssize_t user_copy_rc = copy_to_user_ft(arg, &kp, sizeof(kp));
-            if (user_copy_rc < 0) return user_copy_rc;
-        }
-        return 0;
-    }
-    case TIOCSPGRP: {
-        if (!arg) return -EFAULT;
-        if (!syscall_check_user_range((uint64_t)arg, sizeof(pid_t), false))
-            return -EFAULT;
-        pid_t new_pg;
-        if (copy_from_user_ft(&new_pg, arg, sizeof(new_pg)) < 0)
-            return -EFAULT;
-        pty->pgrp = new_pg;
         return 0;
     }
     case TIOCSCTTY:
