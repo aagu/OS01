@@ -2,6 +2,86 @@
 
 本系统实现了多种硬件驱动程序，包括键盘、PS/2 鼠标、串口、定时器和实时时钟等。
 
+## ARCH-9 驱动模型（PCI 总线 + `pci_driver` + `net_device` + 块层解耦）
+
+ARCH-9 引入统一的驱动模型：
+
+* **PCI 总线抽象** — `kernel/bus/pci/` 提供架构无关的 PCI 核心
+  （`pci_enumerate` / `pci_bind_all` / `pci_match_id` / `pci_register_driver`）；
+  每个驱动通过 `PCI_DRIVER_DECLARE()` 把 `struct pci_driver` 写入
+  `.pci_drivers` 链接段，PCI 核心按 `id_table` 匹配并调用 `probe`。
+* **网络设备抽象** — `kernel/net/device.c` 暴露 `struct net_device_ops`
+  （`xmit` / `poll_rx` / `get_link` / `stop`），e1000 与 virtio-net 注册
+  自己的实例，通过 `net_device_register` / `net_device_poll_all`
+  / `net_service_ready` 与 lwIP 适配器协作。
+* **块层解耦** — `kernel/block/blockdev.c` 通过 `block_device_ops`
+  接受注册，AHCI 不再内嵌通用块层。
+
+### 启动顺序（ARCH-9 修复 Task 9）
+
+`kernel/device/boot.c` 是统一的协调器：
+
+```
+device_core_init
+    └── net_device_init              # 分配 net_device 槽位
+        └── pci_enumerate            # 走 .pci_drivers 段，按 id_table 匹配
+            └── pci_bind_all
+                └── 每个 NIC 的 probe → net_device_register
+net_lwip_start                       # 注册 ONLINE 状态，DHCP 启动
+```
+
+`smp_boot_aps` 在 `device_core_init` 之后调用，确保 SMP 看到的 net_device
+列表与 BSP 一致。
+
+### 公共接口（HEAD）
+
+| 头 | 接口 | 用途 |
+|----|------|------|
+| `kernel/include/bus/pci/pci.h` | `pci_enumerate`、`pci_bind_all`、`pci_match_id`、`pci_register_driver`、`pci_set_bus_master`、`pci_route_gsi`、`pci_msix_enable` | 驱动注册与 PCI 总线访问 |
+| `kernel/include/bus/pci/driver.h` | `PCI_DRIVER_DECLARE(driver)`、`.pci_drivers` 段 | 驱动声明 |
+| `kernel/include/net/device.h` | `net_device_register`、`net_device_poll_all`、`net_service_ready`、`net_default_ipv4` | NIC 与 lwIP 适配器协作 |
+| `kernel/include/net/lwip.h` | `net_lwip_start` | lwIP 适配器（统一多网卡） |
+| `kernel/include/block/blockdev.h` | `block_device_register`、`block_device_read`、`block_device_write` | 块设备注册与读写 |
+| `kernel/include/device/device.h` | `device_quarantine`、设备状态枚举 | 设备生命周期 |
+
+### 错误状态
+
+* `DEV_UNBOUND` — 驱动声明存在但 `id_table` 与枚举到的设备不匹配（`pci_match_id` 返回 `NULL`）。
+* `DEV_PROBE_FAILED` — `probe` 返回非 0；驱动状态保留 UNBOUND，PCI 核心继续枚举其它设备。
+* `DEV_QUARANTINED` — `device_quarantine` 后状态；资源已回收但保留以避免重复探测。
+* `ENETDOWN` — `socket(AF_INET, ...)` 时若默认 netif 仍未 ONLINE，返回 `-ENETDOWN`（非 ONLINE 不创建 socket）。
+* `NET_SERVICE_NOT_READY` — `tcpip_init` 之前 lwIP 适配器未就绪；socket 路径通过 `net_service_ready()` 检查。
+
+### POLL 限制
+
+每张 NIC 在每次轮询循环最多消耗 64 个 RX 包；轮询由 `net_device_poll_all`
+统一调度，每个实例均摊预算。`net_poll_rx` 在 tcpip 线程上下文调用，由
+`sys_arch_mbox_fetch` 的锁-free sweep 触发（50 ms idle wakeup）。
+GSI 冲突时 NIC 自动 fallback 到 `NIC_POLL`；该路径是 *真实的已被占槽拒绝*：
+`register_irq` 自然失败，驱动不再尝试占用槽位，也不修改第一卡的路由。
+
+### QEMU 静态地址兜底
+
+只有默认 netif（`net_default_ipv4()`）走 `10.0.2.15/24` 的兜底；
+非默认 netif 在 DHCP 成功前不创建 socket。QEMU 静态地址兜底**不**作用于
+次要 NIC。
+
+### 审计
+
+`qemutests/driver_model_boundary_audit.py` 静态扫描生产源，禁用以下模式：
+
+* `os01_netif`（ARCH-9 之前的单一全局符号）— `kernel/net/net.c`
+  的历史注释除外
+* `pci_find_device`（ARCH-9 之前直接枚举）— 不在任何生产模块出现
+* `kernel/block/` 中的 `port_num`（块层去 AHCI 耦合）
+* `kernel/bus/` 中的 x86 inlines（`outb`/`outl`/`inb`/`inl`/`wrmsr`/`rdmsr`）
+  / `apic_write` / 固定高半地址
+* `kernel/net/`、`kernel/device/` 中按硬件类型分派
+  （`is_e1000`/`is_virtio`/`nic_kind`/`hw_kind`）
+
+边界变更（迁移窗口遗留物）由 `qemutests/driver_model_matrix.py` 16 个
+测试覆盖；每次新驱动接入都先 RED 后 GREEN。
+
 ## 驱动程序架构
 
 系统的驱动程序架构采用分层设计：

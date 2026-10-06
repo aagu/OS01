@@ -126,7 +126,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_page_table_publish.elf \
     $(TEST_BLD)/test_syscall_dispatch.elf \
     $(TEST_BLD)/test_compat_linux.elf \
-    $(TEST_BLD)/test_slab_idempotent_reservation.elf \
+$(TEST_BLD)/test_slab_idempotent_reservation.elf \
     $(TEST_BLD)/test_slab_basic_x86_count.elf \
     $(TEST_BLD)/test_percpu_layout.elf \
     $(TEST_BLD)/test_tlb_serial_protocol.elf \
@@ -145,9 +145,18 @@ TEST_BINS := \
     $(TEST_BLD)/test_aarch64_pt_split.elf \
     $(TEST_BLD)/test_smp_starting_gate.elf \
     $(TEST_BLD)/test_aarch64_arch_vmm_init.elf \
-    $(TEST_BLD)/test_aarch64_scratch_probe_logic.elf
+    $(TEST_BLD)/test_aarch64_scratch_probe_logic.elf \
+    $(TEST_BLD)/test_block_device_ops.elf \
+    $(TEST_BLD)/test_pci_driver_model.elf \
+    $(TEST_BLD)/test_pci_backend_irq.elf \
+    $(TEST_BLD)/test_ahci_lifecycle.elf \
+    $(TEST_BLD)/test_device_boot.elf \
+    $(TEST_BLD)/test_net_device.elf \
+    $(TEST_BLD)/test_net_lwip.elf \
+    $(TEST_BLD)/test_e1000_instances.elf \
+    $(TEST_BLD)/test_virtio_net_instances.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio
 
 all: $(TEST_BINS)
 
@@ -2344,3 +2353,261 @@ $(TEST_BLD)/test_slab_basic_x86_count.elf: $(TEST_BLD)/test_slab_basic_x86_count
 		$(TEST_BLD)/pmm_boot_production.o \
 		$(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^
+
+# ARCH-9 Phase A: Block device ops & partition wrapping
+BLOCK_HOST_CFLAGS := $(HOST_CFLAGS) -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
+    -include $(TEST_MOCK)/arch9/block_runtime.h -DOS01_HOST_TEST
+
+
+$(TEST_BLD)/blockdev_production.o: $(TESTS_DIR)/kernel/block/blockdev.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BLOCK_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_block_device_ops.o: $(TEST_CASES)/test_block_device_ops.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BLOCK_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_block_device_ops.elf: $(TEST_BLD)/test_block_device_ops.o $(TEST_BLD)/blockdev_production.o $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+test-block: $(TEST_BLD)/test_block_device_ops.elf
+	$<
+
+# ARCH-9 Phase B: PCI driver model & enumeration
+PCI_HOST_CFLAGS := $(HOST_CFLAGS) -D_GNU_SOURCE -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
+    -include $(TEST_MOCK)/arch9/pci_runtime.h -DOS01_HOST_TEST
+
+$(TEST_BLD)/device_core_production.o: $(TESTS_DIR)/kernel/device/core.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PCI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/pci_core_production.o: $(TESTS_DIR)/kernel/bus/pci/core.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PCI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/pci_match_production.o: $(TESTS_DIR)/kernel/bus/pci/match.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PCI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/pci_platform_production.o: $(TESTS_DIR)/kernel/bus/pci/platform.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PCI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_pci_driver_model.o: $(TEST_CASES)/test_pci_driver_model.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PCI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_pci_driver_model.elf: $(TEST_BLD)/test_pci_driver_model.o \
+    $(TEST_BLD)/device_core_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+test-pci: $(TEST_BLD)/test_pci_driver_model.elf
+	$<
+
+# ARCH-9 Phase B: x86 backend, resource access and IRQ preservation
+BACKEND_HOST_CFLAGS := $(HOST_CFLAGS) -D_GNU_SOURCE -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
+    -include $(TEST_MOCK)/arch9/backend_runtime.h -DOS01_HOST_TEST
+
+$(TEST_BLD)/x86_pci_production.o: $(TESTS_DIR)/kernel/arch/x86_64/bus/pci.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BACKEND_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/irq_production.o: $(TESTS_DIR)/kernel/intr/irq.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BACKEND_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_pci_backend_irq.o: $(TEST_CASES)/test_pci_backend_irq.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BACKEND_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_pci_backend_irq.elf: $(TEST_BLD)/test_pci_backend_irq.o \
+    $(TEST_BLD)/x86_pci_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(TEST_BLD)/device_core_production.o \
+    $(TEST_BLD)/irq_production.o \
+    $(LIBC_OBJS)
+	$(HOST_CC) -lpthread -o $@ $^
+
+test-backend: $(TEST_BLD)/test_pci_backend_irq.elf
+	$<
+
+# ARCH-9 Phase B: AHCI lifecycle & driver model
+AHCI_HOST_CFLAGS := $(HOST_CFLAGS) -D_GNU_SOURCE -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
+    -include $(TEST_MOCK)/arch9/ahci_runtime.h -DOS01_HOST_TEST
+
+$(TEST_BLD)/ahci_lifecycle_production.o: $(TESTS_DIR)/kernel/driver/ahci_lifecycle.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AHCI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/ahci_production.o: $(TESTS_DIR)/kernel/driver/ahci.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AHCI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_ahci_lifecycle.o: $(TEST_CASES)/test_ahci_lifecycle.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AHCI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_ahci_lifecycle.elf: $(TEST_BLD)/test_ahci_lifecycle.o \
+    $(TEST_BLD)/ahci_production.o \
+    $(TEST_BLD)/ahci_lifecycle_production.o \
+    $(TEST_BLD)/blockdev_production.o \
+    $(TEST_BLD)/device_core_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+test-ahci: $(TEST_BLD)/test_ahci_lifecycle.elf
+	$<
+
+# ARCH-9 Phase B: Phase 6 device coordinator and root requirement
+BOOT_HOST_CFLAGS := $(HOST_CFLAGS) -D_GNU_SOURCE -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
+    -include $(TEST_MOCK)/arch9/boot_runtime.h -DOS01_HOST_TEST
+
+$(TEST_BLD)/device_boot_production.o: $(TESTS_DIR)/kernel/device/boot.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/fs_boot_production.o: $(TESTS_DIR)/kernel/fs/boot.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_device_boot.o: $(TEST_CASES)/test_device_boot.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_device_boot.elf: $(TEST_BLD)/test_device_boot.o \
+    $(TEST_BLD)/device_boot_production.o \
+    $(TEST_BLD)/fs_boot_production.o \
+    $(TEST_BLD)/device_core_production.o \
+    $(TEST_BLD)/blockdev_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+test-device-boot: $(TEST_BLD)/test_device_boot.elf
+	$<
+
+# ARCH-9 Phase C: net_device registry and lwIP adapter
+NET_HOST_CFLAGS := $(HOST_CFLAGS) -D_GNU_SOURCE -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
+    -include $(TEST_MOCK)/arch9/net_runtime.h -DOS01_HOST_TEST
+
+$(TEST_BLD)/net_device_production.o: $(TESTS_DIR)/kernel/net/device.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(NET_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/net_lwip_production.o: $(TESTS_DIR)/kernel/net/lwip.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(NET_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_net_device.o: $(TEST_CASES)/test_net_device.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(NET_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_net_device.elf: $(TEST_BLD)/test_net_device.o \
+    $(TEST_BLD)/net_device_production.o \
+    $(TEST_BLD)/net_lwip_production.o \
+    $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+test-net: $(TEST_BLD)/test_net_device.elf
+	$<
+
+$(TEST_BLD)/test_net_lwip.o: $(TEST_CASES)/test_net_lwip.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(NET_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_net_lwip.elf: $(TEST_BLD)/test_net_lwip.o \
+    $(TEST_BLD)/net_device_production.o \
+    $(TEST_BLD)/net_lwip_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+test-lwip: $(TEST_BLD)/test_net_lwip.elf
+	$<
+
+# ARCH-9 Phase C Task 10: socket readiness and default-iface queries
+SOCKET_HOST_CFLAGS := $(POLL_HOST_CFLAGS) -I$(TEST_MOCK) $(KERNEL_INC) $(LIBC_INC) \
+    -include $(TEST_MOCK)/arch9/socket_runtime.h -DOS01_HOST_TEST
+
+$(TEST_BLD)/net_socket_production.o: $(TESTS_DIR)/kernel/net/socket.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SOCKET_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_socket_net_readiness.o: $(TEST_CASES)/test_socket_net_readiness.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SOCKET_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_socket_net_readiness.elf: $(TEST_BLD)/test_socket_net_readiness.o \
+    $(TEST_BLD)/net_socket_production.o \
+    $(TEST_BLD)/net_lwip_production.o \
+    $(TEST_BLD)/net_device_production.o \
+    $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+test-socket: $(TEST_BLD)/test_socket_net_readiness.elf
+	$<
+
+# ARCH-9 Phase C: e1000 private instance and IRQ modes
+E1000_HOST_CFLAGS := $(HOST_CFLAGS) -D_GNU_SOURCE -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
+    -include $(TEST_MOCK)/arch9/e1000_runtime.h -DOS01_HOST_TEST
+
+$(TEST_BLD)/e1000_production.o: $(TESTS_DIR)/kernel/driver/e1000.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(E1000_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_e1000_instances.o: $(TEST_CASES)/test_e1000_instances.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(E1000_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_e1000_instances.elf: $(TEST_BLD)/test_e1000_instances.o \
+    $(TEST_BLD)/e1000_production.o \
+    $(TEST_BLD)/net_device_production.o \
+    $(TEST_BLD)/device_core_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(TEST_BLD)/irq_production.o \
+    $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+test-e1000: $(TEST_BLD)/test_e1000_instances.elf
+	$<
+
+# ARCH-9 Phase C: virtio-net private instance and polling mode
+VIRTIO_HOST_CFLAGS := $(HOST_CFLAGS) -D_GNU_SOURCE -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
+    -include $(TEST_MOCK)/arch9/virtio_runtime.h -DOS01_HOST_TEST
+
+$(TEST_BLD)/virtio_production.o: $(TESTS_DIR)/kernel/driver/virtio-net.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VIRTIO_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_virtio_net_instances.o: $(TEST_CASES)/test_virtio_net_instances.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VIRTIO_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_virtio_net_instances.elf: $(TEST_BLD)/test_virtio_net_instances.o \
+    $(TEST_BLD)/virtio_production.o \
+    $(TEST_BLD)/net_device_production.o \
+    $(TEST_BLD)/device_core_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(TEST_BLD)/irq_production.o \
+    $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+test-virtio: $(TEST_BLD)/test_virtio_net_instances.elf
+	$<

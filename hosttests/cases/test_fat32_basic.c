@@ -4,9 +4,11 @@
  * fat32_cluster_to_sector, and fat32_mount validation logic.
  */
 #include "test_framework.h"
+#include <block/blockdev.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
+
 
 /* ── FAT32 constants (from kernel headers) ───────── */
 #define FAT32_EOC_MIN       0x0FFFFFF8
@@ -74,24 +76,26 @@ typedef struct {
 #define BLOCK_COUNT 65536
 static uint8_t mock_disk[BLOCK_SIZE * BLOCK_COUNT];
 
-static int mock_block_read(void *dev, uint64_t lba, uint32_t count, void *buf) {
+static int mock_block_read(block_device_t *dev, uint64_t lba, uint32_t count, void *buf) {
     (void)dev;
     if (lba + count > BLOCK_COUNT) return -1;
     memcpy(buf, mock_disk + lba * BLOCK_SIZE, count * BLOCK_SIZE);
     return 0;
 }
 
-/* ── Fake block device struct ────────────────────── */
-typedef struct {
-    char name[16];
-    int (*read)(void *dev, uint64_t lba, uint32_t count, void *buf);
-    int (*write)(void *dev, uint64_t lba, uint32_t count, const void *buf);
-} block_device_t;
+static const struct block_device_ops mock_ops = {
+    .read = mock_block_read,
+};
 
 static block_device_t mock_dev = {
     .name = "mock",
-    .read = mock_block_read,
+    .sector_count = BLOCK_COUNT,
+    .sector_size = BLOCK_SIZE,
+    .present = 1,
+    .kind = BLOCK_DISK,
+    .ops = &mock_ops,
 };
+
 
 /* ── Helper: format mock disk as FAT32 ────────────── */
 static void format_mock_fat32(void) {

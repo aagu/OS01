@@ -82,17 +82,17 @@ RUN_QEMU_FLAGS_debug      = -S -s
 # so a clean workspace still gets the disk image + firmware built first.
 run:        $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
-	$(RUN_QEMU_BASE) -netdev user,id=net0 -device e1000e,netdev=net0 $(RUN_QEMU_DISK) -no-reboot
+	$(RUN_QEMU_BASE) -netdev user,id=net0 -device e1000,netdev=net0 $(RUN_QEMU_DISK) -no-reboot
 run-kvm:    $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
-	$(RUN_QEMU_BASE) $(RUN_QEMU_FLAGS_run-kvm) -netdev user,id=net0 -device e1000e,netdev=net0 $(RUN_QEMU_DISK) -no-reboot
+	$(RUN_QEMU_BASE) $(RUN_QEMU_FLAGS_run-kvm) -netdev user,id=net0 -device e1000,netdev=net0 $(RUN_QEMU_DISK) -no-reboot
 run-virtio: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
-	$(RUN_QEMU_BASE) -netdev user,id=net0 -device virtio-net-pci,netdev=net0 $(RUN_QEMU_DISK)
+	$(RUN_QEMU_BASE) -netdev user,id=net0 -device virtio-net-pci,disable-modern=on,netdev=net0 $(RUN_QEMU_DISK)
 debug: QEMU_IMAGE = $(DISK_IMG)
 debug:      $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(DISK_IMG) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
-	$(RUN_QEMU_BASE) $(RUN_QEMU_FLAGS_debug) -netdev user,id=net0 -device e1000e,netdev=net0 $(RUN_QEMU_DISK)
+	$(RUN_QEMU_BASE) $(RUN_QEMU_FLAGS_debug) -netdev user,id=net0 -device e1000,netdev=net0 $(RUN_QEMU_DISK)
 
 # ── aarch64 UEFI bring-up (uefi capability) ────────────
 # Targets are always defined so `make aarch64-uefi` under the default x86
@@ -381,7 +381,7 @@ TEST_SELFTEST_IMAGE := $(BUILD_DIR)/image/selftest/disk.img
 # overridable.
 KERNEL_SELFTEST_SMP ?= 4
 
-.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-device test-gfx-client test-gfx-primitives test-m1-host
+.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-device test-gfx-client test-gfx-primitives test-m1-host test-arch9-host
 test-host:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,run $(OS01_SUBMAKE_ARGS))
@@ -443,6 +443,59 @@ test-m1-host: $(if $(CASE),_test-m1-host-run-$(CASE),$(foreach c,$(M1_CASES),_te
 	    m1-contract-x86) echo "  [test-m1-host] CASE=$(CASE)";; \
 	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(M1_CASES)" >&2; exit 1;; \
 	  esac
+
+# ARCH-9 driver model host tests.
+.PHONY: test-arch9-host _test-arch9-host-run-block _test-arch9-host-run-pci _test-arch9-host-run-backend _test-arch9-host-run-ahci _test-arch9-host-run-device-boot _test-arch9-host-run-net _test-arch9-host-run-lwip _test-arch9-host-run-e1000 _test-arch9-host-run-virtio _test-arch9-host-run-socket
+ARCH9_CASES := block pci backend ahci device-boot net lwip e1000 virtio socket
+_test-arch9-host-run-block:
+	@echo "  [test-arch9-host] block"
+	$(call os01_submake,hosttests,test-block $(OS01_SUBMAKE_ARGS))
+_test-arch9-host-run-pci:
+	@echo "  [test-arch9-host] pci"
+	$(call os01_submake,hosttests,test-pci $(OS01_SUBMAKE_ARGS))
+_test-arch9-host-run-backend:
+	@echo "  [test-arch9-host] backend"
+	$(call os01_submake,hosttests,test-backend $(OS01_SUBMAKE_ARGS))
+_test-arch9-host-run-ahci:
+	@echo "  [test-arch9-host] ahci"
+	$(call os01_submake,hosttests,test-ahci $(OS01_SUBMAKE_ARGS))
+_test-arch9-host-run-device-boot:
+	@echo "  [test-arch9-host] device-boot"
+	$(call os01_submake,hosttests,test-device-boot $(OS01_SUBMAKE_ARGS))
+_test-arch9-host-run-net:
+	@echo "  [test-arch9-host] net"
+	$(call os01_submake,hosttests,test-net $(OS01_SUBMAKE_ARGS))
+_test-arch9-host-run-lwip:
+	@echo "  [test-arch9-host] lwip"
+	$(call os01_submake,hosttests,test-lwip $(OS01_SUBMAKE_ARGS))
+_test-arch9-host-run-e1000:
+	@echo "  [test-arch9-host] e1000"
+	$(call os01_submake,hosttests,test-e1000 $(OS01_SUBMAKE_ARGS))
+_test-arch9-host-run-virtio:
+	@echo "  [test-arch9-host] virtio"
+	$(call os01_submake,hosttests,test-virtio $(OS01_SUBMAKE_ARGS))
+_test-arch9-host-run-socket:
+	@echo "  [test-arch9-host] socket"
+	$(call os01_submake,hosttests,test-socket $(OS01_SUBMAKE_ARGS))
+test-arch9-host: CASE ?=
+test-arch9-host: CASE := $(CASE)
+test-arch9-host: $(if $(CASE),_test-arch9-host-run-$(CASE),$(foreach c,$(ARCH9_CASES),_test-arch9-host-run-$(c)))
+	$(call require_capability,rootfs)
+	@case "$(CASE)" in \
+	    "") echo "  [test-arch9-host] full ARCH-9 group: $(ARCH9_CASES)";; \
+	    block) echo "  [test-arch9-host] CASE=$(CASE)";; \
+	    pci) echo "  [test-arch9-host] CASE=$(CASE)";; \
+	    backend) echo "  [test-arch9-host] CASE=$(CASE)";; \
+	    ahci) echo "  [test-arch9-host] CASE=$(CASE)";; \
+	    device-boot) echo "  [test-arch9-host] CASE=$(CASE)";; \
+	    net) echo "  [test-arch9-host] CASE=$(CASE)";; \
+	    lwip) echo "  [test-arch9-host] CASE=$(CASE)";; \
+	    e1000) echo "  [test-arch9-host] CASE=$(CASE)";; \
+	    virtio) echo "  [test-arch9-host] CASE=$(CASE)";; \
+	    socket) echo "  [test-arch9-host] CASE=$(CASE)";; \
+	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(ARCH9_CASES)" >&2; exit 1;; \
+	  esac
+
 # Focused hosttest for the gfx 2D API plan Task 1 — per-file device
 # ioctl/release lifecycle.  Runs the single TEST_BINS entry
 # (test_gfx_file_lifecycle.elf) and asserts the contract spelled out
@@ -506,19 +559,59 @@ test-gfx-primitives:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-gfx-primitives $(OS01_SUBMAKE_ARGS))
 
+# driver-model matrix support — see Task 11.  The python harness
+# (qemutests/driver_matrix_run.py) drives each (case, SMP) pair; the
+# build contract test (qemutests/test_arch9_build_contract.py) only
+# needs the Makefile as the build contract.  Both run from the repository
+# root via subprocess; the recipes below are entry points.
+TEST_DRIVER_MATRIX_CASES := all e1000 virtio mixed two-e1000 two-virtio no-nic no-ahci empty-ahci poll-busy bad-nic adapter-fail unsupported modern-only net-block-smp
+DRIVER_MATRIX_DRIVER_CASE ?=
+DRIVER_MATRIX_DRIVER_SMP ?=
+DRIVER_MODEL_LOG_DIR := $(OS01_ROOT)/test-results/driver-model
+.PHONY: _test-driver-model-prep _test-driver-model-run
+# _test-driver-model-prep builds the canonical (non-fault) disk image
+# which the matrix harness needs for all the no-fault cases.  Fault
+# cases build their own variant images via `make ARCH9_FAULT=<fault>`.
+_test-driver-model-prep:
+	@mkdir -p $(DRIVER_MODEL_LOG_DIR)
+	$(MAKE) --no-print-directory disk.img
+_test-driver-model-run:
+	@mkdir -p $(DRIVER_MODEL_LOG_DIR)
+	DRIVER_MODEL_LOG_DIR="$(DRIVER_MODEL_LOG_DIR)" \
+	  python3 qemutests/driver_matrix_run.py \
+	  $(if $(DRIVER_MODEL_DRIVER_CASE),--case $(DRIVER_MODEL_DRIVER_CASE),--case all) \
+	  $(if $(DRIVER_MATRIX_DRIVER_SMP),--smp $(DRIVER_MATRIX_DRIVER_SMP),)
+
+# driver-model matrix dispatch target.  `make test-qemu SUITE=driver-model`
+# builds the canonical image then runs every matrix case; the
+# optional DRIVER_MODEL_DRIVER_CASE narrows to a single case (mirrors
+# the per-MODE pattern used by test-aarch64). DRIVER_MATRIX_DRIVER_SMP
+# restricts the SMP count(s) passed to the python harness (Task 11
+# parked follow-up resolved in Task 12):
+#   make test-qemu SUITE=driver-model DRIVER_MATRIX_DRIVER_SMP=1
+#   make test-qemu SUITE=driver-model DRIVER_MATRIX_DRIVER_SMP="1 2 4"
+test-qemu-driver-model: _test-driver-model-prep _test-driver-model-run
+	@true
+
 # Per-SUITE lookups, used by test-qemu to pick the right variant build
 # flavor and the right image path. These are Make variables so they
 # resolve at parse time and survive across recipe lines.
-TEST_QEMU_FLAVOR_phase-0       =
-TEST_QEMU_FLAVOR_systest       = OS01_SYSTEST=1
-TEST_QEMU_FLAVOR_inittab-phase = INITTAB_FILE=config/inittab.test
-TEST_QEMU_FLAVOR_network       = OS01_NETTEST=1
-TEST_QEMU_FLAVOR_gfx           =
+TEST_QEMU_FLAVOR_phase-0        =
+TEST_QEMU_FLAVOR_systest        = OS01_SYSTEST=1
+TEST_QEMU_FLAVOR_inittab-phase  = INITTAB_FILE=config/inittab.test
+TEST_QEMU_FLAVOR_network        = OS01_NETTEST=1
+TEST_QEMU_FLAVOR_gfx            =
+# driver-model reuses the normal image path (matrix harness rebuilds
+# variant images itself); the build contract test and the matrix
+# python harness both produce fault variant images via
+# `make ARCH9_FAULT=<fault>`.
+TEST_QEMU_FLAVOR_driver-model   =
 TEST_QEMU_IMG_phase-0       = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_systest       = $(TEST_SYSTEST_IMAGE)
 TEST_QEMU_IMG_inittab-phase = $(TEST_INITTAB_IMAGE)
 TEST_QEMU_IMG_network       = $(TEST_NETTEST_IMAGE)
 TEST_QEMU_IMG_gfx           = $(NORMAL_IMAGE)
+TEST_QEMU_IMG_driver-model  = $(NORMAL_IMAGE)
 
 .PHONY: test-qemu
 # Use the per-SUITE Make variables from Step 1. The image path is
@@ -547,8 +640,8 @@ test-qemu: SUITE := $(SUITE)
 test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@case "$(SUITE)" in \
-	  phase-0|systest|inittab-phase|network|gfx) ;; \
-	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx, got '$(SUITE)'" >&2; exit 1;; \
+	  phase-0|systest|inittab-phase|network|gfx|driver-model) ;; \
+	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|driver-model, got '$(SUITE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-qemu] SUITE=$(SUITE) flavor=$(TEST_QEMU_FLAVOR_$(SUITE)) img=$(TEST_QEMU_IMG_$(SUITE))"
 	# The normal-image hash guard skips BOTH ``phase-0`` (the historical
@@ -557,17 +650,27 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	# touches the normal image must not be reported as a hash drift).
 	# Every other suite runs against an isolated variant build and
 	# must therefore not modify the normal image.
-	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
+	# driver-model runs against the canonical (no-fault) image so the
+	# normal-image hash guard is skipped too; fault variant builds land
+	# under image/driver-model-<fault>/ (Task 11).
+	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "driver-model" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.before"; \
 	fi
-	$(MAKE) $(TEST_QEMU_FLAVOR_$(SUITE)) image
-	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
-	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after"; \
-	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after"; \
+	@if [ "$(SUITE)" = "driver-model" ]; then \
+	  DRIVER_MODEL_DRIVER_CASE="$(DRIVER_MODEL_DRIVER_CASE)" \
+	  DRIVER_MATRIX_DRIVER_SMP="$(DRIVER_MATRIX_DRIVER_SMP)" \
+	  $(MAKE) --no-print-directory test-qemu-driver-model; \
+	else \
+	  $(MAKE) $(TEST_QEMU_FLAVOR_$(SUITE)) image; \
+	  if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
+	    sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after"; \
+	    cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after"; \
+	  fi; \
+	  DISK_IMG="$(TEST_QEMU_IMG_$(SUITE))" \
+	  OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \
+	  NETWORK_NIC="$(NETWORK_NIC)" \
+	  python3 qemutests/run_test.py $(SUITE); \
 	fi
-	DISK_IMG="$(TEST_QEMU_IMG_$(SUITE))" \
-	OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \
-	python3 qemutests/run_test.py $(SUITE)
 
 # Exercise repeated exec/exit through the normal terminal and ash path.
 
@@ -582,6 +685,36 @@ test-syscall-repeat: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAG
 	$(call require_capability,rootfs)
 	python3 qemutests/x86_64_systest_repeat.py --disk "$(NORMAL_IMAGE)" \
 	  --firmware "$(OVMF_FIRMWARE)" --smp "$(SMP)"
+
+# test-syscall — retained AGENTS.md-required alias exception.
+#
+# AGENTS.md (lines 60, 70) requires the literal invocation
+#   `make OS01_SYSTEST=1 test-syscall`
+# even though the canonical bucket target is `test-qemu SUITE=systest`.
+# All other forwarding aliases were removed in the 2026-09-26 cleanup
+# (see docs/build/build.md §alias policy); this is the single
+# permitted exception. The recipe is a one-liner that delegates to
+# the canonical bucket target with the same flag set so the alias
+# never drifts from the underlying harness.
+#
+# Two parse-time gates enforce AGENTS.md's contract:
+#  - OS01_SYSTEST must be 1 (systest is the only init mode supported
+#    by this alias — running it with the normal inittab would not
+#    load /bin/systest as PID 1).
+#  - KERNEL_SELFTEST must NOT be 1 (in-kernel selftests spawn kthreads
+#    at boot which interfere with systest's fork+exec+waitpid test).
+.PHONY: test-syscall
+ifneq ($(filter test-syscall,$(MAKECMDGOALS)),)
+ifneq ($(OS01_SYSTEST),1)
+$(error ERROR: test-syscall requires OS01_SYSTEST=1 on the top-level make invocation (AGENTS.md))
+endif
+ifeq ($(KERNEL_SELFTEST),1)
+$(error ERROR: test-syscall must NOT be combined with KERNEL_SELFTEST=1 (AGENTS.md))
+endif
+endif
+test-syscall:
+	$(call require_capability,rootfs)
+	$(MAKE) OS01_SYSTEST=1 test-qemu SUITE=systest
 
 # test-static = the umbrella: runs every static audit in one shot.
 # Delegates the 4 runtime-audit checks + validate-kernel to test-runtime
@@ -607,6 +740,7 @@ test-static: test-runtime
 	  --elf "$(KERNEL_BUILD_DIR)/kernel.elf" \
 	  --llvm-objdump "$(LLVM_OBJDUMP)" \
 	  --limit 512
+	python3 qemutests/driver_model_boundary_audit.py
 	@$(MAKE) --no-print-directory test-user-canary
 
 # ── test-runtime: original recipe (lines 364-385 of run.mk) ──
@@ -759,11 +893,11 @@ help:
 	@echo ''
 	@echo 'Run / Debug (x86, rootfs):'
 	@printf '  %-22s %-13s %s\n' \
-		 'run'               '(rootfs)'     'QEMU q35 + e1000e + serial stdio';
+		 'run'               '(rootfs)'     'QEMU q35 + e1000 + serial stdio';
 	@printf '  %-22s %-13s %s\n' \
 		 'run-kvm'           '(rootfs)'     'QEMU with KVM acceleration';
 	@printf '  %-22s %-13s %s\n' \
-		 'run-virtio'        '(rootfs)'     'QEMU with virtio-net-pci (instead of e1000e)';
+		 'run-virtio'        '(rootfs)'     'QEMU with virtio-net-pci (instead of e1000)';
 	@printf '  %-22s %-13s %s\n' \
 		 'debug'             '(rootfs)'     'QEMU paused, GDB :1234 (-S -s)';
 	@echo ''
@@ -791,11 +925,11 @@ help:
 	@echo ''
 	@echo 'Test (6 canonical buckets; varied capability):'
 	@printf '  %-22s %-13s %s\n' \
-		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx>)';
+		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|driver-model>)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-static'         '(rootfs)'     'All 10 static audits (runtime, stack-canary, validate-kernel, link-order, kernel-layout, kernel-canary-contract, test-user-canary, syscall-boundary, header-object, stack-frame)';
+		 'test-static'         '(rootfs)'     'All 11 static audits (runtime, stack-canary, validate-kernel, link-order, kernel-layout, kernel-canary-contract, driver-model-boundary, test-user-canary, syscall-boundary, header-object, stack-frame)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-kernel-selftest' '(rootfs)'   'QEMU built-in selftests (isolated selftest image, KERNEL_SELFTEST=1)';
 	@printf '  %-22s %-13s %s\n' \
@@ -804,6 +938,8 @@ help:
 		 'test-contract'       '(rootfs|uefi)' 'Full build contract (PROFILE=<x86_64-clang|aarch64-clang>)';
 	@echo ''
 	@echo 'Standalone test targets (distinct harness / image variant):'
+	@printf '  %-22s %-13s %s\n' \
+		 'test-syscall'          '(rootfs)'   'RETAINED ALIAS — see docs/build/build.md §4 (AGENTS.md exact-target requirement; use OS01_SYSTEST=1 test-qemu SUITE=systest in new code)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-syscall-repeat'   '(rootfs)'   'QEMU exec/exit stability through normal terminal (x86_64_systest_repeat.py)';
 	@printf '  %-22s %-13s %s\n' \
@@ -949,6 +1085,32 @@ unlock-profile:
 	else \
 	  echo "no lock held at $(LOCK_DIR)"; \
 	fi
+
+# ARCH-9 driver model matrix fault-fixture cleanup (Task 11).
+# Removes ONLY the derived kernel/image artifacts for the given fault
+# (kernel/driver-model-<fault>/ + artifacts/kernel/driver-model-<fault>/
+# + image/driver-model-<fault>/); never touches libc, user, firmware,
+# or normal artifacts.  Used between fault runs so the matrix harness
+# can switch faults without `make clean` of the whole profile.
+.PHONY: clean-arch9-fixture
+# Parse-time validation: ARCH9_FAULT must be a known non-none slug.
+# project.mk's enum gate covers all values; this target refuses empty,
+# "none", or any non-driver-model variant (defence in depth).
+ifneq ($(filter $(ARCH9_FAULT),none),)
+clean-arch9-fixture:
+	@echo "ERROR: clean-arch9-fixture requires ARCH9_FAULT=<non-none slug>" >&2; \
+	exit 1
+else ifeq ($(filter $(ARCH9_FAULT),observe bad-nic-bar adapter-fail ahci-empty irq-conflict),)
+clean-arch9-fixture:
+	@echo "ERROR: ARCH9_FAULT='$(ARCH9_FAULT)' is not a known driver-model fault slug" >&2; \
+	exit 1
+else
+clean-arch9-fixture:
+	@echo "  [clean-arch9-fixture] ARCH9_FAULT=$(ARCH9_FAULT)"
+	rm -rf "$(BUILD_DIR)/kernel/driver-model-$(ARCH9_FAULT)"
+	rm -rf "$(BUILD_DIR)/artifacts/kernel/driver-model-$(ARCH9_FAULT)"
+	rm -rf "$(BUILD_DIR)/image/driver-model-$(ARCH9_FAULT)"
+endif
 
 # M1 uses distinct immutable build/image variants; outer flags never choose
 # the matrix's normal/selftest artifact implicitly.

@@ -30,8 +30,11 @@ else ifneq ($(filter 1,$(KERNEL_SELFTEST)),)
 KERNEL_VARIANT := selftest
 else ifneq ($(filter 1,$(KERNEL_CANARY_SELFTEST)),)
 KERNEL_VARIANT := canary-selftest
-else
+else ifneq ($(filter none,$(ARCH9_FAULT)),)
 KERNEL_VARIANT :=
+else
+# ARCH9_FAULT != none — kernel/image live under driver-model-<fault>/.
+KERNEL_VARIANT := driver-model-$(ARCH9_FAULT)
 endif
 KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel$(if $(KERNEL_VARIANT),/$(KERNEL_VARIANT))
 LIBC_BUILD_DIR := $(BUILD_DIR)/libc

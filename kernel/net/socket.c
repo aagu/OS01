@@ -2,8 +2,8 @@
 #include <net/socket.h>
 #include <uapi/sockaddr.h>
 #include <net/net.h>
+#include <net/lwip.h>
 #include <fs/file.h>
-#include "lwip/netif.h"
 #include <sched/task.h>
 #include <memory/slab.h>   // kmalloc, kfree
 #include <fs/poll.h>
@@ -12,9 +12,12 @@
 #include <memory/uaccess.h> // copy_to_user_ft, copy_from_user_ft (Cat C — Task 8)
 #include <string.h>
 #include <errno.h>
+#ifndef OS01_HOST_TEST
+#include "lwip/netif.h"
 #include "lwip/api.h"       // netconn, netbuf, NETCONN_TCP/UDP
 #include "lwip/netbuf.h"   // netbuf_fromaddr, netbuf_fromport
 #include "lwip/ip_addr.h"   // ip4_addr_set_u32
+#endif
 
 // ── Socket state constants ─────────────────────────────────────
 #define SOCK_UNCONNECTED  0
@@ -114,6 +117,14 @@ socket_t *socket_get(int fd)
 
 int64_t do_socket(int domain, int type, int protocol)
 {
+    /* Task 10 (phase C) readiness guard: refuse early if the stack is
+     * not ONLINE.  Returns -ENETDOWN (not -ENOMEM) so callers can
+     * distinguish "no network" from genuine OOM.  Only ONLINE means
+     * tcpip core is confirmed AND at least one adapter is bound. */
+    if (!net_service_ready()) {
+        return -ENETDOWN;
+    }
+
     socket_t *s = socket_alloc(domain, type, protocol);
     if (!s) return -ENOMEM;
 
@@ -395,12 +406,13 @@ int64_t do_getsockname(int fd, void *addr_ptr, uint32_t *addrlen_ptr)
     uint32_t usr_addrlen = *addrlen_ptr;
     if (usr_addrlen < sizeof(struct sockaddr_in))
         return -EINVAL;
-extern struct netif os01_netif;
 
-    // If socket not bound, fall back to netif DHCP address
+    // If socket not bound, fall back to the netif DHCP address.
+    // Task 10: prefer the netconn's actual non-zero IP; only fall back
+    // to the default interface IP when the netconn returns 0.
     uint32_t ip = ip4_addr_get_u32(&lwip_addr);
     if (ip == 0) {
-        ip = ip4_addr_get_u32(&os01_netif.ip_addr);
+        ip = net_default_ipv4();
     }
 
     struct sockaddr_in sin;
@@ -453,9 +465,12 @@ int64_t do_shutdown(int fd, int how)
 }
 
 // ── SYS_getifaddr — return netif IPv4 address ────────────────
-extern struct netif os01_netif;
 
 int64_t do_getifaddr(void)
 {
-    return (int64_t)ip4_addr_get_u32(&os01_netif.ip_addr);
+    /* Task 10: surface goes through net_default_ipv4() so the readiness
+     * state is consulted internally and unpublished adapters are not
+     * read.  Returns 0 when the stack is OFF/STARTING/FAILED or no
+     * interface is bound. */
+    return (int64_t)net_default_ipv4();
 }
