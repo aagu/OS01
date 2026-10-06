@@ -69,9 +69,10 @@ void kpanic(const char *fmt, ...)
 }
 
 
-void serial_printk(const char *fmt, ...)
+int serial_printk(const char *fmt, ...)
 {
     (void)fmt;
+    return 0;
 }
 
 /* ── VFS & FS Mocks for fs_boot_mounts ────────────────────────────── */

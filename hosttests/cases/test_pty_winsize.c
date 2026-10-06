@@ -117,7 +117,7 @@ void schedule(void) {}
 void task_wake(task_t *t) { (void)t; }
 list_t *task_list_next(list_t *pos) { (void)pos; return NULL; }
 int color_printk(unsigned int f, unsigned int b, const char *fmt, ...) { (void)f; (void)b; (void)fmt; return 0; }
-void serial_printk(const char *fmt, ...) { (void)fmt; }
+int serial_printk(const char *fmt, ...) { (void)fmt; return 0; }
 void log_debug(const char *fmt, ...) { (void)fmt; }
 void frame_buffer_init(void) {}
 void frame_buffer_early_init(void) {}
