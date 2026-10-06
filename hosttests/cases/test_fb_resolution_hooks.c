@@ -611,6 +611,14 @@ int main(void)
         printf("\n--- %s ---\n", __test_table[i].name);
         __test_table[i].fn();
     }
+
+    /* The CHECK_TRUE/CHECK_EQ macros record failures in the bare g_failed
+     * counter (matching sibling hosttests).  Fold those into the framework
+     * counters so TEST_RESULTS() prints the real failure count and the
+     * process exit status reflects a failing assertion — otherwise the
+     * RES_CASE=hooks gate could never fail on an assertion regression. */
+    __test_stats.total += g_failed;
+    __test_stats.failed += g_failed;
     int failed = __test_stats.failed;
     TEST_RESULTS();
     return failed > 0 ? 1 : 0;
