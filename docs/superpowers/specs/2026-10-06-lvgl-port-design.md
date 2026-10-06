@@ -1,7 +1,7 @@
 # LVGL v9.5.0 库移植与兼容性测试设计
 
 > **日期**: 2026-10-06
-> **状态**: 待用户复审（v3 修订）
+> **状态**: 待用户复审（v4 最终修订）
 > **基准**: OS01 `62f9cac76ff7734d4444cf04b748dfc003554452`；LVGL v9.5.0 (`85aa60d18b3d5e5588d7b247abf90198f07c8a63`)
 > **依赖评估**: `docs/assessments/2026-10-06-lvgl-libc.md`
 
@@ -15,7 +15,7 @@
 1. **源码受控**：`thirdpart/lvgl` 注册为 Git submodule，提供 `thirdpart/lvgl.manifest` 锁定提交 `85aa60d18b3d5e5588d7b247abf90198f07c8a63`。
 2. **构建合规与增量安全**：
    - 实现独立组件 `liblvgl`，遵循 OS01 single-writer sysroot 规范（`mk/components/sysroot.mk`），输出 `usr/lib/liblvgl.a` 与 `usr/include/lvgl/`，并生成 staging manifest。
-   - `liblvgl/Makefile` 采用 `-MMD -MP` 生成依赖，`install` 目标执行前清理 `$(INSTALL_ROOT)` 确保无残留孤立头文件；配置 `config/lv_conf.h` 变动能准确触发重新编译与 sysroot republish。
+   - `liblvgl/Makefile` 采用 `-MMD -MP` 生成依赖，`install` 目标严格校验 `INSTALL_ROOT` 非空且匹配当前 profile 的 `staging/lvgl` 路径后执行原子清理与串行安装；配置 `config/lv_conf.h` 变动能准确触发重新编译与 sysroot republish。
 3. **依赖与发布链完整**：
    - `$(SYSROOT_STAMP)` 将 `$(STAMPS_DIR)/lvgl-install.stamp` 作为前置依赖，确保 staging 完成后发布并在输入变动时重新触发 generation 组装。
    - 应用编译契约明确：在应用编译参数中增加 `-I$(TARGET_INCDIR)/lvgl -DLV_CONF_INCLUDE_SIMPLE`，保证应用与库引用完全相同的已安装配置，禁止在应用阶段穿透直接引用源码目录。
@@ -25,9 +25,9 @@
    - 提取其未解析符号，比对 OS01 已发布的 `libc.a` 导出符号全集（包含 `malloc/free/realloc`、`memcpy/memmove/memset/memcmp`、`strlen/strnlen/strcpy/strncpy/strcmp/strncmp/strcat/strncat/strchr`、`vsnprintf` 及 SSP canary 符号）；严格禁止出现未实现的 `libm`（如 `cosf/sinf/tanf`）和 `pthread` 符号。
    - `combined.o` 与 `libc.a` 做可重定位链接验证，剩余未解析符号为 0；最终产物 `test_lvgl.elf` 静态检查未解析符号为 0。
 5. **内存渲染兼容性测试通过**：
-   - `/bin/test_lvgl` 检查时钟系统调用返回值，验证单调毫秒滴答实际推进（`(uint32_t)(t1 - t0) > 0`）。
+   - `/bin/test_lvgl` 包含健壮的时钟回调机制：回调内维护 `clock_failed` 状态标志，测试等待采用独立循环预算（50 次短延时），每次采样先断言时钟调用成功，再断言合理有界递增 `0 < (uint32_t)(t1 - t0) <= 100`。
    - 验证控件光栅化冲刷矩形有效性（`x1 <= x2 && y1 <= y2`）；
-   - 设置背景采样与按钮采样标记，按真实行跨度（stride）提取像素，精确匹配背景纯色（`0x00333333`）与按钮内部纯色（`0x001A73E8`）的低 24 位 RGB 值，断言两处采样均被命中。
+   - 设置背景采样与按钮采样标记，使用精确字节行跨度（stride 校验无异常行填充）定位像素，精确匹配背景纯色（`0x00333333`）与按钮内部纯色（`0x001A73E8`）的低 24 位 RGB 值，断言两处采样均被命中。
    - 通过 `lv_mem_monitor()` 精确断言 TLSF 内存池容量、已用比例和空闲空间。
    - 在 QEMU 内以退出码 0 正常结束，输出 `[TEST PASS]` 标记。
 
@@ -82,25 +82,22 @@
 - 编译参数：`-ffreestanding -fno-builtin -Wall -Wextra -O2 -fno-pic -fno-pie -mno-red-zone -fstack-protector-strong`。
 - 头文件搜索包含：`-I$(STAGING_DIR)/kernel-headers/usr/include -isystem $(STAGING_DIR)/libc/usr/include -I$(LVGL_DIR) -I$(LV_CONF_DIR) -DLV_CONF_INCLUDE_SIMPLE`。
 
-### 4.2 头文件暂存与清除策略
-`install` 目标必须先彻底执行 `rm -rf $(INSTALL_ROOT)`，再创建目录结构并复制，防止历史残存头文件污染 sysroot。
-暂存结构：
-```
-staging/lvgl/
-  usr/
-    include/
-      lvgl/
-        lvgl.h
-        lv_version.h
-        lv_conf.h
-        src/
-          core/
-          draw/
-          ...
-    lib/
-      liblvgl.a
-  manifest
-```
+### 4.2 头文件暂存与安全清理
+在 `liblvgl/Makefile` 的 `install` 目标中：
+1. 校验 `INSTALL_ROOT` 非空且必须以 `/staging/lvgl` 结尾，防止误删其它目录：
+   ```make
+   install: $(ARCHIVE)
+   	@test -n "$(INSTALL_ROOT)" || { echo "ERROR: install requires INSTALL_ROOT"; exit 1; }
+   	@echo "$(INSTALL_ROOT)" | grep -q '/staging/lvgl$$' || { echo "ERROR: INSTALL_ROOT must point to staging/lvgl"; exit 1; }
+   	rm -rf $(INSTALL_ROOT)
+   	mkdir -p $(INSTALL_ROOT)/usr/include/lvgl $(INSTALL_ROOT)/usr/lib
+   	cp $(ARCHIVE) $(INSTALL_ROOT)/usr/lib/liblvgl.a
+   	cp $(LV_CONF_DIR)/lv_conf.h $(INSTALL_ROOT)/usr/include/lvgl/lv_conf.h
+   	cp $(LVGL_DIR)/lvgl.h $(LVGL_DIR)/lv_version.h $(INSTALL_ROOT)/usr/include/lvgl/
+   	cp -R --preserve=timestamps $(LVGL_DIR)/src $(INSTALL_ROOT)/usr/include/lvgl/
+   	@find $(INSTALL_ROOT) -type f ! -name manifest | sed 's|^$(INSTALL_ROOT)/||' | sort > $(INSTALL_ROOT)/manifest
+   ```
+2. 串行安装规则由 top-level makefile 与 `sysroot.mk` 统一调度，确保无并发写冲突。
 
 ### 4.3 Sysroot 聚合与应用编译契约
 1. **Sysroot 前置依赖**：
@@ -122,21 +119,44 @@ staging/lvgl/
 ### 5.1 测试流程与严格断言契约
 1. **环境初始化与时钟绑定**：
    - 首先调用 `lv_init()`，完成全局状态分配与默认配置加载。
-   - 定义单调时钟回调：
+   - 定义单调时钟回调，内建失败标志：
      ```c
+     static bool clock_failed = false;
      static uint32_t my_tick_get_cb(void) {
          struct timespec ts;
          if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+             clock_failed = true;
              return 0;
          }
          return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
      }
      ```
-   - 验证时钟调用：在初始阶段验证一次 `clock_gettime(CLOCK_MONOTONIC, &ts)`，若返回非 0 则报错并以退出码 1 终止。
+   - 验证初始时钟调用：调用一次 `clock_gettime(CLOCK_MONOTONIC, &ts)`，若非 0 则报错并退出码 1 终止。
    - 调用 `lv_tick_set_cb(my_tick_get_cb)`。
-   - **断言单调时间递增**：
-     - 记录 `uint32_t t0 = lv_tick_get();`。
-     - 执行短延迟循环（上限 100ms），反复读取 `t1 = lv_tick_get()`，断言在超时前观察到 `(uint32_t)(t1 - t0) > 0`。若超时仍无推进，输出错误并退出码 2 终止。
+   - **断言单调时间递增（有界预算探测）**：
+     - 记录基准：`uint32_t t0 = lv_tick_get();`，断言 `!clock_failed`。
+     - 采用有界探测循环（最多 50 次迭代，每次微量延时约 1~2ms），避免仅依赖待测时钟进行超时计时：
+       ```c
+       bool tick_progressed = false;
+       for (int i = 0; i < 50; i++) {
+           struct timespec pause = { .tv_sec = 0, .tv_nsec = 2000000 };
+           nanosleep(&pause, NULL);
+           uint32_t t1 = lv_tick_get();
+           if (clock_failed) {
+               fprintf(stderr, "clock_gettime failed during tick polling\n");
+               exit(2);
+           }
+           uint32_t delta = t1 - t0;
+           if (delta > 0 && delta <= 100) {
+               tick_progressed = true;
+               break;
+           }
+       }
+       if (!tick_progressed) {
+           fprintf(stderr, "tick failed to progress within budget\n");
+           exit(2);
+       }
+       ```
 2. **显示驱动与字节尺寸精确计算**：
    - 设定虚拟视口尺寸：`#define DISP_HOR_RES 320`，`#define DISP_VER_RES 240`。
    - 设定部分刷新缓冲行数：`#define BUF_LINES 40`。
@@ -167,10 +187,17 @@ staging/lvgl/
      - **坐标边界断言**：
        `assert(area->x1 <= area->x2 && area->y1 <= area->y2);`
        `assert(area->x1 >= 0 && area->y1 >= 0 && area->x2 < DISP_HOR_RES && area->y2 < DISP_VER_RES);`
-     - 行步长为 `uint32_t stride_pixels = (uint32_t)(area->x2 - area->x1 + 1);`。
-     - 取样检查：
-       - 若包含 `(10, 10)`：计算偏移 `(10 - area->y1) * stride_pixels + (10 - area->x1)`，读取 `uint32_t px = ((uint32_t *)px_map)[offset];`，断言 `(px & 0x00FFFFFFu) == CLR_EXPECT_BG`，并标记 `bg_sampled = true`。
-       - 若包含 `(100, 70)`：计算偏移 `(70 - area->y1) * stride_pixels + (100 - area->x1)`，读取 `uint32_t px = ((uint32_t *)px_map)[offset];`，断言 `(px & 0x00FFFFFFu) == CLR_EXPECT_BTN`，并标记 `btn_sampled = true`。
+     - **行跨度提取与像素寻址**：
+       - `int32_t area_w = area->x2 - area->x1 + 1;`
+       - 读取或断言 `stride_bytes = area_w * 4;`（XRGB8888 格式每像素 4 字节，断言无意外对齐填充）。
+       - 若包含 `(10, 10)`：
+         `const uint8_t *row = px_map + (10 - area->y1) * stride_bytes;`
+         `uint32_t px = *(const uint32_t *)(row + (10 - area->x1) * 4);`
+         断言 `(px & 0x00FFFFFFu) == CLR_EXPECT_BG`，并标记 `bg_sampled = true;`。
+       - 若包含 `(100, 70)`：
+         `const uint8_t *row = px_map + (70 - area->y1) * stride_bytes;`
+         `uint32_t px = *(const uint32_t *)(row + (100 - area->x1) * 4);`
+         断言 `(px & 0x00FFFFFFu) == CLR_EXPECT_BTN`，并标记 `btn_sampled = true;`。
      - 调用 `lv_display_flush_ready(disp)`。
    - 调用 `lv_timer_handler()` 触发单次完整渲染流程。
    - **像素命中与冲刷断言**：
