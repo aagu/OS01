@@ -7,6 +7,7 @@
 
 #include <driver/fb_state.h>
 #include <driver/bga.h>
+#include <driver/fb_test.h>
 #include <core/printk.h>
 #include <tty/console.h>
 #include <sync/mutex.h>
@@ -64,6 +65,10 @@ void fb_bootstrap_state(uint64_t phys, uint64_t gop_bytes, const struct fb_info 
     g_backend_failed = false;
     g_raw_mmap_seen = false;
     g_initialized = true;
+
+    /* Drop any armed fault left over from a previous session (test build
+     * only; a no-op in production). */
+    fb_test_reset();
 
     memset(&g_bga_caps, 0, sizeof(g_bga_caps));
     memset(g_bga_modes, 0, sizeof(g_bga_modes));
@@ -300,6 +305,10 @@ void fb_mark_failed(void)
     g_backend_ready = false;
     g_transitioning = true;
     spin_unlock_irqrestore(&display_state_lock, flags);
+
+    /* A permanent backend fault invalidates every armed fault record
+     * (test build only; a no-op in production). */
+    fb_test_clear_pending();
 }
 
 void fb_mark_raw_mmap_seen(void)
@@ -498,7 +507,12 @@ int fb_set_mode(const struct fb_set_mode_req *req)
         .format = FB_FORMAT_RGB32
     };
 
+    /* Register the pending fault association for the calling PID; only a
+     * layout-changing SET consumes an armed register-readback fault, and
+     * only when the target PID matches.  No-op in production. */
+    fb_test_set_begin((int32_t)current->pid);
     enum bga_result bres = bga_apply_mode(&target_info);
+    fb_test_set_end();
 
     if (bres == BGA_APPLIED) {
         if (Pos.FB_addr) {

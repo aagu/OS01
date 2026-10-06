@@ -40,6 +40,9 @@ static int g_present_errno;            /* nonzero: next present fails */
 static int g_state_errno;              /* nonzero: get_state fails */
 static int g_state_calls;
 static struct fb_state g_state;
+/* test-only ENOMEM hook (FB_RESOLUTION_TEST op) */
+static int g_consume_enomem;   /* 1 = the next consume returns 1 (once) */
+static int g_consume_calls;
 /* race: on this get_state call number (1-based, relative) switch generation */
 static int g_state_flip_at;
 static uint64_t g_state_flip_gen;
@@ -86,6 +89,17 @@ static int m_state(int fd, struct fb_state *st)
     return 0;
 }
 
+/* Test-only fbtest ENOMEM hook: returns 1 exactly once, then 0. */
+static int m_consume_enomem(void)
+{
+    g_consume_calls++;
+    if (g_consume_enomem) {
+        g_consume_enomem = 0;
+        return 1;
+    }
+    return 0;
+}
+
 /* tiny in-memory PSF2: 8x16, 256 glyphs */
 static uint8_t g_fontbuf[sizeof(psf2_t) + 256 * 16];
 
@@ -103,6 +117,7 @@ static void setup(uint32_t w, uint32_t h, uint64_t gen)
     g_present_calls = g_state_calls = 0;
     g_open_fail_errno = g_present_errno = g_state_errno = 0;
     g_state_flip_at = 0; g_malloc_fail_nth = 0;
+    g_consume_enomem = 0; g_consume_calls = 0;
     memset(&g_state, 0, sizeof(g_state));
     g_state.info.width = w; g_state.info.height = h;
     g_state.info.stride = w * 4; g_state.info.bpp = 32;
@@ -116,6 +131,7 @@ static void setup(uint32_t w, uint32_t h, uint64_t gen)
                           gen, 0xFFFFFFFFu, 0);
     D.ops.gfx_open = m_open; D.ops.gfx_close = m_close;
     D.ops.gfx_present = m_present; D.ops.get_state = m_state;
+    D.ops.consume_terminal_enomem = m_consume_enomem;
 }
 
 TEST_FUNC(test_terminal_recover_aba) {
@@ -276,6 +292,32 @@ TEST_FUNC(test_terminal_permanent_eio_serial_only) {
     assert_eq(0, g_double_close);
 }
 
+/* FB_RESOLUTION_TEST hook: a one-shot ENOMEM consume fails exactly the next
+ * resource prepare for this PID; the retry then succeeds normally. */
+TEST_FUNC(test_terminal_fbtest_enomem_once) {
+    setup(640, 480, 1);
+    D.ops.consume_terminal_enomem = m_consume_enomem;
+    g_consume_enomem = 1;
+    g_consume_calls = 0;
+
+    gfx_handle_t *old = D.gfx;
+    g_state.info.width = 1280; g_state.info.height = 720;
+    g_state.info.stride = 1280 * 4; g_state.generation = 2;
+
+    assert_eq(1, terminal_display_refresh(&D, 3, 1000));   /* injected ENOMEM */
+    assert_true(D.gfx == old);                             /* old view intact */
+    assert_eq(0, g_open_calls);                            /* prepare never ran */
+    assert_eq(1, g_consume_calls);
+    assert_eq(1250, (int)D.retry_deadline_ms);
+    assert_eq(1, terminal_display_refresh(&D, 3, 1100));   /* rate limited */
+
+    assert_eq(0, terminal_display_refresh(&D, 3, 1250));   /* retry succeeds */
+    assert_true(D.gfx != old);
+    assert_eq(2, g_consume_calls);
+    assert_eq(0, g_double_close);
+    terminal_display_close(&D);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_terminal_recover_aba),
     TEST_ENTRY(test_terminal_resize_changes_core),
@@ -285,6 +327,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_terminal_present_errno_and_redraw_retry),
     TEST_ENTRY(test_idle_poll_bound),
     TEST_ENTRY(test_terminal_permanent_eio_serial_only),
+    TEST_ENTRY(test_terminal_fbtest_enomem_once),
 TEST_LIST_END
 
 int main(void) {

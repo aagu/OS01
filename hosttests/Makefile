@@ -163,9 +163,10 @@ $(TEST_BLD)/test_slab_idempotent_reservation.elf \
     $(TEST_BLD)/test_bga_non_x86.elf \
     $(TEST_BLD)/test_fb_resolution_ioctl.elf \
     $(TEST_BLD)/test_pty_winsize.elf \
+    $(TEST_BLD)/test_fb_resolution_hooks.elf \
     $(TEST_BLD)/test_setres.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-pty-winsize test-terminal-display test-clients
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients
 
 all: $(TEST_BINS)
 
@@ -1171,9 +1172,12 @@ test-terminal-render: $(TEST_BLD)/test_terminal_render.elf
 
 # Terminal display transaction test — REAL user/terminal_display.c with an
 # injected libgfx/FBIOGET_STATE backend; malloc is wrapped for ENOMEM injection.
+# -DFB_RESOLUTION_TEST compiles the Task-9 fbtest ENOMEM hook so
+# test_terminal_fbtest_enomem_once can drive it; the tests always install a
+# stub op, so the real /dev/fbtest path is never taken on the host.
 $(TEST_BLD)/terminal_display.o: $(TESTS_DIR)/user/terminal_display.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(GFX_CLIENT_HOST_CFLAGS) -I$(TEST_INC) -I$(TESTS_DIR)/user -c $< -o $@
+	$(HOST_CC) $(GFX_CLIENT_HOST_CFLAGS) -DFB_RESOLUTION_TEST -I$(TEST_INC) -I$(TESTS_DIR)/user -c $< -o $@
 
 $(TEST_BLD)/test_terminal_display.o: $(TEST_CASES)/test_terminal_display.c
 	@mkdir -p $(TEST_BLD)
@@ -2788,6 +2792,41 @@ $(TEST_BLD)/test_fb_resolution_ioctl.elf: $(TEST_BLD)/test_fb_resolution_ioctl.o
 	$(HOST_CC) -lpthread -o $@ $^
 
 test-fb-ioctl: $(TEST_BLD)/test_fb_resolution_ioctl.elf
+	$<
+
+# Controlled fault-injection surface (QEMU resolution switcher Task 9).
+# Compiles the REAL kernel/driver/fb_test.c together with fb_state.c /
+# bga.c / fb.c built with -DFB_RESOLUTION_TEST, so the armed-token
+# consumption, readback filtering, lease hold and terminal-ENOMEM
+# registry are all exercised end to end against the fake BGA transport.
+# fb_state.c / bga.c / fb.c get distinct object names because their
+# normal FB_STATE/FB_WRITERS objects are built WITHOUT the macro.
+FB_HOOKS_HOST_CFLAGS := $(FB_WRITERS_HOST_CFLAGS) -DFB_RESOLUTION_TEST
+
+$(TEST_BLD)/fb_state_hooks.o: $(TESTS_DIR)/kernel/driver/fb_state.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FB_HOOKS_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/bga_hooks.o: $(TESTS_DIR)/kernel/driver/bga.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FB_HOOKS_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/fb_test.o: $(TESTS_DIR)/kernel/driver/fb_test.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FB_HOOKS_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_fb_resolution_hooks.o: $(TEST_CASES)/test_fb_resolution_hooks.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FB_HOOKS_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_fb_resolution_hooks.elf: $(TEST_BLD)/test_fb_resolution_hooks.o \
+		$(TEST_BLD)/fb_state_hooks.o $(TEST_BLD)/bga_hooks.o \
+		$(TEST_BLD)/fb_test.o $(TEST_BLD)/fb_map.o \
+		$(TEST_BLD)/fb_resolution_runtime.o $(TEST_BLD)/fb_production.o \
+		$(TEST_BLD)/console_production.o $(TEST_BLD)/pci_match_production.o
+	$(HOST_CC) -lpthread -o $@ $^
+
+test-fb-hooks: $(TEST_BLD)/test_fb_resolution_hooks.elf
 	$<
 
 # PTY master window resize notifications (QEMU resolution switcher Task 6)

@@ -42,6 +42,26 @@ $(error ARCH9_FAULT=$(ARCH9_FAULT) cannot be combined with INITTAB_FILE=config/i
 endif
 endif
 
+# ── FB_RESOLUTION_TEST — test-only framebuffer fault surface ────
+# 1 selects the isolated resolution-test kernel/user/image variant and
+# compiles the /dev/fbtest control node + injection hooks.  0 (the
+# production default) installs no control node, command or injection
+# branch.  It is test config only and must not be mixed with any other
+# test/driver-model variant.
+FB_RESOLUTION_TEST ?= 0
+ifeq ($(filter $(FB_RESOLUTION_TEST),0 1),)
+$(error FB_RESOLUTION_TEST='$(FB_RESOLUTION_TEST)' must be 0 or 1)
+endif
+ifneq ($(filter 1,$(FB_RESOLUTION_TEST)),)
+ifneq ($(filter 1,$(KERNEL_SELFTEST) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST)),)
+$(error FB_RESOLUTION_TEST=1 cannot be combined with KERNEL_SELFTEST/KERNEL_CANARY_SELFTEST/OS01_SYSTEST/OS01_NETTEST)
+endif
+ifneq ($(filter none,$(ARCH9_FAULT)),)
+else
+$(error FB_RESOLUTION_TEST=1 cannot be combined with ARCH9_FAULT=$(ARCH9_FAULT))
+endif
+endif
+
 # ── Variant slugs (BEFORE the profile include!) ───────────────
 # IMAGE_VARIANT — the image/manifest dirs' variant suffix, derived from the
 # explicit switch variables. The root Makefile applies OS01_SYSTEST /
@@ -61,8 +81,8 @@ ifneq ($(filter 1,$(KERNEL_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST)),)
 $(error KERNEL_CANARY_SELFTEST=1 cannot be combined with KERNEL_SELFTEST=1, OS01_SYSTEST=1, or OS01_NETTEST=1)
 endif
 endif
-IMAGE_VARIANT := $(strip $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test)$(if $(filter 1,$(KERNEL_SELFTEST)),selftest)$(if $(filter 1,$(KERNEL_CANARY_SELFTEST)),canary-selftest)$(if $(filter none,$(ARCH9_FAULT)),,driver-model-$(ARCH9_FAULT)))
-USER_VARIANT  := $(if $(filter 1,$(OS01_SYSTEST)),systest)
+IMAGE_VARIANT := $(strip $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test)$(if $(filter 1,$(KERNEL_SELFTEST)),selftest)$(if $(filter 1,$(KERNEL_CANARY_SELFTEST)),canary-selftest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter none,$(ARCH9_FAULT)),,driver-model-$(ARCH9_FAULT)))
+USER_VARIANT  := $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)
 
 OS01_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 OS01_PROFILE_FILE := $(OS01_ROOT)/mk/profiles/$(PROFILE).mk
@@ -70,6 +90,14 @@ ifeq ($(wildcard $(OS01_PROFILE_FILE)),)
 $(error unsupported PROFILE='$(PROFILE)')
 endif
 include $(OS01_PROFILE_FILE)
+
+# FB_RESOLUTION_TEST is x86-only (the BGA fault surface targets QEMU
+# Standard VGA).  TARGET_TRIPLE is resolved by the profile include above.
+ifneq ($(filter 1,$(FB_RESOLUTION_TEST)),)
+ifeq ($(filter x86_64%,$(TARGET_TRIPLE)),)
+$(error FB_RESOLUTION_TEST=1 is only supported on x86 targets; TARGET_TRIPLE='$(TARGET_TRIPLE)')
+endif
+endif
 
 # ── Capability gate ────────────────────────────────────────────
 # $(call require_capability,<cap>) aborts during parse / recipe
@@ -104,7 +132,7 @@ endef
 # tasks can rely on them without rework. OS01_SUBMAKE_ARGS is recursive so it
 # is evaluated at recipe-expansion time — after the root Makefile has applied
 # its LOG_TARGET / INITTAB_FILE / ... defaults.
-OS01_SUBMAKE_ALLOWED := CLANG UEFI_CLANG LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_OBJDUMP LLVM_READOBJ LLVM_READELF TARGET_LD RUNTIME_PROVIDER LOG_TARGET KERNEL_SELFTEST KERNEL_CANARY_SELFTEST KERNEL_TEST_FORCE_NO_RNDRRS KERNEL_EXTRA_CFLAGS OS01_SYSTEST OS01_NETTEST INITTAB_FILE AARCH64_QEMU SMP AARCH64_SMP_TEST_NO_ACK_CPU AARCH64_SYNC_FAULT_TEST AARCH64_M1_TEST AARCH64_UEFI_FIRMWARE_SOURCE QEMU_BIN DEBUG DEBUG_CHANNELS ARCH9_FAULT
+OS01_SUBMAKE_ALLOWED := CLANG UEFI_CLANG LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_OBJDUMP LLVM_READOBJ LLVM_READELF TARGET_LD RUNTIME_PROVIDER LOG_TARGET KERNEL_SELFTEST KERNEL_CANARY_SELFTEST KERNEL_TEST_FORCE_NO_RNDRRS KERNEL_EXTRA_CFLAGS OS01_SYSTEST OS01_NETTEST INITTAB_FILE AARCH64_QEMU SMP AARCH64_SMP_TEST_NO_ACK_CPU AARCH64_SYNC_FAULT_TEST AARCH64_M1_TEST AARCH64_UEFI_FIRMWARE_SOURCE QEMU_BIN DEBUG DEBUG_CHANNELS ARCH9_FAULT FB_RESOLUTION_TEST
 OS01_SUBMAKE_ARGS = $(foreach v,$(OS01_SUBMAKE_ALLOWED),$(if $($(v)),$(v)=$($(v))))
 
 # ── Sysroot generation protocol (spec: sysroot single-writer) ──

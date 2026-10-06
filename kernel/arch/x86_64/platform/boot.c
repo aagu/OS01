@@ -63,6 +63,7 @@
 #include <driver/mouse.h>
 #include <driver/fb.h>
 #include <driver/fb_state.h>
+#include <driver/fb_test.h>
 #include <driver/gfx.h>
 #include <fs/devfs.h>
 #include <log/log.h>
@@ -166,4 +167,14 @@ void x86_64_boot_device_nodes(void)
     gfx_init();
     if (devfs_register_chrdev("gfx0", NULL, &gfx_ops) != 0)
         log_err("gfx0: failed to register /dev/gfx0\n");
+
+#ifdef FB_RESOLUTION_TEST
+    // /dev/fbtest — controlled fault-injection surface (QEMU resolution
+    // switcher Task 9).  Registered here (post-devfs_init) rather than in
+    // bga_probe: the BGA probe runs in subsystem phase 6, before
+    // fs_boot_prepare() mounts devfs.  Production builds do not compile
+    // this branch or link driver/fb_test.c.
+    if (fb_test_init() != 0)
+        log_err("fbtest: failed to register /dev/fbtest\n");
+#endif
 }

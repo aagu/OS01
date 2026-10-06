@@ -55,6 +55,18 @@ ARCH9_FAULT_FLAGS := -DOS01_TEST_FAULT=1 '-DARCH9_FAULT_NAME="$(ARCH9_FAULT)"'
 KERNEL_TEST_FAULT_C_SOURCES := device/test_fault.c
 endif
 
+# FB_RESOLUTION_TEST — test-only framebuffer fault surface (Task 9).
+# driver/fb_test.c provides /dev/fbtest; it is added to the source list and
+# compiled with -DFB_RESOLUTION_TEST=1 ONLY for the resolution-test variant.
+# Production keeps it out of the wildcard so no injection symbol is linked.
+ifeq ($(FB_RESOLUTION_TEST),1)
+KERNEL_FB_TEST_C_SOURCES := driver/fb_test.c
+FB_RESOLUTION_TEST_FLAGS := -DFB_RESOLUTION_TEST=1
+else
+KERNEL_FB_TEST_C_SOURCES :=
+FB_RESOLUTION_TEST_FLAGS :=
+endif
+
 ifeq ($(ARCH),aarch64)
 KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    memory/slab.c memory/tlb.c \
@@ -86,7 +98,7 @@ KERNEL_C_SOURCES := \
     $(wildcard fs/*.c) \
     $(wildcard sched/*.c) \
     $(wildcard sync/*.c) \
-    $(wildcard driver/*.c) \
+    $(filter-out driver/fb_test.c,$(wildcard driver/*.c)) \
     $(wildcard ipc/*.c) \
     $(wildcard tty/*.c) \
     $(wildcard intr/*.c) \
@@ -98,6 +110,7 @@ KERNEL_C_SOURCES := \
     $(filter-out device/test_fault.c,$(wildcard device/*.c)) \
     $(wildcard bus/pci/*.c) \
     $(KERNEL_TEST_FAULT_C_SOURCES) \
+    $(KERNEL_FB_TEST_C_SOURCES) \
     ../runtime/builtins/udivti3.c
 
 # Platform devices are selected by arch/<arch>/make.config.  Keep x86-only
@@ -211,6 +224,11 @@ print-canary-contract:
 # defined above (KERNEL_TEST_FAULT_C_SOURCES was already wired into
 # KERNEL_C_SOURCES by the source-discovery block).
 ALL_CFLAGS += $(ARCH9_FAULT_FLAGS)
+
+# ── FB_RESOLUTION_TEST fault surface (Task 9) ──────────────
+# Same pattern: appended after ALL_CFLAGS is defined and after the source
+# list was assembled.  Empty for the production (0) build.
+ALL_CFLAGS += $(FB_RESOLUTION_TEST_FLAGS)
 
 # ── lwIP networking stack ────────────────────────────────────
 LWIP_SRC_DIR  := ../thirdpart/lwip/src
@@ -543,6 +561,12 @@ install-headers:
 	@# ABI). Exclude it from the staged kernel headers so the generation
 	@# assembler never sees a duplicate destination.
 	rm -f $(INSTALL_ROOT)/usr/include/errno.h
+	@# FB_RESOLUTION_TEST is test config only: the production sysroot must
+	@# never publish the fbtest control ABI (uapi/fb_test.h) or its private
+	@# driver header. They are staged only for the resolution-test build.
+ifneq ($(FB_RESOLUTION_TEST),1)
+	rm -f $(INSTALL_ROOT)/usr/include/uapi/fb_test.h $(INSTALL_ROOT)/usr/include/driver/fb_test.h
+endif
 	@find $(INSTALL_ROOT) -type f ! -name manifest | sed 's|^$(INSTALL_ROOT)/||' | sort > $(INSTALL_ROOT)/manifest
 
 # ── Clean ───────────────────────────────────────────────────

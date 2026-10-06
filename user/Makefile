@@ -34,6 +34,14 @@ ifeq ($(OS01_SYSTEST),1)
 override CFLAGS += -DOS01_SYSTEST
 endif
 
+# ── FB_RESOLUTION_TEST (QEMU resolution switcher Task 9) ────
+# Test config only: compiles the terminal_display.c fbtest ENOMEM hook.
+# test_resolution.c (the guest fault helper) is added to C_SOURCES below
+# only for this variant.
+ifeq ($(FB_RESOLUTION_TEST),1)
+override CFLAGS += -DFB_RESOLUTION_TEST
+endif
+
 USER_RAW_LDFLAGS := -m elf_x86_64 -static -no-pie -T linker.ld -L$(TARGET_LIBDIR_LOCAL)
 
 # ── Source discovery ───────────────────────────────────────
@@ -41,7 +49,13 @@ USER_RAW_LDFLAGS := -m elf_x86_64 -static -no-pie -T linker.ld -L$(TARGET_LIBDIR
 # terminal_core.c / terminal_render.c / terminal_display.c / tetris_logic.c /
 # setres_parse.c / gfx_client_policy.c are libraries, not standalone programs
 # (the helper TUs are linked explicitly into their consumers below).
-C_SOURCES := $(filter-out terminal_core.c terminal_render.c terminal_display.c tetris_logic.c setres_parse.c gfx_client_policy.c,$(wildcard *.c))
+# test_resolution.c (the fault-injection guest helper) is packaged ONLY for
+# the FB_RESOLUTION_TEST=1 variant.
+USER_EXCLUDE_SOURCES := terminal_core.c terminal_render.c terminal_display.c tetris_logic.c setres_parse.c gfx_client_policy.c
+ifneq ($(FB_RESOLUTION_TEST),1)
+USER_EXCLUDE_SOURCES += test_resolution.c
+endif
+C_SOURCES := $(filter-out $(USER_EXCLUDE_SOURCES),$(wildcard *.c))
 ASM_SOURCES := $(wildcard *.S)
 
 # Each .c → .elf (e.g. init.c → init.elf)

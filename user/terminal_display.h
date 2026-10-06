@@ -20,6 +20,10 @@ typedef struct terminal_display_ops {
     void (*gfx_close)(gfx_handle_t *h);
     int  (*gfx_present)(gfx_handle_t *h);
     int  (*get_state)(int fb_fd, struct fb_state *st);
+    /* Test-only (FB_RESOLUTION_TEST) fault hook: returns 1 once to force
+     * the next resource prepare to fail with ENOMEM.  NULL — and never
+     * consulted — in production builds. */
+    int  (*consume_terminal_enomem)(void);
 } terminal_display_ops_t;
 
 typedef struct terminal_display {

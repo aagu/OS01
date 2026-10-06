@@ -65,6 +65,12 @@ uint32_t bga_filter_modes(const bga_caps_t *caps, uint64_t mapped_size,
                           struct fb_info out[FB_MAX_MODES]);
 int fb_install_backend(const bga_caps_t *caps, uint32_t *addr, uint64_t mapped_size);
 
+#ifdef FB_RESOLUTION_TEST
+/* Test-only: sample DISPI registers index 0..10, restoring the saved index.
+ * Caller holds the display mutex.  Returns 0 or -ENODEV when unbound. */
+int bga_sample_regs(uint16_t out[11]);
+#endif
+
 extern const struct pci_driver bga_pci_driver;
 
 #ifdef OS01_HOST_TEST

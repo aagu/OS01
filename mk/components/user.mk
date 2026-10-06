@@ -27,6 +27,10 @@ USER_PROGRAMS := init spin sigtest poweroff halt reboot systest \
                  socktest udptest ipaddr nettest netmodeltest tetris desktop \
                  canary_smash canary_dump mousetest test_gfx tetris_dump \
                  test_terminal_screen test_lvgl setres
+# The fault-injection guest helper is packaged ONLY for FB_RESOLUTION_TEST=1.
+ifneq ($(filter 1,$(FB_RESOLUTION_TEST)),)
+USER_PROGRAMS += test_resolution
+endif
 USER_ARTIFACTS := $(addprefix $(USER_ARTIFACT_DIR)/,$(addsuffix .elf,$(USER_PROGRAMS)))
 
 # One grouped rule (GNU make &:, runs once per invocation): under the

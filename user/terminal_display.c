@@ -16,6 +16,36 @@
 #include <string.h>
 #include <sys/ioctl.h>
 
+#ifdef FB_RESOLUTION_TEST
+#include <fcntl.h>
+#include <unistd.h>
+#include <uapi/fb_test.h>
+
+/* Test-only fault hook.  Reads the one-shot terminal-ENOMEM fault armed for
+ * this PID from /dev/fbtest.  The fd is opened lazily and kept for the
+ * process lifetime; a missing device simply disables the hook.  The real
+ * terminal.elf (compiled with -DFB_RESOLUTION_TEST) sets this as its
+ * consume_terminal_enomem op; production never compiles it. */
+static int real_consume_terminal_enomem(void)
+{
+    static int fd = -2; /* -2 = uninitialised */
+    if (fd == -2) {
+        fd = open("/dev/fbtest", O_RDWR);
+    }
+    if (fd < 0) {
+        return 0;
+    }
+
+    struct fb_test_req req;
+    memset(&req, 0, sizeof(req));
+    req.version = 1;
+    req.target_pid = (uint32_t)getpid();
+    int rc = ioctl(fd, FBIOTEST_CONSUME_TERMINAL_ENOMEM, &req);
+    /* The ioctl returns 1 when this PID must fail its next prepare once. */
+    return rc > 0 ? 1 : 0;
+}
+#endif
+
 static gfx_handle_t *real_open(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 {
     return gfx_open(x, y, w, h);
@@ -37,6 +67,9 @@ void terminal_display_init(terminal_display_t *d, gfx_handle_t *gfx,
     d->ops.gfx_close = real_close;
     d->ops.gfx_present = real_present;
     d->ops.get_state = real_state;
+#ifdef FB_RESOLUTION_TEST
+    d->ops.consume_terminal_enomem = real_consume_terminal_enomem;
+#endif
     d->gfx = gfx;
     d->core = core;
     d->font = font;
@@ -114,6 +147,15 @@ int terminal_display_refresh(terminal_display_t *d, int fb_fd, uint64_t now_ms)
     int cols = (int)(w / d->font->width);
     int rows = (int)(h / d->font->height);
     if (cols <= 0 || rows <= 0) return fail(d, EINVAL, now_ms);
+
+#ifdef FB_RESOLUTION_TEST
+    /* Test-only: fail this resource prepare once, exactly as a gfx_open /
+     * core-array ENOMEM would.  Nothing has been allocated yet, so the old
+     * view/core stay intact and the 250 ms retry re-runs the prepare. */
+    if (d->ops.consume_terminal_enomem && d->ops.consume_terminal_enomem()) {
+        return fail(d, ENOMEM, now_ms);
+    }
+#endif
 
     gfx_handle_t *nh = d->ops.gfx_open(0, 0, w, h);
     if (!nh) {

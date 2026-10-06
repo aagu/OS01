@@ -7,6 +7,7 @@
 
 #include <driver/bga.h>
 #include <driver/fb_state.h>
+#include <driver/fb_test.h>
 #include <arch/x86_64/fb_map.h>
 #include <core/printk.h>
 #include <bus/pci/pci.h>
@@ -478,7 +479,9 @@ enum bga_result bga_apply_mode(const struct fb_info *target)
     bga_outw(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_VIRT_HEIGHT);
     uint16_t rb_virt_h = bga_inw(VBE_DISPI_IOPORT_DATA);
     bga_outw(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_X_OFFSET);
-    uint16_t rb_x_off = bga_inw(VBE_DISPI_IOPORT_DATA);
+    uint16_t rb_x_off = fb_test_filter_readback(FB_TEST_STEP_APPLY,
+                                                VBE_DISPI_INDEX_X_OFFSET,
+                                                bga_inw(VBE_DISPI_IOPORT_DATA));
     bga_outw(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_Y_OFFSET);
     uint16_t rb_y_off = bga_inw(VBE_DISPI_IOPORT_DATA);
     bga_outw(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_BANK);
@@ -537,7 +540,9 @@ enum bga_result bga_apply_mode(const struct fb_info *target)
     bga_outw(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_VIRT_HEIGHT);
     uint16_t roll_virt_h = bga_inw(VBE_DISPI_IOPORT_DATA);
     bga_outw(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_X_OFFSET);
-    uint16_t roll_x_off = bga_inw(VBE_DISPI_IOPORT_DATA);
+    uint16_t roll_x_off = fb_test_filter_readback(FB_TEST_STEP_ROLLBACK,
+                                                  VBE_DISPI_INDEX_X_OFFSET,
+                                                  bga_inw(VBE_DISPI_IOPORT_DATA));
     bga_outw(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_Y_OFFSET);
     uint16_t roll_y_off = bga_inw(VBE_DISPI_IOPORT_DATA);
     bga_outw(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_BANK);
@@ -562,6 +567,25 @@ enum bga_result bga_apply_mode(const struct fb_info *target)
 
     return BGA_FAILED;
 }
+
+#ifdef FB_RESOLUTION_TEST
+/* Sample DISPI registers index 0..10 in order, restoring the caller's
+ * index.  Only the test build links this; the caller (fb_test.c SNAPSHOT)
+ * holds the display mutex. */
+int bga_sample_regs(uint16_t out[11])
+{
+    if (!g_bga_bound || !out) {
+        return -ENODEV;
+    }
+    uint16_t orig_index = bga_inw(VBE_DISPI_IOPORT_INDEX);
+    for (uint16_t i = 0; i <= (uint16_t)VBE_DISPI_INDEX_VIDEO_MEMORY_64K; i++) {
+        bga_outw(VBE_DISPI_IOPORT_INDEX, i);
+        out[i] = bga_inw(VBE_DISPI_IOPORT_DATA);
+    }
+    bga_outw(VBE_DISPI_IOPORT_INDEX, orig_index);
+    return 0;
+}
+#endif
 
 static const struct pci_device_id bga_pci_ids[] = {
     {

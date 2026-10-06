@@ -30,6 +30,10 @@ else ifneq ($(filter 1,$(KERNEL_SELFTEST)),)
 KERNEL_VARIANT := selftest
 else ifneq ($(filter 1,$(KERNEL_CANARY_SELFTEST)),)
 KERNEL_VARIANT := canary-selftest
+else ifneq ($(filter 1,$(FB_RESOLUTION_TEST)),)
+# FB_RESOLUTION_TEST=1 compiles the /dev/fbtest control surface; isolate its
+# kernel/image artifacts so the production tree is never touched.
+KERNEL_VARIANT := resolution-test
 else ifneq ($(filter none,$(ARCH9_FAULT)),)
 KERNEL_VARIANT :=
 else
@@ -45,7 +49,7 @@ LIBLVGL_BUILD_DIR := $(BUILD_DIR)/liblvgl
 # lets component sub-makes that include ONLY the profile (via
 # OS01_PROFILE_FILE, e.g. user/Makefile) resolve it from OS01_SYSTEST on
 # their own command line (passed through OS01_SUBMAKE_ARGS).
-USER_VARIANT ?= $(if $(filter 1,$(OS01_SYSTEST)),systest)
+USER_VARIANT ?= $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)
 # Variant-scoped user dirs: the compile-affecting variant keys the user object
 # dir and the user artifact dir, so a systest build compiles fresh objects
 # into build/<profile>/user/systest and publishes artifacts into
