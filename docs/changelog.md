@@ -1,9 +1,22 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-10-04）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-10-06）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
+
+## 2026-10-06
+
+- refactor(driver-model): **ARCH-9 驱动模型 / 总线抽象** —— commits `14119cf7..8b29b25`（分支 `arch9-driver-model` 已合并并删除，21 commit + 1 followup fix；84 文件，+16,695/-1,875）：
+  - **A 阶段（块设备 ops + GPT 包装）**：`struct block_device_ops {read, write, flush}` + `struct block_device_desc {name, sector_count, sector_size, ops, private_data, parent, kind}`；移除 `port_num` 直访问，驱动注册自己的 ops；GPT 经父入口 dispatch；fs/boot 只从 BLOCK_DISK 中选第一盘
+  - **B 阶段（device core + PCI core + AHCI + boot coordinator）**：typed `pci_driver`（id_table 匹配 + probe/remove） + `struct pci_device`（dev, domain/bdf, vendor/device/class, bars[6] {kind, address, valid, index}, driver, driver_data） + `struct pci_backend {roots, root_count, read32/write32/route_gsi}` + x86 backend 隔离在 `kernel/arch/x86_64/bus/pci.c`；AHCI 私有 `ahci_instance` + 安全撤销/DMA 隔离 + boot coordinator（`device_core_init` → `net_device_init` → `pci_enumerate` → `pci_bind_all` → `net_lwip_start`）
+  - **C 阶段（net_device 抽象 + lwIP + e1000 + virtio-net + ENETDOWN 守卫）**：`struct net_device {name, mac, mtu, link_up, parent, ops, priv, adapter}` + ops `{xmit, poll_rx, get_link, stop}`；`net_service_ready()` / `net_default_ipv4()` 公共 readiness 查询；e1000 与 virtio-net 每实例驱动，3 种 IRQ 模式（INTX/POLL/MSIX）；socket `do_socket` 在 NIC 未 ONLINE 时返回 `-ENETDOWN`（spec §Review Focus #4）；过渡期 `os01_netif` 在 Task 9/10 一起移除，`kernel/net/net.c` 收敛为 39 行两向薄 shim
+  - **D 阶段（QEMU 多卡矩阵 + 故障 fixture + per-BDF 观察）**：`make test-qemu SUITE=driver-model` 跑 16 case × 2 SMP；`ARCH9_FAULT=none|observe|bad-nic-bar|adapter-fail|ahci-empty|irq-conflict` 通过 root 传 kernel flag；build contract 路径固定 `build/x86_64-clang/{kernel,artifacts,image}/driver-model-<fault>/`；每个 BDF 注册观察计数器（probe/bar/adapter）让 unsupported/modern-only 能精确断言未匹配设备 zero probe；boundary audit + test-syscall alias 恢复（用户 AGENTS 唯一受允许例外）；`kernel/include/ipc/mbox.h` 从 `kernel/net/sys_arch.c` 抽出满足 source/header symmetry
+  - **最终 wave fix**：AHCI id-table 严式 `01/06/01` 单一匹配（移除 `0xFFFF00` prog_if 掩码，避免非 AHCI SATA 控制器被程序化为 AHCI）；新增 `arch9-irq-mode: ... nic=ethN mode=POLL|INTX` log，使 irq-conflict 矩阵 case 真正验证第二卡 POLL 回落而非仅凭 `iface=` 标记放行
+  - **全量测试验证**：`test-arch9-host` 10 套件绿、`test_driver_model_matrix.py` 21/21（10 RED 注入 + 11 含 IRQ mode/per-card evidence/SMP 过滤/边界审计/IRQ mode 解析）、`test_arch9_build_contract.py` 12/12、`make test-qemu SUITE=driver-model` 31/31（16 case × 2 SMP，含 net-block-smp@SMP=2 only、`irq-conflict` 第二卡 POLL marker）、e1000 + virtio 单卡网络回归、`make PROFILE=x86_64-clang image` 全链路；`test-driver_model_boundary_audit.py` 7 套件验证 `test-syscall` alias gate 与 5 条边界规则
+  - **已知遗留**：`make OS01_SYSTEST=1 test-systest` 暴露 pre-existing 回归（`config/inittab.systest` 不带起网卡，Task 9/10 的 `net_service_ready()` 正确返回 -ENETDOWN；不在本分支范围，单独 follow-up）；多项 minor cleanup（test-only externs、`copy_to_user_ft_res` utility split、文档准确性）通过 task 评审 parked 进 ledger
+  - **测试质量复盘**：完成 12 task × 1 task-reviewer + 4 fix rounds（Task 11 的 silent-pass 隐藏 bug 已修复：`nic1=None` 与 `ok1 >= 3` 互斥 + SMP=1 误跑 + `unsupported` 观察断言反向）+ 最终 wave（AHCI prog_if mask + irq-conflict POLL marker）；交付 12 commits + 7 fix commits
+  - **设计/计划文档**：`docs/superpowers/specs/2026-10-05-arch9-driver-model-design.md`（已确认设计）+ `docs/superpowers/plans/2026-10-05-arch9-driver-model.md`（实现计划，12 任务 4 阶段）；执行评审记录见 `.superpowers/sdd/2026-10-05-arch9-driver-model/progress.md`（gitignored）
 
 ## 2026-10-05
 
