@@ -42,7 +42,7 @@ __res; })
     unsigned long long __qn = (unsigned long long)(n); \
     unsigned long long __q; \
     unsigned long __rem; \
-    __asm__ volatile ("udiv %0, %2, %1" \
+    __asm__ volatile ("udiv %0, %1, %2" \
                       : "=r"(__q) \
                       : "r"(__qn), "r"(__b)); \
     __asm__ volatile ("msub %0, %3, %1, %2" \
