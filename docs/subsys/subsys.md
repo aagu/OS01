@@ -91,32 +91,60 @@ void subsys_init_percpu(void);        // run on all online CPUs
 
 ## Architecture-Specific Registration
 
-Driver self-registration via `SUBSYS_INITCALL()` (kernel/include/subsys/subsys.h):
+Driver self-registration via `SUBSYS_INITCALL()` (kernel/include/subsys/subsys.h)
+takes a single function name and emits that function into the
+`.subsys_init` linker section. The function body itself calls
+`register_subsys()` to publish the (name, init, phase, flags) tuple:
 
 ```c
-SUBSYS_INITCALL("apic", _apic_init, SUBSYS_PHASE_3, 0);
-SUBSYS_INITCALL("pic",  _pic_init,  SUBSYS_PHASE_3, SUBSYS_FLAG_OPTIONAL);
-SUBSYS_INITCALL("timer", _timer_init, SUBSYS_PHASE_4, 0);
-// ...
+// kernel/driver/pit.c
+static int _pit_register(void)
+{
+    register_subsys("pit", _pit_init_wrapper,
+                    SUBSYS_PHASE_4, SUBSYS_FLAG_OPTIONAL);
+    return 0;
+}
+SUBSYS_INITCALL(_pit_register);
 ```
 
-The macro emits a `subsys_entry_t` instance into the `.subsys_init` linker section. Each arch's `kernel/arch/<arch>/linker.ld` collects these into a table with sentinel markers (`__subsys_init_start` / `__subsys_init_end`).
+```c
+// kernel/driver/serial.c
+static int _serial_register(void)
+{
+    register_subsys("serial-irq", _serial_irq_init,
+                    SUBSYS_PHASE_5, 0);
+    return 0;
+}
+SUBSYS_INITCALL(_serial_register);
+```
 
-`arch_register_subsys()` is a 7-line loop over the table — **no per-arch hardcoded driver list**:
+`SUBSYS_INITCALL()` emits a `subsys_initcall_t` function pointer into the
+`.subsys_init` linker section. Each arch's `kernel/arch/<arch>/linker.ld`
+collects these into a table with sentinel markers
+(`__subsys_init_start` / `__subsys_init_end`).
+
+`arch_register_subsys()` is a 7-line loop over the table — **no per-arch
+hardcoded driver list**:
 
 ```c
 void arch_register_subsys(void) {
-    extern subsys_entry_t __subsys_init_start[], __subsys_init_end[];
-    for (subsys_entry_t *e = __subsys_init_start; e < __subsys_init_end; e++)
-        register_subsys_entry(e);   // copies into framework table
+    extern subsys_initcall_t __subsys_init_start[], __subsys_init_end[];
+    for (subsys_initcall_t *fn = __subsys_init_start; fn < __subsys_init_end; fn++)
+        (*fn)();   // each register stub calls register_subsys()
 }
 ```
 
-10 drivers self-register on x86_64 (apic, pic, pit, lapic-timer, timer, serial, keyboard, ahci, pci, net/clocksource variants — see each driver's `.c` for the `SUBSYS_INITCALL()` line).
+10 drivers self-register on x86_64 (apic, pic, pit, lapic-timer, timer,
+serial, keyboard, ahci, pci, net/clocksource variants — see each
+driver's `.c` for the `SUBSYS_INITCALL()` line).
 
 ### Per-CPU subsystems
 
-Same `SUBSYS_INITCALL()` macro variant for per-CPU entries. E.g. `lapic_timer_start_percpu` registers as `SUBSYS_INITCALL_PERCPU()`. The framework iterates the per-CPU table once per online CPU (`0 .. num_cpus-1`) after SMP bringup.
+Per-CPU entries use the `register_subsys_percpu()` runtime API in the
+driver's `_register` stub body. `arch_register_subsys_percpu()` iterates
+the per-CPU framework table and `subsys_init_percpu()` calls each
+`init_percpu(cpu_id)` once for every online CPU
+(`0 .. num_cpus-1`) after SMP bringup.
 
 ### Arch API header (`kernel/include/arch/subsys.h`)
 

@@ -514,6 +514,7 @@ test-gfx-primitives:
 # root via subprocess; the recipes below are entry points.
 TEST_DRIVER_MATRIX_CASES := all e1000 virtio mixed two-e1000 two-virtio no-nic no-ahci empty-ahci poll-busy bad-nic adapter-fail unsupported modern-only net-block-smp
 DRIVER_MATRIX_DRIVER_CASE ?=
+DRIVER_MATRIX_DRIVER_SMP ?=
 DRIVER_MODEL_LOG_DIR := $(OS01_ROOT)/test-results/driver-model
 .PHONY: _test-driver-model-prep _test-driver-model-run
 # _test-driver-model-prep builds the canonical (non-fault) disk image
@@ -526,12 +527,17 @@ _test-driver-model-run:
 	@mkdir -p $(DRIVER_MODEL_LOG_DIR)
 	DRIVER_MODEL_LOG_DIR="$(DRIVER_MODEL_LOG_DIR)" \
 	  python3 qemutests/driver_matrix_run.py \
-	  $(if $(DRIVER_MODEL_DRIVER_CASE),--case $(DRIVER_MODEL_DRIVER_CASE),--case all)
+	  $(if $(DRIVER_MODEL_DRIVER_CASE),--case $(DRIVER_MODEL_DRIVER_CASE),--case all) \
+	  $(if $(DRIVER_MATRIX_DRIVER_SMP),--smp $(DRIVER_MATRIX_DRIVER_SMP),)
 
 # driver-model matrix dispatch target.  `make test-qemu SUITE=driver-model`
 # builds the canonical image then runs every matrix case; the
 # optional DRIVER_MODEL_DRIVER_CASE narrows to a single case (mirrors
-# the per-MODE pattern used by test-aarch64).
+# the per-MODE pattern used by test-aarch64). DRIVER_MATRIX_DRIVER_SMP
+# restricts the SMP count(s) passed to the python harness (Task 11
+# parked follow-up resolved in Task 12):
+#   make test-qemu SUITE=driver-model DRIVER_MATRIX_DRIVER_SMP=1
+#   make test-qemu SUITE=driver-model DRIVER_MATRIX_DRIVER_SMP="1 2 4"
 test-qemu-driver-model: _test-driver-model-prep _test-driver-model-run
 	@true
 
@@ -600,6 +606,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	fi
 	@if [ "$(SUITE)" = "driver-model" ]; then \
 	  DRIVER_MODEL_DRIVER_CASE="$(DRIVER_MODEL_DRIVER_CASE)" \
+	  DRIVER_MATRIX_DRIVER_SMP="$(DRIVER_MATRIX_DRIVER_SMP)" \
 	  $(MAKE) --no-print-directory test-qemu-driver-model; \
 	else \
 	  $(MAKE) $(TEST_QEMU_FLAVOR_$(SUITE)) image; \
@@ -627,6 +634,36 @@ test-syscall-repeat: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAG
 	python3 qemutests/x86_64_systest_repeat.py --disk "$(NORMAL_IMAGE)" \
 	  --firmware "$(OVMF_FIRMWARE)" --smp "$(SMP)"
 
+# test-syscall — retained AGENTS.md-required alias exception.
+#
+# AGENTS.md (lines 60, 70) requires the literal invocation
+#   `make OS01_SYSTEST=1 test-syscall`
+# even though the canonical bucket target is `test-qemu SUITE=systest`.
+# All other forwarding aliases were removed in the 2026-09-26 cleanup
+# (see docs/build/build.md §alias policy); this is the single
+# permitted exception. The recipe is a one-liner that delegates to
+# the canonical bucket target with the same flag set so the alias
+# never drifts from the underlying harness.
+#
+# Two parse-time gates enforce AGENTS.md's contract:
+#  - OS01_SYSTEST must be 1 (systest is the only init mode supported
+#    by this alias — running it with the normal inittab would not
+#    load /bin/systest as PID 1).
+#  - KERNEL_SELFTEST must NOT be 1 (in-kernel selftests spawn kthreads
+#    at boot which interfere with systest's fork+exec+waitpid test).
+.PHONY: test-syscall
+ifneq ($(filter test-syscall,$(MAKECMDGOALS)),)
+ifneq ($(OS01_SYSTEST),1)
+$(error ERROR: test-syscall requires OS01_SYSTEST=1 on the top-level make invocation (AGENTS.md))
+endif
+ifeq ($(KERNEL_SELFTEST),1)
+$(error ERROR: test-syscall must NOT be combined with KERNEL_SELFTEST=1 (AGENTS.md))
+endif
+endif
+test-syscall:
+	$(call require_capability,rootfs)
+	$(MAKE) OS01_SYSTEST=1 test-qemu SUITE=systest
+
 # test-static = the umbrella: runs every static audit in one shot.
 # Delegates the 4 runtime-audit checks + validate-kernel to test-runtime
 # (its prerequisite) so the recipe never drifts from the runtime target.
@@ -651,6 +688,7 @@ test-static: test-runtime
 	  --elf "$(KERNEL_BUILD_DIR)/kernel.elf" \
 	  --llvm-objdump "$(LLVM_OBJDUMP)" \
 	  --limit 512
+	python3 qemutests/driver_model_boundary_audit.py
 	@$(MAKE) --no-print-directory test-user-canary
 
 # ── test-runtime: original recipe (lines 364-385 of run.mk) ──
@@ -835,11 +873,11 @@ help:
 	@echo ''
 	@echo 'Test (6 canonical buckets; varied capability):'
 	@printf '  %-22s %-13s %s\n' \
-		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx>)';
+		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|driver-model>)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-static'         '(rootfs)'     'All 10 static audits (runtime, stack-canary, validate-kernel, link-order, kernel-layout, kernel-canary-contract, test-user-canary, syscall-boundary, header-object, stack-frame)';
+		 'test-static'         '(rootfs)'     'All 11 static audits (runtime, stack-canary, validate-kernel, link-order, kernel-layout, kernel-canary-contract, driver-model-boundary, test-user-canary, syscall-boundary, header-object, stack-frame)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-kernel-selftest' '(rootfs)'   'QEMU built-in selftests (isolated selftest image, KERNEL_SELFTEST=1)';
 	@printf '  %-22s %-13s %s\n' \
@@ -848,6 +886,8 @@ help:
 		 'test-contract'       '(rootfs|uefi)' 'Full build contract (PROFILE=<x86_64-clang|aarch64-clang>)';
 	@echo ''
 	@echo 'Standalone test targets (distinct harness / image variant):'
+	@printf '  %-22s %-13s %s\n' \
+		 'test-syscall'          '(rootfs)'   'RETAINED ALIAS — see docs/build/build.md §4 (AGENTS.md exact-target requirement; use OS01_SYSTEST=1 test-qemu SUITE=systest in new code)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-syscall-repeat'   '(rootfs)'   'QEMU exec/exit stability through normal terminal (x86_64_systest_repeat.py)';
 	@printf '  %-22s %-13s %s\n' \

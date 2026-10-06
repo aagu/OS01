@@ -393,7 +393,7 @@ make INITTAB_FILE=config/inittab.test image   # → .../image/inittab-test/disk.
 | `test-aarch64` | `MODE=` | `smp`、`no-ack`、`gic-spi`、`sync-fault`、`m1-ram`、`m1-sparse`、`m1-arena-exhaust`、`m1-table-exhaust`、`m1-ap-bad-root` | `qemutests/aarch64_*.py` 之一 |
 | `test-contract` | `PROFILE=` | `x86_64-clang`、`aarch64-clang` | `qemutests/build_contract.sh <PROFILE> <mode>` 按 profile mode 列表 |
 | `test-host` | — | — | `os01_submake hosttests` + `pmm_boot_reservation_test.py` |
-| `test-static` | — | — | 8 项静态审计（runtime_audit、stack_canary_audit、validate-kernel、runtime_link_order、kernel_runtime_link、kernel_layout、kernel_canary_contract、test-user-canary） |
+| `test-static` | — | — | 11 项静态审计（runtime_audit、stack_canary_audit、validate-kernel、runtime_link_order、kernel_runtime_link、kernel_layout、kernel_canary_contract、driver_model_boundary_audit、header_object、stack_frame、test-user-canary） |
 | `test-kernel-selftest` | — | — | 启动 selftest 镜像 variant（`KERNEL_SELFTEST=1`）并解析 `[selftest]` 标记 |
 
 **独立的测试目标**（不归入任何 bucket，因为它们使用不同的 harness 或镜像 variant）：
@@ -414,7 +414,16 @@ make INITTAB_FILE=config/inittab.test image   # → .../image/inittab-test/disk.
 
 ### 4. Alias policy（别名策略）
 
-Bucket 目标是规范名。**不再保留任何转发别名。** 所有转发别名（`test`、`test-phase-0`、`test-syscall`、`test-inittab`、`test-network`、`test-aarch64-uefi-smp`、`test-aarch64-uefi-smp-no-ack`、`test-aarch64-gic-spi`、`test-build-contract-x86`、`test-build-contract-aarch64`）在 2026-09-26 cleanup 中删除；CI 和所有调用方必须直接使用 bucket 目标。
+Bucket 目标是规范名。**2026-09-26 cleanup 删除了所有转发别名**（`test`、`test-phase-0`、`test-syscall`、`test-inittab`、`test-network`、`test-aarch64-uefi-smp`、`test-aarch64-uefi-smp-no-ack`、`test-aarch64-gic-spi`、`test-build-contract-x86`、`test-build-contract-aarch64`）；CI 和所有调用方必须直接使用 bucket 目标。
+
+**2026-10-06 例外（ARCH-9 Task 12）**：`test-syscall` 是**唯一**保留的转发别名，作为 `AGENTS.md` 行 60 + 70 的 exact-target 要求兼容入口。它的真实 recipe 是 `$(MAKE) OS01_SYSTEST=1 test-qemu SUITE=systest`，并在解析期有两个 gate：
+
+* `OS01_SYSTEST` 必须为 `1`（systest variant 是这个 alias 唯一的 init 模式；普通 inittab 下不会以 PID 1 加载 `/bin/systest`）
+* `KERNEL_SELFTEST` 必须**不**为 `1`（内核内自测在 boot 时 spawn kthreads，会干扰 systest 的 fork+exec+waitpid 测试）
+
+新代码和 CI **不应**使用 `test-syscall`；用 `OS01_SYSTEST=1 test-qemu SUITE=systest`（bucket 目标）即可。本 alias 仅作为用户 AGENTS.md 的 exact-target 兼容垫片保留，未来若 AGENTS.md 撤回该要求，应在同一次 cleanup 中一并删除（参考 `task-12-report.md` 的撤销条件）。
+
+新增其它转发别名**不**是替代品——它不能替代在新代码或 CI 中使用 bucket 目标。
 
 **保留的 focused checks**：某些 `test-*` 名保留自己的原始 recipe（独立的针对性检查，不转发到 bucket）。为调试永久保留：
 
@@ -423,8 +432,6 @@ Bucket 目标是规范名。**不再保留任何转发别名。** 所有转发�
 - `test-kernel-canary-contract` — kernel canary 编译旗标契约
 - `test-user-canary` — 7 步 SSP/crt0 用户栈 canary 审计
 - `test-pmm-boot-reservation` — PMM 启动期内存保留守卫
-
-新增转发别名**不**是替代品——它不能替代在新代码或 CI 中使用 bucket 目标。别名是单发布周期的兼容垫片，现已删除。
 
 ### 5. 添加新 target
 
