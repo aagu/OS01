@@ -25,7 +25,7 @@ OBJ_DIR   := $(BUILD_DIR)/obj
 CFLAGS   := --sysroot=$(SYSROOT_DIR) \
             -ffreestanding -fstack-protector-strong -fno-asynchronous-unwind-tables \
             -fno-pic -fno-pie -mno-red-zone \
-            -I$(TARGET_INCDIR) \
+            -I$(TARGET_INCDIR) -I$(TARGET_INCDIR)/lvgl -DLV_CONF_INCLUDE_SIMPLE \
             -Wall -Wextra -O2
 
 # ── Syscall test mode ──────────────────────────────────────
@@ -144,6 +144,14 @@ $(BUILD_DIR)/test_gfx.elf: $(OBJ_DIR)/test_gfx.o $(CRT0_OBJ) $(SIGRETURN_OBJ) li
 $(BUILD_DIR)/desktop.elf: $(OBJ_DIR)/desktop.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
 	@mkdir -p $(dir $@)
 	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/desktop.o -lgfx -lc
+	$(OBJ_CPY) --strip-debug $@
+
+# ══════════════════════════════════════════════════════════════
+#  test_lvgl.elf — LVGL compatibility smoke test
+# ══════════════════════════════════════════════════════════════
+$(BUILD_DIR)/test_lvgl.elf: $(OBJ_DIR)/test_lvgl.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/test_lvgl.o -llvgl -lc
 	$(OBJ_CPY) --strip-debug $@
 
 
