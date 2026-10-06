@@ -138,7 +138,7 @@ static int fb_mmap(struct vfs_node *node, struct vma *vma_)
         flush_tlb();
         bool has_residual = false;
         for (uint64_t va = vma->vm_start; va < installed_end; va += PAGE_4K_SIZE) {
-            if (x86_vmm_query_4k_page(user_pgd, va, NULL, NULL) == 0) {
+            if (arch_vmm_query_4k(user_pgd, va, NULL, NULL) == 0) {
                 has_residual = true;
                 break;
             }

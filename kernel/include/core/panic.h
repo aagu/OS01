@@ -4,6 +4,7 @@
 #include <stdarg.h>
 
 void kpanic(const char * msg,...);
+void panic_enable_fb_if_possible(void);
 
 #endif
 

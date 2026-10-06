@@ -391,3 +391,20 @@ int x86_vmm_query_4k_page(uint64_t *pgdir, uint64_t virt,
         *flags_out = *pte & ~PAGE_4K_MASK;
     return 0;
 }
+
+// Arch-neutral semantic facade: query 4KB PTE mapping.
+int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
+                      uint32_t *vm_out)
+{
+    uint64_t flags = 0;
+    int rc = x86_vmm_query_4k_page(pgdir, virt, phys_out, &flags);
+    if (rc < 0)
+        return rc;
+    if (vm_out) {
+        *vm_out = 0;
+        if (flags & PAGE_PRESENT) *vm_out |= VM_PRESENT;
+        if (flags & PAGE_RW)      *vm_out |= VM_WRITE;
+        if (flags & PAGE_USER)    *vm_out |= VM_USER;
+    }
+    return 0;
+}

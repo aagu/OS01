@@ -19,12 +19,15 @@ static bool term_initialized = false;
 static bool console_fb_active = true;
 
 // Scroll the entire framebuffer up by one character row.
-static void console_scroll(void)
+static void console_scroll_snap(const fb_snapshot_t *snap)
 {
-    int rows = (int)(Pos.YResolution / font->height);
-    uint32_t pitch = Pos.XResolution * sizeof(uint32_t);
+    uint32_t xres = (snap && snap->state.info.width) ? snap->state.info.width : Pos.XResolution;
+    uint32_t yres = (snap && snap->state.info.height) ? snap->state.info.height : Pos.YResolution;
+    int rows = (int)(yres / font->height);
+    uint32_t pitch = xres * sizeof(uint32_t);
     int row_bytes = (int)(pitch * font->height);
-    uint8_t *fb = (uint8_t *)Pos.FB_addr;
+    uint8_t *fb = (uint8_t *)(snap && snap->addr ? snap->addr : Pos.FB_addr);
+    if (!fb) return;
     memmove(fb, fb + row_bytes, (uintptr_t)row_bytes * (rows - 1));
     memset(fb + (uintptr_t)row_bytes * (rows - 1), 0, (uintptr_t)row_bytes);
     term_cursor_row = rows - 1;
@@ -75,20 +78,22 @@ void console_putchar(char c)
         break;
     default:
         if ((unsigned char)c >= ' ') {
-            putchar_at(term_cursor_col, term_cursor_row, term_fg, term_bg, c);
+            putchar_at_snap((const struct fb_snapshot *)&lease.snapshot, term_cursor_col, term_cursor_row, term_fg, term_bg, c);
             term_cursor_col++;
         }
         break;
     }
 
-    int max_cols = (int)(Pos.XResolution / font->width);
+    uint32_t cur_xres = lease.snapshot.state.info.width ? lease.snapshot.state.info.width : Pos.XResolution;
+    uint32_t cur_yres = lease.snapshot.state.info.height ? lease.snapshot.state.info.height : Pos.YResolution;
+    int max_cols = (int)(cur_xres / font->width);
     if (term_cursor_col >= max_cols) {
         term_cursor_col = 0;
         term_cursor_row++;
     }
-    int max_rows = (int)(Pos.YResolution / font->height);
+    int max_rows = (int)(cur_yres / font->height);
     if (term_cursor_row >= max_rows)
-        console_scroll();
+        console_scroll_snap(&lease.snapshot);
 
     fb_writer_end(&lease);
     spin_unlock_irqrestore(&Pos.lock, flags);
@@ -115,10 +120,15 @@ void console_surrender_fb(void)
     spin_unlock_irqrestore(&Pos.lock, flags);
 }
 
+void console_force_enable_locked(void)
+{
+    console_fb_active = true;
+}
+
 void console_force_enable(void)
 {
     uint64_t flags = spin_lock_irqsave(&Pos.lock);
-    console_fb_active = true;
+    console_force_enable_locked();
     spin_unlock_irqrestore(&Pos.lock, flags);
 }
 
@@ -131,6 +141,11 @@ void console_notify_resize_locked(void)
 }
 
 #ifdef OS01_HOST_TEST
+bool console__test_is_active(void)
+{
+    return console_fb_active;
+}
+
 void console__test_get_cursors(int *row, int *col, int32_t *pos_x, int32_t *pos_y)
 {
     if (row) *row = term_cursor_row;

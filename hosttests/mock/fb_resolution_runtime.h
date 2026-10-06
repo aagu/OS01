@@ -56,6 +56,11 @@ static inline void spin_unlock(spinlock_T *l) {
     __atomic_clear(&l->lock, __ATOMIC_RELEASE);
 }
 
+static inline long spin_trylock(spinlock_T *l) {
+    int expected = 0;
+    return __atomic_compare_exchange_n(&l->lock, &expected, 1, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED) ? 1 : 0;
+}
+
 static inline uint64_t spin_lock_irqsave(spinlock_T *l) {
     spin_lock(l);
     return 0;

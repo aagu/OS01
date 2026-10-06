@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include <uapi/fb.h>
 
-typedef struct {
+typedef struct fb_snapshot {
     struct fb_state state;
     uint32_t *addr;
     uint64_t mapped_size;

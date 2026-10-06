@@ -26,36 +26,44 @@ position Pos;
 
 psf2_t *font = (psf2_t*)&_binary_kernel_font_psf_start;
 
-void putchark(unsigned int FRcolor,unsigned int BKcolor,unsigned char c)
+void putchark_snap(const struct fb_snapshot *snap, unsigned int FRcolor, unsigned int BKcolor, unsigned char c)
 {
-    if (!Pos.FB_addr) return;
-    uint32_t i = 0,j = 0;
-	uint32_t * addr = NULL;
-	int testval = 0;
-	unsigned char *glyph = (unsigned char*)&_binary_kernel_font_psf_start + font->headersize +
-            (c>0&&c<font->numglyph?c:0)*font->bytesperglyph;
+    const uint32_t *fb_base = (snap && snap->addr) ? (const uint32_t *)snap->addr : Pos.FB_addr;
+    if (!fb_base) return;
+    uint32_t i = 0, j = 0;
+    uint32_t *addr = NULL;
+    int testval = 0;
+    unsigned char *glyph = (unsigned char*)&_binary_kernel_font_psf_start + font->headersize +
+            (c > 0 && c < font->numglyph ? c : 0) * font->bytesperglyph;
 
-	for(i = 0; i < font->height;i++)
-	{
-		addr = Pos.FB_addr + Pos.XResolution * ( Pos.YPosition * font->height + i ) + Pos.XPosition * font->width;
-		testval = 0x100;
-		for(j = 0;j < font->width;j++)
-		{
-			testval = testval >> 1;
-			if(*glyph & testval)
-				*addr = FRcolor;
-			else
-				*addr = BKcolor;
-			addr++;
-		}
-		glyph++;
-	}
+    uint32_t xres = (snap && snap->state.info.width) ? snap->state.info.width : Pos.XResolution;
+    for (i = 0; i < font->height; i++)
+    {
+        addr = (uint32_t *)fb_base + xres * (Pos.YPosition * font->height + i) + Pos.XPosition * font->width;
+        testval = 0x100;
+        for (j = 0; j < font->width; j++)
+        {
+            testval = testval >> 1;
+            if (*glyph & testval)
+                *addr = FRcolor;
+            else
+                *addr = BKcolor;
+            addr++;
+        }
+        glyph++;
+    }
 }
 
-void putchar_at(int col, int row, unsigned int FRcolor, unsigned int BKcolor,
-                unsigned char c)
+void putchark(unsigned int FRcolor, unsigned int BKcolor, unsigned char c)
 {
-    if (!Pos.FB_addr) return;
+    putchark_snap(NULL, FRcolor, BKcolor, c);
+}
+
+void putchar_at_snap(const struct fb_snapshot *snap, int col, int row,
+                     unsigned int FRcolor, unsigned int BKcolor, unsigned char c)
+{
+    const uint32_t *fb_base = (snap && snap->addr) ? (const uint32_t *)snap->addr : Pos.FB_addr;
+    if (!fb_base) return;
     int i = 0, j = 0;
     uint32_t *addr = NULL;
     int testval = 0;
@@ -63,18 +71,19 @@ void putchar_at(int col, int row, unsigned int FRcolor, unsigned int BKcolor,
         + font->headersize
         + (c > 0 && c < font->numglyph ? c : 0) * font->bytesperglyph;
 
+    uint32_t xres = (snap && snap->state.info.width) ? snap->state.info.width : Pos.XResolution;
+    uint32_t yres = (snap && snap->state.info.height) ? snap->state.info.height : Pos.YResolution;
     int pixel_row_start = row * (int)font->height;
     int pixel_col_start = col * (int)font->width;
-    int max_rows = (int)(Pos.YResolution / font->height);
-    int max_cols = (int)(Pos.XResolution / font->width);
+    int max_rows = (int)(yres / font->height);
+    int max_cols = (int)(xres / font->width);
 
     // Clamp to framebuffer bounds
     if (row < 0 || row >= max_rows) return;
     if (col < 0 || col >= max_cols) return;
 
     for (i = 0; i < (int)font->height; i++) {
-        addr = Pos.FB_addr + Pos.XResolution * (pixel_row_start + i)
-               + pixel_col_start;
+        addr = (uint32_t *)fb_base + xres * (pixel_row_start + i) + pixel_col_start;
         testval = 0x100;
         for (j = 0; j < (int)font->width; j++) {
             testval = testval >> 1;
@@ -88,13 +97,18 @@ void putchar_at(int col, int row, unsigned int FRcolor, unsigned int BKcolor,
     }
 }
 
+void putchar_at(int col, int row, unsigned int FRcolor, unsigned int BKcolor,
+                unsigned char c)
+{
+    putchar_at_snap(NULL, col, row, FRcolor, BKcolor, c);
+}
+
 int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
 {
 	int i = 0;
 	int count = 0;
 	int line = 0;
 	va_list args;
-
 	uint64_t flags = spin_lock_irqsave(&Pos.lock);
 
 	va_start(args, fmt);
@@ -104,13 +118,14 @@ int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
 	fb_lease_t lease;
 	int lrc = fb_writer_begin(&lease, 0);
 	if (lrc < 0) {
+		// Drop Pos.lock BEFORE taking serial_lock to prevent AB-BA deadlock
+		spin_unlock_irqrestore(&Pos.lock, flags);
 		uint64_t sf = spin_lock_irqsave(&serial_lock);
 		for(count = 0; count < i; count++)
 		{
 			write_serial_unlocked((unsigned char)*(buf_color + count));
 		}
 		spin_unlock_irqrestore(&serial_lock, sf);
-		spin_unlock_irqrestore(&Pos.lock, flags);
 		return i;
 	}
 
@@ -140,7 +155,7 @@ int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
 				if(Pos.YPosition < 0)
 					Pos.YPosition = (Pos.YResolution / font->height - 1) * font->height;
 			}
-			putchark(FRcolor , BKcolor , ' ');
+			putchark_snap((const struct fb_snapshot *)&lease.snapshot, FRcolor , BKcolor , ' ');
 		}
 		else if((unsigned char)*(buf_color + count) == '\t')
 		{
@@ -148,31 +163,34 @@ int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
 
 Label_tab:
 			line--;
-			putchark(FRcolor , BKcolor , ' ');
+			putchark_snap((const struct fb_snapshot *)&lease.snapshot, FRcolor , BKcolor , ' ');
 			Pos.XPosition++;
 		}
 		else
 		{
-			putchark(FRcolor , BKcolor , (unsigned char)*(buf_color + count));
+			putchark_snap((const struct fb_snapshot *)&lease.snapshot, FRcolor , BKcolor , (unsigned char)*(buf_color + count));
 			Pos.XPosition++;
 		}
 
 
-		if(Pos.XPosition >= (int32_t)(Pos.XResolution / font->width))
+		uint32_t cur_xres = lease.snapshot.state.info.width ? lease.snapshot.state.info.width : Pos.XResolution;
+		uint32_t cur_yres = lease.snapshot.state.info.height ? lease.snapshot.state.info.height : Pos.YResolution;
+		if(Pos.XPosition >= (int32_t)(cur_xres / font->width))
 		{
 			Pos.YPosition++;
 			Pos.XPosition = 0;
 		}
-		if(Pos.YPosition >= (int32_t)(Pos.YResolution / font->height))
+		if(Pos.YPosition >= (int32_t)(cur_yres / font->height))
 		{
 			// Scroll framebuffer up by one character row.
-			// Moves rows 1..N-1 up by one row, then clears the bottom row.
-			int rows = (int)(Pos.YResolution / font->height);
-			uint32_t pitch = Pos.XResolution * sizeof(uint32_t);
+			int rows = (int)(cur_yres / font->height);
+			uint32_t pitch = cur_xres * sizeof(uint32_t);
 			int row_bytes = (int)(pitch * font->height);
-			uint8_t *fb = (uint8_t *)Pos.FB_addr;
-			memmove(fb, fb + row_bytes, (uintptr_t)row_bytes * (rows - 1));
-			memset(fb + (uintptr_t)row_bytes * (rows - 1), 0, (uintptr_t)row_bytes);
+			uint8_t *fb = (uint8_t *)(lease.snapshot.addr ? lease.snapshot.addr : Pos.FB_addr);
+			if (fb) {
+				memmove(fb, fb + row_bytes, (uintptr_t)row_bytes * (rows - 1));
+				memset(fb + (uintptr_t)row_bytes * (rows - 1), 0, (uintptr_t)row_bytes);
+			}
 			Pos.YPosition = rows - 1;
 		}
 

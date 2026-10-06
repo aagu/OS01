@@ -15,6 +15,17 @@
 
 char buf[4096] = {'[','k','e','r','n','e','l',' ','p','a','n','i','c',']',' ',0};
 
+void panic_enable_fb_if_possible(void)
+{
+    fb_snapshot_t snap;
+    if (fb_snapshot_read(&snap) == 0 && snap.addr != NULL && snap.mapped_size > 0) {
+        if (spin_trylock(&Pos.lock)) {
+            console_force_enable_locked();
+            spin_unlock(&Pos.lock);
+        }
+    }
+}
+
 void kpanic(const char * msg,...)
 {
     va_list args;
@@ -23,13 +34,7 @@ void kpanic(const char * msg,...)
     va_end(args);
     serial_printk(buf);
 
-    fb_snapshot_t snap;
-    if (fb_snapshot_read(&snap) == 0 && snap.addr != NULL && snap.mapped_size > 0) {
-        if (spin_trylock(&Pos.lock)) {
-            console_force_enable();
-            spin_unlock(&Pos.lock);
-        }
-    }
+    panic_enable_fb_if_possible();
 
     while (1) {
         arch_local_irq_disable();

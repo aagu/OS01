@@ -11,6 +11,7 @@
 #include <string.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <setjmp.h>
 #include <test_framework.h>
 
 #include "fb_resolution_runtime.h"
@@ -20,6 +21,7 @@
 #include <driver/fb.h>
 #include <driver/gfx.h>
 #include <core/printk.h>
+#include <core/panic.h>
 #include <tty/console.h>
 #include <fs/file.h>
 #include <fs/devfs.h>
@@ -128,13 +130,13 @@ void vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt)
     }
 }
 
-int x86_vmm_query_4k_page(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out, uint64_t *flags_out)
+int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out, uint32_t *vm_out)
 {
     (void)pgdir;
     for (size_t i = 0; i < g_installed_count; i++) {
         if (g_installed_ptes[i] == virt) {
             if (phys_out) *phys_out = 0;
-            if (flags_out) *flags_out = 0;
+            if (vm_out) *vm_out = VM_PRESENT;
             return 0;
         }
     }
@@ -211,9 +213,51 @@ static psf2_t g_test_font = {
 };
 psf2_t *font = &g_test_font;
 
+void putchar_at_snap(const struct fb_snapshot *snap, int col, int row, unsigned int FRcolor, unsigned int BKcolor, unsigned char c)
+{
+    (void)snap; (void)col; (void)row; (void)FRcolor; (void)BKcolor; (void)c;
+}
+
 void putchar_at(int col, int row, unsigned int FRcolor, unsigned int BKcolor, unsigned char c)
 {
-    (void)col; (void)row; (void)FRcolor; (void)BKcolor; (void)c;
+    putchar_at_snap(NULL, col, row, FRcolor, BKcolor, c);
+}
+
+int color_printk(unsigned int FRcolor, unsigned int BKcolor, const char *fmt, ...)
+{
+    (void)FRcolor; (void)BKcolor;
+    char buf[256];
+    va_list args;
+    uint64_t flags = spin_lock_irqsave(&Pos.lock);
+
+    va_start(args, fmt);
+    int i = vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+
+    fb_lease_t lease;
+    int lrc = fb_writer_begin(&lease, 0);
+    if (lrc < 0) {
+        // Drop Pos.lock BEFORE taking serial_lock to prevent AB-BA deadlock
+        spin_unlock_irqrestore(&Pos.lock, flags);
+        uint64_t sf = spin_lock_irqsave(&serial_lock);
+        for (int count = 0; count < i; count++) {
+            write_serial_unlocked((unsigned char)buf[count]);
+        }
+        spin_unlock_irqrestore(&serial_lock, sf);
+        return i;
+    }
+
+    for (int count = 0; count < i; count++) {
+        if (buf[count] == '\n') {
+            Pos.YPosition++;
+            Pos.XPosition = 0;
+        } else {
+            Pos.XPosition++;
+        }
+    }
+    fb_writer_end(&lease);
+    spin_unlock_irqrestore(&Pos.lock, flags);
+    return i;
 }
 
 /* ── Console cursors access helper ── */
@@ -376,7 +420,13 @@ static void test_console_transition_serial_only(void)
     CHECK_EQ(1, g_serial_pos);
     CHECK_EQ('Z', g_serial_buf[0]);
 
-    /* Cursors must remain untouched */
+    /* Also test color_printk fallback during transition */
+    reset_serial_capture();
+    int printed = color_printk(0x00ffffff, 0x00000000, "TransMsg\n");
+    CHECK_TRUE(printed > 0);
+    CHECK_TRUE(strstr(g_serial_buf, "TransMsg\n") != NULL);
+
+    /* Cursors and Pos positions must STILL remain untouched */
     int row = -1, col = -1;
     int32_t pos_x = -1, pos_y = -1;
     console__test_get_cursors(&row, &col, &pos_x, &pos_y);
@@ -386,6 +436,12 @@ static void test_console_transition_serial_only(void)
     CHECK_EQ(5, pos_y);
 
     fb_transition_end();
+
+    /* After transition ends, color_printk succeeds and advances YPosition */
+    reset_serial_capture();
+    printed = color_printk(0x00ffffff, 0x00000000, "NormMsg\n");
+    CHECK_TRUE(printed > 0);
+    CHECK_EQ(6, Pos.YPosition);
 }
 
 /* ── Step 1 Test 4: test_mmap_partial_failure ── */
@@ -485,6 +541,92 @@ static void test_write_row_leased_and_resize(void)
     CHECK_EQ(0, pos_y);
 }
 
+/* ── Panic Simulation / Test Harness (matches kernel/core/panic.c) ── */
+static jmp_buf g_panic_jb;
+static bool    g_panic_armed = false;
+static char    g_last_panic_msg[256];
+
+void panic_enable_fb_if_possible(void)
+{
+    fb_snapshot_t snap;
+    if (fb_snapshot_read(&snap) == 0 && snap.addr != NULL && snap.mapped_size > 0) {
+        if (spin_trylock(&Pos.lock)) {
+            console_force_enable_locked();
+            spin_unlock(&Pos.lock);
+        }
+    }
+}
+
+void kpanic(const char *msg, ...)
+{
+    va_list ap;
+    va_start(ap, msg);
+    vsnprintf(g_last_panic_msg, sizeof(g_last_panic_msg), msg, ap);
+    va_end(ap);
+
+    for (const char *p = g_last_panic_msg; *p; p++)
+        write_serial_unlocked((unsigned char)*p);
+
+    panic_enable_fb_if_possible();
+
+    if (g_panic_armed) {
+        longjmp(g_panic_jb, 1);
+    }
+}
+
+static void test_kpanic_trylock_no_deadlock(void)
+{
+    printf("\n--- test_kpanic_trylock_no_deadlock ---\n");
+    setup_test_environment();
+    console_init();
+
+    /* Subtest 1: Pos.lock is free -> kpanic forces console enable without hang */
+    console_surrender_fb();
+    CHECK_EQ(false, console__test_is_active());
+
+    reset_serial_capture();
+    g_panic_armed = true;
+    if (setjmp(g_panic_jb) == 0) {
+        kpanic("PANIC: unhandled exception\n");
+        CHECK_TRUE(false); /* unreachable */
+    }
+    g_panic_armed = false;
+
+    /* Assert serial output received panic string */
+    CHECK_TRUE(strstr(g_serial_buf, "PANIC: unhandled exception\n") != NULL);
+    /* Assert console fb was re-enabled by console_force_enable_locked */
+    CHECK_EQ(true, console__test_is_active());
+    /* Assert Pos.lock was released (not held) */
+    CHECK_EQ(1, spin_trylock(&Pos.lock));
+    spin_unlock(&Pos.lock);
+
+    /* Subtest 2: Pos.lock is ALREADY HELD -> kpanic trylock fails gracefully, NO DEADLOCK */
+    console_surrender_fb();
+    CHECK_EQ(false, console__test_is_active());
+
+    /* Simulate another CPU or interrupted context holding Pos.lock */
+    uint64_t flags = spin_lock_irqsave(&Pos.lock);
+
+    reset_serial_capture();
+    g_panic_armed = true;
+    if (setjmp(g_panic_jb) == 0) {
+        kpanic("PANIC: recursive lock test\n");
+        CHECK_TRUE(false); /* unreachable */
+    }
+    g_panic_armed = false;
+
+    /* Serial output still emitted */
+    CHECK_TRUE(strstr(g_serial_buf, "PANIC: recursive lock test\n") != NULL);
+    /* Console fb active is STILL false because trylock failed and skipped double lock */
+    CHECK_EQ(false, console__test_is_active());
+
+    /* Release lock held before panic */
+    spin_unlock_irqrestore(&Pos.lock, flags);
+    /* Now lock is cleanly free */
+    CHECK_EQ(1, spin_trylock(&Pos.lock));
+    spin_unlock(&Pos.lock);
+}
+
 int main(void)
 {
     printf("=== Test Runner: Framebuffer Writers Admission ===\n");
@@ -494,6 +636,7 @@ int main(void)
     test_console_transition_serial_only();
     test_mmap_partial_failure();
     test_write_row_leased_and_resize();
+    test_kpanic_trylock_no_deadlock();
 
     printf("\n  ---\n  Total: %u | Passed: %u | Failed: %d\n",
            __test_stats.total, __test_stats.passed, g_failed);
