@@ -173,3 +173,45 @@ Four levels: `LOG_ERR`, `LOG_WARN`, `LOG_INFO`, `LOG_DEBUG`. Compile-time `LOG_T
 11. `futex_init()` — init futex hash buckets.
 12. `console_init()` — initialise the software terminal cursor.
 13. `task_init()` — spawns `/init.elf` as PID 1, then enters the idle loop. EEVDF scheduler active: per-CPU rbtree runqueues + `sched_balance()` work stealing + vruntime/deadline fair scheduling.
+
+## Framebuffer resolution switching
+
+`/bin/setres` queries and switches the QEMU Standard VGA mode at runtime without a
+reboot. The single source of truth is the fb layer (`kernel/driver/fb_state.c`),
+which owns `vram_capacity`, `fb_mapped_size`, `active_framebuffer_size`, the
+`current_info` snapshot, a `uint64_t generation` (starts at 1, bumps on every
+effective layout change or rollback), and the writer-admission state
+(`transitioning` / `active_writers` / `raw_mmap_seen`). `Pos` is only a
+compatibility mirror and never a second mode source.
+
+- **Backend** — `kernel/driver/bga.c` probes the PCI `1234:1111` Standard VGA via
+  the existing `PCI_DRIVER_DECLARE` binder (BAR sizing + BGA ID5 handshake +
+  `VIDEO_MEMORY_64K`), verifies the current 32bpp/XRGB8888 layout, and maps the
+  aperture through the checked fb mapping path. Non-x86 builds compile a port-free
+  stub that returns `-ENODEV` before any port I/O.
+- **Transactions** — a layout-changing SET takes `display_mutex`, closes writer
+  admission, drains `active_writers` (bounded 1 s), programs XRES/YRES/BPP with
+  LFB/NOCLEARMEM, re-reads every layout register, then publishes the new snapshot
+  and `generation++` under `Pos.lock → display_state_lock`. A hardware readback
+  mismatch restores the old layout and returns `-EIO` with `generation++`; a
+  failed rollback publishes `backend_failed` and leaves the session serial-only.
+  Same-mode SET is a no-op (no register write, no clear, no `generation` change).
+- **Writers** — every kernel framebuffer writer (printk, console scroll, gfx
+  present, panic) takes a short writer lease; `transitioning` makes gfx return
+  `-EAGAIN`, stale views return `-ESTALE`. A successful raw `/dev/fb` mmap sets a
+  sticky `raw_mmap_seen`, after which every layout SET returns `-EBUSY` until
+  reboot (munmap/exit do not clear it).
+- **UAPI** — `kernel/include/uapi/fb.h` (`FBIOSURRENDER`, `FBIOGET_MODES`,
+  `FBIOSET_MODE`, `FBIOGET_CURR_MODE`, `FBIOGET_STATE`; `FB_MAX_MODES=16`). The
+  mode table is the fixed 32bpp whitelist filtered by the probed device maximum;
+  the boot mode may lie outside it and is still reported by `GET_STATE` / `setres -l`.
+- **Terminal / PTY** — `user/terminal.c` keeps `fb_fd` for its lifetime and, on a
+  `generation` change, rebuilds the gfx view + `term_core` in place
+  (`terminal_display.c`), then pushes four-field `TIOCSWINSZ` to the PTY master,
+  which signals `SIGWINCH` to the foreground process group. The ash session and
+  PTY survive every switch.
+- **Tests** — host-facing cases live under `test-resolution-host`; the QEMU
+  acceptance runner is `qemutests/test_resolution_switcher.py` (suite
+  `test-qemu SUITE=resolution`), which drives QEMU/QMP screendumps and, in the
+  `FB_RESOLUTION_TEST=1` configuration, the isolated `/dev/fbtest` fault helper
+  (`user/test_resolution.c`).

@@ -677,6 +677,12 @@ def main():
             result = test_network(tester)
         elif args.test_name == "gfx":
             result = test_gfx(tester)
+        elif args.test_name == "resolution":
+            # Imported lazily: test_resolution_switcher.py has no import-time
+            # OVMF/QEMU coupling, but keeping the import here mirrors the
+            # other suites and avoids a circular import at module load.
+            from test_resolution_switcher import test_resolution
+            result = test_resolution(tester)
         else:
             print(f"Unknown test: {args.test_name}")
             result = False

@@ -17,7 +17,12 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <signal.h>
+#include <poll.h>
+#include <time.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>   /* struct winsize */
+#include <sys/mman.h>
 
 #include <uapi/fb.h>
 #include <uapi/fb_test.h>
@@ -102,7 +107,7 @@ static int arm_register(uint32_t cmd, uint32_t pid, uint64_t token,
     return cmd_set(w, h);
 }
 
-static int cmd_hold(void)
+static int cmd_hold(int secs)
 {
     struct fb_test_req req;
     fill_req(&req, 0, 0);
@@ -110,7 +115,99 @@ static int cmd_hold(void)
         printf("ERROR=hold errno=%d\n", errno);
         return 1;
     }
-    printf("HOLD ok\n");
+    printf("HOLD ok secs=%d\n", secs);
+    fflush(stdout);
+
+    /* With a duration, keep the real writer lease held across the window in
+     * which the runner issues a SET, so the SET observes the 1 s drain
+     * timeout.  The lease is released explicitly below (and again by
+     * release_file on exit). */
+    for (int i = 0; i < secs; i++)
+        sleep(1);
+
+    if (ioctl(g_fbtest_fd, FBIOTEST_RELEASE_WRITER, &req) < 0) {
+        printf("ERROR=release errno=%d\n", errno);
+        return 1;
+    }
+    printf("RELEASE ok\n");
+    return 0;
+}
+
+/* pty-watch: foreground SIGWINCH observer (spec §8.2 item 4).  Installs a
+ * SIGWINCH handler and prints a versioned JSON line per signal carrying the
+ * four TIOCGWINSZ fields.  Exits after <secs>. */
+static volatile int g_winch;
+
+static void winch_handler(int sig)
+{
+    (void)sig;
+    g_winch = 1;
+}
+
+static void emit_winsize(int sigwinch)
+{
+    struct winsize ws;
+    memset(&ws, 0, sizeof(ws));
+    (void)ioctl(0, TIOCGWINSZ, &ws);
+    printf("RESJSON {\"v\": 1, \"op\": \"pty-watch\", \"sigwinch\": %d, "
+           "\"row\": %u, \"col\": %u, \"xpixel\": %u, \"ypixel\": %u}\n",
+           sigwinch, (unsigned)ws.ws_row, (unsigned)ws.ws_col,
+           (unsigned)ws.ws_xpixel, (unsigned)ws.ws_ypixel);
+    fflush(stdout);
+}
+
+static int cmd_pty_watch(int secs, uint32_t setw, uint32_t seth)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = winch_handler;
+    sigaction(SIGWINCH, &sa, NULL);
+
+    /* Foreground process: fd 0 is the PTY slave, so TIOCGWINSZ reflects the
+     * terminal's own geometry.  The observer drives the switch itself (the
+     * runner keeps it in the foreground, so no separate process could type
+     * the command concurrently). */
+    emit_winsize(0);
+    if (setw && seth)
+        (void)cmd_set(setw, seth);
+
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (;;) {
+        if (g_winch) {
+            g_winch = 0;
+            emit_winsize(1);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        if ((int)(t1.tv_sec - t0.tv_sec) >= secs)
+            break;
+        poll(NULL, 0, 50);
+    }
+    return 0;
+}
+
+/* mmap: take a raw shared mapping of /dev/fb once, then exit.  The sticky
+ * raw_mmap_seen flag makes every subsequent layout SET return EBUSY for the
+ * rest of the boot (spec §3.3 / §8.2 item 6). */
+static int cmd_mmap(void)
+{
+    int fd = open("/dev/fb", O_RDWR);
+    if (fd < 0) {
+        printf("RESJSON {\"v\": 1, \"op\": \"mmap\", \"rc\": -1, \"errno\": %d}\n",
+               errno);
+        return 1;
+    }
+    void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (p == MAP_FAILED) {
+        printf("RESJSON {\"v\": 1, \"op\": \"mmap\", \"rc\": -1, \"errno\": %d}\n",
+               errno);
+        close(fd);
+        return 1;
+    }
+    printf("RESJSON {\"v\": 1, \"op\": \"mmap\", \"rc\": 0, \"bytes\": 4096}\n");
+    fflush(stdout);
+    munmap(p, 4096);
+    close(fd);
     return 0;
 }
 
@@ -151,7 +248,8 @@ static void usage(void)
 {
     printf("usage: test_resolution <snapshot|get|set W H|"
            "arm-mismatch PID TOKEN W H|arm-rollback PID TOKEN W H|"
-           "hold|release|arm-terminal PID TOKEN|consume-terminal PID>\n");
+           "hold [SECS]|release|arm-terminal PID TOKEN|consume-terminal PID|"
+           "pty-watch [SECS [W H]]|mmap>\n");
 }
 
 int main(int argc, char **argv)
@@ -186,8 +284,8 @@ int main(int argc, char **argv)
                           (uint64_t)strtoull(argv[3], NULL, 0),
                           (uint32_t)strtoul(argv[4], NULL, 10),
                           (uint32_t)strtoul(argv[5], NULL, 10));
-    } else if (!strcmp(cmd, "hold")) {
-        rc = cmd_hold();
+    } else if (!strcmp(cmd, "hold") && (argc == 2 || argc == 3)) {
+        rc = cmd_hold(argc == 3 ? (int)strtol(argv[2], NULL, 10) : 0);
     } else if (!strcmp(cmd, "release")) {
         rc = cmd_release();
     } else if (!strcmp(cmd, "arm-terminal") && argc == 4) {
@@ -195,6 +293,15 @@ int main(int argc, char **argv)
                               (uint64_t)strtoull(argv[3], NULL, 0));
     } else if (!strcmp(cmd, "consume-terminal") && argc == 3) {
         rc = cmd_consume_terminal((uint32_t)strtoul(argv[2], NULL, 10));
+    } else if (!strcmp(cmd, "pty-watch") &&
+               (argc == 2 || argc == 3 || argc == 4)) {
+        uint32_t pw = 0, ph = 0;
+        if (argc == 4)
+            (void)sscanf(argv[3], "%ux%u", &pw, &ph);
+        rc = cmd_pty_watch(argc >= 3 ? (int)strtol(argv[2], NULL, 10) : 6,
+                           pw, ph);
+    } else if (!strcmp(cmd, "mmap")) {
+        rc = cmd_mmap();
     } else {
         usage();
         rc = 2;

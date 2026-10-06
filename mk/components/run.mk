@@ -668,6 +668,10 @@ TEST_QEMU_FLAVOR_systest        = OS01_SYSTEST=1
 TEST_QEMU_FLAVOR_inittab-phase  = INITTAB_FILE=config/inittab.test
 TEST_QEMU_FLAVOR_network        = OS01_NETTEST=1
 TEST_QEMU_FLAVOR_gfx            =
+# resolution uses the profile's active image directly: production runs the
+# normal rootfs, while FB_RESOLUTION_TEST=1 (passed through from the top-level
+# invocation) resolves $(DISK_IMG) to the isolated resolution-test image.
+TEST_QEMU_FLAVOR_resolution     =
 # driver-model reuses the normal image path (matrix harness rebuilds
 # variant images itself); the build contract test and the matrix
 # python harness both produce fault variant images via
@@ -678,6 +682,7 @@ TEST_QEMU_IMG_systest       = $(TEST_SYSTEST_IMAGE)
 TEST_QEMU_IMG_inittab-phase = $(TEST_INITTAB_IMAGE)
 TEST_QEMU_IMG_network       = $(TEST_NETTEST_IMAGE)
 TEST_QEMU_IMG_gfx           = $(NORMAL_IMAGE)
+TEST_QEMU_IMG_resolution    = $(DISK_IMG)
 TEST_QEMU_IMG_driver-model  = $(NORMAL_IMAGE)
 
 .PHONY: test-qemu
@@ -707,20 +712,20 @@ test-qemu: SUITE := $(SUITE)
 test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@case "$(SUITE)" in \
-	  phase-0|systest|inittab-phase|network|gfx|driver-model) ;; \
-	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|driver-model, got '$(SUITE)'" >&2; exit 1;; \
+	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model) ;; \
+	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model, got '$(SUITE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-qemu] SUITE=$(SUITE) flavor=$(TEST_QEMU_FLAVOR_$(SUITE)) img=$(TEST_QEMU_IMG_$(SUITE))"
-	# The normal-image hash guard skips BOTH ``phase-0`` (the historical
-	# no-variant path) AND ``gfx`` (the new ring-3 graphics suite, which
-	# uses the normal image directly per spec §6 — a gfx rebuild that
-	# touches the normal image must not be reported as a hash drift).
-	# Every other suite runs against an isolated variant build and
-	# must therefore not modify the normal image.
+	# The normal-image hash guard skips ``phase-0`` (the historical
+	# no-variant path), ``gfx`` (the ring-3 graphics suite) and
+	# ``resolution`` (its runner only ever copies the image into a private
+	# per-run directory and asserts the source sha256 itself, so it never
+	# writes the active image).  Every other suite runs against an isolated
+	# variant build and must therefore not modify the normal image.
 	# driver-model runs against the canonical (no-fault) image so the
 	# normal-image hash guard is skipped too; fault variant builds land
 	# under image/driver-model-<fault>/ (Task 11).
-	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "driver-model" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
+	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.before"; \
 	fi
 	@if [ "$(SUITE)" = "driver-model" ]; then \
@@ -729,13 +734,15 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  $(MAKE) --no-print-directory test-qemu-driver-model; \
 	else \
 	  $(MAKE) $(TEST_QEMU_FLAVOR_$(SUITE)) image; \
-	  if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
+	  if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
 	    sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	    cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after"; \
 	  fi; \
 	  DISK_IMG="$(TEST_QEMU_IMG_$(SUITE))" \
 	  OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \
 	  NETWORK_NIC="$(NETWORK_NIC)" \
+	  FB_RESOLUTION_TEST="$(FB_RESOLUTION_TEST)" \
+	  OS01_RESOLUTION_RESULT_DIR="$(abspath $(BUILD_DIR)/test-results/resolution)" \
 	  python3 qemutests/run_test.py $(SUITE); \
 	fi
 
@@ -992,7 +999,7 @@ help:
 	@echo ''
 	@echo 'Test (6 canonical buckets; varied capability):'
 	@printf '  %-22s %-13s %s\n' \
-		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|driver-model>)';
+		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model>)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \

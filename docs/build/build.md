@@ -52,7 +52,7 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 
 | Bucket | Purpose | Default |
 | --- | --- | --- |
-| `make test-qemu SUITE=phase-0\|systest\|inittab-phase\|network` | QEMU E2E against the matching variant image | `phase-0` |
+| `make test-qemu SUITE=phase-0\|systest\|inittab-phase\|network\|gfx\|resolution\|driver-model` | QEMU E2E against the matching variant image (or the normal image for `gfx`/`resolution`/`driver-model`) | `phase-0` |
 | `make test-host` | hosttests + PMM boot reservation | — |
 | `make test-static` | runtime / layout / canary / link-order audits (8 audits) | — |
 | `make test-aarch64 MODE=smp\|no-ack\|gic-spi\|sync-fault\|m1-*` | AArch64 PSCI / GIC / sync-fault harness | `smp` |
@@ -61,7 +61,7 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 
 AArch64 M1：`MODE=m1-ram` 分别构建 normal/selftest 独立镜像并跑 16 组 RAM/CPU 矩阵。其余 `m1-*` MODE 构建 `AARCH64_M1_TEST=sparse|arena-exhaust|table-exhaust|ap-bad-root` 对应的隔离 `image/m1-<case>/` / `kernel/m1-<case>/` 变体；该旗要求 `KERNEL_SELFTEST=1`，拒绝与 sync-fault、weak-selftest 或 canary 混用。稀疏 map 仅由编译旗改写，不从环境变量注入。`make PROFILE=x86_64-clang test-m1-host [CASE=m1-layout|m1-reservation|m1-arena|m1-tree|m1-contract-x86|m1-install|m1-publish]` 为原生 focused 测试入口，省略 CASE 跑整组。
 
-Resolution Switcher：`make PROFILE=x86_64-clang test-resolution-host [RES_CASE=uapi|state|writers|bga|ioctl|pty|terminal|clients|hooks|all]` 为分辨率切换器宿主聚焦测试分发入口，省略 `RES_CASE` 时默认 `all`（运行所有已注册 case）；未知或未注册 case 报错非零退出。
+Resolution Switcher：`make PROFILE=x86_64-clang test-resolution-host [RES_CASE=uapi|state|writers|bga|ioctl|pty|terminal|clients|hooks|all]` 为分辨率切换器宿主聚焦测试分发入口，省略 `RES_CASE` 时默认 `all`（运行所有已注册 case）；未知或未注册 case 报错非零退出。端到端套件为 `make PROFILE=x86_64-clang test-qemu SUITE=resolution`（生产配置：QMP surface + `setres` 会话正常用例，含 800×600 往返、空闲后台切换、白名单外初态查询与三启动镜像隔离校验）；`make PROFILE=x86_64-clang FB_RESOLUTION_TEST=1 test-qemu SUITE=resolution` 使用隔离的 `resolution-test` 镜像运行 `/dev/fbtest` 故障子集（读回失配、排空超时、terminal-ENOMEM、SIGWINCH、raw mmap sticky、回滚失败）。QMP 连接失败或截图失败一律 FAIL，不跳过。结果与截图落在 `build/x86_64-clang/test-results/resolution/`。
 
 Standalone (not bucketed): `test-syscall-repeat` (own harness),
 `test-user-canary` (subset of test-static, distinct prereqs),
@@ -347,6 +347,10 @@ make test-host
 | `make OS01_SYSTEST=1 test-qemu SUITE=systest` | `build/<profile>/image/systest/disk.img` | syscall E2E（`OS01_SYSTEST=1`） |
 | `make INITTAB_FILE=config/inittab.test test-qemu SUITE=inittab-phase` | `build/<profile>/image/inittab-test/disk.img` | inittab 阶段派发（`INITTAB_FILE=config/inittab.test`） |
 | `make OS01_NETTEST=1 test-qemu SUITE=network` | `build/<profile>/image/nettest/disk.img` | 网络回归（`OS01_NETTEST=1`） |
+| `make test-qemu SUITE=gfx` | 普通 `build/<profile>/image/disk.img` | ring-3 gfx / terminal / desktop smoke |
+| `make test-qemu SUITE=resolution` | 普通镜像（每次运行复制为私有副本） | 分辨率切换 surface/session 验收（QMP + `setres`） |
+| `make FB_RESOLUTION_TEST=1 test-qemu SUITE=resolution` | `build/<profile>/image/resolution-test/disk.img` | 隔离故障子集（`/dev/fbtest`） |
+| `make test-qemu SUITE=driver-model` | 普通镜像（matrix harness 另建 fault 变体） | 驱动模型矩阵 |
 
 systest variant 是 **compile-affecting** 的：`OS01_SYSTEST=1` 给 user CFLAGS 加 `-DOS01_SYSTEST`，所以 variant 的用户程序构建到独立对象/artifact 目录（`build/<profile>/user/systest`，`build/<profile>/artifacts/user/systest`），variant 镜像包含 systest 编译的 `init.elf`，启动 `/bin/systest` 而不是 BusyBox shell。另两个 variant（nettest、inittab-test）只改 inittab 文件和镜像目录，其用户二进制与普通构建共享。
 
@@ -391,7 +395,7 @@ make INITTAB_FILE=config/inittab.test image   # → .../image/inittab-test/disk.
 
 | Bucket | Flag | 取值 | 运行内容 |
 | --- | --- | --- | --- |
-| `test-qemu` | `SUITE=` | `phase-0`、`systest`、`inittab-phase`、`network` | `qemutests/run_test.py <SUITE>` 对匹配的 variant 镜像 |
+| `test-qemu` | `SUITE=` | `phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model` | `qemutests/run_test.py <SUITE>` 对匹配的 variant 镜像（`gfx`/`resolution`/`driver-model` 用普通镜像；`resolution` 每次只复制私有副本） |
 | `test-aarch64` | `MODE=` | `smp`、`no-ack`、`gic-spi`、`sync-fault`、`m1-ram`、`m1-sparse`、`m1-arena-exhaust`、`m1-table-exhaust`、`m1-ap-bad-root` | `qemutests/aarch64_*.py` 之一 |
 | `test-contract` | `PROFILE=` | `x86_64-clang`、`aarch64-clang` | `qemutests/build_contract.sh <PROFILE> <mode>` 按 profile mode 列表 |
 | `test-host` | — | — | `os01_submake hosttests` + `pmm_boot_reservation_test.py` |
@@ -484,6 +488,8 @@ make test-qemu SUITE=phase-0        # QEMU E2E（普通镜像）
 make test-qemu SUITE=systest        # syscall E2E
 make test-qemu SUITE=inittab-phase  # inittab 阶段派发
 make test-qemu SUITE=network        # 网络回归
+make test-qemu SUITE=resolution     # 分辨率切换 surface/session 验收
+make FB_RESOLUTION_TEST=1 test-qemu SUITE=resolution  # 隔离故障子集
 make test-static                    # 8 项静态审计
 make test-kernel-selftest           # 内核 selftest
 make test-aarch64 MODE=smp          # aarch64 PSCI/SMP
@@ -503,7 +509,7 @@ make PROFILE=aarch64-clang aarch64-uefi-kernel  # aarch64 内核 ELF
 | Flag/变量 | 用途 |
 | --- | --- |
 | `PROFILE=<name>` | 选择 profile（默认 `x86_64-clang`） |
-| `SUITE=<name>` | `test-qemu` 的 variant（`phase-0`、`systest`、`inittab-phase`、`network`） |
+| `SUITE=<name>` | `test-qemu` 的 variant（`phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`） |
 | `MODE=<name>` | `test-aarch64` 的 variant（`smp`、`no-ack`、`gic-spi`） |
 | `OS01_SYSTEST=1` | 启用 systest variant（影响编译旗标） |
 | `OS01_NETTEST=1` | 启用 nettest variant |
