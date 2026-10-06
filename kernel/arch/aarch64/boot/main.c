@@ -375,6 +375,7 @@ static void aarch64_boot_fb_init(const struct boot_context *handoff)
         color_printk(WHITE, BLUE,
                      "[fb] aarch64 color_printk active (%ux%u)\n",
                      Pos.XResolution, Pos.YResolution);
+        kputs("[fb] frame buffer remap succeed (banner above on screen)\n");
     } else {
         kputs("[fb] mapping failed; color_printk disabled\n");
     }

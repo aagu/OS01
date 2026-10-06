@@ -144,38 +144,58 @@ void frame_buffer_init(void)
     uint64_t root_pa  = ttbr_raw & AARCH64_TTBR_BASE_MASK;
     uint64_t *root    = (uint64_t *)(uintptr_t)(root_pa + ARCH_PAGE_OFFSET);
 
-    /* Use 2 MiB blocks where alignment permits; fall back to 4 KiB leaves
-     * for the head (PA not 2 MiB-aligned) and tail (size not a multiple
-     * of 2 MiB). aarch64_pt_map_2m_block returns -EINVAL on misaligned
-     * inputs; we route those segments through aarch64_pt_map_4k_ext. */
-    uint64_t head_skip = pa & (PAGE_2M_SIZE - 1);
-    uint64_t cur_pa = pa - head_skip;          /* round DOWN to 2 MiB */
-    uint64_t va_off = va + head_skip;          /* matching VA offset   */
+    /* Walk [pa, pa+len) using 2 MiB blocks where PA, VA, and the remaining
+     * length are all 2 MiB-aligned; fall back to 4 KiB leaves otherwise.
+     * aarch64_pt_map_2m_block requires BOTH va and pa to be 2 MiB-aligned
+     * (see root_valid / va_canonical in kernel/arch/aarch64/memory/
+     * page_table.c); a misaligned head or tail would EINVAL out. */
+    uint64_t cur_pa = pa;
+    uint64_t cur_va = va;
 
-    while (pa + len > cur_pa) {
+    while (cur_pa < pa + len) {
         uint64_t this_len = pa + len - cur_pa;
-        if (this_len > PAGE_2M_SIZE) this_len = PAGE_2M_SIZE;
-        bool aligned = ((cur_pa & (PAGE_2M_SIZE - 1)) == 0)
-                    && (this_len == PAGE_2M_SIZE);
+        bool pa_aligned = ((cur_pa & (PAGE_2M_SIZE - 1)) == 0);
+        bool va_aligned = ((cur_va & (PAGE_2M_SIZE - 1)) == 0);
+        bool big_enough = (this_len >= PAGE_2M_SIZE);
 
-        int rc;
-        if (aligned) {
-            rc = aarch64_pt_map_2m_block(root, va_off, cur_pa, perm);
-        } else {
-            rc = 0;
-            for (uint64_t off = 0; off < this_len; off += PAGE_4K_SIZE) {
-                int r = aarch64_pt_map_4k_ext(root, va_off + off,
+        int rc = 0;
+        if (pa_aligned && va_aligned && big_enough) {
+            /* Round down to 2 MiB so we don't overrun. */
+            uint64_t blocks = this_len / PAGE_2M_SIZE;
+            uint64_t off = 0;
+            while (off < blocks * PAGE_2M_SIZE) {
+                rc = aarch64_pt_map_2m_block(root, cur_va + off, cur_pa + off, perm);
+                if (rc != AARCH64_PT_OK) break;
+                off += PAGE_2M_SIZE;
+            }
+            if (rc == AARCH64_PT_OK) {
+                cur_pa += blocks * PAGE_2M_SIZE;
+                cur_va += blocks * PAGE_2M_SIZE;
+            }
+            /* Fall through to the per-leaf cleanup if rc is set. */
+        }
+
+        if (rc == AARCH64_PT_OK) {
+            /* Tail (or entire segment, if unaligned): 4 KiB leaves. */
+            uint64_t tail = pa + len - cur_pa;
+            uint64_t off = 0;
+            while (off < tail) {
+                int r = aarch64_pt_map_4k_ext(root, cur_va + off,
                                               cur_pa + off, perm, 0);
                 if (r != AARCH64_PT_OK) { rc = r; break; }
+                off += PAGE_4K_SIZE;
+            }
+            if (rc == AARCH64_PT_OK) {
+                cur_pa += tail;
+                cur_va += tail;
             }
         }
+
         if (rc != AARCH64_PT_OK) {
             kputs("[fb] map failed; Pos.FB_addr=NULL, color_printk disabled\n");
             Pos.FB_addr = NULL;
             return;
         }
-        cur_pa += this_len;
-        va_off += this_len;
     }
 
     Pos.FB_addr = (uint32_t *)AARCH64_FB_VIRT_BASE;
