@@ -382,7 +382,7 @@ TEST_SELFTEST_IMAGE := $(BUILD_DIR)/image/selftest/disk.img
 # overridable.
 KERNEL_SELFTEST_SMP ?= 4
 
-.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-device test-gfx-client test-gfx-primitives test-m1-host test-arch9-host
+.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-device test-gfx-client test-gfx-primitives test-m1-host test-arch9-host test-resolution-host
 test-host:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,run $(OS01_SUBMAKE_ARGS))
@@ -495,6 +495,34 @@ test-arch9-host: $(if $(CASE),_test-arch9-host-run-$(CASE),$(foreach c,$(ARCH9_C
 	    virtio) echo "  [test-arch9-host] CASE=$(CASE)";; \
 	    socket) echo "  [test-arch9-host] CASE=$(CASE)";; \
 	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(ARCH9_CASES)" >&2; exit 1;; \
+	  esac
+
+# ── Resolution Switcher host tests ───────────────────────────
+# Focused host tests for the QEMU resolution switcher plan.
+# RES_CASE accepts uapi, state, writers, bga, ioctl, pty, terminal,
+# clients, hooks, or all.
+# With RES_CASE omitted or all, the umbrella runs all currently registered cases.
+# Unregistered cases and unknown cases abort non-zero.
+.PHONY: test-resolution-host _test-resolution-host-run-uapi
+RESOLUTION_HOST_ALL_CASES := uapi state writers bga ioctl pty terminal clients hooks
+RESOLUTION_HOST_REGISTERED_CASES := uapi
+
+_test-resolution-host-run-uapi:
+	@echo "  [test-resolution-host] uapi"
+	$(call os01_submake,hosttests,test-fb-uapi $(OS01_SUBMAKE_ARGS))
+
+_test-resolution-host-run-%:
+	@echo "ERROR: unknown or unregistered RES_CASE='$*'; valid: $(RESOLUTION_HOST_ALL_CASES) all (registered: $(RESOLUTION_HOST_REGISTERED_CASES))" >&2
+	@exit 1
+
+RES_CASE ?= all
+RES_CASE_EFFECTIVE = $(if $(strip $(RES_CASE)),$(RES_CASE),all)
+test-resolution-host: RES_CASE := $(RES_CASE)
+test-resolution-host: $(if $(filter all,$(RES_CASE_EFFECTIVE)),$(foreach c,$(RESOLUTION_HOST_REGISTERED_CASES),_test-resolution-host-run-$(c)),_test-resolution-host-run-$(RES_CASE_EFFECTIVE))
+	$(call require_capability,rootfs)
+	@case "$(RES_CASE_EFFECTIVE)" in \
+	    all) echo "  [test-resolution-host] full registered group: $(RESOLUTION_HOST_REGISTERED_CASES)";; \
+	    *) echo "  [test-resolution-host] RES_CASE=$(RES_CASE_EFFECTIVE)";; \
 	  esac
 
 # Focused hosttest for the gfx 2D API plan Task 1 — per-file device
@@ -953,6 +981,8 @@ help:
 		 'test-kernel-layout'    '(rootfs)'   'x86_64 kernel.elf layout audit (post-_end reserved)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-kernel-canary-contract' '(rootfs)' 'Kernel canary compile-flag contract';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-resolution-host'  '(rootfs)'   'Resolution switcher host tests (RES_CASE=<uapi|...|all>)';
 	@echo ''
 	@echo 'Maintenance:'
 	@printf '  %-22s %-13s %s\n' \

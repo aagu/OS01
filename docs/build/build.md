@@ -61,6 +61,8 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 
 AArch64 M1：`MODE=m1-ram` 分别构建 normal/selftest 独立镜像并跑 16 组 RAM/CPU 矩阵。其余 `m1-*` MODE 构建 `AARCH64_M1_TEST=sparse|arena-exhaust|table-exhaust|ap-bad-root` 对应的隔离 `image/m1-<case>/` / `kernel/m1-<case>/` 变体；该旗要求 `KERNEL_SELFTEST=1`，拒绝与 sync-fault、weak-selftest 或 canary 混用。稀疏 map 仅由编译旗改写，不从环境变量注入。`make PROFILE=x86_64-clang test-m1-host [CASE=m1-layout|m1-reservation|m1-arena|m1-tree|m1-contract-x86|m1-install|m1-publish]` 为原生 focused 测试入口，省略 CASE 跑整组。
 
+Resolution Switcher：`make PROFILE=x86_64-clang test-resolution-host [RES_CASE=uapi|state|writers|bga|ioctl|pty|terminal|clients|hooks|all]` 为分辨率切换器宿主聚焦测试分发入口，省略 `RES_CASE` 时默认 `all`（运行所有已注册 case）；未知或未注册 case 报错非零退出。
+
 Standalone (not bucketed): `test-syscall-repeat` (own harness),
 `test-user-canary` (subset of test-static, distinct prereqs),
 `test-pmm-boot-reservation` (subset of test-host). 详见第 3 章 §3 test bucket model。
@@ -411,6 +413,7 @@ make INITTAB_FILE=config/inittab.test image   # → .../image/inittab-test/disk.
 | `test-kernel-layout` | 仅 x86 kernel ELF 布局 |
 | `test-kernel-canary-contract` | 仅 kernel canary 编译旗标契约 |
 | `test-aarch64-gic-spi` | 仅 PL011 RX 到 GIC SPI 注入 |
+| `test-resolution-host` | 分辨率切换器宿主聚焦测试分发（`RES_CASE=`） |
 
 ### 4. Alias policy（别名策略）
 
@@ -432,6 +435,7 @@ Bucket 目标是规范名。**2026-09-26 cleanup 删除了所有转发别名**�
 - `test-kernel-canary-contract` — kernel canary 编译旗标契约
 - `test-user-canary` — 7 步 SSP/crt0 用户栈 canary 审计
 - `test-pmm-boot-reservation` — PMM 启动期内存保留守卫
+- `test-resolution-host` — 分辨率切换器宿主聚焦测试分发入口
 
 ### 5. 添加新 target
 

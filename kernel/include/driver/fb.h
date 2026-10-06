@@ -2,12 +2,7 @@
 #define _KERNEL_FB_H
 
 #include <stdint.h>
-
-struct fb_info {
-    uint32_t width, height, stride, bpp, format;
-} __attribute__((packed));
-
-#define FBIOSURRENDER  0x00004601
+#include <uapi/fb.h>
 
 // Populate `out` from the live framebuffer state (Pos).  Returns
 // 0 on success, -EINVAL on a NULL out.  Used by kernel/driver/gfx.c

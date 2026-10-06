@@ -154,9 +154,10 @@ $(TEST_BLD)/test_slab_idempotent_reservation.elf \
     $(TEST_BLD)/test_net_device.elf \
     $(TEST_BLD)/test_net_lwip.elf \
     $(TEST_BLD)/test_e1000_instances.elf \
-    $(TEST_BLD)/test_virtio_net_instances.elf
+    $(TEST_BLD)/test_virtio_net_instances.elf \
+    $(TEST_BLD)/test_fb_uapi.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi
 
 all: $(TEST_BINS)
 
@@ -2610,4 +2611,15 @@ $(TEST_BLD)/test_virtio_net_instances.elf: $(TEST_BLD)/test_virtio_net_instances
 	$(HOST_CC) -o $@ $^
 
 test-virtio: $(TEST_BLD)/test_virtio_net_instances.elf
+	$<
+
+# Framebuffer mode control ABI layout test (QEMU resolution switcher Task 1)
+$(TEST_BLD)/test_fb_uapi.o: $(TEST_CASES)/test_fb_uapi.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(KERNEL_INC) -I$(TEST_INC) -c $< -o $@
+
+$(TEST_BLD)/test_fb_uapi.elf: $(TEST_BLD)/test_fb_uapi.o
+	$(HOST_CC) -o $@ $^
+
+test-fb-uapi: $(TEST_BLD)/test_fb_uapi.elf
 	$<
