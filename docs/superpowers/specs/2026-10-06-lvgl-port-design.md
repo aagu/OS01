@@ -1,7 +1,7 @@
 # LVGL v9.5.0 库移植与兼容性测试设计
 
 > **日期**: 2026-10-06
-> **状态**: 待用户复审（已修订）
+> **状态**: 待用户复审（v3 修订）
 > **基准**: OS01 `62f9cac76ff7734d4444cf04b748dfc003554452`；LVGL v9.5.0 (`85aa60d18b3d5e5588d7b247abf90198f07c8a63`)
 > **依赖评估**: `docs/assessments/2026-10-06-lvgl-libc.md`
 
@@ -13,10 +13,23 @@
 
 ### 成功标准
 1. **源码受控**：`thirdpart/lvgl` 注册为 Git submodule，提供 `thirdpart/lvgl.manifest` 锁定提交 `85aa60d18b3d5e5588d7b247abf90198f07c8a63`。
-2. **构建合规**：实现独立组件 `liblvgl`，遵循 OS01 single-writer sysroot 规范（`mk/components/sysroot.mk`），输出 `usr/lib/liblvgl.a` 与 `usr/include/lvgl/`，并生成 staging manifest。
-3. **依赖与发布链完整**：`$(SYSROOT_STAMP)` 将 `$(STAMPS_DIR)/lvgl-install.stamp` 作为前置依赖，确保 staging 完成后发布并在输入变动时重新触发 generation 组装；测试程序注册到 `mk/components/user.mk` 的 `USER_PROGRAMS` 与 `config/rootfs.mk` 的 `ROOTFS_FILES`，以 `/bin/test_lvgl` 安装进 ext2 根文件系统。
-4. **符号完整与审计**：基于当前 libc 基线配置 `lv_conf.h`。`liblvgl.a` 所有对象文件合并 (`ld.lld -r`) 后仅依赖 OS01 libc 符号；最终产物 `test_lvgl.elf` 未解析符号为 0。
-5. **内存渲染兼容性测试通过**：用户态 `/bin/test_lvgl` 在内存中完成 `lv_init()`、单调滴答注册、显示驱动初始化、按钮/标签/样式构建及 `lv_timer_handler()` 渲染冲刷，精确断言 flush 区域坐标、特定区域像素颜色（背景色与按钮前景色）及 TLSF 内存池状态，在 QEMU 内以退出码 0 正常结束。
+2. **构建合规与增量安全**：
+   - 实现独立组件 `liblvgl`，遵循 OS01 single-writer sysroot 规范（`mk/components/sysroot.mk`），输出 `usr/lib/liblvgl.a` 与 `usr/include/lvgl/`，并生成 staging manifest。
+   - `liblvgl/Makefile` 采用 `-MMD -MP` 生成依赖，`install` 目标执行前清理 `$(INSTALL_ROOT)` 确保无残留孤立头文件；配置 `config/lv_conf.h` 变动能准确触发重新编译与 sysroot republish。
+3. **依赖与发布链完整**：
+   - `$(SYSROOT_STAMP)` 将 `$(STAMPS_DIR)/lvgl-install.stamp` 作为前置依赖，确保 staging 完成后发布并在输入变动时重新触发 generation 组装。
+   - 应用编译契约明确：在应用编译参数中增加 `-I$(TARGET_INCDIR)/lvgl -DLV_CONF_INCLUDE_SIMPLE`，保证应用与库引用完全相同的已安装配置，禁止在应用阶段穿透直接引用源码目录。
+   - 测试程序注册到 `mk/components/user.mk` 的 `USER_PROGRAMS` 与 `config/rootfs.mk` 的 `ROOTFS_FILES`，以 `/bin/test_lvgl` 安装进 ext2 根文件系统。
+4. **符号完整与动态比对审计**：
+   - 基于当前 libc 基线配置 `lv_conf.h`。将 `liblvgl.a` 所有对象文件合并 (`ld.lld -r`) 为 `combined.o`。
+   - 提取其未解析符号，比对 OS01 已发布的 `libc.a` 导出符号全集（包含 `malloc/free/realloc`、`memcpy/memmove/memset/memcmp`、`strlen/strnlen/strcpy/strncpy/strcmp/strncmp/strcat/strncat/strchr`、`vsnprintf` 及 SSP canary 符号）；严格禁止出现未实现的 `libm`（如 `cosf/sinf/tanf`）和 `pthread` 符号。
+   - `combined.o` 与 `libc.a` 做可重定位链接验证，剩余未解析符号为 0；最终产物 `test_lvgl.elf` 静态检查未解析符号为 0。
+5. **内存渲染兼容性测试通过**：
+   - `/bin/test_lvgl` 检查时钟系统调用返回值，验证单调毫秒滴答实际推进（`(uint32_t)(t1 - t0) > 0`）。
+   - 验证控件光栅化冲刷矩形有效性（`x1 <= x2 && y1 <= y2`）；
+   - 设置背景采样与按钮采样标记，按真实行跨度（stride）提取像素，精确匹配背景纯色（`0x00333333`）与按钮内部纯色（`0x001A73E8`）的低 24 位 RGB 值，断言两处采样均被命中。
+   - 通过 `lv_mem_monitor()` 精确断言 TLSF 内存池容量、已用比例和空闲空间。
+   - 在 QEMU 内以退出码 0 正常结束，输出 `[TEST PASS]` 标记。
 
 ### 非目标 (Non-goals)
 - 本任务不修改现有的 `user/desktop.c`（桌面改造在下一个独立任务进行）。
@@ -36,7 +49,7 @@
 | **OS 抽象 (`LV_USE_OS`)** | `LV_OS_NONE` | OS01 pthread 仅具备基础互斥锁，缺递归锁与条件变量；单 UI 线程主循环完全满足需求。保留 `lv_os.c` 与 `lv_os_none.c` 编译。 |
 | **滴答计时 (`lv_tick`)** | 注册自定义回调 | 在 `lv_init()` 完成后调用 `lv_tick_set_cb()`，基于 `clock_gettime(CLOCK_MONOTONIC)` 返回单调递增毫秒。 |
 | **内存分配 (`LV_USE_STDLIB_MALLOC`)** | `LV_STDLIB_BUILTIN` | 使用 LVGL 内置 TLSF 分配器（配置 4MB 独立内存池 `LV_MEM_SIZE = 4 * 1024 * 1024U`），通过 `lv_mem_monitor()` 监控内存使用。 |
-| **字符串操作 (`LV_USE_STDLIB_STRING`)** | `LV_STDLIB_CLIB` | libc 已完整提供 `memcpy/memmove/memset/memcmp` 以及 `strlen/strcpy/strcmp` 等。 |
+| **字符串操作 (`LV_USE_STDLIB_STRING`)** | `LV_STDLIB_CLIB` | libc 已完整提供 `memcpy/memmove/memset/memcmp` 以及 `strlen/strnlen/strcpy/strncpy/strcmp/strncmp/strcat/strncat/strchr` 等。 |
 | **格式化输出 (`LV_USE_STDLIB_SPRINTF`)** | `LV_STDLIB_BUILTIN` | 采用 LVGL 内置高效格式化，避免对 libc 浮点/复杂格式扩展的依赖。 |
 | **浮点与矩阵 (`LV_USE_FLOAT`, `LV_USE_MATRIX`)** | `0` | 当前 libc 无完整 libm（缺 `sinf/cosf/tanf/roundf`）；标准控件、圆角、阴影等无需浮点矩阵。 |
 | **渲染流水线 (`LV_USE_DRAW_SW`)** | `1` | 纯软件渲染器，色彩格式设定为 `LV_COLOR_FORMAT_XRGB8888`（色彩深度 32bpp），与 OS01 Framebuffer 像素格式完全对齐。 |
@@ -55,7 +68,7 @@
 | `liblvgl/Makefile` | 编译 `thirdpart/lvgl/src` 源码，构建 `liblvgl.a`，向 staging 树暂存库文件及公开头文件并生成 manifest。 |
 | `mk/components/sysroot.mk` | 接入 `$(STAMPS_DIR)/lvgl-install.stamp`，纳入 `$(SYSROOT_STAMP)` 前置依赖与 publish 循环。 |
 | `user/test_lvgl.c` | 兼容性测试程序，覆盖初始化、绘制缓冲绑定、控件创建与单次渲染循环。 |
-| `user/Makefile` | 增加 `test_lvgl.elf` 构建与链接规则（仅需 `-llvgl -lc`）。 |
+| `user/Makefile` | 增加 `test_lvgl.elf` 构建与链接规则（配置搜索路径与 `-llvgl -lc`）。 |
 | `mk/components/user.mk` | 将 `test_lvgl` 加入 `USER_PROGRAMS`，确保 ELF 被复制到 `$(USER_ARTIFACT_DIR)`。 |
 | `config/rootfs.mk` | 在 `ROOTFS_FILES` 中注册 `/bin/test_lvgl=$(USER_ARTIFACT_DIR)/test_lvgl.elf:0755`。 |
 
@@ -63,14 +76,15 @@
 
 ## 4. 构建与 Sysroot 暂存实现细节
 
-### 4.1 源码编译策略
-LVGL 源码结构设计高度遵循配置驱动，源文件内部包含宏条件防护（例如 `lv_pthread.c` 内有 `#if LV_USE_OS == LV_OS_PTHREAD`，禁用时自动为空编译单元）。
-- `liblvgl/Makefile` 采用全量安全扫描：编译 `thirdpart/lvgl/src` 下的所有 `.c` 文件（约 463 个）。
-- 这彻底规避了误删 `src/osal/lv_os.c`（包含 `lv_os_init` / `lv_lock` 等通用接口）导致的符号缺失风险。
-- 编译参数：`-ffreestanding -fno-builtin -Wall -Wextra -O2 -fno-pic -fno-pie -mno-red-zone -fstack-protector-strong`，头文件包含 `-I$(STAGING_DIR)/kernel-headers/usr/include -isystem $(STAGING_DIR)/libc/usr/include -I$(LVGL_DIR) -I$(LV_CONF_DIR) -DLV_CONF_INCLUDE_SIMPLE`。
+### 4.1 源码编译策略与增量安全
+- `liblvgl/Makefile` 递归扫描编译 `thirdpart/lvgl/src` 下的所有 `.c` 文件（约 463 个），源文件内自带的条件宏会自动处理未启用后端的空编译。
+- 编译依赖：使用 `clang -MMD -MP` 生成精确依赖文件，包含 `config/lv_conf.h`。修改 `lv_conf.h` 时触发相关源文件重新编译。
+- 编译参数：`-ffreestanding -fno-builtin -Wall -Wextra -O2 -fno-pic -fno-pie -mno-red-zone -fstack-protector-strong`。
+- 头文件搜索包含：`-I$(STAGING_DIR)/kernel-headers/usr/include -isystem $(STAGING_DIR)/libc/usr/include -I$(LVGL_DIR) -I$(LV_CONF_DIR) -DLV_CONF_INCLUDE_SIMPLE`。
 
-### 4.2 头文件树暂存结构
-暂存目录结构规划为：
+### 4.2 头文件暂存与清除策略
+`install` 目标必须先彻底执行 `rm -rf $(INSTALL_ROOT)`，再创建目录结构并复制，防止历史残存头文件污染 sysroot。
+暂存结构：
 ```
 staging/lvgl/
   usr/
@@ -88,19 +102,18 @@ staging/lvgl/
   manifest
 ```
 
-### 4.3 Sysroot 聚合集成与完整依赖链
-在 `mk/components/sysroot.mk` 中：
-1. 定义安装规则：
-   ```make
-   $(STAMPS_DIR)/lvgl-install.stamp: $(STAMPS_DIR)/kernel-headers-install.stamp \
-                                     $(STAMPS_DIR)/libc-install.stamp FORCE
-   	@mkdir -p $(dir $@)
-   	$(call os01_submake,liblvgl,install INSTALL_ROOT=$(STAGING_DIR)/lvgl $(OS01_SUBMAKE_ARGS))
-   	$(call stamp_check,$(STAGING_DIR)/lvgl)
-   ```
-2. 将 `$(STAMPS_DIR)/lvgl-install.stamp` 加入 `$(SYSROOT_STAMP)` 的 prerequisites 列表，确保 sysroot 发布时 LVGL staging 已完成，并在源码变化时触发 generation 重新组装。
-3. 在 generation 发布循环列表补充 `lvgl`：
+### 4.3 Sysroot 聚合与应用编译契约
+1. **Sysroot 前置依赖**：
+   在 `mk/components/sysroot.mk` 中，将 `$(STAMPS_DIR)/lvgl-install.stamp` 加入 `$(SYSROOT_STAMP)` 的 prerequisites 列表，并加入 publish 循环列表：
    `for comp in kernel-headers libc libgfx lvgl mbedtls compat-libs; do ...`
+2. **应用侧编译契约**：
+   应用必须直接从 sysroot 引用 LVGL，不得穿透引用源码目录。在 `user/Makefile` 中：
+   ```make
+   CFLAGS += -I$(TARGET_INCDIR)/lvgl -DLV_CONF_INCLUDE_SIMPLE
+   ```
+   当应用使用 `#include <lvgl/lvgl.h>` 时，LVGL 内部头文件根据 `LV_CONF_INCLUDE_SIMPLE` 直接引用 `"lv_conf.h"`，并在 `$(TARGET_INCDIR)/lvgl` 中命中发布的配置。
+3. **测试程序链接契约**：
+   `test_lvgl.elf` 仅链接 `$(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $< -llvgl -lc`。
 
 ---
 
@@ -113,12 +126,17 @@ staging/lvgl/
      ```c
      static uint32_t my_tick_get_cb(void) {
          struct timespec ts;
-         clock_gettime(CLOCK_MONOTONIC, &ts);
+         if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+             return 0;
+         }
          return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
      }
      ```
+   - 验证时钟调用：在初始阶段验证一次 `clock_gettime(CLOCK_MONOTONIC, &ts)`，若返回非 0 则报错并以退出码 1 终止。
    - 调用 `lv_tick_set_cb(my_tick_get_cb)`。
-   - 验证滴答计时推进：读取当前 tick，稍微空转或休眠 2ms，再次读取断言 `tick2 >= tick1`。
+   - **断言单调时间递增**：
+     - 记录 `uint32_t t0 = lv_tick_get();`。
+     - 执行短延迟循环（上限 100ms），反复读取 `t1 = lv_tick_get()`，断言在超时前观察到 `(uint32_t)(t1 - t0) > 0`。若超时仍无推进，输出错误并退出码 2 终止。
 2. **显示驱动与字节尺寸精确计算**：
    - 设定虚拟视口尺寸：`#define DISP_HOR_RES 320`，`#define DISP_VER_RES 240`。
    - 设定部分刷新缓冲行数：`#define BUF_LINES 40`。
@@ -130,23 +148,34 @@ staging/lvgl/
    - 注册冲刷回调 `flush_cb`。
 3. **UI 场景构建与目标颜色设定**：
    - 获取活动屏幕：`lv_obj_t *scr = lv_screen_active();`。
-   - 明确设置屏幕背景颜色（例如特定灰色 `0x00333333`）：
-     `lv_obj_set_style_bg_color(scr, lv_color_hex(0x333333), 0);`
+   - 设置特定屏幕背景色：`#define CLR_EXPECT_BG 0x00333333u`。
+     `lv_obj_set_style_bg_color(scr, lv_color_hex(CLR_EXPECT_BG), 0);`
      `lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);`
    - 创建测试按钮 `lv_obj_t *btn = lv_button_create(scr);`：
      - 固定位置与尺寸：`lv_obj_set_pos(btn, 60, 60);`，`lv_obj_set_size(btn, 200, 60);`。
-     - 设置按钮背景颜色（例如特定高亮蓝色 `0x001A73E8`）：
-       `lv_obj_set_style_bg_color(btn, lv_color_hex(0x1A73E8), 0);`
+     - 设置特定按钮背景色：`#define CLR_EXPECT_BTN 0x001A73E8u`。
+       `lv_obj_set_style_bg_color(btn, lv_color_hex(CLR_EXPECT_BTN), 0);`
        `lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);`
    - 创建标签：`lv_obj_t *lbl = lv_label_create(btn);`，设置文本 `"OS01 LVGL OK"`，居中对齐。
-4. **渲染冲刷与像素断言**：
+4. **渲染冲刷与像素精确断言**：
+   - 定义全局标记：`static bool bg_sampled = false; static bool btn_sampled = false;`。
+   - 选定采样检测点：
+     - 背景采样点：`(10, 10)`（避开按钮，确保为纯背景）。
+     - 按钮内部采样点：`(100, 70)`（位于按钮内部，避开边缘圆角与中央文本）。
    - 在 `flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)` 中：
      - 递增 `flush_count`。
-     - 断言 `area->x1 >= 0 && area->y1 >= 0 && area->x2 < DISP_HOR_RES && area->y2 < DISP_VER_RES`。
-     - 若冲刷区域覆盖按钮内部坐标（如点 `(100, 70)`），在 `px_map` 中取样对应的像素并断言包含按钮的蓝色分量（非全零、非背景纯灰）。
+     - **坐标边界断言**：
+       `assert(area->x1 <= area->x2 && area->y1 <= area->y2);`
+       `assert(area->x1 >= 0 && area->y1 >= 0 && area->x2 < DISP_HOR_RES && area->y2 < DISP_VER_RES);`
+     - 行步长为 `uint32_t stride_pixels = (uint32_t)(area->x2 - area->x1 + 1);`。
+     - 取样检查：
+       - 若包含 `(10, 10)`：计算偏移 `(10 - area->y1) * stride_pixels + (10 - area->x1)`，读取 `uint32_t px = ((uint32_t *)px_map)[offset];`，断言 `(px & 0x00FFFFFFu) == CLR_EXPECT_BG`，并标记 `bg_sampled = true`。
+       - 若包含 `(100, 70)`：计算偏移 `(70 - area->y1) * stride_pixels + (100 - area->x1)`，读取 `uint32_t px = ((uint32_t *)px_map)[offset];`，断言 `(px & 0x00FFFFFFu) == CLR_EXPECT_BTN`，并标记 `btn_sampled = true`。
      - 调用 `lv_display_flush_ready(disp)`。
    - 调用 `lv_timer_handler()` 触发单次完整渲染流程。
-   - 断言 `flush_count > 0`。
+   - **像素命中与冲刷断言**：
+     - 断言 `flush_count > 0`。
+     - 断言 `bg_sampled && btn_sampled`（两处目标采样点必须都被覆盖并验证）。
 5. **TLSF 内存池状态严格校验**：
    - 使用 v9.5.0 API 结构体：
      ```c
@@ -167,12 +196,14 @@ staging/lvgl/
 
 1. **静态符号审计**：
    - 将 `liblvgl` 编译的所有 `.o` 文件执行 `ld.lld -r` 合并为 `combined.o`。
-   - 执行 `llvm-nm --undefined-only combined.o`，验证未解析符号集严格受限于 OS01 libc.a 提供的符号列表（`malloc/free/realloc`, `memcpy/memmove/memset/memcmp`, `strlen/strcpy/strcmp`, `vsnprintf` 及 SSP canary 符号）。
+   - 执行 `llvm-nm --undefined-only combined.o`，验证未解析符号全集严格受限于 OS01 `libc.a` 导出的定义符号集合；确认无任何 `cosf/sinf/tanf/powf/sqrtf` 等数学库符号及 `pthread_*` 符号。
+   - 将 `combined.o` 与 `libc.a` 执行 `ld.lld -r`，断言剩余未解析符号为 0。
    - 检查最终用户态可执行文件 `test_lvgl.elf`，执行 `llvm-nm --undefined-only test_lvgl.elf` 必须得到 0 个未解析符号。
-2. **构建一致性测试**：
+2. **构建一致性与增量测试**：
    - 执行 `make PROFILE=x86_64-clang sysroot`，确保 staging 阶段无 manifest 重复路径冲突。
+   - 测试修改 `config/lv_conf.h`，确保触发增量重新编译与 sysroot 重新发布。
    - 执行 `make PROFILE=x86_64-clang disk.img`，确保 `test_lvgl.elf` 编译成功并正确打包入 ext2 根分区的 `/bin/test_lvgl`。
 3. **QEMU 自动化运行测试**：
-   - 使用 QEMU 无头运行，在 init/shell 启动后执行 `/bin/test_lvgl`。
-   - 设置 30s 超时时间。
-   - 断言标准输出中出现 `[TEST PASS] LVGL compatibility smoke test succeeded.` 且进程退出码为 0。
+   - 自动化无头运行脚本：通过串口管道向 QEMU 注入执行命令 `/bin/test_lvgl`，并捕获退出码标记（如 `echo EXIT_CODE:$?`）。
+   - 超时设定：整机启动超时 25s，测试执行超时 10s。
+   - 验收断言：标准输出中出现 `[TEST PASS] LVGL compatibility smoke test succeeded.` 且 `EXIT_CODE:0`；失败时自动保留完整串口日志输出。
