@@ -19,10 +19,22 @@ typedef struct __FILE FILE;
 #define SPECIAL	32		/* 0x */
 #define SMALL	64		/* use 'abcdef' instead of 'ABCDEF' */
 
+#if defined(__is_libk)
+/* Libk-mode portable do_div: pure C, no x86-64 inline asm. Used by vsprintf
+ * when compiled as part of libk (cross-arch, both aarch64 and x86_64). */
+#define do_div(n,base) ({ \
+    unsigned long long __q = (n); \
+    (n) = __q / (unsigned long)(base); \
+    (unsigned long)(__q % (unsigned long)(base)); \
+})
+#else
+/* Libc-mode: x86_64 `divq` inline-asm optimization (kept for the userland
+ * libc). Not portable — only __is_libk above defines the portable one. */
 #define do_div(n,base) ({ \
 int __res; \
 __asm__("divq %%rcx":"=a" (n),"=d" (__res):"0" (n),"1" (0),"c" (base)); \
 __res; })
+#endif
 #define is_digit(c)	((c) >= '0' && (c) <= '9')
 
 int printf(const char* __restrict, ...);

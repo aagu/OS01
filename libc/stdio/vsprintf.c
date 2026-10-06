@@ -5,7 +5,13 @@
 #include <stdint.h>
 #include <limits.h>
 #include "stdio_internal.h"
+#ifndef __is_libk
+/* Float-format conversion depends on `double` type support; the libk
+ * build uses -mgeneral-regs-only (no FPU/FP registers), so the floatconv
+ * paths are compiled out. Kernel console output (color_printk /
+ * serial_printk) only needs %s, %d, %u, %x, %lu, %p — no %f / %e / %g. */
 #include "floatconv.h"
+#endif
 
 int skip_atoi(const char **s)
 {
@@ -148,6 +154,7 @@ static __attribute__((noinline)) void vf_int(vf_state_t *st, va_list ap, int is_
 	}
 }
 
+#ifndef __is_libk
 static __attribute__((noinline)) void vf_float(vf_state_t *st, double d, int field_width, int precision,
                                                 int flags, char conv)
 {
@@ -181,6 +188,7 @@ static __attribute__((noinline)) void vf_float(vf_state_t *st, double d, int fie
 	}
 	free(fbuf);
 }
+#endif  /* __is_libk */
 
 size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perform_assign)
 {
@@ -322,8 +330,14 @@ size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perfor
 			case 'f': case 'F':
 			case 'e': case 'E':
 			case 'g': case 'G': {
+#ifndef __is_libk
 				/* Float rendering (binary64, double-only). %L* (long double)
-				 * is not supported: emit the literal text and do NOT consume. */
+				 * is not supported: emit the literal text and do NOT consume.
+				 *
+				 * libk does not link floatconv_render (it would require `double`
+				 * type support in an aarch64 build with -mgeneral-regs-only,
+				 * which clang rejects). Kernel console output doesn't need %f /
+				 * %e / %g. */
 				char conv = *fmt;
 				if (qualifier == 'L') {
 					vf_out(&st, '%');
@@ -334,6 +348,11 @@ size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perfor
 				double d = va_arg(ap, double);
 				vf_float(&st, d, field_width, precision, flags, conv);
 				break;
+#else
+				vf_out(&st, '%');
+				vf_out(&st, *fmt);
+				break;
+#endif
 			}
 
 			case 'a': case 'A': {

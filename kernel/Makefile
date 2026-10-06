@@ -62,6 +62,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    time/clocksource.c time/tick.c time/timer.c \
                    intr/softirq.c \
                    core/stack_chk.c \
+                   core/printk.c \
                    subsys/subsys.c \
                    random/random.c \
                    ../libc/random/chacha20.c \
