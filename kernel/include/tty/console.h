@@ -18,4 +18,13 @@ void console_surrender_fb(void);
 // Force re-enable framebuffer output for kernel panic.
 void console_force_enable(void);
 
+// Notify console of mode resize while holding Pos.lock.
+// Resets term_cursor_row/col and Pos.XPosition/YPosition to 0.
+void console_notify_resize_locked(void);
+
+#ifdef OS01_HOST_TEST
+void console__test_get_cursors(int *row, int *col, int32_t *pos_x, int32_t *pos_y);
+void console__test_set_cursors(int row, int col, int32_t pos_x, int32_t pos_y);
+#endif
+
 #endif

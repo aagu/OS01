@@ -28,6 +28,10 @@ void fb_mark_failed(void);
 void fb_control_lock(void);
 void fb_control_unlock(void);
 
+void fb_mark_raw_mmap_seen(void);
+bool fb_has_raw_mmap_seen(void);
+uint32_t fb_active_writers_count(void);
+
 #ifdef OS01_HOST_TEST
 void fb_state__test_set_generation(uint64_t generation);
 #endif

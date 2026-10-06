@@ -238,6 +238,45 @@ int fb_get_info(struct fb_info *out)
     return 0;
 }
 
+int fb_snapshot_read(fb_snapshot_t *out)
+{
+    if (!out) return -EINVAL;
+    out->state.info.width  = test_fb_width_override ? test_fb_width_override
+                                                    : (uint32_t)TEST_FB_WIDTH;
+    out->state.info.height = (uint32_t)TEST_FB_HEIGHT;
+    out->state.info.stride = TEST_FB_STRIDE;
+    out->state.info.bpp    = 32;
+    out->state.info.format = GFX_FORMAT_RGB32;
+    out->state.generation  = 1;
+    out->state.reserved    = 0;
+    out->addr = test_fb_buf;
+    out->mapped_size = TEST_FB_SIZE;
+    return 0;
+}
+
+int fb_writer_begin(fb_lease_t *lease, uint64_t expected_generation)
+{
+    if (!lease) return -EINVAL;
+    int rc = fb_snapshot_read(&lease->snapshot);
+    if (rc < 0) return rc;
+    if (expected_generation != 0 && expected_generation != lease->snapshot.state.generation)
+        return -ESTALE;
+    lease->held = true;
+    return 0;
+}
+
+void fb_writer_end(fb_lease_t *lease)
+{
+    if (lease) lease->held = false;
+}
+
+int fb_write_row_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
+                        const void *pixels, uint32_t bytes)
+{
+    (void)lease;
+    return fb_write_row(x, y, pixels, bytes);
+}
+
 int fb_write_row(uint32_t x, uint32_t y, const void *pixels,
                  uint32_t row_bytes)
 {

@@ -28,6 +28,7 @@ psf2_t *font = (psf2_t*)&_binary_kernel_font_psf_start;
 
 void putchark(unsigned int FRcolor,unsigned int BKcolor,unsigned char c)
 {
+    if (!Pos.FB_addr) return;
     uint32_t i = 0,j = 0;
 	uint32_t * addr = NULL;
 	int testval = 0;
@@ -54,6 +55,7 @@ void putchark(unsigned int FRcolor,unsigned int BKcolor,unsigned char c)
 void putchar_at(int col, int row, unsigned int FRcolor, unsigned int BKcolor,
                 unsigned char c)
 {
+    if (!Pos.FB_addr) return;
     int i = 0, j = 0;
     uint32_t *addr = NULL;
     int testval = 0;
@@ -93,11 +95,24 @@ int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
 	int line = 0;
 	va_list args;
 
-	spin_lock(&Pos.lock);
+	uint64_t flags = spin_lock_irqsave(&Pos.lock);
 
 	va_start(args, fmt);
 	i = vsprintf(buf_color, fmt, args);
 	va_end(args);
+
+	fb_lease_t lease;
+	int lrc = fb_writer_begin(&lease, 0);
+	if (lrc < 0) {
+		uint64_t sf = spin_lock_irqsave(&serial_lock);
+		for(count = 0; count < i; count++)
+		{
+			write_serial_unlocked((unsigned char)*(buf_color + count));
+		}
+		spin_unlock_irqrestore(&serial_lock, sf);
+		spin_unlock_irqrestore(&Pos.lock, flags);
+		return i;
+	}
 
 	for(count = 0;count < i || line;count++)
 	{
@@ -162,7 +177,8 @@ Label_tab:
 		}
 
 	}
-	spin_unlock(&Pos.lock);
+	fb_writer_end(&lease);
+	spin_unlock_irqrestore(&Pos.lock, flags);
 
 	return i;
 }

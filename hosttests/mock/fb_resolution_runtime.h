@@ -15,6 +15,8 @@
 #define KERNEL_TASK_H 1
 #define _ARCH_MMU_H 1
 
+typedef struct { int dummy; } wait_queue_t;
+
 #define ARCH_PAGE_OFFSET 0ULL
 #define PAGE_OFFSET 0ULL
 #ifndef Phy_To_Virt
@@ -77,13 +79,22 @@ int  mutex_trylock(mutex_t *m);
 /* ── Task and blocker_wait mock ── */
 #define BLOCKER_NANOSLEEP 2
 
+struct mm_struct {
+    uint64_t *pgdir;
+};
+
 struct task_struct {
     uint64_t wakeup_ns;
     int64_t pid;
+    struct mm_struct *mm;
 };
 
 extern struct task_struct mock_current_task;
 #define current (&mock_current_task)
+
+#ifndef arch_flush_tlb_all
+#define arch_flush_tlb_all() flush_tlb()
+#endif
 
 typedef bool (*blocker_check_t)(struct task_struct *waiter);
 int blocker_wait(blocker_check_t check, int type, bool signal_can_wake);

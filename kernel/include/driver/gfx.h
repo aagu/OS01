@@ -42,6 +42,7 @@ typedef struct gfx_view {
     uint32_t desc_w;
     uint32_t desc_h;
     uint32_t format;
+    uint64_t mode_seq;
     bool     configured;
 } gfx_view_t;
 

@@ -42,6 +42,7 @@
 
 #include <driver/gfx.h>
 #include <driver/fb.h>
+#include <driver/fb_state.h>
 #include <uapi/gfx.h>
 #include <fs/file.h>
 #include <fs/devfs.h>
@@ -143,17 +144,17 @@ static int gfx_ioctl_create_view(file_t *f, const gfx_view_desc_t *kdesc)
     gfx_view_t *v = (gfx_view_t *)f->dev_private;
     if (!v || !kdesc) return -EINVAL;
 
-    struct fb_info info;
-    int grc = fb_get_info(&info);
+    fb_snapshot_t snap;
+    int grc = fb_snapshot_read(&snap);
     if (grc < 0) return grc;
 
     // Spec §3 — only RGB32 framebuffers are supported.  A different
     // bpp / format means libgfx's stride assumption (width*4) would
     // be wrong, and silently accepting it would corrupt the fb.
-    if (info.format != GFX_FORMAT_RGB32) return -EINVAL;
+    if (snap.state.info.format != GFX_FORMAT_RGB32) return -EINVAL;
 
-    uint32_t fb_w = info.width;
-    uint32_t fb_h = info.height;
+    uint32_t fb_w = snap.state.info.width;
+    uint32_t fb_h = snap.state.info.height;
 
     // Spec §3 — w, h non-zero.  Spec §4 — overflow-safe subtraction
     // form so UINT32_MAX w / h is rejected even when x or y is 0.
@@ -191,6 +192,7 @@ static int gfx_ioctl_create_view(file_t *f, const gfx_view_desc_t *kdesc)
     v->desc_w      = kdesc->w;
     v->desc_h      = kdesc->h;
     v->format      = GFX_FORMAT_RGB32;
+    v->mode_seq    = snap.state.generation;
     v->configured  = true;
 
     spin_unlock_irqrestore(&g_gfx_table.lock, flags);
@@ -229,15 +231,15 @@ static int gfx_ioctl_get_info(file_t *f, gfx_info_t *kinfo)
 // ── gfx_ioctl_present ──────────────────────────────────────
 // Spec §4: present validates the request struct's user range,
 // snapshots the view rect under the lock, drops the lock, then
-// walks the view row-by-row.  Each row:
+// acquires a frame-wide lease and walks the view row-by-row.
+// Each row:
 //   (a) re-checks the per-row user sub-range with
 //       syscall_check_user_range (snapshot, not a pin),
 //   (b) fault-tolerant copies the row bytes into a heap row buffer,
-//   (c) calls fb_write_row(x, y + row, buf, stride).
+//   (c) calls fb_write_row_leased(&lease, x, y + row, buf, stride).
 //
-// On any fault, kfree the row buffer and return -EFAULT — earlier
-// rows may already be visible on the fb (spec §4: "前面行可能已
-// 更新，下一次完整 present 可恢复").
+// On any fault, kfree the row buffer, release the lease, and return
+// -EFAULT — earlier rows may already be visible on the fb (spec §4).
 static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq)
 {
     gfx_view_t *v = (gfx_view_t *)f->dev_private;
@@ -251,11 +253,12 @@ static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq)
     if (copy_from_user_ft(&kreq, ureq, sizeof(kreq)) < 0)
         return -EFAULT;
 
-    // Stage 2: snapshot the view rectangle under the table lock.
+    // Stage 2: snapshot the view rectangle and mode_seq under the table lock.
     // The lock is dropped before any user-range check or copy_*_ft
     // call (those primitives may longjmp on user fault; holding a
     // spinlock across a longjmp would leak it).
     uint32_t v_x, v_y, v_w, v_h;
+    uint64_t v_mode_seq;
     {
         uint64_t flags = spin_lock_irqsave(&g_gfx_table.lock);
         if (!v->configured) {
@@ -266,6 +269,7 @@ static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq)
         v_y = v->desc_y;
         v_w = v->desc_w;
         v_h = v->desc_h;
+        v_mode_seq = v->mode_seq;
         spin_unlock_irqrestore(&g_gfx_table.lock, flags);
     }
 
@@ -284,35 +288,44 @@ static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq)
             return -EFAULT;
     }
 
-    // Stage 4: walk the rows.  Allocate a single heap row buffer of
-    // exactly stride bytes; free it on every return path.
+    // Stage 4: acquire lease covering the entire frame.
+    fb_lease_t lease;
+    int lrc = fb_writer_begin(&lease, v_mode_seq);
+    if (lrc < 0) return lrc;
+
+    // Walk the rows. Allocate a single heap row buffer of exactly stride bytes;
+    // free it and release lease on every return path.
     size_t row_buf_size = (size_t)kreq.stride;
     void *row_buf = kmalloc(row_buf_size);
-    if (!row_buf) return -ENOMEM;
+    if (!row_buf) {
+        fb_writer_end(&lease);
+        return -ENOMEM;
+    }
 
     for (uint32_t row = 0; row < v_h; row++) {
         uint64_t row_addr = kreq.pixels + (uint64_t)row * (uint64_t)kreq.stride;
         if (!syscall_check_user_range(row_addr, (uint64_t)kreq.stride, false)) {
             kfree(row_buf);
+            fb_writer_end(&lease);
             return -EFAULT;
         }
         if (copy_from_user_ft(row_buf, (const void *)(uintptr_t)row_addr,
                               (size_t)kreq.stride) < 0) {
             kfree(row_buf);
+            fb_writer_end(&lease);
             return -EFAULT;
         }
-        // fb_write_row validates against fb dimensions / FB_length
-        // (kernel/driver/fb.c).  A negative return here means our
-        // view snapshot drifted out of range — defensive, since the
-        // spec doesn't expect this to fire after the validate step.
-        int wrc = fb_write_row(v_x, v_y + row, row_buf, (uint32_t)kreq.stride);
+
+        int wrc = fb_write_row_leased(&lease, v_x, v_y + row, row_buf, (uint32_t)kreq.stride);
         if (wrc < 0) {
             kfree(row_buf);
+            fb_writer_end(&lease);
             return wrc;
         }
     }
 
     kfree(row_buf);
+    fb_writer_end(&lease);
     return 0;
 }
 

@@ -1,6 +1,7 @@
 #include <tty/console.h>
 #include <core/printk.h>
 #include <driver/font.h>
+#include <driver/fb_state.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -44,8 +45,19 @@ void console_putchar(char c)
     // point but tty_write is not on their path.
     write_serial_unlocked(c);
 
-    if (!console_fb_active)
+    uint64_t flags = spin_lock_irqsave(&Pos.lock);
+    if (!console_fb_active) {
+        spin_unlock_irqrestore(&Pos.lock, flags);
         return;
+    }
+
+    fb_lease_t lease;
+    int lrc = fb_writer_begin(&lease, 0);
+    if (lrc < 0) {
+        // Fallback to serial only; do NOT alter screen cursor
+        spin_unlock_irqrestore(&Pos.lock, flags);
+        return;
+    }
 
     switch (c) {
     case '\n':
@@ -77,10 +89,14 @@ void console_putchar(char c)
     int max_rows = (int)(Pos.YResolution / font->height);
     if (term_cursor_row >= max_rows)
         console_scroll();
+
+    fb_writer_end(&lease);
+    spin_unlock_irqrestore(&Pos.lock, flags);
 }
 
 void console_init(void)
 {
+    uint64_t flags = spin_lock_irqsave(&Pos.lock);
     term_cursor_row = Pos.YPosition + 1;
     int max_rows = (int)(Pos.YResolution / font->height);
     if (term_cursor_row >= max_rows) term_cursor_row = max_rows - 1;
@@ -89,14 +105,46 @@ void console_init(void)
     term_bg = BLACK;
     term_initialized = true;
     console_fb_active = true;
+    spin_unlock_irqrestore(&Pos.lock, flags);
 }
 
 void console_surrender_fb(void)
 {
+    uint64_t flags = spin_lock_irqsave(&Pos.lock);
     console_fb_active = false;
+    spin_unlock_irqrestore(&Pos.lock, flags);
 }
 
 void console_force_enable(void)
 {
+    uint64_t flags = spin_lock_irqsave(&Pos.lock);
     console_fb_active = true;
+    spin_unlock_irqrestore(&Pos.lock, flags);
 }
+
+void console_notify_resize_locked(void)
+{
+    term_cursor_row = 0;
+    term_cursor_col = 0;
+    Pos.XPosition = 0;
+    Pos.YPosition = 0;
+}
+
+#ifdef OS01_HOST_TEST
+void console__test_get_cursors(int *row, int *col, int32_t *pos_x, int32_t *pos_y)
+{
+    if (row) *row = term_cursor_row;
+    if (col) *col = term_cursor_col;
+    if (pos_x) *pos_x = Pos.XPosition;
+    if (pos_y) *pos_y = Pos.YPosition;
+}
+
+void console__test_set_cursors(int row, int col, int32_t pos_x, int32_t pos_y)
+{
+    term_cursor_row = row;
+    term_cursor_col = col;
+    Pos.XPosition = pos_x;
+    Pos.YPosition = pos_y;
+}
+#endif
+

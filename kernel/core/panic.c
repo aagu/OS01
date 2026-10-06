@@ -10,6 +10,8 @@
 #include <sched/task.h>
 #include <kernel.h>
 #include <time/timer.h>
+#include <driver/fb_state.h>
+#include <tty/console.h>
 
 char buf[4096] = {'[','k','e','r','n','e','l',' ','p','a','n','i','c',']',' ',0};
 
@@ -20,6 +22,15 @@ void kpanic(const char * msg,...)
     vsprintf(buf+15, msg, args);
     va_end(args);
     serial_printk(buf);
+
+    fb_snapshot_t snap;
+    if (fb_snapshot_read(&snap) == 0 && snap.addr != NULL && snap.mapped_size > 0) {
+        if (spin_trylock(&Pos.lock)) {
+            console_force_enable();
+            spin_unlock(&Pos.lock);
+        }
+    }
+
     while (1) {
         arch_local_irq_disable();
         arch_cpu_halt();

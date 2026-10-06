@@ -14,6 +14,7 @@
 struct task_struct mock_current_task = {
     .wakeup_ns = 0,
     .pid = 1,
+    .mm = NULL,
 };
 
 uint64_t g_mock_clock_ns = 1000000000ULL;

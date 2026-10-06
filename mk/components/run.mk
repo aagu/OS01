@@ -503,9 +503,9 @@ test-arch9-host: $(if $(CASE),_test-arch9-host-run-$(CASE),$(foreach c,$(ARCH9_C
 # clients, hooks, or all.
 # With RES_CASE omitted or all, the umbrella runs all currently registered cases.
 # Unregistered cases and unknown cases abort non-zero.
-.PHONY: test-resolution-host _test-resolution-host-run-uapi _test-resolution-host-run-state
+.PHONY: test-resolution-host _test-resolution-host-run-uapi _test-resolution-host-run-state _test-resolution-host-run-writers
 RESOLUTION_HOST_ALL_CASES := uapi state writers bga ioctl pty terminal clients hooks
-RESOLUTION_HOST_REGISTERED_CASES := uapi state
+RESOLUTION_HOST_REGISTERED_CASES := uapi state writers
 
 _test-resolution-host-run-uapi:
 	@echo "  [test-resolution-host] uapi"
@@ -514,6 +514,10 @@ _test-resolution-host-run-uapi:
 _test-resolution-host-run-state:
 	@echo "  [test-resolution-host] state"
 	$(call os01_submake,hosttests,test-fb-state $(OS01_SUBMAKE_ARGS))
+
+_test-resolution-host-run-writers:
+	@echo "  [test-resolution-host] writers"
+	$(call os01_submake,hosttests,test-fb-writers $(OS01_SUBMAKE_ARGS))
 
 _test-resolution-host-run-%:
 	@echo "ERROR: unknown or unregistered RES_CASE='$*'; valid: $(RESOLUTION_HOST_ALL_CASES) all (registered: $(RESOLUTION_HOST_REGISTERED_CASES))" >&2

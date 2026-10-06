@@ -256,6 +256,29 @@ void fb_mark_failed(void)
     spin_unlock_irqrestore(&display_state_lock, flags);
 }
 
+void fb_mark_raw_mmap_seen(void)
+{
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    g_raw_mmap_seen = true;
+    spin_unlock_irqrestore(&display_state_lock, flags);
+}
+
+bool fb_has_raw_mmap_seen(void)
+{
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    bool seen = g_raw_mmap_seen;
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    return seen;
+}
+
+uint32_t fb_active_writers_count(void)
+{
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    uint32_t count = g_active_writers;
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    return count;
+}
+
 #ifdef OS01_HOST_TEST
 void fb_state__test_set_generation(uint64_t generation)
 {

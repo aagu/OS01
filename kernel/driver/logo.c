@@ -1,6 +1,7 @@
 #include <driver/logo.h>
 #include <core/printk.h>
 #include <driver/font.h>
+#include <driver/fb_state.h>
 
 extern psf2_t *font;
 
@@ -43,6 +44,13 @@ static void fill_rect(int x, int y, int width, int height, unsigned int color)
 
 void boot_logo_show(void)
 {
+    uint64_t flags = spin_lock_irqsave(&Pos.lock);
+    fb_lease_t lease;
+    if (fb_writer_begin(&lease, 0) < 0) {
+        spin_unlock_irqrestore(&Pos.lock, flags);
+        return;
+    }
+
     int scale = Pos.XResolution >= 800 ? 14 :
                 Pos.XResolution >= 480 ? 11 : 8;
     if (Pos.YResolution < 300)
@@ -79,4 +87,7 @@ void boot_logo_show(void)
     // Leave a blank character row between the wordmark and boot messages.
     Pos.YPosition = label_row + 2;
     Pos.XPosition = 0;
+
+    fb_writer_end(&lease);
+    spin_unlock_irqrestore(&Pos.lock, flags);
 }
