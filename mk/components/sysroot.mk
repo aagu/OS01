@@ -69,6 +69,13 @@ $(STAMPS_DIR)/libgfx-install.stamp: $(STAMPS_DIR)/kernel-headers-install.stamp \
 	$(call os01_submake,libgfx,install INSTALL_ROOT=$(STAGING_DIR)/libgfx $(OS01_SUBMAKE_ARGS))
 	$(call stamp_check,$(STAGING_DIR)/libgfx)
 
+# ── LVGL staging (v9.5.0) ────────────────────────────────────────
+$(STAMPS_DIR)/lvgl-install.stamp: $(STAMPS_DIR)/kernel-headers-install.stamp \
+                                  $(STAMPS_DIR)/libc-install.stamp FORCE
+	@mkdir -p $(dir $@)
+	$(call os01_submake,liblvgl,install INSTALL_ROOT=$(STAGING_DIR)/lvgl $(OS01_SUBMAKE_ARGS))
+	$(call stamp_check,$(STAGING_DIR)/lvgl)
+
 # ── mbedTLS adapter (R7) ──────────────────────────────────────────
 # No shared /tmp, no writes into the submodule, no final-sysroot writes.
 # The FORCE-checked recipe computes the input digest (the mbedtls tree, the
@@ -183,6 +190,7 @@ $(STAMPS_DIR)/compat-libs-install.stamp: FORCE
 $(SYSROOT_STAMP): $(STAMPS_DIR)/kernel-headers-install.stamp \
                   $(STAMPS_DIR)/libc-install.stamp \
                   $(STAMPS_DIR)/libgfx-install.stamp \
+                  $(STAMPS_DIR)/lvgl-install.stamp \
                   $(STAMPS_DIR)/mbedtls-install.stamp \
                   $(STAMPS_DIR)/compat-libs-install.stamp
 	@mkdir -p $(dir $@) $(SYSROOT_GENERATIONS_DIR) $(LEASES_DIR)
@@ -216,7 +224,7 @@ $(SYSROOT_STAMP): $(STAMPS_DIR)/kernel-headers-install.stamp \
 	mv -f "$(SYSROOT_GENERATIONS_DIR)/next-generation.tmp" "$(SYSROOT_GENERATIONS_DIR)/next-generation"; \
 	gen="$(SYSROOT_GENERATIONS_DIR)/$$id"; \
 	mkdir -p "$$gen"; \
-	for comp in kernel-headers libc libgfx mbedtls compat-libs; do \
+	for comp in kernel-headers libc libgfx lvgl mbedtls compat-libs; do \
 	  mf="$(STAGING_DIR)/$$comp/manifest"; \
 	  if [ ! -f "$$mf" ]; then echo "ERROR: missing manifest $$mf"; exit 1; fi; \
 	  while IFS= read -r rel; do \
