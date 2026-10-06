@@ -19,21 +19,22 @@ typedef struct __FILE FILE;
 #define SPECIAL	32		/* 0x */
 #define SMALL	64		/* use 'abcdef' instead of 'ABCDEF' */
 
-#if defined(__is_libk)
-/* Libk-mode portable do_div: pure C, no x86-64 inline asm. Used by vsprintf
- * when compiled as part of libk (cross-arch, both aarch64 and x86_64). */
+/* do_div: x86_64 has native divq; every other arch (aarch64 in libk-mode)
+ * gets the portable C variant.  libc/stdio is x86_64-only on the libc
+ * userland side (the Makefile gates the libc.a archive to x86_64), so
+ * the asm path covers both the x86_64 libc userland and x86_64 libk
+ * kernel-side builds. */
+#if defined(__x86_64__)
+#define do_div(n,base) ({ \
+int __res; \
+__asm__("divq %%rcx":"=a" (n),"=d" (__res):"0" (n),"1" (0),"c" (base)); \
+__res; })
+#else
 #define do_div(n,base) ({ \
     unsigned long long __q = (n); \
     (n) = __q / (unsigned long)(base); \
     (unsigned long)(__q % (unsigned long)(base)); \
 })
-#else
-/* Libc-mode: x86_64 `divq` inline-asm optimization (kept for the userland
- * libc). Not portable — only __is_libk above defines the portable one. */
-#define do_div(n,base) ({ \
-int __res; \
-__asm__("divq %%rcx":"=a" (n),"=d" (__res):"0" (n),"1" (0),"c" (base)); \
-__res; })
 #endif
 #define is_digit(c)	((c) >= '0' && (c) <= '9')
 
