@@ -165,3 +165,17 @@ void fb_resolution_runtime_reset(void)
     }
     g_page_pool_count = 0;
 }
+
+#include <core/printk.h>
+#include <driver/bga.h>
+
+__attribute__((weak)) position Pos;
+
+__attribute__((weak)) uint32_t bga_filter_modes(const bga_caps_t *caps, uint64_t mapped_size,
+                                                struct fb_info out[FB_MAX_MODES])
+{
+    (void)caps;
+    (void)mapped_size;
+    (void)out;
+    return 0;
+}

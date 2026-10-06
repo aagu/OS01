@@ -6,6 +6,8 @@
  */
 
 #include <driver/fb_state.h>
+#include <driver/bga.h>
+#include <core/printk.h>
 #include <sync/mutex.h>
 #include <arch/spinlock.h>
 #include <arch/clocksource.h>
@@ -33,6 +35,10 @@ static bool            g_backend_failed;
 static bool            g_raw_mmap_seen __attribute__((unused));
 static bool            g_initialized;
 
+static bga_caps_t      g_bga_caps __attribute__((unused));
+static struct fb_info  g_bga_modes[FB_MAX_MODES] __attribute__((unused));
+static uint32_t        g_bga_modes_count __attribute__((unused));
+
 void fb_bootstrap_state(uint64_t phys, uint64_t gop_bytes, const struct fb_info *info)
 {
     spin_init(&display_state_lock);
@@ -57,6 +63,10 @@ void fb_bootstrap_state(uint64_t phys, uint64_t gop_bytes, const struct fb_info 
     g_backend_failed = false;
     g_raw_mmap_seen = false;
     g_initialized = true;
+
+    memset(&g_bga_caps, 0, sizeof(g_bga_caps));
+    memset(g_bga_modes, 0, sizeof(g_bga_modes));
+    g_bga_modes_count = 0;
 }
 
 void fb_publish_initial_mapping(uint32_t *addr, uint64_t mapped_size)
@@ -68,6 +78,41 @@ void fb_publish_initial_mapping(uint32_t *addr, uint64_t mapped_size)
         g_vram_capacity = mapped_size;
     }
     spin_unlock_irqrestore(&display_state_lock, flags);
+}
+
+int fb_install_backend(const struct bga_caps *caps, uint32_t *addr, uint64_t mapped_size)
+{
+    if (!caps || !addr || mapped_size == 0 || caps->vram_bytes == 0) {
+        return -EINVAL;
+    }
+
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    if (!g_initialized || g_backend_failed) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        return -EIO;
+    }
+
+    g_bga_caps = *caps;
+    g_fb_mapped_addr = addr;
+    g_fb_mapped_size = mapped_size;
+    g_vram_capacity = caps->vram_bytes;
+
+    /* Filter modes for published capability */
+    g_bga_modes_count = bga_filter_modes(caps, mapped_size, g_bga_modes);
+
+    g_backend_ready = true;
+    g_backend_failed = false;
+    g_transitioning = false;
+
+    spin_unlock_irqrestore(&display_state_lock, flags);
+
+    /* Update Pos compatibility mirror */
+    uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
+    Pos.FB_addr = addr;
+    Pos.FB_length = mapped_size;
+    spin_unlock_irqrestore(&Pos.lock, pos_flags);
+
+    return 0;
 }
 
 void fb_control_lock(void)

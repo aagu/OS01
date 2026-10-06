@@ -157,9 +157,11 @@ $(TEST_BLD)/test_slab_idempotent_reservation.elf \
     $(TEST_BLD)/test_virtio_net_instances.elf \
     $(TEST_BLD)/test_fb_uapi.elf \
     $(TEST_BLD)/test_fb_state.elf \
-    $(TEST_BLD)/test_fb_writers.elf
+    $(TEST_BLD)/test_fb_writers.elf \
+    $(TEST_BLD)/test_bga_resolution.elf \
+    $(TEST_BLD)/test_bga_non_x86.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga
 
 all: $(TEST_BINS)
 
@@ -2675,5 +2677,32 @@ $(TEST_BLD)/test_fb_writers.elf: $(TEST_BLD)/test_fb_writers.o $(TEST_BLD)/fb_st
 
 test-fb-writers: $(TEST_BLD)/test_fb_writers.elf
 	$<
+
+# PCI BGA backend probe and hardware transaction test (QEMU resolution switcher Task 4)
+$(TEST_BLD)/bga_production.o: $(TESTS_DIR)/kernel/driver/bga.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FB_STATE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/bga_non_x86.o: $(TESTS_DIR)/kernel/driver/bga.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FB_STATE_HOST_CFLAGS) -DOS01_HOST_TEST_NON_X86 -c $< -o $@
+
+$(TEST_BLD)/test_bga_resolution.o: $(TEST_CASES)/test_bga_resolution.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FB_STATE_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_bga_resolution.elf: $(TEST_BLD)/test_bga_resolution.o $(TEST_BLD)/bga_production.o $(TEST_BLD)/fb_state.o $(TEST_BLD)/fb_map.o $(TEST_BLD)/fb_resolution_runtime.o $(TEST_BLD)/pci_match_production.o
+	$(HOST_CC) -lpthread -o $@ $^
+
+$(TEST_BLD)/test_bga_non_x86.o: $(TEST_CASES)/test_bga_non_x86.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FB_STATE_HOST_CFLAGS) $(FRAMEWORK_INC) -DOS01_HOST_TEST_NON_X86 -c $< -o $@
+
+$(TEST_BLD)/test_bga_non_x86.elf: $(TEST_BLD)/test_bga_non_x86.o $(TEST_BLD)/bga_non_x86.o $(TEST_BLD)/fb_state.o $(TEST_BLD)/fb_map.o $(TEST_BLD)/fb_resolution_runtime.o $(TEST_BLD)/pci_match_production.o
+	$(HOST_CC) -lpthread -o $@ $^
+
+test-bga: $(TEST_BLD)/test_bga_resolution.elf $(TEST_BLD)/test_bga_non_x86.elf
+	$(TEST_BLD)/test_bga_resolution.elf
+	$(TEST_BLD)/test_bga_non_x86.elf
 
 

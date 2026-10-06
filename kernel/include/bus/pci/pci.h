@@ -25,6 +25,9 @@
 #define PCI_CLASS_NETWORK          0x02
 #define PCI_SUBCLASS_ETHERNET      0x00
 
+#define PCI_CLASS_DISPLAY          0x03
+#define PCI_SUBCLASS_VGA           0x00
+
 enum pci_bar_kind {
     PCI_BAR_NONE = 0,
     PCI_BAR_IO,

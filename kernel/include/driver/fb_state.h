@@ -24,6 +24,8 @@ void fb_writer_end(fb_lease_t *lease); /* held=false为no-op */
 int  fb_transition_begin(bool boot_probe); /* boot无等待；runtime有界排空 */
 void fb_transition_end(void); /* 故障状态不重新开放 */
 void fb_mark_failed(void);
+struct bga_caps;
+int  fb_install_backend(const struct bga_caps *caps, uint32_t *addr, uint64_t mapped_size);
 
 void fb_control_lock(void);
 void fb_control_unlock(void);
