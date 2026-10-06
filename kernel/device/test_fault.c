@@ -96,6 +96,28 @@ static int _fault_dump_subsys_init(void)
              g_arch9_obs.adapter_registrations,
              g_arch9_obs.adapter_publishes,
              g_arch9_obs.ahci_port_publications);
+    /* Per-BDF dump: emit one arch9-fault-dev: line per enumerated
+     * device so the matrix can assert per-device counters (e.g.
+     * "the e1000e 8086:10d3 had zero probe hooks fired against it").
+     * The bus/slot/fn are extracted from the encoded BDF:
+     *   bdf = (bus << 8) | (slot << 3) | fn
+     * QEMU's domain is always 0 so we hard-code "0000:". */
+    for (int i = 0; i < g_arch9_obs.bdf_count; i++) {
+        const struct arch9_obs_bdf *b = &g_arch9_obs.bdf[i];
+        unsigned bus = (b->bdf >> 8) & 0xFF;
+        unsigned slot = (b->bdf >> 3) & 0x1F;
+        unsigned fn = b->bdf & 0x7;
+        log_info("arch9-fault-dev: bdf=0000:%02u:%02u.%u vendor=%04x "
+                 "device=%04x probe=%u bar=%u adapter=%u "
+                 "unbound_no_match=%u\n",
+                 bus, slot, fn,
+                 (unsigned)b->vendor,
+                 (unsigned)b->device,
+                 b->probe_calls,
+                 b->bar_writes,
+                 b->adapter_registrations,
+                 b->probe_unbound_no_match);
+    }
     return 0;
 }
 

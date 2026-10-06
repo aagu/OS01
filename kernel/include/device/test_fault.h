@@ -39,7 +39,29 @@
  * observe (and every other non-none variant) exposes counters that the
  * harness greps via the kernel log.  For `none`, the counter macros
  * are no-ops.  Each counter is monotonically increasing; the brief
- * pins them to the corresponding probe site. */
+ * pins them to the corresponding probe site.
+ *
+ * Per-BDF tracking: the aggregate counters are not enough to verify
+ * that an UNMATCHED device (e.g. e1000e 8086:10d3 in `unsupported`)
+ * had zero probe hooks fired against it, because the MATCHED device
+ * (e1000 8086:100e) contaminates the aggregate probe_calls counter.
+ * The matrix runner can grep `arch9-fault-dev:` lines emitted by the
+ * kernel for each enumerated BDF.  Per-BDF entries are registered at
+ * PCI enumerate time (every device, not just probed ones) and
+ * updated by the per-device hooks. */
+#define ARCH9_OBS_MAX_BDF 16
+
+struct arch9_obs_bdf {
+    /* (domain << 16) | (bus << 8) | (slot << 3) | fn */
+    uint16_t bdf;
+    uint16_t vendor;
+    uint16_t device;
+    uint32_t probe_calls;
+    uint32_t bar_writes;
+    uint32_t adapter_registrations;
+    uint32_t probe_unbound_no_match; /* probe returned without binding */
+};
+
 struct arch9_obs {
     uint32_t pci_drivers_exposed;     /* # of declared PCI drivers */
     uint32_t probe_calls;            /* # of probe() invocations   */
@@ -49,6 +71,8 @@ struct arch9_obs {
     uint32_t adapter_registrations;  /* # of net_device_register calls */
     uint32_t adapter_publishes;      /* # of net_device entries that reached ONLINE */
     uint32_t ahci_port_publications; /* # of block_device_register calls in AHCI */
+    uint8_t bdf_count;               /* # of BDFs in bdf[]          */
+    struct arch9_obs_bdf bdf[ARCH9_OBS_MAX_BDF];
 };
 
 #ifdef OS01_HOST_TEST
@@ -63,6 +87,16 @@ static inline void arch9_obs_reset(void) {
     g_arch9_obs.adapter_registrations = 0;
     g_arch9_obs.adapter_publishes = 0;
     g_arch9_obs.ahci_port_publications = 0;
+    g_arch9_obs.bdf_count = 0;
+    for (int i = 0; i < ARCH9_OBS_MAX_BDF; i++) {
+        g_arch9_obs.bdf[i].bdf = 0;
+        g_arch9_obs.bdf[i].vendor = 0;
+        g_arch9_obs.bdf[i].device = 0;
+        g_arch9_obs.bdf[i].probe_calls = 0;
+        g_arch9_obs.bdf[i].bar_writes = 0;
+        g_arch9_obs.bdf[i].adapter_registrations = 0;
+        g_arch9_obs.bdf[i].probe_unbound_no_match = 0;
+    }
 }
 #else
 extern struct arch9_obs g_arch9_obs;
@@ -127,6 +161,85 @@ static inline void arch9_fault_on_adapter_publish(void) {
 static inline void arch9_fault_on_ahci_port_publish(void) {
 #ifdef OS01_TEST_FAULT
     g_arch9_obs.ahci_port_publications++;
+#endif
+}
+
+/* ── Per-BDF observation helpers ────────────────────────────────
+ * Each PCI device is registered exactly once at enumerate time
+ * (kernel/device/boot.c:device_boot_init) so the dump subsys can
+ * emit a per-device line.  The probe/bar/adapter hooks below update
+ * the matching BDF's counters AND the aggregate counters, so the
+ * existing observation_assertions keep working while the matrix
+ * can also assert per-device (e.g. "the e1000e 8086:10d3 had
+ * zero probe hooks fired against it"). */
+
+static inline uint16_t arch9_obs_bdf_encode(uint8_t bus, uint8_t slot,
+                                             uint8_t fn) {
+    return (uint16_t)(((bus & 0xFF) << 8) | ((slot & 0x1F) << 3) |
+                        (fn & 0x7));
+}
+
+static inline int arch9_obs_lookup_bdf(uint16_t bdf_key) {
+    for (int i = 0; i < g_arch9_obs.bdf_count; i++) {
+        if (g_arch9_obs.bdf[i].bdf == bdf_key) return i;
+    }
+    return -1;
+}
+
+static inline int arch9_obs_register_bdf(uint16_t bdf_key,
+                                          uint16_t vendor,
+                                          uint16_t device) {
+    int idx = arch9_obs_lookup_bdf(bdf_key);
+    if (idx >= 0) return idx;
+    if (g_arch9_obs.bdf_count >= ARCH9_OBS_MAX_BDF) return -1;
+    idx = g_arch9_obs.bdf_count++;
+    g_arch9_obs.bdf[idx].bdf = bdf_key;
+    g_arch9_obs.bdf[idx].vendor = vendor;
+    g_arch9_obs.bdf[idx].device = device;
+    return idx;
+}
+
+static inline void arch9_fault_register_bdf(uint16_t bdf_key,
+                                             uint16_t vendor,
+                                             uint16_t device) {
+#ifdef OS01_TEST_FAULT
+    (void)arch9_obs_register_bdf(bdf_key, vendor, device);
+#else
+    (void)bdf_key; (void)vendor; (void)device;
+#endif
+}
+
+static inline void arch9_fault_on_probe_begin_bdf(uint16_t bdf_key,
+                                                   const char *driver_name) {
+#ifdef OS01_TEST_FAULT
+    (void)driver_name;
+    g_arch9_obs.probe_calls++;
+    int idx = arch9_obs_lookup_bdf(bdf_key);
+    if (idx >= 0) g_arch9_obs.bdf[idx].probe_calls++;
+#endif
+}
+
+static inline void arch9_fault_on_bar_write_bdf(uint16_t bdf_key) {
+#ifdef OS01_TEST_FAULT
+    g_arch9_obs.bar_writes++;
+    int idx = arch9_obs_lookup_bdf(bdf_key);
+    if (idx >= 0) g_arch9_obs.bdf[idx].bar_writes++;
+#endif
+}
+
+static inline void arch9_fault_on_adapter_register_bdf(uint16_t bdf_key) {
+#ifdef OS01_TEST_FAULT
+    g_arch9_obs.adapter_registrations++;
+    int idx = arch9_obs_lookup_bdf(bdf_key);
+    if (idx >= 0) g_arch9_obs.bdf[idx].adapter_registrations++;
+#endif
+}
+
+static inline void arch9_fault_on_probe_unbound_no_match_bdf(uint16_t bdf_key) {
+#ifdef OS01_TEST_FAULT
+    g_arch9_obs.probe_unbound_no_match++;
+    int idx = arch9_obs_lookup_bdf(bdf_key);
+    if (idx >= 0) g_arch9_obs.bdf[idx].probe_unbound_no_match++;
 #endif
 }
 

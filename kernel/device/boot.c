@@ -108,6 +108,25 @@ int device_boot_init(void)
         return ret;
     }
 
+    /* 4a. Register every enumerated BDF with the observation
+     * fixture so the matrix can grep per-device counters.  This
+     * must happen before pci_bind_all() so the per-BDF hook fires
+     * for both matched and unmatched devices (an unmatched device
+     * never reaches the probe hook). */
+    if (ret == 0) {
+        unsigned dev_count = pci_device_count();
+        for (unsigned i = 0; i < dev_count; i++) {
+            struct pci_device *pdev = pci_device_get(i);
+            if (!pdev) continue;
+            uint16_t bdf_key = arch9_obs_bdf_encode(pdev->bus,
+                                                    pdev->slot,
+                                                    pdev->fn);
+            arch9_fault_register_bdf(bdf_key,
+                                      (uint16_t)pdev->vendor,
+                                      (uint16_t)pdev->device);
+        }
+    }
+
     /* 5. Bind drivers to devices */
     if (ret == 0) {
         int bind_rc = pci_bind_all();

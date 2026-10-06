@@ -454,19 +454,34 @@ def main():
     else:
         cases = (args.case,)
 
-    failed = []
-    passed = 0
+    # Per-case SMP filter: each case declares `smp=(...)` with the
+    # SMP counts it must run at.  net-block-smp is fixed SMP=2 per
+    # its task brief; every other case supports (1, 2).  Filter
+    # SMP × case combinations BEFORE running them so we never
+    # launch a QEMU that doesn't satisfy the case's contract.
+    filtered = []
     for smp in args.smp:
         for case in cases:
-            print(f"  [matrix] {case} smp={smp} ... ", end="", flush=True)
-            ok, log, ev = _run_case(case, smp, timeout=args.timeout)
-            if ok:
-                print("PASS")
-                passed += 1
-            else:
-                print(f"FAIL ({ev.get('error', 'unknown')})")
-                print(f"      log: {ev.get('log_path')}")
-                failed.append((case, smp, ev.get("log_path")))
+            case_def = DMM.case_dict(case)
+            allowed_smp = case_def.get("smp", (1, 2))
+            if smp not in allowed_smp:
+                print(f"  [matrix] {case} smp={smp} ... SKIP "
+                      f"(case smp constraint {allowed_smp})")
+                continue
+            filtered.append((case, smp))
+
+    failed = []
+    passed = 0
+    for case, smp in filtered:
+        print(f"  [matrix] {case} smp={smp} ... ", end="", flush=True)
+        ok, log, ev = _run_case(case, smp, timeout=args.timeout)
+        if ok:
+            print("PASS")
+            passed += 1
+        else:
+            print(f"FAIL ({ev.get('error', 'unknown')})")
+            print(f"      log: {ev.get('log_path')}")
+            failed.append((case, smp, ev.get("log_path")))
 
     print(f"\n{passed} passed, {len(failed)} failed")
     if failed:

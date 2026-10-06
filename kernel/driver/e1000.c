@@ -340,12 +340,14 @@ int e1000_probe(struct pci_device *pdev, const struct pci_device_id *id)
 {
     if (!pdev) return -EINVAL;
 
+    uint16_t e1000_bdf = arch9_obs_bdf_encode(pdev->bus, pdev->slot, pdev->fn);
+
     if (pdev->vendor != 0x8086 || pdev->device != 0x100e) {
         arch9_fault_on_probe_unbound_after_id();
         return -ENODEV;
     }
 
-    arch9_fault_on_probe_begin("e1000");
+    arch9_fault_on_probe_begin_bdf(e1000_bdf, "e1000");
 
     if (id) {
         if (id->vendor != 0x8086 || id->device != 0x100e) {
@@ -375,10 +377,10 @@ int e1000_probe(struct pci_device *pdev, const struct pci_device_id *id)
          * because the BAR window is now unusable. */
         uint32_t val = 0;
         if (pci_config_read32(pdev, 0x10, &val) == 0) {
-            arch9_fault_on_bar_write();
+            arch9_fault_on_bar_write_bdf(e1000_bdf);
             (void)pci_config_write32(pdev, 0x10, 0xFFFFFFFFu);
         }
-        arch9_fault_on_probe_unbound_no_match();
+        arch9_fault_on_probe_unbound_no_match_bdf(e1000_bdf);
         return -ENODEV;
     }
 
@@ -541,6 +543,14 @@ int e1000_probe(struct pci_device *pdev, const struct pci_device_id *id)
      * register, which caused net_device_register's get_link() to
      * return false (link down) and lwIP's DHCP to never start. */
     inst->initialized = 1;
+
+    /* ARCH-9 Task 11: per-BDF observation — attribute the
+     * adapter_registrations counter to THIS device's BDF so the
+     * matrix can distinguish matched vs unmatched devices.  The
+     * aggregate adapter_register hook was removed from
+     * net_device_register() because every modern call site has
+     * BDF context available here. */
+    arch9_fault_on_adapter_register_bdf(e1000_bdf);
 
     rc = net_device_register(ndev);
     if (rc != 0) {

@@ -126,6 +126,85 @@ class TestMatrixCoverage(unittest.TestCase):
         for c in ("unsupported", "modern-only", "net-block-smp"):
             self.assertIn(c, names, f"matrix missing case {c!r}")
 
+    def test_net_block_smp_is_smp2_only(self):
+        """net-block-smp is fixed SMP=2 per its brief; the runner
+        must filter out other SMP values.  Every other case must
+        support SMP=1 AND SMP=2."""
+        c = DMM.case_dict("net-block-smp")
+        self.assertEqual(c["smp"], (2,),
+                         f"net-block-smp must be SMP=2-only, got {c['smp']}")
+        # No other case should be SMP-restricted the same way.
+        for name in DMM.matrix_case_names():
+            if name == "net-block-smp":
+                continue
+            d = DMM.case_dict(name)
+            self.assertIn(1, d["smp"],
+                          f"case {name!r} must support SMP=1")
+            self.assertIn(2, d["smp"],
+                          f"case {name!r} must support SMP=2")
+
+    def test_unsupported_uses_per_bdf_assertions(self):
+        """unsupported must assert per-BDF counters on BOTH the
+        unmatched device (e1000e 8086:10d3) and the matched device
+        (e1000 8086:100e).  Aggregate-only assertions can't tell
+        them apart."""
+        c = DMM.case_dict("unsupported")
+        assertions = c.get("observation_assertions", {})
+        # Per-BDF keys use bdf[<vendor>:<device>].<counter> form.
+        self.assertIn("bdf[8086:10d3].probe_calls", assertions,
+                      "unsupported must assert e1000e probe == 0")
+        self.assertIn("bdf[8086:10d3].bar_writes", assertions,
+                      "unsupported must assert e1000e bar_writes == 0")
+        self.assertIn("bdf[8086:100e].adapter_registrations", assertions,
+                      "unsupported must assert e1000 adapter_registrations >= 1")
+
+    def test_modern_only_uses_per_bdf_assertions(self):
+        """modern-only must assert per-BDF counters on the unmatched
+        device (1af4:1041) — no aggregate fallbacks."""
+        c = DMM.case_dict("modern-only")
+        assertions = c.get("observation_assertions", {})
+        self.assertIn("bdf[1af4:1041].probe_calls", assertions,
+                      "modern-only must assert modern virtio probe == 0")
+        self.assertIn("bdf[1af4:1041].bar_writes", assertions,
+                      "modern-only must assert modern virtio bar_writes == 0")
+
+
+class TestPerBdfObservationParsing(unittest.TestCase):
+    """parse_observation_dump must expose per-BDF counters under
+    the bdf[<vendor>:<device>] namespace so matrix cases can assert
+    per-device counters without hard-coding the BDF."""
+
+    SAMPLE_LOG = (
+        "arch9-fault: active=1 drivers=3 probe=2 unbound_no_match=1 "
+        "unbound_after_id=1 bar_writes=1 adapters=1 publishes=1 "
+        "ahci_ports=1\n"
+        "arch9-fault-dev: bdf=0000:00:01.0 vendor=8086 device=100e "
+        "probe=1 bar=0 adapter=1 unbound_no_match=0\n"
+        "arch9-fault-dev: bdf=0000:00:02.0 vendor=8086 device=10d3 "
+        "probe=0 bar=0 adapter=0 unbound_no_match=1\n"
+    )
+
+    def test_aggregate_counters_still_present(self):
+        counters = DMM.parse_observation_dump(self.SAMPLE_LOG)
+        self.assertEqual(counters.get("probe_calls"), 2)
+        self.assertEqual(counters.get("bar_writes"), 1)
+        self.assertEqual(counters.get("adapter_registrations"), 1)
+
+    def test_per_bdf_counters_by_vendor_device(self):
+        counters = DMM.parse_observation_dump(self.SAMPLE_LOG)
+        # e1000 (matched) has 1 probe and 1 adapter registration.
+        self.assertEqual(counters.get("bdf[8086:100e].probe_calls"), 1)
+        self.assertEqual(counters.get("bdf[8086:100e].adapter_registrations"), 1)
+        # e1000e (unmatched) has 0 probes and 0 BAR writes.
+        self.assertEqual(counters.get("bdf[8086:10d3].probe_calls"), 0)
+        self.assertEqual(counters.get("bdf[8086:10d3].bar_writes"), 0)
+
+    def test_per_bdf_counters_by_full_bdf(self):
+        counters = DMM.parse_observation_dump(self.SAMPLE_LOG)
+        # Full-BDF lookup also works for debug / forensic use.
+        self.assertEqual(counters.get("bdf.0000:00:01.0.adapter_registrations"), 1)
+        self.assertEqual(counters.get("bdf.0000:00:02.0.probe_calls"), 0)
+
 
 class TestNoNicArgv(unittest.TestCase):
     """no-nic case must omit the default NIC; -nic none is required."""

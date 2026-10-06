@@ -348,7 +348,8 @@ int virtio_net_probe(struct pci_device *pdev, const struct pci_device_id *id)
 {
     if (!pdev) return -EINVAL;
 
-    arch9_fault_on_probe_begin("virtio-net");
+    uint16_t vnet_bdf = arch9_obs_bdf_encode(pdev->bus, pdev->slot, pdev->fn);
+    arch9_fault_on_probe_begin_bdf(vnet_bdf, "virtio-net");
 
     // Validate device identity: reject modern-only or different vendor/device
     if (pdev->vendor != 0x1af4 || pdev->device != 0x1000) {
@@ -465,6 +466,9 @@ int virtio_net_probe(struct pci_device *pdev, const struct pci_device_id *id)
      * register-time link query.  Mirrors the e1000 change so DHCP
      * starts at boot. */
     inst->initialized = 1;
+
+    /* ARCH-9 Task 11: per-BDF observation — see e1000.c. */
+    arch9_fault_on_adapter_register_bdf(vnet_bdf);
 
     rc = net_device_register(ndev);
     if (rc != 0) {

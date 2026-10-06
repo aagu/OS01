@@ -98,7 +98,10 @@ int net_device_register(struct net_device *dev)
              dev->mac[0], dev->mac[1], dev->mac[2],
              dev->mac[3], dev->mac[4], dev->mac[5],
              dev->link_up ? "up" : "down");
-    arch9_fault_on_adapter_register();
+    /* ARCH-9 Task 11: per-BDF observation.  Drivers attribute the
+     * adapter_registrations counter to their device's BDF (see
+     * kernel/driver/e1000.c and kernel/driver/virtio-net.c), so this
+     * site is intentionally a no-op for observation. */
     return 0;
 }
 

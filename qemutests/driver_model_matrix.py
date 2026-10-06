@@ -201,18 +201,18 @@ CASES = (
         "nic1": None,
         "probe": "udp 10.0.2.2 10001",
         "smp": (1, 2),
-        # Healthy e1000 must produce evidence; e1000e must NOT be
-        # bound.  The e1000e device never reaches probe() because
-        # pci_match_id() rejects it before the per-driver probe
-        # hook fires (kernel/bus/pci/core.c:pci_bind_all), so
-        # probe_calls only counts the e1000 match.  Brief §Step 3:
-        # matrix校验UNBOUND、不写BAR (aggregate, since the
-        # observation counters do not currently distinguish the
-        # matched vs unmatched device).
+        # Healthy e1000 (8086:100e) must probe + register; the
+        # e1000e (8086:10d3) must NOT be probed or have BAR writes.
+        # Per-BDF assertion via vendor:device (QEMU enumeration order
+        # makes the BDF non-deterministic, but vendor:device is
+        # stable across boots).
         "expected_cards": ("eth0",),
         "observation_assertions": {
-            "probe_calls": ">0",
-            "adapter_registrations": ">=1",
+            "bdf[8086:10d3].probe_calls": "==0",
+            "bdf[8086:10d3].bar_writes": "==0",
+            "bdf[8086:10d3].adapter_registrations": "==0",
+            "bdf[8086:100e].probe_calls": ">0",
+            "bdf[8086:100e].adapter_registrations": ">=1",
         },
     },
     {
@@ -224,14 +224,14 @@ CASES = (
         "probe": "no-nic",
         "smp": (1, 2),
         # Modern-only virtio-net (1af4:1041) does NOT match the
-        # OS01 driver (1af4:1000).  pci_match_id rejects it
-        # before probe() fires, so no probe_calls increment and
-        # no adapter is registered.  Brief §Step 3: matrix校验
-        # UNBOUND、不写BAR.
+        # OS01 driver (1af4:1000).  pci_match_id rejects it before
+        # probe() fires, so no per-BDF counter increments for
+        # 1af4:1041.  Brief §Step 3: matrix校验 UNBOUND、不写BAR.
         "expected_cards": (),
         "observation_assertions": {
-            "bar_writes": "==0",
-            "adapter_registrations": "==0",
+            "bdf[1af4:1041].probe_calls": "==0",
+            "bdf[1af4:1041].bar_writes": "==0",
+            "bdf[1af4:1041].adapter_registrations": "==0",
         },
     },
     {
@@ -253,14 +253,21 @@ CASES = (
     {
         "name": "net-block-smp",
         "fault": "none",
+        # Brief §Step 3 mandates 同时另一个进程逐卡UDP echo并校验nonce.
+        # The probe (user/netmodeltest.c::child_per_card_udp_loop)
+        # requires BOTH NICs to be ONLINE — it asserts ok0 >= 3 AND
+        # ok1 >= 3 within the 30s budget.  Configuring nic1=None
+        # would silently make ok1 unreachable and the case would
+        # FAIL forever.  Use a real two-NIC topology (Option A from
+        # the brief re-review).
         "nic0": ("e1000", "user,id=net0,dhcpstart=10.0.2.20"),
-        "nic1": None,
+        "nic1": ("e1000", "user,id=net1,net=10.0.3.0/24,dhcpstart=10.0.3.20,host=10.0.3.1"),
         # Brief §Step 10: file-stress writes /.arch9-stress-<nonce>
         # (NOT in /tmp).  Brief §Step 3: 同时另一个进程逐卡UDP echo
         # 并校验nonce.  net-block-smp combined wrapper forks both.
         "probe": "net-block-smp 12345 0xA5 32",
         "smp": (2,),  # fixed SMP=2 per task brief
-        "expected_cards": ("eth0",),
+        "expected_cards": ("eth0", "eth1"),
     },
 )
 
@@ -532,15 +539,61 @@ OBSERVATION_DUMP_RE = re.compile(
 )
 
 
+# Per-BDF dump lines look like:
+#   arch9-fault-dev: bdf=0000:00:02.0 vendor=8086 device=10d3 probe=0
+#       bar=0 adapter=0 unbound_no_match=0
+# The runner parses each line and exposes the counters under the key
+#   bdf[<vendor>:<device>].<counter>
+# (and also bdf.<bdf>.<counter> for direct BDF lookups).  This lets the
+# matrix assert per-device counters without hard-coding the BDF
+# (QEMU's enumeration order makes the BDF non-deterministic).
+OBSERVATION_PER_BDF_RE = re.compile(
+    r"arch9-fault-dev:\s+"
+    r"bdf=(?P<bdf>\d{4}:\d{2}:\d{2}\.\d)\s+"
+    r"vendor=(?P<vendor>[0-9a-fA-F]+)\s+"
+    r"device=(?P<device>[0-9a-fA-F]+)\s+"
+    r"probe=(?P<probe>\d+)\s+"
+    r"bar=(?P<bar>\d+)\s+"
+    r"adapter=(?P<adapter>\d+)\s+"
+    r"unbound_no_match=(?P<unbound_no_match>\d+)"
+)
+
+
 def parse_observation_dump(log):
     """Return a dict of observation counters from the kernel's
-    arch9-fault dump line, or {} if no dump line was found."""
+    arch9-fault dump line.  Returns {} if no dump line was found.
+
+    The aggregate counters (probe_calls, bar_writes, ...) are at the
+    top level; per-BDF counters are exposed under two namespaces:
+
+      bdf[<vendor>:<device>].<counter>  — keyed by vendor:device
+                                          (QEMU-stable across boots)
+      bdf.<bdf>.<counter>               — keyed by full BDF string
+                                          (useful for debugging)
+
+    Both namespaces are populated from the same per-BDF dump lines."""
     if not isinstance(log, str):
         log = log.decode("utf-8", errors="replace")
+    out = {}
     m = OBSERVATION_DUMP_RE.search(log)
-    if not m:
-        return {}
-    return {k: int(v) for k, v in m.groupdict().items()}
+    if m:
+        out.update({k: int(v) for k, v in m.groupdict().items()})
+    for dev_m in OBSERVATION_PER_BDF_RE.finditer(log):
+        d = dev_m.groupdict()
+        bdf = d["bdf"]
+        vendor = d["vendor"]
+        device = d["device"]
+        vd_key = f"{vendor}:{device}"
+        per_dev = {
+            "probe_calls": int(d["probe"]),
+            "bar_writes": int(d["bar"]),
+            "adapter_registrations": int(d["adapter"]),
+            "probe_unbound_no_match": int(d["unbound_no_match"]),
+        }
+        for cname, cval in per_dev.items():
+            out[f"bdf[{vd_key}].{cname}"] = cval
+            out[f"bdf.{bdf}.{cname}"] = cval
+    return out
 
 
 def assert_observation_counters(log, assertions):
