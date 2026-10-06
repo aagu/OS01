@@ -1,7 +1,7 @@
 # OS01 优化路线图
 
-> **基准**: `dd05877b`（2026-10-04）
-> **日期**: 2026-10-04
+> **基准**: `918b6a2e`（2026-10-06）
+> **日期**: 2026-10-06
 
 roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `docs/changelog.md`。
 
@@ -10,7 +10,7 @@ roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `
 - **Phase 1-9**：全部就绪（COW/mmap、调度/信号/SMP、文件系统、设备驱动、用户态、poll/select、网络、时间系统）
 - **工程与架构治理**：AAGU 全套就绪；2026-10-04 规划 ARCH-1..10 架构治理任务（syscall 解耦、Linux ABI 兼容层独立、Muldefs 消除、调度器/VFS/驱动抽象治理等）
 - **aarch64 适配**：Generic Timer 全栈 + GICv2 Phase 1 + IPI fix + EL1 sync 致命诊断 + M0 启动直映 + M1 运行期直映已闭环；M2 Slab + M3 内核 VMM 设计就绪（spec v8 / plan v4），M4 用户态 VMA 与统一 kernel_main 待接入
-- **GUI**：PS/2 鼠标驱动 + 2D 图形 API（`libgfx.a` + `/dev/gfx0`）+ Tetris 移植 + terminal 双缓冲与字形加速迁移已闭环
+- **GUI**：PS/2 鼠标、`libgfx.a` + `/dev/gfx0`、Tetris 与 terminal 迁移已闭环；LVGL v9.5.0 初步移植与图形 showcase 已合并，后续推进平台后端、输入接入、Material 风格桌面与窗口系统
 - **安全与内存**：用户堆与 ELF 映射隔离（4 KiB ELF 分段加载、512 MiB 用户信封、brk 动态收缩与页解绑、保护范围审计）已闭环；用户态 ASLR 规划中
 
 详细背景、commit 记录、经验教训见 `docs/changelog.md` + 各专题 closure 文档（`docs/archive/aarch64/`）+ 主题 docs。
@@ -95,10 +95,32 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 **2026-09-30 闭环**：`libgfx.a` 静态库 + `/dev/gfx0` 受限 present 设备 + Tetris 迁移；terminal 亦已迁移至 libgfx（双缓冲、像素滚动优化与字形绘制加速）；像素缓冲分配已切至匿名 mmap（commit `8ad4d1a8`）。细节见 `docs/gui/gui.md`、`docs/driver/driver.md` gfx0 章节。
 
-| 项 | 内容 | 依赖 | 借鉴 |
-|----|------|------|------|
-| 可缩放字体渲染器 | 矢量/位图缩放 | 2D API ✅ | HackOS |
-| Window Server + compositor | 多窗口管理 + 合成 | 字体/2D/鼠标 | opuntiaOS + HackOS |
+**LVGL 当前基线（2026-10-06）**：v9.5.0 已接入 submodule/manifest、profile staging 与 single-writer sysroot，提供 `liblvgl.a`；采用单 UI 线程、4 MiB TLSF 池、软件渲染、XRGB8888。`test_lvgl` 已包含内存像素断言、控件 showcase 与经 libgfx 提交到屏幕的路径（移植合并 `918b6a2e`，showcase `32208a7e`）。现阶段仍是测试程序与显示演示，鼠标/键盘控件交互、桌面迁移和多进程窗口系统尚未完成；不把软件像素提交称为 GPU 加速。范围与依据见 [移植 spec](superpowers/specs/2026-10-06-lvgl-port-design.md)、[实施 plan](superpowers/plans/2026-10-06-lvgl-port.md) 和 [libc 评估](assessments/2026-10-06-lvgl-libc.md)。
+
+#### 后续功能任务（按依赖推进）
+
+| 项 | 内容 / 完成条件 | 依赖 |
+|----|-----------------|------|
+| GUI-1 LVGL 平台后端 | 从 `test_lvgl` 抽取可复用的显示、tick、flush 与生命周期接口；核对格式、stride、缓冲容量和错误传播。按 `lv_timer_handler()` 返回的等待时间结合 `poll` 驱动，区分离屏与屏幕后端；资源释放和失败回退有明确契约 | LVGL 初步移植 ✅；libgfx ✅ |
+| GUI-2 输入与焦点 | 接入 `/dev/mouse` 位移/按钮/滚轮和 `/dev/keyboard` 扫描码；实现 LVGL indev、光标、修饰键、按下/释放、重复、Tab 导航与控件焦点。指定唯一输入读取者，验证点击、拖动、滚动、文本输入与快捷键 | GUI-1；PS/2 输入与 poll ✅ |
+| GUI-3 Material 风格桌面 | 用 LVGL 重构 `desktop.c`，统一颜色角色、字体层级、间距、圆角、elevation 与 hover/pressed/focus/disabled 状态；实现启动器、应用抽屉、状态栏及基本设置。先交付单进程桌面外壳，应用启动/退出及全屏切换明确，不以绘制窗口装饰代替窗口系统 | GUI-1、GUI-2；现有 desktop 演示 |
+| GUI-4 字体与资源 | 先使用裁剪的抗锯齿位图字体与编译内置图标，覆盖桌面所需字号；单列中文字符集、字库容量与输入方案。按需再引入动态字体或文件资源加载，并审计依赖、许可证及缓存开销 | GUI-1；GUI-3 的文字/资源需求；文件后端见优化项 |
+| GUI-5 Window Server + compositor | 单独设计 surface、IPC、缓冲共享、损伤区域、Z-order、移动/缩放、遮挡、焦点/输入抓取与进程退出回收；可信窗口服务器统一呈现，收紧 `/dev/fb` 与重叠 gfx view 的旁路访问。IPC/共享内存能力先评估，缺项独立补齐；客户端允许使用 LVGL 或其他绘制库 | GUI-1、GUI-2；IPC/共享缓冲与图形权限设计；借鉴 opuntiaOS/HackOS |
+| GUI-6 terminal 窗口化 | 保留 PTY/VT100 核心，将渲染输出接入窗口 surface；键盘只投递到焦点终端，验证 Ctrl-C、alt-screen、窗口关闭和 shell 存活；缩放时更新 PTY winsize 并接通 SIGWINCH | GUI-5；terminal/PTY ✅；SIGWINCH（P5 剩余项） |
+
+顺序：GUI-1 → GUI-2 → GUI-3；GUI-4 可随桌面推进。GUI-5/6 是独立系统工程，不与首版单进程桌面捆绑；aarch64 GUI 等待用户态与显示设备基础就绪。
+
+#### 优化与验证项
+
+| 项 | 当前边界 / 后续工作 | 验收依据 |
+|----|---------------------|----------|
+| 显示接管与恢复（优先） | 统一桌面、terminal 与内核 framebuffer 的所有权；替代仅靠 alt-screen 和固定延时协调的演示路径。处理首次提交失败、进程异常退出、返回终端和显示后端不可用 | 不互相覆盖；失败可回退；退出后终端可继续使用 |
+| 测试与 showcase 分离（优先） | 固定尺寸离屏 smoke 不依赖真实屏幕；显示 showcase 不以静默离屏回退替代屏幕验收。覆盖分辨率/最大宽度边界、分配与 present 失败；runner 验证无换行 prompt、静默超时、仅输入回显和跨块标记 | 离屏、屏幕、输入三类结果可区分；失败非零退出并保留日志 |
+| 脏矩形与批量提交 | 当前 LVGL 局部绘制后，libgfx 的 present 仍提交整个视图。先确保一次逻辑刷新最多一次提交；再设计受边界校验的损伤区域/批量 present ABI，并评估减少额外缓冲复制 | 静态界面无无效提交；小区域变化减少上传字节；保留越界/用户指针防护 |
+| 帧耗时与呈现能力 | 分别测量绘制、复制、内核提交和等待开销，覆盖多分辨率及实际阴影/滚动/动画场景；按瓶颈优化。vsync、page flip、write-combining 或 GPU 后端另行设计；当前私有缓冲不保证无撕裂 | 记录帧耗时分布、CPU 占用与上传量；优化前后使用同一场景比较 |
+| 内存池与资源生命周期 | 评估 4 MiB TLSF 池是否适合桌面；大型绘制缓冲使用 mmap，预算包含字体、图片、图层与多窗口 surface。测试反复创建/销毁、低内存和池耗尽，明确失败处理 | 内存占用有上限；长期运行无持续增长；耗尽不崩溃或破坏状态 |
+| libc / 可选 LVGL 能力 | 按实际需求整理 `lseek/SEEK_*` 的标准头声明并补 `fseek/ftell`；浮点矩阵/矢量功能启用前补所需 libm。pthread 后端等待线程、条件变量、信号量与递归 mutex 完整实现；FreeType/ThorVG/图片解码库逐项审计 | 每次配置扩展重新验证构建、符号和运行时；不让可选依赖阻塞基础桌面 |
+| 构建与版本维护 | 持续验证无修改构建、配置/头文件变更重编、staging 孤立文件清除及已发布 sysroot 编译；审计实际 archive 与当前对象清单一致，删除源码时重建归档。保留固定版本，升级单独回归 | 增量结果与干净构建一致；无陈旧归档成员；符号审计与 GUI 回归通过 |
 
 ### 🔧 P4 硬件适配
 

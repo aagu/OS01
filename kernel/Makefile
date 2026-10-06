@@ -62,6 +62,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    time/clocksource.c time/tick.c time/timer.c \
                    intr/softirq.c \
                    core/stack_chk.c \
+                   core/printk.c \
                    subsys/subsys.c \
                    random/random.c \
                    ../libc/random/chacha20.c \
@@ -110,7 +111,7 @@ endif
 # Architecture C and asm sources: explicit, one-level responsibility groups.
 ARCH_SOURCE_DIRS := boot intr memory smp cpu platform runtime
 ifeq ($(ARCH),x86_64)
-ARCH_SOURCE_DIRS := intr memory smp cpu platform bus
+ARCH_SOURCE_DIRS := intr memory smp cpu platform bus runtime
 endif
 ARCH_C_SOURCES := $(wildcard $(ARCHDIR)/*.c) \
     $(foreach dir,$(ARCH_SOURCE_DIRS),$(wildcard $(ARCHDIR)/$(dir)/*.c))
@@ -373,8 +374,8 @@ $(BUILD_DIR)/lwip/%.o: $(LWIP_SRC_DIR)/%.c $(FLAGS_STAMP)
 	$(EFFECTIVE_CC) $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS) -MD -MP -c $< -o $@
 
 # ── Special objects ────────────────────────────────────────
-# PSF font → .o
-ifeq ($(ARCH),x86_64)
+# PSF font → .o (both arches — kernel/core/printk.c on x86_64 AND
+# kernel/arch/aarch64/runtime/printk_fb.c on aarch64 reference these symbols)
 # `ld -r -b binary` derives the embedded symbols (_binary_kernel_font_psf_*)
 # from the *path string* of the input file. The font asset lives at
 # driver/font.psf, but code (printk.c) still references the kernel/font.o-era
@@ -386,6 +387,7 @@ $(BUILD_DIR)/kernel/font.o: driver/font.psf
 	cp $< $(KERNEL_BUILD_DIR)/generated/kernel/font.psf
 	cd $(KERNEL_BUILD_DIR)/generated && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary kernel/font.psf -o $@
 
+ifeq ($(ARCH),x86_64)
 # Trampoline: assemble → link at 0x8000 → binary → embed
 $(BUILD_DIR)/$(ARCHDIR)/trampoline.o: $(ARCHDIR)/trampoline.S
 	@mkdir -p $(dir $@)
@@ -436,8 +438,12 @@ endif
 endif
 endif
 
-# Stage 1: link without kallsyms, just to get symbol table
-$(BUILD_DIR)/kernel.elf.stage1: $(KERNEL_OBJECTS) $(ARCHDIR)/$(ARCH_LINKER) $(KERNEL_RUNTIME_PREREQ) $(KERNEL_RUNTIME_RELINK_PREREQ)
+# Stage 1: link without kallsyms, just to get symbol table.
+# $(LIBC_BUILD_DIR)/lib/libk.a is listed so that a libc-only change
+# (e.g., editing libc/stdio/vsprintf.c) triggers a relink without an
+# explicit kernel-clean.  Without this, make cannot know that -lk has
+# new content; the link only re-runs when KERNEL_OBJECTS changes.
+$(BUILD_DIR)/kernel.elf.stage1: $(KERNEL_OBJECTS) $(LIBC_BUILD_DIR)/lib/libk.a $(ARCHDIR)/$(ARCH_LINKER) $(KERNEL_RUNTIME_PREREQ) $(KERNEL_RUNTIME_RELINK_PREREQ)
 	@set -eu; \
 	partial="$(KERNEL_RUNTIME_LINK_RECEIPT).stage1"; \
 	complete="$(KERNEL_RUNTIME_LINK_RECEIPT)"; \
@@ -479,7 +485,7 @@ $(BUILD_DIR)/kernel/kallsyms.o: core/kallsyms.c $(BUILD_DIR)/kernel.elf.stage1
 # linker script) changes, so a no-op `make kernel.bin` does not relink.
 
 # ── Final link ──────────────────────────────────────────────
-$(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o $(ARCHDIR)/$(ARCH_LINKER) $(KERNEL_RUNTIME_PREREQ) $(KERNEL_RUNTIME_RELINK_PREREQ)
+$(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(LIBC_BUILD_DIR)/lib/libk.a $(BUILD_DIR)/kernel/kallsyms.o $(ARCHDIR)/$(ARCH_LINKER) $(KERNEL_RUNTIME_PREREQ) $(KERNEL_RUNTIME_RELINK_PREREQ)
 ifeq ($(ARCH),x86_64)
 	@set -eu; \
 	partial="$(KERNEL_RUNTIME_LINK_RECEIPT).stage1"; \

@@ -50,6 +50,7 @@ C_SOURCES := \
     $(wildcard list/*.c) \
     $(wildcard rbtree/*.c) \
     stdlib/calloc.c stdlib/malloc.c \
+    stdio/vsprintf.c \
     $(wildcard string/*.c) \
     $(filter-out ssp/ssp.c, $(wildcard ssp/*.c))
 else
