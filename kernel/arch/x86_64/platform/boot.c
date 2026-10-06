@@ -62,6 +62,7 @@
 #include <driver/keyboard.h>
 #include <driver/mouse.h>
 #include <driver/fb.h>
+#include <driver/fb_state.h>
 #include <driver/gfx.h>
 #include <fs/devfs.h>
 #include <log/log.h>
@@ -80,6 +81,17 @@ void x86_64_boot_early(const struct boot_context *bootctx)
     Pos.XResolution = bootctx->graphics.HorizontalResolution;
     Pos.YResolution = bootctx->graphics.VerticalResolution;
     spin_init(&Pos.lock);
+
+    struct fb_info info = {
+        .width = bootctx->graphics.HorizontalResolution,
+        .height = bootctx->graphics.VerticalResolution,
+        .stride = (bootctx->graphics.PixelsPerScanLine ? bootctx->graphics.PixelsPerScanLine : bootctx->graphics.HorizontalResolution) * sizeof(uint32_t),
+        .bpp = 32,
+        .format = FB_FORMAT_RGB32,
+    };
+    fb_bootstrap_state(bootctx->graphics.FrameBufferBase,
+                       bootctx->graphics.FrameBufferSize,
+                       &info);
 
     arch_task_init_early();
 

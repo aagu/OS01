@@ -6,6 +6,7 @@
 #include <memory/slab.h>
 #include <arch/spinlock.h>
 #include <driver/serial.h>
+#include <driver/fb_state.h>
 #include <stdio.h>
 #include <driver/font.h>
 #include <stddef.h>
@@ -179,6 +180,7 @@ void frame_buffer_early_init()
 	}
 	Pos.FB_addr = (uint32_t *)VIRT_FRAMEBUFFER_EARLY;
 	flush_tlb();
+	fb_publish_initial_mapping(Pos.FB_addr, Pos.FB_length);
 }
 
 // Permanent framebuffer map via vmm_map_page, after PMM/VMM are available.
@@ -194,6 +196,7 @@ void frame_buffer_init()
 	}
 	Pos.FB_addr = (uint32_t *)VIRT_FRAMEBUFFER_OFFSET;
 	tlb_shootdown();
+	fb_publish_initial_mapping(Pos.FB_addr, Pos.FB_length);
 }
 
 void serial_printk(const char * fmt,...)
