@@ -23,18 +23,13 @@ size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perfor
  * succeeds immediately. Retries only on EINTR; a zero write while bytes remain
  * and all other errors return -1. Never writes past the requested length.
  *
- * x86_64 keeps the ssize_t-based decl (the chain pulls in <unistd.h>,
- * which the libc userland needs anyway); non-x86_64 archs (aarch64 in
- * libk-mode) skip <unistd.h> — its <sys/syscall.h> pulls in x86-64
- * inline-asm constraints — and use int64_t directly.  The actual
- * definition in stdio_file.c is only linked on x86_64. */
-#if defined(__x86_64__)
-#include <unistd.h>   /* ssize_t for write_all()'s return type */
+ * ssize_t comes from <sys/types.h>, which both arches include via
+ * <stdio.h> (transitive). The actual definition in stdio_file.c is
+ * only linked on x86_64 userland libc; libk-mode aarch64 doesn't pull
+ * it in. The decl stays here so printf.c (libk-compiled on x86_64)
+ * can call it. */
+#include <sys/types.h>   /* ssize_t for write_all()'s return type */
 ssize_t write_all(int fd, const char *buf, size_t len);
-#else
-#include <stdint.h>
-int64_t write_all(int fd, const char *buf, size_t len);
-#endif
 
 /* P1-5: single FILE → fd resolver — the canonical "truth source" for
  * any stdio consumer that needs to convert a void * (FILE* in OS01's
