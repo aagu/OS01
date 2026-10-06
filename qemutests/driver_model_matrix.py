@@ -249,6 +249,15 @@ CASES = (
         "probe": "ifaces",
         "smp": (1, 2),
         "expected_cards": ("eth0", "eth1"),
+        # Per-NIC IRQ-mode contract (ARCH-9 whole-branch review):
+        # NIC 0 must register an IRQ (INTX or MSIX) and NIC 1
+        # must fall back to POLL.  The grep target is
+        # "arch9-irq-mode: bdf=... nic=<ethN> mode=<MODE>" emitted
+        # only under OS01_TEST_FAULT (production build is silent).
+        "mode_assertion": (
+            ("eth0", "INTX"),
+            ("eth1", "POLL"),
+        ),
     },
     {
         "name": "net-block-smp",
@@ -515,6 +524,61 @@ def assert_normal_image_hash_unchanged(before_sha256, after_sha256):
             f"{before_sha256[:8]} -> {after_sha256[:8]}"
         )
     return True
+
+
+class IrqModeAssertionFailed(HarnessError):
+    """The per-NIC `arch9-irq-mode: ... mode=POLL|INTX|MSIX` log line
+    did not match the contract pinned by the matrix case (e.g. the
+    irq-conflict case expects eth0=INTX AND eth1=POLL)."""
+
+
+# Per-NIC IRQ-mode line emitted by kernel/driver/{e1000,virtio-net}.c
+# immediately after net_device_register would be called.  Format:
+#   arch9-irq-mode: bdf=0000:00:01.0 nic=eth0 mode=INTX
+# Only compiled in under ARCH9_FAULT != none (OS01_TEST_FAULT guard).
+ARCH9_IRQ_MODE_RE = re.compile(
+    r"arch9-irq-mode:\s+"
+    r"bdf=(?P<bdf>\d{4}:\d{2}:\d{2}\.\d)\s+"
+    r"nic=(?P<nic>\S+)\s+"
+    r"mode=(?P<mode>MSIX|INTX|POLL)\b"
+)
+
+
+def _scan_irq_modes(log):
+    """Return a list of (bdf, nic, mode) tuples parsed from the log."""
+    if not isinstance(log, str):
+        log = log.decode("utf-8", errors="replace")
+    return [
+        (m.group("bdf"), m.group("nic"), m.group("mode"))
+        for m in ARCH9_IRQ_MODE_RE.finditer(log)
+    ]
+
+
+def assert_irq_mode(log, nic_modes):
+    """Assert that every (nic, expected_mode) pair in `nic_modes`
+    has a matching `arch9-irq-mode:` line in the log.
+
+    `nic_modes` is an iterable of (nic_name, expected_mode) tuples.
+    The mode values come from the kernel's own enum: MSIX, INTX, POLL.
+    Raises IrqModeAssertionFailed on the first violation.  Lines for
+    NICs not listed in `nic_modes` are silently allowed — the matrix
+    cases that don't care about per-NIC IRQ mode don't have to
+    enumerate every line."""
+    if not nic_modes:
+        return
+    lines = _scan_irq_modes(log)
+    by_nic = {nic: mode for (_bdf, nic, mode) in lines}
+    for nic, expected in nic_modes:
+        got = by_nic.get(nic)
+        if got is None:
+            raise IrqModeAssertionFailed(
+                f"no arch9-irq-mode line for nic={nic!r} "
+                f"(expected mode={expected})"
+            )
+        if got != expected:
+            raise IrqModeAssertionFailed(
+                f"nic={nic!r}: expected mode={expected}, got mode={got}"
+            )
 
 
 class ObservationAssertionFailed(HarnessError):

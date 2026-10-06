@@ -470,6 +470,19 @@ int virtio_net_probe(struct pci_device *pdev, const struct pci_device_id *id)
     /* ARCH-9 Task 11: per-BDF observation — see e1000.c. */
     arch9_fault_on_adapter_register_bdf(vnet_bdf);
 
+#ifdef OS01_TEST_FAULT
+    /* ARCH-9 whole-branch final review: see kernel/driver.e1000.c.
+     * Same per-NIC mode line so the matrix's irq-conflict case can
+     * grep `arch9-irq-mode: ... nic=eth0 mode=INTX` and
+     * `... nic=eth1 mode=POLL` as the second-card POLL marker. */
+    log_info("arch9-irq-mode: bdf=%04x:%02x:%02x.%d nic=%s mode=%s\n",
+              (unsigned)pdev->domain, (unsigned)pdev->bus,
+              (unsigned)pdev->slot, (unsigned)pdev->fn,
+              ndev->name,
+              inst->irq_mode == NIC_INTX ? "INTX" :
+              inst->irq_mode == NIC_MSIX ? "MSIX" : "POLL");
+#endif
+
     rc = net_device_register(ndev);
     if (rc != 0) {
         kfree(ndev);

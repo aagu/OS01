@@ -748,6 +748,13 @@ void ahci_remove(struct pci_device *pdev)
 }
 
 // ── AHCI PCI Driver Declaration ───────────────────────────
+// Plan + spec §5.1 mandate class-only matching on
+// (01/06/01).  The second "fallback" entry that masked off
+// prog_if (class_mask = 0xFFFF00) was removed: it would also
+// match IDE-mode SATA, port-multipliers, and emulated SATA-II
+// controllers, all of which the AHCI spec explicitly excludes.
+// ahci_probe re-validates nothing — the id-loop's class_mask is
+// the only line of defense.
 static const struct pci_device_id ahci_ids[] = {
     {
         .vendor = PCI_ID_ANY,
@@ -756,14 +763,6 @@ static const struct pci_device_id ahci_ids[] = {
         .subdevice = PCI_ID_ANY,
         .class_value = (PCI_CLASS_MASS_STORAGE << 16) | (PCI_SUBCLASS_SATA << 8) | PCI_PROGIF_AHCI,
         .class_mask = 0xFFFFFF,
-    },
-    {
-        .vendor = PCI_ID_ANY,
-        .device = PCI_ID_ANY,
-        .subvendor = PCI_ID_ANY,
-        .subdevice = PCI_ID_ANY,
-        .class_value = (PCI_CLASS_MASS_STORAGE << 16) | (PCI_SUBCLASS_SATA << 8) | 0x00,
-        .class_mask = 0xFFFF00,
     },
 };
 

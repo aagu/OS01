@@ -552,6 +552,20 @@ int e1000_probe(struct pci_device *pdev, const struct pci_device_id *id)
      * BDF context available here. */
     arch9_fault_on_adapter_register_bdf(e1000_bdf);
 
+#ifdef OS01_TEST_FAULT
+    /* ARCH-9 whole-branch final review: matrix's irq-conflict case
+     * must verify that eth1 fell back to POLL (and that eth0 did
+     * NOT).  The grep target is the same shape as
+     * arch9-fault-dev:, so the harness can run per-card regex
+     * checks against `arch9-irq-mode: bdf=... nic=ethN mode=POLL`. */
+    log_info("arch9-irq-mode: bdf=%04x:%02x:%02x.%d nic=%s mode=%s\n",
+              (unsigned)pdev->domain, (unsigned)pdev->bus,
+              (unsigned)pdev->slot, (unsigned)pdev->fn,
+              ndev->name,
+              inst->irq_mode == NIC_MSIX ? "MSIX" :
+              inst->irq_mode == NIC_INTX ? "INTX" : "POLL");
+#endif
+
     rc = net_device_register(ndev);
     if (rc != 0) {
         kfree(ndev);

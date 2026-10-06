@@ -307,6 +307,77 @@ class TestProbeAndSocketDeadlines(unittest.TestCase):
             DMM.assert_socket_deadline(fake_log, deadline_s=2.0)
 
 
+class TestIrqModeAssertion(unittest.TestCase):
+    """ARCH-9 whole-branch final review: matrix's irq-conflict case
+    must verify the second card's POLL fallback.  The kernel emits
+    `arch9-irq-mode: bdf=0000:00:01.0 nic=eth0 mode=INTX` lines
+    (under OS01_TEST_FAULT) and the harness greps them."""
+
+    def test_irq_conflict_asserts_poll_for_second_card(self):
+        # A log containing BOTH nic=eth0 (INTX) AND nic=eth1 (POLL)
+        # must satisfy the irq-conflict matrix contract.
+        fake_log = (
+            "[netmodeltest] iface=eth0 ip=10.0.2.15 PASS\n"
+            "arch9-irq-mode: bdf=0000:00:02.0 nic=eth0 mode=INTX\n"
+            "[netmodeltest] iface=eth1 ip=10.0.3.15 PASS\n"
+            "arch9-irq-mode: bdf=0000:00:03.0 nic=eth1 mode=POLL\n"
+        )
+        # No exception raised — contract satisfied.
+        DMM.assert_irq_mode(
+            fake_log, nic_modes=(("eth0", "INTX"), ("eth1", "POLL")))
+
+    def test_irq_mode_missing_line_raises(self):
+        # The second-card POLL marker is absent → FAIL.
+        fake_log = (
+            "arch9-irq-mode: bdf=0000:00:02.0 nic=eth0 mode=INTX\n"
+            "[netmodeltest] iface=eth1 ip=10.0.3.15 PASS\n"
+            # No arch9-irq-mode for eth1
+        )
+        with self.assertRaises(DMM.IrqModeAssertionFailed):
+            DMM.assert_irq_mode(
+                fake_log, nic_modes=(("eth0", "INTX"), ("eth1", "POLL")))
+
+    def test_irq_mode_wrong_mode_raises(self):
+        # Both lines present, but eth1 is INTX (the fault didn't fire)
+        # — the matrix must REJECT this: it would silently pass on
+        # a topology where both NICs got IRQs and the second card's
+        # POLL fallback never happened.
+        fake_log = (
+            "arch9-irq-mode: bdf=0000:00:02.0 nic=eth0 mode=INTX\n"
+            "arch9-irq-mode: bdf=0000:00:03.0 nic=eth1 mode=INTX\n"
+        )
+        with self.assertRaises(DMM.IrqModeAssertionFailed):
+            DMM.assert_irq_mode(
+                fake_log, nic_modes=(("eth0", "INTX"), ("eth1", "POLL")))
+
+    def test_irq_conflict_case_declares_mode_assertion(self):
+        """The irq-conflict case MUST declare a mode_assertion so the
+        per-card POLL fallback is enforced at the matrix runner, not
+        just optional in production."""
+        c = DMM.case_dict("irq-conflict")
+        ma = c.get("mode_assertion", ())
+        self.assertTrue(len(ma) >= 2,
+                        "irq-conflict must declare per-NIC mode_assertion")
+        # The contract pins eth0 == INTX AND eth1 == POLL.
+        as_dict = dict(ma)
+        self.assertEqual(as_dict.get("eth0"), "INTX",
+                         "irq-conflict eth0 must be INTX")
+        self.assertEqual(as_dict.get("eth1"), "POLL",
+                         "irq-conflict eth1 must be POLL")
+
+    def test_other_cases_have_no_mode_assertion(self):
+        """Only irq-conflict declares mode_assertion; other cases are
+        silent on per-NIC IRQ mode.  The production build never emits
+        the line, so a non-fault case declaring mode_assertion would
+        fail spuriously."""
+        for case in DMM.matrix_case_names():
+            if case == "irq-conflict":
+                continue
+            c = DMM.case_dict(case)
+            self.assertNotIn("mode_assertion", c,
+                              f"{case}: must not declare mode_assertion")
+
+
 class TestVariantHashProtection(unittest.TestCase):
     """A fault fixture must NOT pollute the normal image.  The harness
     records sha256 before/after a fault build and rejects any drift."""

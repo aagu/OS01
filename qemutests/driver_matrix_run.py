@@ -415,6 +415,23 @@ def _run_case(case, smp, timeout=DEFAULT_TIMEOUT):
                     "error": f"observation counter failure: {e}",
                 }
 
+        # Per-NIC IRQ-mode gate (ARCH-9 whole-branch review): for
+        # irq-conflict, the kernel-side `arch9-irq-mode:` log line
+        # must agree with the case's `mode_assertion` (e.g. eth0 =
+        # INTX AND eth1 = POLL).  Production build (OS01_TEST_FAULT
+        # not defined) never emits the line — those cases never
+        # declare mode_assertion in the first place.
+        mode_assertion = c.get("mode_assertion", ())
+        if mode_assertion:
+            try:
+                DMM.assert_irq_mode(log_text, mode_assertion)
+            except DMM.IrqModeAssertionFailed as e:
+                return False, log_text, {
+                    "case": case, "smp": smp,
+                    "log_path": str(log_path),
+                    "error": f"irq-mode assertion failure: {e}",
+                }
+
         if result_passed:
             return True, log_text, {"case": case, "smp": smp,
                                       "log_path": str(log_path)}
