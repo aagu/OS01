@@ -373,8 +373,8 @@ $(BUILD_DIR)/lwip/%.o: $(LWIP_SRC_DIR)/%.c $(FLAGS_STAMP)
 	$(EFFECTIVE_CC) $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS) -MD -MP -c $< -o $@
 
 # ── Special objects ────────────────────────────────────────
-# PSF font → .o
-ifeq ($(ARCH),x86_64)
+# PSF font → .o (both arches — kernel/core/printk.c on x86_64 AND
+# kernel/arch/aarch64/runtime/printk_fb.c on aarch64 reference these symbols)
 # `ld -r -b binary` derives the embedded symbols (_binary_kernel_font_psf_*)
 # from the *path string* of the input file. The font asset lives at
 # driver/font.psf, but code (printk.c) still references the kernel/font.o-era
@@ -386,6 +386,7 @@ $(BUILD_DIR)/kernel/font.o: driver/font.psf
 	cp $< $(KERNEL_BUILD_DIR)/generated/kernel/font.psf
 	cd $(KERNEL_BUILD_DIR)/generated && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary kernel/font.psf -o $@
 
+ifeq ($(ARCH),x86_64)
 # Trampoline: assemble → link at 0x8000 → binary → embed
 $(BUILD_DIR)/$(ARCHDIR)/trampoline.o: $(ARCHDIR)/trampoline.S
 	@mkdir -p $(dir $@)
