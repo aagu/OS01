@@ -104,7 +104,14 @@ ifdef AARCH64_UEFI_DISK
 # aarch64 needs its own directly. Sub-make into libc/ with ARCH=aarch64
 # overrides libc/Makefile's default HOSTARCH=x86_64; the build is
 # incremental (skips already-built *.o / *.libk.o).
-$(LIBC_BUILD_DIR)/lib/libk.a:
+#
+# The wildcard prereq on the libc source tree below is the
+# load-bearing incremental trigger: a libc-only edit (e.g. touching
+# libc/stdio/vsprintf.c) must rebuild libk.a and (via the kernel
+# prereqs added in kernel/Makefile) the kernel too, without an explicit
+# make clean.  Without the prereq make has no way to know the libc
+# source tree changed and silently skips the sub-make.
+$(LIBC_BUILD_DIR)/lib/libk.a: $(wildcard libc/stdio/*.c libc/string/*.c libc/ctype/*.c libc/errno/*.c libc/list/*.c libc/rbtree/*.c libc/stdlib/*.c libc/ssp/*.c) libc/include/stdio.h
 	@mkdir -p $(dir $@)
 	@$(call os01_submake,libc,all ARCH=aarch64 $(OS01_SUBMAKE_ARGS))
 

@@ -1,31 +1,68 @@
-#include <core/printk.h>
-#include <memory/memory.h>
-#include <memory/vmm.h>
-#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
-#include <memory/pmm.h>
-#include <memory/slab.h>
+// kernel/core/printk.c — kernel-side console shared by x86_64 and aarch64
+// (spec 2026-10-06).
+//
+// Both arches link this TU: x86_64 via the `core/*.c` wildcard in
+// kernel/Makefile, aarch64 via the explicit addition to its KERNEL_C_SOURCES
+// list. The colour drawing logic (putchark / putchar_at / color_printk)
+// and the canonical PSF font reference live HERE — single source of
+// truth, no per-arch duplication. Per-arch MMIO mapping is in
+// kernel/arch/<arch>/runtime/printk_fb.c.
+//
+// vsprintf comes from -D__is_libk via stdio/vsprintf.c (in libk.a on
+// both arches). serial_printk uses <driver/serial.h>'s write_serial_
+// unlocked + serial_lock; both arches supply those (x86_64 via
+// kernel/driver/serial.c, aarch64 via kernel/arch/aarch64/platform/serial.c).
+
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+#include <stdio.h>
+
 #include <arch/spinlock.h>
 #include <driver/serial.h>
 #include <driver/fb_state.h>
-#include <stdio.h>
 #include <driver/font.h>
-#include <stddef.h>
-#include <string.h>
+#include <core/printk.h>
 
-// Separate per-function buffers — color_printk and serial_printk share
-// a single global buffer, which is a race condition: int $0x80 uses a
-// trap gate (IF unchanged), so interrupts can fire between vsprintf()
-// and the loop that reads buf.  When an interrupt handler calls
-// serial_printk(), it overwrites buf and corrupts color_printk's output,
-// potentially writing garbage to the framebuffer and clobbering kernel
-// data structures (manifested as #UD at RIP=0x40).
+/* The framebuffer writer-lease / snapshot subsystem (driver/fb_state.c,
+ * fb_writer_begin/fb_writer_end) is built for x86_64 only — aarch64 keeps
+ * PL011 serial as its console and maps the framebuffer directly through
+ * frame_buffer_init().  When the lease subsystem is absent, color_printk
+ * draws straight to the live Pos mapping with a NULL snapshot; the
+ * snapshot helpers' NULL guard keeps that a no-op whenever no framebuffer
+ * is mapped. */
+#if defined(__x86_64__)
+# define PRINTK_FB_WRITER_LEASE 1
+#else
+# define PRINTK_FB_WRITER_LEASE 0
+#endif
+
+/* Font symbols — produced by the kernel/Makefile `ld -r -b binary`
+ * recipe on driver/font.psf for both arches. */
+extern volatile unsigned char _binary_kernel_font_psf_start;
+extern volatile unsigned char _binary_kernel_font_psf_end;
+
+psf2_t *font = (psf2_t *)&_binary_kernel_font_psf_start;
+
+/* Canonical Pos — single global across the whole kernel. aarch64
+ * boot_fb_init() / x86_64_boot_early() each populate the geometry and
+ * call spin_init(&Pos.lock). */
+position Pos;
+
+/* Separate per-function buffers — color_printk and serial_printk must
+ * not share a buffer because int $0x80 / IRQ handlers can fire between
+ * vsprintf and the putchark / write_serial_unlocked loops in either
+ * function. */
 static char buf_color[4096];
 static char buf_serial[4096];
 
-position Pos;
-
-psf2_t *font = (psf2_t*)&_binary_kernel_font_psf_start;
-
+/* Snapshot-aware glyph writer.  Draws one glyph at the current cursor
+ * cell (Pos.XPosition/YPosition).  When `snap` is provided, its mapped
+ * address and geometry are used instead of the Pos mirrors so a writer
+ * holding a lease renders into a consistent framebuffer; NULL falls back
+ * to Pos.FB_addr / Pos.XResolution.  NULL-safe: a missing framebuffer
+ * makes the draw a no-op. */
 void putchark_snap(const struct fb_snapshot *snap, unsigned int FRcolor, unsigned int BKcolor, unsigned char c)
 {
     const uint32_t *fb_base = (snap && snap->addr) ? (const uint32_t *)snap->addr : Pos.FB_addr;
@@ -59,6 +96,9 @@ void putchark(unsigned int FRcolor, unsigned int BKcolor, unsigned char c)
     putchark_snap(NULL, FRcolor, BKcolor, c);
 }
 
+/* Snapshot-aware glyph writer at an explicit character-cell position.
+ * Does NOT touch Pos.XPosition/YPosition or Pos.lock.  NULL-safe: a
+ * missing framebuffer makes the draw a no-op. */
 void putchar_at_snap(const struct fb_snapshot *snap, int col, int row,
                      unsigned int FRcolor, unsigned int BKcolor, unsigned char c)
 {
@@ -115,10 +155,15 @@ int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
 	i = vsprintf(buf_color, fmt, args);
 	va_end(args);
 
+	const struct fb_snapshot *snap = NULL;
+#if PRINTK_FB_WRITER_LEASE
 	fb_lease_t lease;
 	int lrc = fb_writer_begin(&lease, 0);
 	if (lrc < 0) {
-		// Drop Pos.lock BEFORE taking serial_lock to prevent AB-BA deadlock
+		// No framebuffer writer lease (transitioning, not yet mapped,
+		// or failed): continue on serial only, leaving the screen
+		// cursor untouched.  Drop Pos.lock BEFORE taking serial_lock
+		// to prevent AB-BA deadlock.
 		spin_unlock_irqrestore(&Pos.lock, flags);
 		uint64_t sf = spin_lock_irqsave(&serial_lock);
 		for(count = 0; count < i; count++)
@@ -128,6 +173,8 @@ int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
 		spin_unlock_irqrestore(&serial_lock, sf);
 		return i;
 	}
+	snap = &lease.snapshot;
+#endif
 
 	for(count = 0;count < i || line;count++)
 	{
@@ -155,7 +202,7 @@ int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
 				if(Pos.YPosition < 0)
 					Pos.YPosition = (Pos.YResolution / font->height - 1) * font->height;
 			}
-			putchark_snap((const struct fb_snapshot *)&lease.snapshot, FRcolor , BKcolor , ' ');
+			putchark_snap(snap, FRcolor , BKcolor , ' ');
 		}
 		else if((unsigned char)*(buf_color + count) == '\t')
 		{
@@ -163,18 +210,18 @@ int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
 
 Label_tab:
 			line--;
-			putchark_snap((const struct fb_snapshot *)&lease.snapshot, FRcolor , BKcolor , ' ');
+			putchark_snap(snap, FRcolor , BKcolor , ' ');
 			Pos.XPosition++;
 		}
 		else
 		{
-			putchark_snap((const struct fb_snapshot *)&lease.snapshot, FRcolor , BKcolor , (unsigned char)*(buf_color + count));
+			putchark_snap(snap, FRcolor , BKcolor , (unsigned char)*(buf_color + count));
 			Pos.XPosition++;
 		}
 
 
-		uint32_t cur_xres = lease.snapshot.state.info.width ? lease.snapshot.state.info.width : Pos.XResolution;
-		uint32_t cur_yres = lease.snapshot.state.info.height ? lease.snapshot.state.info.height : Pos.YResolution;
+		uint32_t cur_xres = (snap && snap->state.info.width) ? snap->state.info.width : Pos.XResolution;
+		uint32_t cur_yres = (snap && snap->state.info.height) ? snap->state.info.height : Pos.YResolution;
 		if(Pos.XPosition >= (int32_t)(cur_xres / font->width))
 		{
 			Pos.YPosition++;
@@ -186,7 +233,7 @@ Label_tab:
 			int rows = (int)(cur_yres / font->height);
 			uint32_t pitch = cur_xres * sizeof(uint32_t);
 			int row_bytes = (int)(pitch * font->height);
-			uint8_t *fb = (uint8_t *)(lease.snapshot.addr ? lease.snapshot.addr : Pos.FB_addr);
+			uint8_t *fb = (uint8_t *)((snap && snap->addr) ? snap->addr : Pos.FB_addr);
 			if (fb) {
 				memmove(fb, fb + row_bytes, (uintptr_t)row_bytes * (rows - 1));
 				memset(fb + (uintptr_t)row_bytes * (rows - 1), 0, (uintptr_t)row_bytes);
@@ -195,69 +242,29 @@ Label_tab:
 		}
 
 	}
+#if PRINTK_FB_WRITER_LEASE
 	fb_writer_end(&lease);
+#endif
 	spin_unlock_irqrestore(&Pos.lock, flags);
 
 	return i;
 }
 
-// Early framebuffer map via direct PDE writes, before PMM/VMM are available.
-// Uses VIRT_FRAMEBUFFER_EARLY (within PUD[0]) for simple setup.
-void frame_buffer_early_init()
+int serial_printk(const char *fmt, ...)
 {
-	uint64_t *pmd = (uint64_t *)0xffff800000103000;
-	for (uintptr_t i = 0; i < Pos.FB_length; i += PAGE_2M_SIZE)
-	{
-		size_t level2 = (size_t)((VIRT_FRAMEBUFFER_EARLY + i) >> PAGE_2M_SHIFT) & 0x1FF;
-		pmd[level2] = (((uint64_t)Pos.Phy_addr + i) & PAGE_2M_MASK)
-			| (PAGE_KERNEL_PMD | PAGE_WRITE_THROUGH | PAGE_CACHE_DISABLE);
-	}
-	Pos.FB_addr = (uint32_t *)VIRT_FRAMEBUFFER_EARLY;
-	flush_tlb();
-	fb_publish_initial_mapping(Pos.FB_addr, Pos.FB_length);
-}
+    int i = 0;
+    int count = 0;
+    uint64_t sf = spin_lock_irqsave(&serial_lock);
 
-// Permanent framebuffer map via vmm_map_page, after PMM/VMM are available.
-// Remaps to VIRT_FRAMEBUFFER_OFFSET in a separate PGD entry that never
-// overlaps with the physical RAM direct mapping regardless of QEMU -m size.
-void frame_buffer_init()
-{
-	for (uintptr_t i = 0; i < Pos.FB_length; i += PAGE_2M_SIZE)
-	{
-		vmm_map_page(kernel_map, i + (uint64_t)Pos.Phy_addr,
-			VIRT_FRAMEBUFFER_OFFSET + i,
-			PAGE_KERNEL_PMD | PAGE_WRITE_THROUGH | PAGE_CACHE_DISABLE);
-	}
-	Pos.FB_addr = (uint32_t *)VIRT_FRAMEBUFFER_OFFSET;
-	tlb_shootdown();
-	fb_publish_initial_mapping(Pos.FB_addr, Pos.FB_length);
-}
+    va_list args;
+    va_start(args, fmt);
+    i = vsprintf(buf_serial, fmt, args);
+    va_end(args);
 
-void serial_printk(const char * fmt,...)
-{
-	int i = 0;
-	int count = 0;
-	va_list args;
+    for (count = 0; count < i; count++) {
+        write_serial_unlocked((unsigned char)buf_serial[count]);
+    }
 
-	// Hold serial_lock for the whole emission: vsprintf fills
-	// buf_serial, then we write it byte-by-byte.  Without this
-	// outer lock an IRQ handler (e.g. serial_poll / a debug
-	// printk in an IRQ context) could call write_serial between
-	// our vsprintf and our loop, clobbering buf_serial and
-	// corrupting output.  write_serial() re-acquires the same
-	// non-recursive lock — see kernel/driver/serial.c — so we
-	// cannot call write_serial() while holding it.  Use the
-	// _unlocked helper instead.
-	uint64_t sf = spin_lock_irqsave(&serial_lock);
-
-	va_start(args, fmt);
-	i = vsprintf(buf_serial, fmt, args);
-	va_end(args);
-
-	for(count = 0;count < i ;count++)
-	{
-		write_serial_unlocked((unsigned char)*(buf_serial + count));
-	}
-
-	spin_unlock_irqrestore(&serial_lock, sf);
+    spin_unlock_irqrestore(&serial_lock, sf);
+    return i;
 }

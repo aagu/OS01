@@ -35,6 +35,11 @@
  * the smoke test ensures no leaf is left behind. */
 #define AARCH64_PT_SELFTEST_VA UINT64_C(0xffff800000000000)
 
+/* Framebuffer mapping VA on aarch64. Distinct from AARCH64_PT_SELFTEST_VA
+ * (0xffff800000000000) and below ARCH_PAGE_OFFSET (the direct-map region).
+ * Used by kernel/arch/aarch64/runtime/printk_fb.c::frame_buffer_init. */
+#define AARCH64_FB_VIRT_BASE UINT64_C(0xffff900000000000)
+
 /* TTBR0_EL1 layout. The base address field is bits [47:12]; the
  * permitted non-base bits are the ASID (bits [63:48]) and the CnP bit
  * (bit 0). All other bits must read as zero on the live TTBR. Exposed

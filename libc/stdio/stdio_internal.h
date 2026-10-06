@@ -21,8 +21,14 @@ size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perfor
 
 /* Length-safe write: returns len on success, -1 on error. write_all(…, 0)
  * succeeds immediately. Retries only on EINTR; a zero write while bytes remain
- * and all other errors return -1. Never writes past the requested length. */
-#include <unistd.h>   /* ssize_t for write_all()'s return type */
+ * and all other errors return -1. Never writes past the requested length.
+ *
+ * ssize_t comes from <sys/types.h>, which both arches include via
+ * <stdio.h> (transitive). The actual definition in stdio_file.c is
+ * only linked on x86_64 userland libc; libk-mode aarch64 doesn't pull
+ * it in. The decl stays here so printf.c (libk-compiled on x86_64)
+ * can call it. */
+#include <sys/types.h>   /* ssize_t for write_all()'s return type */
 ssize_t write_all(int fd, const char *buf, size_t len);
 
 /* P1-5: single FILE → fd resolver — the canonical "truth source" for
