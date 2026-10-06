@@ -438,8 +438,12 @@ endif
 endif
 endif
 
-# Stage 1: link without kallsyms, just to get symbol table
-$(BUILD_DIR)/kernel.elf.stage1: $(KERNEL_OBJECTS) $(ARCHDIR)/$(ARCH_LINKER) $(KERNEL_RUNTIME_PREREQ) $(KERNEL_RUNTIME_RELINK_PREREQ)
+# Stage 1: link without kallsyms, just to get symbol table.
+# $(LIBC_BUILD_DIR)/lib/libk.a is listed so that a libc-only change
+# (e.g., editing libc/stdio/vsprintf.c) triggers a relink without an
+# explicit kernel-clean.  Without this, make cannot know that -lk has
+# new content; the link only re-runs when KERNEL_OBJECTS changes.
+$(BUILD_DIR)/kernel.elf.stage1: $(KERNEL_OBJECTS) $(LIBC_BUILD_DIR)/lib/libk.a $(ARCHDIR)/$(ARCH_LINKER) $(KERNEL_RUNTIME_PREREQ) $(KERNEL_RUNTIME_RELINK_PREREQ)
 	@set -eu; \
 	partial="$(KERNEL_RUNTIME_LINK_RECEIPT).stage1"; \
 	complete="$(KERNEL_RUNTIME_LINK_RECEIPT)"; \
@@ -481,7 +485,7 @@ $(BUILD_DIR)/kernel/kallsyms.o: core/kallsyms.c $(BUILD_DIR)/kernel.elf.stage1
 # linker script) changes, so a no-op `make kernel.bin` does not relink.
 
 # ── Final link ──────────────────────────────────────────────
-$(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o $(ARCHDIR)/$(ARCH_LINKER) $(KERNEL_RUNTIME_PREREQ) $(KERNEL_RUNTIME_RELINK_PREREQ)
+$(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(LIBC_BUILD_DIR)/lib/libk.a $(BUILD_DIR)/kernel/kallsyms.o $(ARCHDIR)/$(ARCH_LINKER) $(KERNEL_RUNTIME_PREREQ) $(KERNEL_RUNTIME_RELINK_PREREQ)
 ifeq ($(ARCH),x86_64)
 	@set -eu; \
 	partial="$(KERNEL_RUNTIME_LINK_RECEIPT).stage1"; \

@@ -109,7 +109,41 @@ static __attribute__((noinline)) void vf_string(vf_state_t *st, const char *s, i
 		vf_out(st, ' ');
 }
 
-static __attribute__((noinline)) void vf_int(vf_state_t *st, va_list ap, int is_ll, int qualifier,
+/* VF_INT_ARG / VF_INT_DEREF — va_list ABI shim for vf_int.
+ *
+ * The two arches have incompatible va_list semantics:
+ *
+ *   aarch64: __builtin_va_list is a struct (struct { stack; gr_top;
+ *     vr_top; }).  Passing va_list by value copies the struct; va_arg(ap, T)
+ *     inside vf_int then advances only the LOCAL copy and the caller's
+ *     ap is stuck — that's the original "cache 0 size=0" slab bug.
+ *     Fix: vf_int takes va_list*; caller passes &ap; va_arg(*ap, T)
+ *     advances the caller's ap through the pointer.
+ *
+ *   x86_64:  __builtin_va_list is __va_list_tag[1] (array of 1 struct).
+ *     As a function parameter the array decays to __va_list_tag*.  The
+ *     caller's local ap is already that pointer; passing ap to vf_int
+ *     gives vf_int va_list (single pointer).  va_arg(ap, T) advances
+ *     the caller's ap correctly.
+ *
+ * VF_INT_DECL chooses the parameter type; VF_INT_ARG chooses the
+ * argument expression; VF_INT_DEREF chooses the expression passed
+ * to va_arg inside the body.
+ */
+#if defined __aarch64__
+#define VF_INT_DECL  va_list *
+#define VF_INT_ARG(ap)  (&(ap))
+/* VF_GET_INNER is a single-arg function-like macro so the va_arg macro
+ * can be passed a wrapped expression without its own comma scan getting
+ * confused by VF_GET_INNER(ap), ...)'s internal structure. */
+#define VF_GET_INNER(ap)  (*(ap))
+#else
+#define VF_INT_DECL  va_list
+#define VF_INT_ARG(ap)  (ap)
+#define VF_GET_INNER(ap)  (ap)
+#endif
+
+static __attribute__((noinline)) void vf_int(vf_state_t *st, VF_INT_DECL ap, int is_ll, int qualifier,
                                              int field_width, int precision, int flags, char fmt_char)
 {
 	if (fmt_char == 'd' || fmt_char == 'i' || fmt_char == 'u') {
@@ -119,11 +153,11 @@ static __attribute__((noinline)) void vf_int(vf_state_t *st, va_list ap, int is_
 		if (is_signed) {
 			long long sval;
 			if (is_ll || qualifier == 'L' || qualifier == 'Z')
-				sval = va_arg(ap, long long);
+				sval = va_arg(VF_GET_INNER(ap), long long);
 			else if (qualifier == 'l')
-				sval = va_arg(ap, long);
+				sval = va_arg(VF_GET_INNER(ap), long);
 			else
-				sval = va_arg(ap, int);
+				sval = va_arg(VF_GET_INNER(ap), int);
 			if (sval < 0) {
 				sign = '-';
 				mag = 0 - (unsigned long long)sval;
@@ -133,22 +167,22 @@ static __attribute__((noinline)) void vf_int(vf_state_t *st, va_list ap, int is_
 			}
 		} else {
 			if (is_ll || qualifier == 'L' || qualifier == 'Z')
-				mag = va_arg(ap, unsigned long long);
+				mag = va_arg(VF_GET_INNER(ap), unsigned long long);
 			else if (qualifier == 'l')
-				mag = va_arg(ap, unsigned long);
+				mag = va_arg(VF_GET_INNER(ap), unsigned long);
 			else
-				mag = va_arg(ap, unsigned int);
+				mag = va_arg(VF_GET_INNER(ap), unsigned int);
 		}
 		vf_number(st, sign, mag, 10, field_width, precision, flags);
 	} else {
 		/* 'o', 'x', 'X' */
 		unsigned long long uval;
 		if (is_ll || qualifier == 'L' || qualifier == 'Z')
-			uval = va_arg(ap, unsigned long long);
+			uval = va_arg(VF_GET_INNER(ap), unsigned long long);
 		else if (qualifier == 'l')
-			uval = va_arg(ap, unsigned long);
+			uval = va_arg(VF_GET_INNER(ap), unsigned long);
 		else
-			uval = va_arg(ap, unsigned int);
+			uval = va_arg(VF_GET_INNER(ap), unsigned int);
 		vf_number(st, 0, uval, (fmt_char == 'o') ? 8 : 16,
 		          field_width, precision, flags);
 	}
@@ -281,7 +315,7 @@ size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perfor
 
 			case 'o':
 				flags &= ~SMALL;
-				vf_int(&st, ap, is_ll, qualifier, field_width, precision, flags, 'o');
+				vf_int(&st, VF_INT_ARG(ap), is_ll, qualifier, field_width, precision, flags, 'o');
 				break;
 
 			case 'p': {
@@ -299,7 +333,7 @@ size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perfor
 				flags |= SMALL;
 				/* fall through */
 			case 'X':
-				vf_int(&st, ap, is_ll, qualifier, field_width, precision, flags, 'x');
+				vf_int(&st, VF_INT_ARG(ap), is_ll, qualifier, field_width, precision, flags, 'x');
 				break;
 
 			case 'd':
@@ -307,7 +341,7 @@ size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perfor
 				flags |= SIGN;
 				/* fall through */
 			case 'u':
-				vf_int(&st, ap, is_ll, qualifier, field_width, precision, flags, 'd');
+				vf_int(&st, VF_INT_ARG(ap), is_ll, qualifier, field_width, precision, flags, 'd');
 				break;
 
 			case 'n': {
