@@ -23,13 +23,9 @@
 #include <gfx.h>
 #include "terminal_core.h"
 #include "terminal_render.h"
-
-// ── fb_info (must match kernel definition) ──────────────────
-struct fb_info {
-    uint32_t width, height, stride, bpp, format;
-} __attribute__((packed));
-
-#define FBIOSURRENDER  0x00004601
+#include "terminal_display.h"
+#include <uapi/fb.h>
+#include <sys/wait.h>
 
 #define ASH_PATH "/bin/busybox"
 #define FRAME_INTERVAL_MS 33
@@ -40,13 +36,13 @@ extern char _binary_terminal_font_psf_start[];
 extern char _binary_terminal_font_psf_end[];
 
 // ── Terminal state ──────────────────────────────────────────
-static gfx_handle_t *gfx;
-static struct fb_info fb_info;
+// terminal.c owns: fb_fd (parent lifetime), the PTY, ash, the core storage and
+// the final cleanup.  terminal_display.c only drives the gfx view/renderer.
+static struct fb_state fb_st;
 static const psf2_t *font;
-static int term_cols, term_rows;
 static uint32_t fg = 0xFFFFFFFF, bg = 0x00000000;
 static term_core_t core;
-static term_render_t render;
+static terminal_display_t disp;
 
 // ═══════════════════════════════════════════════════════════
 //  Input handler (dual-mode: cooked / raw)
@@ -68,6 +64,24 @@ static void handle_input(char *buf, int n, int pty_fd, int ash_pid)
 //  Main
 // ═══════════════════════════════════════════════════════════
 
+static void serial_msg(int serial_fd, const char *msg)
+{
+    if (serial_fd >= 0) write(serial_fd, msg, strlen(msg));
+}
+
+// Deliver the current view geometry to the PTY master (4 winsize fields).
+// Returns 0 on success (pending cleared) or -1 (still pending, caller retries).
+static int send_winsize(int pty_fd)
+{
+    struct winsize ws;
+    unsigned short r, c, x, y;
+    if (!terminal_display_winsize(&disp, &r, &c, &x, &y)) return 0;
+    ws.ws_row = r; ws.ws_col = c; ws.ws_xpixel = x; ws.ws_ypixel = y;
+    if (ioctl(pty_fd, TIOCSWINSZ, &ws) < 0) return -1;
+    disp.pending_winsize = false;
+    return 0;
+}
+
 int main(void)
 {
     char *ash_argv[] = { "ash", NULL };
@@ -78,10 +92,7 @@ int main(void)
     // 1. Open /dev/tty
     int tty_fd = open("/dev/tty", O_RDONLY);
     if (tty_fd < 0) {
-        if (serial_fd >= 0) {
-            const char msg[] = "[terminal] ERROR: cannot open /dev/tty\r\n";
-            write(serial_fd, msg, sizeof(msg) - 1);
-        }
+        serial_msg(serial_fd, "[terminal] ERROR: cannot open /dev/tty\r\n");
         exec(ASH_PATH, ash_argv, environ);
         return 1;
     }
@@ -89,46 +100,36 @@ int main(void)
     // 2. Validate embedded PSF2 font
     size_t font_size = (size_t)(_binary_terminal_font_psf_end - _binary_terminal_font_psf_start);
     if (!term_font_validate(_binary_terminal_font_psf_start, font_size, &font)) {
-        if (serial_fd >= 0) {
-            const char msg[] = "[terminal] ERROR: invalid embedded PSF2 font\r\n";
-            write(serial_fd, msg, sizeof(msg) - 1);
-        }
+        serial_msg(serial_fd, "[terminal] ERROR: invalid embedded PSF2 font\r\n");
         dup2(tty_fd, 0); close(tty_fd);
         exec(ASH_PATH, ash_argv, environ);
         return 1;
     }
 
-    // 3. Query framebuffer geometry
+    // 3. Query framebuffer state (geometry + mode generation).  fb_fd stays
+    //    open for the whole terminal lifetime: it is used to detect mode
+    //    switches; the ash child closes its copy.
     int fb_fd = open("/dev/fb", O_RDWR);
     if (fb_fd < 0) {
-        if (serial_fd >= 0) {
-            const char msg[] = "[terminal] ERROR: cannot open /dev/fb\r\n";
-            write(serial_fd, msg, sizeof(msg) - 1);
-        }
+        serial_msg(serial_fd, "[terminal] ERROR: cannot open /dev/fb\r\n");
         dup2(tty_fd, 0); close(tty_fd);
         exec(ASH_PATH, ash_argv, environ);
         return 1;
     }
 
-    if (read(fb_fd, &fb_info, sizeof(fb_info)) != (ssize_t)sizeof(fb_info) ||
-        fb_info.width == 0 || fb_info.height == 0) {
-        if (serial_fd >= 0) {
-            const char msg[] = "[terminal] ERROR: invalid /dev/fb metadata\r\n";
-            write(serial_fd, msg, sizeof(msg) - 1);
-        }
+    if (ioctl(fb_fd, FBIOGET_STATE, &fb_st) < 0 ||
+        fb_st.info.width == 0 || fb_st.info.height == 0) {
+        serial_msg(serial_fd, "[terminal] ERROR: invalid /dev/fb state\r\n");
         close(fb_fd);
         dup2(tty_fd, 0); close(tty_fd);
         exec(ASH_PATH, ash_argv, environ);
         return 1;
     }
 
-    term_cols = (int)(fb_info.width / font->width);
-    term_rows = (int)(fb_info.height / font->height);
+    int term_cols = (int)(fb_st.info.width / font->width);
+    int term_rows = (int)(fb_st.info.height / font->height);
     if (term_cols <= 0 || term_rows <= 0) {
-        if (serial_fd >= 0) {
-            const char msg[] = "[terminal] ERROR: non-positive terminal geometry\r\n";
-            write(serial_fd, msg, sizeof(msg) - 1);
-        }
+        serial_msg(serial_fd, "[terminal] ERROR: non-positive terminal geometry\r\n");
         close(fb_fd);
         dup2(tty_fd, 0); close(tty_fd);
         exec(ASH_PATH, ash_argv, environ);
@@ -136,12 +137,9 @@ int main(void)
     }
 
     // 4. Open 2D graphics view (/dev/gfx0)
-    gfx = gfx_open(0, 0, fb_info.width, fb_info.height);
+    gfx_handle_t *gfx = gfx_open(0, 0, fb_st.info.width, fb_st.info.height);
     if (!gfx) {
-        if (serial_fd >= 0) {
-            const char msg[] = "[terminal] ERROR: gfx_open failed\r\n";
-            write(serial_fd, msg, sizeof(msg) - 1);
-        }
+        serial_msg(serial_fd, "[terminal] ERROR: gfx_open failed\r\n");
         close(fb_fd); // Do NOT surrender kernel console
         dup2(tty_fd, 0); close(tty_fd);
         exec(ASH_PATH, ash_argv, environ);
@@ -151,10 +149,7 @@ int main(void)
     // 5. Initialize terminal core and verify memory buffers
     term_core_init(&core, term_rows, term_cols);
     if (!core.main_buf || !core.alt_buf || !core.dirty) {
-        if (serial_fd >= 0) {
-            const char msg[] = "[terminal] ERROR: buffer allocation failed\r\n";
-            write(serial_fd, msg, sizeof(msg) - 1);
-        }
+        serial_msg(serial_fd, "[terminal] ERROR: buffer allocation failed\r\n");
         term_core_free(&core);
         gfx_close(gfx);
         close(fb_fd);
@@ -163,19 +158,19 @@ int main(void)
         return 1;
     }
 
-    term_render_init(&render, gfx, font, &core, fg, bg);
-    term_render_clear(&render);
+    // From here on the view is owned by `disp` (closed once, via
+    // terminal_display_close()).
+    terminal_display_init(&disp, gfx, &core, font, &fb_st.info,
+                          fb_st.generation, fg, bg);
+    term_render_clear(&disp.render);
     term_core_mark_all_dirty(&core);
-    term_render_flush(&render);
+    term_render_flush(&disp.render);
 
     // 6. Verify initial gfx_present succeeds before taking over console
-    if (gfx_present(gfx) != 0) {
-        if (serial_fd >= 0) {
-            const char msg[] = "[terminal] ERROR: initial gfx_present failed\r\n";
-            write(serial_fd, msg, sizeof(msg) - 1);
-        }
+    if (gfx_present(disp.gfx) != 0) {
+        serial_msg(serial_fd, "[terminal] ERROR: initial gfx_present failed\r\n");
         term_core_free(&core);
-        gfx_close(gfx);
+        terminal_display_close(&disp);
         close(fb_fd);
         dup2(tty_fd, 0); close(tty_fd);
         exec(ASH_PATH, ash_argv, environ);
@@ -184,27 +179,22 @@ int main(void)
 
     // 7. Surrender kernel console and verify
     if (ioctl(fb_fd, FBIOSURRENDER, NULL) < 0) {
-        if (serial_fd >= 0) {
-            const char msg[] = "[terminal] ERROR: FBIOSURRENDER ioctl failed\r\n";
-            write(serial_fd, msg, sizeof(msg) - 1);
-        }
+        serial_msg(serial_fd, "[terminal] ERROR: FBIOSURRENDER ioctl failed\r\n");
         term_core_free(&core);
-        gfx_close(gfx);
+        terminal_display_close(&disp);
         close(fb_fd);
         dup2(tty_fd, 0); close(tty_fd);
         exec(ASH_PATH, ash_argv, environ);
         return 1;
     }
-    close(fb_fd);
 
     // 8. Post-surrender present: close any brief race window with kernel console
-    if (gfx_present(gfx) != 0) {
-        if (serial_fd >= 0) {
-            const char msg[] = "[terminal] ERROR: post-surrender gfx_present failed\r\n";
-            write(serial_fd, msg, sizeof(msg) - 1);
-        }
+    //    (a mode switch exactly here is recovered by the loop's refresh).
+    if (gfx_present(disp.gfx) != 0 && errno != EAGAIN && errno != ESTALE) {
+        serial_msg(serial_fd, "[terminal] ERROR: post-surrender gfx_present failed\r\n");
         term_core_free(&core);
-        gfx_close(gfx);
+        terminal_display_close(&disp);
+        close(fb_fd);
         dup2(tty_fd, 0); close(tty_fd);
         exec(ASH_PATH, ash_argv, environ);
         return 1;
@@ -213,82 +203,115 @@ int main(void)
     // 9. Allocate PTY
     int pty_fd = open("/dev/ptmx", O_RDWR);
     if (pty_fd < 0) {
-        if (serial_fd >= 0) {
-            const char msg[] = "[terminal] ERROR: open /dev/ptmx failed\r\n";
-            write(serial_fd, msg, sizeof(msg) - 1);
-        }
-        term_core_free(&core); gfx_close(gfx);
+        serial_msg(serial_fd, "[terminal] ERROR: open /dev/ptmx failed\r\n");
+        term_core_free(&core); terminal_display_close(&disp); close(fb_fd);
         dup2(tty_fd, 0); close(tty_fd);
         exec(ASH_PATH, ash_argv, environ);
         return 1;
     }
     int slave = open("/dev/pts0", O_RDWR);
     if (slave < 0) {
-        if (serial_fd >= 0) {
-            const char msg[] = "[terminal] ERROR: open /dev/pts0 failed\r\n";
-            write(serial_fd, msg, sizeof(msg) - 1);
-        }
-        close(pty_fd); term_core_free(&core); gfx_close(gfx);
+        serial_msg(serial_fd, "[terminal] ERROR: open /dev/pts0 failed\r\n");
+        close(pty_fd); term_core_free(&core); terminal_display_close(&disp);
+        close(fb_fd);
         dup2(tty_fd, 0); close(tty_fd);
         exec(ASH_PATH, ash_argv, environ);
         return 1;
     }
 
-    struct winsize ws = {
-        .ws_row    = (unsigned short)term_rows,
-        .ws_col    = (unsigned short)term_cols,
-        .ws_xpixel = (unsigned short)fb_info.width,
-        .ws_ypixel = (unsigned short)fb_info.height,
-    };
-    ioctl(slave, TIOCSWINSZ, &ws);
+    // 10. Initial window size via the PTY master (failure stays pending and is
+    //     retried by the event loop; it never rebuilds the graphics).
+    disp.pending_winsize = true;
+    uint64_t ws_retry_ms = 0;
+    (void)send_winsize(pty_fd);
+
+    char *buf = (char *)malloc(2048);
 
     // 11. Fork ash
-    int ash_pid = fork();
+    int ash_pid = buf ? fork() : -1;
     if (ash_pid == 0) {
         dup2(slave, 0); dup2(slave, 1); dup2(slave, 2);
-        close(slave); close(pty_fd); close(tty_fd);
+        close(slave); close(pty_fd); close(tty_fd); close(fb_fd);
         exec(ASH_PATH, ash_argv, environ);
         exit(1);
     }
     close(slave);
 
-    // 12. Main event loop: starvation-free 30 FPS throttle + deep idle sleep
+    bool done = false;       // skip the loop on early ash failure
+    bool fatal_exit = false;
+    if (ash_pid < 0) {
+        serial_msg(serial_fd, "[terminal] ERROR: fork failed\r\n");
+        done = true;
+    } else {
+        // Make ash's process group the PTY foreground group (master side
+        // only; the physical TTY / its group is not touched).
+        int pgid = getpgid(ash_pid);
+        if (pgid < 0) {
+            // ash may already be gone (fast exit): reap it and fall to cleanup.
+            if (waitpid(ash_pid, NULL, WNOHANG) == ash_pid) {
+                serial_msg(serial_fd, "[terminal] ERROR: ash exited immediately\r\n");
+                ash_pid = -1;
+                done = true;
+            }
+        } else if (ioctl(pty_fd, TIOCSPGRP, &pgid) < 0) {
+            serial_msg(serial_fd, "[terminal] WARN: PTY TIOCSPGRP failed\r\n");
+        }
+    }
+
+    // 12. Main event loop: 30 FPS throttle; poll never blocks longer than
+    //     250ms so display recovery / winsize retry always make progress.
     struct pollfd fds[2] = {
         {.fd = tty_fd, .events = POLLIN},
         {.fd = pty_fd, .events = POLLIN}
     };
-    char *buf = (char *)malloc(2048);
-    if (!buf) exit(1);
     uint64_t last_present_ms = 0;
     int present_failures = 0;
     bool dirty_pending = false;
     uint64_t last_cmd_submit_ms = 0;
-    bool fatal_exit = false;
+    bool serial_only_logged = false;
 
 #define CMD_HOLD_MS        500
 
-    while (1) {
+    while (!done) {
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         uint64_t now_ms = (uint64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+
+        // 0. Display mode recovery (checked every wakeup, independent of
+        //    CMD_HOLD and of dirty state).
+        uint64_t gen_before = disp.generation;
+        int rr = terminal_display_refresh(&disp, fb_fd, now_ms);
+        if (rr < 0 && !serial_only_logged) {
+            serial_msg(serial_fd, "\r\n[terminal] graphics unavailable, serial only\r\n");
+            serial_only_logged = true;
+        }
+        if (disp.generation != gen_before) {
+            last_present_ms = now_ms;       // redraw already presented
+            dirty_pending = false;
+            present_failures = 0;
+        }
+        if (disp.pending_winsize && now_ms >= ws_retry_ms) {
+            if (send_winsize(pty_fd) != 0) ws_retry_ms = now_ms + TERMINAL_RETRY_MS;
+        }
+
         uint64_t elapsed = now_ms - last_present_ms;
         bool hold_cmd = (now_ms - last_cmd_submit_ms < CMD_HOLD_MS);
 
         // 1. Present immediately if interval elapsed and not holding for command startup
-        if (dirty_pending && elapsed >= FRAME_INTERVAL_MS && !hold_cmd) {
-            term_render_flush(&render);
-            if (gfx_present(gfx) == 0) {
+        if (dirty_pending && elapsed >= FRAME_INTERVAL_MS && !hold_cmd &&
+            !(disp.retry_deadline_ms && now_ms < disp.retry_deadline_ms)) {
+            if (terminal_display_present(&disp, now_ms) == 0) {
                 last_present_ms = now_ms;
                 dirty_pending = false;
                 present_failures = 0;
             } else {
+                int e = errno;
                 last_present_ms = now_ms;
-                present_failures++;
-                if (present_failures >= MAX_PRESENT_FAILURES) {
-                    if (serial_fd >= 0) {
-                        const char msg[] = "\r\n[terminal] FATAL: graphics present failed repeatedly, aborting\r\n";
-                        write(serial_fd, msg, sizeof(msg) - 1);
-                    }
+                // Mode-related failures are recovered via refresh and never
+                // count toward the fatal limit.
+                if (e != EAGAIN && e != ESTALE && e != EBUSY &&
+                    ++present_failures >= MAX_PRESENT_FAILURES) {
+                    serial_msg(serial_fd, "\r\n[terminal] FATAL: graphics present failed repeatedly, aborting\r\n");
                     fatal_exit = true;
                     sleep(2);
                     break;
@@ -297,17 +320,16 @@ int main(void)
         }
 
         // 2. Compute poll timeout
-        int timeout_ms = -1;
+        int base = -1;
         if (dirty_pending) {
             uint64_t cur_elapsed = now_ms - last_present_ms;
             int frame_wait = (cur_elapsed < FRAME_INTERVAL_MS) ?
                              (int)(FRAME_INTERVAL_MS - cur_elapsed) : 0;
             int cmd_wait = (now_ms - last_cmd_submit_ms < CMD_HOLD_MS) ?
                            (int)(CMD_HOLD_MS - (now_ms - last_cmd_submit_ms)) : 0;
-            timeout_ms = (frame_wait > cmd_wait) ? frame_wait : cmd_wait;
-        } else {
-            timeout_ms = -1; // Idle -> deep sleep
+            base = (frame_wait > cmd_wait) ? frame_wait : cmd_wait;
         }
+        int timeout_ms = terminal_display_poll_timeout(&disp, base, now_ms);
 
         int pr = poll(fds, 2, timeout_ms);
         if (pr < 0) {
@@ -315,7 +337,7 @@ int main(void)
             break;
         }
 
-        // 3. Process keyboard input
+        // 3. Process keyboard input (forwarded even when graphics are down)
         if (fds[0].revents & POLLIN) {
             int n = read(tty_fd, buf, 2048);
             if (n > 0) {
@@ -362,19 +384,20 @@ int main(void)
                 }
             }
 
-            if (term_render_cursor_update(&render)) dirty_pending = true;
+            if (term_render_cursor_update(&disp.render)) dirty_pending = true;
             if (shell_exited) break;
         }
     }
 
-    // 13. Teardown
-    if (!fatal_exit) {
-        term_render_clear(&render);
-        gfx_present(gfx);
+    // 13. Teardown (the view is closed exactly once, via terminal_display_close)
+    if (!fatal_exit && !disp.serial_only && disp.gfx) {
+        term_render_clear(&disp.render);
+        gfx_present(disp.gfx);
     }
-    waitpid(ash_pid, NULL, 0);
+    if (ash_pid > 0) waitpid(ash_pid, NULL, 0);
     term_core_free(&core);
-    gfx_close(gfx);
+    terminal_display_close(&disp);
+    close(fb_fd);
     close(pty_fd); close(tty_fd);
     if (serial_fd >= 0) close(serial_fd);
     free(buf);

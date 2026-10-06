@@ -12,6 +12,7 @@
 #include "terminal_core.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 enum { CS_NORMAL = 0, CS_ESC = 1, CS_CSI = 2 };
 
@@ -89,6 +90,53 @@ void term_core_init(term_core_t *t, int rows, int cols)
     if (t->main_buf) memset(t->main_buf, 0, n * sizeof(term_cell_t));
     if (t->alt_buf)  memset(t->alt_buf,  0, n * sizeof(term_cell_t));
     if (t->dirty)    memset(t->dirty,    0, n * sizeof(bool));
+}
+
+static int clamp_i(int v, int lo, int hi)
+{
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+int term_core_resize(term_core_t *t, int rows, int cols)
+{
+    if (rows <= 0 || cols <= 0) return -1;
+    if ((size_t)rows > SIZE_MAX / (size_t)cols ||
+        (size_t)rows * (size_t)cols > SIZE_MAX / sizeof(term_cell_t)) {
+        return -1;
+    }
+    size_t n = (size_t)rows * (size_t)cols;
+    term_cell_t *nm = malloc(n * sizeof(term_cell_t));
+    term_cell_t *na = nm ? malloc(n * sizeof(term_cell_t)) : NULL;
+    bool *nd = na ? malloc(n * sizeof(bool)) : NULL;
+    if (!nm || !na || !nd) {
+        free(nm); free(na); free(nd);
+        return -1;
+    }
+    memset(nm, 0, n * sizeof(term_cell_t));
+    memset(na, 0, n * sizeof(term_cell_t));
+    memset(nd, 1, n * sizeof(bool));   // every new cell needs a redraw
+
+    if (has_buffers(t)) {
+        int cr = t->rows < rows ? t->rows : rows;
+        int cc = t->cols < cols ? t->cols : cols;
+        for (int r = 0; r < cr; r++) {
+            memcpy(nm + (size_t)r * cols, t->main_buf + (size_t)r * t->cols,
+                   (size_t)cc * sizeof(term_cell_t));
+            memcpy(na + (size_t)r * cols, t->alt_buf + (size_t)r * t->cols,
+                   (size_t)cc * sizeof(term_cell_t));
+        }
+    }
+
+    // Commit: nothing below can fail.
+    free(t->main_buf); free(t->alt_buf); free(t->dirty);
+    t->main_buf = nm; t->alt_buf = na; t->dirty = nd;
+    t->rows = rows; t->cols = cols;
+    t->row = clamp_i(t->row, 0, rows - 1);
+    t->col = clamp_i(t->col, 0, cols - 1);
+    t->saved_row = clamp_i(t->saved_row, 0, rows - 1);
+    t->saved_col = clamp_i(t->saved_col, 0, cols - 1);
+    t->scroll_lines_pending = 0;
+    return 0;
 }
 
 void term_core_free(term_core_t *t)

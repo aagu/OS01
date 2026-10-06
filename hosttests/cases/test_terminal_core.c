@@ -319,6 +319,81 @@ TEST_FUNC(test_reinit_resizes) {
     assert_eq(0, cell(core.main_buf, 0, 0)->glyph);   /* fresh blank grid */
 }
 
+/* ── term_core_resize (Task 7) ─────────────────────────────── */
+static int g_malloc_fail_nth = 0;   /* 1-based: fail the Nth malloc; 0 = off */
+void *__real_malloc(size_t n);
+void *__wrap_malloc(size_t n)
+{
+    if (g_malloc_fail_nth > 0 && --g_malloc_fail_nth == 0) return NULL;
+    return __real_malloc(n);
+}
+
+TEST_FUNC(test_resize_shrink_keeps_overlap) {
+    term_core_init(&core, 4, 6);
+    term_core_input(&core, 'A');            /* (0,0) */
+    core.alt_buf[0 * 6 + 1].glyph = 'a';
+    core.alt_active = true;
+    core.row = 3; core.col = 5; core.saved_row = 3; core.saved_col = 5;
+    assert_eq(0, term_core_resize(&core, 2, 3));
+    assert_eq(2, core.rows); assert_eq(3, core.cols);
+    assert_eq('A', core.main_buf[0].glyph);
+    assert_eq('a', core.alt_buf[1].glyph);
+    assert_true(core.alt_active);
+    assert_eq(1, core.row); assert_eq(2, core.col);
+    assert_eq(1, core.saved_row); assert_eq(2, core.saved_col);
+    for (int i = 0; i < 6; i++) assert_true(core.dirty[i]);
+    assert_eq(0, core.scroll_lines_pending);
+}
+
+TEST_FUNC(test_resize_shrink_keeps_M) {
+    term_core_init(&core, 4, 6);
+    core.main_buf[1 * 6 + 2].glyph = 'M';
+    assert_eq(0, term_core_resize(&core, 2, 3));
+    assert_eq('M', core.main_buf[1 * 3 + 2].glyph);
+}
+
+TEST_FUNC(test_resize_expand_blank_and_parser_state) {
+    term_core_init(&core, 2, 3);
+    core.main_buf[1 * 3 + 2].glyph = 'X';
+    core.alt_buf[0].glyph = 'y';
+    core.csi_state = 2; core.csi_param = 7; core.csi_qmark = true;
+    core.cursor_visible = false;
+    assert_eq(0, term_core_resize(&core, 4, 6));
+    assert_eq('X', core.main_buf[1 * 6 + 2].glyph);
+    assert_eq('y', core.alt_buf[0].glyph);
+    assert_eq(0, core.main_buf[3 * 6 + 5].glyph);
+    assert_eq(0, core.main_buf[1 * 6 + 3].glyph);
+    assert_eq(2, core.csi_state); assert_eq(7, core.csi_param);
+    assert_true(core.csi_qmark); assert_false(core.cursor_visible);
+    for (int i = 0; i < 24; i++) assert_true(core.dirty[i]);
+}
+
+TEST_FUNC(test_resize_enomem_each_array_unchanged) {
+    for (int nth = 1; nth <= 3; nth++) {
+        term_core_init(&core, 3, 4);
+        core.main_buf[5].glyph = 'Q';
+        term_cell_t *mb = core.main_buf, *ab = core.alt_buf;
+        bool *db = core.dirty;
+        core.row = 2; core.col = 3;
+        g_malloc_fail_nth = nth;
+        assert_eq(-1, term_core_resize(&core, 6, 8));
+        g_malloc_fail_nth = 0;
+        assert_true(core.main_buf == mb); assert_true(core.alt_buf == ab);
+        assert_true(core.dirty == db);
+        assert_eq(3, core.rows); assert_eq(4, core.cols);
+        assert_eq('Q', core.main_buf[5].glyph);
+        assert_eq(2, core.row); assert_eq(3, core.col);
+    }
+}
+
+TEST_FUNC(test_resize_rejects_bad_dims) {
+    term_core_init(&core, 3, 4);
+    assert_eq(-1, term_core_resize(&core, 0, 4));
+    assert_eq(-1, term_core_resize(&core, 3, -1));
+    assert_eq(-1, term_core_resize(&core, 0x7fffffff, 0x7fffffff));
+    assert_eq(3, core.rows);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_init_blank),
     TEST_ENTRY(test_write_glyph),
@@ -335,6 +410,11 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_cursor_save_restore_dec),
     TEST_ENTRY(test_large_resolution_no_clamp),
     TEST_ENTRY(test_reinit_resizes),
+    TEST_ENTRY(test_resize_shrink_keeps_overlap),
+    TEST_ENTRY(test_resize_shrink_keeps_M),
+    TEST_ENTRY(test_resize_expand_blank_and_parser_state),
+    TEST_ENTRY(test_resize_enomem_each_array_unchanged),
+    TEST_ENTRY(test_resize_rejects_bad_dims),
 TEST_LIST_END
 
 int main() {

@@ -38,8 +38,8 @@ USER_RAW_LDFLAGS := -m elf_x86_64 -static -no-pie -T linker.ld -L$(TARGET_LIBDIR
 
 # ── Source discovery ───────────────────────────────────────
 # crt0.S is startup code, not a program
-# terminal_core.c / terminal_render.c / tetris_logic.c are libraries, not standalone programs
-C_SOURCES := $(filter-out terminal_core.c terminal_render.c tetris_logic.c,$(wildcard *.c))
+# terminal_core.c / terminal_render.c / terminal_display.c / tetris_logic.c are libraries, not standalone programs
+C_SOURCES := $(filter-out terminal_core.c terminal_render.c terminal_display.c tetris_logic.c,$(wildcard *.c))
 ASM_SOURCES := $(wildcard *.S)
 
 # Each .c → .elf (e.g. init.c → init.elf)
@@ -102,9 +102,9 @@ $(BUILD_DIR)/%.elf: $(OBJ_DIR)/%.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
 # ══════════════════════════════════════════════════════════════
 TERMINAL_FONT_OBJ := $(OBJ_DIR)/terminal_font.o
 
-$(BUILD_DIR)/terminal.elf: $(OBJ_DIR)/terminal.o $(OBJ_DIR)/terminal_render.o $(OBJ_DIR)/terminal_core.o $(CRT0_OBJ) $(SIGRETURN_OBJ) $(TERMINAL_FONT_OBJ) linker.ld
+$(BUILD_DIR)/terminal.elf: $(OBJ_DIR)/terminal.o $(OBJ_DIR)/terminal_render.o $(OBJ_DIR)/terminal_core.o $(OBJ_DIR)/terminal_display.o $(CRT0_OBJ) $(SIGRETURN_OBJ) $(TERMINAL_FONT_OBJ) linker.ld
 	@mkdir -p $(dir $@)
-	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/terminal.o $(OBJ_DIR)/terminal_render.o $(OBJ_DIR)/terminal_core.o $(TERMINAL_FONT_OBJ) -lgfx -lc
+	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/terminal.o $(OBJ_DIR)/terminal_render.o $(OBJ_DIR)/terminal_core.o $(OBJ_DIR)/terminal_display.o $(TERMINAL_FONT_OBJ) -lgfx -lc
 	$(OBJ_CPY) --strip-debug $@
 
 $(TERMINAL_FONT_OBJ): terminal_font.psf

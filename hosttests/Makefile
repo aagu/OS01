@@ -80,6 +80,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_canon.elf \
     $(TEST_BLD)/test_terminal_core.elf \
     $(TEST_BLD)/test_terminal_render.elf \
+    $(TEST_BLD)/test_terminal_display.elf \
     $(TEST_BLD)/test_tetris_logic.elf \
     $(TEST_BLD)/test_sync_primitives.elf \
     $(TEST_BLD)/test_poll_requested.elf \
@@ -163,7 +164,7 @@ $(TEST_BLD)/test_slab_idempotent_reservation.elf \
     $(TEST_BLD)/test_fb_resolution_ioctl.elf \
     $(TEST_BLD)/test_pty_winsize.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-pty-winsize
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-pty-winsize test-terminal-display
 
 all: $(TEST_BINS)
 
@@ -1145,7 +1146,7 @@ $(TEST_BLD)/test_terminal_core.o: $(TEST_CASES)/test_terminal_core.c
 	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user -c $< -o $@
 
 $(TEST_BLD)/test_terminal_core.elf: $(TEST_BLD)/test_terminal_core.o $(TEST_BLD)/terminal_core.o
-	$(HOST_CC) -o $@ $^
+	$(HOST_CC) -Wl,--wrap=malloc -o $@ $^
 
 # Terminal render test — compiles REAL user/terminal_render.c + terminal_core.c + libgfx
 $(TEST_BLD)/terminal_render.o: $(TESTS_DIR)/user/terminal_render.c
@@ -1166,6 +1167,30 @@ $(TEST_BLD)/test_terminal_render.elf: $(TEST_BLD)/test_terminal_render.o \
 
 test-terminal-render: $(TEST_BLD)/test_terminal_render.elf
 	$<
+
+# Terminal display transaction test — REAL user/terminal_display.c with an
+# injected libgfx/FBIOGET_STATE backend; malloc is wrapped for ENOMEM injection.
+$(TEST_BLD)/terminal_display.o: $(TESTS_DIR)/user/terminal_display.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GFX_CLIENT_HOST_CFLAGS) -I$(TEST_INC) -I$(TESTS_DIR)/user -c $< -o $@
+
+$(TEST_BLD)/test_terminal_display.o: $(TEST_CASES)/test_terminal_display.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GFX_CLIENT_HOST_CFLAGS) -I$(TEST_INC) -I$(TESTS_DIR)/user -c $< -o $@
+
+$(TEST_BLD)/test_terminal_display.elf: $(TEST_BLD)/test_terminal_display.o \
+		$(TEST_BLD)/terminal_display.o \
+		$(TEST_BLD)/terminal_render.o \
+		$(TEST_BLD)/terminal_core.o \
+		$(TEST_BLD)/libgfx_gfx_production.o \
+		$(TEST_BLD)/libgfx_line_production.o \
+		$(TEST_BLD)/libgfx_sprite_production.o
+	$(HOST_CC) -Wl,--wrap=malloc -o $@ $^
+
+test-terminal-display: $(TEST_BLD)/test_terminal_core.elf $(TEST_BLD)/test_terminal_render.elf $(TEST_BLD)/test_terminal_display.elf
+	$(TEST_BLD)/test_terminal_core.elf
+	$(TEST_BLD)/test_terminal_render.elf
+	$(TEST_BLD)/test_terminal_display.elf
 
 # Tetris logic test — compiles REAL user/tetris_logic.c (pure C)
 $(TEST_BLD)/tetris_logic.o: $(TESTS_DIR)/user/tetris_logic.c

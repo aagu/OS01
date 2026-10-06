@@ -43,6 +43,15 @@ typedef struct {
 // buffers first (so it is idempotent).  Call term_core_free() to release.
 void term_core_init(term_core_t *t, int rows, int cols);
 
+// Resize a live core to rows × cols (both > 0).  All three new arrays are
+// allocated first; on any failure nothing is modified and -1 is returned
+// (ENOMEM for allocation failure / EINVAL for bad dimensions — errno is
+// not touched here; callers treat -1 as ENOMEM).  On success both screens keep
+// their top-left overlapping rectangle (no reflow), the cursor / saved cursor
+// are clamped, every cell is marked dirty and scroll_lines_pending is 0.
+// Parser state, alt_active and cursor_visible are preserved.
+int term_core_resize(term_core_t *t, int rows, int cols);
+
 // Release the buffers allocated by term_core_init().  Safe to call more than
 // once, and on a zero-initialized (never-inited) core.
 void term_core_free(term_core_t *t);
