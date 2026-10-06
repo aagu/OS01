@@ -179,3 +179,13 @@ __attribute__((weak)) uint32_t bga_filter_modes(const bga_caps_t *caps, uint64_t
     (void)out;
     return 0;
 }
+
+__attribute__((weak)) enum bga_result bga_apply_mode(const struct fb_info *target)
+{
+    (void)target;
+    return BGA_FAILED;
+}
+
+__attribute__((weak)) void console_notify_resize_locked(void)
+{
+}

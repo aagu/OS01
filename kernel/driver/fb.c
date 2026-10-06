@@ -19,6 +19,7 @@
 #include <driver/serial.h>      // write_serial
 #include <fs/vfs.h>             // vfs_node_t, vfs_node_put
 #include <fs/devfs.h>           // devfs_ops
+#include <memory/uaccess.h>     // syscall_check_user_range, copy_*_ft
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -41,7 +42,11 @@ static int fb_read(struct vfs_node *node, uint64_t offset,
 
     struct fb_info info;
     fb_snapshot_t snap;
-    if (fb_snapshot_read(&snap) == 0 && snap.state.info.width > 0) {
+    int rc = fb_snapshot_read(&snap);
+    if (rc < 0) {
+        return rc;
+    }
+    if (snap.state.info.width > 0) {
         info = snap.state.info;
     } else {
         info.width  = (uint32_t)Pos.XResolution;
@@ -169,7 +174,7 @@ static int fb_mmap(struct vfs_node *node, struct vma *vma_)
 // ── fb_ioctl: device control ─────────────────────────────────
 static int fb_ioctl(struct vfs_node *node, int cmd, void *arg)
 {
-    (void)node; (void)arg;
+    (void)node;
 
     switch (cmd) {
     case FBIOSURRENDER:
@@ -183,6 +188,56 @@ static int fb_ioctl(struct vfs_node *node, int cmd, void *arg)
             spin_unlock_irqrestore(&Pos.lock, flags);
         }
         return 0;
+
+    case FBIOGET_CURR_MODE: {
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg, sizeof(struct fb_info), true))
+            return -EFAULT;
+        struct fb_info kinfo;
+        int rc = fb_get_info(&kinfo);
+        if (rc < 0) return rc;
+        if (copy_to_user_ft(arg, &kinfo, sizeof(kinfo)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+
+    case FBIOGET_STATE: {
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg, sizeof(struct fb_state), true))
+            return -EFAULT;
+        struct fb_state kstate;
+        int rc = fb_get_state(&kstate);
+        if (rc < 0) return rc;
+        if (copy_to_user_ft(arg, &kstate, sizeof(kstate)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+
+    case FBIOGET_MODES: {
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg, sizeof(struct fb_modes_req), true))
+            return -EFAULT;
+        uint32_t capacity = 0;
+        if (copy_from_user_ft(&capacity, &((struct fb_modes_req *)arg)->capacity, sizeof(uint32_t)) < 0)
+            return -EFAULT;
+        struct fb_modes_req kmodes;
+        int rc = fb_get_modes(capacity, &kmodes);
+        if (rc < 0) return rc;
+        if (copy_to_user_ft(arg, &kmodes, sizeof(kmodes)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+
+    case FBIOSET_MODE: {
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg, sizeof(struct fb_set_mode_req), false))
+            return -EFAULT;
+        struct fb_set_mode_req kreq;
+        if (copy_from_user_ft(&kreq, arg, sizeof(kreq)) < 0)
+            return -EFAULT;
+        return fb_set_mode(&kreq);
+    }
+
     default:
         return -ENOTTY;
     }
@@ -204,7 +259,11 @@ int fb_get_info(struct fb_info *out)
 {
     if (!out) return -EINVAL;
     fb_snapshot_t snap;
-    if (fb_snapshot_read(&snap) == 0 && snap.state.info.width > 0) {
+    int rc = fb_snapshot_read(&snap);
+    if (rc < 0) {
+        return rc;
+    }
+    if (snap.state.info.width > 0) {
         *out = snap.state.info;
         return 0;
     }

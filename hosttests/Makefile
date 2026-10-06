@@ -159,9 +159,10 @@ $(TEST_BLD)/test_slab_idempotent_reservation.elf \
     $(TEST_BLD)/test_fb_state.elf \
     $(TEST_BLD)/test_fb_writers.elf \
     $(TEST_BLD)/test_bga_resolution.elf \
-    $(TEST_BLD)/test_bga_non_x86.elf
+    $(TEST_BLD)/test_bga_non_x86.elf \
+    $(TEST_BLD)/test_fb_resolution_ioctl.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl
 
 all: $(TEST_BINS)
 
@@ -2704,5 +2705,16 @@ $(TEST_BLD)/test_bga_non_x86.elf: $(TEST_BLD)/test_bga_non_x86.o $(TEST_BLD)/bga
 test-bga: $(TEST_BLD)/test_bga_resolution.elf $(TEST_BLD)/test_bga_non_x86.elf
 	$(TEST_BLD)/test_bga_resolution.elf
 	$(TEST_BLD)/test_bga_non_x86.elf
+
+# Framebuffer safe ioctl and SET state machine test (QEMU resolution switcher Task 5)
+$(TEST_BLD)/test_fb_resolution_ioctl.o: $(TEST_CASES)/test_fb_resolution_ioctl.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FB_WRITERS_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_fb_resolution_ioctl.elf: $(TEST_BLD)/test_fb_resolution_ioctl.o $(TEST_BLD)/fb_state.o $(TEST_BLD)/fb_map.o $(TEST_BLD)/fb_resolution_runtime.o $(TEST_BLD)/fb_production.o $(TEST_BLD)/console_production.o $(TEST_BLD)/bga_production.o $(TEST_BLD)/pci_match_production.o
+	$(HOST_CC) -lpthread -o $@ $^
+
+test-fb-ioctl: $(TEST_BLD)/test_fb_resolution_ioctl.elf
+	$<
 
 

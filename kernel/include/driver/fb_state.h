@@ -34,6 +34,10 @@ void fb_mark_raw_mmap_seen(void);
 bool fb_has_raw_mmap_seen(void);
 uint32_t fb_active_writers_count(void);
 
+int fb_set_mode(const struct fb_set_mode_req *req);
+int fb_get_state(struct fb_state *out);
+int fb_get_modes(uint32_t capacity, struct fb_modes_req *out);
+
 #ifdef OS01_HOST_TEST
 void fb_state__test_set_generation(uint64_t generation);
 #endif

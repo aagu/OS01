@@ -8,6 +8,7 @@
 #include <driver/fb_state.h>
 #include <driver/bga.h>
 #include <core/printk.h>
+#include <tty/console.h>
 #include <sync/mutex.h>
 #include <arch/spinlock.h>
 #include <arch/clocksource.h>
@@ -30,14 +31,14 @@ static uint64_t        g_fb_mapped_size;
 static uint64_t        g_vram_capacity;
 static uint32_t        g_active_writers;
 static bool            g_transitioning;
-static bool            g_backend_ready __attribute__((unused));
+static bool            g_backend_ready;
 static bool            g_backend_failed;
-static bool            g_raw_mmap_seen __attribute__((unused));
+static bool            g_raw_mmap_seen;
 static bool            g_initialized;
 
 static bga_caps_t      g_bga_caps __attribute__((unused));
-static struct fb_info  g_bga_modes[FB_MAX_MODES] __attribute__((unused));
-static uint32_t        g_bga_modes_count __attribute__((unused));
+static struct fb_info  g_bga_modes[FB_MAX_MODES];
+static uint32_t        g_bga_modes_count;
 
 void fb_bootstrap_state(uint64_t phys, uint64_t gop_bytes, const struct fb_info *info)
 {
@@ -322,6 +323,205 @@ uint32_t fb_active_writers_count(void)
     uint32_t count = g_active_writers;
     spin_unlock_irqrestore(&display_state_lock, flags);
     return count;
+}
+
+static void fb_commit_layout_locked(const struct fb_info *info, bool redraw_invalidated)
+{
+    uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
+    uint64_t state_flags = spin_lock_irqsave(&display_state_lock);
+
+    if (info) {
+        g_fb_state.info = *info;
+        Pos.XResolution = (int32_t)info->width;
+        Pos.YResolution = (int32_t)info->height;
+        if (g_fb_mapped_size > 0) {
+            Pos.FB_length = g_fb_mapped_size;
+        } else {
+            Pos.FB_length = (uint64_t)info->width * info->height * 4;
+        }
+    }
+
+    if (info || redraw_invalidated) {
+        g_fb_state.generation++;
+    }
+
+    console_notify_resize_locked();
+
+    spin_unlock_irqrestore(&display_state_lock, state_flags);
+    spin_unlock_irqrestore(&Pos.lock, pos_flags);
+}
+
+int fb_get_state(struct fb_state *out)
+{
+    if (!out) {
+        return -EINVAL;
+    }
+
+    fb_control_lock();
+
+    if (!g_initialized) {
+        fb_control_unlock();
+        return -EAGAIN;
+    }
+    if (g_backend_failed) {
+        fb_control_unlock();
+        return -EIO;
+    }
+
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    *out = g_fb_state;
+    out->reserved = 0;
+    spin_unlock_irqrestore(&display_state_lock, flags);
+
+    fb_control_unlock();
+    return 0;
+}
+
+int fb_get_modes(uint32_t capacity, struct fb_modes_req *out)
+{
+    if (!out) {
+        return -EINVAL;
+    }
+    if (capacity > FB_MAX_MODES) {
+        return -EINVAL;
+    }
+
+    fb_control_lock();
+
+    if (!g_initialized) {
+        fb_control_unlock();
+        return -EAGAIN;
+    }
+    if (g_backend_failed) {
+        fb_control_unlock();
+        return -EIO;
+    }
+    if (!g_backend_ready) {
+        fb_control_unlock();
+        return -ENODEV;
+    }
+
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    memset(out, 0, sizeof(*out));
+    uint32_t total = g_bga_modes_count;
+    uint32_t count = capacity < total ? capacity : total;
+    out->capacity = capacity;
+    out->count = count;
+    out->total = total;
+    for (uint32_t i = 0; i < count; i++) {
+        out->modes[i] = g_bga_modes[i];
+    }
+    spin_unlock_irqrestore(&display_state_lock, flags);
+
+    fb_control_unlock();
+    return 0;
+}
+
+int fb_set_mode(const struct fb_set_mode_req *req)
+{
+    if (!req) {
+        return -EINVAL;
+    }
+
+    uint32_t bpp = req->bpp;
+    if (bpp != 0 && bpp != 32) {
+        return -EINVAL;
+    }
+    if (req->width == 0 || req->height == 0) {
+        return -EINVAL;
+    }
+
+    fb_control_lock();
+
+    if (!g_initialized) {
+        fb_control_unlock();
+        return -EAGAIN;
+    }
+    if (g_backend_failed) {
+        fb_control_unlock();
+        return -EIO;
+    }
+    if (!g_backend_ready) {
+        fb_control_unlock();
+        return -ENODEV;
+    }
+
+    /* Check whitelist */
+    bool found = false;
+    for (uint32_t i = 0; i < g_bga_modes_count; i++) {
+        if (g_bga_modes[i].width == req->width &&
+            g_bga_modes[i].height == req->height) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        fb_control_unlock();
+        return -EINVAL;
+    }
+
+    /* Capacity check */
+    uint64_t target_size = (uint64_t)req->width * req->height * 4;
+    uint64_t limit = g_vram_capacity < g_fb_mapped_size ? g_vram_capacity : g_fb_mapped_size;
+    if (target_size > limit) {
+        fb_control_unlock();
+        return -EINVAL;
+    }
+
+    /* No-op check: identical mode returns 0 immediately */
+    if (g_fb_state.info.width == req->width &&
+        g_fb_state.info.height == req->height &&
+        g_fb_state.info.bpp == 32) {
+        fb_control_unlock();
+        return 0;
+    }
+
+    /* Raw sticky check: changing mode when mmap seen returns -EBUSY */
+    if (g_raw_mmap_seen) {
+        fb_control_unlock();
+        return -EBUSY;
+    }
+
+    /* Writer admission drain */
+    int tr_rc = fb_transition_begin(false);
+    if (tr_rc < 0) {
+        fb_control_unlock();
+        return tr_rc;
+    }
+
+    uint64_t old_active_size = (uint64_t)g_fb_state.info.width * g_fb_state.info.height * 4;
+    struct fb_info target_info = {
+        .width = req->width,
+        .height = req->height,
+        .stride = req->width * 4,
+        .bpp = 32,
+        .format = FB_FORMAT_RGB32
+    };
+
+    enum bga_result bres = bga_apply_mode(&target_info);
+
+    if (bres == BGA_APPLIED) {
+        if (Pos.FB_addr) {
+            memset(Pos.FB_addr, 0, (uint64_t)req->width * req->height * 4);
+        }
+        fb_commit_layout_locked(&target_info, false);
+        fb_transition_end();
+        fb_control_unlock();
+        return 0;
+    } else if (bres == BGA_ROLLED_BACK) {
+        if (Pos.FB_addr && old_active_size > 0) {
+            memset(Pos.FB_addr, 0, old_active_size);
+        }
+        fb_commit_layout_locked(NULL, true);
+        fb_transition_end();
+        fb_control_unlock();
+        return -EIO;
+    } else {
+        /* BGA_FAILED: permanently close admission */
+        fb_mark_failed();
+        fb_control_unlock();
+        return -EIO;
+    }
 }
 
 #ifdef OS01_HOST_TEST
