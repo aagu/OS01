@@ -151,7 +151,7 @@ $(BUILD_DIR)/desktop.elf: $(OBJ_DIR)/desktop.o $(CRT0_OBJ) $(SIGRETURN_OBJ) link
 # ══════════════════════════════════════════════════════════════
 $(BUILD_DIR)/test_lvgl.elf: $(OBJ_DIR)/test_lvgl.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
 	@mkdir -p $(dir $@)
-	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/test_lvgl.o -llvgl -lc
+	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/test_lvgl.o -llvgl -lgfx -lc
 	$(OBJ_CPY) --strip-debug $@
 
 
