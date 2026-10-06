@@ -154,7 +154,7 @@ run-aarch64-uefi: aarch64-uefi
 	  sparse="$$dtb_dir/qemu-virt.dtb.sparse"; \
 	  packed="$$dtb_dir/qemu-virt.dtb"; \
 	  $(AARCH64_QEMU) -M virt,gic-version=2 -cpu cortex-a53 -smp $(SMP) \
-	    -machine "dumpdtb=$$sparse" -display none -m $(MEMORY); \
+	    -machine "dumpdtb=$$sparse" -display $(DISPLAY) -m $(MEMORY); \
 	  dtc -I dtb -O dtb -o "$$packed" "$$sparse"; \
 	  rm -f "$$sparse"; \
 	  extra_dtb="-dtb $$packed" ;; \
@@ -163,8 +163,9 @@ run-aarch64-uefi: aarch64-uefi
 	  -drive if=pflash,format=raw,readonly=on,file=$(AARCH64_UEFI_FIRMWARE) \
 	  -drive if=none,file=$(AARCH64_UEFI_DISK),format=raw,readonly=on,id=disk \
 	  -device virtio-blk-device,drive=disk \
+	  -device ramfb \
 	  $$extra_dtb \
-	  -serial stdio -display none -no-reboot
+	  -serial stdio -display $(DISPLAY) -no-reboot
 
 # The AArch64 PSCI SMP acceptance suite intentionally runs the production
 # firmware/image with multiple vCPU counts.  Its Python parser is host-only
