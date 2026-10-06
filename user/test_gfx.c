@@ -239,8 +239,14 @@ static void test_fullscreen_view(uint32_t *fb, const struct fb_info *info,
     gfx_line(h, 0, 0, dmax - 1, dmax - 1, COLOR_WHITE);
 
     /* Push the frame to the kernel. */
+    errno = 0;
     if (gfx_present(h) != 0)
         FAIL("gfx_present returned %d errno=%d", -1, errno);
+    /* errno contract: the libgfx present wrapper must not introduce a
+     * spurious errno on success (it only propagates the kernel errno on
+     * failure). */
+    if (errno != 0)
+        FAIL("gfx_present set errno=%d on success", errno);
 
     /* The /dev/fb mapping is updated by the kernel's per-row
      * fault-tolerant copy.  Give the kernel a brief moment to

@@ -24,14 +24,17 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <errno.h>
 #include <poll.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <time.h>
+#include <sys/time.h>
 #include <gfx.h>
 #include "tetris_logic.h"
+#include "gfx_client_policy.h"
 
 // ── fb_info (must match kernel definition) ──────────────────
 struct fb_info {
@@ -74,9 +77,48 @@ static void draw_rect(int x0, int y0, int w, int h, uint32_t color)
 // present per frame).  Used after each render() and after each
 // clear-line flash so the user sees the updated framebuffer in
 // step with the game state.
-static void present(void)
+//
+// Task 8: apply the shared stale-view policy.  A transient EAGAIN
+// keeps the view and arms a >=250ms retry deadline (the caller must
+// not present again before it); a stale/permanent failure releases the
+// view and makes the caller exit non-zero.  Returns false on the
+// permanent class.  The failing errno is preserved.
+static uint64_t gfx_retry_deadline_ms = 0;
+
+static uint64_t client_now_ms(void)
 {
-    gfx_present(gfx);
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+static bool present(void)
+{
+    uint64_t now = client_now_ms();
+    if (gfx_retry_deadline_ms != 0 && now < gfx_retry_deadline_ms)
+        return true;                 // throttled: skip until the deadline
+    errno = 0;
+    if (gfx_present(gfx) == 0) {
+        gfx_retry_deadline_ms = 0;
+        return true;
+    }
+    int saved = errno;
+    if (gfx_client_present_policy(saved) == 1) {     // EAGAIN: keep view
+        gfx_retry_deadline_ms = now + GFX_CLIENT_RETRY_MS;
+        return true;
+    }
+    const char *why = (saved == ESTALE)
+        ? "display mode changed, restart the app"
+        : "display device failure";
+    char msg[128];
+    int n = snprintf(msg, sizeof(msg), "tetris: %s (errno=%d); exiting\n",
+                     why, saved);
+    if (n > 0) {
+        ssize_t w = write(2, msg, (size_t)n);
+        (void)w;
+    }
+    errno = saved;                   // cleanup below must not clobber it
+    return false;
 }
 
 // Render board + falling piece, diffing against prev_view.
@@ -233,6 +275,7 @@ int main(int argc, char **argv)
     int lines = 0;
     int tick_ms = fast ? 50 : 800;   // classic-start gravity (0.8s/row)
     bool game_over = false;
+    int exit_code = 0;               // non-zero once the gfx view is stale
     // RNG seed: time ^ pid — different every launch
     uint32_t rng = (uint32_t)time(NULL) ^ (uint32_t)getpid();
     if (rng == 0) rng = 0x9e3779b9;
@@ -290,7 +333,7 @@ lock_piece:
                     for (int c = 0; c < TETRIS_W; c++)
                         draw_cell(c, full_rows[i], 0xFFFFFF);
                 /* One present per visual event: flash now visible. */
-                present();
+                if (!present()) { exit_code = 1; goto done; }
                 struct pollfd pf = { .fd = STDIN_FILENO, .events = POLLIN, .revents = 0 };
                 poll(&pf, 1, fast ? 50 : 200);
                 // Force redraw of the cleared rows: prev_view must DIFFER
@@ -306,7 +349,7 @@ lock_piece:
 
         render(&board, &piece);
         /* One present per visual event: the render diff. */
-        present();
+        if (!present()) { exit_code = 1; goto done; }
     }
 
     // Leave the alt screen immediately (nanosleep is known-broken in
@@ -317,6 +360,6 @@ done:
         tcsetattr(STDIN_FILENO, TCSANOW, &orig_term);
     }
     gfx_close(gfx);
-    return 0;
+    return exit_code;
 }
 

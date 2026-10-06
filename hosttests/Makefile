@@ -162,9 +162,10 @@ $(TEST_BLD)/test_slab_idempotent_reservation.elf \
     $(TEST_BLD)/test_bga_resolution.elf \
     $(TEST_BLD)/test_bga_non_x86.elf \
     $(TEST_BLD)/test_fb_resolution_ioctl.elf \
-    $(TEST_BLD)/test_pty_winsize.elf
+    $(TEST_BLD)/test_pty_winsize.elf \
+    $(TEST_BLD)/test_setres.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-pty-winsize test-terminal-display
+.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-pty-winsize test-terminal-display test-clients
 
 all: $(TEST_BINS)
 
@@ -2200,6 +2201,52 @@ $(TEST_BLD)/test_gfx_primitives.elf: $(TEST_BLD)/test_gfx_primitives.o \
 	$(HOST_CC) -o $@ $^
 
 test-gfx-primitives: $(TEST_BLD)/test_gfx_primitives.elf
+	$<
+
+# setres CLI + long-running gfx client policy (QEMU resolution switcher
+# Task 8).  Host-compiles the REAL user/setres_parse.c, user/setres.c
+# (with -DSETRES_NO_MAIN so this TU owns main) and
+# user/gfx_client_policy.c.  libc open/close/ioctl are wrapped so the
+# test can assert the CLI's exact device ops (help opens NOTHING) and
+# inject GET_MODES / GET_STATE / SET_MODE results.
+#
+# The errno ABI shim (GFX_CLIENT_*_CFLAGS) is reused verbatim from the
+# libgfx client test: kernel/include is on the path first for
+# <uapi/fb.h> and its freestanding <errno.h>, so `errno` must be
+# redirected to glibc's TLS accessor.  user/ is added for the
+# "setres_parse.h" / "gfx_client_policy.h" includes.
+SETRES_HOST_CFLAGS := $(GFX_CLIENT_PROD_CFLAGS) -I$(TESTS_DIR)/user
+
+$(TEST_BLD)/gfx_client_policy.o: $(TESTS_DIR)/user/gfx_client_policy.c \
+		$(TESTS_DIR)/user/gfx_client_policy.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SETRES_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/setres_parse.o: $(TESTS_DIR)/user/setres_parse.c \
+		$(TESTS_DIR)/user/setres_parse.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SETRES_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/setres_cli.o: $(TESTS_DIR)/user/setres.c \
+		$(TESTS_DIR)/user/setres_parse.h \
+		$(TESTS_DIR)/kernel/include/uapi/fb.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SETRES_HOST_CFLAGS) -DSETRES_NO_MAIN -c $< -o $@
+
+$(TEST_BLD)/test_setres.o: $(TEST_CASES)/test_setres.c \
+		$(TESTS_DIR)/user/gfx_client_policy.h \
+		$(TESTS_DIR)/user/setres_parse.h \
+		$(TESTS_DIR)/kernel/include/uapi/fb.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GFX_CLIENT_TEST_CFLAGS) -I$(TESTS_DIR)/user -D_GNU_SOURCE -c $< -o $@
+
+$(TEST_BLD)/test_setres.elf: $(TEST_BLD)/test_setres.o \
+		$(TEST_BLD)/setres_cli.o \
+		$(TEST_BLD)/setres_parse.o \
+		$(TEST_BLD)/gfx_client_policy.o
+	$(HOST_CC) -Wl,--wrap=open,--wrap=close,--wrap=ioctl -o $@ $^
+
+test-clients: $(TEST_BLD)/test_setres.elf
 	$<
 
 clean:

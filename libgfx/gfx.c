@@ -156,6 +156,13 @@ int gfx_set_clip(gfx_handle_t *h, int32_t x, int32_t y,
 }
 
 /* ── gfx_present ──────────────────────────────────────────────── */
+/* errno contract (resolution-switcher spec §3.3): the wrapper must
+ * propagate the kernel errno of a FAILED present unchanged (EAGAIN =
+ * transient drain timeout, ESTALE = stale view after a mode switch,
+ * EIO = permanent device failure) and must not touch errno on success.
+ * Callers classify that errno with gfx_client_present_policy(); the
+ * client policy must never alter this propagation.  The request is
+ * re-formed on every call, so nothing is cached across present calls. */
 int gfx_present(gfx_handle_t *h)
 {
     if (!h) {

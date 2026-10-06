@@ -25,12 +25,14 @@
 #include <poll.h>
 #include <termios.h>
 #include <time.h>
+#include <sys/time.h>
 #include <sys/ioctl.h>
 #include <errno.h>
 
 #include <uapi/mouse.h>
 #include <gfx.h>
 #include "font8x16.h"
+#include "gfx_client_policy.h"
 
 #define FBIOSURRENDER 0x00004601
 
@@ -85,6 +87,40 @@ static bool window_open = true;
 static int mouse_x = 100;
 static int mouse_y = 100;
 static bool has_mouse = false;
+
+/* Monotonic retry deadline (ms) armed after a transient present failure. */
+static uint64_t gfx_retry_deadline_ms = 0;
+
+static uint64_t client_now_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+/* Apply the shared stale-view policy to a failed present.  Returns true
+ * when the desktop should keep running (transient EAGAIN schedules a
+ * >=250ms retry); false when the view is stale/permanently failed and
+ * the caller must release the view and exit non-zero.  The failing
+ * errno is preserved for the diagnostic. */
+static bool desktop_present_failed(int err)
+{
+    if (gfx_client_present_policy(err) == 1) {
+        gfx_retry_deadline_ms = client_now_ms() + GFX_CLIENT_RETRY_MS;
+        return true;
+    }
+    const char *why = (err == ESTALE)
+        ? "display mode changed, restart the app"
+        : "display device failure";
+    char msg[160];
+    int n = snprintf(msg, sizeof(msg), "desktop: %s (errno=%d); exiting\n",
+                     why, err);
+    if (n > 0) {
+        ssize_t w = write(2, msg, (size_t)n);
+        (void)w;
+    }
+    return false;
+}
 
 /* ── Text Drawing Helper ────────────────────────────────────── */
 static void draw_string(int32_t x, int32_t y, const char *str,
@@ -702,9 +738,18 @@ int main(int argc, char **argv)
         has_mouse = true;
     }
 
+    int exit_code = 0;
+
     /* Initial paint */
     render_desktop();
-    gfx_present(gfx);
+    errno = 0;
+    if (gfx_present(gfx) != 0) {
+        int saved = errno;
+        if (!desktop_present_failed(saved)) {
+            exit_code = 1;
+            goto cleanup;
+        }
+    }
 
     /* 5. Event loop */
     struct pollfd fds[2];
@@ -789,11 +834,25 @@ int main(int argc, char **argv)
         }
 
         if (need_redraw) {
-            render_desktop();
-            gfx_present(gfx);
+            uint64_t now = client_now_ms();
+            /* Honor the >=250ms retry window armed by a prior EAGAIN. */
+            if (gfx_retry_deadline_ms == 0 || now >= gfx_retry_deadline_ms) {
+                render_desktop();
+                errno = 0;
+                if (gfx_present(gfx) == 0) {
+                    gfx_retry_deadline_ms = 0;
+                } else {
+                    int saved = errno;
+                    if (!desktop_present_failed(saved)) {
+                        exit_code = 1;
+                        break;
+                    }
+                }
+            }
         }
     }
 
+cleanup:
     /* 6. Cleanup */
     if (mouse_fd >= 0) close(mouse_fd);
     gfx_close(gfx);
@@ -803,5 +862,5 @@ int main(int argc, char **argv)
     }
     write(1, "\x1b[?1049l", 8);
 
-    return 0;
+    return exit_code;
 }

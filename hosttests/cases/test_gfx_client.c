@@ -454,6 +454,26 @@ TEST_FUNC(test_present_propagates_einval)
     gfx_close(h);
 }
 
+TEST_FUNC(test_present_propagates_switch_errnos)
+{
+    TEST_SUITE("present: EAGAIN / ESTALE / EIO propagated unchanged");
+    reset_mocks();
+    gfx_handle_t *h = gfx_open(0, 0, 4, 4);
+    assert_not_null(h);
+    /* The resolution-switcher contract (spec §3.3) depends on libgfx
+     * forwarding these three errnos verbatim; a wrapper that swallowed
+     * or remapped them would break the client retry/exit policy. */
+    const int errs[] = { EAGAIN, ESTALE, EIO };
+    for (int i = 0; i < 3; i++) {
+        mock_ioctl_present_rv = -errs[i];
+        errno = 0;
+        int rc = gfx_present(h);
+        assert_eq(-1, rc);
+        assert_eq(errs[i], errno);
+    }
+    gfx_close(h);
+}
+
 TEST_FUNC(test_close_null_is_safe)
 {
     TEST_SUITE("close(NULL) safe");
@@ -503,6 +523,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_present_issues_exactly_one_ioctl),
     TEST_ENTRY(test_present_null_returns_einval),
     TEST_ENTRY(test_present_propagates_einval),
+    TEST_ENTRY(test_present_propagates_switch_errnos),
     TEST_ENTRY(test_close_null_is_safe),
     TEST_ENTRY(test_present_req_pixel_pointer_is_buffer),
 TEST_LIST_END

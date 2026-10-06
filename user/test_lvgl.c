@@ -12,7 +12,9 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/ioctl.h>
+#include <errno.h>
 #include <gfx.h>
+#include "gfx_client_policy.h"
 
 #define FBIOSURRENDER 0x00004601
 
@@ -52,6 +54,45 @@ static uint32_t my_tick_get_cb(void)
 static gfx_handle_t *gfx = NULL;
 static uint32_t screen_w = DISP_FALLBACK_HOR;
 static uint32_t screen_h = DISP_FALLBACK_VER;
+
+/* Task 8: shared stale-view policy state (monotonic ms retry deadline). */
+static uint64_t gfx_retry_deadline_ms = 0;
+
+static uint64_t client_now_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+/* Present the frame under the shared policy.  Returns false when the
+ * view is stale/permanently failed: the caller closes gfx and returns
+ * non-zero.  EAGAIN keeps the view and arms a >=250ms retry (this call
+ * then skips presenting until the deadline). */
+static bool gfx_present_ok(void)
+{
+    if (!gfx) return true;
+    uint64_t now = client_now_ms();
+    if (gfx_retry_deadline_ms != 0 && now < gfx_retry_deadline_ms) return true;
+    errno = 0;
+    if (gfx_present(gfx) == 0) {
+        gfx_retry_deadline_ms = 0;
+        return true;
+    }
+    int saved = errno;
+    if (gfx_client_present_policy(saved) == 1) {     /* EAGAIN: keep view */
+        gfx_retry_deadline_ms = now + GFX_CLIENT_RETRY_MS;
+        return true;
+    }
+    const char *why = (saved == ESTALE)
+        ? "display mode changed, restart the app"
+        : "display device failure";
+    fprintf(stderr, "[test_lvgl] %s (errno=%d); exiting\n", why, saved);
+    gfx_close(gfx);
+    gfx = NULL;
+    errno = saved;                   /* cleanup must not clobber it */
+    return false;
+}
 
 static int flush_count = 0;
 static bool bg_sampled = false;
@@ -537,9 +578,7 @@ int main(int argc, char **argv)
         struct timespec pause = { .tv_sec = 0, .tv_nsec = 20000000 };
         nanosleep(&pause, NULL);
         lv_timer_handler();
-        if (gfx) {
-            gfx_present(gfx);
-        }
+        if (!gfx_present_ok()) return 1;   /* stale/permanent -> abort */
     }
 
     /* 9. Assertions on flush output and pixel sampling */
@@ -576,7 +615,7 @@ int main(int argc, char **argv)
                 }
             }
             lv_timer_handler();
-            if (gfx) gfx_present(gfx);
+            if (!gfx_present_ok()) return 1;
         }
     } else if (!smoke_mode) {
         /* Hold on screen for 1 second so framebuffer / QMP screendump captures it,
@@ -584,7 +623,7 @@ int main(int argc, char **argv)
         for (int i = 0; i < 10; i++) {
             poll(NULL, 0, 100);
             lv_timer_handler();
-            if (gfx) gfx_present(gfx);
+            if (!gfx_present_ok()) return 1;
         }
     }
 

@@ -38,8 +38,10 @@ USER_RAW_LDFLAGS := -m elf_x86_64 -static -no-pie -T linker.ld -L$(TARGET_LIBDIR
 
 # ── Source discovery ───────────────────────────────────────
 # crt0.S is startup code, not a program
-# terminal_core.c / terminal_render.c / terminal_display.c / tetris_logic.c are libraries, not standalone programs
-C_SOURCES := $(filter-out terminal_core.c terminal_render.c terminal_display.c tetris_logic.c,$(wildcard *.c))
+# terminal_core.c / terminal_render.c / terminal_display.c / tetris_logic.c /
+# setres_parse.c / gfx_client_policy.c are libraries, not standalone programs
+# (the helper TUs are linked explicitly into their consumers below).
+C_SOURCES := $(filter-out terminal_core.c terminal_render.c terminal_display.c tetris_logic.c setres_parse.c gfx_client_policy.c,$(wildcard *.c))
 ASM_SOURCES := $(wildcard *.S)
 
 # Each .c → .elf (e.g. init.c → init.elf)
@@ -119,9 +121,11 @@ $(TERMINAL_FONT_OBJ): terminal_font.psf
 # libgfx.a.  The archive is linked explicitly with -lgfx AFTER the
 # using object so the static-archive linker pass picks the symbols
 # up; -lc follows the same convention used by test_gfx.elf.
-$(BUILD_DIR)/tetris.elf: $(OBJ_DIR)/tetris.o $(OBJ_DIR)/tetris_logic.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
+# gfx_client_policy.o (Task 8) supplies the shared EAGAIN-retry /
+# ESTALE-exit classification for the gfx_present result.
+$(BUILD_DIR)/tetris.elf: $(OBJ_DIR)/tetris.o $(OBJ_DIR)/tetris_logic.o $(OBJ_DIR)/gfx_client_policy.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
 	@mkdir -p $(dir $@)
-	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/tetris.o $(OBJ_DIR)/tetris_logic.o -lgfx -lc
+	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/tetris.o $(OBJ_DIR)/tetris_logic.o $(OBJ_DIR)/gfx_client_policy.o -lgfx -lc
 	$(OBJ_CPY) --strip-debug $@
 
 # ══════════════════════════════════════════════════════════════
@@ -140,18 +144,31 @@ $(BUILD_DIR)/test_gfx.elf: $(OBJ_DIR)/test_gfx.o $(CRT0_OBJ) $(SIGRETURN_OBJ) li
 
 # ══════════════════════════════════════════════════════════════
 #  desktop.elf — GUI Desktop (libgfx)
+#  gfx_client_policy.o (Task 8) supplies the shared stale-view policy.
 # ══════════════════════════════════════════════════════════════
-$(BUILD_DIR)/desktop.elf: $(OBJ_DIR)/desktop.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
+$(BUILD_DIR)/desktop.elf: $(OBJ_DIR)/desktop.o $(OBJ_DIR)/gfx_client_policy.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
 	@mkdir -p $(dir $@)
-	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/desktop.o -lgfx -lc
+	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/desktop.o $(OBJ_DIR)/gfx_client_policy.o -lgfx -lc
 	$(OBJ_CPY) --strip-debug $@
 
 # ══════════════════════════════════════════════════════════════
 #  test_lvgl.elf — LVGL compatibility smoke test
+#  gfx_client_policy.o (Task 8) supplies the shared stale-view policy.
 # ══════════════════════════════════════════════════════════════
-$(BUILD_DIR)/test_lvgl.elf: $(OBJ_DIR)/test_lvgl.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
+$(BUILD_DIR)/test_lvgl.elf: $(OBJ_DIR)/test_lvgl.o $(OBJ_DIR)/gfx_client_policy.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
 	@mkdir -p $(dir $@)
-	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/test_lvgl.o -llvgl -lgfx -lc
+	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/test_lvgl.o $(OBJ_DIR)/gfx_client_policy.o -llvgl -lgfx -lc
+	$(OBJ_CPY) --strip-debug $@
+
+# ══════════════════════════════════════════════════════════════
+#  setres.elf — framebuffer resolution CLI (Task 8)
+#  Uses the kernel fb ioctls (uapi/fb.h).  setres_parse.o is a helper
+#  TU excluded from C_SOURCES; setres.c is still auto-discovered as a
+#  program, so this rule overrides the generic link to add the parser.
+# ══════════════════════════════════════════════════════════════
+$(BUILD_DIR)/setres.elf: $(OBJ_DIR)/setres.o $(OBJ_DIR)/setres_parse.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/setres.o $(OBJ_DIR)/setres_parse.o -lc
 	$(OBJ_CPY) --strip-debug $@
 
 
