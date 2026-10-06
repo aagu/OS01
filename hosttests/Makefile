@@ -275,9 +275,18 @@ $(TEST_BLD)/libc_strdup.o: $(LIBC_SRC)/string/strdup.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
+# NOTE: this TU is the *userland* libc formatter, not the kernel-side
+# libk subset.  FRAMEWORK_INC force-includes test_platform.h, which
+# defines __is_libk; since c85172c5/7ebc9d0a libc/stdio/vsprintf.c gates
+# its float (%f/%e/%g) rendering behind `#ifndef __is_libk` (aarch64 libk
+# builds with -mgeneral-regs-only and cannot use `double`).  Compiling the
+# host test's copy in libk mode would silently strip float support and
+# make test_libc_vsprintf assert the wrong thing.  Build it WITHOUT
+# __is_libk so the harness exercises the real, full formatter (floatconv
+# is linked via $(LIBC_OBJS)).
 $(TEST_BLD)/libc_vsprintf.o: $(LIBC_SRC)/stdio/vsprintf.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
 
 $(TEST_BLD)/libc_vsnprintf.o: $(LIBC_SRC)/stdio/vsnprintf.c
 	@mkdir -p $(TEST_BLD)
@@ -913,37 +922,43 @@ test-early-arena: $(TEST_BLD)/test_early_arena.elf $(TEST_BLD)/test_early_arena_
 test-aarch64-color-printk-abi: $(TEST_BLD)/test_aarch64_color_printk_abi.elf
 	$(TEST_BLD)/test_aarch64_color_printk_abi.elf
 
-# aarch64 M2/M3 plan Task 5: color_printk ABI contract. Links the REAL
-# kernel/arch/aarch64/runtime/printk_stub.c against a kputs capture
-# mock. The test TU includes the public <core/printk.h> so a signature
-# mismatch (the old `void color_printk(const char *fmt, ...)` stub) is
-# a compile error; the shadow <arch/aarch64/boot_log.h> lives in
-# $(TEST_MOCK)/aarch64_color_printk and comes BEFORE $(KERNEL_INC).
-AARCH64_PRINTK_STUB_CFLAGS := $(HOST_CFLAGS) -I$(TESTS_DIR)/kernel/include
+# color_printk / serial_printk ABI + behaviour. Links the REAL shared
+# kernel/core/printk.c — the arch-only printk_stub.c was deleted in
+# 42aef0fc and the console is now shared by x86_64 and aarch64
+# (kernel/Makefile's aarch64 KERNEL_C_SOURCES lists `core/printk.c`).
+# The test TU includes the public <core/printk.h> so a signature mismatch
+# is a compile error; the production TU is compiled against the same
+# header. The serial sink + framebuffer-absent stubs live in
+# $(TEST_MOCK)/aarch64_color_printk/printk_capture.c, whose shadow
+# <driver/serial.h> comes BEFORE $(KERNEL_INC).
+PRINTK_ABI_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) \
+	-I$(TEST_MOCK)/aarch64_color_printk $(KERNEL_INC)
 
 $(TEST_BLD)/test_aarch64_color_printk_abi.o: $(TEST_CASES)/test_aarch64_color_printk_abi.c \
+		$(TESTS_DIR)/kernel/include/core/printk.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PRINTK_ABI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/printk_production.o: \
+		$(TESTS_DIR)/kernel/core/printk.c \
 		$(TESTS_DIR)/kernel/include/core/printk.h \
-		$(TEST_MOCK)/aarch64_color_printk/arch/aarch64/boot_log.h
+		$(TESTS_DIR)/kernel/include/driver/serial.h \
+		$(TESTS_DIR)/kernel/include/driver/fb_state.h \
+		$(TESTS_DIR)/kernel/include/driver/font.h \
+		$(TEST_MOCK)/aarch64_color_printk/driver/serial.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PRINTK_ABI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/printk_capture.o: $(TEST_MOCK)/aarch64_color_printk/printk_capture.c \
+		$(TEST_MOCK)/aarch64_color_printk/driver/serial.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) \
 		-I$(TEST_MOCK)/aarch64_color_printk $(KERNEL_INC) -c $< -o $@
 
-$(TEST_BLD)/aarch64_printk_stub_production.o: \
-		$(TESTS_DIR)/kernel/arch/aarch64/runtime/printk_stub.c \
-		$(TESTS_DIR)/kernel/include/core/printk.h \
-		$(TESTS_DIR)/kernel/include/arch/aarch64/boot_log.h
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(AARCH64_PRINTK_STUB_CFLAGS) -c $< -o $@
-
-$(TEST_BLD)/kputs_mock.o: $(TEST_MOCK)/aarch64_color_printk/kputs_mock.c \
-		$(TEST_MOCK)/aarch64_color_printk/arch/aarch64/boot_log.h
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK)/aarch64_color_printk -c $< -o $@
-
 $(TEST_BLD)/test_aarch64_color_printk_abi.elf: \
 		$(TEST_BLD)/test_aarch64_color_printk_abi.o \
-		$(TEST_BLD)/aarch64_printk_stub_production.o \
-		$(TEST_BLD)/kputs_mock.o
+		$(TEST_BLD)/printk_production.o \
+		$(TEST_BLD)/printk_capture.o
 	$(HOST_CC) -o $@ $^
 
 # aarch64 M2/M3 plan Task 3: arena layout-chain / 2 GiB boundary /

@@ -131,7 +131,10 @@ void wait_queue_wake_all(wait_queue_t *wq);
  *  kernel/core/printk.h, which is included by the production sources
  *  we host-compile.  Test TUs can override if needed. */
 int  color_printk(unsigned int fr, unsigned int bk, const char *fmt, ...);
-void serial_printk(const char *fmt, ...);
+/* serial_printk returns int (formatted byte count) to match the public
+ * ABI in kernel/include/core/printk.h; several gfx TUs include that
+ * header, so a `void` declaration here would be a conflicting type. */
+int  serial_printk(const char *fmt, ...);
 void frame_buffer_init(void);
 void frame_buffer_early_init(void);
 

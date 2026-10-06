@@ -119,7 +119,7 @@ void log_debug(const char *fmt, ...) { (void)fmt; }
  * host-compiled gfx.c can link).  The test never invokes them. */
 int  color_printk(unsigned int fr, unsigned int bk, const char *fmt, ...)
 { (void)fr; (void)bk; (void)fmt; return 0; }
-void serial_printk(const char *fmt, ...) { (void)fmt; }
+int  serial_printk(const char *fmt, ...) { (void)fmt; return 0; }
 void frame_buffer_init(void) {}
 void frame_buffer_early_init(void) {}
 

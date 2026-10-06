@@ -27,11 +27,20 @@
  *
  *   4. kernel/Makefile aarch64 whitelist: memory/tlb.c + memory/slab.c
  *      ARE compiled in; the x86-only VMM sources (memory/vmm.c,
- *      memory/vma.c, memory/uaccess.c, sched/task.c, core/printk.c —
- *      the tlb_shootdown callers) are NOT. This is the source-level
- *      twin of the nm gate (mk/components/run.mk: test-aarch64-audit),
- *      which greps the built aarch64 kernel.elf for forbidden
- *      vma_ / uaccess_ / fork_ prefixed T/t symbols.
+ *      memory/vma.c, memory/uaccess.c, sched/task.c — the tlb_shootdown
+ *      callers) are NOT. core/printk.c is deliberately NOT in that
+ *      x86-only set any more: commit 7ebc9d0a ("share color_printk +
+ *      serial_printk via kernel-core") made it the SHARED console for
+ *      both arches, and it contains no vmm-change API at all (see item 5
+ *      below, which audits it for the §5.4 invariant). This is the
+ *      source-level twin of the nm gate (mk/components/run.mk:
+ *      test-aarch64-audit), which greps the built aarch64 kernel.elf for
+ *      forbidden vma_ / uaccess_ / fork_ prefixed T/t symbols.
+ *
+ *   5. core/printk.c is scanned like the other audited files: because it
+ *      is now compiled on aarch64, §5.4 requires that none of its
+ *      lock-holding regions call a vmm-change API. It takes Pos.lock /
+ *      serial_lock only.
  *
  * Mirrors the source-scan pattern of test_x86_ipi_ready_publish.c /
  * test_slab_lock_path.c (no exec from hosttests; the nm half lives in
@@ -53,6 +62,7 @@
 #define TLB_C         OS01_KERNEL_SRC "/kernel/memory/tlb.c"
 #define IPI_C         OS01_KERNEL_SRC "/kernel/arch/aarch64/intr/ipi.c"
 #define KERNEL_MK     OS01_KERNEL_SRC "/kernel/Makefile"
+#define PRINTK_C      OS01_KERNEL_SRC "/kernel/core/printk.c"
 
 /* ── file slurp (fread-grow; the OS01 stdio shim has no fseek/ftell) ── */
 static char *slurp(const char *path)
@@ -335,7 +345,9 @@ static void audit_kernel_mk_aarch64_whitelist(void)
     assert_false(contains(branch, "memory/vma.c"));
     assert_false(contains(branch, "memory/uaccess.c"));
     assert_false(contains(branch, "sched/task.c"));
-    assert_false(contains(branch, "core/printk.c"));
+    /* core/printk.c is the shared console (7ebc9d0a) and has no
+     * vmm-change calls — it belongs IN the aarch64 list. */
+    assert_true(contains(branch, "core/printk.c"));
 
     free(branch);
     free(src);
@@ -349,6 +361,7 @@ int main(void)
     audit_file(EARLY_ARENA_C);
     audit_file(PAGE_TABLE_C);
     audit_file(TLB_C);
+    audit_file(PRINTK_C);   /* now compiled on aarch64 — §5.4 must hold */
     case_no_lock_plus_vmm_change();
     audit_tlb_single_lock();
     audit_ipi_lock_free();

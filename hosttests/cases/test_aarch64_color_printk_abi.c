@@ -1,58 +1,76 @@
 /*
- * test_aarch64_color_printk_abi.c — aarch64 M2/M3 plan Task 5.
+ * test_aarch64_color_printk_abi.c — color_printk / serial_printk ABI + behaviour.
  *
- * Proves the aarch64 color_printk stub matches the public ABI declared
- * in kernel/include/core/printk.h:53:
+ * Historical intent (aarch64 M2/M3 plan Task 5): prove the aarch64
+ * color_printk matches the public ABI declared in
+ * kernel/include/core/printk.h:
  *
  *   int color_printk(unsigned int FRcolor, unsigned int BKcolor,
  *                    const char *fmt, ...);
  *
- * Links the REAL kernel/arch/aarch64/runtime/printk_stub.c (production
- * file) against a kputs capture mock:
- *   1. compile-time: the TU includes <core/printk.h>; the stub must
- *      link against that exact prototype (the old void single-arg
- *      stub was a conflicting declaration).
- *   2. run-time: fg/bg set to garbage values must not be dereferenced
- *      as pointers (the stub ignores them).
- *   3. return value = byte length of fmt (kputs returns void, so the
- *      stub must compute it independently).
+ * The implementation used to live in an aarch64-only stub
+ * (kernel/arch/aarch64/runtime/printk_stub.c).  master commit 42aef0fc
+ * deleted that stub and the console became SHARED: kernel/core/printk.c
+ * now supplies color_printk / serial_printk for BOTH x86_64 and aarch64
+ * (kernel/Makefile's aarch64 KERNEL_C_SOURCES lists `core/printk.c`).
+ *
+ * This test therefore links the REAL shared kernel/core/printk.c:
+ *   1. compile-time: the TU includes <core/printk.h>; the production TU
+ *      is compiled against the same header, so any signature drift
+ *      (e.g. the old `void color_printk(const char *fmt, ...)` stub) is
+ *      a conflicting-types compile error.
+ *   2. run-time: color_printk is a REAL formatter — it returns the
+ *      FORMATTED byte count (vsprintf semantics), not the literal format
+ *      string length the old stub returned.
+ *   3. run-time: the FRcolor/BKcolor arguments are opaque colour values,
+ *      never dereferenced as pointers (garbage values must not fault).
+ *
+ * The serial sink (write_serial_unlocked) is captured by
+ * mock/aarch64_color_printk/printk_capture.c, which also maps the
+ * framebuffer as absent so colour output falls back to serial — the same
+ * observable path as an aarch64 boot before frame_buffer_init().
  */
 #include "test_framework.h"
 #include <core/printk.h>            /* expected signature */
-#include <arch/aarch64/boot_log.h>  /* kputs mock shadow */
 #include <string.h>
 
-TEST_FUNC(test_color_printk_signature_matches_printk_h) {
-    /* Compile-time verified by #include <core/printk.h> above; take a
-     * function pointer at run time to confirm the ABI assignment. */
-    int (*fp)(unsigned int, unsigned int, const char *, ...) = color_printk;
-    assert_true(fp != NULL);
+/* Provided by mock/aarch64_color_printk/printk_capture.c. */
+extern void        mock_serial_reset(void);
+extern const char *mock_serial_buf(void);
+extern size_t      mock_serial_len(void);
+
+TEST_FUNC(test_printk_signature_matches_printk_h) {
+    /* Compile-time verified by #include <core/printk.h> above; take
+     * function pointers at run time to confirm the ABI assignment. */
+    int (*cp)(unsigned int, unsigned int, const char *, ...) = color_printk;
+    int (*sp)(const char *, ...) = serial_printk;
+    assert_true(cp != NULL);
+    assert_true(sp != NULL);
 }
 
-TEST_FUNC(test_color_printk_does_not_deref_colors) {
-    /* Inject garbage fg/bg — must be ignored, not dereferenced. */
-    mock_kputs_clear();
-    int rc = color_printk(0xdeadbeefu, 0xcafebabeu, "SLAB-ERR: ok\n");
-    /* kputs returns void; color_printk must return the fmt byte length. */
+TEST_FUNC(test_serial_printk_formats_varargs_and_returns_length) {
+    /* serial_printk formats its arguments and returns the formatted
+     * byte count (not the literal `fmt` length). */
+    mock_serial_reset();
+    int rc = serial_printk("v=%d %s", 1234, "str");
+    assert_eq(rc, (int)strlen("v=1234 str"));
+    assert_str_eq("v=1234 str", mock_serial_buf());
+    assert_eq((int)mock_serial_len(), (int)strlen("v=1234 str"));
+}
+
+TEST_FUNC(test_color_printk_formats_and_ignores_colors) {
+    /* Inject garbage fg/bg — they are colour values, never
+     * dereferenced.  Return value is the FORMATTED length. */
+    mock_serial_reset();
+    int rc = color_printk(0xdeadbeefu, 0xcafebabeu, "SLAB-ERR: %s\n", "ok");
     assert_eq(rc, (int)strlen("SLAB-ERR: ok\n"));
-    /* The mock received the literal fmt. */
-    assert_true(strcmp(mock_kputs_last(), "SLAB-ERR: ok\n") == 0);
-}
-
-TEST_FUNC(test_color_printk_varargs_ignored) {
-    /* Variadic args consumed by a real formatter would change output;
-     * the stub passes fmt through literally and still returns its
-     * byte length (not the would-be formatted length). */
-    mock_kputs_clear();
-    int rc = color_printk(WHITE, BLACK, "%d %s", 1234, "str");
-    assert_eq(rc, (int)strlen("%d %s"));
-    assert_str_eq("%d %s", mock_kputs_last());
+    assert_str_eq("SLAB-ERR: ok\n", mock_serial_buf());
 }
 
 TEST_LIST_BEGIN
-    TEST_ENTRY(test_color_printk_signature_matches_printk_h),
-    TEST_ENTRY(test_color_printk_does_not_deref_colors),
-    TEST_ENTRY(test_color_printk_varargs_ignored),
+    TEST_ENTRY(test_printk_signature_matches_printk_h),
+    TEST_ENTRY(test_serial_printk_formats_varargs_and_returns_length),
+    TEST_ENTRY(test_color_printk_formats_and_ignores_colors),
 TEST_LIST_END
 
 int main(void)
