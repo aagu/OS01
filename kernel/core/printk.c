@@ -26,6 +26,12 @@ psf2_t *font = (psf2_t*)&_binary_kernel_font_psf_start;
 
 void putchark(unsigned int FRcolor,unsigned int BKcolor,unsigned char c)
 {
+    /* NULL-safe: when no framebuffer is configured (aarch64 boot path
+     * without ramfb, or early-boot before Pos is populated), skip the
+     * pixel write entirely. color_printk's outer spin_lock still
+     * serializes per-char against concurrent IRQ-context callers. */
+    if (!Pos.FB_addr) return;
+
     uint32_t i = 0,j = 0;
 	uint32_t * addr = NULL;
 	int testval = 0;
@@ -52,6 +58,8 @@ void putchark(unsigned int FRcolor,unsigned int BKcolor,unsigned char c)
 void putchar_at(int col, int row, unsigned int FRcolor, unsigned int BKcolor,
                 unsigned char c)
 {
+    if (!Pos.FB_addr) return;
+
     int i = 0, j = 0;
     uint32_t *addr = NULL;
     int testval = 0;
