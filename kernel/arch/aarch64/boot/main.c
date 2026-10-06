@@ -355,6 +355,14 @@ fail:
  * Called once from aarch64_main, after arch_vmm_init returns success. */
 static void aarch64_boot_fb_init(const struct boot_context *handoff)
 {
+    /* spin_init(&Pos.lock) MUST run on every boot path — including the
+     * no-framebuffer branch — because color_printk callers (slab.c error
+     * paths) will spin_lock(&Pos.lock) unconditionally.  BSS zero-init
+     * leaves .lock == 0, which means LOCKED per spinlock_T's contract
+     * (1=unlocked).  spin_init before the gate keeps the lock usable on
+     * every code path. */
+    spin_init(&Pos.lock);
+
     if (!(handoff->flags & BOOT_CONTEXT_HAS_FRAMEBUFFER)) {
         kputs("[fb] no framebuffer in handoff; color_printk disabled\n");
         return;
@@ -366,9 +374,6 @@ static void aarch64_boot_fb_init(const struct boot_context *handoff)
     Pos.YResolution = handoff->graphics.VerticalResolution;
     Pos.XPosition   = 0;
     Pos.YPosition   = 0;
-    /* spin_init(&Pos.lock): x86_64_boot_early does this on its path;
-     * aarch64 has no equivalent stage, so we own the init here. */
-    spin_init(&Pos.lock);
 
     frame_buffer_init();
     if (Pos.FB_addr) {

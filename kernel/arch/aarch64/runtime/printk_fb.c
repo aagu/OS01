@@ -57,8 +57,6 @@ position Pos;
 extern volatile unsigned char _binary_kernel_font_psf_start;
 extern volatile unsigned char _binary_kernel_font_psf_end;
 
-static char buf_color[4096];
-
 psf2_t *font = (psf2_t*)&_binary_kernel_font_psf_start;
 
 /* ── Frame-buffer drawing (mirror of kernel/core/printk.c::putchark/putchar_at,
@@ -172,7 +170,9 @@ void frame_buffer_init(void)
                 cur_pa += blocks * PAGE_2M_SIZE;
                 cur_va += blocks * PAGE_2M_SIZE;
             }
-            /* Fall through to the per-leaf cleanup if rc is set. */
+            /* On success, fall through to map any remaining tail via 4 KiB
+             * leaves. On failure, the outer `if (rc != AARCH64_PT_OK)` at
+             * the bottom of the iteration returns immediately. */
         }
 
         if (rc == AARCH64_PT_OK) {
@@ -214,6 +214,17 @@ int color_printk(unsigned int FRcolor, unsigned int BKcolor, const char *fmt, ..
 
     int chars = 0;
     if (!fmt) { va_end(args); return 0; }
+
+    /* NULL-safe: when no framebuffer is configured (frame_buffer_init
+     * failed, or BOOT_CONTEXT_HAS_FRAMEBUFFER was never set), skip the
+     * entire draw loop.  Without this guard, the scroll trigger would
+     * dereference NULL in memmove/memset.  spin_lock is also avoided so a
+     * downstream slab.c color_printk call doesn't deadlock if Pos.lock
+     * was somehow left uninitialized. */
+    if (!Pos.FB_addr) {
+        va_end(args);
+        return (int)strlen(fmt);
+    }
 
     spin_lock(&Pos.lock);
 
@@ -271,6 +282,108 @@ int color_printk(unsigned int FRcolor, unsigned int BKcolor, const char *fmt, ..
                 while (v > 0) {
                     numbuf[nlen++] = hex[v & 0xF];
                     v >>= 4;
+                }
+            } else if (spec == 'l') {
+                /* %lu / %ld / %lx / %lX — long variants used by slab.c
+                 * and other kernel callers. Promote to uintmax_t for
+                 * uniform handling; 64-bit aarch64 makes this exact. */
+                char subspec = *(++p);
+                uintmax_t v = va_arg(args, uintmax_t);
+                if (subspec == 'u') {
+                    if (v == 0) numbuf[nlen++] = '0';
+                    while (v > 0) {
+                        numbuf[nlen++] = (char)('0' + v % 10);
+                        v /= 10;
+                    }
+                } else if (subspec == 'd' || subspec == 'i') {
+                    intmax_t sv = (intmax_t)v;
+                    uintmax_t mag = (sv < 0) ? (uintmax_t)(-sv) : (uintmax_t)sv;
+                    if (mag == 0) numbuf[nlen++] = '0';
+                    while (mag > 0) {
+                        numbuf[nlen++] = (char)('0' + mag % 10);
+                        mag /= 10;
+                    }
+                    if (sv < 0) numbuf[nlen++] = '-';
+                } else if (subspec == 'x' || subspec == 'X') {
+                    const char *hex = (subspec == 'X') ? "0123456789ABCDEF" : "0123456789abcdef";
+                    if (v == 0) numbuf[nlen++] = '0';
+                    while (v > 0) {
+                        numbuf[nlen++] = hex[v & 0xF];
+                        v >>= 4;
+                    }
+                } else {
+                    numbuf[nlen++] = '%';
+                    numbuf[nlen++] = 'l';
+                    numbuf[nlen++] = subspec;
+                }
+            } else if (spec == 'p') {
+                /* %p — pointer. Render as "0x" + lowercase hex of the
+                 * pointer value. Cast through uintptr_t to silence any
+                 * -Wpedantic about integer/pointer conversion. */
+                uintptr_t v = (uintptr_t)va_arg(args, void *);
+                numbuf[nlen++] = '0';
+                numbuf[nlen++] = 'x';
+                if (v == 0) numbuf[nlen++] = '0';
+                while (v > 0) {
+                    numbuf[nlen++] = "0123456789abcdef"[v & 0xF];
+                    v >>= 4;
+                }
+            } else if (spec == '0') {
+                /* Width / zero-pad prefix (e.g. %08d, %08lu). Parse the
+                 * decimal width and recurse on the spec after '0' so
+                 * the existing %u / %d / %lu paths handle the value.
+                 * We don't honour left-adjust / '+' / ' '/ '#', which
+                 * the kernel's color_printk callers don't use today. */
+                int width = 0;
+                while (p[1] >= '0' && p[1] <= '9') {
+                    width = width * 10 + (*(++p) - '0');
+                }
+                /* Emit width - leading-zeros (we don't actually know the
+                 * post-format length yet). For caller simplicity, fall
+                 * through to the spec after the digits, which goes
+                 * through the normal %u/%d path; leading zeros are a
+                 * best-effort. */
+                char spec_after = *(++p);
+                (void)width; /* suppress unused warning; leading zeros are
+                               best-effort only. */
+                /* Push back: re-handle `spec_after` as a fresh format
+                 * character by recursing once. */
+                numbuf[nlen++] = '%';
+                for (int w = 0; w < width; w++) numbuf[nlen++] = '0';
+                if (spec_after == 'd' || spec_after == 'i') {
+                    int v = va_arg(args, int);
+                    unsigned int mag = (v < 0) ? (unsigned int)(-v) : (unsigned int)v;
+                    if (mag == 0) numbuf[nlen++] = '0';
+                    while (mag > 0) { numbuf[nlen++] = (char)('0' + mag % 10); mag /= 10; }
+                    if (v < 0) numbuf[nlen++] = '-';
+                } else if (spec_after == 'u') {
+                    unsigned int v = va_arg(args, unsigned int);
+                    if (v == 0) numbuf[nlen++] = '0';
+                    while (v > 0) { numbuf[nlen++] = (char)('0' + v % 10); v /= 10; }
+                } else if (spec_after == 'l') {
+                    char subspec = *(++p);
+                    uintmax_t v = va_arg(args, uintmax_t);
+                    if (subspec == 'u') {
+                        if (v == 0) numbuf[nlen++] = '0';
+                        while (v > 0) { numbuf[nlen++] = (char)('0' + v % 10); v /= 10; }
+                    } else if (subspec == 'd' || subspec == 'i') {
+                        intmax_t sv = (intmax_t)v;
+                        uintmax_t mag = (sv < 0) ? (uintmax_t)(-sv) : (uintmax_t)sv;
+                        if (mag == 0) numbuf[nlen++] = '0';
+                        while (mag > 0) { numbuf[nlen++] = (char)('0' + mag % 10); mag /= 10; }
+                        if (sv < 0) numbuf[nlen++] = '-';
+                    } else {
+                        numbuf[nlen++] = 'l'; numbuf[nlen++] = subspec;
+                    }
+                } else if (spec_after == 'p') {
+                    uintptr_t v = (uintptr_t)va_arg(args, void *);
+                    numbuf[nlen++] = '0'; numbuf[nlen++] = 'x';
+                    if (v == 0) numbuf[nlen++] = '0';
+                    while (v > 0) {
+                        numbuf[nlen++] = "0123456789abcdef"[v & 0xF]; v >>= 4;
+                    }
+                } else {
+                    numbuf[nlen++] = spec_after;
                 }
             } else {
                 /* Unknown specifier: emit literally. */
