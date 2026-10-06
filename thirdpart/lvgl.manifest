@@ -1,0 +1,4 @@
+# thirdpart/lvgl.manifest
+# LVGL v9.5.0 input manifest (spec: third-party source manifests).
+LVGL_SOURCE   := thirdpart/lvgl
+LVGL_REVISION := 85aa60d18b3d5e5588d7b247abf90198f07c8a63

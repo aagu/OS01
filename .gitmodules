@@ -10,3 +10,6 @@
 [submodule "thirdpart/mbedtls"]
 	path = thirdpart/mbedtls
 	url = https://github.com/Mbed-TLS/mbedtls.git
+[submodule "thirdpart/lvgl"]
+	path = thirdpart/lvgl
+	url = https://github.com/lvgl/lvgl.git
