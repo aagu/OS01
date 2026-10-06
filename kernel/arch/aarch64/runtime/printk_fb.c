@@ -25,6 +25,7 @@
 //     canonical aarch64 boot console, so no early FB map is needed.
 
 #include <stdbool.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -188,12 +189,11 @@ void frame_buffer_init(void)
 
 int color_printk(unsigned int FRcolor, unsigned int BKcolor, const char *fmt, ...)
 {
-    /* Skip the format-time va_copy dance; we don't read the args. */
-    (void)FRcolor;
-    (void)BKcolor;
+    va_list args;
+    va_start(args, fmt);
 
     int chars = 0;
-    if (!fmt) return 0;
+    if (!fmt) { va_end(args); return 0; }
 
     spin_lock(&Pos.lock);
 
@@ -219,6 +219,55 @@ int color_printk(unsigned int FRcolor, unsigned int BKcolor, const char *fmt, ..
                 putchark(FRcolor, BKcolor, ' ');
                 Pos.XPosition++;
             }
+        } else if (c == '%') {
+            /* Minimal printf-style: %u, %d, %x, %X. Other specifiers
+             * are rendered literally (mirrors what kernel/core/printk.c
+             * gets via vsprintf for unsupported specifiers — keeps the
+             * format string usable for the common integer cases without
+             * pulling vsprintf into aarch64). */
+            char spec = *(++p);
+            char numbuf[24];
+            int nlen = 0;
+            if (spec == 'u') {
+                unsigned int v = va_arg(args, unsigned int);
+                if (v == 0) numbuf[nlen++] = '0';
+                while (v > 0) {
+                    numbuf[nlen++] = (char)('0' + v % 10);
+                    v /= 10;
+                }
+            } else if (spec == 'd' || spec == 'i') {
+                int v = va_arg(args, int);
+                unsigned int mag = (v < 0) ? (unsigned int)(-v) : (unsigned int)v;
+                if (mag == 0) numbuf[nlen++] = '0';
+                while (mag > 0) {
+                    numbuf[nlen++] = (char)('0' + mag % 10);
+                    mag /= 10;
+                }
+                if (v < 0) numbuf[nlen++] = '-';
+            } else if (spec == 'x' || spec == 'X') {
+                unsigned int v = va_arg(args, unsigned int);
+                const char *hex = (spec == 'X') ? "0123456789ABCDEF" : "0123456789abcdef";
+                if (v == 0) numbuf[nlen++] = '0';
+                while (v > 0) {
+                    numbuf[nlen++] = hex[v & 0xF];
+                    v >>= 4;
+                }
+            } else {
+                /* Unknown specifier: emit literally. */
+                numbuf[nlen++] = '%';
+                numbuf[nlen++] = spec;
+            }
+            /* Emit digits in correct order (reversed from how we built). */
+            for (int i = nlen - 1; i >= 0; i--) {
+                putchark(FRcolor, BKcolor, (unsigned char)numbuf[i]);
+                Pos.XPosition++;
+                chars++;
+                if (Pos.XPosition >= (int32_t)(Pos.XResolution / font->width)) {
+                    Pos.YPosition++;
+                    Pos.XPosition = 0;
+                }
+            }
+            continue;
         } else {
             putchark(FRcolor, BKcolor, c);
             Pos.XPosition++;
@@ -242,5 +291,6 @@ int color_printk(unsigned int FRcolor, unsigned int BKcolor, const char *fmt, ..
     }
 
     spin_unlock(&Pos.lock);
+    va_end(args);
     return chars;
 }

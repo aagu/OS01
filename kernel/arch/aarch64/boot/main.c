@@ -348,6 +348,38 @@ fail:
 }
 #endif
 
+/* Populate Pos from the UEFI-handoff graphics info and map the
+ * framebuffer MMIO. Gate on BOOT_CONTEXT_HAS_FRAMEBUFFER so a system
+ * without ramfb (or with broken GOP) still boots cleanly via PL011.
+ *
+ * Called once from aarch64_main, after arch_vmm_init returns success. */
+static void aarch64_boot_fb_init(const struct boot_context *handoff)
+{
+    if (!(handoff->flags & BOOT_CONTEXT_HAS_FRAMEBUFFER)) {
+        kputs("[fb] no framebuffer in handoff; color_printk disabled\n");
+        return;
+    }
+
+    Pos.Phy_addr    = (uint32_t *)handoff->graphics.FrameBufferBase;
+    Pos.FB_length   = handoff->graphics.FrameBufferSize;
+    Pos.XResolution = handoff->graphics.HorizontalResolution;
+    Pos.YResolution = handoff->graphics.VerticalResolution;
+    Pos.XPosition   = 0;
+    Pos.YPosition   = 0;
+    /* spin_init(&Pos.lock): x86_64_boot_early does this on its path;
+     * aarch64 has no equivalent stage, so we own the init here. */
+    spin_init(&Pos.lock);
+
+    frame_buffer_init();
+    if (Pos.FB_addr) {
+        color_printk(WHITE, BLUE,
+                     "[fb] aarch64 color_printk active (%ux%u)\n",
+                     Pos.XResolution, Pos.YResolution);
+    } else {
+        kputs("[fb] mapping failed; color_printk disabled\n");
+    }
+}
+
 void aarch64_main(const struct boot_context *handoff)
 {
     arch_local_irq_disable();
@@ -456,6 +488,18 @@ void aarch64_main(const struct boot_context *handoff)
             for (;;) arch_cpu_halt();
         }
     }
+    /* NEW (spec 2026-10-06): populate Pos from bootctx->graphics and map
+     * the framebuffer MMIO via frame_buffer_init (in
+     * kernel/arch/aarch64/runtime/printk_fb.c). color_printk becomes
+     * live as a result; PL011 remains the canonical boot console (every
+     * kputs/serial_printk still goes to PL011; the banner below is the
+     * first output that ALSO lands on the screen).
+     *
+     * Called BEFORE selftest_run_all / dtb_init / gic_init / smp_boot_aps
+     * so APs see the live Pos via SMP cache coherence. APs only READ
+     * Pos (color_printk from kernel/memory/slab.c error paths); they
+     * never write to it. */
+    aarch64_boot_fb_init(handoff);
     if (aarch64_page_table_probe_prepare()) {
         log_err("M1 FATAL reason=probe\n");
         for (;;) arch_cpu_halt();
