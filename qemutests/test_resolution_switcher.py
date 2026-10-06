@@ -52,6 +52,14 @@ ROUND_TRIP_MODES = ("1280x720", "640x480")
 OFF_WHITELIST_MODE = "1280x960"    # plan-specified off-table boot mode
 OFF_WHITELIST_FALLBACKS = ("1600x1200", "1400x1050", "1152x864")
 
+# Unsupported-display-device case (spec §8.2 item 6): QEMU `-vga cirrus`
+# (1013:00b8) is driven by OVMF QemuVideoDxe so a trusted GOP framebuffer
+# exists, but it does not match the kernel's BGA probe (1234:1111 + legacy VGA
+# I/O), so no switchable backend is published.  bochs-display / secondary-vga
+# both *are* accepted by the probe here, and virtio-gpu-pci yields no GOP with
+# this OVMF, so cirrus is the only suitable device on this host.
+NO_BGA_DEVICE = ("-vga", "cirrus")
+
 WHITELIST = {
     (640, 480), (800, 600), (1024, 768), (1280, 720), (1280, 800),
     (1280, 1024), (1440, 900), (1600, 900), (1920, 1080),
@@ -440,7 +448,8 @@ class ResolutionSession:
 
     def __init__(self, firmware: Path, image: Path, results_dir: Path,
                  smp: int = DEFAULT_SMP, timeout: int = DEFAULT_TIMEOUT,
-                 qemu: str = QEMU, serial_only: bool = False):
+                 qemu: str = QEMU, serial_only: bool = False,
+                 display_device=None):
         self.firmware = Path(firmware)
         self.image = Path(image)
         self.results_dir = Path(results_dir)
@@ -448,6 +457,9 @@ class ResolutionSession:
         self.timeout = timeout
         self.qemu = qemu
         self.serial_only = serial_only
+        # Video device argv tokens; defaults to the supported `-vga std` (BGA).
+        self.display_device = (list(display_device) if display_device
+                               else ["-vga", "std"])
         self.proc: Optional[subprocess.Popen] = None
         self.qmp: Optional[QmpClient] = None
         self.serial_path = self.results_dir / "serial.log"
@@ -474,7 +486,7 @@ class ResolutionSession:
             "-device", "ide-hd,drive=disk,bus=ahci.0",
             "-object", "rng-random,filename=/dev/urandom,id=rng0",
             "-device", "virtio-rng-pci,rng=rng0",
-            "-vga", "std",
+            *self.display_device,
             "-m", "512",
             "-smp", str(self.smp),
             "-serial", "stdio",
@@ -741,6 +753,7 @@ def run_production_suite(firmware: Path, image: Path, results_dir: Path,
 
     failures += _off_whitelist_case(firmware, image, results_dir, log)
     failures += _isolation_case(firmware, image, copy800, results_dir, log)
+    failures += _no_bga_case(firmware, image, results_dir, log, test_build=False)
 
     return _report("production", failures, log)
 
@@ -771,6 +784,7 @@ def run_test_suite(firmware: Path, image: Path, results_dir: Path,
         sess.close()
 
     # Destructive cases each get their own boot, ordered last.
+    failures += _no_bga_case(firmware, image, results_dir, log, test_build=True)
     failures += _mmap_case(firmware, copy800, results_dir, log)
     failures += _rollback_case(firmware, copy800, results_dir, log)
 
@@ -778,6 +792,63 @@ def run_test_suite(firmware: Path, image: Path, results_dir: Path,
 
 
 # ── live orchestration helpers ──────────────────────────────────
+
+def _no_bga_case(firmware: Path, image: Path, results_dir: Path, log,
+                 test_build: bool) -> list:
+    """Unsupported display device with a trusted GOP (spec §8.2 item 6).
+
+    Boots on ``NO_BGA_DEVICE`` (cirrus): OVMF provides a GOP framebuffer, but
+    the kernel finds no BGA backend, so SET and enumerate return ENODEV while
+    the legacy read / surrender path and the serial shell survive.  With the
+    test build the read (GET_STATE) and FBIOSURRENDER are asserted directly.
+    """
+    fail: list = []
+    try:
+        copy = _private_copy(image, results_dir / "disk-nobga.img")
+    except ImageIsolationError as e:
+        return [f"nobga_prepare: {e}"]
+
+    sess = ResolutionSession(firmware, copy, results_dir / "nobga",
+                             display_device=list(NO_BGA_DEVICE))
+    try:
+        sess.start()
+    except QmpError as e:
+        log(f"FAIL: {e}")
+        return ["nobga_qmp_failed"]
+    try:
+        if not sess.wait_for(re.escape(PROMPT), timeout=BOOT_TIMEOUT):
+            fail.append("nobga_no_shell")
+            return fail
+
+        out = _guest(sess, "/bin/setres -l")
+        if "ENODEV" not in out:
+            fail.append("nobga_enumerate_not_enodev")
+        out = _guest(sess, "/bin/setres 1280x720")
+        if "ENODEV" not in out:
+            fail.append("nobga_set_not_enodev")
+
+        # A trusted GOP framebuffer must still exist (real surface, sane size).
+        surf = sess.screen("nobga")
+        if surf is None or not (640 <= surf.width <= 1920 and 480 <= surf.height <= 1200):
+            fail.append("nobga_no_trusted_gop_surface")
+
+        # Legacy read / surrender are still usable (test build has the helper).
+        if test_build:
+            st = parse_resolution_get(_guest(sess, "/bin/test_resolution get"))
+            if st is None or st["width"] == 0 or st["height"] == 0:
+                fail.append("nobga_read_query_failed")
+            sur = _guest(sess, "/bin/test_resolution surrender")
+            if "SURRENDER rc=0" not in sur:
+                fail.append("nobga_surrender_failed")
+
+        # The serial session survives.
+        out = _guest(sess, "echo RES_NOBGA_ALIVE")
+        if "RES_NOBGA_ALIVE" not in out:
+            fail.append("nobga_session_dead")
+    finally:
+        sess.close()
+    return fail
+
 
 def _report(flavor: str, failures: list, log) -> bool:
     for f in failures:
@@ -787,6 +858,17 @@ def _report(flavor: str, failures: list, log) -> bool:
         return False
     log(f"resolution {flavor} suite: PASS")
     return True
+
+
+def _private_copy(source: Path, dest: Path) -> Path:
+    """Copy an image into a per-run private path, asserting the source is
+    byte-identical afterwards (never boot the profile's real image)."""
+    before = _sha256(source)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, dest)
+    if _sha256(source) != before:
+        raise ImageIsolationError("source image changed during copy")
+    return dest
 
 
 def _boot_session(firmware: Path, image: Path, results_dir: Path, log):

@@ -186,6 +186,22 @@ static int cmd_pty_watch(int secs, uint32_t setw, uint32_t seth)
     return 0;
 }
 
+/* surrender: exercise the no-BGA FBIOSURRENDER path (spec §8.2 item 6).  It
+ * takes no argument and must succeed even when no switchable backend exists. */
+static int cmd_surrender(void)
+{
+    int fd = open("/dev/fb", O_RDWR);
+    if (fd < 0) {
+        printf("ERROR=fb_open errno=%d\n", errno);
+        return 1;
+    }
+    int rc = ioctl(fd, FBIOSURRENDER, NULL);
+    int e = rc < 0 ? errno : 0;
+    close(fd);
+    printf("SURRENDER rc=%d errno=%d\n", rc, e);
+    return rc < 0 ? 1 : 0;
+}
+
 /* mmap: take a raw shared mapping of /dev/fb once, then exit.  The sticky
  * raw_mmap_seen flag makes every subsequent layout SET return EBUSY for the
  * rest of the boot (spec §3.3 / §8.2 item 6). */
@@ -249,7 +265,7 @@ static void usage(void)
     printf("usage: test_resolution <snapshot|get|set W H|"
            "arm-mismatch PID TOKEN W H|arm-rollback PID TOKEN W H|"
            "hold [SECS]|release|arm-terminal PID TOKEN|consume-terminal PID|"
-           "pty-watch [SECS [W H]]|mmap>\n");
+           "pty-watch [SECS [W H]]|mmap|surrender>\n");
 }
 
 int main(int argc, char **argv)
@@ -302,6 +318,8 @@ int main(int argc, char **argv)
                            pw, ph);
     } else if (!strcmp(cmd, "mmap")) {
         rc = cmd_mmap();
+    } else if (!strcmp(cmd, "surrender")) {
+        rc = cmd_surrender();
     } else {
         usage();
         rc = 2;
