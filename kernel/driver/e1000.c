@@ -5,7 +5,8 @@
 #include <net/device.h>
 #include <device/test_fault.h>
 #include <ipc/mbox.h>
-#include <memory/vmm.h>       // vmm_map_page, kernel_map, PAGE_KERNEL_PMD_NOCACHE
+#include <memory/vmm.h>       // vmm_map_page, kernel_map
+#include <arch/x86_64/pte.h>  // PAGE_KERNEL_PMD_NOCACHE
 #include <memory/pmm.h>       // PAGE_2M_MASK, alloc_pages, alloc_4k_page, free_pages, free_4k_page
 #include <memory/memory.h>    // Phy_To_Virt
 #include <intr/interrupt.h> // register_irq, unregister_irq

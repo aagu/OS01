@@ -12,7 +12,8 @@
 #include <arch/spinlock.h>
 #include <memory/memory.h>   // Phy_To_Virt
 #include <memory/pmm.h>      // PAGE_2M_MASK
-#include <memory/vmm.h>      // vmm_map_page, PAGE_KERNEL_PMD_NOCACHE
+#include <memory/vmm.h>      // vmm_map_page
+#include <arch/x86_64/pte.h> // PAGE_KERNEL_PMD_NOCACHE
 #endif
 
 #define PCI_CONFIG_ADDR  0xCF8

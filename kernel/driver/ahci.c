@@ -9,6 +9,7 @@
 #include <memory/pmm.h>
 #include <memory/vmm.h>
 #include <memory/slab.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
 #include <arch/io.h>
 #include <arch/cpu.h>
 #include <intr/interrupt.h>
