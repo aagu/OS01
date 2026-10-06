@@ -30,17 +30,10 @@
 #include <errno.h>
 
 #include <uapi/mouse.h>
+#include <uapi/fb.h>
 #include <gfx.h>
 #include "font8x16.h"
 #include "gfx_client_policy.h"
-
-#define FBIOSURRENDER 0x00004601
-
-struct fb_info {
-    uint32_t width;
-    uint32_t height;
-    uint32_t stride;
-};
 
 /* ── Material Design Color Palette (M3 High-Clarity Edition) ── */
 #define CLR_WALLPAPER          0x00CBD5E1u  /* Slate 300 — high-contrast clean canvas */

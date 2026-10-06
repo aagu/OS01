@@ -22,9 +22,10 @@
 #define offsetof(type, member) __builtin_offsetof(type, member)
 #endif
 
-/* ── Test-only ioctl commands (0x4650..0x4656) ──
+/* ── Test-only ioctl commands (0x4650..0x4657) ──
  * SNAPSHOT is a pure-output exception (it reads no request struct).
- * Every other command consumes a fixed `struct fb_test_req`. */
+ * TERMINAL_STATUS is also a query (it reads the request struct but writes
+ * no state).  Every other command consumes a fixed `struct fb_test_req`. */
 #define FBIOTEST_SNAPSHOT                0x00004650
 #define FBIOTEST_ARM_MISMATCH            0x00004651
 #define FBIOTEST_ARM_ROLLBACK_FAILURE    0x00004652
@@ -32,6 +33,7 @@
 #define FBIOTEST_RELEASE_WRITER          0x00004654
 #define FBIOTEST_ARM_TERMINAL_ENOMEM     0x00004655
 #define FBIOTEST_CONSUME_TERMINAL_ENOMEM 0x00004656
+#define FBIOTEST_TERMINAL_STATUS         0x00004657
 
 /* Fixed control request: version must be 1, reserved[] and reserved64
  * must be all zero.  32 bytes.  token identifies an armed register fault

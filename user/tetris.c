@@ -33,15 +33,9 @@
 #include <time.h>
 #include <sys/time.h>
 #include <gfx.h>
+#include <uapi/fb.h>
 #include "tetris_logic.h"
 #include "gfx_client_policy.h"
-
-// ── fb_info (must match kernel definition) ──────────────────
-struct fb_info {
-    uint32_t width, height, stride, bpp, format;
-} __attribute__((packed));
-
-#define FBIOSURRENDER  0x00004601
 
 static gfx_handle_t *gfx;
 

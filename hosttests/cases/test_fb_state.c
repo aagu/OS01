@@ -127,8 +127,7 @@ TEST_FUNC(test_bootstrap_before_first_writer)
 /* ── Test 2: Transition drains frame across threads ── */
 typedef struct {
     pthread_barrier_t *barrier_start;
-    pthread_barrier_t *barrier_drain;
-    volatile bool can_finish;
+    volatile bool transition_seen;  /* set once the in-progress drain is seen */
     int worker_rc;
 } drain_worker_arg_t;
 
@@ -146,8 +145,22 @@ static void *drain_writer_thread(void *arg)
     /* Wait at barrier: writer holds lease */
     pthread_barrier_wait(w->barrier_start);
 
-    /* Wait until transition is trying to drain */
-    while (!w->can_finish) {
+    /* Hold the lease until the transition is *inside* its drain.  Probing
+     * fb_writer_begin() is how we detect that: while a transition is in
+     * progress it returns -EAGAIN without taking a lease.  Releasing only
+     * after that point guarantees fb_transition_begin() observed
+     * active_writers > 0 at entry and took the positive drain-wait path
+     * (wait, then succeed) instead of finding the writer already gone. */
+    for (int spins = 0; spins < 5000; spins++) {
+        fb_lease_t probe = {0};
+        int prc = fb_writer_begin(&probe, 0);
+        if (probe.held) {
+            fb_writer_end(&probe);
+        }
+        if (prc == -EAGAIN) {
+            w->transition_seen = true;
+            break;
+        }
         usleep(1000);
     }
 
@@ -171,7 +184,7 @@ TEST_FUNC(test_transition_drains_frame)
 
     drain_worker_arg_t w_arg = {
         .barrier_start = &b_start,
-        .can_finish = false,
+        .transition_seen = false,
         .worker_rc = -1,
     };
 
@@ -182,18 +195,18 @@ TEST_FUNC(test_transition_drains_frame)
     pthread_barrier_wait(&b_start);
     CHECK_EQ(0, w_arg.worker_rc);
 
-    /* In a separate thread or non-blocking check:
-     * While transition is about to begin, simulate control mutex holder calling fb_transition_begin */
-    w_arg.can_finish = false;
-
-    /* Start transition in background, or allow worker to release after a delay */
-    usleep(10000); /* 10 ms */
-
-    /* Release worker after 20ms */
-    w_arg.can_finish = true;
+    /* The lease is still held here: the worker only releases it once it
+     * observes the in-progress drain.  Assert active_writers > 0 at entry so
+     * the positive drain-wait path below is genuinely exercised. */
+    CHECK_TRUE(fb_active_writers_count() > 0);
 
     int rc = fb_transition_begin(false);
     CHECK_EQ(0, rc);
+
+    /* The drain had to wait for the worker, which could only release after
+     * the transition was already in progress. */
+    CHECK_TRUE(w_arg.transition_seen);
+    CHECK_EQ(0, (int)fb_active_writers_count());
 
     /* Hardware was not touched */
     CHECK_EQ(0, g_mock_hardware_call_count);

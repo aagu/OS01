@@ -17,7 +17,9 @@
  *     timeout.  release_file auto-releases a still-held lease.
  *   - ARM_TERMINAL_ENOMEM arms a one-shot ENOMEM for the next terminal
  *     resize prepare of the target PID; CONSUME_TERMINAL_ENOMEM (issued by
- *     terminal_display.c) reads and clears it.
+ *     terminal_display.c) reads and clears it.  TERMINAL_STATUS is a
+ *     non-destructive query returning (consumed_count << 8) | pending so
+ *     the runner can prove the fault was consumed.
  *   - SNAPSHOT is a pure-output exception returning struct fb_test_snapshot
  *     (state + DISPI regs 0..10 + active writer count), sampled under the
  *     display mutex with the DISPI index restored.
@@ -52,6 +54,7 @@ typedef struct {
     int      kind;
     int32_t  target_pid;
     uint64_t token;
+    uint32_t consumed;   /* times a consume matched this slot (test assertion) */
 } fb_test_pending_t;
 
 static spinlock_T g_test_lock;
@@ -168,10 +171,25 @@ int fb_test_consume_terminal_enomem(int32_t pid)
     int rc = 0;
     if (g_pending_term.valid && g_pending_term.target_pid == pid) {
         g_pending_term.valid = false;
+        g_pending_term.consumed++;
         rc = 1;
     }
     spin_unlock_irqrestore(&g_test_lock, flags);
     return rc;
+}
+
+/* ── Terminal-ENOMEM status query (FBIOTEST_TERMINAL_STATUS) ──
+ * Non-destructive: returns (consumed_count << 8) | pending.  The QEMU
+ * runner uses the consumed delta to prove the armed fault was actually
+ * taken by the terminal, so the injection case cannot pass vacuously. */
+static int fb_test_terminal_status(void)
+{
+    fb_test_lock_ensure();
+    uint64_t flags = spin_lock_irqsave(&g_test_lock);
+    int val = (int)((g_pending_term.consumed << 8) |
+                    (g_pending_term.valid ? 1u : 0u));
+    spin_unlock_irqrestore(&g_test_lock, flags);
+    return val;
 }
 
 /* ── Per-file lifecycle ── */
@@ -368,6 +386,9 @@ static int fb_test_ioctl_file(file_t *f, int cmd, void *arg)
         return fb_test_consume_terminal_enomem(req.target_pid
                                                    ? (int32_t)req.target_pid
                                                    : st->owner_pid);
+
+    case FBIOTEST_TERMINAL_STATUS:
+        return fb_test_terminal_status();
 
     default:
         return -ENOTTY;

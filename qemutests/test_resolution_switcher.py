@@ -359,6 +359,20 @@ def parse_resjson(text: str) -> list:
     return out
 
 
+def parse_term_status(text: str) -> Optional[dict]:
+    """Parse ``test_resolution terminal-status`` output."""
+    m = re.search(r"TERM_STATUS pending=(\d+) consumed=(\d+)", text)
+    if not m:
+        return None
+    return {"pending": int(m.group(1)), "consumed": int(m.group(2))}
+
+
+def parse_ppid(text: str) -> Optional[int]:
+    """Parse the ``PPid:`` field of a /proc/<pid>/status dump."""
+    m = re.search(r"PPid:\s*(\d+)", text)
+    return int(m.group(1)) if m else None
+
+
 # ═══════════════════════════════════════════════════════════════
 #  QMP client
 # ═══════════════════════════════════════════════════════════════
@@ -575,6 +589,15 @@ class ResolutionSession:
         m = re.search(r"(/dev/pts\d+)", self.run("cat /proc/self/fd/0"))
         return m.group(1) if m else None
 
+    def terminal_pid(self) -> Optional[int]:
+        """PID of the terminal process that owns this shell's PTY.
+
+        The interactive shell is the ash child forked by terminal.elf
+        (user/terminal.c), so its parent PID is the terminal PID.  Reading
+        it from /proc avoids hard-coding a PID the test must not assume.
+        """
+        return parse_ppid(self.run("cat /proc/$$/status"))
+
     def close(self) -> None:
         if self.qmp:
             self.qmp.close()
@@ -748,6 +771,7 @@ def run_production_suite(firmware: Path, image: Path, results_dir: Path,
         failures += evaluate_round_trip(sess)
         failures += _idle_switch_case(sess, log)
         failures += _prod_cli_case(sess, log)
+        failures += _client_estale_case(sess, log)
     finally:
         sess.close()
 
@@ -778,6 +802,7 @@ def run_test_suite(firmware: Path, image: Path, results_dir: Path,
         failures += _mismatch_case(sess, log)
         failures += _drain_case(sess, log)
         failures += _terminal_enomem_case(sess, log)
+        failures += _client_eagain_case(sess, log)
         failures += _pty_watch_case(sess, log)
         failures += _capacity_cli_case(sess, log)
     finally:
@@ -934,6 +959,59 @@ def _prod_cli_case(sess, log) -> list:
     return fail
 
 
+def _start_client(sess) -> bool:
+    """Background a real test_lvgl client that reports its exit status.
+
+    The client's own exit code is emitted by the guest shell wrapper
+    (``RES_LVGL_EXIT=$?``) so the runner never has to guess a host-side PID.
+    Returns True once the client has a live view and is in its present loop.
+    """
+    sess.send_line("{ /bin/test_lvgl wait; echo RES_LVGL_EXIT=$?; } &")
+    return sess.wait_for(r"LVGL compatibility smoke test succeeded", timeout=25)
+
+
+def _client_estale_case(sess, log) -> list:
+    """A real long-running gfx client (test_lvgl) survives start, then a real
+    layout switch invalidates its view: it must release its graphics view and
+    exit non-zero with the stale-view diagnostic (spec §8.2 item 9).
+
+    Runs a *real* app in the guest (not the host stand-in loop) and switches
+    the mode for real, so the client observes ESTALE from libgfx.  The client
+    exit status is captured from the guest shell itself (background block),
+    not a host-side PID guess.  Runs last among the shared-boot cases because
+    the client leaves the terminal's alt screen active.
+    """
+    fail: list = []
+    if not _start_client(sess):
+        return ["client_estale_never_presenting"]
+
+    before = sess.mark()
+    _guest(sess, "setres 1280x720")
+
+    # The client must report the stale view ...
+    if not sess.wait_for(r"display mode changed, restart the app", timeout=10,
+                         start=before):
+        fail.append("client_estale_no_diagnostic")
+    # ... and exit non-zero (captured by the guest shell wrapper).
+    sess.wait_for(r"RES_LVGL_EXIT=\d+", timeout=10, start=before)
+    em = re.search(r"RES_LVGL_EXIT=(-?\d+)", sess.output()[len(before):])
+    if em is None:
+        fail.append("client_estale_no_exit_status")
+    elif int(em.group(1)) == 0:
+        fail.append("client_estale_exited_zero")
+
+    # The session/terminal must survive the client's exit.
+    if sess.shell_pid() is None:
+        fail.append("client_estale_session_dead")
+    if "RES_CLIENT_ALIVE" not in _guest(sess, "echo RES_CLIENT_ALIVE"):
+        fail.append("client_estale_shell_alive")
+
+    # Leave the terminal's alt screen (the client died holding it) and restore.
+    sess.send_line("printf '\\033[?1049l'")
+    _guest(sess, "setres 800x600")
+    return fail
+
+
 def _off_whitelist_case(firmware: Path, image: Path, results_dir: Path, log) -> list:
     """Boot an out-of-table mode and verify GET_STATE/CLI report it."""
     fail: list = []
@@ -1056,10 +1134,31 @@ def _drain_case(sess, log) -> list:
 
 
 def _terminal_enomem_case(sess, log) -> list:
-    """Faulted terminal resize prepare recovers and keeps the session."""
+    """Faulted terminal resize prepare recovers and keeps the session.
+
+    The terminal PID is discovered from /proc (the shell's parent), never
+    hard-coded — a wrong PID would leave the fault unconsumed.  The guest
+    ``terminal-status`` consumed-delta proves the armed ENOMEM was actually
+    taken by the terminal, so the case cannot pass vacuously.
+    """
     fail: list = []
     pid0 = sess.shell_pid()
-    _guest(sess, "/bin/test_resolution arm-terminal 2 7")
+    term_pid = sess.terminal_pid()
+    if not term_pid or term_pid <= 0:
+        return ["term_enomem_no_terminal_pid"]
+    if term_pid == pid0:
+        return [f"term_enomem_terminal_is_shell {term_pid}"]
+    log(f"terminal-ENOMEM target PID={term_pid} (shell PID={pid0})")
+
+    baseline = parse_term_status(_guest(sess, "/bin/test_resolution terminal-status"))
+    if baseline is None:
+        return ["term_enomem_status_unparsable"]
+    c0 = baseline["consumed"]
+
+    arm = _guest(sess, f"/bin/test_resolution arm-terminal {term_pid} 7")
+    if "ARM_TERMINAL" not in arm or "ok" not in arm:
+        return [f"term_enomem_arm_failed: {arm.strip()[-120:]}"]
+
     _guest(sess, "setres 1280x720")
     if sess.mode() != (1280, 720):
         fail.append(f"term_enomem_mode {sess.mode()}")
@@ -1074,9 +1173,81 @@ def _terminal_enomem_case(sess, log) -> list:
         time.sleep(0.2)
     if not ok:
         fail.append("term_enomem_no_recovery_frame")
+
+    # The fault must have been *consumed* by the terminal: a wrong PID (or a
+    # broken hook) leaves the consumed count unchanged and pending set.
+    after = parse_term_status(_guest(sess, "/bin/test_resolution terminal-status"))
+    if after is None:
+        fail.append("term_enomem_status_after_unparsable")
+    else:
+        if after["consumed"] != c0 + 1:
+            fail.append(f"term_enomem_not_consumed c0={c0} c1={after['consumed']}")
+        if after["pending"] != 0:
+            fail.append("term_enomem_fault_still_pending")
+            # Do not leak a stuck fault into later cases.
+            _guest(sess, f"/bin/test_resolution consume-terminal {term_pid}")
+
     final = sess.shell_pid()
     if final != pid0:
         fail.append(f"term_enomem_shell_changed {pid0}->{final}")
+    _guest(sess, "setres 800x600")
+    return fail
+
+
+def _client_eagain_case(sess, log) -> list:
+    """A real gfx client (test_lvgl) hits a transient EAGAIN while a mode SET
+    drains behind a held writer lease, stays alive, and keeps its view valid
+    (spec §8.2 item 5).
+
+    The held lease makes ``fb_transition_begin`` set ``transitioning`` for a
+    full ~1 s before its drain times out (-EBUSY); every gfx present in that
+    window fails EAGAIN.  The generation never changes, so a present after the
+    window must succeed again: the client is proven to still hold a live view
+    by driving a *real* switch afterwards, which now yields the ESTALE
+    contract.
+    """
+    fail: list = []
+    sess.send_line("/bin/test_resolution hold 4 &")
+    if not sess.wait_for(r"HOLD ok", timeout=8):
+        return ["eagain_hold_not_acquired"]
+
+    if not _start_client(sess):
+        return ["eagain_client_never_presenting"]
+    # Everything examined from here is strictly newer than the client start,
+    # so a stale RELEASE/clients marker from an earlier case cannot match.
+    mark = sess.mark()
+
+    # This SET must block in the drain and time out: generation unchanged.
+    out = _guest(sess, "setres 1280x720")
+    if "EBUSY" not in out:
+        fail.append(f"eagain_set_not_ebusy: {out.strip()[-120:]}")
+
+    # The client must NOT have exited on the transient failure, and must not
+    # have taken the stale-view path (which only a generation change triggers).
+    seen = sess.output()[len(mark):]
+    if re.search(r"RES_LVGL_EXIT=", seen):
+        fail.append("eagain_client_exited_on_transient")
+    if "display mode changed, restart the app" in seen:
+        fail.append("eagain_client_estale_during_transient")
+
+    # The lease releases after hold expires.  A *real* switch now must yield
+    # ESTALE: only possible while the client still holds its (unchanged,
+    # no-longer-stale) view, so this proves it re-presented after the EAGAIN.
+    if not sess.wait_for(r"RELEASE ok", timeout=10, start=mark):
+        fail.append("eagain_release_missing")
+    before = sess.mark()
+    _guest(sess, "setres 1280x720")
+    if not sess.wait_for(r"display mode changed, restart the app", timeout=10,
+                         start=before):
+        fail.append("eagain_client_view_lost")
+    sess.wait_for(r"RES_LVGL_EXIT=\d+", timeout=10, start=before)
+    em = re.search(r"RES_LVGL_EXIT=(-?\d+)", sess.output()[len(before):])
+    if em is None:
+        fail.append("eagain_client_no_estale_exit")
+    elif int(em.group(1)) == 0:
+        fail.append("eagain_client_estale_exited_zero")
+
+    sess.send_line("printf '\\033[?1049l'")
     _guest(sess, "setres 800x600")
     return fail
 
@@ -1422,6 +1593,15 @@ class ParseHelpersTest(unittest.TestCase):
         st = parse_test_set("SET 1024x768 rc=-1 errno=5\n")
         self.assertEqual((st["width"], st["height"]), (1024, 768))
         self.assertEqual(st["errno"], 5)
+
+    def test_parse_term_status(self):
+        st = parse_term_status("TERM_STATUS pending=0 consumed=3\n")
+        self.assertEqual(st, {"pending": 0, "consumed": 3})
+        self.assertIsNone(parse_term_status("nope"))
+
+    def test_parse_ppid(self):
+        self.assertEqual(parse_ppid("Name:\ttask\nPid:\t42\nPPid:\t7\n"), 7)
+        self.assertIsNone(parse_ppid("no parent here"))
 
 
 if __name__ == "__main__":

@@ -260,12 +260,28 @@ static int cmd_consume_terminal(uint32_t pid)
     return rc < 0 ? 1 : 0;
 }
 
+/* Non-destructive terminal-ENOMEM fault status.  Prints the consumed-count
+ * and pending flag so the runner can prove the armed fault was actually
+ * taken by the terminal (a wrong PID leaves consumed unchanged). */
+static int cmd_terminal_status(void)
+{
+    struct fb_test_req req;
+    fill_req(&req, 0, 0);
+    int rc = ioctl(g_fbtest_fd, FBIOTEST_TERMINAL_STATUS, &req);
+    if (rc < 0) {
+        printf("ERROR=terminal_status errno=%d\n", errno);
+        return 1;
+    }
+    printf("TERM_STATUS pending=%d consumed=%d\n", rc & 1, rc >> 8);
+    return 0;
+}
+
 static void usage(void)
 {
     printf("usage: test_resolution <snapshot|get|set W H|"
            "arm-mismatch PID TOKEN W H|arm-rollback PID TOKEN W H|"
            "hold [SECS]|release|arm-terminal PID TOKEN|consume-terminal PID|"
-           "pty-watch [SECS [W H]]|mmap|surrender>\n");
+           "terminal-status|pty-watch [SECS [W H]]|mmap|surrender>\n");
 }
 
 int main(int argc, char **argv)
@@ -309,6 +325,8 @@ int main(int argc, char **argv)
                               (uint64_t)strtoull(argv[3], NULL, 0));
     } else if (!strcmp(cmd, "consume-terminal") && argc == 3) {
         rc = cmd_consume_terminal((uint32_t)strtoul(argv[2], NULL, 10));
+    } else if (!strcmp(cmd, "terminal-status")) {
+        rc = cmd_terminal_status();
     } else if (!strcmp(cmd, "pty-watch") &&
                (argc == 2 || argc == 3 || argc == 4)) {
         uint32_t pw = 0, ph = 0;

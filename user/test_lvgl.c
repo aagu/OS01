@@ -14,15 +14,8 @@
 #include <sys/ioctl.h>
 #include <errno.h>
 #include <gfx.h>
+#include <uapi/fb.h>
 #include "gfx_client_policy.h"
-
-#define FBIOSURRENDER 0x00004601
-
-struct fb_info {
-    uint32_t width;
-    uint32_t height;
-    uint32_t stride;
-};
 
 #define DISP_FALLBACK_HOR 320
 #define DISP_FALLBACK_VER 240

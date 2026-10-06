@@ -332,6 +332,7 @@ static void test_hooks_abi(void)
     CHECK_EQ(0x4654, FBIOTEST_RELEASE_WRITER);
     CHECK_EQ(0x4655, FBIOTEST_ARM_TERMINAL_ENOMEM);
     CHECK_EQ(0x4656, FBIOTEST_CONSUME_TERMINAL_ENOMEM);
+    CHECK_EQ(0x4657, FBIOTEST_TERMINAL_STATUS);
 }
 
 /* ── Test 2: node registration + request validation ── */

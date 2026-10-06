@@ -70,12 +70,7 @@
 #include <unistd.h>
 
 #include <gfx.h>
-
-/* ── Framebuffer metadata (must match kernel definition) ────── */
-struct fb_info {
-    uint32_t width, height, stride, bpp, format;
-} __attribute__((packed));
-#define FBIOSURRENDER  0x00004601
+#include <uapi/fb.h>
 
 /* ── Colors (0xAARRGGBB, host-endian RGB32) ────────────────────── */
 #define COLOR_RED    0x00FF0000u
