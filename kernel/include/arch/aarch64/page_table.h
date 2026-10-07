@@ -249,12 +249,19 @@ int aarch64_pt_split_block_2m(uint64_t *root, uint64_t va);
  *   AARCH64_PT_EINVAL    for null root or unaligned/uncanonical VA.
  *   AARCH64_PT_ENOENT    when an intermediate L0/L1/L2 table is missing.
  *
- * Test helper — production callers should use arch_vmm_query_4k or the
- * typed aarch64_pt_query_4k_ext instead.  Does NOT acquire pt_lock_for
- * (single-threaded host harness; production callers wanting stable
- * introspection should hold the lock externally). */
+ * Test helper — production callers must use arch_vmm_query_4k or the
+ * typed aarch64_pt_query_4k_ext instead.  The declaration and the
+ * definition are compiled ONLY under OS01_SELFTEST (KERNEL_SELFTEST=1
+ * kernel builds and the hosttests objects that link the real
+ * page_table.c), so a production call site fails to compile rather
+ * than silently skipping the pt_lock_for discipline this helper
+ * documents.  Does NOT acquire pt_lock_for (single-threaded host
+ * harness; production callers wanting stable introspection should
+ * hold the lock externally). */
+#ifdef OS01_SELFTEST
 int aarch64_pt_read_l2_desc(const uint64_t *root, uint64_t va,
                             uint64_t *desc_out);
+#endif /* OS01_SELFTEST */
 
 /* Return true iff every page in [va, va + length) is mapped with the
  * requested access. length == 0 returns true. addr + length overflow

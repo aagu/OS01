@@ -1530,7 +1530,15 @@ $(TEST_BLD)/test_x86_vmm_backend.elf: \
 # vmm_gate_check() is stubbed in the test TU (page_table.c only
 # references it as a symbol; the production vmm_gate.c is not
 # linked here so we don't need percpu_data[] or dtb_cpu_count()).
-AARCH64_PT_SW_HOST_CFLAGS := $(HOST_CFLAGS) -I$(TEST_MOCK)/page_table_aarch64_include \
+# OS01_SELFTEST=1: this harness links the REAL page_table.c, whose
+# aarch64_pt_read_l2_desc test helper (declaration + definition) is
+# compiled only under OS01_SELFTEST — the same guard the kernel
+# selftest build (-DKERNEL_SELFTEST → -DOS01_SELFTEST, kernel/Makefile)
+# and kernel/random/random.c's test hook use.  No other header reachable
+# from this harness carries OS01_SELFTEST-guarded code, so the define
+# only exposes the test-only introspection surface.
+AARCH64_PT_SW_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_SELFTEST=1 \
+                              -I$(TEST_MOCK)/page_table_aarch64_include \
                               $(KERNEL_INC) $(LIBC_INC)
 
 $(TEST_BLD)/aarch64_pt_production.o: \

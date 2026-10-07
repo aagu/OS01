@@ -1288,7 +1288,10 @@ int aarch64_pt_split_block_2m(uint64_t *root, uint64_t va)
 
 /* Read the raw descriptor at pmd[l2] for `va`.  Walks L0 → L1 → L2
  * without allocating and returns pmd[l2_idx].  Test helper; see
- * <arch/aarch64/page_table.h> for the full contract. */
+ * <arch/aarch64/page_table.h> for the full contract.  Compiled only
+ * under OS01_SELFTEST (mirrors kernel/random/random.c's test-hook
+ * pattern) so production code cannot link against it. */
+#ifdef OS01_SELFTEST
 int aarch64_pt_read_l2_desc(const uint64_t *root, uint64_t va,
                             uint64_t *desc_out)
 {
@@ -1308,6 +1311,7 @@ int aarch64_pt_read_l2_desc(const uint64_t *root, uint64_t va,
     *desc_out = pmd[l2_idx];
     return AARCH64_PT_OK;
 }
+#endif /* OS01_SELFTEST */
 
 bool aarch64_pt_range_accessible(const uint64_t *root, uint64_t va,
                                  uint64_t length, bool write, bool user)
