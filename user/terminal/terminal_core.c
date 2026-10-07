@@ -1,6 +1,6 @@
-// user/terminal_core.c — VT100 screen model + CSI parser, pure logic.
+// user/terminal/terminal_core.c — VT100 screen model + CSI parser, pure logic.
 //
-// Extracted from user/terminal.c so the terminal state machine is
+// Extracted from user/terminal/terminal.c so the terminal state machine is
 // host-testable.  Behaviour must match the original parser:
 //   CSI A/B/C/D (cursor), K (clear line), J (clear screen), H (home),
 //   ?25h/?25l (cursor visibility) + \n \r \b \t and printable glyphs.

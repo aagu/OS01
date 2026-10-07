@@ -588,3 +588,55 @@ make PROFILE=aarch64-clang aarch64-uefi-kernel  # aarch64 内核 ELF
 - `docs/build-system-harness.md` → 第 3 章（构建系统 Harness）+ 第 2 章 §2-3（部分）
 
 `docs/build/toolchain.md` 保持独立，覆盖 x86_64 toolchain override 契约。
+
+## 用户态程序与 app.mk
+
+用户程序由 `user/apps.mk` 统一发现，`make user` 编译并发布 ELF，
+`make disk.img` 将程序安装为 `/bin/<程序名>`。新增程序无需修改顶层
+Makefile 或 `config/rootfs.mk`。删除源码或 `app.mk` 后，下一次镜像构建
+也会移除对应的安装条目。
+
+简单程序直接放在 `user/<程序名>.c`。多文件程序放在
+`user/<程序名>/`，添加 `app.mk`，例如：
+
+```make
+# user/example/app.mk；源文件路径相对于此目录
+APP_SOURCES := main.c parser.c entry.S
+APP_CFLAGS := -DENABLE_FEATURE
+APP_LDLIBS := -lgfx
+```
+
+每个子目录对应一个同名 ELF；只发现一级子目录中的 `app.mk`，
+不会把目录中的辅助 `.c` 当作独立程序。`APP_SOURCES` 必须非空，
+支持 `.c` 和 `.S`，也可列出目录内更深层的源文件。顶层单文件与
+子目录程序重名时立即报错；`busybox` 名称保留给 BusyBox 构建适配器。
+
+可选变量：
+
+| 变量 | 用途 |
+|---|---|
+| `APP_CFLAGS` | 追加到本程序目录内源文件的编译选项 |
+| `APP_LDFLAGS` | 追加到本程序的链接选项 |
+| `APP_LDLIBS` | 额外静态库，放在应用对象之后、默认 `-lc` 之前 |
+| `APP_SHARED_SOURCES` | 相对于 `user/` 的共享源文件，以全局选项编译一次 |
+| `APP_EXTRA_OBJS` | 资源生成规则提供的额外对象 |
+
+共享辅助代码放在 `user/common/`；此目录不放 `app.mk`。
+`crt0.S`、信号返回 trampoline 和链接脚本仍由公共规则处理。
+对象与 `.d` 依赖文件保留在 profile/variant 的构建目录内，修改头文件
+或 `app.mk` 会触发相应重建。
+
+`app.mk` 同时被顶层发现逻辑与用户组件读取。自定义资源规则及
+`APP_EXTRA_OBJS` 应放在 `ifeq ($(USER_BUILD_CONTEXT),1)` 条件内，
+使用 `$(OBJ_DIR)` 存放生成文件；可参考 `user/terminal/app.mk`。
+资源生成规则建议写在变量声明之后；默认目标固定为 `all`。
+
+`test_resolution.c` 仍仅在 `FB_RESOLUTION_TEST=1` 时发现和安装。
+`sh.c` 会编译及发布，但 `/bin/sh` 保留为 BusyBox 链接。其他同名
+BusyBox applet 的链接会让位于发现的原生程序。
+
+构建回归检查包含在 `make test-host` 中，也可单独运行：
+
+```bash
+python3 tools/tests/test_user_build.py
+```

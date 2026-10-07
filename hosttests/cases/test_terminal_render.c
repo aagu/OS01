@@ -1,7 +1,7 @@
 /* hosttests/cases/test_terminal_render.c
  *
- * Host unit test exercising the real user/terminal_render.c,
- * user/terminal_core.c, libgfx/sprite.c, libgfx/line.c, and libgfx/gfx.c.
+ * Host unit test exercising the real user/terminal/terminal_render.c,
+ * user/terminal/terminal_core.c, libgfx/sprite.c, libgfx/line.c, and libgfx/gfx.c.
  */
 
 #include "test_framework.h"
@@ -44,17 +44,17 @@ static void load_font_once(void)
 {
     if (g_font_data) return;
     char path[1024];
-    snprintf(path, sizeof(path), "%s/user/terminal_font.psf", REPO_ROOT);
+    snprintf(path, sizeof(path), "%s/user/terminal/terminal_font.psf", REPO_ROOT);
     FILE *fp = fopen(path, "rb");
     if (!fp) {
         /* Try relative */
-        fp = fopen("../user/terminal_font.psf", "rb");
+        fp = fopen("../user/terminal/terminal_font.psf", "rb");
     }
     if (!fp) {
-        fp = fopen("user/terminal_font.psf", "rb");
+        fp = fopen("user/terminal/terminal_font.psf", "rb");
     }
     if (!fp) {
-        fprintf(stderr, "FATAL: cannot find user/terminal_font.psf\n");
+        fprintf(stderr, "FATAL: cannot find user/terminal/terminal_font.psf\n");
         exit(1);
     }
     size_t cap = 4096, n = 0;

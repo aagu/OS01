@@ -1,7 +1,7 @@
 /*
  * test/cases/test_terminal_core.c — VT100 screen-model unit tests.
  *
- * Compiles the REAL user/terminal_core.c (pure logic).  Exercises:
+ * Compiles the REAL user/terminal/terminal_core.c (pure logic).  Exercises:
  * glyph placement, cursor movement, clear ops, scrolling,
  * and the alt-screen (?1049h/?1049l) dual-buffer protocol.
  */

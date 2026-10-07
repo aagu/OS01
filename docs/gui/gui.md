@@ -145,7 +145,7 @@ make PROFILE=x86_64-clang test-qemu SUITE=systest # syscall suite
 
 ## Tetris 游戏实施总结（已完成，2026-08-16，Task 6 迁移到 libgfx）
 
-> 状态：**已完成**。原始提交 `79f1179`（framebuffer + alt-screen 协议）、`d8e5c05`（UX：慢速重力 + 种子 RNG + 消行闪烁）、`ae0cc04`（消行白残留修复）。Task 6（2026-09-30）迁移到 libgfx，提交 `feat(gfx): migrate Tetris and document API`，渲染路径改为 `/dev/gfx0` + `libgfx.a`，游戏逻辑（`user/tetris_logic.c`）零变更。QEMU 手工 `exec /bin/tetris` 可玩，退出终端内容恢复。
+> 状态：**已完成**。原始提交 `79f1179`（framebuffer + alt-screen 协议）、`d8e5c05`（UX：慢速重力 + 种子 RNG + 消行闪烁）、`ae0cc04`（消行白残留修复）。Task 6（2026-09-30）迁移到 libgfx，提交 `feat(gfx): migrate Tetris and document API`，渲染路径改为 `/dev/gfx0` + `libgfx.a`，游戏逻辑（`user/tetris/tetris_logic.c`）零变更。QEMU 手工 `exec /bin/tetris` 可玩，退出终端内容恢复。
 
 ### 目标
 
@@ -182,7 +182,7 @@ OS01 上可玩的俄罗斯方块：用户态 `user/tetris.c`，**手工启动**�
 |------|------------|------|------|------|
 | **1** | `feat(driver): keyboard poll support`（~31 行） | `kernel/driver/keyboard.c` + `kernel/core/main.c` | scancode wait queue（spinlock+list）；`keyboard_handler` push ring 后 wake；`keyboard_poll_dev()`：ring 非空→POLLIN，否则 poll_wait；`keyboard_ops.poll` 挂上（main.c 1 行） | `make clean && make`；QEMU 内测试程序 `poll(/dev/keyboard)` 阻塞等键立即返回 |
 | **2** | `fix(tty): make termios honest`（~60 行） | `kernel/include/tty/tty.h` + `kernel/tty/tty.c` | tty_t 加 `struct termios term`；默认 raw（`c_lflag=0, ICRNL, OPOST\|ONLCR, VMIN=1`）；TCGETS 返回真值 / TCSETS 真存储；tty_read 尊重 ICANON（攒行等 `\n`）+ ECHO 回显。**不做**：ISIG/pgrp（TODO）、OPOST 输出转换（无消费者） | `make clean && make`（结构体变更！）；QEMU 回归 terminal/ash；小程序 TCSETS 切换 raw/canonical 验证行为差异 |
-| **3** | `feat(terminal): alt screen double buffer`（~80 行） | `user/terminal.c` | offscreen 主缓冲 + alt 缓冲；put_glyph 写当前缓冲；CSI 解析器加 `?1049h`（保存+清屏+切 alt）/ `?1049l`（切回主缓冲全量重绘） | 测试程序发 `\e[?1049h` 画图 → `\e[?1049l`，原终端内容完整恢复 |
+| **3** | `feat(terminal): alt screen double buffer`（~80 行） | `user/terminal/terminal.c` | offscreen 主缓冲 + alt 缓冲；put_glyph 写当前缓冲；CSI 解析器加 `?1049h`（保存+清屏+切 alt）/ `?1049l`（切回主缓冲全量重绘） | 测试程序发 `\e[?1049h` 画图 → `\e[?1049l`，原终端内容完整恢复 |
 | **4** | `feat(applets): tetris game`（~400 行） | `user/tetris.c`（新）+ `Makefile` | 游戏逻辑（7 Tetromino、4 旋转、碰撞、消行、计分、等级加速）；输入解析（E0 前缀 + release 位 → 归一化 K_LEFT/RIGHT/DOWN/UP/ROTATE/DROP）；渲染 fb 像素块 + **20×10 逻辑屏脏矩形 diff**（防闪烁）；主循环 `poll(/dev/keyboard, 500ms 超时=下落 tick)`；`\e[?1049h` 进入 / `\e[?1049l` 退出 | QEMU 手工 `exec /bin/tetris` 可玩 |
 | **4b** | `feat(gfx): migrate Tetris and document API`（Task 6） | `user/tetris.c` + `user/Makefile` | 用 `gfx_open(0,0,w,h)` 替代 `/dev/fb` mmap；`gfx_fill_rect` 替代直接像素写；每视觉事件一次 `gfx_present`；脏矩形 diff / clear-line flash 行为保留 | `make test-host` / `make test-qemu SUITE={phase-0,gfx,systest}` 全 PASS；QEMU 手工 screendump 验证 bg 黑、边框灰、I-piece 青色 |
 | **5** | 集成验证（无代码） | — | 全量 `make clean && make`；启动 → terminal/ash 正常 → 玩 tetris → 退出终端恢复；systest 回归 | QEMU 实跑 |

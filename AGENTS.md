@@ -78,7 +78,7 @@ keyboard IRQ → console TTY (tty_push_input) → terminal.elf reads /dev/tty �
 ```
 
 - **Ctrl-C path**: `tty_push_input` (console TTY) does the VINTR line discipline → `signal_pgrp(tty->fg_pgrp, SIGINT)`. With job control disabled (busybox `CONFIG_ASH_JOB_CONTROL=n`), init/terminal/ash/cat all share pgrp 1, so the broadcast hits all of them: terminal.elf survives (must `signal(SIGINT, SIG_IGN)` — see below), ash survives (busybox handler), the foreground job (e.g. `cat`) dies.
-- **`terminal.elf` MUST ignore SIGINT**: exec() resets ALL sighand to `SIG_DFL` (kernel/sched/task.c, deliberate — it also clears inherited SIG_IGN). Without `signal(SIGINT, SIG_IGN)` in `user/terminal.c` main(), every ^C kills the terminal emulator and init respawns it. terminal.elf already handles ^C itself (`kill(ash_pid, SIGINT)`).
+- **`terminal.elf` MUST ignore SIGINT**: exec() resets ALL sighand to `SIG_DFL` (kernel/sched/task.c, deliberate — it also clears inherited SIG_IGN). Without `signal(SIGINT, SIG_IGN)` in `user/terminal/terminal.c` main(), every ^C kills the terminal emulator and init respawns it. terminal.elf already handles ^C itself (`kill(ash_pid, SIGINT)`).
 - **Console TTY default termios is `c_lflag = ISIG`** (signal-aware half-raw, not raw 0) so Ctrl-C works out of the box. Tests asserting the old raw default will fail.
 
 **Headless interactive test (inject commands via serial stdio):**
@@ -129,7 +129,7 @@ IMG=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^image=//p')
 | `kernel/fs/` | vfs.c, fat.c, ext2.c, devfs.c, procfs.c, tmpfs.c, elf.c, file.c, poll.c, select.c |
 | `kernel/tty/tty.c` | Console TTY: fg_pgrp field, VINTR/VQUIT line discipline (ISIG), TIOCSPGRP/TIOCGPGRP, cooked readline |
 | `kernel/tty/pty.c` | PTY master/slave (terminal.elf runs ash on a PTY slave); pty_slave_ioctl TIOCSPGRP |
-| `user/terminal.c` | VT100 terminal emulator: /dev/tty → PTY → ash; must SIG_IGN SIGINT |
+| `user/terminal/terminal.c` | VT100 terminal emulator: /dev/tty → PTY → ash; must SIG_IGN SIGINT |
 | `kernel/subsys/subsys.c` | Subsystem registration framework |
 | `kernel/sync/futex.c` | Futex hash table (SYS_futex=47) |
 | `kernel/include/core/bootinfo.h` | **`boot_context` v2 ABI** (shared by both UEFI loaders); fixed-size types critical |

@@ -1,6 +1,6 @@
 /* hosttests/cases/test_terminal_display.c
  *
- * Host test for the REAL user/terminal_display.c (+ terminal_core.c,
+ * Host test for the REAL user/terminal/terminal_display.c (+ terminal_core.c,
  * terminal_render.c, libgfx draw primitives).  The libgfx open/close/present
  * and FBIOGET_STATE backends are injected through terminal_display_ops_t.
  */

@@ -1,4 +1,4 @@
-/* user/setres_parse.c — see setres_parse.h.  Pure C, no libc beyond
+/* user/setres/setres_parse.c — see setres_parse.h.  Pure C, no libc beyond
  * string comparison, so both the target build and the host fixture
  * compile it unchanged. */
 #include "setres_parse.h"

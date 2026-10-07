@@ -1,4 +1,4 @@
-// user/tetris_logic.c — pure tetris game logic (host-testable).
+// user/tetris/tetris_logic.c — pure tetris game logic (host-testable).
 
 #include "tetris_logic.h"
 #include <string.h>

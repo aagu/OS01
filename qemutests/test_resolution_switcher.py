@@ -665,7 +665,7 @@ class ResolutionSession:
         """PID of the terminal process that owns this shell's PTY.
 
         The interactive shell is the ash child forked by terminal.elf
-        (user/terminal.c), so its parent PID is the terminal PID.  Reading
+        (user/terminal/terminal.c), so its parent PID is the terminal PID.  Reading
         it from /proc avoids hard-coding a PID the test must not assume.
         """
         return parse_ppid(self.run("cat /proc/$$/status"))
