@@ -25,8 +25,9 @@
 //     the SGI was never sent to it because the mask excluded it.
 //
 //  ⑤ two CPUs competing on the same pt_lock (spec §5.4):
-//     a shared scratch root; the AP runs WORK_PT_STRESS (map → unmap
-//     loops) on VA_P while the BSP drives map → replace RW→RO [the
+//     a shared scratch root; the AP runs map → unmap loops as
+//     WORK_PT_MAP items on VA_P while the BSP drives map → replace
+//     RW→RO [the
 //     BBM-class update] → unmap on the adjacent VA_Q. Both VAs hash
 //     to the same pt_lock_for(root_pa, l2) slot, so every critical
 //     section serializes; both sides must complete their iteration

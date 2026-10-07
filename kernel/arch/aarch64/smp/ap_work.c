@@ -63,7 +63,7 @@ bool ap_work_wait(uint32_t cpu, uint32_t seq, uint64_t *out,
 
 /* M3.6 Task 26: weak extension dispatcher. The kernel selftest
  * (test_aarch64_page_table_multicore.c) overrides this with a strong definition that
- * consumes WORK_PT_STRESS / WORK_PT_MAP. The weak default declines
+ * consumes WORK_PT_MAP. The weak default declines
  * every command, preserving the legacy "unknown cmd leaves the item
  * pending" behavior in production builds. */
 __attribute__((weak)) bool ap_work_ext_run(uint32_t cmd, uint64_t arg0,

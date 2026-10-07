@@ -35,10 +35,12 @@ enum ap_work_cmd { WORK_READ64 = 1, WORK_BARRIER = 2 };
 /* M3.6 Task 26 extension commands. These are consumed by the weak
  * ap_work_ext_run() hook below — the production ap_work.c body does
  * not know their payloads; only the kernel selftest
- * (kernel/selftest/test_aarch64_page_table_multicore.c) overrides the hook. Unknown
- * commands without an override are ignored exactly like before
- * (state stays READY, seq does not advance). */
-enum ap_work_cmd_ext { WORK_PT_STRESS = 3, WORK_PT_MAP = 4, WORK_PT_ALLOC = 5 };
+ * (kernel/selftest/test_aarch64_page_table_multicore.c) overrides the hook
+ * (its §8.2⑤ design note describes the map → unmap stress loop that
+ * runs as WORK_PT_MAP items). Unknown commands without an override
+ * are ignored exactly like before (state stays READY, seq does not
+ * advance). */
+enum ap_work_cmd_ext { WORK_PT_MAP = 4 };
 
 /* Weak extension dispatcher (M3.6 Task 26): return true when `cmd`
  * was consumed and *out holds the result; false to leave the item
