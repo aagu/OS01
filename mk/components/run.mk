@@ -398,13 +398,14 @@ test-pmm-boot-reservation:
 # tasks that add new `qemutests/test_*.py` modules (e.g.
 # `qemutests.test_harness_process`, `qemutests.test_harness_result`,
 # `qemutests.test_make_qemu_failure`, `qemutests.test_run_test_harness`,
-# `qemutests.test_driver_model_matrix`, etc.) append their names here
+# `qemutests.test_driver_model_matrix`, `qemutests.test_kernel_selftest_result`,
+# etc.) append their names here
 # so a single `make test-harness` validates the framework end-to-end
 # before any real QEMU run. The recipe is a single `python3 -m unittest`
 # call against the explicit list — never auto-discovery, never an
 # implicit search for `test_*.py`. Every fixture replaces
 # subprocess.Popen with a fake, so no QEMU process can ever start.
-TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure
+TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result
 .PHONY: test-harness
 test-harness:
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -913,6 +914,12 @@ test-user-canary: $(if $(filter userland,$(PROFILE_CAPABILITIES)),$(USER_ARTIFAC
 # This target builds and boots only the selftest-scoped image.  In particular
 # it never uses the ordinary image, and it refuses a combined syscall/selftest
 # request because those suites are intentionally run independently.
+#
+# The QEMU process boundary, the semantic gate (check_kernel_selftest.failures)
+# and the run evidence now live in qemutests/run_kernel_selftest.py (Task 6).
+# The runner receives explicit values — it does NOT infer profile paths — and
+# stops QEMU controlled once the boot summary and scheduled task markers are
+# complete, so the historical external `timeout 75` wrapper is gone.
 .PHONY: test-kernel-selftest
 test-kernel-selftest: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
@@ -921,32 +928,15 @@ test-kernel-selftest: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMW
 	  exit 1; \
 	fi
 	$(MAKE) KERNEL_SELFTEST=1 image
-	@set -eu; \
-	log="$(BUILD_DIR)/logs/kernel-selftest.log"; \
-	mkdir -p "$$(dirname "$$log")"; \
-	rm -f "$$log"; \
-	set +e; \
-	timeout 75 "$(QEMU_BIN)" -M q35 -smp "$(KERNEL_SELFTEST_SMP)" \
-	  -drive if=pflash,format=raw,readonly=on,file="$(OVMF_FIRMWARE)" \
-	  -drive file="$(TEST_SELFTEST_IMAGE)",format=raw,if=none,id=disk \
-	  -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
-	  -object rng-random,filename=/dev/urandom,id=rng0 \
-	  -device virtio-rng-pci,rng=rng0 \
-	  -m "$(MEMORY)" -display none -serial stdio -no-reboot -no-shutdown < /dev/null >"$$log" 2>&1; \
-	rc=$$?; \
-	set -e; \
-	if [ "$$rc" -ne 0 ] && [ "$$rc" -ne 124 ]; then \
-	  echo "ERROR: kernel selftest QEMU exited with status $$rc; log: $$log" >&2; \
-	  cat "$$log" >&2; \
-	  exit 1; \
-	fi; \
-	grep -aF '[selftest] running built-in tests...' "$$log"; \
-	grep -aE '\[selftest\] [1-9][0-9]* total: [1-9][0-9]* passed, 0 failed' "$$log"; \
-	grep -aF '[selftest] done' "$$log"; \
-	python3 qemutests/check_kernel_selftest.py "$$log"; \
-	if [ "$$rc" -eq 124 ]; then \
-	  echo "  [selftest] QEMU timed out after complete passing markers (expected)"; \
-	fi
+	python3 qemutests/run_kernel_selftest.py \
+	  --firmware "$(OVMF_FIRMWARE)" \
+	  --image "$(TEST_SELFTEST_IMAGE)" \
+	  --qemu "$(QEMU_BIN)" \
+	  --cpu "$(KERNEL_SELFTEST_SMP)" \
+	  --memory "$(MEMORY)" \
+	  --timeout 75 \
+	  --build-dir "$(abspath $(BUILD_DIR))" \
+	  --profile "$(PROFILE)"
 
 # ── Run paths ────────────────────────────────────────────────
 # Prints the current profile's absolute firmware and active image path so a
