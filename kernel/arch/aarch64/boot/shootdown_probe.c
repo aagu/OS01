@@ -47,8 +47,8 @@
  * for cross-arch type-checking. Several real APIs return through
  * pointers or use different conventions, hence the wrappers. */
 
-/* arch_vmm_* return ints in the AARCH64_PT_* namespace (OK=0,
- * ENOENT=-3 etc.); the probe only needs OK-vs-non-OK discrimination. */
+/* arch_vmm_* return Linux errno at the backend boundary (0, -ENOENT,
+ * -EEXIST, ...); the probe only needs OK-vs-non-OK discrimination. */
 
 static int prod_map_4k_new(void *pgdir, uint64_t pa, uint64_t va, uint32_t vm)
 {

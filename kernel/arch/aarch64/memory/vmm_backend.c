@@ -225,6 +225,42 @@ static inline void vmm_debug_assert_irqs_enabled(const char *where)
 }
 #endif
 
+/* ── Backend errno contract ──────────────────────────────────────── */
+
+/* Normalize the page-table layer's internal AARCH64_PT_* sentinels to
+ * Linux errno (spec §4.2/§4.3).  The AARCH64_PT_ enum uses sequential
+ * negative numbers that collide with DIFFERENT Linux errno values
+ * (AARCH64_PT_EINVAL=-1 is Linux -EPERM; AARCH64_PT_ENOMEM=-4 is
+ * -EINTR) — without this, a caller comparing arch_vmm_* results
+ * against -EINVAL/-EPERM/-ENOMEM misclassifies every failure.
+ *
+ * Every arch_vmm_* error exit MUST go through this helper so the
+ * backend boundary only ever emits Linux errno (hosttests pin this in
+ * test_aarch64_backend_4k.c's errno-contract block).
+ *
+ * AARCH64_PT_EPROT_NONE (-1111) is NOT an errno: it is the query/
+ * unmap tri-state sentinel ("PROTNONE-stashed, phys_out valid") and
+ * is part of the documented API — passed through untouched.  Unknown
+ * codes also pass through unchanged so a future enum addition fails
+ * loud (as itself) rather than masquerading as a valid errno. */
+static int pt_err_to_linux(int rc)
+{
+    switch (rc) {
+    case AARCH64_PT_OK:         return 0;
+    case AARCH64_PT_EPROT_NONE: return AARCH64_PT_EPROT_NONE;
+    case AARCH64_PT_EINVAL:     return -EINVAL;
+    case AARCH64_PT_EEXIST:     return -EEXIST;
+    case AARCH64_PT_ENOENT:     return -ENOENT;
+    case AARCH64_PT_ENOMEM:     return -ENOMEM;
+    /* Block-vs-table conflict on the walk path: the requested range
+     * is already mapped at an incompatible granularity — -EEXIST. */
+    case AARCH64_PT_ECONFLICT:  return -EEXIST;
+    case AARCH64_PT_EPERM:      return -EPERM;
+    case AARCH64_PT_EAGAIN:     return -EAGAIN;
+    default:                    return rc;
+    }
+}
+
 /* ── arch_vmm_init ───────────────────────────────────────────────── */
 
 /* aarch64 backend init: locate the M1-installed TTBR1 root, validate
@@ -275,16 +311,7 @@ int arch_vmm_map_4k_new(uint64_t *pgdir, uint64_t phys, uint64_t virt,
     uint64_t sw   = vm_to_sw(vm_flags);
     if (perm == 0 && sw == 0) return -EINVAL;
     rc = aarch64_pt_map_4k_ext(pgdir, virt, phys, perm, sw);
-    /* Normalize the page-table layer's internal sentinel codes to
-     * Linux errno (spec §4.2/§4.3).  The AARCH64_PT_ enum uses
-     * sequential negative numbers that don't match Linux errno
-     * values (AARCH64_PT_EEXIST = -2 = -ENOENT in Linux).  Without
-     * this, callers cannot tell "slot occupied" from "slot absent"
-     * — and the user-facing arch_vmm_* contract mandates -EEXIST /
-     * -ENOENT specifically.  Task 19 Fix round 1. */
-    if (rc == AARCH64_PT_EEXIST) return -EEXIST;
-    if (rc == AARCH64_PT_ENOENT) return -ENOENT;
-    return rc;
+    return pt_err_to_linux(rc);
 }
 
 int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
@@ -304,11 +331,9 @@ int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
         if (vm_out)   *vm_out   = VM_PROTNONE;
         return AARCH64_PT_EPROT_NONE;
     }
-    /* Normalize to Linux errno per spec §4.3 — the page-table layer
-     * uses AARCH64_PT_ENOENT = -3, but the backend contract mandates
-     * -ENOENT (-2).  Task 19 Fix round 1. */
-    if (rc == AARCH64_PT_ENOENT) return -ENOENT;
-    if (rc != AARCH64_PT_OK) return rc;
+    /* Normalize to Linux errno per spec §4.3 (pt_err_to_linux keeps
+     * the EPROT_NONE sentinel untouched — handled above). */
+    if (rc != AARCH64_PT_OK) return pt_err_to_linux(rc);
     if (phys_out) *phys_out = pa;
     if (vm_out)   *vm_out   = perm_to_vm(perm, sw);
     return AARCH64_PT_OK;
@@ -332,9 +357,9 @@ int arch_vmm_unmap_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
         if (old_vm_out) *old_vm_out = VM_PROTNONE;
         return AARCH64_PT_EPROT_NONE;
     }
-    /* Normalize AARCH64_PT_ENOENT → -ENOENT (spec §4.3). */
-    if (rc == AARCH64_PT_ENOENT) return -ENOENT;
-    if (rc != AARCH64_PT_OK) return rc;
+    /* Normalize to Linux errno per spec §4.3 (EPROT_NONE handled
+     * above). */
+    if (rc != AARCH64_PT_OK) return pt_err_to_linux(rc);
     if (phys_out)   *phys_out   = pa;
     if (old_vm_out) *old_vm_out = perm_to_vm(perm, sw);
     return AARCH64_PT_OK;
@@ -366,10 +391,10 @@ int arch_vmm_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
     uint64_t old_sw = 0;
     rc = aarch64_pt_replace_4k(pgdir, virt, phys, perm, sw,
                                &old_pa, &old_perm, &old_sw);
-    /* Normalize: aarch64_pt_replace_4k can return -ENOENT when no
-     * leaf (valid OR PROTNONE-stashed) exists at VA. */
-    if (rc == AARCH64_PT_ENOENT) return -ENOENT;
-    if (rc != AARCH64_PT_OK) return rc;
+    /* Normalize: aarch64_pt_replace_4k can return -ENOENT (no leaf,
+     * valid OR PROTNONE-stashed, exists at VA) or -EAGAIN (lock-internal
+     * re-read retry). */
+    if (rc != AARCH64_PT_OK) return pt_err_to_linux(rc);
     if (old_phys_out) *old_phys_out = old_pa;
     if (old_vm_out)   *old_vm_out   = perm_to_vm(old_perm, old_sw);
     return AARCH64_PT_OK;
@@ -401,9 +426,7 @@ int arch_vmm_map_2m(uint64_t *pgdir, uint64_t phys, uint64_t virt,
     uint32_t perm = vm_to_perm(vm_flags);
     if (perm == 0) return -EINVAL;
     rc = aarch64_pt_map_2m_block(pgdir, virt, phys, perm);
-    /* Normalize AARCH64_PT_EEXIST → -EEXIST (spec §4.2). */
-    if (rc == AARCH64_PT_EEXIST) return -EEXIST;
-    return rc;
+    return pt_err_to_linux(rc);
 }
 
 int arch_vmm_unmap_2m(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out)
@@ -417,9 +440,7 @@ int arch_vmm_unmap_2m(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out)
     uint64_t pa = 0;
     rc = aarch64_pt_unmap_2m_block(pgdir, virt, &pa);
     if (phys_out) *phys_out = pa;
-    /* Normalize AARCH64_PT_ENOENT → -ENOENT (spec §4.3). */
-    if (rc == AARCH64_PT_ENOENT) return -ENOENT;
-    return rc;
+    return pt_err_to_linux(rc);
 }
 
 int arch_vmm_split_2m_to_4k(uint64_t *pgdir, uint64_t virt)
@@ -434,6 +455,7 @@ int arch_vmm_split_2m_to_4k(uint64_t *pgdir, uint64_t virt)
      * install time).  Spec §5.3: split on a published root → -EPERM
      * until F10 designs the BBM-level + cross-core invalidation.
      * Route through the primitive so the stub stays consistent with
-     * the page-table layer. */
-    return aarch64_pt_split_block_2m(pgdir, virt);
+     * the page-table layer.  pt_err_to_linux maps the raw
+     * AARCH64_PT_EPERM (-6) to Linux -EPERM (-1). */
+    return pt_err_to_linux(aarch64_pt_split_block_2m(pgdir, virt));
 }

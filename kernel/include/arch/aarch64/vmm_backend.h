@@ -32,8 +32,13 @@
 #define AARCH64_PT_SOFTWARE_PROTNONE  (1UL << 55)
 #define AARCH64_PT_SOFTWARE_COW       (1UL << 56)
 
-// Custom negative error code returned by arch_vmm_query_4k when the
-// entry holds a PROT_NONE stash (distinct from -ENOENT / -EINVAL).
+// Custom negative sentinel returned by arch_vmm_query_4k /
+// arch_vmm_unmap_4k when the entry holds a PROT_NONE stash (distinct
+// from -ENOENT / -EINVAL).  This is the ONLY non-Linux-errno value
+// that crosses the arch_vmm_* boundary: every other error exit is
+// normalized to Linux errno by vmm_backend.c's pt_err_to_linux() —
+// the AARCH64_PT_E* enum values (page_table.h) are internal to the
+// page-table layer and must not leak through the backend.
 #define AARCH64_PT_EPROT_NONE  (-1111)
 
 #endif

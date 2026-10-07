@@ -89,8 +89,14 @@ void vmm_gate_check(void) { (void)0; }
  * they do not need), so we stub it directly.  Returning false means
  * split always proceeds to the unpublished-root branch — same
  * behaviour the production code has on a freshly-allocated scratch
- * root. */
-bool aarch64_pt_root_is_published(const uint64_t *root) { (void)root; return false; }
+ * root.  Tests that need the published branch flip g_mock_root_published
+ * (and must reset it before returning). */
+static int g_mock_root_published;
+bool aarch64_pt_root_is_published(const uint64_t *root)
+{
+    (void)root;
+    return g_mock_root_published != 0;
+}
 
 /* The weak vmm_gate_violation() default in vmm_gate.c spins forever;
  * the host harness overrides it with a longjmp capture so a
@@ -599,6 +605,84 @@ TEST_FUNC(test_backend_2m_api_rejects_missing_huge_flag)
     assert_eq(-EINVAL, rc);
 }
 
+/* ── Backend errno contract (Linux errno at the arch_vmm_* boundary) ──
+ *
+ * The AARCH64_PT_* enum uses sequential negative numbers (-1, -2, ...)
+ * that collide with DIFFERENT Linux errno values (AARCH64_PT_EINVAL=-1
+ * collides with Linux -EPERM; AARCH64_PT_ENOMEM=-4 collides with
+ * -EINTR).  The backend owns the normalization — every arch_vmm_*
+ * error exit must be a Linux errno so callers can compare against
+ * -EINVAL / -EPERM / -ENOMEM / ... directly.  These tests pin the
+ * split/unmap paths whose raw AARCH64_PT_* values used to leak. */
+
+/* 2M-aligned but non-canonical VA (bit 48 set, upper bits not
+ * sign-extended) passes the backend's alignment check and hits the
+ * page-table layer's canonical check → must surface as Linux -EINVAL
+ * (-22), not the raw AARCH64_PT_EINVAL (-1, which callers would read
+ * as -EPERM). */
+TEST_FUNC(test_backend_split_noncanonical_va_linux_einval)
+{
+    mock_pool_reset();
+    g_mock_root_published = 0;
+    uint64_t root_pa;
+    uint64_t *root = fresh_root_and_set_kernel_map(&root_pa);
+    assert_not_null(root);
+
+    int rc = arch_vmm_split_2m_to_4k(root, UINT64_C(0x0001000000000000));
+    assert_eq(-EINVAL, rc);
+}
+
+/* Split on a published root must surface as Linux -EPERM (-1), not
+ * the raw AARCH64_PT_EPERM (-6 = Linux -ENXIO). */
+TEST_FUNC(test_backend_split_published_root_linux_eperm)
+{
+    mock_pool_reset();
+    g_mock_root_published = 1;
+    uint64_t root_pa;
+    uint64_t *root = fresh_root_and_set_kernel_map(&root_pa);
+    assert_not_null(root);
+
+    int rc = arch_vmm_split_2m_to_4k(root, TEST_VA_BASE);
+    g_mock_root_published = 0;
+    assert_eq(-EPERM, rc);
+}
+
+/* Split with an exhausted PMM pool must surface as Linux -ENOMEM
+ * (-12), not the raw AARCH64_PT_ENOMEM (-4 = Linux -EINTR). */
+TEST_FUNC(test_backend_split_alloc_fail_linux_enomem)
+{
+    mock_pool_reset();
+    g_mock_root_published = 0;
+    uint64_t root_pa;
+    uint64_t *root = fresh_root_and_set_kernel_map(&root_pa);
+    assert_not_null(root);
+
+    /* Set up a splittable block first (consumes root + L1/L2 table
+     * slots), then drain the pool so split's L3 allocation fails. */
+    assert_eq(0, arch_vmm_map_2m(root, 0x400000ULL, TEST_VA_BASE,
+                                 VM_KERNEL_RW | VM_HUGE));
+    g_next_alloc_idx = MOCK_POOL_SIZE;
+
+    int rc = arch_vmm_split_2m_to_4k(root, TEST_VA_BASE);
+    assert_eq(-ENOMEM, rc);
+}
+
+/* Empty-slot unmap at the block path must be Linux -ENOENT (-2), not
+ * the raw AARCH64_PT_ENOENT (-3 = Linux -ESRCH).  Green since Task 19
+ * Fix round 1; pinned here so the normalization refactor cannot drop
+ * the 2m path. */
+TEST_FUNC(test_backend_unmap_2m_empty_slot_linux_enoent)
+{
+    mock_pool_reset();
+    uint64_t root_pa;
+    uint64_t *root = fresh_root_and_set_kernel_map(&root_pa);
+    assert_not_null(root);
+
+    uint64_t got_pa = 0xdeadbeefULL;
+    int rc = arch_vmm_unmap_2m(root, TEST_VA_BASE, &got_pa);
+    assert_eq(-ENOENT, rc);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_backend_4k_kernel_rw_normal),
     TEST_ENTRY(test_backend_4k_kernel_ro_normal),
@@ -618,6 +702,10 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_backend_software_bit_roundtrip),
     TEST_ENTRY(test_backend_4k_api_rejects_huge_flag),
     TEST_ENTRY(test_backend_2m_api_rejects_missing_huge_flag),
+    TEST_ENTRY(test_backend_split_noncanonical_va_linux_einval),
+    TEST_ENTRY(test_backend_split_published_root_linux_eperm),
+    TEST_ENTRY(test_backend_split_alloc_fail_linux_enomem),
+    TEST_ENTRY(test_backend_unmap_2m_empty_slot_linux_enoent),
 TEST_LIST_END
 
 int main(void)
