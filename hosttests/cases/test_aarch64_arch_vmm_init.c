@@ -134,14 +134,6 @@ void vmm_gate_violation(const char *reason)
 uint64_t alloc_4k_page(void) { return 0; }
 void free_4k_page(uint64_t phys) { (void)phys; }
 
-/* ── Test failure counter (independent of __test_stats) ───────────
- * The framework's TEST_RESULTS macro zeroes __test_stats.* at the
- * end of RUN_ALL_TESTS, so a post-RUN check on __test_stats.failed
- * always sees 0. Track failures ourselves so the test binary exits
- * non-zero when any assertion fails — the hosttests Makefile run
- * recipe counts suite-level non-zero exits as test failures. */
-static int g_test_failed_count = 0;
-
 /* ── Test constants ──────────────────────────────────────────────── */
 #define VALID_PA      UINT64_C(0x40200000)   /* low M1 arena window */
 #define VALID_TTBR1   VALID_PA               /* no ASID, no CnP */
@@ -150,39 +142,10 @@ static int g_test_failed_count = 0;
 
 /* ── Tests ────────────────────────────────────────────────────────── */
 
-/* Custom assertion macro that increments g_test_failed_count on
- * failure. Mirrors the framework's assert_eq / assert_true shape but
- * survives TEST_RESULTS's __test_stats zeroing (see counter comment
- * above). The framework's macros are still useful for printing
- * failure context; this wrapper layers the persistent counter on
- * top.
- *
- * The framework macros use a do-while wrapper that increments
- * __test_stats.total unconditionally. Our wrapper replicates that
- * shape and re-checks the comparison so g_test_failed_count sticks
- * on failure (unlike a naive `++around_assert` pattern that always
- * decrements). */
-#define ASSERT_EQ_TRACKED(expected, actual) do { \
-    __test_stats.total++; \
-    if ((long)(expected) != (long)(actual)) { \
-        __test_stats.failed++; \
-        g_test_failed_count++; \
-        printf("  [FAIL] %s:%d: assert_eq(" #expected "=%ld, " #actual "=%ld)\n", \
-               __FILE__, __LINE__, (long)(expected), (long)(actual)); \
-    } else { \
-        __test_stats.passed++; \
-    } \
-} while(0)
-#define ASSERT_TRUE_TRACKED(cond) do { \
-    __test_stats.total++; \
-    if (!(cond)) { \
-        __test_stats.failed++; \
-        g_test_failed_count++; \
-        printf("  [FAIL] %s:%d: assert_true(%s)\n", __FILE__, __LINE__, #cond); \
-    } else { \
-        __test_stats.passed++; \
-    } \
-} while(0)
+/* TEST_RESULTS no longer resets __test_stats, so the framework's own
+ * assert_eq / assert_true macros persist their counts to main and the
+ * process exit status reflects a failing assertion directly — no
+ * shadow failure counter needed any more. */
 
 /* Case 1: well-formed TTBR1 → rc = 0, kernel_map == (mmap)(pa + OFFSET). */
 TEST_FUNC(test_valid_ttbr1_pins_kernel_map)
@@ -191,13 +154,13 @@ TEST_FUNC(test_valid_ttbr1_pins_kernel_map)
     kernel_map = NULL;
     g_mock_ttbr1 = VALID_TTBR1;
     int rc = arch_vmm_init();
-    ASSERT_EQ_TRACKED(0, rc);
+    assert_eq(0, rc);
     /* Spec §4.5 / vmm_backend.c::arch_vmm_init: kernel_map is set to
      * the direct-map pointer of the PA extracted from TTBR1. */
-    ASSERT_TRUE_TRACKED(kernel_map ==
+    assert_true(kernel_map ==
                 (uint64_t *)(uintptr_t)(VALID_PA + ARCH_PAGE_OFFSET));
     /* Happy path must not trip the gate violation hook. */
-    ASSERT_EQ_TRACKED(0, g_violation_count);
+    assert_eq(0, g_violation_count);
 }
 
 /* Case 2a: raw TTBR1 == 0 → masked PA == 0 → -EINVAL. */
@@ -207,9 +170,9 @@ TEST_FUNC(test_pa_zero_raw_zero_returns_einval)
     kernel_map = NULL;
     g_mock_ttbr1 = 0;
     int rc = arch_vmm_init();
-    ASSERT_EQ_TRACKED(-EINVAL, rc);
+    assert_eq(-EINVAL, rc);
     /* Spec §4.5: kernel_map untouched on the failure path. */
-    ASSERT_EQ_TRACKED(NULL, kernel_map);
+    assert_eq(NULL, kernel_map);
 }
 
 /* Case 2b: raw TTBR1 has non-base bits but masked PA == 0.
@@ -223,8 +186,8 @@ TEST_FUNC(test_pa_zero_mask_only_nonbase_returns_einval)
     kernel_map = NULL;
     g_mock_ttbr1 = UINT64_C(0x0000000000000FFF); /* base mask → 0 */
     int rc = arch_vmm_init();
-    ASSERT_EQ_TRACKED(-EINVAL, rc);
-    ASSERT_EQ_TRACKED(NULL, kernel_map);
+    assert_eq(-EINVAL, rc);
+    assert_eq(NULL, kernel_map);
 }
 
 /* Case 4: PA exactly at the 1 TiB limit (>= 1 TiB) → -EINVAL.
@@ -239,8 +202,8 @@ TEST_FUNC(test_pa_at_1tib_boundary_returns_einval)
     kernel_map = NULL;
     g_mock_ttbr1 = AT_1TIB_TTBR1;
     int rc = arch_vmm_init();
-    ASSERT_EQ_TRACKED(-EINVAL, rc);
-    ASSERT_EQ_TRACKED(NULL, kernel_map);
+    assert_eq(-EINVAL, rc);
+    assert_eq(NULL, kernel_map);
 }
 
 /* Case 5: PA above 1 TiB with the low 4 KiB bit set. This pins the
@@ -255,8 +218,8 @@ TEST_FUNC(test_pa_above_1tib_returns_einval)
     kernel_map = NULL;
     g_mock_ttbr1 = ABOVE_1TIB_TTBR1;
     int rc = arch_vmm_init();
-    ASSERT_EQ_TRACKED(-EINVAL, rc);
-    ASSERT_EQ_TRACKED(NULL, kernel_map);
+    assert_eq(-EINVAL, rc);
+    assert_eq(NULL, kernel_map);
 }
 
 TEST_LIST_BEGIN
@@ -292,17 +255,16 @@ int main(void)
     kernel_map = NULL;
     g_mock_ttbr1 = 0;
     g_violation_count = 0;
-    g_test_failed_count = 0;
 
     RUN_ALL_TESTS();
 
     /* No vmm_gate_violation should have fired on any of the above
      * paths — arch_vmm_init never reaches the violation hook on
      * its documented paths. A stray would surface as the test
-     * exit code rather than a hang. g_test_failed_count survives
-     * the framework's TEST_RESULTS zeroing (see comment above);
-     * __test_stats.failed does not. */
-    int failed = (g_test_failed_count > 0) || (g_violation_count > 0);
+     * exit code rather than a hang. __test_stats.failed survives
+     * TEST_RESULTS (snapshot, not reset), so main can read it
+     * directly. */
+    int failed = (__test_stats.failed > 0) || (g_violation_count > 0);
 
     kernel_map = NULL;
     return failed ? 1 : 0;

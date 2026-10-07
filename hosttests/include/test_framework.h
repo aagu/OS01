@@ -38,22 +38,26 @@ static test_stats_t __test_stats;
 #define assert_false(cond) assert_true(!(cond))
 
 #define assert_eq(expected, actual) do { \
+    long __e = (long)(expected); \
+    long __a = (long)(actual); \
     __test_stats.total++; \
-    if ((long)(expected) != (long)(actual)) { \
+    if (__e != __a) { \
         __test_stats.failed++; \
         printf("  [FAIL] %s:%d: assert_eq(" #expected "=%ld, " #actual "=%ld)\n", \
-               __FILE__, __LINE__, (long)(expected), (long)(actual)); \
+               __FILE__, __LINE__, __e, __a); \
     } else { \
         __test_stats.passed++; \
     } \
 } while(0)
 
 #define assert_str_eq(expected, actual) do { \
+    const char *__se = (expected); \
+    const char *__sa = (actual); \
     __test_stats.total++; \
-    if (strcmp((expected), (actual)) != 0) { \
+    if (strcmp(__se, __sa) != 0) { \
         __test_stats.failed++; \
         printf("  [FAIL] %s:%d: assert_str_eq(expected=\"%s\", actual=\"%s\")\n", \
-               __FILE__, __LINE__, (expected), (actual)); \
+               __FILE__, __LINE__, __se, __sa); \
     } else { \
         __test_stats.passed++; \
     } \
@@ -82,11 +86,12 @@ static test_stats_t __test_stats;
 } while(0)
 
 #define assert_mem_eq(expected, actual, size) do { \
+    size_t __msz = (size_t)(size); \
     __test_stats.total++; \
-    if (memcmp((expected), (actual), (size)) != 0) { \
+    if (memcmp((expected), (actual), __msz) != 0) { \
         __test_stats.failed++; \
         printf("  [FAIL] %s:%d: assert_mem_eq(%zu bytes)\n", \
-               __FILE__, __LINE__, (size_t)(size)); \
+               __FILE__, __LINE__, __msz); \
     } else { \
         __test_stats.passed++; \
     } \
@@ -106,6 +111,10 @@ static test_stats_t __test_stats;
         } else { \
             printf("  >>> ALL TESTS PASSED <<<\n"); \
         } \
+    } while(0)
+
+#define TEST_RESET() \
+    do { \
         __test_stats.total = 0; \
         __test_stats.passed = 0; \
         __test_stats.failed = 0; \

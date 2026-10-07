@@ -66,7 +66,6 @@ TEST_BINS := \
     $(TEST_BLD)/test_libc_fflush.elf \
     $(TEST_BLD)/test_libc_stdio_registry.elf \
     $(TEST_BLD)/test_libc_fread_fwrite_validate.elf \
-    $(TEST_BLD)/test_libc_stdio_registry.elf \
     $(TEST_BLD)/test_libc_getopt.elf \
     $(TEST_BLD)/test_vfs_basic.elf \
     $(TEST_BLD)/test_fat32_basic.elf \
@@ -127,7 +126,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_page_table_publish.elf \
     $(TEST_BLD)/test_syscall_dispatch.elf \
     $(TEST_BLD)/test_compat_linux.elf \
-$(TEST_BLD)/test_slab_idempotent_reservation.elf \
+    $(TEST_BLD)/test_slab_idempotent_reservation.elf \
     $(TEST_BLD)/test_slab_basic_x86_count.elf \
     $(TEST_BLD)/test_percpu_layout.elf \
     $(TEST_BLD)/test_tlb_serial_protocol.elf \
@@ -166,11 +165,16 @@ $(TEST_BLD)/test_slab_idempotent_reservation.elf \
     $(TEST_BLD)/test_fb_resolution_hooks.elf \
     $(TEST_BLD)/test_setres.elf
 
-.PHONY: all clean run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients
+.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients
 
 all: $(TEST_BINS)
 
-run: $(TEST_BINS)
+check-test-bins-dup:
+	@if [ "$$(echo $(TEST_BINS) | tr ' ' '\n' | sort | uniq -d)" != "" ]; then \
+	    echo "ERROR: duplicate entries in TEST_BINS"; exit 1; \
+	fi
+
+run: $(TEST_BINS) check-test-bins-dup
 	@echo ""
 	@echo "=============================================="
 	@echo "  OS01 Host-Based Test Suite"
@@ -208,7 +212,7 @@ runtime-udivti3-link-probe: $(TEST_BLD)/runtime_udivti3_link_probe.o
 	$(HOST_CC) -nostdlib -Wl,-e,_start -o $(TEST_BLD)/runtime_udivti3-link-probe.elf $<
 
 $(TEST_BLD)/test_runtime_udivti3.o: $(TEST_SRC)/../runtime/selftest/test_udivti3.c \
-		$(TEST_SRC)/../runtime/selftest/udivti3_vectors.h
+	$(TEST_SRC)/../runtime/selftest/udivti3_vectors.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) -I$(TESTS_DIR)/runtime/include -I$(TESTS_DIR)/runtime/selftest -c $< -o $@
 
