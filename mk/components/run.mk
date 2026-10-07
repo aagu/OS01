@@ -265,6 +265,7 @@ _test-aarch64-run-gic-spi:
 	  --firmware "$(AARCH64_UEFI_SELFTEST_FIRMWARE)" \
 	  --image "$(AARCH64_UEFI_SELFTEST_DISK)" \
 	  --qemu "$(AARCH64_QEMU)" \
+	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-gic-spi/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 # AAGU-EL1-sync Task 3: drives the dedicated sync-fault QEMU image
 # (KERNEL_VARIANT=sync-fault, AARCH64_UEFI_SYNC_FAULT_{DISK,FIRMWARE}) in 1-CPU

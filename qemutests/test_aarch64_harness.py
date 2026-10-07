@@ -39,9 +39,12 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -51,6 +54,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import qemutests.aarch64_uefi_smp as smp        # noqa: E402
+import qemutests.aarch64_gic_spi as gspi        # noqa: E402
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -255,6 +259,88 @@ class UefiSmpLifecycleTests(SuiteUnitAdapterTests):
 
 
 # ───────────────────────────────────────────────────────────────────
+# gic-spi — PL011 RX -> GIC SPI verdict, and the live socket path.
+# ───────────────────────────────────────────────────────────────────
+
+
+class GicSpiVerdictTests(unittest.TestCase):
+    def test_armed_then_handled_passes(self):
+        self.assertEqual(gspi.spi_verdict(gspi.ARMED_HANDLED, injected=True)[0],
+                         "pass")
+
+    def test_armed_only_opens_injection_window(self):
+        self.assertEqual(gspi.spi_verdict(gspi.ARMED_ONLY, injected=False),
+                         (None, True))
+
+    def test_handled_only_rejected(self):
+        self.assertEqual(gspi.spi_verdict(gspi.HANDLED_ONLY, injected=False),
+                         (None, False))
+
+    def test_wrong_intid_fails(self):
+        wrong = gspi.ARMED_ONLY + "[gic-spi] intid=40 handled count=1\n"
+        self.assertEqual(gspi.spi_verdict(wrong, injected=True)[0], "fail")
+
+
+class _SpiServer(threading.Thread):
+    """A tiny AF_UNIX peer that feeds a PL011 marker sequence to the
+    harness and records the injected byte."""
+
+    def __init__(self, path):
+        super().__init__(daemon=True)
+        self.path = path
+        self.ready = threading.Event()
+        self.injected = bytearray()
+
+    def run(self):
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(self.path)
+        server.listen(1)
+        self.ready.set()
+        conn, _ = server.accept()
+        try:
+            conn.sendall(gspi.ARMED_ONLY.encode())
+            data = conn.recv(8)
+            self.injected.extend(data or b"")
+            conn.sendall(gspi.HANDLED_ONLY.encode())
+            time.sleep(1.5)
+        finally:
+            conn.close()
+            server.close()
+
+
+class GicSpiLifecycleTests(SuiteUnitAdapterTests):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="os01-gspi-"))
+        fw, img = _stage_inputs(self.tmp)
+        self.dtb = self.tmp / "qemu-virt.dtb"
+        self.dtb.write_bytes(b"dtb")
+        self.build = self.tmp / "build"
+        self.sock = str(self.tmp / "pl011.sock")
+        self.args = argparse.Namespace(
+            qemu="qemu-system-aarch64", firmware=str(fw), image=str(img),
+            log_dir=str(self.tmp / "logs"), cpus=1, timeout=5.0)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_armed_and_handled_over_real_socket_passes(self):
+        server = _SpiServer(self.sock)
+        server.start()
+        self.assertTrue(server.ready.wait(5.0))
+        session = FakeSession(text="")
+        rc = gspi.run_case(
+            self.args, str(self.dtb), session_factory=_factory(session),
+            build_dir=str(self.build), profile="test", sock_path=self.sock)
+        self.assertEqual(rc, 0)
+        self.assertEqual(bytes(server.injected), b"G")
+        data = _one_archive(self.build, gspi.SUITE)
+        self.assert_suite_unit(data)
+        self.assertEqual(data["status"], "PASS")
+        self.assertTrue((Path(data["stdout_log"]).parent / "serial.log").exists())
+
+
+# ───────────────────────────────────────────────────────────────────
 # Ruling 7 — production entry mode (script invocation).
 # ───────────────────────────────────────────────────────────────────
 
@@ -266,8 +352,8 @@ class ScriptModeTests(unittest.TestCase):
     class of breakage (Task 5's Critical defect), so these fixtures run
     the real script entry and rebuild ``sys.path`` to script-mode shape."""
 
-    _SELF_TEST_SCRIPTS = ("aarch64_uefi_smp.py",)
-    _ALL_SCRIPTS = ("aarch64_uefi_smp.py",)
+    _SELF_TEST_SCRIPTS = ("aarch64_uefi_smp.py", "aarch64_gic_spi.py")
+    _ALL_SCRIPTS = ("aarch64_uefi_smp.py", "aarch64_gic_spi.py")
 
     _PROBE = r"""
 import importlib.util, os, sys
