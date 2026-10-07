@@ -106,9 +106,19 @@ class GfxRunnerStartQemuTests(unittest.TestCase):
 
     def setUp(self) -> None:
         # Force the runner into the stdio mode for gfx (default-on).
+        self._saved_qemu_smp = os.environ.get("QEMU_SMP")
         os.environ["QEMU_SMP"] = "1"
         self.runner_mod = _import_run_test()
         self.factory = _FakeSessionFactory()
+
+    def tearDown(self) -> None:
+        # Restore the environment: this module must not leak QEMU_SMP
+        # into the rest of the harness (the leak is fixed here, at its
+        # source, not masked in a consumer).
+        if self._saved_qemu_smp is None:
+            os.environ.pop("QEMU_SMP", None)
+        else:
+            os.environ["QEMU_SMP"] = self._saved_qemu_smp
 
     def _make_tester(self):
         tester = self.runner_mod.TestRunner(disk_img="/tmp/fake-disk.img")
@@ -151,9 +161,19 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
     """Pin the gfx-suite shell flow: prompt → send command → wait marker."""
 
     def setUp(self) -> None:
+        self._saved_qemu_smp = os.environ.get("QEMU_SMP")
         os.environ["QEMU_SMP"] = "1"
         self.runner_mod = _import_run_test()
         self.factory = _FakeSessionFactory()
+
+    def tearDown(self) -> None:
+        # Restore the environment: this module must not leak QEMU_SMP
+        # into the rest of the harness (the leak is fixed here, at its
+        # source, not masked in a consumer).
+        if self._saved_qemu_smp is None:
+            os.environ.pop("QEMU_SMP", None)
+        else:
+            os.environ["QEMU_SMP"] = self._saved_qemu_smp
 
     def _make_tester(self, timeout=2):
         tester = self.runner_mod.TestRunner(
@@ -163,8 +183,24 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
 
     def _stage_chunks(self, contents):
         """Push the staged chunks into the factory so the next
-        ProcessSession produced by start_qemu has them as its text."""
-        chunks = [ln + b"\n" for ln in contents.splitlines() if ln]
+        ProcessSession produced by start_qemu has them as its text.
+
+        A source line that packs the shell prompt together with the next
+        marker (e.g. ``"# [GFX TEST] PASS"``) is split so the prompt is
+        delivered as its own chunk: the real guest prints the prompt and
+        the command's output on separate reads, and the faithful
+        ProcessSession cursor consumes everything received on a match —
+        so the marker must not share the prompt's chunk.
+        """
+        chunks = []
+        for ln in contents.splitlines():
+            if not ln:
+                continue
+            if ln.startswith(b"# ") and len(ln) > 2:
+                chunks.append(b"# \n")
+                chunks.append(ln[2:] + b"\n")
+            else:
+                chunks.append(ln + b"\n")
         self.factory.chunks = chunks
 
     def test_send_line_writes_command_and_flushes(self) -> None:

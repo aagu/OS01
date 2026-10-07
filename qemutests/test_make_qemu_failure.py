@@ -183,7 +183,7 @@ class TestQemuRecipeShapeTests(unittest.TestCase):
 
     def test_recipe_cmp_chain_does_not_swallow_failure(self) -> None:
         """The hash-guard ``cmp`` must not be guarded by ``|| true``
-        or any ``if [ $? ...]\`` branch that masks the failure."""
+        or any ``if [ $? ...]`` branch that masks the failure."""
         recipe = _extract_recipe(self.text, "test-qemu")
         # Extract the lines around 'cmp "$(NORMAL_IMAGE_DIR)/normal.before"'
         m = re.search(

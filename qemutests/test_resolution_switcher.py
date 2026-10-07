@@ -835,6 +835,10 @@ def run_production_suite(firmware: Path, image: Path, results_dir: Path,
         failures += _idle_switch_case(sess, log)
         failures += _prod_cli_case(sess, log)
         failures += _client_estale_case(sess, log)
+        # 1-second observation window (spec §5.3): a kernel panic arriving
+        # in the post-completion tail FAILs the run (Fix 3).
+        if _observe_panic_gate(sess, log):
+            failures.append("late_panic_in_observe_window")
     finally:
         sess.close()
 
@@ -868,6 +872,10 @@ def run_test_suite(firmware: Path, image: Path, results_dir: Path,
         failures += _client_eagain_case(sess, log)
         failures += _pty_watch_case(sess, log)
         failures += _capacity_cli_case(sess, log)
+        # 1-second observation window (spec §5.3), same gate as the
+        # production suite and the four run_test.py suites (Fix 3).
+        if _observe_panic_gate(sess, log):
+            failures.append("late_panic_in_observe_window")
     finally:
         sess.close()
 
@@ -946,6 +954,38 @@ def _report(flavor: str, failures: list, log) -> bool:
         return False
     log(f"resolution {flavor} suite: PASS")
     return True
+
+
+def _observe_panic_gate(session, log=print) -> bool:
+    """1-second observation window (spec §5.3) for the resolution branch.
+
+    After a suite's shared-boot cases complete, drain the session's
+    remaining tail for up to one second and FAIL if a kernel panic
+    arrived in that window — the same late-fault gate the four
+    ``run_test.py`` suites (phase-0 / systest / network / gfx) implement,
+    reusing the shared ``_panic_in`` detector so they cannot diverge.
+    Returns True when a late panic was observed.
+
+    The live session is owned by the suite entry points (``test_resolution``
+    delegates to them), so the observation necessarily happens where the
+    session is still open, before it is closed.
+    """
+    proc = getattr(session, "process", None)
+    if proc is None or not hasattr(proc, "observe"):
+        return False
+    try:
+        tail = proc.observe(1.0) or ""
+    except Exception:
+        tail = ""
+    try:
+        from qemutests.run_test import _panic_in
+    except Exception:  # pragma: no cover - run_test not importable standalone
+        def _panic_in(text: str) -> bool:
+            return "kernel panic" in text.lower()
+    if _panic_in(tail):
+        log("FAIL: kernel panic in 1-second observation window")
+        return True
+    return False
 
 
 def _private_copy(source: Path, dest: Path) -> Path:

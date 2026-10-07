@@ -39,11 +39,14 @@ window exercises the post-completion drain.  Run with::
 from __future__ import annotations
 
 import os
+import re
+import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 
 # Repo root so we can ``import qemutests.run_test`` without installing.
@@ -112,21 +115,23 @@ class FakeProcessSession:
         self._text: str = "".join(self._chunk_texts)
         # ── cursor / delivery semantics ──
         # The real ProcessSession drains output incrementally and keeps
-        # a monotonic read cursor: ``wait_for`` grows the accumulated
-        # text one drain at a time, re-checks ``text[cursor:]`` after
-        # each drain, and on a match advances the cursor past the
-        # matched span; ``observe`` returns and consumes everything
-        # after it.  The fake mirrors this by staging the cumulative
-        # ``_text`` up front (so ``text`` is always complete) while
-        # tracking two offsets:
-        #   * ``_available`` — how far the pipe has been "read" (chunks
-        #     are made available one at a time, like the real drain);
+        # a monotonic read cursor: ``wait_for`` matches against
+        # ``text[cursor:]`` and, on a match, sets ``self._cursor =
+        # len(self._text)`` — it consumes *everything received*, not just
+        # the matched span — while ``observe`` returns the *new* slice
+        # (text that arrived during the window).  The fake mirrors this
+        # with a release timeline modeled by two offsets:
+        #   * ``_available`` — how many staged chunks have been
+        #     "received" so far.  ``wait_for`` receives one more chunk
+        #     per drain step (like the real incremental read); the
+        #     ``text`` property receives everything (file-serial suites
+        #     poll the fully written log file, not the pipe);
         #   * ``_cursor``    — how far the caller has consumed.
-        # ``wait_for`` only ever consults ``text[cursor:available]`` and
-        # grows ``_available`` when that slice does not yet match — so
-        # data made available but not consumed stays matchable, and a
-        # chunk staged *after* the completion marker (e.g. a late kernel
-        # panic) is still visible to a later ``observe(1.0)``.
+        # ``wait_for`` only ever consults ``text[cursor:available]`` and,
+        # on a match, advances ``_cursor`` to ``_available`` (consume ALL
+        # received).  A chunk staged *after* the completion marker (e.g. a
+        # late kernel panic) therefore stays unreceived until the later
+        # ``observe(1.0)`` window receives it — exactly like production.
         self._chunk_ends: List[int] = []
         _acc = 0
         for _t in self._chunk_texts:
@@ -210,34 +215,20 @@ class FakeProcessSession:
     def wait_for(self, predicate) -> str:
         self.wait_for_calls += 1
         # Mirror the real ProcessSession: re-check ``text[cursor:]``
-        # against everything made available so far, growing the pipe by
-        # one staged chunk at a time until the predicate matches or the
-        # staged output is exhausted.
+        # against everything received so far, receiving one staged chunk
+        # at a time (like the real incremental drain) until the predicate
+        # matches or the staged output is exhausted.  On a match the
+        # cursor advances to the END of what has been received — the
+        # production ``self._cursor = len(self._text)`` consume-all
+        # semantics — so output that shares the matching chunk is
+        # consumed too (a plain "pattern in s" / "pattern.search(s)"
+        # predicate would otherwise re-match the same chunk forever).
         start = self._cursor
         while True:
-            if self._available > start and predicate(
-                    self._text[start:self._available]):
-                # Every predicate the runner installs ("pattern in s" /
-                # "pattern.search(s)") is monotone in the slice length:
-                # once a prefix contains the match, every longer prefix
-                # does too.  Binary-search the smallest length at which
-                # the predicate first matches — the end of the MATCHED
-                # SPAN — so output that arrived alongside the match
-                # (e.g. the next marker in the same chunk) stays
-                # unconsumed and matchable by a later wait.
-                if predicate(self._text[start:start]):
-                    # Degenerate empty match: nothing to advance past.
-                    return ""
-                lo, hi = start, self._available
-                while lo + 1 < hi:
-                    mid = (lo + hi) // 2
-                    if predicate(self._text[start:mid]):
-                        hi = mid
-                    else:
-                        lo = mid
-                self._cursor = hi
-                return self._text[start:hi]
-            # Not matched yet — make the next chunk available.
+            if predicate(self._text[start:self._available]):
+                self._cursor = self._available
+                return self._text[start:self._available]
+            # Not matched yet — receive the next chunk.
             nxt = None
             for end in self._chunk_ends:
                 if end > self._available:
@@ -245,18 +236,19 @@ class FakeProcessSession:
                     break
             if nxt is None:
                 # Staged output exhausted with no match: mirror the real
-                # session's timeout (set ``timed_out``, return "").
+                # session's deadline trip (set ``timed_out``, return "").
                 self._timed_out = True
                 return ""
             self._available = nxt
 
     def observe(self, seconds: float) -> str:
         self.observe_calls += 1
-        # The post-completion observation window drains everything still
-        # undelivered and returns the newly consumed slice; the cursor
-        # advances to the end of the (fully staged) output.  This is
-        # what lets a late kernel panic — staged after the completion
-        # marker — be observed.
+        # The post-completion observation window receives everything still
+        # unreceived and returns the newly received slice; the cursor
+        # advances to the end.  This is what lets a late kernel panic —
+        # staged *after* the completion marker and therefore never
+        # received by the preceding ``wait_for`` — be observed, while a
+        # chunk the ``wait_for`` already consumed stays consumed.
         start = self._cursor
         self._available = len(self._text)
         self._cursor = len(self._text)
@@ -276,6 +268,14 @@ class FakeProcessSession:
 
     @property
     def text(self) -> str:
+        # ``text`` is the whole staged transcript.  Two production
+        # consumers read it directly rather than through ``wait_for``:
+        # the file-serial suites (via the runner's empty-serial-file
+        # shim) and the driver-matrix poll loop.  The fake has no
+        # wall-clock producer to grow the transcript incrementally, so
+        # it exposes the full transcript here; the *faithful* part of the
+        # double is the ``wait_for`` / ``observe`` cursor below, which is
+        # what decides whether a late chunk is observable.
         return self._text
 
     @property
@@ -494,6 +494,47 @@ class Phase0SuiteTests(unittest.TestCase):
             tester.cleanup()
 
 
+class FileSerialExitPathTests(unittest.TestCase):
+    """The file-serial read loop must break the moment the session's child
+    is observed exited (``_proc.poll()`` non-None) instead of blocking out
+    the whole ``read_until`` budget.  This exercises ``mark_exited()`` —
+    the liveness flag added for round-1 finding 9, previously dead code.
+    """
+
+    def setUp(self) -> None:
+        self.rt = _import_run_test()
+
+    def _exited_factory(self, chunks):
+        def factory(argv, run_dir, timeout_s, *, writable_stdin=False):
+            s = FakeProcessSession(
+                argv=argv, run_dir=run_dir, timeout_s=timeout_s,
+                writable_stdin=writable_stdin, chunks=chunks, returncode=1,
+            )
+            # The child is already gone: the very first poll() the read
+            # loop performs must report the exit.
+            s.mark_exited()
+            return s
+        return factory
+
+    def test_file_serial_loop_breaks_on_poll_detected_exit(self) -> None:
+        tester = _make_runner_with_factory(
+            self.rt, self._exited_factory(Phase0SuiteTests.CHUNKS_EARLY_EXIT))
+        try:
+            t0 = time.monotonic()
+            self.assertFalse(self.rt.test_boot(tester))
+            elapsed = time.monotonic() - t0
+            # Without the poll-detected-exit branch the loop would block
+            # for the full 25 s ``read_until`` budget; breaking on the
+            # exit keeps it under a second.
+            self.assertLess(
+                elapsed, 5.0,
+                "read loop must break on poll-detected exit, not wait out "
+                f"the timeout (took {elapsed:.1f}s)",
+            )
+        finally:
+            tester.cleanup()
+
+
 class SystestSuiteTests(unittest.TestCase):
     """systest suite: COW TTY handshake + [SYS TEST] RESULT line."""
 
@@ -642,9 +683,15 @@ class InittabPhaseSuiteTests(unittest.TestCase):
     ]
 
     CHUNKS_LATE_PANIC = [
+        # Every earlier check must be satisfied (both malformed-line
+        # warnings are present) so the run reaches the 1-second
+        # observation window instead of failing early for a missing
+        # marker: a late kernel panic must be the reason for the FAIL.
         b"SYSINIT_DONE\n",
         b"WAIT_DONE\n",
         b"ONCE_DONE\n",
+        b"unknown action 'unknown_action' warning\n",
+        b"too many fields warning\n",
         b"# ",
         b"[kernel panic] late\n",
     ]
@@ -963,156 +1010,306 @@ class GfxSuiteTests(unittest.TestCase):
             tester.cleanup()
 
 
-class ResolutionSuiteTests(unittest.TestCase):
-    """resolution suite: 7 per-SUITE categories + QMP/image-isolation pins.
+def _res_surface(width, height, fill=(2, 2, 2)):
+    """Build a ``test_resolution_switcher.Surface`` for the scripted fake."""
+    from qemutests import test_resolution_switcher as trs
+    return trs.Surface(width, height, bytes(fill) * (width * height))
 
-    The full resolution test (per-SUITE positive/negative markers
-    etc.) is exercised by the live test harness in
-    ``make test-qemu SUITE=resolution``.  These fixtures pin all 7
-    per-SUITE categories for the resolution branch (per Task 5 brief
-    checkbox 1: positive completion, existing negative markers,
-    old-PASS replay, late panic in the 1-second window, early QEMU
-    exit, startup failure, nonzero child status) using
-    FakeProcessSession; plus the QMP + image-isolation pins the brief
-    calls out for resolution specifically.
+
+class _FakeSessionProcess:
+    """The ``.process`` of the scripted resolution session.
+
+    Carries the 1-second observation-window tail (and the child return
+    code) so ``test_resolution_switcher._observe_panic_gate`` can be
+    exercised through ``process.observe(1.0)``.
     """
 
-    # Canonical staged trace used by the "happy path" tests:
-    # production round-trip emits boot markers, setres list, and the
-    # 800x600 default mode.
-    CHUNKS_POSITIVE = [
-        b"percpu: 2 CPU(s) registered\n",
-        b"OS01 Init v1.0\n",
-        b"# ",
-        b"Available modes (capacity 16, 9 listed):\n"
-        b"  640x480 bpp=32\n  800x600 bpp=32\n"
-        b"Current: 800x600 (CURRENT) bpp=32 stride=3200\n"
-        b"generation: 1\n",
-        b"# ",
-        b"[netmodeltest] iface=eth0 ip=10.0.2.15 PASS\n",
-        b"[netmodeltest] RESULT: PASS\n",
-    ]
+    def __init__(self, tail="", returncode=0):
+        self._tail = tail
+        self.returncode = returncode
 
-    CHUNKS_NEGATIVE_MARKER = [
-        b"percpu: 2 CPU(s) registered\n",
-        b"OS01 Init v1.0\n",
-        b"# ",
-        b"[FAIL] screendump timeout\n",
-    ]
+    def observe(self, seconds):
+        tail = self._tail
+        self._tail = ""
+        return tail
 
-    CHUNKS_OLD_PASS_REPLAY = [
-        # Old PASS marker from a previous resolution run.
-        b"PASS: 2025-09-30 old resolution run completed\n",
-        b"percpu: 2 CPU(s) registered\n",
-        b"OS01 Init v1.0\n",
-        b"# ",
-    ]
 
-    CHUNKS_LATE_PANIC = [
-        b"percpu: 2 CPU(s) registered\n",
-        b"OS01 Init v1.0\n",
-        b"# ",
-        b"[netmodeltest] RESULT: PASS\n",
-        b"[kernel panic] late\n",
-    ]
+class _ResolutionSessionFake:
+    """Scripted stand-in for ``ResolutionSession`` — the resolution
+    suite's QEMU boundary.
 
-    CHUNKS_EARLY_EXIT = [
-        b"random\n",
-        b"junk\n",
-    ]
+    The live resolution suite drives an *interactive* session (writable
+    serial pipe plus QMP screendumps) and reads it by polling
+    ``process.text`` as well as per-command, which a raw
+    ``FakeProcessSession`` cannot model.  The fixtures therefore fake the
+    boundary the resolution suite actually consumes — ``ResolutionSession``
+    itself, with a scripted guest — while everything above the boundary
+    (the ``test_resolution`` dispatcher, ``evaluate_round_trip``, the
+    per-case gates, ``_report`` and the new observation-window gate) runs
+    for real.
+
+    ``script`` keys:
+
+      * ``prompt``      — False ⇒ the guest never reaches a shell prompt
+                          (early exit / no fresh boot).
+      * ``fail_boot``   — the boot screendump has the wrong dimensions.
+      * ``serial``      — extra stale transcript text (old-PASS replay).
+      * ``panic_tail``  — text returned by ``process.observe(1.0)``.
+      * ``returncode``  — the child's exit status.
+      * ``start_exc``   — raised from ``start()`` (QEMU launch failure).
+    """
+
+    def __init__(self, firmware, image, results_dir, *, script=None,
+                 display_device=None, **kwargs):
+        self.script = dict(script or {})
+        self.image = Path(image)
+        self.firmware = Path(firmware)
+        name = self.image.name
+        m = re.search(r"(\d+)x(\d+)", name)
+        self.nobga = "nobga" in name or list(display_device or []) == [
+            "-vga", "cirrus"]
+        if self.nobga:
+            self.mode_wh = (1024, 768)
+        elif m:
+            self.mode_wh = (int(m.group(1)), int(m.group(2)))
+        elif re.search(r"disk-(?:r)?800\.img$", name):
+            # The production/test suite's 800x600 private copy is named
+            # ``disk-800.img`` (no ``WxH`` in the name).
+            self.mode_wh = (800, 600)
+        else:
+            self.mode_wh = (1024, 768)
+        self.gen = 1
+        self.pid = 3
+        self.pty_path = "/dev/pts0"
+        self.client_started = False
+        self.closed = False
+        self._serial = "# " if self.script.get("prompt", True) else "boot junk\n"
+        self._serial = (self.script.get("serial", "") or "") + self._serial
+        self.process = _FakeSessionProcess(
+            tail=self.script.get("panic_tail", ""),
+            returncode=self.script.get("returncode", 0),
+        )
+
+    # ── lifecycle ──
+    def start(self):
+        exc = self.script.get("start_exc")
+        if exc is not None:
+            raise exc
+
+    def close(self):
+        self.closed = True
+
+    # ── serial transport ──
+    def wait_for(self, pattern, timeout=20, start=None):
+        base = "" if start is None else start
+        return bool(re.search(pattern, self._serial[len(base):]))
+
+    def mark(self):
+        return self._serial
+
+    def output(self):
+        return self._serial
+
+    def run(self, cmd, until="# ", timeout=20):
+        c = cmd.strip()
+        if c in ("/bin/setres -l", "setres -l"):
+            return ("setres: ENODEV\n# " if self.nobga
+                    else self._setres_text())
+        if c == "/bin/setres -h":
+            return "usage: setres [-l | WxH]\n# "
+        if c.startswith("/bin/setres "):
+            return ("setres: ENODEV\n# " if self.nobga
+                    else "not a supported mode\n# ")
+        if c.startswith("setres "):
+            spec = c.split(None, 1)[1]
+            self._apply(spec)
+            return f"setres {spec}\n# "
+        if c.startswith("echo RES_"):
+            return c.split(None, 1)[1] + "\n# "
+        return "# "
+
+    def send_line(self, text):
+        if "test_lvgl" in text:
+            self.client_started = True
+            self._serial += "LVGL compatibility smoke test succeeded\n"
+        elif text.strip().startswith("setres"):
+            spec = text.strip().split(None, 1)[1].replace("&", "").strip()
+            self._apply(spec)
+        else:
+            self._serial += text + "\n"
+
+    def _send(self, text):
+        # Ctrl-C yields a fresh prompt (the idle-switch Ctrl-C check).
+        if text == "\x03":
+            self._serial += "# "
+
+    # ── queries ──
+    def screen(self, label="shot"):
+        if self.script.get("fail_boot") and label == "boot":
+            return _res_surface(640, 480, (2, 2, 2))
+        fill = (1, 1, 1) if label == "pre-echo" else (2, 2, 2)
+        return _res_surface(self.mode_wh[0], self.mode_wh[1], fill)
+
+    def mode(self):
+        return self.mode_wh
+
+    def generation(self):
+        return self.gen
+
+    def setres_list(self):
+        return {
+            "modes": [(640, 480), (800, 600), (1024, 768),
+                      (1280, 720), (1920, 1080)],
+            "current": self.mode_wh,
+            "stride": self.mode_wh[0] * 4,
+            "generation": self.gen,
+        }
+
+    def shell_pid(self):
+        return self.pid
+
+    def pty(self):
+        return self.pty_path
+
+    def terminal_pid(self):
+        return self.pid + 1
+
+    # ── internals ──
+    def _apply(self, spec):
+        m = re.match(r"(\d+)x(\d+)", spec or "")
+        if not m:
+            return
+        wh = (int(m.group(1)), int(m.group(2)))
+        if wh != self.mode_wh:
+            self.mode_wh = wh
+            self.gen += 1
+            if self.client_started:
+                self._serial += (
+                    "display mode changed, restart the app\n"
+                    "RES_LVGL_EXIT=1\n")
+
+    def _setres_text(self):
+        lines = ["Available modes (capacity 16, 5 listed):"]
+        for (w, h) in self.setres_list()["modes"]:
+            lines.append(f"  {w}x{h} bpp=32")
+        lines.append(
+            f"Current: {self.mode_wh[0]}x{self.mode_wh[1]} (CURRENT) "
+            f"bpp=32 stride={self.mode_wh[0] * 4}")
+        lines.append(f"generation: {self.gen}")
+        lines.append("# ")
+        return "\n".join(lines) + "\n"
+
+
+def _stub_prepare_resolution_image(source, mode, destination):
+    """Image-isolation boundary stub: copy source -> destination."""
+    Path(destination).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+    return Path(destination)
+
+
+class ResolutionSuiteTests(unittest.TestCase):
+    """resolution suite: the seven per-SUITE categories, driving the real
+    ``test_resolution`` entry point.
+
+    Each fixture invokes ``test_resolution`` — the resolution dispatcher —
+    with the QEMU boundary scripted, and asserts on its RESULT (a bool, or
+    the launch ``OSError`` it propagates).  None of them assert on data the
+    fixture itself staged: the dispatcher, ``evaluate_round_trip``, the
+    per-case gates and the 1-second observation gate all run for real, so a
+    break in any of them flips the corresponding fixture.  Plus the QMP and
+    image-isolation pins the brief calls out for resolution.
+    """
 
     def setUp(self) -> None:
         self.rt = _import_run_test()
 
-    def _runner_with(self, chunks, returncode=0, start_exc=None):
-        def factory(argv, run_dir, timeout_s, *, writable_stdin=False):
-            return FakeProcessSession(
-                argv=argv, run_dir=run_dir, timeout_s=timeout_s,
-                writable_stdin=writable_stdin, chunks=chunks,
-                returncode=returncode, start_exc=start_exc,
-            )
-        return _make_runner_with_factory(self.rt, factory)
+    def _drive_resolution(self, script):
+        """Run ``test_resolution`` against a scripted session boundary.
+
+        Returns the dispatcher's bool.  Raises whatever the dispatcher
+        propagates (e.g. the launch ``OSError`` for the startup-failure
+        case).
+        """
+        from qemutests import test_resolution_switcher as trs
+        with tempfile.TemporaryDirectory(prefix="os01-resfix-") as td:
+            base = Path(td)
+            firmware = base / "OVMF.fd"
+            firmware.write_bytes(b"fw")
+            image = base / "os01-res-fake.img"
+            image.write_bytes(b"disk")
+            results = base / "results"
+            results.mkdir()
+            keys = ("OVMF_FIRMWARE", "DISK_IMG",
+                    "OS01_RESOLUTION_RESULT_DIR", "OS01_BUILD_DIR")
+            saved_env = {k: os.environ.get(k) for k in keys}
+            saved_session = trs.ResolutionSession
+            saved_prepare = trs.prepare_resolution_image
+            os.environ["OVMF_FIRMWARE"] = str(firmware)
+            os.environ["DISK_IMG"] = str(image)
+            os.environ["OS01_RESOLUTION_RESULT_DIR"] = str(results)
+            os.environ.pop("OS01_BUILD_DIR", None)
+
+            def factory(fw, img, res_dir, **kw):
+                return _ResolutionSessionFake(fw, img, res_dir, script=script,
+                                              **kw)
+
+            trs.ResolutionSession = factory
+            trs.prepare_resolution_image = _stub_prepare_resolution_image
+            try:
+                return trs.test_resolution(None)
+            finally:
+                trs.ResolutionSession = saved_session
+                trs.prepare_resolution_image = saved_prepare
+                for k, v in saved_env.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
 
     def test_resolution_positive_completion(self) -> None:
-        """The resolution suite's positive path must reach the
-        boot markers + setres list + PASS without errors."""
-        tester = self._runner_with(self.CHUNKS_POSITIVE)
-        try:
-            tester.start_qemu()
-            # Positive trace must contain the boot markers AND the
-            # setres list AND the PASS marker.
-            self.assertIn("OS01 Init v1.0", tester.process._text)
-            self.assertIn("800x600", tester.process._text)
-            self.assertIn("RESULT: PASS", tester.process._text)
-        finally:
-            tester.cleanup()
+        """A scripted healthy guest run must make ``test_resolution``
+        return True (the round-trip surface/pid/generation checks pass)."""
+        self.assertTrue(self._drive_resolution({}))
 
     def test_resolution_negative_marker_rejected(self) -> None:
-        """A [FAIL] marker in the trace must be visible to the runner
-        (the suite pins it as a hard FAIL)."""
-        tester = self._runner_with(self.CHUNKS_NEGATIVE_MARKER)
-        try:
-            tester.start_qemu()
-            self.assertIn("[FAIL]", tester.process._text)
-            self.assertNotIn("RESULT: PASS", tester.process._text)
-        finally:
-            tester.cleanup()
+        """A boot screendump with wrong dimensions (the guest's negative
+        evidence) must make ``test_resolution`` return False — the
+        surface check in ``evaluate_round_trip`` is a real gate."""
+        self.assertFalse(self._drive_resolution({"fail_boot": True}))
 
     def test_resolution_old_pass_replay_rejected(self) -> None:
-        """An historical PASS marker from a previous resolution run
-        must NOT count as the current run's PASS."""
-        tester = self._runner_with(self.CHUNKS_OLD_PASS_REPLAY)
-        try:
-            tester.start_qemu()
-            text = tester.process._text
-            self.assertTrue(text.startswith("PASS:"))
-            self.assertNotIn("RESULT: PASS", text)
-        finally:
-            tester.cleanup()
+        """A stale historical PASS line cannot stand in for a fresh boot:
+        a session that never reaches a shell prompt makes
+        ``test_resolution`` return False.  (The resolution suite has no
+        dedicated old-PASS marker; the fresh-prompt requirement is the
+        gate that rejects a replayed transcript.)"""
+        self.assertFalse(self._drive_resolution({
+            "prompt": False,
+            "serial": "PASS: 2025-09-30 old resolution run completed\n",
+        }))
 
     def test_resolution_late_panic_in_observe_window(self) -> None:
-        """A kernel panic arriving within the 1-second observation
-        window after a PASS marker must be visible (and a future
-        hardening task will reject it as FAIL)."""
-        tester = self._runner_with(self.CHUNKS_LATE_PANIC)
-        try:
-            tester.start_qemu()
-            text = tester.process._text
-            self.assertIn("RESULT: PASS", text)
-            self.assertIn("kernel panic", text)
-        finally:
-            tester.cleanup()
+        """A kernel panic arriving in the 1-second observation window
+        after the cases complete must FAIL the run (Fix 3)."""
+        self.assertFalse(self._drive_resolution({
+            "panic_tail": "Kernel panic: late fault\n"}))
 
     def test_resolution_early_qemu_exit(self) -> None:
-        """A QEMU exit before any boot marker must NOT produce a PASS."""
-        tester = self._runner_with(self.CHUNKS_EARLY_EXIT, returncode=0)
-        try:
-            tester.start_qemu()
-            text = tester.process._text
-            self.assertNotIn("OS01 Init v1.0", text)
-            self.assertNotIn("RESULT: PASS", text)
-        finally:
-            tester.cleanup()
+        """A session that exits before the shell prompt must NOT produce
+        a PASS (``_boot_session`` requires a fresh prompt)."""
+        self.assertFalse(self._drive_resolution({"prompt": False}))
 
     def test_resolution_startup_failure(self) -> None:
-        """QEMU launch failure must surface as an exception (start_exc)."""
-        tester = self._runner_with(
-            [], start_exc=FileNotFoundError("qemu missing"))
-        try:
-            with self.assertRaises((FileNotFoundError, OSError)):
-                tester.start_qemu()
-        finally:
-            tester.cleanup()
+        """A QEMU launch failure must propagate as an ``OSError`` rather
+        than be swallowed."""
+        with self.assertRaises(OSError):
+            self._drive_resolution({"start_exc": OSError("qemu missing")})
 
     def test_resolution_nonzero_child_status(self) -> None:
-        """A QEMU that exits nonzero after writing a marker must NOT
-        produce a PASS."""
-        tester = self._runner_with(self.CHUNKS_EARLY_EXIT, returncode=1)
-        try:
-            tester.start_qemu()
-            self.assertNotIn("RESULT: PASS", tester.process._text)
-        finally:
-            tester.cleanup()
+        """A session that never reaches the prompt exits FAIL regardless
+        of child status; the run must not be reported as PASS."""
+        self.assertFalse(self._drive_resolution({
+            "prompt": False, "returncode": 2}))
 
     def test_resolution_qmp_image_isolation_pinned(self) -> None:
         """ResolutionSession must (a) call prepare_resolution_image,
@@ -1395,19 +1592,11 @@ class DriverModelSuiteTests(unittest.TestCase):
 class SMPCheckTests(unittest.TestCase):
     """SMP / QEMU_SMP conflict detection (spec §7.1).
 
-    These assertions pin the conflict *rules* and must be hermetic: an
-    ambient ``QEMU_SMP`` (e.g. one left in the environment by another
-    harness module that forces SMP=1) must not change the outcome of a
-    test that never mentions the env var.  ``setUp`` therefore clears
-    ``QEMU_SMP`` and ``tearDown`` restores whatever was there.
+    These assertions pin the conflict *rules*.  They are hermetic now
+    that the one module that used to leak ``QEMU_SMP`` (``test_gfx_runner``)
+    restores it in ``tearDown``; the earlier consumer-side band-aid that
+    popped the env var here is no longer needed.
     """
-
-    def setUp(self) -> None:
-        self._saved_qemu_smp = os.environ.pop("QEMU_SMP", None)
-
-    def tearDown(self) -> None:
-        if self._saved_qemu_smp is not None:
-            os.environ["QEMU_SMP"] = self._saved_qemu_smp
 
     def test_smp_and_qemu_smp_matching_is_fine(self) -> None:
         self.rt = _import_run_test()
@@ -1565,6 +1754,123 @@ class RunArchiveIntegrationTests(unittest.TestCase):
         finally:
             if saved is not None:
                 os.environ["OS01_BUILD_DIR"] = saved
+
+
+class MainErrorExitCodeTests(unittest.TestCase):
+    """Fix 1: ``run_test.main()`` must not leak an unbound ``result``.
+
+    When a suite function raises (e.g. a real QEMU launch raising
+    ``OSError``), ``main()``'s ``finally`` used to call
+    ``_write_run_report(tester, args, result)`` with ``result`` unbound:
+    a ``NameError`` masked the original exception, ``result.json`` was
+    never written, and the process exited 1.  Per spec §6.2 an internal
+    error is an ERROR — exit 2 — with the traceback still visible and
+    the archive still written.
+    """
+
+    def setUp(self) -> None:
+        self.rt = _import_run_test()
+        self._tmp = tempfile.TemporaryDirectory(prefix="os01-mainerr-")
+        self.addCleanup(self._tmp.cleanup)
+        self.build_dir = Path(self._tmp.name)
+
+    def test_main_suite_exception_exits_2_and_writes_report(self) -> None:
+        def raising_session_factory(argv, run_dir, timeout_s, *,
+                                    writable_stdin=False):
+            # Real QEMU launch failure: start() raises OSError.
+            return FakeProcessSession(
+                argv=argv, run_dir=run_dir, timeout_s=timeout_s,
+                writable_stdin=writable_stdin, chunks=[],
+                start_exc=OSError("simulated QEMU launch failure"),
+            )
+
+        def boom(tester):
+            # Reach start_qemu (which builds the RunArchive) and then
+            # raise from the QEMU boundary, exercising the error path.
+            tester.start_qemu()
+            raise AssertionError("unreachable: start_qemu should raise")
+
+        saved_proc = self.rt.ProcessSession
+        saved_boot = self.rt.test_boot
+        saved_argv = sys.argv
+        saved_build = os.environ.get("OS01_BUILD_DIR")
+        self.rt.ProcessSession = raising_session_factory
+        self.rt.test_boot = boom
+        os.environ["OS01_BUILD_DIR"] = str(self.build_dir)
+        sys.argv = ["run_test.py", "--disk", "/tmp/fake-disk.img", "boot"]
+        try:
+            with self.assertRaises(SystemExit) as cm:
+                self.rt.main()
+            self.assertEqual(cm.exception.code, 2)
+        finally:
+            self.rt.ProcessSession = saved_proc
+            self.rt.test_boot = saved_boot
+            sys.argv = saved_argv
+            if saved_build is None:
+                os.environ.pop("OS01_BUILD_DIR", None)
+            else:
+                os.environ["OS01_BUILD_DIR"] = saved_build
+
+        reports = list(self.build_dir.rglob("result.json"))
+        self.assertEqual(
+            len(reports), 1,
+            "result.json must still be written when a suite raises")
+        import json as _json
+        data = _json.loads(reports[0].read_text())
+        self.assertEqual(data["status"], "ERROR")
+        self.assertEqual(data["runner_exit_code"], 2)
+
+
+class FakeProcessSessionCursorTests(unittest.TestCase):
+    """Pin the fake's cursor semantics to the real ProcessSession (Fix 5).
+
+    ``ProcessSession.wait_for`` consumes EVERYTHING received on a match
+    (``self._cursor = len(self._text)``; see
+    ``test_harness_process.ProcessSessionCursorAdvanceTests``), and
+    ``observe`` returns only the text that arrives *after* the preceding
+    read.  These fixtures make the serial-stdio fake obey the same
+    contract, so a late-panic fixture cannot pass merely because the
+    double is more permissive than production.
+    """
+
+    def _fake(self, chunks):
+        return FakeProcessSession(
+            argv=["qemu-system-x86_64"],
+            run_dir=Path(tempfile.gettempdir()) / "os01-fake-cursor",
+            timeout_s=1.0,
+            writable_stdin=True,
+            chunks=chunks,
+        )
+
+    def test_wait_for_consumes_everything_received(self) -> None:
+        # The received chunk holds BOTH the marker and a later line.
+        # Production consumes the whole received text on the match, so
+        # the trailing line is not re-observable.
+        fake = self._fake([b"READY\nlate line\n"])
+        fake.wait_for(lambda s: "READY" in s)
+        self.assertEqual(fake.observe(1.0), "")
+
+    def test_marker_sharing_a_consumed_chunk_is_not_rematched(self) -> None:
+        # Two markers in ONE received chunk: the first wait_for consumes
+        # the whole chunk, so the second marker must NOT be re-matchable.
+        fake = self._fake([b"A\nB\n"])
+        self.assertIn("A", fake.wait_for(lambda s: "A" in s))
+        self.assertEqual(fake.wait_for(lambda s: "B" in s), "")
+        self.assertTrue(fake.timed_out)
+
+    def test_observe_sees_a_late_chunk(self) -> None:
+        # A chunk that arrives *after* the matched one is received by the
+        # observe window (the honest late-panic mechanism).
+        fake = self._fake([b"READY\n", b"[kernel panic] late\n"])
+        fake.wait_for(lambda s: "READY" in s)
+        self.assertIn("kernel panic", fake.observe(1.0))
+
+    def test_observe_does_not_replay_the_matched_chunk(self) -> None:
+        # A chunk the wait_for already received is consumed: observe sees
+        # only the still-unreceived tail, never the matched span again.
+        fake = self._fake([b"MARKER\n", b"tail\n"])
+        self.assertEqual(fake.wait_for(lambda s: "MARKER" in s), "MARKER\n")
+        self.assertEqual(fake.observe(1.0), "tail\n")
 
 
 if __name__ == "__main__":

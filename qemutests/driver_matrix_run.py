@@ -280,8 +280,11 @@ def _run_case(case, smp, timeout=DEFAULT_TIMEOUT, session_factory=None):
                     stderr_log=str(archive.run_dir / "stderr.log"),
                 )
                 archive.write(report)
-            except Exception:
-                pass
+            except Exception as exc:
+                # Match run_test.py: a failed result.json write is
+                # announced on stderr rather than swallowed silently.
+                print(f"[driver_matrix_run] warning: failed to write "
+                      f"RunReport: {exc}", file=sys.stderr)
     return _captured
 
 

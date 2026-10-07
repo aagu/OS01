@@ -37,6 +37,7 @@ factory to bypass the real subprocess.Popen boundary.
 
 import sys
 import os
+import hashlib
 import subprocess
 import re
 import time
@@ -45,6 +46,7 @@ import tempfile
 import http.server
 import socketserver
 import threading
+import traceback
 from pathlib import Path
 
 QEMU = os.environ.get("QEMU", "qemu-system-x86_64")
@@ -89,6 +91,18 @@ try:
 except ImportError:  # pragma: no cover
     RunArchive = None  # type: ignore[assignment]
     RunReport = None  # type: ignore[assignment]
+
+
+def _sha256_path(path):
+    """Return the hex SHA-256 of ``path``, or None if it is unreadable."""
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fp:
+            for chunk in iter(lambda: fp.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except (OSError, TypeError):
+        return None
 
 
 class TestRunner:
@@ -147,6 +161,12 @@ class TestRunner:
         # the runner is invoked outside a build context (the legacy
         # path used by host-only unit tests).
         self.run_archive = None
+        # RunReport evidence (spec §7.2): the input image is hashed
+        # before launch and again after the run so a mid-run mutation
+        # (QEMU writing the disk) is detectable; the wall-clock duration
+        # is measured from launch.
+        self._started_monotonic = None
+        self._image_sha_before = None
 
     def start_qemu(self, network=False, serial_stdio=False,
                    extra_qemu_args=None, snapshot=False, run_dir=None):
@@ -180,6 +200,13 @@ class TestRunner:
         if snapshot or self.snapshot:
             if "-snapshot" not in all_extra:
                 all_extra.append("-snapshot")
+
+        # RunReport evidence (spec §7.2): snapshot the input image hash
+        # and the wall-clock start time now, before QEMU can write the
+        # disk, so _write_run_report records a real before/after pair and
+        # a real duration.
+        self._started_monotonic = time.monotonic()
+        self._image_sha_before = _sha256_path(self.disk_img)
 
         # Allocate run_dir for the ProcessSession.
         # RunArchive integration (spec §7.2): when OS01_BUILD_DIR is
@@ -637,6 +664,18 @@ def test_inittab_phase(tester):
         print("FAIL: missing 'too many fields' warning")
         return False
 
+    # 1-second observation window (spec §5.3): a kernel panic that
+    # arrives within observe(1) after the phase checks is a late fault
+    # and FAILs the run even though every phase marker was present.
+    if tester.process is not None:
+        try:
+            tail = tester.process.observe(1.0)
+        except Exception:
+            tail = ""
+        if _panic_in(tail):
+            print("FAIL: kernel panic in 1-second observation window")
+            return False
+
     print("PASS: phase dispatch order verified, error paths exercised")
     return True
 
@@ -905,6 +944,11 @@ def main():
 
     tester = TestRunner(args.disk, args.timeout, suite=args.test_name)
 
+    # ``result`` is assigned only inside the branches below; initialize it
+    # so ``finally`` never sees an unbound name if a suite function raises
+    # (spec §6.2: an internal/launch error is an ERROR — exit 2, not 1).
+    result = None
+    error = None
     try:
         if args.test_name == "boot" or args.test_name == "phase-0":
             result = test_boot(tester)
@@ -925,14 +969,22 @@ def main():
         else:
             print(f"Unknown test: {args.test_name}")
             result = False
+    except Exception as exc:  # noqa: BLE001 — surfaced below as ERROR/exit 2
+        # A raising suite (e.g. a real QEMU launch OSError) is an ERROR:
+        # capture it so the finally block still writes result.json and the
+        # process exits 2 instead of masking the exception with a NameError.
+        error = exc
     finally:
         tester.cleanup()
-        _write_run_report(tester, args, result)
+        _write_run_report(tester, args, result, error=error)
 
+    if error is not None:
+        traceback.print_exception(type(error), error, error.__traceback__)
+        sys.exit(2)
     sys.exit(0 if result else 1)
 
 
-def _write_run_report(tester, args, result):
+def _write_run_report(tester, args, result, error=None):
     """Persist a RunReport to ``tester.run_archive`` if one was created.
 
     Best-effort: an ArchiveWriteError is logged but does not change
@@ -941,9 +993,7 @@ def _write_run_report(tester, args, result):
     archive = getattr(tester, "run_archive", None)
     if archive is None or RunReport is None:
         return
-    import json as _json
     import subprocess as _sp
-    import hashlib as _hl
     from datetime import datetime, timezone
     try:
         # Best-effort git revision / dirty flag.
@@ -966,15 +1016,17 @@ def _write_run_report(tester, args, result):
                 git_dirty = bool(d.stdout.strip())
         except (OSError, _sp.TimeoutExpired):
             pass
-        # Best-effort image sha256.
+        # Input-image hash pair (spec §7.2): ``before`` was captured in
+        # start_qemu before QEMU could write the disk; ``after`` is taken
+        # now.  A difference means the run mutated its input image.
         img_path = Path(tester.disk_img) if tester.disk_img else None
-        img_sha = None
-        if img_path and img_path.is_file():
-            h = _hl.sha256()
-            with open(img_path, "rb") as fp:
-                for chunk in iter(lambda: fp.read(1 << 20), b""):
-                    h.update(chunk)
-            img_sha = h.hexdigest()
+        img_sha_before = getattr(tester, "_image_sha_before", None)
+        img_sha_after = _sha256_path(img_path) if img_path else None
+        # Wall-clock duration measured from launch.
+        started = getattr(tester, "_started_monotonic", None)
+        duration_s = (
+            max(0.0, time.monotonic() - started) if started else 0.0
+        )
         # Compose the report.
         report = RunReport(
             schema_version=1,
@@ -994,18 +1046,21 @@ def _write_run_report(tester, args, result):
             firmware_sha256_before=None,
             firmware_sha256_after=None,
             image_path=str(img_path) if img_path else None,
-            image_sha256_before=img_sha,
-            image_sha256_after=img_sha,
+            image_sha256_before=img_sha_before,
+            image_sha256_after=img_sha_after,
             utc_started_at=datetime.now(timezone.utc).isoformat(),
-            duration_s=0.0,
-            runner_exit_code=0 if result else 1,
+            duration_s=duration_s,
+            runner_exit_code=2 if error is not None else (0 if result else 1),
             child_exit_code=(
                 tester.process.returncode if tester.process else None
             ),
             stopped_by_runner=bool(
                 tester.process and tester.process.stopped_by_runner
             ),
-            status="PASS" if result else "FAIL",
+            status=(
+                "ERROR" if error is not None
+                else ("PASS" if result else "FAIL")
+            ),
             count_unit="case",
             outcomes=[],
             stdout_log=str(archive.run_dir / "stdout.log"),
