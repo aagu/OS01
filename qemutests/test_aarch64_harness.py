@@ -659,17 +659,50 @@ class M1ExpectedFailureLifecycleTests(SuiteUnitAdapterTests):
 
     def test_stayed_alive_after_evidence_passes(self):
         session = FakeSession(text="M1 FATAL reason=arena-exhaust\n")
-        self.assertTrue(self._run(session))
+        self.assertEqual(self._run(session), 0)
         data = _one_archive(self.build, m1m.SUITE)
         self.assert_suite_unit(data)
         self.assertEqual(data["status"], "PASS")
+        self.assert_exit_code_matches_status(data, 0)
+        self.assert_hash_before_unset(data)
 
     def test_exit_before_acceptance_fails(self):
         session = FakeSession(text="M1 FATAL reason=arena-exhaust\n",
                               exit_in_window=True)
-        self.assertFalse(self._run(session))
+        self.assertEqual(self._run(session), 1)
         data = _one_archive(self.build, m1m.SUITE)
         self.assertEqual(data["status"], "FAIL")
+        self.assert_exit_code_matches_status(data, 1)
+
+    def test_spawn_error_exits_2_and_archives_error(self):
+        # A QEMU that cannot launch is a configuration/environment ERROR
+        # (exit 2), not the FAIL/exit-1 slot the archive previously
+        # disagreed with.
+        session = FakeSession(start_exc=FileNotFoundError("no-such-qemu"))
+        self.assertEqual(self._run(session), 2)
+        data = _one_archive(self.build, m1m.SUITE)
+        self.assert_suite_unit(data)
+        self.assertEqual(data["status"], "ERROR")
+        self.assert_exit_code_matches_status(data, 2)
+
+
+class M1ExitCodeFoldTests(unittest.TestCase):
+    """The m1 runner folds its child processes' exit codes; a
+    configuration/environment ERROR (2) must survive the fold instead of
+    collapsing to a plain FAIL (1)."""
+
+    def test_normalize_child_return_code(self):
+        self.assertEqual(m1m._normalize_rc(0), 0)
+        self.assertEqual(m1m._normalize_rc(1), 1)
+        self.assertEqual(m1m._normalize_rc(2), 2)
+        # A signal-killed child is a failure, never a PASS.
+        self.assertEqual(m1m._normalize_rc(-9), 1)
+
+    def test_aggregate_case_codes(self):
+        self.assertEqual(m1m._aggregate_exit_codes([0, 0]), 0)
+        self.assertEqual(m1m._aggregate_exit_codes([0, 1]), 1)
+        self.assertEqual(m1m._aggregate_exit_codes([0, 2]), 2)
+        self.assertEqual(m1m._aggregate_exit_codes([1, 2]), 2)
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -732,6 +765,14 @@ class RunnerExitCodeScriptTests(SuiteUnitAdapterTests):
     def test_m3_probe_missing_qemu_exits_2(self):
         self._env_error("aarch64_m3_probe.py", m3p.SUITE,
                         ["--timeout", "5"])
+
+    def test_m1_matrix_missing_qemu_exits_2(self):
+        # ``--variant`` takes the m1 expected-failure path; an explicit
+        # ``--diagnostic-dtb`` skips DTB generation (which needs QEMU), so
+        # the missing QEMU surfaces as the session launch error.
+        self._env_error("aarch64_m1_matrix.py", m1m.SUITE,
+                        ["--variant", "arena-exhaust", "--timeout", "5",
+                         "--diagnostic-dtb", str(self.dtb)])
 
     def test_uefi_smp_aggregates_case_codes(self):
         # Multi-case runs fold to the plan's contract: 0 all-pass, 2 if any

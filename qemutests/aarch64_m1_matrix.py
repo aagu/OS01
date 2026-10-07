@@ -41,6 +41,31 @@ MATRIX = ((256, 1), (512, 1), (512, 2), (512, 4),
           (2048, 1), (2048, 2), (2048, 4), (4096, 1))
 
 
+# Direct-runner exit codes (plan global constraint): 0=PASS,
+# 1=FAIL/TIMEOUT, 2=configuration/environment ERROR, 130=Ctrl-C.
+
+def _normalize_rc(rc: int) -> int:
+    """Map a child process return code onto the 0/1/2 runner contract."""
+    if rc == 0:
+        return 0
+    if rc == 2:
+        return 2
+    # Any other nonzero (including a signal-killed child) is a failure.
+    return 1
+
+
+def _aggregate_exit_codes(codes: list[int]) -> int:
+    """Fold per-case exit codes into the runner's own exit code.
+
+    0 when every case passed; 2 when any case hit a configuration /
+    environment ERROR; otherwise 1 (the FAIL/TIMEOUT slot)."""
+    if all(code == 0 for code in codes):
+        return 0
+    if any(code == 2 for code in codes):
+        return 2
+    return 1
+
+
 def _sha256_path(path) -> str | None:
     if path is None:
         return None
@@ -85,10 +110,13 @@ def _write_suite_report(archive, *, argv, profile, session, started_monotonic,
             argv=list(argv), cpu_count=int(cpu), memory_mib=512,
             tool_versions={},
             firmware_path=firmware or None,
-            firmware_sha256_before=_sha256_path(firmware),
+            # Only the post-run hash is recorded: a ``*_before`` computed at
+            # report time would not be a real mutation check (same convention
+            # as ``run_kernel_selftest.py`` / ``run_hosttests.py``).
+            firmware_sha256_before=None,
             firmware_sha256_after=_sha256_path(firmware),
             image_path=image or None,
-            image_sha256_before=_sha256_path(image),
+            image_sha256_before=None,
             image_sha256_after=_sha256_path(image),
             utc_started_at=datetime.now(timezone.utc).isoformat(),
             duration_s=max(0.0, time.monotonic() - started_monotonic),
@@ -106,9 +134,9 @@ def _write_suite_report(archive, *, argv, profile, session, started_monotonic,
 
 
 def run_matrix(args: argparse.Namespace, *, build_dir=None,
-               profile="default") -> bool:
+               profile="default") -> int:
     script = Path(__file__).with_name("aarch64_uefi_smp.py")
-    outcomes: list[bool] = []
+    codes: list[int] = []
     for label, image, selftest in (
         ("normal", args.normal_image, False),
         ("selftest", args.selftest_image, True),
@@ -128,12 +156,13 @@ def run_matrix(args: argparse.Namespace, *, build_dir=None,
             if selftest:
                 command.extend(("--expect-selftest", "--expect-gic", "--expect-clk"))
             print(f"M1 matrix: {label}, RAM={ram_mib} MiB, CPUs={cpus}")
-            outcomes.append(subprocess.run(command, check=False).returncode == 0)
-    return all(outcomes)
+            codes.append(
+                _normalize_rc(subprocess.run(command, check=False).returncode))
+    return _aggregate_exit_codes(codes)
 
 
 def run_sparse_variant(args: argparse.Namespace, *, build_dir=None,
-                       profile="default") -> bool:
+                       profile="default") -> int:
     script = Path(__file__).with_name("aarch64_uefi_smp.py")
     log_dir = Path(args.log_dir) / "sparse-ram-512-cpus-1"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -147,17 +176,21 @@ def run_sparse_variant(args: argparse.Namespace, *, build_dir=None,
     ]
     if build_dir:
         command += ["--build-dir", str(build_dir), "--profile", profile]
-    return subprocess.run(command, check=False).returncode == 0
+    return _normalize_rc(subprocess.run(command, check=False).returncode)
 
 
 def run_expected_failure(args: argparse.Namespace, *, session_factory=None,
-                         build_dir=None, profile="default") -> bool:
+                         build_dir=None, profile="default") -> int:
     """Run one intentional failure and verify its signature while QEMU lives.
 
     The expected-fatal adapter: evidence is ``m1_failure_evidence_ok`` over
     the captured log, and success additionally requires QEMU to *stay
     alive* for the 2-second grace period after the evidence — the runner
-    then owns the stop.  A QEMU that exits early FAILs."""
+    then owns the stop.  A QEMU that exits early FAILs.
+
+    Returns the plan's direct-runner exit code: 0 (PASS), 1 (FAIL /
+    TIMEOUT) or 2 (configuration / environment ERROR).  The archived
+    ``status`` always matches the returned code."""
     if session_factory is None:
         session_factory = ProcessSession
     started = time.monotonic()
@@ -238,10 +271,10 @@ def run_expected_failure(args: argparse.Namespace, *, session_factory=None,
         metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
         _write_suite_report(
             archive, argv=command, profile=profile, session=session,
-            started_monotonic=started, status="ERROR", runner_exit_code=1,
+            started_monotonic=started, status="ERROR", runner_exit_code=2,
             errors=[f"spawn error: {spawn_error}"], cpu=cpus,
             firmware=args.firmware, image=args.image)
-        return False
+        return 2
 
     accepted = (not exited_early and stayed_alive
                 and m1_failure_evidence_ok(text, args.variant, cpus,
@@ -263,7 +296,7 @@ def run_expected_failure(args: argparse.Namespace, *, session_factory=None,
                       "cpus": cpus,
                       "result": "PASS" if accepted else "FAIL",
                       "log": str(run_dir / "stdout.log")}))
-    return accepted
+    return 0 if accepted else 1
 
 
 def main() -> int:
@@ -296,15 +329,15 @@ def main() -> int:
         parser.error("--image is only valid with --variant")
     Path(args.log_dir).mkdir(parents=True, exist_ok=True)
     if args.variant == "sparse":
-        accepted = run_sparse_variant(args, build_dir=args.build_dir,
-                                      profile=args.profile)
+        code = run_sparse_variant(args, build_dir=args.build_dir,
+                                  profile=args.profile)
     elif args.variant:
-        accepted = run_expected_failure(args, build_dir=args.build_dir,
-                                        profile=args.profile)
+        code = run_expected_failure(args, build_dir=args.build_dir,
+                                    profile=args.profile)
     else:
-        accepted = run_matrix(args, build_dir=args.build_dir,
-                              profile=args.profile)
-    return 0 if accepted else 1
+        code = run_matrix(args, build_dir=args.build_dir,
+                          profile=args.profile)
+    return code
 
 
 if __name__ == "__main__":
