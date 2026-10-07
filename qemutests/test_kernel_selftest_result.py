@@ -313,7 +313,10 @@ class KernelSelftestRunArchiveTests(unittest.TestCase):
         self.assertEqual(data["runner_exit_code"], 0)
         self.assertEqual(data["cpu_count"], 8)
         self.assertTrue(data["stopped_by_runner"])
-        self.assertEqual(data["count_unit"], "suite")
+        # The runner publishes protocol-v1 per-case records
+        # (declared_ids/observed_ids + per-case outcomes), so the count
+        # unit is the individual case, not the suite aggregate.
+        self.assertEqual(data["count_unit"], "case")
         # Archive path: <build_dir>/logs/tests/kernel-selftest/<UTC>-<uuid>/
         reports = list(Path(self.build_dir).rglob("result.json"))
         rel = reports[0].relative_to(self.build_dir)

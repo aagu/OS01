@@ -979,6 +979,7 @@ def main():
     # (spec §6.2: an internal/launch error is an ERROR — exit 2, not 1).
     result = None
     error = None
+    interrupted = False
     try:
         if args.test_name == "boot" or args.test_name == "phase-0":
             result = test_boot(tester)
@@ -999,23 +1000,47 @@ def main():
         else:
             print(f"Unknown test: {args.test_name}")
             result = False
+    except KeyboardInterrupt:
+        # Ctrl-C is its own outcome (spec §6.2): archive status="ERROR"
+        # and exit 130, matching the four other runners
+        # (run_hosttests.py / run_static_audit.py / run_kernel_selftest.py /
+        # x86_64_systest_repeat.py).  Without this handler CPython exited
+        # 130 while the archive recorded FAIL/1 — the two signals disagreed.
+        interrupted = True
     except Exception as exc:  # noqa: BLE001 — surfaced below as ERROR/exit 2
         # A raising suite (e.g. a real QEMU launch OSError) is an ERROR:
         # capture it so the finally block still writes result.json and the
         # process exits 2 instead of masking the exception with a NameError.
         error = exc
     finally:
+        # Capture the session BEFORE ``cleanup()`` nulls ``tester.process``.
+        # ``cleanup()`` reaps the child (populating the real ``returncode``
+        # and, when it had to terminate a live child, ``stopped_by_runner``),
+        # so the process evidence must be read from this reference after the
+        # cleanup and before it becomes unreachable — otherwise every report
+        # records an empty argv and a null child exit (spec §7.2).
+        session = tester.process
         tester.cleanup()
-        _write_run_report(tester, args, result, error=error)
+        _write_run_report(
+            tester, args, result, error=error, session=session,
+            interrupted=interrupted,
+        )
 
+    if interrupted:
+        sys.exit(130)
     if error is not None:
         traceback.print_exception(type(error), error, error.__traceback__)
         sys.exit(2)
     sys.exit(0 if result else 1)
 
 
-def _write_run_report(tester, args, result, error=None):
+def _write_run_report(tester, args, result, error=None, session=None,
+                      interrupted=False):
     """Persist a RunReport to ``tester.run_archive`` if one was created.
+
+    ``session`` is the ProcessSession captured before ``cleanup()``;
+    its argv, returncode and controlled-stop flag are the process
+    evidence spec §7.2 requires.
 
     Best-effort: an ArchiveWriteError is logged but does not change
     the test exit code (the suite itself owns pass/fail; the archive
@@ -1068,7 +1093,7 @@ def _write_run_report(tester, args, result, error=None):
             request=None,
             declared_ids=None,
             observed_ids=None,
-            argv=list(tester.process.argv) if tester.process else [],
+            argv=list(session.argv) if session is not None else [],
             cpu_count=int(getattr(tester, "_effective_smp", "1") or 1),
             memory_mib=512,
             tool_versions={},
@@ -1080,18 +1105,24 @@ def _write_run_report(tester, args, result, error=None):
             image_sha256_after=img_sha_after,
             utc_started_at=datetime.now(timezone.utc).isoformat(),
             duration_s=duration_s,
-            runner_exit_code=2 if error is not None else (0 if result else 1),
+            runner_exit_code=(
+                130 if interrupted
+                else (2 if error is not None else (0 if result else 1))
+            ),
             child_exit_code=(
-                tester.process.returncode if tester.process else None
+                session.returncode if session is not None else None
             ),
             stopped_by_runner=bool(
-                tester.process and tester.process.stopped_by_runner
+                session is not None and session.stopped_by_runner
             ),
             status=(
-                "ERROR" if error is not None
+                "ERROR" if (error is not None or interrupted)
                 else ("PASS" if result else "FAIL")
             ),
-            count_unit="case",
+            # run_test.py publishes no per-case records (outcomes=[],
+            # declared_ids=observed_ids=None), so the count unit describes
+            # the suite aggregate, not individual cases.
+            count_unit="suite",
             outcomes=[],
             stdout_log=str(archive.run_dir / "stdout.log"),
             stderr_log=str(archive.run_dir / "stderr.log"),

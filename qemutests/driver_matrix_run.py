@@ -256,6 +256,9 @@ def _run_case(case, smp, timeout=DEFAULT_TIMEOUT, session_factory=None):
                 from qemutests.harness.result import RunReport
                 ok, log_text, ev = _captured
                 argv_snapshot = ev.get("argv") or []
+                # A QEMU launch failure is an environment ERROR (exit 2),
+                # matching every other runner — not a test FAIL/1.
+                launch_error = bool(ev.get("launch_error"))
                 report = RunReport(
                     schema_version=1,
                     run_id=archive.run_dir.name,
@@ -278,10 +281,13 @@ def _run_case(case, smp, timeout=DEFAULT_TIMEOUT, session_factory=None):
                     image_sha256_after=None,
                     utc_started_at=datetime.now(timezone.utc).isoformat(),
                     duration_s=0.0,
-                    runner_exit_code=0 if ok else 1,
+                    runner_exit_code=2 if launch_error else (0 if ok else 1),
                     child_exit_code=None,
                     stopped_by_runner=False,
-                    status="PASS" if ok else "FAIL",
+                    status=(
+                        "ERROR" if launch_error
+                        else ("PASS" if ok else "FAIL")
+                    ),
                     count_unit="case",
                     outcomes=[],
                     stdout_log=str(archive.run_dir / "stdout.log"),
@@ -407,7 +413,13 @@ def _run_case_body(case, smp, timeout, session_factory, archive):
             process.start()
         except Exception as e:
             for u in udp_list: u.stop()
-            return False, "", _ev({"error": f"qemu launch failed: {e}"})
+            # ``launch_error`` flags an environment/launch failure (as
+            # opposed to a test FAIL), so the archived RunReport records
+            # ERROR/2 like every other runner rather than FAIL/1.
+            return False, "", _ev({
+                "error": f"qemu launch failed: {e}",
+                "launch_error": True,
+            })
 
         # Sequence: boot (~18s for SMP=1, ~25s for SMP=2) + send probe + drain.
         deadline = time.monotonic() + timeout

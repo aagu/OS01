@@ -413,8 +413,9 @@ test-pmm-boot-reservation:
 # fixtures drive real `make -n kernel.bin`, which needs a prepared
 # sysroot, so it cannot run in this zero-environment-dependency gate
 # (the CI `harness` job builds nothing before `make test-harness`).  It
-# is NOT owned by the `test-contract` bucket either — `test-contract`
-# runs `qemutests/build_contract.sh` and never invokes this module.
+# IS owned by the `test-contract` bucket instead: that target *does*
+# build a sysroot, and its x86_64-clang branch runs this module after
+# the `build_contract.sh` mode loop.
 # The recipe is a single `python3 -m unittest` call against the explicit
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Every fixture replaces subprocess.Popen with a fake, so no QEMU process
@@ -1087,7 +1088,7 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'test-kernel-selftest' '(rootfs)'   'QEMU built-in selftests (isolated selftest image, KERNEL_SELFTEST=1)';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-aarch64'        '(uefi)'       'aarch64 UEFI test (MODE=<smp|no-ack|gic-spi|sync-fault|m1-*>)';
+		 'test-aarch64'        '(uefi)'       'aarch64 UEFI test (MODE=<smp|no-ack|gic-spi|sync-fault|m3-probe|m1-*>)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-contract'       '(rootfs|uefi)' 'Full build contract (PROFILE=<x86_64-clang|aarch64-clang>)';
 	@echo ''
@@ -1174,7 +1175,11 @@ test-contract: $(if $(filter x86_64-clang,$(PROFILE)),disk.img,aarch64-uefi)
 	for m in $$modes; do \
 	  echo "  [test-contract] $(PROFILE)/$$m"; \
 	  sh qemutests/build_contract.sh $(PROFILE) $$m; \
-	done
+	done; \
+	if [ "$(PROFILE)" = "x86_64-clang" ]; then \
+	  echo "  [test-contract] $(PROFILE)/arch9-build-contract"; \
+	  PROFILE=$(PROFILE) python3 -m unittest qemutests.test_arch9_build_contract; \
+	fi
 
 # ── Clean ───────────────────────────────────────────────────
 # Only the default profile owns the project-root kernel.bin / disk.img compat

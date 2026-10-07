@@ -264,6 +264,14 @@ class FakeProcessSession:
 
     def close(self) -> None:
         self.close_calls += 1
+        # Mirror the real ProcessSession._cleanup(): a child that is still
+        # alive when the session is closed is terminated by the runner
+        # (stopped_by_runner True); an already-exited child is merely
+        # reaped (False).  Without this the double was easier than
+        # production and hid the run_test.py evidence defect.
+        if self._running:
+            self._stopped_by_runner = True
+        self._running = False
 
     # ── properties ──
 
@@ -1644,6 +1652,56 @@ class DriverModelSuiteTests(unittest.TestCase):
         )
         self.assertFalse(ok)
 
+    def test_driver_model_launch_failure_archives_error_not_fail(self) -> None:
+        """A QEMU *launch* failure is an environment ERROR (status
+        ``ERROR`` / exit 2), matching every other runner — not a test
+        ``FAIL``/1 (whole-branch-review Minor)."""
+        import json as _json
+        base_factory = self._factory([], returncode=0)
+
+        def broken_factory(argv, run_dir, timeout_s, **kw):
+            sess = base_factory(argv, run_dir, timeout_s, **kw)
+            sess.start = lambda: (_ for _ in ()).throw(
+                FileNotFoundError("qemu not found"))
+            return sess
+
+        from qemutests import driver_matrix_run as dmr
+        real_read_paths = dmr._read_paths_for
+        real_build = dmr._build_for_fault
+        real_argv = dmr._qemu_argv_for
+        dmr._read_paths_for = lambda fault: {
+            "firmware": "/tmp/fake-ovmf.fd",
+            "image": "/tmp/fake-disk.img",
+        }
+        dmr._build_for_fault = lambda fault: True
+        dmr._qemu_argv_for = (
+            lambda case_, smp_, img, fw, **kw:
+            ["qemu-system-x86_64", "-snapshot",
+             "-serial", "stdio", "-display", "none"])
+        tmp = tempfile.TemporaryDirectory(prefix="os01-dm-archive-")
+        self.addCleanup(tmp.cleanup)
+        saved = os.environ.get("OS01_BUILD_DIR")
+        os.environ["OS01_BUILD_DIR"] = tmp.name
+        try:
+            ok, log_text, ev = dmr._run_case(
+                "no-nic", 1, timeout=5, session_factory=broken_factory,
+            )
+        finally:
+            dmr._read_paths_for = real_read_paths
+            dmr._build_for_fault = real_build
+            dmr._qemu_argv_for = real_argv
+            if saved is None:
+                os.environ.pop("OS01_BUILD_DIR", None)
+            else:
+                os.environ["OS01_BUILD_DIR"] = saved
+        self.assertFalse(ok)
+        reports = list(Path(tmp.name).rglob("result.json"))
+        self.assertEqual(len(reports), 1,
+                         "the launch-failure run must still be archived")
+        data = _json.loads(reports[0].read_text())
+        self.assertEqual(data["status"], "ERROR")
+        self.assertEqual(data["runner_exit_code"], 2)
+
 
 class SMPCheckTests(unittest.TestCase):
     """SMP / QEMU_SMP conflict detection (spec §7.1).
@@ -1875,6 +1933,167 @@ class MainErrorExitCodeTests(unittest.TestCase):
         data = _json.loads(reports[0].read_text())
         self.assertEqual(data["status"], "ERROR")
         self.assertEqual(data["runner_exit_code"], 2)
+
+
+class _InterruptingFake(FakeProcessSession):
+    """A ``FakeProcessSession`` whose ``wait_for`` raises
+    ``KeyboardInterrupt`` — the Ctrl-C that arrives while the runner is
+    blocked on the serial pipe."""
+
+    def wait_for(self, predicate) -> str:
+        raise KeyboardInterrupt
+
+
+class MainInterruptTests(unittest.TestCase):
+    """spec §6.2 — a Ctrl-C run exits 130 and is archived ``ERROR``/130,
+    exactly like the four other runners (``run_hosttests.py``,
+    ``run_static_audit.py``, ``run_kernel_selftest.py``,
+    ``x86_64_systest_repeat.py``).
+
+    ``run_test.py`` was the one runner with no ``KeyboardInterrupt``
+    handler, so CPython exited 130 while its archive said ``FAIL``/1 — the
+    two signals disagreed.
+    """
+
+    def setUp(self) -> None:
+        self.rt = _import_run_test()
+        self._tmp = tempfile.TemporaryDirectory(prefix="os01-interrupt-")
+        self.addCleanup(self._tmp.cleanup)
+        self.build_dir = Path(self._tmp.name)
+
+    def test_main_ctrl_c_exits_130_and_archives_error(self) -> None:
+        def factory(argv, run_dir, timeout_s, *, writable_stdin=False):
+            return _InterruptingFake(
+                argv=argv, run_dir=run_dir, timeout_s=timeout_s,
+                writable_stdin=writable_stdin, chunks=[])
+
+        saved_proc = self.rt.ProcessSession
+        saved_argv = sys.argv
+        saved_build = os.environ.get("OS01_BUILD_DIR")
+        self.rt.ProcessSession = factory
+        os.environ["OS01_BUILD_DIR"] = str(self.build_dir)
+        sys.argv = ["run_test.py", "--disk", "/tmp/fake-disk.img", "systest"]
+        try:
+            with self.assertRaises(SystemExit) as cm:
+                self.rt.main()
+            self.assertEqual(cm.exception.code, 130)
+        finally:
+            self.rt.ProcessSession = saved_proc
+            sys.argv = saved_argv
+            if saved_build is None:
+                os.environ.pop("OS01_BUILD_DIR", None)
+            else:
+                os.environ["OS01_BUILD_DIR"] = saved_build
+
+        reports = list(self.build_dir.rglob("result.json"))
+        self.assertEqual(
+            len(reports), 1,
+            "an interrupted run must still archive exactly one result.json")
+        import json as _json
+        data = _json.loads(reports[0].read_text())
+        self.assertEqual(data["status"], "ERROR")
+        self.assertEqual(data["runner_exit_code"], 130)
+
+
+class RunTestReportEvidenceTests(unittest.TestCase):
+    """spec §7.2 — ``run_test.py``'s ``result.json`` must record real
+    process evidence.
+
+    Regression for the whole-branch-review Important 1: ``main()``'s
+    ``finally`` ran ``tester.cleanup()`` *before* ``_write_run_report``,
+    and ``cleanup()`` nulls ``tester.process`` — so **every** x86 QEMU
+    report recorded ``argv=[]``, ``child_exit_code=None`` and
+    ``stopped_by_runner=False``.  These fixtures drive ``main()`` for
+    real (the archive is written in ``main``'s ``finally``) and assert
+    all three fields against the session the runner actually owned, so a
+    regression to the nulled-session ordering flips them.
+    """
+
+    def setUp(self) -> None:
+        self.rt = _import_run_test()
+        self._tmp = tempfile.TemporaryDirectory(prefix="os01-evidence-")
+        self.addCleanup(self._tmp.cleanup)
+        self.build_dir = Path(self._tmp.name)
+
+    def _drive_main(self, chunks, *, returncode=0, suite="boot",
+                    child_exited=True, start_exc=None):
+        """Run ``rt.main()`` for ``suite`` against a FakeProcessSession.
+
+        Returns ``(captured_argv, session, report_dict)``.  ``child_exited``
+        chooses whether the child self-exited before the session was closed
+        (``stopped_by_runner`` False) or was still alive when the runner
+        closed it (``stopped_by_runner`` True).
+        """
+        captured = {}
+
+        def factory(argv, run_dir, timeout_s, *, writable_stdin=False):
+            session = FakeProcessSession(
+                argv=argv, run_dir=run_dir, timeout_s=timeout_s,
+                writable_stdin=writable_stdin, chunks=chunks,
+                returncode=returncode, start_exc=start_exc,
+            )
+            captured["argv"] = list(argv)
+            captured["session"] = session
+            if child_exited:
+                session.mark_exited()
+            return session
+
+        saved_proc = self.rt.ProcessSession
+        saved_argv = sys.argv
+        saved_build = os.environ.get("OS01_BUILD_DIR")
+        self.rt.ProcessSession = factory
+        os.environ["OS01_BUILD_DIR"] = str(self.build_dir)
+        sys.argv = ["run_test.py", "--disk", "/tmp/fake-disk.img", suite]
+        try:
+            with self.assertRaises(SystemExit):
+                self.rt.main()
+        finally:
+            self.rt.ProcessSession = saved_proc
+            sys.argv = saved_argv
+            if saved_build is None:
+                os.environ.pop("OS01_BUILD_DIR", None)
+            else:
+                os.environ["OS01_BUILD_DIR"] = saved_build
+        return captured["argv"], captured["session"], self._report()
+
+    def _report(self):
+        import json as _json
+        reports = list(self.build_dir.rglob("result.json"))
+        self.assertEqual(
+            len(reports), 1,
+            "exactly one result.json must be archived")
+        return _json.loads(reports[0].read_text())
+
+    def test_report_argv_is_the_real_qemu_command(self) -> None:
+        argv, _session, data = self._drive_main(
+            Phase0SuiteTests.CHUNKS_POSITIVE)
+        self.assertTrue(data["argv"], "archived argv must not be empty")
+        self.assertEqual(data["argv"], argv)
+        self.assertEqual(data["argv"][0], self.rt.QEMU)
+
+    def test_report_child_exit_code_is_populated_on_exit(self) -> None:
+        _argv, _session, data = self._drive_main(
+            Phase0SuiteTests.CHUNKS_POSITIVE, returncode=0, child_exited=True)
+        self.assertEqual(data["child_exit_code"], 0)
+        self.assertFalse(
+            data["stopped_by_runner"],
+            "a self-exited child was not stopped by the runner")
+
+    def test_report_stopped_by_runner_when_runner_stops_child(self) -> None:
+        # The child is still alive when the runner closes the session, so
+        # the runner terminates it: stopped_by_runner must be True.
+        _argv, _session, data = self._drive_main(
+            Phase0SuiteTests.CHUNKS_POSITIVE, child_exited=False)
+        self.assertTrue(
+            data["stopped_by_runner"],
+            "a runner-terminated child must be recorded as such")
+
+    def test_report_count_unit_is_suite(self) -> None:
+        # run_test.py publishes no per-case records (outcomes=[],
+        # declared_ids=None), so count_unit describes the suite aggregate.
+        _argv, _session, data = self._drive_main(
+            Phase0SuiteTests.CHUNKS_POSITIVE)
+        self.assertEqual(data["count_unit"], "suite")
 
 
 class FakeProcessSessionCursorTests(unittest.TestCase):

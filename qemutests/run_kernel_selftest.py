@@ -253,7 +253,11 @@ def _write_report(
                 session is not None and session.stopped_by_runner
             ),
             status=status,
-            count_unit="suite",
+            # The runner gates on, and publishes, protocol-v1 per-case
+            # records (declared_ids/observed_ids plus per-case outcomes),
+            # so the count unit is the individual case — not the suite
+            # aggregate.  (Matches run_hosttests.py's v1 mode.)
+            count_unit="case",
             outcomes=[{"errors": list(errors),
                        "cases": dict(case_outcomes or {})}],
             stdout_log=str(archive.run_dir / "stdout.log"),

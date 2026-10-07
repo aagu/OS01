@@ -451,5 +451,31 @@ class ProcessSessionProcessGroupTests(unittest.TestCase):
             )
 
 
+class ProcessSessionArgvAccessorTests(unittest.TestCase):
+    """``ProcessSession`` exposes the launched argv through a **public**
+    read-only accessor.
+
+    RunReport evidence (spec §7.2) needs the real argv of the child.  The
+    runner must read it publicly (``session.argv``) rather than reaching
+    into ``_argv`` — the real class exposed only the private attribute
+    while the test double exposed ``.argv``, which is how the ordering
+    defect in ``run_test.py`` stayed hidden (the double was more
+    permissive than production).
+    """
+
+    def test_argv_accessor_returns_a_copy_of_launch_argv(self) -> None:
+        from qemutests.harness import process as proc_mod
+        sess = proc_mod.ProcessSession(
+            argv=["/bin/echo", "hello"],
+            run_dir=Path(tempfile.mkdtemp(prefix="os01-argv-")),
+            timeout_s=1.0,
+        )
+        self.assertEqual(sess.argv, ["/bin/echo", "hello"])
+        # A copy, not the internal list: mutating the returned value must
+        # not change the session's argv.
+        sess.argv.append("mutated")
+        self.assertEqual(sess.argv, ["/bin/echo", "hello"])
+
+
 if __name__ == "__main__":
     unittest.main()

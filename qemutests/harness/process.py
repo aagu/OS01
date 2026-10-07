@@ -23,6 +23,7 @@ Properties:
     stopped_by_runner: bool                  — True if we issued terminate/kill
     timed_out: bool                          — True if a wait_for hit the deadline
     deadline: float                          — monotonic time at which budget expires
+    argv: list[str]                          — the launched command (read-only copy)
 
 Persistent attributes:
     stdout.log                     — file under run_dir, written incrementally
@@ -132,6 +133,17 @@ class ProcessSession:
     def deadline(self) -> float:
         """Monotonic time at which the global budget expires."""
         return self._deadline
+
+    @property
+    def argv(self) -> List[str]:
+        """The argv the child was launched with (a read-only copy).
+
+        Exposed so a runner can record the real command in its RunReport
+        (spec §7.2) through a public accessor rather than reaching into
+        ``_argv``.  Returning a copy keeps the session's own list
+        immutable from the caller's side.
+        """
+        return list(self._argv)
 
     @property
     def run_dir(self) -> Path:

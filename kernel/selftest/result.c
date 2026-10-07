@@ -40,7 +40,7 @@ static int late_count;
 static int run_error;     /* any contract violation seen this run */
 static int run_started;   /* selftest_begin_run() has run */
 static int end_emitted;   /* guards "exactly one END" */
-static int n_pass, n_fail, n_skip;
+static int n_pass, n_fail;
 
 static selftest_early_t *find_early(const char *id)
 {
@@ -100,7 +100,7 @@ void selftest_begin_run(unsigned int expected_late)
     run_error = 0;
     run_started = 1;
     end_emitted = 0;
-    n_pass = n_fail = n_skip = 0;
+    n_pass = n_fail = 0;
 
     selftest_register_builtin_tests();
 
@@ -209,9 +209,12 @@ int selftest_end_run(void)
         }
     }
 
-    int total = n_pass + n_fail + n_skip;
+    /* The publisher never emits a SKIP terminal, so the skipped count is
+     * always 0 (the "no SKIP of a required case" rule rests entirely on
+     * parse_v1). */
+    int total = n_pass + n_fail;
     serial_printk("[TEST] END suite=" SELFTEST_SUITE_NAME
                   " total=%d passed=%d failed=%d skipped=%d\n",
-                  total, n_pass, n_fail, n_skip);
+                  total, n_pass, n_fail, 0);
     return run_error ? 1 : 0;
 }
