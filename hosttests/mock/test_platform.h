@@ -55,12 +55,16 @@ extern char *strstr(const char *haystack, const char *needle);
 
 #define NR_CPUS 8
 
-/* percpu stub */
+/* percpu stub — compile surface only.  This is NOT the production
+ * layout: kernel/include/percpu/percpu.h is authoritative (its size is
+ * pinned by PERCPU_DATA_SIZE + _Static_assert there and at runtime by
+ * hosttests/cases/test_percpu_layout.c).  The legacy tlb_wanted/tlb_ack
+ * pair was removed in M3 Task 12 and must not reappear here.  Only
+ * tsc_offset is actually read through this stub. */
 typedef struct {
     uint64_t self, need_resched;
-    uint32_t cpu_id, apic_id, online, scheduler_ok;
+    uint32_t cpu_id, arch_processor_id, online, scheduler_ok;
     void *tss;
-    uint32_t tlb_wanted, tlb_ack;
     void *run_queue, *idle;
     uint64_t schedule_count, tsc_boot;
     int64_t  tsc_offset;        /* bsp_tsc - ap_tsc (BSP=0), used by clocksource_read_ns */
