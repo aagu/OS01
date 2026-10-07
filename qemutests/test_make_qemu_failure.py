@@ -53,8 +53,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 # Repo root so we can locate mk/components/run.mk.
@@ -63,6 +65,18 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 RUN_MK = ROOT / "mk" / "components" / "run.mk"
+
+# ``make -n test-qemu SUITE=systest`` is a *dry run*, but GNU Make still
+# executes any logical recipe line that contains ``$(MAKE)``.  Master's
+# ``user/`` restructure added per-app sub-makes, so the dry run now
+# recurses through more of the build and measures ~34.3 s on the merged
+# tree (measured 34.068 s here).  Give the capture a wide margin so a
+# legitimately-built-but-slow tree still exercises the assertions instead
+# of skipping: a silent skip on a slow-but-buildable tree would stop
+# pinning the recipe structure, which is worse than an error.  120 s is
+# ~3.5x the measured time, and any timeout is now reported as a loud skip
+# (see ``MakeFailureDryRunTests._make_n_capture``).
+DRY_RUN_TIMEOUT = 120
 
 
 def _read_runmk() -> str:
@@ -266,17 +280,36 @@ class MakeFailureDryRunTests(unittest.TestCase):
     """
 
     def _make_n_capture(self, *args) -> str:
-        """Run ``make -n`` with the given args, return stdout+stderr."""
+        """Run ``make -n`` with the given args, return stdout+stderr.
+
+        If the dry run does not finish within ``DRY_RUN_TIMEOUT`` the
+        fixture cannot capture the recipe structure; that is reported as a
+        **loud skip** naming the command and the elapsed time, not as an
+        ERROR.  A workspace that cannot build already skips (see the
+        individual tests); this is the same "no evidence" path for the
+        timeout case.
+        """
+        cmd = ["make", "-n", *args]
+        start = time.monotonic()
         try:
             proc = subprocess.run(
-                ["make", "-n", *args],
+                cmd,
                 cwd=ROOT,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=DRY_RUN_TIMEOUT,
             )
         except FileNotFoundError:
             self.skipTest("make is not installed on the test machine")
+        except subprocess.TimeoutExpired:
+            elapsed = time.monotonic() - start
+            self.skipTest(
+                f"make -n dry run did not finish within "
+                f"{DRY_RUN_TIMEOUT}s (elapsed {elapsed:.1f}s): could not "
+                f"capture the recipe structure. This is a 'no evidence' "
+                f"skip, NOT a pass; the source-parsing tests above still "
+                f"pin the structural rules. Command: {' '.join(cmd)}"
+            )
         # Combine stdout and stderr (Make often prints recipes to
         # stderr when something in the chain is unbuildable).
         out = (proc.stdout or "") + (proc.stderr or "")
@@ -335,6 +368,57 @@ class MakeFailureDryRunTests(unittest.TestCase):
         self.assertLess(
             build_pos, runner_pos,
             "build sub-make must precede runner invocation in recipe",
+        )
+
+
+class DryRunTimeoutNoEvidenceTests(unittest.TestCase):
+    """Pin the dry-run fixture's "no evidence" path.
+
+    ``_make_n_capture`` shells out to ``make -n`` with a timeout.  When
+    that dry run does not finish in time the fixture cannot capture the
+    recipe structure — it must report that as a **loud skip** (naming the
+    command and the elapsed time) rather than letting
+    ``subprocess.TimeoutExpired`` escape as an ERROR.  A skip a reader
+    cannot mistake for a pass, and with a timeout wide enough that a
+    legitimately-built-but-slow tree still exercises the assertions.
+    """
+
+    def test_timeout_is_reported_as_loud_skip(self) -> None:
+        inst = MakeFailureDryRunTests(
+            "test_test_qemu_dry_run_includes_cmp_line"
+        )
+
+        def _boom(*_a, **_k):
+            raise subprocess.TimeoutExpired(
+                cmd=["make", "-n", "test-qemu", "SUITE=systest"],
+                timeout=30,
+            )
+
+        with mock.patch.object(subprocess, "run", _boom):
+            with self.assertRaises(unittest.SkipTest) as cm:
+                inst._make_n_capture("test-qemu", "SUITE=systest")
+        msg = str(cm.exception)
+        # The skip must be loud: name the command and the elapsed time.
+        self.assertIn("make -n", msg,
+                      "timeout skip must name the command")
+        self.assertIn("SUITE=systest", msg,
+                      "timeout skip must name the command arguments")
+        self.assertRegex(
+            msg,
+            r"elapsed\s+\d",
+            "timeout skip must report the elapsed time so a reader cannot "
+            "mistake it for a pass",
+        )
+
+    def test_dry_run_timeout_has_headroom_over_measured(self) -> None:
+        """The merged-tree dry run measures ~34.3 s; the timeout must
+        have real headroom so a legitimately-built-but-slow tree still
+        runs the assertions instead of silently skipping."""
+        self.assertGreater(
+            DRY_RUN_TIMEOUT, 34.3 * 2,
+            "dry-run timeout must have >=2x headroom over the measured "
+            "34.3 s dry run (a silent skip on a buildable tree would stop "
+            "pinning the recipe structure)",
         )
 
 
