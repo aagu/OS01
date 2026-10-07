@@ -1,4 +1,4 @@
-// user/terminal_display.c — display-mode transaction helper for terminal.elf.
+// user/terminal/terminal_display.c — display-mode transaction helper for terminal.elf.
 //
 // NOT a standalone program (excluded from user/Makefile C_SOURCES, linked
 // explicitly into terminal.elf).  Owns neither fb_fd nor the PTY/ash: the

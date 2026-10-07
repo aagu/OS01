@@ -1,4 +1,4 @@
-/* user/gfx_client_policy.c — see gfx_client_policy.h. */
+/* user/common/gfx_client_policy.c — see gfx_client_policy.h. */
 #include "gfx_client_policy.h"
 
 #include <errno.h>

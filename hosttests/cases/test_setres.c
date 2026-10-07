@@ -16,8 +16,8 @@
  *     ESTALE / EIO, without letting cleanup clobber the diagnostic
  *     errno.
  *
- * Build: the REAL user/setres.c (compiled with -DSETRES_NO_MAIN),
- * user/setres_parse.c and user/gfx_client_policy.c are host-compiled
+ * Build: the REAL user/setres/setres.c (compiled with -DSETRES_NO_MAIN),
+ * user/setres/setres_parse.c and user/common/gfx_client_policy.c are host-compiled
  * and linked here.  libc open/close/ioctl are routed through
  * -Wl,--wrap so the test observes exactly which device ops the CLI
  * performs (help must open NOTHING).

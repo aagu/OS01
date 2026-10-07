@@ -1,7 +1,7 @@
 /*
  * test/cases/test_tetris_logic.c — tetris game logic unit tests.
  *
- * Compiles the REAL user/tetris_logic.c (pure C).  Exercises: spawn,
+ * Compiles the REAL user/tetris/tetris_logic.c (pure C).  Exercises: spawn,
  * wall/floor/occupied collision, movement, rotation + wall kicks,
  * locking, row clearing, game over.
  *

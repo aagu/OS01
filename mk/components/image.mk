@@ -46,7 +46,15 @@ ROOTFS_MANIFEST := $(IMAGE_DIR)/rootfs.manifest
 #   symlink<TAB>dest<TAB>target
 include $(OS01_ROOT)/config/rootfs.mk
 
-$(ROOTFS_MANIFEST): $(OS01_ROOT)/config/rootfs.mk \
+# Dynamic discovery must invalidate staging on removals as well as additions.
+# Preserve mtime when the expanded input list is unchanged.
+ROOTFS_INPUTS_STAMP := $(IMAGE_DIR)/rootfs.inputs
+$(ROOTFS_INPUTS_STAMP): FORCE
+	@mkdir -p $(dir $@)
+	@printf '%s\n' $(ROOTFS_FILES) $(ROOTFS_SYMLINKS) > $@.tmp
+	@cmp -s $@.tmp $@ && rm -f $@.tmp || mv $@.tmp $@
+
+$(ROOTFS_MANIFEST): $(ROOTFS_INPUTS_STAMP) $(OS01_ROOT)/config/rootfs.mk \
 		$(USER_ARTIFACTS) $(USER_ARTIFACT_DIR)/busybox.elf \
 		$(KERNEL_ARTIFACT) $(INITTAB_FILE)
 	@rm -rf $(ROOTFS_STAGING)

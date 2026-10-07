@@ -1157,26 +1157,26 @@ $(TEST_BLD)/test_canon.o: $(TEST_CASES)/test_canon.c
 $(TEST_BLD)/test_canon.elf: $(TEST_BLD)/test_canon.o $(TEST_BLD)/canon.o
 	$(HOST_CC) -o $@ $^
 
-# Terminal core test — compiles REAL user/terminal_core.c (pure logic)
-$(TEST_BLD)/terminal_core.o: $(TESTS_DIR)/user/terminal_core.c
+# Terminal core test — compiles REAL user/terminal/terminal_core.c (pure logic)
+$(TEST_BLD)/terminal_core.o: $(TESTS_DIR)/user/terminal/terminal_core.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user -c $< -o $@
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user/terminal -c $< -o $@
 
 $(TEST_BLD)/test_terminal_core.o: $(TEST_CASES)/test_terminal_core.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user -c $< -o $@
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user/terminal -c $< -o $@
 
 $(TEST_BLD)/test_terminal_core.elf: $(TEST_BLD)/test_terminal_core.o $(TEST_BLD)/terminal_core.o
 	$(HOST_CC) -Wl,--wrap=malloc -o $@ $^
 
-# Terminal render test — compiles REAL user/terminal_render.c + terminal_core.c + libgfx
-$(TEST_BLD)/terminal_render.o: $(TESTS_DIR)/user/terminal_render.c
+# Terminal render test — compiles REAL user/terminal/terminal_render.c + terminal_core.c + libgfx
+$(TEST_BLD)/terminal_render.o: $(TESTS_DIR)/user/terminal/terminal_render.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user -I$(TESTS_DIR)/libgfx -I$(TESTS_DIR)/kernel/include -c $< -o $@
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user/terminal -I$(TESTS_DIR)/libgfx -I$(TESTS_DIR)/kernel/include -c $< -o $@
 
 $(TEST_BLD)/test_terminal_render.o: $(TEST_CASES)/test_terminal_render.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user -I$(TESTS_DIR)/libgfx -I$(TESTS_DIR)/kernel/include -DREPO_ROOT=\"$(TESTS_DIR)\" -c $< -o $@
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user/terminal -I$(TESTS_DIR)/libgfx -I$(TESTS_DIR)/kernel/include -DREPO_ROOT=\"$(TESTS_DIR)\" -c $< -o $@
 
 $(TEST_BLD)/test_terminal_render.elf: $(TEST_BLD)/test_terminal_render.o \
 		$(TEST_BLD)/terminal_render.o \
@@ -1189,18 +1189,18 @@ $(TEST_BLD)/test_terminal_render.elf: $(TEST_BLD)/test_terminal_render.o \
 test-terminal-render: $(TEST_BLD)/test_terminal_render.elf
 	$<
 
-# Terminal display transaction test — REAL user/terminal_display.c with an
+# Terminal display transaction test — REAL user/terminal/terminal_display.c with an
 # injected libgfx/FBIOGET_STATE backend; malloc is wrapped for ENOMEM injection.
 # -DFB_RESOLUTION_TEST compiles the Task-9 fbtest ENOMEM hook so
 # test_terminal_fbtest_enomem_once can drive it; the tests always install a
 # stub op, so the real /dev/fbtest path is never taken on the host.
-$(TEST_BLD)/terminal_display.o: $(TESTS_DIR)/user/terminal_display.c
+$(TEST_BLD)/terminal_display.o: $(TESTS_DIR)/user/terminal/terminal_display.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(GFX_CLIENT_HOST_CFLAGS) -DFB_RESOLUTION_TEST -I$(TEST_INC) -I$(TESTS_DIR)/user -c $< -o $@
+	$(HOST_CC) $(GFX_CLIENT_HOST_CFLAGS) -DFB_RESOLUTION_TEST -I$(TEST_INC) -I$(TESTS_DIR)/user/terminal -c $< -o $@
 
 $(TEST_BLD)/test_terminal_display.o: $(TEST_CASES)/test_terminal_display.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(GFX_CLIENT_HOST_CFLAGS) -I$(TEST_INC) -I$(TESTS_DIR)/user -c $< -o $@
+	$(HOST_CC) $(GFX_CLIENT_HOST_CFLAGS) -I$(TEST_INC) -I$(TESTS_DIR)/user/terminal -c $< -o $@
 
 $(TEST_BLD)/test_terminal_display.elf: $(TEST_BLD)/test_terminal_display.o \
 		$(TEST_BLD)/terminal_display.o \
@@ -1216,14 +1216,14 @@ test-terminal-display: $(TEST_BLD)/test_terminal_core.elf $(TEST_BLD)/test_termi
 	$(TEST_BLD)/test_terminal_render.elf
 	$(TEST_BLD)/test_terminal_display.elf
 
-# Tetris logic test — compiles REAL user/tetris_logic.c (pure C)
-$(TEST_BLD)/tetris_logic.o: $(TESTS_DIR)/user/tetris_logic.c
+# Tetris logic test — compiles REAL user/tetris/tetris_logic.c (pure C)
+$(TEST_BLD)/tetris_logic.o: $(TESTS_DIR)/user/tetris/tetris_logic.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user -c $< -o $@
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user/tetris -c $< -o $@
 
 $(TEST_BLD)/test_tetris_logic.o: $(TEST_CASES)/test_tetris_logic.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user -c $< -o $@
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user/tetris -c $< -o $@
 
 $(TEST_BLD)/test_tetris_logic.elf: $(TEST_BLD)/test_tetris_logic.o $(TEST_BLD)/tetris_logic.o
 	$(HOST_CC) -o $@ $^
@@ -2235,9 +2235,9 @@ test-gfx-primitives: $(TEST_BLD)/test_gfx_primitives.elf
 	$<
 
 # setres CLI + long-running gfx client policy (QEMU resolution switcher
-# Task 8).  Host-compiles the REAL user/setres_parse.c, user/setres.c
+# Task 8).  Host-compiles the REAL user/setres/setres_parse.c, user/setres/setres.c
 # (with -DSETRES_NO_MAIN so this TU owns main) and
-# user/gfx_client_policy.c.  libc open/close/ioctl are wrapped so the
+# user/common/gfx_client_policy.c.  libc open/close/ioctl are wrapped so the
 # test can assert the CLI's exact device ops (help opens NOTHING) and
 # inject GET_MODES / GET_STATE / SET_MODE results.
 #
@@ -2246,30 +2246,30 @@ test-gfx-primitives: $(TEST_BLD)/test_gfx_primitives.elf
 # <uapi/fb.h> and its freestanding <errno.h>, so `errno` must be
 # redirected to glibc's TLS accessor.  user/ is added for the
 # "setres_parse.h" / "gfx_client_policy.h" includes.
-SETRES_HOST_CFLAGS := $(GFX_CLIENT_PROD_CFLAGS) -I$(TESTS_DIR)/user
+SETRES_HOST_CFLAGS := $(GFX_CLIENT_PROD_CFLAGS) -I$(TESTS_DIR)/user/setres -I$(TESTS_DIR)/user/common
 
-$(TEST_BLD)/gfx_client_policy.o: $(TESTS_DIR)/user/gfx_client_policy.c \
-		$(TESTS_DIR)/user/gfx_client_policy.h
+$(TEST_BLD)/gfx_client_policy.o: $(TESTS_DIR)/user/common/gfx_client_policy.c \
+		$(TESTS_DIR)/user/common/gfx_client_policy.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(SETRES_HOST_CFLAGS) -c $< -o $@
 
-$(TEST_BLD)/setres_parse.o: $(TESTS_DIR)/user/setres_parse.c \
-		$(TESTS_DIR)/user/setres_parse.h
+$(TEST_BLD)/setres_parse.o: $(TESTS_DIR)/user/setres/setres_parse.c \
+		$(TESTS_DIR)/user/setres/setres_parse.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(SETRES_HOST_CFLAGS) -c $< -o $@
 
-$(TEST_BLD)/setres_cli.o: $(TESTS_DIR)/user/setres.c \
-		$(TESTS_DIR)/user/setres_parse.h \
+$(TEST_BLD)/setres_cli.o: $(TESTS_DIR)/user/setres/setres.c \
+		$(TESTS_DIR)/user/setres/setres_parse.h \
 		$(TESTS_DIR)/kernel/include/uapi/fb.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(SETRES_HOST_CFLAGS) -DSETRES_NO_MAIN -c $< -o $@
 
 $(TEST_BLD)/test_setres.o: $(TEST_CASES)/test_setres.c \
-		$(TESTS_DIR)/user/gfx_client_policy.h \
-		$(TESTS_DIR)/user/setres_parse.h \
+		$(TESTS_DIR)/user/common/gfx_client_policy.h \
+		$(TESTS_DIR)/user/setres/setres_parse.h \
 		$(TESTS_DIR)/kernel/include/uapi/fb.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(GFX_CLIENT_TEST_CFLAGS) -I$(TESTS_DIR)/user -D_GNU_SOURCE -c $< -o $@
+	$(HOST_CC) $(GFX_CLIENT_TEST_CFLAGS) -I$(TESTS_DIR)/user/setres -I$(TESTS_DIR)/user/common -D_GNU_SOURCE -c $< -o $@
 
 $(TEST_BLD)/test_setres.elf: $(TEST_BLD)/test_setres.o \
 		$(TEST_BLD)/setres_cli.o \

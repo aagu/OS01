@@ -205,7 +205,7 @@ compatibility mirror and never a second mode source.
   `FBIOSET_MODE`, `FBIOGET_CURR_MODE`, `FBIOGET_STATE`; `FB_MAX_MODES=16`). The
   mode table is the fixed 32bpp whitelist filtered by the probed device maximum;
   the boot mode may lie outside it and is still reported by `GET_STATE` / `setres -l`.
-- **Terminal / PTY** — `user/terminal.c` keeps `fb_fd` for its lifetime and, on a
+- **Terminal / PTY** — `user/terminal/terminal.c` keeps `fb_fd` for its lifetime and, on a
   `generation` change, rebuilds the gfx view + `term_core` in place
   (`terminal_display.c`), then pushes four-field `TIOCSWINSZ` to the PTY master,
   which signals `SIGWINCH` to the foreground process group. The ash session and

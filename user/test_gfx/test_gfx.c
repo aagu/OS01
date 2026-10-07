@@ -505,7 +505,7 @@ int main(void)
     /* Tell the kernel we're surrendering the framebuffer so gfx0
      * presents can land without racing terminal.c's writes.  This
      * is the same ioctl terminal.c uses on its way in (see
-     * user/terminal.c). */
+     * user/terminal/terminal.c). */
     (void)ioctl(fb_fd, FBIOSURRENDER, NULL);
 
     /* Tests in spec order.  Each prints its own FAIL reason. */

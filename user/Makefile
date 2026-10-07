@@ -26,7 +26,7 @@ CFLAGS   := --sysroot=$(SYSROOT_DIR) \
             -ffreestanding -fstack-protector-strong -fno-asynchronous-unwind-tables \
             -fno-pic -fno-pie -mno-red-zone \
             -I$(TARGET_INCDIR) -I$(TARGET_INCDIR)/lvgl -DLV_CONF_INCLUDE_SIMPLE \
-            -Wall -Wextra -O2
+            -Icommon -Wall -Wextra -O2
 
 # ── Syscall test mode ──────────────────────────────────────
 # When OS01_SYSTEST=1, init.c spawns /systest.elf instead of /busybox.elf sh
@@ -36,7 +36,7 @@ endif
 
 # ── FB_RESOLUTION_TEST (QEMU resolution switcher Task 9) ────
 # Test config only: compiles the terminal_display.c fbtest ENOMEM hook.
-# test_resolution.c (the guest fault helper) is added to C_SOURCES below
+# test_resolution.c (the guest fault helper) is discovered below
 # only for this variant.
 ifeq ($(FB_RESOLUTION_TEST),1)
 override CFLAGS += -DFB_RESOLUTION_TEST
@@ -44,33 +44,18 @@ endif
 
 USER_RAW_LDFLAGS := -m elf_x86_64 -static -no-pie -T linker.ld -L$(TARGET_LIBDIR_LOCAL)
 
-# ── Source discovery ───────────────────────────────────────
-# crt0.S is startup code, not a program
-# terminal_core.c / terminal_render.c / terminal_display.c / tetris_logic.c /
-# setres_parse.c / gfx_client_policy.c are libraries, not standalone programs
-# (the helper TUs are linked explicitly into their consumers below).
-# test_resolution.c (the fault-injection guest helper) is packaged ONLY for
-# the FB_RESOLUTION_TEST=1 variant.
-USER_EXCLUDE_SOURCES := terminal_core.c terminal_render.c terminal_display.c tetris_logic.c setres_parse.c gfx_client_policy.c
-ifneq ($(FB_RESOLUTION_TEST),1)
-USER_EXCLUDE_SOURCES += test_resolution.c
-endif
-C_SOURCES := $(filter-out $(USER_EXCLUDE_SOURCES),$(wildcard *.c))
-ASM_SOURCES := $(wildcard *.S)
+# ── Program discovery and app manifests ─────────────────────
+.DEFAULT_GOAL := all
+USER_BUILD_CONTEXT := 1
+include $(OS01_ROOT)/user/apps.mk
+PROGRAMS := $(addprefix $(BUILD_DIR)/,$(addsuffix .elf,$(USER_PROGRAMS)))
+CRT0_OBJ := $(OBJ_DIR)/crt0.o
+SIGRETURN_OBJ := $(OBJ_DIR)/sigreturn_trampoline.o
+COMMON_LINK_DEPS := $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld Makefile apps.mk
 
-# Each .c → .elf (e.g. init.c → init.elf)
-PROGRAMS := $(patsubst %.c,$(BUILD_DIR)/%.elf,$(C_SOURCES))
-
-# ── Targets ────────────────────────────────────────────────
 .PHONY: all clean
-
-# Build all programs into $(BUILD_DIR); the root user.mk publishes them to
-# $(USER_ARTIFACT_DIR) (artifacts/user) which config/rootfs.mk references for
-# the disk image — do NOT copy back to the source dir (that would pollute
-# user/ with build artifacts).
 all: $(PROGRAMS)
 
-# ── Compile rules (into build dir) ─────────────────────────
 $(OBJ_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
@@ -79,119 +64,32 @@ $(OBJ_DIR)/%.o: %.S
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
-# ── Keep intermediate objects ──────────────────────────────────
-# The user program objects are GNU-make intermediates of the .elf links.
-# GNU make deletes intermediates after a successful build, so the second
-# `make disk.img` after a clean rebuild would recompile the pattern-linked
-# objects once. .SECONDARY keeps them so the second build is a true
-# 0-compile no-op. NOTE: the pattern form `.SECONDARY: $(OBJ_DIR)/%.o` does
-# NOT hold on GNU Make 4.4 — the object list must be expanded explicitly.
-# (The objects of the explicit-link programs — terminal/tetris and their
-# helpers — and the explicit targets crt0/sigreturn/terminal_font are not
-# intermediates and need no protection.)
-.SECONDARY: $(patsubst %.c,$(OBJ_DIR)/%.o,$(wildcard *.c)) \
-            $(patsubst %.S,$(OBJ_DIR)/%.o,$(wildcard *.S))
+# Compile shared sources once with global flags. App flags affect local sources.
+user_objects = $(addprefix $(OBJ_DIR)/,$(addsuffix .o,$(basename $(1))))
+USER_OBJECTS := $(call user_objects,$(USER_FLAT_SOURCES)) $(CRT0_OBJ) $(SIGRETURN_OBJ)
 
-# ── crt0 startup (compiled once, linked into every program) ─
-CRT0_OBJ := $(OBJ_DIR)/crt0.o
+define flat_program
+$(BUILD_DIR)/$(1).elf: $(OBJ_DIR)/$(1).o $(COMMON_LINK_DEPS)
+	@mkdir -p $$(dir $$@)
+	$$(TARGET_LD) $$(USER_RAW_LDFLAGS) -o $$@ $$(CRT0_OBJ) $$(SIGRETURN_OBJ) $(OBJ_DIR)/$(1).o -lc
+	$$(OBJ_CPY) --strip-debug $$@
+endef
+$(foreach app,$(USER_FLAT_PROGRAMS),$(eval $(call flat_program,$(app))))
 
-$(CRT0_OBJ): crt0.S
-	@mkdir -p $(dir $@)
-	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
+define directory_program
+USER_APP_$(1)_OBJECTS := $(call user_objects,$(USER_APP_$(1)_SOURCES)) $(USER_APP_$(1)_EXTRA_OBJS)
+USER_OBJECTS += $$(USER_APP_$(1)_OBJECTS)
+$(call user_objects,$(filter $(1)/%,$(USER_APP_$(1)_SOURCES))): override CFLAGS += $(USER_APP_$(1)_CFLAGS)
+$(call user_objects,$(USER_APP_$(1)_SOURCES)): $(1)/app.mk
+$(BUILD_DIR)/$(1).elf: $$(USER_APP_$(1)_OBJECTS) $(COMMON_LINK_DEPS) $(1)/app.mk
+	@mkdir -p $$(dir $$@)
+	$$(TARGET_LD) $$(USER_RAW_LDFLAGS) $(USER_APP_$(1)_LDFLAGS) -o $$@ $$(CRT0_OBJ) $$(SIGRETURN_OBJ) $$(USER_APP_$(1)_OBJECTS) $(USER_APP_$(1)_LDLIBS) -lc
+	$$(OBJ_CPY) --strip-debug $$@
+endef
+$(foreach app,$(USER_DIRECTORY_PROGRAMS),$(eval $(call directory_program,$(app))))
 
-# ── sigreturn trampoline (compiled once, linked into every program) ─
-SIGRETURN_OBJ := $(OBJ_DIR)/sigreturn_trampoline.o
+.SECONDARY: $(USER_OBJECTS)
+-include $(USER_OBJECTS:.o=.d)
 
-$(SIGRETURN_OBJ): sigreturn_trampoline.S
-	@mkdir -p $(dir $@)
-	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
-
-# ── Link rules (pattern: each .c → .elf linked with crt0) ─
-# init.c → $(OBJ_DIR)/init.o → $(BUILD_DIR)/init.elf
-$(BUILD_DIR)/%.elf: $(OBJ_DIR)/%.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
-	@mkdir -p $(dir $@)
-	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $< -lc
-	$(OBJ_CPY) --strip-debug $@
-
-# ══════════════════════════════════════════════════════════════
-#  terminal.elf — needs embedded font (override pattern rule)
-# ══════════════════════════════════════════════════════════════
-TERMINAL_FONT_OBJ := $(OBJ_DIR)/terminal_font.o
-
-$(BUILD_DIR)/terminal.elf: $(OBJ_DIR)/terminal.o $(OBJ_DIR)/terminal_render.o $(OBJ_DIR)/terminal_core.o $(OBJ_DIR)/terminal_display.o $(CRT0_OBJ) $(SIGRETURN_OBJ) $(TERMINAL_FONT_OBJ) linker.ld
-	@mkdir -p $(dir $@)
-	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/terminal.o $(OBJ_DIR)/terminal_render.o $(OBJ_DIR)/terminal_core.o $(OBJ_DIR)/terminal_display.o $(TERMINAL_FONT_OBJ) -lgfx -lc
-	$(OBJ_CPY) --strip-debug $@
-
-$(TERMINAL_FONT_OBJ): terminal_font.psf
-	@mkdir -p $(dir $@)
-	$(OBJ_CPY) -B i386 -I binary -O elf64-x86-64 terminal_font.psf $@
-
-# ══════════════════════════════════════════════════════════════
-#  tetris.elf — needs tetris_logic.o + libgfx (Task 6 migration)
-# ══════════════════════════════════════════════════════════════
-# Task 6 migrated the renderer from direct /dev/fb mmap to libgfx:
-# gfx_open / gfx_fill_rect / gfx_present / gfx_close live in
-# libgfx.a.  The archive is linked explicitly with -lgfx AFTER the
-# using object so the static-archive linker pass picks the symbols
-# up; -lc follows the same convention used by test_gfx.elf.
-# gfx_client_policy.o (Task 8) supplies the shared EAGAIN-retry /
-# ESTALE-exit classification for the gfx_present result.
-$(BUILD_DIR)/tetris.elf: $(OBJ_DIR)/tetris.o $(OBJ_DIR)/tetris_logic.o $(OBJ_DIR)/gfx_client_policy.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
-	@mkdir -p $(dir $@)
-	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/tetris.o $(OBJ_DIR)/tetris_logic.o $(OBJ_DIR)/gfx_client_policy.o -lgfx -lc
-	$(OBJ_CPY) --strip-debug $@
-
-# ══════════════════════════════════════════════════════════════
-#  test_gfx.elf — libgfx client smoke (Task 3)
-#  Links libgfx.a explicitly with -lgfx -lc AFTER the using
-#  object so the static archive order resolves gfx_open /
-#  gfx_close / gfx_get_info / gfx_set_clip / gfx_present (the
-#  library's only out-of-line wrapper file at this stage; Task 4
-#  will add the primitives).  tetris.elf follows the same pattern
-#  in Task 5.
-# ══════════════════════════════════════════════════════════════
-$(BUILD_DIR)/test_gfx.elf: $(OBJ_DIR)/test_gfx.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
-	@mkdir -p $(dir $@)
-	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/test_gfx.o -lgfx -lc
-	$(OBJ_CPY) --strip-debug $@
-
-# ══════════════════════════════════════════════════════════════
-#  desktop.elf — GUI Desktop (libgfx)
-#  gfx_client_policy.o (Task 8) supplies the shared stale-view policy.
-# ══════════════════════════════════════════════════════════════
-$(BUILD_DIR)/desktop.elf: $(OBJ_DIR)/desktop.o $(OBJ_DIR)/gfx_client_policy.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
-	@mkdir -p $(dir $@)
-	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/desktop.o $(OBJ_DIR)/gfx_client_policy.o -lgfx -lc
-	$(OBJ_CPY) --strip-debug $@
-
-# ══════════════════════════════════════════════════════════════
-#  test_lvgl.elf — LVGL compatibility smoke test
-#  gfx_client_policy.o (Task 8) supplies the shared stale-view policy.
-# ══════════════════════════════════════════════════════════════
-$(BUILD_DIR)/test_lvgl.elf: $(OBJ_DIR)/test_lvgl.o $(OBJ_DIR)/gfx_client_policy.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
-	@mkdir -p $(dir $@)
-	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/test_lvgl.o $(OBJ_DIR)/gfx_client_policy.o -llvgl -lgfx -lc
-	$(OBJ_CPY) --strip-debug $@
-
-# ══════════════════════════════════════════════════════════════
-#  setres.elf — framebuffer resolution CLI (Task 8)
-#  Uses the kernel fb ioctls (uapi/fb.h).  setres_parse.o is a helper
-#  TU excluded from C_SOURCES; setres.c is still auto-discovered as a
-#  program, so this rule overrides the generic link to add the parser.
-# ══════════════════════════════════════════════════════════════
-$(BUILD_DIR)/setres.elf: $(OBJ_DIR)/setres.o $(OBJ_DIR)/setres_parse.o $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld
-	@mkdir -p $(dir $@)
-	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) $(OBJ_DIR)/setres.o $(OBJ_DIR)/setres_parse.o -lc
-	$(OBJ_CPY) --strip-debug $@
-
-
-
-# ── Clean ──────────────────────────────────────────────────
 clean:
 	rm -rf $(BUILD_DIR)
-
-# ── Dependency tracking ────────────────────────────────────
-C_DEPS := $(patsubst %.c,$(OBJ_DIR)/%.d,$(C_SOURCES))
-ASM_DEPS := $(patsubst %.S,$(OBJ_DIR)/%.d,$(ASM_SOURCES))
--include $(C_DEPS) $(ASM_DEPS)
