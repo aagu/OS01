@@ -299,6 +299,7 @@ _test-aarch64-run-m3-probe:
 	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
 	  --image "$(AARCH64_UEFI_DISK)" \
 	  --qemu "$(AARCH64_QEMU)" \
+	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-m3-probe/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 
 # test-aarch64: the umbrella. Dispatches to the per-MODE prep + run helpers.

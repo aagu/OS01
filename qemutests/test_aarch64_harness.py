@@ -56,6 +56,7 @@ if str(ROOT) not in sys.path:
 import qemutests.aarch64_uefi_smp as smp        # noqa: E402
 import qemutests.aarch64_gic_spi as gspi        # noqa: E402
 import qemutests.aarch64_sync_fault as sflt     # noqa: E402
+import qemutests.aarch64_m3_probe as m3p        # noqa: E402
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -435,6 +436,57 @@ class GicSpiLifecycleTests(SuiteUnitAdapterTests):
 
 
 # ───────────────────────────────────────────────────────────────────
+# m3-probe — production shootdown probe evidence and lifecycle.
+# ───────────────────────────────────────────────────────────────────
+
+
+class M3ProbeEvidenceTests(unittest.TestCase):
+    def test_valid_log_accepted(self):
+        self.assertTrue(m3p.probe_evidence(m3p.valid_log))
+
+    def test_fail_line_rejected(self):
+        self.assertFalse(m3p.probe_evidence(m3p.fail_ap_not_ready))
+
+    def test_skip_single_cpu_rejected(self):
+        self.assertFalse(m3p.probe_evidence(m3p.skip_single_cpu))
+
+    def test_ok_before_start_rejected(self):
+        self.assertFalse(m3p.probe_evidence(m3p.ok_before_start))
+
+
+class M3ProbeLifecycleTests(SuiteUnitAdapterTests):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="os01-m3-"))
+        fw, img = _stage_inputs(self.tmp)
+        self.build = self.tmp / "build"
+        self.args = argparse.Namespace(
+            qemu="qemu-system-aarch64", firmware=str(fw), image=str(img),
+            log_dir=str(self.tmp / "logs"), timeout=5.0, diagnostic_dtb=None)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, session):
+        return m3p.run_case(
+            self.args, session_factory=_factory(session),
+            build_dir=str(self.build), profile="test")
+
+    def test_probe_ok_archives_suite_unit_pass(self):
+        session = FakeSession(text=m3p.valid_log)
+        self.assertTrue(self._run(session))
+        data = _one_archive(self.build, m3p.SUITE)
+        self.assert_suite_unit(data)
+        self.assertEqual(data["status"], "PASS")
+
+    def test_missing_ok_times_out(self):
+        session = FakeSession(text="UEFI: booting OS01\n", matched=False)
+        self.assertFalse(self._run(session))
+        data = _one_archive(self.build, m3p.SUITE)
+        self.assertEqual(data["status"], "FAIL")
+
+
+# ───────────────────────────────────────────────────────────────────
 # Ruling 7 — production entry mode (script invocation).
 # ───────────────────────────────────────────────────────────────────
 
@@ -447,9 +499,9 @@ class ScriptModeTests(unittest.TestCase):
     the real script entry and rebuild ``sys.path`` to script-mode shape."""
 
     _SELF_TEST_SCRIPTS = ("aarch64_uefi_smp.py", "aarch64_gic_spi.py",
-                          "aarch64_sync_fault.py")
+                          "aarch64_sync_fault.py", "aarch64_m3_probe.py")
     _ALL_SCRIPTS = ("aarch64_uefi_smp.py", "aarch64_gic_spi.py",
-                    "aarch64_sync_fault.py")
+                    "aarch64_sync_fault.py", "aarch64_m3_probe.py")
 
     _PROBE = r"""
 import importlib.util, os, sys
