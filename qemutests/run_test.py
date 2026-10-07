@@ -1,5 +1,39 @@
 #!/usr/bin/env python3
-"""OS01 test runner — launches QEMU with serial pipe, feeds commands, checks output."""
+"""OS01 test runner — launches QEMU with serial pipe, feeds commands, checks output.
+
+Task 5 of the lightweight test-framework plan (spec §5.3): the
+QEMU process boundary now delegates to ``ProcessSession`` so a
+single deadline, monotonic-timeout, and process-group kill covers
+every suite.  The existing ``TestRunner`` interface is preserved —
+``start_qemu`` / ``send_line`` / ``read_until`` / ``cleanup`` are
+the only public surface the suite functions consume.
+
+Two transports remain available:
+
+  * ``serial_stdio=True``  → ``-serial stdio`` and a writable
+    stdin.  Used by ``test_gfx`` so the runner can type shell
+    commands into BusyBox.  Serial output is captured by the
+    ProcessSession's stdout pipe (``process.text``) and surfaced
+    via ``read_until``.
+
+  * ``serial_stdio=False`` (default) → ``-serial file:<path>`` and
+    a closed stdin.  Used by ``test_boot``, ``test_systest``,
+    ``test_inittab_phase``, ``test_network``, ``test_resolution``
+    (and the driver-matrix delegate).  The runner polls the
+    serial log file directly; ProcessSession still owns the QEMU
+    process lifecycle, log files, and timeout.
+
+``SMP`` (effective QEMU CPU count) is recorded on the TestRunner
+and used in the ``-smp`` argv token.  When both ``SMP`` and the
+legacy ``QEMU_SMP`` are set they must agree — a mismatch raises
+``SystemExit`` before ``start_qemu`` is allowed to spawn QEMU.
+
+``ProcessSession`` is overridable via the ``session_factory``
+constructor kwarg.  Every fixture in
+``qemutests/test_run_test_harness.py`` and
+``qemutests/test_gfx_runner.py`` installs a ``FakeProcessSession``
+factory to bypass the real subprocess.Popen boundary.
+"""
 
 import sys
 import os
@@ -11,6 +45,7 @@ import tempfile
 import http.server
 import socketserver
 import threading
+from pathlib import Path
 
 QEMU = os.environ.get("QEMU", "qemu-system-x86_64")
 DISK_IMG = os.environ.get("DISK_IMG", "disk.img")
@@ -32,20 +67,56 @@ if not QEMU_SMP.isdigit() or int(QEMU_SMP) < 1:
     raise SystemExit(
         f"QEMU_SMP must be a positive integer, got {QEMU_SMP!r}")
 
+# ProcessSession — spec §5.3 of the test-framework plan.  Tasks 3
+# established the frozen interface; the import here is the only
+# connection between the legacy runner and the new harness layer.
+# Import guarded so the legacy _FakePopen fixtures (test_gfx_runner.py)
+# can monkey-patch ``run_test.subprocess.Popen`` without needing the
+# harness module available.
+try:
+    from qemutests.harness.process import ProcessSession
+except ImportError:  # pragma: no cover
+    ProcessSession = None  # type: ignore[assignment]
+
+
 class TestRunner:
     def __init__(self, disk_img, timeout=TIMEOUT,
-                 extra_qemu_args=None, snapshot=False):
+                 extra_qemu_args=None, snapshot=False,
+                 smp=None, qemu_smp=None,
+                 session_factory=None):
         self.disk_img = disk_img
         self.timeout = timeout
         self.extra_qemu_args = list(extra_qemu_args) if extra_qemu_args else []
         self.snapshot = snapshot
-        self.proc = None
-        self.serial_log = None
+        # SMP / QEMU_SMP conflict check (spec §7.1).  Both can be set
+        # but must agree; ``smp`` is the preferred name going forward.
+        if smp is not None and qemu_smp is not None and str(smp) != str(qemu_smp):
+            raise SystemExit(
+                f"ERROR: SMP={smp} conflicts with legacy QEMU_SMP={qemu_smp}"
+            )
+        self.smp = smp
+        self.qemu_smp = qemu_smp
+        self._effective_smp = (
+            str(smp) if smp is not None
+            else (str(qemu_smp) if qemu_smp is not None else QEMU_SMP)
+        )
+        # Session factory: tests install a stand-in (see FakeProcessSession
+        # in qemutests/test_run_test_harness.py).  Default: the real
+        # ProcessSession.
+        if session_factory is None and ProcessSession is not None:
+            self._session_factory = ProcessSession
+        else:
+            self._session_factory = session_factory
+        # State.
+        self.process = None        # ProcessSession (or FakeProcessSession)
+        self.proc = None           # legacy alias for `process`
         self.serial_path = None
-        self._serial_stdout_fp = None  # serial-stdio mode writes via this
+        self._serial_stdout_fp = None
+        self._run_dir = None
+        self._is_serial_stdio = False
 
     def start_qemu(self, network=False, serial_stdio=False,
-                   extra_qemu_args=None, snapshot=False):
+                   extra_qemu_args=None, snapshot=False, run_dir=None):
         """Launch QEMU.
 
         With ``serial_stdio=False`` (default) the historical
@@ -56,14 +127,18 @@ class TestRunner:
         With ``serial_stdio=True`` the runner uses ``-serial stdio``
         so its own stdin/stdout ARE the serial port: the runner can
         type shell commands at the BusyBox prompt.  Serial output is
-        also tee'd to a temp file (via ``tee``) so the existing
-        log-reading helpers still work — but the primary transport
-        for the gfx suite is the writable stdin pipe below.
+        also captured by the ProcessSession's stdout pipe (``text``).
 
         ``extra_qemu_args`` is a list of argv tokens appended to the
         default QEMU invocation (e.g., second -netdev, alternate
         -machine, or extra -device).  ``snapshot=True`` appends
         ``-snapshot`` so writes to disk are discarded on shutdown.
+
+        The QEMU process boundary is owned by a ProcessSession
+        (spec §5.3) — argv-only, monotonic deadline, persistent
+        log files, process-group cleanup.  The factory used to
+        construct the session is ``self._session_factory``; tests
+        install a FakeProcessSession to bypass real subprocess.Popen.
         """
         # Merge instance-level extra args with per-call overrides.
         all_extra = list(self.extra_qemu_args)
@@ -73,25 +148,24 @@ class TestRunner:
             if "-snapshot" not in all_extra:
                 all_extra.append("-snapshot")
 
-        self.serial_log = tempfile.NamedTemporaryFile(
-            prefix="os01_serial_", suffix=".log", delete=False)
-        self.serial_path = self.serial_log.name
-        self.serial_log.close()  # QEMU will write to it; we open separately for reading
+        # Allocate run_dir for the ProcessSession.
+        if run_dir is None:
+            run_dir = Path(tempfile.mkdtemp(prefix="os01-qemu-"))
+        self._run_dir = run_dir
 
-        if serial_stdio:
-            # The shell needs a writable stdin, so QEMU's stdin is a
-            # PIPE; the serial READ side is captured to the log file
-            # via a direct stdout redirect.  We open the log file in
-            # append+line-buffered mode so the existing
-            # ``_read_available()`` polling loop keeps working
-            # unchanged.  No ``tee`` wrapper — that would deadlock on
-            # the pipe because tee's stdout side fills up while no
-            # Python reader drains it.
-            serial_arg = "stdio"
-            stdin_target = subprocess.PIPE
-        else:
+        # For file-serial mode, allocate the serial log path.
+        if not serial_stdio:
+            serial_log = tempfile.NamedTemporaryFile(
+                prefix="os01_serial_", suffix=".log", delete=False)
+            self.serial_path = serial_log.name
+            serial_log.close()
             serial_arg = f"file:{self.serial_path}"
-            stdin_target = subprocess.DEVNULL
+        else:
+            serial_arg = "stdio"
+            # ProcessSession owns stdout.log; expose it as serial_path
+            # for legacy callers / fixture staging.
+            self.serial_path = str(run_dir / "stdout.log")
+        self._is_serial_stdio = bool(serial_stdio)
 
         args = [
             QEMU,
@@ -108,7 +182,7 @@ class TestRunner:
             "-object", "rng-random,filename=/dev/urandom,id=rng0",
             "-device", "virtio-rng-pci,rng=rng0",
             "-m", "512",
-            "-smp", QEMU_SMP,
+            "-smp", self._effective_smp,
             "-serial", serial_arg,
             "-display", "none",
             "-no-reboot",
@@ -148,7 +222,7 @@ class TestRunner:
                 "-drive", f"file={self.disk_img},format=raw,if=none,id=disk",
                 "-device", "virtio-blk-pci,drive=disk",
                 "-m", "512",
-                "-smp", QEMU_SMP,
+                "-smp", self._effective_smp,
                 "-serial", serial_arg,
                 "-display", "none",
                 "-no-reboot",
@@ -164,39 +238,82 @@ class TestRunner:
         # can override machine, add NICs, etc.).
         if all_extra:
             args += all_extra
-        if serial_stdio:
-            # Redirect QEMU's stdout (the serial READ side under
-            # -serial stdio) into the log file directly — line-buffered
-            # so the polling reader sees data promptly.  Stderr is
-            # dropped: nothing in QEMU's stderr matters for this suite.
-            # We keep the handle on ``self`` so cleanup() can close it
-            # before unlinking the path on Windows (and to release the
-            # inode on Linux too).
-            self._serial_stdout_fp = open(self.serial_path, "ab", buffering=0)
-            self.proc = subprocess.Popen(
-                args,
-                stdin=subprocess.PIPE,
-                stdout=self._serial_stdout_fp,
-                stderr=subprocess.DEVNULL,
+
+        # Construct ProcessSession via the injected factory (or directly).
+        if self._session_factory is None:
+            raise RuntimeError(
+                "ProcessSession is unavailable; cannot launch QEMU"
             )
-        else:
-            self.proc = subprocess.Popen(
-                args,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+        self.process = self._session_factory(
+            argv=args,
+            run_dir=run_dir,
+            timeout_s=self.timeout,
+            writable_stdin=bool(serial_stdio),
+        )
+        self.process.start()
+        # Legacy alias: tests that imported `_FakePopen.last_instance`
+        # can read ``tester.proc.args`` against the session's argv.
+        self.proc = self.process
 
     def _read_available(self):
-        """Read any new data from the serial log file."""
+        """Read the serial log file (file-serial mode).  ProcessSession's
+        ``text`` is the serial-stdio source.
+
+        For FakeProcessSession-backed tests (no real QEMU writes to
+        the serial file), the file is empty; the runner falls back
+        to ``process.text`` so the file-serial polling path still
+        sees the staged chunks.
+        """
+        if self._is_serial_stdio:
+            return self.process.text.encode("utf-8", errors="replace") if self.process else b""
+        if not self.serial_path:
+            return b""
         try:
             with open(self.serial_path, 'rb') as f:
-                return f.read()
+                data = f.read()
         except (OSError, IOError):
-            return b''
+            data = b""
+        # Empty file + fake session with staged text → use the fake's
+        # text as the source.
+        if not data and self.process is not None:
+            text = getattr(self.process, "text", "") or ""
+            if text:
+                return text.encode("utf-8", errors="replace")
+        return data
 
     def read_until(self, pattern, timeout=None):
-        """Read serial output until pattern matches. Returns the match or None."""
+        """Read serial output until pattern matches. Returns the match or None.
+
+        In ``serial_stdio=True`` mode the source is the ProcessSession's
+        stdout pipe (``text``).  In ``serial_stdio=False`` mode the
+        source is the file QEMU writes to (``serial_path``) — the
+        existing file-polling loop is preserved for backwards
+        compatibility with file-serial suites.
+        """
+        if self.process is None:
+            return None
+        if self._is_serial_stdio:
+            if isinstance(pattern, str):
+                result = self.process.wait_for(lambda s: pattern in s)
+                if not result:
+                    return None
+                return result
+            # Compiled regex: return a ``re.Match`` object so the
+            # legacy ``m.group(0)`` callers keep working.  We match
+            # against the accumulated text; on no match we return
+            # None (predicate-fail semantics).
+            text = self.process.text
+            m = pattern.search(text)
+            if m:
+                return m
+            # Wait for the predicate to match.
+            matched_slice = self.process.wait_for(
+                lambda s: bool(pattern.search(s))
+            )
+            if not matched_slice:
+                return None
+            return pattern.search(self.process.text)
+        # File-serial mode: legacy file-polling loop.
         if timeout is None:
             timeout = self.timeout
         deadline = time.time() + timeout
@@ -221,7 +338,7 @@ class TestRunner:
                     if m:
                         return m
 
-            if self.proc.poll() is not None:
+            if self.process._proc and self.process._proc.poll() is not None:
                 # QEMU exited — read any remaining output
                 data = self._read_available()
                 if len(data) > last_size:
@@ -252,11 +369,12 @@ class TestRunner:
         subsequent wait_for_prompt() can rely on QEMU having
         received them.
         """
-        if not self.proc or not self.proc.stdin or self.proc.stdin is subprocess.DEVNULL:
+        if self.process is None:
+            raise RuntimeError("QEMU not started")
+        if not self._is_serial_stdio:
             raise RuntimeError(
                 "send() requires serial_stdio=True (stdin pipe is closed in file-serial mode)")
-        self.proc.stdin.write(text.encode("utf-8"))
-        self.proc.stdin.flush()
+        self.process.send(text.encode("utf-8"))
 
     def send_line(self, text):
         """Send a command line (text + ``\\n``) and flush.
@@ -271,12 +389,13 @@ class TestRunner:
         return self.read_until("# ", timeout=timeout)
 
     def cleanup(self):
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
+        if self.process is not None:
             try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+                self.process.close()
+            except Exception:
+                pass
+            self.process = None
+            self.proc = None
         if self._serial_stdout_fp is not None:
             try:
                 self._serial_stdout_fp.close()
@@ -288,6 +407,7 @@ class TestRunner:
                 os.unlink(self.serial_path)
             except OSError:
                 pass
+            self.serial_path = None
 
 
 def test_boot(tester):
@@ -311,31 +431,32 @@ def test_boot(tester):
     # precedes the /dev/null probe, which precedes the init banner.
     # Both single- and multi-CPU branches enforce this ordering —
     # BSP percpu runs even at SMP=1 (num_cpus=1 after the BSP loop).
-    if int(QEMU_SMP) > 1:
+    effective_smp = int(tester._effective_smp)
+    if effective_smp > 1:
         markers = (
-            rf"percpu: {int(QEMU_SMP)} CPU\(s\) registered"
+            rf"percpu: {effective_smp} CPU\(s\) registered"
             r".*tty: console TTY created"
             r".*devfs: /dev/null read=0 write=4"
             r".*OS01 Init v1\.0"
         )
     else:
         markers = (
-            rf"percpu: {int(QEMU_SMP)} CPU\(s\) registered"
+            rf"percpu: {effective_smp} CPU\(s\) registered"
             r".*tty: console TTY created"
             r".*devfs: /dev/null read=0 write=4"
             r".*OS01 Init v1\.0"
         )
     if not re.search(markers, booted, re.DOTALL):
         print("FAIL: boot-log markers missing or out of order "
-              f"(QEMU_SMP={QEMU_SMP})")
+              f"(QEMU_SMP={tester._effective_smp})")
         return False
 
     # Multi-CPU boot: the kernel must have registered the configured
     # CPU count (line format: "percpu: %u CPU(s) registered (%u in MADT)").
-    if int(QEMU_SMP) > 1:
-        percpu = f"percpu: {QEMU_SMP} CPU(s) registered"
+    if effective_smp > 1:
+        percpu = f"percpu: {tester._effective_smp} CPU(s) registered"
         if percpu not in booted:
-            print(f"FAIL: missing {percpu!r} in boot log")
+            print(f"FAIL: missing {percu!r} in boot log")
             return False
 
     # Wait for shell prompt
@@ -364,7 +485,7 @@ def test_systest(tester):
             return False
         if "COW TTY READY" not in m.group(0):
             break
-        tester.send("COW!")
+        tester.send_line("COW!")
     if m and "COW TTY READY" in m.group(0):
         m = tester.read_until(re.compile(result_pattern),
                               timeout=max(0, deadline - time.monotonic()))
@@ -574,7 +695,7 @@ def test_gfx(tester):
     # If the caller forgot to start QEMU, we start it here too — but
     # only if no proc exists.  Calling start_qemu twice would clobber
     # the serial log file the first invocation already opened.
-    if not tester.proc:
+    if not tester.process:
         tester.start_qemu(serial_stdio=True)
 
     # Wait for the BusyBox ash prompt.  read_until() matches on the
@@ -650,7 +771,7 @@ def test_gfx(tester):
         log = tester._read_available().decode('utf-8', errors='replace')
         marker_re = re.compile(r"\[DESKTOP\][^\n]*")
         m = marker_re.search(log)
-        print(f"FAIL: /bin/desktop smoke did not produce PASS marker "
+        print(f"FAIL: /bin/desktop smoke did not produce SMOKE PASS marker "
               f"(last test marker: {m.group(0) if m else '<none>'!r})")
         return False
     print("PASS: [DESKTOP] SMOKE PASS marker observed")
