@@ -18,7 +18,7 @@ static uint64_t mutex_test_thread(uint64_t arg)
     return 0;
 }
 
-void test_kernel_mutex(void)
+int test_kernel_mutex(void)
 {
     mutex_init(&test_mtx);
     shared_counter = 0;
@@ -28,7 +28,7 @@ void test_kernel_mutex(void)
 
     if (!t1 || !t2) {
         serial_printk("[selftest] kernel mutex: FAIL (kthread create)\n");
-        return;
+        return -1;
     }
 
     int spins = 0;
@@ -38,10 +38,12 @@ void test_kernel_mutex(void)
         spins++;
     }
 
-    if (shared_counter == 2000)
+    if (shared_counter == 2000) {
         serial_printk("[selftest] kernel mutex: PASS (counter=%d)\n",
                       shared_counter);
-    else
-        serial_printk("[selftest] kernel mutex: FAIL (counter=%d)\n",
-                      shared_counter);
+        return 0;
+    }
+    serial_printk("[selftest] kernel mutex: FAIL (counter=%d)\n",
+                  shared_counter);
+    return -1;
 }

@@ -8,6 +8,7 @@
 #include <log/log.h>      /* for log_err/log_info macros */
 #include <core/printk.h>  /* for serial_printk (selftest markers) */
 #include <core/selftest.h> /* for selftest_run_all (OS01_SELFTEST builds) */
+#include <selftest/result.h> /* protocol-v1 coordinator (OS01_SELFTEST builds) */
 #include <memory/memory.h>   /* for struct boot_context / Virt_To_Phy */
 #include <memory/pmm.h>      /* for PMMngr, struct Page, alloc_pages, free_pages, ZONE_NORMAL */
 #include <memory/pmm_arch.h> /* for pmm_arch_normalize (preflight caller) */
@@ -521,7 +522,12 @@ void aarch64_main(const struct boot_context *handoff)
      * so the sync-fault probe block below stays the last pre-SMP
      * activity. */
     {
+        /* AArch64 runs only the boot (early) cases — no scheduler-side
+         * tests — so it declares an empty late selection and emits its
+         * single END right after the boot tests. */
+        selftest_begin_run(0);
         int failed = selftest_run_all();
+        selftest_end_run();
         serial_printk("[selftest] done (failed=%d)\n", failed);
     }
 #endif

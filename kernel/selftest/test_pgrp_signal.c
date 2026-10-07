@@ -52,12 +52,15 @@ static bool pgrp_wait_restored(void)
     return false;
 }
 
-// NOTE: non-static void (called from task_init via extern). NOT registered via
+// NOTE: non-static int (called from task_init via extern). NOT registered via
 // the SELFTEST() macro — its .selftest_table section is never consumed by
 // selftest_run_all(), which only runs explicitly-registered tests. Matches
-// test_kthread_self_reap / test_fd_refcount / test_tty_vintr.
-void test_pgrp_signal(void)
+// test_kthread_self_reap / test_fd_refcount / test_tty_vintr.  Returns 0 on
+// PASS, nonzero on FAIL; the caller (task_init) reports it via
+// selftest_record_late().
+int test_pgrp_signal(void)
 {
+    int rc = -1;
     serial_printk("[selftest] test_pgrp_signal: start\n");
     pgrp_thread_ready = 0;
     pgrp_thread_pid = 0;
@@ -69,7 +72,7 @@ void test_pgrp_signal(void)
     task_t *t = create_kthread(pgrp_thread_fn, 0, "pgrp_test");
     if (!t) {
         serial_printk("[selftest] test_pgrp_signal: FAIL: create_kthread returned NULL\n");
-        return;
+        return -1;
     }
 
     // Wait for thread to register pid and reach INTERRUPTIBLE
@@ -129,6 +132,7 @@ void test_pgrp_signal(void)
     }
 
     serial_printk("[selftest] test_pgrp_signal: PASS\n");
+    rc = 0;
 out:;
     // Wake failed fixtures too, then let the worker restore PF_KTHREAD.
     uint64_t cleanup_flags = spin_lock_irqsave(&task_list_lock);
@@ -138,7 +142,7 @@ out:;
     spin_unlock_irqrestore(&task_list_lock, cleanup_flags);
     if (!pgrp_wait_restored()) {
         serial_printk("[selftest] test_pgrp_signal: FAIL: cleanup timeout\n");
-        return;
+        return -1;
     }
 
     // Release before the worker has ever published TASK_INTERRUPTIBLE.
@@ -148,7 +152,7 @@ out:;
     t = create_kthread(pgrp_thread_fn, 1, "pgrp_abort_test");
     if (!t) {
         serial_printk("[selftest] pgrp early cleanup: FAIL: create\n");
-        return;
+        return -1;
     }
     cleanup_flags = spin_lock_irqsave(&task_list_lock);
     __atomic_store_n(&pgrp_thread_release, 1, __ATOMIC_RELEASE);
@@ -156,8 +160,12 @@ out:;
     task_wake(t);
     spin_unlock_irqrestore(&task_list_lock, cleanup_flags);
     __atomic_store_n(&pgrp_abort_go, 1, __ATOMIC_RELEASE);
-    serial_printk("[selftest] pgrp early cleanup: %s\n",
-                  pgrp_wait_restored() ? "PASS" : "FAIL: worker slept after release");
+    if (!pgrp_wait_restored()) {
+        serial_printk("[selftest] pgrp early cleanup: FAIL: worker slept after release\n");
+        return -1;
+    }
+    serial_printk("[selftest] pgrp early cleanup: PASS\n");
+    return rc;
 }
 
 #endif // OS01_SELFTEST

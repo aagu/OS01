@@ -18,10 +18,12 @@ Design (spec §5.3, §6.2, §7.2):
     interface, Task 3) and the evidence to ``RunArchive``/``RunReport``
     (Task 4).  The runner does not re-implement lifecycle, deadlines,
     log files, or archive layout.
-  * ``failures(log)`` from ``check_kernel_selftest`` remains the
-    semantic PASS/FAIL gate.  Its ``-> list[str]`` interface is
-    unchanged so Task 9 can swap it for protocol v1 without touching
-    this process layer.
+  * The semantic PASS/FAIL gate is **protocol v1** (spec §6.1):
+    ``check_kernel_selftest.v1_failures`` runs the frozen ``parse_v1``
+    state machine over the captured log and rejects a trace that is not
+    a complete, fully-passing ``kernel-selftest`` result.  There is **no
+    legacy fallback**: a log without v1 records fails, however complete
+    its legacy boot summary looks.
   * A post-completion **1-second observation window** (``_panic_in``,
     shared with ``run_test.py``) catches a kernel panic that arrives
     after the completion markers.  The window is load-bearing: the log
@@ -68,15 +70,16 @@ except ImportError:  # pragma: no cover
     ProcessSession = None  # type: ignore[assignment]
 
 try:  # noqa: E402
-    from qemutests.harness.result import RunArchive, RunReport
+    from qemutests.harness.result import RunArchive, RunReport, parse_v1
 except ImportError:  # pragma: no cover
     RunArchive = None  # type: ignore[assignment]
     RunReport = None  # type: ignore[assignment]
+    parse_v1 = None  # type: ignore[assignment]
 
 try:  # noqa: E402
-    from qemutests.check_kernel_selftest import failures
+    from qemutests.check_kernel_selftest import v1_failures
 except ImportError:  # pragma: no cover — script-mode fallback
-    from check_kernel_selftest import failures  # type: ignore[no-redef]
+    from check_kernel_selftest import v1_failures  # type: ignore[no-redef]
 
 
 # The suite id used for the archive path and the RunReport.
@@ -211,6 +214,9 @@ def _write_report(
     status: str,
     runner_exit_code: int,
     session,
+    declared_ids=None,
+    observed_ids=None,
+    case_outcomes=None,
 ) -> None:
     """Persist a RunReport; best-effort (never raises)."""
     if archive is None or RunReport is None:
@@ -227,8 +233,8 @@ def _write_report(
             profile=profile,
             suite=SUITE,
             request=None,
-            declared_ids=None,
-            observed_ids=None,
+            declared_ids=declared_ids,
+            observed_ids=observed_ids,
             argv=list(argv),
             cpu_count=int(cpu),
             memory_mib=_memory_mib(memory),
@@ -248,7 +254,8 @@ def _write_report(
             ),
             status=status,
             count_unit="suite",
-            outcomes=[{"errors": list(errors)}],
+            outcomes=[{"errors": list(errors),
+                       "cases": dict(case_outcomes or {})}],
             stdout_log=str(archive.run_dir / "stdout.log"),
             stderr_log=str(archive.run_dir / "stderr.log"),
         )
@@ -343,12 +350,23 @@ def run_kernel_selftest(
         )
         return 2
 
-    # ── semantic gate ────────────────────────────────────────────
-    errors = list(failures(log))
+    # ── semantic gate: protocol v1 only (no legacy fallback) ─────
+    errors = list(v1_failures(log))
     if _panic_in(tail):
         errors.append("kernel panic in 1-second observation window")
     ok = not errors
     status = "PASS" if ok else "FAIL"
+
+    # Record the declared/observed case sets for the archive (forensic;
+    # the v1 gate above is the decision).
+    declared_ids = observed_ids = None
+    case_outcomes = None
+    if parse_v1 is not None:
+        pr = parse_v1(log, suite=SUITE)
+        declared_ids = set(pr.selected)
+        observed_ids = set(pr.terminal)
+        case_outcomes = {cid: pr.terminal_status.get(cid, "")
+                         for cid in sorted(pr.selected)}
 
     for error in errors:
         print(f"ERROR: kernel selftest: {error}", file=sys.stderr)
@@ -357,7 +375,8 @@ def run_kernel_selftest(
         archive, argv=argv, profile=profile, cpu=cpu, memory=memory,
         firmware=firmware, image=image, started_monotonic=started_monotonic,
         errors=errors, status=status, runner_exit_code=(0 if ok else 1),
-        session=session,
+        session=session, declared_ids=declared_ids, observed_ids=observed_ids,
+        case_outcomes=case_outcomes,
     )
     if ok:
         print("PASS: kernel selftest completed (boot + scheduled task markers)")

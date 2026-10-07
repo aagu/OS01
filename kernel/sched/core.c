@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <core/assert.h>
 #include <core/printk.h>   // serial_printk
+#include <selftest/result.h> // selftest_record_late / selftest_end_run
 
 // ── Preemption flag ──────────────────────────────────────
 // Now per-CPU (percpu_t.need_resched, offset 8 from GS base).
@@ -591,8 +592,8 @@ void task_init(void)
     // schedule().  Two kernel threads increment a shared counter
     // under mutex_lock 1000 times each, verifying mutual exclusion.
     {
-        extern void test_kernel_mutex(void);
-        test_kernel_mutex();
+        extern int test_kernel_mutex(void);
+        selftest_record_late("kernel_mutex", test_kernel_mutex());
     }
 #endif
 
@@ -600,8 +601,8 @@ void task_init(void)
     // ── kthread self-reap selftest ───────────────────────────
     // Must run after scheduler_ok=1 so schedule() works.
     {
-        extern void test_kthread_self_reap(void);
-        test_kthread_self_reap();
+        extern int test_kthread_self_reap(void);
+        selftest_record_late("kthread_self_reap", test_kthread_self_reap());
     }
 #endif
 
@@ -610,8 +611,8 @@ void task_init(void)
     // After scheduler_ok=1 (kernel_thread + schedule() work).
     // files_unpin is now a synchronous drop-to-zero → files_free.
     {
-        extern void test_fd_refcount(void);
-        test_fd_refcount();
+        extern int test_fd_refcount(void);
+        selftest_record_late("fd_refcount", test_fd_refcount());
     }
 #endif
 
@@ -619,8 +620,8 @@ void task_init(void)
     // ── pgrp signal selftest ─────────────────────────────────
     // After scheduler_ok=1 (kernel_thread + schedule() work).
     {
-        extern void test_pgrp_signal(void);
-        test_pgrp_signal();
+        extern int test_pgrp_signal(void);
+        selftest_record_late("pgrp_signal", test_pgrp_signal());
     }
 #endif
 
@@ -628,9 +629,12 @@ void task_init(void)
     // ── tty VINTR selftest ───────────────────────────────────
     // After scheduler_ok=1 (kernel_thread + schedule() work).
     {
-        extern void test_tty_vintr(void);
-        test_tty_vintr();
+        extern int test_tty_vintr(void);
+        selftest_record_late("tty_vintr", test_tty_vintr());
     }
+    // All scheduled cases reported: emit the single END record.  A late
+    // case that never ran is turned into a FAIL by selftest_end_run().
+    selftest_end_run();
     serial_printk("[selftest] task tests done\n");
 #endif
 

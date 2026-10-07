@@ -9,6 +9,7 @@
 #include <arch/x86_64/boot.h> // x86_64_boot_early/_memory/_subsystems/_device_nodes
 #include <arch/x86_64/smp_boot.h> // x86_64_boot_percpu / _aps
 #include <core/selftest.h>    // selftest_run_all
+#include <selftest/result.h>  // protocol-v1 coordinator (begin/run/end)
 #include <sync/futex.h>       // futex_init
 #include <tty/console.h>      // console_init
 #include <tty/pty.h>          // pty_init
@@ -142,6 +143,12 @@ int kernel_main(const struct boot_context *bootctx)
 
 #ifdef OS01_SELFTEST
     serial_printk("[selftest] running built-in tests...\n");
+    /* Declare the complete protocol-v1 selection before START: the
+     * registered boot-time (early) cases plus the five scheduled cases
+     * task_init() runs later.  selftest_run_all() executes the early
+     * subset; task_init() records the late cases and emits the single
+     * END via selftest_end_run(). */
+    selftest_begin_run(5);
     selftest_run_all();
     serial_printk("[selftest] done\n");
 #endif

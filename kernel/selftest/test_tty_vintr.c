@@ -52,10 +52,13 @@ static uint64_t vintr_thread_fn(uint64_t arg) {
     return 0;
 }
 
-// NOTE: non-static void (called from task_init via extern). NOT registered via
+// NOTE: non-static int (called from task_init via extern). NOT registered via
 // SELFTEST() macro. Matches test_kthread_self_reap / test_fd_refcount.
-void test_tty_vintr(void)
+// Returns 0 on PASS, nonzero on FAIL; the caller (task_init) reports it via
+// selftest_record_late().
+int test_tty_vintr(void)
 {
+    int rc = -1;
     serial_printk("[selftest] test_tty_vintr... ");
     vintr_seen = 0;
     vintr_thread_pid = 0;
@@ -64,7 +67,7 @@ void test_tty_vintr(void)
     tty_t *dev_tty = get_dev_tty();
     if (!dev_tty) {
         serial_printk("FAIL: get_dev_tty returned NULL\n");
-        return;
+        return -1;
     }
 
     // 1. Spawn kernel thread via create_kthread() (returns task_t*;
@@ -73,7 +76,7 @@ void test_tty_vintr(void)
     task_t *t = create_kthread(vintr_thread_fn, 0, "vintr_test");
     if (!t) {
         serial_printk("FAIL: create_kthread returned NULL\n");
-        return;
+        return -1;
     }
 
     // 2. Spin until thread is in TASK_INTERRUPTIBLE (bounded)
@@ -116,6 +119,7 @@ void test_tty_vintr(void)
         serial_printk("FAIL: thread did not receive SIGINT\n");
     } else {
         serial_printk("PASS\n");
+        rc = 0;
     }
 
     // Cleanup
@@ -128,6 +132,7 @@ out:;
     t->signal |= (1ULL << SIGINT);
     task_wake(t);
     spin_unlock_irqrestore(&task_list_lock, cleanup_flags);
+    return rc;
 }
 
 #endif // OS01_SELFTEST

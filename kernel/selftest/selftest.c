@@ -1,4 +1,5 @@
 #include <core/selftest.h>
+#include <selftest/result.h>   /* selftest_register / _register_late / coordinator */
 #include <core/printk.h>
 #include <memory/slab.h>
 #include <memory/vmm.h>
@@ -9,21 +10,6 @@
 #include <fs/file.h>
 #include <string.h>
 #include <stdlib.h>
-
-#define SELFTEST_MAX 32
-static selftest_entry_t test_table[SELFTEST_MAX];
-static int test_count = 0;
-
-void selftest_register(const char *name, selftest_fn fn)
-{
-    if (test_count >= SELFTEST_MAX) {
-        serial_printk("[selftest] ERROR: test table full (%s)\n", name);
-        return;
-    }
-    test_table[test_count].name = name;
-    test_table[test_count].fn   = fn;
-    test_count++;
-}
 
 // ── Built-in tests ────────────────────────────────────────
 
@@ -107,11 +93,12 @@ static int test_spinlock_basic(void)
     return 0;
 }
 
-static int test_pipe_basic(void)
-{
-    (void)0;
-    return 0;
-}
+/* NOTE: the former no-op pipe test (which returned 0 and so produced a
+ * bogus PASS) is deliberately gone from both the body list and the
+ * registration below.  Spec §5.2: an unimplemented test must be removed
+ * from registration or reported as a SKIP with a reason — it must never
+ * emit PASS.  Re-add a real pipe test here, registered below, when one
+ * exists. */
 
 int test_rwlock_basic(void);
 int test_seqlock_basic(void);
@@ -148,8 +135,12 @@ int test_arch_atomic_u64_or_and(void);
 int entropy_quality_selftest_current_mode(void);
 #endif
 
-// ── Test runner ────────────────────────────────────────────
-int selftest_run_all(void)
+// ── Registration ───────────────────────────────────────────
+// Populated once per run by selftest_begin_run() (kernel/selftest/result.c),
+// which then executes the early subset via selftest_run_all().  The
+// protocol publisher emits START/SELECT/BEGIN/terminal/END around this
+// selection; the `[selftest] ...` lines are diagnostics only.
+void selftest_register_builtin_tests(void)
 {
     selftest_register("slab_alloc_free",   test_slab_alloc_free);
     selftest_register("slab_many_sizes",   test_slab_many_sizes);
@@ -181,7 +172,6 @@ int selftest_run_all(void)
     selftest_register("rwlock_basic",      test_rwlock_basic);
     selftest_register("seqlock_basic",     test_seqlock_basic);
 #endif /* !__aarch64__ */
-    selftest_register("pipe_basic",        test_pipe_basic);
 
 #ifdef OS01_SELFTEST
 #if !defined(__aarch64__)
@@ -210,21 +200,20 @@ int selftest_run_all(void)
     selftest_register("entropy_quality_selftest_current_mode",
                       entropy_quality_selftest_current_mode);
 #endif /* !__aarch64__ */
-#endif
 
-    int passed = 0, failed = 0;
-    for (int i = 0; i < test_count; i++) {
-        serial_printk("[selftest] %s... ", test_table[i].name);
-        int rc = test_table[i].fn();
-        if (rc == 0) {
-            serial_printk("PASS\n");
-            passed++;
-        } else {
-            serial_printk("FAIL (%d)\n", rc);
-            failed++;
-        }
-    }
-    serial_printk("[selftest] %d total: %d passed, %d failed\n",
-                  passed + failed, passed, failed);
-    return failed;
+    /* ── Scheduled (late) cases ─────────────────────────────────
+     * Executed from task_init() in kernel/sched/core.c once the
+     * scheduler is live and reported with selftest_record_late().
+     * These ids are the two-sided contract with the record calls in
+     * sched/core.c: a declared late case that never runs is a failure,
+     * so a drifting id cannot silently drop a scheduled test.  AArch64
+     * has no scheduler-side tests, so it declares none. */
+#if !defined(__aarch64__)
+    selftest_register_late("kernel_mutex");
+    selftest_register_late("kthread_self_reap");
+    selftest_register_late("fd_refcount");
+    selftest_register_late("pgrp_signal");
+    selftest_register_late("tty_vintr");
+#endif /* !__aarch64__ */
+#endif /* OS01_SELFTEST */
 }

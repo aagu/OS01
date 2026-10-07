@@ -130,10 +130,10 @@ out:
     return 0;
 }
 
-static void run_get_detach_race(void)
+static int run_get_detach_race(void)
 {
     race_fs = files_alloc();            // harness ref: refcount == 1
-    if (!race_fs) { serial_printk("FAIL (files_alloc)\n"); return; }
+    if (!race_fs) { serial_printk("FAIL (files_alloc)\n"); return -1; }
 
     r3_start = 0; r3_abort = 0; r3_reader_done = 0; r3_writer_done = 0;
     r3_reader_cpu_mask = 0; r3_writer_cpu_mask = 0;
@@ -157,7 +157,7 @@ static void run_get_detach_race(void)
         if (writer_ok) wait_flag_timeout(&r3_writer_done);
         files_unpin(race_fs);
         serial_printk("FAIL (kthread create)\n");
-        return;
+        return -1;
     }
 
     __atomic_store_n(&r3_start, 1, __ATOMIC_RELEASE);   // release both workers
@@ -170,25 +170,31 @@ static void run_get_detach_race(void)
         // its own and drop its ref).  Deliberately LEAK the harness ref rather
         // than free a table a live worker may touch.
         serial_printk("FAIL (timeout reader=%d writer=%d)\n", rd, wd);
-        return;
+        return -1;
     }
 
     int cross_cpu = (r3_reader_cpu_mask & r3_writer_cpu_mask) == 0
                     && r3_reader_cpu_mask != 0 && r3_writer_cpu_mask != 0;
 
-    if (r3_writer_err)
+    int rc = 0;
+    if (r3_writer_err) {
         serial_printk("FAIL (writer_err=%d)\n", r3_writer_err);
-    else if (!(r3_saw_present && r3_saw_absent))
+        rc = -1;
+    } else if (!(r3_saw_present && r3_saw_absent)) {
         serial_printk("FAIL (no slot interaction present=%d absent=%d)\n",
                       r3_saw_present, r3_saw_absent);
-    else if (!cross_cpu)
+        rc = -1;
+    } else if (!cross_cpu) {
         serial_printk("FAIL (no cross-CPU overlap reader=%x writer=%x)\n",
                       r3_reader_cpu_mask, r3_writer_cpu_mask);
-    else
+        rc = -1;
+    } else {
         serial_printk("PASS (cross-CPU reader=%x writer=%x)\n",
                       r3_reader_cpu_mask, r3_writer_cpu_mask);
+    }
 
     files_unpin(race_fs);               // harness ref → refcount 0 → synchronous files_free
+    return rc;
 }
 
 // ── Scenario 2: pin-vs-detach (R2) ────────────────────────
@@ -239,7 +245,7 @@ static uint64_t pin_reader(uint64_t arg)
     return 0;
 }
 
-static void run_pin_detach_race(void)
+static int run_pin_detach_race(void)
 {
     r2_reader_go = 0; r2_reader_started = 0; r2_holder_entered = 0;
     r2_reader_done = 0;
@@ -247,7 +253,7 @@ static void run_pin_detach_race(void)
     r2_saw_present = 0; r2_saw_absent = 0;
 
     int holder_pid = kernel_thread(race_holder, 0, PF_KTHREAD);
-    if (holder_pid < 0) { serial_printk("FAIL (holder create)\n"); return; }
+    if (holder_pid < 0) { serial_printk("FAIL (holder create)\n"); return -1; }
 
     int reader_pid = kernel_thread(pin_reader, (uint64_t)holder_pid, PF_KTHREAD);
     if (reader_pid < 0) {
@@ -255,14 +261,14 @@ static void run_pin_detach_race(void)
         // We never touch holder task_t* again.
         __atomic_store_n(&r2_reader_started, 1, __ATOMIC_RELEASE);
         serial_printk("FAIL (reader create)\n");
-        return;
+        return -1;
     }
 
     __atomic_store_n(&r2_reader_go, 1, __ATOMIC_RELEASE);   // release reader
 
     if (!wait_flag_timeout(&r2_reader_done)) {
         serial_printk("FAIL (timeout)\n");
-        return;
+        return -1;
     }
 
     int holder_entered = __atomic_load_n(&r2_holder_entered, __ATOMIC_ACQUIRE);
@@ -275,26 +281,34 @@ static void run_pin_detach_race(void)
                     (r2_reader_cpu_mask & (1U << holder_cpu)) == 0;
     }
 
-    if (!(r2_saw_present && r2_saw_absent))
+    if (!(r2_saw_present && r2_saw_absent)) {
         serial_printk("FAIL (no detach observed present=%d absent=%d)\n",
                       r2_saw_present, r2_saw_absent);
-    else if (!holder_entered)
+        return -1;
+    } else if (!holder_entered) {
         serial_printk("FAIL (holder never entered)\n");
-    else if (!cross_cpu)
+        return -1;
+    } else if (!cross_cpu) {
         serial_printk("FAIL (no cross-CPU reader=%x holder=%d)\n",
                       r2_reader_cpu_mask, r2_holder_cpu);
-    else
-        serial_printk("PASS (cross-CPU reader=%x holder=%d)\n",
-                      r2_reader_cpu_mask, r2_holder_cpu);
+        return -1;
+    }
+    serial_printk("PASS (cross-CPU reader=%x holder=%d)\n",
+                  r2_reader_cpu_mask, r2_holder_cpu);
+    return 0;
 }
 
-void test_fd_refcount(void)
+int test_fd_refcount(void)
 {
+    int rc = 0;
     serial_printk("[selftest] fd_refcount get-vs-detach... ");
-    run_get_detach_race();
+    if (run_get_detach_race() != 0)
+        rc = -1;
 
     serial_printk("[selftest] fd_refcount pin-vs-detach... ");
-    run_pin_detach_race();
+    if (run_pin_detach_race() != 0)
+        rc = -1;
+    return rc;
 }
 
 #endif // OS01_SELFTEST

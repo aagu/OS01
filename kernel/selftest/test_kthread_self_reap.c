@@ -74,7 +74,7 @@ static int test_kthread_self_reap_once(void)
     return 0;
 }
 
-void test_kthread_self_reap(void)
+int test_kthread_self_reap(void)
 {
     int ok = 0, fail = 0;
     serial_printk("[selftest] kthread_self_reap... ");
@@ -82,6 +82,7 @@ void test_kthread_self_reap(void)
     else { fail++; serial_printk("FAIL\n"); }
     serial_printk("[selftest] kthread_self_reap: %d passed, %d failed\n",
                   ok, fail);
+    return fail;
 }
 
 #endif // OS01_SELFTEST
