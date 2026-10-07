@@ -1,16 +1,54 @@
 #!/usr/bin/env python3
-"""Acceptance harness for the AArch64 UEFI PSCI SMP bring-up."""
+"""Acceptance harness for the AArch64 UEFI PSCI SMP bring-up.
+
+Task 10 of the lightweight test-framework plan moves the common
+process/output/archive code onto ``ProcessSession`` (Task 3) and
+``RunArchive``/``RunReport`` (Task 4).  The suite-owned acceptance rules
+(``passed`` / ``degraded_passed`` / ``acceptance_evidence`` / the
+diagnostic-DTB mechanism) are unchanged — only the process boundary and
+the per-invocation evidence archive were replaced.
+
+The suite does **not** publish the v1 ``[TEST]`` protocol, so each
+invocation is archived as a ``suite``-unit result (spec §6.2) — there are
+no fabricated guest case records.
+"""
 
 import argparse
 import hashlib
 import json
 import os
 import re
-import selectors
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+
+# Running this file as a script (``python3 qemutests/aarch64_uefi_smp.py``)
+# puts the *qemutests* directory on ``sys.path[0]`` — not the repo root — so
+# ``import qemutests.*`` would fail.  Bootstrap the repo root explicitly
+# (Ruling 7; same pattern as ``run_kernel_selftest.py``).
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+try:  # noqa: E402 — path bootstrap must precede this import
+    from qemutests.harness.process import ProcessSession
+except ImportError:  # pragma: no cover
+    ProcessSession = None  # type: ignore[assignment]
+
+try:  # noqa: E402
+    from qemutests.harness.result import RunArchive, RunReport
+except ImportError:  # pragma: no cover
+    RunArchive = None  # type: ignore[assignment]
+    RunReport = None  # type: ignore[assignment]
+
+
+# Suite id for the archive path and the RunReport.
+SUITE = "aarch64-uefi-smp"
+
+# Post-completion observation window (spec §5.3).
+OBSERVE_SECONDS = 1.0
 
 
 complete_log_for_4_cpus = """\
@@ -748,6 +786,85 @@ def file_sha256(path: str) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def _sha256_path(path) -> str | None:
+    """Hex SHA-256 of ``path``, or None if it is unreadable."""
+    if path is None:
+        return None
+    try:
+        return file_sha256(str(path))
+    except (OSError, TypeError):
+        return None
+
+
+def _git_revision() -> tuple[str, bool]:
+    """Best-effort (revision, dirty) for the RunReport."""
+    rev, dirty = "unknown", False
+    try:
+        r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=_ROOT,
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            rev = r.stdout.strip()
+        d = subprocess.run(["git", "status", "--porcelain"], cwd=_ROOT,
+                           capture_output=True, text=True, timeout=5)
+        if d.returncode == 0:
+            dirty = bool(d.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return rev, dirty
+
+
+def _write_suite_report(archive, *, argv, profile, cpu, memory_mib,
+                        firmware, image, started_monotonic, status,
+                        runner_exit_code, session, errors, extra=None) -> None:
+    """Persist a suite-unit RunReport; best-effort (never raises).
+
+    The AArch64 suites have no guest v1 cases, so ``count_unit`` is
+    always ``suite`` and ``declared_ids`` / ``observed_ids`` stay None —
+    an explicit adapter, never fabricated case records (spec §6.2)."""
+    if archive is None or RunReport is None:
+        return
+    try:
+        rev, dirty = _git_revision()
+        outcomes = [{"errors": list(errors)}]
+        if extra:
+            outcomes[0].update(extra)
+        report = RunReport(
+            schema_version=1,
+            run_id=archive.run_dir.name,
+            git_revision=rev,
+            git_dirty=dirty,
+            profile=profile,
+            suite=SUITE,
+            request=None,
+            declared_ids=None,
+            observed_ids=None,
+            argv=list(argv),
+            cpu_count=int(cpu),
+            memory_mib=int(memory_mib or 0),
+            tool_versions={},
+            firmware_path=firmware or None,
+            firmware_sha256_before=_sha256_path(firmware),
+            firmware_sha256_after=_sha256_path(firmware),
+            image_path=image or None,
+            image_sha256_before=_sha256_path(image),
+            image_sha256_after=_sha256_path(image),
+            utc_started_at=datetime.now(timezone.utc).isoformat(),
+            duration_s=max(0.0, time.monotonic() - started_monotonic),
+            runner_exit_code=runner_exit_code,
+            child_exit_code=(session.returncode if session is not None else None),
+            stopped_by_runner=bool(session is not None and session.stopped_by_runner),
+            status=status,
+            count_unit="suite",
+            outcomes=outcomes,
+            stdout_log=str(archive.run_dir / "stdout.log"),
+            stderr_log=str(archive.run_dir / "stderr.log"),
+        )
+        archive.write(report)
+    except Exception as exc:  # noqa: BLE001 — evidence must not mask the run
+        print(f"[{SUITE}] warning: failed to write RunReport: {exc}",
+              file=sys.stderr)
+
+
 def generate_diagnostic_dtb(qemu: str, log_dir: str, cpus: int, ram_mib: int = 512) -> str:
     """Materialize a packed QEMU-generated virt DTB into the run log dir.
 
@@ -784,18 +901,34 @@ def generate_diagnostic_dtb(qemu: str, log_dir: str, cpus: int, ram_mib: int = 5
     return packed
 
 
-def run_case(args: argparse.Namespace, cpus: int, iteration: int) -> bool:
-    """Run one QEMU case with a monotonic deadline and non-blocking drains."""
+def run_case(args: argparse.Namespace, cpus: int, iteration: int, *,
+             session_factory=None, build_dir=None, profile="default") -> bool:
+    """Run one QEMU case through ``ProcessSession`` + ``RunArchive``.
+
+    Only the common process/output/archive code is delegated: the
+    acceptance decision still comes from ``acceptance_evidence`` (suite
+    owned).  When ``build_dir`` is given, each case gets its own
+    ``RunArchive`` directory and a suite-unit ``result.json``.
+    """
+    if session_factory is None:
+        session_factory = ProcessSession
+    started = time.monotonic()
+
     diagnostic_dtb = None
     if getattr(args, "diagnostic_dtb", None):
         diagnostic_dtb = generate_diagnostic_dtb(
             args.qemu, args.log_dir, cpus, getattr(args, "ram_mib", 512))
-    prefix = Path(args.log_dir) / f"cpus-{cpus}-run-{iteration}"
-    stdout_path = prefix.with_suffix(".stdout.log")
-    stderr_path = prefix.with_suffix(".stderr.log")
+
+    archive = None
+    if build_dir and RunArchive is not None:
+        archive = RunArchive.create(Path(build_dir), SUITE)
+        run_dir = archive.run_dir
+    else:
+        run_dir = Path(args.log_dir) / f"cpus-{cpus}-run-{iteration}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
     command = qemu_command(args, cpus, diagnostic_dtb)
-    started = time.monotonic()
-    metadata_path = prefix.with_suffix(".metadata.json")
+    metadata_path = run_dir / "metadata.json"
     metadata = {
         "command": command, "cpus": cpus, "ram_mib": getattr(args, "ram_mib", 512),
         "run": iteration,
@@ -809,76 +942,77 @@ def run_case(args: argparse.Namespace, cpus: int, iteration: int) -> bool:
     if diagnostic_dtb:
         metadata["diagnostic_dtb_sha256"] = file_sha256(diagnostic_dtb)
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
-    stdout = bytearray()
-    stderr = bytearray()
-    timed_out = False
-    complete = False
-    returncode = None
-    try:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
-    except OSError as error:
-        print(json.dumps({"event": "spawn-error", "cpus": cpus, "run": iteration, "error": str(error)}))
-        return False
-    if process.stdout is None or process.stderr is None:
-        # stdout=PIPE/stderr=PIPE guarantees both are set; this guards the
-        # type narrowing that selectors.DefaultSelector.register needs.
+
+    if session_factory is None:
+        print(json.dumps({"event": "spawn-error", "cpus": cpus,
+                          "run": iteration,
+                          "error": "ProcessSession is unavailable"}))
         return False
 
-    # key by file descriptor (int) so selector.get_key and select()'s
-    # key.fd both stay int-keyed and consistent with the streams map.
-    streams = {process.stdout.fileno(): (process.stdout, stdout),
-               process.stderr.fileno(): (process.stderr, stderr)}
-    selector = selectors.DefaultSelector()
-    deadline = time.monotonic() + args.timeout
+    session = None
     try:
-        for fd, (stream, _) in streams.items():
-            os.set_blocking(fd, False)
-            selector.register(stream, selectors.EVENT_READ)
-        while selector.get_map():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                timed_out = True
-                break
-            for key, _ in selector.select(remaining):
-                chunk = os.read(key.fd, 4096)
-                if chunk:
-                    streams[key.fd][1].extend(chunk)
-                else:
-                    selector.unregister(key.fileobj)
-            text = (stdout + stderr).decode("utf-8", errors="replace")
-            if acceptance_evidence(args, text, cpus):
-                complete = True
-                break
-            if process.poll() is not None and not selector.get_map():
-                break
-    finally:
-        selector.close()
-        if process.poll() is None:
-            process.terminate()
+        session = session_factory(argv=command, run_dir=run_dir,
+                                  timeout_s=args.timeout)
+        session.start()
+        # Wait for the suite-owned acceptance evidence, then observe a
+        # short window for a late kernel failure before stopping QEMU
+        # (spec §5.3) — the runner owns termination, QEMU runs forever
+        # under ``-no-shutdown``.
+        session.wait_for(lambda text: acceptance_evidence(args, text, cpus))
+        session.observe(OBSERVE_SECONDS)
+        session.stop()
+        session.close()
+    except Exception as error:  # noqa: BLE001 — a launch/OS error is ERROR
+        if session is not None:
             try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-        returncode = process.returncode
-        stdout_path.write_bytes(stdout)
-        stderr_path.write_bytes(stderr)
+                session.close()
+            except Exception:
+                pass
+        print(json.dumps({"event": "spawn-error", "cpus": cpus,
+                          "run": iteration, "error": str(error)}))
+        _write_suite_report(
+            archive, argv=command, profile=profile, cpu=cpus,
+            memory_mib=getattr(args, "ram_mib", 512), firmware=args.firmware,
+            image=args.image, started_monotonic=started, status="ERROR",
+            runner_exit_code=1, session=session,
+            errors=[f"spawn error: {error}"])
+        return False
 
-    text = (stdout + stderr).decode("utf-8", errors="replace")
+    text = session.text
+    timed_out = session.timed_out
+    complete = not timed_out
     accepted = acceptance_evidence(args, text, cpus)
     result = accepted and not timed_out
     metadata.update({
         "compiled_no_ack_cpu": [int(value) for value in re.findall(
             r"^\[smp-test\] no_ack_cpu=(\d+)$", text.replace("\r", ""), re.MULTILINE)],
         "elapsed_seconds": time.monotonic() - started,
-        "timeout": timed_out, "complete": complete, "returncode": returncode,
+        "timeout": timed_out, "complete": complete,
+        "returncode": session.returncode,
         "result": "PASS" if result else "FAIL",
     })
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
+
+    errors = []
+    if timed_out:
+        errors.append("timeout before acceptance evidence")
+    elif not accepted:
+        errors.append("acceptance evidence not satisfied")
+    _write_suite_report(
+        archive, argv=command, profile=profile, cpu=cpus,
+        memory_mib=getattr(args, "ram_mib", 512), firmware=args.firmware,
+        image=args.image, started_monotonic=started,
+        status="PASS" if result else "FAIL",
+        runner_exit_code=0 if result else 1, session=session, errors=errors,
+        extra={"timeout": timed_out, "complete": complete})
+
     print(json.dumps({
-        "event": "case", "cpus": cpus, "run": iteration, "result": "PASS" if result else "FAIL",
-        "timeout": timed_out, "complete": complete, "returncode": returncode,
-        "stdout": str(stdout_path), "stderr": str(stderr_path),
+        "event": "case", "cpus": cpus, "run": iteration,
+        "result": "PASS" if result else "FAIL",
+        "timeout": timed_out, "complete": complete,
+        "returncode": session.returncode,
+        "stdout": str(run_dir / "stdout.log"),
+        "stderr": str(run_dir / "stderr.log"),
     }))
     return result
 
@@ -928,6 +1062,13 @@ def main() -> int:
                              "use acpi=off and a QEMU-generated DTB. Pass an explicit "
                              "PATH to a prebuilt DTB or 'auto' to materialize one "
                              "into the run log dir. One --cpus value matching the DTB.")
+    parser.add_argument("--build-dir", default=None,
+                        help="build dir for the per-case run archive "
+                             "(build/<profile>/logs/tests/<suite>/...), "
+                             "supplied by Make")
+    parser.add_argument("--profile", default=os.environ.get("OS01_PROFILE",
+                                                             "default"),
+                        help="profile name recorded in the report")
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -942,7 +1083,8 @@ def main() -> int:
     if args.diagnostic_dtb and args.diagnostic_dtb != "auto" and len(args.cpus) != 1:
         parser.error("--diagnostic-dtb requires one --cpus value matching the DTB")
     Path(args.log_dir).mkdir(parents=True, exist_ok=True)
-    outcomes = [run_case(args, cpus, iteration)
+    outcomes = [run_case(args, cpus, iteration,
+                         build_dir=args.build_dir, profile=args.profile)
                 for cpus in args.cpus for iteration in range(1, args.repeat + 1)]
     return 0 if all(outcomes) else 1
 
