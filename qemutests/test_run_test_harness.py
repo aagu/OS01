@@ -536,34 +536,74 @@ class FileSerialExitPathTests(unittest.TestCase):
             tester.cleanup()
 
 
+def _systest_v1_trace(ids, *, failed=(), result=None):
+    """Build a protocol-v1 systest transcript for the runner fixtures.
+
+    ``result`` is the legacy ``[SYS TEST] RESULT`` handshake line; by
+    default it deliberately under-reports (0 passed) so a runner still
+    keying on it cannot agree with the v1 records by accident.
+    """
+    failed = set(failed)
+    lines = [f"[TEST] START v=1 suite=systest expected={len(ids)}"]
+    for cid in ids:
+        lines.append(f"[TEST] SELECT {cid} required=1")
+    for cid in ids:
+        lines.append(f"[TEST] BEGIN {cid}")
+        lines.append(
+            f"[TEST] FAIL {cid} reason=assertion_failures_1"
+            if cid in failed else f"[TEST] PASS {cid}")
+    passed = len(ids) - len(failed)
+    if result is None:
+        result = "[SYS TEST] RESULT: 0 passed, 0 failed"
+    lines.append(result)
+    lines.append(
+        f"[TEST] END suite=systest total={len(ids)} "
+        f"passed={passed} failed={len(failed)} skipped=0")
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
 class SystestSuiteTests(unittest.TestCase):
-    """systest suite: COW TTY handshake + [SYS TEST] RESULT line."""
+    """systest suite: COW TTY handshake + protocol-v1 gate.
+
+    The v1 trace is the only success gate (Task 8).  The COW TTY
+    handshakes and the ``/bin/terminal`` rejection are preserved; the
+    legacy ``[SYS TEST] RESULT`` line survives as a handshake marker
+    only.
+    """
+
+    _IDS = ["startup_layout", "putchar", "write", "read"]
 
     CHUNKS_POSITIVE = [
         b"[COW TTY READY 0]\n",
         b"[COW TTY READY 1]\n",
         b"[COW TTY READY 2]\n",
         b"[COW TTY READY 3]\n",
-        b"[SYS TEST] RESULT: 32 passed, 0 failed\n",
+        _systest_v1_trace(_IDS, result="[SYS TEST] RESULT: 32 passed, 0 failed"),
     ]
 
+    # A v1 FAIL record with a *successful* legacy RESULT line: only the
+    # v1 record may reject the run.
     CHUNKS_NEGATIVE = [
         b"[COW TTY READY 0]\n",
         b"[COW TTY READY 1]\n",
-        b"[SYS TEST] RESULT: 30 passed, 2 failed\n",
+        _systest_v1_trace(
+            _IDS, failed=["write"],
+            result="[SYS TEST] RESULT: 4 passed, 0 failed"),
     ]
 
     CHUNKS_OLD_PASS_REPLAY = [
-        # Old PASS from a prior /bin/systest run.  Real systest
-        # prints "[SYS TEST] RESULT: N passed, M failed".
+        # Old PASS from a prior /bin/systest run, plus a bare v1
+        # terminal with no START/BEGIN.  Neither a legacy RESULT line
+        # nor a replayed [TEST] PASS may be read as this run's result.
         b"PASS: previous systest run completed 2025-09-01\n",
+        b"[TEST] PASS write\n",
         b"[COW TTY READY 0]\n",
-        b"[SYS TEST] RESULT: 0 passed, 0 failed\n",
+        b"[SYS TEST] RESULT: 32 passed, 0 failed\n",
     ]
 
     CHUNKS_LATE_PANIC = [
         b"[COW TTY READY 0]\n",
-        b"[SYS TEST] RESULT: 32 passed, 0 failed\n",
+        _systest_v1_trace(_IDS, result="[SYS TEST] RESULT: 32 passed, 0 failed"),
         b"[kernel panic] not really a panic but treated as one\n",
     ]
 
@@ -603,11 +643,10 @@ class SystestSuiteTests(unittest.TestCase):
             tester.cleanup()
 
     def test_systest_old_pass_replay_rejected(self) -> None:
-        # Cursor-restart semantics: a historical PASS line that
-        # appears BEFORE the current run's first COW TTY READY
-        # marker cannot be confused for the current run's RESULT
-        # line because the runner reads the buffer AFTER the COW
-        # TTY READY handshake, ignoring any earlier text.
+        # A historical PASS (legacy string or a bare [TEST] terminal
+        # with no START/BEGIN) must not be accepted as this run's
+        # result.  parse_v1 requires an anchored START..END trace, so
+        # the replayed PASS is a protocol error.
         tester = self._runner_with(self.CHUNKS_OLD_PASS_REPLAY)
         try:
             self.assertFalse(self.rt.test_systest(tester))

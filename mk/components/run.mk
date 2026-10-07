@@ -405,7 +405,7 @@ test-pmm-boot-reservation:
 # call against the explicit list — never auto-discovery, never an
 # implicit search for `test_*.py`. Every fixture replaces
 # subprocess.Popen with a fake, so no QEMU process can ever start.
-TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests
+TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol
 .PHONY: test-harness
 test-harness:
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -754,7 +754,13 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  DRIVER_MATRIX_DRIVER_SMP="$(DRIVER_MATRIX_DRIVER_SMP)" \
 	  $(MAKE) --no-print-directory test-qemu-driver-model || exit 1; \
 	else \
-	  $(MAKE) $(TEST_QEMU_FLAVOR_$(SUITE)) image || exit 1; \
+	  if [ "$(SUITE)" = "systest" ] && [ -n "$(CASE)" ]; then \
+	    mkdir -p "$(abspath $(BUILD_DIR))/config" || exit 1; \
+	    printf 'tty1:once:/bin/systest --case %s\n' "$(CASE)" > "$(abspath $(BUILD_DIR))/config/inittab.systest.case" || exit 1; \
+	    $(MAKE) OS01_SYSTEST=1 INITTAB_FILE="$(abspath $(BUILD_DIR))/config/inittab.systest.case" image || exit 1; \
+	  else \
+	    $(MAKE) $(TEST_QEMU_FLAVOR_$(SUITE)) image || exit 1; \
+	  fi; \
 	  if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
 	    sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after" || exit 1; \
 	    cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after" || exit 1; \
@@ -765,6 +771,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  FB_RESOLUTION_TEST="$(FB_RESOLUTION_TEST)" \
 	  OS01_BUILD_DIR="$(abspath $(BUILD_DIR))" \
 	  OS01_RESOLUTION_RESULT_DIR="$(abspath $(BUILD_DIR)/test-results/resolution)" \
+	  SYSTEST_CASE="$(CASE)" \
 	  python3 qemutests/run_test.py $(SUITE); \
 	fi
 
@@ -1010,7 +1017,7 @@ help:
 	@echo ''
 	@echo 'Test (6 canonical buckets; varied capability):'
 	@printf '  %-22s %-13s %s\n' \
-		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model>)';
+		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model>, CASE=<id> selects one systest case)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \

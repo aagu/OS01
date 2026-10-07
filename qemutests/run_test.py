@@ -101,10 +101,11 @@ except ImportError:  # pragma: no cover
 # monkey-patch ``run_test.subprocess.Popen`` without needing the
 # harness submodule installed.
 try:
-    from qemutests.harness.result import RunArchive, RunReport
+    from qemutests.harness.result import RunArchive, RunReport, parse_v1
 except ImportError:  # pragma: no cover
     RunArchive = None  # type: ignore[assignment]
     RunReport = None  # type: ignore[assignment]
+    parse_v1 = None  # type: ignore[assignment]
 
 
 def _sha256_path(path):
@@ -579,7 +580,22 @@ def test_boot(tester):
 
 
 def test_systest(tester):
-    """Run systest, supplying deterministic serial input for COW TTY reads."""
+    """Run systest; validate protocol v1 as the only success gate.
+
+    The guest publishes a protocol-v1 trace (``[TEST] START/SELECT/
+    BEGIN/terminal/END``) from the ``tests[]`` table in
+    ``user/systest.c``.  ``parse_v1`` is the *only* success gate: it
+    enforces exact SELECT/BEGIN/terminal set equality, count arithmetic,
+    at least one PASS, and — when ``SYSTEST_CASE`` selects a single case
+    — that the declared *and* observed IDs equal that case.  The legacy
+    ``[SYS TEST] RESULT`` line is retained purely as the COW handshake's
+    completion signal; it no longer decides pass/fail.
+
+    ``SYSTEST_CASE`` (written by ``mk/components/run.mk`` alongside the
+    private ``inittab.systest.case``) names the requested case; an
+    unset/empty value runs the full table.
+    """
+    requested_case = os.environ.get("SYSTEST_CASE") or None
     tester.start_qemu(serial_stdio=True)
     deadline = time.monotonic() + 60
     # Each region's child signals only after fork, immediately before read.
@@ -607,14 +623,15 @@ def test_systest(tester):
               "instead of /bin/systest). Rebuild with: make OS01_SYSTEST=1 test-qemu SUITE=systest")
         return False
 
-    # RESULT line matched — drain whatever remains so the parse regex has a
-    # stable snapshot (the matched group only holds the prefix match).
+    # RESULT line matched — drain whatever remains (in particular the
+    # ``[TEST] END`` record that follows it) so parse_v1 sees the
+    # complete trace.
     time.sleep(2)
     output = tester._read_available().decode('utf-8', errors='replace')
 
     # 1-second observation window (spec §5.3): a kernel panic that
     # arrives within observe(1) after the RESULT line FAILs the run
-    # even though the test count says PASS.
+    # even though the protocol records say PASS.
     if tester.process is not None:
         try:
             tail = tester.process.observe(1.0)
@@ -624,24 +641,23 @@ def test_systest(tester):
             print("FAIL: kernel panic in 1-second observation window")
             return False
 
-    # Parse: "[SYS TEST] RESULT: N passed, M failed"
-    m2 = re.search(r'\[SYS TEST\] RESULT:\s*(\d+)\s*passed,\s*(\d+)\s*failed', output)
-    if not m2:
-        print(f"FAIL: could not parse result line. output={output[-200:]!r}")
+    # Protocol v1 is the only success gate (spec §6.1 / §6.2).
+    if parse_v1 is None:
+        print("FAIL: harness parse_v1 unavailable; cannot validate systest")
         return False
-
-    passed, failed = int(m2.group(1)), int(m2.group(2))
-    if failed > 0:
-        print(f"FAIL: {failed} tests failed ({passed} passed)")
+    pr = parse_v1(output, suite="systest", requested_case=requested_case)
+    if not pr.ok:
+        for err in pr.errors:
+            print(f"FAIL: systest protocol: {err}")
         return False
-    if passed == 0:
-        # A zero-count summary means no syscall test actually ran
-        # (e.g. the RESULT line was replayed from a stale run rather
-        # than produced by this one).  Treat it as a hard FAIL rather
-        # than a vacuous "0 passed" success.
-        print("FAIL: degenerate systest result (0 passed, 0 failed)")
+    if pr.failed > 0:
+        for cid, reason in sorted(pr.reasons.items()):
+            print(f"FAIL: systest case {cid}: {reason}")
         return False
-    print(f"PASS: all {passed} syscall tests passed")
+    if requested_case is not None:
+        print(f"PASS: case {requested_case} passed")
+    else:
+        print(f"PASS: all {pr.passed} syscall tests passed")
     return True
 
 

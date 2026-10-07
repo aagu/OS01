@@ -4059,109 +4059,138 @@ static void test_linux_abi_compat(void)
 }
 
 // ── Runner ─────────────────────────────────────────────────
+//
+// The tests[] table is the single source of case identity: --list,
+// --case <id>, --quick, --full and the protocol-v1 SELECT records all
+// derive from it.  Each row carries a stable machine ID matching the
+// protocol grammar [A-Za-z0-9_.-]+ (distinct from its human display
+// name), a required flag (must not be SKIPped) and a quick flag
+// (included in --quick).  Default selection is the full table.
 
 typedef void (*test_fn)(void);
 
-static struct { const char *name; test_fn fn; } tests[] = {
-    {"startup layout",    test_startup_layout},
-    {"startup matrix",    test_startup_matrix},
-    {"startup execvp",    test_startup_execvp},
-    {"signal handler sync", test_signal_handler_sync},
-    {"poll",               test_poll},
-    {"putchar",           test_putchar},
-    {"sendto user boundaries", test_sendto_user_boundaries},
-    {"write",             test_write},
-    {"brk",               test_brk},
-    {"getpid/getppid",    test_getpid_getppid},
-    {"fork+exec+waitpid", test_fork_exec_waitpid},
-    {"exec_hostile_argv", test_exec_hostile_argv},
-    {"exec_hostile_envp", test_exec_hostile_envp},
-    {"hostile", test_hostile},
-    {"devfs_open_inherit", test_devfs_open_inherited_fg_pgrp},
-    {"orphan_reparent",   test_orphan_reparent},
-    {"read",              test_read},
-    {"open/close",        test_open_close},
-    {"dup/dup2",          test_dup_dup2},
-    {"pipe",              test_pipe},
-    {"sigaction",         test_signal_register},
-    {"chdir/getcwd",      test_chdir_getcwd},
-    {"stat/fstat",        test_stat_fstat},
-    {"lseek",             test_lseek},
-    {"fcntl",             test_fcntl},
-    {"getdents64",        test_getdents64},
-    {"access",            test_access},
-    {"mkdir/rmdir",       test_mkdir_rmdir},
-    {"unlink",            test_unlink},
-    {"readlink",          test_readlink},
-    {"rename",            test_rename},
-    {"ftruncate/truncate",test_truncate},
-    {"gettimeofday",      test_gettimeofday},
-    {"clock_gettime",     test_clock_gettime},
-    {"nanosleep",         test_nanosleep},
-    {"nanosleep_eintr",   test_nanosleep_eintr},
-    {"chmod/fchmod",      test_chmod},
-    {"times",             test_times},
-    {"uname",             test_uname},
-    {"umask",             test_umask},
-    {"kill+deliver",      test_kill_signal_deliver},
-    {"sync",              test_sync},
-    {"sigprocmask",       test_sigprocmask},
-    {"sigreturn_saved_frame", test_sigreturn_saved_frame},
-    {"ext2_write",        test_ext2_write},
-    {"boot_fat_mount",    test_boot_fat_mount},
-    // {"pipe+dup2",         test_pipe_dup2_inherit},
-    {"reboot",            test_reboot_skip},
-    {"select_basic",        test_select_basic},
-    {"select_write",        test_select_write},
-    {"select_timeout",      test_select_timeout},
-    {"select_null_timeout", test_select_null_timeout},
-    {"select_multifd",      test_select_multifd},
-    {"select_zero_timeout", test_select_zero_timeout},
-    {"select_sleep",        test_select_sleep},
-    {"pselect_sleep",       test_pselect_sleep},
-    {"select_invalid_fd",   test_select_invalid_fd},
-    {"pselect_null_sigmask", test_pselect_null_sigmask},
-    {"pselect_bad_ss_len",  test_pselect_bad_ss_len},
-    {"rbtree_insert_order", test_wrap_rbtree_insert_order},
-    {"rbtree_erase_middle", test_wrap_rbtree_erase_middle},
-    {"rbtree_stress_100",   test_wrap_rbtree_stress_100},
-    {"rbtree_last",         test_wrap_rbtree_last},
-    {"rbtree_prev_traversal", test_wrap_rbtree_prev_traversal},
-    {"rbtree_prev_null",    test_wrap_rbtree_prev_null},
-    {"eevdf_fork_child",    test_wrap_eevdf_fork_child_scheduled},
-    {"proc_maps",           test_proc_maps},
-    {"proc_fd",             test_proc_fd},
-    {"termios",             test_termios},
-    {"tiocspgrp",           test_tiocspgrp_roundtrip},
-    {"devfs_open_fg",       test_devfs_open_default_fg_pgrp},
-    {"setpgid_getpgid",   test_setpgid_getpgid},
-    {"setsid",            test_setsid},
-    {"setpgid_auto_fg", test_setpgid_auto_fg_pgrp},
-    {"signal_pgrp_basic",  test_signal_pgrp_basic},
-    {"kill_pgrp",          test_kill_neg_pid_pgrp},
-    {"getrandom",           test_getrandom},
-    {"libc_printf_getopt",  test_libc_printf_getopt},
+typedef struct {
+    const char *id;      /* stable machine ID, [A-Za-z0-9_.-]+ */
+    const char *name;    /* human-readable display name */
+    test_fn fn;
+    int required;        /* 1 = mandatory case (SELECT required=1) */
+    int quick;           /* 1 = included by --quick */
+} test_case_t;
+
+static const test_case_t tests[] = {
+    {"startup_layout",    "startup layout",    test_startup_layout,          1, 0},
+    {"startup_matrix",    "startup matrix",    test_startup_matrix,          1, 0},
+    {"startup_execvp",    "startup execvp",    test_startup_execvp,          1, 0},
+    {"signal_handler_sync", "signal handler sync", test_signal_handler_sync, 1, 0},
+    {"poll",              "poll syscall",      test_poll,                    1, 0},
+    {"putchar",           "putchar syscall",   test_putchar,                 1, 1},
+    {"sendto_user_boundaries", "sendto user boundaries", test_sendto_user_boundaries, 0, 0},
+    {"write",             "write syscall",     test_write,                   1, 1},
+    {"brk",               "brk heap",          test_brk,                     1, 0},
+    {"getpid_getppid",    "getpid getppid",    test_getpid_getppid,          1, 1},
+    {"fork_exec_waitpid", "fork exec waitpid", test_fork_exec_waitpid,       1, 0},
+    {"exec_hostile_argv", "exec hostile argv", test_exec_hostile_argv,       1, 0},
+    {"exec_hostile_envp", "exec hostile envp", test_exec_hostile_envp,       1, 0},
+    {"hostile",           "hostile syscalls",  test_hostile,                 1, 0},
+    {"devfs_open_inherit", "devfs open inherit", test_devfs_open_inherited_fg_pgrp, 1, 0},
+    {"orphan_reparent",   "orphan reparent",   test_orphan_reparent,         1, 0},
+    {"read",              "read syscall",      test_read,                    1, 1},
+    {"open_close",        "open close",        test_open_close,              1, 1},
+    {"dup_dup2",          "dup dup2",          test_dup_dup2,                1, 0},
+    {"pipe",              "pipe syscall",      test_pipe,                    1, 0},
+    {"sigaction",         "sigaction register", test_signal_register,        1, 0},
+    {"chdir_getcwd",      "chdir getcwd",      test_chdir_getcwd,            1, 0},
+    {"stat_fstat",        "stat fstat",        test_stat_fstat,              1, 0},
+    {"lseek",             "lseek offsets",     test_lseek,                   1, 0},
+    {"fcntl",             "fcntl flags",       test_fcntl,                   1, 0},
+    {"getdents64",        "getdents64 entries", test_getdents64,             1, 0},
+    {"access",            "access checks",     test_access,                  1, 1},
+    {"mkdir_rmdir",       "mkdir rmdir",       test_mkdir_rmdir,             1, 0},
+    {"unlink",            "unlink file",       test_unlink,                  1, 0},
+    {"readlink",          "readlink stub",     test_readlink,                1, 0},
+    {"rename",            "rename file",       test_rename,                  1, 0},
+    {"ftruncate_truncate", "ftruncate truncate", test_truncate,              1, 0},
+    {"gettimeofday",      "gettimeofday clock", test_gettimeofday,           1, 0},
+    {"clock_gettime",     "clock_gettime monotonic", test_clock_gettime,     1, 0},
+    {"nanosleep",         "nanosleep duration", test_nanosleep,              1, 0},
+    {"nanosleep_eintr",   "nanosleep eintr",   test_nanosleep_eintr,         1, 0},
+    {"chmod_fchmod",      "chmod fchmod",      test_chmod,                   1, 0},
+    {"times",             "times cpu",         test_times,                   1, 0},
+    {"uname",             "uname sysname",     test_uname,                   1, 1},
+    {"umask",             "umask mask",        test_umask,                   1, 0},
+    {"kill_deliver",      "kill deliver",      test_kill_signal_deliver,     1, 0},
+    {"sync",              "sync flush",        test_sync,                    1, 0},
+    {"sigprocmask",       "sigprocmask block", test_sigprocmask,             1, 0},
+    {"sigreturn_saved_frame", "sigreturn saved frame", test_sigreturn_saved_frame, 1, 0},
+    {"ext2_write",        "ext2 write",        test_ext2_write,              1, 0},
+    {"boot_fat_mount",    "boot fat mount",    test_boot_fat_mount,          1, 0},
+    {"reboot",            "reboot skip",       test_reboot_skip,             0, 0},
+    {"select_basic",      "select basic",      test_select_basic,            1, 0},
+    {"select_write",      "select write",      test_select_write,            1, 0},
+    {"select_timeout",    "select timeout",    test_select_timeout,          1, 0},
+    {"select_null_timeout", "select null timeout", test_select_null_timeout, 0, 0},
+    {"select_multifd",    "select multifd",    test_select_multifd,          1, 0},
+    {"select_zero_timeout", "select zero timeout", test_select_zero_timeout, 1, 0},
+    {"select_sleep",      "select sleep",      test_select_sleep,            1, 0},
+    {"pselect_sleep",     "pselect sleep",     test_pselect_sleep,           1, 0},
+    {"select_invalid_fd", "select invalid fd", test_select_invalid_fd,       0, 0},
+    {"pselect_null_sigmask", "pselect null sigmask", test_pselect_null_sigmask, 1, 0},
+    {"pselect_bad_ss_len", "pselect bad ss len", test_pselect_bad_ss_len,    1, 0},
+    {"rbtree_insert_order", "rbtree insert order", test_wrap_rbtree_insert_order, 1, 0},
+    {"rbtree_erase_middle", "rbtree erase middle", test_wrap_rbtree_erase_middle, 1, 0},
+    {"rbtree_stress_100", "rbtree stress 100", test_wrap_rbtree_stress_100,  1, 0},
+    {"rbtree_last",       "rbtree last",       test_wrap_rbtree_last,        1, 0},
+    {"rbtree_prev_traversal", "rbtree prev traversal", test_wrap_rbtree_prev_traversal, 1, 0},
+    {"rbtree_prev_null",  "rbtree prev null",  test_wrap_rbtree_prev_null,   1, 0},
+    {"eevdf_fork_child",  "eevdf fork child",  test_wrap_eevdf_fork_child_scheduled, 1, 0},
+    {"proc_maps",         "proc maps",         test_proc_maps,               1, 0},
+    {"proc_fd",           "proc fd",           test_proc_fd,                 1, 0},
+    {"termios",           "termios honesty",   test_termios,                 1, 0},
+    {"tiocspgrp",         "tiocspgrp roundtrip", test_tiocspgrp_roundtrip,   1, 0},
+    {"devfs_open_fg",     "devfs open fg",     test_devfs_open_default_fg_pgrp, 1, 0},
+    {"setpgid_getpgid",   "setpgid getpgid",   test_setpgid_getpgid,         1, 0},
+    {"setsid",            "setsid session",    test_setsid,                  1, 0},
+    {"setpgid_auto_fg",   "setpgid auto fg",   test_setpgid_auto_fg_pgrp,    1, 0},
+    {"signal_pgrp_basic", "signal pgrp basic", test_signal_pgrp_basic,       1, 0},
+    {"kill_pgrp",         "kill pgrp",         test_kill_neg_pid_pgrp,       1, 0},
+    {"getrandom",         "getrandom urandom", test_getrandom,               1, 0},
+    {"libc_printf_getopt", "libc printf getopt", test_libc_printf_getopt,    1, 0},
     // ── symlink support (T12) ──
-    {"symlink_create_readlink", test_symlink_create_readlink},
-    {"symlink_errors",          test_symlink_errors},
-    {"symlink_stat",            test_symlink_stat},
-    {"symlink_follow_midpath",  test_symlink_follow_midpath},
-    {"symlink_loop_depth",      test_symlink_loop_depth},
-    {"41_exec_via_symlink",     test_41_exec_via_symlink},
-    {"42_getdents_dt_lnk",      test_42_getdents_dt_lnk},
-    {"43_ssp_guard_seeded",               test_ssp_guard_seeded},
-    {"44_ssp_guard_distinct_across_exec", test_ssp_guard_distinct_across_exec},
-    {"45_ssp_trip_sigabrt_exec",  test_ssp_trip_sigabrt_exec},
-    {"46_ssp_trip_sigabrt_fork",  test_ssp_trip_sigabrt_fork},
-    {"47_ssp_no_false_trip",      test_ssp_no_false_trip},
-    {"48_atexit_lifecycle",       test_atexit_lifecycle},
-    {"49_brk_read_fresh_page",    test_brk_read_fresh_page},
-    {"50_protected_ranges",       test_protected_ranges},
-    {"51_fork_brk_isolation",     test_fork_brk_isolation},
-    {"52_fork_mmap_cow_isolation",test_fork_mmap_cow_isolation},
-    {"53_cow_kernel_outputs", test_cow_kernel_outputs},
-    {"54_linux_abi_compat", test_linux_abi_compat},
+    {"symlink_create_readlink", "symlink create readlink", test_symlink_create_readlink, 1, 0},
+    {"symlink_errors",    "symlink errors",    test_symlink_errors,          1, 0},
+    {"symlink_stat",      "symlink stat",      test_symlink_stat,            1, 0},
+    {"symlink_follow_midpath", "symlink follow midpath", test_symlink_follow_midpath, 1, 0},
+    {"symlink_loop_depth", "symlink loop depth", test_symlink_loop_depth,    1, 0},
+    {"41_exec_via_symlink", "exec via symlink", test_41_exec_via_symlink,    1, 0},
+    {"42_getdents_dt_lnk", "getdents dt lnk",  test_42_getdents_dt_lnk,      1, 0},
+    {"43_ssp_guard_seeded", "ssp guard seeded", test_ssp_guard_seeded,       1, 0},
+    {"44_ssp_guard_distinct_across_exec", "ssp guard distinct across exec", test_ssp_guard_distinct_across_exec, 1, 0},
+    {"45_ssp_trip_sigabrt_exec", "ssp trip sigabrt exec", test_ssp_trip_sigabrt_exec, 1, 0},
+    {"46_ssp_trip_sigabrt_fork", "ssp trip sigabrt fork", test_ssp_trip_sigabrt_fork, 1, 0},
+    {"47_ssp_no_false_trip", "ssp no false trip", test_ssp_no_false_trip,    1, 0},
+    {"48_atexit_lifecycle", "atexit lifecycle", test_atexit_lifecycle,       1, 0},
+    {"49_brk_read_fresh_page", "brk read fresh page", test_brk_read_fresh_page, 1, 0},
+    {"50_protected_ranges", "protected ranges", test_protected_ranges,       1, 0},
+    {"51_fork_brk_isolation", "fork brk isolation", test_fork_brk_isolation, 1, 0},
+    {"52_fork_mmap_cow_isolation", "fork mmap cow isolation", test_fork_mmap_cow_isolation, 1, 0},
+    {"53_cow_kernel_outputs", "cow kernel outputs", test_cow_kernel_outputs, 1, 0},
+    {"54_linux_abi_compat", "linux abi compat", test_linux_abi_compat,       1, 0},
 };
+
+// ── CLI: --list ────────────────────────────────────────────
+// Print every table row (id + flags) in table order.  --list is the
+// machine-readable mirror of the execution order: both iterate tests[]
+// by index, so list/execution parity is structural.
+static int print_case_list(void)
+{
+    int n = (int)(sizeof(tests) / sizeof(tests[0]));
+    printf("[SYS TEST] %d case(s)\n", n);
+    for (int i = 0; i < n; i++) {
+        printf("%s\t%s\trequired=%d quick=%d\n",
+               tests[i].id, tests[i].name, tests[i].required, tests[i].quick);
+    }
+    return 0;
+}
 
 int main(int argc, char **argv, char **envp)
 {
@@ -4170,17 +4199,83 @@ int main(int argc, char **argv, char **envp)
     g_argc = argc;
     g_argv = argv;
 
+    // Argument parsing: --list / --case <id> / --quick / --full.
+    // Default is the full table.
+    const char *want_case = NULL;
+    int want_quick = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--list") == 0) {
+            return print_case_list();
+        } else if (strcmp(argv[i], "--case") == 0 && i + 1 < argc) {
+            want_case = argv[++i];
+        } else if (strcmp(argv[i], "--quick") == 0) {
+            want_quick = 1;
+        } else if (strcmp(argv[i], "--full") == 0) {
+            want_quick = 0;
+        }
+    }
+
     printf("[SYS TEST] OS01 Syscall Test Suite\n");
     printf("[SYS TEST] ----------------------------------------\n");
 
-    int n = sizeof(tests) / sizeof(tests[0]);
-    for (int i = 0; i < n; i++) {
-        tests[i].fn();
+    int n = (int)(sizeof(tests) / sizeof(tests[0]));
+
+    // Build the selection as indices into tests[] (keeps execution and
+    // SELECT emission reading from the same table entry).
+    static int sel[sizeof(tests) / sizeof(tests[0])];
+    int nsel = 0;
+    if (want_case != NULL) {
+        int found = -1;
+        for (int i = 0; i < n; i++) {
+            if (strcmp(tests[i].id, want_case) == 0) { found = i; break; }
+        }
+        if (found < 0) {
+            // Unknown case: publish no v1 trace, so the host sees a
+            // protocol failure (missing START/END) and archives FAIL.
+            printf("[SYS TEST] ERROR: unknown case '%s' (use --list)\n",
+                   want_case);
+            return 2;
+        }
+        sel[nsel++] = found;
+    } else if (want_quick) {
+        for (int i = 0; i < n; i++)
+            if (tests[i].quick) sel[nsel++] = i;
+    } else {
+        for (int i = 0; i < n; i++) sel[nsel++] = i;
     }
 
-    // Print summary — use write(1,…) so output serialises through the
-    // PTY instead of racing past buffered test output via raw SYS_putchar.
+    // Protocol v1 (spec §6.1): declare the whole selection before any
+    // case runs, then one BEGIN + terminal per case.
+    printf("[TEST] START v=1 suite=systest expected=%d\n", nsel);
+    for (int k = 0; k < nsel; k++) {
+        printf("[TEST] SELECT %s required=%d\n",
+               tests[sel[k]].id, tests[sel[k]].required);
+    }
+
+    int case_passed = 0, case_failed = 0;
+    for (int k = 0; k < nsel; k++) {
+        const test_case_t *tc = &tests[sel[k]];
+        printf("\n--- %s ---\n", tc->name);
+        // Per-case status derives from the assertion-failure delta
+        // across the case body (no child isolation).
+        int before = fail_count;
+        tc->fn();
+        int delta = fail_count - before;
+        printf("[TEST] BEGIN %s\n", tc->id);
+        if (delta == 0) {
+            case_passed++;
+            printf("[TEST] PASS %s\n", tc->id);
+        } else {
+            case_failed++;
+            printf("[TEST] FAIL %s reason=assertion_failures_%d\n",
+                   tc->id, delta);
+        }
+    }
+
+    // Legacy summary line kept for transition; no longer the gate.
     printf("\n[SYS TEST] RESULT: %d passed, %d failed\n", pass_count, fail_count);
+    printf("[TEST] END suite=systest total=%d passed=%d failed=%d skipped=%d\n",
+           nsel, case_passed, case_failed, 0);
 
     return fail_count > 255 ? 255 : (int)fail_count;
 }

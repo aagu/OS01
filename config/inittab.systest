@@ -1,2 +1,5 @@
 # OS01 /etc/inittab (systest mode)
-tty1:respawn:/bin/systest
+# `once` (not `respawn`): one guest boot runs /bin/systest exactly once,
+# so the guest publishes exactly one START/END protocol-v1 trace.  A
+# respawn would restart systest after it exits and replay the trace.
+tty1:once:/bin/systest
