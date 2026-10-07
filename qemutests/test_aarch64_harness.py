@@ -285,32 +285,47 @@ class SyncFaultLifecycleTests(SuiteUnitAdapterTests):
 
     def test_runner_owned_stop_after_evidence_passes(self):
         session = FakeSession(text=sflt.valid_log, self_exited=False)
-        self.assertTrue(self._run(session))
+        self.assertEqual(self._run(session), 0)
         self.assertIn("stop", session.calls)
         data = _one_archive(self.build, sflt.SUITE)
         self.assert_suite_unit(data)
         self.assertEqual(data["status"], "PASS")
+        self.assert_exit_code_matches_status(data, 0)
+        self.assert_hash_before_unset(data)
         self.assertTrue(data["stopped_by_runner"])
 
     def test_spontaneous_exit_after_evidence_fails(self):
         # Evidence is complete, but QEMU exited on its own — weak evidence.
         session = FakeSession(text=sflt.valid_log, self_exited=True)
-        self.assertFalse(self._run(session))
+        self.assertEqual(self._run(session), 1)
         data = _one_archive(self.build, sflt.SUITE)
         self.assertEqual(data["status"], "FAIL")
+        self.assert_exit_code_matches_status(data, 1)
         self.assertFalse(data["stopped_by_runner"])
 
     def test_ordinary_timeout_fails(self):
-        # No evidence ever arrives; the deadline trips.
+        # No evidence ever arrives; the deadline trips — the exit-1 slot.
         session = FakeSession(text="UEFI: booting OS01\n", matched=False)
-        self.assertFalse(self._run(session))
+        self.assertEqual(self._run(session), 1)
         data = _one_archive(self.build, sflt.SUITE)
         self.assertEqual(data["status"], "FAIL")
+        self.assert_exit_code_matches_status(data, 1)
 
     def test_self_exit_during_observation_window_fails(self):
         # QEMU survives the wait but exits inside the post-fatal drain.
         session = FakeSession(text=sflt.valid_log, exit_in_window=True)
-        self.assertFalse(self._run(session))
+        self.assertEqual(self._run(session), 1)
+
+    def test_spawn_error_exits_2_and_archives_error(self):
+        # A QEMU that cannot launch is a configuration/environment ERROR
+        # (exit 2), not the FAIL/exit-1 slot the archive previously
+        # disagreed with.
+        session = FakeSession(start_exc=FileNotFoundError("no-such-qemu"))
+        self.assertEqual(self._run(session), 2)
+        data = _one_archive(self.build, sflt.SUITE)
+        self.assert_suite_unit(data)
+        self.assertEqual(data["status"], "ERROR")
+        self.assert_exit_code_matches_status(data, 2)
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -695,6 +710,10 @@ class RunnerExitCodeScriptTests(SuiteUnitAdapterTests):
         self._env_error("aarch64_gic_spi.py", gspi.SUITE,
                         ["--cpus", "1", "--timeout", "5",
                          "--diagnostic-dtb", str(self.dtb)])
+
+    def test_sync_fault_missing_qemu_exits_2(self):
+        self._env_error("aarch64_sync_fault.py", sflt.SUITE,
+                        ["--timeout", "5"])
 
     def test_uefi_smp_aggregates_case_codes(self):
         # Multi-case runs fold to the plan's contract: 0 all-pass, 2 if any
