@@ -1230,6 +1230,7 @@ _test-aarch64-run-m1-ram:
 	  --normal-image "$(BUILD_DIR)/image/aarch64-uefi.img" \
 	  --selftest-image "$(AARCH64_UEFI_SELFTEST_DISK)" \
 	  --firmware "$(AARCH64_UEFI_SELFTEST_FIRMWARE)" --qemu "$(AARCH64_QEMU)" \
+	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/m1-ram"
 
 .PHONY: _test-aarch64-prep-m1-sparse _test-aarch64-run-m1-sparse
@@ -1239,6 +1240,7 @@ _test-aarch64-run-m1-sparse:
 	python3 qemutests/aarch64_m1_matrix.py --variant sparse \
 	  --image "$(BUILD_DIR)/image/m1-sparse/aarch64-uefi.img" \
 	  --firmware "$(BUILD_DIR)/image/m1-sparse/QEMU_EFI.fd" --qemu "$(AARCH64_QEMU)" \
+	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/m1-sparse"
 
 .PHONY: _test-aarch64-prep-m1-arena-exhaust _test-aarch64-run-m1-arena-exhaust
@@ -1248,6 +1250,7 @@ _test-aarch64-run-m1-arena-exhaust:
 	python3 qemutests/aarch64_m1_matrix.py --variant arena-exhaust \
 	  --image "$(BUILD_DIR)/image/m1-arena-exhaust/aarch64-uefi.img" \
 	  --firmware "$(BUILD_DIR)/image/m1-arena-exhaust/QEMU_EFI.fd" --qemu "$(AARCH64_QEMU)" \
+	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/m1-arena-exhaust"
 
 .PHONY: _test-aarch64-prep-m1-table-exhaust _test-aarch64-run-m1-table-exhaust
@@ -1257,6 +1260,7 @@ _test-aarch64-run-m1-table-exhaust:
 	python3 qemutests/aarch64_m1_matrix.py --variant table-exhaust \
 	  --image "$(BUILD_DIR)/image/m1-table-exhaust/aarch64-uefi.img" \
 	  --firmware "$(BUILD_DIR)/image/m1-table-exhaust/QEMU_EFI.fd" --qemu "$(AARCH64_QEMU)" \
+	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/m1-table-exhaust"
 
 .PHONY: _test-aarch64-prep-m1-ap-bad-root _test-aarch64-run-m1-ap-bad-root
@@ -1266,4 +1270,5 @@ _test-aarch64-run-m1-ap-bad-root:
 	python3 qemutests/aarch64_m1_matrix.py --variant ap-bad-root \
 	  --image "$(BUILD_DIR)/image/m1-ap-bad-root/aarch64-uefi.img" \
 	  --firmware "$(BUILD_DIR)/image/m1-ap-bad-root/QEMU_EFI.fd" --qemu "$(AARCH64_QEMU)" \
+	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/m1-ap-bad-root"

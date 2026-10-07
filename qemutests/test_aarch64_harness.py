@@ -57,6 +57,8 @@ import qemutests.aarch64_uefi_smp as smp        # noqa: E402
 import qemutests.aarch64_gic_spi as gspi        # noqa: E402
 import qemutests.aarch64_sync_fault as sflt     # noqa: E402
 import qemutests.aarch64_m3_probe as m3p        # noqa: E402
+import qemutests.aarch64_m1_matrix as m1m       # noqa: E402
+import qemutests.aarch64_m1_evidence as m1ev    # noqa: E402
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -487,6 +489,71 @@ class M3ProbeLifecycleTests(SuiteUnitAdapterTests):
 
 
 # ───────────────────────────────────────────────────────────────────
+# M1 — runtime direct-map evidence and the expected-failure adapter.
+# ───────────────────────────────────────────────────────────────────
+
+
+class M1EvidenceTests(unittest.TestCase):
+    def test_normal_and_selftest_fixtures_accepted(self):
+        for cpus in (1, 2, 4):
+            self.assertTrue(
+                m1ev.m1_evidence_ok(m1ev._fixture(cpus), cpus, False, 512))
+            self.assertTrue(
+                m1ev.m1_evidence_ok(m1ev._fixture(cpus, selftest=True),
+                                    cpus, True, 512))
+
+    def test_ram_exhaustion_negative_adapter_rules(self):
+        # The negative adapter requires the evidence signature AND
+        # stayed_alive; a QEMU that did not stay alive must not pass.
+        self.assertTrue(m1ev.m1_failure_evidence_ok(
+            "M1 FATAL reason=arena-exhaust\n", "arena-exhaust", 1, True))
+        self.assertFalse(m1ev.m1_failure_evidence_ok(
+            "M1 FATAL reason=arena-exhaust\n", "arena-exhaust", 1, False))
+        # The wrong variant must not be accepted by the adapter.
+        self.assertFalse(m1ev.m1_failure_evidence_ok(
+            "M1 FATAL reason=arena-exhaust\n", "table-exhaust", 1, True))
+
+
+class M1ExpectedFailureLifecycleTests(SuiteUnitAdapterTests):
+    """``run_expected_failure`` is the expected-fatal adapter: PASS only
+    while QEMU stays alive after the failure signature."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="os01-m1ef-"))
+        fw, img = _stage_inputs(self.tmp)
+        self.dtb = self.tmp / "qemu-virt.dtb"
+        self.dtb.write_bytes(b"dtb")
+        self.build = self.tmp / "build"
+        self.args = argparse.Namespace(
+            qemu="qemu-system-aarch64", firmware=str(fw), image=str(img),
+            log_dir=str(self.tmp / "logs"), timeout=5.0,
+            variant="arena-exhaust", diagnostic_dtb=str(self.dtb))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, session):
+        return m1m.run_expected_failure(
+            self.args, session_factory=_factory(session),
+            build_dir=str(self.build), profile="test")
+
+    def test_stayed_alive_after_evidence_passes(self):
+        session = FakeSession(text="M1 FATAL reason=arena-exhaust\n")
+        self.assertTrue(self._run(session))
+        data = _one_archive(self.build, m1m.SUITE)
+        self.assert_suite_unit(data)
+        self.assertEqual(data["status"], "PASS")
+
+    def test_exit_before_acceptance_fails(self):
+        session = FakeSession(text="M1 FATAL reason=arena-exhaust\n",
+                              exit_in_window=True)
+        self.assertFalse(self._run(session))
+        data = _one_archive(self.build, m1m.SUITE)
+        self.assertEqual(data["status"], "FAIL")
+
+
+# ───────────────────────────────────────────────────────────────────
 # Ruling 7 — production entry mode (script invocation).
 # ───────────────────────────────────────────────────────────────────
 
@@ -501,7 +568,8 @@ class ScriptModeTests(unittest.TestCase):
     _SELF_TEST_SCRIPTS = ("aarch64_uefi_smp.py", "aarch64_gic_spi.py",
                           "aarch64_sync_fault.py", "aarch64_m3_probe.py")
     _ALL_SCRIPTS = ("aarch64_uefi_smp.py", "aarch64_gic_spi.py",
-                    "aarch64_sync_fault.py", "aarch64_m3_probe.py")
+                    "aarch64_sync_fault.py", "aarch64_m3_probe.py",
+                    "aarch64_m1_matrix.py")
 
     _PROBE = r"""
 import importlib.util, os, sys
