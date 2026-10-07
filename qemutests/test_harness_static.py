@@ -23,6 +23,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import re
 import shutil
 import stat
 import subprocess
@@ -105,6 +106,36 @@ def _archives(build_dir: Path, suite: str):
     return [json.loads(p.read_text()) for p in sorted(base.glob("*/result.json"))]
 
 
+def assert_exit_code_convention(case, *, status, runner_exit_code, label) -> None:
+    """Pin the framework exit-code convention (plan table, spec §6.2):
+
+        ``status="ERROR"`` ⟺ exit 2 and ``status="FAIL"`` ⟺ exit 1.
+
+    A ``rc < 0`` (a **signal**) is a *crashed test* — a FAIL, not a
+    configuration ERROR — so a consumer keying on the process exit code and
+    one keying on ``result.json`` can never disagree.  This is the
+    "two signals disagree" class; the fixture is RED if it ever returns.
+    """
+    if status == "ERROR":
+        # ERROR is the configuration/environment verdict (exit 2).  The only
+        # other ERROR archive is the Ctrl-C interruption (exit 130), a
+        # distinct row in the plan's exit-code table.  Neither may ride the
+        # FAIL/TIMEOUT slot (exit 1).
+        case.assertIn(runner_exit_code, (2, 130),
+                      f"{label}: status=ERROR must exit 2 (or 130 for Ctrl-C), "
+                      f"not {runner_exit_code}")
+    if runner_exit_code == 2:
+        case.assertEqual(status, "ERROR",
+                         f"{label}: exit 2 must be status=ERROR, not {status}")
+    if status == "FAIL":
+        case.assertEqual(runner_exit_code, 1,
+                         f"{label}: status=FAIL must exit 1, "
+                         f"not {runner_exit_code}")
+    if runner_exit_code == 1:
+        case.assertIn(status, ("FAIL", "TIMEOUT"),
+                      f"{label}: exit 1 must be FAIL/TIMEOUT, not {status}")
+
+
 # ───────────────────────────────────────────────────────────────────
 # Acceptance fixtures — one per gate the adapter owns.
 # ───────────────────────────────────────────────────────────────────
@@ -160,12 +191,12 @@ class AcceptanceTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(_archives(self.build, self.suite)[0]["status"], "FAIL")
 
-    # ── G2a: killed by a signal is an ERROR ──
+    # ── G2a: killed by a signal is a FAIL (a crashed test is a failed test) ──
 
-    def test_signal_is_error(self) -> None:
+    def test_signal_is_fail(self) -> None:
         rc = self._audit("crash.sh", AUDIT_CRASH)
         self.assertEqual(rc, 1)
-        self.assertEqual(_archives(self.build, self.suite)[0]["status"], "ERROR")
+        self.assertEqual(_archives(self.build, self.suite)[0]["status"], "FAIL")
 
     # ── G3: a hang is a TIMEOUT ──
 
@@ -245,6 +276,151 @@ class AcceptanceTests(unittest.TestCase):
         rc = _run_main(["--build-dir", str(self.build), "--suite", "",
                         "--", "/bin/true"])
         self.assertEqual(rc, 2)
+
+
+class DirectCallGuardTests(unittest.TestCase):
+    """``run_static_audit`` is a public entry point, not just ``main``'s
+    helper.  A direct call after a failed harness import (the module-level
+    ``RunArchive``/``RunReport`` left as ``None``) must report exit 2 —
+    the same verdict ``main`` gives — instead of raising ``AttributeError``
+    from ``RunArchive.create``."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="os01-static-guard-"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_direct_call_without_archive_symbols_is_exit_2(self) -> None:
+        saved = (rsa.RunArchive, rsa.RunReport)
+        rsa.RunArchive = None
+        rsa.RunReport = None
+        try:
+            rc = rsa.run_static_audit(
+                ["/bin/true"], build_dir=str(self.tmp / "build"),
+                suite="guard-audit", timeout_s=5.0)
+        finally:
+            rsa.RunArchive, rsa.RunReport = saved
+        self.assertEqual(rc, 2)
+
+
+# ───────────────────────────────────────────────────────────────────
+# run.mk wiring — the per-audit budget (source-level fixture)
+# ───────────────────────────────────────────────────────────────────
+
+
+class MakefileWiringTests(unittest.TestCase):
+    """``validate-kernel`` is a build-y sub-make, so it must NOT inherit
+    the pure-Python ``STATIC_AUDIT_TIMEOUT`` (120 s risks a spurious
+    TIMEOUT/1).  It gets its own, larger budget; every other audit keeps
+    the default."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.mk = (ROOT / "mk" / "components" / "run.mk").read_text(
+            encoding="utf-8")
+
+    def test_validate_kernel_has_its_own_larger_timeout(self) -> None:
+        default = re.search(r"^STATIC_AUDIT_TIMEOUT\s*\?=\s*(\d+)",
+                            self.mk, re.MULTILINE)
+        own = re.search(r"^VALIDATE_KERNEL_AUDIT_TIMEOUT\s*\?=\s*(\d+)",
+                        self.mk, re.MULTILINE)
+        self.assertIsNotNone(default, "STATIC_AUDIT_TIMEOUT missing")
+        self.assertIsNotNone(
+            own, "VALIDATE_KERNEL_AUDIT_TIMEOUT missing — validate-kernel "
+                 "would inherit the 120 s audit default")
+        self.assertGreater(
+            int(own.group(1)), int(default.group(1)),
+            "validate-kernel's budget must exceed the audit default")
+        # The dedicated runner variable carries that budget, and the
+        # validate-kernel recipe uses it (not the default one).
+        var = re.search(
+            r"^RUN_STATIC_AUDIT_VALIDATE\s*=\s*(.+)$", self.mk, re.MULTILINE)
+        self.assertIsNotNone(var, "RUN_STATIC_AUDIT_VALIDATE missing")
+        self.assertIn("--timeout $(VALIDATE_KERNEL_AUDIT_TIMEOUT)",
+                      var.group(1))
+        self.assertTrue(
+            re.search(r"RUN_STATIC_AUDIT_VALIDATE\)\s+validate-kernel\s+--",
+                      self.mk),
+            "validate-kernel recipe must use the dedicated long budget")
+
+    def test_every_other_audit_keeps_the_default_budget(self) -> None:
+        # Only validate-kernel may use the long-budget variable.
+        uses = re.findall(r"\$\(RUN_STATIC_AUDIT_VALIDATE\)\s+(\S+)", self.mk)
+        self.assertEqual(uses, ["validate-kernel"], uses)
+
+
+# ───────────────────────────────────────────────────────────────────
+# Exit-code convention — status ⟺ exit code, for every verdict the
+# adapter can archive.  Pinned so the convention cannot silently drift.
+# ───────────────────────────────────────────────────────────────────
+
+
+class ExitCodeEquivalenceTests(unittest.TestCase):
+    """One convention for every verdict: ERROR/2, FAIL/1, TIMEOUT/1, PASS/0.
+
+    Runs each verdict-producing scenario and asserts the archived
+    ``status`` and the archived ``runner_exit_code`` agree *and* that the
+    process exit code equals the archived one.  A future regression that
+    archives a signal (or any crash) as ``ERROR``/1 — the split this fix
+    removed — is RED here.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="os01-static-equiv-"))
+        self.build = self.tmp / "build"
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _row(self, suite: str, name: str, body: str, extra=(), *,
+             timeout: float = 10.0):
+        """Run one audit in its own suite; return (label, status, exit, rc)."""
+        path = _write_audit(self.tmp, name, body)
+        rc = _run_main(["--build-dir", str(self.build), "--suite", suite,
+                        "--timeout", str(timeout), "--", str(path), *extra])
+        reports = _archives(self.build, suite)
+        self.assertTrue(reports, f"{name}: no archived report")
+        return name, reports[-1]["status"], reports[-1]["runner_exit_code"], rc
+
+    def test_every_verdict_agrees_with_its_exit_code(self) -> None:
+        artifact = self.tmp / "artifact.bin"
+        artifact.write_bytes(b"x\n")
+
+        rows = [
+            self._row("eq-pass", "ok.sh", AUDIT_CHECK_ARTIFACT, [str(artifact)]),
+            self._row("eq-fail", "fail.sh", AUDIT_SILENT_FAILURE),
+            self._row("eq-crash", "crash.sh", AUDIT_CRASH),
+            self._row("eq-hang", "hang.sh", AUDIT_HANG, timeout=1.0),
+        ]
+
+        # A program that cannot start — the only genuine ERROR — is exit 2.
+        ghost = self.tmp / "ghost.sh"
+        rc = _run_main(["--build-dir", str(self.build), "--suite", "eq-ghost",
+                        "--timeout", "5", "--", str(ghost)])
+        reports = _archives(self.build, "eq-ghost")
+        self.assertTrue(reports, "launch error: no archived report")
+        rows.append(("ghost.sh", reports[-1]["status"],
+                     reports[-1]["runner_exit_code"], rc))
+
+        for label, status, exit_code, rc in rows:
+            with self.subTest(label=label):
+                self.assertEqual(rc, exit_code,
+                                 f"{label}: process rc != archived exit code")
+                assert_exit_code_convention(
+                    self, status=status, runner_exit_code=exit_code,
+                    label=label)
+
+        # Anti-tautology: the fixture must observe both ends of the
+        # convention, else the ERROR⇒2 / FAIL⇒1 assertions are vacuous.
+        seen = {(status, exit_code) for _, status, exit_code, _ in rows}
+        self.assertIn(("ERROR", 2), seen,
+                      "equivalence fixture never exercised a real ERROR/2")
+        self.assertIn(("FAIL", 1), seen,
+                      "equivalence fixture never exercised a real FAIL/1")
+        # ... and specifically that a signal is FAIL/1, not ERROR/1.
+        signal_row = next(r for r in rows if r[0] == "crash.sh")
+        self.assertEqual((signal_row[1], signal_row[2]), ("FAIL", 1))
 
 
 # ───────────────────────────────────────────────────────────────────

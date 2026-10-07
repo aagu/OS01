@@ -19,9 +19,11 @@ Acceptance rule — spec §6.2, "静态审计":
                therefore allowed *because its own contract permits it* —
                there is no output rule to relax, and an empty log on its
                own is never a PASS (a silent nonzero exit is a FAIL).
-  * **FAIL**  — the audit started and exited **nonzero**.
+  * **FAIL**  — the audit started and **exited nonzero**, or was killed
+               by a **signal** (a crashed audit program is a *failed
+               test*, not a configuration problem).
   * **ERROR** — the audit could **not start** (missing/unusable
-               executable) or was killed by a **signal**.
+               executable) — configuration/environment only.
   * **TIMEOUT** — the audit did not finish inside the monotonic budget.
 
 ``count_unit`` is ``"audit"`` and ``declared_ids``/``observed_ids`` are
@@ -80,10 +82,6 @@ COUNT_UNIT = "audit"
 # (spec: Python receives the actual timeout value); this is only a
 # fallback for a manual invocation.
 DEFAULT_TIMEOUT_S = 120.0
-
-
-class _SplitError(Exception):
-    """Raised when the ``--`` separated tail is malformed."""
 
 
 def split_audit_argv(argv: Sequence[str]) -> Tuple[List[str], List[str]]:
@@ -215,6 +213,13 @@ def run_static_audit(
     if session_factory is None:
         print("ERROR: ProcessSession is unavailable", file=sys.stderr)
         return 2
+    # Mirror ``main``'s harness guard so a *direct* call after a
+    # failed harness import reports exit 2 instead of raising AttributeError
+    # from ``RunArchive.create`` below.  Both entry points must agree.
+    if RunArchive is None or RunReport is None:
+        print("ERROR: harness unavailable (RunArchive/RunReport)",
+              file=sys.stderr)
+        return 2
 
     try:
         archive = RunArchive.create(build_dir=Path(build_dir), suite=suite)
@@ -266,7 +271,11 @@ def run_static_audit(
         status, code = "TIMEOUT", 1
         errors.append(f"audit did not finish within {timeout_s:g}s")
     elif rc is not None and rc < 0:                # gate:signal
-        status, code = "ERROR", 1
+        # A signal means the audit program itself crashed: a *failed test*,
+        # not a configuration/environment problem.  FAIL/1 keeps the exit
+        # code and the archived status in agreement (ERROR is reserved for
+        # the program that could not start).
+        status, code = "FAIL", 1
         errors.append(f"audit terminated by signal {-rc}")
     elif rc != 0:                                  # gate:nonzero
         status, code = "FAIL", 1

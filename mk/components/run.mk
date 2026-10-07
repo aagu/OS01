@@ -847,6 +847,13 @@ test-syscall:
 # report names its real argv.
 STATIC_AUDIT_TIMEOUT ?= 120
 RUN_STATIC_AUDIT = python3 qemutests/run_static_audit.py --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" --timeout $(STATIC_AUDIT_TIMEOUT) --suite
+# validate-kernel is not a pure-Python audit: it is a build-y sub-make
+# (it may rebuild/relink the kernel), so it must NOT inherit the 120 s
+# audit default — a legitimate, slow validate would be a spurious
+# TIMEOUT/1.  It gets an explicit, larger budget of its own; every other
+# audit keeps STATIC_AUDIT_TIMEOUT.
+VALIDATE_KERNEL_AUDIT_TIMEOUT ?= 600
+RUN_STATIC_AUDIT_VALIDATE = python3 qemutests/run_static_audit.py --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" --timeout $(VALIDATE_KERNEL_AUDIT_TIMEOUT) --suite
 
 # The seven user-canary checks, verbatim from the pre-Task-12 recipe, kept as
 # one shell program so every check still runs exactly as before.  The adapter
@@ -935,7 +942,7 @@ test-runtime: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(KERNEL_ARTIFACT))
 	  --elf "$(KERNEL_ELF)" \
 	  --llvm-readelf "$(LLVM_READELF)" \
 	  --llvm-objdump "$(LLVM_OBJDUMP)"
-	$(RUN_STATIC_AUDIT) validate-kernel -- \
+	$(RUN_STATIC_AUDIT_VALIDATE) validate-kernel -- \
 	  $(MAKE) --no-print-directory validate-kernel
 	$(RUN_STATIC_AUDIT) runtime-link-order -- \
 	  python3 qemutests/runtime_link_order_test.py

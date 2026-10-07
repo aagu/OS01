@@ -455,8 +455,12 @@ def run_one(
         status = "TIMEOUT"
         code = 1
         errors.append(f"did not finish within {timeout_s:g}s")
-    elif rc != 0:
-        status = "ERROR" if (rc is not None and rc < 0) else "FAIL"
+    elif rc != 0:                                  # gate:signal
+        # A signal (rc < 0) means the binary itself crashed: a *failed
+        # test*, not a configuration/environment problem.  FAIL/1 keeps the
+        # exit code and the archived status in agreement (ERROR is reserved
+        # for a binary that could not launch).
+        status = "FAIL"
         code = 1
         errors.append(f"child exited with status {rc}")
 

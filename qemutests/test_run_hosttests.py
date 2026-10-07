@@ -158,6 +158,35 @@ def _archives(build_dir: Path):
     return found
 
 
+def assert_exit_code_convention(case, *, status, runner_exit_code, label) -> None:
+    """Pin the framework exit-code convention (plan table, spec §6.2):
+
+        ``status="ERROR"`` ⟺ exit 2 and ``status="FAIL"`` ⟺ exit 1.
+
+    A ``rc < 0`` (a **signal**) means the binary itself crashed — a *failed
+    test*, not a configuration ERROR — so a consumer keying on the process
+    exit code and one keying on ``result.json`` can never disagree.
+    """
+    if status == "ERROR":
+        # ERROR is the configuration/environment verdict (exit 2).  The only
+        # other ERROR archive is the Ctrl-C interruption (exit 130), a
+        # distinct row in the plan's exit-code table.  Neither may ride the
+        # FAIL/TIMEOUT slot (exit 1).
+        case.assertIn(runner_exit_code, (2, 130),
+                      f"{label}: status=ERROR must exit 2 (or 130 for Ctrl-C), "
+                      f"not {runner_exit_code}")
+    if runner_exit_code == 2:
+        case.assertEqual(status, "ERROR",
+                         f"{label}: exit 2 must be status=ERROR, not {status}")
+    if status == "FAIL":
+        case.assertEqual(runner_exit_code, 1,
+                         f"{label}: status=FAIL must exit 1, "
+                         f"not {runner_exit_code}")
+    if runner_exit_code == 1:
+        case.assertIn(status, ("FAIL", "TIMEOUT"),
+                      f"{label}: exit 1 must be FAIL/TIMEOUT, not {status}")
+
+
 # ───────────────────────────────────────────────────────────────────
 # Selection fixtures
 # ───────────────────────────────────────────────────────────────────
@@ -261,7 +290,7 @@ class AcceptanceTests(unittest.TestCase):
     def test_crash_fails(self) -> None:
         self._one("crash.elf", SCRIPT_CRASH)
         self.assertEqual(self._last_rc, 1)
-        self.assertEqual(_archives(self.build)["crash"]["status"], "ERROR")
+        self.assertEqual(_archives(self.build)["crash"]["status"], "FAIL")
 
     def test_hang_times_out(self) -> None:
         self._one("hang.elf", SCRIPT_HANG, timeout=1.0)
@@ -385,6 +414,70 @@ class ExitStatusTests(unittest.TestCase):
         silent = _write_script(self.tmp, "quiet.elf", SCRIPT_EMPTY_OUTPUT)
         rc = self._run([silent], exit_status=[""])
         self.assertEqual(rc, 2)
+
+
+# ───────────────────────────────────────────────────────────────────
+# Exit-code convention — status ⟺ exit code, for every verdict the
+# runner can archive.  Pinned so the convention cannot silently drift.
+# ───────────────────────────────────────────────────────────────────
+
+
+class ExitCodeEquivalenceTests(unittest.TestCase):
+    """One convention for every verdict: ERROR/2, FAIL/1, TIMEOUT/1, PASS/0.
+
+    Each scenario runs through the same entry points production uses; the
+    launch-error row (the only genuine ERROR/2) is driven through
+    ``run_one`` directly because ``main``'s environment preflight rejects a
+    missing binary *before* any archive exists.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="os01-hostequiv-"))
+        self.build = self.tmp / "build"
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _row(self, name: str, body: str, *, timeout: float = 10.0):
+        """Run one binary via main(); return (label, status, exit, rc)."""
+        path = _write_script(self.tmp, name, body)
+        rc = _run_main(["--build-dir", str(self.build),
+                        "--timeout", str(timeout), str(path)])
+        data = _archives(self.build)[rh.binary_id(str(path))]
+        return name, data["status"], data["runner_exit_code"], rc
+
+    def test_every_verdict_agrees_with_its_exit_code(self) -> None:
+        rows = [
+            self._row("pass.elf", SCRIPT_LEGACY_PASS),
+            self._row("fail.elf", SCRIPT_MASKED_FAILURE),
+            self._row("crash.elf", SCRIPT_CRASH),
+            self._row("hang.elf", SCRIPT_HANG, timeout=1.0),
+        ]
+
+        # The only genuine ERROR — a binary that cannot launch — is exit 2.
+        ghost = str(self.tmp / "ghost.elf")  # does not exist
+        rc = rh.run_one(ghost, build_dir=str(self.build), profile="equiv",
+                        timeout_s=5.0)
+        data = _archives(self.build)["ghost"]
+        rows.append(("ghost.elf", data["status"], data["runner_exit_code"], rc))
+
+        for label, status, exit_code, rc in rows:
+            with self.subTest(label=label):
+                self.assertEqual(rc, exit_code,
+                                 f"{label}: process rc != archived exit code")
+                assert_exit_code_convention(
+                    self, status=status, runner_exit_code=exit_code,
+                    label=label)
+
+        # Anti-tautology: both ends of the convention must be exercised.
+        seen = {(status, exit_code) for _, status, exit_code, _ in rows}
+        self.assertIn(("ERROR", 2), seen,
+                      "equivalence fixture never exercised a real ERROR/2")
+        self.assertIn(("FAIL", 1), seen,
+                      "equivalence fixture never exercised a real FAIL/1")
+        # ... and specifically that a signal is FAIL/1, not ERROR/1.
+        signal_row = next(r for r in rows if r[0] == "crash.elf")
+        self.assertEqual((signal_row[1], signal_row[2]), ("FAIL", 1))
 
 
 # ───────────────────────────────────────────────────────────────────
