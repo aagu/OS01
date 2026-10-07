@@ -391,7 +391,7 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 
 **`result.json`（schema v1）** 至少记录：schema 版本；run ID；git revision 与 dirty 状态；profile 与 suite；请求选择条件与声明/实际 ID 集合（普通 v1 套件）；实际 argv；CPU 数与内存；工具版本；镜像/固件路径与 SHA-256（有输入时，区分运行前/后哈希）；UTC 开始时间与耗时；runner / child 返回码；是否受控停止；最终状态；计数单位；各用例状态/理由；日志路径。
 
-**计数单位（count unit）。** `count_unit` 描述报告**实际包含**的内容。仅当该次运行发布了**逐用例记录**时用 `case`：协议 v1 的 systest 与内核自测（`declared_ids`/`observed_ids` 与逐用例结果齐备），以及迁移到 v1 的宿主二进制。旧格式/重复聚合套件用 `suite`：包括旧格式宿主二进制、`run_test.py` 的**全部**套件（它只把 v1 当作门控，不发布逐用例记录——`outcomes` 为空、`declared_ids` 为 null）与 `systest-repeat` 之类的重复套件。静态审计用 `audit`。断言数不等于用例数；旧格式适配器**绝不**编造 guest 用例记录。
+**计数单位（count unit）。** `count_unit` 描述报告**实际包含**的内容。仅当该次运行发布了**逐用例记录**时用 `case`：协议 v1 的内核自测（`declared_ids`/`observed_ids` 与逐用例结果齐备），以及迁移到 v1 的宿主二进制。旧格式/重复聚合套件用 `suite`：包括旧格式宿主二进制、`run_test.py` 的**全部**套件（它只把 v1 当作门控，不发布逐用例记录——`outcomes` 为空、`declared_ids` 为 null，故 `SUITE=systest` 亦为 `suite`）、内核自测的启动失败/中断 ERROR 归档（同样不发布任何逐用例记录）与 `systest-repeat` 之类的重复套件。静态审计用 `audit`。断言数不等于用例数；旧格式适配器**绝不**编造 guest 用例记录。
 
 **`CASE` 选择。** 目前只有 systest 支持按用例选择：`make OS01_SYSTEST=1 test-qemu SUITE=systest CASE=<id>`，`<id>` 必须匹配 `[A-Za-z0-9_.-]+`（`ID` 由 `user/systest.c --list` 提供），Make 写入私有 inittab 行并经现有 `INITTAB_FILE` 传入。宿主 runner 另有 `--binary ID` 选择单个 `TEST_BINS` 二进制。其它套件（`phase-0`、`gfx`、`resolution`、`driver-model`）**不支持** `CASE`。
 
@@ -437,13 +437,13 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 | Run / Debug | `run`、`run-kvm`、`run-virtio`、`debug` | `rootfs` | 对已有镜像启动 QEMU |
 | Bring-up | `aarch64-uefi`、`aarch64-uefi-kernel`、`run-aarch64-uefi` | `uefi` | AArch64 UEFI 启动链 |
 | Validate | `validate`、`validate-kernel`、`validate-uefi`、`validate-profile` | `rootfs`（最后一个：`always`） | x86 产物健全性检查 + profile 检查 |
-| Test | `test-qemu`、`test-host`、`test-static`、`test-kernel-selftest`、`test-aarch64`、`test-contract`（6 个 bucket；见 §3）+ `test-harness`（框架回归；不带任何 profile 能力；不启动 QEMU） | varies | 端到端和审计套件 |
+| Test | `test-qemu`、`test-host`、`test-static`、`test-kernel-selftest`、`test-aarch64`、`test-contract`、`test-harness`（框架回归；不带任何 profile 能力；不启动 QEMU）（7 个 bucket；见 §3） | varies | 端到端和审计套件 |
 | Inspection | `print-run-paths` | `rootfs` | 为外部 QEMU 调用打印解析后的路径 |
 | Maintenance | `clean`、`unlock-profile` | always | 生命周期 |
 
 ### 3. Test bucket model（测试桶模型）
 
-**6 个测试 bucket 目标** — 3 个带 flag，3 个不带：
+**7 个测试 bucket 目标** — 3 个带 flag，4 个不带：
 
 | Bucket | Flag | 取值 | 运行内容 |
 | --- | --- | --- | --- |
@@ -453,8 +453,9 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 | `test-host` | — | — | `os01_submake hosttests` + `pmm_boot_reservation_test.py` |
 | `test-static` | — | — | 11 项静态审计（runtime_audit、stack_canary_audit、validate-kernel、runtime_link_order、kernel_runtime_link、kernel_layout、kernel_canary_contract、driver_model_boundary_audit、header_object、stack_frame、test-user-canary） |
 | `test-kernel-selftest` | — | — | 启动 selftest 镜像 variant（`KERNEL_SELFTEST=1`）并解析 `[selftest]` 标记 |
+| `test-harness` | — | — | Python `unittest` 框架回归（`TEST_HARNESS_MODULES` 列表；不启动 QEMU） |
 
-**`test-harness`** 框架回归入口（上述 bucket 之一；`always` 能力；不启动 QEMU）：运行 `mk/components/run.mk` 中 `TEST_HARNESS_MODULES` 列表里的 Python `unittest` 模块。该列表在 Task 2 以单元素 `qemutests.test_gfx_runner` 起步，各任务以其新增的 `qemutests/test_*.py` 追加（Ruling 3）；Task 13 收口为 **15 个模块**，并补齐了此前**无任何 target 运行**的宿主自测（`test_driver_model_matrix`、`test_driver_model_boundary_audit`、`test_resolution_switcher`）以及针对本 workflow 的静态契约检查 `test_ci_workflow`。`test_lvgl_runner` **不**在列表内——它是会拉起 QEMU 的驱动脚本，不是 unittest 模块。`test_arch9_build_contract` 同样**不**在列表内：它的 fixture 会对 `kernel.bin` 执行真实的 `make -n`，需要有已准备好的 sysroot，因而无法在零环境依赖的 `make test-harness` 门控中运行（CI 的 `harness` job 在调用它之前不做任何构建）。它由 `test-contract` bucket 拥有：该 target **会**构建 sysroot，且在其 `x86_64-clang` 分支的 `build_contract.sh` 模式循环之后运行该模块，因此不再是无 target 调用的孤儿。recipe 始终为一次显式的 `python3 -m unittest $(TEST_HARNESS_MODULES)`：不做自动目录发现，不隐式启动 QEMU 脚本，不通过模块名推断 build 路径。fixture 以 fake `subprocess.Popen` 替换真实 QEMU（个别模块会以 `make -n` 探测 Make 契约，但**绝不**拉起 QEMU 进程），因此 `make test-harness` 在 PR/CI 中作为"零环境依赖"门控。
+**`test-harness`** 框架回归入口（上表七个 bucket 之一；`always` 能力；不启动 QEMU）：运行 `mk/components/run.mk` 中 `TEST_HARNESS_MODULES` 列表里的 Python `unittest` 模块。该列表在 Task 2 以单元素 `qemutests.test_gfx_runner` 起步，各任务以其新增的 `qemutests/test_*.py` 追加（Ruling 3）；Task 13 收口为 **15 个模块**，并补齐了此前**无任何 target 运行**的宿主自测（`test_driver_model_matrix`、`test_driver_model_boundary_audit`、`test_resolution_switcher`）以及针对本 workflow 的静态契约检查 `test_ci_workflow`。`test_lvgl_runner` **不**在列表内——它是会拉起 QEMU 的驱动脚本，不是 unittest 模块。`test_arch9_build_contract` 同样**不**在列表内：它的 fixture 会对 `kernel.bin` 执行真实的 `make -n`，需要有已准备好的 sysroot，因而无法在零环境依赖的 `make test-harness` 门控中运行（CI 的 `harness` job 在调用它之前不做任何构建）。它由 `test-contract` bucket 拥有：该 target **会**构建 sysroot，且在其 `x86_64-clang` 分支的 `build_contract.sh` 模式循环之后运行该模块，因此不再是无 target 调用的孤儿。recipe 始终为一次显式的 `python3 -m unittest $(TEST_HARNESS_MODULES)`：不做自动目录发现，不隐式启动 QEMU 脚本，不通过模块名推断 build 路径。fixture 以 fake `subprocess.Popen` 替换真实 QEMU（个别模块会以 `make -n` 探测 Make 契约，但**绝不**拉起 QEMU 进程），因此 `make test-harness` 在 PR/CI 中作为"零环境依赖"门控。
 
 **独立的测试目标**（不归入任何 bucket，因为它们使用不同的 harness 或镜像 variant）：
 

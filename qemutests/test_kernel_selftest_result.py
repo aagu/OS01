@@ -329,6 +329,29 @@ class KernelSelftestRunArchiveTests(unittest.TestCase):
         self.assertEqual(data["status"], "FAIL")
         self.assertEqual(data["runner_exit_code"], 1)
 
+    def test_error_run_labels_suite_not_case(self) -> None:
+        # The launch-failure ERROR path publishes no per-case records
+        # (declared_ids=None, no case outcomes), so its count_unit must
+        # describe the suite aggregate.  ``case`` is reserved for runs
+        # that actually published individual case records — the same
+        # rule that makes a normal run "case" (build.md, count unit).
+        def factory(argv, run_dir, timeout_s, *, writable_stdin: bool = False):
+            return ReceivedOnlyFakeProcessSession(
+                argv=argv, run_dir=run_dir, timeout_s=timeout_s,
+                writable_stdin=writable_stdin, chunks=[],
+                start_exc=FileNotFoundError("no qemu"))
+
+        rc = rks.run_kernel_selftest(
+            qemu="qemu-system-x86_64", firmware="/f", image="/i",
+            cpu=4, memory="512M", timeout_s=5.0,
+            build_dir=self.build_dir, profile="x86_64-clang",
+            session_factory=factory)
+        self.assertEqual(rc, 2)
+        data = self._report()
+        self.assertEqual(data["status"], "ERROR")
+        self.assertIsNone(data["declared_ids"])
+        self.assertEqual(data["count_unit"], "suite")
+
 
 class KernelSelftestMakeWiringTests(unittest.TestCase):
     """Source-level pin of the ``test-kernel-selftest`` Make wiring.

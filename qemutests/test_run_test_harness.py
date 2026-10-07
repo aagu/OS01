@@ -259,7 +259,16 @@ class FakeProcessSession:
 
     def stop(self):
         self.stop_calls += 1
-        self._stopped_by_runner = True
+        # Mirror the real ProcessSession.stop() -> _cleanup(): a child
+        # that is still alive is terminated by the runner
+        # (stopped_by_runner True); an already-exited child is merely
+        # reaped (False).  Recording the flag unconditionally made the
+        # double easier than production — the same shape that hid the
+        # run_test.py evidence defect — so it is now pinned to the
+        # production rule.
+        if self._running:
+            self._stopped_by_runner = True
+        self._running = False
         return self._returncode
 
     def close(self) -> None:
@@ -2146,6 +2155,50 @@ class FakeProcessSessionCursorTests(unittest.TestCase):
         fake = self._fake([b"MARKER\n", b"tail\n"])
         self.assertEqual(fake.wait_for(lambda s: "MARKER" in s), "MARKER\n")
         self.assertEqual(fake.observe(1.0), "tail\n")
+
+
+class FakeProcessSessionStopFidelityTests(unittest.TestCase):
+    """Pin ``FakeProcessSession.stop()`` to the real ``ProcessSession``.
+
+    Production ``ProcessSession.stop() -> _cleanup()`` sets
+    ``_stopped_by_runner = True`` **only** when the child was still alive
+    (``harness/process.py:380-402``); an already-exited child is merely
+    reaped and the flag stays ``False``.  The double used to set the flag
+    unconditionally — the same "double easier than production" shape that
+    hid the ``run_test.py`` evidence defect — on the very field that
+    regression was about.  These fixtures pin the double to the
+    production rule so a future edit cannot make it permissive again.
+    """
+
+    def _fake(self, *, running: bool) -> FakeProcessSession:
+        fake = FakeProcessSession(
+            argv=["qemu-system-x86_64"],
+            run_dir=Path(tempfile.gettempdir()) / "os01-fake-stop",
+            timeout_s=1.0,
+            chunks=[],
+        )
+        if not running:
+            fake.mark_exited()
+        return fake
+
+    def test_stop_records_runner_termination_of_a_live_child(self) -> None:
+        # The child is still alive when the runner stops it: production
+        # records a runner-owned stop.
+        fake = self._fake(running=True)
+        self.assertIsNone(fake._proc.poll())
+        fake.stop()
+        self.assertTrue(
+            fake.stopped_by_runner,
+            "a runner-terminated live child must be recorded as stopped")
+
+    def test_stop_on_an_already_exited_child_is_not_a_runner_stop(self) -> None:
+        # The child exited on its own *before* the runner stopped it, so
+        # production only reaps it and leaves ``stopped_by_runner`` False.
+        fake = self._fake(running=False)
+        fake.stop()
+        self.assertFalse(
+            fake.stopped_by_runner,
+            "an already-exited child was not stopped by the runner")
 
 
 class ScriptModeImportTests(unittest.TestCase):
