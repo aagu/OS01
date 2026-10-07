@@ -458,12 +458,28 @@ class QmpClient:
 # ═══════════════════════════════════════════════════════════════
 
 class ResolutionSession:
-    """A running QEMU instance driven over a writable serial pipe + QMP."""
+    """A running QEMU instance driven over a writable serial pipe + QMP.
+
+    The QEMU process boundary is owned by ``ProcessSession`` (spec
+    section 5.3).  QMP is a separate concern (a unix socket) and
+    continues to be managed by ``QmpClient`` directly.
+
+    Process boundary delegation:
+      * ``start()`` constructs a ``ProcessSession`` via an
+        injectable ``session_factory`` (default: ``ProcessSession``).
+        Tests install a stand-in to bypass the real QEMU spawn.
+      * Serial output is captured by the ProcessSession's stdout
+        pipe (``text``); the legacy ``_pump()`` / ``serial.log``
+        file path is preserved as a backward-compat shim that
+        reads from ``process.text``.
+      * ``send_line`` writes via ``process.send``.  Lifecycle /
+        cleanup delegate to ``process.close``.
+    """
 
     def __init__(self, firmware: Path, image: Path, results_dir: Path,
                  smp: int = DEFAULT_SMP, timeout: int = DEFAULT_TIMEOUT,
                  qemu: str = QEMU, serial_only: bool = False,
-                 display_device=None):
+                 display_device=None, session_factory=None):
         self.firmware = Path(firmware)
         self.image = Path(image)
         self.results_dir = Path(results_dir)
@@ -474,7 +490,14 @@ class ResolutionSession:
         # Video device argv tokens; defaults to the supported `-vga std` (BGA).
         self.display_device = (list(display_device) if display_device
                                else ["-vga", "std"])
-        self.proc: Optional[subprocess.Popen] = None
+        # ProcessSession factory: tests install a stand-in (see
+        # FakeProcessSession in qemutests/test_run_test_harness.py).
+        if session_factory is None:
+            from qemutests.harness.process import ProcessSession
+            session_factory = ProcessSession
+        self._session_factory = session_factory
+        self.proc = None            # legacy alias for `process._proc`
+        self.process = None         # ProcessSession instance
         self.qmp: Optional[QmpClient] = None
         self.serial_path = self.results_dir / "serial.log"
         self._serial_fp = None
@@ -491,6 +514,10 @@ class ResolutionSession:
             os.unlink(qmp_path)
         except OSError:
             pass
+        # Backward-compat serial.log shim — the live harness still
+        # creates the shim so legacy readers (debug scripts) find
+        # the file.  The primary serial source is now the
+        # ProcessSession's stdout pipe.
         self._serial_fp = open(self.serial_path, "wb", buffering=0)
         args = [
             self.qemu, "-M", "q35",
@@ -508,25 +535,51 @@ class ResolutionSession:
             "-no-reboot", "-no-shutdown",
             "-qmp", f"unix:{qmp_path},server,nowait",
         ]
-        self.proc = subprocess.Popen(
-            args, stdin=subprocess.PIPE, stdout=self._serial_fp,
-            stderr=subprocess.DEVNULL)
+        # Construct ProcessSession (argv-only, monotonic deadline,
+        # process-group kill, persistent log files).  writable_stdin
+        # is True because ResolutionSession types shell commands.
+        run_dir = self.results_dir / "process"
+        self.process = self._session_factory(
+            argv=args,
+            run_dir=run_dir,
+            timeout_s=float(self.timeout),
+            writable_stdin=True,
+        )
+        self.process.start()
+        self.proc = self.process  # legacy alias
+        # Mirror initial serial output to the legacy serial.log file
+        # so external debug readers can still tail it.
+        if self._serial_fp is not None:
+            try:
+                self._serial_fp.write(self.process.text.encode("utf-8", errors="replace"))
+                self._serial_fp.flush()
+            except OSError:
+                pass
         self.qmp = QmpClient(qmp_path)
         self.qmp.connect()   # QmpError -> FAIL (never skip)
 
     # ── serial transport ──
     def _pump(self) -> None:
+        # The serial source is the ProcessSession's stdout pipe; the
+        # legacy serial.log file is mirrored for debug readers.  We
+        # always re-read ``process.text`` so a freshly-drained chunk
+        # is visible to the next wait_for call.
         try:
-            data = self.serial_path.read_bytes()
-        except OSError:
+            data = self.process.text.encode("utf-8", errors="replace")
+        except (OSError, AttributeError):
             data = b""
         self._buf = data.decode("utf-8", errors="replace")
+        if self._serial_fp is not None:
+            try:
+                self._serial_fp.write(data)
+                self._serial_fp.flush()
+            except OSError:
+                pass
 
     def _send(self, text: str) -> None:
-        if not self.proc or not self.proc.stdin:
+        if not self.process:
             raise RuntimeError("session not started")
-        self.proc.stdin.write(text.encode())
-        self.proc.stdin.flush()
+        self.process.send(text.encode("utf-8"))
 
     def send_line(self, text: str) -> None:
         self._send(text + "\n")
@@ -534,8 +587,9 @@ class ResolutionSession:
     def wait_for(self, pattern: str, timeout: float = 20.0,
                  start: Optional[str] = None) -> bool:
         rx = re.compile(pattern)
-        # With no explicit start, search the whole buffer: a single serial read
-        # can deliver several events at once, so "already present" must count.
+        # With no explicit start, search the whole buffer: a single
+        # serial read can deliver several events at once, so
+        # "already present" must count.
         base = "" if start is None else start
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -543,7 +597,7 @@ class ResolutionSession:
             region = self._buf[len(base):]
             if rx.search(region):
                 return True
-            if self.proc and self.proc.poll() is not None:
+            if self.process and self.process._proc and self.process._proc.poll() is not None:
                 return False
             time.sleep(0.2)
         return False
@@ -601,17 +655,19 @@ class ResolutionSession:
     def close(self) -> None:
         if self.qmp:
             self.qmp.close()
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
+        if self.process is not None:
             try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+                self.process.close()
+            except Exception:
+                pass
+            self.process = None
+            self.proc = None
         if self._serial_fp:
             try:
                 self._serial_fp.close()
             except OSError:
                 pass
+            self._serial_fp = None
         if self._qmp_dir:
             shutil.rmtree(self._qmp_dir, ignore_errors=True)
 
