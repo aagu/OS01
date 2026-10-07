@@ -188,10 +188,13 @@ def _write_suite_report(archive, *, argv, profile, cpu, memory_mib,
             argv=list(argv), cpu_count=int(cpu), memory_mib=int(memory_mib or 0),
             tool_versions={},
             firmware_path=firmware or None,
-            firmware_sha256_before=_sha256_path(firmware),
+            # Only the post-run hash is recorded: a ``*_before`` computed at
+            # report time would not be a real mutation check (same convention
+            # as ``run_kernel_selftest.py`` / ``run_hosttests.py``).
+            firmware_sha256_before=None,
             firmware_sha256_after=_sha256_path(firmware),
             image_path=image or None,
-            image_sha256_before=_sha256_path(image),
+            image_sha256_before=None,
             image_sha256_after=_sha256_path(image),
             utc_started_at=datetime.now(timezone.utc).isoformat(),
             duration_s=max(0.0, time.monotonic() - started_monotonic),
@@ -214,7 +217,10 @@ def run_case(args, diagnostic_dtb, *, session_factory=None, build_dir=None,
 
     Only the common process/output/archive code is delegated: the verdict
     is still ``spi_verdict`` (suite owned) over the serial socket stream.
-    Returns 0 (PASS), 1 (FAIL) or 2 (TIMEOUT/ERROR).
+
+    Returns the plan's direct-runner exit code: 0 (PASS), 1 (FAIL or
+    TIMEOUT) or 2 (configuration / environment ERROR).  The archived
+    ``status`` always matches the returned code.
     """
     if session_factory is None:
         session_factory = ProcessSession
@@ -240,6 +246,7 @@ def run_case(args, diagnostic_dtb, *, session_factory=None, build_dir=None,
     log = bytearray()
     verdict = None
     timed_out = False
+    died_before_bind = False
     injected = False
     spawn_error = None
     try:
@@ -261,7 +268,17 @@ def run_case(args, diagnostic_dtb, *, session_factory=None, build_dir=None,
                     except OSError:
                         pass
                     client = None
-                    time.sleep(0.2)
+                    # Liveness gate (base loop: ``proc.poll() is None``).
+                    # A zero-ish observation window drains the pipes and
+                    # lets ProcessSession reap a child that has already
+                    # exited: a QEMU that died *before binding the socket*
+                    # must be a FAIL, not spun out to the deadline and
+                    # misreported as a TIMEOUT.  A live session leaves
+                    # ``returncode`` as None and we keep retrying.
+                    session.observe(0.2)
+                    if session.returncode is not None:
+                        died_before_bind = True
+                        break
                     continue
             # 200ms 切片 select: 让 deadline 检查 + inject 触发都有机会
             # 在 idle 串口上及时推进, 不会无限挂在内核 recv().
@@ -281,7 +298,7 @@ def run_case(args, diagnostic_dtb, *, session_factory=None, build_dir=None,
             if inject_now and not injected:
                 # 注入 1 字节 -> PL011 RX IRQ. 现状 kernel 没 handler,
                 # IRQn 不变 handled, harness 继续等 handled marker,
-                # 最终由 deadline -> timed_out -> exit 2 (RED 证据).
+                # 最终由 deadline -> timed_out -> exit 1 (TIMEOUT 槽).
                 try:
                     client.send(b"G")
                     injected = True
@@ -289,8 +306,10 @@ def run_case(args, diagnostic_dtb, *, session_factory=None, build_dir=None,
                     pass
             if verdict is not None:
                 break
-        # 跳出 while 时若还没出 verdict, 就是 deadline 到了.
-        if verdict is None and time.monotonic() >= deadline:
+        # 跳出 while 时若还没出 verdict, 且不是检测到 QEMU 提前退出,
+        # 就是 deadline 到了.
+        if (verdict is None and not died_before_bind
+                and time.monotonic() >= deadline):
             timed_out = True
     except Exception as error:  # noqa: BLE001
         spawn_error = error
@@ -329,19 +348,31 @@ def run_case(args, diagnostic_dtb, *, session_factory=None, build_dir=None,
     armed_count = len(ARMED_RE.findall(log_text.replace("\r", "")))
     handled_count = len(HANDLED_RE.findall(log_text.replace("\r", "")))
     accepted = verdict == "pass"
-    status = ("PASS" if accepted else
-              ("TIMEOUT" if timed_out else "FAIL"))
-    rc = 0 if accepted else (2 if timed_out else 1)
+    # Exit-code / archive-status classification (plan global constraint:
+    # 0=PASS, 1=FAIL/TIMEOUT, 2=configuration/environment ERROR).  A
+    # timeout is in the exit-1 slot, and a QEMU that died before binding
+    # the socket is a FAIL — neither is exit 2.
+    if accepted:
+        status, rc = "PASS", 0
+    elif timed_out:
+        status, rc = "TIMEOUT", 1
+    else:
+        status, rc = "FAIL", 1
     errors = []
     if not accepted:
-        errors.append("timeout waiting for armed+handled markers" if timed_out
-                      else "armed+handled verdict not satisfied")
+        if timed_out:
+            errors.append("timeout waiting for armed+handled markers")
+        elif died_before_bind:
+            errors.append("QEMU exited before binding the serial socket")
+        else:
+            errors.append("armed+handled verdict not satisfied")
     _write_suite_report(
         archive, argv=command, profile=profile, cpu=args.cpus, memory_mib=512,
         firmware=args.firmware, image=args.image, started_monotonic=started,
         status=status, runner_exit_code=rc, session=session, errors=errors,
         extra={"injected": injected, "armed_count": armed_count,
-               "handled_count": handled_count})
+               "handled_count": handled_count,
+               "died_before_bind": died_before_bind})
     summary = {
         "event": "spi-case",
         "cpus": args.cpus,
@@ -349,6 +380,7 @@ def run_case(args, diagnostic_dtb, *, session_factory=None, build_dir=None,
         "injected": injected,
         "armed_count": armed_count,
         "handled_count": handled_count,
+        "died_before_bind": died_before_bind,
         "serial": str(serial_path),
     }
     print(json.dumps(summary))

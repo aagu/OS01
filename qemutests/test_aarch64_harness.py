@@ -488,7 +488,43 @@ class GicSpiLifecycleTests(SuiteUnitAdapterTests):
         data = _one_archive(self.build, gspi.SUITE)
         self.assert_suite_unit(data)
         self.assertEqual(data["status"], "PASS")
+        self.assert_exit_code_matches_status(data, 0)
+        self.assert_hash_before_unset(data)
         self.assertTrue((Path(data["stdout_log"]).parent / "serial.log").exists())
+
+    def _args(self, timeout):
+        return argparse.Namespace(
+            qemu="qemu-system-aarch64", firmware=self.args.firmware,
+            image=self.args.image, log_dir=self.args.log_dir, cpus=1,
+            timeout=timeout)
+
+    def test_dead_qemu_before_bind_is_fail_not_timeout(self):
+        # QEMU dies before it ever binds the serial socket.  The base loop's
+        # ``proc.poll()`` liveness gate caught this as FAIL; the migrated
+        # loop must too — it is a FAIL (exit 1), not the TIMEOUT/exit-2
+        # bucket it fell into once ``proc.poll`` was dropped.
+        session = FakeSession(text="", exit_in_window=True)
+        rc = gspi.run_case(
+            self._args(0.5), str(self.dtb), session_factory=_factory(session),
+            build_dir=str(self.build), profile="test",
+            sock_path=str(self.tmp / "never-bound.sock"))
+        self.assertEqual(rc, 1)
+        data = _one_archive(self.build, gspi.SUITE)
+        self.assertEqual(data["status"], "FAIL")
+        self.assert_exit_code_matches_status(data, 1)
+
+    def test_ordinary_timeout_exits_1(self):
+        # No socket ever appears and QEMU stays alive: the deadline trips.
+        # The contract puts TIMEOUT in the exit-1 slot (it was exit 2).
+        session = FakeSession(text="")
+        rc = gspi.run_case(
+            self._args(0.3), str(self.dtb), session_factory=_factory(session),
+            build_dir=str(self.build), profile="test",
+            sock_path=str(self.tmp / "never-bound.sock"))
+        self.assertEqual(rc, 1)
+        data = _one_archive(self.build, gspi.SUITE)
+        self.assertEqual(data["status"], "TIMEOUT")
+        self.assert_exit_code_matches_status(data, 1)
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -654,6 +690,11 @@ class RunnerExitCodeScriptTests(SuiteUnitAdapterTests):
     def test_uefi_smp_missing_qemu_exits_2(self):
         self._env_error("aarch64_uefi_smp.py", smp.SUITE,
                         ["--cpus", "1", "--repeat", "1", "--timeout", "5"])
+
+    def test_gic_spi_missing_qemu_exits_2(self):
+        self._env_error("aarch64_gic_spi.py", gspi.SUITE,
+                        ["--cpus", "1", "--timeout", "5",
+                         "--diagnostic-dtb", str(self.dtb)])
 
     def test_uefi_smp_aggregates_case_codes(self):
         # Multi-case runs fold to the plan's contract: 0 all-pass, 2 if any
