@@ -409,6 +409,12 @@ test-pmm-boot-reservation:
 # `test_ci_workflow` (a static contract check over
 # .github/workflows/ci.yml).  `test_lvgl_runner` is deliberately NOT
 # listed: it is an executable QEMU driver script, not a unittest module.
+# `test_arch9_build_contract` is also deliberately NOT listed: its
+# fixtures drive real `make -n kernel.bin`, which needs a prepared
+# sysroot, so it cannot run in this zero-environment-dependency gate
+# (the CI `harness` job builds nothing before `make test-harness`).  It
+# is NOT owned by the `test-contract` bucket either — `test-contract`
+# runs `qemutests/build_contract.sh` and never invokes this module.
 # The recipe is a single `python3 -m unittest` call against the explicit
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Every fixture replaces subprocess.Popen with a fake, so no QEMU process

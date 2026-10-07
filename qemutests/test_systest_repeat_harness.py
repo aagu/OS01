@@ -41,6 +41,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -53,6 +54,34 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import qemutests.x86_64_systest_repeat as repeat  # noqa: E402
+
+RUN_MK = ROOT / "mk" / "components" / "run.mk"
+
+
+def _recipe_body(text: str, target: str) -> str:
+    """Return the recipe of the first ``target:`` rule in a Makefile.
+
+    Recipe lines are the tab-indented lines after the rule header;
+    shell line-continuations are collapsed so one invocation is one
+    logical string.
+    """
+    lines = text.splitlines()
+    try:
+        start = next(
+            i for i, ln in enumerate(lines)
+            if re.match(rf"^{re.escape(target)}\s*:", ln)
+        )
+    except StopIteration:
+        raise AssertionError(f"no rule for target {target!r}")
+    body = []
+    for ln in lines[start + 1:]:
+        if ln.startswith("\t"):
+            body.append(ln.strip())
+        elif ln.strip() == "":
+            continue
+        else:
+            break
+    return " ".join(body)
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -437,6 +466,26 @@ class ArchiveAdapterTests(RepeatCase):
 
 
 # ───────────────────────────────────────────────────────────────────
+# Recipe contract — the Make recipe must hand Python the real timeout.
+# ───────────────────────────────────────────────────────────────────
+
+
+class RecipeContractTests(unittest.TestCase):
+    """``run.mk``'s ``test-syscall-repeat`` recipe must pass an explicit
+    ``--timeout`` so the runner receives the *actual* budget instead of
+    inventing its own default (the plan's constraint: Python is handed
+    the real timeout value).  Pinned statically: no QEMU is launched."""
+
+    def test_recipe_passes_an_explicit_timeout(self):
+        recipe = _recipe_body(RUN_MK.read_text(encoding="utf-8"),
+                              "test-syscall-repeat")
+        self.assertRegex(
+            recipe, r"--timeout\s+180\b",
+            "test-syscall-repeat must pass `--timeout 180` to "
+            "x86_64_systest_repeat.py; got:\n" + recipe)
+
+
+# ───────────────────────────────────────────────────────────────────
 # Ruling 7 — production entry mode (script invocation).
 # ───────────────────────────────────────────────────────────────────
 
@@ -503,6 +552,32 @@ print("SCRIPT_MODE_OK", os.path.basename(target))
         finally:
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ───────────────────────────────────────────────────────────────────
+# ``--help`` description robustness — a hardcoded literal, not
+# ``__doc__``-derived (which is None under -OO / PYTHONOPTIMIZE=2).
+# ───────────────────────────────────────────────────────────────────
+
+
+class HelpDescriptionTests(unittest.TestCase):
+    """The argparse ``description`` must be a literal, not
+    ``__doc__.splitlines()[0]`` — under ``-OO`` CPython strips module
+    docstrings, so a doc-derived description raises ``AttributeError``
+    while a literal keeps ``--help`` working."""
+
+    def test_help_survives_pythonoptimize_2(self):
+        proc = subprocess.run(
+            [sys.executable, "-OO", "qemutests/x86_64_systest_repeat.py",
+             "--help"],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=60)
+        self.assertEqual(
+            proc.returncode, 0,
+            f"--help must survive -OO\n{proc.stdout}\n{proc.stderr}")
+        self.assertIn(
+            "Run systest repeatedly from the real terminal/ash path.",
+            proc.stdout,
+            "the argparse description must be the hardcoded literal")
 
 
 if __name__ == "__main__":

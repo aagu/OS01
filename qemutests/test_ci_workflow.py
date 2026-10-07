@@ -5,9 +5,11 @@ Host-only, no QEMU, no YAML dependency (the plan forbids adding a YAML
 parser): the workflow is read as text and checked against the contract
 Task 13 puts in place:
 
-  1. ``make test-harness`` is invoked *explicitly* — the framework
-     regression entry is a named module list, never
-     ``python3 -m unittest discover``.
+  1. ``make test-harness`` is invoked *explicitly* from a job ``run:``
+     step — the framework regression entry is a named module list, never
+     ``python3 -m unittest discover``.  The check is pinned to a real
+     step (comments cannot satisfy it): a workflow-level comment may
+     mention the command without it ever running.
   2. The separate systest / kernel-selftest commands never share flags:
      no single ``make`` command carries both ``OS01_SYSTEST=1`` and
      ``KERNEL_SELFTEST=1`` (the Makefile rejects the combination, so a
@@ -64,6 +66,80 @@ def _make_commands(text: str) -> list[str]:
     return cmds
 
 
+# ── Step-level extraction (no YAML dependency) ───────────────────────
+# A gate must be satisfied by a real *step* that runs the command, never
+# by a mention inside a `#` comment at the workflow level.  These helpers
+# read the workflow as text, split it into jobs, and pull the shell
+# command out of every `run:` key (inline or `|`/`>` block scalar),
+# dropping shell-comment lines so a commented-out command cannot count.
+
+_JOBS_KEY = re.compile(r"^jobs:\s*$")
+_JOB_KEY = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
+_RUN_KEY = re.compile(r"^(\s*)run:\s*(.*)$")
+
+
+def _job_blocks(text: str) -> dict[str, str]:
+    """Split the workflow into ``{job name: job block text}``.
+
+    A job is a 2-space-indented ``name:`` key directly under the
+    top-level ``jobs:``.  Job blocks include their nested steps.
+    """
+    lines = text.splitlines()
+    try:
+        start = next(i for i, ln in enumerate(lines) if _JOBS_KEY.match(ln)) + 1
+    except StopIteration:
+        return {}
+    blocks: dict[str, str] = {}
+    name = None
+    buf: list[str] = []
+    for ln in lines[start:]:
+        m = _JOB_KEY.match(ln)
+        if m:
+            if name is not None:
+                blocks[name] = "\n".join(buf)
+            name = m.group(1)
+            buf = []
+        elif name is not None:
+            buf.append(ln)
+    if name is not None:
+        blocks[name] = "\n".join(buf)
+    return blocks
+
+
+def _step_run_commands(block: str) -> list[str]:
+    """Every ``run:`` shell command in *block* (inline or block scalar)."""
+    lines = block.splitlines()
+    cmds: list[str] = []
+    i = 0
+    while i < len(lines):
+        m = _RUN_KEY.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        indent = len(m.group(1))
+        inline = m.group(2).strip()
+        if inline and inline[0] not in "|>":
+            cmds.append(inline)
+            i += 1
+            continue
+        # Block scalar (``|`` / ``>``): collect the more-indented body and
+        # drop shell-comment lines, so a commented-out command cannot pass.
+        i += 1
+        body: list[str] = []
+        while i < len(lines):
+            nxt = lines[i]
+            if nxt.strip() == "":
+                i += 1
+                continue
+            if len(nxt) - len(nxt.lstrip(" ")) <= indent:
+                break
+            body.append(nxt)
+            i += 1
+        cmds.append("\n".join(
+            ln for ln in body if not ln.lstrip().startswith("#")))
+    return cmds
+
+
 class CiWorkflowContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.assertTrue(CI_PATH.is_file(), f"missing workflow: {CI_PATH}")
@@ -71,9 +147,21 @@ class CiWorkflowContractTests(unittest.TestCase):
 
     # ── 1. test-harness is explicit ──────────────────────────────
     def test_test_harness_is_invoked_explicitly(self) -> None:
-        self.assertIn(
-            "make test-harness", self.text,
-            "ci.yml must invoke `make test-harness` explicitly")
+        # Pin the command to an actual job step, not merely to some
+        # occurrence anywhere in the file: `make test-harness` also
+        # appears in workflow-level comments, so a text-wide `assertIn`
+        # would stay green even if the real step were deleted.
+        invokers = [
+            job for job, block in _job_blocks(self.text).items()
+            if any(
+                re.search(r"(?:^|[\s;&|(])make\s+test-harness(?:\s|$)", cmd)
+                for cmd in _step_run_commands(block)
+            )
+        ]
+        self.assertTrue(
+            invokers,
+            "ci.yml must invoke `make test-harness` from a job `run:` step "
+            "(a comment or any non-step mention does not count)")
         self.assertNotIn(
             "unittest discover", self.text,
             "test-harness must run an explicit module list, never "

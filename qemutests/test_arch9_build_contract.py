@@ -202,7 +202,13 @@ class TestMatrixCaseNames(unittest.TestCase):
     )
 
     def test_all_cases_listed(self):
-        import driver_model_matrix as DMM
+        # Package-qualified so the module resolves under
+        # ``python3 -m unittest qemutests.test_arch9_build_contract``
+        # (cwd is the repo root, so a bare ``import driver_model_matrix``
+        # fails with ModuleNotFoundError).  ``qemutests`` is a namespace
+        # package; sibling modules import it the same way
+        # (``qemutests/test_run_test_harness.py``).
+        from qemutests import driver_model_matrix as DMM
         names = set(DMM.matrix_case_names())
         for c in self.EXPECTED:
             self.assertIn(c, names, f"matrix missing case {c!r}")

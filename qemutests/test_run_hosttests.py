@@ -31,6 +31,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -478,6 +479,66 @@ class ExitCodeEquivalenceTests(unittest.TestCase):
         # ... and specifically that a signal is FAIL/1, not ERROR/1.
         signal_row = next(r for r in rows if r[0] == "crash.elf")
         self.assertEqual((signal_row[1], signal_row[2]), ("FAIL", 1))
+
+
+# ───────────────────────────────────────────────────────────────────
+# Ctrl-C — the "archive every run" constraint (spec §7.2) must hold on
+# the interrupt path too, exactly as run_static_audit.py does.
+# ───────────────────────────────────────────────────────────────────
+
+
+class _InterruptingSession:
+    """A session whose ``observe`` raises ``KeyboardInterrupt`` — the
+    SIGINT-during-observe shape ``run_one`` must turn into an archived
+    ``ERROR``/130 row before re-raising."""
+
+    def __init__(self, *, argv, run_dir, timeout_s):
+        self.argv = argv
+        self.run_dir = run_dir
+        self.timeout_s = timeout_s
+        self.text = ""
+
+    def start(self):
+        pass
+
+    def observe(self, seconds):
+        raise KeyboardInterrupt
+
+    def stop(self):
+        return 0
+
+    def close(self):
+        pass
+
+
+class InterruptTests(unittest.TestCase):
+    """An interrupted host-test run must still leave a ``result.json`` in
+    the archive directory (the plan's "archive every run" constraint) and
+    exit 130 — matching ``run_static_audit.py``'s Ctrl-C row (status
+    ``ERROR``, ``runner_exit_code`` 130)."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="os01-hostint-"))
+        self.build = self.tmp / "build"
+        self.binary = _write_script(self.tmp, "slow.elf", SCRIPT_LEGACY_PASS)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_ctrl_c_archives_an_error_row(self) -> None:
+        with mock.patch.object(rh, "ProcessSession", _InterruptingSession):
+            rc = _run_main(["--build-dir", str(self.build), str(self.binary)])
+        self.assertEqual(rc, 130)
+        arch = _archives(self.build)
+        self.assertIn(
+            "slow", arch,
+            "an interrupted run left no result.json in its archive")
+        self.assertEqual(arch["slow"]["status"], "ERROR")
+        self.assertEqual(arch["slow"]["runner_exit_code"], 130)
+        assert_exit_code_convention(
+            self, status=arch["slow"]["status"],
+            runner_exit_code=arch["slow"]["runner_exit_code"],
+            label="ctrl-c")
 
 
 # ───────────────────────────────────────────────────────────────────

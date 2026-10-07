@@ -418,12 +418,23 @@ def run_one(
         rc = session.stop()
     except KeyboardInterrupt:
         # Reap the child on Ctrl-C; the session's process group is killed
-        # so no host binary is left running.
+        # so no host binary is left running.  The interruption is still an
+        # archived run: write the ERROR/130 row before re-raising, matching
+        # run_static_audit.py's Ctrl-C handler (spec §7.2 "archive every
+        # run"), so an interrupted run never leaves an archive directory
+        # without a result.json.
         if session is not None:
             try:
                 session.close()
             except Exception:
                 pass
+        _write_report(
+            archive, binary=bid, profile=profile, mode="unknown", argv=argv,
+            started_monotonic=started_monotonic, status="ERROR",
+            runner_exit_code=130, child_exit_code=None,
+            stopped_by_runner=False, errors=["interrupted (Ctrl-C)"],
+            exit_status_only=allow_empty,
+        )
         raise
     except Exception as exc:  # noqa: BLE001 — a launch/OS error is ERROR
         if session is not None:

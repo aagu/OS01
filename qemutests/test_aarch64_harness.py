@@ -172,6 +172,20 @@ def _one_archive(build: Path, suite: str):
     return json.loads(results[0].read_text())
 
 
+def _one_metadata(build: Path, suite: str):
+    """Return the single ``metadata.json`` dict under the suite's archive.
+
+    The m1 matrix runner writes a human-facing ``metadata.json`` next to
+    the ``result.json``; the two signals must agree.
+    """
+    base = Path(build) / "logs" / "tests" / suite
+    metas = sorted(base.glob("*/metadata.json"))
+    if len(metas) != 1:
+        raise AssertionError(
+            f"expected exactly one metadata.json under {base}, found {metas}")
+    return json.loads(metas[0].read_text())
+
+
 def _ns(**kw):
     base = dict(
         qemu="qemu-system-aarch64", firmware=None, image=None,
@@ -773,6 +787,14 @@ class RunnerExitCodeScriptTests(SuiteUnitAdapterTests):
         self._env_error("aarch64_m1_matrix.py", m1m.SUITE,
                         ["--variant", "arena-exhaust", "--timeout", "5",
                          "--diagnostic-dtb", str(self.dtb)])
+        # The m1 matrix writes a *second* signal, ``metadata.json``.  On the
+        # environment-error path it must record ``ERROR`` too — it used to
+        # say ``FAIL`` while ``result.json`` said ``ERROR``/exit 2, the exact
+        # "two signals disagree" class this framework removes.
+        data = _one_archive(self.build, m1m.SUITE)
+        meta = _one_metadata(self.build, m1m.SUITE)
+        self.assertEqual(meta["result"], "ERROR")
+        self.assertEqual(meta["result"], data["status"])
 
     def test_uefi_smp_aggregates_case_codes(self):
         # Multi-case runs fold to the plan's contract: 0 all-pass, 2 if any
