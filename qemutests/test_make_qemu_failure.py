@@ -436,5 +436,225 @@ class RecipeLineFailureShortCircuitTests(unittest.TestCase):
                 )
 
 
+# ────────────────────────────────────────────────────────────────────
+# RED demonstration: prove that a recipe WITHOUT `|| exit` lets a later
+# successful command mask an earlier build/hash failure (the brief's
+# "later successful command can mask either failure" warning).
+#
+# We construct a throwaway Makefile that mirrors the brief's recipe
+# structure (build → hash → runner) and exercise it twice:
+#   1. WITHOUT `|| exit`: a failing build/hcmp is silently masked by
+#      the successful runner; `make test-qemu` exits 0.
+#   2. WITH `|| exit`: the failing build/hcmp aborts the recipe; the
+#      runner never starts (marker file absent); `make test-qemu` exits
+#      nonzero.
+#
+# The second case is the contract the production recipe must satisfy.
+# ────────────────────────────────────────────────────────────────────
+
+
+_RECIPE_WITHOUT = """\
+test-qemu:
+\t@if [ "$(SUITE)" = "driver-model" ]; then \\
+\t  $(MAKE) --no-print-directory driver-model; \\
+\telse \\
+\t  $(MAKE) image; \\
+\t  ./fake-runner.sh; \\
+\tfi
+"""
+
+_RECIPE_WITH = """\
+test-qemu:
+\t@if [ "$(SUITE)" = "driver-model" ]; then \\
+\t  $(MAKE) --no-print-directory driver-model || exit 1; \\
+\telse \\
+\t  $(MAKE) image || exit 1; \\
+\t  $(MAKE) hash-check || exit 1; \\
+\t  ./fake-runner.sh || exit 1; \\
+\tfi
+"""
+
+
+class _Sandbox:
+    """Throwaway workspace: a stub `image` target, a `driver-model`
+    target that fails on demand, and a runner-side script that writes a
+    marker file when invoked.  Lets the RED demonstration exercise
+    `make test-qemu` without launching a real QEMU."""
+
+    @staticmethod
+    def write(tmp: Path, *, recipe: str, build_rc: int, hash_rc: int,
+              driver_rc: int, runner_rc: int = 0) -> Path:
+        mk = tmp / "Makefile"
+        runner = tmp / "fake-runner.sh"
+        marker = tmp / "RUNNER_INVOKED"
+        # Force-clear the marker so each invocation starts fresh.
+        marker.write_text("")
+        runner.write_text(
+            "#!/bin/sh\n"
+            f"echo 1 > '{marker}'\n"
+            f"exit {runner_rc}\n"
+        )
+        runner.chmod(0o755)
+        # Stub Makefile:
+        #  - ``image`` exits with the build_rc
+        #  - ``driver-model`` exits with the driver_rc
+        #  - ``hash-check`` shim that exits with hash_rc
+        #  - ``fake-runner.sh`` is the runner script (writes marker).
+        mk.write_text(
+            recipe
+            + "\n"
+            + "image:\n"
+            + f"\t@exit {build_rc}\n"
+            + "driver-model:\n"
+            + f"\t@exit {driver_rc}\n"
+            + "hash-check:\n"
+            + f"\t@exit {hash_rc}\n"
+            + ".PHONY: test-qemu image driver-model hash-check\n"
+        )
+        return marker
+
+
+class RedFailureMaskingDemo(unittest.TestCase):
+    """Prove the brief's "later successful command can mask failure"
+    warning by running a stub Makefile against a failing build."""
+
+    def _make_in(self, tmp: Path, extra: list) -> "subprocess.CompletedProcess":
+        return subprocess.run(
+            ["make", "-s", "test-qemu", *extra],
+            cwd=tmp,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    def test_without_exit_failing_build_is_masked_by_runner(self) -> None:
+        """Without ``|| exit`` after the build, the failing build is
+        silent and the runner STILL runs (marker file written).  This
+        is exactly the failure mode the brief warns about."""
+        with tempfile.TemporaryDirectory(prefix="make-red-") as tdir:
+            tmp = Path(tdir)
+            marker = _Sandbox.write(
+                tmp, recipe=_RECIPE_WITHOUT,
+                build_rc=1, hash_rc=0, driver_rc=0,
+            )
+            # The runner script writes the marker; without || exit, a
+            # failing build is silent and the runner STILL runs.
+            proc = self._make_in(tmp, ["SUITE=phase-0"])
+            self.assertEqual(
+                proc.returncode, 0,
+                f"without || exit, the failing build is masked; "
+                f"runner returned {proc.returncode!r}; stdout={proc.stdout!r}",
+            )
+            self.assertTrue(
+                marker.read_text().strip() != "",
+                "marker file written => runner was invoked "
+                f"(masking the build failure); marker={marker.read_text()!r}",
+            )
+
+    def test_with_exit_failing_build_aborts_before_runner(self) -> None:
+        """With ``|| exit`` after the build, the failing build aborts
+        the recipe (make returns nonzero) and the runner NEVER runs
+        (marker file empty).  This is the contract the production
+        recipe must satisfy."""
+        with tempfile.TemporaryDirectory(prefix="make-red-") as tdir:
+            tmp = Path(tdir)
+            marker = _Sandbox.write(
+                tmp, recipe=_RECIPE_WITH,
+                build_rc=1, hash_rc=0, driver_rc=0,
+            )
+            proc = self._make_in(tmp, ["SUITE=phase-0"])
+            self.assertNotEqual(
+                proc.returncode, 0,
+                f"with || exit, the failing build must abort; "
+                f"got rc={proc.returncode!r}; stdout={proc.stdout!r}",
+            )
+            self.assertEqual(
+                marker.read_text().strip(), "",
+                "marker file empty => runner was NOT invoked "
+                "(build failure aborted the recipe)",
+            )
+
+    def test_with_exit_failing_hash_aborts_before_runner(self) -> None:
+        """The hash-check ``cmp`` line must also short-circuit: with
+        ``|| exit`` after the hash, a non-matching cmp aborts the
+        recipe before the runner starts."""
+        with tempfile.TemporaryDirectory(prefix="make-red-") as tdir:
+            tmp = Path(tdir)
+            marker = _Sandbox.write(
+                tmp, recipe=_RECIPE_WITH,
+                build_rc=0, hash_rc=1, driver_rc=0,
+            )
+            proc = self._make_in(tmp, ["SUITE=phase-0"])
+            self.assertNotEqual(
+                proc.returncode, 0,
+                f"with || exit, the failing hash must abort; "
+                f"got rc={proc.returncode!r}",
+            )
+            self.assertEqual(
+                marker.read_text().strip(), "",
+                "marker file empty => runner was NOT invoked "
+                "after hash failure",
+            )
+
+    def test_with_exit_driver_model_failure_aborts(self) -> None:
+        """The driver-model ``$(MAKE) ... test-qemu-driver-model`` line
+        must short-circuit too — a build failure inside the matrix
+        harness aborts the recipe before the runner starts."""
+        with tempfile.TemporaryDirectory(prefix="make-red-") as tdir:
+            tmp = Path(tdir)
+            marker = _Sandbox.write(
+                tmp, recipe=_RECIPE_WITH,
+                build_rc=0, hash_rc=0, driver_rc=1,
+            )
+            proc = self._make_in(tmp, ["SUITE=driver-model"])
+            self.assertNotEqual(
+                proc.returncode, 0,
+                f"with || exit, the driver-model sub-make failure must "
+                f"abort; got rc={proc.returncode!r}",
+            )
+            self.assertEqual(
+                marker.read_text().strip(), "",
+                "marker file empty => runner was NOT invoked "
+                "after driver-model failure",
+            )
+
+
+class ProductionRecipeShortCircuitPinnedTests(unittest.TestCase):
+    """Pin the production recipe's ``|| exit`` short-circuiting contract.
+
+    The brief explicitly requires: "Add explicit ``|| exit`` or
+    equivalent short-circuiting after every build/hash command in
+    ``test-qemu`` and its driver-model dispatch so an old image cannot
+    produce a green result."  These source-parsing tests lock that in."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.text = _read_runmk()
+
+    def test_driver_model_submake_short_circuits(self) -> None:
+        recipe = _extract_recipe(self.text, "test-qemu")
+        self.assertRegex(
+            recipe,
+            r"\$\(MAKE\).*test-qemu-driver-model.*\|\|\s*exit\s+1",
+            "driver-model sub-make line must end with '|| exit 1'",
+        )
+
+    def test_variant_image_submake_short_circuits(self) -> None:
+        recipe = _extract_recipe(self.text, "test-qemu")
+        self.assertRegex(
+            recipe,
+            r"\$\(MAKE\).*TEST_QEMU_FLAVOR_.*image.*\|\|\s*exit\s+1",
+            "variant image sub-make line must end with '|| exit 1'",
+        )
+
+    def test_normal_after_cmp_short_circuits(self) -> None:
+        recipe = _extract_recipe(self.text, "test-qemu")
+        self.assertRegex(
+            recipe,
+            r'cmp\s+"\$\(NORMAL_IMAGE_DIR\)/normal\.before".*\|\|\s*exit\s+1',
+            "normal-before/normal-after cmp line must end with '|| exit 1'",
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

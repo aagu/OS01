@@ -664,6 +664,7 @@ _test-driver-model-prep:
 _test-driver-model-run:
 	@mkdir -p $(DRIVER_MODEL_LOG_DIR)
 	DRIVER_MODEL_LOG_DIR="$(DRIVER_MODEL_LOG_DIR)" \
+	  OS01_BUILD_DIR="$(abspath $(BUILD_DIR))" \
 	  python3 qemutests/driver_matrix_run.py \
 	  $(if $(DRIVER_MODEL_DRIVER_CASE),--case $(DRIVER_MODEL_DRIVER_CASE),--case all) \
 	  $(if $(DRIVER_MATRIX_DRIVER_SMP),--smp $(DRIVER_MATRIX_DRIVER_SMP),)
@@ -750,17 +751,18 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	@if [ "$(SUITE)" = "driver-model" ]; then \
 	  DRIVER_MODEL_DRIVER_CASE="$(DRIVER_MODEL_DRIVER_CASE)" \
 	  DRIVER_MATRIX_DRIVER_SMP="$(DRIVER_MATRIX_DRIVER_SMP)" \
-	  $(MAKE) --no-print-directory test-qemu-driver-model; \
+	  $(MAKE) --no-print-directory test-qemu-driver-model || exit 1; \
 	else \
-	  $(MAKE) $(TEST_QEMU_FLAVOR_$(SUITE)) image; \
+	  $(MAKE) $(TEST_QEMU_FLAVOR_$(SUITE)) image || exit 1; \
 	  if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
-	    sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after"; \
-	    cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after"; \
+	    sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after" || exit 1; \
+	    cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after" || exit 1; \
 	  fi; \
 	  DISK_IMG="$(TEST_QEMU_IMG_$(SUITE))" \
 	  OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \
 	  NETWORK_NIC="$(NETWORK_NIC)" \
 	  FB_RESOLUTION_TEST="$(FB_RESOLUTION_TEST)" \
+	  OS01_BUILD_DIR="$(abspath $(BUILD_DIR))" \
 	  OS01_RESOLUTION_RESULT_DIR="$(abspath $(BUILD_DIR)/test-results/resolution)" \
 	  python3 qemutests/run_test.py $(SUITE); \
 	fi

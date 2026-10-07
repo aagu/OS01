@@ -133,6 +133,16 @@ class ProcessSession:
         """Monotonic time at which the global budget expires."""
         return self._deadline
 
+    @property
+    def run_dir(self) -> Path:
+        """The session's run directory (where stdout/stderr logs live).
+
+        Exposed as a public property so test fixtures can assert the
+        ProcessSession's working directory matches the RunArchive's
+        ``run_dir``.
+        """
+        return self._run_dir
+
     # ── lifecycle ──────────────────────────────────────────────
 
     def start(self) -> None:

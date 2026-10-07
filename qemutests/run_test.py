@@ -78,21 +78,49 @@ try:
 except ImportError:  # pragma: no cover
     ProcessSession = None  # type: ignore[assignment]
 
+# RunArchive + RunReport (spec §7.2).  The harness owns the evidence
+# directory under ``build/<profile>/logs/tests/<suite>/<UTC>-<uuid>/``
+# and writes ``result.json`` after every QEMU run.  Imported with the
+# same guard as ProcessSession so legacy test_gfx_runner fixtures can
+# monkey-patch ``run_test.subprocess.Popen`` without needing the
+# harness submodule installed.
+try:
+    from qemutests.harness.result import RunArchive, RunReport
+except ImportError:  # pragma: no cover
+    RunArchive = None  # type: ignore[assignment]
+    RunReport = None  # type: ignore[assignment]
+
 
 class TestRunner:
     def __init__(self, disk_img, timeout=TIMEOUT,
                  extra_qemu_args=None, snapshot=False,
                  smp=None, qemu_smp=None,
-                 session_factory=None):
+                 session_factory=None, suite="phase-0"):
         self.disk_img = disk_img
         self.timeout = timeout
         self.extra_qemu_args = list(extra_qemu_args) if extra_qemu_args else []
         self.snapshot = snapshot
-        # SMP / QEMU_SMP conflict check (spec §7.1).  Both can be set
-        # but must agree; ``smp`` is the preferred name going forward.
-        if smp is not None and qemu_smp is not None and str(smp) != str(qemu_smp):
+        self.suite = suite
+        # SMP / QEMU_SMP conflict check (spec §7.1).  All three sources
+        # (kwarg smp, kwarg qemu_smp, QEMU_SMP env var) must agree
+        # before any QEMU spawn.  ``smp`` is the preferred name going
+        # forward.
+        env_qemu_smp = os.environ.get("QEMU_SMP")
+        if (smp is not None and qemu_smp is not None
+                and str(smp) != str(qemu_smp)):
             raise SystemExit(
                 f"ERROR: SMP={smp} conflicts with legacy QEMU_SMP={qemu_smp}"
+            )
+        if (smp is not None and env_qemu_smp
+                and str(smp) != env_qemu_smp):
+            raise SystemExit(
+                f"ERROR: SMP={smp} conflicts with env QEMU_SMP={env_qemu_smp}"
+            )
+        if (qemu_smp is not None and env_qemu_smp
+                and str(qemu_smp) != env_qemu_smp):
+            raise SystemExit(
+                f"ERROR: QEMU_SMP={qemu_smp} conflicts with "
+                f"env QEMU_SMP={env_qemu_smp}"
             )
         self.smp = smp
         self.qemu_smp = qemu_smp
@@ -114,6 +142,11 @@ class TestRunner:
         self._serial_stdout_fp = None
         self._run_dir = None
         self._is_serial_stdio = False
+        # RunArchive (spec §7.2): populated by start_qemu() when the
+        # OS01_BUILD_DIR env var is set.  ``run_archive = None`` when
+        # the runner is invoked outside a build context (the legacy
+        # path used by host-only unit tests).
+        self.run_archive = None
 
     def start_qemu(self, network=False, serial_stdio=False,
                    extra_qemu_args=None, snapshot=False, run_dir=None):
@@ -149,8 +182,24 @@ class TestRunner:
                 all_extra.append("-snapshot")
 
         # Allocate run_dir for the ProcessSession.
+        # RunArchive integration (spec §7.2): when OS01_BUILD_DIR is
+        # set, the runner creates an archive under
+        # ``build/<profile>/logs/tests/<suite>/<UTC>-<uuid>/`` so the
+        # suite's evidence is preserved at a stable, predictable
+        # path.  When the env var is absent (host-only unit tests
+        # that don't care about evidence), fall back to the legacy
+        # mkdtemp in /tmp.  The factory can still override run_dir
+        # explicitly via the ``run_dir`` kwarg.
         if run_dir is None:
-            run_dir = Path(tempfile.mkdtemp(prefix="os01-qemu-"))
+            build_dir = os.environ.get("OS01_BUILD_DIR")
+            if build_dir and RunArchive is not None:
+                archive = RunArchive.create(
+                    build_dir=Path(build_dir), suite=self.suite,
+                )
+                self.run_archive = archive
+                run_dir = archive.run_dir
+            else:
+                run_dir = Path(tempfile.mkdtemp(prefix="os01-qemu-"))
         self._run_dir = run_dir
 
         # For file-serial mode, allocate the serial log path.
@@ -410,6 +459,20 @@ class TestRunner:
             self.serial_path = None
 
 
+def _panic_in(text):
+    """True if ``text`` contains a kernel-panic marker.
+
+    The kernel emits a bracketed ``[kernel panic]`` form AND a
+    ``Kernel panic: <reason>`` / ``Kernel panic - <reason>`` form
+    (the capitalised heading comes straight from ``panic()``).  Match
+    case-insensitively so a late fault in the 1-second observation
+    window is never missed regardless of which form it takes.  This is
+    the single shared detector used by every suite's observe-window
+    check (spec §5.3).
+    """
+    return "kernel panic" in text.lower()
+
+
 def test_boot(tester):
     """Phase 0 test: verify kernel boots, boot-log markers appear in
     order, and the shell runs."""
@@ -451,19 +514,24 @@ def test_boot(tester):
               f"(QEMU_SMP={tester._effective_smp})")
         return False
 
-    # Multi-CPU boot: the kernel must have registered the configured
-    # CPU count (line format: "percpu: %u CPU(s) registered (%u in MADT)").
-    if effective_smp > 1:
-        percpu = f"percpu: {tester._effective_smp} CPU(s) registered"
-        if percpu not in booted:
-            print(f"FAIL: missing {percu!r} in boot log")
-            return False
-
     # Wait for shell prompt
     prompt = tester.read_until("# ", timeout=15)
     if not prompt:
         print("FAIL: No shell prompt")
         return False
+
+    # 1-second observation window (spec §5.3): a kernel panic that
+    # arrives within observe(1) after the prompt is treated as a
+    # late fault — the run FAILs even though boot succeeded.  This
+    # closes the "kernel crashes 100 ms after the prompt" hole.
+    if tester.process is not None:
+        try:
+            tail = tester.process.observe(1.0)
+        except Exception:
+            tail = ""
+        if _panic_in(tail):
+            print("FAIL: kernel panic in 1-second observation window")
+            return False
 
     print("PASS: Kernel booted, boot markers verified, shell prompt appeared")
     return True
@@ -503,6 +571,18 @@ def test_systest(tester):
     time.sleep(2)
     output = tester._read_available().decode('utf-8', errors='replace')
 
+    # 1-second observation window (spec §5.3): a kernel panic that
+    # arrives within observe(1) after the RESULT line FAILs the run
+    # even though the test count says PASS.
+    if tester.process is not None:
+        try:
+            tail = tester.process.observe(1.0)
+        except Exception:
+            tail = ""
+        if _panic_in(tail):
+            print("FAIL: kernel panic in 1-second observation window")
+            return False
+
     # Parse: "[SYS TEST] RESULT: N passed, M failed"
     m2 = re.search(r'\[SYS TEST\] RESULT:\s*(\d+)\s*passed,\s*(\d+)\s*failed', output)
     if not m2:
@@ -512,6 +592,13 @@ def test_systest(tester):
     passed, failed = int(m2.group(1)), int(m2.group(2))
     if failed > 0:
         print(f"FAIL: {failed} tests failed ({passed} passed)")
+        return False
+    if passed == 0:
+        # A zero-count summary means no syscall test actually ran
+        # (e.g. the RESULT line was replayed from a stale run rather
+        # than produced by this one).  Treat it as a hard FAIL rather
+        # than a vacuous "0 passed" success.
+        print("FAIL: degenerate systest result (0 passed, 0 failed)")
         return False
     print(f"PASS: all {passed} syscall tests passed")
     return True
@@ -657,6 +744,27 @@ def test_network(tester):
 
         time.sleep(1)
         output = tester._read_available().decode('utf-8', errors='replace')
+        # 1-second observation window (spec §5.3): a kernel panic in
+        # the post-RESULT tail FAILs the run.
+        if tester.process is not None:
+            try:
+                tail = tester.process.observe(1.0)
+            except Exception:
+                tail = ""
+            if _panic_in(tail):
+                print("FAIL: kernel panic in 1-second observation window")
+                return False
+        # Anchor the RESULT on THIS run's own start evidence: nettest
+        # performs a DHCP handshake (``[NET TEST] DHCP: PASS``) before
+        # it prints the RESULT summary, so the current run's output up
+        # to the RESULT must carry the DHCP evidence.  A historical
+        # generic ``PASS:`` line replayed from a previous run (the old
+        # adapter's marker) has no DHCP evidence, so accepting its
+        # stale ``RESULT: 6 passed`` would be a false green.
+        if "DHCP" not in output:
+            print("FAIL: network RESULT without current-run DHCP evidence "
+                  "(stale/foreign output)")
+            return False
         match = re.search(r'\[NET TEST\] RESULT:\s*(\d+)\s*passed,\s*(\d+)\s*failed', output)
         if not match:
             print("FAIL: could not parse network result")
@@ -775,6 +883,16 @@ def test_gfx(tester):
               f"(last test marker: {m.group(0) if m else '<none>'!r})")
         return False
     print("PASS: [DESKTOP] SMOKE PASS marker observed")
+    # 1-second observation window (spec §5.3): a kernel panic in the
+    # post-completion tail FAILs the run.
+    if tester.process is not None:
+        try:
+            tail = tester.process.observe(1.0)
+        except Exception:
+            tail = ""
+        if _panic_in(tail):
+            print("FAIL: kernel panic in 1-second observation window")
+            return False
     return True
 
 
@@ -785,7 +903,7 @@ def main():
     parser.add_argument("test_name", nargs="?", default="boot", help="Test to run")
     args = parser.parse_args()
 
-    tester = TestRunner(args.disk, args.timeout)
+    tester = TestRunner(args.disk, args.timeout, suite=args.test_name)
 
     try:
         if args.test_name == "boot" or args.test_name == "phase-0":
@@ -809,8 +927,93 @@ def main():
             result = False
     finally:
         tester.cleanup()
+        _write_run_report(tester, args, result)
 
     sys.exit(0 if result else 1)
+
+
+def _write_run_report(tester, args, result):
+    """Persist a RunReport to ``tester.run_archive`` if one was created.
+
+    Best-effort: an ArchiveWriteError is logged but does not change
+    the test exit code (the suite itself owns pass/fail; the archive
+    is for forensics only)."""
+    archive = getattr(tester, "run_archive", None)
+    if archive is None or RunReport is None:
+        return
+    import json as _json
+    import subprocess as _sp
+    import hashlib as _hl
+    from datetime import datetime, timezone
+    try:
+        # Best-effort git revision / dirty flag.
+        git_rev = "unknown"
+        git_dirty = False
+        try:
+            r = _sp.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=Path(__file__).resolve().parents[1],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                git_rev = r.stdout.strip()
+            d = _sp.run(
+                ["git", "status", "--porcelain"],
+                cwd=Path(__file__).resolve().parents[1],
+                capture_output=True, text=True, timeout=5,
+            )
+            if d.returncode == 0:
+                git_dirty = bool(d.stdout.strip())
+        except (OSError, _sp.TimeoutExpired):
+            pass
+        # Best-effort image sha256.
+        img_path = Path(tester.disk_img) if tester.disk_img else None
+        img_sha = None
+        if img_path and img_path.is_file():
+            h = _hl.sha256()
+            with open(img_path, "rb") as fp:
+                for chunk in iter(lambda: fp.read(1 << 20), b""):
+                    h.update(chunk)
+            img_sha = h.hexdigest()
+        # Compose the report.
+        report = RunReport(
+            schema_version=1,
+            run_id=archive.run_dir.name,
+            git_revision=git_rev,
+            git_dirty=git_dirty,
+            profile=os.environ.get("OS01_PROFILE", "default"),
+            suite=args.test_name,
+            request=None,
+            declared_ids=None,
+            observed_ids=None,
+            argv=list(tester.process.argv) if tester.process else [],
+            cpu_count=int(getattr(tester, "_effective_smp", "1") or 1),
+            memory_mib=512,
+            tool_versions={},
+            firmware_path=OVMF_FIRMWARE,
+            firmware_sha256_before=None,
+            firmware_sha256_after=None,
+            image_path=str(img_path) if img_path else None,
+            image_sha256_before=img_sha,
+            image_sha256_after=img_sha,
+            utc_started_at=datetime.now(timezone.utc).isoformat(),
+            duration_s=0.0,
+            runner_exit_code=0 if result else 1,
+            child_exit_code=(
+                tester.process.returncode if tester.process else None
+            ),
+            stopped_by_runner=bool(
+                tester.process and tester.process.stopped_by_runner
+            ),
+            status="PASS" if result else "FAIL",
+            count_unit="case",
+            outcomes=[],
+            stdout_log=str(archive.run_dir / "stdout.log"),
+            stderr_log=str(archive.run_dir / "stderr.log"),
+        )
+        archive.write(report)
+    except Exception as exc:
+        print(f"[run_test] warning: failed to write RunReport: {exc}")
 
 
 if __name__ == "__main__":

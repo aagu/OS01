@@ -37,6 +37,7 @@ import tempfile
 import time
 import unittest
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -479,7 +480,8 @@ class ResolutionSession:
     def __init__(self, firmware: Path, image: Path, results_dir: Path,
                  smp: int = DEFAULT_SMP, timeout: int = DEFAULT_TIMEOUT,
                  qemu: str = QEMU, serial_only: bool = False,
-                 display_device=None, session_factory=None):
+                 display_device=None, session_factory=None,
+                 run_archive=None):
         self.firmware = Path(firmware)
         self.image = Path(image)
         self.results_dir = Path(results_dir)
@@ -503,6 +505,11 @@ class ResolutionSession:
         self._serial_fp = None
         self._qmp_dir = None
         self._buf = ""
+        # RunArchive (spec §7.2): when the suite dispatcher wired one
+        # in via OS01_BUILD_DIR, the session lives under
+        # ``build/<profile>/logs/tests/<suite>/<UTC>-<uuid>/``;
+        # ``None`` means the legacy results_dir path is used.
+        self.run_archive = run_archive
 
     def start(self) -> None:
         self.results_dir.mkdir(parents=True, exist_ok=True)
@@ -1420,11 +1427,70 @@ def test_resolution(tester=None) -> bool:
         log("FAIL: DISK_IMG is not set to a readable file")
         return False
 
+    # RunArchive integration (spec §7.2): when OS01_BUILD_DIR is set
+    # the suite creates an archive and writes result.json after the
+    # run.  When unset (host unit tests), fall back to the legacy
+    # results_dir.
+    archive = None
+    build_dir = env.get("OS01_BUILD_DIR")
+    if build_dir:
+        try:
+            from qemutests.harness.result import RunArchive
+            archive = RunArchive.create(
+                build_dir=Path(build_dir), suite="resolution")
+        except Exception:
+            archive = None
     results_dir = _results_dir(Path(image))
+    if archive is not None:
+        # Make the archive's run_dir the canonical results_dir for
+        # this run so the suite writes its logs into the archive.
+        results_dir = archive.run_dir
     log(f"resolution suite: firmware={firmware} image={image} results={results_dir}")
-    if str(env.get("FB_RESOLUTION_TEST", "0")) == "1":
-        return run_test_suite(firmware, Path(image), results_dir, log)
-    return run_production_suite(firmware, Path(image), results_dir, log)
+    ok = False
+    try:
+        if str(env.get("FB_RESOLUTION_TEST", "0")) == "1":
+            ok = run_test_suite(firmware, Path(image), results_dir, log)
+        else:
+            ok = run_production_suite(firmware, Path(image), results_dir, log)
+    finally:
+        if archive is not None:
+            try:
+                from qemutests.harness.result import RunReport
+                report = RunReport(
+                    schema_version=1,
+                    run_id=archive.run_dir.name,
+                    git_revision="unknown",
+                    git_dirty=False,
+                    profile=env.get("OS01_PROFILE", "default"),
+                    suite="resolution",
+                    request=None,
+                    declared_ids=None,
+                    observed_ids=None,
+                    argv=[],
+                    cpu_count=2,
+                    memory_mib=512,
+                    tool_versions={},
+                    firmware_path=str(firmware),
+                    firmware_sha256_before=None,
+                    firmware_sha256_after=None,
+                    image_path=str(image),
+                    image_sha256_before=None,
+                    image_sha256_after=None,
+                    utc_started_at=datetime.now(timezone.utc).isoformat(),
+                    duration_s=0.0,
+                    runner_exit_code=0 if ok else 1,
+                    child_exit_code=None,
+                    stopped_by_runner=False,
+                    status="PASS" if ok else "FAIL",
+                    count_unit="case",
+                    outcomes=[],
+                    stdout_log=str(archive.run_dir / "stdout.log"),
+                    stderr_log=str(archive.run_dir / "stderr.log"),
+                )
+                archive.write(report)
+            except Exception as exc:
+                log(f"  [run_test] warning: failed to write RunReport: {exc}")
+    return ok
 
 
 def main(argv=None) -> int:

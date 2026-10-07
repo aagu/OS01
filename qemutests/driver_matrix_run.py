@@ -26,6 +26,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -209,12 +210,88 @@ def _run_case(case, smp, timeout=DEFAULT_TIMEOUT, session_factory=None):
     ``make print-run-paths``) and ``_build_for_fault`` (via
     ``make ARCH9_FAULT=<fault> image``) are unchanged.  Build
     failures end the case before QEMU is launched.
+
+    Each invocation creates a fresh ``RunArchive`` (spec §7.2) under
+    ``build/<profile>/logs/tests/driver-model/<UTC>-<uuid>/`` when
+    ``OS01_BUILD_DIR`` is set; the archive's ``run_dir`` is the
+    ProcessSession's working directory and ``result.json`` is
+    written on completion.
     """
     # Lazy import keeps the matrix harness importable in hosts without
     # the harness submodule installed (e.g., dry-runs).
     if session_factory is None:
         from qemutests.harness.process import ProcessSession
         session_factory = ProcessSession
+
+    # RunArchive integration (spec §7.2): construct an archive
+    # upfront so the ProcessSession's run_dir lives under the
+    # archive path.  The result tuple is captured after the body
+    # runs and ``result.json`` is written in the finally block.
+    archive = None
+    build_dir = os.environ.get("OS01_BUILD_DIR")
+    if build_dir:
+        try:
+            from qemutests.harness.result import RunArchive
+            archive = RunArchive.create(
+                build_dir=Path(build_dir), suite="driver-model")
+        except Exception:
+            archive = None
+    # Placeholder; the body assigns the real tuple here.
+    _captured: tuple = (False, "", {"error": "no result captured"})
+
+    try:
+        _captured = _run_case_body(
+            case, smp, timeout, session_factory, archive)
+    finally:
+        if archive is not None:
+            try:
+                from qemutests.harness.result import RunReport
+                ok, log_text, ev = _captured
+                argv_snapshot = ev.get("argv") or []
+                report = RunReport(
+                    schema_version=1,
+                    run_id=archive.run_dir.name,
+                    git_revision="unknown",
+                    git_dirty=False,
+                    profile=os.environ.get("OS01_PROFILE", "default"),
+                    suite="driver-model",
+                    request=case,
+                    declared_ids=None,
+                    observed_ids=None,
+                    argv=list(argv_snapshot),
+                    cpu_count=smp,
+                    memory_mib=512,
+                    tool_versions={},
+                    firmware_path=str(ev.get("firmware", "")) or None,
+                    firmware_sha256_before=None,
+                    firmware_sha256_after=None,
+                    image_path=str(ev.get("image", "")) or None,
+                    image_sha256_before=None,
+                    image_sha256_after=None,
+                    utc_started_at=datetime.now(timezone.utc).isoformat(),
+                    duration_s=0.0,
+                    runner_exit_code=0 if ok else 1,
+                    child_exit_code=None,
+                    stopped_by_runner=False,
+                    status="PASS" if ok else "FAIL",
+                    count_unit="case",
+                    outcomes=[],
+                    stdout_log=str(archive.run_dir / "stdout.log"),
+                    stderr_log=str(archive.run_dir / "stderr.log"),
+                )
+                archive.write(report)
+            except Exception:
+                pass
+    return _captured
+
+
+def _run_case_body(case, smp, timeout, session_factory, archive):
+    """Inner implementation of ``_run_case``.
+
+    The outer wrapper handles RunArchive creation and report writing;
+    this function owns the actual case logic and returns the result
+    tuple to be archived.
+    """
     c = DMM.case_dict(case)
     fault = c["fault"]
     paths = _read_paths_for(fault)
@@ -291,8 +368,23 @@ def _run_case(case, smp, timeout=DEFAULT_TIMEOUT, session_factory=None):
         log_dir = Path("/tmp")
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"os23matrix_{case}_{smp}_{int(time.time())}.log"
-    # The ProcessSession's run_dir lives alongside the forensic log.
-    process_run_dir = log_dir / f"run_{case}_{smp}_{int(time.time())}"
+    # RunArchive integration (spec §7.2): when an archive is supplied,
+    # use its run_dir as the ProcessSession's working directory.
+    # Otherwise fall back to the legacy log_dir/run_<case>_<smp> path.
+    if archive is not None:
+        process_run_dir = archive.run_dir
+    else:
+        process_run_dir = log_dir / f"run_{case}_{smp}_{int(time.time())}"
+    # Augment the return-evidence dict with the case's argv, firmware,
+    # and image so the outer wrapper can build the RunReport.
+    base_ev = {"case": case, "smp": smp, "argv": argv,
+               "firmware": fw, "image": img}
+
+    def _ev(extra: dict) -> dict:
+        out = dict(base_ev)
+        out.update(extra)
+        return out
+
     try:
         try:
             process = session_factory(
@@ -304,7 +396,7 @@ def _run_case(case, smp, timeout=DEFAULT_TIMEOUT, session_factory=None):
             process.start()
         except Exception as e:
             for u in udp_list: u.stop()
-            return False, "", {"error": f"qemu launch failed: {e}"}
+            return False, "", _ev({"error": f"qemu launch failed: {e}"})
 
         # Sequence: boot (~18s for SMP=1, ~25s for SMP=2) + send probe + drain.
         deadline = time.monotonic() + timeout
@@ -370,18 +462,16 @@ def _run_case(case, smp, timeout=DEFAULT_TIMEOUT, session_factory=None):
                 "[kernel panic]" in log_text or "FATAL" in log_text
             )
             if boot_markers_present and panic_present:
-                return True, log_text, {
-                    "case": case, "smp": smp,
+                return True, log_text, _ev({
                     "log_path": str(log_path),
                     "note": "expected boot failure (root filesystem / media missing)",
-                }
+                })
             # Without a panic, this is a real failure.
             if not result_passed:
-                return False, log_text, {
-                    "case": case, "smp": smp,
+                return False, log_text, _ev({
                     "log_path": str(log_path),
                     "error": "no-ahci/empty-ahci without expected panic",
-                }
+                })
 
         # Per-card evidence gate: every expected card must produce
         # an `iface=ethN` line in the guest probe.  brief Step 1:
@@ -391,11 +481,10 @@ def _run_case(case, smp, timeout=DEFAULT_TIMEOUT, session_factory=None):
             try:
                 DMM.assert_each_card_has_evidence(log_text, expected)
             except DMM.CardEvidenceMissing as e:
-                return False, log_text, {
-                    "case": case, "smp": smp,
+                return False, log_text, _ev({
                     "log_path": str(log_path),
                     "error": f"card evidence missing: {e}",
-                }
+                })
 
         # Observation counters gate (brief Step 3): for observe +
         # unsupported/modern-only, the kernel-side counters must
@@ -405,11 +494,10 @@ def _run_case(case, smp, timeout=DEFAULT_TIMEOUT, session_factory=None):
             try:
                 DMM.assert_observation_counters(log_text, observations)
             except DMM.ObservationAssertionFailed as e:
-                return False, log_text, {
-                    "case": case, "smp": smp,
+                return False, log_text, _ev({
                     "log_path": str(log_path),
                     "error": f"observation counter failure: {e}",
-                }
+                })
 
         # Per-NIC IRQ-mode gate (ARCH-9 whole-branch review): for
         # irq-conflict, the kernel-side `arch9-irq-mode:` log line
@@ -422,21 +510,19 @@ def _run_case(case, smp, timeout=DEFAULT_TIMEOUT, session_factory=None):
             try:
                 DMM.assert_irq_mode(log_text, mode_assertion)
             except DMM.IrqModeAssertionFailed as e:
-                return False, log_text, {
-                    "case": case, "smp": smp,
+                return False, log_text, _ev({
                     "log_path": str(log_path),
                     "error": f"irq-mode assertion failure: {e}",
-                }
+                })
 
         if result_passed:
-            return True, log_text, {"case": case, "smp": smp,
-                                      "log_path": str(log_path)}
+            return True, log_text, _ev({"log_path": str(log_path)})
         if result_failed:
-            return False, log_text, {"case": case, "smp": smp,
-                                      "log_path": str(log_path)}
-        return False, log_text, {"case": case, "smp": smp,
-                                  "log_path": str(log_path),
-                                  "error": "timeout"}
+            return False, log_text, _ev({"log_path": str(log_path)})
+        return False, log_text, _ev({
+            "log_path": str(log_path),
+            "error": "timeout",
+        })
     finally:
         for u in udp_list: u.stop()
 
