@@ -410,7 +410,7 @@ test-pmm-boot-reservation:
 # call against the explicit list — never auto-discovery, never an
 # implicit search for `test_*.py`. Every fixture replaces
 # subprocess.Popen with a fake, so no QEMU process can ever start.
-TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness
+TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static
 .PHONY: test-harness
 test-harness:
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -833,44 +833,114 @@ test-syscall:
 # boundary) are distinct in harness/prereqs and stay in this recipe.
 .PHONY: test-static test-runtime test-kernel-layout test-kernel-canary-contract test-user-canary
 
+# ── Static-audit evidence adapter (Task 12) ─────────────────────
+# Every static audit below runs through qemutests/run_static_audit.py, which
+# owns the process boundary (ProcessSession) and archives exactly ONE
+# `audit`-unit result per executed audit command under
+# build/<profile>/logs/tests/<suite>/<UTC>-<unique-id>/.  Make still prepares
+# the inputs and selects the command (capability gates, prerequisites and the
+# per-audit suite id live here); the adapter runs no build steps and invents
+# no case records.  The audit program owns all artifact and diagnostic
+# assertions: a PASS means it actually started and exited 0 (a missing
+# executable, a signal, a nonzero exit or a timeout is archived as
+# ERROR/FAIL/TIMEOUT).  The `<suite>` id is the audit's own name so every
+# report names its real argv.
+STATIC_AUDIT_TIMEOUT ?= 120
+RUN_STATIC_AUDIT = python3 qemutests/run_static_audit.py --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" --timeout $(STATIC_AUDIT_TIMEOUT) --suite
+
+# The seven user-canary checks, verbatim from the pre-Task-12 recipe, kept as
+# one shell program so every check still runs exactly as before.  The adapter
+# runs it with `sh -c` (one audit command, one archived result);
+# `$(subst ','\'',...)` single-quotes the program for `sh -c`, escaping the
+# single quotes its `awk` programs contain.
+define USER_CANARY_AUDIT_BODY
+set -e; \
+echo "[user-canary] 1/7 libc.a defines guard+fail"; \
+test -n "$$($(LLVM_NM) -P $(SYSROOT)/usr/lib/libc.a | awk '$$1=="__stack_chk_guard" && ($$2=="B" || $$2=="D")')" \
+  || { echo "ERROR: __stack_chk_guard not defined (B/D) in $(SYSROOT)/usr/lib/libc.a"; exit 1; }; \
+test -n "$$($(LLVM_NM) -P $(SYSROOT)/usr/lib/libc.a | awk '$$1=="__stack_chk_fail" && $$2=="T"')" \
+  || { echo "ERROR: __stack_chk_fail not defined (T) in $(SYSROOT)/usr/lib/libc.a"; exit 1; }; \
+echo "[user-canary] 2/7 libk.a does NOT define them (kernel owns its own)"; \
+test -z "$$($(LLVM_NM) -P $(SYSROOT)/usr/lib/libk.a | awk '$$1=="__stack_chk_guard" || $$1=="__stack_chk_fail"')" \
+  || { echo "ERROR: libk.a must not carry SSP symbols"; exit 1; }; \
+echo "[user-canary] 3/7 user ELFs link SSP in (T __stack_chk_fail)"; \
+for e in systest canary_dump canary_smash; do \
+  $(LLVM_NM) -P $(USER_ARTIFACT_DIR)/$$e.elf \
+    | awk '$$1=="__stack_chk_fail" && $$2=="T" {f=1} END {exit !f}' \
+    || { echo "ERROR: $$e.elf has no resolved __stack_chk_fail"; exit 1; }; \
+done; \
+echo "[user-canary] 4/7 busybox.elf links SSP in"; \
+$(LLVM_NM) -P $(USER_ARTIFACT_DIR)/busybox.elf \
+  | awk '$$1=="__stack_chk_fail" && $$2=="T" {f=1} END {exit !f}' \
+  || { echo "ERROR: busybox.elf has no resolved __stack_chk_fail"; exit 1; }; \
+echo "[user-canary] 5/7 SSP flags in all three compile switches"; \
+for f in libc/Makefile user/Makefile config/busybox.config.in; do \
+  grep -q -- "-fstack-protector-strong" $$f \
+    || { echo "ERROR: $$f lacks -fstack-protector-strong"; exit 1; }; \
+done; \
+if grep -v "^LIBK_CFLAGS" libc/Makefile | grep -q -- "-fno-stack-protector"; then \
+  echo "ERROR: stray -fno-stack-protector in libc/Makefile (non-LIBK line)"; exit 1; \
+fi; \
+echo "[user-canary] 6/7 probe programs staged in rootfs manifest"; \
+for b in canary_dump canary_smash; do \
+  grep -q "/bin/$$b" $(ROOTFS_MANIFEST) \
+    || { echo "ERROR: /bin/$$b missing from $(ROOTFS_MANIFEST)"; exit 1; }; \
+done; \
+echo "[user-canary] 7/7 crt0 overlay byte-identity invariant"; \
+cmp -s user/crt0.S config/busybox.overlay/applets/crt0.S \
+  || { echo "ERROR: user/crt0.S and busybox overlay crt0.S diverged"; exit 1; }; \
+echo "[user-canary] audit passed"
+endef
+
 # ── test-static: 5 runtime audits via test-runtime + 4 standalone ──
 test-static: test-runtime
 	$(call require_capability,rootfs)
-	python3 qemutests/syscall_boundary_audit.py
-	python3 qemutests/x86_64_kernel_layout_test.py "$(KERNEL_BUILD_DIR)/kernel.elf" \
+	$(RUN_STATIC_AUDIT) syscall-boundary -- \
+	  python3 qemutests/syscall_boundary_audit.py
+	$(RUN_STATIC_AUDIT) kernel-layout -- \
+	  python3 qemutests/x86_64_kernel_layout_test.py "$(KERNEL_BUILD_DIR)/kernel.elf" \
 	  --llvm-nm "$(LLVM_NM)" --llvm-readelf "$(LLVM_READELF)"
-	python3 qemutests/kernel_canary_contract_test.py
-	python3 qemutests/header_object_audit.py \
+	$(RUN_STATIC_AUDIT) kernel-canary-contract -- \
+	  python3 qemutests/kernel_canary_contract_test.py
+	$(RUN_STATIC_AUDIT) header-object-audit -- \
+	  python3 qemutests/header_object_audit.py \
 	  --include-dir "kernel/include" \
 	  --sysroot "$(SYSROOT)" \
 	  --runtime-inc "runtime/include" \
 	  --llvm-nm "$(LLVM_NM)" \
 	  --clang "$(CLANG)"
-	python3 qemutests/stack_frame_audit.py \
+	$(RUN_STATIC_AUDIT) stack-frame-audit -- \
+	  python3 qemutests/stack_frame_audit.py \
 	  --elf "$(KERNEL_BUILD_DIR)/kernel.elf" \
 	  --llvm-objdump "$(LLVM_OBJDUMP)" \
 	  --limit 512
-	python3 qemutests/driver_model_boundary_audit.py
+	$(RUN_STATIC_AUDIT) driver-model-boundary -- \
+	  python3 qemutests/driver_model_boundary_audit.py
 	@$(MAKE) --no-print-directory test-user-canary
 
 # ── test-runtime: original recipe (lines 364-385 of run.mk) ──
 test-runtime: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(KERNEL_ARTIFACT))
 	$(call require_capability,rootfs)
-	python3 qemutests/runtime_audit.py \
+	$(RUN_STATIC_AUDIT) runtime-audit -- \
+	  python3 qemutests/runtime_audit.py \
 	  --stage1 "$(KERNEL_BUILD_DIR)/kernel.elf.stage1" \
 	  --final "$(KERNEL_ELF)" \
 	  --link-receipt "$(KERNEL_RUNTIME_LINK_RECEIPT)" \
 	  --runtime-input "$(KERNEL_RUNTIME_INPUTS)" \
 	  --llvm-nm "$(LLVM_NM)" \
 	  --llvm-readobj "$(LLVM_READOBJ)"
-	python3 qemutests/stack_canary_audit.py \
+	$(RUN_STATIC_AUDIT) stack-canary-audit -- \
+	  python3 qemutests/stack_canary_audit.py \
 	  --object "$(KERNEL_BUILD_DIR)/sched/core.o" \
 	  --elf "$(KERNEL_ELF)" \
 	  --llvm-readelf "$(LLVM_READELF)" \
 	  --llvm-objdump "$(LLVM_OBJDUMP)"
-	@$(MAKE) --no-print-directory validate-kernel
-	python3 qemutests/runtime_link_order_test.py
-	python3 qemutests/kernel_runtime_link_test.py \
+	$(RUN_STATIC_AUDIT) validate-kernel -- \
+	  $(MAKE) --no-print-directory validate-kernel
+	$(RUN_STATIC_AUDIT) runtime-link-order -- \
+	  python3 qemutests/runtime_link_order_test.py
+	$(RUN_STATIC_AUDIT) kernel-runtime-link -- \
+	  python3 qemutests/kernel_runtime_link_test.py \
 	  --source-receipt "$(KERNEL_RUNTIME_LINK_RECEIPT)" \
 	  --sysroot "$(SYSROOT)" \
 	  --profile-file "$(OS01_PROFILE_FILE)" \
@@ -878,52 +948,20 @@ test-runtime: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(KERNEL_ARTIFACT))
 
 # ── test-kernel-layout: original recipe (line 485-488) ──────
 test-kernel-layout: kernel.bin
-	python3 qemutests/x86_64_kernel_layout_test.py "$(KERNEL_BUILD_DIR)/kernel.elf" \
+	$(RUN_STATIC_AUDIT) kernel-layout -- \
+	  python3 qemutests/x86_64_kernel_layout_test.py "$(KERNEL_BUILD_DIR)/kernel.elf" \
 	  --llvm-nm "$(LLVM_NM)" --llvm-readelf "$(LLVM_READELF)"
 
 # ── test-kernel-canary-contract: original recipe (line 490-492) ─
 test-kernel-canary-contract:
-	python3 qemutests/kernel_canary_contract_test.py
+	$(RUN_STATIC_AUDIT) kernel-canary-contract -- \
+	  python3 qemutests/kernel_canary_contract_test.py
 
 # ── test-user-canary: original recipe (lines 393-431) ───────
 test-user-canary: $(if $(filter userland,$(PROFILE_CAPABILITIES)),$(USER_ARTIFACTS) $(USER_ARTIFACT_DIR)/busybox.elf $(ROOTFS_MANIFEST))
 	$(call require_capability,rootfs)
-	@set -e; \
-	echo "[user-canary] 1/7 libc.a defines guard+fail"; \
-	test -n "$$($(LLVM_NM) -P $(SYSROOT)/usr/lib/libc.a | awk '$$1=="__stack_chk_guard" && ($$2=="B" || $$2=="D")')" \
-	  || { echo "ERROR: __stack_chk_guard not defined (B/D) in $(SYSROOT)/usr/lib/libc.a"; exit 1; }; \
-	test -n "$$($(LLVM_NM) -P $(SYSROOT)/usr/lib/libc.a | awk '$$1=="__stack_chk_fail" && $$2=="T"')" \
-	  || { echo "ERROR: __stack_chk_fail not defined (T) in $(SYSROOT)/usr/lib/libc.a"; exit 1; }; \
-	echo "[user-canary] 2/7 libk.a does NOT define them (kernel owns its own)"; \
-	test -z "$$($(LLVM_NM) -P $(SYSROOT)/usr/lib/libk.a | awk '$$1=="__stack_chk_guard" || $$1=="__stack_chk_fail"')" \
-	  || { echo "ERROR: libk.a must not carry SSP symbols"; exit 1; }; \
-	echo "[user-canary] 3/7 user ELFs link SSP in (T __stack_chk_fail)"; \
-	for e in systest canary_dump canary_smash; do \
-	  $(LLVM_NM) -P $(USER_ARTIFACT_DIR)/$$e.elf \
-	    | awk '$$1=="__stack_chk_fail" && $$2=="T" {f=1} END {exit !f}' \
-	    || { echo "ERROR: $$e.elf has no resolved __stack_chk_fail"; exit 1; }; \
-	done; \
-	echo "[user-canary] 4/7 busybox.elf links SSP in"; \
-	$(LLVM_NM) -P $(USER_ARTIFACT_DIR)/busybox.elf \
-	  | awk '$$1=="__stack_chk_fail" && $$2=="T" {f=1} END {exit !f}' \
-	  || { echo "ERROR: busybox.elf has no resolved __stack_chk_fail"; exit 1; }; \
-	echo "[user-canary] 5/7 SSP flags in all three compile switches"; \
-	for f in libc/Makefile user/Makefile config/busybox.config.in; do \
-	  grep -q -- "-fstack-protector-strong" $$f \
-	    || { echo "ERROR: $$f lacks -fstack-protector-strong"; exit 1; }; \
-	done; \
-	if grep -v "^LIBK_CFLAGS" libc/Makefile | grep -q -- "-fno-stack-protector"; then \
-	  echo "ERROR: stray -fno-stack-protector in libc/Makefile (non-LIBK line)"; exit 1; \
-	fi; \
-	echo "[user-canary] 6/7 probe programs staged in rootfs manifest"; \
-	for b in canary_dump canary_smash; do \
-	  grep -q "/bin/$$b" $(ROOTFS_MANIFEST) \
-	    || { echo "ERROR: /bin/$$b missing from $(ROOTFS_MANIFEST)"; exit 1; }; \
-	done; \
-	echo "[user-canary] 7/7 crt0 overlay byte-identity invariant"; \
-	cmp -s user/crt0.S config/busybox.overlay/applets/crt0.S \
-	  || { echo "ERROR: user/crt0.S and busybox overlay crt0.S diverged"; exit 1; }; \
-	echo "[user-canary] audit passed"
+	@$(RUN_STATIC_AUDIT) user-canary -- \
+	  sh -c '$(subst ','\'',$(USER_CANARY_AUDIT_BODY))'
 
 # This target builds and boots only the selftest-scoped image.  In particular
 # it never uses the ordinary image, and it refuses a combined syscall/selftest
