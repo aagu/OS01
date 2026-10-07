@@ -1,9 +1,21 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-10-06）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-10-07）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
+
+## 2026-10-07
+
+- cleanup(aarch64): **M2/M3 杂项 cosmetic 遗留 7 项全部闭环**（分支 `worktree-m23-cosmetic-cleanup`，7 commits）：
+  - **死枚举**：删 `ap_work.h` 的 `WORK_PT_STRESS`/`WORK_PT_ALLOC`（无任何用户；`WORK_PT_MAP` 由 kernel selftest 的 `ap_work_ext_run` override 消费，保留），同步修正 `ap_work.c` 与 selftest 头注释里过时的 WORK_PT_STRESS 叙述
+  - **head.S 过时注释**：`head.S` TPIDR_EL1 注释里 "152 (0x98)" 改为陈述真实约束（16-bit mov immediate），不再硬编码可漂移的尺寸数字（实际 `PERCPU_DATA_SIZE` 自 M3 Task 12 起为 144）
+  - **mock percpu 陷阱**：`hosttests/mock/test_platform.h` 删 legacy `tlb_wanted/tlb_ack`（生产端 M3 Task 12 已移除）、`apic_id` 改名 `arch_processor_id` 对齐生产命名，注释明确「compile-only stub，布局契约以 `kernel/include/percpu/percpu.h` 为准（`test_percpu_layout.c` 运行时钉）」
+  - **serial_printk %d 字面输出**：确认根因（aarch64 `printk_stub` 用 `kputs(fmt)` 打字面格式串）已在 `7ebc9d0a`（share color_printk + serial_printk via kernel-core）移除；本次以 `test-aarch64 MODE=smp` 9/9 boot 日志 0 处字面格式串 + `[selftest] 6 total: 6 passed` 闭环，无代码改动
+  - **errno 归一化（TDD）**：`vmm_backend.c` 新增 `pt_err_to_linux()`，替换原 Task 19 两点式 EEXIST/ENOENT 归一化，覆盖全部 `arch_vmm_*` 出口——此前 `AARCH64_PT_EINVAL=-1`（撞 Linux `-EPERM`）、`ENOMEM=-4`（撞 `-EINTR`）、`EPERM=-6`、`EAGAIN=-7`、`ECONFLICT=-5` 裸穿透（可达路径：split 已发布 root 的 `-EPERM` 与 alloc-fail 的 `-ENOMEM`）。`AARCH64_PT_EPROT_NONE` 三态 sentinel 保留；未知码原样穿透 fail-loud。RED→GREEN：`test_aarch64_backend_4k.c` 新增 errno-contract 4 断言（先 3 失败后全绿），`shootdown_probe.c`/`vmm_backend.h` 注释同步
+  - **read_l2_desc test-only 守卫**：声明与定义均加 `#ifdef OS01_SELFTEST`（`kernel/random/random.c` test-hook 同款模式）——生产误用直接编译错；hosttests 的 `AARCH64_PT_SW_HOST_CFLAGS` 加 `-DOS01_SELFTEST=1` 保持 host harness 可用；生产 aarch64 内核 `nm` 0 引用验证
+  - **§5.2b TLBI TODO**：`walk_to_l2` 的 `TODO(Task 18)` 过时任务编号改为条件式描述（首个「已发布 root + create」caller 出现时落地 per-level TLBI 分支；M4 phantom-ENOENT 钉死前不实现）
+  - **验证**：`make clean` 后 `test-host` 108 套件 0 失败（避开增量假绿）；生产 aarch64 构建 rc=0；`make PROFILE=aarch64-clang test-aarch64 MODE=smp` 9/9 PASS（cpus 1/2/4 × 3）且 selftest `6 total: 6 passed`
 
 ## 2026-10-06
 
