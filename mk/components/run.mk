@@ -404,7 +404,7 @@ test-pmm-boot-reservation:
 # call against the explicit list — never auto-discovery, never an
 # implicit search for `test_*.py`. Every fixture replaces
 # subprocess.Popen with a fake, so no QEMU process can ever start.
-TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result
+TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure
 .PHONY: test-harness
 test-harness:
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
