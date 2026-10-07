@@ -210,10 +210,13 @@ def _write_suite_report(archive, *, argv, profile, session, started_monotonic,
             request=None, declared_ids=None, observed_ids=None,
             argv=list(argv), cpu_count=2, memory_mib=512, tool_versions={},
             firmware_path=firmware or None,
-            firmware_sha256_before=_sha256_path(firmware),
+            # Only the post-run hash is recorded: a ``*_before`` computed at
+            # report time would not be a real mutation check (same convention
+            # as ``run_kernel_selftest.py`` / ``run_hosttests.py``).
+            firmware_sha256_before=None,
             firmware_sha256_after=_sha256_path(firmware),
             image_path=image or None,
-            image_sha256_before=_sha256_path(image),
+            image_sha256_before=None,
             image_sha256_after=_sha256_path(image),
             utc_started_at=datetime.now(timezone.utc).isoformat(),
             duration_s=max(0.0, time.monotonic() - started_monotonic),
@@ -256,10 +259,14 @@ def generate_diagnostic_dtb(qemu: str, log_dir: str, cpus: int,
 
 
 def run_case(args: argparse.Namespace, *, session_factory=None, build_dir=None,
-             profile="default") -> bool:
+             profile="default") -> int:
     """Run the production-image probe case once through ``ProcessSession``
     + ``RunArchive``. The evidence decision is still ``probe_evidence``
-    (suite owned); a timeout is a failure."""
+    (suite owned); a timeout is a failure.
+
+    Returns the plan's direct-runner exit code: 0 (PASS), 1 (FAIL /
+    TIMEOUT) or 2 (configuration / environment ERROR).  The archived
+    ``status`` always matches the returned code."""
     if session_factory is None:
         session_factory = ProcessSession
     started = time.monotonic()
@@ -322,10 +329,10 @@ def run_case(args: argparse.Namespace, *, session_factory=None, build_dir=None,
         print(json.dumps({"event": "spawn-error", "error": str(spawn_error)}))
         _write_suite_report(
             archive, argv=command, profile=profile, session=session,
-            started_monotonic=started, status="ERROR", runner_exit_code=1,
+            started_monotonic=started, status="ERROR", runner_exit_code=2,
             errors=[f"spawn error: {spawn_error}"],
             firmware=args.firmware, image=args.image)
-        return False
+        return 2
 
     accepted = probe_evidence(text)
     result = accepted and not timed_out
@@ -358,7 +365,7 @@ def run_case(args: argparse.Namespace, *, session_factory=None, build_dir=None,
         "stdout": str(run_dir / "stdout.log"),
         "stderr": str(run_dir / "stderr.log"),
     }))
-    return result
+    return 0 if result else 1
 
 
 def main() -> int:
@@ -384,8 +391,7 @@ def main() -> int:
         parser.error("--firmware, --image, --qemu, and --log-dir are required outside --self-test")
     if args.timeout <= 0:
         parser.error("--timeout must be greater than zero")
-    return 0 if run_case(args, build_dir=args.build_dir,
-                         profile=args.profile) else 1
+    return run_case(args, build_dir=args.build_dir, profile=args.profile)
 
 
 if __name__ == "__main__":

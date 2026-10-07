@@ -581,16 +581,30 @@ class M3ProbeLifecycleTests(SuiteUnitAdapterTests):
 
     def test_probe_ok_archives_suite_unit_pass(self):
         session = FakeSession(text=m3p.valid_log)
-        self.assertTrue(self._run(session))
+        self.assertEqual(self._run(session), 0)
         data = _one_archive(self.build, m3p.SUITE)
         self.assert_suite_unit(data)
         self.assertEqual(data["status"], "PASS")
+        self.assert_exit_code_matches_status(data, 0)
+        self.assert_hash_before_unset(data)
 
     def test_missing_ok_times_out(self):
         session = FakeSession(text="UEFI: booting OS01\n", matched=False)
-        self.assertFalse(self._run(session))
+        self.assertEqual(self._run(session), 1)
         data = _one_archive(self.build, m3p.SUITE)
         self.assertEqual(data["status"], "FAIL")
+        self.assert_exit_code_matches_status(data, 1)
+
+    def test_spawn_error_exits_2_and_archives_error(self):
+        # A QEMU that cannot launch is a configuration/environment ERROR
+        # (exit 2), not the FAIL/exit-1 slot the archive previously
+        # disagreed with.
+        session = FakeSession(start_exc=FileNotFoundError("no-such-qemu"))
+        self.assertEqual(self._run(session), 2)
+        data = _one_archive(self.build, m3p.SUITE)
+        self.assert_suite_unit(data)
+        self.assertEqual(data["status"], "ERROR")
+        self.assert_exit_code_matches_status(data, 2)
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -713,6 +727,10 @@ class RunnerExitCodeScriptTests(SuiteUnitAdapterTests):
 
     def test_sync_fault_missing_qemu_exits_2(self):
         self._env_error("aarch64_sync_fault.py", sflt.SUITE,
+                        ["--timeout", "5"])
+
+    def test_m3_probe_missing_qemu_exits_2(self):
+        self._env_error("aarch64_m3_probe.py", m3p.SUITE,
                         ["--timeout", "5"])
 
     def test_uefi_smp_aggregates_case_codes(self):
