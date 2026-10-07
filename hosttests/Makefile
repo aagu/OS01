@@ -85,7 +85,6 @@ TEST_BINS := \
     $(TEST_BLD)/test_poll_requested.elf \
     $(TEST_BLD)/test_poll_waitqueue_handshake.elf \
     $(TEST_BLD)/test_bootinfo_abi.elf \
-    $(TEST_BLD)/test_runtime_udivti3.elf \
     $(TEST_BLD)/test_lwip_rand.elf \
     $(TEST_BLD)/test_gic_driver.elf \
     $(TEST_BLD)/test_aarch64_ipi_broadcast.elf \
@@ -111,7 +110,6 @@ TEST_BINS := \
     $(TEST_BLD)/test_user_protected_ranges.elf \
     $(TEST_BLD)/test_fork_user_map.elf \
     $(TEST_BLD)/test_user_write_cow.elf \
-    $(TEST_BLD)/test_page_table_runner.elf \
     $(TEST_BLD)/test_page_table_layout.elf \
     $(TEST_BLD)/test_page_table_reservation.elf \
     $(TEST_BLD)/test_early_arena.elf $(TEST_BLD)/test_early_arena_exhaust.elf \
@@ -174,34 +172,42 @@ check-test-bins-dup:
 	    echo "ERROR: duplicate entries in TEST_BINS"; exit 1; \
 	fi
 
-run: $(TEST_BINS) check-test-bins-dup
+# ── Host suite execution (test-framework plan, Task 7) ─────────────
+# `run` no longer greps a binary's stdout: it hands the authoritative
+# TEST_BINS list to qemutests/run_hosttests.py, which runs each binary with
+# its own timeout and archive and validates the evidence (legacy adapter
+# plus protocol v1 for migrated binaries).
+#
+# Binaries that intentionally print NOTHING on success (they report only on
+# failure) cannot satisfy the legacy adapter's "nonempty suite evidence"
+# rule — spec §6.2: an empty log cannot pass — so they are not ordinary
+# TEST_BINS entries.  They stay in the build and are exercised by an
+# explicit exit-status adapter in the recipe below, so `make test-host`
+# keeps running them without ever treating an empty log as a pass.
+HOST_TEST_TIMEOUT ?= 60
+
+TEST_EXIT_STATUS_BINS := \
+    $(TEST_BLD)/test_runtime_udivti3.elf \
+    $(TEST_BLD)/test_page_table_runner.elf
+
+run: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS) check-test-bins-dup
 	@echo ""
 	@echo "=============================================="
 	@echo "  OS01 Host-Based Test Suite"
 	@echo "=============================================="
-	@failed=0; total=0; \
-	for t in $(TEST_BINS); do \
-	    name=$$(basename $$t .elf); \
-	    echo ""; \
-	    echo "======== $$name ========"; \
-	    output=$$($$t 2>&1); \
-	    rc=$$?; \
-	    printf '%s\n' "$$output" | \
-	        grep -E "===|Total|Failed|>>>|ALL" --color=never || true; \
-	    total=$$((total + 1)); \
-	    if [ "$${rc}" -ne 0 ]; then \
-	        failed=$$((failed + 1)); \
-	        if [ "$${rc}" -ne 1 ]; then \
-	            echo "  >>> $$name CRASHED (rc=$$rc) <<<"; \
-	        fi; \
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) $(TEST_BINS)
+	@echo ""
+	@echo "  [hosttests] exit-status-only binaries (no stdout evidence)"
+	@for t in $(TEST_EXIT_STATUS_BINS); do \
+	    "$$t" >/dev/null 2>&1; rc=$$?; \
+	    echo "  -> $$(basename $$t .elf): exit $$rc"; \
+	    if [ "$$rc" -ne 0 ]; then \
+	        echo "ERROR: $$t expected exit 0, got $$rc"; exit 1; \
 	    fi; \
-	    echo "  -> exit code: $$rc"; \
-	done; \
-	echo ""; \
-	echo "=============================================="; \
-	echo "  Suites: $$total | Failed: $$failed"; \
-	echo "=============================================="; \
-	exit $$failed
+	done
+	@echo "  [hosttests] all host test binaries passed"
 
 # Runtime fixtures.
 $(TEST_BLD)/runtime_udivti3_link_probe.o: $(TEST_SRC)/../runtime/selftest/udivti3_link_probe.c

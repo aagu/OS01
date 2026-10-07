@@ -138,16 +138,58 @@ typedef struct {
     }; \
     static int __test_table_size = sizeof(__test_table) / sizeof(__test_table[0]);
 
+/* ── Protocol v1 emission (test-framework plan, Task 7) ─────────────
+ * RUN_ALL_TESTS() publishes a machine-readable protocol-v1 trace so the
+ * host runner (qemutests/run_hosttests.py) can validate *case* identity
+ * and counts instead of trusting the process exit status alone.
+ *
+ * Assertion counts stay separate from case counts: TEST_RESULTS() keeps
+ * printing the assertion summary ("Total/Passed/Failed" counts every
+ * assert_* macro), while the [TEST] END line reports CASE counts (one per
+ * registered test function).  A case is FAIL when the assertion-failure
+ * counter advanced across its body.
+ *
+ * The suite id is a single fixed label for the host framework; each
+ * binary is an independent unit for the runner (which archives one report
+ * per binary).  Case ids are the registered test-function names, which are
+ * C identifiers and therefore already match the protocol's
+ * [A-Za-z0-9_.-]+ grammar.
+ *
+ * The host registry has no per-case "optional" flag, so every default
+ * case is declared required=1 (spec 6.1: default-selected ordinary cases
+ * are mandatory).  No SKIP record is ever emitted from this path. */
+#define HOSTTEST_SUITE_ID "hosttests"
+
 #define RUN_ALL_TESTS() \
     do { \
         printf("=== Test Runner ===\n"); \
         (void)__test_table_size; \
-        int __table_size = sizeof(__test_table) / sizeof(__test_table[0]); \
+        int __table_size = (int)(sizeof(__test_table) / sizeof(__test_table[0])); \
+        int __case_passed = 0; \
+        int __case_failed = 0; \
+        printf("[TEST] START v=1 suite=%s expected=%d\n", \
+               HOSTTEST_SUITE_ID, __table_size); \
+        for (int __s = 0; __s < __table_size; __s++) { \
+            printf("[TEST] SELECT %s required=1\n", __test_table[__s].name); \
+        } \
         for (int __i = 0; __i < __table_size; __i++) { \
             printf("\n--- %s ---\n", __test_table[__i].name); \
+            int __before_failed = __test_stats.failed; \
             __test_table[__i].fn(); \
+            int __case_delta = __test_stats.failed - __before_failed; \
+            printf("[TEST] BEGIN %s\n", __test_table[__i].name); \
+            if (__case_delta == 0) { \
+                __case_passed++; \
+                printf("[TEST] PASS %s\n", __test_table[__i].name); \
+            } else { \
+                __case_failed++; \
+                printf("[TEST] FAIL %s reason=assertion_failures_%d\n", \
+                       __test_table[__i].name, __case_delta); \
+            } \
         } \
         TEST_RESULTS(); \
+        printf("[TEST] END suite=%s total=%d passed=%d failed=%d skipped=%d\n", \
+               HOSTTEST_SUITE_ID, __table_size, __case_passed, __case_failed, 0); \
     } while(0)
 
 #endif /* TEST_FRAMEWORK_H */
