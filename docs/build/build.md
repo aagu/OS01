@@ -363,6 +363,57 @@ make OS01_NETTEST=1 image          # → build/x86_64-clang/image/nettest/disk.i
 make INITTAB_FILE=config/inittab.test image   # → .../image/inittab-test/disk.img
 ```
 
+#### 测试框架（runner、归档、退出码与观察窗口）
+
+宿主 C 测试、x86/aarch64 QEMU 套件与静态审计共用 `qemutests/harness/` 中的进程/结果层（`ProcessSession`、`RunArchive`、`parse_v1`）。runner 直接调用时的退出码统一为：
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | PASS — 有效完整结果 |
+| `1` | FAIL 或 TIMEOUT — 测试未通过（含超时） |
+| `2` | ERROR — 配置/运行环境错误（缺可执行文件、不可用输入、镜像/固件缺失等） |
+| `130` | Ctrl-C（SIGINT） |
+
+Make/CI 只保证「零 / 非零」，不要求透传具体数值；`result.json` 记录 runner 与子进程的真实返回码、细分状态与中断原因（spec §6.2）。框架级不变式：`status="ERROR"` ⟺ 退出 2，`status="FAIL"`/`"TIMEOUT"` ⟺ 退出 1，`status="PASS"` ⟺ 退出 0；Ctrl-C 在 130 单独成行。
+
+**运行归档。** 每次运行（成功、失败与超时都保留）归档到：
+
+```text
+build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
+  stdout.log      # 宿主命令输出或 guest 串口输出
+  stderr.log      # 宿主进程 / QEMU 诊断
+  result.json     # 同目录临时文件 + 原子 rename 替换
+```
+
+生命周期由用户清理 / `make clean <profile>` 管理，不自动删除。
+
+> **已记录偏差（启动失败归档只含 `result.json`）。** 归档目录在 `ProcessSession.start()` **之前**创建，而 `stdout.log`/`stderr.log` 只有 `Popen` 成功后才打开。因此**启动失败**（可执行文件缺失等）的归档只有 `result.json`，没有 `stdout.log`/`stderr.log`。这是刻意的：启动失败时本来就没有子进程输出可采集，且修正它需要改变 `ProcessSession` 语义（方案明确禁止）。受影响的运行路径包括 `run_static_audit.py` 与 `run_hosttests.py`。
+
+**`result.json`（schema v1）** 至少记录：schema 版本；run ID；git revision 与 dirty 状态；profile 与 suite；请求选择条件与声明/实际 ID 集合（普通 v1 套件）；实际 argv；CPU 数与内存；工具版本；镜像/固件路径与 SHA-256（有输入时，区分运行前/后哈希）；UTC 开始时间与耗时；runner / child 返回码；是否受控停止；最终状态；计数单位；各用例状态/理由；日志路径。
+
+**计数单位（count unit）。** 断言数不等于用例数。宿主二进制为 `binary`（旧格式）或 `case`（v1，断言计数单列）；systest 与内核自测为 `case`（协议 v1）；重复/旧格式套件为 `suite`；静态审计为 `audit`。旧格式适配器**绝不**编造 guest 用例记录。
+
+**`CASE` 选择。** 目前只有 systest 支持按用例选择：`make OS01_SYSTEST=1 test-qemu SUITE=systest CASE=<id>`，`<id>` 必须匹配 `[A-Za-z0-9_.-]+`（`ID` 由 `user/systest.c --list` 提供），Make 写入私有 inittab 行并经现有 `INITTAB_FILE` 传入。宿主 runner 另有 `--binary ID` 选择单个 `TEST_BINS` 二进制。其它套件（`phase-0`、`gfx`、`resolution`、`driver-model`）**不支持** `CASE`。
+
+**1 秒观察窗口与其边界。** 套件收到完整结果后继续观察 **1 秒**（`ProcessSession.observe`，共享 `_panic_in` 检测器），以捕获结果到达后窗口内到达的尾部异常（如 panic），随后由 runner 主动停止 QEMU、排空并回收。窗口只检查「已到达 / 窗口内」的异常，**不保证**检测无限延后的崩溃。
+
+> **已记录偏差（窗口归属）。** 1 秒窗口施加于**自身拥有该延迟**的套件（普通 x86/aarch64 套件与内核自测）。预期 fatal/故障套件不把 1 秒窗口作为验收依据：它们按各自套件拥有的证据规则判定——例如 sync-fault 要求 armed/fatal 顺序唯一、寄存器字段完整，且证据成立后由 runner 停止仍存活的 QEMU；QEMU 自行退出则失败。
+
+**实际生效配置。** 文档区分「Make 输入」与「实际生效值」：
+
+| 套件 | 实际 QEMU CPU 来源 | 记录字段 |
+| --- | --- | --- |
+| `test-qemu SUITE=...`（x86） | `QEMU_SMP` 环境变量（默认 `1`；`run_test.py` 读取并用于 `-smp`） | `result.json.cpu_count` |
+| `test-kernel-selftest` | `KERNEL_SELFTEST_SMP`（透传为 `--cpu`） | `cpu_count` |
+| `test-aarch64 MODE=...` | 各 MODE 自带的 `--cpus` 列表 | 每个 (case, cpu) 一份报告 |
+| 交互 `run` / `run-kvm` / `debug` | `SMP`（默认 `2`） | — |
+
+> 说明：`test-qemu` 的 CPU 数取自 `QEMU_SMP` 环境变量（如 `QEMU_SMP=2 make test-qemu SUITE=phase-0`），这正是 `run_test.py` 实际读取并归档到 `cpu_count` 的值；Make 变量 `SMP` 目前只作用于交互式 `run`/`debug` 目标。
+
+**CI。** `.github/workflows/ci.yml` 的 `harness` job 运行 `make test-harness`（纯 Python，无 QEMU、无构建前置）；`x86-checks` 在 PR 上跑 `phase-0`、`systest` 的 1/2 核与内核自测 8 核，`aarch64-checks` 跑 aarch64 SMP 冒烟，失败时上传 `build/*/logs/tests/**`；夜间 `schedule` 与手动 `workflow_dispatch` 的 `full-matrix` job 保留 1/2/4/8 核与 RAM/fault MODE。`test-contract` 保持在独立 `contract` job（它会 `make clean`）。
+
+**耗时（实测）。** 本仓库开发机：`make test-harness`（15 模块）约 **4 分钟**（2026-10-07，429 tests）。QEMU 套件（`phase-0`/`systest`/`test-kernel-selftest`/`test-aarch64`）的耗时须在具备已构建镜像与 `thirdpart/*` submodule 的环境（CI）实测后再回填；本 worktree 无构建树，未实测。
+
 ### 6. 配置文件
 
 系统行为通过 `config/` 配置（BusyBox 配置、`config/rootfs.mk` 磁盘镜像清单、inittab 模板 `config/inittab`、`config/inittab.systest`、`config/inittab.nettest`、`config/inittab.test`）。
@@ -403,7 +454,7 @@ make INITTAB_FILE=config/inittab.test image   # → .../image/inittab-test/disk.
 | `test-static` | — | — | 11 项静态审计（runtime_audit、stack_canary_audit、validate-kernel、runtime_link_order、kernel_runtime_link、kernel_layout、kernel_canary_contract、driver_model_boundary_audit、header_object、stack_frame、test-user-canary） |
 | `test-kernel-selftest` | — | — | 启动 selftest 镜像 variant（`KERNEL_SELFTEST=1`）并解析 `[selftest]` 标记 |
 
-**`test-harness`** 框架回归入口（与上述 6 个 bucket 并列；`always` 能力；不启动 QEMU）：运行 `mk/components/run.mk` 中 `TEST_HARNESS_MODULES` 列表里的 Python `unittest` 模块。Task 2 初始化该列表为单元素 `qemutests.test_gfx_runner`；后续任务新增的 `qemutests/test_*.py`（如 `test_harness_process`、`test_harness_result`、`test_make_qemu_failure`、`test_run_test_harness`、`test_driver_model_matrix` 等）以追加方式接入同一列表。recipe 始终为一次显式的 `python3 -m unittest $(TEST_HARNESS_MODULES)`：不做自动目录发现，不隐式启动 QEMU 脚本，不通过模块名推断 build 路径。fixture 通过 fake `subprocess.Popen` 替换真实 QEMU，因此 `make test-harness` 永远不会拉起真实进程——这也是在 PR/CI 中作为"零环境依赖"门控的原因。
+**`test-harness`** 框架回归入口（与上述 6 个 bucket 并列；`always` 能力；不启动 QEMU）：运行 `mk/components/run.mk` 中 `TEST_HARNESS_MODULES` 列表里的 Python `unittest` 模块。该列表在 Task 2 以单元素 `qemutests.test_gfx_runner` 起步，各任务以其新增的 `qemutests/test_*.py` 追加（Ruling 3）；Task 13 收口为 **15 个模块**，并补齐了此前**无任何 target 运行**的宿主自测（`test_driver_model_matrix`、`test_driver_model_boundary_audit`、`test_resolution_switcher`）以及针对本 workflow 的静态契约检查 `test_ci_workflow`。`test_lvgl_runner` **不**在列表内——它是会拉起 QEMU 的驱动脚本，不是 unittest 模块。recipe 始终为一次显式的 `python3 -m unittest $(TEST_HARNESS_MODULES)`：不做自动目录发现，不隐式启动 QEMU 脚本，不通过模块名推断 build 路径。fixture 以 fake `subprocess.Popen` 替换真实 QEMU（个别模块会以 `make -n` 探测 Make 契约，但**绝不**拉起 QEMU 进程），因此 `make test-harness` 在 PR/CI 中作为"零环境依赖"门控。
 
 **独立的测试目标**（不归入任何 bucket，因为它们使用不同的 harness 或镜像 variant）：
 

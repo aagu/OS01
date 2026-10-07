@@ -501,7 +501,8 @@ def _validate_paths(disk: str, firmware: str) -> Optional[str]:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(
+        description="Run systest repeatedly from the real terminal/ash path.")
     parser.add_argument("--disk", required=True,
                         help="normal-image disk copy to boot")
     parser.add_argument("--firmware", required=True,

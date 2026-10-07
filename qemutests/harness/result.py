@@ -565,16 +565,6 @@ def _is_required(cid: str) -> bool:
     return _REQUIRED.get(cid, False)
 
 
-def _terminal_status(pr: ProtocolResult, cid: str) -> str:
-    """Return PASS / FAIL / SKIP for a terminal id, or '' if unknown.
-
-    Backed by ``pr.terminal_status`` which the PASS/FAIL/SKIP handler
-    populates with the keyword verbatim.  Returns '' if the id never
-    reached a terminal.
-    """
-    return pr.terminal_status.get(cid, "")
-
-
 # Reset the required-table at module import time (no test should see
 # stale state).
 _REQUIRED.clear()

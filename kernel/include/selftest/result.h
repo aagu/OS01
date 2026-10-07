@@ -17,12 +17,24 @@
  *
  * selftest_begin_run() declares the *complete* configuration-specific
  * selection (early + late) before it emits START; selftest_end_run()
- * emits the single END.  Registration overflow, a duplicate id, an
- * expected/registered late-count mismatch, a late case that is recorded
- * twice or never runs, and a second END are all surfaced as protocol
- * failures — the emitted trace is rejected by the host's parse_v1 (a
- * phantom SELECT that never begins, or an END that disagrees with the
- * declared totals).
+ * emits the single END.
+ *
+ * Violations detected *before* the selection is published — early/late
+ * registry overflow, a duplicate id, and an expected/registered
+ * late-count mismatch — set the run error flag, and begin_run() then
+ * appends one phantom `SELECT ... required=1` that never begins, so the
+ * emitted trace is rejected by the host's parse_v1 (fail-closed rather
+ * than silently under-selected).  A declared late case that never ran is
+ * caught by end_run(), which emits a BEGIN/FAIL (reason=late_case_not_run)
+ * for it, so a run cannot pass with an unfinished scheduled case.
+ *
+ * Two violations are defensive only: record_late() on an unknown or
+ * already-recorded id, and a second end_run().  Each prints an
+ * `[selftest] ERROR:` diagnostic and sets the run error flag, but emits
+ * no anomalous record — the already-published trace is unchanged, so
+ * parse_v1 does *not* reject it, and both callers discard end_run()'s
+ * return value.  They cannot yield a false PASS (every declared id still
+ * needs its terminal), but they are not themselves protocol failures.
  *
  * The historical `[selftest] ...` diagnostic lines (including the
  * `[selftest] N total: N passed, N failed` summary) are still printed,

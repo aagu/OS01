@@ -629,9 +629,22 @@ class KernelSelftestPipePlaceholderTests(unittest.TestCase):
             "nonempty reason")
 
     def test_pipe_basic_noop_body_is_gone(self) -> None:
-        self.assertNotIn(
-            "test_pipe_basic", _read_kernel_source(self.SRC),
-            "the no-op test_pipe_basic body must not remain in the registry")
+        """The former no-op body must not come back.
+
+        The old ``test_pipe_basic`` was literally ``{ (void)0; return 0; }``,
+        which produced a bogus PASS.  A future *real* pipe test may
+        legitimately reuse the name, so this fixture forbids the no-op
+        *body*, not the presence of the identifier — the "not registered"
+        half is pinned by ``test_pipe_basic_is_not_registered``.
+        """
+        noop_body = re.search(
+            r"int\s+test_pipe_basic\s*\([^)]*\)\s*"
+            r"\{\s*\(void\)0\s*;\s*return\s+0\s*;\s*\}",
+            _read_kernel_source(self.SRC))
+        self.assertIsNone(
+            noop_body,
+            "the no-op test_pipe_basic body ((void)0; return 0;) must not "
+            "remain — make it a real pipe test or an explicit SKIP")
 
 
 class KernelSelftestCoordinatorContractTests(unittest.TestCase):

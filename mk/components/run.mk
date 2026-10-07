@@ -398,19 +398,22 @@ test-pmm-boot-reservation:
 
 # ── Test framework regression (no QEMU, always) ──────────────
 # Explicit Python unittest entry for the test framework itself.
-# The list is append-only across tasks: Task 2 establishes
-# `qemutests.test_gfx_runner` as the first/only module; later
-# tasks that add new `qemutests/test_*.py` modules (e.g.
-# `qemutests.test_harness_process`, `qemutests.test_harness_result`,
-# `qemutests.test_make_qemu_failure`, `qemutests.test_run_test_harness`,
-# `qemutests.test_driver_model_matrix`, `qemutests.test_kernel_selftest_result`,
-# etc.) append their names here
-# so a single `make test-harness` validates the framework end-to-end
-# before any real QEMU run. The recipe is a single `python3 -m unittest`
-# call against the explicit list — never auto-discovery, never an
-# implicit search for `test_*.py`. Every fixture replaces
-# subprocess.Popen with a fake, so no QEMU process can ever start.
-TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static
+# The list is append-only across tasks: Task 2 established
+# `qemutests.test_gfx_runner` as the first module; later tasks that add
+# a new `qemutests/test_*.py` module append its name here in the same
+# commit (Ruling 3), so a single `make test-harness` validates the
+# framework end-to-end before any real QEMU run.  Task 13 (final
+# acceptance) also folded in the pre-existing host-only runner
+# self-tests that no other target ran (`test_driver_model_matrix`,
+# `test_driver_model_boundary_audit`, `test_resolution_switcher`) plus
+# `test_ci_workflow` (a static contract check over
+# .github/workflows/ci.yml).  `test_lvgl_runner` is deliberately NOT
+# listed: it is an executable QEMU driver script, not a unittest module.
+# The recipe is a single `python3 -m unittest` call against the explicit
+# list — never auto-discovery, never an implicit search for `test_*.py`.
+# Every fixture replaces subprocess.Popen with a fake, so no QEMU process
+# can ever start.
+TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow
 .PHONY: test-harness
 test-harness:
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -794,7 +797,8 @@ test-syscall-repeat: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAG
 	$(call require_capability,rootfs)
 	python3 qemutests/x86_64_systest_repeat.py --disk "$(NORMAL_IMAGE)" \
 	  --firmware "$(OVMF_FIRMWARE)" --qemu "$(QEMU_BIN)" --memory "$(MEMORY)" \
-	  --smp "$(SMP)" --build-dir "$(abspath $(BUILD_DIR))" --profile "$(PROFILE)"
+	  --smp "$(SMP)" --timeout 180 \
+	  --build-dir "$(abspath $(BUILD_DIR))" --profile "$(PROFILE)"
 
 # test-syscall — retained AGENTS.md-required alias exception.
 #

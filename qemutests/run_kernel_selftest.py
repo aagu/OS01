@@ -27,7 +27,7 @@ Design (spec §5.3, §6.2, §7.2):
   * A post-completion **1-second observation window** (``_panic_in``,
     shared with ``run_test.py``) catches a kernel panic that arrives
     after the completion markers.  The window is load-bearing: the log
-    handed to ``failures`` is captured *before* the window, so a late
+    handed to ``v1_failures`` is captured *before* the window, so a late
     panic is visible only because the window read it.
 
 Exit codes (spec §6.2): 0=PASS, 1=FAIL/TIMEOUT, 2=config/env ERROR,
@@ -279,7 +279,7 @@ def run_kernel_selftest(
     run_dir: Optional[Path] = None,
     observe_s: float = OBSERVE_SECONDS,
 ) -> int:
-    """Boot the selftest image, gate on ``failures``, archive the run.
+    """Boot the selftest image, gate on ``v1_failures``, archive the run.
 
     Returns one of 0 (PASS), 1 (FAIL/TIMEOUT) or 2 (ERROR).  The
     KeyboardInterrupt path (Ctrl-C) returns 130.
@@ -307,7 +307,7 @@ def run_kernel_selftest(
         session.start()
         # Wait for the boot summary AND the scheduled-task markers.  If
         # they never arrive the wait consumes the deadline and returns
-        # ""; the legacy ``failures`` gate then reports the missing
+        # ""; the ``v1_failures`` gate then reports the missing
         # markers.
         session.wait_for(_completion_reached)
         # Capture the log *before* the observation window so a kernel

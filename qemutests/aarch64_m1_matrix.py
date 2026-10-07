@@ -267,7 +267,7 @@ def run_expected_failure(args: argparse.Namespace, *, session_factory=None,
     if spawn_error is not None:
         print(json.dumps({"event": "spawn-error", "variant": args.variant,
                           "error": str(spawn_error)}))
-        metadata.update({"result": "FAIL"})
+        metadata.update({"result": "ERROR"})
         metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
         _write_suite_report(
             archive, argv=command, profile=profile, session=session,

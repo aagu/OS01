@@ -13,12 +13,20 @@
 # `-I/usr/include`), dosfstools, mtools, e2fsprogs, dtc, ripgrep,
 # python3, wget, git. Image workflow: .github/workflows/image.yml.
 #
-# Jobs:
+# Jobs (see docs/build/build.md §3 for the test-bucket model):
+#   harness        — framework regression (`make test-harness`; no QEMU)
 #   x86-checks     — non-destructive x86_64 test surface on every PR/push
-#   aarch64-checks — aarch64 UEFI build on every PR/push (SMP test
-#                    deferred — see comment in the job)
+#   aarch64-checks — aarch64 UEFI build + SMP smoke on every PR/push
 #   contract       — destructive build-system contract tests on every PR/push
+#   full-matrix    — 1/2/4/8 CPU + RAM/fault matrix on schedule/manual only
 #   master-images  — rebuild both images and upload as artifact on push→master
+#
+# The CPU matrix is expressed with QEMU_SMP= for the x86 QEMU suites:
+# qemutests/run_test.py reads the effective QEMU CPU count from the
+# QEMU_SMP environment variable and archives it as `cpu_count` in
+# result.json (SMP= is the Make input for the interactive run/debug
+# targets only). The kernel selftest uses KERNEL_SELFTEST_SMP=, and the
+# aarch64 harness owns its own --cpus matrix.
 #
 # Design: docs/superpowers/specs/2026-09-19-github-ci-design.md
 name: ci
@@ -28,6 +36,10 @@ on:
   push:
     branches: [master]
   workflow_dispatch:
+  # Nightly full matrix (1/2/4/8 CPUs + RAM/fault modes); the PR jobs
+  # keep only the fast subset the plan requires for every change.
+  schedule:
+    - cron: '0 3 * * *'
 
 # Cancel in-progress runs when a new commit lands on the same PR or branch.
 # For master pushes and manual dispatches the group key still differs, so
@@ -46,10 +58,41 @@ permissions:
 # All jobs run inside the published os01-ci image. See ci/Dockerfile +
 # ci/README.md for what's inside.
 jobs:
+  # ── Framework regression (PR + push) ─────────────────────────
+  # `make test-harness` runs an explicit Python unittest module list
+  # (TEST_HARNESS_MODULES in mk/components/run.mk) with no QEMU and no
+  # build prerequisites, so it is the cheapest first gate. It also runs
+  # qemutests/test_ci_workflow.py, which statically checks this file.
+  harness:
+    name: framework regression
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/aagu/os01-ci:latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Some recipe steps invoke `git`; the container's git sees the
+      # bind-mounted workspace as owned by a different uid, which trips
+      # "fatal: detected dubious ownership in repository". Marking the
+      # workspace + every submodule as safe makes those calls succeed.
+      - name: Mark workspace + submodules as git-safe
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git submodule foreach --recursive --quiet 'git config --global --add safe.directory "$sm_path"'
+
+      - name: Framework regression (no QEMU)
+        run: make test-harness
+
   # ── x86_64 test surface (PR + push) ───────────────────────────
   # Builds disk.img then runs every non-destructive x86_64 test entry
   # point. KERNEL_SELFTEST and OS01_SYSTEST are invoked separately per
-  # AGENTS.md gotcha — the Makefile rejects combining them.
+  # AGENTS.md gotcha — the Makefile rejects combining them. The plan
+  # requires phase-0 and systest at 1/2 CPUs and the kernel selftest at
+  # 8 CPUs on every PR.
   x86-checks:
     name: x86_64 checks
     runs-on: ubuntu-24.04
@@ -106,17 +149,38 @@ jobs:
       - name: User canary
         run: make test-user-canary
 
-      - name: Kernel selftest (QEMU)
+      - name: x86 phase-0 E2E (1 CPU)
+        run: QEMU_SMP=1 make test-qemu SUITE=phase-0
+
+      - name: x86 phase-0 E2E (2 CPUs)
+        run: QEMU_SMP=2 make test-qemu SUITE=phase-0
+
+      - name: Syscall E2E (1 CPU)
+        run: QEMU_SMP=1 make OS01_SYSTEST=1 test-qemu SUITE=systest
+
+      - name: Syscall E2E (2 CPUs)
+        run: QEMU_SMP=2 make OS01_SYSTEST=1 test-qemu SUITE=systest
+
+      - name: Kernel selftest (8 CPUs)
         run: make KERNEL_SELFTEST=1 KERNEL_SELFTEST_SMP=8 test-kernel-selftest
 
-      - name: Syscall E2E (QEMU)
-        run: make OS01_SYSTEST=1 test-qemu SUITE=systest
+      # Every runner archives its run under build/<profile>/logs/tests/
+      # <suite>/<UTC-time>-<unique-id>/; upload them so a red job is
+      # diagnosable without re-running locally.
+      - name: Upload run logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: x86-test-logs
+          path: build/*/logs/tests/**
+          if-no-files-found: ignore
+          retention-days: 7
 
   # ── aarch64 test surface (PR + push) ──────────────────────────
-  # Builds the aarch64 UEFI bring-up image. The SMP acceptance harness
-  # is deferred (see closure report) — ubuntu-24.04's qemu 8.2.2
-  # rejects 'qemu-system-aarch64 -machine dumpdtb=' and the firmware
-  # image workflow that ships qemu 11.1.1 lives on master.
+  # Builds the aarch64 UEFI bring-up image then runs an SMP smoke. The
+  # smoke uses the `smp` MODE (its --cpus matrix includes the 2-CPU
+  # bring-up the plan requires for a PR); the fuller per-MODE and
+  # RAM-exhaustion matrix lives in the scheduled full-matrix job.
   aarch64-checks:
     name: aarch64 checks
     runs-on: ubuntu-24.04
@@ -164,6 +228,18 @@ jobs:
       - name: Build aarch64 UEFI image
         run: make -j"$(nproc)" CC="clang -target aarch64-none-elf" LD="ld.lld -m aarch64elf" AR=llvm-ar PROFILE=aarch64-clang aarch64-uefi
 
+      - name: AArch64 SMP smoke (includes 2 CPUs)
+        run: make PROFILE=aarch64-clang test-aarch64 MODE=smp
+
+      - name: Upload run logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aarch64-test-logs
+          path: build/*/logs/tests/**
+          if-no-files-found: ignore
+          retention-days: 7
+
   # ── Build-system contract suite (PR + push) ──────────────────
   # These tests deliberately `make clean` at the end — they assert the
   # build-system contract, not the produced binaries. Run in their own
@@ -201,13 +277,81 @@ jobs:
       # shell recipe in mk/components/kernel.mk, which fails the contract
       # even with make -n. Pre-existing project bug, tracked separately.
 
+  # ── Full CPU / RAM / fault matrix (schedule + manual only) ────
+  # The plan keeps the slow 1/2/4/8 CPU sweep and the RAM-exhaustion /
+  # fault MODEs off every PR but on a nightly schedule and manual
+  # dispatch, so the umbrella entry points never lose coverage.
+  full-matrix:
+    name: full CPU/RAM/fault matrix
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/aagu/os01-ci:latest
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Mark workspace + submodules as git-safe
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git submodule foreach --recursive --quiet 'git config --global --add safe.directory "$sm_path"'
+
+      - name: Verify toolchain
+        run: |
+          clang --version | head -1
+          qemu-system-x86_64 --version | head -1
+          qemu-system-aarch64 --version | head -1
+
+      - name: Build disk.img
+        run: make -j"$(nproc)" disk.img
+
+      - name: x86 phase-0 at 1/2/4/8 CPUs
+        run: |
+          for cpus in 1 2 4 8; do
+            echo "== phase-0 @ ${cpus} CPU(s) =="
+            QEMU_SMP="${cpus}" make test-qemu SUITE=phase-0 || exit 1
+          done
+
+      - name: Syscall E2E at 1/2/4/8 CPUs
+        run: |
+          for cpus in 1 2 4 8; do
+            echo "== systest @ ${cpus} CPU(s) =="
+            QEMU_SMP="${cpus}" make OS01_SYSTEST=1 test-qemu SUITE=systest || exit 1
+          done
+
+      - name: AArch64 fault / SMP MODEs
+        run: |
+          for mode in smp gic-spi sync-fault; do
+            echo "== aarch64 MODE=${mode} =="
+            make PROFILE=aarch64-clang test-aarch64 MODE="${mode}" || exit 1
+          done
+
+      - name: AArch64 M1 RAM-exhaustion MODEs
+        run: |
+          for mode in m1-ram m1-sparse m1-arena-exhaust m1-table-exhaust; do
+            echo "== aarch64 MODE=${mode} =="
+            make PROFILE=aarch64-clang test-aarch64 MODE="${mode}" || exit 1
+          done
+
+      - name: Upload run logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-matrix-test-logs
+          path: build/*/logs/tests/**
+          if-no-files-found: ignore
+          retention-days: 14
+
   # ── Master artifact publication (push to master only) ─────────
-  # Runs only after the three check jobs have all passed on master.
+  # Runs only after the check jobs have all passed on master.
   # Rebuilds both images fresh because the contract job ends with
   # `make clean` and the uploaded disk.img must come from a green run.
   master-images:
     name: master images
-    needs: [x86-checks, aarch64-checks, contract]
+    needs: [harness, x86-checks, aarch64-checks, contract]
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
     container:
