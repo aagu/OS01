@@ -686,7 +686,10 @@ secondary_start:
      * (verified above via [x6, #AARCH64_BOOT_CPU_ID_OFFSET]).
      * PERCPU_DATA_SIZE is a numeric literal in
      * kernel/include/percpu/percpu.h (assembly context cannot use
-     * sizeof(percpu_t)). 152 (0x98) fits a 16-bit mov immediate. */
+     * sizeof(percpu_t); its equality with sizeof(percpu_t) is pinned
+     * by a _Static_assert there). Any percpu_t up to 64 KiB fits the
+     * 16-bit mov immediate, so the literal needs no asm-side update
+     * when the struct grows. */
     ldr     x7, =percpu_data
     mov     x8, #PERCPU_DATA_SIZE
     madd    x7, x19, x8, x7
