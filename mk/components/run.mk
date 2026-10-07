@@ -279,6 +279,7 @@ _test-aarch64-run-sync-fault:
 	  --firmware "$(AARCH64_UEFI_SYNC_FAULT_FIRMWARE)" \
 	  --image "$(AARCH64_UEFI_SYNC_FAULT_DISK)" \
 	  --qemu "$(AARCH64_QEMU)" \
+	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sync-fault/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 
 # M3.5 Task 25: production shootdown probe (spec §7.3). Builds the

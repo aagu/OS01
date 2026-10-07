@@ -19,11 +19,34 @@ import hashlib
 import json
 import os
 import re
-import selectors
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+
+# Running this file as a script puts ``qemutests/`` on ``sys.path[0]`` —
+# not the repo root — so bootstrap the repo root explicitly (Ruling 7).
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+try:  # noqa: E402
+    from qemutests.harness.process import ProcessSession
+except ImportError:  # pragma: no cover
+    ProcessSession = None  # type: ignore[assignment]
+
+try:  # noqa: E402
+    from qemutests.harness.result import RunArchive, RunReport
+except ImportError:  # pragma: no cover
+    RunArchive = None  # type: ignore[assignment]
+    RunReport = None  # type: ignore[assignment]
+
+# Suite id for the archive path and the RunReport.
+SUITE = "aarch64-sync-fault"
+
+# Post-fatal drain before the runner stops QEMU (spec §5.2/§5.3).
+POST_FATAL_DRAIN = 0.5
 
 
 # A typical live QEMU run starts with a small amount of UEFI banner text
@@ -274,14 +297,91 @@ def file_sha256(path: str) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def run_case(args: argparse.Namespace) -> bool:
-    """Run the sync-fault QEMU case once, drain briefly after the fatal
-    line, then terminate QEMU. A timeout is a failure."""
-    Path(args.log_dir).mkdir(parents=True, exist_ok=True)
-    prefix = Path(args.log_dir) / "sync-fault-run"
-    stdout_path = prefix.with_suffix(".stdout.log")
-    stderr_path = prefix.with_suffix(".stderr.log")
-    metadata_path = prefix.with_suffix(".metadata.json")
+def _sha256_path(path) -> str | None:
+    if path is None:
+        return None
+    try:
+        return file_sha256(str(path))
+    except (OSError, TypeError):
+        return None
+
+
+def _git_revision() -> tuple[str, bool]:
+    rev, dirty = "unknown", False
+    try:
+        r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=_ROOT,
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            rev = r.stdout.strip()
+        d = subprocess.run(["git", "status", "--porcelain"], cwd=_ROOT,
+                           capture_output=True, text=True, timeout=5)
+        if d.returncode == 0:
+            dirty = bool(d.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return rev, dirty
+
+
+def _write_suite_report(archive, *, argv, profile, session, started_monotonic,
+                        status, runner_exit_code, errors, firmware=None,
+                        image=None, extra=None) -> None:
+    """Persist a suite-unit RunReport; the suite has no guest v1 cases."""
+    if archive is None or RunReport is None:
+        return
+    try:
+        rev, dirty = _git_revision()
+        outcomes = [{"errors": list(errors)}]
+        if extra:
+            outcomes[0].update(extra)
+        report = RunReport(
+            schema_version=1, run_id=archive.run_dir.name,
+            git_revision=rev, git_dirty=dirty, profile=profile, suite=SUITE,
+            request=None, declared_ids=None, observed_ids=None,
+            argv=list(argv), cpu_count=1, memory_mib=512, tool_versions={},
+            firmware_path=firmware or None,
+            firmware_sha256_before=_sha256_path(firmware),
+            firmware_sha256_after=_sha256_path(firmware),
+            image_path=image or None,
+            image_sha256_before=_sha256_path(image),
+            image_sha256_after=_sha256_path(image),
+            utc_started_at=datetime.now(timezone.utc).isoformat(),
+            duration_s=max(0.0, time.monotonic() - started_monotonic),
+            runner_exit_code=runner_exit_code,
+            child_exit_code=(session.returncode if session is not None else None),
+            stopped_by_runner=bool(session is not None and session.stopped_by_runner),
+            status=status, count_unit="suite", outcomes=outcomes,
+            stdout_log=str(archive.run_dir / "stdout.log"),
+            stderr_log=str(archive.run_dir / "stderr.log"),
+        )
+        archive.write(report)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{SUITE}] warning: failed to write RunReport: {exc}",
+              file=sys.stderr)
+
+
+def run_case(args: argparse.Namespace, *, session_factory=None, build_dir=None,
+             profile="default") -> bool:
+    """Run the sync-fault case once through ``ProcessSession`` +
+    ``RunArchive``. The evidence decision is still ``sync_fault_evidence``
+    (suite owned); the process boundary and per-run archive are common.
+
+    Success requires the runner to actively stop QEMU after the ordered
+    fatal evidence (spec §5.2): a QEMU that self-exits is weak evidence
+    and FAILs, even though the fatal line is present.
+    """
+    if session_factory is None:
+        session_factory = ProcessSession
+    started = time.monotonic()
+
+    archive = None
+    if build_dir and RunArchive is not None:
+        archive = RunArchive.create(Path(build_dir), SUITE)
+        run_dir = archive.run_dir
+    else:
+        run_dir = Path(args.log_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    metadata_path = run_dir / "metadata.json"
+
     command = qemu_command(args)
     metadata = {
         "command": command,
@@ -292,79 +392,47 @@ def run_case(args: argparse.Namespace) -> bool:
     }
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
 
-    stdout = bytearray()
-    stderr = bytearray()
+    session = None
+    fatal_observed = False
     timed_out = False
-    returncode = None
-    harness_terminated = False
-    post_fatal_drain = 0.5
-    fatal_observed_at = None
+    stopped_by_runner = False
+    spawn_error = None
     try:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, bufsize=0)
-    except OSError as error:
-        print(json.dumps({"event": "spawn-error", "error": str(error)}))
-        return False
-    if process.stdout is None or process.stderr is None:
-        return False
-    streams = {process.stdout.fileno(): (process.stdout, stdout),
-               process.stderr.fileno(): (process.stderr, stderr)}
-    selector = selectors.DefaultSelector()
-    deadline = time.monotonic() + args.timeout
-    try:
-        for fd, (stream, _) in streams.items():
-            os.set_blocking(fd, False)
-            selector.register(stream, selectors.EVENT_READ)
-        while selector.get_map():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                timed_out = True
-                break
-            for key, _ in selector.select(remaining):
-                chunk = os.read(key.fd, 4096)
-                if chunk:
-                    streams[key.fd][1].extend(chunk)
-                else:
-                    selector.unregister(key.fileobj)
-            text = (stdout + stderr).decode("utf-8", errors="replace")
-            if fatal_observed_at is None and sync_fault_evidence(text):
-                fatal_observed_at = time.monotonic()
-                # Allow a short drain so any trailing kernel noise is
-                # captured, but do not wait for QEMU to exit on its own.
-                drain_deadline = fatal_observed_at + post_fatal_drain
-                while time.monotonic() < drain_deadline:
-                    if not selector.get_map():
-                        break
-                    for key, _ in selector.select(min(0.2, drain_deadline - time.monotonic())):
-                        chunk = os.read(key.fd, 4096)
-                        if chunk:
-                            streams[key.fd][1].extend(chunk)
-                        else:
-                            selector.unregister(key.fileobj)
-                break
-            if process.poll() is not None and not selector.get_map():
-                break
-    finally:
-        selector.close()
-        # Capture whether the harness actively terminated QEMU. If poll
-        # is None when finally runs, the kernel/probe is still alive and
-        # we have to terminate it ourselves; that satisfies spec §5.2.
-        # If poll is already non-None, QEMU self-exited — the harness
-        # never got the chance to terminate it, which is the weak
-        # evidence case the user flagged.
-        harness_terminated = process.poll() is None
-        if harness_terminated:
-            process.terminate()
+        if session_factory is None:
+            raise RuntimeError("ProcessSession is unavailable")
+        session = session_factory(argv=command, run_dir=run_dir,
+                                  timeout_s=args.timeout)
+        session.start()
+        # Wait for the suite-owned fatal evidence. If it never arrives the
+        # deadline trips (timed_out) and the run is not a success.
+        session.wait_for(lambda text: sync_fault_evidence(text))
+        fatal_observed = not session.timed_out
+        # Short drain so trailing kernel noise is captured, but do not
+        # wait for QEMU to exit on its own: the runner stops it (spec §5.2).
+        session.observe(POST_FATAL_DRAIN)
+        session.stop()
+        session.close()
+    except Exception as error:  # noqa: BLE001 — launch/OS error is ERROR
+        spawn_error = error
+        if session is not None:
             try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-        returncode = process.returncode
-        stdout_path.write_bytes(stdout)
-        stderr_path.write_bytes(stderr)
+                session.close()
+            except Exception:
+                pass
 
-    text = (stdout + stderr).decode("utf-8", errors="replace")
+    text = session.text if session is not None else ""
+    timed_out = bool(session is not None and session.timed_out)
+    stopped_by_runner = bool(session is not None and session.stopped_by_runner)
+
+    if spawn_error is not None:
+        print(json.dumps({"event": "spawn-error", "error": str(spawn_error)}))
+        _write_suite_report(
+            archive, argv=command, profile=profile, session=session,
+            started_monotonic=started, status="ERROR", runner_exit_code=1,
+            errors=[f"spawn error: {spawn_error}"],
+            firmware=args.firmware, image=args.image)
+        return False
+
     accepted = sync_fault_evidence(text)
     # spec §5.2: success requires the harness to actively terminate QEMU
     # after observing the FATAL. A QEMU that self-exits before the
@@ -372,32 +440,52 @@ def run_case(args: argparse.Namespace) -> bool:
     # on its own) is weak evidence — the diagnostic may have been
     # printed by something other than the kernel under test.
     #
-    # `harness_terminated` is set in the finally block above. If it is
-    # False, QEMU had already exited when the loop ended and the
-    # harness did NOT get to terminate it — fail unless the fatal was
-    # never observed (in which case it is a different failure mode).
+    # ``stopped_by_runner`` is ProcessSession's record of the runner
+    # issuing terminate/kill: it is True only when QEMU was still alive
+    # when the runner stopped it. If it is False, QEMU had already exited
+    # and the harness did NOT get to terminate it — fail unless the fatal
+    # was never observed (in which case it is a different failure mode).
     qemu_self_exited = (
-        fatal_observed_at is not None
-        and not harness_terminated
+        fatal_observed
+        and not stopped_by_runner
         and not timed_out
     )
     result = accepted and not timed_out and not qemu_self_exited
     metadata.update({
-        "elapsed_seconds": time.monotonic() - (
-            fatal_observed_at if fatal_observed_at else deadline),
-        "timeout": timed_out, "returncode": returncode,
-        "harness_terminated": harness_terminated,
-        "fatal_observed": fatal_observed_at is not None,
+        "elapsed_seconds": time.monotonic() - started,
+        "timeout": timed_out,
+        "returncode": (session.returncode if session is not None else None),
+        "harness_terminated": stopped_by_runner,
+        "fatal_observed": fatal_observed,
         "qemu_self_exited": qemu_self_exited,
         "result": "PASS" if result else "FAIL",
     })
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
+
+    errors = []
+    if timed_out:
+        errors.append("timeout before sync-fault evidence")
+    elif not accepted:
+        errors.append("sync-fault evidence not satisfied")
+    if qemu_self_exited:
+        errors.append("QEMU self-exited after the fatal evidence "
+                      "(no runner-owned stop)")
+    _write_suite_report(
+        archive, argv=command, profile=profile, session=session,
+        started_monotonic=started, status="PASS" if result else "FAIL",
+        runner_exit_code=0 if result else 1, errors=errors,
+        firmware=args.firmware, image=args.image,
+        extra={"timeout": timed_out, "fatal_observed": fatal_observed,
+               "qemu_self_exited": qemu_self_exited})
+
     print(json.dumps({
         "event": "case", "result": "PASS" if result else "FAIL",
-        "timeout": timed_out, "returncode": returncode,
-        "fatal_observed": fatal_observed_at is not None,
+        "timeout": timed_out,
+        "returncode": (session.returncode if session is not None else None),
+        "fatal_observed": fatal_observed,
         "qemu_self_exited": qemu_self_exited,
-        "stdout": str(stdout_path), "stderr": str(stderr_path),
+        "stdout": str(run_dir / "stdout.log"),
+        "stderr": str(run_dir / "stderr.log"),
     }))
     return result
 
@@ -410,6 +498,11 @@ def main() -> int:
     parser.add_argument("--image")
     parser.add_argument("--qemu")
     parser.add_argument("--log-dir")
+    parser.add_argument("--build-dir", default=None,
+                        help="build dir for the run archive, supplied by Make")
+    parser.add_argument("--profile", default=os.environ.get("OS01_PROFILE",
+                                                             "default"),
+                        help="profile name recorded in the report")
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -419,7 +512,8 @@ def main() -> int:
         parser.error("--firmware, --image, --qemu, and --log-dir are required outside --self-test")
     if args.timeout <= 0:
         parser.error("--timeout must be greater than zero")
-    return 0 if run_case(args) else 1
+    return 0 if run_case(args, build_dir=args.build_dir,
+                         profile=args.profile) else 1
 
 
 if __name__ == "__main__":

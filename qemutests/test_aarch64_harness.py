@@ -55,6 +55,7 @@ if str(ROOT) not in sys.path:
 
 import qemutests.aarch64_uefi_smp as smp        # noqa: E402
 import qemutests.aarch64_gic_spi as gspi        # noqa: E402
+import qemutests.aarch64_sync_fault as sflt     # noqa: E402
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -192,6 +193,99 @@ class SuiteUnitAdapterTests(unittest.TestCase):
         self.assertEqual(data["count_unit"], "suite")
         self.assertIsNone(data["declared_ids"])
         self.assertIsNone(data["observed_ids"])
+
+
+# ───────────────────────────────────────────────────────────────────
+# sync-fault — recorded-log evidence fixtures (ordering / uniqueness /
+# register fields) plus the lifecycle Review Focus.
+# ───────────────────────────────────────────────────────────────────
+
+
+class SyncFaultEvidenceTests(unittest.TestCase):
+    def test_valid_log_accepted(self):
+        self.assertTrue(sflt.sync_fault_evidence(sflt.valid_log))
+
+    def test_valid_log_alt_registers_accepted(self):
+        self.assertTrue(sflt.sync_fault_evidence(sflt.valid_log_alt_regs))
+
+    def test_missing_armed_rejected(self):
+        self.assertFalse(sflt.sync_fault_evidence(
+            sflt.valid_log.replace("[aarch64-sync-test] armed\n", "")))
+
+    def test_duplicate_armed_rejected(self):
+        self.assertFalse(sflt.sync_fault_evidence(
+            sflt.valid_log + "[aarch64-sync-test] armed\n"))
+
+    def test_wrong_far_rejected(self):
+        self.assertFalse(sflt.sync_fault_evidence(
+            sflt.valid_log.replace("far=0xffff800000000000", "far=0xdeadbeef")))
+
+    def test_wrong_ec_rejected(self):
+        self.assertFalse(sflt.sync_fault_evidence(
+            sflt.valid_log.replace("ec=0x25", "ec=0x24")))
+
+    def test_armed_after_fatal_rejected(self):
+        reordered = (
+            sflt.valid_log.replace(
+                "[aarch64-sync-test] armed\n[aarch64-sync] FATAL ",
+                "[aarch64-sync] FATAL ", 1)
+            + "\n[aarch64-sync-test] armed\n")
+        self.assertFalse(sflt.sync_fault_evidence(reordered))
+
+    def test_tick_after_fatal_rejected(self):
+        self.assertFalse(sflt.sync_fault_evidence(
+            sflt.valid_log + "[tick] 1\n"))
+
+
+class SyncFaultLifecycleTests(SuiteUnitAdapterTests):
+    """Review Focus: fatal-then-spontaneous-exit FAILs; runner-owned stop
+    after ordered evidence PASSes; an ordinary timeout is never success."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="os01-sf-"))
+        fw, img = _stage_inputs(self.tmp)
+        self.build = self.tmp / "build"
+        self.args = argparse.Namespace(
+            qemu="qemu-system-aarch64", firmware=str(fw), image=str(img),
+            log_dir=str(self.tmp / "logs"), timeout=5.0)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, session):
+        return sflt.run_case(
+            self.args, session_factory=_factory(session),
+            build_dir=str(self.build), profile="test")
+
+    def test_runner_owned_stop_after_evidence_passes(self):
+        session = FakeSession(text=sflt.valid_log, self_exited=False)
+        self.assertTrue(self._run(session))
+        self.assertIn("stop", session.calls)
+        data = _one_archive(self.build, sflt.SUITE)
+        self.assert_suite_unit(data)
+        self.assertEqual(data["status"], "PASS")
+        self.assertTrue(data["stopped_by_runner"])
+
+    def test_spontaneous_exit_after_evidence_fails(self):
+        # Evidence is complete, but QEMU exited on its own — weak evidence.
+        session = FakeSession(text=sflt.valid_log, self_exited=True)
+        self.assertFalse(self._run(session))
+        data = _one_archive(self.build, sflt.SUITE)
+        self.assertEqual(data["status"], "FAIL")
+        self.assertFalse(data["stopped_by_runner"])
+
+    def test_ordinary_timeout_fails(self):
+        # No evidence ever arrives; the deadline trips.
+        session = FakeSession(text="UEFI: booting OS01\n", matched=False)
+        self.assertFalse(self._run(session))
+        data = _one_archive(self.build, sflt.SUITE)
+        self.assertEqual(data["status"], "FAIL")
+
+    def test_self_exit_during_observation_window_fails(self):
+        # QEMU survives the wait but exits inside the post-fatal drain.
+        session = FakeSession(text=sflt.valid_log, exit_in_window=True)
+        self.assertFalse(self._run(session))
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -352,8 +446,10 @@ class ScriptModeTests(unittest.TestCase):
     class of breakage (Task 5's Critical defect), so these fixtures run
     the real script entry and rebuild ``sys.path`` to script-mode shape."""
 
-    _SELF_TEST_SCRIPTS = ("aarch64_uefi_smp.py", "aarch64_gic_spi.py")
-    _ALL_SCRIPTS = ("aarch64_uefi_smp.py", "aarch64_gic_spi.py")
+    _SELF_TEST_SCRIPTS = ("aarch64_uefi_smp.py", "aarch64_gic_spi.py",
+                          "aarch64_sync_fault.py")
+    _ALL_SCRIPTS = ("aarch64_uefi_smp.py", "aarch64_gic_spi.py",
+                    "aarch64_sync_fault.py")
 
     _PROBE = r"""
 import importlib.util, os, sys
