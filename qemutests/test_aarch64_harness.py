@@ -197,6 +197,28 @@ class SuiteUnitAdapterTests(unittest.TestCase):
         self.assertIsNone(data["declared_ids"])
         self.assertIsNone(data["observed_ids"])
 
+    def assert_hash_before_unset(self, data):
+        """Only a post-run hash is recorded.
+
+        All input hashes are taken at report time, so a ``*_before`` field
+        computed the same way is a fake mutation check — the plan's other
+        runners leave ``*_before = None`` and fill only ``*_after``
+        (`run_kernel_selftest.py`, `run_hosttests.py`)."""
+        self.assertIsNone(data["firmware_sha256_before"])
+        self.assertIsNone(data["image_sha256_before"])
+        self.assertIsNotNone(data["firmware_sha256_after"])
+        self.assertIsNotNone(data["image_sha256_after"])
+
+    def assert_exit_code_matches_status(self, data, code):
+        """The archive status must tell the same story as the exit code."""
+        self.assertEqual(data["runner_exit_code"], code)
+        if code == 0:
+            self.assertEqual(data["status"], "PASS")
+        elif code == 1:
+            self.assertIn(data["status"], ("FAIL", "TIMEOUT"))
+        elif code == 2:
+            self.assertEqual(data["status"], "ERROR")
+
 
 # ───────────────────────────────────────────────────────────────────
 # sync-fault — recorded-log evidence fixtures (ordering / uniqueness /
@@ -338,21 +360,53 @@ class UefiSmpLifecycleTests(SuiteUnitAdapterTests):
 
     def test_passing_case_archives_suite_unit(self):
         session = FakeSession(text=smp.current_log_for_2_cpus)
-        ok = smp.run_case(self._args(), 2, 1, session_factory=_factory(session),
+        rc = smp.run_case(self._args(), 2, 1, session_factory=_factory(session),
                           build_dir=str(self.build), profile="test")
-        self.assertTrue(ok)
+        self.assertEqual(rc, 0)
         data = _one_archive(self.build, smp.SUITE)
         self.assert_suite_unit(data)
         self.assertEqual(data["status"], "PASS")
+        self.assert_exit_code_matches_status(data, 0)
+        self.assert_hash_before_unset(data)
         self.assertEqual(data["cpu_count"], 2)
 
     def test_failing_case_archives_fail(self):
         session = FakeSession(text="UEFI: booting OS01\n", matched=False)
-        ok = smp.run_case(self._args(), 2, 1, session_factory=_factory(session),
+        rc = smp.run_case(self._args(), 2, 1, session_factory=_factory(session),
                           build_dir=str(self.build), profile="test")
-        self.assertFalse(ok)
+        self.assertEqual(rc, 1)
         data = _one_archive(self.build, smp.SUITE)
         self.assertEqual(data["status"], "FAIL")
+        self.assert_exit_code_matches_status(data, 1)
+
+    def test_spawn_error_exits_2_and_archives_error(self):
+        # A QEMU that cannot launch is a configuration/environment ERROR,
+        # which the plan puts in the exit-2 slot — not the FAIL/TIMEOUT
+        # exit-1 slot the archive previously disagreed with.
+        session = FakeSession(start_exc=FileNotFoundError("no-such-qemu"))
+        rc = smp.run_case(self._args(), 2, 1, session_factory=_factory(session),
+                          build_dir=str(self.build), profile="test")
+        self.assertEqual(rc, 2)
+        data = _one_archive(self.build, smp.SUITE)
+        self.assert_suite_unit(data)
+        self.assertEqual(data["status"], "ERROR")
+        self.assert_exit_code_matches_status(data, 2)
+
+    def test_unavailable_session_exits_2_and_archives_error(self):
+        # With ``ProcessSession`` unavailable the run must still exit 2 with
+        # status ERROR, and the archive directory it created must not be
+        # left orphaned without a result.json.
+        saved = smp.ProcessSession
+        smp.ProcessSession = None
+        try:
+            rc = smp.run_case(self._args(), 2, 1, build_dir=str(self.build),
+                              profile="test")
+        finally:
+            smp.ProcessSession = saved
+        self.assertEqual(rc, 2)
+        data = _one_archive(self.build, smp.SUITE)
+        self.assertEqual(data["status"], "ERROR")
+        self.assert_exit_code_matches_status(data, 2)
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -551,6 +605,63 @@ class M1ExpectedFailureLifecycleTests(SuiteUnitAdapterTests):
         self.assertFalse(self._run(session))
         data = _one_archive(self.build, m1m.SUITE)
         self.assertEqual(data["status"], "FAIL")
+
+
+# ───────────────────────────────────────────────────────────────────
+# Exit-code contract through the real script entry (Ruling 7):
+# 0=PASS, 1=FAIL/TIMEOUT, 2=configuration/environment ERROR.
+# ───────────────────────────────────────────────────────────────────
+
+
+class RunnerExitCodeScriptTests(SuiteUnitAdapterTests):
+    """The plan's global exit-code contract through the **real script
+    entry** (Ruling 7).  A missing QEMU binary is a configuration ERROR,
+    so every script must exit 2 *and* archive ``status="ERROR"`` — the two
+    signals must tell the same story (never exit 1 while archiving ERROR,
+    or exit 2 while archiving FAIL).
+
+    The fixture uses a bogus ``--qemu`` so ``ProcessSession.start()``
+    raises ``FileNotFoundError`` through the production code path."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="os01-exit-"))
+        self.fw, self.img = _stage_inputs(self.tmp)
+        self.build = self.tmp / "build"
+        self.log = self.tmp / "logs"
+        self.dtb = self.tmp / "qemu-virt.dtb"
+        self.dtb.write_bytes(b"dtb")
+        self.qemu = str(self.tmp / "no-such-qemu")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _env_error(self, script, suite, extra):
+        proc = subprocess.run(
+            [sys.executable, "-I", f"qemutests/{script}",
+             "--firmware", str(self.fw), "--image", str(self.img),
+             "--qemu", self.qemu, "--log-dir", str(self.log),
+             "--build-dir", str(self.build), "--profile", "test", *extra],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(
+            proc.returncode, 2,
+            f"{script} must exit 2 on a missing QEMU\n{proc.stdout}\n{proc.stderr}")
+        data = _one_archive(self.build, suite)
+        self.assert_suite_unit(data)
+        self.assert_exit_code_matches_status(data, 2)
+
+    def test_uefi_smp_missing_qemu_exits_2(self):
+        self._env_error("aarch64_uefi_smp.py", smp.SUITE,
+                        ["--cpus", "1", "--repeat", "1", "--timeout", "5"])
+
+    def test_uefi_smp_aggregates_case_codes(self):
+        # Multi-case runs fold to the plan's contract: 0 all-pass, 2 if any
+        # case was a configuration/environment ERROR, else 1.
+        self.assertEqual(smp._aggregate_exit_codes([0, 0]), 0)
+        self.assertEqual(smp._aggregate_exit_codes([0, 1]), 1)
+        self.assertEqual(smp._aggregate_exit_codes([0, 2]), 2)
+        self.assertEqual(smp._aggregate_exit_codes([1, 2]), 2)
 
 
 # ───────────────────────────────────────────────────────────────────

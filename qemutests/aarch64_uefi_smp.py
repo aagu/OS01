@@ -843,10 +843,13 @@ def _write_suite_report(archive, *, argv, profile, cpu, memory_mib,
             memory_mib=int(memory_mib or 0),
             tool_versions={},
             firmware_path=firmware or None,
-            firmware_sha256_before=_sha256_path(firmware),
+            # Only the post-run hash is recorded: a ``*_before`` computed at
+            # report time would not be a real mutation check (same convention
+            # as ``run_kernel_selftest.py`` / ``run_hosttests.py``).
+            firmware_sha256_before=None,
             firmware_sha256_after=_sha256_path(firmware),
             image_path=image or None,
-            image_sha256_before=_sha256_path(image),
+            image_sha256_before=None,
             image_sha256_after=_sha256_path(image),
             utc_started_at=datetime.now(timezone.utc).isoformat(),
             duration_s=max(0.0, time.monotonic() - started_monotonic),
@@ -902,13 +905,17 @@ def generate_diagnostic_dtb(qemu: str, log_dir: str, cpus: int, ram_mib: int = 5
 
 
 def run_case(args: argparse.Namespace, cpus: int, iteration: int, *,
-             session_factory=None, build_dir=None, profile="default") -> bool:
+             session_factory=None, build_dir=None, profile="default") -> int:
     """Run one QEMU case through ``ProcessSession`` + ``RunArchive``.
 
     Only the common process/output/archive code is delegated: the
     acceptance decision still comes from ``acceptance_evidence`` (suite
     owned).  When ``build_dir`` is given, each case gets its own
     ``RunArchive`` directory and a suite-unit ``result.json``.
+
+    Returns the plan's direct-runner exit code: 0 (PASS), 1 (FAIL /
+    TIMEOUT) or 2 (configuration / environment ERROR).  The archived
+    ``status`` is always the same classification as the returned code.
     """
     if session_factory is None:
         session_factory = ProcessSession
@@ -944,10 +951,20 @@ def run_case(args: argparse.Namespace, cpus: int, iteration: int, *,
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
 
     if session_factory is None:
+        # Environment ERROR: ``ProcessSession`` could not be imported.  The
+        # archive directory was already created above, so write the ERROR
+        # report here too — otherwise it is left orphaned without a
+        # ``result.json``.
         print(json.dumps({"event": "spawn-error", "cpus": cpus,
                           "run": iteration,
                           "error": "ProcessSession is unavailable"}))
-        return False
+        _write_suite_report(
+            archive, argv=command, profile=profile, cpu=cpus,
+            memory_mib=getattr(args, "ram_mib", 512), firmware=args.firmware,
+            image=args.image, started_monotonic=started, status="ERROR",
+            runner_exit_code=2, session=None,
+            errors=["spawn error: ProcessSession is unavailable"])
+        return 2
 
     session = None
     try:
@@ -974,9 +991,9 @@ def run_case(args: argparse.Namespace, cpus: int, iteration: int, *,
             archive, argv=command, profile=profile, cpu=cpus,
             memory_mib=getattr(args, "ram_mib", 512), firmware=args.firmware,
             image=args.image, started_monotonic=started, status="ERROR",
-            runner_exit_code=1, session=session,
+            runner_exit_code=2, session=session,
             errors=[f"spawn error: {error}"])
-        return False
+        return 2
 
     text = session.text
     timed_out = session.timed_out
@@ -1014,7 +1031,19 @@ def run_case(args: argparse.Namespace, cpus: int, iteration: int, *,
         "stdout": str(run_dir / "stdout.log"),
         "stderr": str(run_dir / "stderr.log"),
     }))
-    return result
+    return 0 if result else 1
+
+
+def _aggregate_exit_codes(codes: list[int]) -> int:
+    """Fold per-case exit codes into the runner's own exit code.
+
+    0 when every case passed; 2 when any case hit a configuration /
+    environment ERROR; otherwise 1 (the FAIL/TIMEOUT slot)."""
+    if all(code == 0 for code in codes):
+        return 0
+    if any(code == 2 for code in codes):
+        return 2
+    return 1
 
 
 def main() -> int:
@@ -1086,7 +1115,7 @@ def main() -> int:
     outcomes = [run_case(args, cpus, iteration,
                          build_dir=args.build_dir, profile=args.profile)
                 for cpus in args.cpus for iteration in range(1, args.repeat + 1)]
-    return 0 if all(outcomes) else 1
+    return _aggregate_exit_codes(outcomes)
 
 
 if __name__ == "__main__":
