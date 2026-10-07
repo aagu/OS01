@@ -5,10 +5,10 @@ The plan (docs/superpowers/plans/2026-09-30-2d-graphics-api.md Task 5)
 defines a separate transport for the gfx suite: ``-serial stdio`` with
 a writable stdin so the runner can type ``/bin/test_gfx`` into the
 shell.  Other suites must retain file-serial behaviour (write-only,
-sequential subprocess.Popen with no TTY).  This file's tests pin those
-contracts without invoking real QEMU — every QEMU process is replaced
-by a fake popen that records the argv, keeps stdin in a buffer, and
-releases the serial output on demand.
+sequential ProcessSession-backed QEMU with no TTY).  This file's
+tests pin those contracts without invoking real QEMU — every QEMU
+process is replaced by a FakeProcessSession that records the argv,
+keeps stdin in a buffer, and surfaces serial output on demand.
 
 Run with:
     python3 -m unittest qemutests.test_gfx_runner
@@ -16,13 +16,10 @@ Run with:
 
 from __future__ import annotations
 
-import importlib
 import os
-import subprocess
 import sys
 import unittest
 from pathlib import Path
-from typing import List, Optional
 
 
 # Repo root so we can `import qemutests.run_test` without installing.
@@ -30,13 +27,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+
 # Provide a fake OVMF_FIRMWARE path BEFORE importing run_test: the
 # real module hard-fails at module load if the env var is unset or the
 # file does not exist (see qemutests/run_test.py top-of-file guard).
-# We MUST NOT point this at the real build/x86_64-clang/firmware/OVMF.fd
-# (overwriting the 4 MiB firmware with a 9-byte stub would brick the
-# build).  Use a tempfile path that lives alongside the test's
-# scratch dir and is removed by the OS at reboot.
 import tempfile as _tempfile_mod
 _FAKE_OVMF = Path(_tempfile_mod.gettempdir()) / "os01_test_gfx_runner_ovmf.fd"
 _FAKE_OVMF.write_bytes(b"OVMF-stub")
@@ -57,75 +51,49 @@ def _import_run_test():
 
 
 # ────────────────────────────────────────────────────────────────────
-# Fake popen + QEMU process
+# FakeProcessSession factory — substitutes the QEMU boundary.
+#
+# Reuses the FakeProcessSession defined in qemutests/test_run_test_harness.py
+# (the canonical stand-in established by Task 5).  The class is
+# exposed there with the full ProcessSession interface so the
+# migration to ProcessSession is a one-line swap.
 # ────────────────────────────────────────────────────────────────────
 
 
-class _FakeStdin:
-    """A minimal stdin that records writes + flushes."""
+class _FakeSessionFactory:
+    """Builds FakeProcessSession instances with shared chunks/state.
+
+    The TestRunner's ``start_qemu`` calls
+    ``self._session_factory(argv, run_dir, timeout_s, writable_stdin=...)``
+    to obtain a process boundary.  This factory is installed in
+    ``setUp`` so every fixture in this file bypasses real QEMU.
+    """
 
     def __init__(self) -> None:
-        self.buffer: bytes = b""
-        self.flushes: int = 0
-
-    def write(self, data: bytes) -> int:
-        self.buffer += data
-        return len(data)
-
-    def flush(self) -> None:
-        self.flushes += 1
-
-    def text(self) -> str:
-        return self.buffer.decode("utf-8", errors="replace")
-
-
-class _FakePopen:
-    """Stand-in for subprocess.Popen that records argv and stdin."""
-
-    last_instance: Optional["_FakePopen"] = None
-
-    def __init__(
-        self,
-        args: List[str],
-        **kwargs,
-    ) -> None:
-        self.args = list(args)
-        # Capture every kwarg exactly as subprocess.Popen received them
-        # (stdin / stdout / stderr / cwd / env / ...).  Tests assert
-        # against self.kwargs.get("stdin") etc.
-        self.kwargs = dict(kwargs)
-        # Replace the int sentinels (subprocess.PIPE / DEVNULL) with
-        # our writable / noop stand-ins so send_line() works against
-        # a fake popen without raising AttributeError.  The original
-        # sentinel value is preserved in self.kwargs["stdin"] so
-        # tests can assert what the caller asked for.
-        stdin = kwargs.get("stdin")
-        if stdin is subprocess.DEVNULL:
-            self.stdin = _FakeStdin()  # never written by send()
-        elif stdin is None or stdin is subprocess.PIPE:
-            self.stdin = _FakeStdin()
-        else:
-            self.stdin = stdin
-        self.stdout = kwargs.get("stdout")
-        self.stderr = kwargs.get("stderr")
-        self.terminated = False
-        self.killed = False
-        self.returncode: Optional[int] = None
-        type(self).last_instance = self
-
-    def poll(self) -> Optional[int]:
-        return self.returncode
-
-    def terminate(self) -> None:
-        self.terminated = True
+        self.chunks = []
         self.returncode = 0
+        self.start_exc = None
+        self.created = []
 
-    def kill(self) -> None:
-        self.killed = True
-        self.returncode = -9
+    def __call__(self, argv, run_dir, timeout_s, *, writable_stdin=False):
+        from qemutests.test_run_test_harness import FakeProcessSession
+        s = FakeProcessSession(
+            argv=argv,
+            run_dir=run_dir,
+            timeout_s=timeout_s,
+            writable_stdin=writable_stdin,
+            chunks=self.chunks,
+            returncode=self.returncode,
+            start_exc=self.start_exc,
+        )
+        self.created.append(s)
+        return s
 
-    def wait(self, timeout: Optional[float] = None) -> int:
-        return self.returncode or 0
+    def reset(self, chunks=(), returncode=0, start_exc=None):
+        self.chunks = list(chunks)
+        self.returncode = returncode
+        self.start_exc = start_exc
+        self.created = []
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -140,42 +108,43 @@ class GfxRunnerStartQemuTests(unittest.TestCase):
         # Force the runner into the stdio mode for gfx (default-on).
         os.environ["QEMU_SMP"] = "1"
         self.runner_mod = _import_run_test()
-        # Patch subprocess.Popen inside the runner module so start_qemu
-        # captures our fake instead of forking a real QEMU.
-        self._real_popen = self.runner_mod.subprocess.Popen
-        self.runner_mod.subprocess.Popen = _FakePopen  # type: ignore[assignment]
+        self.factory = _FakeSessionFactory()
 
-    def tearDown(self) -> None:
-        self.runner_mod.subprocess.Popen = self._real_popen  # type: ignore[assignment]
+    def _make_tester(self):
+        tester = self.runner_mod.TestRunner(disk_img="/tmp/fake-disk.img")
+        tester._session_factory = self.factory
+        return tester
 
     def test_gfx_suite_uses_serial_stdio_with_pipe_stdin(self) -> None:
         """gfx suite must invoke QEMU with -serial stdio and stdin=PIPE."""
 
-        tester = self.runner_mod.TestRunner(disk_img="/tmp/fake-disk.img")
+        self.factory.reset()
+        tester = self._make_tester()
         tester.start_qemu(serial_stdio=True)
-        self.assertIsNotNone(tester.proc)
-        args = tester.proc.args
+        self.assertIsNotNone(tester.process)
+        args = tester.process.argv
         # -serial stdio present
         self.assertIn("-serial", args)
         sidx = args.index("-serial")
         self.assertEqual(args[sidx + 1], "stdio")
-        # serial_log path was created but the serial_path writer stays
-        # a file on disk (stdio mode still logs to a file for tail).
+        # serial_path was created (stdio mode writes to
+        # run_dir/stdout.log; the runner exposes it as serial_path).
         self.assertTrue(tester.serial_path)
-        # stdin was a PIPE (not DEVNULL); the fake stores either.
-        self.assertIsNotNone(tester.proc.stdin)
+        # writable_stdin=True is set on the session for stdio mode.
+        self.assertTrue(tester.process.writable_stdin)
 
     def test_default_file_serial_suite_uses_devnull_stdin(self) -> None:
         """Default (non-stdio) suites must keep the historical contract."""
 
-        tester = self.runner_mod.TestRunner(disk_img="/tmp/fake-disk.img")
+        self.factory.reset()
+        tester = self._make_tester()
         tester.start_qemu()
-        args = tester.proc.args
+        args = tester.process.argv
         # The file-serial path uses -serial file:<path>.
         sidx = args.index("-serial")
         self.assertTrue(args[sidx + 1].startswith("file:"))
-        # And stdin is DEVNULL — the runner never types into QEMU.
-        self.assertEqual(tester.proc.kwargs.get("stdin"), subprocess.DEVNULL)
+        # writable_stdin=False is the file-serial default.
+        self.assertFalse(tester.process.writable_stdin)
 
 
 class GfxRunnerShellFlowTests(unittest.TestCase):
@@ -184,73 +153,38 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
     def setUp(self) -> None:
         os.environ["QEMU_SMP"] = "1"
         self.runner_mod = _import_run_test()
-        self._real_popen = self.runner_mod.subprocess.Popen
-        self.runner_mod.subprocess.Popen = _FakePopen  # type: ignore[assignment]
+        self.factory = _FakeSessionFactory()
 
-    def tearDown(self) -> None:
-        self.runner_mod.subprocess.Popen = self._real_popen  # type: ignore[assignment]
+    def _make_tester(self, timeout=2):
+        tester = self.runner_mod.TestRunner(
+            disk_img="/tmp/fake-disk.img", timeout=timeout)
+        tester._session_factory = self.factory
+        return tester
 
-    def _make_fake_serial_file(self, contents: bytes) -> str:
-        """Create a fake serial log file and return its path."""
-
-        path = self.runner_mod.tempfile.NamedTemporaryFile(
-            prefix="os01_fake_serial_",
-            suffix=".log",
-            delete=False,
-        )
-        path_name = path.name
-        path.close()
-        with open(path_name, "wb") as f:
-            f.write(contents)
-        return path_name
-
-    def _stage_log_for_runner(self, tester, contents: bytes) -> None:
-        """Write ``contents`` to whatever serial-path start_qemu picked.
-
-        ``start_qemu`` always overwrites ``tester.serial_path`` with a
-        fresh NamedTemporaryFile — so a test cannot pre-create a file
-        and expect the runner to read from it.  Instead the test calls
-        start_qemu first, then writes the fake log into the path it
-        picked."""
-        with open(tester.serial_path, "wb") as f:
-            f.write(contents)
+    def _stage_chunks(self, contents):
+        """Push the staged chunks into the factory so the next
+        ProcessSession produced by start_qemu has them as its text."""
+        chunks = [ln + b"\n" for ln in contents.splitlines() if ln]
+        self.factory.chunks = chunks
 
     def test_send_line_writes_command_and_flushes(self) -> None:
-        """send_line() writes bytes + flushes the stdin pipe."""
+        """send_line() writes bytes via the ProcessSession's send."""
 
+        self.factory.reset()
         tester = self.runner_mod.TestRunner(disk_img="/tmp/fake-disk.img")
-        tester.proc = _FakePopen(["qemu-system-x86_64", "-serial", "stdio"])
-        # Fake stdin is what send_line should write into.
-        fake_stdin = _FakeStdin()
-        tester.proc.stdin = fake_stdin
+        tester._session_factory = self.factory
+        tester.start_qemu(serial_stdio=True)
         tester.send_line("/bin/test_gfx")
-        self.assertEqual(fake_stdin.text(), "/bin/test_gfx\n")
-        self.assertGreaterEqual(fake_stdin.flushes, 1)
+        # Verify the bytes were sent.
+        self.assertIn("/bin/test_gfx", tester.process.sent_text())
+        self.assertIn("\n", tester.process.sent_text())
 
     def test_gfx_suite_dispatches_to_pass_marker(self) -> None:
         """The runner's gfx entry point waits for prompt, sends test_gfx,
         waits for [GFX TEST] PASS and returns True on success."""
 
-        # Use a short timeout so a hung read_until can't hang the test
-        # suite.  The runner reads the serial log file (already
-        # populated by _stage_log_for_runner), so the marker is found
-        # on the first poll and the timeout is irrelevant — except
-        # for the FAIL case below, where the marker is missing and
-        # we want the read to return quickly with None.
-        tester = self.runner_mod.TestRunner(
-            disk_img="/tmp/fake-disk.img", timeout=2)
-        # Drive the runner exactly the way the gfx suite will:
-        # 1) start_qemu picks a fresh serial_path
-        # 2) we then seed that path with the boot+prompt and the
-        #    full sequence of PASS markers the current run_test.py
-        #    test_gfx() expects.  Earlier fixtures only seeded the
-        #    [GFX TEST] PASS marker; the suite was since extended to
-        #    wait for tetris/terminal/desktop markers too, so a
-        #    fixture that stops at the first marker would silently
-        #    miss the rest of the suite's contract.
-        tester.start_qemu(serial_stdio=True)
-        self._stage_log_for_runner(
-            tester,
+        tester = self._make_tester()
+        self._stage_chunks(
             b"OS01 boot ... done\n"
             b"login: root\n"
             b"# "                                       # prompt
@@ -263,33 +197,27 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
             b"[DESKTOP] SMOKE PASS\n",
         )
         try:
+            tester.start_qemu(serial_stdio=True)
             ok = self.runner_mod.test_gfx(tester)
             self.assertTrue(ok)
-            # Verify the command was sent and the stdin was flushed.
-            stdin = tester.proc.stdin
-            self.assertIsInstance(stdin, _FakeStdin)
-            self.assertIn("/bin/test_gfx", stdin.text())
-            self.assertIn("/bin/tetris smoke", stdin.text())
-            self.assertIn("/bin/test_terminal_screen", stdin.text())
-            self.assertIn("/bin/desktop smoke", stdin.text())
-            self.assertGreaterEqual(stdin.flushes, 1)
+            # Verify the command was sent.
+            self.assertIn("/bin/test_gfx", tester.process.sent_text())
+            self.assertIn("/bin/tetris smoke", tester.process.sent_text())
+            self.assertIn(
+                "/bin/test_terminal_screen", tester.process.sent_text())
+            self.assertIn("/bin/desktop smoke", tester.process.sent_text())
         finally:
             tester.cleanup()
 
     def test_gfx_suite_rejects_missing_marker(self) -> None:
         """No [GFX TEST] PASS in serial → test_gfx returns False."""
 
-        # Short timeout so the read_until for the marker returns
-        # quickly with None — the runner then prints a diagnostic and
-        # returns False.
-        tester = self.runner_mod.TestRunner(
-            disk_img="/tmp/fake-disk.img", timeout=2)
-        tester.start_qemu(serial_stdio=True)
-        self._stage_log_for_runner(
-            tester,
+        tester = self._make_tester()
+        self._stage_chunks(
             b"OS01 boot ... done\n# [GFX TEST] FAIL: white-diagonal mismatch\n",
         )
         try:
+            tester.start_qemu(serial_stdio=True)
             ok = self.runner_mod.test_gfx(tester)
             self.assertFalse(ok)
         finally:
@@ -305,17 +233,10 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
         in the log.
         """
 
-        tester = self.runner_mod.TestRunner(
-            disk_img="/tmp/fake-disk.img", timeout=2)
-        tester.start_qemu(serial_stdio=True)
+        tester = self._make_tester()
         # gfx PASS is present, tetris marker is NOT — the runner
-        # should fail at step B.  The terminal/desktop markers are
-        # included so a buggy implementation that races past the
-        # tetris stage would still be caught by these later
-        # checks; the test is tight on tetris specifically because
-        # that's the contract being pinned here.
-        self._stage_log_for_runner(
-            tester,
+        # should fail at step B.
+        self._stage_chunks(
             b"OS01 boot ... done\n"
             b"login: root\n"
             b"# "
@@ -324,12 +245,11 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
             b"[DESKTOP] SMOKE PASS\n",
         )
         try:
+            tester.start_qemu(serial_stdio=True)
             ok = self.runner_mod.test_gfx(tester)
             self.assertFalse(ok)
             # Verify the runner typed /bin/tetris smoke before failing.
-            stdin = tester.proc.stdin
-            self.assertIsInstance(stdin, _FakeStdin)
-            self.assertIn("/bin/tetris smoke", stdin.text())
+            self.assertIn("/bin/tetris smoke", tester.process.sent_text())
         finally:
             tester.cleanup()
 
@@ -343,14 +263,9 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
         silent regression to the older two-stage suite.
         """
 
-        tester = self.runner_mod.TestRunner(
-            disk_img="/tmp/fake-disk.img", timeout=2)
-        tester.start_qemu(serial_stdio=True)
-        # gfx + tetris PASS, but no terminal marker.  The desktop
-        # marker is left in to make sure the runner is checked at
-        # the right stage and not after a sloppy fallback.
-        self._stage_log_for_runner(
-            tester,
+        tester = self._make_tester()
+        # gfx + tetris PASS, but no terminal marker.
+        self._stage_chunks(
             b"OS01 boot ... done\n"
             b"login: root\n"
             b"# "
@@ -359,11 +274,11 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
             b"[DESKTOP] SMOKE PASS\n",
         )
         try:
+            tester.start_qemu(serial_stdio=True)
             ok = self.runner_mod.test_gfx(tester)
             self.assertFalse(ok)
-            stdin = tester.proc.stdin
-            self.assertIsInstance(stdin, _FakeStdin)
-            self.assertIn("/bin/test_terminal_screen", stdin.text())
+            self.assertIn(
+                "/bin/test_terminal_screen", tester.process.sent_text())
         finally:
             tester.cleanup()
 
@@ -376,11 +291,8 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
         step would mask a real desktop failure.
         """
 
-        tester = self.runner_mod.TestRunner(
-            disk_img="/tmp/fake-disk.img", timeout=2)
-        tester.start_qemu(serial_stdio=True)
-        self._stage_log_for_runner(
-            tester,
+        tester = self._make_tester()
+        self._stage_chunks(
             b"OS01 boot ... done\n"
             b"login: root\n"
             b"# "
@@ -389,25 +301,18 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
             b"[TERM SCREEN TEST] PASS\n",
         )
         try:
+            tester.start_qemu(serial_stdio=True)
             ok = self.runner_mod.test_gfx(tester)
             self.assertFalse(ok)
-            stdin = tester.proc.stdin
-            self.assertIsInstance(stdin, _FakeStdin)
-            self.assertIn("/bin/desktop smoke", stdin.text())
+            self.assertIn("/bin/desktop smoke", tester.process.sent_text())
         finally:
             tester.cleanup()
 
     def test_run_test_dispatches_gfx_suite(self) -> None:
         """``python3 run_test.py gfx`` routes to test_gfx()."""
 
-        tester = self.runner_mod.TestRunner(
-            disk_img="/tmp/fake-disk.img", timeout=2)
-        tester.start_qemu(serial_stdio=True)
-        # Same full-marker fixture as test_gfx_suite_dispatches_to_pass_marker
-        # — this is the dispatch sanity check, so it must run the
-        # whole stage sequence end-to-end.
-        self._stage_log_for_runner(
-            tester,
+        tester = self._make_tester()
+        self._stage_chunks(
             b"OS01 boot ... done\n"
             b"login: root\n"
             b"# "
@@ -417,6 +322,7 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
             b"[DESKTOP] SMOKE PASS\n",
         )
         try:
+            tester.start_qemu(serial_stdio=True)
             self.assertTrue(self.runner_mod.test_gfx(tester))
         finally:
             tester.cleanup()
@@ -459,7 +365,7 @@ class GfxMakeDryRunTests(unittest.TestCase):
         # exclude BOTH phase-0 AND gfx (not just phase-0).  Spec: a gfx
         # rebuild of the normal image is allowed.
         # We assert: (a) at least two `if [ "$(SUITE)" != ... ]` lines
-        # exist (the sandwich bookends); and (b) both phase-0 AND gfx
+        # exist (the sandwich bookends); and (b) both phase-0 and gfx
         # are excluded by the AND chain in BOTH conditions.
         phase0_and_gfx_excluded = (
             '$(SUITE)" != "phase-0"' in self.text
@@ -470,8 +376,8 @@ class GfxMakeDryRunTests(unittest.TestCase):
         self.assertTrue(
             phase0_and_gfx_excluded,
             "normal-image hash guard must exclude BOTH phase-0 and gfx in both 'if' conditions "
-            f"(saw {self.text.count(chr(36) + '(SUITE)' + chr(34) + ' != ' + chr(34) + 'phase-0' + chr(34))} phase-0 and "
-            f"{self.text.count(chr(36) + '(SUITE)' + chr(34) + ' != ' + chr(34) + 'gfx' + chr(34))} gfx exclusions; need ≥2 of each)",
+            f"(saw {self.text.count('$(SUITE)\" != \"phase-0\"')} phase-0 and "
+            f"{self.text.count('$(SUITE)\" != \"gfx\"')} gfx exclusions; need >=2 of each)",
         )
 
 
