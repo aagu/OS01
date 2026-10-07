@@ -23,6 +23,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -196,8 +197,24 @@ class UdpEchoHost:
             return self.echoed
 
 
-def _run_case(case, smp, timeout=DEFAULT_TIMEOUT):
-    """Run a single matrix case. Returns (passed: bool, log: str, evidence: dict)."""
+def _run_case(case, smp, timeout=DEFAULT_TIMEOUT, session_factory=None):
+    """Run a single matrix case. Returns (passed: bool, log: str, evidence: dict).
+
+    The QEMU process boundary is owned by ``ProcessSession`` (spec
+    section 5.3) when ``session_factory`` is supplied; otherwise the
+    real ``ProcessSession`` is used.  Tests pass a stand-in factory to
+    bypass the real subprocess spawn.
+
+    Make still owns the build recipe: ``_read_paths_for`` (via
+    ``make print-run-paths``) and ``_build_for_fault`` (via
+    ``make ARCH9_FAULT=<fault> image``) are unchanged.  Build
+    failures end the case before QEMU is launched.
+    """
+    # Lazy import keeps the matrix harness importable in hosts without
+    # the harness submodule installed (e.g., dry-runs).
+    if session_factory is None:
+        from qemutests.harness.process import ProcessSession
+        session_factory = ProcessSession
     c = DMM.case_dict(case)
     fault = c["fault"]
     paths = _read_paths_for(fault)
@@ -260,10 +277,12 @@ def _run_case(case, smp, timeout=DEFAULT_TIMEOUT):
             print(f"  [matrix] cmd={cmd!r} udp_port_base={udp_port_base}",
                   file=sys.stderr)
 
-    # Wire up the input pipe. We use subprocess.PIPE for stdin so we
-    # can write the probe command after the boot settles, and a
-    # separate file for serial output so we can poll the markers.
-    proc = None
+    # Wire up the input pipe. ProcessSession owns the QEMU process
+    # boundary (spec section 5.3): argv-only, monotonic deadline,
+    # persistent log files, process-group cleanup.  The matrix
+    # harness keeps a forensic log file (``log_path``) so the
+    # existing references in test_driver_model_matrix.py continue
+    # to work.
     if os.environ.get("DRIVER_MODEL_LOG_DIR"):
         log_dir = Path(os.environ["DRIVER_MODEL_LOG_DIR"])
     elif os.environ.get("TMPDIR"):
@@ -272,52 +291,37 @@ def _run_case(case, smp, timeout=DEFAULT_TIMEOUT):
         log_dir = Path("/tmp")
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"os23matrix_{case}_{smp}_{int(time.time())}.log"
-    # buffering=0 keeps QEMU's serial stdio line-buffered to disk; the
-    # runner polls the file size every 0.5s and a stale read would
-    # otherwise look like a hang.
-    log_fh = open(log_path, "wb", buffering=0)
-    # Also capture QEMU's stderr (hostfwd / chardev errors surface there)
-    # so we can diagnose launch failures.
-    err_path = log_path.with_suffix(".err.log")
-    err_fh = open(err_path, "wb", buffering=0)
+    # The ProcessSession's run_dir lives alongside the forensic log.
+    process_run_dir = log_dir / f"run_{case}_{smp}_{int(time.time())}"
     try:
         try:
-            proc = subprocess.Popen(
-                argv,
-                stdin=subprocess.PIPE,
-                stdout=log_fh,
-                stderr=err_fh,
-                cwd=str(WORKTREE_ROOT),
+            process = session_factory(
+                argv=argv,
+                run_dir=process_run_dir,
+                timeout_s=float(timeout),
+                writable_stdin=True,
             )
+            process.start()
         except Exception as e:
-            log_fh.close()
-            err_fh.close()
             for u in udp_list: u.stop()
             return False, "", {"error": f"qemu launch failed: {e}"}
 
         # Sequence: boot (~18s for SMP=1, ~25s for SMP=2) + send probe + drain.
-        boot_wait = 25 if smp >= 2 else 18
         deadline = time.monotonic() + timeout
         sent_cmd = False
-        log_bytes_seen = 0
         result_passed = False
         result_failed = False
+        # Mirror the live ProcessSession text to the forensic log so
+        # the existing ``log_path`` references work.  The matrix
+        # parser inspects ``log_text`` directly so we don't have to
+        # re-read the file.
+        log_fh = open(log_path, "w", encoding="utf-8", errors="replace")
         try:
             while time.monotonic() < deadline:
                 time.sleep(0.5)
-                try:
-                    size = log_path.stat().st_size
-                except OSError:
-                    continue
-                if size > log_bytes_seen:
-                    log_bytes_seen = size
-                log_text = ""
-                try:
-                    with open(log_path, "r", encoding="utf-8",
-                               errors="replace") as f:
-                        log_text = f.read()
-                except OSError:
-                    continue
+                log_text = process.text
+                log_fh.write(log_text)
+                log_fh.flush()
                 # Wait for the kernel to declare the stack online AND
                 # the shell prompt to be ready.  Multi-NIC cases need
                 # "stack online with N active adapter(s)" so all NICs
@@ -330,8 +334,7 @@ def _run_case(case, smp, timeout=DEFAULT_TIMEOUT):
                         ready = "OS01 Init v1.0" in log_text and "#" in log_text
                 if not sent_cmd and ready:
                     try:
-                        proc.stdin.write((cmd + "\n").encode())
-                        proc.stdin.flush()
+                        process.send((cmd + "\n").encode("utf-8"))
                         sent_cmd = True
                     except BrokenPipeError:
                         pass
@@ -343,21 +346,14 @@ def _run_case(case, smp, timeout=DEFAULT_TIMEOUT):
                     result_failed = True
                     break
         finally:
-            if proc and proc.poll() is None:
-                try:
-                    proc.send_signal(signal.SIGTERM)
-                    proc.wait(timeout=5)
-                except Exception:
-                    proc.kill()
+            try:
+                process.close()
+            except Exception:
+                pass
             log_fh.close()
             for u in udp_list: u.stop()
 
-        try:
-            with open(log_path, "r", encoding="utf-8",
-                       errors="replace") as f:
-                log_text = f.read()
-        except OSError:
-            log_text = ""
+        log_text = process.text
 
         # Expect-boot-failure cases (no-ahci, empty-ahci) deliberately
         # produce a kernel panic because the kernel has no virtio-blk
