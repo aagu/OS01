@@ -595,13 +595,13 @@ static int walk_to_l3(uint64_t *root, uint64_t va, bool create,
  * returns -1.  Block descriptors at L2 are NOT rejected here — the
  * caller checks `pmd[l2]` to distinguish block vs table for split.
  *
- * TODO(Task 18): the spec §5.2b item 4 "每级发布后 local TLBI" branch
- * (TLBI per-level publication when root is active) is currently a
- * no-op because the only callers under M3.3 are pre-published-root
- * (M1 selftest, M3.3 selftest) — none take the published-root code
- * path.  Task 18 (map_2m on the published root) will branch on
- * `create && is_active_root(root)` and issue a per-level local TLBI
- * here.  Until then, no TLBI leaves walk_to_l2 with create=true. */
+ * Deferred (spec §5.2b item 4 "每级发布后 local TLBI"): when a caller
+ * first walks a PUBLISHED root with create=true (no such caller today
+ * — every current create-path caller runs before its root is
+ * published), this function must branch on `create &&
+ * is_active_root(root)` and issue a per-level local TLBI as each
+ * intermediate table is published.  Until such a caller exists the
+ * branch stays a no-op by design. */
 int walk_to_l2(uint64_t *root, uint64_t va, bool create,
                uint64_t **pmd_out, int *result_out)
 {
@@ -609,10 +609,11 @@ int walk_to_l2(uint64_t *root, uint64_t va, bool create,
     uint64_t l1 = (va >> AARCH64_PT_L1_SHIFT) & AARCH64_PT_IDX_MASK;
     uint64_t l2 = (va >> AARCH64_PT_L2_SHIFT) & AARCH64_PT_IDX_MASK;
     /* `create` is consulted by ensure_child_table (per-level alloc);
-     * suppress the unused warning in this TU — Task 18 will add an
-     * is_active_root() branch on top. */
+     * the per-level TLBI branch on `create && is_active_root(root)`
+     * lands here when the first published-root create-path caller
+     * arrives (see the comment above). */
     (void)l2;  /* used by ensure_child_table via the parent pointer */
-    (void)create;       /* TODO(Task 18): branch on `create` for TLBI */
+    (void)create;
 
     /* Lock order: caller already holds pt_lock_for(root, l2).  We
      * take only pt_upper_lock around the L0/L1 ensure segment —
