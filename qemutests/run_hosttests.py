@@ -10,12 +10,21 @@ Invocation (exactly how ``hosttests/Makefile`` calls it)::
 
     python3 qemutests/run_hosttests.py \
         --build-dir <build/<profile>> [--profile <profile>] [--timeout N] \
-        [--binary ID ...] BINARY...
+        [--binary ID ...] [--exit-status ID ...] BINARY...
 
 ``BINARY...`` is the authoritative list Make hands over (``TEST_BINS``);
 ``--binary ID`` narrows that list to the named binaries (ID = basename
 without ``.elf``).  Unknown, duplicate, or empty selections are a
 configuration ERROR (exit 2) and are rejected *before* any binary runs.
+
+``--exit-status ID`` is an explicit, repeatable allowlist of binaries
+that report solely through their exit code and print nothing on success.
+A named id is still run through the normal ``ProcessSession`` path (so it
+keeps the per-binary timeout) and is still archived (``stdout.log``,
+``stderr.log``, atomic ``result.json``); it is accepted on exit 0 with
+**empty** stdout.  Every binary *not* named keeps the strict rule below:
+an empty log cannot pass.  The exemption is per-id, never a blanket
+relaxation.
 
 Per-binary acceptance (spec §6.2):
 
@@ -165,6 +174,39 @@ def resolve_selection(
     return [path for path in binaries if binary_id(path) in wanted]
 
 
+def resolve_exit_status(
+    select: Optional[Sequence[str]],
+    binaries: Sequence[str],
+) -> List[str]:
+    """Validate the ``--exit-status`` allowlist against the binaries to run.
+
+    Raises :class:`SelectionError` for an empty or duplicate id, or for an
+    id that names no binary in ``binaries`` (a typo must not silently
+    become "no exemption" or, worse, apply to the wrong binary).  Returns
+    the de-duplicated ids in first-seen order.
+    """
+    if not select:
+        return []
+
+    by_id = {binary_id(path) for path in binaries}
+    chosen: List[str] = []
+    seen = set()
+    for raw in select:
+        token = raw.strip()
+        if not token:
+            raise SelectionError("empty --exit-status id")
+        if token in seen:
+            raise SelectionError(f"duplicate --exit-status id: {token}")
+        seen.add(token)
+        if token not in by_id:
+            raise SelectionError(
+                f"unknown --exit-status id {token!r} "
+                f"(known: {sorted(by_id)})"
+            )
+        chosen.append(token)
+    return chosen
+
+
 # ────────────────────────────────────────────────────────────────────
 # Evidence validation
 # ────────────────────────────────────────────────────────────────────
@@ -178,18 +220,24 @@ def is_migrated(text: str) -> bool:
     )
 
 
-def legacy_errors(text: str) -> List[str]:
+def legacy_errors(text: str, *, allow_empty: bool = False) -> List[str]:
     """Validate a binary's *legacy* (non-v1) evidence.
 
     Applies to every binary (migrated binaries satisfy it too, and the
     framework binaries print the assertion summary regardless):
-      * an empty log cannot pass (spec §6.2);
+      * an empty log cannot pass (spec §6.2) — unless ``allow_empty``;
       * a printed summary must be complete and report zero failures;
       * the framework failure banner alone is a failure.
+
+    ``allow_empty`` is set **only** for a binary named on the
+    ``--exit-status`` allowlist (a binary that reports solely through its
+    exit code).  It relaxes the empty-evidence rule and nothing else: a
+    listed binary that prints a masked failure summary still fails.
     """
     errors: List[str] = []
     if not text.strip():
-        errors.append("empty output: no suite evidence")
+        if not allow_empty:
+            errors.append("empty output: no suite evidence")
         return errors
 
     saw_summary = False
@@ -265,6 +313,7 @@ def _write_report(
     child_exit_code: Optional[int],
     stopped_by_runner: bool,
     errors: List[str],
+    exit_status_only: bool = False,
     declared_ids=None,
     observed_ids=None,
     case_outcomes=None,
@@ -303,7 +352,12 @@ def _write_report(
             status=status,
             count_unit=("case" if mode == "v1" else "suite"),
             outcomes=[
-                {"binary": binary, "mode": mode, "errors": list(errors)},
+                {
+                    "binary": binary,
+                    "mode": mode,
+                    "exit_status_only": exit_status_only,
+                    "errors": list(errors),
+                },
                 *(case_outcomes or []),
             ],
             stdout_log=str(archive.run_dir / "stdout.log"),
@@ -327,10 +381,15 @@ def run_one(
     profile: str,
     timeout_s: float,
     session_factory: Optional[Callable] = None,
+    allow_empty: bool = False,
 ) -> int:
     """Run one binary, archive its report, return its exit contribution.
 
     0 = PASS, 1 = FAIL/TIMEOUT/child-crash, 2 = launch/environment ERROR.
+
+    ``allow_empty`` is set only for a binary named on the
+    ``--exit-status`` allowlist: it lets an empty log pass (exit status
+    is then the sole gate) while every other acceptance rule is unchanged.
     """
     if session_factory is None:
         session_factory = ProcessSession
@@ -377,7 +436,7 @@ def run_one(
             archive, binary=bid, profile=profile, mode="unknown", argv=argv,
             started_monotonic=started_monotonic, status="ERROR",
             runner_exit_code=2, child_exit_code=None, stopped_by_runner=False,
-            errors=[f"launch error: {exc}"],
+            errors=[f"launch error: {exc}"], exit_status_only=allow_empty,
         )
         return 2
 
@@ -401,7 +460,7 @@ def run_one(
         code = 1
         errors.append(f"child exited with status {rc}")
 
-    errors.extend(legacy_errors(text))
+    errors.extend(legacy_errors(text, allow_empty=allow_empty))
 
     if mode == "v1":
         pr = parse_v1(text, suite=SUITE)
@@ -424,6 +483,7 @@ def run_one(
         started_monotonic=started_monotonic, status=status,
         runner_exit_code=code, child_exit_code=rc,
         stopped_by_runner=timed_out, errors=errors,
+        exit_status_only=allow_empty,
         declared_ids=declared_ids, observed_ids=observed_ids,
         case_outcomes=case_outcomes,
     )
@@ -442,17 +502,24 @@ def run_hosttests(
     profile: str = "default",
     timeout_s: float = 60.0,
     session_factory: Optional[Callable] = None,
+    exit_status_ids: Optional[Sequence[str]] = None,
 ) -> int:
     """Run every binary in turn; continue after failures.
+
+    ``exit_status_ids`` is the ``--exit-status`` allowlist: those ids are
+    still run, timed, and archived, but are accepted on exit status alone
+    (empty stdout is allowed for them — and only them).
 
     Returns the worst exit contribution: 2 (environment) beats 1 (failure)
     beats 0 (pass).
     """
+    allow = set(exit_status_ids or ())
     worst = 0
     for path in binaries:
         contrib = run_one(
             path, build_dir=build_dir, profile=profile,
             timeout_s=timeout_s, session_factory=session_factory,
+            allow_empty=binary_id(path) in allow,
         )
         worst = max(worst, contrib)
 
@@ -497,11 +564,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         metavar="ID",
         help="run only this binary id (basename without .elf); repeatable",
     )
+    parser.add_argument(
+        "--exit-status", action="append", default=None, dest="exit_status",
+        metavar="ID",
+        help="id allowed to pass on exit status alone (empty stdout ok); "
+             "repeatable; every other binary still requires suite evidence",
+    )
     parser.add_argument("binaries", nargs="*", help="binary paths to run")
     args = parser.parse_args(argv)
 
     try:
         chosen = resolve_selection(args.binaries, args.select)
+        exit_ids = resolve_exit_status(args.exit_status, chosen)
     except SelectionError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
@@ -519,7 +593,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         return run_hosttests(
             chosen, build_dir=args.build_dir, profile=args.profile,
-            timeout_s=args.timeout,
+            timeout_s=args.timeout, exit_status_ids=exit_ids,
         )
     except KeyboardInterrupt:
         print("interrupted (Ctrl-C)", file=sys.stderr)

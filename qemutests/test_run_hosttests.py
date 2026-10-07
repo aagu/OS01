@@ -108,6 +108,12 @@ SCRIPT_EMPTY_OUTPUT = """\
 exit 0
 """
 
+# Exits nonzero but prints nothing at all — the shape of a silent binary
+# that genuinely failed.  Even an `--exit-status`-listed id must fail here.
+SCRIPT_EMPTY_FAILURE = """\
+exit 3
+"""
+
 # Crashes on SIGSEGV (child_exit_code < 0 / signal).
 SCRIPT_CRASH = """\
 kill -SEGV $$
@@ -297,6 +303,91 @@ class AcceptanceTests(unittest.TestCase):
 
 
 # ───────────────────────────────────────────────────────────────────
+# `--exit-status ID` — the explicit, repeatable silent-binary allowlist
+# ───────────────────────────────────────────────────────────────────
+
+
+class ExitStatusTests(unittest.TestCase):
+    """A binary named via ``--exit-status ID`` may pass on exit 0 with
+    **empty** stdout (spec §6.2's empty-evidence rule is relaxed for it
+    alone), still gets its per-binary timeout, and is still archived.
+
+    Every binary *not* named keeps the strict rule: an empty log cannot
+    pass.  The unlisted-silent fixture below is the regression guard that
+    keeps this from silently becoming a blanket relaxation.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="os01-hostexit-"))
+        self.build = self.tmp / "build"
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, binaries, exit_status=(), *, timeout: float = 10.0) -> int:
+        argv = ["--build-dir", str(self.build), "--timeout", str(timeout)]
+        for eid in exit_status:
+            argv += ["--exit-status", eid]
+        argv += [str(b) for b in binaries]
+        return _run_main(argv)
+
+    def test_listed_silent_binary_passes(self) -> None:
+        silent = _write_script(self.tmp, "quiet.elf", SCRIPT_EMPTY_OUTPUT)
+        rc = self._run([silent], exit_status=["quiet"])
+        self.assertEqual(rc, 0)
+        data = _archives(self.build)["quiet"]
+        self.assertEqual(data["status"], "PASS")
+        self.assertEqual(data["count_unit"], "suite")
+        self.assertEqual(data["child_exit_code"], 0)
+
+    def test_listed_binary_with_nonzero_exit_fails(self) -> None:
+        bad = _write_script(self.tmp, "bad.elf", SCRIPT_EMPTY_FAILURE)
+        rc = self._run([bad], exit_status=["bad"])
+        self.assertEqual(rc, 1)
+        self.assertEqual(_archives(self.build)["bad"]["status"], "FAIL")
+
+    def test_listed_binary_still_gets_the_per_binary_timeout(self) -> None:
+        hang = _write_script(self.tmp, "hang.elf", SCRIPT_HANG)
+        rc = self._run([hang], exit_status=["hang"], timeout=1.0)
+        self.assertEqual(rc, 1)
+        self.assertEqual(_archives(self.build)["hang"]["status"], "TIMEOUT")
+
+    def test_unlisted_silent_binary_still_fails(self) -> None:
+        """The regression guard: with an allowlist in force, a *different*
+        silent binary that is not named must still FAIL on the empty log."""
+        listed = _write_script(self.tmp, "listed.elf", SCRIPT_EMPTY_OUTPUT)
+        unlisted = _write_script(self.tmp, "unlisted.elf", SCRIPT_EMPTY_OUTPUT)
+        rc = self._run([listed, unlisted], exit_status=["listed"])
+        self.assertEqual(rc, 1)
+        arch = _archives(self.build)
+        self.assertEqual(arch["listed"]["status"], "PASS")
+        self.assertEqual(arch["unlisted"]["status"], "FAIL")
+        errs = " ".join(arch["unlisted"]["outcomes"][0]["errors"])
+        self.assertIn("empty output", errs)
+
+    def test_listed_run_still_produces_result_json(self) -> None:
+        """Archive RED: disabling the archive write makes this fail."""
+        silent = _write_script(self.tmp, "quiet.elf", SCRIPT_EMPTY_OUTPUT)
+        rc = self._run([silent], exit_status=["quiet"])
+        self.assertEqual(rc, 0)
+        results = sorted(
+            (self.build / "logs" / "tests" / rh.SUITE).glob("*/result.json")
+        )
+        self.assertEqual(len(results), 1, f"no archive written: {results}")
+
+    def test_unknown_exit_status_id_is_config_error(self) -> None:
+        silent = _write_script(self.tmp, "quiet.elf", SCRIPT_EMPTY_OUTPUT)
+        rc = self._run([silent], exit_status=["nope"])
+        self.assertEqual(rc, 2)
+        self.assertEqual(_archives(self.build), {})
+
+    def test_empty_exit_status_id_is_config_error(self) -> None:
+        silent = _write_script(self.tmp, "quiet.elf", SCRIPT_EMPTY_OUTPUT)
+        rc = self._run([silent], exit_status=[""])
+        self.assertEqual(rc, 2)
+
+
+# ───────────────────────────────────────────────────────────────────
 # Ruling 7 — the production entry mode (script invocation)
 # ───────────────────────────────────────────────────────────────────
 
@@ -314,10 +405,10 @@ class ScriptModeTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _run_as_script(self, fixture: Path, build: Path):
+    def _run_as_script(self, fixture: Path, build: Path, *, extra=()):
         return subprocess.run(
             [sys.executable, "-I", "qemutests/run_hosttests.py",
-             "--build-dir", str(build), "--timeout", "10", str(fixture)],
+             "--build-dir", str(build), "--timeout", "10", *extra, str(fixture)],
             cwd=str(ROOT), capture_output=True, text=True, timeout=120,
         )
 
@@ -328,6 +419,18 @@ class ScriptModeTests(unittest.TestCase):
             proc.returncode, 0,
             f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}")
         self.assertEqual(_archives(self.build)["legacy"]["status"], "PASS")
+
+    def test_script_mode_accepts_a_listed_silent_binary(self) -> None:
+        """`--exit-status` must work in the invocation mode production uses
+        (Ruling 7): a listed silent binary passes as a script, and the run
+        is still archived."""
+        fixture = _write_script(self.tmp, "quiet.elf", SCRIPT_EMPTY_OUTPUT)
+        proc = self._run_as_script(
+            fixture, self.build, extra=("--exit-status", "quiet"))
+        self.assertEqual(
+            proc.returncode, 0,
+            f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}")
+        self.assertEqual(_archives(self.build)["quiet"]["status"], "PASS")
 
     def test_script_mode_rejects_a_masked_failure(self) -> None:
         fixture = _write_script(self.tmp, "masked.elf", SCRIPT_MASKED_FAILURE)

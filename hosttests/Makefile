@@ -163,13 +163,22 @@ TEST_BINS := \
     $(TEST_BLD)/test_fb_resolution_hooks.elf \
     $(TEST_BLD)/test_setres.elf
 
+# Binaries that report solely through their exit code and print nothing on
+# success (see the `run` section for the full rationale).  Defined here, NOT
+# next to `run`, because `all` below lists them as prerequisites and Make
+# expands an explicit rule's prerequisite list where it is parsed — a
+# definition further down would be empty at that point.
+TEST_EXIT_STATUS_BINS := \
+    $(TEST_BLD)/test_runtime_udivti3.elf \
+    $(TEST_BLD)/test_page_table_runner.elf
+
 .PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients
 
-all: $(TEST_BINS)
+all: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS)
 
 check-test-bins-dup:
-	@if [ "$$(echo $(TEST_BINS) | tr ' ' '\n' | sort | uniq -d)" != "" ]; then \
-	    echo "ERROR: duplicate entries in TEST_BINS"; exit 1; \
+	@if [ "$$(echo $(TEST_BINS) $(TEST_EXIT_STATUS_BINS) | tr ' ' '\n' | sort | uniq -d)" != "" ]; then \
+	    echo "ERROR: duplicate entries in TEST_BINS/TEST_EXIT_STATUS_BINS"; exit 1; \
 	fi
 
 # ── Host suite execution (test-framework plan, Task 7) ─────────────
@@ -178,17 +187,27 @@ check-test-bins-dup:
 # its own timeout and archive and validates the evidence (legacy adapter
 # plus protocol v1 for migrated binaries).
 #
-# Binaries that intentionally print NOTHING on success (they report only on
-# failure) cannot satisfy the legacy adapter's "nonempty suite evidence"
-# rule — spec §6.2: an empty log cannot pass — so they are not ordinary
-# TEST_BINS entries.  They stay in the build and are exercised by an
-# explicit exit-status adapter in the recipe below, so `make test-host`
-# keeps running them without ever treating an empty log as a pass.
+# Two binaries report solely through their exit code and print NOTHING on
+# success, so they cannot satisfy the legacy adapter's "nonempty suite
+# evidence" rule — spec §6.2: an empty log cannot pass.  They are listed in
+# TEST_EXIT_STATUS_BINS and named to the runner via `--exit-status`, which
+# runs them through the SAME ProcessSession/archive path as everything else
+# (per-binary timeout; stdout.log / stderr.log / result.json still written)
+# and accepts "exit 0 with empty stdout" for these ids ALONE.  Every other
+# binary keeps the strict rule: an empty log is a FAIL.  Both groups run in
+# one runner invocation, so a failure in either never hides the other.
+#
+#   * test_page_table_runner — a framework meta-test: it forks a child that
+#     fails on purpose and passes only when the failure propagates
+#     (WEXITSTATUS(child) == 1); the child's buffered output is discarded.
+#   * test_runtime_udivti3 — an ordinary __udivti3 correctness fixture
+#     (runtime/selftest/test_udivti3.c) that prints only on a vector
+#     mismatch.  It is NOT a framework meta-test; rc=0 with no output is
+#     its pass signal.
 HOST_TEST_TIMEOUT ?= 60
 
-TEST_EXIT_STATUS_BINS := \
-    $(TEST_BLD)/test_runtime_udivti3.elf \
-    $(TEST_BLD)/test_page_table_runner.elf
+# One `--exit-status <id>` per exempted binary (id = basename without .elf).
+EXIT_STATUS_FLAGS := $(foreach b,$(TEST_EXIT_STATUS_BINS),--exit-status $(basename $(notdir $(b))))
 
 run: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS) check-test-bins-dup
 	@echo ""
@@ -197,16 +216,8 @@ run: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS) check-test-bins-dup
 	@echo "=============================================="
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
-	    --timeout $(HOST_TEST_TIMEOUT) $(TEST_BINS)
-	@echo ""
-	@echo "  [hosttests] exit-status-only binaries (no stdout evidence)"
-	@for t in $(TEST_EXIT_STATUS_BINS); do \
-	    "$$t" >/dev/null 2>&1; rc=$$?; \
-	    echo "  -> $$(basename $$t .elf): exit $$rc"; \
-	    if [ "$$rc" -ne 0 ]; then \
-	        echo "ERROR: $$t expected exit 0, got $$rc"; exit 1; \
-	    fi; \
-	done
+	    --timeout $(HOST_TEST_TIMEOUT) $(EXIT_STATUS_FLAGS) \
+	    $(TEST_BINS) $(TEST_EXIT_STATUS_BINS)
 	@echo "  [hosttests] all host test binaries passed"
 
 # Runtime fixtures.
