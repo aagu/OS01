@@ -241,14 +241,26 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
             disk_img="/tmp/fake-disk.img", timeout=2)
         # Drive the runner exactly the way the gfx suite will:
         # 1) start_qemu picks a fresh serial_path
-        # 2) we then seed that path with the boot+prompt+PASS marker
+        # 2) we then seed that path with the boot+prompt and the
+        #    full sequence of PASS markers the current run_test.py
+        #    test_gfx() expects.  Earlier fixtures only seeded the
+        #    [GFX TEST] PASS marker; the suite was since extended to
+        #    wait for tetris/terminal/desktop markers too, so a
+        #    fixture that stops at the first marker would silently
+        #    miss the rest of the suite's contract.
         tester.start_qemu(serial_stdio=True)
         self._stage_log_for_runner(
             tester,
             b"OS01 boot ... done\n"
             b"login: root\n"
-            b"# "                              # prompt
-            b"[GFX TEST] PASS\n",
+            b"# "                                       # prompt
+            b"[GFX TEST] PASS\n"
+            b"/bin/tetris smoke\n"
+            b"[TETRIS] SMOKE PASS\n"
+            b"/bin/test_terminal_screen\n"
+            b"[TERM SCREEN TEST] PASS\n"
+            b"/bin/desktop smoke\n"
+            b"[DESKTOP] SMOKE PASS\n",
         )
         try:
             ok = self.runner_mod.test_gfx(tester)
@@ -257,6 +269,9 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
             stdin = tester.proc.stdin
             self.assertIsInstance(stdin, _FakeStdin)
             self.assertIn("/bin/test_gfx", stdin.text())
+            self.assertIn("/bin/tetris smoke", stdin.text())
+            self.assertIn("/bin/test_terminal_screen", stdin.text())
+            self.assertIn("/bin/desktop smoke", stdin.text())
             self.assertGreaterEqual(stdin.flushes, 1)
         finally:
             tester.cleanup()
@@ -280,13 +295,127 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
         finally:
             tester.cleanup()
 
+    def test_gfx_suite_rejects_missing_tetris_marker(self) -> None:
+        """gfx marker present but no [TETRIS] SMOKE PASS → test_gfx
+        returns False and stops before the terminal/desktop stages.
+
+        This pins the gfx→tetris→terminal→desktop sequence: the
+        runner must not declare PASS when the tetris smoke step
+        fails to print its marker, regardless of any later markers
+        in the log.
+        """
+
+        tester = self.runner_mod.TestRunner(
+            disk_img="/tmp/fake-disk.img", timeout=2)
+        tester.start_qemu(serial_stdio=True)
+        # gfx PASS is present, tetris marker is NOT — the runner
+        # should fail at step B.  The terminal/desktop markers are
+        # included so a buggy implementation that races past the
+        # tetris stage would still be caught by these later
+        # checks; the test is tight on tetris specifically because
+        # that's the contract being pinned here.
+        self._stage_log_for_runner(
+            tester,
+            b"OS01 boot ... done\n"
+            b"login: root\n"
+            b"# "
+            b"[GFX TEST] PASS\n"
+            b"[TERM SCREEN TEST] PASS\n"
+            b"[DESKTOP] SMOKE PASS\n",
+        )
+        try:
+            ok = self.runner_mod.test_gfx(tester)
+            self.assertFalse(ok)
+            # Verify the runner typed /bin/tetris smoke before failing.
+            stdin = tester.proc.stdin
+            self.assertIsInstance(stdin, _FakeStdin)
+            self.assertIn("/bin/tetris smoke", stdin.text())
+        finally:
+            tester.cleanup()
+
+    def test_gfx_suite_rejects_missing_terminal_marker(self) -> None:
+        """gfx + tetris markers present but no [TERM SCREEN TEST] PASS
+        → test_gfx returns False.
+
+        The terminal stage is a separate visual-screen E2E binary
+        (``/bin/test_terminal_screen``); this fixture pins that the
+        runner treats its marker as required and does not accept a
+        silent regression to the older two-stage suite.
+        """
+
+        tester = self.runner_mod.TestRunner(
+            disk_img="/tmp/fake-disk.img", timeout=2)
+        tester.start_qemu(serial_stdio=True)
+        # gfx + tetris PASS, but no terminal marker.  The desktop
+        # marker is left in to make sure the runner is checked at
+        # the right stage and not after a sloppy fallback.
+        self._stage_log_for_runner(
+            tester,
+            b"OS01 boot ... done\n"
+            b"login: root\n"
+            b"# "
+            b"[GFX TEST] PASS\n"
+            b"[TETRIS] SMOKE PASS\n"
+            b"[DESKTOP] SMOKE PASS\n",
+        )
+        try:
+            ok = self.runner_mod.test_gfx(tester)
+            self.assertFalse(ok)
+            stdin = tester.proc.stdin
+            self.assertIsInstance(stdin, _FakeStdin)
+            self.assertIn("/bin/test_terminal_screen", stdin.text())
+        finally:
+            tester.cleanup()
+
+    def test_gfx_suite_rejects_missing_desktop_marker(self) -> None:
+        """gfx + tetris + terminal markers present but no
+        [DESKTOP] SMOKE PASS → test_gfx returns False.
+
+        The desktop stage is the final visual E2E in the gfx suite;
+        a regression that lets the suite pass after the terminal
+        step would mask a real desktop failure.
+        """
+
+        tester = self.runner_mod.TestRunner(
+            disk_img="/tmp/fake-disk.img", timeout=2)
+        tester.start_qemu(serial_stdio=True)
+        self._stage_log_for_runner(
+            tester,
+            b"OS01 boot ... done\n"
+            b"login: root\n"
+            b"# "
+            b"[GFX TEST] PASS\n"
+            b"[TETRIS] SMOKE PASS\n"
+            b"[TERM SCREEN TEST] PASS\n",
+        )
+        try:
+            ok = self.runner_mod.test_gfx(tester)
+            self.assertFalse(ok)
+            stdin = tester.proc.stdin
+            self.assertIsInstance(stdin, _FakeStdin)
+            self.assertIn("/bin/desktop smoke", stdin.text())
+        finally:
+            tester.cleanup()
+
     def test_run_test_dispatches_gfx_suite(self) -> None:
         """``python3 run_test.py gfx`` routes to test_gfx()."""
 
         tester = self.runner_mod.TestRunner(
             disk_img="/tmp/fake-disk.img", timeout=2)
         tester.start_qemu(serial_stdio=True)
-        self._stage_log_for_runner(tester, b"# [GFX TEST] PASS\n")
+        # Same full-marker fixture as test_gfx_suite_dispatches_to_pass_marker
+        # — this is the dispatch sanity check, so it must run the
+        # whole stage sequence end-to-end.
+        self._stage_log_for_runner(
+            tester,
+            b"OS01 boot ... done\n"
+            b"login: root\n"
+            b"# "
+            b"[GFX TEST] PASS\n"
+            b"[TETRIS] SMOKE PASS\n"
+            b"[TERM SCREEN TEST] PASS\n"
+            b"[DESKTOP] SMOKE PASS\n",
+        )
         try:
             self.assertTrue(self.runner_mod.test_gfx(tester))
         finally:

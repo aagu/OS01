@@ -391,6 +391,25 @@ test-host:
 test-pmm-boot-reservation:
 	python3 qemutests/pmm_boot_reservation_test.py
 
+# ── Test framework regression (no QEMU, always) ──────────────
+# Explicit Python unittest entry for the test framework itself.
+# The list is append-only across tasks: Task 2 establishes
+# `qemutests.test_gfx_runner` as the first/only module; later
+# tasks that add new `qemutests/test_*.py` modules (e.g.
+# `qemutests.test_harness_process`, `qemutests.test_harness_result`,
+# `qemutests.test_make_qemu_failure`, `qemutests.test_run_test_harness`,
+# `qemutests.test_driver_model_matrix`, etc.) append their names here
+# so a single `make test-harness` validates the framework end-to-end
+# before any real QEMU run. The recipe is a single `python3 -m unittest`
+# call against the explicit list — never auto-discovery, never an
+# implicit search for `test_*.py`. Every fixture replaces
+# subprocess.Popen with a fake, so no QEMU process can ever start.
+TEST_HARNESS_MODULES := qemutests.test_gfx_runner
+.PHONY: test-harness
+test-harness:
+	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
+	python3 -m unittest $(TEST_HARNESS_MODULES)
+
 # Focused M1 host tests (aarch64 M1 plan). Each CASE runs the matching
 # focused TEST_BINS entry under hosttests/.  Unknown non-empty CASE
 # aborts non-zero. With CASE omitted the umbrella runs the full M1
@@ -1010,6 +1029,10 @@ help:
 		 'test-aarch64'        '(uefi)'       'aarch64 UEFI test (MODE=<smp|no-ack|gic-spi|sync-fault|m1-*>)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-contract'       '(rootfs|uefi)' 'Full build contract (PROFILE=<x86_64-clang|aarch64-clang>)';
+	@echo ''
+	@echo 'Framework regression (no QEMU; always):'
+	@printf '  %-22s %-13s %s\n' \
+		 'test-harness'      '(always)'   'Python unittest framework regression (TEST_HARNESS_MODULES list — append-only across tasks; never discovers QEMU scripts)';
 	@echo ''
 	@echo 'Standalone test targets (distinct harness / image variant):'
 	@printf '  %-22s %-13s %s\n' \

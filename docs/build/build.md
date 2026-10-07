@@ -58,6 +58,7 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 | `make test-aarch64 MODE=smp\|no-ack\|gic-spi\|sync-fault\|m1-*` | AArch64 PSCI / GIC / sync-fault harness | `smp` |
 | `make test-contract PROFILE=x86_64-clang\|aarch64-clang` | CI build-contract check | `x86_64-clang` |
 | `make test-kernel-selftest` | Boot selftest image + parse `[selftest]` markers | — |
+| `make test-harness` | Python unittest framework regression (no QEMU, never discovers QEMU scripts) | — |
 
 AArch64 M1：`MODE=m1-ram` 分别构建 normal/selftest 独立镜像并跑 16 组 RAM/CPU 矩阵。其余 `m1-*` MODE 构建 `AARCH64_M1_TEST=sparse|arena-exhaust|table-exhaust|ap-bad-root` 对应的隔离 `image/m1-<case>/` / `kernel/m1-<case>/` 变体；该旗要求 `KERNEL_SELFTEST=1`，拒绝与 sync-fault、weak-selftest 或 canary 混用。稀疏 map 仅由编译旗改写，不从环境变量注入。`make PROFILE=x86_64-clang test-m1-host [CASE=m1-layout|m1-reservation|m1-arena|m1-tree|m1-contract-x86|m1-install|m1-publish]` 为原生 focused 测试入口，省略 CASE 跑整组。
 
@@ -385,7 +386,7 @@ make INITTAB_FILE=config/inittab.test image   # → .../image/inittab-test/disk.
 | Run / Debug | `run`、`run-kvm`、`run-virtio`、`debug` | `rootfs` | 对已有镜像启动 QEMU |
 | Bring-up | `aarch64-uefi`、`aarch64-uefi-kernel`、`run-aarch64-uefi` | `uefi` | AArch64 UEFI 启动链 |
 | Validate | `validate`、`validate-kernel`、`validate-uefi`、`validate-profile` | `rootfs`（最后一个：`always`） | x86 产物健全性检查 + profile 检查 |
-| Test | `test-qemu`、`test-host`、`test-static`、`test-kernel-selftest`、`test-aarch64`、`test-contract`（6 个 bucket；见 §3） | varies | 端到端和审计套件 |
+| Test | `test-qemu`、`test-host`、`test-static`、`test-kernel-selftest`、`test-aarch64`、`test-contract`（6 个 bucket；见 §3）+ `test-harness`（框架回归；不带任何 profile 能力；不启动 QEMU） | varies | 端到端和审计套件 |
 | Inspection | `print-run-paths` | `rootfs` | 为外部 QEMU 调用打印解析后的路径 |
 | Maintenance | `clean`、`unlock-profile` | always | 生命周期 |
 
@@ -401,6 +402,8 @@ make INITTAB_FILE=config/inittab.test image   # → .../image/inittab-test/disk.
 | `test-host` | — | — | `os01_submake hosttests` + `pmm_boot_reservation_test.py` |
 | `test-static` | — | — | 11 项静态审计（runtime_audit、stack_canary_audit、validate-kernel、runtime_link_order、kernel_runtime_link、kernel_layout、kernel_canary_contract、driver_model_boundary_audit、header_object、stack_frame、test-user-canary） |
 | `test-kernel-selftest` | — | — | 启动 selftest 镜像 variant（`KERNEL_SELFTEST=1`）并解析 `[selftest]` 标记 |
+
+**`test-harness`** 框架回归入口（与上述 6 个 bucket 并列；`always` 能力；不启动 QEMU）：运行 `mk/components/run.mk` 中 `TEST_HARNESS_MODULES` 列表里的 Python `unittest` 模块。Task 2 初始化该列表为单元素 `qemutests.test_gfx_runner`；后续任务新增的 `qemutests/test_*.py`（如 `test_harness_process`、`test_harness_result`、`test_make_qemu_failure`、`test_run_test_harness`、`test_driver_model_matrix` 等）以追加方式接入同一列表。recipe 始终为一次显式的 `python3 -m unittest $(TEST_HARNESS_MODULES)`：不做自动目录发现，不隐式启动 QEMU 脚本，不通过模块名推断 build 路径。fixture 通过 fake `subprocess.Popen` 替换真实 QEMU，因此 `make test-harness` 永远不会拉起真实进程——这也是在 PR/CI 中作为"零环境依赖"门控的原因。
 
 **独立的测试目标**（不归入任何 bucket，因为它们使用不同的 harness 或镜像 variant）：
 
@@ -494,6 +497,7 @@ make test-static                    # 8 项静态审计
 make test-kernel-selftest           # 内核 selftest
 make test-aarch64 MODE=smp          # aarch64 PSCI/SMP
 make test-contract                  # CI 契约检查
+make test-harness                   # Python unittest 框架回归（TEST_HARNESS_MODULES 列表；不启动 QEMU）
 
 # 检查
 make PROFILE=x86_64-clang print-run-paths  # 打印 firmware= / image= 路径
