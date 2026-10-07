@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -445,6 +446,273 @@ class SystestUnknownCaseArchiveTests(unittest.TestCase):
         self.assertEqual(data["status"], "FAIL")
         self.assertEqual(data["suite"], "systest")
         self.assertEqual(data["runner_exit_code"], 1)
+
+
+# ────────────────────────────────────────────────────────────────────
+# Selection fixtures — parse ``print_case_list()`` and ``main()``'s
+# ``--case`` / ``--quick`` / ``--full`` dispatch out of the production
+# source, so ``--list`` output, the ``--quick`` subset and the full run
+# cannot silently diverge from the ``tests[]`` table the run loop
+# executes.  These are host-runnable static checks: no QEMU involved.
+# ────────────────────────────────────────────────────────────────────
+
+
+def _read_systest_src() -> str:
+    return (ROOT / "user" / "systest.c").read_text(encoding="utf-8")
+
+
+def _brace_block(text: str, open_idx: int) -> str:
+    """Return the slice covering the brace group opened at ``open_idx``
+    (a ``{``), balanced against nested braces."""
+    if text[open_idx] != "{":
+        raise AssertionError("internal: _brace_block not at a '{'")
+    depth = 0
+    for i in range(open_idx, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_idx:i + 1]
+    raise AssertionError("unbalanced braces in user/systest.c")
+
+
+def _function_body(src: str, name: str) -> str:
+    """Return the ``{...}`` body of ``name()`` in ``src``."""
+    m = re.search(rf"\b{re.escape(name)}\s*\([^)]*\)\s*\{{", src)
+    if m is None:
+        raise AssertionError(f"{name}() not found in user/systest.c")
+    return _brace_block(src, m.end() - 1)
+
+
+_LOOP_RE = re.compile(
+    r"for\s*\(\s*int\s+(\w+)\s*=\s*(.+?)\s*;\s*\1\s*(<=|<|>=|>)\s*(.+?)\s*;"
+    r"\s*\1\s*(\+\+|--)\s*\)")
+
+
+def _eval_index_bound(expr: str, n: int) -> int:
+    expr = expr.replace(" ", "")
+    if expr == "n":
+        return n
+    m = re.fullmatch(r"n([+-])(\d+)", expr)
+    if m:
+        return n + int(m.group(2)) if m.group(1) == "+" else n - int(m.group(2))
+    if re.fullmatch(r"\d+", expr):
+        return int(expr)
+    raise AssertionError(f"cannot evaluate loop bound {expr!r}")
+
+
+def _loop_index_order(loop_text: str, n: int):
+    """Return ``(ordered indices the loop visits, loop variable name)``.
+
+    Handles the canonical ``for (int i = 0; i < n; i++)`` and its
+    reversed / narrowed variants, so a reordered or truncated loop is
+    reported as a *different order*, not as a parse error.
+    """
+    m = _LOOP_RE.search(loop_text)
+    if m is None:
+        raise AssertionError(f"loop header not recognised: {loop_text!r}")
+    var, start, op, bound, step = m.groups()
+    start_v = _eval_index_bound(start, n)
+    bound_v = _eval_index_bound(bound, n)
+    if step == "++" and op in ("<", "<="):
+        stop = bound_v if op == "<" else bound_v + 1
+        return list(range(start_v, stop)), var
+    if step == "--" and op in (">", ">="):
+        stop = bound_v - 1 if op == ">" else bound_v
+        return list(range(start_v, stop, -1)), var
+    raise AssertionError(f"unsupported loop header: {loop_text!r}")
+
+
+def _index_expression_ids(body: str, rows, var: str, order):
+    """Map ``tests[<expr>].id`` over ``order`` to a list of case IDs."""
+    idx = re.search(r"tests\s*\[\s*([^\]]+?)\s*\]\s*\.\s*id", body)
+    if idx is None:
+        raise AssertionError("no tests[...].id access found in the block")
+    expr = idx.group(1).replace(" ", "")
+    n = len(rows)
+    if expr == var:
+        sel = order
+    elif expr == f"n-1-{var}":
+        sel = [n - 1 - i for i in order]
+    else:
+        raise AssertionError(
+            f"unrecognised table index expression {expr!r}; list/execution "
+            "parity cannot be assumed")
+    return [rows[i][0] for i in sel]
+
+
+def _print_case_list_ids(rows):
+    """The IDs ``print_case_list()`` emits, in emission order."""
+    body = _function_body(_read_systest_src(), "print_case_list")
+    order, var = _loop_index_order(body, len(rows))
+    return _index_expression_ids(body, rows, var, order)
+
+
+def _full_selection_block() -> str:
+    """The final ``else`` branch of main()'s selection chain (``--full``)."""
+    body = _function_body(_read_systest_src(), "main")
+    m = re.search(r"\}\s*else\s*\{", body)
+    if m is None:
+        raise AssertionError("no final '} else {' branch in main()")
+    return _brace_block(body, m.end() - 1)
+
+
+def _full_selection_ids(rows):
+    """The IDs the full run (no ``--case``/``--quick``) executes, in order."""
+    block = _full_selection_block()
+    order, var = _loop_index_order(block, len(rows))
+    # The full branch assigns the loop index straight into sel[]:
+    #   for (int i = 0; i < n; i++) sel[nsel++] = i;
+    if not re.search(
+            rf"sel\s*\[\s*nsel\+\+\s*\]\s*=\s*{re.escape(var)}\b", block):
+        raise AssertionError(
+            "the final else branch does not fill sel[] from its loop index")
+    return [rows[i][0] for i in order]
+
+
+def _quick_selection_block() -> str:
+    """The ``else if (want_quick)`` branch of main()'s selection chain."""
+    body = _function_body(_read_systest_src(), "main")
+    m = re.search(r"else\s+if\s*\(\s*want_quick\s*\)\s*\{", body)
+    if m is None:
+        raise AssertionError("no 'else if (want_quick)' branch in main()")
+    return _brace_block(body, m.end() - 1)
+
+
+class SystestListExecutionParityTests(unittest.TestCase):
+    """``--list`` and the full run iterate ``tests[]`` in the same order.
+
+    The parity the source comment claims ("both iterate tests[] by
+    index") is asserted here against the real ``print_case_list()`` and
+    the real run-loop selection, so the two cannot silently diverge.
+    """
+
+    def setUp(self) -> None:
+        self.rows = _parse_systest_table()
+        self.assertGreaterEqual(
+            len(self.rows), 50,
+            f"parsed only {len(self.rows)} rows from user/systest.c")
+
+    def test_print_case_list_emits_table_ids_in_order(self) -> None:
+        self.assertEqual(
+            _print_case_list_ids(self.rows),
+            [r[0] for r in self.rows],
+            "print_case_list() must emit the tests[] IDs in table order")
+
+    def test_full_selection_executes_every_row_in_order(self) -> None:
+        self.assertEqual(
+            _full_selection_ids(self.rows),
+            [r[0] for r in self.rows],
+            "the default (full) run must execute every tests[] row in order")
+
+    def test_list_and_execution_sequences_are_identical(self) -> None:
+        # The parity claim itself: the IDs --list prints are exactly the
+        # IDs the run loop executes, in the same order.
+        self.assertEqual(
+            _print_case_list_ids(self.rows),
+            _full_selection_ids(self.rows),
+            "list/execution parity broken: --list and the run loop "
+            "enumerate tests[] differently")
+
+
+class SystestQuickFullSelectionTests(unittest.TestCase):
+    """``--quick`` / ``--full`` read the table, not a re-typed literal."""
+
+    def setUp(self) -> None:
+        self.rows = _parse_systest_table()
+        self.assertGreaterEqual(
+            len(self.rows), 50,
+            f"parsed only {len(self.rows)} rows from user/systest.c")
+
+    def test_quick_predicate_is_the_table_field(self) -> None:
+        # The --quick branch must select on tests[i].quick — the same
+        # field this module's table parse reads — not a hard-coded list.
+        block = _quick_selection_block()
+        self.assertIn(
+            "tests[i].quick", block.replace(" ", ""),
+            "--quick must select on the tests[].quick field")
+        table_ids = {r[0] for r in self.rows}
+        literals = [s for s in re.findall(r'"([^"]*)"', block)
+                    if s in table_ids]
+        self.assertEqual(
+            literals, [],
+            "--quick re-types case IDs as string literals instead of "
+            f"reading tests[].quick: {literals}")
+
+    def test_full_selects_every_row(self) -> None:
+        self.assertEqual(
+            _full_selection_ids(self.rows),
+            [r[0] for r in self.rows],
+            "--full must select every tests[] row")
+
+    def test_quick_is_strict_nonempty_subset_of_full(self) -> None:
+        full = _full_selection_ids(self.rows)
+        quick = [r[0] for r in self.rows if r[3] == 1]
+        self.assertTrue(quick, "--quick selection would be empty")
+        self.assertTrue(
+            set(quick) < set(full),
+            "--quick must be a strict subset of --full "
+            f"(quick={len(quick)} full={len(full)})")
+        self.assertEqual(
+            [q for q in quick if q not in full], [],
+            "a --quick id is not part of the full run")
+
+
+class SystestBeginOrderingTests(unittest.TestCase):
+    """``[TEST] BEGIN`` marks case *start*, so it precedes the case body."""
+
+    def test_begin_record_precedes_the_case_body(self) -> None:
+        body = _function_body(_read_systest_src(), "main")
+        begin = body.find('printf("[TEST] BEGIN')
+        call = body.find("tc->fn()")
+        self.assertNotEqual(begin, -1, "no [TEST] BEGIN emission in main()")
+        self.assertNotEqual(call, -1, "no tc->fn() call in main()")
+        self.assertLess(
+            begin, call,
+            "[TEST] BEGIN must be emitted before the case body runs")
+
+
+class SystestMakeCaseValidationTests(unittest.TestCase):
+    """run.mk must reject a CASE value outside ``[A-Za-z0-9_.-]+``.
+
+    The value is interpolated verbatim into the inittab line init reads
+    (``mk/components/run.mk``), so a whitespace/metacharacter value must
+    fail fast in Make rather than reach the file.
+    """
+
+    _GUARD_RE = re.compile(r'case\s+"\$\(CASE\)"\s+in.*?esac')
+
+    def _guard(self) -> str:
+        mk = (ROOT / "mk" / "components" / "run.mk").read_text(
+            encoding="utf-8")
+        m = self._GUARD_RE.search(mk)
+        self.assertIsNotNone(
+            m, "run.mk must validate $(CASE) before writing the inittab line")
+        return m.group(0)
+
+    def _run_guard(self, case_value: str):
+        guard = self._guard().replace("$(CASE)", case_value)
+        return subprocess.run(
+            ["sh", "-c", guard], capture_output=True, text=True)
+
+    def test_malformed_case_is_rejected(self) -> None:
+        for bad in ("write;reboot", "two words", "quote'd", "pipe|cmd",
+                    "amp&bg"):
+            proc = self._run_guard(bad)
+            self.assertNotEqual(
+                proc.returncode, 0,
+                f"CASE={bad!r} must be rejected by the Make guard")
+            self.assertIn("ERROR", proc.stderr)
+
+    def test_grammar_valid_cases_are_accepted(self) -> None:
+        for good in ("write", "startup_layout", "48_atexit_lifecycle",
+                     "a.b-c_9"):
+            proc = self._run_guard(good)
+            self.assertEqual(
+                proc.returncode, 0,
+                f"grammar-valid CASE={good!r} must pass the guard: "
+                f"{proc.stderr}")
 
 
 if __name__ == "__main__":

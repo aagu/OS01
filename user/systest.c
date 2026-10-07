@@ -4256,12 +4256,15 @@ int main(int argc, char **argv, char **envp)
     for (int k = 0; k < nsel; k++) {
         const test_case_t *tc = &tests[sel[k]];
         printf("\n--- %s ---\n", tc->name);
+        // [TEST] BEGIN marks the case *start*, so it is emitted before
+        // the body runs — parse_v1 anchors the terminal to this open
+        // BEGIN, so a body that never returns still yields no terminal.
+        printf("[TEST] BEGIN %s\n", tc->id);
         // Per-case status derives from the assertion-failure delta
         // across the case body (no child isolation).
         int before = fail_count;
         tc->fn();
         int delta = fail_count - before;
-        printf("[TEST] BEGIN %s\n", tc->id);
         if (delta == 0) {
             case_passed++;
             printf("[TEST] PASS %s\n", tc->id);

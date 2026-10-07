@@ -755,6 +755,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  $(MAKE) --no-print-directory test-qemu-driver-model || exit 1; \
 	else \
 	  if [ "$(SUITE)" = "systest" ] && [ -n "$(CASE)" ]; then \
+	    case "$(CASE)" in *[!A-Za-z0-9_.-]*) echo "ERROR: CASE='$(CASE)' must match [A-Za-z0-9_.-]+ (see user/systest.c --list)" >&2; exit 2;; esac; \
 	    mkdir -p "$(abspath $(BUILD_DIR))/config" || exit 1; \
 	    printf 'tty1:once:/bin/systest --case %s\n' "$(CASE)" > "$(abspath $(BUILD_DIR))/config/inittab.systest.case" || exit 1; \
 	    $(MAKE) OS01_SYSTEST=1 INITTAB_FILE="$(abspath $(BUILD_DIR))/config/inittab.systest.case" image || exit 1; \

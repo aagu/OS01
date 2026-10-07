@@ -693,6 +693,22 @@ class SystestSuiteTests(unittest.TestCase):
         finally:
             tester.cleanup()
 
+    def test_systest_not_systest_build_rejected(self) -> None:
+        # A disk that booted /bin/terminal (not /bin/systest) prints the
+        # terminal banner; the runner must reject it.  A valid v1 trace is
+        # appended so the *banner gate* — not the absence of a trace — is
+        # the sole reason for the reject (Ruling 6: with the banner gate
+        # disabled this run would PASS the protocol check).
+        chunks = self.CHUNKS_NOT_SYSTEST_BUILD + [
+            _systest_v1_trace(
+                self._IDS, result="[SYS TEST] RESULT: 4 passed, 0 failed"),
+        ]
+        tester = self._runner_with(chunks)
+        try:
+            self.assertFalse(self.rt.test_systest(tester))
+        finally:
+            tester.cleanup()
+
 
 class InittabPhaseSuiteTests(unittest.TestCase):
     """inittab-phase suite: SYSINIT_DONE -> WAIT_DONE -> ONCE_DONE."""
@@ -1970,6 +1986,11 @@ assert _result.RunArchive is not None, "harness RunArchive unavailable"
 # run_test.py binds ProcessSession at module scope; it must not be None.
 if hasattr(mod, "ProcessSession"):
     assert mod.ProcessSession is not None, "module ProcessSession is None"
+
+# Task 8: the v1 systest gate depends on parse_v1 resolving at module
+# scope; the guarded harness import must not have degraded to None.
+if hasattr(mod, "parse_v1"):
+    assert mod.parse_v1 is not None, "module parse_v1 is None"
 
 print("SCRIPT_MODE_OK", os.path.basename(target))
 """

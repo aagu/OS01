@@ -536,13 +536,21 @@ def parse_v1(
 #
 # We track per-id required-ness on a side dict instead of on
 # ProtocolResult because the dataclass fields are spec-driven.  The
-# table is keyed by id and lives for the lifetime of one parse_v1
-# call.  Each invocation starts with an empty table.
+# table is keyed by id and persists for the process lifetime: it is
+# cleared only once, at module import (below), so entries are NOT
+# rebuilt per parse_v1 call — a stale entry from a previous call
+# survives into the next.
 #
-# Single-threaded assumption: parse_v1 is the sole writer/reader and
-# the table is rebuilt per call.  Tasks 5–12 will import this; do NOT
-# refactor to thread-locals or per-instance state without coordinating
-# across every importing suite.
+# Stale entries are safe: every id that reaches a terminal in a call
+# was SELECTed in that same call, and the SELECT handler re-writes its
+# entry (``_set_required``) before any required-ness check runs.  An id
+# that is not re-SELECTed raises a different error and its required
+# flag is never consulted.
+#
+# Single-threaded assumption: parse_v1 is the sole writer/reader of the
+# table.  Tasks 5–12 will import this; do NOT refactor to thread-locals
+# or per-instance state without coordinating across every importing
+# suite.
 # ────────────────────────────────────────────────────────────────────
 
 
