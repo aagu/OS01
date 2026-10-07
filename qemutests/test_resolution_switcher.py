@@ -41,6 +41,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+# This module is imported *bare* by run_test.py's script-mode main()
+# (``from test_resolution_switcher import test_resolution``), which puts
+# the *qemutests* directory on ``sys.path[0]`` — not the repo root — so
+# its lazy ``from qemutests.harness... import ...`` calls would raise
+# ModuleNotFoundError when driven as a script.  Bootstrap the repo root so
+# the harness imports resolve regardless of how this module is loaded.
+# Idempotent.
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 QEMU = os.environ.get("QEMU", "qemu-system-x86_64")
 DEFAULT_SMP = 2
 DEFAULT_TIMEOUT = 180

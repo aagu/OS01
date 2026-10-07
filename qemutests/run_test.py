@@ -49,6 +49,20 @@ import threading
 import traceback
 from pathlib import Path
 
+# mk/components/run.mk invokes this runner as a *script*
+# (``python3 qemutests/run_test.py $(SUITE)``), which puts ``sys.path[0]``
+# on the *qemutests* directory — not the repo root — so ``import
+# qemutests.*`` below would fail and be swallowed by the ``except
+# ImportError`` guards (leaving ``ProcessSession = None`` until a QEMU
+# launch raises "ProcessSession is unavailable").  Bootstrap the repo root
+# explicitly so the runner works both as a script and as
+# ``python3 -m qemutests.run_test``.  Keeping ``qemutests/`` on the path
+# also preserves the bare ``from test_resolution_switcher import ...`` at
+# main().  Idempotent: the root is added at most once.
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 QEMU = os.environ.get("QEMU", "qemu-system-x86_64")
 DISK_IMG = os.environ.get("DISK_IMG", "disk.img")
 TIMEOUT = int(os.environ.get("TEST_TIMEOUT", "60"))

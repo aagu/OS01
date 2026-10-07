@@ -31,6 +31,14 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 WORKTREE_ROOT = HERE.parent
+# Script mode (``python3 qemutests/driver_matrix_run.py``) puts ``HERE``
+# — not the repo root — on ``sys.path[0]``, so the lazy harness imports
+# (``from qemutests.harness.process import ProcessSession`` and friends)
+# would raise ModuleNotFoundError at QEMU-launch time.  Bootstrap the repo
+# root so ``import qemutests.*`` resolves; keep ``HERE`` on the path too
+# for the bare ``import driver_model_matrix`` below.  Idempotent.
+if str(WORKTREE_ROOT) not in sys.path:
+    sys.path.insert(0, str(WORKTREE_ROOT))
 sys.path.insert(0, str(HERE))
 
 import driver_model_matrix as DMM  # noqa: E402

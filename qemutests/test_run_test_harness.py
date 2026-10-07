@@ -41,6 +41,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -1871,6 +1872,93 @@ class FakeProcessSessionCursorTests(unittest.TestCase):
         fake = self._fake([b"MARKER\n", b"tail\n"])
         self.assertEqual(fake.wait_for(lambda s: "MARKER" in s), "MARKER\n")
         self.assertEqual(fake.observe(1.0), "tail\n")
+
+
+class ScriptModeImportTests(unittest.TestCase):
+    """Script-mode entry regression (Task-5 Critical defect).
+
+    ``mk/components/run.mk`` invokes the x86 runners as *scripts*::
+
+        python3 qemutests/driver_matrix_run.py ...
+        python3 qemutests/run_test.py $(SUITE)
+
+    In script mode Python sets ``sys.path[0]`` to the **runner's own
+    directory** (``qemutests/``) — not the repo root — so a runner's
+    ``from qemutests.harness... import ...`` cannot resolve ``qemutests``
+    as a package.  ``run_test.py`` swallows that ``ModuleNotFoundError``
+    (``except ImportError: ProcessSession = None``), so the defect only
+    surfaces at QEMU-launch time as ``RuntimeError: ProcessSession is
+    unavailable``.
+
+    Every other fixture here imports the runners as *modules* (repo root
+    on ``sys.path``), which is a code path production never uses — which
+    is exactly how the defect survived three review rounds.  These
+    fixtures instead execute each runner's file with ``sys.path`` rebuilt
+    to match a real script invocation and assert the harness symbols
+    resolve (are not ``None``).
+    """
+
+    # Run in a fresh subprocess (``-I`` = isolated: PYTHONPATH and
+    # user-site are ignored, so the result reflects the runner's own
+    # bootstrap, not ambient path leakage).  The probe rebuilds
+    # ``sys.path`` to script-mode shape, loads the runner file, and then
+    # performs the very harness imports the runner relies on.
+    _PROBE = r"""
+import importlib.util
+import os
+import sys
+
+target = os.path.abspath(sys.argv[1])
+qdir = os.path.dirname(target)      # the runner's own directory
+root = os.path.dirname(qdir)        # the repo root
+
+# SCRIPT MODE: sys.path[0] == the script's own directory; no repo root.
+sys.path = [p for p in sys.path if os.path.abspath(p or os.getcwd()) != root]
+sys.path.insert(0, qdir)
+
+name = "script_mode_probe_" + os.path.splitext(os.path.basename(target))[0]
+spec = importlib.util.spec_from_file_location(name, target)
+mod = importlib.util.module_from_spec(spec)
+sys.modules[name] = mod
+spec.loader.exec_module(mod)
+
+# The exact imports the runners perform must resolve in this path state.
+import qemutests.harness.process as _proc
+import qemutests.harness.result as _result
+assert _proc.ProcessSession is not None, "harness ProcessSession unavailable"
+assert _result.RunArchive is not None, "harness RunArchive unavailable"
+
+# run_test.py binds ProcessSession at module scope; it must not be None.
+if hasattr(mod, "ProcessSession"):
+    assert mod.ProcessSession is not None, "module ProcessSession is None"
+
+print("SCRIPT_MODE_OK", os.path.basename(target))
+"""
+
+    def _run_script_mode(self, relpath: str):
+        env = dict(os.environ)
+        # run_test.py raises SystemExit at import time without a readable
+        # firmware path; reuse the fixture's existing stub.
+        env["OVMF_FIRMWARE"] = str(_FAKE_OVMF)
+        return subprocess.run(
+            [sys.executable, "-I", "-c", self._PROBE, str(ROOT / relpath)],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=60,
+        )
+
+    def _assert_script_mode_imports(self, relpath: str) -> None:
+        proc = self._run_script_mode(relpath)
+        self.assertEqual(
+            proc.returncode, 0,
+            "script-mode import failed for {} — production runs it this "
+            "way (mk/components/run.mk)\nstdout:\n{}\nstderr:\n{}".format(
+                relpath, proc.stdout, proc.stderr))
+        self.assertIn("SCRIPT_MODE_OK", proc.stdout)
+
+    def test_run_test_imports_harness_in_script_mode(self) -> None:
+        self._assert_script_mode_imports("qemutests/run_test.py")
+
+    def test_driver_matrix_run_imports_harness_in_script_mode(self) -> None:
+        self._assert_script_mode_imports("qemutests/driver_matrix_run.py")
 
 
 if __name__ == "__main__":
