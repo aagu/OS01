@@ -410,7 +410,7 @@ test-pmm-boot-reservation:
 # call against the explicit list — never auto-discovery, never an
 # implicit search for `test_*.py`. Every fixture replaces
 # subprocess.Popen with a fake, so no QEMU process can ever start.
-TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness
+TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness
 .PHONY: test-harness
 test-harness:
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -793,7 +793,8 @@ endif
 test-syscall-repeat: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	python3 qemutests/x86_64_systest_repeat.py --disk "$(NORMAL_IMAGE)" \
-	  --firmware "$(OVMF_FIRMWARE)" --smp "$(SMP)"
+	  --firmware "$(OVMF_FIRMWARE)" --qemu "$(QEMU_BIN)" --memory "$(MEMORY)" \
+	  --smp "$(SMP)" --build-dir "$(abspath $(BUILD_DIR))" --profile "$(PROFILE)"
 
 # test-syscall — retained AGENTS.md-required alias exception.
 #
