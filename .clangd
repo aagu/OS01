@@ -18,3 +18,10 @@ CompileFlags:
   Add:
     - -I/home/aagu/OS01/kernel/include
     - -I/home/aagu/OS01/thirdpart/lwip/src/include
+
+---
+If:
+  PathMatch: hosttests/.*
+CompileFlags:
+  Add:
+  - -I/home/aagu/OS01/hosttests/include
