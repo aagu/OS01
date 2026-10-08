@@ -438,9 +438,14 @@ class ImageHashGuardTests(unittest.TestCase):
 
     def test_normal_before_file_numerical(self) -> None:
         # The pre-build sha256sum is gated by 'if [ "$(SUITE)" != ... ]'.
+        # Accept either a single-line form (``if [ ... ]``) or a
+        # continuation form (``@if [ ... ] && [ ... ]; \``); the latter
+        # is what the test-qemu recipe currently uses (the hash guard
+        # is its own recipe line, separated from the ``$(MAKE)`` build
+        # step so ``make -n test-qemu SUITE=*`` stays a true dry run).
         self.assertRegex(
             self.text,
-            r'(?m)^\s*if \[\s+"\$\(SUITE\)"\s+!=\s+"phase-0"\s*\]',
+            r'(?m)^\s*@?if \[\s+"\$\(SUITE\)"\s+!=\s+"phase-0"\s*\]',
             "test-qemu must guard the pre-build sha256sum with a "
             "SUITE != phase-0 check (and similar for gfx/resolution/driver-model)",
         )
