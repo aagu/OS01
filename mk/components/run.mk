@@ -421,7 +421,7 @@ test-pmm-boot-reservation:
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Every fixture replaces subprocess.Popen with a fake, so no QEMU process
 # can ever start.
-TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow
+TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_monitor_runner
 .PHONY: test-harness
 test-harness:
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -783,6 +783,12 @@ TEST_QEMU_FLAVOR_resolution     =
 # python harness both produce fault variant images via
 # `make ARCH9_FAULT=<fault>`.
 TEST_QEMU_FLAVOR_driver-model   =
+# monitor (monitor plan Task 9) runs the normal image directly: the test
+# helper /bin/test_monitor and /bin/monitor are both installed into the
+# normal rootfs by the shared program discovery, so no variant build is
+# needed.  The matrix boots the normal image read-only (-snapshot) at
+# 1/2/8 cores.
+TEST_QEMU_FLAVOR_monitor        =
 TEST_QEMU_IMG_phase-0       = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_systest       = $(TEST_SYSTEST_IMAGE)
 TEST_QEMU_IMG_inittab-phase = $(TEST_INITTAB_IMAGE)
@@ -790,6 +796,7 @@ TEST_QEMU_IMG_network       = $(TEST_NETTEST_IMAGE)
 TEST_QEMU_IMG_gfx           = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_resolution    = $(DISK_IMG)
 TEST_QEMU_IMG_driver-model  = $(NORMAL_IMAGE)
+TEST_QEMU_IMG_monitor       = $(NORMAL_IMAGE)
 
 .PHONY: test-qemu
 # Use the per-SUITE Make variables from Step 1. The image path is
@@ -818,8 +825,8 @@ test-qemu: SUITE := $(SUITE)
 test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@case "$(SUITE)" in \
-	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model) ;; \
-	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model, got '$(SUITE)'" >&2; exit 1;; \
+	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor) ;; \
+	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor, got '$(SUITE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-qemu] SUITE=$(SUITE) flavor=$(TEST_QEMU_FLAVOR_$(SUITE)) img=$(TEST_QEMU_IMG_$(SUITE))"
 	# The normal-image hash guard skips ``phase-0`` (the historical
@@ -831,7 +838,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	# driver-model runs against the canonical (no-fault) image so the
 	# normal-image hash guard is skipped too; fault variant builds land
 	# under image/driver-model-<fault>/ (Task 11).
-	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
+	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "monitor" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.before"; \
 	fi
 	# Build step. THIS RECIPE LINE CONTAINS ``$(MAKE)`` AND IS DELIBERATELY
@@ -860,7 +867,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  fi; \
 	fi
 	# Hash guard AFTER the build (own recipe line, no ``$(MAKE)``).
-	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
+	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "monitor" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after" || exit 1; \
 	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after" || exit 1; \
 	fi
@@ -1170,7 +1177,7 @@ help:
 	@echo ''
 	@echo 'Test (6 canonical buckets; varied capability):'
 	@printf '  %-22s %-13s %s\n' \
-		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model>, CASE=<id> selects one systest case)';
+		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor>, CASE=<id> selects one systest case)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \
