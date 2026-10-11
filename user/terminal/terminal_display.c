@@ -259,13 +259,13 @@ int terminal_display_poll_timeout(const terminal_display_t *d,
     if (!d->serial_only && d->retry_deadline_ms && d->retry_deadline_ms > now_ms) {
         int w = (int)(d->retry_deadline_ms - now_ms);
         if (w > (int)TERMINAL_RETRY_MS) w = (int)TERMINAL_RETRY_MS;
-        if (base_timeout_ms < 0 || base_timeout_ms < w) {
+        if (w <= 0) w = 1;
+        if (base_timeout_ms <= 0) {
             return w;
         }
-        if (base_timeout_ms > (int)TERMINAL_RETRY_MS) {
-            return (int)TERMINAL_RETRY_MS;
-        }
-        return base_timeout_ms;
+        int b = base_timeout_ms;
+        if (b > (int)TERMINAL_RETRY_MS) b = (int)TERMINAL_RETRY_MS;
+        return (b < w) ? b : w;
     }
 
     int t = base_timeout_ms;

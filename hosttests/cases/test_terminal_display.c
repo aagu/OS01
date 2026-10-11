@@ -520,6 +520,13 @@ TEST_FUNC(test_terminal_foreground_dirty_retry_poll_timeout_avoids_busy_loop) {
     int t_base_neg = terminal_display_poll_timeout(&D, -1, now_ms);
     assert_eq(250, t_base_neg);
 
+    /* When a retry window w is active, return min(base clamped to [..250], w) with w>0;
+     * positive base > w must clamp to w. */
+    uint64_t now_w50 = 1200; /* deadline 1250 - 1200 = 50ms remaining */
+    assert_eq(50, terminal_display_poll_timeout(&D, 100, now_w50));
+    assert_eq(50, terminal_display_poll_timeout(&D, -1, now_w50));
+    assert_eq(50, terminal_display_poll_timeout(&D, 0, now_w50));
+
     terminal_display_close(&D);
 }
 
