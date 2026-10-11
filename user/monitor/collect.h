@@ -132,7 +132,10 @@ struct monitor_process_sample {
     uint64_t pid, ppid, birth_id;
     uint64_t sampled_ns, start_ns, runtime_ticks;
     uint32_t last_cpu;       /* last/current scheduling CPU */
-    char state;              /* R / S / D / T / Z */
+    /* R / S / D / T / Z, or '?' — the kernel's defensive fallback
+     * (snap_state_char) for state bits matching none of the five; the
+     * row is kept and display decides how to render it. */
+    char state;
     char comm[MONITOR_COMM_MAX];
 };
 

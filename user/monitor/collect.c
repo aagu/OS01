@@ -526,8 +526,12 @@ int monitor_parse_status(const char *text, size_t len,
             const char *q = span_skip_ws(vs, le);
             if (q >= le)
                 return -EINVAL;
+            /* R/S/D/T/Z are the five task states; '?' is the kernel's
+             * defensive fallback (procfs_snap.c snap_state_char) for
+             * state bits matching none of them — accept it and keep
+             * the row; display decides how to render it. */
             if (*q != 'R' && *q != 'S' && *q != 'D' &&
-                *q != 'T' && *q != 'Z')
+                *q != 'T' && *q != 'Z' && *q != '?')
                 return -EINVAL;
             if (span_skip_ws(q + 1, le) != le)
                 return -EINVAL;      /* exactly one state letter */

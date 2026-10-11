@@ -526,6 +526,15 @@ static TEST_FUNC(test_status_parse_and_name_decode)
     t = "Version:\t1\nName:\tx\nPid:\t5\nPPid:\t1\nState:\tX\nCPU:\t0\n"
         "BirthId:\t9\nStartNs:\t1\nSampleNs:\t2\nRuntimeTicks:\t3\n";
     assert_eq(monitor_parse_status(t, strlen(t), &p), -EINVAL);
+    /* kernel unknown-state marker '?' (procfs_snap.c snap_state_char
+     * fallback): well-formed file must parse and keep the process row
+     * with the state preserved — not silently dropped */
+    t = "Version:\t1\nName:\todd\nPid:\t5\nPPid:\t1\nState:\t?\nCPU:\t2\n"
+        "BirthId:\t9\nStartNs:\t1\nSampleNs:\t2\nRuntimeTicks:\t3\n";
+    assert_eq(monitor_parse_status(t, strlen(t), &p), 0);
+    assert_eq(p.state, '?');
+    assert_eq(p.pid, 5);
+    assert_eq(p.last_cpu, 2);
     /* multi-char state */
     t = "Version:\t1\nName:\tx\nPid:\t5\nPPid:\t1\nState:\tRS\nCPU:\t0\n"
         "BirthId:\t9\nStartNs:\t1\nSampleNs:\t2\nRuntimeTicks:\t3\n";
