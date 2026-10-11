@@ -41,17 +41,33 @@ if str(ROOT) not in sys.path:
 def _alive(pid: int) -> bool:
     """Return True if a process with this pid is still running.
 
-    Uses signal 0 (existence + permission probe).  Raises
-    ProcessLookupError via os.kill when the pid is gone."""
+    Uses signal 0 (existence + permission probe).  A zombie answers
+    signal 0 too — the pid lingers in the process table until it is
+    reaped — so the state letter in /proc/<pid>/stat refines the
+    probe: a zombie has already exited, and in the CI job container
+    reparented zombies are never reaped by PID 1, so treating them as
+    alive would report phantom leaks."""
 
     try:
         os.kill(pid, 0)
-        return True
     except ProcessLookupError:
         return False
     except PermissionError:
         # Process exists but we can't signal it — treat as alive.
         return True
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            stat = f.read()
+    except FileNotFoundError:
+        # Gone between the probe and the read — fully reaped.
+        return False
+    except OSError:
+        # Can't classify — fall back to the signal-0 answer.
+        return True
+    # Field 3 (state) follows the comm field, which is parenthesized
+    # and may itself contain parens — cut at the LAST closing paren.
+    state = chr(stat[stat.rindex(b")") + 2])
+    return state != "Z"
 
 
 def _pypid(sess) -> int:
@@ -65,6 +81,60 @@ def _pypid(sess) -> int:
 # ────────────────────────────────────────────────────────────────────
 # Tests
 # ────────────────────────────────────────────────────────────────────
+
+
+def _proc_state(pid: int) -> str:
+    """Return the /proc/<pid>/stat state letter for ``pid``.
+
+    Raises FileNotFoundError once the pid is fully gone (reaped)."""
+    with open(f"/proc/{pid}/stat", "rb") as f:
+        stat = f.read()
+    # Field 3 (state) follows the comm field, which is parenthesized
+    # and may itself contain parens — cut at the LAST closing paren.
+    return chr(stat[stat.rindex(b")") + 2])
+
+
+class AliveHelperSemanticsTests(unittest.TestCase):
+    """``_alive`` must report a zombie pid as NOT alive.
+
+    ``os.kill(pid, 0)`` answers success for a zombie too: the pid still
+    exists in the process table until it is reaped.  In the CI job
+    container the grandchildren a closed ``ProcessSession`` leaves
+    behind are reparented to a PID 1 that never reaps them, so they
+    stay zombies forever — which made
+    ``test_close_terminates_entire_process_group`` report a phantom
+    "grandchild leaked" failure even though the SIGTERM had killed the
+    grandchild (RunReport evidence: ``/proc/<pid>/stat`` state ``Z``).
+    A zombie is dead; only a running (or stopped/tracing) process is
+    alive."""
+
+    def test_zombie_pid_is_not_alive(self) -> None:
+        pid = os.fork()
+        if pid == 0:
+            os._exit(0)  # zombie as soon as this lands
+        try:
+            # Precondition: the child really is a zombie (exited but
+            # not yet reaped) before we probe _alive — otherwise the
+            # assert could pass/fail on fork timing, not semantics.
+            deadline = time.monotonic() + 5.0
+            while True:
+                try:
+                    if _proc_state(pid) == "Z":
+                        break
+                except FileNotFoundError:
+                    self.fail("child was reaped before we could probe it")
+                self.assertLess(
+                    time.monotonic(), deadline,
+                    "child never became a zombie",
+                )
+                time.sleep(0.01)
+            self.assertFalse(
+                _alive(pid),
+                "zombie pid must not count as alive "
+                "(os.kill(pid, 0) alone answers True for zombies)",
+            )
+        finally:
+            os.waitpid(pid, 0)
 
 
 class ProcessSessionStartTests(unittest.TestCase):
