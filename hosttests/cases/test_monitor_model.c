@@ -512,6 +512,68 @@ static TEST_FUNC(test_near_uint64_max)
     free_sample(&b);
 }
 
+/* ── 7b. scenarios that FORCE 128-bit intermediates ────────────────
+ * These must fail on a 64-bit-only implementation: the scaled product
+ * 10000 × ΔB, the ΔB + ΔI denominator sum and the process ΔR × 1e13
+ * product all exceed 64 bits, so a wrapping implementation produces a
+ * wrong (not merely rounded) result. */
+
+static TEST_FUNC(test_forces_128_bit_intermediates)
+{
+    struct monitor_model m = { 0 };
+    struct monitor_sample a = mk_sample();
+    struct monitor_sample b = mk_sample();
+
+    model_malloc_fail_after = -1;
+
+    /* ΔB = UINT64_MAX, ΔI = 0: the denominator still fits 64 bits but
+     * 10000 × ΔB does not; the exact quotient is 10000, remainder 0 */
+    monitor_model_init(&m);
+    set_cpu(&a, 0, 1, 0, 1);
+    assert_eq(monitor_model_update(&m, &a), 0);
+    set_cpu(&b, 0, 1, UINT64_MAX, 1);
+    assert_eq(monitor_model_update(&m, &b), 0);
+    assert_eq(find_cpu(&m, 0)->pct.percent_10000, 10000);
+    assert_true(find_cpu(&m, 0)->pct.raw_10000 == 10000);
+    monitor_model_destroy(&m);
+
+    /* ΔB = UINT64_MAX and ΔI = UINT64_MAX - 1: the denominator itself
+     * exceeds 64 bits (2^65 - 3); the exact quotient is 5000 with a
+     * remainder too small to round up */
+    monitor_model_init(&m);
+    a.stat.ncpu = 0;                    /* fresh rounds, counters reused */
+    b.stat.ncpu = 0;
+    set_cpu(&a, 0, 1, 0, 1);
+    assert_eq(monitor_model_update(&m, &a), 0);
+    set_cpu(&b, 0, 1, UINT64_MAX, UINT64_MAX);
+    assert_eq(monitor_model_update(&m, &b), 0);
+    assert_eq(m.total_cpu.percent_10000, 5000);
+    assert_eq(find_cpu(&m, 0)->pct.percent_10000, 5000);
+    monitor_model_destroy(&m);
+
+    /* process: ΔR = 2^38 over Δt = 1e9 ns at 100Hz — ΔR × 1e13 is
+     * ~2.8e24, far past 64 bits; the ratio is exactly ΔR × 100 (an
+     * integer, zero remainder), so the diagnostic raw must be EXACT
+     * and the display clamps at 10000 */
+    monitor_model_init(&m);
+    {
+        const uint64_t dr = 1ULL << 38;
+
+        set_proc(&a, 8, 8, 0, 0, "hog");
+        assert_eq(monitor_model_update(&m, &a), 0);
+        set_proc(&b, 8, 8, 1000000000ULL, dr, "hog");
+        assert_eq(monitor_model_update(&m, &b), 0);
+        assert_true(find_proc(&m, 8)->cpu.valid);
+        assert_eq(find_proc(&m, 8)->cpu.percent_10000, 10000);
+        assert_true(find_proc(&m, 8)->cpu.raw_10000 ==
+                    (__uint128_t)dr * 100);
+    }
+    monitor_model_destroy(&m);
+
+    free_sample(&a);
+    free_sample(&b);
+}
+
 /* ── 8. 60-slot ring: coverage, wraparound, invalid empty points ─── */
 
 static TEST_FUNC(test_history_ring)
@@ -697,6 +759,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_process_clamp_and_raw),
     TEST_ENTRY(test_sorting),
     TEST_ENTRY(test_near_uint64_max),
+    TEST_ENTRY(test_forces_128_bit_intermediates),
     TEST_ENTRY(test_history_ring),
     TEST_ENTRY(test_oom_preserves_baseline),
     TEST_ENTRY(test_api_contract),
