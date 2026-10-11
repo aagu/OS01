@@ -173,6 +173,8 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 - **`test_display_owner` 读取 libgfx 内部句柄 fd 耦合（2026-10-11，显示独占实施）**：`test_display_owner` 通过 `*(const int *)gh` 直接读取 `libgfx` handle 首字段 fd（布局耦合；设计规范禁止公开 `gfx_get_fd`）。候选修复方案：引入非 sysroot 的内部测试头 `libgfx/gfx_test.h` 配合 `offsetof` static assert 校验，或在测试代码中保留当前读取方式并辅以显式注释。保持现状，无需修改测试代码。
 
+- **内核用户态异常退出状态未编码为信号终止（2026-10-11，显示独占实施）**：`kernel/arch/x86_64/intr/trap.c:88` 的 `kill_current_user_task` 在处理用户态异常（如只读页面 #PF、除零、GPF）时，通过 `xorl %edi, %edi` 向 `do_exit` 传递退出码 0，导致父进程 `waitpid` 收到的状态为 `0x0`（表现为正常退出 exit(0)）而非预期信号终止状态（如 `WIFSIGNALED` 且 `WTERMSIG == SIGSEGV`）。后续需重构内核异常终止路径，将对应的致命信号（`SIGSEGV`/`SIGFPE` 等）传递给 `do_exit` 编码为信号退出状态。
+
 > **独立缺陷备忘**：aarch64 contract `targets` mode 依赖 x86 build 目录存在（`make -n PROFILE=x86_64-clang kernel.bin` 的 `+` 前缀 artifact recipe 在 `-n` 下也会执行，clean workspace 下跑 aarch64 contract 会触发）。
 
 ---

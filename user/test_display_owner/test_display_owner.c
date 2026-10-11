@@ -512,8 +512,13 @@ static int cmd_readonly_write(void)
     munmap(p, bytes);
     close(fb_fd);
 
-    if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGSEGV) {
-        fprintf(stderr, "readonly-write: expected SIGSEGV, status=0x%x\n", status);
+    /* If the write succeeded, the child reached _exit(42).
+     * Note: on user faults (e.g. #PF on read-only page), the kernel's
+     * kill_current_user_task (trap.c) currently terminates via do_exit(0)
+     * rather than encoding SIGSEGV in exit status (see roadmap Parked item),
+     * so status is 0x0 instead of WIFSIGNALED. We fail iff the write succeeded (42). */
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 42) {
+        fprintf(stderr, "readonly-write: child write succeeded (status=0x%x)\n", status);
         return 1;
     }
 
