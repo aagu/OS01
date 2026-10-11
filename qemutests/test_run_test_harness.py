@@ -294,6 +294,12 @@ class FakeProcessSession:
         # it exposes the full transcript here; the *faithful* part of the
         # double is the ``wait_for`` / ``observe`` cursor below, which is
         # what decides whether a late chunk is observable.
+        # NOTE: this is deliberately MORE permissive than the real
+        # ProcessSession (whose ``text`` only accumulates bytes the
+        # drain loop has already read).  Fixtures that need the
+        # production ``text``-is-received-so-far semantics — e.g. the
+        # test_systest END-arrives-late regression — use
+        # ``ReceivedOnlyProcessSession`` below instead.
         return self._text
 
     @property
@@ -335,6 +341,27 @@ class FakeProcessSession:
 
     def sent_text(self) -> str:
         return self._stdin_buf.decode("utf-8", errors="replace")
+
+
+class ReceivedOnlyProcessSession(FakeProcessSession):
+    """FakeProcessSession with the REAL ``text`` semantics.
+
+    The shared fake exposes the whole staged transcript through
+    ``text``, which is more permissive than production (the real
+    ``ProcessSession._text`` only accumulates bytes the drain loop has
+    already read off the pipe).  That extra permissiveness is exactly
+    what hid the test_systest ordering defect: the runner snapshots
+    ``text`` via ``_read_available()`` right after the RESULT-line
+    match, so with the shared fake the snapshot already contained the
+    late-arriving ``[TEST] END`` record that production never had.
+    Fixtures that pin such received-so-far behaviour use this
+    subclass; ``wait_for`` / ``observe`` / cursor semantics are
+    inherited unchanged.
+    """
+
+    @property
+    def text(self) -> str:
+        return self._text[: self._available]
 
 
 class _FakeProc:
@@ -624,6 +651,28 @@ class SystestSuiteTests(unittest.TestCase):
         b"[kernel panic] not really a panic but treated as one\n",
     ]
 
+    # The tail of a real systest run trickles out of the emulated UART:
+    # the host matches ``[SYS TEST] RESULT:`` as soon as those bytes
+    # arrive, while the ``[TEST] END`` record the protocol gate requires
+    # is still in the pipe.  Staged as its own chunk, END only becomes
+    # received once the session is drained again — which in production
+    # happens in the 1-second observation window, AFTER the runner
+    # snapshots the trace (see the regression this pins below).
+    _TRACE_WITHOUT_END = (
+        b"[TEST] START v=1 suite=systest expected=4\n"
+        + b"".join(b"[TEST] SELECT %s required=1\n" % cid.encode() for cid in _IDS)
+        + b"".join(b"[TEST] BEGIN %s\n[TEST] PASS %s\n" % (cid.encode(), cid.encode()) for cid in _IDS)
+        + b"\n[SYS TEST] RESULT: 32 passed, 0 failed\n"
+    )
+    CHUNKS_END_ARRIVES_AFTER_RESULT_MATCH = [
+        b"[COW TTY READY 0]\n",
+        b"[COW TTY READY 1]\n",
+        b"[COW TTY READY 2]\n",
+        b"[COW TTY READY 3]\n",
+        _TRACE_WITHOUT_END,
+        b"[TEST] END suite=systest total=4 passed=4 failed=0 skipped=0\n",
+    ]
+
     CHUNKS_NOT_SYSTEST_BUILD = [
         b"[COW TTY READY 0]\n",
         b"Welcome to /bin/terminal\n",
@@ -647,6 +696,44 @@ class SystestSuiteTests(unittest.TestCase):
 
     def test_systest_positive_completion(self) -> None:
         tester = self._runner_with(self.CHUNKS_POSITIVE)
+        try:
+            self.assertTrue(self.rt.test_systest(tester))
+            # The COW handshake payload is exactly 4 bytes per region:
+            # the guest's tty read consumes ``"COW!"`` verbatim, so a
+            # trailing newline would stay in the tty input buffer and
+            # shift every LATER region's stream by one byte (region 0
+            # passed, regions 1-3 read ``"\nCOW"`` and failed) —
+            # ``send_line``'s newline is wrong here; send raw bytes.
+            self.assertEqual(
+                tester.process.sent_text(), "COW!" * 4,
+                "COW handshake must send exactly 'COW!' per region, "
+                "with no trailing newline",
+            )
+        finally:
+            tester.cleanup()
+
+    def test_systest_end_arriving_after_result_match_is_parsed(self) -> None:
+        # Regression: the runner snapshotted the trace via
+        # ``_read_available()`` immediately after the RESULT-line match,
+        # BEFORE the 1-second observation window drained the session —
+        # so an END record that was still in the pipe at match time
+        # (the real UART trickles it out a few bytes behind RESULT)
+        # never reached parse_v1 and the run FAILed with
+        # "missing END line" even though the guest had completed.
+        # The snapshot must happen after the drain.  Uses the
+        # received-so-far double: the shared fake's full-transcript
+        # ``text`` would hand the runner the END record production
+        # never had at snapshot time.
+        def factory(argv, run_dir, timeout_s, *, writable_stdin=False):
+            return ReceivedOnlyProcessSession(
+                argv=argv,
+                run_dir=run_dir,
+                timeout_s=timeout_s,
+                writable_stdin=writable_stdin,
+                chunks=self.CHUNKS_END_ARRIVES_AFTER_RESULT_MATCH,
+                returncode=0,
+            )
+        tester = _make_runner_with_factory(self.rt, factory)
         try:
             self.assertTrue(self.rt.test_systest(tester))
         finally:

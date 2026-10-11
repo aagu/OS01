@@ -52,9 +52,17 @@ static int test_cmp(rbtree_node_t *a, rbtree_node_t *b)
 
 static int fail_count = 0;
 static int pass_count = 0;
+// Set by a case body via skip_case() when its prerequisite is absent
+// in this boot environment; the runner publishes a [TEST] SKIP
+// terminal instead of PASS/FAIL.  Reset before every case.
+static const char *case_skip_reason = NULL;
 
 #define PASS(msg, ...) do { printf("[PASS] " msg "\n", ##__VA_ARGS__); pass_count++; } while(0)
 #define FAIL(msg, ...) do { printf("[FAIL] " msg "\n", ##__VA_ARGS__); fail_count++; } while(0)
+// Mark the current case as skipped (reason must be a protocol token:
+// [A-Za-z0-9_.-]+).  Only meaningful for required=0 cases — a SKIPped
+// required case still FAILs the run downstream.
+#define skip_case(reason) do { case_skip_reason = (reason); } while(0)
 #define CHECK3(cond, name, detail) do { \
     if (cond) PASS("%s (%s)", name, detail); \
     else FAIL("%s: %s", name, detail); \
@@ -78,7 +86,11 @@ static void test_sendto_user_boundaries(void)
 {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
-        FAIL("sendto user boundaries (UDP socket setup)");
+        // No UDP stack in this boot (the systest QEMU runs without a
+        // NIC, so the kernel has no netdev to bring up).  The EFAULT
+        // boundary checks below only need a socket fd, not a working
+        // network — skip rather than fail; the case is required=0.
+        skip_case("no_udp_socket");
         return;
     }
 
@@ -4252,7 +4264,7 @@ int main(int argc, char **argv, char **envp)
                tests[sel[k]].id, tests[sel[k]].required);
     }
 
-    int case_passed = 0, case_failed = 0;
+    int case_passed = 0, case_failed = 0, case_skipped = 0;
     for (int k = 0; k < nsel; k++) {
         const test_case_t *tc = &tests[sel[k]];
         printf("\n--- %s ---\n", tc->name);
@@ -4261,11 +4273,20 @@ int main(int argc, char **argv, char **envp)
         // BEGIN, so a body that never returns still yields no terminal.
         printf("[TEST] BEGIN %s\n", tc->id);
         // Per-case status derives from the assertion-failure delta
-        // across the case body (no child isolation).
+        // across the case body (no child isolation).  A body that
+        // cannot run at all (its prerequisite is absent in this boot
+        // environment — e.g. no NIC, so socket() fails) calls
+        // skip_case() and publishes a SKIP terminal instead of FAIL:
+        // parse_v1 counts a SKIP separately, and only required=1
+        // cases make a SKIP fatal downstream.
+        case_skip_reason = NULL;
         int before = fail_count;
         tc->fn();
         int delta = fail_count - before;
-        if (delta == 0) {
+        if (case_skip_reason != NULL) {
+            case_skipped++;
+            printf("[TEST] SKIP %s reason=%s\n", tc->id, case_skip_reason);
+        } else if (delta == 0) {
             case_passed++;
             printf("[TEST] PASS %s\n", tc->id);
         } else {
@@ -4278,7 +4299,7 @@ int main(int argc, char **argv, char **envp)
     // Legacy summary line kept for transition; no longer the gate.
     printf("\n[SYS TEST] RESULT: %d passed, %d failed\n", pass_count, fail_count);
     printf("[TEST] END suite=systest total=%d passed=%d failed=%d skipped=%d\n",
-           nsel, case_passed, case_failed, 0);
+           nsel, case_passed, case_failed, case_skipped);
 
     return fail_count > 255 ? 255 : (int)fail_count;
 }

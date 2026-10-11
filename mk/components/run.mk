@@ -765,6 +765,17 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.before"; \
 	fi
+	# Build step. THIS RECIPE LINE CONTAINS ``$(MAKE)`` AND IS DELIBERATELY
+	# KEPT ON ITS OWN LOGICAL LINE: GNU Make executes any recipe line that
+	# contains ``$(MAKE)`` even under ``make -n`` (so the recursive make
+	# runs and gets the ``-n`` flag propagated). Keeping ``python3
+	# qemutests/run_test.py`` off this line is what lets ``make -n
+	# test-qemu SUITE=*`` continue to dry-run cleanly — the build
+	# contract (``build_contract.sh targets``) and the
+	# MakeFailureDryRunTests fixtures both rely on the dry-run printing
+	# the recipe structure without actually launching QEMU. If you
+	# refactor this block, keep ``$(MAKE)`` and the python invocation on
+	# SEPARATE recipe lines; see commit fix/ci-test-qemu-dryrun.
 	@if [ "$(SUITE)" = "driver-model" ]; then \
 	  DRIVER_MODEL_DRIVER_CASE="$(DRIVER_MODEL_DRIVER_CASE)" \
 	  DRIVER_MATRIX_DRIVER_SMP="$(DRIVER_MATRIX_DRIVER_SMP)" \
@@ -778,10 +789,19 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  else \
 	    $(MAKE) $(TEST_QEMU_FLAVOR_$(SUITE)) image || exit 1; \
 	  fi; \
-	  if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
-	    sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after" || exit 1; \
-	    cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after" || exit 1; \
-	  fi; \
+	fi
+	# Hash guard AFTER the build (own recipe line, no ``$(MAKE)``).
+	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
+	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after" || exit 1; \
+	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after" || exit 1; \
+	fi
+	# Run the harness (own recipe line, no ``$(MAKE)`` — therefore NOT
+	# executed under ``make -n``; this is the line that broke the
+	# ``build_contract.sh targets`` dry-run when it was inlined into the
+	# same ``if/else/fi`` block as ``$(MAKE)``). driver-model runs the
+	# python harness inside ``test-qemu-driver-model`` and must NOT
+	# launch it again here.
+	@if [ "$(SUITE)" != "driver-model" ]; then \
 	  DISK_IMG="$(TEST_QEMU_IMG_$(SUITE))" \
 	  OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \
 	  NETWORK_NIC="$(NETWORK_NIC)" \
@@ -1167,6 +1187,21 @@ test-contract: PROFILE := $(PROFILE)
 test-contract: $(if $(filter x86_64-clang,$(PROFILE)),disk.img,aarch64-uefi)
 	$(call require_capability,$(if $(filter x86_64-clang,$(PROFILE)),rootfs,uefi))
 	$(MAKE) --no-print-directory _test-contract-prep-$(if $(filter x86_64-clang,$(PROFILE)),x86,aarch64)
+	# arch9-build-contract runs FIRST: it dry-runs ``make -n
+	# ARCH9_FAULT=<fault> kernel.bin``, whose ``$(KERNEL_ARTIFACT)``
+	# recipe carries an ``@+$(SHELL) -ec '...'`` line that forces
+	# execution under ``-n`` (so it sees the real publish-lock /
+	# sysroot-symlink state). The ``host-test`` mode at the END of
+	# ``X86_CONTRACT_MODES`` does ``make clean`` (deletes the sysroot
+	# symlink); running arch9 BEFORE the modes loop sees a still-
+	# intact build tree. (Earlier ordering masked this: the
+	# ``targets`` mode used to fail first with ``OVMF_FIRMWARE must
+	# name a readable firmware file`` and short-circuited the loop
+	# before ``host-test`` could run.)
+	if [ "$(PROFILE)" = "x86_64-clang" ]; then \
+	  echo "  [test-contract] $(PROFILE)/arch9-build-contract"; \
+	  PROFILE=$(PROFILE) python3 -m unittest qemutests.test_arch9_build_contract; \
+	fi; \
 	@set -e; \
 	case "$(PROFILE)" in \
 	  x86_64-clang)    modes="$(X86_CONTRACT_MODES)";; \
@@ -1176,11 +1211,7 @@ test-contract: $(if $(filter x86_64-clang,$(PROFILE)),disk.img,aarch64-uefi)
 	for m in $$modes; do \
 	  echo "  [test-contract] $(PROFILE)/$$m"; \
 	  sh qemutests/build_contract.sh $(PROFILE) $$m; \
-	done; \
-	if [ "$(PROFILE)" = "x86_64-clang" ]; then \
-	  echo "  [test-contract] $(PROFILE)/arch9-build-contract"; \
-	  PROFILE=$(PROFILE) python3 -m unittest qemutests.test_arch9_build_contract; \
-	fi
+	done
 
 # ── Clean ───────────────────────────────────────────────────
 # Only the default profile owns the project-root kernel.bin / disk.img compat
