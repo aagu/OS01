@@ -162,11 +162,23 @@ int main(void)
     // terminal_display_close()).
     terminal_display_init(&disp, gfx, &core, font, &fb_st.info,
                           fb_st.generation, fg, bg);
+
+    // 6. Register fallback role before first present
+    if (gfx_register_fallback(disp.gfx) != 0) {
+        serial_msg(serial_fd, "[terminal] ERROR: gfx_register_fallback failed\r\n");
+        term_core_free(&core);
+        terminal_display_close(&disp);
+        close(fb_fd);
+        dup2(tty_fd, 0); close(tty_fd);
+        exec(ASH_PATH, ash_argv, environ);
+        return 1;
+    }
+
     term_render_clear(&disp.render);
     term_core_mark_all_dirty(&core);
     term_render_flush(&disp.render);
 
-    // 6. Verify initial gfx_present succeeds before taking over console
+    // 7. Initial gfx_present after registering fallback
     if (gfx_present(disp.gfx) != 0) {
         serial_msg(serial_fd, "[terminal] ERROR: initial gfx_present failed\r\n");
         term_core_free(&core);
@@ -177,30 +189,7 @@ int main(void)
         return 1;
     }
 
-    // 7. Surrender kernel console and verify
-    if (ioctl(fb_fd, FBIOSURRENDER, NULL) < 0) {
-        serial_msg(serial_fd, "[terminal] ERROR: FBIOSURRENDER ioctl failed\r\n");
-        term_core_free(&core);
-        terminal_display_close(&disp);
-        close(fb_fd);
-        dup2(tty_fd, 0); close(tty_fd);
-        exec(ASH_PATH, ash_argv, environ);
-        return 1;
-    }
-
-    // 8. Post-surrender present: close any brief race window with kernel console
-    //    (a mode switch exactly here is recovered by the loop's refresh).
-    if (gfx_present(disp.gfx) != 0 && errno != EAGAIN && errno != ESTALE) {
-        serial_msg(serial_fd, "[terminal] ERROR: post-surrender gfx_present failed\r\n");
-        term_core_free(&core);
-        terminal_display_close(&disp);
-        close(fb_fd);
-        dup2(tty_fd, 0); close(tty_fd);
-        exec(ASH_PATH, ash_argv, environ);
-        return 1;
-    }
-
-    // 9. Allocate PTY
+    // 8. Allocate PTY
     int pty_fd = open("/dev/ptmx", O_RDWR);
     if (pty_fd < 0) {
         serial_msg(serial_fd, "[terminal] ERROR: open /dev/ptmx failed\r\n");
@@ -219,17 +208,18 @@ int main(void)
         return 1;
     }
 
-    // 10. Initial window size via the PTY master (failure stays pending and is
-    //     retried by the event loop; it never rebuilds the graphics).
+    // 9. Initial window size via the PTY master (failure stays pending and is
+    //    retried by the event loop; it never rebuilds the graphics).
     disp.pending_winsize = true;
     uint64_t ws_retry_ms = 0;
     (void)send_winsize(pty_fd);
 
     char *buf = (char *)malloc(2048);
 
-    // 11. Fork ash
+    // 10. Fork ash
     int ash_pid = buf ? fork() : -1;
     if (ash_pid == 0) {
+        gfx_close(disp.gfx);
         dup2(slave, 0); dup2(slave, 1); dup2(slave, 2);
         close(slave); close(pty_fd); close(tty_fd); close(fb_fd);
         exec(ASH_PATH, ash_argv, environ);
@@ -267,18 +257,14 @@ int main(void)
     uint64_t last_present_ms = 0;
     int present_failures = 0;
     bool dirty_pending = false;
-    uint64_t last_cmd_submit_ms = 0;
     bool serial_only_logged = false;
-
-#define CMD_HOLD_MS        500
 
     while (!done) {
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         uint64_t now_ms = (uint64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 
-        // 0. Display mode recovery (checked every wakeup, independent of
-        //    CMD_HOLD and of dirty state).
+        // 0. Display mode recovery (checked every wakeup, independent of dirty state).
         uint64_t gen_before = disp.generation;
         int rr = terminal_display_refresh(&disp, fb_fd, now_ms);
         if (rr < 0 && !serial_only_logged) {
@@ -295,20 +281,24 @@ int main(void)
         }
 
         uint64_t elapsed = now_ms - last_present_ms;
-        bool hold_cmd = (now_ms - last_cmd_submit_ms < CMD_HOLD_MS);
 
-        // 1. Present immediately if interval elapsed and not holding for command startup
-        if (dirty_pending && elapsed >= FRAME_INTERVAL_MS && !hold_cmd &&
+        // 1. Present immediately if interval elapsed and not waiting on retry
+        if (dirty_pending && elapsed >= FRAME_INTERVAL_MS &&
             !(disp.retry_deadline_ms && now_ms < disp.retry_deadline_ms)) {
-            if (terminal_display_present(&disp, now_ms) == 0) {
+            int prc = terminal_display_present(&disp, now_ms);
+            if (prc == 0) {
                 last_present_ms = now_ms;
                 dirty_pending = false;
+                present_failures = 0;
+            } else if (prc == TERMINAL_PRESENT_SKIPPED) {
+                // Background pause: keep dirty_pending to flush when restored, reset failure counter
+                last_present_ms = now_ms;
                 present_failures = 0;
             } else {
                 int e = errno;
                 last_present_ms = now_ms;
                 // Mode-related failures are recovered via refresh and never
-                // count toward the fatal limit.
+                // count toward the fatal limit. EACCES is already handled as skipped.
                 if (e != EAGAIN && e != ESTALE && e != EBUSY &&
                     ++present_failures >= MAX_PRESENT_FAILURES) {
                     serial_msg(serial_fd, "\r\n[terminal] FATAL: graphics present failed repeatedly, aborting\r\n");
@@ -321,13 +311,10 @@ int main(void)
 
         // 2. Compute poll timeout
         int base = -1;
-        if (dirty_pending) {
+        if (dirty_pending && disp.foreground) {
             uint64_t cur_elapsed = now_ms - last_present_ms;
-            int frame_wait = (cur_elapsed < FRAME_INTERVAL_MS) ?
-                             (int)(FRAME_INTERVAL_MS - cur_elapsed) : 0;
-            int cmd_wait = (now_ms - last_cmd_submit_ms < CMD_HOLD_MS) ?
-                           (int)(CMD_HOLD_MS - (now_ms - last_cmd_submit_ms)) : 0;
-            base = (frame_wait > cmd_wait) ? frame_wait : cmd_wait;
+            base = (cur_elapsed < FRAME_INTERVAL_MS) ?
+                   (int)(FRAME_INTERVAL_MS - cur_elapsed) : 0;
         }
         int timeout_ms = terminal_display_poll_timeout(&disp, base, now_ms);
 
@@ -341,12 +328,6 @@ int main(void)
         if (fds[0].revents & POLLIN) {
             int n = read(tty_fd, buf, 2048);
             if (n > 0) {
-                for (int i = 0; i < n; i++) {
-                    if (buf[i] == '\n' || buf[i] == '\r') {
-                        last_cmd_submit_ms = now_ms;
-                        break;
-                    }
-                }
                 handle_input(buf, n, pty_fd, ash_pid);
             }
         }
@@ -390,7 +371,7 @@ int main(void)
     }
 
     // 13. Teardown (the view is closed exactly once, via terminal_display_close)
-    if (!fatal_exit && !disp.serial_only && disp.gfx) {
+    if (!fatal_exit && !disp.serial_only && disp.gfx && disp.foreground) {
         term_render_clear(&disp.render);
         gfx_present(disp.gfx);
     }

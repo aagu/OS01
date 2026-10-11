@@ -52,6 +52,9 @@ static gfx_handle_t *real_open(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 }
 static void real_close(gfx_handle_t *h) { gfx_close(h); }
 static int real_present(gfx_handle_t *h) { return gfx_present(h); }
+static int real_register_fallback(gfx_handle_t *h) { return gfx_register_fallback(h); }
+static int real_get_display_state(gfx_handle_t *h, gfx_display_state_t *st) { return gfx_get_display_state(h, st); }
+static int real_replace_fallback(gfx_handle_t *old_h, gfx_handle_t *new_h) { return gfx_replace_fallback(old_h, new_h); }
 static int real_state(int fb_fd, struct fb_state *st)
 {
     return ioctl(fb_fd, FBIOGET_STATE, st) < 0 ? -1 : 0;
@@ -66,6 +69,9 @@ void terminal_display_init(terminal_display_t *d, gfx_handle_t *gfx,
     d->ops.gfx_open = real_open;
     d->ops.gfx_close = real_close;
     d->ops.gfx_present = real_present;
+    d->ops.gfx_register_fallback = real_register_fallback;
+    d->ops.gfx_get_display_state = real_get_display_state;
+    d->ops.gfx_replace_fallback = real_replace_fallback;
     d->ops.get_state = real_state;
 #ifdef FB_RESOLUTION_TEST
     d->ops.consume_terminal_enomem = real_consume_terminal_enomem;
@@ -75,6 +81,8 @@ void terminal_display_init(terminal_display_t *d, gfx_handle_t *gfx,
     d->font = font;
     d->info = *info;
     d->generation = generation;
+    d->owner_generation = 1;
+    d->foreground = true;
     d->fg = fg;
     d->bg = bg;
     term_render_init(&d->render, gfx, font, core, fg, bg);
@@ -103,11 +111,22 @@ static int fail(terminal_display_t *d, int e, uint64_t now_ms)
 int terminal_display_present(terminal_display_t *d, uint64_t now_ms)
 {
     if (d->serial_only || !d->gfx) return 0;
+    if (!d->foreground) return TERMINAL_PRESENT_SKIPPED;
+
     term_render_flush(&d->render);
     if (d->ops.gfx_present(d->gfx) == 0) return 0;
+
+    int e = errno;
+    if (e == EACCES) {
+        /* Background pause: non-owner calling present. Do not count as failure. */
+        d->foreground = false;
+        d->redraw_pending = true;
+        return TERMINAL_PRESENT_SKIPPED;
+    }
     // errno belongs to the failing present; only arm the retry (no syscalls).
-    if (errno == EAGAIN || errno == ESTALE)
+    if (e == EAGAIN || e == ESTALE)
         d->retry_deadline_ms = now_ms + TERMINAL_RETRY_MS;
+    errno = e;
     return -1;
 }
 
@@ -117,9 +136,13 @@ static int redraw(terminal_display_t *d, uint64_t now_ms)
     term_render_clear(&d->render);
     term_core_mark_all_dirty(d->core);
     d->redraw_pending = true;
-    if (terminal_display_present(d, now_ms) == 0) {
+    int rc = terminal_display_present(d, now_ms);
+    if (rc == 0) {
         d->redraw_pending = false;
         d->retry_deadline_ms = 0;
+        return 0;
+    }
+    if (rc == TERMINAL_PRESENT_SKIPPED) {
         return 0;
     }
     return fail(d, errno, now_ms);
@@ -129,6 +152,23 @@ int terminal_display_refresh(terminal_display_t *d, int fb_fd, uint64_t now_ms)
 {
     if (d->serial_only) return -1;
     if (d->retry_deadline_ms && now_ms < d->retry_deadline_ms) return 1;
+
+    /* Check ownership state */
+    if (d->gfx && d->ops.gfx_get_display_state) {
+        gfx_display_state_t dst;
+        if (d->ops.gfx_get_display_state(d->gfx, &dst) == 0) {
+            bool was_fg = d->foreground;
+            bool is_fg = (dst.flags & GFX_DISPLAY_STATE_FOREGROUND) != 0;
+            d->foreground = is_fg;
+
+            if (dst.generation != d->owner_generation || (!was_fg && is_fg)) {
+                d->owner_generation = dst.generation;
+                if (is_fg) {
+                    d->redraw_pending = true;
+                }
+            }
+        }
+    }
 
     struct fb_state st;
     if (d->ops.get_state(fb_fd, &st) != 0) {
@@ -181,6 +221,24 @@ int terminal_display_refresh(terminal_display_t *d, int fb_fd, uint64_t now_ms)
     if (term_core_resize(d->core, rows, cols) != 0) {
         d->ops.gfx_close(nh);
         return fail(d, ENOMEM, now_ms);
+    }
+
+    // Transfer fallback role from old view to new view before closing old
+    if (d->gfx && d->ops.gfx_replace_fallback) {
+        if (d->ops.gfx_replace_fallback(d->gfx, nh) != 0) {
+            int e = errno;
+            d->ops.gfx_close(nh);
+            return fail(d, e, now_ms);
+        }
+    }
+
+    // Update display ownership state for the new view
+    if (d->ops.gfx_get_display_state) {
+        gfx_display_state_t dst2;
+        if (d->ops.gfx_get_display_state(nh, &dst2) == 0) {
+            d->owner_generation = dst2.generation;
+            d->foreground = (dst2.flags & GFX_DISPLAY_STATE_FOREGROUND) != 0;
+        }
     }
 
     // Commit point: bind the renderer to the new view, then drop the old one.

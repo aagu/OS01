@@ -13,12 +13,16 @@
  * owns the term_core_t storage + final cleanup (terminal_display_close()). */
 
 #define TERMINAL_RETRY_MS     250u   /* retry / idle-poll upper bound */
+#define TERMINAL_PRESENT_SKIPPED 1   /* normal pause in background: 0=committed, -1=error, 1=skipped */
 
 /* Injectable backend (defaults = real libgfx / FBIOGET_STATE ioctl). */
 typedef struct terminal_display_ops {
     gfx_handle_t *(*gfx_open)(uint32_t x, uint32_t y, uint32_t w, uint32_t h);
     void (*gfx_close)(gfx_handle_t *h);
     int  (*gfx_present)(gfx_handle_t *h);
+    int  (*gfx_register_fallback)(gfx_handle_t *h);
+    int  (*gfx_get_display_state)(gfx_handle_t *h, gfx_display_state_t *st);
+    int  (*gfx_replace_fallback)(gfx_handle_t *old_h, gfx_handle_t *new_h);
     int  (*get_state)(int fb_fd, struct fb_state *st);
     /* Test-only (FB_RESOLUTION_TEST) fault hook: returns 1 once to force
      * the next resource prepare to fail with ENOMEM.  NULL — and never
@@ -33,10 +37,12 @@ typedef struct terminal_display {
     const psf2_t *font;
     struct fb_info info;
     uint64_t generation;
+    uint64_t owner_generation;   /* display ownership generation from GFX_GET_DISPLAY_STATE */
+    bool foreground;             /* true if this view currently holds screen foreground */
     uint32_t fg, bg;
     uint64_t retry_deadline_ms;   /* 0 = none */
     bool serial_only;             /* permanent device failure: no graphics */
-    bool redraw_pending;          /* new view bound, full redraw not yet presented */
+    bool redraw_pending;          /* new view bound or foreground restored, full redraw not yet presented */
     bool pending_winsize;         /* PTY master TIOCSWINSZ not yet delivered */
     terminal_display_ops_t ops;
 } terminal_display_t;

@@ -40,6 +40,11 @@ static int g_present_errno;            /* nonzero: next present fails */
 static int g_state_errno;              /* nonzero: get_state fails */
 static int g_state_calls;
 static struct fb_state g_state;
+static gfx_display_state_t g_disp_state;
+static int g_reg_fallback_calls, g_reg_fallback_errno;
+static int g_get_disp_state_calls, g_get_disp_state_errno;
+static int g_replace_fallback_calls, g_replace_fallback_errno;
+static gfx_handle_t *g_last_replace_old, *g_last_replace_new;
 /* test-only ENOMEM hook (FB_RESOLUTION_TEST op) */
 static int g_consume_enomem;   /* 1 = the next consume returns 1 (once) */
 static int g_consume_calls;
@@ -74,6 +79,27 @@ static int m_present(gfx_handle_t *h)
 {
     (void)h; g_present_calls++;
     if (g_present_errno) { errno = g_present_errno; g_present_errno = 0; return -1; }
+    return 0;
+}
+static int m_register_fallback(gfx_handle_t *h)
+{
+    (void)h; g_reg_fallback_calls++;
+    if (g_reg_fallback_errno) { errno = g_reg_fallback_errno; g_reg_fallback_errno = 0; return -1; }
+    return 0;
+}
+static int m_get_display_state(gfx_handle_t *h, gfx_display_state_t *st)
+{
+    (void)h; g_get_disp_state_calls++;
+    if (g_get_disp_state_errno) { errno = g_get_disp_state_errno; return -1; }
+    *st = g_disp_state;
+    return 0;
+}
+static int m_replace_fallback(gfx_handle_t *old_h, gfx_handle_t *new_h)
+{
+    g_replace_fallback_calls++;
+    g_last_replace_old = old_h;
+    g_last_replace_new = new_h;
+    if (g_replace_fallback_errno) { errno = g_replace_fallback_errno; g_replace_fallback_errno = 0; return -1; }
     return 0;
 }
 static int m_state(int fd, struct fb_state *st)
@@ -118,10 +144,18 @@ static void setup(uint32_t w, uint32_t h, uint64_t gen)
     g_open_fail_errno = g_present_errno = g_state_errno = 0;
     g_state_flip_at = 0; g_malloc_fail_nth = 0;
     g_consume_enomem = 0; g_consume_calls = 0;
+    g_reg_fallback_calls = g_reg_fallback_errno = 0;
+    g_get_disp_state_calls = g_get_disp_state_errno = 0;
+    g_replace_fallback_calls = g_replace_fallback_errno = 0;
+    g_last_replace_old = g_last_replace_new = NULL;
     memset(&g_state, 0, sizeof(g_state));
     g_state.info.width = w; g_state.info.height = h;
     g_state.info.stride = w * 4; g_state.info.bpp = 32;
     g_state.generation = gen;
+
+    memset(&g_disp_state, 0, sizeof(g_disp_state));
+    g_disp_state.generation = 1;
+    g_disp_state.flags = GFX_DISPLAY_STATE_FOREGROUND | GFX_DISPLAY_STATE_FALLBACK;
 
     term_core_init(&core, (int)(h / 16), (int)(w / 8));
     struct fb_info info = g_state.info;
@@ -131,6 +165,9 @@ static void setup(uint32_t w, uint32_t h, uint64_t gen)
                           gen, 0xFFFFFFFFu, 0);
     D.ops.gfx_open = m_open; D.ops.gfx_close = m_close;
     D.ops.gfx_present = m_present; D.ops.get_state = m_state;
+    D.ops.gfx_register_fallback = m_register_fallback;
+    D.ops.gfx_get_display_state = m_get_display_state;
+    D.ops.gfx_replace_fallback = m_replace_fallback;
     D.ops.consume_terminal_enomem = m_consume_enomem;
 }
 
@@ -318,6 +355,144 @@ TEST_FUNC(test_terminal_fbtest_enomem_once) {
     terminal_display_close(&D);
 }
 
+/* Background receiving PTY/core dirty does NOT call render/present; returns TERMINAL_PRESENT_SKIPPED */
+TEST_FUNC(test_terminal_background_skips_present) {
+    setup(640, 480, 1);
+    /* Switch state to background (fallback only, not foreground) */
+    g_disp_state.flags = GFX_DISPLAY_STATE_FALLBACK;
+    /* Refresh queries ownership state and sets foreground = false */
+    assert_eq(0, terminal_display_refresh(&D, 3, 100));
+    assert_false(D.foreground);
+
+    /* PTY dirty input arrives */
+    term_core_input(&core, 'X');
+    int before_present = g_present_calls;
+    assert_eq(TERMINAL_PRESENT_SKIPPED, terminal_display_present(&D, 110));
+    assert_eq(before_present, g_present_calls);
+    assert_false(D.serial_only);
+
+    terminal_display_close(&D);
+}
+
+/* Owner generation change / recovery must trigger full redraw (redraw_pending cleared, screen presented) */
+TEST_FUNC(test_terminal_owner_restore_triggers_full_redraw) {
+    setup(640, 480, 1);
+    /* Initially background */
+    g_disp_state.flags = GFX_DISPLAY_STATE_FALLBACK;
+    g_disp_state.generation = 2;
+    terminal_display_refresh(&D, 3, 100);
+    assert_false(D.foreground);
+
+    /* Write some text while background */
+    term_core_input(&core, 'A');
+    term_core_input(&core, 'B');
+
+    /* Foreground restored with incremented ownership generation */
+    g_disp_state.flags = GFX_DISPLAY_STATE_FOREGROUND | GFX_DISPLAY_STATE_FALLBACK;
+    g_disp_state.generation = 3;
+    int before_present = g_present_calls;
+    assert_eq(0, terminal_display_refresh(&D, 3, 200));
+    assert_true(D.foreground);
+    assert_eq(3, (int)D.owner_generation);
+    assert_false(D.redraw_pending);
+    assert_true(g_present_calls > before_present);
+
+    terminal_display_close(&D);
+}
+
+/* EACCES on present does NOT count toward failures or set serial_only; sets foreground=false, redraw_pending=true */
+TEST_FUNC(test_terminal_present_eacces_pauses_without_failure) {
+    setup(640, 480, 1);
+    /* First ensure foreground */
+    assert_true(D.foreground);
+
+    /* GFX_PRESENT returns EACCES (lost foreground race) */
+    g_present_errno = EACCES;
+    assert_eq(TERMINAL_PRESENT_SKIPPED, terminal_display_present(&D, 100));
+    assert_false(D.foreground);
+    assert_true(D.redraw_pending);
+    assert_false(D.serial_only);
+
+    /* Subsequent present in background returns TERMINAL_PRESENT_SKIPPED without calling m_present */
+    int before_present = g_present_calls;
+    assert_eq(TERMINAL_PRESENT_SKIPPED, terminal_display_present(&D, 150));
+    assert_eq(before_present, g_present_calls);
+    assert_false(D.serial_only);
+
+    terminal_display_close(&D);
+}
+
+/* Mode change: prepares new view, calls replace_fallback, closes old view */
+TEST_FUNC(test_terminal_mode_replace_fallback_success) {
+    setup(640, 480, 1);
+    gfx_handle_t *old = D.gfx;
+    g_state.generation = 2;
+    g_state.info.width = 1024; g_state.info.height = 768;
+    g_disp_state.generation = 1;
+    g_disp_state.flags = GFX_DISPLAY_STATE_FOREGROUND | GFX_DISPLAY_STATE_FALLBACK;
+
+    assert_eq(0, terminal_display_refresh(&D, 3, 1000));
+    assert_true(D.gfx != old);
+    assert_eq(1, g_replace_fallback_calls);
+    assert_true(g_last_replace_old == old);
+    assert_true(g_last_replace_new == D.gfx);
+    assert_true(((struct fake_handle *)old)->closed);
+    assert_eq(1, g_close_calls);
+    assert_true(D.foreground);
+
+    terminal_display_close(&D);
+}
+
+/* Mode change when replace_fallback fails: does NOT close old view or drop role, arms retry */
+TEST_FUNC(test_terminal_mode_replace_fallback_failure_keeps_old) {
+    setup(640, 480, 1);
+    gfx_handle_t *old = D.gfx;
+    g_state.generation = 2;
+    g_replace_fallback_errno = EBUSY;
+
+    assert_eq(1, terminal_display_refresh(&D, 3, 1000));
+    assert_true(D.gfx == old);
+    assert_false(((struct fake_handle *)old)->closed);
+    assert_eq(1, g_replace_fallback_calls);
+    /* The newly allocated view was closed upon replace failure */
+    assert_eq(1, g_close_calls);
+    assert_eq(1250, (int)D.retry_deadline_ms);
+
+    /* Next retry succeeds after replace_fallback_errno cleared */
+    assert_eq(0, terminal_display_refresh(&D, 3, 1250));
+    assert_true(D.gfx != old);
+    assert_true(((struct fake_handle *)old)->closed);
+
+    terminal_display_close(&D);
+}
+
+/* Mode recovery while in background: replace_fallback succeeds, does NOT steal back foreground */
+TEST_FUNC(test_terminal_mode_recovery_in_background_does_not_steal_foreground) {
+    setup(640, 480, 1);
+    gfx_handle_t *old = D.gfx;
+    /* Currently another GUI is foreground */
+    g_disp_state.flags = GFX_DISPLAY_STATE_FALLBACK;
+    g_disp_state.generation = 2;
+    D.foreground = false;
+
+    g_state.generation = 2;
+    g_state.info.width = 800; g_state.info.height = 600;
+
+    int before_present = g_present_calls;
+    assert_eq(0, terminal_display_refresh(&D, 3, 1000));
+    assert_true(D.gfx != old);
+    assert_eq(1, g_replace_fallback_calls);
+    assert_true(g_last_replace_old == old);
+    assert_true(g_last_replace_new == D.gfx);
+    assert_true(((struct fake_handle *)old)->closed);
+    /* Crucial check: remains background! Does NOT present to screen! */
+    assert_false(D.foreground);
+    assert_eq(before_present, g_present_calls);
+    assert_true(D.redraw_pending);
+
+    terminal_display_close(&D);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_terminal_recover_aba),
     TEST_ENTRY(test_terminal_resize_changes_core),
@@ -328,6 +503,12 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_idle_poll_bound),
     TEST_ENTRY(test_terminal_permanent_eio_serial_only),
     TEST_ENTRY(test_terminal_fbtest_enomem_once),
+    TEST_ENTRY(test_terminal_background_skips_present),
+    TEST_ENTRY(test_terminal_owner_restore_triggers_full_redraw),
+    TEST_ENTRY(test_terminal_present_eacces_pauses_without_failure),
+    TEST_ENTRY(test_terminal_mode_replace_fallback_success),
+    TEST_ENTRY(test_terminal_mode_replace_fallback_failure_keeps_old),
+    TEST_ENTRY(test_terminal_mode_recovery_in_background_does_not_steal_foreground),
 TEST_LIST_END
 
 int main(void) {
