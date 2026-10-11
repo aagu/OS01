@@ -37,6 +37,10 @@ static bool            g_backend_failed;
 static bool            g_raw_mmap_seen;
 static bool            g_initialized;
 
+static const void     *g_owner;
+static const void     *g_fallback;
+static uint64_t        g_owner_generation;
+
 static bga_caps_t      g_bga_caps __attribute__((unused));
 static struct fb_info  g_bga_modes[FB_MAX_MODES];
 static uint32_t        g_bga_modes_count;
@@ -65,6 +69,10 @@ void fb_bootstrap_state(uint64_t phys, uint64_t gop_bytes, const struct fb_info 
     g_backend_failed = false;
     g_raw_mmap_seen = false;
     g_initialized = true;
+
+    g_owner = NULL;
+    g_fallback = NULL;
+    g_owner_generation = 1;
 
     /* Drop any armed fault left over from a previous session (test build
      * only; a no-op in production). */
@@ -178,6 +186,10 @@ int fb_writer_begin(fb_lease_t *lease, uint64_t expected_generation)
     if (!g_fb_mapped_addr || g_fb_mapped_size == 0) {
         spin_unlock_irqrestore(&display_state_lock, flags);
         return -EAGAIN;
+    }
+    if (g_owner != NULL) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        return -EBUSY;
     }
     if (expected_generation != 0 && expected_generation != g_fb_state.generation) {
         spin_unlock_irqrestore(&display_state_lock, flags);
@@ -546,3 +558,411 @@ void fb_state__test_set_generation(uint64_t generation)
     spin_unlock_irqrestore(&display_state_lock, flags);
 }
 #endif
+
+int fb_gfx_writer_begin(fb_lease_t *lease, uint64_t mode_seq, const void *cookie)
+{
+    if (!lease) {
+        return -EINVAL;
+    }
+    lease->held = false;
+
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    if (!g_initialized) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        return -EAGAIN;
+    }
+    if (g_backend_failed) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        return -EIO;
+    }
+    if (g_transitioning) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        return -EAGAIN;
+    }
+    if (!g_fb_mapped_addr || g_fb_mapped_size == 0) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        return -EAGAIN;
+    }
+    if (cookie == NULL || g_owner != cookie) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        return -EACCES;
+    }
+    if (mode_seq != 0 && mode_seq != g_fb_state.generation) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        return -ESTALE;
+    }
+
+    lease->snapshot.state = g_fb_state;
+    lease->snapshot.addr = g_fb_mapped_addr;
+    lease->snapshot.mapped_size = g_fb_mapped_size;
+    lease->held = true;
+    g_active_writers++;
+
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    return 0;
+}
+
+int fb_owner_get_state(const void *cookie, gfx_display_state_t *out)
+{
+    if (!out) {
+        return -EINVAL;
+    }
+
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    if (!g_initialized) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        return -EAGAIN;
+    }
+    if (g_backend_failed) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        return -EIO;
+    }
+
+    uint32_t role_flags = 0;
+    if (cookie != NULL) {
+        if (g_owner == cookie) {
+            role_flags |= GFX_DISPLAY_STATE_FOREGROUND;
+        }
+        if (g_fallback == cookie) {
+            role_flags |= GFX_DISPLAY_STATE_FALLBACK;
+        }
+    }
+
+    out->generation = g_owner_generation;
+    out->flags = role_flags;
+    out->reserved = 0;
+
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    return 0;
+}
+
+int fb_owner_register_fallback(const void *cookie, uint64_t expected_mode)
+{
+    if (!cookie) {
+        return -EINVAL;
+    }
+
+    fb_control_lock();
+
+    if (!g_initialized) {
+        fb_control_unlock();
+        return -EAGAIN;
+    }
+    if (g_backend_failed) {
+        fb_control_unlock();
+        return -EIO;
+    }
+
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    if (expected_mode != 0 && expected_mode != g_fb_state.generation) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return -ESTALE;
+    }
+    if (g_fallback != NULL && g_fallback != cookie) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return -EBUSY;
+    }
+    if (g_fallback == cookie && (g_owner == cookie || g_owner != NULL)) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return 0;
+    }
+    bool will_become_owner = (g_owner == NULL);
+    spin_unlock_irqrestore(&display_state_lock, flags);
+
+    if (will_become_owner) {
+        int tr_rc = fb_transition_begin(false);
+        if (tr_rc < 0) {
+            fb_control_unlock();
+            return tr_rc;
+        }
+    }
+
+    uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
+    flags = spin_lock_irqsave(&display_state_lock);
+
+    if (expected_mode != 0 && expected_mode != g_fb_state.generation) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        spin_unlock_irqrestore(&Pos.lock, pos_flags);
+        if (will_become_owner) {
+            fb_transition_end();
+        }
+        fb_control_unlock();
+        return -ESTALE;
+    }
+
+    if (g_fallback != NULL && g_fallback != cookie) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        spin_unlock_irqrestore(&Pos.lock, pos_flags);
+        if (will_become_owner) {
+            fb_transition_end();
+        }
+        fb_control_unlock();
+        return -EBUSY;
+    }
+
+    bool role_changed = false;
+    if (g_fallback != cookie) {
+        g_fallback = cookie;
+        role_changed = true;
+    }
+    if (g_owner == NULL) {
+        g_owner = cookie;
+        role_changed = true;
+    }
+    if (role_changed) {
+        g_owner_generation++;
+    }
+
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    spin_unlock_irqrestore(&Pos.lock, pos_flags);
+
+    if (will_become_owner) {
+        fb_transition_end();
+    }
+    fb_control_unlock();
+    return 0;
+}
+
+int fb_owner_acquire(const void *cookie, uint64_t expected_mode)
+{
+    if (!cookie) {
+        return -EINVAL;
+    }
+
+    fb_control_lock();
+
+    if (!g_initialized) {
+        fb_control_unlock();
+        return -EAGAIN;
+    }
+    if (g_backend_failed) {
+        fb_control_unlock();
+        return -EIO;
+    }
+
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    if (expected_mode != 0 && expected_mode != g_fb_state.generation) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return -ESTALE;
+    }
+    if (g_owner == cookie) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return 0;
+    }
+    if (g_owner != NULL && g_owner != g_fallback) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return -EBUSY;
+    }
+    spin_unlock_irqrestore(&display_state_lock, flags);
+
+    int tr_rc = fb_transition_begin(false);
+    if (tr_rc < 0) {
+        fb_control_unlock();
+        return tr_rc;
+    }
+
+    uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
+    flags = spin_lock_irqsave(&display_state_lock);
+
+    if (expected_mode != 0 && expected_mode != g_fb_state.generation) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        spin_unlock_irqrestore(&Pos.lock, pos_flags);
+        fb_transition_end();
+        fb_control_unlock();
+        return -ESTALE;
+    }
+
+    if (g_owner != NULL && g_owner != g_fallback && g_owner != cookie) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        spin_unlock_irqrestore(&Pos.lock, pos_flags);
+        fb_transition_end();
+        fb_control_unlock();
+        return -EBUSY;
+    }
+
+    if (g_owner != cookie) {
+        g_owner = cookie;
+        g_owner_generation++;
+    }
+
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    spin_unlock_irqrestore(&Pos.lock, pos_flags);
+
+    fb_transition_end();
+    fb_control_unlock();
+    return 0;
+}
+
+int fb_owner_release(const void *cookie)
+{
+    if (!cookie) {
+        return -EINVAL;
+    }
+
+    fb_control_lock();
+
+    if (!g_initialized) {
+        fb_control_unlock();
+        return -EAGAIN;
+    }
+    if (g_backend_failed) {
+        fb_control_unlock();
+        return -EIO;
+    }
+
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    if (g_owner != cookie || g_owner == g_fallback) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return 0;
+    }
+    spin_unlock_irqrestore(&display_state_lock, flags);
+
+    int tr_rc = fb_transition_begin(false);
+    if (tr_rc < 0) {
+        fb_control_unlock();
+        return tr_rc;
+    }
+
+    uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
+    flags = spin_lock_irqsave(&display_state_lock);
+
+    if (g_owner == cookie && g_owner != g_fallback) {
+        g_owner = g_fallback;
+        g_owner_generation++;
+    }
+
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    spin_unlock_irqrestore(&Pos.lock, pos_flags);
+
+    fb_transition_end();
+    fb_control_unlock();
+    return 0;
+}
+
+int fb_owner_replace_fallback(const void *old_cookie, const void *new_cookie, uint64_t expected_mode)
+{
+    if (!old_cookie || !new_cookie) {
+        return -EINVAL;
+    }
+
+    fb_control_lock();
+
+    if (!g_initialized) {
+        fb_control_unlock();
+        return -EAGAIN;
+    }
+    if (g_backend_failed) {
+        fb_control_unlock();
+        return -EIO;
+    }
+
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    if (expected_mode != 0 && expected_mode != g_fb_state.generation) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return -ESTALE;
+    }
+    if (g_fallback != old_cookie) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return -EINVAL;
+    }
+    if (old_cookie == new_cookie) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return 0;
+    }
+    bool old_was_owner = (g_owner == old_cookie);
+    spin_unlock_irqrestore(&display_state_lock, flags);
+
+    if (old_was_owner) {
+        int tr_rc = fb_transition_begin(false);
+        if (tr_rc < 0) {
+            fb_control_unlock();
+            return tr_rc;
+        }
+    }
+
+    uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
+    flags = spin_lock_irqsave(&display_state_lock);
+
+    if (expected_mode != 0 && expected_mode != g_fb_state.generation) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        spin_unlock_irqrestore(&Pos.lock, pos_flags);
+        if (old_was_owner) {
+            fb_transition_end();
+        }
+        fb_control_unlock();
+        return -ESTALE;
+    }
+
+    if (g_fallback != old_cookie) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        spin_unlock_irqrestore(&Pos.lock, pos_flags);
+        if (old_was_owner) {
+            fb_transition_end();
+        }
+        fb_control_unlock();
+        return -EINVAL;
+    }
+
+    g_fallback = new_cookie;
+    if (g_owner == old_cookie) {
+        g_owner = new_cookie;
+    }
+    g_owner_generation++;
+
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    spin_unlock_irqrestore(&Pos.lock, pos_flags);
+
+    if (old_was_owner) {
+        fb_transition_end();
+    }
+    fb_control_unlock();
+    return 0;
+}
+
+void fb_owner_detach(const void *cookie)
+{
+    if (!cookie) {
+        return;
+    }
+
+    fb_control_lock();
+
+    uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+
+    bool changed = false;
+
+    if (g_fallback == cookie) {
+        g_fallback = NULL;
+        changed = true;
+    }
+
+    if (g_owner == cookie) {
+        if (g_fallback != NULL) {
+            g_owner = g_fallback;
+        } else {
+            g_owner = NULL;
+        }
+        changed = true;
+    }
+
+    if (changed) {
+        g_owner_generation++;
+    }
+
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    spin_unlock_irqrestore(&Pos.lock, pos_flags);
+
+    fb_control_unlock();
+}
+
