@@ -14,9 +14,9 @@
  * All drawing goes to libgfx's private buffer via gfx_fill_rect;
  * gfx_present is invoked exactly once per visual event (after each
  * render, and after each clear-line flash) so the kernel does at
- * most one GFX_PRESENT ioctl per visual update.  The kernel-side
- * FBIOSURRENDER ioctl is still issued on /dev/fb so the kernel
- * console yields the framebuffer before gfx writes go out.
+ * most one GFX_PRESENT ioctl per visual update.  Display ownership
+ * is acquired via gfx_acquire (and restored via gfx_release on exit)
+ * so exclusive control is negotiated before gfx writes go out.
  */
 
 #include <stdint.h>

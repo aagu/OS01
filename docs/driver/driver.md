@@ -338,13 +338,13 @@ rtc_write_datetime(&new_dt);
 
 #### 帧缓冲协调器与显示所有权（Display Ownership Coordinator，2026-10-11）
 
-为解决多客户端（如 terminal 终端模拟器与桌面/GUI 应用）并发写入屏幕造成的撕裂与覆盖，帧缓冲层引入了统一的**显示所有权协调器**（`kernel/driver/fb.c`，UAPI 定义在 `kernel/include/uapi/fb.h`）：
+为解决多客户端（如 terminal 终端模拟器与桌面/GUI 应用）并发写入屏幕造成的撕裂与覆盖，帧缓冲层引入了统一的**显示所有权协调器**（`kernel/driver/fb_state.c`，头文件 `kernel/include/driver/fb_state.h`，ioctl UAPI 定义在 `kernel/include/uapi/gfx.h` 并由 `kernel/driver/gfx.c` 分发）：
 
 * **所有权状态机**：
-  * 全局维护主所有者 `g_owner`（`file_t *`）与回退持有者 `g_fallback`（`file_t *`）。
+  * 全局维护主所有者 `g_owner` 与回退持有者 `g_fallback`（均为非所有权视图 cookie `const void *cookie`，非 `file_t *`）。
   * 仅当前所有者（或无所有者时的任意 client）允许写入/present。
   * `GFX_ACQUIRE` / `GFX_RELEASE` / `GFX_REGISTER_FALLBACK` / `GFX_REPLACE_FALLBACK` ioctl 驱动状态转移。
-  * `g_owner` 异常退出或关闭 fd（`fb_release_file`）时，内核自动将所有权降级并恢复给 `g_fallback`（例如 terminal），避免屏幕被失控应用占据或黑屏。
+  * `g_owner` 异常退出或关闭 fd（最终关闭钩子 `gfx_release_file` 调用 `fb_owner_detach`）时，内核自动将所有权降级并恢复给 `g_fallback`（例如 terminal），避免屏幕被失控应用占据或黑屏。
 * **写入路径仲裁**：
   * `fb_gfx_writer_begin`：专供 `gfx0` present 调用，若调用方非当前 `g_owner` 则返回 `-EACCES`。
   * `fb_writer_begin`：传统 writer lease 路径，与 GUI owner 互斥（存在 GUI owner 时返回 `-EBUSY`）。
@@ -362,8 +362,8 @@ rtc_write_datetime(&new_dt);
 - 维护最多 16 项视图表（`g_gfx_table.slot[GFX_MAX_VIEWS=16]`），spinlock 保护分配 / 配置 / 释放
 - `GFX_CREATE_VIEW`：校验矩形（减法形式溢出 `x ≤ fb_w && w ≤ fb_w - x`），分配视图槽
 - `GFX_GET_INFO`：返回视图的 `width / height / stride / format`
-- `GFX_PRESENT`：快照视图矩形 → 校验 `fb_gfx_writer_begin` 所有权 → 释放锁 → 逐行 `syscall_check_user_range` + `copy_from_user_ft` → `fb_write_row`；中途中断返回 `-EFAULT`，前面行可能已更新（spec §4）
-- `release_file`：`file_put` 引用为 0 时清槽并释放视图结构
+- `GFX_PRESENT`：快照视图矩形 → 校验 `fb_gfx_writer_begin` 所有权 → 释放锁 → 逐行 `syscall_check_user_range` + `copy_from_user_ft` → `fb_write_row_leased`；中途中断返回 `-EFAULT`，前面行可能已更新（spec §4）
+- `release_file`：`file_put` 引用为 0 时触发 `gfx_release_file`（调用 `fb_owner_detach`），清槽并释放视图结构
 - **不提供 mmap 回调**：用户像素缓冲始终由用户提供，不通过 mmap 映射
 
 **并发模型**：

@@ -252,7 +252,7 @@ P3: fb ✅ → 2D API ✅ → 字体 → Window Server；PS/2 鼠标 ✅ 并行
 1. **排他性前台（Exclusive Foreground Owner）**：
    - 同一时刻内核只允许一个活跃前台所有者（`g_owner`）。
    - 只有持有前台所有权的句柄才能通过 `GFX_PRESENT` 向物理帧缓冲提交像素，非所有者 present 立即返回 `-EACCES`。
-   - 所有权绑定在打开的 `file_t` 对象（而非裸 PID），支持 `dup`/`fork` 引用继承，并在最终关闭（final close）时触发自动清理。
+   - 所有权在协调器中记录为打开视图的非所有权 cookie（`const void *cookie`，对应 `f->dev_private`，而非裸 PID 或 `file_t *`），支持 `dup`/`fork` 共享引用，并在最终关闭（final close，由 `gfx_release_file` 调用 `fb_owner_detach`）时触发自动清理。
 
 2. **恢复目标（Fallback Owner）**：
    - 桌面虚拟终端（`terminal.elf`）初始化时注册为系统级 fallback 所有者（`GFX_REGISTER_FALLBACK`）。

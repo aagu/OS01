@@ -8,8 +8,8 @@
 ## 2026-10-11
 
 - feat(gfx): **显示所有权协调器与异常恢复（Display Ownership Coordinator）**（分支 `feat/display-ownership`，Tasks 1–6 全部闭环）：
-  - **所有权协调状态机**：`kernel/driver/fb.c` 维护 `g_owner` / `g_fallback` 单例；新增 `GFX_ACQUIRE`、`GFX_RELEASE`、`GFX_REGISTER_FALLBACK`、`GFX_REPLACE_FALLBACK`、`GFX_GET_DISPLAY_STATE` ioctl；`g_owner` 进程显式释放或异常退出（`fb_release_file`）时自动降级切换至 `g_fallback`
-  - **写入路径仲裁**：`gfx0` 的 present 提交走 `fb_gfx_writer_begin`，非当前 owner 严格拒绝（`-EACCES`）；传统 `fb_writer_begin` 与 GUI owner 互斥
+  - **所有权协调状态机**：`kernel/driver/fb_state.c`（头文件 `kernel/include/driver/fb_state.h`）维护 `g_owner` / `g_fallback` 单例（均为非所有权视图 cookie `const void *cookie`，非 `file_t *`）；ioctl UAPI 定义在 `kernel/include/uapi/gfx.h` 并由 `kernel/driver/gfx.c` 分发（新增 `GFX_ACQUIRE`、`GFX_RELEASE`、`GFX_REGISTER_FALLBACK`、`GFX_REPLACE_FALLBACK`、`GFX_GET_DISPLAY_STATE`）；`g_owner` 进程显式释放或最终关闭（`gfx_release_file` 调用 `fb_owner_detach`）时自动降级切换至 `g_fallback`
+  - **写入路径仲裁**：`gfx0` 的 present 提交走 `fb_gfx_writer_begin`（逐行写入使用 `fb_write_row_leased`），非当前 owner 严格拒绝（`-EACCES`）；传统 `fb_writer_begin` 与 GUI owner 互斥
   - **原始 mmap 边界防护**：存在 GUI owner 时禁止直接可写 `mmap("/dev/fb")`（返回 `-EBUSY`）；只读 mmap 映射为只读 PTE；`do_mprotect` 对 `VMA_IO`（包含显存）禁止提升为可写（返回 `-EPERM`）
   - **用户态客户端与 libgfx**：`libgfx` 新增所有权管理包装 API（`gfx_acquire` / `gfx_release` / `gfx_register_fallback` 等）；terminal 注册为 fallback owner，在 GUI 进程退出或崩溃后无缝接管并恢复终端画面
   - **全量测试与回归**：
