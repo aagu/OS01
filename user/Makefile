@@ -53,8 +53,35 @@ CRT0_OBJ := $(OBJ_DIR)/crt0.o
 SIGRETURN_OBJ := $(OBJ_DIR)/sigreturn_trampoline.o
 COMMON_LINK_DEPS := $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld Makefile apps.mk
 
+# ── User runtime consumer link probe (monitor plan Task 5) ────
+# The root user component passes the consumer=user builtins archive as
+# USER_RUNTIME_ARCHIVE (build/<profile>/runtime/user/<provider>-<digest>/
+# libos01-builtins.a).  The probe is a real user program: it links crt0 +
+# the probe object + the archive (in the app-LDLIBS position, after the
+# objects, before -lc) and must therefore fail with an undefined __udivti3
+# until the user runtime consumer exists.  The archive is an ELF
+# prerequisite so an archive-only update still relinks the probe.
+RUNTIME_PROBE_NAME := user_udivti3_link_probe
+RUNTIME_PROBE_ELF  := $(BUILD_DIR)/$(RUNTIME_PROBE_NAME).elf
+RUNTIME_PROBE_OBJ  := $(OBJ_DIR)/$(RUNTIME_PROBE_NAME).o
+
+$(RUNTIME_PROBE_OBJ): $(OS01_ROOT)/runtime/selftest/$(RUNTIME_PROBE_NAME).c \
+                      $(OS01_ROOT)/runtime/selftest/udivti3_vectors.h
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(CFLAGS) -I$(OS01_ROOT)/runtime/selftest \
+		-MMD -MP -c $< -o $@
+
+$(RUNTIME_PROBE_ELF): $(RUNTIME_PROBE_OBJ) $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld \
+                      $(USER_RUNTIME_ARCHIVE)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) \
+		$(RUNTIME_PROBE_OBJ) $(USER_RUNTIME_ARCHIVE) -lc
+	$(OBJ_CPY) --strip-debug $@
+
+-include $(RUNTIME_PROBE_OBJ:.o=.d)
+
 .PHONY: all clean
-all: $(PROGRAMS)
+all: $(PROGRAMS) $(RUNTIME_PROBE_ELF)
 
 $(OBJ_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -81,7 +108,7 @@ USER_APP_$(1)_OBJECTS := $(call user_objects,$(USER_APP_$(1)_SOURCES)) $(USER_AP
 USER_OBJECTS += $$(USER_APP_$(1)_OBJECTS)
 $(call user_objects,$(filter $(1)/%,$(USER_APP_$(1)_SOURCES))): override CFLAGS += $(USER_APP_$(1)_CFLAGS)
 $(call user_objects,$(USER_APP_$(1)_SOURCES)): $(1)/app.mk
-$(BUILD_DIR)/$(1).elf: $$(USER_APP_$(1)_OBJECTS) $(COMMON_LINK_DEPS) $(1)/app.mk
+$(BUILD_DIR)/$(1).elf: $$(USER_APP_$(1)_OBJECTS) $(COMMON_LINK_DEPS) $(1)/app.mk $$(filter %.a,$$(USER_APP_$(1)_LDLIBS))
 	@mkdir -p $$(dir $$@)
 	$$(TARGET_LD) $$(USER_RAW_LDFLAGS) $(USER_APP_$(1)_LDFLAGS) -o $$@ $$(CRT0_OBJ) $$(SIGRETURN_OBJ) $$(USER_APP_$(1)_OBJECTS) $(USER_APP_$(1)_LDLIBS) -lc
 	$$(OBJ_CPY) --strip-debug $$@

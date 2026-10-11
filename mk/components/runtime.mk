@@ -11,6 +11,11 @@ $(error OS01_PROFILE_FILE='$(OS01_PROFILE_FILE)' does not exist; invoke from the
 endif
 include $(OS01_PROFILE_FILE)
 
+# Escape a single quote for a shell single-quoted field.  Shared by the
+# kernel and user variant tuples (both hash the complete tuple to keep
+# filesystem paths short; the receipts preserve readable values for audit).
+override runtime_sq = $(subst ','"'"',$(1))
+
 ifdef RUNTIME_TARGET_kernel
 
 RUNTIME_PROVIDER ?= selfhosted
@@ -42,7 +47,6 @@ endif
 # Escape a single quote for a shell single-quoted field.  Hashing the complete
 # tuple keeps filesystem paths short while the receipt preserves readable
 # values for audit.
-override runtime_sq = $(subst ','"'"',$(1))
 override RUNTIME_KERNEL_VARIANT_TUPLE := profile=$(PROFILE)|consumer=kernel|target=$(RUNTIME_TARGET_kernel)|format=$(RUNTIME_OBJECT_FORMAT_kernel)|machine=$(RUNTIME_MACHINE_kernel)|abi=$(RUNTIME_ABI_kernel)|provider=$(RUNTIME_PROVIDER)|clang=$(CLANG_ID)|resource=$(CLANG_RESOURCE_DIR)|cflags=$(RUNTIME_KERNEL_CFLAGS_NORMALIZED)|source=$(RUNTIME_KERNEL_SOURCE_DIGEST)
 override RUNTIME_KERNEL_VARIANT_DIGEST := $(strip $(shell \
     printf '%s' '$(call runtime_sq,$(RUNTIME_KERNEL_VARIANT_TUPLE))' | \
@@ -191,5 +195,86 @@ endif
 
 .PHONY: runtime-kernel
 runtime-kernel: $(KERNEL_RUNTIME_PREREQ)
+
+endif
+
+# ── User runtime consumer (monitor plan Task 5, spec §2.3) ────
+# Same variant contract as the kernel consumer, but a completely separate
+# build: build/<profile>/runtime/user/<provider>-<digest>/ with its own
+# archive, receipt and object dir.  The digest tuple below includes the
+# consumer, so the kernel and user archives can never collide even when
+# every other tuple field matches.  The profile owns the user target,
+# CFLAGS, object format, machine and ABI (the kernel variant's
+# -mcmodel=kernel objects must never be linked into a user ELF).  v1
+# supports only the selfhosted provider; anything else fails at parse time.
+
+ifdef RUNTIME_TARGET_user
+
+USER_RUNTIME_PROVIDER ?= selfhosted
+ifeq ($(USER_RUNTIME_PROVIDER),selfhosted)
+else
+$(error ERROR: user runtime provider '$(USER_RUNTIME_PROVIDER)' is unsupported; the v1 user consumer supports only selfhosted)
+endif
+
+define runtime_require_user_var
+ifeq ($(strip $($(1))),)
+$$(error ERROR: user runtime variant requires $(1))
+endif
+endef
+$(foreach v,RUNTIME_TARGET_user RUNTIME_CFLAGS_user RUNTIME_OBJECT_FORMAT_user RUNTIME_MACHINE_user RUNTIME_ABI_user,$(eval $(call runtime_require_user_var,$(v))))
+
+override RUNTIME_USER_CONSUMER := user
+override RUNTIME_USER_CFLAGS_NORMALIZED := $(strip $(RUNTIME_CFLAGS_user))
+override RUNTIME_USER_SOURCE_INPUTS := \
+    $(OS01_ROOT)/runtime/include/os01/compiler_rt.h \
+    $(OS01_ROOT)/runtime/builtins/udivti3.c
+override RUNTIME_USER_SOURCE_DIGEST := $(strip $(shell \
+    sha256sum $(RUNTIME_USER_SOURCE_INPUTS) 2>/dev/null | \
+    awk '{print $$1}' | sha256sum | cut -d' ' -f1))
+ifeq ($(RUNTIME_USER_SOURCE_DIGEST),)
+$(error ERROR: failed to compute user runtime source digest)
+endif
+
+# Same tuple shape as the kernel variant (consumer=user instead of
+# consumer=kernel), hashed to keep the filesystem path short; the receipt
+# preserves the readable values for audit.
+override RUNTIME_USER_VARIANT_TUPLE := profile=$(PROFILE)|consumer=user|target=$(RUNTIME_TARGET_user)|format=$(RUNTIME_OBJECT_FORMAT_user)|machine=$(RUNTIME_MACHINE_user)|abi=$(RUNTIME_ABI_user)|provider=$(USER_RUNTIME_PROVIDER)|clang=$(CLANG_ID)|resource=$(CLANG_RESOURCE_DIR)|cflags=$(RUNTIME_USER_CFLAGS_NORMALIZED)|source=$(RUNTIME_USER_SOURCE_DIGEST)
+override RUNTIME_USER_VARIANT_DIGEST := $(strip $(shell \
+    printf '%s' '$(call runtime_sq,$(RUNTIME_USER_VARIANT_TUPLE))' | \
+    sha256sum | cut -d' ' -f1))
+ifeq ($(RUNTIME_USER_VARIANT_DIGEST),)
+$(error ERROR: failed to compute user runtime variant key)
+endif
+
+override USER_RUNTIME_VARIANT_DIR := $(BUILD_DIR)/runtime/user/$(USER_RUNTIME_PROVIDER)-$(RUNTIME_USER_VARIANT_DIGEST)
+override USER_RUNTIME_RECEIPT := $(USER_RUNTIME_VARIANT_DIR)/runtime.receipt
+override USER_RUNTIME_ARCHIVE := $(USER_RUNTIME_VARIANT_DIR)/libos01-builtins.a
+override USER_RUNTIME_PREREQ := $(USER_RUNTIME_RECEIPT)
+
+# Grouped targets, same shape as the kernel rule: runtime/Makefile is
+# consumer-agnostic (everything consumer-specific arrives as inputs) and
+# publishes both outputs atomically enough for parallel requests.
+# RUNTIME_PROVIDER is repeated AFTER $(OS01_SUBMAKE_ARGS) because the
+# whitelist forwards the kernel provider; the user consumer's own provider
+# must win.
+$(USER_RUNTIME_ARCHIVE) $(USER_RUNTIME_RECEIPT) &: \
+		$(RUNTIME_USER_SOURCE_INPUTS) $(OS01_ROOT)/runtime/Makefile \
+		$(OS01_PROFILE_FILE)
+	$(call os01_submake,runtime,runtime-receipt \
+		"RUNTIME_CONSUMER=$(RUNTIME_USER_CONSUMER)" \
+		"RUNTIME_BUILD_DIR=$(USER_RUNTIME_VARIANT_DIR)" \
+		"RUNTIME_ARCHIVE=$(USER_RUNTIME_ARCHIVE)" \
+		"RUNTIME_RECEIPT=$(USER_RUNTIME_RECEIPT)" \
+		"RUNTIME_TARGET=$(RUNTIME_TARGET_user)" \
+		"RUNTIME_CFLAGS=$(RUNTIME_USER_CFLAGS_NORMALIZED)" \
+		"RUNTIME_OBJECT_FORMAT=$(RUNTIME_OBJECT_FORMAT_user)" \
+		"RUNTIME_MACHINE=$(RUNTIME_MACHINE_user)" \
+		"RUNTIME_ABI=$(RUNTIME_ABI_user)" \
+		"RUNTIME_SOURCE_DIGEST=$(RUNTIME_USER_SOURCE_DIGEST)" \
+		$(OS01_SUBMAKE_ARGS) \
+		"RUNTIME_PROVIDER=$(USER_RUNTIME_PROVIDER)")
+
+.PHONY: runtime-user
+runtime-user: $(USER_RUNTIME_PREREQ)
 
 endif

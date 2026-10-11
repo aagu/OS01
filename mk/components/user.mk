@@ -22,13 +22,17 @@ ifeq ($(filter userland,$(PROFILE_CAPABILITIES)),userland)
 # ── User programs ────────────────────────────────────────────
 include $(OS01_ROOT)/user/apps.mk
 USER_ARTIFACTS := $(addprefix $(USER_ARTIFACT_DIR)/,$(addsuffix .elf,$(USER_PROGRAMS)))
+# User runtime consumer link probe (monitor plan Task 5): built by the user
+# sub-make from runtime/selftest/user_udivti3_link_probe.c and published
+# beside the other user artifacts.  test-monitor-runtime consumes it.
+USER_RUNTIME_PROBE := $(USER_ARTIFACT_DIR)/user_udivti3_link_probe.elf
 
 # One grouped rule (GNU make &:, runs once per invocation): under the
 # generation lease the sub-make builds every program into $(USER_BUILD_DIR),
 # then each program ELF is copied into the artifact dir and verified. The
 # copy/verify lines are separate recipe lines (not part of the + shell), so a
 # dry run (-n) never touches the artifacts.
-$(USER_ARTIFACTS)&: $(SYSROOT_STAMP) FORCE
+$(USER_ARTIFACTS) $(USER_RUNTIME_PROBE)&: $(SYSROOT_STAMP) $(USER_RUNTIME_PREREQ) FORCE
 	@mkdir -p $(dir $(firstword $(USER_ARTIFACTS))) $(USER_BUILD_DIR)
 	@+$(SHELL) -ec '\
 	  mkdir -p "$(dir $(LOCK_DIR))"; \
@@ -60,11 +64,14 @@ $(USER_ARTIFACTS)&: $(SYSROOT_STAMP) FORCE
 	  env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
 	    MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
 	    -C user OS01_PROFILE_FILE="$(OS01_PROFILE_FILE)" PROFILE="$(PROFILE)" \
+	    USER_RUNTIME_ARCHIVE="$(USER_RUNTIME_ARCHIVE)" \
 	    all $$force SYSROOT_GENERATION_DIR="$$genabs" $(OS01_SUBMAKE_ARGS); \
 	  if [ -z "$(DRY_RUN)" ]; then printf "%s\n" "$$genid" > "$(USER_BUILD_DIR)/.sysroot-generation"; fi; \
 	'
 	@for p in $(USER_PROGRAMS); do cmp -s $(USER_BUILD_DIR)/$$p.elf $(USER_ARTIFACT_DIR)/$$p.elf || cp $(USER_BUILD_DIR)/$$p.elf $(USER_ARTIFACT_DIR)/$$p.elf; done
+	@cmp -s $(USER_BUILD_DIR)/user_udivti3_link_probe.elf $(USER_RUNTIME_PROBE) || cp $(USER_BUILD_DIR)/user_udivti3_link_probe.elf $(USER_RUNTIME_PROBE)
 	@for p in $(USER_PROGRAMS); do test -f $(USER_ARTIFACT_DIR)/$$p.elf || { echo "ERROR: missing user artifact $$p.elf"; exit 1; }; done
+	@test -f $(USER_RUNTIME_PROBE) || { echo "ERROR: missing user runtime probe artifact $(USER_RUNTIME_PROBE)"; exit 1; }
 
 # ── BusyBox adapter ───────────────────────────────────────────
 # Never writes thirdpart/busybox-1.36.1/. The manifest records the source

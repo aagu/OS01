@@ -695,6 +695,30 @@ test-monitor-host: $(if $(CASE),_test-monitor-host-run-$(CASE),$(foreach c,$(MON
 	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(MONITOR_CASES)" >&2; exit 1;; \
 	  esac
 
+# ── User runtime consumer gate (monitor plan Task 5) ─────────
+# Builds the user runtime consumer (mk/components/runtime.mk: independent
+# consumer=user archive + receipt) and the user link probe, then runs
+# qemutests/monitor_runtime_test.py against the REAL target artifacts:
+# receipt.consumer=user, kernel/user variant paths differ, the probe ELF has
+# no unresolved runtime symbols (no host-symbol backfill), and unsupported
+# user providers are rejected.  hosttests passing is not a substitute for
+# this gate.  Separate from the test-monitor-host group on purpose: this is
+# a target-artifact contract, not a host fixture.
+.PHONY: test-monitor-runtime
+# $(KERNEL_RUNTIME_PREREQ) guarantees the kernel variant receipt exists even
+# on a clean tree, so the kernel/user path-separation assertion always has
+# its counterpart; the user side builds the consumer=user archive + probe.
+test-monitor-runtime: $(KERNEL_RUNTIME_PREREQ) $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE)
+	$(call require_capability,rootfs)
+	python3 qemutests/monitor_runtime_test.py \
+	  --probe "$(USER_RUNTIME_PROBE)" \
+	  --user-receipt "$(USER_RUNTIME_RECEIPT)" \
+	  --kernel-receipt "$(KERNEL_RUNTIME_RECEIPT)" \
+	  --llvm-nm "$(LLVM_NM)" \
+	  --llvm-readobj "$(LLVM_READOBJ)" \
+	  --profile "$(PROFILE)" \
+	  --repo-root "$(OS01_ROOT)"
+
 # driver-model matrix support — see Task 11.  The python harness
 # (qemutests/driver_matrix_run.py) drives each (case, SMP) pair; the
 # build contract test (qemutests/test_arch9_build_contract.py) only
