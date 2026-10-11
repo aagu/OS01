@@ -668,8 +668,8 @@ test-gfx-primitives:
 # With CASE omitted the umbrella runs the whole registered group.
 # Implementation mirrors test-m1-host: each case gets its own .PHONY
 # runner because os01_submake must start its own recipe line.
-.PHONY: test-monitor-host _test-monitor-host-run-file _test-monitor-host-run-accounting _test-monitor-host-run-pmm _test-monitor-host-run-procfs _test-monitor-host-run-collect _test-monitor-host-run-model
-MONITOR_CASES := file accounting pmm procfs collect model
+.PHONY: test-monitor-host _test-monitor-host-run-file _test-monitor-host-run-accounting _test-monitor-host-run-pmm _test-monitor-host-run-procfs _test-monitor-host-run-collect _test-monitor-host-run-model _test-monitor-host-run-render
+MONITOR_CASES := file accounting pmm procfs collect model render
 _test-monitor-host-run-file:
 	@echo "  [test-monitor-host] file"
 	$(call os01_submake,hosttests,test-monitor-file $(OS01_SUBMAKE_ARGS))
@@ -688,6 +688,9 @@ _test-monitor-host-run-collect:
 _test-monitor-host-run-model:
 	@echo "  [test-monitor-host] model"
 	$(call os01_submake,hosttests,test-monitor-model $(OS01_SUBMAKE_ARGS))
+_test-monitor-host-run-render:
+	@echo "  [test-monitor-host] render"
+	$(call os01_submake,hosttests,test-monitor-render $(OS01_SUBMAKE_ARGS))
 test-monitor-host: CASE ?=
 test-monitor-host: CASE := $(CASE)
 test-monitor-host: $(if $(CASE),_test-monitor-host-run-$(CASE),$(foreach c,$(MONITOR_CASES),_test-monitor-host-run-$(c)))
@@ -700,6 +703,7 @@ test-monitor-host: $(if $(CASE),_test-monitor-host-run-$(CASE),$(foreach c,$(MON
 	    procfs) echo "  [test-monitor-host] CASE=$(CASE)";; \
 	    collect) echo "  [test-monitor-host] CASE=$(CASE)";; \
 	    model) echo "  [test-monitor-host] CASE=$(CASE)";; \
+	    render) echo "  [test-monitor-host] CASE=$(CASE)";; \
 	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(MONITOR_CASES)" >&2; exit 1;; \
 	  esac
 

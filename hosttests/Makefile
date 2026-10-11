@@ -104,6 +104,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_monitor_pmm.elf \
     $(TEST_BLD)/test_monitor_collect.elf \
     $(TEST_BLD)/test_monitor_model.elf \
+    $(TEST_BLD)/test_monitor_render.elf \
     $(TEST_BLD)/test_gfx_device.elf \
     $(TEST_BLD)/test_gfx_client.elf \
     $(TEST_BLD)/test_gfx_primitives.elf \
@@ -2337,6 +2338,77 @@ $(TEST_BLD)/test_monitor_model.elf: $(TEST_BLD)/test_monitor_model.o \
 
 .PHONY: test-monitor-model
 test-monitor-model: $(TEST_BLD)/test_monitor_model.elf
+	$<
+
+# Monitor plan Task 8: terminal dashboard, sampling loop and terminal
+# lifecycle.  Drives the REAL user/monitor/render.c (all output through
+# a renamed fprintf -> mon_test_fprintf) and user/monitor/monitor.c
+# (renamed isatty/tcgetattr/tcsetattr/ioctl/poll/clock_gettime/signal/
+# read + monitor_collect/monitor_sample_destroy, errno -> mon_test_errno,
+# and main -> monitor_main so the fixture keeps its own entry point).
+# model.c is linked link the real delta engine, so the loop's first
+# round renders "--" and its second renders a true "50.0%".  Asserted
+# (plan Task 8 Step 1): 5000 -> "50.0%" / invalid -> "--" / one-decimal
+# rounding, the "PMM 占用" MiB label, Source-driven temperature labels,
+# stale expiry markers, Name ESC re-escaping (no raw control byte ever
+# reaches the terminal), narrow-terminal truncation that never splits an
+# escape sequence, the single exit path (termios_restored &&
+# cursor_restored) for q/SIGINT/SIGTERM/EOF/init-failure, no uninitialized
+# termios write-back, a 3-second overrun producing exactly one catch-up
+# sample, and finite plain --samples output with unknown-argument
+# rejection.
+MONITOR_RENDER_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) -I$(TESTS_DIR)/user
+MONITOR_MAIN_CFLAGS := $(MONITOR_RENDER_CFLAGS) \
+    -Dmain=monitor_main \
+    -Disatty=mon_test_isatty \
+    -Dtcgetattr=mon_test_tcgetattr \
+    -Dtcsetattr=mon_test_tcsetattr \
+    -Dioctl=mon_test_ioctl \
+    -Dpoll=mon_test_poll \
+    -Dclock_gettime=mon_test_clock_gettime \
+    -Dsignal=mon_test_signal \
+    -Dread=mon_test_read \
+    -Dmonitor_collect=mon_test_collect \
+    -Dmonitor_sample_destroy=mon_test_sample_destroy \
+    -Derrno=mon_test_errno
+MONITOR_RENDER_PROD_CFLAGS := $(MONITOR_RENDER_CFLAGS) -Dfprintf=mon_test_fprintf
+
+$(TEST_BLD)/monitor_render_production.o: $(TESTS_DIR)/user/monitor/render.c \
+		$(TESTS_DIR)/user/monitor/render.h \
+		$(TESTS_DIR)/user/monitor/model.h \
+		$(TESTS_DIR)/user/monitor/collect.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(MONITOR_RENDER_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/monitor_main_production.o: $(TESTS_DIR)/user/monitor/monitor.c \
+		$(TESTS_DIR)/user/monitor/render.h \
+		$(TESTS_DIR)/user/monitor/model.h \
+		$(TESTS_DIR)/user/monitor/collect.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(MONITOR_MAIN_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/monitor_render_model.o: $(TESTS_DIR)/user/monitor/model.c \
+		$(TESTS_DIR)/user/monitor/model.h \
+		$(TESTS_DIR)/user/monitor/collect.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(MONITOR_RENDER_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_monitor_render.o: $(TEST_CASES)/test_monitor_render.c \
+		$(TESTS_DIR)/user/monitor/render.h \
+		$(TESTS_DIR)/user/monitor/model.h \
+		$(TESTS_DIR)/user/monitor/collect.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
+	  -I$(TESTS_DIR)/user -c $< -o $@
+
+$(TEST_BLD)/test_monitor_render.elf: $(TEST_BLD)/test_monitor_render.o \
+		$(TEST_BLD)/monitor_render_production.o \
+		$(TEST_BLD)/monitor_main_production.o \
+		$(TEST_BLD)/monitor_render_model.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+.PHONY: test-monitor-render
+test-monitor-render: $(TEST_BLD)/test_monitor_render.elf
 	$<
 
 # Gfx device test (Task 2): host-compiles the REAL
