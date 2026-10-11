@@ -1,7 +1,7 @@
 # OS01 优化路线图
 
-> **基准**: `918b6a2e`（2026-10-06）
-> **日期**: 2026-10-06
+> **基准**: `4bf23983`（2026-10-11）
+> **日期**: 2026-10-11
 
 roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `docs/changelog.md`。
 
@@ -10,7 +10,7 @@ roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `
 - **Phase 1-9**：全部就绪（COW/mmap、调度/信号/SMP、文件系统、设备驱动、用户态、poll/select、网络、时间系统）
 - **工程与架构治理**：AAGU 全套就绪；2026-10-04 规划 ARCH-1..10 架构治理任务（syscall 解耦、Linux ABI 兼容层独立、Muldefs 消除、调度器/VFS/驱动抽象治理等）
 - **aarch64 适配**：Generic Timer 全栈 + GICv2 Phase 1 + IPI fix + EL1 sync 致命诊断 + M0 启动直映 + M1 运行期直映已闭环；M2 Slab + M3 内核 VMM 设计就绪（spec v8 / plan v4），M4 用户态 VMA 与统一 kernel_main 待接入
-- **GUI**：PS/2 鼠标、`libgfx.a` + `/dev/gfx0`、Tetris 与 terminal 迁移已闭环；LVGL v9.5.0 初步移植与图形 showcase 已合并，后续推进平台后端、输入接入、Material 风格桌面与窗口系统
+- **GUI**：PS/2 鼠标、`libgfx.a` + `/dev/gfx0`、Tetris 与 terminal 迁移已闭环；QEMU 分辨率切换与显示所有权协调器（独占接管/fallback 自动恢复/只读 raw mmap 保护）已闭环；LVGL v9.5.0 初步移植与图形 showcase 已合并，后续推进平台后端、输入接入、Material 风格桌面与窗口系统
 - **安全与内存**：用户堆与 ELF 映射隔离（4 KiB ELF 分段加载、512 MiB 用户信封、brk 动态收缩与页解绑、保护范围审计）已闭环；用户态 ASLR 规划中
 
 详细背景、commit 记录、经验教训见 `docs/changelog.md` + 各专题 closure 文档（`docs/archive/aarch64/`）+ 主题 docs。
