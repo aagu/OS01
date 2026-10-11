@@ -19,11 +19,41 @@
 #define PROCFS_TYPE_MAPS      5   // /proc/<pid>/maps
 #define PROCFS_TYPE_FD_DIR    7   // /proc/<pid>/fd/   (directory)
 #define PROCFS_TYPE_FD_ENTRY  8   // /proc/<pid>/fd/<N> (synthetic file)
+// Monitor plan Task 4 (spec §6): previously unused type numbers — the
+// existing values above are unchanged.
+#define PROCFS_TYPE_STAT      9   // /proc/stat     (per-CPU tick accounting)
+#define PROCFS_TYPE_THERMAL   10  // /proc/thermal  (cached thermal sample)
 
 #define PROCFS_PID_SELF       0xFFFFFF   // sentinel: resolve to current->pid in read()
 
 // ── Public API ─────────────────────────────────────────────────
 
 void procfs_init(void);
+
+// ── Monitor plan Task 4: per-file snapshot lifecycle (spec §6) ──
+// The four statistics nodes (stat/thermal/meminfo/status) generate
+// their text ONCE per open (procfs_open_file → fs_private snapshot),
+// serve slices of that snapshot (procfs_read_file — stable EOF, so
+// segmented reads never mix two generations), and free it on the last
+// file_put (procfs_release_file, fired from file_free).  Implemented in
+// fs/procfs_snap.c, wired into procfs_ops in fs/procfs.c; non-static so
+// the host harness can drive them directly.  open_file returns 0,
+// -ENOMEM (allocation), -EOVERFLOW (formatting exceeds the fixed
+// capacity) or -ENOENT (PID already gone for status).
+struct file;
+int      procfs_open_file(struct file *f);
+int64_t  procfs_read_file(struct file *f, uint64_t offset,
+                          uint64_t size, void *buffer);
+void     procfs_release_file(struct file *f);
+
+// /proc root task-range readdir: the PID-directory scan (index >= base)
+// runs as ONE traversal under task_list_lock, so a task deleted mid-
+// scan can never be dereferenced after free; across calls the scan is
+// still dynamic (spec §5.2 — users dedups by PID, a later scan fills
+// the gaps).  Fills entry, returns 0; entry->name[0]='\0' when the
+// index is past the last task.
+struct vfs_dirent;
+int procfs_readdir_tasks(uint64_t index, struct vfs_dirent *entry,
+                         uint64_t base);
 
 #endif // _FS_PROCFS_H

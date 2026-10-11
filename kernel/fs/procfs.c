@@ -15,15 +15,8 @@
 #include <stdio.h>
 
 // ── State char for /proc/<pid>/status ───────────────────────
-static char state_char(int64_t state)
-{
-    if (state & TASK_RUNNING)        return 'R';
-    if (state & TASK_INTERRUPTIBLE)  return 'S';
-    if (state & TASK_UNINTERRUPTIBLE) return 'D';
-    if (state & TASK_ZOMBIE)         return 'Z';
-    if (state & TASK_STOPPED)        return 'T';
-    return '?';
-}
+// (Moved to fs/procfs_snap.c in monitor plan Task 4 — the statistics
+// snapshot producers live there now.)
 
 // ── Find task by PID (lockless — caller holds spinlock) ──────
 static task_t *find_task_by_pid(int pid)
@@ -93,59 +86,15 @@ static int gen_fd_target(file_t *f, char *buf, int bufsz)
 // read() time.  size=0 for directories.
 
 // ── Generate /proc/<pid>/status ──────────────────────────────
-// Returns bytes written (excluding NUL).  Buffer must be >= 256 bytes.
-static int gen_status(task_t *t, char *buf, int bufsz)
-{
-    int off = snprintf(buf, bufsz,
-        "Name:\ttask\n"
-        "Pid:\t%d\n"
-        "PPid:\t%d\n"
-        "State:\t%c\n"
-        "CPU:\t%u\n"
-        "Priority:\t%d\n",
-        (int)t->pid,
-        t->parent ? (int)t->parent->pid : 0,
-        state_char(t->state),
-        (unsigned)t->cpu,
-        (int)t->priority
-    );
-    return off;
-}
+// (Moved to fs/procfs_snap.c in monitor plan Task 4: status is now a
+// per-open snapshot via the vfs_ops open_file/read_file/release_file
+// hooks, formatted by procfs_fmt_status outside task_list_lock.)
 
 // ── Generate /proc/meminfo ───────────────────────────────────
-// Returns bytes written (excluding NUL).  Buffer must be >= 512 bytes.
-static int gen_meminfo(char *buf, int bufsz)
-{
-    uint64_t total_pages = 0;
-    uint64_t used_pages  = 0;
-    uint64_t free_pages  = 0;
-    int      zone_count  = 0;
-
-    for (int i = 0; i < (int)PMMngr.zones_size; i++) {
-        struct Zone *z = &PMMngr.zones_struct[i];
-        total_pages += z->pages_length;
-        used_pages  += z->page_using_count;
-        free_pages  += z->page_free_count;
-        zone_count++;
-    }
-
-    uint64_t total_kb = total_pages * 2048;  // 2MB pages → KB
-    uint64_t free_kb  = free_pages  * 2048;
-    uint64_t used_kb  = used_pages  * 2048;
-
-    int off = snprintf(buf, bufsz,
-        "MemTotal:\t%lu kB\n"
-        "MemFree:\t%lu kB\n"
-        "MemUsed:\t%lu kB\n"
-        "PageSize:\t2048 kB\n"
-        "Zones:\t%d\n",
-        (unsigned long)total_kb,
-        (unsigned long)free_kb,
-        (unsigned long)used_kb,
-        zone_count
-    );
-    return off;
-}
+// (Moved to fs/procfs_snap.c in monitor plan Task 4: meminfo now
+// snapshots the locked pmm_get_stats() counters (spec §4.1) per open;
+// the kB units are kept, the legacy Zones line is gone because the
+// locked snapshot exports bytes, not zone bookkeeping.)
 
 // ── Generate /proc/<pid>/maps ────────────────────────────────
 //
@@ -346,14 +295,6 @@ static int procfs_read(vfs_node_t *node, uint64_t offset,
     int ret = 0;
 
     switch (type) {
-    case PROCFS_TYPE_STATUS: {
-        task_t *t = find_task_by_pid((int)pid);
-        if (t) len = gen_status(t, local, 4096);
-        break;
-    }
-    case PROCFS_TYPE_MEMINFO:
-        len = gen_meminfo(local, 4096);
-        break;
     case PROCFS_TYPE_MAPS: {
         task_t *t = find_task_by_pid((int)pid);
         if (t) len = gen_maps(t, local, 4096);
@@ -429,33 +370,26 @@ static int procfs_readdir(vfs_node_t *node, uint64_t index,
             entry->size = 4096;
             entry->ino  = (uint32_t)(uintptr_t)PROCFS_ENCODE(PROCFS_TYPE_MEMINFO, 0);
             return 0;
-        default: {
-            // /proc/<pid> → per-process directories
-            uint64_t kidx = index - 2;
-            list_t  *pos  = init_task_union.task.list.next;
-
-            while (pos != &init_task_union.task.list) {
-                task_t *t = container_of(pos, task_t, list);
-                // Skip kernel threads and idle (pid 0)
-                if (t->pid > 0 && !(t->flags & PF_KTHREAD)) {
-                    if (kidx == 0) {
-                        char name[32];
-                        int n = snprintf(name, sizeof(name), "%d", (int)t->pid);
-                        memcpy(entry->name, name, n + 1);
-                        entry->type = VFS_DIR;
-                        entry->size = 0;
-                        entry->ino  = (uint32_t)(uintptr_t)PROCFS_ENCODE(
-                            PROCFS_TYPE_PID_DIR, (uint32_t)t->pid);
-                        return 0;
-                    }
-                    kidx--;
-                }
-                pos = pos->next;
-            }
-            // No more entries
-            entry->name[0] = '\0';
+        case 2:
+            // /proc/stat → per-CPU tick accounting (monitor plan Task 4)
+            strcpy(entry->name, "stat");
+            entry->type = VFS_FILE;
+            entry->size = 4096;
+            entry->ino  = (uint32_t)(uintptr_t)PROCFS_ENCODE(PROCFS_TYPE_STAT, 0);
             return 0;
-        }
+        case 3:
+            // /proc/thermal → cached thermal sample (monitor plan Task 4)
+            strcpy(entry->name, "thermal");
+            entry->type = VFS_FILE;
+            entry->size = 4096;
+            entry->ino  = (uint32_t)(uintptr_t)PROCFS_ENCODE(PROCFS_TYPE_THERMAL, 0);
+            return 0;
+        default:
+            // /proc/<pid> → per-process directories.  The PID scan runs
+            // as one traversal under task_list_lock (monitor plan Task 4,
+            // spec §5.2) in fs/procfs_snap.c; across calls it stays
+            // dynamic.  User tasks start at index 4.
+            return procfs_readdir_tasks(index, entry, 4);
         }
     }
 
@@ -558,10 +492,17 @@ static int procfs_readdir(vfs_node_t *node, uint64_t index,
 }
 
 // ── ops vector ────────────────────────────────────────────────
+// Monitor plan Task 4: the statistics nodes (stat/thermal/meminfo/
+// status) use the Task-1 per-file snapshot lifecycle hooks; every other
+// procfs node keeps the legacy regenerate-per-read behaviour (read_file
+// falls back to vfs_read → procfs_read when no snapshot is attached).
 static vfs_ops_t procfs_ops = {
-    .read    = procfs_read,
-    .write   = NULL,
-    .readdir = procfs_readdir,
+    .read         = procfs_read,
+    .write        = NULL,
+    .readdir      = procfs_readdir,
+    .open_file    = procfs_open_file,
+    .read_file    = procfs_read_file,
+    .release_file = procfs_release_file,
     // create / unlink / mkdir / rmdir / rename / truncate are NULL
 };
 

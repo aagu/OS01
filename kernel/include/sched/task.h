@@ -72,6 +72,9 @@ extern void idle_resume(void);
 #define PF_LINUX_ABI (1 << 3)
 #define PF_SELF_REAP (1 << 5)   // kthread exited; __switch_to epilogue frees it
 
+// task_struct.comm length (monitor spec §5.1): 63 name bytes + NUL.
+#define TASK_COMM_LEN 64
+
 // waitpid options
 #define WNOHANG 1
 
@@ -153,6 +156,19 @@ typedef struct task_struct
     // non-idle task; explicitly zeroed on every creation path and after
     // fork so a child never inherits the parent's runtime.
     uint64_t      runtime_ticks;
+
+    // ── Task identity (monitor plan Task 4, spec §5.1) ─────────
+    // birth_id: global atomic creation sequence number (stable key for
+    //   the monitor's (pid, birth_id) history table);
+    // start_ns: monotonic creation time (arch_clocksource_read_ns);
+    // comm:     NUL-terminated display basename, at most 63 bytes.
+    // All three are initialized by task_identity_init() BEFORE the task
+    // is published to the task table.  comm reads/writes (fork inherit,
+    // exec rename, procfs snapshot copy) share task_list_lock;
+    // birth_id/start_ns are written pre-publication and never change.
+    uint64_t      birth_id;
+    uint64_t      start_ns;
+    char          comm[TASK_COMM_LEN];
     uint32_t cpu; // CPU affinity — which CPU owns this task (for SMP)
 
     blocker_t blocker;              // current block state (BLOCKER_NONE = not blocked)
@@ -244,6 +260,7 @@ extern task_t *init_task[NR_CPUS];
     .priority = 2,                    /* idle task quantum = 20 ms */ \
     .ctty_type = CTTY_NONE,           \
     .ctty = NULL,                     \
+    .comm = "idle",                   /* monitor spec §5.1: kernel threads are named */ \
 }
 
 
@@ -366,6 +383,23 @@ int signal_pgrp(pid_t target, int sig);
 // it (or NULL).  Caller owns a reference and must files_unpin() it.
 // Caller does NOT touch task_t after return.
 files_t *task_files_pin_by_pid(int pid);
+
+// ── Task identity (monitor plan Task 4, spec §5.1) ─────────
+// Implemented in kernel/sched/identity.c; host harness CASE=procfs
+// drives these directly.  See identity.c for the full protocol.
+uint64_t task_next_birth_id(void);
+const char *task_basename(const char *path);
+// Pre-publication init: birth_id + start_ns + zero runtime + comm.
+void task_identity_init(task_t *tsk, const char *name);
+// comm writes below share task_list_lock with the procfs snapshot copy.
+// Caller holds task_list_lock (or owns the task pre-publication).
+void task_comm_set(task_t *tsk, const char *name);
+// fork: copy the parent's comm ONLY (never runtime/birth_id/start_ns).
+// Caller holds task_list_lock.
+void task_comm_inherit(task_t *child, const task_t *parent);
+// exec commit: rename to basename(path) under task_list_lock.  Takes
+// the lock itself; returns 0 or -EINVAL (comm untouched on failure).
+int task_comm_apply_exec(task_t *tsk, const char *path);
 
 #ifdef OS01_SELFTEST
 /* selftest-only auxv probe (spec 2026-09-17 §7 Layer 2).

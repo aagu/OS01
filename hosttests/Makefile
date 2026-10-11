@@ -2179,6 +2179,77 @@ $(TEST_BLD)/test_monitor_pmm.elf: $(TEST_BLD)/test_monitor_pmm.o \
 test-monitor-pmm: $(TEST_BLD)/test_monitor_pmm.elf
 	$<
 
+# Monitor plan Task 4: task identity + procfs snapshot producers.
+# Host-compiles the REAL kernel/fs/procfs_snap.c (the lock-taking
+# snapshot producers + /proc root task readdir), kernel/fs/procfs_fmt.c
+# (pure formatting + Name encoding), kernel/sched/identity.c (birth_id/
+# start_ns/comm lifecycle) and kernel/arch/thermal.c (weak thermal
+# defaults + per-CPU cache) against mock/procfs_test_runtime.h, which
+# shadows sched/task.h / percpu / slab and provides a test-controlled
+# task list, monotonic clock, kmalloc fail-injection and a
+# task_list_lock observation hook that can simulate the winning
+# concurrent delete (unlink + poison + free inside the acquisition).
+# The fixture stubs sched_accounting_read / pmm_get_stats — the real
+# units keep their own Task-2/Task-3 harnesses (test-monitor-accounting,
+# test-monitor-pmm).  Asserted: fork birth/runtime/comm protocol, exec
+# rename rules, Name encoding (63 control bytes → 252, one line,
+# backslash doubling, \xHH, exact-fit EOVERFLOW), status/stat/thermal/
+# meminfo formats (Version: 1 + SampleNs everywhere, meminfo kB),
+# snapshot stability across task disappearance, -ENOMEM/-EOVERFLOW
+# rollback, readdir zombie visibility + concurrent-delete safety.
+PROCFS_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
+    -Wno-unused-function -D__SPINLOCK_H__ -DOS01_HOST_TEST \
+    -include $(TEST_MOCK)/procfs_test_runtime.h \
+    -I$(TEST_MOCK)/include $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+
+# The pure formatter TU needs no mock surface at all.
+FMT_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC)
+
+$(TEST_BLD)/procfs_snap_production.o: $(TESTS_DIR)/kernel/fs/procfs_snap.c \
+		$(TEST_MOCK)/procfs_test_runtime.h \
+		$(TESTS_DIR)/kernel/include/fs/procfs_fmt.h \
+		$(TESTS_DIR)/kernel/include/fs/procfs.h \
+		$(TESTS_DIR)/kernel/include/arch/thermal.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PROCFS_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/procfs_fmt_production.o: $(TESTS_DIR)/kernel/fs/procfs_fmt.c \
+		$(TESTS_DIR)/kernel/include/fs/procfs_fmt.h \
+		$(TESTS_DIR)/kernel/include/arch/thermal.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FMT_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/identity_production.o: $(TESTS_DIR)/kernel/sched/identity.c \
+		$(TEST_MOCK)/procfs_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PROCFS_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/thermal_production.o: $(TESTS_DIR)/kernel/arch/thermal.c \
+		$(TESTS_DIR)/kernel/include/arch/thermal.h \
+		$(TEST_MOCK)/procfs_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PROCFS_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_monitor_procfs.o: $(TEST_CASES)/test_monitor_procfs.c \
+		$(TEST_MOCK)/procfs_test_runtime.h \
+		$(TESTS_DIR)/kernel/include/fs/procfs_fmt.h \
+		$(TESTS_DIR)/kernel/include/fs/procfs.h \
+		$(TESTS_DIR)/kernel/include/sched/accounting.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PROCFS_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_monitor_procfs.elf: $(TEST_BLD)/test_monitor_procfs.o \
+		$(TEST_BLD)/procfs_snap_production.o \
+		$(TEST_BLD)/procfs_fmt_production.o \
+		$(TEST_BLD)/identity_production.o \
+		$(TEST_BLD)/thermal_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+.PHONY: test-monitor-procfs
+test-monitor-procfs: $(TEST_BLD)/test_monitor_procfs.elf
+	$<
+
 # Gfx device test (Task 2): host-compiles the REAL
 # kernel/driver/gfx.c against gfx_test_runtime.h, which provides the
 # heavy stubs the lifecycle test already declares (kmalloc/kfree,

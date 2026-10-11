@@ -363,11 +363,13 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags __attribute__((unused)),
     memset(tsk, 0, sizeof(task_t));
     memset(thd, 0, sizeof(thread_t));
 
-    // Monitor plan Task 2: a child never inherits the parent's real
-    // runtime.  The memset above already zeroes runtime_ticks; keep the
-    // explicit reset so any future switch to a struct-copy fork path
-    // cannot silently reintroduce inheritance.
-    tsk->runtime_ticks = 0;
+    // Monitor plan Task 2/4 (spec §2.1/§5.1): a child never inherits the
+    // parent's real runtime.  task_identity_init also assigns the child's
+    // own birth_id + start_ns BEFORE publication and zeroes runtime_ticks
+    // explicitly, so any future switch to a struct-copy fork path cannot
+    // silently reintroduce inheritance.  comm is copied from the parent
+    // under task_list_lock, together with the list insert below.
+    task_identity_init(tsk, NULL);
 
     // ── Selective field initialization (NOT *tsk = *current) ──
     // The shallow struct copy was the root cause of the CR2=0x8
@@ -416,6 +418,10 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags __attribute__((unused)),
     list_init(&tsk->io_wait_node);
     {
         uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
+        // Monitor plan Task 4 (spec §5.1): fork copies the parent's comm
+        // under task_list_lock — the same lock the procfs status snapshot
+        // copy uses, so a reader never sees a half-written comm.
+        task_comm_inherit(tsk, current);
         list_add_to_before(&init_task_union.task.list, &tsk->list);
         spin_unlock_irqrestore(&task_list_lock, tl_flags);
     }
@@ -548,19 +554,29 @@ int kernel_thread(uint64_t (*fn)(uint64_t), uint64_t arg, uint64_t flags)
 struct task_struct *create_kthread(uint64_t (*fn)(uint64_t), uint64_t arg,
                                    const char *name)
 {
-    (void)name;
     int64_t pid = kernel_thread(fn, arg, PF_KTHREAD);
     if (pid < 0)
         return NULL;
 
+    // Monitor plan Task 4 (spec §5.1): kernel threads are named too.
+    // The lookup + rename run under task_list_lock, so a concurrent
+    // procfs reader never observes a half-written comm.  (kernel_thread
+    // has no name parameter — do_fork inherited `current`'s comm, which
+    // the spawner's name overrides here.)
+    struct task_struct *found = NULL;
+    uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
     list_t *pos = init_task_union.task.list.next;
     while (pos != &init_task_union.task.list) {
         task_t *t = container_of(pos, task_t, list);
-        if (t->pid == pid)
-            return t;
+        if (t->pid == pid) {
+            task_comm_set(t, name ? name : "kthread");
+            found = t;
+            break;
+        }
         pos = task_list_next(pos);
     }
-    return NULL;
+    spin_unlock_irqrestore(&task_list_lock, tl_flags);
+    return found;
 }
 
 // ── task_send_signal ────────────────────────────────────────
