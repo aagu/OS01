@@ -48,8 +48,10 @@ static gfx_handle_t *gfx = NULL;
 static uint32_t screen_w = DISP_FALLBACK_HOR;
 static uint32_t screen_h = DISP_FALLBACK_VER;
 
-/* Task 8: shared stale-view policy state (monotonic ms retry deadline). */
+/* Shared stale-view policy state (monotonic ms retry deadline). */
 static uint64_t gfx_retry_deadline_ms = 0;
+static bool acquired = false;
+static bool is_smoke = false;
 
 static uint64_t client_now_ms(void)
 {
@@ -64,9 +66,28 @@ static uint64_t client_now_ms(void)
  * then skips presenting until the deadline). */
 static bool gfx_present_ok(void)
 {
-    if (!gfx) return true;
+    if (is_smoke) return true;
+    if (!gfx) return false;
     uint64_t now = client_now_ms();
     if (gfx_retry_deadline_ms != 0 && now < gfx_retry_deadline_ms) return true;
+
+    if (!acquired) {
+        errno = 0;
+        if (gfx_acquire(gfx) != 0) {
+            int saved = errno;
+            if (saved == EBUSY) {
+                fprintf(stderr, "[test_lvgl] display busy (another GUI active); exiting\n");
+            } else {
+                fprintf(stderr, "[test_lvgl] gfx_acquire failed (errno=%d); exiting\n", saved);
+            }
+            gfx_close(gfx);
+            gfx = NULL;
+            errno = saved;
+            return false;
+        }
+        acquired = true;
+    }
+
     errno = 0;
     if (gfx_present(gfx) == 0) {
         gfx_retry_deadline_ms = 0;
@@ -77,10 +98,16 @@ static bool gfx_present_ok(void)
         gfx_retry_deadline_ms = now + GFX_CLIENT_RETRY_MS;
         return true;
     }
-    const char *why = (saved == ESTALE)
-        ? "display mode changed, restart the app"
-        : "display device failure";
+    const char *why;
+    if (saved == EACCES) {
+        why = "lost display foreground ownership";
+    } else if (saved == ESTALE) {
+        why = "display mode changed, restart the app";
+    } else {
+        why = "display device failure";
+    }
     fprintf(stderr, "[test_lvgl] %s (errno=%d); exiting\n", why, saved);
+    gfx_release(gfx);
     gfx_close(gfx);
     gfx = NULL;
     errno = saved;                   /* cleanup must not clobber it */
@@ -462,6 +489,7 @@ int main(int argc, char **argv)
                                   strcmp(argv[1], "--wait") == 0 ||
                                   strcmp(argv[1], "gui") == 0));
     bool smoke_mode = (argc > 1 && strcmp(argv[1], "smoke") == 0);
+    is_smoke = smoke_mode;
 
     printf("[test_lvgl] Starting LVGL v9.5.0 smoke test...\n");
 
@@ -507,27 +535,33 @@ int main(int argc, char **argv)
     printf("[test_lvgl] Monotonic tick progression verified.\n");
 
     /* 5. Probe Framebuffer and libgfx */
-    int fb_fd = open("/dev/fb", O_RDWR);
-    if (fb_fd >= 0) {
+    if (smoke_mode) {
+        /* Smoke mode is strictly off-screen and does not touch physical display */
+        screen_w = DISP_FALLBACK_HOR;
+        screen_h = DISP_FALLBACK_VER;
+        gfx = NULL;
+    } else {
+        int fb_fd = open("/dev/fb", O_RDONLY);
+        if (fb_fd < 0) {
+            fprintf(stderr, "[test_lvgl] open /dev/fb failed: %s\n", strerror(errno));
+            return 1;
+        }
         struct fb_info info;
         ssize_t r = read(fb_fd, &info, sizeof(info));
-        ioctl(fb_fd, FBIOSURRENDER, NULL);
         close(fb_fd);
 
-        if (r == (ssize_t)sizeof(info) && info.width > 0 && info.height > 0) {
-            screen_w = info.width;
-            screen_h = info.height;
+        if (r != (ssize_t)sizeof(info) || info.width == 0 || info.height == 0) {
+            fprintf(stderr, "[test_lvgl] invalid framebuffer metadata\n");
+            return 1;
+        }
 
-            if (!smoke_mode) {
-                /* Enter alt screen and wait out terminal CMD_HOLD_MS (500ms) */
-                write(1, "\x1b[?1049h\x1b[2J", 12);
-                poll(NULL, 0, 550);
-            }
+        screen_w = info.width;
+        screen_h = info.height;
 
-            gfx = gfx_open(0, 0, screen_w, screen_h);
-            if (!gfx) {
-                printf("[test_lvgl] WARNING: gfx_open failed, using headless memory display\n");
-            }
+        gfx = gfx_open(0, 0, screen_w, screen_h);
+        if (!gfx) {
+            fprintf(stderr, "[test_lvgl] gfx_open failed (errno=%d)\n", errno);
+            return 1;
         }
     }
 
@@ -622,10 +656,11 @@ int main(int argc, char **argv)
 
     /* 12. Cleanup */
     if (gfx) {
+        if (acquired) {
+            gfx_release(gfx);
+        }
         gfx_close(gfx);
-    }
-    if (!smoke_mode && fb_fd >= 0) {
-        write(1, "\x1b[?1049l", 8);
+        gfx = NULL;
     }
 
     return 0;

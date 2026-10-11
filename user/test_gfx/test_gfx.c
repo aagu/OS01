@@ -146,7 +146,7 @@
  * mapping, *out_info the metadata.  Caller closes + munmaps. */
 static int fb_open_and_map(uint32_t **out_fb, struct fb_info *out_info)
 {
-    int fd = open("/dev/fb", O_RDWR);
+    int fd = open("/dev/fb", O_RDONLY);
     if (fd < 0)
         FAIL("cannot open /dev/fb (errno=%d)", errno);
     if (read(fd, out_info, sizeof(*out_info)) !=
@@ -157,7 +157,7 @@ static int fb_open_and_map(uint32_t **out_fb, struct fb_info *out_info)
         FAIL("/dev/fb reports zero dimensions (w=%u h=%u stride=%u)",
              out_info->width, out_info->height, out_info->stride);
     size_t bytes = (size_t)out_info->height * (size_t)out_info->stride;
-    void *p = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+    void *p = mmap(NULL, bytes, PROT_READ,
                    MAP_SHARED, fd, 0);
     if (p == MAP_FAILED)
         FAIL("mmap of /dev/fb failed (errno=%d)", errno);
@@ -234,6 +234,8 @@ static void test_fullscreen_view(uint32_t *fb, const struct fb_info *info,
     gfx_line(h, 0, 0, dmax - 1, dmax - 1, COLOR_WHITE);
 
     /* Push the frame to the kernel. */
+    if (gfx_acquire(h) != 0)
+        FAIL("gfx_acquire(full) returned %d errno=%d", -1, errno);
     errno = 0;
     if (gfx_present(h) != 0)
         FAIL("gfx_present returned %d errno=%d", -1, errno);
@@ -267,8 +269,8 @@ static void test_fullscreen_view(uint32_t *fb, const struct fb_info *info,
      * would fail here by design. */
     if (diag_pt != COLOR_WHITE)
         FAIL("diagonal pixel (%u,%u) = 0x%08X, expected WHITE 0x%08X",
-             (uint32_t)(dmax / 2), (uint32_t)(dmax / 2),
-             diag_pt, COLOR_WHITE);
+              (uint32_t)(dmax / 2), (uint32_t)(dmax / 2),
+              diag_pt, COLOR_WHITE);
     if (left_pt != COLOR_RED)
         FAIL("off-diagonal LEFT (10,11) = 0x%08X, expected RED 0x%08X",
              left_pt, COLOR_RED);
@@ -276,6 +278,8 @@ static void test_fullscreen_view(uint32_t *fb, const struct fb_info *info,
         FAIL("off-diagonal RIGHT (w-10,h-11) = 0x%08X, expected GREEN 0x%08X",
              right_pt, COLOR_GREEN);
 
+    if (gfx_release(h) != 0)
+        FAIL("gfx_release(full) returned %d errno=%d", -1, errno);
     gfx_close(h);
 }
 
@@ -325,12 +329,18 @@ static void test_small_central_view(uint32_t *fb,
 
     /* Push the sentinel frame so the yellow band is in the
      * framebuffer BEFORE the small-view present runs. */
+    if (gfx_acquire(full) != 0)
+        FAIL("full gfx_acquire errno=%d", errno);
     if (gfx_present(full) != 0)
         FAIL("full gfx_present (sentinels) errno=%d", errno);
+    if (gfx_release(full) != 0)
+        FAIL("full gfx_release errno=%d", errno);
     gfx_close(full);
 
     /* Now paint the small view blue + present it. */
     gfx_fill_rect(small, 0, 0, cw, ch, COLOR_BLUE);
+    if (gfx_acquire(small) != 0)
+        FAIL("small gfx_acquire errno=%d", errno);
     if (gfx_present(small) != 0)
         FAIL("small gfx_present errno=%d", errno);
 
@@ -364,6 +374,8 @@ static void test_small_central_view(uint32_t *fb,
         FAIL("inside small view = 0x%08X, expected BLUE 0x%08X",
              inside, COLOR_BLUE);
 
+    if (gfx_release(small) != 0)
+        FAIL("small gfx_release errno=%d", errno);
     gfx_close(small);
 }
 
@@ -501,12 +513,6 @@ int main(void)
              (unsigned long long)headroom_need,
              (unsigned long long)fb_bytes,
              HEAP_HEADROOM, HEAP_LIMIT);
-
-    /* Tell the kernel we're surrendering the framebuffer so gfx0
-     * presents can land without racing terminal.c's writes.  This
-     * is the same ioctl terminal.c uses on its way in (see
-     * user/terminal/terminal.c). */
-    (void)ioctl(fb_fd, FBIOSURRENDER, NULL);
 
     /* Tests in spec order.  Each prints its own FAIL reason. */
     test_negative_cases(info.width, info.height); /* no QEMU drawing needed   */

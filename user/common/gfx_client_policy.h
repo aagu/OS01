@@ -23,9 +23,10 @@
  *   0   success (err == 0)
  *   1   transient (err == EAGAIN): keep the view, retry after at least
  *       GFX_CLIENT_RETRY_MS — do NOT reopen the view, do NOT exit
- *  -1   permanent (ESTALE: the view is stale after a mode switch; EIO:
- *       device failure; or any other unexpected errno): release the
- *       graphics resources and exit non-zero.
+ *  -1   permanent (EACCES: lost foreground ownership/not display owner;
+ *       ESTALE: the view is stale after a mode switch; EIO: device failure;
+ *       or any other unexpected errno): release the graphics resources
+ *       and exit non-zero without busy retrying.
  *
  * Pure: it never issues a syscall and never touches errno, so the
  * caller's failing errno survives for the diagnostic message. */
