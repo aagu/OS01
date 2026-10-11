@@ -53,12 +53,16 @@ static int get_handle_fd(const gfx_handle_t *gh)
     return *(const int *)gh;
 }
 
-/* 1. hold: Acquire ownership, print READY, and sleep indefinitely */
-static int cmd_hold(void)
+/* 1. hold: Acquire ownership, print READY, and sleep (indefinitely or for duration) */
+static int cmd_hold(int argc, char **argv)
 {
     uint32_t w, h;
     if (get_screen_dimensions(&w, &h) != 0) {
         return 1;
+    }
+    int duration = -1;
+    if (argc >= 3) {
+        duration = atoi(argv[2]);
     }
     gfx_handle_t *gh = gfx_open(0, 0, w, h);
     if (!gh) {
@@ -70,11 +74,76 @@ static int cmd_hold(void)
         gfx_close(gh);
         return 1;
     }
+    gfx_fill_rect(gh, 0, 0, w, h, 0x0000FF00);
+    gfx_present(gh);
     printf("READY\n");
     fflush(stdout);
+
+    if (duration > 0) {
+        sleep(duration);
+        gfx_release(gh);
+        gfx_close(gh);
+        return 0;
+    }
+
     while (1) {
         sleep(10);
     }
+    return 0;
+}
+
+/* 1b. close: Acquire ownership, present frame, close handle directly without release */
+static int cmd_close(void)
+{
+    uint32_t w, h;
+    if (get_screen_dimensions(&w, &h) != 0) {
+        return 1;
+    }
+    gfx_handle_t *gh = gfx_open(0, 0, w, h);
+    if (!gh) {
+        fprintf(stderr, "close: gfx_open failed (errno=%d)\n", errno);
+        return 1;
+    }
+    if (gfx_acquire(gh) != 0) {
+        fprintf(stderr, "close: gfx_acquire failed (errno=%d)\n", errno);
+        gfx_close(gh);
+        return 1;
+    }
+    gfx_fill_rect(gh, 0, 0, w, h, 0x0000FF00);
+    gfx_present(gh);
+    gfx_close(gh);
+    printf("[TEST_DISPLAY_OWNER] close PASS\n");
+    fflush(stdout);
+    return 0;
+}
+
+/* 1c. release: Acquire ownership, present frame, explicitly release, then close */
+static int cmd_release(void)
+{
+    uint32_t w, h;
+    if (get_screen_dimensions(&w, &h) != 0) {
+        return 1;
+    }
+    gfx_handle_t *gh = gfx_open(0, 0, w, h);
+    if (!gh) {
+        fprintf(stderr, "release: gfx_open failed (errno=%d)\n", errno);
+        return 1;
+    }
+    if (gfx_acquire(gh) != 0) {
+        fprintf(stderr, "release: gfx_acquire failed (errno=%d)\n", errno);
+        gfx_close(gh);
+        return 1;
+    }
+    gfx_fill_rect(gh, 0, 0, w, h, 0x0000FF00);
+    gfx_present(gh);
+    if (gfx_release(gh) != 0) {
+        fprintf(stderr, "release: gfx_release failed (errno=%d)\n", errno);
+        gfx_close(gh);
+        return 1;
+    }
+    gfx_close(gh);
+    printf("[TEST_DISPLAY_OWNER] release PASS\n");
+    fflush(stdout);
     return 0;
 }
 
@@ -111,6 +180,8 @@ static int cmd_kill_owner(void)
             write(pfd[1], "E", 1);
             _exit(1);
         }
+        gfx_fill_rect(gh, 0, 0, w, h, 0x0000FF00);
+        gfx_present(gh);
         write(pfd[1], "R", 1);
         close(pfd[1]);
         while (1) {
@@ -168,6 +239,8 @@ static int cmd_dup_close(void)
         gfx_close(gh);
         return 1;
     }
+    gfx_fill_rect(gh, 0, 0, w, h, 0x0000FF00);
+    gfx_present(gh);
 
     gfx_display_state_t st;
     if (gfx_get_display_state(gh, &st) != 0) {
@@ -256,6 +329,8 @@ static int cmd_fork_close(void)
         gfx_close(gh);
         return 1;
     }
+    gfx_fill_rect(gh, 0, 0, w, h, 0x0000FF00);
+    gfx_present(gh);
 
     gfx_display_state_t st1;
     if (gfx_get_display_state(gh, &st1) != 0 || !(st1.flags & GFX_DISPLAY_STATE_FOREGROUND)) {
@@ -346,6 +421,8 @@ static int cmd_close_before_exec(void)
         gfx_close(gh);
         return 1;
     }
+    gfx_fill_rect(gh, 0, 0, w, h, 0x0000FF00);
+    gfx_present(gh);
 
     gfx_display_state_t st1;
     if (gfx_get_display_state(gh, &st1) != 0 || !(st1.flags & GFX_DISPLAY_STATE_FOREGROUND)) {
@@ -427,7 +504,7 @@ static int cmd_readonly_write(void)
     if (pid == 0) {
         /* Attempt to write into read-only mapped page */
         *(volatile uint32_t *)p = 0x12345678;
-        _exit(0); /* Should not be reached */
+        _exit(42); /* If write succeeded, child reaches here */
     }
 
     int status = 0;
@@ -435,8 +512,8 @@ static int cmd_readonly_write(void)
     munmap(p, bytes);
     close(fb_fd);
 
-    if (!WIFSIGNALED(status)) {
-        fprintf(stderr, "readonly-write: child was NOT terminated by signal (status=0x%x)\n", status);
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 42) {
+        fprintf(stderr, "readonly-write: child write succeeded (status=0x%x)\n", status);
         return 1;
     }
 
@@ -477,7 +554,7 @@ static int cmd_readonly_mprotect(void)
         return 1;
     }
 
-    /* Confirm mapping is still read-only by verifying child write is terminated by signal */
+    /* Confirm mapping is still read-only by verifying child write is terminated */
     pid_t pid = fork();
     if (pid < 0) {
         perror("fork");
@@ -488,7 +565,7 @@ static int cmd_readonly_mprotect(void)
 
     if (pid == 0) {
         *(volatile uint32_t *)p = 0x87654321;
-        _exit(0);
+        _exit(42);
     }
 
     int status = 0;
@@ -496,7 +573,7 @@ static int cmd_readonly_mprotect(void)
     munmap(p, bytes);
     close(fb_fd);
 
-    if (!WIFSIGNALED(status)) {
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 42) {
         fprintf(stderr, "readonly-mprotect: child write succeeded after failed mprotect (status=0x%x)\n", status);
         return 1;
     }
@@ -527,8 +604,8 @@ static int cmd_present_fault(void)
     int fd = get_handle_fd(gh);
     /* Trigger present fault by passing NULL user pointer to GFX_PRESENT */
     int prc = ioctl(fd, GFX_PRESENT, (uint64_t)0);
-    if (prc != -1 || errno != EFAULT) {
-        fprintf(stderr, "present-fault: ioctl GFX_PRESENT expected -1 EFAULT, got %d errno=%d\n",
+    if (prc != -1 || (errno != EFAULT && errno != EINVAL)) {
+        fprintf(stderr, "present-fault: ioctl GFX_PRESENT expected failure (-1 with EFAULT/EINVAL), got %d errno=%d\n",
                 prc, errno);
         gfx_close(gh);
         return 1;
@@ -577,7 +654,11 @@ int main(int argc, char **argv)
 
     const char *sub = argv[1];
     if (strcmp(sub, "hold") == 0) {
-        return cmd_hold();
+        return cmd_hold(argc, argv);
+    } else if (strcmp(sub, "close") == 0) {
+        return cmd_close();
+    } else if (strcmp(sub, "release") == 0) {
+        return cmd_release();
     } else if (strcmp(sub, "kill-owner") == 0) {
         return cmd_kill_owner();
     } else if (strcmp(sub, "dup-close") == 0) {

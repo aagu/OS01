@@ -240,3 +240,30 @@ Step 5 (集成验证) ──→ 所有 Step 完成后
 ```
 P3: fb ✅ → 2D API ✅ → 字体 → Window Server；PS/2 鼠标 ✅ 并行
 ```
+
+---
+
+## 显示所有权协调协议（Display Ownership Protocol，2026-10-11）
+
+> 状态：**已完成**。提供排他性前台显示控制权协调、崩溃恢复与 libgfx 接口封装。
+
+### 架构与核心概念
+
+1. **排他性前台（Exclusive Foreground Owner）**：
+   - 同一时刻内核只允许一个活跃前台所有者（`g_owner`）。
+   - 只有持有前台所有权的句柄才能通过 `GFX_PRESENT` 向物理帧缓冲提交像素，非所有者 present 立即返回 `-EACCES`。
+   - 所有权绑定在打开的 `file_t` 对象（而非裸 PID），支持 `dup`/`fork` 引用继承，并在最终关闭（final close）时触发自动清理。
+
+2. **恢复目标（Fallback Owner）**：
+   - 桌面虚拟终端（`terminal.elf`）初始化时注册为系统级 fallback 所有者（`GFX_REGISTER_FALLBACK`）。
+   - 当没有前台 GUI 启动时，fallback 兼任前台所有者。
+   - 当全屏应用（如 `test_lvgl`、`desktop`、`tetris`）通过 `GFX_ACQUIRE` 抢占前台时，fallback 降为后台等待态。
+   - 当全屏应用主动调用 `GFX_RELEASE`、正常关闭或异常退出（SIGKILL/崩溃）由内核执行最终关闭时，前台所有权自动回退到 fallback（若无 fallback 则退回内核 console），触发终端完整重绘。
+
+3. **libgfx 用户态封装（`libgfx/gfx.h`）**：
+   - `int gfx_claim_ownership(gfx_handle_t *h)`：前台抢占（`GFX_ACQUIRE`），成功后可调用 `gfx_present`。
+   - `int gfx_release_ownership(gfx_handle_t *h)`：主动归还所有权（`GFX_RELEASE`），前台恢复至 fallback。
+   - `int gfx_register_fallback(gfx_handle_t *h)`：注册为全屏 fallback 恢复目标。
+   - `int gfx_get_display_state(gfx_handle_t *h, gfx_display_state_t *out)`：查询当前所有权代数及前台/fallback 状态标志。
+   - `int gfx_replace_fallback(gfx_handle_t *old_h, gfx_handle_t *new_h)`：在分辨率切换等场景下原子换绑 fallback。
+

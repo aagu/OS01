@@ -353,6 +353,8 @@ int main(void)
                     break;
                 } else if (errno == EINTR) {
                     continue;
+                } else if (errno == EAGAIN) {
+                    break;
                 } else {
                     shell_exited = true;
                     break;

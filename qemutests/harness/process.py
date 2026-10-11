@@ -91,10 +91,10 @@ class ProcessSession:
         # Child + state.
         self._proc: Optional[subprocess.Popen] = None
         self._stdout_decoder: codecs.IncrementalDecoder = (
-            codecs.getincrementaldecoder("utf-8")()
+            codecs.getincrementaldecoder("utf-8")(errors="replace")
         )
         self._stderr_decoder: codecs.IncrementalDecoder = (
-            codecs.getincrementaldecoder("utf-8")()
+            codecs.getincrementaldecoder("utf-8")(errors="replace")
         )
         self._text = ""
         self._stderr_text = ""
