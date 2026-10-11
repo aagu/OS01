@@ -22,6 +22,14 @@
 #define NR_CPUS 8
 #endif
 
+/* The fallback above only fires when the real arch value is not visible
+ * yet; if the arch NR_CPUS ever drifts away from 8, procfs_stat_snap
+ * would silently mis-size cpu[] and /proc/stat would truncate cores.
+ * Fail loudly at compile time instead (monitor design Task 4 review). */
+_Static_assert(NR_CPUS == 8,
+               "procfs_fmt.h fallback NR_CPUS != arch NR_CPUS: "
+               "/proc/stat cpu[] sizing would truncate cores");
+
 /* task_t comm is NUL-terminated and holds at most 63 bytes + NUL. */
 #define PROCFS_COMM_MAX 64
 #define PROCFS_COMM_DATA_MAX (PROCFS_COMM_MAX - 1)

@@ -5,6 +5,10 @@
 
 ---
 
+## 2026-10-11
+
+- chore(monitor): **/proc/meminfo 移除 legacy `Zones:` 行**（monitor 分支 Task 4）——可观察的格式变更备案：该行无任何消费者（内核内或用户态），monitor spec 亦未约束它，故随 procfs 统一格式化（`kernel/fs/procfs_fmt.h`）一并删除；其余 meminfo 字段与 kB 单位保持不变
+
 ## 2026-10-07
 
 - cleanup(aarch64): **M2/M3 杂项 cosmetic 遗留 7 项全部闭环**（分支 `worktree-m23-cosmetic-cleanup`，7 commits）：
