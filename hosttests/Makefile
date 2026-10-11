@@ -100,6 +100,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_mouse_proto.elf \
     $(TEST_BLD)/test_gfx_file_lifecycle.elf \
     $(TEST_BLD)/test_monitor_file.elf \
+    $(TEST_BLD)/test_monitor_accounting.elf \
     $(TEST_BLD)/test_gfx_device.elf \
     $(TEST_BLD)/test_gfx_client.elf \
     $(TEST_BLD)/test_gfx_primitives.elf \
@@ -2116,6 +2117,39 @@ $(TEST_BLD)/test_monitor_file.elf: $(TEST_BLD)/test_monitor_file.o \
 		$(TEST_BLD)/gfx_devfs_production.o \
 		$(TEST_BLD)/gfx_file_production.o
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+# Monitor plan Task 2: per-CPU tick accounting.  Host-compiles the REAL
+# kernel/sched/accounting.c against mock/accounting_test_runtime.h,
+# which short-circuits sched/task.h + percpu/percpu.h and provides a
+# test-controlled cpu_id() / percpu_data[] / current, so the fixture
+# drives the production accounting code (not a mock of it).  The test TU
+# reuses test_platform.h's percpu_t / spinlock stubs (FRAMEWORK_INC
+# preincludes it FIRST, so the mock header takes its test-TU branch);
+# the production object must NOT see FRAMEWORK_INC — test_platform.h
+# typedefs a stale percpu_t and a constant cpu_id().
+ACC_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC)
+ACC_PROD_CFLAGS := $(ACC_HOST_CFLAGS) \
+                   -include $(TEST_MOCK)/accounting_test_runtime.h
+
+$(TEST_BLD)/accounting_production.o: $(TESTS_DIR)/kernel/sched/accounting.c \
+		$(TEST_MOCK)/accounting_test_runtime.h \
+		$(TESTS_DIR)/kernel/include/sched/accounting.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ACC_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_monitor_accounting.o: $(TEST_CASES)/test_monitor_accounting.c \
+		$(TEST_MOCK)/accounting_test_runtime.h \
+		$(TESTS_DIR)/kernel/include/sched/accounting.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FRAMEWORK_INC) $(ACC_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_monitor_accounting.elf: $(TEST_BLD)/test_monitor_accounting.o \
+		$(TEST_BLD)/accounting_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-monitor-accounting
+test-monitor-accounting: $(TEST_BLD)/test_monitor_accounting.elf
+	$<
 
 # Gfx device test (Task 2): host-compiles the REAL
 # kernel/driver/gfx.c against gfx_test_runtime.h, which provides the

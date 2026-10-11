@@ -363,6 +363,12 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags __attribute__((unused)),
     memset(tsk, 0, sizeof(task_t));
     memset(thd, 0, sizeof(thread_t));
 
+    // Monitor plan Task 2: a child never inherits the parent's real
+    // runtime.  The memset above already zeroes runtime_ticks; keep the
+    // explicit reset so any future switch to a struct-copy fork path
+    // cannot silently reintroduce inheritance.
+    tsk->runtime_ticks = 0;
+
     // ── Selective field initialization (NOT *tsk = *current) ──
     // The shallow struct copy was the root cause of the CR2=0x8
     // page fault: it copied stale list nodes (wait_list, io_wait_node),

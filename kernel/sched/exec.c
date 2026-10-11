@@ -385,6 +385,11 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     }
 
     memset(tsk, 0, sizeof(task_t));
+
+    // Monitor plan Task 2: every creation path starts with zero real
+    // runtime (memset covers it; kept explicit like in do_fork).
+    tsk->runtime_ticks = 0;
+
     tsk->stack_alloc_base = raw_alloc;
 
     tsk->state = TASK_UNINTERRUPTIBLE;

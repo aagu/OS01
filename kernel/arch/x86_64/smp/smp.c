@@ -8,6 +8,7 @@
 #include <arch/irq.h>
 #include <arch/x86_64/gate.h>
 #include <arch/msr.h>
+#include <sched/accounting.h>
 #include <core/debug.h>
 #include <memory/memory.h>
 #include <memory/vmm.h>
@@ -121,8 +122,16 @@ void ap_entry(void)
     // switch.
     load_TR((8 + cpu->cpu_id * 2));
 
-    // Start per-CPU scheduling tick
-    lapic_timer_start(100);
+    // Start per-CPU scheduling tick.  Monitor plan Task 2: the AP's
+    // accounting lifecycle is published HERE, exactly once, from the
+    // REAL lapic_timer_start() return value — a failed AP timer stays
+    // valid=0 (unavailable) and must never be flipped to valid by any
+    // other per-cpu callback (the BSP-side subsys callback skips the
+    // publish entirely).
+    {
+        bool tick_started = lapic_timer_start(100);
+        sched_accounting_cpu_start(cpu->cpu_id, 100, tick_started);
+    }
 
     __sync_synchronize();
     cpu->online = 1;                     // 1. 先活（BSP 等待循环退出条件）

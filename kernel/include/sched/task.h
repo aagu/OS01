@@ -145,6 +145,14 @@ typedef struct task_struct
     uint64_t      vruntime;   // accumulated virtual runtime (ticks)
     uint64_t      deadline;   // vruntime + slice, rbtree sort key
     bool          on_rq;      // true when on a CPU's runqueue
+
+    // ── Real runtime in ticks (monitor plan Task 2, spec §2.1) ──
+    // Independent of vruntime (wakeups/fork/migration perturb vruntime,
+    // so it is not a wall-runtime delta source).  Atomically fetch-added
+    // once per timer tick by sched_account_tick() for the interrupted
+    // non-idle task; explicitly zeroed on every creation path and after
+    // fork so a child never inherits the parent's runtime.
+    uint64_t      runtime_ticks;
     uint32_t cpu; // CPU affinity — which CPU owns this task (for SMP)
 
     blocker_t blocker;              // current block state (BLOCKER_NONE = not blocked)
