@@ -44,6 +44,7 @@ typedef struct terminal_display {
     bool serial_only;             /* permanent device failure: no graphics */
     bool redraw_pending;          /* new view bound or foreground restored, full redraw not yet presented */
     bool pending_winsize;         /* PTY master TIOCSWINSZ not yet delivered */
+    bool refresh_presented;       /* true if the last terminal_display_refresh executed a redraw+present */
     terminal_display_ops_t ops;
 } terminal_display_t;
 
@@ -52,6 +53,9 @@ void terminal_display_init(terminal_display_t *d, gfx_handle_t *gfx,
                            term_core_t *core, const psf2_t *font,
                            const struct fb_info *info, uint64_t generation,
                            uint32_t fg, uint32_t bg);
+
+/* Synchronize owner_generation and foreground state with the underlying display. */
+int terminal_display_sync_owner(terminal_display_t *d);
 
 /* 0 = nothing to recover / recovered, 1 = retry after 250ms, -1 = permanent
  * device failure (d->serial_only set; caller keeps forwarding to serial). */

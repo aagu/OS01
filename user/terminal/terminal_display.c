@@ -88,6 +88,20 @@ void terminal_display_init(terminal_display_t *d, gfx_handle_t *gfx,
     term_render_init(&d->render, gfx, font, core, fg, bg);
 }
 
+int terminal_display_sync_owner(terminal_display_t *d)
+{
+    if (!d->gfx || !d->ops.gfx_get_display_state) {
+        return -1;
+    }
+    gfx_display_state_t dst;
+    if (d->ops.gfx_get_display_state(d->gfx, &dst) != 0) {
+        return -1;
+    }
+    d->owner_generation = dst.generation;
+    d->foreground = (dst.flags & GFX_DISPLAY_STATE_FOREGROUND) != 0;
+    return 0;
+}
+
 // Device errors that no amount of retrying will fix.
 static bool errno_is_permanent(int e)
 {
@@ -140,6 +154,7 @@ static int redraw(terminal_display_t *d, uint64_t now_ms)
     if (rc == 0) {
         d->redraw_pending = false;
         d->retry_deadline_ms = 0;
+        d->refresh_presented = true;
         return 0;
     }
     if (rc == TERMINAL_PRESENT_SKIPPED) {
@@ -150,6 +165,7 @@ static int redraw(terminal_display_t *d, uint64_t now_ms)
 
 int terminal_display_refresh(terminal_display_t *d, int fb_fd, uint64_t now_ms)
 {
+    d->refresh_presented = false;
     if (d->serial_only) return -1;
     if (d->retry_deadline_ms && now_ms < d->retry_deadline_ms) return 1;
 

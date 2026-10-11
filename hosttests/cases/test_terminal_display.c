@@ -567,6 +567,79 @@ TEST_FUNC(test_terminal_background_ticks_do_not_redraw_until_restore) {
     terminal_display_close(&D);
 }
 
+/* Item 1: after fallback registration, syncing owner avoids redundant redraw on first tick */
+TEST_FUNC(test_terminal_no_redundant_redraw_on_first_refresh_after_fallback_sync) {
+    setup(640, 480, 1);
+    /* Kernel owner_generation increments to 2 after fallback registration */
+    g_disp_state.flags = GFX_DISPLAY_STATE_FOREGROUND | GFX_DISPLAY_STATE_FALLBACK;
+    g_disp_state.generation = 2;
+
+    /* Sync owner generation from display state */
+    assert_eq(0, terminal_display_sync_owner(&D));
+    assert_eq(2, D.owner_generation);
+    assert_true(D.foreground);
+
+    int before_presents = g_present_calls;
+
+    /* First refresh tick: generation unchanged, owner unchanged => no redraw / no present */
+    assert_eq(0, terminal_display_refresh(&D, 3, 100));
+    assert_eq(before_presents, g_present_calls);
+    assert_false(D.redraw_pending);
+    assert_false(D.refresh_presented);
+
+    terminal_display_close(&D);
+}
+
+/* Item 2: foreground restore reports refresh_presented and causes exactly one present */
+TEST_FUNC(test_terminal_foreground_restore_reports_presented_and_causes_exactly_one_present) {
+    setup(640, 480, 1);
+    g_disp_state.flags = GFX_DISPLAY_STATE_FOREGROUND | GFX_DISPLAY_STATE_FALLBACK;
+    g_disp_state.generation = 2;
+    terminal_display_sync_owner(&D);
+
+    /* View loses foreground */
+    g_disp_state.flags = GFX_DISPLAY_STATE_FALLBACK;
+    g_disp_state.generation = 3;
+    assert_eq(0, terminal_display_refresh(&D, 3, 100));
+    assert_false(D.foreground);
+
+    /* Output arrived in background: terminal marks dirty */
+    bool dirty_pending = true;
+    uint64_t last_present_ms = 0;
+    int present_failures = 0;
+
+    /* Foreground restored */
+    g_disp_state.flags = GFX_DISPLAY_STATE_FOREGROUND | GFX_DISPLAY_STATE_FALLBACK;
+    g_disp_state.generation = 4;
+
+    int before_presents = g_present_calls;
+    uint64_t now_ms = 200;
+    uint64_t gen_before = D.generation;
+
+    int rr = terminal_display_refresh(&D, 3, now_ms);
+    assert_eq(0, rr);
+    assert_true(D.refresh_presented);
+    assert_eq(before_presents + 1, g_present_calls);
+
+    /* terminal.c event loop logic: reset dirty_pending and last_present_ms when refresh presented */
+    if (D.generation != gen_before || D.refresh_presented) {
+        last_present_ms = now_ms;
+        dirty_pending = false;
+        present_failures = 0;
+    }
+
+    uint64_t elapsed = now_ms - last_present_ms;
+    /* Step 1 in terminal.c: must NOT present a second time */
+    if (dirty_pending && elapsed >= 33 &&
+        !(D.retry_deadline_ms && now_ms < D.retry_deadline_ms)) {
+        terminal_display_present(&D, now_ms);
+    }
+
+    assert_eq(before_presents + 1, g_present_calls);
+
+    terminal_display_close(&D);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_terminal_recover_aba),
     TEST_ENTRY(test_terminal_resize_changes_core),
@@ -585,6 +658,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_terminal_mode_recovery_in_background_does_not_steal_foreground),
     TEST_ENTRY(test_terminal_foreground_dirty_retry_poll_timeout_avoids_busy_loop),
     TEST_ENTRY(test_terminal_background_ticks_do_not_redraw_until_restore),
+    TEST_ENTRY(test_terminal_no_redundant_redraw_on_first_refresh_after_fallback_sync),
+    TEST_ENTRY(test_terminal_foreground_restore_reports_presented_and_causes_exactly_one_present),
 TEST_LIST_END
 
 int main(void) {

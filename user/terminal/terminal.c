@@ -173,6 +173,7 @@ int main(void)
         exec(ASH_PATH, ash_argv, environ);
         return 1;
     }
+    terminal_display_sync_owner(&disp);
 
     term_render_clear(&disp.render);
     term_core_mark_all_dirty(&core);
@@ -271,7 +272,7 @@ int main(void)
             serial_msg(serial_fd, "\r\n[terminal] graphics unavailable, serial only\r\n");
             serial_only_logged = true;
         }
-        if (disp.generation != gen_before) {
+        if (disp.generation != gen_before || disp.refresh_presented) {
             last_present_ms = now_ms;       // redraw already presented
             dirty_pending = false;
             present_failures = 0;
