@@ -311,7 +311,8 @@ int main(void)
 
         // 2. Compute poll timeout
         int base = -1;
-        if (dirty_pending && disp.foreground) {
+        if (dirty_pending && disp.foreground &&
+            !(disp.retry_deadline_ms && now_ms < disp.retry_deadline_ms)) {
             uint64_t cur_elapsed = now_ms - last_present_ms;
             base = (cur_elapsed < FRAME_INTERVAL_MS) ?
                    (int)(FRAME_INTERVAL_MS - cur_elapsed) : 0;

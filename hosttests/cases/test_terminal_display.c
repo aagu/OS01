@@ -493,6 +493,36 @@ TEST_FUNC(test_terminal_mode_recovery_in_background_does_not_steal_foreground) {
     terminal_display_close(&D);
 }
 
+/* Foreground + dirty + retry active => timeout > 0 and <= remaining retry window, avoiding zero-timeout busy poll */
+TEST_FUNC(test_terminal_foreground_dirty_retry_poll_timeout_avoids_busy_loop) {
+    setup(640, 480, 1);
+    assert_true(D.foreground);
+
+    /* Arm retry deadline (e.g. from EAGAIN on present or prepare failure) */
+    D.retry_deadline_ms = 1250;
+    uint64_t now_ms = 1000;
+
+    /* PTY/core is dirty and cur_elapsed >= FRAME_INTERVAL_MS.
+     * When present is blocked by retry deadline, terminal.c computes base timeout or base=0.
+     * Even if base=0 is requested, poll timeout must NOT return 0 (no busy poll).
+     * It must return > 0 and <= remaining retry window (250ms). */
+    int t_base_0 = terminal_display_poll_timeout(&D, 0, now_ms);
+    assert_true(t_base_0 > 0);
+    assert_true(t_base_0 <= 250);
+    assert_eq(250, t_base_0);
+
+    /* As time advances, timeout tracks the remaining retry window */
+    int t_base_adv = terminal_display_poll_timeout(&D, 0, 1150);
+    assert_true(t_base_adv > 0);
+    assert_eq(100, t_base_adv);
+
+    /* With negative base (-1 = indefinite), it also waits up to the retry deadline */
+    int t_base_neg = terminal_display_poll_timeout(&D, -1, now_ms);
+    assert_eq(250, t_base_neg);
+
+    terminal_display_close(&D);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_terminal_recover_aba),
     TEST_ENTRY(test_terminal_resize_changes_core),
@@ -509,6 +539,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_terminal_mode_replace_fallback_success),
     TEST_ENTRY(test_terminal_mode_replace_fallback_failure_keeps_old),
     TEST_ENTRY(test_terminal_mode_recovery_in_background_does_not_steal_foreground),
+    TEST_ENTRY(test_terminal_foreground_dirty_retry_poll_timeout_avoids_busy_loop),
 TEST_LIST_END
 
 int main(void) {

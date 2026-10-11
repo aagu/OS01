@@ -256,13 +256,20 @@ int terminal_display_refresh(terminal_display_t *d, int fb_fd, uint64_t now_ms)
 int terminal_display_poll_timeout(const terminal_display_t *d,
                                   int base_timeout_ms, uint64_t now_ms)
 {
+    if (!d->serial_only && d->retry_deadline_ms && d->retry_deadline_ms > now_ms) {
+        int w = (int)(d->retry_deadline_ms - now_ms);
+        if (w > (int)TERMINAL_RETRY_MS) w = (int)TERMINAL_RETRY_MS;
+        if (base_timeout_ms < 0 || base_timeout_ms < w) {
+            return w;
+        }
+        if (base_timeout_ms > (int)TERMINAL_RETRY_MS) {
+            return (int)TERMINAL_RETRY_MS;
+        }
+        return base_timeout_ms;
+    }
+
     int t = base_timeout_ms;
     if (t < 0 || t > (int)TERMINAL_RETRY_MS) t = (int)TERMINAL_RETRY_MS;
-    if (!d->serial_only && d->retry_deadline_ms) {
-        int w = d->retry_deadline_ms > now_ms
-                    ? (int)(d->retry_deadline_ms - now_ms) : 0;
-        if (w < t) t = w;
-    }
     return t;
 }
 
