@@ -176,7 +176,7 @@ int terminal_display_refresh(terminal_display_t *d, int fb_fd, uint64_t now_ms)
         return fail(d, e, now_ms);
     }
     if (st.generation == d->generation) {
-        if (d->redraw_pending) return redraw(d, now_ms);
+        if (d->redraw_pending && d->foreground) return redraw(d, now_ms);
         d->retry_deadline_ms = 0;
         return 0;
     }

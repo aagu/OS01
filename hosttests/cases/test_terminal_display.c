@@ -523,6 +523,43 @@ TEST_FUNC(test_terminal_foreground_dirty_retry_poll_timeout_avoids_busy_loop) {
     terminal_display_close(&D);
 }
 
+/* Background ticks with redraw_pending must NOT execute redraw (no render/clear), but preserve redraw_pending until restore */
+TEST_FUNC(test_terminal_background_ticks_do_not_redraw_until_restore) {
+    setup(640, 480, 1);
+    /* Transition to background */
+    g_disp_state.flags = GFX_DISPLAY_STATE_FALLBACK;
+    g_disp_state.generation = 2;
+    assert_eq(0, terminal_display_refresh(&D, 3, 100));
+    assert_false(D.foreground);
+
+    /* Flag a redraw while in background */
+    D.redraw_pending = true;
+
+    /* Plant a canary in view pixels */
+    struct fake_handle *fh = (struct fake_handle *)D.gfx;
+    fh->pixels[0] = 0x12345678;
+
+    /* Tick in background */
+    assert_eq(0, terminal_display_refresh(&D, 3, 110));
+    assert_false(D.foreground);
+    /* In background ticks: redraw_pending must remain true, no render/clear should run */
+    assert_true(D.redraw_pending);
+    assert_eq(0x12345678, fh->pixels[0]);
+
+    /* Restore foreground */
+    g_disp_state.flags = GFX_DISPLAY_STATE_FOREGROUND | GFX_DISPLAY_STATE_FALLBACK;
+    g_disp_state.generation = 3;
+    int before_present = g_present_calls;
+    assert_eq(0, terminal_display_refresh(&D, 3, 200));
+    assert_true(D.foreground);
+    assert_false(D.redraw_pending);
+    /* Full redraw executed: canary overwritten and screen presented */
+    assert_true(fh->pixels[0] != 0x12345678);
+    assert_true(g_present_calls > before_present);
+
+    terminal_display_close(&D);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_terminal_recover_aba),
     TEST_ENTRY(test_terminal_resize_changes_core),
@@ -540,6 +577,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_terminal_mode_replace_fallback_failure_keeps_old),
     TEST_ENTRY(test_terminal_mode_recovery_in_background_does_not_steal_foreground),
     TEST_ENTRY(test_terminal_foreground_dirty_retry_poll_timeout_avoids_busy_loop),
+    TEST_ENTRY(test_terminal_background_ticks_do_not_redraw_until_restore),
 TEST_LIST_END
 
 int main(void) {
