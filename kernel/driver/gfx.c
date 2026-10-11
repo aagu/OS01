@@ -500,7 +500,8 @@ static int gfx_ioctl_file(file_t *f, int cmd, void *arg)
             return -EINVAL;
         }
 
-        if (old_file->node && devfs_get_file_ops(old_file) != &gfx_ops) {
+        const struct devfs_ops *ops = devfs_get_file_ops(old_file);
+        if (!old_file->node || ops != &gfx_ops) {
             file_put(old_file);
             return -EINVAL;
         }

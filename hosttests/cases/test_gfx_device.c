@@ -1190,6 +1190,34 @@ TEST_FUNC(test_replace_fallback_non_gfx_fd_returns_einval) {
     file_put(dummy);
 }
 
+TEST_FUNC(test_replace_fallback_null_node_returns_einval) {
+    reset_test_state();
+    file_t *f_old = open_gfx0();
+    assert_not_null(f_old);
+    gfx_view_desc_t v_old = { 0, 0, TEST_FB_WIDTH, TEST_FB_HEIGHT };
+    assert_eq(0, do_create_view(f_old, &v_old));
+    assert_eq(0, do_register_fallback(f_old));
+
+    file_t *dummy = file_alloc();
+    dummy->type = FD_DEV;
+    dummy->node = NULL;
+    dummy->dev_private = f_old->dev_private;
+    test_files.fd[2] = dummy;
+
+    file_t *f_new = open_gfx0();
+    assert_not_null(f_new);
+    gfx_view_desc_t v_new = { 0, 0, TEST_FB_WIDTH, TEST_FB_HEIGHT };
+    assert_eq(0, do_create_view(f_new, &v_new));
+
+    gfx_replace_fallback_t req = { .old_fd = 2, .reserved = 0 };
+    assert_eq(-EINVAL, do_replace_fallback(f_new, &req));
+
+    file_put(f_new);
+    test_files.fd[2] = NULL;
+    file_put(dummy);
+    file_put(f_old);
+}
+
 TEST_FUNC(test_present_not_owner_returns_eacces_and_no_writes) {
     reset_test_state();
     file_t *f = open_gfx0();
@@ -1269,6 +1297,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_replace_fallback_invalid_old_fd_returns_ebadf),
     TEST_ENTRY(test_replace_fallback_fault_returns_efault),
     TEST_ENTRY(test_replace_fallback_non_gfx_fd_returns_einval),
+    TEST_ENTRY(test_replace_fallback_null_node_returns_einval),
     TEST_ENTRY(test_present_not_owner_returns_eacces_and_no_writes),
     TEST_ENTRY(test_acquire_and_present_success),
 TEST_LIST_END
