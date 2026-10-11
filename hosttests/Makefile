@@ -102,6 +102,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_monitor_file.elf \
     $(TEST_BLD)/test_monitor_accounting.elf \
     $(TEST_BLD)/test_monitor_pmm.elf \
+    $(TEST_BLD)/test_monitor_collect.elf \
     $(TEST_BLD)/test_gfx_device.elf \
     $(TEST_BLD)/test_gfx_client.elf \
     $(TEST_BLD)/test_gfx_primitives.elf \
@@ -2248,6 +2249,47 @@ $(TEST_BLD)/test_monitor_procfs.elf: $(TEST_BLD)/test_monitor_procfs.o \
 
 .PHONY: test-monitor-procfs
 test-monitor-procfs: $(TEST_BLD)/test_monitor_procfs.elf
+	$<
+
+# Monitor plan Task 6: user-space collection + strict parsing.  The
+# fixture drives the REAL user/monitor/collect.c (freestanding userland
+# code, OS01 libc headers) against a fixture-owned fake procfs.  The
+# production TU's libc calls are renamed onto mon_test_* shims with -D
+# (open/read/close/opendir/readdir/closedir/malloc/free), giving the
+# fixture an interposition seam WITHOUT relying on host-libc symbol
+# overriding: the fixture serves per-path text or -ENOENT, chunks
+# reads, counts open fds (NOFILE discipline) and injects allocation
+# failures.  Asserted: §6 validity rules (required/duplicate/overflow/
+# illegal -> -EINVAL, unknown keys ignored, order/whitespace
+# independent, Version must be 1), meminfo kB->bytes with T=0 invalid,
+# Name decode (\\ and \xHH only, no decoded NUL, <=63 bytes, name is a
+# copy), thermal fixed reason table + unknown marker + State-decided
+# usability, PID all-decimal dedup, ENOENT skip, per-PID
+# close-before-next-open with max_open_fds <= baseline+2, overlong
+# files invalid, per-metric isolation, OOM round rollback (-ENOMEM).
+MONITOR_COLLECT_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) -I$(TESTS_DIR)/user \
+    -Dopen=mon_test_open -Dclose=mon_test_close -Dread=mon_test_read \
+    -Dopendir=mon_test_opendir -Dreaddir=mon_test_readdir \
+    -Dclosedir=mon_test_closedir \
+    -Dmalloc=mon_test_malloc -Dfree=mon_test_free
+
+$(TEST_BLD)/monitor_collect_production.o: $(TESTS_DIR)/user/monitor/collect.c \
+		$(TESTS_DIR)/user/monitor/collect.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(MONITOR_COLLECT_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_monitor_collect.o: $(TEST_CASES)/test_monitor_collect.c \
+		$(TESTS_DIR)/user/monitor/collect.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
+	  -I$(TESTS_DIR)/user -c $< -o $@
+
+$(TEST_BLD)/test_monitor_collect.elf: $(TEST_BLD)/test_monitor_collect.o \
+		$(TEST_BLD)/monitor_collect_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+.PHONY: test-monitor-collect
+test-monitor-collect: $(TEST_BLD)/test_monitor_collect.elf
 	$<
 
 # Gfx device test (Task 2): host-compiles the REAL
