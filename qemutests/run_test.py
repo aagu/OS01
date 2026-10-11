@@ -610,7 +610,12 @@ def test_systest(tester):
             return False
         if "COW TTY READY" not in m.group(0):
             break
-        tester.send_line("COW!")
+        # The handshake payload is exactly 4 bytes: the guest's tty read
+        # consumes ``"COW!"`` verbatim, and anything extra — send_line's
+        # trailing newline in particular — stays in the tty input buffer
+        # and shifts every later region's stream by one byte (region 0
+        # passes, regions 1-3 read "\nCOW" and FAIL the memcmp).
+        tester.send("COW!")
     if m and "COW TTY READY" in m.group(0):
         m = tester.read_until(re.compile(result_pattern),
                               timeout=max(0, deadline - time.monotonic()))
@@ -623,11 +628,12 @@ def test_systest(tester):
               "instead of /bin/systest). Rebuild with: make OS01_SYSTEST=1 test-qemu SUITE=systest")
         return False
 
-    # RESULT line matched — drain whatever remains (in particular the
-    # ``[TEST] END`` record that follows it) so parse_v1 sees the
-    # complete trace.
+    # RESULT line matched — the tail it belongs to may still be
+    # trickling out of the emulated UART (the match fires as soon as
+    # the ``RESULT:`` bytes arrive, with the ``[TEST] END`` record
+    # still in the pipe), so the 1-second observation window below is
+    # what drains the rest of the trace into the session.
     time.sleep(2)
-    output = tester._read_available().decode('utf-8', errors='replace')
 
     # 1-second observation window (spec §5.3): a kernel panic that
     # arrives within observe(1) after the RESULT line FAILs the run
@@ -640,6 +646,13 @@ def test_systest(tester):
         if _panic_in(tail):
             print("FAIL: kernel panic in 1-second observation window")
             return False
+
+    # Snapshot the trace only AFTER the observation window has drained
+    # the session — ``_read_available()`` (serial-stdio mode) returns
+    # the bytes received so far, and anything not yet drained (the
+    # ``[TEST] END`` record above all) must be received before
+    # parse_v1 validates the trace.
+    output = tester._read_available().decode('utf-8', errors='replace')
 
     # Protocol v1 is the only success gate (spec §6.1 / §6.2).
     if parse_v1 is None:
