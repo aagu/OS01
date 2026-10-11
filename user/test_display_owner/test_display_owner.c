@@ -512,8 +512,8 @@ static int cmd_readonly_write(void)
     munmap(p, bytes);
     close(fb_fd);
 
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 42) {
-        fprintf(stderr, "readonly-write: child write succeeded (status=0x%x)\n", status);
+    if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGSEGV) {
+        fprintf(stderr, "readonly-write: expected SIGSEGV, status=0x%x\n", status);
         return 1;
     }
 
