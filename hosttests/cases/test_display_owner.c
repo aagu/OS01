@@ -463,6 +463,66 @@ TEST_FUNC(test_uaccess_fault_all_exits_release_lease)
     CHECK_EQ(0, fb_owner_acquire(COOKIE_B, 1));
 }
 
+/*
+ * Test 9:
+ * Backend failure during drain causes acquire to end transition and return -EIO.
+ */
+TEST_FUNC(test_drain_with_backend_failure_ends_transition_and_returns_eio)
+{
+    setup_env();
+    g_mock_use_real_clock = true;
+    g_mock_yield_on_wait = true;
+
+    CHECK_EQ(0, fb_owner_register_fallback(COOKIE_A, 1));
+
+    fb_lease_t leaseA = {0};
+    CHECK_EQ(0, fb_gfx_writer_begin(&leaseA, 1, COOKIE_A));
+    CHECK_TRUE(leaseA.held);
+    CHECK_EQ(1, (int)fb_active_writers_count());
+
+    pthread_barrier_t barrier;
+    pthread_barrier_init(&barrier, NULL, 2);
+    acquire_thread_arg_t a_arg = {
+        .barrier = &barrier,
+        .acquire_rc = -999,
+    };
+    pthread_t th;
+    pthread_create(&th, NULL, acquire_worker, &a_arg);
+
+    pthread_barrier_wait(&barrier);
+
+    /* Wait until worker enters drain */
+    bool drain_observed = false;
+    for (int spins = 0; spins < 2000; spins++) {
+        fb_lease_t probe = {0};
+        int prc = fb_gfx_writer_begin(&probe, 1, COOKIE_A);
+        if (probe.held) {
+            fb_writer_end(&probe);
+        }
+        if (prc == -EAGAIN) {
+            drain_observed = true;
+            break;
+        }
+        usleep(1000);
+    }
+    CHECK_TRUE(drain_observed);
+
+    /* Mark backend as failed while acquire is blocked in drain */
+    fb_mark_failed();
+
+    /* Release the writer lease so drain finishes */
+    fb_writer_end(&leaseA);
+
+    pthread_join(th, NULL);
+    pthread_barrier_destroy(&barrier);
+
+    /* Acquire must detect g_backend_failed after drain and return -EIO */
+    CHECK_EQ(-EIO, a_arg.acquire_rc);
+
+    /* Subsequent transition attempt should see -EIO, NOT -EBUSY (transition ended) */
+    CHECK_EQ(-EIO, fb_transition_begin(false));
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_owner_acquire_release_hierarchy),
     TEST_ENTRY(test_owner_detach_scenarios),
@@ -472,6 +532,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_drain_failure_preserves_owner_and_generation),
     TEST_ENTRY(test_role_check_and_writer_count_no_gap),
     TEST_ENTRY(test_uaccess_fault_all_exits_release_lease),
+    TEST_ENTRY(test_drain_with_backend_failure_ends_transition_and_returns_eio),
 TEST_LIST_END
 
 int main(void)

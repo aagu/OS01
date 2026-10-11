@@ -42,7 +42,7 @@ static bool            g_initialized;
 
 static const void     *g_owner;
 static const void     *g_fallback;
-static uint64_t        g_owner_generation;
+static uint64_t        g_owner_generation = 1;
 
 static bga_caps_t      g_bga_caps __attribute__((unused));
 static struct fb_info  g_bga_modes[FB_MAX_MODES];
@@ -747,6 +747,16 @@ int fb_owner_register_fallback(const void *cookie, uint64_t expected_mode)
     uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
     flags = spin_lock_irqsave(&display_state_lock);
 
+    if (g_backend_failed) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        spin_unlock_irqrestore(&Pos.lock, pos_flags);
+        if (will_become_owner) {
+            fb_transition_end();
+        }
+        fb_control_unlock();
+        return -EIO;
+    }
+
     if (g_raw_writable_mmap_seen) {
         spin_unlock_irqrestore(&display_state_lock, flags);
         spin_unlock_irqrestore(&Pos.lock, pos_flags);
@@ -850,6 +860,14 @@ int fb_owner_acquire(const void *cookie, uint64_t expected_mode)
     uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
     flags = spin_lock_irqsave(&display_state_lock);
 
+    if (g_backend_failed) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        spin_unlock_irqrestore(&Pos.lock, pos_flags);
+        fb_transition_end();
+        fb_control_unlock();
+        return -EIO;
+    }
+
     if (g_raw_writable_mmap_seen) {
         spin_unlock_irqrestore(&display_state_lock, flags);
         spin_unlock_irqrestore(&Pos.lock, pos_flags);
@@ -922,6 +940,14 @@ int fb_owner_release(const void *cookie)
     uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
     flags = spin_lock_irqsave(&display_state_lock);
 
+    if (g_backend_failed) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        spin_unlock_irqrestore(&Pos.lock, pos_flags);
+        fb_transition_end();
+        fb_control_unlock();
+        return -EIO;
+    }
+
     if (g_owner == cookie && g_owner != g_fallback) {
         g_owner = g_fallback;
         g_owner_generation++;
@@ -982,6 +1008,16 @@ int fb_owner_replace_fallback(const void *old_cookie, const void *new_cookie, ui
 
     uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
     flags = spin_lock_irqsave(&display_state_lock);
+
+    if (g_backend_failed) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        spin_unlock_irqrestore(&Pos.lock, pos_flags);
+        if (old_was_owner) {
+            fb_transition_end();
+        }
+        fb_control_unlock();
+        return -EIO;
+    }
 
     if (expected_mode != 0 && expected_mode != g_fb_state.generation) {
         spin_unlock_irqrestore(&display_state_lock, flags);
