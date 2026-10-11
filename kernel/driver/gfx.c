@@ -46,6 +46,7 @@
 #include <uapi/gfx.h>
 #include <fs/file.h>
 #include <fs/devfs.h>
+#include <sched/task.h>
 #include <memory/uaccess.h>      // syscall_check_user_range, copy_*_ft
 #include <memory/slab.h>         // kmalloc, kfree
 #include <arch/spinlock.h>       // spinlock_T, spin_lock_irqsave

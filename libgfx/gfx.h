@@ -91,6 +91,43 @@ int gfx_set_clip(gfx_handle_t *h, int32_t x, int32_t y,
  * with errno=EINVAL without issuing an ioctl. */
 int gfx_present(gfx_handle_t *h);
 
+/* ── Ownership & Fallback (Display Ownership Plan) ─────────────
+ * Exclusive display ownership, fallback role registration, and
+ * display state query wrappers for /dev/gfx0.
+ *
+ * All wrappers return 0 on success, or -1 on error with errno set
+ * from the underlying ioctl. On success, errno is NOT modified.
+ * If any handle or output pointer argument is NULL, the functions
+ * immediately return -1 with errno=EINVAL without issuing an ioctl.
+ */
+
+/* Request exclusive display ownership for this view.
+ * Issues GFX_ACQUIRE ioctl with explicit third argument (uint64_t)0.
+ * Returns 0 on success, -1 on failure (e.g. EBUSY if another GUI owns the screen). */
+int gfx_acquire(gfx_handle_t *h);
+
+/* Relinquish exclusive display ownership, restoring fallback if registered
+ * or returning to the kernel console.
+ * Issues GFX_RELEASE ioctl with explicit third argument (uint64_t)0.
+ * Returns 0 on success, -1 on failure. */
+int gfx_release(gfx_handle_t *h);
+
+/* Register this view as the fallback owner target.
+ * Issues GFX_REGISTER_FALLBACK ioctl with explicit third argument (uint64_t)0.
+ * Returns 0 on success, -1 on failure (e.g. EBUSY if a different fallback is active). */
+int gfx_register_fallback(gfx_handle_t *h);
+
+/* Query current display ownership generation and foreground/fallback role flags.
+ * Issues GFX_GET_DISPLAY_STATE ioctl.
+ * Returns 0 on success (populating *out), -1 on failure. */
+int gfx_get_display_state(gfx_handle_t *h, gfx_display_state_t *out);
+
+/* Atomically transfer fallback role from old_h to new_h.
+ * Issues GFX_REPLACE_FALLBACK ioctl on new_h->fd with req.old_fd = old_h->fd
+ * and req.reserved = 0.
+ * Returns 0 on success, -1 on failure. */
+int gfx_replace_fallback(gfx_handle_t *old_h, gfx_handle_t *new_h);
+
 /* ── Archive-function declarations (Task 4) ────────────────────
  *
  * Each primitive routes through one `gfx__*_impl` function in

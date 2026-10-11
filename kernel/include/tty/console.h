@@ -1,6 +1,8 @@
 #ifndef _KERNEL_CONSOLE_H
 #define _KERNEL_CONSOLE_H
 
+#include <stdbool.h>
+
 // Initialize the software terminal.
 // Must be called after framebuffer is mapped and PIT is running.
 void console_init(void);
