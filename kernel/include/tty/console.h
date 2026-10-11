@@ -21,6 +21,9 @@ void console_force_enable(void);
 // Force re-enable framebuffer output while Pos.lock is already held.
 void console_force_enable_locked(void);
 
+// Set console active while Pos.lock is already held.
+void console_set_active_locked(bool active);
+
 // Notify console of mode resize while holding Pos.lock.
 // Resets term_cursor_row/col and Pos.XPosition/YPosition to 0.
 void console_notify_resize_locked(void);

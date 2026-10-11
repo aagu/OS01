@@ -795,6 +795,31 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
 
     spin_lock(&current->mm->lock);
 
+    // Pre-scan: verify no holes and no VMA_IO across the whole target range
+    // before modifying any VMA or PTE.
+    uint64_t scan_addr = addr;
+    list_t *scan_pos = current->mm->vma_list.next;
+    while (scan_pos != &current->mm->vma_list) {
+        vma_t *v = container_of(scan_pos, vma_t, list);
+        if (v->vm_end <= scan_addr) { scan_pos = scan_pos->next; continue; }
+        if (v->vm_start >= end) break;
+        if (v->vm_start > scan_addr) {
+            spin_unlock(&current->mm->lock);
+            return -ENOMEM;
+        }
+        if (v->vm_flags & VMA_IO) {
+            spin_unlock(&current->mm->lock);
+            return -EPERM;
+        }
+        scan_addr = v->vm_end;
+        if (scan_addr >= end) break;
+        scan_pos = scan_pos->next;
+    }
+    if (scan_addr < end) {
+        spin_unlock(&current->mm->lock);
+        return -ENOMEM;
+    }
+
     uint64_t *user_pgd = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pgdir);
 
     list_t *pos = current->mm->vma_list.next;
@@ -802,12 +827,6 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
         vma_t *v = container_of(pos, vma_t, list);
         if (v->vm_end <= addr)   { pos = pos->next; continue; }
         if (v->vm_start >= end)  break;
-
-        // Hole check
-        if (v->vm_start > addr) {
-            spin_unlock(&current->mm->lock);
-            return -ENOMEM;
-        }
 
         // Update VMA
         v->vm_flags     &= ~(VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC);

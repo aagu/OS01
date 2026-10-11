@@ -746,6 +746,58 @@ static void test_sys_exec_uses_destroy_helper(void)
     free(src);
 }
 
+static void test_do_mprotect_vma_io_rejected(void)
+{
+    TEST_SUITE("do_mprotect — VMA_IO rejected with EPERM, no modifications");
+
+    setup_mm();
+    current_task_for_host_test()->mm = &fixture_mm;
+    current_task_for_host_test()->addr_limit = UINT64_MAX;
+
+    /* Insert an IO VMA at 0x50000000, 8KB (2 pages) */
+    vma_t io_vma;
+    memset(&io_vma, 0, sizeof(io_vma));
+    io_vma.vm_start = 0x50000000UL;
+    io_vma.vm_end   = 0x50002000UL;
+    io_vma.vm_flags = VMA_IO | VMA_PROT_READ;
+    io_vma.vm_page_prot = PAGE_USER | PAGE_VALID;
+    list_init(&io_vma.list);
+    list_add_to_before(&fixture_mm.vma_list, &io_vma.list);
+
+    /* 1. Request PROT_READ | PROT_WRITE -> rejected with -EPERM */
+    int rc = do_mprotect(0x50000000UL, 0x2000UL, 1 | 2 /* PROT_READ | PROT_WRITE */);
+    assert_eq(-EPERM, rc);
+    assert_eq((uint64_t)(VMA_IO | VMA_PROT_READ), io_vma.vm_flags);
+    assert_eq((uint64_t)(PAGE_USER | PAGE_VALID), io_vma.vm_page_prot);
+
+    /* 2. Request PROT_EXEC -> rejected with -EPERM */
+    rc = do_mprotect(0x50000000UL, 0x2000UL, 4 /* PROT_EXEC */);
+    assert_eq(-EPERM, rc);
+    assert_eq((uint64_t)(VMA_IO | VMA_PROT_READ), io_vma.vm_flags);
+    assert_eq((uint64_t)(PAGE_USER | PAGE_VALID), io_vma.vm_page_prot);
+
+    /* 3. Request PROT_NONE -> rejected with -EPERM */
+    rc = do_mprotect(0x50000000UL, 0x2000UL, 0 /* PROT_NONE */);
+    assert_eq(-EPERM, rc);
+    assert_eq((uint64_t)(VMA_IO | VMA_PROT_READ), io_vma.vm_flags);
+    assert_eq((uint64_t)(PAGE_USER | PAGE_VALID), io_vma.vm_page_prot);
+
+    /* 4. Request across a range with a hole (using normal VMA) -> rejected with -ENOMEM */
+    vma_t norm_vma;
+    memset(&norm_vma, 0, sizeof(norm_vma));
+    norm_vma.vm_start = 0x60000000UL;
+    norm_vma.vm_end   = 0x60002000UL;
+    norm_vma.vm_flags = VMA_PROT_READ;
+    norm_vma.vm_page_prot = PAGE_USER | PAGE_VALID;
+    list_init(&norm_vma.list);
+    list_add_to_before(&fixture_mm.vma_list, &norm_vma.list);
+    rc = do_mprotect(0x60000000UL, 0x4000UL, 1 /* PROT_READ */);
+    assert_eq(-ENOMEM, rc);
+    list_del(&norm_vma.list);
+
+    list_del(&io_vma.list);
+}
+
 /* ── Test list ─────────────────────────────────────────────── */
 
 TEST_LIST_BEGIN
@@ -768,6 +820,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_sys_exec_calls_mm_init_user_heap),
     TEST_ENTRY(test_sys_exec_old_mm_retained_until_switch),
     TEST_ENTRY(test_sys_exec_uses_destroy_helper),
+    TEST_ENTRY(test_do_mprotect_vma_io_rejected),
 TEST_LIST_END
 
 int main(void)

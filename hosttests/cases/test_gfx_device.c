@@ -238,6 +238,8 @@ int fb_get_info(struct fb_info *out)
     return 0;
 }
 
+static uint64_t test_mode_generation = 1;
+
 int fb_snapshot_read(fb_snapshot_t *out)
 {
     if (!out) return -EINVAL;
@@ -247,12 +249,17 @@ int fb_snapshot_read(fb_snapshot_t *out)
     out->state.info.stride = TEST_FB_STRIDE;
     out->state.info.bpp    = 32;
     out->state.info.format = GFX_FORMAT_RGB32;
-    out->state.generation  = 1;
+    out->state.generation  = test_mode_generation;
     out->state.reserved    = 0;
     out->addr = test_fb_buf;
     out->mapped_size = TEST_FB_SIZE;
     return 0;
 }
+
+static const void *g_test_owner = NULL;
+static const void *g_test_fallback = NULL;
+static uint64_t g_test_owner_generation = 1;
+static uint32_t g_test_active_writers = 0;
 
 int fb_writer_begin(fb_lease_t *lease, uint64_t expected_generation)
 {
@@ -262,12 +269,113 @@ int fb_writer_begin(fb_lease_t *lease, uint64_t expected_generation)
     if (expected_generation != 0 && expected_generation != lease->snapshot.state.generation)
         return -ESTALE;
     lease->held = true;
+    g_test_active_writers++;
+    return 0;
+}
+
+int fb_gfx_writer_begin(fb_lease_t *lease, uint64_t mode_seq, const void *cookie)
+{
+    if (!lease) return -EINVAL;
+    if (g_test_owner != cookie) return -EACCES;
+    int rc = fb_snapshot_read(&lease->snapshot);
+    if (rc < 0) return rc;
+    if (mode_seq != 0 && mode_seq != lease->snapshot.state.generation)
+        return -ESTALE;
+    lease->held = true;
+    g_test_active_writers++;
     return 0;
 }
 
 void fb_writer_end(fb_lease_t *lease)
 {
-    if (lease) lease->held = false;
+    if (lease && lease->held) {
+        lease->held = false;
+        if (g_test_active_writers > 0) g_test_active_writers--;
+    }
+}
+
+int fb_owner_acquire(const void *cookie, uint64_t expected_mode)
+{
+    if (!cookie) return -EINVAL;
+    fb_snapshot_t snap;
+    int rc = fb_snapshot_read(&snap);
+    if (rc < 0) return rc;
+    if (expected_mode != 0 && expected_mode != snap.state.generation)
+        return -ESTALE;
+    if (g_test_owner != NULL && g_test_owner != g_test_fallback && g_test_owner != cookie)
+        return -EBUSY;
+    if (g_test_owner != cookie) {
+        g_test_owner = cookie;
+        g_test_owner_generation++;
+    }
+    return 0;
+}
+
+int fb_owner_release(const void *cookie)
+{
+    if (!cookie) return -EINVAL;
+    if (g_test_owner == cookie && g_test_owner != g_test_fallback) {
+        g_test_owner = g_test_fallback;
+        g_test_owner_generation++;
+    }
+    return 0;
+}
+
+int fb_owner_register_fallback(const void *cookie, uint64_t expected_mode)
+{
+    if (!cookie) return -EINVAL;
+    fb_snapshot_t snap;
+    int rc = fb_snapshot_read(&snap);
+    if (rc < 0) return rc;
+    if (expected_mode != 0 && expected_mode != snap.state.generation)
+        return -ESTALE;
+    if (g_test_fallback != NULL && g_test_fallback != cookie)
+        return -EBUSY;
+    g_test_fallback = cookie;
+    if (g_test_owner == NULL) {
+        g_test_owner = cookie;
+        g_test_owner_generation++;
+    }
+    return 0;
+}
+
+int fb_owner_replace_fallback(const void *old_cookie, const void *new_cookie, uint64_t expected_mode)
+{
+    if (!old_cookie || !new_cookie) return -EINVAL;
+    fb_snapshot_t snap;
+    int rc = fb_snapshot_read(&snap);
+    if (rc < 0) return rc;
+    if (expected_mode != 0 && expected_mode != snap.state.generation)
+        return -ESTALE;
+    if (g_test_fallback != old_cookie) return -EINVAL;
+    g_test_fallback = new_cookie;
+    if (g_test_owner == old_cookie) g_test_owner = new_cookie;
+    g_test_owner_generation++;
+    return 0;
+}
+
+void fb_owner_detach(const void *cookie)
+{
+    if (!cookie) return;
+    bool changed = false;
+    if (g_test_fallback == cookie) { g_test_fallback = NULL; changed = true; }
+    if (g_test_owner == cookie) {
+        g_test_owner = g_test_fallback;
+        changed = true;
+    }
+    if (changed) g_test_owner_generation++;
+}
+
+int fb_owner_get_state(const void *cookie, gfx_display_state_t *out)
+{
+    if (!out) return -EINVAL;
+    uint32_t flags = 0;
+    if (cookie && g_test_owner == cookie) flags |= GFX_DISPLAY_STATE_FOREGROUND;
+    if (cookie && g_test_fallback == cookie) flags |= GFX_DISPLAY_STATE_FALLBACK;
+    out->generation = g_test_owner_generation;
+    out->flags = flags;
+    out->reserved = 0;
+    return 0;
 }
 
 int fb_write_row_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
@@ -325,6 +433,12 @@ static void reset_test_state(void)
     g_user_sim.fault_after_calls = -1;
     g_user_sim.copy_count       = 0;
     g_user_sim.range_check_count = 0;
+
+    g_test_owner = NULL;
+    g_test_fallback = NULL;
+    g_test_owner_generation = 1;
+    g_test_active_writers = 0;
+    test_mode_generation = 1;
 }
 
 /* ── devfs registration plumbing (mirror lifecycle test) ── */
@@ -390,6 +504,31 @@ static int do_get_info(file_t *f, gfx_info_t *info)
 static int do_present(file_t *f, gfx_present_req_t *req)
 {
     return (int)fd_ioctl(f, GFX_PRESENT, (void *)req);
+}
+
+static int do_acquire(file_t *f)
+{
+    return (int)fd_ioctl(f, GFX_ACQUIRE, NULL);
+}
+
+static int do_release(file_t *f)
+{
+    return (int)fd_ioctl(f, GFX_RELEASE, NULL);
+}
+
+static int do_register_fallback(file_t *f)
+{
+    return (int)fd_ioctl(f, GFX_REGISTER_FALLBACK, NULL);
+}
+
+static int do_get_display_state(file_t *f, gfx_display_state_t *st)
+{
+    return (int)fd_ioctl(f, GFX_GET_DISPLAY_STATE, (void *)st);
+}
+
+static int do_replace_fallback(file_t *f, gfx_replace_fallback_t *req)
+{
+    return (int)fd_ioctl(f, GFX_REPLACE_FALLBACK, (void *)req);
 }
 
 /* ── Tests ──────────────────────────────────────────── */
@@ -606,6 +745,8 @@ TEST_FUNC(test_present_odd_width_happy_path) {
     assert_eq(0, do_get_info(f, &info));
     assert_eq(20u, info.stride);
 
+    assert_eq(0, do_acquire(f));
+
     /* Build a user buffer (host heap) with unique 32-bit values. */
     uint32_t *user_buf = (uint32_t *)(g_user_sim.buf + 0x1000);
     for (uint32_t i = 0; i < W * H; i++) user_buf[i] = 0x1000 + i;
@@ -638,6 +779,8 @@ TEST_FUNC(test_present_sentinel_outside_view) {
     gfx_info_t info;
     assert_eq(0, do_get_info(f, &info));
     assert_eq(16u, info.stride);
+
+    assert_eq(0, do_acquire(f));
 
     uint32_t *user_buf = (uint32_t *)(g_user_sim.buf + 0x2000);
     for (uint32_t i = 0; i < 4 * 4; i++) user_buf[i] = 0xC0FFEE00u + i;
@@ -681,6 +824,8 @@ TEST_FUNC(test_present_sentinel_in_row_padding) {
     gfx_info_t info;
     assert_eq(0, do_get_info(f, &info));
     assert_eq(12u, info.stride);
+
+    assert_eq(0, do_acquire(f));
 
     uint32_t *user_buf = (uint32_t *)(g_user_sim.buf + 0x3000);
     user_buf[0] = 0xAA11AA11u;
@@ -734,11 +879,14 @@ TEST_FUNC(test_present_overlapping_views_in_present_order) {
     for (uint32_t i = 0; i < 16; i++) user_buf2[i] = 0x00FF00FFu;  /* green-ish */
 
     /* Present f1 first (overlap area (2..3, 2..3) becomes 0xFF0000FF). */
+    assert_eq(0, do_acquire(f1));
     gfx_present_req_t req1 = { (uint64_t)user_buf1, i1.stride, 0 };
     assert_eq(0, do_present(f1, &req1));
     assert_eq(0xFF0000FFu, test_fb_buf[2 * TEST_FB_WIDTH + 2]);
+    assert_eq(0, do_release(f1));
 
     /* Present f2 second: the overlap area must now be f2's value. */
+    assert_eq(0, do_acquire(f2));
     gfx_present_req_t req2 = { (uint64_t)user_buf2, i2.stride, 0 };
     assert_eq(0, do_present(f2, &req2));
     assert_eq(0x00FF00FFu, test_fb_buf[2 * TEST_FB_WIDTH + 2]);
@@ -880,6 +1028,8 @@ TEST_FUNC(test_present_mid_fault_leaves_partial) {
     gfx_info_t info;
     assert_eq(0, do_get_info(f, &info));
 
+    assert_eq(0, do_acquire(f));
+
     uint32_t *user_buf = (uint32_t *)(g_user_sim.buf + 0x9000);
     for (uint32_t i = 0; i < W * H; i++) user_buf[i] = 0xBEEF0000u + i;
 
@@ -926,6 +1076,167 @@ TEST_FUNC(test_present_unknown_cmd_returns_enotty) {
     file_put(f);
 }
 
+TEST_FUNC(test_acquire_unconfigured_returns_einval) {
+    reset_test_state();
+    file_t *f = open_gfx0();
+    assert_not_null(f);
+    assert_eq(-EINVAL, do_acquire(f));
+    file_put(f);
+}
+
+TEST_FUNC(test_acquire_stale_mode_returns_estale) {
+    reset_test_state();
+    file_t *f = open_gfx0();
+    assert_not_null(f);
+    gfx_view_desc_t v = { 0, 0, 4, 4 };
+    assert_eq(0, do_create_view(f, &v));
+
+    /* View was created at mode generation 1. Simulate mode bump: */
+    test_mode_generation = 2;
+    assert_eq(-ESTALE, do_acquire(f));
+
+    file_put(f);
+}
+
+TEST_FUNC(test_register_fallback_unconfigured_returns_einval) {
+    reset_test_state();
+    file_t *f = open_gfx0();
+    assert_not_null(f);
+    assert_eq(-EINVAL, do_register_fallback(f));
+    file_put(f);
+}
+
+TEST_FUNC(test_register_fallback_not_fullscreen_returns_einval) {
+    reset_test_state();
+    file_t *f = open_gfx0();
+    assert_not_null(f);
+    gfx_view_desc_t v = { 0, 0, 4, 4 };
+    assert_eq(0, do_create_view(f, &v));
+    assert_eq(-EINVAL, do_register_fallback(f));
+    file_put(f);
+}
+
+TEST_FUNC(test_get_display_state_unconfigured_returns_einval) {
+    reset_test_state();
+    file_t *f = open_gfx0();
+    assert_not_null(f);
+    gfx_display_state_t st;
+    assert_eq(-EINVAL, do_get_display_state(f, &st));
+    file_put(f);
+}
+
+TEST_FUNC(test_get_display_state_fault_returns_efault) {
+    reset_test_state();
+    file_t *f = open_gfx0();
+    assert_not_null(f);
+    gfx_view_desc_t v = { 0, 0, 4, 4 };
+    assert_eq(0, do_create_view(f, &v));
+    assert_eq(-EFAULT, do_get_display_state(f, NULL));
+    assert_eq(-EFAULT, do_get_display_state(f, (gfx_display_state_t *)0x1000ULL));
+    file_put(f);
+}
+
+TEST_FUNC(test_replace_fallback_reserved_nonzero_returns_einval) {
+    reset_test_state();
+    file_t *f = open_gfx0();
+    assert_not_null(f);
+    gfx_view_desc_t v = { 0, 0, TEST_FB_WIDTH, TEST_FB_HEIGHT };
+    assert_eq(0, do_create_view(f, &v));
+    gfx_replace_fallback_t req = { .old_fd = 0, .reserved = 1 };
+    assert_eq(-EINVAL, do_replace_fallback(f, &req));
+    file_put(f);
+}
+
+TEST_FUNC(test_replace_fallback_invalid_old_fd_returns_ebadf) {
+    reset_test_state();
+    file_t *f = open_gfx0();
+    assert_not_null(f);
+    gfx_view_desc_t v = { 0, 0, TEST_FB_WIDTH, TEST_FB_HEIGHT };
+    assert_eq(0, do_create_view(f, &v));
+    gfx_replace_fallback_t req = { .old_fd = -1, .reserved = 0 };
+    assert_eq(-EBADF, do_replace_fallback(f, &req));
+    gfx_replace_fallback_t req2 = { .old_fd = 15, .reserved = 0 };
+    assert_eq(-EBADF, do_replace_fallback(f, &req2));
+    file_put(f);
+}
+
+TEST_FUNC(test_replace_fallback_fault_returns_efault) {
+    reset_test_state();
+    file_t *f = open_gfx0();
+    assert_not_null(f);
+    gfx_view_desc_t v = { 0, 0, TEST_FB_WIDTH, TEST_FB_HEIGHT };
+    assert_eq(0, do_create_view(f, &v));
+    assert_eq(-EFAULT, do_replace_fallback(f, NULL));
+    assert_eq(-EFAULT, do_replace_fallback(f, (gfx_replace_fallback_t *)0x1000ULL));
+    file_put(f);
+}
+
+TEST_FUNC(test_replace_fallback_non_gfx_fd_returns_einval) {
+    reset_test_state();
+    file_t *dummy = file_alloc();
+    dummy->type = FD_PIPE;
+    test_files.fd[2] = dummy;
+
+    file_t *f = open_gfx0();
+    assert_not_null(f);
+    gfx_view_desc_t v = { 0, 0, TEST_FB_WIDTH, TEST_FB_HEIGHT };
+    assert_eq(0, do_create_view(f, &v));
+
+    gfx_replace_fallback_t req = { .old_fd = 2, .reserved = 0 };
+    assert_eq(-EINVAL, do_replace_fallback(f, &req));
+
+    file_put(f);
+    test_files.fd[2] = NULL;
+    file_put(dummy);
+}
+
+TEST_FUNC(test_present_not_owner_returns_eacces_and_no_writes) {
+    reset_test_state();
+    file_t *f = open_gfx0();
+    assert_not_null(f);
+    gfx_view_desc_t v = { 0, 0, 4, 4 };
+    assert_eq(0, do_create_view(f, &v));
+    gfx_info_t info;
+    assert_eq(0, do_get_info(f, &info));
+
+    /* View is NOT owner */
+    uint32_t *user_buf = (uint32_t *)(g_user_sim.buf + 0x8000);
+    for (int i = 0; i < 16; i++) user_buf[i] = 0x11223344;
+    gfx_present_req_t req = { (uint64_t)user_buf, info.stride, 0 };
+
+    int rc = do_present(f, &req);
+    assert_eq(-EACCES, rc);
+    assert_eq(0xDEADBEEFu, test_fb_buf[0]);
+    assert_eq(0, g_test_active_writers);
+
+    file_put(f);
+}
+
+TEST_FUNC(test_acquire_and_present_success) {
+    reset_test_state();
+    file_t *f = open_gfx0();
+    assert_not_null(f);
+    gfx_view_desc_t v = { 0, 0, 4, 4 };
+    assert_eq(0, do_create_view(f, &v));
+    gfx_info_t info;
+    assert_eq(0, do_get_info(f, &info));
+
+    assert_eq(0, do_acquire(f));
+
+    gfx_display_state_t st;
+    assert_eq(0, do_get_display_state(f, &st));
+    assert_eq(GFX_DISPLAY_STATE_FOREGROUND, st.flags & GFX_DISPLAY_STATE_FOREGROUND);
+
+    uint32_t *user_buf = (uint32_t *)(g_user_sim.buf + 0x8000);
+    for (int i = 0; i < 16; i++) user_buf[i] = 0xCAFEBABE;
+    gfx_present_req_t req = { (uint64_t)user_buf, info.stride, 0 };
+    assert_eq(0, do_present(f, &req));
+    assert_eq(0xCAFEBABEu, test_fb_buf[0]);
+    assert_eq(0, g_test_active_writers);
+
+    file_put(f);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_create_view_rejects_zero_size),
     TEST_ENTRY(test_create_view_rejects_uint32_max_overflow),
@@ -948,6 +1259,18 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_present_mid_fault_leaves_partial),
     TEST_ENTRY(test_present_unconfigured_returns_einval),
     TEST_ENTRY(test_present_unknown_cmd_returns_enotty),
+    TEST_ENTRY(test_acquire_unconfigured_returns_einval),
+    TEST_ENTRY(test_acquire_stale_mode_returns_estale),
+    TEST_ENTRY(test_register_fallback_unconfigured_returns_einval),
+    TEST_ENTRY(test_register_fallback_not_fullscreen_returns_einval),
+    TEST_ENTRY(test_get_display_state_unconfigured_returns_einval),
+    TEST_ENTRY(test_get_display_state_fault_returns_efault),
+    TEST_ENTRY(test_replace_fallback_reserved_nonzero_returns_einval),
+    TEST_ENTRY(test_replace_fallback_invalid_old_fd_returns_ebadf),
+    TEST_ENTRY(test_replace_fallback_fault_returns_efault),
+    TEST_ENTRY(test_replace_fallback_non_gfx_fd_returns_einval),
+    TEST_ENTRY(test_present_not_owner_returns_eacces_and_no_writes),
+    TEST_ENTRY(test_acquire_and_present_success),
 TEST_LIST_END
 
 int main(void) {

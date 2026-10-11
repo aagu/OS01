@@ -189,3 +189,38 @@ __attribute__((weak)) enum bga_result bga_apply_mode(const struct fb_info *targe
 __attribute__((weak)) void console_notify_resize_locked(void)
 {
 }
+
+__attribute__((weak)) void console_force_enable_locked(void)
+{
+}
+
+__attribute__((weak)) void console_set_active_locked(bool active)
+{
+    (void)active;
+}
+
+__attribute__((weak)) void fb_set_surrendered_locked(bool surrendered)
+{
+    (void)surrendered;
+}
+
+struct file;
+struct devfs_ops;
+
+__attribute__((weak)) struct file *files_get_file(struct files_struct *f, int fd)
+{
+    (void)f;
+    (void)fd;
+    return NULL;
+}
+
+__attribute__((weak)) void file_put(struct file *f)
+{
+    (void)f;
+}
+
+__attribute__((weak)) const struct devfs_ops *devfs_get_file_ops(struct file *f)
+{
+    (void)f;
+    return NULL;
+}

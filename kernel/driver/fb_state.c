@@ -6,6 +6,7 @@
  */
 
 #include <driver/fb_state.h>
+#include <driver/fb.h>
 #include <driver/bga.h>
 #include <driver/fb_test.h>
 #include <core/printk.h>
@@ -35,6 +36,8 @@ static bool            g_transitioning;
 static bool            g_backend_ready;
 static bool            g_backend_failed;
 static bool            g_raw_mmap_seen;
+static bool            g_raw_writable_mmap_seen;
+static bool            g_raw_writable_test_allowed;
 static bool            g_initialized;
 
 static const void     *g_owner;
@@ -68,6 +71,8 @@ void fb_bootstrap_state(uint64_t phys, uint64_t gop_bytes, const struct fb_info 
     g_backend_ready = false;
     g_backend_failed = false;
     g_raw_mmap_seen = false;
+    g_raw_writable_mmap_seen = false;
+    g_raw_writable_test_allowed = false;
     g_initialized = true;
 
     g_owner = NULL;
@@ -310,13 +315,30 @@ void fb_transition_end(void)
     spin_unlock_irqrestore(&display_state_lock, flags);
 }
 
+void fb_update_console_ownership_locked(void)
+{
+    if (g_owner == NULL) {
+        console_force_enable_locked();
+        fb_set_surrendered_locked(false);
+    } else {
+        console_set_active_locked(false);
+        fb_set_surrendered_locked(true);
+    }
+}
+
 void fb_mark_failed(void)
 {
+    uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
     uint64_t flags = spin_lock_irqsave(&display_state_lock);
     g_backend_failed = true;
     g_backend_ready = false;
     g_transitioning = true;
+    g_owner = NULL;
+    g_fallback = NULL;
+    g_owner_generation++;
+    fb_update_console_ownership_locked();
     spin_unlock_irqrestore(&display_state_lock, flags);
+    spin_unlock_irqrestore(&Pos.lock, pos_flags);
 
     /* A permanent backend fault invalidates every armed fault record
      * (test build only; a no-op in production). */
@@ -336,6 +358,43 @@ bool fb_has_raw_mmap_seen(void)
     bool seen = g_raw_mmap_seen;
     spin_unlock_irqrestore(&display_state_lock, flags);
     return seen;
+}
+
+void fb_mark_raw_writable_mmap_seen(void)
+{
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    g_raw_writable_mmap_seen = true;
+    spin_unlock_irqrestore(&display_state_lock, flags);
+}
+
+bool fb_has_raw_writable_mmap_seen(void)
+{
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    bool seen = g_raw_writable_mmap_seen;
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    return seen;
+}
+
+bool fb_has_owner_or_fallback(void)
+{
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    bool has = (g_owner != NULL || g_fallback != NULL);
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    return has;
+}
+
+bool fb_is_raw_writable_allowed(void)
+{
+#if defined(FB_RESOLUTION_TEST) && (FB_RESOLUTION_TEST != 0)
+    return true;
+#else
+    return g_raw_writable_test_allowed;
+#endif
+}
+
+void fb_set_raw_writable_allowed_for_test(bool allowed)
+{
+    g_raw_writable_test_allowed = allowed;
 }
 
 uint32_t fb_active_writers_count(void)
@@ -654,6 +713,11 @@ int fb_owner_register_fallback(const void *cookie, uint64_t expected_mode)
     }
 
     uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    if (g_raw_writable_mmap_seen) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return -EBUSY;
+    }
     if (expected_mode != 0 && expected_mode != g_fb_state.generation) {
         spin_unlock_irqrestore(&display_state_lock, flags);
         fb_control_unlock();
@@ -682,6 +746,16 @@ int fb_owner_register_fallback(const void *cookie, uint64_t expected_mode)
 
     uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
     flags = spin_lock_irqsave(&display_state_lock);
+
+    if (g_raw_writable_mmap_seen) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        spin_unlock_irqrestore(&Pos.lock, pos_flags);
+        if (will_become_owner) {
+            fb_transition_end();
+        }
+        fb_control_unlock();
+        return -EBUSY;
+    }
 
     if (expected_mode != 0 && expected_mode != g_fb_state.generation) {
         spin_unlock_irqrestore(&display_state_lock, flags);
@@ -714,6 +788,7 @@ int fb_owner_register_fallback(const void *cookie, uint64_t expected_mode)
     }
     if (role_changed) {
         g_owner_generation++;
+        fb_update_console_ownership_locked();
     }
 
     spin_unlock_irqrestore(&display_state_lock, flags);
@@ -744,6 +819,11 @@ int fb_owner_acquire(const void *cookie, uint64_t expected_mode)
     }
 
     uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    if (g_raw_writable_mmap_seen) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return -EBUSY;
+    }
     if (expected_mode != 0 && expected_mode != g_fb_state.generation) {
         spin_unlock_irqrestore(&display_state_lock, flags);
         fb_control_unlock();
@@ -770,6 +850,14 @@ int fb_owner_acquire(const void *cookie, uint64_t expected_mode)
     uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
     flags = spin_lock_irqsave(&display_state_lock);
 
+    if (g_raw_writable_mmap_seen) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        spin_unlock_irqrestore(&Pos.lock, pos_flags);
+        fb_transition_end();
+        fb_control_unlock();
+        return -EBUSY;
+    }
+
     if (expected_mode != 0 && expected_mode != g_fb_state.generation) {
         spin_unlock_irqrestore(&display_state_lock, flags);
         spin_unlock_irqrestore(&Pos.lock, pos_flags);
@@ -789,6 +877,7 @@ int fb_owner_acquire(const void *cookie, uint64_t expected_mode)
     if (g_owner != cookie) {
         g_owner = cookie;
         g_owner_generation++;
+        fb_update_console_ownership_locked();
     }
 
     spin_unlock_irqrestore(&display_state_lock, flags);
@@ -836,6 +925,7 @@ int fb_owner_release(const void *cookie)
     if (g_owner == cookie && g_owner != g_fallback) {
         g_owner = g_fallback;
         g_owner_generation++;
+        fb_update_console_ownership_locked();
     }
 
     spin_unlock_irqrestore(&display_state_lock, flags);
@@ -918,6 +1008,7 @@ int fb_owner_replace_fallback(const void *old_cookie, const void *new_cookie, ui
         g_owner = new_cookie;
     }
     g_owner_generation++;
+    fb_update_console_ownership_locked();
 
     spin_unlock_irqrestore(&display_state_lock, flags);
     spin_unlock_irqrestore(&Pos.lock, pos_flags);
@@ -958,6 +1049,7 @@ void fb_owner_detach(const void *cookie)
 
     if (changed) {
         g_owner_generation++;
+        fb_update_console_ownership_locked();
     }
 
     spin_unlock_irqrestore(&display_state_lock, flags);

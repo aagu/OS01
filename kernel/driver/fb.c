@@ -30,6 +30,16 @@
 // framebuffer.  Kernel fb_write diverts to serial only.
 static bool fb_surrendered = false;
 
+void fb_set_surrendered_locked(bool surrendered)
+{
+    fb_surrendered = surrendered;
+}
+
+bool fb_is_surrendered_locked(void)
+{
+    return fb_surrendered;
+}
+
 // ── fb_read: return fb_info metadata ─────────────────────────
 // offset=0  -> return fb_info struct
 // offset>0  -> return 0 (EOF)
@@ -116,12 +126,25 @@ static int fb_mmap(struct vfs_node *node, struct vma *vma_)
         return -EINVAL;
     }
 
+    bool is_writable = (vma->vm_flags & VMA_PROT_WRITE) != 0;
+    if (is_writable) {
+        if (!fb_is_raw_writable_allowed()) {
+            fb_control_unlock();
+            return -EPERM;
+        }
+        if (fb_has_owner_or_fallback()) {
+            fb_control_unlock();
+            return -EBUSY;
+        }
+    }
+
     // Eagerly fill PTEs with uncacheable MMIO attributes.
     // The physical framebuffer pages start at Pos.Phy_addr.
     uint64_t *user_pgd = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pgdir);
     uint64_t fb_phys = (uint64_t)Pos.Phy_addr;
 
-    uint64_t page_flags = PAGE_USER_PTE | PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH;
+    uint64_t page_flags = (is_writable ? PAGE_USER_PTE : PAGE_USER_PTE_RO)
+                          | PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH;
 
     uint64_t installed_end = vma->vm_start;
     bool map_failed = false;
@@ -151,6 +174,9 @@ static int fb_mmap(struct vfs_node *node, struct vma *vma_)
         if (has_residual) {
             // Cannot reliably unmap: mark sticky for safety
             fb_mark_raw_mmap_seen();
+            if (is_writable) {
+                fb_mark_raw_writable_mmap_seen();
+            }
         }
         fb_control_unlock();
         return -ENOMEM;
@@ -158,6 +184,9 @@ static int fb_mmap(struct vfs_node *node, struct vma *vma_)
 
     flush_tlb();
     fb_mark_raw_mmap_seen();
+    if (is_writable) {
+        fb_mark_raw_writable_mmap_seen();
+    }
 
     // Safety: clear vm_file to prevent do_page_fault from calling
     // vfs_read on this VMA.  Fork will skip these PTEs (VMA_IO guard),

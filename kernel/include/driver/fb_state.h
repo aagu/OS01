@@ -33,6 +33,12 @@ void fb_control_unlock(void);
 
 void fb_mark_raw_mmap_seen(void);
 bool fb_has_raw_mmap_seen(void);
+void fb_mark_raw_writable_mmap_seen(void);
+bool fb_has_raw_writable_mmap_seen(void);
+bool fb_has_owner_or_fallback(void);
+bool fb_is_raw_writable_allowed(void);
+void fb_set_raw_writable_allowed_for_test(bool allowed);
+void fb_update_console_ownership_locked(void);
 uint32_t fb_active_writers_count(void);
 
 int fb_set_mode(const struct fb_set_mode_req *req);
