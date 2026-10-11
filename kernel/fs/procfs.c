@@ -295,6 +295,22 @@ static int procfs_read(vfs_node_t *node, uint64_t offset,
     int ret = 0;
 
     switch (type) {
+    case PROCFS_TYPE_STATUS:
+    case PROCFS_TYPE_STAT:
+    case PROCFS_TYPE_THERMAL:
+    case PROCFS_TYPE_MEMINFO:
+        // Monitor plan Task 4 legacy fallback: a direct node read (no
+        // file_t, therefore no open_file snapshot) is still a legal path
+        // (Task 1 contract: "无 hook 走旧 node read") — kernel-internal
+        // readers and the KERNEL_SELFTEST procfs case use it.  Regenerate
+        // through the same snapshot producers the hook path uses, so
+        // both paths share one formatting source.  A vanished status PID
+        // (-ENOENT) or overflow reads as empty, matching the old
+        // behaviour of this regenerate-per-call path.
+        len = procfs_generate_node(type, pid, local, 4096);
+        if (len < 0)
+            len = 0;
+        break;
     case PROCFS_TYPE_MAPS: {
         task_t *t = find_task_by_pid((int)pid);
         if (t) len = gen_maps(t, local, 4096);

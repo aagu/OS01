@@ -242,6 +242,51 @@ static int build_meminfo(struct procfs_snapshot **out)
     return 0;
 }
 
+// ── Legacy no-file_t node read (Task 1 contract fallback) ─────────
+// A direct vfs_lookup + vfs_read on the node — kernel-internal readers,
+// the KERNEL_SELFTEST procfs case — never runs the open_file hook, and
+// "无 hook 走旧 node read" keeps that path legal.  Regenerate CURRENT
+// content here through the SAME snapshot producers the open_file hook
+// uses, so there is exactly one source of formatting truth (the
+// per-open stable snapshot remains the primary path for fd reads).
+// Returns bytes written, or a negative errno (-ENOENT for a vanished
+// status PID, -EOVERFLOW if the text exceeds cap).
+int procfs_generate_node(uint32_t type, uint32_t pid, char *buf, size_t cap)
+{
+    if (!buf || cap == 0)
+        return -EINVAL;
+
+    struct procfs_snapshot *s = NULL;
+    int rc;
+    switch (type) {
+    case PROCFS_TYPE_STATUS:
+        rc = build_status(pid, &s);
+        break;
+    case PROCFS_TYPE_STAT:
+        rc = build_stat(&s);
+        break;
+    case PROCFS_TYPE_THERMAL:
+        rc = build_thermal(&s);
+        break;
+    case PROCFS_TYPE_MEMINFO:
+        rc = build_meminfo(&s);
+        break;
+    default:
+        return -EINVAL;
+    }
+    if (rc < 0)
+        return rc;
+
+    if (s->len >= cap) {
+        kfree(s);
+        return -EOVERFLOW;
+    }
+    memcpy(buf, s->data, s->len);
+    int n = (int)s->len;
+    kfree(s);
+    return n;
+}
+
 // ── Per-file snapshot lifecycle hooks (spec §6, Task 1 plumbing) ──
 
 int procfs_open_file(struct file *f)

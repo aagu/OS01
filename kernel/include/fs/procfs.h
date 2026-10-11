@@ -1,6 +1,7 @@
 #ifndef _FS_PROCFS_H
 #define _FS_PROCFS_H
 
+#include <stddef.h>   // size_t (procfs_generate_node)
 #include <stdint.h>
 
 // ── procfs node types (packed in node->fs_data, lower 32 bits) ─
@@ -55,5 +56,14 @@ void     procfs_release_file(struct file *f);
 struct vfs_dirent;
 int procfs_readdir_tasks(uint64_t index, struct vfs_dirent *entry,
                          uint64_t base);
+
+// Legacy no-file_t node read fallback: regenerate CURRENT content for a
+// statistics node through the same snapshot producers procfs_open_file
+// uses (one formatting source).  A direct vfs_read on the node — no
+// file_t, no open_file hook — remains a legal path (Task 1 contract),
+// so procfs_read() delegates here for stat/thermal/meminfo/status.
+// Returns bytes written or a negative errno; procfs_read maps failures
+// to an empty read.
+int procfs_generate_node(uint32_t type, uint32_t pid, char *buf, size_t cap);
 
 #endif // _FS_PROCFS_H
