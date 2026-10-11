@@ -421,7 +421,7 @@ test-pmm-boot-reservation:
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Every fixture replaces subprocess.Popen with a fake, so no QEMU process
 # can ever start.
-TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow
+TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_monitor_runner
 .PHONY: test-harness
 test-harness:
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -669,6 +669,75 @@ test-display-owner:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-display-owner $(OS01_SUBMAKE_ARGS))
 
+# ── Terminal monitor host tests (2026-10-11 monitor plan) ────
+# Focused host tests, one per monitor-plan task.  The CASE whitelist
+# grows task by task; an unknown CASE must abort, never silently pass.
+# With CASE omitted the umbrella runs the whole registered group.
+# Implementation mirrors test-m1-host: each case gets its own .PHONY
+# runner because os01_submake must start its own recipe line.
+.PHONY: test-monitor-host _test-monitor-host-run-file _test-monitor-host-run-accounting _test-monitor-host-run-pmm _test-monitor-host-run-procfs _test-monitor-host-run-collect _test-monitor-host-run-model _test-monitor-host-run-render
+MONITOR_CASES := file accounting pmm procfs collect model render
+_test-monitor-host-run-file:
+	@echo "  [test-monitor-host] file"
+	$(call os01_submake,hosttests,test-monitor-file $(OS01_SUBMAKE_ARGS))
+_test-monitor-host-run-accounting:
+	@echo "  [test-monitor-host] accounting"
+	$(call os01_submake,hosttests,test-monitor-accounting $(OS01_SUBMAKE_ARGS))
+_test-monitor-host-run-pmm:
+	@echo "  [test-monitor-host] pmm"
+	$(call os01_submake,hosttests,test-monitor-pmm $(OS01_SUBMAKE_ARGS))
+_test-monitor-host-run-procfs:
+	@echo "  [test-monitor-host] procfs"
+	$(call os01_submake,hosttests,test-monitor-procfs $(OS01_SUBMAKE_ARGS))
+_test-monitor-host-run-collect:
+	@echo "  [test-monitor-host] collect"
+	$(call os01_submake,hosttests,test-monitor-collect $(OS01_SUBMAKE_ARGS))
+_test-monitor-host-run-model:
+	@echo "  [test-monitor-host] model"
+	$(call os01_submake,hosttests,test-monitor-model $(OS01_SUBMAKE_ARGS))
+_test-monitor-host-run-render:
+	@echo "  [test-monitor-host] render"
+	$(call os01_submake,hosttests,test-monitor-render $(OS01_SUBMAKE_ARGS))
+test-monitor-host: CASE ?=
+test-monitor-host: CASE := $(CASE)
+test-monitor-host: $(if $(CASE),_test-monitor-host-run-$(CASE),$(foreach c,$(MONITOR_CASES),_test-monitor-host-run-$(c)))
+	$(call require_capability,rootfs)
+	@case "$(CASE)" in \
+	    "") echo "  [test-monitor-host] full monitor group: $(MONITOR_CASES)";; \
+	    file) echo "  [test-monitor-host] CASE=$(CASE)";; \
+	    accounting) echo "  [test-monitor-host] CASE=$(CASE)";; \
+	    pmm) echo "  [test-monitor-host] CASE=$(CASE)";; \
+	    procfs) echo "  [test-monitor-host] CASE=$(CASE)";; \
+	    collect) echo "  [test-monitor-host] CASE=$(CASE)";; \
+	    model) echo "  [test-monitor-host] CASE=$(CASE)";; \
+	    render) echo "  [test-monitor-host] CASE=$(CASE)";; \
+	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(MONITOR_CASES)" >&2; exit 1;; \
+	  esac
+
+# ── User runtime consumer gate (monitor plan Task 5) ─────────
+# Builds the user runtime consumer (mk/components/runtime.mk: independent
+# consumer=user archive + receipt) and the user link probe, then runs
+# qemutests/monitor_runtime_test.py against the REAL target artifacts:
+# receipt.consumer=user, kernel/user variant paths differ, the probe ELF has
+# no unresolved runtime symbols (no host-symbol backfill), and unsupported
+# user providers are rejected.  hosttests passing is not a substitute for
+# this gate.  Separate from the test-monitor-host group on purpose: this is
+# a target-artifact contract, not a host fixture.
+.PHONY: test-monitor-runtime
+# $(KERNEL_RUNTIME_PREREQ) guarantees the kernel variant receipt exists even
+# on a clean tree, so the kernel/user path-separation assertion always has
+# its counterpart; the user side builds the consumer=user archive + probe.
+test-monitor-runtime: $(KERNEL_RUNTIME_PREREQ) $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE)
+	$(call require_capability,rootfs)
+	python3 qemutests/monitor_runtime_test.py \
+	  --probe "$(USER_RUNTIME_PROBE)" \
+	  --user-receipt "$(USER_RUNTIME_RECEIPT)" \
+	  --kernel-receipt "$(KERNEL_RUNTIME_RECEIPT)" \
+	  --llvm-nm "$(LLVM_NM)" \
+	  --llvm-readobj "$(LLVM_READOBJ)" \
+	  --profile "$(PROFILE)" \
+	  --repo-root "$(OS01_ROOT)"
+
 # driver-model matrix support — see Task 11.  The python harness
 # (qemutests/driver_matrix_run.py) drives each (case, SMP) pair; the
 # build contract test (qemutests/test_arch9_build_contract.py) only
@@ -721,6 +790,12 @@ TEST_QEMU_FLAVOR_resolution     =
 # python harness both produce fault variant images via
 # `make ARCH9_FAULT=<fault>`.
 TEST_QEMU_FLAVOR_driver-model   =
+# monitor (monitor plan Task 9) runs the normal image directly: the test
+# helper /bin/test_monitor and /bin/monitor are both installed into the
+# normal rootfs by the shared program discovery, so no variant build is
+# needed.  The matrix boots the normal image read-only (-snapshot) at
+# 1/2/8 cores.
+TEST_QEMU_FLAVOR_monitor        =
 TEST_QEMU_IMG_phase-0       = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_systest       = $(TEST_SYSTEST_IMAGE)
 TEST_QEMU_IMG_inittab-phase = $(TEST_INITTAB_IMAGE)
@@ -728,6 +803,7 @@ TEST_QEMU_IMG_network       = $(TEST_NETTEST_IMAGE)
 TEST_QEMU_IMG_gfx           = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_resolution    = $(DISK_IMG)
 TEST_QEMU_IMG_driver-model  = $(NORMAL_IMAGE)
+TEST_QEMU_IMG_monitor       = $(NORMAL_IMAGE)
 
 .PHONY: test-qemu
 # Use the per-SUITE Make variables from Step 1. The image path is
@@ -756,8 +832,8 @@ test-qemu: SUITE := $(SUITE)
 test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@case "$(SUITE)" in \
-	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model) ;; \
-	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model, got '$(SUITE)'" >&2; exit 1;; \
+	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor) ;; \
+	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor, got '$(SUITE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-qemu] SUITE=$(SUITE) flavor=$(TEST_QEMU_FLAVOR_$(SUITE)) img=$(TEST_QEMU_IMG_$(SUITE))"
 	# The normal-image hash guard skips ``phase-0`` (the historical
@@ -769,7 +845,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	# driver-model runs against the canonical (no-fault) image so the
 	# normal-image hash guard is skipped too; fault variant builds land
 	# under image/driver-model-<fault>/ (Task 11).
-	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
+	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "monitor" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.before"; \
 	fi
 	# Build step. THIS RECIPE LINE CONTAINS ``$(MAKE)`` AND IS DELIBERATELY
@@ -798,7 +874,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  fi; \
 	fi
 	# Hash guard AFTER the build (own recipe line, no ``$(MAKE)``).
-	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
+	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "monitor" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after" || exit 1; \
 	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after" || exit 1; \
 	fi
@@ -1108,7 +1184,7 @@ help:
 	@echo ''
 	@echo 'Test (6 canonical buckets; varied capability):'
 	@printf '  %-22s %-13s %s\n' \
-		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model>, CASE=<id> selects one systest case)';
+		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor>, CASE=<id> selects one systest case)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \

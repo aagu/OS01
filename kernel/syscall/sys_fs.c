@@ -408,6 +408,15 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
             f->node = node;  // takes ownership of lookup ref
             node = NULL;     // f owns the ref now; don't double-put on cleanup
             f->flags = flags;
+            // spec §6: generate the open-time snapshot after the node
+            // pin / file init and BEFORE the fd is published (fd_alloc
+            // below).  No-op without an open_file hook.  Failure rolls
+            // back through out_open's file_free; the hook unmounted its
+            // own partial state, so release_file is a no-op there.  The
+            // devfs branch above must NOT run this — device files keep
+            // their own open/release protocol.
+            int open_rc = vfs_file_open(f);
+            if (open_rc < 0) { syscall_result = open_rc; goto out_open; }
         } else {
             vfs_node_put(node);  // devfs path owns its own ref
             node = NULL;

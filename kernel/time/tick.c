@@ -7,6 +7,7 @@
 #include <intr/interrupt.h>     // irq_mask / irq_unmask
 #include <sync/wait.h>          // wait_queue_wake_all
 #include <sched/task.h>          // current
+#include <sched/accounting.h>    // sched_account_tick()
 #include <kernel.h>               // container_of
 
 // Per-tick poll-timeout scan. Strong definition lives in kernel/fs/poll.c
@@ -17,6 +18,19 @@ __attribute__((weak)) void poll_timeout_tick(void);
 void tick_handler(void)
 {
     jiffies++;
+
+    // Monitor plan Task 2: BSP tick accounting — exactly ONE sample per
+    // tick here.  This covers both the PIT fallback and the BSP LAPIC
+    // path; the BSP branch of lapic_timer_handler() routes through this
+    // function and must not call sched_account_tick() a second time.
+    // (APs account separately in lapic_timer_handler()'s AP branch.)
+    // aarch64 has no per-CPU tick accounting wired up yet (no task
+    // scheduler, no sched_accounting_cpu_start caller): keep the
+    // reference out of that build entirely instead of relying on the
+    // valid=0 early return — `current` is x86-only inline asm there.
+#ifdef __x86_64__
+    sched_account_tick();
+#endif
 
     poll_timeout_tick();
 

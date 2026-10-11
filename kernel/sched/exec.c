@@ -385,6 +385,12 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     }
 
     memset(tsk, 0, sizeof(task_t));
+
+    // Monitor plan Task 2/4 (spec §2.1/§5.1): every creation path
+    // assigns birth_id + start_ns and starts with zero real runtime,
+    // BEFORE the task is published.  comm = basename of the executable.
+    task_identity_init(tsk, task_basename(path));
+
     tsk->stack_alloc_base = raw_alloc;
 
     tsk->state = TASK_UNINTERRUPTIBLE;
@@ -711,6 +717,13 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     for (int sig = 1; sig < NSIG; sig++)
         current->sighand[sig].sa_handler = SIG_DFL;
     current->flags = (current->flags & ~PF_LINUX_ABI) | abi_flag;
+
+    // Monitor plan Task 4 (spec §5.1): the exec commit renames comm to
+    // the new image's basename, under task_list_lock.  Every failure
+    // path above returned long before this point, so the old comm
+    // survives any failed exec.  exec is NOT a new process — birth_id,
+    // start_ns and runtime_ticks are intentionally untouched.
+    task_comm_apply_exec(current, path);
 
     // 8. Overwrite pt_regs for RESTORE_ALL → iretq to the new process
     regs->cs      = USER_CS;

@@ -9,6 +9,7 @@
 #include <intr/softirq.h>
 #include <time/clockevent.h>   // tick_handler()
 #include <time/clocksource.h>  // clocksource_freq_hz()
+#include <sched/accounting.h>  // sched_account_tick()
 #include <stdbool.h>
 
 // Assembly stub created below
@@ -149,6 +150,11 @@ void lapic_timer_handler(pt_regs_t *regs __attribute__((unused)),
         this_cpu()->need_resched = 1;
         this_cpu()->watchdog_counter++;
         set_softirq_status(TIMER_SIRQ);
+        // Monitor plan Task 2: AP ticks are accounted HERE, exactly once
+        // per interrupt — the BSP branch above already accounts via
+        // tick_handler(), so the BSP LAPIC path must not call
+        // sched_account_tick() again (double accounting).
+        sched_account_tick();
     }
     lapic_eoi();
 }

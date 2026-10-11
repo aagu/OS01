@@ -110,3 +110,19 @@ RUNTIME_ABI_kernel := x86_64-sysv
 # compiler-rt remains opt-in for the kernel.  A separately audited, profile-
 # owned manifest must name the exact archive before this provider is eligible.
 RUNTIME_COMPILER_RT_MANIFEST_kernel ?=
+
+# User runtime consumer (monitor plan Task 5, spec §2.3).  The user archive
+# is linked into freestanding non-PIE ring-3 ELFs, so it gets the USER code
+# model and flags — never the kernel variant's -mcmodel=kernel objects.
+# Everything a user consumer needs is declared here so the kernel-only flags
+# above can never leak into it.
+RUNTIME_TARGET_user := $(TARGET_TRIPLE)
+RUNTIME_CFLAGS_user := -ffreestanding -fno-builtin -fno-stack-protector \
+                       -fno-asynchronous-unwind-tables -fno-pic -fno-pie \
+                       -mno-red-zone -mcmodel=small
+RUNTIME_OBJECT_FORMAT_user := ELF
+RUNTIME_MACHINE_user := EM_X86_64
+RUNTIME_ABI_user := x86_64-sysv
+# v1 user consumer supports only the selfhosted provider; any other value is
+# rejected at parse time by mk/components/runtime.mk.
+USER_RUNTIME_PROVIDER ?= selfhosted

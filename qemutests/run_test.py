@@ -1010,6 +1010,14 @@ def main():
             # other suites and avoids a circular import at module load.
             from test_resolution_switcher import test_resolution
             result = test_resolution(tester)
+        elif args.test_name == "monitor":
+            # The monitor suite (monitor plan Task 9) runs the 1/2/8-core
+            # matrix with its own QEMU launches (serial stdio), mirroring the
+            # resolution suite: the dispatcher entry ignores the pre-built
+            # TestRunner and mints its own ProcessSessions per core count.
+            # Imported lazily to avoid import-time OVMF/QEMU coupling.
+            from qemutests.monitor_test import test_monitor
+            result = test_monitor(tester)
         else:
             print(f"Unknown test: {args.test_name}")
             result = False

@@ -26,6 +26,22 @@ class UserBuildTest(unittest.TestCase):
         self.lib = self.root / 'sysroot/usr/lib'
         self.lib.mkdir(parents=True)
         subprocess.run(['ar', 'rcs', str(self.lib / 'libc.a')], check=True)
+        # user/Makefile also links the runtime link probe from
+        # $(OS01_ROOT)/runtime/selftest/ and expects the root build to hand it
+        # the user builtins archive (USER_RUNTIME_ARCHIVE).  Mirror that
+        # contract: copy the real probe sources into the fixture tree and
+        # build a one-symbol stub archive that defines __udivti3 so the probe
+        # links like it does in the real build.
+        probe_dir = self.root / 'runtime/selftest'
+        probe_dir.mkdir(parents=True)
+        shutil.copy(ROOT / 'runtime/selftest/user_udivti3_link_probe.c', probe_dir / 'user_udivti3_link_probe.c')
+        shutil.copy(ROOT / 'runtime/selftest/udivti3_vectors.h', probe_dir / 'udivti3_vectors.h')
+        stub_c = self.root / 'runtime/stub_udivti3.c'
+        stub_c.write_text('unsigned __int128 __udivti3(unsigned __int128 a, unsigned __int128 b) { return b ? a : 1; }\n')
+        stub_o = self.root / 'runtime/stub_udivti3.o'
+        subprocess.run(['clang', '-c', str(stub_c), '-o', str(stub_o)], check=True)
+        self.runtime_archive = self.root / 'runtime/libos01-builtins.a'
+        subprocess.run(['ar', 'rcs', str(self.runtime_archive), str(stub_o)], check=True)
         self.profile = self.root / 'profile.mk'
         self.profile.write_text(f'OS01_ROOT := {self.root}\nUSER_BUILD_DIR := {self.root}/out\nEFFECTIVE_CC := clang\nTARGET_LD := ld.lld\nOBJ_CPY := true\n')
         (self.user / 'hello.c').write_text('int main(void) { return 0; }\n')
@@ -40,6 +56,7 @@ class UserBuildTest(unittest.TestCase):
         result = subprocess.run(['make', '--no-print-directory', '-C', str(self.user),
                                  f'OS01_PROFILE_FILE={self.profile}',
                                  f'SYSROOT_GENERATION_DIR={self.root}/sysroot',
+                                 f'USER_RUNTIME_ARCHIVE={self.runtime_archive}',
                                  'CFLAGS=-ffreestanding -fno-pie', *args],
                                 text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if ok:

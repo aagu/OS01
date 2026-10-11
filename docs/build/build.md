@@ -52,7 +52,7 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 
 | Bucket | Purpose | Default |
 | --- | --- | --- |
-| `make test-qemu SUITE=phase-0\|systest\|inittab-phase\|network\|gfx\|resolution\|driver-model` | QEMU E2E against the matching variant image (or the normal image for `gfx`/`resolution`/`driver-model`) | `phase-0` |
+| `make test-qemu SUITE=phase-0\|systest\|inittab-phase\|network\|gfx\|resolution\|driver-model\|monitor` | QEMU E2E against the matching variant image (or the normal image for `gfx`/`resolution`/`driver-model`/`monitor`) | `phase-0` |
 | `make test-host` | hosttests + PMM boot reservation | — |
 | `make test-static` | runtime / layout / canary / link-order audits (8 audits) | — |
 | `make test-aarch64 MODE=smp\|no-ack\|gic-spi\|sync-fault\|m3-probe\|m1-*` | AArch64 PSCI / GIC / sync-fault harness | `smp` |
@@ -352,6 +352,7 @@ make test-host
 | `make test-qemu SUITE=resolution` | 普通镜像（每次运行复制为私有副本） | 分辨率切换 surface/session 验收（QMP + `setres`） |
 | `make FB_RESOLUTION_TEST=1 test-qemu SUITE=resolution` | `build/<profile>/image/resolution-test/disk.img` | 隔离故障子集（`/dev/fbtest`） |
 | `make test-qemu SUITE=driver-model` | 普通镜像（matrix harness 另建 fault 变体） | 驱动模型矩阵 |
+| `make test-qemu SUITE=monitor` | 普通镜像（`-snapshot` 只读启动，1/2/8 核各自拉 QEMU） | 终端 monitor 1/2/8 核矩阵 + 终端生命周期（q/SIGINT/SIGTERM/`--samples`/EOF）|
 
 systest variant 是 **compile-affecting** 的：`OS01_SYSTEST=1` 给 user CFLAGS 加 `-DOS01_SYSTEST`，所以 variant 的用户程序构建到独立对象/artifact 目录（`build/<profile>/user/systest`，`build/<profile>/artifacts/user/systest`），variant 镜像包含 systest 编译的 `init.elf`，启动 `/bin/systest` 而不是 BusyBox shell。另两个 variant（nettest、inittab-test）只改 inittab 文件和镜像目录，其用户二进制与普通构建共享。
 
@@ -447,7 +448,7 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 
 | Bucket | Flag | 取值 | 运行内容 |
 | --- | --- | --- | --- |
-| `test-qemu` | `SUITE=` | `phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model` | `qemutests/run_test.py <SUITE>` 对匹配的 variant 镜像（`gfx`/`resolution`/`driver-model` 用普通镜像；`resolution` 每次只复制私有副本） |
+| `test-qemu` | `SUITE=` | `phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor` | `qemutests/run_test.py <SUITE>` 对匹配的 variant 镜像（`gfx`/`resolution`/`driver-model`/`monitor` 用普通镜像；`resolution`/`monitor` 各自拉私有 QEMU 进程） |
 | `test-aarch64` | `MODE=` | `smp`、`no-ack`、`gic-spi`、`sync-fault`、`m3-probe`、`m1-ram`、`m1-sparse`、`m1-arena-exhaust`、`m1-table-exhaust`、`m1-ap-bad-root` | `qemutests/aarch64_*.py` 之一 |
 | `test-contract` | `PROFILE=` | `x86_64-clang`、`aarch64-clang` | `qemutests/build_contract.sh <PROFILE> <mode>` 按 profile mode 列表 |
 | `test-host` | — | — | `os01_submake hosttests` + `pmm_boot_reservation_test.py` |
@@ -455,7 +456,7 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 | `test-kernel-selftest` | — | — | 启动 selftest 镜像 variant（`KERNEL_SELFTEST=1`）并解析 `[selftest]` 标记 |
 | `test-harness` | — | — | Python `unittest` 框架回归（`TEST_HARNESS_MODULES` 列表；不启动 QEMU） |
 
-**`test-harness`** 框架回归入口（上表七个 bucket 之一；`always` 能力；不启动 QEMU）：运行 `mk/components/run.mk` 中 `TEST_HARNESS_MODULES` 列表里的 Python `unittest` 模块。该列表在 Task 2 以单元素 `qemutests.test_gfx_runner` 起步，各任务以其新增的 `qemutests/test_*.py` 追加（Ruling 3）；Task 13 收口为 **15 个模块**，并补齐了此前**无任何 target 运行**的宿主自测（`test_driver_model_matrix`、`test_driver_model_boundary_audit`、`test_resolution_switcher`）以及针对本 workflow 的静态契约检查 `test_ci_workflow`。`test_lvgl_runner` **不**在列表内——它是会拉起 QEMU 的驱动脚本，不是 unittest 模块。`test_arch9_build_contract` 同样**不**在列表内：它的 fixture 会对 `kernel.bin` 执行真实的 `make -n`，需要有已准备好的 sysroot，因而无法在零环境依赖的 `make test-harness` 门控中运行（CI 的 `harness` job 在调用它之前不做任何构建）。它由 `test-contract` bucket 拥有：该 target **会**构建 sysroot，且在其 `x86_64-clang` 分支的 `build_contract.sh` 模式循环之后运行该模块，因此不再是无 target 调用的孤儿。recipe 始终为一次显式的 `python3 -m unittest $(TEST_HARNESS_MODULES)`：不做自动目录发现，不隐式启动 QEMU 脚本，不通过模块名推断 build 路径。fixture 以 fake `subprocess.Popen` 替换真实 QEMU（个别模块会以 `make -n` 探测 Make 契约，但**绝不**拉起 QEMU 进程），因此 `make test-harness` 在 PR/CI 中作为"零环境依赖"门控。
+**`test-harness`** 框架回归入口（上表七个 bucket 之一；`always` 能力；不启动 QEMU）：运行 `mk/components/run.mk` 中 `TEST_HARNESS_MODULES` 列表里的 Python `unittest` 模块。该列表在 Task 2 以单元素 `qemutests.test_gfx_runner` 起步，各任务以其新增的 `qemutests/test_*.py` 追加（Ruling 3）；Task 13 收口为 **15 个模块**，monitor plan（2026-10-11）Task 9 追加 `qemutests.test_monitor_runner` 至 **16 个模块**，并补齐了此前**无任何 target 运行**的宿主自测（`test_driver_model_matrix`、`test_driver_model_boundary_audit`、`test_resolution_switcher`）以及针对本 workflow 的静态契约检查 `test_ci_workflow`。`test_lvgl_runner` **不**在列表内——它是会拉起 QEMU 的驱动脚本，不是 unittest 模块。`test_arch9_build_contract` 同样**不**在列表内：它的 fixture 会对 `kernel.bin` 执行真实的 `make -n`，需要有已准备好的 sysroot，因而无法在零环境依赖的 `make test-harness` 门控中运行（CI 的 `harness` job 在调用它之前不做任何构建）。它由 `test-contract` bucket 拥有：该 target **会**构建 sysroot，且在其 `x86_64-clang` 分支的 `build_contract.sh` 模式循环之后运行该模块，因此不再是无 target 调用的孤儿。recipe 始终为一次显式的 `python3 -m unittest $(TEST_HARNESS_MODULES)`：不做自动目录发现，不隐式启动 QEMU 脚本，不通过模块名推断 build 路径。fixture 以 fake `subprocess.Popen` 替换真实 QEMU（个别模块会以 `make -n` 探测 Make 契约，但**绝不**拉起 QEMU 进程），因此 `make test-harness` 在 PR/CI 中作为"零环境依赖"门控。
 
 **独立的测试目标**（不归入任何 bucket，因为它们使用不同的 harness 或镜像 variant）：
 
@@ -544,6 +545,7 @@ make test-qemu SUITE=systest        # syscall E2E
 make test-qemu SUITE=inittab-phase  # inittab 阶段派发
 make test-qemu SUITE=network        # 网络回归
 make test-qemu SUITE=resolution     # 分辨率切换 surface/session 验收
+make test-qemu SUITE=monitor        # 终端 monitor 1/2/8 核矩阵 + 终端生命周期
 make FB_RESOLUTION_TEST=1 test-qemu SUITE=resolution  # 隔离故障子集
 make test-static                    # 8 项静态审计
 make test-kernel-selftest           # 内核 selftest
@@ -565,7 +567,7 @@ make PROFILE=aarch64-clang aarch64-uefi-kernel  # aarch64 内核 ELF
 | Flag/变量 | 用途 |
 | --- | --- |
 | `PROFILE=<name>` | 选择 profile（默认 `x86_64-clang`） |
-| `SUITE=<name>` | `test-qemu` 的 variant（`phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`） |
+| `SUITE=<name>` | `test-qemu` 的 variant（`phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor`） |
 | `MODE=<name>` | `test-aarch64` 的 variant（`smp`、`no-ack`、`gic-spi`） |
 | `OS01_SYSTEST=1` | 启用 systest variant（影响编译旗标） |
 | `OS01_NETTEST=1` | 启用 nettest variant |

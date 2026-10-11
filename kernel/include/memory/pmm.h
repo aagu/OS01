@@ -100,4 +100,18 @@ uint16_t page_cow_refs(uint64_t phys);
 
 bool pmm_4k_page_allocated(uint64_t phys);
 
+/* Locked PMM usage snapshot (monitor design spec §4.1).  pmm_get_stats
+ * sums the Zone counters once under the allocator-internal pmm_lock —
+ * the lock is NOT exported.  All fields are bytes (64-bit); the first
+ * version deliberately does NOT export subpage-pool metrics
+ * (pool_reserved/allocated/reusable).  managed_bytes == 0 means the
+ * snapshot is unavailable; judging that is the caller's job. */
+struct pmm_stats {
+    uint64_t managed_bytes;
+    uint64_t reserved_bytes;  /* PMM 已占用，含池保留页 */
+    uint64_t free_bytes;
+};
+
+void pmm_get_stats(struct pmm_stats *out);
+
 #endif

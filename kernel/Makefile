@@ -120,6 +120,12 @@ KERNEL_C_SOURCES := \
 # keyboard, port-I/O based) out of architecture-neutral source discovery.
 KERNEL_C_SOURCES := $(filter-out driver/pit.c driver/i8042.c driver/keyboard.c driver/mouse.c,$(KERNEL_C_SOURCES))
 KERNEL_C_SOURCES += $(ARCH_PLATFORM_C_SOURCES)
+# Monitor plan Task 4: arch-neutral thermal facade (weak defaults + the
+# per-CPU sample cache procfs/thermal reads).  Listed EXPLICITLY, never
+# via a wildcard: kernel/arch/*.c is NOT covered by the ARCHDIR wildcard
+# below (it only matches arch/x86_64/...).  The source compiles on any
+# arch (no x86 headers); aarch64 can adopt it when it gains a consumer.
+KERNEL_C_SOURCES += arch/thermal.c
 endif
 
 # Architecture C and asm sources: explicit, one-level responsibility groups.

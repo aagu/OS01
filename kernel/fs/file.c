@@ -136,11 +136,20 @@ void file_free(file_t *f)
     // Also wipe f->dev_private so a buggy re-entry path can't see a
     // dangling pointer; release_file has already freed it.
     if (f->node) {
+        // spec §6: the fs snapshot release fires first, mirroring the
+        // devfs order (per-file release BEFORE the node ref goes
+        // away, never under the file reference lock).  No-op without
+        // a release_file hook; device files keep devfs_release_file
+        // below — the devfs per-device callback lives on struct
+        // devfs_ops, never on vfs_ops, so the two protocols cannot
+        // double-release one file.
+        vfs_file_release(f);
         devfs_release_file(f);
         vfs_node_put(f->node);
         f->node = NULL;
     }
     f->dev_private = NULL;
+    f->fs_private = NULL;
     if (f->type == FD_SOCKET && f->sock) {
         if (f->sock->conn)
             netconn_delete((struct netconn *)f->sock->conn);
@@ -644,6 +653,36 @@ out_release:
     return result;
 }
 
+// ── Per-file snapshot lifecycle (spec §6) ───────────────────
+// Optional vfs_ops hooks for statistics filesystems: open_file
+// generates the text once per open, read_file serves slices of that
+// snapshot, release_file frees it.  All three are optional — NULL
+// keeps the legacy behaviour for every existing filesystem, and the
+// devfs per-device release protocol (struct devfs_ops.release_file)
+// is independent of vfs_ops->release_file, so the two can never
+// double-release one file.
+int vfs_file_open(file_t *f)
+{
+    if (!f || !f->node || !f->node->ops || !f->node->ops->open_file)
+        return 0;
+    return f->node->ops->open_file(f);
+}
+
+int64_t vfs_file_read(file_t *f, uint64_t offset, uint64_t size, void *buf)
+{
+    if (!f || !f->node || !f->node->ops) return -1;
+    if (f->node->ops->read_file)
+        return f->node->ops->read_file(f, offset, size, buf);
+    return vfs_read(f->node, offset, size, buf);
+}
+
+void vfs_file_release(file_t *f)
+{
+    if (!f || !f->node || !f->node->ops || !f->node->ops->release_file)
+        return;
+    f->node->ops->release_file(f);
+}
+
 // ── Read through a file descriptor ──────────────────────────
 //
 // Task 8 (Cat C): all read paths route user-space destinations through
@@ -674,7 +713,7 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
 #ifndef OS01_HOST_TEST
         if (!f->node || !f->node->ops ||
             (uint64_t)f->node->ops < 0xffff800000000000ULL ||
-            !f->node->ops->read)
+            (!f->node->ops->read && !f->node->ops->read_file))
             return -1;
 #else
         /* OS01_HOST_TEST: production's kernel-half ops-pointer guard
@@ -682,7 +721,8 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
          * on Linux x86_64).  The read-pointer check alone is enough for
          * the host harness; the guard is preserved in every non-host
          * build below. */
-        if (!f->node || !f->node->ops || !f->node->ops->read)
+        if (!f->node || !f->node->ops ||
+            (!f->node->ops->read && !f->node->ops->read_file))
             return -1;
 #endif
         // Check access mode (low 2 bits) — ignore O_CREAT etc.
@@ -713,7 +753,11 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
             uint64_t chunk = remaining < UACCESS_BOUNCE_SIZE
                              ? remaining : UACCESS_BOUNCE_SIZE;
 
-            int64_t n = vfs_read(f->node, f->offset, chunk, kbuf);
+            // spec §6: snapshot files read slices of the open-time
+            // snapshot via read_file; every other node takes the
+            // legacy vfs_read path.  Offset still advances only after
+            // a successful copy below.
+            int64_t n = vfs_file_read(f, f->offset, chunk, kbuf);
             if (n < 0) { last_err = n; break; }   // I/O error (preserved)
             if (n == 0) break;                    // EOF
 

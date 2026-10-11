@@ -32,6 +32,7 @@
 #include <core/printk.h>
 #include <arch/thread.h>
 #include <time/clockevent.h>
+#include <sched/accounting.h>
 #include <subsys/subsys.h>
 #include <arch/subsys.h>
 #include <arch/cpu.h>
@@ -108,6 +109,15 @@ void x86_64_boot_percpu(void)
 
 void x86_64_boot_aps(void)
 {
+    // Monitor plan Task 2: initialize the per-CPU tick accounting ONCE,
+    // here, BEFORE tick_start(): GS/percpu are already usable (BSP's
+    // percpu_install_gs(0) ran in x86_64_boot_percpu) and the APs are
+    // not up yet.  Until sched_accounting_init() release-publishes
+    // accounting_ready, early tick interrupts (the PIT may already be
+    // armed) stay inert in sched_account_tick() and never touch the
+    // still-zeroed usage spinlocks.
+    sched_accounting_init();
+
     // 显式启动 tick 源：GS base 已装（x86_64_boot_percpu 中的
     // percpu_install_gs(0)），this_cpu() 可用。tick_start 先掩 PIT
     // 再启 LAPIC，失败回退 PIT。
