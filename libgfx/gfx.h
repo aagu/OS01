@@ -119,7 +119,8 @@ int gfx_register_fallback(gfx_handle_t *h);
 
 /* Query current display ownership generation and foreground/fallback role flags.
  * Issues GFX_GET_DISPLAY_STATE ioctl.
- * Returns 0 on success (populating *out), -1 on failure. */
+ * Returns 0 on success (populating *out), -1 on failure.
+ * If h == NULL or out == NULL, immediately returns -1 with errno=EINVAL without issuing an ioctl. */
 int gfx_get_display_state(gfx_handle_t *h, gfx_display_state_t *out);
 
 /* Atomically transfer fallback role from old_h to new_h.
