@@ -261,8 +261,8 @@ P3: fb ✅ → 2D API ✅ → 字体 → Window Server；PS/2 鼠标 ✅ 并行
    - 当全屏应用主动调用 `GFX_RELEASE`、正常关闭或异常退出（SIGKILL/崩溃）由内核执行最终关闭时，前台所有权自动回退到 fallback（若无 fallback 则退回内核 console），触发终端完整重绘。
 
 3. **libgfx 用户态封装（`libgfx/gfx.h`）**：
-   - `int gfx_claim_ownership(gfx_handle_t *h)`：前台抢占（`GFX_ACQUIRE`），成功后可调用 `gfx_present`。
-   - `int gfx_release_ownership(gfx_handle_t *h)`：主动归还所有权（`GFX_RELEASE`），前台恢复至 fallback。
+   - `int gfx_acquire(gfx_handle_t *h)`：前台抢占（`GFX_ACQUIRE`），成功后可调用 `gfx_present`。
+   - `int gfx_release(gfx_handle_t *h)`：主动归还所有权（`GFX_RELEASE`），前台恢复至 fallback。
    - `int gfx_register_fallback(gfx_handle_t *h)`：注册为全屏 fallback 恢复目标。
    - `int gfx_get_display_state(gfx_handle_t *h, gfx_display_state_t *out)`：查询当前所有权代数及前台/fallback 状态标志。
    - `int gfx_replace_fallback(gfx_handle_t *old_h, gfx_handle_t *new_h)`：在分辨率切换等场景下原子换绑 fallback。

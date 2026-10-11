@@ -346,12 +346,12 @@ rtc_write_datetime(&new_dt);
   * `GFX_ACQUIRE` / `GFX_RELEASE` / `GFX_REGISTER_FALLBACK` / `GFX_REPLACE_FALLBACK` ioctl 驱动状态转移。
   * `g_owner` 异常退出或关闭 fd（`fb_release_file`）时，内核自动将所有权降级并恢复给 `g_fallback`（例如 terminal），避免屏幕被失控应用占据或黑屏。
 * **写入路径仲裁**：
-  * `fb_gfx_writer_begin`：专供 `gfx0` present 调用，若调用方非当前 `g_owner` 则返回 `-EBUSY`。
+  * `fb_gfx_writer_begin`：专供 `gfx0` present 调用，若调用方非当前 `g_owner` 则返回 `-EACCES`。
   * `fb_writer_begin`：传统 writer lease 路径，与 GUI owner 互斥（存在 GUI owner 时返回 `-EBUSY`）。
 * **原始 mmap 边界防护（Raw Mmap Boundary Protection）**：
   * 对直接 `mmap("/dev/fb")` 的进程，若系统已存在激活的 GUI owner，禁止可写 mmap（返回 `-EBUSY`）。
   * 现存原始可写 mmap 时，拒绝新的 `GFX_ACQUIRE`（返回 `-EBUSY`）。
-  * 只读 mmap 页表项映射为只读 PTE，`do_mprotect` 对 `VMA_IO`（包含 fb 物理页）的写权限变更直接拦截返回 `-EACCES`，杜绝绕过所有权协调器篡改显存。
+  * 只读 mmap 页表项映射为只读 PTE，`do_mprotect` 对 `VMA_IO`（包含 fb 物理页）的写权限变更直接拦截返回 `-EPERM`，杜绝绕过所有权协调器篡改显存。
 
 ### gfx0 设备（`/dev/gfx0`，2026-09-30）
 
@@ -374,7 +374,7 @@ rtc_write_datetime(&new_dt);
 
 **所有权与安全限制**：
 
-- 2026-10-11 起接通帧缓冲所有权协调器：非当前 owner 执行 `GFX_PRESENT` 返回 `-EBUSY`
+- 2026-10-11 起接通帧缓冲所有权协调器：非当前 owner 执行 `GFX_PRESENT` 返回 `-EACCES`
 - 无 vsync / page-flip / 硬件双缓冲
 - 仅 RGB32 host-endian，无 alpha blend
 - 视图表固定 16 项（超出需动态扩表）

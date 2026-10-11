@@ -342,6 +342,25 @@ class DisplayOwnerRunner:
                 f"Terminal was respawned! Original PID={self.terminal_pid}, current={current_pid}"
             )
 
+    def assert_fallback_restored(self, shot: Surface, tag: str, baseline: Optional[Surface] = None) -> None:
+        if shot.is_blank():
+            raise AssertionError(f"{tag}: Display is blank after fallback restoration")
+        center_px = shot.pixel(shot.width // 2, shot.height // 2)
+        if center_px == (0, 255, 0):
+            raise AssertionError(
+                f"{tag}: Stale GUI frame detected (center pixel is green {center_px})"
+            )
+        if shot.is_mostly_color((0, 255, 0), threshold=0.05):
+            raise AssertionError(
+                f"{tag}: Display is mostly green (0, 255, 0); stale GUI frame was not restored to fallback"
+            )
+        if baseline is not None:
+            diff = shot.differ_fraction(baseline)
+            if diff > 0.3:
+                raise AssertionError(
+                    f"{tag}: Fallback display differ fraction ({diff:.2f}) > 0.3 vs baseline"
+                )
+
     def close(self) -> None:
         if self.qmp:
             self.qmp.close()
@@ -421,6 +440,29 @@ class RunnerFailureTests(unittest.TestCase):
         self.assertIn("sample log entry", log_p.read_text())
         shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_stale_green_screenshot_rejected(self):
+        """A stale solid-green GUI screenshot must be rejected by fallback assertion."""
+        w, h = 100, 100
+        green_px = b"\x00\xff\x00" * (w * h)
+        green_surface = Surface(w, h, green_px)
+
+        runner = DisplayOwnerRunner(smp=1)
+        with self.assertRaises(AssertionError) as ctx:
+            runner.assert_fallback_restored(green_surface, "TestStaleGreen")
+        self.assertIn("Stale GUI frame detected", str(ctx.exception))
+
+    def test_valid_terminal_screenshot_accepted(self):
+        """A terminal-like screenshot (mostly black background, sparse text) passes fallback assertion."""
+        w, h = 100, 100
+        px = bytearray(w * h * 3)
+        for i in range(50):
+            px[i * 3:i * 3 + 3] = b"\xff\xff\xff"
+        term_surface = Surface(w, h, bytes(px))
+        baseline = Surface(w, h, b"\x00" * (w * h * 3))
+
+        runner = DisplayOwnerRunner(smp=1)
+        runner.assert_fallback_restored(term_surface, "TestTerminal", baseline=baseline)
+
 
 # ────────────────────────────────────────────────────────────────────
 # End-to-End Test Suite Execution
@@ -452,8 +494,7 @@ def run_e2e_suite(smp: int = 2) -> bool:
         runner.assert_shell_alive("CASE1_CLOSE", timeout=10.0)
         runner.assert_terminal_not_respawned()
         shot_close = runner.screendump("01_after_close")
-        if shot_close.is_blank() or shot_close.differ_fraction(shot_baseline) > 0.3:
-            raise AssertionError("Case 1: Fallback display was not cleanly restored")
+        runner.assert_fallback_restored(shot_close, "Case 1", shot_baseline)
         print("      PASS: normal close restored fallback; terminal unrespawned; shell alive")
 
         # ── Case 2: 显式 release ──
@@ -466,8 +507,7 @@ def run_e2e_suite(smp: int = 2) -> bool:
         runner.assert_shell_alive("CASE2_RELEASE", timeout=10.0)
         runner.assert_terminal_not_respawned()
         shot_rel = runner.screendump("02_after_release")
-        if shot_rel.is_blank():
-            raise AssertionError("Case 2: Display is blank after release")
+        runner.assert_fallback_restored(shot_rel, "Case 2", shot_baseline)
         print("      PASS: explicit release restored fallback; terminal unrespawned; shell alive")
 
         # ── Case 3: 首次 present 失败 ──
@@ -480,8 +520,7 @@ def run_e2e_suite(smp: int = 2) -> bool:
         runner.assert_shell_alive("CASE3_FAULT", timeout=10.0)
         runner.assert_terminal_not_respawned()
         shot_fault = runner.screendump("03_after_fault")
-        if shot_fault.is_blank():
-            raise AssertionError("Case 3: Display is blank after fault cleanup")
+        runner.assert_fallback_restored(shot_fault, "Case 3", shot_baseline)
         print("      PASS: present-fault cleaned up and restored fallback")
 
         # ── Case 4: SIGKILL recovery ──
@@ -494,8 +533,7 @@ def run_e2e_suite(smp: int = 2) -> bool:
         runner.assert_shell_alive("CASE4_KILL", timeout=10.0)
         runner.assert_terminal_not_respawned()
         shot_kill = runner.screendump("04_after_kill")
-        if shot_kill.is_blank():
-            raise AssertionError("Case 4: Display is blank after SIGKILL recovery")
+        runner.assert_fallback_restored(shot_kill, "Case 4", shot_baseline)
         print("      PASS: SIGKILL of owner restored fallback cleanly")
 
         # ── Case 5: dup 最后关闭 ──
@@ -508,8 +546,7 @@ def run_e2e_suite(smp: int = 2) -> bool:
         runner.assert_shell_alive("CASE5_DUP", timeout=10.0)
         runner.assert_terminal_not_respawned()
         shot_dup = runner.screendump("05_after_dup")
-        if shot_dup.is_blank():
-            raise AssertionError("Case 5: Display is blank after dup close")
+        runner.assert_fallback_restored(shot_dup, "Case 5", shot_baseline)
         print("      PASS: final close on dup restored fallback")
 
         # ── Case 6: 显式 close-before-exec ──
@@ -521,7 +558,9 @@ def run_e2e_suite(smp: int = 2) -> bool:
             raise AssertionError(f"Case 6 (close-before-exec) did not pass: {out[-300:]}")
         runner.assert_shell_alive("CASE6_EXEC", timeout=10.0)
         runner.assert_terminal_not_respawned()
-        print("      PASS: close-before-exec verified parent ownership preserved")
+        shot_exec = runner.screendump("06_after_exec")
+        runner.assert_fallback_restored(shot_exec, "Case 6", shot_baseline)
+        print("      PASS: close-before-exec verified parent ownership preserved and fallback restored")
 
         # ── Case 7: 后台持续 PTY 输出与 GUI 前台 hold ──
         print("\n[8/9] Testing Case 7: continuous background stream + GUI foreground hold...")
@@ -558,9 +597,7 @@ def run_e2e_suite(smp: int = 2) -> bool:
 
         # Screenshot after hold: fallback restored, terminal shows updated text
         shot_restored = runner.screendump("07_after_hold")
-        center_after = shot_restored.pixel(shot_restored.width // 2, shot_restored.height // 2)
-        if center_after == (0, 255, 0) or shot_restored.is_blank():
-            raise AssertionError("Case 7: Fallback terminal did not restore after hold completed")
+        runner.assert_fallback_restored(shot_restored, "Case 7", shot_baseline)
         print("      PASS: PTY drained during GUI foreground hold; screen restored with updated text")
 
         # ── Case 8: 只读回读与非法写保护 ──
