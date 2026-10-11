@@ -103,6 +103,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_monitor_accounting.elf \
     $(TEST_BLD)/test_monitor_pmm.elf \
     $(TEST_BLD)/test_monitor_collect.elf \
+    $(TEST_BLD)/test_monitor_model.elf \
     $(TEST_BLD)/test_gfx_device.elf \
     $(TEST_BLD)/test_gfx_client.elf \
     $(TEST_BLD)/test_gfx_primitives.elf \
@@ -2290,6 +2291,52 @@ $(TEST_BLD)/test_monitor_collect.elf: $(TEST_BLD)/test_monitor_collect.o \
 
 .PHONY: test-monitor-collect
 test-monitor-collect: $(TEST_BLD)/test_monitor_collect.elf
+	$<
+
+# Monitor plan Task 7: delta model + bounded history.  The fixture
+# drives the REAL user/monitor/model.c (freestanding userland code, OS01
+# libc headers) with hand-built monitor_sample rounds.  The production
+# TU's malloc/free are renamed onto mon_model_* shims with -D (the same
+# interposition seam as monitor_collect_production.o), so the fixture
+# can inject an allocation failure and prove an OOM round returns
+# -ENOMEM WITHOUT destroying the previous display rows or the delta
+# baseline.  Asserted (spec §2.3/§5.3): dual-core busy deltas 100/0 +
+# idle 0/100 -> total 5000 / process 10000, all-busy -> 10000, one-decal
+# rounding (1/3 -> 3333, 2/3 -> 6667), first round / zero denominator /
+# counter regression / epoch change / differing tick_hz -> invalid with
+# the new counters kept as the rebuilt baseline, new-onlined cores
+# never contribute their accumulated history to the period delta,
+# migration keeps runtime, exec same-birth continues the delta,
+# PID-same-value new birth invalid, vanished PIDs removed (history
+# with them), 60-slot ring wraparound with empty points (valid bit
+# clear) for missing rounds and no stale values copied as current,
+# near-UINT64_MAX counters delta without overflow (compare-then-
+# subtract + 128-bit scaled intermediates, remainder via n-(n/d)*d),
+# process display clamped at 10000 with the diagnostic 128-bit raw
+# kept, sorting (processes CPU% desc / PID asc / invalid last; CPUs
+# CPU% desc) and the init/update/destroy ownership contract.
+MONITOR_MODEL_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) -I$(TESTS_DIR)/user \
+    -Dmalloc=mon_model_malloc -Dfree=mon_model_free
+
+$(TEST_BLD)/monitor_model_production.o: $(TESTS_DIR)/user/monitor/model.c \
+		$(TESTS_DIR)/user/monitor/model.h \
+		$(TESTS_DIR)/user/monitor/collect.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(MONITOR_MODEL_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_monitor_model.o: $(TEST_CASES)/test_monitor_model.c \
+		$(TESTS_DIR)/user/monitor/model.h \
+		$(TESTS_DIR)/user/monitor/collect.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
+	  -I$(TESTS_DIR)/user -c $< -o $@
+
+$(TEST_BLD)/test_monitor_model.elf: $(TEST_BLD)/test_monitor_model.o \
+		$(TEST_BLD)/monitor_model_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+.PHONY: test-monitor-model
+test-monitor-model: $(TEST_BLD)/test_monitor_model.elf
 	$<
 
 # Gfx device test (Task 2): host-compiles the REAL
