@@ -98,4 +98,7 @@ void devfs_release_file(struct file *f);
 // Retrieve private_data from a devfs node (e.g. pty_t* for PTY slave nodes).
 void *devfs_get_private(struct vfs_node *node);
 
+// Retrieve devfs_ops from an open device file.
+const struct devfs_ops *devfs_get_file_ops(struct file *f);
+
 #endif

@@ -6,6 +6,7 @@
  */
 
 #include <driver/fb_state.h>
+#include <driver/fb.h>
 #include <driver/bga.h>
 #include <driver/fb_test.h>
 #include <core/printk.h>
@@ -35,7 +36,13 @@ static bool            g_transitioning;
 static bool            g_backend_ready;
 static bool            g_backend_failed;
 static bool            g_raw_mmap_seen;
+static bool            g_raw_writable_mmap_seen;
+static bool            g_raw_writable_test_allowed;
 static bool            g_initialized;
+
+static const void     *g_owner;
+static const void     *g_fallback;
+static uint64_t        g_owner_generation;
 
 static bga_caps_t      g_bga_caps __attribute__((unused));
 static struct fb_info  g_bga_modes[FB_MAX_MODES];
@@ -64,7 +71,13 @@ void fb_bootstrap_state(uint64_t phys, uint64_t gop_bytes, const struct fb_info 
     g_backend_ready = false;
     g_backend_failed = false;
     g_raw_mmap_seen = false;
+    g_raw_writable_mmap_seen = false;
+    g_raw_writable_test_allowed = false;
     g_initialized = true;
+
+    g_owner = NULL;
+    g_fallback = NULL;
+    g_owner_generation = 1;
 
     /* Drop any armed fault left over from a previous session (test build
      * only; a no-op in production). */
@@ -178,6 +191,10 @@ int fb_writer_begin(fb_lease_t *lease, uint64_t expected_generation)
     if (!g_fb_mapped_addr || g_fb_mapped_size == 0) {
         spin_unlock_irqrestore(&display_state_lock, flags);
         return -EAGAIN;
+    }
+    if (g_owner != NULL) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        return -EBUSY;
     }
     if (expected_generation != 0 && expected_generation != g_fb_state.generation) {
         spin_unlock_irqrestore(&display_state_lock, flags);
@@ -298,13 +315,30 @@ void fb_transition_end(void)
     spin_unlock_irqrestore(&display_state_lock, flags);
 }
 
+void fb_update_console_ownership_locked(void)
+{
+    if (g_owner == NULL) {
+        console_force_enable_locked();
+        fb_set_surrendered_locked(false);
+    } else {
+        console_set_active_locked(false);
+        fb_set_surrendered_locked(true);
+    }
+}
+
 void fb_mark_failed(void)
 {
+    uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
     uint64_t flags = spin_lock_irqsave(&display_state_lock);
     g_backend_failed = true;
     g_backend_ready = false;
     g_transitioning = true;
+    g_owner = NULL;
+    g_fallback = NULL;
+    g_owner_generation++;
+    fb_update_console_ownership_locked();
     spin_unlock_irqrestore(&display_state_lock, flags);
+    spin_unlock_irqrestore(&Pos.lock, pos_flags);
 
     /* A permanent backend fault invalidates every armed fault record
      * (test build only; a no-op in production). */
@@ -324,6 +358,43 @@ bool fb_has_raw_mmap_seen(void)
     bool seen = g_raw_mmap_seen;
     spin_unlock_irqrestore(&display_state_lock, flags);
     return seen;
+}
+
+void fb_mark_raw_writable_mmap_seen(void)
+{
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    g_raw_writable_mmap_seen = true;
+    spin_unlock_irqrestore(&display_state_lock, flags);
+}
+
+bool fb_has_raw_writable_mmap_seen(void)
+{
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    bool seen = g_raw_writable_mmap_seen;
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    return seen;
+}
+
+bool fb_has_owner_or_fallback(void)
+{
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    bool has = (g_owner != NULL || g_fallback != NULL);
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    return has;
+}
+
+bool fb_is_raw_writable_allowed(void)
+{
+#if defined(FB_RESOLUTION_TEST) && (FB_RESOLUTION_TEST != 0)
+    return true;
+#else
+    return g_raw_writable_test_allowed;
+#endif
+}
+
+void fb_set_raw_writable_allowed_for_test(bool allowed)
+{
+    g_raw_writable_test_allowed = allowed;
 }
 
 uint32_t fb_active_writers_count(void)
@@ -546,3 +617,444 @@ void fb_state__test_set_generation(uint64_t generation)
     spin_unlock_irqrestore(&display_state_lock, flags);
 }
 #endif
+
+int fb_gfx_writer_begin(fb_lease_t *lease, uint64_t mode_seq, const void *cookie)
+{
+    if (!lease) {
+        return -EINVAL;
+    }
+    lease->held = false;
+
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    if (!g_initialized) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        return -EAGAIN;
+    }
+    if (g_backend_failed) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        return -EIO;
+    }
+    if (g_transitioning) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        return -EAGAIN;
+    }
+    if (!g_fb_mapped_addr || g_fb_mapped_size == 0) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        return -EAGAIN;
+    }
+    if (cookie == NULL || g_owner != cookie) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        return -EACCES;
+    }
+    if (mode_seq != 0 && mode_seq != g_fb_state.generation) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        return -ESTALE;
+    }
+
+    lease->snapshot.state = g_fb_state;
+    lease->snapshot.addr = g_fb_mapped_addr;
+    lease->snapshot.mapped_size = g_fb_mapped_size;
+    lease->held = true;
+    g_active_writers++;
+
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    return 0;
+}
+
+int fb_owner_get_state(const void *cookie, gfx_display_state_t *out)
+{
+    if (!out) {
+        return -EINVAL;
+    }
+
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    if (!g_initialized) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        return -EAGAIN;
+    }
+    if (g_backend_failed) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        return -EIO;
+    }
+
+    uint32_t role_flags = 0;
+    if (cookie != NULL) {
+        if (g_owner == cookie) {
+            role_flags |= GFX_DISPLAY_STATE_FOREGROUND;
+        }
+        if (g_fallback == cookie) {
+            role_flags |= GFX_DISPLAY_STATE_FALLBACK;
+        }
+    }
+
+    out->generation = g_owner_generation;
+    out->flags = role_flags;
+    out->reserved = 0;
+
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    return 0;
+}
+
+int fb_owner_register_fallback(const void *cookie, uint64_t expected_mode)
+{
+    if (!cookie) {
+        return -EINVAL;
+    }
+
+    fb_control_lock();
+
+    if (!g_initialized) {
+        fb_control_unlock();
+        return -EAGAIN;
+    }
+    if (g_backend_failed) {
+        fb_control_unlock();
+        return -EIO;
+    }
+
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    if (g_raw_writable_mmap_seen) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return -EBUSY;
+    }
+    if (expected_mode != 0 && expected_mode != g_fb_state.generation) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return -ESTALE;
+    }
+    if (g_fallback != NULL && g_fallback != cookie) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return -EBUSY;
+    }
+    if (g_fallback == cookie && (g_owner == cookie || g_owner != NULL)) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return 0;
+    }
+    bool will_become_owner = (g_owner == NULL);
+    spin_unlock_irqrestore(&display_state_lock, flags);
+
+    if (will_become_owner) {
+        int tr_rc = fb_transition_begin(false);
+        if (tr_rc < 0) {
+            fb_control_unlock();
+            return tr_rc;
+        }
+    }
+
+    uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
+    flags = spin_lock_irqsave(&display_state_lock);
+
+    if (g_raw_writable_mmap_seen) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        spin_unlock_irqrestore(&Pos.lock, pos_flags);
+        if (will_become_owner) {
+            fb_transition_end();
+        }
+        fb_control_unlock();
+        return -EBUSY;
+    }
+
+    if (expected_mode != 0 && expected_mode != g_fb_state.generation) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        spin_unlock_irqrestore(&Pos.lock, pos_flags);
+        if (will_become_owner) {
+            fb_transition_end();
+        }
+        fb_control_unlock();
+        return -ESTALE;
+    }
+
+    if (g_fallback != NULL && g_fallback != cookie) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        spin_unlock_irqrestore(&Pos.lock, pos_flags);
+        if (will_become_owner) {
+            fb_transition_end();
+        }
+        fb_control_unlock();
+        return -EBUSY;
+    }
+
+    bool role_changed = false;
+    if (g_fallback != cookie) {
+        g_fallback = cookie;
+        role_changed = true;
+    }
+    if (g_owner == NULL) {
+        g_owner = cookie;
+        role_changed = true;
+    }
+    if (role_changed) {
+        g_owner_generation++;
+        fb_update_console_ownership_locked();
+    }
+
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    spin_unlock_irqrestore(&Pos.lock, pos_flags);
+
+    if (will_become_owner) {
+        fb_transition_end();
+    }
+    fb_control_unlock();
+    return 0;
+}
+
+int fb_owner_acquire(const void *cookie, uint64_t expected_mode)
+{
+    if (!cookie) {
+        return -EINVAL;
+    }
+
+    fb_control_lock();
+
+    if (!g_initialized) {
+        fb_control_unlock();
+        return -EAGAIN;
+    }
+    if (g_backend_failed) {
+        fb_control_unlock();
+        return -EIO;
+    }
+
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    if (g_raw_writable_mmap_seen) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return -EBUSY;
+    }
+    if (expected_mode != 0 && expected_mode != g_fb_state.generation) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return -ESTALE;
+    }
+    if (g_owner == cookie) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return 0;
+    }
+    if (g_owner != NULL && g_owner != g_fallback) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return -EBUSY;
+    }
+    spin_unlock_irqrestore(&display_state_lock, flags);
+
+    int tr_rc = fb_transition_begin(false);
+    if (tr_rc < 0) {
+        fb_control_unlock();
+        return tr_rc;
+    }
+
+    uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
+    flags = spin_lock_irqsave(&display_state_lock);
+
+    if (g_raw_writable_mmap_seen) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        spin_unlock_irqrestore(&Pos.lock, pos_flags);
+        fb_transition_end();
+        fb_control_unlock();
+        return -EBUSY;
+    }
+
+    if (expected_mode != 0 && expected_mode != g_fb_state.generation) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        spin_unlock_irqrestore(&Pos.lock, pos_flags);
+        fb_transition_end();
+        fb_control_unlock();
+        return -ESTALE;
+    }
+
+    if (g_owner != NULL && g_owner != g_fallback && g_owner != cookie) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        spin_unlock_irqrestore(&Pos.lock, pos_flags);
+        fb_transition_end();
+        fb_control_unlock();
+        return -EBUSY;
+    }
+
+    if (g_owner != cookie) {
+        g_owner = cookie;
+        g_owner_generation++;
+        fb_update_console_ownership_locked();
+    }
+
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    spin_unlock_irqrestore(&Pos.lock, pos_flags);
+
+    fb_transition_end();
+    fb_control_unlock();
+    return 0;
+}
+
+int fb_owner_release(const void *cookie)
+{
+    if (!cookie) {
+        return -EINVAL;
+    }
+
+    fb_control_lock();
+
+    if (!g_initialized) {
+        fb_control_unlock();
+        return -EAGAIN;
+    }
+    if (g_backend_failed) {
+        fb_control_unlock();
+        return -EIO;
+    }
+
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    if (g_owner != cookie || g_owner == g_fallback) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return 0;
+    }
+    spin_unlock_irqrestore(&display_state_lock, flags);
+
+    int tr_rc = fb_transition_begin(false);
+    if (tr_rc < 0) {
+        fb_control_unlock();
+        return tr_rc;
+    }
+
+    uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
+    flags = spin_lock_irqsave(&display_state_lock);
+
+    if (g_owner == cookie && g_owner != g_fallback) {
+        g_owner = g_fallback;
+        g_owner_generation++;
+        fb_update_console_ownership_locked();
+    }
+
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    spin_unlock_irqrestore(&Pos.lock, pos_flags);
+
+    fb_transition_end();
+    fb_control_unlock();
+    return 0;
+}
+
+int fb_owner_replace_fallback(const void *old_cookie, const void *new_cookie, uint64_t expected_mode)
+{
+    if (!old_cookie || !new_cookie) {
+        return -EINVAL;
+    }
+
+    fb_control_lock();
+
+    if (!g_initialized) {
+        fb_control_unlock();
+        return -EAGAIN;
+    }
+    if (g_backend_failed) {
+        fb_control_unlock();
+        return -EIO;
+    }
+
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+    if (expected_mode != 0 && expected_mode != g_fb_state.generation) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return -ESTALE;
+    }
+    if (g_fallback != old_cookie) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return -EINVAL;
+    }
+    if (old_cookie == new_cookie) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        fb_control_unlock();
+        return 0;
+    }
+    bool old_was_owner = (g_owner == old_cookie);
+    spin_unlock_irqrestore(&display_state_lock, flags);
+
+    if (old_was_owner) {
+        int tr_rc = fb_transition_begin(false);
+        if (tr_rc < 0) {
+            fb_control_unlock();
+            return tr_rc;
+        }
+    }
+
+    uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
+    flags = spin_lock_irqsave(&display_state_lock);
+
+    if (expected_mode != 0 && expected_mode != g_fb_state.generation) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        spin_unlock_irqrestore(&Pos.lock, pos_flags);
+        if (old_was_owner) {
+            fb_transition_end();
+        }
+        fb_control_unlock();
+        return -ESTALE;
+    }
+
+    if (g_fallback != old_cookie) {
+        spin_unlock_irqrestore(&display_state_lock, flags);
+        spin_unlock_irqrestore(&Pos.lock, pos_flags);
+        if (old_was_owner) {
+            fb_transition_end();
+        }
+        fb_control_unlock();
+        return -EINVAL;
+    }
+
+    g_fallback = new_cookie;
+    if (g_owner == old_cookie) {
+        g_owner = new_cookie;
+    }
+    g_owner_generation++;
+    fb_update_console_ownership_locked();
+
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    spin_unlock_irqrestore(&Pos.lock, pos_flags);
+
+    if (old_was_owner) {
+        fb_transition_end();
+    }
+    fb_control_unlock();
+    return 0;
+}
+
+void fb_owner_detach(const void *cookie)
+{
+    if (!cookie) {
+        return;
+    }
+
+    fb_control_lock();
+
+    uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+
+    bool changed = false;
+
+    if (g_fallback == cookie) {
+        g_fallback = NULL;
+        changed = true;
+    }
+
+    if (g_owner == cookie) {
+        if (g_fallback != NULL) {
+            g_owner = g_fallback;
+        } else {
+            g_owner = NULL;
+        }
+        changed = true;
+    }
+
+    if (changed) {
+        g_owner_generation++;
+        fb_update_console_ownership_locked();
+    }
+
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    spin_unlock_irqrestore(&Pos.lock, pos_flags);
+
+    fb_control_unlock();
+}
+

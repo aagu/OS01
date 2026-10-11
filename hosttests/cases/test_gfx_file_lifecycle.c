@@ -31,6 +31,8 @@
 
 #include <fs/file.h>
 #include <fs/devfs.h>
+#include <driver/gfx.h>
+#include <driver/fb_state.h>
 #include <uapi/gfx.h>
 #include <lwip/err.h>
 #include <lwip/api.h>
@@ -162,6 +164,19 @@ gfx_test_task_union_t init_task_union;
 list_t *task_list_next(list_t *p) { (void)p; return NULL; }
 int signal_pgrp(pid_t t, int s) { (void)t; (void)s; return -1; }
 
+/* ── Framebuffer & Display Coordinator Stubs ── */
+int fb_snapshot_read(fb_snapshot_t *out) { (void)out; return 0; }
+int fb_gfx_writer_begin(fb_lease_t *l, uint64_t m, const void *c) { (void)l; (void)m; (void)c; return 0; }
+void fb_writer_end(fb_lease_t *l) { (void)l; }
+int fb_write_row_leased(const fb_lease_t *l, uint32_t x, uint32_t y, const void *p, uint32_t b) { (void)l; (void)x; (void)y; (void)p; (void)b; return 0; }
+int fb_owner_acquire(const void *c, uint64_t m) { (void)c; (void)m; return 0; }
+int fb_owner_release(const void *c) { (void)c; return 0; }
+int fb_owner_register_fallback(const void *c, uint64_t m) { (void)c; (void)m; return 0; }
+int fb_owner_replace_fallback(const void *o, const void *n, uint64_t m) { (void)o; (void)n; (void)m; return 0; }
+static int g_lifecycle_detach_calls = 0;
+void fb_owner_detach(const void *c) { (void)c; g_lifecycle_detach_calls++; }
+int fb_owner_get_state(const void *c, gfx_display_state_t *o) { (void)c; (void)o; return 0; }
+
 /* ── test tracking (mirrors production devices[] semantics) ── */
 
 struct test_device_state {
@@ -175,7 +190,7 @@ struct test_device_state {
     int   legacy_ioctl_count;
 };
 
-#define TEST_MAX_DEVICES 4
+#define TEST_MAX_DEVICES DEVFS_MAX_DEVICES
 static struct test_device_state test_devices[TEST_MAX_DEVICES];
 
 /* Mirror of "node refcount outstanding".  Every test-driven
@@ -525,6 +540,34 @@ static void test_pipe_preserves_cow_allocation_error(void)
     pipe_free(p);
 }
 
+TEST_FUNC(test_gfx_dup_close_restores_only_on_final_close) {
+    reset_test_state();
+    int idx = registered_count++;
+    int rc = devfs_register_chrdev("gfx_dup_test", NULL, &gfx_ops);
+    assert_true(rc >= 0);
+    struct vfs_node *node = test_node_with_idx(idx);
+
+    file_t *f = NULL;
+    rc = devfs_open_node(node, "/dev/gfx_dup_test", O_RDWR, &f);
+    assert_eq(0, rc);
+    assert_not_null(f);
+    assert_not_null(f->dev_private);
+
+    /* Simulate dup() / fork() keeping an extra reference */
+    file_get(f);  /* refcount becomes 2 */
+
+    g_lifecycle_detach_calls = 0;
+
+    /* First close (refcount 2 -> 1): release_file / fb_owner_detach MUST NOT run */
+    file_put(f);
+    assert_eq(0, g_lifecycle_detach_calls);
+
+    /* Second close (refcount 1 -> 0): release_file runs and fb_owner_detach is invoked */
+    file_put(f);
+    assert_eq(1, g_lifecycle_detach_calls);
+    assert_eq(0, node_ref_balance);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_read_preserves_cow_allocation_error),
     TEST_ENTRY(test_pipe_preserves_cow_allocation_error),
@@ -535,6 +578,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_ioctl_reaches_file_via_fdioctl),
     TEST_ENTRY(test_regular_file_cannot_dispatch_device_callbacks),
     TEST_ENTRY(test_abi_struct_sizes),
+    TEST_ENTRY(test_gfx_dup_close_restores_only_on_final_close),
 TEST_LIST_END
 
 int main(void) {

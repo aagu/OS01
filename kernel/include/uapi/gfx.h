@@ -18,6 +18,35 @@
 #define GFX_CREATE_VIEW  0x4701
 #define GFX_GET_INFO     0x4702
 #define GFX_PRESENT      0x4703
+#define GFX_ACQUIRE           0x4704
+#define GFX_RELEASE           0x4705
+#define GFX_REGISTER_FALLBACK 0x4706
+#define GFX_GET_DISPLAY_STATE 0x4707
+#define GFX_REPLACE_FALLBACK  0x4708
+
+#define GFX_DISPLAY_STATE_FOREGROUND (1u << 0)
+#define GFX_DISPLAY_STATE_FALLBACK   (1u << 1)
+
+/* GFX_GET_DISPLAY_STATE — output; queries current ownership generation and
+ * foreground/fallback role flags for the caller's view cookie. reserved is 0. */
+typedef struct {
+    uint64_t generation;
+    uint32_t flags;
+    uint32_t reserved;
+} gfx_display_state_t;
+
+_Static_assert(sizeof(gfx_display_state_t) == 16,
+               "gfx_display_state_t must be 16 bytes (ABI)");
+
+/* GFX_REPLACE_FALLBACK — input; atomic fallback transfer from old_fd to the
+ * calling handle. reserved must be 0. */
+typedef struct {
+    int32_t old_fd;
+    uint32_t reserved;
+} gfx_replace_fallback_t;
+
+_Static_assert(sizeof(gfx_replace_fallback_t) == 8,
+               "gfx_replace_fallback_t must be 8 bytes (ABI)");
 
 /* GFX_CREATE_VIEW — input; describes the full-screen rectangle the
  * caller wants the kernel to render into.  x, y are full-screen

@@ -46,6 +46,7 @@
 #include <uapi/gfx.h>
 #include <fs/file.h>
 #include <fs/devfs.h>
+#include <sched/task.h>
 #include <memory/uaccess.h>      // syscall_check_user_range, copy_*_ft
 #include <memory/slab.h>         // kmalloc, kfree
 #include <arch/spinlock.h>       // spinlock_T, spin_lock_irqsave
@@ -108,6 +109,7 @@ static int gfx_open(const char *name, file_t **out_file)
     v->slot = -1;
     v->configured = false;
 
+    f->type = FD_DEV;
     f->dev_private = v;
     *out_file = f;
     return 0;
@@ -120,6 +122,10 @@ static void gfx_release_file(file_t *f)
 {
     if (!f || !f->dev_private) return;
     gfx_view_t *v = (gfx_view_t *)f->dev_private;
+
+    // Detach view unconditionally from display coordinator before
+    // clearing slot and freeing view memory.
+    fb_owner_detach(v);
 
     uint64_t flags = spin_lock_irqsave(&g_gfx_table.lock);
     if (v->slot >= 0 && v->slot < GFX_MAX_VIEWS &&
@@ -290,7 +296,7 @@ static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq)
 
     // Stage 4: acquire lease covering the entire frame.
     fb_lease_t lease;
-    int lrc = fb_writer_begin(&lease, v_mode_seq);
+    int lrc = fb_gfx_writer_begin(&lease, v_mode_seq, v);
     if (lrc < 0) return lrc;
 
     // Walk the rows. Allocate a single heap row buffer of exactly stride bytes;
@@ -367,6 +373,156 @@ static int gfx_ioctl_file(file_t *f, int cmd, void *arg)
         // gfx_ioctl_present itself does syscall_check_user_range +
         // copy_from_user_ft on the request struct.
         return gfx_ioctl_present(f, (gfx_present_req_t *)arg);
+    }
+    case GFX_ACQUIRE: {
+        gfx_view_t *v = (gfx_view_t *)f->dev_private;
+        if (!v) return -EINVAL;
+        uint64_t mode_seq;
+        {
+            uint64_t flags = spin_lock_irqsave(&g_gfx_table.lock);
+            if (!v->configured) {
+                spin_unlock_irqrestore(&g_gfx_table.lock, flags);
+                return -EINVAL;
+            }
+            mode_seq = v->mode_seq;
+            spin_unlock_irqrestore(&g_gfx_table.lock, flags);
+        }
+        return fb_owner_acquire(v, mode_seq);
+    }
+    case GFX_RELEASE: {
+        gfx_view_t *v = (gfx_view_t *)f->dev_private;
+        if (!v) return -EINVAL;
+        {
+            uint64_t flags = spin_lock_irqsave(&g_gfx_table.lock);
+            if (!v->configured) {
+                spin_unlock_irqrestore(&g_gfx_table.lock, flags);
+                return -EINVAL;
+            }
+            spin_unlock_irqrestore(&g_gfx_table.lock, flags);
+        }
+        return fb_owner_release(v);
+    }
+    case GFX_REGISTER_FALLBACK: {
+        gfx_view_t *v = (gfx_view_t *)f->dev_private;
+        if (!v) return -EINVAL;
+
+        fb_snapshot_t snap;
+        int s_rc = fb_snapshot_read(&snap);
+        if (s_rc < 0) return s_rc;
+
+        uint64_t mode_seq;
+        {
+            uint64_t flags = spin_lock_irqsave(&g_gfx_table.lock);
+            if (!v->configured) {
+                spin_unlock_irqrestore(&g_gfx_table.lock, flags);
+                return -EINVAL;
+            }
+            if (v->desc_x != 0 || v->desc_y != 0 ||
+                v->desc_w != snap.state.info.width ||
+                v->desc_h != snap.state.info.height) {
+                spin_unlock_irqrestore(&g_gfx_table.lock, flags);
+                return -EINVAL;
+            }
+            mode_seq = v->mode_seq;
+            spin_unlock_irqrestore(&g_gfx_table.lock, flags);
+        }
+        return fb_owner_register_fallback(v, mode_seq);
+    }
+    case GFX_GET_DISPLAY_STATE: {
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg,
+                                      sizeof(gfx_display_state_t), true))
+            return -EFAULT;
+
+        gfx_view_t *v = (gfx_view_t *)f->dev_private;
+        if (!v) return -EINVAL;
+        {
+            uint64_t flags = spin_lock_irqsave(&g_gfx_table.lock);
+            if (!v->configured) {
+                spin_unlock_irqrestore(&g_gfx_table.lock, flags);
+                return -EINVAL;
+            }
+            spin_unlock_irqrestore(&g_gfx_table.lock, flags);
+        }
+
+        gfx_display_state_t kstate;
+        int grc = fb_owner_get_state(v, &kstate);
+        if (grc < 0) return grc;
+
+        if (copy_to_user_ft(arg, &kstate, sizeof(kstate)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    case GFX_REPLACE_FALLBACK: {
+        if (!arg) return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg,
+                                      sizeof(gfx_replace_fallback_t), false))
+            return -EFAULT;
+
+        gfx_replace_fallback_t kreq;
+        if (copy_from_user_ft(&kreq, arg, sizeof(kreq)) < 0)
+            return -EFAULT;
+
+        if (kreq.reserved != 0)
+            return -EINVAL;
+
+        gfx_view_t *new_v = (gfx_view_t *)f->dev_private;
+        if (!new_v) return -EINVAL;
+
+        fb_snapshot_t snap;
+        int s_rc = fb_snapshot_read(&snap);
+        if (s_rc < 0) return s_rc;
+
+        uint64_t new_mode_seq;
+        {
+            uint64_t flags = spin_lock_irqsave(&g_gfx_table.lock);
+            if (!new_v->configured) {
+                spin_unlock_irqrestore(&g_gfx_table.lock, flags);
+                return -EINVAL;
+            }
+            if (new_v->desc_x != 0 || new_v->desc_y != 0 ||
+                new_v->desc_w != snap.state.info.width ||
+                new_v->desc_h != snap.state.info.height) {
+                spin_unlock_irqrestore(&g_gfx_table.lock, flags);
+                return -EINVAL;
+            }
+            new_mode_seq = new_v->mode_seq;
+            spin_unlock_irqrestore(&g_gfx_table.lock, flags);
+        }
+
+        if (kreq.old_fd < 0 || kreq.old_fd >= NOFILE) return -EBADF;
+
+        file_t *old_file = files_get_file(current->files, kreq.old_fd);
+        if (!old_file) return -EBADF;
+
+        if (old_file->type != FD_DEV) {
+            file_put(old_file);
+            return -EINVAL;
+        }
+
+        const struct devfs_ops *ops = devfs_get_file_ops(old_file);
+        if (!old_file->node || ops != &gfx_ops) {
+            file_put(old_file);
+            return -EINVAL;
+        }
+
+        gfx_view_t *old_v = NULL;
+        {
+            uint64_t flags = spin_lock_irqsave(&g_gfx_table.lock);
+            old_v = (gfx_view_t *)old_file->dev_private;
+            if (!old_v || !old_v->configured || old_v->slot < 0 ||
+                old_v->slot >= GFX_MAX_VIEWS ||
+                g_gfx_table.slots[old_v->slot] != old_v) {
+                spin_unlock_irqrestore(&g_gfx_table.lock, flags);
+                file_put(old_file);
+                return -EINVAL;
+            }
+            spin_unlock_irqrestore(&g_gfx_table.lock, flags);
+        }
+
+        int rrc = fb_owner_replace_fallback(old_v, new_v, new_mode_seq);
+        file_put(old_file);
+        return rrc;
     }
     default:
         return -ENOTTY;

@@ -1,6 +1,8 @@
 #ifndef _KERNEL_CONSOLE_H
 #define _KERNEL_CONSOLE_H
 
+#include <stdbool.h>
+
 // Initialize the software terminal.
 // Must be called after framebuffer is mapped and PIT is running.
 void console_init(void);
@@ -20,6 +22,9 @@ void console_force_enable(void);
 
 // Force re-enable framebuffer output while Pos.lock is already held.
 void console_force_enable_locked(void);
+
+// Set console active while Pos.lock is already held.
+void console_set_active_locked(bool active);
 
 // Notify console of mode resize while holding Pos.lock.
 // Resets term_cursor_row/col and Pos.XPosition/YPosition to 0.

@@ -14,9 +14,9 @@
  * All drawing goes to libgfx's private buffer via gfx_fill_rect;
  * gfx_present is invoked exactly once per visual event (after each
  * render, and after each clear-line flash) so the kernel does at
- * most one GFX_PRESENT ioctl per visual update.  The kernel-side
- * FBIOSURRENDER ioctl is still issued on /dev/fb so the kernel
- * console yields the framebuffer before gfx writes go out.
+ * most one GFX_PRESENT ioctl per visual update.  Display ownership
+ * is acquired via gfx_acquire (and restored via gfx_release on exit)
+ * so exclusive control is negotiated before gfx writes go out.
  */
 
 #include <stdint.h>
@@ -101,9 +101,13 @@ static bool present(void)
         gfx_retry_deadline_ms = now + GFX_CLIENT_RETRY_MS;
         return true;
     }
-    const char *why = (saved == ESTALE)
-        ? "display mode changed, restart the app"
-        : "display device failure";
+    const char *why;
+    if (saved == EACCES)
+        why = "lost display foreground ownership";
+    else if (saved == ESTALE)
+        why = "display mode changed, restart the app";
+    else
+        why = "display device failure";
     char msg[128];
     int n = snprintf(msg, sizeof(msg), "tetris: %s (errno=%d); exiting\n",
                      why, saved);
@@ -173,13 +177,9 @@ int main(int argc, char **argv)
     // height).  The kernel-side fb mmap path is no longer used
     // here; libgfx owns the pixels buffer that gfx_present ships
     // to /dev/gfx0 each frame.
-    int fb_fd = open("/dev/fb", O_RDWR);
+    int fb_fd = open("/dev/fb", O_RDONLY);
     if (fb_fd < 0) return 1;
     ssize_t r = read(fb_fd, &fb_info, sizeof(fb_info));
-    /* Ask the kernel console to step aside before we present.
-     * Mirrors the pre-migration behaviour so the kernel console
-     * doesn't trample our pixels between presents. */
-    ioctl(fb_fd, FBIOSURRENDER, NULL);
     close(fb_fd);
     if (r != (ssize_t)sizeof(fb_info) ||
         fb_info.width == 0 || fb_info.height == 0)
@@ -230,11 +230,24 @@ int main(int argc, char **argv)
                           (uint32_t)cell, (uint32_t)cell,
                           0x00FF00FFu);          /* T = magenta */
         }
-        /* One real gfx_present ships the buffer to the kernel. */
-        if (gfx_present(gfx) != 0) {
+        /* Explicitly acquire display ownership before presenting. */
+        if (gfx_acquire(gfx) != 0) {
+            int saved = errno;
+            if (saved == EBUSY) {
+                fprintf(stderr, "tetris: display busy (another GUI active); exiting\n");
+            } else {
+                fprintf(stderr, "tetris: gfx_acquire failed (errno=%d); exiting\n", saved);
+            }
             gfx_close(gfx);
             return 1;
         }
+        /* One real gfx_present ships the buffer to the kernel. */
+        if (gfx_present(gfx) != 0) {
+            gfx_release(gfx);
+            gfx_close(gfx);
+            return 1;
+        }
+        gfx_release(gfx);
         gfx_close(gfx);
         /* The marker line — single line, no extra banners.  Goes
          * to stdout (fd 1), which under -serial stdio is the QEMU
@@ -255,10 +268,6 @@ int main(int argc, char **argv)
         tcsetattr(STDIN_FILENO, TCSANOW, &raw);
     }
 
-    // ── Enter alt screen (terminal restores main on exit) ─
-    write(1, "\x1b[?1049h", 8);
-    write(1, "\x1b[2J", 4);
-
     // ── Game loop ────────────────────────────────────────
     tetris_board_t board;
     memset(&board, 0, sizeof(board));
@@ -278,6 +287,20 @@ int main(int argc, char **argv)
     memset(prev_view, 0, sizeof(prev_view));
     if (tetris_spawn(&board, &piece, 0) != 0)
         game_over = true;
+    render(&board, &piece);
+
+    /* Acquire display ownership after preparing first frame in RAM */
+    if (gfx_acquire(gfx) != 0) {
+        int saved = errno;
+        if (saved == EBUSY) {
+            fprintf(stderr, "tetris: display busy (another GUI active); exiting\n");
+        } else {
+            fprintf(stderr, "tetris: gfx_acquire failed (errno=%d); exiting\n", saved);
+        }
+        exit_code = 1;
+        goto done;
+    }
+    if (!present()) { exit_code = 1; goto done; }
 
     tetris_input_t input;
     tetris_input_init(&input);
@@ -349,11 +372,14 @@ lock_piece:
     // Leave the alt screen immediately (nanosleep is known-broken in
     // this kernel — see plan doc; tetris doesn't need it).
 done:
-    write(1, "\x1b[?1049l", 8);
     if (has_term) {
         tcsetattr(STDIN_FILENO, TCSANOW, &orig_term);
     }
-    gfx_close(gfx);
+    if (gfx) {
+        gfx_release(gfx);
+        gfx_close(gfx);
+        gfx = NULL;
+    }
     return exit_code;
 }
 

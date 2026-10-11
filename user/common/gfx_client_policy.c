@@ -7,7 +7,8 @@ int gfx_client_present_policy(int err)
 {
     if (err == 0) return 0;        /* present succeeded */
     if (err == EAGAIN) return 1;   /* transient drain timeout: retry */
-    /* ESTALE (stale view after a mode switch), EIO (device failure) and
-     * any other unexpected errno are permanent: release and exit. */
+    /* EACCES (lost foreground ownership/not display owner), ESTALE (stale view
+     * after a mode switch), EIO (device failure) and any other unexpected errno
+     * are permanent: release resources and exit. */
     return -1;
 }

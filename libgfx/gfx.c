@@ -179,3 +179,72 @@ int gfx_present(gfx_handle_t *h)
     req.reserved = 0;
     return ioctl(h->fd, GFX_PRESENT, &req);
 }
+
+/* ── Ownership & Fallback (Display Ownership Plan) ───────────── */
+
+/* Issue GFX_ACQUIRE ioctl with explicit third argument (uint64_t)0.
+ * Error returns -1 with errno set from ioctl; success returns 0 without
+ * altering errno. h == NULL returns -1 with errno=EINVAL without ioctl. */
+int gfx_acquire(gfx_handle_t *h)
+{
+    if (!h) {
+        errno = EINVAL;
+        return -1;
+    }
+    return ioctl(h->fd, GFX_ACQUIRE, (uint64_t)0);
+}
+
+/* Issue GFX_RELEASE ioctl with explicit third argument (uint64_t)0.
+ * Error returns -1 with errno set from ioctl; success returns 0 without
+ * altering errno. h == NULL returns -1 with errno=EINVAL without ioctl. */
+int gfx_release(gfx_handle_t *h)
+{
+    if (!h) {
+        errno = EINVAL;
+        return -1;
+    }
+    return ioctl(h->fd, GFX_RELEASE, (uint64_t)0);
+}
+
+/* Issue GFX_REGISTER_FALLBACK ioctl with explicit third argument (uint64_t)0.
+ * Error returns -1 with errno set from ioctl; success returns 0 without
+ * altering errno. h == NULL returns -1 with errno=EINVAL without ioctl. */
+int gfx_register_fallback(gfx_handle_t *h)
+{
+    if (!h) {
+        errno = EINVAL;
+        return -1;
+    }
+    return ioctl(h->fd, GFX_REGISTER_FALLBACK, (uint64_t)0);
+}
+
+/* Issue GFX_GET_DISPLAY_STATE ioctl to populate *out.
+ * Error returns -1 with errno set from ioctl; success returns 0 without
+ * altering errno. h == NULL or out == NULL returns -1 with errno=EINVAL
+ * without ioctl. */
+int gfx_get_display_state(gfx_handle_t *h, gfx_display_state_t *out)
+{
+    if (!h || !out) {
+        errno = EINVAL;
+        return -1;
+    }
+    return ioctl(h->fd, GFX_GET_DISPLAY_STATE, out);
+}
+
+/* Issue GFX_REPLACE_FALLBACK ioctl on new_h->fd with req.old_fd = old_h->fd
+ * and req.reserved = 0.
+ * Error returns -1 with errno set from ioctl; success returns 0 without
+ * altering errno. old_h == NULL or new_h == NULL returns -1 with errno=EINVAL
+ * without ioctl. */
+int gfx_replace_fallback(gfx_handle_t *old_h, gfx_handle_t *new_h)
+{
+    if (!old_h || !new_h) {
+        errno = EINVAL;
+        return -1;
+    }
+    gfx_replace_fallback_t req;
+    req.old_fd = old_h->fd;
+    req.reserved = 0;
+    return ioctl(new_h->fd, GFX_REPLACE_FALLBACK, &req);
+}
+

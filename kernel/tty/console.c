@@ -125,6 +125,11 @@ void console_force_enable_locked(void)
     console_fb_active = true;
 }
 
+void console_set_active_locked(bool active)
+{
+    console_fb_active = active;
+}
+
 void console_force_enable(void)
 {
     uint64_t flags = spin_lock_irqsave(&Pos.lock);

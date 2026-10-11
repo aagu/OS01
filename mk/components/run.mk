@@ -662,6 +662,13 @@ test-gfx-primitives:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-gfx-primitives $(OS01_SUBMAKE_ARGS))
 
+# Focused hosttest for the display ownership plan Task 1 — exclusive
+# display coordinator and writer admission.
+.PHONY: test-display-owner
+test-display-owner:
+	$(call require_capability,rootfs)
+	@$(call os01_submake,hosttests,test-display-owner $(OS01_SUBMAKE_ARGS))
+
 # driver-model matrix support — see Task 11.  The python harness
 # (qemutests/driver_matrix_run.py) drives each (case, SMP) pair; the
 # build contract test (qemutests/test_arch9_build_contract.py) only

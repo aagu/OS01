@@ -102,9 +102,13 @@ static bool desktop_present_failed(int err)
         gfx_retry_deadline_ms = client_now_ms() + GFX_CLIENT_RETRY_MS;
         return true;
     }
-    const char *why = (err == ESTALE)
-        ? "display mode changed, restart the app"
-        : "display device failure";
+    const char *why;
+    if (err == EACCES)
+        why = "lost display foreground ownership";
+    else if (err == ESTALE)
+        why = "display mode changed, restart the app";
+    else
+        why = "display device failure";
     char msg[160];
     int n = snprintf(msg, sizeof(msg), "desktop: %s (errno=%d); exiting\n",
                      why, err);
@@ -669,7 +673,7 @@ int main(int argc, char **argv)
     bool smoke = (argc > 1 && argv[1] && strcmp(argv[1], "smoke") == 0);
 
     /* 1. Query Framebuffer metadata */
-    int fb_fd = open("/dev/fb", O_RDWR);
+    int fb_fd = open("/dev/fb", O_RDONLY);
     if (fb_fd < 0) {
         perror("desktop: open /dev/fb");
         return 1;
@@ -677,7 +681,6 @@ int main(int argc, char **argv)
 
     struct fb_info info;
     ssize_t r = read(fb_fd, &info, sizeof(info));
-    ioctl(fb_fd, FBIOSURRENDER, NULL);
     close(fb_fd);
 
     if (r != (ssize_t)sizeof(info) || info.width == 0 || info.height == 0) {
@@ -697,13 +700,25 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* 3. Smoke mode: paint once, present, and exit */
+    /* 3. Smoke mode: paint once, acquire, present, and exit */
     if (smoke) {
         render_desktop();
-        if (gfx_present(gfx) != 0) {
+        if (gfx_acquire(gfx) != 0) {
+            int saved = errno;
+            if (saved == EBUSY) {
+                fprintf(stderr, "desktop: display busy (another GUI active); exiting\n");
+            } else {
+                fprintf(stderr, "desktop: gfx_acquire failed (errno=%d); exiting\n", saved);
+            }
             gfx_close(gfx);
             return 1;
         }
+        if (gfx_present(gfx) != 0) {
+            gfx_release(gfx);
+            gfx_close(gfx);
+            return 1;
+        }
+        gfx_release(gfx);
         gfx_close(gfx);
         write(1, "[DESKTOP] SMOKE PASS\n", 21);
         return 0;
@@ -718,13 +733,6 @@ int main(int argc, char **argv)
         tcsetattr(STDIN_FILENO, TCSANOW, &raw);
     }
 
-    /* Switch to alt screen */
-    write(1, "\x1b[?1049h\x1b[2J", 12);
-
-    /* Wait out terminal's CMD_HOLD_MS (500ms) delayed flush window so
-     * terminal.elf doesn't trample our initial frame with its alt-screen clear */
-    poll(NULL, 0, 550);
-
     /* Non-blocking mouse device */
     int mouse_fd = open("/dev/mouse", O_RDONLY | O_NONBLOCK);
     if (mouse_fd >= 0) {
@@ -733,8 +741,19 @@ int main(int argc, char **argv)
 
     int exit_code = 0;
 
-    /* Initial paint */
+    /* Initial paint in RAM, acquire display ownership, and first present */
     render_desktop();
+    if (gfx_acquire(gfx) != 0) {
+        int saved = errno;
+        if (saved == EBUSY) {
+            fprintf(stderr, "desktop: display busy (another GUI active); exiting\n");
+        } else {
+            fprintf(stderr, "desktop: gfx_acquire failed (errno=%d); exiting\n", saved);
+        }
+        exit_code = 1;
+        goto cleanup;
+    }
+
     errno = 0;
     if (gfx_present(gfx) != 0) {
         int saved = errno;
@@ -848,12 +867,15 @@ int main(int argc, char **argv)
 cleanup:
     /* 6. Cleanup */
     if (mouse_fd >= 0) close(mouse_fd);
-    gfx_close(gfx);
+    if (gfx) {
+        gfx_release(gfx);
+        gfx_close(gfx);
+        gfx = NULL;
+    }
 
     if (has_term) {
         tcsetattr(STDIN_FILENO, TCSANOW, &orig_term);
     }
-    write(1, "\x1b[?1049l", 8);
 
     return exit_code;
 }

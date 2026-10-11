@@ -161,7 +161,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_fb_resolution_ioctl.elf \
     $(TEST_BLD)/test_pty_winsize.elf \
     $(TEST_BLD)/test_fb_resolution_hooks.elf \
-    $(TEST_BLD)/test_setres.elf
+    $(TEST_BLD)/test_setres.elf \
+    $(TEST_BLD)/test_display_owner.elf
 
 # Binaries that report solely through their exit code and print nothing on
 # success (see the `run` section for the full rationale).  Defined here, NOT
@@ -172,7 +173,7 @@ TEST_EXIT_STATUS_BINS := \
     $(TEST_BLD)/test_runtime_udivti3.elf \
     $(TEST_BLD)/test_page_table_runner.elf
 
-.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients
+.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner
 
 all: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS)
 
@@ -2086,6 +2087,7 @@ $(TEST_BLD)/test_gfx_file_lifecycle.o: $(TEST_CASES)/test_gfx_file_lifecycle.c \
 	$(HOST_CC) $(GFX_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
 $(TEST_BLD)/test_gfx_file_lifecycle.elf: $(TEST_BLD)/test_gfx_file_lifecycle.o \
+		$(TEST_BLD)/gfx_gfx_production.o \
 		$(TEST_BLD)/gfx_devfs_production.o \
 		$(TEST_BLD)/gfx_file_production.o
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
@@ -2798,6 +2800,17 @@ $(TEST_BLD)/test_fb_writers.elf: $(TEST_BLD)/test_fb_writers.o $(TEST_BLD)/fb_st
 	$(HOST_CC) -lpthread -o $@ $^
 
 test-fb-writers: $(TEST_BLD)/test_fb_writers.elf
+	$<
+
+# Display ownership coordinator & exclusive writer leases test (Display Ownership Task 1)
+$(TEST_BLD)/test_display_owner.o: $(TEST_CASES)/test_display_owner.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FB_STATE_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_display_owner.elf: $(TEST_BLD)/test_display_owner.o $(TEST_BLD)/fb_state.o $(TEST_BLD)/fb_map.o $(TEST_BLD)/fb_resolution_runtime.o
+	$(HOST_CC) -lpthread -o $@ $^
+
+test-display-owner: $(TEST_BLD)/test_display_owner.elf
 	$<
 
 # PCI BGA backend probe and hardware transaction test (QEMU resolution switcher Task 4)

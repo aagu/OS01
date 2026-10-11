@@ -336,6 +336,23 @@ rtc_write_datetime(&new_dt);
 * `frame_buffer_init` - 将帧缓冲重映射到 `VIRT_FRAMEBUFFER_OFFSET`
 * 在 devfs 中注册为 `/dev/fb`（`devfs_register_chrdev("fb", ...)`）
 
+#### 帧缓冲协调器与显示所有权（Display Ownership Coordinator，2026-10-11）
+
+为解决多客户端（如 terminal 终端模拟器与桌面/GUI 应用）并发写入屏幕造成的撕裂与覆盖，帧缓冲层引入了统一的**显示所有权协调器**（`kernel/driver/fb_state.c`，头文件 `kernel/include/driver/fb_state.h`，ioctl UAPI 定义在 `kernel/include/uapi/gfx.h` 并由 `kernel/driver/gfx.c` 分发）：
+
+* **所有权状态机**：
+  * 全局维护主所有者 `g_owner` 与回退持有者 `g_fallback`（均为非所有权视图 cookie `const void *cookie`，非 `file_t *`）。
+  * 仅当前所有者（或无所有者时的任意 client）允许写入/present。
+  * `GFX_ACQUIRE` / `GFX_RELEASE` / `GFX_REGISTER_FALLBACK` / `GFX_REPLACE_FALLBACK` ioctl 驱动状态转移。
+  * `g_owner` 异常退出或关闭 fd（最终关闭钩子 `gfx_release_file` 调用 `fb_owner_detach`）时，内核自动将所有权降级并恢复给 `g_fallback`（例如 terminal），避免屏幕被失控应用占据或黑屏。
+* **写入路径仲裁**：
+  * `fb_gfx_writer_begin`：专供 `gfx0` present 调用，若调用方非当前 `g_owner` 则返回 `-EACCES`。
+  * `fb_writer_begin`：传统 writer lease 路径，与 GUI owner 互斥（存在 GUI owner 时返回 `-EBUSY`）。
+* **原始 mmap 边界防护（Raw Mmap Boundary Protection）**：
+  * 对直接 `mmap("/dev/fb")` 的进程，若系统已存在激活的 GUI owner，禁止可写 mmap（返回 `-EBUSY`）。
+  * 现存原始可写 mmap 时，拒绝新的 `GFX_ACQUIRE`（返回 `-EBUSY`）。
+  * 只读 mmap 页表项映射为只读 PTE，`do_mprotect` 对 `VMA_IO`（包含 fb 物理页）的写权限变更直接拦截返回 `-EPERM`，杜绝绕过所有权协调器篡改显存。
+
 ### gfx0 设备（`/dev/gfx0`，2026-09-30）
 
 受限 present 设备，提供用户态 2D 图形 API（libgfx）的内核后端。文件位于 `kernel/driver/gfx.c`，ABI 定义在 `kernel/include/uapi/gfx.h`。
@@ -345,8 +362,8 @@ rtc_write_datetime(&new_dt);
 - 维护最多 16 项视图表（`g_gfx_table.slot[GFX_MAX_VIEWS=16]`），spinlock 保护分配 / 配置 / 释放
 - `GFX_CREATE_VIEW`：校验矩形（减法形式溢出 `x ≤ fb_w && w ≤ fb_w - x`），分配视图槽
 - `GFX_GET_INFO`：返回视图的 `width / height / stride / format`
-- `GFX_PRESENT`：快照视图矩形 → 释放锁 → 逐行 `syscall_check_user_range` + `copy_from_user_ft` → `fb_write_row`；中途中断返回 `-EFAULT`，前面行可能已更新（spec §4）
-- `release_file`：`file_put` 引用为 0 时清槽并释放视图结构
+- `GFX_PRESENT`：快照视图矩形 → 校验 `fb_gfx_writer_begin` 所有权 → 释放锁 → 逐行 `syscall_check_user_range` + `copy_from_user_ft` → `fb_write_row_leased`；中途中断返回 `-EFAULT`，前面行可能已更新（spec §4）
+- `release_file`：`file_put` 引用为 0 时触发 `gfx_release_file`（调用 `fb_owner_detach`），清槽并释放视图结构
 - **不提供 mmap 回调**：用户像素缓冲始终由用户提供，不通过 mmap 映射
 
 **并发模型**：
@@ -355,15 +372,15 @@ rtc_write_datetime(&new_dt);
 - `copy_*_ft` 在 fault 时 longjmp 到调用方；调用方确保 spinlock 已释放
 - `dup` / `fork` 共享 `file_t` 引用计数，最后 `file_put` 触发 release
 
-**限制（spec §2 / §4 明示）**：
+**所有权与安全限制**：
 
-- 没有 owner / 委托 / compositor：任何进程可继续打开 `/dev/fb`，重叠视图按 present 顺序覆盖
+- 2026-10-11 起接通帧缓冲所有权协调器：非当前 owner 执行 `GFX_PRESENT` 返回 `-EACCES`
 - 无 vsync / page-flip / 硬件双缓冲
 - 仅 RGB32 host-endian，无 alpha blend
 - 视图表固定 16 项（超出需动态扩表）
 - 关闭 path 不支持（仅 `file_put` 触发 release）
 
-详见 `docs/gui/gui.md` 第 2 节、`.superpowers/sdd/2026-09-30-2d-graphics-api/`。
+详见 `docs/gui/gui.md` 第 2 节与第 4 节、`.superpowers/sdd/2026-09-30-2d-graphics-api/`、`.superpowers/sdd/2026-10-07-display-ownership/`。
 
 ### TTY 驱动
 

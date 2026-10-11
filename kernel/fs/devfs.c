@@ -613,3 +613,13 @@ void *devfs_get_private(struct vfs_node *node)
         return NULL;
     return devices[idx].private_data;
 }
+
+// ── devfs_get_file_ops — retrieve devfs_ops from an open device file ──
+const struct devfs_ops *devfs_get_file_ops(file_t *f)
+{
+    if (!f || !f->node || f->type != FD_DEV) return NULL;
+    int idx = (int)(uintptr_t)f->node->fs_data;
+    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+        return NULL;
+    return devices[idx].ops;
+}

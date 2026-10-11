@@ -88,10 +88,13 @@ struct mm_struct {
     uint64_t *pgdir;
 };
 
+struct files_struct;
+
 struct task_struct {
     uint64_t wakeup_ns;
     int64_t pid;
     struct mm_struct *mm;
+    struct files_struct *files;
 };
 
 extern struct task_struct mock_current_task;

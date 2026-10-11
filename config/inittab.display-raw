@@ -1,0 +1,3 @@
+# OS01 /etc/inittab (display-raw: direct ash on tty1 without fallback terminal)
+# Format: id:action:process
+tty1:respawn:/bin/busybox ash

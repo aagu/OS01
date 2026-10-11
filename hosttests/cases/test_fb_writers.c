@@ -92,6 +92,7 @@ static uint32_t g_test_vram[TEST_FB_BYTES / 4] __attribute__((aligned(4096)));
 /* ── Mock Page Table Tracking for mmap ── */
 #define MAX_TRACKED_PAGES 64
 static uint64_t g_installed_ptes[MAX_TRACKED_PAGES];
+static uint64_t g_installed_flags[MAX_TRACKED_PAGES];
 static size_t   g_installed_count = 0;
 static int      g_inject_map_fail_page = -1;
 static int      g_inject_unmap_fail_page = -1;
@@ -99,7 +100,7 @@ static int      g_current_map_page = 0;
 
 int vmm_map_4k_page(uint64_t *pgdir, uint64_t phys, uint64_t virt, uint64_t flags)
 {
-    (void)pgdir; (void)flags;
+    (void)pgdir;
     if (g_current_map_page == g_inject_map_fail_page) {
         g_current_map_page++;
         return -ENOMEM;
@@ -107,7 +108,9 @@ int vmm_map_4k_page(uint64_t *pgdir, uint64_t phys, uint64_t virt, uint64_t flag
     g_current_map_page++;
 
     if (g_installed_count < MAX_TRACKED_PAGES) {
-        g_installed_ptes[g_installed_count++] = virt;
+        g_installed_ptes[g_installed_count] = virt;
+        g_installed_flags[g_installed_count] = flags;
+        g_installed_count++;
     }
     return 0;
 }
@@ -123,6 +126,7 @@ void vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt)
             /* Remove by shifting */
             for (size_t j = i; j + 1 < g_installed_count; j++) {
                 g_installed_ptes[j] = g_installed_ptes[j + 1];
+                g_installed_flags[j] = g_installed_flags[j + 1];
             }
             g_installed_count--;
             return;
@@ -323,6 +327,9 @@ static void test_present_fault_releases_lease(void)
     rc = gfx_ops.ioctl_file(f, GFX_CREATE_VIEW, &desc);
     CHECK_EQ(0, rc);
 
+    rc = gfx_ops.ioctl_file(f, GFX_ACQUIRE, (void *)(uintptr_t)0);
+    CHECK_EQ(0, rc);
+
     uint32_t fake_pixels[32 * 4];
     memset(fake_pixels, 0xAA, sizeof(fake_pixels));
 
@@ -369,6 +376,9 @@ static void test_view_aba_stale(void)
         .h = 4,
     };
     rc = gfx_ops.ioctl_file(f, GFX_CREATE_VIEW, &desc);
+    CHECK_EQ(0, rc);
+
+    rc = gfx_ops.ioctl_file(f, GFX_ACQUIRE, (void *)(uintptr_t)0);
     CHECK_EQ(0, rc);
 
     /* View was created at generation 1 */
@@ -627,6 +637,109 @@ static void test_kpanic_trylock_no_deadlock(void)
     spin_unlock(&Pos.lock);
 }
 
+/* ── Test: Raw mmap boundary and bidirectional ownership EBUSY ── */
+static void test_raw_mmap_ownership_boundaries(void)
+{
+    printf("\n--- test_raw_mmap_ownership_boundaries ---\n");
+    setup_test_environment();
+
+    vma_t vma;
+    memset(&vma, 0, sizeof(vma));
+    vma.vm_start = 0x10000;
+    vma.vm_end   = 0x14000; /* 4 pages = 16KB */
+    vma.vm_file  = NULL;
+
+    /* 1. Normal mode: writable mmap rejected with -EPERM */
+    vma.vm_flags = VMA_SHARED | VMA_PROT_WRITE | VMA_PROT_READ;
+    int rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    CHECK_EQ(-EPERM, rc);
+    CHECK_EQ(false, fb_has_raw_writable_mmap_seen());
+    CHECK_EQ(false, fb_has_raw_mmap_seen());
+    CHECK_EQ(0, g_installed_count);
+
+    /* 2. Readonly mmap succeeds and PTEs do NOT have PAGE_WRITE */
+    vma.vm_flags = VMA_SHARED | VMA_PROT_READ;
+    g_current_map_page = 0;
+    g_inject_map_fail_page = -1;
+    g_inject_unmap_fail_page = -1;
+    g_installed_count = 0;
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    CHECK_EQ(0, rc);
+    CHECK_EQ(4, g_installed_count);
+    CHECK_EQ(true, fb_has_raw_mmap_seen());
+    CHECK_EQ(false, fb_has_raw_writable_mmap_seen());
+    for (size_t i = 0; i < g_installed_count; i++) {
+        CHECK_EQ(0, (g_installed_flags[i] & PAGE_WRITE));
+    }
+
+    /* 3. Test mode writable mmap and ownership bidirectional EBUSY */
+    setup_test_environment();
+    fb_set_raw_writable_allowed_for_test(true);
+    CHECK_EQ(true, fb_is_raw_writable_allowed());
+
+    void *owner_cookie = (void *)0xCAFE;
+
+    /* 3a: Foreground owner active -> writable mmap rejected with -EBUSY */
+    rc = fb_owner_acquire(owner_cookie, 0);
+    CHECK_EQ(0, rc);
+    vma.vm_flags = VMA_SHARED | VMA_PROT_WRITE | VMA_PROT_READ;
+    g_current_map_page = 0;
+    g_installed_count = 0;
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    CHECK_EQ(-EBUSY, rc);
+    CHECK_EQ(false, fb_has_raw_writable_mmap_seen());
+    fb_owner_release(owner_cookie);
+
+    /* 3b: Fallback owner active -> writable mmap rejected with -EBUSY */
+    rc = fb_owner_register_fallback(owner_cookie, 0);
+    CHECK_EQ(0, rc);
+    g_current_map_page = 0;
+    g_installed_count = 0;
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    CHECK_EQ(-EBUSY, rc);
+    CHECK_EQ(false, fb_has_raw_writable_mmap_seen());
+    fb_owner_detach(owner_cookie);
+
+    /* 3c: Writable mmap succeeds -> sets sticky g_raw_writable_mmap_seen,
+     * causing subsequent acquire and register_fallback to return -EBUSY */
+    g_current_map_page = 0;
+    g_installed_count = 0;
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    CHECK_EQ(0, rc);
+    CHECK_EQ(true, fb_has_raw_writable_mmap_seen());
+    CHECK_EQ(-EBUSY, fb_owner_acquire(owner_cookie, 0));
+    CHECK_EQ(-EBUSY, fb_owner_register_fallback(owner_cookie, 0));
+
+    /* 4. Partial map failure + unmap failure sets sticky, causing subsequent acquire/register to return EBUSY */
+    setup_test_environment();
+    fb_set_raw_writable_allowed_for_test(true);
+    g_current_map_page = 0;
+    g_inject_map_fail_page = 1;
+    g_inject_unmap_fail_page = 0; /* unmap page 0 fails! dirty residual */
+    g_installed_count = 0;
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    CHECK_EQ(-ENOMEM, rc);
+    CHECK_EQ(true, fb_has_raw_writable_mmap_seen());
+    CHECK_EQ(-EBUSY, fb_owner_acquire(owner_cookie, 0));
+    CHECK_EQ(-EBUSY, fb_owner_register_fallback(owner_cookie, 0));
+
+    /* 5. Partial map failure + unmap success (clean rollback) leaves NO sticky */
+    setup_test_environment();
+    fb_set_raw_writable_allowed_for_test(true);
+    g_current_map_page = 0;
+    g_inject_map_fail_page = 1;
+    g_inject_unmap_fail_page = -1; /* unmap succeeds cleanly */
+    g_installed_count = 0;
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    CHECK_EQ(-ENOMEM, rc);
+    CHECK_EQ(false, fb_has_raw_writable_mmap_seen());
+    /* Owner acquire and register_fallback both succeed! */
+    CHECK_EQ(0, fb_owner_acquire(owner_cookie, 0));
+    fb_owner_release(owner_cookie);
+    CHECK_EQ(0, fb_owner_register_fallback(owner_cookie, 0));
+    fb_owner_detach(owner_cookie);
+}
+
 int main(void)
 {
     printf("=== Test Runner: Framebuffer Writers Admission ===\n");
@@ -637,6 +750,7 @@ int main(void)
     test_mmap_partial_failure();
     test_write_row_leased_and_resize();
     test_kpanic_trylock_no_deadlock();
+    test_raw_mmap_ownership_boundaries();
 
     printf("\n  ---\n  Total: %u | Passed: %u | Failed: %d\n",
            __test_stats.total, __test_stats.passed, g_failed);

@@ -21,6 +21,9 @@ int fb_write_row_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
 int fb_write_row(uint32_t x, uint32_t y, const void *pixels,
                  uint32_t row_bytes);
 
+void fb_set_surrendered_locked(bool surrendered);
+bool fb_is_surrendered_locked(void);
+
 struct devfs_ops;
 extern const struct devfs_ops fb_ops;
 

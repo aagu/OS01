@@ -30,7 +30,7 @@ int main(int argc, char **argv)
 {
     (void)argc; (void)argv;
 
-    int fb_fd = open("/dev/fb", O_RDWR);
+    int fb_fd = open("/dev/fb", O_RDONLY);
     if (fb_fd < 0) {
         printf("FAIL: cannot open /dev/fb\n");
         return 1;
@@ -46,7 +46,7 @@ int main(int argc, char **argv)
 
     uint32_t *fb = (uint32_t *)mmap(NULL,
                                      fb_info.height * fb_info.stride,
-                                     PROT_READ | PROT_WRITE,
+                                     PROT_READ,
                                      MAP_SHARED, fb_fd, 0);
     if ((intptr_t)fb < 0) {
         printf("FAIL: mmap returned %p\n", (void *)fb);

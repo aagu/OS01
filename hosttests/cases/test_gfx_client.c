@@ -73,13 +73,22 @@ static int   mock_open_errno;                 /* 0 = success */
 static int   mock_ioctl_create_view_rv;       /* default 0 */
 static int   mock_ioctl_get_info_rv;          /* default 0 */
 static int   mock_ioctl_present_rv;           /* default 0 */
+static int   mock_ioctl_acquire_rv;           /* default 0 */
+static int   mock_ioctl_release_rv;           /* default 0 */
+static int   mock_ioctl_register_fallback_rv; /* default 0 */
+static int   mock_ioctl_get_display_state_rv; /* default 0 */
+static int   mock_ioctl_replace_fallback_rv;  /* default 0 */
 
 static gfx_info_t mock_ioctl_get_info_value;  /* default 4x4 */
+static gfx_display_state_t mock_ioctl_display_state_value;
+static gfx_replace_fallback_t mock_ioctl_replace_fallback_passed;
 
 #define MAX_IOCTL_LOG 16
 static struct {
+    int fd;
     unsigned long cmd;
     void *arg;
+    uint64_t raw_arg;
 } mock_ioctl_log[MAX_IOCTL_LOG];
 
 static void reset_mocks(void)
@@ -98,10 +107,20 @@ static void reset_mocks(void)
     mock_ioctl_create_view_rv = 0;
     mock_ioctl_get_info_rv = 0;
     mock_ioctl_present_rv = 0;
+    mock_ioctl_acquire_rv = 0;
+    mock_ioctl_release_rv = 0;
+    mock_ioctl_register_fallback_rv = 0;
+    mock_ioctl_get_display_state_rv = 0;
+    mock_ioctl_replace_fallback_rv = 0;
     mock_ioctl_get_info_value.width = 4;
     mock_ioctl_get_info_value.height = 4;
     mock_ioctl_get_info_value.stride = 16;
     mock_ioctl_get_info_value.format = GFX_FORMAT_RGB32;
+    memset(&mock_ioctl_display_state_value, 0, sizeof(mock_ioctl_display_state_value));
+    mock_ioctl_display_state_value.generation = 1;
+    mock_ioctl_display_state_value.flags = GFX_DISPLAY_STATE_FOREGROUND;
+    mock_ioctl_display_state_value.reserved = 0;
+    memset(&mock_ioctl_replace_fallback_passed, 0, sizeof(mock_ioctl_replace_fallback_passed));
     memset(mock_ioctl_log, 0, sizeof(mock_ioctl_log));
 }
 
@@ -138,7 +157,7 @@ int __wrap_open(const char *path, int flags, ...)
         errno = mock_open_errno;
         return -1;
     }
-    return mock_open_fd_to_return;
+    return mock_open_fd_to_return++;
 }
 
 int __wrap_close(int fd)
@@ -152,12 +171,14 @@ int __wrap_ioctl(int fd, unsigned long request, ...)
 {
     va_list ap;
     va_start(ap, request);
-    void *arg = va_arg(ap, void *);
+    uint64_t raw_arg = va_arg(ap, uint64_t);
+    void *arg = (void *)(uintptr_t)raw_arg;
     va_end(ap);
-    (void)fd;
     if (mock_ioctl_count < MAX_IOCTL_LOG) {
+        mock_ioctl_log[mock_ioctl_count].fd = fd;
         mock_ioctl_log[mock_ioctl_count].cmd = request;
         mock_ioctl_log[mock_ioctl_count].arg = arg;
+        mock_ioctl_log[mock_ioctl_count].raw_arg = raw_arg;
     }
     mock_ioctl_count++;
     int rv;
@@ -174,6 +195,29 @@ int __wrap_ioctl(int fd, unsigned long request, ...)
         break;
     case GFX_PRESENT:
         rv = mock_ioctl_present_rv;
+        break;
+    case GFX_ACQUIRE:
+        rv = mock_ioctl_acquire_rv;
+        break;
+    case GFX_RELEASE:
+        rv = mock_ioctl_release_rv;
+        break;
+    case GFX_REGISTER_FALLBACK:
+        rv = mock_ioctl_register_fallback_rv;
+        break;
+    case GFX_GET_DISPLAY_STATE:
+        rv = mock_ioctl_get_display_state_rv;
+        if (rv == 0 && arg) {
+            memcpy(arg, &mock_ioctl_display_state_value,
+                   sizeof(mock_ioctl_display_state_value));
+        }
+        break;
+    case GFX_REPLACE_FALLBACK:
+        rv = mock_ioctl_replace_fallback_rv;
+        if (arg) {
+            memcpy(&mock_ioctl_replace_fallback_passed, arg,
+                   sizeof(mock_ioctl_replace_fallback_passed));
+        }
         break;
     default:
         rv = -ENOTTY;
@@ -509,6 +553,254 @@ TEST_FUNC(test_present_req_pixel_pointer_is_buffer)
     gfx_close(h);
 }
 
+TEST_FUNC(test_ownership_invalid_arguments_no_ioctl)
+{
+    TEST_SUITE("ownership: invalid arguments return EINVAL without ioctl");
+    reset_mocks();
+    gfx_display_state_t st;
+    gfx_handle_t *h = gfx_open(0, 0, 4, 4);
+    assert_not_null(h);
+    int ioctls_after_open = mock_ioctl_count;
+
+    /* gfx_acquire(NULL) */
+    errno = 0;
+    int rc = gfx_acquire(NULL);
+    assert_eq(-1, rc);
+    assert_eq(EINVAL, errno);
+    assert_eq(ioctls_after_open, mock_ioctl_count);
+
+    /* gfx_release(NULL) */
+    errno = 0;
+    rc = gfx_release(NULL);
+    assert_eq(-1, rc);
+    assert_eq(EINVAL, errno);
+    assert_eq(ioctls_after_open, mock_ioctl_count);
+
+    /* gfx_register_fallback(NULL) */
+    errno = 0;
+    rc = gfx_register_fallback(NULL);
+    assert_eq(-1, rc);
+    assert_eq(EINVAL, errno);
+    assert_eq(ioctls_after_open, mock_ioctl_count);
+
+    /* gfx_get_display_state(NULL, &st) */
+    errno = 0;
+    rc = gfx_get_display_state(NULL, &st);
+    assert_eq(-1, rc);
+    assert_eq(EINVAL, errno);
+    assert_eq(ioctls_after_open, mock_ioctl_count);
+
+    /* gfx_get_display_state(h, NULL) */
+    errno = 0;
+    rc = gfx_get_display_state(h, NULL);
+    assert_eq(-1, rc);
+    assert_eq(EINVAL, errno);
+    assert_eq(ioctls_after_open, mock_ioctl_count);
+
+    /* gfx_replace_fallback(NULL, h) */
+    errno = 0;
+    rc = gfx_replace_fallback(NULL, h);
+    assert_eq(-1, rc);
+    assert_eq(EINVAL, errno);
+    assert_eq(ioctls_after_open, mock_ioctl_count);
+
+    /* gfx_replace_fallback(h, NULL) */
+    errno = 0;
+    rc = gfx_replace_fallback(h, NULL);
+    assert_eq(-1, rc);
+    assert_eq(EINVAL, errno);
+    assert_eq(ioctls_after_open, mock_ioctl_count);
+
+    /* gfx_replace_fallback(NULL, NULL) */
+    errno = 0;
+    rc = gfx_replace_fallback(NULL, NULL);
+    assert_eq(-1, rc);
+    assert_eq(EINVAL, errno);
+    assert_eq(ioctls_after_open, mock_ioctl_count);
+
+    gfx_close(h);
+}
+
+TEST_FUNC(test_ownership_no_arg_commands_explicit_zero_arg)
+{
+    TEST_SUITE("ownership: no-arg commands pass explicit (uint64_t)0");
+    reset_mocks();
+    gfx_handle_t *h = gfx_open(0, 0, 4, 4);
+    assert_not_null(h);
+    int idx = mock_ioctl_count;
+
+    /* GFX_ACQUIRE */
+    int rc = gfx_acquire(h);
+    assert_eq(0, rc);
+    assert_eq(idx + 1, mock_ioctl_count);
+    assert_eq((int)GFX_ACQUIRE, (int)mock_ioctl_log[idx].cmd);
+    assert_eq(0ULL, mock_ioctl_log[idx].raw_arg);
+    idx++;
+
+    /* GFX_RELEASE */
+    rc = gfx_release(h);
+    assert_eq(0, rc);
+    assert_eq(idx + 1, mock_ioctl_count);
+    assert_eq((int)GFX_RELEASE, (int)mock_ioctl_log[idx].cmd);
+    assert_eq(0ULL, mock_ioctl_log[idx].raw_arg);
+    idx++;
+
+    /* GFX_REGISTER_FALLBACK */
+    rc = gfx_register_fallback(h);
+    assert_eq(0, rc);
+    assert_eq(idx + 1, mock_ioctl_count);
+    assert_eq((int)GFX_REGISTER_FALLBACK, (int)mock_ioctl_log[idx].cmd);
+    assert_eq(0ULL, mock_ioctl_log[idx].raw_arg);
+
+    gfx_close(h);
+}
+
+TEST_FUNC(test_ownership_success_preserves_errno)
+{
+    TEST_SUITE("ownership: success preserves caller errno");
+    reset_mocks();
+    gfx_handle_t *h1 = gfx_open(0, 0, 4, 4);
+    gfx_handle_t *h2 = gfx_open(0, 0, 4, 4);
+    assert_not_null(h1);
+    assert_not_null(h2);
+
+    /* acquire */
+    errno = ENOENT;
+    int rc = gfx_acquire(h1);
+    assert_eq(0, rc);
+    assert_eq(ENOENT, errno);
+
+    /* release */
+    errno = ENOENT;
+    rc = gfx_release(h1);
+    assert_eq(0, rc);
+    assert_eq(ENOENT, errno);
+
+    /* register_fallback */
+    errno = ENOENT;
+    rc = gfx_register_fallback(h1);
+    assert_eq(0, rc);
+    assert_eq(ENOENT, errno);
+
+    /* get_display_state */
+    gfx_display_state_t st;
+    errno = ENOENT;
+    rc = gfx_get_display_state(h1, &st);
+    assert_eq(0, rc);
+    assert_eq(ENOENT, errno);
+
+    /* replace_fallback */
+    errno = ENOENT;
+    rc = gfx_replace_fallback(h1, h2);
+    assert_eq(0, rc);
+    assert_eq(ENOENT, errno);
+
+    gfx_close(h1);
+    gfx_close(h2);
+}
+
+TEST_FUNC(test_replace_fallback_arguments_and_reserved)
+{
+    TEST_SUITE("replace_fallback: old/new FD routing and reserved=0");
+    reset_mocks();
+    gfx_handle_t *old_h = gfx_open(0, 0, 4, 4);
+    gfx_handle_t *new_h = gfx_open(0, 0, 4, 4);
+    assert_not_null(old_h);
+    assert_not_null(new_h);
+    /* old_h got first open (fd 7), new_h got second open (fd 8) */
+    int old_fd = 7;
+    int new_fd = 8;
+
+    int idx = mock_ioctl_count;
+    int rc = gfx_replace_fallback(old_h, new_h);
+    assert_eq(0, rc);
+    assert_eq(idx + 1, mock_ioctl_count);
+
+    /* Verify ioctl was called on new_h->fd */
+    assert_eq((int)GFX_REPLACE_FALLBACK, (int)mock_ioctl_log[idx].cmd);
+    assert_eq(new_fd, mock_ioctl_log[idx].fd);
+
+    /* Verify payload carries old_h->fd and reserved is 0 */
+    assert_eq(old_fd, mock_ioctl_replace_fallback_passed.old_fd);
+    assert_eq(0u, mock_ioctl_replace_fallback_passed.reserved);
+
+    gfx_close(old_h);
+    gfx_close(new_h);
+}
+
+TEST_FUNC(test_ownership_error_propagation)
+{
+    TEST_SUITE("ownership: ioctl errors propagated unchanged");
+    reset_mocks();
+    gfx_handle_t *h1 = gfx_open(0, 0, 4, 4);
+    gfx_handle_t *h2 = gfx_open(0, 0, 4, 4);
+    assert_not_null(h1);
+    assert_not_null(h2);
+
+    /* acquire: EBUSY */
+    mock_ioctl_acquire_rv = -EBUSY;
+    errno = 0;
+    int rc = gfx_acquire(h1);
+    assert_eq(-1, rc);
+    assert_eq(EBUSY, errno);
+
+    /* release: EINVAL */
+    mock_ioctl_release_rv = -EINVAL;
+    errno = 0;
+    rc = gfx_release(h1);
+    assert_eq(-1, rc);
+    assert_eq(EINVAL, errno);
+
+    /* register_fallback: EBUSY */
+    mock_ioctl_register_fallback_rv = -EBUSY;
+    errno = 0;
+    rc = gfx_register_fallback(h1);
+    assert_eq(-1, rc);
+    assert_eq(EBUSY, errno);
+
+    /* get_display_state: EINVAL */
+    mock_ioctl_get_display_state_rv = -EINVAL;
+    gfx_display_state_t st;
+    errno = 0;
+    rc = gfx_get_display_state(h1, &st);
+    assert_eq(-1, rc);
+    assert_eq(EINVAL, errno);
+
+    /* replace_fallback: EBADF */
+    mock_ioctl_replace_fallback_rv = -EBADF;
+    errno = 0;
+    rc = gfx_replace_fallback(h1, h2);
+    assert_eq(-1, rc);
+    assert_eq(EBADF, errno);
+
+    gfx_close(h1);
+    gfx_close(h2);
+}
+
+TEST_FUNC(test_get_display_state_populates_output)
+{
+    TEST_SUITE("get_display_state: populates output struct");
+    reset_mocks();
+    gfx_handle_t *h = gfx_open(0, 0, 4, 4);
+    assert_not_null(h);
+
+    mock_ioctl_display_state_value.generation = 42;
+    mock_ioctl_display_state_value.flags =
+        GFX_DISPLAY_STATE_FOREGROUND | GFX_DISPLAY_STATE_FALLBACK;
+    mock_ioctl_display_state_value.reserved = 0;
+
+    gfx_display_state_t st;
+    memset(&st, 0xff, sizeof(st));
+    int rc = gfx_get_display_state(h, &st);
+    assert_eq(0, rc);
+    assert_eq(42ULL, st.generation);
+    assert_eq((unsigned)(GFX_DISPLAY_STATE_FOREGROUND | GFX_DISPLAY_STATE_FALLBACK),
+              st.flags);
+    assert_eq(0u, st.reserved);
+
+    gfx_close(h);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_open_happy_path),
     TEST_ENTRY(test_open_enoint_normalized_to_enodev),
@@ -526,6 +818,12 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_present_propagates_switch_errnos),
     TEST_ENTRY(test_close_null_is_safe),
     TEST_ENTRY(test_present_req_pixel_pointer_is_buffer),
+    TEST_ENTRY(test_ownership_invalid_arguments_no_ioctl),
+    TEST_ENTRY(test_ownership_no_arg_commands_explicit_zero_arg),
+    TEST_ENTRY(test_ownership_success_preserves_errno),
+    TEST_ENTRY(test_replace_fallback_arguments_and_reserved),
+    TEST_ENTRY(test_ownership_error_propagation),
+    TEST_ENTRY(test_get_display_state_populates_output),
 TEST_LIST_END
 
 int main(void)
@@ -533,3 +831,4 @@ int main(void)
     RUN_ALL_TESTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }
+
