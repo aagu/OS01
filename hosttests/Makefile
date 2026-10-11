@@ -101,6 +101,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_gfx_file_lifecycle.elf \
     $(TEST_BLD)/test_monitor_file.elf \
     $(TEST_BLD)/test_monitor_accounting.elf \
+    $(TEST_BLD)/test_monitor_pmm.elf \
     $(TEST_BLD)/test_gfx_device.elf \
     $(TEST_BLD)/test_gfx_client.elf \
     $(TEST_BLD)/test_gfx_primitives.elf \
@@ -2149,6 +2150,33 @@ $(TEST_BLD)/test_monitor_accounting.elf: $(TEST_BLD)/test_monitor_accounting.o \
 
 .PHONY: test-monitor-accounting
 test-monitor-accounting: $(TEST_BLD)/test_monitor_accounting.elf
+	$<
+
+# Monitor plan Task 3: locked PMM usage snapshot.  Links the REAL
+# kernel/memory/pmm.c via the SAME PMM_SHADOW_INC harness as
+# test_pmm_ram_rel_index (mock arch/spinlock.h + arch/cpu.h shadow the
+# privileged-asm headers; everything else is the production header).
+# The fixture hand-builds PMMngr (zone counters + bits_map) instead of
+# driving pmm_init's boot_context path — out of scope for a snapshot
+# test — and parks a static backing buffer at the Phy_To_Virt image of
+# the pool page so alloc_4k_page's new-pool path writes into real host
+# memory.  Asserted: the 3-pages/1-in-use fixture T=6291456 /
+# U=2097152 / F=4194304, T==U+F across page alloc/free, in-pool 4KB
+# alloc/free leaving U untouched, T=0 → zero stats, Σzone summing.
+$(TEST_BLD)/test_monitor_pmm.o: $(TEST_CASES)/test_monitor_pmm.c \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/memory.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -I$(TEST_INC) -c $< -o $@
+
+$(TEST_BLD)/test_monitor_pmm.elf: $(TEST_BLD)/test_monitor_pmm.o \
+		$(TEST_BLD)/pmm_production.o \
+		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_boot_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-monitor-pmm
+test-monitor-pmm: $(TEST_BLD)/test_monitor_pmm.elf
 	$<
 
 # Gfx device test (Task 2): host-compiles the REAL

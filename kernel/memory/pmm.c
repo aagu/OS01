@@ -468,6 +468,44 @@ void free_pages(struct Page * page,int32_t number)
 	spin_unlock_irqrestore(&pmm_lock, flags);
 }
 
+/* ── Locked usage snapshot (monitor design spec §4.1) ─────────
+ *
+ * One pmm_lock acquisition; the Zone counters are summed into a
+ * local and copied out AFTER the unlock, so the caller can format
+ * the bytes without holding (or even seeing) the allocator lock.
+ * Lock discipline:
+ *   - no allocation and no formatting inside the lock (any stats
+ *     path must never allocate a temporary buffer under a lock);
+ *   - subpage_lock is NOT taken here, and never in reverse order —
+ *     a future joint-consistency snapshot must follow the existing
+ *     allocation-path order subpage_lock -> pmm_lock;
+ *   - subpage-pool metrics are deliberately NOT exported in this
+ *     first version.
+ * T == U + F holds for a consistent snapshot; T == 0 means the
+ * snapshot is unavailable (the caller judges that). */
+void pmm_get_stats(struct pmm_stats *out)
+{
+    if (!out)
+        return;
+
+    struct pmm_stats acc = { 0, 0, 0 };
+    uint64_t flags = spin_lock_irqsave(&pmm_lock);
+
+    for (uint64_t i = 0; i < PMMngr.zones_size; i++)
+    {
+        const struct Zone *z = PMMngr.zones_struct + i;
+        acc.managed_bytes  += (uint64_t)z->pages_length     * PAGE_2M_SIZE;
+        acc.reserved_bytes += (uint64_t)z->page_using_count * PAGE_2M_SIZE;
+        acc.free_bytes     += (uint64_t)z->page_free_count  * PAGE_2M_SIZE;
+    }
+
+    spin_unlock_irqrestore(&pmm_lock, flags);
+
+    out->managed_bytes  = acc.managed_bytes;
+    out->reserved_bytes = acc.reserved_bytes;
+    out->free_bytes     = acc.free_bytes;
+}
+
 // Find the subpage_pool containing phys, or NULL.  Must be called with
 // subpage_lock held.  Extracted from free_4k_page's pool walk.
 static struct subpage_pool *find_pool_locked(uint64_t phys)
