@@ -99,6 +99,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_mouse_init.elf \
     $(TEST_BLD)/test_mouse_proto.elf \
     $(TEST_BLD)/test_gfx_file_lifecycle.elf \
+    $(TEST_BLD)/test_monitor_file.elf \
     $(TEST_BLD)/test_gfx_device.elf \
     $(TEST_BLD)/test_gfx_client.elf \
     $(TEST_BLD)/test_gfx_primitives.elf \
@@ -2092,6 +2093,29 @@ $(TEST_BLD)/test_gfx_file_lifecycle.elf: $(TEST_BLD)/test_gfx_file_lifecycle.o \
 
 test-gfx-file-lifecycle: $(TEST_BLD)/test_gfx_file_lifecycle.elf
 	$<
+
+# Monitor plan Task 1: VFS per-file snapshot lifecycle hooks.  Reuses
+# the gfx harness's production objects (kernel/fs/file.c + devfs.c via
+# GFX_HOST_CFLAGS / gfx_test_runtime.h) so the fixture drives the REAL
+# file_alloc / file_get / file_put / file_free / fd_read paths and the
+# real devfs register/open/release protocol, not mocks of them.  The
+# snapshot filesystem callbacks live in the test TU (the procfs
+# counterpart is monitor plan Task 4).  Tested production symbols:
+# vfs_file_open, vfs_file_read, vfs_file_release, fd_read,
+# devfs_register_chrdev, devfs_open_node, devfs_release_file.
+.PHONY: test-monitor-file
+test-monitor-file: $(TEST_BLD)/test_monitor_file.elf
+	$<
+
+$(TEST_BLD)/test_monitor_file.o: $(TEST_CASES)/test_monitor_file.c \
+		$(TEST_MOCK)/gfx_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GFX_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_monitor_file.elf: $(TEST_BLD)/test_monitor_file.o \
+		$(TEST_BLD)/gfx_devfs_production.o \
+		$(TEST_BLD)/gfx_file_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 # Gfx device test (Task 2): host-compiles the REAL
 # kernel/driver/gfx.c against gfx_test_runtime.h, which provides the

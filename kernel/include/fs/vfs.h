@@ -33,6 +33,7 @@ struct vfs_node;
 struct vfs_mount;
 struct vfs_dirent;
 struct vma;
+struct file;
 
 // ── File operations (filesystem driver provides these) ────
 typedef struct vfs_ops {
@@ -86,6 +87,34 @@ typedef struct vfs_ops {
     // Read the symlink target into `buf` (up to `size` bytes).
     // Returns bytes written (excluding NUL) or -errno.
     int (*readlink)(struct vfs_node *node, char *buf, size_t size);
+
+    // ── Optional per-file snapshot lifecycle hooks (spec §6,
+    // monitor design 2026-10-09) ──
+    // Only filesystems whose files need an open-time snapshot
+    // (procfs statistics) register these; designated initializers
+    // leave them NULL everywhere else, which keeps the legacy
+    // node-read behaviour.  They operate on the file_t, never on the
+    // shared vfs_node — each independent open gets its own snapshot.
+    //
+    // open_file generates the file text once and attaches it to
+    // f->fs_private.  Returns 0 or -errno (-ENOMEM on allocation
+    // failure, -EOVERFLOW when the text exceeds the fixed capacity —
+    // never truncate into plausible-looking data).  On failure the
+    // hook must undo its own partial state: file_free still calls
+    // release_file on the way out, which must treat a NULL
+    // f->fs_private as "nothing attached".
+    int (*open_file)(struct file *f);
+    // read_file returns a slice of the open-time snapshot; EOF is
+    // the stable snapshot length, so split reads never mix two
+    // generations of the source data.
+    int64_t (*read_file)(struct file *f, uint64_t offset,
+                         uint64_t size, void *buffer);
+    // release_file frees the snapshot.  Fired from file_free on the
+    // drop-to-zero transition, BEFORE the node ref is dropped (and
+    // never under the file reference lock — file_put's contract).
+    // Device files keep their own devfs release_file protocol
+    // (struct devfs_ops); this hook must not touch it.
+    void (*release_file)(struct file *f);
 } vfs_ops_t;
 
 // ── A mounted filesystem instance ─────────────────────────

@@ -662,6 +662,27 @@ test-gfx-primitives:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-gfx-primitives $(OS01_SUBMAKE_ARGS))
 
+# ── Terminal monitor host tests (2026-10-11 monitor plan) ────
+# Focused host tests, one per monitor-plan task.  The CASE whitelist
+# grows task by task; an unknown CASE must abort, never silently pass.
+# With CASE omitted the umbrella runs the whole registered group.
+# Implementation mirrors test-m1-host: each case gets its own .PHONY
+# runner because os01_submake must start its own recipe line.
+.PHONY: test-monitor-host _test-monitor-host-run-file
+MONITOR_CASES := file
+_test-monitor-host-run-file:
+	@echo "  [test-monitor-host] file"
+	$(call os01_submake,hosttests,test-monitor-file $(OS01_SUBMAKE_ARGS))
+test-monitor-host: CASE ?=
+test-monitor-host: CASE := $(CASE)
+test-monitor-host: $(if $(CASE),_test-monitor-host-run-$(CASE),$(foreach c,$(MONITOR_CASES),_test-monitor-host-run-$(c)))
+	$(call require_capability,rootfs)
+	@case "$(CASE)" in \
+	    "") echo "  [test-monitor-host] full monitor group: $(MONITOR_CASES)";; \
+	    file) echo "  [test-monitor-host] CASE=$(CASE)";; \
+	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(MONITOR_CASES)" >&2; exit 1;; \
+	  esac
+
 # driver-model matrix support — see Task 11.  The python harness
 # (qemutests/driver_matrix_run.py) drives each (case, SMP) pair; the
 # build contract test (qemutests/test_arch9_build_contract.py) only

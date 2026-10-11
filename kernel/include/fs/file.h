@@ -107,6 +107,13 @@ typedef struct file {
     // 末尾的 vfs_node_put 单独释放，顺序固定为：devfs_release_file →
     // vfs_node_put。NULL 表示设备 open 不需要 per-file 状态。
     void           *dev_private;
+    // spec §6（monitor design 2026-10-09）：文件系统私有 per-open 快照
+    // （如 procfs 统计文本）。不复用 dev_private——设备文件走 devfs
+    // 自有 release 协议，快照文件走 vfs_ops 的通用 release_file hook，
+    // 两条协议互不重叠。file_alloc 置 NULL；仅文件系统的 open_file
+    // hook 可写入，仅 release_file hook 可释放。dup/fork 共享同一
+    // file_t，因此也共享同一份快照。
+    void           *fs_private;
 } file_t;
 
 // ── Per-process file descriptor table ──────────────────────
@@ -157,6 +164,16 @@ int     fd_dup2(files_t *fs, int oldfd, int newfd);  // locks fs->lock internall
 // Read / write through fd (may sleep for pipes)
 int64_t      fd_read(file_t *f, void *buf, uint64_t size);
 int64_t      fd_write(file_t *f, const void *buf, uint64_t size);
+
+// ── Per-file snapshot lifecycle (spec §6) ──────────────────
+// Thin wrappers over the optional vfs_ops open_file/read_file/
+// release_file hooks.  Without a hook: open/release are no-ops and
+// read falls back to the legacy node read, so existing filesystems
+// and devices are unaffected.
+int          vfs_file_open(file_t *f);
+int64_t      vfs_file_read(file_t *f, uint64_t offset, uint64_t size,
+                           void *buf);
+void         vfs_file_release(file_t *f);
 
 // ioctl through fd — dispatches by file type
 int64_t      fd_ioctl(file_t *f, int cmd, void *arg);
