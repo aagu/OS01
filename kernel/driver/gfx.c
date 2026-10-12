@@ -50,6 +50,8 @@
 #include <memory/uaccess.h>      // syscall_check_user_range, copy_*_ft
 #include <memory/slab.h>         // kmalloc, kfree
 #include <arch/spinlock.h>       // spinlock_T, spin_lock_irqsave
+#include <arch/clocksource.h>    // arch_clocksource_read_ns (terminal-cpu probe)
+#include <core/printk.h>         // serial_printk                (terminal-cpu probe)
 #include <errno.h>
 #include <string.h>
 #include <stdint.h>
@@ -248,6 +250,16 @@ static int gfx_ioctl_get_info(file_t *f, gfx_info_t *kinfo)
 // -EFAULT — earlier rows may already be visible on the fb (spec §4).
 static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq)
 {
+    /* ── Terminal-CPU probe (Phase 1 instrumentation) ───────────────
+     * Wall-time cost of a successful present, accumulated and dumped
+     * every 256 calls. Counts only the rc==0 success path; error
+     * returns are silently excluded so they don't bias the average.
+     * Removed once we have the numbers (commit tty-cpu-probe done).
+     */
+    static uint64_t s_present_ns;
+    static uint64_t s_present_count;
+    uint64_t t_present0 = arch_clocksource_read_ns();
+
     gfx_view_t *v = (gfx_view_t *)f->dev_private;
     if (!v || !ureq) return -EINVAL;
 
@@ -299,8 +311,29 @@ static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq)
     int lrc = fb_gfx_writer_begin(&lease, v_mode_seq, v);
     if (lrc < 0) return lrc;
 
-    // Walk the rows. Allocate a single heap row buffer of exactly stride bytes;
-    // free it and release lease on every return path.
+    /* Row-by-row present path. Terminal-cpu investigation (commit
+     * tty-cpu-probe-v1) confirmed two redundant costs inside the
+     * prior loop:
+     *
+     *   1. The per-row syscall_check_user_range was redundant —
+     *      Stage 3 already range-checked the whole
+     *      [pixels, pixels + v_h*stride) user region.
+     *   2. The per-row setjmp in copy_from_user_ft was hoistable:
+     *      arm current->fault_jmp ONCE for the loop and memcpy
+     *      inline per row. A fault on any row longjmps to the
+     *      cleanup below; spec §4 already accepts that early rows
+     *      may have become visible by then.
+     *
+     * On QEMU TCG these are near-free because clang folds the
+     * setjmp/longjmp pair into IR intrinsic calls and the kernel's
+     * TLB is hot, so the per-iteration wall time is dominated by
+     * fb_write_row_leased (47.9 µs / row in the recorded run, ≈33 ns
+     * per pixel). On bare metal the savings should be visible —
+     * each redundant setjmp+PT walk is a few µs, and 1080 of them
+     * × 1-2 present/s adds up. See
+     * docs/roadmap.md parked "terminal 长时间占用 CPU 约 16%" for
+     * the full investigation and follow-up.
+     */
     size_t row_buf_size = (size_t)kreq.stride;
     void *row_buf = kmalloc(row_buf_size);
     if (!row_buf) {
@@ -308,30 +341,49 @@ static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq)
         return -ENOMEM;
     }
 
-    for (uint32_t row = 0; row < v_h; row++) {
-        uint64_t row_addr = kreq.pixels + (uint64_t)row * (uint64_t)kreq.stride;
-        if (!syscall_check_user_range(row_addr, (uint64_t)kreq.stride, false)) {
-            kfree(row_buf);
-            fb_writer_end(&lease);
-            return -EFAULT;
-        }
-        if (copy_from_user_ft(row_buf, (const void *)(uintptr_t)row_addr,
-                              (size_t)kreq.stride) < 0) {
-            kfree(row_buf);
-            fb_writer_end(&lease);
-            return -EFAULT;
-        }
+    os01_jmp_buf jb;
+    void **old_jmp = current->fault_jmp;
+    void (*old_cb)(void *) = current->fault_cleanup;
+    void *old_arg = current->fault_cleanup_arg;
+    current->fault_jmp = (void **)jb;
+    current->fault_cleanup = NULL;
+    current->fault_cleanup_arg = NULL;
 
-        int wrc = fb_write_row_leased(&lease, v_x, v_y + row, row_buf, (uint32_t)kreq.stride);
-        if (wrc < 0) {
-            kfree(row_buf);
-            fb_writer_end(&lease);
-            return wrc;
+    int rc;
+    if (__builtin_setjmp((void **)jb) == 0) {
+        rc = 0;
+        for (uint32_t row = 0; row < v_h; row++) {
+            uint64_t row_addr = kreq.pixels + (uint64_t)row * (uint64_t)kreq.stride;
+            __builtin_memcpy(row_buf, (const void *)(uintptr_t)row_addr,
+                             (size_t)kreq.stride);
+            int wrc = fb_write_row_leased(&lease, v_x, v_y + row, row_buf,
+                                          (uint32_t)kreq.stride);
+            if (wrc < 0) { rc = wrc; break; }
         }
+    } else {
+        rc = -EFAULT;
     }
+
+    current->fault_jmp = old_jmp;
+    current->fault_cleanup = old_cb;
+    current->fault_cleanup_arg = old_arg;
 
     kfree(row_buf);
     fb_writer_end(&lease);
+    if (rc < 0) return rc;
+
+    /* Phase 1 instrumentation: aggregate cost & rate, dump every 256
+     * successful presents so a QEMU 10 s run leaves multiple points. */
+    {
+        uint64_t dt = arch_clocksource_read_ns() - t_present0;
+        s_present_ns += dt;
+        s_present_count++;
+        if ((s_present_count & 0xffu) == 0) {
+            serial_printk("gfx_present: count=%llu total_ns=%llu avg_ns=%llu\n",
+                          s_present_count, s_present_ns,
+                          s_present_ns / s_present_count);
+        }
+    }
     return 0;
 }
 
