@@ -95,6 +95,14 @@ struct task_struct {
     int64_t pid;
     struct mm_struct *mm;
     struct files_struct *files;
+    /* uaccess fault recovery slots (production kernel/driver/gfx.c
+     * arms current->fault_jmp across the per-row memcpy loop).  The
+     * fb writers/host tests never trip the fault path, but the
+     * production gfx.c references these fields regardless of the
+     * test outcome, so the host task stub needs them present. */
+    void **fault_jmp;
+    void (*fault_cleanup)(void *);
+    void *fault_cleanup_arg;
 };
 
 extern struct task_struct mock_current_task;

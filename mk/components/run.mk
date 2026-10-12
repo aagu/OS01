@@ -387,7 +387,7 @@ TEST_SELFTEST_IMAGE := $(BUILD_DIR)/image/selftest/disk.img
 # overridable.
 KERNEL_SELFTEST_SMP ?= 4
 
-.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-device test-gfx-client test-gfx-primitives test-m1-host test-arch9-host test-resolution-host
+.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-fault-bridge test-gfx-device test-gfx-client test-gfx-primitives test-m1-host test-arch9-host test-resolution-host
 test-host:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,run $(OS01_SUBMAKE_ARGS))
@@ -627,6 +627,15 @@ test-gfx-file-lifecycle:
 test-gfx-device:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-gfx-device $(OS01_SUBMAKE_ARGS))
+# Partial-present Task 1 Step 2: host SIGSEGV bridge self-test. Links
+# ONLY the bridge + the bridge test TU (no production kernel objects).
+# Pin install/restore round-trip, PROT_NONE fault longjmps inside the
+# protected region, NULL get_jump does not fake EFAULT, and restore
+# returns the host SIGSEGV mask to the pre-install value. Must pass
+# before test-gfx-device depends on the bridge for the new rect tests.
+test-gfx-fault-bridge:
+	$(call require_capability,rootfs)
+	@$(call os01_submake,hosttests,test-gfx-fault-bridge $(OS01_SUBMAKE_ARGS))
 # Focused hosttest for the gfx 2D API plan Task 3 — libgfx client
 # lifecycle.  Runs test_gfx_client.elf which host-compiles the REAL
 # libgfx/gfx.c (open/close/get_info/set_clip/present) with HOST_CC

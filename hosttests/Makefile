@@ -99,6 +99,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_mouse_init.elf \
     $(TEST_BLD)/test_mouse_proto.elf \
     $(TEST_BLD)/test_gfx_file_lifecycle.elf \
+    $(TEST_BLD)/test_gfx_fault_bridge.elf \
     $(TEST_BLD)/test_monitor_file.elf \
     $(TEST_BLD)/test_monitor_accounting.elf \
     $(TEST_BLD)/test_monitor_pmm.elf \
@@ -2429,17 +2430,54 @@ $(TEST_BLD)/gfx_gfx_production.o: $(TESTS_DIR)/kernel/driver/gfx.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(GFX_HOST_CFLAGS) -c $< -o $@
 
+# Partial-present Task 1 Step 2: host SIGSEGV bridge for the
+# in-process inline-memcpy fault tests.  Compiled with HOST_CC /
+# HOST_CFLAGS only — NO KERNEL_INC, NO LIBC_INC, NO force-include,
+# NO GFX_HOST_CFLAGS, NO production-header chain.  The bridge .c is
+# the ONLY TU in the binary that talks to glibc's signal ABI; the
+# test TU includes <signal.h> only for the sigprocmask probe that
+# confirms restore() puts the host SIGSEGV mask back to the
+# pre-install value.  Linked ONLY into test_gfx_device.elf (the
+# gfx_device tests are the only ones that exercise fault_jmp).
+$(TEST_BLD)/gfx_fault_bridge.o: $(TEST_MOCK)/gfx_fault_bridge.c \
+		$(TEST_MOCK)/gfx_fault_bridge.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -c $< -o $@
+
+# Bridge self-test: links the bridge and the test TU only — does NOT
+# pull in any production code.  Lets us verify install/restore +
+# longjmp-on-fault before the new rect-present tests depend on it.
+# Mirrors the GFX_CLIENT_*_CFLAGS pattern: errno must expand to glibc's
+# TLS accessor (hosttests/include/errno.h declares a non-TLS reference,
+# which trips the .tbss/.data mismatch at link time).
+$(TEST_BLD)/test_gfx_fault_bridge.o: $(TEST_CASES)/test_gfx_fault_bridge.c \
+		$(TEST_MOCK)/gfx_fault_bridge.h \
+		$(TEST_INC)/test_framework.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK) -I$(TEST_INC) \
+		-D'errno=(*__errno_location())' \
+		-include $(TEST_INC)/gfx_client_errno.h -c $< -o $@
+
+$(TEST_BLD)/test_gfx_fault_bridge.elf: $(TEST_BLD)/test_gfx_fault_bridge.o \
+		$(TEST_BLD)/gfx_fault_bridge.o
+	$(HOST_CC) -o $@ $^
+
+test-gfx-fault-bridge: $(TEST_BLD)/test_gfx_fault_bridge.elf
+	$<
+
 $(TEST_BLD)/test_gfx_device.o: $(TEST_CASES)/test_gfx_device.c \
 		$(TESTS_DIR)/kernel/include/driver/gfx.h \
 		$(TESTS_DIR)/kernel/include/uapi/gfx.h \
-		$(TEST_MOCK)/gfx_test_runtime.h
+		$(TEST_MOCK)/gfx_test_runtime.h \
+		$(TEST_MOCK)/gfx_fault_bridge.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(GFX_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+	$(HOST_CC) $(GFX_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TEST_MOCK) -c $< -o $@
 
 $(TEST_BLD)/test_gfx_device.elf: $(TEST_BLD)/test_gfx_device.o \
 		$(TEST_BLD)/gfx_gfx_production.o \
 		$(TEST_BLD)/gfx_devfs_production.o \
-		$(TEST_BLD)/gfx_file_production.o
+		$(TEST_BLD)/gfx_file_production.o \
+		$(TEST_BLD)/gfx_fault_bridge.o
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 test-gfx-device: $(TEST_BLD)/test_gfx_device.elf
