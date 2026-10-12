@@ -594,10 +594,29 @@ def test_systest(tester):
     ``SYSTEST_CASE`` (written by ``mk/components/run.mk`` alongside the
     private ``inittab.systest.case``) names the requested case; an
     unset/empty value runs the full table.
+
+    The deadline scales with the effective SMP count.  The base 60s
+    budget covers the scheduled 1/2/4 CPU matrix in CI (each run
+    finishes in ~60s of QEMU time).  At SMP=5/6/7/8 the boot + per-CPU
+    synchronization overhead during the COW TTY handshake and the
+    syscall table pushes the wall-clock past 60s; without scaling the
+    runner trips the deadline and reports ``systest did not complete``
+    even though the guest is still emitting valid trace records — see
+    CI run 38235268805 (scheduled full-matrix job, 8-CPU systest
+    flake).  +10s per VCPU above 4 keeps the higher counts safely
+    inside the budget.
     """
     requested_case = os.environ.get("SYSTEST_CASE") or None
+    # SMP-aware deadline: ProcessSession's overall QEMU timeout is
+    # derived from ``tester.timeout`` (passed in ``start_qemu``), so
+    # bump it before the spawn so the child isn't killed mid-run at
+    # SMP>=5.  ``tester`` is single-use per suite, so mutating
+    # ``tester.timeout`` here has no cross-suite effect.
+    effective_smp = max(1, int(getattr(tester, "_effective_smp", "1") or 1))
+    systest_timeout_s = 60 + max(0, effective_smp - 4) * 10
+    tester.timeout = systest_timeout_s
     tester.start_qemu(serial_stdio=True)
-    deadline = time.monotonic() + 60
+    deadline = time.monotonic() + systest_timeout_s
     # Each region's child signals only after fork, immediately before read.
     # Exact markers prevent replaying input for a previously handled region.
     result_pattern = r"(\[SYS TEST\] RESULT:|'/bin/terminal|BusyBox v)"
