@@ -120,9 +120,28 @@ core dirty 表示需要重绘的 cell；renderer pending damage 表示私有 pix
 - EAGAIN：保留 damage，沿用 250 ms deadline；无新 PTY 输出也必须能重试。
 - ESTALE：保留当前 damage 直到现有 refresh/rebind 完成；新 view 必须 full redraw，旧 view 坐标不能复制到新 view。
 - EACCES：进入 background/skipped，保留 damage，继续处理 PTY；前台恢复后必须 full redraw，覆盖其他 owner 留下的内容。
-- EIO 与其他错误：沿用既有恢复/失败计数与 serial-only 策略，不伪装成功。
+- 普通入口的 EIO 与其他错误：返回 -1，保留 damage，由 main 沿用既有失败计数；不把普通错误搬进 refresh 来绕过 main 的计数。
 
-pending damage 的重试由 display 的现有 deadline/refresh 路径驱动，即使 generation 未变也不能直接清 deadline 而跳过未成功的提交。须在 `terminal_display.c` 内完成这一修正，不改 terminal.c 的调度逻辑。失败后的 errno 在返回时必须仍是失败 present 的 errno。
+display 增加 `present_retry_pending`，只表示实际提交失败后需要 refresh 重试，与“已有 damage”和资源准备失败的 deadline 区分。普通入口仅在 EAGAIN/ESTALE 时设置它并设置 `now_ms+250` deadline；其他普通错误仍交 main 计数。成功提交清除此标志和 deadline。owner/mode 恢复造成的 full redraw 优先于旧 damage 重试，新 view 不继承旧几何，但恢复过程中尚未成功的 full redraw 仍必须保留。
+
+refresh 每次进入首先清 `refresh_presented`，状态检查/重绑定继续按现有协议执行，并按下表与 main 握手。普通 pending damage 不能成为 refresh 提交的触发条件。
+
+| refresh 条件或提交结果 | 行为与返回值 |
+|---|---|
+| 无已失败提交、无需 redraw/rebind | 只查询状态，返回 0；不得 flush/提交一般 dirty，即使有 pending damage |
+| deadline 未到 | 返回 1；不提交，保留状态，不设置 refresh_presented |
+| owner/mode 恢复要求 redraw/rebind | 沿用恢复流程并 full redraw；不得用旧 rect 代替 |
+| deadline 已到、generation 不变、foreground、present_retry_pending | 执行一次 flush+提交尝试，允许把等待期间新增 dirty 合并进本轮；不再额外等待33 ms，因为失败重试已等待250 ms |
+| 实际提交全部成功 | ack、清 present_retry_pending/deadline，设置 refresh_presented=true，返回0；main 据此清 dirty_pending、更新 last_present_ms 并跳过重复提交 |
+| 无 damage 的 no-op | 返回0，但不设置 refresh_presented；清空无工作可重试的标志/deadline，不计提交成功帧 |
+| EAGAIN/ESTALE | 保留 damage 和 present_retry_pending，deadline=now_ms+250，返回1，errno保留；下轮先查 owner/mode，不忙重试 |
+| EACCES 或查询确认 background | foreground=false、redraw_pending=true，保留 damage，取消旧 partial retry 标志/deadline，返回0；前台恢复交 full redraw，不设置 refresh_presented |
+| EIO/ENODEV/ENXIO/EBADF/ENOTTY | 由现有 fail() 设置 serial_only=true、清 deadline与retry标志，返回-1且保留errno；停止图形尝试 |
+| 其他 refresh 提交错误（含 ENOMEM/EFAULT/EINVAL/EBUSY） | 保留 damage/retry标志，由 fail() 设置now_ms+250，返回1且保留errno；遵循既有恢复路径的非永久错误重试，不增加main的失败计数 |
+
+资源准备或状态查询失败仍由现有 fail() 负责，不因它的 deadline 自动设置 present_retry_pending；恢复 redraw 失败产生的重试标志也不取消 redraw_pending，后续继续 full 恢复。非错误/不提交分支不引入新的 errno 承诺；返回失败或等待失败重试时必须保留失败操作的 errno。
+
+全部修改在 `terminal_display.c` 内完成，不改 terminal.c 的调度与失败计数逻辑。main 只负责普通提交失败计数；refresh 内错误由既有 fail() 负责，两者不重复计数。
 
 一轮多 ioctl 可以遇到 owner/mode 在矩形之间改变；这是允许的部分提交失败，靠保留 damage 和后续 full 恢复收敛，不把整轮矩形扩大为一个持锁事务。
 
@@ -130,7 +149,16 @@ pending damage 的重试由 display 的现有 deadline/refresh 路径驱动，�
 
 保留 terminal.c 的四段 `[term-probe]`、kernel gfx present probe 和 fb row probe。handoff 的“长期保留”优先于代码内写着“上线后移除”的旧注释；可以修正文案，不删除观测。
 
-旧 `gfx_present` probe 不足以单独比较多个 rect：必须让矩形路径也计入成功 present 的时间/字节统计，区分 full/rect。另在 display/renderer 侧增加低频逻辑帧汇总，包含 full_frames、partial_frames、rect_calls、成功逻辑帧写入字节、失败次数；不改变已有 term-probe 格式。可用新增 `log_debug`/debug channel 控制 kernel 新统计，新代码不新增 serial_printk。
+旧 `gfx_present` probe 不足以单独比较多个 rect：必须让矩形路径也计入成功 present 的时间/字节统计，区分 full/rect。新增 display 层统一计时，普通调用与 refresh 重试/full redraw 都经过同一统计入口：计时从 flush 前开始，到最后一个 ioctl 返回及 ack/失败状态处理结束，整轮只计一次。低频逻辑帧汇总包含以下字段：
+
+- `full_frames`、`partial_frames`：实际发出 ioctl 且全部成功的逻辑帧；`success_ns` 为这些帧的累计耗时，`success_bytes` 为这些帧的全部 ioctl 写入字节和。
+- `noop_calls`、`skipped_calls`：无 damage、background/serial-only 不发 ioctl 的调用，均不进入成功帧的分子或分母。
+- `failed_attempts`、`failed_ns`：实际提交失败的整轮尝试和累计耗时，与成功统计分开；`rect_calls` 包括失败 ioctl，并可按成功/失败分列。
+- `failed_completed_rect_bytes`：失败轮中在失败 ioctl 之前已完整成功的矩形字节数，是已写量的下界；失败 ioctl 内的部分行不能由用户态可靠推算，必须标明未知，不写成零字节或准确总量。kernel gfx 路径另计每次成功 row write 的 bytes，含失败 present 的已写前缀，用于交叉检查实际写入量，不改变 fb row probe。
+
+汇总在 terminal_display.c 使用独立 `/dev/serial` 描述符输出（懒打开，生命周期由 display close 清理），每秒至多一条；通过注入时钟/统计输出 hook 可做 host 验证。统计包含明确的采样区间，最后不足一秒可在close时输出；不得让汇总输出耗时进入 success_ns/failed_ns，不得让打开/写入/关闭描述符覆盖调用者应收到的 errno。计时本身始终开启，输出可以受构建选项控制，性能验收构建必须启用。kernel 新统计可通过 log_debug/debug channel 输出，新代码不新增 serial_printk。不改变已有 term-probe 格式。
+
+原 `[term-probe]` 原样保留，用于与历史基线交叉观察；它只计 main 普通 present 分支，refresh 提交属于 refresh segment；普通 no-op 返回0也会进入 presents 分母，失败尝试耗时也会进入 present 分子。因此它不能单独作为真实成功逻辑帧的性能主门槛，也不能通过把昂贵提交移进 refresh 或增加 no-op 宣称达标。
 
 fb row 原 probe 不含直接 byte 输出，单靠 ns/pixel 不能证明字节减少；新增统计或 host mock 的总 bytes/rect 几何必须提供独立证据。固定“每 256 次”也不能假设 10 秒必有输出：2 calls/s 需要约 128 秒。短验收窗口使用每秒汇总，或明确延长采样到获得完整数据。
 
@@ -139,7 +167,7 @@ fb row 原 probe 不含直接 byte 输出，单靠 ns/pixel 不能证明字节�
 通过条件：
 
 1. 稳态平均每个成功逻辑帧写入量 <300,000 B；统计一轮所有 rect 的总和，而非单个 ioctl。确定性稀疏变化 fixture 同时证明只写指定区域。
-2. 原 `[term-probe]` 的稳态聚合 `present_avg_us <= 10000`，按 presents 数加权，涵盖整轮 display present 的多个 ioctl；保留每秒值和长尾以便分析。
+2. 新 display 统一统计的稳态 `success_ns / (full_frames+partial_frames) <= 10,000,000 ns`；分母必须非零，覆盖普通与refresh入口。保留每秒值、失败耗时与成功帧长尾；原 term-probe 的加权 present_avg_us 和 refresh_avg_us 同时报告作为连续性证据，解释其与主统计的差异。
 3. terminal 在 monitor 中的稳态 CPU 目标为 CPU0 的约 1–3%，报告 scheduler 实际计费结果。主门槛是字节数和时间，不能把 wall time 换算值当作 CPU 达标证据；CPU 未达目标仍需解释原因。
 4. idle terminal 持续无 full/rect 更新（排除初始化），无忙轮询；视觉正确性与恢复测试全部通过。
 
@@ -152,7 +180,8 @@ fb row 原 probe 不含直接 byte 输出，单靠 ns/pixel 不能证明字节�
 | UAPI/libgfx host | 结构布局、命令号、旧 reserved 校验；rect 请求完整字段与源基址；NULL/零尺寸/越界/完整 view；clip 无关；成功 errno 不变、失败 errno 透传 |
 | kernel gfx host | 非零 view origin 与 x/y；单像素、最右下角、完整 rect；stride 错误、溢出、无效用户地址；请求 copy fault 与中间行 fault；只写 w×h×4 B，rect 外 sentinel 不变；资源/lease/fault 状态清理；EACCES/EAGAIN/ESTALE/EIO |
 | renderer host | 分散行不合 bbox、同行合并、相邻同跨度合并；光标擦除/显隐；清屏、scroll、alt-screen、余量像素；64 容量溢出 full；dirty 清除后 pending 仍保留；无变化无 ioctl |
-| display host | 多 rect 全成功才 ack；第 N 个失败后全列表重试；无新输出的 deadline 重试；background drain/恢复 full；mode rebind 丢弃旧几何；缺失注入 hook full fallback；新 present 错误沿用恢复策略 |
+| display host | 多 rect 全成功才 ack；第 N 个失败后全列表重试；无deadline的一般dirty不在refresh提交；deadline前不提交、到期无PTY输出重试；成功设置refresh_presented供main清dirty且不重复提交；再次失败重新设deadline；background drain/恢复 full；mode rebind 丢弃旧几何；缺失注入 hook full fallback；表中各错误状态/返回值/errno/计数责任 |
+| 统计 host | 相同实际帧分别从普通与refresh入口提交，主统计相同；插入大量no-op/skipped不改变成功平均；成功/失败耗时分离；失败前成功rect字节为下界并标记未知前缀；kernel计入失败present的成功行；统计输出不覆盖errno、不计入提交耗时；无成功帧不能判性能通过 |
 | QEMU surface/session | sparse 更新前后截图像素差，rect 外不变；光标、滚屏、清屏、alt-screen；GUI owner 退出/释放/被杀后的完整恢复；setres 往返、后台切换和故障恢复；monitor 正常退出及 Ctrl-C 后 shell 存活 |
 
 稀疏像素 sentinel/截图测试必须实际验证内核写入范围；只有 libgfx ioctl mock 不能证明 kernel 边界安全。QEMU 截图应沿用既有 QMP surface 获取路径，不能因截图失败跳过。性能 runner 基于已有 monitor suite 扩展或注册聚焦用例，具体入口在 implementation plan 钉死；不把尚不存在的 target 写成现有命令。
