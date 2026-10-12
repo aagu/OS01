@@ -712,6 +712,67 @@ class SystestSuiteTests(unittest.TestCase):
         finally:
             tester.cleanup()
 
+    def _runner_with_smp(self, chunks, smp, returncode=0, start_exc=None):
+        """Variant of ``_runner_with`` that constructs the TestRunner
+        with a non-default ``smp=`` so deadline-scaling tests can
+        exercise the SMP-aware path.  The fixture still bypasses real
+        QEMU via the same FakeProcessSession factory.
+        """
+        def factory(argv, run_dir, timeout_s, *, writable_stdin=False):
+            return FakeProcessSession(
+                argv=argv,
+                run_dir=run_dir,
+                timeout_s=timeout_s,
+                writable_stdin=writable_stdin,
+                chunks=chunks,
+                returncode=returncode,
+                start_exc=start_exc,
+            )
+        tester = self.rt.TestRunner(
+            disk_img="/tmp/fake-disk.img",
+            timeout=2,
+            smp=smp,
+        )
+        tester._session_factory = factory
+        return tester
+
+    def test_systest_deadline_scales_with_smp(self) -> None:
+        """Regression for CI run 38235268805: the systest deadline
+        must grow with SMP count, otherwise the 5/6/7/8 CPU scheduled
+        matrix flakes the runner with ``systest did not complete`` even
+        though the guest is still emitting valid trace records.
+
+        Verifies two angles:
+          * SMP=1 keeps the original 60s budget (so PR-time 1/2-CPU
+            systest runs are unaffected).
+          * SMP=8 inflates the ProcessSession's overall QEMU deadline
+            (passed as ``timeout_s`` to the session factory) past the
+            60s baseline.
+        """
+        # SMP=1: original 60s budget preserved.
+        tester = self._runner_with_smp(self.CHUNKS_POSITIVE, smp=1)
+        try:
+            self.assertTrue(self.rt.test_systest(tester))
+            self.assertEqual(
+                tester.process.timeout_s, 60,
+                "SMP=1 must keep the original 60s ProcessSession budget",
+            )
+        finally:
+            tester.cleanup()
+
+        # SMP=8: deadline scaled per the +10s/extra-VCPU rule.
+        # (60 + (8-4) * 10 = 100s — comfortably above the ~63s the
+        # CI run measured for 8-CPU systest.)
+        tester = self._runner_with_smp(self.CHUNKS_POSITIVE, smp=8)
+        try:
+            self.assertTrue(self.rt.test_systest(tester))
+            self.assertEqual(
+                tester.process.timeout_s, 100,
+                "SMP=8 must inflate the ProcessSession budget past 60s",
+            )
+        finally:
+            tester.cleanup()
+
     def test_systest_end_arriving_after_result_match_is_parsed(self) -> None:
         # Regression: the runner snapshotted the trace via
         # ``_read_available()`` immediately after the RESULT-line match,
