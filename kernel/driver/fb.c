@@ -17,6 +17,7 @@
 #include <memory/memory.h>      // PAGE_OFFSET, Virt_To_Phy, Phy_To_Virt
 #include <tty/console.h>     // console_surrender_fb
 #include <driver/serial.h>      // write_serial
+#include <arch/clocksource.h>    // arch_clocksource_read_ns (terminal-cpu probe)
 #include <fs/vfs.h>             // vfs_node_t, vfs_node_put
 #include <fs/devfs.h>           // devfs_ops
 #include <memory/uaccess.h>     // syscall_check_user_range, copy_*_ft
@@ -308,6 +309,15 @@ int fb_get_info(struct fb_info *out)
 int fb_write_row_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
                         const void *pixels, uint32_t bytes)
 {
+    /* Terminal-CPU investigation (commit tty-cpu-probe-v1). Per-row
+     * wall time is needed to understand how much of gfx_ioctl_present
+     * is fb memcpy vs setjmp+PT walk. We dump every 1024 calls so
+     * the cost on a busy terminal is one printk every ~50 ms. The
+     * cost on idle fb activity (one present every few seconds) is
+     * negligible. Removed once partial-present ABI lands (see
+     * docs/roadmap.md parked "terminal 长时间占用 CPU 约 16%"). */
+    uint64_t t_row0 = arch_clocksource_read_ns();
+
     if (!lease || !lease->held) return -EINVAL;
     if (!pixels) return -EINVAL;
     if (!lease->snapshot.addr) return -EINVAL;
@@ -329,6 +339,22 @@ int fb_write_row_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
 
     uint8_t *dst = (uint8_t *)lease->snapshot.addr + byte_offset;
     memcpy(dst, pixels, bytes);
+
+    {
+        static uint64_t s_row_ns;
+        static uint64_t s_row_count;
+        static uint64_t s_row_bytes;
+        uint64_t dt = arch_clocksource_read_ns() - t_row0;
+        s_row_ns += dt;
+        s_row_count++;
+        s_row_bytes += bytes;
+        if ((s_row_count & 0x3ffu) == 0 && s_row_count > 0) {
+            serial_printk("fb_write_row: count=%llu total_ns=%llu avg_ns=%llu ns/pixel=%llu\n",
+                          s_row_count, s_row_ns,
+                          s_row_ns / s_row_count,
+                          s_row_ns * 4 / s_row_bytes);
+        }
+    }
     return 0;
 }
 

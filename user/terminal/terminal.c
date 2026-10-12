@@ -260,14 +260,50 @@ int main(void)
     bool dirty_pending = false;
     bool serial_only_logged = false;
 
+    /* ── Terminal-CPU probe (Phase 1 instrumentation) ──────────────
+     * Per-second wakeup/present counters dumped to /dev/serial so the
+     * kernel's avg_ns/present pairs up with the per-second present
+     * rate: avg_ns * presents_sec == terminal CPU on CPU0 (modulo the
+     * few µs per idle wakeup).  Removed once we have the numbers.
+     */
+    uint64_t s_wakeups = 0;
+    uint64_t s_presents = 0;
+    uint64_t s_iter_begin_ns = 0;
+    uint64_t s_iter_sum_ns = 0;
+    uint64_t s_iter_max_ns = 0;
+    uint64_t s_after_refresh_ns = 0;
+    uint64_t s_seg_refresh_sum = 0;
+    uint64_t s_seg_refresh_max = 0;
+    uint64_t s_seg_present_sum = 0;
+    uint64_t s_seg_present_max = 0;
+    uint64_t s_seg_drain_sum = 0;
+    uint64_t s_seg_drain_max = 0;
+    uint64_t s_seg_other_sum = 0;
+    uint64_t s_seg_other_max = 0;
+    uint64_t s_stats_period_start_ms = 0;
+
     while (!done) {
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         uint64_t now_ms = (uint64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+        s_wakeups++;
+        /* probe: t_iter_begin_ns captured here, sampled again at the
+         * poll() entry below to get the per-iteration work cost
+         * excluding the poll() blocking wait. */
+        s_iter_begin_ns = (uint64_t)now.tv_sec * 1000000000ull + now.tv_nsec;
 
         // 0. Display mode recovery (checked every wakeup, independent of dirty state).
         uint64_t gen_before = disp.generation;
         int rr = terminal_display_refresh(&disp, fb_fd, now_ms);
+        {
+            /* probe: capture post-refresh timestamp. */
+            struct timespec tnow;
+            clock_gettime(CLOCK_MONOTONIC, &tnow);
+            s_after_refresh_ns = (uint64_t)tnow.tv_sec * 1000000000ull + tnow.tv_nsec;
+            uint64_t dt = s_after_refresh_ns - s_iter_begin_ns;
+            s_seg_refresh_sum += dt;
+            if (dt > s_seg_refresh_max) s_seg_refresh_max = dt;
+        }
         if (rr < 0 && !serial_only_logged) {
             serial_msg(serial_fd, "\r\n[terminal] graphics unavailable, serial only\r\n");
             serial_only_logged = true;
@@ -287,10 +323,23 @@ int main(void)
         if (dirty_pending && elapsed >= FRAME_INTERVAL_MS &&
             !(disp.retry_deadline_ms && now_ms < disp.retry_deadline_ms)) {
             int prc = terminal_display_present(&disp, now_ms);
+            {
+                /* probe: capture post-present timestamp for the
+                 * present segment measurement. Only a successful
+                 * present is counted in seg_present; failure paths
+                 * contribute to seg_drain_or_other below. */
+                struct timespec tnow;
+                clock_gettime(CLOCK_MONOTONIC, &tnow);
+                uint64_t t = (uint64_t)tnow.tv_sec * 1000000000ull + tnow.tv_nsec;
+                uint64_t dt = t - s_after_refresh_ns;
+                s_seg_present_sum += dt;
+                if (dt > s_seg_present_max) s_seg_present_max = dt;
+            }
             if (prc == 0) {
                 last_present_ms = now_ms;
                 dirty_pending = false;
                 present_failures = 0;
+                s_presents++;          /* ── probe ─────────────────── */
             } else if (prc == TERMINAL_PRESENT_SKIPPED) {
                 // Background pause: keep dirty_pending to flush when restored, reset failure counter
                 last_present_ms = now_ms;
@@ -320,10 +369,58 @@ int main(void)
         }
         int timeout_ms = terminal_display_poll_timeout(&disp, base, now_ms);
 
+        /* probe: per-iteration work (excludes the poll() blocking wait). */
+        {
+            struct timespec tnow;
+            clock_gettime(CLOCK_MONOTONIC, &tnow);
+            uint64_t tnow_ns = (uint64_t)tnow.tv_sec * 1000000000ull + tnow.tv_nsec;
+            uint64_t dt = tnow_ns - s_iter_begin_ns;
+            s_iter_sum_ns += dt;
+            if (dt > s_iter_max_ns) s_iter_max_ns = dt;
+        }
         int pr = poll(fds, 2, timeout_ms);
         if (pr < 0) {
             if (errno == EINTR) continue;
             break;
+        }
+
+        /* ── probe: dump per-second counters via serial ── */
+        if (s_stats_period_start_ms == 0) s_stats_period_start_ms = now_ms;
+        if (now_ms - s_stats_period_start_ms >= 1000) {
+            uint64_t w = s_wakeups;
+            uint64_t avg_iter_ns = w ? (s_iter_sum_ns / w) : 0;
+            uint64_t avg_refresh_ns = w ? (s_seg_refresh_sum / w) : 0;
+            uint64_t avg_rest_ns    = (avg_iter_ns > avg_refresh_ns)
+                                    ? (avg_iter_ns - avg_refresh_ns) : 0;
+            /* present segment uses s_presents as denom (not always hit). */
+            uint64_t p = s_presents;
+            uint64_t avg_present_ns = p ? (s_seg_present_sum / p) : 0;
+            char sbuf[192];
+            int sl = snprintf(sbuf, sizeof sbuf,
+                "[term-probe] wakes/s=%llu presents/s=%llu "
+                "iter_avg_us=%llu iter_max_us=%llu "
+                "refresh_avg_us=%llu refresh_max_us=%llu "
+                "rest_avg_us=%llu "
+                "present_avg_us=%llu present_max_us=%llu\r\n",
+                (unsigned long long)w,
+                (unsigned long long)s_presents,
+                (unsigned long long)(avg_iter_ns / 1000),
+                (unsigned long long)(s_iter_max_ns / 1000),
+                (unsigned long long)(avg_refresh_ns / 1000),
+                (unsigned long long)(s_seg_refresh_max / 1000),
+                (unsigned long long)(avg_rest_ns / 1000),
+                (unsigned long long)(avg_present_ns / 1000),
+                (unsigned long long)(s_seg_present_max / 1000));
+            if (sl > 0) serial_msg(serial_fd, sbuf);
+            s_wakeups = 0;
+            s_presents = 0;
+            s_iter_sum_ns = 0;
+            s_iter_max_ns = 0;
+            s_seg_refresh_sum = 0;
+            s_seg_refresh_max = 0;
+            s_seg_present_sum = 0;
+            s_seg_present_max = 0;
+            s_stats_period_start_ms = now_ms;
         }
 
         // 3. Process keyboard input (forwarded even when graphics are down)
