@@ -470,8 +470,126 @@ static void test_negative_cases(uint32_t fw, uint32_t fh)
 
 /* ── Driver ──────────────────────────────────────────────────── */
 
-int main(void)
+/* Task 6 of the partial-present plan: --present-rect-surface mode.
+ *
+ * This mode is independent of the historical full-screen / small-view
+ * suite above.  It opens a small view at a NON-ZERO origin, full-paints
+ * it yellow (the sentinel), and uses GFX_PRESENT_RECT to upload a
+ * sub-rectangle of the buffer at a time.  It does NOT mmap /dev/fb
+ * — the runner verifies the rect through QMP screendumps (the kernel
+ * task surface is the authoritative pixel source).  The protocol is
+ * pinned by the brief:
+ *
+ *   1. On entry, write "[present-rect-surface] ready" to /dev/serial.
+ *   2. Wait for stdin to send a "go" line (the runner types it).
+ *   3. Do the surface work: one 8x8 rect inside a 64x64 view at
+ *      (100,100), then one 1x1 bottom-right rect, then a full-view rect.
+ *   4. Write "[present-rect-surface] rect=x,y,w,h done" after each
+ *      present.
+ *   5. Write "[present-rect-surface] PASS" or
+ *      "[present-rect-surface] FAIL: <reason>" on exit.
+ *
+ * The kernel-side partial-rect path (kernel/driver/gfx.c, Task 1)
+ * writes only w*h*4 bytes per rect; the QEMU driver verifies
+ * pixel-correctness via QMP screendumps before / after each rect. */
+
+static void present_rect_surface_mode(void)
 {
+    /* Constants — pinned by the brief so the QEMU driver can
+     * verify the surface geometry exactly. */
+    const uint32_t VX = 100u, VY = 100u, VW = 64u, VH = 64u;
+    const uint32_t RECT_X = 10u, RECT_Y = 10u,
+                    RECT_W = 8u, RECT_H = 8u;
+    const uint32_t BR_X = (VW - 1u), BR_Y = (VH - 1u),
+                    BR_W = 1u, BR_H = 1u;
+
+    /* Print the ready marker on stdout (which is wired to the
+     * emulated serial port under -serial stdio). */
+    printf("[present-rect-surface] ready\n");
+
+    /* Block on stdin until the runner types "go".  We use read()
+     * (not stdio) because OS01's libc does not declare fgets;
+     * the runner sends "go\n" so a single 4-byte read is enough. */
+    char line[64];
+    ssize_t got_n = read(STDIN_FILENO, line, sizeof(line) - 1);
+    if (got_n <= 0)
+        FAIL("stdin closed before 'go'");
+    line[got_n] = '\0';
+
+    /* Open the view at (VX, VY, VW, VH).  gfx_open does the
+     * /dev/gfx0 open + CREATE_VIEW + GET_INFO + mmap; failure
+     * (EINVAL / ENODEV) here would be a kernel-side regression
+     * — surface the errno in the FAIL line. */
+    gfx_handle_t *h = gfx_open(VX, VY, VW, VH);
+    if (!h)
+        FAIL("gfx_open(%u,%u,%u,%u) NULL errno=%d",
+             VX, VY, VW, VH, errno);
+
+    /* Acquire display ownership so the kernel-side partial path
+     * has a clear writer lease (mirrors the gfx E2E tests). */
+    if (gfx_acquire(h) != 0)
+        FAIL("gfx_acquire errno=%d", errno);
+
+    /* Step 1: full-paint the entire view YELLOW as the sentinel.
+     * gfx_present (full path) uploads every row; the kernel-side
+     * byte counter for this round is 64 * 64 * 4 = 16,384 bytes. */
+    gfx_fill_rect(h, 0, 0, VW, VH, COLOR_YELLOW);
+    if (gfx_present(h) != 0)
+        FAIL("gfx_present (yellow sentinel) errno=%d", errno);
+
+    /* Step 2: paint the rect interior BLUE and the rest of the
+     * view RED, then present only the small rect via the new
+     * GFX_PRESENT_RECT ioctl.  The kernel-side byte counter for
+     * this round is RECT_W * RECT_H * 4 = 8 * 8 * 4 = 256 B. */
+    gfx_fill_rect(h, 0, 0, VW, VH, COLOR_RED);
+    gfx_fill_rect(h, (int32_t)RECT_X, (int32_t)RECT_Y,
+                  RECT_W, RECT_H, COLOR_BLUE);
+    if (gfx_present_rect(h, RECT_X, RECT_Y, RECT_W, RECT_H) != 0)
+        FAIL("gfx_present_rect (8x8) errno=%d", errno);
+
+    /* Mark this rect done. */
+    printf("[present-rect-surface] rect=%u,%u,%u,%u done\n",
+           RECT_X, RECT_Y, RECT_W, RECT_H);
+
+    /* Step 3: 1x1 bottom-right rect — exercises the kernel-side
+     * path at the maximum y/h index (no off-by-one).  Red sentinel
+     * stays; only the single pixel becomes blue. */
+    gfx_fill_rect(h, 0, 0, VW, VH, COLOR_RED);
+    gfx_fill_rect(h, (int32_t)BR_X, (int32_t)BR_Y, BR_W, BR_H,
+                  COLOR_BLUE);
+    if (gfx_present_rect(h, BR_X, BR_Y, BR_W, BR_H) != 0)
+        FAIL("gfx_present_rect (1x1 bottom-right) errno=%d",
+             errno);
+    printf("[present-rect-surface] rect=%u,%u,%u,%u done\n",
+           BR_X, BR_Y, BR_W, BR_H);
+
+    /* Step 4: full-view rect — exercises the "complete view" path
+     * via gfx_present (one full ioctl). */
+    gfx_fill_rect(h, 0, 0, VW, VH, COLOR_BLUE);
+    if (gfx_present(h) != 0)
+        FAIL("gfx_present (full blue) errno=%d", errno);
+    printf("[present-rect-surface] rect=0,0,%u,%u done\n",
+           VW, VH);
+
+    if (gfx_release(h) != 0)
+        FAIL("gfx_release errno=%d", errno);
+    gfx_close(h);
+
+    /* Emit the present-rect-surface PASS marker verbatim.  We
+     * deliberately do NOT use the shared PASS() macro (which prints
+     * "[GFX TEST] PASS") — the QEMU driver keys off the
+     * "[present-rect-surface] PASS" prefix to distinguish this
+     * surface-protocol completion from the historical gfx E2E. */
+    printf("[present-rect-surface] PASS\n");
+    exit(0);
+}
+
+int main(int argc, char **argv)
+{
+    if (argc >= 2 && strcmp(argv[1], "--present-rect-surface") == 0) {
+        present_rect_surface_mode();
+        /* not reached: present_rect_surface_mode _exit(0)s on PASS */
+    }
     /* Open /dev/fb ONCE for tests 1 + 2 (both need to verify the
      * kernel-presented framebuffer).  /dev/fb's mmap is shared
      * across opens, so the kernel's gfx0 present writes are

@@ -1037,6 +1037,15 @@ def main():
             # Imported lazily to avoid import-time OVMF/QEMU coupling.
             from qemutests.monitor_test import test_monitor
             result = test_monitor(tester)
+        elif args.test_name == "terminal-present":
+            # Task 6 of the partial-present plan: single-suite QEMU driver
+            # that combines the new GFX_PRESENT_RECT surface protocol with a
+            # >=30 s steady-state monitor window, gating the spec §8 byte /
+            # ns / window / failed_prefix / idle-window rules against the
+            # Task-3 baseline manifest.  Imported lazily to mirror the
+            # monitor / resolution dispatch shape.
+            from qemutests.terminal_present_test import test_terminal_present
+            result = test_terminal_present(tester)
         else:
             print(f"Unknown test: {args.test_name}")
             result = False
