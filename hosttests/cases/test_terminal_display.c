@@ -52,6 +52,24 @@ static int g_consume_calls;
 static int g_state_flip_at;
 static uint64_t g_state_flip_gen;
 
+/* ── Task 5 rect/round helpers ──────────────────────────────
+ * Track every gfx_present_rect hook invocation (one row per call).
+ * If g_rect_errno[i] is nonzero, the i-th call returns -1 with that
+ * errno instead of 0.  g_rect_calls is the call counter (call index is
+ * 0-based).  g_rect_always_errno, if nonzero, makes EVERY call fail
+ * with that errno (overrides the per-call table).  This is enough to
+ * drive the multi-rect round, retry handshake and state-table tests. */
+#define RECT_LOG_MAX 256
+typedef struct { uint32_t x, y, w, h; } rect_call_t;
+static rect_call_t g_rect_log[RECT_LOG_MAX];
+static int         g_rect_log_count;
+static int         g_rect_errno_per_call[RECT_LOG_MAX];
+static int         g_rect_always_errno;
+/* Set g_rect_owners[i] to a non-zero value to make the i-th call fail
+ * with EACCES (foreground change mid-round).  Mutually exclusive with
+ * the always_errnop table. */
+static int         g_rect_owners[RECT_LOG_MAX];
+
 /* ── Task 3 metrics harness ───────────────────────────────────
  *
  * now_ns fake holds g_now_ns; bumped by +g_now_advance each call.  The
@@ -87,11 +105,14 @@ static uint64_t m_now_ns(void)
 static int m_stats_open(void)
 {
     g_stats_open_calls++;
-    if (g_stats_open_fail) { g_stats_open_fail = 0; return -1; }
-    if (g_stats_open_returns >= 0) return g_stats_open_returns;
-    /* Default: hand out an opaque sentinel fd (the test only counts
-     * write/close calls — the fake never touches a real /dev/serial). */
-    return 0x40001;
+    int saved = errno;
+    int rc;
+    if (g_stats_open_fail) { g_stats_open_fail = 0; rc = -1; }
+    else if (g_stats_open_returns >= 0) rc = g_stats_open_returns;
+    else
+        rc = 0x40001; /* opaque sentinel fd */
+    errno = saved;
+    return rc;
 }
 static int m_stats_write(int fd, const char *text, size_t len)
 {
@@ -112,6 +133,9 @@ static int m_stats_close(int fd)
 {
     g_stats_close_calls++;
     g_stats_close_value = fd;
+    /* Stats I/O is required by spec §8 to never clobber caller's
+     * errno.  This hook does no I/O in the host test, so errno is
+     * unchanged by definition; we keep the body small to stay that way. */
     return 0;
 }
 
@@ -201,6 +225,43 @@ static int m_present(gfx_handle_t *h)
     if (g_present_errno) { errno = g_present_errno; g_present_errno = 0; return -1; }
     return 0;
 }
+
+/* Task 5 fake gfx_present_rect hook.  Records the rect into g_rect_log
+ * for ordering & geometry assertions.  g_rect_always_errno wins over
+ * the per-call table if nonzero.  If both are zero the call succeeds
+ * (returns 0). */
+static int m_present_rect(gfx_handle_t *h, uint32_t x, uint32_t y,
+                          uint32_t w, uint32_t h_)
+{
+    (void)h;
+    int idx = g_rect_log_count;
+    if (idx >= RECT_LOG_MAX) {
+        /* Drop further calls after the log is full: count them in a
+         * separate counter so tests can detect overflow. */
+        g_rect_log_count++;
+        errno = ENOSPC;
+        return -1;
+    }
+    g_rect_log[idx].x = x; g_rect_log[idx].y = y;
+    g_rect_log[idx].w = w; g_rect_log[idx].h = h_;
+    g_rect_log_count++;
+    if (g_rect_owners[idx]) {
+        errno = EACCES;
+        return -1;
+    }
+    if (g_rect_always_errno) {
+        int e = g_rect_always_errno;
+        errno = e;
+        return -1;
+    }
+    if (g_rect_errno_per_call[idx]) {
+        int e = g_rect_errno_per_call[idx];
+        g_rect_errno_per_call[idx] = 0;
+        errno = e;
+        return -1;
+    }
+    return 0;
+}
 static int m_register_fallback(gfx_handle_t *h)
 {
     (void)h; g_reg_fallback_calls++;
@@ -268,6 +329,15 @@ static void setup(uint32_t w, uint32_t h, uint64_t gen)
     g_get_disp_state_calls = g_get_disp_state_errno = 0;
     g_replace_fallback_calls = g_replace_fallback_errno = 0;
     g_last_replace_old = g_last_replace_new = NULL;
+    /* Reset Task 5 rect round counters. */
+    g_rect_log_count = 0;
+    g_rect_always_errno = 0;
+    for (int i = 0; i < RECT_LOG_MAX; i++) {
+        g_rect_errno_per_call[i] = 0;
+        g_rect_owners[i] = 0;
+        g_rect_log[i].x = g_rect_log[i].y = 0;
+        g_rect_log[i].w = g_rect_log[i].h = 0;
+    }
     memset(&g_state, 0, sizeof(g_state));
     g_state.info.width = w; g_state.info.height = h;
     g_state.info.stride = w * 4; g_state.info.bpp = 32;
@@ -289,6 +359,11 @@ static void setup(uint32_t w, uint32_t h, uint64_t gen)
     D.ops.gfx_get_display_state = m_get_display_state;
     D.ops.gfx_replace_fallback = m_replace_fallback;
     D.ops.consume_terminal_enomem = m_consume_enomem;
+    /* Task 5 rect hook default: present-day tests (Task 3) still need a
+     * OLD-full path.  We pin the default to the OLD full present so the
+     * existing 248 tests stay green WITHOUT recoding anything.  Tests
+     * that want the rect path call install_rect_hook() after setup(). */
+    D.ops.gfx_present_rect = NULL;
     /* Task 3 metrics hooks — defaults are the real_* production impls
      * (CLOCK_MONOTONIC / /dev/serial).  Tests that want a fake clock
      * or a captured /dev/serial must override these AFTER setup(). */
@@ -807,10 +882,18 @@ TEST_FUNC(test_terminal_present_metrics_full_frame_and_failures) {
     assert_true(g_present_calls >= before_redraw + 1);
 
     /* 3) Failed frame: only failed_attempts and failed_ns advance.
-     * success_* untouched.  Use EAGAIN which keeps foreground=true. */
+     * success_* untouched.  Use EAGAIN which keeps foreground=true.
+     *
+     * After Task 5 the display_submit body is damage-aware: an empty
+     * damage state routes to noop (not a failed frame), so the failing
+     * present path is only reached when there IS pending damage.  We
+     * re-arm full_pending via term_render_clear to make the failing
+     * present take the full path; this matches the production flow
+     * after a redraw or after accumulation of dirty cells. */
     g_present_errno = EAGAIN;
     D.retry_deadline_ms = 0;
     reset_step_clock();
+    term_render_clear(&D.render);
     assert_eq(-1, terminal_display_present(&D, 0));
     assert_eq(EAGAIN, errno);
     assert_eq(1, D.metrics.failed_attempts);
@@ -990,6 +1073,861 @@ TEST_FUNC(test_terminal_present_metrics_output_lifecycle) {
     terminal_display_close(&D);
 }
 
+/* ── Task 5 metric protocol — damage-driven present ─────────── */
+
+/* ── Task 5 metric protocol — damage-driven present ─────────── */
+
+/* The renderer always adds the cursor's underline as a single-pixel
+ * damage rect when the cursor is visible (spec §6 row 2 + Task 4).
+ * Tests that want a clean damage=0 state must hide the cursor
+ * before driving the renderer; otherwise the noop path can never
+ * trigger from a hot setup. */
+static void hide_cursor_and_flush(void)
+{
+    /* \e[?25l hides the cursor. */
+    term_core_input(&core, 0x1b);
+    term_core_input(&core, '[');
+    term_core_input(&core, '?');
+    term_core_input(&core, '2');
+    term_core_input(&core, '5');
+    term_core_input(&core, 'l');
+    term_render_cursor_update(&D.render);
+    term_render_flush(&D.render);
+    /* Drop the initial full_pending flag the renderer carries after
+     * init + the cursor-hide flush. */
+    term_render_ack_damage(&D.render);
+}
+
+/* Mark a single cell dirty and force the renderer's pending_damage to
+ * contain that cell's row-span (8×16 px for the 8×16 font used in
+ * test_terminal_display.c).  Returns nothing — the row/col numbering
+ * follows the small-font convention used in setup().  Hides the
+ * cursor so the only damage is the cell rect itself (otherwise the
+ * visible-cursor underline shows up as an 8×1 rect that biases the
+ * byte-count assertions). */
+static void mark_one_cell(int row, int col, uint8_t glyph)
+{
+    term_cell_t *scr = term_core_screen(&core);
+    scr[row * core.cols + col].glyph = glyph;
+    core.dirty[row * core.cols + col] = true;
+}
+
+/* ── Test 1: multi-rect round + ack + retry semantics ───────── */
+
+/* Two cell-row spans → exactly two gfx_present_rect calls; total
+ * bytes = sum(w*h*4); full success acks damage.  The second rect
+ * returning EAGAIN: the first's success bytes count toward
+ * failed_completed_rect_bytes; damage is preserved; the next round
+ * retries both rects.  Also covers: NULL rect hook falls back to
+ * single full gfx_present; real rect hook returning ENOTTY does NOT
+ * fall back; no damage = no ioctl + noop_calls++. */
+TEST_FUNC(test_display_partial_rect_round_and_ack) {
+    /* Subtest A: list path success on two rects. */
+    setup(80, 64, 1);                    /* 8×16 font ⇒ 10×4 cells */
+    D.ops.gfx_present_rect = m_present_rect;
+    /* Hide the cursor (so the visible-cursor underline doesn't show
+     * up as an extra 8×1 rect) and ack the init's full_pending. */
+    hide_cursor_and_flush();
+    assert_eq(0u, D.render.pending_damage.count);
+    assert_false(D.render.pending_damage.full);
+    /* Mark 2 cells on different rows → 2 distinct rects. */
+    mark_one_cell(0, 0, 'A');
+    mark_one_cell(3, 5, 'B');
+    assert_eq(0, terminal_display_present(&D, 1000));
+    /* Exactly 2 rect calls; (0,0,8,16) then (40,48,8,16) (col 5 = x=40,
+     * row 3 = y=48). */
+    assert_eq(2, g_rect_log_count);
+    assert_eq(0u, g_rect_log[0].x);
+    assert_eq(0u, g_rect_log[0].y);
+    assert_eq(8u, g_rect_log[0].w);
+    assert_eq(16u, g_rect_log[0].h);
+    assert_eq(40u, g_rect_log[1].x);
+    assert_eq(48u, g_rect_log[1].y);
+    assert_eq(8u, g_rect_log[1].w);
+    assert_eq(16u, g_rect_log[1].h);
+    /* 8*16*4 + 8*16*4 = 1024 B per round; partial_frames=1; g_present_calls
+     * stays at 0 (list path). */
+    assert_eq(0, g_present_calls);
+    assert_eq(1ull, D.metrics.partial_frames);
+    assert_eq(0ull, D.metrics.full_frames);
+    assert_eq(1024ull, D.metrics.success_bytes);
+    assert_eq(2ull, D.metrics.rect_calls);
+    assert_eq(0ull, D.metrics.failed_completed_rect_bytes);
+    /* Ack: pending damage is empty after a fully successful round. */
+    assert_false(D.render.pending_damage.full);
+    assert_eq(0u, D.render.pending_damage.count);
+    terminal_display_close(&D);
+
+    /* Subtest B: 2nd rect returns EAGAIN.  First rect's success bytes
+     * go to failed_completed_rect_bytes; damage is preserved (entire
+     * list); next round retries BOTH rects. */
+    setup(80, 64, 1);
+    D.ops.gfx_present_rect = m_present_rect;
+    hide_cursor_and_flush();
+    mark_one_cell(0, 0, 'A');
+    mark_one_cell(3, 5, 'B');
+    g_rect_errno_per_call[1] = EAGAIN;
+    errno = 0;
+    assert_eq(-1, terminal_display_present(&D, 1000));
+    assert_eq(EAGAIN, errno);
+    assert_eq(2, g_rect_log_count);
+    /* First rect's 8*16*4 = 512 B is the completed prefix. */
+    assert_eq(512ull, D.metrics.failed_completed_rect_bytes);
+    /* No partial success frame; failed_attempts=1. */
+    assert_eq(0ull, D.metrics.partial_frames);
+    assert_eq(1ull, D.metrics.failed_attempts);
+    /* Damage preserved (full list): pending_damage.count == 2 still. */
+    assert_false(D.render.pending_damage.full);
+    assert_eq(2u, D.render.pending_damage.count);
+    /* ordinary present armed retry pending + 250ms deadline. */
+    assert_true(D.present_retry_pending);
+    assert_eq(1250ull, D.retry_deadline_ms);
+    /* Round 2 (would be triggered by refresh at deadline or by an
+     * external main loop after deadline): the SAME two rects must be
+     * re-issued.  Feed the same dirty cells, mark flushable again,
+     * and call refresh at the deadline to drive the retry submit. */
+    /* Re-mark the same cells (they're still dirty in core.dirty? NO:
+     * the renderer flush cleared core.dirty when it ran; the renderer
+     * preserves pending_damage because the round failed.  Mark again
+     * to match the spec's "partial recovery merges new dirty". */
+    /* Actually the spec says "partial recovery merges new dirty
+     * without losing coverage" — meaning the existing pending damage
+     * is kept AND new damage can be added.  Here we already have
+     * pending damage; future flushes that find cells dirty add
+     * more.  For this subtest we just want to verify the SAME
+     * pending damage survives and is re-submitted. */
+    /* Drop the deadline so the next present can proceed; reset
+     * retry flag for clarity. */
+    D.retry_deadline_ms = 0;
+    D.present_retry_pending = false;
+    /* g_rect_errno_per_call[1] was consumed during round 1 so the
+     * retry round's 2nd rect succeeds.  This makes the retry a
+     * successful round. */
+    assert_eq(0, terminal_display_present(&D, 2000));
+    /* 4 total rect ioctls logged (2 from round 1 + 2 from round 2). */
+    assert_eq(4, g_rect_log_count);
+    /* The retry round succeeded: partial_frames=1, ack'd damage. */
+    assert_eq(1ull, D.metrics.partial_frames);
+    assert_eq(1024ull, D.metrics.success_bytes);
+    assert_eq(0u, D.render.pending_damage.count);
+    /* Retry flags cleared on success. */
+    assert_false(D.present_retry_pending);
+    assert_eq(0ull, D.retry_deadline_ms);
+    /* failed_completed_rect_bytes stays at 512 because the 2nd round
+     * succeeded (it is only incremented on a failed round's
+     * pre-failure rect bytes). */
+    assert_eq(512ull, D.metrics.failed_completed_rect_bytes);
+    /* failed_attempts counts the 1 failed round only. */
+    assert_eq(1ull, D.metrics.failed_attempts);
+    terminal_display_close(&D);
+
+    /* Subtest C: NULL rect hook ⇒ single full gfx_present fallback. */
+    setup(80, 64, 1);
+    D.ops.gfx_present_rect = NULL;
+    hide_cursor_and_flush();
+    mark_one_cell(0, 0, 'A');
+    mark_one_cell(3, 5, 'B');
+    assert_eq(0, terminal_display_present(&D, 1000));
+    assert_eq(1, g_present_calls); /* single full ioctl */
+    assert_eq(0, g_rect_log_count); /* no rect hook was called */
+    /* 80*64*4 = 20480 B for the full view. */
+    assert_eq(20480ull, D.metrics.success_bytes);
+    assert_eq(1ull, D.metrics.full_frames);
+    terminal_display_close(&D);
+
+    /* Subtest D: real rect hook returning ENOTTY is propagated as
+     * -1/ENOTTY (no fallback to gfx_present).  Use per-call table
+     * so the 1st rect succeeds (so we record a real failed_completed
+     * prefix) and the 2nd rect returns ENOTTY.  For the ORDINARY entry
+     * path the implementation propagates -1/ENOTTY verbatim WITHOUT
+     * setting serial_only (that is reserved for refresh-time fail()).
+     * Subtest 3k exercises the refresh-time permanent-errno path. */
+    setup(80, 64, 1);
+    D.ops.gfx_present_rect = m_present_rect;
+    hide_cursor_and_flush();
+    mark_one_cell(0, 0, 'A');
+    mark_one_cell(3, 5, 'B');
+    g_rect_errno_per_call[1] = ENOTTY;
+    errno = 0;
+    assert_eq(-1, terminal_display_present(&D, 1000));
+    assert_eq(ENOTTY, errno);
+    /* No fallback path: gfx_present is NOT called. */
+    assert_eq(0, g_present_calls);
+    /* Both rects attempted (1st succ, 2nd ENOTTY). */
+    assert_eq(2, g_rect_log_count);
+    /* First rect's bytes (512) recorded as the completed prefix. */
+    assert_eq(512ull, D.metrics.failed_completed_rect_bytes);
+    assert_eq(1ull, D.metrics.failed_attempts);
+    /* ENOTTY is NOT a retry errno; retry_pending stays false, the
+     * ordinary path does NOT set serial_only (the brief says
+     * permanent errnos only become serial_only in refresh's fail()). */
+    assert_false(D.serial_only);
+    assert_false(D.present_retry_pending);
+    assert_eq(0ull, D.retry_deadline_ms);
+    terminal_display_close(&D);
+
+    /* Subtest E: no damage = no ioctl + noop_calls++. */
+    setup(80, 64, 1);
+    D.ops.gfx_present_rect = m_present_rect;
+    /* Hide cursor + ack init full_pending so the renderer's pending
+     * damage is truly empty — otherwise the visible cursor's
+     * underline (8×1 px = 32 B) would force a single-rect list
+     * round. */
+    hide_cursor_and_flush();
+    /* Don't mark anything. */
+    assert_eq(0, terminal_display_present(&D, 1000));
+    assert_eq(0, g_present_calls);
+    assert_eq(0, g_rect_log_count);
+    assert_eq(0, D.metrics.success_bytes);
+    assert_true(D.metrics.noop_calls >= 1);
+    terminal_display_close(&D);
+}
+
+/* ── Test 2: scheduling handshake failure ──────────────────── */
+
+/* now=100ms, an ordinary present returns EAGAIN → retry_deadline_ms=350,
+ * present_retry_pending=true.  refresh at now=349 returns 1, no
+ * submit.  refresh at now=350 with no new PTY output: ONE submit
+ * attempt; success clears the flags and sets refresh_presented=true.
+ * Main loop reads refresh_presented, clears dirty_pending: no third
+ * submit.  No-deadline general dirty is NOT submitted by refresh.
+ * Retry-again EAGAIN: deadline=600, errno preserved; partial recovery
+ * merges new dirty without losing coverage. */
+TEST_FUNC(test_display_partial_retry_deadline) {
+    /* Subtest A: full handshake on retry → deadline arm → 350 submit success. */
+    setup(80, 64, 1);
+    D.ops.gfx_present_rect = m_present_rect;
+    hide_cursor_and_flush();
+    mark_one_cell(0, 0, 'A');
+    mark_one_cell(3, 5, 'B');
+    /* Drive the first submit attempt to fail with EAGAIN. */
+    g_rect_always_errno = EAGAIN;
+    errno = 0;
+    assert_eq(-1, terminal_display_present(&D, 100));
+    assert_eq(EAGAIN, errno);
+    /* retry_deadline = 100 + 250 = 350, pending set. */
+    assert_true(D.present_retry_pending);
+    assert_eq(350ull, D.retry_deadline_ms);
+    /* Damage preserved (2 rects). */
+    assert_eq(2u, D.render.pending_damage.count);
+    /* Refresh before deadline returns 1 without ANY ioctl. */
+    int rect_calls_before = g_rect_log_count;
+    assert_eq(1, terminal_display_refresh(&D, 3, 349));
+    assert_eq(rect_calls_before, g_rect_log_count);
+    assert_true(D.present_retry_pending);
+    /* Refresh at deadline: ONE submit attempt.  Make this one
+     * succeed. */
+    g_rect_always_errno = 0;
+    assert_eq(0, terminal_display_refresh(&D, 3, 350));
+    /* ONE submit = 2 rect calls added. */
+    assert_eq(rect_calls_before + 2, g_rect_log_count);
+    /* Success cleared retry + deadline, set refresh_presented=true. */
+    assert_false(D.present_retry_pending);
+    assert_eq(0ull, D.retry_deadline_ms);
+    assert_true(D.refresh_presented);
+    /* Damage ACK'd. */
+    assert_eq(0u, D.render.pending_damage.count);
+    assert_false(D.render.pending_damage.full);
+
+    /* Simulate main loop reading refresh_presented and clearing
+     * dirty_pending.  After this the main loop must NOT issue
+     * another submit at the same now. */
+    bool dirty_pending = true;
+    uint64_t last_present_ms = 0;
+    if (D.refresh_presented) {
+        dirty_pending = false;
+        last_present_ms = 350;
+    }
+    uint64_t now_ms = 350;
+    uint64_t elapsed = now_ms - last_present_ms;
+    int rect_calls_before_step = g_rect_log_count;
+    if (dirty_pending && elapsed >= 33 &&
+        !(D.retry_deadline_ms && now_ms < D.retry_deadline_ms)) {
+        terminal_display_present(&D, now_ms);
+    }
+    /* Main loop's "if dirty_present" branch did NOT fire because
+     * dirty_pending was cleared by refresh_presented. */
+    assert_eq(rect_calls_before_step, g_rect_log_count);
+    terminal_display_close(&D);
+
+    /* Subtest B: ordinary PTY dirty with NO retry pending must NOT be
+     * submitted by refresh (spec §7 row 1).  Without redraw_pending
+     * or generation change, refresh returns 0 with no flush /
+     * submit, even if pending damage exists. */
+    setup(80, 64, 1);
+    D.ops.gfx_present_rect = m_present_rect;
+    hide_cursor_and_flush();
+    /* Simulate ordinary PTY dirty arriving while foreground is true
+     * but no retry is pending. */
+    mark_one_cell(2, 4, 'X');
+    assert_false(D.present_retry_pending);
+    /* refresh at now=1000 (no owner/mode change, no redraw_pending,
+     * no retry pending, no deadline) returns 0, no submit. */
+    int rect_before = g_rect_log_count;
+    assert_eq(0, terminal_display_refresh(&D, 3, 1000));
+    assert_eq(rect_before, g_rect_log_count);
+    /* Flush dirty cells into pending damage — refresh does NOT do
+     * this (no-op per spec row 1), so the test must do it explicitly
+     * to verify that pending_damage survives. */
+    term_render_flush(&D.render);
+    /* The damage is still there for the ordinary present path. */
+    assert_eq(1u, D.render.pending_damage.count);
+    /* The ordinary present path can still issue a submit (no deadline
+     * blocking it). */
+    assert_eq(0, terminal_display_present(&D, 1100));
+    assert_eq(rect_before + 1, g_rect_log_count);
+    terminal_display_close(&D);
+
+    /* Subtest C: again-EAGAIN retry → deadline=600, errno preserved;
+     * partial recovery merges new dirty without losing coverage. */
+    setup(80, 64, 1);
+    D.ops.gfx_present_rect = m_present_rect;
+    hide_cursor_and_flush();
+    mark_one_cell(0, 0, 'A');
+    g_rect_always_errno = EAGAIN;
+    errno = 0;
+    assert_eq(-1, terminal_display_present(&D, 350));
+    assert_eq(EAGAIN, errno);
+    assert_eq(600ull, D.retry_deadline_ms);
+    assert_true(D.present_retry_pending);
+    /* Damage preserved. */
+    assert_eq(1u, D.render.pending_damage.count);
+    /* Before deadline refresh returns 1. */
+    assert_eq(1, terminal_display_refresh(&D, 3, 599));
+    /* Mark a NEW cell dirty; the renderer must MERGE this into
+     * pending damage without losing the old. */
+    mark_one_cell(2, 4, 'X');
+    /* At deadline, submit succeeds.  Both rects (the original one +
+     * the newly-merged one) are submitted. */
+    g_rect_always_errno = 0;
+    int rc2 = terminal_display_refresh(&D, 3, 600);
+    assert_eq(0, rc2);
+    assert_true(D.refresh_presented);
+    /* pending damage fully acked. */
+    assert_eq(0u, D.render.pending_damage.count);
+    assert_false(D.render.pending_damage.full);
+    assert_false(D.present_retry_pending);
+    assert_eq(0ull, D.retry_deadline_ms);
+    terminal_display_close(&D);
+}
+
+/* ── Test 3: spec §7 state table ───────────────────────────── */
+
+/* Parametric check of every errno in the spec table from the
+ * ordinary + refresh entry paths.  Returns 0 / 1 / -1 /
+ * TERMINAL_PRESENT_SKIPPED as documented; preserved errno;
+ * counters increment the right way; present_retry_pending +
+ * retry_deadline_ms taken on the right path only.  Covers the
+ * rect-hook-NULL fallback, real-ENOTTY propagation, owner/mode
+ * change mid-round, mode-rebind, resource-prepare failure does
+ * NOT arm partial retry, full-redraw failure keeps redraw_pending. */
+TEST_FUNC(test_display_state_table_parametric) {
+    /* ── 3a: ordinary EAGAIN → -1, retry arm, damage preserved ── */
+    {
+        setup(80, 64, 1);
+        D.ops.gfx_present_rect = m_present_rect;
+        hide_cursor_and_flush();
+        mark_one_cell(0, 0, 'A');
+        g_rect_always_errno = EAGAIN;
+        errno = 0;
+        assert_eq(-1, terminal_display_present(&D, 1000));
+        assert_eq(EAGAIN, errno);
+        assert_true(D.present_retry_pending);
+        assert_eq(1250ull, D.retry_deadline_ms);
+        assert_eq(1ull, D.metrics.failed_attempts);
+        assert_eq(0ull, D.metrics.partial_frames);
+        assert_eq(1u, D.render.pending_damage.count);
+        terminal_display_close(&D);
+    }
+
+    /* ── 3b: ordinary ESTALE → -1, retry arm, damage preserved ── */
+    {
+        setup(80, 64, 1);
+        D.ops.gfx_present_rect = m_present_rect;
+        hide_cursor_and_flush();
+        mark_one_cell(0, 0, 'A');
+        g_rect_always_errno = ESTALE;
+        errno = 0;
+        assert_eq(-1, terminal_display_present(&D, 2000));
+        assert_eq(ESTALE, errno);
+        assert_true(D.present_retry_pending);
+        assert_eq(2250ull, D.retry_deadline_ms);
+        terminal_display_close(&D);
+    }
+
+    /* ── 3c: ordinary EACCES → SKIPPED, foreground=false,
+     *        redraw_pending=true, retry NOT armed,
+     *        damage preserved.  Per-errno counters split between
+     *        display_submit (failed_attempts/failed_ns records the
+     *        actual ioctl failure) and terminal_display_present
+     *        (skipped_calls records the SKIPPED return to caller).
+     *        Both increment because both layers' invariants fire. ── */
+    {
+        setup(80, 64, 1);
+        D.ops.gfx_present_rect = m_present_rect;
+        hide_cursor_and_flush();
+        mark_one_cell(0, 0, 'A');
+        g_rect_always_errno = EACCES;
+        assert_eq(TERMINAL_PRESENT_SKIPPED,
+                  terminal_display_present(&D, 1000));
+        assert_false(D.foreground);
+        assert_true(D.redraw_pending);
+        assert_false(D.present_retry_pending);
+        assert_eq(0ull, D.retry_deadline_ms);
+        /* Damage preserved (the SKIPPED return does not ack). */
+        assert_eq(1u, D.render.pending_damage.count);
+        /* display_submit recorded the ioctl failure (failed_attempts++);
+         * the EACCES happened WHILE foreground was true so the present
+         * path doesn't bump skipped_calls (the bg branch is the only
+         * one that increments it).  Main's failure counter sees the -1
+         * return and counts there. */
+        assert_eq(1ull, D.metrics.failed_attempts);
+        assert_eq(0ull, D.metrics.skipped_calls);
+        terminal_display_close(&D);
+    }
+
+    /* ── 3d: ordinary EIO → -1, errno preserved, NO retry arm.
+     *        The ordinary entry does NOT set serial_only (that is
+     *        reserved for refresh's fail() — see subtest 3k and
+     *        test_terminal_permanent_eio_serial_only).  Display
+     *        records the ioctl failure as failed_attempts++; main
+     *        loop (terminal.c) counts the failure. ── */
+    {
+        setup(80, 64, 1);
+        D.ops.gfx_present_rect = m_present_rect;
+        hide_cursor_and_flush();
+        mark_one_cell(0, 0, 'A');
+        g_rect_always_errno = EIO;
+        errno = 0;
+        assert_eq(-1, terminal_display_present(&D, 1000));
+        assert_eq(EIO, errno);
+        assert_false(D.present_retry_pending);
+        assert_eq(0ull, D.retry_deadline_ms);
+        assert_false(D.serial_only); /* ordinary path */
+        assert_eq(1ull, D.metrics.failed_attempts);
+        terminal_display_close(&D);
+    }
+
+    /* ── 3e: ordinary ENOMEM → -1, errno preserved, NO retry arm
+     *        (resource-prepare failures do NOT arm partial retry;
+     *        but ENOMEM here is from a rect call, which is a
+     *        present failure like EIO except not permanent). ── */
+    {
+        setup(80, 64, 1);
+        D.ops.gfx_present_rect = m_present_rect;
+        hide_cursor_and_flush();
+        mark_one_cell(0, 0, 'A');
+        g_rect_always_errno = ENOMEM;
+        errno = 0;
+        assert_eq(-1, terminal_display_present(&D, 1000));
+        assert_eq(ENOMEM, errno);
+        /* ENOMEM is non-permanent BUT is also NOT EAGAIN/ESTALE,
+         * so the rect-path retry flag is NOT armed (main counts
+         * the failure). */
+        assert_false(D.present_retry_pending);
+        assert_eq(0ull, D.retry_deadline_ms);
+        /* ENOMEM is not in permanent list, so serial_only stays
+         * false. */
+        assert_false(D.serial_only);
+        terminal_display_close(&D);
+    }
+
+    /* ── 3f: ordinary EFAULT → -1, errno preserved, NOT arm
+     *        (consistent with EIO/ENOMEM; ENOTTY from REAL hook
+     *        is propagation, no fallback). ── */
+    {
+        setup(80, 64, 1);
+        D.ops.gfx_present_rect = m_present_rect;
+        hide_cursor_and_flush();
+        mark_one_cell(0, 0, 'A');
+        g_rect_always_errno = EFAULT;
+        errno = 0;
+        assert_eq(-1, terminal_display_present(&D, 1000));
+        assert_eq(EFAULT, errno);
+        assert_false(D.present_retry_pending);
+        /* EFAULT is not in the permanent errno list — serial_only
+         * is unchanged. */
+        assert_false(D.serial_only);
+        terminal_display_close(&D);
+    }
+
+    /* ── 3g: ordinary EINVAL → -1, errno preserved, NOT arm ── */
+    {
+        setup(80, 64, 1);
+        D.ops.gfx_present_rect = m_present_rect;
+        hide_cursor_and_flush();
+        mark_one_cell(0, 0, 'A');
+        g_rect_always_errno = EINVAL;
+        errno = 0;
+        assert_eq(-1, terminal_display_present(&D, 1000));
+        assert_eq(EINVAL, errno);
+        assert_false(D.present_retry_pending);
+        terminal_display_close(&D);
+    }
+
+    /* ── 3h: ordinary EBUSY → -1, errno preserved, NOT arm ── */
+    {
+        setup(80, 64, 1);
+        D.ops.gfx_present_rect = m_present_rect;
+        hide_cursor_and_flush();
+        mark_one_cell(0, 0, 'A');
+        g_rect_always_errno = EBUSY;
+        errno = 0;
+        assert_eq(-1, terminal_display_present(&D, 1000));
+        assert_eq(EBUSY, errno);
+        assert_false(D.present_retry_pending);
+        terminal_display_close(&D);
+    }
+
+    /* ── 3i: ordinary ENODEV → -1, errno preserved; ordinary path
+     *        does NOT set serial_only (refresh-time fail() does,
+     *        see 3k). ── */
+    {
+        setup(80, 64, 1);
+        D.ops.gfx_present_rect = m_present_rect;
+        hide_cursor_and_flush();
+        mark_one_cell(0, 0, 'A');
+        g_rect_always_errno = ENODEV;
+        errno = 0;
+        assert_eq(-1, terminal_display_present(&D, 1000));
+        assert_eq(ENODEV, errno);
+        assert_false(D.serial_only); /* ordinary path: not set */
+        assert_false(D.present_retry_pending);
+        terminal_display_close(&D);
+    }
+
+    /* ── 3j: ordinary ENXIO / EBADF / ENOTTY → -1, errno preserved,
+     *        no fallback to gfx_present.  Ordinary path does NOT
+     *        set serial_only (refresh-time fail() does, see 3k). ── */
+    {
+        int errnos[] = { ENXIO, EBADF, ENOTTY };
+        for (size_t i = 0; i < sizeof(errnos)/sizeof(errnos[0]); i++) {
+            int e = errnos[i];
+            setup(80, 64, 1);
+            D.ops.gfx_present_rect = m_present_rect;
+            hide_cursor_and_flush();
+            mark_one_cell(0, 0, 'A');
+            g_rect_always_errno = e;
+            errno = 0;
+            assert_eq(-1, terminal_display_present(&D, 1000));
+            assert_eq(e, errno);
+            /* ENOTTY is propagated without falling back to
+             * gfx_present. */
+            assert_eq(0, g_present_calls);
+            assert_false(D.serial_only); /* ordinary path: not set */
+            assert_false(D.present_retry_pending);
+            terminal_display_close(&D);
+        }
+    }
+
+    /* ── 3k: refresh entry — same error matrix but routed through
+     *        terminal_display_refresh.  We pre-arm present_retry_pending
+     *        with a deadline in the past so the refresh path is
+     *        the active submit path. ── */
+    {
+        int errnos[] = { EAGAIN, ESTALE, EIO, ENOMEM, EFAULT,
+                         EINVAL, EBUSY, ENODEV, ENXIO, EBADF, ENOTTY };
+        for (size_t i = 0; i < sizeof(errnos)/sizeof(errnos[0]); i++) {
+            int e = errnos[i];
+            setup(80, 64, 1);
+            D.ops.gfx_present_rect = m_present_rect;
+            hide_cursor_and_flush();
+            mark_one_cell(0, 0, 'A');
+            /* Pre-arm retry so refresh takes the submit path. */
+            D.present_retry_pending = true;
+            D.retry_deadline_ms = 100; /* already past */
+            g_rect_always_errno = e;
+            errno = 0;
+            int rrc = terminal_display_refresh(&D, 3, 1000);
+            /* Permanent errnos: -1 (serial_only) — refresh returns
+             * -1 exactly like fail().  Non-permanent retry-class
+             * errnos (EAGAIN/ESTALE) return 1; others return 1 also
+             * (spec §7 row 10 — "other refresh submit errors" 1). */
+            if (e == EIO || e == ENODEV || e == ENXIO ||
+                e == EBADF || e == ENOTTY) {
+                assert_eq(-1, rrc);
+                assert_eq(e, errno);
+                assert_true(D.serial_only);
+            } else {
+                assert_eq(1, rrc);
+                assert_eq(e, errno);
+                assert_false(D.serial_only);
+            }
+            /* EAGAIN/ESTALE: retry_pending and deadline RE-armed. */
+            if (e == EAGAIN || e == ESTALE) {
+                assert_true(D.present_retry_pending);
+                assert_eq(1250ull, D.retry_deadline_ms);
+            } else {
+                /* Other errnos: deadline reset by fail() to 1250 too
+                 * (spec row 10), but present_retry_pending cleared
+                 * if permanent (or kept + new deadline if not). */
+                if (e == EIO || e == ENODEV || e == ENXIO ||
+                    e == EBADF || e == ENOTTY) {
+                    assert_false(D.present_retry_pending);
+                    assert_eq(0ull, D.retry_deadline_ms);
+                } else {
+                    /* Non-permanent non-retry errno: fail() arms 250ms
+                     * deadline; present_retry_pending stays cleared
+                     * (spec: refresh-time retry-pending is only armed
+                     * by EAGAIN/ESTALE from refresh; the deadline here
+                     * is a refresh recovery window). */
+                    assert_eq(1250ull, D.retry_deadline_ms);
+                }
+            }
+            terminal_display_close(&D);
+        }
+    }
+
+    /* ── 3l: mode rebind (generation change) ⇒ must issue ONE
+     *        full redraw, NOT carry the old rects to the new
+     *        view.  Old rects are discarded by redraw_full_pending. ── */
+    {
+        setup(80, 64, 1);
+        D.ops.gfx_present_rect = m_present_rect;
+        hide_cursor_and_flush();
+        mark_one_cell(0, 0, 'A');
+        mark_one_cell(3, 5, 'B');
+        /* Explicit flush so the renderer's pending damage reflects
+         * the marked cells (refresh does not flush by itself). */
+        term_render_flush(&D.render);
+        /* Pending damage is now 2 rects. */
+        assert_eq(2u, D.render.pending_damage.count);
+        /* Trigger a mode rebind: gen+1 with a DIFFERENT view size. */
+        g_state.generation = 2;
+        g_state.info.width = 1280; g_state.info.height = 720;
+        g_state.info.stride = 1280 * 4;
+        int rect_before = g_rect_log_count;
+        int present_before = g_present_calls;
+        assert_eq(0, terminal_display_refresh(&D, 3, 1000));
+        /* The mode rebind does a full redraw on the NEW view: it
+         * uses gfx_present (single full ioctl), NOT the rect
+         * hook.  Old rects are NOT carried to the new view. */
+        assert_eq(rect_before, g_rect_log_count);
+        assert_eq(present_before + 1, g_present_calls);
+        terminal_display_close(&D);
+    }
+
+    /* ── 3m: resource-prepare failure does NOT arm partial retry. ── */
+    {
+        setup(80, 64, 1);
+        D.ops.gfx_present_rect = m_present_rect;
+        hide_cursor_and_flush();
+        /* Trigger a mode rebind that requires gfx_open.  Force
+         * ENOMEM on the prepare via g_consume_enomem (FB_RESOLUTION_TEST hook). */
+        g_state.generation = 2;
+        g_state.info.width = 1280; g_state.info.height = 720;
+        g_state.info.stride = 1280 * 4;
+        D.ops.consume_terminal_enomem = m_consume_enomem;
+        g_consume_enomem = 1;
+        assert_eq(1, terminal_display_refresh(&D, 3, 1000));
+        /* The resource prepare failed; partial retry is NOT armed
+         * (only full-redraw retry).  deadline may be set by
+         * fail() but present_retry_pending is NOT. */
+        assert_false(D.present_retry_pending);
+        terminal_display_close(&D);
+    }
+
+    /* ── 3n: full-redraw present fails → redraw_pending stays true. ── */
+    {
+        setup(80, 64, 1);
+        D.ops.gfx_present_rect = m_present_rect;
+        /* Pre-load the renderer so term_render_clear in redraw() can
+         * draw to it (its pixels field is set up). */
+        D.present_retry_pending = false;
+        D.retry_deadline_ms = 0;
+        hide_cursor_and_flush();
+        /* Manually arm redraw_pending: this is what foreground
+         * restore sets up via the owner-restore branch. */
+        D.redraw_pending = true;
+        /* Set rect hook to NULL so the full path is taken even
+         * though damage is full.  (Wait — when damage.full=true the
+         * full path is always taken regardless of hook.  We do
+         * NOT need to clear the hook; we just need m_present to
+         * fail.) */
+        g_present_errno = EAGAIN;
+        errno = 0;
+        /* Refresh hits the redraw_pending branch, calls redraw,
+         * which calls terminal_display_present, which calls
+         * display_submit → full path → m_present EAGAIN. */
+        int rrc = terminal_display_refresh(&D, 3, 1000);
+        assert_eq(1, rrc); /* rate-limited-style: redraw retry deadline 250ms */
+        assert_eq(EAGAIN, errno);
+        assert_true(D.redraw_pending); /* MUST stay true */
+        /* EAGAIN arms retry. */
+        assert_true(D.present_retry_pending);
+        assert_eq(1250ull, D.retry_deadline_ms);
+        terminal_display_close(&D);
+    }
+
+    /* ── 3o: refresh at no-deadline/no-retry returns 0 with no submit. ── */
+    {
+        setup(80, 64, 1);
+        D.ops.gfx_present_rect = m_present_rect;
+        hide_cursor_and_flush();
+        mark_one_cell(0, 0, 'A'); /* dirty exists */
+        int rect_before = g_rect_log_count;
+        int present_before = g_present_calls;
+        /* No redraw_pending, no deadline, no retry_pending, no
+         * owner/mode change — refresh returns 0 with no submit
+         * (spec §7 row 1). */
+        assert_eq(0, terminal_display_refresh(&D, 3, 1000));
+        assert_eq(rect_before, g_rect_log_count);
+        assert_eq(present_before, g_present_calls);
+        terminal_display_close(&D);
+    }
+}
+
+/* ── Test 4: metrics anti-dilution ─────────────────────────── */
+
+/* Same 6ms frame submitted from ordinary AND refresh entry: success
+ * statistics agree.  Insert 1000 noop / skipped calls between:
+ * success_ns and success frame count UNCHANGED.  Failed-frame time
+ * does NOT enter success_ns.  Full bytes include actual view size;
+ * partial stats include ALL rects' bytes.  Stats hook I/O still
+ * preserves caller errno. */
+TEST_FUNC(test_display_partial_metrics_anti_dilution) {
+    /* ── Subtest A: same 6ms frame → ordinary and refresh entries
+     *        record the SAME success_ns. ── */
+    {
+        setup(4, 3, 1);   /* view 4×3 × 4 B = 48 B */
+        D.ops.now_ns = step_clock;
+        reset_step_clock();
+        /* ordinary path: full frame (initial full_pending=true) */
+        assert_eq(0, terminal_display_present(&D, 0));
+        uint64_t ordinary_success_ns = D.metrics.success_ns;
+        uint64_t ordinary_success_bytes = D.metrics.success_bytes;
+        assert_eq(6000000ull, ordinary_success_ns);
+        assert_eq(48ull, ordinary_success_bytes);
+        /* refresh path: redraw → full → success */
+        g_disp_state.generation = 2;
+        reset_step_clock();
+        assert_eq(0, terminal_display_refresh(&D, 3, 0));
+        uint64_t refresh_success_ns = D.metrics.success_ns - ordinary_success_ns;
+        /* The refresh's redraw path issues one full present (per the
+         * pre-Task-5 baseline OR Task 5's full path); both paths
+         * accumulate into success_ns in the same way. */
+        assert_eq(6000000ull, refresh_success_ns);
+        /* Both runs measured 6ms — agreement. */
+        assert_eq(ordinary_success_ns, refresh_success_ns);
+        terminal_display_close(&D);
+    }
+
+    /* ── Subtest B: 1000 noop / skipped inserts between two
+     *        successful presents — neither success_ns nor success
+     *        frame count advances for the inserts. ── */
+    {
+        setup(4, 3, 1);
+        D.ops.now_ns = step_clock;
+        reset_step_clock();
+        /* First successful present. */
+        assert_eq(0, terminal_display_present(&D, 0));
+        assert_eq(1ull, D.metrics.full_frames);
+        uint64_t success_ns_1 = D.metrics.success_ns; /* 6M */
+        uint64_t frame_count_1 = D.metrics.full_frames; /* 1 */
+        /* Insert 1000 calls that should NOT touch success_*: 500
+         * background-present SKIPPED + 500 ordinary-presents on
+         * empty damage (noop). */
+        for (int i = 0; i < 500; i++) {
+            D.foreground = false;
+            terminal_display_present(&D, 0);
+            D.foreground = true;
+            /* ACK'd after part 1 so damage is empty → next ordinary
+             * present is a noop. */
+            terminal_display_present(&D, 0);
+        }
+        /* Still 1 full_frame, success_ns unchanged. */
+        assert_eq(frame_count_1, D.metrics.full_frames);
+        assert_eq(success_ns_1, D.metrics.success_ns);
+        assert_eq(48ull, D.metrics.success_bytes);
+        /* The noops and skipped_counts DID increment. */
+        assert_true(D.metrics.noop_calls >= 500);
+        assert_true(D.metrics.skipped_calls >= 500);
+        terminal_display_close(&D);
+    }
+
+    /* ── Subtest C: failed-frame time does NOT enter success_ns. ── */
+    {
+        setup(80, 64, 1);            /* 80×64 view, 10×4 cells @ 8×16 */
+        D.ops.gfx_present_rect = m_present_rect;
+        D.ops.now_ns = step_clock;
+        reset_step_clock();
+        /* Establish a baseline success (initial full_pending = true,
+         * so the first present takes the full-path; success_ns = 6M
+         * from step_clock's deterministic post-ioctl sample). */
+        hide_cursor_and_flush();
+        assert_eq(0, terminal_display_present(&D, 0));
+        uint64_t success_ns_before = D.metrics.success_ns;
+        uint64_t success_frames_before = D.metrics.partial_frames +
+                                        D.metrics.full_frames;
+        uint64_t success_bytes_before = D.metrics.success_bytes;
+        /* Drive a failed list-path round: m_present_rect returns
+         * EAGAIN before any rect succeeds. */
+        mark_one_cell(0, 0, 'A');
+        g_rect_always_errno = EAGAIN;
+        reset_step_clock();
+        assert_eq(-1, terminal_display_present(&D, 0));
+        /* success_* UNCHANGED.  failed_* advanced. */
+        assert_eq(success_ns_before, D.metrics.success_ns);
+        assert_eq(success_frames_before,
+                  D.metrics.partial_frames + D.metrics.full_frames);
+        assert_eq(success_bytes_before, D.metrics.success_bytes);
+        assert_eq(1ull, D.metrics.failed_attempts);
+        assert_true(D.metrics.failed_ns > 0);
+        terminal_display_close(&D);
+    }
+
+    /* ── Subtest D: full_bytes = stride*height for the actual view;
+     *        partial stats include ALL rects' bytes when ALL
+     *        rects succeed. ── */
+    {
+        setup(80, 64, 1);  /* 80*64*4 = 20480 B full */
+        D.ops.gfx_present_rect = m_present_rect;
+        hide_cursor_and_flush();
+        mark_one_cell(0, 0, 'A');
+        mark_one_cell(3, 5, 'B');
+        /* Force the full path (damage.full=true) and verify byte count. */
+        term_render_clear(&D.render);
+        assert_eq(0, terminal_display_present(&D, 1000));
+        assert_eq(1ull, D.metrics.full_frames);
+        assert_eq(0ull, D.metrics.partial_frames);
+        assert_eq(20480ull, D.metrics.success_bytes);
+        assert_eq(1ull, D.metrics.rect_calls); /* one full ioctl */
+        /* Now exercise list path with two 8x16 rects → 1024 B partial.
+         * Ack the prior full_pending and mark new dirty to flip to
+         * list path. */
+        hide_cursor_and_flush();
+        mark_one_cell(0, 0, 'A');
+        mark_one_cell(3, 5, 'B');
+        assert_eq(0, terminal_display_present(&D, 1000));
+        assert_eq(1ull, D.metrics.partial_frames);
+        /* full_frames stayed at 1 — only the first present was the
+         * full path.  success_bytes = 20480 + 1024. */
+        assert_eq(1ull, D.metrics.full_frames);
+        assert_eq(20480ull + 1024ull, D.metrics.success_bytes);
+        assert_eq(3ull, D.metrics.rect_calls); /* 1 full + 2 rect */
+        terminal_display_close(&D);
+    }
+
+    /* ── Subtest E: stats I/O preserves caller errno. ── */
+    {
+        setup(4, 3, 1);
+        D.ops.now_ns = step_clock;
+        reset_step_clock();
+        /* Force a stats_write failure during emit.  Set errno to
+         * a sentinel before the call. */
+        set_step_clock_jump_to(1500000000ull);
+        g_stats_write_fail = 1;
+        errno = ETIMEDOUT;
+        assert_eq(0, terminal_display_present(&D, 0));
+        /* Caller's errno (ETIMEDOUT) is preserved across the
+         * stats_write failure inside display_submit. */
+        assert_eq(ETIMEDOUT, errno);
+        terminal_display_close(&D);
+    }
+}
+
+/* ── end Task 5 tests ───────────────────────────────────────── */
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_terminal_recover_aba),
     TEST_ENTRY(test_terminal_resize_changes_core),
@@ -1012,6 +1950,12 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_terminal_foreground_restore_reports_presented_and_causes_exactly_one_present),
     TEST_ENTRY(test_terminal_present_metrics_full_frame_and_failures),
     TEST_ENTRY(test_terminal_present_metrics_output_lifecycle),
+    /* Task 5: partial-rect submit, retry handshake, spec state table,
+     * metrics anti-dilution. */
+    TEST_ENTRY(test_display_partial_rect_round_and_ack),
+    TEST_ENTRY(test_display_partial_retry_deadline),
+    TEST_ENTRY(test_display_state_table_parametric),
+    TEST_ENTRY(test_display_partial_metrics_anti_dilution),
 TEST_LIST_END
 
 int main(void) {

@@ -127,15 +127,14 @@ static gfx_handle_t *real_open(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 }
 static void real_close(gfx_handle_t *h) { gfx_close(h); }
 static int real_present(gfx_handle_t *h) { return gfx_present(h); }
-/* Task 3: the rect hook field exists on terminal_display_ops_t but is
- * NOT wired to libgfx/gfx_present_rect yet.  Task 5 will.  Until then
- * the missing hook falls back to the OLD full present inside
- * display_submit() so the existing tests that only inject gfx_present
- * keep passing. */
+/* Real gfx_present_rect hook (Task 5): wired to libgfx's wrapper
+ * (Task 2).  A NULL handle / invalid geometry inside the wrapper
+ * returns -1/EINVAL without issuing any ioctl; the failure is
+ * propagated naturally to display_submit's list path. */
 static int real_present_rect(gfx_handle_t *h, uint32_t x, uint32_t y,
                              uint32_t w, uint32_t h_)
 {
-    return gfx_present(h);
+    return gfx_present_rect(h, x, y, w, h_);
 }
 static int real_register_fallback(gfx_handle_t *h) { return gfx_register_fallback(h); }
 static int real_get_display_state(gfx_handle_t *h, gfx_display_state_t *st) { return gfx_get_display_state(h, st); }
@@ -255,37 +254,42 @@ static int emit_present_record(terminal_display_t *d,
     return 0;
 }
 
-/* Task 3 unified entry: ordinary present and redraw both flow through
- * here.  In Task 3 the body submits ONE full-frame GFX_PRESENT ioctl
- * and updates terminal_present_metrics_t accordingly.  Task 5 will
- * replace the body with damage-aware selection.
+/* ── Path-selected present (Task 5 spec §7) ─────────────────────
  *
- * Caller contract:
- *   - `d` is a valid terminal_display_t (not serial_only).  Background
- *     / serial_only are handled by terminal_display_present() and the
- *     redraw wrapper BEFORE reaching this fn.
- *   - `now_ms` is the wall-clock timestamp from terminal.c's
- *     `clock_gettime(CLOCK_MONOTONIC)` and is only used as a fallback
- *     for the metrics clock if ops.now_ns is NULL.
- *   - `*submitted` is set to true iff exactly one ioctl was issued AND
- *     that ioctl returned success.  Spec §7 ack rule: only ALL-true
- *     frames count as full_frames.
+ * `display_submit` selects between the full / list / noop / fallback
+ * paths based on the renderer's pending damage and the ops-installed
+ * rect hook.  It is the single entry point used by both
+ * terminal_display_present() (the ordinary path) and the refresh-time
+ * retry submit (spec §7 row 4-5).
  *
- * Return: 0 = no error (success or no-op submitted frame); the ioctl's
- * errno is left in errno (terminal_display_present() preserves it for
- * its caller).  Metrics-clock reads happen ONCE each at the start and
- * immediately after the ioctl returns — no syscalls between the two
- * samples. */
+ * Path selection (binding for Task 5):
+ *   1) damage.full OR (damage.count > 0 AND rect hook NULL):
+ *      single GFX_PRESENT ioctl (full view); success → full_frames++;
+ *      failure → failed_attempts/failed_ns; damage preserved on failure.
+ *   2) damage.count == 0: noop → noop_calls++, no ioctl.
+ *   3) otherwise (damage.count > 0 AND rect hook present):
+ *      iterate damage.rects[] in their (y,x) sorted order, calling
+ *      gfx_present_rect once each; stop on first non-success;
+ *      successful rects' bytes → partial_frames / success_bytes on
+ *      full-round success, or failed_completed_rect_bytes on partial
+ *      round failure.
+ *
+ * Caller-observable invariants:
+ *   - `*submitted` is set true ONLY when at least one ioctl was issued
+ *     AND ALL issued ioctls returned 0 (spec §7 ack rule).
+ *   - On full success: term_render_ack_damage clears pending damage,
+ *     present_retry_pending clears, retry_deadline_ms clears.
+ *   - On failure: pending damage is preserved; emit-helpers preserve
+ *     errno; the ioctl's errno is restored at the end so terminal_display_present
+ *     can classify it.
+ *   - All rect hook failures stop the round (no "all-or-nothing"
+ *     upgrade to full present). */
 static int display_submit(terminal_display_t *d, uint64_t now_ms,
                           bool *submitted)
 {
     if (submitted) *submitted = false;
 
-    /* Ensure we have an interval open before incrementing anything.
-     * The sentinel is UINT64_MAX (never a real clock value) so the
-     * check below also works when the first interval legitimately
-     * starts at clock=0.  Once set, the only way back to UNSET is
-     * through metrics_reset() at a successful emit. */
+    /* Interval seed (Task 3 contract). */
     uint64_t t0_ns;
     if (d->ops.now_ns) {
         t0_ns = d->ops.now_ns();
@@ -294,52 +298,130 @@ static int display_submit(terminal_display_t *d, uint64_t now_ms,
     }
     if (d->metrics_begin_ns == UINT64_MAX) d->metrics_begin_ns = t0_ns;
 
-    /* Flush dirty cells to the view's private buffer.  This is part of
-     * the measured window — present_cost depends on what we drew. */
+    /* Flush dirty cells into pending damage and snapshot it.  The
+     * snapshot is local; the renderer keeps its own copy.  A later
+     * flush that finds more dirty cells will extend pending_damage
+     * for the next round (Task 4 contract). */
     term_render_flush(&d->render);
+    term_damage_t damage;
+    term_render_get_damage(&d->render, &damage);
 
-    /* Full-frame path (Task 3): one GFX_PRESENT ioctl.  Task 5 will
-     * branch on pending damage here. */
-    uint64_t before = d->ops.now_ns ? d->ops.now_ns() : t0_ns;
-    int rc = d->ops.gfx_present(d->gfx);
-    uint64_t after = d->ops.now_ns ? d->ops.now_ns() : before;
-    uint64_t dt = after - before;
-
-    d->metrics.rect_calls++; /* one ioctl attempted */
-
-    if (rc != 0) {
-        d->metrics.failed_attempts++;
-        d->metrics.failed_ns += dt;
-        if (dt > d->metrics.failed_max_ns) d->metrics.failed_max_ns = dt;
-        /* On failure the failed ioctl's byte prefix is unknown; we
-         * MUST keep the success_* and rect_* counters for the next
-         * interval to merge (spec §8). */
-    } else {
-        /* Success path.  Bytes for a full present are the entire
-         * configured view (info.width * info.height * 4 == info.stride
-         * * info.height for RGB32).  Use stride*height as the canonical
-         * byte count — it's what the kernel wrote. */
-        uint64_t bytes = (uint64_t)d->info.stride * d->info.height;
-        d->metrics.full_frames++;
-        d->metrics.success_ns += dt;
-        d->metrics.success_bytes += bytes;
-        if (dt > d->metrics.success_max_ns) d->metrics.success_max_ns = dt;
-        if (submitted) *submitted = true;
+    /* Path selection.  The NULL-hook fallback keeps tests that
+     * don't supply the new op green without changing any production
+     * behaviour (real terminals always wire gfx_present_rect). */
+    bool want_full = damage.full;
+    if (!want_full && damage.count > 0 && d->ops.gfx_present_rect == NULL) {
+        want_full = true;
     }
 
-    /* Per-second emit decision: lazy-open fd once, then emit.  On
-     * successful emit we close the interval (reset counters + new
-     * begin).  On emit failure the counters are retained so the
-     * next interval can merge them (spec §8). */
+    int rc = 0;
+    int rc_errno = 0;
+
+    if (want_full) {
+        /* ── Full path: one GFX_PRESENT ioctl ────────────── */
+        uint64_t before = d->ops.now_ns ? d->ops.now_ns() : t0_ns;
+        rc = d->ops.gfx_present(d->gfx);
+        uint64_t after = d->ops.now_ns ? d->ops.now_ns() : before;
+        uint64_t dt = after - before;
+
+        d->metrics.rect_calls++;
+
+        if (rc != 0) {
+            d->metrics.failed_attempts++;
+            d->metrics.failed_ns += dt;
+            if (dt > d->metrics.failed_max_ns)
+                d->metrics.failed_max_ns = dt;
+            rc_errno = errno;
+        } else {
+            /* Success.  full_bytes = stride * height (== width*height*4
+             * for RGB32); the kernel wrote the entire view. */
+            uint64_t bytes = (uint64_t)d->info.stride * d->info.height;
+            d->metrics.full_frames++;
+            d->metrics.success_ns += dt;
+            d->metrics.success_bytes += bytes;
+            if (dt > d->metrics.success_max_ns)
+                d->metrics.success_max_ns = dt;
+            term_render_ack_damage(&d->render);
+            d->present_retry_pending = false;
+            d->retry_deadline_ms = 0;
+            if (submitted) *submitted = true;
+        }
+    } else if (damage.count == 0) {
+        /* ── Noop path: no ioctl, no failure, no ack needed ─ */
+        d->metrics.noop_calls++;
+        rc = 0;
+    } else {
+        /* ── List path: per-rect gfx_present_rect ────────── */
+        uint64_t total_dt = 0;
+        uint64_t succ_bytes = 0;
+        bool round_failed = false;
+        int failed_errno = 0;
+        for (uint32_t i = 0; i < damage.count; i++) {
+            uint32_t x = damage.rects[i].x, y = damage.rects[i].y;
+            uint32_t w = damage.rects[i].w, h = damage.rects[i].h;
+            uint64_t before = d->ops.now_ns ? d->ops.now_ns() : t0_ns;
+            int rrc = d->ops.gfx_present_rect(d->gfx, x, y, w, h);
+            uint64_t after = d->ops.now_ns ? d->ops.now_ns() : before;
+            uint64_t dt = after - before;
+            total_dt += dt;
+            d->metrics.rect_calls++;
+            if (rrc == 0) {
+                /* Per-rect bytes = w*h*4 (the kernel writes exactly
+                 * that for a partial rect). */
+                succ_bytes += (uint64_t)w * h * 4u;
+                continue;
+            }
+            /* First failure: stop the round.  Pending damage is
+             * preserved; retry will re-issue the same rects. */
+            round_failed = true;
+            failed_errno = errno;
+            break;
+        }
+
+        if (!round_failed) {
+            d->metrics.partial_frames++;
+            d->metrics.success_ns += total_dt;
+            d->metrics.success_bytes += succ_bytes;
+            if (total_dt > d->metrics.success_max_ns)
+                d->metrics.success_max_ns = total_dt;
+            term_render_ack_damage(&d->render);
+            d->present_retry_pending = false;
+            d->retry_deadline_ms = 0;
+            if (submitted) *submitted = true;
+            rc = 0;
+        } else {
+            /* Pre-failure successful rects' bytes are a LOWER BOUND
+             * on the kernel-written prefix.  total_dt already
+             * includes only the time spent up to the first failure,
+             * so it IS the wall-clock cost of the failed round. */
+            d->metrics.failed_attempts++;
+            d->metrics.failed_ns += total_dt;
+            if (total_dt > d->metrics.failed_max_ns)
+                d->metrics.failed_max_ns = total_dt;
+            d->metrics.failed_completed_rect_bytes += succ_bytes;
+            rc = -1;
+            rc_errno = failed_errno;
+        }
+    }
+
+    /* Per-second emit decision (Task 3 contract).  Save errno so
+     * the emit helpers cannot clobber the ioctl's errno that we
+     * restore below. */
+    int saved_emit_errno = errno;
     uint64_t end_ns = d->ops.now_ns ? d->ops.now_ns() : t0_ns;
     if (stats_emit_due(d, end_ns)) {
         uint64_t begin_ns = d->metrics_begin_ns;
         if (emit_present_record(d, begin_ns, end_ns) == 0) {
             metrics_reset(d, end_ns);
         }
-        /* On emit failure (stats_write returned -1) the counters are
-         * kept; the next emit_due attempt will merge. */
     }
+
+    /* Restore the ioctl errno for the caller.  On success, the
+     * ioctl didn't touch errno; we restore saved_emit_errno in case
+     * snprintf inside the emit step clobbered it.  On failure, we
+     * restore the failing ioctl's errno. */
+    if (rc != 0) errno = rc_errno;
+    else errno = saved_emit_errno;
     return rc;
 }
 
@@ -426,44 +508,148 @@ int terminal_display_present(terminal_display_t *d, uint64_t now_ms)
 }
 
 // Redraw the whole screen into the current view and present it.
+// Term_render_clear() promotes pending_damage to full=true (spec §6),
+// so the present below takes the full GFX_PRESENT path even when the
+// rect hook is installed; the OLD rects do NOT leak across a full
+// redraw.  The caller (refresh) must already have armed
+// redraw_pending if it was the reason for calling.
+//
+// Returns the conventional terminal_display codes:
+//   0            = present succeeded (ack); refresh_presented=true
+//   1            = retryable failure; fail() set the deadline
+//  -1            = permanent failure; serial_only=true
+//
+// On background drain (foreground=false; present returns SKIPPED),
+// redraw_pending STAYS true so the foreground-restore refresh will
+// re-trigger this path.
 static int redraw(terminal_display_t *d, uint64_t now_ms)
 {
     term_render_clear(&d->render);
     term_core_mark_all_dirty(d->core);
+    /* Arm redraw_pending; the success branch clears it below.
+     * Background drain (SKIPPED) and failure (-1) keep it set. */
     d->redraw_pending = true;
     int rc = terminal_display_present(d, now_ms);
     if (rc == 0) {
         d->redraw_pending = false;
+        /* terminal_display_present already cleared retry_deadline_ms +
+         * present_retry_pending on a SUCCESSFUL present (display_submit
+         * did the actual ack), but be defensive in case someone
+         * short-circuits the path later. */
         d->retry_deadline_ms = 0;
         d->present_retry_pending = false;
         d->refresh_presented = true;
         return 0;
     }
     if (rc == TERMINAL_PRESENT_SKIPPED) {
+        /* Background drain: keep redraw_pending=true, leave retry
+         * flags alone (terminal_display_present has already managed
+         * them when the foreground was lost). */
         return 0;
     }
     return fail(d, errno, now_ms);
 }
 
+// Refresh-time submit helper (spec §7 row 4-5).  Pre-condition: the
+// caller has already verified (a) deadline reached, (b) generation
+// unchanged, (c) foreground=true, (d) present_retry_pending=true.
+//
+// Issues exactly ONE flush+submit attempt via display_submit.  Maps
+// the resulting state to the spec's row 4-10 outcomes:
+//
+//   - full success → ack (done by display_submit), refresh_presented=true,
+//     return 0.
+//   - noop (no damage) → clear retry flags, return 0 WITHOUT setting
+//     refresh_presented (spec row "无 damage 的 no-op").
+//   - EAGAIN / ESTALE → re-arm retry (deadline=now+250), return 1.
+//   - EACCES → foreground=false, redraw_pending=true, clear retry
+//     flags, return 0 (spec row 8).
+//   - permanent errnos (EIO/ENODEV/ENXIO/EBADF/ENOTTY) → serial_only,
+//     clear retry flags, return -1 (spec row 9).
+//   - other errnos (ENOMEM/EFAULT/EINVAL/EBUSY) → keep retry flags,
+//     fail() sets deadline, return 1 (spec row 10).
+//
+// In all cases the caller's errno (the ioctl errno) is preserved.
+static int refresh_submit_attempt(terminal_display_t *d, uint64_t now_ms)
+{
+    if (d->serial_only || !d->gfx || !d->foreground) return 0;
+
+    bool submitted = false;
+    int rc = display_submit(d, now_ms, &submitted);
+    if (rc == 0) {
+        if (submitted) {
+            /* display_submit already cleared retry flags + ack'd. */
+            d->refresh_presented = true;
+            return 0;
+        }
+        /* Noop path (damage was empty when the deadline fired).
+         * Clear the stale retry flag so the refresh path won't
+         * submit again on every tick; do NOT set refresh_presented. */
+        d->present_retry_pending = false;
+        d->retry_deadline_ms = 0;
+        return 0;
+    }
+
+    /* Failure classification per spec §7. */
+    int e = errno;
+    if (e == EAGAIN || e == ESTALE) {
+        d->present_retry_pending = true;
+        d->retry_deadline_ms = now_ms + TERMINAL_RETRY_MS;
+        errno = e;
+        return 1;
+    }
+    if (e == EACCES) {
+        d->foreground = false;
+        d->redraw_pending = true;
+        d->present_retry_pending = false;
+        d->retry_deadline_ms = 0;
+        return 0;
+    }
+    if (errno_is_permanent(e)) {
+        d->serial_only = true;
+        d->present_retry_pending = false;
+        d->retry_deadline_ms = 0;
+        errno = e;
+        return -1;
+    }
+    /* ENOMEM / EFAULT / EINVAL / EBUSY: keep retry flag, fail() arms
+     * 250ms deadline. */
+    d->present_retry_pending = true;
+    d->retry_deadline_ms = now_ms + TERMINAL_RETRY_MS;
+    errno = e;
+    return 1;
+}
+
 int terminal_display_refresh(terminal_display_t *d, int fb_fd, uint64_t now_ms)
 {
+    /* Spec §7 row 0: refresh enters with refresh_presented=false; the
+     * flag stays false unless a successful submit happened this tick. */
     d->refresh_presented = false;
+
+    /* Spec §7 row 9 (serial_only): permanent device failure, no graphics. */
     if (d->serial_only) return -1;
+
+    /* Spec §7 row "deadline 未到": rate-limit.  No submit, no state
+     * change, no refresh_presented. */
     if (d->retry_deadline_ms && now_ms < d->retry_deadline_ms) return 1;
 
-    /* Check ownership state */
+    /* Check ownership state.  get_display_state failure goes through
+     * fail() which arms a 250ms deadline (no present_retry_pending —
+     * spec: resource-prepare failures do NOT arm partial retry). */
     if (d->gfx && d->ops.gfx_get_display_state) {
         gfx_display_state_t dst;
-        if (d->ops.gfx_get_display_state(d->gfx, &dst) == 0) {
-            bool was_fg = d->foreground;
-            bool is_fg = (dst.flags & GFX_DISPLAY_STATE_FOREGROUND) != 0;
-            d->foreground = is_fg;
+        if (d->ops.gfx_get_display_state(d->gfx, &dst) != 0) {
+            int e = errno;
+            return fail(d, e, now_ms);
+        }
+        bool was_fg = d->foreground;
+        bool is_fg = (dst.flags & GFX_DISPLAY_STATE_FOREGROUND) != 0;
+        d->foreground = is_fg;
 
-            if (dst.generation != d->owner_generation || (!was_fg && is_fg)) {
-                d->owner_generation = dst.generation;
-                if (is_fg) {
-                    d->redraw_pending = true;
-                }
+        if (dst.generation != d->owner_generation || (!was_fg && is_fg)) {
+            d->owner_generation = dst.generation;
+            if (is_fg) {
+                d->redraw_pending = true;
             }
         }
     }
@@ -473,12 +659,28 @@ int terminal_display_refresh(terminal_display_t *d, int fb_fd, uint64_t now_ms)
         int e = errno;
         return fail(d, e, now_ms);
     }
+
+    /* Generation unchanged: limited submit paths (spec §7 row 1 / 3 / 4-5). */
     if (st.generation == d->generation) {
-        if (d->redraw_pending && d->foreground) return redraw(d, now_ms);
-        d->retry_deadline_ms = 0;
+        /* redraw_pending has priority over retry_pending; foreground
+         * is required to actually run redraw (otherwise we keep
+         * redraw_pending set and return 0 — the foreground-restore
+         * refresh will pick it up). */
+        if (d->redraw_pending) {
+            if (!d->foreground) return 0;
+            return redraw(d, now_ms);
+        }
+        /* Retry-at-deadline: only when present_retry_pending is set
+         * AND foreground AND we passed the deadline guard above. */
+        if (d->present_retry_pending && d->foreground) {
+            return refresh_submit_attempt(d, now_ms);
+        }
+        /* Spec §7 row 1: no submit, return 0.  Pending damage must
+         * NOT be auto-promoted to a present here (Task 5 brief). */
         return 0;
     }
 
+    /* ── Generation changed: mode rebind path (spec §7 row 3) ── */
     uint32_t w = st.info.width, h = st.info.height;
     if (w == 0 || h == 0 || d->font->width == 0 || d->font->height == 0)
         return fail(d, EINVAL, now_ms);
@@ -546,6 +748,11 @@ int terminal_display_refresh(terminal_display_t *d, int fb_fd, uint64_t now_ms)
     d->info = st2.info;
     d->generation = st2.generation;
     d->pending_winsize = true;
+    /* Mode rebind invalidates the OLD geometry: drop any in-flight
+     * partial retry that targeted the old view.  The new view will
+     * get a full redraw. */
+    d->present_retry_pending = false;
+    d->retry_deadline_ms = 0;
     if (old) d->ops.gfx_close(old);
 
     return redraw(d, now_ms);
