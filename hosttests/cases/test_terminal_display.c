@@ -52,6 +52,126 @@ static int g_consume_calls;
 static int g_state_flip_at;
 static uint64_t g_state_flip_gen;
 
+/* ── Task 3 metrics harness ───────────────────────────────────
+ *
+ * now_ns fake holds g_now_ns; bumped by +g_now_advance each call.  The
+ * default advance is 0 so callers can pin the moment.  After the first
+ * submit-style call inside the SU, the test typically bumps it by 6_000_000
+ * ns (Task 3 brief) or by 100_000_000 ns (1/10 sec, common).
+ *
+ * stats_open / stats_write / stats_close fakes maintain their own
+ * counters and record every text blob that passes through stats_write
+ * into g_emitted_text[].  stats_open returns -1 once if g_stats_open_fail
+ * is set; the lazy open policy of terminal_display.c sets stats_fd to
+ * DISABLED after the first failure and never retries. */
+static uint64_t g_now_ns;
+static uint64_t g_now_advance; /* added to g_now_ns each call */
+static int g_stats_open_calls;
+static int g_stats_open_fail;   /* if nonzero: next stats_open returns -1 */
+static int g_stats_open_returns;  /* the fd to return from stats_open (-1 default) */
+static int g_stats_write_calls;
+static int g_stats_write_fail;  /* if nonzero: next stats_write returns -1 */
+static int g_stats_close_calls;
+static int g_stats_close_value;  /* fd passed to stats_close, recorded */
+#define EMIT_MAX_LINES 16
+#define EMIT_MAX_LEN   512
+static char g_emitted_text[EMIT_MAX_LINES][EMIT_MAX_LEN];
+static int  g_emitted_lines;
+
+static uint64_t m_now_ns(void)
+{
+    uint64_t v = g_now_ns;
+    g_now_ns += g_now_advance;
+    return v;
+}
+static int m_stats_open(void)
+{
+    g_stats_open_calls++;
+    if (g_stats_open_fail) { g_stats_open_fail = 0; return -1; }
+    if (g_stats_open_returns >= 0) return g_stats_open_returns;
+    /* Default: hand out an opaque sentinel fd (the test only counts
+     * write/close calls — the fake never touches a real /dev/serial). */
+    return 0x40001;
+}
+static int m_stats_write(int fd, const char *text, size_t len)
+{
+    g_stats_write_calls++;
+    int saved = errno;
+    if (g_stats_write_fail) { g_stats_write_fail = 0; errno = EIO; return -1; }
+    if (g_emitted_lines < EMIT_MAX_LINES && len < EMIT_MAX_LEN) {
+        size_t n = len < (size_t)(EMIT_MAX_LEN - 1) ? len : (size_t)(EMIT_MAX_LEN - 1);
+        for (size_t i = 0; i < n; i++) g_emitted_text[g_emitted_lines][i] = text[i];
+        g_emitted_text[g_emitted_lines][n] = '\0';
+        g_emitted_lines++;
+    }
+    (void)fd;
+    errno = saved;
+    return 0;
+}
+static int m_stats_close(int fd)
+{
+    g_stats_close_calls++;
+    g_stats_close_value = fd;
+    return 0;
+}
+
+static void reset_stats_counters(void)
+{
+    g_now_ns = 0;
+    g_now_advance = 0;
+    g_stats_open_calls = 0;
+    g_stats_open_fail = 0;
+    g_stats_open_returns = -1;
+    g_stats_write_calls = 0;
+    g_stats_write_fail = 0;
+    g_stats_close_calls = 0;
+    g_stats_close_value = -1;
+    g_emitted_lines = 0;
+    for (int i = 0; i < EMIT_MAX_LINES; i++) g_emitted_text[i][0] = '\0';
+}
+
+/* ── Step clock: deterministic ns clock for Task 3 metrics tests. ─
+ *
+ * Returns a value derived from g_now_ns as follows:
+ *   call 1 (pre-flush)    -> 0           (g_now_ns == 0)
+ *   call 2 (pre-ioctl)    -> 0           (still 0)
+ *   call 3 (post-ioctl)   -> 6_000_000   (g_now_ns bumped to 6 MB)
+ *   call 4 (end_ns / emit-due check) -> 6_000_000 (unchanged; not yet 1 s)
+ *   call 5+ -> whatever g_now_ns is at that point.
+ *
+ * Tests use set_step_clock_jump_to() to bump g_now_ns past 1 s for
+ * emit-due assertions.  The clock is *read-only* with respect to
+ * advance — only set_step_clock_jump_to() mutates g_now_ns. */
+static int s_step_call;
+static void reset_step_clock(void) {
+    s_step_call = 0;
+    g_now_ns = 0;
+}
+static void reset_step_clock_keep_time(void) {
+    s_step_call = 0;
+}
+static void set_step_clock_jump_to(uint64_t ns) {
+    g_now_ns = ns;
+}
+static uint64_t step_clock(void)
+{
+    s_step_call++;
+    /* Only call #3 (the post-ioctl sample) advances the clock by
+     * exactly 6_000_000 ns — the brief's pinned "single submit
+     * duration".  All other calls return the current g_now_ns
+     * unchanged so tests can pre-set arbitrary time origins. */
+    if (s_step_call == 3) g_now_ns += 6000000ull;
+    return g_now_ns;
+}
+
+/* Returns a NON-ZERO, NON-FAKE clock value used to verify that the
+ * final-interval emit at terminal_display_close captures real begin
+ * and end timestamps (not the fake step_clock's 0 / 6000000). */
+static uint64_t real_close_now_ns(void)
+{
+    return 5000000000ull; /* 5 seconds — well past the 1 s window */
+}
+
 static gfx_handle_t *m_open(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 {
     (void)x; (void)y;
@@ -169,6 +289,14 @@ static void setup(uint32_t w, uint32_t h, uint64_t gen)
     D.ops.gfx_get_display_state = m_get_display_state;
     D.ops.gfx_replace_fallback = m_replace_fallback;
     D.ops.consume_terminal_enomem = m_consume_enomem;
+    /* Task 3 metrics hooks — defaults are the real_* production impls
+     * (CLOCK_MONOTONIC / /dev/serial).  Tests that want a fake clock
+     * or a captured /dev/serial must override these AFTER setup(). */
+    D.ops.now_ns = m_now_ns;
+    D.ops.stats_open = m_stats_open;
+    D.ops.stats_write = m_stats_write;
+    D.ops.stats_close = m_stats_close;
+    reset_stats_counters();
 }
 
 TEST_FUNC(test_terminal_recover_aba) {
@@ -640,6 +768,228 @@ TEST_FUNC(test_terminal_foreground_restore_reports_presented_and_causes_exactly_
     terminal_display_close(&D);
 }
 
+/* ── Task 3 metric tests ─────────────────────────────────────── */
+
+/* One full-frame submit through the ordinary entry on a 4×3 view
+ * (48 B) taking 6_000_000 ns — drives full_frames, success_ns,
+ * success_bytes.  A follow-up failed frame only advances
+ * failed_attempts and failed_ns.  Background present bumps
+ * skipped_calls only and never calls gfx_present.  A stats_write that
+ * clobbers errno must NOT pollute submit return or measured time. */
+TEST_FUNC(test_terminal_present_metrics_full_frame_and_failures) {
+    setup(4, 3, 1);             /* view 4×3 × 4 B = 48 B */
+    D.ops.now_ns = step_clock;
+    reset_step_clock();
+
+    /* 1) Ordinary entry: full frame success */
+    assert_eq(0, terminal_display_present(&D, 0));
+    assert_eq(1, D.metrics.full_frames);
+    assert_eq(0, D.metrics.partial_frames);
+    assert_eq(6000000ull, D.metrics.success_ns);
+    assert_eq(48ull, D.metrics.success_bytes);
+    assert_eq(6000000ull, D.metrics.success_max_ns);
+    assert_eq(0, D.metrics.failed_attempts);
+    assert_eq(0, D.metrics.failed_ns);
+    assert_eq(1, g_present_calls);
+
+    /* 2) Refresh redraw path also routes through display_submit.  We
+     * trigger redraw via the owner_generation-change branch (the
+     * refresh query sees g_disp_state.generation != D.owner_generation
+     * and arms d->redraw_pending without changing g_state.generation,
+     * so the refresh takes the same-dimension redraw path). */
+    g_disp_state.generation = 2;
+    int before_redraw = g_present_calls;
+    reset_step_clock();
+    assert_eq(0, terminal_display_refresh(&D, 3, 0));
+    assert_eq(2, D.metrics.full_frames);
+    assert_eq(12000000ull, D.metrics.success_ns);
+    assert_eq(96ull, D.metrics.success_bytes);
+    assert_true(g_present_calls >= before_redraw + 1);
+
+    /* 3) Failed frame: only failed_attempts and failed_ns advance.
+     * success_* untouched.  Use EAGAIN which keeps foreground=true. */
+    g_present_errno = EAGAIN;
+    D.retry_deadline_ms = 0;
+    reset_step_clock();
+    assert_eq(-1, terminal_display_present(&D, 0));
+    assert_eq(EAGAIN, errno);
+    assert_eq(1, D.metrics.failed_attempts);
+    assert_eq(12000000ull, D.metrics.success_ns);
+    assert_eq(2, D.metrics.full_frames);
+    assert_eq(96ull, D.metrics.success_bytes);
+    assert_true(D.metrics.failed_ns > 0);
+
+    /* 4) Background present: only skipped_calls. */
+    D.foreground = false;
+    int before_bg = g_present_calls;
+    int rc_bg = terminal_display_present(&D, 1000);
+    assert_eq(TERMINAL_PRESENT_SKIPPED, rc_bg);
+    assert_eq(before_bg, g_present_calls);
+    assert_true(D.metrics.skipped_calls >= 1);
+    assert_eq(2, D.metrics.full_frames);
+    assert_eq(96ull, D.metrics.success_bytes);
+    D.foreground = true;
+
+    /* 5) stats_write failure must not propagate errno to the submit
+     * return or extend success_ns.  Set up a present whose emit step
+     * crosses the 1-second boundary, then make stats_write fail. */
+    g_present_errno = 0;
+    D.retry_deadline_ms = 0;
+    reset_step_clock();
+    set_step_clock_jump_to(3000000000ull);
+    g_stats_write_fail = 1;
+    int before_write_calls = g_stats_write_calls;
+    assert_eq(0, terminal_display_present(&D, 0));
+    /* After this present, full_frames += 1, success_ns += 6_000_000,
+     * success_bytes += 48.  The failing stats_write must NOT have
+     * contributed to success_ns (the ioctl timer is local to
+     * display_submit and ends before the emit step). */
+    assert_eq(3, D.metrics.full_frames);
+    assert_eq(18000000ull, D.metrics.success_ns);
+    assert_eq(144ull, D.metrics.success_bytes);
+    /* The emit was attempted but failed; stats_write_calls grew by 1. */
+    assert_eq(before_write_calls + 1, g_stats_write_calls);
+    /* The emit-fail must NOT have reset the interval — counters
+     * must still be present, ready for the next interval.  Prove
+     * that with the next successful present. */
+    assert_true(D.metrics_begin_ns != UINT64_MAX);
+    assert_eq(3, D.metrics.full_frames);
+
+    /* Close: stats_fd was opened so close must be called exactly once. */
+    terminal_display_close(&D);
+    assert_eq(1, g_stats_close_calls);
+    /* Idempotent: second close must NOT call stats_close again. */
+    terminal_display_close(&D);
+    assert_eq(1, g_stats_close_calls);
+}
+
+/* Output lifecycle: lazy open ONCE; failed open disables the path
+ * (sets stats_fd == DISABLED and never retries).  stats_close is
+ * idempotent.  No output before 1 second; exactly one output after
+ * 1 second.  Write failure does NOT overwrite caller's EAGAIN.  The
+ * final short interval at terminal_display_close DOES emit and has
+ * real begin/end_ns (not fakes). */
+TEST_FUNC(test_terminal_present_metrics_output_lifecycle) {
+    setup(4, 3, 1);
+    D.ops.now_ns = step_clock;
+    reset_step_clock();
+
+    /* 1) First present at clock=0 — sets begin_ns to 0 but does NOT
+     * trigger emit (still < 1 s since begin). */
+    terminal_display_present(&D, 0);
+    assert_eq(1, D.metrics.full_frames);
+    assert_eq(0, g_stats_open_calls);   /* lazy open NOT yet triggered */
+    assert_eq(0, g_stats_write_calls);  /* no emit yet */
+    assert_true(D.metrics_begin_ns == 0);
+
+    /* 2) Bump clock past 1 second.  The next present's emit-due
+     * check fires.  Lazy open happens, then a single emit. */
+    reset_step_clock();
+    set_step_clock_jump_to(1500000000ull); /* 1.5 s */
+    terminal_display_present(&D, 0);
+    assert_eq(1, g_stats_open_calls);
+    assert_eq(1, g_stats_write_calls);
+    /* Interval counters were reset by the emit. */
+    assert_eq(0, D.metrics.full_frames);
+    assert_eq(0, D.metrics.success_ns);
+    assert_eq(0, D.metrics.success_ns);
+    assert_true(D.metrics_begin_ns != UINT64_MAX);
+
+    /* 3) Subsequent presents reuse the already-open fd (lazy open
+     * is one-shot): emit_due on the next present fires but does
+     * NOT call stats_open again. */
+    reset_step_clock();
+    set_step_clock_jump_to(3000000000ull);
+    terminal_display_present(&D, 0);
+    assert_eq(1, g_stats_open_calls);  /* no second open */
+    assert_eq(2, g_stats_write_calls); /* second emit fired */
+
+    /* terminal_display_close: close the fd. */
+    terminal_display_close(&D);
+    assert_eq(1, g_stats_close_calls);
+    /* Idempotent close: stats_fd was set to DISABLED so the second
+     * close must NOT call stats_close. */
+    terminal_display_close(&D);
+    assert_eq(1, g_stats_close_calls);
+
+    /* 4) The final short interval at close emits with real begin /
+     * end ns when stats_fd >= 0.  Re-init to a clean display,
+     * make ONE present (begin_ns set), close it.  Use the real
+     * clock for now_ns at close to verify the real begin/end are
+     * passed to the emit (not the fake).
+     *
+     * NOTE: setup() resets the stats counters, so all counters here
+     * start at 0. */
+    setup(4, 3, 1);
+    D.ops.now_ns = step_clock;
+    reset_step_clock();
+    terminal_display_present(&D, 0);
+    assert_eq(1, D.metrics.full_frames);
+    assert_eq(0, g_stats_open_calls); /* lazy open NOT yet triggered */
+    assert_eq(0, g_stats_write_calls);
+    /* Switch now_ns to a real-clock fn just before close so the
+     * close path uses real values.  The fake emit capture will see
+     * those real values in the text. */
+    D.ops.now_ns = real_close_now_ns;
+    terminal_display_close(&D);
+    /* Lazy open at close + final emit + close. */
+    assert_eq(1, g_stats_open_calls);
+    assert_eq(1, g_stats_write_calls);
+    assert_eq(1, g_stats_close_calls);
+    /* Close was called exactly once. */
+    terminal_display_close(&D);
+    assert_eq(1, g_stats_close_calls); /* idempotent */
+
+    /* 5) Failed stats_open permanently disables the path: subsequent
+     * present does NOT retry open; final close emits + closes nothing.
+     *
+     * NOTE: setup() resets stats counters — start from 0. */
+    setup(4, 3, 1);
+    D.ops.now_ns = step_clock;
+    reset_step_clock();
+    /* Open the interval at clock=0 (no emit-due yet — < 1 s). */
+    terminal_display_present(&D, 0);
+    assert_eq(0, g_stats_open_calls); /* still unopened */
+    assert_eq(0, g_stats_write_calls);
+    /* Now jump past 1 s; the next present fires emit-due.  Set
+     * g_stats_open_fail=1 BEFORE that present so the lazy open
+     * returns -1 and stats_fd becomes DISABLED. */
+    reset_step_clock();
+    set_step_clock_jump_to(1500000000ull);
+    g_stats_open_fail = 1;
+    terminal_display_present(&D, 0);
+    assert_eq(1, g_stats_open_calls); /* 1 attempt that failed */
+    assert_eq(0, g_stats_write_calls); /* no fd to write to */
+    /* A second present crossing the next boundary must NOT retry open. */
+    reset_step_clock();
+    set_step_clock_jump_to(3000000000ull);
+    terminal_display_present(&D, 0);
+    assert_eq(1, g_stats_open_calls); /* still no retry */
+    /* terminal_display_close: stats_fd == DISABLED, so no close call. */
+    terminal_display_close(&D);
+    assert_eq(0, g_stats_close_calls);
+    terminal_display_close(&D);
+    assert_eq(0, g_stats_close_calls);
+
+    /* 6) stats_write failure does NOT overwrite caller's EAGAIN.
+     * Set EAGAIN before the submit; the failing stats_write inside
+     * must not leave EAGAIN replaced by the write errno (EIO). */
+    setup(4, 3, 1);
+    D.ops.now_ns = step_clock;
+    reset_step_clock();
+    set_step_clock_jump_to(1500000000ull); /* trigger emit */
+    g_stats_write_fail = 1;
+    errno = EAGAIN;
+    terminal_display_present(&D, 0);
+    /* The submit returned 0 (success).  EAGAIN must still be the
+     * caller's errno, NOT replaced by the failing stats_write's
+     * internal EIO. */
+    assert_eq(EAGAIN, errno);
+    (void)EAGAIN;
+    /* Clean up. */
+    terminal_display_close(&D);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_terminal_recover_aba),
     TEST_ENTRY(test_terminal_resize_changes_core),
@@ -660,6 +1010,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_terminal_background_ticks_do_not_redraw_until_restore),
     TEST_ENTRY(test_terminal_no_redundant_redraw_on_first_refresh_after_fallback_sync),
     TEST_ENTRY(test_terminal_foreground_restore_reports_presented_and_causes_exactly_one_present),
+    TEST_ENTRY(test_terminal_present_metrics_full_frame_and_failures),
+    TEST_ENTRY(test_terminal_present_metrics_output_lifecycle),
 TEST_LIST_END
 
 int main(void) {

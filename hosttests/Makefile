@@ -1219,11 +1219,13 @@ test-terminal-render: $(TEST_BLD)/test_terminal_render.elf
 # -DFB_RESOLUTION_TEST compiles the Task-9 fbtest ENOMEM hook so
 # test_terminal_fbtest_enomem_once can drive it; the tests always install a
 # stub op, so the real /dev/fbtest path is never taken on the host.
-$(TEST_BLD)/terminal_display.o: $(TESTS_DIR)/user/terminal/terminal_display.c
+$(TEST_BLD)/terminal_display.o: $(TESTS_DIR)/user/terminal/terminal_display.c \
+		$(TESTS_DIR)/user/terminal/terminal_display.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(GFX_CLIENT_HOST_CFLAGS) -DFB_RESOLUTION_TEST -I$(TEST_INC) -I$(TESTS_DIR)/user/terminal -c $< -o $@
 
-$(TEST_BLD)/test_terminal_display.o: $(TEST_CASES)/test_terminal_display.c
+$(TEST_BLD)/test_terminal_display.o: $(TEST_CASES)/test_terminal_display.c \
+		$(TESTS_DIR)/user/terminal/terminal_display.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(GFX_CLIENT_HOST_CFLAGS) -I$(TEST_INC) -I$(TESTS_DIR)/user/terminal -c $< -o $@
 
