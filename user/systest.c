@@ -3335,6 +3335,79 @@ static void test_ssp_no_false_trip(void)
            "want WIFEXITED&&42, status=%#x", st);
 }
 
+/* ── 54b/54c/54d: 用户态异常路径 waitpid 信号终止语义 ─────────
+ * 三种 user-mode fault 各应被父 waitpid 识别为 WIFSIGNALED && 对应 WTERMSIG：
+ *   54b. #DE（除零） → SIGFPE (8)
+ *   54c. #PF（写只读页） → SIGSEGV (11)
+ *   54d. #UD（ud2） → SIGILL (4)
+ * 若 fix 未生效，三个 child 都会被 waitpid 看到 status=0（WIFEXITED 假象），
+ * 整套测试 FAIL，root cause 是 kernel/arch/x86_64/intr/trap.c 之前把
+ * do_exit(0) 硬编码成退出码（exit_code 高字节），shell/init/busybox
+ * wait/trap 全部失真（roadmap parked 项，2026-10-11）。
+ */
+static void __attribute__((noinline)) trap_divzero(void)
+{
+    volatile int a = 1, b = 0;
+    volatile int c = a / b;                  /* #DE */
+    (void)c;
+    _exit(123);                              /* 不可达 */
+}
+
+static void __attribute__((noinline)) trap_write_ro(void)
+{
+    /* mmap 一页 PROT_READ，触发写时 #PF (P=1, W=1) → SIGSEGV。
+     * 故意不调 munmap；child 自身立刻被 kill，资源由 reaper 释放。 */
+    void *p = mmap(NULL, 4096, PROT_READ,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == (void *)-1) _exit(99);
+    *(volatile int *)p = 42;                 /* #PF, write to RO → SIGSEGV */
+    _exit(124);                              /* 不可达 */
+}
+
+static void __attribute__((noinline)) trap_ud2(void)
+{
+    /* ud2 = Invalid Opcode (#UD) → SIGILL。noinline 防止编译器把 ud2
+     * 优化掉（gcc/clang 都不会，但显式标注意图）。 */
+    __asm__ __volatile__("ud2");
+    _exit(125);                              /* 不可达 */
+}
+
+static void test_user_fault_divzero(void)
+{
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("fork_divzero", "fork failed"); return; }
+    if (pid == 0) trap_divzero();
+    int st = 0;
+    waitpid(pid, &st, 0);
+    CHECKF(WIFSIGNALED(st) && WTERMSIG(st) == SIGFPE,
+           "54b_fault_divzero", "status=%#x",
+           "want WIFSIGNALED&&SIGFPE(8), status=%#x", st);
+}
+
+static void test_user_fault_write_ro(void)
+{
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("fork_wp", "fork failed"); return; }
+    if (pid == 0) trap_write_ro();
+    int st = 0;
+    waitpid(pid, &st, 0);
+    CHECKF(WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV,
+           "54c_fault_write_ro", "status=%#x",
+           "want WIFSIGNALED&&SIGSEGV(11), status=%#x", st);
+}
+
+static void test_user_fault_ud2(void)
+{
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("fork_ud2", "fork failed"); return; }
+    if (pid == 0) trap_ud2();
+    int st = 0;
+    waitpid(pid, &st, 0);
+    CHECKF(WIFSIGNALED(st) && WTERMSIG(st) == SIGILL,
+           "54d_fault_ud2", "status=%#x",
+           "want WIFSIGNALED&&SIGILL(4), status=%#x", st);
+}
+
 /* 扫描 "TAG <16hex>[\n|\0]"（canary_dump 的输出格式 "GUARD %016lx\n"）。
  * 返回 0 OK，-1 格式不符——不修改 *out。 */
 static int parse_hex16_line(const char *buf, const char *tag, uint64_t *out)
@@ -4187,6 +4260,9 @@ static const test_case_t tests[] = {
     {"52_fork_mmap_cow_isolation", "fork mmap cow isolation", test_fork_mmap_cow_isolation, 1, 0},
     {"53_cow_kernel_outputs", "cow kernel outputs", test_cow_kernel_outputs, 1, 0},
     {"54_linux_abi_compat", "linux abi compat", test_linux_abi_compat,       1, 0},
+    {"54b_user_fault_divzero", "user fault divzero → SIGFPE",  test_user_fault_divzero,    1, 0},
+    {"54c_user_fault_write_ro", "user fault write ro → SIGSEGV", test_user_fault_write_ro,  1, 0},
+    {"54d_user_fault_ud2",     "user fault ud2 → SIGILL",      test_user_fault_ud2,        1, 0},
 };
 
 // ── CLI: --list ────────────────────────────────────────────

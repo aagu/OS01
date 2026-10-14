@@ -22,6 +22,7 @@
 #include <driver/serial.h>
 #include <errno.h>
 #include <uapi/syscall.h>
+#include <uapi/time.h>            // SIGSEGV / SIGFPE / SIGBUS / SIGILL
 #include <syscall/dispatch.h>
 #include <syscall/compat.h>
 #include <string.h>
@@ -50,7 +51,17 @@ static inline task_t *task_from_tss(void)
 // Use TSS.rsp0 to locate the correct task, then overwrite the iretq
 // frame to redirect execution to do_exit() on the task's kernel stack
 // (where get_current_task() will work correctly).
-static void kill_current_user_task(pt_regs_t *regs)
+//
+// `sig` is the fatal signal to record as the task's termination reason.
+// It is forwarded to do_exit() which stores it verbatim into
+// current->exit_code; waitpid() decodes the low byte as a signal
+// (WIFSIGNALED / WTERMSIG) per the encoding in kernel/syscall/sys_proc.c
+// (SYS_exit path puts the user-supplied code in the high byte; signal
+// deaths put the signal in the low byte).  This used to always pass 0,
+// which made a parent waitpid() see WIFEXITED && WEXITSTATUS == 0 —
+// indistinguishable from a clean exit(0), silently breaking POSIX signal
+// semantics for any shell / init / busybox `wait` / `trap` consumer.
+static void kill_current_user_task(pt_regs_t *regs, int sig)
 {
     task_t *task = task_from_tss();
 
@@ -59,8 +70,8 @@ static void kill_current_user_task(pt_regs_t *regs)
         return;
     }
 
-    log_err("Killing task %d (user fault at RIP=%p)\n",
-            task->pid, regs->rip);
+    log_err("Killing task %d (user fault at RIP=%p, signal=%d)\n",
+            task->pid, regs->rip, sig);
 
     // Mark the task ZOMBIE now, so a waiter (do_waitpid) can reap it
     // later. The actual resource cleanup (vmm_free_user_map, kfree)
@@ -75,9 +86,10 @@ static void kill_current_user_task(pt_regs_t *regs)
     // would return garbage, causing memory corruption or a crash.
     //
     // Instead, switch RSP to the task's kernel stack directly and
-    // call do_exit.  RSP is set to (task + STACK_SIZE - 8) so that
-    // get_current_task() returns the correct task struct (RSP
-    // masking rounds down to the STACK_SIZE-aligned base).
+    // call do_exit with `sig` as the exit_code (low byte = signal
+    // per the encoding above).  RSP is set to (task + STACK_SIZE - 8)
+    // so that get_current_task() returns the correct task struct
+    // (RSP masking rounds down to the STACK_SIZE-aligned base).
     // The -8 also mimics the stack state after a normal function
     // call (return address below the top) so do_exit's prologue
     // and sub-functions work correctly.  Since do_exit() calls
@@ -85,10 +97,11 @@ static void kill_current_user_task(pt_regs_t *regs)
     // the compiler is told this path is unreachable.
     __asm__ __volatile__(
         "movq %[stack_top], %%rsp\n\t"
-        "xorl %%edi, %%edi\n\t"         // rdi = 0 (exit code)
+        "movl %[sig], %%edi\n\t"        // rdi = sig (low byte = signal)
         "call do_exit\n\t"
         :
-        : [stack_top] "r"((uint64_t)task + STACK_SIZE - 8)
+        : [stack_top] "r"((uint64_t)task + STACK_SIZE - 8),
+          [sig]      "r"(sig)
         : "edi", "memory"
     );
     __builtin_unreachable();
@@ -97,11 +110,13 @@ static void kill_current_user_task(pt_regs_t *regs)
 // Check for user-mode fault and kill the task if so.  Returns 1 if
 // the fault was user-mode (caller should return immediately), 0 if
 // kernel-mode (caller should continue with kernel fault handling).
-static inline int handle_user_fault(pt_regs_t *regs, const char *name)
+// `sig` is the fatal signal to record (passed through to
+// kill_current_user_task and ultimately do_exit).
+static inline int handle_user_fault(pt_regs_t *regs, const char *name, int sig)
 {
     if (regs->cs & 3) {
-        log_err("%s from user, killing task\n", name);
-        kill_current_user_task(regs);
+        log_err("%s from user, killing task (signal=%d)\n", name, sig);
+        kill_current_user_task(regs, sig);
         return 1;
     }
     return 0;
@@ -109,7 +124,7 @@ static inline int handle_user_fault(pt_regs_t *regs, const char *name)
 
 void do_divide_error(pt_regs_t * regs, uint64_t error_code)
 {
-        if (handle_user_fault(regs, "do_divide_error")) return;
+        if (handle_user_fault(regs, "do_divide_error", SIGFPE)) return;
     log_err("do_divide_error(0),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
@@ -150,7 +165,7 @@ void do_int3(pt_regs_t * regs, uint64_t error_code)
 
 void do_overflow(pt_regs_t * regs, uint64_t error_code)
 {
-    if (handle_user_fault(regs, "do_overflow")) return;
+    if (handle_user_fault(regs, "do_overflow", SIGFPE)) return;
 	log_err("do_overflow(4),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
@@ -161,7 +176,7 @@ void do_overflow(pt_regs_t * regs, uint64_t error_code)
 
 void do_bounds(pt_regs_t * regs, uint64_t error_code)
 {
-    if (handle_user_fault(regs, "do_bounds")) return;
+    if (handle_user_fault(regs, "do_bounds", SIGFPE)) return;
 	log_err("do_bounds(5),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
@@ -172,7 +187,7 @@ void do_bounds(pt_regs_t * regs, uint64_t error_code)
 
 void do_undefined_opcode(pt_regs_t * regs, uint64_t error_code)
 {
-    if (handle_user_fault(regs, "do_undefined_opcode")) return;
+    if (handle_user_fault(regs, "do_undefined_opcode", SIGILL)) return;
 	log_err("do_undefined_opcode(6),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
@@ -183,7 +198,7 @@ void do_undefined_opcode(pt_regs_t * regs, uint64_t error_code)
 
 void do_dev_not_available(pt_regs_t * regs, uint64_t error_code)
 {
-    if (handle_user_fault(regs, "do_dev_not_available")) return;
+    if (handle_user_fault(regs, "do_dev_not_available", SIGFPE)) return;
 	log_err("do_dev_not_available(7),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
@@ -204,7 +219,7 @@ void do_double_fault(pt_regs_t * regs, uint64_t error_code)
 
 void do_coprocessor_segment_overrun(pt_regs_t * regs, uint64_t error_code)
 {
-    if (handle_user_fault(regs, "do_coprocessor_segment_overrun")) return;
+    if (handle_user_fault(regs, "do_coprocessor_segment_overrun", SIGFPE)) return;
 	log_err("do_coprocessor_segment_overrun(9),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
@@ -215,7 +230,7 @@ void do_coprocessor_segment_overrun(pt_regs_t * regs, uint64_t error_code)
 
 void do_invalid_TSS(pt_regs_t * regs, uint64_t error_code)
 {
-    if (handle_user_fault(regs, "do_invalid_TSS")) return;
+    if (handle_user_fault(regs, "do_invalid_TSS", SIGSEGV)) return;
 	log_err("do_invalid_TSS(10),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 
 	if(error_code & 0x01)
@@ -253,7 +268,7 @@ void do_invalid_TSS(pt_regs_t * regs, uint64_t error_code)
 
 void do_segment_not_present(pt_regs_t * regs, uint64_t error_code)
 {
-    if (handle_user_fault(regs, "do_segment_not_present")) return;
+    if (handle_user_fault(regs, "do_segment_not_present", SIGBUS)) return;
 	log_err("do_segment_not_present(11),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 
 	if(error_code & 0x01)
@@ -291,7 +306,7 @@ void do_segment_not_present(pt_regs_t * regs, uint64_t error_code)
 
 void do_stack_segment_fault(pt_regs_t * regs, uint64_t error_code)
 {
-    if (handle_user_fault(regs, "do_stack_segment_fault")) return;
+    if (handle_user_fault(regs, "do_stack_segment_fault", SIGBUS)) return;
 	log_err("do_stack_segment_fault(12),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 
 	if(error_code & 0x01)
@@ -335,7 +350,7 @@ void do_general_protection(pt_regs_t * regs, uint64_t error_code)
 		task_t *t = task_from_tss();
 		log_err("do_general_protection(13) from user, killing task %d\n",
 		        t ? t->pid : -1);
-		kill_current_user_task(regs);
+		kill_current_user_task(regs, SIGSEGV);
 		return;
 	}
 	log_err("do_general_protection(13),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
@@ -513,7 +528,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 	if (regs->cs & 3) {
 		task_t *t = task_from_tss();
 		if (!t || !t->mm) {
-			kill_current_user_task(regs);
+			kill_current_user_task(regs, SIGSEGV);
 			return;
 		}
 
@@ -547,7 +562,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 						    alloc_4k_page();
 						if (!nphys) {
 							kill_current_user_task(
-							    regs);
+							    regs, SIGSEGV);
 							return;
 						}
 						memcpy(
@@ -565,7 +580,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 				}
 			}
 			log_debug("PF: pid=%d cr2=%p no vma\n", t->pid, cr2);
-			kill_current_user_task(regs);
+			kill_current_user_task(regs, SIGSEGV);
 			return;
 		}
 
@@ -575,7 +590,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 		// PROT_NONE VMA -> any access is SIGSEGV
 		if (!(vma->vm_flags & (VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC))) {
 			log_debug("PF: pid=%d cr2=%p PROTNONE\n", t->pid, cr2);
-			kill_current_user_task(regs);
+			kill_current_user_task(regs, SIGSEGV);
 			return;
 		}
 
@@ -583,13 +598,13 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 		if ((error_code & 0x03) == 0x03 && !(vma->vm_flags & VMA_PROT_WRITE)) {
 			log_debug("PF: pid=%d cr2=%p write to RO page\n",
 			          t->pid, cr2);
-			kill_current_user_task(regs);
+			kill_current_user_task(regs, SIGSEGV);
 			return;
 		}
 
 		// Instruction fetch (I=1)
 		if ((error_code & 0x10) && !(vma->vm_flags & VMA_PROT_EXEC)) {
-			kill_current_user_task(regs);
+			kill_current_user_task(regs, SIGSEGV);
 			return;
 		}
 		// -- COW resolution (P=1, W=1, VMA_PROT_WRITE is set) --
@@ -619,7 +634,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 					} else {
 						spin_unlock_irqrestore(
 						    &t->mm->lock, lock_flags);
-						kill_current_user_task(regs);
+						kill_current_user_task(regs, SIGSEGV);
 						return;
 					}
 				}
@@ -634,7 +649,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 							spin_unlock_irqrestore(
 							    &t->mm->lock,
 							    lock_flags);
-						kill_current_user_task(regs);
+						kill_current_user_task(regs, SIGSEGV);
 						return;
 					}
 					memcpy((void *)Phy_To_Virt(new_phys),
@@ -679,7 +694,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 			if (vma->vm_flags & VMA_HEAP) {
 				log_debug("PF: pid=%d cr2=%p heap absent-leaf -> EFAULT\n",
 				          t->pid, cr2);
-				kill_current_user_task(regs);
+				kill_current_user_task(regs, SIGSEGV);
 				return;
 			}
 
@@ -690,7 +705,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 				uint64_t phys = alloc_4k_page();
 				if (!phys) {
 					log_debug("PF: pid=%d OOM\n", t->pid);
-					kill_current_user_task(regs);
+					kill_current_user_task(regs, SIGSEGV);
 					return;
 				}
 				memset((void *)Phy_To_Virt(phys), 0, PAGE_4K_SIZE);
@@ -698,7 +713,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 							     cr2 & PAGE_4K_MASK, vma->vm_page_prot);
 				if (rc != 0) {
 					free_4k_page(phys);
-					kill_current_user_task(regs);
+					kill_current_user_task(regs, SIGSEGV);
 					return;
 				}
 				return;
@@ -707,7 +722,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 			if (vma->vm_file && !(vma->vm_flags & VMA_IO)) {
 				uint64_t phys = alloc_4k_page();
 				if (!phys) {
-					kill_current_user_task(regs);
+					kill_current_user_task(regs, SIGSEGV);
 					return;
 				}
 				uint64_t file_off =
@@ -718,7 +733,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 						  (void *)Phy_To_Virt(phys));
 				if (n < 0) {
 					free_4k_page(phys);
-					kill_current_user_task(regs);
+					kill_current_user_task(regs, SIGSEGV);
 					return;
 				}
 				// Zero-fill tail to avoid leaking kernel data
@@ -729,7 +744,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 							     cr2 & PAGE_4K_MASK, vma->vm_page_prot);
 				if (rc != 0) {
 					free_4k_page(phys);
-					kill_current_user_task(regs);
+					kill_current_user_task(regs, SIGSEGV);
 					return;
 				}
 				return;
@@ -737,7 +752,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 		}
 
 		// Unhandled -> SIGSEGV
-		kill_current_user_task(regs);
+		kill_current_user_task(regs, SIGSEGV);
 		return;
 	}
 	log_err("do_page_fault(14),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
@@ -787,7 +802,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 
 void do_x87_FPU_error(pt_regs_t * regs, uint64_t error_code)
 {
-    if (handle_user_fault(regs, "do_x87_FPU_error")) return;
+    if (handle_user_fault(regs, "do_x87_FPU_error", SIGFPE)) return;
 	log_err("do_x87_FPU_error(16),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
@@ -798,7 +813,7 @@ void do_x87_FPU_error(pt_regs_t * regs, uint64_t error_code)
 
 void do_alignment_check(pt_regs_t * regs, uint64_t error_code)
 {
-    if (handle_user_fault(regs, "do_alignment_check")) return;
+    if (handle_user_fault(regs, "do_alignment_check", SIGBUS)) return;
 	log_err("do_alignment_check(17),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
@@ -809,7 +824,7 @@ void do_alignment_check(pt_regs_t * regs, uint64_t error_code)
 
 void do_machine_check(pt_regs_t * regs, uint64_t error_code)
 {
-    if (handle_user_fault(regs, "do_machine_check")) return;
+    if (handle_user_fault(regs, "do_machine_check", SIGBUS)) return;
 	log_err("do_machine_check(18),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
@@ -820,7 +835,7 @@ void do_machine_check(pt_regs_t * regs, uint64_t error_code)
 
 void do_SIMD_exception(pt_regs_t * regs, uint64_t error_code)
 {
-    if (handle_user_fault(regs, "do_SIMD_exception")) return;
+    if (handle_user_fault(regs, "do_SIMD_exception", SIGFPE)) return;
 	log_err("do_SIMD_exception(19),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
@@ -831,7 +846,7 @@ void do_SIMD_exception(pt_regs_t * regs, uint64_t error_code)
 
 void do_virtualization_exception(pt_regs_t * regs, uint64_t error_code)
 {
-    if (handle_user_fault(regs, "do_virtualization_exception")) return;
+    if (handle_user_fault(regs, "do_virtualization_exception", SIGBUS)) return;
 	log_err("do_virtualization_exception(20),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
 	while(1)
