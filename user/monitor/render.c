@@ -343,6 +343,14 @@ void monitor_term_enter(FILE *out)
 {
     fprintf(out, "%s", C_CLEAR_SCREEN);   /* clear + home */
     fprintf(out, "%s", C_HIDE_CURSOR);
+    /* Force the escape sequences to the terminal now: stdout is
+     * line-buffered when attached to a TTY, but neither sequence
+     * contains a newline, so without an explicit fflush they sit in
+     * the buffer until the next newline-bearing fprintf (the first
+     * frame, ~1s later in interactive mode).  The user briefly sees
+     * a dirty screen + blinking cursor before the clear lands.
+     * Closed roadmap parked item ⑤ (monitor plan, 2026-10-11). */
+    fflush(out);
 }
 
 void monitor_term_leave(FILE *out)
