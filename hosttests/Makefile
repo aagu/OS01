@@ -106,6 +106,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_monitor_collect.elf \
     $(TEST_BLD)/test_monitor_model.elf \
     $(TEST_BLD)/test_monitor_render.elf \
+    $(TEST_BLD)/test_thermal_fixup.elf \
     $(TEST_BLD)/test_gfx_device.elf \
     $(TEST_BLD)/test_gfx_client.elf \
     $(TEST_BLD)/test_gfx_primitives.elf \
@@ -2275,6 +2276,43 @@ $(TEST_BLD)/thermal_production.o: $(TESTS_DIR)/kernel/arch/thermal.c \
 		$(TEST_MOCK)/procfs_test_runtime.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(PROCFS_HOST_CFLAGS) -c $< -o $@
+
+# ── monitor thermal plan, Task 1: instruction-scoped safe RDMSR ──
+# Host fixture test_thermal_fixup.elf links the REAL production
+# kernel/arch/x86_64/cpu/msr_safe.{S,c} — there is no host-side
+# clone.  The preprocessor needs KERNEL_INC so .S can pull
+# <arch/x86_64/linkage.h>; the C side needs the same plus the host
+# mock surface so spinlock/clocksource/... stubs are visible.
+MSR_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
+                   -Wno-unused-function -D__SPINLOCK_H__ -DOS01_HOST_TEST \
+                   -I$(TEST_MOCK)/include $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+
+$(TEST_BLD)/msr_safe_production.o: $(TESTS_DIR)/kernel/arch/x86_64/cpu/msr_safe.S \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/linkage.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/msr_safe.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(MSR_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/msr_safe_fixup_production.o: $(TESTS_DIR)/kernel/arch/x86_64/cpu/msr_safe.c \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/msr_safe.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(MSR_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_thermal_fixup.o: $(TEST_CASES)/test_thermal_fixup.c \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/msr_safe.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(MSR_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_thermal_fixup.elf: $(TEST_BLD)/test_thermal_fixup.o \
+		$(TEST_BLD)/msr_safe_production.o \
+		$(TEST_BLD)/msr_safe_fixup_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+.PHONY: test-thermal-fixup
+test-thermal-fixup: $(TEST_BLD)/test_thermal_fixup.elf
+	$<
 
 $(TEST_BLD)/test_monitor_procfs.o: $(TEST_CASES)/test_monitor_procfs.c \
 		$(TEST_MOCK)/procfs_test_runtime.h \
