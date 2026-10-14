@@ -158,10 +158,11 @@ static void test_marker_lines_in_source(void)
 
 int main(void)
 {
-    /* Call suite directly — RUN_ALL_TESTS() resets __test_stats via
-     * TEST_RESULTS() before we can read it, which masks the exit code.
-     * Match test_gic_driver's pattern: call suites directly, then read
-     * stats before returning. */
+    /* Mirror test_gic_driver's main: print summary then read
+     * __test_stats.failed for the exit code. TEST_RESULTS() now
+     * prints a snapshot without resetting the stats (commit
+     * 2d594ce0), so RUN_ALL_TESTS() would also work; we keep the
+     * direct pattern to match sibling GIC tests. */
     test_marker_lines_in_source();
     printf("\n%s: %d total, %d passed, %d failed\n",
            "test_gic_marker_lines",

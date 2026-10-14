@@ -422,10 +422,21 @@ test-pmm-boot-reservation:
 # Every fixture replaces subprocess.Popen with a fake, so no QEMU process
 # can ever start.
 TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_monitor_runner qemutests.test_terminal_present_runner
-.PHONY: test-harness
-test-harness:
+.PHONY: test-harness test-framework-contract
+test-harness: test-framework-contract
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
 	python3 -m unittest $(TEST_HARNESS_MODULES)
+
+# Negative-contract hosttest: builds test_framework_contract.elf and
+# asserts its exit code is exactly 1.  Pins three test-framework
+# contracts (assertion exit-code propagation, macro single-evaluation,
+# TEST_RESULTS() not resetting stats — see
+# hosttests/cases/test_framework_contract.c header for the spec and
+# commit 2d594ce0 for the original fix).  Wired into `make test-harness`
+# so CI catches regressions; safe to run standalone (no QEMU, no
+# kernel, single-file compile).
+test-framework-contract:
+	$(call os01_submake,hosttests,test-framework-contract $(OS01_SUBMAKE_ARGS))
 
 # Focused M1 host tests (aarch64 M1 plan). Each CASE runs the matching
 # focused TEST_BINS entry under hosttests/.  Unknown non-empty CASE
@@ -1225,7 +1236,9 @@ help:
 	@echo ''
 	@echo 'Framework regression (no QEMU; always):'
 	@printf '  %-22s %-13s %s\n' \
-		 'test-harness'      '(always)'   'Python unittest framework regression (TEST_HARNESS_MODULES list — append-only across tasks; never discovers QEMU scripts)';
+		 'test-harness'         '(always)'   'Python unittest framework regression (TEST_HARNESS_MODULES list — append-only across tasks; never discovers QEMU scripts); also runs test-framework-contract as a prereq';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-framework-contract' '(always)' 'Hostside negative contract: builds test_framework_contract.elf and asserts exit code 1 (assertion exit-code propagation / single-evaluation / TEST_RESULTS snapshot)';
 	@echo ''
 	@echo 'Standalone test targets (distinct harness / image variant):'
 	@printf '  %-22s %-13s %s\n' \

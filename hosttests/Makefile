@@ -180,7 +180,7 @@ TEST_EXIT_STATUS_BINS := \
     $(TEST_BLD)/test_runtime_udivti3.elf \
     $(TEST_BLD)/test_page_table_runner.elf
 
-.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner
+.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner test-framework-contract
 
 all: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS)
 
@@ -227,6 +227,44 @@ run: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS) check-test-bins-dup
 	    --timeout $(HOST_TEST_TIMEOUT) $(EXIT_STATUS_FLAGS) \
 	    $(TEST_BINS) $(TEST_EXIT_STATUS_BINS)
 	@echo "  [hosttests] all host test binaries passed"
+
+# ── Negative-contract binary: framework exit-code integrity ─────────
+# test_framework_contract.c is deliberately NOT in TEST_BINS or
+# TEST_EXIT_STATUS_BINS — both runners expect exit 0.  This binary
+# pins three test-framework contracts by being expected to FAIL:
+#
+#   1. A failing assertion propagates to the process exit status
+#      (TEST_RESULTS() must NOT reset __test_stats; see commit
+#      2d594ce0 for the original fix).
+#   2. Assertion macros evaluate their arguments exactly once
+#      (assert_eq / assert_str_eq / assert_mem_eq single-evaluation).
+#   3. TEST_RESULTS() is a pure snapshot — it must not mutate the
+#      stats, so a second consecutive summary reports the same totals.
+#
+# The Make target asserts the binary exits with code 1 (the contract
+# for the framework).  Any future regression that breaks the contract
+# flips the exit to 0 (or another code) and this target fails.
+$(TEST_BLD)/test_framework_contract.elf: $(TEST_CASES)/test_framework_contract.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $(TEST_BLD)/test_framework_contract.o
+	$(HOST_CC) -o $@ $(TEST_BLD)/test_framework_contract.o
+
+test-framework-contract: $(TEST_BLD)/test_framework_contract.elf
+	@echo "  [framework-contract] running $< (must exit EXACTLY 1: negative contract)"
+	@out=`$<`; rc=$$?; \
+	 if [ $$rc -eq 1 ]; then \
+	     echo "  [framework-contract] PASS: exit 1 (assertion exit-code contract holds)"; \
+	 else \
+	     echo "  [framework-contract] FAIL: expected exit 1, got $$rc"; \
+	     echo "$$out" | sed 's/^/    /'; \
+	     case $$rc in \
+	         0) echo "    hint: assertions no longer propagate (TEST_RESULTS may be resetting __test_stats)";; \
+	         2) echo "    hint: assertion macro evaluated its argument more than once";; \
+	         3) echo "    hint: TEST_RESULTS() reset __test_stats (the pre-2d594ce0 bug)";; \
+	         *) echo "    hint: unexpected exit code; see test_framework_contract.c header for the contract";; \
+	     esac; \
+	     exit 1; \
+	 fi
 
 # Runtime fixtures.
 $(TEST_BLD)/runtime_udivti3_link_probe.o: $(TEST_SRC)/../runtime/selftest/udivti3_link_probe.c
