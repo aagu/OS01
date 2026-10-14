@@ -60,8 +60,16 @@ __attribute__((weak)) void arch_thermal_read(struct thermal_sample *out)
 }
 
 /* Publish one fresh backend reading into cache[cpu] as a group. */
-static void cache_publish(unsigned cpu)
+void thermal_publish(unsigned cpu)
 {
+    if (cpu >= NR_CPUS) {
+        /* Frontend should never publish out-of-range — surface the
+         * bug rather than silently clamp.  arch_thermal_read still
+         * returns a complete (unsupported) sample for arbitrary
+         * cpu values via thermal_read(), but publishes must be in
+         * range to keep lock-state honest. */
+        return;
+    }
     struct thermal_sample s;
     arch_thermal_read(&s);
     s.cpu_id = cpu;
@@ -70,6 +78,9 @@ static void cache_publish(unsigned cpu)
     cache[cpu].sample = s;
     spin_unlock_irqrestore(&cache[cpu].lock, flags);
 }
+
+/* Backwards-compat alias for the legacy cache_publish call sites. */
+static inline void cache_publish(unsigned cpu) { thermal_publish(cpu); }
 
 int thermal_subsys_init(void)
 {
@@ -125,3 +136,18 @@ static int thermal_subsys_register(void)
 }
 SUBSYS_INITCALL(thermal_subsys_register);
 #endif /* OS01_HOST_TEST */
+
+/* ── Arch-neutral worker startup hook (thermal plan Task 3) ──
+ *
+ * Called from kernel/sched/core.c::task_init() on the BSP, after
+ * scheduler_ok=1 has been published and before the idle loop drains
+ * the scheduler.  Backends may use this to spawn an
+ * arch_specific sampler via kernel_thread_on_cpu() (Task 2).
+ * The weak default returns 0 — no worker started, the cache stays
+ * whatever arch_thermal_init published (unsupported/backend_
+ * unavailable/source=none on arches with no backend).
+ */
+__attribute__((weak)) int arch_thermal_start_worker(void)
+{
+    return 0;
+}

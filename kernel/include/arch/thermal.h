@@ -81,4 +81,18 @@ void thermal_read(uint32_t cpu, struct thermal_sample *out);
  * CPU.  Thermal absence is not a boot failure, so this always returns 0. */
 int  thermal_subsys_init(void);
 
+/* Publish one freshly-read sample into cache[cpu] under that CPU's
+ * independent lock as a GROUP (state/temp_mc/reason/source/sampled_ns).
+ * Backends use this when they have an out-of-lock sample ready; the
+ * arch-neutral cache_publish takes the lock, swaps the struct, and
+ * releases before any other code can observe a half-update. */
+void thermal_publish(unsigned cpu);
+
+/* Decode a (target, status) pair into mC.  Pure function: no MSR
+ * access, no global state.  Returns 0 on success; -EINVAL when the
+ * status is invalid (bit 31 = 0) or the reading field is zero
+ * (chip reporting no current reading).  target is TjMax in °C;
+ * result is millidegrees Celsius and may be negative. */
+int  thermal_decode_core(uint64_t target, uint64_t status, int32_t *temp_mc);
+
 #endif /* _ARCH_THERMAL_H */

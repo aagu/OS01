@@ -747,7 +747,7 @@ test-monitor-host: $(if $(CASE),_test-monitor-host-run-$(CASE),$(foreach c,$(MON
 # Each test-thermal-host case corresponds to a per-fixture runner in
 # hosttests/Makefile.  Initial Task 1 commits only register `fixup`;
 # Tasks 2/3 add `affinity` and `decode` respectively.
-.PHONY: test-thermal-host _test-thermal-host-run-fixup _test-thermal-host-run-affinity
+.PHONY: test-thermal-host _test-thermal-host-run-fixup _test-thermal-host-run-affinity _test-thermal-host-run-decode
 _test-thermal-host-run-fixup:
 	@echo "  [test-thermal-host] fixup"
 	$(call os01_submake,hosttests,test-thermal-fixup $(OS01_SUBMAKE_ARGS))
@@ -756,7 +756,11 @@ _test-thermal-host-run-affinity:
 	@echo "  [test-thermal-host] affinity"
 	$(call os01_submake,hosttests,test-thermal-affinity $(OS01_SUBMAKE_ARGS))
 
-THERMAL_CASES := fixup affinity
+_test-thermal-host-run-decode:
+	@echo "  [test-thermal-host] decode"
+	$(call os01_submake,hosttests,test-thermal-decode $(OS01_SUBMAKE_ARGS))
+
+THERMAL_CASES := fixup affinity decode
 test-thermal-host: CASE ?=
 test-thermal-host: CASE := $(CASE)
 # Umbrella: with empty CASE, depend on every per-case runner; otherwise
@@ -767,6 +771,7 @@ test-thermal-host: $(if $(CASE),_test-thermal-host-run-$(CASE),$(foreach c,$(THE
 	    "") echo "  [test-thermal-host] full thermal group: $(THERMAL_CASES)";; \
 	    fixup) echo "  [test-thermal-host] CASE=$(CASE)";; \
 	    affinity) echo "  [test-thermal-host] CASE=$(CASE)";; \
+	    decode) echo "  [test-thermal-host] CASE=$(CASE)";; \
 	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(THERMAL_CASES)" >&2; exit 1;; \
 	esac
 

@@ -108,6 +108,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_monitor_render.elf \
     $(TEST_BLD)/test_thermal_fixup.elf \
     $(TEST_BLD)/test_thermal_affinity.elf \
+    $(TEST_BLD)/test_thermal_decode.elf \
     $(TEST_BLD)/test_gfx_device.elf \
     $(TEST_BLD)/test_gfx_client.elf \
     $(TEST_BLD)/test_gfx_primitives.elf \
@@ -2338,6 +2339,33 @@ $(TEST_BLD)/test_thermal_affinity.elf: $(TEST_BLD)/test_thermal_affinity.o \
 
 .PHONY: test-thermal-affinity
 test-thermal-affinity: $(TEST_BLD)/test_thermal_affinity.elf
+	$<
+
+# ── monitor thermal plan, Task 3: pure IA32_THERM_STATUS decoder ──
+# Pure decode lives in kernel/arch/x86_64/cpu/thermal_decode.c so
+# both the kernel build and the host fixture can link it without
+# pulling in the rest of the backend (which needs kernel symbols).
+THERMAL_DECODE_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
+                              -Wno-unused-function -D__SPINLOCK_H__ -DOS01_HOST_TEST \
+                              -I$(TEST_MOCK)/include $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+
+$(TEST_BLD)/thermal_decode_production.o: \
+		$(TESTS_DIR)/kernel/arch/x86_64/cpu/thermal_decode.c \
+		$(TESTS_DIR)/kernel/include/arch/thermal.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(THERMAL_DECODE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_thermal_decode.o: $(TEST_CASES)/test_thermal_decode.c \
+		$(TESTS_DIR)/kernel/include/arch/thermal.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(THERMAL_DECODE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_thermal_decode.elf: $(TEST_BLD)/test_thermal_decode.o \
+		$(TEST_BLD)/thermal_decode_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+.PHONY: test-thermal-decode
+test-thermal-decode: $(TEST_BLD)/test_thermal_decode.elf
 	$<
 
 $(TEST_BLD)/test_monitor_procfs.o: $(TEST_CASES)/test_monitor_procfs.c \
