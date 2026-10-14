@@ -52,6 +52,7 @@
 #include <arch/spinlock.h>       // spinlock_T, spin_lock_irqsave
 #include <arch/clocksource.h>    // arch_clocksource_read_ns (terminal-cpu probe)
 #include <core/printk.h>         // serial_printk                (terminal-cpu probe)
+#include <log/log.h>             // log_debug                  (partial-present stats)
 #include <errno.h>
 #include <string.h>
 #include <stdint.h>
@@ -236,6 +237,107 @@ static int gfx_ioctl_get_info(file_t *f, gfx_info_t *kinfo)
     return 0;
 }
 
+// ── Partial-present stats (spec §8) ─────────────────────────────
+//
+// Per-ioctl instrumentation (NOT per-logical-frame: that's the
+// display layer's job in Task 3).  Three numbers:
+//   - full_success_ns / rect_success_ns : wall time of the success path
+//     for full vs rect ioctls (terminal-cpu probe style; logged via
+//     log_debug, not serial_printk, per the binding "新代码不新增
+//     serial_printk" constraint).
+//   - row_bytes_written : cumulative bytes written via fb_write_row_leased
+//     across successful rows; on the rect path, per-success-row is w*4.
+//     The "prefix" counter folds in the rows a previous FAILED rect
+//     present successfully wrote before tripping — a lower bound for
+//     the failed attempt's actual write volume, since the fault path
+//     can longjmp with the row_count register clobbered.
+//   - failed_attempts : any rect present that returned a negative
+//     errno (EFAULT, ENOMEM, ESTALE, EACCES, EIO, EINVAL, ...).
+//
+// All counters are 64-bit atomic loads/stores so SMP racing updates
+// don't lose a sample.  The log_debug throttle is 1 Hz (we sample the
+// timestamp and skip the print if < 1 s since the previous one).
+//
+// The longjmp path MUST NOT read setjmp-volatile-changed locals;
+// `prefix_bytes_this_attempt` is `volatile` so the compiler keeps the
+// store across the longjmp and we can fold it into row_bytes_written
+// on the next successful call.
+
+static struct {
+    uint64_t full_success_ns;
+    uint64_t rect_success_ns;
+    uint64_t full_count;
+    uint64_t rect_count;
+    uint64_t row_bytes_written;          /* full path: stride per row */
+    uint64_t prefix_bytes_to_fold;       /* unconsumed success prefix
+                                          * from a failed attempt */
+    uint64_t failed_attempts;
+    uint64_t last_log_ns;
+} g_present_stats;
+
+static uint64_t atomic_load_u64(uint64_t *p)
+{
+    /* __atomic_load_n with __ATOMIC_RELAXED is the cheapest portable
+     * primitive; the kernel's own inline asm atomic ops (x86_64 lock;
+     * aarch64 ldar) match.  We avoid pulling in arch/spinlock.h's
+     * spinlock type because stats counters are not lock-protected
+     * invariants — torn mid-update is harmless (one sample lost). */
+    return __atomic_load_n(p, __ATOMIC_RELAXED);
+}
+
+static void atomic_add_u64(uint64_t *p, uint64_t v)
+{
+    __atomic_add_fetch(p, v, __ATOMIC_RELAXED);
+}
+
+/* Fold any pending failure-prefix into the cumulative row-byte
+ * counter.  Called at the top of every successful present so the
+ * bytes a previous failed attempt successfully wrote are accounted
+ * for before the new attempt's bytes land.  The volatile
+ * read+compare-exchange pattern avoids a torn 0/prefix sequence when
+ * a failure on another CPU races. */
+static void fold_prefix_bytes(void)
+{
+    for (;;) {
+        uint64_t cur = atomic_load_u64(&g_present_stats.prefix_bytes_to_fold);
+        if (cur == 0) return;
+        if (__atomic_compare_exchange_n(&g_present_stats.prefix_bytes_to_fold,
+                                        &cur, 0, 0,
+                                        __ATOMIC_ACQ_REL,
+                                        __ATOMIC_RELAXED)) {
+            atomic_add_u64(&g_present_stats.row_bytes_written, cur);
+            return;
+        }
+    }
+}
+
+static void stats_log_maybe(uint64_t now_ns)
+{
+    uint64_t last = atomic_load_u64(&g_present_stats.last_log_ns);
+    /* 1 second minimum spacing.  A torn read could let through two
+     * samples within < 1 s — harmless for a stats line. */
+    if (now_ns - last < (uint64_t)1000000000ULL) return;
+    if (!__atomic_compare_exchange_n(&g_present_stats.last_log_ns,
+                                     &last, now_ns, 0,
+                                     __ATOMIC_ACQ_REL,
+                                     __ATOMIC_RELAXED)) {
+        return;     /* someone else logged */
+    }
+
+    uint64_t full_ns   = atomic_load_u64(&g_present_stats.full_success_ns);
+    uint64_t rect_ns   = atomic_load_u64(&g_present_stats.rect_success_ns);
+    uint64_t full_n    = atomic_load_u64(&g_present_stats.full_count);
+    uint64_t rect_n    = atomic_load_u64(&g_present_stats.rect_count);
+    uint64_t bytes     = atomic_load_u64(&g_present_stats.row_bytes_written);
+    uint64_t failed    = atomic_load_u64(&g_present_stats.failed_attempts);
+    uint64_t avg_full  = full_n  ? full_ns  / full_n  : 0;
+    uint64_t avg_rect  = rect_n  ? rect_ns  / rect_n  : 0;
+
+    log_debug("gfx_present_stats: full=%llu avg_ns=%llu rect=%llu avg_ns=%llu "
+              "bytes=%llu failed=%llu\n",
+              full_n, avg_full, rect_n, avg_rect, bytes, failed);
+}
+
 // ── gfx_ioctl_present ──────────────────────────────────────
 // Spec §4: present validates the request struct's user range,
 // snapshots the view rect under the lock, drops the lock, then
@@ -372,10 +474,21 @@ static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq)
     fb_writer_end(&lease);
     if (rc < 0) return rc;
 
+    /* Fold any pending failed-attempt prefix bytes from a previous
+     * rect/full present into the cumulative counter, then add THIS
+     * attempt's bytes (v_h * stride for the full path).  Spec §8:
+     * kernel gfx counts row-write bytes per success row; the rect
+     * path's prefix folding rule applies symmetrically here. */
+    fold_prefix_bytes();
+    atomic_add_u64(&g_present_stats.row_bytes_written,
+                   (uint64_t)v_h * (uint64_t)kreq.stride);
+
     /* Phase 1 instrumentation: aggregate cost & rate, dump every 256
      * successful presents so a QEMU 10 s run leaves multiple points. */
     {
         uint64_t dt = arch_clocksource_read_ns() - t_present0;
+        atomic_add_u64(&g_present_stats.full_success_ns, dt);
+        atomic_add_u64(&g_present_stats.full_count, 1);
         s_present_ns += dt;
         s_present_count++;
         if ((s_present_count & 0xffu) == 0) {
@@ -384,6 +497,169 @@ static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq)
                           s_present_ns / s_present_count);
         }
     }
+    stats_log_maybe(arch_clocksource_read_ns());
+    return 0;
+}
+
+// ── gfx_ioctl_present_rect — Task 1 partial-rectangle path ─────
+//
+// Spec §4+§5.  Owns one fb_gfx_writer_begin lease across the rect's
+// rows, validates geometry/stride/user-range with NO implicit
+// clipping, and walks the bounce-per-row path with a single fault
+// context (per-prefix byte counter is volatile — see fold rule above).
+//
+// Error returns: -EFAULT (user range fault / fault mid-memcpy),
+// -EINVAL (geometry / stride / reserved / unconfigured view),
+// -EACCES / -EAGAIN / -ESTALE / -EIO / -EBUSY / -ENOMEM from the
+// lease and kmalloc paths, propagated unchanged.
+static int gfx_ioctl_present_rect(file_t *f, gfx_present_rect_req_t *ureq)
+{
+    uint64_t t_present0 = arch_clocksource_read_ns();
+
+    gfx_view_t *v = (gfx_view_t *)f->dev_private;
+    if (!v || !ureq) return -EINVAL;
+
+    // Stage 1: validate + copy the request struct.
+    if (!syscall_check_user_range((uint64_t)ureq,
+                                  sizeof(gfx_present_rect_req_t), false))
+        return -EFAULT;
+    gfx_present_rect_req_t kreq;
+    if (copy_from_user_ft(&kreq, ureq, sizeof(kreq)) < 0)
+        return -EFAULT;
+
+    // Stage 2: snapshot the view rectangle + mode_seq under the lock,
+    // then drop the lock BEFORE any user-range check / setjmp arm.
+    uint32_t v_x, v_y, v_w, v_h;
+    uint64_t v_mode_seq;
+    {
+        uint64_t flags = spin_lock_irqsave(&g_gfx_table.lock);
+        if (!v->configured) {
+            spin_unlock_irqrestore(&g_gfx_table.lock, flags);
+            return -EINVAL;
+        }
+        v_x = v->desc_x;
+        v_y = v->desc_y;
+        v_w = v->desc_w;
+        v_h = v->desc_h;
+        v_mode_seq = v->mode_seq;
+        spin_unlock_irqrestore(&g_gfx_table.lock, flags);
+    }
+
+    // Stage 3: geometry (subtraction form, rejects zero + UINT32_MAX).
+    if (kreq.w == 0 || kreq.h == 0)             return -EINVAL;
+    if (kreq.x > v_w || kreq.w > v_w - kreq.x)  return -EINVAL;
+    if (kreq.y > v_h || kreq.h > v_h - kreq.y)  return -EINVAL;
+    if (kreq.reserved != 0)                     return -EINVAL;
+
+    // Spec §4: stride MUST equal view_w * 4.  Reject anything else,
+    // including zero stride (would silently underwrite the buffer).
+    uint32_t expected_stride = v_w * 4u;
+    if (kreq.stride != expected_stride)         return -EINVAL;
+
+    // Stage 4: address arithmetic.  Everything in uint64_t with
+    // explicit overflow rejection — the geometry subtractions above
+    // do not catch a hostile stride passed as `pixels` (per spec
+    // §5 the user pointer must lie in the user range and the
+    // envelope must be representable).
+    if (kreq.pixels == 0)                       return -EFAULT;
+    uint64_t y_term = (uint64_t)kreq.y * (uint64_t)kreq.stride;
+    uint64_t x_term = (uint64_t)kreq.x * 4u;
+    if (y_term + x_term < y_term)               return -EFAULT;   /* y*stride overflow */
+    uint64_t first = kreq.pixels + y_term + x_term;
+    if (first < kreq.pixels)                    return -EFAULT;   /* + y*stride overflow */
+    /* (h-1)*stride + w*4 */
+    uint64_t last_row_off = ((uint64_t)kreq.h - 1u) * (uint64_t)kreq.stride;
+    if (last_row_off / (uint64_t)kreq.stride != (uint64_t)kreq.h - 1u) return -EFAULT;
+    uint64_t last_row_bytes = last_row_off + (uint64_t)kreq.w * 4u;
+    if (last_row_bytes < last_row_off)          return -EFAULT;
+    uint64_t length = last_row_bytes;
+    if (!syscall_check_user_range(first, length, false))
+        return -EFAULT;
+
+    // Stage 5: acquire one lease covering the entire frame.  The
+    // lease's snapshot gives us the destination base + mode_seq; we
+    // never read live Pos again, so a concurrent mode flip does not
+    // tear our writes.
+    fb_lease_t lease;
+    int lrc = fb_gfx_writer_begin(&lease, v_mode_seq, v);
+    if (lrc < 0) return lrc;
+
+    // Stage 6: bounce = exactly w*4 bytes.  Spec §5 rejects
+    // allocating anything larger; the per-row copy is always w*4.
+    uint32_t row_bytes = kreq.w * 4u;
+    void *row_buf = kmalloc(row_bytes);
+    if (!row_buf) {
+        fb_writer_end(&lease);
+        atomic_add_u64(&g_present_stats.failed_attempts, 1);
+        return -ENOMEM;
+    }
+
+    // Arm the fault context ONCE for the whole loop.  The prefix
+    // counter is volatile so the longjmp side still sees a valid
+    // store (longjmp is a control-flow transfer, not a memory
+    // barrier, and the optimiser must not elide the prefix count).
+    os01_jmp_buf jb;
+    void **old_jmp = current->fault_jmp;
+    void (*old_cb)(void *) = current->fault_cleanup;
+    void *old_arg = current->fault_cleanup_arg;
+    current->fault_jmp = (void **)jb;
+    current->fault_cleanup = NULL;
+    current->fault_cleanup_arg = NULL;
+
+    volatile uint64_t prefix_bytes_this_attempt = 0;
+
+    int rc = 0;
+    if (__builtin_setjmp((void **)jb) == 0) {
+        for (uint32_t i = 0; i < kreq.h; i++) {
+            uint64_t row_addr = kreq.pixels +
+                                ((uint64_t)kreq.y + (uint64_t)i) *
+                                (uint64_t)kreq.stride +
+                                (uint64_t)kreq.x * 4u;
+            __builtin_memcpy(row_buf, (const void *)(uintptr_t)row_addr,
+                             (size_t)row_bytes);
+            int wrc = fb_write_row_leased(&lease,
+                                          v_x + kreq.x,
+                                          v_y + kreq.y + i,
+                                          row_buf, row_bytes);
+            if (wrc < 0) { rc = wrc; break; }
+            prefix_bytes_this_attempt += (uint64_t)row_bytes;
+        }
+    } else {
+        /* Longjmp from inline-memcpy fault.  Spec §5: early rows
+         * may have become visible; we count the SUCCESSFUL rows
+         * (prefix_bytes_this_attempt) into the prefix-to-fold
+         * accumulator and report EFAULT. */
+        atomic_add_u64(&g_present_stats.prefix_bytes_to_fold,
+                      prefix_bytes_this_attempt);
+        rc = -EFAULT;
+    }
+
+    current->fault_jmp = old_jmp;
+    current->fault_cleanup = old_cb;
+    current->fault_cleanup_arg = old_arg;
+
+    kfree(row_buf);
+    fb_writer_end(&lease);
+
+    if (rc < 0) {
+        atomic_add_u64(&g_present_stats.failed_attempts, 1);
+        return rc;
+    }
+
+    /* Success path.  Fold any pending failed-prefix bytes BEFORE we
+     * add this attempt's bytes — that way the cumulative
+     * row_bytes_written is monotonic and the per-second log keeps
+     * reading in the same order as the writes happened. */
+    fold_prefix_bytes();
+
+    /* `rows_written * row_bytes == prefix_bytes_this_attempt` on the
+     * success path; add it directly to the cumulative counter. */
+    atomic_add_u64(&g_present_stats.row_bytes_written, prefix_bytes_this_attempt);
+
+    uint64_t dt = arch_clocksource_read_ns() - t_present0;
+    atomic_add_u64(&g_present_stats.rect_success_ns, dt);
+    atomic_add_u64(&g_present_stats.rect_count, 1);
+    stats_log_maybe(arch_clocksource_read_ns());
     return 0;
 }
 
@@ -425,6 +701,12 @@ static int gfx_ioctl_file(file_t *f, int cmd, void *arg)
         // gfx_ioctl_present itself does syscall_check_user_range +
         // copy_from_user_ft on the request struct.
         return gfx_ioctl_present(f, (gfx_present_req_t *)arg);
+    }
+    case GFX_PRESENT_RECT: {
+        // Same staging pattern as GFX_PRESENT — the rect handler
+        // itself does syscall_check_user_range + copy_from_user_ft
+        // on the 32 B request struct.
+        return gfx_ioctl_present_rect(f, (gfx_present_rect_req_t *)arg);
     }
     case GFX_ACQUIRE: {
         gfx_view_t *v = (gfx_view_t *)f->dev_private;

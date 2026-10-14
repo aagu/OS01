@@ -498,6 +498,526 @@ TEST_FUNC(test_glyph_8wide_fastpath)
     free(gfx);
 }
 
+/* ── Helpers for damage-set tests (Task 4) ──────────────────────────── */
+
+/* Set up a fresh render, feed the bytes that mark the cursor off and
+ * put the renderer in a known initial state.  Caller is responsible for
+ * freeing the core + handle. */
+static void fresh_render_no_cursor(int rows, int cols)
+{
+    term_core_init(&g_core, rows, cols);
+    gfx_handle_t *gfx = create_mock_handle();
+    term_render_init(&g_render, gfx, g_font, &g_core, 0xFFFFFFFFu, 0x00000000u);
+    /* Hide the cursor so cell damage is isolated from cursor underline
+     * damage in the assertions below. */
+    feed_str(&g_core, "\x1b[?25l");
+    term_render_cursor_update(&g_render);
+    term_render_flush(&g_render);
+    /* The init+feed+flush path sets pending_damage.full; ack once so the
+     * next flush records ONLY the damage we drive. */
+    term_damage_t d;
+    term_render_get_damage(&g_render, &d);
+    term_render_ack_damage(&g_render);
+}
+
+/* Direct dirty-bitmap writer: mark one cell at (row, col) dirty without
+ * going through the parser.  Used to construct precise damage fixtures
+ * independent of the VT100 escape semantics. */
+static void mark_one(int row, int col, uint8_t glyph)
+{
+    term_cell_t *scr = term_core_screen(&g_core);
+    scr[row * g_core.cols + col].glyph = glyph;
+    g_core.dirty[row * g_core.cols + col] = true;
+}
+
+/* Compare one rect (order-insensitive helper).  Returns true if any rect
+ * in `d` matches (x, y, w, h). */
+static bool contains_rect(const term_damage_t *d, uint32_t x, uint32_t y,
+                          uint32_t w, uint32_t h)
+{
+    for (uint32_t i = 0; i < d->count; ++i) {
+        if (d->rects[i].x == x && d->rects[i].y == y &&
+            d->rects[i].w == w && d->rects[i].h == h) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Sort a damage copy by (y, x) before comparison (matches the renderer's
+ * post-flush final order). */
+static int cmp_rect_yx(const void *a, const void *b)
+{
+    const term_damage_rect_t *ra = (const term_damage_rect_t *)a;
+    const term_damage_rect_t *rb = (const term_damage_rect_t *)b;
+    if (ra->y != rb->y) return (ra->y < rb->y) ? -1 : 1;
+    if (ra->x != rb->x) return (ra->x < rb->x) ? -1 : 1;
+    return 0;
+}
+static void sort_damage_copy(term_damage_t *d)
+{
+    /* qsort is in libc; the host test links libc via $(LIBC_OBJS). */
+    extern void qsort(void *base, size_t nmemb, size_t size,
+                      int (*compar)(const void *, const void *));
+    qsort(d->rects, d->count, sizeof(d->rects[0]), cmp_rect_yx);
+}
+
+/* ── Test 11: damage basic set and merge (Task 4 brief step 1) ──────── */
+TEST_FUNC(test_damage_basic_set_and_merge)
+{
+    TEST_SUITE("terminal_render: damage set — basic row spans, merge, retain, ack");
+    load_font_once();
+    /* 4 rows × 10 cols at 8×16 → 80×64 view.  We pick rows 1 and 3 to
+     * ensure they are not merged into a single bbox; same-row col 2 +
+     * col 4 must merge into one span of width 24; adjacent same-span
+     * rows must merge into h=32. */
+    const int ROWS = 4, COLS = 10;
+    fresh_render_no_cursor(ROWS, COLS);
+
+    term_damage_t d;
+
+    /* 1. Two cells on different rows -> two separate rects in damage. */
+    mark_one(1, 2, 'A');
+    mark_one(3, 7, 'B');
+    term_render_flush(&g_render);
+    term_render_get_damage(&g_render, &d);
+    sort_damage_copy(&d);
+    assert_false(d.full);                 /* not promoted to full */
+    assert_eq(2u, d.count);               /* distinct rows => no merge */
+    /* row 1 (y=16, height 16) col 2 (x=16, w=8) */
+    assert_true(contains_rect(&d, 16u, 16u, 8u, 16u));
+    /* row 3 (y=48) col 7 (x=56) */
+    assert_true(contains_rect(&d, 56u, 48u, 8u, 16u));
+    /* Bbox (16,16)→(64,64) would be wrong because that's 4 rows tall. */
+    assert_false(contains_rect(&d, 16u, 16u, 48u, 48u));
+
+    /* 2. Verify that core dirty bitmap is cleared, but pending damage
+     * is NOT cleared by the flush. */
+    assert_false(term_core_is_dirty(&g_core, 1, 2));
+    assert_false(term_core_is_dirty(&g_core, 3, 7));
+
+    /* 3. Same-row col 2 + col 4 should merge into one span of width 24
+     * (col 2 x=16, col 4 x=32, width from col 2 to 5 exclusive = 24). */
+    term_render_ack_damage(&g_render);
+    mark_one(0, 2, 'C');
+    mark_one(0, 4, 'D');
+    term_render_flush(&g_render);
+    term_render_get_damage(&g_render, &d);
+    sort_damage_copy(&d);
+    assert_false(d.full);
+    assert_eq(1u, d.count);
+    assert_eq(16u, d.rects[0].x);
+    assert_eq(0u,  d.rects[0].y);
+    assert_eq(24u, d.rects[0].w);
+    assert_eq(16u, d.rects[0].h);
+
+    /* 4. Adjacent rows with identical span must merge vertically: rows
+     * 1 and 2 each have col 2 dirty → single rect with h=32, x=16,
+     * w=8. */
+    term_render_ack_damage(&g_render);
+    mark_one(1, 2, 'E');
+    mark_one(2, 2, 'F');
+    term_render_flush(&g_render);
+    term_render_get_damage(&g_render, &d);
+    sort_damage_copy(&d);
+    assert_eq(1u, d.count);
+    assert_eq(16u, d.rects[0].x);
+    assert_eq(16u, d.rects[0].y);   /* row 1 starts at y=16 */
+    assert_eq(8u,  d.rects[0].w);
+    assert_eq(32u, d.rects[0].h);    /* rows 1+2 = 32 px tall */
+
+    /* 5. A second flush with NO new changes must NOT clear pending. */
+    term_render_flush(&g_render);
+    term_render_get_damage(&g_render, &d);
+    assert_eq(1u, d.count);
+    assert_eq(8u, d.rects[0].w);
+    assert_eq(32u, d.rects[0].h);
+    /* And ack clears. */
+    term_render_ack_damage(&g_render);
+    term_render_get_damage(&g_render, &d);
+    assert_false(d.full);
+    assert_eq(0u, d.count);
+
+    /* 6. Initial state after init must be full=true.  fresh_render_*()
+     * acked it; a fresh init without acking would show full=true. */
+    term_core_free(&g_core);
+    free(g_render.gfx);
+    gfx_handle_t *gfx2 = create_mock_handle();
+    term_core_t core2;
+    term_core_init(&core2, ROWS, COLS);
+    term_render_t r2;
+    term_render_init(&r2, gfx2, g_font, &core2, 0xFFFFFFFFu, 0x00000000u);
+    term_render_get_damage(&r2, &d);
+    assert_true(d.full);
+    assert_eq(0u, d.count);
+    term_core_free(&core2);
+    free(gfx2);
+}
+
+/* ── Test 12: damage retains prior spans when one row updates again ─── */
+/* Helper: is the (px, py) pixel covered by any rect in d? */
+static bool pixel_is_covered(const term_damage_t *d, uint32_t px, uint32_t py)
+{
+    for (uint32_t i = 0; i < d->count; ++i) {
+        const term_damage_rect_t *r = &d->rects[i];
+        if (px >= r->x && px < r->x + r->w &&
+            py >= r->y && py < r->y + r->h) {
+            return true;
+        }
+    }
+    return false;
+}
+/* Helper: every pixel of cell (crow, ccol) at 8x16 font, width=8W cols,
+ * is in some rect. */
+static bool cell_is_covered(const term_damage_t *d, int crow, int ccol,
+                            uint32_t font_w, uint32_t font_h)
+{
+    for (uint32_t y = (uint32_t)crow * font_h;
+         y < (uint32_t)(crow + 1) * font_h; ++y) {
+        for (uint32_t x = (uint32_t)ccol * font_w;
+             x < (uint32_t)(ccol + 1) * font_w; ++x) {
+            if (!pixel_is_covered(d, x, y)) return false;
+        }
+    }
+    return true;
+}
+
+TEST_FUNC(test_damage_merged_rows_updated_again)
+{
+    TEST_SUITE("terminal_render: damage merge keeps all old/new pixel spans");
+    load_font_once();
+    const int ROWS = 4, COLS = 10;
+    fresh_render_no_cursor(ROWS, COLS);
+
+    term_damage_t d;
+
+    /* Merge two rows then update one of them; the union of rects must
+     * cover ALL old + new pixels (cells (1,2), (2,2), and (2,3)). */
+    mark_one(1, 2, 'X');
+    mark_one(2, 2, 'Y');
+    term_render_flush(&g_render);
+    term_render_get_damage(&g_render, &d);
+    /* First flush: rows 1+2 col 2 merged into (16,16,8,32). */
+    assert_eq(1u, d.count);
+    assert_eq(32u, d.rects[0].h);
+
+    /* Re-dirty a non-mergeable new cell: row 2 col 3. */
+    g_core.dirty[2 * g_core.cols + 3] = true;
+    term_core_screen(&g_core)[2 * g_core.cols + 3].glyph = 'Z';
+    term_render_flush(&g_render);
+
+    term_render_get_damage(&g_render, &d);
+    /* Cell coverage invariant: every pixel of cells (1,2), (2,2), (2,3)
+     * must still be inside some rect.  The old merged rect spans cols
+     * 2 of rows 1+2; the new cell lies at col 3 of row 2 (different x
+     * range), so we end up with two rects, but their UNION must cover
+     * all changed pixels. */
+    assert_false(d.full);
+    assert_true(d.count >= 2u);
+    assert_true(cell_is_covered(&d, 1, 2, FONT_W, FONT_H));
+    assert_true(cell_is_covered(&d, 2, 2, FONT_W, FONT_H));
+    assert_true(cell_is_covered(&d, 2, 3, FONT_W, FONT_H));
+
+    term_core_free(&g_core);
+    free(g_render.gfx);
+}
+
+/* ── Test 13: 65 non-mergeable spans promote to full ────────────────── */
+TEST_FUNC(test_damage_overflow_promotes_full)
+{
+    TEST_SUITE("terminal_render: 65 non-mergeable spans promote to full=true");
+    load_font_once();
+    /* We need ≥130 char rows: use a 200-row core.  But TEST_ROWS=4 by
+     * default and we want each new row to have a unique non-mergeable
+     * span.  Use 132 rows × 2 cols so interleaving x with a gap row
+     * gives non-mergeable spans. */
+    const int ROWS = 132, COLS = 2;
+    fresh_render_no_cursor(ROWS, COLS);
+
+    term_damage_t d;
+
+    /* Mark alternating (col 0 on row r, col 1 on row r+1) — each row
+     * dirty so we get 132 single-cell spans which cannot merge across
+     * rows (they're different y/h, different x ranges).  Each row has
+     * either col 0 or col 1 dirty (NOT both), so even same-y merges
+     * are impossible (only one rect per row). */
+    for (int r = 0; r < ROWS; ++r) {
+        int col = (r & 1);  /* alternate 0,1,0,1,... */
+        mark_one(r, col, 'A' + (r % 26));
+    }
+    term_render_flush(&g_render);
+    term_render_get_damage(&g_render, &d);
+
+    /* The first 64 should land in the list.  The 65th arrives when we
+     * add one more row past 128.  Since we had 132 dirty cells, the
+     * 65th forces promotion to full and discards the list.  Verify
+     * after the fact that full=true and list is gone. */
+    assert_true(d.full);
+    assert_eq(0u, d.count);
+
+    /* Even after additional spans arrive, the full state is sticky. */
+    mark_one(0, 0, 'Z');
+    term_render_flush(&g_render);
+    term_render_get_damage(&g_render, &d);
+    assert_true(d.full);
+
+    term_render_ack_damage(&g_render);
+    term_render_get_damage(&g_render, &d);
+    assert_false(d.full);
+    assert_eq(0u, d.count);
+
+    term_core_free(&g_core);
+    free(g_render.gfx);
+}
+
+/* ── Test 14: cursor draw and erase contribute damage ──────────────── */
+TEST_FUNC(test_damage_cursor_old_and_new_and_erase)
+{
+    TEST_SUITE("terminal_render: cursor underline adds damage even with no cell change");
+    load_font_once();
+    const int ROWS = 4, COLS = 10;
+    fresh_render_no_cursor(ROWS, COLS);
+
+    term_damage_t d;
+
+    /* 1. Cursor movement with no cell content change.  After init the
+     * cursor is at (0, 0) hidden.  We move it right with CURSOR-RIGHT
+     * — old cell (0, 0) and new cell (0, 1) both enter damage. */
+    feed_str(&g_core, "\x1b[C");
+    bool changed = term_render_cursor_update(&g_render);
+    assert_true(changed);  /* col moved 0 → 1 */
+    term_render_flush(&g_render);
+    term_render_get_damage(&g_render, &d);
+    sort_damage_copy(&d);
+    /* Old cell x=0 w=8 + new cell x=8 w=8 → same y/h, adjacent x.
+     * Merge horizontally → single rect (0, 0, 16, 16). */
+    assert_false(d.full);
+    assert_eq(1u, d.count);
+    assert_eq(0u,  d.rects[0].x);
+    assert_eq(0u,  d.rects[0].y);
+    assert_eq(16u, d.rects[0].w);
+    assert_eq(16u, d.rects[0].h);
+
+    /* 2. Hiding the cursor (visibility toggle without move) erases the
+     * old underline — must add damage.  First show the cursor (so we
+     * can later hide it) without moving it. */
+    term_render_ack_damage(&g_render);
+    feed_str(&g_core, "\x1b[?25h");   /* show */
+    assert_true(term_render_cursor_update(&g_render));
+    term_render_flush(&g_render);
+    term_render_ack_damage(&g_render);
+    /* Now hide: visibility toggle from true → false WITHOUT cursor move. */
+    feed_str(&g_core, "\x1b[?25l");
+    bool hid = term_render_cursor_update(&g_render);
+    assert_true(hid);  /* visibility flipped */
+    term_render_flush(&g_render);
+    term_render_get_damage(&g_render, &d);
+    sort_damage_copy(&d);
+    /* Last cursor position was (0, 1) — that single cell is the damage
+     * target (cursor_update marks it dirty to erase the underline). */
+    assert_false(d.full);
+    assert_eq(1u, d.count);
+    assert_eq(8u,  d.rects[0].x);
+    assert_eq(0u,  d.rects[0].y);
+    assert_eq(8u,  d.rects[0].w);
+    assert_eq(16u, d.rects[0].h);
+
+    term_core_free(&g_core);
+    free(g_render.gfx);
+}
+
+/* ── Test 15: term_render_clear promotes to full ────────────────────── */
+TEST_FUNC(test_damage_clear_promotes_full)
+{
+    TEST_SUITE("terminal_render: term_render_clear promotes pending damage to full");
+    load_font_once();
+    const int ROWS = 4, COLS = 10;
+    fresh_render_no_cursor(ROWS, COLS);
+
+    term_damage_t d;
+
+    /* First add some real damage. */
+    mark_one(1, 0, 'A');
+    term_render_flush(&g_render);
+    term_render_get_damage(&g_render, &d);
+    assert_false(d.full);
+    assert_eq(1u, d.count);
+
+    /* Now call clear; damage must collapse to full. */
+    term_render_clear(&g_render);
+    term_render_get_damage(&g_render, &d);
+    assert_true(d.full);
+    assert_eq(0u, d.count);
+
+    /* Even after ack, a subsequent cell render does NOT add a partial;
+     * a fresh full view has nothing dirty yet so flush sees nothing to
+     * do — pending stays empty (NOT full). */
+    term_render_ack_damage(&g_render);
+    term_render_flush(&g_render);
+    term_render_get_damage(&g_render, &d);
+    assert_false(d.full);
+    assert_eq(0u, d.count);
+
+    term_core_free(&g_core);
+    free(g_render.gfx);
+}
+
+/* ── Test 16: scroll promotes pending to full ──────────────────────── */
+TEST_FUNC(test_damage_scroll_promotes_full)
+{
+    TEST_SUITE("terminal_render: pixel scroll promotes pending damage to full");
+    load_font_once();
+    const int ROWS = 4, COLS = 10;
+
+    /* Drive the renderer through a real scroll so we keep cursor hidden
+     * and the render pre-flushed. */
+    term_core_init(&g_core, ROWS, COLS);
+    gfx_handle_t *gfx = create_mock_handle();
+    term_render_init(&g_render, gfx, g_font, &g_core, 0xFFFFFFFFu, 0x00000000u);
+    feed_str(&g_core, "\x1b[?25l");   /* hide cursor */
+    feed_str(&g_core, "AB");           /* 2 cells on row 0 */
+    term_render_cursor_update(&g_render);
+    term_render_flush(&g_render);
+
+    /* Ack first; the next scroll-induced flush must promote to full.
+     * To force a pixel scroll we must write past the last row: type
+     * enough text with newlines to push content 5 rows deep (one past
+     * the 4-row screen), so the parser invokes scroll_active and sets
+     * scroll_lines_pending. */
+    term_render_ack_damage(&g_render);
+    /* Fill rows 0..3 with content; cursor will be at (col-last, 3). */
+    feed_str(&g_core, "XXXX\nYYYY\nZZZZ\nWWWW\n");
+    /* The trailing \n pushes the parser to scroll once (rows=4 → row
+     * becomes 4 → scroll_active: rows shift up, scroll_lines_pending=1). */
+    term_render_flush(&g_render);
+
+    term_damage_t d;
+    term_render_get_damage(&g_render, &d);
+    assert_true(d.full);
+    assert_eq(0u, d.count);
+
+    term_core_free(&g_core);
+    free(gfx);
+}
+
+/* ── Test 17: alt-screen toggle promotes to full ───────────────────── */
+TEST_FUNC(test_damage_alt_screen_promotes_full)
+{
+    TEST_SUITE("terminal_render: alt-screen toggle promotes pending damage to full");
+    load_font_once();
+    const int ROWS = 4, COLS = 10;
+
+    term_core_init(&g_core, ROWS, COLS);
+    gfx_handle_t *gfx = create_mock_handle();
+    term_render_init(&g_render, gfx, g_font, &g_core, 0xFFFFFFFFu, 0x00000000u);
+    feed_str(&g_core, "\x1b[?25l");    /* hide cursor */
+    feed_str(&g_core, "MAIN");
+    term_render_cursor_update(&g_render);
+    term_render_flush(&g_render);
+    term_render_ack_damage(&g_render);
+
+    /* Enter alt screen — flush must promote. */
+    feed_str(&g_core, "\x1b[?1049h");
+    term_render_flush(&g_render);
+    term_damage_t d;
+    term_render_get_damage(&g_render, &d);
+    assert_true(d.full);
+    assert_eq(0u, d.count);
+
+    term_core_free(&g_core);
+    free(gfx);
+}
+
+/* ── Test 18: reinit (renderer swap on rebind) resets to full ───────── */
+TEST_FUNC(test_damage_reinit_resets_to_full)
+{
+    TEST_SUITE("terminal_render: term_render_init re-arms pending as full");
+    load_font_once();
+    const int ROWS = 4, COLS = 10;
+    fresh_render_no_cursor(ROWS, COLS);
+
+    /* Add a non-full state then re-init the same struct: full must
+     * come back. */
+    mark_one(0, 0, 'A');
+    term_render_flush(&g_render);
+    term_damage_t d;
+    term_render_get_damage(&g_render, &d);
+    assert_false(d.full);
+
+    gfx_handle_t *gfx2 = create_mock_handle();
+    term_render_init(&g_render, gfx2, g_font, &g_core, 0xFFFFFFFFu, 0x00000000u);
+    term_render_get_damage(&g_render, &d);
+    assert_true(d.full);
+    assert_eq(0u, d.count);
+
+    term_core_free(&g_core);
+    free(g_render.gfx);
+}
+
+/* ── Test 19: sort order is (y asc, x asc) ──────────────────────────── */
+TEST_FUNC(test_damage_sort_order_yx)
+{
+    TEST_SUITE("terminal_render: damage list sorted by (y asc, x asc)");
+    load_font_once();
+    const int ROWS = 4, COLS = 10;
+    fresh_render_no_cursor(ROWS, COLS);
+
+    /* Mark three cells in deliberately inverted order. */
+    mark_one(2, 1, 'B');
+    mark_one(0, 2, 'A');
+    mark_one(2, 0, 'C');
+    term_render_flush(&g_render);
+
+    term_damage_t d;
+    term_render_get_damage(&g_render, &d);
+    /* The renderer must already be sorted by (y, x).  d.rects[0]
+     * should be row 0 (y=0); d.rects[1] should be row 2 (y=2*FONT_H).
+     * Within row 2, the column 0 cell comes before column 1 (x asc). */
+    assert_eq(2u, d.count);
+    assert_eq(0u,                       d.rects[0].y);
+    assert_eq((uint32_t)(2 * FONT_H),   d.rects[1].y);
+    assert_eq((uint32_t)(2 * FONT_W),   d.rects[0].x);   /* col 2 of row 0 */
+    /* Within row 2 (rects[1]) col 0 < col 1 → x_asc. */
+    assert_true(d.rects[1].x < (uint32_t)(1 * FONT_W + d.rects[1].w));
+
+    term_core_free(&g_core);
+    free(g_render.gfx);
+}
+
+/* ── Test 20: blank-overwrite on a single row stays partial ────────── */
+TEST_FUNC(test_damage_blank_overwrite_stays_partial)
+{
+    TEST_SUITE("terminal_render: blank-overwrite on a single row stays partial");
+    load_font_once();
+    const int ROWS = 4, COLS = 10;
+    fresh_render_no_cursor(ROWS, COLS);
+
+    /* Fill row 0 with 'X' on every cell, then flush+ack.
+     * mark_one() bypasses the parser, so the cursor stays at (0, 0)
+     * (it was set there by fresh_render_no_cursor and not moved). */
+    for (int c = 0; c < COLS; ++c) mark_one(0, c, 'X');
+    term_render_flush(&g_render);
+    term_render_ack_damage(&g_render);
+
+    /* \e[K (EIL param=0) erases from cursor to EOL.  Cursor at (0, 0)
+     * erases ALL 10 cells of row 0; each cell changes from 'X' to ' '
+     * so each is marked dirty by the core. */
+    feed_str(&g_core, "\x1b[K");
+    term_render_flush(&g_render);
+    term_damage_t d;
+    term_render_get_damage(&g_render, &d);
+    sort_damage_copy(&d);
+    /* Whole row 0 affected, single contiguous span. */
+    assert_false(d.full);
+    assert_eq(1u, d.count);
+    assert_eq(0u, d.rects[0].y);
+    assert_eq((uint32_t)FONT_H, d.rects[0].h);
+    assert_eq((uint32_t)(COLS * FONT_W), d.rects[0].w);
+
+    term_core_free(&g_core);
+    free(g_render.gfx);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_font_validation),
     TEST_ENTRY(test_render_high_bit_chars),
@@ -507,6 +1027,16 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_render_fault_injection),
     TEST_ENTRY(test_render_pixel_scroll_single_line),
     TEST_ENTRY(test_render_pixel_scroll_cursor_cleanup),
+    TEST_ENTRY(test_damage_basic_set_and_merge),
+    TEST_ENTRY(test_damage_merged_rows_updated_again),
+    TEST_ENTRY(test_damage_overflow_promotes_full),
+    TEST_ENTRY(test_damage_cursor_old_and_new_and_erase),
+    TEST_ENTRY(test_damage_clear_promotes_full),
+    TEST_ENTRY(test_damage_scroll_promotes_full),
+    TEST_ENTRY(test_damage_alt_screen_promotes_full),
+    TEST_ENTRY(test_damage_reinit_resets_to_full),
+    TEST_ENTRY(test_damage_sort_order_yx),
+    TEST_ENTRY(test_damage_blank_overwrite_stays_partial),
     TEST_ENTRY(test_glyph_8wide_fastpath),
 TEST_LIST_END
 

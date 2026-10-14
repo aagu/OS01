@@ -57,6 +57,13 @@ typedef struct task_struct {
     list_t io_wait_node;
     int ctty_type;
     void *ctty;
+    /* uaccess fault recovery (production kernel/driver/gfx.c arms
+     * current->fault_jmp across the per-row memcpy loop). The host
+     * harness only needs the slots; longjmp is exercised by the host
+     * fault bridge's PROT_NONE mmap path, not by these fields. */
+    void **fault_jmp;
+    void (*fault_cleanup)(void *);
+    void *fault_cleanup_arg;
 } task_t;
 
 typedef struct {

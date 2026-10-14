@@ -46,6 +46,13 @@
 #include <gfx.h>
 #include <uapi/gfx.h>
 
+/* internal.h exposes the opaque handle's layout to hosttests so the
+ * pixel-pointer snapshot test can read back what gfx.c stored.  This
+ * mirrors test_gfx_primitives.c (Task 4).  internal.h is NOT shipped
+ * to the sysroot; the test reaches it via -I$(libgfx_dir) on the
+ * host compile line in hosttests/Makefile. */
+#include "internal.h"
+
 /* ── Mock state ───────────────────────────────────────────────
  * Call counters and the values each mock returns.  reset_mocks()
  * restores every default at the start of a test so individual
@@ -78,6 +85,7 @@ static int   mock_ioctl_release_rv;           /* default 0 */
 static int   mock_ioctl_register_fallback_rv; /* default 0 */
 static int   mock_ioctl_get_display_state_rv; /* default 0 */
 static int   mock_ioctl_replace_fallback_rv;  /* default 0 */
+static int   mock_ioctl_present_rect_rv;      /* default 0 (Task 2) */
 
 static gfx_info_t mock_ioctl_get_info_value;  /* default 4x4 */
 static gfx_display_state_t mock_ioctl_display_state_value;
@@ -112,6 +120,7 @@ static void reset_mocks(void)
     mock_ioctl_register_fallback_rv = 0;
     mock_ioctl_get_display_state_rv = 0;
     mock_ioctl_replace_fallback_rv = 0;
+    mock_ioctl_present_rect_rv = 0;
     mock_ioctl_get_info_value.width = 4;
     mock_ioctl_get_info_value.height = 4;
     mock_ioctl_get_info_value.stride = 16;
@@ -195,6 +204,9 @@ int __wrap_ioctl(int fd, unsigned long request, ...)
         break;
     case GFX_PRESENT:
         rv = mock_ioctl_present_rv;
+        break;
+    case GFX_PRESENT_RECT:
+        rv = mock_ioctl_present_rect_rv;
         break;
     case GFX_ACQUIRE:
         rv = mock_ioctl_acquire_rv;
@@ -801,6 +813,166 @@ TEST_FUNC(test_get_display_state_populates_output)
     gfx_close(h);
 }
 
+/* Task 2: GFX_PRESENT_RECT client wrapper.
+ *
+ * Spec (docs/superpowers/specs/2026-10-12-terminal-partial-present-design.md)
+ * §4: libgfx exposes `int gfx_present_rect(handle, x, y, w, h_)`, validates
+ * inputs up-front with subtraction-form geometry, returns -1/EINVAL
+ * without ioctl on bad input, and re-forms the UAPI request on every
+ * call (no user-pointer caching).  Full-view rectangles must call the
+ * old gfx_present (one GFX_PRESENT ioctl); other valid rectangles must
+ * call the new ioctl (one GFX_PRESENT_RECT ioctl).  Successful calls
+ * must NOT modify errno; failed calls must propagate the ioctl errno
+ * (EFAULT/EACCES/EAGAIN/ESTALE/EIO/ENOTTY/...) verbatim.
+ *
+ * Test plan:
+ *   - The handle is a 4×4 view, so stride = 16 and the full-view rect
+ *     is exactly (0,0,4,4).  Req fields pins the source pixels, the
+ *     stride = view_w*4, reserved=0, and the exact (x,y,w,h_) passed.
+ *   - gfx_set_clip has no influence on the present_rect request (the
+ *     clip is library-local drawing state per spec §4).
+ *   - NULL handle / zero w / zero h_ / out-of-range / UINT32_MAX w or
+ *     h_ all return -1/EINVAL with mock_ioctl_count unchanged.
+ *   - Full-view (0,0,4,4) issues a single GFX_PRESENT (NOT
+ *     GFX_PRESENT_RECT) ioctl.
+ *   - Pre-set errno=EDOM is preserved across a successful
+ *     gfx_present_rect call.
+ *   - mocked ioctl return values -EACCES/-EAGAIN/-ESTALE/-EIO/-ENOTTY
+ *     propagate verbatim (rc=-1, errno=the same value). */
+TEST_FUNC(test_present_rect_request_and_errno)
+{
+    TEST_SUITE("present_rect: request fields, errno, full-view dispatch");
+    reset_mocks();
+    gfx_handle_t *h = gfx_open(0, 0, 4, 4);
+    assert_not_null(h);
+
+    /* Snapshot the handle's pixels pointer and stride; the wrapper
+     * must place these into the UAPI request verbatim on every call
+     * (no caching). */
+    const struct gfx_handle *internal = (const struct gfx_handle *)h;
+    uint64_t expected_pixels = (uint64_t)(uintptr_t)internal->pixels;
+    assert_true(expected_pixels != 0u);
+    uint32_t expected_stride = 4u * 4u;  /* view_w * 4 */
+
+    /* ── Partial-rect happy path: source/stride/reserved/rect/ioctl count ── */
+    int idx = mock_ioctl_count;
+    errno = 0;
+    int rc = gfx_present_rect(h, 1u, 1u, 2u, 1u);
+    assert_eq(0, rc);
+    /* Exactly ONE new ioctl and it is the new GFX_PRESENT_RECT command. */
+    assert_eq(idx + 1, mock_ioctl_count);
+    assert_eq((int)GFX_PRESENT_RECT, (int)mock_ioctl_log[idx].cmd);
+
+    gfx_present_rect_req_t *req =
+        (gfx_present_rect_req_t *)mock_ioctl_log[idx].arg;
+    assert_not_null(req);
+    /* Source base == handle's full pixels buffer. */
+    assert_eq((long)expected_pixels, (long)req->pixels);
+    /* Stride == view_w * 4. */
+    assert_eq((long)expected_stride, (long)req->stride);
+    /* reserved MUST be 0. */
+    assert_eq(0u, req->reserved);
+    /* Rect fields equal what the caller passed. */
+    assert_eq(1u, req->x);
+    assert_eq(1u, req->y);
+    assert_eq(2u, req->w);
+    assert_eq(1u, req->h);
+
+    /* ── gfx_set_clip must NOT affect the rect request (clip is drawing-only) ── */
+    int clip_idx = mock_ioctl_count;
+    gfx_set_clip(h, 0u, 0u, 3u, 3u);  /* different "region" */
+    errno = 0;
+    rc = gfx_present_rect(h, 2u, 0u, 2u, 1u);
+    assert_eq(0, rc);
+    assert_eq(clip_idx + 1, mock_ioctl_count);
+    gfx_present_rect_req_t *clip_req =
+        (gfx_present_rect_req_t *)mock_ioctl_log[clip_idx].arg;
+    assert_not_null(clip_req);
+    assert_eq(2u, clip_req->x);
+    assert_eq(0u, clip_req->y);
+    assert_eq(2u, clip_req->w);
+    assert_eq(1u, clip_req->h);
+
+    /* ── NULL handle: -1/EINVAL, no ioctl increment ── */
+    int before_null = mock_ioctl_count;
+    errno = 0;
+    rc = gfx_present_rect(NULL, 1u, 1u, 2u, 1u);
+    assert_eq(-1, rc);
+    assert_eq(EINVAL, errno);
+    assert_eq(before_null, mock_ioctl_count);
+
+    /* ── zero w: -1/EINVAL, no ioctl increment ── */
+    int before_zw = mock_ioctl_count;
+    errno = 0;
+    rc = gfx_present_rect(h, 1u, 1u, 0u, 1u);
+    assert_eq(-1, rc);
+    assert_eq(EINVAL, errno);
+    assert_eq(before_zw, mock_ioctl_count);
+
+    /* ── zero h_: -1/EINVAL, no ioctl increment ── */
+    int before_zh = mock_ioctl_count;
+    errno = 0;
+    rc = gfx_present_rect(h, 1u, 1u, 2u, 0u);
+    assert_eq(-1, rc);
+    assert_eq(EINVAL, errno);
+    assert_eq(before_zh, mock_ioctl_count);
+
+    /* ── out-of-range x + w > view_w (subtraction form): -1/EINVAL, no ioctl ── */
+    int before_oor = mock_ioctl_count;
+    errno = 0;
+    rc = gfx_present_rect(h, 3u, 0u, 2u, 1u);  /* x=3+w=2 > view_w=4 */
+    assert_eq(-1, rc);
+    assert_eq(EINVAL, errno);
+    assert_eq(before_oor, mock_ioctl_count);
+
+    /* ── UINT32_MAX w overflow rejected by subtraction-form check ── */
+    int before_uw = mock_ioctl_count;
+    errno = 0;
+    rc = gfx_present_rect(h, 0u, 0u, UINT32_MAX, 1u);
+    assert_eq(-1, rc);
+    assert_eq(EINVAL, errno);
+    assert_eq(before_uw, mock_ioctl_count);
+
+    /* ── UINT32_MAX h_ overflow rejected by subtraction-form check ── */
+    int before_uh = mock_ioctl_count;
+    errno = 0;
+    rc = gfx_present_rect(h, 0u, 0u, 1u, UINT32_MAX);
+    assert_eq(-1, rc);
+    assert_eq(EINVAL, errno);
+    assert_eq(before_uh, mock_ioctl_count);
+
+    /* ── Full-view rect must dispatch to gfx_present (GFX_PRESENT), NOT
+     *    GFX_PRESENT_RECT. The test pins this distinction directly. ── */
+    int before_full = mock_ioctl_count;
+    errno = 0;
+    rc = gfx_present_rect(h, 0u, 0u, 4u, 4u);  /* == entire 4x4 view */
+    assert_eq(0, rc);
+    assert_eq(before_full + 1, mock_ioctl_count);
+    assert_eq((int)GFX_PRESENT, (int)mock_ioctl_log[before_full].cmd);
+    assert_true((int)GFX_PRESENT_RECT !=
+                (int)mock_ioctl_log[before_full].cmd);
+
+    /* ── Success preserves caller errno (wrapper does NOT touch errno). ── */
+    errno = EDOM;
+    rc = gfx_present_rect(h, 1u, 1u, 2u, 1u);
+    assert_eq(0, rc);
+    assert_eq(EDOM, errno);
+
+    /* ── Failed-call errno passthrough verbatim. ── */
+    const int errs[] = { EACCES, EAGAIN, ESTALE, EIO, ENOTTY };
+    for (int i = 0; i < 5; i++) {
+        mock_ioctl_present_rect_rv = -errs[i];
+        errno = 0;
+        rc = gfx_present_rect(h, 1u, 1u, 2u, 1u);
+        assert_eq(-1, rc);
+        assert_eq(errs[i], errno);
+    }
+    /* Reset mock so gfx_close (and any incidental cleanup) see success. */
+    mock_ioctl_present_rect_rv = 0;
+
+    gfx_close(h);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_open_happy_path),
     TEST_ENTRY(test_open_enoint_normalized_to_enodev),
@@ -824,6 +996,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_replace_fallback_arguments_and_reserved),
     TEST_ENTRY(test_ownership_error_propagation),
     TEST_ENTRY(test_get_display_state_populates_output),
+    TEST_ENTRY(test_present_rect_request_and_errno),
 TEST_LIST_END
 
 int main(void)

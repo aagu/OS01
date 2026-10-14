@@ -6,6 +6,24 @@ These fixtures exercise each SUITE branch in
 stand-in for ``qemutests.harness.process.ProcessSession``.  No real
 QEMU is launched.
 
+The docstring SUITE enumeration is documentation only — there is
+no parametrized SUITE fixture in this module because each SUITE
+has its own ``test_xxx_positive_completion`` (and friends) class
+that owns its own marker / FakeProcessSession script.  See
+``test_make_qemu_failure.py`` for the SUITE-whitelist contract
+that *is* asserted by source-parsing.
+
+SUITEs added after Task 6 of plan 2026-10-12-terminal-partial-present:
+  * ``terminal-present`` — Task 6 added a new SUITE in
+    ``qemutests/terminal_present_test.py`` and the dispatcher
+    branch in ``qemutests/run_test.py``.  This module does NOT
+    add a per-SUITE fixture for it because the suite owns its own
+    FakeProcessSession-style driver self-tests (see
+    ``qemutests/test_terminal_present_runner.DriverRunnerTests``);
+    the harness contract this module tests (FakeProcessSession,
+    RunArchive integration, RunReport evidence, exit codes) is
+    suite-agnostic and applies equally to the new SUITE.
+
 Coverage matrix (per Task 5 brief, checkbox 1):
 
   For every SUITE (``phase-0``, ``systest``, ``inittab-phase``,

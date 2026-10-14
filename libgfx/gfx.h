@@ -91,6 +91,34 @@ int gfx_set_clip(gfx_handle_t *h, int32_t x, int32_t y,
  * with errno=EINVAL without issuing an ioctl. */
 int gfx_present(gfx_handle_t *h);
 
+/* Issue exactly one GFX_PRESENT_RECT ioctl carrying the handle's FULL
+ * pixels buffer (a per-call pointer; the kernel never caches it) and
+ * a view-local rectangle [x, x+w) × [y, y+h_).  Coordinates and size
+ * are in VIEW-LOCAL pixels; the destination framebuffer coordinates
+ * are view origin + (x, y).  pixels is the FULL view base (NOT a
+ * packed rect); stride MUST equal info.stride (== view_w * 4).
+ *
+ * Behaviour contract (spec §4):
+ *   - h == NULL → -1, errno=EINVAL, no ioctl issued.
+ *   - w == 0 || h_ == 0 → -1, errno=EINVAL, no ioctl issued.
+ *   - x + w > view_w || y + h_ > view_h (subtraction form, which also
+ *     rejects UINT32_MAX overflow) → -1, errno=EINVAL, no ioctl.
+ *   - Rectangle exactly equals the configured view (x==0 && y==0 &&
+ *     w==view_w && h_==view_h) → call the OLD gfx_present (one
+ *     GFX_PRESENT ioctl).  No fallback path: an ENOTTY from the old
+ *     ioctl is NOT retried through GFX_PRESENT_RECT.
+ *   - Any other valid (x, y, w, h_) tuple → exactly one GFX_PRESENT_RECT
+ *     ioctl.  The request is RE-FORMED on every call from the
+ *     handle's current state; no user pointer is cached.
+ *   - gfx_set_clip has no effect on the request (the clip is
+ *     library-local drawing state per spec §4).
+ *   - Successful return (rc == 0) does NOT modify errno.
+ *   - Failed return (rc == -1) propagates the ioctl errno verbatim
+ *     (EFAULT/EACCES/EAGAIN/ESTALE/EIO/ENOTTY/...). */
+int gfx_present_rect(gfx_handle_t *h,
+                     uint32_t x, uint32_t y,
+                     uint32_t w, uint32_t h_);
+
 /* ── Ownership & Fallback (Display Ownership Plan) ─────────────
  * Exclusive display ownership, fallback role registration, and
  * display state query wrappers for /dev/gfx0.

@@ -134,6 +134,22 @@ int tty_phys_ioctl(struct vfs_node *n, int c, void *a)
 
 /* Debug log. */
 void log_debug(const char *fmt, ...) { (void)fmt; }
+/* Production gfx.c's stats_log_maybe expands log_debug(fmt, ...)
+ * which references g_log_level and _log_write; stub them so the
+ * link succeeds for the lifecycle test (which never invokes the
+ * present path). */
+int g_log_level = 0;
+void _log_write(int level, const char *fmt, ...)
+{ (void)level; (void)fmt; }
+/* arch_clocksource_read_ns — production gfx.c samples wall time
+ * around both the full and rect present paths.  Stub it for the
+ * lifecycle test (the lifecycle test never reaches the present
+ * dispatch). */
+uint64_t arch_clocksource_read_ns(void) { return 0; }
+/* serial_printk — production gfx_ioctl_present's terminal-cpu
+ * probe still uses serial_printk for the every-256-successes
+ * summary; stub it so the link works. */
+int  serial_printk(const char *fmt, ...) { (void)fmt; return 0; }
 
 /* lwIP stubs — referenced by file.c's FD_SOCKET branches; never
  * reached by the lifecycle test. */

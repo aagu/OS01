@@ -15,6 +15,9 @@ struct task_struct mock_current_task = {
     .wakeup_ns = 0,
     .pid = 1,
     .mm = NULL,
+    .fault_jmp = NULL,
+    .fault_cleanup = NULL,
+    .fault_cleanup_arg = NULL,
 };
 
 uint64_t g_mock_clock_ns = 1000000000ULL;
@@ -224,3 +227,10 @@ __attribute__((weak)) const struct devfs_ops *devfs_get_file_ops(struct file *f)
     (void)f;
     return NULL;
 }
+
+/* ── log / serial_printk stubs (production gfx.c + fb.c reference
+ *  these even when the present path is never invoked). */
+int g_log_level = 0;
+void _log_write(int level, const char *fmt, ...)
+{ (void)level; (void)fmt; }
+int serial_printk(const char *fmt, ...) { (void)fmt; return 0; }

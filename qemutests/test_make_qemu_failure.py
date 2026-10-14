@@ -178,7 +178,8 @@ class TestQemuRecipeShapeTests(unittest.TestCase):
                              "test-qemu must contain a SUITE case/esac block")
         body = m.group("n")
         for suite in ("phase-0", "systest", "inittab-phase",
-                       "network", "gfx", "resolution", "driver-model"):
+                       "network", "gfx", "resolution", "driver-model",
+                       "monitor", "terminal-present"):
             self.assertIn(suite, body,
                           f"SUITE case missing {suite!r}")
 
@@ -471,12 +472,13 @@ class ImageHashGuardTests(unittest.TestCase):
 
     def test_suite_skip_list_excludes_all_passthrough_suites(self) -> None:
         """Both ``if`` guards must skip phase-0 / gfx / resolution /
-        driver-model so their rebuild / private-image paths aren't
-        masked."""
+        driver-model / monitor / terminal-present so their rebuild /
+        private-image paths aren't masked."""
         # We count occurrences of each suite string in the recipe
         # body for the test-qemu target.
         recipe = _extract_recipe(self.text, "test-qemu")
-        for suite in ("phase-0", "gfx", "resolution", "driver-model"):
+        for suite in ("phase-0", "gfx", "resolution", "driver-model",
+                      "monitor", "terminal-present"):
             count = recipe.count(f'"{suite}"')
             self.assertGreaterEqual(
                 count, 2,

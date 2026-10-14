@@ -1,6 +1,7 @@
 #ifndef _UAPI_GFX_H
 #define _UAPI_GFX_H
 
+#include <stddef.h>      /* offsetof for ABI static_asserts */
 #include <stdint.h>
 
 /* /dev/gfx0 — 2D graphics view UAPI.
@@ -23,6 +24,12 @@
 #define GFX_REGISTER_FALLBACK 0x4706
 #define GFX_GET_DISPLAY_STATE 0x4707
 #define GFX_REPLACE_FALLBACK  0x4708
+/* Terminal partial-present plan (Task 1): leased partial-rectangle
+ * present.  View-local coordinates; pixels points to the full view's
+ * private buffer; stride MUST equal view_w*4; reserved=0.  See
+ * docs/superpowers/specs/2026-10-12-terminal-partial-present-design.md
+ * §4 (UAPI) + §5 (kernel execution) for the contract. */
+#define GFX_PRESENT_RECT 0x4709
 
 #define GFX_DISPLAY_STATE_FOREGROUND (1u << 0)
 #define GFX_DISPLAY_STATE_FALLBACK   (1u << 1)
@@ -86,5 +93,36 @@ typedef struct {
 
 _Static_assert(sizeof(gfx_present_req_t) == 16,
                "gfx_present_req_t must be 16 bytes (ABI)");
+
+/* GFX_PRESENT_RECT — input; partial-rectangle present (spec §4).
+ * Coordinates are VIEW-LOCAL pixels; the framebuffer destination is
+ * view origin + (x, y).  pixels is the FULL view private buffer
+ * base, NOT a packed rect — stride MUST equal view_w*4.  reserved
+ * must be 0.  Per-row copy length is w*4; per-row source address is
+ * pixels + (y+i)*stride + x*4.  Drawing-side clip does not affect
+ * the present request (no implicit clipping, no fallback on errors). */
+typedef struct {
+    uint64_t pixels;      /* this-process user pointer; full-view base */
+    uint32_t stride;      /* must equal view_w * 4 */
+    uint32_t reserved;    /* must be 0 */
+    uint32_t x;           /* view-local start column */
+    uint32_t y;           /* view-local start row */
+    uint32_t w;           /* width in pixels (must be > 0) */
+    uint32_t h;           /* height in pixels (must be > 0) */
+} gfx_present_rect_req_t;
+
+/* Field offsets are part of the ABI — Task 2's libgfx wrapper mirrors
+ * the same struct (and pins the offsets through <uapi/gfx.h> which
+ * libgfx already includes from sysroot).  Bumping any field is a
+ * breaking UAPI change. */
+_Static_assert(sizeof(gfx_present_rect_req_t) == 32,
+               "gfx_present_rect_req_t must be 32 bytes (ABI)");
+_Static_assert(offsetof(gfx_present_rect_req_t, pixels)   == 0,  "pixels offset");
+_Static_assert(offsetof(gfx_present_rect_req_t, stride)   == 8,  "stride offset");
+_Static_assert(offsetof(gfx_present_rect_req_t, reserved) == 12, "reserved offset");
+_Static_assert(offsetof(gfx_present_rect_req_t, x)       == 16, "x offset");
+_Static_assert(offsetof(gfx_present_rect_req_t, y)       == 20, "y offset");
+_Static_assert(offsetof(gfx_present_rect_req_t, w)       == 24, "w offset");
+_Static_assert(offsetof(gfx_present_rect_req_t, h)       == 28, "h offset");
 
 #endif /* _UAPI_GFX_H */

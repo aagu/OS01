@@ -387,7 +387,7 @@ TEST_SELFTEST_IMAGE := $(BUILD_DIR)/image/selftest/disk.img
 # overridable.
 KERNEL_SELFTEST_SMP ?= 4
 
-.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-device test-gfx-client test-gfx-primitives test-m1-host test-arch9-host test-resolution-host
+.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-fault-bridge test-gfx-device test-gfx-client test-gfx-primitives test-m1-host test-arch9-host test-resolution-host
 test-host:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,run $(OS01_SUBMAKE_ARGS))
@@ -421,7 +421,7 @@ test-pmm-boot-reservation:
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Every fixture replaces subprocess.Popen with a fake, so no QEMU process
 # can ever start.
-TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_monitor_runner
+TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_monitor_runner qemutests.test_terminal_present_runner
 .PHONY: test-harness
 test-harness:
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -627,6 +627,15 @@ test-gfx-file-lifecycle:
 test-gfx-device:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-gfx-device $(OS01_SUBMAKE_ARGS))
+# Partial-present Task 1 Step 2: host SIGSEGV bridge self-test. Links
+# ONLY the bridge + the bridge test TU (no production kernel objects).
+# Pin install/restore round-trip, PROT_NONE fault longjmps inside the
+# protected region, NULL get_jump does not fake EFAULT, and restore
+# returns the host SIGSEGV mask to the pre-install value. Must pass
+# before test-gfx-device depends on the bridge for the new rect tests.
+test-gfx-fault-bridge:
+	$(call require_capability,rootfs)
+	@$(call os01_submake,hosttests,test-gfx-fault-bridge $(OS01_SUBMAKE_ARGS))
 # Focused hosttest for the gfx 2D API plan Task 3 — libgfx client
 # lifecycle.  Runs test_gfx_client.elf which host-compiles the REAL
 # libgfx/gfx.c (open/close/get_info/set_clip/present) with HOST_CC
@@ -796,14 +805,28 @@ TEST_QEMU_FLAVOR_driver-model   =
 # needed.  The matrix boots the normal image read-only (-snapshot) at
 # 1/2/8 cores.
 TEST_QEMU_FLAVOR_monitor        =
-TEST_QEMU_IMG_phase-0       = $(NORMAL_IMAGE)
-TEST_QEMU_IMG_systest       = $(TEST_SYSTEST_IMAGE)
-TEST_QEMU_IMG_inittab-phase = $(TEST_INITTAB_IMAGE)
-TEST_QEMU_IMG_network       = $(TEST_NETTEST_IMAGE)
-TEST_QEMU_IMG_gfx           = $(NORMAL_IMAGE)
-TEST_QEMU_IMG_resolution    = $(DISK_IMG)
-TEST_QEMU_IMG_driver-model  = $(NORMAL_IMAGE)
-TEST_QEMU_IMG_monitor       = $(NORMAL_IMAGE)
+# terminal-present (Task 6 of partial-present plan) runs the normal
+# image directly: /bin/test_gfx --present-rect-surface and /bin/monitor
+# are both installed into the normal rootfs by the shared program
+# discovery, so no variant build is needed.  The single-suite driver
+# launches its own QEMU (TCG, q35, 512 MiB, -smp 2, -snapshot, -serial
+# stdio, -display none) — the parent TestRunner does NOT pre-spawn
+# QEMU for this suite.
+TEST_QEMU_FLAVOR_terminal-present =
+# Default baseline log path for the terminal-present suite; the
+# task-6 brief calls this out explicitly.  Tests pass this through to
+# the dispatcher as TERMINAL_PRESENT_BASELINE_LOG; an explicit
+# override is allowed (e.g. for re-capturing the baseline elsewhere).
+TERMINAL_PRESENT_BASELINE_LOG ?= /tmp/os01-terminal-present-baseline/serial.log
+TEST_QEMU_IMG_phase-0          = $(NORMAL_IMAGE)
+TEST_QEMU_IMG_systest          = $(TEST_SYSTEST_IMAGE)
+TEST_QEMU_IMG_inittab-phase    = $(TEST_INITTAB_IMAGE)
+TEST_QEMU_IMG_network          = $(TEST_NETTEST_IMAGE)
+TEST_QEMU_IMG_gfx              = $(NORMAL_IMAGE)
+TEST_QEMU_IMG_resolution       = $(DISK_IMG)
+TEST_QEMU_IMG_driver-model     = $(NORMAL_IMAGE)
+TEST_QEMU_IMG_monitor          = $(NORMAL_IMAGE)
+TEST_QEMU_IMG_terminal-present = $(NORMAL_IMAGE)
 
 .PHONY: test-qemu
 # Use the per-SUITE Make variables from Step 1. The image path is
@@ -832,8 +855,8 @@ test-qemu: SUITE := $(SUITE)
 test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@case "$(SUITE)" in \
-	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor) ;; \
-	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor, got '$(SUITE)'" >&2; exit 1;; \
+	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present) ;; \
+	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present, got '$(SUITE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-qemu] SUITE=$(SUITE) flavor=$(TEST_QEMU_FLAVOR_$(SUITE)) img=$(TEST_QEMU_IMG_$(SUITE))"
 	# The normal-image hash guard skips ``phase-0`` (the historical
@@ -845,7 +868,10 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	# driver-model runs against the canonical (no-fault) image so the
 	# normal-image hash guard is skipped too; fault variant builds land
 	# under image/driver-model-<fault>/ (Task 11).
-	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "monitor" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
+	# terminal-present runs against the normal image read-only (-snapshot)
+	# and uses its own QEMU launch via the dispatcher; it does not
+	# modify the normal image, so the hash guard is skipped too.
+	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "monitor" ] && [ "$(SUITE)" != "terminal-present" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.before"; \
 	fi
 	# Build step. THIS RECIPE LINE CONTAINS ``$(MAKE)`` AND IS DELIBERATELY
@@ -874,7 +900,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  fi; \
 	fi
 	# Hash guard AFTER the build (own recipe line, no ``$(MAKE)``).
-	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "monitor" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
+	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "monitor" ] && [ "$(SUITE)" != "terminal-present" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after" || exit 1; \
 	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after" || exit 1; \
 	fi
@@ -889,6 +915,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \
 	  NETWORK_NIC="$(NETWORK_NIC)" \
 	  FB_RESOLUTION_TEST="$(FB_RESOLUTION_TEST)" \
+	  TERMINAL_PRESENT_BASELINE_LOG="$(TERMINAL_PRESENT_BASELINE_LOG)" \
 	  OS01_BUILD_DIR="$(abspath $(BUILD_DIR))" \
 	  OS01_RESOLUTION_RESULT_DIR="$(abspath $(BUILD_DIR)/test-results/resolution)" \
 	  SYSTEST_CASE="$(CASE)" \
@@ -1184,7 +1211,7 @@ help:
 	@echo ''
 	@echo 'Test (6 canonical buckets; varied capability):'
 	@printf '  %-22s %-13s %s\n' \
-		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor>, CASE=<id> selects one systest case)';
+		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present>, CASE=<id> selects one systest case)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \

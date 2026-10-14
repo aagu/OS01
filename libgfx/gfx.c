@@ -26,6 +26,12 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+/* UAPI mirror — the kernel UAPI ships through the sysroot.  This
+ * explicit include binds libgfx/gfx.c to the UAPI struct definitions
+ * (GFX_PRESENT_RECT 0x4709, gfx_present_rect_req_t) so re-declaring
+ * the struct here is impossible. */
+#include <uapi/gfx.h>
+
 /* Device path — single source of truth for the client.  Spec §3. */
 #define GFX_DEVICE_PATH "/dev/gfx0"
 
@@ -178,6 +184,72 @@ int gfx_present(gfx_handle_t *h)
     req.stride = h->info.stride;
     req.reserved = 0;
     return ioctl(h->fd, GFX_PRESENT, &req);
+}
+
+/* ── gfx_present_rect ──────────────────────────────────────────── */
+/* Spec (docs/superpowers/specs/2026-10-12-terminal-partial-present-design.md)
+ * §4: view-local rectangle present over a leased ioctl.  Re-uses the
+ * same handle-layout invariants as gfx_present (per-call user pointer,
+ * info.stride, reserved=0) and adds geometry validation up-front.
+ *
+ * Dispatch rule (test-pinned, no fallback):
+ *   - Rectangle == configured view → call gfx_present (one GFX_PRESENT
+ *     ioctl).  Spec §4 disallows an ENOTTY → full-frame fallback.
+ *   - Any other valid rect → exactly one GFX_PRESENT_RECT ioctl.
+ *
+ * Geometry rule: subtraction form.  check `x > view_w || w > view_w - x`
+ * BEFORE subtracting so x=view_w, w=0 is rejected (x > view_w) without
+ * underflowing view_w - x.  Same for y / h_.  UINT32_MAX inputs also
+ * fall out for free: view_w - 0 fits in uint32_t, and UINT32_MAX > any
+ * non-negative value, so the predicate rejects them.
+ *
+ * Errors: h == NULL OR geometry invalid → return -1 with errno=EINVAL
+ * NO ioctl.  Successful return (rc == 0) does NOT modify errno (the
+ * ioctl wrapper leaves errno untouched on success).  Failed ioctl
+ * returns its errno verbatim — no remapping, no swallowing.
+ *
+ * Allocation: zero.  Handle layout unchanged.  Caller's clip is
+ * library-local drawing state and is NOT consulted here. */
+int gfx_present_rect(gfx_handle_t *h,
+                     uint32_t x, uint32_t y,
+                     uint32_t w, uint32_t h_)
+{
+    if (!h) {
+        errno = EINVAL;
+        return -1;
+    }
+    /* Subtraction-form geometry check.  The `x > view_w` half is what
+     * stops `view_w - x` from wrapping to a huge unsigned value when
+     * x exceeds the view; the `w > view_w - x` half bounds the
+     * rectangle's right edge without ever computing x+w. */
+    uint32_t view_w = h->info.width;
+    uint32_t view_h = h->info.height;
+    if (w == 0u || h_ == 0u ||
+        x > view_w || w > view_w - x ||
+        y > view_h || h_ > view_h - y) {
+        errno = EINVAL;
+        return -1;
+    }
+    /* Full-view dispatch: route to old gfx_present so one GFX_PRESENT
+     * ioctl carries the request.  Spec §4 forbids ENOTTY fallback, so
+     * this branching is the only place the two ioctls meet. */
+    if (x == 0u && y == 0u && w == view_w && h_ == view_h) {
+        return gfx_present(h);
+    }
+    /* Partial-view: one GFX_PRESENT_RECT ioctl.  Re-form every call —
+     * the kernel never caches the user pointer, and the test verifies
+     * the source base is the handle's CURRENT pixels (snapshot at
+     * open time is exactly what handle->pixels is).  reserved = 0 is
+     * required by the UAPI (the kernel returns EINVAL otherwise). */
+    gfx_present_rect_req_t req;
+    req.pixels  = (uint64_t)(uintptr_t)h->pixels;
+    req.stride  = h->info.stride;
+    req.reserved = 0;
+    req.x = x;
+    req.y = y;
+    req.w = w;
+    req.h = h_;
+    return ioctl(h->fd, GFX_PRESENT_RECT, &req);
 }
 
 /* ── Ownership & Fallback (Display Ownership Plan) ───────────── */
