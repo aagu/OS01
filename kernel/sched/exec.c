@@ -403,6 +403,10 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     tsk->blocked = 0;                        // user tasks start with empty blocked mask
     tsk->priority = 5;                     // 50 ms quantum at 100 Hz
     tsk->cpu = sched_pick_cpu();          // place on least-loaded CPU
+    /* Thermal plan Task 2: user tasks default to all-online mask. */
+    tsk->allowed_cpus = (num_cpus >= NR_CPUS)
+                       ? ~0ULL
+                       : ((1ULL << num_cpus) - 1);
 
     // Inherit fd table from parent (the init task)
     tsk->parent = current;

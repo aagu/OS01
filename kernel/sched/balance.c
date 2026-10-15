@@ -7,26 +7,63 @@
 #include <log/log.h>
 #include <kernel.h>
 
-/* ── sched_pick_cpu: choose CPU with fewest nr_running ────
- * Called from do_fork() and spawn_user_task() to place
- * new tasks on the least-loaded CPU.
- * Complexity: O(num_cpus).  Acceptable for NR_CPUS ≤ 8.
+/* ── sched_pick_cpu_mask: choose any cpu in @allowed ────
+ * Thermal plan Task 2: back-compat callers (do_fork / spawn_user_task)
+ * get the all-cpus wrapper below; this entry point is what future
+ * pinned service paths consume.  Returns a cpu 0 ≤ c < NR_CPUS that is
+ * (a) online AND scheduler_ok AND (b) has its bit set in @allowed.
+ * Returns NR_CPUS if no such cpu exists or @allowed is empty.
+ *
+ * Tiebreak: the cpu with the smaller nr_running wins; ties break on
+ * cpu_id (deterministic for test assertions).  Complexity O(NR_CPUS),
+ * acceptable for ≤ 8.
  */
-uint32_t sched_pick_cpu(void)
+unsigned sched_pick_cpu_mask(uint64_t allowed)
 {
+    if (allowed == 0)
+        return NR_CPUS;
+    unsigned best = NR_CPUS;
+    uint32_t min_nr = UINT32_MAX;
     uint32_t me = cpu_id();
-    uint32_t best = me;
-    uint32_t min_nr = *(volatile uint32_t *)&percpu_data[me].nr_running;
-
-    for (uint32_t i = 0; i < num_cpus; i++) {
-        if (!percpu_data[i].online) continue;
+    for (uint32_t i = 0; i < NR_CPUS; i++) {
+        if (((allowed >> i) & 1ULL) == 0)
+            continue;
+        if (i >= num_cpus)
+            break;  /* mask bit beyond live set — nothing else can match */
+        if (!percpu_data[i].online || !percpu_data[i].scheduler_ok)
+            continue;
         uint32_t nr = *(volatile uint32_t *)&percpu_data[i].nr_running;
-        if (nr < min_nr) {
+        /* Tiebreak: lower nr wins; equal nr prefers the caller's CPU
+         * to keep the schedule local; further equal prefers lower i. */
+        if (nr < min_nr ||
+            (nr == min_nr && (best == NR_CPUS || i == me))) {
             min_nr = nr;
             best = i;
         }
     }
     return best;
+}
+
+/* ── sched_pick_cpu: choose CPU with fewest nr_running ────
+ * Called from do_fork() and spawn_user_task() to place
+ * new tasks on the least-loaded CPU.
+ * Complexity: O(num_cpus).  Acceptable for NR_CPUS ≤ 8.
+ *
+ * Back-compat wrapper over sched_pick_cpu_mask(): the "default"
+ * mask is (1 << num_cpus) - 1 — every CPU the system could
+ * reasonably run a task on RIGHT NOW (online + scheduler_ok).
+ * idle pins a subset, normal forks & spawns default to the
+ * whole live set.
+ */
+uint32_t sched_pick_cpu(void)
+{
+    uint64_t mask = num_cpus >= NR_CPUS
+                       ? ~0ULL
+                       : ((1ULL << num_cpus) - 1);
+    unsigned c = sched_pick_cpu_mask(mask);
+    if (c == NR_CPUS)
+        c = 0;   /* fallback: BSP, never NULL */
+    return (uint32_t)c;
 }
 
 /* ── sched_notify_remote: wake remote CPU after enqueue ──
@@ -132,9 +169,17 @@ void sched_balance(percpu_t *rq)
              * (on_rq=true) while it still runs (on_cpu=1) for
              * vruntime reordering; without the on_cpu check another
              * CPU's balancer steals it and BOTH CPUs operate on the
-             * same task (double-book -> stack clobber, RIP=2/1). */
+             * same task (double-book -> stack clobber, RIP=2/1).
+             *
+             * Thermal plan Task 2: also refuse to migrate a task
+             * across its allowed_cpus mask.  A pinned kernel service
+             * (mask == (1<<cpu)) MUST stay on its cpu even if the
+             * load-balancer's view would prefer to move it; the
+             * plan explicitly forbids the silent fallback.
+             */
             if (t->pid != user_init_pid &&
-                !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
+                !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE) &&
+                ((t->allowed_cpus >> rq->cpu_id) & 1ULL)) {
                 dequeue_task(t, src_rq);
                 t->cpu = rq->cpu_id;
 

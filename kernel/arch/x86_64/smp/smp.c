@@ -180,6 +180,11 @@ static task_t *create_idle_task(uint32_t cpu_num)
     tsk->priority = 2;
     tsk->counter  = 2;
     tsk->cpu      = cpu_num;
+    /* Thermal plan Task 2: AP idle may only run on its own CPU.
+     * Pre-publication channel ensures the picker can't place it
+     * on any other cpu even if the runqueue mask is briefly empty.
+     */
+    tsk->allowed_cpus = 1ULL << cpu_num;
     tsk->addr_limit = 0xffff800000000000UL;
 
     thread_t *thd = (thread_t *)calloc(1, sizeof(thread_t));

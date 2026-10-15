@@ -34,6 +34,30 @@ void enqueue_task(task_t *task, percpu_t *rq)
      */
     ASSERT(task != rq->idle);
 
+    /* Thermal plan Task 2: the published cpu + allowed_cpus
+     * contract is enforced here.  A task whose mask does not
+     * include rq->cpu_id is either:
+     *   - still under kernel_thread_on_cpu (pre-publication), in
+     *     which case the caller raced a slow fork pin: drop the
+     *     enqueue, leave the task blocked, and surface a logged
+     *     internal error so the bug surfaces in QEMU rather than
+     *     silently running a pinned service on the wrong core.
+     *   - aimed at a wrong runqueue by a wake/balance path that
+     *     bypassed the mask filter (also a bug — the plan
+     *     explicitly forbids the silent fallback).
+     * Either way: refuse the enqueue and do NOT update rq
+     * counters.  task_wake / sched_balance / schedule() all
+     * re-check via mask on the relevant call sites.
+     */
+    if (rq->cpu_id < NR_CPUS &&
+        ((task->allowed_cpus >> rq->cpu_id) & 1ULL) == 0) {
+        log_err("[sched] enqueue_task: pid=%d mask=0x%llx blocked by cpu %u mask\n",
+                (int)task->pid,
+                (unsigned long long)task->allowed_cpus,
+                rq->cpu_id);
+        return;
+    }
+
     task->deadline = task->vruntime + EEVDF_MIN_SLICE;
     // [FIX-atomic] RELEASE: paired with task_wake's ACQUIRE load
     // (on_rq) so a concurrent wakeup never sees a stale false.

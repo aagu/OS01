@@ -22,6 +22,14 @@ task_t *pick_eevdf(percpu_t *rq);
 /* ── Load balance & CPU placement (balance.c) ── */
 void sched_balance(percpu_t *rq);
 uint32_t sched_pick_cpu(void);
+/* Mask-aware picker (thermal plan Task 2): returns a cpu
+ * 0 ≤ cpu < NR_CPUS that is online, scheduler_ok, and whose
+ * bit is set in @allowed.  Returns NR_CPUS when no such cpu
+ * exists.  Internally power-of-cap-aware (prefers fewer bits
+ * beyond num_cpus so a mask wider than the live set still
+ * finds a target).  Old sched_pick_cpu is the all-cpus wrapper
+ * for back-compat. */
+unsigned sched_pick_cpu_mask(uint64_t allowed);
 void sched_notify_remote(task_t *tsk);
 
 /* ── Internal helper (exec.c / fork.c shared) ── */

@@ -171,6 +171,20 @@ typedef struct task_struct
     char          comm[TASK_COMM_LEN];
     uint32_t cpu; // CPU affinity — which CPU owns this task (for SMP)
 
+    // ── CPU mask (thermal plan Task 2) ─────────────────────────
+    // Bit N == 1: this task is eligible to run on percpu_data[N].
+    // 64-bit bitmap; NR_CPUS ≤ 8 leaves the upper 56 bits as zero.
+    // Idle tasks seed only their own bit (BSP idle → 1, AP idle →
+    // (1 << ap_cpu_id)).  Normal tasks default to
+    // (1ULL << num_cpus) - 1 — covers every online CPU plus any
+    // future AP that joined after fork.  Pinned kernel services
+    // (e.g. the thermal worker) carry a single-bit mask chosen by
+    // kernel_thread_on_cpu().  The mask is set BEFORE the task is
+    // published to the task list / runqueue; enqueue_task refuses
+    // to place the task on a CPU whose bit is zero (and the
+    // balancer refuses to migrate it across the bit boundary).
+    uint64_t allowed_cpus;
+
     blocker_t blocker;              // current block state (BLOCKER_NONE = not blocked)
     blocker_data_t blocker_data;    // per-type blocking data
 
@@ -261,6 +275,7 @@ extern task_t *init_task[NR_CPUS];
     .ctty_type = CTTY_NONE,           \
     .ctty = NULL,                     \
     .comm = "idle",                   /* monitor spec §5.1: kernel threads are named */ \
+    .allowed_cpus = 1ULL,             /* BSP idle stays on cpu 0 forever */ \
 }
 
 
@@ -335,6 +350,19 @@ struct task_struct *create_kthread(uint64_t (*fn)(uint64_t), uint64_t arg,
 // task-list scan to recover a task_t* — the returned pid is the
 // authoritative "did it get created" signal, safe under SMP.
 int kernel_thread(uint64_t (*fn)(uint64_t), uint64_t arg, uint64_t flags);
+
+// Pin a new kernel service task to a single CPU (thermal plan Task 2).
+// cpu must satisfy:
+//   * cpu < num_cpus
+//   * percpu_data[cpu].online
+//   * percpu_data[cpu].scheduler_ok (the target CPU has finished its
+//     per-CPU init and is actually scheduling).
+// On failure returns -EINVAL (bad cpu, not online, not scheduler_ok)
+// or -ENOMEM (kernel_thread allocation failed).  Otherwise returns
+// the new pid (>= 0).  Pinning is a single-bit allowed_cpus = (1<<cpu);
+// the task is created via kernel_thread() so its lifecycle matches
+// every other kthread.
+int kernel_thread_on_cpu(uint64_t (*fn)(uint64_t), uint64_t arg, unsigned cpu);
 
 /* User stack layout (separate 2MB page at 0x800000).
  * The 2MB page at 0x600000 is left unmapped as a stack guard —

@@ -8,6 +8,8 @@
 *.ipch
 *.S
 !kernel/arch/x86_64/thread_entry.S
+!kernel/arch/x86_64/cpu/msr_safe.S
+!kernel/arch/x86_64/cpu/thermal.S
 *.EFI
 .claude/
 .codegraph/

@@ -106,6 +106,9 @@ TEST_BINS := \
     $(TEST_BLD)/test_monitor_collect.elf \
     $(TEST_BLD)/test_monitor_model.elf \
     $(TEST_BLD)/test_monitor_render.elf \
+    $(TEST_BLD)/test_thermal_fixup.elf \
+    $(TEST_BLD)/test_thermal_affinity.elf \
+    $(TEST_BLD)/test_thermal_decode.elf \
     $(TEST_BLD)/test_gfx_device.elf \
     $(TEST_BLD)/test_gfx_client.elf \
     $(TEST_BLD)/test_gfx_primitives.elf \
@@ -2275,6 +2278,95 @@ $(TEST_BLD)/thermal_production.o: $(TESTS_DIR)/kernel/arch/thermal.c \
 		$(TEST_MOCK)/procfs_test_runtime.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(PROCFS_HOST_CFLAGS) -c $< -o $@
+
+# ── monitor thermal plan, Task 1: instruction-scoped safe RDMSR ──
+# Host fixture test_thermal_fixup.elf links the REAL production
+# kernel/arch/x86_64/cpu/msr_safe.{S,c} — there is no host-side
+# clone.  The preprocessor needs KERNEL_INC so .S can pull
+# <arch/x86_64/linkage.h>; the C side needs the same plus the host
+# mock surface so spinlock/clocksource/... stubs are visible.
+MSR_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
+                   -Wno-unused-function -D__SPINLOCK_H__ -DOS01_HOST_TEST \
+                   -I$(TEST_MOCK)/include $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+
+$(TEST_BLD)/msr_safe_production.o: $(TESTS_DIR)/kernel/arch/x86_64/cpu/msr_safe.S \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/linkage.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/msr_safe.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(MSR_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/msr_safe_fixup_production.o: $(TESTS_DIR)/kernel/arch/x86_64/cpu/msr_safe.c \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/msr_safe.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(MSR_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_thermal_fixup.o: $(TEST_CASES)/test_thermal_fixup.c \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/msr_safe.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(MSR_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_thermal_fixup.elf: $(TEST_BLD)/test_thermal_fixup.o \
+		$(TEST_BLD)/msr_safe_production.o \
+		$(TEST_BLD)/msr_safe_fixup_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+.PHONY: test-thermal-fixup
+test-thermal-fixup: $(TEST_BLD)/test_thermal_fixup.elf
+	$<
+
+# ── monitor thermal plan, Task 2: BSP-pinned kernel threads ──
+# Host fixture test_thermal_affinity.elf compiles against
+# <sched/task.h> + <sched/internal.h> + <arch/x86_64/msr_safe.h>
+# (regression on Task 1).  The runtime scheduler checks live in
+# kernel/selftest/test_thermal_affinity.c (in-kernel).
+AFFINITY_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
+                        -Wno-unused-function -D__SPINLOCK_H__ -DOS01_HOST_TEST \
+                        -I$(TEST_MOCK)/include $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+
+$(TEST_BLD)/test_thermal_affinity.o: $(TEST_CASES)/test_thermal_affinity.c \
+		$(TESTS_DIR)/kernel/include/sched/task.h \
+		$(TESTS_DIR)/kernel/include/sched/internal.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/msr_safe.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AFFINITY_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_thermal_affinity.elf: $(TEST_BLD)/test_thermal_affinity.o \
+		$(TEST_BLD)/msr_safe_production.o \
+		$(TEST_BLD)/msr_safe_fixup_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+.PHONY: test-thermal-affinity
+test-thermal-affinity: $(TEST_BLD)/test_thermal_affinity.elf
+	$<
+
+# ── monitor thermal plan, Task 3: pure IA32_THERM_STATUS decoder ──
+# Pure decode lives in kernel/arch/x86_64/cpu/thermal_decode.c so
+# both the kernel build and the host fixture can link it without
+# pulling in the rest of the backend (which needs kernel symbols).
+THERMAL_DECODE_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
+                              -Wno-unused-function -D__SPINLOCK_H__ -DOS01_HOST_TEST \
+                              -I$(TEST_MOCK)/include $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+
+$(TEST_BLD)/thermal_decode_production.o: \
+		$(TESTS_DIR)/kernel/arch/x86_64/cpu/thermal_decode.c \
+		$(TESTS_DIR)/kernel/include/arch/thermal.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(THERMAL_DECODE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_thermal_decode.o: $(TEST_CASES)/test_thermal_decode.c \
+		$(TESTS_DIR)/kernel/include/arch/thermal.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(THERMAL_DECODE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_thermal_decode.elf: $(TEST_BLD)/test_thermal_decode.o \
+		$(TEST_BLD)/thermal_decode_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+.PHONY: test-thermal-decode
+test-thermal-decode: $(TEST_BLD)/test_thermal_decode.elf
+	$<
 
 $(TEST_BLD)/test_monitor_procfs.o: $(TEST_CASES)/test_monitor_procfs.c \
 		$(TEST_MOCK)/procfs_test_runtime.h \

@@ -133,6 +133,9 @@ int test_at_random_strong_only(void);
 int test_canary_single_source(void);
 int test_arch_atomic_u64_or_and(void);
 int entropy_quality_selftest_current_mode(void);
+int test_msr_safe(void);
+int test_thermal_affinity(void);
+int test_thermal_decode(void);
 #endif
 
 // ── Registration ───────────────────────────────────────────
@@ -199,6 +202,9 @@ void selftest_register_builtin_tests(void)
     selftest_register("arch_atomic_u64_or_and", test_arch_atomic_u64_or_and);
     selftest_register("entropy_quality_selftest_current_mode",
                       entropy_quality_selftest_current_mode);
+    selftest_register("msr_safe",          test_msr_safe);
+    selftest_register("thermal_affinity",  test_thermal_affinity);
+    selftest_register("thermal_decode",    test_thermal_decode);
 #endif /* !__aarch64__ */
 
     /* ── Scheduled (late) cases ─────────────────────────────────

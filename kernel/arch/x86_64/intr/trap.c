@@ -4,6 +4,7 @@
 #include <arch/x86_64/hw.h>
 #include <arch/segment.h>
 #include <arch/x86_64/tss.h>
+#include <arch/x86_64/msr_safe.h>   /* arch_msr_gp_fixup (Task 1 safe-RDMSR fixup) */
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -344,6 +345,14 @@ void do_stack_segment_fault(pt_regs_t * regs, uint64_t error_code)
 
 void do_general_protection(pt_regs_t * regs, uint64_t error_code)
 {
+	// Instruction-scoped safe RDMSR fixup (thermal plan Task 1).
+	// MUST run before any logging / user-mode dispatch: a marked
+	// rdmsr (CPL==0, err==0, RIP==arch_rdmsr_safe_try) is silently
+	// redirected to the fail label and the original #GP is consumed.
+	// Any other fault falls through unchanged.
+	if (arch_msr_gp_fixup(regs, error_code))
+		return;
+
 	// User-mode fault → kill the task, don't halt the kernel
 	// NOTE: on IST stack — do NOT use current (get_current_task).
 	if (regs->cs & 3) {

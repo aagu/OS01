@@ -586,6 +586,23 @@ void task_init(void)
     current->state = TASK_RUNNING;
     this_cpu()->scheduler_ok = 1;
 
+    // Thermal plan Task 3: arch-neutral startup hook for any CPU-pinned
+    // service worker (currently: BSP-pinned thermal core-DTS sampler).
+    // Called exactly once per boot, after scheduler_ok=1 (kernel_thread
+    // and schedule() must work) and before the idle loop drains the
+    // scheduler for good.  The weak default returns 0 (no worker);
+    // x86_64's strong backend returns -EIO/-ENOMEM on failure and the
+    // hook can NEVER block boot.  We log rather than crash — the
+    // /proc/thermal cache will surface READ_ERROR/WORKER_START instead.
+    {
+        extern int arch_thermal_start_worker(void);
+        int wrc = arch_thermal_start_worker();
+        if (wrc != 0) {
+            log_warn("[sched] thermal worker start returned %d (cached "
+                     "in thermal cache as READ_ERROR/WORKER_START)\n", wrc);
+        }
+    }
+
 #ifdef OS01_SELFTEST
     // ── Kernel mutex selftest ────────────────────────────────
     // Runs before the idle loop so we can use kernel_thread +
