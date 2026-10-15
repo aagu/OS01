@@ -2506,7 +2506,7 @@ MONITOR_MAIN_CFLAGS := $(MONITOR_RENDER_CFLAGS) \
     -Dmonitor_collect=mon_test_collect \
     -Dmonitor_sample_destroy=mon_test_sample_destroy \
     -Derrno=mon_test_errno
-MONITOR_RENDER_PROD_CFLAGS := $(MONITOR_RENDER_CFLAGS) -Dfprintf=mon_test_fprintf
+MONITOR_RENDER_PROD_CFLAGS := $(MONITOR_RENDER_CFLAGS) -Dfprintf=mon_test_fprintf -Dfflush=mon_test_fflush
 
 $(TEST_BLD)/monitor_render_production.o: $(TESTS_DIR)/user/monitor/render.c \
 		$(TESTS_DIR)/user/monitor/render.h \

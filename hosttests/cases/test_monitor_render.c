@@ -93,6 +93,12 @@ int mon_test_fprintf(void *f, const char *fmt, ...)
     return n;
 }
 
+int mon_test_fflush(void *f)
+{
+    (void)f;
+    return 0;
+}
+
 /* ══ errno (non-TLS) seam ══ */
 int mon_test_errno;
 

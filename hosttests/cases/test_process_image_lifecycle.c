@@ -568,7 +568,7 @@ static void test_spawn_user_task_no_early_task_list_insert(void)
      * We check each prerequisite precedes the task_list_lock site. */
     char *fn = strstr(src, "int64_t spawn_user_task(const char *path");
     assert_not_null(fn);
-    char *fn_end = fn + 8 * 1024;
+    char *fn_end = fn + 16 * 1024;
     if (fn_end > src + len) fn_end = src + len;
     size_t span = (size_t)(fn_end - fn);
     assert_true(span > 0);

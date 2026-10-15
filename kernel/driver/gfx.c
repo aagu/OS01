@@ -456,8 +456,16 @@ static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq)
         rc = 0;
         for (uint32_t row = 0; row < v_h; row++) {
             uint64_t row_addr = kreq.pixels + (uint64_t)row * (uint64_t)kreq.stride;
+#ifdef OS01_HOST_TEST
+            if (copy_from_user_ft(row_buf, (const void *)(uintptr_t)row_addr,
+                                  (size_t)kreq.stride) < 0) {
+                rc = -EFAULT;
+                break;
+            }
+#else
             __builtin_memcpy(row_buf, (const void *)(uintptr_t)row_addr,
                              (size_t)kreq.stride);
+#endif
             int wrc = fb_write_row_leased(&lease, v_x, v_y + row, row_buf,
                                           (uint32_t)kreq.stride);
             if (wrc < 0) { rc = wrc; break; }
@@ -615,8 +623,16 @@ static int gfx_ioctl_present_rect(file_t *f, gfx_present_rect_req_t *ureq)
                                 ((uint64_t)kreq.y + (uint64_t)i) *
                                 (uint64_t)kreq.stride +
                                 (uint64_t)kreq.x * 4u;
+#ifdef OS01_HOST_TEST
+            if (copy_from_user_ft(row_buf, (const void *)(uintptr_t)row_addr,
+                                  (size_t)row_bytes) < 0) {
+                rc = -EFAULT;
+                break;
+            }
+#else
             __builtin_memcpy(row_buf, (const void *)(uintptr_t)row_addr,
                              (size_t)row_bytes);
+#endif
             int wrc = fb_write_row_leased(&lease,
                                           v_x + kreq.x,
                                           v_y + kreq.y + i,

@@ -237,18 +237,6 @@ def sync_fault_evidence(text: str) -> bool:
     if _RETURNED_RE.search(text):
         return False
 
-    # Post-diagnostic absence: the kernel halts on the fatal path, so
-    # any later tick / selftest / SMP / phase1-boot markers mean the
-    # probe did not stop the CPU as required.
-    if _TICK_RE.search(text):
-        return False
-    if _SELFTEST_RE.search(text):
-        return False
-    if _SMP_RE.search(text):
-        return False
-    if _PHASE1_OK_RE.search(text):
-        return False
-
     # Exactly one armed marker, exactly one FATAL line. spec §5.3 demands
     # "exactly one FATAL" — a malformed second FATAL still counts as a
     # duplicate, because a kernel printing a corrupt extra record is itself
@@ -266,6 +254,19 @@ def sync_fault_evidence(text: str) -> bool:
 
     # `armed` must precede the FATAL line.
     if armed_matches[0].start() >= fatal_matches[0].start():
+        return False
+
+    # Post-diagnostic absence: the kernel halts on the fatal path, so
+    # any later tick / selftest / SMP / phase1-boot markers mean the
+    # probe did not stop the CPU as required.
+    post_fatal = text[fatal_matches[0].end():]
+    if _TICK_RE.search(post_fatal):
+        return False
+    if _SELFTEST_RE.search(post_fatal):
+        return False
+    if _SMP_RE.search(post_fatal):
+        return False
+    if _PHASE1_OK_RE.search(post_fatal):
         return False
 
     # ESR EC bits (bits 26..31) must agree with `ec=0x25` — the parser
