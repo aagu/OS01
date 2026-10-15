@@ -791,6 +791,24 @@ class SystestSuiteTests(unittest.TestCase):
         finally:
             tester.cleanup()
 
+    def test_systest_deadline_respects_systest_timeout_env(self) -> None:
+        """SYSTEST_TIMEOUT overrides the baseline deadline from 60s."""
+        tester = self._runner_with_smp(self.CHUNKS_POSITIVE, smp=1)
+        old_timeout = os.environ.get("SYSTEST_TIMEOUT")
+        try:
+            os.environ["SYSTEST_TIMEOUT"] = "120"
+            self.assertTrue(self.rt.test_systest(tester))
+            self.assertEqual(
+                tester.process.timeout_s, 120,
+                "SYSTEST_TIMEOUT=120 must override baseline budget",
+            )
+        finally:
+            if old_timeout is None:
+                os.environ.pop("SYSTEST_TIMEOUT", None)
+            else:
+                os.environ["SYSTEST_TIMEOUT"] = old_timeout
+            tester.cleanup()
+
     def test_systest_end_arriving_after_result_match_is_parsed(self) -> None:
         # Regression: the runner snapshotted the trace via
         # ``_read_available()`` immediately after the RESULT-line match,

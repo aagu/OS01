@@ -613,7 +613,8 @@ def test_systest(tester):
     # SMP>=5.  ``tester`` is single-use per suite, so mutating
     # ``tester.timeout`` here has no cross-suite effect.
     effective_smp = max(1, int(getattr(tester, "_effective_smp", "1") or 1))
-    systest_timeout_s = 60 + max(0, effective_smp - 4) * 10
+    systest_base_s = int(os.environ.get("SYSTEST_TIMEOUT") or 60)
+    systest_timeout_s = systest_base_s + max(0, effective_smp - 4) * 10
     tester.timeout = systest_timeout_s
     tester.start_qemu(serial_stdio=True)
     deadline = time.monotonic() + systest_timeout_s

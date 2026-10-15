@@ -891,6 +891,8 @@ endif
 endif
 endif
 
+SYSTEST_TIMEOUT ?= 120
+
 test-qemu: SUITE ?= phase-0
 test-qemu: SUITE := $(SUITE)
 # Firmware remains a prerequisite for every suite. No image-path prereq:
@@ -962,6 +964,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  OS01_BUILD_DIR="$(abspath $(BUILD_DIR))" \
 	  OS01_RESOLUTION_RESULT_DIR="$(abspath $(BUILD_DIR)/test-results/resolution)" \
 	  SYSTEST_CASE="$(CASE)" \
+	  SYSTEST_TIMEOUT="$(SYSTEST_TIMEOUT)" \
 	  python3 qemutests/run_test.py $(SUITE); \
 	fi
 
