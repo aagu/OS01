@@ -53,13 +53,16 @@ static int test_msr_safe_known_good(void)
 
 static int test_msr_safe_known_bad(void)
 {
-    /* 0xFFFFFFFF is universally unimplemented; the assembly's rdmsr
-     * raises #GP, arch_msr_gp_fixup recognizes the marked RIP,
-     * redirects to fail, and the C continuation returns -EIO WITHOUT
-     * writing *value. */
+    /* 0x800 (IA32_X2APIC range) without x2APIC enabled universally
+     * raises #GP on both hardware and QEMU (SDM Vol 3A §10.12.1:
+     * "If x2APIC mode is not enabled, any attempt to access the MSR
+     * range 800H through 8FFH results in a #GP").
+     * The assembly's rdmsr raises #GP, arch_msr_gp_fixup recognizes
+     * the marked RIP, redirects to fail, and the C continuation
+     * returns -EIO WITHOUT writing *value. */
     const uint64_t kSentinel = 0x1122334455667788ULL;
     uint64_t value = kSentinel;
-    int ret = arch_rdmsr_safe(0xFFFFFFFFU, &value);
+    int ret = arch_rdmsr_safe(0x800U, &value);
     if (ret != -EIO) {
         serial_printk("[selftest] msr_safe_known_bad: expected %d got %d\n", -EIO, ret);
         return -1;

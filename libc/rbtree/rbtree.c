@@ -2,8 +2,10 @@
 
 /* ── Internal helpers ─────────────────────────────────── */
 
+#ifndef RB_RED
 #define RB_RED    1
 #define RB_BLACK  0
+#endif
 
 static inline int is_red(rbtree_node_t *n)
 {

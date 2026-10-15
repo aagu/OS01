@@ -26,9 +26,14 @@
 #include <percpu/percpu.h>
 #include <arch/cpu.h>
 #include <arch/spinlock.h>
+#include <rbtree.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <string.h>
+
+#ifndef RB_BLACK
+#define RB_BLACK 0
+#endif
 
 #include <core/printk.h>
 
@@ -166,6 +171,8 @@ int test_thermal_affinity(void)
 {
     int ok = 0, fail = 0;
     serial_printk("[selftest] thermal_affinity... ");
+    uint32_t saved_ok = this_cpu()->scheduler_ok;
+    this_cpu()->scheduler_ok = 1;
     struct { const char *name; int (*fn)(void); } cases[] = {
         { "pick_cpu_mask_empty",        test_msr_safe_pick_cpu_mask_empty         },
         { "pick_cpu_mask_bsp",           test_msr_safe_pick_cpu_mask_bsp           },
@@ -180,6 +187,7 @@ int test_thermal_affinity(void)
             serial_printk("[selftest] thermal_affinity.%s FAIL\n", cases[i].name);
         }
     }
+    this_cpu()->scheduler_ok = saved_ok;
     serial_printk("[selftest] thermal_affinity: %d passed, %d failed\n", ok, fail);
     return fail;
 }

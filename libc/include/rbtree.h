@@ -3,6 +3,9 @@
 
 #include <stddef.h>
 
+#define RB_BLACK  0
+#define RB_RED    1
+
 typedef struct rbtree_node {
     struct rbtree_node *left;
     struct rbtree_node *right;
