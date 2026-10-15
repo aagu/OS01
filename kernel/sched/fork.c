@@ -23,6 +23,14 @@
 
 extern void arch_kernel_thread_entry(void);
 
+/* Thermal plan Task 2 — pre-publication pin channel.  Defined later
+ * in this file; forward-declared here so the do_fork() body (line 405,
+ * inside the mask block) sees the static linkage and C99 does not
+ * promote it to a non-static implicit declaration that the later
+ * static definition would then conflict with. */
+static void fork_pin_apply(task_t *tsk);
+static inline void fork_pin_consume(void);
+
 // ── fork_mm_copy — create private address space for fork child ─
 // Builds a new PGD with private copies of all user pages.
 //

@@ -61,6 +61,8 @@
 #include <arch/x86_64/msr_safe.h>     /* Task 1 primitive */
 #include <arch/clocksource.h>
 #include <arch/spinlock.h>
+#include <arch/irq.h>             /* arch_local_irq_enable */
+#include <arch/x86_64/regs.h>     /* cache_publish consumers in worker */
 #include <sched/task.h>
 #include <sched/internal.h>
 #include <percpu/percpu.h>

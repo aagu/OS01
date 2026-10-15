@@ -2295,7 +2295,7 @@ $(TEST_BLD)/msr_safe_production.o: $(TESTS_DIR)/kernel/arch/x86_64/cpu/msr_safe.
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(MSR_HOST_CFLAGS) -c $< -o $@
 
-$(TEST_BLD)/msr_safe_fixup_production.o: $(TESTS_DIR)/kernel/arch/x86_64/cpu/msr_safe.c \
+$(TEST_BLD)/msr_safe_fixup_production.o: $(TESTS_DIR)/kernel/arch/x86_64/cpu/msr_safe_fixup.c \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/msr_safe.h \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
 	@mkdir -p $(TEST_BLD)
