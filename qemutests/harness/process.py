@@ -373,6 +373,17 @@ class ProcessSession:
     def _cleanup(self) -> None:
         if self._cleaned_up:
             return
+        # Final drain BEFORE we set _cleaned_up (or kill the child):
+        # capture bytes the child emitted between the caller's last
+        # read_until/observe and our cleanup.  Without this, the trace
+        # tail is lost when the caller returns from the test body
+        # before the child has finished writing — and the resulting
+        # stdout.log is 0 bytes (or missing entirely if the artifact
+        # uploader skips files that were empty when the upload step
+        # ran).  Two iterations: the first drains the already-buffered
+        # bytes, the second closes out the EOF on each pipe.
+        self._drain(timeout=0.5)
+        self._drain(timeout=0.1)
         self._cleaned_up = True
         if self._proc is None:
             self._close_files()
@@ -406,6 +417,11 @@ class ProcessSession:
                 self._returncode = self._proc.wait(timeout=0.5)
             except Exception:
                 self._returncode = self._proc.returncode
+        # Drain one more time after wait() in case the child emitted
+        # bytes between our pre-drain above and process exit.
+        self._drain(timeout=0.5)
+        self._drain(timeout=0.1)
+
         self._close_files()
 
     def _close_files(self) -> None:

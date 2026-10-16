@@ -493,7 +493,12 @@ class TestRunner:
             except OSError:
                 pass
             self._serial_stdout_fp = None
-        if self.serial_path and os.path.exists(self.serial_path):
+        # Only unlink the serial file in file-serial mode.  In
+        # serial-stdio mode self.serial_path aliases run_dir/stdout.log
+        # for legacy callers (see start_qemu's "ProcessSession owns
+        # stdout.log" comment) — unlinking it would delete the QEMU
+        # serial trace the artifact uploader needs.
+        if self.serial_path and os.path.exists(self.serial_path) and not self._is_serial_stdio:
             try:
                 os.unlink(self.serial_path)
             except OSError:
