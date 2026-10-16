@@ -646,6 +646,38 @@ class M1EvidenceTests(unittest.TestCase):
         self.assertFalse(m1ev.m1_failure_evidence_ok(
             "M1 FATAL reason=arena-exhaust\n", "table-exhaust", 1, True))
 
+    def test_arena_exhaust_evidence_matches_kernel(self):
+        # Verbatim output captured from a CI run (run 38870209038, 2026-10-16
+        # full-matrix job, AArch64 M1 RAM-exhaustion MODEs /
+        # arena-exhaust variant).  If the kernel FATAL text drifts, this
+        # fails locally instead of in the schedule job.  Update
+        # allowed_diagnostics in qemutests/aarch64_m1_evidence.py AND
+        # this fixture together.
+        kernel_text = (
+            "UEFI firmware (version  built at 04:08:44 on Oct 16 2026)\n"
+            "BdsDxe: loading Boot0002 \"UEFI Non-Block Boot Device\" "
+            "from VenHw(837DCA9E-E874-4D82-B29A-23FE0E23D1E2,003E000A00000000)\n"
+            "BdsDxe: starting Boot0002 \"UEFI Non-Block Boot Device\" "
+            "from VenHw(837DCA9E-E874-4D82-B29A-23FE0E23D1E2,003E000A00000000)\n"
+            "UEFI-A64: RAM ranges=3 pages2m=236 bytes=494927872\n"
+            "M1 FATAL reason=arena-exhaust\n"
+            "[smp] FATAL: aarch64 M1 arena preflight failed\n"
+            "[smp] FATAL: arena need=20 MiB (metadata + slab_meta + 8 * 2 MiB + "
+            "table pool, 2 MiB-aligned)\n"
+            "[smp] FATAL: no RAM in [0x40200000, 0x80000000) window\n"
+            "[smp] FATAL: aarch64 M1 arena preflight failed\n"
+        )
+        self.assertTrue(
+            m1ev.m1_failure_evidence_ok(
+                kernel_text, "arena-exhaust", 1, stayed_alive=True),
+            "kernel FATAL output for arena-exhaust must be accepted "
+            "(regex drift between kernel/.../early_arena.c and "
+            "aarch64_m1_evidence.py)",
+        )
+        # stayed_alive=False still rejects, even with the full kernel text.
+        self.assertFalse(m1ev.m1_failure_evidence_ok(
+            kernel_text, "arena-exhaust", 1, stayed_alive=False))
+
 
 class M1ExpectedFailureLifecycleTests(SuiteUnitAdapterTests):
     """``run_expected_failure`` is the expected-fatal adapter: PASS only

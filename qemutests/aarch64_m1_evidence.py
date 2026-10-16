@@ -259,11 +259,29 @@ def m1_failure_evidence_ok(text: str, variant: str, cpus: int,
             expected.append("M1 FATAL reason=runtime-init")
         if fatal != expected:
             return False
+        # NOTE: keep these patterns in sync with kernel/arch/aarch64/
+        # memory/early_arena.c (see log_failure_diagnostic() and the
+        # preflight guard branches).  When the kernel FATAL text changes,
+        # update this tuple AND extend
+        # M1EvidenceTests.test_arena_exhaust_evidence_matches_kernel
+        # so the divergence is caught locally.
         allowed_diagnostics = (
-            r"\[smp\] FATAL: arena need=\d+ MiB \(metadata \+ table pool, 2 MiB-aligned\)",
+            # log_failure_diagnostic() — emitted in every preflight failure.
+            r"\[smp\] FATAL: arena need=\d+ MiB \(metadata \+ slab_meta \+ 8 \* 2 MiB \+ table pool, 2 MiB-aligned\)",
             r"\[smp\] FATAL: largest available intersection in \[0x40200000, 0x80000000\) = \d+ MiB in \[0x[0-9a-f]+, 0x[0-9a-f]+\)",
             r"\[smp\] FATAL: no RAM in \[0x40200000, 0x80000000\) window",
             r"\[smp\] FATAL: aarch64 M1 arena preflight failed",
+            # "arena exceeds 2 GiB cap" — only when need >= window.  Tests
+            # typically use ram_mib=512 so this branch rarely fires, but
+            # accept it for forward-compat with smaller-RAM profiles.
+            r"\[smp\] FATAL: arena exceeds 2 GiB cap \(need=\d+ MiB >= window=\d+ MiB\)",
+            # "arena exceeds 2 GiB (need/available/...)" — fires when the
+            # 2GiB-cap refusal branch emits.
+            r"\[smp\] FATAL: arena exceeds 2 GiB \(need=\d+ available=\d+ slab_page_end=0x[0-9a-f]+ end=0x[0-9a-f]+ cap=0x[0-9a-f]+\)",
+            # "invalid arena input" — emitted when validate_ranges() fails.
+            r"\[smp\] FATAL: invalid arena input error=\d+",
+            # preflight guard — candidate window crosses AARCH64_M1_ARENA_HI.
+            r"\[smp\] FATAL: arena exceeds 2 GiB \(slab_page_end=0x[0-9a-f]+, end=0x[0-9a-f]+, cap=0x[0-9a-f]+\)",
         ) if variant == "arena-exhaust" else ()
         for line in lines:
             if failure_pattern.search(line) and line not in expected:
