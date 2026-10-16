@@ -63,6 +63,7 @@
 #include <driver/mouse.h>
 #include <driver/fb.h>
 #include <driver/fb_state.h>
+#include <log/log.h>
 #include <driver/fb_test.h>
 #include <driver/gfx.h>
 #include <fs/devfs.h>
@@ -101,11 +102,11 @@ void x86_64_boot_early(const struct boot_context *bootctx)
 
     // Serial: hardware init only (IER=0, no IRQ yet).
     init_serial();             // baud/line/FIFO — for serial_printk
-    serial_printk("serial port init succeed\n");
+    log_info("serial port init succeed\n");
 
     // EFER NXE — enable No-eXecute for user-space page tables
     arch_cpu_enable_nx();
-    serial_printk("EFER: NXE enabled\n");
+    log_info("EFER: NXE enabled\n");
 }
 
 // ── Stage 3 of 3: subsystem framework (phases 3-6) ───────────

@@ -8,13 +8,13 @@
 // linker resolves; the trampoline will be replaced once kthread
 // bringup lands on that arch.
 
-#include <core/printk.h>
+#include <log/log.h>
 
 __attribute__((weak)) void arch_kernel_thread_entry(void);
 
 __attribute__((weak)) void arch_kernel_thread_entry(void)
 {
     // Default: panic — never reached on x86_64 (overridden).
-    serial_printk("PANIC: arch_kernel_thread_entry: no per-arch override\n");
+    log_err("PANIC: arch_kernel_thread_entry: no per-arch override\n");
     for (;;) { /* spin */ }
 }

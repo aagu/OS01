@@ -1,7 +1,7 @@
 // kernel/subsys/subsys.c
 
 #include <subsys/subsys.h>
-#include <core/printk.h>
+#include <log/log.h>
 #include <percpu/percpu.h>
 #include <string.h>
 
@@ -56,16 +56,15 @@ void subsys_init_phase(int phase)
         if (e->phase != phase || e->initialized != 0)
             continue;
 
-        serial_printk("subsys: init  %s ... ", e->name);
         int ret = e->init();
         e->initialized = (ret == 0) ? 1 : -1;
 
         if (ret == 0) {
-            serial_printk("ok\n");
+            log_info("subsys: init  %s ... ok\n", e->name);
         } else if (e->flags & SUBSYS_FLAG_OPTIONAL) {
-            serial_printk("SKIP (optional, ret=%d)\n", ret);
+            log_warn("subsys: init  %s ... SKIP (optional, ret=%d)\n", e->name, ret);
         } else {
-            serial_printk("FAIL (ret=%d)\n", ret);
+            log_err("subsys: init  %s ... FAIL (ret=%d)\n", e->name, ret);
         }
     }
 }
@@ -86,12 +85,13 @@ void subsys_init_percpu(void)
             continue;
 
         for (uint32_t cpu = 0; cpu < num_cpus; cpu++) {
-            serial_printk("subsys: percpu %s cpu=%u ... ", e->name, cpu);
             int ret = e->init_percpu((int)cpu);
             if (ret != 0 && !(e->flags & SUBSYS_FLAG_OPTIONAL)) {
-                serial_printk("FAIL (ret=%d)\n", ret);
+                log_err("subsys: percpu %s cpu=%u ... FAIL (ret=%d)\n", e->name, cpu, ret);
+            } else if (ret != 0) {
+                log_warn("subsys: percpu %s cpu=%u ... SKIP (optional, ret=%d)\n", e->name, cpu, ret);
             } else {
-                serial_printk("ok\n");
+                log_info("subsys: percpu %s cpu=%u ... ok\n", e->name, cpu);
             }
         }
         e->initialized = 1;

@@ -1,6 +1,6 @@
 #include <driver/serial.h>
 #include <intr/interrupt.h>
-#include <core/printk.h>
+#include <log/log.h>
 #include <tty/tty.h>
 #include <intr/apic.h>
 #include <arch/io.h>
@@ -108,8 +108,8 @@ void init_serial_irq(void)
     uint8_t ier = arch_inb(SERIAL_COM1 + 1);   // Interrupt Enable Register
     uint8_t iir = arch_inb(SERIAL_COM1 + 2);   // Interrupt Identification (also FCR)
     uint8_t mcr = arch_inb(SERIAL_COM1 + 4);   // Modem Control Register
-    serial_printk("serial: IRQ4 registered (IER=%#x IIR=%#x MCR=%#x)\n",
-                  ier, iir, mcr);
+    log_info("serial: IRQ4 registered (IER=%#x IIR=%#x MCR=%#x)\n",
+             ier, iir, mcr);
 }
 
 // ═══════════════════════════════════════════════════════════

@@ -65,7 +65,7 @@ Init:    head.S → kernel_main → subsys → VFS/FS → TTY → percpu → SMP
 - **`set_tss64` writes global TSS64_Table**. Per-CPU `init_tss[NR_CPUS]` exists but GDT slot still needs per-CPU update for SMP.
 - **Signal delivery must check CPL**: `do_signal_delivery` only valid when `regs->cs == USER_CS`. Calling it with kernel regs corrupts state.
 - **COW page teardown**: check `PAGE_COW` **before** clearing PTE in `vmm_unmap_4k_page` — phys addr must still be valid for `page_cow_put()`.
-- **New code**: use `log_err`/`log_warn`/`log_info`/`log_debug` (not `serial_printk`). Debug: `debug_<channel>()`. See `docs/log/log.md`.
+- **Kernel logging policy**: All new/modified kernel code MUST use `log_err`/`log_warn`/`log_info`/`log_debug` (or `debug_<channel>()`), never bare `serial_printk`/`color_printk`. Hardcoded colors (`color_printk`) are forbidden for operational logs (handled automatically by `LOG_TARGET`). Only 4 whitelisted exceptions exist: panic/scheduler fatal dump (`panic.c`, `sched/core.c`), console raw char blit (`tty_def_output`), selftest protocol markers, and logger core itself. Full policy: [`docs/log/log.md`](docs/log/log.md).
 - **New hardware**: register via `register_subsys()` in `kernel/subsys/` — don't hardcode in `kernel_main`. See `docs/subsys/subsys.md`.
 - **`make test-syscall` must NOT set `KERNEL_SELFTEST=1`**: the in-kernel selftests spawn kthreads at boot which interfere with systest's fork+exec+waitpid test, producing a spurious "fork hang" (looks like a regression; it isn't). Run the two suites separately: systest via `make OS01_SYSTEST=1 test-syscall`, kernel selftests via `make KERNEL_SELFTEST=1`.
 

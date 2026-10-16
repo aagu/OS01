@@ -1,5 +1,5 @@
 #include <intr/pic.h>
-#include <core/printk.h>
+#include <log/log.h>
 #include <arch/io.h>
 #include <kernel.h>
 #include <arch/irq.h>
@@ -9,7 +9,7 @@
 
 void pic_init()
 {
-    color_printk(YELLOW, BLACK, "8259A init\n");
+    log_info("8259A init\n");
 
     //8259A Master
     arch_outb(MASTER_ICW1, 0x11);
@@ -69,13 +69,13 @@ void pic_disable(uint64_t nr)
 
 uint64_t pic_install(uint64_t nr, void * data __attribute__((unused)))
 {
-    color_printk(BLUE, BLACK, "pic device %d installed\n", nr - 0x20);
+    log_info("pic device %d installed\n", nr - 0x20);
     return 0;
 }
 
 void pic_uninstall(uint64_t nr)
 {
-    color_printk(BLUE, BLACK, "pic device %d uninstalled\n", nr - 0x20);
+    log_info("pic device %d uninstalled\n", nr - 0x20);
 }
 
 void pic_ack(uint64_t nr)

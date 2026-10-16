@@ -330,7 +330,7 @@ struct Page * alloc_pages(int32_t zone_select, uint64_t number, uint64_t page_fl
 {
     if (number > 64)
     {
-        color_printk(RED, BLACK, "alloc_pages() ERROR: number is invalid\n");
+        log_err("alloc_pages() ERROR: number is invalid\n");
         return NULL;
     }
 
@@ -358,7 +358,7 @@ struct Page * alloc_pages(int32_t zone_select, uint64_t number, uint64_t page_fl
         attribute = 0;
         break;
     default:
-        color_printk(RED, BLACK, "alloc_pages() ERROR: zone_select index is invalid\n");
+        log_err("alloc_pages() ERROR: zone_select index is invalid\n");
         spin_unlock_irqrestore(&pmm_lock, flags);
         return NULL;
         break;
@@ -421,7 +421,7 @@ struct Page * alloc_pages(int32_t zone_select, uint64_t number, uint64_t page_fl
         }
     }
 
-    color_printk(RED, BLACK, "alloc_pages() ERROR: no page can alloc\n");
+    log_err("alloc_pages() ERROR: no page can alloc\n");
     spin_unlock_irqrestore(&pmm_lock, flags);
     return NULL;
 
@@ -442,14 +442,14 @@ void free_pages(struct Page * page,int32_t number)
 
 	if(page == NULL)
 	{
-		color_printk(RED,BLACK,"free_pages() ERROR: page is invalid\n");
+		log_err("free_pages() ERROR: page is invalid\n");
 		spin_unlock_irqrestore(&pmm_lock, flags);
 		return ;
 	}
 
 	if(number >= 64 || number <= 0)
 	{
-		color_printk(RED,BLACK,"free_pages() ERROR: number is invalid\n");
+		log_err("free_pages() ERROR: number is invalid\n");
 		spin_unlock_irqrestore(&pmm_lock, flags);
 		return ;
 	}

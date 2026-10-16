@@ -19,7 +19,7 @@
 #include <driver/serial.h>
 #include <driver/keyboard.h>
 #include <fs/devfs.h>
-#include <core/printk.h>      // serial_printk for "tty: console TTY created"
+#include <log/log.h>          // log_info for "tty: console TTY created"
 
 void tty_boot_init(void)
 {
@@ -30,7 +30,7 @@ void tty_boot_init(void)
         serial_set_tty(console);         // serial IRQ → TTY
         keyboard_set_tty(console);       // keyboard IRQ → TTY
         tty_set_dev_tty(console);        // /dev/tty read/write → TTY
-        serial_printk("tty: console TTY created\n");
+        log_info("tty: console TTY created\n");
     }
 
     // Register /dev/tty (magic → controlling terminal) and /dev/tty0

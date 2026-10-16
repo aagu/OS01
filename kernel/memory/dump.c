@@ -1,5 +1,5 @@
 #include <memory/memory.h>
-#include <core/printk.h>
+#include <log/log.h>
 #include <stdbool.h>
 
 static uint64_t mem_char(uint64_t val)
@@ -9,7 +9,7 @@ static uint64_t mem_char(uint64_t val)
 
 void mem_dump(const void * start, const void * end)
 {
-    color_printk(BLUE, BLACK, "mem dump from %#016lx to %#016lx\n", start, end);
+    log_info("mem dump from %#016lx to %#016lx\n", start, end);
 
     uint8_t * p = (uint8_t *)start;
 
@@ -19,7 +19,7 @@ void mem_dump(const void * start, const void * end)
     {
         uint64_t offset = (uint64_t)p & 0xffffffff;
         if (*(uint64_t *)offset || p + 16 >= (uint8_t *)end) {
-            color_printk(YELLOW, BLACK, "%#016lx:\t"
+            log_info("%#016lx:\t"
                 "%02x %02x %02x %02x  "
                 "%02x %02x %02x %02x  "
                 "%02x %02x %02x %02x  "
@@ -45,7 +45,7 @@ void mem_dump(const void * start, const void * end)
         {
             if (!zero_ignore_print)
             {
-                color_printk(YELLOW, BLACK, "........\n");
+                log_info("........\n");
                 zero_ignore_print = true;
             }
         }

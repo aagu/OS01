@@ -8,6 +8,7 @@
 // the MMIO pages from COW, demand paging, and premature freeing.
 
 #include <driver/fb.h>
+#include <log/log.h>
 #include <core/printk.h>      // Pos, frame_buffer
 #include <memory/vma.h>         // vma_t, VMA_IO, VMA_SHARED
 #include <memory/vmm.h>
@@ -349,10 +350,10 @@ int fb_write_row_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
         s_row_count++;
         s_row_bytes += bytes;
         if ((s_row_count & 0x3ffu) == 0 && s_row_count > 0) {
-            serial_printk("fb_write_row: count=%llu total_ns=%llu avg_ns=%llu ns/pixel=%llu\n",
-                          s_row_count, s_row_ns,
-                          s_row_ns / s_row_count,
-                          s_row_ns * 4 / s_row_bytes);
+            log_debug("fb_write_row: count=%llu total_ns=%llu avg_ns=%llu ns/pixel=%llu\n",
+                      s_row_count, s_row_ns,
+                      s_row_ns / s_row_count,
+                      s_row_ns * 4 / s_row_bytes);
         }
     }
     return 0;

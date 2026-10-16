@@ -422,7 +422,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 		// value is the Clang-required compile-time constant 1.
 		if (cr2 < current->addr_limit && current->fault_jmp)
 			__builtin_longjmp(current->fault_jmp, 1);
-		serial_printk("PF-KRN: err=%lx rip=%lx rsp=%lx rbp=%lx cr2=%lx "
+		log_err("PF-KRN: err=%lx rip=%lx rsp=%lx rbp=%lx cr2=%lx "
 			"pid=%d cpu=%d\n",
 			error_code, regs->rip, regs->rsp, regs->rbp, cr2,
 			t?t->pid:-1, cpu_id());
@@ -439,18 +439,18 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 			uint64_t head = (uint64_t)&init_task_union.task.list;
 			uint64_t pos = *(uint64_t *)head;  // list.next
 			int n = 0;
-			serial_printk("PF-KRN: tasklist head=%lx\n", head);
+			log_err("PF-KRN: tasklist head=%lx\n", head);
 			// Circular list: stop when we return to head.  Do NOT use
 			// address ordering (head is lower than heap nodes).
 			while (pos != head && n < 32) {
 				if (pos < 0xffff800000000000ULL ||
 				    pos > 0xffff800020000000ULL) {
-					serial_printk("PF-KRN:   tasklist corrupt pos=%lx\n", pos);
+					log_err("PF-KRN:   tasklist corrupt pos=%lx\n", pos);
 					break;
 				}
 				task_t *tl = container_of((list_t *)pos, task_t, list);
 				uint64_t stk = (uint64_t)tl->stack_alloc_base;
-				serial_printk("PF-KRN:   task pid=%ld st=%d fl=%lx cpu=%u on_rq=%u on_cpu=%u thd=%p stk=%lx\n",
+				log_err("PF-KRN:   task pid=%ld st=%d fl=%lx cpu=%u on_rq=%u on_cpu=%u thd=%p stk=%lx\n",
 					(long)tl->pid, (int)tl->state, (unsigned long)tl->flags,
 					(unsigned)tl->cpu, (unsigned)tl->on_rq, (unsigned)tl->on_cpu,
 					(void *)tl->thread, stk);
@@ -458,36 +458,36 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 				n++;
 			}
 		}
-		serial_printk("PF-KRN: r8=%lx r9=%lx r10=%lx r11=%lx\n",
+		log_err("PF-KRN: r8=%lx r9=%lx r10=%lx r11=%lx\n",
 			regs->r8, regs->r9, regs->r10, regs->r11);
-		serial_printk("PF-KRN: r12=%lx r13=%lx r14=%lx r15=%lx\n",
+		log_err("PF-KRN: r12=%lx r13=%lx r14=%lx r15=%lx\n",
 			regs->r12, regs->r13, regs->r14, regs->r15);
-		serial_printk("PF-KRN: rax=%lx rbx=%lx rcx=%lx rdx=%lx\n",
+		log_err("PF-KRN: rax=%lx rbx=%lx rcx=%lx rdx=%lx\n",
 			regs->rax, regs->rbx, regs->rcx, regs->rdx);
-		serial_printk("PF-KRN: rdi=%lx rsi=%lx cs=%lx ss=%lx\n",
+		log_err("PF-KRN: rdi=%lx rsi=%lx cs=%lx ss=%lx\n",
 			regs->rdi, regs->rsi, regs->cs, regs->ss);
 		if (t) {
-			serial_printk("PF-KRN: task sig=%lx blk=%lx st=%d fl=%lx\n",
+			log_err("PF-KRN: task sig=%lx blk=%lx st=%d fl=%lx\n",
 				t->signal, t->blocked, t->state, t->flags);
-			serial_printk("PF-KRN: thd rsp=%lx rsp0=%lx rip=%lx\n",
+			log_err("PF-KRN: thd rsp=%lx rsp0=%lx rip=%lx\n",
 				t->thread->rsp, t->thread->rsp0, t->thread->rip);
 			// Dump 8 bytes at saved RSP to see what schedule() saved
 			uint64_t saved_rsp = t->thread->rsp;
 			if (saved_rsp >= 0xffff800000000000ULL)
-				serial_printk("PF-KRN: *thd_rsp=%lx %lx\n",
+				log_err("PF-KRN: *thd_rsp=%lx %lx\n",
 					*(uint64_t *)saved_rsp,
 					*((uint64_t *)saved_rsp + 1));
 			// Dump 16 qwords around the saved rsp to reconstruct the
 			// return chain that led to the bad RIP.
 			if (saved_rsp >= 0xffff800000000000ULL) {
 				uint64_t *p = (uint64_t *)(saved_rsp & ~0x7ULL);
-				serial_printk("PF-KRN: thd_rsp-8..+120:\n");
+				log_err("PF-KRN: thd_rsp-8..+120:\n");
 				for (int i = -1; i < 15; i++) {
 					uint64_t addr = (uint64_t)p + i * 8;
 					if (addr < 0xffff800000000000ULL ||
 					    addr > 0xffff800020000000ULL)
 						break;
-					serial_printk("PF-KRN:   [%+d] %p: %lx\n",
+					log_err("PF-KRN:   [%+d] %p: %lx\n",
 						(i * 8), (void *)addr,
 						*(uint64_t *)addr);
 				}
@@ -497,11 +497,11 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 				uint64_t cr = regs->rsp;
 				if (cr >= 0xffff800000000000ULL &&
 				    cr <= 0xffff800020000000ULL) {
-					serial_printk("PF-KRN: crsp dump:\n");
+					log_err("PF-KRN: crsp dump:\n");
 					for (int i = 0; i < 8; i++) {
 						uint64_t addr = cr + i * 8;
 						if (addr > 0xffff800020000000ULL) break;
-						serial_printk("PF-KRN:   crsp[%d] %p: %lx\n",
+						log_err("PF-KRN:   crsp[%d] %p: %lx\n",
 							i, (void *)addr, *(uint64_t *)addr);
 					}
 				}
@@ -509,14 +509,14 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 		}
 		// Check stack boundaries
 		uint64_t sb = regs->rsp & ~(STACK_SIZE - 1);
-		serial_printk("PF-KRN: stack %lu/%lu used\n",
+		log_err("PF-KRN: stack %lu/%lu used\n",
 			((sb + STACK_SIZE) - regs->rsp), (uint64_t)STACK_SIZE);
 
 		// Raw rbp-chain backtrace: return addresses + frame pointers.
 		// Walk up to 12 frames; stop on unmapped/loop pointers.
 		{
 			uint64_t fp = regs->rbp;
-			serial_printk("PF-KRN: bt rbp=%lx rip=%lx\n", fp, regs->rip);
+			log_err("PF-KRN: bt rbp=%lx rip=%lx\n", fp, regs->rip);
 			for (int i = 0; i < 12; i++) {
 				if (fp < 0xffff800000000000ULL ||
 				    fp > 0xffff800020000000ULL)
@@ -524,7 +524,7 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 				uint64_t *fr = (uint64_t *)fp;
 				uint64_t ret = fr[1];
 				uint64_t next_fp = fr[0];
-				serial_printk("PF-KRN:   #%d fp=%lx ret=%lx\n",
+				log_err("PF-KRN:   #%d fp=%lx ret=%lx\n",
 					i, fp, ret);
 				if (next_fp <= fp) break;  // loop or forward
 				fp = next_fp;

@@ -2,6 +2,7 @@
 #include <memory/memory.h>
 #include <core/debug.h>
 #include <core/printk.h>
+#include <log/log.h>
 #include <kernel.h>
 #include <string.h>
 
@@ -69,7 +70,7 @@ static inline void slab_lock_release(arch_irq_state_t flags) {
 struct Slab * kmalloc_create(uint64_t size)
 {
     if (kmalloc_creating) {
-        color_printk(RED, BLACK, "kmalloc_create: recursive call, size=%lu\n", size);
+        log_err("kmalloc_create: recursive call, size=%lu\n", size);
         return NULL;
     }
     kmalloc_creating = true;
@@ -84,7 +85,7 @@ struct Slab * kmalloc_create(uint64_t size)
 
     if (page == NULL)
     {
-        color_printk(RED,BLACK,"kmalloc_create()->alloc_pages()=>page == NULL\n");
+        log_err("kmalloc_create()->alloc_pages()=>page == NULL\n");
 		kmalloc_creating = false;
 		return NULL;
     }
@@ -153,7 +154,7 @@ struct Slab * kmalloc_create(uint64_t size)
         break;
 
     default:
-        color_printk(RED,BLACK,"kmalloc_create() ERROR: wrong size:%08d\n",size);
+        log_err("kmalloc_create() ERROR: wrong size:%08d\n",size);
 		free_pages(page,1);
         kmalloc_creating = false;
         return NULL;
@@ -170,7 +171,7 @@ void * kmalloc(size_t size)
     uint64_t _slab_flags = slab_lock_acquire();
     if (size > 1048576)
     {
-        color_printk(RED,BLACK,"kmalloc() ERROR: kmalloc size too long:%08d\n",size);
+        log_err("kmalloc() ERROR: kmalloc size too long:%08d\n",size);
 		slab_lock_release(_slab_flags);
 		return NULL;
     }
@@ -197,7 +198,7 @@ void * kmalloc(size_t size)
         slab = kmalloc_create(kmalloc_cache_size[i].size);
         if (slab == NULL)
         {
-            color_printk(RED, BLACK, "kmalloc()->kmalloc_create()=>slab == NULL\n");
+            log_err("kmalloc()->kmalloc_create()=>slab == NULL\n");
             slab_lock_release(_slab_flags);
             return NULL;
         }
@@ -229,7 +230,7 @@ void * kmalloc(size_t size)
         }
     }
 
-	color_printk(BLUE,BLACK,"kmalloc() ERROR: no memory can alloc\n");
+	log_err("kmalloc() ERROR: no memory can alloc\n");
 	slab_lock_release(_slab_flags);
 	return NULL;
 }
@@ -281,7 +282,7 @@ size_t kfree(void * address)
                 uint64_t *word = slab->color_map + (index >> 6);
                 uint64_t bit = 1UL << (index % 64);
                 if (!(*word & bit)) {
-                    color_printk(RED, BLACK, "kfree: double free %p\n", address);
+                    log_err("kfree: double free %p\n", address);
                     slab_lock_release(_slab_flags);
                     return 1;
                 }
@@ -331,7 +332,7 @@ size_t kfree(void * address)
         } while (slab != kmalloc_cache_size[i].cache_pool);
     }
 
-    color_printk(RED, BLACK, "kfree() ERROR: can not free memory %p\n", address);
+    log_err("kfree() ERROR: can not free memory %p\n", address);
 
     slab_lock_release(_slab_flags);
     return 0;
@@ -446,10 +447,9 @@ size_t slab_init()
 	 * there. (uint64_t)-1 also means "no bound" on aarch64 pre-prepare
 	 * or checked-overflow, so the comparison can never false-fail. */
 	if (PMMngr.end_of_struct > PMMngr_end_of_struct_upper_bound()) {
-		color_printk(RED, BLACK,
-		             "slab_init() FATAL: end_of_struct=%#018lx exceeds slab_meta upper bound=%#018lx\n",
-		             PMMngr.end_of_struct,
-		             PMMngr_end_of_struct_upper_bound());
+		log_err("slab_init() FATAL: end_of_struct=%#018lx exceeds slab_meta upper bound=%#018lx\n",
+		        PMMngr.end_of_struct,
+		        PMMngr_end_of_struct_upper_bound());
 		/* kpanic is not in the aarch64 kernel source whitelist; the
 		 * pmm.c fatal-path convention (color_printk + arch_cpu_halt)
 		 * is used instead. */

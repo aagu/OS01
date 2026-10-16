@@ -17,7 +17,7 @@
 #include <fs/tmpfs.h>
 #include <fs/procfs.h>
 #include <block/blockdev.h>
-#include <core/printk.h>      // serial_printk for GPT/ext2/FAT32 fallback logs
+#include <log/log.h>          // log_* for GPT/ext2/FAT32 fallback logs
 #include <core/panic.h>
 #include <stdbool.h>
 
@@ -97,13 +97,13 @@ static bool mount_partitioned_disk(void)
         vfs_mount("/", gpt->partitions[1].dev, &ext2_vfs_ops, ext2_fs);
         root_ok = true;
     } else {
-        serial_printk("EXT2: mount failed — / not available\n");
+        log_err("EXT2: mount failed — / not available\n");
     }
 
     if (0 == fat32_init(gpt->partitions[0].dev, &fat_fs))
         vfs_mount("/boot", gpt->partitions[0].dev, &fat_vfs_ops, fat_fs);
     else
-        serial_printk("FAT32: /boot mount failed\n");
+        log_warn("FAT32: /boot mount failed\n");
 
     return root_ok;
 }
@@ -147,7 +147,7 @@ void fs_boot_probe_devfs(void)
         char c;
         int r = vfs_read(nul, 0, 1, &c);
         int w = vfs_write(nul, 0, 4, "test");
-        serial_printk("devfs: /dev/null read=%d write=%d\n", r, w);
+        log_info("devfs: /dev/null read=%d write=%d\n", r, w);
         vfs_node_put(nul);
     }
 }

@@ -500,9 +500,9 @@ static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq)
         s_present_ns += dt;
         s_present_count++;
         if ((s_present_count & 0xffu) == 0) {
-            serial_printk("gfx_present: count=%llu total_ns=%llu avg_ns=%llu\n",
-                          s_present_count, s_present_ns,
-                          s_present_ns / s_present_count);
+            log_debug("gfx_present: count=%llu total_ns=%llu avg_ns=%llu\n",
+                      s_present_count, s_present_ns,
+                      s_present_ns / s_present_count);
         }
     }
     stats_log_maybe(arch_clocksource_read_ns());

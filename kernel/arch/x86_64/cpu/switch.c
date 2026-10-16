@@ -5,6 +5,7 @@
 #include <arch/cpu.h>
 #include <arch/x86_64/tss.h>
 #include <core/printk.h>
+#include <log/log.h>
 #include <memory/slab.h>   // kfree — for PF_SELF_REAP epilogue
 
 /**
@@ -37,17 +38,17 @@ void __switch_to(task_t *prev, task_t *next)
         // task's stack (slab reuse) -> caught here.
         (uint64_t)next->thread->rsp < (uint64_t)next ||
         (uint64_t)next->thread->rsp > (uint64_t)next + STACK_SIZE) {
-        serial_printk("SWITCH-BAD: next=%p pid=%ld state=%ld cpu=%d "
-                      "on_rq=%d on_cpu=%d thread=%p\n",
-                      (void *)next, next ? next->pid : -1,
-                      next ? next->state : -1,
-                      cpu_id(),
-                      next ? (int)next->on_rq : -1,
-                      next ? (int)next->on_cpu : -1,
-                      (void *)(next ? next->thread : NULL));
-        serial_printk("SWITCH-BAD: prev=%p pid=%ld thread=%p\n",
-                      (void *)prev, prev ? prev->pid : -1,
-                      (void *)(prev ? prev->thread : NULL));
+        log_err("SWITCH-BAD: next=%p pid=%ld state=%ld cpu=%d "
+                "on_rq=%d on_cpu=%d thread=%p\n",
+                (void *)next, next ? next->pid : -1,
+                next ? next->state : -1,
+                cpu_id(),
+                next ? (int)next->on_rq : -1,
+                next ? (int)next->on_cpu : -1,
+                (void *)(next ? next->thread : NULL));
+        log_err("SWITCH-BAD: prev=%p pid=%ld thread=%p\n",
+                (void *)prev, prev ? prev->pid : -1,
+                (void *)(prev ? prev->thread : NULL));
         for (;;) arch_cpu_halt();  // halt instead of crashing
     }
 

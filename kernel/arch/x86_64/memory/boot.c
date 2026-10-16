@@ -58,5 +58,5 @@ void x86_64_boot_memory(const struct boot_context *bootctx)
     }
 
     frame_buffer_init();                 // remap FB at VIRT_FRAMEBUFFER_OFFSET
-    color_printk(GREEN, BLACK, "frame buffer remap succeed\n");
+    log_info("frame buffer remap succeed\n");
 }

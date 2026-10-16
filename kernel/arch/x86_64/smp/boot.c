@@ -30,6 +30,7 @@
 #include <intr/ipi.h>         /* IPI_VECTOR_TLB */
 #include <driver/serial.h>
 #include <core/printk.h>
+#include <log/log.h>
 #include <arch/thread.h>
 #include <time/clockevent.h>
 #include <sched/accounting.h>
@@ -82,8 +83,8 @@ void x86_64_boot_percpu(void)
             continue;
 
         if (cpu_idx >= NR_CPUS) {
-            serial_printk("percpu: APIC id=%u DROPPED (NR_CPUS=%u)\n",
-                          apic_info.lapics[i].apic_id, (unsigned)NR_CPUS);
+            log_warn("percpu: APIC id=%u DROPPED (NR_CPUS=%u)\n",
+                     apic_info.lapics[i].apic_id, (unsigned)NR_CPUS);
             continue;
         }
 
@@ -94,16 +95,16 @@ void x86_64_boot_percpu(void)
             percpu_data[0].tss_hw = arch_task_boot_state();
             percpu_install_gs(0);
             percpu_data[0].online = 1;
-            serial_printk("percpu: BSP  (cpu=%u, apic_id=%u) online\n",
-                          cpu_idx, apic_info.lapics[i].apic_id);
+            log_info("percpu: BSP  (cpu=%u, apic_id=%u) online\n",
+                     cpu_idx, apic_info.lapics[i].apic_id);
         } else {
-            serial_printk("percpu: AP   (cpu=%u, apic_id=%u) registered\n",
-                          cpu_idx, apic_info.lapics[i].apic_id);
+            log_info("percpu: AP   (cpu=%u, apic_id=%u) registered\n",
+                     cpu_idx, apic_info.lapics[i].apic_id);
         }
         cpu_idx++;
     }
-    serial_printk("percpu: %u CPU(s) registered (%u in MADT)\n",
-                  cpu_idx, apic_info.lapic_count);
+    log_info("percpu: %u CPU(s) registered (%u in MADT)\n",
+             cpu_idx, apic_info.lapic_count);
     num_cpus = cpu_idx;
 }
 

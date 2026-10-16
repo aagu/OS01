@@ -19,7 +19,7 @@
 #include <intr/pic.h>                   // get_pic_controller
 #include <intr/interrupt.h>             // MAX_GSI, irq_table, hw_int_controller_t
 #include <core/debug.h>                 // debug_irq
-#include <core/printk.h>                // color_printk (for spurious-vector log)
+#include <log/log.h>                    // log_err (for spurious-vector log)
 #include <arch/cpu.h>              // arch_local_irq_disable
 #include <stddef.h>                       // NULL
 
@@ -66,7 +66,7 @@ void arch_irq_dispatch(pt_regs_t *regs, uint64_t hwirq)
 {
     arch_local_irq_disable();
     if ((hwirq & IRQ_VECTOR_HIGH_BIT) != 0) {
-        color_printk(RED, BLACK, "do_IRQ: spurious vector %#018lx\n", hwirq);
+        log_err("do_IRQ: spurious vector %#018lx\n", hwirq);
         return;
     }
     uint32_t gsi = arch_irq_vector_to_gsi(hwirq);

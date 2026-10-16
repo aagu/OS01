@@ -199,13 +199,13 @@ static vfs_mount_t *find_mount(const char *path)
         // entry pointer is a kernel-high-half address (above PAGE_OFFSET);
         // anything below is user space or zero-page garbage.
         if ((unsigned long)mp < 0xffff800000000000UL) {
-            serial_printk("VFS: find_mount: CORRUPT mp=%p path=%p "
-                          "iter=%d\n",
-                          (void *)mp, (const void *)path, _iter);
+            log_err("VFS: find_mount: CORRUPT mp=%p path=%p "
+                    "iter=%d\n",
+                    (void *)mp, (const void *)path, _iter);
             // Dump the rest of the chain so we can see how we got here.
             for (vfs_mount_t *q = mount_list; q && q != mp; q = q->next) {
-                serial_printk("  [chain] mp=%p path=%p next=%p\n",
-                              (void *)q, (void *)q->path, (void *)q->next);
+                log_err("  [chain] mp=%p path=%p next=%p\n",
+                        (void *)q, (void *)q->path, (void *)q->next);
             }
             break;
         }

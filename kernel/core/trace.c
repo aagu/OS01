@@ -1,5 +1,5 @@
 #include <core/trace.h>
-#include <core/printk.h>
+#include <log/log.h>
 
 void backtrace(pt_regs_t* regs)
 {
@@ -7,21 +7,12 @@ void backtrace(pt_regs_t* regs)
 	unsigned long ret_address = regs->rip;
 	int i = 0;
 
-	color_printk(RED,BLACK,"====================== Kernel Stack Backtrace ======================\n");
-	serial_printk("====================== Kernel Stack Backtrace ======================\n");
+	log_err("====================== Kernel Stack Backtrace ======================\n");
 
 	for(i = 0;i<KERNEL_TRACE_DEPTH;i++)
 	{
 		if(lookup_kallsyms(ret_address,i)) {
-			int li;
-			for(li = 0; li < i; li++) {
-				color_printk(RED,BLACK,"  ");
-				serial_printk("  ");
-			}
-			color_printk(RED,BLACK,"+---> ");
-			serial_printk("+---> ");
-			color_printk(RED,BLACK,"address:%#018lx \t(no symbol)\n",ret_address);
-			serial_printk("address:%#018lx \t(no symbol)\n",ret_address);
+			log_err("%*s+---> address:%#018lx \t(no symbol)\n", i * 2, "", ret_address);
 		}
 		if((unsigned long)rbp < (unsigned long)regs->rsp)
 			break;
@@ -34,22 +25,16 @@ void backtrace(pt_regs_t* regs)
 int32_t lookup_kallsyms(uint64_t address, int32_t level)
 {
     int index = 0;
-	int level_index = 0;
 	char * string =(char *) &kallsyms_names;
 	for(index = 0;index<kallsyms_syms_num;index++)
 		if(address > kallsyms_addresses[index] && address <= kallsyms_addresses[index+1])
 			break;
 	if(index < kallsyms_syms_num)
 	{
-		for(level_index = 0;level_index < level;level_index++) {
-			color_printk(RED,BLACK,"  ");
-			serial_printk("  ");
-		}
-		color_printk(RED,BLACK,"+---> ");
-		serial_printk("+---> ");
-
-		color_printk(RED,BLACK,"address:%#018lx \t(+) %04d function:%s\n",address,address - kallsyms_addresses[index],&string[kallsyms_index[index]]);
-		serial_printk("address:%#018lx \t(+) %04d function:%s\n",address,address - kallsyms_addresses[index],&string[kallsyms_index[index]]);
+		log_err("%*s+---> address:%#018lx \t(+) %04d function:%s\n",
+		        level * 2, "", address,
+		        (int)(address - kallsyms_addresses[index]),
+		        &string[kallsyms_index[index]]);
 		return 0;
 	}
 	else
