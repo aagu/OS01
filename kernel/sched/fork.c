@@ -632,7 +632,21 @@ int kernel_thread_on_cpu(uint64_t (*fn)(uint64_t), uint64_t arg, unsigned cpu)
     fork_pin.active       = true;
     int pid = kernel_thread(fn, arg, PF_KTHREAD);
     /* kernel_thread completed; whether it succeeded or returned
-     * a negative pid, the channel is logically consumed. */
+     * a negative pid, the channel is logically consumed.  Without
+     * this consume, the active pin leaks into the next do_fork()
+     * — observed failure mode: thermal_affinity's negative
+     * kernel_thread_on_cpu calls (validation rejects, returns -EINVAL
+     * with pin untouched because validations run BEFORE the pin set)
+     * pass cleanly, but fd_refcount scenario 1's two successful
+     * kernel_thread_on_cpu calls leave the channel active with the
+     * SECOND pin (cpu=other, mask=1<<other).  Scenario 2 then
+     * creates race_holder / pin_reader via plain kernel_thread();
+     * fork_pin_apply steals their cpu + allowed_cpus from the
+     * stale pin, pinning them to a CPU the harness can't reach
+     * (and the test mask-check flips) instead of the natural
+     * least-loaded placement.  fork_pin_consume is a static inline
+     * defined above — call it. */
+    fork_pin_consume();
     return pid;
 }
 
