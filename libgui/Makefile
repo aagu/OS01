@@ -1,8 +1,9 @@
-# ── liblvgl Makefile (staging component — spec: single-writer sysroot)
+# ── libgui Makefile (staging component — spec: single-writer sysroot)
 #
-# This Makefile is the build driver for the userland LVGL static library
-# (liblvgl.a). Its install target stages the library and public headers
-# into $(STAGING_DIR)/lvgl, NEVER into the final sysroot.
+# This Makefile is the build driver for the userland native GUI static
+# library (libgui.a). Its install target stages the library, public
+# headers (gui.h, gui_platform.h) and license into $(STAGING_DIR)/gui,
+# NEVER into the final sysroot.
 # mk/components/sysroot.mk is the SINGLE WRITER of the sysroot generation;
 # this Makefile only produces a manifest via find and lets sysroot.mk consume it.
 LOCAL_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
@@ -15,9 +16,9 @@ $(error OS01_PROFILE_FILE='$(OS01_PROFILE_FILE)' does not exist; invoke from the
 endif
 include $(OS01_PROFILE_FILE)
 
-BUILD_DIR := $(LIBLVGL_BUILD_DIR)
-LIBLVGL_DIR := $(abspath $(dir $(LOCAL_MAKEFILE)))
-OS01_ROOT := $(abspath $(LIBLVGL_DIR)/..)
+BUILD_DIR := $(LIBGUI_BUILD_DIR)
+LIBGUI_DIR := $(abspath $(dir $(LOCAL_MAKEFILE)))
+OS01_ROOT := $(abspath $(LIBGUI_DIR)/..)
 
 include $(OS01_ROOT)/thirdpart/lvgl.manifest
 
@@ -39,20 +40,41 @@ CFLAGS := --sysroot=$(STAGING_DIR)/kernel-headers \
           -fno-pic -fno-pie -mno-red-zone -fstack-protector-strong \
           -I$(STAGING_DIR)/kernel-headers/usr/include \
           -isystem $(STAGING_DIR)/libc/usr/include \
+          -I$(STAGING_DIR)/libgfx/usr/include \
+          -I$(LIBGUI_DIR)/include \
+          -I$(LIBGUI_DIR)/internal \
+          -I$(OS01_ROOT)/user/common \
           -I$(LVGL_DIR) \
+          -I$(OS01_ROOT)/thirdpart \
           -I$(OS01_ROOT)/config \
           -DLV_CONF_INCLUDE_SIMPLE
 
-C_SOURCES := $(shell find $(LVGL_SRC_DIR) -name '*.c')
-OBJS := $(patsubst $(LVGL_SRC_DIR)/%.c,$(BUILD_DIR)/obj/%.o,$(C_SOURCES))
-ARCHIVE := $(BUILD_DIR)/lib/liblvgl.a
+LVGL_C_SOURCES := $(shell find $(LVGL_SRC_DIR) -name '*.c')
+LVGL_OBJS := $(patsubst $(LVGL_SRC_DIR)/%.c,$(BUILD_DIR)/obj/lvgl/%.o,$(LVGL_C_SOURCES))
+
+PLATFORM_C_SOURCES := $(LIBGUI_DIR)/src/platform.c $(LIBGUI_DIR)/src/tick.c
+PLATFORM_OBJS := $(patsubst $(LIBGUI_DIR)/src/%.c,$(BUILD_DIR)/obj/platform/%.o,$(PLATFORM_C_SOURCES))
+
+COMMON_C_SOURCES := $(OS01_ROOT)/user/common/gfx_client_policy.c
+COMMON_OBJS := $(BUILD_DIR)/obj/common/gfx_client_policy.o
+
+OBJS := $(LVGL_OBJS) $(PLATFORM_OBJS) $(COMMON_OBJS)
+ARCHIVE := $(BUILD_DIR)/lib/libgui.a
 TARGET_AR ?= $(LLVM_AR)
 
 all: $(ARCHIVE)
 
 $(OBJS): | check-version
 
-$(BUILD_DIR)/obj/%.o: $(LVGL_SRC_DIR)/%.c
+$(BUILD_DIR)/obj/lvgl/%.o: $(LVGL_SRC_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(BUILD_DIR)/obj/platform/%.o: $(LIBGUI_DIR)/src/%.c
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(BUILD_DIR)/obj/common/gfx_client_policy.o: $(OS01_ROOT)/user/common/gfx_client_policy.c
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
@@ -62,13 +84,12 @@ $(ARCHIVE): $(OBJS)
 
 install: $(ARCHIVE)
 	@test -n "$(INSTALL_ROOT)" || { echo "ERROR: install requires INSTALL_ROOT (staging tree)"; exit 1; }
-	@echo "$(INSTALL_ROOT)" | grep -q '/staging/lvgl$$' || { echo "ERROR: INSTALL_ROOT must point to staging/lvgl"; exit 1; }
+	@echo "$(INSTALL_ROOT)" | grep -q '/staging/gui$$' || { echo "ERROR: INSTALL_ROOT must point to staging/gui"; exit 1; }
 	rm -rf $(INSTALL_ROOT)
-	mkdir -p $(INSTALL_ROOT)/usr/include/lvgl $(INSTALL_ROOT)/usr/lib
-	cp $(ARCHIVE) $(INSTALL_ROOT)/usr/lib/liblvgl.a
-	cp $(OS01_ROOT)/config/lv_conf.h $(INSTALL_ROOT)/usr/include/lvgl/lv_conf.h
-	cp $(LVGL_DIR)/lvgl.h $(LVGL_DIR)/lv_version.h $(LVGL_DIR)/LICENCE.txt $(INSTALL_ROOT)/usr/include/lvgl/
-	cd $(LVGL_DIR) && find src -name '*.h' | cpio -pdm $(INSTALL_ROOT)/usr/include/lvgl
+	mkdir -p $(INSTALL_ROOT)/usr/include/gui $(INSTALL_ROOT)/usr/lib $(INSTALL_ROOT)/usr/share/licenses/libgui
+	cp $(ARCHIVE) $(INSTALL_ROOT)/usr/lib/libgui.a
+	cp $(LIBGUI_DIR)/include/gui/gui.h $(LIBGUI_DIR)/include/gui/gui_platform.h $(INSTALL_ROOT)/usr/include/gui/
+	cp $(LVGL_DIR)/LICENCE.txt $(INSTALL_ROOT)/usr/share/licenses/libgui/LVGL-LICENCE.txt
 	@find $(INSTALL_ROOT) -type f ! -name manifest | sed 's|^$(INSTALL_ROOT)/||' | sort > $(INSTALL_ROOT)/manifest
 
 clean:

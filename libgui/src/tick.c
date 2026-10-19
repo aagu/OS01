@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <sys/time.h>
 #include <time.h>
 
 static int s_tick_error = 0;

@@ -3,13 +3,44 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$ROOT/build/x86_64-clang"
-LVGL_OBJ_DIR="$BUILD_DIR/liblvgl/obj"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --build-dir)
+      BUILD_DIR="$2"
+      shift 2
+      ;;
+    --build-dir=*)
+      BUILD_DIR="${1#*=}"
+      shift
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Convert to absolute path if relative
+if [[ "$BUILD_DIR" != /* ]]; then
+  BUILD_DIR="$ROOT/$BUILD_DIR"
+fi
+
+LVGL_OBJ_DIR="$BUILD_DIR/libgui/obj/lvgl"
+if [ ! -d "$LVGL_OBJ_DIR" ] && [ -d "$BUILD_DIR/liblvgl/obj" ]; then
+  LVGL_OBJ_DIR="$BUILD_DIR/liblvgl/obj"
+fi
+
 LIBC_A="$BUILD_DIR/staging/libc/usr/lib/libc.a"
 OUT_DIR="$BUILD_DIR/audit"
 mkdir -p "$OUT_DIR"
 
-echo "[audit] Merging all liblvgl objects into $OUT_DIR/lvgl_combined.o..."
+echo "[audit] Merging LVGL objects from $LVGL_OBJ_DIR into $OUT_DIR/lvgl_combined.o..."
 OBJS=$(find "$LVGL_OBJ_DIR" -name '*.o')
+if [ -z "$OBJS" ]; then
+  echo "ERROR: No object files found in $LVGL_OBJ_DIR"
+  exit 1
+fi
 ld.lld -r $OBJS -o "$OUT_DIR/lvgl_combined.o"
 
 echo "[audit] Extracting undefined symbols from LVGL combined object..."
