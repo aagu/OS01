@@ -117,7 +117,9 @@ static inline int arch_atomic_cas(volatile uint64_t *ptr, uint64_t old, uint64_t
         "   b    3f             \n\t"
         "2: mov  %w1, #0         \n\t"
         "3:                     \n\t"
-        : "=&r"(cur), "=&r"(result) : "r"(ptr), "r"(old), "r"(new) : "memory"
+        /* CMP changes NZCV even when the CAS fails.  Without "cc",
+         * callers may reuse a pre-CAS condition after this asm. */
+        : "=&r"(cur), "=&r"(result) : "r"(ptr), "r"(old), "r"(new) : "memory", "cc"
     );
     return result;
 }

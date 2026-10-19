@@ -113,8 +113,21 @@
 
 /* ⑤ iteration budget: small enough to keep the whole selftest well
  * inside the harness timeout, large enough to force real interleaving
- * on the shared lock. */
-#define MC_STRESS_ITERS     200u
+ * on the shared lock.  2026-10-19 phantom-ENOENT investigation:
+ * bumped from 200 → 3000 — original 200 was set when the bug was
+ * observed at 1/200 rate in 2026-10-05 task-26 testing; 3000 keeps
+ * §⑤ well inside the harness timeout but increases confidence the
+ * baseline isn't masking the rare TCG artifact. */
+#define MC_STRESS_ITERS     3000u
+
+/* ⑤b (2026-10-19): TIGHTENED concurrent-replace variant — the
+ * design-note in §⑤ says "both CPUs run concurrent map/replace/unmap
+ * loops into the SAME L3 table page" was the original repro shape.
+ * BSP loops on VA_P (PTE[0] in L3), AP loops on VA_Q (PTE[1] in the
+ * same L3 page); both serialize on the same pt_lock_for(root_pa,
+ * l2_idx) slot.  Without lock-down §⑤b we cannot surface the rare
+ * phantom-ENOENT (roadmap Parked #2). */
+#define MC_STRESS_ITERS_5B  500u
 
 /* Work-item extension payloads (arg0 = pointer to these, BSS kernel
  * VA — identical on every core). */
@@ -125,7 +138,25 @@ struct mc_map_args {
     int       rc;
 };
 
+/* WORK_PT_REPLACE_LOOP payload (2026-10-19 §5b).  AP reads the loop
+ * parameters once at entry; the BSP may update `stop` (a release
+ * store) to ask for graceful termination.  `ap_done` is published by
+ * the AP as the LAST step of the handler (release) — the BSP spins
+ * on ap_done + slot state to wait for completion.  `rc` carries the
+ * last error code seen by the AP; AARCH64_PT_OK = loop completed
+ * without error. */
+struct mc_loop_args {
+    uint64_t *root;
+    uint64_t  va;
+    uint64_t  pa;
+    uint32_t  iters;          /* loop iteration count */
+    volatile uint32_t stop;   /* BSP may set to 1 to ask AP to stop */
+    volatile uint32_t ap_done;/* AP sets to 1 after loop exits */
+    int       rc;             /* AARCH64_PT_OK on clean exit */
+};
+
 static struct mc_map_args    mc_ap_map;
+static struct mc_loop_args   mc_ap_loop;
 
 /* ── Output helpers (aarch64 serial_printk is verbatim) ─────────── */
 static void mc_puts(const char *s) { kputs(s); }
@@ -289,6 +320,35 @@ bool ap_work_ext_run(uint32_t cmd, uint64_t arg0, uint64_t arg1,
         *out = (uint64_t)(int64_t)a->rc;
         return true;
     }
+    if (cmd == WORK_PT_REPLACE_LOOP) {
+        /* §5b (2026-10-19 phantom-ENOENT lock-down).  The AP runs
+         * map_4k_ext → replace_4k(RW→RO atomic) → unmap_4k_ext on
+         * `a->va` for `a->iters` rounds, sharing the scratch root
+         * with the BSP which runs the SAME loop on an adjacent
+         * PTE in the same L3 page.  Every round takes
+         * pt_lock_for(root_pa, l2_idx) — both VAs hash to the same
+         * L2 slot, so every iteration serializes with the BSP's
+         * parallel iteration.  The handler exits on the first
+         * -ENOENT (or any other non-OK rc) so the BSP's FAIL
+         * message reflects the same rc. */
+        struct mc_loop_args *a = (struct mc_loop_args *)(uintptr_t)arg0;
+        a->rc = AARCH64_PT_OK;
+        for (uint32_t i = 0; i < a->iters; i++) {
+            if (a->stop) break;
+            int rc = aarch64_pt_map_4k_ext(a->root, a->va, a->pa,
+                                           AARCH64_PT_KERNEL_RW, 0);
+            if (rc != AARCH64_PT_OK) { a->rc = rc; break; }
+            rc = aarch64_pt_replace_4k(a->root, a->va, a->pa,
+                                       AARCH64_PT_KERNEL_RO, 0,
+                                       NULL, NULL, NULL);
+            if (rc != AARCH64_PT_OK) { a->rc = rc; break; }
+            rc = aarch64_pt_unmap_4k_ext(a->root, a->va, NULL, NULL, NULL);
+            if (rc != AARCH64_PT_OK) { a->rc = rc; break; }
+        }
+        a->ap_done = 1;
+        *out = (uint64_t)(int64_t)a->rc;
+        return true;
+    }
     return false;
 }
 
@@ -443,6 +503,100 @@ static int section_pt_lock_interleave(uint64_t *root, uint64_t data_ap,
     return 0;
 }
 
+/* ── Section ⑤b: BSP+AP concurrent map/replace/unmap on same L3 ────
+ *
+ * The deferred concurrent-replace corner (Task 26 design-note,
+ * roadmap Parked #2): both CPUs run map_4k_ext → replace_4k(RW→RO
+ * atomic) → unmap_4k_ext loops into the same L3 table page.  BSP
+ * loops on VA_P (PTE[0]); AP loops on VA_Q (PTE[1] in the same L3
+ * page).  Both VAs hash to the same pt_lock_for(root_pa, l2_idx)
+ * slot, so every iteration serializes with the other CPU's
+ * parallel iteration — but they touch different PTEs, so no -EEXIST.
+ *
+ * The "phantom -ENOENT" symptom the task-26 report described is a
+ * read of the leaf observing V=0 immediately after the BSP or AP
+ * has just written V=1 via map_4k_ext; the dump_chain() failure path
+ * shows the post-mortem chain.  The test is bounded (cycle-counter
+ * deadline for the AP handshake + MC_STRESS_ITERS_5B × 6 page-table
+ * ops per iter) so a wedge becomes a FAIL, never a grid hang.
+ *
+ * Note: this section is NOT a substitute for §⑤.  §⑤ covers the
+ * same-pt_lock-for serialised case (AP WORK_BARRIER, BSP iterating
+ * on two leaves).  §⑤b covers the actually-concurrent case (AP
+ * running ops in parallel, so the L2-slot lock cycles between the
+ * two CPUs every round).  Together they exercise the full
+ * pt_lock + atomic-replace ordering surface. */
+static int section_concurrent_replace(uint64_t *root, uint64_t data_ap,
+                                      uint64_t data_bsp)
+{
+    mc_ap_loop.root    = root;
+    mc_ap_loop.va      = MC_VA_Q;    /* AP: PTE[1] in the L3 page */
+    mc_ap_loop.pa      = data_ap;
+    mc_ap_loop.iters   = MC_STRESS_ITERS_5B;
+    mc_ap_loop.stop    = 0;
+    mc_ap_loop.ap_done = 0;
+    mc_ap_loop.rc      = -EINPROGRESS;
+
+    uint32_t seq = 10003;
+    ap_work_submit(1, seq, WORK_PT_REPLACE_LOOP,
+                   (uint64_t)(uintptr_t)&mc_ap_loop, 0);
+
+    int rc = 0;
+    uint64_t o_pa; uint32_t o_pm; uint64_t o_sw;
+    uint32_t bsp_op = 0, bsp_it = 0;
+    /* BSP loops on VA_P (PTE[0]) — adjacent PTE in the same L3 page
+     * as the AP's loop.  Every round serialises on the same
+     * pt_lock_for slot. */
+    for (uint32_t i = 0; i < MC_STRESS_ITERS_5B && rc == 0; i++) {
+        rc = aarch64_pt_map_4k_ext(root, MC_VA_P, data_bsp,
+                                   AARCH64_PT_KERNEL_RW, 0);
+        bsp_op = 0; bsp_it = i;
+        if (rc != AARCH64_PT_OK) break;
+        rc = aarch64_pt_replace_4k(root, MC_VA_P, data_bsp,
+                                   AARCH64_PT_KERNEL_RO, 0,
+                                   &o_pa, &o_pm, &o_sw);
+        bsp_op = 1;
+        if (rc != AARCH64_PT_OK) break;
+        rc = aarch64_pt_unmap_4k_ext(root, MC_VA_P, &o_pa, &o_pm, &o_sw);
+        bsp_op = 2;
+        if (rc != AARCH64_PT_OK) break;
+    }
+
+    /* Bounded AP handshake close — FAIL, never halt. */
+    bool ap_done = mc_poll_work_done(1, seq);
+    mc_work_rearm(1);
+
+    if (rc != 0 || !ap_done || mc_ap_loop.rc != AARCH64_PT_OK) {
+        mc_dump_chain(root);
+        mc_puts("[selftest] m3mc: 5b bsp_op=");
+        mc_put_u64(bsp_op);
+        mc_puts(" it=");
+        mc_put_u64(bsp_it);
+        mc_puts(" bsp_rc=");
+        mc_put_i32(rc);
+        mc_puts(" ap_rc=");
+        mc_put_i32(mc_ap_loop.rc);
+        mc_puts("\n");
+    }
+    if (!ap_done)
+        return section_fail("5b:ap_timeout", -ETIMEDOUT);
+    if (mc_ap_loop.rc != AARCH64_PT_OK)
+        return section_fail("5b:ap_rc", mc_ap_loop.rc);
+    if (rc != AARCH64_PT_OK)
+        return section_fail("5b:bsp_rc", rc);
+
+    /* Both leaves drained: the slots must be empty again. */
+    rc = aarch64_pt_query_4k_ext(root, MC_VA_P, &o_pa, &o_pm, &o_sw);
+    if (rc != AARCH64_PT_ENOENT)
+        return section_fail("5b:va_p_leftover", rc ? rc : -EIO);
+    rc = aarch64_pt_query_4k_ext(root, MC_VA_Q, &o_pa, &o_pm, &o_sw);
+    if (rc != AARCH64_PT_ENOENT)
+        return section_fail("5b:va_q_leftover", rc ? rc : -EIO);
+
+    mc_puts("[selftest] m3mc: 5b PASS\n");
+    return 0;
+}
+
 /* ── Section ⑥: concurrent L1 creation on a shared L1 entry ─────── */
 static int section_shared_l1(uint64_t *root, uint64_t data_ap,
                              uint64_t data_bsp)
@@ -533,6 +687,8 @@ int test_aarch64_page_table_multicore_run(void)
     } else {
         if (section_pt_lock_interleave(root, data_ap, data_bsp) == 0)
             passed++; else failed++;
+        if (section_concurrent_replace(root, data_ap, data_bsp) == 0)
+            passed++; else failed++;
         if (section_shared_l1(root, data_ap, data_bsp) == 0)
             passed++; else failed++;
         free_4k_page(data_ap);
@@ -543,7 +699,7 @@ int test_aarch64_page_table_multicore_run(void)
     /* Parser-asserted final marker. Sections: target_set,
      * partial_mask (SKIP at -smp 2 counts as a pass — the 4-core
      * matrix leg covers the real assertion), pt_lock_interleave,
-     * shared_l1. */
+     * 5b (concurrent_replace), shared_l1. */
     if (failed == 0) {
         mc_puts("[selftest] m3mc: ");
         mc_put_u64((uint64_t)passed);

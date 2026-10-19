@@ -39,8 +39,17 @@ enum ap_work_cmd { WORK_READ64 = 1, WORK_BARRIER = 2 };
  * (its §8.2⑤ design note describes the map → unmap stress loop that
  * runs as WORK_PT_MAP items). Unknown commands without an override
  * are ignored exactly like before (state stays READY, seq does not
- * advance). */
-enum ap_work_cmd_ext { WORK_PT_MAP = 4 };
+ * advance).
+ *
+ * 2026-10-19 phantom-ENOENT investigation (roadmap Parked #2): added
+ * WORK_PT_REPLACE_LOOP so §5b can have the AP loop map→replace(atomic
+ * RW→RO)→unmap on a scratch leaf while the BSP does the same on an
+ * adjacent leaf in the same L3 page.  arg0 = pointer to a
+ * `struct mc_loop_args` (BSS kernel VA, identical on every core).
+ * The handler loops until iters_done == iters OR stop != 0, then
+ * sets ap_done = 1 and returns; the BSP polls ap_done + slot
+ * state to wait for completion. */
+enum ap_work_cmd_ext { WORK_PT_MAP = 4, WORK_PT_REPLACE_LOOP = 5 };
 
 /* Weak extension dispatcher (M3.6 Task 26): return true when `cmd`
  * was consumed and *out holds the result; false to leave the item
