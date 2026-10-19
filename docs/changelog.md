@@ -1,9 +1,13 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-10-11）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-10-19）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
+
+## 2026-10-19
+
+- fix(selftest): **test_tty_vintr 间歇性挂死**（分支 `fix/tty-vintr-timeout`）：VINTR → signal_pgrp 链路本身工作正常（vintr 子线程确实唤起并 `vintr_seen=1`），但测试线程用 `arch_local_irq_disable` 的紧忙等 spin2 在 SMP=4 负载均衡把 vintr 子线程迁到与测试线程同 CPU 时永远等不到该值（runner 75s 超时）。改为直接检查 `t->signal & SIGINT && t->state == RUNNING`，与 `test_pgrp_signal` 同模式。SMP=4 与 SMP=8 各连测多次 tty_vintr 0 失败；fd_refcount 在 SMP=4/8 偶发独立 `rc_-1` 失败与本 fix 无关（roadmap parked item #1）
 
 ## 2026-10-11
 
