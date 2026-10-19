@@ -107,16 +107,28 @@ int test_tty_vintr(void)
     // 5. Inject VINTR char (0x03 = Ctrl-C) into tty
     tty_push_input(dev_tty, 0x03);
 
-    // 6. Wait for thread to wake and ack (bounded)
-    int spin2 = 0;
-    while (!__atomic_load_n(&vintr_seen, __ATOMIC_ACQUIRE) && spin2++ < 10000) {
+    // 6. Wait for the thread to receive the signal.  Bounded spin on
+    //    (t->signal & SIGINT) — same pattern as test_pgrp_signal.  The
+    //    previous "wait for vintr_seen ack" pattern deadlocked under
+    //    SMP=4 when the load balancer migrated the vintr thread onto the
+    //    same CPU as the test thread, because the test thread's tight
+    //    `arch_local_irq_disable` loop blocked preemption of itself long
+    //    enough that the vintr thread's `vintr_seen=1` write was never
+    //    observed before the runner's 75 s timeout.
+    int wait = 0;
+    while (wait++ < 10000) {
+        if ((t->signal & (1ULL << SIGINT)) && t->state == TASK_RUNNING)
+            break;
         arch_local_irq_enable();
         for (volatile int i = 0; i < 1000; i++);
         arch_local_irq_disable();
     }
 
-    if (!__atomic_load_n(&vintr_seen, __ATOMIC_ACQUIRE)) {
+    if ((t->signal & (1ULL << SIGINT)) == 0) {
         serial_printk("FAIL: thread did not receive SIGINT\n");
+    } else if (t->state != TASK_RUNNING) {
+        serial_printk("FAIL: thread not in RUNNING (state=%lld)\n",
+                      (long long)t->state);
     } else {
         serial_printk("PASS\n");
         rc = 0;
