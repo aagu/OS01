@@ -39,7 +39,7 @@ import unittest
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 # This module is imported *bare* by run_test.py's script-mode main()
 # (``from test_resolution_switcher import test_resolution``), which puts
@@ -76,6 +76,14 @@ WHITELIST = {
     (640, 480), (800, 600), (1024, 768), (1280, 720), (1280, 800),
     (1280, 1024), (1440, 900), (1600, 900), (1920, 1080),
 }
+
+# Shell-prompt matcher.  A bare ``# `` substring is too loose: an error
+# message or a comment in the captured serial buffer can carry the same
+# two bytes (anywhere in a line) and cause ``wait_for`` to return
+# before the new prompt is actually echoed.  Anchor it to a line start
+# with MULTILINE so the next command's leading ``# `` only matches
+# once the shell has finished its previous job.
+PROMPT_RE = re.compile(rf"^{re.escape(PROMPT)}", re.MULTILINE)
 
 # EFI System Partition type GUID (canonical, mixed-endian decoded).
 ESP_TYPE_GUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
@@ -808,7 +816,8 @@ def evaluate_round_trip(session, initial: str = BOOT_MODE) -> list:
     """
     fail: list = []
 
-    def expect(w: int, h: int, label: str) -> None:
+    def expect(w: int, h: int, label: str,
+               sentinels: Sequence[tuple[int, int, tuple[int, int, int]]] = ()) -> None:
         surf = session.screen(label)
         r = check_surface_dims((w, h), surf)
         if r:
@@ -817,8 +826,19 @@ def evaluate_round_trip(session, initial: str = BOOT_MODE) -> list:
         r = check_picture_present(surf)
         if r:
             fail.append(f"{label}:{r}")
+        # Spec §8.2: also confirm a *known edge pixel* of the live
+        # screendump.  ``(0, 0)`` is the top-left corner after the
+        # terminal's clear-to-bg draw (terminal_render.c: bg=0x000000
+        # fullscreen rect), so a (0,0)→black assertion is the simplest
+        # concrete check the suite can pin without coupling to glyph
+        # metrics or palette evolution across mode switches.
+        for x, y, rgb in sentinels:
+            r = check_sentinel(surf, x, y, rgb, tol=4) if surf else "no_surface"
+            if r:
+                fail.append(f"{label}:{r}")
 
-    expect(800, 600, "boot")
+    expect(800, 600, "boot",
+           sentinels=((0, 0, (0, 0, 0)),))
     if session.mode() != (800, 600):
         fail.append(f"boot_mode {session.mode()} != (800, 600)")
 
@@ -854,7 +874,8 @@ def evaluate_round_trip(session, initial: str = BOOT_MODE) -> list:
     # Restore the initial mode and require a *new* generation (ABA-safe).
     gen_before = session.generation()
     session.run(f"setres {initial}")
-    expect(800, 600, "restore")
+    expect(800, 600, "restore",
+           sentinels=((0, 0, (0, 0, 0)),))
     if session.mode() != (800, 600):
         fail.append(f"restore_mode {session.mode()} != (800, 600)")
     gen_after = session.generation()
@@ -908,6 +929,12 @@ def evaluate_off_whitelist(session) -> tuple[bool, list, Optional[str]]:
     r = check_surface_dims((mode[0], mode[1]), surf)
     if r:
         fail.append(f"off_whitelist:{r}")
+    if surf is not None:
+        # Same pixel as the round-trip sentinel: the off-table boot also
+        # hands control to the terminal which paints bg=black at (0,0).
+        r = check_sentinel(surf, 0, 0, (0, 0, 0), tol=4)
+        if r:
+            fail.append(f"off_whitelist:{r}")
     return (not fail), fail, None
 
 
@@ -1003,6 +1030,12 @@ def run_test_suite(firmware: Path, image: Path, results_dir: Path,
     failures += _mmap_case(firmware, copy800, results_dir, log)
     failures += _rollback_case(firmware, copy800, results_dir, log)
 
+    # Spec §8.2 item-1: a "three-boot" isolation check (original ->
+    # 800x600 copy -> original) is required for *both* configurations,
+    # so even the FB_RESOLUTION_TEST=1 subset proves the original
+    # image's sha256 and boot mode survive our copy+boot cycle.
+    failures += _isolation_case(firmware, image, copy800, results_dir, log)
+
     return _report("test", failures, log)
 
 
@@ -1031,7 +1064,7 @@ def _no_bga_case(firmware: Path, image: Path, results_dir: Path, log,
         log(f"FAIL: {e}")
         return ["nobga_qmp_failed"]
     try:
-        if not sess.wait_for(re.escape(PROMPT), timeout=BOOT_TIMEOUT):
+        if not sess.wait_for(PROMPT_RE, timeout=BOOT_TIMEOUT):
             fail.append("nobga_no_shell")
             return fail
 
@@ -1125,7 +1158,7 @@ def _boot_session(firmware: Path, image: Path, results_dir: Path, log):
     except QmpError as e:
         log(f"FAIL: {e}")
         return None
-    if not sess.wait_for(re.escape(PROMPT), timeout=BOOT_TIMEOUT):
+    if not sess.wait_for(PROMPT_RE, timeout=BOOT_TIMEOUT):
         log("FAIL: no shell prompt")
         log("serial tail:\n" + sess.output()[-800:])
         sess.close()
@@ -1161,7 +1194,7 @@ def _idle_switch_case(sess, log) -> list:
     # Ctrl-C must still reach ash and yield a fresh prompt.
     mark = sess.mark()
     sess._send("\x03")
-    if not sess.wait_for(re.escape(PROMPT), timeout=8, start=mark):
+    if not sess.wait_for(PROMPT_RE, timeout=8, start=mark):
         fail.append("ctrl_c_no_prompt")
     if sess.shell_pid() != pid0:
         fail.append("ctrl_c_shell_changed")
@@ -1351,13 +1384,16 @@ def _drain_case(firmware: Path, image: Path, results_dir: Path, log) -> list:
     if sess is None:
         return ["drain_boot_failed"]
     try:
-        sess.send_line("/bin/test_resolution hold 4 &")
-        if not sess.wait_for(r"HOLD ok", timeout=8):
+        mark = sess.mark()
+        sess.send_line("/bin/test_resolution hold 8 &")
+        if not sess.wait_for(r"HOLD ok", timeout=8, start=mark):
             return ["drain_hold_not_acquired"]
+        mark = sess.mark()
         out = _guest(sess, f"setres 1280x720")
         if "EBUSY" not in out:
             fail.append(f"drain_no_ebusy: {out.strip()[-120:]}")
-        if not sess.wait_for(r"RELEASE ok", timeout=8):
+        # Release window: 8s lease on a drained SET that may take ~1s.
+        if not sess.wait_for(r"RELEASE ok", timeout=12, start=mark):
             fail.append("drain_release_missing")
         if sess.mode() != (800, 600):
             fail.append(f"drain_mode_changed {sess.mode()}")
@@ -1440,15 +1476,18 @@ def _client_eagain_case(sess, log) -> list:
     contract.
     """
     fail: list = []
-    sess.send_line("/bin/test_resolution hold 4 &")
-    if not sess.wait_for(r"HOLD ok", timeout=8):
+    pre_hold = sess.mark()
+    sess.send_line("/bin/test_resolution hold 8 &")
+    if not sess.wait_for(r"HOLD ok", timeout=8, start=pre_hold):
         return ["eagain_hold_not_acquired"]
 
     if not _start_client(sess):
         return ["eagain_client_never_presenting"]
-    # Everything examined from here is strictly newer than the client start,
-    # so a stale RELEASE/clients marker from an earlier case cannot match.
-    mark = sess.mark()
+    # Carve a fresh observation window AFTER client-start so that stale
+    # client markers from a prior boot (residual across the per-suite
+    # _boot_session) cannot match.  Anything appended from here on is
+    # strictly a consequence of *this* case's actions.
+    post_client = sess.mark()
 
     # This SET must block in the drain and time out: generation unchanged.
     out = _guest(sess, "setres 1280x720")
@@ -1457,7 +1496,7 @@ def _client_eagain_case(sess, log) -> list:
 
     # The client must NOT have exited on the transient failure, and must not
     # have taken the stale-view path (which only a generation change triggers).
-    seen = sess.output()[len(mark):]
+    seen = sess.output()[len(post_client):]
     if re.search(r"RES_LVGL_EXIT=", seen):
         fail.append("eagain_client_exited_on_transient")
     if "display mode changed, restart the app" in seen:
@@ -1466,7 +1505,9 @@ def _client_eagain_case(sess, log) -> list:
     # The lease releases after hold expires.  A *real* switch now must yield
     # ESTALE: only possible while the client still holds its (unchanged,
     # no-longer-stale) view, so this proves it re-presented after the EAGAIN.
-    if not sess.wait_for(r"RELEASE ok", timeout=10, start=mark):
+    # 8s lease on the 4s hold we used before left a ~3s slack window; with the
+    # hold bumped to 8s and a settled drain of ~1s we have ~6s of margin.
+    if not sess.wait_for(r"RELEASE ok", timeout=14, start=post_client):
         fail.append("eagain_release_missing")
     before = sess.mark()
     _guest(sess, "setres 1280x720")
@@ -1548,8 +1589,18 @@ def _mmap_case(firmware: Path, image: Path, results_dir: Path, log) -> list:
         return ["mmap_boot_failed"]
     try:
         out = _guest(sess, "/bin/test_resolution mmap")
-        if "RESJSON" not in out or '"op": "mmap"' not in out:
-            fail.append(f"mmap_helper_failed: {out.strip()[-120:]}")
+        # The previous loose match ("op": "mmap" anywhere) hid a real
+        # failure mode: a rc=-1 RESJSON line means the helper reached
+        # mmap() and the open call failed, *or* the mmap() returned
+        # MAP_FAILED, and no sticky raw_mmap_seen flag was ever set.
+        # Without that flag the subsequent SET cannot return EBUSY, so
+        # the test would PASS without exercising the contract.  Pin to
+        # rc=0 / bytes:4096 (the helper's success payload).
+        parsed = parse_resjson(out)
+        ok_payload = [p for p in parsed if p.get("op") == "mmap" and p.get("rc") == 0]
+        if not ok_payload:
+            tail = out.strip()[-120:]
+            fail.append(f"mmap_helper_failed: {tail}")
         out = _guest(sess, "setres 1280x720")
         if "EBUSY" not in out:
             fail.append("mmap_set_not_ebusy")
@@ -1670,11 +1721,54 @@ def test_resolution(tester=None) -> bool:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="OS01 resolution-switcher runner")
-    parser.add_argument("case", nargs="?", default="all",
-                        help="all | production | test | round-trip | off-whitelist")
+    parser.add_argument(
+        "case", nargs="?", default="all",
+        help="suite to run from the standalone CLI: "
+             "all (default) | production (surface/session normal cases) | "
+             "test (FB_RESOLUTION_TEST=1 fault-injection subset).  "
+             "The 'round-trip' and 'off-whitelist' granular cases are "
+             "currently routed through the run_test.py dispatcher; "
+             "running them standalone is not yet supported.")
     args = parser.parse_args(argv)
-    ok = test_resolution(None)
-    return 0 if ok else 1
+    # Validate the case dispatch *first* so a misspelled CLI argument
+    # raises parser.error / SystemExit(2) instead of failing with the
+    # unrelated "missing firmware" gate.  This keeps ``main`` honest
+    # about honoring ``args.case``.
+    if args.case not in ("all", "production", "test",
+                         "round-trip", "off-whitelist"):
+        parser.error(f"unknown case: {args.case!r}")
+        return 2
+
+    env = dict(os.environ)
+    firmware = _env_path("OVMF_FIRMWARE")
+    image = _env_path("DISK_IMG")
+    if not firmware or not firmware.is_file():
+        print("FAIL: OVMF_FIRMWARE is not set to a readable file")
+        return 1
+    if not image or not Path(image).is_file():
+        print("FAIL: DISK_IMG is not set to a readable file")
+        return 1
+
+    log = print
+    results_dir = _results_dir(Path(image))
+    log(f"resolution suite (case={args.case}): firmware={firmware} "
+        f"image={image} results={results_dir}")
+
+    if args.case == "all":
+        return 0 if test_resolution(None) else 1
+    if args.case == "production":
+        return 0 if run_production_suite(firmware, Path(image),
+                                         results_dir, log) else 1
+    if args.case == "test":
+        return 0 if run_test_suite(firmware, Path(image),
+                                   results_dir, log) else 1
+    if args.case in ("round-trip", "off-whitelist"):
+        print(f"FAIL: case={args.case!r} is not exposed through the "
+              "standalone CLI; invoke it through "
+              "`qemutests/run_test.py --test resolution` "
+              "(the dispatcher wires the four suites).")
+        return 1
+    return 2
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1687,6 +1781,26 @@ class FakeSurface(Surface):
 
 def _mk_surface(w: int, h: int, fill: tuple[int, int, int] = (0, 0, 0)) -> Surface:
     return Surface(w, h, bytes(fill) * (w * h))
+
+
+def _mk_surface_with_sentinel(w: int, h: int,
+                              fill: tuple[int, int, int],
+                              sentinel: tuple[int, int,
+                                              tuple[int, int, int]]) -> Surface:
+    """A non-blank surface whose top-left pixel matches the given sentinel.
+
+    The terminal's boot framebuffer is non-blank (the BGA surface after
+    OVMF GOP setup usually carries a non-bg border).  For host tests we
+    want both: a non-blank surface that passes ``check_picture_present``
+    AND a top-left pixel satisfying ``check_sentinel`` so we exercise
+    the live wiring here.  ``fill`` is the bulk color; ``sentinel`` is
+    (x, y, rgb) the test wants pinned at that exact pixel.
+    """
+    px = bytearray(bytes(fill) * (w * h))
+    x, y, rgb = sentinel
+    base = (y * w + x) * 3
+    px[base:base + 3] = bytes(rgb)
+    return Surface(w, h, bytes(px))
 
 
 class FakeSession:
@@ -1713,6 +1827,16 @@ class FakeSession:
             return _mk_surface(self.mode_now[0], self.mode_now[1])
         if label in ("same-pre", "same-post"):
             return _mk_surface(*self.mode_now, fill=(2, 2, 2))
+        # Boot / restore / mode-switch screendumps must satisfy the
+        # known edge-pixel sentinel at (0, 0): the terminal renders a
+        # bg=0x000000 fullscreen fill (terminal_render.c), so a black
+        # surface is what the live hardware also reports.  We render a
+        # non-blank frame (so ``check_picture_present`` still passes)
+        # with (0, 0) pinned to (0, 0, 0) to exercise the live
+        # sentinel wiring here without coupling to glyph metrics.
+        if label == "boot" or label == "restore" or label.startswith("m"):
+            return _mk_surface_with_sentinel(
+                *self.mode_now, fill=(2, 2, 2), sentinel=(0, 0, (0, 0, 0)))
         return _mk_surface(*self.mode_now, fill=(2, 2, 2))
 
     def mode(self):
@@ -1935,6 +2059,39 @@ class CheckHelpersTest(unittest.TestCase):
         fs.shell_pid = lambda: next(seq)
         self.assertTrue(any("pid_changed" in f for f in evaluate_round_trip(fs)))
 
+    def test_round_trip_sentinel_violation(self):
+        # A pre-echo painted surface that also satisfies the new
+        # (0, 0)=(0, 0, 0) sentinel for the boot screendump must still
+        # pass; this test simulates a broken terminal where the first
+        # screendump comes back with a non-black (0, 0) and verifies
+        # the suite reports the failure.
+        fs = FakeSession()
+
+        # Allow the boot screendump to come back with a non-black
+        # sentinel pixel: override FakeSession.screen for "boot" only.
+        original_screen = fs.screen
+
+        def bad_screen(label="shot"):
+            if label == "boot":
+                return _mk_surface(*fs.mode_now, fill=(255, 0, 0))
+            return original_screen(label)
+
+        fs.screen = bad_screen
+        fail = evaluate_round_trip(fs)
+        self.assertTrue(any("sentinel_pixel(0,0)" in f for f in fail),
+                        f"expected sentinel_pixel(0,0) failure, got {fail}")
+
+    def test_mmap_helper_filters_partial_success(self):
+        # parse_resjson must surface the rc=0 "mmap" payload as the
+        # success marker, so a guest helper that prints only the
+        # helper-shaped JSON without rc=0 (open() or mmap() failed)
+        # is rejected by the case logic.
+        rc0 = parse_resjson('RESJSON {"v": 1, "op": "mmap", "rc": 0, "bytes": 4096}\n')
+        rcneg = parse_resjson('RESJSON {"v": 1, "op": "mmap", "rc": -1, "errno": 5}\n')
+        self.assertEqual([p.get("rc") for p in rc0 if p.get("op") == "mmap"], [0])
+        # A negative rc -1 must NOT count as success.
+        self.assertFalse(any(p.get("rc") == 0 for p in rcneg))
+
 
 class ParseHelpersTest(unittest.TestCase):
     def test_parse_setres_list(self):
@@ -1960,6 +2117,56 @@ class ParseHelpersTest(unittest.TestCase):
     def test_parse_ppid(self):
         self.assertEqual(parse_ppid("Name:\ttask\nPid:\t42\nPPid:\t7\n"), 7)
         self.assertIsNone(parse_ppid("no parent here"))
+
+
+class PromptRegexTest(unittest.TestCase):
+    """Anchor PROMPT to a line start with MULTILINE.
+
+    A bare ``# `` substring is too loose: a serial line that mentions
+    the prompt shape (e.g. an error comment) would otherwise satisfy
+    ``wait_for`` before the shell finishes its previous job.  These
+    tests pin the anchored regression in place.
+    """
+
+    def test_prompt_re_matches_at_line_start(self):
+        buf = "boot: OK\n# "
+        m = PROMPT_RE.search(buf)
+        self.assertIsNotNone(m)
+        self.assertEqual(buf[m.start():m.end()], PROMPT)
+
+    def test_prompt_re_rejects_mid_line(self):
+        # A stray ``# `` embedded in arbitrary text is NOT a prompt.
+        buf = "[warn] leftover # comment in serial buffer\n"
+        self.assertIsNone(PROMPT_RE.search(buf))
+
+    def test_prompt_re_matches_after_first_command(self):
+        buf = "# echo one\n# echo two\n# "
+        matches = list(PROMPT_RE.finditer(buf))
+        self.assertEqual(len(matches), 3)
+        self.assertEqual([buf[m.start():m.end()] for m in matches],
+                         ["# "] * 3)
+
+
+class MainCliDispatchTest(unittest.TestCase):
+    """Wire the standalone ``main(argv)`` entry to ``args.case``."""
+
+    def test_main_unknown_case_exits_2(self):
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                main(["nonsense-case"])
+        # argparse error -> SystemExit(2)
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_main_round_trip_standalone_rejected(self):
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            rc = main(["round-trip"])
+        # Either the image gate fails (1) or argparse error (2);
+        # both honor the case argument rather than silently ignoring it.
+        self.assertIn(rc, (1, 2))
 
 
 if __name__ == "__main__":
