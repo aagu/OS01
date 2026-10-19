@@ -1,11 +1,13 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-10-19）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-10-20）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
 
 ## 2026-10-20
+
+- test(resolution): **roadmap Parked #5 #1–#7 闭环**（分支 `fix/resolution-switcher-cosmetic`，commit [`cd65b868`](../../logs/git/refs/master)）：`qemutests/test_resolution_switcher.py` 7 项 cosmetic/鲁棒性收尾一次性合并（+231/−24，1 文件）。① `expect()` 增 `sentinels=` 参数，boot/restore/m{} 三类 surface 强制 `(0,0)=黑` sentinel（来自 `terminal_render.c:356` `gfx_fill_rect(... bg)` 后置约束）由 `_mk_surface_with_sentinel(w,h,fill=(2,2,2),sentinel=(0,0,(0,0,0)))` host 复现非纯黑 surface + 已知像素双源 ground truth；② `_drain_case` 用 hold-then-setres-assert-EBUSY 串起三步且 release 匹配 `start=` 过滤陈旧 serial；③ `wait_for(r"HOLD ok", ..., start=mark)` 收紧所有 callsite 防陈旧行；④ `_client_eagain_case` 同 start 化 + hold 8s 余量；⑤ `_mmap_case` 改 `parse_resjson` 过滤 `op=="mmap" and rc==0`，不再误命中 rc:-1 失败 JSON；⑥ `run_test_suite` 现跑三启动 `_isolation_case`（spec §8.2 item-1 隔离契约）；⑦ `PROMPT_RE = re.compile(rf"^{re.escape(PROMPT)}", re.MULTILINE)` 行首锚定 3 callsite 替换；⑧ `main()` `parser.error()` 校验 `case` 置于 firmware gate 之前，未知 case 返回 SystemExit(2)。补充 5 host unit test（`test_round_trip_sentinel_violation`、`test_mmap_helper_filters_partial_success`、`test_prompt_re_matches_at_line_start`/`_rejects_mid_line`/`_matches_after_first_command`、`test_main_unknown_case_exits_2`、`test_main_round_trip_standalone_rejected`）。roadmap Parked #5 #8–#21（客户端策略/`terminal.c:301-302` present 门限/`fb_test` 残留/T6 pty/`fb_write_row` 死码等）仍未闭环。
 
 - fix(aarch64): **phantom `-ENOENT` 根因钉死并修复**（分支 `fix/aarch64-phantom-enoent`，commit [`80eed2e9`](../../logs/git/refs/master)）：`kernel/include/arch/atomic.h` 的 AArch64 `arch_atomic_cas()` 内联汇编执行 `cmp` 但只声明 `"memory"` clobber，未声明 `"cc"`，导致编译器保留 PROTNONE 检测的 `tst` NZCV 跨 CAS 跨过去再被 `csel` 消费。首次 CAS 失败（lock busy）时 `cmp 0,1` 把 Z=0，csel 依此清掉描述符 V 位，retry 路径不改 desc 直接 `stlr` 出 V=0/TABLE=1/PA=correct 的畸形 desc，下一次读 V=0 即 phantom `-ENOENT`。修复 +1 行（加 `"cc"`）。回归钉死测试：新增 `kernel/selftest/test_aarch64_page_table_multicore.c` §5b（BSP+AP 紧邻 PTE 索引上 500 次 `replace_4k` RW→RO 原子循环，`ap_work_cmd_ext` 增 `WORK_PT_REPLACE_LOOP=5` 枚举值驱动 AP 侧）—— cpus=4 无修复 100% 复现，有修复 100% PASS；cpus=2/4 实端到端各 5/5 PASS。roadmap Parked #2 + M4「不得引入并发 `arch_vmm_*` updater」硬约束同步撤销。根因证据：`docs/aarch64-phantom-enoent-root-cause-2026-10-19.md`（前后 disasm）；pause-session 期间的历史档：`docs/aarch64-phantom-enoent-handoff-2026-10-19.md`。
 
