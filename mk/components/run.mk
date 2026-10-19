@@ -387,7 +387,7 @@ TEST_SELFTEST_IMAGE := $(BUILD_DIR)/image/selftest/disk.img
 # overridable.
 KERNEL_SELFTEST_SMP ?= 4
 
-.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-fault-bridge test-gfx-device test-gfx-client test-gfx-primitives test-m1-host test-arch9-host test-resolution-host
+.PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-fault-bridge test-gfx-device test-gfx-client test-gfx-primitives test-m1-host test-arch9-host test-resolution-host test-gui-host
 test-host:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,run $(OS01_SUBMAKE_ARGS))
@@ -609,6 +609,36 @@ test-resolution-host: $(if $(filter all,$(RES_CASE_EFFECTIVE)),$(foreach c,$(RES
 	    all) echo "  [test-resolution-host] full registered group: $(RESOLUTION_HOST_REGISTERED_CASES)";; \
 	    *) echo "  [test-resolution-host] RES_CASE=$(RES_CASE_EFFECTIVE)";; \
 	  esac
+
+# ── GUI host tests ───────────────────────────────────────────
+# Focused host tests for GUI-1 LVGL platform backend.
+# CASE accepts platform, lvgl, or all (default: all).
+# In Task 3 only platform is registered; Task 4 adds lvgl.
+# Unknown CASE aborts non-zero before invoking submake.
+.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl
+GUI_HOST_REGISTERED_CASES := platform
+
+_test-gui-host-run-platform:
+	@echo "  [test-gui-host] platform"
+	$(call os01_submake,hosttests,test-gui-platform $(OS01_SUBMAKE_ARGS))
+
+_test-gui-host-run-lvgl:
+	@echo "  [test-gui-host] lvgl"
+	$(call os01_submake,hosttests,test-gui-lvgl $(OS01_SUBMAKE_ARGS))
+
+_test-gui-host-run-%:
+	@echo "ERROR: unknown CASE='$*'; valid: platform, lvgl, all" >&2
+	@exit 1
+
+GUI_CASE_RAW := $(CASE)
+GUI_CASE_EFFECTIVE = $(if $(strip $(GUI_CASE_RAW)),$(GUI_CASE_RAW),all)
+test-gui-host: $(if $(filter all,$(GUI_CASE_EFFECTIVE)),$(foreach c,$(GUI_HOST_REGISTERED_CASES),_test-gui-host-run-$(c)),_test-gui-host-run-$(GUI_CASE_EFFECTIVE))
+	$(call require_capability,rootfs)
+	@case "$(GUI_CASE_EFFECTIVE)" in \
+	    all) echo "  [test-gui-host] full registered group: $(GUI_HOST_REGISTERED_CASES)";; \
+	    *) echo "  [test-gui-host] CASE=$(GUI_CASE_EFFECTIVE)";; \
+	  esac
+
 
 # Focused hosttest for the gfx 2D API plan Task 1 — per-file device
 # ioctl/release lifecycle.  Runs the single TEST_BINS entry

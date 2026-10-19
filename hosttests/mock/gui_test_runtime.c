@@ -1,0 +1,391 @@
+#include "gui_test_runtime.h"
+#include <src/display/lv_display_private.h>
+#include <gui_tick.h>
+
+#include <errno.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <time.h>
+#include <unistd.h>
+
+struct gui_test_counts g_gui_test_counts = {0};
+
+static uint64_t g_gui_test_now_ms = 100;
+
+bool g_gui_test_intercept_calloc = true;
+bool g_gui_test_fail_calloc = false;
+
+bool g_gui_test_intercept_mmap = true;
+int  g_gui_test_fail_mmap_n = 0;
+bool g_gui_test_mock_large_mmap = true;
+bool g_gui_test_fail_munmap = false;
+
+bool g_gui_test_intercept_fb = true;
+bool g_gui_test_fail_fb_open = false;
+int  g_gui_test_fail_fb_open_errno = 0;
+bool g_gui_test_fail_fb_read = false;
+int  g_gui_test_fail_fb_read_errno = 0;
+bool g_gui_test_short_fb_read = false;
+struct fb_info g_gui_test_fb_info = {
+    .width = 640,
+    .height = 480,
+    .stride = 2560,
+    .bpp = 32,
+    .format = FB_FORMAT_RGB32
+};
+
+bool g_gui_test_intercept_clock = true;
+bool g_gui_test_fail_clock = false;
+int  g_gui_test_fail_clock_errno = 0;
+int  g_gui_test_fail_clock_after_n = 0;
+
+bool g_gui_test_fail_gfx_open = false;
+int  g_gui_test_fail_gfx_open_errno = 0;
+bool g_gui_test_fail_gfx_info = false;
+bool g_gui_test_mismatch_gfx_info = false;
+gfx_info_t g_gui_test_gfx_info_override = {0};
+
+int  g_gui_test_fail_acquire_errno = 0;
+int  g_gui_test_fail_present_errno = 0;
+uint32_t g_gui_test_present_blocking_ms = 0;
+int  g_gui_test_fail_release_errno = 0;
+bool g_gui_test_cleanup_change_errno = false;
+
+bool g_gui_test_fail_lv_display_create = false;
+uint32_t g_gui_test_handler_delay = 20;
+
+lv_display_t *g_gui_test_last_display = NULL;
+
+struct queued_flush {
+    lv_area_t area;
+    const uint32_t *pixels;
+};
+#define MAX_QUEUED_FLUSHES 32
+static struct queued_flush s_flush_queue[MAX_QUEUED_FLUSHES];
+static int s_flush_count = 0;
+
+void gui_test_reset(void)
+{
+    memset(&g_gui_test_counts, 0, sizeof(g_gui_test_counts));
+    g_gui_test_now_ms = 100;
+    gui_tick_reset();
+
+    g_gui_test_intercept_calloc = true;
+    g_gui_test_fail_calloc = false;
+
+    g_gui_test_intercept_mmap = true;
+    g_gui_test_fail_mmap_n = 0;
+    g_gui_test_mock_large_mmap = true;
+    g_gui_test_fail_munmap = false;
+
+    g_gui_test_intercept_fb = true;
+    g_gui_test_fail_fb_open = false;
+    g_gui_test_fail_fb_open_errno = 0;
+    g_gui_test_fail_fb_read = false;
+    g_gui_test_fail_fb_read_errno = 0;
+    g_gui_test_short_fb_read = false;
+    g_gui_test_fb_info.width = 640;
+    g_gui_test_fb_info.height = 480;
+    g_gui_test_fb_info.stride = 2560;
+    g_gui_test_fb_info.bpp = 32;
+    g_gui_test_fb_info.format = FB_FORMAT_RGB32;
+
+    g_gui_test_intercept_clock = true;
+    g_gui_test_fail_clock = false;
+    g_gui_test_fail_clock_errno = 0;
+    g_gui_test_fail_clock_after_n = 0;
+
+    g_gui_test_fail_gfx_open = false;
+    g_gui_test_fail_gfx_open_errno = 0;
+    g_gui_test_fail_gfx_info = false;
+    g_gui_test_mismatch_gfx_info = false;
+    memset(&g_gui_test_gfx_info_override, 0, sizeof(g_gui_test_gfx_info_override));
+
+    g_gui_test_fail_acquire_errno = 0;
+    g_gui_test_fail_present_errno = 0;
+    g_gui_test_present_blocking_ms = 0;
+    g_gui_test_fail_release_errno = 0;
+    g_gui_test_cleanup_change_errno = false;
+
+    g_gui_test_fail_lv_display_create = false;
+    g_gui_test_handler_delay = 20;
+
+    g_gui_test_last_display = NULL;
+    s_flush_count = 0;
+}
+
+void gui_test_set_now(uint64_t ms)
+{
+    g_gui_test_now_ms = ms;
+}
+
+uint64_t gui_test_get_now(void)
+{
+    return g_gui_test_now_ms;
+}
+
+void gui_test_advance_now(uint64_t ms)
+{
+    g_gui_test_now_ms += ms;
+}
+
+void gui_test_queue_flush(const lv_area_t *area, const uint32_t *pixels)
+{
+    if (s_flush_count < MAX_QUEUED_FLUSHES) {
+        if (area) {
+            s_flush_queue[s_flush_count].area = *area;
+        } else {
+            memset(&s_flush_queue[s_flush_count].area, 0, sizeof(lv_area_t));
+        }
+        s_flush_queue[s_flush_count].pixels = pixels;
+        s_flush_count++;
+    }
+}
+
+/* ── Wrappers ─────────────────────────────────────────────────── */
+
+extern void *__real_calloc(size_t nmemb, size_t size);
+void *__wrap_calloc(size_t nmemb, size_t size)
+{
+    if (g_gui_test_intercept_calloc && g_gui_test_fail_calloc) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    return __real_calloc(nmemb, size);
+}
+
+extern void *__real_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
+void *__wrap_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
+{
+    if (g_gui_test_intercept_mmap) {
+        g_gui_test_counts.mmap++;
+        if (g_gui_test_fail_mmap_n > 0) {
+            g_gui_test_fail_mmap_n--;
+            if (g_gui_test_fail_mmap_n == 0) {
+                errno = ENOMEM;
+                return MAP_FAILED;
+            }
+        }
+        if (g_gui_test_mock_large_mmap && length > 64 * 1024 * 1024) {
+            return __real_mmap(NULL, 4096, prot, flags | MAP_ANONYMOUS, -1, 0);
+        }
+    }
+    return __real_mmap(addr, length, prot, flags, fd, offset);
+}
+
+extern int __real_munmap(void *addr, size_t length);
+int __wrap_munmap(void *addr, size_t length)
+{
+    if (g_gui_test_intercept_mmap) {
+        g_gui_test_counts.munmap++;
+        if (addr == MAP_FAILED) {
+            fprintf(stderr, "FATAL TEST FAILURE: munmap called on MAP_FAILED (%p)!\n", addr);
+            abort();
+        }
+        if (g_gui_test_cleanup_change_errno) {
+            errno = EBUSY;
+        }
+        if (g_gui_test_mock_large_mmap && length > 64 * 1024 * 1024) {
+            return __real_munmap(addr, 4096);
+        }
+    }
+    return __real_munmap(addr, length);
+}
+
+extern int __real_open(const char *pathname, int flags, ...);
+int __wrap_open(const char *pathname, int flags, ...)
+{
+    if (g_gui_test_intercept_fb && pathname && strcmp(pathname, "/dev/fb") == 0) {
+        if (g_gui_test_fail_fb_open) {
+            errno = g_gui_test_fail_fb_open_errno ? g_gui_test_fail_fb_open_errno : ENOENT;
+            return -1;
+        }
+        return 999;
+    }
+    va_list ap;
+    va_start(ap, flags);
+    mode_t mode = va_arg(ap, mode_t);
+    va_end(ap);
+    return __real_open(pathname, flags, mode);
+}
+
+extern ssize_t __real_read(int fd, void *buf, size_t count);
+ssize_t __wrap_read(int fd, void *buf, size_t count)
+{
+    if (fd == 999) {
+        if (g_gui_test_fail_fb_read) {
+            errno = g_gui_test_fail_fb_read_errno ? g_gui_test_fail_fb_read_errno : EIO;
+            return -1;
+        }
+        if (g_gui_test_short_fb_read) {
+            size_t copy_sz = sizeof(struct fb_info) > 4 ? sizeof(struct fb_info) - 4 : 1;
+            if (count < copy_sz) copy_sz = count;
+            memcpy(buf, &g_gui_test_fb_info, copy_sz);
+            return (ssize_t)copy_sz;
+        }
+        size_t copy_sz = sizeof(struct fb_info);
+        if (count < copy_sz) copy_sz = count;
+        memcpy(buf, &g_gui_test_fb_info, copy_sz);
+        return (ssize_t)copy_sz;
+    }
+    return __real_read(fd, buf, count);
+}
+
+extern int __real_close(int fd);
+int __wrap_close(int fd)
+{
+    if (fd == 999) {
+        return 0;
+    }
+    return __real_close(fd);
+}
+
+extern int __real_clock_gettime(clockid_t clk_id, struct timespec *tp);
+int __wrap_clock_gettime(clockid_t clk_id, struct timespec *tp)
+{
+    if (g_gui_test_intercept_clock && clk_id == CLOCK_MONOTONIC) {
+        if (g_gui_test_fail_clock) {
+            errno = g_gui_test_fail_clock_errno ? g_gui_test_fail_clock_errno : EIO;
+            return -1;
+        }
+        if (g_gui_test_fail_clock_after_n > 0) {
+            g_gui_test_fail_clock_after_n--;
+            if (g_gui_test_fail_clock_after_n == 0) {
+                errno = g_gui_test_fail_clock_errno ? g_gui_test_fail_clock_errno : EIO;
+                return -1;
+            }
+        }
+        if (tp) {
+            tp->tv_sec = (time_t)(g_gui_test_now_ms / 1000ULL);
+            tp->tv_nsec = (long)((g_gui_test_now_ms % 1000ULL) * 1000000ULL);
+        }
+        return 0;
+    }
+    return __real_clock_gettime(clk_id, tp);
+}
+
+static int s_mock_gfx_val = 0x42;
+
+gfx_handle_t *__wrap_gfx_open(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
+{
+    (void)x; (void)y; (void)w; (void)h;
+    if (g_gui_test_fail_gfx_open) {
+        errno = g_gui_test_fail_gfx_open_errno ? g_gui_test_fail_gfx_open_errno : ENODEV;
+        return NULL;
+    }
+    return (gfx_handle_t *)&s_mock_gfx_val;
+}
+
+gfx_info_t __wrap_gfx_get_info(const gfx_handle_t *h)
+{
+    (void)h;
+    if (g_gui_test_fail_gfx_info) {
+        errno = EINVAL;
+        return (gfx_info_t){0};
+    }
+    if (g_gui_test_mismatch_gfx_info) {
+        return g_gui_test_gfx_info_override;
+    }
+    return (gfx_info_t){
+        .width = g_gui_test_fb_info.width,
+        .height = g_gui_test_fb_info.height,
+        .stride = g_gui_test_fb_info.width * 4,
+        .format = GFX_FORMAT_RGB32
+    };
+}
+
+int __wrap_gfx_acquire(gfx_handle_t *h)
+{
+    (void)h;
+    g_gui_test_counts.acquire++;
+    if (g_gui_test_fail_acquire_errno) {
+        errno = g_gui_test_fail_acquire_errno;
+        return -1;
+    }
+    return 0;
+}
+
+int __wrap_gfx_present(gfx_handle_t *h)
+{
+    (void)h;
+    g_gui_test_counts.present++;
+    if (g_gui_test_present_blocking_ms > 0) {
+        g_gui_test_now_ms += g_gui_test_present_blocking_ms;
+    }
+    if (g_gui_test_fail_present_errno) {
+        errno = g_gui_test_fail_present_errno;
+        return -1;
+    }
+    return 0;
+}
+
+int __wrap_gfx_release(gfx_handle_t *h)
+{
+    (void)h;
+    g_gui_test_counts.release++;
+    if (g_gui_test_fail_release_errno) {
+        errno = g_gui_test_fail_release_errno;
+        return -1;
+    }
+    return 0;
+}
+
+void __wrap_gfx_close(gfx_handle_t *h)
+{
+    if (h) {
+        g_gui_test_counts.close++;
+    }
+    if (g_gui_test_cleanup_change_errno) {
+        errno = EBUSY;
+    }
+}
+
+void __wrap_gfx_sprite_blit(gfx_handle_t *h, int32_t dst_x, int32_t dst_y,
+                            const uint32_t *sprite, uint32_t stride,
+                            uint32_t w, uint32_t h_, bool has_key, uint32_t key_color)
+{
+    (void)h; (void)dst_x; (void)dst_y; (void)sprite; (void)stride;
+    (void)w; (void)h_; (void)has_key; (void)key_color;
+}
+
+extern lv_display_t *__real_lv_display_create(int32_t hor_res, int32_t ver_res);
+lv_display_t *__wrap_lv_display_create(int32_t hor_res, int32_t ver_res)
+{
+    if (g_gui_test_fail_lv_display_create) {
+        return NULL;
+    }
+    lv_display_t *disp = __real_lv_display_create(hor_res, ver_res);
+    g_gui_test_last_display = disp;
+    return disp;
+}
+
+extern void __real_lv_display_flush_ready(lv_display_t *disp);
+void __wrap_lv_display_flush_ready(lv_display_t *disp)
+{
+    g_gui_test_counts.ready++;
+    __real_lv_display_flush_ready(disp);
+}
+
+uint32_t __wrap_lv_timer_handler(void)
+{
+    g_gui_test_counts.handler++;
+    if (g_gui_test_last_display && s_flush_count > 0) {
+        lv_display_flush_cb_t cb = g_gui_test_last_display->flush_cb;
+        if (cb) {
+            int count = s_flush_count;
+            s_flush_count = 0;
+            for (int i = 0; i < count; i++) {
+                cb(g_gui_test_last_display, &s_flush_queue[i].area, (uint8_t *)s_flush_queue[i].pixels);
+            }
+        } else {
+            s_flush_count = 0;
+        }
+    }
+    return g_gui_test_handler_delay;
+}

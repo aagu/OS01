@@ -1,0 +1,564 @@
+#include <gui/gui_platform.h>
+#include <gui_lvgl_private.h>
+#include <gui_tick.h>
+#include <gfx.h>
+#include "gfx_client_policy.h"
+#include <uapi/fb.h>
+#include <src/display/lv_display_private.h>
+
+#include <errno.h>
+#include <fcntl.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+struct gui_platform {
+    gui_mode_t mode;
+    uint32_t width;
+    uint32_t height;
+    uint32_t buffer_lines;
+
+    /* 绘制缓冲（匿名 mmap 分配） */
+    uint32_t *draw_buf;
+    size_t draw_buf_bytes;
+
+    /* 离屏模式影子画幅（匿名 mmap 分配，仅离屏模式有效） */
+    uint32_t *shadow_canvas;
+    size_t shadow_canvas_bytes;
+
+    /* 屏幕模式关联设备 */
+    gfx_handle_t *gfx;
+    bool acquired;
+    bool pending_present;         /* flush 后置位，present 成功后清除 */
+    gui_status_t terminal_status; /* OK 表示仍活跃，其余终止态锁存 */
+    int terminal_errno;
+    int flush_error;              /* flush 无返回值，供 step 收敛错误 */
+    uint64_t retry_deadline_ms;   /* EAGAIN 限频退避截止时间 (CLOCK_MONOTONIC ms) */
+
+    /* 内部关联对象 */
+    lv_display_t *disp;
+    uint32_t flush_count;
+};
+
+static gui_platform_t *g_active_platform = NULL;
+
+bool gui_platform_checked_mul_size(size_t a, size_t b, size_t *out)
+{
+#if defined(__has_builtin) && __has_builtin(__builtin_mul_overflow)
+    return !__builtin_mul_overflow(a, b, out);
+#else
+    if (a != 0 && b > SIZE_MAX / a) return false;
+    *out = a * b;
+    return true;
+#endif
+}
+
+static void platform_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
+{
+    gui_platform_t *platform = (gui_platform_t *)lv_display_get_user_data(disp);
+    if (!platform) {
+        lv_display_flush_ready(disp);
+        return;
+    }
+
+    if (!area || !px_map ||
+        area->x1 < 0 || area->y1 < 0 ||
+        area->x1 > area->x2 || area->y1 > area->y2 ||
+        (uint32_t)area->x2 >= platform->width ||
+        (uint32_t)area->y2 >= platform->height) {
+        platform->flush_error = EINVAL;
+        lv_display_flush_ready(disp);
+        return;
+    }
+
+    int32_t area_w = area->x2 - area->x1 + 1;
+    int32_t area_h = area->y2 - area->y1 + 1;
+    size_t stride_bytes = (size_t)area_w * sizeof(uint32_t);
+    size_t total_bytes = stride_bytes * (size_t)area_h;
+
+    if (total_bytes > platform->draw_buf_bytes) {
+        platform->flush_error = EINVAL;
+        lv_display_flush_ready(disp);
+        return;
+    }
+
+    if (platform->mode == GUI_MODE_ONSCREEN) {
+        if (platform->gfx) {
+            gfx_sprite_blit(platform->gfx, area->x1, area->y1,
+                            (const uint32_t *)px_map, (uint32_t)stride_bytes,
+                            (uint32_t)area_w, (uint32_t)area_h, false, 0);
+            platform->pending_present = true;
+        }
+    } else {
+        const uint32_t *src = (const uint32_t *)px_map;
+        for (int32_t row = 0; row < area_h; row++) {
+            size_t dst_offset = ((size_t)area->y1 + (size_t)row) * (size_t)platform->width + (size_t)area->x1;
+            size_t src_offset = (size_t)row * (size_t)area_w;
+            memcpy(&platform->shadow_canvas[dst_offset], &src[src_offset], stride_bytes);
+        }
+        platform->pending_present = true;
+    }
+
+    platform->flush_count++;
+    lv_display_flush_ready(disp);
+}
+
+gui_platform_t *gui_platform_create(const gui_config_t *cfg)
+{
+    /* 1. Single instance check */
+    if (g_active_platform != NULL) {
+        errno = EBUSY;
+        return NULL;
+    }
+    gui_tick_reset();
+
+    gui_mode_t mode = GUI_MODE_ONSCREEN;
+    uint32_t req_w = 0;
+    uint32_t req_h = 0;
+    uint32_t req_lines = 0;
+
+    if (cfg != NULL) {
+        mode = cfg->mode;
+        req_w = cfg->width;
+        req_h = cfg->height;
+        req_lines = cfg->buffer_lines;
+    }
+
+    if (mode != GUI_MODE_ONSCREEN && mode != GUI_MODE_OFFSCREEN) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    if (mode == GUI_MODE_ONSCREEN) {
+        if (req_w != 0 || req_h != 0) {
+            errno = EINVAL;
+            return NULL;
+        }
+
+        int fb_fd = open("/dev/fb", O_RDONLY);
+        if (fb_fd < 0) {
+            return NULL;
+        }
+
+        struct fb_info fb;
+        ssize_t n = read(fb_fd, &fb, sizeof(fb));
+        int saved_read_err = errno;
+        close(fb_fd);
+
+        if (n < 0) {
+            errno = saved_read_err;
+            return NULL;
+        }
+        if ((size_t)n < sizeof(fb) || fb.width == 0 || fb.height == 0 || fb.format != FB_FORMAT_RGB32) {
+            errno = EINVAL;
+            return NULL;
+        }
+
+        req_w = fb.width;
+        req_h = fb.height;
+    } else {
+        if (req_w == 0 || req_h == 0) {
+            errno = EINVAL;
+            return NULL;
+        }
+    }
+
+    /* 2. Bounds check */
+    if (req_w > 16383 || req_h > 65535) {
+        errno = EOVERFLOW;
+        return NULL;
+    }
+
+    uint32_t lines = req_lines ? req_lines : 40;
+    if (lines > req_h) {
+        lines = req_h;
+    }
+    if (lines > UINT16_MAX) {
+        errno = EOVERFLOW;
+        return NULL;
+    }
+
+    size_t stride = 0;
+    if (!gui_platform_checked_mul_size((size_t)req_w, sizeof(uint32_t), &stride)) {
+        errno = EOVERFLOW;
+        return NULL;
+    }
+
+    size_t draw_bytes = 0;
+    if (!gui_platform_checked_mul_size(stride, (size_t)lines, &draw_bytes)) {
+        errno = EOVERFLOW;
+        return NULL;
+    }
+    if (draw_bytes == 0 || draw_bytes > UINT32_MAX) {
+        errno = EOVERFLOW;
+        return NULL;
+    }
+
+    size_t canvas_bytes = 0;
+    if (mode == GUI_MODE_OFFSCREEN) {
+        if (!gui_platform_checked_mul_size(stride, (size_t)req_h, &canvas_bytes)) {
+            errno = EOVERFLOW;
+            return NULL;
+        }
+        if (canvas_bytes == 0) {
+            errno = EOVERFLOW;
+            return NULL;
+        }
+    }
+
+    /* 3. Clock availability */
+    uint64_t init_now = 0;
+    if (gui_tick_now_ms(&init_now) != 0) {
+        return NULL;
+    }
+
+    /* 4. Allocate platform struct */
+    gui_platform_t *platform = (gui_platform_t *)calloc(1, sizeof(gui_platform_t));
+    if (!platform) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    platform->mode = mode;
+    platform->width = req_w;
+    platform->height = req_h;
+    platform->buffer_lines = lines;
+    platform->draw_buf = (uint32_t *)MAP_FAILED;
+    platform->shadow_canvas = (uint32_t *)MAP_FAILED;
+
+    int saved = 0;
+    bool lv_inited = false;
+
+    /* 5. Screen mode gfx initialization */
+    if (mode == GUI_MODE_ONSCREEN) {
+        platform->gfx = gfx_open(0, 0, req_w, req_h);
+        if (!platform->gfx) {
+            saved = errno;
+            goto rollback;
+        }
+
+        gfx_info_t info = gfx_get_info(platform->gfx);
+        if (info.width != req_w || info.height != req_h ||
+            info.stride != (uint32_t)stride || info.format != GFX_FORMAT_RGB32) {
+            saved = EINVAL;
+            goto rollback;
+        }
+    }
+
+    /* 6. Allocate memory mappings */
+    platform->draw_buf = (uint32_t *)mmap(NULL, draw_bytes, PROT_READ | PROT_WRITE,
+                                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (platform->draw_buf == MAP_FAILED) {
+        saved = errno;
+        goto rollback;
+    }
+    platform->draw_buf_bytes = draw_bytes;
+
+    if (mode == GUI_MODE_OFFSCREEN) {
+        platform->shadow_canvas = (uint32_t *)mmap(NULL, canvas_bytes, PROT_READ | PROT_WRITE,
+                                                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (platform->shadow_canvas == MAP_FAILED) {
+            saved = errno;
+            goto rollback;
+        }
+        platform->shadow_canvas_bytes = canvas_bytes;
+        memset(platform->shadow_canvas, 0, canvas_bytes);
+    }
+
+    /* 7. Initialize LVGL */
+    lv_init();
+    lv_inited = true;
+    lv_tick_set_cb(gui_tick_get_cb);
+
+    platform->disp = lv_display_create((int32_t)req_w, (int32_t)req_h);
+    if (!platform->disp) {
+        saved = ENOMEM;
+        goto rollback;
+    }
+
+    lv_display_set_color_format(platform->disp, LV_COLOR_FORMAT_XRGB8888);
+    lv_display_set_user_data(platform->disp, platform);
+    lv_display_set_flush_cb(platform->disp, platform_flush_cb);
+    lv_display_set_buffers(platform->disp, platform->draw_buf, NULL,
+                           (uint32_t)draw_bytes, LV_DISPLAY_RENDER_MODE_PARTIAL);
+
+#ifdef OS01_HOST_TEST
+    extern bool g_gui_test_tamper_header;
+    if (g_gui_test_tamper_header && platform->disp->buf_1) {
+        platform->disp->buf_1->header.stride = 0xbeef;
+    }
+#endif
+
+    if (!platform->disp->buf_1 ||
+        platform->disp->buf_1->header.w != req_w ||
+        platform->disp->buf_1->header.h != lines ||
+        platform->disp->buf_1->header.stride != (uint32_t)stride) {
+        saved = EINVAL;
+        goto rollback;
+    }
+
+    g_active_platform = platform;
+    return platform;
+
+rollback:
+    if (platform->disp) {
+        lv_display_delete(platform->disp);
+        platform->disp = NULL;
+    }
+    if (lv_inited) {
+        lv_deinit();
+    }
+    if (platform->shadow_canvas != MAP_FAILED && platform->shadow_canvas_bytes > 0) {
+        munmap(platform->shadow_canvas, platform->shadow_canvas_bytes);
+        platform->shadow_canvas = (uint32_t *)MAP_FAILED;
+    }
+    if (platform->draw_buf != MAP_FAILED && platform->draw_buf_bytes > 0) {
+        munmap(platform->draw_buf, platform->draw_buf_bytes);
+        platform->draw_buf = (uint32_t *)MAP_FAILED;
+    }
+    if (platform->gfx) {
+        if (platform->acquired) {
+            gfx_release(platform->gfx);
+        }
+        gfx_close(platform->gfx);
+        platform->gfx = NULL;
+    }
+    free(platform);
+    errno = saved;
+    return NULL;
+}
+
+void gui_platform_destroy(gui_platform_t *platform)
+{
+    if (!platform) return;
+
+    if (platform->disp) {
+        lv_display_delete(platform->disp);
+        platform->disp = NULL;
+    }
+    lv_deinit();
+
+    if (platform->gfx) {
+        if (platform->acquired) {
+            gfx_release(platform->gfx);
+            platform->acquired = false;
+        }
+        gfx_close(platform->gfx);
+        platform->gfx = NULL;
+    }
+
+    if (platform->shadow_canvas != MAP_FAILED && platform->shadow_canvas_bytes > 0) {
+        munmap(platform->shadow_canvas, platform->shadow_canvas_bytes);
+        platform->shadow_canvas = (uint32_t *)MAP_FAILED;
+    }
+    if (platform->draw_buf != MAP_FAILED && platform->draw_buf_bytes > 0) {
+        munmap(platform->draw_buf, platform->draw_buf_bytes);
+        platform->draw_buf = (uint32_t *)MAP_FAILED;
+    }
+
+    if (g_active_platform == platform) {
+        g_active_platform = NULL;
+    }
+    gui_tick_reset();
+    free(platform);
+}
+
+uint32_t gui_platform_get_width(const gui_platform_t *platform)
+{
+    if (!platform) {
+        errno = EINVAL;
+        return 0;
+    }
+    return platform->width;
+}
+
+uint32_t gui_platform_get_height(const gui_platform_t *platform)
+{
+    if (!platform) {
+        errno = EINVAL;
+        return 0;
+    }
+    return platform->height;
+}
+
+gui_mode_t gui_platform_get_mode(const gui_platform_t *platform)
+{
+    if (!platform) {
+        errno = EINVAL;
+        return GUI_MODE_ONSCREEN;
+    }
+    return platform->mode;
+}
+
+lv_display_t *gui_platform_get_lv_display(gui_platform_t *platform)
+{
+    if (!platform) {
+        errno = EINVAL;
+        return NULL;
+    }
+    return platform->disp;
+}
+
+uint32_t gui_platform_get_pixel(const gui_platform_t *platform, uint32_t x, uint32_t y)
+{
+    if (!platform || platform->mode != GUI_MODE_OFFSCREEN) {
+        errno = EINVAL;
+        return 0xFFFFFFFFu;
+    }
+    if (x >= platform->width || y >= platform->height) {
+        errno = EINVAL;
+        return 0xFFFFFFFFu;
+    }
+    size_t offset = (size_t)y * (size_t)platform->width + (size_t)x;
+    return platform->shadow_canvas[offset] & 0x00FFFFFFu;
+}
+
+static gui_status_t enter_terminal_state(gui_platform_t *platform, gui_status_t status, int err)
+{
+    int saved_errno = err;
+    if (platform->gfx) {
+        if (platform->acquired) {
+            gfx_release(platform->gfx);
+            platform->acquired = false;
+        }
+        gfx_close(platform->gfx);
+        platform->gfx = NULL;
+    }
+    platform->pending_present = false;
+    platform->retry_deadline_ms = 0;
+    platform->terminal_status = status;
+    platform->terminal_errno = saved_errno;
+    errno = saved_errno;
+    return status;
+}
+
+static gui_status_t compute_wait_and_return(gui_platform_t *platform, uint32_t lv_delay,
+                                            uint64_t t_before_handler, gui_status_t status,
+                                            uint32_t *out_next_delay_ms)
+{
+    uint64_t now = 0;
+    if (gui_tick_now_ms(&now) != 0) {
+        return enter_terminal_state(platform, GUI_STATUS_ERROR, errno);
+    }
+
+    uint32_t wait_ms = 100;
+    if (lv_delay != UINT32_MAX /* LV_NO_TIMER_READY */) {
+        uint64_t elapsed = now >= t_before_handler ? (now - t_before_handler) : 0;
+        if (lv_delay > elapsed) {
+            uint32_t remaining = lv_delay - (uint32_t)elapsed;
+            wait_ms = remaining > 100 ? 100 : remaining;
+        } else {
+            wait_ms = 0;
+        }
+    }
+
+    if (platform->pending_present && platform->retry_deadline_ms != 0) {
+        if (now >= platform->retry_deadline_ms) {
+            wait_ms = 0;
+        } else {
+            uint64_t rem = platform->retry_deadline_ms - now;
+            uint32_t rem_ms = rem > 100 ? 100 : (uint32_t)rem;
+            if (rem_ms < wait_ms) {
+                wait_ms = rem_ms;
+            }
+        }
+    }
+
+    if (out_next_delay_ms) {
+        *out_next_delay_ms = wait_ms;
+    }
+    return status;
+}
+
+gui_status_t gui_platform_step(gui_platform_t *platform, uint32_t *out_next_delay_ms)
+{
+    if (out_next_delay_ms) {
+        *out_next_delay_ms = 100;
+    }
+
+    if (!platform) {
+        errno = EINVAL;
+        return GUI_STATUS_ERROR;
+    }
+
+    if (platform->terminal_status != GUI_STATUS_OK) {
+        errno = platform->terminal_errno;
+        return platform->terminal_status;
+    }
+
+    if (gui_tick_error() != 0) {
+        int err = gui_tick_error();
+        return enter_terminal_state(platform, GUI_STATUS_ERROR, err);
+    }
+
+    uint64_t t_before_handler = 0;
+    if (gui_tick_now_ms(&t_before_handler) != 0) {
+        return enter_terminal_state(platform, GUI_STATUS_ERROR, errno);
+    }
+
+    uint32_t lv_delay = lv_timer_handler();
+
+    if (gui_tick_error() != 0) {
+        int err = gui_tick_error();
+        return enter_terminal_state(platform, GUI_STATUS_ERROR, err);
+    }
+    if (platform->flush_error != 0) {
+        int err = platform->flush_error;
+        return enter_terminal_state(platform, GUI_STATUS_ERROR, err);
+    }
+
+    if (platform->mode == GUI_MODE_OFFSCREEN) {
+        platform->pending_present = false;
+        return compute_wait_and_return(platform, lv_delay, t_before_handler, GUI_STATUS_OK, out_next_delay_ms);
+    }
+
+    gui_status_t ret_status = GUI_STATUS_OK;
+
+    if (platform->pending_present) {
+        uint64_t now = 0;
+        if (gui_tick_now_ms(&now) != 0) {
+            return enter_terminal_state(platform, GUI_STATUS_ERROR, errno);
+        }
+
+        if (platform->retry_deadline_ms != 0 && now < platform->retry_deadline_ms) {
+            ret_status = GUI_STATUS_EAGAIN;
+        } else {
+            if (!platform->acquired) {
+                errno = 0;
+                if (gfx_acquire(platform->gfx) != 0) {
+                    int err = errno ? errno : EIO;
+                    return enter_terminal_state(platform, GUI_STATUS_ERROR, err);
+                }
+                platform->acquired = true;
+            }
+
+            errno = 0;
+            if (gfx_present(platform->gfx) == 0) {
+                platform->pending_present = false;
+                platform->retry_deadline_ms = 0;
+                ret_status = GUI_STATUS_OK;
+            } else {
+                int err = errno ? errno : EIO;
+                if (gfx_client_present_policy(err) == 1) { /* EAGAIN */
+                    uint64_t now_after = 0;
+                    if (gui_tick_now_ms(&now_after) != 0) {
+                        return enter_terminal_state(platform, GUI_STATUS_ERROR, errno);
+                    }
+                    platform->retry_deadline_ms = now_after + GFX_CLIENT_RETRY_MS;
+                    ret_status = GUI_STATUS_EAGAIN;
+                } else if (err == EACCES) {
+                    return enter_terminal_state(platform, GUI_STATUS_LOST_OWNERSHIP, EACCES);
+                } else if (err == ESTALE) {
+                    return enter_terminal_state(platform, GUI_STATUS_DISPLAY_CHANGED, ESTALE);
+                } else {
+                    return enter_terminal_state(platform, GUI_STATUS_ERROR, err);
+                }
+            }
+        }
+    }
+
+    return compute_wait_and_return(platform, lv_delay, t_before_handler, ret_status, out_next_delay_ms);
+}

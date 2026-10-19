@@ -172,7 +172,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_pty_winsize.elf \
     $(TEST_BLD)/test_fb_resolution_hooks.elf \
     $(TEST_BLD)/test_setres.elf \
-    $(TEST_BLD)/test_display_owner.elf
+    $(TEST_BLD)/test_display_owner.elf \
+    $(TEST_BLD)/test_gui_platform.elf
 
 # Binaries that report solely through their exit code and print nothing on
 # success (see the `run` section for the full rationale).  Defined here, NOT
@@ -183,7 +184,7 @@ TEST_EXIT_STATUS_BINS := \
     $(TEST_BLD)/test_runtime_udivti3.elf \
     $(TEST_BLD)/test_page_table_runner.elf
 
-.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner test-framework-contract
+.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner test-framework-contract test-gui-platform
 
 all: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS)
 
@@ -3402,5 +3403,126 @@ $(TEST_BLD)/test_pty_winsize.elf: $(TEST_BLD)/test_pty_winsize.o \
 
 test-pty-winsize: $(TEST_BLD)/test_pty_winsize.elf
 	$<
+
+# ── GUI platform host tests ─────────────────────────────────────
+GUI_HOST_DIR := $(TEST_BLD)/gui
+GUI_LVGL_DIR := $(GUI_HOST_DIR)/lvgl
+GUI_DETERMINISTIC_DIR := $(GUI_HOST_DIR)/deterministic
+GUI_INTEGRATION_DIR := $(GUI_HOST_DIR)/integration
+
+include $(TESTS_DIR)/thirdpart/lvgl.manifest
+
+GUI_LVGL_SOURCES := $(shell find $(TESTS_DIR)/$(LVGL_SOURCE)/src -name '*.c')
+GUI_LVGL_OBJS := $(patsubst $(TESTS_DIR)/$(LVGL_SOURCE)/src/%.c,$(GUI_LVGL_DIR)/obj/%.o,$(GUI_LVGL_SOURCES))
+GUI_LVGL_ARCHIVE := $(GUI_LVGL_DIR)/liblvgl-host.a
+
+$(GUI_HOST_DIR)/lvgl-version.stamp: $(TESTS_DIR)/thirdpart/lvgl.manifest
+	@test -e "$(TESTS_DIR)/$(LVGL_SOURCE)/.git" || { echo "ERROR: $(LVGL_SOURCE) not a git submodule (.git missing)"; exit 1; }
+	@test -f "$(TESTS_DIR)/$(LVGL_SOURCE)/lvgl.h" || { echo "ERROR: $(LVGL_SOURCE) missing lvgl.h"; exit 1; }
+	@head=$$(git -C "$(TESTS_DIR)/$(LVGL_SOURCE)" rev-parse --verify HEAD 2>/dev/null) || { echo "ERROR: failed to get git commit for $(LVGL_SOURCE)"; exit 1; }; \
+	if [ "$$head" != "$(LVGL_REVISION)" ]; then \
+	  echo "ERROR: $(LVGL_SOURCE) revision $$head does not match manifest $(LVGL_REVISION)"; exit 1; \
+	fi
+	@mkdir -p $(dir $@)
+	@touch $@
+
+$(GUI_HOST_DIR)/include/uapi/gfx.h: $(TESTS_DIR)/kernel/include/uapi/gfx.h
+	@mkdir -p $(dir $@)
+	ln -sf $< $@
+
+$(GUI_HOST_DIR)/include/uapi/fb.h: $(TESTS_DIR)/kernel/include/uapi/fb.h
+	@mkdir -p $(dir $@)
+	ln -sf $< $@
+
+GUI_HOST_UAPI_HEADERS := $(GUI_HOST_DIR)/include/uapi/gfx.h $(GUI_HOST_DIR)/include/uapi/fb.h
+
+GUI_HOST_LVGL_CFLAGS := -O2 -g $(filter-out -O0,$(HOST_CFLAGS)) \
+    -I$(TESTS_DIR)/thirdpart \
+    -I$(TESTS_DIR)/thirdpart/lvgl \
+    -I$(TESTS_DIR)/config \
+    -DLV_CONF_INCLUDE_SIMPLE
+
+$(GUI_LVGL_OBJS): | $(GUI_HOST_DIR)/lvgl-version.stamp
+
+$(GUI_LVGL_DIR)/obj/%.o: $(TESTS_DIR)/$(LVGL_SOURCE)/src/%.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_LVGL_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_LVGL_ARCHIVE): $(GUI_LVGL_OBJS)
+	@mkdir -p $(dir $@)
+	ar rcs $@ $^
+
+GUI_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST \
+    -I$(GUI_HOST_DIR)/include \
+    -I$(TESTS_DIR)/libgui/include \
+    -I$(TESTS_DIR)/libgui/internal \
+    -I$(TESTS_DIR)/libgfx \
+    -I$(TESTS_DIR)/user/common \
+    -I$(TESTS_DIR)/thirdpart \
+    -I$(TESTS_DIR)/thirdpart/lvgl \
+    -I$(TESTS_DIR)/config \
+    -iquote $(TEST_INC) \
+    -iquote $(TEST_MOCK) \
+    -DLV_CONF_INCLUDE_SIMPLE
+
+$(GUI_DETERMINISTIC_DIR)/platform.o: $(TESTS_DIR)/libgui/src/platform.c $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_DETERMINISTIC_DIR)/tick.o: $(TESTS_DIR)/libgui/src/tick.c $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_DETERMINISTIC_DIR)/gfx_client_policy.o: $(TESTS_DIR)/user/common/gfx_client_policy.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_DETERMINISTIC_DIR)/gui_test_runtime.o: $(TEST_MOCK)/gui_test_runtime.c $(TEST_MOCK)/gui_test_runtime.h $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_DETERMINISTIC_DIR)/test_gui_platform.o: $(TEST_CASES)/test_gui_platform.c $(TEST_MOCK)/gui_test_runtime.h $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+GUI_PLATFORM_WRAPS := \
+    -Wl,--wrap=clock_gettime \
+    -Wl,--wrap=calloc \
+    -Wl,--wrap=mmap \
+    -Wl,--wrap=munmap \
+    -Wl,--wrap=open \
+    -Wl,--wrap=read \
+    -Wl,--wrap=close \
+    -Wl,--wrap=gfx_open \
+    -Wl,--wrap=gfx_get_info \
+    -Wl,--wrap=gfx_acquire \
+    -Wl,--wrap=gfx_present \
+    -Wl,--wrap=gfx_release \
+    -Wl,--wrap=gfx_close \
+    -Wl,--wrap=gfx_sprite_blit \
+    -Wl,--wrap=lv_timer_handler \
+    -Wl,--wrap=lv_display_flush_ready \
+    -Wl,--wrap=lv_display_create
+
+$(TEST_BLD)/test_gui_platform.elf: \
+		$(GUI_DETERMINISTIC_DIR)/test_gui_platform.o \
+		$(GUI_DETERMINISTIC_DIR)/gui_test_runtime.o \
+		$(GUI_DETERMINISTIC_DIR)/platform.o \
+		$(GUI_DETERMINISTIC_DIR)/tick.o \
+		$(GUI_DETERMINISTIC_DIR)/gfx_client_policy.o \
+		$(GUI_LVGL_ARCHIVE)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_PLATFORM_WRAPS) -o $@ $^ -lpthread -lm
+
+.PHONY: test-gui-platform
+test-gui-platform: $(TEST_BLD)/test_gui_platform.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+-include $(patsubst %.o,%.d,$(GUI_LVGL_OBJS))
+-include $(GUI_DETERMINISTIC_DIR)/*.d
+
 
 
