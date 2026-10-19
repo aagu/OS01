@@ -1052,6 +1052,12 @@ def main():
             # monitor / resolution dispatch shape.
             from qemutests.terminal_present_test import test_terminal_present
             result = test_terminal_present(tester)
+        elif args.test_name == "gui":
+            # Task 7 of GUI-1 plan: GUI QEMU suite (LVGL platform backend,
+            # smoke, normal exit, wait quit, busy owner, killed owner, fatal owner)
+            # across SMP 1 and 2 matrix with QMP screendumps.
+            from qemutests.gui_test import test_gui
+            result = test_gui(tester)
         else:
             print(f"Unknown test: {args.test_name}")
             result = False

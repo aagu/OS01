@@ -179,7 +179,7 @@ class TestQemuRecipeShapeTests(unittest.TestCase):
         body = m.group("n")
         for suite in ("phase-0", "systest", "inittab-phase",
                        "network", "gfx", "resolution", "driver-model",
-                       "monitor", "terminal-present"):
+                       "monitor", "terminal-present", "gui"):
             self.assertIn(suite, body,
                           f"SUITE case missing {suite!r}")
 
