@@ -25,7 +25,7 @@ OBJ_DIR   := $(BUILD_DIR)/obj
 CFLAGS   := --sysroot=$(SYSROOT_DIR) \
             -ffreestanding -fstack-protector-strong -fno-asynchronous-unwind-tables \
             -fno-pic -fno-pie -mno-red-zone \
-            -I$(TARGET_INCDIR) -I$(TARGET_INCDIR)/lvgl -DLV_CONF_INCLUDE_SIMPLE \
+            -I$(TARGET_INCDIR) \
             -Icommon -Wall -Wextra -O2
 
 # ── Syscall test mode ──────────────────────────────────────

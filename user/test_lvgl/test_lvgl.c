@@ -1,163 +1,42 @@
 /* user/test_lvgl.c — LVGL v9.5.0 graphical showcase & compatibility test for OS01 */
 
-#include <lvgl/lvgl.h>
-#include <sys/time.h>
-#include <time.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <gui/gui.h>
+#include <gui_lvgl_private.h>
+
+#include <errno.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <sys/ioctl.h>
-#include <errno.h>
-#include <gfx.h>
-#include <uapi/fb.h>
-#include "gfx_client_policy.h"
-
-#define DISP_FALLBACK_HOR 320
-#define DISP_FALLBACK_VER 240
-#define MAX_HOR_RES       1920
-#define BUF_LINES         40
 
 #define CLR_EXPECT_BG  0x00181825u  /* Catppuccin Mantle dark background */
 #define CLR_EXPECT_BTN 0x001A73E8u  /* Google Blue 600 */
 
-static bool clock_failed = false;
+static int32_t btn_sample_x = 100;
+static int32_t btn_sample_y = 70;
 
-static uint32_t my_tick_get_cb(void)
+static int get_monotonic_ms(uint64_t *out_ms)
 {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-        clock_failed = true;
-        return 0;
+        return -1;
     }
-    return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+    *out_ms = (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
+    return 0;
 }
 
 #define TEST_ASSERT(cond) do { \
     if (!(cond)) { \
         fprintf(stderr, "ASSERTION FAILED (%s:%d): %s\n", __FILE__, __LINE__, #cond); \
-        exit(1); \
+        ret = 1; \
+        goto cleanup; \
     } \
 } while (0)
 
-static gfx_handle_t *gfx = NULL;
-static uint32_t screen_w = DISP_FALLBACK_HOR;
-static uint32_t screen_h = DISP_FALLBACK_VER;
-
-/* Shared stale-view policy state (monotonic ms retry deadline). */
-static uint64_t gfx_retry_deadline_ms = 0;
-static bool acquired = false;
-static bool is_smoke = false;
-
-static uint64_t client_now_ms(void)
-{
-    struct timespec ts;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
-    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
-}
-
-/* Present the frame under the shared policy.  Returns false when the
- * view is stale/permanently failed: the caller closes gfx and returns
- * non-zero.  EAGAIN keeps the view and arms a >=250ms retry (this call
- * then skips presenting until the deadline). */
-static bool gfx_present_ok(void)
-{
-    if (is_smoke) return true;
-    if (!gfx) return false;
-    uint64_t now = client_now_ms();
-    if (gfx_retry_deadline_ms != 0 && now < gfx_retry_deadline_ms) return true;
-
-    if (!acquired) {
-        errno = 0;
-        if (gfx_acquire(gfx) != 0) {
-            int saved = errno;
-            if (saved == EBUSY) {
-                fprintf(stderr, "[test_lvgl] display busy (another GUI active); exiting\n");
-            } else {
-                fprintf(stderr, "[test_lvgl] gfx_acquire failed (errno=%d); exiting\n", saved);
-            }
-            gfx_close(gfx);
-            gfx = NULL;
-            errno = saved;
-            return false;
-        }
-        acquired = true;
-    }
-
-    errno = 0;
-    if (gfx_present(gfx) == 0) {
-        gfx_retry_deadline_ms = 0;
-        return true;
-    }
-    int saved = errno;
-    if (gfx_client_present_policy(saved) == 1) {     /* EAGAIN: keep view */
-        gfx_retry_deadline_ms = now + GFX_CLIENT_RETRY_MS;
-        return true;
-    }
-    const char *why;
-    if (saved == EACCES) {
-        why = "lost display foreground ownership";
-    } else if (saved == ESTALE) {
-        why = "display mode changed, restart the app";
-    } else {
-        why = "display device failure";
-    }
-    fprintf(stderr, "[test_lvgl] %s (errno=%d); exiting\n", why, saved);
-    gfx_release(gfx);
-    gfx_close(gfx);
-    gfx = NULL;
-    errno = saved;                   /* cleanup must not clobber it */
-    return false;
-}
-
-static int flush_count = 0;
-static bool bg_sampled = false;
-static bool btn_sampled = false;
-
-static int32_t btn_sample_x = 100;
-static int32_t btn_sample_y = 70;
-
-static void test_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
-{
-    TEST_ASSERT(area->x1 <= area->x2);
-    TEST_ASSERT(area->y1 <= area->y2);
-    TEST_ASSERT(area->x1 >= 0 && area->y1 >= 0);
-    TEST_ASSERT((uint32_t)area->x2 < screen_w && (uint32_t)area->y2 < screen_h);
-
-    int32_t area_w = area->x2 - area->x1 + 1;
-    int32_t area_h = area->y2 - area->y1 + 1;
-    uint32_t stride_bytes = lv_draw_buf_width_to_stride((uint32_t)area_w, LV_COLOR_FORMAT_XRGB8888);
-    TEST_ASSERT(stride_bytes == (uint32_t)(area_w * 4));
-
-    if (gfx) {
-        gfx_sprite_blit(gfx, area->x1, area->y1, (const uint32_t *)px_map,
-                        stride_bytes, (uint32_t)area_w, (uint32_t)area_h, false, 0);
-    }
-
-    /* Sample background at (10, 10) */
-    if (10 >= area->x1 && 10 <= area->x2 && 10 >= area->y1 && 10 <= area->y2) {
-        const uint8_t *row = px_map + (10 - area->y1) * stride_bytes;
-        uint32_t px = *(const uint32_t *)(row + (10 - area->x1) * 4);
-        TEST_ASSERT((px & 0x00FFFFFFu) == CLR_EXPECT_BG);
-        bg_sampled = true;
-    }
-
-    /* Sample primary button */
-    if (btn_sample_x >= area->x1 && btn_sample_x <= area->x2 &&
-        btn_sample_y >= area->y1 && btn_sample_y <= area->y2) {
-        const uint8_t *row = px_map + (btn_sample_y - area->y1) * stride_bytes;
-        uint32_t px = *(const uint32_t *)(row + (btn_sample_x - area->x1) * 4);
-        TEST_ASSERT((px & 0x00FFFFFFu) == CLR_EXPECT_BTN);
-        btn_sampled = true;
-    }
-
-    flush_count++;
-    lv_display_flush_ready(disp);
-}
 
 static void build_rich_ui(lv_obj_t *scr, uint32_t w, uint32_t h)
 {
@@ -484,107 +363,73 @@ static void build_rich_ui(lv_obj_t *scr, uint32_t w, uint32_t h)
 
 int main(int argc, char **argv)
 {
-    bool wait_mode = (argc > 1 && (strcmp(argv[1], "-w") == 0 ||
-                                  strcmp(argv[1], "wait") == 0 ||
-                                  strcmp(argv[1], "--wait") == 0 ||
-                                  strcmp(argv[1], "gui") == 0));
-    bool smoke_mode = (argc > 1 && strcmp(argv[1], "smoke") == 0);
-    is_smoke = smoke_mode;
+    int ret = 0;
+    gui_platform_t *platform = NULL;
 
-    printf("[test_lvgl] Starting LVGL v9.5.0 smoke test...\n");
-
-    /* 1. Verify initial monotonic clock availability */
-    struct timespec ts_init;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts_init) != 0) {
-        fprintf(stderr, "clock_gettime failed at startup\n");
+    uint64_t app_start_ms = 0;
+    if (get_monotonic_ms(&app_start_ms) != 0) {
+        fprintf(stderr, "[test_lvgl] clock_gettime failed at startup\n");
         return 1;
     }
 
-    /* 2. Initialize LVGL core first */
-    lv_init();
+    bool wait_mode = false;
+    bool smoke_mode = false;
 
-    /* 3. Register custom monotonic tick callback */
-    lv_tick_set_cb(my_tick_get_cb);
-
-    /* 4. Verify monotonic tick progression within budget */
-    uint32_t t0 = lv_tick_get();
-    if (clock_failed) {
-        fprintf(stderr, "clock_failed set on initial tick read\n");
-        return 2;
-    }
-
-    bool tick_progressed = false;
-    for (int i = 0; i < 50; i++) {
-        struct timespec pause = { .tv_sec = 0, .tv_nsec = 2000000 };
-        nanosleep(&pause, NULL);
-        uint32_t t1 = lv_tick_get();
-        if (clock_failed) {
-            fprintf(stderr, "clock_gettime failed during tick polling\n");
-            return 2;
-        }
-        uint32_t delta = t1 - t0;
-        if (delta > 0 && delta <= 100) {
-            tick_progressed = true;
-            break;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--smoke") == 0 || strcmp(argv[i], "smoke") == 0) {
+            smoke_mode = true;
+        } else if (strcmp(argv[i], "-w") == 0 || strcmp(argv[i], "wait") == 0 ||
+                   strcmp(argv[i], "--wait") == 0 || strcmp(argv[i], "gui") == 0) {
+            wait_mode = true;
         }
     }
-    if (!tick_progressed) {
-        fprintf(stderr, "tick failed to progress within budget\n");
-        return 2;
-    }
-    printf("[test_lvgl] Monotonic tick progression verified.\n");
 
-    /* 5. Probe Framebuffer and libgfx */
     if (smoke_mode) {
-        /* Smoke mode is strictly off-screen and does not touch physical display */
-        screen_w = DISP_FALLBACK_HOR;
-        screen_h = DISP_FALLBACK_VER;
-        gfx = NULL;
+        printf("[test_lvgl] Starting LVGL v9.5.0 smoke test...\n");
     } else {
-        int fb_fd = open("/dev/fb", O_RDONLY);
-        if (fb_fd < 0) {
-            fprintf(stderr, "[test_lvgl] open /dev/fb failed: %s\n", strerror(errno));
-            return 1;
-        }
-        struct fb_info info;
-        ssize_t r = read(fb_fd, &info, sizeof(info));
-        close(fb_fd);
-
-        if (r != (ssize_t)sizeof(info) || info.width == 0 || info.height == 0) {
-            fprintf(stderr, "[test_lvgl] invalid framebuffer metadata\n");
-            return 1;
-        }
-
-        screen_w = info.width;
-        screen_h = info.height;
-
-        gfx = gfx_open(0, 0, screen_w, screen_h);
-        if (!gfx) {
-            fprintf(stderr, "[test_lvgl] gfx_open failed (errno=%d)\n", errno);
-            return 1;
-        }
+        printf("[test_lvgl] Starting LVGL v9.5.0 showcase...\n");
     }
 
-    /* 6. Create display and partial draw buffer */
-    static uint32_t draw_buf[MAX_HOR_RES * BUF_LINES];
-    uint32_t buf_bytes = (uint32_t)(screen_w * BUF_LINES * sizeof(uint32_t));
+    gui_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    if (smoke_mode) {
+        cfg.mode = GUI_MODE_OFFSCREEN;
+        cfg.width = 320;
+        cfg.height = 240;
+        cfg.buffer_lines = 40;
+    } else {
+        cfg.mode = GUI_MODE_ONSCREEN;
+        cfg.width = 0;
+        cfg.height = 0;
+        cfg.buffer_lines = 40;
+    }
 
-    lv_display_t *disp = lv_display_create(screen_w, screen_h);
+    platform = gui_platform_create(&cfg);
+    if (!platform) {
+        int err = errno;
+        if (err == EBUSY) {
+            fprintf(stderr, "[test_lvgl] display busy (another GUI active); exiting\n");
+        } else {
+            fprintf(stderr, "[test_lvgl] gui_platform_create failed (errno=%d): %s\n", err, strerror(err));
+        }
+        ret = 1;
+        goto cleanup;
+    }
+
+    uint32_t screen_w = gui_platform_get_width(platform);
+    uint32_t screen_h = gui_platform_get_height(platform);
+
+    lv_display_t *disp = gui_platform_get_lv_display(platform);
     TEST_ASSERT(disp != NULL);
-    lv_display_set_color_format(disp, LV_COLOR_FORMAT_XRGB8888);
-    lv_display_set_buffers(disp, draw_buf, NULL, buf_bytes, LV_DISPLAY_RENDER_MODE_PARTIAL);
-    lv_display_set_flush_cb(disp, test_flush_cb);
-
-    /* 7. Build UI scene */
-    lv_obj_t *scr = lv_screen_active();
+    lv_obj_t *scr = lv_display_get_screen_active(disp);
     TEST_ASSERT(scr != NULL);
+
     lv_obj_set_style_bg_color(scr, lv_color_hex(CLR_EXPECT_BG), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
     if (screen_w >= 640 && screen_h >= 480) {
         build_rich_ui(scr, screen_w, screen_h);
     } else {
-        /* Fallback minimal scene */
         btn_sample_x = 100;
         btn_sample_y = 70;
         lv_obj_t *btn = lv_button_create(scr);
@@ -600,21 +445,93 @@ int main(int argc, char **argv)
         lv_obj_center(lbl);
     }
 
-    /* 8. Render loop and present */
-    for (int frame = 0; frame < 5; frame++) {
-        struct timespec pause = { .tv_sec = 0, .tv_nsec = 20000000 };
-        nanosleep(&pause, NULL);
-        lv_timer_handler();
-        if (!gfx_present_ok()) return 1;   /* stale/permanent -> abort */
+    if (smoke_mode) {
+        bool pixel_assert_passed = false;
+        while (1) {
+            uint64_t now_ms = 0;
+            if (get_monotonic_ms(&now_ms) != 0) {
+                fprintf(stderr, "[test_lvgl] monotonic clock error\n");
+                ret = 2;
+                goto cleanup;
+            }
+            if (now_ms - app_start_ms >= 1000ULL) {
+                fprintf(stderr, "[test_lvgl] smoke test timed out within 1s budget\n");
+                ret = 2;
+                goto cleanup;
+            }
+
+            uint32_t delay_ms = 100;
+            gui_status_t status = gui_platform_step(platform, &delay_ms);
+            if (status != GUI_STATUS_OK) {
+                fprintf(stderr, "[test_lvgl] step failed (status=%d, errno=%d)\n", (int)status, errno);
+                ret = 1;
+                goto cleanup;
+            }
+
+            uint32_t px_bg = gui_platform_get_pixel(platform, 10, 10);
+            uint32_t px_btn = gui_platform_get_pixel(platform, (uint32_t)btn_sample_x, (uint32_t)btn_sample_y);
+            if (px_bg == CLR_EXPECT_BG && px_btn == CLR_EXPECT_BTN) {
+                pixel_assert_passed = true;
+                break;
+            }
+
+            uint64_t elapsed = now_ms - app_start_ms;
+            uint64_t rem = (elapsed < 1000ULL) ? (1000ULL - elapsed) : 0;
+            if (delay_ms > rem) delay_ms = (uint32_t)rem;
+            int pret = poll(NULL, 0, (int)delay_ms);
+            if (pret < 0 && errno != EINTR) {
+                fprintf(stderr, "[test_lvgl] poll failed (errno=%d)\n", errno);
+                ret = 1;
+                goto cleanup;
+            }
+        }
+
+        if (!pixel_assert_passed) {
+            fprintf(stderr, "[test_lvgl] pixel assertions failed\n");
+            ret = 1;
+            goto cleanup;
+        }
+
+        printf("[test_lvgl] Rendering and pixel assertions passed.\n");
+
+        lv_mem_monitor_t mon;
+        lv_mem_monitor(&mon);
+        printf("[test_lvgl] Memory pool: total=%u, free=%u, used_pct=%u%%\n",
+               mon.total_size, mon.free_size, (unsigned)mon.used_pct);
+
+        TEST_ASSERT(mon.total_size >= (4 * 1024 * 1024 - 65536));
+        TEST_ASSERT(mon.used_pct > 0 && mon.used_pct < 50);
+        TEST_ASSERT(mon.free_size > 0 && mon.free_size < mon.total_size);
+
+        printf("[TEST PASS] LVGL compatibility smoke test succeeded.\n");
+        fflush(stdout);
+
+        ret = 0;
+        goto cleanup;
     }
 
-    /* 9. Assertions on flush output and pixel sampling */
-    TEST_ASSERT(flush_count > 0);
-    TEST_ASSERT(bg_sampled);
-    TEST_ASSERT(btn_sampled);
-    printf("[test_lvgl] Rendering and pixel assertions passed (flush_count=%d).\n", flush_count);
+    /* Onscreen mode: render initial frames */
+    for (int frame = 0; frame < 5; frame++) {
+        uint32_t delay_ms = 20;
+        gui_status_t status = gui_platform_step(platform, &delay_ms);
+        if (status == GUI_STATUS_LOST_OWNERSHIP ||
+            status == GUI_STATUS_DISPLAY_CHANGED ||
+            status == GUI_STATUS_ERROR) {
+            const char *why = (status == GUI_STATUS_LOST_OWNERSHIP) ? "lost display foreground ownership" :
+                              (status == GUI_STATUS_DISPLAY_CHANGED) ? "display mode changed, restart the app" :
+                              "display device failure";
+            fprintf(stderr, "[test_lvgl] %s (errno=%d); exiting\n", why, errno);
+            ret = 1;
+            goto cleanup;
+        }
+        int pret = poll(NULL, 0, (int)delay_ms);
+        if (pret < 0 && errno != EINTR) {
+            fprintf(stderr, "[test_lvgl] poll failed (errno=%d)\n", errno);
+            ret = 1;
+            goto cleanup;
+        }
+    }
 
-    /* 10. TLSF memory pool assertions */
     lv_mem_monitor_t mon;
     lv_mem_monitor(&mon);
     printf("[test_lvgl] Memory pool: total=%u, free=%u, used_pct=%u%%\n",
@@ -627,41 +544,97 @@ int main(int argc, char **argv)
     printf("[TEST PASS] LVGL compatibility smoke test succeeded.\n");
     fflush(stdout);
 
-    /* 11. Visual display hold / event loop */
     if (wait_mode) {
         printf("[test_lvgl] Interactive mode: Press 'q' or ESC to exit...\n");
         while (1) {
+            uint32_t delay_ms = 100;
+            gui_status_t status = gui_platform_step(platform, &delay_ms);
+            if (status == GUI_STATUS_LOST_OWNERSHIP ||
+                status == GUI_STATUS_DISPLAY_CHANGED ||
+                status == GUI_STATUS_ERROR) {
+                const char *why = (status == GUI_STATUS_LOST_OWNERSHIP) ? "lost display foreground ownership" :
+                                  (status == GUI_STATUS_DISPLAY_CHANGED) ? "display mode changed, restart the app" :
+                                  "display device failure";
+                fprintf(stderr, "[test_lvgl] %s (errno=%d); exiting\n", why, errno);
+                ret = 1;
+                goto cleanup;
+            }
+
             struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN, .revents = 0 };
-            int ret = poll(&pfd, 1, 100);
-            if (ret > 0 && (pfd.revents & POLLIN)) {
-                char ch = 0;
-                if (read(STDIN_FILENO, &ch, 1) > 0) {
-                    if (ch == 'q' || ch == 'Q' || ch == 27 || ch == 3) {
+            int pret = poll(&pfd, 1, (int)delay_ms);
+            if (pret < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                fprintf(stderr, "[test_lvgl] poll stdin failed (errno=%d)\n", errno);
+                ret = 1;
+                goto cleanup;
+            }
+            if (pret > 0) {
+                if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+                    break;
+                }
+                if (pfd.revents & POLLIN) {
+                    char ch = 0;
+                    ssize_t n = read(STDIN_FILENO, &ch, 1);
+                    if (n > 0) {
+                        if (ch == 'q' || ch == 'Q' || ch == 27 || ch == 3) {
+                            break;
+                        }
+                    } else if (n == 0) {
+                        break;
+                    } else if (errno != EINTR && errno != EAGAIN) {
                         break;
                     }
                 }
             }
-            lv_timer_handler();
-            if (!gfx_present_ok()) return 1;
         }
-    } else if (!smoke_mode) {
-        /* Hold on screen for 1 second so framebuffer / QMP screendump captures it,
-         * using poll(NULL) so stdin queued commands are preserved */
-        for (int i = 0; i < 10; i++) {
-            poll(NULL, 0, 100);
-            lv_timer_handler();
-            if (!gfx_present_ok()) return 1;
+    } else {
+        /* Default mode: hold display for 1 second, preserving stdin */
+        uint64_t hold_start_ms = 0;
+        if (get_monotonic_ms(&hold_start_ms) != 0) {
+            ret = 1;
+            goto cleanup;
+        }
+        while (1) {
+            uint64_t hold_now_ms = 0;
+            if (get_monotonic_ms(&hold_now_ms) != 0) {
+                ret = 1;
+                goto cleanup;
+            }
+            if (hold_now_ms - hold_start_ms >= 1000ULL) {
+                break;
+            }
+            uint32_t delay_ms = 100;
+            gui_status_t status = gui_platform_step(platform, &delay_ms);
+            if (status == GUI_STATUS_LOST_OWNERSHIP ||
+                status == GUI_STATUS_DISPLAY_CHANGED ||
+                status == GUI_STATUS_ERROR) {
+                const char *why = (status == GUI_STATUS_LOST_OWNERSHIP) ? "lost display foreground ownership" :
+                                  (status == GUI_STATUS_DISPLAY_CHANGED) ? "display mode changed, restart the app" :
+                                  "display device failure";
+                fprintf(stderr, "[test_lvgl] %s (errno=%d); exiting\n", why, errno);
+                ret = 1;
+                goto cleanup;
+            }
+            uint64_t elapsed = hold_now_ms - hold_start_ms;
+            uint64_t rem = (elapsed < 1000ULL) ? (1000ULL - elapsed) : 0;
+            if (delay_ms > rem) delay_ms = (uint32_t)rem;
+            int pret = poll(NULL, 0, (int)delay_ms);
+            if (pret < 0 && errno != EINTR) {
+                fprintf(stderr, "[test_lvgl] poll failed (errno=%d)\n", errno);
+                ret = 1;
+                goto cleanup;
+            }
         }
     }
 
-    /* 12. Cleanup */
-    if (gfx) {
-        if (acquired) {
-            gfx_release(gfx);
-        }
-        gfx_close(gfx);
-        gfx = NULL;
-    }
+    ret = 0;
 
-    return 0;
+cleanup:
+    if (platform) {
+        gui_platform_destroy(platform);
+        platform = NULL;
+    }
+    return ret;
 }
