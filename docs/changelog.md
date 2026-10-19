@@ -5,6 +5,10 @@
 
 ---
 
+## 2026-10-20
+
+- fix(aarch64): **phantom `-ENOENT` 根因钉死并修复**（分支 `fix/aarch64-phantom-enoent`，commit [`80eed2e9`](../../logs/git/refs/master)）：`kernel/include/arch/atomic.h` 的 AArch64 `arch_atomic_cas()` 内联汇编执行 `cmp` 但只声明 `"memory"` clobber，未声明 `"cc"`，导致编译器保留 PROTNONE 检测的 `tst` NZCV 跨 CAS 跨过去再被 `csel` 消费。首次 CAS 失败（lock busy）时 `cmp 0,1` 把 Z=0，csel 依此清掉描述符 V 位，retry 路径不改 desc 直接 `stlr` 出 V=0/TABLE=1/PA=correct 的畸形 desc，下一次读 V=0 即 phantom `-ENOENT`。修复 +1 行（加 `"cc"`）。回归钉死测试：新增 `kernel/selftest/test_aarch64_page_table_multicore.c` §5b（BSP+AP 紧邻 PTE 索引上 500 次 `replace_4k` RW→RO 原子循环，`ap_work_cmd_ext` 增 `WORK_PT_REPLACE_LOOP=5` 枚举值驱动 AP 侧）—— cpus=4 无修复 100% 复现，有修复 100% PASS；cpus=2/4 实端到端各 5/5 PASS。roadmap Parked #2 + M4「不得引入并发 `arch_vmm_*` updater」硬约束同步撤销。根因证据：`docs/aarch64-phantom-enoent-root-cause-2026-10-19.md`（前后 disasm）；pause-session 期间的历史档：`docs/aarch64-phantom-enoent-handoff-2026-10-19.md`。
+
 ## 2026-10-19
 
 - fix(selftest): **test_tty_vintr 间歇性挂死**（分支 `fix/tty-vintr-timeout`）：VINTR → signal_pgrp 链路本身工作正常（vintr 子线程确实唤起并 `vintr_seen=1`），但测试线程用 `arch_local_irq_disable` 的紧忙等 spin2 在 SMP=4 负载均衡把 vintr 子线程迁到与测试线程同 CPU 时永远等不到该值（runner 75s 超时）。改为直接检查 `t->signal & SIGINT && t->state == RUNNING`，与 `test_pgrp_signal` 同模式。SMP=4 与 SMP=8 各连测多次 tty_vintr 0 失败；fd_refcount 在 SMP=4/8 偶发独立 `rc_-1` 失败与本 fix 无关（roadmap parked item #1）
