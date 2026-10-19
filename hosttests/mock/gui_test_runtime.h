@@ -30,7 +30,9 @@ void gui_test_reset(void);
 void gui_test_set_now(uint64_t ms);
 uint64_t gui_test_get_now(void);
 void gui_test_advance_now(uint64_t ms);
+#ifndef GUI_INTEGRATION_TEST
 void gui_test_queue_flush(const lv_area_t *area, const uint32_t *pixels);
+#endif
 
 /* Fault injection and mock configurations */
 extern bool g_gui_test_intercept_calloc;
@@ -66,10 +68,12 @@ extern uint32_t g_gui_test_present_blocking_ms;
 extern int  g_gui_test_fail_release_errno;
 extern bool g_gui_test_cleanup_change_errno;
 
+#ifndef GUI_INTEGRATION_TEST
 extern bool g_gui_test_fail_lv_display_create;
 extern uint32_t g_gui_test_handler_delay;
 
 extern lv_display_t *g_gui_test_last_display;
+#endif
 
 #ifdef __cplusplus
 }

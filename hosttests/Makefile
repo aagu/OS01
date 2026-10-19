@@ -173,7 +173,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_fb_resolution_hooks.elf \
     $(TEST_BLD)/test_setres.elf \
     $(TEST_BLD)/test_display_owner.elf \
-    $(TEST_BLD)/test_gui_platform.elf
+    $(TEST_BLD)/test_gui_platform.elf \
+    $(TEST_BLD)/test_gui_lvgl_integration.elf
 
 # Binaries that report solely through their exit code and print nothing on
 # success (see the `run` section for the full rationale).  Defined here, NOT
@@ -184,7 +185,7 @@ TEST_EXIT_STATUS_BINS := \
     $(TEST_BLD)/test_runtime_udivti3.elf \
     $(TEST_BLD)/test_page_table_runner.elf
 
-.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner test-framework-contract test-gui-platform
+.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner test-framework-contract test-gui-platform test-gui-lvgl
 
 all: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS)
 
@@ -3521,8 +3522,62 @@ test-gui-platform: $(TEST_BLD)/test_gui_platform.elf
 	    --timeout $(HOST_TEST_TIMEOUT) \
 	    $<
 
+$(GUI_INTEGRATION_DIR)/platform.o: $(TESTS_DIR)/libgui/src/platform.c $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -DGUI_INTEGRATION_TEST -MMD -MP -c $< -o $@
+
+$(GUI_INTEGRATION_DIR)/tick.o: $(TESTS_DIR)/libgui/src/tick.c $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -DGUI_INTEGRATION_TEST -MMD -MP -c $< -o $@
+
+$(GUI_INTEGRATION_DIR)/gfx_client_policy.o: $(TESTS_DIR)/user/common/gfx_client_policy.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -DGUI_INTEGRATION_TEST -MMD -MP -c $< -o $@
+
+$(GUI_INTEGRATION_DIR)/gui_test_runtime.o: $(TEST_MOCK)/gui_test_runtime.c $(TEST_MOCK)/gui_test_runtime.h $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -DGUI_INTEGRATION_TEST -MMD -MP -c $< -o $@
+
+$(GUI_INTEGRATION_DIR)/test_gui_lvgl_integration.o: $(TEST_CASES)/test_gui_lvgl_integration.c $(TEST_MOCK)/gui_test_runtime.h $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -DGUI_INTEGRATION_TEST -MMD -MP -c $< -o $@
+
+GUI_INTEGRATION_WRAPS := \
+    -Wl,--wrap=clock_gettime \
+    -Wl,--wrap=calloc \
+    -Wl,--wrap=mmap \
+    -Wl,--wrap=munmap \
+    -Wl,--wrap=open \
+    -Wl,--wrap=read \
+    -Wl,--wrap=close \
+    -Wl,--wrap=gfx_open \
+    -Wl,--wrap=gfx_get_info \
+    -Wl,--wrap=gfx_acquire \
+    -Wl,--wrap=gfx_present \
+    -Wl,--wrap=gfx_release \
+    -Wl,--wrap=gfx_close \
+    -Wl,--wrap=gfx_sprite_blit
+
+$(TEST_BLD)/test_gui_lvgl_integration.elf: \
+		$(GUI_INTEGRATION_DIR)/test_gui_lvgl_integration.o \
+		$(GUI_INTEGRATION_DIR)/gui_test_runtime.o \
+		$(GUI_INTEGRATION_DIR)/platform.o \
+		$(GUI_INTEGRATION_DIR)/tick.o \
+		$(GUI_INTEGRATION_DIR)/gfx_client_policy.o \
+		$(GUI_LVGL_ARCHIVE)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_INTEGRATION_WRAPS) -o $@ $^ -lpthread -lm
+
+.PHONY: test-gui-lvgl
+test-gui-lvgl: $(TEST_BLD)/test_gui_lvgl_integration.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
 -include $(patsubst %.o,%.d,$(GUI_LVGL_OBJS))
 -include $(GUI_DETERMINISTIC_DIR)/*.d
+-include $(GUI_INTEGRATION_DIR)/*.d
 
 
 

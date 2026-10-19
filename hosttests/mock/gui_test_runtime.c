@@ -57,6 +57,7 @@ uint32_t g_gui_test_present_blocking_ms = 0;
 int  g_gui_test_fail_release_errno = 0;
 bool g_gui_test_cleanup_change_errno = false;
 
+#ifndef GUI_INTEGRATION_TEST
 bool g_gui_test_fail_lv_display_create = false;
 uint32_t g_gui_test_handler_delay = 20;
 
@@ -69,6 +70,7 @@ struct queued_flush {
 #define MAX_QUEUED_FLUSHES 32
 static struct queued_flush s_flush_queue[MAX_QUEUED_FLUSHES];
 static int s_flush_count = 0;
+#endif
 
 void gui_test_reset(void)
 {
@@ -113,11 +115,13 @@ void gui_test_reset(void)
     g_gui_test_fail_release_errno = 0;
     g_gui_test_cleanup_change_errno = false;
 
+#ifndef GUI_INTEGRATION_TEST
     g_gui_test_fail_lv_display_create = false;
     g_gui_test_handler_delay = 20;
 
     g_gui_test_last_display = NULL;
     s_flush_count = 0;
+#endif
 }
 
 void gui_test_set_now(uint64_t ms)
@@ -135,6 +139,7 @@ void gui_test_advance_now(uint64_t ms)
     g_gui_test_now_ms += ms;
 }
 
+#ifndef GUI_INTEGRATION_TEST
 void gui_test_queue_flush(const lv_area_t *area, const uint32_t *pixels)
 {
     if (s_flush_count < MAX_QUEUED_FLUSHES) {
@@ -147,6 +152,7 @@ void gui_test_queue_flush(const lv_area_t *area, const uint32_t *pixels)
         s_flush_count++;
     }
 }
+#endif
 
 /* ── Wrappers ─────────────────────────────────────────────────── */
 
@@ -354,6 +360,7 @@ void __wrap_gfx_sprite_blit(gfx_handle_t *h, int32_t dst_x, int32_t dst_y,
     (void)w; (void)h_; (void)has_key; (void)key_color;
 }
 
+#ifndef GUI_INTEGRATION_TEST
 extern lv_display_t *__real_lv_display_create(int32_t hor_res, int32_t ver_res);
 lv_display_t *__wrap_lv_display_create(int32_t hor_res, int32_t ver_res)
 {
@@ -389,3 +396,4 @@ uint32_t __wrap_lv_timer_handler(void)
     }
     return g_gui_test_handler_delay;
 }
+#endif

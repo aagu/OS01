@@ -616,7 +616,7 @@ test-resolution-host: $(if $(filter all,$(RES_CASE_EFFECTIVE)),$(foreach c,$(RES
 # In Task 3 only platform is registered; Task 4 adds lvgl.
 # Unknown CASE aborts non-zero before invoking submake.
 .PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl
-GUI_HOST_REGISTERED_CASES := platform
+GUI_HOST_REGISTERED_CASES := platform lvgl
 
 _test-gui-host-run-platform:
 	@echo "  [test-gui-host] platform"
