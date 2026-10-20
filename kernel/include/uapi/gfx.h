@@ -138,13 +138,27 @@ _Static_assert(offsetof(gfx_present_rect_req_t, h)       == 28, "h offset");
  *
  * keyboard_fd   the caller's /dev/keyboard descriptor (required).
  * mouse_fd      the caller's /dev/mouse descriptor; -1 means the
- *               keyboard only.
+ *               keyboard only.  Every other negative value is a bad
+ *               descriptor (-EBADF).
  * flags         v1 must be 0.
  * reserved      must be 0.
  * generation    in: 0; out: the lease generation (non-zero, monotonic).
  * initial_modifiers
  *               in: 0; out: bit0 = Caps Lock, every other bit 0.
- * reserved2     in: 0; out: 0. */
+ * reserved2     in: 0; out: 0.
+ *
+ * The errno the bind can return:
+ *   EFAULT          the struct is not readable and writable.
+ *   EBADF           a descriptor is out of range or not open.
+ *   EINVAL          the descriptor is not readable / not the input
+ *                   device, a reserved or result field is not 0, or
+ *                   the view is not configured.
+ *   EACCES          the caller is not the display owner.
+ *   ESTALE          the view is stale (the display moved on).
+ *   EBUSY           a lease already exists.
+ *   EAGAIN          the display is not initialised yet.
+ *   EIO             the display backend has failed.
+ *   ENODEV          this kernel has no input route (no PS/2 chain). */
 typedef struct {
     int32_t  keyboard_fd;
     int32_t  mouse_fd;

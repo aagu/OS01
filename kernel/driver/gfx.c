@@ -697,7 +697,11 @@ static int gfx_input_file_check(file_t *f, const struct devfs_ops *expected)
 {
     if (!f) return -EBADF;
     if (f->type != FD_DEV) return -EINVAL;
-    if (f->flags == O_WRONLY) return -EINVAL;   /* not readable */
+    /* The access mode is the low two bits of the open flags: O_RDONLY
+     * 0, O_WRONLY 1, O_RDWR 2 (there is no O_ACCMODE in this tree), so
+     * a write-only descriptor is rejected even when it carries other
+     * flags (O_APPEND, O_TRUNC, ...). */
+    if ((f->flags & 3) == O_WRONLY) return -EINVAL;
     const struct devfs_ops *ops = devfs_get_file_ops(f);
     if (!ops || !expected || ops != expected) return -EINVAL;
     return 0;
@@ -951,6 +955,11 @@ static int gfx_ioctl_file(file_t *f, int cmd, void *arg)
                 file_put(kbd_file);
                 return -EBADF;
             }
+        } else if (kreq.mouse_fd < -1) {
+            /* Only -1 means "keyboard only"; every other negative value
+             * is a bad descriptor, exactly like a bad keyboard_fd. */
+            file_put(kbd_file);
+            return -EBADF;
         }
 
         int crc = gfx_input_file_check(kbd_file, &keyboard_ops);

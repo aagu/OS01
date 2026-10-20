@@ -371,6 +371,24 @@ static int do_bind(int kbd_fd, int mouse_fd, gfx_bind_input_t *out)
     return rc;
 }
 
+/* Close a device file: the route's release hook runs, and the final
+ * close of a BOUND file revokes the whole lease (the route's own
+ * semantics — the coordinator is not told). */
+static void close_input_file(file_t *f)
+{
+    file_put(f);
+}
+
+/* (Re-)open a keyboard device file and put it back into the fd table. */
+static void reopen_keyboard(void)
+{
+    file_t *f = NULL;
+    input_route_open(INPUT_DEVICE_KEYBOARD, &f);
+    g_kbd_file = f;
+    g_fds[FD_KBD].file = f;
+    g_fds[FD_KBD].ops = &keyboard_ops;
+}
+
 /* ── The UAPI layout ──────────────────────────────────────────── */
 
 TEST_FUNC(test_gfx_input_uapi_layout)
@@ -486,6 +504,9 @@ TEST_FUNC(test_bind_input_ebadf_on_a_bad_fd)
     assert_eq(-EBADF, do_bind(-5, FD_MOUSE, &out));
     /* A valid keyboard with a bad mouse. */
     assert_eq(-EBADF, do_bind(FD_KBD, MAX_TEST_FDS, &out));
+    /* Only -1 means "keyboard only": every other negative mouse fd is a
+     * bad descriptor. */
+    assert_eq(-EBADF, do_bind(FD_KBD, -2, &out));
 }
 
 TEST_FUNC(test_bind_input_einval_on_a_bad_device)
@@ -498,6 +519,12 @@ TEST_FUNC(test_bind_input_einval_on_a_bad_device)
 
     /* The keyboard fd is not readable. */
     g_kbd_file->flags = O_WRONLY;
+    assert_eq(-EINVAL, do_bind(FD_KBD, FD_MOUSE, &out));
+    g_kbd_file->flags = O_RDONLY;
+
+    /* A write-only descriptor stays write-only when other open flags
+     * are set: the access mode is the low two bits. */
+    g_kbd_file->flags = O_WRONLY | O_APPEND;
     assert_eq(-EINVAL, do_bind(FD_KBD, FD_MOUSE, &out));
     g_kbd_file->flags = O_RDONLY;
 
@@ -611,6 +638,38 @@ TEST_FUNC(test_bind_input_keyboard_only_lease)
               (long)input_route_read(g_mouse_file, 0, sizeof(buf), buf));
 }
 
+TEST_FUNC(test_bind_input_after_the_bound_file_is_closed)
+{
+    TEST_SUITE("gfx bind UAPI: the lease dies with the bound file");
+    setup_env();
+    acquire_ownership();
+
+    gfx_bind_input_t out;
+    assert_eq(0, do_bind(FD_KBD, FD_MOUSE, &out));
+    assert_true(out.generation != 0);
+
+    /* The application closes its bound keyboard file.  The route
+     * revokes the whole lease on the final close of a bound file — and
+     * it does so INSIDE the route, without telling the coordinator. */
+    close_input_file(g_kbd_file);
+    g_kbd_file = NULL;
+    g_fds[FD_KBD].file = NULL;
+
+    /* The application reopens the device and binds again: the
+     * coordinator must reconcile its record with the route instead of
+     * answering a stale EBUSY. */
+    reopen_keyboard();
+    assert_eq(0, do_bind(FD_KBD, FD_MOUSE, &out));
+    assert_true(out.generation != 0);
+
+    /* And the new lease is the live one. */
+    uint8_t buf[8];
+    input_route_keyboard_byte(0x1E);
+    assert_eq(1, input_route_read(g_kbd_file, 0, sizeof(buf), buf));
+    assert_eq(0x1E, buf[0]);
+    assert_eq(-EBUSY, input_route_read(g_other_kbd_file, 0, sizeof(buf), buf));
+}
+
 TEST_FUNC(test_unbind_input_succeeds_without_a_lease)
 {
     TEST_SUITE("gfx bind UAPI: unbind without a lease");
@@ -693,6 +752,11 @@ TEST_FUNC(test_copyout_rollback_does_not_revoke_new_generation)
 
     /* The other reader is still shut out: the lease is really alive. */
     assert_eq(-EBUSY, input_route_read(g_other_kbd_file, 0, sizeof(buf), buf));
+
+    /* The coordinator's record still holds the NEW lease: a further
+     * bind is refused with EBUSY.  (The stale rollback must not have
+     * cleared the record.) */
+    assert_eq(-EBUSY, do_bind(FD_KBD, FD_MOUSE, &out));
 }
 
 /* ── The libgfx wrapper ───────────────────────────────────────── */
@@ -805,6 +869,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_bind_input_estale_on_an_old_view),
     TEST_ENTRY(test_bind_input_ebusy_on_a_duplicate_bind),
     TEST_ENTRY(test_bind_input_grants_an_exclusive_lease),
+    TEST_ENTRY(test_bind_input_after_the_bound_file_is_closed),
     TEST_ENTRY(test_bind_input_keyboard_only_lease),
     TEST_ENTRY(test_unbind_input_succeeds_without_a_lease),
     TEST_ENTRY(test_bind_input_copyout_failure_rolls_the_lease_back),

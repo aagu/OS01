@@ -608,6 +608,23 @@ int input_route_bind(const void *view, struct file *kbd, struct file *mouse,
     return 0;
 }
 
+int input_route_lease_live(const void **view, uint64_t *generation)
+{
+    uint64_t flags;
+    int live;
+
+    flags = spin_lock_irqsave(&route.lock);
+
+    live = route.lease_active ? 1 : 0;
+    if (live) {
+        if (view) *view = route.view;
+        if (generation) *generation = route.generation;
+    }
+
+    spin_unlock_irqrestore(&route.lock, flags);
+    return live;
+}
+
 void input_route_unbind(const void *view, uint64_t generation, int reason)
 {
     uint64_t flags;

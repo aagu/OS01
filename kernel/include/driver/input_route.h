@@ -123,6 +123,20 @@ int  input_route_bind(const void *view, struct file *kbd, struct file *mouse,
  * for another view or another generation never touches the lease. */
 void input_route_unbind(const void *view, uint64_t generation, int reason);
 
+/* The live lease, if any: `view` receives the lease's owner and
+ * `generation` its generation; the return value is 1 when a lease is
+ * live and 0 when there is none.
+ *
+ * The route revokes the lease on its own — the final close of a bound
+ * file revokes it — and that revoke happens INSIDE the route.  This
+ * query is how a caller learns about it: the two answers to "is there
+ * a lease?" must never diverge.
+ *
+ * IRQ-safe: it takes only the route lock and never a display lock, so
+ * it can be called under the display lock (the lock order is
+ * display → route) without inverting anything. */
+int  input_route_lease_live(const void **view, uint64_t *generation);
+
 /* ── The file-aware device entry points ────────────────────────── */
 
 /* Read from a route file.  Before the lease the device is NORMAL and

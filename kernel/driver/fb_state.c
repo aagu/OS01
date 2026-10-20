@@ -30,6 +30,7 @@
  * -ENODEV. */
 #pragma weak input_route_bind
 #pragma weak input_route_unbind
+#pragma weak input_route_lease_live
 
 /* ── Display coordinator private state ── */
 static spinlock_T display_state_lock;
@@ -769,6 +770,50 @@ static void fb_input_revoke_locked(int reason)
         input_route_unbind(view, generation, reason);
 }
 
+/* Does a live lease block a new bind?
+ *
+ * The route revokes the lease on its own — the final close of a bound
+ * raw file revokes it — and that revoke happens INSIDE the route, so
+ * the coordinator's own record goes stale: it would answer EBUSY for
+ * a lease that no longer exists.  The record is therefore reconciled
+ * with the route before the answer is given, so the two components
+ * never disagree about "is there a lease?".
+ *
+ * The query takes only the route lock (never a display lock) and runs
+ * in the coordinator's own context, never in the IRQ path: the lock
+ * order stays display_mutex → display_state_lock → route.
+ *
+ * The route's exclusivity is PER LEASED DEVICE (a keyboard-only lease
+ * does not own the mouse), while the coordinator refuses a second
+ * bind outright.  For every sequence the UAPI can express the two
+ * agree — the keyboard is mandatory, so a second bind always collides
+ * on the keyboard — and the coordinator stays the stricter of the two
+ * on purpose: a mouse-only lease must never break that invariant. */
+static bool fb_input_lease_blocks_locked(void)
+{
+    if (g_input_lease.state != FB_INPUT_LEASE_LIVE) {
+        return false;
+    }
+
+    const void *view = NULL;
+    uint64_t generation = 0;
+
+    if (input_route_lease_live && input_route_lease_live(&view, &generation)) {
+        /* The route holds a lease: ours (the same view and
+         * generation) or one that is not ours.  Neither may be
+         * preempted. */
+        return true;
+    }
+
+    /* The route holds no lease any more: the record was stale (the
+     * application closed a bound raw file, which revokes the lease
+     * inside the route).  Drop it and let the bind proceed. */
+    g_input_lease.state = FB_INPUT_LEASE_NONE;
+    g_input_lease.view = NULL;
+    g_input_lease.generation = 0;
+    return false;
+}
+
 int fb_input_bind(const void *view, uint64_t expected_mode,
                   struct file *kbd, struct file *mouse,
                   uint64_t *generation, uint32_t *initial_modifiers)
@@ -799,7 +844,7 @@ int fb_input_bind(const void *view, uint64_t expected_mode,
     } else if (expected_mode != 0 && expected_mode != g_fb_state.generation) {
         /* The view is stale: the display moved on since it was made. */
         rc = -ESTALE;
-    } else if (g_input_lease.state == FB_INPUT_LEASE_LIVE) {
+    } else if (fb_input_lease_blocks_locked()) {
         /* A lease already exists: the bind never preempts it. */
         rc = -EBUSY;
     } else {

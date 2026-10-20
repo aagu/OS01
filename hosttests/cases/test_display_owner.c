@@ -84,6 +84,8 @@ static const void *g_route_unbind_view;
 static uint64_t    g_route_unbind_generation;
 static int         g_route_unbind_reason;
 static uint64_t    g_route_next_generation;
+static const void *g_route_live_view;
+static uint64_t    g_route_live_generation;
 
 static void route_reset_counters(void)
 {
@@ -93,15 +95,21 @@ static void route_reset_counters(void)
     g_route_unbind_generation = 0;
     g_route_unbind_reason = 0;
     g_route_next_generation = 0;
+    g_route_live_view = NULL;
+    g_route_live_generation = 0;
 }
 
 int input_route_bind(const void *view, struct file *kbd, struct file *mouse,
                      uint64_t *generation, uint32_t *initial_modifiers)
 {
-    (void)view; (void)kbd; (void)mouse;
+    uint64_t gen;
+    (void)kbd; (void)mouse;
     g_route_bind_count++;
-    if (generation) *generation = ++g_route_next_generation;
+    gen = ++g_route_next_generation;
+    if (generation) *generation = gen;
     if (initial_modifiers) *initial_modifiers = 0;
+    g_route_live_view = view;
+    g_route_live_generation = gen;
     return 0;
 }
 
@@ -111,6 +119,30 @@ void input_route_unbind(const void *view, uint64_t generation, int reason)
     g_route_unbind_view = view;
     g_route_unbind_generation = generation;
     g_route_unbind_reason = reason;
+    /* The route's own rule: a cleanup for another view or another
+     * generation never touches the lease. */
+    if (g_route_live_view == view &&
+        (generation == 0 || generation == g_route_live_generation)) {
+        g_route_live_view = NULL;
+        g_route_live_generation = 0;
+    }
+}
+
+int input_route_lease_live(const void **view, uint64_t *generation)
+{
+    if (!g_route_live_view) return 0;
+    if (view) *view = g_route_live_view;
+    if (generation) *generation = g_route_live_generation;
+    return 1;
+}
+
+/* The route revokes the lease on its own when a bound raw file reaches
+ * its final close, and it does not tell the coordinator: the fixture
+ * reproduces that here. */
+static void route_drop_lease(void)
+{
+    g_route_live_view = NULL;
+    g_route_live_generation = 0;
 }
 
 /* The resolution switcher stand-in: one published mode, and a mode
@@ -765,6 +797,41 @@ TEST_FUNC(test_input_unbind_clears_only_its_own_view)
                               FAKE_MOUSE_FILE, &generation, &modifiers));
 }
 
+/*
+ * Test: the lease record follows the route.  The route revokes the
+ * lease on its own when a bound raw file reaches its final close, and
+ * it does not tell the coordinator: the coordinator must reconcile its
+ * record with the route instead of answering a stale EBUSY.
+ */
+TEST_FUNC(test_input_lease_record_is_reconciled_with_the_route)
+{
+    setup_env();
+    route_reset_counters();
+
+    uint64_t generation = 0;
+    uint32_t modifiers = 0;
+
+    CHECK_EQ(0, fb_owner_register_fallback(COOKIE_A, 1));
+    CHECK_EQ(0, fb_input_bind(COOKIE_A, 1, FAKE_KBD_FILE,
+                              FAKE_MOUSE_FILE, &generation, &modifiers));
+    CHECK_EQ(1, (int)g_route_bind_count);
+
+    /* The application closes a bound raw file: the route revokes the
+     * lease inside the route and the coordinator is not told. */
+    route_drop_lease();
+
+    /* The next bind must not answer a stale EBUSY — the lease is
+     * gone. */
+    CHECK_EQ(0, fb_input_bind(COOKIE_A, 1, FAKE_KBD_FILE,
+                              FAKE_MOUSE_FILE, &generation, &modifiers));
+    CHECK_EQ(2, (int)g_route_bind_count);
+
+    /* A live lease still blocks a second bind. */
+    CHECK_EQ(-EBUSY, fb_input_bind(COOKIE_A, 1, FAKE_KBD_FILE,
+                                   FAKE_MOUSE_FILE, &generation, &modifiers));
+    CHECK_EQ(2, (int)g_route_bind_count);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_owner_acquire_release_hierarchy),
     TEST_ENTRY(test_owner_detach_scenarios),
@@ -778,6 +845,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_input_lease_requires_the_display_owner),
     TEST_ENTRY(test_input_lease_is_revoked_by_the_display_state_commits),
     TEST_ENTRY(test_input_unbind_clears_only_its_own_view),
+    TEST_ENTRY(test_input_lease_record_is_reconciled_with_the_route),
 TEST_LIST_END
 
 int main(void)

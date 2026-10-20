@@ -77,7 +77,22 @@ int  fb_owner_get_state(const void *cookie, gfx_display_state_t *out);
  * non-zero `generation` must match the live lease exactly; zero is the
  * current view's explicit release.  `reason` is 0 for an explicit
  * cleanup and a revoke reason (EACCES / ESTALE / EIO) when the lease
- * is taken away. */
+ * is taken away.
+ *
+ * The errno fb_input_bind() can return:
+ *   0        the lease was granted.
+ *   -EINVAL  the arguments are wrong (no view, no keyboard file).
+ *   -EAGAIN  the display state is not initialised yet.
+ *   -EIO     the display backend has failed.
+ *   -EACCES  the caller is not the display owner.
+ *   -ESTALE  the view is stale (the display generation moved on).
+ *   -EBUSY   a lease already exists (it is never preempted).
+ *   -ENODEV  this build has no input route (no PS/2 chain).
+ *
+ * The route revokes the lease on its own — the final close of a bound
+ * raw file revokes it — so the coordinator reconciles its record with
+ * the route before it answers, and the two components never disagree
+ * about "is there a lease?". */
 struct file;
 int  fb_input_bind(const void *view, uint64_t expected_mode,
                    struct file *kbd, struct file *mouse,
