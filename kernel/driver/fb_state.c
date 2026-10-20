@@ -9,6 +9,7 @@
 #include <driver/fb.h>
 #include <driver/bga.h>
 #include <driver/fb_test.h>
+#include <driver/input_route.h>
 #include <core/printk.h>
 #include <tty/console.h>
 #include <sync/mutex.h>
@@ -20,6 +21,15 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+
+/* The input route (kernel/driver/input_route.c) is part of the x86 PS/2
+ * chain and is therefore x86-selected, while this coordinator belongs
+ * to the architecture-neutral driver set.  The references are weak so
+ * that set still links on a platform without a PS/2 chain: there the
+ * route is absent, no lease can exist, and every bind is refused with
+ * -ENODEV. */
+#pragma weak input_route_bind
+#pragma weak input_route_unbind
 
 /* ── Display coordinator private state ── */
 static spinlock_T display_state_lock;
@@ -43,6 +53,29 @@ static bool            g_initialized;
 static const void     *g_owner;
 static const void     *g_fallback;
 static uint64_t        g_owner_generation = 1;
+
+/* ── The physical-input lease (GUI-2 plan Task 4) ────────────────
+ * The lease lives with the DISPLAY OWNER: it is granted inside the
+ * display control lock, together with the owner and mode check, and it
+ * is revoked at every owner / mode state commit point.  The record
+ * keeps the WEAK view identity and the lease generation — never a file
+ * reference — so the bound raw files can still reach their final
+ * close, and that final close still revokes the lease. */
+typedef enum {
+    FB_INPUT_LEASE_NONE = 0,   /* no lease, no record */
+    FB_INPUT_LEASE_LIVE,       /* the route holds the lease */
+    FB_INPUT_LEASE_REVOKED,    /* the route lease is gone; the record may be cleaned up */
+} fb_input_lease_state_t;
+
+static struct {
+    fb_input_lease_state_t state;
+    const void            *view;
+    uint64_t               generation;
+} g_input_lease;
+
+/* Revoke the live lease at an owner / mode state commit point (the
+ * display state lock is held). */
+static void fb_input_revoke_locked(int reason);
 
 static bga_caps_t      g_bga_caps __attribute__((unused));
 static struct fb_info  g_bga_modes[FB_MAX_MODES];
@@ -78,6 +111,11 @@ void fb_bootstrap_state(uint64_t phys, uint64_t gop_bytes, const struct fb_info 
     g_owner = NULL;
     g_fallback = NULL;
     g_owner_generation = 1;
+
+    /* No lease exists before the first bind. */
+    g_input_lease.state = FB_INPUT_LEASE_NONE;
+    g_input_lease.view = NULL;
+    g_input_lease.generation = 0;
 
     /* Drop any armed fault left over from a previous session (test build
      * only; a no-op in production). */
@@ -333,6 +371,9 @@ void fb_mark_failed(void)
     g_backend_failed = true;
     g_backend_ready = false;
     g_transitioning = true;
+    /* The backend is gone: the display ownership — and with it the
+     * input lease — is gone too. */
+    fb_input_revoke_locked(EIO);
     g_owner = NULL;
     g_fallback = NULL;
     g_owner_generation++;
@@ -409,6 +450,14 @@ static void fb_commit_layout_locked(const struct fb_info *info, bool redraw_inva
 {
     uint64_t pos_flags = spin_lock_irqsave(&Pos.lock);
     uint64_t state_flags = spin_lock_irqsave(&display_state_lock);
+
+    /* The resolution / mode generation is about to move on: every view
+     * becomes stale, so the lease that was bound to the old generation
+     * is revoked here — at the state commit point, before the old view
+     * can act on it any more. */
+    if (info || redraw_invalidated) {
+        fb_input_revoke_locked(ESTALE);
+    }
 
     if (info) {
         g_fb_state.info = *info;
@@ -695,6 +744,122 @@ int fb_owner_get_state(const void *cookie, gfx_display_state_t *out)
     return 0;
 }
 
+/* ── The physical-input lease ─────────────────────────────────────
+ * Revoke the live lease at an owner / mode state commit point.  The
+ * display state lock is held (and the display mutex on the owner
+ * paths): the lock order is display_mutex → display_state_lock →
+ * input_route, and the route never takes a display lock or the
+ * display mutex, so this cannot invert.
+ *
+ * The CAPTURED generation is handed to the route: a revoke therefore
+ * never takes away a NEWER lease of the same view.  The record
+ * survives the revoke — a revoked record may still be cleaned up by
+ * its own view. */
+static void fb_input_revoke_locked(int reason)
+{
+    if (g_input_lease.state != FB_INPUT_LEASE_LIVE)
+        return;
+
+    const void *view = g_input_lease.view;
+    uint64_t generation = g_input_lease.generation;
+
+    g_input_lease.state = FB_INPUT_LEASE_REVOKED;
+
+    if (input_route_unbind)
+        input_route_unbind(view, generation, reason);
+}
+
+int fb_input_bind(const void *view, uint64_t expected_mode,
+                  struct file *kbd, struct file *mouse,
+                  uint64_t *generation, uint32_t *initial_modifiers)
+{
+    if (!view || !kbd) {
+        return -EINVAL;
+    }
+    if (!input_route_bind) {
+        /* No input route in this build (no PS/2 chain). */
+        return -ENODEV;
+    }
+
+    fb_control_lock();
+
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+
+    int rc = 0;
+    uint64_t gen = 0;
+    uint32_t mods = 0;
+
+    if (!g_initialized) {
+        rc = -EAGAIN;
+    } else if (g_backend_failed) {
+        rc = -EIO;
+    } else if (g_owner != view) {
+        /* Only the display owner may hold the physical input. */
+        rc = -EACCES;
+    } else if (expected_mode != 0 && expected_mode != g_fb_state.generation) {
+        /* The view is stale: the display moved on since it was made. */
+        rc = -ESTALE;
+    } else if (g_input_lease.state == FB_INPUT_LEASE_LIVE) {
+        /* A lease already exists: the bind never preempts it. */
+        rc = -EBUSY;
+    } else {
+        /* The owner check and the lease commit happen in the SAME
+         * display critical section, so a concurrent owner change can
+         * never slip between them. */
+        rc = input_route_bind(view, kbd, mouse, &gen, &mods);
+        if (rc == 0) {
+            g_input_lease.state = FB_INPUT_LEASE_LIVE;
+            g_input_lease.view = view;
+            g_input_lease.generation = gen;
+            if (generation) {
+                *generation = gen;
+            }
+            if (initial_modifiers) {
+                /* The UAPI reports bit0 = Caps Lock; the route hands
+                 * out its own modifier bits. */
+                *initial_modifiers = (mods & INPUT_ROUTE_MOD_CAPS) ? 1u : 0u;
+            }
+        }
+    }
+
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    fb_control_unlock();
+    return rc;
+}
+
+void fb_input_unbind(const void *view, uint64_t generation, int reason)
+{
+    if (!view) {
+        return;
+    }
+
+    fb_control_lock();
+
+    uint64_t flags = spin_lock_irqsave(&display_state_lock);
+
+    /* Only THIS view's lease may be released: another view's lease is
+     * never touched, and a view without a lease releases nothing. */
+    if (g_input_lease.state != FB_INPUT_LEASE_NONE &&
+        g_input_lease.view == view &&
+        (generation == 0 || generation == g_input_lease.generation)) {
+        uint64_t lease_generation = g_input_lease.generation;
+        g_input_lease.state = FB_INPUT_LEASE_NONE;
+        g_input_lease.view = NULL;
+        g_input_lease.generation = 0;
+
+        if (input_route_unbind) {
+            /* The captured generation is handed to the route: it matches
+             * the live lease exactly, so an old cleanup never releases a
+             * newer lease of the same view. */
+            input_route_unbind(view, generation ? generation : lease_generation,
+                               reason);
+        }
+    }
+
+    spin_unlock_irqrestore(&display_state_lock, flags);
+    fb_control_unlock();
+}
+
 int fb_owner_register_fallback(const void *cookie, uint64_t expected_mode)
 {
     if (!cookie) {
@@ -893,6 +1058,10 @@ int fb_owner_acquire(const void *cookie, uint64_t expected_mode)
     }
 
     if (g_owner != cookie) {
+        /* The owner changes: the lease that lived with the old owner
+         * is revoked here, at the commit point, before the old view can
+         * be freed. */
+        fb_input_revoke_locked(EACCES);
         g_owner = cookie;
         g_owner_generation++;
         fb_update_console_ownership_locked();
@@ -949,6 +1118,8 @@ int fb_owner_release(const void *cookie)
     }
 
     if (g_owner == cookie && g_owner != g_fallback) {
+        /* The view gives the display up: its input lease goes with it. */
+        fb_input_revoke_locked(EACCES);
         g_owner = g_fallback;
         g_owner_generation++;
         fb_update_console_ownership_locked();
@@ -1041,6 +1212,10 @@ int fb_owner_replace_fallback(const void *old_cookie, const void *new_cookie, ui
 
     g_fallback = new_cookie;
     if (g_owner == old_cookie) {
+        /* The fallback handover really changes the owner: the old
+         * owner's lease is revoked.  A handover that leaves the owner
+         * alone revokes nothing. */
+        fb_input_revoke_locked(EACCES);
         g_owner = new_cookie;
     }
     g_owner_generation++;
@@ -1075,6 +1250,9 @@ void fb_owner_detach(const void *cookie)
     }
 
     if (g_owner == cookie) {
+        /* The view goes away: its input lease must die with it, and it
+         * must die BEFORE the view memory is freed. */
+        fb_input_revoke_locked(EACCES);
         if (g_fallback != NULL) {
             g_owner = g_fallback;
         } else {

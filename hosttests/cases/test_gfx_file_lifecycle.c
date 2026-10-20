@@ -192,6 +192,15 @@ int fb_owner_replace_fallback(const void *o, const void *n, uint64_t m) { (void)
 static int g_lifecycle_detach_calls = 0;
 void fb_owner_detach(const void *c) { (void)c; g_lifecycle_detach_calls++; }
 int fb_owner_get_state(const void *c, gfx_display_state_t *o) { (void)c; (void)o; return 0; }
+/* The input lease is not part of this fixture: the bind ioctl refuses
+ * the lease and the unbind is a no-op. */
+int fb_input_bind(const void *v, uint64_t m, struct file *k, struct file *mu,
+                  uint64_t *g, uint32_t *mods)
+{
+    (void)v; (void)m; (void)k; (void)mu; (void)g; (void)mods;
+    return -ENODEV;
+}
+void fb_input_unbind(const void *v, uint64_t g, int r) { (void)v; (void)g; (void)r; }
 
 /* ── test tracking (mirrors production devices[] semantics) ── */
 

@@ -320,3 +320,44 @@ int gfx_replace_fallback(gfx_handle_t *old_h, gfx_handle_t *new_h)
     return ioctl(new_h->fd, GFX_REPLACE_FALLBACK, &req);
 }
 
+/* Issue GFX_BIND_INPUT ioctl with the caller's descriptors and copy
+ * the lease result back into *out_state.
+ * Error returns -1 with errno set from ioctl; success returns 0 without
+ * altering errno. h == NULL or out_state == NULL returns -1 with
+ * errno=EINVAL without ioctl. */
+int gfx_bind_input(gfx_handle_t *h, int keyboard_fd, int mouse_fd,
+                   gfx_input_state_t *out_state)
+{
+    if (!h || !out_state) {
+        errno = EINVAL;
+        return -1;
+    }
+    gfx_bind_input_t req;
+    memset(&req, 0, sizeof(req));
+    req.keyboard_fd = keyboard_fd;
+    req.mouse_fd = mouse_fd;
+    req.flags = 0;
+    req.reserved = 0;
+    req.generation = 0;
+    req.initial_modifiers = 0;
+    req.reserved2 = 0;
+    if (ioctl(h->fd, GFX_BIND_INPUT, &req) < 0)
+        return -1;
+    out_state->generation = req.generation;
+    out_state->initial_modifiers = req.initial_modifiers;
+    out_state->reserved = req.reserved2;
+    return 0;
+}
+
+/* Issue GFX_UNBIND_INPUT ioctl with explicit third argument (uint64_t)0.
+ * Error returns -1 with errno set from ioctl; success returns 0 without
+ * altering errno. h == NULL returns -1 with errno=EINVAL without ioctl. */
+int gfx_unbind_input(gfx_handle_t *h)
+{
+    if (!h) {
+        errno = EINVAL;
+        return -1;
+    }
+    return ioctl(h->fd, GFX_UNBIND_INPUT, (uint64_t)0);
+}
+

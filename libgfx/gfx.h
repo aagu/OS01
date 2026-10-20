@@ -157,6 +157,38 @@ int gfx_get_display_state(gfx_handle_t *h, gfx_display_state_t *out);
  * Returns 0 on success, -1 on failure. */
 int gfx_replace_fallback(gfx_handle_t *old_h, gfx_handle_t *new_h);
 
+/* ── Physical-input lease (GUI-2 plan Task 4) ───────────────────
+ * The lease binds the physical keyboard (and mouse) to THIS view: the
+ * input becomes exclusive — no other reader can steal the bytes and
+ * the keyboard stops leaking into the console TTY — and the lease
+ * lives and dies with the display ownership.
+ *
+ * `generation` is the lease generation (non-zero, monotonic) and
+ * `initial_modifiers` the modifier snapshot the consumer starts from
+ * (bit0 = Caps Lock). */
+typedef struct {
+    uint64_t generation;
+    uint32_t initial_modifiers;
+    uint32_t reserved;
+} gfx_input_state_t;
+
+/* Bind the physical input to this handle's view.
+ * Issues the GFX_BIND_INPUT ioctl with the caller's descriptors.
+ * `mouse_fd` may be -1 for a keyboard-only lease.
+ * `out_state` is MANDATORY: it receives the lease generation and the
+ * initial modifier snapshot (bit0 = Caps Lock).
+ * Returns 0 on success, -1 on failure with errno set from the ioctl.
+ * If h == NULL or out_state == NULL, immediately returns -1 with
+ * errno=EINVAL without issuing an ioctl. */
+int gfx_bind_input(gfx_handle_t *h, int keyboard_fd, int mouse_fd,
+                   gfx_input_state_t *out_state);
+
+/* Release THIS view's input lease.
+ * Issues the GFX_UNBIND_INPUT ioctl; it only affects the caller's own
+ * view and succeeds when nothing is bound.
+ * Returns 0 on success, -1 on failure. */
+int gfx_unbind_input(gfx_handle_t *h);
+
 /* ── Archive-function declarations (Task 4) ────────────────────
  *
  * Each primitive routes through one `gfx__*_impl` function in

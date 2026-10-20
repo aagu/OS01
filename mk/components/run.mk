@@ -665,6 +665,15 @@ _test-gui-host-run-input-frame:
 # mouse button isolation keeps the movement, the lock order is
 # route → NORMAL queue/poll, and a publish injected at the
 # check-empty → register-waiter boundary is not lost.
+#
+# GUI-2 plan Task 4 adds the second binary of this case:
+# test_gfx_input.elf, which host-compiles the REAL kernel/driver/gfx.c
+# (the GFX_BIND_INPUT / GFX_UNBIND_INPUT ioctls), the REAL
+# kernel/driver/fb_state.c (the owner / lease coordinator) and the REAL
+# kernel/driver/input_route.c (the lease), and asserts the spec §4.1
+# contract: the 32-byte INOUT struct, EFAULT / EBADF / EINVAL / EACCES
+# / ESTALE / EBUSY, the exclusive lease, the copy-out rollback that
+# must not revoke a newer generation, and the libgfx wrapper.
 _test-gui-host-run-input-route:
 	@echo "  [test-gui-host] input-route"
 	$(call os01_submake,hosttests,test-gui-input-route $(OS01_SUBMAKE_ARGS))

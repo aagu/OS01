@@ -177,7 +177,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_gui_lvgl_integration.elf \
     $(TEST_BLD)/test_devfs_input_dispatch.elf \
     $(TEST_BLD)/test_input_ps2_frame.elf \
-    $(TEST_BLD)/test_input_route.elf
+    $(TEST_BLD)/test_input_route.elf \
+    $(TEST_BLD)/test_gfx_input.elf
 
 # Binaries that report solely through their exit code and print nothing on
 # success (see the `run` section for the full rationale).  Defined here, NOT
@@ -188,7 +189,7 @@ TEST_EXIT_STATUS_BINS := \
     $(TEST_BLD)/test_runtime_udivti3.elf \
     $(TEST_BLD)/test_page_table_runner.elf
 
-.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner test-framework-contract test-gui-platform test-gui-lvgl test-gui-devfs-input test-gui-input-frame test-gui-input-route
+.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner test-framework-contract test-gui-platform test-gui-lvgl test-gui-devfs-input test-gui-input-frame test-gui-input-route test-gui-gfx-input
 
 all: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS)
 
@@ -3664,11 +3665,12 @@ $(TEST_BLD)/test_input_ps2_frame.elf: $(TEST_BLD)/test_input_ps2_frame.o \
 # input_route_poll, input_route_keyboard_byte, input_route_mouse_event,
 # input_route_release_file, input_route_set_normal_sinks.
 .PHONY: test-gui-input-route
-test-gui-input-route: $(TEST_BLD)/test_input_route.elf
+test-gui-input-route: $(TEST_BLD)/test_input_route.elf $(TEST_BLD)/test_gfx_input.elf
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \
-	    $<
+	    $(TEST_BLD)/test_input_route.elf \
+	    $(TEST_BLD)/test_gfx_input.elf
 
 ROUTE_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
     -Wno-unused-function -D__SPINLOCK_H__ -DOS01_HOST_TEST \
@@ -3697,6 +3699,50 @@ $(TEST_BLD)/test_input_route.elf: $(TEST_BLD)/test_input_route.o \
 		$(TEST_BLD)/input_route_runtime.o \
 		$(TEST_BLD)/input_ps2_production.o
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+# GUI-2 plan Task 4: the gfx input-lease UAPI.  The fixture host-
+# compiles the REAL kernel/driver/gfx.c (the GFX_BIND_INPUT /
+# GFX_UNBIND_INPUT ioctls), the REAL kernel/driver/fb_state.c (the
+# owner / lease coordinator) and the REAL kernel/driver/input_route.c
+# (the lease itself) and asserts the spec §4.1 contract: the 32-byte
+# INOUT struct, EFAULT / EBADF / EINVAL / EACCES / ESTALE / EBUSY, the
+# exclusive lease, the copy-out rollback that must not revoke a newer
+# generation, and the libgfx wrapper.
+#
+# The REAL libgfx/gfx.c is linked through the same --wrap harness the
+# gfx client test uses, so the userspace wrapper is observed exactly as
+# it calls the kernel.
+GFX_INPUT_TEST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST -I$(TEST_MOCK) \
+    -include $(TEST_MOCK)/fb_resolution_runtime.h \
+    $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC) -I$(TESTS_DIR)/libgfx \
+    -D'errno=(*__errno_location())' -include $(TEST_INC)/gfx_client_errno.h
+
+$(TEST_BLD)/test_gfx_input.o: $(TEST_CASES)/test_gfx_input.c \
+		$(TESTS_DIR)/kernel/include/uapi/gfx.h \
+		$(TESTS_DIR)/kernel/include/driver/fb_state.h \
+		$(TESTS_DIR)/kernel/include/driver/input_route.h \
+		$(TESTS_DIR)/libgfx/gfx.h \
+		$(TEST_MOCK)/fb_resolution_runtime.h \
+		$(TEST_INC)/test_framework.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GFX_INPUT_TEST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_gfx_input.elf: $(TEST_BLD)/test_gfx_input.o \
+		$(TEST_BLD)/gfx_production.o \
+		$(TEST_BLD)/fb_state.o \
+		$(TEST_BLD)/fb_map.o \
+		$(TEST_BLD)/fb_resolution_runtime.o \
+		$(TEST_BLD)/input_route_production.o \
+		$(TEST_BLD)/input_route_runtime.o \
+		$(TEST_BLD)/input_ps2_production.o \
+		$(TEST_BLD)/libgfx_gfx_production.o
+	$(HOST_CC) -lpthread \
+	    -Wl,--wrap=open,--wrap=close,--wrap=ioctl,--wrap=malloc,--wrap=calloc,--wrap=free,--wrap=mmap,--wrap=munmap \
+	    -o $@ $^
+
+.PHONY: test-gui-gfx-input
+test-gui-gfx-input: $(TEST_BLD)/test_gfx_input.elf
+	$(TEST_BLD)/test_gfx_input.elf
 
 -include $(patsubst %.o,%.d,$(GUI_LVGL_OBJS))
 -include $(GUI_DETERMINISTIC_DIR)/*.d

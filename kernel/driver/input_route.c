@@ -206,6 +206,18 @@ static int route_endpoint_is_owner_locked(const struct route_endpoint *ep)
     return 0;
 }
 
+/* The lease is exclusive PER LEASED DEVICE: a keyboard-only lease does
+ * not own the mouse, so the mouse stays on the NORMAL path and every
+ * reader may read it. */
+static int route_device_is_leased_locked(const struct route_endpoint *ep)
+{
+    if (!route.lease_active)
+        return 0;
+    if (ep->device == INPUT_DEVICE_KEYBOARD)
+        return route.kbd_ep != NULL;
+    return route.mouse_ep != NULL;
+}
+
 /* ── The ACTIVE queues ────────────────────────────────────────── */
 
 static void route_kbd_queue_reset_locked(void)
@@ -511,18 +523,22 @@ int input_route_bind(const void *view, struct file *kbd, struct file *mouse,
     uint64_t flags;
     int i;
 
-    if (!view || !kbd || !mouse)
+    if (!view || !kbd)
         return -EINVAL;
 
     kbd_ep = (struct route_endpoint *)kbd->dev_private;
-    mouse_ep = (struct route_endpoint *)mouse->dev_private;
-    if (!kbd_ep || !mouse_ep)
+    if (!kbd_ep || kbd_ep->device != INPUT_DEVICE_KEYBOARD || kbd_ep->revoked)
         return -EINVAL;
-    if (kbd_ep->device != INPUT_DEVICE_KEYBOARD ||
-        mouse_ep->device != INPUT_DEVICE_MOUSE)
-        return -EINVAL;
-    if (kbd_ep->revoked || mouse_ep->revoked)
-        return -EINVAL;
+
+    /* A keyboard-only lease (mouse == NULL) leases the keyboard alone:
+     * the mouse device stays on the NORMAL path. */
+    if (mouse) {
+        mouse_ep = (struct route_endpoint *)mouse->dev_private;
+        if (!mouse_ep || mouse_ep->device != INPUT_DEVICE_MOUSE || mouse_ep->revoked)
+            return -EINVAL;
+    } else {
+        mouse_ep = NULL;
+    }
 
     flags = spin_lock_irqsave(&route.lock);
 
@@ -540,9 +556,11 @@ int input_route_bind(const void *view, struct file *kbd, struct file *mouse,
     kbd_ep->generation = route.generation;
     kbd_ep->error = 0;
     kbd_ep->revoked = 0;
-    mouse_ep->generation = route.generation;
-    mouse_ep->error = 0;
-    mouse_ep->revoked = 0;
+    if (mouse_ep) {
+        mouse_ep->generation = route.generation;
+        mouse_ep->error = 0;
+        mouse_ep->revoked = 0;
+    }
 
     /* The snapshot the new consumer starts from: the modifiers that
      * are physically held plus the Caps latch. */
@@ -574,8 +592,9 @@ int input_route_bind(const void *view, struct file *kbd, struct file *mouse,
 
     /* The mouse buttons that were already held are isolated as well:
      * the consumer never saw their press, so it must never see them
-     * held.  The movement is never lost. */
-    route.mouse_isolated = route.mouse_buttons;
+     * held.  The movement is never lost.  A keyboard-only lease does
+     * not own the mouse, so its buttons are left alone. */
+    route.mouse_isolated = mouse_ep ? route.mouse_buttons : 0;
 
     /* The transient modifier state starts clean. */
     route.logical_mods = 0;
@@ -635,10 +654,11 @@ int input_route_read(struct file *f, uint64_t offset, uint64_t size, void *buf)
 
     if (ep->revoked && ep->error) {
         rc = -ep->error;
-    } else if (route.lease_active && !route_endpoint_is_owner_locked(ep)) {
+    } else if (route_device_is_leased_locked(ep) &&
+               !route_endpoint_is_owner_locked(ep)) {
         /* The lease is exclusive: no other reader may steal the bytes. */
         rc = -EBUSY;
-    } else if (route.lease_active) {
+    } else if (route_endpoint_is_owner_locked(ep)) {
         rc = route_active_read_locked(ep, size, buf);
     } else {
         rc = route_normal_read_locked(ep, offset, size, buf);
@@ -679,9 +699,10 @@ uint32_t input_route_poll(struct file *f, uint32_t requested,
 
     if (ep->revoked && ep->error) {
         mask = POLLERR;
-    } else if (route.lease_active && !route_endpoint_is_owner_locked(ep)) {
+    } else if (route_device_is_leased_locked(ep) &&
+               !route_endpoint_is_owner_locked(ep)) {
         mask = POLLERR;
-    } else if (route.lease_active) {
+    } else if (route_endpoint_is_owner_locked(ep)) {
         if (overflow || desync) {
             /* The overflow means the stream lost data, the desync means
              * the consumer's key state may have diverged: both are
@@ -833,9 +854,12 @@ void input_route_mouse_event(const mouse_event_t *event)
     }
     route.mouse_buttons = event->buttons;
 
-    if (route.lease_active) {
+    if (route.lease_active && route.mouse_ep) {
+        /* The mouse is leased: the event belongs to the lease. */
         route_mouse_push_locked(&out);
     } else if (route.mouse_sink && route.mouse_sink->publish) {
+        /* A keyboard-only lease does not own the mouse: the mouse stays
+         * on the NORMAL path. */
         route.mouse_sink->publish(&out);
     }
 

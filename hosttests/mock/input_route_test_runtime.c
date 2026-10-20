@@ -454,7 +454,12 @@ void wait_queue_init(wait_queue_t *wq)
 
 /* ── The log stand-ins ──────────────────────────────────────── */
 
-int g_log_level = LOG_ERR;
+/* WEAK: the GUI-2 Task 4 fixture links this runtime together with the
+ * fb host runtime (hosttests/mock/fb_resolution_runtime.c), which
+ * defines the same log-level knob.  A weak definition keeps the route
+ * fixture self-contained while letting the other runtime win when both
+ * are linked into one binary. */
+__attribute__((weak)) int g_log_level = LOG_ERR;
 
 void _log_err_impl(const char *fmt, ...) { (void)fmt; }
 void _log_warn_impl(const char *fmt, ...) { (void)fmt; }

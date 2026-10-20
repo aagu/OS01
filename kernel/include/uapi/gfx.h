@@ -30,6 +30,12 @@
  * docs/superpowers/specs/2026-10-12-terminal-partial-present-design.md
  * §4 (UAPI) + §5 (kernel execution) for the contract. */
 #define GFX_PRESENT_RECT 0x4709
+/* GUI-2 plan Task 4: the physical-input lease.  GFX_BIND_INPUT binds
+ * the caller's keyboard / mouse file descriptors to the caller's
+ * DISPLAY VIEW, so the lease lives and dies with the display
+ * ownership.  GFX_UNBIND_INPUT releases the caller's own lease. */
+#define GFX_BIND_INPUT   0x470A
+#define GFX_UNBIND_INPUT 0x470B
 
 #define GFX_DISPLAY_STATE_FOREGROUND (1u << 0)
 #define GFX_DISPLAY_STATE_FALLBACK   (1u << 1)
@@ -124,5 +130,41 @@ _Static_assert(offsetof(gfx_present_rect_req_t, x)       == 16, "x offset");
 _Static_assert(offsetof(gfx_present_rect_req_t, y)       == 20, "y offset");
 _Static_assert(offsetof(gfx_present_rect_req_t, w)       == 24, "w offset");
 _Static_assert(offsetof(gfx_present_rect_req_t, h)       == 28, "h offset");
+
+/* GFX_BIND_INPUT — INOUT; binds the physical-input lease to the
+ * calling view.  The whole struct must be readable AND writable; the
+ * input result fields (generation / initial_modifiers) must be 0 on
+ * entry and are written back on success.
+ *
+ * keyboard_fd   the caller's /dev/keyboard descriptor (required).
+ * mouse_fd      the caller's /dev/mouse descriptor; -1 means the
+ *               keyboard only.
+ * flags         v1 must be 0.
+ * reserved      must be 0.
+ * generation    in: 0; out: the lease generation (non-zero, monotonic).
+ * initial_modifiers
+ *               in: 0; out: bit0 = Caps Lock, every other bit 0.
+ * reserved2     in: 0; out: 0. */
+typedef struct {
+    int32_t  keyboard_fd;
+    int32_t  mouse_fd;
+    uint32_t flags;
+    uint32_t reserved;
+    uint64_t generation;
+    uint32_t initial_modifiers;
+    uint32_t reserved2;
+} gfx_bind_input_t;
+
+/* Field offsets are part of the ABI (spec §4.1) — the libgfx wrapper
+ * and every client build against this header. */
+_Static_assert(sizeof(gfx_bind_input_t) == 32,
+               "gfx_bind_input_t must be 32 bytes (ABI)");
+_Static_assert(offsetof(gfx_bind_input_t, keyboard_fd)      == 0,  "keyboard_fd offset");
+_Static_assert(offsetof(gfx_bind_input_t, mouse_fd)         == 4,  "mouse_fd offset");
+_Static_assert(offsetof(gfx_bind_input_t, flags)            == 8,  "flags offset");
+_Static_assert(offsetof(gfx_bind_input_t, reserved)         == 12, "reserved offset");
+_Static_assert(offsetof(gfx_bind_input_t, generation)       == 16, "generation offset");
+_Static_assert(offsetof(gfx_bind_input_t, initial_modifiers) == 24, "initial_modifiers offset");
+_Static_assert(offsetof(gfx_bind_input_t, reserved2)        == 28, "reserved2 offset");
 
 #endif /* _UAPI_GFX_H */

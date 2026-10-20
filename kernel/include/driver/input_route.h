@@ -107,6 +107,9 @@ void input_route_release_file(struct file *f);
  * route endpoints of the matching device.  A live lease is replaced:
  * the previous owner loses it.
  *
+ * A NULL `mouse` leases the KEYBOARD alone: the mouse device then stays
+ * on the NORMAL path and is not owned by the lease.
+ *
  * `generation` receives the new lease generation (non-zero and
  * monotonically increasing) and `initial_modifiers` the modifier
  * snapshot the new consumer starts from. */

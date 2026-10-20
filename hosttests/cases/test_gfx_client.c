@@ -90,6 +90,10 @@ static int   mock_ioctl_present_rect_rv;      /* default 0 (Task 2) */
 static gfx_info_t mock_ioctl_get_info_value;  /* default 4x4 */
 static gfx_display_state_t mock_ioctl_display_state_value;
 static gfx_replace_fallback_t mock_ioctl_replace_fallback_passed;
+static gfx_bind_input_t mock_ioctl_bind_value;      /* the kernel's answer */
+static gfx_bind_input_t mock_ioctl_bind_passed;     /* what the client sent */
+static int mock_ioctl_bind_rv;
+static int mock_ioctl_unbind_rv;
 
 #define MAX_IOCTL_LOG 16
 static struct {
@@ -121,6 +125,8 @@ static void reset_mocks(void)
     mock_ioctl_get_display_state_rv = 0;
     mock_ioctl_replace_fallback_rv = 0;
     mock_ioctl_present_rect_rv = 0;
+    mock_ioctl_bind_rv = 0;
+    mock_ioctl_unbind_rv = 0;
     mock_ioctl_get_info_value.width = 4;
     mock_ioctl_get_info_value.height = 4;
     mock_ioctl_get_info_value.stride = 16;
@@ -130,6 +136,8 @@ static void reset_mocks(void)
     mock_ioctl_display_state_value.flags = GFX_DISPLAY_STATE_FOREGROUND;
     mock_ioctl_display_state_value.reserved = 0;
     memset(&mock_ioctl_replace_fallback_passed, 0, sizeof(mock_ioctl_replace_fallback_passed));
+    memset(&mock_ioctl_bind_value, 0, sizeof(mock_ioctl_bind_value));
+    memset(&mock_ioctl_bind_passed, 0, sizeof(mock_ioctl_bind_passed));
     memset(mock_ioctl_log, 0, sizeof(mock_ioctl_log));
 }
 
@@ -230,6 +238,20 @@ int __wrap_ioctl(int fd, unsigned long request, ...)
             memcpy(&mock_ioctl_replace_fallback_passed, arg,
                    sizeof(mock_ioctl_replace_fallback_passed));
         }
+        break;
+    case GFX_BIND_INPUT:
+        rv = mock_ioctl_bind_rv;
+        if (arg) {
+            /* Keep what the client sent, then answer with the lease
+             * result the kernel would have written back. */
+            memcpy(&mock_ioctl_bind_passed, arg, sizeof(mock_ioctl_bind_passed));
+            if (rv == 0) {
+                memcpy(arg, &mock_ioctl_bind_value, sizeof(mock_ioctl_bind_value));
+            }
+        }
+        break;
+    case GFX_UNBIND_INPUT:
+        rv = mock_ioctl_unbind_rv;
         break;
     default:
         rv = -ENOTTY;
@@ -973,8 +995,112 @@ TEST_FUNC(test_present_rect_request_and_errno)
     gfx_close(h);
 }
 
+TEST_FUNC(test_bind_input_lifecycle)
+{
+    TEST_SUITE("bind_input: the lease lifecycle of one view");
+    reset_mocks();
+    gfx_handle_t *h = gfx_open(0, 0, 4, 4);
+    assert_not_null(h);
+
+    /* The kernel's answer: a lease generation and the modifier
+     * snapshot (bit0 = Caps Lock). */
+    mock_ioctl_bind_value.generation = 7;
+    mock_ioctl_bind_value.initial_modifiers = 1;
+
+    int idx = mock_ioctl_count;
+    gfx_input_state_t state;
+    memset(&state, 0, sizeof(state));
+    errno = ENOENT;
+    int rc = gfx_bind_input(h, 3, 4, &state);
+    assert_eq(0, rc);
+    assert_eq(ENOENT, errno);
+    assert_eq(idx + 1, mock_ioctl_count);
+    assert_eq((int)GFX_BIND_INPUT, (int)mock_ioctl_log[idx].cmd);
+    assert_eq(7, mock_ioctl_log[idx].fd);
+
+    /* The descriptors travel with the request ... */
+    assert_eq(3, mock_ioctl_bind_passed.keyboard_fd);
+    assert_eq(4, mock_ioctl_bind_passed.mouse_fd);
+    /* ... and the input result fields are 0 on entry. */
+    assert_eq(0, mock_ioctl_bind_passed.flags);
+    assert_eq(0, mock_ioctl_bind_passed.reserved);
+    assert_eq(0, mock_ioctl_bind_passed.generation);
+    assert_eq(0, mock_ioctl_bind_passed.initial_modifiers);
+    assert_eq(0, mock_ioctl_bind_passed.reserved2);
+
+    /* The lease result lands in the caller's state. */
+    assert_eq(7, (long)state.generation);
+    assert_eq(1, (long)state.initial_modifiers);
+    assert_eq(0, (long)state.reserved);
+
+    /* A keyboard-only lease (mouse_fd = -1) is a legal request. */
+    idx = mock_ioctl_count;
+    memset(&state, 0, sizeof(state));
+    rc = gfx_bind_input(h, 3, -1, &state);
+    assert_eq(0, rc);
+    assert_eq(idx + 1, mock_ioctl_count);
+    assert_eq(3, mock_ioctl_bind_passed.keyboard_fd);
+    assert_eq(-1, mock_ioctl_bind_passed.mouse_fd);
+
+    /* The release closes the lease of THIS view only. */
+    idx = mock_ioctl_count;
+    errno = ENOENT;
+    rc = gfx_unbind_input(h);
+    assert_eq(0, rc);
+    assert_eq(ENOENT, errno);
+    assert_eq(idx + 1, mock_ioctl_count);
+    assert_eq((int)GFX_UNBIND_INPUT, (int)mock_ioctl_log[idx].cmd);
+    assert_eq(7, mock_ioctl_log[idx].fd);
+
+    gfx_close(h);
+}
+
+TEST_FUNC(test_bind_input_errors_and_arguments)
+{
+    TEST_SUITE("bind_input: argument checks and errno passthrough");
+    reset_mocks();
+    gfx_handle_t *h = gfx_open(0, 0, 4, 4);
+    assert_not_null(h);
+    int ioctls_after_open = mock_ioctl_count;
+
+    gfx_input_state_t state;
+    memset(&state, 0, sizeof(state));
+
+    /* A NULL handle and a NULL out_state are refused without an
+     * ioctl. */
+    errno = 0;
+    assert_eq(-1, gfx_bind_input(NULL, 3, 4, &state));
+    assert_eq(EINVAL, errno);
+    errno = 0;
+    assert_eq(-1, gfx_bind_input(h, 3, 4, NULL));
+    assert_eq(EINVAL, errno);
+    errno = 0;
+    assert_eq(-1, gfx_unbind_input(NULL));
+    assert_eq(EINVAL, errno);
+    assert_eq(ioctls_after_open, mock_ioctl_count);
+
+    /* The kernel's errno reaches the caller unchanged. */
+    const int errs[] = { EACCES, ESTALE, EBUSY, EINVAL, EFAULT, EBADF };
+    for (int i = 0; i < 6; i++) {
+        mock_ioctl_bind_rv = -errs[i];
+        errno = 0;
+        assert_eq(-1, gfx_bind_input(h, 3, 4, &state));
+        assert_eq(errs[i], errno);
+    }
+    mock_ioctl_bind_rv = 0;
+
+    mock_ioctl_unbind_rv = -EIO;
+    errno = 0;
+    assert_eq(-1, gfx_unbind_input(h));
+    assert_eq(EIO, errno);
+
+    gfx_close(h);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_open_happy_path),
+    TEST_ENTRY(test_bind_input_lifecycle),
+    TEST_ENTRY(test_bind_input_errors_and_arguments),
     TEST_ENTRY(test_open_enoint_normalized_to_enodev),
     TEST_ENTRY(test_open_enfile_is_preserved),
     TEST_ENTRY(test_open_create_view_failure_cleanup),

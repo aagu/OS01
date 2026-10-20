@@ -17,7 +17,9 @@
 #include <uapi/fb.h>
 #include <uapi/gfx.h>
 #include <driver/fb_state.h>
+#include <driver/bga.h>
 #include <driver/font.h>
+#include <driver/input_route.h>
 #include <core/printk.h>
 
 static int g_failed = 0;
@@ -68,6 +70,77 @@ static const void *const COOKIE_A  = (const void *)0x1000A;
 static const void *const COOKIE_A2 = (const void *)0x1000A2;
 static const void *const COOKIE_B  = (const void *)0x1000B;
 static const void *const COOKIE_C  = (const void *)0x1000C;
+
+/* ── The input route stand-in ─────────────────────────────────
+ * The GUI-2 input route (kernel/driver/input_route.c) is not linked
+ * into this fixture: the display coordinator reaches it through weak
+ * references, so the fixture supplies its own recording stand-in.
+ * The route's own contract (the generation matching, the exclusive
+ * lease) is asserted by the input-route fixture; what matters HERE is
+ * WHEN the coordinator grants and revokes the lease. */
+static uint32_t    g_route_bind_count;
+static uint32_t    g_route_unbind_count;
+static const void *g_route_unbind_view;
+static uint64_t    g_route_unbind_generation;
+static int         g_route_unbind_reason;
+static uint64_t    g_route_next_generation;
+
+static void route_reset_counters(void)
+{
+    g_route_bind_count = 0;
+    g_route_unbind_count = 0;
+    g_route_unbind_view = NULL;
+    g_route_unbind_generation = 0;
+    g_route_unbind_reason = 0;
+    g_route_next_generation = 0;
+}
+
+int input_route_bind(const void *view, struct file *kbd, struct file *mouse,
+                     uint64_t *generation, uint32_t *initial_modifiers)
+{
+    (void)view; (void)kbd; (void)mouse;
+    g_route_bind_count++;
+    if (generation) *generation = ++g_route_next_generation;
+    if (initial_modifiers) *initial_modifiers = 0;
+    return 0;
+}
+
+void input_route_unbind(const void *view, uint64_t generation, int reason)
+{
+    g_route_unbind_count++;
+    g_route_unbind_view = view;
+    g_route_unbind_generation = generation;
+    g_route_unbind_reason = reason;
+}
+
+/* The resolution switcher stand-in: one published mode, and a mode
+ * change that applies cleanly.  The fb host runtime's weak defaults
+ * publish no mode at all, so the resolution path could not be
+ * exercised with them. */
+uint32_t bga_filter_modes(const bga_caps_t *caps, uint64_t mapped_size,
+                           struct fb_info out[FB_MAX_MODES])
+{
+    (void)caps; (void)mapped_size;
+    memset(&out[0], 0, sizeof(out[0]));
+    out[0].width = 800;
+    out[0].height = 600;
+    out[0].stride = 800 * 4;
+    out[0].bpp = 32;
+    out[0].format = FB_FORMAT_RGB32;
+    return 1;
+}
+
+enum bga_result bga_apply_mode(const struct fb_info *target)
+{
+    (void)target;
+    return BGA_APPLIED;
+}
+
+/* The route files are only identities for the coordinator: the stand-in
+ * route never dereferences them. */
+static char g_fake_file_storage[2][8];
+#define FAKE_KBD_FILE   ((struct file *)g_fake_file_storage[0])
+#define FAKE_MOUSE_FILE ((struct file *)g_fake_file_storage[1])
 
 /*
  * Test 1:
@@ -523,6 +596,175 @@ TEST_FUNC(test_drain_with_backend_failure_ends_transition_and_returns_eio)
     CHECK_EQ(-EIO, fb_transition_begin(false));
 }
 
+/*
+ * Test: the input lease is granted to the display owner only, and a
+ * live lease is never preempted.
+ */
+TEST_FUNC(test_input_lease_requires_the_display_owner)
+{
+    setup_env();
+    route_reset_counters();
+
+    uint64_t generation = 0;
+    uint32_t modifiers = 0;
+
+    /* No owner at all: the bind is refused. */
+    CHECK_EQ(-EACCES, fb_input_bind(COOKIE_A, 1, FAKE_KBD_FILE,
+                                    FAKE_MOUSE_FILE, &generation, &modifiers));
+    CHECK_EQ(0, (int)g_route_bind_count);
+
+    CHECK_EQ(0, fb_owner_register_fallback(COOKIE_A, 1));
+    CHECK_EQ(0, fb_input_bind(COOKIE_A, 1, FAKE_KBD_FILE,
+                              FAKE_MOUSE_FILE, &generation, &modifiers));
+    CHECK_EQ(1, (int)g_route_bind_count);
+    CHECK_TRUE(generation != 0);
+
+    /* A second bind does not preempt the live lease. */
+    CHECK_EQ(-EBUSY, fb_input_bind(COOKIE_A, 1, FAKE_KBD_FILE,
+                                   FAKE_MOUSE_FILE, &generation, &modifiers));
+    CHECK_EQ(1, (int)g_route_bind_count);
+
+    /* A view that is not the owner may not bind. */
+    CHECK_EQ(-EACCES, fb_input_bind(COOKIE_B, 1, FAKE_KBD_FILE,
+                                    FAKE_MOUSE_FILE, &generation, &modifiers));
+
+    /* A stale view may not bind. */
+    CHECK_EQ(-ESTALE, fb_input_bind(COOKIE_A, 99, FAKE_KBD_FILE,
+                                    FAKE_MOUSE_FILE, &generation, &modifiers));
+}
+
+/*
+ * Test: the lease is revoked at every display state commit point —
+ * a new owner, a release, a detach, a fallback handover that really
+ * changes the owner, a resolution generation update and a backend
+ * failure — and a fallback change that leaves the owner alone revokes
+ * nothing.
+ */
+TEST_FUNC(test_input_lease_is_revoked_by_the_display_state_commits)
+{
+    uint64_t generation = 0;
+    uint32_t modifiers = 0;
+
+    /* 1. A new view takes the display over from the owner. */
+    setup_env();
+    route_reset_counters();
+    CHECK_EQ(0, fb_owner_register_fallback(COOKIE_A, 1));
+    CHECK_EQ(0, fb_input_bind(COOKIE_A, 1, FAKE_KBD_FILE,
+                              FAKE_MOUSE_FILE, &generation, &modifiers));
+    route_reset_counters();
+    CHECK_EQ(0, fb_owner_acquire(COOKIE_B, 1));
+    CHECK_EQ(1, (int)g_route_unbind_count);
+    CHECK_EQ((long)COOKIE_A, (long)g_route_unbind_view);
+    CHECK_EQ(EACCES, g_route_unbind_reason);
+
+    /* 2. The owner releases the display. */
+    CHECK_EQ(0, fb_input_bind(COOKIE_B, 1, FAKE_KBD_FILE,
+                              FAKE_MOUSE_FILE, &generation, &modifiers));
+    route_reset_counters();
+    CHECK_EQ(0, fb_owner_release(COOKIE_B));
+    CHECK_EQ(1, (int)g_route_unbind_count);
+    CHECK_EQ((long)COOKIE_B, (long)g_route_unbind_view);
+    CHECK_EQ(EACCES, g_route_unbind_reason);
+
+    /* 3. The owner's view is detached. */
+    CHECK_EQ(0, fb_input_bind(COOKIE_A, 1, FAKE_KBD_FILE,
+                              FAKE_MOUSE_FILE, &generation, &modifiers));
+    route_reset_counters();
+    fb_owner_detach(COOKIE_A);
+    CHECK_EQ(1, (int)g_route_unbind_count);
+    CHECK_EQ((long)COOKIE_A, (long)g_route_unbind_view);
+    CHECK_EQ(EACCES, g_route_unbind_reason);
+
+    /* 4. A fallback handover that really changes the owner. */
+    setup_env();
+    route_reset_counters();
+    CHECK_EQ(0, fb_owner_register_fallback(COOKIE_A, 1));
+    CHECK_EQ(0, fb_input_bind(COOKIE_A, 1, FAKE_KBD_FILE,
+                              FAKE_MOUSE_FILE, &generation, &modifiers));
+    route_reset_counters();
+    CHECK_EQ(0, fb_owner_replace_fallback(COOKIE_A, COOKIE_A2, 1));
+    CHECK_EQ(1, (int)g_route_unbind_count);
+    CHECK_EQ((long)COOKIE_A, (long)g_route_unbind_view);
+    CHECK_EQ(EACCES, g_route_unbind_reason);
+
+    /* 5. A fallback handover that leaves the owner alone. */
+    setup_env();
+    route_reset_counters();
+    CHECK_EQ(0, fb_owner_register_fallback(COOKIE_A, 1));
+    CHECK_EQ(0, fb_owner_acquire(COOKIE_B, 1));
+    CHECK_EQ(0, fb_input_bind(COOKIE_B, 1, FAKE_KBD_FILE,
+                              FAKE_MOUSE_FILE, &generation, &modifiers));
+    route_reset_counters();
+    CHECK_EQ(0, fb_owner_replace_fallback(COOKIE_A, COOKIE_A2, 1));
+    CHECK_EQ(0, (int)g_route_unbind_count);
+
+    /* 6. A resolution generation update. */
+    setup_env();
+    route_reset_counters();
+    CHECK_EQ(0, fb_owner_register_fallback(COOKIE_A, 1));
+    CHECK_EQ(0, fb_input_bind(COOKIE_A, 1, FAKE_KBD_FILE,
+                              FAKE_MOUSE_FILE, &generation, &modifiers));
+    bga_caps_t caps = {
+        .vram_bytes = sizeof(g_fake_vram),
+        .max_width = 1024,
+        .max_height = 768,
+        .max_bpp = 32,
+    };
+    CHECK_EQ(0, fb_install_backend(&caps, g_fake_vram, sizeof(g_fake_vram)));
+    route_reset_counters();
+    struct fb_set_mode_req req = { .width = 800, .height = 600, .bpp = 32 };
+    CHECK_EQ(0, fb_set_mode(&req));
+    CHECK_EQ(1, (int)g_route_unbind_count);
+    CHECK_EQ(ESTALE, g_route_unbind_reason);
+
+    /* 7. A backend failure. */
+    setup_env();
+    route_reset_counters();
+    CHECK_EQ(0, fb_owner_register_fallback(COOKIE_A, 1));
+    CHECK_EQ(0, fb_input_bind(COOKIE_A, 1, FAKE_KBD_FILE,
+                              FAKE_MOUSE_FILE, &generation, &modifiers));
+    route_reset_counters();
+    fb_mark_failed();
+    CHECK_EQ(1, (int)g_route_unbind_count);
+    CHECK_EQ(EIO, g_route_unbind_reason);
+}
+
+/*
+ * Test: a normal unbind clears only its own view's lease.
+ */
+TEST_FUNC(test_input_unbind_clears_only_its_own_view)
+{
+    setup_env();
+    route_reset_counters();
+
+    uint64_t generation = 0;
+    uint32_t modifiers = 0;
+
+    CHECK_EQ(0, fb_owner_register_fallback(COOKIE_A, 1));
+    CHECK_EQ(0, fb_input_bind(COOKIE_A, 1, FAKE_KBD_FILE,
+                              FAKE_MOUSE_FILE, &generation, &modifiers));
+
+    /* Another view's unbind never touches this lease. */
+    fb_input_unbind(COOKIE_B, 0, 0);
+    CHECK_EQ(0, (int)g_route_unbind_count);
+
+    /* A stale generation never releases the live lease. */
+    fb_input_unbind(COOKIE_A, generation + 100, 0);
+    CHECK_EQ(0, (int)g_route_unbind_count);
+
+    /* The owner's own unbind releases it. */
+    fb_input_unbind(COOKIE_A, 0, 0);
+    CHECK_EQ(1, (int)g_route_unbind_count);
+    CHECK_EQ((long)COOKIE_A, (long)g_route_unbind_view);
+    /* The captured generation is handed to the route, so the release
+     * can never touch a newer lease of the same view. */
+    CHECK_EQ((long)generation, (long)g_route_unbind_generation);
+
+    /* And the lease is gone: a new bind is possible. */
+    CHECK_EQ(0, fb_input_bind(COOKIE_A, 1, FAKE_KBD_FILE,
+                              FAKE_MOUSE_FILE, &generation, &modifiers));
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_owner_acquire_release_hierarchy),
     TEST_ENTRY(test_owner_detach_scenarios),
@@ -533,6 +775,9 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_role_check_and_writer_count_no_gap),
     TEST_ENTRY(test_uaccess_fault_all_exits_release_lease),
     TEST_ENTRY(test_drain_with_backend_failure_ends_transition_and_returns_eio),
+    TEST_ENTRY(test_input_lease_requires_the_display_owner),
+    TEST_ENTRY(test_input_lease_is_revoked_by_the_display_state_commits),
+    TEST_ENTRY(test_input_unbind_clears_only_its_own_view),
 TEST_LIST_END
 
 int main(void)

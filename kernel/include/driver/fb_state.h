@@ -54,6 +54,36 @@ int  fb_owner_replace_fallback(const void *old_cookie, const void *new_cookie, u
 void fb_owner_detach(const void *cookie);
 int  fb_owner_get_state(const void *cookie, gfx_display_state_t *out);
 
+/* ── The physical-input lease (GUI-2 plan Task 4) ────────────────
+ * The lease is bound to the DISPLAY OWNER: it is granted inside the
+ * display control lock together with the owner / mode check, and it is
+ * revoked at every owner / mode state commit point (a new owner, a
+ * release, a detach, a fallback handover, a resolution change, a
+ * backend failure), so the lease can never outlive the view that owns
+ * it.
+ *
+ * fb_input_bind() takes a TEMPORARY file reference: the caller drops
+ * its own reference right after the call, and the lease holds only the
+ * route's weak endpoint identities — no reference cycle, so the final
+ * close of a bound raw file still fires and still revokes the lease.
+ *
+ * `expected_mode` is the view's mode sequence; a stale view is
+ * refused with -ESTALE.  `generation` receives the lease generation
+ * (non-zero, monotonic) and `initial_modifiers` the modifier snapshot
+ * the new consumer starts from (bit0 = Caps Lock).
+ *
+ * fb_input_unbind() releases the lease of ONE view only: a view that
+ * does not hold the lease never touches another view's lease.  A
+ * non-zero `generation` must match the live lease exactly; zero is the
+ * current view's explicit release.  `reason` is 0 for an explicit
+ * cleanup and a revoke reason (EACCES / ESTALE / EIO) when the lease
+ * is taken away. */
+struct file;
+int  fb_input_bind(const void *view, uint64_t expected_mode,
+                   struct file *kbd, struct file *mouse,
+                   uint64_t *generation, uint32_t *initial_modifiers);
+void fb_input_unbind(const void *view, uint64_t generation, int reason);
+
 #ifdef OS01_HOST_TEST
 void fb_state__test_set_generation(uint64_t generation);
 #endif
