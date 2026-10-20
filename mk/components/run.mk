@@ -611,12 +611,12 @@ test-resolution-host: $(if $(filter all,$(RES_CASE_EFFECTIVE)),$(foreach c,$(RES
 	  esac
 
 # ── GUI host tests ───────────────────────────────────────────
-# Focused host tests for GUI-1 LVGL platform backend.
-# CASE accepts platform, lvgl, or all (default: all).
-# In Task 3 only platform is registered; Task 4 adds lvgl.
+# Focused host tests for the GUI plans: the GUI-1 LVGL platform backend
+# and the GUI-2 input-focus chain.  CASE accepts any registered case
+# (platform, lvgl, devfs-input) or all (default: all).
 # Unknown CASE aborts non-zero before invoking submake.
-.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl
-GUI_HOST_REGISTERED_CASES := platform lvgl
+.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input
+GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input
 
 _test-gui-host-run-platform:
 	@echo "  [test-gui-host] platform"
@@ -626,8 +626,19 @@ _test-gui-host-run-lvgl:
 	@echo "  [test-gui-host] lvgl"
 	$(call os01_submake,hosttests,test-gui-lvgl $(OS01_SUBMAKE_ARGS))
 
+# GUI-2 plan Task 1: file-aware devfs read/poll dispatch.  Runs
+# test_devfs_input_dispatch.elf, which host-compiles the REAL
+# kernel/fs/devfs.c + kernel/fs/file.c + kernel/fs/poll.c and asserts the
+# spec §4.3 devfs contract: the file identity reaches the device, the
+# legacy node read/poll stay the fallback for devices without the new
+# hooks, a read_file error is not downgraded to the node read, and
+# poll_file returning 0 stays "not ready".
+_test-gui-host-run-devfs-input:
+	@echo "  [test-gui-host] devfs-input"
+	$(call os01_submake,hosttests,test-gui-devfs-input $(OS01_SUBMAKE_ARGS))
+
 _test-gui-host-run-%:
-	@echo "ERROR: unknown CASE='$*'; valid: platform, lvgl, all" >&2
+	@echo "ERROR: unknown CASE='$*'; valid: $(GUI_HOST_REGISTERED_CASES), all" >&2
 	@exit 1
 
 GUI_CASE_RAW := $(CASE)

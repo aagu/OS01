@@ -174,7 +174,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_setres.elf \
     $(TEST_BLD)/test_display_owner.elf \
     $(TEST_BLD)/test_gui_platform.elf \
-    $(TEST_BLD)/test_gui_lvgl_integration.elf
+    $(TEST_BLD)/test_gui_lvgl_integration.elf \
+    $(TEST_BLD)/test_devfs_input_dispatch.elf
 
 # Binaries that report solely through their exit code and print nothing on
 # success (see the `run` section for the full rationale).  Defined here, NOT
@@ -185,7 +186,7 @@ TEST_EXIT_STATUS_BINS := \
     $(TEST_BLD)/test_runtime_udivti3.elf \
     $(TEST_BLD)/test_page_table_runner.elf
 
-.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner test-framework-contract test-gui-platform test-gui-lvgl
+.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner test-framework-contract test-gui-platform test-gui-lvgl test-gui-devfs-input
 
 all: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS)
 
@@ -3574,6 +3575,28 @@ test-gui-lvgl: $(TEST_BLD)/test_gui_lvgl_integration.elf
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \
 	    $<
+
+# GUI-2 plan Task 1: file-aware devfs read/poll dispatch.  Host-compiles
+# the REAL kernel/fs/devfs.c + kernel/fs/file.c + kernel/fs/poll.c
+# (POLL_HOST_CFLAGS / poll_test_runtime.h) and links them against the
+# narrow mocks of the layers below that the fixture provides, so the
+# assertions observe the production dispatch (devfs_register_chrdev →
+# devfs read/poll bridge → fd_read / fd_poll) and not a stub's return
+# value.  Tested production symbols: devfs_register_chrdev,
+# devfs_get_private, devfs_poll_file, fd_read, fd_poll.
+.PHONY: test-gui-devfs-input
+test-gui-devfs-input: $(TEST_BLD)/test_devfs_input_dispatch.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+$(TEST_BLD)/test_devfs_input_dispatch.o: $(TEST_CASES)/test_devfs_input_dispatch.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_devfs_input_dispatch.elf: $(TEST_BLD)/test_devfs_input_dispatch.o $(POLL_PRODUCTION_OBJS)
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 -include $(patsubst %.o,%.d,$(GUI_LVGL_OBJS))
 -include $(GUI_DETERMINISTIC_DIR)/*.d

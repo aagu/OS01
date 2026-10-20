@@ -30,6 +30,20 @@ struct vma;
 //             BEFORE the node reference is released.  NULL means
 //             no per-file cleanup; the node callback (if any) is
 //             unaffected.
+// read_file:  file-aware read.  Receives the specific file_t, so a
+//             device can tell two open file descriptions on the same
+//             node apart (e.g. the input lease needs to know WHICH
+//             reader owns the physical keyboard).  The buffer is
+//             always kernel memory — fd_read bounces through a kernel
+//             buffer and copies to user space itself.  NULL means
+//             "no file-aware read": devfs falls back to the legacy
+//             node read (ops->read).  An error returned here is
+//             final; devfs never retries through the node read.
+// poll_file:  file-aware poll.  Same contract as read_file: NULL
+//             means devfs falls back to the legacy node poll
+//             (ops->poll).  A returned mask of 0 is a legitimate
+//             "not ready" answer and is never upgraded to
+//             always-ready.
 struct devfs_ops {
     int (*open)(const char *name, struct file **out_file);
     int (*read)(struct vfs_node *, uint64_t, uint64_t, void *);
@@ -49,6 +63,12 @@ struct devfs_ops {
     int (*ioctl)(struct vfs_node *, int cmd, void *arg);
     int (*ioctl_file)(struct file *, int cmd, void *arg);
     void (*release_file)(struct file *);
+    // ── Optional file-aware hooks (appended last: the layout above
+    //    is the long-standing device ABI) ──────────────────────
+    int (*read_file)(struct file *, uint64_t offset, uint64_t size,
+                     void *buffer);
+    uint32_t (*poll_file)(struct file *, uint32_t requested,
+                          struct poll_table *pt);
 };
 
 // Register a character device that will appear under /dev/
@@ -70,6 +90,16 @@ extern const struct devfs_ops tty_phys_ops;
 // calls device's poll callback or returns always-ready if none.
 uint32_t devfs_poll(struct vfs_node *node, uint32_t requested,
                     struct poll_table *pt);
+
+// Poll a devfs device THROUGH a specific file_t.  Resolves f->node to
+// the devfs device and prefers ops->poll_file when set; falls back to
+// the legacy node poll (ops->poll, or always-ready when the device
+// registers no poll callback at all) only when poll_file is absent.
+// A poll_file result of 0 is a legitimate "not ready" answer and is
+// returned as-is.  Returns POLLNVAL when the file has no node, is not
+// a device file, or its node does not resolve to a devfs device.
+uint32_t devfs_poll_file(struct file *f, uint32_t requested,
+                         struct poll_table *pt);
 
 // sys_open integration: check the devfs device's open callback,
 // returning a custom file_t or NULL to fall through to FD_DEV.
