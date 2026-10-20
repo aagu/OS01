@@ -176,7 +176,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_gui_platform.elf \
     $(TEST_BLD)/test_gui_lvgl_integration.elf \
     $(TEST_BLD)/test_devfs_input_dispatch.elf \
-    $(TEST_BLD)/test_input_ps2_frame.elf
+    $(TEST_BLD)/test_input_ps2_frame.elf \
+    $(TEST_BLD)/test_input_route.elf
 
 # Binaries that report solely through their exit code and print nothing on
 # success (see the `run` section for the full rationale).  Defined here, NOT
@@ -187,7 +188,7 @@ TEST_EXIT_STATUS_BINS := \
     $(TEST_BLD)/test_runtime_udivti3.elf \
     $(TEST_BLD)/test_page_table_runner.elf
 
-.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner test-framework-contract test-gui-platform test-gui-lvgl test-gui-devfs-input test-gui-input-frame
+.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner test-framework-contract test-gui-platform test-gui-lvgl test-gui-devfs-input test-gui-input-frame test-gui-input-route
 
 all: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS)
 
@@ -2086,8 +2087,22 @@ $(TEST_BLD)/test_i8042_demux.o: $(TEST_CASES)/test_i8042_demux.c \
 
 $(TEST_BLD)/test_i8042_demux.elf: $(TEST_BLD)/test_i8042_demux.o \
 		$(TEST_BLD)/i8042_production.o \
-		$(TEST_BLD)/keyboard_production.o
+		$(TEST_BLD)/keyboard_production.o \
+		$(TEST_BLD)/input_route_kbd_production.o \
+		$(TEST_BLD)/input_ps2_production.o
 	$(HOST_CC) -o $@ $^
+
+# The keyboard driver hands every hardware byte to the input route, so
+# the route and its framer are linked into the fixtures that compile
+# the real keyboard / mouse drivers.  The route is compiled with the
+# same kbd shadows as the drivers.
+$(TEST_BLD)/input_route_kbd_production.o: $(TESTS_DIR)/kernel/driver/input_route.c \
+		$(TESTS_DIR)/kernel/include/driver/input_route.h \
+		$(TESTS_DIR)/kernel/include/driver/input_ps2.h \
+		$(TEST_MOCK)/kbd_include/fs/file.h \
+		$(TEST_MOCK)/kbd_include/fs/poll.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(KBD_HOST_CFLAGS) -c $< -o $@
 
 test_i8042_demux: $(TEST_BLD)/test_i8042_demux.elf
 	$<
@@ -2101,12 +2116,18 @@ test_mouse_proto: $(TEST_BLD)/test_mouse_proto.elf
 
 # Links the real phase-6 mouse driver against scriptable i8042 and IRQ
 # transactions; the test observes command-byte and consumer state.
+# The mouse driver hands every event to the input route, so the route
+# and its framer are linked in as well.
 $(TEST_BLD)/test_mouse_init.elf: $(TEST_CASES)/test_mouse_init.c \
 		$(TESTS_DIR)/kernel/driver/mouse.c \
+		$(TESTS_DIR)/kernel/driver/input_route.c \
+		$(TESTS_DIR)/kernel/driver/input_ps2.c \
 		$(TESTS_DIR)/kernel/include/driver/mouse.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(KBD_HOST_CFLAGS) $< \
-		$(TESTS_DIR)/kernel/driver/mouse.c -o $@
+		$(TESTS_DIR)/kernel/driver/mouse.c \
+		$(TESTS_DIR)/kernel/driver/input_route.c \
+		$(TESTS_DIR)/kernel/driver/input_ps2.c -o $@
 
 test_mouse_init: $(TEST_BLD)/test_mouse_init.elf
 	$<
@@ -3625,6 +3646,57 @@ $(TEST_BLD)/input_ps2_production.o: $(TESTS_DIR)/kernel/driver/input_ps2.c \
 $(TEST_BLD)/test_input_ps2_frame.elf: $(TEST_BLD)/test_input_ps2_frame.o \
 		$(TEST_BLD)/input_ps2_production.o
 	$(HOST_CC) -o $@ $^
+
+# GUI-2 plan Task 3: the exclusive physical-input lease.  The route owns
+# the physical key state, the lease and the ACTIVE queues, so the fixture
+# host-compiles the REAL kernel/driver/input_route.c (plus the REAL
+# kernel/driver/input_ps2.c framer) and links them against the recording
+# runtime in hosttests/mock/input_route_test_runtime.{c,h}.
+#
+# The recording runtime is not a convenience: the route's contract is a
+# lock ORDER (route → NORMAL queue/poll) and an ATOMIC "authorize +
+# dequeue + register waiter" window.  A no-op mock spinlock cannot show
+# either, so the runtime records every acquisition with its nesting
+# depth and the assertions look at the recorded order.
+#
+# Tested production symbols: input_route_init, input_route_open,
+# input_route_bind, input_route_unbind, input_route_read,
+# input_route_poll, input_route_keyboard_byte, input_route_mouse_event,
+# input_route_release_file, input_route_set_normal_sinks.
+.PHONY: test-gui-input-route
+test-gui-input-route: $(TEST_BLD)/test_input_route.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+ROUTE_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
+    -Wno-unused-function -D__SPINLOCK_H__ -DOS01_HOST_TEST \
+    -include $(TEST_MOCK)/input_route_test_runtime.h \
+    -I$(TEST_MOCK) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+
+$(TEST_BLD)/test_input_route.o: $(TEST_CASES)/test_input_route.c \
+		$(TESTS_DIR)/kernel/include/driver/input_route.h \
+		$(TEST_MOCK)/input_route_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ROUTE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/input_route_production.o: $(TESTS_DIR)/kernel/driver/input_route.c \
+		$(TESTS_DIR)/kernel/include/driver/input_route.h \
+		$(TESTS_DIR)/kernel/include/driver/input_ps2.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ROUTE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/input_route_runtime.o: $(TEST_MOCK)/input_route_test_runtime.c \
+		$(TEST_MOCK)/input_route_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ROUTE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_input_route.elf: $(TEST_BLD)/test_input_route.o \
+		$(TEST_BLD)/input_route_production.o \
+		$(TEST_BLD)/input_route_runtime.o \
+		$(TEST_BLD)/input_ps2_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 -include $(patsubst %.o,%.d,$(GUI_LVGL_OBJS))
 -include $(GUI_DETERMINISTIC_DIR)/*.d

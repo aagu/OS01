@@ -18,6 +18,7 @@
  */
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "test_framework.h"
@@ -408,10 +409,30 @@ static void test_zero_freq_fails_transactions(void)
 
 #include <intr/interrupt.h>
 #include <tty/tty.h>
+#include <fs/file.h>
 #include <fs/poll.h>
 #include <percpu/percpu.h>
 #include <subsys/subsys.h>
 #include <driver/keyboard.h>
+
+/* ── The input route's out-of-scope dependencies ──────────────
+ * The keyboard driver hands every hardware byte to the input route
+ * (kernel/driver/input_route.c), which is linked into this binary
+ * because the legacy NORMAL path lives behind it.  The route's FILE
+ * lifecycle (input_route_open → file_alloc) and its heap use are not
+ * exercised here: this fixture tests the i8042 demux and the NORMAL
+ * keyboard path, not the lease.  The stubs below keep the link
+ * complete and make that omission explicit. */
+file_t *file_alloc(void) { return NULL; }
+void file_free(file_t *f) { (void)f; }
+void file_get(file_t *f) { (void)f; }
+void file_put(file_t *f) { (void)f; }
+void *kmalloc(size_t size) { return calloc(1, size ? size : 1); }
+size_t kfree(void *ptr) { free(ptr); return 0; }
+/* The route logs a warning when an ACTIVE queue overflows; this fixture
+ * never leases the device, so the log level silences it. */
+int g_log_level = 0;
+void _log_warn_impl(const char *fmt, ...) { (void)fmt; }
 
 /* ── percpu / GS gate ───────────────────────────────────────── */
 uint32_t num_cpus;

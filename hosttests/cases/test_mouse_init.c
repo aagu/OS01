@@ -1,10 +1,13 @@
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "test_framework.h"
 #include <driver/i8042.h>
 #include <driver/mouse_proto.h>
 #include <driver/mouse.h>
+#include <driver/input_route.h>
+#include <fs/file.h>
 #include <fs/poll.h>
 #include <percpu/percpu.h>
 #include <errno.h>
@@ -12,6 +15,25 @@
 
 extern int mouse_init(void);
 extern int mouse_ready(void);
+
+/* ── The input route's out-of-scope dependencies ──────────────
+ * The mouse driver hands every decoded event to the input route
+ * (kernel/driver/input_route.c), which is linked into this binary
+ * because the legacy NORMAL event ring lives behind it.  The route's
+ * FILE lifecycle (input_route_open → file_alloc) and its heap use are
+ * not exercised here: this fixture tests the mouse INIT/probe path,
+ * not the lease.  The stubs below keep the link complete and make
+ * that omission explicit. */
+file_t *file_alloc(void) { return NULL; }
+void file_free(file_t *f) { (void)f; }
+void file_get(file_t *f) { (void)f; }
+void file_put(file_t *f) { (void)f; }
+void *kmalloc(size_t size) { return calloc(1, size ? size : 1); }
+size_t kfree(void *ptr) { free(ptr); return 0; }
+/* The route logs a warning when an ACTIVE queue overflows; this fixture
+ * never leases the device, so the log level silences it. */
+int g_log_level = 0;
+void _log_warn_impl(const char *fmt, ...) { (void)fmt; }
 
 static uint64_t now, freq = 1000000;
 static uint64_t pump_step = 1000;
@@ -123,6 +145,10 @@ void mouse_proto_reset(mouse_proto_state_t *s, bool wheel)
 
 static void reset_case(uint8_t cb)
 { now = 0; freq = 1000000; pump_step = 1000; keyboard_ok = irq_ok = 1;
+  /* The route is initialised by the keyboard driver in the real kernel
+   * (phase 5, before the mouse probe in phase 6); this fixture starts
+   * the mouse on its own, so it initialises the route here. */
+  input_route_init();
   original_command_byte = command_byte = cb; cmd_writes = aux_writes = 0;
   fail_aux_at = resend_at = resend_left = bad_source_at = bad_bat = bad_id = probe_reject = 0;
   wheel_id = 3; reporting = consumer_active = packet_events = 0;

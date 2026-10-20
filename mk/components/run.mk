@@ -613,10 +613,11 @@ test-resolution-host: $(if $(filter all,$(RES_CASE_EFFECTIVE)),$(foreach c,$(RES
 # ── GUI host tests ───────────────────────────────────────────
 # Focused host tests for the GUI plans: the GUI-1 LVGL platform backend
 # and the GUI-2 input-focus chain.  CASE accepts any registered case
-# (platform, lvgl, devfs-input, input-frame) or all (default: all).
+# (platform, lvgl, devfs-input, input-frame, input-route) or all
+# (default: all).
 # Unknown CASE aborts non-zero before invoking submake.
-.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame
-GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame
+.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route
+GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route
 
 _test-gui-host-run-platform:
 	@echo "  [test-gui-host] platform"
@@ -647,6 +648,26 @@ _test-gui-host-run-devfs-input:
 _test-gui-host-run-input-frame:
 	@echo "  [test-gui-host] input-frame"
 	$(call os01_submake,hosttests,test-gui-input-frame $(OS01_SUBMAKE_ARGS))
+
+# GUI-2 plan Task 3: the exclusive physical-input lease.  Runs
+# test_input_route.elf, which host-compiles the REAL
+# kernel/driver/input_route.c (+ the REAL kernel/driver/input_ps2.c
+# framer) against the recording runtime in
+# hosttests/mock/input_route_test_runtime.{c,h} and asserts the spec
+# §4.3 lease contract: the device is NORMAL before the lease, the
+# owner's file reads the ACTIVE queue while every other file gets
+# EBUSY / POLLERR, an empty ACTIVE queue is EAGAIN, only the FINAL
+# close revokes, closing any bound file revokes the whole lease, a
+# recycled file address does not release a new lease, a sequence that
+# does not fit and the 65th mouse event are EOVERFLOW / POLLERR, a
+# sequence is never published in halves, a make that crosses an epoch
+# is isolated until its break, the Caps typematic does not flip, the
+# mouse button isolation keeps the movement, the lock order is
+# route → NORMAL queue/poll, and a publish injected at the
+# check-empty → register-waiter boundary is not lost.
+_test-gui-host-run-input-route:
+	@echo "  [test-gui-host] input-route"
+	$(call os01_submake,hosttests,test-gui-input-route $(OS01_SUBMAKE_ARGS))
 
 _test-gui-host-run-%:
 	@echo "ERROR: unknown CASE='$*'; valid: $(GUI_HOST_REGISTERED_CASES), all" >&2

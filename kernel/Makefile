@@ -118,9 +118,10 @@ KERNEL_C_SOURCES := \
 # Platform devices are selected by arch/<arch>/make.config.  Keep x86-only
 # APIC/PIC/PIT/RTC code and the x86-only PS/2 pair (i8042 controller +
 # keyboard, port-I/O based) out of architecture-neutral source discovery.
-# driver/input_ps2.c (the pure Set 1 framer) is x86-selected for the same
-# reason: only the x86 PS/2 driver chain consumes it.
-KERNEL_C_SOURCES := $(filter-out driver/pit.c driver/i8042.c driver/keyboard.c driver/mouse.c driver/input_ps2.c,$(KERNEL_C_SOURCES))
+# driver/input_ps2.c (the pure Set 1 framer) and driver/input_route.c (the
+# input lease) are x86-selected for the same reason: only the x86 PS/2
+# driver chain consumes them.
+KERNEL_C_SOURCES := $(filter-out driver/pit.c driver/i8042.c driver/keyboard.c driver/mouse.c driver/input_ps2.c driver/input_route.c,$(KERNEL_C_SOURCES))
 KERNEL_C_SOURCES += $(ARCH_PLATFORM_C_SOURCES)
 # Monitor plan Task 4: arch-neutral thermal facade (weak defaults + the
 # per-CPU sample cache procfs/thermal reads).  Listed EXPLICITLY, never

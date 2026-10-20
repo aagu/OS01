@@ -14,6 +14,9 @@
 #include <list.h>
 
 #define POLLIN     0x001
+#define POLLERR    0x008
+#define POLLHUP    0x010
+#define POLLNVAL   0x020
 #define POLLRDNORM 0x040
 
 typedef struct wait_queue {

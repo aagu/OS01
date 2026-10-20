@@ -38,4 +38,10 @@ uint32_t keyboard_poll_dev(void *priv, uint32_t requested,
 // Get the TTY that receives translated input (for reading lflag, etc.).
 tty_t *keyboard_get_tty(void);
 
+/* The /dev/keyboard device operations table.  It lives with the driver
+ * so the file-aware hooks (open / read_file / poll_file / release_file)
+ * can reach the input route; the platform only registers it. */
+struct devfs_ops;
+extern const struct devfs_ops keyboard_ops;
+
 #endif
