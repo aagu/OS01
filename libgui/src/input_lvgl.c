@@ -273,41 +273,20 @@ void gui_input_lvgl_destroy(gui_input_t *input)
 
 void gui_input_lvgl_cancel(gui_input_t *input)
 {
+    gui_input_lvgl_t *lv;
+
     if (!input) {
         return;
     }
+    lv = &input->lvgl;
 
-    gui_input_lvgl_t *lv = &input->lvgl;
-
-    /* 停止旧键的重复。 */
-    input->repeat_armed = false;
-
-    /* 尚未投递的键事件被丢弃，当前活动键被清除（迟到的释放会被拒绝）。 */
-    lv->pending_valid = false;
-    lv->active_key = 0;
-    lv->active_physical = 0;
-
-    if (lv->keypad) {
-        /*
-         * wait-release 重新就绪协议：
-         *   lv_indev_wait_release() 让下一次 read 提供一次 RELEASED；
-         *   显式 lv_indev_read() 完成这一次读，之后才投递新的键。
-         * 该合成样本不产生原生 UP 回调，也不合成 click。
-         */
-        lv_indev_wait_release(lv->keypad);
-        lv->pending_key = 0;
-        lv->pending_state = LV_INDEV_STATE_RELEASED;
-        lv->pending_valid = true;
-        lv_indev_read(lv->keypad);
-        lv->pending_valid = false;
-    }
-
-    /* 旧控件的视觉按下状态：对象仍存活时清掉。 */
-    if (lv->pressed_obj && gui_input_focus_alive(input, lv->pressed_obj)) {
-        lv_obj_remove_state(lv->pressed_obj, LV_STATE_PRESSED);
-    }
-    lv->pressed_obj = NULL;
-    lv->cancel_pending = false;
+    /*
+     * 键盘：与"新键取消旧键"共用**同一份**重新就绪协议
+     * （gui_input_lvgl_cancel_key）。两份协议各自演化会漂移：旧的那份不
+     * 检查 read 是否真的消费了取消样本，被阻塞时 LVGL 会吞掉下一次
+     * PRESSED（wait_until_release 仍然有效），按键就被静默丢掉了。
+     */
+    (void)gui_input_lvgl_cancel_key(input);
 
     if (lv->pointer) {
         /* pointer 用 reset 清理手势状态（不补 click）。 */
@@ -526,8 +505,17 @@ bool gui_input_lvgl_pump(gui_input_t *input)
         return true;
     }
 
-    /* 焦点检查：隐藏 / 禁用 / 删除的控件不再占导航位置。 */
-    (void)gui_input_focus_refresh(input);
+    /*
+     * 焦点检查：隐藏 / 禁用 / 删除的控件不再占导航位置。
+     *
+     * 焦点因此发生转移时，旧键与它的重复必须取消（spec §7.2）：否则软件
+     * 重复会被注入到新焦点控件上，随后的真实 UP 还会变成新控件的幽灵
+     * click。focus_sync() 里的组回调也会标记，但这里显式接住返回值，
+     * 两条路径都覆盖。
+     */
+    if (gui_input_focus_refresh(input)) {
+        gui_input_lvgl_mark_cancel(input);
+    }
 
     if (input->lvgl.cancel_pending) {
         return gui_input_lvgl_cancel_key(input);

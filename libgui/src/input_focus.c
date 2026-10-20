@@ -247,9 +247,17 @@ static void focus_sync(gui_input_t *input)
         }
     }
     if (target) {
-        input->focus.focus = target;
-        focus_visual_set(target, true);
+        /*
+         * 先把记录里的焦点清空再交给 LVGL：组回调只在"焦点真的变了"时
+         * 标记取消（focus_apply 也是这么做的）。否则隐藏 / 禁用引起的焦点
+         * 转移会被当成"没变"，旧键不会被取消（spec §7.2）。
+         */
+        input->focus.focus = NULL;
         lv_group_focus_obj(target);
+        if (lv_group_get_focused(group) != target) {
+            /* 没有生效（例如对象不在组内）：保持无焦点。 */
+            input->focus.focus = NULL;
+        }
     }
 }
 
@@ -314,9 +322,27 @@ int gui_input_focus_create(gui_input_t *input)
 /* 删除焦点组并清空记录。 */
 void gui_input_focus_destroy(gui_input_t *input)
 {
+    unsigned i;
+
     if (!input) {
         return;
     }
+
+    /*
+     * 先摘掉每个控件上的 LV_EVENT_DELETE 回调。
+     *
+     * 控件比 input 活得久：gui_input_destroy() 释放 input 之后，平台/屏幕
+     * 才被销毁，控件随之收到 LV_EVENT_DELETE。回调里会解引用 input
+     * （记录与适配层状态），因此必须在这里注销，否则就是释放后使用。
+     */
+    for (i = 0; i < input->focus.count; i++) {
+        lv_obj_t *obj = input->focus.entries[i];
+
+        if (obj) {
+            lv_obj_remove_event_cb(obj, focus_obj_event_cb);
+        }
+    }
+
     if (input->lvgl.group) {
         lv_group_delete(input->lvgl.group);
         input->lvgl.group = NULL;

@@ -3862,7 +3862,10 @@ $(GUI_INPUT_DIR)/gfx_client_policy.o: $(TESTS_DIR)/user/common/gfx_client_policy
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
 
-GUI_INPUT_PLATFORM_WRAPS := \
+#
+# GUI-2 输入单元的共享链接包装：记录型 mock（设备 / 时钟 / gfx）与 LVGL 的
+# 观察点。两个 GUI 输入二进制共用这一份清单，避免两份列表各自漂移。
+GUI_INPUT_WRAPS_COMMON := \
     -Wl,--wrap=clock_gettime \
     -Wl,--wrap=calloc \
     -Wl,--wrap=mmap \
@@ -3880,11 +3883,14 @@ GUI_INPUT_PLATFORM_WRAPS := \
     -Wl,--wrap=gfx_bind_input \
     -Wl,--wrap=gfx_unbind_input \
     -Wl,--wrap=gfx_get_display_state \
-    -Wl,--wrap=lv_timer_handler \
     -Wl,--wrap=lv_display_flush_ready \
     -Wl,--wrap=lv_display_create \
     -Wl,--wrap=lv_indev_read \
     -Wl,--wrap=gui_input_lvgl_create
+
+# input-platform 额外把 lv_timer_handler 换成只计数的桩（不渲染）。
+GUI_INPUT_PLATFORM_WRAPS := $(GUI_INPUT_WRAPS_COMMON) \
+    -Wl,--wrap=lv_timer_handler
 
 $(TEST_BLD)/test_gui_input_platform.elf: \
 		$(GUI_INPUT_DIR)/test_gui_input_platform.o \
@@ -3912,33 +3918,12 @@ $(TEST_BLD)/test_gui_input_platform.elf: \
 # (-DOS01_HOST_TEST) and therefore never reaches the public sysroot.
 GUI_INPUT_LVGL_DIR := $(GUI_HOST_DIR)/input_lvgl
 
-# The input-lvgl binary reuses the input-platform wrapper mechanism (the
-# keypad read observation point) but keeps the REAL lv_timer_handler and
-# lv_display_flush_ready: the focus outline is asserted by sampling rendered
-# pixels, so LVGL must actually refresh the display (the shared mock replaces
-# the timer handler with a counting stub that never renders).
-GUI_INPUT_LVGL_WRAPS := \
-    -Wl,--wrap=clock_gettime \
-    -Wl,--wrap=calloc \
-    -Wl,--wrap=mmap \
-    -Wl,--wrap=munmap \
-    -Wl,--wrap=open \
-    -Wl,--wrap=read \
-    -Wl,--wrap=close \
-    -Wl,--wrap=gfx_open \
-    -Wl,--wrap=gfx_get_info \
-    -Wl,--wrap=gfx_acquire \
-    -Wl,--wrap=gfx_present \
-    -Wl,--wrap=gfx_release \
-    -Wl,--wrap=gfx_close \
-    -Wl,--wrap=gfx_sprite_blit \
-    -Wl,--wrap=gfx_bind_input \
-    -Wl,--wrap=gfx_unbind_input \
-    -Wl,--wrap=gfx_get_display_state \
-    -Wl,--wrap=lv_display_flush_ready \
-    -Wl,--wrap=lv_display_create \
-    -Wl,--wrap=lv_indev_read \
-    -Wl,--wrap=gui_input_lvgl_create
+# The input-lvgl binary reuses the shared input wrapper set (the keypad read
+# observation point) but keeps the REAL lv_timer_handler: the focus outline is
+# asserted by sampling rendered pixels, so LVGL must actually refresh the
+# display (the shared mock replaces the timer handler with a counting stub
+# that never renders).
+GUI_INPUT_LVGL_WRAPS := $(GUI_INPUT_WRAPS_COMMON)
 
 .PHONY: test-gui-input-lvgl
 test-gui-input-lvgl: $(TEST_BLD)/test_gui_input_lvgl.elf

@@ -259,7 +259,9 @@ typedef struct {
     lv_obj_t    *delete_self;    /* 按下时删除这个控件 */
     int clicks;
     int pressed;
+    int released;
     int keys;                    /* 收到 LV_EVENT_KEY 的次数 */
+    int cancels;                 /* 收到 LV_EVENT_CANCEL 的次数 */
 } button_probe_t;
 
 static void probe_button_cb(lv_event_t *e)
@@ -269,6 +271,14 @@ static void probe_button_cb(lv_event_t *e)
 
     if (code == LV_EVENT_CLICKED) {
         probe->clicks++;
+        return;
+    }
+    if (code == LV_EVENT_RELEASED) {
+        probe->released++;
+        return;
+    }
+    if (code == LV_EVENT_CANCEL) {
+        probe->cancels++;
         return;
     }
     if (code == LV_EVENT_KEY) {
@@ -558,6 +568,7 @@ TEST_FUNC(test_enter_press_with_focus_change_has_no_ghost_click)
     const uint8_t enter_down[] = { KEY_ENTER_DOWN };
     const uint8_t enter_up[] = { KEY_ENTER_UP };
     const uint8_t a_down[] = { KEY_A_DOWN };
+    button_probe_t ta_probe;
 
     fixture_setup(&fx);
     ta = make_textarea(&fx, 20, 20);
@@ -568,6 +579,14 @@ TEST_FUNC(test_enter_press_with_focus_change_has_no_ghost_click)
     probe.focus_target = ta;
     lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_CLICKED, &probe);
     lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_PRESSED, &probe);
+    lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_RELEASED, &probe);
+
+    /* 新焦点上的探针：LVGL 的 keypad 把 RELEASED / CLICKED 发给**当前焦点**
+     * 对象，所以幽灵 click 会落在 textarea 上而不是旧按钮上。 */
+    memset(&ta_probe, 0, sizeof(ta_probe));
+    ta_probe.input = fx.input;
+    lv_obj_add_event_cb(ta, probe_button_cb, LV_EVENT_CLICKED, &ta_probe);
+    lv_obj_add_event_cb(ta, probe_button_cb, LV_EVENT_RELEASED, &ta_probe);
 
     assert_eq(0, gui_input_focus_add(fx.input, ta));
     assert_eq(0, gui_input_focus_add(fx.input, btn));
@@ -583,6 +602,11 @@ TEST_FUNC(test_enter_press_with_focus_change_has_no_ghost_click)
     feed(&fx, enter_up, sizeof(enter_up));
     step(&fx);
     assert_eq(0, probe.clicks);
+    assert_eq(0, probe.released);
+    assert_eq(0, ta_probe.clicks);
+    assert_eq(0, ta_probe.released);
+    /* 旧控件的 PRESSED 视觉必须被清除（取消协议的一步）。 */
+    assert_false(lv_obj_has_state(btn, LV_STATE_PRESSED));
 
     /* 下一个普通键仍然被输入。 */
     feed(&fx, a_down, sizeof(a_down));
@@ -597,6 +621,7 @@ TEST_FUNC(test_enter_press_with_deletion_inside_callback_has_no_ghost_click)
     fixture_t fx;
     lv_obj_t *ta, *btn;
     button_probe_t probe;
+    button_probe_t ta_probe;
     const uint8_t enter_down[] = { KEY_ENTER_DOWN };
     const uint8_t enter_up[] = { KEY_ENTER_UP };
     const uint8_t a_down[] = { KEY_A_DOWN };
@@ -610,6 +635,13 @@ TEST_FUNC(test_enter_press_with_deletion_inside_callback_has_no_ghost_click)
     probe.delete_self = btn;
     lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_CLICKED, &probe);
     lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_PRESSED, &probe);
+    lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_RELEASED, &probe);
+
+    /* 新焦点上的探针：幽灵 RELEASED / CLICKED 会落在这里。 */
+    memset(&ta_probe, 0, sizeof(ta_probe));
+    ta_probe.input = fx.input;
+    lv_obj_add_event_cb(ta, probe_button_cb, LV_EVENT_CLICKED, &ta_probe);
+    lv_obj_add_event_cb(ta, probe_button_cb, LV_EVENT_RELEASED, &ta_probe);
 
     assert_eq(0, gui_input_focus_add(fx.input, ta));
     assert_eq(0, gui_input_focus_add(fx.input, btn));
@@ -626,6 +658,9 @@ TEST_FUNC(test_enter_press_with_deletion_inside_callback_has_no_ghost_click)
     feed(&fx, enter_up, sizeof(enter_up));
     step(&fx);
     assert_eq(0, probe.clicks);
+    assert_eq(0, probe.released);
+    assert_eq(0, ta_probe.clicks);
+    assert_eq(0, ta_probe.released);
 
     /* 下一个普通键仍然被输入（没有被吞掉）。 */
     feed(&fx, a_down, sizeof(a_down));
@@ -672,9 +707,98 @@ TEST_FUNC(test_all_hidden_widgets_do_not_drop_the_next_key)
     fixture_teardown(&fx);
 }
 
-/* ═══════════════════════════════════════════════════════════════
- *  软件重复
- * ═══════════════════════════════════════════════════════════════ */
+/*
+ * 隐藏当前焦点必须取消按住的键（spec §7.2）。
+ *
+ * 焦点转移到别的控件后，旧键不得继续作用：软件重复不能注入到新焦点控件上，
+ * 迟到的真实 UP 也不能变成新控件的幽灵 click。
+ */
+TEST_FUNC(test_hiding_the_focused_widget_cancels_the_held_key)
+{
+    fixture_t fx;
+    lv_obj_t *ta, *btn;
+    button_probe_t probe;
+    const uint8_t a_down[] = { KEY_A_DOWN };
+    const uint8_t a_up[] = { KEY_A_UP };
+
+    fixture_setup(&fx);
+    ta = make_textarea(&fx, 20, 20);
+    btn = make_button(&fx, 200, 120);
+
+    memset(&probe, 0, sizeof(probe));
+    probe.input = fx.input;
+    lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_CLICKED, &probe);
+    lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_KEY, &probe);
+    lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_RELEASED, &probe);
+
+    assert_eq(0, gui_input_focus_add(fx.input, ta));
+    assert_eq(0, gui_input_focus_add(fx.input, btn));
+    assert_eq(0, gui_input_focus_set(fx.input, ta));
+
+    /* 按住 'a'：文本里有一个字符。 */
+    feed(&fx, a_down, sizeof(a_down));
+    step(&fx);
+    assert_str_eq("a", lv_textarea_get_text(ta));
+
+    /* 隐藏当前焦点：焦点转移到按钮。 */
+    lv_obj_add_flag(ta, LV_OBJ_FLAG_HIDDEN);
+    step(&fx);
+    assert_true(gui_input_focus_current(fx.input) == btn);
+
+    /* 旧键已被取消：软件重复不再产生（新焦点控件收不到重复的键）。 */
+    gui_test_set_now(1000);
+    step(&fx);
+    assert_eq(0, probe.keys);
+    assert_str_eq("a", lv_textarea_get_text(ta));
+
+    /* 迟到的真实 UP 不产生 click。 */
+    feed(&fx, a_up, sizeof(a_up));
+    step(&fx);
+    assert_eq(0, probe.clicks);
+    assert_eq(0, probe.released);
+
+    fixture_teardown(&fx);
+}
+
+/*
+ * 唯一的焦点被隐藏时，按住的键同样必须被取消。
+ *
+ * 这一条与上一条的区别：隐藏之后**没有**可用候选，焦点变成空。此时不能
+ * 靠"焦点转移"顺带取消（旧键仍然按着，重复还会继续跑）。
+ */
+TEST_FUNC(test_hiding_the_only_focused_widget_cancels_the_held_key)
+{
+    fixture_t fx;
+    lv_obj_t *ta;
+    const uint8_t a_down[] = { KEY_A_DOWN };
+    const uint8_t a_up[] = { KEY_A_UP };
+
+    fixture_setup(&fx);
+    ta = make_textarea(&fx, 20, 20);
+    assert_eq(0, gui_input_focus_add(fx.input, ta));
+
+    /* 按住 'a'。 */
+    feed(&fx, a_down, sizeof(a_down));
+    step(&fx);
+    assert_str_eq("a", lv_textarea_get_text(ta));
+
+    /* 唯一的焦点被隐藏：没有可用候选，焦点为空。 */
+    lv_obj_add_flag(ta, LV_OBJ_FLAG_HIDDEN);
+    step(&fx);
+    assert_null(gui_input_focus_current(fx.input));
+
+    /* 按住的键必须被取消：重复不再产生，活动键失效。 */
+    assert_false(fx.input->repeat_armed);
+    assert_eq(0, fx.input->lvgl.active_key);
+
+    /* 迟到的真实 UP 不产生任何效果。 */
+    feed(&fx, a_up, sizeof(a_up));
+    step(&fx);
+    assert_str_eq("a", lv_textarea_get_text(ta));
+
+    fixture_teardown(&fx);
+}
+
 
 /*
  * read 被阻塞时不得泄漏旧 Enter，也不得投递新键。
@@ -1006,10 +1130,213 @@ TEST_FUNC(test_focus_change_mid_repeat_stops_the_repeat_without_dropping_keys)
     fixture_teardown(&fx);
 }
 
+/*
+ * 编辑键与方向键：路由给焦点控件，并且参与软件重复。
+ *
+ * Set 1 的方向键是 E0 前缀序列（E0 4B = Left，E0 47 = Home，E0 4F = End）。
+ */
+TEST_FUNC(test_editing_keys_repeat_and_route_to_the_textarea)
+{
+    fixture_t fx;
+    lv_obj_t *ta;
+    const uint8_t left[] = { 0xE0u, 0x4Bu };
+    const uint8_t left_up[] = { 0xE0u, 0x9Bu };
+    const uint8_t right[] = { 0xE0u, 0x4Du };
+    const uint8_t right_up[] = { 0xE0u, 0x9Du };
+    const uint8_t home[] = { 0xE0u, 0x47u };
+    const uint8_t home_up[] = { 0xE0u, 0xC7u };
+    const uint8_t end[] = { 0xE0u, 0x4Fu };
+    const uint8_t end_up[] = { 0xE0u, 0xCFu };
+    const uint8_t backspace[] = { 0x0Eu };
+    const uint8_t del[] = { 0x53u };
+    const uint8_t del_up[] = { 0xD3u };
+
+    fixture_setup(&fx);
+    ta = make_textarea(&fx, 20, 20);
+    assert_eq(0, gui_input_focus_add(fx.input, ta));
+
+    lv_textarea_set_text(ta, "abcd");
+    lv_textarea_set_cursor_pos(ta, 4);
+
+    /* 方向键：光标左移。 */
+    feed(&fx, left, sizeof(left));
+    step(&fx);
+    assert_eq(3, lv_textarea_get_cursor_pos(ta));
+    feed(&fx, left_up, sizeof(left_up));
+    step(&fx);
+
+    /* Home：回到开头；End：到末尾。 */
+    feed(&fx, home, sizeof(home));
+    step(&fx);
+    assert_eq(0, lv_textarea_get_cursor_pos(ta));
+    feed(&fx, home_up, sizeof(home_up));
+    step(&fx);
+
+    feed(&fx, end, sizeof(end));
+    step(&fx);
+    assert_eq(4, lv_textarea_get_cursor_pos(ta));
+    feed(&fx, end_up, sizeof(end_up));
+    step(&fx);
+
+    /* 末尾再按右键不再移动。 */
+    feed(&fx, right, sizeof(right));
+    step(&fx);
+    assert_eq(4, lv_textarea_get_cursor_pos(ta));
+    feed(&fx, right_up, sizeof(right_up));
+    step(&fx);
+
+    /* Delete：删除光标处的字符（末尾无字符可删，光标前移也没有作用）。 */
+    feed(&fx, del, sizeof(del));
+    step(&fx);
+    assert_str_eq("abcd", lv_textarea_get_text(ta));
+    feed(&fx, del_up, sizeof(del_up));
+    step(&fx);
+
+    feed(&fx, home, sizeof(home));
+    step(&fx);
+    feed(&fx, home_up, sizeof(home_up));
+    step(&fx);
+
+    feed(&fx, del, sizeof(del));
+    step(&fx);
+    assert_str_eq("bcd", lv_textarea_get_text(ta));
+    feed(&fx, del_up, sizeof(del_up));
+    step(&fx);
+
+    /* Backspace：删除光标前的字符，并且参与软件重复。 */
+    lv_textarea_set_text(ta, "abcd");
+    lv_textarea_set_cursor_pos(ta, 4);
+    feed(&fx, backspace, sizeof(backspace));
+    step(&fx);
+    assert_str_eq("abc", lv_textarea_get_text(ta));
+
+    gui_test_set_now(400);
+    step(&fx);
+    assert_str_eq("ab", lv_textarea_get_text(ta));
+
+    gui_test_set_now(440);
+    step(&fx);
+    assert_str_eq("a", lv_textarea_get_text(ta));
+
+    fixture_teardown(&fx);
+}
+
+/* Esc：交给焦点控件的取消动作，不结束进程。 */
+TEST_FUNC(test_esc_is_delivered_as_cancel_to_the_focused_widget)
+{
+    fixture_t fx;
+    lv_obj_t *ta;
+    button_probe_t probe;
+    const uint8_t esc_down[] = { KEY_ESC_DOWN };
+
+    fixture_setup(&fx);
+    ta = make_textarea(&fx, 20, 20);
+    memset(&probe, 0, sizeof(probe));
+    probe.input = fx.input;
+    lv_obj_add_event_cb(ta, probe_button_cb, LV_EVENT_CANCEL, &probe);
+    lv_obj_add_event_cb(ta, probe_button_cb, LV_EVENT_KEY, &probe);
+
+    assert_eq(0, gui_input_focus_add(fx.input, ta));
+    assert_eq(0, gui_input_focus_set(fx.input, ta));
+
+    feed(&fx, esc_down, sizeof(esc_down));
+    step(&fx);
+
+    /* 焦点控件收到 Esc 键与取消动作。 */
+    assert_eq(1, probe.keys);
+    assert_eq(1, probe.cancels);
+
+    fixture_teardown(&fx);
+}
+
+/* 左键点击可聚焦控件：它成为焦点（LVGL 的 indev_click_focus 路径）。 */
+TEST_FUNC(test_left_click_focuses_a_registered_widget)
+{
+    fixture_t fx;
+    lv_obj_t *btn1, *btn2;
+    mouse_event_t move;
+    mouse_event_t press;
+    mouse_event_t release;
+
+    fixture_setup(&fx);
+    btn1 = make_button(&fx, 20, 20);
+    btn2 = make_button(&fx, 200, 120);
+    assert_eq(0, gui_input_focus_add(fx.input, btn1));
+    assert_eq(0, gui_input_focus_add(fx.input, btn2));
+    assert_true(gui_input_focus_current(fx.input) == btn1);
+
+    /* 光标初始在视口中心：移动到第二个按钮上再点击。 */
+    memset(&move, 0, sizeof(move));
+    memset(&press, 0, sizeof(press));
+    memset(&release, 0, sizeof(release));
+    move.dx = 70;
+    move.dy = 35;
+    press.buttons = 0x01u;
+    gui_input_lvgl_pointer(fx.input, &move);
+    gui_input_lvgl_pointer(fx.input, &press);
+    step(&fx);
+
+    /* 被点击的注册控件成为焦点。 */
+    assert_true(gui_input_focus_current(fx.input) == btn2);
+
+    gui_input_lvgl_pointer(fx.input, &release);
+    step(&fx);
+    assert_true(gui_input_focus_current(fx.input) == btn2);
+
+    fixture_teardown(&fx);
+}
+
+/*
+ * Ctrl/Alt 路径上的取消也必须用同一份重新就绪协议。
+ *
+ * read 被阻塞时旧的那份协议会把 wait_until_release 留在 LVGL 里，下一次
+ * PRESSED 会被 LVGL 静默吞掉：按键就丢了。现在两条路径共用
+ * gui_input_lvgl_cancel_key()，被阻塞时保留 pending 并重试。
+ */
+TEST_FUNC(test_blocked_read_on_the_ctrl_path_does_not_lose_the_next_key)
+{
+    fixture_t fx;
+    lv_obj_t *ta;
+    lv_indev_t *keypad;
+    const uint8_t a_down[] = { KEY_A_DOWN };
+    const uint8_t ctrl_down[] = { KEY_LCTRL_DOWN };
+    const uint8_t ctrl_up[] = { KEY_LCTRL_UP };
+    const uint8_t c_down[] = { KEY_C_DOWN };
+
+    fixture_setup(&fx);
+    ta = make_textarea(&fx, 20, 20);
+    assert_eq(0, gui_input_focus_add(fx.input, ta));
+
+    keypad = find_keypad();
+    assert_not_null(keypad);
+
+    /* 按住 'a'。 */
+    feed(&fx, a_down, sizeof(a_down));
+    step(&fx);
+    assert_str_eq("a", lv_textarea_get_text(ta));
+
+    /* indev 被暂停：Ctrl 的取消协议读不到取消样本。 */
+    lv_indev_enable(keypad, false);
+    feed(&fx, ctrl_down, sizeof(ctrl_down));
+    step(&fx);
+    feed(&fx, ctrl_up, sizeof(ctrl_up));
+    step(&fx);
+
+    /* 读取恢复：待处理的取消协议被补做。 */
+    lv_indev_enable(keypad, true);
+    step(&fx);
+
+    /* 管线恢复：下一个键正常送达（没有被 LVGL 的 wait_until_release 吞掉）。 */
+    feed(&fx, c_down, sizeof(c_down));
+    step(&fx);
+    assert_str_eq("ac", lv_textarea_get_text(ta));
+
+    fixture_teardown(&fx);
+}
+
 /* ═══════════════════════════════════════════════════════════════
  *  快捷键
  * ═══════════════════════════════════════════════════════════════ */
-
 TEST_FUNC(test_consumed_shortcut_is_not_inserted)
 {
     fixture_t fx;
@@ -1101,13 +1428,19 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_enter_press_with_focus_change_has_no_ghost_click),
     TEST_ENTRY(test_enter_press_with_deletion_inside_callback_has_no_ghost_click),
     TEST_ENTRY(test_all_hidden_widgets_do_not_drop_the_next_key),
+    TEST_ENTRY(test_hiding_the_focused_widget_cancels_the_held_key),
+    TEST_ENTRY(test_hiding_the_only_focused_widget_cancels_the_held_key),
     TEST_ENTRY(test_blocked_read_does_not_leak_the_old_enter),
+    TEST_ENTRY(test_blocked_read_on_the_ctrl_path_does_not_lose_the_next_key),
     TEST_ENTRY(test_repeat_is_400ms_then_40ms),
     TEST_ENTRY(test_repeat_does_not_burst_after_a_stall),
     TEST_ENTRY(test_ctrl_down_cancels_and_release_does_not_restore),
     TEST_ENTRY(test_shift_change_keeps_the_cached_char_of_a_repeat),
     TEST_ENTRY(test_space_repeats_in_a_textarea_but_activates_a_button_once),
     TEST_ENTRY(test_tab_enter_and_esc_do_not_repeat),
+    TEST_ENTRY(test_editing_keys_repeat_and_route_to_the_textarea),
+    TEST_ENTRY(test_esc_is_delivered_as_cancel_to_the_focused_widget),
+    TEST_ENTRY(test_left_click_focuses_a_registered_widget),
     TEST_ENTRY(test_focus_change_mid_repeat_stops_the_repeat_without_dropping_keys),
     TEST_ENTRY(test_consumed_shortcut_is_not_inserted),
     TEST_ENTRY(test_consumed_release_still_releases_the_lvgl_key),
