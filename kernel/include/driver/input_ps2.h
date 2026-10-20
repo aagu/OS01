@@ -45,10 +45,18 @@ enum {
 
 /* Framer state — stack allocatable and tiny: the accumulated bytes and
  * the start epoch live in the caller's frame buffer, so the persistent
- * state stays at 2 bytes (the brief caps it at 6). */
+ * state stays at 4 bytes (the brief caps it at 6).
+ *
+ * `token` identifies the accumulator that owns the CURRENT sequence: it
+ * changes with every sequence and is copied into the frame that starts
+ * it.  `check` is a rolling checksum over the bytes accumulated so far;
+ * both let the framer verify that the caller still presents the very
+ * same accumulator (see input_ps2_frame_feed). */
 typedef struct {
     uint8_t phase;   /* INPUT_PS2_PH_* */
     uint8_t length;  /* bytes of the current sequence consumed so far */
+    uint8_t token;   /* per-sequence token: identifies the accumulator */
+    uint8_t check;   /* rolling checksum of the accumulated bytes */
 } input_ps2_frame_state_t;
 
 /* One complete scan sequence. */
@@ -59,6 +67,7 @@ typedef struct {
     uint8_t  is_make;     /* 1 = key down (make), 0 = key up (break) */
     uint8_t  is_special;  /* 1 = PrintScreen/Pause (never a modifier) */
     uint64_t start_epoch; /* epoch of the FIRST byte of the sequence */
+    uint8_t  token;       /* token of the sequence (accumulator check) */
 } input_ps2_frame_t;
 
 /* A special frame carries no ordinary key identity (physical_key is 0),
@@ -76,19 +85,44 @@ void input_ps2_frame_reset(input_ps2_frame_state_t *st);
 
 /* Feed one Set 1 byte into the framer.
  *
- * The SAME `out` buffer must be passed for every byte of one sequence:
- * it is the sequence accumulator (the raw bytes land in out->bytes) and
- * it holds the epoch of the sequence's first byte (out->start_epoch).
+ * The accumulator: `out` IS the sequence accumulator — the raw bytes land
+ * in out->bytes and the epoch of the sequence's first byte is kept in
+ * out->start_epoch.  The caller MUST therefore present the SAME `out`
+ * object for every byte of one sequence, and that object must have a
+ * STABLE ADDRESS across the calls: it has to be a field of the caller's
+ * own state (or a static), never a fresh stack local of a per-byte
+ * function — a per-call local would be a different object on the next
+ * call and the accumulated bytes plus the start epoch would be lost.
+ *
+ * This requirement is ENFORCED, not merely documented: the framer stamps
+ * the accumulator it starts a sequence with (out->token) and verifies,
+ * for every later byte of that sequence, that the presented accumulator
+ * still carries that token and still holds the bytes accumulated so
+ * far.  A caller that loses the accumulator gets -EINVAL — never a
+ * frame with garbage bytes and a stale epoch.
+ *
+ * The guard pairs a per-sequence counter with a checksum over the
+ * accumulated bytes, so a coincidental match on uninitialised memory
+ * is very unlikely (but not mathematically impossible).
+ *
  * Its contents are meaningful only when the call returns 1.
  *
  * Returns:
  *    1  a complete frame was written to *out
  *    0  more bytes are needed (the sequence is still incomplete)
- *   <0  the byte stream is not a valid Set 1 sequence: a negative errno
- *       (EILSEQ) is returned, the partial sequence — including the bytes
- *       already consumed as part of it — is dropped, and the framer
- *       recovers to a sequence boundary.  No frame is written, so a
- *       corrupt sequence never yields a fake Shift / Ctrl.
+ *  -EINVAL
+ *       the caller presented a different accumulator than the one the
+ *       sequence started in (a lost or swapped frame buffer).  The
+ *       partial sequence is dropped and the framer returns to a
+ *       sequence boundary; the offending byte is consumed, so a sequence
+ *       tail can never resurface as a standalone key.  The caller must
+ *       treat the sequence as LOST: it cannot be resumed.
+ *  -EILSEQ
+ *       the byte stream is not a valid Set 1 sequence: the partial
+ *       sequence — including the bytes already consumed as part of it —
+ *       is dropped and the framer recovers to a sequence boundary.  No
+ *       frame is written, so a corrupt sequence never yields a fake
+ *       Shift / Ctrl.
  */
 int input_ps2_frame_feed(input_ps2_frame_state_t *st, uint8_t byte,
                          uint64_t epoch, input_ps2_frame_t *out);

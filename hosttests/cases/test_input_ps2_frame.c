@@ -299,6 +299,72 @@ TEST_FUNC(test_state_stays_small) {
     assert_true(sizeof(input_ps2_frame_state_t) <= 6);
 }
 
+/* The accumulator is VERIFIED: a caller that presents a different
+ * frame buffer partway through a sequence (the natural per-byte stack
+ * local) must get a loud error, never a frame built from the wrong
+ * buffer's garbage bytes and a stale epoch. */
+TEST_FUNC(test_lost_accumulator_is_rejected) {
+    framer_t f;
+    framer_init(&f);
+
+    /* E0 opens a two-byte sequence in the first accumulator. */
+    assert_eq(0, framer_feed(&f, 0xE0, 70));
+    assert_eq(0, f.frames);
+
+    /* The caller now presents a DIFFERENT accumulator (a fresh stack
+     * local in a per-byte function). */
+    input_ps2_frame_t lost;
+    memset(&lost, 0, sizeof(lost));
+    assert_eq(-EINVAL, input_ps2_frame_feed(&f.state, 0x1D, 71, &lost));
+
+    /* No frame was published, and the lost tail did not resurface as a
+     * standalone left Ctrl. */
+    assert_eq(0, f.frames);
+    assert_eq(0, lost.length);
+
+    /* The framer recovered to a sequence boundary: the next byte starts
+     * a fresh sequence in the accumulator the caller presents. */
+    assert_eq(1, framer_feed(&f, 0x1E, 72));
+    assert_eq(1, f.frames);
+    assert_eq(0x01E, f.frame.physical_key);
+    assert_eq(1, f.frame.length);
+}
+
+/* The same guard fires for a STALE accumulator: a copy taken before the
+ * current sequence started still carries the previous sequence's token. */
+TEST_FUNC(test_stale_accumulator_is_rejected) {
+    framer_t f;
+    framer_init(&f);
+
+    /* One complete sequence in the accumulator. */
+    assert_eq(1, framer_feed(&f, 0x1E, 80));
+
+    /* Keep a copy of the accumulator as it looks after that sequence. */
+    input_ps2_frame_t stale = f.frame;
+
+    /* A new sequence starts in the live accumulator. */
+    assert_eq(0, framer_feed(&f, 0xE0, 81));
+
+    /* Presenting the stale copy must be rejected. */
+    int frames_before = f.frames;
+    assert_eq(-EINVAL, input_ps2_frame_feed(&f.state, 0x1D, 82, &stale));
+    assert_eq(frames_before, f.frames);
+}
+
+/* An accumulator whose CONTENT was overwritten (same object, clobbered
+ * bytes) is rejected too — the token alone would not catch it. */
+TEST_FUNC(test_clobbered_accumulator_is_rejected) {
+    framer_t f;
+    framer_init(&f);
+
+    assert_eq(0, framer_feed(&f, 0xE0, 90));
+
+    /* Same object, same token, but the accumulated byte was overwritten. */
+    f.frame.bytes[0] = 0x00;
+    assert_eq(-EINVAL, input_ps2_frame_feed(&f.state, 0x1D, 91, &f.frame));
+    assert_eq(0, f.frames);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_sequences_frame_completely),
     TEST_ENTRY(test_e0_prefix_emits_only_after_second_byte),
@@ -311,6 +377,9 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_corrupt_e0_prefix_is_reported),
     TEST_ENTRY(test_reset_drops_partial_sequence),
     TEST_ENTRY(test_state_stays_small),
+    TEST_ENTRY(test_lost_accumulator_is_rejected),
+    TEST_ENTRY(test_stale_accumulator_is_rejected),
+    TEST_ENTRY(test_clobbered_accumulator_is_rejected),
 TEST_LIST_END
 
 int main(void)
