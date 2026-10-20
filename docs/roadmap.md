@@ -102,7 +102,7 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 | 项 | 内容 / 完成条件 | 依赖 |
 |----|-----------------|------|
 | GUI-1 LVGL 平台后端 | 从 `test_lvgl` 抽取可复用的显示、tick、flush 与生命周期接口；核对格式、stride、缓冲容量和错误传播。按 `lv_timer_handler()` 返回的等待时间结合 `poll` 驱动，区分离屏与屏幕后端；资源释放和失败回退有明确契约 | LVGL 初步移植 ✅；libgfx ✅ |
-| GUI-2 输入与焦点 | 接入 `/dev/mouse` 位移/按钮/滚轮和 `/dev/keyboard` 扫描码；实现 LVGL indev、光标、修饰键、按下/释放、重复、Tab 导航与控件焦点。指定唯一输入读取者，验证点击、拖动、滚动、文本输入与快捷键。[设计 spec（2026-10-20，草案待评审）](superpowers/specs/2026-10-20-gui-2-input-focus-design.md) | GUI-1；PS/2 输入与 poll ✅ |
+| GUI-2 输入与焦点 | 接入 `/dev/mouse` 位移/按钮/滚轮和 `/dev/keyboard` 扫描码；实现 LVGL indev、光标、修饰键、按下/释放、重复、Tab 导航与控件焦点。指定唯一输入读取者，验证点击、拖动、滚动、文本输入与快捷键。[设计 spec（子 agent 评审通过）](superpowers/specs/2026-10-20-gui-2-input-focus-design.md)；[实施 plan（交给 Luna 执行，尚未实施）](superpowers/plans/2026-10-20-gui-2-input-focus.md) | GUI-1；PS/2 输入与 poll ✅ |
 | GUI-3 Material 风格桌面 | 用 LVGL 重构 `desktop.c`，统一颜色角色、字体层级、间距、圆角、elevation 与 hover/pressed/focus/disabled 状态；实现启动器、应用抽屉、状态栏及基本设置。先交付单进程桌面外壳，应用启动/退出及全屏切换明确，不以绘制窗口装饰代替窗口系统 | GUI-1、GUI-2；现有 desktop 演示 |
 | GUI-4 字体与资源 | 先使用裁剪的抗锯齿位图字体与编译内置图标，覆盖桌面所需字号；单列中文字符集、字库容量与输入方案。按需再引入动态字体或文件资源加载，并审计依赖、许可证及缓存开销 | GUI-1；GUI-3 的文字/资源需求；文件后端见优化项 |
 | GUI-5 Window Server + compositor | 单独设计 surface、IPC、缓冲共享、损伤区域、Z-order、移动/缩放、遮挡、焦点/输入抓取与进程退出回收；可信窗口服务器统一呈现，收紧 `/dev/fb` 与重叠 gfx view 的旁路访问。IPC/共享内存能力先评估，缺项独立补齐；客户端允许使用 LVGL 或其他绘制库 | GUI-1、GUI-2；IPC/共享缓冲与图形权限设计；借鉴 opuntiaOS/HackOS |
