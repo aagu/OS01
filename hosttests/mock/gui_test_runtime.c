@@ -63,7 +63,8 @@ bool g_gui_test_kbd_open_fails = false;
 int  g_gui_test_kbd_open_errno = 0;
 bool g_gui_test_mouse_open_fails = false;
 int  g_gui_test_mouse_open_errno = 0;
-int  g_gui_test_input_open_flags = 0;
+int  g_gui_test_kbd_open_flags = 0;
+int  g_gui_test_mouse_open_flags = 0;
 
 int  g_gui_test_fail_bind_errno = 0;
 uint32_t g_gui_test_bind_initial_modifiers = 0;
@@ -192,7 +193,8 @@ void gui_test_reset(void)
     g_gui_test_kbd_open_errno = 0;
     g_gui_test_mouse_open_fails = false;
     g_gui_test_mouse_open_errno = 0;
-    g_gui_test_input_open_flags = 0;
+    g_gui_test_kbd_open_flags = 0;
+    g_gui_test_mouse_open_flags = 0;
 
     g_gui_test_fail_bind_errno = 0;
     g_gui_test_bind_initial_modifiers = 0;
@@ -307,7 +309,7 @@ int __wrap_open(const char *pathname, int flags, ...)
         return 999;
     }
     if (pathname && strcmp(pathname, "/dev/keyboard") == 0) {
-        g_gui_test_input_open_flags = flags;
+        g_gui_test_kbd_open_flags = flags;
         if (g_gui_test_kbd_open_fails) {
             errno = g_gui_test_kbd_open_errno ? g_gui_test_kbd_open_errno : ENOENT;
             return -1;
@@ -316,7 +318,7 @@ int __wrap_open(const char *pathname, int flags, ...)
         return GUI_TEST_KEYBOARD_FD;
     }
     if (pathname && strcmp(pathname, "/dev/mouse") == 0) {
-        g_gui_test_input_open_flags = flags;
+        g_gui_test_mouse_open_flags = flags;
         if (g_gui_test_mouse_open_fails) {
             errno = g_gui_test_mouse_open_errno ? g_gui_test_mouse_open_errno : ENOENT;
             return -1;

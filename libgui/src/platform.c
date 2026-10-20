@@ -386,7 +386,15 @@ void gui_platform_destroy(gui_platform_t *platform)
 {
     if (!platform) return;
 
-    /* 仍挂接的输入先销毁：它的 indev 对象还需要活着的 display。 */
+    /*
+     * 仍挂接的输入先销毁：它的 indev 对象还需要活着的 display。
+     *
+     * 所有权转移：gui_input_create() 挂接成功后，输入对象的**所有权归
+     * 平台**——本函数会销毁并释放它，调用方此后不得再使用该指针，也不得
+     * 再调用 gui_input_destroy()（否则重复释放）。调用方若要自己掌控
+     * 生命周期，必须在销毁平台**之前**先调用 gui_input_destroy()，
+     * 那会把输入从平台上摘除，平台随后不再持有它。
+     */
     if (platform->input) {
         gui_input_destroy(platform->input);   /* 自行解除挂接 */
     }

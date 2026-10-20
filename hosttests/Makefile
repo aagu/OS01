@@ -3881,6 +3881,7 @@ GUI_INPUT_PLATFORM_WRAPS := \
     -Wl,--wrap=lv_timer_handler \
     -Wl,--wrap=lv_display_flush_ready \
     -Wl,--wrap=lv_display_create \
+    -Wl,--wrap=lv_indev_read \
     -Wl,--wrap=gui_input_lvgl_create
 
 $(TEST_BLD)/test_gui_input_platform.elf: \

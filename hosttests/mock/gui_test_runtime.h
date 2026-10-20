@@ -87,7 +87,8 @@ extern bool g_gui_test_kbd_open_fails;
 extern int  g_gui_test_kbd_open_errno;
 extern bool g_gui_test_mouse_open_fails;
 extern int  g_gui_test_mouse_open_errno;
-extern int  g_gui_test_input_open_flags;  /* the flags of the last device open */
+extern int  g_gui_test_kbd_open_flags;    /* the flags of the last /dev/keyboard open */
+extern int  g_gui_test_mouse_open_flags;  /* the flags of the last /dev/mouse open */
 
 /* The input lease (GFX_BIND_INPUT / GFX_UNBIND_INPUT). */
 extern int  g_gui_test_fail_bind_errno;

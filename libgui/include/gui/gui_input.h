@@ -109,6 +109,12 @@ gui_input_t *gui_input_create(gui_platform_t *platform, const gui_input_config_t
 /**
  * @brief 销毁输入对象并释放其持有的设备与状态
  *
+ * 所有权：gui_input_create() 成功返回后，输入对象挂接在平台上，其所有权
+ * 归平台——gui_platform_destroy() 会自动销毁并释放仍挂接的输入对象，此后
+ * 调用方不得再使用该指针，也不得再次调用 gui_input_destroy()（重复释放）。
+ * 调用方若要自己掌控生命周期，必须在销毁平台**之前**先调用本函数：本函数
+ * 会把输入从平台上摘除，平台随后不再持有它。
+ *
  * @param input 待销毁的输入句柄指针（允许为 NULL）
  */
 void gui_input_destroy(gui_input_t *input);

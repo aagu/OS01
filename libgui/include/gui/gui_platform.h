@@ -51,6 +51,11 @@ gui_platform_t *gui_platform_create(const gui_config_t *cfg);
 /**
  * @brief 销毁平台后端上下文，释放所有绘制缓冲、映射与设备句柄
  *
+ * 若平台上仍挂接输入对象（gui_input_create 成功返回），本函数会先销毁并
+ * 释放它：输入对象的所有权在挂接后归平台，调用方此后不得再使用该指针，
+ * 也不得再次调用 gui_input_destroy()。要自己掌控输入生命周期，必须在销毁
+ * 平台之前先销毁输入。
+ *
  * @param platform 待销毁的平台句柄指针（允许为 NULL）
  */
 void gui_platform_destroy(gui_platform_t *platform);

@@ -88,6 +88,7 @@ typedef struct {
     bool            pending_valid;  /* 是否存在待投递样本 */
 
     uint32_t active_key;    /* 当前按住键的 LVGL 键值（0 = 无键按住，UP 事件复用它） */
+    uint16_t active_physical; /* 当前按住键的物理身份（Set 1 扫描码），用于拒绝错键释放 */
 
     int32_t cursor_x;       /* LVGL 光标的绝对位置 */
     int32_t cursor_y;

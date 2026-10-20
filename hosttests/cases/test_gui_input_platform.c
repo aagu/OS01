@@ -92,6 +92,23 @@ static void record_pointer(const gui_pointer_event_t *event, void *userdata)
 /* platform.c 的 OS01_HOST_TEST 断言注入点：本用例不篡改帧头，但符号必须存在。 */
 bool g_gui_test_tamper_header = false;
 
+/*
+ * LVGL 投递观察点：统计**适配层**发起的 keypad indev 读取次数。
+ * 包装器立刻转发给真实的 lv_indev_read，因此产品路径的行为不变；
+ * 只用公开 API（lv_indev_get_type）区分 keypad 与 pointer。
+ * keypad 是 EVENT 模式（读定时器已暂停），所以计数只包含适配层的显式投递。
+ */
+static uint32_t g_gui_test_keypad_reads;
+
+extern void __real_lv_indev_read(lv_indev_t *indev);
+void __wrap_lv_indev_read(lv_indev_t *indev)
+{
+    if (indev && lv_indev_get_type(indev) == LV_INDEV_TYPE_KEYPAD) {
+        g_gui_test_keypad_reads++;
+    }
+    __real_lv_indev_read(indev);
+}
+
 extern int __real_gui_input_lvgl_create(gui_input_t *input);
 int __wrap_gui_input_lvgl_create(gui_input_t *input)
 {
@@ -185,9 +202,10 @@ TEST_FUNC(test_lifecycle_create_and_destroy)
     gui_input_t *input = gui_input_create(platform, &cfg);
     assert_not_null(input);
 
-    /* 两个设备都被打开，且是 O_RDONLY|O_NONBLOCK。 */
+    /* 两个设备都被打开，且都是 O_RDONLY|O_NONBLOCK（分别记录，互不覆盖）。 */
     assert_eq(opens_before + 2, g_gui_test_counts.open);
-    assert_eq(O_RDONLY | O_NONBLOCK, g_gui_test_input_open_flags);
+    assert_eq(O_RDONLY | O_NONBLOCK, g_gui_test_kbd_open_flags);
+    assert_eq(O_RDONLY | O_NONBLOCK, g_gui_test_mouse_open_flags);
 
     /* 租约已绑定。 */
     assert_eq(1, g_gui_test_counts.bind);
@@ -532,14 +550,36 @@ TEST_FUNC(test_lifecycle_failed_create_keeps_previous_owner)
     gui_platform_destroy(platform);
 }
 
-TEST_FUNC(test_caps_only_seeding)
+/*
+ * Caps 植入的三个用例，各自证明**不同**的事实：
+ *
+ *  1. test_caps_seeding_converts_kernel_caps_bit
+ *     租约 UAPI 的快照是 **bit0 = Caps Lock**（uapi/gfx.h；内核
+ *     fb_state.c:864 只可能给出 0 或 1）。这个用例用内核**唯一可能**
+ *     产生的 “Caps 开” 值 0x1，断言种子被正确折算成公开位序的
+ *     GUI_MOD_CAPS（1 << 6）。
+ *     这是唯一能咬住“位序折算”的用例：naive 实现
+ *     `seed = initial_modifiers & GUI_MOD_CAPS` 在 0x1 上得到 0x00
+ *     （Caps 丢失，字母全变小写），而折算实现得到 0x40。
+ *
+ *  2. test_caps_seeding_drops_aggregate_modifier_bits
+ *     快照被设成内核**不可能**产生的 0xFFFFFFFF（聚合位全开）。它证明的
+ *     只有一件事：聚合的 Shift/Ctrl/Alt 位**没有**被转发给解码器
+ *     （若原样转发，LSHIFT 会被植入 → 字母变成 'a' 而不是 'A'）。
+ *     它**不能**证明位序折算（naive 实现在这个取值上与折算实现结果相同）。
+ *
+ *  3. test_caps_seeding_absent_caps_stays_lowercase
+ *     快照为 0：Caps 不被植入，同样的字节产生小写字母。
+ */
+
+TEST_FUNC(test_caps_seeding_converts_kernel_caps_bit)
 {
     gui_test_reset();
     gui_platform_t *platform = gui_platform_create(NULL);
     assert_not_null(platform);
 
-    /* 租约快照的所有位都是 1：只有 Caps 锁存允许被植入。 */
-    g_gui_test_bind_initial_modifiers = 0xFFFFFFFFu;
+    /* 内核唯一的 “Caps 开” 取值：UAPI bit0。 */
+    g_gui_test_bind_initial_modifiers = 0x1u;
 
     gui_input_config_t cfg = { .mode = GUI_INPUT_DEVICES, .require_mouse = false };
     gui_input_t *input = gui_input_create(platform, &cfg);
@@ -561,35 +601,82 @@ TEST_FUNC(test_caps_only_seeding)
     assert_eq(GUI_STATUS_OK, gui_platform_step(platform, &delay));
     assert_eq(1, log.count);
 
-    /* Caps 打开：字母是 Shift XOR Caps → 'A'；Shift 绝不能被植入。 */
-    assert_eq('A', log.events[0].codepoint);
+    /* UAPI 的 bit0 被折算成公开位序的 GUI_MOD_CAPS：字母是 Shift XOR Caps。 */
     assert_eq(GUI_MOD_CAPS, log.events[0].modifiers);
-    assert_eq(0, log.events[0].modifiers & GUI_MOD_LSHIFT);
-    assert_eq(0, log.events[0].modifiers & GUI_MOD_RSHIFT);
+    assert_eq('A', log.events[0].codepoint);
 
     gui_input_destroy(input);
     gui_platform_destroy(platform);
+}
 
-    /* 没有 Caps 时同一个字节产生小写字母。 */
+TEST_FUNC(test_caps_seeding_drops_aggregate_modifier_bits)
+{
     gui_test_reset();
-    platform = gui_platform_create(NULL);
+    gui_platform_t *platform = gui_platform_create(NULL);
     assert_not_null(platform);
 
-    g_gui_test_bind_initial_modifiers = 0;
-    input = gui_input_create(platform, &cfg);
+    /* 聚合位全开（内核不会产生这个值）：只用来证明它们没有被转发。 */
+    g_gui_test_bind_initial_modifiers = 0xFFFFFFFFu;
+
+    gui_input_config_t cfg = { .mode = GUI_INPUT_DEVICES, .require_mouse = false };
+    gui_input_t *input = gui_input_create(platform, &cfg);
     assert_not_null(input);
 
+    key_log_t log;
     memset(&log, 0, sizeof(log));
     gui_input_set_key_handler(input, record_key, &log);
 
+    uint8_t make_a = 0x1E;
     gui_test_device_add_data(&g_gui_test_keyboard, &make_a, 1);
     gui_test_device_add_op(&g_gui_test_keyboard, 0, 1);
 
     assert_eq(0, gui_input_dispatch(input, NULL, 0));
+
+    uint32_t delay = 0;
     assert_eq(GUI_STATUS_OK, gui_platform_step(platform, &delay));
     assert_eq(1, log.count);
-    assert_eq('a', log.events[0].codepoint);
+
+    /* 只有 Caps 被植入：Shift 绝不能出现（否则字母会是 'a'）。 */
+    assert_eq(GUI_MOD_CAPS, log.events[0].modifiers);
+    assert_eq(0, log.events[0].modifiers & GUI_MOD_LSHIFT);
+    assert_eq(0, log.events[0].modifiers & GUI_MOD_RSHIFT);
+    assert_eq(0, log.events[0].modifiers & GUI_MOD_LCTRL);
+    assert_eq(0, log.events[0].modifiers & GUI_MOD_RCTRL);
+    assert_eq(0, log.events[0].modifiers & GUI_MOD_LALT);
+    assert_eq(0, log.events[0].modifiers & GUI_MOD_RALT);
+    assert_eq('A', log.events[0].codepoint);
+
+    gui_input_destroy(input);
+    gui_platform_destroy(platform);
+}
+
+TEST_FUNC(test_caps_seeding_absent_caps_stays_lowercase)
+{
+    gui_test_reset();
+    gui_platform_t *platform = gui_platform_create(NULL);
+    assert_not_null(platform);
+
+    g_gui_test_bind_initial_modifiers = 0;
+
+    gui_input_config_t cfg = { .mode = GUI_INPUT_DEVICES, .require_mouse = false };
+    gui_input_t *input = gui_input_create(platform, &cfg);
+    assert_not_null(input);
+
+    key_log_t log;
+    memset(&log, 0, sizeof(log));
+    gui_input_set_key_handler(input, record_key, &log);
+
+    uint8_t make_a = 0x1E;
+    gui_test_device_add_data(&g_gui_test_keyboard, &make_a, 1);
+    gui_test_device_add_op(&g_gui_test_keyboard, 0, 1);
+
+    assert_eq(0, gui_input_dispatch(input, NULL, 0));
+
+    uint32_t delay = 0;
+    assert_eq(GUI_STATUS_OK, gui_platform_step(platform, &delay));
+    assert_eq(1, log.count);
     assert_eq(0, log.events[0].modifiers);
+    assert_eq('a', log.events[0].codepoint);
 
     gui_input_destroy(input);
     gui_platform_destroy(platform);
@@ -961,6 +1048,67 @@ TEST_FUNC(test_pump_queued_ctrl_cancels_current_key)
     gui_platform_destroy(platform);
 }
 
+TEST_FUNC(test_lvgl_release_identity_is_guarded)
+{
+    gui_test_reset();
+    gui_platform_t *platform = gui_platform_create(NULL);
+    assert_not_null(platform);
+
+    gui_input_config_t cfg = { .mode = GUI_INPUT_DEVICES, .require_mouse = false };
+    gui_input_t *input = gui_input_create(platform, &cfg);
+    assert_not_null(input);
+
+    key_log_t log;
+    memset(&log, 0, sizeof(log));
+    gui_input_set_key_handler(input, record_key, &log);
+
+    uint32_t delay = 0;
+    const uint8_t make_a = 0x1E;
+    const uint8_t make_b = 0x30;
+    const uint8_t break_a = 0x9E;
+    const uint8_t break_b = 0xB0;
+
+    /* 1) press 'a' */
+    g_gui_test_keypad_reads = 0;
+    gui_test_device_add_data(&g_gui_test_keyboard, &make_a, 1);
+    gui_test_device_add_op(&g_gui_test_keyboard, 0, 1);
+    assert_eq(0, gui_input_dispatch(input, NULL, 0));
+    assert_eq(GUI_STATUS_OK, gui_platform_step(platform, &delay));
+    assert_eq(1, log.count);
+    assert_eq(1, g_gui_test_keypad_reads);   /* DOWN 'a' 送达 */
+
+    /* 2) press 'b'（重叠：'a' 仍然按住） */
+    g_gui_test_keypad_reads = 0;
+    gui_test_device_add_data(&g_gui_test_keyboard, &make_b, 1);
+    gui_test_device_add_op(&g_gui_test_keyboard, 0, 1);
+    assert_eq(0, gui_input_dispatch(input, NULL, 0));
+    assert_eq(GUI_STATUS_OK, gui_platform_step(platform, &delay));
+    assert_eq(2, log.count);
+    assert_eq(1, g_gui_test_keypad_reads);   /* DOWN 'b' 送达 */
+
+    /* 3) release 'a'：与当前活动键（'b'）的物理身份不匹配 ——
+     *    适配层必须拒绝这次投递，不能把 'b' 释放掉。 */
+    g_gui_test_keypad_reads = 0;
+    gui_test_device_add_data(&g_gui_test_keyboard, &break_a, 1);
+    gui_test_device_add_op(&g_gui_test_keyboard, 0, 1);
+    assert_eq(0, gui_input_dispatch(input, NULL, 0));
+    assert_eq(GUI_STATUS_OK, gui_platform_step(platform, &delay));
+    assert_eq(3, log.count);                 /* 原生 handler 仍然看到事件 */
+    assert_eq(0, g_gui_test_keypad_reads);   /* 但没有向 LVGL 投递错键释放 */
+
+    /* 4) release 'b'：与活动键匹配 —— 真正的释放被送达，键不会卡住。 */
+    g_gui_test_keypad_reads = 0;
+    gui_test_device_add_data(&g_gui_test_keyboard, &break_b, 1);
+    gui_test_device_add_op(&g_gui_test_keyboard, 0, 1);
+    assert_eq(0, gui_input_dispatch(input, NULL, 0));
+    assert_eq(GUI_STATUS_OK, gui_platform_step(platform, &delay));
+    assert_eq(4, log.count);
+    assert_eq(1, g_gui_test_keypad_reads);   /* RELEASED 'b' 送达 */
+
+    gui_input_destroy(input);
+    gui_platform_destroy(platform);
+}
+
 TEST_FUNC(test_platform_callbacks_only_inside_step)
 {
     gui_test_reset();
@@ -1124,7 +1272,9 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_lifecycle_second_create_is_ebusy),
     TEST_ENTRY(test_lifecycle_synthetic_and_mode_rules),
     TEST_ENTRY(test_lifecycle_failed_create_keeps_previous_owner),
-    TEST_ENTRY(test_caps_only_seeding),
+    TEST_ENTRY(test_caps_seeding_converts_kernel_caps_bit),
+    TEST_ENTRY(test_caps_seeding_drops_aggregate_modifier_bits),
+    TEST_ENTRY(test_caps_seeding_absent_caps_stays_lowercase),
     TEST_ENTRY(test_pump_read_errors),
     TEST_ENTRY(test_pump_short_read_carries_prefix),
     TEST_ENTRY(test_pump_poll_flags_map_to_errors),
@@ -1132,6 +1282,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_pump_down_up_not_merged),
     TEST_ENTRY(test_pump_queued_snapshot_travels_with_event),
     TEST_ENTRY(test_pump_queued_ctrl_cancels_current_key),
+    TEST_ENTRY(test_lvgl_release_identity_is_guarded),
     TEST_ENTRY(test_platform_callbacks_only_inside_step),
     TEST_ENTRY(test_platform_lost_owner_stops_delivery),
     TEST_ENTRY(test_platform_input_error_enters_terminal_path),

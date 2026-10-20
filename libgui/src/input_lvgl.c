@@ -198,6 +198,7 @@ void gui_input_lvgl_destroy(gui_input_t *input)
     }
     lv->pending_valid = false;
     lv->active_key = 0;
+    lv->active_physical = 0;
     lv->pointer_pressed = false;
 }
 
@@ -209,9 +210,10 @@ void gui_input_lvgl_cancel(gui_input_t *input)
 
     gui_input_lvgl_t *lv = &input->lvgl;
 
-    /* 尚未投递的键事件被丢弃。 */
+    /* 尚未投递的键事件被丢弃，当前活动键被清除（迟到的释放会被拒绝）。 */
     lv->pending_valid = false;
     lv->active_key = 0;
+    lv->active_physical = 0;
 
     if (lv->keypad) {
         /*
@@ -250,8 +252,18 @@ int gui_input_lvgl_deliver(gui_input_t *input, const gui_key_event_t *event)
 
     uint32_t key = 0;
     if (event->action == GUI_KEY_UP) {
-        /* UP 沿用对应 DOWN 的键值（UP 的 codepoint 恒为 0）。 */
-        key = lv->active_key;
+        /*
+         * UP 沿用对应 DOWN 的键值（UP 的 codepoint 恒为 0），但**必须**
+         * 与当前按住键的物理身份一致：LVGL 的 keypad indev 是单键模型，
+         * 错配的释放会把别的键释放掉（并让真正的那次释放被丢弃）。
+         * 例如 press 'a' → press 'b' → release 'a' → release 'b'：
+         * release 'a' 与当前活动键不符 → 拒绝投递；release 'b' 才是
+         * 真正的释放。键被取消（cancel）后 active_physical 为 0，
+         * 迟到的释放同样被拒绝。
+         */
+        if (event->physical_key == lv->active_physical) {
+            key = lv->active_key;
+        }
     } else {
         if (event->codepoint != 0) {
             key = event->codepoint;   /* ASCII 字符 */
@@ -260,11 +272,13 @@ int gui_input_lvgl_deliver(gui_input_t *input, const gui_key_event_t *event)
         }
         if (key != 0) {
             lv->active_key = key;
+            lv->active_physical = event->physical_key;
         }
     }
 
     if (key == 0) {
-        /* 没有 LVGL 键义（修饰键、功能键、keypad 数字区……）。 */
+        /* 没有 LVGL 键义（修饰键、功能键、keypad 数字区……），或者这是一次
+         * 与当前活动键不匹配的释放：都不向 LVGL 投递。 */
         return 0;
     }
 
@@ -277,6 +291,7 @@ int gui_input_lvgl_deliver(gui_input_t *input, const gui_key_event_t *event)
 
     if (event->action == GUI_KEY_UP) {
         lv->active_key = 0;
+        lv->active_physical = 0;
     }
     return 1;
 }
